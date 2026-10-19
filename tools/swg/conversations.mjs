@@ -187,9 +187,10 @@ export function tableJson(map) {
  * Write a plan's files under `<out>/conversations`, with each table read by `readTable(path)` (a Map, or
  * null for a table the archives have not got). The strings folder is written afresh, so a table no longer
  * wanted is gone. `ref` is the reference's own hash, which `status` compares to ask for a run again when
- * the reference changes under it. Answers how many tables were written and which were missing.
+ * the reference changes under it. Answers how many tables were written and which were missing. `late` is the late
+ * stamp the caller's mount gives (finalnames.mjs), written into `speakers.json` as it is.
  */
-export function writeConversations(out, plan, readTable, ref) {
+export function writeConversations(out, plan, readTable, ref, late = null) {
   const dir = join(out, 'conversations');
   const strings = join(dir, 'strings');
   rmSync(strings, { recursive: true, force: true });
@@ -213,7 +214,7 @@ export function writeConversations(out, plan, readTable, ref) {
   const core3 = { ...plan.core3, ref };
   const core3Text = JSON.stringify(core3);
   writeFileSync(join(dir, 'core3.json'), core3Text);
-  const speakers = { ...plan.speakers, ref, tables: plan.tables.filter((t) => !missing.includes(t)) };
+  const speakers = { ...plan.speakers, ref, tables: plan.tables.filter((t) => !missing.includes(t)), ...(late ? { late } : {}) };
   const speakersText = JSON.stringify(speakers);
   writeFileSync(join(dir, 'speakers.json'), speakersText);
   return { written, missing, bytes, core3Bytes: core3Text.length, speakersBytes: speakersText.length };

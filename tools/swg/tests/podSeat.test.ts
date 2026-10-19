@@ -601,7 +601,7 @@ else {
     mkdirSync(join(dir, 'gallery'), { recursive: true });
     const galleryAsks = (models: object[]): string[] => {
       writeFileSync(join(dir, 'gallery', 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: MATERIAL_FORMAT, lodFormat: LOD_FORMAT, categories: { layout: models } }));
-      const r = spawnSync(process.execPath, [cli, 'status', dir, '--json'], { encoding: 'utf8', maxBuffer: 16 * 1048576 });
+      const r = spawnSync(process.execPath, [cli, 'status', dir, '--json'], { encoding: 'utf8', maxBuffer: 16 * 1048576, env: { ...process.env, SWG: '' } });
       assert.equal(r.status, 0, `status runs over the drawn pack: ${r.stderr}`);
       const steps = (JSON.parse(r.stdout.slice(r.stdout.indexOf('{'))) as { steps: { command: string; reasons: string[] }[] }).steps;
       return steps.filter((s) => s.command === 'gallery').flatMap((s) => s.reasons);
@@ -617,7 +617,7 @@ else {
       writeFileSync(join(dir, 'gallery', 'gallery.json'), JSON.stringify({ sections: [{ id: 'vehicles', title: 'Vehicles', z: 0, depth: 10, items: labels.map((label) => ({ label, template: `object/mobile/vehicle/shared_${label}.iff`, model: label })) }] }));
       try {
         writeFileSync(join(dir, 'gallery', 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: MATERIAL_FORMAT, lodFormat: LOD_FORMAT, paintFormat: GALLERY_PAINT_FORMAT, categories: { layout: [] } }));
-        const r = spawnSync(process.execPath, [cli, 'status', dir, '--json'], { encoding: 'utf8', maxBuffer: 16 * 1048576 });
+        const r = spawnSync(process.execPath, [cli, 'status', dir, '--json'], { encoding: 'utf8', maxBuffer: 16 * 1048576, env: { ...process.env, SWG: '' } });
         assert.equal(r.status, 0, `status runs over the drawn pack: ${r.stderr}`);
         const steps = (JSON.parse(r.stdout.slice(r.stdout.indexOf('{'))) as { steps: { command: string; reasons: string[] }[] }).steps;
         return steps.filter((s) => s.command === 'gallery').flatMap((s) => s.reasons);

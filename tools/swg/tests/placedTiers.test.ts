@@ -152,6 +152,22 @@ function inRange(t: Table, objs: Placed[], px: number, pz: number, reach: number
   return { tiers, objects };
 }
 
+/**
+ * Tatooine's figures: the LOD research's own on the snapshot it measured, or, for a world converted with SOE's final
+ * names list in the mount (its manifest's own `late` stamp says so), the same counts measured on SOE complete's pilot
+ * conversion, whose late buildout moves the layout.
+ */
+function figuresOf(planet: string): { late: boolean; first: number; all: number; oldRule: number; research: number } {
+  let state: string | undefined;
+  try {
+    state = JSON.parse(readFileSync(join(ROOT, planet, 'manifest.json'), 'utf8')).late?.state;
+  } catch {
+    state = undefined;
+  }
+  const late = state === 'applied' || state === 'final';
+  return late ? { late, first: 16192, all: 16213, oldRule: 3252, research: 2393 } : { late, first: 16207, all: 16228, oldRule: 3257, research: 2398 };
+}
+
 for (const planet of ['tatooine', 'naboo', 'corellia']) {
   const w = readWorld(planet);
   if (!w) {
@@ -170,7 +186,8 @@ for (const planet of ['tatooine', 'naboo', 'corellia']) {
   ok(objs.every((o) => o.snapTier === oldTier(o.radius)), `${planet}: filed by the snapshot's radius, every one of ${n} objects is in the very tier the streamer before step 6 filed it in`);
   ok(bySnapshot[0] / n > 0.998, `${planet}: the old rule puts ${bySnapshot[0]} of ${n} in the first tier (more than 99.8%)`);
   ok(byModel[0] / n < 0.1 && byModel[2] > byModel[1] && byModel[1] > byModel[0], `${planet}: by the model's own size ${byModel[0]} load from 1.7 km, ${byModel[1]} from 750 m and ${byModel[2]} from 320 m`);
-  if (planet === 'tatooine') ok(bySnapshot[0] === 16207 && n === 16228, "Tatooine: the old rule's 16,207 of 16,228 in the first tier, the LOD research's own figure");
+  const fig = figuresOf(planet);
+  if (planet === 'tatooine') ok(bySnapshot[0] === fig.first && n === fig.all, `Tatooine: the old rule's ${bySnapshot[0]} of ${n} in the first tier, ${fig.late ? "the pilot's measure with SOE's final names list" : "the LOD research's own figure"} (${fig.first} of ${fig.all})`);
 
   // The floor under a tier holding furniture: whenever a building's rooms can be built -- the player within the
   // widest room range of its edge -- everything filed under it is in range. Checked on every hosted object of
@@ -231,8 +248,8 @@ for (const planet of ['tatooine', 'naboo', 'corellia']) {
     const half = Math.max(Math.abs(b.max[0] - b.min[0]), Math.abs(b.max[2] - b.min[2])) / 2;
     if (dReg <= (o.contained ? 160 : PLACED_TIERS[tierOfSize(half)].range)) research++;
   }
-  ok(oldRule === 3257, "Mos Eisley, on the research's own grid: the old rule has 3,257 placed objects in range, the LOD research's own figure");
-  ok(research === 2398, "and the research's model rule (ground-plane half-width, indoors within 160 m) its 2,398");
+  ok(oldRule === fig.oldRule, `Mos Eisley, on the research's own grid: the old rule has ${oldRule} placed objects in range, ${fig.late ? "the pilot's measure with SOE's final names list" : "the LOD research's own figure"} (${fig.oldRule})`);
+  ok(research === fig.research, `and the research's model rule (ground-plane half-width, indoors within 160 m) its ${research} (${fig.research})`);
   // The streamer's own grid: the town's mark mirrored and centred, every region filed as the streamer files it.
   const tx = gameX(town.x, w.center.x);
   const tz = gameZ(town.z, w.center.z);

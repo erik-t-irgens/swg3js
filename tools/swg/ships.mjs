@@ -21,7 +21,8 @@ export function shipClassOf(name) {
   if (/yt1300|yt_1300|yt2400|yt_2400|ykl37|ykl_37|firespray|freighter|transport|belbullab|g1a|dunelizard/.test(n)) return 'freighter';
   if (/gunship|gunboat|corvette|lambda|arc170|arc_170|decimator|nova_courier|novacourier|hutt_heavy|hutt_medium/.test(n)) return 'gunship';
   if (/y-?wing|ywing|b-?wing|bwing|tie_bomber|tiebomber|tie_defender|advanced|heavy|kimogila|ixiyen|rihkxyrk/.test(n)) return 'bomber';
-  if (/x-?wing|xwing|a-?wing|awing|z95|z-?95|tie_|tie\b|headhunter|scyk|dunelizard|vaksai|jedi_starfighter|eta|delta|naboo_n1|n1|starfighter|interceptor|light/.test(n)) return 'fighter';
+  // `twing`, `havoc`, `snowspeeder` and `droid_fighter`: the fighters SOE's last publishes added [ours, only a label].
+  if (/x-?wing|xwing|a-?wing|awing|z95|z-?95|tie_|tie\b|headhunter|scyk|dunelizard|vaksai|jedi_starfighter|eta|delta|naboo_n1|n1|starfighter|interceptor|light|twing|havoc|snow_?speeder|droid_fighter/.test(n)) return 'fighter';
   if (/shuttle|yacht|sorosuub|luxury/.test(n)) return 'shuttle';
   return 'other';
 }
@@ -81,11 +82,18 @@ export function boltReach(effect) {
  * `chassis` and `wingOpenSpeedFactor`; once the chassis tables are read for customization, `fit`,
  * copied onto the ship when set, null for a ship with no tables); `deps.weaponOf(id)` names the weapon the ship
  * fires as { name, projectile, speed, range } or null. Ships whose exterior fails are listed with why.
+ * `deps.chassisOf(template)`, when given (the chassis table was read), names the hull's chassis row: a player
+ * template with none is left out and listed with why, since it is a placeholder drawn on another hull's body (on
+ * SOE's final mount `shared_player_tie_defender.iff`, an X-wing body; the real TIE Defender is `tiedefender`).
  */
 export function buildShips(templates, deps, { log = () => {}, limit = Infinity } = {}) {
   const ships = [];
   const skipped = [];
   for (const template of templates.slice(0, limit)) {
+    if (deps.chassisOf && !deps.chassisOf(template)) {
+      skipped.push({ template, why: 'no chassis row in ship_chassis.iff: a placeholder template drawn on another hull, left out' });
+      continue;
+    }
     const r = deps.convert(template);
     if (!r || r.skip) {
       skipped.push({ template, why: String(r?.skip ?? 'failed').slice(0, 120) });

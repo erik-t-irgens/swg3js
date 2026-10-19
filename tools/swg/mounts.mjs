@@ -8,6 +8,7 @@
 //   datatables/mount/rider_pose_map.iff            saddle_appearance_name + seat_index -> rider_pose
 import { parseIff } from './iff.mjs';
 import { parseDatatable } from './datatable.mjs';
+import { resolveTemplateString } from './objtemplate.mjs';
 
 const norm = (s) => String(s ?? '').replace(/\\/g, '/').replace(/^\//, '').toLowerCase();
 /** A skeletal appearance's family: the file's name without its folder, extension or a _hue suffix (the table lists bantha_hue.sat, the template names bantha.sat). */
@@ -50,13 +51,50 @@ export function riderPoseFor(vfs, satPath, seat = 1) {
   return riderPoseFromTables(satPath, seat, tables(vfs));
 }
 
+const byAppearance = new WeakMap();
+
+/**
+ * Every mobile template by the appearance its chain names (`appearanceFilename`), lower case: one pass over
+ * `object/mobile/**`, made once per mounted set and only when a mount is not found by its name.
+ */
+function mobilesByAppearance(vfs, mobiles, appearanceOf) {
+  let map = byAppearance.get(vfs);
+  if (!map) {
+    map = new Map();
+    for (const m of [...mobiles].sort()) {
+      if (!/\/shared_[^/]+\.iff$/.test(m)) continue;
+      let app = null;
+      try {
+        app = appearanceOf(m);
+      } catch {
+        app = null;
+      }
+      if (!app) continue;
+      const key = norm(app);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(m);
+    }
+    byAppearance.set(vfs, map);
+  }
+  return map;
+}
+
 /**
  * Every creature the saddle map lists as mountable (a creature .sat, not a vehicle's pv_ one)
  * that has a mobile template in the archives, as { id, template, sat, saddle }: the banthas,
  * dewbacks, kaadu, cu pa, varactyls, tauntauns and the rest. The mount tables list a creature
  * by its _hue appearance (the customizable one the player buys); the id drops that suffix.
+ *
+ * A mount whose template carries another name than its appearance is found by the appearance: the template
+ * under `object/mobile/` whose chain names the row's `.sat` (or the same appearance less its `_hue`). From
+ * publish 55 four of the saddle map's rows are such (the beast master's whisper bird, reptilian flier and snorbal,
+ * and the trading card's armoured tauntaun), and a mount found that way takes its template's own label as its id
+ * (`bm_whisper_bird_mount`), since the appearance's stem reads oddly and nothing keys on it. `appearanceOf(template)`
+ * is how a template's appearance is read (its chain's `appearanceFilename`, unless a test hands in another).
  */
-export function mountCreatures(vfs) {
+export function mountCreatures(vfs, { appearanceOf = null } = {}) {
+  const params = new Map();
+  const appOf = appearanceOf ?? ((t) => resolveTemplateString(vfs, t, ['appearanceFilename'], params));
   const mobiles = vfs.list('object/mobile/');
   const out = [];
   for (const r of tables(vfs).logical) {
@@ -64,10 +102,16 @@ export function mountCreatures(vfs) {
     if (!/^appearance\/[^/]+\.sat$/.test(sat) || /\/pv_/.test(sat)) continue;
     const stemName = sat.replace(/^appearance\//, '').replace(/\.sat$/, '');
     const base = stemName.replace(/_hue$/, '');
-    const template = [`object/mobile/shared_${stemName}.iff`, `object/mobile/shared_${base}.iff`, ...mobiles.filter((m) => m.endsWith(`/shared_${stemName}.iff`) || m.endsWith(`/shared_${base}.iff`))].find((c) => vfs.has(c));
+    let id = base;
+    let template = [`object/mobile/shared_${stemName}.iff`, `object/mobile/shared_${base}.iff`, ...mobiles.filter((m) => m.endsWith(`/shared_${stemName}.iff`) || m.endsWith(`/shared_${base}.iff`))].find((c) => vfs.has(c));
+    if (!template) {
+      const map = mobilesByAppearance(vfs, mobiles, appOf);
+      template = (map.get(sat) ?? map.get(sat.replace(/_hue\.sat$/, '.sat')) ?? []).find((c) => !/\/vehicle\//.test(c)) ?? null;
+      if (template) id = template.replace(/^.*\/shared_/, '').replace(/\.iff$/, '');
+    }
     // A vehicle listed by its own appearance (the basilisk, the wheel bike, the pod racers) is the gallery's.
     if (!template || /\/vehicle\//.test(template) || /pod_?racer|speeder|wheel_bike|walker|atpt/.test(base)) continue;
-    if (!out.some((o) => o.id === base)) out.push({ id: base, template, sat, saddle: r.logical_saddle_name });
+    if (!out.some((o) => o.id === id)) out.push({ id, template, sat, saddle: r.logical_saddle_name });
   }
   return out;
 }

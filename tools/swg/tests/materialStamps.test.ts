@@ -52,7 +52,7 @@ function model(stamped: boolean): Buffer {
 
 /** What `status --json` asks for on a folder: each step's command and every reason given for it. */
 function asked(dir: string): { command: string; reasons: string[] }[] {
-  const run = spawnSync(process.execPath, [cli, 'status', dir, '--json'], { encoding: 'utf8', maxBuffer: 64 * 1048576 });
+  const run = spawnSync(process.execPath, [cli, 'status', dir, '--json'], { encoding: 'utf8', maxBuffer: 64 * 1048576, env: { ...process.env, SWG: '' } });
   return JSON.parse(run.stdout).steps;
 }
 const askedFor = (steps: { command: string; reasons: string[] }[], command: string) => steps.filter((s) => s.command === command).some((s) => s.reasons.some((r) => r.includes(`material format ${MATERIAL_FORMAT}`)));

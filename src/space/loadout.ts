@@ -6,6 +6,7 @@
 // Pure: no three, no rapier; node's tests import it straight from source.
 import type { ComponentDef, FitDef, ShipFit } from '../vehicles/shipFit.ts';
 import { gradeOf, type Grade } from './shipStats.ts';
+import { gradeTier } from './tierLadder.ts';
 
 /** The grade a tier wants in every slot (invented). */
 export const TIER_GRADE: Record<number, Grade> = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5 };
@@ -40,7 +41,8 @@ function firesBolts(c: ComponentDef): boolean {
  */
 export function pickLoadout(fit: FitDef, components: readonly ComponentDef[], tier: number, preferProjectile: number | null, rng: () => number): ShipFit {
   const out: ShipFit = { components: {}, paint: {} };
-  const want = TIER_GRADE[Math.max(1, Math.min(5, Math.round(tier)))] ?? 2;
+  // Tiers 6 to 10 ask for the grade of the tier the ladder reads them as (`tierLadder.ts`); 1 to 5 as they always did.
+  const want = TIER_GRADE[gradeTier(tier)] ?? 2;
   for (const s of fit.slots) {
     // A fixed slot is always stock; a modification slot's one look is a reward (the X-wing's strakes): an NPC leaves it empty.
     if (s.fixed || MODIFICATION.test(s.slot)) continue;

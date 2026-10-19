@@ -340,9 +340,10 @@ function writeJson(file, data) {
  *
  * `only` narrows the run to templates whose path holds that text (a quick check;
  * `samples: false` writes the JSON without copying any audio). Either one writes a narrowed
- * `sounds.json` over whatever was there, which `status` then asks to have run again in full.
+ * `sounds.json` over whatever was there, which `status` then asks to have run again in full. `late` is the late
+ * stamp the caller's mount gives (finalnames.mjs), written into `sounds.json` as it is.
  */
-export function convertSounds(vfs, outDir, { only = null, samples: copySamples = true, log = () => {} } = {}) {
+export function convertSounds(vfs, outDir, { only = null, samples: copySamples = true, log = () => {}, late = null } = {}) {
   const soundsDir = join(outDir, 'sounds');
 
   const sources = readSoundTables(vfs, { log });
@@ -449,7 +450,9 @@ export function convertSounds(vfs, outDir, { only = null, samples: copySamples =
       mkdirSync(dir, { recursive: true });
       dirs.add(dir);
     }
-    if (existsSync(dest) && statSync(dest).size === buf.length) continue;
+    // A sample SOE's final names list re-points is written whatever is there: a re-issued sample can keep its
+    // size, and kept by its size alone the late one would never arrive (there are a few dozen of them).
+    if (existsSync(dest) && statSync(dest).size === buf.length && !vfs.lateOf?.(s)) continue;
     writeFileSync(dest, buf);
     copied++;
   }
@@ -555,6 +558,8 @@ export function convertSounds(vfs, outDir, { only = null, samples: copySamples =
     failed,
     ...(only ? { only } : {}),
     ...(copySamples ? {} : { samplesWritten: false }),
+    // A narrowed run stands for no late world: it holds only what it asked for.
+    ...(late && !only ? { late } : {}),
   });
 
   log(`  sounds: sounds.json ${(soundsSize / 1048576).toFixed(2)} MB, sources.json ${(sourcesSize / 1024).toFixed(0)} KB, events.json ${(eventsSize / 1024).toFixed(0)} KB -> ${soundsDir}`);

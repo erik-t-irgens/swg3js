@@ -68,8 +68,11 @@ export const STORY_SOURCE = [/^src\/story\/.+\.ts$/, /^src\/story\/testSet\/.+$/
 export const PROGRESS_SOURCE = [/^src\/progress\/.+\.ts$/];
 /** The launcher proper (the bootstrap is built into the exe and is not needed in the release). */
 const LAUNCHER_FILES = ['tools/launcher/main.mjs', 'tools/launcher/checks.mjs', 'tools/launcher/plan.mjs', 'tools/launcher/serve.mjs', 'tools/launcher/page.html', 'tools/launcher/README.md'];
-/** The converter's data files, beside its modules. */
-const CONVERTER_DATA = ['tools/swg/README.md', 'tools/swg/manifests/retail.json', 'tools/swg/regions/regions.json'];
+/**
+ * The converter's data files, beside its modules. `final-names.json` is SOE's final names list (names and places only,
+ * the owner's one exception to the hard rule, tools/swg/finalnames.mjs), which every player's converter mounts.
+ */
+const CONVERTER_DATA = ['tools/swg/README.md', 'tools/swg/manifests/retail.json', 'tools/swg/manifests/final-names.json', 'tools/swg/regions/regions.json'];
 
 /** Where the pack's own build of the game goes: the only dist folder a release is ever packed from. */
 export const PACK_DIST = join(ROOT, 'launcher-build', 'dist');

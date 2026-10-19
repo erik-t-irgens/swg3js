@@ -6,6 +6,8 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { PROPS_PACK_VERSION, buildProps, isProp, propCounts, propGroup, propId, propSize } from '../props.mjs';
+import { atBase, traceHash } from './atBase.ts';
+import { mountRetail } from './materialsHarness.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -33,6 +35,49 @@ function note(what: string): void {
   ok(!isProp('object/static/space/shared_spacestation_imperial.iff'), 'and not a space station, which the space packs already carry');
   ok(!isProp('object/tangible/space/shared_spacestation_rebel.iff'), 'under either of its two folders');
   ok(!isProp('object/tangible/furniture/all/frn_all_chair_s01.iff'), 'a template that is not the shared one is not a prop either');
+}
+
+// ---------------------------------------------------------------- the trading-card decorations
+{
+  const app = (a: string) => () => a;
+  ok(isProp('object/tangible/tcg/series8/shared_combine_decorative_bespin_lamp.iff', app('appearance/frn_bespin_lamp.apt')), 'a trading-card decoration is a prop');
+  ok(!isProp('object/tangible/tcg/series1/shared_structure_deed_barn.iff', app('appearance/eqp_tool_datapad.apt')) && !isProp('object/tangible/tcg/series3/shared_vehicle_deed_mechno_chair.iff'), 'its structure and vehicle deeds are not');
+  ok(!isProp('object/tangible/tcg/series2/shared_greeter_deed_ewok.iff', app('appearance/frn_all_data_terminal_wall_s3.apt')) && !isProp('object/tangible/tcg/series4/shared_instant_travel_terminal_deed.iff'), 'nor any other deed, nor an instant travel terminal');
+  ok(!isProp('object/tangible/tcg/series5/shared_house_capacity_organizational_datapad.iff', app('appearance/item_tcg_datapad_s01.apt')), 'nor one drawn as a datapad');
+  ok(isProp('object/tangible/tcg/series5/shared_decorative_thing.iff'), 'and with no appearance known, a decoration by its name is taken');
+}
+{
+  // Day one: every template the rule took at the pass's base is still taken (the change only admits trading cards).
+  // Today's rule is asked with an appearance that calls everything a datapad, so a trading-card refusal (by name or by
+  // look) leaking out of tcg/ shows as a loss. Over the archives' own templates when this machine has them, else over
+  // a hand sample; where git cannot hand the base over, today's answers for the sample are held to the base's hash.
+  const old = await atBase<{ isProp: typeof isProp }>('tools/swg/props.mjs');
+  const datapad = () => 'appearance/eqp_tool_datapad.apt';
+  const TCG = /\/tcg\//;
+  const sample = ['object/tangible/furniture/all/shared_frn_all_chair_s01.iff', 'object/static/structure/general/shared_streetlamp_small.iff', 'object/installation/faction_perk/turret/shared_tower_lg.iff', 'object/tangible/wearables/shirt/shared_shirt_s01.iff', 'object/tangible/ship/shared_cmp_engine.iff', 'object/static/space/shared_spacestation_imperial.iff', 'object/tangible/deed/player_house_deed/shared_yt1300_house_deed.iff', 'object/tangible/loot/creature/shared_bone.iff', 'object/tangible/hair/human/shared_hair_human_male_s01.iff', 'object/tangible/tcg/series1/shared_decorative_x.iff', 'object/tangible/crafting/station/shared_food_station.iff', 'object/tangible/painting/shared_painting_wod_s01.iff', 'object/tangible/furniture/decorative/shared_datapad_deed_display.iff'];
+  const kept = sample.filter((t) => !TCG.test(t));
+  const trace = (f: (t: string) => boolean) => kept.map((t) => [t, f(t)]);
+  const BASE_TRACE = '533491c78828';
+  const judge = (templates: string[], what: string) => {
+    const lost = templates.filter((t) => old!.isProp(t) && !isProp(t, datapad));
+    const gained = templates.filter((t) => !old!.isProp(t) && isProp(t));
+    ok(!lost.length && gained.every((t) => TCG.test(t)), `day one, ${what}: nothing the rule took at the pass's base is left out, and only trading cards are added (${templates.length} templates, ${gained.length} gained${lost.length ? `; lost ${lost.slice(0, 5).join(', ')}` : ''})`);
+  };
+  if (old) {
+    judge(sample, 'a hand sample');
+    const then = traceHash(trace(old.isProp));
+    if (then !== BASE_TRACE) note(`the base's trace hashes to ${then}; write it as BASE_TRACE so a checkout without git still holds today's to it`);
+    else ok(true, `and that trace is the one written down here (${BASE_TRACE})`);
+    const vfs = await mountRetail();
+    if (!vfs) note('no SWG install on this machine: day one is held over the hand sample alone');
+    else {
+      judge(vfs.list('object/').filter((t: string) => t.startsWith('object/')), "every template the archives hold");
+      (vfs as { close?: () => void }).close?.();
+    }
+  } else {
+    note("git cannot hand over props.mjs as it stood at the pass's base: today's answers for the sample are held to the trace written down here");
+    ok(traceHash(trace((t) => isProp(t, datapad))) === BASE_TRACE, `day one: every template of the sample outside tcg/ is taken or refused as the base did (${traceHash(trace((t) => isProp(t, datapad)))}, written ${BASE_TRACE})`);
+  }
 }
 
 {
@@ -87,8 +132,12 @@ function note(what: string): void {
     ok(missing === 0, `and all ${m.models.length} model files are on disk`);
     // Nothing enormous: the space stations are out, so what is left is furniture and structures a
     // player might really stand. This is what would trip if that exclusion were ever lost.
+    // The cap is the pack's own late world's: 974 MB measured on the mount before SOE's final names list, 1,228 MB
+    // with it (729 more props, 275 of them trading-card decorations, none of them a space station).
     const bytes = m.models.reduce((a, d) => a + statSync(join('assets-private', 'props', d.file)).size, 0);
-    ok(bytes / 1e6 < 1100, `the whole pack's models are ${(bytes / 1e6).toFixed(0)} MB, which is under the cap that would say the space stations had crept back in`);
+    const late = (m as { late?: { state?: string } }).late?.state;
+    const cap = late === 'applied' || late === 'final' ? 1400 : 1100;
+    ok(bytes / 1e6 < cap, `the whole pack's models are ${(bytes / 1e6).toFixed(0)} MB, which is under the cap of ${cap} MB that would say the space stations had crept back in`);
   }
 }
 

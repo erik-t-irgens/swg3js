@@ -54,7 +54,8 @@ export const FAMILIES = new Map([
   ...['acklay', 'spider', 'rancor', 'cat_predatory', 'canine', 'lizard_giant', 'insect_mantis', 'nexu', 'snake_basic', 'pig', 'bear', 'simian_ape', 'jundak', 'sher_kar', 'rat', 'lava_flea', 'dinosaurid', 'elite_acklay', 'elite_kaadu', 'elite_snake_basic', 'elite_tauntaun', 'urnsoris', 'tanray_lizard'].map((t) => [t, 'predator']),
   ...['bantha', 'camel', 'dewback', 'giraffe', 'horse', 'kaadu', 'elephant', 'fambaa', 'goat', 'tauntaun', 'varactyl', 'reek', 'bird_turkey_baz_nitch', 'bird_turkey_nuna', 'bird_turkey_pharple', 'kubaza_beetle', 'millipede'].map((t) => [t, 'herd']),
   ...['cat_domestic', 'frog', 'insect_basic', 'rabbit', 'lizard_basic', 'simian_monkey'].map((t) => [t, 'critter']),
-  ...['bat', 'mynock', 'bird_finch', 'bird_giant', 'griffon', 'insect_moth'].map((t) => [t, 'flyer']),
+  // `hawk_bat`: the table SOE's last publishes added for the hawk bat, which an unknown table would take for a herd animal.
+  ...['bat', 'mynock', 'bird_finch', 'bird_giant', 'griffon', 'insect_moth', 'hawk_bat'].map((t) => [t, 'flyer']),
   ['basilisk_war_droid', 'machine'],
 ]);
 
@@ -1374,10 +1375,19 @@ export function signatureOf(object) {
   return sha1(JSON.stringify(object)).slice(0, 16);
 }
 
-/** Which archives this run mounted, so a unit made from another set is never mistaken for it. */
-export function sourceStampOf({ retailOnly, archives }) {
+/**
+ * Which archives this run mounted, so a unit made from another set is never mistaken for it. `late` is what
+ * SOE's final names list made of the mount (finalnames.mjs): the list's identity joins the key only when it
+ * applied (`names:<key>`) or the indexes are SOE's own final ones (`final-index`), and otherwise the key is
+ * exactly what it always was, so an install the list cannot serve keeps every unit it has. `late` is that world
+ * as a string, or the mobiles command's late stamp (`lateStampOf`, whose `state` and `key` say it), which then
+ * rides beside the key, outside it, with the gate's why, as the catalogue's stamp for `status`.
+ */
+export function sourceStampOf({ retailOnly, archives, late = null }) {
   const sorted = [...archives].map(([name, size]) => [String(name).toLowerCase(), size]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  return { retailOnly: !!retailOnly, archives: sorted.length, key: sha1(JSON.stringify([!!retailOnly, sorted])).slice(0, 12) };
+  const world = typeof late === 'string' ? late : late?.state === 'applied' ? `names:${late.key}` : late?.state === 'final' ? 'final-index' : null;
+  const key = sha1(JSON.stringify(world ? [!!retailOnly, sorted, world] : [!!retailOnly, sorted])).slice(0, 12);
+  return { retailOnly: !!retailOnly, archives: sorted.length, key, ...(late && typeof late === 'object' ? { late } : {}) };
 }
 
 /** What the conversion code comes to, so a record written by other code is noticed. */

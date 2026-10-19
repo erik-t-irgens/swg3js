@@ -47,6 +47,7 @@ import {
   isCamp,
   nestHealth,
   nudgeSite,
+  refused,
   reinforcements,
   respawnWait,
   spreadOf,
@@ -341,6 +342,20 @@ export class WildLife {
     if (!this.pack || !this.manifest) return;
     this.sites = gridSites(this.pack.planet, this.pack.areas, this.pack.noSpawn ?? [], this.manifest.groups);
     this.last.sites = this.sites.length;
+  }
+
+  /**
+   * For the console: the no-spawn circles of ours over the sites SOE's last publishes added (`src: 'ours'`, the
+   * converter's `lateSiteCircles`) and how many grid sites they kept off, worked out on asking by laying the grid
+   * again without them, so nothing about it costs a frame or a load.
+   */
+  lateKeptOff(): { circles: number; keptOff: number } {
+    if (!this.pack || !this.manifest) return { circles: 0, keptOff: 0 };
+    const all = this.pack.noSpawn ?? [];
+    const ours = all.filter((n) => n.src === 'ours');
+    if (!ours.length) return { circles: 0, keptOff: 0 };
+    const without = gridSites(this.pack.planet, this.pack.areas, all.filter((n) => n.src !== 'ours'), this.manifest.groups);
+    return { circles: ours.length, keptOff: without.filter((s) => refused(ours, s.x, s.z, true)).length };
   }
 
   unload(): void {

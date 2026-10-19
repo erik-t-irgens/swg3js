@@ -229,7 +229,11 @@ export async function start(ctx) {
     status.running = true;
     let text = '';
     const errs = [];
-    const { done } = runChild(cli, ['status', folders().out, '--json'], { onLine: (l) => (text += `${l}\n`), onErrLine: (l) => errs.push(l) });
+    // The player's own SWG folder goes with it whenever its check passed: `status` asks of SOE's final files what this
+    // install can mount (tools/swg/finalnames.mjs), and the launcher has no `.env` to tell it, so without the folder
+    // the page and the conversion drive (which passes it too) would disagree for good.
+    const swgArg = checks.swg?.ok && folders().swg ? [`--swg=${folders().swg}`] : [];
+    const { done } = runChild(cli, ['status', folders().out, '--json', ...swgArg], { onLine: (l) => (text += `${l}\n`), onErrLine: (l) => errs.push(l) });
     const code = await done;
     status.running = false;
     status.ran = Date.now();

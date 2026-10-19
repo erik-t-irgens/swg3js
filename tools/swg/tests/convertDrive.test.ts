@@ -9,6 +9,7 @@
 // last line, and a step the plan set aside is checked by there being no child at all.
 
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -51,12 +52,15 @@ type Status = { format: 1; done: boolean; steps: Asked[]; unreadable?: string[] 
 /** What `status --json` would say, one answer per time round. The last is repeated if it runs out. */
 const statuses = (list: Status[]) => {
   const asks: number[] = [];
-  const status = async () => {
+  /** What each asking was handed, for the checks of what the driver passes on (the install, above all). */
+  const handed: { swg?: string }[] = [];
+  const status = async (o: { swg?: string } = {}) => {
     const at = Math.min(asks.length, list.length - 1);
     asks.push(at);
+    handed.push(o);
     return list[at];
   };
-  return { status, asks };
+  return { status, asks, handed };
 };
 
 /**
@@ -105,14 +109,14 @@ async function drive(list: Status[], { only, dryRun, jobs = 2, stopAfter, stopWh
   const out = join(scratch, `run${++runs}`);
   mkdirSync(out, { recursive: true });
   const events: any[] = [];
-  const { status: asking, asks } = statuses(list);
+  const { status: asking, asks, handed } = statuses(list);
   const stopper = new AbortController();
   if (stopAfter !== undefined) setTimeout(() => stopper.abort(), stopAfter);
   // Stopping in the moment between "what is missing?" and the first child: the signal has already gone
   // off by the time the pass is made, so a listener added then would never hear it.
   const status = stopWhileAsking
     ? async (o: any) => {
-        const answer = await asking();
+        const answer = await asking(o);
         stopper.abort();
         return answer;
       }
@@ -132,7 +136,7 @@ async function drive(list: Status[], { only, dryRun, jobs = 2, stopAfter, stopWh
     signal: stopper.signal,
     onEvent: (e: any) => events.push(e),
   });
-  return { result, events, out, asked: asks.length };
+  return { result, events, out, asked: asks.length, handed };
 }
 
 /** When a child really ran, from the file the child itself wrote. A child that was killed has no end. */
@@ -186,6 +190,25 @@ const step = (command: string, extra: Partial<Asked> = {}): Asked => ({ command,
   ok(/alpha starting/.test(line.line), "a child's own words reach the caller with the step they came from");
   ok(events.some((e) => e.kind === 'pass' && e.jobs === 2 && /convert-/.test(e.logDir)), 'each pass says how many run at once and where the logs are');
   ok(result.logDirs.length === 2 && existsSync(join(result.logDirs[0], 'summary.txt')), "and every pass leaves its children's output and a summary on disk");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The install goes to every asking as `--swg`: a launcher player's Convert runs `status` with no .env beside it, so
+// without it SOE's final files (finalnames.mjs) would ask nothing there.
+{
+  const { handed } = await drive([{ format: 1, done: false, steps: [step('alpha')] }, { format: 1, done: true, steps: [] }]);
+  ok(handed.length === 2 && handed.every((o) => o.swg === 'D:\\SWG'), `every asking is handed the install the drive converts from (${handed.map((o) => o.swg).join(', ')})`);
+  // And `askStatus` itself puts it on the command line it starts, read off a stand-in child that answers as status does.
+  let seen: string[] = [];
+  const answer = JSON.stringify({ format: 1, done: true, steps: [] });
+  const standIn = ({ args }: { args: string[] }) => {
+    seen = args;
+    return spawn(process.execPath, ['-e', `process.stdout.write(${JSON.stringify(answer)})`], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  };
+  const said = await D.askStatus({ cli: fake, out: 'C:\\packs', spawnStep: standIn, swg: 'D:\\SWG' });
+  ok(said.done === true && seen[0] === 'status' && seen[1] === 'C:\\packs' && seen.includes('--json') && seen.includes('--swg=D:\\SWG'), `askStatus asks status --json with --swg=<the install> (${seen.join(' ')})`);
+  await D.askStatus({ cli: fake, out: 'C:\\packs', spawnStep: standIn });
+  ok(!seen.some((a) => a.startsWith('--swg')), 'and with no install it names none');
 }
 
 // ---------------------------------------------------------------------------------------------

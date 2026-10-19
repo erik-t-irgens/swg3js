@@ -272,6 +272,8 @@ export function hairCarryFor(parts: readonly HairCarryPart[], worn: readonly str
  * The hair tab of ours, for a species whose converted hair the game's creator never offered: the
  * Sullustan's styles, and a colour row over the one variable they carry (`index_color_hair`, read through
  * the styles' own palette, `pc_hair_sul`). Keyed by species, since it is one invented thing and not a rule.
+ * Only a table converted before SOE's final names list lacks the Sullustans' hair; SOE's final table has rows
+ * of its own for them, and then `withOursHair` leaves the entry as it is.
  */
 const OURS_HAIR: Record<string, { variables: string[] }> = {
   sullustan: { variables: ['index_color_hair'] },

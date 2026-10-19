@@ -10,6 +10,7 @@ import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync } fro
 import { join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { openToc, tocRank } from './toc.mjs';
+import { finalNamesList, mountFinalNames } from './finalnames.mjs';
 
 const HEADER_SIZE = 36;
 const RECORD_SIZE = 24;
@@ -148,8 +149,13 @@ export function archiveRank(file) {
  * files, matching the client. `filter(fileName)` restricts which archives may
  * supply data (for example only retail ones); .toc files are always read since
  * they hold no assets, but entries pointing at excluded archives are ignored.
+ *
+ * Then SOE's final names list (finalnames.mjs), all of it or none: `finalNames` undefined loads the
+ * committed list (so every reader sees one world), `false` leaves it out (a test that compares), and a
+ * list object is used as it is (tests). What it did is `late` on the result, and `lateOf(path)` says
+ * whether a file's current copy came from one of its rows.
  */
-export function openVfs(dir, { filter, log = (msg) => console.error(msg) } = {}) {
+export function openVfs(dir, { filter, log = (msg) => console.error(msg), finalNames, timing } = {}) {
   const treNames = readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.tre'));
   const tocNames = readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.toc')).sort((a, b) => tocRank(a) - tocRank(b) || a.localeCompare(b, 'en'));
   const archives = new Map();
@@ -204,6 +210,7 @@ export function openVfs(dir, { filter, log = (msg) => console.error(msg) } = {})
   // Then the client's .toc indexes, which resolve the data-only archives.
   let indexed = 0;
   const tocsUsed = [];
+  const tocPaths = new Map();
   for (const f of tocNames) {
     let toc;
     try {
@@ -213,6 +220,7 @@ export function openVfs(dir, { filter, log = (msg) => console.error(msg) } = {})
       continue;
     }
     tocsUsed.push(f);
+    tocPaths.set(f.toLowerCase(), join(dir, f));
     for (const e of toc.entries) {
       const treeName = toc.treeFiles[e.treeFileIndex];
       if (treeName === undefined || !allowed(treeName)) continue;
@@ -223,6 +231,12 @@ export function openVfs(dir, { filter, log = (msg) => console.error(msg) } = {})
     }
   }
 
+  // SOE's final names, after every index and in any order (the list is the difference of two mounts, so no
+  // name it carries is one the indexes already answer the same way).
+  const late = finalNames === false
+    ? { state: 'off', key: null, rows: 0, applied: 0, newPaths: 0, newer: 0, held: 0, refused: [], why: 'left out by the caller' }
+    : mountFinalNames(finalNames ?? finalNamesList(), { tocPaths, archiveFor, allowed, apply, has: (name) => index.has(name.toLowerCase()), timing, dir });
+
   const opened = [...archives.values()].filter(Boolean);
   if (!opened.length) throw new Error(`None of the archives in ${dir} could be read`);
   if (dataOnly && !tocsUsed.length) log(`${dataOnly} data-only (6000) archives found but no .toc index to read them with`);
@@ -232,7 +246,24 @@ export function openVfs(dir, { filter, log = (msg) => console.error(msg) } = {})
     archives: opened,
     tocs: tocsUsed,
     skipped,
+    late,
     summary: `${opened.length} archives (${dataOnly} data-only), ${tocsUsed.length} index files, ${indexed} indexed entries, ${index.size} files`,
+    /** Whether a file's current copy came from a row of SOE's final names list. */
+    lateOf(name) {
+      return !!index.get(norm(name))?.late;
+    },
+    /**
+     * A file as the indexes alone gave it, before SOE's final names list re-pointed it: the last copy no list
+     * row wrote, or null where that copy is a deletion or there is none.
+     */
+    readIndexed(name) {
+      const h = history.get(norm(name)) ?? [];
+      for (let i = h.length - 1; i >= 0; i--) {
+        if (h[i].late) continue;
+        return h[i].deleted ? null : h[i].read();
+      }
+      return null;
+    },
     list(filterText) {
       const out = [];
       for (const key of index.keys()) if (!filterText || key.includes(filterText.toLowerCase())) out.push(key);
@@ -243,7 +274,7 @@ export function openVfs(dir, { filter, log = (msg) => console.error(msg) } = {})
     },
     /** Every archive that carries a file, oldest first, with whether that copy is a deletion marker. */
     versions(name) {
-      return (history.get(norm(name)) ?? []).map((v) => ({ archive: v.archive, size: v.size, deleted: !!v.deleted }));
+      return (history.get(norm(name)) ?? []).map((v) => ({ archive: v.archive, size: v.size, deleted: !!v.deleted, ...(v.late ? { late: true } : {}) }));
     },
     /** A file as a named archive holds it, whatever later publishes replaced it with. */
     readFrom(name, archive) {

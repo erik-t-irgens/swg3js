@@ -30,7 +30,7 @@ import { findAll, parseIff } from '../iff.mjs';
 import { encodePng } from '../png.mjs';
 import { MATERIAL_FORMAT, describeSurface, materialOf, programSource, roughnessOfMask, specMaskOf } from '../surface.mjs';
 import { chunk, encode, form, W } from './iffWriter.ts';
-import { PACKS, converterDeps, entryOf, glbImage, glbsUnder, mountRetail, packFormat, usedShaders, writtenModel, type Img } from './materialsHarness.ts';
+import { PACKS, converterDeps, entryOf, glbImage, glbsUnder, mountForPack, mountRetail, packFormat, usedShaders, writtenModel, type Img } from './materialsHarness.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -381,6 +381,21 @@ else {
       note(`${f} under ${PACKS} is material format ${format}, older than ${MATERIAL_FORMAT}: its models are not read here (status asks for it again)`);
       continue;
     }
+    // Held to the archives as this pack was converted from them: before or after SOE's final names list.
+    const mount = await mountForPack(PACKS, f, vfs);
+    if (!mount.vfs) {
+      note(`${f} under ${PACKS} is not read here: ${mount.why}`);
+      continue;
+    }
+    const pv = mount.vfs;
+    const packCache = pv === vfs ? cache : new Map();
+    const packSources = new Map<string, Img | null>();
+    const packSource = (path: string): Img | null => {
+      if (pv === vfs) return source(path);
+      const p = path.replace(/\\/g, '/').toLowerCase();
+      if (!packSources.has(p)) packSources.set(p, pv.has(p) ? (decodeDds(pv.read(p)) as Img) : null);
+      return packSources.get(p)!;
+    };
     checkedPacks++;
     let textured = 0;
     let stamped = 0;
@@ -408,7 +423,7 @@ else {
         const twice = !!m.extras.swgSpec.squared;
         let d;
         try {
-          d = describeSurface(vfs, m.name, cache);
+          d = describeSurface(pv, m.name, packCache);
         } catch {
           continue;
         }
@@ -416,7 +431,7 @@ else {
         const named = d.textures.find((t: { slot: string }) => t.slot === slot);
         // The colour texture's own picture can be a bake or a paint in a pack; a mask of its own file is plain.
         if (!named || slot === (d.mainSlot ?? 'MAIN') || String(named.path).toLowerCase() === String(d.main).toLowerCase()) continue;
-        const src = source(named.path);
+        const src = packSource(named.path);
         const mr = glbImage(json, bin, mrIndex);
         if (!src || !mr) continue;
         masked++;

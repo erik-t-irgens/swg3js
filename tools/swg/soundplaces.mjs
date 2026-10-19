@@ -225,7 +225,7 @@ function loadPlacements(vfs, planet) {
  * rather than given a directory holding nothing but its sounds, since nothing would ever fetch it
  * and `status` does not ask about a planet with no pack either.
  */
-export function convertSoundPlaces(vfs, outDir, { planets = [], log = () => {} } = {}) {
+export function convertSoundPlaces(vfs, outDir, { planets = [], log = () => {}, late = null } = {}) {
   let rows = [];
   if (vfs.has('datatables/interior/interior.iff')) {
     try {
@@ -262,7 +262,8 @@ export function convertSoundPlaces(vfs, outDir, { planets = [], log = () => {} }
     const soundObjects = emitters.filter((e) => e.template.startsWith(SOUND_OBJECT)).length;
     const file = join(outDir, planet, 'sounds.json');
     mkdirSync(join(outDir, planet), { recursive: true });
-    writeFileSync(file, JSON.stringify({ format: PLACES_FORMAT, planet, frame: 'snapshot', soundObjects, emitters, pobs, surfaces, rooms }));
+    // `late`: the late stamp the caller's mount gives (finalnames.mjs), written as it is.
+    writeFileSync(file, JSON.stringify({ format: PLACES_FORMAT, planet, frame: 'snapshot', soundObjects, emitters, pobs, surfaces, rooms, ...(late ? { late } : {}) }));
     const result = { planet, emitters: emitters.length, soundObjects, distinct, inside, pobs: names.size, pobsWithRow: withRow.length, rooms: Object.keys(rooms).length, surfaces: Object.keys(surfaces).length };
     results.push(result);
     log(`  sounds: ${planet}: ${emitters.length} placed emitters (${soundObjects} sound objects, ${distinct} distinct sounds, ${inside} inside a building), ${names.size} portal layouts (${withRow.length} with a room row), ${Object.keys(rooms).length} room rows, ${Object.keys(surfaces).length} templates with a surface of their own -> ${file}`);

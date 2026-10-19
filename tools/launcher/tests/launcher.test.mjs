@@ -451,6 +451,14 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   const packedPaths = new Set(packed.map((f) => f.path));
   const lost = refFiles.filter((f) => !packedPaths.has(f));
   ok(!lost.length, `the release carries the Core3 reference, all ${refFiles.length} files${lost.length ? ` (missing ${lost.join(', ')})` : ''}`);
+  // SOE's final names list is what every player's converter mounts SOE's final client by (tools/swg/finalnames.mjs);
+  // left out of a release, a launcher player's conversion is the publish 54 world with nothing to say why.
+  ok(packedPaths.has('tools/swg/manifests/final-names.json'), "the release carries SOE's final names list (tools/swg/manifests/final-names.json)");
+  // And the launcher's page runs `status` itself, with no `.env` beside the release: it must hand it the player's own
+  // SWG folder whenever that folder's check passed, or the page and the conversion drive answer two different things.
+  const mainSrc = readFileSync(join(root, 'tools', 'launcher', 'main.mjs'), 'utf8');
+  const statusCall = mainSrc.slice(mainSrc.indexOf('const runStatus'), mainSrc.indexOf('// ---- the conversion drive'));
+  ok(/checks\.swg\?\.ok/.test(statusCall) && /--swg=\$\{folders\(\)\.swg\}/.test(statusCall) && /'status', folders\(\)\.out, '--json', \.\.\.swgArg/.test(statusCall), "the launcher's page passes --swg=<the player's SWG folder> to the status it runs whenever the SWG check passed");
   // The server runs the story's rules from `src/story/` as they are, which is a folder rule rather than a
   // name in a list: this pins it, so a rules file nobody imports yet ships as surely as one somebody does,
   // and so does the one file outside the folder those rules may import.

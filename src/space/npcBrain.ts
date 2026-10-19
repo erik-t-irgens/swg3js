@@ -138,7 +138,13 @@ export class NpcBrain {
   shots = 0;
   /** Its hand on the wings: when it last fought, and what that makes of them now. */
   readonly wingHand = new NpcWingHand();
-  private readonly skill: PilotSkill;
+  /**
+   * How well it flies and shoots, read at its tier every time it is asked rather than once at the spawn, so the tier
+   * ladder's dials (`tierLadder.ts`, `__debug.npcShips({ ladder })`) reach a pilot already in the air. A table lookup.
+   */
+  private get skill(): PilotSkill {
+    return skillOfTier(this.ship.type.tier);
+  }
   /** The stick the pilot wants (steerToward's), and the one its hand holds (capped and eased by its skill). */
   private readonly stick: Stick = { x: 0, y: 0, roll: 0 };
   private readonly held: Stick = { x: 0, y: 0, roll: 0 };
@@ -170,7 +176,6 @@ export class NpcBrain {
     private readonly ship: NpcShip,
     private readonly rng: () => number,
   ) {
-    this.skill = skillOfTier(ship.type.tier);
     // Staggered, so a group does not all choose and look on the same frame.
     this.nextPick = rng() * this.skill.reaction;
     this.nextRay = rng() * AVOID_TUNE.rayEvery;

@@ -25,7 +25,7 @@ import { decodeDds } from '../dds.mjs';
 import { readGlb } from '../glbclips.mjs';
 import { decodePng } from '../png.mjs';
 import { describeSurface } from '../surface.mjs';
-import { mountRetail, PACKS, type Img, type Vfs } from './materialsHarness.ts';
+import { mountForLate, mountRetail, PACKS, type Img, type Vfs } from './materialsHarness.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -223,8 +223,18 @@ else {
   if (rinor || cone) ok((!rinor || rinor.blend === false) && (!cone || cone.blend === true), 'the two shaders the name rule gets wrong carry their own pass: the Dathomir leaf cut out, the Kashyyyk cone flower blended');
   else console.log('     (neither of the two shaders the name rule gets wrong is in these packs)');
 
-  const vfs = (await mountRetail()) as Vfs | null;
-  if (!vfs) console.log('skip the archives: no SWG install on this machine (SWG in the environment or .env)');
+  // Held to the archives as the flora was converted from them (the stamp the flora command writes into the table
+  // beside the packs): before or after SOE's final names list.
+  const here = (await mountRetail()) as Vfs | null;
+  let floraLate = null;
+  try {
+    floraLate = existsSync(sharedFile) ? (JSON.parse(readFileSync(sharedFile, 'utf8')).late ?? null) : null;
+  } catch {
+    /* read as no stamp */
+  }
+  const mount = here ? await mountForLate(floraLate, here) : { vfs: null, why: 'no SWG install on this machine (SWG in the environment or .env)' };
+  const vfs = mount.vfs as Vfs | null;
+  if (!vfs) console.log(`skip the archives: ${mount.why}`);
   else {
     const cache = new Map();
     let passWrong = 0;

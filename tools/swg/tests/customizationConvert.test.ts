@@ -107,7 +107,7 @@ const note = (s: string) => console.log(`note ${s}`);
     mkdirSync(join(dir, 'characters'), { recursive: true });
     writeFileSync(join(dir, 'characters', 'index.json'), JSON.stringify({ species: [{ id: 'human_male', species: 'human', gender: 'male', wardrobe: null, morphs: [], variables: [], jkaClips: true }] }));
     const asks = (): boolean => {
-      const run = spawnSync(process.execPath, [cli, 'status', dir], { encoding: 'utf8', maxBuffer: 16 * 1048576 });
+      const run = spawnSync(process.execPath, [cli, 'status', dir], { encoding: 'utf8', maxBuffer: 16 * 1048576, env: { ...process.env, SWG: '' } });
       return /swg -- customization /.test(run.stdout ?? '');
     };
     ok(asks(), 'status asks for the creator table where there is a species index and no table');

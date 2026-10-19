@@ -366,7 +366,7 @@ const table = (vfs, path) => {
  * The ships pack is read for its hull ids and their stock parts when it is there; without it the
  * parts and vehicles are still written, and `status` says the hulls are missing.
  */
-export function convertShipSounds(vfs, outDir, { log = () => {} } = {}) {
+export function convertShipSounds(vfs, outDir, { log = () => {}, late = null } = {}) {
   const cache = new Map();
   const has = (p) => vfs.has(p);
   const names = (run) => engineNames(run, has);
@@ -628,7 +628,8 @@ export function convertShipSounds(vfs, outDir, { log = () => {} } = {}) {
   if (danglingOwners.length) notes.push(`${danglingOwners.length} sounds have no template in the archives: ${danglingOwners.join('; ')}`);
   const file = join(outDir, 'sounds', 'ships.json');
   mkdirSync(join(outDir, 'sounds'), { recursive: true });
-  writeFileSync(file, JSON.stringify(written));
+  // The late stamp the caller's mount gives (finalnames.mjs), written as it is.
+  writeFileSync(file, JSON.stringify(late ? { ...written, late } : written));
 
   // The joins alone also go into the bank's own events.json, beside the client data they point at,
   // because that is the one file the game already fetches for a body's sounds and a lookup that

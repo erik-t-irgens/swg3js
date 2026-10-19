@@ -3,7 +3,7 @@
 // The kind used to be the first of five name patterns to match a vehicle's label, its template or its model, and a
 // vehicle no pattern matched became a speeder bike; every "speeder" the bike pattern missed became a hover car that
 // climbs with the view, which is how the Sith, Geonosian and swamp speeders and every landspeeder came to fly. The
-// table below is the gallery's 57 vehicles and the one exhibit of ours beside them (Sebulba's pod) by their garage id,
+// table below is the gallery's 62 vehicles and the one exhibit of ours beside them (Sebulba's pod) by their garage id,
 // sorted by what each is: the open landspeeders and
 // every multi-seat skiff, lifter and transport are bikes that race (the owner's answer), the Koro-2 and the Organa
 // stay hover cars, the snowspeeder is an aircraft and the basilisk walks. The name rule stays as the fallback for an
@@ -31,7 +31,12 @@ const GROUND: VehicleKindRow = { kind: 'ground' };
 const HOVER: VehicleKindRow = { kind: 'flyer' };
 const AIR: VehicleKindRow = { kind: 'flyer', air: true };
 
-/** The gallery's vehicles by their garage id (the gallery label), each with the kind it is: 57 of the game's and one exhibit of ours. */
+/**
+ * The gallery's vehicles by their garage id (the gallery label), each with the kind it is: 62 of the game's and one
+ * exhibit of ours. Five came with SOE's last publishes, each at the kind the name rule already gives it, so the table
+ * moves nothing: the single-pod airspeeder and its two trading-card templates fly, and SOE's own player AT-ST and
+ * AT-XT templates walk (they draw the walkers `hoth_at_st` and `walker_at_xt` already draw, listed as every template is).
+ */
 export const VEHICLE_KINDS: Readonly<Record<string, VehicleKindRow>> = {
   a1_deluxe_floater: BIKE,
   air2_swoop_speeder: BIKE,
@@ -81,6 +86,7 @@ export const VEHICLE_KINDS: Readonly<Record<string, VehicleKindRow>> = {
   ric_920_speeder: BIKE,
   // A six-seat floating platform.
   senate_pod: BIKE,
+  single_pod_airspeeder: AIR,
   sith_speeder: BIKE,
   // An airspeeder that takes off and lands: the name rule missed it only because it says "snowspeeder".
   snowspeeder: AIR,
@@ -91,6 +97,8 @@ export const VEHICLE_KINDS: Readonly<Record<string, VehicleKindRow>> = {
   speederbike_swoop: BIKE,
   stap_speeder: BIKE,
   swamp_speeder: BIKE,
+  tcg_8_air_speeder: AIR,
+  tcg_8_single_pod_airspeeder: AIR,
   tcg_at_pt_walker: GROUND,
   tcg_hk47_jetpack: AIR,
   tcg_merr_sonn_jt12_jetpack: AIR,
@@ -100,7 +108,9 @@ export const VEHICLE_KINDS: Readonly<Record<string, VehicleKindRow>> = {
   tcg_republic_gunship: AIR,
   temp_walker1: GROUND,
   walker_at_rt_camo: GROUND,
+  walker_at_st: GROUND,
   walker_at_xt: GROUND,
+  walker_at_xt_player: GROUND,
   xj6_air_speeder: AIR,
 };
 

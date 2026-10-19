@@ -5,6 +5,7 @@ import { boltReach, buildShips, defaultWeaponFor, shipClassOf, shipLabelOf } fro
 import { parseClientData, parseClientEffect } from '../shipdata.mjs';
 import { parseIff } from '../iff.mjs';
 import { chunk, encode, form, W } from './iffWriter.ts';
+import { atBase, traceHash } from './atBase.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -29,6 +30,42 @@ const yt = r.ships.find((s) => s.id === 'yt1300')!;
 ok(yt.interior?.cells === 5 && yt.interior.pob.endsWith('.pob'), 'the freighter carries its interior');
 ok(r.ships.find((s) => s.id === 'xwing')!.interior === null, 'the fighter has none');
 ok(yt.length === 27 && r.ships[0].class <= r.ships[1].class, 'lengths are measured and ships sort by class');
+
+// With the chassis table read, a player template with no chassis row is a placeholder (on SOE's final mount the TIE
+// Defender one, drawn on an X-wing body): left out, listed with why, and never converted.
+{
+  const converted: string[] = [];
+  const s = buildShips(['object/ship/player/shared_player_xwing.iff', 'object/ship/player/shared_player_tie_defender.iff'], {
+    convert: (t: string) => (converted.push(t), { model: shipLabelOf(t), file: `${shipLabelOf(t)}.glb`, bounds: { min: [-1, 0, -1], max: [1, 1, 1] } }),
+    chassisOf: (t: string) => (t.includes('tie_defender') ? null : 'player_xwing'),
+  });
+  ok(s.ships.length === 1 && s.skipped.length === 1 && /no chassis row/.test(s.skipped[0].why) && !converted.some((t) => t.includes('tie_defender')), 'a template with no chassis row is left out, listed with why, and not converted');
+  const noTable = buildShips(['object/ship/player/shared_player_tie_defender.iff'], { convert: (t: string) => ({ model: shipLabelOf(t), file: 'x.glb', bounds: { min: [0, 0, 0], max: [1, 1, 1] } }) });
+  ok(noTable.ships.length === 1, 'with no chassis table read nothing is left out for it');
+}
+// The fighters SOE's last publishes added, by the four words of ours.
+ok(['twing', 'havoc', 'snow_speeder_s01', 'snowspeeder', 'droid_fighter_s01'].every((n) => shipClassOf(`object/ship/player/shared_player_${n}.iff`) === 'fighter'), 'the T-wing, the Havoc, the snowspeeder and the droid fighter are starfighters');
+{
+  // Day one: every name the old rule classed keeps its class, unless it now matches one of the four words.
+  const old = await atBase<{ shipClassOf: typeof shipClassOf }>('tools/swg/ships.mjs');
+  const names = ['xwing', 'ywing', 'awing', 'bwing', 'z95', 'tiefighter', 'tie_bomber', 'tieadvanced', 'tieinterceptor', 'tie_defender', 'tiedefender', 'tieoppressor', 'yt1300', 'yt2400', 'ykl37r', 'firespray', 'decimator', 'arc170', 'hutt_heavy_s01', 'hutt_medium_s02', 'hutt_light_s01', 'blacksun_heavy_s01', 'blacksun_light_s02', 'blacksun_vaksai_s02', 'kimogila', 'jedi_starfighter', 'naboo_n1', 'vwing', 'sorosuub_luxury_yacht', 'lambda', 'corellian_corvette', 'gunboat', 'g1a', 'belbullab22', 'scyk', 'headhunter', 'ixiyen', 'rihkxyrk', 'twing', 'havoc', 'snow_speeder_s01', 'droid_fighter_s01', 'eta2', 'delta7'];
+  const NEW = /twing|havoc|snow_?speeder|droid_fighter/;
+  // Where git cannot hand the base over, today's classes of the names the four words do not name are held to the hash
+  // of the base's, written down here.
+  const kept = names.filter((n) => !NEW.test(n));
+  const trace = (f: typeof shipClassOf) => kept.map((n) => [n, f(`object/ship/player/shared_player_${n}.iff`)]);
+  const BASE_TRACE = 'ff30dc4cb21c';
+  if (old) {
+    const moved = names.filter((n) => { const t = `object/ship/player/shared_player_${n}.iff`; return shipClassOf(t) !== old.shipClassOf(t) && !NEW.test(t); });
+    ok(!moved.length, `day one: every name keeps the class the rule gave it at the pass's base, but those the four words now name (${names.length} names${moved.length ? `; moved ${moved.join(', ')}` : ''})`);
+    const then = traceHash(trace(old.shipClassOf));
+    if (then !== BASE_TRACE) console.log(`note the base's trace hashes to ${then}; write it as BASE_TRACE so a checkout without git still holds today's to it`);
+    else ok(true, `and that trace is the one written down here (${BASE_TRACE})`);
+  } else {
+    console.log("note git cannot hand over ships.mjs as it stood at the pass's base: today's classes are held to the trace written down here");
+    ok(traceHash(trace(shipClassOf)) === BASE_TRACE, `day one: every name the four words do not name keeps the base's class (${traceHash(trace(shipClassOf))}, written ${BASE_TRACE})`);
+  }
+}
 
 // The gun a ship fires, from the weapon table's names.
 const guns = ['wpn_generic', 'wpn_xwing_missile_s01', 'wpn_awing_blaster', 'wpn_tiefighter_basic', 'wpn_tieadvanced_blaster', 'wpn_z95_blaster', 'wpn_light_blaster', 'wpn_light_blaster_green'];

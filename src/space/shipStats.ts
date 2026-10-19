@@ -5,6 +5,7 @@
 //
 // Pure: no three, no rapier; node's tests import it straight from source.
 import type { ComponentWeapon } from '../vehicles/shipFit.ts';
+import { strengthTier } from './tierLadder.ts';
 
 export type Grade = 1 | 2 | 3 | 4 | 5;
 
@@ -56,10 +57,14 @@ export const FAMILY_TRAITS: Record<string, { speed?: number; agility?: number; h
 export const gradeScale = (g: Grade): number => 0.8 + 0.1 * g;
 /** Top speed by the engine's grade. */
 export const speedScale = (g: Grade): number => 0.95 + 0.025 * g;
-/** Durability by tier (tier 2 is 1; tier 0, a ship a player flies, is 1). */
-export const tierDurability = (t: number): number => (t ? 0.6 + 0.2 * t : 1);
-/** Damage by tier (tier 0 is 1). */
-export const tierDamage = (t: number): number => (t ? 0.7 + 0.15 * t : 1);
+/**
+ * Durability by tier (tier 2 is 1; tier 0, a ship a player flies, is 1). A tier above 5 is read at the tier the ladder
+ * reads it as (`strengthTier`, `tierLadder.ts`): the formula was written for tiers 1 to 5, and at tier 10 it would make
+ * a ship 2.6 times as hard to kill as a tier 5.
+ */
+export const tierDurability = (t: number): number => (t ? 0.6 + 0.2 * strengthTier(t) : 1);
+/** Damage by tier (tier 0 is 1), the same way. */
+export const tierDamage = (t: number): number => (t ? 0.7 + 0.15 * strengthTier(t) : 1);
 
 /** A shield's regeneration a second, as a share of its maximum, after SHIELD_DELAY seconds without a hit. */
 export const SHIELD_REGEN = 0.08;

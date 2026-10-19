@@ -7,9 +7,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  buildCombat, chassisNameOf, combatCounts, combatLine, combatStatus, COMBAT_FORMAT, factionOf, formationOf, hitEffectsOf, hitSoundsOf, hullFxOf, NOT_LADDER, slotsOf,
+  buildCombat, chassisNameOf, combatCounts, combatLine, combatStatus, COMBAT_FORMAT, factionOf, formationOf, hitEffectsOf, hitSoundsOf, hullFxOf, NOT_LADDER, NPC_TIER_TOP, slotsOf,
   targetRowsOf, tauntsOf, tauntTableOf, typeParts, wordsOf,
 } from '../npcships.mjs';
+import { atBase, traceHash } from './atBase.ts';
 import { parseDatatable, parseStringTable } from '../datatable.mjs';
 import { parseIff } from '../iff.mjs';
 import { chunk, encode, form, W } from './iffWriter.ts';
@@ -58,7 +59,27 @@ function stringTable(entries: [string, string][]) {
 const bs = typeParts('blacksun_light_s01_tier3');
 ok(!!bs && bs.family === 'blacksun_light_s01' && bs.base === 'blacksun_light' && bs.style === 's01' && bs.tier === 3, "a styled type's family, base, style and tier");
 ok(same(typeParts('tiefighter_tier1'), { family: 'tiefighter', base: 'tiefighter', style: null, tier: 1 }), 'an unstyled type is its own base');
-ok(typeParts('xwing') === null && typeParts('x_tier6') === null && typeParts('x_tier0') === null, 'an untiered id and a tier outside 1 to 5 are not types');
+// SOE's own families run to tier 10 from publish 55 on (NPC_TIER_TOP); a tier outside 1 to 10 is no type.
+ok(typeParts('xwing') === null && typeParts('x_tier11') === null && typeParts('x_tier0') === null, 'an untiered id and a tier outside 1 to 10 are not types');
+ok(same(typeParts('x_tier6'), { family: 'x', base: 'x', style: null, tier: 6 }) && typeParts('xwing_tier10')?.tier === 10 && NPC_TIER_TOP === 10, 'a tier 6 to 10 is a type');
+{
+  // Day one: every id with a tier from 1 to 5 is what typeParts answered at the pass's base, loaded out of git; where
+  // git cannot hand it over, today's answers are held to the hash of the base's, written down here.
+  const old = await atBase<{ typeParts: typeof typeParts }>('tools/swg/npcships.mjs');
+  const ids = ['tiefighter_tier1', 'blacksun_light_s01_tier3', 'hutt_heavy_s02_tier5', 'xwing_tier2', 'x_tier4', 'a_b_c_tier1', 'tier3', 'z95_tier05', 'xwing', 'x_tier0', 'x_tier6'];
+  const lowIds = ids.filter((id) => { const p = typeParts(id); return !p || p.tier <= 5; });
+  const trace = (f: typeof typeParts) => lowIds.map((id) => [id, f(id)]);
+  const BASE_TRACE = 'c7a99b0122c0';
+  if (old) {
+    ok(lowIds.every((id) => same(typeParts(id), old.typeParts(id))), `day one: typeParts answers every id with a tier from 1 to 5 (and none) as at the pass's base (${lowIds.length} ids)`);
+    const then = traceHash(trace(old.typeParts));
+    if (then !== BASE_TRACE) console.log(`note the base's trace hashes to ${then}; write it as BASE_TRACE so a checkout without git still holds today's to it`);
+    else ok(true, `and that trace is the one written down here (${BASE_TRACE})`);
+  } else {
+    console.log("note git cannot hand over npcships.mjs as it stood at the pass's base: today's answers are held to the trace written down here");
+    ok(traceHash(trace(typeParts)) === BASE_TRACE, `day one: typeParts answers every id with a tier from 1 to 5 as the base did (${traceHash(trace(typeParts))}, written ${BASE_TRACE})`);
+  }
+}
 
 // Chassis rows.
 const rowNames = new Set(['blacksun_light_tier1', 'tiefighter_tier2', 'hutt_light_s01_tier1']);
@@ -181,6 +202,26 @@ const byId = new Map(f.types.map((x: { id: string }) => [x.id, x]));
 ok(f.version === COMBAT_FORMAT && COMBAT_FORMAT === 1, 'the file is version 1');
 ok(byId.get('tiefighter_tier1')?.hull === 'tiefighter' && byId.get('tiefighter_tier2')?.hull === 'tiefighter', 'the hull whose id is the family wins over another with the same appearance (case and slashes aside)');
 ok(byId.get('blacksun_light_s01_tier1')?.hull === 'blacksun_light_s01' && byId.get('blacksun_light_s02_tier1')?.hull === 'blacksun_light_s02', 'each style flies its own hull');
+{
+  // A family that exists only above tier 5 borrows a name from its own tiers, lowest first, not from tiers 1 to 5.
+  const late = buildCombat({
+    templates: ['object/ship/shared_tdef_tier6.iff', 'object/ship/shared_tdef_tier7.iff', 'object/ship/shared_tdef_tier8.iff'],
+    appearanceOf: () => 'appearance/xwing.apt',
+    ships: [{ id: 'xwing', template: 'object/ship/player/shared_player_xwing.iff', chassis: 'player_xwing' }],
+    chassisRows: new Map([6, 7, 8].map((t) => [`tdef_tier${t}`, { ...row, name: `tdef_tier${t}` }])),
+    slotNames,
+    nameOf: (id: string) => (id === 'tdef_tier7' ? 'TEST Defender' : null),
+    formations: {},
+    taunts: {},
+    hitEffectRows: [],
+    hitSoundRows: [],
+    targetRows: [],
+    particle: () => null,
+    effect: () => null,
+  });
+  const tiers = late.file.types.map((t: { id: string; name: string; tier: number }) => `${t.tier}:${t.name}`).join(' ');
+  ok(tiers === '6:TEST Defender 7:TEST Defender 8:TEST Defender', `a family only above tier 5 is typed at each tier, the tier 6 named from tier 7's name (${tiers})`);
+}
 ok(byId.get('blacksun_light_s01_tier1')?.chassis === 'blacksun_light_tier1' && byId.get('blacksun_light_s02_tier1')?.chassis === 'blacksun_light_tier1', 'both styles read the style-dropped chassis');
 ok(same(built.chassisWanted.get('blacksun_light_tier1'), ['blacksun_light_s01', 'blacksun_light_s02']) && same([...built.chassisWanted.keys()].sort(), ['blacksun_light_tier1', 'tiefighter_tier1', 'tiefighter_tier2']), "chassisWanted holds the chassis and every hull that flies it");
 ok(!byId.has('nova_orion_pirate_light_tier1') && !f.skipped.some((s: { id: string }) => s.id.startsWith('nova_orion')), 'a not-ladder family is dropped, not listed as skipped');

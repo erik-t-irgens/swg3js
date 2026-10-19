@@ -179,9 +179,11 @@ export function packPartOf(id: string, packParts: readonly string[]): string | n
  * Whether a worn part's name is a hairstyle, which is never an item: hair belongs to the appearance page.
  * Every hairstyle id begins `hair_` but the Sullustan's eighteen, which are `sul_hair_s<nn>_<f|m>`, and
  * those were taken for wearables -- owned, put in the backpack, and never taken off when a style changed.
+ * SOE's last publishes add the Sullustan beards, `sul_beard_s01_m` to `s12_m`, which are hair of the same kind
+ * and would otherwise be taken for wearables in exactly that way.
  */
 export function isHairKey(key: string): boolean {
-  return /^(hair_|sul_hair_)/.test(key);
+  return /^(hair_|sul_hair_|sul_beard_)/.test(key);
 }
 
 /** As much of a catalogue entry as the hair lists read. */

@@ -94,8 +94,25 @@ const STUDY: Record<string, [number, number, number, number]> = {
   yavin4: [13, 52, 47, 30],
 };
 
+/**
+ * A world's terrain as SOE's final names list re-issues it (its own manifest's `late` stamp says the pack was
+ * converted with the list in the mount), measured on SOE complete's pilot conversion: Dathomir's alone moves, by one
+ * AFDN and one AFDF (Lok's re-issued terrain keeps its radial counts, and Tatooine's and Talus's Life Day copies are
+ * held back).
+ */
+const STUDY_LATE: Record<string, [number, number, number, number]> = { dathomir: [17, 63, 82, 25] };
+const lateOf = (name: string): boolean => {
+  try {
+    const s = JSON.parse(readFileSync(join(PACKS, name, 'manifest.json'), 'utf8')).late?.state;
+    return s === 'applied' || s === 'final';
+  } catch {
+    return false;
+  }
+};
+
 const worlds = groundWorlds();
 if (!worlds.length) note(`no converted world under ${PACKS}: only the groups built in memory were checked`);
+let lateWorlds = 0;
 let families = 0;
 let children = 0;
 let near = 0;
@@ -131,7 +148,9 @@ for (const name of worlds) {
     }
   };
   visit(t.generator.layers);
-  const want = STUDY[name];
+  const late = lateOf(name);
+  if (late) lateWorlds++;
+  const want = (late && STUDY_LATE[name]) || STUDY[name];
   const n = raws.filter((r) => r.tag === 'AFDN').length;
   const f = raws.filter((r) => r.tag === 'AFDF').length;
   ok(g.leftover === 0 && (g.version === 4 || g.families.size === 0), `${name}: RGRP ${g.version >= 0 ? `version 000${g.version}` : 'absent'} reads to the byte (${g.leftover} bytes left)`);
@@ -145,7 +164,8 @@ for (const name of worlds) {
   near += n;
   far += f;
 }
-if (worlds.length === Object.keys(STUDY).length) ok(families === 168 && children === 602 && near === 855 && far === 296, `over all nineteen worlds: ${families} families, ${children} children, ${near} AFDN, ${far} AFDF (168, 602, 855, 296)`);
+const dathLate = worlds.includes('dathomir') && lateOf('dathomir') ? 1 : 0;
+if (worlds.length === Object.keys(STUDY).length) ok(families === 168 && children === 602 && near === 855 + dathLate && far === 296 + dathLate, `over all nineteen worlds (${lateWorlds} converted with SOE's final names list): ${families} families, ${children} children, ${near} AFDN, ${far} AFDF (168, 602, ${855 + dathLate}, ${296 + dathLate})`);
 else note(`${worlds.length} of the nineteen worlds converted: the totals are checked only over all of them`);
 
 console.log(`\n${passed} passed`);

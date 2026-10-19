@@ -126,7 +126,8 @@ export function joinDeeds(deeds, buildings, deps) {
   const faults = [];
   const feet = new Map();
   for (const d of deeds) {
-    const b = buildings.get(d.makes) ?? { lots: 0, upkeep: 0, zones: [] };
+    // A deed of ours has no lots, no upkeep and every world: those were the server's, and nothing here invents them.
+    const b = (d.ours ? null : buildings.get(d.makes)) ?? { lots: 0, upkeep: 0, zones: [] };
     const layout = deps.templateString(d.makes, ['portalLayoutFilename']);
     const model = layout ? layout.split('/').pop().replace(/\.[^.]+$/, '') : null;
     const footFile = deps.templateString(d.makes, ['structureFootprintFileName']) ?? deps.templateString(d.template, ['structureFootprintFileName']);
@@ -140,12 +141,13 @@ export function joinDeeds(deeds, buildings, deps) {
       }
       foot = feet.get(footFile);
     }
-    const name = deps.name(d.template);
+    // A deed of ours (`OUR_DEEDS`) takes its building's name where its own names a table the client lacks.
+    const name = deps.name(d.template) || (d.ours ? deps.name(d.makes) : null);
     rows.push({
       id: d.id,
       name: name || wordsFrom(d.id),
       named: !!name,
-      desc: deps.desc(d.template) || '',
+      desc: deps.desc(d.template) || (d.ours ? deps.desc(d.makes) || '' : ''),
       makes: d.makes,
       model: model && deps.hasModel(model) ? model : null,
       layout: model,
@@ -154,9 +156,81 @@ export function joinDeeds(deeds, buildings, deps) {
       zones: b.zones,
       foot: foot ? footprintEntry(foot) : null,
       patch: foot ? round4(footprintPatch(foot)) : null,
+      ...(d.ours ? { ours: true } : {}),
     });
   }
   return { rows, faults };
+}
+
+/**
+ * Deeds of ours [ours, from the client's own names]: every client house deed Core3's scripts do not know, paired with
+ * the client building it makes by the two templates' own names, since no client file pairs a deed with its building
+ * (that was the server's). Each row goes through `joinDeeds` as a Core3 row does -- the layout, the model and the
+ * footprint from the building, the name from the deed falling back to the building's -- with no lots, no upkeep and
+ * every world (`zones: []`), and marked `ours`, since those three were the server's and nothing here invents them.
+ * Where two deeds make one building (the Dathomir huts' plain and `_01` deeds) the first listed is the row, the one
+ * the client names. The houses SOE's last publishes added come first, then the older player houses and the trading
+ * card buildings Core3 never had a deed for.
+ */
+export const OUR_DEEDS = [
+  ['object/tangible/deed/player_house_deed/shared_yt1300_house_deed.iff', 'shared_player_house_yt1300.iff'],
+  ['object/tangible/deed/player_house_deed/shared_tree_house_01_deed.iff', 'shared_player_house_tree_house_01.iff'],
+  ['object/tangible/deed/player_house_deed/shared_jabbas_sail_barge_deed.iff', 'shared_player_house_jabbas_sail_barge.iff'],
+  ['object/tangible/deed/player_house_deed/shared_player_house_tcg_8_bespin_house_deed.iff', 'shared_player_house_tcg_8_bespin_house.iff'],
+  ['object/tangible/deed/player_house_deed/shared_player_house_tcg_8_yoda_house.iff', 'shared_player_house_tcg_8_yoda_house.iff'],
+  ['object/tangible/deed/player_house_deed/shared_wod_ns_hut_deed.iff', 'shared_player_house_wod_ns_hut.iff'],
+  ['object/tangible/deed/player_house_deed/shared_wod_ns_hut_01_deed.iff', 'shared_player_house_wod_ns_hut.iff'],
+  ['object/tangible/deed/player_house_deed/shared_wod_sm_hut_deed.iff', 'shared_player_house_wod_sm_hut.iff'],
+  ['object/tangible/deed/player_house_deed/shared_wod_sm_hut_01_deed.iff', 'shared_player_house_wod_sm_hut.iff'],
+  ['object/tangible/deed/player_house_deed/shared_generic_house_large_window_s01_deed.iff', 'shared_player_house_generic_large_window_s01.iff'],
+  ['object/tangible/deed/player_house_deed/shared_generic_house_large_window_s02_deed.iff', 'shared_player_house_generic_large_window_s02.iff'],
+  ['object/tangible/deed/player_house_deed/shared_generic_house_medium_windowed_deed.iff', 'shared_player_house_generic_medium_windowed.iff'],
+  ['object/tangible/deed/player_house_deed/shared_generic_house_medium_windowed_s02_deed.iff', 'shared_player_house_generic_medium_windowed_s02.iff'],
+  ['object/tangible/deed/player_house_deed/shared_generic_house_small_window_deed.iff', 'shared_player_house_generic_small_windowed.iff'],
+  ['object/tangible/deed/player_house_deed/shared_generic_house_small_window_style_03_deed.iff', 'shared_player_house_generic_small_window_style_03.iff'],
+  ['object/tangible/deed/player_house_deed/shared_naboo_house_small_window_deed.iff', 'shared_player_house_naboo_small_window_style_01.iff'],
+  ['object/tangible/deed/player_house_deed/shared_tatooine_house_window_small_deed.iff', 'shared_player_house_tatooine_small_window_style_01.iff'],
+  ['object/tangible/deed/player_house_deed/shared_mustafar_house_lg.iff', 'shared_player_house_mustafar_lg.iff'],
+  ['object/tangible/tcg/series1/shared_structure_deed_barn.iff', 'shared_barn_no_planet_restriction.iff'],
+  ['object/tangible/tcg/series1/shared_structure_deed_diner.iff', 'shared_diner_no_planet_restriction.iff'],
+  ['object/tangible/tcg/series3/shared_structure_deed_jedi_meditation_room_deed.iff', 'shared_player_house_jedi_meditation_room.iff'],
+  ['object/tangible/tcg/series3/shared_structure_deed_sith_meditation_room_deed.iff', 'shared_player_house_sith_meditation_room.iff'],
+  ['object/tangible/tcg/series4/shared_structure_deed_relaxation_pool.iff', 'shared_player_house_tcg_relaxation_pool.iff'],
+  ['object/tangible/tcg/series5/shared_structure_deed_player_house_atat.iff', 'shared_player_house_atat.iff'],
+  ['object/tangible/tcg/series5/shared_structure_deed_player_house_hangar.iff', 'shared_player_house_hangar.iff'],
+  ['object/tangible/tcg/series6/shared_structure_deed_emperors_spire.iff', 'shared_player_house_tcg_emperors_spire.iff'],
+  ['object/tangible/tcg/series6/shared_structure_deed_rebel_spire.iff', 'shared_player_house_tcg_rebel_spire.iff'],
+  ['object/tangible/tcg/series7/shared_structure_deed_commando_bunker.iff', 'shared_player_house_tcg_commando_bunker.iff'],
+  ['object/tangible/tcg/series7/shared_structure_deed_vehicle_garage.iff', 'shared_player_house_tcg_vehicle_garage.iff'],
+  ['object/tangible/tcg/series7/shared_structure_deed_vip_bunker.iff', 'shared_player_house_tcg_vip_bunker.iff'],
+];
+
+/**
+ * A building template's path with its file name's `shared_` taken off, lower case: the one spelling a client
+ * template (`object/building/player/shared_player_house_yt1300.iff`) and the server template Core3's rows name
+ * (`object/building/player/player_house_yt1300.iff`) share, as `readDeeds` joins a script to its client deed.
+ */
+export const buildingKey = (path) => String(path ?? '').toLowerCase().replace(/\\/g, '/').replace(/\/shared_([^/]+)$/, '/$1');
+
+/**
+ * The deeds of ours this install's archives can stand (`OUR_DEEDS`), in the shape `readDeeds` gives a Core3 deed,
+ * marked `ours`: one a building, the first listed winning, only where the deed and its building are in the archives
+ * and Core3 has no deed making that building already (`known`, the buildings Core3's own rows make, server paths
+ * compared with the client's by `buildingKey`). `buildingOf` finds a building template by its file name (the folder
+ * under `object/building/player/` is the client's).
+ */
+export function ourDeeds({ has, buildingOf, known = new Set() }) {
+  const out = [];
+  const taken = new Set([...known].map(buildingKey));
+  for (const [template, building] of OUR_DEEDS) {
+    if (!has(template)) continue;
+    const makes = buildingOf(building);
+    if (!makes || taken.has(buildingKey(makes))) continue;
+    taken.add(buildingKey(makes));
+    const id = template.split('/').pop().replace(/^shared_/, '').replace(/\.iff$/, '');
+    out.push({ key: id, template, makes, id, ours: true });
+  }
+  return out;
 }
 
 /** Words out of a key, for a deed the string tables have no name for. */

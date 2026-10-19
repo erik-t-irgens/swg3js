@@ -38,13 +38,58 @@ export function swgDir(): string | null {
   return swg && existsSync(swg) ? swg : null;
 }
 
-/** The client's archives, retail only, or null where this machine has none. */
-export async function mountRetail(): Promise<Vfs | null> {
+/**
+ * The client's archives, retail only, or null where this machine has none. `finalNames: false` mounts them
+ * without SOE's final names list, as every pack converted before the list was.
+ */
+export async function mountRetail({ finalNames }: { finalNames?: false } = {}): Promise<Vfs | null> {
   const swg = swgDir();
   if (!swg) return null;
   const { openVfs } = await import('../tre.mjs');
   const { isRetailByName } = await import('../manifest.mjs');
-  return openVfs(swg, { filter: (f: string) => isRetailByName(f, statSync(join(swg, f)).size) !== null, log: () => {} }) as Vfs;
+  return openVfs(swg, { filter: (f: string) => isRetailByName(f, statSync(join(swg, f)).size) !== null, log: () => {}, ...(finalNames === false ? { finalNames: false } : {}) }) as Vfs;
+}
+
+/** The late stamp a pack folder carries (`late` beside the format `packFormat` reads), or null for none. */
+export function packLate(root: string, folder: string): { key?: string | null; state?: string } | null {
+  for (const name of ['manifest.json', 'wardrobe.json', 'parts.json']) {
+    const file = join(root, folder, name);
+    if (!existsSync(file)) continue;
+    try {
+      return JSON.parse(readFileSync(file, 'utf8')).late ?? null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+const packMounts = new Map<string, Vfs | null>();
+/**
+ * The archives as a pack folder was converted from them: with SOE's final names list where its stamp says the
+ * list was in the mount, without it where the pack carries no stamp or one that did not apply (every pack
+ * converted before the list), so a test holding a pack's pixels to the archives compares like with like on
+ * either side of a conversion. Null, with why, for a pack of a late world this machine cannot mount (a list
+ * other than this build's: status asks for it again).
+ */
+export async function mountForPack(root: string, folder: string, here?: Vfs | null): Promise<{ vfs: Vfs | null; why?: string }> {
+  return mountForLate(packLate(root, folder), here);
+}
+
+/** The same for a stamp read from wherever the command that wrote it keeps it (`<world>/terrain/radial.json`'s `late`). */
+export async function mountForLate(stamp: { key?: string | null; state?: string } | null | undefined, here?: Vfs | null): Promise<{ vfs: Vfs | null; why?: string }> {
+  const { lateWorld } = await import('../finalnames.mjs');
+  const theirs = lateWorld(stamp ?? null);
+  if (!packMounts.has('default')) packMounts.set('default', here ?? (await mountRetail()));
+  const def = packMounts.get('default') ?? null;
+  if (!def) return { vfs: null, why: 'no SWG install on this machine' };
+  const ours = lateWorld((def as Vfs & { late?: { key?: string; state?: string } }).late ?? null);
+  if (theirs === ours) return { vfs: def };
+  if (theirs === 'publish54') {
+    if (!packMounts.has('publish54')) packMounts.set('publish54', await mountRetail({ finalNames: false }));
+    return { vfs: packMounts.get('publish54') ?? null };
+  }
+  return { vfs: null, why: `converted from ${theirs}, which this machine mounts as ${ours}` };
 }
 
 /** The converter's own texture-entry dependencies over these archives, as `cli.mjs`'s `surfaceDeps` makes them. */

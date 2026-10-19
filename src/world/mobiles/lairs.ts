@@ -53,6 +53,11 @@ export interface SpawnArea {
    * other area does.
    */
   world?: boolean;
+  /**
+   * `ours`: a no-spawn circle the converter laid over a site SOE's last publishes added to a world's buildout tables
+   * (`lateSiteCircles` in tools/swg/spawnpack.mjs), kept apart only so the console can count what it keeps off.
+   */
+  src?: 'ours';
 }
 
 /** One lair a group may put down, with the weight it is drawn at. */

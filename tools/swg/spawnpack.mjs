@@ -20,11 +20,95 @@
 // which is how the server read it: a timer only runs when it is above nought.
 
 import { intoRoom, unitOf } from './core3.mjs';
+import { parseDatatable } from './datatable.mjs';
+import { parseIff } from './iff.mjs';
 import { core3StatsFor } from './mobiles.mjs';
 import { flattenWithWorldTransforms } from './ws.mjs';
 
 /** Bumped whenever a row or the manifest changes shape or meaning; `status` asks again below it. */
 export const SPAWNS_FORMAT = 2;
+
+/** Objects a late buildout table added that stand nearer each other than this are one site (single link) [ours]. */
+export const LATE_SITE_LINK = 40;
+/** And no lair stands within this of a site's farthest object [ours]. */
+export const LATE_SITE_PAD = 40;
+
+/**
+ * The objects a buildout table's current copy places that its previous copy did not, standing on their own (not
+ * in a cell), as `{ x, z, template }` in the snapshot's frame: each a row of the current table whose template,
+ * place and turn no row of the previous one has (all of them where there is no previous copy). `area` is the area
+ * row's corner (`x1`, `z1`), which a top-level object is placed from. Rows are `parseDatatable`'s.
+ */
+export function addedObjects(current, previous, area) {
+  const keyOf = (r) => [Number(r.shared_template_crc) >>> 0, ...['px', 'py', 'pz', 'qw', 'qx', 'qy', 'qz'].map((k) => Math.round((Number(r[k]) || 0) * 100))].join('|');
+  const had = new Set((previous ?? []).map(keyOf));
+  const out = [];
+  for (const r of current ?? []) {
+    if ((Number(r.cell_index) || 0) !== 0 || (Number(r.container) || 0) !== 0) continue;
+    if (had.has(keyOf(r))) continue;
+    out.push({ x: (Number(area.x1) || 0) + (Number(r.px) || 0), z: (Number(area.z1) || 0) + (Number(r.pz) || 0), crc: Number(r.shared_template_crc) >>> 0 });
+  }
+  return out;
+}
+
+/**
+ * Points clustered by single link within `link` metres, each cluster a no-spawn circle of ours about its middle
+ * reaching its farthest point plus `pad`, in the noSpawn rows' own shape and marked `src: 'ours'`.
+ */
+export function siteCircles(points, { link = LATE_SITE_LINK, pad = LATE_SITE_PAD, name = 'late_site' } = {}) {
+  const group = points.map((_, i) => i);
+  const root = (i) => (group[i] === i ? i : (group[i] = root(group[i])));
+  for (let i = 0; i < points.length; i++) {
+    for (let j = i + 1; j < points.length; j++) {
+      if (Math.hypot(points[i].x - points[j].x, points[i].z - points[j].z) <= link) group[root(i)] = root(j);
+    }
+  }
+  const clusters = new Map();
+  points.forEach((p, i) => {
+    const k = root(i);
+    if (!clusters.has(k)) clusters.set(k, []);
+    clusters.get(k).push(p);
+  });
+  const out = [];
+  for (const members of clusters.values()) {
+    const x = members.reduce((a, p) => a + p.x, 0) / members.length;
+    const z = members.reduce((a, p) => a + p.z, 0) / members.length;
+    const r = Math.max(...members.map((p) => Math.hypot(p.x - x, p.z - z))) + pad;
+    out.push({ x: Math.round(x * 10) / 10, z: Math.round(z * 10) / 10, r: Math.round(r * 10) / 10, objects: members.length });
+  }
+  out.sort((a, b) => a.x - b.x || a.z - b.z);
+  // `groups` and `cap` as every no-spawn row of the server's carries them, so a reader of the rows sees one shape.
+  return out.map((c, i) => ({ name: `${name}_${i + 1}`, shape: 'circle', x: c.x, z: c.z, r: c.r, groups: [], cap: 0, objects: c.objects, src: 'ours' }));
+}
+
+/**
+ * No-spawn circles of ours over the sites SOE's last publishes added to a world (the design's D24): for each of the
+ * world's buildout tables whose current copy came from SOE's final names list (`vfs.lateOf`), the objects absent
+ * from its previous copy (`vfs.readIndexed`), clustered (`siteCircles`). It keeps lairs off the Witches of Dathomir
+ * sites, the End of War base and Nym's Stronghold from the very run that brings them, and removes nothing a
+ * re-issued table already had. A world whose tables did not move, or a mount without the late layer, gives none.
+ */
+export function lateSiteCircles(vfs, world) {
+  if (!vfs?.lateOf) return [];
+  const read = (buf) => {
+    try {
+      return buf && buf.length >= 12 ? parseDatatable(parseIff(buf)).rows : null;
+    } catch {
+      return null;
+    }
+  };
+  const areasPath = `datatables/buildout/areas_${world}.iff`;
+  if (!vfs.has(areasPath)) return [];
+  const areas = read(vfs.read(areasPath)) ?? [];
+  const points = [];
+  for (const area of areas) {
+    if (!area.area || area.eventRequired) continue;
+    const path = `datatables/buildout/${world}/${area.area}.iff`;
+    if (!vfs.has(path) || !vfs.lateOf(path)) continue;
+    points.push(...addedObjects(read(vfs.read(path)), read(vfs.readIndexed?.(path) ?? null), area));
+  }
+  return siteCircles(points, { name: `late_site_${world}` });
+}
 
 /**
  * What `status` makes of the spawns packs on disk: the worlds whose pack is older than this format
@@ -43,7 +127,8 @@ export function spawnsStale(formats, manifestFormat) {
  * (its file is on disk already) and `convert(id, source)` -> `{ bounds, triangles }` (a throw where it will not).
  *
  * A model whose file is already there is kept as it stands **only while the last run's manifest stood for
- * models at the current material format** (`stale` false, `materialStale` in surface.mjs). Kept because its
+ * models at the current material format and this mount's late world** (`stale` false, `keptStale` in
+ * finalnames.mjs). Kept because its
  * file was there, a run the stamp asked for would write the stamp over the very models it was asked to redo,
  * and nothing would ever ask for them again. One file is converted once a run however many templates share it.
  *  -> { nests: { [template]: { id, file, bounds?, triangles? } }, made, failed }

@@ -1338,7 +1338,7 @@ const NO_BERTH: OutdoorTune = { ...OUTDOOR_TUNE, berthCost: 0, berthPull: 0 };
     writeFileSync(join(world, 'layout.json'), JSON.stringify({ objects: [{ template: 'object/tangible/furniture/shared_drawn.iff' }] }));
     const statusAt = (slope: number | undefined, rules: number | null = NAV_BAKE_RULES): { command: string; reasons: string[] }[] => {
       writeFileSync(join(world, 'nav.json'), JSON.stringify({ version: NAV_GRID_VERSION, planet: 'tatooine', nx: 4, nz: 4, cell: 2, ...(slope === undefined ? {} : { slopeDegrees: slope }), ...(rules === null ? {} : { rules }) }));
-      const r = spawnSync(process.execPath, [join(here, '..', 'cli.mjs'), 'status', dir, '--json'], { encoding: 'utf8' });
+      const r = spawnSync(process.execPath, [join(here, '..', 'cli.mjs'), 'status', dir, '--json'], { encoding: 'utf8', env: { ...process.env, SWG: '' } });
       assert.equal(r.status, 0, `status runs over the drawn pack: ${r.stderr}`);
       return (JSON.parse(r.stdout.slice(r.stdout.indexOf('{'))) as { steps: { command: string; reasons: string[] }[] }).steps;
     };

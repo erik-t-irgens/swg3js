@@ -28,9 +28,9 @@ export const COMBAT_FORMAT = 1;
 export const NPC_FACTIONS = { imperial: /^tie/, rebel: /^(xwing|ywing|awing|bwing|arc170)$/, blacksun: /^blacksun_/, pirate: /^(hutt_|z95$|firespray$)/ };
 
 /**
- * Tiered families that are not the space-mobile ladder: on the retail archives only the nova_orion_*
- * quest line's (tiers up to 10) are tiered; the new-player and prototype hull names are kept here in case
- * a tiered template ever carries one.
+ * Tiered families that are not the space-mobile ladder: the nova_orion_* quest line's (tiers up to 10) is a quest's
+ * own and not the ladder, although SOE's own families now run to tier 10 too (from publish 55); the new-player and
+ * prototype hull names are kept here in case a tiered template ever carries one.
  */
 export const NOT_LADDER = /^(nova_orion_|basic_|prototype_|experimental_ship)|_npe$/;
 
@@ -52,14 +52,21 @@ const round = (v) => {
 const idOf = (template) => norm(template).replace(/^.*\//, '').replace(/^shared_/, '').replace(/\.iff$/i, '');
 
 /**
+ * The highest tier a type may carry [SOE: from publish 55 on the families run to tier 10, where they had stopped at
+ * 5]. The game flies tiers 6 to 10 by its own ladder (`src/space/tierLadder.ts`), at tier 5's numbers until the owner
+ * moves them.
+ */
+export const NPC_TIER_TOP = 10;
+
+/**
  * 'blacksun_light_s01_tier3' -> { family: 'blacksun_light_s01', base: 'blacksun_light', style: 's01', tier: 3 };
- * null for an untiered id or a tier outside 1 to 5.
+ * null for an untiered id or a tier outside 1 to 10 (`NPC_TIER_TOP`).
  */
 export function typeParts(id) {
   const m = /^(.+)_tier(\d+)$/.exec(String(id ?? ''));
   if (!m) return null;
   const tier = Number(m[2]);
-  if (tier < 1 || tier > 5) return null;
+  if (tier < 1 || tier > NPC_TIER_TOP) return null;
   const family = m[1];
   const s = /^(.+)_(s\d+)$/.exec(family);
   return { family, base: s ? s[1] : family, style: s ? s[2] : null, tier };
@@ -258,6 +265,15 @@ export function buildCombat(deps) {
   const skipped = [];
   const chassisWanted = new Map();
   const seen = new Set();
+  // Each family's tiers as its templates give them, for the name fallback: a family that exists only above tier 5
+  // has no tier 1 to borrow a name from.
+  const familyTiers = new Map();
+  for (const template of deps.templates ?? []) {
+    const p = typeParts(idOf(template));
+    if (!p) continue;
+    if (!familyTiers.has(p.family)) familyTiers.set(p.family, new Set());
+    familyTiers.get(p.family).add(p.tier);
+  }
   for (const template of [...(deps.templates ?? [])].map(norm).sort()) {
     const id = idOf(template);
     const parts = typeParts(id);
@@ -281,9 +297,13 @@ export function buildCombat(deps) {
       continue;
     }
     const faction = factionOf(parts.family);
-    // The name table misses a few tiers (four of the Imperial Guard interceptor's five): another tier's name, else words.
+    // The name table misses a few tiers (four of the Imperial Guard interceptor's five): another of the family's own
+    // tiers' names, lowest first, else words.
     let name = deps.nameOf?.(id) || null;
-    for (let k = 1; !name && k <= 5; k++) name = deps.nameOf?.(`${parts.family}_tier${k}`) || null;
+    for (const k of [...(familyTiers.get(parts.family) ?? [])].sort((a, b) => a - b)) {
+      if (name) break;
+      name = deps.nameOf?.(`${parts.family}_tier${k}`) || null;
+    }
     name ||= wordsOf(parts.family);
     types.push({ id, name, family: parts.family, base: parts.base, style: parts.style, tier: parts.tier, hull, chassis, faction, taunts: tauntTableOf(faction, parts.family, parts.tier), template });
     if (!chassisWanted.has(chassis)) chassisWanted.set(chassis, []);

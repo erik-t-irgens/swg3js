@@ -21,7 +21,7 @@ import { radialStatus, sha1Of } from '../radial.mjs';
 import { describeSurface } from '../surface.mjs';
 import { RADIAL_FORMAT, RADIAL_JSON, RADIAL_RGBA, RADIAL_SIZE, radialPlaced, readRadialFile, resampleRgba } from '../../../src/swg/terrain/radialFile.ts';
 import { parseTerrainTemplate } from '../../../src/swg/terrain/trn.ts';
-import { mountRetail, PACKS } from './materialsHarness.ts';
+import { mountForLate, mountRetail, PACKS } from './materialsHarness.ts';
 import { groundWorlds } from './terrainHarness.ts';
 
 let passed = 0;
@@ -82,19 +82,26 @@ for (const name of worlds) {
   ok(radialStatus(name, json, trn, rgba.length).why === null, `${name}: status asks nothing more of it`);
   ok(radialStatus(name, { ...json, trn: { ...json.trn, sha1: 'x' } }, trn, rgba.length).why !== null && radialStatus(name, null, trn, null).why !== null && radialStatus(name, { ...json, radialFormat: 0 }, trn, rgba.length).why !== null && radialStatus(name, json, trn, rgba.length - 4).why !== null && radialStatus(name, { ...json, layers: json.layers - 1 }, trn, rgba.length).why !== null, `${name}: status asks again with no file, another format, another terrain, a short list or a short picture file`);
   if (!vfs) continue;
+  // Held to the archives as these pictures were written from them: before or after SOE's final names list.
+  const mount = await mountForLate(json.late, vfs);
+  if (!mount.vfs) {
+    note(`${name}: its layers are not held to the archives here: ${mount.why}`);
+    continue;
+  }
+  const pv = mount.vfs;
   let same = 0;
   let refs = 0;
   const cache = new Map();
   for (const [key, e] of file!.shaders) {
-    const d = describeSurface(vfs, `shader/${key}.sht`, cache);
-    const img = decodeDds(vfs.read(d.main));
+    const d = describeSurface(pv, `shader/${key}.sht`, cache);
+    const img = decodeDds(pv.read(d.main));
     const want = resampleRgba(img.rgba, img.width, img.height, RADIAL_SIZE);
     const at = e.layer * RADIAL_SIZE * RADIAL_SIZE * 4;
     let equal = img.width === e.width && img.height === e.height;
     for (let i = 0; equal && i < want.length; i++) if (rgba[at + i] !== want[i]) equal = false;
     if (equal) same++;
     // The ARVS record the shader's own effect tests against, read off the shader's bytes here.
-    const root = parseIff(vfs.read(`shader/${key}.sht`));
+    const root = parseIff(pv.read(`shader/${key}.sht`));
     const arvs = findAll(root, 'ARVS')[0];
     const data = arvs?.children?.find((c: { tag: string }) => !isForm(c))?.data as Buffer | undefined;
     const records = new Map<string, number>();

@@ -297,6 +297,7 @@ import { MOUSE_FLIGHT, aimCursor, circleRadius, coneClamp, flightTune, gunAim, h
 import { ZONE_TIER } from './space/roster';
 import { fillTaunt, pickLine } from './space/taunts';
 import { componentLine } from './space/shipStats';
+import { TIER_LADDER_TUNE, ladderLine, tuneTierLadder } from './space/tierLadder.ts';
 import { targetable, type CombatStatus } from './space/shipCombat';
 import type { ShipSpawner } from './ui/npcUi';
 import { HyperspaceCatalogue, arrivalAt, landmarksOf, loadSpacePack, type Destination } from './space/spaceData';
@@ -2754,6 +2755,8 @@ class App {
         return {
           ready: wildLife.ready,
           ...wildLife.last,
+          // The no-spawn circles of ours over what SOE's last publishes added to this world, and the sites they kept off.
+          late: wildLife.lateKeptOff(),
           ...(moved.length ? { moved } : {}),
           standing: wildLife.report(at, centre),
           nearest: near,
@@ -6542,7 +6545,14 @@ class App {
        * `ms: { think, physics }`. `{ patrols: false }` stops the patrols streaming in, `{ passive: true }` every NPC's fire,
        * `{ clear: true }` takes every NPC ship away.
        */
-      npcShips: (opts: { patrols?: boolean; passive?: boolean; clear?: boolean } = {}) => {
+      npcShips: (opts: { patrols?: boolean; passive?: boolean; clear?: boolean; ladder?: true | Parameters<typeof tuneTierLadder>[0] } = {}) => {
+        // Tiers 6 to 10 (SOE's families from publish 55 on): `{ ladder: true }` prints the ladder, an object moves it. The
+        // skill reaches every pilot in the air at once (the brain reads it at each think); a ship's fit and its strength
+        // are made when it is stood, so those reach the next ship stood.
+        if (opts.ladder) {
+          if (opts.ladder !== true) tuneTierLadder(opts.ladder);
+          return { ladder: JSON.parse(JSON.stringify(TIER_LADDER_TUNE)), line: ladderLine(), note: 'skill: ships in the air now; grade and strength: the next ship stood' };
+        }
         const mgr = this.world.npcShips;
         const data = this.world.ships.data;
         let cleared: number | null = null;

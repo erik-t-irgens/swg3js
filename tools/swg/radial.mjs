@@ -73,9 +73,11 @@ function writeInPlace(target, bytes) {
 
 /**
  * One world's radial pictures and their list, from the terrain file its pack carries (`trnBytes`, which the
- * template was parsed from) and the archives. Returns what it wrote, counted.
+ * template was parsed from) and the archives. Returns what it wrote, counted. `late` is the late stamp the caller's
+ * mount gives (finalnames.mjs), written as it is: the pictures come out of the archives, so a re-issued grass picture
+ * on a terrain that did not change is still asked for again.
  */
-export function writeRadial(vfs, template, trnBytes, outDir, { log = console.error, warn = console.warn } = {}) {
+export function writeRadial(vfs, template, trnBytes, outDir, { log = console.error, warn = console.warn, late = null } = {}) {
   const placed = radialPlaced(template.generator);
   const cache = new Map();
   const shaders = {};
@@ -116,6 +118,7 @@ export function writeRadial(vfs, template, trnBytes, outDir, { log = console.err
     far: placed.filter((p) => p.far).length,
     shaders,
     ...(missing.length ? { missing } : {}),
+    ...(late ? { late } : {}),
   };
   // The pictures first and the list after, so a list is never there before the pictures it names.
   writeInPlace(join(outDir, RADIAL_RGBA), rgba);

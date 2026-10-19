@@ -8,6 +8,7 @@
 // Pure: no three, no rapier; node's tests import it straight from source. Every function fills an
 // `out` and allocates nothing. The tiers' skill lives here too, so the duel tests can fly it.
 import { interceptTime } from '../combat/intercept.ts';
+import { skillTier } from './tierLadder.ts';
 
 export interface V3 {
   x: number;
@@ -64,9 +65,9 @@ export const PILOT_SKILL: Record<number, PilotSkill> = {
   5: { reaction: 0.25, scatterDeg: 0.9, gunConeDeg: 12, lead: 0.95, breakRange: 80, evadeChance: 0.75, stickMax: 0.94, response: 0.12 },
 };
 
-/** A tier's skill (clamped to 1..5, rounded). */
+/** A tier's skill (rounded, held to 1..5; a tier above 5 flies as the tier the ladder reads it as, `tierLadder.ts`). */
 export function skillOfTier(tier: number): PilotSkill {
-  return PILOT_SKILL[Math.min(5, Math.max(1, Math.round(tier)))] ?? PILOT_SKILL[1];
+  return PILOT_SKILL[skillTier(tier)] ?? PILOT_SKILL[1];
 }
 
 const clamp1 = (n: number): number => (n > 1 ? 1 : n < -1 ? -1 : n);

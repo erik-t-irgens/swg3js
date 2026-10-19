@@ -1,6 +1,6 @@
 // The gallery's vehicles by kind, and which part of a vehicle follows which kind (src/vehicles/vehicleKinds.ts).
 //
-// The table's 57 rows and their counts; the name rule kept as the fallback and as the switch's other side; every
+// The table's 63 rows and their counts; the name rule kept as the fallback and as the switch's other side; every
 // converted gallery vehicle with a row; the routing over every row against every kind it can be spawned as (the drive,
 // the modes and the race box by the kind; the seat and the clips by what it is; a rig never; a creature's saddle
 // whatever; the eye seat only for the ships pack's own ships spawned as ships); and the race boxes over the real
@@ -27,13 +27,16 @@ const restore = () => {
 
 const rows = Object.entries(VEHICLE_KINDS);
 const count = (f: (r: (typeof rows)[number][1]) => boolean) => rows.filter(([, r]) => f(r)).length;
-ok(rows.length === 58 && Object.hasOwn(VEHICLE_KINDS, 'podracer_sebulba'), `the table has the gallery's 57 vehicles and Sebulba's pod, an exhibit of ours (${rows.length})`);
+// 62: the 57 of before and the five SOE's last publishes added (the single-pod airspeeder, its two trading-card
+// templates, and SOE's own player AT-ST and AT-XT), each at the kind the name rule gives it.
+ok(rows.length === 63 && Object.hasOwn(VEHICLE_KINDS, 'podracer_sebulba'), `the table has the gallery's 62 vehicles and Sebulba's pod, an exhibit of ours (${rows.length})`);
+ok(['single_pod_airspeeder', 'tcg_8_air_speeder', 'tcg_8_single_pod_airspeeder', 'walker_at_st', 'walker_at_xt_player'].every((id) => Object.hasOwn(VEHICLE_KINDS, id) && VEHICLE_KINDS[id].kind === kindByNames(id, undefined, undefined).kind), "the five late vehicles each have a row, at the kind the name rule gives them");
 const pods = count((r) => r.kind === 'podracer');
 const bikes = count((r) => r.kind === 'speederbike');
 const hover = count((r) => r.kind === 'flyer' && !r.air);
 const air = count((r) => r.kind === 'flyer' && !!r.air);
 const ground = count((r) => r.kind === 'ground');
-ok(pods === 8 && bikes === 33 && hover === 3 && air === 6 && ground === 8, `8 pods, 33 bikes, 3 hover cars, 6 aircraft and 8 that walk or roll (${pods}, ${bikes}, ${hover}, ${air}, ${ground})`);
+ok(pods === 8 && bikes === 33 && hover === 3 && air === 9 && ground === 10, `8 pods, 33 bikes, 3 hover cars, 9 aircraft and 10 that walk or roll (${pods}, ${bikes}, ${hover}, ${air}, ${ground})`);
 ok(rows.every(([id, r]) => kindFor({ id }).kind === r.kind && kindFor({ id }).inferred), 'with the switch on, every row is its own kind and never a guess');
 ok(hoverCarFor('koro2_speeder') === true && hoverCarFor('landspeeder_organa') === true && hoverCarFor('snowspeeder') === false && hoverCarFor('jetpack') === false && hoverCarFor('no_such_vehicle') === undefined, "a flyer is a hover car or an aircraft by its row; an id the table lacks is the name rule's");
 ok(races('podracer') && races('speederbike') && !races('flyer') && !races('ground') && !races('ship'), 'every pod and every bike races, nothing else');

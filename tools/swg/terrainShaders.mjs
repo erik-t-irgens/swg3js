@@ -257,9 +257,9 @@ function writeGroundShader(vfs, path, stem, outDir, written, warn) {
  * Every ground family's every child, the border masks and the cloud tile, and `terrain/shaders.json`
  * listing them. A shader two families share is written once; files a run before this one left under
  * `terrain/shaders/` that this run did not write are taken away, so the folder holds what the list names.
- * Returns what it wrote, counted.
+ * Returns what it wrote, counted. `late` is the late stamp the caller's mount gives (finalnames.mjs), written as it is.
  */
-export function writeGroundTextures(vfs, template, outDir, { log = console.error, warn = console.warn } = {}) {
+export function writeGroundTextures(vfs, template, outDir, { log = console.error, warn = console.warn, late = null } = {}) {
   const written = new Set();
   /** Per shader file, its pictures (or the reason it has none), so a shader two families name is written once. */
   const byShader = new Map();
@@ -352,7 +352,7 @@ export function writeGroundTextures(vfs, template, outDir, { log = console.error
   mkdirSync(join(outDir, 'terrain'), { recursive: true });
   // Versioned, because `status` cannot otherwise tell an old pack from a new one and nothing would ever ask
   // for it again -- the hole that has already cost this project twice over the rigs.
-  writeFileSync(join(outDir, 'terrain/shaders.json'), JSON.stringify({ version: TERRAIN_SHADERS_VERSION, families, blend, clouds }, null, 1));
+  writeFileSync(join(outDir, 'terrain/shaders.json'), JSON.stringify({ version: TERRAIN_SHADERS_VERSION, families, blend, clouds, ...(late ? { late } : {}) }, null, 1));
   const shaderDir = join(outDir, 'terrain/shaders');
   let swept = 0;
   if (existsSync(shaderDir)) {

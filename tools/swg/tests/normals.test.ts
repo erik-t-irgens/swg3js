@@ -32,7 +32,7 @@ import { describeSurface, normalReadOf, programSource } from '../surface.mjs';
 import { buildGlb } from '../glb.mjs';
 import { MATERIAL_FORMAT } from '../surface.mjs';
 import { loadShader, renderContext } from '../texrender.mjs';
-import { PACKS, converterDeps, entryOf, glbImage, glbsUnder, mountRetail, packFormat, swgDir, usedShaders, writtenModel, type Img } from './materialsHarness.ts';
+import { PACKS, converterDeps, entryOf, glbImage, glbsUnder, mountForPack, mountRetail, packFormat, swgDir, usedShaders, writtenModel, type Img } from './materialsHarness.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -363,6 +363,15 @@ else {
       note(`${f} under ${PACKS} is material format ${format}, older than ${MATERIAL_FORMAT}: its models are not read here (status asks for it again)`);
       continue;
     }
+    // Held to the archives as this pack was converted from them: before or after SOE's final names list.
+    const mount = await mountForPack(PACKS, f, vfs);
+    if (!mount.vfs) {
+      note(`${f} under ${PACKS} is not read here: ${mount.why}`);
+      continue;
+    }
+    const pv = mount.vfs;
+    const packCache = pv === vfs ? cache : new Map();
+    const packSources = pv === vfs ? sourceCache : new Map<string, Img>();
     checkedPacks++;
     const bad: string[] = [];
     let materials = 0;
@@ -372,17 +381,17 @@ else {
         if (m?.normalTexture?.index === undefined || typeof m.name !== 'string') continue;
         let d;
         try {
-          d = describeSurface(vfs, m.name, cache);
+          d = describeSurface(pv, m.name, packCache);
         } catch {
           continue;
         }
         const read = d.normalRead;
         const slot = read?.kind === 'read' ? read.slot : null;
         const path = slot ? String(d.textures.find((t: { slot: string }) => t.slot === slot)?.path ?? '').replace(/\\/g, '/').toLowerCase() : '';
-        if (!slot || !path || !vfs.has(path)) continue;
+        if (!slot || !path || !pv.has(path)) continue;
         const written = glbImage(json, bin, m.normalTexture.index);
-        const src = sourceCache.get(path) ?? (decodeDds(vfs.read(path)) as Img);
-        sourceCache.set(path, src);
+        const src = packSources.get(path) ?? (decodeDds(pv.read(path)) as Img);
+        packSources.set(path, src);
         materials++;
         if (!written || written.width !== src.width) {
           bad.push(`${m.name} (size)`);

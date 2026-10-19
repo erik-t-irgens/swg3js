@@ -291,6 +291,21 @@ const WORLDS: Record<string, { noBox: number; noBoxSlack: number; doorway: numbe
   tatooine: { noBox: 18, noBoxSlack: 3, doorway: 11 },
   naboo: { noBox: 4, noBoxSlack: 2, doorway: 3 },
 };
+/**
+ * The same for a world converted with SOE's final names list in the mount (its manifest's own `late` stamp says so),
+ * measured on SOE complete's pilot conversion: Tatooine's late buildout leaves 22 things in no room box.
+ */
+const WORLDS_LATE: Record<string, { noBox: number; noBoxSlack: number; doorway: number }> = {
+  tatooine: { noBox: 22, noBoxSlack: 3, doorway: 11 },
+};
+const lateWorld = (planet: string): boolean => {
+  try {
+    const s = JSON.parse(readFileSync(`assets-private/${planet}/manifest.json`, 'utf8')).late?.state;
+    return s === 'applied' || s === 'final';
+  } catch {
+    return false;
+  }
+};
 
 let realRuns = 0;
 for (const planet of ['tatooine', 'naboo']) {
@@ -305,7 +320,7 @@ for (const planet of ['tatooine', 'naboo']) {
   const ms = performance.now() - t0;
   console.log(`     ${planet}: ${JSON.stringify(h.stats)} in ${ms.toFixed(0)} ms`);
   ok(h.stats.twoHosts === 0 && h.stats.hosted > 0, `${planet}: of ${h.stats.contained} things placed in rooms, ${h.stats.hosted} have a host and not one is held by the rooms of two buildings`);
-  const whole = WORLDS[planet];
+  const whole = (lateWorld(planet) && WORLDS_LATE[planet]) || WORLDS[planet];
   if (whole) ok(Math.abs(h.stats.noBox - whole.noBox) <= whole.noBoxSlack && Math.abs(h.stats.doorway - whole.doorway) <= 1 && h.stats.hosted + h.stats.noBox === h.stats.contained, `${planet}: hosting's own answer is ${h.stats.noBox} in no room box and ${h.stats.doorway} in a doorway to the world, against ${whole.noBox} and ${whole.doorway} measured`);
   // Every hosted object's rooms hold the room box that holds its origin (grown by the pad), the one that holds
   // its middle, and every one (grown by the pad) that holds a corner of its own box turned and placed: a piece

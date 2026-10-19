@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { OFF_HAND_CLASSES, TINT_LEAST, chooseArrangement, cleanTint, collapseOwned, countOf, firstItems, fitFor, garmentMeshesOf, heldThingsOf, lookWithoutGarments, migrateInventory, mintThing, moveTints, normalizeOwned, occupancy, outfitTints, packPartOf, pairOwned, partToItemId, pickedTint, planHold, pruneHeld, pruneThings, resolveKit, sameTint, slotWords, speciesWords, thingOf, tintFromValues, tintValues, wornThingOf, type Fit, type HeldRef, type OwnedItem, type TintVariable } from '../../../src/core/inventory.ts';
 import { itemInfo, itemSwatch, wardrobeIndex, type ItemContext } from '../../../src/player/items.ts';
+import { isHairKey as hairKey } from '../../../src/core/inventory.ts';
 import { characterMark } from '../../../src/net/session.ts';
 
 let checks = 0;
@@ -687,5 +688,8 @@ const HOLD_BOTH = [['hold_r', 'hold_l']];
   ok(info.name === 'Grapple rig' && !info.missing && info.fit === 'ok' && info.glyph === 'ic-grapple' && info.icon === null && info.slots === null, `the rig has our own name and words, fits every species, takes no slot and shows our glyph (${info.name}: ${info.description})`);
   ok(itemInfo('gear', 'a_rig_nobody_made', ctx).missing, 'and gear this build does not know is missing, shown and destroyable');
 }
+
+// The Sullustan beards SOE's last publishes add (`sul_beard_s01_m` to `s12_m`) are hair, never a thing owned.
+ok(hairKey('sul_beard_s01_m') && hairKey('sul_beard_s12_m') && hairKey('sul_hair_s01_f') && !hairKey('beard_s01') && !hairKey('sul_bearded_robe_s01'), "a Sullustan beard is hair, as the Sullustan's styles are, and nothing else that merely says beard is");
 
 console.log(`${checks} checks passed`);

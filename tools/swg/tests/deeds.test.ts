@@ -11,9 +11,9 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { footprintEntry, footprintFaults, footprintPatch, footprintSize, readFootprint } from '../sfp.mjs';
-import { deedCounts, joinDeeds, wordsFrom } from '../deeds.mjs';
+import { OUR_DEEDS, deedCounts, joinDeeds, ourDeeds, wordsFrom } from '../deeds.mjs';
 import { patchOfFootprint } from '../../../src/world/housePlace.ts';
-import { deedOfModel, wrongWorld, type DeedRow } from '../../../src/world/deeds.ts';
+import { DEED_PACK_VERSION, deedLine, deedOfModel, wrongWorld, type DeedRow } from '../../../src/world/deeds.ts';
 import { PLANETS } from '../../../src/data/planets.ts';
 import { W, chunk, encode, form } from './iffWriter.ts';
 
@@ -26,6 +26,12 @@ function ok(cond: boolean, what: string): void {
 function note(what: string): void {
   console.log(`note ${what}`);
 }
+/**
+ * The walk-in models the gallery carries that no deed row makes, Core3's or ours (measured on the pilot conversion
+ * of SOE complete's first wave, SOE's final names list applied): the sandcrawler house, the shared and player-city
+ * merchant tents (Core3's three merchant tent deeds make the planets' own) and the three image designer tents.
+ */
+const HOUSES_WITHOUT_A_DEED = new Set<string>(['ply_all_sandcrawler_house', 'ply_all_merchant_tent_s01', 'ply_pgc_merchant_tent_s01', 'ply_corl_idesigner_tent_s01', 'ply_nboo_idesigner_tent_s01', 'ply_tato_idesigner_tent_s01']);
 
 /** A footprint file built by hand, so the reader is checked against bytes we chose. */
 function makeSfp(width: number, height: number, pivotX: number, pivotZ: number, cw: number, ch: number, rows: string[]): Uint8Array {
@@ -141,6 +147,45 @@ function makeSfp(width: number, height: number, pivotX: number, pivotZ: number, 
   ok(wordsFrom('corellia_house_small_deed') === 'Corellia House Small', 'words out of a key drop the deed and capitalise');
 }
 
+// ---------------------------------------------------------------- the deeds of ours
+{
+  // Every client house deed Core3 never knew, paired by the templates' own names: one row a building, the first listed
+  // deed winning, none for a building Core3 already makes or a deed the archives have not got.
+  const [d0, b0] = OUR_DEEDS[0];
+  const huts = OUR_DEEDS.filter(([, b]) => b === 'shared_player_house_wod_ns_hut.iff');
+  ok(OUR_DEEDS.length === 30 && new Set(OUR_DEEDS.map(([, b]) => b)).size === 28 && huts.length === 2, `the table is 30 deed templates over 28 buildings, the hut deeds two each (${OUR_DEEDS.length}, ${new Set(OUR_DEEDS.map(([, b]) => b)).size})`);
+  const held = new Set(OUR_DEEDS.map(([d]) => d));
+  const buildingOf = (file: string) => `object/building/player/${file}`;
+  // Core3 names the building its deed makes by the server's template, with no `shared_` (`generatedObjectTemplate`).
+  const serverPath = buildingOf(OUR_DEEDS[1][1]).replace('/shared_', '/');
+  const rows = ourDeeds({ has: (p: string) => held.has(p), buildingOf, known: new Set([serverPath]) });
+  ok(rows.length === 27 && rows.every((r) => r.ours) && new Set(rows.map((r) => r.makes)).size === rows.length && !rows.some((r) => r.makes === buildingOf(OUR_DEEDS[1][1])), `one row a building, every one marked ours, a building Core3 already makes (named by its server template, ${serverPath}) left out (27 of 28)`);
+  ok(rows.some((r) => r.template === huts[0][0]) && !rows.some((r) => r.template === huts[1][0]), 'where two deeds make one building, the first listed is the row');
+  ok(ourDeeds({ has: (p: string) => p !== d0, buildingOf, known: new Set() }).every((r) => r.makes !== buildingOf(b0)), 'a deed the archives have not got stands nothing');
+  const sfp = makeSfp(2, 2, 0, 0, 4, 4, ['FF', 'FF']);
+  const joined = joinDeeds(rows.slice(0, 1), new Map([[rows[0].makes, { lots: 9, upkeep: 99, zones: ['naboo'] }]]), {
+    has: () => true,
+    read: () => sfp,
+    templateString: (t: string, names: string[]) => (names[0] === 'portalLayoutFilename' && t === rows[0].makes ? 'appearance/ply_test_house.pob' : names[0] === 'structureFootprintFileName' ? 'footprint/test.sfp' : null),
+    name: (t: string) => (t === rows[0].makes ? 'TEST House' : null),
+    desc: () => '',
+    hasModel: () => true,
+  });
+  const o = joined.rows[0];
+  ok(o.ours === true && o.lots === 0 && o.upkeep === 0 && o.zones.length === 0, "a deed of ours carries no lots, no upkeep and every world, whatever is said of its building");
+  ok(o.name === 'TEST House' && o.named && o.model === 'ply_test_house' && o.foot?.w === 2, "and takes its building's name where its own has none, its model and footprint from the building");
+  const core3Row = joinDeeds([{ key: 'k', template: 'object/tangible/deed/shared_c.iff', makes: 'object/building/player/c.iff', id: 'c_deed' }], new Map(), { has: () => false, read: () => sfp, templateString: () => null, name: () => null, desc: () => '', hasModel: () => false }).rows[0];
+  ok(!('ours' in core3Row), "a Core3 deed is written as it always was, with no `ours`");
+  // The pack stays version 1: `ours` is a field an older reader passes over, so a build before this one still reads it.
+  const cli = readFileSync(new URL('../cli.mjs', import.meta.url), 'utf8');
+  ok(/const DEED_PACK_VERSION = 1;/.test(cli) && DEED_PACK_VERSION === 1, 'the deeds pack is version 1 on both sides');
+  // What the Housing tab says under a deed of ours, and under any other exactly as before.
+  const foot = { w: 2, h: 2, px: 0, pz: 0, cw: 8, ch: 8, rows: ['FF', 'FF'] };
+  const base: DeedRow = { id: 'd', name: 'd', named: true, desc: '', makes: '', model: 'ply_house', layout: null, lots: 2, upkeep: 15, zones: [], foot, patch: null };
+  ok(deedLine({ ...base, ours: true, lots: 0, upkeep: 0 }) === '16 by 16 m · lots and upkeep: not known (ours)', 'a deed of ours says its lots and upkeep are not known');
+  ok(deedLine(base) === '16 by 16 m · 2 lots · 15 a day' && deedLine({ ...base, lots: 0, upkeep: 0 }) === '16 by 16 m · no lots · 0 a day', 'and any other deed reads as it always did');
+}
+
 // ---------------------------------------------------------------- the real archives
 
 {
@@ -167,6 +212,19 @@ function makeSfp(width: number, height: number, pivotX: number, pivotZ: number, 
     note(`the biggest is ${worst.id} at ${Math.round(worst.area)} square metres`);
     const houses = placeable.filter((r) => /house/.test(r.id));
     note(`${houses.length} of them are houses, from ${Math.min(...houses.map((h) => h.lots))} to ${Math.max(...houses.map((h) => h.lots))} lots`);
+    // Every walk-in house the gallery carries is some deed's model, Core3's or ours, or a named exception -- held only
+    // on a pack written with the deeds of ours (from SOE complete's first wave), which a pack from before has not got.
+    const gallery = join('assets-private', 'gallery', 'manifest.json');
+    const ours = (d.deeds as { ours?: boolean }[]).filter((r) => r.ours).length;
+    if (!ours) note('the deeds pack carries no deeds of ours (converted before them): the gallery\'s houses are not held to it');
+    else if (!existsSync(gallery)) note('no gallery here: its houses are not held to the deeds');
+    else {
+      const models = (JSON.parse(readFileSync(gallery, 'utf8')).categories?.layout ?? []) as { id: string; cells?: unknown[] }[];
+      const made = new Set(d.deeds.map((r) => r.model).filter(Boolean));
+      const walkIn = models.filter((m) => /^ply_/.test(m.id) && (m.cells?.length ?? 0) > 1 && !/construction/.test(m.id));
+      const lacking = walkIn.filter((m) => !made.has(m.id) && !HOUSES_WITHOUT_A_DEED.has(m.id)).map((m) => m.id);
+      ok(!lacking.length, `every walk-in house the gallery carries is a deed's model, Core3's or one of the ${ours} of ours, or a named exception (${walkIn.length}${lacking.length ? `; lacking ${lacking.join(', ')}` : ''})`);
+    }
   }
 }
 

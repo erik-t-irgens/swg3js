@@ -35,7 +35,7 @@ import { decodePng } from '../png.mjs';
 import { shaderTextures } from '../sht.mjs';
 import { decodeTga } from '../tga.mjs';
 import { COLOR_RAMPS, GROUND_CLOUDS, GROUND_MASKS, REFERENCE_STEP, TERRAIN_SHADERS_VERSION, alphaAsGrey, downscaleRgba, groundShaderPath, groundStatus, primaryChild, writeColorRamps, writeGroundTextures, writeTerrainBitmaps } from '../terrainShaders.mjs';
-import { mountRetail, PACKS, type Img, type Vfs } from './materialsHarness.ts';
+import { mountForLate, mountRetail, PACKS, type Img, type Vfs } from './materialsHarness.ts';
 import { RandomGenerator } from '../../../src/swg/terrain/fractal.ts';
 import { rampFromArchives } from './terrainHarness.ts';
 
@@ -376,8 +376,11 @@ else {
     const file = join(dir, 'terrain/shaders.json');
     if (!existsSync(file) || !existsSync(join(dir, 'terrain.trn'))) continue;
     let version = 0;
+    let late = null;
     try {
-      version = JSON.parse(readFileSync(file, 'utf8')).version ?? 1;
+      const j = JSON.parse(readFileSync(file, 'utf8'));
+      version = j.version ?? 1;
+      late = j.late ?? null;
     } catch {
       /* read as old below */
     }
@@ -385,7 +388,13 @@ else {
       note(`${world} under ${PACKS} is terrain shaders version ${version}, older than ${TERRAIN_SHADERS_VERSION}: not read here (status asks for the terrain again)`);
       continue;
     }
-    checkGround(`${world} (on disk)`, dir, vfs, planetOf(new Uint8Array(readFileSync(join(dir, 'terrain.trn'))), dir, vfs), packTally);
+    // Held to the archives as these pictures were written from them: before or after SOE's final names list.
+    const mount = await mountForLate(late, vfs);
+    if (!mount.vfs) {
+      note(`${world} under ${PACKS} is not read here: ${mount.why}`);
+      continue;
+    }
+    checkGround(`${world} (on disk)`, dir, mount.vfs, planetOf(new Uint8Array(readFileSync(join(dir, 'terrain.trn'))), dir, mount.vfs), packTally);
     checked++;
   }
   if (checked) ok(packTally.off.length === 0, `the ${checked} worlds on disk carry the archives' own pictures, ${packTally.pictures} children's colours texel for texel${packTally.off.length ? `; not: ${packTally.off.slice(0, 5).join('; ')}` : ''}`);

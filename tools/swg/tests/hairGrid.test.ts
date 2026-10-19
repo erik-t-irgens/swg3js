@@ -239,9 +239,19 @@ if (!existsSync(tableFile) || !existsSync(indexFile)) {
   }
   note(`grids: ${counts.join('; ')}`);
   ok(checked >= 18, `every species with a wardrobe was laid out (${checked})`);
+  // SOE's final names list (the table's own `late` stamp says it was in the mount) brings SOE's final creator table,
+  // measured on SOE complete's pilot conversion: one of the Trandoshan female's four untabled styles is a row of it,
+  // the Bothan male has a second style no row names, the Sullustans have rows of their own (19 a woman's, 39 a man's
+  // with his twelve beards), the Wookiees twelve styles each, and the human wardrobe five styles no row names.
+  const lateState = (table as { late?: { state?: string } }).late?.state;
+  const late = lateState === 'applied' || lateState === 'final';
   {
     const g = gridOf('human_female')!;
-    ok(g.groups.map((x) => x.id).join() === 'own,other' && g.groups[0].cells[0].id === NO_HAIR, "a human female: her styles with no hair leading, then the men's");
+    // With SOE's final names list the human wardrobe also carries five styles no row of the table names, which come
+    // after the men's in a group of their own; before it, there is no such group.
+    const shape = g.groups.map((x) => x.id).join();
+    ok(shape === (late ? 'own,other,untabled' : 'own,other') && g.groups[0].cells[0].id === NO_HAIR, `a human female: her styles with no hair leading, then the men's${late ? ', then the five no row names' : ''} (${g.groups.map((x) => `${x.id} ${x.cells.length}`).join(', ')})`);
+    if (late) ok(g.groups[2].cells.length === 5, `and those are five (${g.groups[2]?.cells.length})`);
     ok(!g.groups[0].cells.some((c) => c.id === 'hair_human_female_s33'), 'the style the archives lack is not offered');
     ok(g.groups[1].cells.length === table.species.human_male.hair!.filter((h) => h.inArchives).length, "and every one of the men's");
   }
@@ -252,14 +262,18 @@ if (!existsSync(tableFile) || !existsSync(indexFile)) {
     ok(!!first && first === table.species[id].hair!.find((h) => h.creation && h.inArchives)!.id, `and a new one starts in the table's first creation style (${first})`);
   }
   ok(defaultHair(table, wardrobe('human_male').items, 'human', 'male') === null, 'a new human starts in none');
-  ok(gridOf('trandoshan_female')!.groups.find((x) => x.id === 'untabled')?.cells.length === 4, "the Trandoshan female's four styles no row names stand apart");
-  ok(ids(gridOf('bothan_male')!.groups.find((x) => x.id === 'untabled')?.cells ?? []) === 'hair_bothan_male_s12', "and the Bothan male's one");
-  for (const [id, end] of [['sullustan_female', '_f'], ['sullustan_male', '_m']] as const) {
+  ok(gridOf('trandoshan_female')!.groups.find((x) => x.id === 'untabled')?.cells.length === (late ? 3 : 4), `the Trandoshan female's ${late ? 'three' : 'four'} styles no row names stand apart`);
+  ok(ids(gridOf('bothan_male')!.groups.find((x) => x.id === 'untabled')?.cells ?? []) === (late ? 'hair_bothan_male_s12,hair_bothan_male_s26' : 'hair_bothan_male_s12'), `and the Bothan male's ${late ? 'two' : 'one'}`);
+  for (const [id, end, count] of [['sullustan_female', '_f', 19], ['sullustan_male', '_m', 39]] as const) {
     const g = gridOf(id)!;
     const styles = g.groups.flatMap((x) => x.cells).filter((c) => c.id !== NO_HAIR);
-    ok(g.groups.map((x) => x.id).join() === 'untabled' && styles.length === 18 && styles.every((c) => c.id.endsWith(end)), `${id}: eighteen styles, all ${end}, under "Not in the game's creator"`);
+    if (late) {
+      const own = (g.groups.find((x) => x.id === 'own')?.cells ?? []).filter((c) => c.id !== NO_HAIR);
+      ok(g.groups.map((x) => x.id).join() === 'own,other' && own.length === count && own.every((c) => c.id.endsWith(end)), `${id}: the table's own ${count} styles, all ${end}, then the other gender's`);
+    } else ok(g.groups.map((x) => x.id).join() === 'untabled' && styles.length === 18 && styles.every((c) => c.id.endsWith(end)), `${id}: eighteen styles, all ${end}, under "Not in the game's creator"`);
   }
-  for (const id of ['ithorian_female', 'moncal_male', 'wookiee_female']) ok((gridOf(id)?.groups.length ?? 0) === 0, `${id} has no styles, so no grid`);
+  for (const id of ['ithorian_female', 'moncal_male', ...(late ? [] : ['wookiee_female'])]) ok((gridOf(id)?.groups.length ?? 0) === 0, `${id} has no styles, so no grid`);
+  if (late) ok(gridOf('wookiee_female')!.groups.find((x) => x.id === 'own')?.cells.filter((c) => c.id !== NO_HAIR).length === 12, 'a Wookiee woman has her twelve styles from the table');
 
   // The colour carried, through the game's own customizer: a human male's first style coloured, his
   // fourth loaded beside it, and the keys the grid's carry writes are the ones the fourth's recipe reads.

@@ -39,13 +39,32 @@ export const PROP_ROOTS = /^object\/(tangible|static|installation)\//;
  * nothing anybody places by hand. Measured, they are 115 models and **226 MB of the pack's 1,138**,
  * which is a fifth of it for nothing that is not already converted twice over.
  */
-export const PROP_NOT = /^object\/(tangible|static)\/space\/|^object\/(tangible\/(wearables|armor|weapon|component|ship|deed|schematic|loot\/creature|hair|tcg)|draft_schematic)\//;
+export const PROP_NOT = /^object\/(tangible|static)\/space\/|^object\/(tangible\/(wearables|armor|weapon|component|ship|deed|schematic|loot\/creature|hair)|draft_schematic)\//;
 
-/** Whether a template path is a prop this pack should carry. */
-export function isProp(template) {
+/**
+ * The trading-card decorations are SOE's own retail props (the owner's default, the design's D16): `tcg/` left the
+ * refused folders, which carried no reason for it. What of it is not a prop stays out [ours]: a template whose name
+ * says it is a deed of some kind or an instant travel terminal (`PROP_TCG_NOT`), and one drawn as a datapad
+ * (`PROP_TCG_DATAPAD`, the look every card's deed and voucher wears).
+ */
+export const PROP_TCG = /^object\/tangible\/tcg\//;
+export const PROP_TCG_NOT = /structure_deed_|vehicle_deed_|deed_|instant_travel_terminal_/;
+export const PROP_TCG_DATAPAD = /datapad/;
+
+/**
+ * Whether a template path is a prop this pack should carry. `appearanceOf(template)`, when given, names a
+ * trading-card template's appearance, so one drawn as a datapad is left out.
+ */
+export function isProp(template, appearanceOf = null) {
   const t = String(template ?? '').toLowerCase().replace(/\\/g, '/');
   if (!/shared_[^/]+\.iff$/.test(t)) return false;
-  return PROP_ROOTS.test(t) && !PROP_NOT.test(t);
+  if (!PROP_ROOTS.test(t) || PROP_NOT.test(t)) return false;
+  if (PROP_TCG.test(t)) {
+    if (PROP_TCG_NOT.test(t.split('/').pop())) return false;
+    const app = appearanceOf?.(template);
+    if (app && PROP_TCG_DATAPAD.test(String(app).toLowerCase())) return false;
+  }
+  return true;
 }
 
 /**
@@ -80,7 +99,7 @@ export function propSize(bounds) {
  *
  * `deps.convert(template)` answers `{ model, file, bounds, icon }` or `{ skip }`; it is the caller's,
  * so this file opens no archive. `deps.describe(template, id)` is the backpack's own name,
- * description and slots reader.
+ * description and slots reader; `deps.appearanceOf(template)` a template's appearance, for `isProp`.
  */
 export function buildProps(templates, deps, { log = () => {}, limit = Infinity } = {}) {
   const props = [];
@@ -89,7 +108,7 @@ export function buildProps(templates, deps, { log = () => {}, limit = Infinity }
   const groups = new Map();
   let n = 0;
   for (const template of templates) {
-    if (!isProp(template)) continue;
+    if (!isProp(template, deps.appearanceOf ?? null)) continue;
     if (n >= limit) break;
     n++;
     const r = deps.convert(template);

@@ -202,9 +202,10 @@ export function cameraEffectStrength(path) {
  * Write the planet's sky data into the pack. `textureFor(shaderPath)` resolves a shader to
  * its main texture ({ png, alphaMode, hasAlpha }) the way meshes get theirs. `particleFor(prtPath)`
  * converts a row's camera effect into the pack and returns { file } or { failed }; without it the
- * rows still name their effect but no file is written.
+ * rows still name their effect but no file is written. `late` is the late stamp the caller's mount gives
+ * (finalnames.mjs `lateStampOf`), written as it is.
  */
-export function exportSky(vfs, planet, outDir, { textureFor, particleFor = null, log = console.error, space = null }) {
+export function exportSky(vfs, planet, outDir, { textureFor, particleFor = null, log = console.error, space = null, late = null }) {
   const envPath = `terrain/environment/${planet}.iff`;
   const tablePath = `datatables/environment/${planet}.iff`;
   // A space zone's sky can stand on its terrain file alone (Kashyyyk's system has no environment file of its own).
@@ -407,6 +408,7 @@ export function exportSky(vfs, planet, outDir, { textureFor, particleFor = null,
       effects: Object.fromEntries(Object.entries(FORCE_EFFECTS).map(([kind, list]) => [kind, list.map((p) => (vfs.has(p) ? effect(p)?.file ?? null : null))])),
     };
   }
+  if (late) sky.late = late;
   writeFileSync(join(outDir, 'sky.json'), JSON.stringify(sky));
   const cameraEffects = new Set(sky.blocks.map((b) => b.cameraEffect?.source).filter(Boolean));
   const effectKinds = [...new Set(sky.blocks.map((b) => b.cameraEffect?.kind).filter(Boolean))];

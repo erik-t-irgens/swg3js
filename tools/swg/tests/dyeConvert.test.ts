@@ -47,7 +47,7 @@ type Item = { id: string; kind: string; parts: { name: string; file: string }[];
     const hair = { id: 'hair_x', kind: 'hair', parts: [{ name: 'hair_m_l0', file: 'hair_m_l0.glb' }], slots: [['hair']], name: 'hair', icon: 'icons/hair_x.png', colour: 'palette' };
     const write = (w: object) => writeFileSync(join(folder, 'wardrobe.json'), JSON.stringify({ species: 'human_male', gender: 'm', materialFormat: MATERIAL_FORMAT, ...w }));
     const reasons = (): string => {
-      const run = spawnSync(process.execPath, [cli, 'status', dir], { encoding: 'utf8', maxBuffer: 16 * 1048576 });
+      const run = spawnSync(process.execPath, [cli, 'status', dir], { encoding: 'utf8', maxBuffer: 16 * 1048576, env: { ...process.env, SWG: '' } });
       const out = run.stdout ?? '';
       const at = out.indexOf('swg -- wardrobe ');
       return at < 0 ? '' : out.slice(at, out.indexOf('\n', out.indexOf('\n', at) + 1));
@@ -105,6 +105,18 @@ const WHOLE: Record<string, { items: number; back: number; dyed: number; named: 
   ithorian_male: { items: 500, back: 22, dyed: 79, named: ['robe_jedi_dark_s01'], glowing: 2 },
   ithorian_female: { items: 500, back: 22, dyed: 78, named: ['robe_jedi_dark_s01'], glowing: 2 },
 };
+/**
+ * The same, for a folder converted with SOE's final names list in the mount (its own `late` stamp says so), measured
+ * on SOE complete's pilot conversion: the re-issued pieces bring more palettes laid on after the first pass and more
+ * glowing bakes, and four human pieces (one Ithorian) that took no colour before now take the game's own, so take
+ * no dye of ours.
+ */
+const WHOLE_LATE: Record<string, { back: number; dyed: number; glowing: number }> = {
+  human_male: { back: 95, dyed: 226, glowing: 4 },
+  human_female: { back: 95, dyed: 226, glowing: 4 },
+  ithorian_male: { back: 48, dyed: 78, glowing: 5 },
+  ithorian_female: { back: 48, dyed: 78, glowing: 5 },
+};
 
 for (const folder of folders) {
   const dir = join(wardrobeRoot, folder);
@@ -117,7 +129,8 @@ for (const folder of folders) {
     continue;
   }
   if (!dyed) note(`wardrobe/${folder} was converted with --no-dye, so its dye is not read here; everything else is`);
-  const want = WHOLE[folder];
+  const lateState = (wardrobe as { late?: { state?: string } }).late?.state;
+  const want = WHOLE[folder] && (lateState === 'applied' || lateState === 'final') && WHOLE_LATE[folder] ? { ...WHOLE[folder], ...WHOLE_LATE[folder] } : WHOLE[folder];
   const whole = !!want && wardrobe.items.length >= want.items;
   const cz = JSON.parse(readFileSync(join(dir, 'customize.json'), 'utf8')) as { recipes: Recipe[]; palettes: Record<string, number[][]>; dye?: { variable: string; palette: string } };
   const decoded = new Map<string, Img | null>();
@@ -297,11 +310,13 @@ for (const folder of folders) {
         bad.push(`${h.id} (none)`);
         continue;
       }
+      // The floor says only that something is drawn: the Wookiee dreadlocks SOE's final names list brings fill 4.7%
+      // of their picture, long and thin in a square frame, so it stands at 3%.
       let opaque = 0;
       for (let i = 3; i < pic.rgba.length; i += 4) if (pic.rgba[i] > 0) opaque++;
-      if (opaque < 0.05 * pic.width * pic.height) bad.push(`${h.id} (${((opaque / (pic.width * pic.height)) * 100).toFixed(1)}%)`);
+      if (opaque < 0.03 * pic.width * pic.height) bad.push(`${h.id} (${((opaque / (pic.width * pic.height)) * 100).toFixed(1)}%)`);
     }
-    ok(bad.length === 0, `wardrobe/${folder}: each of its ${hair.length} hairstyles has a picture that decodes, at least 5% of it drawn${bad.length ? `; not: ${bad.slice(0, 4).join(', ')}` : ''}`);
+    ok(bad.length === 0, `wardrobe/${folder}: each of its ${hair.length} hairstyles has a picture that decodes, at least 3% of it drawn${bad.length ? `; not: ${bad.slice(0, 4).join(', ')}` : ''}`);
   }
 }
 

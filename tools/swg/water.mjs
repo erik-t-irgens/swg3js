@@ -431,8 +431,9 @@ export function waterPackNeedsHarm(water) {
  *
  * `harm` is the client's water values, read once a run by the caller and handed to every planet;
  * left out, this reads them itself, so a planet converted through the snapshot carries them too.
+ * `late` is the late stamp the caller's mount gives (finalnames.mjs `lateStampOf`), written as it is.
  */
-export function exportWater(vfs, planet, uses, template, outDir, { log = console.error, writeFile = writeFileSync, harm } = {}) {
+export function exportWater(vfs, planet, uses, template, outDir, { log = console.error, writeFile = writeFileSync, harm, late = null } = {}) {
   const notes = [];
   const written = new Map();
   const shaders = {};
@@ -443,7 +444,7 @@ export function exportWater(vfs, planet, uses, template, outDir, { log = console
     : null;
   const values = harm === undefined ? readWaterHarm(vfs, notes) : harm;
   if (!values) notes.push("the client's water value tables could not be read, so this pack carries no harm block");
-  const out = { version: 1, planet, global, harm: values ?? null, shaders, notes };
+  const out = { version: 1, planet, global, harm: values ?? null, shaders, notes, ...(late ? { late } : {}) };
   writeFile(join(outDir, 'water.json'), JSON.stringify(out, null, 1));
   const list = Object.values(shaders);
   const lava = list.filter((s) => s.kind === 'lava').length;

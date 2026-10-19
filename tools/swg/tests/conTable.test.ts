@@ -157,7 +157,7 @@ function testTable(rows = CON_LEVELS, edit?: (row: Record<string, number>, i: nu
   try {
     const cli = fileURLToPath(new URL('../cli.mjs', import.meta.url));
     const asks = (): boolean => {
-      const run = spawnSync(process.execPath, [cli, 'status', dir], { encoding: 'utf8', maxBuffer: 16 * 1048576 });
+      const run = spawnSync(process.execPath, [cli, 'status', dir], { encoding: 'utf8', maxBuffer: 16 * 1048576, env: { ...process.env, SWG: '' } });
       return /swg -- customization /.test(run.stdout ?? '');
     };
     ok(asks(), 'status itself asks for customization over a folder with nothing in it: the check stands outside the species gate');

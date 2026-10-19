@@ -54,6 +54,14 @@
 //                                                                  the centre defaults to the planet's starport (else its busiest spot);
 //                                                                  "all" converts every planet the game knows into <out-dir>/<planet>
 //   node tools/swg/cli.mjs stat <swg-dir> <file>                    which archive provides a file (after load order and deletions)
+//   node tools/swg/cli.mjs final-names <final-index-dir> <swg-dir> [--to=<file>]   the maintainer's, never asked by status: write SOE's final names
+//                                                                  list (manifests/final-names.json) from the folder holding SOE's own final
+//                                                                  sku0..3_client.toc (only those four are read) and the install's own indexes:
+//                                                                  names and places only, the owner's one exception to the hard rule (finalnames.mjs)
+//   node tools/swg/cli.mjs final-names --verify <swg-dir>           read every set row of the list back from an install, held to its length and SHA-1
+//   node tools/swg/cli.mjs final-names --inventory <out-dir> --to=<file>   every file under the packs with its size and time, for --rewritten
+//   node tools/swg/cli.mjs final-names --rewritten <out-dir> --since=<time> --before=<inventory>   every model, picture or buffer a run
+//                                                                  left unwritten in a stamped command's folder (exit 1), and what no JSON names
 //   node tools/swg/cli.mjs why <swg-dir> <planet> <pattern>         why snapshot objects matching a name do or do not convert
 //   node tools/swg/cli.mjs pob <swg-dir> <file.pob>                 print a portal building's cells, portals, links and each cell's walkable floor (diagnostic)
 //
@@ -210,7 +218,7 @@ import { bakeShader, describeShader, describeVariables, loadImage, loadShader, p
 import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
 import { DYE_FORMAT, DYE_PALETTE, DYE_PALETTE_COLOURS, DYE_TUNE, EXTRA_GARMENT_PALETTES, colourOf, dyeBlock, dyeMesh, dyeSkip, readsVariable, wardrobeColourStatus } from './dye.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
-import { GLASS_WORDS, MATERIAL_FORMAT, describeLines, describeSurface, isPlainCutOut, maskOf, materialStale, shineLine, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceReaders, surfaceTexture } from './surface.mjs';
+import { GLASS_WORDS, MATERIAL_FORMAT, describeLines, describeSurface, isPlainCutOut, maskOf, shineLine, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceReaders, surfaceTexture } from './surface.mjs';
 import { bleedCard } from './cardBleed.mjs';
 import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
@@ -282,7 +290,13 @@ const FITTINGS_PACK_VERSION = 1;
 // The ground's textures and what goes with them are terrainShaders.mjs's (TERRAIN_SHADERS_VERSION there).
 /** The shape of music/music.json. A pack written by an older run is asked for again. */
 const MUSIC_PACK_VERSION = 1;
-import { openTre, openVfs, readHeader } from './tre.mjs';
+import { archiveRank, openTre, openVfs, readHeader } from './tre.mjs';
+import { openToc, tocRank } from './toc.mjs';
+import {
+  FINAL_NAMES_HELD, FINAL_NAMES_URL, LATE_STAMPED, LATE_STAMP_VERSION, finalNamesKey, finalNamesList, gridLayoutStale, inventoryOf, keptStale, lateAsk, lateMountLine, lateStampOf, lateWorld, layoutKeyOf, probeInstall,
+  rewrittenCheck, verifyFinalNames, withLate,
+} from './finalnames.mjs';
+import { buildFinalNames, finalNamesText } from './finalnamesBuild.mjs';
 
 // A .env beside package.json names the folders once; @NAME anywhere in the arguments becomes that
 // variable's value (from .env or the environment), whichever shell is running.
@@ -323,7 +337,20 @@ function mount(dir) {
     filter: retailOnly ? (f) => isRetailByName(f, statSync(join(dir, f)).size) !== null : undefined,
   });
   console.error(`mounted ${vfs.summary}${retailOnly ? ' (retail only)' : ''}`);
+  // What SOE's final names list made of this install (finalnames.mjs): the conversion carries on whatever it says.
+  const late = lateMountLine(vfs.late);
+  if (late) console.error(late);
   return vfs;
+}
+
+/**
+ * The late stamp a command writes (finalnames.mjs): this mount's, or, for a run that keeps part of an older
+ * conversion (a match, a limit, an --only), the stamp the record it keeps carried, by the rule its material format
+ * already follows: what was kept stands for whatever world it was converted from, so the whole stands for no newer.
+ */
+function lateFor(vfs, command, { partial = false, old = null } = {}) {
+  if (!partial) return lateStampOf(vfs, command);
+  return old?.late ?? null;
 }
 
 const textureCache = new Map();
@@ -1234,7 +1261,7 @@ async function copyTerrain(vfs, planet, outDir) {
   // Each its own try, so the textures failing never costs the planet its colour ramps or the other way.
   if (planetTemplate) {
     try {
-      writeGroundTextures(vfs, planetTemplate, outDir);
+      writeGroundTextures(vfs, planetTemplate, outDir, { late: lateStampOf(vfs, 'terrain') });
     } catch (err) {
       console.warn(`ground textures not converted: ${err.message}`);
     }
@@ -1250,12 +1277,12 @@ async function copyTerrain(vfs, planet, outDir) {
   if (planetTemplate) {
     try {
       const { waterShaderUses } = await import('../../src/swg/terrain/trn.ts');
-      exportWater(vfs, planet, waterShaderUses(planetTemplate), planetTemplate, outDir);
+      exportWater(vfs, planet, waterShaderUses(planetTemplate), planetTemplate, outDir, { late: lateStampOf(vfs, 'water') });
     } catch (err) {
       console.warn(`water look not converted: ${err.message}`);
     }
   }
-  exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir) });
+  exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), late: lateStampOf(vfs, 'sky') });
   return 'terrain.trn';
 }
 
@@ -1315,7 +1342,7 @@ function convertFlora(vfs, template, outDir, manifest) {
   }
   manifest.categories.flora = [...defs.values()];
   manifest.cards = cards;
-  writeSharedCards(dirname(outDir), cards);
+  writeSharedCards(dirname(outDir), cards, lateStampOf(vfs, 'flora'));
   const kinds = Object.values(cards);
   console.log(`flora cards: ${kinds.length} card shaders, by the client's own pass ${kinds.filter((c) => c.blend).length} blended and ${kinds.filter((c) => !c.blend).length} cut out, ${kinds.filter((c) => c.emissive.some((v) => v > 0)).length} with an emissive; the pictures of the ${bled} the GLB draws as cut-outs bled`);
   // The shapes the client collided with, beside the manifest rather than in it (a mesh shape is a
@@ -1332,9 +1359,10 @@ const SHARED_CARDS_VERSION = 1;
  * folder that holds each world's pack): a world's placed trees can wear a shader only another world plants, and
  * the game reads this once a session so each is ruled whatever world was visited first. Merged into what is
  * there, so converting one world's flora keeps every other world's rows; the rows are each world's own `cards`,
- * the same entries for the same shader wherever it is converted.
+ * the same entries for the same shader wherever it is converted. It carries the late stamp of the run that wrote
+ * it last (`late`), which is the flora's stamp for `status`.
  */
-function writeSharedCards(root, cards) {
+function writeSharedCards(root, cards, late = null) {
   const file = join(root, 'flora-cards.json');
   let all = {};
   if (existsSync(file)) {
@@ -1347,7 +1375,7 @@ function writeSharedCards(root, cards) {
   }
   Object.assign(all, cards);
   const sorted = Object.fromEntries(Object.keys(all).sort().map((k) => [k, all[k]]));
-  writeFileSync(file, JSON.stringify({ version: SHARED_CARDS_VERSION, cards: sorted }));
+  writeFileSync(file, JSON.stringify({ version: SHARED_CARDS_VERSION, cards: sorted, ...(late ? { late } : {}) }));
   return Object.keys(sorted).length;
 }
 
@@ -1356,7 +1384,7 @@ function writeSharedCards(root, cards) {
  * It converts nothing: it reads each appearance's chain for the collision extent the client authored.
  */
 function writeFloraCollision(vfs, outDir, defs) {
-  const file = floraCollisionFile(vfs, defs.map((d) => d.appearance).filter(Boolean), { flipX: !flags.has('--no-flip') });
+  const file = withLate(floraCollisionFile(vfs, defs.map((d) => d.appearance).filter(Boolean), { flipX: !flags.has('--no-flip') }), vfs, 'floracollision');
   writeFileSync(join(outDir, 'flora-collision.json'), JSON.stringify(file));
   const c = file.counts;
   console.log(`flora collision: ${c.appearances} appearances (${Object.entries(c.byKind).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`).join(', ')}), ${Object.entries(c.shapes).map(([k, n]) => `${n} ${k}`).join(', ') || 'no shapes'}${c.unreadable ? `, ${c.unreadable} unreadable (guessed in the game)` : ''}${c.unreadParts ? `, ${c.unreadParts} parts of a kind not read` : ''}`);
@@ -1370,9 +1398,10 @@ function writeFloraCollision(vfs, outDir, defs) {
  */
 /**
  * A character as parts (body, head and each worn item as its own GLB against one shared skeleton)
- * under <outRoot>/characters/<id>/, keeping the Jedi Academy clips an old rig there carried.
+ * under <outRoot>/characters/<id>/, keeping the Jedi Academy clips an old rig there carried. `command` is the one
+ * whose late stamp parts.json carries (`parts` for the player's pack, `species` for each the species run writes).
  */
-function convertParts(vfs, outRoot, template, { wear = DEFAULT_WEAR, variables = new Map(), anim = undefined, maxAnims = undefined } = {}) {
+function convertParts(vfs, outRoot, template, { wear = DEFAULT_WEAR, variables = new Map(), anim = undefined, maxAnims = undefined, command = 'parts' } = {}) {
   const id = basename(template).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
   const outDir = join(outRoot, 'characters', id);
   const rigFile = join(outDir, 'rig.glb');
@@ -1416,6 +1445,8 @@ function convertParts(vfs, outRoot, template, { wear = DEFAULT_WEAR, variables =
     template,
     // The stamp a parts pack never had (`clips-apply` rewrites this file and keeps it).
     materialFormat: MATERIAL_FORMAT,
+    // And the late world it was converted from (finalnames.mjs), which `clips-apply` keeps the same way.
+    ...withLate({}, vfs, command),
     skeleton: info.skeleton,
     rig: info.rig,
     joints: info.joints,
@@ -1477,6 +1508,7 @@ function applyBundleToRig(rigFile, bundleFile) {
 function writeSpeciesIndex(outRoot) {
   const dir = join(outRoot, 'characters');
   const species = [];
+  const lateOfPack = new Map();
   if (existsSync(dir)) {
     for (const id of readdirSync(dir).sort()) {
       const file = join(dir, id, 'parts.json');
@@ -1487,6 +1519,7 @@ function writeSpeciesIndex(outRoot) {
       } catch {
         continue;
       }
+      lateOfPack.set(id, m.late ?? null);
       const gender = m.gender ?? (/female/i.test(id) ? 'female' : 'male');
       const wardrobeDir = [id, `human_${gender}`].find((w) => existsSync(join(outRoot, 'wardrobe', w, 'wardrobe.json')));
       species.push({
@@ -1507,6 +1540,10 @@ function writeSpeciesIndex(outRoot) {
   // The index's own stamp is its oldest pack's: it is written by `parts` as well as `species`, and a
   // run over one species must not make the rest read as new.
   const index = { materialFormat: species.length ? Math.min(...species.map((s) => s.materialFormat)) : MATERIAL_FORMAT, species };
+  // Its late stamp the same way: one every pack shares, else none, so a run over one species never makes the rest
+  // read as converted from SOE's final files.
+  const lates = species.map((s) => lateOfPack.get(s.id) ?? null);
+  if (lates.length && lates.every((l) => l && lateWorld(l) === lateWorld(lates[0]) && l.key === lates[0].key && l.v === lates[0].v)) index.late = lates[0];
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'index.json'), JSON.stringify(index, null, 2));
   return index;
@@ -2530,6 +2567,85 @@ function floraCardsCurrent(packDir, defs) {
   return null;
 }
 
+/** The clips a rig's manifest names (its clip list and its speeds), for a named product. */
+const clipNamesOf = (m) => [...(m?.clips ?? []), ...Object.keys(m?.clipSpeeds ?? {})];
+/** The dances only SOE's final body table names (`appearance/lat/all_m.lat`, re-issued in publish 58): the named product of a rig converted from it. */
+const LATE_DANCES = /(^|:)dance_3[3-6]$/;
+
+/**
+ * What `status` asks of SOE's final files (finalnames.mjs): one loop over every command that stamps what it writes,
+ * each file its own `if`, so nothing here can sit between another check's `if` and its `else if`. The install comes
+ * from `--swg`, else `SWG` from the environment or `.env`; with none named, the late layer asks nothing and the line
+ * says so. `player`, `parts`, `species` and `customization`, stamped `applied`, are held to a thing only SOE's final
+ * files make, since a stamp alone could be one a later command copied forward. Answers the report's line.
+ */
+function lateStatus(dir, readJson, need) {
+  const list = finalNamesList();
+  const swg = options.swg || process.env.SWG || '';
+  const probe = list.broken || !swg ? null : probeInstall(swg, list);
+  const current = (command) => ({ key: list.broken ? null : list.key, v: LATE_STAMP_VERSION[command] ?? 1 });
+  const at = (json, field) => (field ? field.split('.').reduce((v, k) => (v == null ? v : v[k]), json) : json);
+  const player = readJson(join(dir, 'player/manifest.json'))?.players?.[0] ?? null;
+  const species = (readJson(join(dir, 'characters/index.json'))?.species ?? []).map((s) => s.id);
+  const wardrobes = existsSync(join(dir, 'wardrobe')) ? readdirSync(join(dir, 'wardrobe')).filter((w) => w in M.WARDROBE_RUNS && existsSync(join(dir, 'wardrobe', w, 'wardrobe.json'))) : [];
+  const worlds = GAME_PLANETS.filter((p) => existsSync(join(dir, p, 'manifest.json')));
+  const counts = { files: 0, current: 0, refused: null };
+  for (const entry of LATE_STAMPED) {
+    // Every file the entry names on this disk, with what fills the ask's tokens for it.
+    const files = [];
+    for (const pattern of entry.files) {
+      const [path, field] = pattern.split('#');
+      const expand = path.includes('<world>') ? worlds.map((w) => [path.replace('<world>', w), w])
+        : path.includes('<zone>') ? Object.keys(SPACE_ZONES).map((z) => [path.replace('<zone>', z), z])
+        : path.includes('<wardrobe>') ? wardrobes.map((w) => [path.replace('<wardrobe>', w), w])
+        : path.includes('<species>') ? species.map((s) => [path.replace('<species>', s), s])
+        : path.includes('<player>') ? [[path.replace('<player>', player?.id ?? 'human_male'), null]]
+        : [[path, null]];
+      for (const [rel, what] of expand) {
+        const json = readJson(join(dir, rel));
+        if (!json) continue;
+        files.push({ rel, what, json, stamp: at(json, field)?.late ?? null, field });
+      }
+    }
+    const asks = new Map();
+    // The player and the sounds are steps a caller with Jedi Academy's folder adds it to (statusplan.mjs `TAKES_JKA`),
+    // so the ask names none and a machine without it is never held back by one.
+    const ask = (what, why, label) => {
+      const run = entry.command === 'wardrobe' ? M.WARDROBE_RUNS[what] ?? '' : '';
+      const command = entry.ask.replace('<out>', dir).replace('<run>', run);
+      const by = asks.get(command) ?? new Map();
+      by.set(why, (by.get(why) ?? []).concat(label));
+      asks.set(command, by);
+    };
+    for (const f of files) {
+      counts.files++;
+      const why = lateAsk(f.stamp, current(entry.command), probe);
+      if (why) ask(f.what, why, f.rel);
+      else if (f.stamp && lateWorld(f.stamp) !== 'publish54' && f.stamp.key === current(entry.command).key) counts.current++;
+      // A refusal the probe cannot see (its archives unmoved since) is what the line says, since the probe says serves.
+      else if (f.stamp?.state === 'refused' && f.stamp.key === current(entry.command).key && f.stamp.why) counts.refused ??= f.stamp.why;
+      // The named products, only while the stamp says SOE's final files were mounted.
+      if (f.stamp?.state !== 'applied') continue;
+      if (entry.command === 'player' && !clipNamesOf(f.json.players?.[0]).some((c) => LATE_DANCES.test(c))) ask(f.what, "its clips lack the dances only SOE's final body table names (dance_33 to dance_36)", f.rel);
+      if ((entry.command === 'parts' || entry.command === 'species') && f.rel.endsWith('parts.json') && !clipNamesOf(f.json).some((c) => LATE_DANCES.test(c))) ask(f.what, "its clips lack the dances only SOE's final body table names (dance_33 to dance_36)", f.rel);
+      if (entry.command === 'customization' && !(f.json.species?.wookiee_male?.hair?.length > 0)) ask(f.what, "it gives the Wookiees no hairstyles, which SOE's final table does", f.rel);
+    }
+    for (const [command, byWhy] of asks) {
+      for (const [why, labels] of byWhy) need(command, `${labels.length === 1 ? labels[0] : `${labels.length} files (${labels.slice(0, 3).join(', ')}${labels.length > 3 ? ', ...' : ''})`} ${labels.length === 1 ? 'was' : 'were'} ${why}`);
+    }
+  }
+  const n = (x) => x.toLocaleString('en-US');
+  if (list.broken) return `  SOE's final files: the names list cannot be used (${list.broken}); every pack is the publish 54 world`;
+  if (!swg) return "  SOE's final files: no SWG folder named (set SWG or pass --swg), so not checked";
+  if (probe.state === 'no') return `  SOE's final files: not mounted on this install: ${probe.why}; the world is publish 54's`;
+  const held = Object.keys(FINAL_NAMES_HELD).length;
+  // A folder with no stamped file in it has nothing mounted yet, whatever the two counts' equality says.
+  if (!counts.files) return `  SOE's final files: this install can mount them (names list ${n(list.rows.length)} rows, ${list.key}); no pack is converted here yet`;
+  if (counts.current === counts.files) return `  SOE's final files: mounted in every pack (${n(list.rows.length - held)} rows of names list ${list.key}${held ? `; ${held} held back: Life Day snow` : ''})${probe.state === 'final' ? " (this folder has SOE's own final indexes, so Tatooine and Talus carry Life Day's snow)" : ''}`;
+  if (!counts.current && counts.refused) return `  SOE's final files: not mounted on this install: ${counts.refused}; the world is publish 54's`;
+  return `  SOE's final files: this install can mount them (names list ${n(list.rows.length)} rows, ${list.key}); ${counts.current} of ${counts.files} packs carry them yet`;
+}
+
 function packStatus(dir) {
   // A file that is there but will not parse (a conversion stopped or a machine that lost power in
   // the middle of writing it) is taken as missing, so the step that writes it is asked for again,
@@ -2555,6 +2671,8 @@ function packStatus(dir) {
     todo.get(cmd).push(why);
   };
   console.log(`packs under ${dir}:`);
+  // SOE's final files first, which every stamped pack answers to (finalnames.mjs): one loop of `if`s of its own.
+  console.log(lateStatus(dir, readJson, need));
   let planets = 0;
   /** What the worlds' own counts say the reading of the programs could not do (`surfaceCounts` in each manifest). */
   const surfaceNotes = { worlds: 0, otherSets: 0, unread: 0, second: 0 };
@@ -2697,6 +2815,12 @@ function packStatus(dir) {
     // ones calls a courtyard over a cellar a building's floor and closes every lane narrower than six
     // metres, and routes perfectly happily round both.
     else if (navGrid && !(Number(navGrid.rules ?? 1) >= NAV_BAKE_RULES)) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid was baked by older rules: a courtyard over rooms under the ground is walled off as a floor, and lanes a body walks down are closed`);
+    // What the grid was baked from (`layoutKey`, finalnames.mjs `gridLayoutStale`): its own `if`, after the chain above.
+    // A grid that names a layout other than the pack's is baked again; one that names none is asked only beside a
+    // world converted with SOE's final files, so an install the names list cannot serve is never asked for its grids.
+    // `navgrid --skip-existing` asks the very same function, so a resumed bake keeps nothing this asks for.
+    const navStale = gridLayoutStale(navGrid, packDir, manifest);
+    if (navStale) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid ${navStale}`);
     // Its own `if`: exportWater always writes the file, so its existence is the whole test.
     if (terrain && !water) need(`water <swg-dir> all ${dir} --retail-only`, `${planet} has no water.json`);
     // A lava entry written before the lava look has no `lava` block: the game draws it in a stand-in look.
@@ -2748,7 +2872,7 @@ function packStatus(dir) {
     // Its terminals and shuttles are models it converts, which carried no material stamp before 6: asked for
     // with a reason of its own, since none of the others is true of such a world. A run converts them again
     // (`travelModelsToConvert` in travel.mjs) rather than keeping them because their files are there.
-    if (travel && materialStale(travel)) travelMaterials.push(planet);
+    if (travel && keptStale(travel, null, 'travel')) travelMaterials.push(planet);
     // The fires, sprays, flames and glows the objects' client data hangs on them (`objeffects`),
     // keyed by template: wanted again whenever what the table was built from is newer than it.
     if (objects && objEffectsStale(packDir, ['layout.json', 'fittings.json', 'travel.json'])) wantObjEffects = true;
@@ -3531,7 +3655,7 @@ function writePois(vfs, planet, snap, entries, cx, cz, outDir) {
   }
   const pois = result ? result.places : [];
   const s = result ? result.stats : null;
-  const file = { planet, center: { x: cx, z: cz }, clientPlaces: s ? s.archive : 0, ...(s && s.frame.rows ? { frameCheck: s.frame } : {}), pois };
+  const file = withLate({ planet, center: { x: cx, z: cz }, clientPlaces: s ? s.archive : 0, ...(s && s.frame.rows ? { frameCheck: s.frame } : {}), pois }, vfs, 'pois');
   writeFileSync(join(outDir, 'pois.json'), JSON.stringify(file));
   const counts = `${pois.length} (${pois.filter((p) => p.kind === 'place').length} the client's own named places, ${pois.filter((p) => p.kind === 'city' || p.kind === 'landmark' || p.kind === 'area').length} regions, ${pois.filter((p) => p.kind === 'starport' || p.kind === 'shuttleport').length} travel points)`;
   console.log(`points of interest: ${counts} -> ${join(outDir, 'pois.json')}`);
@@ -3727,6 +3851,9 @@ async function snapshotPlanet(vfs, planet, outDir) {
     // The `surfaces:` counts kept with the pack, so `status` can say what the reading of the programs could
     // not do (a normal map or a mask on a set the models do not carry, a program it could not read).
     manifest.surfaceCounts = surfaceCounts(surfaceUse);
+    // Which late world the layout and its models were converted from (finalnames.mjs), which `status` and the
+    // walk grid's ask read.
+    withLate(manifest, vfs, 'snapshot');
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}${flora.particles ? `, ${flora.particles} particle effects skipped` : ''}`);
     writePois(vfs, planet, snap, entries, cx, cz, outDir);
@@ -4216,9 +4343,12 @@ switch (cmd) {
       index[id] = { file: `${id}.png`, source: best.name, width: img.width, height: img.height };
       console.log(`  ${id.padEnd(10)} <- ${best.name} (${best.dds.width}x${best.dds.height}${hits.length > 1 ? `, of ${hits.length}` : ''})`);
     }
-    writeFileSync(join(outDir, 'index.json'), JSON.stringify(index, null, 2));
+    const pictured = Object.keys(index).length;
+    // Keyed by planet, and its late stamp beside them under `late`, which no planet is called: only `status` and the
+    // converter's driver read this file (the game asks for <planet>.png by name).
+    writeFileSync(join(outDir, 'index.json'), JSON.stringify(withLate(index, vfs, 'loading'), null, 2));
     const missing = planets.map(([id]) => id).filter((id) => !index[id]);
-    console.log(`-> ${outDir}: ${Object.keys(index).length} planets${missing.length ? `; none found for ${missing.join(', ')} (the game draws its own)` : ''}`);
+    console.log(`-> ${outDir}: ${pictured} planets${missing.length ? `; none found for ${missing.join(', ')} (the game draws its own)` : ''}`);
     break;
   }
   case 'texture': {
@@ -4362,8 +4492,11 @@ switch (cmd) {
     // Stamped, so `status` can tell creatures converted before a change to how a surface is read: they
     // carried none, and nothing would ever have asked for them again. A matched run keeps the rest of the
     // list as it was converted, so it keeps the stamp the list had.
-    const creaturesFormat = match ? Math.min(MATERIAL_FORMAT, (existsSync(join(outDir, 'manifest.json')) ? JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')).materialFormat : null) ?? 1) : MATERIAL_FORMAT;
-    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ materialFormat: creaturesFormat, creatures: list }, null, 2));
+    const oldCreatures = match && existsSync(join(outDir, 'manifest.json')) ? JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')) : null;
+    const creaturesFormat = match ? Math.min(MATERIAL_FORMAT, oldCreatures?.materialFormat ?? 1) : MATERIAL_FORMAT;
+    // And its late stamp the same way: a matched run keeps the one the list had (`lateFor`).
+    const creaturesLate = lateFor(vfs, 'creatures', { partial: !!match, old: oldCreatures });
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ materialFormat: creaturesFormat, ...(creaturesLate ? { late: creaturesLate } : {}), creatures: list }, null, 2));
     console.log(`creatures: ${list.length} (${list.filter((c) => c.mount).length} mounts) -> ${join(outDir, 'manifest.json')}`);
     printEffectSummary();
     break;
@@ -4375,7 +4508,9 @@ switch (cmd) {
     if (!pos[2]) usage();
     const vfs = mount(pos[1]);
     const outRoot = pos[2];
-    const source = M.sourceStampOf({ retailOnly: flags.has('--retail-only'), archives: vfs.archives.map((a) => [basename(a.path).toLowerCase(), statSync(a.path).size]) });
+    // SOE's final names list joins the key only when it applied, so every unit is made again from SOE's final files
+    // where it did and kept where it could not; its stamp rides in the catalogue's `options.source.late`.
+    const source = M.sourceStampOf({ retailOnly: flags.has('--retail-only'), archives: vfs.archives.map((a) => [basename(a.path).toLowerCase(), statSync(a.path).size]), late: lateStampOf(vfs, 'mobiles') });
     // Each mobile's health and damage from the emulator's own numbers: the Core3 reference kept in the
     // checkout (`core3ref.mjs`), a folder named outright with --core3=<dir>, or none with --core3=none.
     const c3 = core3SourceFor(options);
@@ -4491,7 +4626,7 @@ switch (cmd) {
     // `materialFormat`: the stamp `player`, `parts` and `species` never had, so that `status` can ask for
     // them again when what a surface carries changes (the clip-carrying commands that rewrite this entry
     // keep it, since they change only the fields they name).
-    const entry = { id, file: `player/${id}.glb`, template, materialFormat: MATERIAL_FORMAT, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, moods: info.moodsAsked === true,...(info.partialClips ? { partialClips: info.partialClips } : {}), ...(info.variants ? { variants: info.variants } : {}), bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
+    const entry = { id, file: `player/${id}.glb`, template, materialFormat: MATERIAL_FORMAT, ...withLate({}, vfs, 'player'), wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, moods: info.moodsAsked === true,...(info.partialClips ? { partialClips: info.partialClips } : {}), ...(info.variants ? { variants: info.variants } : {}), bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
     if (!info.jkaClips && existsSync(join(outDir, 'manifest.json'))) {
       const before = (JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')).players ?? []).find((e) => e.id === id);
       const had = Object.keys(before?.jkaClips ?? {}).length;
@@ -4722,7 +4857,10 @@ switch (cmd) {
     // running the wardrobe four times over and being asked for it again each time.
     // `dyeFormat` says the dye ran (dye.mjs, which `status` asks for again below it); `noDye` that it was left
     // out on purpose with --no-dye, which is the owner's choice and not asked for again.
-    writeFileSync(join(outDir, 'wardrobe.json'), JSON.stringify({ species: speciesId, gender, skeleton: baseSkeletonFile, materialFormat: MATERIAL_FORMAT, ...(dyeOn ? { dyeFormat: DYE_FORMAT } : { noDye: true }), items: catalogue }, null, 2));
+    // The late world it was converted from (finalnames.mjs): a run of part of the wardrobe writes none, since its
+    // file then lists only what it converted and the folder must be converted whole to stand for one world.
+    const wardrobeLate = lateFor(vfs, 'wardrobe', { partial: !!match || Number.isFinite(limit) || !['wearables', 'hair'].every((k) => kinds.includes(k)) });
+    writeFileSync(join(outDir, 'wardrobe.json'), JSON.stringify({ species: speciesId, gender, skeleton: baseSkeletonFile, materialFormat: MATERIAL_FORMAT, ...(wardrobeLate ? { late: wardrobeLate } : {}), ...(dyeOn ? { dyeFormat: DYE_FORMAT } : { noDye: true }), items: catalogue }, null, 2));
     if (recipes.length) {
       // The palettes the recipes name, and the three garment palettes no piece names, kept for a picker. Ours is
       // set after: `exportPalettes` writes `[]` for a palette the archives have not got, and an empty palette
@@ -4816,7 +4954,7 @@ switch (cmd) {
       const id = basename(template).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
       console.log(`\n${id} (${template})`);
       try {
-        const r = convertParts(vfs, pos[2], template, { wear, variables: customizationValues(options.var), anim: options.anim, maxAnims: options['max-anims'] });
+        const r = convertParts(vfs, pos[2], template, { wear, variables: customizationValues(options.var), anim: options.anim, maxAnims: options['max-anims'], command: 'species' });
         if (existsSync(bundle)) {
           const n = applyBundleToRig(join(r.outDir, 'rig.glb'), bundle);
           if (n) console.log(`   ${n} Jedi Academy clips applied from ${bundle}`);
@@ -4865,7 +5003,7 @@ switch (cmd) {
     const { file, counts } = built;
     const target = join(pos[2], ...CUSTOMIZATION_FILE.split('/'));
     mkdirSync(dirname(target), { recursive: true });
-    const text = JSON.stringify(file);
+    const text = JSON.stringify(withLate(file, vfs, 'customization'));
     writeFileSync(target, text);
     // And progress's challenge table beside it (tools/swg/conTable.mjs): one more small retail table, written
     // `rows: null` with the reason when the archives have not got it or it does not read as the table.
@@ -5211,7 +5349,7 @@ switch (cmd) {
       },
       { log: console.log },
     );
-    const manifest = { classes: WEAPON_CLASSES, weapons, skipped, saberColors, effects, powers, materialFormat: MATERIAL_FORMAT };
+    const manifest = withLate({ classes: WEAPON_CLASSES, weapons, skipped, saberColors, effects, powers, materialFormat: MATERIAL_FORMAT }, vfs, 'weapons');
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
     console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; I in game opens the rack, the Weapons tab); ${fxCache.size} weapon effect rows, ${particleCountFor(outDir)} particle effects; ${weapons.filter((w) => w.name).length} named, ${weapons.filter((w) => w.icon).length} with icons`);
     if (powers.skipped.length) console.log(`   the Force's files left out:\n${powers.skipped.map((s) => `     ${s.file}  (${s.why})`).join('\n')}`);
@@ -5702,7 +5840,9 @@ switch (cmd) {
     const match = options.match ? new RegExp(options.match, 'i') : null;
     const allTemplates = galleryTemplates(vfs, 'object/ship/player/');
     const templates = allTemplates.filter((t) => !match || match.test(t));
-    const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior, extrasOf, weaponOf }, { log: console.log, limit });
+    // With the chassis table read, a player template with no chassis row is a placeholder and is left out (ships.mjs).
+    const chassisOf = chassisRows.size ? (t) => chassisNameFor(t.replace(/^.*\/shared_/, '').replace(/\.iff$/, ''), (n) => chassisRows.has(n)) : undefined;
+    const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior, extrasOf, weaponOf, chassisOf }, { log: console.log, limit });
     // components.json: every component a slot can take (with its name and, for a gun, its bolt), and the
     // droids: the flight computers, and each astromech the mobiles pack holds, with the heads a hull draws
     // it as instead (the N-1's), converted here with the ships (so before the manifest's models are listed).
@@ -5749,7 +5889,7 @@ switch (cmd) {
       }
       paintMaker.write(list);
     }
-    const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed), materialFormat: MATERIAL_FORMAT, assembly: SHIP_ASSEMBLY_FORMAT, ...(components ? { fitFormat: SHIP_FIT_FORMAT } : {}) };
+    const manifest = withLate({ classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed), materialFormat: MATERIAL_FORMAT, assembly: SHIP_ASSEMBLY_FORMAT, ...(components ? { fitFormat: SHIP_FIT_FORMAT } : {}) }, vfs, 'ships');
     if (projectiles.length) writeFileSync(join(outDir, 'projectiles.json'), JSON.stringify({ projectiles, weapons }, null, 2));
     if (match) {
       // A matched run redoes some ships: the rest keep their place in the manifest.
@@ -5757,6 +5897,10 @@ switch (cmd) {
         const old = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8'));
         // The ships this run did not redo keep the material format they were converted with.
         manifest.materialFormat = old.materialFormat ?? 1;
+        // And the late stamp, the same way (finalnames.mjs).
+        const late = lateFor(vfs, 'ships', { partial: true, old });
+        if (late) manifest.late = late;
+        else delete manifest.late;
         const done = new Set(ships.map((sh) => sh.id));
         const files = new Set(manifest.models.map((m) => m.file));
         manifest.ships = [...(old.ships ?? []).filter((sh) => !done.has(sh.id) && !match.test(sh.template)), ...ships].sort((a, b) => a.class.localeCompare(b.class) || a.id.localeCompare(b.id));
@@ -5871,6 +6015,8 @@ switch (cmd) {
           }
         }
         combat.file.counts = combatCounts(combat.file);
+        // The NPC types and their tier fits come out of the archives as the hulls do: stamped with the manifest's world.
+        if (manifest.late) combat.file.late = manifest.late;
         writeFileSync(join(outDir, 'combat.json'), JSON.stringify(combat.file));
         console.log(combatLine(combat.file));
         if (args.includes('--verbose')) for (const n of [...npcNotes, ...combat.skipped.map((s) => `left out ${s.id}: ${s.why}`)]) console.log(`   ${n}`);
@@ -6062,15 +6208,20 @@ switch (cmd) {
     let galleryLods = LOD_FORMAT;
     // And the vehicles' paint stamp, which only a run that built the vehicles writes.
     let galleryPaint = paintMaker ? GALLERY_PAINT_FORMAT : 0;
+    // And its late stamp (finalnames.mjs): the sections a partial run keeps stand for the world they were converted
+    // from, so a run of some sections keeps the stamp the last whole run wrote.
+    let galleryLate = lateStampOf(vfs, 'gallery');
     if (options.only) {
       try {
         const was = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8'));
         galleryFormat = was.materialFormat ?? 1;
         galleryLods = was.lodFormat ?? 0;
         if (!paintMaker) galleryPaint = was.paintFormat ?? 0;
+        galleryLate = lateFor(vfs, 'gallery', { partial: true, old: was });
       } catch {
         galleryFormat = 1;
         galleryLods = 0;
+        galleryLate = null;
       }
     }
     // The vehicles' paint recipes beside the manifest, and only the images they name left in customize/.
@@ -6083,7 +6234,7 @@ switch (cmd) {
       for (const n of paintNotes) console.log(`   paint: ${n}`);
     }
     const galleryModels = [...models.values()].filter((m) => m && !m.failed);
-    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: galleryFormat, lodFormat: galleryLods, ...(galleryPaint ? { paintFormat: galleryPaint } : {}), categories: { layout: galleryModels } }, null, 2));
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: galleryFormat, lodFormat: galleryLods, ...(galleryPaint ? { paintFormat: galleryPaint } : {}), ...(galleryLate ? { late: galleryLate } : {}), categories: { layout: galleryModels } }, null, 2));
     console.log(lodSummaryLine('gallery', galleryModels));
     writeFileSync(join(outDir, 'gallery.json'), JSON.stringify({ sections: g.sections, anims: g.anims }));
     writeFloors(outDir, galleryModels.map((m) => m.id));
@@ -6304,8 +6455,69 @@ switch (cmd) {
     if (flags.has('--all')) {
       const versions = vfs.versions(pos[2]);
       console.log(`every copy, oldest first (the last one wins):`);
-      for (const v of versions) console.log(`  ${basename(v.archive)}: ${v.deleted ? 'deletion marker' : `${v.size} bytes`}`);
+      for (const v of versions) console.log(`  ${basename(v.archive)}: ${v.deleted ? 'deletion marker' : `${v.size} bytes`}${v.late ? " (SOE's final names list)" : ''}`);
     }
+    break;
+  }
+
+  case 'final-names': {
+    // The maintainer's: write the names list, check it against an install, take an inventory of the packs, or
+    // say what a run left unwritten. `status` never asks for any of it.
+    if (flags.has('--verify')) {
+      if (!pos[1]) usage();
+      const list = finalNamesList();
+      if (list.broken) {
+        console.log(`the names list cannot be used: ${list.broken}`);
+        process.exit(1);
+      }
+      const set = list.rows.filter((r) => r[0] === 'set').length;
+      const t0 = Date.now();
+      const bad = verifyFinalNames(pos[1], list, { openTre });
+      if (!bad.length) console.log(`every row good: ${set.toLocaleString('en-US')} set rows of ${list.rows.length.toLocaleString('en-US')} read from ${pos[1]} at their lengths and SHA-1s (${Date.now() - t0} ms); list ${list.key}`);
+      else {
+        console.log(`${bad.length} of ${set} set rows do not hold:`);
+        for (const b of bad.slice(0, 40)) console.log(`  ${b.path}: ${b.why}`);
+        if (bad.length > 40) console.log(`  ... and ${bad.length - 40} more`);
+        process.exit(1);
+      }
+      break;
+    }
+    if (flags.has('--inventory')) {
+      // Every file under <out-dir> with its size and time, which --rewritten compares a run against.
+      if (!pos[1] || !options.to) usage();
+      const files = inventoryOf(pos[1]);
+      writeFileSync(options.to, JSON.stringify({ root: resolve(pos[1]), at: Date.now(), files }));
+      console.log(`${files.length.toLocaleString('en-US')} files under ${pos[1]} written to ${options.to}`);
+      break;
+    }
+    if (flags.has('--rewritten')) {
+      if (!pos[1] || !options.since || !options.before) usage();
+      const since = /^\d+$/.test(options.since) ? Number(options.since) : Date.parse(options.since);
+      if (!Number.isFinite(since)) {
+        console.log(`--since=${options.since} is not a time (an epoch in milliseconds or a date the computer reads)`);
+        process.exit(1);
+      }
+      const before = JSON.parse(readFileSync(options.before, 'utf8'));
+      const result = rewrittenCheck(pos[1], { since, before: before.files ?? before, worlds: GAME_PLANETS, zones: [...Object.keys(SPACE_ZONES)] });
+      const group = (m) => [...m].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+      console.log(`files under ${pos[1]} that were there before ${new Date(since).toISOString()} and were not written since:`);
+      for (const [g, n] of group(result.kept)) console.log(`  kept, not a model or picture: ${g}: ${n}`);
+      for (const [g, files] of group(result.leftOver)) console.log(`  left over from an older run (no JSON in its folder names it): ${g}: ${files.length}${files.length <= 3 ? ` (${files.join(', ')})` : ` (${files.slice(0, 3).join(', ')}, ...)`}`);
+      for (const [g, f] of group(result.faults)) console.log(`  NOT WRITTEN AGAIN, owned by ${f.owner}: ${g}: ${f.files.length} (${f.files.slice(0, 5).join(', ')}${f.files.length > 5 ? ', ...' : ''})`);
+      console.log(result.ok ? 'nothing a stamped command owns was left unwritten' : `${result.faults.size} group(s) a stamped command left unwritten: mend the command that owns each, raise its LATE_STAMP_VERSION, and convert again`);
+      if (!result.ok) process.exit(1);
+      break;
+    }
+    // <folder holding SOE's final sku0..3_client.toc> <swg-dir> [--to=<file>]
+    if (!pos[2]) usage();
+    const retail = JSON.parse(readFileSync(new URL('./manifests/retail.json', import.meta.url), 'utf8'));
+    const t0 = Date.now();
+    const { list, stats } = buildFinalNames(pos[1], pos[2], { openToc, tocRank, openTre, archiveRank, ngeFinal: retail.nge_final, log: (m) => console.log(m) });
+    const to = options.to ?? FINAL_NAMES_URL;
+    writeFileSync(to, finalNamesText(list));
+    const n = (x) => x.toLocaleString('en-US');
+    console.log(`${n(stats.newPaths)} new paths and ${n(stats.newer)} newer copies against the install's own indexes; ${(stats.stored / 1048576).toFixed(0)} MB stored read and hashed in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+    console.log(`written to ${to instanceof URL ? (await import('node:url')).fileURLToPath(to) : to}; list ${finalNamesKey(finalNamesText(list))}`);
     break;
   }
 
@@ -6331,7 +6543,7 @@ switch (cmd) {
     for (const [planet, outDir] of targets) {
       mkdirSync(outDir, { recursive: true });
       console.log(`${planet}:`);
-      exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), log: console.log });
+      exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), log: console.log, late: lateStampOf(vfs, 'sky') });
     }
     printEffectSummary();
     break;
@@ -6367,7 +6579,7 @@ switch (cmd) {
       }
       mkdirSync(outDir, { recursive: true });
       console.log(`${planet}:`);
-      exportWater(vfs, planet, waterShaderUses(t), t, outDir, { log: console.log, harm });
+      exportWater(vfs, planet, waterShaderUses(t), t, outDir, { log: console.log, harm, late: lateStampOf(vfs, 'water') });
     }
     break;
   }
@@ -6638,7 +6850,7 @@ switch (cmd) {
         frameCheck,
       };
       // `materialFormat`: the zone's models (stations, asteroids) are converted here, and carried no stamp.
-      writeFileSync(join(outDir, 'space.json'), JSON.stringify({ version: SPACE_PACK_VERSION, materialFormat: MATERIAL_FORMAT, zone, planet: SPACE_ZONES[zone] ?? null, title, stations, scenery, planets, arrival, hyperspace, nebulae, nebulaLook: look, lightning, fields, lanes, dockEffects: dockFx }, null, 2));
+      writeFileSync(join(outDir, 'space.json'), JSON.stringify(withLate({ version: SPACE_PACK_VERSION, materialFormat: MATERIAL_FORMAT, zone, planet: SPACE_ZONES[zone] ?? null, title, stations, scenery, planets, arrival, hyperspace, nebulae, nebulaLook: look, lightning, fields, lanes, dockEffects: dockFx }, vfs, 'space'), null, 2));
       const zoneModels = [...models.values()].filter((m) => !m.failed);
       writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: zone, categories: { layout: zoneModels } }, null, 2));
       writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: zone, center: { x: 0, z: 0 }, radius: null, objects, skipped: [] }));
@@ -6894,7 +7106,7 @@ switch (cmd) {
         continue;
       }
       process.stdout.write(`${planet}:`);
-      const r = writeRadial(vfs, template, trn, outDir, { log: (m) => console.log(m), warn: (m) => console.log(`  ${m}`) });
+      const r = writeRadial(vfs, template, trn, outDir, { log: (m) => console.log(m), warn: (m) => console.log(`  ${m}`), late: lateStampOf(vfs, 'radial') });
       worlds++;
       layers += r.layers;
       bytes += r.bytes;
@@ -7109,11 +7321,12 @@ switch (cmd) {
       manifest.categories ??= {};
       manifest.categories.layout ??= [];
       // A model this command wrote under a file from before the current material format (or with no file
-      // to say) was converted then too, so it is converted again rather than kept because it is there.
+      // to say) was converted then too, so it is converted again rather than kept because it is there; and one
+      // written from another late world than this mount's the same (`keptStale`, finalnames.mjs).
       // Only its own (the snapshot's entries carry a `source`, these an `appearance`): a world's own
       // terminal is the snapshot's to redo. `travelModelsToConvert` in travel.mjs is the rule, node-tested.
       const oldTravel = recordAt(join(out, dir.name, 'travel.json'));
-      const plan = T.travelModelsToConvert(manifest.categories.layout, new Set(rows.map((r) => r.model)), materialStale(oldTravel));
+      const plan = T.travelModelsToConvert(manifest.categories.layout, new Set(rows.map((r) => r.model)), keptStale(oldTravel, vfs, 'travel'));
       manifest.categories.layout = plan.layout;
       for (const [id, appearance] of plan.convert) {
         if (!vfs.has(appearance)) {
@@ -7153,7 +7366,7 @@ switch (cmd) {
       writeFileSync(
         join(out, dir.name, 'travel.json'),
         // `materialFormat`: the terminals and the shuttles' pieces are models converted here, unstamped before 6.
-        JSON.stringify({ version: TRAVEL_PACK_VERSION, materialFormat: MATERIAL_FORMAT, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each starport and shuttleport building, joined to where this world's own snapshot places them" }, counts, rigs: used, rows }, null, 1),
+        JSON.stringify(withLate({ version: TRAVEL_PACK_VERSION, materialFormat: MATERIAL_FORMAT, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each starport and shuttleport building, joined to where this world's own snapshot places them" }, counts, rigs: used, rows }, vfs, 'travel'), null, 1),
       );
       worlds++;
       things += rows.length;
@@ -7242,8 +7455,16 @@ switch (cmd) {
     };
     const templates = [...galleryTemplates(vfs, 'object/tangible/'), ...galleryTemplates(vfs, 'object/static/'), ...galleryTemplates(vfs, 'object/installation/')];
     console.log(`props: ${templates.length} templates under the three roots`);
-    const { props, skipped } = P.buildProps(templates, { convert, describe: (template, id) => describeItem(vfs, template, id, itemCaches) }, { log: console.log, limit: options.limit ? Number(options.limit) : Infinity });
-    const manifest = { version: P.PROPS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, props, models: [...models.values()].filter((m) => !m.failed), skipped };
+    const appearanceCache = new Map();
+    const appearanceOf = (template) => {
+      try {
+        return resolveTemplateString(vfs, template, ['appearanceFilename'], appearanceCache);
+      } catch {
+        return null;
+      }
+    };
+    const { props, skipped } = P.buildProps(templates, { convert, describe: (template, id) => describeItem(vfs, template, id, itemCaches), appearanceOf }, { log: console.log, limit: options.limit ? Number(options.limit) : Infinity });
+    const manifest = withLate({ version: P.PROPS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, props, models: [...models.values()].filter((m) => !m.failed), skipped }, vfs, 'props');
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 1));
     const c = P.propCounts(manifest);
     console.log(`-> ${outDir}: ${c.props} props in ${c.models} models over ${c.groups} groups; ${c.named} named, ${c.iconed} with a picture, ${skipped.length} left out`);
@@ -7366,8 +7587,13 @@ switch (cmd) {
       manifest.categories ??= {};
       manifest.categories.layout ??= [];
       const appearanceOfId = new Map([...models.values()].map((m) => [m.id, m.appearance]));
+      // A model already in the layout is kept, unless it is one of ours (it carries an `appearance`; the snapshot's
+      // carry a `source`) written under a record from an older material format or another late world (`keptStale`).
+      const redo = keptStale(recordAt(join(out, dir.name, 'fittings.json')), vfs, 'fittings');
       for (const id of new Set(rows.map((r) => r.model))) {
-        if (manifest.categories.layout.some((d) => d.id === id)) continue;
+        const at = manifest.categories.layout.findIndex((d) => d.id === id);
+        if (at >= 0 && !(redo && manifest.categories.layout[at].appearance)) continue;
+        if (at >= 0) manifest.categories.layout.splice(at, 1);
         const appearance = appearanceOfId.get(id);
         if (!appearance || !vfs.has(appearance)) {
           console.warn(`  ${dir.name}: ${id} has no appearance in the archives`);
@@ -7386,7 +7612,8 @@ switch (cmd) {
       writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
       writeFileSync(
         join(out, dir.name, 'fittings.json'),
-        JSON.stringify({ version: FITTINGS_PACK_VERSION, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each building that travel has no use for, joined to where this world's own snapshot places them" }, counts, rows }, null, 1),
+        // `materialFormat` and `late`: the models it converts beside the rows stand for both, read back by `keptStale`.
+        JSON.stringify(withLate({ version: FITTINGS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each building that travel has no use for, joined to where this world's own snapshot places them" }, counts, rows }, vfs, 'fittings'), null, 1),
       );
       worlds++;
       things += rows.length;
@@ -7433,7 +7660,7 @@ switch (cmd) {
         table[t] = rows;
         effects += rows.length;
       }
-      writeFileSync(join(packDir, 'objeffects.json'), JSON.stringify({ version: OBJECT_EFFECTS_VERSION, templates: table }));
+      writeFileSync(join(packDir, 'objeffects.json'), JSON.stringify(withLate({ version: OBJECT_EFFECTS_VERSION, templates: table }, vfs, 'objeffects')));
       return { templates: Object.keys(table).length, effects };
     };
     const rowsOf = (file) => {
@@ -7527,7 +7754,7 @@ switch (cmd) {
       const defs = Object.values(manifest?.categories ?? {}).flat().filter((d) => d && d.cells && /\.pob$/i.test(d.source ?? ''));
       if (!defs.length) continue;
       const { file, counts, appearances: apps } = packDoorTable(defs, readDoors, styles, { flipX, exists, soundsOf });
-      writeFileSync(join(packDir, 'doors.json'), JSON.stringify(file));
+      writeFileSync(join(packDir, 'doors.json'), JSON.stringify(withLate(file, vfs, 'doors')));
       for (const a of apps) appearances.add(a);
       total.packs++;
       for (const k of Object.keys(counts)) total[k] += counts[k];
@@ -7550,7 +7777,7 @@ switch (cmd) {
         console.warn(`  door model ${a} would not convert: ${err.message}`);
       }
     }
-    writeFileSync(join(doorsDir, 'manifest.json'), JSON.stringify({ planet: 'doors', version: DOORS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, categories: { doors: models } }, null, 1));
+    writeFileSync(join(doorsDir, 'manifest.json'), JSON.stringify(withLate({ planet: 'doors', version: DOORS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, categories: { doors: models } }, vfs, 'doors'), null, 1));
     console.log(`doors: ${total.doors} doors in ${total.withDoors} of ${total.buildings} portal buildings over ${total.packs} packs; ${models.length} door models -> ${doorsDir}${failed ? ` (${failed} would not convert)` : ''}`);
     const rc = readDoors.counts;
     console.log(`  read ${rc.files} portal files: ${rc.sides} portal sides name a style, ${rc.doors} doors${rc.unplaced ? `, ${rc.unplaced} in a portal lying flat with no hardpoint left out` : ''}${rc.disagree ? `, ${rc.disagree} whose two sides name different styles (the first side's taken)` : ''}${rc.missingStyle ? `, ${rc.missingStyle} naming a style the table has not got` : ''}${rc.forceField ? `, ${rc.forceField} force fields left out` : ''}${rc.disabled ? `, ${rc.disabled} in a disabled portal left out` : ''}`);
@@ -7573,10 +7800,9 @@ switch (cmd) {
     // It must run after `gallery`, since it checks each deed's model against what that pack carries.
     if (!pos[2]) usage();
     const c3 = core3SourceFor(options);
-    if (!c3 || c3.missing) {
-      console.log(`deeds: ${c3 ? c3.missing : '--core3=none: no emulator data, so no deeds'}`);
-      break;
-    }
+    // The deeds of ours (`OUR_DEEDS` in deeds.mjs) are the client's own templates paired by name, so they are written
+    // with no emulator data at all; Core3's are added when the reference (or a folder) is there.
+    if (!c3 || c3.missing) console.log(`deeds: ${c3 ? c3.missing : '--core3=none: no emulator data'}, so only the deeds of ours`);
     const D = await import('./deeds.mjs');
     const vfs = mount(pos[1]);
     const out = pos[2];
@@ -7608,8 +7834,11 @@ switch (cmd) {
         /* an unreadable gallery means no deed can be placed, which is what it says below */
       }
     }
-    const deeds = c3.readDeeds();
-    const buildings = c3.readBuildings();
+    const core3Deeds = c3 && !c3.missing ? c3.readDeeds() : [];
+    const buildings = c3 && !c3.missing ? c3.readBuildings() : new Map();
+    const playerBuildings = vfs.list('object/building/player/');
+    const ours = D.ourDeeds({ has: (p) => vfs.has(p), buildingOf: (file) => playerBuildings.find((t) => t.endsWith(`/${file}`)) ?? null, known: new Set(core3Deeds.map((d) => d.makes)) });
+    const deeds = [...core3Deeds, ...ours];
     const { rows, faults } = D.joinDeeds(deeds, buildings, {
       has: (p) => vfs.has(p),
       read: (p) => vfs.read(p),
@@ -7623,17 +7852,21 @@ switch (cmd) {
     writeFileSync(
       join(out, 'deeds.json'),
       JSON.stringify(
-        {
-          version: DEED_PACK_VERSION,
-          source: { core3: true, note: 'what each deed makes, its lots and its upkeep are the emulator scripts; the name, the model and the footprint are the game archives' },
-          counts,
-          deeds: rows,
-        },
+        withLate(
+          {
+            version: DEED_PACK_VERSION,
+            source: { core3: true, note: 'what each deed makes, its lots and its upkeep are the emulator scripts; the name, the model and the footprint are the game archives' },
+            counts,
+            deeds: rows,
+          },
+          vfs,
+          'deeds',
+        ),
         null,
         1,
       ),
     );
-    console.log(`deeds: ${counts.deeds} buildings a player can buy, ${counts.named} named by the game, ${counts.withModel} with a model this game carries, ${counts.withFoot} with the grid the client placed them on`);
+    console.log(`deeds: ${counts.deeds} buildings a player can buy (${ours.length} deeds of ours, with no lots or upkeep), ${counts.named} named by the game, ${counts.withModel} with a model this game carries, ${counts.withFoot} with the grid the client placed them on`);
     if (!models.size) console.log('  the gallery pack is not converted, so no deed names a model: run `gallery` first');
     for (const f of faults.slice(0, 5)) console.log(`  footprint: ${f}`);
     break;
@@ -7683,7 +7916,7 @@ switch (cmd) {
       }
     };
     // Stamped with the shipped reference's own hash, which is what `status` compares with.
-    const w = CV.writeConversations(out, plan, readTable, CV.referenceHash(CORE3_REF_DIR));
+    const w = CV.writeConversations(out, plan, readTable, CV.referenceHash(CORE3_REF_DIR), lateStampOf(vfs, 'conversations'));
     const c = plan.counts;
     console.log(`conversations: ${c.trees} of the server's conversations (${c.instances} built by ${c.shapes} factories) for ${c.withTree} kinds of people, ${c.withDiction} who greet in the client's own reaction lines, ${c.heralds} heralds stood, over ${packs.length} worlds' people`);
     console.log(`  ${w.written} of the client's string tables (${(w.bytes / 1048576).toFixed(2)} MB), core3.json ${(w.core3Bytes / 1024).toFixed(0)} KB, speakers.json ${(w.speakersBytes / 1024).toFixed(0)} KB, in ${((Date.now() - t0) / 1000).toFixed(1)} s -> ${join(out, 'conversations')}`);
@@ -7898,8 +8131,9 @@ switch (cmd) {
         }
       }
       // A nest whose model is already on disk is kept only while the last run's manifest stood for models at
-      // this material format; otherwise it is converted again (`nestModels` in spawnpack.mjs says why).
-      const modelsStale = materialStale(recordAt(join(dir, 'manifest.json')));
+      // this material format and this mount's late world; otherwise it is converted again (`nestModels` in
+      // spawnpack.mjs says why, `keptStale` in finalnames.mjs what is asked).
+      const modelsStale = keptStale(recordAt(join(dir, 'manifest.json')), spawnVfs, 'spawns');
       const { nests: madeNests, made, failed } = sp.nestModels(wanted, {
         resolve: (template) => {
           const r = resolveTemplateMesh(spawnVfs, template, cache);
@@ -7997,6 +8231,8 @@ switch (cmd) {
           // only by a run that made them (one with the archives): a run without them makes no model, and a
           // stamp from it would stand for nothing and stop `status` asking for the run that does.
           ...(options.swg ? { materialFormat: MATERIAL_FORMAT } : {}),
+          // And its late stamp the same way (finalnames.mjs): only a run with the archives read any of them.
+          ...(options.swg && lateStampOf(spawnVfs, 'spawns') ? { late: lateStampOf(spawnVfs, 'spawns') } : {}),
           source: 'core3',
           converted: new Date().toISOString(),
           counts: {
@@ -8073,6 +8309,10 @@ switch (cmd) {
       // Which frame the numbers are in, asked of the ground rather than of anything built from the
       // same scripts. `heightCheck` says why that distinction is the whole of it.
       const frame = c3.heightCheck(rows, terrainHeights(out));
+      // No-spawn circles of ours over what SOE's last publishes added to the world's buildout tables (spawnpack.mjs
+      // `lateSiteCircles`), so no lair stands on a site the very run that brings it put there.
+      const lateSites = spawnVfs ? sp.lateSiteCircles(spawnVfs, world) : [];
+      if (lateSites.length) console.log(`spawns: ${world} — ${lateSites.length} no-spawn circle${lateSites.length === 1 ? '' : 's'} of ours over ${lateSites.reduce((n, c) => n + c.objects, 0)} objects SOE's final files added`);
       if (frame.reading !== 'snapshot' && frame.outdoors > 20) {
         console.log(`spawns: ${world} READS MIRRORED (ground is ${frame.mirrored} m out as-is and ${frame.asIs} m mirrored) — every coordinate in it is on the wrong side of the world`);
       }
@@ -8090,9 +8330,9 @@ switch (cmd) {
             // stands is drawn from a seed on this side.
             source: { areas: 'core3', statics: 'core3', creaturePlaces: 'invented', scatter: 'drawn', stacks: 'nudged' },
             frameCheck: frame,
-            counts: { areas: r.spawn.length, noSpawn: r.noSpawn.length, statics: rows.length, staticsDropped: dropped.get(world) ?? 0, noBody: lost.body, noRoom: lost.room },
+            counts: { areas: r.spawn.length, noSpawn: r.noSpawn.length + lateSites.length, lateSites: lateSites.length, statics: rows.length, staticsDropped: dropped.get(world) ?? 0, noBody: lost.body, noRoom: lost.room },
             areas: r.spawn,
-            noSpawn: r.noSpawn,
+            noSpawn: [...r.noSpawn, ...lateSites],
             statics: rows,
             pools: poolsOut,
           },
@@ -8248,21 +8488,35 @@ switch (cmd) {
         }
         const want = slope ?? SLOPE_CLIMB_DEGREES;
         const rules = Number(there?.rules ?? 1);
-        if (there && there.version === NAV_GRID_VERSION && there.nx && Number(there.slopeDegrees) === Number(want) && rules >= NAV_BAKE_RULES) {
+        // What it was baked from, by the rule `status` asks (finalnames.mjs `gridLayoutStale`): a grid of another
+        // layout, or one with no key beside a world converted with SOE's final files, is not done.
+        let manifest = null;
+        try {
+          manifest = there && existsSync(join(outDir, 'manifest.json')) ? JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')) : null;
+        } catch {
+          manifest = null;
+        }
+        const stale = there ? gridLayoutStale(there, outDir, manifest) : null;
+        if (there && there.version === NAV_GRID_VERSION && there.nx && Number(there.slopeDegrees) === Number(want) && rules >= NAV_BAKE_RULES && !stale) {
           console.log(`${planet}: nav.json is there already, version ${there.version} at ${there.slopeDegrees} degrees`);
           continue;
         }
         if (there) {
           const why = there.version !== NAV_GRID_VERSION
-            ? `version ${there.version}, which this build does not read`
+            ? `is version ${there.version}, which this build does not read`
             : Number(there.slopeDegrees) !== Number(want)
-              ? `at ${there.slopeDegrees} degrees, not ${want}`
-              : `baked by rules ${rules}, not ${NAV_BAKE_RULES}`;
-          console.log(`${planet}: re-baking: the nav.json there is ${why}`);
+              ? `is at ${there.slopeDegrees} degrees, not ${want}`
+              : rules < NAV_BAKE_RULES
+                ? `is baked by rules ${rules}, not ${NAV_BAKE_RULES}`
+                : stale ?? 'has no grid in it';
+          console.log(`${planet}: re-baking: the nav.json there ${why}`);
         }
       }
       try {
+        // What it is baked from, taken before the bake reads it, so `status` can ask again when either moves.
+        const layoutKey = layoutKeyOf(outDir);
         const grid = await buildNavGrid(outDir, { cell, slope, log: (line) => console.log(line) });
+        if (layoutKey) grid.header.layoutKey = layoutKey;
         const out = writeNavGrid(outDir, grid);
         const stats = out.stats;
         console.log(`  blocked before the body's ${stats.margin} m margin: slope ${stats.slope}, objects ${stats.objects}, water ${stats.water}; after it ${stats.blocked} (${((100 * stats.blocked) / (out.nx * out.nz)).toFixed(2)}%), plus ${stats.indoor} cells inside ${stats.buildings} portal buildings, which the rooms' own pathing has, and ${stats.opened} cells over rooms under the ground left open`);
@@ -8406,19 +8660,19 @@ switch (cmd) {
     // Jedi Academy first, so a wrong path is found before the long work: its saber hums, the files
     // its animation events name, and the frames those events mark.
     const jkaSounds = options.jka ? convertJkaSounds(options.jka, pos[2], { log: console.log }) : null;
-        convertSounds(vfs, pos[2], { only: options.only ?? null, samples: !flags.has('--no-samples'), log: console.log });
+    convertSounds(vfs, pos[2], { only: options.only ?? null, samples: !flags.has('--no-samples'), log: console.log, late: lateStampOf(vfs, 'sounds') });
     // When each of the game's own animations marks a footstep, a voice or a blow landing, which
     // animation each species' clips play, and which client data each body reads its events from.
     convertClipEvents(vfs, pos[2], { jka: jkaSounds, log: console.log });
     // What a ship, a ship part and a vehicle sound like: the engine loop the fitted engine part
     // carries, the booster, a hull's own thrusters and the sound it blows up with, and every
     // vehicle's idle, run and water sounds, each joined to the client data that speaks for it.
-    convertShipSounds(vfs, pos[2], { log: console.log });
+    convertShipSounds(vfs, pos[2], { log: console.log, late: lateStampOf(vfs, 'sounds') });
     // A planet argument (or `all`) also writes where that planet's sounds are: the emitters its
     // world places, the room beds of the buildings it places, and what is underfoot on each of them.
     // A name that is not a planet is a typo, not a planet with nothing in it, so it says so.
     if (pos[3] && pos[3] !== 'all' && !GAME_PLANETS.includes(pos[3])) usage();
-    if (pos[3]) convertSoundPlaces(vfs, pos[2], { planets: pos[3] === 'all' ? GAME_PLANETS : [pos[3]], log: console.log });
+    if (pos[3]) convertSoundPlaces(vfs, pos[2], { planets: pos[3] === 'all' ? GAME_PLANETS : [pos[3]], log: console.log, late: lateStampOf(vfs, 'sounds') });
     break;
   }
 

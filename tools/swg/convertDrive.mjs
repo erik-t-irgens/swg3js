@@ -307,9 +307,13 @@ export function spawnByCommand(childCommand) {
   };
 }
 
-/** `status <out> --json` as a child, its JSON read as the launcher has always read it. */
-export async function askStatus({ cli, out, cwd = process.cwd(), env = process.env, spawnStep = null }) {
-  const child = (spawnStep ?? spawnConverter)({ cli, args: ['status', out, '--json'], cwd, env });
+/**
+ * `status <out> --json` as a child, its JSON read as the launcher has always read it. `swg`, the install this drive
+ * converts from, goes to it as `--swg`, so `status` asks of SOE's final files (finalnames.mjs) what this very install
+ * can mount, and the driver and the launcher's own page see one answer.
+ */
+export async function askStatus({ cli, out, cwd = process.cwd(), env = process.env, spawnStep = null, swg = '' }) {
+  const child = (spawnStep ?? spawnConverter)({ cli, args: ['status', out, '--json', ...(swg ? [`--swg=${swg}`] : [])], cwd, env });
   let text = '';
   const errs = [];
   child.stdout?.on('data', (d) => (text += d.toString()));
@@ -504,7 +508,7 @@ export async function runConvert({
       ranOut = true;
       break;
     }
-    const answered = await status({ cli, out, cwd, env, spawnStep: starter });
+    const answered = await status({ cli, out, cwd, env, spawnStep: starter, swg });
     // What `status` asked, and beside it the work it has no way of asking for: the wardrobes, which it
     // reads out of a mobiles catalogue that does not exist yet, and the loading pictures, which it never
     // asks for at all. A seed already asked for is dropped rather than planned twice.

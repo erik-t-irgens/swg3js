@@ -2,6 +2,7 @@
 // the path-keeping flattener and the branch a wild spawn plays, pack planning and baking, names,
 // customization, outfits, stats, unit records, selection and the catalogue. No archive is read.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { form, chunk, W, encode, type Node } from './iffWriter.ts';
 import { parseIff } from '../iff.mjs';
 import { buildGlb } from '../glb.mjs';
@@ -499,6 +500,17 @@ ok(stamp.key === M.sourceStampOf({ retailOnly: true, archives: [...archives].rev
   && stamp.key !== M.sourceStampOf({ retailOnly: true, archives: [...archives, ['c.tre', 1]] }).key
   && stamp.key !== M.sourceStampOf({ retailOnly: true, archives: [['a.tre', 11], ['b.tre', 20]] }).key,
 'the archive stamp ignores their order and notices a flag, an archive or a size');
+// SOE's final names list joins the key only when it applied: an install it cannot serve keeps the key it always had,
+// which is the two-argument key exactly (so every unit stays current there), and two late worlds are two keys.
+{
+  const twoArg = createHash('sha1').update(JSON.stringify([true, [['a.tre', 10], ['b.tre', 20]]])).digest('hex').slice(0, 12);
+  ok(stamp.key === twoArg && M.sourceStampOf({ retailOnly: true, archives, late: null }).key === twoArg && M.sourceStampOf({ retailOnly: true, archives, late: { key: 'k', state: 'none', rows: 1, v: 1 } }).key === twoArg, 'with no late world the key is the two-argument key, to the bit');
+  const a = M.sourceStampOf({ retailOnly: true, archives, late: 'names:aaaaaaaaaaaa' }).key;
+  const b = M.sourceStampOf({ retailOnly: true, archives, late: 'names:bbbbbbbbbbbb' }).key;
+  ok(a !== twoArg && b !== twoArg && a !== b, 'a late world gives another key, and two late worlds give two');
+  const fromStamp = M.sourceStampOf({ retailOnly: true, archives, late: { key: 'aaaaaaaaaaaa', state: 'applied', rows: 1, v: 1 } });
+  ok(fromStamp.key === a && fromStamp.late?.state === 'applied', "the mobiles command's late stamp gives that key and rides beside it");
+}
 ok(M.signatureOf({ source: stamp.key, sat: 'x' }) !== M.signatureOf({ source: 'other', sat: 'x' }), 'a unit converted from other archives has another signature');
 const sizes: Record<string, number> = { 'mobiles/models/x.glb': 100 };
 // The written format is whatever the converter writes now, not a number typed in here: a bump is

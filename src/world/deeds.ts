@@ -38,6 +38,11 @@ export interface DeedRow {
   foot: { w: number; h: number; px: number; pz: number; cw: number; ch: number; rows: string[] } | null;
   /** The patch that grid asks for, worked out by the converter and checked against the game's own copy. */
   patch: Patch | null;
+  /**
+   * A deed of ours (the converter's `OUR_DEEDS`): a client deed Core3 never knew, paired with its building by the two
+   * templates' own names. Its lots and upkeep were the server's and are not known, so it carries none and every world.
+   */
+  ours?: boolean;
 }
 
 export interface DeedPack {
@@ -129,9 +134,10 @@ export function wrongWorld(d: DeedRow, planetId: string): string | null {
   return `this one may only stand on ${where}`;
 }
 
-/** What a deed says about itself under its name, in one line. */
+/** What a deed says about itself under its name, in one line. A deed of ours says its lots and upkeep are not known. */
 export function deedLine(d: DeedRow): string {
   const size = d.foot ? `${Math.round(d.foot.w * d.foot.cw)} by ${Math.round(d.foot.h * d.foot.ch)} m` : 'no footprint';
+  if (d.ours) return `${size} · lots and upkeep: not known (ours)`;
   const lots = d.lots ? `${d.lots} lot${d.lots === 1 ? '' : 's'}` : 'no lots';
   return `${size} · ${lots} · ${d.upkeep} a day`;
 }
