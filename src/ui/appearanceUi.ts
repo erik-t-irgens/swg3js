@@ -23,7 +23,7 @@ import { loadCustomizeFile } from '../player/customizer.ts';
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs.ts';
 import { CharacterPreview } from './characterPreview.ts';
 import { distinctLabels, plainLabel } from './variableLabel.ts';
-import { CREATOR_TUNE, bareName, catalogueName, creatorTableNow, creatorView, hairNone, itemSections, loadCreatorTable, ownSection, packColours, packSliders, pickWrites, swatchLayout, type CreatorSpecies, type CreatorState, type CreatorTable, type CreatorView, type ItemColour, type ItemSection, type PackColour, type ViewRow } from './creatorModel.ts';
+import { CREATOR_TUNE, bareName, catalogueName, creatorTableNow, creatorView, gridGroupId, hairNone, itemSections, loadCreatorTable, ownSection, packColours, packSliders, pickWrites, swatchLayout, type CreatorSpecies, type CreatorState, type CreatorTable, type CreatorView, type ItemColour, type ItemSection, type PackColour, type ViewRow } from './creatorModel.ts';
 import { NO_HAIR, hairCells, withOursHair, type HairGrid, type HairItem } from './hairGrid.ts';
 import { hairOfSpecies, pickedTint } from '../core/inventory.ts';
 import { groupHtml, GroupState } from './catalogue.ts';
@@ -655,6 +655,8 @@ export class AppearanceUi {
     const morphs = c.morphValues();
     const out: string[] = [];
     let picker = this.hairGridHtml();
+    // The grid stands at the top of the first hair group (`gridGroupId`); a later one shows its own rows or nothing.
+    const gridAt = gridGroupId(view);
     for (const g of view.groups) {
       const rows: string[] = [];
       for (const r of g.rows) {
@@ -662,7 +664,7 @@ export class AppearanceUi {
         const html = this.tableRow(r, values, morphs);
         if (html) rows.push(html);
       }
-      const lead = g.hair ? picker : '';
+      const lead = g.id === gridAt ? picker : '';
       if (lead) picker = '';
       if (!rows.length && !lead) continue;
       out.push(`<h3 class="wardrobe-section">${esc(g.label)}${g.ours ? ' <span>ours: what the pack has and the game never showed</span>' : ''}</h3>${lead}${rows.join('')}`);

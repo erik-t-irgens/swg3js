@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { STEMS, STEM_OURS, instrumentStems, musicCounts, performanceName, readSampleName, readSongs } from '../music.mjs';
 import { BAND_TUNE, Band, FLOOR_INSTRUMENTS, MUSIC_ANIM, animFor, bandWords, inBand, musicId, musicTemplate, partsFor, songOffset, songsFor, standsOnGround, stemFor, type MusicPack } from '../../../src/audio/band.ts';
 import { TemplateRun, makeStart } from '../../../src/audio/template.ts';
-import { isFlourishClip, isMusicLoop, loopsEmote, performOf } from '../../../src/core/emotes.ts';
+import { DANCES, isFlourishClip, isMusicLoop, loopsEmote, performOf, prettyEmote } from '../../../src/core/emotes.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -465,6 +465,14 @@ const here = { x: 0, y: 0, z: 0 };
   ok(performOf('loop_skill:speed2:music_3') === 'music_3' && performOf('loop_skill:speed2:dance_18') === 'dance_18', 'a performance names its own style, whichever kind it is');
   ok(loopsEmote('loop_skill:speed2:music_3'), 'it loops until the player moves -- the one line that makes it loop on every other screen too');
   ok(isFlourishClip('skill_action_7:music_5'), 'and a flourish is a flourish whatever it is over');
+}
+{
+  // SOE's last four dances (the body table re-issued in publish 58 names visual ids 33 to 36): the wheel names each
+  // by the performance table's own key, never "style 33", and every visual id from 1 to 36 has a label.
+  const late = [33, 34, 35, 36].map((n) => prettyEmote(`loop_skill:speed2:dance_${n}`));
+  ok(late.every((l, i) => l.startsWith('Dance: ') && !/style \d/.test(l) && l === `Dance: ${DANCES[33 + i]}`), `the four late dances read by name (${late.join(', ')})`);
+  ok(Array.from({ length: 36 }, (_, i) => i + 1).every((n) => typeof DANCES[n] === 'string' && DANCES[n].length > 0), 'every dance from 1 to 36 has a label');
+  ok(prettyEmote('loop_skill:speed2:dance_37') === 'Dance: style 37', 'and one the table never had still reads by its number');
 }
 
 {

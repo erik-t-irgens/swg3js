@@ -180,10 +180,12 @@ export function packPartOf(id: string, packParts: readonly string[]): string | n
  * Every hairstyle id begins `hair_` but the Sullustan's eighteen, which are `sul_hair_s<nn>_<f|m>`, and
  * those were taken for wearables -- owned, put in the backpack, and never taken off when a style changed.
  * SOE's last publishes add the Sullustan beards, `sul_beard_s01_m` to `s12_m`, which are hair of the same kind
- * and would otherwise be taken for wearables in exactly that way.
+ * and would otherwise be taken for wearables in exactly that way. And the Singing Mountain Clan's one style under
+ * a hair folder of its own, `singing_mountain_clan_bangs_s01`, is every wardrobe's last hair entry the rest miss
+ * (`lateMenus.test.ts` holds every hair entry of every wardrobe to this rule).
  */
 export function isHairKey(key: string): boolean {
-  return /^(hair_|sul_hair_|sul_beard_)/.test(key);
+  return /^(hair_|sul_hair_|sul_beard_|singing_mountain_clan_bangs_)/.test(key);
 }
 
 /** As much of a catalogue entry as the hair lists read. */
@@ -878,9 +880,35 @@ export const SLOT_GROUPS: readonly { id: string; label: string; match: RegExp }[
 ];
 export const OTHER_GROUP: { id: string; label: string; match: RegExp } = { id: 'other', label: 'Other', match: /.*/ };
 
-/** The give tab's group for an item, by the first pattern its id fits (a guess from the id, kept for packs without arrangements). */
-export function slotGroupOf(id: string): string {
+/**
+ * The give tab's group a body slot of the game's arrangements stands in, for an item no id pattern places (ours: the
+ * slots read down the body as the groups do; an ear, the eyes and the mouth are the head's, a ring and a cybernetic
+ * hand the hands', and a slot of a hand that holds rather than wears is no group).
+ */
+const GROUP_OF_SLOT: Readonly<Record<string, string>> = {
+  hat: 'head', eyes: 'head', mouth: 'head', earring_l: 'head', earring_r: 'head',
+  neck: 'neck',
+  chest1: 'chest', chest2: 'chest', chest3_l: 'chest', chest3_r: 'chest',
+  back: 'back', cloak: 'back',
+  bicep_l: 'bicep_l', bicep_r: 'bicep_r',
+  bracer_upper_l: 'bracer_l', bracer_lower_l: 'bracer_l', wrist_l: 'bracer_l',
+  bracer_upper_r: 'bracer_r', bracer_lower_r: 'bracer_r', wrist_r: 'bracer_r',
+  gloves: 'hands', ring_l: 'hands', ring_r: 'hands', cybernetic_hand_l: 'hands', cybernetic_hand_r: 'hands',
+  utility_belt: 'waist',
+  pants1: 'legs', pants2: 'legs',
+  shoes: 'feet',
+};
+
+/**
+ * The give tab's group for an item: the first pattern its id fits (a guess from the id, kept for packs without
+ * arrangements), and for one no pattern places, the group of its arrangement's first slot when it carries one
+ * (`slots`, the wardrobe entry's). So nothing an id pattern places moves, and what read "Other" for want of a word in
+ * its id -- SOE's late Life Day wings, the crafting headband and bracelet among them -- stands under its body slot.
+ */
+export function slotGroupOf(id: string, slots?: readonly (readonly string[])[] | null): string {
   for (const s of SLOT_GROUPS) if (s.match.test(id)) return s.id;
+  const first = slots?.[0]?.[0];
+  if (first && Object.prototype.hasOwnProperty.call(GROUP_OF_SLOT, first)) return GROUP_OF_SLOT[first];
   return OTHER_GROUP.id;
 }
 

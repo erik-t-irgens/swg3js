@@ -48,6 +48,8 @@ interface PropsManifest {
   version: number;
   props: PropDef[];
   models: PropModel[];
+  /** The converter's late stamp: whether SOE's final files were in the mount it was written from. */
+  late?: unknown;
 }
 
 /**
@@ -92,6 +94,11 @@ export class PropCatalogue {
 
   get all(): readonly PropDef[] {
     return this.manifest?.props ?? [];
+  }
+
+  /** The pack's late stamp, null for a pack that carries none, undefined before it has landed (`__debug.late()`). */
+  get late(): unknown {
+    return this.manifest ? (this.manifest.late ?? null) : undefined;
   }
 
   find(id: string): PropDef | null {

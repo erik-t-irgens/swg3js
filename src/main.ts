@@ -147,7 +147,8 @@ import { STAND_TUNE, StoryStands, type CastDeps } from './world/storyStands.ts';
 import { TRACKER_TUNE, TimeWarnings, Tracker, trackerTime, tuneTracker } from './ui/tracker.ts';
 import { WAYPOINT_COLOURS, WAYPOINT_TUNE, gameToRaw, gameToRawX, gameToRawZ, isWaypointColour, rawToGameX, rawToGameZ, tuneWaypointView, waypointName } from './story/waypoints.ts';
 import { WardrobeUi } from './ui/wardrobeUi';
-import { WeaponsUi } from './ui/weaponsUi';
+import { GROUP_ORDER as RACK_ORDER, WeaponsUi } from './ui/weaponsUi';
+import { LATE_THINGS, bodiesProduct, clothesProduct, emotesProduct, garageProduct, hairProduct, housingProduct, lateLine, lateStateOf, missingMenus, propsProduct, rackProduct, shipsProduct, type LateProduct } from './ui/lateReport.ts';
 import { GIVE_TUNE } from './ui/giveModel.ts';
 import { BackpackUi, type BackpackCell } from './ui/backpackUi';
 import { Equipment, ITEMS_TUNE, tuneItems } from './player/equipment';
@@ -231,7 +232,7 @@ interface TravelWait {
 import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTripsFrom, shipTripsNote, type ShipTerminalState } from './world/shipTerminal.ts';
 import type { Building, PlacedObject } from './world/layoutStream';
 import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
-import { allDeeds, deedById, deedLine, deedOfModel, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
+import { allDeeds, deedById, deedLine, deedOfModel, deedsLate, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
 import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftTo as houseLiftTo, turnTo, wheelReach, type GhostDeps, type GhostState } from './world/placeGhost.ts';
 import { clearRadius, patchOfBounds, patchOfFootprint, type Footprint, type Patch } from './world/housePlace.ts';
 import { NO_KEY, PlacingBar, placingView, type PlacingKeys, type PlacingView } from './ui/placingBar.ts';
@@ -357,6 +358,7 @@ import { wireVehicleId } from './vehicles/podHybrid.ts';
 import { BIKE_SCALE, CEILING_MOST, RACE_BASE, RACE_TUNE, RACE_UPGRADES, readRaceHatch, tuneBase, tuneRace, tuneUpgrades, type RaceTune } from './vehicles/raceTune.ts';
 import { RACE_CLOCK, enginePartName, holdsLiving, raceFling, type RaceDrive, type RaceMode } from './vehicles/raceDrive.ts';
 import { vehicleDialsFor } from './vehicles/raceDials.ts';
+import { shipDialsFor } from './space/tierDials.ts';
 import { ENGINE_TUNE, damagePart, mendEngines, tuneEngines, type EngineTune } from './vehicles/drivetrain.ts';
 import { hardpointName } from './vehicles/shipAssembly.ts';
 import { EngineFx } from './vehicles/engineFx.ts';
@@ -7851,6 +7853,15 @@ class App {
         return this.world.gallery ? { ...this.world.gallery.status(), nearest: this.world.gallery.nearest(this.player.pos) } : 'not on the gallery planet (?planet=gallery)';
       },
       /**
+       * What each menu holds from SOE's final files (publishes 55 to 59, `src/ui/lateReport.ts`): every pack the game has
+       * already fetched with its late stamp (`applied`, `final`, `none`, `refused`, or `before` when it carries none),
+       * each menu's late thing asked of that menu's own function over what it was fetched with (`shows`: true, false,
+       * or null while its pack has not been fetched: open the menu once), the menus whose pack says the late files were
+       * in the mount and still do not show them (`missing`, which should be empty), and the line the converter's
+       * `status` would print as far as these packs can say it. Fetches nothing.
+       */
+      late: () => this.lateReport(),
+      /**
        * Move the blade's axis in the hand to see where it looks right. `grip({ source: 'tags' })` swaps in the axis
        * the importer read from the game's own tag geometry (when it could), `grip({ source: 'solved' })` the one
        * solved from the swings; `grip({ tilt: 20, turn: -10 })` turns the axis by degrees about two axes at right
@@ -10452,8 +10463,9 @@ class App {
       canOpen: () => this.started && this.inWorld && !this.traveling && !this.talkNow,
       freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
       holdKeys: (ms) => this.holdGameKeys(ms),
-      // The race drive's, the engines' and a race run's numbers of feel, as sliders when `race`, `engines` or `track` is picked.
-      dials: (helper) => vehicleDialsFor(helper),
+      // The race drive's, the engines' and a race run's numbers of feel, as sliders when `race`, `engines` or `track` is
+      // picked, and the NPC ship ladder's tiers 6 to 10 when `npcShips` is.
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper),
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -12589,6 +12601,100 @@ class App {
       startsIn: defaultHair(table, items, c.speciesName, c.genderName),
       remembered,
       last: this.hairChange,
+    };
+  }
+
+  /**
+   * What the console's `late()` shows: each pack already fetched with its late stamp, and each menu's late thing asked
+   * of the menu's own function (`src/ui/lateReport.ts`) over what that pack holds. A pack not fetched is said to be
+   * so (its menu's `shows` null) rather than fetched here: the report reads, it never loads.
+   */
+  private lateReport(): Record<string, unknown> {
+    const base = import.meta.env.BASE_URL;
+    const packs: { name: string; stamp: unknown }[] = [];
+    const menus: Record<string, LateProduct | { menu: string; shows: null; what: string }> = {};
+    const notYet = (menu: string, what: string) => (menus[menu] = { menu, shows: null, what });
+    // The wardrobes the converter stamps (`wardrobe/<folder>/`), not the mobiles' wearables, which carry none of their own.
+    const wardrobes = [...Character.wardrobesNow()].filter(([dir]) => dir.includes('/assets-private/wardrobe/'));
+    for (const [dir, w] of wardrobes) {
+      const folder = dir.replace(/\/$/, '').split('/').pop() ?? dir;
+      packs.push({ name: `wardrobe/${folder}`, stamp: (w as { late?: unknown }).late ?? null });
+    }
+    const humans = wardrobes.filter(([dir]) => /\/wardrobe\/human_(fe)?male\/$/.test(dir));
+    if (humans.length) {
+      const [dir, w] = humans[0];
+      const folder = dir.replace(/\/$/, '').split('/').pop() ?? '';
+      menus.clothes = clothesProduct(w.items, { own: (w.gender ?? '').charAt(0) || (folder.endsWith('female') ? 'f' : 'm'), species: folder });
+    } else notYet('clothes', 'no human wardrobe fetched yet: open the Clothes tab once');
+    const table = creatorTableNow(base);
+    if (table) packs.push({ name: 'characters/customization.json', stamp: table.late ?? null });
+    const wookieeHair = wardrobes.find(([, w]) => w.items.some((i) => i.id.startsWith(`hair_${LATE_THINGS.hair.species}_${LATE_THINGS.hair.gender}_`)));
+    if (table && wookieeHair) menus.hair = hairProduct(table, wookieeHair[1].items as HairItem[]);
+    else notYet('hair', table === undefined ? "the creator's table has not landed yet" : !table ? 'no creator table converted' : 'no wardrobe holding the Wookiee hair fetched yet: open the Clothes or Appearance tab once');
+    const rig = this.player.rig;
+    const parts = rig?.character?.manifest as { id?: string; late?: unknown } | undefined;
+    if (parts?.id) packs.push({ name: `characters/${parts.id}`, stamp: parts.late ?? null });
+    if (rig) menus.emotes = emotesProduct(rig.clipNames);
+    else notYet('emotes', 'no rig');
+    const weapons = this.weapons;
+    if (weapons) {
+      packs.push({ name: 'weapons', stamp: weapons.manifest.late ?? null });
+      menus.rack = rackProduct(weapons.weapons, RACK_ORDER);
+    } else notYet('rack', 'the rack has not loaded yet');
+    const g = this.garage ?? this.world.garage;
+    if (g) {
+      if (g.late.gallery !== undefined) packs.push({ name: 'gallery', stamp: g.late.gallery });
+      if (g.late.creatures !== undefined) packs.push({ name: 'creatures', stamp: g.late.creatures });
+      if (g.late.ships !== undefined) packs.push({ name: 'ships', stamp: g.late.ships });
+      menus.garage = garageProduct(g.vehicles.map((v) => v.id));
+    } else notYet('garage', 'the garage has not loaded yet: open the spawner (B) once');
+    const combat = this.world.ships.data;
+    if (combat) packs.push({ name: 'ships/combat.json', stamp: combat.file.late ?? null });
+    // The hull is asked of the garage's own list, so only once the garage has loaded; the tier 10 type of the NPC types
+    // once their one fetch has answered, and a fetch that answered with no file is the menu not showing them (which
+    // `missing` names when the ships pack says the late files were in the mount), never a menu not yet asked.
+    if (!g) notYet('ships', `the garage has not loaded yet: open the spawner (B) once${combat ? ` (the NPC types are in: ${combat.file.types.some((t) => t.id === LATE_THINGS.npcType) ? LATE_THINGS.npcType : `no ${LATE_THINGS.npcType}`})` : ''}`);
+    else if (!this.world.ships.loaded) notYet('ships', 'the NPC ship types (ships/combat.json) have not landed yet');
+    else menus.ships = shipsProduct(g.vehicles.filter((v) => v.kind === 'ship').map((v) => v.id), combat ? combat.file.types.map((t) => t.id) : null);
+    const cat = this.world.mobileCatalogue;
+    if (cat) {
+      packs.push({ name: 'mobiles', stamp: cat.file.options?.source?.late ?? null });
+      menus.npcs = bodiesProduct((id) => {
+        const e = cat.byId(id);
+        return e ? cat.ready(e).ok : null;
+      });
+    } else notYet('npcs', 'the creature and NPC catalogue has not landed yet');
+    if (this.props.loaded) {
+      packs.push({ name: 'props', stamp: this.props.late ?? null });
+      menus.props = propsProduct(this.props.all, this.props.groups().map((x) => ({ id: x.id, label: x.label })));
+    } else notYet('props', 'the props pack has not landed yet: open the Props tab once');
+    const deedsStamp = deedsLate();
+    if (deedsStamp !== undefined) {
+      packs.push({ name: 'deeds', stamp: deedsStamp });
+      menus.housing = housingProduct(allDeeds());
+    } else notYet('housing', 'the deeds have not landed yet: open the Housing tab once');
+    const stateOf = new Map(packs.map((p) => [p.name, lateStateOf(p.stamp)]));
+    // A menu whose own pack says the late files were in the mount, and still does not show the late thing.
+    const packOfMenu: Record<string, readonly string[]> = {
+      clothes: humans.length ? [`wardrobe/${humans[0][0].replace(/\/$/, '').split('/').pop()}`] : [],
+      hair: ['characters/customization.json'],
+      emotes: parts?.id ? [`characters/${parts.id}`] : [],
+      rack: ['weapons'],
+      garage: ['gallery', 'creatures'],
+      ships: ['ships', 'ships/combat.json'],
+      npcs: ['mobiles'],
+      props: ['props'],
+      housing: ['deeds'],
+    };
+    const missing = missingMenus(Object.values(menus), packOfMenu, packs);
+    return {
+      line: lateLine(packs),
+      packs: packs.map((p) => {
+        const s = p.stamp as { key?: string; rows?: number; why?: string } | null;
+        return { name: p.name, state: stateOf.get(p.name), ...(s?.key ? { key: s.key } : {}), ...(s?.why ? { why: s.why } : {}) };
+      }),
+      menus,
+      missing,
     };
   }
 

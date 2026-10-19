@@ -120,6 +120,22 @@ export function kindByNames(label: string, template: string | undefined, model: 
   return { kind: kind ?? 'speederbike', inferred: kind !== null };
 }
 
+/**
+ * The gallery's vehicles the garage lists: every item of the gallery's vehicles section whose model the manifest's
+ * layout holds, each with that layout entry, in the section's order; one whose model the layout lacks was not
+ * converted and is passed over. `Garage.load` builds its gallery vehicles from these, and `lateMenus.test.ts` reads
+ * the packs on disk through this very rule rather than a looser one of its own.
+ */
+export function garageGalleryRows<I extends { model: string }, M extends { id: string }>(items: readonly I[], layout: readonly M[]): { item: I; model: M }[] {
+  const files = new Map(layout.map((m) => [m.id, m]));
+  const out: { item: I; model: M }[] = [];
+  for (const item of items) {
+    const model = files.get(item.model);
+    if (model) out.push({ item, model });
+  }
+  return out;
+}
+
 /** The table's row for a garage id, while the switch and `kinds` say the table is used; null otherwise. */
 export function kindRow(id: string): VehicleKindRow | null {
   if (!RACE_TUNE.on || RACE_TUNE.kinds !== 'table') return null;

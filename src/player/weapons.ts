@@ -90,6 +90,8 @@ export interface WeaponsManifest {
    * `fireLook.ts` for why).
    */
   effects?: Partial<Record<ExtraEffect, string>>;
+  /** The converter's late stamp: whether SOE's final files were in the mount it was written from. */
+  late?: unknown;
 }
 
 /** The effects a pack carries beyond the guns' own rows, by the name the game asks for them by. */

@@ -134,6 +134,25 @@ const base = {
   const order = v.groups.map((g) => g.id);
   const want = [...SLOT_GROUPS, OTHER_GROUP].map((s) => s.id).filter((id) => order.includes(id));
   ok(order.join(',') === want.join(','), `the groups read down the body, Other last (${order.join(', ')})`);
+
+  // A piece no id pattern places stands under its arrangement's first slot (the view hands `slotGroupOf` the entry's
+  // own slots), one an id pattern places stays where its pattern puts it whatever slot it takes, and one whose slot is
+  // a hand that holds rather than wears, or that carries no slots at all, is still Other's.
+  const slotted = buildWardrobeView(
+    [
+      wear('love_day_wings', { slots: [['back']] }),
+      wear('crafting_band', { slots: [['hat']] }),
+      wear('wod_bracelet', { slots: [['wrist_l']] }),
+      wear('helmet_odd', { slots: [['chest1']] }),
+      wear('held_thing', { slots: [['hold_r']] }),
+      wear('bare_trinket'),
+    ],
+    base,
+  );
+  const under = (id: string) => slotted.groups.find((g) => g.cells.some((c) => c.id === id))?.id;
+  ok(under('love_day_wings') === 'back' && under('crafting_band') === 'head' && under('wod_bracelet') === 'bracer_l', `a piece no pattern places is listed under its arrangement's first slot (${under('love_day_wings')}, ${under('crafting_band')}, ${under('wod_bracelet')})`);
+  ok(under('helmet_odd') === 'head', 'a piece a pattern places stays under its pattern whatever slot it takes');
+  ok(under('held_thing') === 'other' && under('bare_trinket') === 'other', 'and a piece held in a hand, or with no slots, is still Other\'s');
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -422,6 +441,11 @@ const base = {
   // The panels' own behaviour, which this change was not allowed to touch.
   ok(wardrobe.includes('onWear') && wardrobe.includes('onRemove'), 'the Clothes tab still puts a piece on and takes one off through the game\'s equipment');
   ok(/takes off every worn piece of this group/.test(wardrobe), 'and an empty pick is still the dropdowns\' "— none —"');
+  // A group's "take off" takes off what stands under its heading as the view groups it (the entry's own slots
+  // through `groupOf`), or a piece listed under Back by its slot would never be taken off by Back's own button;
+  // a double-click on a worn piece takes off that piece alone, since a group gathers several body slots.
+  ok(/!isHairKey\(part\) && this\.groupOf\(itemId\) === slot/.test(wardrobe) && /private groupOf\(id: string\): string \{[\s\S]*?return slotGroupOf\(item\?\.id \?\? id, item\?\.slots\);/.test(wardrobe), "a group's take-off asks the view's own grouping, the entry's slots and all");
+  ok(/if \(c\.on\) await this\.takeOff\(c\.id\);/.test(wardrobe) && /private async takeOff\(itemId: string\)[\s\S]*?x === itemId/.test(wardrobe), 'and a double-click on a worn piece takes off that piece and nothing else under its heading');
   ok(wardrobe.includes('Take everything off'), 'and the strip button is still there');
   ok(/def\.class === 'thrown'/.test(weapons), 'a grenade is still a listing rather than something to hold');
   ok(weapons.includes('blade-colours') && weapons.includes('Empty hands'), 'the blade colours and Empty hands are still on the rack');

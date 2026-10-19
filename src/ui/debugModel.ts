@@ -46,11 +46,12 @@ export const DEBUG_MENU_TUNE = {
  * under the seated people, how a held key turns and raises a thing in hand, and the grass, the far tree cards and
  * the flora's shadows, whose page settings they move in memory, and first of all the race drive, the
  * engines and a race run and its tracks, whose numbers of feel are sliders (`src/vehicles/raceDials.ts`,
- * `src/race/trackDials.ts`; the track's list of gates is the menu's too, on the dev server). Listed first, in
- * a group of their own, so every one is in one place and a new one is a line here; the pins of these are the
- * ones a tick runs again at start (`startCalls`).
+ * `src/race/trackDials.ts`; the track's list of gates is the menu's too, on the dev server), and the NPC
+ * ships, whose ladder above tier 5 is sliders too (`src/space/tierDials.ts`). Listed first, in a group of
+ * their own, so every one is in one place and a new one is a line here; the pins of these are the ones a tick
+ * runs again at start (`startCalls`).
  */
-export const TUNING_HELPERS: readonly string[] = ['race', 'engines', 'track', 'reach', 'lod', 'flora', 'grass', 'farCards', 'floraShadows', 'god', 'difficulty', 'time', 'day', 'fog', 'bladeGlow', 'torch', 'hover', 'nebulae', 'arm', 'seats', 'placeHold'];
+export const TUNING_HELPERS: readonly string[] = ['race', 'engines', 'track', 'npcShips', 'reach', 'lod', 'flora', 'grass', 'farCards', 'floraShadows', 'god', 'difficulty', 'time', 'day', 'fog', 'bladeGlow', 'torch', 'hover', 'nebulae', 'arm', 'seats', 'placeHold'];
 
 /**
  * Where each helper is listed. A helper named in no group is listed under "Other", so one added to
@@ -59,14 +60,14 @@ export const TUNING_HELPERS: readonly string[] = ['race', 'engines', 'track', 'r
  */
 export const DEBUG_GROUPS: readonly { title: string; helpers: readonly string[] }[] = [
   { title: 'Tuning', helpers: TUNING_HELPERS },
-  { title: 'Where and when', helpers: ['teleport', 'teleportSwg', 'swg', 'look', 'zoom', 'mouse', 'cell', 'near', 'find', 'player', 'scene', 'advance', 'advanceCost', 'breakFrames', 'map', 'mapGroup', 'galaxy', 'spaceMap', 'travel', 'gates', 'doorless', 'buildings', 'enter', 'interiors', 'doors', 'instances', 'corvette', 'gallery', 'show', 'character', 'capture', 'captureShip', 'goToShot', 'place', 'placeView', 'placeClock', 'cloning'] },
+  { title: 'Where and when', helpers: ['teleport', 'teleportSwg', 'swg', 'look', 'zoom', 'mouse', 'cell', 'near', 'find', 'player', 'scene', 'advance', 'advanceCost', 'breakFrames', 'map', 'mapGroup', 'galaxy', 'spaceMap', 'travel', 'gates', 'doorless', 'buildings', 'enter', 'interiors', 'doors', 'instances', 'corvette', 'gallery', 'late', 'show', 'character', 'capture', 'captureShip', 'goToShot', 'place', 'placeView', 'placeClock', 'cloning'] },
   { title: 'Travel, homes and trade', helpers: ['shuttle', 'terminal', 'ride', 'rigHull', 'fittings', 'house', 'homes', 'deed', 'prop', 'placements', 'purse', 'trade'] },
   { title: 'Story', helpers: ['story', 'quests', 'signal', 'storyHere', 'waypoints', 'minimap', 'talkTree', 'gestures', 'shots', 'reactions', 'docs', 'journal', 'file', 'standing', 'companion'] },
   { title: 'Progress', helpers: ['progress', 'stat', 'encounter'] },
   { title: 'Character and kit', helpers: ['appearance', 'creator', 'hair', 'dye', 'tint', 'recipe', 'morph', 'species', 'wardrobe', 'wear', 'remove', 'preview', 'closet', 'fpHead', 'headLook', 'grapple', 'mood', 'variant', 'anim', 'upper', 'split', 'steady', 'grip', 'items', 'give', 'use', 'destroy', 'backpack', 'startingKit', 'giveScreens', 'weapons', 'equip', 'heldFx', 'shine', 'select', 'burn', 'breath', 'heal', 'profile', 'gun', 'gunType'] },
   { title: 'Fighting', helpers: ['saber', 'saberDefense', 'guns', 'bolts', 'turrets', 'turret', 'shootPlayer', 'blades', 'clash', 'scars', 'marks', 'powers', 'gadgets', 'forceLightning', 'footprints', 'ragdoll', 'kill', 'wreck'] },
   { title: 'Creatures and people', helpers: ['creature', 'fighter', 'fighters', 'cover', 'send', 'nav', 'patrols', 'mobile', 'mobiles', 'mobileRoles', 'mobileAssets', 'mobileTune', 'stepProbe', 'mobileCull', 'wild', 'people', 'ours', 'talk', 'followers'] },
-  { title: 'Vehicles and ships', helpers: ['vehicles', 'spawn', 'spawnBox', 'mount', 'unspawn', 'vehicleTune', 'vehicleState', 'shipFit', 'refit', 'paint', 'shipEdit', 'ship', 'controls', 'cockpit', 'cockpitFrame', 'seat', 'wings', 'landing', 'dock', 'boots', 'droid', 'shipShadows', 'shipDrift', 'pushBodies', 'flight', 'taunt', 'npcShips', 'npcShip', 'shipCombat'] },
+  { title: 'Vehicles and ships', helpers: ['vehicles', 'spawn', 'spawnBox', 'mount', 'unspawn', 'vehicleTune', 'vehicleState', 'shipFit', 'refit', 'paint', 'shipEdit', 'ship', 'controls', 'cockpit', 'cockpitFrame', 'seat', 'wings', 'landing', 'dock', 'boots', 'droid', 'shipShadows', 'shipDrift', 'pushBodies', 'flight', 'taunt', 'npcShip', 'shipCombat'] },
   { title: 'Space', helpers: ['cruise', 'jumps', 'jump', 'jumpState', 'jumpFx', 'suns'] },
   { title: 'Picture and effects', helpers: ['postfx', 'fxTiming', 'fxView', 'fxCheck', 'fxWarm', 'renderInfo', 'ssao', 'dof', 'previewDof', 'clouds', 'heat', 'heatPlume', 'flare', 'flareTune', 'flareProbe', 'faceSun', 'roomAir', 'movers', 'motionProbe', 'motionTune', 'grade', 'gradeSelfTest', 'gradeCheck', 'shadows', 'shadowLook', 'ambient', 'normals', 'gloss', 'ground', 'dem', 'groundRules', 'slopes', 'families', 'reflections', 'spec', 'specSelfTest', 'cards', 'cardsSelfTest', 'cardLight', 'cardLightSelfTest', 'leafShadowSelfTest', 'sway', 'swaySelfTest', 'grassShadowSelfTest', 'blackBox', 'specks', 'underwater', 'particles', 'ribbons', 'animTex'] },
   { title: 'Water, sky and weather', helpers: ['water', 'waterFx', 'waterSurface', 'sea', 'afloat', 'lava', 'ripples', 'fountains', 'weather', 'sky'] },

@@ -5,8 +5,12 @@
 import assert from 'node:assert/strict';
 import { OFF_HAND_CLASSES, TINT_LEAST, chooseArrangement, cleanTint, collapseOwned, countOf, firstItems, fitFor, garmentMeshesOf, heldThingsOf, lookWithoutGarments, migrateInventory, mintThing, moveTints, normalizeOwned, occupancy, outfitTints, packPartOf, pairOwned, partToItemId, pickedTint, planHold, pruneHeld, pruneThings, resolveKit, sameTint, slotWords, speciesWords, thingOf, tintFromValues, tintValues, wornThingOf, type Fit, type HeldRef, type OwnedItem, type TintVariable } from '../../../src/core/inventory.ts';
 import { itemInfo, itemSwatch, wardrobeIndex, type ItemContext } from '../../../src/player/items.ts';
-import { isHairKey as hairKey } from '../../../src/core/inventory.ts';
+import { isHairKey as hairKey, slotGroupOf } from '../../../src/core/inventory.ts';
 import { characterMark } from '../../../src/net/session.ts';
+import { atBase, traceHash } from './atBase.ts';
+
+/** The give tab's groups of the day-one ids below through `slotGroupOf` as it stood at the pass's base, for a checkout git cannot answer in. */
+const SLOT_GROUP_BASE_HASH = '08229f87a176';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -691,5 +695,22 @@ const HOLD_BOTH = [['hold_r', 'hold_l']];
 
 // The Sullustan beards SOE's last publishes add (`sul_beard_s01_m` to `s12_m`) are hair, never a thing owned.
 ok(hairKey('sul_beard_s01_m') && hairKey('sul_beard_s12_m') && hairKey('sul_hair_s01_f') && !hairKey('beard_s01') && !hairKey('sul_bearded_robe_s01'), "a Sullustan beard is hair, as the Sullustan's styles are, and nothing else that merely says beard is");
+// And the Singing Mountain Clan's one style, under a hair folder of its own, is hair too (every wardrobe's last hair entry the rest missed).
+ok(hairKey('singing_mountain_clan_bangs_s01') && !hairKey('singing_mountain_clan_shirt_s01') && !hairKey('singing_mountain_clan_boots'), "the clan's bangs are hair, and the clan's clothes are not");
+
+// --- the give tab's groups: an entry no id pattern places stands under its arrangement's first slot ----------------
+{
+  // SOE's late pieces that read "Other" for want of a word in their ids (slots as the wardrobe pack carries them).
+  ok(slotGroupOf('back_love_day_11_hue_wings', [['back']]) === 'back' && slotGroupOf('cyborg_crafting_headband_s01', [['hat']]) === 'head' && slotGroupOf('bracelet_wod_crafting_l', [['wrist_l']]) === 'bracer_l', "the Life Day wings, the crafting headband and the bracelet stand under their body slots");
+  ok(slotGroupOf('back_love_day_11_hue_wings') === 'other' && slotGroupOf('back_love_day_11_hue_wings', null) === 'other' && slotGroupOf('odd_piece', [['hold_r']]) === 'other' && slotGroupOf('odd_piece', [[]]) === 'other', 'with no slots, or a slot that holds rather than wears, it stays Other');
+  ok(slotGroupOf('armor_padawan_robe', PADAWAN) === 'chest' && slotGroupOf('shirt_s03', [['shoes']]) === 'chest' && slotGroupOf('boots_s05', [['hat']]) === 'feet', 'what an id pattern places stays where it was, whatever its slots say');
+  ok(slotGroupOf('earring_s01', [['earring_l'], ['earring_r']]) === 'head' && slotGroupOf('ring_s01', RING_EITHER) === 'hands' && slotGroupOf('arm_band', [['bicep_r']]) === 'bicep_r' && slotGroupOf('cyber_hand', [['cybernetic_hand_l']]) === 'hands', "an ear is the head's, a ring and a cybernetic hand the hands', each arm its own side's");
+  // The day one: every id with no slots is grouped as the function at the pass's base groups it, over the ids the
+  // tests above and the give tab's own fixtures use (where git cannot answer, a hash of that function's trace).
+  const ids = ['shirt_s03', 'jacket_s02', 'pants_s04', 'shoes_s01', 'hat_s04', 'helmet_s01', 'goggles_s02', 'necklace_s01', 'backpack_s01', 'cape_s02', 'bicep_l_s01', 'bracer_r', 'wrist_l', 'gloves_s01', 'belt_s03', 'skirt_s02', 'boots_s05', 'sandals_s01', 'robe_s01', 'vest_s02', 'armor_mandalorian_chest_plate', 'armor_padawan_robe', 'ring_s01', 'earring_s01', 'back_love_day_11_hue_wings', 'cyborg_crafting_headband_s01', 'bracelet_wod_crafting_l', 'apron_chef_s01', 'mask_s01', 'bandolier_s01', 'kilt_s01', 'odd_piece'];
+  const old = await atBase<{ slotGroupOf: (id: string) => string }>('src/core/inventory.ts');
+  if (old) ok(ids.every((id) => slotGroupOf(id) === old.slotGroupOf(id) && slotGroupOf(id, [['back']]) === (old.slotGroupOf(id) === 'other' ? 'back' : old.slotGroupOf(id))), `every id is grouped as before with no slots, and only what read Other moves with them (${ids.length}, against the pass's base)`);
+  else ok(traceHash(ids.map((id) => slotGroupOf(id))) === SLOT_GROUP_BASE_HASH, `every id is grouped as before with no slots (${ids.length}, against the base's trace hash: git could not hand the old file over)`);
+}
 
 console.log(`${checks} checks passed`);

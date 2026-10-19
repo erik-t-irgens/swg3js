@@ -6,9 +6,9 @@
 // cell is called when two items share the game's name; and -- the one that decides whether the
 // screens look broken -- what a cell shows when the converter drew no picture for it.
 //
-// That last one is not a rare accident. Counted on the owner's own packs with the two switches as the
-// panel opens them, the human folders list 915 and 964 items and every one has a picture; the Ithorian
-// folders list 519 and 522 of which 172 have none, and every one of those is a row the client's
+// That last one is not a rare accident. Counted on the owner's own packs (converted with SOE's final
+// files) with the two switches as the panel opens them, the human folders list 951 and 1,002 items and
+// every one has a picture; the Ithorian folders list 545 and 548 of which 172 have none, and every one of those is a row the client's
 // appearance table marks `:hide` for that species: the converter wrote no meshes for it (`parts`
 // empty, `sat` null), so there was nothing to draw. Such a piece draws nothing on the body either, so
 // its cell says "worn unseen" rather than falling back to initials by accident.
@@ -26,10 +26,10 @@ import { escapeHtml, prettyName } from './catalogue.ts';
  * (`__debug.giveScreens({ page: 60 })`) and one node test can sweep them.
  *
  * - `page`: cells a group draws at a time, the rest behind a "show the next N" button, exactly as the
- *   NPC tab's rows do -- its own number. Measured on the owner's packs with the switches as the panel
- *   opens them, two of a human wardrobe's thirteen groups run past it (the chest's 175 and 206, and
- *   Other's 124 and 127) and one of the Ithorian's (Other's 123), so a page button is an ordinary
- *   sight and not a once-in-the-panel thing.
+ *   NPC tab's rows do -- its own number. Measured on the owner's packs converted with SOE's final files,
+ *   with the switches as the panel opens them, one of a human wardrobe's thirteen groups runs past it
+ *   (the chest's 192 and 230) and none of the Ithorian's: Other, which held 124 and 127 before its pieces
+ *   were put under their arrangements' first slots (`slotGroupOf`), holds two to four now.
  * - `openCells`: how many cells the groups that open on their own may draw between them on the first
  *   paint. Opening every group that holds something worn is thirteen groups and 856 cells on a
  *   dressed human, which is the paging thrown away; the groups past the budget stay folded and their
@@ -220,7 +220,7 @@ export function buildWardrobeView(items: readonly WardrobeRow[], opts: WardrobeO
     }
     listed++;
     const name = item.name?.trim() || wearName(item.id);
-    const group = slotGroupOf(item.id);
+    const group = slotGroupOf(item.id, item.slots);
     const meshless = (item.parts?.length ?? 0) === 0;
     const picture: Picture = item.icon ? 'icon' : meshless ? 'unseen' : 'blank';
     const takes = item.slots?.length ? `takes: ${item.slots.map((a) => slotWords(a)).join(' or ')}` : '';

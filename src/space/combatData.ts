@@ -66,6 +66,8 @@ export interface CombatFile {
   hulls: Record<string, HullFx>;
   skipped: { id: string; why: string }[];
   counts?: { types: number; families: number; hulls: number; skipped: number; fits: number; formations: number; taunts: number; hitLayers: number; target: boolean };
+  /** The converter's late stamp: whether SOE's final files were in the mount it was written from. */
+  late?: unknown;
 }
 
 /** A family as the NPC tab lists it: its name, faction and the tiers it has. */
