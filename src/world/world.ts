@@ -63,6 +63,9 @@ import { Doors, type DoorView } from './doors.ts';
 import { InstanceLocks } from './instances.ts';
 import { gatherOpeners } from './doorMath.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
+import { standingList } from './ngeOverlay.ts';
+import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, brigadeBodies, personDormant, rosterRows, ruinsOf, type RosterRow, type RuinsCircle } from './restuss.ts';
+import { releaseWorldStates, stateNow, standsIn, takeWorldStates } from './worldState.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { conversationPack } from './conversationPack.ts';
@@ -555,6 +558,25 @@ export class World {
    * ship's rooms), else null. Asked by the mobiles' manager on every spawn, whoever calls it.
    */
   refuseMobiles: (() => string | null) | null = null;
+  /**
+   * Set by the game: whether a server others share holds the world this arrival is for, answered once the
+   * line can say (`serverHoldsFor` in `ngeOverlay.ts`). The owner's local overlay asks it behind the loading
+   * screen and is left out where a server holds the world, unless he says otherwise. None, and nobody does.
+   */
+  serverHoldsWorld: (() => Promise<boolean>) | null = null;
+  /**
+   * Set by the game: what an arrival on a world with states (Restuss: `worldState.ts`) waits on behind its loading
+   * screen before it takes them -- a saved server's hail, where one is coming, so the world stands the server's
+   * state and not this browser's. Settles at once with nothing to wait for. None, and nothing is waited on.
+   */
+  worldStatesReady: (() => Promise<void>) | null = null;
+  /**
+   * Set by the game: where this world brings the player in and back, in the world's frame (the arrival, a
+   * teleport's spot, and so where a death comes round on a world with no cloning facility). The owner's local
+   * overlay keeps its people and herds who pick a fight on sight that far off it (`NGE_OVERLAY_TUNE.arrivalClear`).
+   * None, and nothing is kept off.
+   */
+  arrivalPoint: (() => { readonly x: number; readonly z: number } | null) | null = null;
   /** What the fighters need from the game, kept across planets and given to each new manager. */
   npcDeps: Partial<NpcDeps> = {};
   /** The player as something that can be hurt and fought: its place and state are set each frame. */
@@ -1458,6 +1480,10 @@ export class World {
 
   load(planet: PlanetDef, packId = packIdOf(planet)): void {
     this.unload();
+    // The world left behind's states are let go: until this one's pack has been read, every world's stand in what an
+    // arrival would take now (`worldState.ts`).
+    releaseWorldStates();
+    this.restussFile = null;
     this.planet = planet;
     this.packId = packId;
     this.terrain?.detachSwg();
@@ -1664,6 +1690,21 @@ export class World {
       this.packProgress = 1;
       return null;
     }
+    // The world's states (Restuss as the living launch city or as its ruins: `worldState.ts`), taken now and kept
+    // for the rest of this world, after a saved server's hail where one is coming: everything below that stands
+    // anything reads them, the streamer, the people and the roster of ours among them. Taken before the pack is
+    // the world's, since the frames drawn during the wait hand the world's pack to whatever reads it (the placed
+    // sounds are put down the frame `this.pack` is first seen, `readySound`), and each of those must read the states
+    // this arrival takes and not the ones an arrival would have taken before the hail.
+    if (pack.layout?.states) {
+      await this.worldStatesReady?.();
+      // A travel in the wait: the pack is nobody's yet, so the unload never saw it and it is let go here.
+      if (token !== this.loadToken) {
+        pack.dispose();
+        return null;
+      }
+      takeWorldStates(pack.layout.states);
+    }
     this.pack = pack;
     // The world's outdoor walkability grid, written beside the manifest by the `navgrid` command.
     // A world with no `nav.json` answers false to everything and every body in it steers exactly as
@@ -1676,7 +1717,7 @@ export class World {
     // The world's own wildlife: where the server's spawn areas are and what may stand in them. A
     // few hundred kilobytes a world beside the fleet's one manifest, and a world with no such pack
     // simply has the wildlife it always had.
-    await wildLife.load(this.packId, import.meta.env.BASE_URL);
+    await wildLife.load(this.packId, import.meta.env.BASE_URL, { serverHolds: this.serverHoldsWorld ?? undefined });
     if (token !== this.loadToken) return null;
     // The people who stand somewhere and stay there ride in the same pack the wildlife does, so the
     // rows are taken from what that fetch already holds rather than fetched a second time. Beside them
@@ -1685,8 +1726,20 @@ export class World {
     // world as it was.
     await Promise.race([conversationPack.pending, new Promise<void>((r) => setTimeout(r, 4000))]);
     if (token !== this.loadToken) return null;
+    // The owner's local overlay's people last of all (`standingList` in `ngeOverlay.ts`), so every row before them
+    // keeps its place in the list, and so its `stood:` name, in every browser; stood behind this same loading
+    // screen with the rest.
     const people = wildLife.peopleRows() as StandingRow[];
-    standingPeople.adopt(people.length ? [...people, ...conversationPack.standRows(this.packId)] : people, wildLife.peopleCreatures(), wildLife.peopleExtras());
+    const heralds = people.length ? conversationPack.standRows(this.packId) : [];
+    // Restuss's First Brigade of ours, after the heralds and before the overlay, in the list whatever state the city
+    // stands in (stood only in the ruins, by their tag), and Core3's town inside its circle skipped in the ruins: no
+    // row's place, and so no `stood:` name, depends on the state (`restuss.ts`).
+    const restuss = pack.layout?.states?.[RESTUSS_KEY];
+    const roster = restuss && people.length ? await this.restussRoster(pack) : [];
+    if (token !== this.loadToken) return null;
+    const ruins: RuinsCircle | null = restuss?.centre && stateNow(RESTUSS_KEY) === 'ruins' ? { centre: restuss.centre, circle: RESTUSS_TUNE.circle } : null;
+    this.restussFile = restuss ? { centre: restuss.centre ?? null, roster: roster.length } : null;
+    standingPeople.adopt(standingList(people, heralds, wildLife.overlayRows() as StandingRow[], roster as StandingRow[]), wildLife.peopleCreatures(), { ...wildLife.peopleExtras(), dormant: (r) => personDormant(r, standsIn, ruins) });
     this.packProgress = 0.12;
 
     const scatter: ScatterItem[] = [];
@@ -1795,7 +1848,8 @@ export class World {
       this.particles = new ParticleEffects(this.scene, pack.url(''));
       this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
       // The gallery is one long walk of exhibits with nothing else to draw: everything loads from anywhere on it.
-      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.streamReach(), hugeColliders: !!planet.space });
+      // What stands in a state this world did not arrive in (Restuss's other state) lies dormant (`worldState.ts`).
+      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.streamReach(), hugeColliders: !!planet.space, stands: standsIn });
       // A tier is built hidden and shown once its programs exist, so no frame is ever the first to
       // draw a material nothing had built: that was thirteen programs and two frames of over a
       // second for a player who had not moved. `swg.shaderPace` = '0' in local storage leaves it
@@ -1918,6 +1972,8 @@ export class World {
     this.loadToken++;
     this.ambience?.leave();
     this.unload();
+    releaseWorldStates();
+    this.restussFile = null;
   }
 
   /** Moved on by every unload: a vehicle being prepared for the world that went is not made (spawnVehicle's `alive`). */
@@ -3402,7 +3458,7 @@ export class World {
     for (const t of this.floraTrunks().trunks) things.push({ x: t.x, z: t.z, r: t.r, what: 'a tree or a rock (its collision shape)' });
     const c = this.layoutCenter ?? { x: 0, z: 0 };
     for (const s of wildLife.allSites) things.push({ x: rawToGameX(c.x, s.x), z: rawToGameZ(c.z, s.z), r: Math.max(5, s.size / 2), what: `a lair, herd or camp (${s.lair})` });
-    for (const r of wildLife.peopleRows() as StandingRow[]) {
+    for (const r of [...(wildLife.peopleRows() as StandingRow[]), ...(wildLife.overlayRows() as StandingRow[])]) {
       if (r.cell || !Number.isFinite(r.x) || !Number.isFinite(r.z)) continue;
       things.push({ x: rawToGameX(c.x, r.x), z: rawToGameZ(c.z, r.z), r: 1, what: `a post (${r.who})` });
     }
@@ -6798,6 +6854,8 @@ export class World {
         // The outdoor walk grid, once this world has one: a site laid on a cliff or in a lake is moved
         // to open ground, or not stood.
         walkable: (x, z) => (outdoorNav.ready ? outdoorNav.walkable(x, z) : null),
+        // Where the player comes in and back, which the owner's local overlay's herds that pick a fight keep clear of.
+        arrival: () => this.arrivalPoint?.() ?? null,
         nest: {
           scene: this.scene,
           physics: this.physics,
@@ -6964,6 +7022,8 @@ export class World {
         keeps: (m) => this.followers.holds(m),
         // A world of copies stands nobody but in the copy the player is in.
         scope: (x, y, z) => this.inCopy(x, y, z),
+        // Where the player comes in and back, which the owner's local overlay's people who pick a fight keep clear of.
+        arrival: () => this.arrivalPoint?.() ?? null,
         // One of them the story killed for this character is never stood here again.
         gone: (key) => this.peopleGone?.(key) ?? false,
       };
@@ -8138,6 +8198,62 @@ export class World {
       this.mobiles.cap = cap;
       this.mobiles.animRange = animRange;
     }
+  }
+
+  /**
+   * What this world arrived with of Restuss (`restuss.ts`): the city's middle in the snapshot's frame, and how many
+   * of the First Brigade of ours were put in its list. Null on a world with no Restuss.
+   */
+  restussFile: { centre: { x: number; z: number } | null; roster: number } | null = null;
+
+  /** Every tag this world's states give (`restuss=living`, `restuss=ruins`): the placement editor's State choices. */
+  stateTags(): string[] {
+    const states = this.pack?.layout?.states;
+    if (!states) return [];
+    const out: string[] = [];
+    for (const key of Object.keys(states)) for (const v of states[key]?.values ?? []) out.push(`${key}=${v}`);
+    return out;
+  }
+
+  /**
+   * Restuss's circle in the world's frame while this world stands it in ruins (its middle from the layout's own
+   * `states.restuss` block, carried by the layout's mirror), else null: what Core3's fittings there are skipped by.
+   */
+  restussRuinsHere(): RuinsCircle | null {
+    const block = this.pack?.layout?.states?.[RESTUSS_KEY];
+    const c = this.layoutCenter;
+    if (!block?.centre || !c || stateNow(RESTUSS_KEY) !== 'ruins') return null;
+    return { centre: { x: -(block.centre.x - c.x), z: block.centre.z - c.z }, circle: RESTUSS_TUNE.circle };
+  }
+
+  /**
+   * For the console: what this world stands of its states -- the layout's objects standing in one state only and
+   * those lying dormant (`LayoutStreamer`), and of the people the rows skipped (Core3's town in the ruins, and rows
+   * of the other state) and how many of ours are in the list. Null for a world with no states.
+   */
+  statesReport(): { standing: number; dormant: number; people: { dormant: number; core3: number; stated: number; oursHere: number }; roster: number } | null {
+    if (!this.pack?.layout?.states) return null;
+    return {
+      standing: this.layoutStream?.statedCount ?? 0,
+      dormant: this.layoutStream?.dormantCount ?? 0,
+      people: standingPeople.dormantReport(),
+      roster: this.restussFile?.roster ?? 0,
+    };
+  }
+
+  /**
+   * The First Brigade of ours for a pack whose layout carries Restuss (`rosterRows`): a post by a rule over the
+   * ruins' own places, each person a body out of the catalogue's `dressed_brigade_*` entries. The catalogue is
+   * waited on a moment (four seconds, as the heralds are), since it is fetched at boot and is often still in
+   * flight as the first world loads; with none by then the ruins hold nobody of ours this visit.
+   */
+  private async restussRoster(pack: AssetPack): Promise<RosterRow[]> {
+    const layout = pack.layout;
+    if (!layout) return [];
+    const ruins = ruinsOf(layout.objects, (model) => pack.find(model)?.bounds ?? null);
+    if (!ruins.length || !RESTUSS_ROSTER_TUNE.on) return [];
+    const cat = await Promise.race([this.loadMobileCatalogue(), new Promise<null>((r) => setTimeout(() => r(null), 4000))]);
+    return rosterRows(ruins, brigadeBodies(cat?.entries ?? []));
   }
 
   /** Start the creature and NPC catalogue's one fetch (at boot, beside the species index); it resolves to the catalogue, or null. */

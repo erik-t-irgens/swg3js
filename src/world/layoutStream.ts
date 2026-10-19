@@ -27,6 +27,7 @@ import { LOD_LEVEL_TUNE, sweepDue } from './lodLevels.ts';
 import type { BuildingDoors, DoorsFile } from './doorMath.ts';
 import type { DressingStand, StandAnswer } from './permanent.ts';
 import { radiusOfBounds } from '../story/placements.ts';
+import { fileByState, standsIn } from './worldState.ts';
 
 /**
  * What stands the doors in a building's doorways when its rooms are built and takes them down with
@@ -446,6 +447,16 @@ export class LayoutStreamer {
   /** Objects wider than COLLIDER_RADIUS_CAP. Must stay a field initialiser: the constructor's loop fills it. */
   private readonly huge = new Set<PlacedObject>();
   /**
+   * The layout's objects of a world state this world does not stand in (Restuss's living city in the ruins, its ruins
+   * in the living city: `worldState.ts`), filed nowhere else -- never drawn, collided with or stood in -- and asked
+   * only by the placing rules (`objectsNear`), so a house is refused on the city's ground in either state. Their
+   * flora circles are kept with everybody's, so switching never shows a tree through a building. A field
+   * initialiser, as `huge`: the constructor's loop fills it.
+   */
+  private readonly dormant: PlacedObject[] = [];
+  /** How many of the objects standing stand in one world state only: a field initialiser, as `dormant`. */
+  private statedStanding = 0;
+  /**
    * What each object placed in play brought with it, so taking it out again is exact.
    *
    * A tier built the ordinary way shares one instanced mesh between every copy of a model in it, so
@@ -674,7 +685,7 @@ export class LayoutStreamer {
   private readonly pack: AssetPack;
   private readonly effects: ParticleEffects | null;
 
-  constructor(scene: THREE.Scene, physics: Physics, pack: AssetPack, layout: Layout, effects: ParticleEffects | null = null, options: { reach?: number; hugeColliders?: boolean } = {}) {
+  constructor(scene: THREE.Scene, physics: Physics, pack: AssetPack, layout: Layout, effects: ParticleEffects | null = null, options: { reach?: number; hugeColliders?: boolean; stands?: (tag?: string) => boolean } = {}) {
     this.scene = scene;
     this.physics = physics;
     this.pack = pack;
@@ -689,7 +700,12 @@ export class LayoutStreamer {
     // every entry and would be asked once for each of tens of thousands of objects.
     const defs = new Map<string, PackModelDef>();
     for (const list of Object.values(pack.manifest.categories)) for (const d of list) defs.set(d.id, d);
-    for (const o of layout.objects) {
+    // Which objects stand in the world's states as they were taken at this arrival (`worldState.ts`), and the index
+    // each takes in `objects`: the layout's own `in` names a building by its place in the layout, which is not its
+    // place here once what lies dormant before it is left out (`fileByState`).
+    const filed = fileByState(layout.objects, options.stands ?? standsIn);
+    for (let li = 0; li < layout.objects.length; li++) {
+      const o = layout.objects[li];
       // Snapshot space is mirrored in X and centred on the layout centre.
       const gx = gameX(o.x, layout.center.x);
       const gz = gameZ(o.z, layout.center.z);
@@ -699,12 +715,23 @@ export class LayoutStreamer {
       const sizeTier = modelTier(o.radius, def?.bounds, !!def?.particle);
       const snapTier = snapshotTier(o.radius);
       const p: PlacedObject = { model: o.model, template: o.template, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius, contained: !!o.contained, tier: this.filing === 'snapshot' ? snapTier : sizeTier, sizeTier, snapTier, footprint: 0 };
-      // The building and the room the snapshot itself names (step 7): an index into this same list, which the
-      // loop fills in the layout's own order.
+      if (filed.placedAt[li] < 0) {
+        // Of a state this world does not stand in: kept for the placing rules and out of the flora, filed nowhere else.
+        if (!p.contained) p.footprint = def?.particle ? 0 : footprintOf(def?.bounds, tiltSin(p.q.x, p.q.z));
+        this.dormant.push(p);
+        if (!p.contained) {
+          const clear = floraClearRadius(o.radius, def?.bounds ?? null);
+          if (clear > 0) this.addExclusion({ x: gx, z: gz, r: clear });
+        }
+        continue;
+      }
+      // The building and the room the snapshot itself names (step 7): an index into this same list, mapped from the
+      // layout's own by the filing above.
       if (o.contained && typeof o.in === 'number' && typeof o.cell === 'number') {
-        p.hostIndex = o.in;
+        p.hostIndex = filed.host[li];
         p.cell = o.cell;
       }
+      if (o.state) this.statedStanding++;
       this.objects.push(p);
       const region = this.regionFor(gx, gz);
       region.objects[p.tier].push(p);
@@ -1113,7 +1140,30 @@ export class LayoutStreamer {
         }
       }
     }
+    // And what lies dormant, of the world's other state: a house is refused on Restuss's ground whichever state the
+    // city stands in, or putting one down in the ruins would bury it in a building the next arrival stands. A walk
+    // of the list itself, which is a few hundred objects on the one world that has any.
+    for (const o of this.dormant) {
+      if (o.contained) continue;
+      const def = this.defOf(o.model);
+      if (def?.particle) continue;
+      const radius = modelReach(def?.bounds);
+      if (!(radius > 0)) continue;
+      const want = radius + reach;
+      if ((o.x - x) ** 2 + (o.z - z) ** 2 > want * want) continue;
+      out.push({ x: o.x, z: o.z, radius, template: o.template, model: o.model });
+    }
     return out;
+  }
+
+  /** How many of the layout's objects lie dormant, of a world state this world does not stand in (`worldState.ts`). */
+  get dormantCount(): number {
+    return this.dormant.length;
+  }
+
+  /** How many of the objects standing stand in one world state only (the state this world arrived in). */
+  get statedCount(): number {
+    return this.statedStanding;
   }
 
   /** The circles `keepFloraOff` has registered, so the same one asked for twice is kept once. */

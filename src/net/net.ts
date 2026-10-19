@@ -7,6 +7,7 @@ import { sharedClock } from '../world/sharedClock.ts';
 import { SESSION, Session, type CharacterSummary, type Settlement } from './session.ts';
 import { rideFields, type PeerAboard } from './aboardMath.ts';
 import { storyHailVersion } from '../story/storyWire.ts';
+import { cleanStates } from '../world/worldState.ts';
 
 export interface Hello {
   name: string;
@@ -180,6 +181,11 @@ interface ServerWord {
   veh?: number;
   /** Whether a server's hail says it carries the group's race word (1); a server before it says nothing. */
   race?: number;
+  /**
+   * The world states a server keeps (`{ restuss: 'living' }`), on its hail and on the `worldStates` word its admin's
+   * change sends; a server before them says nothing, and each browser keeps its own setting (src/world/worldState.ts).
+   */
+  states?: unknown;
 }
 
 /**
@@ -200,6 +206,52 @@ const PING_TICK = 1000;
 const HELLO_VERSION_READ = 3;
 
 const STORAGE = 'swg.server';
+
+/**
+ * A look at a server's hail on a line of its own, closed the moment the hail is read: what an arrival on a world
+ * with states asks of a saved server before the game's own line is made (a session's first world, whose line is
+ * connected only after its loading screen), so the world stands the server's state on that very arrival. It says
+ * nothing and claims nothing; a server that hears a line open and close again with no word between keeps nothing
+ * of it. The hail as it came, or null: the relay that came before (which never hails), a far end that is not
+ * there, or nothing within `waitMs`.
+ */
+export function peekHail(url: string, waitMs: number): Promise<Record<string, unknown> | null> {
+  return new Promise((resolve) => {
+    let ws: WebSocket | null = null;
+    let done = false;
+    const finish = (v: Record<string, unknown> | null): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        ws?.close();
+      } catch {
+        /* closing is all that is left to do */
+      }
+      resolve(v);
+    };
+    const timer = setTimeout(() => finish(null), Math.max(0, waitMs));
+    try {
+      ws = new WebSocket(url.trim());
+    } catch {
+      finish(null);
+      return;
+    }
+    ws.onmessage = (e) => {
+      let msg: unknown = null;
+      try {
+        msg = JSON.parse(String(e.data));
+      } catch {
+        msg = null;
+      }
+      finish(msg && typeof msg === 'object' && (msg as { t?: unknown }).t === 'hail' ? (msg as Record<string, unknown>) : null);
+    };
+    ws.onerror = () => {
+      /* onclose follows */
+    };
+    ws.onclose = () => finish(null);
+  });
+}
 
 export class Net {
   private socket: WebSocket | null = null;
@@ -250,6 +302,13 @@ export class Net {
    * never sends any of these, so with one this is never called.
    */
   onWord: (msg: Record<string, unknown>) => void = () => {};
+  /**
+   * The world states a server keeps, as this line heard them (src/world/worldState.ts, cleaned): on its hail (null
+   * for a server whose hail carries none, and for the relay that came before, which never hails), on its admin's
+   * `worldStates` word, and null again when the line is put down on purpose or this browser is turned away or taken
+   * over. A line that merely drops says nothing, and the last word stands while it comes back.
+   */
+  onStates: (states: Record<string, string> | null, why: 'hail' | 'word' | 'gone') => void = () => {};
 
   /** The server kept in this browser, or the one in ?server=, or none. */
   static savedUrl(): string {
@@ -334,8 +393,9 @@ export class Net {
     this.clearPeers();
     this.session.closed();
     // Put down on purpose: the day goes back to this browser's own clock rather than carrying the
-    // server's offset about with it.
+    // server's offset about with it, and its world states to this browser's own settings.
     sharedClock.none();
+    this.onStates(null, 'gone');
     this.setStatus('off', '');
   }
 
@@ -384,6 +444,8 @@ export class Net {
         this.hailTimer = 0;
         this.session.hailTimedOut();
         sharedClock.none();
+        // The relay that came before keeps no world state: every browser keeps its own setting.
+        this.onStates(null, 'hail');
         // With a word set nothing has been said yet, so this hello is the one going ahead of a claim.
         // With none, the hello went at the moment the line opened and was kept by whatever is there.
         this.greetedEarly = !!this.session.word;
@@ -450,6 +512,16 @@ export class Net {
     if (this.online && this.greeted) this.send(msg);
   }
 
+  /**
+   * Ask the server to stand a world in another state (`worldStateSet`): the admin's alone, and only a value the key
+   * allows. The answer is the `worldStates` word to everybody connected, or a refusal to this browser.
+   */
+  setWorldState(key: string, value: string): boolean {
+    if (!this.online || !this.greeted) return false;
+    this.send({ t: 'worldStateSet', key, value });
+    return true;
+  }
+
   private receive(text: string): void {
     let msg: { t: string; id?: number; hello?: Hello; peers?: Peer[]; clip?: string; word?: string } & Partial<PeerState>;
     try {
@@ -469,7 +541,9 @@ export class Net {
         // The world's clock, from the greeting: the day and the weather follow it from here on, and the
         // round trips below sharpen it. The hello follows the claim, never the other way about.
         sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined, Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
-        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0, props: Number(server.props) > 0 ? Math.floor(Number(server.props)) : 0, homes: Number(server.homes) > 0 ? Math.floor(Number(server.homes)) : 0, progress: Number(server.progress) > 0 ? Math.floor(Number(server.progress)) : 0, gear: Number(server.gear) > 0 ? Math.floor(Number(server.gear)) : 0, veh: Number(server.veh) > 0 ? Math.floor(Number(server.veh)) : 0, race: Number(server.race) > 0 ? Math.floor(Number(server.race)) : 0 });
+        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0, props: Number(server.props) > 0 ? Math.floor(Number(server.props)) : 0, homes: Number(server.homes) > 0 ? Math.floor(Number(server.homes)) : 0, progress: Number(server.progress) > 0 ? Math.floor(Number(server.progress)) : 0, gear: Number(server.gear) > 0 ? Math.floor(Number(server.gear)) : 0, veh: Number(server.veh) > 0 ? Math.floor(Number(server.veh)) : 0, race: Number(server.race) > 0 ? Math.floor(Number(server.race)) : 0, states: cleanStates(server.states) });
+        // The world states it keeps, which an arrival on a world with states was waiting on (null: a server before them).
+        this.onStates(this.session.worldStates, 'hail');
         // A hail that came in after the wait had already run out: this browser said hello ahead of its
         // claim, and a server that asks for a join word threw that hello away without a word about it.
         // Now that it has claimed, the hello is said again. A server that asks for no word kept the
@@ -502,6 +576,19 @@ export class Net {
         if (server.do === 'refused') this.onNotice(typeof server.why === 'string' ? server.why.slice(0, 160) : 'the server would not change the day');
         else if (Number(server.dayMs) > 0) sharedClock.dayWord(Number(server.dayMs), Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
         break;
+      case 'worldStates': {
+        // The world's admin changed a world's state (Restuss living or in ruins), for everybody connected; a refusal
+        // is a word for the one who asked. Taken at the next arrival on that world (src/world/worldState.ts).
+        if (server.do === 'refused') {
+          this.onNotice(typeof server.why === 'string' ? server.why.slice(0, 160) : 'the server would not change that world');
+          break;
+        }
+        const states = cleanStates(server.states);
+        if (!states) break;
+        this.session.worldStatesWord(states);
+        this.onStates(states, 'word');
+        break;
+      }
       case 'claimed':
         // The server has us: this is what makes it a server session, not the welcome, because a server
         // with a join word answers the claim before it will listen to a hello at all.
@@ -530,6 +617,7 @@ export class Net {
         // goes back to its own clock rather than keeping a stranger's offset for the life of the page.
         // It must come before the close, because the close's own handler keeps whatever is still shared.
         sharedClock.none();
+        this.onStates(null, 'gone');
         this.socket?.close();
         this.setStatus('off', 'turned away');
         break;
@@ -541,6 +629,7 @@ export class Net {
         // The same as being turned away: this browser is out of that world, so it takes its own clock
         // back rather than keeping the server's offset with nothing to correct it.
         sharedClock.none();
+        this.onStates(null, 'gone');
         this.socket?.close();
         this.clearPeers();
         this.setStatus('off', 'taken over');
@@ -554,6 +643,7 @@ export class Net {
           this.hailTimer = 0;
           this.session.welcomedWithoutHail();
           sharedClock.none();
+          this.onStates(null, 'hail');
         }
         this.session.welcome({ id: msg.id, v: Number(server.v) || 0, ff: server.ff === 1 ? 1 : 0 });
         for (const p of msg.peers ?? []) {

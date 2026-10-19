@@ -277,6 +277,8 @@ const warns = (r: ReturnType<typeof checkSet>, re: RegExp) => r.warnings.some((w
         ['eisley-locker', [ref([3448, -4688], 'story', LOCKER_TEMPLATE)]],
         // Both layers hold it: the world edit's row stands, a hundred metres from the story's.
         ['yard-gate', [ref([100, 100], 'story', null, 4), ref([0, 0], 'world', null, 2)]],
+        // Kept to one world state (rubble for Restuss's ruins): it stands only while its world stands that way.
+        ['ruin-rubble', [{ ...ref([500, 500], 'world', null, 6), state: 'restuss=ruins' }]],
       ]),
     ],
     // Rows the game never stands, as `placementsOf` marks them: anything in the world of copies, a building in a space zone.
@@ -310,6 +312,9 @@ const warns = (r: ReturnType<typeof checkSet>, re: RegExp) => r.warnings.some((w
   ok(warned.errors.length === 0 && warned.warnings.some((w) => w.rule === 1 && w.file === 'objects/by-template.jsonc' && /write "template": "place\/eisley-locker"/.test(w.message)), 'an object written with the template of a thing a permanent row stands near its point is warned: the game never finds that row by its template');
   ok(!warned.warnings.some((w) => w.file === 'objects/by-template-far.jsonc'), 'and one with no such row near it is not');
   ok(!warned.warnings.some((w) => w.file === 'objects/other-template.jsonc'), "nor one of another template a metre from the row: the snapshot's own thing of that template is what it means");
+  const stated = run([obj('rubble', 'place/ruin-rubble', [501, 500])]);
+  ok(stated.errors.length === 0 && stated.warnings.some((w) => w.rule === 1 && w.file === 'objects/rubble.jsonc' && /names a row that stands in restuss=ruins only \(public\/placements\/world\/tatooine\.json:6\)/.test(w.message)), `an object naming a row kept to one world state is clean but warned, naming the state and where the row is (${stated.warnings.map((w) => w.message).join('; ')})`);
+  ok(!good.warnings.some((w) => /stands in .* only/.test(w.message)), 'and one naming a row of every state is not');
   const unchecked = run([obj('ghost', 'place/no-such-row', [0, 0]), obj('by-template', LOCKER_TEMPLATE, [3450, -4690])], {});
   ok(unchecked.errors.length === 0 && unchecked.warnings.length === 0 && unchecked.counts.placed === 1, 'with no placements handed in nothing of it is checked, and the object naming one is still counted');
   ok(TEMPLATE.test(placementKey('eisley-locker')) && TEMPLATE.test('place/a_b-9'), "a row's key passes the story's own template pattern, so nothing in the story had to change to name one");
@@ -363,6 +368,12 @@ const warns = (r: ReturnType<typeof checkSet>, re: RegExp) => r.warnings.some((w
     ok(read.standing === 4 && read.worlds === 2 && read.never === 3 && !read.placements.has('corellia'), `what the game stands is counted, and what it never stands apart (${read.standing} over ${read.worlds}, ${read.never} never)`);
     const none = placementsOf(join(scratch, 'not-there'), { root });
     ok(none.files === 0 && none.placements.size === 0 && none.notes.length === 0, 'a placements folder that is not there is none, and says nothing');
+    // A row kept to one world state carries it onto its ref, which is what the warning above reads; one of every state none.
+    const stateDir = join(scratch, 'placements-stated');
+    mkdirSync(join(stateDir, 'world'), { recursive: true });
+    writeFileSync(join(stateDir, 'world', 'rori.json'), placementsFileText('rori', 'raw', [row('rubble', 5300, 5700, { state: 'restuss=ruins' }), row('crate', 5310, 5700)]));
+    const statedRead = placementsOf(stateDir, { root }).placements.get('rori');
+    ok(statedRead?.get('rubble')?.[0].state === 'restuss=ruins' && statedRead?.get('crate')?.[0].state === undefined, `a row's world state is read onto its ref (${JSON.stringify(statedRead?.get('rubble'))})`);
     ok(PLACEMENTS_DIR === join(ROOT, 'public', 'placements'), "with none named, it is this checkout's own public/placements, which the build ships");
     // The command line: an object naming a row, then the same with its near forty metres off.
     const story = join(scratch, 'story-private');

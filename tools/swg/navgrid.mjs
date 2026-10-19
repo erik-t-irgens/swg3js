@@ -1106,6 +1106,8 @@ export async function buildNavGrid(dir, opts = {}) {
   const defs = new Map();
   for (const list of Object.values(manifest.categories ?? {})) for (const e of list) defs.set(e.id, e);
   const byModel = new Map();
+  // Every object whatever world state it stands in (`state`, Restuss's living city and its ruins: restuss.mjs): one
+  // grid serves both, so a body in the ruins routes round where a house stood and never into a building in either.
   for (const o of layout.objects) {
     if (o.contained) continue;
     const list = byModel.get(o.model);

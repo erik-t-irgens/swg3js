@@ -317,8 +317,10 @@ const look = (values: Record<string, number>) => ({ morphs: {}, values, height: 
   ok(/values:\s*rig\.variableValues\(\)/.test(hello), "and those colours are read off the character as it is drawn, not the record's look");
   const figure = main.slice(main.indexOf('this.select.loadFigure ='), main.indexOf('this.select.weaponName ='));
   ok(/const look = await this\.recordLook\(c, character\);[\s\S]*putBackLook\(character, look\);\s*this\.applyAppearance\(character, look\)/.test(figure), "the select screen puts the rig back before this record's look goes on, its things' colours laid over it");
+  // The creator puts the rig back to its pack outright (no look of anybody's), its shape and height with it.
   const creator = method('private async openCreator(): Promise<void> {');
-  ok(/putBackLook\(character, legacy\);\s*this\.applyAppearance\(character, legacy\)/.test(creator), 'and so does the creator, which reuses the last figure\'s rig when the species is the same');
+  const fresh = method('private async freshBody(c: Character): Promise<void> {');
+  ok(/this\.freshBody\(character\)/.test(creator) && /putBackLook\(c, null\);\s*c\.resetShape\(\)/.test(fresh), 'and so does the creator, which reuses the last figure\'s rig when the species is the same');
 }
 
 console.log(`\n${passed} checks passed`);

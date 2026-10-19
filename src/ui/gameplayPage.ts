@@ -27,4 +27,19 @@ export const GAMEPLAY: { title: string; knobs: readonly Knob[] }[] = [
       },
     ],
   },
+  {
+    title: 'The world',
+    knobs: [
+      {
+        key: 'restuss',
+        label: 'Restuss',
+        kind: 'choice',
+        choices: [
+          { value: 'living', label: 'The living city' },
+          { value: 'ruins', label: 'In ruins' },
+        ],
+        hint: "How Restuss on Rori stands: the launch city whole, with its people, its starport and its shuttleport, or its ruins with the First Brigade standing guard and the late camp's pads its only ports. The camp and the faction cantinas stand either way. It changes when you next arrive on Rori; on a server that keeps it, the server's admin decides it for everybody.",
+      },
+    ],
+  },
 ];

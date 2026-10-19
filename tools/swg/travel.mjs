@@ -459,10 +459,12 @@ export function placeChildren(placements, byTemplate) {
     const yaw = yawOfQuat(p.q);
     const cos = Math.cos(yaw);
     const sin = Math.sin(yaw);
+    // A building that stands in one world state only (Restuss's launch city: restuss.mjs) gives its children that state.
+    const state = p.state ? { state: p.state } : {};
     for (const k of kids) {
       const { x: _x, y: _y, z: _z, yaw: _yaw, cell: _cell, ...rest } = k;
       if (k.cell > 0) {
-        out.push({ ...rest, model: k.model ?? null, building: p.template, at: p.id ?? null, cell: k.cell, x: k.x, y: k.y, z: k.z, yaw: k.yaw, bx: p.x, by: p.y, bz: p.z, byaw: Math.round(yaw * 1e4) / 1e4 });
+        out.push({ ...rest, model: k.model ?? null, building: p.template, at: p.id ?? null, cell: k.cell, x: k.x, y: k.y, z: k.z, yaw: k.yaw, bx: p.x, by: p.y, bz: p.z, byaw: Math.round(yaw * 1e4) / 1e4, ...state });
         continue;
       }
       out.push({
@@ -479,6 +481,7 @@ export function placeChildren(placements, byTemplate) {
         by: p.y,
         bz: p.z,
         byaw: Math.round(yaw * 1e4) / 1e4,
+        ...state,
       });
     }
   }

@@ -288,7 +288,20 @@ check('outside circle', near(s.heightAt(150, 100), expectAt(150, 100), 1e-3));
   const se = new TerrainSampler(te);
   check('environment base layer covers the map', se.environmentAt(0, 0) === 1 && se.environmentAt(-400, 300) === 1, `${se.environmentAt(0, 0)} ${se.environmentAt(-400, 300)}`);
   check('environment circle paints its family', se.environmentAt(100, 100) === 2 && se.environmentAt(120, 100) === 2, `${se.environmentAt(100, 100)} ${se.environmentAt(120, 100)}`);
-  check('seasonal area kept in its own map', se.environmentAt(100, 100, true) === 3 && se.environmentAt(100, 100) === 2 && se.environmentAt(120, 100, true) === 2, `${se.environmentAt(100, 100, true)} ${se.environmentAt(120, 100, true)}`);
+  {
+    // A layer painting Life Day's area runs only in its season (`TERRAIN_GROUND_TUNE.lifeDay`, read as the terrain
+    // is parsed): out of season the place underneath is all there is; in season the area is kept in a map of its own.
+    const { TERRAIN_GROUND_TUNE } = await import('../../../src/swg/terrain/generator.ts');
+    check('out of season a Life Day layer paints no seasonal area', se.environmentAt(100, 100, true) === 2 && se.environmentAt(100, 100) === 2, `${se.environmentAt(100, 100, true)} ${se.environmentAt(100, 100)}`);
+    const was = TERRAIN_GROUND_TUNE.lifeDay;
+    TERRAIN_GROUND_TUNE.lifeDay = true;
+    try {
+      const ss = new TerrainSampler(makeTrn(false));
+      check('seasonal area kept in its own map', ss.environmentAt(100, 100, true) === 3 && ss.environmentAt(100, 100) === 2 && ss.environmentAt(120, 100, true) === 2, `${ss.environmentAt(100, 100, true)} ${ss.environmentAt(120, 100, true)}`);
+    } finally {
+      TERRAIN_GROUND_TUNE.lifeDay = was;
+    }
+  }
   check('feather under the family clamp leaves the pole alone', se.environmentAt(134, 100) === 1, String(se.environmentAt(134, 100)));
   const so = new TerrainSampler(makeTrn(true));
   check('feather clamp override narrows the area', so.environmentAt(120, 100) === 2 && so.environmentAt(130, 100) === 1, `${so.environmentAt(120, 100)} ${so.environmentAt(130, 100)}`);

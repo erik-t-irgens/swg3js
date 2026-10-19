@@ -8,6 +8,7 @@ import { DOORS_PACK_VERSION, type DoorsFile } from './doorMath.ts';
 import { CARD_LIGHT_TUNE } from './cardLight.ts';
 import { prepareCardModel, registerPackCards, registerSharedCards } from './cardRule.ts';
 import { prepareSwayModel } from './floraSway.ts';
+import type { LayoutStateBlock } from './worldState.ts';
 
 export interface CellLight {
   type: number;
@@ -159,11 +160,18 @@ export interface LayoutObject {
   in?: number;
   /** Pack-relative terrain modification layer (.lay) flattening the ground under a building. */
   layer?: string;
+  /**
+   * The world state it stands in (`restuss=living`, `restuss=ruins`), where it stands in one only: Restuss's launch
+   * city and its ruins (`tools/swg/restuss.mjs`). Absent, every state. Read through `standsIn` (`worldState.ts`).
+   */
+  state?: string;
 }
 
 export interface Layout {
   planet: string;
   center: { x: number; z: number };
+  /** A world's states, by key (Rori's `restuss`), where it has any: what an arrival takes them from (`worldState.ts`). */
+  states?: Record<string, LayoutStateBlock>;
   radius: number;
   /** Pack-relative terrain template (.trn) copied from the game, when the converter found one. */
   terrain?: string;

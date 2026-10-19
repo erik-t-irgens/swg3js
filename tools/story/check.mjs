@@ -176,7 +176,7 @@ export function placementsOf(dir = PLACEMENTS_DIR, { root = ROOT, kinds = worldK
         const never = worldNever ?? (kind === 'space' && r.kind === 'building' ? 'a space zone stands no building' : null);
         if (never) neverRows++;
         if (never && !worldNever) notes.push(`${shown}:${lineOf(r.id)}: warning: row ${r.id} is never stood: ${never}`);
-        const ref = { at: [r.x, r.z], layer, file: shown, line: lineOf(r.id), template, never };
+        const ref = { at: [r.x, r.z], layer, file: shown, line: lineOf(r.id), template, never, ...(r.state ? { state: r.state } : {}) };
         if (!placements.has(word.world)) placements.set(word.world, new Map());
         const ids = placements.get(word.world);
         if (!ids.has(r.id)) ids.set(r.id, []);

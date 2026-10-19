@@ -48,13 +48,14 @@ import * as THREE from 'three';
 import type { MobileCatalogue } from './mobiles/catalogue.ts';
 import type { MobileEntry } from './mobiles/types.ts';
 import type { Mobile } from './mobiles/mobile.ts';
-import type { Post } from './mobiles/brain.ts';
+import type { Post, PostTune } from './mobiles/brain.ts';
 import type { Aggression } from '../combat/kit.ts';
 import { intoWorld, tuneTable } from './wildLife.ts';
 import { roll } from './spawnSeed.ts';
 import { SEATED_MOOD, moodOfRow } from './mobiles/moodIdle.ts';
 import { Patrol, walksRound } from './patrols.ts';
 import { seatOfMood, type SeatedRow } from './seatProps.ts';
+import { NGE_OVERLAY_TUNE, picksFights, rowKeptOff } from './ngeOverlay.ts';
 
 /**
  * One person, as the converter wrote them: x and z in the snapshot's frame, as every placed object
@@ -103,6 +104,36 @@ export interface StandingRow {
   takes?: string;
   /** Stood by us rather than by the data: the Star Destroyer's crew, whom no data stands anywhere. */
   ours?: boolean;
+  /** Which script or table stood it (`herald` for the heralds `conversationPack.ts` stands). */
+  from?: string;
+  /**
+   * Out of the owner's local overlay of SOE's own placements (`ngeOverlay.ts`), stood after everybody else; or one of
+   * ours stood by a rule of the game's (`'ours'`: the First Brigade in Restuss's ruins, `restuss.ts`).
+   */
+  src?: 'nge' | 'ours';
+  /** The world state it stands in (`restuss=ruins`), where it stands in one only; absent, every state (`worldState.ts`). */
+  state?: string;
+  /**
+   * How far it steps about its spot, metres, where its spawner let it loiter or wander (the overlay's rows): its
+   * post's radius in place of `PEOPLE_TUNE.postRadius` (`postFor`).
+   */
+  roam?: number;
+  /**
+   * It walks its round whether or not it may be fought (`patrolFor`): the overlay's patrol rows, whose spawner
+   * the server walked its fighters round with, where Core3's towns left their combat walkers at their posts.
+   */
+  walks?: boolean;
+}
+
+/** Where a row came from, for the console: the local overlay, a herald, the people of ours, or Core3's own. */
+export type RowSource = 'core3' | 'herald' | 'nge' | 'ours';
+
+/** A row's source (`RowSource`). */
+export function sourceOfRow(r: Pick<StandingRow, 'src' | 'from' | 'ours'>): RowSource {
+  if (r.src === 'nge') return 'nge';
+  if (r.from === 'herald') return 'herald';
+  if (r.ours) return 'ours';
+  return 'core3';
 }
 
 /**
@@ -126,6 +157,13 @@ export interface PeopleExtras {
   pools?: Readonly<Record<string, readonly string[]>> | null;
   /** The fleet's weapon groups: a group's name to its weapon templates. */
   weaponGroups?: Readonly<Record<string, readonly string[]>> | null;
+  /**
+   * Which rows lie dormant for this world, asked once of each as it is adopted (in the snapshot's frame, before the
+   * rows are carried): a row of a world state the world does not stand in, and in Restuss's ruins Core3's own town
+   * inside its circle (`personDormant` in `restuss.ts`). A dormant row is never stood and never taken off the list, so
+   * every row's place in it, and so its `stood:` name, is the same in every state.
+   */
+  dormant?: ((row: StandingRow) => boolean) | null;
 }
 
 const TEMPERS: readonly Aggression[] = ['passive', 'skittish', 'defensive', 'aggressive'];
@@ -454,6 +492,13 @@ export interface PeopleDeps {
    */
   scope?(x: number, y: number, z: number): boolean;
   /**
+   * Where this world brings the player in and back (the world's frame): the arrival, a teleport's spot, and so
+   * where a death comes round on a world with no cloning facility. The owner's local overlay keeps its people who
+   * pick a fight on sight that far off it (`rowKeptOff`, `NGE_OVERLAY_TUNE.arrivalClear`); nobody else's row is
+   * touched. None, and nothing is kept off.
+   */
+  arrival?(): { readonly x: number; readonly z: number } | null;
+  /**
    * Whether this browser shares the people it may be fought over with a server just now (`Owned.seeding`).
    * While it does, a person killed comes back as the same person rather than as its row's next life: the
    * lives are each browser's own count, and two browsers that had seen different numbers of deaths would
@@ -572,6 +617,8 @@ export class StandingPeople {
    * person and body again (`personFor`). Walking away and back is not a life; the same body stands.
    */
   private lives = new Uint16Array(0);
+  /** Which rows lie dormant for this world (`PeopleExtras.dormant`): 1 never stood, decided once at `adopt`. */
+  private dormant = new Uint8Array(0);
   /** The fleet's creatures and the rest of the pack a person is drawn from (`adopt`). */
   private creatures: Readonly<Record<string, PeopleCreature>> | null = null;
   private extras: PeopleExtras = {};
@@ -610,8 +657,11 @@ export class StandingPeople {
    * the people of ours are asked to give back (`src/world/ambient/`), since whatever covers the least of
    * them stands somebody of the data's on the next pass. `pass` counts the passes that really ran and is
    * never reset, so a shortfall is answered once and not once for every time it is read.
+   *
+   * `offArrival` is how many rows that pass kept off the place a player comes in and back at, or put down there
+   * (`rowKeptOff`: the owner's local overlay's people who pick a fight on sight).
    */
-  readonly last = { rows: 0, up: 0, down: 0, indoors: 0, stood: 0, dropped: 0, swapped: 0, waiting: 0, refused: '', essential: 0, short: 0, shortBytes: 0, pass: 0 };
+  readonly last = { rows: 0, up: 0, down: 0, indoors: 0, stood: 0, dropped: 0, swapped: 0, waiting: 0, refused: '', essential: 0, short: 0, shortBytes: 0, pass: 0, offArrival: 0 };
 
   get ready(): boolean {
     return this.rows.length > 0;
@@ -650,6 +700,10 @@ export class StandingPeople {
       if (r.route) row.route = r.route.map((p) => ({ ...p }));
       this.rows.push(row);
     }
+    // Asked of each row in the snapshot's frame, as the pack wrote it, before any pass carries it.
+    this.dormant = new Uint8Array(this.rows.length);
+    const dormant = this.extras.dormant;
+    if (dormant) for (let i = 0; i < this.rows.length; i++) if (dormant(this.rows[i])) this.dormant[i] = 1;
     this.lives = new Uint16Array(this.rows.length);
     this.away = new Float64Array(this.rows.length);
     this.near.length = 0;
@@ -678,6 +732,7 @@ export class StandingPeople {
     this.creatures = null;
     this.extras = {};
     this.lives = new Uint16Array(0);
+    this.dormant = new Uint8Array(0);
     this.away = new Float64Array(0);
     this.near.length = 0;
     this.last.rows = 0;
@@ -734,7 +789,10 @@ export class StandingPeople {
     this.last.waiting = 0;
     this.last.short = 0;
     this.last.shortBytes = 0;
+    this.last.offArrival = 0;
     this.last.pass++;
+    // Where the player comes in and back, which the overlay's people who pick a fight keep clear of (`rowKeptOff`).
+    const arrival = deps.arrival?.() ?? null;
 
     // The dead first, so a place somebody cleared fills again on its own time.
     for (const [i, s] of this.up) {
@@ -767,6 +825,8 @@ export class StandingPeople {
     const near = this.near;
     near.length = 0;
     for (let i = 0; i < this.rows.length; i++) {
+      // A row of the world's other state, or of Core3's town in Restuss's ruins, is never stood here.
+      if (this.dormant[i]) continue;
       // Measured from where the body stands, which for a patroller is the first point of its walk.
       const st = this.stands[i];
       const away = Math.hypot(st.x - at.x, st.z - at.z);
@@ -780,11 +840,15 @@ export class StandingPeople {
         // So is one the story killed for this character, wherever they stand (a follower included: its row is
         // never stood again once it is let go).
         const gone = !!this.rows[i].key && !!deps.gone?.(this.rows[i].key!);
-        const outside = away > PEOPLE_TUNE.drop || (!!deps.scope && !deps.scope(st.x, st.y, st.z)) || gone;
+        // And one of the overlay's who picks a fight, standing where the player now comes in and back (a teleport
+        // moved that place onto it): put down, or a death there comes round among them again.
+        const kept = !!arrival && here.body !== null && rowKeptOff(here.row, st, picksFights(this.creatureOf(here.who)), arrival);
+        const outside = away > PEOPLE_TUNE.drop || (!!deps.scope && !deps.scope(st.x, st.y, st.z)) || gone || kept;
         if (outside && !(here.body && deps.keeps?.(here.body))) {
           if (here.body) {
             deps.remove(here.body);
             this.last.dropped++;
+            if (kept) this.last.offArrival++;
           }
           // Somebody killed who stays down (respawning off, or a row that never came back) is
           // remembered however far the player goes, or walking away and back would be a respawn by
@@ -856,6 +920,11 @@ export class StandingPeople {
           entry = firstEntry;
           essential = who.essential ?? standsStill(entry);
         }
+      }
+      // One of the overlay's who picks a fight on sight is never stood by where the player comes in and back.
+      if (arrival && rowKeptOff(r, st, picksFights(who.creature), arrival)) {
+        this.last.offArrival++;
+        continue;
       }
       // Somebody every other browser saw die, or saw walk off with a player, stays down here too until
       // the server's own wait for that row is out.
@@ -1121,7 +1190,9 @@ export class StandingPeople {
    */
   anyStanding(x: number, z: number, reach: number, inside: (st: StandPlace) => boolean): boolean {
     if (!this.framed) return false;
-    for (const st of this.stands) {
+    for (let i = 0; i < this.stands.length; i++) {
+      if (this.dormant[i]) continue;
+      const st = this.stands[i];
       if (Math.abs(st.x - x) > reach || Math.abs(st.z - z) > reach) continue;
       if (inside(st)) return true;
     }
@@ -1144,7 +1215,7 @@ export class StandingPeople {
     let best: { x: number; y: number; z: number; key: string; who: string; inside: boolean; metres: number } | null = null;
     for (let i = 0; i < this.rows.length; i++) {
       const r = this.rows[i];
-      if (!test(r.who)) continue;
+      if (this.dormant[i] || !test(r.who)) continue;
       const st = this.stands[i];
       const d = Math.hypot(st.x - x, st.z - z);
       if (best && d >= best.metres) continue;
@@ -1214,7 +1285,7 @@ export class StandingPeople {
     const out: SeatedRow[] = [];
     for (let i = 0; i < this.rows.length; i++) {
       const r = this.rows[i];
-      if (r.gcw?.length) continue;
+      if (this.dormant[i] || r.gcw?.length) continue;
       const sits = seatOfMood(moodOfRow(r));
       if (!sits) continue;
       const st = this.stands[i];
@@ -1270,6 +1341,42 @@ export class StandingPeople {
     return this.extras.world ?? '';
   }
 
+  /**
+   * For the console: the rows, and the bodies standing now, by where each row came from (`sourceOfRow`): Core3's,
+   * the heralds', the people of ours (the Star Destroyer's crew) and the local overlay's.
+   */
+  bySource(): { rows: Record<RowSource, number>; up: Record<RowSource, number> } {
+    const rows: Record<RowSource, number> = { core3: 0, herald: 0, nge: 0, ours: 0 };
+    const up: Record<RowSource, number> = { core3: 0, herald: 0, nge: 0, ours: 0 };
+    for (const r of this.rows) rows[sourceOfRow(r)]++;
+    for (const s of this.up.values()) if (s.body) up[sourceOfRow(s.row)]++;
+    return { rows, up };
+  }
+
+  /**
+   * For the console: how many rows lie dormant for this world, and of those how many are Core3's own (the rest of
+   * another state, ours among them); and how many rows of a state this world stands in are ours (`src: 'ours'`).
+   */
+  dormantReport(): { dormant: number; core3: number; stated: number; oursHere: number } {
+    let dormant = 0;
+    let core3 = 0;
+    let oursHere = 0;
+    for (let i = 0; i < this.rows.length; i++) {
+      const r = this.rows[i];
+      if (this.dormant[i]) {
+        dormant++;
+        if (sourceOfRow(r) === 'core3') core3++;
+      } else if (r.state && r.src === 'ours') oursHere++;
+    }
+    return { dormant, core3, stated: dormant - core3, oursHere };
+  }
+
+  /** A creature of the fleet's half by its name, or null. */
+  private creatureOf(who: string): PeopleCreature | null {
+    const c = this.creatures;
+    return c && Object.prototype.hasOwnProperty.call(c, who) ? c[who] : null;
+  }
+
   /** Row `i`'s name in the world: `stood:`, the world and its place in the pack's list. */
   stoodId(i: number): string {
     return `stood:${this.extras.world || 'here'}:${i}`;
@@ -1323,7 +1430,7 @@ export class StandingPeople {
       const r = this.rows[i];
       const st = this.stands[i];
       const first = r.route?.[0];
-      if (!first || !walksRound(r.route, first.x === st.x && first.z === st.z, r.peaceful === true)) continue;
+      if (!first || !walksRound(r.route, first.x === st.x && first.z === st.z, setGoing(r))) continue;
       out.push({
         who: r.who,
         x: Math.round(st.x * 10) / 10,
@@ -1407,21 +1514,53 @@ export interface PersonReport {
  * who would otherwise get up and stroll about in a sitting pose; `near` for everyone else, who steps
  * about their spot.
  */
-export function postFor(r: Pick<StandingRow, 'still' | 'sit' | 'heading'>, mood?: string | null): Post {
+export function postFor(r: Pick<StandingRow, 'still' | 'sit' | 'heading' | 'roam'>, mood?: string | null): Post {
   const seated = !!mood && SEATED_MOOD.test(mood);
-  return { kind: r.still || r.sit || seated ? 'still' : 'near', heading: r.heading, tune: PEOPLE_TUNE };
+  const still = r.still || r.sit || seated;
+  return { kind: still ? 'still' : 'near', heading: r.heading, tune: !still && typeof r.roam === 'number' && r.roam > 0 ? roamTune(r.roam) : PEOPLE_TUNE };
+}
+
+/** The post tunes of a radius of their own, one a radius for the session, so standing a body makes nothing. */
+const ROAM_TUNES = new Map<number, PostTune>();
+
+/**
+ * A post of a radius of its own (a row of the overlay whose spawner let it loiter or wander), stepping about as
+ * often as `NGE_OVERLAY_TUNE.roamEvery` says, or the standing people's own `postEvery` where that is null: both
+ * read live, as a post holds the standing people's table by reference.
+ */
+export function roamTune(radius: number): PostTune {
+  let t = ROAM_TUNES.get(radius);
+  if (!t) {
+    t = {
+      postRadius: radius,
+      get postEvery(): readonly [number, number] {
+        return NGE_OVERLAY_TUNE.roamEvery ?? PEOPLE_TUNE.postEvery;
+      },
+    };
+    ROAM_TUNES.set(radius, t);
+  }
+  return t;
+}
+
+/**
+ * Whether a row's walker is set going on its round whatever it is: one the town made unattackable, or one whose
+ * data says it walks (`walks`: the overlay's patrol rows, whose spawner the server walked its fighters round with).
+ */
+export function setGoing(r: Pick<StandingRow, 'peaceful' | 'walks'>): boolean {
+  return r.peaceful === true || r.walks === true;
 }
 
 /**
  * The round a row's body walks, or null: a round of two points or more that it was stood at the start
- * of (`standPlaceOf` put it on the first point rather than at its own row), walked by a walker the town
- * made unattackable and, only with `PATROL_TUNE.combat`, by one of its combat walkers too
- * (`walksRound`). Made when the body is stood, so its clock starts then.
+ * of (`standPlaceOf` put it on the first point rather than at its own row), walked by a walker set going
+ * (`setGoing`: one the town made unattackable, or one whose data says it walks) and, only with
+ * `PATROL_TUNE.combat`, by one of the towns' combat walkers too (`walksRound`). Made when the body is
+ * stood, so its clock starts then.
  */
-export function patrolFor(r: Pick<StandingRow, 'route' | 'peaceful'>, st: Pick<StandPlace, 'x' | 'z'>, now: number, rand: () => number = Math.random): Patrol | null {
+export function patrolFor(r: Pick<StandingRow, 'route' | 'peaceful' | 'walks'>, st: Pick<StandPlace, 'x' | 'z'>, now: number, rand: () => number = Math.random): Patrol | null {
   const first = r.route?.[0];
   const atFirst = !!first && first.x === st.x && first.z === st.z;
-  return walksRound(r.route, atFirst, r.peaceful === true) ? new Patrol(r.route!, now, rand) : null;
+  return walksRound(r.route, atFirst, setGoing(r)) ? new Patrol(r.route!, now, rand) : null;
 }
 
 /**

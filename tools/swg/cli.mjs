@@ -52,8 +52,10 @@
 //                                                                  convert the world snapshot's objects around a point into a layout,
 //                                                                  and copy the planet's terrain (.trn) plus building terrain layers (.lay);
 //                                                                  the centre defaults to the planet's starport (else its busiest spot);
-//                                                                  "all" converts every planet the game knows into <out-dir>/<planet>
-//   node tools/swg/cli.mjs stat <swg-dir> <file>                    which archive provides a file (after load order and deletions)
+//                                                                  "all" converts every planet the game knows into <out-dir>/<planet>;
+//                                                                  Rori's carries Restuss's launch city and its ruins, each tagged with
+//                                                                  the world state it stands in (restuss.mjs)
+//   node tools/swg/cli.mjs stat <swg-dir> <file>                   which archive provides a file (after load order and deletions)
 //   node tools/swg/cli.mjs final-names <final-index-dir> <swg-dir> [--to=<file>]   the maintainer's, never asked by status: write SOE's final names
 //                                                                  list (manifests/final-names.json) from the folder holding SOE's own final
 //                                                                  sku0..3_client.toc (only those four are read) and the install's own indexes:
@@ -143,7 +145,10 @@
 //                                                                  in the checkout. It opens no game archive, so it takes no <swg-dir>,
 //                                                                  and it must run after the worlds and after mobiles. Writes <pack>/spawns.json
 //                                                                  per world and <out-dir>/spawns/manifest.json for the fleet; with --swg, the
-//                                                                  instances zone's too (the corvette's crews in every copy, our Star Destroyer crew)
+//                                                                  instances zone's too (the corvette's crews in every copy, our Star Destroyer crew);
+//                                                                  --nge=<folder> then reads SOE's own people for Kashyyyk and Mustafar off the
+//                                                                  owner's local NGE copy into <out-dir>/nge only (never committed, never shipped,
+//                                                                  never from .env, never passed by a launcher); --nge=none takes that folder away
 //   node tools/swg/cli.mjs sandbox <swg-dir> <out-dir> [--seed=N]   a made-up system to fly in, 250 km across, as <out-dir>/space_sandbox:
 //                                                                  a sun and a sky borrowed from a converted zone, four to six planets with real
 //                                                                  places you can fly to, asteroid fields and three jump points; nothing in it
@@ -191,6 +196,7 @@
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { detailLevels, exteriorAppearance, resolveParts } from './appearance.mjs';
 import { LOD_FORMAT, lodMeshesFor as lodMeshesForDeps } from './lodlevels.mjs';
 import { decodeDds } from './dds.mjs';
@@ -262,6 +268,8 @@ import { CUSTOMIZATION_FILE, buildCustomization, customizationStatus } from './c
 import { LEVELS_FILE, LEVELS_SOURCE, conRows, levelsStatus } from './conTable.mjs';
 import { instanceSpawnsWhy } from './instances.mjs';
 import { SPAWNS_FORMAT, spawnsStale } from './spawnpack.mjs';
+import { NGE_ZONES, ngeArg, ngeStatus, overlayTarget, sourceInside, stampOf } from './ngepack.mjs';
+import { gitPlace } from './nge.mjs';
 import { OBJECT_EFFECTS_VERSION, readClientChildren } from './clientfx.mjs';
 import { paintRecipeMaker } from './paintrecipes.mjs';
 import { mapFrameOf } from './mapframe.mjs';
@@ -297,6 +305,7 @@ import {
   rewrittenCheck, verifyFinalNames, withLate,
 } from './finalnames.mjs';
 import { buildFinalNames, finalNamesText } from './finalnamesBuild.mjs';
+import { RESTUSS_KEY, RESTUSS_STATES_VERSION, addToSnapshot, layoutObject, namePortsInStates, portTag, restussAddition, restussLast, restussSoundsStatus, restussStatus, statesBlock, tagServerObjects } from './restuss.mjs';
 
 // A .env beside package.json names the folders once; @NAME anywhere in the arguments becomes that
 // variable's value (from .env or the environment), whichever shell is running.
@@ -319,6 +328,13 @@ const expandEnv = (a) =>
     }
     return before + value;
   });
+// The NGE copy is named outright on the command line and never from .env (`ngeArg` in ngepack.mjs says why), so
+// its word is read off the raw command line before any `@NAME` is put in place, and refused if it is one.
+const NGE_WORD = ngeArg(process.argv.slice(2));
+if (NGE_WORD?.refuse) {
+  console.error(`spawns: ${NGE_WORD.refuse}`);
+  process.exit(1);
+}
 const args = process.argv.slice(2).map(expandEnv);
 const flags = new Set(args.filter((a) => a.startsWith('--')).map((a) => a.split('=')[0]));
 const options = Object.fromEntries(args.filter((a) => a.startsWith('--') && a.includes('=')).map((a) => a.slice(2).split('=')));
@@ -329,6 +345,89 @@ function usage() {
   const src = readFileSync(new URL(import.meta.url)).toString().split('\n');
   console.log(src.filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n'));
   process.exit(1);
+}
+
+/** This checkout's own folder: what `--nge` may never name. */
+const REPO_DIR = resolve(fileURLToPath(new URL('../../', import.meta.url)));
+
+/** `spawns --nge=none`: the local overlay taken away, said in words, and nothing else touched. */
+function removeNgeOverlay(out) {
+  const dir = join(out, 'nge');
+  if (!existsSync(dir)) {
+    console.log(`spawns: --nge=none: there is no overlay at ${dir}, so nothing was removed`);
+    return;
+  }
+  let files = 0;
+  const count = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (e.isDirectory()) count(join(d, e.name));
+      else files++;
+    }
+  };
+  count(dir);
+  rmSync(dir, { recursive: true, force: true });
+  console.log(`spawns: --nge=none: removed ${dir} (${files} files: the overlay's index, its fleet manifest and its zones' packs); the game stands Core3's people alone again`);
+}
+
+/**
+ * The NGE half of `spawns` (`--nge=<folder>`): SOE's own placements for Kashyyyk's seven zones and Mustafar, read
+ * off the owner's local copy (`nge.mjs`) and turned into packs the game already reads (`ngepack.mjs`), written
+ * under `<out>/nge/` alone: `index.json`, `spawns/manifest.json` and `spawns/<zone>.json`. A zone whose pack is
+ * not converted is left out and said. The archives (`vfs`) give the zones' own area tables and the buildouts the
+ * crews' copies and rooms are found in; without them the crews are left out and said. Nothing of it is ever
+ * committed or shipped: the launcher never passes `--nge`, and the target is refused unless git ignores it.
+ */
+async function spawnsNge({ out, outDir, reader, vfs, groundOf }) {
+  const t0 = Date.now();
+  const P = await import('./ngepack.mjs');
+  const catFile = join(out, 'mobiles', 'catalogue.json');
+  if (!existsSync(catFile)) {
+    console.log(`spawns: nge: no mobiles catalogue at ${catFile}; run mobiles first, since every body here has to reach a model`);
+    return;
+  }
+  const catalogue = JSON.parse(readFileSync(catFile, 'utf8'));
+  const zones = NGE_ZONES.filter((z) => existsSync(join(out, z, 'manifest.json')) && existsSync(join(out, z, 'layout.json')));
+  const missing = NGE_ZONES.filter((z) => !zones.includes(z));
+  const packOf = (zone) => {
+    try {
+      const layoutBytes = readFileSync(join(out, zone, 'layout.json'));
+      return { layout: JSON.parse(layoutBytes.toString('utf8')), manifest: JSON.parse(readFileSync(join(out, zone, 'manifest.json'), 'utf8')), stamp: stampOf(layoutBytes) };
+    } catch {
+      return null;
+    }
+  };
+  const read = (path) => {
+    try {
+      return vfs?.has(path) ? parseDatatable(parseIff(vfs.read(path))).rows : null;
+    } catch {
+      return null;
+    }
+  };
+  const built = P.buildNgeOverlay({
+    reader,
+    zones,
+    packOf,
+    groundOf,
+    snapOf: vfs ? (zone) => mergeBuildouts({ templates: [], nodes: [] }, loadBuildouts(vfs, zone)) : null,
+    clientAreas: vfs ? (zone) => read(`datatables/buildout/areas_${zone}.iff`) : null,
+    catalogue,
+    converted: new Date().toISOString(),
+  });
+  // What the last run wrote goes first, so a zone this run no longer writes leaves no pack behind it.
+  rmSync(join(outDir, 'spawns'), { recursive: true, force: true });
+  mkdirSync(join(outDir, 'spawns'), { recursive: true });
+  writeFileSync(join(outDir, 'spawns', 'manifest.json'), JSON.stringify(built.manifest, null, 1));
+  for (const [zone, pack] of Object.entries(built.packs)) writeFileSync(join(outDir, 'spawns', `${zone}.json`), JSON.stringify(pack, null, 1));
+  writeFileSync(join(outDir, 'index.json'), JSON.stringify(built.index, null, 1));
+  const c = built.index.counts;
+  for (const [zone, z] of Object.entries(built.index.zones)) {
+    const f = z.frame;
+    console.log(`spawns: nge ${zone} — ${z.rows} people (${z.statics} standing in one place, ${z.corpses} corpses, ${z.crew} crew, ${z.spawners + z.patrols} from ${z.sites} spawners over ${z.copies} area copies), ${z.areas} wild areas${z.dropped ? ` (${z.dropped} no-spawn region holding them whole dropped)` : ''}; frame: objects median ${f.objects.median ?? '-'} m over ${f.objects.matched}, ground ${f.ground.reading} (${f.ground.asIs} m as written, ${f.ground.mirrored} m mirrored)${z.routeLost ? `; ${z.routeLost} routes with a point missing` : ''}${z.crewLost ? `; ${z.crewLost} crew rows in no room` : ''}${z.inCell ? `; ${z.inCell} spawners in a room, left out` : ''}`);
+  }
+  console.log(`spawns: nge — ${c.rows} people over ${Object.keys(built.packs).length} zones (${c.statics} standing in one place, ${c.corpses} corpses, ${c.crew} crew), ${c.areas} wild areas, ${c.creatures} creatures (${c.withGame} with their own numbers), ${c.gated} quest-gated spawners left out, ${c.unresolved} unresolved, from ${reader.roots.root} (${built.index.copy.files} files) into ${outDir}, in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+  if (c.crewTablesLeft) console.log(`spawns: nge — ${c.crewTablesLeft} room crews left out: their copies and rooms are found in the archives, so run with --swg=<swg-dir>`);
+  if (missing.length) console.log(`spawns: nge — not converted yet, so left out: ${missing.join(', ')}`);
+  if (built.index.unresolved.length || built.index.bodiless.length) console.log(`spawns: nge — unresolved: ${[...built.index.unresolved, ...built.index.bodiless].slice(0, 20).join(', ')}`);
 }
 
 function mount(dir) {
@@ -2338,6 +2437,9 @@ function cellIndexById(vfs, planet) {
   } catch {
     return out;
   }
+  // Restuss's launch city, whose rooms Core3's screenplays name by the launch snapshot's own cell ids (restuss.mjs):
+  // a fitting stood in one belongs to the living city and carries its state.
+  addToSnapshot(snap, restussAddition(vfs, planet, snap.nodes.slice()));
   const walk = (node, building) => {
     const t = snap.templates[node.templateIndex] ?? '';
     const isCell = /shared_cell\.iff$/.test(t);
@@ -2349,6 +2451,7 @@ function cellIndexById(vfs, planet) {
         by: building.pos[1],
         bz: building.pos[2],
         byaw: Math.round(yawOfLayoutQuat(building.q) * 1e4) / 1e4,
+        ...(building.state ? { state: building.state } : {}),
       });
     }
     for (const c of node.children ?? []) walk(c, isCell ? building : node);
@@ -2410,6 +2513,15 @@ function loadPlanetObjects(vfs, planet) {
     let nextId = 1 << 29;
     const extra = spawns.objects.map((o) => ({ id: nextId++, containedBy: 0, template: o.template, cellIndex: 0, q: o.q, pos: o.pos, radius: 4, portalLayoutCrc: 0, children: [], area: `server:${o.file}` }));
     mergeBuildouts(snap, { nodes: extra });
+  }
+  // Restuss's launch city and its ruins (restuss.mjs), after everything else, so nothing of today's world moves in the
+  // layout and the auto centre is the Rebel outpost's still; and Core3's own objects in the city's circle with it.
+  const restuss = restussAddition(vfs, planet, snap.nodes.slice(0, snapshotCount), buildout.nodes);
+  if (restuss) {
+    addToSnapshot(snap, restuss);
+    const server = tagServerObjects(snap, restuss.centre);
+    const c = restuss.counts;
+    console.error(`restuss: the launch city from ${restuss.archive} inside ${restuss.rect.join(',')}: ${c.top} top-level objects, ${c.all} with their children, ${c.buildings} buildings, ${c.ruins} with a ruin of their kind${c.offset ? `, ${c.offset} ids moved clear of today's` : ', every raw id kept'}; middle ${restuss.centre.x},${restuss.centre.z} (${restuss.centre.from === 'clientregion' ? "the client's own region" : 'the rectangle'})${server ? `; ${server} of Core3's objects in its circle belong to it` : ''}`);
   }
   const entries = flattenWithWorldTransforms(snap);
   return { snap, entries, snapshotCount, buildout: buildout.stats, spawns, core3 };
@@ -2842,6 +2954,16 @@ function packStatus(dir) {
     // A world whose layout carries gates between its zones but no gates.json was converted before the
     // join was written: those gates stand there doing nothing and nothing else would say so.
     if (!gates && layout && layout.objects.some((o) => isZoneGate(o.template))) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet}'s zone gates have no destinations`);
+    // Restuss in both of its states (restuss.mjs): Rori's snapshot until its layout carries the launch city and its
+    // ruins, its places until its ports are named by state, and its people until Core3's indoor rows there join the
+    // city's rooms. An `if` of its own, with its own `else if`s, after every chain above.
+    const restussAsk = planet === 'rori' ? restussStatus(layout, pois, readJson(join(packDir, 'spawns.json'))) : null;
+    if (restussAsk?.ask === 'snapshot') need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, restussAsk.why);
+    else if (restussAsk?.ask === 'pois') need(`pois <swg-dir> ${planet} ${packDir} --retail-only`, restussAsk.why);
+    else if (restussAsk?.ask === 'spawns') need(`spawns ${dir} --swg=<swg-dir> --retail-only`, restussAsk.why);
+    // And its placed sounds, read from the archives with the city in them (soundplaces.mjs): an `if` of its own.
+    const restussSounds = planet === 'rori' ? restussSoundsStatus(layout, readJson(join(packDir, 'sounds.json'))) : null;
+    if (restussSounds) need(`sounds <swg-dir> ${dir} ${planet} --retail-only`, restussSounds.why);
     // What the reading of the programs could not do on this world, summed below (a pack from before
     // format 6 carries no count). Tallied here, ahead of the snapshot's own chain of asks and never
     // inside it: an `if` of its own between the material format's ask and the `else if` after it would
@@ -3478,6 +3600,23 @@ function packStatus(dir) {
       console.log(talk.line);
       if (talk.why) need(`conversations <swg-dir> ${dir} --retail-only`, talk.why);
     }
+    // The owner's local NGE overlay (`spawns --nge`, ngepack.mjs): one line while it is there and nothing at all
+    // otherwise, so a launcher player is never told of it. What to run again is said here and never put in the
+    // to-do list, since a step there is one a launcher's plan would run, and nothing a launcher runs passes --nge.
+    const ngeIndex = readQuiet(join(dir, 'nge', 'index.json'));
+    if (ngeIndex) {
+      const layouts = {};
+      for (const z of Object.keys(ngeIndex.zones ?? {})) {
+        try {
+          layouts[z] = stampOf(readFileSync(join(dir, z, 'layout.json')));
+        } catch {
+          layouts[z] = null;
+        }
+      }
+      const said = ngeStatus(ngeIndex, { catalogue: mobiles.converted ?? null, layouts });
+      console.log(said.line);
+      if (said.ask) console.log(`  nge overlay: run again by hand (no launcher ever does): npm run swg -- ${said.ask.command.replace('<out-dir>', dir)}  -- ${said.ask.why}`);
+    }
   }
   // The sound bank: every sound the game may play, the samples, and where each one is used.
   const sound = soundStatus(dir, readJson);
@@ -3608,10 +3747,14 @@ function pointsOfInterest(vfs, planet, snap, entries, { regions: wantRegions = t
     }
     const label = portLabel(x, z, places, kind === 'starport' ? 'Starport' : 'Shuttleport');
     if (label.from === 'place') namedAfterPlace++;
-    found.push({ x, z, kind, label: label.name, template });
+    // The world state a port belongs to (restuss.mjs): the launch city's own ports the living state's, the late
+    // camp's pads in the city's circle the ruins', every other port both.
+    const state = portTag(e.node.state, x, z, snap.restuss?.centre);
+    found.push({ x, z, kind, label: label.name, template, ...(state ? { state } : {}) });
   }
-  const named = namePorts(found, travelPoints, seen);
-  found.forEach((f, i) => places.push({ name: named.names[i], x: f.x, z: f.z, r: 0, kind: f.kind }));
+  // Named once per state over that state's ports and the untagged, so each state holds one port of each name.
+  const named = namePortsInStates(found, (list) => namePorts(list, travelPoints, seen));
+  found.forEach((f, i) => places.push({ name: named.names[i], x: f.x, z: f.z, r: 0, kind: f.kind, ...(f.state ? { state: f.state } : {}) }));
   const ports = {
     found: found.length,
     fromServer: named.fromServer,
@@ -3666,7 +3809,8 @@ function writePois(vfs, planet, snap, entries, cx, cz, outDir) {
   }
   const pois = result ? result.places : [];
   const s = result ? result.stats : null;
-  const file = withLate({ planet, center: { x: cx, z: cz }, clientPlaces: s ? s.archive : 0, ...(s && s.frame.rows ? { frameCheck: s.frame } : {}), pois }, vfs, 'pois');
+  // `states`: its ports were named once per world state (restuss.mjs), which `status` asks of Rori's.
+  const file = withLate({ planet, center: { x: cx, z: cz }, clientPlaces: s ? s.archive : 0, ...(s && s.frame.rows ? { frameCheck: s.frame } : {}), ...(snap.restuss ? { states: { [RESTUSS_KEY]: RESTUSS_STATES_VERSION } } : {}), pois }, vfs, 'pois');
   writeFileSync(join(outDir, 'pois.json'), JSON.stringify(file));
   const counts = `${pois.length} (${pois.filter((p) => p.kind === 'place').length} the client's own named places, ${pois.filter((p) => p.kind === 'city' || p.kind === 'landmark' || p.kind === 'area').length} regions, ${pois.filter((p) => p.kind === 'starport' || p.kind === 'shuttleport').length} travel points)`;
   console.log(`points of interest: ${counts} -> ${join(outDir, 'pois.json')}`);
@@ -3736,6 +3880,8 @@ async function snapshotPlanet(vfs, planet, outDir) {
       return null;
     };
     const pushObject = (e, obj) => {
+      // The world state it stands in (`restuss=living`, `restuss=ruins`), where it stands in only one (restuss.mjs).
+      if (e.node.state) obj.state = e.node.state;
       objectRow.set(e.node.id, objects.length);
       if (obj.contained) indoorRows.push([objects.length, e]);
       objects.push(obj);
@@ -3843,7 +3989,11 @@ async function snapshotPlanet(vfs, planet, outDir) {
     }
     console.log(`rooms: ${indoorRows.length} objects inside buildings, ${roomsWritten} with their room from the cell that holds them, ${hostsWritten} with the building's own row`);
     const terrainFile = await copyTerrain(vfs, planet, outDir);
-    const layout = { planet, center: { x: cx, z: cz }, radius: Number.isFinite(radius) ? radius : null, terrain: terrainFile, objects, skipped };
+    // A world with states (Restuss) says so after its centre, which a reader takes from the head of the file as its
+    // second key (`poisCentre.test.ts`).
+    const states = snap.restuss ? statesBlock(snap.restuss, objects) : null;
+    const layout = layoutObject({ planet, center: { x: cx, z: cz }, states, radius: Number.isFinite(radius) ? radius : null, terrain: terrainFile, objects, skipped });
+    if (states) console.log(`restuss: ${states[RESTUSS_KEY].living} objects stand in the living city and ${states[RESTUSS_KEY].ruins} ruins in its place`);
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
     const manifestPath = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
@@ -7568,7 +7718,7 @@ switch (cmd) {
             lost++;
             continue;
           }
-          all.push({ template: p.template, model, building: c.building, at: null, cell: c.cellIndex, x: p.x, y: p.y, z: p.z, yaw: p.yaw, bx: c.bx, by: c.by, bz: c.bz, byaw: c.byaw });
+          all.push({ template: p.template, model, building: c.building, at: null, cell: c.cellIndex, x: p.x, y: p.y, z: p.z, yaw: p.yaw, bx: c.bx, by: c.by, bz: c.bz, byaw: c.byaw, ...(c.state ? { state: c.state } : {}) });
         }
       }
       // The instances zone: the corvette's fittings in every copy of its faction's ship, through the
@@ -7972,16 +8122,42 @@ switch (cmd) {
     // git-ignored output folder exactly as the packs converted from the game's own archives do.
     // `tools/swg/core3.mjs` says what the four-file chain is and where it is not what it looks like.
     if (!pos[1]) usage();
-    const src = core3SourceFor(options);
-    if (!src || src.missing) {
-      console.log(`spawns: ${src ? src.missing : '--core3=none: no emulator data, so no spawns'}`);
+    // `--nge=<folder>`: SOE's own people for Kashyyyk and Mustafar, read off the owner's local NGE copy after the
+    // Core3 half, into <out-dir>/nge only (`spawnsNge`, `ngepack.mjs`); `--nge=none` takes that folder away and
+    // does nothing else. Every refusal comes before anything is written.
+    if (NGE_WORD?.value === 'none') {
+      removeNgeOverlay(resolve(pos[1]));
       break;
     }
-    const c3 = await import('./core3.mjs');
+    let ngeReader = null;
+    let ngeOut = null;
+    if (NGE_WORD?.value) {
+      const target = overlayTarget(resolve(pos[1]), gitPlace);
+      if (target.refuse) {
+        console.log(`spawns: ${target.refuse}`);
+        process.exitCode = 1;
+        break;
+      }
+      const from = resolve(NGE_WORD.value);
+      if (sourceInside(from, REPO_DIR)) {
+        console.log(`spawns: --nge=${from} is inside this repository; the NGE copy is read where it stands and is never brought into it`);
+        process.exitCode = 1;
+        break;
+      }
+      const { makeNgeReader } = await import('./nge.mjs');
+      ngeReader = makeNgeReader(from);
+      if (!ngeReader) {
+        console.log(`spawns: --nge=${from} holds no NGE tables (name the copy's checkout, its dsrc, or its server datatables folder)`);
+        process.exitCode = 1;
+        break;
+      }
+      ngeOut = target.dir;
+    }
+    const src = core3SourceFor(options);
     const trn = await import('../../src/swg/terrain/trn.ts');
     // Mounted once when the archives are offered: the nests are converted from it and every world's
     // snapshot is read from it to put the indoor people where they really stand.
-    const spawnVfs = options.swg ? mount(options.swg) : null;
+    const spawnVfs = options.swg && ((src && !src.missing) || ngeReader) ? mount(options.swg) : null;
     /**
      * The pack's own ground, as a function of x and z, for the frame check.
      *
@@ -8013,6 +8189,15 @@ switch (cmd) {
         return () => NaN;
       }
     };
+    // The NGE half, once the Core3 half has run (or has nothing to run): it reads the packs and the catalogue
+    // the converter already wrote and writes under <out-dir>/nge alone.
+    const ngeHalf = ngeReader ? () => spawnsNge({ out: resolve(pos[1]), outDir: ngeOut, reader: ngeReader, vfs: spawnVfs, groundOf: (zone) => terrainHeights(join(pos[1], zone)) }) : null;
+    if (!src || src.missing) {
+      console.log(`spawns: ${src ? src.missing : '--core3=none: no emulator data, so no spawns'}`);
+      if (ngeHalf) await ngeHalf();
+      break;
+    }
+    const c3 = await import('./core3.mjs');
     const started = Date.now();
     const sp = await import('./spawnpack.mjs');
     const regions = src.readRegions();
@@ -8098,17 +8283,25 @@ switch (cmd) {
     // the position they were written with. The room number travels with them so the runtime knows
     // which cell to put them in rather than guessing from a point. The buildout tables are the second
     // place the client stands buildings, and are read too (`roomsOf` in spawnpack.mjs says why).
+    // Restuss's launch city is read in too (restuss.mjs), as every other reader of a world's snapshot reads it: its
+    // rooms are the ones Core3's town rows indoors there name, by the launch snapshot's own cell ids. `restuss` is
+    // the city's own cells, by which the rows that join a room only because of it are told apart; null elsewhere.
     const roomsOf = (world) => {
-      if (!options.swg) return new Map();
+      const none = { rooms: new Map(), restuss: null };
+      if (!options.swg) return none;
       try {
         const ws = `snapshot/${world}.ws`;
-        if (!spawnVfs.has(ws)) return new Map();
+        if (!spawnVfs.has(ws)) return none;
         const snap = parseSnapshot(parseIff(spawnVfs.read(ws)));
-        mergeBuildouts(snap, loadBuildouts(spawnVfs, world));
-        return sp.roomsOf(snap);
+        const own = snap.nodes.slice();
+        const bo = loadBuildouts(spawnVfs, world);
+        mergeBuildouts(snap, bo);
+        const added = restussAddition(spawnVfs, world, own, bo.nodes);
+        addToSnapshot(snap, added);
+        return { rooms: sp.roomsOf(snap), restuss: added ? added.cells : null };
       } catch {
         /* a world whose snapshot will not read simply keeps its people indoors and unplaced */
-        return new Map();
+        return none;
       }
     };
 
@@ -8292,11 +8485,11 @@ switch (cmd) {
         noWorld.push(world);
         continue;
       }
-      const rooms = roomsOf(world);
+      const { rooms, restuss } = roomsOf(world);
       const worldPools = pools.get(world) ?? new Map();
       const lost = { body: 0, room: 0 };
       let routesLost = 0;
-      const rows = [];
+      const kept = [];
       for (const s of statics.get(world) ?? []) {
         // The place and the facing both, through the room's own turn (`intoRoom` says why both); a
         // person in a room no snapshot or buildout holds is a spot in a room and nowhere on a planet.
@@ -8308,8 +8501,14 @@ switch (cmd) {
         if (got.row.routeLost) routesLost++;
         const takes = I.takerFaction(corvette.takers, world, got.row.who);
         if (takes) got.row.takes = takes;
-        rows.push(got.row);
+        kept.push({ row: got.row, cell: s.cell });
       }
+      // The rows that find their room only because Restuss's launch city is read in, after every other row of the
+      // world (`restussLast`), so no row's place in the list, and so no `stood:` name, moves; each tagged with the
+      // living city its room is in, so it stands nowhere in the ruins.
+      const rows = restussLast(kept, restuss);
+      const joinedLate = restuss ? kept.filter((e) => e.cell && restuss.has(e.cell)).length : 0;
+      if (restuss) console.log(`spawns: ${world} — ${joinedLate} of Core3's people stand in the rooms of Restuss's launch city, after every other row`);
       lostBy.body += lost.body;
       lostBy.room += lost.room;
       const indoors = rows.filter((s) => s.cell).length;
@@ -8342,6 +8541,8 @@ switch (cmd) {
             source: { areas: 'core3', statics: 'core3', creaturePlaces: 'invented', scatter: 'drawn', stacks: 'nudged' },
             frameCheck: frame,
             counts: { areas: r.spawn.length, noSpawn: r.noSpawn.length + lateSites.length, lateSites: lateSites.length, statics: rows.length, staticsDropped: dropped.get(world) ?? 0, noBody: lost.body, noRoom: lost.room },
+            // Restuss's launch city was read in, and how many rows came to stand in its rooms (appended last).
+            ...(restuss ? { restuss: { joined: joinedLate, version: RESTUSS_STATES_VERSION } } : {}),
             areas: r.spawn,
             noSpawn: [...r.noSpawn, ...lateSites],
             statics: rows,
@@ -8430,6 +8631,7 @@ switch (cmd) {
       `spawns: ${worlds} worlds, ${areas} spawn areas, ${people} standing people (${lostBy.body} with no body, ${lostBy.room} in no room), ${joined.size} creatures with the server's own level, health and damage (${withGame} with their own numbers; ${missing.length} named a body we have not got), ${Object.keys(dressOut).length} dress groups, ${Object.keys(weaponOut).length} weapon groups, ${lairs.size} lairs, ${groups.size} groups; ${dropped.get('?') ?? 0} rows with no world, ${luaSkipped} script statements stepped over, in ${((Date.now() - started) / 1000).toFixed(1)}s`,
     );
     if (noWorld.length) console.log(`spawns: not converted yet, so left out: ${noWorld.join(', ')}`);
+    if (ngeHalf) await ngeHalf();
     break;
   }
   case 'scenes': {

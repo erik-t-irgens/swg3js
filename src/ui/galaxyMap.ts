@@ -16,6 +16,7 @@ import { GALAXY_VIEW_TUNE, GalaxyView } from './galaxyView';
 import { mapShareX, mapShareY, type MapFrame } from './spaceMapLayers.ts';
 import { mapMeta } from './mapImages.ts';
 import { poisCentreOf } from '../world/loadingTune.ts';
+import { inState } from '../world/worldState.ts';
 
 /**
  * A named place from a converted pack's pois.json, in SWG coordinates. `place` is the client's own
@@ -29,6 +30,8 @@ export interface Poi {
   r: number;
   kind: 'city' | 'starport' | 'shuttleport' | 'place' | 'landmark' | 'area' | 'region';
   desc?: string;
+  /** The world state it stands in, where only one (Restuss's two sets of ports: `worldState.ts`). */
+  state?: string;
 }
 
 /** What the galaxy tab needs from the game to offer a jump into a system's orbit. */
@@ -289,9 +292,15 @@ export class GalaxyMap {
    * A pack's `pois.json` whole: its places and the centre they are measured about (null where the file has none,
    * or could not be read). What a travel to a place on another world reads to work the place out in the game's
    * frame before that world is loaded (`App.teleport`, `placeFromPois`). Read once a session, shared with
-   * `loadPois`.
+   * `loadPois`. Only the rows of the world state that world stands in now (`inState`: Restuss's two sets of
+   * ports, each named alike), filtered at each ask, since a state is taken at an arrival and the file is kept.
    */
   loadPoisFile(planetId: string): Promise<{ center: { x: number; z: number } | null; pois: Poi[] }> {
+    return this.loadPoisRaw(planetId).then((f) => ({ center: f.center, pois: inState(f.pois) }));
+  }
+
+  /** The same file as it stands, every state's rows: what the game keeps and filters again as states change. */
+  loadPoisRaw(planetId: string): Promise<{ center: { x: number; z: number } | null; pois: Poi[] }> {
     let p = this.pois.get(planetId);
     if (!p) {
       p = fetch(`${import.meta.env.BASE_URL}assets-private/${planetId}/pois.json`)

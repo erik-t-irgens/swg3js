@@ -673,4 +673,13 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   ok(FULL_CONVERSION_BYTES >= 17 * 1024 ** 3, 'and the figure is above what a full conversion really comes to');
 }
 
+// The owner's local NGE overlay (`spawns --nge`, tools/swg/ngepack.mjs) is his install's alone: nothing a launcher
+// runs ever names it, so a launcher player converts and plays exactly what every other player does.
+{
+  for (const f of ['tools/swg/convertPlan.mjs', 'tools/swg/convertDrive.mjs', 'tools/launcher/main.mjs', 'tools/launcher/plan.mjs']) {
+    const text = readFileSync(join(root, ...f.split('/')), 'utf8');
+    ok(!/--nge\b/.test(text), `${f} never passes --nge`);
+  }
+}
+
 console.log(`\n${checks} checks passed`);

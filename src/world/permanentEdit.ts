@@ -171,6 +171,23 @@ function mm(v: number): number {
   return Math.round(v * 1000) / 1000;
 }
 
+/**
+ * The State choice the editor's list offers a row on a world with states, in order: every state (`''`), then each
+ * value of each state the world has (`restuss=living`, `restuss=ruins`). `next` is the one after `now`, round.
+ */
+export function nextStateChoice(now: string | undefined, tags: readonly string[]): string {
+  const all = ['', ...tags];
+  const i = all.indexOf(now ?? '');
+  return all[(i + 1) % all.length];
+}
+
+/** A state choice in words, as the list's button says it. */
+export function stateChoiceText(tag: string | undefined): string {
+  if (!tag) return 'every state';
+  const eq = tag.indexOf('=');
+  return eq > 0 ? `${tag.slice(0, eq)} ${tag.slice(eq + 1)} only` : tag;
+}
+
 /** What a row written again keeps of the row it was: its id and everything the owner set by hand. */
 function keepOf(base: PlacementRow | null | undefined): Partial<PlacementRow> {
   if (!base) return {};
@@ -180,6 +197,8 @@ function keepOf(base: PlacementRow | null | undefined): Partial<PlacementRow> {
   if (base.clear !== undefined) out.clear = base.clear;
   if (base.name !== undefined) out.name = base.name;
   if (base.note !== undefined) out.note = base.note;
+  // And the world state it stands in (rubble placed for Restuss's ruins), set from the editor's list.
+  if (base.state !== undefined) out.state = base.state;
   return out;
 }
 

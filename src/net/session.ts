@@ -99,6 +99,11 @@ export interface Hail {
   veh?: number;
   /** Whether the server carries the group's race word: 1 does; 0 or absent, and no race is called. */
   race?: number;
+  /**
+   * The world states the server keeps (`{ restuss: 'living' }`), cleaned (src/world/worldState.ts); null or absent for
+   * a server before them, whose browsers each keep their own setting.
+   */
+  states?: Record<string, string> | null;
 }
 
 /** What the server keeps about a character, and what a browser offers: the part the two are compared on. */
@@ -337,6 +342,8 @@ export interface SessionStats {
   veh: number;
   /** Whether the far end's greeting said it carries the group's race word: 1 it does, 0 it does not. */
   race: number;
+  /** The world states the far end's greeting said it keeps, as its admin has since changed them; null for none. */
+  states: Record<string, string> | null;
 }
 
 /**
@@ -378,7 +385,7 @@ export class Session {
   private ffHeard = false;
   /** Said once per line: a server speaking a language newer than this browser's. */
   private saidNewer = false;
-  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0, items: 0, paint: 0, props: 0, homes: 0, progress: 0, gear: 0, veh: 0, race: 0 };
+  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0, items: 0, paint: 0, props: 0, homes: 0, progress: 0, gear: 0, veh: 0, race: 0, states: null };
 
   /** What the game tells the player: joining, being taken over, a character settled. The message line takes it. */
   onNote: (text: string) => void = () => {};
@@ -709,6 +716,7 @@ export class Session {
     this.stat.gear = 0;
     this.stat.veh = 0;
     this.stat.race = 0;
+    this.stat.states = null;
     this.saidNewer = false;
     // A line being opened again is the player asking for this character back, so what was true of the
     // last line is not carried into this one: left set, the console said for the rest of the page's
@@ -773,6 +781,9 @@ export class Session {
     // And how it passes a vehicle on, and whether it carries the group's race word (`vehVersion`, `raceVersion`).
     this.stat.veh = Number(h.veh) > 0 ? Math.floor(Number(h.veh)) : 0;
     this.stat.race = Number(h.race) > 0 ? Math.floor(Number(h.race)) : 0;
+    // And the world states it keeps, which the world reads at its next arrival whether or not the claim is answered:
+    // one Restuss for everybody on that server (`worldStates`).
+    this.stat.states = h.states ? { ...h.states } : null;
     if (this.stat.serverVersion > WIRE_VERSION && !this.saidNewer) {
       this.saidNewer = true;
       this.onNote('this server speaks a newer language than this browser: some of what it holds may not reach you');
@@ -1067,6 +1078,16 @@ export class Session {
    */
   get raceVersion(): number {
     return this.stat.authority === 'server' ? this.stat.race : 0;
+  }
+
+  /** The world states the server keeps as this line last heard them (its hail, its admin's word since), or null for none. */
+  get worldStates(): Record<string, string> | null {
+    return this.stat.states;
+  }
+
+  /** The server's admin changed a world's state: the whole of what it keeps now, as the word carried it. */
+  worldStatesWord(states: Record<string, string>): void {
+    this.stat.states = { ...states };
   }
 
   /**

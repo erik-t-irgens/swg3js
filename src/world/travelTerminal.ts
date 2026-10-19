@@ -102,6 +102,13 @@ export interface TravelRow {
   by: number;
   bz: number;
   byaw: number;
+  /**
+   * The world state its building stands in (`restuss=living`: Restuss's launch city's starport and shuttleport),
+   * where it stands in one only. A world stands only the rows of its state (`inState`, `worldState.ts`); the city's
+   * rows are the last in the file, since the city is appended last to its layout, so leaving them out moves no
+   * other row's place.
+   */
+  state?: string;
 }
 
 /** One of them in the world's own frame, with what it belongs to. */
