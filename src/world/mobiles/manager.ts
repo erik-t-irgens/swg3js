@@ -32,6 +32,8 @@ import { CATALOGUE_COMMAND, type MobileCatalogue } from './catalogue';
 import { BRAIN_TUNE, type BrainTune } from './brain';
 import { GAIT_LIMITS, moveSpeeds, type GaitLimits } from './gait';
 import { LOD_TUNE, lodTier, type LodInput, type LodTier, type LodTune } from './lod';
+// How much of the screen each body covers, and what that thins of how it is drawn (the performance pass's third wave).
+import { CROWD_PARTS, CROWD_SWITCHES, CrowdRecord, CrowdView, crowdInput, shareScale, smallPartsHidden } from './crowd.ts';
 import { reachesCascades } from '../bodyCull.ts';
 import { STEP_STATS, STEP_TUNE, tuneStep, type StepTune } from './stepUp.ts';
 import { keepsSpot, PERCH_TUNE, perchesAgain, perchNear, perchSpawn, perchStep, perchSurface, perchTimedOut, tunePerch, type PerchTune } from './perch.ts';
@@ -300,7 +302,7 @@ const sphere = new THREE.Sphere();
 const tmp = new THREE.Vector3();
 const ZERO = new THREE.Vector3();
 /** The tier's input, filled per mobile every frame rather than made anew. */
-const lodInput: LodInput = { dist: 0, onScreen: true, nearScreen: true, busy: false, sizeClass: 'small', shadows: false, playerDist: 0, animRange: LOD_TUNE.animRange, room: -1, inCascades: undefined };
+const lodInput: LodInput = { dist: 0, onScreen: true, nearScreen: true, busy: false, sizeClass: 'small', shadows: false, playerDist: 0, animRange: LOD_TUNE.animRange, room: -1, inCascades: undefined, share: 0.5, engaged: false, shared: false, still: false };
 /** How often (seconds) a mobile's inside-or-out is asked again, and its shadow flag set. */
 const INSIDE_EVERY = 0.25;
 /** A body that has gone this far since its room was last followed is followed now, whatever the clock (the tracker takes a jump over 5 m as a teleport). */
@@ -325,6 +327,12 @@ interface Held {
   cell: CellState | null;
   /** Where its feet were when the room was last followed. */
   readonly cellFrom: THREE.Vector3;
+  /**
+   * The crowd's own record of it (`CrowdRecord`, written by `crowdInput` every pass): its share of the screen's height,
+   * and where and since when its root has stood, for whether it stands still (`LodInput.still`). A class of its own and
+   * not fields of this literal, whose number fields written every frame would each be a new heap number.
+   */
+  readonly crowd: CrowdRecord;
 }
 
 export class MobileManager {
@@ -566,6 +574,7 @@ export class MobileManager {
       seed: opts.seed,
       cell: null,
       cellFrom: m.pos.clone(),
+      crowd: new CrowdRecord(),
     };
     if (inside) {
       held.cell = this.deps.cellAt(m.pos, opts.room);
@@ -1210,10 +1219,25 @@ export class MobileManager {
       frustum.setFromProjectionMatrix(projView);
       camera.getWorldPosition(this.camPos);
     } else this.camPos.copy(ctx.playerPos);
+    // What a body's share of the screen's height is worked out from at this camera, once (aiming's zoom counts); with no
+    // perspective camera every body is taken to fill the screen and nothing is thinned by its share.
+    // Worked out again only when the view's field or zoom has moved (aiming), so a steady frame makes no number of it.
+    const persp = camera as THREE.PerspectiveCamera | null;
+    const view = this.crowdView;
+    if (!persp || !persp.isPerspectiveCamera) view.shareK = 0;
+    else if (persp.fov !== this.shareFov || persp.zoom !== this.shareZoom || view.shareK === 0) {
+      this.shareFov = persp.fov;
+      this.shareZoom = persp.zoom;
+      view.shareK = shareScale(persp.fov, persp.zoom);
+    }
+    // The clock whether a body stands still is judged on (`crowdInput`): the world's own, which `__debug.advance` moves.
+    view.now = ctx.now;
     const shadows = this.deps.shadows();
     this.shadowBoxes = shadows && this.deps.shadowBoxes ? this.deps.shadowBoxes() : null;
     const tune = LOD_TUNE;
     this.walled = 0;
+    this.emptyOff = 0;
+    this.smallOff = 0;
     this.perchCounts.held = 0;
     this.perchCounts.far = 0;
     // Behind a loading screen the perch's safety net does not count: the tiers take as long as they take.
@@ -1248,12 +1272,24 @@ export class MobileManager {
       // of falling through a floor that has gone is half a metre nobody asked for. A perched body is
       // held the same way, and this line writes the hold every frame, so the perch is part of it.
       m.setAirless(m.perched || (held.cell !== null && !(this.deps.cellSolid?.(held.cell) ?? true)));
-      const tier = this.tierOf(m, camera, ctx.playerPos, shadows, tune, held.tier);
-      // The whole cull: a group that is not visible is in no pass at all.
+      const tier = this.tierOf(m, camera, ctx.playerPos, shadows, tune, held);
+      // The whole cull: a group that is not visible is in no pass at all, and the scene's matrix walk steps over it
+      // (`BodyGroup.culled`); the walk after it comes back works its whole body out again.
       const visible = tier.visible || !!m.ragdoll;
       if (held.visible !== visible) {
         m.group.visible = visible;
+        m.group.culled = !visible;
+        if (visible) m.group.matrixWorldNeedsUpdate = true;
         held.visible = visible;
+      }
+      // Its small parts by its share of the screen, hidden under `smallShare` and shown again only past the band over it,
+      // and at once when it engages (`smallPartsHidden`); listed again first whenever the thresholds have moved.
+      if (m.ready) {
+        if (m.smallVersion !== CROWD_PARTS.version) m.listSmallParts(CROWD_PARTS.version);
+        const hide = smallPartsHidden(m.smallHidden, held.crowd.share, m.engaged, CROWD_SWITCHES.smallParts);
+        if (hide !== m.smallHidden) m.setSmallHidden(hide);
+        if (hide) this.smallOff += m.smallMeshes.length;
+        if (CROWD_SWITCHES.emptyMeshes) this.emptyOff += m.emptyMeshes.length;
       }
       // A shadow is put on the step it is wanted and taken off on the half-second: a body the frustum or its
       // room has just brought into view throws its shadow on the frame it is first drawn, never half a second late.
@@ -1282,7 +1318,8 @@ export class MobileManager {
    * The tier for one mobile: its world sphere against the frustum as it is and grown by the shadow slack,
    * and its rooms as the portal renderer's last frame saw them (commit 2c).
    */
-  private tierOf(m: Mobile, camera: THREE.Camera | null, playerPos: THREE.Vector3, shadows: boolean, tune: LodTune, out: LodTier): LodTier {
+  private tierOf(m: Mobile, camera: THREE.Camera | null, playerPos: THREE.Vector3, shadows: boolean, tune: LodTune, held: Held): LodTier {
+    const out = held.tier;
     const cull = m.plan.cull;
     const radius = (m.ragdoll ? 2 : 1) * cull.radius;
     sphere.center.set(m.pos.x, m.pos.y + cull.y, m.pos.z);
@@ -1319,7 +1356,94 @@ export class MobileManager {
     const room = this.deps.roomSeen && !m.ragdoll ? this.deps.roomSeen(m.group) : -1;
     i.room = room;
     if (room === 0 || room === 2) this.walled++;
+    // The crowd's say (`lodTier`'s last part, its inputs filled by `crowdInput`): its share of the screen's height from its
+    // height and its distance, at the camera's own field of view and zoom; whether it is in a fight; whether this browser
+    // keeps it for a server; and whether its root has stood still for `holdAfter`, judged over time since the physics
+    // moves a body only on whole sixtieths. Metres stay for the simulation's own decisions.
+    crowdInput(i, m, held.crowd, this.crowdView);
     return lodTier(i, tune, out);
+  }
+
+  /**
+   * What every body's crowd inputs are worked out from this frame (`CrowdView`): the camera's share scale (`shareScale`,
+   * nought with no perspective camera) and the clock, written at the top of every update before any body reads them.
+   */
+  private readonly crowdView = new CrowdView();
+  /** The field of view and zoom `crowdView.shareK` was worked out at. */
+  private shareFov = 0.5;
+  private shareZoom = 0.5;
+  /** How many meshes that draw nothing are off, and how many small parts are hidden, over every body this frame. */
+  emptyOff = 0;
+  smallOff = 0;
+
+  /** The empties switch flipped (`CROWD_SWITCHES.emptyMeshes`): every body hung takes it at once. */
+  applyEmpties(): void {
+    for (const m of this.live) m.showEmpties();
+  }
+
+  /** The small parts' switch flipped (`CROWD_SWITCHES.smallParts`): every body hung takes it at once, by its last share. */
+  applySmallParts(): void {
+    for (const m of this.live) {
+      const held = this.held.get(m);
+      if (held && m.ready) m.setSmallHidden(smallPartsHidden(m.smallHidden, held.crowd.share, m.engaged, CROWD_SWITCHES.smallParts));
+    }
+  }
+
+  /**
+   * For `__debug.crowd()`: every body's tier and share of the screen, whether it is drawn and whether its walk is skipped
+   * as culled (`culled`) or may be as nothing posed it (`still`), whether its root counts as standing still for
+   * `holdShare` (`resting`), its small parts and whether they are hidden, its empties, whether it holds its pose, whether
+   * this browser keeps it for a server and how often it thinks; and those counted.
+   */
+  crowdReport(): Record<string, unknown> {
+    const r4 = (v: number) => (Number.isFinite(v) ? Number(v.toFixed(4)) : v);
+    const byTier: Record<string, number> = {};
+    let holding = 0;
+    let kept = 0;
+    let smallHidden = 0;
+    let smallParts = 0;
+    let empties = 0;
+    let culled = 0;
+    const bodies: Record<string, unknown>[] = [];
+    const keptThink: Record<string, number> = {};
+    for (const m of this.live) {
+      const held = this.held.get(m);
+      const t = held?.tier;
+      const name = t?.name ?? 'loading';
+      byTier[name] = (byTier[name] ?? 0) + 1;
+      const holds = !!t && t.animEvery === 0 && t.name !== 'frozen';
+      if (holds) holding++;
+      const keeps = m.keptForServer;
+      if (keeps) {
+        kept++;
+        const k = String(t?.think ?? 0);
+        keptThink[k] = (keptThink[k] ?? 0) + 1;
+      }
+      smallParts += m.smallMeshes.length;
+      if (m.smallHidden) smallHidden += m.smallMeshes.length;
+      if (CROWD_SWITCHES.emptyMeshes) empties += m.emptyMeshes.length;
+      if (m.group.culled) culled++;
+      bodies.push({
+        key: m.key,
+        name: m.label,
+        tier: name,
+        share: r4(held?.crowd.share ?? 0),
+        drawn: m.group.visible,
+        culled: m.group.culled,
+        still: m.group.still,
+        resting: held?.crowd.resting ?? false,
+        engaged: m.engaged,
+        small: m.smallMeshes.length,
+        smallHidden: m.smallHidden,
+        empties: m.emptyMeshes.length,
+        holds,
+        kept: keeps,
+        think: t?.think ?? null,
+        animEvery: t?.animEvery ?? null,
+      });
+    }
+    bodies.sort((a, b) => (b.share as number) - (a.share as number));
+    return { bodies: this.live.length, byTier, culled, smallParts, smallHidden, empties, holding, kept, keptThink, list: bodies };
   }
 
   /** The shadow cascades' light boxes, read once at the top of `update` for every body's tier; null with shadows off or none wired. */

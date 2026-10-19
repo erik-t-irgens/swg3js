@@ -748,5 +748,110 @@ const pausedFrame = (ms: number, calls = 999, body?: () => void) => {
   } else console.log('skip nothing allocated on a frame: run with node --expose-gc to measure');
 }
 
+// ---------------------------------------------------------------------------------------------
+// The performance pass's third wave: nothing allocated by a frame of the crowd's new per-body work -- the tiers with
+// the new inputs (`lodTier`'s share, engaged, shared and still), the small parts' band, the mover list's rule, the
+// share itself, and the scene's matrix walk stepping over bodies culled and standing still (`BodyGroup`), with the
+// counts rolled. The manager itself cannot be loaded by node (its imports are the game's whole), so its per-frame
+// additions are these pieces, each a kept field or a pure call; measured as the file measures the report's own.
+{
+  const gc = (globalThis as { gc?: () => void }).gc;
+  if (gc) {
+    const { BODY_WALK, BodyGroup, endBodyWalkFrame } = await import('../../../src/world/mobiles/bodyGroup.ts');
+    const { CrowdRecord, CrowdView, crowdInput, listsMover, shareScale, smallPartsHidden } = await import('../../../src/world/mobiles/crowd.ts');
+    const { LOD_TUNE, lodTier } = await import('../../../src/world/mobiles/lod.ts');
+    const scene = new THREE.Scene();
+    const container = new THREE.Group();
+    scene.add(container);
+    const roots: InstanceType<typeof BodyGroup>[] = [];
+    for (let b = 0; b < 60; b++) {
+      const root = new BodyGroup(true);
+      const inner = new THREE.Group();
+      root.add(inner);
+      let parent: THREE.Object3D = inner;
+      for (let k = 0; k < 12; k++) {
+        const bone = new THREE.Bone();
+        bone.position.y = 0.1;
+        parent.add(bone);
+        parent = bone;
+      }
+      root.position.set(b, 0, -b);
+      container.add(root);
+      roots.push(root);
+    }
+    const input = { dist: 0, onScreen: true, nearScreen: true, busy: false, sizeClass: 'small' as const, shadows: true, playerDist: 0, animRange: 160, room: -1, inCascades: true as boolean | undefined, share: 0.5, engaged: false, shared: false, still: false };
+    const out = { name: 'near' as 'near' | 'mid' | 'far' | 'hidden' | 'frozen', animEvery: 1, visible: true, castShadow: false, think: 0.1, move: true };
+    const hidden = new Uint8Array(roots.length);
+    let f = 0;
+    let listed = 0;
+    // The manager's own arithmetic: the share's scale worked out again only when the view's field or zoom moves (aiming),
+    // then each body's crowd inputs filled by `crowdInput` (its share, its fight, its keeping, standing still judged over
+    // time) from stub bodies of a mobile's shape and the manager's own record of each (`CrowdRecord`) and its view
+    // (`CrowdView`), the very classes it keeps, half of the bodies walking. An object literal of the record's shape made
+    // a heap number of every `share` written here (16 bytes a body a frame), which is why the record is a class.
+    const view = new CrowdView();
+    const shared = { zoom: 0 };
+    const bodies = roots.map((r, b) => ({ plan: { height: 1.8 }, pos: r.position.clone(), engaged: b % 7 === 0, keptForServer: b % 5 === 0 }));
+    const helds = roots.map(() => new CrowdRecord());
+    const crowdFrame = () => {
+      f++;
+      const zoom = f % 500 < 250 ? 1 : 1.6;
+      if (zoom !== shared.zoom) {
+        shared.zoom = zoom;
+        view.shareK = shareScale(60, zoom);
+      }
+      view.now += 1 / 144;
+      // The physics' own step: the walkers move on every frame that carries one, about two in five at 144.
+      const stepped = (f * 60) % 144 < 60;
+      for (let b = 0; b < roots.length; b++) {
+        const root = roots[b];
+        // A third culled, a third standing still, a third posed this frame (its mixer ran).
+        root.culled = b % 3 === 0;
+        if (b % 3 === 2 || f % 4 === b % 4) root.posed();
+        if (stepped && b % 2 === 1) bodies[b].pos.x += 1.4 / 60;
+        input.dist = 5 + b * 3;
+        input.playerDist = input.dist;
+        crowdInput(input, bodies[b], helds[b], view);
+        lodTier(input, LOD_TUNE, out);
+        hidden[b] = smallPartsHidden(hidden[b] === 1, helds[b].share, input.engaged, true) ? 1 : 0;
+        if (listsMover(!root.culled, BODY_WALK.culled && root.culled, true)) listed++;
+      }
+      scene.updateMatrixWorld();
+      endBodyWalkFrame();
+    };
+    for (let i = 0; i < 5000; i++) crowdFrame();
+    let gcs = 0;
+    const obs = new PerformanceObserver((list) => {
+      gcs += list.getEntries().length;
+    });
+    obs.observe({ entryTypes: ['gc'] });
+    const youngSpace = () => v8.getHeapSpaceStatistics().find((s) => s.space_name === 'new_space')?.space_used_size ?? 0;
+    const settle = () => new Promise<void>((r) => setTimeout(r, 30));
+    // The cleanest of four runs, each after a fresh warm and a settle: the first writes of a new input field deoptimise
+    // the tiers, and a window caught while the engine is still optimising them again boxes their numbers in the code it
+    // falls back on, which is the engine's and not the frame's (the lesson the grapple's measures learned).
+    let perFrame = Infinity;
+    let cleanGcs = 1;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      for (let i = 0; i < 3000; i++) crowdFrame();
+      gc();
+      await settle();
+      gcs = 0;
+      const before = youngSpace();
+      for (let i = 0; i < 2000; i++) crowdFrame();
+      const after = youngSpace();
+      await settle();
+      const now = (after - before) / 2000;
+      if (gcs === 0 && now < perFrame) {
+        perFrame = now;
+        cleanGcs = 0;
+      }
+    }
+    const gcsSeen = cleanGcs;
+    obs.disconnect();
+    ok(gcsSeen === 0 && perFrame < 4, `a frame of the crowd's work over 60 bodies -- each body's inputs filled (\`crowdInput\`: the share, the fight, the keeping, standing still over time), the tiers, the band, the mover rule, the walk stepping over the culled and the still -- makes no garbage (${perFrame.toFixed(2)} bytes a frame; ${listed > 0 ? 'bodies listed' : 'none listed'})`);
+  } else console.log("skip nothing allocated by the crowd's frame: run with node --expose-gc to measure");
+}
+
 Object.defineProperty(performance, 'now', { value: realNow, configurable: true, writable: true });
 console.log(`\n${checks} checks passed`);

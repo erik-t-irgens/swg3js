@@ -452,7 +452,9 @@ const want = (shown: (keyof typeof R)[]) => seen([...shown, 'lit'].filter((k) =>
   ok(manager.includes('this.deps.roomSeen(m.group)') && manager.includes('(cast && held.cast === false)'), "the manager reads each body's level by its own group, and puts a shadow on the step it is wanted rather than on the half-second");
   const mobile = read('world/mobiles/mobile.ts');
   const animate = mobile.slice(mobile.indexOf('  private animate(dt: number, tier: LodTier): void {'));
-  ok(/if \(this\.posed\) \{\s*if \(every <= 0\) return;/.test(animate) && animate.includes('this.posed = true;') && (mobile.match(/this\.posed = false;/g) ?? []).length >= 1, 'a body frozen from the start is posed once all the same on being hung, so it is never revealed in its rest pose (a body is never stood again in place: one that comes back is new, and hung)');
+  // `mixedOnce` (it was `posed` before the third wave of the performance pass gave that name to the method that marks a body
+  // written for the scene's matrix walk).
+  ok(/if \(this\.mixedOnce\) \{\s*if \(every <= 0\) return;/.test(animate) && animate.includes('this.mixedOnce = true;') && (mobile.match(/this\.mixedOnce = false;/g) ?? []).length >= 1, 'a body frozen from the start is posed once all the same on being hung, so it is never revealed in its rest pose (a body is never stood again in place: one that comes back is new, and hung)');
 }
 
 // ---- 11. Nothing allocated by a frame of it. ----

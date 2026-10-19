@@ -32,6 +32,11 @@ import { FURNITURE_TUNE, type FurnitureTune } from './world/furnitureHost.ts';
 import { SKELETON_FRAME, SKELETON_TUNE } from './core/skeletonOnce.ts';
 import { LOW_CULL } from './world/bodyCull.ts';
 import { LOD_TUNE } from './world/mobiles/lod.ts';
+// The steady cost of people (the performance pass's third wave): the bodies the scene's matrix walk steps over, and what
+// of each body is drawn by its share of the screen, with the console's knob and the debug menu's sliders for it.
+import { BODY_WALK, BODY_WALK_STATS, endBodyWalkFrame } from './world/mobiles/bodyGroup.ts';
+import { CROWD_SWITCHES, CROWD_TUNE, listsMover, tuneCrowd, type CrowdTune } from './world/mobiles/crowd.ts';
+import { crowdDialsFor } from './world/mobiles/crowdDials.ts';
 import { FAR_TILE_TUNE } from './world/farTile.ts';
 import { FAR_PROBE, FAR_PROBE_STATS } from './world/mobiles/groundProbe.ts';
 import { FLORA_WARM } from './world/flora.ts';
@@ -1836,6 +1841,59 @@ class App {
       set: (v) => (ROOM_DEFER.on = !!v),
       values: [false, true],
       note: "true builds a body stood outdoors with its world pass's programs only and its rooms pass's after it, off the frame; read when a body is prepared, so an in-session ab compares only bodies prepared while it runs",
+    });
+    // The third wave, each first value the old way: the scene's matrix walk stepping over a body the manager's whole cull
+    // hides, and over a creature or person nothing has posed since its last walk (`bodyGroup.ts`); a body's meshes that
+    // draw nothing kept off; only the bodies a pass drew listed for the motion blur; and a body's small parts hidden while
+    // it is small on the screen, the one of the five that changes the picture (`crowd.ts`, `__debug.crowd()`).
+    registerPerfSwitch('walkSkip', { get: () => BODY_WALK.culled, set: (v) => (BODY_WALK.culled = !!v), values: [false, true], note: "a creature or person the manager's whole cull hides is left out of the scene's matrix walk; the walk after it shows again works it out whole. A fighter has no whole cull and is never left out" });
+    registerPerfSwitch('walkStill', { get: () => BODY_WALK.still, set: (v) => (BODY_WALK.still = !!v), values: [false, true], note: 'a creature or person nothing has posed since its last walk (its mixer did not run, its root did not move) keeps that walk\'s world matrices; never a fighter' });
+    registerPerfSwitch('emptyMeshes', {
+      get: () => CROWD_SWITCHES.emptyMeshes,
+      set: (v) => {
+        CROWD_SWITCHES.emptyMeshes = !!v;
+        this.world.mobiles?.applyEmpties();
+      },
+      values: [false, true],
+      note: "a body's meshes that draw no triangle (a body part wholly under clothes) kept off, where three issued a draw of nothing for each after its program, uniforms and vertex array",
+    });
+    registerPerfSwitch('moverList', { get: () => CROWD_SWITCHES.moverList, set: (v) => (CROWD_SWITCHES.moverList = !!v), values: [false, true], note: 'only the creatures and people a pass drew are listed for the motion blur (one the walk stepped over as culled never is, whatever this says)' });
+    registerPerfSwitch('smallParts', {
+      get: () => CROWD_SWITCHES.smallParts,
+      set: (v) => {
+        CROWD_SWITCHES.smallParts = !!v;
+        this.world.mobiles?.applySmallParts();
+      },
+      values: [false, true],
+      note: "a body's small parts (eyes, teeth, buckles) hidden while it covers less than `CROWD_TUNE.smallShare` of the screen's height: a look, the owner's to judge, not an exact fix",
+    });
+    // The four exact ones at once, as `step3` puts step 3 beside the old way: the two walk skips cover for each other (a
+    // culled body that stands still is skipped by either), so each alone measures only what the other leaves it. Reads
+    // true with all four on, false with all four off and 'mixed' otherwise, kept aside and put back as step3's is.
+    const crowdKeys = ['walkSkip', 'walkStill', 'emptyMeshes', 'moverList'] as const;
+    let crowdMixed: unknown[] | null = null;
+    const crowdGet = (): boolean | 'mixed' => {
+      let on = 0;
+      for (const k of crowdKeys) if (PERF_SWITCHES.get(k)?.get() === true) on++;
+      return on === crowdKeys.length ? true : on === 0 ? false : 'mixed';
+    };
+    registerPerfSwitch('crowdExact', {
+      get: crowdGet,
+      set: (v) => {
+        if (v === true || v === false) {
+          if (crowdMixed === null && crowdGet() === 'mixed') crowdMixed = crowdKeys.map((k) => PERF_SWITCHES.get(k)?.get());
+          for (const k of crowdKeys) {
+            const sw = PERF_SWITCHES.get(k);
+            if (sw && sw.get() !== v) sw.set(v);
+          }
+        } else if (v === 'mixed' && crowdMixed !== null) {
+          const saved = crowdMixed;
+          crowdMixed = null;
+          crowdKeys.forEach((k, i) => PERF_SWITCHES.get(k)?.set(saved[i]));
+        }
+      },
+      values: [false, true],
+      note: 'the four exact fixes of the third wave at once: both walk skips, the empty meshes and the mover list',
     });
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
     this.world.attachCamera(this.cam.camera, true, this.portals);
@@ -8870,6 +8928,29 @@ class App {
       /** Every mobile's cull sphere, whether it is on and near the screen, whether it is drawn and casts, and its tier: the check that the one sphere is in the frame it claims. */
       mobileCull: () => this.world.mobiles?.cullReport(this.cam.camera, this.player.pos) ?? 'no world loaded',
       /**
+       * The steady cost of people (`src/world/mobiles/crowd.ts`, `bodyGroup.ts`): every body's tier and share of the screen's
+       * height, counts by tier, the small parts hidden, the bodies the last frame's matrix walk worked out and stepped over
+       * (culled and still), the empties off, the bodies listed for the motion blur, those kept for a server and how often
+       * they think, and those holding their pose. `{ tune }` moves `CROWD_TUNE` in memory (every number of it a look the
+       * owner judges; the debug menu has them as sliders), and `{ compare: 'walkSkip' }` draws the frame with each value of
+       * a switch and compares the two pictures pixel for pixel (beside two draws of the first value, the noise floor).
+       */
+      crowd: (opts?: { tune?: Partial<Record<keyof CrowdTune, unknown>>; compare?: string }) => {
+        const words = opts?.tune ? tuneCrowd(opts.tune) : [];
+        const compared = opts?.compare ? this.crowdCompare(opts.compare) : null;
+        const mobiles = this.world.mobiles;
+        const s = BODY_WALK_STATS;
+        return {
+          ...(words.length ? { words } : {}),
+          ...(compared ? { compared } : {}),
+          ...(mobiles ? mobiles.crowdReport() : { bodies: 0, note: 'no world loaded' }),
+          walk: { walked: s.lastWalked, skippedCulled: s.lastCulled, skippedStill: s.lastStill, walkSkip: BODY_WALK.culled, walkStill: BODY_WALK.still },
+          moversListed: this.moversListed,
+          switches: { ...CROWD_SWITCHES },
+          tune: { ...CROWD_TUNE },
+        };
+      },
+      /**
        * The indoor pathing: `nav()` says whether this pack carries floor meshes at all, how many
        * rooms name one, how many have been read, how many searches have been asked for and what
        * became of each, and what the last one cost; `nav({ reach: 0.6, every: 0.25 })` moves any of
@@ -10535,8 +10616,8 @@ class App {
       freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
       holdKeys: (ms) => this.holdGameKeys(ms),
       // The race drive's, the engines' and a race run's numbers of feel, as sliders when `race`, `engines` or `track` is
-      // picked, and the NPC ship ladder's tiers 6 to 10 when `npcShips` is.
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper),
+      // picked, the NPC ship ladder's tiers 6 to 10 when `npcShips` is, and how a far body is drawn when `crowd` is.
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper),
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -19659,6 +19740,82 @@ class App {
     }
   }
 
+  /**
+   * A switch's two values compared on one picture (`__debug.crowd({ compare })`): the frame is drawn three times with its
+   * first value and twice with its second, with nothing stepped between, and read back after each -- the scene as the
+   * portal renderer drew it, before the effects, where an exact fix must leave every value the same (`scene`), and the
+   * canvas, where the effects' own frame-to-frame easing and noise move a few hundred pixels whatever the switch says
+   * (`canvas`, beside two draws of the first value: `noise`). The console's alone: it allocates the pictures, and the
+   * switch is put back as it was.
+   */
+  private crowdCompare(key: string): Record<string, unknown> {
+    const sw = PERF_SWITCHES.get(key);
+    if (!sw) return { error: `no switch named '${key}'` };
+    if (!this.inWorld) return { error: 'no world to draw' };
+    const gl = this.renderer.getContext();
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    const w = size.x;
+    const h = size.y;
+    const fx = this.postfx;
+    const scene = fx ? fx.sceneTarget : null;
+    const grab = (): { canvas: Uint8Array; scene: Uint16Array | null } => {
+      this.drawFrame();
+      const px = new Uint8Array(w * h * 4);
+      const was = this.renderer.getRenderTarget();
+      if (was) this.renderer.setRenderTarget(null);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      if (was) this.renderer.setRenderTarget(was);
+      let raw: Uint16Array | null = null;
+      if (scene) {
+        raw = new Uint16Array(scene.width * scene.height * 4);
+        this.renderer.readRenderTargetPixels(scene, 0, 0, scene.width, scene.height, raw);
+      }
+      return { canvas: px, scene: raw };
+    };
+    const differ = (x: ArrayLike<number> | null, y: ArrayLike<number> | null): { pixels: number; worst: number } | null => {
+      if (!x || !y) return null;
+      let pixels = 0;
+      let worst = 0;
+      for (let i = 0; i < x.length; i += 4) {
+        const d = Math.max(Math.abs(x[i] - y[i]), Math.abs(x[i + 1] - y[i + 1]), Math.abs(x[i + 2] - y[i + 2]));
+        if (d > 0) pixels++;
+        if (d > worst) worst = d;
+      }
+      return { pixels, worst };
+    };
+    const before = sw.get();
+    const [a, b] = sw.values;
+    // The grain and the dither move every draw by a level or two in nearly every pixel of the canvas; held off for the
+    // compare (the console's own pass override, never saved).
+    const grainWas = fx ? fx.override.grainVignette : undefined;
+    if (fx) fx.override.grainVignette = false;
+    try {
+      sw.set(a);
+      grab();
+      const a1 = grab();
+      const a2 = grab();
+      sw.set(b);
+      grab();
+      const b1 = grab();
+      const inScene = differ(a2.scene, b1.scene);
+      return {
+        key,
+        a,
+        b,
+        size: [w, h],
+        scene: { noise: differ(a1.scene, a2.scene), switched: inScene },
+        canvas: { noise: differ(a1.canvas, a2.canvas), switched: differ(a2.canvas, b1.canvas) },
+        same: inScene !== null && inScene.pixels === 0,
+      };
+    } finally {
+      sw.set(before);
+      if (fx) {
+        if (grainWas === undefined) delete fx.override.grainVignette;
+        else fx.override.grainVignette = grainWas;
+      }
+    }
+  }
+
   /** The `people` perf switch as it stands: the creatures' and people's container out of the scene, hidden, or in. */
   private peopleSwitch(): 'on' | 'out' | 'hidden' {
     const group = this.world.mobiles?.group;
@@ -19950,6 +20107,9 @@ class App {
     this.renderer.info.autoReset = auto;
   }
 
+  /** How many of the catalogue's creatures and people the last frame listed for the motion blur (`__debug.crowd()`). */
+  private moversListed = 0;
+
   /**
    * Everything that moves on its own, for the motion blur, once a frame: the player and what they
    * ride, fly or stand aboard (followed by the camera), other vehicles, the creatures, the fighters,
@@ -19971,7 +20131,22 @@ class App {
     }
     if (w.creatures) for (const c of w.creatures.creatures) out.add(c.group, false, 'creature');
     if (w.npcs) for (const n of w.npcs.npcs) out.add(n.group, false, 'npc');
-    if (w.mobiles) for (const m of w.mobiles.live) out.add(m.group, false, 'creature');
+    // The catalogue's creatures and people only while a pass drew them (`listsMover`): read here, in the effects, after
+    // the portal renderer's passes, which keep a body no pass drew hidden through the effects. A body nothing drew needs
+    // no record, and one coming back is met afresh, blurring with the camera alone for its first frame. One the matrix
+    // walk stepped over as culled is never listed, whatever the switch: its meshes' world matrices are not this frame's.
+    // One it stepped over as standing still is, its matrices being the very ones a whole walk would have made.
+    let listed = 0;
+    if (w.mobiles) {
+      const live = w.mobiles.live;
+      for (let i = 0; i < live.length; i++) {
+        const g = live[i].group;
+        if (!listsMover(g.visible, BODY_WALK.culled && g.culled, CROWD_SWITCHES.moverList)) continue;
+        out.add(g, false, 'creature');
+        listed++;
+      }
+    }
+    this.moversListed = listed;
     // The loose props: one group for all of them, whose root never moves and whose children do, so
     // the classifier's "only the parts that move relative to it" branch is exactly right for them.
     // 'vehicle' rather than a kind of their own: `FxMoverKind` has no 'prop' and a crate is the
@@ -28512,7 +28687,14 @@ class App {
         perf.gauge(CNT.portalMaterials, this.portals.materials.size);
         perf.gauge(CNT.mobiles, this.world.mobiles?.live.length ?? 0);
         perf.count(CNT.seenOff, this.world.mobiles?.walled ?? 0);
+        // The bodies this frame's matrix walk worked out whole and stepped over, and the meshes kept off and hidden.
+        perf.count(CNT.bodiesWalked, BODY_WALK_STATS.walked);
+        perf.count(CNT.bodiesSkipped, BODY_WALK_STATS.culled + BODY_WALK_STATS.still);
+        perf.gauge(CNT.emptyOff, this.world.mobiles?.emptyOff ?? 0);
+        perf.gauge(CNT.smallOff, this.world.mobiles?.smallOff ?? 0);
       }
+      // This frame's walk counts become the last frame's, timed or not, so the console reads a whole frame's.
+      endBodyWalkFrame();
       this.perfSyncMark = sync;
       // A frame the game did not simulate (the Escape menu, which is up whenever the console has the
       // mouse, a panel, the map, a loading screen, a death) is left out of the report and only counted.

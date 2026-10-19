@@ -152,6 +152,12 @@ const COUNTER_DEFS = [
   { key: 'floraRebuilt', group: 'levels', label: 'flora regions rebuilt', kind: 'sum', scale: 1 },
   { key: 'floraPending', group: 'levels', label: 'flora regions waiting', kind: 'last', scale: 1 },
   { key: 'rideBias', group: 'levels', label: 'ride bias', kind: 'mean', scale: 1 },
+  // The performance pass's third wave: the bodies the scene's matrix walk worked out whole and those it stepped over (culled
+  // or standing still, `bodyGroup.ts`), and the meshes that draw nothing kept off and the small parts hidden (`crowd.ts`).
+  { key: 'bodiesWalked', group: 'people', label: 'bodies walked', kind: 'mean', scale: 1 },
+  { key: 'bodiesSkipped', group: 'people', label: 'bodies skipped', kind: 'mean', scale: 1 },
+  { key: 'emptyOff', group: 'people', label: 'empty meshes off', kind: 'last', scale: 1 },
+  { key: 'smallOff', group: 'people', label: 'small parts off', kind: 'last', scale: 1 },
   { key: 'strays', group: '', label: 'strays', kind: 'mean', scale: 1 },
   { key: 'caster0', group: '', label: 'caster0', kind: 'mean', scale: 1 },
   { key: 'caster1', group: '', label: 'caster1', kind: 'mean', scale: 1 },

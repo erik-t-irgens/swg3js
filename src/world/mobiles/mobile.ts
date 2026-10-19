@@ -84,6 +84,10 @@ import type { CoverDeps } from '../cover.ts';
 import { SPINE_BONE, foldSpine, type FoldRecord } from './spineFold.ts';
 import type { PackAsset } from './assets';
 import type { RoomJob } from '../roomDefer.ts';
+// Its root, which the scene's one matrix walk a frame steps over while it is culled or stands still (`bodyGroup.ts`),
+// and what of it is drawn by its share of the screen: the meshes that draw nothing and its small parts (`crowd.ts`).
+import { BodyGroup } from './bodyGroup.ts';
+import { CROWD_SWITCHES, emptiesOf, hideSmallParts, relistSmallParts } from './crowd.ts';
 import type { CarryWeapon, Gait, MobileEntry, MobileState, Roles, Vec3 } from './types';
 
 export type { MobileState };
@@ -142,6 +146,11 @@ export interface MobileBody {
   scene: THREE.Object3D;
   /** Its rooms programs, deferred for a body first stood outdoors (`roomDefer.ts`); absent is ready. */
   roomJob?: RoomJob;
+  /**
+   * Its geometries that draw nothing (a body part wholly under clothes), listed on this record the first time a body
+   * of it is hung (`emptiesOf` in crowd.ts) and never on a mesh's `userData`. Every clone shares its geometry.
+   */
+  empties?: Set<THREE.BufferGeometry>;
 }
 
 /** What the pack is played with beyond its own clips and roles: a Jedi's swings off a species rig, a rifle's stance. */
@@ -378,8 +387,12 @@ export class Mobile implements Living, NpcSubject {
   private readonly baseAggression: Aggression;
   /** Whether it went passive for want of anything to fight with rather than by its own temper. */
   private emptyHanded = false;
-  /** Hangs at the body's middle, turned by the heading. */
-  readonly group = new THREE.Group();
+  /**
+   * Hangs at the body's middle, turned by the heading. A root the scene's matrix walk steps over while the manager's
+   * whole cull hides it, or while nothing under it has been posed since its last walk (`bodyGroup.ts`): so every
+   * write of a position, a turn or a scale under it, here or anywhere in this folder, calls `posed()`.
+   */
+  readonly group = new BodyGroup(true);
   /** Hangs at -feet, at the spawn's scale: the model's origin is on the ground. */
   readonly inner = new THREE.Group();
   /** The feet, mirrored from the physics body every frame. */
@@ -582,7 +595,18 @@ export class Mobile implements Living, NpcSubject {
   private frame = 0;
   private animAcc = 0;
   /** Whether the mixer has run since the model was hung or the bones were put back to rest (`animate`). */
-  private posed = false;
+  private mixedOnce = false;
+  /**
+   * Its meshes that draw nothing (its look's `empties`), kept off while the switch says so: the per-body half of the
+   * look's own list, filled when it is hung. And its small parts, hidden while it is small on the screen
+   * (`setSmallHidden`, the manager's call): both on this body's own record, never on a mesh's `userData`.
+   */
+  readonly emptyMeshes: THREE.Mesh[] = [];
+  readonly smallMeshes: THREE.Mesh[] = [];
+  /** Whether its small parts are hidden now. */
+  smallHidden = false;
+  /** Which listing of the small parts its list was made under (`CROWD_PARTS.version`), so a moved threshold lists them again. */
+  smallVersion = -1;
   /** What the body moves at: what the chosen gait's feet show. */
   private speed = 0;
   /** The acceleration's own progress toward the pace, from which the gait is chosen (never overwritten by the gait). */
@@ -947,6 +971,7 @@ export class Mobile implements Living, NpcSubject {
     this.inner.position.y = -feet;
     this.inner.scale.setScalar(this.scale);
     this.group.add(this.inner);
+    this.posed();
     this.group.name = `mobile:${e.id}`;
     markActor(this.group);
     // Stood on something raised: held from the first step, before the manager has seen it once.
@@ -1035,6 +1060,44 @@ export class Mobile implements Living, NpcSubject {
   /** Whether it has been taken out of the world. */
   get removed(): boolean {
     return this.disposed;
+  }
+
+  /**
+   * Something under its root has just been written -- its mixer ran, `inner` was turned, lifted or faded, a weapon was
+   * hung, a fold or a ragdoll moved a bone -- so the scene's next matrix walk walks it whole rather than keeping last
+   * walk's world matrices (`BodyGroup.still`). Every writer of a position, a turn or a scale of any node under it calls
+   * this; `walkSkip.test.ts` holds the list. Writes to the root itself need not: its matrix is compared as it walks.
+   */
+  posed(): void {
+    this.group.posed();
+  }
+
+  /**
+   * Kept by this browser for a server: one of the world's while a server holds the world, and this the browser thinking
+   * for it. Its decisions are everybody's, so it never thinks slower than `CROWD_TUNE.sharedThink` (`lodTier`).
+   */
+  get keptForServer(): boolean {
+    return !this.driven && this.sharedLive;
+  }
+
+  /** Its meshes that draw nothing turned off or back on, by the switch (`CROWD_SWITCHES.emptyMeshes`). */
+  showEmpties(): void {
+    const on = !CROWD_SWITCHES.emptyMeshes;
+    for (let i = 0; i < this.emptyMeshes.length; i++) this.emptyMeshes[i].visible = on;
+  }
+
+  /** Its small parts hidden or shown again (the manager's call, by its share of the screen): `hideSmallParts`. */
+  setSmallHidden(hidden: boolean): void {
+    hideSmallParts(this, hidden);
+  }
+
+  /**
+   * Its small parts listed again from its hung meshes by the thresholds in force (`relistSmallParts`, `isSmallPart`):
+   * when it is hung, when a weapon goes in or out of its hand, and whenever `smallTris` or `smallSize` has moved since
+   * (`CROWD_PARTS`). A mesh the look itself hides, and one of its empties, is never one; with no model hung, none is.
+   */
+  listSmallParts(version: number): void {
+    relistSmallParts(this, this.model ? this.inner : null, this.scale, version);
   }
 
   /** In a building or out: the colliders' filters and the ground check follow it through a door. */
@@ -1511,12 +1574,20 @@ export class Mobile implements Living, NpcSubject {
     this.carried = !!extras?.carried;
     markActor(scene);
     this.inner.add(scene);
+    this.posed();
     this.model = scene;
     this.wornBody = model;
+    // Its meshes that draw nothing, by its look's own list (every clone shares the look's geometry), kept off while the
+    // switch says so; then its small parts, of what is left. Nothing here draws or compiles: a mesh turned off is one
+    // three skips, and the look was prepared whole.
+    const empties = emptiesOf(model);
+    this.emptyMeshes.length = 0;
+    for (const m of this.meshes) if (m.visible && empties.has(m.geometry)) this.emptyMeshes.push(m);
+    this.showEmpties();
     // Each mesh culled on its own in every pass and cascade (commit 3c).
     this.refitCull();
     // A new skeleton in its rest pose: posed on its first step, whatever its tier.
-    this.posed = false;
+    this.mixedOnce = false;
     let warning: string | null = null;
     if (pack) {
       this.roles = rolesFor(pack.json, this.entry.gender);
@@ -1654,6 +1725,7 @@ export class Mobile implements Living, NpcSubject {
         if (!under) this.meshes[n++] = m;
       }
       this.meshes.length = n;
+      this.smallVersion = -1;
     }
     this.holder = null;
     this.weapon = null;
@@ -1745,12 +1817,16 @@ export class Mobile implements Living, NpcSubject {
     });
     const hand = boneForRole(bones, 'rightHand');
     if (!hand) return false;
-    this.group.updateMatrixWorld(true);
+    // The whole body worked out now, whatever the walk's skips say: the hand's scale and turn are read below.
+    this.group.walkWhole();
     const holder = new THREE.Group();
     holder.name = `mobile weapon:${e.id}`;
     holder.add(e.model);
     holder.scale.setScalar(1 / Math.max(hand.getWorldScale(tmp).x, 1e-6));
     hand.add(holder);
+    this.posed();
+    // A weapon in its hand is never one of its small parts, but what is in its meshes changed: listed again.
+    this.smallVersion = -1;
     markActor(holder);
     e.model.traverse((o) => {
       const m = o as THREE.Mesh;
@@ -1766,6 +1842,7 @@ export class Mobile implements Living, NpcSubject {
       tmp.set(0, 0, 1).applyQuaternion(this.model.getWorldQuaternion(tmpQ));
       tmp.applyQuaternion(hand.getWorldQuaternion(tmpQ).invert()).normalize();
       holder.quaternion.setFromUnitVectors(UP, tmp);
+      this.posed();
       this.hiltTop = e.hiltTop;
       const blade = new SaberBlade();
       blade.setColor(e.color);
@@ -1799,6 +1876,7 @@ export class Mobile implements Living, NpcSubject {
       muzzle.name = 'muzzle';
       muzzle.position.set(0, 0, e.length * 0.55);
       holder.add(muzzle);
+      this.posed();
       this.muzzle = muzzle;
     }
     return true;
@@ -3033,7 +3111,10 @@ export class Mobile implements Living, NpcSubject {
   startRagdoll(): void {
     this.queued = false;
     if (this.ragdoll || !this.model || !this.dead || this.disposed) return;
-    this.group.updateMatrixWorld(true);
+    // The whole body worked out now, whatever the walk's skips say (a body culled as it died was not walked): the
+    // ragdoll is built from the bones' world matrices, and from here its pieces write every bone each step.
+    this.group.walkWhole();
+    this.posed();
     const v = this.body.linvel();
     const maxRadius = clamp(0.08 * this.plan.height, 0.22, 2);
     this.ragdoll = new Ragdoll(this.deps.physics, this.model, {
@@ -3112,6 +3193,8 @@ export class Mobile implements Living, NpcSubject {
 
   /** The share switch flipped (commit 3a): its hung meshes one skeleton, or one each; how many it has now. */
   reshare(share: boolean): number {
+    // A mesh bound again has its bind inverse put back from its bind matrix, which the next whole walk makes its world's.
+    this.posed();
     return this.model ? reshareSkeletons(this.model, share) : 0;
   }
 
@@ -3263,6 +3346,7 @@ export class Mobile implements Living, NpcSubject {
     this.inner.rotation.y = 0;
     // The same frame the fold is taken in, and put back to nothing before it is read.
     if (this.spines?.length) foldSpine(this.spines, this.inner, this.folded, 0, 0);
+    this.posed();
   }
 
   /**
@@ -3325,6 +3409,7 @@ export class Mobile implements Living, NpcSubject {
     this.aimTurn = easeAngle(this.aimTurn, bodyShare(this.aimFix.yaw), STANCE_TUNE.bodyTurn, dt);
     if (this.inner.rotation.y !== this.aimTurn) this.inner.rotation.y = this.aimTurn;
     foldSpine(this.spines ?? [], this.inner, this.folded, spineShare(this.aimFix.yaw), this.aimFix.pitch);
+    this.posed();
   }
 
   private fighting(): boolean {
@@ -3347,6 +3432,7 @@ export class Mobile implements Living, NpcSubject {
     // 1. The physics has the body: the skin follows it, and its place is where the trunk lies.
     if (this.ragdoll) {
       this.ragdoll.update(dt);
+      this.posed();
       this.ragdoll.centre(tmp);
       this.pos.set(tmp.x, tmp.y - Math.min(0.3, this.halfHeight * 0.3), tmp.z);
       this.deadTimer -= dt;
@@ -3391,6 +3477,7 @@ export class Mobile implements Living, NpcSubject {
       if (this.fading > 0) {
         this.fading = Math.max(0, this.fading - dt);
         this.inner.scale.setScalar(this.scale * Math.max(0.001, this.fading / HOLOGRAM_FADE));
+        this.posed();
       }
       if (this.swimming) {
         const v = this.body.linvel();
@@ -3518,6 +3605,7 @@ export class Mobile implements Living, NpcSubject {
       if (this.fading > 0) {
         this.fading = Math.max(0, this.fading - dt);
         this.inner.scale.setScalar(this.scale * Math.max(0.001, this.fading / HOLOGRAM_FADE));
+        this.posed();
       }
       this.animate(dt, tier);
       this.updateBlade(dt, ctx.camera);
@@ -4179,6 +4267,7 @@ export class Mobile implements Living, NpcSubject {
       this.liftLagZ = 0;
     }
     this.inner.position.set(0, this.liftLagY - this.plan.feet, this.liftLagZ);
+    this.posed();
   }
 
   /** No lag at all: anything that puts the body somewhere new. */
@@ -4187,6 +4276,7 @@ export class Mobile implements Living, NpcSubject {
     this.liftLagY = 0;
     this.liftLagZ = 0;
     this.inner.position.set(0, -this.plan.feet, 0);
+    this.posed();
   }
 
   /**
@@ -4372,13 +4462,16 @@ export class Mobile implements Living, NpcSubject {
     if (!a) return;
     this.animAcc = Math.min(2, this.animAcc + dt);
     const every = tier.animEvery;
-    if (this.posed) {
+    if (this.mixedOnce) {
       if (every <= 0) return;
       if (every > 1 && (this.frame + this.key) % every !== 0) return;
     }
     a.update(this.animAcc);
     this.animAcc = 0;
-    this.posed = true;
+    this.mixedOnce = true;
+    // The mixer wrote its bones: the next matrix walk walks the body whole. A frame it did not run, the body keeps last
+    // walk's world matrices (`BodyGroup.still`), which is most frames of a body standing at the far tier.
+    this.posed();
   }
 
   /**

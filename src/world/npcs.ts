@@ -122,6 +122,10 @@ import { FIGHTER_BODY, POSTURE_TUNE, STANCE_TUNE, aimMode, aimPointFor, applyBod
 import { BLADE_RADIUS, BladePath, type Striker } from '../combat/sweep';
 // Its meshes culled one by one against a sphere about the figure, set once (commit 3c).
 import { cullsOneByOne, fighterCull, fitCullSpheres, setBodyCulled, type BodyPose } from './bodyCull.ts';
+// Its root, which the scene's matrix walk steps over while a whole cull hides it (`bodyGroup.ts`). Never as standing
+// still: a fighter is posed by the player's rig and `fighterStance.ts` from here, outside the folder whose every writer
+// marks a body posed, so it is made without `marksPoses` and nothing here sets `still`.
+import { BodyGroup } from './mobiles/bodyGroup.ts';
 // Jedi Academy's roll when it is aimed at, and a jump by what it is (`evade.ts`): the same tables a
 // person from the catalogue reads, and its own rig's own clips.
 import { EVADE_TUNE, EvadeClock, JUMP_TUNE, ROLL_CLIPS, aimedAt, jumpAcross, jumpClipName, jumpHeight, jumpLevelFor, jumpSpeed, ledgeJump, rollCommit, rollDirection, rollVector, tuneEvade, tuneJump, type AimLine, type EvadeTune, type JumpTune, type LedgeAsk, type RollDir } from './evade.ts';
@@ -466,7 +470,7 @@ let warnedProne = false;
 // look, its weapon and its blade's colour drawn from the record's seed, so every browser dresses the same
 // body -- and kept by one browser, every other driving its copy from the keeper's rows.
 export class Npc implements Living, ErrandBody, NpcSubject {
-  readonly group = new THREE.Group();
+  readonly group = new BodyGroup();
   readonly pos = new THREE.Vector3();
   readonly body: RAPIER.RigidBody;
   readonly collider: RAPIER.Collider;
