@@ -78,9 +78,10 @@ import { roomOverhead } from './nav/navMesh.ts';
 import type { SunInfo } from '../core/postfx';
 import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
 import { isShadowOnly } from '../core/fxRegistry.ts';
-import { ProgramQueue, resolveLinks } from '../core/programQueue.ts';
-import { PACE_TUNE, framesFor } from '../core/programPace.ts';
-import { pacingHard, shaderBudget } from '../core/shaderWatch.ts';
+import { ProgramQueue, materialsUnder, resolveLinks } from '../core/programQueue.ts';
+import { PACE_TUNE, QueueWatch, framesFor } from '../core/programPace.ts';
+import { noteProgramTime, pacingHard, shaderBudget } from '../core/shaderWatch.ts';
+import { LOADING_TUNE, courseCounts, loadBounded, sweepYield } from './loadingTune.ts';
 import { addPointLight, cascadesUsable, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
 import { ParticleEffects, type EffectHandle, type EffectSounds } from './particles';
 import { Ambience, type AmbienceContext, type BedRow, type RoomRow } from '../audio/ambience.ts';
@@ -403,6 +404,8 @@ const NO_HURT = (): void => { };
 
 /** How many of an actor's textures are uploaded before the frame is given a turn (`prepareActor`). */
 const TEXTURES_PER_YIELD = 4;
+/** How many objects one batch of the compile sweep takes (`sweepBatches`): whether it then waits a frame is `sweepYield`'s. */
+const SWEEP_BATCH = 8;
 
 /**
  * False when local storage holds `swg.shaderPace` = '0' (read once): the whole of the pacing is
@@ -1486,7 +1489,7 @@ export class World {
     // The catalogue's mobiles. The asset cache outlives the planet; the catalogue is a getter,
     // not a value, because on a cold first load it is usually still in flight here.
     const mobileAssets = MobileAssets.for(import.meta.env.BASE_URL);
-    mobileAssets.prepare = (root) => this.prepareActor(root);
+    mobileAssets.prepare = (root, label) => this.prepareActor(root, label);
     mobileAssets.forget = (mats) => this.forgetMaterials(mats);
     this.mobiles = new MobileManager({
       physics: this.physics,
@@ -1970,6 +1973,9 @@ export class World {
     this.structures.length = 0;
     this.layoutStream?.dispose();
     this.layoutStream = null;
+    // The race courses' warm memo goes with the streamer it was kept for: held, it kept the world left behind's whole
+    // region list and its pack's parsed layout reachable until the next race start's need test asked again.
+    this.courseWarmed = { ls: null, ids: new Set() };
     // The doors came down with their buildings' rooms just above; the door models go with the world they
     // were prepared in, their materials out of the portal set and the cascades first.
     this.forgetMaterials(this.doors.materials());
@@ -3278,7 +3284,7 @@ export class World {
     this.placedWarm = ids;
     st.asked = ids.size;
     const queue: string[] = [];
-    for (const id of ids.keys()) if (!ls.loadedModel(id)) queue.push(id);
+    for (const id of ids.keys()) if (!ls.loadedModel(id) && !ls.hasFailed(id)) queue.push(id);
     const token = this.loadToken;
     const t0 = performance.now();
     let next = 0;
@@ -3291,7 +3297,7 @@ export class World {
           try {
             await ls.loadModel(id);
           } catch {
-            // A model that will not load is noted by the streamer when its tier asks for it.
+            // A model that will not load is noted by the streamer (`hasFailed`) and not asked for again.
           }
         }
       } finally {
@@ -3381,8 +3387,9 @@ export class World {
    * (`App.settle`). Measured on arrivals 1.5 km from Theed's starport with a flight onto it: with no wait the
    * screen lifted with 142 of 318 models in and the approach built two programs in play (a trophy and a tent
    * pipe) that the old rule had built behind the screen; with a 6 s wait all 318 were in on one run of two and
-   * nothing was built in play, but the screen stood 5 to 7 s longer. So it ships at nought: best effort, never
-   * holding the screen up; the knob is `__debug.placed({ warmWaitMs })`.
+   * nothing was built in play, but the screen stood 5 to 7 s longer. That was against a sweep that waited a frame
+   * per eight objects (15 to 28 s whatever it built); with it sliced it ships at 3 s; the knob is
+   * `__debug.placed({ warmWaitMs })`.
    */
   placedWarmSettled(ms: number): Promise<void> {
     return Promise.race([this.placedWarmLoads, new Promise<void>((r) => setTimeout(r, Math.max(0, ms)))]);
@@ -3411,27 +3418,151 @@ export class World {
         continue;
       }
       st.ready++;
-      for (const prim of m.primitives) {
-        if (prim.cell > 0 && m.portals.length > 0) continue;
-        if (isBasinWater(prim.material)) continue;
-        if (!indoor && this.compiledMaterials.has(prim.material)) continue;
-        const s = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
-        s.name = `warm:${id}`;
-        if (indoor) s.layers.enable(ACTOR_LAYER);
-        out.push(s);
-      }
-      // Its lower detail levels (step 7), which only its outdoor copies are drawn at: a far street's atlases
-      // and cards must not build their programs on the frame a copy first falls to them.
-      for (const lv of lowerLevels(m)) {
-        for (const prim of lv.primitives) {
-          if (this.compiledMaterials.has(prim.material)) continue;
-          const s = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
-          s.name = `warm:${id}:level`;
-          out.push(s);
-        }
-      }
+      this.standInsOf(id, m, indoor, out);
     }
     st.standIns = out.length;
+    return out;
+  }
+
+  /**
+   * One loaded model's stand-ins for a sweep (`placedStandIns`, `compileCourse`): an instanced mesh of one per piece,
+   * on the actor layer where a copy stands indoors (so both passes are built), never in the scene. An outdoor piece
+   * whose material is adopted already is left out -- a tier holds it and its world pass is built -- but never an
+   * indoor one, whose rooms' pass an outdoor copy never built; a portal building's rooms and a basin's water are
+   * left out (their own building's and the water system's). Its lower detail levels, which only its outdoor copies
+   * are drawn at (step 7), go too: a far street's atlases and cards must not build their programs on the frame a copy
+   * first falls to them.
+   */
+  private standInsOf(id: string, m: NonNullable<ReturnType<LayoutStreamer['loadedModel']>>, indoor: boolean, out: THREE.InstancedMesh[]): void {
+    for (const prim of m.primitives) {
+      if (prim.cell > 0 && m.portals.length > 0) continue;
+      if (isBasinWater(prim.material)) continue;
+      if (!indoor && this.compiledMaterials.has(prim.material)) continue;
+      const s = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
+      s.name = `warm:${id}`;
+      if (indoor) s.layers.enable(ACTOR_LAYER);
+      out.push(s);
+    }
+    for (const lv of lowerLevels(m)) {
+      for (const prim of lv.primitives) {
+        if (this.compiledMaterials.has(prim.material)) continue;
+        const s = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
+        s.name = `warm:${id}:level`;
+        out.push(s);
+      }
+    }
+  }
+
+  /**
+   * Whether a loaded model is warmed by the rule `placedStandIns` trusts: no copy of it indoors, and every piece and
+   * lower level of it (bar a portal building's rooms and a basin's water) wearing a material already adopted, whose
+   * world pass a tier then holds built.
+   */
+  private warmedWhole(m: NonNullable<ReturnType<LayoutStreamer['loadedModel']>>, indoor: boolean): boolean {
+    if (indoor) return false;
+    for (const prim of m.primitives) {
+      if (prim.cell > 0 && m.portals.length > 0) continue;
+      if (isBasinWater(prim.material)) continue;
+      if (!this.compiledMaterials.has(prim.material)) return false;
+    }
+    for (const lv of lowerLevels(m)) for (const prim of lv.primitives) if (!this.compiledMaterials.has(prim.material)) return false;
+    return true;
+  }
+
+  /**
+   * The race courses' models warmed this session (`compileCourse`), kept for the streamer they were warmed under and
+   * dropped with it: by `courseWarmedIds` when the streamer has changed, and by `unload`, which lets the streamer go.
+   */
+  private courseWarmed: { ls: LayoutStreamer | null; ids: Set<string> } = { ls: null, ids: new Set() };
+
+  private courseWarmedIds(): Set<string> {
+    if (this.courseWarmed.ls !== this.layoutStream) this.courseWarmed = { ls: this.layoutStream, ids: new Set() };
+    return this.courseWarmed.ids;
+  }
+
+  /**
+   * What a race start needs before its countdown (`raceCurtainNeed` decides): the models along the course
+   * (`LayoutStreamer.modelsAlong` over its sampled legs), how many of them are not loaded, known not to load, and
+   * loaded and not warmed (`courseCounts`: neither warmed whole by the rule `placedStandIns` trusts nor warmed for a
+   * course this session; never warmed whole with an indoor copy), whether the grid's ground is in, what the program
+   * queue still holds, and how far the hull is from the grid. Synchronous and for a start alone, never a frame; it
+   * must not call `placedStandIns`, which consumes the placed warm's list.
+   */
+  courseNeed(points: readonly { x: number; z: number }[], grid: THREE.Vector3, hull: THREE.Vector3): { ids: string[]; indoor: Map<string, boolean>; missing: number; failed: number; unwarmed: number; settled: boolean; pending: number; hullToGrid: number } {
+    const ls = this.layoutStream;
+    const indoor = ls && !this.planet?.space ? ls.modelsAlong(points) : new Map<string, boolean>();
+    const warmed = this.courseWarmedIds();
+    const counts = courseCounts(indoor, {
+      loaded: (id) => ls?.loadedModel(id) ?? null,
+      failed: (id) => !!ls?.hasFailed(id),
+      warmed: (id) => warmed.has(id),
+      warmedWhole: (m) => this.warmedWhole(m, false),
+    });
+    return { ids: [...indoor.keys()], indoor, ...counts, settled: this.settled(grid), pending: this.programs.pending, hullToGrid: Math.hypot(hull.x - grid.x, hull.z - grid.z) };
+  }
+
+  /**
+   * A course curtain's loads: every model of `ids` not loaded yet and not known not to load, `LOADING_TUNE.courseLoads`
+   * at a time, for at most `ms` (`TRACK_TUNE.warmWaitMs`) and only while a screen is up (`loadBounded`); what has not
+   * arrived by then streams in with its tier, as it would have. Answers how many loaded and how many were left.
+   */
+  async loadCourse(ids: readonly string[], ms: number): Promise<{ loaded: number; left: number }> {
+    const ls = this.layoutStream;
+    if (!ls) return { loaded: 0, left: 0 };
+    const queue = ids.filter((id) => !ls.loadedModel(id) && !ls.hasFailed(id));
+    const token = this.loadToken;
+    const keepOn = (): boolean => token === this.loadToken && this.layoutStream === ls && this.behindScreen;
+    const { loaded } = await loadBounded(queue, (id) => ls.loadModel(id), keepOn, LOADING_TUNE.courseLoads, ms, (wait) => new Promise<void>((r) => setTimeout(r, wait)));
+    // Whatever is still loading goes on loading: what it brings in is in the streamer's cache for its tier.
+    let left = 0;
+    for (const id of queue) if (!ls.loadedModel(id) && !ls.hasFailed(id)) left++;
+    return { loaded, left };
+  }
+
+  /**
+   * Build the programs of a course's models behind its curtain: stand-ins made as `placedStandIns` makes them, for
+   * every model of `ids` that has loaded and is not warmed already, compiled by the sliced sweep, their shadows'
+   * depth programs drawn as the arrival's sweep draws them, the ids kept as warmed for this session, and the
+   * stand-ins let go (their programs are held by the pack's own materials). Answers how many programs it built.
+   */
+  async compileCourse(ids: readonly string[], indoor: ReadonlyMap<string, boolean>): Promise<{ programs: number; sweepMs: number; depthMs: number }> {
+    const r = this.renderer;
+    const camera = this.camera;
+    const ls = this.layoutStream;
+    const out = { programs: 0, sweepMs: 0, depthMs: 0 };
+    if (!r || !camera || !ls) return out;
+    const warmed = this.courseWarmedIds();
+    const standIns: THREE.InstancedMesh[] = [];
+    const done: string[] = [];
+    for (const id of ids) {
+      const m = ls.loadedModel(id);
+      if (!m || warmed.has(id)) continue;
+      const inside = indoor.get(id) ?? false;
+      if (!this.warmedWhole(m, inside)) this.standInsOf(id, m, inside, standIns);
+      done.push(id);
+    }
+    const target = this.compileTarget();
+    const before = r.info.programs?.length ?? 0;
+    try {
+      for (const s of standIns) this.adoptMaterials(s);
+      if (standIns.length) {
+        const t0 = performance.now();
+        await this.sweepBatches(r, camera, standIns, target, () => {});
+        const t1 = performance.now();
+        out.sweepMs = Math.round(t1 - t0);
+        // The shadows' depth programs over them only where one sways: a caster that does not sway draws its shadow with
+        // three's own depth material, whose every key the arrival's sweep already drew (`plainDepthCombos`), and a
+        // swaying one with a depth material of its own (`floraSway.ts`) that nothing has drawn yet.
+        if (standIns.some((s) => !Array.isArray(s.material) && s.material.userData.swgSway !== undefined)) {
+          this.compileShadowDepth(r, target, standIns);
+          out.depthMs = Math.round(performance.now() - t1);
+        }
+      }
+      for (const id of done) warmed.add(id);
+    } finally {
+      for (const s of standIns) s.dispose();
+    }
+    out.programs = (r.info.programs?.length ?? 0) - before;
     return out;
   }
 
@@ -4665,7 +4796,7 @@ export class World {
    * a converted actor's meshes sit wherever their GLB put them under the model root, so three's
    * per-mesh sphere is not what anyone wants; the whole actor is culled as one group instead.
    */
-  async prepareActor(root: THREE.Object3D): Promise<void> {
+  async prepareActor(root: THREE.Object3D, label?: string): Promise<void> {
     markActor(root);
     this.adoptMaterials(root);
     root.traverse((o) => {
@@ -4676,7 +4807,9 @@ export class World {
       mesh.frustumCulled = false;
     });
     await this.uploadTextures([root]);
-    await this.compileReady([root]);
+    // The label is the queue's: a program built in play names the body it was for (`shaders().pace.lastBuilt`),
+    // and a look's (`look:`) is counted as the frame report's `programs (people)`.
+    await this.compileReady([root], label);
   }
 
   /**
@@ -4934,6 +5067,8 @@ export class World {
    * offers the object again. The map is weak, so an object that goes takes its place in it along.
    */
   private readonly passCursor = new WeakMap<THREE.Object3D, number>();
+  /** An empty group, compiled under layer 0 to put the world pass's lights back after a room's compile. Kept, never added. */
+  private readonly compileNothing = new THREE.Group();
 
   /**
    * One turn at making an object ready to be drawn: its programs built, a pass at a time, for the
@@ -4958,15 +5093,24 @@ export class World {
     // path the game will really draw.
     const target = this.compileTarget();
     let made = 0;
+    let last = 0;
     while (at < passes.length) {
       const layer = passes[at];
       const root = World.rootOf([o]);
       const was = r.info.programs?.length ?? 0;
       this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compile(root, camera, this.scene)));
       made += (r.info.programs?.length ?? 0) - was;
+      last = layer;
       at++;
       if (made >= allowance) break;
     }
+    // A compile sets three's lights up for the layers it was made under, and the next shadow pass keys every
+    // depth program it draws first on whatever set was last set up (it draws before it sets up its own pass's
+    // lights). So a turn that ended on a room's pass puts the world pass's set back with a compile of nothing
+    // under layer 0, as the depth warm-up does, or a queued actor's room program left the room set in force
+    // for the next frame's shadows. Only the queue's own leak: outdoors beside buildings a frame's last real
+    // pass is still a room's (wave 2's per-pass render states end that).
+    if (last !== 0) this.withLayers(camera, 0, () => this.withTarget(r, target, () => r.compile(this.compileNothing, camera, this.scene)));
     const done = at >= passes.length;
     if (done) this.passCursor.delete(o);
     else this.passCursor.set(o, at);
@@ -4994,7 +5138,7 @@ export class World {
    * time a few short ones. Every drawable with a material counts (meshes, sprites, points,
    * lines), as `compileAllAsync` walks them.
    */
-  async compileReady(objects: THREE.Object3D[]): Promise<void> {
+  async compileReady(objects: THREE.Object3D[], label?: string): Promise<void> {
     const r = this.renderer;
     const camera = this.camera;
     if (!r || !camera) return;
@@ -5016,7 +5160,7 @@ export class World {
     // Something being made ready to be shown is urgent: a peer walking up, a weapon taken up, a
     // ship spawned. It goes ahead of the scenery filling in, which is the one producer that pushes
     // without stopping.
-    await this.queueOrBuild(meshes, 'something being made ready to be shown', true);
+    await this.queueOrBuild(meshes, label ?? 'something being made ready to be shown', true);
   }
 
   /**
@@ -5053,10 +5197,22 @@ export class World {
    */
   private async queueOrBuild(objects: THREE.Object3D[], label: string, urgent: boolean): Promise<void> {
     if (!objects.length) return;
-    if (!SHADER_PACING || this.behindScreen || this.programs.idle(performance.now())) {
-      for (const o of objects) {
-        this.compileWhole(o);
-        await this.breath();
+    // On a page on screen the idle rule's bounds are the long ones (`PACE_TUNE.idleShownMs`): frames stand still there
+    // only while the browser waits on the GPU process, never because the loop has gone.
+    const shown = !document.hidden;
+    if (!SHADER_PACING || this.behindScreen || this.programs.idle(performance.now(), shown)) {
+      // The idle rule's own build on a page on screen with no screen up is the fault `flushedInPlay` counts.
+      const byIdle = SHADER_PACING && !this.behindScreen && shown;
+      const before = byIdle ? (this.renderer?.info.programs?.length ?? 0) : 0;
+      this.outrightBuilds++;
+      try {
+        for (const o of objects) {
+          this.compileWhole(o);
+          await this.breath();
+        }
+      } finally {
+        this.outrightBuilds--;
+        if (byIdle) this.programs.noteIdleBuilt((this.renderer?.info.programs?.length ?? 0) - before);
       }
       return;
     }
@@ -5068,16 +5224,49 @@ export class World {
     void wait.then(() => {
       settled = true;
     });
+    // Judged by frames, never by the wall time since the last one (`QueueWatch`): a frame that spent 1.6 s
+    // building a program read as a stopped loop to the first timer after it, which then built the rest of
+    // the queue in that timer task, outside any frame.
+    const watch = new QueueWatch();
     while (!settled) {
       // The frame loop stopping under a wait is the same case as there never having been one, and
-      // it must be answered the same way rather than left hanging.
-      if (this.programs.idle(performance.now())) {
-        await this.flushQueue();
-        break;
+      // it must be answered the same way rather than left hanging. On a page on screen only after the long
+      // bound: frames held back while the GPU process caught up read as a stop at 250 ms, and the flush that
+      // followed blocked a cold Direct3D 11 arrival 3.9 s in a timer task.
+      if (watch.stopped(this.programs.ticks, performance.now(), !document.hidden)) {
+        await this.flushQueue(true);
+        // A flush in play hands back to the pump the moment frames look at the queue again, so the wait
+        // goes on until the batch is really answered.
+        if (settled) break;
       }
       await new Promise<void>((r) => setTimeout(r, PACE_TUNE.pollMs));
     }
     await wait;
+  }
+
+  /** How many outright builds (`queueOrBuild` behind a screen) are under way: each holds the GPU process's compile threads. */
+  private outrightBuilds = 0;
+
+  /**
+   * Whether nothing of the world's is building a program just now: no outright build under way, nothing on the queue
+   * and no flush. What the driver check waits for before each trivial link (`App.checkDriverAfterSweep`), so its own
+   * links never queue behind the game's on the GPU process's compile threads: the least link is the driver's floor
+   * only where nothing else is being linked beside it. A body still loading is not asked about: it builds nothing
+   * until it lands, and then through an outright build, which this sees at the instant of the try; asked about, a
+   * town whose wildlife was still coming in when its screen lifted never went quiet, and on Vulkan the check never
+   * ran at all over two arrivals. It cannot see the GPU process's own work (a draw's first use of a program on
+   * Direct3D 11), which the least of spaced samples is there for.
+   */
+  get compileQuiet(): boolean {
+    return this.compileBusy === '';
+  }
+
+  /** What is building a program just now, in the order asked: an outright build, the queue, a flush, or nothing. */
+  get compileBusy(): '' | 'outright' | 'queued' | 'flush' {
+    if (this.outrightBuilds !== 0) return 'outright';
+    if (this.programs.pending !== 0) return 'queued';
+    if (this.flushing !== null) return 'flush';
+    return '';
   }
 
   /** The flush in flight, if any: a second caller joins it rather than starting another. */
@@ -5088,15 +5277,28 @@ export class World {
    * together would each take the head job while the other still held it, and a job would be
    * stepped over. A second caller joins the first, which takes work pushed while it runs anyway.
    */
-  private flushQueue(): Promise<void> {
+  private flushQueue(play = false): Promise<void> {
     if (!this.flushing) {
+      // In play (a waiter whose polls saw no frame): only the jobs there now, stopping the moment a frame
+      // looks at the queue again (`ProgramQueue.flush`'s `play`).
       this.flushing = this.programs
-        .flush((o, allowance) => this.compileOne(o, allowance), () => this.breath())
+        .flush((o, allowance) => this.compileOne(o, allowance), () => this.breath(), play ? this.flushPlay : undefined)
         .finally(() => {
           this.flushing = null;
         });
     }
     return this.flushing;
+  }
+
+  /**
+   * What a flush in play asks before it counts a program as `flushedInPlay`, made once: whether the page is on screen
+   * with no loading screen up, where frames ought to be ticking the queue and a timer task building is the fault.
+   */
+  private readonly flushPlay = { shown: (): boolean => !document.hidden && !this.behindScreen };
+
+  /** Everything on the program queue built now: a race start's course curtain, behind its screen, before it lifts. */
+  flushPrograms(): Promise<void> {
+    return this.flushQueue();
   }
 
   /**
@@ -5129,7 +5331,7 @@ export class World {
    * once behind its first loading screen, so the pacing is decided in one place by one measurement
    * rather than by each part of this guessing at what a program costs.
    */
-  shaderPace(): { pacing: boolean; pending: number; waiting: number; built: number; linked: number; worstFrame: number; overranFrames: number; blame: string; budget: number; hard: boolean; framesLeft: number; behindScreen: boolean; frames: number; idle: boolean } {
+  shaderPace(): { pacing: boolean; pending: number; waiting: number; built: number; linked: number; worstFrame: number; overranFrames: number; blame: string; budget: number; hard: boolean; framesLeft: number; behindScreen: boolean; frames: number; idle: boolean; flushedInPlay: number; peopleBuilt: number; lastBuilt: string[]; tune: typeof PACE_TUNE } {
     const budget = shaderBudget(this.behindScreen);
     return {
       // False with `swg.shaderPace` = '0' in local storage: everything below still counts, but
@@ -5151,7 +5353,13 @@ export class World {
       // How many frames have looked at the queue, and whether one has lately: `idle` true in play
       // means the frame loop has stopped and every wait is being answered outright instead.
       frames: this.programs.ticks,
-      idle: this.programs.idle(performance.now()),
+      idle: this.programs.idle(performance.now(), !document.hidden),
+      // What a waiter's flush built in a timer task on a page on screen with no loading screen up (should stay at
+      // nought), the programs built in play for a dressed person, and the labels of the last eight built in play.
+      flushedInPlay: this.programs.flushedInPlay,
+      peopleBuilt: this.programs.peopleBuilt,
+      lastBuilt: this.programs.lastBuilt,
+      tune: { ...PACE_TUNE },
     };
   }
 
@@ -5161,7 +5369,8 @@ export class World {
    * than on the first shot or the first look at a building. Returns how many programs were made.
    */
   async compileAllAsync(
-    onProgress: (done: number, total: number) => void = () => { },
+    /** Objects done and in all, and the programs this sweep has made so far. */
+    onProgress: (done: number, total: number, made: number) => void = () => { },
     /**
      * There used to be a `waitReady` here, asking for the programs to be ready and not merely
      * created before this returns. It is gone because it is now always true and cannot be asked
@@ -5182,10 +5391,41 @@ export class World {
     return this.compileEverything(r, camera, onProgress, opts);
   }
 
+  /**
+   * Compile some objects a batch of `SWEEP_BATCH` at a time for every pass that draws them, finishing each
+   * batch's links before the next (`compileFor`), so every program the sweep makes is ready to draw with by the
+   * time it ends and no chained poll is left running behind the loading screen. Each batch that built programs is
+   * timed (its wall time, the wait for a frame left out) into the session's milliseconds a program
+   * (`noteProgramTime`), which the loading screen's words and the pacing read.
+   *
+   * When it waits a frame is `sweepYield`'s: in play (the Effects switch's sweep, drawing the old picture
+   * meanwhile) after every batch, as it always was; behind a screen only after a batch that built a program or
+   * once `LOADING_TUNE.sliceMs` of work has gone by. A frame per eight objects whatever they built was 28 of a
+   * 44-second screen at Mos Eisley, the sweep's own work 0.45 s of it. A hidden tab's frame is a message to itself
+   * (`nextFrame`), untouched.
+   */
+  private async sweepBatches(r: THREE.WebGLRenderer, camera: THREE.Camera, objects: THREE.Object3D[], target: THREE.WebGLRenderTarget | null, onBatch: (i: number, built: number) => void): Promise<void> {
+    const behind = this.behindScreen;
+    let sliceFrom = performance.now();
+    for (let i = 0; i < objects.length; i += SWEEP_BATCH) {
+      const was = r.info.programs?.length ?? 0;
+      const t0 = performance.now();
+      this.compileFor(r, camera, objects.slice(i, i + SWEEP_BATCH), target);
+      const t1 = performance.now();
+      const built = (r.info.programs?.length ?? 0) - was;
+      if (built > 0) noteProgramTime(t1 - t0, built);
+      onBatch(i, built);
+      if (sweepYield(built, t1 - sliceFrom, behind, LOADING_TUNE.sliceMs)) {
+        await this.nextFrame();
+        sliceFrom = performance.now();
+      }
+    }
+  }
+
   private async compileEverything(
     r: THREE.WebGLRenderer,
     camera: THREE.Camera,
-    onProgress: (done: number, total: number) => void,
+    onProgress: (done: number, total: number, made: number) => void,
     opts: { target?: THREE.WebGLRenderTarget | null; keepQueue?: boolean },
   ): Promise<number> {
     this.setupShadowMaterials();
@@ -5220,19 +5460,12 @@ export class World {
       objects.push(o);
     }
     const before = r.info.programs?.length ?? 0;
-    const BATCH = 8;
     const placedFrom = objects.length - placed.length;
     let placedPrograms = 0;
-    for (let i = 0; i < objects.length; i += BATCH) {
-      // `compileFor` builds each batch's programs and finishes their links before it returns, so
-      // every program this sweep makes is ready to draw with by the time it ends, and no chained
-      // poll is left running behind the loading screen.
-      const was = r.info.programs?.length ?? 0;
-      this.compileFor(r, camera, objects.slice(i, i + BATCH), target);
-      if (i + BATCH > placedFrom) placedPrograms += (r.info.programs?.length ?? 0) - was;
-      onProgress(Math.min(objects.length, i + BATCH), objects.length);
-      await this.nextFrame();
-    }
+    await this.sweepBatches(r, camera, objects, target, (i, built) => {
+      if (i + SWEEP_BATCH > placedFrom) placedPrograms += built;
+      onProgress(Math.min(objects.length, i + SWEEP_BATCH), objects.length, (r.info.programs?.length ?? 0) - before);
+    });
     // The shadows' depth programs (`compileShadowDepth`): the loading sweep never builds a depth program, so one
     // stand-in per depth combination is drawn into the shadow maps here as a frame draws them, under the world
     // pass's lights and a room's -- the flora's swaying shadows (`floraSway.ts`) over everything the sweep
@@ -5460,14 +5693,10 @@ export class World {
     // in the buildings the data leaves empty (`ambient/`) -- and what an admin stands. The planet's one
     // species stood in a ring round the arrival point, which is what a world was before any of that, is
     // gone, switch and all; the NPC tab still stands one of it by hand (`CreatureManager.spawnAt`).
-    // The people the server stood here, before the screen lifts rather than after: every one within
-    // range is stood in one forced pass, so their models are loaded and their programs compiled by
-    // the warm-up that follows instead of a few at a time on live frames as the player walks in.
-    // The cap is the same forty; what the force changes is only the three-a-pass trickle.
-    standingPeople.step(0, this.simTime, new THREE.Vector3(center.x, this.terrain.heightAt(center.x, center.z), center.z), this.peopleDeps(), true);
-    // And the people of ours in what is left, for the same reason: whoever is due at a port or in an
-    // empty building is stood now and compiled behind the screen with everybody else.
-    ambientPeople.step(0, this.simTime, new THREE.Vector3(center.x, this.terrain.heightAt(center.x, center.z), center.z), this.ambientDeps(), true);
+    // Nobody is stood here: this runs after `load` has emptied the people's rows and before `loadPack`
+    // hands them the new world's, so a forced pass here stood nobody on every path. The loading screen's
+    // own settle stands the people, ours and the creatures round the arrival once the pack is in
+    // (`App.settle`: `standPeopleNow`, `standOursNow`, `standWildNow`), and waits for their bodies.
     markActor(this.creatures.group);
     // Turrets are spawned from the NPC tab (B) now, not stood around the arrival point.
     markActor(this.turrets.group);
@@ -6377,6 +6606,62 @@ export class World {
   standPeopleNow(at: THREE.Vector3): number {
     standingPeople.step(0, this.simTime, at, this.peopleDeps(), true);
     return standingPeople.last.stood;
+  }
+
+  /**
+   * The people of ours due round a point stood now, in one forced pass (whoever is due at a port or in a building
+   * the data leaves empty), behind a loading screen as `standPeopleNow` stands the data's own.
+   */
+  standOursNow(at: THREE.Vector3): void {
+    ambientPeople.step(0, this.simTime, at, this.ambientDeps(), true);
+  }
+
+  /**
+   * The creatures round a point stood now: the wild world's pass forced, past its hold and its few sites a pass.
+   * Answers how many sites waited for their ground to be generated, which the next forced pass inside the same
+   * loading screen's bound tries again.
+   */
+  standWildNow(at: THREE.Vector3): number {
+    wildLife.step(0, this.simTime, at, this.wildDeps(), true);
+    return wildLife.last.waiting;
+  }
+
+  /**
+   * The people pass's own word on what it stood, for the loading screen's record (`__debug.loading()`): `want`, the
+   * rows it stood under the caps and those it refused for want of model memory; `refused`, those; `up`, the bodies
+   * whose model is up; and every body of the world's still loading, which the screen's bound leaves to stand after
+   * it lifts.
+   */
+  peopleReport(): { want: number; refused: number; up: number; stood: number; loading: number } {
+    const last = standingPeople.last;
+    let loading = 0;
+    for (const m of this.mobiles?.live ?? []) if (!m.removed && !m.dead && !m.ready) loading++;
+    return { want: last.up + last.short, refused: last.short, up: standingPeople.readyBodies(), stood: last.up, loading };
+  }
+
+  /**
+   * Every material of every body whose model is up (the gone left out), its weapon and whatever else hangs on it:
+   * what a loading screen keeps as it lifts, so the window after it can count the programs built for exactly those
+   * bodies (`programsForUp`). Clones share their master's materials, so a crowd of one look is that look's few.
+   */
+  readyBodyMaterials(out: Set<THREE.Material>): Set<THREE.Material> {
+    for (const m of this.mobiles?.live ?? []) {
+      if (!m.ready || m.removed || m.dead) continue;
+      materialsUnder(m.group, out);
+    }
+    return out;
+  }
+
+  /** How many bodies standing in the world have their model up, of how many (the gone left out): what the loading screen says while it waits. */
+  bodiesCount(): { up: number; of: number } {
+    let up = 0;
+    let of = 0;
+    for (const m of this.mobiles?.live ?? []) {
+      if (m.removed || m.dead) continue;
+      of++;
+      if (m.ready) up++;
+    }
+    return { up, of };
   }
 
   /** Whether every body standing in the world has its model up (or has gone): what a loading screen waits on after `standPeopleNow`. */

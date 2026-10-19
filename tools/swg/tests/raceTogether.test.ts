@@ -176,7 +176,7 @@ const loop = file.tracks.find((t) => t.id === 'test_dune_loop')!;
   ok(/started/.test(joinCheck(race, { ...here, now: T0 + 1 }).why), '5: after go, too late');
   ok(/not in the group/.test(joinCheck(race, { ...here, me: 12 }).why), '5: not listed when it was called');
   ok(joinCheck(race, { ...here, ride: 'ride a pod first' }).why === 'ride a pod first', '5: and what the player rides says for itself why it cannot race it');
-  ok(trackDigest(loop) === trackDigest(readTrackFile(readFileSync(new URL('../../../public/tracks/tatooine.json', import.meta.url), 'utf8'), 'tatooine', 'ground').tracks[0]) && /^[0-9a-f]{8}$/.test(trackDigest(loop)), `5: the same file read twice is the same digest (${trackDigest(loop)})`);
+  ok(trackDigest(loop) === trackDigest(readTrackFile(readFileSync(new URL('../../../public/tracks/tatooine.json', import.meta.url), 'utf8'), 'tatooine', 'ground').tracks.find((t) => t.id === loop.id)!) && /^[0-9a-f]{8}$/.test(trackDigest(loop)), `5: the same file read twice is the same digest (${trackDigest(loop)})`);
   ok(outWordFor('the rider died') === 'died' && outWordFor('you got off') === 'left' && outWordFor('a jump to another system') === 'world' && outWordFor('stopped from the console') === 'stopped' && outWordFor('the bike left racing mode') === 'vehicle', '5: the game\'s words for a run ended are the out word\'s');
 }
 

@@ -30,8 +30,9 @@ export const TRACK_TUNE = {
   /**
    * Milliseconds the "preparing the track" curtain waits for the course's placed models to load before it compiles
    * them: a bound on the wait, never a number of feel (what is not in by then builds as its tier comes into range).
+   * 4 s (it was 8), so a session's first start on a cold cache is at most about 6 s with its compiles.
    */
-  warmWaitMs: 8000,
+  warmWaitMs: 4000,
 };
 
 export type TrackTune = typeof TRACK_TUNE;

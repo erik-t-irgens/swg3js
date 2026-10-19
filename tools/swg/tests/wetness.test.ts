@@ -141,4 +141,32 @@ const meshOf = (m: THREE.Material) => new THREE.Mesh(box, m);
   ok(!hull.customProgramCacheKey().startsWith('wet-object|'), 'a material marked dry is never wrapped, wherever it is met first');
 }
 
+// What is held is never wet, whoever prepares it first (the performance pass's first wave): every material the
+// weapons rack loads is marked dry as it loads. A mobile's weapon is prepared before it is hung on a bone, where the
+// under-a-bone test could not yet see it, and its wet programs were a weapon-only family built in play. The rack's
+// own loader is driven here, its file read handed a scene in place of a GLB.
+{
+  const { WeaponCatalogue } = await import('../../../src/player/weapons.ts');
+  const manifest = { classes: {}, weapons: [], skipped: [] };
+  const rack = new (WeaponCatalogue as unknown as new (m: unknown, base: string) => InstanceType<typeof WeaponCatalogue>)(manifest, '/assets-private/weapons/');
+  const loaded = new THREE.Group();
+  const gunMat = standard();
+  const multi = [standard(), standard()];
+  loaded.add(meshOf(gunMat));
+  loaded.add(new THREE.Mesh(box, multi));
+  (rack as unknown as { loader: { loadAsync: (url: string) => Promise<{ scene: THREE.Group }> } }).loader.loadAsync = async () => ({ scene: loaded });
+  const model = await rack.model({ id: 'gun', file: 'gun.glb' } as never);
+  const mats: THREE.Material[] = [];
+  model.traverse((o) => {
+    const m = (o as THREE.Mesh).material;
+    if (m) mats.push(...(Array.isArray(m) ? m : [m]));
+  });
+  ok(mats.length === 3 && mats.every((m) => m.userData.dry === true), 'every material the weapons rack loads is marked dry, a mesh with a list of them included');
+  // Met first in the open, before any hand holds it, the wet wrap still leaves it alone.
+  const free = model.children[0] as THREE.Mesh;
+  model.remove(free);
+  wetWrap(free.material as THREE.Material, free);
+  ok(!(free.material as THREE.Material).customProgramCacheKey().startsWith('wet-object|') && !isWettable(free.material as THREE.Material, free), 'so the wet wrap skips it even met first in the open, before it is hung on a bone');
+}
+
 console.log(`\n${passed} checks passed`);

@@ -9,10 +9,51 @@
 // can be driven here with numbers and stand-ins, which is the only place the ordering can be seen
 // at all -- in a browser it is hidden inside a frame.
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type * as THREE from 'three';
-import { PACE_TUNE, PaceBudget, framesFor, paceLine, tuneProgramPace } from '../../../src/core/programPace.ts';
+import { PACE_TUNE, PaceBudget, QueueWatch, framesFor, paceLine, tuneProgramPace } from '../../../src/core/programPace.ts';
 import { ProgramQueue, materialsUnder, resolveLinks } from '../../../src/core/programQueue.ts';
 import { SHADER_TUNE } from '../../../src/core/shaderWatch.ts';
+
+/** The pass's base: the queue's idle rule as it stood before the performance pass judged it by frames. */
+const BASE = '5f3cff4';
+/** The old rule's trace (`idle` over a sweep of instants after one tick), hashed: what the day-one check holds to where git cannot answer. */
+const BASE_IDLE_TRACE = '2e02c93d';
+const REPO = new URL('../../../', import.meta.url);
+
+/** FNV-1a over a string, as eight hex digits. */
+function fnv(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
+/** `programQueue.ts` (and the two files it reads) as they stood at `BASE`, out of git into a scratch folder; null where git cannot answer. */
+async function baseQueue(): Promise<{ ProgramQueue: typeof ProgramQueue } | null> {
+  const show = (rel: string): string | null => {
+    try {
+      return execFileSync('git', ['show', `${BASE}:${rel}`], { cwd: REPO, encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\r\n/g, '\n');
+    } catch {
+      return null;
+    }
+  };
+  const files = { programQueue: show('src/core/programQueue.ts'), programPace: show('src/core/programPace.ts'), shaderWatch: show('src/core/shaderWatch.ts') };
+  if (!files.programQueue || !files.programPace || !files.shaderWatch) return null;
+  const dir = mkdtempSync(join(tmpdir(), 'programpace-base-'));
+  try {
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, `${name}.ts`), text!.replace(/from 'three'/g, `from '${import.meta.resolve('three')}'`));
+    return (await import(pathToFileURL(join(dir, 'programQueue.ts')).href)) as { ProgramQueue: typeof ProgramQueue };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 let passed = 0;
 const ok = (cond: boolean, msg: string): void => {
@@ -241,9 +282,162 @@ ok(framesFor(1, 8) === 1, 'anything left to do takes at least one frame');
   ok(q.ticks === 0, 'with no frames on its books');
   q.tick(1000);
   ok(q.since(1000) === 0 && !q.idle(1000), 'a frame that has just looked at it is not idle');
-  ok(!q.idle(1000 + PACE_TUNE.idleMs), 'nor is one exactly at the limit');
-  ok(q.idle(1001 + PACE_TUNE.idleMs), 'past the limit it is idle again');
+  // The single-instant test is the backstop, never the waiter's: a frame that built one program for 1.6 s is
+  // far past `idleMs` and still nothing like a stopped loop.
+  ok(!q.idle(1000 + PACE_TUNE.idleMs + 1) && !q.idle(1000 + 1600), 'the single-instant test does not take a 1.6 s frame for a stopped loop');
+  ok(!q.idle(1000 + PACE_TUNE.idleBackstopMs), 'nor one exactly at the backstop');
+  ok(q.idle(1001 + PACE_TUNE.idleBackstopMs), 'past the backstop it is idle: nothing has looked for longer than any frame the game draws');
   ok(q.ticks === 1, 'and the frames are counted');
+  ok(PACE_TUNE.idleBackstopMs > 1600 && PACE_TUNE.idleBackstopMs > PACE_TUNE.idleMs, 'the backstop is longer than the longest frame measured and than a waiter\'s span');
+}
+
+{
+  // A waiter's own view (`QueueWatch`): the loop is stopped only once two of its polls spanning more than
+  // `idleMs` saw no new frame. A frame that ran long ticks the queue again as it ends (the frame loop's tick
+  // after its draw), so the poll after it sees a new count.
+  const q = new ProgramQueue();
+  q.tick(0);
+  const w = new QueueWatch();
+  ok(!w.stopped(q.ticks, 10), 'a first poll only takes note');
+  ok(!w.stopped(q.ticks, 10 + PACE_TUNE.idleMs), 'two polls exactly idleMs apart with no frame between are not yet a stop');
+  ok(w.stopped(q.ticks, 11 + PACE_TUNE.idleMs), 'past idleMs with no frame between, the loop is stopped');
+  const w2 = new QueueWatch();
+  ok(!w2.stopped(q.ticks, 10), 'a fresh waiter takes note');
+  // The long frame: ticked at its start (the queue's pump) and again as it ends, 1.6 s later.
+  q.tick(12);
+  q.tick(1612);
+  ok(!w2.stopped(q.ticks, 1615), 'a poll after a 1.6 s frame that ticked as it ended sees a new count, not a stop');
+  ok(!w2.stopped(q.ticks, 1615 + PACE_TUNE.idleMs), 'and the span starts again from that poll');
+  ok(w2.stopped(q.ticks, 1616 + PACE_TUNE.idleMs), 'which a loop that really stopped then runs out');
+}
+
+{
+  // On a page on screen the browser can hold the frames back while its GPU process catches up, with the main thread
+  // free and the waiters' timers running: on a cold Direct3D 11 arrival 486 ms with no frame, which the 250 ms span
+  // read as a stopped loop and answered with a flush that blocked the page 3.9 s in a timer task. On screen both
+  // tests take the long bound.
+  const q = new ProgramQueue();
+  q.tick(1000);
+  const w = new QueueWatch();
+  ok(!w.stopped(q.ticks, 1000, true), 'a waiter on a page on screen takes note');
+  ok(!w.stopped(q.ticks, 1486, true) && !w.stopped(q.ticks, 1000 + PACE_TUNE.idleBackstopMs + 1, true), 'frames held back half a second, or past the hidden tab\'s backstop, are no stop on a page on screen');
+  ok(w.stopped(q.ticks, 1001 + PACE_TUNE.idleShownMs, true), 'past idleShownMs even a page on screen has stopped, so no wait is ever left unanswered');
+  const hidden = new QueueWatch();
+  hidden.stopped(q.ticks, 1000);
+  ok(hidden.stopped(q.ticks, 1001 + PACE_TUNE.idleMs), 'while a hidden tab, whose frames really stop, is answered after idleMs as before');
+  ok(!q.idle(1486, true) && !q.idle(1000 + PACE_TUNE.idleBackstopMs + 1, true) && q.idle(1001 + PACE_TUNE.idleShownMs, true), 'and the single-instant test on screen takes the same long bound');
+  ok(q.idle(1001 + PACE_TUNE.idleBackstopMs), 'where in a hidden tab it is the backstop');
+  ok(new ProgramQueue().idle(0, true), 'a queue no frame has ever looked at is idle on screen too: a character put back in a ship before the frame loop opens is never kept waiting');
+  ok(PACE_TUNE.idleShownMs === 10000 && PACE_TUNE.idleShownMs > PACE_TUNE.idleBackstopMs, 'the bound on screen is ours, ten seconds, longer than the hidden backstop');
+  q.noteIdleBuilt(3);
+  q.noteIdleBuilt(0);
+  ok(q.flushedInPlay === 3, "and the entry test's own outright build on a page on screen is counted with the flushes");
+}
+
+{
+  // The fault the rule removes, and a new queueOrBuild (whose entry is the single-instant test) still queuing on
+  // such a frame: a fake compile that moves the clock 1,600 ms.
+  const q = new ProgramQueue();
+  let t = 0;
+  q.tick(t);
+  q.add([obj('slow')], 'something being made ready to be shown');
+  q.pump(false, () => {
+    t += 1600;
+    return built(1);
+  }, () => t);
+  // The frame that built it ends with its tick after the draw.
+  const beforeEndTick = t;
+  ok(!q.idle(beforeEndTick + 1), 'right after a 1,600 ms compile, before the frame\'s closing tick, the backstop still does not call the loop stopped');
+  q.tick(t);
+  ok(!q.idle(t + 5), 'and with the closing tick a new queueOrBuild queues rather than building outright');
+}
+
+{
+  // A waiter's flush in play takes only the jobs present when it began, and stops the moment frames look at the
+  // queue again, handing the rest back to the pump. In a hidden tab (frames stopped, the rule working as meant) what
+  // it builds is not the fault and is not counted.
+  const q = new ProgramQueue();
+  q.tick(0);
+  q.add([obj('a'), obj('b'), obj('c')], 'look:jawa');
+  const order: string[] = [];
+  let pushed = false;
+  await q.flush((o) => {
+    order.push(nameOf(o));
+    if (!pushed) {
+      pushed = true;
+      q.add([obj('late')], 'the quarter-second material scan');
+    }
+    return built(1);
+  }, async () => undefined, { shown: () => false });
+  ok(order.join(',') === 'a,b,c', 'a flush in play takes only the jobs present when it began, never one pushed after');
+  ok(q.pending === 1, 'and leaves the late one for the pump');
+  ok(q.flushedInPlay === 0, 'and in a tab not on screen, where frames really stop, nothing it built is the fault');
+  ok(q.peopleBuilt === 3 && q.lastBuilt.length === 3 && q.lastBuilt[0] === 'look:jawa', 'what it built in play is counted for the people and keeps its label');
+}
+
+{
+  // On a page on screen with no loading screen up, every program a waiter's flush builds is a timer task building
+  // where frames ought to be ticking: counted, however few frames it then catches.
+  const q = new ProgramQueue();
+  q.tick(0);
+  q.add([obj('a'), obj('b')], 'look:jawa');
+  await q.flush(() => built(1), async () => undefined, { shown: () => true });
+  ok(q.flushedInPlay === 2, `a flush on a page on screen is counted whole, the misjudgement itself (${q.flushedInPlay})`);
+  q.add([obj('c')], 'the placed-object streamer');
+  await q.flush(() => built(1), async () => undefined);
+  ok(q.flushedInPlay === 2, "and a loading screen's own flush, which is no waiter's, never is");
+}
+
+{
+  const q = new ProgramQueue();
+  let t = 0;
+  q.tick(0);
+  q.add([obj('a'), obj('b'), obj('c')], 'the placed-object streamer');
+  const order: string[] = [];
+  await q.flush((o) => {
+    order.push(nameOf(o));
+    // A frame comes in while the flush is building: it ticks the queue.
+    q.tick((t += 16));
+    return built(1);
+  }, async () => undefined, { shown: () => true });
+  ok(order.join(',') === 'a', 'a flush in play stops the moment a frame looks at the queue again');
+  ok(q.pending === 2, 'and hands the rest back to the pump');
+  ok(q.flushedInPlay === 1, 'and the program it built on a page on screen is counted (the waiter misjudged)');
+}
+
+{
+  // The labels of what was built in play are a ring of eight, newest first; a loading frame's builds are not kept.
+  const q = new ProgramQueue();
+  for (let i = 0; i < 10; i++) q.add([obj(`o${i}`)], `label${i}`);
+  while (q.pending) q.pump(false, () => built(1), () => 0);
+  ok(q.lastBuilt.length === 8 && q.lastBuilt[0] === 'label9' && q.lastBuilt[7] === 'label2', 'the last eight labels built in play, newest first');
+  q.add([obj('screen')], 'look:behind');
+  q.pump(true, () => built(1), () => 0);
+  ok(q.lastBuilt[0] === 'label9' && q.peopleBuilt === 0, 'a build behind a loading screen is not play: no label kept and no person counted');
+}
+
+{
+  // Day one: the queue as it stood at the pass's base (5f3cff4), loaded from git, calls the loop stopped on that
+  // very 1,600 ms frame, which is the fault the new rule exists to remove, and its trace over a sweep of instants is
+  // held to the hash written here. Where git cannot answer the half is said to be skipped and counts nothing.
+  const old = await baseQueue();
+  const trace: string[] = [];
+  const sweep = (idle: (now: number) => boolean) => [0, 100, 250, 251, 1000, 1600, 2000, 2001, 5000].map((d) => (idle(1000 + d) ? '1' : '0')).join('');
+  if (old) {
+    const q = new old.ProgramQueue();
+    q.tick(1000);
+    ok(q.idle(1000 + 1600), 'day one: the old rule calls the loop stopped on the poll after a 1,600 ms frame (the timer-task flush, 37 of 170 programs in a Bestine session)');
+    trace.push(sweep((n) => q.idle(n)));
+    ok(fnv(trace.join('|')) === BASE_IDLE_TRACE, `day one: the old rule's trace is the one written down here (${fnv(trace.join('|'))})`);
+  } else {
+    // Nothing is compared here, so nothing is counted: a check that only finds a string written down would swell the
+    // total and prove nothing about the old rule.
+    console.log('note git could not hand over programQueue.ts at 5f3cff4: the day-one half is not run, and no check is counted for it');
+  }
+  const now = new ProgramQueue();
+  now.tick(1000);
+  ok(!now.idle(1000 + 1600), 'and today\'s does not');
+  ok(sweep((n) => now.idle(n)) === '000000011', `today's single-instant test is idle only past the backstop (${sweep((n) => now.idle(n))})`);
 }
 
 {

@@ -333,6 +333,53 @@ function nearWorld(areas: WildPack['areas'] = [nearArea], man: WildManifest = ma
   ok(bodies.length > 0, 'and it picks up again the moment the hold comes off');
 }
 
+// ------------------------------------------------------------------ a loading screen's forced pass
+{
+  // Behind a loading screen the creatures round an arrival are stood in one pass (`World.standWildNow`): past the
+  // world's hold, past the few sites a pass, and past a site still waiting for its ground, which the next forced pass
+  // inside the same screen's bound stands.
+  const at = new THREE.Vector3(0, 0, 0);
+  const held = nearWorld();
+  const h = game({ held: () => true });
+  held.step(0, 1, at, h.deps, true);
+  ok(h.bodies.length > 0 && held.last.up > 0, `a forced pass stands sites though the world is holding still (${held.last.up} sites)`);
+
+  const many = nearWorld();
+  const m = game();
+  many.step(0, 1, at, m.deps, true);
+  const plain = nearWorld();
+  const p = game();
+  plain.step(1, 1, at, p.deps);
+  ok(many.last.up > WILD_TUNE.sitesPerPass && many.last.up <= LAIR_TUNE.liveLairs, `a forced pass stands every site in range at once (${many.last.up}), never past ${LAIR_TUNE.liveLairs}`);
+  ok(plain.last.up <= WILD_TUNE.sitesPerPass && plain.last.up < many.last.up, `where an ordinary pass of the same world stands its ${WILD_TUNE.sitesPerPass} (${plain.last.up})`);
+
+  const w = nearWorld();
+  let first: { x: number; z: number } | null = null;
+  let groundIn = false;
+  const g = game({
+    walkable: () => true,
+    groundAt: () => 0,
+    groundReady: (x, z) => {
+      if (!first) first = { x, z };
+      return groundIn || x !== first.x || z !== first.z;
+    },
+  });
+  const standing = (x: WildLife) => [...(x as unknown as { standing: Map<string, { at: { x: number; z: number } }> }).standing.values()];
+  const atFirst = () => standing(w).some((r) => first !== null && r.at.x === first.x && r.at.z === first.z);
+  w.step(0, 1, at, g.deps, true);
+  const upFirst = w.last.up;
+  ok(w.last.waiting === 1 && upFirst > 0 && !atFirst(), `a forced pass steps over the nearest site still waiting for its ground and stands the rest (${upFirst} up, ${w.last.waiting} waiting)`);
+  groundIn = true;
+  w.step(0, 1.1, at, g.deps, true);
+  ok(w.last.waiting === 0 && atFirst() && w.last.up === upFirst + 1, `and the next forced pass, its ground come, stands it (${w.last.up} up)`);
+
+  // A forced pass that cannot run leaves nothing waiting for a screen to hold on: never a count from an earlier pass.
+  const none = new WildLife();
+  (none.last as { waiting: number }).waiting = 3;
+  none.step(0, 1, at, game().deps, true);
+  ok(none.last.waiting === 0, 'a forced pass over a world with no wild half says nothing is waiting');
+}
+
 // ------------------------------------------------------------------ a broken lair comes back
 {
   const w = nearWorld();

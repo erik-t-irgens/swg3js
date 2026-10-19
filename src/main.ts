@@ -433,7 +433,9 @@ import { setWaterSurface, WATER_SURFACE_BAND, WATER_SURFACE_HIDE } from './world
 import type { WaterSurfaceTune } from './world/waterSurfaceMath.ts';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
-import { compilerVerdict, groupPrograms, loadingLine, machineAside, measureCompiler, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
+import { backendOf, checkDriver, compilerVerdict, driverCheck, forgetCompilerMeasurement, groupPrograms, loadingLine, machineAside, programMs, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type Backend, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
+import { PACE_TUNE, tuneProgramPace } from './core/programPace.ts';
+import { centreAgrees, LOADING_TUNE, LoadingLog, placeFromPois, programsForUp, raceCurtainNeed, tuneLoading } from './world/loadingTune.ts';
 import { census as programFamilies } from './core/fx/programCensus.ts';
 import { censusOf, CNT, PASS, PERF, perf, PERF_SWITCHES, PERF_TUNE, PERF_WAIT_MS, readMarks, registerPerfSwitch, SEC, writeMark, type TraceReport } from './core/perf.ts';
 
@@ -686,6 +688,14 @@ interface TravelOpts {
   at?: THREE.Vector3;
   heading?: number;
   indoors?: boolean;
+  /**
+   * The spot is a place on the ground (a map's chip, a port), worked out before the world loaded with no height of
+   * its own: stood on the real terrain once the world is in, 0.3 m over it as a teleport stands one, and kept as the
+   * spawn, before the group is told where this came out and the place is saved (`App.teleport`'s single pass).
+   */
+  ground?: boolean;
+  /** And the spot is a port's own place: stood in that port's building's way in where its rooms are over it (`standInPort`). */
+  port?: boolean;
   /** What the loading screen says is being travelled to. */
   label?: string;
   /**
@@ -798,6 +808,8 @@ interface TrackConsoleOpts {
   reload?: boolean;
   /** The debug menu's "Race the group": the leader calls a race on that track (`__debug.raceTogether({ start })`). */
   groupRace?: string;
+  /** The race start's need test without starting (`raceCurtainNeed`): none, or a course curtain and why, and the course set's counts. */
+  need?: string;
 }
 
 class App {
@@ -1478,6 +1490,22 @@ class App {
   private readonly timer = new THREE.Timer();
   private started = false;
   private traveling = false;
+  /**
+   * A race start's course curtain is up (beside `traveling`, which it also sets: every one of the seventy-odd
+   * places that read `traveling` is right for any screen). The two side effects a race must not trip read this as
+   * well: the story's "left every area" and a call's end. A curtain is a moment at the grid, not a journey.
+   */
+  private curtainOnly = false;
+  /** The last trip's loading screens and the window after the last one, for `__debug.loading()`. */
+  private readonly loadingLog = new LoadingLog();
+  /** The backend the main context runs on, read once at boot off its renderer string (`backendOf`). */
+  private backend: Backend = 'unknown';
+  /** When the world was last drawn behind a fully opaque loading screen (`LOADING_TUNE.drawEveryMs`). */
+  private screenDrawnAt = 0;
+  /** The queue's count of programs built in play for a dressed person, as the last frame read it (the frame report's counter). */
+  private peopleBuiltMark = 0;
+  /** The `people` perf switch's own record: the mobiles' container taken out of the scene, and where it hung. */
+  private peopleOut: { group: THREE.Object3D; parent: THREE.Object3D } | null = null;
   private dying = false;
   /** The last frame's length, for the effects that smear by how far the camera moved in it. */
   private lastDt = 1 / 60;
@@ -1492,6 +1520,8 @@ class App {
   private placeNamesFor = '';
   /** The map's own place loader, captured from the galaxy tab so nothing here has to open the map. */
   private poisOf: (packId: string) => Promise<Poi[]> = async () => [];
+  /** The same loader's file whole, its centre beside its places (null where a pack's file has none or will not read). */
+  private poisFileOf: (packId: string) => Promise<{ center: { x: number; z: number } | null; pois: Poi[] }> = async () => ({ center: null, pois: [] });
   /** The facilities the death card is offering just now, in the order its rows stand. */
   private deathChoices: FacilityChoice[] = [];
   /** Animation mixers of models shown through the debug hook. */
@@ -1506,6 +1536,15 @@ class App {
 
   constructor(private readonly physics: Physics) {
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true });
+    // Which backend this context runs on, read once for the session and reported (`__debug.shaders()`, the loading
+    // record): Direct3D 11 builds a program in about 400 ms, Vulkan in about 10, which is most of what a screen costs.
+    try {
+      const gl = this.renderer.getContext();
+      const info = gl.getExtension('WEBGL_debug_renderer_info');
+      this.backend = backendOf(String(info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)));
+    } catch {
+      this.backend = 'unknown';
+    }
     // ?lowfx=1 is the cheap preset for this session; otherwise the settings kept in this browser.
     const lowfx = new URLSearchParams(location.search).get('lowfx') === '1';
     if (lowfx) Object.assign(this.settings, { renderScale: 0.5, shadows: false, effects: false });
@@ -1765,6 +1804,13 @@ class App {
     registerPerfSwitch('navSightAdvance', { get: () => outdoorNav.agent.sight > 0, set: (v) => (outdoorNav.agent.sight = v ? 1 : 0), values: [false, true], note: "a body outdoors drops a path's corner within reach only where the leg after it can be walked from where it stands, so a tight turn round an obstacle is walked round rather than cut into it (every arrival at Mos Eisley was let go in the junk such a turn cut through). Ships off, the reach alone every body outdoors has always walked by: on, it did not get one arrival more past that junk, and it has been measured on nothing else. It changes every creature, person and fighter out of doors, so compare it over minutes of a town, not in an ab" });
     registerPerfSwitch('oursOffScreen', { get: () => ROUTINE_TUNE.letGoOffScreen, set: (v) => (ROUTINE_TUNE.letGoOffScreen = !!v), values: [false, true], note: 'a stalled walk of ours is let go only while it is off the screen, or after `ROUTINE_TUNE.letGoWait` seconds held in view' });
     registerPerfSwitch('rideLodBias', { get: () => RIDE_LOD_TUNE.on, set: (v) => { RIDE_LOD_TUNE.on = !!v; this.world.refreshDetail(); }, values: [false, true], note: "the detail levels' switch distances and the plant reach divided by 1 + (speed - 20) / 30 (at most 5) while the eye moves faster than 20 m/s: a shuttle ride, a fast ship. Ships off: on a flown trip it saved nothing (RIDE_LOD_DEFAULTS says what was measured)" });
+    // The performance pass: what the people cost in all, put side by side with nobody (`perf({ ab: { key: 'people' } })`).
+    registerPerfSwitch('people', {
+      get: () => this.peopleSwitch(),
+      set: (v) => this.setPeopleSwitch(v === 'out' || v === 'hidden' ? v : 'on'),
+      values: ['on', 'out', 'hidden'],
+      note: "'out' takes every creature's and person's container out of the scene with their simulation still running (what the console paste on the main before this pass did); 'hidden' sets it invisible and leaves it in the scene graph",
+    });
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
     this.world.attachCamera(this.cam.camera, true, this.portals);
     if (!S.shadows) this.world.setShadowsEnabled(false);
@@ -2537,6 +2583,9 @@ class App {
     // The galaxy tab keeps a world's named places once it has read them; the death card reads the
     // same list through this rather than reaching into the map.
     this.poisOf = (id) => galaxy.loadPois(id);
+    // And the same file whole, its centre with it: what a travel to a place on another world reads to stand the
+    // place in the game's frame before that world loads (`teleport`, `placeFromPois`), one screen and not two.
+    this.poisFileOf = (id) => galaxy.loadPoisFile(id);
     // The shuttle fares: the game's own, out of the same file the galaxy map draws its routes from,
     // fetched once for the session. A pack with no file leaves them null and a port then moves you
     // about its own world for nothing rather than offering no ride at all.
@@ -4018,8 +4067,23 @@ class App {
        * worth without a reload; `?shadowStrays=1` on the address does the same from a boot, which
        * is the way that cannot be fooled by a world already streamed in.
        */
-      shaders: (opts?: { full?: boolean; groups?: boolean; families?: boolean; since?: boolean; raw?: boolean; keepStrays?: boolean }) => {
+      /**
+       * The last trip's loading screens and what was built after the last one lifted (`App.loadingReport`): the
+       * one figure the performance pass's first wave is read by. `loading({ tune: { sliceMs: 0 } })` moves
+       * `LOADING_TUNE` in memory first.
+       */
+      loading: (opts?: { tune?: Partial<Record<keyof typeof LOADING_TUNE, unknown>> }) => this.loadingReport(opts),
+      shaders: (opts?: { full?: boolean; groups?: boolean; families?: boolean; since?: boolean; raw?: boolean; keepStrays?: boolean; probe?: 'again'; pace?: Partial<typeof PACE_TUNE> }) => {
         if (opts?.keepStrays !== undefined) SHADOW_STRAYS.keep = opts.keepStrays;
+        // The driver check and the sweep's timing forgotten, so the next loading screen measures them afresh (the
+        // driver check runs on its own frames after that screen's sweep).
+        if (opts?.probe === 'again') {
+          forgetCompilerMeasurement();
+          this.shaderVerdictSaid = false;
+          this.driverHeld = false;
+        }
+        // The program queue's pacing moved live, in memory (`PACE_TUNE`).
+        if (opts?.pace) tuneProgramPace(opts.pace);
         const rows = this.shaderRows();
         // Sampled here as well as in the frame loop, so a console call in a driven tab (where no
         // frame runs on its own) still sees what the last draw built. The phase is the frame loop's
@@ -4043,6 +4107,11 @@ class App {
           keys: totals.keys,
           forgotten: totals.forgotten,
           machine: compilerVerdict(),
+          // The backend this context runs on, the sweep's own milliseconds a program (what the words and the pacing
+          // read), and the driver check (which decides only whether the Interface page blames the driver).
+          backend: this.backend,
+          programMs: programMs(),
+          driver: { leastMs: driverCheck().leastMs, queueMs: driverCheck().queueMs, samples: driverCheck().samples.slice(), done: driverCheck().done, waits: { ...this.driverWaits, busy: { ...this.driverWaits.busy } } },
           // Kept on deliberately: reading a shader's error log was measured to cost nothing at all
           // (1569.8 ms against 1569.5 ms over four programs), and a broken shader must still say so.
           checkShaderErrors: this.renderer.debug.checkShaderErrors,
@@ -9108,15 +9177,17 @@ class App {
         }
         const spot = spots.find((s) => s.key === key)!;
         let travelled = false;
-        if (this.world.packId !== spot.pack) {
-          const where = packPlanet(spot.pack);
-          if (!where) return { error: `no world is the ${spot.pack} pack`, place: key };
-          await this.travel(planetById(where.planet), where.zone);
-          travelled = true;
-        }
         // The captured height, not the terrain's: the shot was taken standing exactly there, and a
         // resampled ground can sit a few centimetres off after a reconversion.
         const at = new THREE.Vector3(spot.stand.x, spot.stand.y, spot.stand.z);
+        if (this.world.packId !== spot.pack) {
+          const where = packPlanet(spot.pack);
+          if (!where) return { error: `no world is the ${spot.pack} pack`, place: key };
+          // Come out at the spot itself, so the world streams round it behind the one screen and not round
+          // the world's spawn.
+          await this.travel(planetById(where.planet), where.zone, undefined, { at, heading: (spot.stand.heading * Math.PI) / 180, label: spot.place ?? spot.key });
+          travelled = true;
+        }
         this.player.reset(at);
         this.player.heading = (spot.stand.heading * Math.PI) / 180;
         // The body's own view height, not the table's default: a posture that sinks the eyes moves
@@ -9209,6 +9280,31 @@ class App {
     this.death.querySelector('.respawn')!.addEventListener('click', () => this.respawn());
     this.ui.appendChild(this.death);
     this.loadingScreen = new LoadingScreen(this.ui, import.meta.env.BASE_URL);
+    // The last trip's screens kept for `__debug.loading()`: each going up and away, its words, and the programs built
+    // behind it off the watch's own loading count (sampled here, so a hidden tab drawing no frames counts too).
+    this.loadingScreen.onChange = (kind, text, now) => {
+      if (kind === 'what') {
+        this.loadingLog.what(text, now);
+        return;
+      }
+      this.sampleShaders(this.shaderPhase());
+      const programs = this.shaderWatch.totals.byPhase.loading;
+      if (kind === 'on') {
+        // A screen going up ends the last one's window, and lets go of the materials it was counting for.
+        this.dropUpWindow();
+        this.loadingLog.on(text, now, programs);
+      } else {
+        this.loadingLog.off(now, programs, this.shaderWatch.highest);
+        // The window after it counts for the bodies its settle had up as it lifted (`upPending`), and for nobody
+        // where it had no settle (a race start's course curtain): `forUp` then reads null, not nought.
+        const w = this.upWindow;
+        w.materials = this.upPending;
+        w.measured = this.upPending !== null;
+        w.count = 0;
+        w.names = [];
+        this.upPending = null;
+      }
+    };
     // Whether a long frame would be seen just now: a loading screen over the world, or a jump's
     // closed tunnel in front of it. The world asks this before it decides to pace a shader compile
     // rather than do it outright, and it is the only thing that knows the answer -- it used to
@@ -14076,7 +14172,8 @@ class App {
     // A travel begun takes the player out of every area they stood in, said at once so an observe step's
     // watch stops counting where the trip began rather than on the far side of it. Nothing at all once
     // they are said, which is every frame of the trip after the first.
-    if (this.traveling && this.storyWatch.inside.length) this.storyWatch.leaveAll(this.raiseStory);
+    // Not a race start's course curtain (`curtainOnly`): the player stays at the grid, in the areas they stood in.
+    if (this.traveling && !this.curtainOnly && this.storyWatch.inside.length) this.storyWatch.leaveAll(this.raiseStory);
     this.storyClock -= dt;
     if (this.storyClock > 0) return;
     this.storyClock = 1 / Math.max(1, TRACKER_TUNE.hz);
@@ -15214,14 +15311,18 @@ class App {
    * chunks under and around the feet, and the placed objects within working range. The player
    * is not simulated meanwhile, so nothing falls through ground that is not there yet. A world
    * that never settles (a pack missing) lets go after a while rather than never.
+   *
+   * And the living are stood behind it, dressed and compiled before it lifts: the people at their posts, the
+   * people of ours, the creatures round the arrival and the ticket collectors, waited for up to
+   * `LOADING_TUNE.standWaitMs` from when they were first stood. Stood after the screen they were 27 to 29
+   * colour programs built in play in the first 30 s of a town, 360 to 520 ms frames on Direct3D 11.
    */
-  private async settle(timeoutMs = 30000, warm?: { at: readonly { x: number; z: number }[]; waitMs: number }): Promise<void> {
+  private async settle(timeoutMs = 30000): Promise<void> {
     const t0 = performance.now();
     // The placed models the old rule would have loaded round here start loading behind this screen, so the
     // sweep below builds their programs (step 6, `World.warmPlaced`); a world whose pack is not in yet starts
-    // them itself when it is. A race track's curtain hands its gates instead (`startRun`), and waits for them.
-    if (warm) this.world.warmPlaced(warm.at);
-    else this.world.warmPlaced(this.player.worldPos);
+    // them itself when it is.
+    this.world.warmPlaced(this.player.worldPos);
     // The world position: aboard a hull's rooms `player.pos` is in the hull's frame, near its origin, not where the hull is.
     while (performance.now() - t0 < timeoutMs) {
       if (this.world.settled(this.player.worldPos)) break;
@@ -15231,6 +15332,15 @@ class App {
       this.loadingScreen.setWhat(`loading ${stage}`);
       await new Promise((r) => setTimeout(r, 100));
     }
+    // The people at their posts stood round the arrival now that the pack (and with it their rows) is in, so their
+    // looks load while the companion, the shuttles, the dressing, the effects and the reflections are waited for
+    // below. The catalogue is fetched once at boot and usually still in flight on a first world: waited for (it is
+    // memoised, nothing after the first world waits), bounded by what is left of this screen. And the ticket
+    // collectors asked for now rather than at the next second's try (`standCollectorsNow`).
+    const kicked = performance.now();
+    await Promise.race([this.world.loadMobileCatalogue(), new Promise((r) => setTimeout(r, Math.max(0, timeoutMs - (kicked - t0))))]);
+    this.world.standPeopleNow(this.player.worldPos);
+    this.standCollectorsNow();
     // The companion stood beside the player behind this screen, as every follower is dropped at a change of world,
     // and their model waited for (bounded), so the sweep below builds their programs and not the first frames after.
     this.loadingScreen.setWhat('your companion');
@@ -15241,6 +15351,10 @@ class App {
     // of a passenger coming down onto it. A world stood already (a respawn, a teleport) waits for nothing.
     this.loadingScreen.setWhat('the shuttles');
     await Promise.race([this.travelStanding, new Promise((r) => setTimeout(r, Math.max(0, Math.min(TRAVEL_STAND_WAIT, timeoutMs - (performance.now() - t0)))))]);
+    // The people of ours, whose ports are planned once the shuttles stand, and the creatures round the arrival, each
+    // in a forced pass of its own: everybody due in range at once rather than a few a pass on live frames.
+    this.world.standOursNow(this.player.worldPos);
+    let wildWaiting = this.world.standWildNow(this.player.worldPos);
     // What this world stands for good, filed behind the screen and the rows filed into tiers already standing
     // built (one bound for both), and then the world asked again whether it has settled: a row filed after the
     // first loop let go is in a tier that loop never waited for, or is being built into one it did, which the
@@ -15257,10 +15371,6 @@ class App {
       this.loadingScreen.setWhat(`loading ${stage}`);
       await new Promise((r) => setTimeout(r, 100));
     }
-    // How dear a shader program is on this machine, measured once a session and only here, behind a
-    // screen the player is already waiting at. It decides nothing about how the game looks: only how
-    // hard it paces itself afterwards, and what this screen admits to while the wait is long.
-    this.measureShaderCompiler();
     // Every shader compiles now, behind the screen: the effects, the bolts and the kit's own
     // visuals put one of themselves in the scene first, so the first shot, hit or throw finds its
     // shaders ready rather than compiling them on the frame it is needed.
@@ -15284,27 +15394,61 @@ class App {
     // frame and rebuilds every reflective material in the world at once (a jump already waited).
     this.loadingScreen.setWhat('reflections');
     await this.world.reflectionsReady(3000);
-    // The placed models the old rule would have loaded round here, which the sweep below builds programs for
-    // from stand-ins (step 6): given `PLACED_TUNE.warmWaitMs` more to come in (nought as shipped, since the wait
-    // costs more screen than the programs it saves), since what is not in by the sweep builds its programs in
-    // play as its tier comes into range.
-    // A race track's curtain waits for the models along its course (`startRun`) by a knob of its own.
-    if (warm && warm.waitMs > 0) {
-      this.loadingScreen.setWhat('the placed objects along the course');
-      await this.world.placedWarmSettled(warm.waitMs);
+    // The people again, now that the rooms built meanwhile have their collision (a person indoors waits for a room
+    // whose building is not in), the collectors again, and then the bodies stood behind this screen waited for, up
+    // to `standWaitMs` from when they were first stood: so their programs are built by the sweep below and not on
+    // the first frames shown. A body still loading when the bound runs out is left to its load, as before: stood
+    // after the screen lifts, its programs built in play, and counted (`__debug.loading()`'s `afterBound`). A
+    // creature's site that waited for its ground holds the wait too, inside the same bound, though every body stood
+    // so far is up: it has stood nobody yet, so nothing else would ever ask for it again before the screen lifts.
+    this.world.standPeopleNow(this.player.worldPos);
+    this.standCollectorsNow();
+    while ((!this.world.bodiesUp || wildWaiting > 0) && performance.now() < kicked + LOADING_TUNE.standWaitMs) {
+      const n = this.world.bodiesCount();
+      this.loadingScreen.setWhat(n.up < n.of ? `the people here, ${n.up} of ${n.of}` : 'the creatures here');
+      if (wildWaiting > 0) wildWaiting = this.world.standWildNow(this.player.worldPos);
+      await new Promise((r) => setTimeout(r, 100));
     }
+    // The placed models the old rule would have loaded round here, which the sweep below builds programs for
+    // from stand-ins (step 6): given `PLACED_TUNE.warmWaitMs` more to come in, since what is not in by the sweep
+    // builds its programs in play as its tier comes into range. Three seconds now the sweep no longer costs
+    // fifteen to twenty-eight (it was nought against that).
     if (PLACED_TUNE.warmWaitMs > 0) {
       this.loadingScreen.setWhat('the placed objects round you');
       await this.world.placedWarmSettled(PLACED_TUNE.warmWaitMs);
     }
     const tCompile = performance.now();
-    // The line under the title is the one the screen always said on a machine where a program costs
-    // a millisecond, and says why the wait is long on one where it costs a third of a second: a
-    // thirty-second wait with a reason is a different thing from one that looks hung.
-    const compiled = await this.world.compileAllAsync((done, total) => this.loadingScreen.setWhat(loadingLine(done, total, compilerVerdict())));
-    if (compiled) console.info(`shaders: ${compiled} programs compiled behind the loading screen in ${(performance.now() - tCompile).toFixed(0)} ms`);
+    // The line under the title says how many programs this screen has made so far, and how dear each one is here
+    // only where that is worth saying: a thirty-second wait with a reason is a different thing from one that
+    // looks hung, and the objects the sweep walks fly past once it is sliced.
+    this.sampleShaders('loading');
+    const screenBefore = this.loadingProgramsSoFar();
+    const compiled = await this.world.compileAllAsync((_done, _total, made) => this.loadingScreen.setWhat(loadingLine(screenBefore + made, compilerVerdict())));
+    const sweepMs = performance.now() - tCompile;
+    this.loadingLog.sweep(compiled, sweepMs);
+    // Both figures: the whole screen's programs (the people's and the streamer's outright builds among them) and
+    // the sweep's own, which is what its slicing is measured by.
+    this.sampleShaders('loading');
+    const screenMade = this.loadingProgramsSoFar();
+    if (screenMade || compiled) console.info(`shaders: ${screenMade} programs built behind the loading screen in ${Math.round(performance.now() - this.loadingLog.openedAt)} ms (the sweep: ${compiled} in ${Math.round(sweepMs)} ms)`);
     // A frame with everything in, so the first thing seen is the world and not the screen lifting off a blank.
     this.drawFrame();
+    // The driver check, on frames of its own after this one (`checkDriver`): whether the graphics driver is to blame
+    // for a slow program, decided once a session, and nothing about the pacing. One screen a session, the first whose
+    // check is not done, waits up to `driverWaitMs` for its tries (said under the title, so `__debug.loading()` shows
+    // what it cost); every later one lets the check go on over its own frames without holding for it, since the check
+    // decides only the Interface page's sentence.
+    const driverDone = this.checkDriverAfterSweep();
+    if (!this.shaderVerdictSaid && !this.driverHeld && LOADING_TUNE.driverWaitMs > 0) {
+      this.driverHeld = true;
+      this.loadingScreen.setWhat('checking the graphics driver');
+      await Promise.race([driverDone, new Promise((r) => setTimeout(r, LOADING_TUNE.driverWaitMs))]);
+    }
+    // What the bodies stood behind this screen came to as it lifts: the people pass's want and its refusals, how
+    // many are up, and what is still loading; and the materials of those up, which the window after the screen counts
+    // the programs built for (`programsForUp`, `after.forUp`).
+    this.loadingLog.bodies(this.world.peopleReport());
+    this.upPending = this.world.readyBodyMaterials(new Set());
     this.lastPrograms = this.renderer.info.programs?.length ?? 0;
     // Everything built behind this screen is put on the watch's books as the loading screen's work,
     // so the first play frame reports the one program it really made rather than the two hundred
@@ -15315,6 +15459,9 @@ class App {
     // one pass over the live list. It is not idle: in a hidden tab, and in anything driving the game
     // without frames, no frame loop runs at all and this is the only sample the whole load gets.
     this.sampleShaders('loading');
+    // The settle's work is done: what the screen says now is its tail (the caller's last steps and the reveal), kept
+    // apart in `__debug.loading()`'s phases rather than added to whatever was said last.
+    this.loadingScreen.setWhat('ready');
     this.loadingScreen.setProgress(1);
     await new Promise((r) => setTimeout(r, 120));
   }
@@ -15354,25 +15501,196 @@ class App {
   }
 
   /**
-   * Measure the machine once, behind a loading screen, and say what was found. The probe builds two
-   * or three trivial programs nobody has built before and times the driver's own blocking answer;
-   * on a machine where that is a millisecond it stops after one and costs nothing worth naming.
+   * The driver check, once a session, after a loading screen's sweep: a trivial link on each of a few frames of
+   * its own, each made outside the frame's draw once the game's own queued work has been drained (`checkDriver`),
+   * the least of them kept. It decides whether the Interface page blames the graphics driver, and nothing about
+   * the pacing, which the sweep's own real programs decide (`programMs`). Said once in the console when done. A
+   * screen that has lifted by the next try stops it, and the next screen goes on from where it got to.
    */
-  private measureShaderCompiler(): void {
-    if (this.shaderVerdictSaid) return;
-    let gl: WebGL2RenderingContext | WebGLRenderingContext | null = null;
+  private async checkDriverAfterSweep(): Promise<void> {
+    if (this.shaderVerdictSaid || this.driverChecking) return;
+    this.driverChecking = true;
     try {
-      gl = this.renderer.getContext();
-    } catch {
-      gl = null;
+      let gl: WebGL2RenderingContext | WebGLRenderingContext | null = null;
+      try {
+        gl = this.renderer.getContext();
+      } catch {
+        gl = null;
+      }
+      const w = this.driverWaits;
+      w.screens++;
+      while (!driverCheck().done) {
+        // A frame, and then a task after it, so the drain never sits between the effects' own draws (they read
+        // their error flag inside one). A hidden tab draws no frames: a timer instead.
+        await new Promise<void>((r) => (document.hidden ? setTimeout(r, 50) : requestAnimationFrame(() => setTimeout(r, 0))));
+        w.frames++;
+        const inPlay = this.started && !this.loadingScreen.open;
+        if (!gl) {
+          w.ended = 'no context';
+          return;
+        }
+        if (inPlay) {
+          w.ended = 'the screen lifted';
+          return;
+        }
+        // Only while nothing of the world's is building a program (`compileQuiet`): a link timed beside an outright
+        // build or a flush waits on the GPU process's busy compile threads, whatever the drain said. A screen that
+        // lifts before the check has its tries leaves the rest to the next one.
+        const busy = this.world.compileBusy;
+        if (busy !== '') {
+          w.notQuiet++;
+          w.busy[busy]++;
+          continue;
+        }
+        checkDriver(gl, { inPlay });
+      }
+      w.ended = 'done';
+      this.shaderVerdictSaid = true;
+      // One line, once a session. A machine with nothing wrong with it gets one cheerful line and is
+      // never mentioned again.
+      console.info(verdictLine(compilerVerdict()));
+    } finally {
+      this.driverChecking = false;
     }
-    const verdict = measureCompiler(gl, { inPlay: this.started && !this.loadingScreen.open });
-    // Not measured means the probe declined (it was asked in play); it may ask again next time.
-    if (!verdict.measured && verdict.why.includes('in play')) return;
-    this.shaderVerdictSaid = true;
-    // One line, once a session. A machine with nothing wrong with it gets one cheerful line and is
-    // never mentioned again.
-    console.info(verdictLine(verdict));
+  }
+
+  /** The driver check running now, so a second screen's sweep does not start another beside it. */
+  private driverChecking = false;
+
+  /** Whether a screen this session has already waited for the driver check's tries (`LOADING_TUNE.driverWaitMs`): once in all. */
+  private driverHeld = false;
+
+  /**
+   * The materials of the bodies up as the settle of the screen up now finished (`World.readyBodyMaterials`), waiting
+   * for that screen to lift; then the window after it (`upWindow`) holds them, for `LOADING_TUNE.afterS` at most, and
+   * counts the programs built for them in it. Let go when the window ends or another screen goes up, so the bodies of
+   * a world left behind are never kept by it.
+   */
+  private upPending: Set<THREE.Material> | null = null;
+  private readonly upWindow: { materials: Set<THREE.Material> | null; measured: boolean; count: number; names: string[] } = { materials: null, measured: false, count: 0, names: [] };
+
+  /** Another screen went up: the window after the last one ends uncounted (it is never reported again) and its materials are let go. */
+  private dropUpWindow(): void {
+    this.upPending = null;
+    const w = this.upWindow;
+    w.materials = null;
+    w.measured = false;
+    w.count = 0;
+    w.names = [];
+  }
+
+  /** The window after the last screen ran its course: what was built for its bodies in it counted once, and their materials let go. */
+  private endUpWindow(): void {
+    const w = this.upWindow;
+    const after = this.loadingLog.after(performance.now());
+    if (w.materials && after) w.count = this.countUp(w.materials, after.idFrom, after.idTo, w.names);
+    w.materials = null;
+  }
+
+  /** The programs built for these materials with ids past `fromId` and no later than `toId` (`programsForUp`, over three's own records of them). */
+  private countUp(materials: Set<THREE.Material>, fromId: number, toId: number, names: string[]): number {
+    const props = this.renderer.properties as unknown as { has(o: object): boolean; get(o: object): { programs?: Map<unknown, { id: number }> } };
+    names.length = 0;
+    return programsForUp(materials, fromId, toId, (m) => (props.has(m) ? props.get(m).programs?.values() : null), (m) => m.name, names);
+  }
+
+  /**
+   * How the driver check's frames have gone this session, for `__debug.shaders().driver.waits`: the screens it ran
+   * behind, the frames it waited, those on which the world was still building a program, and how it last stopped.
+   */
+  private readonly driverWaits = { screens: 0, frames: 0, notQuiet: 0, busy: { outright: 0, queued: 0, flush: 0 }, ended: '' };
+
+  /**
+   * `__debug.loading()`: the last trip's screens (each one's title, length, its phases by the words it said, the
+   * programs built behind it and its sweep's own, the bodies stood and up as it lifted against the people pass's
+   * want and its budget refusals, and a race start's curtain), and `after`: the first `afterS` seconds after the last
+   * screen lifted -- the colour programs built in play then, the dressed people's among them by the queue's label,
+   * the skinned depth programs and the bodies stood after the bound apart, the worst frame and those over 100 ms.
+   * With `tune`, `LOADING_TUNE` moved in memory first (`sliceMs` 0 is the old frame per batch, for comparing).
+   */
+  private loadingReport(opts?: { tune?: Partial<Record<keyof typeof LOADING_TUNE, unknown>> }): Record<string, unknown> {
+    const words = opts?.tune ? tuneLoading(opts.tune) : [];
+    const now = performance.now();
+    this.sampleShaders(this.shaderPhase());
+    const after = this.loadingLog.after(now);
+    let afterOut: Record<string, unknown> | null = null;
+    if (after) {
+      // The programs built in play inside the window, read off the watch's own history by when each key was last
+      // built: depth and distance programs (the shadow pass's) apart from the rest, which are colour programs, and
+      // of the depth ones those of a skinned body. The motion blur's own variants are named `fx.velocity`.
+      const win = this.loadingLog.afterWindow;
+      let colour = 0;
+      let colourSkinned = 0;
+      let depth = 0;
+      let skinnedDepth = 0;
+      let velocity = 0;
+      const colourLabels: string[] = [];
+      for (const b of this.shaderWatch.builtInPlay(Number.POSITIVE_INFINITY)) {
+        if (b.at < win.from || b.at > win.until) continue;
+        if (/^fx\.velocity/.test(b.label)) velocity++;
+        else if (/(Depth|Distance)Material/.test(b.label)) {
+          depth++;
+          if (/skinned/.test(b.label)) skinnedDepth++;
+        } else {
+          colour++;
+          // A skinned colour program is a body's (a person, a creature); the rest are the world's own (a room, a tier).
+          if (/skinned/.test(b.label)) colourSkinned++;
+          if (colourLabels.length < 12) colourLabels.push(b.label);
+        }
+      }
+      // What was built for the bodies up as the screen lifted, read off three's own records of their materials: live
+      // while the window is open (up to the newest program, since a hidden tab draws no frame to carry its end along),
+      // as counted when it closed after. Null for a screen that stood nobody (a race start's course curtain).
+      const w = this.upWindow;
+      const forUpNames: string[] = [];
+      let forUp: number | null = null;
+      if (w.measured) {
+        if (w.materials) forUp = this.countUp(w.materials, after.idFrom, Math.max(after.idTo, this.loadingLog.inWindow(now) ? this.shaderWatch.highest : -1), forUpNames);
+        else {
+          forUp = w.count;
+          forUpNames.push(...w.names);
+        }
+      }
+      afterOut = { ...after, colour, colourBodies: colourSkinned, colourWorld: colour - colourSkinned, people: after.people, forUp, forUpNames, skinnedDepth, depth, velocity, colourLabels, lastBuilt: this.world.programs.lastBuilt };
+    }
+    return {
+      screens: this.loadingLog.screens.map((s) => ({ ...s, phases: s.phases.slice() })),
+      after: afterOut,
+      backend: this.backend,
+      programMs: programMs(),
+      tune: { ...LOADING_TUNE },
+      placedWarmWaitMs: PLACED_TUNE.warmWaitMs,
+      ...(words.length ? { words } : {}),
+    };
+  }
+
+  /** The programs built behind the loading screen up now, so far: the watch's loading count since the screen went up. */
+  private loadingProgramsSoFar(): number {
+    if (!this.loadingLog.up) return 0;
+    return Math.max(0, this.shaderWatch.totals.byPhase.loading - this.loadingLog.programsAtOn);
+  }
+
+  /**
+   * The ticket collectors asked for now, behind a loading screen: those of this world's travel rows not yet
+   * waiting or standing put on the list (as `standTravelRest` puts them once the shuttles stand), and the
+   * list asked once outright rather than at the next second's try (`stepTravelStand`), so a collector is stood,
+   * dressed and compiled before the screen lifts. Nothing until the catalogue is in and the rows are this world's.
+   */
+  private standCollectorsNow(): void {
+    const pack = packIdOf(this.world.planet, this.zone);
+    if (this.travelRowsFor !== pack || !this.world.mobileCatalogue) return;
+    const known = new Set<string>();
+    for (const w of this.travelWaiting) known.add(w.key);
+    for (const s of this.travelStood.droids) known.add(s.row.key);
+    const things = this.travelThings();
+    for (const [i, t] of things.entries()) {
+      if (t.kind !== 'collector' || !t.model) continue;
+      const key = `travel:${pack}:${i}`;
+      if (known.has(key)) continue;
+      this.travelWaiting.push({ key, model: t.model, x: t.x, y: t.y, z: t.z, yaw: t.yaw, inside: t.cell > 0 });
+    }
+    this.travelTriedAt = Number.NEGATIVE_INFINITY;
+    this.stepTravelStand(performance.now() / 1000);
   }
 
   /** Where a passenger's place is kept; written, not made. */
@@ -15764,13 +16082,24 @@ class App {
     else if (planet.instances) await this.enterCopy(null, null, true, opts?.back ?? leftFrom);
     else if (opts?.at && !besideAt && !arrived) {
       this.physics.stepOnce();
-      p.reset(opts.at.clone());
+      const at = opts.at.clone();
+      // A place on the ground worked out before the world was in has no height of its own: stood on the real
+      // terrain now that it is, as a teleport stands one.
+      if (opts.ground) at.y = this.world.terrain.heightAt(at.x, at.z) + 0.3;
+      p.reset(at);
       if (opts.heading !== undefined) {
         p.heading = opts.heading;
         this.cam.yaw = opts.heading + Math.PI;
       }
       if (opts.indoors) this.world.enterCellAt(opts.at);
       this.physics.stepOnce();
+      // And kept as the spawn, and a port's place stood in its building's way in (Theed's hangar), before the
+      // group is told where this came out and the place is saved below: done after, the group's word and the saved
+      // place were the world's own spawn (the followers came out at Bestine, 5 km from Mos Eisley).
+      if (opts.ground) {
+        this.spawn.copy(p.pos);
+        if (opts.port && this.standInPort()) this.spawn.copy(p.pos);
+      }
     }
     // The ship a crew left docked at the hull they went aboard: docked again, as it was.
     if (arrived && crossing?.dock && !this.docking.park(arrived, crossing.dock.key, crossing.dock.lane)) this.messages.system('the dock your ship was left at is not here, so it is flying free');
@@ -16257,9 +16586,28 @@ class App {
     // Out of any dungeon copy the player was in: a teleport is no way back out of one, and leaves it behind.
     this.instanceHere = null;
     if (planet.id !== this.world.planet.id || (planet.zones?.length && zoneId && zoneId !== this.zone)) {
-      await this.travel(planet, zoneId);
-      // The pack (and with it the snapshot's centre) loads after arrival; wait for it.
-      for (let i = 0; i < 100 && !this.world.layoutCenter; i++) await new Promise((r) => setTimeout(r, 100));
+      // One screen, at the place: the place is worked out in the game's frame from the far world's own
+      // `pois.json` centre before anybody travels (`placeFromPois`, this method's own arithmetic below), and the
+      // travel comes out there, stood on the ground once the world is in. Two screens, the world's spawn and
+      // then the place, were 82 s from Naboo to Mos Eisley on a first visit, and the group came out at the
+      // spawn. No centre (an old pack, a file that would not read) and space (which has no places file) are
+      // the two phases as they always were.
+      const centre = planet.space ? null : await this.poisFileOf(packIdOf(planet, zoneId)).then((f) => f.center, () => null);
+      if (centre) {
+        const g = placeFromPois(centre, poi);
+        await this.travel(planet, zoneId, undefined, { at: new THREE.Vector3(g.x, 0, g.z), label: poi.name, ground: true, port: isPortKind(poi.kind) });
+        for (let i = 0; i < 100 && !this.world.layoutCenter; i++) await new Promise((r) => setTimeout(r, 100));
+        // A travel that did not reach the world (another under way, a world that would not load) stands nobody.
+        if (this.world.planet.id !== planet.id) return;
+        // The safety net: a pack whose layout is centred elsewhere than its places file says (none converted
+        // today, 19 of 19 agree) put the place wrong, and the old second phase stands the player right.
+        if (centreAgrees(this.world.layoutCenter, centre, LOADING_TUNE.centreSlack)) return;
+        console.warn(`travel: ${packIdOf(planet, zoneId)}'s layout centre is not its places file's (${centre.x}, ${centre.z}); ${poi.name} is found again on a second screen`);
+      } else {
+        await this.travel(planet, zoneId);
+        // The pack (and with it the snapshot's centre) loads after arrival; wait for it.
+        for (let i = 0; i < 100 && !this.world.layoutCenter; i++) await new Promise((r) => setTimeout(r, 100));
+      }
     }
     const c = this.world.layoutCenter;
     if (!c) return;
@@ -17568,12 +17916,42 @@ class App {
   }
 
   /**
-   * Stand what the player rides at a place on a course, facing `heading`: behind a short curtain (the loading screen's
-   * own) when `curtain`, with the world round it settled and the models near `warmAt` warmed and compiled, so what is
-   * raced past builds no program; at once otherwise. The hull is stood again once the ground is in, at the grid's own
-   * height but never under the ground.
+   * The points a course's models are asked for along (`World.courseNeed`, `LayoutStreamer.modelsAlong`): the grid,
+   * and every leg from the grid round the gates sampled every `LOADING_TUNE.courseStep`, ends included.
    */
-  private async standOnCourse(v: Vehicle, x: number, y: number, z: number, heading: number, curtain: { label: string; warmAt: readonly { x: number; z: number }[] } | null): Promise<void> {
+  private coursePoints(t: TrackDef, places: { grid: { x: number; z: number }; gates: readonly { x: number; z: number; w: number }[] }): { x: number; z: number }[] {
+    const out: { x: number; z: number }[] = [{ x: places.grid.x, z: places.grid.z }];
+    const step = Math.max(1, LOADING_TUNE.courseStep);
+    for (const l of courseLegs(t, places.grid, places.gates)) {
+      const len = Math.hypot(l.bx - l.ax, l.bz - l.az);
+      const n = Math.max(1, Math.ceil(len / step));
+      for (let i = 0; i <= n; i++) out.push({ x: l.ax + ((l.bx - l.ax) * i) / n, z: l.az + ((l.bz - l.az) * i) / n });
+    }
+    return out;
+  }
+
+  /**
+   * Whether a start at a grid needs a curtain (`raceCurtainNeed` over `World.courseNeed`): none when the hull is beside
+   * the grid and everything along the course is in and warmed, else a course curtain and why.
+   */
+  private courseCurtain(v: Vehicle, grid: { x: number; y: number; z: number }, points: readonly { x: number; z: number }[]): { need: 'none' | 'course'; why: string } {
+    const n = this.world.courseNeed(points, new THREE.Vector3(grid.x, grid.y, grid.z), v.pos);
+    return raceCurtainNeed(n);
+  }
+
+  /**
+   * Stand what the player rides at a place on a course, facing `heading`. With no curtain (`raceCurtainNeed` found
+   * the hull beside the grid and everything along the course loaded and warmed) at once, the streamed world left
+   * where it is, since the hull moved less than a chunk: `jumpTo` streams with no budget, resets the roof grid and
+   * forgets the building state, all on a live frame. With one, a **course curtain**, never `settle()`: the screen up;
+   * only when the hull was far, the paint, the world moved and the grid's ground waited for (`gridSettleMs`); the
+   * course's missing models loaded (`TRACK_TUNE.warmWaitMs`, what misses it streams with its tier), compiled
+   * (`World.compileCourse`), the queue flushed, and the screen gone at once. None of the companion, the shuttles,
+   * the dressing, the effects, the reflections or the whole-scene sweep a start changes nothing of. It keeps
+   * `traveling` and sets `curtainOnly` beside it, which the story's leave and a call's end read.
+   */
+  private async standOnCourse(v: Vehicle, x: number, y: number, z: number, heading: number, curtain: { label: string; points: readonly { x: number; z: number }[]; why: string } | null): Promise<void> {
+    const moved = Math.hypot(v.pos.x - x, v.pos.z - z);
     const stand = () => {
       const at = Math.max(y, this.courseFloor(x, z) + STAND_LIFT);
       if (v.race) v.race.standAt(v, x, at, z, heading);
@@ -17583,10 +17961,12 @@ class App {
     };
     stand();
     if (!curtain) {
-      this.world.jumpTo(v.pos);
+      if (moved >= LOADING_TUNE.courseNear) this.world.jumpTo(v.pos);
+      this.loadingLog.curtain('none', performance.now());
       return;
     }
     this.traveling = true;
+    this.curtainOnly = true;
     this.map.hide();
     // The keys as the curtain found them, given back after it: a run started from the debug menu's Gates view leaves
     // the menu holding the mouse, and taken back regardless the game read the keys typed into the menu, with the
@@ -17594,16 +17974,44 @@ class App {
     const held = this.input.captured;
     this.input.captured = false;
     this.loadingScreen.show(this.world.planet, curtain.label, 'preparing the track');
+    const report = { models: 0, loaded: 0, left: 0, compiled: 0, sweepMs: 0, depthMs: 0 };
     try {
-      await new Promise((r) => setTimeout(r, 250));
-      this.world.jumpTo(v.pos);
-      this.physics.stepOnce();
-      await this.settle(30000, { at: curtain.warmAt, waitMs: TRACK_TUNE.warmWaitMs });
-      // The ground under the grid is in now: stood again on it.
-      stand();
+      if (moved >= LOADING_TUNE.courseNear) {
+        // Far: the screen painted before the world is moved under it, and the grid's ground waited for (bounded).
+        await new Promise((r) => setTimeout(r, 250));
+        this.world.jumpTo(v.pos);
+        this.physics.stepOnce();
+        const grid = new THREE.Vector3(x, y, z);
+        const t0 = performance.now();
+        while (!this.world.settled(grid) && performance.now() - t0 < LOADING_TUNE.gridSettleMs) {
+          const { total, stage } = this.world.progress(grid);
+          this.loadingScreen.setProgress(0.04 + total * 0.5);
+          this.loadingScreen.setWhat(`loading ${stage}`);
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        // The ground under the grid is in now: stood again on it.
+        stand();
+      }
+      // The course's own models, asked for again now the hull stands where it starts.
+      const need = this.world.courseNeed(curtain.points, new THREE.Vector3(x, y, z), v.pos);
+      report.models = need.ids.length;
+      this.loadingScreen.setWhat('the placed objects along the course');
+      const got = await this.world.loadCourse(need.ids, TRACK_TUNE.warmWaitMs);
+      report.loaded = got.loaded;
+      report.left = got.left;
+      this.loadingScreen.setProgress(0.7);
+      this.loadingScreen.setWhat('building shaders for the course');
+      const built = await this.world.compileCourse(need.ids, need.indoor);
+      report.compiled = built.programs;
+      report.sweepMs = built.sweepMs;
+      report.depthMs = built.depthMs;
+      await this.world.flushPrograms();
+      this.sampleShaders('loading');
     } finally {
-      await this.loadingScreen.hide();
+      this.loadingLog.curtain(`course (${curtain.why})`, performance.now(), report);
+      await this.loadingScreen.hide({ quick: LOADING_TUNE.quickHide });
       this.traveling = false;
+      this.curtainOnly = false;
       this.input.captured = held;
     }
     this.handBackMouse();
@@ -17644,7 +18052,11 @@ class App {
     const midY = this.hullMiddle(v);
     // A group race stands each member at a slot of its own behind the grid, in the order the leader's word listed them.
     const at = group ? gridSlot({ x: places.grid.x, y: places.grid.y, z: places.grid.z, heading }, group.slot, kind) : places.grid;
-    await this.standOnCourse(v, at.x, at.y, at.z, heading, { label: group ? `${t.name}: a group race` : t.name, warmAt: [places.grid, ...places.gates] });
+    // No curtain at all beside the grid once everything along the course is in (every start after a session's first
+    // on a course); a short course curtain otherwise, never the whole arrival's settle (4.5 to 7 s before).
+    const points = this.coursePoints(t, places);
+    const need = this.courseCurtain(v, at, points);
+    await this.standOnCourse(v, at.x, at.y, at.z, heading, need.need === 'course' ? { label: group ? `${t.name}: a group race` : t.name, points, why: need.why } : null);
     if (packIdOf(this.world.planet, this.zone) !== world || this.player.mounted !== v || v.disposed) return 'the run was not started: the world or the ride changed behind the curtain';
     if (group && this.raceTogether.race !== group.race) return 'the race changed behind the curtain';
     this.clearRun();
@@ -17666,8 +18078,9 @@ class App {
     this.refreshGateShapes();
     if (moded) this.messages.system('racing mode: a timed run races the bike');
     this.messages.system(`${t.name}: ${t.kind === 'circuit' ? `${run.laps} lap${run.laps === 1 ? '' : 's'}` : 'a sprint'}, ${run.n} gates, ${(lapLength(t, places.gates) / 1000).toFixed(1)} km a lap; W in the window round go for a start boost`);
-    if (group) return `${t.name}, a group race, on the ${def.label} as a ${kind} from slot ${group.slot + 1}: go in ${Math.max(0, Math.ceil(-run.clock))} s`;
-    return `${t.name} started on the ${def.label} as a ${kind}: counting down from ${TRACK_TUNE.countdown} s`;
+    const curtainWords = need.need === 'course' ? `curtain: course (${need.why})` : 'curtain: none';
+    if (group) return `${t.name}, a group race, on the ${def.label} as a ${kind} from slot ${group.slot + 1}: go in ${Math.max(0, Math.ceil(-run.clock))} s; ${curtainWords}`;
+    return `${t.name} started on the ${def.label} as a ${kind}: counting down from ${TRACK_TUNE.countdown} s; ${curtainWords}`;
   }
 
   /**
@@ -18221,13 +18634,32 @@ class App {
       else if (this.raceRun?.live) words.push('not during a run: track({ stop: true }) first');
       else {
         const places = trackInGame(t, this.world.layoutCenter, this.trackFrame());
-        const far = v.pos.distanceTo(new THREE.Vector3(places.grid.x, places.grid.y, places.grid.z)) > 300;
-        await this.standOnCourse(v, places.grid.x, places.grid.y, places.grid.z, turnHeading(places.grid.q), far ? { label: t.name, warmAt: [places.grid] } : null);
-        words.push(`at ${t.name}'s grid`);
+        // The same need test and course curtain a start takes, over the whole course: warmed only at its grid, a
+        // course's far props built their programs in play as it was raced (a 371 to 386 ms frame on one).
+        const points = this.coursePoints(t, places);
+        const need = this.courseCurtain(v, places.grid, points);
+        await this.standOnCourse(v, places.grid.x, places.grid.y, places.grid.z, turnHeading(places.grid.q), need.need === 'course' ? { label: t.name, points, why: need.why } : null);
+        words.push(`at ${t.name}'s grid (curtain: ${need.need === 'course' ? `course, ${need.why}` : 'none'})`);
       }
     }
     if (typeof opts.start === 'string') words.push(await this.startRun(opts.start));
     if (typeof opts.groupRace === 'string') words.push(this.raceTogether.call(opts.groupRace));
+    let need: Record<string, unknown> | null = null;
+    if (typeof opts.need === 'string') {
+      // The race start's own need test, asked without starting: from what the player rides, at the grid itself.
+      const t = this.trackById(opts.need) ?? (this.trackHeld?.id === opts.need ? this.trackHeld : null);
+      const v = this.player.mounted;
+      if (!t) words.push(`no track called ${opts.need} on this world`);
+      else if (!v) words.push('ride something first: the need test measures from the hull to the grid');
+      else {
+        const places = trackInGame(t, this.world.layoutCenter, this.trackFrame());
+        const points = this.coursePoints(t, places);
+        const n = this.world.courseNeed(points, new THREE.Vector3(places.grid.x, places.grid.y, places.grid.z), v.pos);
+        const r = raceCurtainNeed(n);
+        need = { curtain: r.need, why: r.why, models: n.ids.length, missing: n.missing, failed: n.failed, unwarmed: n.unwarmed, settled: n.settled, pending: n.pending, hullToGrid: Math.round(n.hullToGrid), points: points.length };
+        words.push(r.need === 'course' ? `curtain: course (${r.why})` : 'curtain: none');
+      }
+    }
     let check: { hits: { what: string; leg: string; off: number; at: [number, number] }[]; built: string; words: string } | null = null;
     if (typeof opts.check === 'string') {
       const t = this.trackById(opts.check) ?? (this.trackHeld?.id === opts.check ? this.trackHeld : null);
@@ -18254,6 +18686,7 @@ class App {
       best: bests,
       held: import.meta.env.DEV && this.trackHeld ? { id: this.trackHeld.id, gates: this.trackHeld.gates.length, unsaved: this.trackHeldUnsaved } : null,
       ...(check ? { check } : {}),
+      ...(need ? { need } : {}),
       tune: { ...TRACK_TUNE },
       words,
     };
@@ -18579,14 +19012,27 @@ class App {
     if (this.player.mounted || this.player.aboard || this.ride?.riding) return 'get off or out first: a mark is a place on foot';
     if (this.perfFlight) return 'a flight is going; ask again when it is over';
     if (PERF.run) return 'an A/B run is going; `await __debug.perf({ cancel: true })` first';
-    if (m.planet !== this.world.planet.id || m.zone !== (this.zone ?? '')) {
-      await this.travel(planetById(m.planet), m.zone || undefined);
-      if (this.world.planet.id !== m.planet) return `the travel to ${m.planet} did not arrive`;
-    }
-    if (this.traveling) return 'a crossing is under way; ask again when it is over';
     const to = new THREE.Vector3(m.x, m.y, m.z);
     const p = this.player;
     let cell = 0;
+    if (m.planet !== this.world.planet.id || m.zone !== (this.zone ?? '')) {
+      // On another world the travel comes out at the mark itself, so the world streams round it behind its one
+      // screen and not round the world's spawn; then only the mark's room is entered.
+      await this.travel(planetById(m.planet), m.zone || undefined, undefined, { at: to, heading: m.yaw - Math.PI, label: name });
+      if (this.world.planet.id !== m.planet) return `the travel to ${m.planet} did not arrive`;
+      cell = this.world.enterCellAt(to, m.cell ?? 0);
+      p.reset(to);
+      this.physics.stepOnce();
+      this.cam.yaw = m.yaw;
+      this.cam.pitch = m.pitch;
+      this.cam.zoomTarget = m.zoom;
+      this.cam.distance = m.zoom;
+      this.savePlace(true);
+      const wantedThere = m.cell ?? 0;
+      say(`perf: at '${name}' on ${m.planet}, room ${cell}`);
+      return { at: name, planet: m.planet, cell, note: wantedThere !== cell ? `the mark was in room ${wantedThere} and this is room ${cell}: its building may not have come in` : `${this.menu.open ? 'click Resume, ' : ''}let it settle a few seconds, then \`await __debug.perf()\`` };
+    }
+    if (this.traveling) return 'a crossing is under way; ask again when it is over';
     this.traveling = true;
     this.map.hide();
     this.input.captured = false;
@@ -18838,6 +19284,36 @@ class App {
     } finally {
       this.portals.actors.restoreFrame();
     }
+  }
+
+  /** The `people` perf switch as it stands: the creatures' and people's container out of the scene, hidden, or in. */
+  private peopleSwitch(): 'on' | 'out' | 'hidden' {
+    const group = this.world.mobiles?.group;
+    if (this.peopleOut && this.peopleOut.group === group) return 'out';
+    return group && !group.visible ? 'hidden' : 'on';
+  }
+
+  /**
+   * Set the `people` perf switch: `'out'` takes the mobiles' one container out of the scene with their simulation
+   * still running (nothing about them is drawn, walked, culled or listed for the blur), `'hidden'` leaves it in the
+   * scene graph invisible, `'on'` puts it back as it was. A container left out when its world went is simply let go:
+   * the next world's is its own and in the scene.
+   */
+  private setPeopleSwitch(v: 'on' | 'out' | 'hidden'): void {
+    const group = this.world.mobiles?.group ?? null;
+    if (this.peopleOut && this.peopleOut.group !== group) this.peopleOut = null;
+    if (v === 'out') {
+      if (!this.peopleOut && group?.parent) {
+        this.peopleOut = { group, parent: group.parent };
+        group.removeFromParent();
+      }
+      return;
+    }
+    if (this.peopleOut) {
+      this.peopleOut.parent.add(this.peopleOut.group);
+      this.peopleOut = null;
+    }
+    if (group) group.visible = v !== 'hidden';
   }
 
   /** The routing's record for one stood shuttle, refilled (`ShuttleRigs.routeOf`). */
@@ -19457,8 +19933,9 @@ class App {
         // for half a dozen reasons that are all about **this moment** rather than about the droid --
         // its model not planned yet, the budget full, a cell whose floor is not built, the manager
         // not there at all. Asked once on arrival, every one of those was a collector that never
-        // appeared and never would. `stepTravelStand` asks again until it stands.
-        this.travelWaiting.push({ key, model: t.model, x: t.x, y: t.y, z: t.z, yaw: t.yaw, inside: t.cell > 0 });
+        // appeared and never would. `stepTravelStand` asks again until it stands. A loading screen may
+        // have put it on the list already (`standCollectorsNow`), which is not a second collector.
+        if (!this.travelWaiting.some((w) => w.key === key) && !this.travelStood.droids.some((s) => s.row.key === key)) this.travelWaiting.push({ key, model: t.model, x: t.x, y: t.y, z: t.z, yaw: t.yaw, inside: t.cell > 0 });
         continue;
       }
       // Solid whatever its size: a terminal is under the sweep's own floor for small props and is
@@ -27007,7 +27484,8 @@ class App {
         let next = false;
         for (let n = 1; n <= 9; n++) if (input.consumeKey(DIGIT_CODES[n - 1])) next = true;
         input.dropPresses();
-        if (this.dying || this.traveling || !this.inWorld) this.endComm();
+        // A race start's course curtain (`curtainOnly`) is a moment at the grid and ends no call.
+        if (this.dying || (this.traveling && !this.curtainOnly) || !this.inWorld) this.endComm();
         else if (next) this.nextCommLine();
       }
 
@@ -27551,8 +28029,19 @@ class App {
       // player's own camera in between would put that view into the motion blur's history and its
       // focus into the lens, which is what smeared every picture of the first run.
       perf.begin(SEC.draw);
-      this.drawFrame();
+      // Behind a fully opaque loading screen nothing drawn can be seen, so the world is drawn at most every
+      // `LOADING_TUNE.drawEveryMs` (its `update` above still runs every frame, and every frame is drawn once the
+      // screen begins to go): drawn every frame it was half of a screen's main thread, 22 s of a 44 s screen.
+      const screenHides = LOADING_TUNE.screenDraws && this.loadingScreen.opaque;
+      if (!screenHides || tFrame - this.screenDrawnAt >= LOADING_TUNE.drawEveryMs) {
+        this.drawFrame();
+        if (screenHides) this.screenDrawnAt = tFrame;
+      }
       perf.end(SEC.draw);
+      // A fresh stamp on the program queue after the draw as well as before it (`updateShadows`): a frame that built
+      // a program for a second and a half leaves a frame just ended on the queue's books, so a waiter polling after it
+      // sees a frame and never takes it for a stopped loop.
+      this.world.programs.tick(performance.now());
       stats.renderMs = performance.now() - tRender;
       // The display's shapes, over the picture and under every panel. Nothing is drawn and the canvas
       // is cleared once whenever the game is not simulating, so no reticle stands frozen over the
@@ -27575,6 +28064,15 @@ class App {
       const phase = this.shaderPhase();
       const made = this.sampleShaders(phase);
       if (phase === 'play') perf.count(CNT.programsPlay, made.made);
+      // Of those, the queue's for a dressed person (its job's label a look's), and the window after the last loading
+      // screen kept: the frame's length and that count, numbers only.
+      const peopleBuilt = this.world.programs.peopleBuilt;
+      perf.count(CNT.programsPeople, peopleBuilt - this.peopleBuiltMark);
+      this.peopleBuiltMark = peopleBuilt;
+      this.loadingLog.frame(rawDt * 1000, tFrame, peopleBuilt, this.shaderWatch.highest);
+      // The window after the last screen ran out: what was built for the bodies it had up is counted once and their
+      // materials let go. One comparison a frame otherwise.
+      if (this.upWindow.materials && tFrame > this.loadingLog.afterEnds) this.endUpWindow();
       if (made.made > 0 && phase === 'play' && this.lastPrograms > 0) {
         const churn = made.dropped > 0 ? `, ${made.dropped} dropped` : '';
         const over = made.made > SHADER_TUNE.playBudget ? ' — over the one a frame this game holds to' : '';

@@ -31,11 +31,31 @@ export const PACE_TUNE = {
   /** A play frame that built more than this is worth one line in the console. */
   warnOver: 1,
   /**
-   * How long the queue may go unlooked-at before whoever is waiting on it gives up and builds the
-   * work itself. Only a frame empties the queue, so a stretch this long with no frame in it means
-   * no frame is running: there is nothing to protect and nothing that would ever answer the wait.
+   * How long a waiter's own polls must span with no frame looking at the queue before it gives up and
+   * builds the work itself (`QueueWatch`). Only a frame empties the queue, so two polls this far apart
+   * that saw no new frame mean no frame is running: there is nothing to protect and nothing that would
+   * ever answer the wait. Judged by frames counted, never by the wall time since the last one: a frame
+   * that spent 1.6 s building a program looks exactly like a stopped loop to a clock read after it.
    */
   idleMs: 250,
+  /**
+   * The single-instant test a caller with no polls of its own makes before it queues (`queueOrBuild`'s
+   * entry, `ProgramQueue.idle`): never looked at, or not for this long. Far longer than any one frame the
+   * game draws, however slow, so a long frame is never read as a stopped loop; short enough that a
+   * character put back in a ship before the frame loop opens is not held up by it. Ours.
+   */
+  idleBackstopMs: 2000,
+  /**
+   * Both of the above on a page that is on screen (`document.hidden` false): how long a waiter's polls, and the
+   * single-instant test, must see no frame before the work is built outright. A page on screen has its frame loop
+   * running, and what holds its frames back is the browser waiting on a GPU process still building the last frame's
+   * programs while the main thread is free and its timers run: on a cold Direct3D 11 arrival the frames stood still
+   * 486 ms after Mos Eisley's screen lifted, a waiter read that as a stopped loop at 250 ms and built in its timer
+   * task, which blocked the page 3.9 s. Building outright there is the very freeze the queue exists to spare, so on
+   * screen the wait is long; finite, so a frame loop that really has stopped under a page on screen (nothing in the
+   * game does that) still never leaves a wait unanswered. Ours.
+   */
+  idleShownMs: 10000,
   /** How often someone waiting on the queue looks to see whether a frame is still running. */
   pollMs: 50,
 };
@@ -167,4 +187,28 @@ export function framesFor(pending: number, budget: number): number {
   if (pending <= 0) return 0;
   const per = Math.max(1, Math.floor(budget));
   return Math.ceil(pending / per);
+}
+
+/**
+ * One waiter's view of whether the frame loop has stopped: its own polls, and the queue's count of
+ * frames that have looked at it. The loop is taken as stopped only once two of its polls spanning more
+ * than `idleMs` saw the same count, so a frame that ran long, however long, is a frame and not a stop:
+ * it ticks the queue again as it ends (the frame loop's tick after its draw), and the next poll sees a
+ * new count. On a page that is on screen the span is `idleShownMs`, since frames there stop only while the
+ * browser waits on the GPU process, never because the loop has gone. Clockless: `now` is the caller's, so
+ * a test drives it with numbers.
+ */
+export class QueueWatch {
+  private ticks = -1;
+  private since = 0;
+
+  /** One poll. True once the count has stood still across polls more than `idleMs` apart (`idleShownMs` with `shown`). */
+  stopped(ticks: number, now: number, shown = false): boolean {
+    if (ticks !== this.ticks) {
+      this.ticks = ticks;
+      this.since = now;
+      return false;
+    }
+    return now - this.since > (shown ? PACE_TUNE.idleShownMs : PACE_TUNE.idleMs);
+  }
 }

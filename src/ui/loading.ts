@@ -4,6 +4,7 @@
 // converter's `loading` command has pulled it (assets-private/loading/<planet>.png); without
 // one, a planet drawn from the planet's own sky colours over stars.
 import type { PlanetDef } from '../data/planets';
+import { opaqueAt } from '../world/loadingTune.ts';
 
 export class LoadingScreen {
   readonly root: HTMLElement;
@@ -21,6 +22,14 @@ export class LoadingScreen {
   private raf = 0;
   private visible = false;
   private planetId = '';
+  /** When the screen was last shown, and whether it has begun going away: what `opaque` reads. */
+  private shownAt = 0;
+  private hiding = false;
+  /**
+   * Told of every change the screen makes, with the page's own time: what the last trip's record is kept
+   * from (`LoadingLog`, `__debug.loading()`). Nothing by default.
+   */
+  onChange: ((kind: 'on' | 'what' | 'off', text: string, now: number) => void) | null = null;
 
   constructor(parent: HTMLElement, private readonly baseUrl: string) {
     this.root = document.createElement('div');
@@ -53,13 +62,27 @@ export class LoadingScreen {
     return this.visible;
   }
 
+  /**
+   * Whether the screen covers the whole picture now: shown, its half-second fade in over, and not yet going
+   * away (`opaqueAt`). Nothing behind it can be seen, so the world need not be drawn every frame
+   * (`LOADING_TUNE.drawEveryMs`).
+   */
+  get opaque(): boolean {
+    return opaqueAt(this.visible, this.hiding, this.shownAt, performance.now());
+  }
+
   /** Show the screen for a planet (or none: a starfield), with a title and what is being waited for. */
   show(planet: PlanetDef | null, title: string, what: string): void {
+    // A screen already up and covering stays covering; one coming up fades in from here.
+    if (!this.visible || this.hiding) this.shownAt = performance.now();
     this.visible = true;
+    this.hiding = false;
     this.target = 0;
     this.shown = 0;
     this.title.textContent = title.toUpperCase();
     this.what.textContent = what;
+    this.onChange?.('on', title, performance.now());
+    this.onChange?.('what', what, performance.now());
     this.blurb.textContent = planet?.description ?? '';
     const id = planet?.id ?? '';
     if (id !== this.planetId) {
@@ -81,6 +104,7 @@ export class LoadingScreen {
   /** What the wait is on now, under the title. */
   setWhat(what: string): void {
     this.what.textContent = what;
+    this.onChange?.('what', what, performance.now());
   }
 
   /** Progress, 0 to 1. A lower value than before is ignored: the reveal never runs backwards. */
@@ -88,15 +112,25 @@ export class LoadingScreen {
     this.target = Math.max(this.target, Math.min(1, Math.max(0, p)));
   }
 
-  /** Fill to the end and fade away. */
-  async hide(): Promise<void> {
+  /**
+   * Fill to the end and fade away. `quick` goes at once, without the reveal's glide to the edge and its 180 ms:
+   * a race start's short course curtain, which is a moment and not a journey.
+   */
+  async hide(opts: { quick?: boolean } = {}): Promise<void> {
     this.target = 1;
-    // Let the reveal reach the edge before the screen goes, so the picture is seen whole for a moment.
-    const t0 = performance.now();
-    while (this.shown < 0.995 && performance.now() - t0 < 900) await new Promise((r) => setTimeout(r, 16));
-    await new Promise((r) => setTimeout(r, 180));
+    this.hiding = true;
+    if (!opts.quick) {
+      // Let the reveal reach the edge before the screen goes, so the picture is seen whole for a moment.
+      const t0 = performance.now();
+      while (this.shown < 0.995 && performance.now() - t0 < 900) await new Promise((r) => setTimeout(r, 16));
+      await new Promise((r) => setTimeout(r, 180));
+    } else {
+      this.shown = 1;
+      this.draw();
+    }
     this.visible = false;
     this.root.classList.remove('on');
+    this.onChange?.('off', '', performance.now());
   }
 
   private tick = (): void => {

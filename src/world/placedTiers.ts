@@ -57,14 +57,16 @@ export interface PlacedTune {
   /** Behind a loading screen, build the programs of every model the old rule would have loaded around the arrival. */
   warm: boolean;
   /**
-   * The most a loading screen waits for those models to load before it compiles, in milliseconds. Ours, and 0:
-   * measured on arrivals 1.5 km from Theed's starport, a 6 s wait held the screen up 5 to 7 s longer and still
-   * had all 318 models in on one run of two, to save the two programs the approach otherwise builds in play.
+   * The most a loading screen waits for those models to load before it compiles, in milliseconds. Ours, and 3000:
+   * it was 0 against a sweep that cost 15 to 28 s whatever it built (a 6 s wait held the screen up 5 to 7 s longer
+   * to save the two programs an approach to Theed's starport built in play), and 191 of 223 models were still
+   * missing at the sweep on a first arrival. With the sweep sliced (the performance pass's first wave) a few
+   * seconds more of loads cost little screen; a technical bound, never a number of feel.
    */
   warmWaitMs: number;
 }
 
-export const PLACED_TUNE: PlacedTune = { tierRule: 'model', warm: true, warmWaitMs: 0 };
+export const PLACED_TUNE: PlacedTune = { tierRule: 'model', warm: true, warmWaitMs: 3000 };
 
 /** A model's box as the manifest carries it: two corners, in either order. */
 export interface PlacedBounds {

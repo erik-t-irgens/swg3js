@@ -15,6 +15,7 @@ import { loadSpacePack, type Destination, type HyperspaceCatalogue } from '../sp
 import { GALAXY_VIEW_TUNE, GalaxyView } from './galaxyView';
 import { mapShareX, mapShareY, type MapFrame } from './spaceMapLayers.ts';
 import { mapMeta } from './mapImages.ts';
+import { poisCentreOf } from '../world/loadingTune.ts';
 
 /**
  * A named place from a converted pack's pois.json, in SWG coordinates. `place` is the client's own
@@ -91,7 +92,8 @@ export class GalaxyMap {
   readonly root: HTMLElement;
   private currentId = '';
   private currentZone: string | undefined;
-  private readonly pois = new Map<string, Promise<Poi[]>>();
+  /** Each pack's `pois.json` as read, its places and its own centre, fetched once a session (a failed read is empty). */
+  private readonly pois = new Map<string, Promise<{ center: { x: number; z: number } | null; pois: Poi[] }>>();
   private readonly view: GalaxyView;
   private readonly viewHolder: HTMLElement;
   private readonly catchLayer: HTMLElement;
@@ -280,15 +282,25 @@ export class GalaxyMap {
   }
 
   loadPois(planetId: string): Promise<Poi[]> {
+    return this.loadPoisFile(planetId).then((f) => f.pois);
+  }
+
+  /**
+   * A pack's `pois.json` whole: its places and the centre they are measured about (null where the file has none,
+   * or could not be read). What a travel to a place on another world reads to work the place out in the game's
+   * frame before that world is loaded (`App.teleport`, `placeFromPois`). Read once a session, shared with
+   * `loadPois`.
+   */
+  loadPoisFile(planetId: string): Promise<{ center: { x: number; z: number } | null; pois: Poi[] }> {
     let p = this.pois.get(planetId);
     if (!p) {
       p = fetch(`${import.meta.env.BASE_URL}assets-private/${planetId}/pois.json`)
         .then(async (res) => {
-          if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return [];
+          if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return { center: null, pois: [] };
           const data = (await res.json()) as { pois?: Poi[] };
-          return data.pois ?? [];
+          return { center: poisCentreOf(data), pois: Array.isArray(data?.pois) ? data.pois : [] };
         })
-        .catch(() => []);
+        .catch(() => ({ center: null, pois: [] }));
       this.pois.set(planetId, p);
     }
     return p;

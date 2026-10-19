@@ -16,6 +16,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 // The value imports carry their extensions so the node tests can drive the cache itself (lookBudget.test.ts).
 import { surfaces } from '../surfaces.ts';
+import { LOOK_LABEL } from '../../core/programQueue.ts';
 import { cloneShared } from './cloneShared.ts';
 import type { AnimPack, MobileEntry, Vec3 } from './types';
 import type { MobileCatalogue } from './catalogue';
@@ -140,7 +141,7 @@ export class MobileAssets {
    * actor before it is shown. This is the hook anything else that must see a new mobile prototype
    * chains onto (the motion blur's own preparation among them), not the fighters' compile hook.
    */
-  prepare: ((root: THREE.Object3D) => Promise<void>) | null = null;
+  prepare: ((root: THREE.Object3D, label?: string) => Promise<void>) | null = null;
   /** Set by the world: take disposed materials out of the portal set and the cascades' map. */
   forget: ((materials: readonly THREE.Material[]) => void) | null = null;
   /** Set by the game once: what else must see a new prototype before it is shown, after `prepare` (the motion blur's shaders for its morph counts). */
@@ -272,7 +273,7 @@ export class MobileAssets {
       throw this.fail(file, err);
     }
     const asset = MobileAssets.measure(file, gltf.scene, bounds);
-    asset.prepared = this.prepareRoot(asset.scene);
+    asset.prepared = this.prepareRoot(asset.scene, `model:${file}`);
     await asset.prepared;
     return asset;
   }
@@ -364,7 +365,8 @@ export class MobileAssets {
     }
     asset.missing = built.missing;
     if (built.missing.length) console.warn(`mobiles: ${spec.entry.id} wears ${built.missing.length} piece${built.missing.length === 1 ? '' : 's'} this pack has not got: ${built.missing.join(', ')}`);
-    asset.prepared = this.prepareRoot(asset.scene);
+    // Labelled a look's (`LOOK_LABEL`), so a program built in play for it is counted as a dressed person's.
+    asset.prepared = this.prepareRoot(asset.scene, key.startsWith(LOOK_LABEL) ? key : `${LOOK_LABEL}${key}`);
     await asset.prepared;
     return asset;
   }
@@ -397,16 +399,19 @@ export class MobileAssets {
       hologram: true,
       base,
     };
-    asset.prepared = this.prepareRoot(scene);
+    asset.prepared = this.prepareRoot(scene, `hologram:${file}`);
     await asset.prepared;
     return asset;
   }
 
-  /** Make an object ready to be drawn without a stall, as every asset is before it is shown (a weapon a mobile will hold). */
-  prepareRoot(root: THREE.Object3D): Promise<void> {
+  /**
+   * Make an object ready to be drawn without a stall, as every asset is before it is shown (a weapon a mobile will
+   * hold). `label` names it on the program queue, so a program built in play says whose it was.
+   */
+  prepareRoot(root: THREE.Object3D, label?: string): Promise<void> {
     const prepare = this.prepare;
     const also = this.alsoPrepare;
-    const first = prepare ? prepare(root).catch((err) => console.warn('mobiles: preparing a model failed', err)) : Promise.resolve();
+    const first = prepare ? prepare(root, label).catch((err) => console.warn('mobiles: preparing a model failed', err)) : Promise.resolve();
     return also ? first.then(() => also(root)).catch((err) => console.warn('mobiles: the effects could not prepare a model', err)) : first;
   }
 

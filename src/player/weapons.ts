@@ -2,7 +2,7 @@
 // kind fights like, so a weapon put in a hand picks the carries, the style and the blade's reach.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { surfaces } from '../world/surfaces';
+import { surfaces } from '../world/surfaces.ts';
 import { OFF_HAND_CLASSES } from '../core/inventory.ts';
 import { fireLookLine, pickFireLook, type FireLook } from './fireLook.ts';
 
@@ -112,8 +112,14 @@ export class WeaponCatalogue {
   private readonly models = new Map<string, Promise<THREE.Group>>();
   /** The fire chosen for a burning body: undefined until it is first asked for, then kept. */
   private fireChosen: FireLook | null | undefined;
+  readonly manifest: WeaponsManifest;
+  private readonly baseUrl: string;
 
-  private constructor(readonly manifest: WeaponsManifest, private readonly baseUrl: string) {
+  // Fields written out rather than as parameter properties, which node's type stripping refuses: a node test
+  // drives the rack's own loader (`wetness.test.ts`).
+  private constructor(manifest: WeaponsManifest, baseUrl: string) {
+    this.manifest = manifest;
+    this.baseUrl = baseUrl;
     this.weapons = manifest.weapons;
     this.skipped = manifest.skipped ?? [];
   }
@@ -188,6 +194,10 @@ export class WeaponCatalogue {
           if (m.isMesh) {
             m.castShadow = true;
             m.frustumCulled = false;
+            // What is held is never wet (CLAUDE.md), whoever prepares it first: a mobile's weapon is prepared
+            // before it is hung on a bone, where the wet wrap's own test (under a bone) could not yet see it,
+            // and its wet programs were a family of their own built in play, about 400 ms apiece.
+            for (const mat of Array.isArray(m.material) ? m.material : [m.material]) if (mat) mat.userData.dry = true;
           }
         });
         return gltf.scene;

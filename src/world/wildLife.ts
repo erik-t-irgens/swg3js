@@ -448,6 +448,7 @@ export class WildLife {
     this.standing.clear();
     this.last.up = 0;
     this.last.bodies = 0;
+    this.last.waiting = 0;
   }
 
   /**
@@ -455,17 +456,25 @@ export class WildLife {
    *
    * `now` is the world's own clock (`World.simTime`), which is what every respawn keys off, and `dt`
    * is how much of it has passed. Both come from `stepLiving`, so `__debug.advance` drives all of it.
+   *
+   * `force` is a loading screen's pass (`World.standWildNow`): it runs whatever the hold says and however
+   * soon after the last, and stands every site in range rather than a few a pass, so the creatures round an
+   * arrival are loaded and compiled behind the screen. A site still waiting for its ground is stepped over
+   * rather than holding the rest back, and the next forced pass inside the same screen's bound tries it again.
    */
-  step(dt: number, now: number, at: THREE.Vector3, deps: WildDeps): void {
+  step(dt: number, now: number, at: THREE.Vector3, deps: WildDeps, force = false): void {
     this.deps = deps;
-    if (!this.ready || deps.held()) return;
+    // A forced pass answers its loading screen in `last.waiting`, so one that cannot run (no pack, no catalogue, no
+    // centre yet) leaves nought there and never a count from some earlier pass for the screen to wait on.
+    if (force) this.last.waiting = 0;
+    if (!this.ready || (deps.held() && !force)) return;
     const cat = deps.catalogue();
     const centre = deps.centre();
     if (!cat || !centre) return;
     // Turned back on by the table rather than the switch: what was cleared meanwhile stands again.
     if (WILD_TUNE.respawns && this.cleared.size) this.forgetCleared();
     this.since += dt;
-    const moved = !Number.isFinite(this.lastAt.x) || this.lastAt.distanceTo(at) > WILD_TUNE.moveMetres;
+    const moved = force || !Number.isFinite(this.lastAt.x) || this.lastAt.distanceTo(at) > WILD_TUNE.moveMetres;
     if (this.since < WILD_TUNE.everySeconds && !moved) {
       // A nest being struck answers on the frame it is struck, not on the next slow pass.
       this.reinforce(now, cat, deps);
@@ -489,18 +498,22 @@ export class WildLife {
     // First the nests and camps still standing whose people are due to stand again, then new sites.
     for (const rec of this.standing.values()) {
       if (!rec.refill) continue;
-      if (stood >= WILD_TUNE.sitesPerPass) break;
+      if (!force && stood >= WILD_TUNE.sitesPerPass) break;
       if (this.standBodies(rec, cat, deps) > 0) {
         rec.refill = false;
         stood++;
       }
     }
     for (const site of add) {
-      if (stood >= WILD_TUNE.sitesPerPass) break;
+      if (!force && stood >= WILD_TUNE.sitesPerPass) break;
       const done = this.stand(site, cat, centre, deps);
       // One waiting for its ground holds back the ones farther off, or they would take the room the
-      // nearest is owed, and it would stand only when something else was put away.
-      if (done === 'wait') break;
+      // nearest is owed, and it would stand only when something else was put away. A forced pass has no
+      // few a pass to give room out of, so it steps over it and the next forced pass tries it again.
+      if (done === 'wait') {
+        if (force) continue;
+        break;
+      }
       if (done) stood++;
     }
     this.reinforce(now, cat, deps);

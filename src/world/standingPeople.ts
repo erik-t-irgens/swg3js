@@ -617,6 +617,13 @@ export class StandingPeople {
     return this.rows.length > 0;
   }
 
+  /** How many of the bodies this pass has standing have their model up: what a loading screen's record counts as up. */
+  readyBodies(): number {
+    let n = 0;
+    for (const s of this.up.values()) if (s.body && s.body.ready && !s.body.removed && !s.body.dead) n++;
+    return n;
+  }
+
   /**
    * Take the rows a pack carries. Only those that reach a body, and only those really placed. Each
    * is copied, since the pass carries its own into the world's frame and the pack's are left as the

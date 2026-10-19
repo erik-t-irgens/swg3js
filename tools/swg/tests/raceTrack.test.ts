@@ -1056,7 +1056,9 @@ function driveRound(r: ReturnType<typeof runOf>, pts: { x: number; z: number }[]
   const words = tuneTrack({ countdown: 99, nope: 1, putBack: 'x' } as never);
   ok(TRACK_TUNE.countdown === 10 && words.length === 3, `the tune holds a number to its range and names what it refused (${words.join('; ')})`);
   tuneTrack({ countdown: 3 });
-  ok(/warm\?: \{ at: readonly \{ x: number; z: number \}\[\]; waitMs: number \}/.test(main) && /await this\.settle\(30000, \{ at: curtain\.warmAt, waitMs: TRACK_TUNE\.warmWaitMs \}\);/.test(main), "a run's curtain warms the models along its gates and compiles them behind the loading screen");
+  // A run's course curtain (the performance pass): the course's models loaded for at most the knob and compiled
+  // behind the screen, never the arrival's whole settle (`loadingWiring.test.ts` reads the rest of it).
+  ok(/await this\.world\.loadCourse\(need\.ids, TRACK_TUNE\.warmWaitMs\)/.test(main) && /await this\.world\.compileCourse\(need\.ids, need\.indoor\)/.test(main), "a run's curtain warms the models along its course and compiles them behind the loading screen");
 }
 
 console.log(`\nraceTrack: ${checks} checks passed`);

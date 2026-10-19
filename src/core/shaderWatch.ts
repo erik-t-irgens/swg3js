@@ -15,11 +15,13 @@
 //     that the forty-odd fields which must be whole numbers are; a key that never passes is
 //     reported unread rather than guessed at. Everything downstream — the console, the debug hook
 //     and the counts grouped by light signature — reads the facts, never the string.
-//  3. `probeCompiler` — how dear a program is on THIS machine, measured once behind the loading
-//     screen. On the machine this work was done for, building one costs a flat third of a second
-//     whatever the shader is, and a world holds a couple of hundred of them; on another machine the
-//     same programs cost a millisecond each. Nothing about how the game looks may depend on the
-//     answer: it decides only how hard the game paces itself and what the loading screen admits to.
+//  3. The machine — how dear a program is on THIS machine, timed on the real programs the loading
+//     screen's sweep builds (`noteProgramTime`, `programMs`): about 400 ms each on Direct3D 11, about
+//     10 on Vulkan. Nothing about how the game looks may depend on the answer: it decides only how
+//     hard the game paces itself and what the loading screen admits to. A trivial link (`checkDriver`,
+//     after the sweep, the game's own queued work drained first) decides only whether the graphics
+//     driver is blamed on the Interface page: timed as it once was, straight after the game's own
+//     work, it timed that work (267 ms for a link that costs half a millisecond).
 //
 // This file has no imports at all, on purpose: a node test drives every rule in it directly, and
 // the one function that needs a GPU takes the context as an argument.
@@ -102,20 +104,64 @@ export const SHADER_TUNE = {
 
 export type CompilerSpeed = 'quick' | 'fair' | 'slow' | 'unknown';
 
+/**
+ * The driver check: a few trivial links on frames of their own after a loading screen's sweep, each after
+ * the game's own queued GPU work has been drained (`gl.getError()`, timed apart as `queueMs`), keeping the
+ * least. It decides one thing, whether the graphics driver is to blame (the Interface page's sentence, only
+ * past `slowMs`), and nothing about pacing: a trivial link timed straight after the game's own work timed
+ * that work (267 ms against 0.2 to 0.6 ms on the owner's machine), and a trivial link says little about a
+ * 400 ms program in any case.
+ */
+export interface DriverCheck {
+  /** The least of the spaced trivial links, in milliseconds; 0 until one has been taken. */
+  leastMs: number;
+  /** The largest drain before them: the game's own queued GPU work, not the driver's. */
+  queueMs: number;
+  /** Every link that linked, in the order taken. */
+  samples: number[];
+  /** How many tries were made (a refused link is a try and no sample). */
+  tries: number;
+  /** Whether every try of the session has been made. */
+  done: boolean;
+}
+
 export interface CompilerVerdict {
-  /** What one new program costs on this machine, in milliseconds; 0 until the probe has run. */
+  /**
+   * What one new program costs on this machine, in milliseconds: the median of what the loading screen's
+   * sweep spent on each program it built (`noteProgramTime`), real programs and their links, the wait for
+   * a frame left out. 0 until a sweep has built one.
+   */
   msPerProgram: number;
   speed: CompilerSpeed;
   /** How many programs a frame may be built in play. */
   budget: number;
-  /** True on a machine where everything that can be deferred should be. */
+  /** True where a program costs `slowMs` or more: everything that can be deferred should be. */
   hard: boolean;
-  /** How many trivial programs the probe built, and what each cost. */
+  /** The sweep's samples, each one batch's milliseconds a program. */
   samples: number[];
-  /** Whether the probe has run at all this session. */
+  /** Whether a sweep has timed a program at all this session. */
   measured: boolean;
-  /** Why the probe did not run, when it did not. */
+  /** Why nothing is measured yet, when it is not. */
   why: string;
+  /** The driver check, which decides only whether the driver is blamed. */
+  driver: DriverCheck;
+}
+
+/** The game's backend, read once at boot off the renderer string (`backendOf`). */
+export type Backend = 'd3d11' | 'vulkan' | 'gl' | 'metal' | 'software' | 'unknown';
+
+/**
+ * Which backend a renderer string names: ANGLE's own words for Direct3D 11, Vulkan, OpenGL and Metal, and
+ * a software rasteriser (SwiftShader, llvmpipe, Microsoft's Basic Render driver). Pure; read once at boot.
+ */
+export function backendOf(renderer: string | null | undefined): Backend {
+  const s = String(renderer ?? '');
+  if (/swiftshader|llvmpipe|softpipe|basic render|software/i.test(s)) return 'software';
+  if (/vulkan/i.test(s)) return 'vulkan';
+  if (/direct3d11|d3d11/i.test(s)) return 'd3d11';
+  if (/metal/i.test(s)) return 'metal';
+  if (/opengl|\bgl\b/i.test(s)) return 'gl';
+  return 'unknown';
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -586,6 +632,14 @@ export class ProgramWatch {
     return out;
   }
 
+  /**
+   * The highest program id at the last sample that walked (-1 before any). Three numbers its programs as it makes them,
+   * so every program made after a sample has an id past this: what the loading record's window reads by.
+   */
+  get highest(): number {
+    return this.highestId;
+  }
+
   /** How many programs have been built since this was last called. */
   takeSince(): number {
     const made = this.madeEver - this.sinceMark;
@@ -821,8 +875,16 @@ export function middleOf(samples: readonly number[]): number {
   return (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-/** The verdict a set of probe samples comes to, or the unmeasured one when there are none. */
-export function verdictFrom(samples: readonly number[], why = ''): CompilerVerdict {
+/** A driver check with nothing taken yet. */
+export function freshDriver(): DriverCheck {
+  return { leastMs: 0, queueMs: 0, samples: [], tries: 0, done: false };
+}
+
+/**
+ * The verdict a set of the sweep's samples comes to (each a batch's milliseconds a program), or the
+ * unmeasured one when there are none. `driver` is the session's driver check, carried beside it.
+ */
+export function verdictFrom(samples: readonly number[], why = '', driver: DriverCheck = freshDriver()): CompilerVerdict {
   const ms = middleOf(samples);
   const speed = classifyCompiler(ms);
   return {
@@ -833,6 +895,7 @@ export function verdictFrom(samples: readonly number[], why = ''): CompilerVerdi
     samples: samples.slice(),
     measured: samples.length > 0,
     why: samples.length ? '' : why || 'not measured yet',
+    driver,
   };
 }
 
@@ -846,23 +909,33 @@ function eachMs(v: CompilerVerdict): string {
   return `${Number(v.msPerProgram.toFixed(1))} ms`;
 }
 
-/** The verdict as one sentence for the console, said once a session. */
+/** Milliseconds in the fewest figures that still say them (`eachMs`'s rule for any number). */
+function msWords(ms: number): string {
+  if (ms >= 10) return `${Math.round(ms)} ms`;
+  return `${Number(ms.toFixed(1))} ms`;
+}
+
+/** The verdict as one sentence for the console, said once a session, once the driver check has finished. */
 export function verdictLine(v: CompilerVerdict): string {
-  if (!v.measured) return `shaders: this machine was not measured (${v.why}); programs are paced to ${v.budget} a frame in play`;
+  const d = v.driver;
+  const driver = d.samples.length ? `; the driver links a trivial one in ${msWords(d.leastMs)} (the least of ${d.samples.length}, after ${msWords(d.queueMs)} of the game's own queued work was drained)` : '';
+  if (!v.measured) return `shaders: the sweep timed no program yet (${v.why}); programs are paced to ${v.budget} a frame in play${driver}`;
   const each = eachMs(v);
-  const counted = `${v.samples.length} probe${v.samples.length === 1 ? '' : 's'}`;
-  if (v.speed === 'quick') return `shaders: this machine builds a new program in about ${each} (${counted}); nothing to work around`;
-  if (v.speed === 'fair') return `shaders: this machine builds a new program in about ${each} (${counted}); programs are paced to ${v.budget} a frame in play`;
-  return `shaders: this machine builds a new program in about ${each} (${counted}), which is slow enough to be seen as a freeze; programs are paced to ${v.budget} a frame in play and everything that can wait for a loading screen does`;
+  const counted = `${v.samples.length} batch${v.samples.length === 1 ? '' : 'es'} timed`;
+  if (v.speed === 'quick') return `shaders: this machine builds a new program in about ${each} (${counted}); nothing to work around${driver}`;
+  if (v.speed === 'fair') return `shaders: this machine builds a new program in about ${each} (${counted}); programs are paced to ${v.budget} a frame in play${driver}`;
+  return `shaders: this machine builds a new program in about ${each} (${counted}), which is slow enough to be seen as a freeze; programs are paced to ${v.budget} a frame in play${driver}`;
 }
 
 /**
- * What the loading screen says while it is building programs. On a quick machine this is the line
- * it always said; on a slow one it says why the wait is long and that it is a first visit's price,
- * because a thirty-second wait with a reason is a different thing from one that looks hung.
+ * What the loading screen says while it is building programs: how many it has made behind this screen so
+ * far, and how dear each one is here only where that is worth saying (past `quickMs`). Never the object
+ * count, which flies past once the sweep is sliced, and which a per-program time beside it invites a
+ * player to multiply into a wait five times too long (`machineAside` says why).
  */
-export function loadingLine(done: number, total: number, v: CompilerVerdict): string {
-  return `compiling shaders, ${done} of ${total} objects${machineAside(v)}`;
+export function loadingLine(made: number, v: CompilerVerdict): string {
+  const aside = v.measured && v.msPerProgram >= SHADER_TUNE.quickMs ? ` · about ${eachMs(v)} each here` : '';
+  return `building shaders, ${made} new${aside}`;
 }
 
 /**
@@ -885,13 +958,23 @@ export function machineAside(v: CompilerVerdict): string {
   return ` · each new shader program takes about ${each} here; most of these objects share one already built, so a first visit is slow and the next is quicker`;
 }
 
-/** The same verdict for a settings page, where there is no console to have said it once. */
+/**
+ * The same verdict for a settings page, where there is no console to have said it once. The driver is
+ * blamed only where the driver check's least trivial link is itself past `slowMs`: the broken-driver case
+ * this sentence was written for, where four lines of GLSL took a third of a second. A real program costing
+ * that much on a healthy driver (Direct3D 11 builds the game's in about 400 ms) is the backend's price,
+ * not a fault, and is said as such.
+ */
 export function verdictNote(v: CompilerVerdict): string {
+  const d = v.driver;
+  if (d.samples.length && d.leastMs >= SHADER_TUNE.slowMs) {
+    return `Your browser takes about ${msWords(d.leastMs)} to build even a trivial shader, which is far longer than it should be and is a fault of the graphics driver rather than of the game. Loading a world for the first time is slow because of it; in play the game builds at most one a frame, so what you feel is a dropped frame rather than a pause. A newer graphics driver usually cures it.`;
+  }
   if (!v.measured) return '';
   const each = eachMs(v);
   if (v.speed === 'quick') return `Your browser builds a new shader in about ${each}, which is as it should be.`;
   if (v.speed === 'fair') return `Your browser builds a new shader in about ${each}. The game builds at most one a frame in play so that it costs a dropped frame rather than a pause.`;
-  return `Your browser takes about ${each} to build a single shader, which is far longer than it should be and is a fault of the graphics driver rather than of the game. Loading a world for the first time is slow because of it; in play the game builds at most one a frame, so what you feel is a dropped frame rather than a pause. A newer graphics driver usually cures it.`;
+  return `Your browser builds a new shader in about ${each}. The game builds them behind its loading screens, and in play at most one a frame, so what you feel is a dropped frame rather than a pause.`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -901,12 +984,32 @@ export function verdictNote(v: CompilerVerdict): string {
 // spawn paths, which have no line back to the game object, and it is one measurement of one
 // machine rather than anything about a world.
 
-let held: CompilerVerdict = verdictFrom([], 'not measured yet');
-let probed = false;
+let driver: DriverCheck = freshDriver();
+/** The sweep's own samples, each a batch's milliseconds a program, the newest `SWEEP_SAMPLES` kept. */
+let sweepSamples: number[] = [];
+const SWEEP_SAMPLES = 64;
+let held: CompilerVerdict = verdictFrom([], 'not measured yet', driver);
 
 /** What was measured, or the unmeasured verdict. Never throws and never measures anything itself. */
 export function compilerVerdict(): CompilerVerdict {
   return held;
+}
+
+/**
+ * One batch of the loading screen's sweep timed: `ms` of wall time (the wait for a frame left out) for the
+ * `programs` it built, links and all. The session's median of these is what a program costs here
+ * (`programMs`), which the words and the pacing's `hard` read. A batch that built nothing is no sample.
+ */
+export function noteProgramTime(ms: number, programs: number): void {
+  if (!(programs > 0) || !Number.isFinite(ms) || ms < 0) return;
+  sweepSamples.push(ms / programs);
+  if (sweepSamples.length > SWEEP_SAMPLES) sweepSamples.splice(0, sweepSamples.length - SWEEP_SAMPLES);
+  held = verdictFrom(sweepSamples, 'not measured yet', driver);
+}
+
+/** The session's median milliseconds a program, as the sweep timed them; 0 until one was timed. */
+export function programMs(): number {
+  return held.msPerProgram;
 }
 
 /**
@@ -928,33 +1031,50 @@ export function pacingHard(): boolean {
 }
 
 /**
- * Measure this machine, once a session, behind a loading screen. Answers the verdict either way,
- * so a caller can say it in one line without asking whether it ran.
+ * One try of the driver check: the game's queued GPU work drained first (`gl.getError()`, which waits for
+ * it, timed apart as `queueMs`), then one trivial link nobody has built before, timed by itself. The
+ * caller makes each try on a frame of its own after the loading screen's sweep, outside any frame's draw
+ * (the effects read their own error flag inside one), and the least link of the `probeMax` tries is
+ * kept: one slow neighbour cannot move a least, and a link timed behind the game's own work is never
+ * least. Never in play, never with no context, and nothing once every try of the session is made.
+ * Answers the check either way.
  */
-export function measureCompiler(gl: WebGLRenderingContext | WebGL2RenderingContext | null, opts: { inPlay?: boolean; seed?: number } = {}): CompilerVerdict {
-  if (probed) return held;
-  if (opts.inPlay) {
-    held = verdictFrom([], 'the probe never runs in play');
-    return held;
-  }
-  probed = true;
-  if (!gl) {
-    held = verdictFrom([], 'no drawing context');
-    return held;
-  }
-  const seed = opts.seed ?? Math.floor(Math.random() * 0x7fffffff);
-  let samples: number[] = [];
+export function checkDriver(gl: WebGLRenderingContext | WebGL2RenderingContext | null, opts: { inPlay?: boolean; seed?: number } = {}): DriverCheck {
+  const d = driver;
+  if (d.done || opts.inPlay || !gl) return d;
+  const t0 = now();
   try {
-    samples = probeCompiler(gl, seed);
+    gl.getError();
   } catch {
-    samples = [];
+    /* a context that will not answer is drained of nothing */
   }
-  held = verdictFrom(samples, 'the probe could not build a program');
-  return held;
+  const queued = now() - t0;
+  if (queued > d.queueMs) d.queueMs = Number(queued.toFixed(2));
+  let ms = -1;
+  try {
+    ms = linkOnce(gl, (opts.seed ?? Math.floor(Math.random() * 0x7fffffff)) + d.tries * 7919);
+  } catch {
+    ms = -1;
+  }
+  d.tries++;
+  if (ms >= 0) {
+    d.samples.push(Number(ms.toFixed(2)));
+    let least = d.samples[0];
+    for (const s of d.samples) if (s < least) least = s;
+    d.leastMs = least;
+  }
+  if (d.tries >= Math.max(1, SHADER_TUNE.probeMax)) d.done = true;
+  return d;
 }
 
-/** For a test, and for the console's `shaders({ probe: 'again' })`: forget the measurement. */
+/** What the driver check found so far. */
+export function driverCheck(): DriverCheck {
+  return driver;
+}
+
+/** For a test, and for the console's `shaders({ probe: 'again' })`: forget the driver check and the sweep's timing, so the next screen measures afresh. */
 export function forgetCompilerMeasurement(): void {
-  probed = false;
-  held = verdictFrom([], 'not measured yet');
+  driver = freshDriver();
+  sweepSamples = [];
+  held = verdictFrom([], 'not measured yet', driver);
 }

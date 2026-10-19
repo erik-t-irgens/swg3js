@@ -210,7 +210,10 @@ const fares: FareTable = {
   const main = readFileSync(join(process.cwd(), 'src', 'main.ts'), 'utf8');
   ok(/if \(isPortKind\(poi\.kind\) && this\.standInPort\(\)\)/.test(main), 'an arrival is stood in its building only when it is at a port');
   ok(/await this\.settle\(\);\s*(?:\/\/[^\n]*\n\s*)*if \(c\.pos && !planet\.space && \(await this\.atPortPlace\(\)\)\) this\.standInPort\(\);/.test(main), "and a character put back where it was saved is too, once its world is in, only at a port's place");
-  ok((main.match(/this\.standInPort\(\)/g) ?? []).length === 2 && (main.match(/this\.world\.roomOverAt\(/g) ?? []).length === 1, 'in those two places and through the one stand-in, which is the only caller of the world\'s');
+  // And the third: a travel to a port on another world in one screen (the performance pass's single pass), whose
+  // `port` is set only from the place's own kind.
+  ok(/if \(opts\.port && this\.standInPort\(\)\) this\.spawn\.copy\(p\.pos\);/.test(main) && /ground: true, port: isPortKind\(poi\.kind\) \}/.test(main), "and a travel to a port's place on another world in one screen, only when the place is a port");
+  ok((main.match(/this\.standInPort\(\)/g) ?? []).length === 3 && (main.match(/this\.world\.roomOverAt\(/g) ?? []).length === 1, 'in those three places and through the one stand-in, which is the only caller of the world\'s');
 }
 
 // ---------------------------------------------------------------- the real worlds

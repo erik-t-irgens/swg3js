@@ -113,6 +113,9 @@ const COUNTER_DEFS = [
   { key: 'farTiles', group: 'streaming', label: 'far tiles rebuilt', kind: 'sum', scale: 1 },
   { key: 'syncBlocks', group: 'streaming', label: 'sync blocks', kind: 'sum', scale: 1 },
   { key: 'programsPlay', group: 'streaming', label: 'programs in play', kind: 'sum', scale: 1 },
+  // Of those, the programs the paced queue built in play for a dressed person (its job's label a look's): what
+  // the performance pass's first wave stands behind the loading screen instead.
+  { key: 'programsPeople', group: 'streaming', label: 'programs (people)', kind: 'sum', scale: 1 },
   { key: 'portalMaterials', group: 'scene', label: 'portal materials', kind: 'last', scale: 1 },
   { key: 'mobiles', group: 'scene', label: 'mobiles', kind: 'last', scale: 1 },
   // The portal renderer's visible set (step 1): the flood's room visits, the room meshes shown in the

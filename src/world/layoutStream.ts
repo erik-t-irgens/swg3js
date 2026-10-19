@@ -1379,6 +1379,42 @@ export class LayoutStreamer {
   }
 
   /**
+   * The models a path will bring in: every region tier within **its own** range (`rangeOf`, the tier's range at the
+   * settings' reach, raised for a building's furniture by its rooms' range) of any of the points, as `update` loads
+   * them and `loadedAround` asks of them, each model's id and whether any of its copies there stands in a building's
+   * rooms. A race course's legs sampled every `LOADING_TUNE.courseStep` (`App`'s course curtain and need test): its
+   * small props from a band 320 m either side and not the 1.7 km disc `modelsWithin` takes about every point, which
+   * asked for 583 models and compiled 414 stand-ins on every start of the Dune Loop. Particles and portal rooms left
+   * out as there. Made on a start, never on a frame.
+   */
+  modelsAlong(points: readonly { x: number; z: number }[]): Map<string, boolean> {
+    const out = new Map<string, boolean>();
+    if (!points.length) return out;
+    const room = this.roomRange();
+    const particles = new Set<string>();
+    for (const region of this.regions.values()) {
+      let near = Number.POSITIVE_INFINITY;
+      for (const p of points) {
+        const d = boxDistance(p.x, p.z, region.cx, region.cz);
+        if (d < near) near = d;
+      }
+      for (let t = 0; t < TIERS.length; t++) {
+        const list = region.objects[t];
+        if (!list.length || near > this.rangeOf(region, t, room)) continue;
+        for (const o of list) {
+          if (particles.has(o.model)) continue;
+          const was = out.get(o.model);
+          if (was === undefined) {
+            if (this.defOf(o.model)?.particle) particles.add(o.model);
+            else out.set(o.model, o.contained);
+          } else if (o.contained && !was) out.set(o.model, true);
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
    * File every object again by another rule (step 6): every tier is dropped -- the buildings with their rooms
    * and their collision, the furniture, the effects, the water -- and the regions rebuilt, so the next update
    * loads what is in range by the new rule. A thing put down in play is filed again with the rest and goes back
@@ -1424,14 +1460,33 @@ export class LayoutStreamer {
     return true;
   }
 
-  /** A placed model, loaded (or the load already under way) through whichever pack carries it. */
+  /**
+   * A placed model, loaded (or the load already under way) through whichever pack carries it. A load that fails is
+   * noted as a tier's is (`hasFailed`), so what asked for it ahead of its tier (the placed warm, a course curtain) does
+   * not ask again for a file nothing in play can mend.
+   */
   loadModel(id: string): Promise<LoadedModel> {
-    return this.modelOf(id);
+    return this.modelOf(id).catch((err: unknown) => {
+      this.noteFailed(id, err);
+      throw err;
+    });
   }
 
   /** A placed model already loaded, or null. */
   loadedModel(id: string): LoadedModel | null {
     return this.loadedOf(id);
+  }
+
+  /** Whether a placed model is known not to load: a missing or broken file, noted once whoever asked for it. */
+  hasFailed(id: string): boolean {
+    return this.failed.has(id);
+  }
+
+  /** A model that would not load, noted once and said once. */
+  private noteFailed(id: string, err: unknown): void {
+    if (this.failed.has(id)) return;
+    this.failed.add(id);
+    console.warn(`snapshot model ${id} failed to load: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   /**
@@ -1622,10 +1677,7 @@ export class LayoutStreamer {
           models.set(id, await this.modelOf(id));
         } catch (err) {
           // Missing or broken model: its instances are skipped, once noted.
-          if (!this.failed.has(id)) {
-            this.failed.add(id);
-            console.warn(`snapshot model ${id} failed to load: ${err instanceof Error ? err.message : String(err)}`);
-          }
+          this.noteFailed(id, err);
         }
         if (this.disposed) return null;
       }
@@ -2036,10 +2088,7 @@ export class LayoutStreamer {
     try {
       model = await this.modelOf(p.model);
     } catch (err) {
-      if (!this.failed.has(p.model)) {
-        this.failed.add(p.model);
-        console.warn(`snapshot model ${p.model} failed to load: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      this.noteFailed(p.model, err);
       return null;
     }
     // Taken away again, or its whole tier unloaded, while the model loaded.

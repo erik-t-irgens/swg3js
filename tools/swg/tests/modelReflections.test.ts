@@ -278,19 +278,20 @@ setEnvironment(sky, 1);
   ok(/if \(m\.userData\.swgCube === true\) joinModelReflections\(m\);/.test(firstSight), "a model joins the first time the world adopts its material, before any of the wraps' compile");
   ok((world.match(/joinModelReflections\(/g) ?? []).length === 1, 'and nowhere else in the world');
   const prepares: [string, string][] = [
-    ['async prepareActor(root: THREE.Object3D): Promise<void> {', 'await this.compileReady('],
+    ['async prepareActor(root: THREE.Object3D, label?: string): Promise<void> {', 'await this.compileReady('],
     ['async prepareVehicle(roots: THREE.Object3D[]): Promise<void> {', 'await this.compileReady('],
     ['async prepareExtras(objects: THREE.Object3D[]): Promise<void> {', 'await this.compileReady('],
-    ['async compileReady(objects: THREE.Object3D[]): Promise<void> {', 'await this.queueOrBuild('],
+    ['async compileReady(objects: THREE.Object3D[], label?: string): Promise<void> {', 'await this.queueOrBuild('],
     ['private async prepareStreamed(objects: THREE.Object3D[]): Promise<void> {', 'await this.queueOrBuild('],
-    ['private async compileEverything(', 'this.compileFor('],
+    ['private async compileEverything(', 'await this.sweepBatches('],
+    ['async compileCourse(', 'await this.sweepBatches('],
   ];
   for (const [sig, compile] of prepares) {
     const body = bodyOf(world, sig);
     ok(before(body, /this\.(adoptMaterials\(|setupShadowMaterials\(\))/, compile), `${sig.replace(/\(.*$/, '').replace(/^(private )?async /, '')} adopts, and so registers, before it compiles`);
   }
   ok(/private setupShadowMaterials\(\): void \{\s*const fresh = this\.adoptMaterials\(this\.scene\);/.test(world), 'the warm-up sweep adopts the whole scene before it compiles it');
-  ok(/mobileAssets\.prepare = \(root\) => this\.prepareActor\(root\);/.test(world), "a creature's and a dressed person's model is prepared as an actor");
+  ok(/mobileAssets\.prepare = \(root, label\) => this\.prepareActor\(root, label\);/.test(world), "a creature's and a dressed person's model is prepared as an actor");
   ok(/vehiclePrepare: \(roots: THREE\.Object3D\[\]\) => Promise<void> = \(roots\) => this\.prepareVehicle\(roots\);/.test(world), 'the preparation every vehicle path is handed prepares it as a vehicle');
   // And every path is handed that one, not a stand-in that prepares nothing.
   const spawnBody = bodyOf(world, 'async spawnVehicle(');

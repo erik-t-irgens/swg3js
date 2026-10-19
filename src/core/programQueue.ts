@@ -99,6 +99,15 @@ function finish(program: LazyProgram | undefined): number {
   return 1;
 }
 
+/**
+ * What a look's own label starts with (`MobileAssets` names a dressed person's prepare `look:<key>`): the
+ * frame report's `programs (people)` counts the programs built in play under it.
+ */
+export const LOOK_LABEL = 'look:';
+
+/** How many labels of programs built in play the queue remembers (`lastBuilt`). */
+const LAST_BUILT = 8;
+
 /** One thing to compile, and what to say about it if the frame it lands on overruns. */
 interface Job {
   object: THREE.Object3D;
@@ -168,6 +177,20 @@ export class ProgramQueue {
   /** When a frame last looked at this queue, and how many times one has. */
   private tickedAt = Number.NEGATIVE_INFINITY;
   private tickCount = 0;
+  /**
+   * Programs the idle rule built in a timer task while the page was on screen with no loading screen up, a waiter's
+   * flush or an outright build at the entry test (`noteIdleBuilt`): the fault the rule judged by frames exists to end
+   * (a long frame, or frames the browser held back while the GPU process caught up, taken for a stopped loop, and
+   * the queue built outside any frame: 37 of 170 programs of a Bestine session). With the rule right a page on screen
+   * has frames ticking the queue and nothing builds there, so it stays at nought; a hidden tab, whose frames stop,
+   * builds as the rule means it to and is not counted.
+   */
+  private flushedPlay = 0;
+  /** The labels of the last `LAST_BUILT` jobs that built a program in play, as a ring: a string put in a slot, nothing made. */
+  private readonly builtLabels = new Array<string>(LAST_BUILT).fill('');
+  private builtAt = 0;
+  /** Programs built in play for a look (`LOOK_LABEL`): what the frame report's `programs (people)` counts. */
+  private peopleEver = 0;
 
   /**
    * Objects something is waiting on. The promise answers once every one of them has been compiled.
@@ -202,7 +225,8 @@ export class ProgramQueue {
   }
 
   /**
-   * Whether no frame has looked at the queue for long enough that none is running at all.
+   * Whether no frame has ever looked at the queue, or none has for `idleBackstopMs`: the one test a
+   * caller can make at a single instant, before it decides whether to queue at all.
    *
    * The queue is emptied by a frame and by nothing else, so a stretch with no frame in it means
    * either that nothing is being drawn yet (a loading screen before the world's first frame, a
@@ -210,9 +234,16 @@ export class ProgramQueue {
    * no drawn frame to protect, and a promise from `push` would otherwise never be answered at all:
    * whoever is waiting builds the work itself instead. A frame notes itself with `tick` whether or
    * not it had anything to do, so this is a fact about frames and never about the work.
+   *
+   * It is not what a waiter asks once it is waiting: that is two of its own polls seeing no new frame
+   * (`QueueWatch`). Judged here by the time since the last tick at `idleMs`, a frame that built one
+   * program for 1.6 s read as a stopped loop to the first timer after it, and its waiter flushed the
+   * rest of the queue in that timer task, outside any frame -- 37 of 170 programs of a Bestine session.
+   * On a page on screen (`shown`) the bound is `idleShownMs`: frames stand still there only while the
+   * browser waits on the GPU process, which is the worst moment to build anything outright.
    */
-  idle(now: number): boolean {
-    return this.since(now) > PACE_TUNE.idleMs;
+  idle(now: number, shown = false): boolean {
+    return this.tickCount === 0 || this.since(now) > (shown ? Math.max(PACE_TUNE.idleBackstopMs, PACE_TUNE.idleShownMs) : PACE_TUNE.idleBackstopMs);
   }
 
   /** How many frames have looked at the queue this session. */
@@ -256,6 +287,42 @@ export class ProgramQueue {
     return this.lastOverrun;
   }
 
+  /** Programs the idle rule built in a timer task on a page on screen with no loading screen up (should stay at nought). */
+  get flushedInPlay(): number {
+    return this.flushedPlay;
+  }
+
+  /** Programs built in play for a look, for the session (`LOOK_LABEL`). */
+  get peopleBuilt(): number {
+    return this.peopleEver;
+  }
+
+  /** The labels of the last eight jobs that built a program in play, newest first. For the console: it makes a list. */
+  get lastBuilt(): string[] {
+    const out: string[] = [];
+    for (let i = 1; i <= LAST_BUILT; i++) {
+      const s = this.builtLabels[(this.builtAt - i + LAST_BUILT * 2) % LAST_BUILT];
+      if (s) out.push(s);
+    }
+    return out;
+  }
+
+  /** A job built `made` programs in play under `label`: its label kept, and a look's counted. Nothing made. */
+  private notePlay(label: string, made: number): void {
+    if (made <= 0) return;
+    this.builtLabels[this.builtAt] = label;
+    this.builtAt = (this.builtAt + 1) % LAST_BUILT;
+    if (label.startsWith(LOOK_LABEL)) this.peopleEver += made;
+  }
+
+  /**
+   * Programs the idle rule built outright on a page on screen with no loading screen up (`World.queueOrBuild`'s entry
+   * test calling the loop stopped): the same fault as a waiter's flush there, and counted with it in `flushedInPlay`.
+   */
+  noteIdleBuilt(made: number): void {
+    if (made > 0) this.flushedPlay += made;
+  }
+
   /** Count a link finished somewhere else (the loading screen's own batches), so the figure is the session's. */
   countLinks(n: number): void {
     if (n > 0) this.linkedEver += n;
@@ -290,6 +357,7 @@ export class ProgramQueue {
       if (made > 0) {
         this.builtEver += made;
         if (!from) from = job.label;
+        if (!loading) this.notePlay(job.label, made);
       }
       b.charge(made, ms);
       // A job that says it has more to do and built nothing is a job that cannot make progress:
@@ -317,20 +385,35 @@ export class ProgramQueue {
    * Everything on the queue, now, with a breath between objects: behind a loading screen or inside
    * a jump's closed tunnel. Work pushed while this runs is taken too, so a caller need only call it
    * once when its own streaming has stopped.
+   *
+   * With `play` it is a waiter's flush in play, made because its own polls saw no frame (`QueueWatch`):
+   * it takes only the jobs present when it began, and stops the moment a frame looks at the queue again,
+   * handing the rest back to the pump. Every program it builds while `play.shown()` says the page is on
+   * screen with no loading screen up is counted as `flushedInPlay`: a timer task building programs where
+   * frames ought to be ticking, which the frame-judged rule exists to keep at nought. A flush that runs
+   * there is the misjudgement itself, however few frames it then catches.
    */
-  async flush(compile: (o: THREE.Object3D, allowance: number) => CompileStep, breath: () => Promise<void>): Promise<void> {
+  async flush(compile: (o: THREE.Object3D, allowance: number) => CompileStep, breath: () => Promise<void>, play?: { shown: () => boolean }): Promise<void> {
+    const startTicks = this.tickCount;
+    let left = play ? this.pending : Number.POSITIVE_INFINITY;
     for (;;) {
+      if (play && (this.tickCount !== startTicks || left <= 0)) break;
       const job = this.peek();
       if (!job) break;
       try {
         // Nothing is being looked at, so there is no allowance to keep to: the whole object at once.
         const step = compile(job.object, Number.POSITIVE_INFINITY);
         this.builtEver += step.made;
+        if (play) {
+          this.notePlay(job.label, step.made);
+          if (step.made > 0 && play.shown()) this.flushedPlay += step.made;
+        }
         if (!step.done && step.made > 0) continue;
       } catch (err) {
         console.warn(`shaders: ${job.label} could not be compiled ahead of its first draw`, err);
       }
       this.drop();
+      left--;
       this.settle();
       await breath();
     }

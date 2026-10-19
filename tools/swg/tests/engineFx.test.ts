@@ -222,7 +222,8 @@ const worldOf = (o: THREE.Object3D) => {
   const ships = main.indexOf('await this.world.ships.prepareEffects(this.renderer);');
   const prep = main.indexOf('await this.engineFx.prepare(this.renderer);');
   const compile = main.indexOf('await this.world.compileAllAsync(', prep);
-  ok(ships > 0 && prep > ships && compile > prep && main.slice(prep, compile).split('\n').length < 30, '(main.ts: made ready behind the loading screen, before its compile)');
+  // The settle's wait for the people it stood (the performance pass) sits between the two now, so the span is wider.
+  ok(ships > 0 && prep > ships && compile > prep && main.slice(prep, compile).split('\n').length < 60, '(main.ts: made ready behind the loading screen, before its compile)');
   ok(/this\.engineFx\.update\(this\.world\.vehicles\);/.test(main), '(main.ts: stepped over every vehicle each frame)');
   const arriveAt = main.indexOf('private arrive(planet: PlanetDef');
   const arrive = main.slice(arriveAt, main.indexOf('\n  }\n', arriveAt));

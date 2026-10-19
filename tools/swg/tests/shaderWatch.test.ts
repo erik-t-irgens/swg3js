@@ -32,18 +32,22 @@ import { dirname, join } from 'node:path';
 const {
   ProgramWatch,
   SHADER_TUNE,
+  backendOf,
+  checkDriver,
   classifyCompiler,
   compilerVerdict,
+  driverCheck,
   forgetCompilerMeasurement,
   groupPrograms,
   lightWords,
   loadingLine,
   machineAside,
-  measureCompiler,
   middleOf,
+  noteProgramTime,
   pacingHard,
   probeCompiler,
   programLabel,
+  programMs,
   readKey,
   shaderBudget,
   verdictFrom,
@@ -438,31 +442,36 @@ const row = (key: string, name = '', type = 'MeshStandardMaterial'): { id: numbe
 }
 
 {
-  ok(loadingLine(40, 1403, verdictFrom([0.4])) === 'compiling shaders, 40 of 1403 objects', 'on a quick machine the loading screen says exactly what it always said');
-  const slow = loadingLine(40, 1403, verdictFrom([305]));
-  ok(slow.startsWith('compiling shaders, 40 of 1403 objects') && slow.includes('305 ms') && slow.includes('quicker'), `and on a slow one it says why the wait is long and that it is a first visit's price ("${slow}")`);
-  // The number a player is given must be a number they cannot multiply into a wrong answer. The
-  // line has just counted OBJECTS, so an aside saying "each one" attaches to the objects: 1403 at
-  // 305 ms reads as seven minutes, against the couple of hundred programs a world really makes and
-  // a wait five times shorter. So the aside names the shader program itself, and says that most of
-  // those objects will share one already built.
+  // The loading screen's line counts the programs made behind it, never the objects the sweep walks (which fly
+  // past once the sweep is sliced), and says what one costs here only past `quickMs`.
+  ok(loadingLine(40, verdictFrom([0.4])) === 'building shaders, 40 new', 'on a quick machine the loading screen says how many programs it has made, and nothing more');
+  ok(loadingLine(3, verdictFrom([])) === 'building shaders, 3 new', 'an unmeasured machine says nothing extra');
+  ok(loadingLine(3, verdictFrom([SHADER_TUNE.quickMs - 0.1])) === 'building shaders, 3 new', 'nor does one just under quickMs');
+  const slow = loadingLine(12, verdictFrom([305]));
+  ok(slow === 'building shaders, 12 new · about 305 ms each here', `past quickMs it says what each costs here ("${slow}")`);
+  ok(loadingLine(12, verdictFrom([SHADER_TUNE.quickMs])).includes(`${SHADER_TUNE.quickMs} ms each`), 'from quickMs itself');
+  ok(!/objects/.test(slow), 'never the object count, which a per-program time beside it invites a player to multiply');
+  // The number a player is given must be a number they cannot multiply into a wrong answer. The Effects
+  // switch's notice still counts OBJECTS just before its aside, so the aside there names the shader program
+  // itself and says that most of those objects share one already built.
   for (const v of [verdictFrom([305]), verdictFrom([25])]) {
     const aside = machineAside(v);
     ok(aside.includes('shader program') && !/each one/.test(aside), `the aside names the shader program rather than borrowing the objects the line counted ("${aside.trim()}")`);
     ok(aside.includes('share one already built'), 'and says that most of the objects counted share a program, so the two numbers are not multiplied together');
   }
-  ok(loadingLine(1, 2, verdictFrom([])) === 'compiling shaders, 1 of 2 objects', 'an unmeasured machine says nothing extra');
-  ok(loadingLine(40, 1403, verdictFrom([20])).includes('20 ms'), 'a fair machine says the number without the apology');
-  // Anything that says it is building shaders ends with the same aside, so the loading screen and
-  // the notice the Effects switch puts up cannot come to say different things about one machine.
   ok(machineAside(verdictFrom([0.4])) === '' && machineAside(verdictFrom([])) === '', 'a machine with nothing wrong with it is told nothing at all, on any screen');
-  ok(loadingLine(1, 2, verdictFrom([305])).endsWith(machineAside(verdictFrom([305]))), 'and the loading screen says exactly what the notice says');
 }
 
 {
   ok(verdictNote(verdictFrom([])) === '', 'the settings page says nothing at all until the machine has been measured');
-  const note = verdictNote(verdictFrom([305]));
-  ok(note.includes('305 ms') && note.includes('driver') && !note.includes('shaders:'), 'and on a slow machine it tells the player the truth in their own words, not the console\'s');
+  // The driver is blamed only where its own least trivial link is past slowMs: a real program costing 305 ms on a
+  // healthy driver (Direct3D 11 builds the game's in about 400) is the backend's price, never the driver's fault.
+  const healthy = verdictNote(verdictFrom([305], '', { leastMs: 0.4, queueMs: 300, samples: [0.4, 0.5, 0.6], tries: 3, done: true }));
+  ok(healthy.includes('305 ms') && !healthy.includes('driver') && !healthy.includes('shaders:'), `a slow program on a healthy driver says its cost and blames nobody ("${healthy}")`);
+  const broken = verdictNote(verdictFrom([305], '', { leastMs: 280, queueMs: 2, samples: [280, 300, 290], tries: 3, done: true }));
+  ok(broken.includes('280 ms') && broken.includes('driver') && !broken.includes('shaders:'), 'a driver whose own trivial link is past slowMs is blamed, in the player\'s own words, not the console\'s');
+  const brokenUnmeasured = verdictNote(verdictFrom([], '', { leastMs: SHADER_TUNE.slowMs, queueMs: 0, samples: [SHADER_TUNE.slowMs], tries: 1, done: false }));
+  ok(brokenUnmeasured.includes('driver'), 'from slowMs itself, and even before the sweep has timed a real program');
   ok(verdictNote(verdictFrom([0.4])).includes('as it should be'), 'a quick machine is told it is fine');
   // The figures a player is shown are the ones the probe can stand behind: whole milliseconds above
   // ten, one decimal below, and never a trailing nought pretending to a fourth figure.
@@ -559,23 +568,106 @@ const nowMs = (): number => Number(process.hrtime.bigint() / 1000n) / 1000;
 }
 
 // ---------------------------------------------------------------------------------------------
-// The one verdict the session keeps.
+// The one verdict the session keeps: the sweep's real programs decide the pacing, the driver check decides
+// only whether the driver is blamed.
 {
   forgetCompilerMeasurement();
   ok(!compilerVerdict().measured && shaderBudget() === SHADER_TUNE.playBudget && !pacingHard(), 'before anything is measured the pacing is already on and nothing is hard');
   ok(shaderBudget(true) === SHADER_TUNE.loadBudget, 'and a loading screen has a budget of its own, since the player is waiting on purpose');
-  const refused = measureCompiler(fakeGl(300) as never, { inPlay: true });
-  ok(!refused.measured && refused.why.includes('in play'), 'the probe refuses to run in play and says so');
-  ok(!compilerVerdict().measured, 'and a refusal does not count as the one measurement of the session');
-  const got = measureCompiler(fakeGl(SHADER_TUNE.slowMs + 40) as never, { seed: 7 });
-  ok(got.measured && got.speed === 'slow' && pacingHard(), 'measured once, the verdict is kept and the pacing goes hard');
+  // `hard` follows the sweep's own milliseconds a program.
+  noteProgramTime(3 * 9, 3);
+  ok(compilerVerdict().measured && programMs() === 9 && !pacingHard(), 'a sweep that built three programs in 27 ms times them at 9 ms each, which is not hard');
+  noteProgramTime(0, 0);
+  ok(compilerVerdict().samples.length === 1, 'a batch that built nothing is no sample');
+  forgetCompilerMeasurement();
+  noteProgramTime(2 * 400, 2);
+  noteProgramTime(410, 1);
+  noteProgramTime(390, 1);
+  ok(programMs() === 400 && pacingHard() && compilerVerdict().speed === 'slow', 'three batches at about 400 ms a program (Direct3D 11) make the pacing hard, by their median');
   ok(shaderBudget() === SHADER_TUNE.playBudget, 'which changes nothing in play: one a frame was already the rule');
   ok(shaderBudget(true) === SHADER_TUNE.hardLoadBudget && SHADER_TUNE.hardLoadBudget < SHADER_TUNE.loadBudget, 'and fewer behind a loading screen, so the line under the title keeps moving instead of standing still for seconds');
-  ok(compilerVerdict() === measureCompiler(fakeGl(0) as never, { seed: 9 }), 'and a second call measures nothing: it is one machine, measured once a session');
-  ok(measureCompiler(null).measured, 'a call with no context after a measurement still answers the measurement');
   forgetCompilerMeasurement();
-  ok(measureCompiler(null).why === 'no drawing context', 'and with no context and nothing measured it says that instead');
+  ok(!compilerVerdict().measured && !pacingHard(), 'and forgetting it (`shaders({ probe: \'again\' })`) leaves the next screen to measure afresh');
+}
+
+// The driver check. A stand-in context whose `getError` waits for the game's own queued work on its first call
+// (300 ms, as the probe once timed straight after the game's draws), and whose links cost what each test says.
+function drainingGl(linkMs: number, drainMs = 300) {
+  const gl = fakeGl(linkMs);
+  let drains = 0;
+  gl.getError = () => {
+    drains++;
+    if (drains === 1) {
+      const until = nowMs() + drainMs;
+      while (nowMs() < until) { /* the game's own work finishing on the GPU */ }
+    }
+    return 0;
+  };
+  return gl;
+}
+
+{
   forgetCompilerMeasurement();
+  const gl = drainingGl(0.3);
+  const refused = checkDriver(gl as never, { inPlay: true });
+  ok(refused.tries === 0 && !refused.done, 'the driver check never runs in play');
+  ok(checkDriver(null).tries === 0, 'nor with no context');
+  for (let i = 0; i < SHADER_TUNE.probeMax; i++) checkDriver(gl as never, { seed: 11 });
+  const d = driverCheck();
+  ok(d.done && d.tries === SHADER_TUNE.probeMax && d.samples.length === SHADER_TUNE.probeMax, `three tries, one a call (a call a frame in the game): ${d.tries}`);
+  ok(d.queueMs >= 250 && d.queueMs < 1000, `the drain before the first link is timed apart as the game's own queued work (${d.queueMs} ms)`);
+  ok(d.leastMs < SHADER_TUNE.quickMs, `and the links themselves are quick (${d.leastMs} ms), so a 300 ms queue is never blamed on the driver`);
+  ok(!verdictNote(compilerVerdict()).includes('driver'), 'and the Interface page blames nobody');
+  ok(checkDriver(gl as never).tries === SHADER_TUNE.probeMax, 'and once its tries are made it makes no more this session');
+  forgetCompilerMeasurement();
+}
+
+{
+  forgetCompilerMeasurement();
+  const gl = drainingGl(SHADER_TUNE.slowMs + 240, 2);
+  for (let i = 0; i < SHADER_TUNE.probeMax; i++) checkDriver(gl as never, { seed: 13 });
+  const d = driverCheck();
+  ok(d.leastMs >= SHADER_TUNE.slowMs, `a driver whose trivial links cost 300 ms is found slow (${d.leastMs} ms)`);
+  ok(verdictNote(compilerVerdict()).includes('driver'), 'and only then does the Interface page blame the driver');
+  ok(!pacingHard(), 'which decides nothing about the pacing: no real program has been timed');
+  forgetCompilerMeasurement();
+}
+
+{
+  // The least of spaced samples is kept: one slow neighbour cannot move a least.
+  forgetCompilerMeasurement();
+  const gl = drainingGl(0, 0);
+  gl.linkProgram = () => {
+    gl.linked++;
+    gl.pending = gl.linked === 1 ? SHADER_TUNE.slowMs + 50 : 2;
+  };
+  for (let i = 0; i < SHADER_TUNE.probeMax; i++) checkDriver(gl as never, { seed: 17 });
+  const d = driverCheck();
+  ok(d.samples.length === 3 && d.leastMs < 10 && Math.max(...d.samples) >= SHADER_TUNE.slowMs, `the least of the spaced links is kept, a slow first one among them (${d.samples.join(', ')})`);
+  ok(!verdictNote(compilerVerdict()).includes('driver'), 'so one slow link is never taken for a broken driver');
+  forgetCompilerMeasurement();
+}
+
+{
+  // A refused link is a try and no sample: a refusal is fast, and taken as a measurement it would call a broken
+  // driver the fastest going.
+  forgetCompilerMeasurement();
+  const gl = fakeGl(0, { failLink: true });
+  gl.getError = () => 0;
+  for (let i = 0; i < SHADER_TUNE.probeMax; i++) checkDriver(gl as never, { seed: 19 });
+  const d = driverCheck();
+  ok(d.done && d.samples.length === 0 && d.leastMs === 0, 'a link the driver refuses is a try and no sample');
+  forgetCompilerMeasurement();
+}
+
+// The backend, read once at boot off the renderer string.
+{
+  ok(backendOf('ANGLE (NVIDIA, NVIDIA GeForce RTX 5080 (0x00002C02) Direct3D11 vs_5_0 ps_5_0, D3D11)') === 'd3d11', 'ANGLE on Direct3D 11 reads d3d11');
+  ok(backendOf('ANGLE (NVIDIA, Vulkan 1.3.0 (NVIDIA GeForce RTX 5080 (0x00002C02)), NVIDIA)') === 'vulkan', 'ANGLE on Vulkan reads vulkan');
+  ok(backendOf('ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)') === 'software', 'SwiftShader reads software, whatever it runs on');
+  ok(backendOf('ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)') === 'metal', 'ANGLE on Metal reads metal');
+  ok(backendOf('ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)') === 'gl', 'ANGLE on OpenGL reads gl');
+  ok(backendOf('') === 'unknown' && backendOf(null) === 'unknown', 'nothing to read is unknown');
 }
 
 console.log(`\n${checks} checks passed`);

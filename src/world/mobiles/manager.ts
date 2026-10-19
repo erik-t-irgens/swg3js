@@ -1004,7 +1004,7 @@ export class MobileManager {
     if (def.file) {
       let ready = this.preparedWeapons.get(def.file);
       if (!ready) {
-        ready = this.deps.assets.prepareRoot(model);
+        ready = this.deps.assets.prepareRoot(model, `weapon:${def.file}`);
         this.preparedWeapons.set(def.file, ready);
       }
       await ready;
