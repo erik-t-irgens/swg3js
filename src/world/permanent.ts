@@ -27,6 +27,7 @@
 // every import with its `.ts` extension, no enum, no namespace, no constructor parameter properties.
 
 import { mergeLayers, placementKey, radiusOfBounds, rowHash, syncPlan, toGame, type GamePlace, type PlacementEntry, type PlacementFrame, type PlacementLayer, type PlacementPack, type PlacementRead, type PlacementRow } from '../story/placements.ts';
+import { standsIn } from './worldState.ts';
 
 /** Every number here is ours. Live through `__debug.placements({ tune })`. */
 export const DRESSING_TUNE = {
@@ -45,8 +46,8 @@ export const DRESSING_TUNE = {
 /** What kind of world the rows are in: decides the frame and what is skipped. */
 export type WorldKind = 'ground' | 'space' | 'copies';
 /** Why a row does not stand; `inHand` is one the dev server's editor has taken up (`lift`), which comes back with `restore` or `land`. */
-export type SkipReason = 'badRow' | 'clash' | 'noPack' | 'noModel' | 'copies' | 'space' | 'inHand';
-const REASONS: readonly SkipReason[] = ['badRow', 'clash', 'noPack', 'noModel', 'copies', 'space', 'inHand'];
+export type SkipReason = 'badRow' | 'clash' | 'noPack' | 'noModel' | 'copies' | 'space' | 'inHand' | 'otherState';
+const REASONS: readonly SkipReason[] = ['badRow', 'clash', 'noPack', 'noModel', 'copies', 'space', 'inHand', 'otherState'];
 
 /** A model's own box, in its own frame. Either corner may come first: spans are taken, never corners (the BOX lesson). */
 export interface PlacementBox {
@@ -394,7 +395,9 @@ export class PermanentLayer {
     const want: PlacementEntry[] = [];
     for (const e of merged.rows) {
       const key = placementKey(e.row.id);
-      const why: SkipReason | null = this.lifted.has(key) ? 'inHand' : this.kind === 'copies' ? 'copies' : this.kind === 'space' && e.row.kind === 'building' ? 'space' : !this.deps.packReady(e.row.pack) ? 'noPack' : null;
+      // A row of a world state this world does not stand in (Restuss's rubble in the living city) is filed nowhere and
+      // never taken out of its file; a state changes only at an arrival, so nothing is filed or unfiled mid-world.
+      const why: SkipReason | null = this.lifted.has(key) ? 'inHand' : this.kind === 'copies' ? 'copies' : this.kind === 'space' && e.row.kind === 'building' ? 'space' : e.row.state && !standsIn(e.row.state) ? 'otherState' : !this.deps.packReady(e.row.pack) ? 'noPack' : null;
       if (why) this.skips.set(key, { id: e.row.id, layer: e.layer, kind: e.row.kind, why });
       else want.push(e);
     }
@@ -514,7 +517,7 @@ export class PermanentLayer {
    * speaks of is still the one up; once it has gone, every question above answers nothing.
    */
   report(): { world: string; current: boolean; frame: PlacementFrame; kind: WorldKind; layers: Record<PlacementLayer, LayerReport>; rows: { id: string; layer: PlacementLayer; key: string; kind: string; label: string; stood: boolean; why: SkipReason | null }[]; refused: { layer: PlacementLayer; id: string; why: string }[] } {
-    const blank = (): Record<SkipReason, number> => ({ badRow: 0, clash: 0, noPack: 0, noModel: 0, copies: 0, space: 0, inHand: 0 });
+    const blank = (): Record<SkipReason, number> => ({ badRow: 0, clash: 0, noPack: 0, noModel: 0, copies: 0, space: 0, inHand: 0, otherState: 0 });
     const layers = {} as Record<PlacementLayer, LayerReport>;
     const refused: { layer: PlacementLayer; id: string; why: string }[] = [];
     for (const layer of ['story', 'world'] as const) {

@@ -194,11 +194,13 @@ export function mergeOverlay(pack: WildPack | null, manifest: WildManifest | nul
 
 /**
  * The list a world's standing people are adopted from, in the order that names them (`stood:<world>:<n>`): the
- * world's own rows, the heralds beside them where it has any, and the local overlay's after both, so an overlay
- * there or not moves no name of anybody else's in any browser.
+ * world's own rows, the heralds beside them where it has any, the people of ours a rule of the game's stands there
+ * (`ours`: the First Brigade in Restuss's ruins, in the list whatever state the world stands in, `restuss.ts`), and
+ * the local overlay's after all of them, so neither an overlay nor a state moves any name of anybody else's in any
+ * browser.
  */
-export function standingList<T>(own: readonly T[], heralds: readonly T[], overlay: readonly T[]): readonly T[] {
-  const first = own.length ? [...own, ...heralds] : own;
+export function standingList<T>(own: readonly T[], heralds: readonly T[], overlay: readonly T[], ours: readonly T[] = []): readonly T[] {
+  const first = own.length ? [...own, ...heralds, ...ours] : own;
   return overlay.length ? [...first, ...overlay] : first;
 }
 

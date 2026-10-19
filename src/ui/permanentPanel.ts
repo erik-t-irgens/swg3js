@@ -97,6 +97,9 @@ export interface PermanentRowView {
   stood: boolean;
   /** Whether it is in the editor's hand now: nothing here changes it until it is put down. */
   held: boolean;
+  /** The world state it stands in (`restuss=ruins`), '' for every state, and that in words. */
+  state: string;
+  stateText: string;
 }
 
 /** What the panel shows. */
@@ -113,6 +116,11 @@ export interface PermanentPanelModel {
   models: { id: string; name: string }[] | null;
   /** What to say when there are no rows. */
   note: string;
+  /**
+   * The world states a row may be kept to on this world (`restuss=living`, `restuss=ruins`), offered as a State
+   * choice on each row; null on a world with none, where there is nothing to choose.
+   */
+  states: string[] | null;
 }
 
 export class PermanentPanel {
@@ -123,6 +131,8 @@ export class PermanentPanel {
   onRename: (id: string, to: string) => void = () => {};
   onWords: (id: string, name: string, note: string) => void = () => {};
   onSolid: (id: string, solid: boolean) => void = () => {};
+  /** The State button pressed: the row's world state moved to the next choice (the game works out which). */
+  onState: (id: string) => void = () => {};
   onCopy: (id: string, what: 'object' | 'area') => void = () => {};
   /** A gallery building, double-clicked: take it in hand by its model. */
   onModel: (model: string) => void = () => {};
@@ -130,7 +140,7 @@ export class PermanentPanel {
   private readonly head: HTMLElement;
   private readonly body: HTMLElement;
   private readonly kind: 'prop' | 'building';
-  private model: PermanentPanelModel = { layer: 'yours', dest: '', layerKey: '', rows: [], more: 0, models: null, note: '' };
+  private model: PermanentPanelModel = { layer: 'yours', dest: '', layerKey: '', rows: [], more: 0, models: null, note: '', states: null };
   /** What the body was last drawn from (the model, the row opened, the question asked), so a refresh that changes none of it draws nothing. */
   private drawn = '';
   /** The row opened for its actions, by id. */
@@ -240,6 +250,8 @@ export class PermanentPanel {
       `<button data-act="take"${r.stood ? '' : ' disabled'}>Pick up</button>` +
       `<button class="danger" data-act="del"${held}>Delete</button>` +
       `<button data-act="solid"${held}>Solid: ${r.solid ? 'yes' : 'no'}</button>` +
+      // On a world with states (Restuss), which one it stands in: every state, or one only.
+      (this.model.states ? `<button data-act="state"${held}>State: ${escapeHtml(r.stateText)}</button>` : '') +
       `<button data-act="object">Copy as story object</button>` +
       `<button data-act="area">Copy as area</button>` +
       `</div>`;
@@ -304,6 +316,9 @@ export class PermanentPanel {
         return;
       case 'solid':
         this.onSolid(id, !r.solid);
+        return;
+      case 'state':
+        this.onState(id);
         return;
       case 'object':
       case 'area':

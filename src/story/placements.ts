@@ -71,6 +71,12 @@ export interface PlacementRow {
    * Says nothing about how it stands.
    */
   ground?: number;
+  /**
+   * The world state it stands in, as `<key>=<value>` (`restuss=ruins`): rubble placed for Restuss's ruins stands in
+   * the ruins only, and in the living city it is filed nowhere (`src/world/worldState.ts`). Absent, every state.
+   * Cleaned only for its shape here, since this folder knows nothing of a world's states.
+   */
+  state?: string;
   name?: string;
   note?: string;
   /** When it was written, milliseconds since the epoch. */
@@ -118,7 +124,9 @@ const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const NAME_ID = /^[A-Za-z0-9_.-]{1,96}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 /** The fields a row may carry; the reserved ones are read and set aside. */
-const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'name', 'note', 'at']);
+const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'name', 'note', 'at']);
+/** A world state's tag: its key and its value, each lower-case words. */
+const STATE = /^[a-z0-9_]+=[a-z0-9_]+$/;
 const RESERVED = new Set(['fill', 'locked', 'effectsOf']);
 
 /** The streamer's key for a row's id. */
@@ -199,6 +207,12 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
     const g = num(o.ground);
     if (g === undefined || Math.abs(g) > L.height) return `its ground is a height of ${L.height} m at most either way`;
     row.ground = g;
+  }
+  // A state of the wrong shape is kept out of the row as a field this build does not read is, with its note: the row
+  // then stands in every state, which is what it did before anybody wrote one.
+  if (o.state !== undefined) {
+    if (typeof o.state === 'string' && STATE.test(o.state)) row.state = o.state;
+    else unknown.push(`${id}.state`);
   }
   if (o.name !== undefined) {
     if (typeof o.name !== 'string' || o.name.length > L.name || CONTROL.test(o.name)) return `its name is words of ${L.name} characters at most`;
@@ -335,7 +349,8 @@ export function radiusOfBounds(b: { min: readonly number[]; max: readonly number
  * row's words re-stands nothing. Exact rather than a digest, since a sync compares at most a few thousand.
  */
 export function rowHash(row: PlacementRow): string {
-  return JSON.stringify([row.kind, row.pack, row.thing ?? null, row.model ?? null, row.deed ?? null, row.x, row.y, row.z, row.q, row.solid ?? null, row.inside ?? null, row.clear ?? null, row.guard ?? null]);
+  // The state only where a row has one, so a row with none answers exactly what it did before rows could carry one.
+  return JSON.stringify([row.kind, row.pack, row.thing ?? null, row.model ?? null, row.deed ?? null, row.x, row.y, row.z, row.q, row.solid ?? null, row.inside ?? null, row.clear ?? null, row.guard ?? null, ...(row.state ? [row.state] : [])]);
 }
 
 /**
@@ -397,7 +412,7 @@ export function mintPlacementId(base: string, taken: ReadonlySet<string>): strin
 }
 
 /** The field order a row is written in, so one row is always one line spelled the same way. */
-const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'name', 'note', 'at'];
+const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'name', 'note', 'at'];
 /** Every field a row of this build reads, in the order it is written. */
 export const PLACEMENT_FIELDS: readonly string[] = ORDER;
 const ORDERED = new Set<string>(ORDER);

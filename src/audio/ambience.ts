@@ -19,6 +19,7 @@
  */
 import { OUTSIDE, type SoundSpace } from './distance.ts';
 import { WORLD_SOURCE_TUNE, WorldEmitters, type LoopHost, type WorldSourceTune } from './emitters.ts';
+import { standsIn } from '../world/worldState.ts';
 
 /** One row of the game's interior table, as the converter writes it into `sounds/sources.json`. */
 export interface RoomRow {
@@ -48,6 +49,11 @@ export interface PlacedEmitterDef {
   cell?: number;
   /** That building's own place, in the snapshot's frame. */
   bp?: number[];
+  /**
+   * The world state it sounds in (`restuss=living`: Restuss's launch city), where only one; absent, every state.
+   * Put down only while the world stands it (`standsIn`, `src/world/worldState.ts`).
+   */
+  state?: string;
 }
 
 /**
@@ -60,6 +66,8 @@ export interface PlanetSounds {
   planet?: string;
   /** Which frame the places are in. Only the snapshot's is understood; anything else is left alone. */
   frame?: string;
+  /** Rori's: Restuss's launch city was read in, its emitters tagged with the state they sound in (`tools/swg/soundplaces.mjs`). */
+  states?: Record<string, number>;
   emitters?: PlacedEmitterDef[];
   /** Each placed template's portal layout, for the rooms below. */
   pobs?: Record<string, string>;
@@ -385,6 +393,9 @@ export class Ambience {
     if ((pack.format ?? 0) > PLANET_SOUNDS_READ) console.info(`sound: ${this.packId}'s places are from a newer converter (format ${pack.format}); read as far as this game understands them`);
     for (const e of pack.emitters ?? []) {
       if (!e?.sound) continue;
+      // One of a world state this world does not stand in (Restuss's launch city in its ruins) sounds nowhere: the
+      // states were taken before the world's pack, and so this frame, was handed over (`World.loadPack`).
+      if (e.state && !standsIn(e.state)) continue;
       const x = -((e.p?.[0] ?? 0) - this.centerX);
       const y = e.p?.[1] ?? 0;
       const z = (e.p?.[2] ?? 0) - this.centerZ;

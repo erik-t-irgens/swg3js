@@ -176,6 +176,12 @@ export interface Settings extends FxSettings {
    * 1 their own numbers (`src/world/difficulty.ts`). Never the player's or another player's.
    */
   difficulty: number;
+  /**
+   * How Restuss stands when you next arrive on Rori with no server's word on it: the living launch city or its ruins
+   * (`src/world/worldState.ts`). Kept as the world state's own setting (`swg.world.restuss`), which this mirrors;
+   * a server that keeps one stands it for everybody.
+   */
+  restuss: 'living' | 'ruins';
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -279,6 +285,8 @@ export const DEFAULT_SETTINGS: Settings = {
   hudTrackerInFlight: false,
   // Ours, and one: every body stands at its own numbers until the player says otherwise.
   difficulty: 1,
+  // The owner's (2026-10-19, the pass's design §10 Q1): Restuss stands as its ruins, how SOE's live game ended.
+  restuss: 'ruins',
   ...FX_DEFAULTS,
 };
 

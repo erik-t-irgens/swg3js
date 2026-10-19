@@ -49,7 +49,9 @@ export const DEBUG_MENU_TUNE = {
  * `src/race/trackDials.ts`; the track's list of gates is the menu's too, on the dev server), and the NPC
  * ships, whose ladder above tier 5 is sliders too (`src/space/tierDials.ts`). Listed first, in a group of
  * their own, so every one is in one place and a new one is a line here; the pins of these are the ones a tick
- * runs again at start (`startCalls`).
+ * runs again at start (`startCalls`). A helper of another group may have sliders too (`restuss`, under "Where and
+ * when" as the pass's design files it, whose First Brigade is sliders: `src/world/restussDials.ts`), since the menu
+ * asks every helper picked for its dials.
  */
 export const TUNING_HELPERS: readonly string[] = ['race', 'engines', 'track', 'npcShips', 'reach', 'lod', 'flora', 'grass', 'farCards', 'floraShadows', 'god', 'difficulty', 'time', 'day', 'fog', 'bladeGlow', 'torch', 'hover', 'nebulae', 'arm', 'seats', 'placeHold'];
 
@@ -60,7 +62,7 @@ export const TUNING_HELPERS: readonly string[] = ['race', 'engines', 'track', 'n
  */
 export const DEBUG_GROUPS: readonly { title: string; helpers: readonly string[] }[] = [
   { title: 'Tuning', helpers: TUNING_HELPERS },
-  { title: 'Where and when', helpers: ['teleport', 'teleportSwg', 'swg', 'look', 'zoom', 'mouse', 'cell', 'near', 'find', 'player', 'scene', 'advance', 'advanceCost', 'breakFrames', 'map', 'mapGroup', 'galaxy', 'spaceMap', 'travel', 'gates', 'doorless', 'buildings', 'enter', 'interiors', 'doors', 'instances', 'corvette', 'gallery', 'late', 'show', 'character', 'capture', 'captureShip', 'goToShot', 'place', 'placeView', 'placeClock', 'cloning'] },
+  { title: 'Where and when', helpers: ['teleport', 'teleportSwg', 'swg', 'look', 'zoom', 'mouse', 'cell', 'near', 'find', 'player', 'scene', 'advance', 'advanceCost', 'breakFrames', 'map', 'mapGroup', 'galaxy', 'spaceMap', 'travel', 'gates', 'doorless', 'buildings', 'enter', 'interiors', 'doors', 'instances', 'corvette', 'restuss', 'gallery', 'late', 'show', 'character', 'capture', 'captureShip', 'goToShot', 'place', 'placeView', 'placeClock', 'cloning'] },
   { title: 'Travel, homes and trade', helpers: ['shuttle', 'terminal', 'ride', 'rigHull', 'fittings', 'house', 'homes', 'deed', 'prop', 'placements', 'purse', 'trade'] },
   { title: 'Story', helpers: ['story', 'quests', 'signal', 'storyHere', 'waypoints', 'minimap', 'talkTree', 'gestures', 'shots', 'reactions', 'docs', 'journal', 'file', 'standing', 'companion'] },
   { title: 'Progress', helpers: ['progress', 'stat', 'encounter'] },

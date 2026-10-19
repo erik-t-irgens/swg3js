@@ -106,8 +106,13 @@ export interface StandingRow {
   ours?: boolean;
   /** Which script or table stood it (`herald` for the heralds `conversationPack.ts` stands). */
   from?: string;
-  /** Out of the owner's local overlay of SOE's own placements (`ngeOverlay.ts`), stood after everybody else. */
-  src?: 'nge';
+  /**
+   * Out of the owner's local overlay of SOE's own placements (`ngeOverlay.ts`), stood after everybody else; or one of
+   * ours stood by a rule of the game's (`'ours'`: the First Brigade in Restuss's ruins, `restuss.ts`).
+   */
+  src?: 'nge' | 'ours';
+  /** The world state it stands in (`restuss=ruins`), where it stands in one only; absent, every state (`worldState.ts`). */
+  state?: string;
   /**
    * How far it steps about its spot, metres, where its spawner let it loiter or wander (the overlay's rows): its
    * post's radius in place of `PEOPLE_TUNE.postRadius` (`postFor`).
@@ -152,6 +157,13 @@ export interface PeopleExtras {
   pools?: Readonly<Record<string, readonly string[]>> | null;
   /** The fleet's weapon groups: a group's name to its weapon templates. */
   weaponGroups?: Readonly<Record<string, readonly string[]>> | null;
+  /**
+   * Which rows lie dormant for this world, asked once of each as it is adopted (in the snapshot's frame, before the
+   * rows are carried): a row of a world state the world does not stand in, and in Restuss's ruins Core3's own town
+   * inside its circle (`personDormant` in `restuss.ts`). A dormant row is never stood and never taken off the list, so
+   * every row's place in it, and so its `stood:` name, is the same in every state.
+   */
+  dormant?: ((row: StandingRow) => boolean) | null;
 }
 
 const TEMPERS: readonly Aggression[] = ['passive', 'skittish', 'defensive', 'aggressive'];
@@ -605,6 +617,8 @@ export class StandingPeople {
    * person and body again (`personFor`). Walking away and back is not a life; the same body stands.
    */
   private lives = new Uint16Array(0);
+  /** Which rows lie dormant for this world (`PeopleExtras.dormant`): 1 never stood, decided once at `adopt`. */
+  private dormant = new Uint8Array(0);
   /** The fleet's creatures and the rest of the pack a person is drawn from (`adopt`). */
   private creatures: Readonly<Record<string, PeopleCreature>> | null = null;
   private extras: PeopleExtras = {};
@@ -686,6 +700,10 @@ export class StandingPeople {
       if (r.route) row.route = r.route.map((p) => ({ ...p }));
       this.rows.push(row);
     }
+    // Asked of each row in the snapshot's frame, as the pack wrote it, before any pass carries it.
+    this.dormant = new Uint8Array(this.rows.length);
+    const dormant = this.extras.dormant;
+    if (dormant) for (let i = 0; i < this.rows.length; i++) if (dormant(this.rows[i])) this.dormant[i] = 1;
     this.lives = new Uint16Array(this.rows.length);
     this.away = new Float64Array(this.rows.length);
     this.near.length = 0;
@@ -714,6 +732,7 @@ export class StandingPeople {
     this.creatures = null;
     this.extras = {};
     this.lives = new Uint16Array(0);
+    this.dormant = new Uint8Array(0);
     this.away = new Float64Array(0);
     this.near.length = 0;
     this.last.rows = 0;
@@ -806,6 +825,8 @@ export class StandingPeople {
     const near = this.near;
     near.length = 0;
     for (let i = 0; i < this.rows.length; i++) {
+      // A row of the world's other state, or of Core3's town in Restuss's ruins, is never stood here.
+      if (this.dormant[i]) continue;
       // Measured from where the body stands, which for a patroller is the first point of its walk.
       const st = this.stands[i];
       const away = Math.hypot(st.x - at.x, st.z - at.z);
@@ -1169,7 +1190,9 @@ export class StandingPeople {
    */
   anyStanding(x: number, z: number, reach: number, inside: (st: StandPlace) => boolean): boolean {
     if (!this.framed) return false;
-    for (const st of this.stands) {
+    for (let i = 0; i < this.stands.length; i++) {
+      if (this.dormant[i]) continue;
+      const st = this.stands[i];
       if (Math.abs(st.x - x) > reach || Math.abs(st.z - z) > reach) continue;
       if (inside(st)) return true;
     }
@@ -1192,7 +1215,7 @@ export class StandingPeople {
     let best: { x: number; y: number; z: number; key: string; who: string; inside: boolean; metres: number } | null = null;
     for (let i = 0; i < this.rows.length; i++) {
       const r = this.rows[i];
-      if (!test(r.who)) continue;
+      if (this.dormant[i] || !test(r.who)) continue;
       const st = this.stands[i];
       const d = Math.hypot(st.x - x, st.z - z);
       if (best && d >= best.metres) continue;
@@ -1262,7 +1285,7 @@ export class StandingPeople {
     const out: SeatedRow[] = [];
     for (let i = 0; i < this.rows.length; i++) {
       const r = this.rows[i];
-      if (r.gcw?.length) continue;
+      if (this.dormant[i] || r.gcw?.length) continue;
       const sits = seatOfMood(moodOfRow(r));
       if (!sits) continue;
       const st = this.stands[i];
@@ -1328,6 +1351,24 @@ export class StandingPeople {
     for (const r of this.rows) rows[sourceOfRow(r)]++;
     for (const s of this.up.values()) if (s.body) up[sourceOfRow(s.row)]++;
     return { rows, up };
+  }
+
+  /**
+   * For the console: how many rows lie dormant for this world, and of those how many are Core3's own (the rest of
+   * another state, ours among them); and how many rows of a state this world stands in are ours (`src: 'ours'`).
+   */
+  dormantReport(): { dormant: number; core3: number; stated: number; oursHere: number } {
+    let dormant = 0;
+    let core3 = 0;
+    let oursHere = 0;
+    for (let i = 0; i < this.rows.length; i++) {
+      const r = this.rows[i];
+      if (this.dormant[i]) {
+        dormant++;
+        if (sourceOfRow(r) === 'core3') core3++;
+      } else if (r.state && r.src === 'ours') oursHere++;
+    }
+    return { dormant, core3, stated: dormant - core3, oursHere };
   }
 
   /** A creature of the fleet's half by its name, or null. */

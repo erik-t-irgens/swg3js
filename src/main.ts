@@ -188,6 +188,10 @@ import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { destinationFor, loadGalaxyFile, planetOfRouteId, routeFactsOf, systemOf, systemOfPack, systemsOfWorlds } from './data/galaxy';
 import { HOMES_MOVE_VERSION, homeKey, homes, routeHomeWord } from './net/homes.ts';
 import { NGE_OVERLAY_TUNE, ngeOverlay, serverHoldsFor, whereOf } from './world/ngeOverlay.ts';
+// A world's states (Restuss as the living launch city or its ruins), and Restuss's own rules and dials.
+import { WORLD_STATES, WORLD_STATE_TUNE, WORLD_STATE_WORDS, arrivalWait, cleanStates, fileInState, inState, localWorldState, serverWorldStates, setLocalWorldState, setServerStates, stateNews, standsIn, statesInForce, tuneWorldStateWait, waitForHail, worldStateOf, worldStateSource, worldStateStamp } from './world/worldState.ts';
+import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, fittingDormant, tuneRestuss, tuneRestussRoster } from './world/restuss.ts';
+import { worldDialsFor } from './world/restussDials.ts';
 import { PROPS_KEEPER_TUNE, SERVER_NOT_ANSWERING, arrivalCircles, arrivalHolds, arrivalKeeper, keeperNews, keeperOf, keeperState, keeperStateOf, keptDepsOf, keptKey, keptProps, keptRefusal, routePropWord, switchSets, type Keeper, type KeeperState, type KeptRow, type KeptSets } from './net/propsKept.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
@@ -246,7 +250,7 @@ import { letGoOf, placedProps, propsKey, type LetGo, type PlacedDeps, type Place
 import { HOUSING_TUNE, LocalHomes, MOVE_SAYS, atDoorDoes, atDoorOf, awayText, backHouseText, houseName, inHandHouseText, isLocalHome, localMoveOf, moveDropped, movedHouseText, myBuildings, pickedHouseText, placeLocalHome, type HomeStore, type HouseMove, type LocalHome, type LocalHomeDeps, type LocalHomeLanding, type MyBuilding } from './world/myBuildings.ts';
 import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, standsSolid, type StandAnswer, type StoodRow, type WorldKind } from './world/permanent.ts';
 import { PLACEMENT_LAYERS, fromGame, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
-import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, driftText, forceText, groundMoved, homeStaysText, inHandText, keptText, nextDestination, notYoursText, pickedUpText, removedText, rowFromHouse, rowFromProp, savedText, takeOutText, yawOfTurn, type BuildingSource, type Destination as KeptIn, type HandSource, type HomeSource } from './world/permanentEdit.ts';
+import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, driftText, forceText, groundMoved, homeStaysText, inHandText, keptText, nextDestination, nextStateChoice, notYoursText, pickedUpText, removedText, rowFromHouse, rowFromProp, savedText, stateChoiceText, takeOutText, yawOfTurn, type BuildingSource, type Destination as KeptIn, type HandSource, type HomeSource } from './world/permanentEdit.ts';
 import { EDITOR_HEADER, EDITOR_HEADER_VALUE, PLACEMENTS_ENDPOINT_TUNE, type PlacementReply, type PlacementReplyOk } from './world/placementEdits.ts';
 import { EditChip } from './ui/editChip.ts';
 import { PermanentPanel, editSlots, type PermanentPanelModel, type PermanentRowView } from './ui/permanentPanel.ts';
@@ -309,7 +313,7 @@ import { stopLabel, type LiftStop } from './world/lifts';
 import { draggable, windowsDebug } from './ui/drag.ts';
 import { LoadingScreen } from './ui/loading';
 import { EmoteWheel } from './ui/emoteWheel';
-import { Net, type Hello, type PeerVehicle } from './net/net';
+import { Net, peekHail, type Hello, type PeerVehicle } from './net/net';
 import { SESSION, Session, tuneSession } from './net/session.ts';
 import { clockKnob } from './world/sharedClock.ts';
 import { hourOfDay } from './world/dayPhase.ts';
@@ -1524,11 +1528,25 @@ class App {
    * that the death card can call a facility by the town it stands in. Empty until it lands, and
    * empty for a world whose pack has no list, which costs the rows their names and nothing else.
    */
-  private placeNames: Poi[] = [];
+  private get placeNames(): Poi[] {
+    // Only the rows of the state this world stands in (Restuss's two sets of ports, each named alike: `worldState.ts`),
+    // kept until the list or a state changes: asked for eight times a second by the prompt's gather.
+    const stamp = worldStateStamp();
+    if (this.placeRowsIn.rows !== this.placeRows || this.placeRowsIn.stamp !== stamp) this.placeRowsIn = { rows: this.placeRows, stamp, list: inState(this.placeRows) };
+    return this.placeRowsIn.list;
+  }
+  private set placeNames(rows: Poi[]) {
+    this.placeRows = rows;
+  }
+  /** The places as the pack's file holds them, every state's rows, and the filtered list kept beside them. */
+  private placeRows: Poi[] = [];
+  private placeRowsIn: { rows: Poi[]; stamp: number; list: Poi[] } = { rows: [], stamp: -1, list: [] };
   /** Which pack `placeNames` was read for: a travel's own read is the one that counts. */
   private placeNamesFor = '';
   /** The map's own place loader, captured from the galaxy tab so nothing here has to open the map. */
   private poisOf: (packId: string) => Promise<Poi[]> = async () => [];
+  /** The same loader's rows as the file holds them, every state's: what `placeNames` is read from. */
+  private poisRawOf: (packId: string) => Promise<Poi[]> = async () => [];
   /** The same loader's file whole, its centre beside its places (null where a pack's file has none or will not read). */
   private poisFileOf: (packId: string) => Promise<{ center: { x: number; z: number } | null; pois: Poi[] }> = async () => ({ center: null, pois: [] });
   /** The facilities the death card is offering just now, in the order its rows stand. */
@@ -1675,6 +1693,9 @@ class App {
     this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
     // How hard the world's own bodies are, before any of them is stood: each reads it as it stands.
     setDifficulty(S.difficulty);
+    // How Restuss stands with no server's word on it: the world state's own setting is the one kept, and the page's
+    // row shows it (`worldState.ts`).
+    S.restuss = (localWorldState(RESTUSS_KEY) ?? WORLD_STATES[RESTUSS_KEY].default) as Settings['restuss'];
     // The weather's settings (the world made it; the HUD, made below, shows its note from the loop).
     this.world.weather.configure(S);
     // A hand torch: a spot light carried at the head (at the eye in first person), pointing at the
@@ -2610,6 +2631,7 @@ class App {
     // The galaxy tab keeps a world's named places once it has read them; the death card reads the
     // same list through this rather than reaching into the map.
     this.poisOf = (id) => galaxy.loadPois(id);
+    this.poisRawOf = (id) => galaxy.loadPoisRaw(id).then((f) => f.pois);
     // And the same file whole, its centre with it: what a travel to a place on another world reads to stand the
     // place in the game's frame before that world loads (`teleport`, `placeFromPois`), one screen and not two.
     this.poisFileOf = (id) => galaxy.loadPoisFile(id);
@@ -2990,6 +3012,59 @@ class App {
           .slice(0, 3)
           .map(({ t, d }) => ({ who: t.label, away: Math.round(d), hp: Math.round((t as { hp?: number }).hp ?? 0), of: Math.round((t as { maxHp?: number }).maxHp ?? 0) }));
         return { scale: DIFFICULTY.scale, range: { ...DIFFICULTY_RANGE }, kept: this.settings.difficulty, nearest: near };
+      },
+      /**
+       * Restuss in both of its states (`src/world/worldState.ts`, `src/world/restuss.ts`). With nothing it says how
+       * the city stands here (`here`, taken at this arrival), how an arrival would stand it now (`next`) and where
+       * that comes from (the server's word, this browser's setting, the default), what waited for a server's hail
+       * at the last arrival, how many of the layout's objects stand in one state only and how many lie dormant,
+       * how many of Core3's people and fittings the ruins' circle skips, how many of the First Brigade of ours are in
+       * Rori's list and how many may stand now, and Restuss's ports offered here. `restuss('ruins')` or
+       * `restuss('living')` sets this browser's own (kept, the owner's), or with a server that keeps it is the
+       * admin's word to it; it is taken at the next arrival on Rori, and `{ go: true }` is one where you stand.
+       * `{ tune: { circle } }` and `{ roster: { on, share, group, ring, spacing, temper, respawn } }` move the
+       * circle and the brigade in memory, from the next arrival; `{ wait }` how long an arrival waits for a hail.
+       */
+      restuss: (arg?: string | { go?: boolean; tune?: Record<string, unknown>; roster?: Record<string, unknown>; wait?: number }) => {
+        const said: string[] = [];
+        if (typeof arg === 'string') said.push(this.chooseWorldState(RESTUSS_KEY, arg));
+        else if (arg && typeof arg === 'object') {
+          const moved = [...tuneRestuss(arg.tune), ...tuneRestussRoster(arg.roster)];
+          if (moved.length) said.push(`moved ${moved.join(', ')}: read at the next arrival on Rori`);
+          if (arg.wait !== undefined) said.push(`an arrival waits up to ${tuneWorldStateWait(arg.wait)} ms for a server's hail`);
+          if (arg.go) {
+            const p = this.player;
+            if (p.mounted || p.piloting || p.aboard || p.eva || this.traveling) said.push('an arrival where you stand wants you on foot and in no travel');
+            else {
+              void this.travel(this.world.planet, this.zone, undefined, { at: p.worldPos.clone(), heading: p.heading, label: this.world.planet.name });
+              said.push(`arriving again on ${this.world.planet.name} where you stand`);
+            }
+          }
+        }
+        const report = this.world.statesReport();
+        const block = this.world.restussRuinsHere();
+        const c = this.world.layoutCenter;
+        const centre = this.world.restussFile?.centre ?? null;
+        const mid = centre && c ? { x: -(centre.x - c.x), z: centre.z - c.z } : null;
+        const ports = mid ? this.portsHere().filter((q) => Math.hypot(q.x - mid.x, q.z - mid.z) <= RESTUSS_TUNE.circle).map((q) => `${q.name} (${q.kind})`) : [];
+        const fittings = this.fittingRowsFor === packIdOf(this.world.planet, this.zone) && c ? fittingsOf(this.fittingRows, c).filter((f) => fittingDormant(f, standsIn, block)).length : 0;
+        return {
+          here: statesInForce()[RESTUSS_KEY] ?? null,
+          next: worldStateOf(RESTUSS_KEY),
+          from: worldStateSource(RESTUSS_KEY),
+          server: serverWorldStates()?.[RESTUSS_KEY] ?? null,
+          setting: localWorldState(RESTUSS_KEY),
+          waited: this.worldStatesWaited,
+          objects: report ? { standing: report.standing, dormant: report.dormant } : null,
+          skipped: report ? { people: report.people.core3, otherState: report.people.stated, fittings } : null,
+          roster: report ? { rows: report.roster, mayStand: report.people.oursHere } : null,
+          ports,
+          tune: { ...RESTUSS_TUNE },
+          rosterTune: { ...RESTUSS_ROSTER_TUNE, group: [...RESTUSS_ROSTER_TUNE.group] },
+          wait: WORLD_STATE_TUNE.waitMs,
+          ...(said.length ? { said } : {}),
+          note: report ? '' : 'this world has no states: Restuss is on Rori, from a Rori snapshot converted with it',
+        };
       },
       /**
        * Put a building on the ground in front of you, and walk into it.
@@ -9694,6 +9769,10 @@ class App {
     // opened in another browser, a refusal -- goes to the message line, which holds it long enough to be
     // read. Nothing of this goes to the prompt, which is rewritten every frame.
     this.net.onNotice = (text) => this.messages.system(text);
+    // The world states a server keeps (Restuss living or in ruins: `worldState.ts`): its hail's, its admin's word, or
+    // none once the line is put down. Taken at the next arrival on that world, never in the middle of one, which the
+    // message line says once when the word moves a world's state away from the one in force.
+    this.net.onStates = (states, why) => this.heardWorldStates(states, why);
     // What the server made of this character. Nothing applies it yet: the server holds a character's
     // name, where it is and its change counter, and what it owns comes with the ledger later.
     this.net.session.onSettled = (what, record) => {
@@ -10575,7 +10654,7 @@ class App {
       holdKeys: (ms) => this.holdGameKeys(ms),
       // The race drive's, the engines' and a race run's numbers of feel, as sliders when `race`, `engines` or `track` is
       // picked, and the NPC ship ladder's tiers 6 to 10 when `npcShips` is.
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper),
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? worldDialsFor(helper),
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -11124,6 +11203,8 @@ class App {
     }
     void ngeOverlay.fetchIndex(import.meta.env.BASE_URL);
     this.world.serverHoldsWorld = () => this.serverHoldsHere();
+    // An arrival on a world with states (Restuss) waits a moment for a saved server's hail first (`worldStatesHere`).
+    this.world.worldStatesReady = () => this.worldStatesHere();
     // Where this world brings the player in and back (the arrival, a teleport's spot, and where a death comes round
     // with no cloning facility near): the overlay's people and herds who pick a fight keep clear of it.
     this.world.arrivalPoint = () => this.spawn;
@@ -11733,6 +11814,10 @@ class App {
         // Numbers on bodies already standing: nothing is stood again and nothing compiles.
         setDifficulty(S.difficulty);
         this.world.applyDifficulty();
+        break;
+      case 'restuss':
+        // Taken at the next arrival on Rori: this browser's own setting, or the admin's word on a server that keeps it.
+        this.messages.system(this.chooseWorldState(RESTUSS_KEY, S.restuss));
         break;
       case 'sensitivity':
         this.cam.sensitivity = S.sensitivity;
@@ -16267,7 +16352,9 @@ class App {
     this.world.day.paused = false;
     this.placeNames = [];
     this.placeNamesFor = placesFor;
-    void this.poisOf(placesFor)
+    // Every state's rows, filtered as they are read (`placeNames`): the states are taken behind the loading screen,
+    // after this has asked.
+    void this.poisRawOf(placesFor)
       .then((list) => {
         if (this.placeNamesFor === placesFor) this.placeNames = list;
       })
@@ -20238,7 +20325,8 @@ class App {
     const c = this.world.layoutCenter;
     const pack = packIdOf(this.world.planet, this.zone);
     if (!c || this.placeNamesFor !== pack) return [];
-    const key = `${pack}|${this.placeNames.length}|${c.x},${c.z}`;
+    // The states' own stamp in the key: Restuss's two sets of ports are as many rows in either state.
+    const key = `${pack}|${this.placeNames.length}|${c.x},${c.z}|${worldStateStamp()}`;
     if (this.portsCache.key !== key) this.portsCache = { key, ports: portsOf(this.placeNames, c) };
     return this.portsCache.ports;
   }
@@ -20484,8 +20572,10 @@ class App {
     const c = this.world.layoutCenter;
     const pack = packIdOf(this.world.planet, this.zone);
     if (!c) return [];
-    const key = `${pack}|${c.x},${c.z}|${this.travelRowsFor === pack ? this.travelRows.length : -1}`;
-    if (this.travelCache.key !== key) this.travelCache = { key, things: this.travelRowsFor === pack ? travelThingsOf(this.travelRows, c) : [] };
+    const key = `${pack}|${c.x},${c.z}|${this.travelRowsFor === pack ? this.travelRows.length : -1}|${worldStateStamp()}`;
+    // Only the rows of the state this world stands in (`inState`): Restuss's launch city's starport and shuttleport
+    // in the living city. Its rows are the last in the file, so leaving them out moves no other thing's place.
+    if (this.travelCache.key !== key) this.travelCache = { key, things: this.travelRowsFor === pack ? travelThingsOf(inState(this.travelRows), c) : [] };
     return this.travelCache.things;
   }
 
@@ -20948,8 +21038,11 @@ class App {
     return { facts: this.routeFacts, gate: SPACE_GATE_HEIGHT, discSeconds: RIDE_TUNE.discSeconds };
   }
 
-  /** Each other world's shuttle pads, as `padsOf` read them: asked for once a session, and again only after a null. */
-  private readonly padsFor = new Map<string, Promise<FarPads | null>>();
+  /**
+   * Each other world's shuttle pads, as `padsOf` read them, one entry a pack: asked for once a session, and again only
+   * after a null or once the world states have moved since (`stamp`, `worldStateStamp`), which replaces the entry.
+   */
+  private readonly padsFor = new Map<string, { stamp: number; p: Promise<FarPads | null> }>();
 
   /**
    * Another world's shuttle pads, read out of its own packs before anybody goes there: its travel rows
@@ -20958,25 +21051,29 @@ class App {
    * Null for a world whose travel pack or places cannot be read, which is asked for again next time.
    */
   private padsOf(pack: string): Promise<FarPads | null> {
-    let p = this.padsFor.get(pack);
-    if (p) return p;
+    // Kept with the states' stamp: another world's pads are those of the state it would stand in now (Restuss's), and
+    // an entry read under another stamp is replaced, never kept beside it, so the map holds a pack once.
+    const stamp = worldStateStamp();
+    const had = this.padsFor.get(pack);
+    if (had && had.stamp === stamp) return had.p;
     const base = `${import.meta.env.BASE_URL}assets-private/${pack}/`;
     const json = async (file: string): Promise<unknown> => {
       const res = await fetch(`${base}${file}`);
       if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
       return res.json();
     };
-    p = (async () => {
+    const p = (async () => {
       try {
         const [travel, pois] = await Promise.all([json('travel.json'), json('pois.json')]);
-        return farPadsOf(travel, pois);
+        return farPadsOf(fileInState(travel), fileInState(pois, 'pois'));
       } catch {
         return null;
       }
     })();
-    this.padsFor.set(pack, p);
+    const entry = { stamp, p };
+    this.padsFor.set(pack, entry);
     void p.then((got) => {
-      if (!got && this.padsFor.get(pack) === p) this.padsFor.delete(pack);
+      if (!got && this.padsFor.get(pack) === entry) this.padsFor.delete(pack);
     });
     return p;
   }
@@ -21227,9 +21324,13 @@ class App {
     if (this.world.planet.instances && !only) return;
     const all = fittingsOf(this.fittingRows, c);
     if (only) this.lockCopy(all);
+    // In Restuss's ruins, what the server stood on no building inside its circle, and anywhere a fitting of the state
+    // not standing, are skipped and never taken off the list (`fittingDormant`).
+    const ruins = this.world.restussRuinsHere();
     for (const [i, f] of all.entries()) {
       if (!current()) return;
       if (only && (Math.abs(f.bx - only.x) > 1 || Math.abs(f.bz - only.z) > 1)) continue;
+      if (fittingDormant(f, standsIn, ruins)) continue;
       const key = `fitting:${pack}:${run.run}:${i}`;
       // Solid whatever its size: a terminal or a panel is under the sweep's own floor for small
       // props and is exactly the thing the owner asked to be able to walk into rather than through.
@@ -21440,6 +21541,80 @@ class App {
       };
       ask();
     });
+  }
+
+  /**
+   * What an arrival on a world with states waits on before it takes them (`arrivalWait` in `worldState.ts`): nothing
+   * with no server saved or a line already answered; a look at the saved server's hail on a line of its own where the
+   * game's own line is made only after this loading screen (a session's first world); and otherwise this line's own
+   * hail, asked a tenth of a second at a time. Never longer than `WORLD_STATE_TUNE.waitMs`.
+   */
+  private async worldStatesHere(): Promise<void> {
+    const saved = Net.savedUrl();
+    const plan = arrivalWait({ states: true, saved: !!saved, mode: this.net.session.debug().mode, wanted: this.net.wanted, toCome: this.relayAsked });
+    this.worldStatesWaited = plan;
+    if (plan === 'peek') {
+      const hail = await peekHail(saved, WORLD_STATE_TUNE.waitMs);
+      // A hail that carries none is a server from before them, whose every browser keeps its own setting.
+      if (hail) setServerStates(cleanStates(hail.states));
+      return;
+    }
+    if (plan === 'wait') {
+      await waitForHail(() => {
+        const mode = this.net.session.debug().mode;
+        return mode === 'server' || mode === 'relay' || !this.net.wanted;
+      });
+    }
+  }
+
+  /** What the last arrival on a world with states waited on (`arrivalWait`), for the console. */
+  private worldStatesWaited = 'none';
+
+  /**
+   * A world's state chosen (the Gameplay page's row, `__debug.restuss('ruins')`): on a server that keeps it, the
+   * admin's word to it -- anybody else is told whose it is and the row goes back to the server's -- and with none,
+   * this browser's own setting, kept. Taken at the next arrival on that world either way; answers what to say.
+   */
+  private chooseWorldState(key: string, value: string): string {
+    const w = WORLD_STATE_WORDS[key];
+    const name = w?.name ?? key;
+    const said = (v: string): string => w?.values[v] ?? v;
+    const values = WORLD_STATES[key]?.values ?? [];
+    if (!values.includes(value)) return `${name} is ${values.join(' or ')}, not ${value}`;
+    const server = serverWorldStates();
+    if (server && typeof server[key] === 'string') {
+      if (this.net.session.debug().admin) {
+        if (!this.net.setWorldState(key, value)) return `the server is not answering: ${name} stays as it keeps it, ${said(server[key])}`;
+        return `asked the server to stand ${name} as ${said(value)}: everybody on it takes it at their next arrival on ${w?.world ?? 'that world'}`;
+      }
+      if (key === RESTUSS_KEY) this.settings.restuss = server[key] as Settings['restuss'];
+      return `this server keeps ${name} as ${said(server[key])} for everybody: only its admin changes it`;
+    }
+    const before = worldStateOf(key);
+    setLocalWorldState(key, value);
+    if (key === RESTUSS_KEY) this.settings.restuss = value as Settings['restuss'];
+    return stateNews(key, before, value, statesInForce()[key] ?? null) ?? `${name} stands as ${said(value)}`;
+  }
+
+  /**
+   * The world states a server keeps, as its line heard them (`Net.onStates`): written as the server's word, and where
+   * that moves a world's state away from the one it stands in (or would at its next arrival), said once on the
+   * message line, since nothing restreams in the middle of a world.
+   */
+  private heardWorldStates(states: Record<string, string> | null, why: 'hail' | 'word' | 'gone'): void {
+    const before: Record<string, string> = {};
+    for (const key of Object.keys(WORLD_STATES)) before[key] = worldStateOf(key);
+    setServerStates(states);
+    const here = statesInForce();
+    for (const key of Object.keys(WORLD_STATES)) {
+      const after = worldStateOf(key);
+      if (after === before[key]) continue;
+      const news = stateNews(key, before[key], after, here[key] ?? null);
+      if (news) this.messages.system(news);
+    }
+    // The Gameplay page's row reads what an arrival would take, which the server's word now answers.
+    if (why !== 'gone' && states && typeof states[RESTUSS_KEY] === 'string') this.settings.restuss = states[RESTUSS_KEY] as Settings['restuss'];
+    else if (why === 'gone') this.settings.restuss = (localWorldState(RESTUSS_KEY) ?? WORLD_STATES[RESTUSS_KEY].default) as Settings['restuss'];
   }
 
   /** The frame's turn: who keeps them, asked every `everyMs`. */
@@ -24494,7 +24669,7 @@ class App {
 
   /** What one of the two tabs' panels shows: this world's rows of that kind, nearest first, and for buildings every one the gallery has. */
   private editPanelModel(kind: 'prop' | 'building'): PermanentPanelModel {
-    if (!import.meta.env.DEV) return { layer: 'yours', dest: '', layerKey: '', rows: [], more: 0, models: null, note: '' };
+    if (!import.meta.env.DEV) return { layer: 'yours', dest: '', layerKey: '', rows: [], more: 0, models: null, note: '', states: null };
     const pack = this.editWorld();
     const layerKey = this.input.bindings.placeLayer[0];
     const me = this.player.worldPos;
@@ -24510,7 +24685,9 @@ class App {
         const g = s ? { x: s.x, y: s.y, z: s.z } : placementToGame(row, this.world.layoutCenter, r.frame);
         const d = Math.hypot(g.x - me.x, g.z - me.z);
         const held = x.why === 'inHand';
-        rows.push({ d, view: { id: x.id, layer: x.layer, label: s?.label ?? this.dressingLabel(row), away: awayText(d), bad: held ? null : x.why, drift: s ? this.driftOf(row, g) : null, solid: this.solidOf(row), name: row.name ?? '', note: row.note ?? '', stood: x.stood, held } });
+        // A row of the world's other state is not standing because it belongs to the other state, said so.
+        const bad = held ? null : x.why === 'otherState' ? `it stands in ${stateChoiceText(row.state)}` : x.why;
+        rows.push({ d, view: { id: x.id, layer: x.layer, label: s?.label ?? this.dressingLabel(row), away: awayText(d), bad, drift: s ? this.driftOf(row, g) : null, solid: this.solidOf(row), name: row.name ?? '', note: row.note ?? '', stood: x.stood, held, state: row.state ?? '', stateText: stateChoiceText(row.state) } });
       }
     }
     rows.sort((a, b) => a.d - b.d);
@@ -24523,6 +24700,7 @@ class App {
       more: rows.length - shown.length,
       models: kind === 'building' ? (this.editModels ?? []) : null,
       note: current ? `none stands for good on ${pack}` : "this world's permanent placements are not stood yet",
+      states: this.world.stateTags().length ? this.world.stateTags() : null,
     };
   }
 
@@ -24573,6 +24751,16 @@ class App {
       panel.onSolid = (id, solid) => {
         const had = this.editRowOf(id);
         if (had) void this.editPut(had.layer, { ...had.row, solid });
+      };
+      // Which world state it stands in, round the choices this world's states give: every state, then each one.
+      panel.onState = (id) => {
+        const had = this.editRowOf(id);
+        if (!had) return;
+        const row: PlacementRow = { ...had.row };
+        const next = nextStateChoice(row.state, this.world.stateTags());
+        if (next) row.state = next;
+        else delete row.state;
+        void this.editPut(had.layer, row);
       };
       panel.onCopy = (id, what) => void this.copySnippet(id, what);
       panel.onModel = (model) => {

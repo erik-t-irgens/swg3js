@@ -47,6 +47,8 @@ export interface FittingRow {
   opensCell?: number;
   /** What the server called it, where it named it ("Keypad", "Escape Pod Controls"). */
   name?: string;
+  /** The world state its building stands in (`restuss=living`), where it stands in one only (`worldState.ts`). */
+  state?: string;
 }
 
 /** One of them in the world's own frame. */
@@ -67,6 +69,7 @@ export interface Fitting {
   opensCell?: number;
   opens?: string;
   name?: string;
+  state?: string;
 }
 
 /**
@@ -87,6 +90,7 @@ export function fittingsOf(rows: readonly FittingRow[], centre: { x: number; z: 
     if (typeof r.opensCell === 'number' && r.opensCell > 0) f.opensCell = r.opensCell;
     if (typeof r.opens === 'string') f.opens = r.opens;
     if (typeof r.name === 'string') f.name = r.name;
+    if (typeof r.state === 'string') f.state = r.state;
     out.push(f);
   }
   return out;

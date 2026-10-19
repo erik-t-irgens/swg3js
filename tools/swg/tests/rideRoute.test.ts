@@ -33,6 +33,7 @@ import { RIDE_TUNE, downGlideOf } from '../../../src/world/shuttleRide.ts';
 import { portsOf, ridesFrom, type FareTable, type Port, type PoiRow } from '../../../src/world/shuttle.ts';
 import { PORT_ROW_M, portKindOf } from '../places.mjs';
 import { TRAVEL_TUNE, rigTimes, travelThingsOf, type Ticket, type TravelRig, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
+import { WORLD_STATES, fileInState, forgetWorldStates, inState, setLocalWorldState, takeWorldStates } from '../../../src/world/worldState.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -43,6 +44,34 @@ function ok(cond: boolean, what: string): void {
 function note(what: string): void {
   console.log(`note ${what}`);
 }
+
+/**
+ * Each way a world's packs are read in play, for the checks over the real packs: a world whose places were named
+ * once per world state (Rori's `states.restuss`, `tools/swg/restuss.mjs`) once per value of each, with its places
+ * and its travel rows filtered as the game filters them (`inState`, `fileInState`), and every other world once, as
+ * it stands. `label` is '' for a world with no states, else the state (`restuss=living`); `take` stands the world in
+ * it, as an arrival there would. Read off the places' own mark, so a pack from before the states has one pass.
+ */
+function statePasses(pois: { states?: Record<string, unknown> }): { label: string; take: () => void }[] {
+  const keys = Object.keys(pois.states ?? {}).filter((k) => Object.prototype.hasOwnProperty.call(WORLD_STATES, k));
+  if (!keys.length) return [{ label: '', take: () => forgetWorldStates() }];
+  const out: { label: string; take: () => void }[] = [];
+  for (const key of keys) {
+    for (const value of WORLD_STATES[key].values) {
+      out.push({
+        label: `${key}=${value}`,
+        take: () => {
+          forgetWorldStates();
+          setLocalWorldState(key, value);
+          takeWorldStates({ [key]: { values: WORLD_STATES[key].values, default: WORLD_STATES[key].default } });
+        },
+      });
+    }
+  }
+  return out;
+}
+/** A world's name as a check names it, with the state its pass stands it in where it has one. */
+const inPass = (world: string, label: string): string => (label ? `${world} (${label})` : world);
 
 const thing = (over: Partial<TravelThing> = {}): TravelThing => ({ kind: 'shuttle', model: null, rig: 'transport', mood: 'calm', x: 0, y: 12, z: 0, yaw: 0.5, cell: 0, building: 'b', bx: 0, bz: 0, ...over });
 const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { land: 'land', lift: 'take_off' } }, seconds: { land: 26.6, take_off: 19.9 } };
@@ -223,22 +252,28 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
   let named = 0;
   for (const world of worlds) {
     const travel = JSON.parse(readFileSync(join(packs, world, 'travel.json'), 'utf8')) as { rows?: TravelRow[]; rigs?: Record<string, TravelRig> };
-    const pois = JSON.parse(readFileSync(join(packs, world, 'pois.json'), 'utf8')) as { center?: { x: number; z: number }; pois?: PoiRow[] };
+    const pois = JSON.parse(readFileSync(join(packs, world, 'pois.json'), 'utf8')) as { center?: { x: number; z: number }; pois?: PoiRow[]; states?: Record<string, unknown> };
     if (!pois.center || !Array.isArray(travel.rows)) continue;
-    const ports = portsOf(pois.pois ?? [], pois.center);
-    const all = travelThingsOf(travel.rows, pois.center);
-    for (const [i, t] of all.entries()) {
-      assert.equal(shuttleClockName(world, t, ports), oldName(world, t, ports), `${world}: thing ${i} runs its round under the name it always did`);
-      things++;
-      if (t.kind !== 'shuttle') continue;
-      const pad: PadRef = padRefOf(world, i, t, ports, travel.rigs ?? {}, all);
-      assert.equal(pad.key, `travel:${world}:${i}`);
-      assert.equal(pad.clock, oldName(world, t, ports));
-      const times = t.rig && travel.rigs?.[t.rig] ? rigTimes(travel.rigs[t.rig], t.mood) : null;
-      if (times) assert.ok(pad.times.land === times.land && pad.times.lift === times.lift, `${world}: pad ${i} takes its rig's own times`);
-      pads++;
-      if (pad.port) named++;
+    // Read as the game reads it in each of the world's states: only that state's places and travel rows.
+    for (const pass of statePasses(pois)) {
+      pass.take();
+      const here = inPass(world, pass.label);
+      const ports = portsOf(inState(pois.pois ?? []), pois.center);
+      const all = travelThingsOf(inState(travel.rows), pois.center);
+      for (const [i, t] of all.entries()) {
+        assert.equal(shuttleClockName(world, t, ports), oldName(world, t, ports), `${here}: thing ${i} runs its round under the name it always did`);
+        things++;
+        if (t.kind !== 'shuttle') continue;
+        const pad: PadRef = padRefOf(world, i, t, ports, travel.rigs ?? {}, all);
+        assert.equal(pad.key, `travel:${world}:${i}`);
+        assert.equal(pad.clock, oldName(world, t, ports));
+        const times = t.rig && travel.rigs?.[t.rig] ? rigTimes(travel.rigs[t.rig], t.mood) : null;
+        if (times) assert.ok(pad.times.land === times.land && pad.times.lift === times.lift, `${here}: pad ${i} takes its rig's own times`);
+        pads++;
+        if (pad.port) named++;
+      }
     }
+    forgetWorldStates();
   }
   if (things) ok(true, `over ${worlds.length} converted worlds, every one of ${things} travel things runs its round under the name main.ts always gave it, and ${pads} shuttle pads (${named} with a port's name) are keyed as the drawn shuttles stand them`);
 }
@@ -248,7 +283,7 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
 {
   // Seven of the game's ports have no shuttle standing on a rig by them out in the open, and a ticket there
   // is flown as far as the take-off and set down at the port: six with no shuttle at all (Dathomir's two
-  // dead starports, Restuss's two, Talus's lone shuttleport and Kachirho), and Theed Starport, whose
+  // dead starports, Restuss's two -- the late camp's pads, its ports in its ruins -- Talus's lone shuttleport and Kachirho), and Theed Starport, whose
   // transport parks in the royal hangar's room. Every other port a ticket can name has a pad to land on.
   const packs = join(process.cwd(), 'assets-private');
   const worlds = existsSync(packs) ? readdirSync(packs).filter((w) => !w.startsWith('space_') && existsSync(join(packs, w, 'travel.json')) && existsSync(join(packs, w, 'pois.json'))) : [];
@@ -259,31 +294,52 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
   const noneShuttle: string[] = [];
   let answered = 0;
   let calm = 0;
+  // Restuss's own ports in its living state (the launch city's starport and shuttleport), where a pack has the states.
+  const living: string[] = [];
+  let stated = false;
   for (const world of worlds) {
     const travel = JSON.parse(readFileSync(join(packs, world, 'travel.json'), 'utf8')) as { rows?: TravelRow[]; rigs?: Record<string, TravelRig> };
-    const pois = JSON.parse(readFileSync(join(packs, world, 'pois.json'), 'utf8')) as { center?: { x: number; z: number }; pois?: PoiRow[] };
+    const pois = JSON.parse(readFileSync(join(packs, world, 'pois.json'), 'utf8')) as { center?: { x: number; z: number }; pois?: PoiRow[]; states?: Record<string, unknown> };
     if (!pois.center || !Array.isArray(travel.rows)) continue;
     const rigs = travel.rigs ?? {};
-    const all = travelThingsOf(travel.rows, pois.center);
-    for (const p of portsOf(pois.pois ?? [], pois.center)) {
-      const ports = portsOf(pois.pois ?? [], pois.center);
-      if (!padOfPort(all, ports, p.name, world, rigs, undefined, 'transport')) noneTransport.push(`${world}: ${p.name}`);
-      if (!padOfPort(all, ports, p.name, world, rigs, undefined, 'shuttle')) noneShuttle.push(`${world}: ${p.name}`);
-      const pad = padOfPort(all, ports, p.name, world, rigs);
-      if (!pad) {
-        none.push(`${world}: ${p.name}`);
-        continue;
+    // A world with states once per state, as the game reads it there (`padOfPort` finds a port by its name, which each
+    // state holds once): a port of one state is asked in its own pass, and a port standing in every state is one port,
+    // asked at the first pass alone. So the seven below are the ruins' two camp pads and the five other dead ports, the
+    // very seven a pack before the states had, and the living city's own two must each have a pad.
+    const passes = statePasses(pois);
+    for (const [n, pass] of passes.entries()) {
+      pass.take();
+      if (pass.label) stated = true;
+      const here = inPass(world, pass.label);
+      const all = travelThingsOf(inState(travel.rows), pois.center);
+      const ports = portsOf(inState(pois.pois ?? []), pois.center);
+      const rows = inState(pois.pois ?? []);
+      for (const p of ports) {
+        // Its own row, by the name each state holds once (the check below on a world's names holds that).
+        const row = rows.find((r) => r.name === p.name) as { state?: string } | undefined;
+        if (n > 0 && !row?.state) continue;
+        if (!padOfPort(all, ports, p.name, world, rigs, undefined, 'transport')) noneTransport.push(`${here}: ${p.name}`);
+        if (!padOfPort(all, ports, p.name, world, rigs, undefined, 'shuttle')) noneShuttle.push(`${here}: ${p.name}`);
+        const pad = padOfPort(all, ports, p.name, world, rigs);
+        if (pass.label === 'restuss=living' && /^Restuss /.test(p.name)) living.push(`${p.name}: ${pad ? 'pad' : 'none'}`);
+        if (!pad) {
+          none.push(`${here}: ${p.name}`);
+          continue;
+        }
+        assert.ok(pad.rig && rigs[pad.rig] && Math.hypot(p.x - all[pad.index].bx, p.z - all[pad.index].bz) <= PORT_REACH, `${here}: ${p.name}'s pad has a rig and stands by it`);
+        answered++;
+        if (landMood(rigs[pad.rig], pad) === 'calm') calm++;
       }
-      assert.ok(pad.rig && rigs[pad.rig] && Math.hypot(p.x - all[pad.index].bx, p.z - all[pad.index].bz) <= PORT_REACH, `${world}: ${p.name}'s pad has a rig and stands by it`);
-      answered++;
-      if (landMood(rigs[pad.rig], pad) === 'calm') calm++;
     }
+    forgetWorldStates();
   }
   if (!answered) note('no converted world carries rigged shuttle pads, so the ports are not checked: npm run swg -- travel @SWG assets-private --retail-only');
   else {
     ok(none.length === 7 && none.includes('naboo: Theed Starport'), `seven ports have no rigged shuttle in the open to land on, Theed Starport among them (${none.join('; ')})`);
     ok(answered > 40, `and every other one of ${answered + none.length} has its pad (${answered}, ${calm} of them flown to by a transport's calm landing)`);
     ok(noneTransport.length === 6 && !noneTransport.includes('naboo: Theed Starport') && noneShuttle.length === 7 && noneShuttle.includes('naboo: Theed Starport'), `for a trip flown with a transport six have none, Theed Starport's hangar being its pad (${noneTransport.join('; ')}); for one flown with the plain shuttle still seven`);
+    if (stated) ok(living.length === 2 && living.every((l) => /: pad$/.test(l)), `and in Restuss's living state its own starport and shuttleport, the launch city's, each have their pad (${living.join('; ')})`);
+    else note("no converted world carries Restuss's states, so its living city's ports are not checked: npm run swg -- convert assets-private --yes");
   }
 }
 
@@ -309,30 +365,41 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
   let nabooPorts = 0;
   for (const world of worlds) {
     const travel = JSON.parse(readFileSync(join(packs, world, 'travel.json'), 'utf8')) as { rows?: TravelRow[] };
-    const pois = JSON.parse(readFileSync(join(packs, world, 'pois.json'), 'utf8')) as { center?: { x: number; z: number }; pois?: PoiRow[] };
+    const pois = JSON.parse(readFileSync(join(packs, world, 'pois.json'), 'utf8')) as { center?: { x: number; z: number }; pois?: PoiRow[]; states?: Record<string, unknown> };
     if (!pois.center || !Array.isArray(travel.rows)) continue;
-    const ports = portsOf(pois.pois ?? [], pois.center);
-    const names = new Set<string>();
-    for (const p of ports) {
-      if (names.has(p.name)) twice.push(`${world}: ${p.name}`);
-      names.add(p.name);
-    }
-    const all = travelThingsOf(travel.rows, pois.center);
     const seen = new Set<string>();
-    for (const t of all) {
-      const key = `${t.bx},${t.bz}`;
-      const kind = portKindOf(t.building);
-      if (!seen.has(key)) {
-        seen.add(key);
-        buildings++;
+    // A world with states once per state, its places and travel rows as the game reads them there: each state names
+    // each of its ports once, and a thing of one state joins a port of that state. A thing standing in every state is
+    // asked at the first pass alone.
+    let ports: Port[] = [];
+    for (const [n, pass] of statePasses(pois).entries()) {
+      pass.take();
+      const here = inPass(world, pass.label);
+      ports = portsOf(inState(pois.pois ?? []), pois.center);
+      const names = new Set<string>();
+      for (const p of ports) {
+        if (names.has(p.name)) twice.push(`${here}: ${p.name}`);
+        names.add(p.name);
       }
-      const port = portOfThing(ports, t);
-      // A thing of a building that is no port (a camp's lone shuttle) is not held to a row.
-      if (!kind) continue;
-      if (!port || Math.hypot(port.x - t.bx, port.z - t.bz) > PORT_ROW_M || port.kind !== kind) wrong.push(`${world}: a ${t.kind} of ${t.building.split('/').pop()} at ${Math.round(t.bx)},${Math.round(t.bz)} joins ${port ? `${port.name} (${port.kind}, ${Math.round(Math.hypot(port.x - t.bx, port.z - t.bz))} m)` : 'no port'}`);
-      else joined++;
-      if (t.kind === 'shuttle' && t.rig === 'transport' && port?.kind !== 'starport') transports.push(`${world}: ${t.building.split('/').pop()}`);
+      const rows = inState(travel.rows);
+      const all = travelThingsOf(rows, pois.center);
+      for (const [i, t] of all.entries()) {
+        if (n > 0 && !rows[i].state) continue;
+        const key = `${t.bx},${t.bz}`;
+        const kind = portKindOf(t.building);
+        if (!seen.has(key)) {
+          seen.add(key);
+          buildings++;
+        }
+        const port = portOfThing(ports, t);
+        // A thing of a building that is no port (a camp's lone shuttle) is not held to a row.
+        if (!kind) continue;
+        if (!port || Math.hypot(port.x - t.bx, port.z - t.bz) > PORT_ROW_M || port.kind !== kind) wrong.push(`${here}: a ${t.kind} of ${t.building.split('/').pop()} at ${Math.round(t.bx)},${Math.round(t.bz)} joins ${port ? `${port.name} (${port.kind}, ${Math.round(Math.hypot(port.x - t.bx, port.z - t.bz))} m)` : 'no port'}`);
+        else joined++;
+        if (t.kind === 'shuttle' && t.rig === 'transport' && port?.kind !== 'starport') transports.push(`${here}: ${t.building.split('/').pop()}`);
+      }
     }
+    forgetWorldStates();
     if (world === 'naboo' && fares) {
       const theedPort = ports.find((p) => p.name === 'Theed Starport');
       const label = (id: string) => planetOfRouteId(id)?.name ?? null;
@@ -411,31 +478,37 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
     const travelJson = JSON.parse(readFileSync(join(packs, world, 'travel.json'), 'utf8')) as { version?: number; rows?: TravelRow[]; rigs?: Record<string, TravelRig> };
     if (!Array.isArray(travelJson.rows)) continue;
     travelled++;
-    // What a trip reads of it before it goes: the game's own call, on the files as they are.
-    const far = farPadsOf(travelJson, poisJson);
-    if (!far) {
-      unread.push(world);
-      continue;
+    // In each state of a world that has them, as the game's `padsOf` and the world it loads both read it then.
+    for (const pass of statePasses(poisJson as { states?: Record<string, unknown> })) {
+      pass.take();
+      const here = inPass(world, pass.label);
+      // What a trip reads of it before it goes: the game's own call, on the files as they are, filtered as it filters them.
+      const far = farPadsOf(fileInState(travelJson), fileInState(poisJson, 'pois'));
+      if (!far) {
+        unread.push(here);
+        continue;
+      }
+      // What the far world stands once it has loaded: its rows about the layout's centre, its places likewise.
+      const rigs = travelJson.rigs && typeof travelJson.rigs === 'object' ? travelJson.rigs : {};
+      const stood = travelThingsOf(inState(travelJson.rows), layout.center);
+      const stoodPorts = portsOf(inState(poisJson.pois ?? []), layout.center);
+      assert.deepEqual(far.things, stood, `${here}: its travel things read before it loads are the ones it stands`);
+      assert.deepEqual(far.ports, stoodPorts, `${here}: and its ports are the ones it names`);
+      assert.deepEqual(Object.keys(far.rigs), Object.keys(rigs), `${here}: with the same rigs`);
+      for (const p of far.ports) {
+        ports++;
+        const pad = padOfPort(far.things, far.ports, p.name, world, far.rigs);
+        const there = padOfPort(stood, stoodPorts, p.name, world, rigs);
+        assert.deepEqual(pad, there, `${here}: ${p.name}'s pad read before it loads is the pad it has once it has`);
+        if (!pad) continue;
+        const t = stood[pad.index];
+        assert.equal(pad.key, `travel:${world}:${pad.index}`, `${here}: ${p.name}'s pad is keyed as its world stands it`);
+        assert.equal(pad.clock, shuttleClockName(world, t, stoodPorts), `${here}: ${p.name}'s pad runs its round under the name its world gives it`);
+        assert.ok(t.kind === 'shuttle' && t.x === pad.x && t.y === pad.y && t.z === pad.z && t.yaw === pad.yaw, `${here}: ${p.name}'s pad stands where its world stands its shuttle`);
+        pads++;
+      }
     }
-    // What the far world stands once it has loaded: its rows about the layout's centre, its places likewise.
-    const rigs = travelJson.rigs && typeof travelJson.rigs === 'object' ? travelJson.rigs : {};
-    const stood = travelThingsOf(travelJson.rows, layout.center);
-    const stoodPorts = portsOf(poisJson.pois ?? [], layout.center);
-    assert.deepEqual(far.things, stood, `${world}: its travel things read before it loads are the ones it stands`);
-    assert.deepEqual(far.ports, stoodPorts, `${world}: and its ports are the ones it names`);
-    assert.deepEqual(Object.keys(far.rigs), Object.keys(rigs), `${world}: with the same rigs`);
-    for (const p of far.ports) {
-      ports++;
-      const pad = padOfPort(far.things, far.ports, p.name, world, far.rigs);
-      const there = padOfPort(stood, stoodPorts, p.name, world, rigs);
-      assert.deepEqual(pad, there, `${world}: ${p.name}'s pad read before it loads is the pad it has once it has`);
-      if (!pad) continue;
-      const t = stood[pad.index];
-      assert.equal(pad.key, `travel:${world}:${pad.index}`, `${world}: ${p.name}'s pad is keyed as its world stands it`);
-      assert.equal(pad.clock, shuttleClockName(world, t, stoodPorts), `${world}: ${p.name}'s pad runs its round under the name its world gives it`);
-      assert.ok(t.kind === 'shuttle' && t.x === pad.x && t.y === pad.y && t.z === pad.z && t.yaw === pad.yaw, `${world}: ${p.name}'s pad stands where its world stands its shuttle`);
-      pads++;
-    }
+    forgetWorldStates();
   }
   if (worlds.length) {
     ok(centreOff.length === 0, `the places' centre is the layout's on every ground pack there is (${worlds.length}${centreOff.length ? `; off: ${centreOff.join('; ')}` : ''})`);

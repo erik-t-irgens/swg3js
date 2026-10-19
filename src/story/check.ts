@@ -112,6 +112,8 @@ export interface PlacementRef {
    * building (refused there as a house is).
    */
   never?: string | null;
+  /** The one world state it stands in (`restuss=ruins`), where it stands in one only. */
+  state?: string | null;
 }
 
 /** Every permanent placement's row, by world and then by id; an id two layers hold has two refs. */
@@ -914,6 +916,9 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
       // Strictly under the reach, as the game finds (`nearestPlaced` keeps only what is nearer than it).
       const d = Math.hypot(row.at[0] - o.near[0], row.at[1] - o.near[1]);
       if (d >= OBJECT_FIND) errors.push({ level: 'error', file: o.src.file, line: lineAt(o.src.lines, '/near'), message: `near is ${Math.round(d * 10) / 10} m from where ${placeId} stands (${row.file}:${row.line}), and the game finds it only under ${OBJECT_FIND} m round near`, rule: 1 });
+      // A row kept to one world state stands only while its world stands that way, so a job that needs it waits
+      // whenever the world stands the other (Restuss's rubble in the living city).
+      if (row.state) warnings.push({ level: 'warning', file: o.src.file, line: lineAt(o.src.lines, '/template'), message: `${o.template} names a row that stands in ${row.state} only (${row.file}:${row.line}): while ${o.world} stands otherwise the game finds nothing there`, rule: 1 });
       continue;
     }
     // A thing a permanent row stands is filed under the row's own key: an object naming its template finds the

@@ -35,6 +35,7 @@ import { applyProps } from './propsKept.mjs';
 import { applyPurse } from './purse.mjs';
 import { applyStory, readStories } from './stories.mjs';
 import { applyProgressRec, readProgress } from './progress.mjs';
+import { applyWorldStates } from './worldState.mjs';
 
 /** The shape of the file. A file written by a newer server is left alone and not played into. */
 export const STORE_VERSION = 1;
@@ -66,10 +67,10 @@ function table(from = null) {
  * character's story book, `storyArchive` the books a browser's copy replaced, kept whole, and `storyTexts` the
  * words of the journals by their hash (stories.mjs); `progress` each character's progress record,
  * `progressArchive` the records a browser's copy replaced and `progressOwed` the quest bonuses owed to a character
- * whose progress had not settled yet (progress.mjs).
+ * whose progress had not settled yet (progress.mjs); `worldStates` the admin's word on each world state (worldState.mjs).
  */
 export function emptyWorld(epoch = Date.now()) {
-  return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), props: table(), purses: table(), stories: table(), storyArchive: table(), storyTexts: table(), progress: table(), progressArchive: table(), progressOwed: table(), settings: {} };
+  return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), props: table(), purses: table(), stories: table(), storyArchive: table(), storyTexts: table(), progress: table(), progressArchive: table(), progressOwed: table(), worldStates: table(), settings: {} };
 }
 
 /**
@@ -115,7 +116,7 @@ export function applyChange(data, rec) {
       // decides what each row looks like on disk, and the same function runs when the thing happens
       // and when the log is replayed on start. Anything neither of them knows is a record from a
       // newer server: kept in the log, not understood here, and not an error.
-      return applyItems(data, rec) || applyHomes(data, rec) || applyProps(data, rec) || applyPurse(data, rec) || applyStory(data, rec) || applyProgressRec(data, rec);
+      return applyItems(data, rec) || applyHomes(data, rec) || applyProps(data, rec) || applyPurse(data, rec) || applyStory(data, rec) || applyProgressRec(data, rec) || applyWorldStates(data, rec);
   }
 }
 
@@ -195,7 +196,7 @@ export class Store {
           texts = {};
         }
       }
-      this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses), props: table(loaded.props), purses: table(loaded.purses), stories: table(loaded.stories), storyArchive: table(loaded.storyArchive), storyTexts: table(texts), progress: table(loaded.progress), progressArchive: table(loaded.progressArchive), progressOwed: table(loaded.progressOwed) };
+      this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses), props: table(loaded.props), purses: table(loaded.purses), stories: table(loaded.stories), storyArchive: table(loaded.storyArchive), storyTexts: table(texts), progress: table(loaded.progress), progressArchive: table(loaded.progressArchive), progressOwed: table(loaded.progressOwed), worldStates: table(loaded.worldStates) };
       delete this.data.storyTextsFile;
       // A story book's own tables are keyed by a browser too, a level further down: they are rebuilt
       // before the log is played back onto them, so a replayed change meets the book a live one did. A

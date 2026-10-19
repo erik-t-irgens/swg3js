@@ -52,8 +52,10 @@
 //                                                                  convert the world snapshot's objects around a point into a layout,
 //                                                                  and copy the planet's terrain (.trn) plus building terrain layers (.lay);
 //                                                                  the centre defaults to the planet's starport (else its busiest spot);
-//                                                                  "all" converts every planet the game knows into <out-dir>/<planet>
-//   node tools/swg/cli.mjs stat <swg-dir> <file>                    which archive provides a file (after load order and deletions)
+//                                                                  "all" converts every planet the game knows into <out-dir>/<planet>;
+//                                                                  Rori's carries Restuss's launch city and its ruins, each tagged with
+//                                                                  the world state it stands in (restuss.mjs)
+//   node tools/swg/cli.mjs stat <swg-dir> <file>                   which archive provides a file (after load order and deletions)
 //   node tools/swg/cli.mjs final-names <final-index-dir> <swg-dir> [--to=<file>]   the maintainer's, never asked by status: write SOE's final names
 //                                                                  list (manifests/final-names.json) from the folder holding SOE's own final
 //                                                                  sku0..3_client.toc (only those four are read) and the install's own indexes:
@@ -303,6 +305,7 @@ import {
   rewrittenCheck, verifyFinalNames, withLate,
 } from './finalnames.mjs';
 import { buildFinalNames, finalNamesText } from './finalnamesBuild.mjs';
+import { RESTUSS_KEY, RESTUSS_STATES_VERSION, addToSnapshot, layoutObject, namePortsInStates, portTag, restussAddition, restussLast, restussSoundsStatus, restussStatus, statesBlock, tagServerObjects } from './restuss.mjs';
 
 // A .env beside package.json names the folders once; @NAME anywhere in the arguments becomes that
 // variable's value (from .env or the environment), whichever shell is running.
@@ -2434,6 +2437,9 @@ function cellIndexById(vfs, planet) {
   } catch {
     return out;
   }
+  // Restuss's launch city, whose rooms Core3's screenplays name by the launch snapshot's own cell ids (restuss.mjs):
+  // a fitting stood in one belongs to the living city and carries its state.
+  addToSnapshot(snap, restussAddition(vfs, planet, snap.nodes.slice()));
   const walk = (node, building) => {
     const t = snap.templates[node.templateIndex] ?? '';
     const isCell = /shared_cell\.iff$/.test(t);
@@ -2445,6 +2451,7 @@ function cellIndexById(vfs, planet) {
         by: building.pos[1],
         bz: building.pos[2],
         byaw: Math.round(yawOfLayoutQuat(building.q) * 1e4) / 1e4,
+        ...(building.state ? { state: building.state } : {}),
       });
     }
     for (const c of node.children ?? []) walk(c, isCell ? building : node);
@@ -2506,6 +2513,15 @@ function loadPlanetObjects(vfs, planet) {
     let nextId = 1 << 29;
     const extra = spawns.objects.map((o) => ({ id: nextId++, containedBy: 0, template: o.template, cellIndex: 0, q: o.q, pos: o.pos, radius: 4, portalLayoutCrc: 0, children: [], area: `server:${o.file}` }));
     mergeBuildouts(snap, { nodes: extra });
+  }
+  // Restuss's launch city and its ruins (restuss.mjs), after everything else, so nothing of today's world moves in the
+  // layout and the auto centre is the Rebel outpost's still; and Core3's own objects in the city's circle with it.
+  const restuss = restussAddition(vfs, planet, snap.nodes.slice(0, snapshotCount), buildout.nodes);
+  if (restuss) {
+    addToSnapshot(snap, restuss);
+    const server = tagServerObjects(snap, restuss.centre);
+    const c = restuss.counts;
+    console.error(`restuss: the launch city from ${restuss.archive} inside ${restuss.rect.join(',')}: ${c.top} top-level objects, ${c.all} with their children, ${c.buildings} buildings, ${c.ruins} with a ruin of their kind${c.offset ? `, ${c.offset} ids moved clear of today's` : ', every raw id kept'}; middle ${restuss.centre.x},${restuss.centre.z} (${restuss.centre.from === 'clientregion' ? "the client's own region" : 'the rectangle'})${server ? `; ${server} of Core3's objects in its circle belong to it` : ''}`);
   }
   const entries = flattenWithWorldTransforms(snap);
   return { snap, entries, snapshotCount, buildout: buildout.stats, spawns, core3 };
@@ -2938,6 +2954,16 @@ function packStatus(dir) {
     // A world whose layout carries gates between its zones but no gates.json was converted before the
     // join was written: those gates stand there doing nothing and nothing else would say so.
     if (!gates && layout && layout.objects.some((o) => isZoneGate(o.template))) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet}'s zone gates have no destinations`);
+    // Restuss in both of its states (restuss.mjs): Rori's snapshot until its layout carries the launch city and its
+    // ruins, its places until its ports are named by state, and its people until Core3's indoor rows there join the
+    // city's rooms. An `if` of its own, with its own `else if`s, after every chain above.
+    const restussAsk = planet === 'rori' ? restussStatus(layout, pois, readJson(join(packDir, 'spawns.json'))) : null;
+    if (restussAsk?.ask === 'snapshot') need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, restussAsk.why);
+    else if (restussAsk?.ask === 'pois') need(`pois <swg-dir> ${planet} ${packDir} --retail-only`, restussAsk.why);
+    else if (restussAsk?.ask === 'spawns') need(`spawns ${dir} --swg=<swg-dir> --retail-only`, restussAsk.why);
+    // And its placed sounds, read from the archives with the city in them (soundplaces.mjs): an `if` of its own.
+    const restussSounds = planet === 'rori' ? restussSoundsStatus(layout, readJson(join(packDir, 'sounds.json'))) : null;
+    if (restussSounds) need(`sounds <swg-dir> ${dir} ${planet} --retail-only`, restussSounds.why);
     // What the reading of the programs could not do on this world, summed below (a pack from before
     // format 6 carries no count). Tallied here, ahead of the snapshot's own chain of asks and never
     // inside it: an `if` of its own between the material format's ask and the `else if` after it would
@@ -3710,10 +3736,14 @@ function pointsOfInterest(vfs, planet, snap, entries, { regions: wantRegions = t
     }
     const label = portLabel(x, z, places, kind === 'starport' ? 'Starport' : 'Shuttleport');
     if (label.from === 'place') namedAfterPlace++;
-    found.push({ x, z, kind, label: label.name, template });
+    // The world state a port belongs to (restuss.mjs): the launch city's own ports the living state's, the late
+    // camp's pads in the city's circle the ruins', every other port both.
+    const state = portTag(e.node.state, x, z, snap.restuss?.centre);
+    found.push({ x, z, kind, label: label.name, template, ...(state ? { state } : {}) });
   }
-  const named = namePorts(found, travelPoints, seen);
-  found.forEach((f, i) => places.push({ name: named.names[i], x: f.x, z: f.z, r: 0, kind: f.kind }));
+  // Named once per state over that state's ports and the untagged, so each state holds one port of each name.
+  const named = namePortsInStates(found, (list) => namePorts(list, travelPoints, seen));
+  found.forEach((f, i) => places.push({ name: named.names[i], x: f.x, z: f.z, r: 0, kind: f.kind, ...(f.state ? { state: f.state } : {}) }));
   const ports = {
     found: found.length,
     fromServer: named.fromServer,
@@ -3768,7 +3798,8 @@ function writePois(vfs, planet, snap, entries, cx, cz, outDir) {
   }
   const pois = result ? result.places : [];
   const s = result ? result.stats : null;
-  const file = withLate({ planet, center: { x: cx, z: cz }, clientPlaces: s ? s.archive : 0, ...(s && s.frame.rows ? { frameCheck: s.frame } : {}), pois }, vfs, 'pois');
+  // `states`: its ports were named once per world state (restuss.mjs), which `status` asks of Rori's.
+  const file = withLate({ planet, center: { x: cx, z: cz }, clientPlaces: s ? s.archive : 0, ...(s && s.frame.rows ? { frameCheck: s.frame } : {}), ...(snap.restuss ? { states: { [RESTUSS_KEY]: RESTUSS_STATES_VERSION } } : {}), pois }, vfs, 'pois');
   writeFileSync(join(outDir, 'pois.json'), JSON.stringify(file));
   const counts = `${pois.length} (${pois.filter((p) => p.kind === 'place').length} the client's own named places, ${pois.filter((p) => p.kind === 'city' || p.kind === 'landmark' || p.kind === 'area').length} regions, ${pois.filter((p) => p.kind === 'starport' || p.kind === 'shuttleport').length} travel points)`;
   console.log(`points of interest: ${counts} -> ${join(outDir, 'pois.json')}`);
@@ -3838,6 +3869,8 @@ async function snapshotPlanet(vfs, planet, outDir) {
       return null;
     };
     const pushObject = (e, obj) => {
+      // The world state it stands in (`restuss=living`, `restuss=ruins`), where it stands in only one (restuss.mjs).
+      if (e.node.state) obj.state = e.node.state;
       objectRow.set(e.node.id, objects.length);
       if (obj.contained) indoorRows.push([objects.length, e]);
       objects.push(obj);
@@ -3945,7 +3978,11 @@ async function snapshotPlanet(vfs, planet, outDir) {
     }
     console.log(`rooms: ${indoorRows.length} objects inside buildings, ${roomsWritten} with their room from the cell that holds them, ${hostsWritten} with the building's own row`);
     const terrainFile = await copyTerrain(vfs, planet, outDir);
-    const layout = { planet, center: { x: cx, z: cz }, radius: Number.isFinite(radius) ? radius : null, terrain: terrainFile, objects, skipped };
+    // A world with states (Restuss) says so after its centre, which a reader takes from the head of the file as its
+    // second key (`poisCentre.test.ts`).
+    const states = snap.restuss ? statesBlock(snap.restuss, objects) : null;
+    const layout = layoutObject({ planet, center: { x: cx, z: cz }, states, radius: Number.isFinite(radius) ? radius : null, terrain: terrainFile, objects, skipped });
+    if (states) console.log(`restuss: ${states[RESTUSS_KEY].living} objects stand in the living city and ${states[RESTUSS_KEY].ruins} ruins in its place`);
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
     const manifestPath = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
@@ -7670,7 +7707,7 @@ switch (cmd) {
             lost++;
             continue;
           }
-          all.push({ template: p.template, model, building: c.building, at: null, cell: c.cellIndex, x: p.x, y: p.y, z: p.z, yaw: p.yaw, bx: c.bx, by: c.by, bz: c.bz, byaw: c.byaw });
+          all.push({ template: p.template, model, building: c.building, at: null, cell: c.cellIndex, x: p.x, y: p.y, z: p.z, yaw: p.yaw, bx: c.bx, by: c.by, bz: c.bz, byaw: c.byaw, ...(c.state ? { state: c.state } : {}) });
         }
       }
       // The instances zone: the corvette's fittings in every copy of its faction's ship, through the
@@ -8235,17 +8272,25 @@ switch (cmd) {
     // the position they were written with. The room number travels with them so the runtime knows
     // which cell to put them in rather than guessing from a point. The buildout tables are the second
     // place the client stands buildings, and are read too (`roomsOf` in spawnpack.mjs says why).
+    // Restuss's launch city is read in too (restuss.mjs), as every other reader of a world's snapshot reads it: its
+    // rooms are the ones Core3's town rows indoors there name, by the launch snapshot's own cell ids. `restuss` is
+    // the city's own cells, by which the rows that join a room only because of it are told apart; null elsewhere.
     const roomsOf = (world) => {
-      if (!options.swg) return new Map();
+      const none = { rooms: new Map(), restuss: null };
+      if (!options.swg) return none;
       try {
         const ws = `snapshot/${world}.ws`;
-        if (!spawnVfs.has(ws)) return new Map();
+        if (!spawnVfs.has(ws)) return none;
         const snap = parseSnapshot(parseIff(spawnVfs.read(ws)));
-        mergeBuildouts(snap, loadBuildouts(spawnVfs, world));
-        return sp.roomsOf(snap);
+        const own = snap.nodes.slice();
+        const bo = loadBuildouts(spawnVfs, world);
+        mergeBuildouts(snap, bo);
+        const added = restussAddition(spawnVfs, world, own, bo.nodes);
+        addToSnapshot(snap, added);
+        return { rooms: sp.roomsOf(snap), restuss: added ? added.cells : null };
       } catch {
         /* a world whose snapshot will not read simply keeps its people indoors and unplaced */
-        return new Map();
+        return none;
       }
     };
 
@@ -8429,11 +8474,11 @@ switch (cmd) {
         noWorld.push(world);
         continue;
       }
-      const rooms = roomsOf(world);
+      const { rooms, restuss } = roomsOf(world);
       const worldPools = pools.get(world) ?? new Map();
       const lost = { body: 0, room: 0 };
       let routesLost = 0;
-      const rows = [];
+      const kept = [];
       for (const s of statics.get(world) ?? []) {
         // The place and the facing both, through the room's own turn (`intoRoom` says why both); a
         // person in a room no snapshot or buildout holds is a spot in a room and nowhere on a planet.
@@ -8445,8 +8490,14 @@ switch (cmd) {
         if (got.row.routeLost) routesLost++;
         const takes = I.takerFaction(corvette.takers, world, got.row.who);
         if (takes) got.row.takes = takes;
-        rows.push(got.row);
+        kept.push({ row: got.row, cell: s.cell });
       }
+      // The rows that find their room only because Restuss's launch city is read in, after every other row of the
+      // world (`restussLast`), so no row's place in the list, and so no `stood:` name, moves; each tagged with the
+      // living city its room is in, so it stands nowhere in the ruins.
+      const rows = restussLast(kept, restuss);
+      const joinedLate = restuss ? kept.filter((e) => e.cell && restuss.has(e.cell)).length : 0;
+      if (restuss) console.log(`spawns: ${world} — ${joinedLate} of Core3's people stand in the rooms of Restuss's launch city, after every other row`);
       lostBy.body += lost.body;
       lostBy.room += lost.room;
       const indoors = rows.filter((s) => s.cell).length;
@@ -8479,6 +8530,8 @@ switch (cmd) {
             source: { areas: 'core3', statics: 'core3', creaturePlaces: 'invented', scatter: 'drawn', stacks: 'nudged' },
             frameCheck: frame,
             counts: { areas: r.spawn.length, noSpawn: r.noSpawn.length + lateSites.length, lateSites: lateSites.length, statics: rows.length, staticsDropped: dropped.get(world) ?? 0, noBody: lost.body, noRoom: lost.room },
+            // Restuss's launch city was read in, and how many rows came to stand in its rooms (appended last).
+            ...(restuss ? { restuss: { joined: joinedLate, version: RESTUSS_STATES_VERSION } } : {}),
             areas: r.spawn,
             noSpawn: [...r.noSpawn, ...lateSites],
             statics: rows,

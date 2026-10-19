@@ -118,6 +118,9 @@
 //                                                          stood that very creature (`Ownership.mayStrike`)
 //   { t: 'day', ms }                                       the admin changing how long a day is, for everybody: the day
 //                                                          is anchored where it stands so nobody's sun moves
+//   { t: 'worldStateSet', key, value }                       the admin standing a world in another state for everybody
+//                                                          (worldState.mjs: `restuss` living or ruins), taken by each
+//                                                          browser at its next arrival on that world
 //   { t: 'items', do: list|get|add|drop|using|tint, rows?, kind?, what?, thing?, id?, worn?, held?, tint?, at? }
 //                                                          what this character owns (ledger.mjs). `list` is the
 //                                                          backpack handed up on a first claim; after that the
@@ -214,7 +217,7 @@
 //                                                          person the browser says is in reach
 //   { t: 'progress', do: 'grant' | 'xp' | 'reset', node?, src?, n? }   the admin's own: a node granted, XP given, emptied
 // Server to browser:
-//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items, paint, props, homes, progress, gear, veh, race }   sent the instant the socket opens, before
+//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items, paint, props, homes, progress, gear, veh, race, states }   sent the instant the socket opens, before
 //                                                          anything is said; `story` is { v, sets, tests }, the story this
 //                                                          server holds, which a browser built before it never reads; `items`
 //                                                          is 2 on a server that keeps a row per thing (ledger.mjs's
@@ -238,7 +241,10 @@
 //                                                          VEHICLE_WIRE_VERSION), which a watcher draws the vehicle ahead
 //                                                          by; `race` is 1 on a server that carries the group's race word
 //                                                          (raceWire.mjs's RACE_VERSION), and a browser calls no race against
-//                                                          any other
+//                                                          any other; `states` the world states this server keeps
+//                                                          ({ restuss: 'living' }, worldState.mjs), which every browser stands
+//                                                          at its next arrival on that world, and a browser keeps its own
+//                                                          setting against any server whose hail carries none
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
 //                                 (denied closes the line; refused is about the character only and
 //                                  leaves the browser connected to offer another)
@@ -286,6 +292,8 @@
 //   { t: 'npcBlow', id, i, a, at, w? }   (a creature kept at that browser struck you; you, and nobody else, take it off)
 //   { t: 'day', dayMs, dayAt?, dayFrom? }   (how long a day is now and where it was anchored, to everybody connected)
 //   { t: 'day', do: 'refused', why }   (to whoever asked, and to nobody else)
+//   { t: 'worldStates', states }   (every world state this server keeps, after the admin changed one, to everybody connected)
+//   { t: 'worldStates', do: 'refused', why }   (to whoever asked, and to nobody else)
 //   { t: 'items', do: 'list', take: browser|server, rows: [{ id, kind, what, got, thing, tint?, tintAt? }] }   (the settled
 //                                                          list, sent back in answer to a list or a get: the first one
 //                                                          a character hands up is written down, and after that this is
@@ -380,6 +388,7 @@ import { readLevels } from './progressData.mjs';
 import { readStorySet } from './storySet.mjs';
 import { readCore3Story } from './core3Story.mjs';
 import { storyWorlds } from './storyWorlds.mjs';
+import { WorldStates } from './worldState.mjs';
 
 /**
  * What this server speaks. A browser that hears no hail is talking to the relay that came before. 3 is
@@ -653,6 +662,10 @@ const stories = new Stories({
 });
 stories.load(store.data);
 stories.readSets();
+// The world states (worldState.mjs): Restuss living or in ruins, one for everybody on this server, written down like
+// the day's length so a restart keeps the admin's last word.
+const worldStates = new WorldStates({ write: (rec) => store.change(rec) });
+worldStates.load(store.data);
 const settings = { friendlyFire: FRIENDLY_FIRE, word: WORD ? 1 : 0, ...clock.dayHand() };
 const had = store.data.settings ?? {};
 if (had.friendlyFire !== settings.friendlyFire || had.word !== settings.word || had.dayMs !== settings.dayMs || (had.dayAt ?? 0) !== (settings.dayAt ?? 0)) store.change({ t: 'settings', settings });
@@ -1539,6 +1552,24 @@ function onMessage(c, text, trimmed = false) {
     store.change({ t: 'settings', settings: day });
     for (const o of clients.values()) if (o.hello) send(o, { t: 'day', ...day });
     console.log(`  ${c.id} ${who(c)} made a day ${Math.round(day.dayMs / 1000)} s long`);
+  } else if (msg.t === 'worldStateSet') {
+    // A world's state, for everybody, from the one person who may say it (the check the admin's spawn words use) and
+    // only a value its key allows (worldState.mjs). Written down, and told to everybody connected on every world --
+    // a browser takes it at its next arrival on that world, wherever it is now.
+    if (!c.hello) return;
+    c.stating ??= { at: 0, lines: 0 };
+    if (!maySpawn(c.stating, Date.now(), OWN_TUNING)) return;
+    if (!admins(c)) {
+      send(c, { t: 'worldStates', do: 'refused', why: 'only this world’s admin can change how a world stands' });
+      return;
+    }
+    const got = worldStates.set(msg);
+    if (!got.ok) {
+      send(c, { t: 'worldStates', do: 'refused', why: got.why });
+      return;
+    }
+    for (const o of clients.values()) if (o.hello) send(o, { t: 'worldStates', states: got.states });
+    if (got.changed) console.log(`  ${c.id} ${who(c)} stood the world states as ${JSON.stringify(got.states)}`);
   } else if (msg.t === 'npcDrop') {
     // A browser saying it cannot keep one: it has no body for that creature and cannot build one
     // (its catalogue does not know the species), or its model has still not landed. Keeping a
@@ -1825,6 +1856,8 @@ const server = createServer((req, res) => {
         purses: purses.describe(),
         stories: stories.describe(),
         progress: progress.describe(),
+        // How each world with states stands for everybody here (worldState.mjs): the admin's last word, else its default.
+        worldStates: worldStates.hail(),
         joinWord: WORD ? 'set' : 'none',
         admin: adminFor(store.data, ADMIN) || 'nobody yet',
         friendlyFire: FRIENDLY_FIRE,
@@ -1900,7 +1933,8 @@ server.on('upgrade', (req, socket) => {
   // `paint` that it passes a ship's colours carried whole on, so a browser knows whether the others see them;
   // `props` that it keeps a player's props, so a browser hands its own to it rather than keeping them itself;
   // `progress` that it holds each character's progress, so a browser claims rather than paying itself.
-  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION, props: PROPS_VERSION, homes: HOMES_VERSION, progress: progress.hail(), gear: GEAR_VERSION, veh: VEHICLE_WIRE_VERSION, race: RACE_VERSION });
+  // `states` the world states it keeps (worldState.mjs), which a browser stands at its next arrival on that world.
+  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION, props: PROPS_VERSION, homes: HOMES_VERSION, progress: progress.hail(), gear: GEAR_VERSION, veh: VEHICLE_WIRE_VERSION, race: RACE_VERSION, states: worldStates.hail() });
   if (WORD) {
     const grace = setTimeout(() => {
       if (!c.player && clients.has(c.id)) deny(c, 'this server has a join word and none was given');
