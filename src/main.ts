@@ -187,6 +187,7 @@ import { SHUTTLE_TUNE, fareText, isPortKind, landingOn, portAt, portPlacedAt, po
 import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { destinationFor, loadGalaxyFile, planetOfRouteId, routeFactsOf, systemOf, systemOfPack, systemsOfWorlds } from './data/galaxy';
 import { HOMES_MOVE_VERSION, homeKey, homes, routeHomeWord } from './net/homes.ts';
+import { NGE_OVERLAY_TUNE, ngeOverlay, serverHoldsFor, whereOf } from './world/ngeOverlay.ts';
 import { PROPS_KEEPER_TUNE, SERVER_NOT_ANSWERING, arrivalCircles, arrivalHolds, arrivalKeeper, keeperNews, keeperOf, keeperState, keeperStateOf, keptDepsOf, keptKey, keptProps, keptRefusal, routePropWord, switchSets, type Keeper, type KeeperState, type KeptRow, type KeptSets } from './net/propsKept.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
@@ -2733,6 +2734,9 @@ class App {
        * are, and, once the world's walk grid is in, the same for the sites moved onto walkable ground
        * (those with none dropped). The server's flatness test a site must pass as well when it stands is
        * not in that figure: asked of every site at once it would generate the whole world's ground.
+       *
+       * `sources` counts the sites laid and the areas they were laid over by where the area came from, Core3's or
+       * the owner's local overlay's (`nge`: Mustafar's spawn regions, `ngeOverlay.ts`), with the overlay's people.
        */
       wild: (opts?: { go?: boolean; restand?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean; coverage?: boolean }) => {
         const moved = opts?.tune ? wildLife.retune(opts.tune) : [];
@@ -2757,6 +2761,9 @@ class App {
         return {
           ready: wildLife.ready,
           ...wildLife.last,
+          // The sites and the areas by where they came from: Core3's own, or the owner's local overlay's (`nge`).
+          sources: wildLife.bySource(),
+          nge: ngeOverlay.report(),
           // The no-spawn circles of ours over what SOE's last publishes added to this world, and the sites they kept off.
           late: wildLife.lateKeptOff(),
           ...(moved.length ? { moved } : {}),
@@ -2799,9 +2806,41 @@ class App {
        * with how high it stands over the terrain now, what became of it and the streamer's last answer (`built`,
        * `coming` or `far`). A few seconds after arriving, `held` should be 0. Its numbers move with
        * `__debug.mobileTune({ perch })`.
+       *
+       * `sources` counts the rows, and the bodies standing, by where each came from: Core3's, the heralds', the
+       * people of ours, and the owner's local overlay of SOE's own (`nge`, Kashyyyk and Mustafar, `ngeOverlay.ts`),
+       * whose state is `nge`. `{ nge: 'alone' | 'always' | 'never' }` says where that overlay stands from the next
+       * arrival: where no server holds the world, on a server as well, or nowhere (in memory;
+       * `localStorage['swg.nge'] = '0'` or `'always'` keeps it in this browser). `{ roamEvery: [8, 20] }` is how often,
+       * in seconds, one of its people whose spawner let it loiter steps about, live; null takes `postEvery`'s.
+       * `{ arrivalClear: 64 }` is how many metres its people and herds who pick a fight on sight are kept from where
+       * the player comes in and back (the arrival, a teleport's spot, where a death comes round), live; nought stands
+       * them where the data does. `offArrival` counts the rows the last pass kept off or put down.
        */
-      people: (opts?: { go?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean; where?: string; mood?: boolean; gcw?: GcwSide; restand?: boolean; story?: boolean; perch?: boolean }) => {
+      people: (opts?: { go?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean; where?: string; mood?: boolean; gcw?: GcwSide; restand?: boolean; story?: boolean; perch?: boolean; nge?: string; roamEvery?: [number, number] | null; arrivalClear?: number }) => {
         if (opts?.perch) return this.world.mobiles ? this.world.mobiles.perchReport(this.player.worldPos) : 'no world loaded';
+        // How far the local overlay's people and herds who pick a fight keep from where the player comes in and back, live.
+        if (opts?.arrivalClear !== undefined) {
+          const c = opts.arrivalClear;
+          if (typeof c !== 'number' || !Number.isFinite(c) || c < 0) return { refused: 'arrivalClear: metres, nought or more' };
+          NGE_OVERLAY_TUNE.arrivalClear = c;
+        }
+        // How often a person of the local overlay whose spawner let it loiter or wander takes a step, live (a post
+        // reads it at each step): a pair of seconds, or null for the standing people's own `postEvery`.
+        if (opts?.roamEvery !== undefined) {
+          const r = opts.roamEvery;
+          if (r === null) NGE_OVERLAY_TUNE.roamEvery = null;
+          else if (Array.isArray(r) && r.length === 2 && r.every((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0)) NGE_OVERLAY_TUNE.roamEvery = [Math.min(r[0], r[1]), Math.max(r[0], r[1])];
+          else return { refused: 'roamEvery: a pair of seconds, least and most, or null' };
+        }
+        // Where the owner's local overlay stands (`ngeOverlay.ts`): in memory, read at the next arrival; the stored
+        // switch is his to keep (`localStorage['swg.nge']`).
+        if (opts?.nge !== undefined) {
+          const where = whereOf(opts.nge);
+          if (!where) return { refused: `nge: 'alone', 'always' or 'never' (it was ${JSON.stringify(opts.nge)})` };
+          NGE_OVERLAY_TUNE.where = where;
+          return { nge: ngeOverlay.report(), note: `from the next arrival (a travel, or the select screen and back): ${where === 'alone' ? 'stood where no server holds the world' : where === 'always' ? 'stood on a server too, where only this browser holds and sees them' : 'left out everywhere'}; localStorage['swg.nge'] = '0' or 'always' keeps it in this browser` };
+        }
         if (opts?.story) {
           const book = this.story.book;
           return {
@@ -2841,7 +2880,7 @@ class App {
           const cell = p.indoors ? this.world.enterCellAt(to) : 0;
           return { went: p, cell, note: p.indoors ? 'indoors: they stand once the building around them is built' : 'they stand on the next pass' };
         }
-        return { ready: standingPeople.ready, ...standingPeople.last, side: standingPeople.side, ...(moved.length ? { moved } : {}), standing: standingPeople.report(at), nearest: near, tune: { ...PEOPLE_TUNE } };
+        return { ready: standingPeople.ready, ...standingPeople.last, side: standingPeople.side, sources: standingPeople.bySource(), nge: ngeOverlay.report(), ...(moved.length ? { moved } : {}), standing: standingPeople.report(at), nearest: near, tune: { ...PEOPLE_TUNE } };
       },
       /**
        * The people of ours (`src/world/ambient/`): the travellers who come to a port for each round of its
@@ -11003,6 +11042,20 @@ class App {
     });
     // Aboard a ship's rooms nothing is stood, whoever asks (the console, the spawner, the wildlife).
     this.world.refuseMobiles = () => (this.player?.aboard ? 'nothing can be stood aboard a ship’s rooms' : null);
+    // The owner's local overlay of SOE's own people for Kashyyyk and Mustafar (`ngeOverlay.ts`): its index asked for
+    // once a session (one miss for anybody without it), where it stands the owner's to keep in this browser
+    // (`localStorage['swg.nge']`, '0' or 'always'), and whether a server holds the world answered for each arrival.
+    try {
+      const kept = whereOf(localStorage.getItem('swg.nge'));
+      if (kept) NGE_OVERLAY_TUNE.where = kept;
+    } catch {
+      /* a page that refuses storage keeps the default */
+    }
+    void ngeOverlay.fetchIndex(import.meta.env.BASE_URL);
+    this.world.serverHoldsWorld = () => this.serverHoldsHere();
+    // Where this world brings the player in and back (the arrival, a teleport's spot, and where a death comes round
+    // with no cloning facility near): the overlay's people and herds who pick a fight keep clear of it.
+    this.world.arrivalPoint = () => this.spawn;
     this.appearanceUi.onSpecies = (id) => void this.switchCharacter(id);
     const params = new URLSearchParams(location.search);
     this.setClass(params.get('class') === 'bounty_hunter' ? 'bounty_hunter' : 'jedi');
@@ -21073,6 +21126,23 @@ class App {
   private gearKeeperNow(): 'here' | 'server' | 'pending' {
     if (this.net.session.gearVersion >= GEAR_KEPT) return 'server';
     return keeperOf(this.gearKeptBy, this.gearStateNow()) === 'local' ? 'here' : 'pending';
+  }
+
+  /**
+   * Whether a server others share holds the world arriving, for the owner's local overlay (`serverHoldsFor` in
+   * `ngeOverlay.ts`): asked a tenth of a second at a time from the moment it is asked, so it needs no frame, and
+   * never longer than the props keeper's own wait for an answer.
+   */
+  private serverHoldsHere(): Promise<boolean> {
+    const began = performance.now();
+    return new Promise((resolve) => {
+      const ask = (): void => {
+        const holds = serverHoldsFor(this.net.session, this.net.wanted, this.relayAsked, performance.now() - began);
+        if (holds === null) setTimeout(ask, 100);
+        else resolve(holds);
+      };
+      ask();
+    });
   }
 
   /** The frame's turn: who keeps them, asked every `everyMs`. */

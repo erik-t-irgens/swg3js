@@ -250,10 +250,11 @@ export function thinkWalking(kept: Decision | null, self: { x: number; z: number
 
 /**
  * Whether a row's body walks its round at all: a round of two points or more that it was stood at the
- * start of, and, unless `combat` says otherwise, a walker the town made unattackable -- the server's own
- * split between the walkers it set going and the combat walkers it left at their posts.
+ * start of, and, unless `combat` says otherwise, a walker set going (`setGoing` in standingPeople.ts: one
+ * the town made unattackable, or one whose data says it walks) -- the towns' own split between the walkers
+ * they set going and the combat walkers they left at their posts.
  */
-export function walksRound(route: readonly PatrolPoint[] | undefined, standsAtFirst: boolean, peaceful: boolean, tune: PatrolTune = PATROL_TUNE): boolean {
+export function walksRound(route: readonly PatrolPoint[] | undefined, standsAtFirst: boolean, setGoing: boolean, tune: PatrolTune = PATROL_TUNE): boolean {
   if (!route || route.length < 2 || !standsAtFirst) return false;
-  return peaceful || tune.combat;
+  return setGoing || tune.combat;
 }

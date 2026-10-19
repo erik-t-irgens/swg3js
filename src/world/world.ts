@@ -62,6 +62,7 @@ import { Doors, type DoorView } from './doors.ts';
 import { InstanceLocks } from './instances.ts';
 import { gatherOpeners } from './doorMath.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
+import { standingList } from './ngeOverlay.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { conversationPack } from './conversationPack.ts';
@@ -551,6 +552,19 @@ export class World {
    * ship's rooms), else null. Asked by the mobiles' manager on every spawn, whoever calls it.
    */
   refuseMobiles: (() => string | null) | null = null;
+  /**
+   * Set by the game: whether a server others share holds the world this arrival is for, answered once the
+   * line can say (`serverHoldsFor` in `ngeOverlay.ts`). The owner's local overlay asks it behind the loading
+   * screen and is left out where a server holds the world, unless he says otherwise. None, and nobody does.
+   */
+  serverHoldsWorld: (() => Promise<boolean>) | null = null;
+  /**
+   * Set by the game: where this world brings the player in and back, in the world's frame (the arrival, a
+   * teleport's spot, and so where a death comes round on a world with no cloning facility). The owner's local
+   * overlay keeps its people and herds who pick a fight on sight that far off it (`NGE_OVERLAY_TUNE.arrivalClear`).
+   * None, and nothing is kept off.
+   */
+  arrivalPoint: (() => { readonly x: number; readonly z: number } | null) | null = null;
   /** What the fighters need from the game, kept across planets and given to each new manager. */
   npcDeps: Partial<NpcDeps> = {};
   /** The player as something that can be hurt and fought: its place and state are set each frame. */
@@ -1664,7 +1678,7 @@ export class World {
     // The world's own wildlife: where the server's spawn areas are and what may stand in them. A
     // few hundred kilobytes a world beside the fleet's one manifest, and a world with no such pack
     // simply has the wildlife it always had.
-    await wildLife.load(this.packId, import.meta.env.BASE_URL);
+    await wildLife.load(this.packId, import.meta.env.BASE_URL, { serverHolds: this.serverHoldsWorld ?? undefined });
     if (token !== this.loadToken) return null;
     // The people who stand somewhere and stay there ride in the same pack the wildlife does, so the
     // rows are taken from what that fetch already holds rather than fetched a second time. Beside them
@@ -1673,8 +1687,12 @@ export class World {
     // world as it was.
     await Promise.race([conversationPack.pending, new Promise<void>((r) => setTimeout(r, 4000))]);
     if (token !== this.loadToken) return null;
+    // The owner's local overlay's people last of all (`standingList` in `ngeOverlay.ts`), so every row before them
+    // keeps its place in the list, and so its `stood:` name, in every browser; stood behind this same loading
+    // screen with the rest.
     const people = wildLife.peopleRows() as StandingRow[];
-    standingPeople.adopt(people.length ? [...people, ...conversationPack.standRows(this.packId)] : people, wildLife.peopleCreatures(), wildLife.peopleExtras());
+    const heralds = people.length ? conversationPack.standRows(this.packId) : [];
+    standingPeople.adopt(standingList(people, heralds, wildLife.overlayRows() as StandingRow[]), wildLife.peopleCreatures(), wildLife.peopleExtras());
     this.packProgress = 0.12;
 
     const scatter: ScatterItem[] = [];
@@ -3374,7 +3392,7 @@ export class World {
     for (const t of this.floraTrunks().trunks) things.push({ x: t.x, z: t.z, r: t.r, what: 'a tree or a rock (its collision shape)' });
     const c = this.layoutCenter ?? { x: 0, z: 0 };
     for (const s of wildLife.allSites) things.push({ x: rawToGameX(c.x, s.x), z: rawToGameZ(c.z, s.z), r: Math.max(5, s.size / 2), what: `a lair, herd or camp (${s.lair})` });
-    for (const r of wildLife.peopleRows() as StandingRow[]) {
+    for (const r of [...(wildLife.peopleRows() as StandingRow[]), ...(wildLife.overlayRows() as StandingRow[])]) {
       if (r.cell || !Number.isFinite(r.x) || !Number.isFinite(r.z)) continue;
       things.push({ x: rawToGameX(c.x, r.x), z: rawToGameZ(c.z, r.z), r: 1, what: `a post (${r.who})` });
     }
@@ -6552,6 +6570,8 @@ export class World {
         // The outdoor walk grid, once this world has one: a site laid on a cliff or in a lake is moved
         // to open ground, or not stood.
         walkable: (x, z) => (outdoorNav.ready ? outdoorNav.walkable(x, z) : null),
+        // Where the player comes in and back, which the owner's local overlay's herds that pick a fight keep clear of.
+        arrival: () => this.arrivalPoint?.() ?? null,
         nest: {
           scene: this.scene,
           physics: this.physics,
@@ -6718,6 +6738,8 @@ export class World {
         keeps: (m) => this.followers.holds(m),
         // A world of copies stands nobody but in the copy the player is in.
         scope: (x, y, z) => this.inCopy(x, y, z),
+        // Where the player comes in and back, which the owner's local overlay's people who pick a fight keep clear of.
+        arrival: () => this.arrivalPoint?.() ?? null,
         // One of them the story killed for this character is never stood here again.
         gone: (key) => this.peopleGone?.(key) ?? false,
       };

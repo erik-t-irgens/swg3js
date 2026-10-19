@@ -143,7 +143,10 @@
 //                                                                  in the checkout. It opens no game archive, so it takes no <swg-dir>,
 //                                                                  and it must run after the worlds and after mobiles. Writes <pack>/spawns.json
 //                                                                  per world and <out-dir>/spawns/manifest.json for the fleet; with --swg, the
-//                                                                  instances zone's too (the corvette's crews in every copy, our Star Destroyer crew)
+//                                                                  instances zone's too (the corvette's crews in every copy, our Star Destroyer crew);
+//                                                                  --nge=<folder> then reads SOE's own people for Kashyyyk and Mustafar off the
+//                                                                  owner's local NGE copy into <out-dir>/nge only (never committed, never shipped,
+//                                                                  never from .env, never passed by a launcher); --nge=none takes that folder away
 //   node tools/swg/cli.mjs sandbox <swg-dir> <out-dir> [--seed=N]   a made-up system to fly in, 250 km across, as <out-dir>/space_sandbox:
 //                                                                  a sun and a sky borrowed from a converted zone, four to six planets with real
 //                                                                  places you can fly to, asteroid fields and three jump points; nothing in it
@@ -191,6 +194,7 @@
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { detailLevels, exteriorAppearance, resolveParts } from './appearance.mjs';
 import { LOD_FORMAT, lodMeshesFor as lodMeshesForDeps } from './lodlevels.mjs';
 import { decodeDds } from './dds.mjs';
@@ -262,6 +266,8 @@ import { CUSTOMIZATION_FILE, buildCustomization, customizationStatus } from './c
 import { LEVELS_FILE, LEVELS_SOURCE, conRows, levelsStatus } from './conTable.mjs';
 import { instanceSpawnsWhy } from './instances.mjs';
 import { SPAWNS_FORMAT, spawnsStale } from './spawnpack.mjs';
+import { NGE_ZONES, ngeArg, ngeStatus, overlayTarget, sourceInside, stampOf } from './ngepack.mjs';
+import { gitPlace } from './nge.mjs';
 import { OBJECT_EFFECTS_VERSION, readClientChildren } from './clientfx.mjs';
 import { paintRecipeMaker } from './paintrecipes.mjs';
 import { mapFrameOf } from './mapframe.mjs';
@@ -319,6 +325,13 @@ const expandEnv = (a) =>
     }
     return before + value;
   });
+// The NGE copy is named outright on the command line and never from .env (`ngeArg` in ngepack.mjs says why), so
+// its word is read off the raw command line before any `@NAME` is put in place, and refused if it is one.
+const NGE_WORD = ngeArg(process.argv.slice(2));
+if (NGE_WORD?.refuse) {
+  console.error(`spawns: ${NGE_WORD.refuse}`);
+  process.exit(1);
+}
 const args = process.argv.slice(2).map(expandEnv);
 const flags = new Set(args.filter((a) => a.startsWith('--')).map((a) => a.split('=')[0]));
 const options = Object.fromEntries(args.filter((a) => a.startsWith('--') && a.includes('=')).map((a) => a.slice(2).split('=')));
@@ -329,6 +342,89 @@ function usage() {
   const src = readFileSync(new URL(import.meta.url)).toString().split('\n');
   console.log(src.filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n'));
   process.exit(1);
+}
+
+/** This checkout's own folder: what `--nge` may never name. */
+const REPO_DIR = resolve(fileURLToPath(new URL('../../', import.meta.url)));
+
+/** `spawns --nge=none`: the local overlay taken away, said in words, and nothing else touched. */
+function removeNgeOverlay(out) {
+  const dir = join(out, 'nge');
+  if (!existsSync(dir)) {
+    console.log(`spawns: --nge=none: there is no overlay at ${dir}, so nothing was removed`);
+    return;
+  }
+  let files = 0;
+  const count = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (e.isDirectory()) count(join(d, e.name));
+      else files++;
+    }
+  };
+  count(dir);
+  rmSync(dir, { recursive: true, force: true });
+  console.log(`spawns: --nge=none: removed ${dir} (${files} files: the overlay's index, its fleet manifest and its zones' packs); the game stands Core3's people alone again`);
+}
+
+/**
+ * The NGE half of `spawns` (`--nge=<folder>`): SOE's own placements for Kashyyyk's seven zones and Mustafar, read
+ * off the owner's local copy (`nge.mjs`) and turned into packs the game already reads (`ngepack.mjs`), written
+ * under `<out>/nge/` alone: `index.json`, `spawns/manifest.json` and `spawns/<zone>.json`. A zone whose pack is
+ * not converted is left out and said. The archives (`vfs`) give the zones' own area tables and the buildouts the
+ * crews' copies and rooms are found in; without them the crews are left out and said. Nothing of it is ever
+ * committed or shipped: the launcher never passes `--nge`, and the target is refused unless git ignores it.
+ */
+async function spawnsNge({ out, outDir, reader, vfs, groundOf }) {
+  const t0 = Date.now();
+  const P = await import('./ngepack.mjs');
+  const catFile = join(out, 'mobiles', 'catalogue.json');
+  if (!existsSync(catFile)) {
+    console.log(`spawns: nge: no mobiles catalogue at ${catFile}; run mobiles first, since every body here has to reach a model`);
+    return;
+  }
+  const catalogue = JSON.parse(readFileSync(catFile, 'utf8'));
+  const zones = NGE_ZONES.filter((z) => existsSync(join(out, z, 'manifest.json')) && existsSync(join(out, z, 'layout.json')));
+  const missing = NGE_ZONES.filter((z) => !zones.includes(z));
+  const packOf = (zone) => {
+    try {
+      const layoutBytes = readFileSync(join(out, zone, 'layout.json'));
+      return { layout: JSON.parse(layoutBytes.toString('utf8')), manifest: JSON.parse(readFileSync(join(out, zone, 'manifest.json'), 'utf8')), stamp: stampOf(layoutBytes) };
+    } catch {
+      return null;
+    }
+  };
+  const read = (path) => {
+    try {
+      return vfs?.has(path) ? parseDatatable(parseIff(vfs.read(path))).rows : null;
+    } catch {
+      return null;
+    }
+  };
+  const built = P.buildNgeOverlay({
+    reader,
+    zones,
+    packOf,
+    groundOf,
+    snapOf: vfs ? (zone) => mergeBuildouts({ templates: [], nodes: [] }, loadBuildouts(vfs, zone)) : null,
+    clientAreas: vfs ? (zone) => read(`datatables/buildout/areas_${zone}.iff`) : null,
+    catalogue,
+    converted: new Date().toISOString(),
+  });
+  // What the last run wrote goes first, so a zone this run no longer writes leaves no pack behind it.
+  rmSync(join(outDir, 'spawns'), { recursive: true, force: true });
+  mkdirSync(join(outDir, 'spawns'), { recursive: true });
+  writeFileSync(join(outDir, 'spawns', 'manifest.json'), JSON.stringify(built.manifest, null, 1));
+  for (const [zone, pack] of Object.entries(built.packs)) writeFileSync(join(outDir, 'spawns', `${zone}.json`), JSON.stringify(pack, null, 1));
+  writeFileSync(join(outDir, 'index.json'), JSON.stringify(built.index, null, 1));
+  const c = built.index.counts;
+  for (const [zone, z] of Object.entries(built.index.zones)) {
+    const f = z.frame;
+    console.log(`spawns: nge ${zone} — ${z.rows} people (${z.statics} standing in one place, ${z.corpses} corpses, ${z.crew} crew, ${z.spawners + z.patrols} from ${z.sites} spawners over ${z.copies} area copies), ${z.areas} wild areas${z.dropped ? ` (${z.dropped} no-spawn region holding them whole dropped)` : ''}; frame: objects median ${f.objects.median ?? '-'} m over ${f.objects.matched}, ground ${f.ground.reading} (${f.ground.asIs} m as written, ${f.ground.mirrored} m mirrored)${z.routeLost ? `; ${z.routeLost} routes with a point missing` : ''}${z.crewLost ? `; ${z.crewLost} crew rows in no room` : ''}${z.inCell ? `; ${z.inCell} spawners in a room, left out` : ''}`);
+  }
+  console.log(`spawns: nge — ${c.rows} people over ${Object.keys(built.packs).length} zones (${c.statics} standing in one place, ${c.corpses} corpses, ${c.crew} crew), ${c.areas} wild areas, ${c.creatures} creatures (${c.withGame} with their own numbers), ${c.gated} quest-gated spawners left out, ${c.unresolved} unresolved, from ${reader.roots.root} (${built.index.copy.files} files) into ${outDir}, in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+  if (c.crewTablesLeft) console.log(`spawns: nge — ${c.crewTablesLeft} room crews left out: their copies and rooms are found in the archives, so run with --swg=<swg-dir>`);
+  if (missing.length) console.log(`spawns: nge — not converted yet, so left out: ${missing.join(', ')}`);
+  if (built.index.unresolved.length || built.index.bodiless.length) console.log(`spawns: nge — unresolved: ${[...built.index.unresolved, ...built.index.bodiless].slice(0, 20).join(', ')}`);
 }
 
 function mount(dir) {
@@ -3466,6 +3562,23 @@ function packStatus(dir) {
       const talk = conversationsStatus(dir, CORE3_REF_DIR, readdirSync(dir).filter((w) => existsSync(join(dir, w, 'spawns.json'))));
       console.log(talk.line);
       if (talk.why) need(`conversations <swg-dir> ${dir} --retail-only`, talk.why);
+    }
+    // The owner's local NGE overlay (`spawns --nge`, ngepack.mjs): one line while it is there and nothing at all
+    // otherwise, so a launcher player is never told of it. What to run again is said here and never put in the
+    // to-do list, since a step there is one a launcher's plan would run, and nothing a launcher runs passes --nge.
+    const ngeIndex = readQuiet(join(dir, 'nge', 'index.json'));
+    if (ngeIndex) {
+      const layouts = {};
+      for (const z of Object.keys(ngeIndex.zones ?? {})) {
+        try {
+          layouts[z] = stampOf(readFileSync(join(dir, z, 'layout.json')));
+        } catch {
+          layouts[z] = null;
+        }
+      }
+      const said = ngeStatus(ngeIndex, { catalogue: mobiles.converted ?? null, layouts });
+      console.log(said.line);
+      if (said.ask) console.log(`  nge overlay: run again by hand (no launcher ever does): npm run swg -- ${said.ask.command.replace('<out-dir>', dir)}  -- ${said.ask.why}`);
     }
   }
   // The sound bank: every sound the game may play, the samples, and where each one is used.
@@ -7961,16 +8074,42 @@ switch (cmd) {
     // git-ignored output folder exactly as the packs converted from the game's own archives do.
     // `tools/swg/core3.mjs` says what the four-file chain is and where it is not what it looks like.
     if (!pos[1]) usage();
-    const src = core3SourceFor(options);
-    if (!src || src.missing) {
-      console.log(`spawns: ${src ? src.missing : '--core3=none: no emulator data, so no spawns'}`);
+    // `--nge=<folder>`: SOE's own people for Kashyyyk and Mustafar, read off the owner's local NGE copy after the
+    // Core3 half, into <out-dir>/nge only (`spawnsNge`, `ngepack.mjs`); `--nge=none` takes that folder away and
+    // does nothing else. Every refusal comes before anything is written.
+    if (NGE_WORD?.value === 'none') {
+      removeNgeOverlay(resolve(pos[1]));
       break;
     }
-    const c3 = await import('./core3.mjs');
+    let ngeReader = null;
+    let ngeOut = null;
+    if (NGE_WORD?.value) {
+      const target = overlayTarget(resolve(pos[1]), gitPlace);
+      if (target.refuse) {
+        console.log(`spawns: ${target.refuse}`);
+        process.exitCode = 1;
+        break;
+      }
+      const from = resolve(NGE_WORD.value);
+      if (sourceInside(from, REPO_DIR)) {
+        console.log(`spawns: --nge=${from} is inside this repository; the NGE copy is read where it stands and is never brought into it`);
+        process.exitCode = 1;
+        break;
+      }
+      const { makeNgeReader } = await import('./nge.mjs');
+      ngeReader = makeNgeReader(from);
+      if (!ngeReader) {
+        console.log(`spawns: --nge=${from} holds no NGE tables (name the copy's checkout, its dsrc, or its server datatables folder)`);
+        process.exitCode = 1;
+        break;
+      }
+      ngeOut = target.dir;
+    }
+    const src = core3SourceFor(options);
     const trn = await import('../../src/swg/terrain/trn.ts');
     // Mounted once when the archives are offered: the nests are converted from it and every world's
     // snapshot is read from it to put the indoor people where they really stand.
-    const spawnVfs = options.swg ? mount(options.swg) : null;
+    const spawnVfs = options.swg && ((src && !src.missing) || ngeReader) ? mount(options.swg) : null;
     /**
      * The pack's own ground, as a function of x and z, for the frame check.
      *
@@ -8002,6 +8141,15 @@ switch (cmd) {
         return () => NaN;
       }
     };
+    // The NGE half, once the Core3 half has run (or has nothing to run): it reads the packs and the catalogue
+    // the converter already wrote and writes under <out-dir>/nge alone.
+    const ngeHalf = ngeReader ? () => spawnsNge({ out: resolve(pos[1]), outDir: ngeOut, reader: ngeReader, vfs: spawnVfs, groundOf: (zone) => terrainHeights(join(pos[1], zone)) }) : null;
+    if (!src || src.missing) {
+      console.log(`spawns: ${src ? src.missing : '--core3=none: no emulator data, so no spawns'}`);
+      if (ngeHalf) await ngeHalf();
+      break;
+    }
+    const c3 = await import('./core3.mjs');
     const started = Date.now();
     const sp = await import('./spawnpack.mjs');
     const regions = src.readRegions();
@@ -8419,6 +8567,7 @@ switch (cmd) {
       `spawns: ${worlds} worlds, ${areas} spawn areas, ${people} standing people (${lostBy.body} with no body, ${lostBy.room} in no room), ${joined.size} creatures with the server's own level, health and damage (${withGame} with their own numbers; ${missing.length} named a body we have not got), ${Object.keys(dressOut).length} dress groups, ${Object.keys(weaponOut).length} weapon groups, ${lairs.size} lairs, ${groups.size} groups; ${dropped.get('?') ?? 0} rows with no world, ${luaSkipped} script statements stepped over, in ${((Date.now() - started) / 1000).toFixed(1)}s`,
     );
     if (noWorld.length) console.log(`spawns: not converted yet, so left out: ${noWorld.join(', ')}`);
+    if (ngeHalf) await ngeHalf();
     break;
   }
   case 'scenes': {
