@@ -817,7 +817,8 @@ export class MobileManager {
     const forced = opts.weaponTemplate && (!opts.worldId || opts.listed) ? opts.weaponTemplate : undefined;
     const own: OwnArms = { weapons: opts.weapons, groups: opts.weaponGroups, aggression: opts.overrides?.aggression, ranged: opts.overrides?.ranged, forcedTemplate: forced };
     const [model, pack, arms] = await Promise.allSettled([
-      assets.acquireModel(file, { hologram, bounds, estimate: guess.model, look: look ? { entry, cat } : undefined }),
+      // Stood indoors, its rooms programs are built before it is shown; outdoors they follow it (`roomDefer.ts`).
+      assets.acquireModel(file, { hologram, bounds, estimate: guess.model, look: look ? { entry, cat } : undefined, indoors: held.cell !== null }),
       packInfo ? assets.acquirePack(packInfo.id, packInfo.file, packInfo.json, guess.pack) : Promise.resolve(null),
       this.armsFor(entry, packInfo, held.seed, own),
     ]);

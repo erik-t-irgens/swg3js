@@ -679,6 +679,16 @@ export class ProgramWatch {
     out.sort((a, b) => b.at - a.at);
     return out.slice(0, limit);
   }
+
+  /**
+   * The same records with each one's cache key beside it, for whatever must sort them by what the program is rather
+   * than by its label (`playKindOf`): the console's own list leaves the keys out, which are long.
+   */
+  builtInPlayKeyed(): { key: string; label: string; at: number; made: number }[] {
+    const out: { key: string; label: string; at: number; made: number }[] = [];
+    for (const [key, rec] of this.history) if (rec.phase === 'play') out.push({ key, label: rec.label, at: Math.round(rec.lastAt), made: rec.made });
+    return out;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

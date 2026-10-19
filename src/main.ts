@@ -436,8 +436,13 @@ import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
 import { backendOf, checkDriver, compilerVerdict, driverCheck, forgetCompilerMeasurement, groupPrograms, loadingLine, machineAside, programMs, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type Backend, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
 import { PACE_TUNE, tuneProgramPace } from './core/programPace.ts';
+import { LINK_STATE, LINK_TUNE, LINK_WAITS, LinkCheck, linkMode, linkWhy, tuneLinks, watchLinkWaits, type LinkModeName } from './core/linkMode.ts';
+import { PASS_STATES } from './world/passScenes.ts';
+import { ROOM_DEFER, ROOM_DEFER_STATS } from './world/roomDefer.ts';
+import { SKINNED_LOAD, SKINNED_STATS } from './core/skinnedLoad.ts';
+import { PERSON_KEYS_TUNE } from './world/personKeys.ts';
 import { centreAgrees, LOADING_TUNE, LoadingLog, placeFromPois, programsForUp, raceCurtainNeed, tuneLoading } from './world/loadingTune.ts';
-import { census as programFamilies } from './core/fx/programCensus.ts';
+import { census as programFamilies, playKindOf } from './core/fx/programCensus.ts';
 import { censusOf, CNT, PASS, PERF, perf, PERF_SWITCHES, PERF_TUNE, PERF_WAIT_MS, readMarks, registerPerfSwitch, SEC, writeMark, type TraceReport } from './core/perf.ts';
 
 // The race drive's hatch, read before anything spawns or the garage sorts a vehicle: `localStorage['swg.race'] = '0'`
@@ -1546,6 +1551,9 @@ class App {
     } catch {
       this.backend = 'unknown';
     }
+    // The link-wait watch (`linkMode.ts`): the GL calls that can make the main thread wait on a shader link, wrapped
+    // once on this context and timed, whoever makes them, so a frame's real wait is known (T9). Nothing on a steady frame.
+    watchLinkWaits(this.renderer.getContext(), () => performance.now());
     // ?lowfx=1 is the cheap preset for this session; otherwise the settings kept in this browser.
     const lowfx = new URLSearchParams(location.search).get('lowfx') === '1';
     if (lowfx) Object.assign(this.settings, { renderScale: 0.5, shadows: false, effects: false });
@@ -1811,6 +1819,21 @@ class App {
       set: (v) => this.setPeopleSwitch(v === 'out' || v === 'hidden' ? v : 'on'),
       values: ['on', 'out', 'hidden'],
       note: "'out' takes every creature's and person's container out of the scene with their simulation still running (what the console paste on the main before this pass did); 'hidden' sets it invisible and leaves it in the scene graph",
+    });
+    // The performance pass's second wave, each first value the old way: one render state for every pass (the light
+    // version moving three times a frame) against one per pass (`passScenes.ts`), and an outdoor body's rooms programs
+    // built before it is shown against built after it, off the frame (`roomDefer.ts`).
+    registerPerfSwitch('renderStates', {
+      get: () => PASS_STATES.mode,
+      set: (v) => (PASS_STATES.mode = v === 'shared' ? 'shared' : 'perPass'),
+      values: ['shared', 'perPass'],
+      note: "'shared' draws the shadow pass, the world and every rooms pass with one render state, so every lit material works its program out again three times a frame; 'perPass' gives the shadow pass and the rooms their own scenes. Flipped live, the depth programs of the new set are built on live frames once: a comparing switch",
+    });
+    registerPerfSwitch('roomDefer', {
+      get: () => ROOM_DEFER.on,
+      set: (v) => (ROOM_DEFER.on = !!v),
+      values: [false, true],
+      note: "true builds a body stood outdoors with its world pass's programs only and its rooms pass's after it, off the frame; read when a body is prepared, so an in-session ab compares only bodies prepared while it runs",
     });
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
     this.world.attachCamera(this.cam.camera, true, this.portals);
@@ -2553,8 +2576,8 @@ class App {
       this.world.npcDeps.weapons = c;
       this.world.npcDeps.effects = this.effects;
       // Before a fighter is shown: its own shaders, then the motion blur's for its outfit's morph counts.
-      this.world.npcDeps.compile = async (objects) => {
-        await this.world.compileReady(objects);
+      this.world.npcDeps.compile = async (objects, opts) => {
+        await this.world.compileReady(objects, undefined, opts);
         await this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots(objects);
       };
       this.world.npcs?.attach(this.world.npcDeps);
@@ -4076,6 +4099,36 @@ class App {
        * `LOADING_TUNE` in memory first.
        */
       loading: (opts?: { tune?: Partial<Record<keyof typeof LOADING_TUNE, unknown>> }) => this.loadingReport(opts),
+      /**
+       * How shader programs are linked (`linkMode.ts`): the mode and why, the backend, what is in flight, issued and
+       * resolved, how long a program takes from asked to ready, what the main thread waited on links (the watch, timed at
+       * the GL calls whoever made them), what the bound and a hiding tab resolved, and the room deferral's counts.
+       * `links({ mode: 'blocking' })` or `'parallel'` forces a mode for comparing and `'checked'` gives the check's back;
+       * `links({ tune: { inFlight: 4 } })` moves `LINK_TUNE`; `links({ forget: true })` counts the waits from nought.
+       */
+      links: (opts?: { mode?: LinkModeName | 'checked'; tune?: Partial<Record<keyof typeof LINK_TUNE, unknown>>; forget?: boolean }) => this.linksReport(opts),
+      /**
+       * What every skinned mesh was made into as it loaded (`skinnedLoad.ts`): joints widened to floats, geometries padded
+       * to which rung of the morph ladder, meshes whose influences were extended, geometries met already drawn (nought by
+       * construction in the game, which widens every model in its loader before a frame can draw it: a guard for a
+       * caller that does not exist yet, and no check), and the two hatches and the ladder as read at load, which a
+       * session refuses to move.
+       */
+      skinnedLoad: (opts?: { ladder?: unknown; floatJoints?: unknown; morphLadder?: unknown }) => {
+        const asked = !!opts && ('ladder' in opts || 'floatJoints' in opts || 'morphLadder' in opts);
+        return {
+          floatJoints: SKINNED_LOAD.floatJoints,
+          morphLadder: SKINNED_LOAD.morphLadder,
+          ladder: [...PERSON_KEYS_TUNE.morphLadder],
+          joints: SKINNED_STATS.joints,
+          padded: SKINNED_STATS.padded,
+          byRung: { ...SKINNED_STATS.byRung },
+          influences: SKINNED_STATS.influences,
+          metDrawn: SKINNED_STATS.metDrawn,
+          pastTop: SKINNED_STATS.pastTop,
+          ...(asked ? { refused: "the ladder and the two hatches are read once at load (the warm lists are made from them at the first screen): set localStorage['swg.floatJoints'] or localStorage['swg.morphLadder'] to '0' and reload to take one away" } : {}),
+        };
+      },
       shaders: (opts?: { full?: boolean; groups?: boolean; families?: boolean; since?: boolean; raw?: boolean; keepStrays?: boolean; probe?: 'again'; pace?: Partial<typeof PACE_TUNE> }) => {
         if (opts?.keepStrays !== undefined) SHADOW_STRAYS.keep = opts.keepStrays;
         // The driver check and the sweep's timing forgotten, so the next loading screen measures them afresh (the
@@ -4137,6 +4190,11 @@ class App {
           // The newest twenty, or with `full` every one the history still holds (`keys` of them at most):
           // a count read off the short list is a lower bound and nothing else.
           builtInPlay: this.shaderWatch.builtInPlay(opts?.full ? Number.POSITIVE_INFINITY : 20),
+          // The performance pass's second wave: what was built in play since the last screen lifted, by kind (T10 reads
+          // `depth` and `velocity`, which should stay nought: the skinned depth combinations and the velocity variants are
+          // warmed behind the first screen), and what was warmed there.
+          inPlay: this.inPlayByKind(),
+          warm: this.warmedByKind(),
         };
         if (opts?.since) out.since = this.shaderWatch.takeSince();
         if (opts?.groups) out.groups = grouped.groups;
@@ -6215,22 +6273,35 @@ class App {
         this.drawFrame();
         return pass.check(this.renderer, this.postfx.sceneTarget);
       },
-      /** Draw `n` frames back to back with the GPU waited on after each, and report the milliseconds one takes; `await bench(30, false)` first turns the effects off, `bench(30, true)` on. */
+      /**
+       * Draw `n` frames back to back with the GPU waited on after each, and report the milliseconds one takes; `await
+       * bench(30, false)` first turns the effects off, `bench(30, true)` on. The wait is a 1x1 `readPixels` from the
+       * canvas after each frame, which cannot return before the GPU has drawn it: `gl.finish()`, which this used, returns
+       * at once in Chrome, so the old figure was the CPU's side alone.
+       */
       bench: async (n = 30, effects?: boolean) => {
         if (effects !== undefined && effects !== this.settings.effects) {
           this.settings.effects = effects;
           await this.reconcileEffects();
         }
         const gl = this.renderer.getContext();
+        const pixel = new Uint8Array(4);
+        const sync = (): void => {
+          // The canvas's own framebuffer: whatever target the frame left bound, the read is of what was drawn last.
+          const was = this.renderer.getRenderTarget();
+          if (was) this.renderer.setRenderTarget(null);
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+          if (was) this.renderer.setRenderTarget(was);
+        };
         this.drawFrame();
-        gl.finish();
+        sync();
         const t0 = performance.now();
         for (let i = 0; i < n; i++) {
           this.drawFrame();
-          gl.finish();
+          sync();
         }
         const ms = (performance.now() - t0) / n;
-        return { effects: !!this.postfx, msPerFrame: Number(ms.toFixed(2)), fps: Math.round(1000 / ms), calls: this.frameCalls, passes: this.portals.passes };
+        return { effects: !!this.postfx, msPerFrame: Number(ms.toFixed(2)), fps: Math.round(1000 / ms), calls: this.frameCalls, passes: this.portals.passes, gpuWaited: 'a 1x1 readPixels after each frame' };
       },
       /**
        * Open or close the map window (M): with no tab it shuts an open window and opens a shut one on the tab
@@ -15317,6 +15388,186 @@ class App {
   private ranAtStart = false;
 
   /**
+   * The programs built in play since the last loading screen lifted (all of the session's with none yet), by kind, read
+   * off the watch's own history as `loading().after` reads it and sorted by each program's own cache key
+   * (`playKindOf`): velocity variants (`fx.velocity`), depth programs (three's depth and distance materials, the sway's
+   * twins and the grass's casting material, whatever they are named; `skinnedDepth` those of a skinned body), and
+   * everything else, colour.
+   */
+  private inPlayByKind(): { colour: number; depth: number; skinnedDepth: number; velocity: number; since: number } {
+    const from = this.loadingLog.afterWindow.from;
+    let colour = 0;
+    let depth = 0;
+    let skinnedDepth = 0;
+    let velocity = 0;
+    for (const b of this.shaderWatch.builtInPlayKeyed()) {
+      if (b.at < from) continue;
+      const k = playKindOf(b.key, b.label);
+      if (k.kind === 'velocity') velocity++;
+      else if (k.kind === 'depth') {
+        depth++;
+        if (k.skinned) skinnedDepth++;
+      } else colour++;
+    }
+    return { colour, depth, skinnedDepth, velocity, since: Number.isFinite(from) ? Math.round((performance.now() - from) / 100) / 10 : 0 };
+  }
+
+  /** What the loading screens warmed of the programs a body needs (`shaders().warm`): the velocity variants and the depth combinations. */
+  private warmedByKind(): { velocity: { warm: number; ready: number; others: number; othersReady: number } | null; depth: number; skinnedDepth: number; sway: number; programs: number } {
+    const w = this.world.shadowDepthWarm;
+    return { velocity: this.postfx?.product<VelocityProduct>('velocity')?.warmCount() ?? null, depth: w.plain, skinnedDepth: w.skinned, sway: w.standIns, programs: w.programs };
+  }
+
+  /** `__debug.links()`: see its comment there. */
+  private linksReport(opts?: { mode?: LinkModeName | 'checked'; tune?: Partial<Record<keyof typeof LINK_TUNE, unknown>>; forget?: boolean }): Record<string, unknown> {
+    const words: string[] = [];
+    if (opts?.mode !== undefined) {
+      if (opts.mode === 'checked') LINK_STATE.forced = null;
+      else if (opts.mode === 'parallel' || opts.mode === 'blocking') LINK_STATE.forced = opts.mode;
+      else words.push(`no mode called ${String(opts.mode)}: 'parallel', 'blocking' or 'checked'`);
+    }
+    if (opts?.tune) words.push(...tuneLinks(opts.tune));
+    if (opts?.forget) LINK_WAITS.forget();
+    const hidden = document.hidden;
+    const q = this.world.programs.flight;
+    const o = this.world.outrightLinks;
+    const w = LINK_WAITS;
+    const r2 = (n: number): number => Math.round(n * 100) / 100;
+    const routes = this.portals.actors.stats;
+    return {
+      mode: linkMode(hidden),
+      why: linkWhy(hidden),
+      checked: { mode: LINK_STATE.checked, why: LINK_STATE.why, decided: LINK_STATE.decided, ...(this.linkCheck ? this.linkCheck.facts() : {}) },
+      forced: LINK_STATE.forced,
+      backend: this.backend,
+      inFlight: q.programsInFlight,
+      inFlightObjects: q.objects,
+      issued: q.issued + o.issued,
+      resolved: q.resolved + o.resolved,
+      medianReadyMs: r2(q.medianReadyMs()),
+      worstReadyMs: r2(Math.max(q.worstReadyMs, o.worstReadyMs)),
+      // T9: the worst main-thread milliseconds any frame of play waited on links, and the frames of play past
+      // `waitFrameMs`, timed at the GL calls whoever made them; every frame's (loading screens included) beside.
+      worstFrameMs: r2(w.worstPlayMs),
+      framesOver: w.framesOverPlay,
+      playFrames: w.playFrames,
+      everyFrame: { worstMs: r2(w.worstMs), framesOver: w.framesOver },
+      lastFrameMs: r2(w.lastMs),
+      calls: w.calls,
+      totalMs: Math.round(w.totalMs),
+      boundResolved: q.bound + o.bound,
+      hiddenResolved: q.hiddenResolved + o.hidden,
+      turnedResolved: q.turned,
+      goneInFlight: q.gone + o.gone,
+      rooms: {
+        on: ROOM_DEFER.on,
+        deferredWide: routes.deferredWide,
+        deferredLit: routes.deferredLit,
+        notReady: routes.notReady,
+        pending: this.portals.roomPendingCount,
+        session: { ...ROOM_DEFER_STATS },
+      },
+      renderStates: PASS_STATES.mode,
+      lightChurn: this.churnLast,
+      tune: { ...LINK_TUNE },
+      ...(words.length ? { words } : {}),
+    };
+  }
+
+  /** The ground's light version as last read, and the material it was read off (`lightChurn`). */
+  private churnVersion = -1;
+  private churnOf: THREE.Material | null = null;
+  /** The last frame's churn, for the console. */
+  private churnLast = 0;
+
+  /**
+   * How far one world material's light version moved since the last frame (`World.churnMaterial`, the ground's): three a
+   * frame outdoors beside buildings with one render state for every pass, nought with one per pass (`passScenes.ts`).
+   * Nought with no ground (space) and on the frame the material changes. Read off three's own record; nothing made
+   * once the record exists.
+   */
+  private lightChurn(): number {
+    const m = this.world.churnMaterial();
+    const props = this.renderer.properties as unknown as { has(o: object): boolean; get(o: object): { lightsStateVersion?: number } };
+    if (!m || !props.has(m)) {
+      this.churnOf = null;
+      this.churnLast = 0;
+      return 0;
+    }
+    const v = props.get(m).lightsStateVersion ?? -1;
+    const moved = m === this.churnOf && this.churnVersion >= 0 && v >= 0 ? v - this.churnVersion : 0;
+    this.churnOf = m;
+    this.churnVersion = v;
+    this.churnLast = moved;
+    return moved;
+  }
+
+  /** The boot check of the link mode (`linkMode.ts`), made by the first settle of the page; null before. */
+  private linkCheck: LinkCheck | null = null;
+
+  /**
+   * The boot check (`linkMode.ts`): one salted standard material compiled on the main renderer as its own scene and its
+   * program polled with three's `isReady` once a frame for up to `LINK_TUNE.checkMs` of the tab shown. Ready in time
+   * with no poll that waited: `parallel`; not ready or no extension: `blocking`. Once a page; what it decided stands
+   * for the session (a hidden tab is `blocking` while hidden whatever it said, and the check waits a hidden spell out
+   * rather than deciding on it). The stand-in is let go once it answers.
+   */
+  private startLinkCheck(): void {
+    if (this.linkCheck) return;
+    const check = new LinkCheck();
+    this.linkCheck = check;
+    const r = this.renderer;
+    const extension = r.extensions.has('KHR_parallel_shader_compile');
+    const material = new THREE.MeshStandardMaterial();
+    // A salt of its own, so the program is never one three or the browser's program cache already holds.
+    material.defines = { SWG_LINK_PROBE: String(Math.floor(Math.random() * 1e9)) };
+    material.name = 'link probe';
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+    let program: { isReady(): boolean; getUniforms(): unknown } | null = null;
+    try {
+      r.compile(mesh, this.cam.camera);
+      program = (r.properties.get(material) as { currentProgram?: { isReady(): boolean; getUniforms(): unknown } }).currentProgram ?? null;
+    } catch (err) {
+      console.warn('shaders: the link check could not compile its probe', err);
+    }
+    check.start(program, extension, performance.now());
+    // A tab that hides while a frame's poll is pending pauses the check at once, so the hidden spell is never counted
+    // against its window; the pending frame's poll, run when the tab shows, starts the window again.
+    const onHide = (): void => {
+      if (document.hidden && !check.done) check.poll(performance.now(), true);
+    };
+    document.addEventListener('visibilitychange', onHide);
+    const done = (): void => {
+      document.removeEventListener('visibilitychange', onHide);
+      material.dispose();
+      mesh.geometry.dispose();
+      console.info(`shaders: links are ${LINK_STATE.checked} on this machine (${LINK_STATE.why})`);
+    };
+    // Once a frame. A hidden tab draws no frames and never reports a program linked, so the check waits it out (the
+    // mode is `blocking` while it is hidden, whatever) and polls again on the first frame after the tab shows: decided
+    // while hidden, a page that entered play hidden stayed `blocking` for its whole session.
+    const onShown = (): void => {
+      if (document.hidden) return;
+      document.removeEventListener('visibilitychange', onShown);
+      requestAnimationFrame(poll);
+    };
+    const next = (): void => {
+      if (document.hidden) document.addEventListener('visibilitychange', onShown);
+      else requestAnimationFrame(poll);
+    };
+    const poll = (): void => {
+      if (check.poll(performance.now(), document.hidden, () => performance.now())) {
+        done();
+        return;
+      }
+      next();
+    };
+    if (check.done) done();
+    else if (document.hidden) poll();
+    else requestAnimationFrame(poll);
+  }
+
+  /**
    * Hold the loading screen until the world around the player is in: the pack, the ground
    * chunks under and around the feet, and the placed objects within working range. The player
    * is not simulated meanwhile, so nothing falls through ground that is not there yet. A world
@@ -15329,6 +15580,9 @@ class App {
    */
   private async settle(timeoutMs = 30000): Promise<void> {
     const t0 = performance.now();
+    // Whether this machine links shader programs in the background (`linkMode.ts`): one salted program compiled now
+    // and polled once a frame, decided long before the sweep below, once a page.
+    this.startLinkCheck();
     // The placed models the old rule would have loaded round here start loading behind this screen, so the
     // sweep below builds their programs (step 6, `World.warmPlaced`); a world whose pack is not in yet starts
     // them itself when it is.
@@ -15626,8 +15880,9 @@ class App {
     let afterOut: Record<string, unknown> | null = null;
     if (after) {
       // The programs built in play inside the window, read off the watch's own history by when each key was last
-      // built: depth and distance programs (the shadow pass's) apart from the rest, which are colour programs, and
-      // of the depth ones those of a skinned body. The motion blur's own variants are named `fx.velocity`.
+      // built and sorted by each one's own cache key (`playKindOf`): depth and distance programs (the shadow pass's,
+      // the sway's twins and the grass's casting material among them) apart from the rest, which are colour programs,
+      // and of the depth ones those of a skinned body. The motion blur's own variants are named `fx.velocity`.
       const win = this.loadingLog.afterWindow;
       let colour = 0;
       let colourSkinned = 0;
@@ -15635,16 +15890,18 @@ class App {
       let skinnedDepth = 0;
       let velocity = 0;
       const colourLabels: string[] = [];
-      for (const b of this.shaderWatch.builtInPlay(Number.POSITIVE_INFINITY)) {
+      const inWindow = this.shaderWatch.builtInPlayKeyed().sort((a, b) => b.at - a.at);
+      for (const b of inWindow) {
         if (b.at < win.from || b.at > win.until) continue;
-        if (/^fx\.velocity/.test(b.label)) velocity++;
-        else if (/(Depth|Distance)Material/.test(b.label)) {
+        const k = playKindOf(b.key, b.label);
+        if (k.kind === 'velocity') velocity++;
+        else if (k.kind === 'depth') {
           depth++;
-          if (/skinned/.test(b.label)) skinnedDepth++;
+          if (k.skinned) skinnedDepth++;
         } else {
           colour++;
           // A skinned colour program is a body's (a person, a creature); the rest are the world's own (a room, a tier).
-          if (/skinned/.test(b.label)) colourSkinned++;
+          if (k.skinned) colourSkinned++;
           if (colourLabels.length < 12) colourLabels.push(b.label);
         }
       }
@@ -19339,6 +19596,10 @@ class App {
    */
   private collectRoutes(): void {
     const r = this.portals.actors;
+    // The bodies whose rooms programs are still being built off the frame (the room deferral, `roomDefer.ts`), listed
+    // for the portal renderer before anything else: with the routes off for the frame it hides these around each rooms
+    // pass itself, so none of them is drawn there before its program is built. Kept array, written by index.
+    this.listRoomPending();
     // Collected for the routing, and for the creatures' tiers (which read how each body's rooms were seen)
     // even when only that switch is on; bodies are hidden and routed only with the routing's own.
     const routing = cullOn('actorRoutes');
@@ -19361,7 +19622,8 @@ class App {
         at[2] = m.pos.z;
         at[3] = m.ragdoll ? 2 * c.radius : c.radius;
         at[4] = from ? m.pos.distanceTo(from) : 0;
-        r.add(ROUTE_KIND.mobile, m.group, m.bladeRoot, cell ? cell.building : null, cell ? cell.cell : 0);
+        // A body counting in a room before its rooms programs are built has that job made urgent now.
+        if (r.add(ROUTE_KIND.mobile, m.group, m.bladeRoot, cell ? cell.building : null, cell ? cell.cell : 0, m.roomReady)) m.roomsNow();
       }
     }
     const npcs = w.npcs?.npcs;
@@ -19375,7 +19637,7 @@ class App {
         at[2] = n.pos.z;
         at[3] = n.ragdoll ? 2.4 : 1.3;
         at[4] = n.pos.distanceTo(n.cellFrom);
-        r.add(ROUTE_KIND.fighter, n.group, n.bladeRoot, cell ? cell.building : null, cell ? cell.cell : 0);
+        if (r.add(ROUTE_KIND.fighter, n.group, n.bladeRoot, cell ? cell.building : null, cell ? cell.cell : 0, n.roomReady)) n.roomsNow();
       }
     }
     const p = this.player;
@@ -19415,10 +19677,41 @@ class App {
       out.root = null;
     }
     r.hideFrame(routing);
+    // The room deferral's frames counted for the console: a record not room-ready that reached more rooms than the
+    // routes take (routed rather than skipped), and one with a light under it left in every pass (should stay nought).
+    if (r.stats.deferredWide > 0) ROOM_DEFER_STATS.wideFrames++;
+    if (r.stats.deferredLit > 0) ROOM_DEFER_STATS.litFrames++;
   }
 
   /** Scratch for a hull's middle in `collectRoutes`. */
   private readonly routeMid = new THREE.Vector3();
+
+  /**
+   * The roots of every creature, person and fighter whose rooms programs are still being built off the frame, into the
+   * portal renderer's kept list (`PortalRenderer.roomPending`): what it hides around a rooms pass while the routes are
+   * off for the frame. A body with a light under it is never deferred, so never on it. Nothing allocated.
+   */
+  private listRoomPending(): void {
+    const list = this.portals.roomPending;
+    let n = 0;
+    const live = this.world.mobiles?.live;
+    if (live) {
+      for (let i = 0; i < live.length; i++) {
+        const m = live[i];
+        if (m.ready && !m.removed && !m.roomReady) list[n++] = m.group;
+      }
+    }
+    const npcs = this.world.npcs?.npcs;
+    if (npcs) {
+      for (let i = 0; i < npcs.length; i++) {
+        const f = npcs[i];
+        if (!f.roomReady) list[n++] = f.group;
+      }
+    }
+    // Last frame's tail let go of, so a body taken away is not held here (written by index, never shortened).
+    for (let i = n; i < this.portals.roomPendingCount; i++) (list as (THREE.Object3D | null)[])[i] = null;
+    this.portals.roomPendingCount = n;
+  }
 
   /** The frame drawn once its visible set is worked out and what moves on its own is routed (`drawFrame`). */
   private drawFrameRouted(cam: THREE.PerspectiveCamera, view: Building | null): void {
@@ -19641,6 +19934,10 @@ class App {
     // The specks are made per chain: a pass belongs to one, and switching Effects builds a second in
     // the background and disposes the first, which would take a shared pass's points with it.
     installEffects(fx, { water: this.world.waterBodies, heat: this.heat, collectMovers: this.collectMovers, collectDofGlows: this.collectDofGlows, specks: () => new UnderwaterSpecksPass() });
+    // The motion blur's variants met after the warm-up go on the world's program queue as jobs carrying their own
+    // compile (keyed on the empty light set of their own draws), never compiled synchronously on the frame that met
+    // them nor by the world's own compile, which would key them on a pass's lights.
+    fx.product<VelocityProduct>('velocity')?.setQueue((objects, label, urgent, own) => this.world.programJob(objects, label, urgent, own));
     return fx;
   }
 
@@ -28079,6 +28376,10 @@ class App {
       const peopleBuilt = this.world.programs.peopleBuilt;
       perf.count(CNT.programsPeople, peopleBuilt - this.peopleBuiltMark);
       this.peopleBuiltMark = peopleBuilt;
+      // What this frame's main thread waited on shader links, timed at the GL calls themselves whoever made them (T9),
+      // and how far the ground's light version moved (T11: nought with a render state per pass). Numbers only.
+      perf.count(CNT.linkWait, LINK_WAITS.endFrame(phase === 'play'));
+      perf.count(CNT.lightChurn, this.lightChurn());
       this.loadingLog.frame(rawDt * 1000, tFrame, peopleBuilt, this.shaderWatch.highest);
       // The window after the last screen ran out: what was built for the bodies it had up is counted once and their
       // materials let go. One comparison a frame otherwise.

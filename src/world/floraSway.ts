@@ -26,6 +26,7 @@
 // `localStorage['swg.sway'] = '0'` skips the wrap at load: a program that fails to compile draws nothing.
 import * as THREE from 'three';
 import { padLeafBox } from './cardLight.ts';
+import { warmLadder } from './personKeys.ts';
 import { chainHas, wrapCompile, type Wrappable } from './compileHooks.ts';
 import { SWAY_APPLY, SWAY_DEFAULTS, SWAY_PARS, cyclesPerWrap, measureSway, omegaOf, stepClock, swayExcursion, swayOffset, swayPeriod, swaySelected, type SwayFrame, type SwayPrimitive, type SwayShape, type SwayTune } from './swayMath.ts';
 
@@ -467,6 +468,62 @@ export function plainDepthCombos(set: string): THREE.InstancedMesh[] {
     }
   }
   plainCombos.set(set, out);
+  return out;
+}
+
+/**
+ * Stand-ins for every way a skinned body casts its shadow through three's own depth material (the performance pass's
+ * second wave), one light set's worth: a skinned mesh for each rung of the morph ladder (`PERSON_KEYS_TUNE`, which
+ * every skinned primitive is padded to at load, with morph normals above nought as every morphed primitive the packs
+ * carry has them) by each side three gives the depth material (a front-only material casts from its back, a
+ * double-sided one from both, a back-only one from its front) by plain, pictured and pictured with a cut (which three
+ * draws through a clone of its depth material per source material, keyed alike): 27, a closed list of our own. Built
+ * in play, these were the skinned depth programs a body's first shadow frame made (14 over a Bestine walk, most of them
+ * keyed on a room's lights before the shadow pass had a scene of its own). Each makes three's shared depth material
+ * choose its program again (`chooseDepthProgram`). Not culled; never in a scene but while the warm-up draws them; their
+ * geometry, skeletons and materials are the session's, kept by `set` and ladder. With the ladder's hatch off
+ * (`warmLadder` null) there are none, as before the ladder: the counts are then the packs' own and no closed list fits.
+ */
+const skinnedCombos = new Map<string, THREE.SkinnedMesh[]>();
+export function skinnedDepthCombos(set: string, ladder: readonly number[] | null = warmLadder()): THREE.SkinnedMesh[] {
+  const rungs = ladder ?? [];
+  const key = `${set}|${rungs.join(',')}`;
+  let out = skinnedCombos.get(key);
+  if (out) return out;
+  const picture = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
+  picture.needsUpdate = true;
+  out = [];
+  for (const rung of rungs) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0], 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1, 0, 0, 1], 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1], 2));
+    // Floats, as every skinned mesh's joints are stored at load (`skinnedLoad.ts`), so Direct3D 11's input layout is the real one's.
+    g.setAttribute('skinIndex', new THREE.Float32BufferAttribute(new Float32Array(12), 4));
+    g.setAttribute('skinWeight', new THREE.Float32BufferAttribute([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], 4));
+    if (rung > 0) {
+      const zeros = new Float32Array(9);
+      g.morphAttributes.position = Array.from({ length: rung }, () => new THREE.BufferAttribute(zeros, 3));
+      g.morphAttributes.normal = Array.from({ length: rung }, () => new THREE.BufferAttribute(zeros, 3));
+    }
+    for (const side of [THREE.FrontSide, THREE.DoubleSide, THREE.BackSide]) {
+      for (const kind of ['plain', 'pictured', 'cut'] as const) {
+        const m = new THREE.MeshStandardMaterial({ side, map: kind === 'plain' ? null : picture, alphaTest: kind === 'cut' ? 0.5 : 0 });
+        m.name = `skinned depth combination (${set}, m${rung}, ${side === THREE.FrontSide ? 'cast from the back' : side === THREE.DoubleSide ? 'both sides' : 'cast from the front'}, ${kind})`;
+        const s = new THREE.SkinnedMesh(g, m);
+        const bone = new THREE.Bone();
+        s.add(bone);
+        s.bind(new THREE.Skeleton([bone]));
+        s.castShadow = true;
+        s.receiveShadow = true;
+        s.frustumCulled = false;
+        s.name = 'skinned depth stand-in';
+        s.onBeforeShadow = chooseDepthProgram as THREE.Object3D['onBeforeShadow'];
+        out.push(s);
+      }
+    }
+  }
+  skinnedCombos.set(key, out);
   return out;
 }
 

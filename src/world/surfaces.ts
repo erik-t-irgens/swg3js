@@ -12,6 +12,7 @@
 import * as THREE from 'three';
 import type { GLTF, GLTFLoader, GLTFLoaderPlugin, GLTFParser } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { frac, makeClock, stepClock, type FlipClock, type FlipMode } from './surfaceClock.ts';
+import { skinnedPlugin } from '../core/skinnedLoad.ts';
 
 /** The converter's `extras.swg` on a material (tools/swg/glb.mjs). */
 export interface SwgSurface {
@@ -164,9 +165,13 @@ export class AnimatedSurfaces {
   /** One bound listener for every material, so adopting makes no closure. */
   private readonly onDispose = (e: { target: unknown }): void => this.forget(e.target as THREE.Material);
 
-  /** Register the loader plugin; returns the loader so a field can be `surfaces.withPlugin(new GLTFLoader())`. */
+  /**
+   * Register the loader plugin, and the skinned meshes' own (`skinnedLoad.ts`: Float32 joints and the morph ladder, at
+   * load); returns the loader so a field can be `surfaces.withPlugin(new GLTFLoader())`.
+   */
   withPlugin(loader: GLTFLoader): GLTFLoader {
     loader.register((parser) => new SwgSurfacesPlugin(parser, this));
+    loader.register(skinnedPlugin);
     return loader;
   }
 

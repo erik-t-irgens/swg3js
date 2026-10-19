@@ -24,9 +24,17 @@ import { makeAdditiveOnce, missingCarries, missingRoles, rolesFor, type PackClip
 import { makeHologram } from './hologram.ts';
 import { buildLook, isLook, lookFolder, lookKey } from './look.ts';
 import { FreeTally, LOOK_SHARE, LookShare, geometryBytes, textureBytes, texturesOf, type LookHold } from './lookShare.ts';
+import { roomJob, type RoomJob } from '../roomDefer.ts';
 
-/** The cache's numbers: the bytes it may hold, loads at once, and how long a failed file is not asked for again (ms). */
-export const MOBILE_CACHE = { budget: 180e6, concurrency: 2, failFor: 30_000 };
+/**
+ * The cache's numbers: the bytes it may hold, loads at once, and how long a failed file is not asked for again (ms).
+ * The budget was 180 MB until the performance pass's second wave stored every skinned mesh's joints as floats and padded
+ * its morph targets to the ladder's rungs at load (`skinnedLoad.ts`), which the same people's models measure 3.1% the
+ * bigger for (Bestine's square, the two hatches off and then on with the budget out of the way: 264.0 against 272.3 MB
+ * referenced); 3.1% of the 180 the town filled is 5.7 MB, rounded up to the next five, 10 MB, so the same town stands the
+ * same people.
+ */
+export const MOBILE_CACHE = { budget: 190e6, concurrency: 2, failFor: 30_000 };
 
 /** GPU bytes a model takes, over its bytes on disk, until it has been loaded and measured (PNG to RGBA with mips). */
 const DISK_TO_GPU = 3.5;
@@ -61,6 +69,14 @@ export interface ModelAsset {
    * what is its alone, and what it holds is counted by the share, once however many looks hold it.
    */
   hold?: LookHold;
+  /**
+   * Its rooms pass's programs (the room deferral, `roomDefer.ts`): `ready` false while an asset first wanted by a body
+   * stood outdoors has had only its world pass built, until the job pushed after it answers; `promote` makes that job
+   * urgent (a body of it counts in a room before it is ready). Read by `Mobile.roomReady`. Ready from the start for an
+   * asset first wanted indoors, which keeps both passes urgent. Marked `gone` when the asset is disposed, so work still
+   * queued for it compiles nothing; left not ready when a world's unload let its work go unbuilt (`resume` asks again).
+   */
+  roomJob?: RoomJob;
 }
 
 export interface PackAsset extends PackClipSource {
@@ -140,8 +156,9 @@ export class MobileAssets {
    * Set by the world on every load (to `World.prepareActor`): register, upload and compile an
    * actor before it is shown. This is the hook anything else that must see a new mobile prototype
    * chains onto (the motion blur's own preparation among them), not the fighters' compile hook.
+   * `roomsLater` is the room deferral's handle (`roomDefer.ts`) for an asset first wanted by a body stood outdoors.
    */
-  prepare: ((root: THREE.Object3D, label?: string) => Promise<void>) | null = null;
+  prepare: ((root: THREE.Object3D, label?: string, roomsLater?: RoomJob) => Promise<void>) | null = null;
   /** Set by the world: take disposed materials out of the portal set and the cascades' map. */
   forget: ((materials: readonly THREE.Material[]) => void) | null = null;
   /** Set by the game once: what else must see a new prototype before it is shown, after `prepare` (the motion blur's shaders for its morph counts). */
@@ -229,12 +246,19 @@ export class MobileAssets {
    * A hologram is its own asset, `<file>#holo`, made from the plain one's parsed scene and never
    * fetched twice.
    */
-  acquireModel(file: string, opts: { hologram: boolean; bounds?: { min: Vec3; max: Vec3 }; estimate?: number; look?: LookSpec }): Promise<ModelAsset> {
+  acquireModel(file: string, opts: { hologram: boolean; bounds?: { min: Vec3; max: Vec3 }; estimate?: number; look?: LookSpec; indoors?: boolean }): Promise<ModelAsset> {
     const key = opts.hologram ? `${file}#holo` : file;
     const have = this.models.get(key);
     if (have) {
       have.refs++;
       have.lastUsed = performance.now();
+      // Wanted indoors before its rooms programs are in (it was first stood outdoors): that job goes ahead now. Wanted
+      // outdoors after its rooms work was let go unbuilt (a world unloaded while it waited): that work is asked for again,
+      // below the urgent rank; while it is merely still waiting, `resume` does nothing.
+      if (have.roomJob && !have.roomJob.ready) {
+        if (opts.indoors) have.roomJob.promote();
+        else have.roomJob.resume();
+      }
       return (have.prepared ?? Promise.resolve()).then(() => have);
     }
     const failed = this.failure(file);
@@ -243,7 +267,9 @@ export class MobileAssets {
     if (!job) {
       // A hologram's own weight is its material; the plain asset it holds is a job of its own, with the model's estimate.
       const j = { promise: null as unknown as Promise<ModelAsset>, claims: 0, estimate: opts.hologram ? HOLOGRAM_BYTES : (opts.estimate ?? UNKNOWN_BYTES) };
-      j.promise = (opts.hologram ? this.loadHologram(file, opts.bounds, opts.estimate, opts.look) : opts.look ? this.loadLook(file, opts.look, opts.bounds) : this.loadModel(file, opts.bounds)).then(
+      // The first body to want it decides whether its rooms pass may follow it (stood outdoors) or not (indoors).
+      const later = !opts.indoors;
+      j.promise = (opts.hologram ? this.loadHologram(file, opts.bounds, opts.estimate, opts.look, later) : opts.look ? this.loadLook(file, opts.look, opts.bounds, later) : this.loadModel(file, opts.bounds, later)).then(
         (asset) => {
           // Everyone who asked while it loaded holds it from the moment it lands, before any
           // continuation runs, so a trim in between can never take it.
@@ -265,7 +291,7 @@ export class MobileAssets {
     return job.promise;
   }
 
-  private async loadModel(file: string, bounds?: { min: Vec3; max: Vec3 }): Promise<ModelAsset> {
+  private async loadModel(file: string, bounds?: { min: Vec3; max: Vec3 }, roomsLater = false): Promise<ModelAsset> {
     let gltf;
     try {
       gltf = await this.slot(() => this.loader.loadAsync(this.url(file)));
@@ -273,7 +299,7 @@ export class MobileAssets {
       throw this.fail(file, err);
     }
     const asset = MobileAssets.measure(file, gltf.scene, bounds);
-    asset.prepared = this.prepareRoot(asset.scene, `model:${file}`);
+    asset.prepared = this.prepareRoot(asset.scene, `model:${file}`, roomsLater ? asset.roomJob : undefined);
     await asset.prepared;
     return asset;
   }
@@ -321,6 +347,7 @@ export class MobileAssets {
       prepared: null,
       hologram: false,
       base: null,
+      roomJob: roomJob(),
     };
   }
 
@@ -329,7 +356,7 @@ export class MobileAssets {
    * drawn, then prepared exactly as a model is before anything clones it. Two slots are shared
    * with the model loads, so a burst of dressed spawns cannot start a dozen builds at once.
    */
-  private async loadLook(key: string, spec: LookSpec, bounds?: { min: Vec3; max: Vec3 }): Promise<ModelAsset> {
+  private async loadLook(key: string, spec: LookSpec, bounds?: { min: Vec3; max: Vec3 }, roomsLater = false): Promise<ModelAsset> {
     // Taken before the build starts, so a look of the same body built meanwhile counts as already out.
     const hold = LOOK_SHARE.on ? this.shared.hold(lookFolder(spec.entry, spec.cat) ?? '') : null;
     let built;
@@ -366,14 +393,14 @@ export class MobileAssets {
     asset.missing = built.missing;
     if (built.missing.length) console.warn(`mobiles: ${spec.entry.id} wears ${built.missing.length} piece${built.missing.length === 1 ? '' : 's'} this pack has not got: ${built.missing.join(', ')}`);
     // Labelled a look's (`LOOK_LABEL`), so a program built in play for it is counted as a dressed person's.
-    asset.prepared = this.prepareRoot(asset.scene, key.startsWith(LOOK_LABEL) ? key : `${LOOK_LABEL}${key}`);
+    asset.prepared = this.prepareRoot(asset.scene, key.startsWith(LOOK_LABEL) ? key : `${LOOK_LABEL}${key}`, roomsLater ? asset.roomJob : undefined);
     await asset.prepared;
     return asset;
   }
 
-  private async loadHologram(file: string, bounds?: { min: Vec3; max: Vec3 }, estimate?: number, look?: LookSpec): Promise<ModelAsset> {
+  private async loadHologram(file: string, bounds?: { min: Vec3; max: Vec3 }, estimate?: number, look?: LookSpec, roomsLater = false): Promise<ModelAsset> {
     // The plain asset first (a model, or a look), held for the hologram's life.
-    const base = await this.acquireModel(file, { hologram: false, bounds, estimate, look });
+    const base = await this.acquireModel(file, { hologram: false, bounds, estimate, look, indoors: !roomsLater });
     // One skeleton for the meshes that shared one (commit 3a), so every body cloned from this shares one too.
     const scene = cloneShared(base.scene) as THREE.Group;
     const materials = makeHologram(scene);
@@ -398,20 +425,22 @@ export class MobileAssets {
       prepared: null,
       hologram: true,
       base,
+      roomJob: roomJob(),
     };
-    asset.prepared = this.prepareRoot(scene, `hologram:${file}`);
+    asset.prepared = this.prepareRoot(scene, `hologram:${file}`, roomsLater ? asset.roomJob : undefined);
     await asset.prepared;
     return asset;
   }
 
   /**
    * Make an object ready to be drawn without a stall, as every asset is before it is shown (a weapon a mobile will
-   * hold). `label` names it on the program queue, so a program built in play says whose it was.
+   * hold). `label` names it on the program queue, so a program built in play says whose it was. `roomsLater` is the
+   * room deferral's handle for an asset first wanted by a body stood outdoors (`roomDefer.ts`).
    */
-  prepareRoot(root: THREE.Object3D, label?: string): Promise<void> {
+  prepareRoot(root: THREE.Object3D, label?: string, roomsLater?: RoomJob): Promise<void> {
     const prepare = this.prepare;
     const also = this.alsoPrepare;
-    const first = prepare ? prepare(root, label).catch((err) => console.warn('mobiles: preparing a model failed', err)) : Promise.resolve();
+    const first = prepare ? prepare(root, label, roomsLater).catch((err) => console.warn('mobiles: preparing a model failed', err)) : Promise.resolve();
     return also ? first.then(() => also(root)).catch((err) => console.warn('mobiles: the effects could not prepare a model', err)) : first;
   }
 
@@ -542,6 +571,9 @@ export class MobileAssets {
   /** Dispose a model; answers the bytes of shared pieces that went with it (the last look to hold them). */
   private disposeModel(a: ModelAsset): number {
     this.models.delete(a.key);
+    // Its rooms work still queued (the room deferral) compiles nothing from here on: compiled after the dispose below,
+    // three would build programs for materials nothing releases and the cascades' map would take them back.
+    if (a.roomJob) a.roomJob.gone = true;
     this.forget?.(a.materials);
     for (const m of a.materials) m.dispose();
     if (a.hologram) {

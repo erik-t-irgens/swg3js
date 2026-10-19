@@ -83,6 +83,7 @@ import type { CoverDeps } from '../cover.ts';
 // rule, which is why that rule is exported and no second walk is: one home for which bones fold.
 import { SPINE_BONE, foldSpine, type FoldRecord } from './spineFold.ts';
 import type { PackAsset } from './assets';
+import type { RoomJob } from '../roomDefer.ts';
 import type { CarryWeapon, Gait, MobileEntry, MobileState, Roles, Vec3 } from './types';
 
 export type { MobileState };
@@ -139,6 +140,8 @@ const lowShare = (): number => capsuleTopFor('crouch') / Math.max(1e-3, capsuleT
 export interface MobileBody {
   key: string;
   scene: THREE.Object3D;
+  /** Its rooms programs, deferred for a body first stood outdoors (`roomDefer.ts`); absent is ready. */
+  roomJob?: RoomJob;
 }
 
 /** What the pack is played with beyond its own clips and roles: a Jedi's swings off a species rig, a rifle's stance. */
@@ -1007,6 +1010,23 @@ export class Mobile implements Living, NpcSubject {
     return !!this.model;
   }
 
+  /** The body it was hung with (`attach`), for whether its rooms programs are built yet. */
+  private wornBody: MobileBody | null = null;
+
+  /**
+   * Whether its body's rooms programs are built (the room deferral, `roomDefer.ts`): false while a body first stood
+   * outdoors has had only its world pass built. The routes never draw it in a building's pass meanwhile.
+   */
+  get roomReady(): boolean {
+    return this.wornBody?.roomJob?.ready !== false;
+  }
+
+  /** Its body's rooms programs wanted now (it counts in a room before they are built): that job goes ahead. */
+  roomsNow(): void {
+    const job = this.wornBody?.roomJob;
+    if (job && !job.ready) job.promote();
+  }
+
   /** Its lit blade's own group, which hangs beside the body rather than under it; null with no blade. */
   get bladeRoot(): THREE.Object3D | null {
     return this.blade ? this.blade.group : null;
@@ -1492,6 +1512,7 @@ export class Mobile implements Living, NpcSubject {
     markActor(scene);
     this.inner.add(scene);
     this.model = scene;
+    this.wornBody = model;
     // Each mesh culled on its own in every pass and cascade (commit 3c).
     this.refitCull();
     // A new skeleton in its rest pose: posed on its first step, whatever its tier.
@@ -4510,6 +4531,7 @@ export class Mobile implements Living, NpcSubject {
       });
       this.inner.remove(this.model);
       this.model = null;
+      this.wornBody = null;
     }
     this.meshes.length = 0;
     this.cullMeshes.length = 0;

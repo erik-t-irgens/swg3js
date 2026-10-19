@@ -9,7 +9,8 @@
 import type { RecipeRender } from './customizer.ts';
 import type { Img, Recipe, Values } from './texrender.ts';
 import { decodePng } from './png.ts';
-import { ImageCache, paintFiles, runRecipeJob, type JobImg, type PaintRecipe } from '../vehicles/paintJob.ts';
+import { hashPixels } from './bytesHash.ts';
+import { ImageCache, paintFiles, runRecipeJob, type HashedImg, type JobImg, type PaintRecipe } from '../vehicles/paintJob.ts';
 
 /** Every number here is ours. */
 export const RECIPE_WORKER_TUNE = {
@@ -46,6 +47,7 @@ interface Job {
   palettes: Record<string, number[][]>;
   dir: string;
   asked: number;
+  hash: boolean;
   resolve: (img: JobImg | null) => void;
 }
 
@@ -127,7 +129,7 @@ export function makeRecipeRender(opts: { name: string; cacheMB: number; withNorm
     hereCache.set(key, img);
     return img;
   };
-  const renderHere = async (recipe: Recipe, values: Values, palettes: Record<string, number[][]>, dir: string): Promise<JobImg | null> => {
+  const renderHere = async (recipe: Recipe, values: Values, palettes: Record<string, number[][]>, dir: string, hash = false): Promise<JobImg | null> => {
     const r = recipe as PaintRecipe;
     const mine = new Map<string, Img | null>();
     hereInFlight++;
@@ -138,8 +140,14 @@ export function makeRecipeRender(opts: { name: string; cacheMB: number; withNorm
       await new Promise((resolve) => setTimeout(resolve, 0));
       const t0 = performance.now();
       const img = runRecipeJob(r, values, palettes, (f) => (f ? (mine.get(f) ?? null) : null), withNormal);
+      // The hashes the worker would hand back, made here as the worker makes them, so the two paths agree.
+      if (img && hash) {
+        img.hash = hashPixels(img.rgba);
+        if (img.emis) img.emis.hash = hashPixels(img.emis.rgba);
+        if (img.normal) img.normal.hash = hashPixels(img.normal.rgba);
+      }
       const ms = performance.now() - t0;
-      answered({ recipe, values, palettes, dir, asked, resolve: () => {} }, img, ms);
+      answered({ recipe, values, palettes, dir, asked, hash, resolve: () => {} }, img, ms);
       return img;
     } catch (err) {
       console.warn(`${name}: ${recipe.material} did not render`, err);
@@ -154,7 +162,7 @@ export function makeRecipeRender(opts: { name: string; cacheMB: number; withNorm
     try {
       if (typeof Worker === 'undefined') throw new Error('no Worker here');
       const w = new Worker(new URL('./recipeWorker.worker.ts', import.meta.url), { type: 'module' });
-      w.onmessage = (e: MessageEvent<{ id: number; width?: number; height?: number; rgba?: Uint8Array; emis?: Img; normal?: Img; ms?: number; empty?: true; error?: string }>) => {
+      w.onmessage = (e: MessageEvent<{ id: number; width?: number; height?: number; rgba?: Uint8Array; emis?: HashedImg; normal?: HashedImg; hash?: string; ms?: number; empty?: true; error?: string }>) => {
         const m = e.data;
         const job = jobs.get(m.id);
         if (!job) return;
@@ -163,7 +171,7 @@ export function makeRecipeRender(opts: { name: string; cacheMB: number; withNorm
           console.warn(`${name}: ${job.recipe.material} did not render: ${m.error}`);
           answered(job, null, null);
         } else if (m.empty || !m.rgba || !m.width || !m.height) answered(job, null, null);
-        else answered(job, { width: m.width, height: m.height, rgba: m.rgba, ...(m.emis ? { emis: m.emis } : {}), ...(m.normal ? { normal: m.normal } : {}) }, m.ms ?? null);
+        else answered(job, { width: m.width, height: m.height, rgba: m.rgba, ...(m.hash ? { hash: m.hash } : {}), ...(m.emis ? { emis: m.emis } : {}), ...(m.normal ? { normal: m.normal } : {}) }, m.ms ?? null);
       };
       w.onerror = (e) => {
         // The worker's script did not load (or died): everything it held renders here instead.
@@ -174,7 +182,7 @@ export function makeRecipeRender(opts: { name: string; cacheMB: number; withNorm
         warnOnce(`the worker failed (${e.message || 'no message'})`);
         const held = [...jobs.values()];
         jobs.clear();
-        for (const job of held) void renderHere(job.recipe, job.values, job.palettes, job.dir).then(job.resolve);
+        for (const job of held) void renderHere(job.recipe, job.values, job.palettes, job.dir, job.hash).then(job.resolve);
       };
       w.postMessage({ init: { cacheMB } });
       worker = w;
@@ -185,14 +193,15 @@ export function makeRecipeRender(opts: { name: string; cacheMB: number; withNorm
     return worker;
   };
 
-  const render = ((recipe, values, palettes, imageDir) => {
+  const render = ((recipe, values, palettes, imageDir, opts) => {
     const dir = absolute(imageDir);
+    const hash = !!opts?.hash;
     const w = render.here ? null : workerOf();
-    if (!w) return renderHere(recipe, values, palettes, dir);
+    if (!w) return renderHere(recipe, values, palettes, dir, hash);
     return new Promise<JobImg | null>((resolve) => {
       const id = nextId++;
-      jobs.set(id, { recipe, values, palettes, dir, asked: performance.now(), resolve });
-      w.postMessage({ id, recipe, values: [...values], palettes, dir, normal: withNormal });
+      jobs.set(id, { recipe, values, palettes, dir, asked: performance.now(), hash, resolve });
+      w.postMessage({ id, recipe, values: [...values], palettes, dir, normal: withNormal, hash });
     });
   }) as RecipeRenderer;
   render.here = false;
@@ -213,6 +222,7 @@ export function makeRecipeRender(opts: { name: string; cacheMB: number; withNorm
  * The renderer every character shares (the player, the people another player is drawn as, the fighters,
  * the select screen's figure): its own worker, so a recolour never waits behind a ship's paint, and the
  * normal map the values pick handed back with each render. The dressed people the mobiles stand share
- * their renders with each other instead, on this thread (`Customizer.share`).
+ * their renders with each other (`Customizer.share`), and make the ones nobody has made yet here too, with
+ * the pixels' hash made in the worker (`Customizer.shareRender`).
  */
 export const characterRender = makeRecipeRender({ name: 'characters', cacheMB: RECIPE_WORKER_TUNE.characterCacheMB, withNormal: true });

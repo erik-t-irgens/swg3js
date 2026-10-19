@@ -9,7 +9,9 @@
 // in velocity.ts and motionBlur.ts mirrors them line for line; `tools/swg/tests/velocity.test.ts`
 // checks these.
 //
-// Nothing here imports anything.
+// Nothing here imports anything but the morph ladder (`personKeys.ts`, pure), which the warm list is made from.
+
+import { warmLadder } from '../../world/personKeys.ts';
 
 /**
  * A step of the camera's that must not read as motion: last frame's view is moved by it before the
@@ -256,17 +258,35 @@ export function variantKey(p: VariantKeyParts): string {
 }
 
 /**
- * Compiled behind the loading screen. Over the 3441 character, wardrobe and player files there are 36
- * skinned keys: m3 1570 parts, m0 1464, m4 1061, m0 with alpha 163, m5 110, m2 77, m1 47, m6 40, ...
- * These fourteen cover 4613 of 4723 parts (97.7%); creatures use only m0, with and without alpha.
- * Rigid movers have no morphs.
+ * The variants compiled behind the loading screen for a ladder (`warmLadder`): the two rigid variants and every skinned
+ * rung of the morph ladder (`PERSON_KEYS_TUNE.morphLadder`, every skinned primitive padded to it at load by
+ * `skinnedLoad.ts`), with morph normals above nought (every morphed primitive the packs carry has them) and with and
+ * without alpha: eight, a closed list of our own, where the old one was fourteen read off the packs and every head's
+ * count (19 to 33) was missed and built in play. A primitive past the top rung keeps its own count, and its variant is
+ * queued when it is met. Rigid movers have no morphs. With no ladder (`localStorage['swg.morphLadder'] = '0'`, where
+ * every primitive keeps its own count) it is the first wave's list as it stood, so the hatch is the old way to compare.
  */
-export const WARM_VARIANTS: readonly VariantKeyParts[] = [
-  { skinned: false, morphs: 0, morphNormals: false, morphColors: false, alpha: false },
-  { skinned: false, morphs: 0, morphNormals: false, morphColors: false, alpha: true },
+export function warmVariants(ladder: readonly number[] | null): readonly VariantKeyParts[] {
+  const rigid: VariantKeyParts[] = [
+    { skinned: false, morphs: 0, morphNormals: false, morphColors: false, alpha: false },
+    { skinned: false, morphs: 0, morphNormals: false, morphColors: false, alpha: true },
+  ];
+  if (!ladder) return [...rigid, ...WAVE_ONE_SKINNED];
+  return [...rigid, ...ladder.flatMap((m) => [false, true].map((alpha) => ({ skinned: true, morphs: m, morphNormals: m > 0, morphColors: false, alpha })))];
+}
+
+/**
+ * The first wave's skinned variants, as they stood before the ladder: over the 3441 character, wardrobe and player
+ * files then there were 36 skinned keys (m3 1570 parts, m0 1464, m4 1061, m0 with alpha 163, m5 110, m2 77, m1 47, m6
+ * 40, ...), and these twelve with the two rigid ones covered 4613 of 4723 parts (97.7%). Kept only for the hatch.
+ */
+const WAVE_ONE_SKINNED: readonly VariantKeyParts[] = [
   ...[0, 1, 2, 3, 4, 5, 6, 7].map((m) => ({ skinned: true, morphs: m, morphNormals: m > 0, morphColors: false, alpha: false })),
   ...[0, 2, 3, 4].map((m) => ({ skinned: true, morphs: m, morphNormals: m > 0, morphColors: false, alpha: true })),
 ];
+
+/** What this session compiles behind the loading screen (see `warmVariants`). */
+export const WARM_VARIANTS: readonly VariantKeyParts[] = warmVariants(warmLadder());
 
 export interface Vec3Like {
   x: number;

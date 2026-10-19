@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type * as THREE from 'three';
 import { PACE_TUNE, PaceBudget, QueueWatch, framesFor, paceLine, tuneProgramPace } from '../../../src/core/programPace.ts';
-import { ProgramQueue, materialsUnder, resolveLinks } from '../../../src/core/programQueue.ts';
+import { ProgramQueue, materialsUnder, resolveLinks, type OwnJob, type QueueLinks } from '../../../src/core/programQueue.ts';
 import { SHADER_TUNE } from '../../../src/core/shaderWatch.ts';
 
 /** The pass's base: the queue's idle rule as it stood before the performance pass judged it by frames. */
@@ -681,6 +681,178 @@ ok(framesFor(1, 8) === 1, 'anything left to do takes at least one frame');
   ok(resolveLinks(none, [material]) === 0, 'a material with no program yet is stepped over');
   ok(resolveLinks(null, [material]) === 0, 'and with no renderer there is nothing to finish');
   ok(resolveLinks({} as unknown as THREE.WebGLRenderer, [material]) === 0, 'a renderer with no properties store is stepped over too');
+}
+
+{
+  // An object its flight saw ready finishes only what reports its link done (the performance pass's second wave): a
+  // shared material can hold a program another job issued since (a second person of one look whose first person's
+  // rooms pass is in flight), and finished here that link was waited for on the main thread by an object that never
+  // needed it.
+  const asked: string[] = [];
+  const program = (name: string, done: boolean) => ({ isReady: () => done, getUniforms: () => void asked.push(name) });
+  const world = program('world pass', true);
+  const rooms = program('rooms pass, another job', false);
+  const record = { programs: new Map<string, unknown>([['w', world], ['r', rooms]]) };
+  const material = { name: 'shared' } as unknown as THREE.Material;
+  const renderer = { properties: { has: () => true, get: () => record } } as unknown as THREE.WebGLRenderer;
+  ok(resolveLinks(renderer, [material], true) === 1 && asked.join() === 'world pass', 'seen ready, only the program that reports its link done is finished');
+  ok(resolveLinks(renderer, [material]) === 1 && asked.join() === 'world pass,rooms pass, another job', 'and the one still linking is left for its own flight, which finishes it (here, outright)');
+  const plain = { getUniforms: () => void asked.push('no question') };
+  const r2 = { properties: { has: () => true, get: () => ({ currentProgram: plain }) } } as unknown as THREE.WebGLRenderer;
+  ok(resolveLinks(r2, [material], true) === 1 && asked.includes('no question'), 'a program that cannot be asked (no parallel compile) is finished as ever');
+}
+
+{
+  // The queue hands the flag on: an entry its flight saw ready is resolved with `onlyReady`; one the bound or a hiding
+  // tab finished is resolved whole.
+  const q = new ProgramQueue();
+  q.flight.say = () => undefined;
+  const flags: string[] = [];
+  let hidden = false;
+  const progs = new Map<THREE.Object3D, { isReady(): boolean; getUniforms(): unknown }>();
+  q.links = {
+    parallel: () => !hidden,
+    hidden: () => hidden,
+    pending: (o) => {
+      const p = progs.get(o);
+      return p ? [p] : [];
+    },
+    resolve: (o, onlyReady) => {
+      flags.push(`${nameOf(o)} ${onlyReady ? 'ready-only' : 'whole'}`);
+      progs.delete(o);
+      return 1;
+    },
+  };
+  const compile = (o: THREE.Object3D) => {
+    progs.set(o, { isReady: () => nameOf(o) === 'fast', getUniforms: () => undefined });
+    return built(1);
+  };
+  q.add([obj('fast')], 'scan');
+  q.add([obj('slow')], 'scan');
+  for (let i = 0; i < 4; i++) q.pump(false, compile, () => 0);
+  ok(flags.includes('fast ready-only') && !flags.some((f) => f.startsWith('slow')), `an entry seen ready is resolved ready-only, and one still linking waits (${flags.join(', ')})`);
+  hidden = true;
+  q.pump(false, compile, () => 0);
+  ok(flags.includes('slow whole'), `one a hiding tab finished is resolved whole (${flags.join(', ')})`);
+}
+
+// --- a job carrying its own compile and finish (the performance pass's second wave) ----------------
+
+{
+  // Compiled by its own compile, never by the queue's callback, in a pump and in a flush; finished once, after.
+  const q = new ProgramQueue();
+  const log: string[] = [];
+  const own: OwnJob = {
+    compile: (o, _allowance, resolve) => {
+      log.push(`own ${nameOf(o)} ${resolve ? 'resolve' : 'issue'}`);
+      return built(1);
+    },
+    finish: (o) => {
+      log.push(`finish ${nameOf(o)}`);
+    },
+  };
+  const queueCompile = (o: THREE.Object3D) => {
+    log.push(`queue ${nameOf(o)}`);
+    return built(1);
+  };
+  q.add([obj('v1')], 'fx.velocity', own);
+  void q.push([obj('v2')], 'fx.velocity for a body', true, own);
+  q.add([obj('plain')], 'scan');
+  while (q.pending) q.pump(false, queueCompile, () => 0);
+  ok(log.join(',') === 'own v2 resolve,finish v2,own v1 resolve,finish v1,queue plain', `a job with its own compile is compiled by it, resolved as it compiles in blocking mode, and finished once after (${log.join(',')})`);
+  log.length = 0;
+  q.add([obj('f1')], 'fx.velocity', own);
+  await q.flush(queueCompile, async () => undefined);
+  ok(log.join(',') === 'own f1 resolve,finish f1', `and the same in a flush (${log.join(',')})`);
+}
+
+{
+  // In parallel mode: issued by its own compile with no resolve, finished only once its programs are resolved; and an
+  // urgent batch answered only when every object's programs are, with loose work never issued ahead of it.
+  const q = new ProgramQueue();
+  const ready = new Map<THREE.Object3D, { polls: number; resolved: boolean; isReady(): boolean; getUniforms(): unknown }>();
+  const log: string[] = [];
+  const make = (o: THREE.Object3D) => {
+    const p = { polls: 0, resolved: false, isReady: () => ++p.polls > 1, getUniforms: () => undefined };
+    ready.set(o, p);
+  };
+  const links: QueueLinks = {
+    parallel: () => true,
+    hidden: () => false,
+    pending: (o) => {
+      const p = ready.get(o);
+      return p && !p.resolved ? [p] : [];
+    },
+    resolve: (o) => {
+      const p = ready.get(o);
+      if (!p || p.resolved) return 0;
+      p.resolved = true;
+      log.push(`resolve ${nameOf(o)}`);
+      return 1;
+    },
+  };
+  q.links = links;
+  q.flight.say = () => undefined;
+  const own: OwnJob = {
+    compile: (o, _allowance, resolve) => {
+      log.push(`own ${nameOf(o)} ${resolve ? 'resolve' : 'issue'}`);
+      make(o);
+      return built(1);
+    },
+    finish: (o) => {
+      log.push(`finish ${nameOf(o)}`);
+    },
+  };
+  let answered = false;
+  void q.push([obj('a'), obj('b')], 'urgent', true, own).then(() => {
+    answered = true;
+  });
+  q.add([obj('loose')], 'scan', own);
+  q.pump(false, () => built(1), () => 0);
+  await flush();
+  ok(!answered && !log.some((l) => l.startsWith('finish')), 'issued, nothing finished and the batch not answered on the frame it went out');
+  for (let i = 0; i < 6; i++) q.pump(false, () => built(1), () => 0);
+  await flush();
+  const order = log.join(',');
+  ok(log.indexOf('own a issue') < log.indexOf('own loose issue') && log.indexOf('own b issue') < log.indexOf('own loose issue'), `the loose work is issued only after every urgent object (${order})`);
+  ok(log.indexOf('resolve a') < log.indexOf('finish a') && log.indexOf('resolve b') < log.indexOf('finish b'), 'each own job is finished after its resolve, never before');
+  ok(log.filter((l) => l === 'finish a').length === 1 && log.filter((l) => l === 'finish loose').length === 1, 'and once');
+  ok(answered, 'the urgent batch is answered once both its objects are resolved');
+}
+
+{
+  // An own job let go unbuilt (a world clearing the queue) says so, so its owner can ask for it again.
+  const q = new ProgramQueue();
+  const dropped: string[] = [];
+  const own: OwnJob = { compile: () => built(1), dropped: (o) => dropped.push(nameOf(o)) };
+  q.add([obj('d1')], 'fx.velocity', own);
+  void q.push([obj('d2')], 'fx.velocity for a body', true, own);
+  q.clear();
+  ok(dropped.sort().join(',') === 'd1,d2', `every object of an own job let go unbuilt is told to its owner (${dropped.join(',')})`);
+  q.add([obj('d3')], 'fx.velocity', own);
+  q.clearLoose();
+  ok(dropped.includes('d3'), 'and so is loose work a sweep drops');
+}
+
+{
+  // A batch pushed below the urgent rank is made urgent by its own (the room deferral's promote): pushed after the
+  // scenery, so only the promote can put it first, and the same two without the promote are taken in their order.
+  const run = (promote: boolean): { seen: string[]; moved: boolean; again: boolean } => {
+    const q = new ProgramQueue();
+    const seen: string[] = [];
+    const own: OwnJob = { compile: (o) => (seen.push(nameOf(o)), built(1)) };
+    void q.push([obj('tier')], 'the placed-object streamer');
+    void q.push([obj('rooms')], 'its rooms', false, own);
+    const moved = promote ? q.promote(own) : false;
+    for (let i = 0; i < 4; i++) q.pump(false, (o) => (seen.push(nameOf(o)), built(1)), () => 0);
+    return { seen, moved, again: q.promote(own) };
+  };
+  const promoted = run(true);
+  const left = run(false);
+  ok(promoted.moved, 'a batch carrying an own job is found and moved');
+  ok(promoted.seen.join() === 'rooms,tier', `and goes ahead of the scenery that was pushed before it (${promoted.seen.join()})`);
+  ok(left.seen.join() === 'tier,rooms', `where without the promote the scenery pushed first is taken first, so the check above can fail (${left.seen.join()})`);
+  ok(!promoted.again, 'and once moved it is not found below the urgent rank again');
 }
 
 console.log(`\n${passed} checks passed`);

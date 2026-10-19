@@ -15,7 +15,8 @@
 import * as THREE from 'three';
 import type { FxProductId, FxSettings } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context';
-import { NO_PRODUCTS, type FxProduct, type FxWarmItem } from './pass';
+// The value import carries its extension so a node test can build a product (`velocity.test.ts`).
+import { NO_PRODUCTS, type FxProduct, type FxWarmItem } from './pass.ts';
 import type { PostFX } from '../postfx';
 
 /** Every layer at once, as three's own `enableAll` writes it. */
@@ -160,12 +161,16 @@ export abstract class GeometryProduct implements FxProduct {
   readonly timerLabel: string;
   protected target: THREE.WebGLRenderTarget;
   protected readonly drawer: FxGeometryDrawer = sharedDrawer();
+  // Written out rather than taken as parameter properties, so a node test can build a product (node's type stripping
+  // refuses those).
+  readonly id: FxProductId;
+  protected readonly postfx: PostFX;
+  private readonly look: { format: THREE.PixelFormat; type: THREE.TextureDataType; clear: THREE.Color; clearAlpha: number; count?: number };
 
-  protected constructor(
-    readonly id: FxProductId,
-    protected readonly postfx: PostFX,
-    private readonly look: { format: THREE.PixelFormat; type: THREE.TextureDataType; clear: THREE.Color; clearAlpha: number; count?: number },
-  ) {
+  protected constructor(id: FxProductId, postfx: PostFX, look: { format: THREE.PixelFormat; type: THREE.TextureDataType; clear: THREE.Color; clearAlpha: number; count?: number }) {
+    this.id = id;
+    this.postfx = postfx;
+    this.look = look;
     this.timerLabel = `product:${id}`;
     this.target = createSharedDepthTarget(postfx, { format: look.format, type: look.type, name: `fx.${id}`, count: look.count });
   }
@@ -223,7 +228,8 @@ function dummyMesh(material: THREE.Material): THREE.Mesh {
 function dummySkinnedMesh(material: THREE.Material): THREE.SkinnedMesh {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0, 0, 0, 0], 3));
-  g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 4));
+  // Floats, as every skinned mesh's joints are stored at load (`skinnedLoad.ts`), so the stand-in's input layout is the real one's.
+  g.setAttribute('skinIndex', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 4));
   g.setAttribute('skinWeight', new THREE.Float32BufferAttribute([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], 4));
   const bone = new THREE.Bone();
   const mesh = new THREE.SkinnedMesh(g, material);

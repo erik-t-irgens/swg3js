@@ -164,8 +164,8 @@ const read = (rel: string) => readFileSync(fileURLToPath(new URL(`../../../src/$
   ok(planted.includes('const cast = floraCasts(size, 0) && castsShadow(material);') && planted.includes('const receive = cardReceives(material, floraBig(size));') && /mesh\.userData\.casterSize = model\.radius \* Math\.max\(\.\.\.list\.map\(\(p\) => p\.scale\)\);\s*plantedShadow\(mesh\);/.test(flora), "and so do a chunk's own meshes, stamped with their size as they are planted and ruled by the one function the world walks them with");
   ok(/applyFloraCasters\(\): number \{\s*this\.floraField\?\.applyShadows\(\);[\s\S]{0,200}for \(const g of \[c\.trees, c\.plants\]\) \{[\s\S]{0,120}if \(\(o as THREE\.Mesh\)\.isMesh && plantedShadow\(o as THREE\.Mesh\)\) casting\+\+;/.test(w), "and a switch moved walks every chunk's trees and plants through that function, and the region batches through theirs");
   const portal = read('world/portalRender.ts');
-  const rooms = portal.slice(portal.indexOf('private renderRooms('), portal.indexOf('private renderRooms(') + 500);
-  ok(rooms.indexOf('this.roomPass(true);') >= 0 && rooms.indexOf('this.roomPass(true);') < rooms.indexOf('this.renderLayer(scene, camera, INTERIOR_LAYER);') && rooms.indexOf('this.roomPass(false);') > rooms.indexOf('finally'), "a building's rooms pass is told it has begun and, whatever happens, that it has ended");
+  const rooms = portal.slice(portal.indexOf('private renderRooms('), portal.indexOf('private renderRooms(') + 1100);
+  ok(rooms.indexOf('this.roomPass(true);') >= 0 && rooms.indexOf('this.roomPass(true);') < rooms.indexOf('this.renderLayer(this.passScenes.forRooms(scene), camera, INTERIOR_LAYER);') && rooms.indexOf('this.roomPass(false);') > rooms.indexOf('finally'), "a building's rooms pass is told it has begun and, whatever happens, that it has ended");
   ok(w.includes('portals.roomPass = roomPassLeaves;') && /function roomPassLeaves\(on: boolean\): void \{\s*setCardRoomPass\(on\);\s*setSwayRoomPass\(on\);/.test(w), 'and the world hands it the cards\' light and the sway, so a plant standing in a room takes its lamps and no wind');
 }
 

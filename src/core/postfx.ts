@@ -35,6 +35,7 @@ import { LinearDepthHalf, NormalsHalf } from './fx/products';
 import { DebugMaskProduct } from './fx/geometry';
 import { BloomPass, DebugViewPass, FxaaPass, GodRaysPass, MotionBlurPass, OutputFxPass, SanitizePass } from './fx/passes';
 import { FxTimer, type FxTimingReport } from './fx/timer';
+import { resolveLinks } from './programQueue.ts';
 
 export type { SunInfo, FxFrameInput, FxFrameContext, FxSun } from './fx/context';
 
@@ -426,14 +427,21 @@ export class PostFX {
     for (let i = 0; i < this.passes.length; i++) {
       for (const m of this.passes[i].materials()) items.push({ ...m, where: m.where ?? (this.defs[i].canBeLast ? 'both' : 'target') });
     }
+    const compiled: THREE.Object3D[] = [];
     for (const it of items) {
       const object = it.object ?? fullscreenMesh(it.material);
+      compiled.push(object);
       // Any target at all gives the program key a real draw into the scene target would have; the
       // canvas gives the other one, because it is the only place tone mapping is applied.
       if (it.where !== 'screen') compileOn(this.bufferA, object);
       if (it.where !== 'target') compileOn(null, object);
     }
     await Promise.all(jobs);
+    // `compileAsync` waits for the links and never asks a program for its uniforms, so each program's first draw asked
+    // instead: a synchronous question to the GPU process, which in play waits behind whatever it is linking for
+    // somebody else (two water-mask programs warmed here first drawn 84 s later waited 111 ms each on Direct3D 11, the
+    // one frame of the performance pass's walk that waited on links). Asked here, behind the screen, after the links.
+    for (const o of compiled) resolveLinks(r, o);
     return (r.info.programs?.length ?? 0) - before;
   }
 

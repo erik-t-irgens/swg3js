@@ -31,6 +31,7 @@ import { ActorRoutes, ROUTE_PASS } from './portalCull.ts';
 import { furnitureOn, maskSeen } from './furnitureHost.ts';
 import { beginSkeletonFrame, endSkeletonFrame, installSkeletonOnce } from '../core/skeletonOnce.ts';
 import { setPortalRef, setSharedRef as shareEveryRef, shareRef, unshareRef } from './stencilRef.ts';
+import { PassScenes } from './passScenes.ts';
 
 export { crossing } from './portalVis.ts';
 
@@ -189,15 +190,53 @@ export class PortalRenderer {
    */
   roomPass: (on: boolean) => void = () => {};
 
+  /**
+   * The shadow pass's own scene and the rooms' own scene (`passScenes.ts`): each pass keeps a light set of its own, so
+   * the lit materials stop working their program keys out again three times a frame and a depth program is keyed on
+   * the shadow pass's own set. The world pass keeps the real scene.
+   */
+  readonly passScenes = new PassScenes();
+
+  /**
+   * Bodies whose rooms programs are still being built off the frame (the room deferral, `World.roomPending`), as the
+   * world lists them before each frame: kept, written by index, `roomPendingCount` of them live. With the routes on
+   * (`ActorRoutes`) a body not room-ready is never shown in a building's pass anyway; with the routes off for the frame
+   * every one of these is hidden around each rooms pass and put back after, so no rooms program is built on a live
+   * frame for a body that has none yet. A body with a light under it is never on this list (the world leaves it out).
+   */
+  readonly roomPending: THREE.Object3D[] = [];
+  roomPendingCount = 0;
+  /** Each pending root's own `visible`, kept while a rooms pass hides it. */
+  private readonly roomPendingWas: boolean[] = [];
+
+  /** The scene a pass of this layer draws and compiles against: the rooms' proxy for the rooms' layer, the real one else. */
+  passScene(scene: THREE.Scene, layer: number): THREE.Scene {
+    return layer === INTERIOR_LAYER ? this.passScenes.forRooms(scene) : scene;
+  }
+
+  /** The proxies' lights set up once for this world (`PassScenes.prime`): every loading screen's sweep does it first. */
+  primePasses(scene: THREE.Scene, camera: THREE.Camera): void {
+    this.passScenes.prime(this.renderer, scene, this.shadowProbe, camera, (1 << INTERIOR_LAYER) | (1 << ACTOR_LAYER));
+  }
+
   /** One building's interior pass, with the hinted pool dimmed for any building it was not lit for (`hintedLights`). */
-  private renderRooms(scene: THREE.Scene, camera: THREE.Camera, b: Building): void {
+  private renderRooms(scene: THREE.Scene, camera: THREE.Camera, b: Building, routed: boolean): void {
     const h = this.hintedLights;
     const dim = h.building !== null && h.building !== b;
     if (dim) h.dim(true);
     this.roomPass(true);
+    // With the routes off for this frame nothing else keeps a body with no rooms program out of the pass.
+    const hide = !routed ? this.roomPendingCount : 0;
+    const was = this.roomPendingWas;
+    for (let i = 0; i < hide; i++) {
+      const o = this.roomPending[i];
+      was[i] = o.visible;
+      o.visible = false;
+    }
     try {
-      this.renderLayer(scene, camera, INTERIOR_LAYER);
+      this.renderLayer(this.passScenes.forRooms(scene), camera, INTERIOR_LAYER);
     } finally {
+      for (let i = 0; i < hide; i++) this.roomPending[i].visible = was[i];
       this.roomPass(false);
       if (dim) h.dim(false);
     }
@@ -381,7 +420,8 @@ export class PortalRenderer {
     this.shadingShadows = true;
     const strays = this.strays;
     try {
-      r.render(scene, this.shadowProbe);
+      // Through the shadow pass's own scene, as a frame's shadow pass draws: the depth programs are keyed on its set.
+      r.render(this.passScenes.forShadows(scene), this.shadowProbe);
     } finally {
       this.shadingShadows = false;
       this.strays = strays;
@@ -631,7 +671,8 @@ export class PortalRenderer {
     r.shadowMap.needsUpdate = true;
     this.shadingShadows = true;
     try {
-      this.pass('shadows', scene, this.shadowProbe, PASS.shadows);
+      // Through the shadow pass's own scene (`passScenes.ts`): its light set is every light at once and stays so.
+      this.pass('shadows', this.passScenes.forShadows(scene), this.shadowProbe, PASS.shadows);
     } finally {
       this.shadingShadows = false;
       // Once for the pass, not once for each stray: read as its own sentence ("what the last
@@ -708,7 +749,7 @@ export class PortalRenderer {
         // Inside: the whole building fills the screen; the world only through its exits.
         routes?.route(ROUTE_PASS.building, view, null);
         this.roomMeshes += this.showInterior(view, true, seenRooms ? this.vis.seenOf(view) : null);
-        this.renderRooms(scene, camera, view);
+        this.renderRooms(scene, camera, view, routes !== null);
         if (this.matrixOnce) scene.matrixWorldAutoUpdate = false;
         this.showInterior(view, false);
         if (skipWorld) return;
@@ -747,7 +788,7 @@ export class PortalRenderer {
         // What stands in this building's rooms, and nothing else.
         routes?.route(ROUTE_PASS.building, b, null);
         this.roomMeshes += this.showInterior(b, true, seenRooms ? this.vis.seenOf(b) : null);
-        this.renderRooms(scene, camera, b);
+        this.renderRooms(scene, camera, b, routes !== null);
         this.showInterior(b, false);
         this.setRef(1);
         this.drawPortals(this.exitList, doors, camera, 1, false, true);

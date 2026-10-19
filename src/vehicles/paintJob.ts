@@ -12,10 +12,15 @@ import { maskOf, splitGlow } from './glowSplit.ts';
 export interface PaintGlow { maskTag: 'EMIS' | 'MAIN' | 'NRML' | 'SPEC'; channel: 'a' | 'rgb'; keepAlpha: boolean }
 /** A ship's paint recipe: a customizer recipe, with its glow when the shader glows, and the SSHT's own MAIN kept by name (the pre-customization look). */
 export interface PaintRecipe extends Recipe { glow?: PaintGlow; staticMain?: string }
+/**
+ * A picture with the hash of its pixels where it was made, when that was asked for (`bytesHash.ts`): the characters'
+ * worker hashes a shared look's render there so the main thread need not read it again (`lookShare.ts`'s `contentKey`).
+ */
+export interface HashedImg extends Img { hash?: string }
 /** A render: the colour for `map` (the lit half when there is a glow), and the glow for `emissiveMap` when there is one. */
-export interface PaintImg extends Img { emis?: Img }
+export interface PaintImg extends Img { emis?: HashedImg }
 /** A render as a worker hands it back: the colour (and its glow), and the normal map the values pick when it was asked for. */
-export interface JobImg extends PaintImg { normal?: Img }
+export interface JobImg extends PaintImg { normal?: HashedImg; hash?: string }
 
 /**
  * One recipe's render as a worker makes it: the colour (split into its lit half and its glow when the recipe

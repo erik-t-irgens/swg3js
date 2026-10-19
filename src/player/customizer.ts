@@ -12,7 +12,7 @@ import * as THREE from 'three';
 // The imports carry their extensions so the node tests can load this module (a ship's paint uses it).
 import { type CustomizeFile, type Img, type Recipe, type Values, recipeNormal, recipeNormalFiles, recipeValueKey, recipeVariableDefs, recipeVariables, renderRecipe, variableKey } from './texrender.ts';
 import { decodePng } from './png.ts';
-import { type JobImg, type PaintImg, type PaintRecipe, runPaintJob } from '../vehicles/paintJob.ts';
+import { type HashedImg, type JobImg, type PaintImg, type PaintRecipe, runPaintJob } from '../vehicles/paintJob.ts';
 
 /**
  * A renderer that makes a recipe's texture somewhere else (a worker: recipeWorker.ts): the recipe, a copy
@@ -21,7 +21,7 @@ import { type JobImg, type PaintImg, type PaintRecipe, runPaintJob } from '../ve
  * renderer makes those (a character's does). Null when the render was dropped (a newer paint won), and
  * nothing is put then.
  */
-export type RecipeRender = (r: Recipe, values: Values, palettes: Record<string, number[][]>, imageDir: string) => Promise<JobImg | null>;
+export type RecipeRender = (r: Recipe, values: Values, palettes: Record<string, number[][]>, imageDir: string, opts?: { hash?: boolean }) => Promise<JobImg | null>;
 
 /**
  * Whether a recipe's textures are its mesh's own: it reads a variable private to its mesh, so the same
@@ -105,6 +105,26 @@ type TextureSlot = 'map' | 'normalMap' | 'emissiveMap';
 function slotKey(r: Recipe, slot: TextureSlot): string {
   const base = perMesh(r) ? `${r.material}|${r.mesh}` : r.material;
   return slot === 'map' ? base : slot === 'normalMap' ? `${base}#normal` : `${base}#emis`;
+}
+
+/**
+ * A render made elsewhere as a texture (`renderTexture`), carrying its pixels' hash where it was made (the share's
+ * `contentKey` reads it rather than reading the pixels again on this thread).
+ */
+function hashedTexture(img: HashedImg, normal: boolean): THREE.DataTexture {
+  const tex = renderTexture(img, normal);
+  if (img.hash) tex.userData[CONTENT_HASH_KEY] = img.hash;
+  return tex;
+}
+
+/** The texture field the share reads a render's hash from: `lookShare.ts`'s `CONTENT_HASH`, said once here so this file imports nothing of the world. */
+const CONTENT_HASH_KEY = 'swgContentHash';
+
+/** A recipe as a renderer that splits glows is sent it when no material of it takes the glow: whole, its glow left off. */
+function withoutGlow(r: PaintRecipe): PaintRecipe {
+  const plain: PaintRecipe = { ...r };
+  delete plain.glow;
+  return plain;
 }
 
 /** A texture for a render's pixels, as every render is put on a material: a colour (or a glow) in sRGB, a normal map as it stands, mipmapped and repeating. */
@@ -194,8 +214,30 @@ export class Customizer {
    * Where this character's renders are shared with others of the same colours (`RenderShare`), set only
    * for a look the mobiles build once and never colour again; null renders every recipe for this
    * character alone, which is what the player, another player and the wardrobe's doll always do.
+   *
+   * Refused on a customizer that renders elsewhere (`renderOff`): `run` takes the private branch first and puts into
+   * textures of its own, so such a look would never reach the share and would quietly hold private textures. A shared
+   * look renders in a worker through `shareRender` instead, which is the share's own and never the private branch.
    */
-  share: RenderShare | null = null;
+  get share(): RenderShare | null {
+    return this.sharing;
+  }
+  set share(s: RenderShare | null) {
+    if (s && this.renderOff) {
+      console.warn('customize: a look that renders elsewhere cannot share its renders (it would take the private branch); the share is kept off');
+      this.sharing = null;
+      return;
+    }
+    this.sharing = s;
+  }
+  private sharing: RenderShare | null = null;
+  /**
+   * Where a shared look's renders are made (the performance pass's second wave): the characters' worker
+   * (`characterRender`), handed by `Character.load` beside the share. Every claim's make asks it for the colour, the
+   * glow and the normal map from one render, with the pixels' hash made there, so the main thread neither renders a
+   * shared look nor reads its pixels to alias them. Null renders here, between frames, as before.
+   */
+  shareRender: RecipeRender | null = null;
 
   constructor(renderOff: RecipeRender | null = null, opts: { putsGlow?: boolean } = {}) {
     this.renderOff = renderOff;
@@ -504,6 +546,10 @@ export class Customizer {
    * (the recipe is queued again for the new value, and that is another key).
    */
   private async runShared(r: Recipe, share: RenderShare): Promise<void> {
+    if (this.shareRender) {
+      await this.runSharedOff(r, share, this.shareRender);
+      return;
+    }
     const dir = this.dirOf.get(r) ?? '';
     const values: Values = new Map(this.values);
     const keys = renderKeys(r, values, dir);
@@ -547,6 +593,51 @@ export class Customizer {
   }
 
   /**
+   * `runShared` with the renders made in the worker (`shareRender`): the same keys and the same claims, each make
+   * asking the worker, which hands back the colour (split when the recipe `splits`), the glow and the normal map from
+   * one render with each picture's hash. The `|lit` claim's make keeps the glow and the normal for the `|glow` and
+   * normal claims of this same call; a claim another look made already is taken from the share, and a make that finds
+   * no render of this call's asks the worker again. The recipe goes as a renderer that splits is sent it: whole when no
+   * material of it has a glow map to take the glow.
+   */
+  private async runSharedOff(r: Recipe, share: RenderShare, off: RecipeRender): Promise<void> {
+    const dir = this.dirOf.get(r) ?? '';
+    const values: Values = new Map(this.values);
+    const keys = renderKeys(r, values, dir);
+    const split = this.splits(r);
+    const sent: Recipe = split || !(r as PaintRecipe).glow ? r : withoutGlow(r as PaintRecipe);
+    const palettes = this.palettesOf(r);
+    let made: JobImg | null = null;
+    let asked = false;
+    const render = async (): Promise<JobImg | null> => {
+      if (!asked) {
+        asked = true;
+        made = await off(sent, values, palettes, dir, { hash: true });
+      }
+      return made;
+    };
+    const colour = await share.claim(split ? `${keys.render}|lit` : keys.render, 'render', async () => {
+      const img = await render();
+      return img ? hashedTexture(img, false) : null;
+    });
+    if (!colour) return;
+    this.putShared(r, colour as THREE.DataTexture, 'map');
+    if (split) {
+      const emis = await share.claim(`${keys.render}|glow`, 'render', async () => {
+        const glow = (await render())?.emis ?? null;
+        return glow ? hashedTexture(glow, false) : null;
+      });
+      if (emis) this.putShared(r, emis as THREE.DataTexture, 'emissiveMap');
+    }
+    if (!keys.normal) return;
+    const normal = await share.claim(keys.normal, 'normal', async () => {
+      const img = (await render())?.normal ?? null;
+      return img ? hashedTexture(img, true) : null;
+    });
+    if (normal) this.putShared(r, normal as THREE.DataTexture, 'normalMap');
+  }
+
+  /**
    * Whether a recipe's render is split into a lit colour and a glow: its shader glows through a mask (the
    * converter wrote `glow`: a worn piece the wardrobe bakes for a palette laid on after its first pass, whose
    * GLB carries the lit half as its base and the glow as its emissive) and a material it feeds has a glow map
@@ -566,9 +657,7 @@ export class Customizer {
    */
   private offRecipe(r: Recipe): Recipe {
     if (!this.putsGlow || !(r as PaintRecipe).glow || this.splits(r)) return r;
-    const plain: PaintRecipe = { ...(r as PaintRecipe) };
-    delete plain.glow;
-    return plain;
+    return withoutGlow(r as PaintRecipe);
   }
 
   /**
