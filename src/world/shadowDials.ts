@@ -12,6 +12,17 @@
 import type { DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
 import { SHADOW_PASS_TUNE, tuneShadowPass } from './shadowCadence.ts';
+import { SHADOW_SPLIT_TUNE, softShare, tuneShadowSplits } from './shadowSplits.ts';
+
+/** Where a map ends or how soft it is, set through `tuneShadowSplits` as the console's line writes it (`{ splits: { nearReach: 16 } }`). */
+function splitDial(k: 'nearReach' | 'midReach', label: string, min: number, max: number, step: number, note: string, text?: (v: number) => string): NumberDial {
+  return { kind: 'number', key: `splits.${k}`, label, note, min, max, step, unit: 'm', get: () => SHADOW_SPLIT_TUNE[k], set: (v) => tuneShadowSplits({ [k]: v }), text };
+}
+
+/** One map's share of the page's softness. */
+function softDial(i: number, label: string, note: string): NumberDial {
+  return { kind: 'number', key: `splits.soft.${i}`, label, note, min: 0.25, max: 4, step: 0.05, unit: '', get: () => softShare(i), set: (v) => tuneShadowSplits({ soft: { [i]: v } }) };
+}
 
 /** The frames a cascade aged this many ms is drawn on, at the owner's 144 Hz and at 60. */
 const framesAt = (ms: number) => (ms > 0 ? `every ${Math.max(1, Math.ceil((ms * 144) / 1000 - 1e-9))} frames at 144 Hz, every ${Math.max(1, Math.ceil((ms * 60) / 1000 - 1e-9))} at 60` : 'every frame');
@@ -40,8 +51,19 @@ function dial(k: 'fastMover' | 'coverDeep', label: string, min: number, max: num
 
 const SHADOW_GROUPS: DialGroup[] = [
   {
+    title: 'How far each shadow map reaches, and how soft',
+    note: 'Three maps of the same size share the shadow distance: the nearer a map ends, the sharper its shadows. The near map ends at its own reach whatever the Shadow distance on the Graphics page, so near shadows stay sharp at any range; the middle map ends where the near reach and the distance meet on a log scale unless you give it a reach; the far map takes the rest. The page\'s Shadow softness is multiplied by each map\'s share.',
+    dials: [
+      splitDial('nearReach', 'Near map ends at', 2, 60, 1, 'Metres from your eye. 16 m is about 2 cm a texel at 2048: crisp. Larger keeps more ground sharp and each texel coarser.'),
+      splitDial('midReach', 'Middle map ends at', 0, 400, 5, 'Metres; 0 is the near reach and the distance met halfway on a log scale (about 72 m at the default 320 m, 113 m at 800).', (v) => (v > 0 ? `${v} m` : 'automatic')),
+      softDial(0, 'Near softness share', 'Times the page\'s softness, in the near map\'s own fine texels.'),
+      softDial(1, 'Middle softness share', 'Times the page\'s softness, in the middle map\'s texels.'),
+      softDial(2, 'Far softness share', 'Times the page\'s softness, in the far map\'s coarse texels: above 1 makes the far shadows more of a suggestion.'),
+    ],
+  },
+  {
     title: 'How old the far shadows may be',
-    note: 'The near map (to 54 m) is drawn every frame. The middle (54 to 115 m) and far (115 to 320 m) maps are drawn again once this old: what stands still looks the same, and a moving thing\'s shadow there may trail it by up to this long. 0 is every frame, as before.',
+    note: 'The near map is drawn every frame. The middle and far maps are drawn again once this old: what stands still looks the same, and a moving thing\'s shadow there may trail it by up to this long. 0 is every frame, as before.',
     dials: [
       ageDial(1, 'Middle map, at most', 'The middle map is drawn again once its picture is this old. 13 ms is every second frame at 144 Hz: a walker\'s shadow trails 8 cm.'),
       ageDial(2, 'Far map, at most', 'The far map is drawn again once its picture is this old. 41 ms is every sixth frame at 144 Hz: a walker\'s shadow trails 25 cm, under one of its 40 cm texels.'),
