@@ -43,7 +43,10 @@ function ok(cond: boolean, what: string): void {
 const text = readFileSync(OURS_URL, 'utf8');
 const table = parseOurs(text) as { rows: Record<string, unknown>[]; key: string; broken?: string };
 ok(!table.broken && table.rows.length > 0, `the committed table reads (${table.rows?.length ?? 0} rows, key ${table.key})${table.broken ? `: ${table.broken}` : ''}`);
-ok(table.key === oursKey(text.replace(/\n/g, '\r\n')), 'a CRLF copy of the table keys the same');
+// Both copies are made from the text with its line endings folded first: a checkout with `core.autocrlf` hands the
+// file over in CRLF already, and turning every `\n` of that into `\r\n` makes `\r\r\n`, which no checkout writes.
+const lfText = text.replace(/\r\n/g, '\n');
+ok(table.key === oursKey(lfText) && table.key === oursKey(lfText.replace(/\n/g, '\r\n')), 'the table keys the same with LF and with CRLF line endings');
 const list = finalNamesList() as { rows: unknown[][]; broken?: string };
 const lateSet = new Set((list.rows ?? []).filter((r) => r[0] === 'set').map((r) => String(r[2]).toLowerCase()));
 ok(!list.broken && table.rows.every((r) => lateSet.has(String(r.appearance))), `every row's appearance is a path SOE's final names list carries (${table.rows.filter((r) => !lateSet.has(String(r.appearance))).map((r) => r.appearance).join(', ') || 'all'})`);
