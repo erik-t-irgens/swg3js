@@ -1,0 +1,255 @@
+{
+ "format": 1,
+ "note": "SOE's own server data for Kashyyyk and Mustafar: which creature stands where, facing which way, how many, over which areas and in which rooms, as names, numbers and places only. Committed and shipped to every player by the owner's decision of 2026-10-19; no model, texture, sound, string, script or quest of the game's. Written by `npm run swg -- nge-reference <the copy>`, every answer compared with a fresh read of the copy before it was kept.",
+ "made": "2026-10-20T04:48:11.294Z",
+ "sha1": "1bd9cb1b4d5c3a48",
+ "source": {
+  "kind": "checkout",
+  "files": 1007,
+  "sha1": "59481e05819776ca"
+ },
+ "zones": [
+  "kashyyyk_main",
+  "kashyyyk_hunting",
+  "kashyyyk_dead_forest",
+  "kashyyyk_rryatt_trail",
+  "kashyyyk_north_dungeons",
+  "kashyyyk_south_dungeons",
+  "kashyyyk_pob_dungeons",
+  "mustafar"
+ ],
+ "files": {
+  "tables": "tables.json",
+  "zones": {
+   "kashyyyk_main": "kashyyyk_main.json",
+   "kashyyyk_hunting": "kashyyyk_hunting.json",
+   "kashyyyk_dead_forest": "kashyyyk_dead_forest.json",
+   "kashyyyk_rryatt_trail": "kashyyyk_rryatt_trail.json",
+   "kashyyyk_north_dungeons": "kashyyyk_north_dungeons.json",
+   "kashyyyk_south_dungeons": "kashyyyk_south_dungeons.json",
+   "kashyyyk_pob_dungeons": "kashyyyk_pob_dungeons.json",
+   "mustafar": "mustafar.json"
+  }
+ },
+ "creatureColumns": [
+  "creatureName",
+  "BaseLevel",
+  "difficultyClass",
+  "template",
+  "aggressive",
+  "invulnerable",
+  "herd",
+  "stalker",
+  "death_blow",
+  "primary_weapon",
+  "primary_weapon_speed",
+  "secondary_weapon",
+  "socialGroup",
+  "pvpFaction",
+  "niche"
+ ],
+ "statColumns": [
+  "Level",
+  "HP",
+  "damagePerSecond",
+  "Elite_HP",
+  "Elite_damagePerSecond",
+  "Boss_HP",
+  "Boss_damagePerSecond"
+ ],
+ "frames": {
+  "kashyyyk_main": {
+   "matched": 1392,
+   "unmatched": 1231,
+   "median": 0,
+   "within": 1392
+  },
+  "kashyyyk_hunting": {
+   "matched": 1809,
+   "unmatched": 4,
+   "median": 0,
+   "within": 1809
+  },
+  "kashyyyk_dead_forest": {
+   "matched": 1993,
+   "unmatched": 4,
+   "median": 0,
+   "within": 1993
+  },
+  "kashyyyk_rryatt_trail": {
+   "matched": 10116,
+   "unmatched": 156,
+   "median": 0,
+   "within": 10116
+  },
+  "kashyyyk_north_dungeons": {
+   "matched": 4336,
+   "unmatched": 8,
+   "median": 0,
+   "within": 4336
+  },
+  "kashyyyk_south_dungeons": {
+   "matched": 4476,
+   "unmatched": 36,
+   "median": 0,
+   "within": 4476
+  },
+  "kashyyyk_pob_dungeons": {
+   "matched": 30,
+   "unmatched": 20,
+   "median": 0,
+   "within": 20
+  },
+  "mustafar": {
+   "matched": 4807,
+   "unmatched": 48,
+   "median": 0,
+   "within": 4807
+  }
+ },
+ "counts": {
+  "zones": {
+   "kashyyyk_main": {
+    "areas": 1,
+    "tables": 1,
+    "rows": 449,
+    "kinds": {
+     "s": 50,
+     "a": 240,
+     "c": 5,
+     "p": 27,
+     "w": 126,
+     "o": 1
+    },
+    "regions": 3,
+    "lists": 0
+   },
+   "kashyyyk_hunting": {
+    "areas": 1,
+    "tables": 1,
+    "rows": 375,
+    "kinds": {
+     "a": 258,
+     "p": 14,
+     "w": 84,
+     "g": 2,
+     "s": 17
+    },
+    "regions": 1,
+    "lists": 0
+   },
+   "kashyyyk_dead_forest": {
+    "areas": 1,
+    "tables": 1,
+    "rows": 147,
+    "kinds": {
+     "a": 87,
+     "p": 4,
+     "w": 43,
+     "s": 11,
+     "o": 1,
+     "g": 1
+    },
+    "regions": 1,
+    "lists": 0
+   },
+   "kashyyyk_rryatt_trail": {
+    "areas": 24,
+    "tables": 4,
+    "rows": 256,
+    "kinds": {
+     "a": 230,
+     "s": 13,
+     "p": 2,
+     "w": 10,
+     "g": 1
+    },
+    "regions": 1,
+    "lists": 0
+   },
+   "kashyyyk_north_dungeons": {
+    "areas": 16,
+    "tables": 2,
+    "rows": 236,
+    "kinds": {
+     "g": 21,
+     "a": 70,
+     "p": 17,
+     "w": 128
+    },
+    "regions": 1,
+    "lists": 0
+   },
+   "kashyyyk_south_dungeons": {
+    "areas": 24,
+    "tables": 2,
+    "rows": 141,
+    "kinds": {
+     "g": 86,
+     "a": 55
+    },
+    "regions": 1,
+    "lists": 0
+   },
+   "kashyyyk_pob_dungeons": {
+    "areas": 30,
+    "tables": 2,
+    "rows": 2,
+    "kinds": {
+     "o": 2
+    },
+    "regions": 1,
+    "lists": 0
+   },
+   "mustafar": {
+    "areas": 88,
+    "tables": 12,
+    "rows": 346,
+    "kinds": {
+     "a": 178,
+     "o": 4,
+     "s": 7,
+     "w": 125,
+     "p": 13,
+     "c": 19
+    },
+    "regions": 47,
+    "lists": 34
+   }
+  },
+  "tables": {
+   "creatures": 496,
+   "types": 197,
+   "shared": 543,
+   "dress": 63,
+   "stats": 70,
+   "weapons": 38,
+   "lairs": 156,
+   "crews": 7
+  },
+  "overlay": {
+   "rows": 17677,
+   "statics": 163,
+   "corpses": 24,
+   "crew": 7524,
+   "spawners": 9369,
+   "patrols": 597,
+   "sites": 3917,
+   "areas": 34,
+   "creatures": 496,
+   "withGame": 496,
+   "lairs": 156,
+   "groups": 34,
+   "unresolved": 0,
+   "gated": 1293,
+   "dropped": 1,
+   "routeLost": 3,
+   "crewLost": 0,
+   "noBody": 0,
+   "noRoom": 0,
+   "inCell": 0,
+   "crewTablesLeft": 0,
+   "things": 704
+  }
+ }
+}

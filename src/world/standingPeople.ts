@@ -107,7 +107,7 @@ export interface StandingRow {
   /** Which script or table stood it (`herald` for the heralds `conversationPack.ts` stands). */
   from?: string;
   /**
-   * Out of the owner's local overlay of SOE's own placements (`ngeOverlay.ts`), stood after everybody else; or one of
+   * Out of the NGE overlay of SOE's own placements (`ngeOverlay.ts`), stood after everybody else; or one of
    * ours stood by a rule of the game's (`'ours'`: the First Brigade in Restuss's ruins, `restuss.ts`).
    */
   src?: 'nge' | 'ours';
@@ -125,7 +125,7 @@ export interface StandingRow {
   walks?: boolean;
 }
 
-/** Where a row came from, for the console: the local overlay, a herald, the people of ours, or Core3's own. */
+/** Where a row came from, for the console: the NGE overlay, a herald, the people of ours, or Core3's own. */
 export type RowSource = 'core3' | 'herald' | 'nge' | 'ours';
 
 /** A row's source (`RowSource`). */
@@ -196,7 +196,7 @@ export interface PersonOverrides {
 export interface PersonSpawn {
   /** In a room, which changes how the ground is found. */
   inside: boolean;
-  /** Its place in the pack's list: the world's name for it (`stood:<n>`), which no other row has. */
+  /** Its place in the pack's list, which no other row has: the world's name for it but for a row of the overlay's (`stoodName`). */
   index: number;
   /** The one number everything it rolls is drawn from: its key's, so it rolls the same whatever order the rows are in. */
   seed: number;
@@ -214,9 +214,8 @@ export interface PersonSpawn {
   /** The room of its building it stands in, where the data says: it seeds the body's cell. */
   room?: number;
   /**
-   * Its name in the world (`stood:<world>:<n>`), the same in every browser: what it is shared under, and
-   * what a server holds its death by. The world is in it because every world's rows are numbered from
-   * nought, and a death held under `stood:17` on one world must never be another world's person.
+   * Its name in the world (`stood:<world>:<n>`, or `stood:<world>:<key>` for a row of SOE's own overlay: `stoodName`),
+   * the same in every browser: what it is shared under, and what a server holds its death by.
    */
   id: string;
   /** How long it stays down once it dies, in seconds: its row's own respawn, which a server holds its death for. */
@@ -257,6 +256,28 @@ export function seedOfRow(r: Pick<StandingRow, 'key'>, index: number): number {
     return h >>> 0;
   }
   return index >>> 0;
+}
+
+/** A key a row of SOE's own overlay may be named by: a plain id, never figures alone, which would read as a place in the list. */
+const OVERLAY_NAME_KEY = /^(?=.*[A-Za-z_-])[A-Za-z0-9_-]{1,24}$/;
+
+/**
+ * A standing row's name in the world (`PersonSpawn.id`), the same in every browser: what a server shares the body
+ * under and holds its death by. The world is in it because every world's rows are numbered from nought, and a death
+ * held under `stood:17` on one world must never be another world's person.
+ *
+ * Core3's rows, the heralds and the people of ours go by their place in the list (`stood:<world>:<n>`), which every
+ * browser builds alike from the same reference, and which every build since the people were shared names them by.
+ * A row of SOE's own overlay (`src: 'nge'`) goes by its own key (`stood:<world>:<key>`, the converter's `n` and
+ * eleven hex): those rows come last and the converter drops one whose creature joins no body of that machine's own
+ * catalogue, or whose room its own archives do not hold, so by place in the list every one after it would name another
+ * body on a machine whose catalogue joins it; by key a row's name is its own whatever else that machine dropped. A
+ * key that is no plain id falls back to the place.
+ */
+export function stoodName(world: string, row: Pick<StandingRow, 'key' | 'src'> | undefined, i: number): string {
+  const k = row?.key;
+  if (row?.src === 'nge' && typeof k === 'string' && OVERLAY_NAME_KEY.test(k)) return `stood:${world}:${k}`;
+  return `stood:${world}:${i}`;
 }
 
 /** The streams a row's draws come out of, one for each question and each life, so no draw moves another. */
@@ -493,7 +514,7 @@ export interface PeopleDeps {
   scope?(x: number, y: number, z: number): boolean;
   /**
    * Where this world brings the player in and back (the world's frame): the arrival, a teleport's spot, and so
-   * where a death comes round on a world with no cloning facility. The owner's local overlay keeps its people who
+   * where a death comes round on a world with no cloning facility. The NGE overlay keeps its people who
    * pick a fight on sight that far off it (`rowKeptOff`, `NGE_OVERLAY_TUNE.arrivalClear`); nobody else's row is
    * touched. None, and nothing is kept off.
    */
@@ -659,7 +680,7 @@ export class StandingPeople {
    * never reset, so a shortfall is answered once and not once for every time it is read.
    *
    * `offArrival` is how many rows that pass kept off the place a player comes in and back at, or put down there
-   * (`rowKeptOff`: the owner's local overlay's people who pick a fight on sight).
+   * (`rowKeptOff`: the NGE overlay's people who pick a fight on sight).
    */
   readonly last = { rows: 0, up: 0, down: 0, indoors: 0, stood: 0, dropped: 0, swapped: 0, waiting: 0, refused: '', essential: 0, short: 0, shortBytes: 0, pass: 0, offArrival: 0 };
 
@@ -1343,7 +1364,7 @@ export class StandingPeople {
 
   /**
    * For the console: the rows, and the bodies standing now, by where each row came from (`sourceOfRow`): Core3's,
-   * the heralds', the people of ours (the Star Destroyer's crew) and the local overlay's.
+   * the heralds', the people of ours (the Star Destroyer's crew) and the NGE overlay's.
    */
   bySource(): { rows: Record<RowSource, number>; up: Record<RowSource, number> } {
     const rows: Record<RowSource, number> = { core3: 0, herald: 0, nge: 0, ours: 0 };
@@ -1377,9 +1398,9 @@ export class StandingPeople {
     return c && Object.prototype.hasOwnProperty.call(c, who) ? c[who] : null;
   }
 
-  /** Row `i`'s name in the world: `stood:`, the world and its place in the pack's list. */
+  /** Row `i`'s name in the world (`stoodName`). */
   stoodId(i: number): string {
-    return `stood:${this.extras.world || 'here'}:${i}`;
+    return stoodName(this.extras.world || 'here', this.rows[i], i);
   }
 
   /** The side holding this world's towns, whose guards stand. */

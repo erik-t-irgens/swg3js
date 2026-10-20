@@ -18,6 +18,8 @@ import {
   NGE_FORMAT, NGE_PREFIX, NGE_RULES, buildNgeOverlay, holdsWhole, kindOf, ngeArg, ngeKey, ngeStatus, overlayTarget, regionAreas, rowIds, sharedOf, sourceInside, spawnerPlace, yawOfQ,
 } from '../ngepack.mjs';
 import { STATIC_TUNE, unitOf } from '../core3.mjs';
+import { differs } from '../core3ref.mjs';
+import { comparable, ngeRefReader, referenceHash, writeNgeReference } from '../ngeref.mjs';
 import { mergeBuildouts } from '../buildout.mjs';
 import { gameOf } from '../spawnpack.mjs';
 
@@ -418,6 +420,59 @@ const zi = built.index.zones.test_zone;
   rmSync(changed, { recursive: true, force: true });
 }
 
+// ------------------------------------------------------------------------------------- the reference
+// The rows every converter reads by default (`ngeref.mjs`): read off the tree, written as the reference, read back
+// through the reader every converter uses, and built into the very overlay the tree builds, with the archives (the
+// crews) and without; and refused, writing nothing, where the two would stand otherwise.
+{
+  const zones = ['test_zone', 'test_zone_plain'];
+  const buildWith = (reader: ReturnType<typeof makeNgeReader>, archives: boolean) => buildNgeOverlay({ reader, zones, packOf: () => pack, groundOf: () => (x: number) => ground(x), snapOf: archives ? () => snap : null, clientAreas: null, catalogue, converted: 'test_now' });
+  const refDir = join(mkdtempSync(join(tmpdir(), 'test_nge_ref_')), 'test_ngeref');
+  const w = writeNgeReference({ reader: makeNgeReader(root)!, fresh: makeNgeReader(root)!, build: buildWith, modes: [true, false], zones, outDir: refDir, made: 'test_now' });
+  const files = readdirSync(refDir).sort();
+  ok(files.join(',') === 'index.json,tables.json,test_zone.json,test_zone_plain.json' && !existsSync(`${refDir}.new`), `the reference is a file per zone, one of shared tables and an index, and nothing is left staged (${files.join(', ')})`);
+  ok(w.index.sha1 === referenceHash(Object.fromEntries(files.filter((f) => f !== 'index.json').map((f) => [f, readFileSync(join(refDir, f), 'utf8')]))) && /^[0-9a-f]{16}$/.test(w.index.sha1), "the index carries the reference's own hash over its files");
+  for (const archives of [true, false]) {
+    const live = buildWith(makeNgeReader(root)!, archives);
+    const fromRef = buildWith(ngeRefReader(refDir)!, archives);
+    const d = differs(comparable(live), comparable(fromRef));
+    ok(d === null && fromRef.index.copy.kind === 'reference' && fromRef.index.local === false && live.index.local === true, `${archives ? 'with the archives' : 'without them'}, the overlay built from the reference is the overlay built from the copy, row for row, name for name (${live.index.counts.rows} people)${d ? `: ${d}` : ''}`);
+    const sig = (b: typeof live) => Object.values(b.packs).flatMap((p) => (p.statics as Record<string, unknown>[]).map((r) => `${r.key}|${r.who}|${r.x}|${r.z}|${r.cell}`)).join('\n');
+    ok(sig(live) === sig(fromRef) && sig(buildWith(ngeRefReader(refDir)!, archives)) === sig(fromRef), `and every row keeps its key, its place and its room in every build of the same reference (${archives ? 'with' : 'without'} the archives)`);
+  }
+  ok(w.index.frames.test_zone?.median === 0 && buildWith(ngeRefReader(refDir)!, true).index.zones.test_zone.frame.objects.median === 0, "the placed objects' frame check is measured once when the reference is written and kept in its place");
+  // Only what something stands is kept: the tree's one creature nothing names, and its level's stats, stay behind.
+  const kept = JSON.parse(readFileSync(join(refDir, 'tables.json'), 'utf8'));
+  const keptNames = Object.keys(kept.creatures).sort().join(',');
+  const keptLevels = Object.keys(kept.stats).sort((x, y) => Number(x) - Number(y)).join(',');
+  ok(!('test_creature_unused' in kept.creatures) && keptNames === 'test_creature_crew,test_creature_dress,test_creature_lair,test_creature_plain,test_creature_tpf' && keptLevels === '10,20,30', `the reference keeps the creatures something stands and no other, and their levels' stats alone (${keptNames}; levels ${keptLevels})`);
+  // Nothing but rows: no string longer than a name, no script, no objvar text.
+  const strings: string[] = [];
+  const walk = (v: unknown): void => {
+    if (typeof v === 'string') strings.push(v);
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) {
+      strings.push(k);
+      walk(x);
+    }
+  };
+  for (const f of files) if (f !== 'index.json') walk(JSON.parse(readFileSync(join(refDir, f), 'utf8')));
+  const scripts = ['systems.spawning.spawner_area', 'systems.spawning.spawner_patrol', 'npc.celebrity.celebrity_spawner', 'npc.celebrity.corpse_spawner', 'theme_park.dungeon.generic_spawner', 'systems.combat.test_mine_spawner', 'test_name'];
+  const odd = strings.filter((s) => s.length > 96 || !/^[A-Za-z0-9_#./:-]*$/.test(s) || scripts.includes(s) || s.includes('|'));
+  ok(odd.length === 0 && strings.length > 50, `every string the reference holds is a name, a path or a number's text: none longer than a name, no script, no objvar written out (${strings.length} strings${odd.length ? `: ${odd.slice(0, 4).join(' / ')}` : ''})`);
+  // A reference that would stand otherwise than the copy is refused, and nothing is written.
+  const refused = join(mkdtempSync(join(tmpdir(), 'test_nge_refused_')), 'test_ngeref');
+  let why = '';
+  try {
+    writeNgeReference({ reader: makeNgeReader(root)!, fresh: makeNgeReader(root)!, build: (r, archives) => (r.roots.kind === 'reference' ? buildNgeOverlay({ reader: r, zones, packOf: () => pack, groundOf: () => () => 0, snapOf: archives ? () => snap : null, clientAreas: null, catalogue, converted: 'test_now' }) : buildWith(r, archives)), modes: [true], zones, outDir: refused });
+  } catch (err) {
+    why = (err as Error).message;
+  }
+  ok(/otherwise than the copy/.test(why) && !existsSync(refused) && !existsSync(`${refused}.new`), `a reference that would stand otherwise than the copy is refused and nothing written (${why.slice(0, 90)})`);
+  rmSync(dirname(refDir), { recursive: true, force: true });
+  rmSync(dirname(refused), { recursive: true, force: true });
+}
+
 // ------------------------------------------------------------------------------------- the guards
 {
   ok(ngeArg(['spawns', 'test_out', '--nge=@TEST_NGE'])?.refuse?.includes('.env') === true && ngeArg(['spawns', '--nge'])?.refuse !== undefined && ngeArg(['--nge=C:/test_a=b'])?.value === 'C:/test_a=b' && ngeArg(['spawns']) === null, 'the folder is read off the raw word, a path holding = whole, and an @ value refused');
@@ -449,7 +504,8 @@ const zi = built.index.zones.test_zone;
   writeFileSync(join(out, 'nge', 'index.json'), '{}');
   writeFileSync(join(out, 'nge', 'spawns', 'manifest.json'), '{}');
   const none = run(['spawns', out, '--nge=none']);
-  ok(none.status === 0 && /removed .* \(2 files/.test(none.stdout) && !existsSync(join(out, 'nge')), '--nge=none takes the overlay away and says what went');
+  const left = existsSync(join(out, 'nge', 'index.json')) ? JSON.parse(readFileSync(join(out, 'nge', 'index.json'), 'utf8')) : null;
+  ok(none.status === 0 && /removed .* \(2 files/.test(none.stdout) && left?.none === true && Object.keys(left.zones).length === 0 && readdirSync(join(out, 'nge')).join(',') === 'index.json', '--nge=none takes the overlay away, says what went, and leaves an index that says they were left out by choice and lists no world');
 
   // The cli's NGE half, run whole: nothing written outside <out>/nge, the Core3 half's fleet folder left byte for
   // byte, and a zone's pack the last run wrote and this one does not taken away inside nge alone.
@@ -479,7 +535,7 @@ const zi = built.index.zones.test_zone;
   writeFileSync(join(out, 'nge', 'index.json'), JSON.stringify({ format: NGE_FORMAT, local: true, source: 'nge', converted: 'test_then', copy: { root: 'C:/test_copy' }, catalogue: { converted: 'test_older' }, zones: { test_zone: { rows: 1, areas: 0, layout: 'test_a' } } }));
   const st = run(['status', out, '--json']);
   const said = JSON.parse(st.stdout || '{}') as { steps?: { args: string[] }[]; lines?: string[] };
-  ok(st.status === 0 && !!said.steps && said.steps.every((s) => !s.args.some((a) => /--nge/.test(a))) && (said.lines ?? []).some((l) => /nge overlay: run again by hand/.test(l)), 'status says a stale overlay is to be converted again by hand, and puts no --nge in any step a launcher would run');
+  ok(st.status === 0 && !!said.steps && said.steps.every((s) => !s.args.some((a) => /--nge/.test(a))) && (said.lines ?? []).some((l) => /nge: run again by hand/.test(l)), 'status says a stale overlay read from a live copy is to be converted again by hand, and puts no --nge in any step a launcher would run');
   rmSync(out, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });
 }
@@ -489,7 +545,7 @@ const zi = built.index.zones.test_zone;
   const index = { format: NGE_FORMAT, converted: '2026-01-01T00:00:00Z', copy: { root: 'C:/test_copy' }, catalogue: { converted: 'test_cat' }, zones: { test_zone: { rows: 3, areas: 1, layout: 'test_layout' } } };
   ok(ngeStatus(null, {}) === null, 'with no overlay status says nothing at all');
   const fresh = ngeStatus(index, { catalogue: 'test_cat', layouts: { test_zone: 'test_layout' } })!;
-  ok(/nge overlay \(local, never shipped\).*3 people, 1 wild areas, from C:\/test_copy/.test(fresh.line) && fresh.ask === null, 'with one, it says what it holds and from where, and asks nothing while it stands for what is there');
+  ok(/nge: .*3 people, 1 wild areas, read from a live copy at C:\/test_copy/.test(fresh.line) && fresh.ask === null, 'with one, it says what it holds and from where, and asks nothing while it stands for what is there');
   ok(/catalogue/.test(ngeStatus(index, { catalogue: 'test_other', layouts: { test_zone: 'test_layout' } })!.ask!.why) && /--nge=C:\/test_copy/.test(ngeStatus(index, { catalogue: 'test_other', layouts: {} })!.ask!.command), 'a catalogue converted since asks again, with the folder the index recorded');
   ok(/test_zone/.test(ngeStatus(index, { catalogue: 'test_cat', layouts: { test_zone: 'test_moved' } })!.ask!.why) && /older/.test(ngeStatus({ ...index, format: 0 }, { catalogue: 'test_cat', layouts: { test_zone: 'test_layout' } })!.ask!.why), 'and so does a layout that moved, or an overlay of an older format');
   ok(sharedOf('test_folder/test_x') === 'object/mobile/test_folder/shared_test_x.iff' && sharedOf('object/mobile/shared_test_y.iff') === 'object/mobile/shared_test_y.iff', 'a server template\'s shared twin');
@@ -501,7 +557,7 @@ const zi = built.index.zones.test_zone;
   if (existsSync(disk)) {
     const m = JSON.parse(readFileSync(disk, 'utf8'));
     const stray = [...Object.keys(m.creatures ?? {}), ...Object.keys(m.lairs ?? {}), ...Object.keys(m.groups ?? {}), ...Object.keys(m.weaponGroups ?? {})].filter((k) => !k.startsWith(NGE_PREFIX));
-    ok(stray.length === 0 && m.local === true && m.source === 'nge', 'the overlay on this machine names nothing that is not nge:-prefixed');
+    ok(stray.length === 0 && m.source === 'nge', `the overlay on this machine (${m.local ? 'read from a live copy' : 'from the reference'}) names nothing that is not nge:-prefixed`);
   } else console.log('note no overlay on this machine (spawns --nge writes one): nothing more to check');
 }
 

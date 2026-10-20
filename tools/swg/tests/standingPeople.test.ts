@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { closeSync, existsSync, openSync, readFileSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { GCW_SIDES, STAYS_DOWN_SECONDS, StandingPeople, PEOPLE_TUNE, overridesOf, personFor, postFor, seedOfRow, standPlaceOf, standsStill, weaponsOf, type PeopleCreature, type PeopleDeps, type PersonSpawn, type PlanContext, type StandingRow } from '../../../src/world/standingPeople.ts';
+import { GCW_SIDES, STAYS_DOWN_SECONDS, StandingPeople, PEOPLE_TUNE, overridesOf, personFor, postFor, seedOfRow, standPlaceOf, standsStill, stoodName, weaponsOf, type PeopleCreature, type PeopleDeps, type PersonSpawn, type PlanContext, type StandingRow } from '../../../src/world/standingPeople.ts';
 import { moodIdleName, moodOfRow, pickMoodClip, withMood, type RigVariants } from '../../../src/world/mobiles/moodIdle.ts';
 import { buildingWithRoomIn, offRoomBox, ROOM_SLACK, type RoomBuilding } from '../../../src/world/roomOf.ts';
 import { intoWorld } from '../../../src/world/wildLife.ts';
@@ -976,14 +976,15 @@ function memory(own: Record<string, number>, sharers: string[] = [], piece = 0) 
   ok(/if \(!b \|\| b\.dead \|\| b\.removed \|\| b\.engaged \|\| s\.essential !== essential \|\| deps\?\.keeps\?\.\(b\)\) continue;/.test(src('world/standingPeople.ts')) && /get engaged\(\): boolean \{/.test(mobile), 'and nobody in a fight is put down to make room for somebody nearer, nor anybody of the other cap, nor anybody following the player');
 
   // What the town says about each row reaches the body the world stands, and the budget can make room.
-  // The owner's local overlay's people come last of all (`standingList` in ngeOverlay.ts), so no other row's place
+  // The NGE overlay's people come last of all (`standingList` in ngeOverlay.ts), so no other row's place
   // moves; Restuss's First Brigade of ours goes between the heralds and the overlay whatever state the city stands in,
   // and which rows sleep in this state is a mask the people take beside the list, never a list of their own.
   ok(/const people = wildLife\.peopleRows\(\) as StandingRow\[\];\s*const heralds = people\.length \? conversationPack\.standRows\(this\.packId\) : \[\];[\s\S]{0,1400}standingPeople\.adopt\(standingList\(people, heralds, wildLife\.overlayRows\(\) as StandingRow\[\], roster as StandingRow\[\]\), wildLife\.peopleCreatures\(\), \{ \.\.\.wildLife\.peopleExtras\(\), dormant: \(r\) => personDormant\(r, standsIn, ruins\) \}\);/.test(worldSrc), "the world hands the people each creature's own numbers with the rows (and the heralds the conversations stand beside them, Restuss's roster of ours after them and the local overlay's after all), and the towns' lists, weapon groups and the state's sleepers beside them");
   // The name is the person's own (`stood:<world>:<index>`, unique across worlds so the server can hold it
   // once), and the row's respawn goes with it, which is how long its post stays empty once it dies.
   ok(/spawn: \(entry, at, how\) =>\s*this\.mobiles\?\.spawn\(entry, at, \{\s*origin: 'spawned',\s*seed: how\.seed,\s*inside: how\.inside,\s*worldId: how\.id,\s*essential: how\.essential,\s*overrides: how\.overrides,\s*creature: how\.creature,\s*mood: how\.mood,\s*weapons: how\.weapons,\s*weaponGroups: how\.weaponGroups,\s*room: how\.room,\s*respawn: how\.respawn,\s*\}\)/.test(worldSrc), "and stands each with its own creature's numbers, mood, weapons and room over its body's");
-  ok(/stoodId\(i: number\): string \{\s*return `stood:\$\{this\.extras\.world \|\| 'here'\}:\$\{i\}`;/.test(src('world/standingPeople.ts')), 'under a name of its own that says which world it stands on');
+  ok(/stoodId\(i: number\): string \{\s*return stoodName\(this\.extras\.world \|\| 'here', this\.rows\[i\], i\);/.test(src('world/standingPeople.ts')), 'under a name of its own that says which world it stands on');
+  ok(stoodName('tatooine', { key: 'abcdef012345' }, 12) === 'stood:tatooine:12' && stoodName('tatooine', undefined, 3) === 'stood:tatooine:3' && stoodName('mustafar', { src: 'nge', key: 'n0123456789a' }, 12) === 'stood:mustafar:n0123456789a', "Core3's rows by their place in the list, as every build since they were shared has named them; the overlay's by their own key");
   // What creature a body is, which the player's progress keys a fight's diminishing returns and a first win on: the
   // row's own creature, carried from every spawner that knows it to the body, and the entry's id only where none
   // does. Without it every one of the thirty-five kinds of Tusken would key as the one body they all wear.

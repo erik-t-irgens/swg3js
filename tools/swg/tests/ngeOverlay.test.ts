@@ -1,14 +1,15 @@
-// The owner's local NGE overlay at run time (`src/world/ngeOverlay.ts`, `WildLife`, `StandingPeople`): SOE's own
-// people for Kashyyyk and Mustafar laid over the world's own wildlife pack, **after** Core3's rows and the heralds,
-// so that nobody else's name moves in any browser, and left out wherever a server holds the world unless the owner
-// says otherwise. Every name here is TEST data; nothing of the copy is in this file.
+// The NGE overlay at run time (`src/world/ngeOverlay.ts`, `WildLife`, `StandingPeople`): SOE's own people for
+// Kashyyyk and Mustafar, which every converter writes from the reference beside it, laid over the world's own
+// wildlife pack **after** Core3's rows and the heralds, so that nobody else's name moves in any browser, and stood
+// for everybody with no opt-in, a server's world included (`where` is only a switch to compare with). Every name
+// here is TEST data.
 
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { readFileSync } from 'node:fs';
 import { NGE_OVERLAY_TUNE, emptyPack, mergeOverlay, nearArrival, ngeOverlay, overlayStands, picksFights, rowKeptOff, serverHoldsFor, standingList, whereOf } from '../../../src/world/ngeOverlay.ts';
 import { WildLife, type WildDeps, type WildManifest, type WildPack } from '../../../src/world/wildLife.ts';
-import { PEOPLE_TUNE, StandingPeople, patrolFor, postFor, sourceOfRow, type PeopleDeps, type PersonSpawn, type StandingRow } from '../../../src/world/standingPeople.ts';
+import { PEOPLE_TUNE, StandingPeople, patrolFor, postFor, sourceOfRow, stoodName, type PeopleDeps, type PersonSpawn, type StandingRow } from '../../../src/world/standingPeople.ts';
 import { LAIR_TUNE, gridSites } from '../../../src/world/mobiles/lairs.ts';
 import type { Post } from '../../../src/world/mobiles/brain.ts';
 import { NGE_FORMAT, ngeStatus } from '../ngepack.mjs';
@@ -19,6 +20,10 @@ function ok(cond: boolean, what: string): void {
   passed++;
   console.log(`ok   ${what}`);
 }
+
+// Where the overlay stands before anything here moves it: everywhere, for everybody, with no opt-in.
+const DEFAULT_WHERE = NGE_OVERLAY_TUNE.where;
+ok(DEFAULT_WHERE === 'always', `the overlay stands everywhere by default, a server's world included, with no switch to turn on (${DEFAULT_WHERE})`);
 
 // ------------------------------------------------------------------------------------------- the packs
 const row = (key: string, who: string, x: number, z: number, extra: Partial<StandingRow> = {}): StandingRow => ({ key, who, id: `${who}_body`, x, y: 0, z, heading: 0, cell: 0, respawn: 300, where: 'test_where', ...extra });
@@ -175,7 +180,12 @@ function names(list: readonly StandingRow[], world: string): Map<string, string>
   const was = names(before, 'test_world');
   const now = names(after, 'test_world');
   ok(was.size === 4 && [...was].every(([key, id]) => now.get(key) === id), "every Core3 row and herald is stood under the same stood: name with the overlay as without");
-  ok(now.get('n00000000001') === 'stood:test_world:4' && now.get('n00000000002') === 'stood:test_world:5', "and the overlay's under the names after theirs");
+  ok(now.get('n00000000001') === 'stood:test_world:n00000000001' && now.get('n00000000002') === 'stood:test_world:n00000000002', "and the overlay's under their own keys, which no place in the list can be");
+  // Named by key, an overlay row keeps its name when a machine's converter dropped one before it (a creature its
+  // catalogue joins no body for): by place, every row after the gap would name another body there.
+  const short = names(standingList(own, heralds, over.slice(1)), 'test_world');
+  ok(short.get('n00000000002') === now.get('n00000000002') && [...was].every(([key, id]) => short.get(key) === id), 'and one keeps its name on a machine that dropped the row before it, as every Core3 row and herald keeps theirs');
+  ok(stoodName('test_world', { src: 'nge', key: '00000004' }, 7) === 'stood:test_world:7' && stoodName('test_world', { src: 'nge', key: 'bad key!' }, 7) === 'stood:test_world:7' && stoodName('test_world', { key: 'abcdef012345' }, 7) === 'stood:test_world:7', "a key of figures alone, a key that is no plain id, and every row not the overlay's go by their place");
 
   const k = new WildLife();
   k.adopt(null, null, overPack(), overManifest());
@@ -184,7 +194,7 @@ function names(list: readonly StandingRow[], world: string): Map<string, string>
   people.adopt(list, k.peopleCreatures() as never, k.peopleExtras());
   const { deps, bodies } = game();
   people.step(0, 0, new THREE.Vector3(0, 0, 0), deps, true);
-  ok(bodies.length === 2 && bodies.every((b) => b.how.id.startsWith('stood:test_zone:')) && !bodies.some((b) => b.how.id.startsWith('stood:here:')), "on a world Core3 holds nothing of, the overlay's rows are named stood:<the pack id>:<n>, never stood:here:");
+  ok(bodies.length === 2 && bodies.every((b) => b.how.id.startsWith('stood:test_zone:')) && !bodies.some((b) => b.how.id.startsWith('stood:here:')), "on a world Core3 holds nothing of, the overlay's rows are named stood:<the pack id>:<key>, never stood:here:");
   ok(bodies.every((b) => b.how.overrides?.level === 40 && b.how.overrides?.aggression === 'aggressive'), "and stood with their own creature's numbers out of the overlay's fleet half");
   const src = people.bySource();
   ok(src.rows.nge === 2 && src.up.nge === 2 && src.rows.core3 === 0, 'the console counts them as the overlay\'s');
@@ -338,18 +348,34 @@ function names(list: readonly StandingRow[], world: string): Map<string, string>
     direct.adopt(core3Pack(), core3Manifest());
     ok(JSON.stringify(plain.allSites) === JSON.stringify(direct.allSites) && plain.overlayRows().length === 0 && !said.some((l) => l.includes('nge overlay')), 'with no overlay on this install a load reads exactly what it read before, and says nothing of it');
 
-    files['nge/index.json'] = { format: NGE_FORMAT, local: true, source: 'nge', converted: 'test_now', zones: { test_zone: { rows: 2, areas: 1 } } };
+    // The index every converter writes from the reference (`local: false`): stood with no opt-in, on a world a
+    // server holds as well, which is never even asked.
+    files['nge/index.json'] = { format: NGE_FORMAT, local: false, source: 'nge', converted: 'test_now', zones: { test_zone: { rows: 2, areas: 1 } } };
     files['nge/spawns/test_zone.json'] = overPack();
     files['nge/spawns/manifest.json'] = overManifest();
     ngeOverlay.forget();
     const kept = NGE_OVERLAY_TUNE.where;
+    let asked = 0;
+    const shared = new WildLife();
+    await shared.load('test_zone', '', {
+      serverHolds: async () => {
+        asked++;
+        return true;
+      },
+    });
+    ok(NGE_OVERLAY_TUNE.where === 'always' && shared.overlayRows().length === 2 && shared.ready && asked === 0 && ngeOverlay.last.left === '', 'by default a world the index lists stands the overlay on a server too, never asking whether one holds it');
+    // Two browsers built from the same packs name every row the same: the same list, in the same order.
+    const second = new WildLife();
+    await second.load('test_zone', '', { serverHolds: async () => true });
+    const listOf = (w: WildLife) => standingList(w.peopleRows() as StandingRow[], [], w.overlayRows() as StandingRow[]).map((r) => r.key).join(',');
+    ok(listOf(shared) === listOf(second) && listOf(shared) === 'n00000000001,n00000000002', "and two browsers holding the same overlay hold its rows in one order, so every stood: name is the same in both");
     NGE_OVERLAY_TUNE.where = 'alone';
     const alone = new WildLife();
     await alone.load('test_zone', '', { serverHolds: async () => false });
-    ok(alone.overlayRows().length === 2 && alone.ready && ngeOverlay.last.left === '' && said.some((l) => /nge overlay: 2 people and 1 wild areas on test_zone/.test(l)), 'a world the index lists takes the overlay where no server holds it, and the load says so in one line');
+    ok(alone.overlayRows().length === 2 && alone.ready && ngeOverlay.last.left === '' && said.some((l) => /nge overlay: 2 people and 1 wild areas on test_zone/.test(l)), "set to 'alone', a world the index lists takes the overlay where no server holds it, and the load says so in one line");
     const held = new WildLife();
     await held.load('test_zone', '', { serverHolds: async () => true });
-    ok(held.overlayRows().length === 0 && !held.ready && ngeOverlay.last.left === 'server' && said.some((l) => /a server holds test_zone/.test(l)), 'with a server holding it the overlay is left out, and the line says why');
+    ok(held.overlayRows().length === 0 && !held.ready && ngeOverlay.last.left === 'server' && said.some((l) => /a server holds test_zone/.test(l)), "and with a server holding it the overlay is left out, and the line says why");
     NGE_OVERLAY_TUNE.where = 'always';
     const always = new WildLife();
     await always.load('test_zone', '', { serverHolds: async () => true });
@@ -362,13 +388,26 @@ function names(list: readonly StandingRow[], world: string): Map<string, string>
     const other = new WildLife();
     await other.load('test_world', '', { serverHolds: async () => false });
     ok(JSON.stringify(other.allSites) === JSON.stringify(direct.allSites) && other.overlayRows().length === 0, 'and a world the index does not list loads as it did');
-    // An index that does not say it is the local overlay's is no overlay at all.
-    for (const bent of [{ local: undefined }, { source: 'test_other' }]) {
-      files['nge/index.json'] = { format: NGE_FORMAT, local: true, source: 'nge', converted: 'test_now', zones: { test_zone: { rows: 2, areas: 1 } }, ...bent };
+    // The overlay's index, whichever it came from (a live copy's, `local: true`, or the reference's), is taken; one
+    // whose source is another's is none, and one left out by choice (`spawns --nge=none`) lists no world.
+    for (const [bent, takes] of [[{ local: true }, true], [{ local: undefined }, true], [{ source: 'test_other' }, false]] as [Record<string, unknown>, boolean][]) {
+      files['nge/index.json'] = { format: NGE_FORMAT, local: false, source: 'nge', converted: 'test_now', zones: { test_zone: { rows: 2, areas: 1 } }, ...bent };
       ngeOverlay.forget();
       await ngeOverlay.fetchIndex('');
-      ok(!ngeOverlay.present && !ngeOverlay.overlayFor('test_zone'), `an index ${'local' in bent ? 'that does not say it is local' : "whose source is not the overlay's"} is taken as none`);
+      ok(ngeOverlay.present === takes && ngeOverlay.overlayFor('test_zone') === takes, `an index ${'source' in bent ? "whose source is not the overlay's is taken as none" : `${bent.local ? 'read from a live copy' : 'that says nothing of where it came from'} is taken`}`);
     }
+    files['nge/index.json'] = { format: NGE_FORMAT, source: 'nge', none: true, converted: 'test_now', zones: {} };
+    ngeOverlay.forget();
+    NGE_OVERLAY_TUNE.where = 'always';
+    const chosen = new WildLife();
+    await chosen.load('test_zone', '', { serverHolds: async () => false });
+    ok(!ngeOverlay.present && !ngeOverlay.overlayFor('test_zone') && chosen.overlayRows().length === 0 && !chosen.ready, 'an index left by spawns --nge=none lists no world, and the world stands none of the overlay');
+    // Packs converted before the overlay: no index at all, and the world is exactly what it was.
+    delete files['nge/index.json'];
+    ngeOverlay.forget();
+    const before = new WildLife();
+    await before.load('test_world', '', { serverHolds: async () => false });
+    ok(!ngeOverlay.present && JSON.stringify(before.allSites) === JSON.stringify(direct.allSites) && before.overlayRows().length === 0, 'and packs converted before the overlay stand none of it and load their world exactly as before');
     NGE_OVERLAY_TUNE.where = kept;
   } finally {
     globalThis.fetch = was;
@@ -385,7 +424,7 @@ function names(list: readonly StandingRow[], world: string): Map<string, string>
   const main = text('src/main.ts');
   const world = text('src/world/world.ts');
   ok(/this\.world\.serverHoldsWorld = \(\) => this\.serverHoldsHere\(\);/.test(main) && /serverHoldsFor\(this\.net\.session, this\.net\.wanted, this\.relayAsked, performance\.now\(\) - began\)/.test(main), "the game hands the world whether a server holds it, by the props keeper's own line and wait");
-  ok(/const kept = whereOf\(localStorage\.getItem\('swg\.nge'\)\);\s*if \(kept\) NGE_OVERLAY_TUNE\.where = kept;/.test(main) && /void ngeOverlay\.fetchIndex\(import\.meta\.env\.BASE_URL\);/.test(main), "the stored switch is read once at load, and the index asked for once a session");
+  ok(!/swg\.nge/.test(main) && !/localStorage[^\n]*NGE_OVERLAY_TUNE/.test(main) && /void ngeOverlay\.fetchIndex\(import\.meta\.env\.BASE_URL\);/.test(main), 'no stored switch keeps the overlay off in any browser, and the index is asked for once a session');
   ok(/this\.world\.arrivalPoint = \(\) => this\.spawn;/.test(main), 'the game hands the world where the player comes in and back: the spot a respawn comes round at');
   ok(/await wildLife\.load\(this\.packId, import\.meta\.env\.BASE_URL, \{ serverHolds: this\.serverHoldsWorld \?\? undefined \}\);/.test(world), "the world's load asks it whether a server holds the world");
   ok((world.match(/arrival: \(\) => this\.arrivalPoint\?\.\(\) \?\? null,/g) ?? []).length === 2, 'and hands that place to the standing people and to the wild world alike');
@@ -397,7 +436,24 @@ function names(list: readonly StandingRow[], world: string): Map<string, string>
   ok(ngeStatus(null, {}) === null, 'status says nothing of an overlay that is not there');
   const index = { format: NGE_FORMAT, converted: 'test', copy: { root: 'C:/test_copy' }, catalogue: { converted: 'test_cat' }, zones: { test_zone: { rows: 1, areas: 0, layout: 'test_a' } } };
   const stale = ngeStatus(index, { catalogue: 'test_cat', layouts: { test_zone: 'test_b' } })!;
-  ok(/spawns .*--nge=C:\/test_copy/.test(stale.ask!.command) && /test_zone/.test(stale.ask!.why), 'and asks for spawns again with the copy the index recorded, naming what moved');
+  ok(/spawns .*--nge=C:\/test_copy/.test(stale.ask!.command) && /test_zone/.test(stale.ask!.why) && !stale.ask!.need, 'an overlay read from a live copy is asked again by hand with the copy the index recorded, naming what moved, and never put on the to-do list');
+  // The reference every converter reads: asked on the to-do list a launcher runs, with no --nge, whenever the packs
+  // were converted without its rows -- told by the index and its stamps, never by a file's being there.
+  const ref = { sha1: 'test_ref_a' };
+  const layouts = { test_zone: 'test_a', test_other_zone: null };
+  const none = ngeStatus(null, { catalogue: 'test_cat', layouts, reference: ref })!;
+  ok(none.ask?.need === true && !/--nge/.test(none.ask.command) && /test_zone/.test(none.ask.why), 'packs converted before it (a zone of theirs converted and no index) ask for spawns on the to-do list, with no --nge');
+  ok(/test_ref_a/.test(none.line) && /test_ref_a/.test(none.ask!.why), "and the line and the reason name the reference beside the converter by its hash, as every other line of it does");
+  ok(ngeStatus(null, { catalogue: 'test_cat', layouts: { test_zone: null }, reference: ref }) === null && ngeStatus(null, { catalogue: 'test_cat', layouts, reference: null })!.ask === null, 'with none of its zones converted nothing is said, and with the reference missing nothing is asked that could not be answered');
+  const fromRef = { format: NGE_FORMAT, converted: 'test', copy: { root: 'tools/swg/ngeref', kind: 'reference', sha1: 'test_ref_a' }, catalogue: { converted: 'test_cat' }, zones: { test_zone: { rows: 3, areas: 1, layout: 'test_a' } } };
+  ok(ngeStatus(fromRef, { catalogue: 'test_cat', layouts, reference: ref })!.ask === null && /from the reference test_ref_a/.test(ngeStatus(fromRef, { catalogue: 'test_cat', layouts, reference: ref })!.line), "one made from the reference beside the converter, over this catalogue and these layouts, asks nothing and names the reference");
+  const moved = ngeStatus(fromRef, { catalogue: 'test_cat', layouts, reference: { sha1: 'test_ref_b' } })!;
+  ok(moved.ask?.need === true && /reference/.test(moved.ask.why), 'a reference that changed since asks again on the to-do list');
+  const added = ngeStatus(fromRef, { catalogue: 'test_cat', layouts: { ...layouts, test_other_zone: 'test_c' }, reference: ref })!;
+  ok(added.ask?.need === true && /test_other_zone/.test(added.ask.why), 'and so does a zone converted since that has none');
+  ok(ngeStatus({ format: NGE_FORMAT, source: 'nge', none: true, zones: {} }, { catalogue: 'test_cat', layouts, reference: ref })!.ask === null, 'one left out by choice (--nge=none) is not asked about again');
+  const old = ngeStatus({ ...index, format: 1, copy: { root: 'C:/test_copy', kind: 'checkout' } }, { catalogue: 'test_cat', layouts: { test_zone: 'test_a' }, reference: ref })!;
+  ok(old.ask?.need === true && !/--nge/.test(old.ask.command) && /older/.test(old.ask.why), "an overlay from before the reference is stood again from it, on the to-do list, with no --nge");
 }
 
 console.log(`\n${passed} checks passed`);

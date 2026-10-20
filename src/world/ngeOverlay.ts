@@ -1,17 +1,20 @@
-// SOE's own people for Kashyyyk and Mustafar, on the owner's install only: the local overlay the converter writes
-// with `spawns --nge=<folder>` (`tools/swg/ngepack.mjs`) into `assets-private/nge/`, fetched and laid over the
-// world's own wildlife pack here.
+// SOE's own people for Kashyyyk and Mustafar: the overlay every converter writes with `spawns` (`tools/swg/
+// ngepack.mjs`) into `assets-private/nge/`, from the reference beside it (`tools/swg/ngeref/`, committed and shipped
+// by the owner's decision of 2026-10-19), fetched and laid over the world's own wildlife pack here.
 //
-// **Nobody else ever has it.** The overlay is read off the owner's local copy of SOE's server data at conversion
-// time, never committed, never shipped, and no launcher ever asks for it, so for every other player the one thing
-// this file does is ask once a session for an index that is not there. Where it is there, a world it lists takes
-// its rows and areas **after** Core3's and the heralds' (`mergeOverlay`, `WildLife.overlayRows`): every Core3 row
-// and herald keeps its place in the list and so its `stood:` name in every browser, and every name the overlay
-// brings is `nge:`-prefixed, so nothing of it can stand for one of Core3's.
+// **Everybody has the same rows.** Every player's converter reads the same reference, so every browser built from
+// it stands the same people under the same names. A world the index lists takes its rows and areas **after**
+// Core3's and the heralds' (`mergeOverlay`, `WildLife.overlayRows`): every Core3 row and herald keeps its place in
+// the list and so its `stood:` name in every browser, and every name the overlay brings is `nge:`-prefixed, so
+// nothing of it can stand for one of Core3's. With a server they are the world's seeded bodies like any other
+// (`seen`), each under its own key (`stood:<world>:<key>`, `stoodName` in `standingPeople.ts`) rather than its
+// place in the list, since a machine whose catalogue joins one creature fewer drops that row and every place after
+// it would move; and a browser whose packs were converted before them has no index, stands none of them and names
+// everybody else the same.
 //
-// **Where a server holds the world** it is left out unless the owner says otherwise (`NGE_OVERLAY_TUNE.where`):
-// his rule that every client has the same content (2026-10-04) means bodies only his browser holds, that nobody
-// else could see or fight, have no place on a server others share.
+// **Where it stands** is a switch for comparing (`NGE_OVERLAY_TUNE.where`): everywhere by default; `alone` stands
+// it only where no server others share holds the world, as the first cut of this file did when only the owner's
+// install had it; `never` leaves it out.
 //
 // Rule for this file (node runs it with type stripping for the tests): every import with its `.ts` extension, no
 // enum, no namespace, no constructor parameter properties.
@@ -19,15 +22,16 @@
 import { PROPS_KEEPER_TUNE } from '../net/propsKept.ts';
 import type { WildManifest, WildPack } from './wildLife.ts';
 
-/** Where the local overlay stands: where no server holds the world (`alone`), on a server as well (`always`), or nowhere. */
+/** Where the overlay stands: everywhere, on a server too (`always`, the default), only where no server holds the world (`alone`), or nowhere. */
 export type NgeWhere = 'alone' | 'always' | 'never';
 
 /**
- * Every number and switch of the overlay's at run time. `where` is read at the next arrival: `alone` is the
- * default (§10 Q6 of the pass's design, ours), and `localStorage['swg.nge']` (`'0'` or `'always'`) is the
- * owner's to keep, read once at load; `__debug.people({ nge })` moves it in memory. `roamEvery` is how often a
- * person of the overlay that steps about its spot takes a step, seconds: null is the standing people's own
- * (`PEOPLE_TUNE.postEvery`), and a pair of its own is the owner's to try.
+ * Every number and switch of the overlay's at run time. `where` is read at the next arrival: `always` is the
+ * default, since every player's converter writes the very same rows (the owner's decision of 2026-10-19 that
+ * these people ship for every client), and `__debug.people({ nge })` moves it in memory to compare (`alone`, where
+ * no server holds the world; `never`). `roamEvery` is how often a person of the overlay that steps about its spot
+ * takes a step, seconds: null is the standing people's own (`PEOPLE_TUNE.postEvery`), and a pair of its own is the
+ * owner's to try.
  *
  * `arrivalClear` is how far, in metres, anything of the overlay that picks a fight on sight is kept from the
  * place this world brings a player in and back at: the arrival, the spot a teleport stands them on, and so where
@@ -40,7 +44,7 @@ export type NgeWhere = 'alone' | 'always' | 'never';
  * (`__debug.people({ arrivalClear })`), read at every pass.
  */
 export const NGE_OVERLAY_TUNE: { where: NgeWhere; roamEvery: [number, number] | null; arrivalClear: number } = {
-  where: 'alone',
+  where: 'always',
   roamEvery: null,
   arrivalClear: 64,
 };
@@ -85,7 +89,7 @@ export function picksFights(c: { readonly game?: { readonly aggression?: unknown
 /** Every name the overlay brings begins with this (`NGE_PREFIX` in tools/swg/ngepack.mjs). */
 export const NGE_PREFIX = 'nge:';
 
-/** A stored or typed word for `where`, or null where it is none. `'0'` is the switch off the README names. */
+/** A typed word for `where`, or null where it is none. `'0'` reads as `never`. */
 export function whereOf(word: unknown): NgeWhere | null {
   if (word === '0' || word === 'never' || word === false) return 'never';
   if (word === 'always') return 'always';
@@ -117,10 +121,14 @@ export function serverHoldsFor(line: { readonly authority: string; readonly mode
   return sinceMs < waitMs ? null : false;
 }
 
-/** The index the converter writes beside the overlay, as far as the game reads it. */
+/**
+ * The index the converter writes beside the overlay, as far as the game reads it. `local` is an overlay read from a
+ * live copy rather than the reference; `none` one left out by choice (`spawns --nge=none`), which lists no world.
+ */
 export interface OverlayIndex {
   format?: number;
   local?: boolean;
+  none?: boolean;
   source?: string;
   converted?: string;
   zones?: Record<string, { rows?: number; areas?: number }>;
@@ -168,7 +176,7 @@ export function strayName(over: WildPack, overManifest: WildManifest): string | 
 export function mergeOverlay(pack: WildPack | null, manifest: WildManifest | null, over: WildPack | null, overManifest: WildManifest | null): { pack: WildPack | null; manifest: WildManifest | null; rows: readonly unknown[] } {
   if (!over || !overManifest) return { pack, manifest, rows: [] };
   const stray = strayName(over, overManifest);
-  if (stray !== null) throw new Error(`the local overlay names ${JSON.stringify(stray)}, which is not ${NGE_PREFIX}-prefixed`);
+  if (stray !== null) throw new Error(`the overlay names ${JSON.stringify(stray)}, which is not ${NGE_PREFIX}-prefixed`);
   const base = pack ?? emptyPack(over.planet);
   const fleet = manifest ?? emptyManifest();
   return {
@@ -196,8 +204,8 @@ export function mergeOverlay(pack: WildPack | null, manifest: WildManifest | nul
  * The list a world's standing people are adopted from, in the order that names them (`stood:<world>:<n>`): the
  * world's own rows, the heralds beside them where it has any, the people of ours a rule of the game's stands there
  * (`ours`: the First Brigade in Restuss's ruins, in the list whatever state the world stands in, `restuss.ts`), and
- * the local overlay's after all of them, so neither an overlay nor a state moves any name of anybody else's in any
- * browser.
+ * the NGE overlay's after all of them, so neither an overlay nor a state moves any name of anybody else's in any
+ * browser. The overlay's own rows are named by their keys and not their places (`stoodName`).
  */
 export function standingList<T>(own: readonly T[], heralds: readonly T[], overlay: readonly T[], ours: readonly T[] = []): readonly T[] {
   const first = own.length ? [...own, ...heralds, ...ours] : own;
@@ -229,7 +237,9 @@ export class NgeOverlay {
       this.pending = (async () => {
         try {
           const got = (await jsonOf(await fetch(`${base}assets-private/nge/index.json`, { cache: 'no-store' }))) as OverlayIndex | null;
-          this.index = got && got.local === true && got.source === 'nge' && got.zones && typeof got.zones === 'object' ? got : null;
+          // The overlay's own index, whichever it came from (the reference or a live copy): one left out by choice
+          // lists no world, and stands nothing.
+          this.index = got && got.source === 'nge' && got.zones && typeof got.zones === 'object' ? got : null;
         } catch {
           this.index = null;
         }
@@ -238,9 +248,9 @@ export class NgeOverlay {
     return this.pending;
   }
 
-  /** Whether this install has the overlay at all. */
+  /** Whether this install has the overlay at all: an index listing a world (one left out by choice lists none). */
   get present(): boolean {
-    return !!this.index;
+    return !!this.index && Object.keys(this.index.zones ?? {}).length > 0;
   }
 
   /** Whether the index lists a world (its pack id). */

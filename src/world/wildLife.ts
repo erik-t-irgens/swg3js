@@ -168,7 +168,7 @@ export interface WildDeps {
   shareNest?(nest: WildNest, at: { x: number; y: number; z: number }, respawn: number): void;
   /**
    * Where this world brings the player in and back (the world's frame), as the standing people are told it
-   * (`PeopleDeps.arrival`): the owner's local overlay's herds that pick a fight on sight are kept that far off it
+   * (`PeopleDeps.arrival`): the NGE overlay's herds that pick a fight on sight are kept that far off it
    * (`NGE_OVERLAY_TUNE.arrivalClear`). None, and nothing is kept off.
    */
   arrival?(): { readonly x: number; readonly z: number } | null;
@@ -272,7 +272,7 @@ export function tuneTable(table: object, t: Record<string, unknown> | null | und
 export class WildLife {
   private pack: WildPack | null = null;
   private manifest: WildManifest | null = null;
-  /** The local overlay's people on this world (`overlayRows`), none where it is not stood here. */
+  /** The NGE overlay's people on this world (`overlayRows`), none where it is not stood here. */
   private overlay: readonly unknown[] = [];
   private sites: LairSite[] = [];
   private readonly standing = new Map<string, Standing>();
@@ -323,9 +323,10 @@ export class WildLife {
     if (!planetId) return;
     try {
       const [packRes, manRes] = await Promise.all([fetch(`${base}assets-private/${planetId}/spawns.json`), fetch(`${base}assets-private/spawns/manifest.json`)]);
-      // The owner's local overlay (`ngeOverlay.ts`), for a world its index lists and only where `where` lets it
-      // stand: where no server holds the world unless he says otherwise, waited on behind the loading screen.
-      // A world it does not list reads exactly what it read before.
+      // SOE's own people for Kashyyyk and Mustafar (`ngeOverlay.ts`), for a world the overlay's index lists, where
+      // `where` lets it stand: everywhere by default, and asked whether a server holds the world, behind the loading
+      // screen, only when it is set to stand where none does. A world it does not list reads exactly what it read
+      // before.
       const listed = await ngeOverlay.listed(planetId, base);
       if (token !== this.token) return;
       if (!listed && (!packRes.ok || !manRes.ok)) return;
@@ -355,14 +356,14 @@ export class WildLife {
     }
   }
 
-  /** The one line a load says of the local overlay on a world its index lists: what came of it, or why it was left out. */
+  /** The one line a load says of the NGE overlay on a world its index lists: what came of it, or why it was left out. */
   private sayOverlay(planetId: string): void {
     const last = ngeOverlay.last;
-    if (last.left === 'server') console.log(`nge overlay: a server holds ${planetId} (or one saved here connects after this loading screen), so the local overlay is left out here; __debug.people({ nge: 'always' }) stands it from the next arrival, and localStorage['swg.nge'] = 'always' keeps that in this browser`);
+    if (last.left === 'server') console.log(`nge overlay: a server holds ${planetId} (or one saved here connects after this loading screen) and the overlay is set to stand only where none does, so it is left out here; __debug.people({ nge: 'always' }) stands it from the next arrival`);
     else if (last.left === 'off') console.log(`nge overlay: switched off, so ${planetId} stands Core3's people alone`);
     else if (last.left === 'refused') console.log(`nge overlay: refused on ${planetId}: it names something that is not nge:-prefixed; convert it again`);
     else if (last.left === 'missing') console.log(`nge overlay: the index lists ${planetId} and its pack is missing; convert it again`);
-    else console.log(`nge overlay: ${last.rows} people and ${last.areas} wild areas on ${planetId} from the local overlay (never shipped)`);
+    else console.log(`nge overlay: ${last.rows} people and ${last.areas} wild areas on ${planetId}, SOE's own`);
   }
 
   /**
@@ -377,7 +378,7 @@ export class WildLife {
     let p = readsSpawns(pack?.format) && pack && Array.isArray(pack.areas) ? pack : null;
     let m = readsSpawns(manifest?.format) && manifest?.lairs ? manifest : null;
     this.overlay = [];
-    // The owner's local overlay laid over the world's own (`mergeOverlay`): its areas and names beside Core3's,
+    // The NGE overlay laid over the world's own (`mergeOverlay`): its areas and names beside Core3's,
     // its people handed apart to stand after Core3's and the heralds' (`overlayRows`). One that names anything
     // not `nge:`-prefixed is refused whole, and the world stands Core3's alone.
     if (readsSpawns(over?.format) && over && Array.isArray(over.areas) && readsSpawns(overManifest?.format) && overManifest?.lairs) {
@@ -462,7 +463,7 @@ export class WildLife {
     const moved = [...tuneTable(LAIR_TUNE, t), ...tuneTable(WILD_TUNE, t), ...tuneTable(NEST_MODEL_TUNE, t)];
     if (moved.some((k) => LAYOUT_KEYS.includes(k))) {
       this.restand();
-      // The pack held is already the merged one (the local overlay's areas in it), and the overlay's people are
+      // The pack held is already the merged one (the NGE overlay's areas in it), and the overlay's people are
       // handed apart from it, so they are kept across the new laying out rather than lost from `overlayRows`.
       const overlay = this.overlay;
       this.adopt(this.pack, this.manifest);
@@ -575,7 +576,7 @@ export class WildLife {
     const mine = { x: centre.x - at.x, z: at.z + centre.z };
     const live = new Set(this.standing.keys());
     const { add, drop } = wanted(this.openSites(), mine, live);
-    // The owner's local overlay's herds that pick a fight keep clear of where the player comes in and back
+    // The NGE overlay's herds that pick a fight keep clear of where the player comes in and back
     // (`siteKeptOff`): one standing there when that place moved onto it (a teleport) goes with the far ones.
     const arrival = deps.arrival?.() ?? null;
     if (arrival) {
@@ -880,7 +881,7 @@ export class WildLife {
 
   /** Put a site away: every body it stood, the thing in its middle, and the record. */
   /**
-   * Whether a site of the owner's local overlay (laid over one of its `nge:` areas) is kept off the place the player
+   * Whether a site of the NGE overlay (laid over one of its `nge:` areas) is kept off the place the player
    * comes in and back at: one whose lair stands any creature that picks a fight on sight, its middle (`middle`, the
    * world's frame) and its spread, and `more` metres it may yet be moved, inside `NGE_OVERLAY_TUNE.arrivalClear`.
    * Nobody else's site is touched.
@@ -1150,7 +1151,7 @@ export class WildLife {
   }
 
   /**
-   * The local overlay's people (`ngeOverlay.ts`), handed apart from `peopleRows` so the world stands them **after**
+   * The NGE overlay's people (`ngeOverlay.ts`), handed apart from `peopleRows` so the world stands them **after**
    * Core3's and the heralds': every one of those keeps its place in the list and so its `stood:` name in every
    * browser. None where the overlay is not here, or not stood here.
    */
@@ -1160,7 +1161,7 @@ export class WildLife {
 
   /**
    * For the console: the sites laid and the areas they were laid over, by where the area came from (`core3`, or
-   * `nge` for the local overlay's), and the overlay's own people.
+   * `nge` for the NGE overlay's), and the overlay's own people.
    */
   bySource(): { sites: Record<'core3' | 'nge', number>; areas: Record<'core3' | 'nge', number>; overlayRows: number } {
     const sites = { core3: 0, nge: 0 };

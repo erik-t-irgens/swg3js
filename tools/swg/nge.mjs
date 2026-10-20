@@ -1,5 +1,7 @@
-// The NGE copy's reader: SOE's own server tables, read off the owner's local copy at conversion time, into
-// `assets-private/nge/` only (`spawns --nge=<folder>`; the rules are `ngepack.mjs`, which says what all of it is).
+// The NGE copy's reader: SOE's own server tables, read off a live copy -- by `spawns --nge=<folder>` into
+// `assets-private/nge/`, and by `nge-reference`, which keeps what the overlay reads of it as the committed
+// reference every converter reads by default (`ngeref.mjs`); the rules are `ngepack.mjs`, which says what all of
+// it is.
 //
 // It reads data and never code: the tables (`.tab`, tab-separated text with a row of column names and a row of
 // types) and, of a mobile's server template (`.tpf`), the one line that names its client body. Quest scripts,
