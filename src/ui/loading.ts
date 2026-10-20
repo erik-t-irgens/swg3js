@@ -1,15 +1,25 @@
 // The loading screen: the planet's picture, grey and dim, filling in with colour from the left
 // as the world streams in (the way Halo's did), with the planet's name, what is being waited
 // for, and the percentage. The picture is the game's own loading screen for the planet when the
-// converter's `loading` command has pulled it (assets-private/loading/<planet>.png); without
-// one, a planet drawn from the planet's own sky colours over stars.
+// converter's `loading` command has pulled it (assets-private/loading/<planet>.png, asked for only
+// where that command's own index lists it); without one, a planet drawn from the planet's own sky
+// colours over stars, on two canvases shown where the pictures stand, never encoded into an image
+// (a readback of the whole canvas, 54 ms the first time).
 import type { PlanetDef } from '../data/planets';
 import { opaqueAt } from '../world/loadingTune.ts';
+import { loadingPicture } from '../world/packFiles.ts';
 
 export class LoadingScreen {
   readonly root: HTMLElement;
   private readonly grey: HTMLImageElement;
   private readonly colour: HTMLImageElement;
+  /** The stand-in picture, drawn twice (the grey one and the one filling in), shown in place of the two images. */
+  private readonly greyStand: HTMLCanvasElement;
+  private readonly colourStand: HTMLCanvasElement;
+  /** Whichever of the two colour layers is shown now: the one the reveal's clip is written to. */
+  private colourShown: HTMLElement;
+  /** Bumped at each world's picture asked for, so an answer that comes after another world's is dropped. */
+  private pictureAsk = 0;
   private readonly edge: HTMLElement;
   private readonly title: HTMLElement;
   private readonly what: HTMLElement;
@@ -37,6 +47,8 @@ export class LoadingScreen {
     this.root.innerHTML = `
       <img class="grey" alt="" draggable="false" />
       <img class="colour" alt="" draggable="false" />
+      <canvas class="grey" width="1600" height="900" hidden></canvas>
+      <canvas class="colour" width="1600" height="900" hidden></canvas>
       <div class="edge"></div>
       <div class="vignette"></div>
       <div class="caption">
@@ -47,8 +59,11 @@ export class LoadingScreen {
         <div class="pct">0%</div>
       </div>`;
     parent.appendChild(this.root);
-    this.grey = this.root.querySelector<HTMLImageElement>('.grey')!;
-    this.colour = this.root.querySelector<HTMLImageElement>('.colour')!;
+    this.grey = this.root.querySelector<HTMLImageElement>('img.grey')!;
+    this.colour = this.root.querySelector<HTMLImageElement>('img.colour')!;
+    this.greyStand = this.root.querySelector<HTMLCanvasElement>('canvas.grey')!;
+    this.colourStand = this.root.querySelector<HTMLCanvasElement>('canvas.colour')!;
+    this.colourShown = this.colour;
     this.edge = this.root.querySelector<HTMLElement>('.edge')!;
     this.title = this.root.querySelector<HTMLElement>('.title')!;
     this.what = this.root.querySelector<HTMLElement>('.what')!;
@@ -87,12 +102,17 @@ export class LoadingScreen {
     const id = planet?.id ?? '';
     if (id !== this.planetId) {
       this.planetId = id;
-      if (planet) {
-        const src = `${this.baseUrl}assets-private/loading/${planet.id}.png`;
-        this.grey.src = src;
-        this.colour.src = src;
-      } else this.fallback();
       this.planet = planet;
+      const ask = ++this.pictureAsk;
+      if (planet) {
+        // The picture only where the `loading` command's own index lists one (ten worlds of every one the game has),
+        // the stand-in otherwise: every other world's screen asked for a picture that could only miss.
+        void loadingPicture(planet, this.baseUrl).then((src) => {
+          if (ask !== this.pictureAsk) return;
+          if (src) this.showPicture(src);
+          else this.fallback();
+        });
+      } else this.fallback();
     }
     this.draw();
     this.root.classList.add('on');
@@ -148,23 +168,47 @@ export class LoadingScreen {
   private draw(): void {
     const p = this.shown;
     const right = (1 - p) * 100;
-    this.colour.style.clipPath = `inset(0 ${right}% 0 0)`;
+    this.colourShown.style.clipPath = `inset(0 ${right}% 0 0)`;
     this.edge.style.left = `${p * 100}%`;
     this.edge.style.opacity = p > 0.002 && p < 0.998 ? '1' : '0';
     this.bar.style.width = `${p * 100}%`;
     this.pct.textContent = `${Math.round(p * 100)}%`;
   }
 
-  /** No picture for the planet: draw one from its sky, a world hanging in the dark. */
+  /** The game's own picture for the planet, in both layers, with the stand-in's canvases put away. */
+  private showPicture(src: string): void {
+    this.grey.src = src;
+    this.colour.src = src;
+    this.showLayers(false);
+  }
+
+  /** Which pair stands: the two images, or the two canvases of the stand-in. The reveal's clip follows the shown one. */
+  private showLayers(standIn: boolean): void {
+    this.grey.hidden = standIn;
+    this.colour.hidden = standIn;
+    this.greyStand.hidden = !standIn;
+    this.colourStand.hidden = !standIn;
+    this.colourShown = standIn ? this.colourStand : this.colour;
+    this.draw();
+  }
+
+  /**
+   * No picture for the planet: draw one from its sky, a world hanging in the dark, on the two canvases themselves (the
+   * same picture twice, each drawn from the same seed), which stand where the images would. Encoding it into an image
+   * for the two `<img>`s read the whole canvas back first, 54 ms the first time.
+   */
   private fallback(): void {
+    const greyCtx = this.greyStand.getContext('2d');
+    const colourCtx = this.colourStand.getContext('2d');
+    if (!greyCtx || !colourCtx) return;
+    this.paintStandIn(greyCtx, this.greyStand.width, this.greyStand.height);
+    this.paintStandIn(colourCtx, this.colourStand.width, this.colourStand.height);
+    this.showLayers(true);
+  }
+
+  /** The stand-in picture of the planet now shown, drawn into one canvas. */
+  private paintStandIn(ctx: CanvasRenderingContext2D, w: number, h: number): void {
     const planet = this.planet;
-    const w = 1600;
-    const h = 900;
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
     const hex = (c: number) => `#${c.toString(16).padStart(6, '0')}`;
     ctx.fillStyle = '#04070d';
     ctx.fillRect(0, 0, w, h);
@@ -220,8 +264,5 @@ export class LoadingScreen {
       ctx.fill();
     }
     ctx.restore();
-    const url = canvas.toDataURL('image/jpeg', 0.9);
-    this.grey.src = url;
-    this.colour.src = url;
   }
 }

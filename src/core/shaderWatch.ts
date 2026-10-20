@@ -164,6 +164,25 @@ export function backendOf(renderer: string | null | undefined): Backend {
   return 'unknown';
 }
 
+/**
+ * What the message line says of the backend, once a session at the first world: only a software rasteriser is worth a
+ * word, since the browser is then drawing without the graphics card and every frame is slow. Nothing is said of any
+ * other backend (the launcher cannot change the browser's renderer as an option, so the game says nothing about it).
+ */
+export function backendLine(backend: Backend): string | null {
+  return backend === 'software' ? "This browser is drawing the game without the graphics card (a software renderer), so it will be very slow: turn on the browser's graphics acceleration in its settings and restart it." : null;
+}
+
+/**
+ * What the console says once at boot beside the driver message some machines show on Vulkan, "GPU stall due to
+ * ReadPixels": it is the browser's own, not the game's. On a machine where Vulkan turns the browser's GPU compositing
+ * off, the browser reads every frame of the page's canvas back to composite it in software, and the driver warns of the
+ * first few of those readbacks; the game reads no pixels at all. Nothing is said on another backend, which never shows it.
+ */
+export function readbackNote(backend: Backend): string | null {
+  return backend === 'vulkan' ? 'graphics: a driver message at start-up saying "GPU stall due to ReadPixels" is the browser\'s own, not the game\'s: on Vulkan the browser may composite the page without the graphics card, reading every frame of the canvas back to do it, and the message is the first of those readbacks (the game reads no pixels)' : null;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Reading three's cache key.
 //

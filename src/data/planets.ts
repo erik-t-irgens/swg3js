@@ -70,6 +70,13 @@ export interface PlanetDef {
    * world with no zones; absent, the flattest dry spot near the layout centre (`World.spawnPoint`).
    */
   arrival?: WorldArrival;
+  /**
+   * `false` for a world that declares no pack of its own (today every real-elevation world): nothing under
+   * `assets-private/<id>/` is ever asked for it (`src/world/packFiles.ts`), since every such ask would be a file the
+   * game knows is not there. Absent, a world's pack is asked for as it always was; a world given content later (the
+   * map maker) drops the `false` and every one of its files is asked for again.
+   */
+  pack?: false;
   /** Downward acceleration in m/s². Real planets vary; SWG feel is snappier than Earth. */
   gravity: number;
   sky: { top: number; horizon: number; sunColor: number; suns: number; sunElevation: number; sunAzimuth: number };
@@ -340,6 +347,7 @@ export const PLANETS: PlanetDef[] = [
     light: { sunIntensity: 2.6, ambientSky: 0xd9a070, ambientGround: 0x6a5040, ambientIntensity: 1.15 },
     terrain: { base: 2, amplitude: 48, frequency: 0.0032, octaves: 5, ridged: 0.8, flatten: 1.0, detail: 0.7 },
     dem: { url: '/dem/canyon', size: 32768, lift: -719.7274780273438, feather: 600, detail: .4 },
+    pack: false,
     water: { level: 100, color: 0x2c4a52, opacity: 0.86 },
     palette: { low: 0xd8b073, mid: 0xe7c78d, high: 0xf2dcaa, slope: 0xb48d56, shore: 0xe7c78d },
     props: { treeDensity: 0, rockDensity: 0.55, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x8f7355, treeScale: 1 },
@@ -363,6 +371,7 @@ export const PLANETS: PlanetDef[] = [
     light: { sunIntensity: 1.5, ambientSky: 0x9fb3c4, ambientGround: 0x55604f, ambientIntensity: 1.25 },
     terrain: { base: 0, amplitude: 60, frequency: 0.0030, octaves: 4, ridged: 0.4, flatten: 1.0, detail: 0.4 },
     dem: { url: '/dem/seattle', size: 32768, lift: 15.707568168640137, feather: 0, detail: 1 },
+    pack: false,
     water: { level: 25, color: 0x2c4a52, opacity: 0.86 },
     palette: { low: 0x5f9a47, mid: 0x4a7f3a, high: 0x8a9a75, slope: 0x6f6a60, shore: 0xc8ba85 },
     props: { treeDensity: 0.9, rockDensity: 0.12, treeStyle: 'pine', canopy: 0x2c4028, trunk: 0x4a3828, rock: 0x6c6a63, treeScale: 1.3 },
@@ -372,6 +381,7 @@ export const PLANETS: PlanetDef[] = [
     id: 'monument',
     name: 'Monument',
     dem: { url: '/dem/monument', size: 16288, lift: -1490.344970703125, feather: 0, detail: 1 },
+    pack: false,
     tagline: 'Monument Valley',
     description: 'An old land from another world',
     seed: 4242,
@@ -391,6 +401,7 @@ export const PLANETS: PlanetDef[] = [
     id: 'helens',
     name: 'Helensar',
     dem: { url: '/dem/helens', size: 24576, lift: -299.8861083984375, feather: 0, detail: 1 },
+    pack: false,
     tagline: 'An erupted goliath',
     description: 'An old land from another world',
     seed: 4001,

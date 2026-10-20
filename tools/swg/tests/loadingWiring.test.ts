@@ -172,4 +172,14 @@ function method(text: string, signature: string): string {
   ok(/async prepareActor\(root: THREE\.Object3D, label\?: string, roomsLater\?: RoomJob\)[\s\S]{0,1100}await this\.compileReady\(\[root\], label, roomsLater \? \{ roomsLater \} : undefined\);/.test(world), 'prepareActor hands the queue its label (and the room deferral its handle)');
 }
 
+// --- the loading screen's own picture (the fifth wave) -------------------------------------------------------------------
+
+{
+  const loading = readFileSync(new URL('../../../src/ui/loading.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const code = loading.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  ok(!/toDataURL|toBlob|getImageData/.test(code), "the loading screen reads nothing back: the stand-in picture is the canvas itself, never encoded with toDataURL");
+  ok(/<canvas class="grey"[^>]*hidden><\/canvas>/.test(loading) && /<canvas class="colour"[^>]*hidden><\/canvas>/.test(loading) && /this\.paintStandIn\(greyCtx,[^)]*\);\s*this\.paintStandIn\(colourCtx,[^)]*\);\s*this\.showLayers\(true\);/.test(loading), 'it is drawn twice, onto two canvases that stand where the two pictures would');
+  ok(/void loadingPicture\(planet, this\.baseUrl\)\.then\(\(src\) => \{\s*if \(ask !== this\.pictureAsk\) return;/.test(loading) && !/assets-private\/loading\/\$\{planet\.id\}\.png/.test(code), "and a picture is asked for only where the loading command's own index lists one (`loadingPicture`), the answer for another world's screen dropped");
+}
+
 console.log(`\nloadingWiring: ${checks} checks passed`);

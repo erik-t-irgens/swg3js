@@ -68,6 +68,7 @@ import type { Mobile } from './mobiles/mobile.ts';
 import { NEST_MODEL_TUNE, WildCamp, WildNest, nestModels, type NestDeps, type NestEffect } from './wildNest.ts';
 import { overridesOf, weaponsOf, type PersonOverrides } from './standingPeople.ts';
 import { NGE_OVERLAY_TUNE, NGE_PREFIX, mergeOverlay, ngeOverlay, nearArrival, overlayStands, picksFights } from './ngeOverlay.ts';
+import { packJson } from './packFiles.ts';
 
 /** The spawns packs this game reads: format 1, and format 2, which is format 1 with more beside it. */
 export const SPAWNS_READ = [1, 2];
@@ -322,15 +323,16 @@ export class WildLife {
     this.overlay = [];
     if (!planetId) return;
     try {
-      const [packRes, manRes] = await Promise.all([fetch(`${base}assets-private/${planetId}/spawns.json`), fetch(`${base}assets-private/spawns/manifest.json`)]);
+      // The world's own half is asked only of a world the server populated (`packHolds`: Kashyyyk's zones, Mustafar and
+      // every space zone have no `spawns.json`, and each of their arrivals asked for one that could only miss).
+      const [pack, manRes] = await Promise.all([packJson<WildPack>(planetId, 'spawns.json', base, { probe: false }), fetch(`${base}assets-private/spawns/manifest.json`)]);
       // SOE's own people for Kashyyyk and Mustafar (`ngeOverlay.ts`), for a world the overlay's index lists, where
       // `where` lets it stand: everywhere by default, and asked whether a server holds the world, behind the loading
       // screen, only when it is set to stand where none does. A world it does not list reads exactly what it read
       // before.
       const listed = await ngeOverlay.listed(planetId, base);
       if (token !== this.token) return;
-      if (!listed && (!packRes.ok || !manRes.ok)) return;
-      const pack = packRes.ok ? ((await packRes.json()) as WildPack) : null;
+      if (!listed && (!pack || !manRes.ok)) return;
       const manifest = manRes.ok ? ((await manRes.json()) as WildManifest) : null;
       if (token !== this.token) return;
       let over: { pack: WildPack; manifest: WildManifest } | null = null;

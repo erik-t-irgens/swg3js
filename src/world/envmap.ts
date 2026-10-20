@@ -63,7 +63,13 @@ const listeners = new Set<(texture: THREE.Texture | null, scale: number) => void
  * load (`MODEL_REFLECTIONS_AT_LOAD`), which is exactly how they were drawn before they had one.
  */
 export type ReflectionSource = 'sky' | 'game';
-export const REFLECTIONS: { source: ReflectionSource; plain: number; models: boolean } = { source: savedSource(), plain: 0, models: true };
+/**
+ * `dome` is how our own sky is captured: `kept` (the default since the performance pass's fifth wave) into the kept cube
+ * and target in place (`DomeCapture`), `scene` the way before it, a target made every capture through `fromScene` with
+ * its 0.04 rad blur, to compare the look by (`__debug.reflections({ dome: 'scene' })`; the kept target's height is the
+ * same 512, so nothing compiles either way). Not remembered.
+ */
+export const REFLECTIONS: { source: ReflectionSource; plain: number; models: boolean; dome: 'kept' | 'scene' } = { source: savedSource(), plain: 0, models: true, dome: 'kept' };
 
 /** Whether the models join the registry at all this session, read once at load (`swg.reflections.models`). */
 export const MODEL_REFLECTIONS_AT_LOAD = modelsAtLoad();
@@ -274,6 +280,87 @@ export function currentEnvironment(): { texture: THREE.Texture | null; scale: nu
 export function onEnvironment(listener: (texture: THREE.Texture | null, scale: number) => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+/**
+ * The cube every environment here is filtered from, in pixels a side: the dome's capture and every cube a water body may
+ * see, since `envMapCubeUVHeight` (four times this) is in a reflective material's program key.
+ */
+export const DOME_CUBE = 128;
+
+/** The part of three's `PMREMGenerator` the dome's capture uses; a node test hands in a counting stand-in. */
+export interface DomeFilter {
+  fromCubemap(cubemap: THREE.Texture, renderTarget?: THREE.WebGLRenderTarget | null): THREE.WebGLRenderTarget;
+  compileCubemapShader(): void;
+}
+
+/** A cube texture's size a side, from its first face; 0 where it has none. */
+export function cubeSizeOf(cube: THREE.Texture): number {
+  const faces = cube.image as ArrayLike<{ width?: number; image?: { width?: number } } | undefined> | undefined;
+  const face = faces && typeof faces === 'object' && 'length' in faces ? faces[0] : undefined;
+  return face?.width ?? face?.image?.width ?? 0;
+}
+
+/**
+ * Our own sky's reflection, captured without allocating (the performance pass's fifth wave). The dome is rendered into
+ * one kept 128 px cube and filtered into one kept PMREM target, written in place at every capture, so a capture makes
+ * no target and hands no material a new environment: the texture every reflective surface holds is the same object
+ * for the session, its contents new. `fromScene` made a whole target every call, every four seconds, and handed it out.
+ *
+ * The filter is a generator of the dome's own (`domePmrem`), never the world's shared one: handed a target, three's
+ * generator skips allocating and reuses whatever ping-pong target, level meshes and filter materials the size it last
+ * allocated left it, and the shared generator also filters the areas' own cube maps at their file's size (a space
+ * zone's are 256 px), after which a kept capture through it would be filtered at the wrong size. This one filters the
+ * dome's 128 px cube and nothing else, refusing any other, and its materials have the shared one's source, so its
+ * programs are the ones already built. It is made and warmed behind the first loading screen, with an empty scene's
+ * capture that also makes the kept target, and is never disposed in a session.
+ *
+ * The capture takes no blur of its own (`fromScene` blurred the dome by 0.04 rad before filtering; `fromCubemap` takes
+ * none), so the sharpest level of the sky's reflection is a few texels sharper than it was; every rougher level is the
+ * same filter of the same dome.
+ */
+export class DomeCapture {
+  /** The kept cube the dome is rendered into, a 128 px half-float cube. */
+  readonly cube: THREE.WebGLCubeRenderTarget;
+  /** The six cameras that render it, at the reach `fromScene` was given (1 to 20 km). */
+  readonly camera: THREE.CubeCamera;
+  /** The dome's own filter (`domePmrem`). */
+  readonly domePmrem: DomeFilter;
+  /** The kept PMREM target, made by the first capture and written in place by every capture after it. */
+  target: THREE.WebGLRenderTarget | null = null;
+  /** For the console and the test: captures made, targets made (one for the session), cubes refused for their size. */
+  readonly stats = { captures: 0, targetsMade: 0, refused: 0 };
+
+  // Written out, not as parameter properties: node's type stripping runs this file in the sky capture's test.
+  constructor(domePmrem: DomeFilter) {
+    this.domePmrem = domePmrem;
+    this.cube = new THREE.WebGLCubeRenderTarget(DOME_CUBE, { type: THREE.HalfFloatType, generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: true });
+    this.camera = new THREE.CubeCamera(1, 20000, this.cube);
+  }
+
+  /**
+   * A cube filtered into the kept target, or null for a cube that is not the dome's 128 px (refused, never filtered: the
+   * generator's internals are 128's and the kept target's height is in every reflective program's key).
+   */
+  filterCube(cube: THREE.Texture): THREE.Texture | null {
+    if (cubeSizeOf(cube) !== DOME_CUBE) {
+      this.stats.refused++;
+      return null;
+    }
+    if (this.target) this.domePmrem.fromCubemap(cube, this.target);
+    else {
+      this.target = this.domePmrem.fromCubemap(cube);
+      this.stats.targetsMade++;
+    }
+    return this.target.texture;
+  }
+
+  /** Render into the kept cube (`draw`: the six faces, `CubeCamera.update` in the game) and filter it into the kept target. */
+  capture(draw: (camera: THREE.CubeCamera) => void): THREE.Texture | null {
+    draw(this.camera);
+    this.stats.captures++;
+    return this.filterCube(this.cube.texture);
+  }
 }
 
 /** Whether a loaded material was exported as shiny: a metalness map or factor from the shader's mask. */

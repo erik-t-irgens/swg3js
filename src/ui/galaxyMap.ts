@@ -17,6 +17,13 @@ import { mapShareX, mapShareY, type MapFrame } from './spaceMapLayers.ts';
 import { mapMeta } from './mapImages.ts';
 import { poisCentreOf } from '../world/loadingTune.ts';
 import { inState } from '../world/worldState.ts';
+import { packJson } from '../world/packFiles.ts';
+
+/**
+ * What a space zone with no pack says on its card and its panel: the command, and that the game sees it after a reload,
+ * since a missing pack is asked for once a session (`loadSpacePack`).
+ */
+const SPACE_UNCONVERTED = 'not converted (asked once this session): npm run swg -- space @SWG all assets-private --retail-only, then reload the page';
 
 /**
  * A named place from a converted pack's pois.json, in SWG coordinates. `place` is the client's own
@@ -303,11 +310,12 @@ export class GalaxyMap {
   loadPoisRaw(planetId: string): Promise<{ center: { x: number; z: number } | null; pois: Poi[] }> {
     let p = this.pois.get(planetId);
     if (!p) {
-      p = fetch(`${import.meta.env.BASE_URL}assets-private/${planetId}/pois.json`)
-        .then(async (res) => {
-          if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return { center: null, pois: [] };
-          const data = (await res.json()) as { pois?: Poi[] };
-          return { center: poisCentreOf(data), pois: Array.isArray(data?.pois) ? data.pois : [] };
+      // Asked only of a ground world with a pack of its own (`packHolds`): every boot used to ask for eighteen that
+      // cannot exist, the real-elevation worlds', the gallery's and every space zone's.
+      p = packJson<{ pois?: Poi[] }>(planetId, 'pois.json', import.meta.env.BASE_URL, { probe: false })
+        .then((data) => {
+          if (!data) return { center: null, pois: [] };
+          return { center: poisCentreOf(data), pois: Array.isArray(data.pois) ? data.pois : [] };
         })
         .catch(() => ({ center: null, pois: [] }));
       this.pois.set(planetId, p);
@@ -612,7 +620,7 @@ export class GalaxyMap {
       actions.appendChild(missing);
       void loadSpacePack(this.deps.baseUrl, planet.id).then((pack) => {
         if (pack || !missing.isConnected) return;
-        missing.textContent = 'not converted: npm run swg -- space @SWG all assets-private --retail-only';
+        missing.textContent = SPACE_UNCONVERTED;
       });
     }
     box.appendChild(actions);
@@ -716,9 +724,9 @@ export class GalaxyMap {
 
   /**
    * A space system with no pack at all (Kessel, Ord Mantell and Deep Space before the `space` run) would be travelled to
-   * behind the loading screen into an empty zone: its card says so, with the command. Asked on every showing, since
-   * `loadSpacePack` keeps no missing pack, so a conversion mid-session clears the note; a pack from before hyperspace
-   * still flies and is not marked.
+   * behind the loading screen into an empty zone: its card says so, with the command. `loadSpacePack` keeps a missing
+   * pack for the session (asked again on every showing, each was a request that could only miss), so the note says a
+   * conversion is seen after a reload; a pack from before hyperspace still flies and is not marked.
    */
   private markUnconverted(): void {
     for (const p of PLANETS) {
@@ -726,7 +734,7 @@ export class GalaxyMap {
       const note = this.cards.querySelector<HTMLElement>(`.planet-card[data-id="${p.id}"] .space-missing`);
       if (!note) continue;
       void loadSpacePack(import.meta.env.BASE_URL, p.id).then((pack) => {
-        const text = pack ? '' : ` · not converted: npm run swg -- space @SWG all assets-private --retail-only`;
+        const text = pack ? '' : ` · ${SPACE_UNCONVERTED}`;
         if (note.textContent !== text) note.textContent = text;
       });
     }

@@ -317,7 +317,7 @@ import { TIER_LADDER_TUNE, ladderLine, tuneTierLadder } from './space/tierLadder
 import { HULL_NPC_TUNE, NPC_SIDES, hullNameOf, hullWords, npcShipRoute, tuneHullNpc } from './space/hullNpc.ts';
 import { targetable, type CombatStatus } from './space/shipCombat';
 import type { ShipSpawner } from './ui/npcUi';
-import { HyperspaceCatalogue, arrivalAt, landmarksOf, loadSpacePack, type Destination } from './space/spaceData';
+import { HyperspaceCatalogue, arrivalAt, forgetSpacePacks, landmarksOf, loadSpacePack, type Destination } from './space/spaceData';
 import { JUMP_COUNTDOWN, TUNNEL_TIMES, arrivalPose, exitEnd, jumpChaseBack, lookRotation, sceneOf, toGame, transitAt, tunnelCameraFar, tunnelSize } from './space/hyperspaceMath';
 import { LiftMenu } from './ui/liftMenu';
 import { stopLabel, type LiftStop } from './world/lifts';
@@ -452,7 +452,7 @@ import { setWaterSurface, WATER_SURFACE_BAND, WATER_SURFACE_HIDE } from './world
 import type { WaterSurfaceTune } from './world/waterSurfaceMath.ts';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
-import { backendOf, checkDriver, compilerVerdict, driverCheck, forgetCompilerMeasurement, groupPrograms, loadingLine, machineAside, programMs, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type Backend, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
+import { backendLine, backendOf, readbackNote, checkDriver, compilerVerdict, driverCheck, forgetCompilerMeasurement, groupPrograms, loadingLine, machineAside, programMs, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type Backend, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
 import { PACE_TUNE, tuneProgramPace } from './core/programPace.ts';
 import { LINK_STATE, LINK_TUNE, LINK_WAITS, LinkCheck, linkMode, linkWhy, tuneLinks, watchLinkWaits, type LinkModeName } from './core/linkMode.ts';
 import { PASS_STATES } from './world/passScenes.ts';
@@ -461,6 +461,11 @@ import { SKINNED_LOAD, SKINNED_STATS } from './core/skinnedLoad.ts';
 import { PERSON_KEYS_LIVE, PERSON_KEYS_STATS, PERSON_KEYS_TUNE, PERSON_KEYS_WARM, PERSON_TEST_BOUND, forEachPersonMaterial, givenTo, outsideWhy, personShapes, pickTestLooks, pixelDiff, setGiven, setPersonKeysLive, shapeName, type PixelStats } from './world/personKeys.ts';
 import type { CharacterPreview } from './ui/characterPreview.ts';
 import { centreAgrees, LOADING_TUNE, LoadingLog, placeFromPois, programsForUp, raceCurtainNeed, tuneLoading } from './world/loadingTune.ts';
+import { fetchPublic, filesReport, forgetFiles, packJson, packless, setShippedPublic } from './world/packFiles.ts';
+// The public files this build ships, the tracked tracks, placements and real-elevation rasters (`vite.config.ts`):
+// null on the dev server, which asks for every such file and answers it from the disk as the editors need.
+import shippedPublic from 'virtual:shipped-public';
+setShippedPublic(shippedPublic);
 import { census as programFamilies, playKindOf } from './core/fx/programCensus.ts';
 import { censusOf, CNT, PASS, PERF, perf, PERF_SWITCHES, PERF_TUNE, PERF_WAIT_MS, readMarks, registerPerfSwitch, SEC, writeMark, type TraceReport } from './core/perf.ts';
 
@@ -1531,6 +1536,8 @@ class App {
   private readonly loadingLog = new LoadingLog();
   /** The backend the main context runs on, read once at boot off its renderer string (`backendOf`). */
   private backend: Backend = 'unknown';
+  /** Whether the message line has said what it says once a session of the backend (`backendLine`: a software renderer). */
+  private backendSaid = false;
   /** When the world was last drawn behind a fully opaque loading screen (`LOADING_TUNE.drawEveryMs`). */
   private screenDrawnAt = 0;
   /** The queue's count of programs built in play for a dressed person, as the last frame read it (the frame report's counter). */
@@ -1590,6 +1597,10 @@ class App {
     } catch {
       this.backend = 'unknown';
     }
+    // The one driver message a Vulkan machine may print at start-up, explained beside it: the browser's own readback,
+    // not the game's (`readbackNote`). A software rasteriser is said on the message line at the first world (`arrive`).
+    const readback = readbackNote(this.backend);
+    if (readback) console.info(readback);
     // The link-wait watch (`linkMode.ts`): the GL calls that can make the main thread wait on a shader link, wrapped
     // once on this context and timed, whoever makes them, so a frame's real wait is known (T9). Nothing on a steady frame.
     watchLinkWaits(this.renderer.getContext(), () => performance.now());
@@ -4340,6 +4351,25 @@ class App {
        */
       loading: (opts?: { tune?: Partial<Record<keyof typeof LOADING_TUNE, unknown>> }) => this.loadingReport(opts),
       /**
+       * The files the game asked for this session that belong to a world's pack, and the public files a build ships
+       * (`packFiles.ts`): each one asked with its answer (`ok`, `missing`, `page` for a page handed back in its place,
+       * `error`) and how often, a pack's own files and the public ones apart (`public`, `counts.public`: on the dev server
+       * every world's placements and tracks are asked whether the disk holds them or not, so their misses are no fault),
+       * the misses kept (a 404, and only a 404) and not asked again this session, the asks answered with no request and
+       * why (a world with no pack, a kind of world the converter writes no such file for, a miss earlier this session, a
+       * public file not in the build), the worlds that declare no pack, and the build's list of the public files it
+       * ships (`null` on the dev server, which asks for every one). `files({ forget: true })` forgets every answer kept,
+       * the space zones' included, so every file is asked for again (after a conversion, with the dev server stopped
+       * for it and started again).
+       */
+      files: (opts?: { forget?: boolean }) => {
+        if (opts?.forget === true) {
+          forgetFiles();
+          forgetSpacePacks();
+        }
+        return filesReport();
+      },
+      /**
        * How shader programs are linked (`linkMode.ts`): the mode and why, the backend, what is in flight, issued and
        * resolved, how long a program takes from asked to ready, what the main thread waited on links (the watch, timed at
        * the GL calls whoever made them), what the bound and a hiding tab resolved, and the room deferral's counts.
@@ -5258,11 +5288,20 @@ class App {
        * way), and `reflections({ source: 'sky' })` to our own sky dome, the default. The choice is
        * remembered in this browser (`localStorage['swg.reflections']`) and takes effect at once.
        */
-      reflections: (opts: { source?: ReflectionSource; plain?: number; models?: boolean; preview?: number } = {}) => {
+      reflections: (opts: { source?: ReflectionSource; plain?: number; models?: boolean; preview?: number; capture?: boolean; dome?: 'kept' | 'scene' } = {}) => {
         if (opts.source === 'sky' || opts.source === 'game') {
           setReflectionSource(opts.source);
           this.world.reflectionsChanged();
         }
+        // How the sky is captured: into the kept targets in place (the default), or the way before, a target made every
+        // capture with `fromScene`'s blur, to compare the look by. Not remembered; nothing compiles either way.
+        if (opts.dome === 'kept' || opts.dome === 'scene') {
+          REFLECTIONS.dome = opts.dome;
+          this.world.recaptureSky();
+        }
+        // The sky taken again on the next frame rather than when its four-second clock comes round (`capture` below says
+        // what the captures have made: one kept target for the session, filled in place).
+        if (opts.capture === true) this.world.recaptureSky();
         // How much of it the surfaces whose shader has no reflection cube take: nought, the client's, by
         // default, and 1 is the faint mirror and sky-coloured fill they had before. A uniform; nothing compiles.
         if (typeof opts.plain === 'number') setPlainReflections(opts.plain);
@@ -5288,6 +5327,8 @@ class App {
               ? 'worn, held, flown and ridden models and the creatures reflect where their shader has a cube'
               : 'models written at nought: their reflection and its fill are off, their programs kept',
           preview: PREVIEW_REFLECTIONS.strength,
+          dome: REFLECTIONS.dome,
+          capture: this.world.domeReport(),
         };
       },
       /**
@@ -15021,6 +15062,9 @@ class App {
           return null;
         })
         : Promise.resolve(null),
+      // The player's own story folder's index, asked at every boot whatever the build carries: the launcher serves a
+      // folder the player has named (`storyDir`) at this very address, and answers it missing with none named, which no
+      // list made when the game was built can know. That one miss at a launcher's boot is the rule's one exception.
       ownSetFiles(import.meta.env.BASE_URL).catch(() => null),
     ]);
     if (load !== this.storyLoads) return;
@@ -16847,10 +16891,14 @@ class App {
    */
   private async homeOf(planet: PlanetDef, zoneId?: string): Promise<ArrivalPlace | null> {
     if (!planet.arrival || !hasOwnArrival(planet)) return null;
-    const centre = await this.poisFileOf(packIdOf(planet, zoneId)).then(
-      (f) => f.center,
-      () => null,
-    );
+    // A world that declares no pack has no places file and no layout: its raw frame is the game's about nought, as every
+    // reader of a missing centre takes it, so its own arrival is read with nothing asked for (`packFiles.ts`).
+    const centre = packless(planet)
+      ? { x: 0, z: 0 }
+      : await this.poisFileOf(packIdOf(planet, zoneId)).then(
+          (f) => f.center,
+          () => null,
+        );
     return centre ? arrivalInGame(planet.arrival, centre) : null;
   }
 
@@ -16950,6 +16998,12 @@ class App {
     this.hud.setPlanet(planet);
     this.minimap.setName(planet.name);
     this.map.setCurrent(planet.id, this.zone);
+    // A browser drawing without the graphics card is told so once, at its first world (`backendLine`).
+    if (!this.backendSaid) {
+      this.backendSaid = true;
+      const line = backendLine(this.backend);
+      if (line) this.messages.system(line);
+    }
     this.updateUrl();
     this.remotes.setWorld(planet.id, this.zone);
     this.net.setHello(this.helloNow());
@@ -18914,7 +18968,9 @@ class App {
    */
   private async readTracks(world: string, kind: 'ground' | 'space'): Promise<TrackRead | null> {
     try {
-      const res = await fetch(`${import.meta.env.BASE_URL}${tracksPath(world)}`, { cache: 'no-store' });
+      // Asked in a built game only where its own list ships the file, and always on the dev server (`fetchPublic`).
+      const res = await fetchPublic(tracksPath(world), { cache: 'no-store' }, import.meta.env.BASE_URL);
+      if (!res) return null;
       const type = res.headers.get('content-type') ?? '';
       if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return null;
       const read = readTrackFile(await res.text(), world, kind);
@@ -21280,9 +21336,9 @@ class App {
     this.travelRigs = {};
     this.travelCache = { key: '', things: [] };
     try {
-      const res = await fetch(`${import.meta.env.BASE_URL}assets-private/${pack}/travel.json`);
-      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return;
-      const data = (await res.json()) as { version?: number; rows?: TravelRow[]; rigs?: Record<string, TravelRig> };
+      // Asked only of a world whose pack is there (`packJson`: its probe has already answered by now).
+      const data = await packJson<{ version?: number; rows?: TravelRow[]; rigs?: Record<string, TravelRig> }>(pack, 'travel.json', import.meta.env.BASE_URL);
+      if (!data) return;
       // A pack written before the models were named carries no `model` on any row, so it reads as a
       // world whose terminals are there to press and not to see, and one written before the rigs
       // carries none, so its shuttles stand still as they always did. Refusing either outright would
@@ -21974,12 +22030,10 @@ class App {
     const stamp = worldStateStamp();
     const had = this.padsFor.get(pack);
     if (had && had.stamp === stamp) return had.p;
-    const base = `${import.meta.env.BASE_URL}assets-private/${pack}/`;
-    const json = async (file: string): Promise<unknown> => {
-      const res = await fetch(`${base}${file}`);
-      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-      return res.json();
-    };
+    // Through the pack's own files (`packFiles.ts`): nothing asked of a world with no pack, and a miss asked once a session.
+    // Never behind the manifest's probe: a ticket bought, or a boarding, asks for a far world's pads, whose manifest (up
+    // to 2.8 MB) nothing has fetched yet and the arrival would fetch again; each file's own 404 is remembered instead.
+    const json = (file: string): Promise<unknown> => packJson(pack, file, import.meta.env.BASE_URL, { probe: false });
     const p = (async () => {
       try {
         const [travel, pois] = await Promise.all([json('travel.json'), json('pois.json')]);
@@ -22198,9 +22252,9 @@ class App {
     this.fittingRows = [];
     this.fittingRowsIn = false;
     try {
-      const res = await fetch(`${import.meta.env.BASE_URL}assets-private/${pack}/fittings.json`);
-      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return;
-      const data = (await res.json()) as { version?: number; rows?: FittingRow[] };
+      // Asked only of a world whose pack is there (`packJson`).
+      const data = await packJson<{ version?: number; rows?: FittingRow[] }>(pack, 'fittings.json', import.meta.env.BASE_URL);
+      if (!data) return;
       if (!Array.isArray(data.rows) || data.version !== FITTINGS_PACK_VERSION) return;
       if (this.fittingRowsFor !== pack) return;
       this.fittingRows = data.rows;
@@ -22784,7 +22838,10 @@ class App {
    */
   private async fetchPlacements(layer: PlacementLayer, pack: string, frame: 'ground' | 'space'): Promise<PlacementRead | null> {
     try {
-      const res = await fetch(`${import.meta.env.BASE_URL}${placementsPath(layer, pack)}`, { cache: 'no-store' });
+      // A built game asks only for a file its own list says it ships (`shippedAsk`); the dev server hands no list and
+      // every file is asked for, which is what the editor's first save of a world's file needs (`packFiles.ts`).
+      const res = await fetchPublic(placementsPath(layer, pack), { cache: 'no-store' }, import.meta.env.BASE_URL);
+      if (!res) return null;
       const type = res.headers.get('content-type') ?? '';
       if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return null;
       const read = readPlacementsFile(await res.text(), pack, frame);

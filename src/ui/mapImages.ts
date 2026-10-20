@@ -10,10 +10,12 @@
 // A page that only wants to put it in an `<img>` takes the address instead and decodes nothing here.
 //
 // Every answer is a promise kept per pack, so asking twice costs nothing, and a pack with no picture
-// (a space zone, the dungeon copies, a pack converted before the `maps` command) answers null once and
-// is never fetched again this session.
+// answers null and is never fetched again this session: a space zone, the dungeon copies and a world
+// with no pack are never asked at all (`packFiles.ts`), and a pack converted before the `maps` command
+// is asked once.
 
 import { mapFrame, type MapFrame } from './spaceMapLayers.ts';
+import { packJson } from '../world/packFiles.ts';
 
 /** A picture's address and the ground it covers, in the map's own frame (the snapshot's). */
 export interface MapMeta {
@@ -43,12 +45,12 @@ export function mapMeta(packId: string): Promise<MapMeta | null> {
   let p = metas.get(packId);
   if (!p) {
     const dir = `${base()}assets-private/${packId}/`;
-    p = fetch(`${dir}map.json`)
-      .then(async (res) => {
-        if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-        const meta = (await res.json()) as { image?: string; width?: number; centre?: { x: number; z: number } };
-        return meta.image ? { url: `${dir}${meta.image}`, frame: mapFrame(meta) } : null;
-      })
+    // Asked only of a pack the `maps` command writes a picture for (`packHolds`: a ground world with a pack, not the
+    // copies' world nor a space zone, which every map window and minimap there used to ask for once and miss). Never
+    // behind the manifest's probe: the galaxy tab and a travel terminal ask for a far world's picture, whose manifest
+    // (up to 2.8 MB) nothing has fetched yet and the arrival would fetch again; the file's own 404 is remembered instead.
+    p = packJson<{ image?: string; width?: number; centre?: { x: number; z: number } }>(packId, 'map.json', base(), { probe: false })
+      .then((meta) => (meta?.image ? { url: `${dir}${meta.image}`, frame: mapFrame(meta) } : null))
       .catch(() => null);
     metas.set(packId, p);
   }
