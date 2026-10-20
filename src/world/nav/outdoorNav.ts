@@ -20,6 +20,7 @@
 // the bake's own region ranks turn "it never arrived" into an answer before the body sets off.
 import { NAV_TUNE, type NavTune } from './navMesh.ts';
 import type { NavAgent } from './navAgent.ts';
+import { packJson } from '../packFiles.ts';
 import {
   NAV_GRID_VERSION,
   NAV_INDOOR,
@@ -261,9 +262,9 @@ export class OutdoorNav {
     const root = (import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/';
     const base = baseUrl ?? `${root}assets-private/${planetId}/`;
     try {
-      const hr = await fetch(`${base}nav.json`);
-      if (!hr.ok || !(hr.headers.get('content-type') ?? '').includes('json')) return false;
-      const header = (await hr.json()) as OutdoorHeader;
+      // A world's own grid is asked through its pack's files (`packFiles.ts`): never of a kind of world the `navgrid`
+      // command writes none for (a space zone, the gallery, a world with no pack). A folder handed in is asked as it is.
+      const header = baseUrl === undefined ? await packJson<OutdoorHeader>(planetId, 'nav.json', root, { probe: false }) : await fetchHeader(`${base}nav.json`);
       if (!header || header.version !== NAV_GRID_VERSION) return false;
       const br = await fetch(`${base}${(header as unknown as { file?: string }).file ?? 'nav.bin'}`);
       if (!br.ok) return false;
@@ -542,6 +543,13 @@ export class OutdoorNav {
     }
     return this.status();
   }
+}
+
+/** A grid's header out of a folder handed in rather than a world's own pack, or null where there is none. */
+async function fetchHeader(url: string): Promise<OutdoorHeader | null> {
+  const hr = await fetch(url);
+  if (!hr.ok || !(hr.headers.get('content-type') ?? '').includes('json')) return null;
+  return (await hr.json()) as OutdoorHeader;
 }
 
 /**

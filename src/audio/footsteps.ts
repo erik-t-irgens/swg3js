@@ -36,6 +36,7 @@
 import { ClipEventIndex, ClipWatcher, CLIP_EVENT_TUNE, type ActiveClip, type ClipEvent, type ClipEventPack } from './clipEvents.ts';
 import { OUTSIDE, type SoundSpace } from './distance.ts';
 import type { LoopHost } from './emitters.ts';
+import { packJson } from '../world/packFiles.ts';
 
 /** One body's client data as the converter writes it into `sounds/events.json`. */
 export interface ClientDataEntry {
@@ -593,14 +594,12 @@ export class BodySounds {
     this.packId = packId;
     this.surfaceState = 'loading';
     const token = this.token;
-    void fetch(`${this.baseUrl}assets-private/${packId}/sounds.json`)
-      .then(async (res) => (res.ok ? ((await res.json()) as SurfacePack) : null))
-      .catch(() => null)
-      .then((pack) => {
-        if (token !== this.token) return;
-        this.surfaces = pack?.surfaces ?? {};
-        this.surfaceState = pack ? `${Object.keys(this.surfaces).length} object surfaces` : 'none';
-      });
+    // The world's one `sounds.json`, read once for its three readers (`packFiles.ts`).
+    void packJson<SurfacePack>(packId, 'sounds.json', this.baseUrl, { shared: true }).then((pack) => {
+      if (token !== this.token) return;
+      this.surfaces = pack?.surfaces ?? {};
+      this.surfaceState = pack ? `${Object.keys(this.surfaces).length} object surfaces` : 'none';
+    });
   }
 
   /** The planet is going: every idle loop let go and every body forgotten. */

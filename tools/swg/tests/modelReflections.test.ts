@@ -310,7 +310,9 @@ setEnvironment(sky, 1);
   ok(/private async prepareRoot\(root: THREE\.Object3D\): Promise<void> \{[\s\S]{0,120}?await this\.world\.prepareActor\(root\);/.test(main), "what the backpack puts on and the hands take up, and another player's look, go through the world's prepareActor");
   ok(/prepare: \(root\) => this\.prepareRoot\(root\),/.test(main) && /this\.remotes\.prepare = \(root\) => this\.prepareRoot\(root\);/.test(main) && /this\.remotes\.prepareVehicle = \(roots\) => this\.world\.vehiclePrepare\(roots\);/.test(main), 'the equipment and the other players are handed exactly those');
   ok(/setEnvironmentStandIn\(this\.world\.waterBodies\.blackEnvironment\);/.test(main) && before(main, 'this.world.waterBodies.attach(this.renderer);', 'setEnvironmentStandIn('), 'the stand-in is handed over at boot, once the water has made it, before any world loads');
-  ok(/fromScene\(sky\.domeScene, 0\.04, 1, 20000, \{ size: 128 \}\)/.test(world) && /const WATER_CUBE_SIZE = 128;/.test(text('src/world/waterBodies.ts')) && STUDIO_CUBE === 128, "the world's sky captures and its black stand-in say 128 in their own source (the words only: making either needs a WebGL context), the studio's size with them");
+  // Since the performance pass's fifth wave the sky is captured into a kept cube of `DOME_CUBE` (`DomeCapture`), which
+  // refuses any other size (`skyCapture.test.ts`).
+  ok(/new DomeCapture\(new THREE\.PMREMGenerator\(renderer\)\)/.test(world) && /export const DOME_CUBE = 128;/.test(text('src/world/envmap.ts')) && /const WATER_CUBE_SIZE = 128;/.test(text('src/world/waterBodies.ts')) && STUDIO_CUBE === 128, "the world's sky captures and its black stand-in say 128 in their own source (the words only: making either needs a WebGL context), the studio's size with them");
   {
     // What the studio is really filtered at, through the real `studioEnvironment` with three's filter stood in for.
     const real = THREE.PMREMGenerator.prototype.fromScene;

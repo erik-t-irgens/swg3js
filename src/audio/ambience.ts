@@ -20,6 +20,7 @@
 import { OUTSIDE, type SoundSpace } from './distance.ts';
 import { WORLD_SOURCE_TUNE, WorldEmitters, type LoopHost, type WorldSourceTune } from './emitters.ts';
 import { standsIn } from '../world/worldState.ts';
+import { packJson } from '../world/packFiles.ts';
 
 /** One row of the game's interior table, as the converter writes it into `sounds/sources.json`. */
 export interface RoomRow {
@@ -329,16 +330,12 @@ export class Ambience {
     this.packId = packId;
     this.packState = 'loading';
     const token = this.token;
-    void fetch(`${this.baseUrl}assets-private/${packId}/sounds.json`)
-      .then(async (res) => {
-        if (!res.ok) return null;
-        return (await res.json()) as PlanetSounds;
-      })
-      .catch(() => null)
-      .then((pack) => {
-        if (token !== this.token) return;
-        this.adopt(pack);
-      });
+    // One fetch of the world's file for its three readers, the feet's and the guns' beside this one, asked only where
+    // the world has a pack and the converter writes sound places for its kind (`packFiles.ts`).
+    void packJson<PlanetSounds>(packId, 'sounds.json', this.baseUrl, { shared: true }).then((pack) => {
+      if (token !== this.token) return;
+      this.adopt(pack);
+    });
   }
 
   /**

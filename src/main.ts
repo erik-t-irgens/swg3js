@@ -317,7 +317,7 @@ import { TIER_LADDER_TUNE, ladderLine, tuneTierLadder } from './space/tierLadder
 import { END_OF_WAR_TUNE, HULL_NPC_TUNE, NPC_SIDES, endOfWarRows, hullNameOf, hullWords, npcShipRoute, tuneEndOfWar, tuneHullNpc } from './space/hullNpc.ts';
 import { targetable, type CombatStatus } from './space/shipCombat';
 import type { ShipSpawner } from './ui/npcUi';
-import { HyperspaceCatalogue, arrivalAt, landmarksOf, loadSpacePack, type Destination } from './space/spaceData';
+import { HyperspaceCatalogue, arrivalAt, forgetSpacePacks, landmarksOf, loadSpacePack, type Destination } from './space/spaceData';
 import { JUMP_COUNTDOWN, TUNNEL_TIMES, arrivalPose, exitEnd, jumpChaseBack, lookRotation, sceneOf, toGame, transitAt, tunnelCameraFar, tunnelSize } from './space/hyperspaceMath';
 import { LiftMenu } from './ui/liftMenu';
 import { stopLabel, type LiftStop } from './world/lifts';
@@ -452,14 +452,20 @@ import { setWaterSurface, WATER_SURFACE_BAND, WATER_SURFACE_HIDE } from './world
 import type { WaterSurfaceTune } from './world/waterSurfaceMath.ts';
 import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
-import { backendOf, checkDriver, compilerVerdict, driverCheck, forgetCompilerMeasurement, groupPrograms, loadingLine, machineAside, programMs, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type Backend, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
+import { backendLine, backendOf, readbackNote, checkDriver, compilerVerdict, driverCheck, forgetCompilerMeasurement, groupPrograms, loadingLine, machineAside, programMs, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type Backend, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
 import { PACE_TUNE, tuneProgramPace } from './core/programPace.ts';
 import { LINK_STATE, LINK_TUNE, LINK_WAITS, LinkCheck, linkMode, linkWhy, tuneLinks, watchLinkWaits, type LinkModeName } from './core/linkMode.ts';
 import { PASS_STATES } from './world/passScenes.ts';
 import { ROOM_DEFER, ROOM_DEFER_STATS } from './world/roomDefer.ts';
 import { SKINNED_LOAD, SKINNED_STATS } from './core/skinnedLoad.ts';
-import { PERSON_KEYS_TUNE } from './world/personKeys.ts';
+import { PERSON_KEYS_LIVE, PERSON_KEYS_STATS, PERSON_KEYS_TUNE, PERSON_KEYS_WARM, PERSON_TEST_BOUND, forEachPersonMaterial, givenTo, outsideWhy, personShapes, pickTestLooks, pixelDiff, setGiven, setPersonKeysLive, shapeName, type PixelStats } from './world/personKeys.ts';
+import type { CharacterPreview } from './ui/characterPreview.ts';
 import { centreAgrees, LOADING_TUNE, LoadingLog, placeFromPois, programsForUp, raceCurtainNeed, tuneLoading } from './world/loadingTune.ts';
+import { fetchPublic, filesReport, forgetFiles, packJson, packless, setShippedPublic } from './world/packFiles.ts';
+// The public files this build ships, the tracked tracks, placements and real-elevation rasters (`vite.config.ts`):
+// null on the dev server, which asks for every such file and answers it from the disk as the editors need.
+import shippedPublic from 'virtual:shipped-public';
+setShippedPublic(shippedPublic);
 import { census as programFamilies, playKindOf } from './core/fx/programCensus.ts';
 import { censusOf, CNT, PASS, PERF, perf, PERF_SWITCHES, PERF_TUNE, PERF_WAIT_MS, readMarks, registerPerfSwitch, SEC, writeMark, type TraceReport } from './core/perf.ts';
 
@@ -1530,6 +1536,8 @@ class App {
   private readonly loadingLog = new LoadingLog();
   /** The backend the main context runs on, read once at boot off its renderer string (`backendOf`). */
   private backend: Backend = 'unknown';
+  /** Whether the message line has said what it says once a session of the backend (`backendLine`: a software renderer). */
+  private backendSaid = false;
   /** When the world was last drawn behind a fully opaque loading screen (`LOADING_TUNE.drawEveryMs`). */
   private screenDrawnAt = 0;
   /** The queue's count of programs built in play for a dressed person, as the last frame read it (the frame report's counter). */
@@ -1589,6 +1597,10 @@ class App {
     } catch {
       this.backend = 'unknown';
     }
+    // The one driver message a Vulkan machine may print at start-up, explained beside it: the browser's own readback,
+    // not the game's (`readbackNote`). A software rasteriser is said on the message line at the first world (`arrive`).
+    const readback = readbackNote(this.backend);
+    if (readback) console.info(readback);
     // The link-wait watch (`linkMode.ts`): the GL calls that can make the main thread wait on a shader link, wrapped
     // once on this context and timed, whoever makes them, so a frame's real wait is known (T9). Nothing on a steady frame.
     watchLinkWaits(this.renderer.getContext(), () => performance.now());
@@ -1875,6 +1887,17 @@ class App {
       set: (v) => (ROOM_DEFER.on = !!v),
       values: [false, true],
       note: "true builds a body stood outdoors with its world pass's programs only and its rooms pass's after it, off the frame; read when a body is prepared, so an in-session ab compares only bodies prepared while it runs",
+    });
+    // The fourth wave (`personKeys.ts`): every skinned and rack material's maps made one superset at load. Read at load
+    // (`localStorage['swg.personKeys'] = '0'` leaves it out); flipped here it takes the superset off every material met
+    // and puts it back, which builds the other shapes' programs on live frames: for the pixel test and a GPU A/B only.
+    registerPerfSwitch('personKeys', {
+      get: () => PERSON_KEYS_TUNE.on && PERSON_KEYS_LIVE.on,
+      set: (v) => {
+        if (PERSON_KEYS_TUNE.on) setPersonKeysLive(!!v);
+      },
+      values: [false, true],
+      note: "true gives every skinned material and rack weapon a flat normal map, a white roughness and metalness map and the environment at nought (no pixel changes; two texture reads a fragment); false takes them off. Flipped live the other shapes' programs are built on live frames once: a comparing switch. Off at load (`localStorage['swg.personKeys'] = '0'`) nothing is given and this stays false",
     });
     // The third wave, each first value the old way: the scene's matrix walk stepping over a body the manager's whole cull
     // hides, and over a creature or person nothing has posed since its last walk (`bodyGroup.ts`); a body's meshes that
@@ -4328,6 +4351,25 @@ class App {
        */
       loading: (opts?: { tune?: Partial<Record<keyof typeof LOADING_TUNE, unknown>> }) => this.loadingReport(opts),
       /**
+       * The files the game asked for this session that belong to a world's pack, and the public files a build ships
+       * (`packFiles.ts`): each one asked with its answer (`ok`, `missing`, `page` for a page handed back in its place,
+       * `error`) and how often, a pack's own files and the public ones apart (`public`, `counts.public`: on the dev server
+       * every world's placements and tracks are asked whether the disk holds them or not, so their misses are no fault),
+       * the misses kept (a 404, and only a 404) and not asked again this session, the asks answered with no request and
+       * why (a world with no pack, a kind of world the converter writes no such file for, a miss earlier this session, a
+       * public file not in the build), the worlds that declare no pack, and the build's list of the public files it
+       * ships (`null` on the dev server, which asks for every one). `files({ forget: true })` forgets every answer kept,
+       * the space zones' included, so every file is asked for again (after a conversion, with the dev server stopped
+       * for it and started again).
+       */
+      files: (opts?: { forget?: boolean }) => {
+        if (opts?.forget === true) {
+          forgetFiles();
+          forgetSpacePacks();
+        }
+        return filesReport();
+      },
+      /**
        * How shader programs are linked (`linkMode.ts`): the mode and why, the backend, what is in flight, issued and
        * resolved, how long a program takes from asked to ready, what the main thread waited on links (the watch, timed at
        * the GL calls whoever made them), what the bound and a hiding tab resolved, and the room deferral's counts.
@@ -4357,6 +4399,17 @@ class App {
           ...(asked ? { refused: "the ladder and the two hatches are read once at load (the warm lists are made from them at the first screen): set localStorage['swg.floatJoints'] or localStorage['swg.morphLadder'] to '0' and reload to take one away" } : {}),
         };
       },
+      /**
+       * One program key for many people (the performance pass's fourth wave, `personKeys.ts`): the shapes of the
+       * product, what the loading screens' warm built of them, the skinned and rack materials normalised this session,
+       * the shapes they came in before and after, every one outside the product by name and why, the bodies whose rooms
+       * pass was found warm at the urgent rank, and `inPlay`, the colour programs built in play for any of them (T14).
+       * `{ selfTest: true }` stands the test looks one at a time and draws each with the superset off and on, in the
+       * world and in the doll's and the select screen's own contexts, and prints the largest and mean channel difference
+       * over the figure, passing only when every look asked was compared: it builds the off shapes' programs, so only
+       * ever from the console. `{ on }` is refused in words (read at load).
+       */
+      personKeys: (opts?: { selfTest?: boolean | { looks?: string[]; pictures?: boolean; size?: number }; on?: unknown }) => this.personKeysReport(opts),
       shaders: (opts?: { full?: boolean; groups?: boolean; families?: boolean; since?: boolean; raw?: boolean; keepStrays?: boolean; probe?: 'again'; pace?: Partial<typeof PACE_TUNE> }) => {
         if (opts?.keepStrays !== undefined) SHADOW_STRAYS.keep = opts.keepStrays;
         // The driver check and the sweep's timing forgotten, so the next loading screen measures them afresh (the
@@ -5235,11 +5288,20 @@ class App {
        * way), and `reflections({ source: 'sky' })` to our own sky dome, the default. The choice is
        * remembered in this browser (`localStorage['swg.reflections']`) and takes effect at once.
        */
-      reflections: (opts: { source?: ReflectionSource; plain?: number; models?: boolean; preview?: number } = {}) => {
+      reflections: (opts: { source?: ReflectionSource; plain?: number; models?: boolean; preview?: number; capture?: boolean; dome?: 'kept' | 'scene' } = {}) => {
         if (opts.source === 'sky' || opts.source === 'game') {
           setReflectionSource(opts.source);
           this.world.reflectionsChanged();
         }
+        // How the sky is captured: into the kept targets in place (the default), or the way before, a target made every
+        // capture with `fromScene`'s blur, to compare the look by. Not remembered; nothing compiles either way.
+        if (opts.dome === 'kept' || opts.dome === 'scene') {
+          REFLECTIONS.dome = opts.dome;
+          this.world.recaptureSky();
+        }
+        // The sky taken again on the next frame rather than when its four-second clock comes round (`capture` below says
+        // what the captures have made: one kept target for the session, filled in place).
+        if (opts.capture === true) this.world.recaptureSky();
         // How much of it the surfaces whose shader has no reflection cube take: nought, the client's, by
         // default, and 1 is the faint mirror and sky-coloured fill they had before. A uniform; nothing compiles.
         if (typeof opts.plain === 'number') setPlainReflections(opts.plain);
@@ -5265,6 +5327,8 @@ class App {
               ? 'worn, held, flown and ridden models and the creatures reflect where their shader has a cube'
               : 'models written at nought: their reflection and its fill are off, their programs kept',
           preview: PREVIEW_REFLECTIONS.strength,
+          dome: REFLECTIONS.dome,
+          capture: this.world.domeReport(),
         };
       },
       /**
@@ -15047,6 +15111,9 @@ class App {
           return null;
         })
         : Promise.resolve(null),
+      // The player's own story folder's index, asked at every boot whatever the build carries: the launcher serves a
+      // folder the player has named (`storyDir`) at this very address, and answers it missing with none named, which no
+      // list made when the game was built can know. That one miss at a launcher's boot is the rule's one exception.
       ownSetFiles(import.meta.env.BASE_URL).catch(() => null),
     ]);
     if (load !== this.storyLoads) return;
@@ -15953,6 +16020,283 @@ class App {
     return { velocity: this.postfx?.product<VelocityProduct>('velocity')?.warmCount() ?? null, depth: w.plain, skinnedDepth: w.skinned, sway: w.standIns, programs: w.programs };
   }
 
+  /** The programs the person keys' self test built (its own off shapes, and the test looks it stood), left out of `personKeys()`'s in-play count and its cold reading. */
+  private readonly personTestIds = new Set<number>();
+  /** The last self test's verdict, kept for the next `personKeys()`. */
+  private personTestLast: { pass: boolean; tested: string; untested: string[]; worst: number; worstMean: number; over: string[] } | null = null;
+
+  /**
+   * `__debug.personKeys()`: see its comment there. Every material is read off the renderer's own records: one whose every
+   * program is one the warm built is inside the product whatever its reading says, and one whose reading finds nothing
+   * outside but whose program the warm did not build is named as such (a hole in the reading). `inPlay` counts the
+   * programs built in play in any of these materials' records (T14), the self test's own left out.
+   */
+  private personKeysReport(opts?: { selfTest?: boolean | { looks?: string[]; pictures?: boolean; size?: number }; on?: unknown }): Record<string, unknown> | Promise<Record<string, unknown>> {
+    if (opts?.selfTest) return this.personKeysSelfTest(typeof opts.selfTest === 'object' ? opts.selfTest : {});
+    this.sampleShaders(this.shaderPhase());
+    const programsOf = this.world.programsOf;
+    const warmed = PERSON_KEYS_WARM.programs;
+    const before = new Set<string>();
+    const after = new Set<string>();
+    const byWhy = new Map<string, { n: number; names: string[] }>();
+    const inPlayNames: string[] = [];
+    let materials = 0;
+    let rack = 0;
+    let outside = 0;
+    let inPlay = 0;
+    forEachPersonMaterial((m, kind, facts, b, a) => {
+      materials++;
+      if (kind === 'rack') rack++;
+      if (b) before.add(b);
+      if (a) after.add(a);
+      let cold = false;
+      const ps = programsOf(m);
+      if (ps) {
+        for (const p of ps) {
+          if (this.personTestIds.has(p.id)) continue;
+          if (!warmed.has(p)) cold = true;
+          if (this.shaderWatch.phaseOf(p.cacheKey) === 'play') {
+            inPlay++;
+            if (inPlayNames.length < 20) inPlayNames.push(m.name || '(unnamed)');
+          }
+        }
+      }
+      let why = outsideWhy(m, facts, kind);
+      if (!why.length && cold && warmed.size) why = ['its program is not one the warm built'];
+      if (!why.length) return;
+      outside++;
+      const k = why.join(', ');
+      const e = byWhy.get(k) ?? { n: 0, names: [] };
+      e.n++;
+      if (e.names.length < 6) e.names.push(m.name || '(unnamed)');
+      byWhy.set(k, e);
+    });
+    const shapes = personShapes();
+    const w = PERSON_KEYS_WARM;
+    return {
+      on: PERSON_KEYS_TUNE.on,
+      live: PERSON_KEYS_TUNE.on && PERSON_KEYS_LIVE.on,
+      ...(opts && 'on' in opts ? { refused: "the person keys are read once at load (the warm is made from them at the first screen): set localStorage['swg.personKeys'] to '0' and reload to take them away; perf({ ab: { key: 'personKeys' } }) compares them live" } : {}),
+      shapes: { product: shapes.length, people: shapes.filter((s) => s.kind === 'person').length, rack: shapes.filter((s) => s.kind === 'rack').length, names: shapes.map(shapeName) },
+      warmed: { programs: warmed.size, warms: w.warms, firstMs: Math.round(w.firstMs), firstBuilt: w.firstBuilt, lastMs: Math.round(w.lastMs), lastBuilt: w.lastBuilt },
+      normalised: { met: materials, metRack: rack, ...PERSON_KEYS_STATS },
+      shapesSeen: { before: before.size, after: after.size },
+      outside: { count: outside, byWhy: [...byWhy].sort((x, y) => y[1].n - x[1].n).map(([why, e]) => ({ why, n: e.n, names: e.names })) },
+      rooms: { warm: PERSON_KEYS_STATS.roomReady, missed: PERSON_KEYS_STATS.roomMissed, deferred: ROOM_DEFER_STATS.deferred },
+      inPlay: { programs: inPlay, names: inPlayNames },
+      ...(this.personTestLast ? { selfTest: this.personTestLast } : {}),
+    };
+  }
+
+  /**
+   * The person keys' pixel test (`personKeys({ selfTest: true })`): each test look stood four metres ahead (passive, from a
+   * fixed seed), and, once it is up and has stood a second, drawn with every material it wears and holds as normalised,
+   * again, with the superset taken off, and once more with it put back -- in the world (the scene as the portal renderer
+   * drew it, read off the effects' scene target, nothing stepped between draws, a draw with the body hidden giving the
+   * figure's mask) and in the wardrobe doll's and the select screen's own contexts (`CharacterPreview.testPicture`).
+   * Largest channel difference and mean over the figure, in sRGB levels, against the bound (2 and 0.2); two draws of the
+   * normalised figure are the noise floor, and the draw after the superset went back on must equal the first. A look
+   * passes only where every picture held a figure and the superset came off at least one of its materials, and the run
+   * passes only where every look asked was stood and compared (`tested`, `untested`). The
+   * console's alone: it builds the off shapes' programs and stands people, and allocates freely. With `pictures`, or for
+   * a look over the bound, the world's two pictures and their difference are kept as PNG addresses on
+   * `window.__personKeysPictures`.
+   */
+  private async personKeysSelfTest(o: { looks?: string[]; pictures?: boolean; size?: number }): Promise<Record<string, unknown>> {
+    if (!PERSON_KEYS_TUNE.on) return { error: "the person keys are off this session (localStorage['swg.personKeys'] = '0'): nothing to compare" };
+    if (!this.inWorld) return { error: 'no world to draw' };
+    const target = this.postfx ? this.postfx.sceneTarget : null;
+    if (!target) return { error: 'the effects are off: the world picture is read off their scene target (turn Effects on)' };
+    const mobiles = this.world.mobiles;
+    const cat = this.world.mobileCatalogue;
+    if (!mobiles || !cat) return { error: 'the creature and NPC catalogue has not loaded (or is not converted)' };
+    if (this.player.aboard) return { error: 'step out of the ship first' };
+    const rows = this.shaderRows();
+    let highestBefore = -1;
+    for (const p of rows) if (p.id > highestBefore) highestBefore = p.id;
+    this.sampleShaders(this.shaderPhase());
+    const madeBefore = this.shaderWatch.totals.made;
+    // Stood past the model memory budget (as a fixture is), which a town's people fill: the test stands one look at a time
+    // and takes each away again.
+    const looks = pickTestLooks(cat.file.entries, (e) => cat.ready(e).ok && !mobiles.whyNot(e, cat, 'spawned', false), o.looks);
+    const size = Math.max(64, Math.min(512, Math.round(o.size ?? 256)));
+    const W = target.width;
+    const H = target.height;
+    const raw = new Uint16Array(W * H * 4);
+    const toLevel = (h: number): number => {
+      const v = THREE.DataUtils.fromHalfFloat(h);
+      const c = v <= 0 ? 0 : v >= 1 ? 1 : v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+      return Math.round(c * 255);
+    };
+    const grabWorld = (): Uint8Array => {
+      this.drawFrame();
+      this.renderer.readRenderTargetPixels(target, 0, 0, W, H, raw);
+      const out = new Uint8Array(W * H * 4);
+      for (let i = 0; i < raw.length; i += 4) {
+        out[i] = toLevel(raw[i]);
+        out[i + 1] = toLevel(raw[i + 1]);
+        out[i + 2] = toLevel(raw[i + 2]);
+        out[i + 3] = 255;
+      }
+      return out;
+    };
+    const previews: [string, CharacterPreview][] = [['doll', this.wardrobe.doll], ['select', this.select.stagePreview()]];
+    const pictures: Record<string, Record<string, string>> = {};
+    const results: Record<string, unknown>[] = [];
+    const over: string[] = [];
+    let worst = 0;
+    let worstMean = 0;
+    const fwd = new THREE.Vector3();
+    for (const look of looks) {
+      if (!look.entry) {
+        results.push({ look: look.label, error: look.why });
+        continue;
+      }
+      this.cam.forward(fwd);
+      fwd.y = 0;
+      fwd.normalize();
+      const spawned = mobiles.spawnAhead(look.entry, this.player.pos, fwd, 1, 4, this.world.inside, { overrides: { aggression: 'passive' }, seed: 7, fixture: true });
+      const m = spawned.mobiles[0];
+      if (!m) {
+        results.push({ look: look.label, id: look.entry.id, error: spawned.note || 'not stood' });
+        continue;
+      }
+      try {
+        await mobiles.loaded(m);
+        const t0 = performance.now();
+        while ((!m.ready || !m.model) && performance.now() - t0 < 20000) await new Promise((r) => setTimeout(r, 100));
+        if (!m.ready || !m.model) {
+          results.push({ look: look.label, id: look.entry.id, error: mobiles.loadError(m) ?? 'never came up' });
+          continue;
+        }
+        // A second of frames, so the idle has posed it and its programs are drawn.
+        await new Promise((r) => setTimeout(r, 1000));
+        const mats = new Set<THREE.Material>();
+        const worn = new Set<THREE.Material>();
+        m.group.traverse((x) => {
+          const mat = (x as THREE.Mesh).material;
+          if (!mat) return;
+          for (const one of Array.isArray(mat) ? mat : [mat]) {
+            worn.add(one);
+            if (givenTo(one)) mats.add(one);
+          }
+        });
+        // How many materials the superset really came off: a look whose materials were given nothing would compare a
+        // picture with itself and score nought, so nought taken off fails the look.
+        const off = (): number => {
+          let n = 0;
+          for (const mat of mats) if (setGiven(mat, false)) n++;
+          return n;
+        };
+        const on = (): void => {
+          for (const mat of mats) setGiven(mat, true);
+        };
+        let world: PixelStats & { floor: number; restored: number; taken: number };
+        let worldPics: { a: Uint8Array; b: Uint8Array } | null = null;
+        try {
+          const a1 = grabWorld();
+          const a2 = grabWorld();
+          const taken = off();
+          const b = grabWorld();
+          on();
+          const a3 = grabWorld();
+          const wasVisible = m.group.visible;
+          m.group.visible = false;
+          const c = grabWorld();
+          m.group.visible = wasVisible;
+          world = { ...pixelDiff(a2, b, (i) => a2[i] !== c[i] || a2[i + 1] !== c[i + 1] || a2[i + 2] !== c[i + 2]), floor: pixelDiff(a1, a2, () => true).max, restored: pixelDiff(a2, a3, () => true).max, taken };
+          worldPics = { a: a2, b };
+        } finally {
+          on();
+        }
+        // The previews compile these very materials (the town's people share them) in contexts of their own, and the
+        // cascades keep one shader record per material, the last compiled in any context: kept across the previews'
+        // compiles and put back after, or every body of this look would read the cascades' ranges off a preview's
+        // uniforms for the rest of the session (`World.keepShadowRecords`, as the ship edit page's preview does).
+        const restoreRecords = this.world.keepShadowRecords([...worn]);
+        const inPreviews: Record<string, PixelStats & { floor: number; restored: number; taken: number }> = {};
+        try {
+          for (const [name, p] of previews) {
+            try {
+              const pa = p.testPicture(m.model, size);
+              const taken = off();
+              const pb = p.testPicture(m.model, size);
+              on();
+              const pc = p.testPicture(m.model, size);
+              inPreviews[name] = { ...pixelDiff(pa, pb, (i) => pa[i + 3] > 0 || pb[i + 3] > 0), floor: 0, restored: pixelDiff(pa, pc, () => true).max, taken };
+            } finally {
+              on();
+            }
+          }
+        } finally {
+          restoreRecords();
+        }
+        const all = [world, ...Object.values(inPreviews)];
+        const max = Math.max(...all.map((d) => d.max));
+        const mean = Math.max(...all.map((d) => d.mean));
+        // A look passes only where every picture held a figure and the superset really came off for each: a preview that
+        // drew nothing, or a look given nothing to take off, compares a picture with itself.
+        const pass = max <= PERSON_TEST_BOUND.max && mean <= PERSON_TEST_BOUND.mean && all.every((d) => d.restored === 0 && d.pixels > 0 && d.taken > 0);
+        worst = Math.max(worst, max);
+        worstMean = Math.max(worstMean, mean);
+        if (!pass) over.push(look.label);
+        if ((o.pictures || !pass) && worldPics) {
+          pictures[look.label] = { normalised: App.pngOf(worldPics.a, W, H), off: App.pngOf(worldPics.b, W, H), diff: App.pngOf(worldPics.a, W, H, worldPics.b) };
+        }
+        results.push({ look: look.label, id: look.entry.id, name: look.entry.name, materials: mats.size, pass, world, ...inPreviews });
+      } finally {
+        mobiles.clear((x) => x === m);
+      }
+    }
+    // Every program it built that still lives (its off shapes on materials the town's people share, and its looks' own),
+    // left out of `personKeys().inPlay` from here on; those on looks it took away again went with them.
+    for (const p of this.shaderRows()) if (p.id > highestBefore) this.personTestIds.add(p.id);
+    this.sampleShaders(this.shaderPhase());
+    const built = this.shaderWatch.totals.made - madeBefore;
+    if (Object.keys(pictures).length) (window as unknown as { __personKeysPictures: unknown }).__personKeysPictures = pictures;
+    // The verdict holds only for a whole run: a look that could not be stood or never came up is a look not tested, and
+    // the run is not a pass while any is (`tested` says how many of those asked were compared, `untested` which not).
+    const tested = results.filter((r) => typeof r.pass === 'boolean');
+    const untested = results.filter((r) => typeof r.pass !== 'boolean').map((r) => String(r.look));
+    const pass = tested.length > 0 && untested.length === 0 && over.length === 0;
+    const testedLine = `${tested.length}/${looks.length}`;
+    this.personTestLast = { pass, tested: testedLine, untested, worst, worstMean: Number(worstMean.toFixed(3)), over };
+    return { pass, tested: testedLine, untested, bound: { ...PERSON_TEST_BOUND }, looks: results, built, worst, worstMean: Number(worstMean.toFixed(3)), over, pictures: Object.keys(pictures) };
+  }
+
+  /**
+   * An RGBA picture read off a target (bottom row first) as a PNG address, upright; with `b`, where the two differ at
+   * all the pixel is red, over 2 levels white, and elsewhere the first picture darkened. The console's alone.
+   */
+  private static pngOf(a: Uint8Array, w: number, h: number, b?: Uint8Array): string {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const g = c.getContext('2d');
+    if (!g) return '';
+    const img = g.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const k = ((h - 1 - y) * w + x) * 4;
+        const o = (y * w + x) * 4;
+        if (b) {
+          const d = Math.max(Math.abs(a[k] - b[k]), Math.abs(a[k + 1] - b[k + 1]), Math.abs(a[k + 2] - b[k + 2]));
+          const shade = a[k] >> 2;
+          img.data[o] = d > 0 ? 255 : shade;
+          img.data[o + 1] = d > 2 ? 255 : d > 0 ? 0 : shade;
+          img.data[o + 2] = d > 2 ? 255 : d > 0 ? 0 : shade;
+        } else {
+          img.data[o] = a[k];
+          img.data[o + 1] = a[k + 1];
+          img.data[o + 2] = a[k + 2];
+        }
+        img.data[o + 3] = 255;
+      }
+    }
+    g.putImageData(img, 0, 0);
+    return c.toDataURL('image/png');
+  }
+
   /** `__debug.links()`: see its comment there. */
   private linksReport(opts?: { mode?: LinkModeName | 'checked'; tune?: Partial<Record<keyof typeof LINK_TUNE, unknown>>; forget?: boolean }): Record<string, unknown> {
     const words: string[] = [];
@@ -16131,6 +16475,14 @@ class App {
       this.loadingScreen.setWhat(`loading ${stage}`);
       await new Promise((r) => setTimeout(r, 100));
     }
+    // Every shape a person's or a rack weapon's material can take, compiled for both passes behind this screen (the
+    // performance pass's fourth wave, `World.warmPersonShapes`), begun before anybody is stood so the people stood below
+    // find their programs built, and waited for before the sweep. The session's first screen builds them; every later
+    // one finds them built.
+    const personWarm = this.world.warmPersonShapes().catch((err) => {
+      console.warn('personKeys: the warm of the people\'s shapes failed', err);
+      return 0;
+    });
     // The people at their posts stood round the arrival now that the pack (and with it their rows) is in, so their
     // looks load while the companion, the shuttles, the dressing, the effects and the reflections are waited for
     // below. The catalogue is fetched once at boot and usually still in flight on a first world: waited for (it is
@@ -16212,6 +16564,9 @@ class App {
     // from stand-ins (step 6): given `PLACED_TUNE.warmWaitMs` more to come in, since what is not in by the sweep
     // builds its programs in play as its tier comes into range. Three seconds now the sweep no longer costs
     // fifteen to twenty-eight (it was nought against that).
+    // The people's shapes (begun above) finished before the sweep, said under the title while they are waited for.
+    this.loadingScreen.setWhat("the people's shaders");
+    await personWarm;
     if (PLACED_TUNE.warmWaitMs > 0) {
       this.loadingScreen.setWhat('the placed objects round you');
       await this.world.placedWarmSettled(PLACED_TUNE.warmWaitMs);
@@ -16585,10 +16940,14 @@ class App {
    */
   private async homeOf(planet: PlanetDef, zoneId?: string): Promise<ArrivalPlace | null> {
     if (!planet.arrival || !hasOwnArrival(planet)) return null;
-    const centre = await this.poisFileOf(packIdOf(planet, zoneId)).then(
-      (f) => f.center,
-      () => null,
-    );
+    // A world that declares no pack has no places file and no layout: its raw frame is the game's about nought, as every
+    // reader of a missing centre takes it, so its own arrival is read with nothing asked for (`packFiles.ts`).
+    const centre = packless(planet)
+      ? { x: 0, z: 0 }
+      : await this.poisFileOf(packIdOf(planet, zoneId)).then(
+          (f) => f.center,
+          () => null,
+        );
     return centre ? arrivalInGame(planet.arrival, centre) : null;
   }
 
@@ -16688,6 +17047,12 @@ class App {
     this.hud.setPlanet(planet);
     this.minimap.setName(planet.name);
     this.map.setCurrent(planet.id, this.zone);
+    // A browser drawing without the graphics card is told so once, at its first world (`backendLine`).
+    if (!this.backendSaid) {
+      this.backendSaid = true;
+      const line = backendLine(this.backend);
+      if (line) this.messages.system(line);
+    }
     this.updateUrl();
     this.remotes.setWorld(planet.id, this.zone);
     this.net.setHello(this.helloNow());
@@ -18652,7 +19017,9 @@ class App {
    */
   private async readTracks(world: string, kind: 'ground' | 'space'): Promise<TrackRead | null> {
     try {
-      const res = await fetch(`${import.meta.env.BASE_URL}${tracksPath(world)}`, { cache: 'no-store' });
+      // Asked in a built game only where its own list ships the file, and always on the dev server (`fetchPublic`).
+      const res = await fetchPublic(tracksPath(world), { cache: 'no-store' }, import.meta.env.BASE_URL);
+      if (!res) return null;
       const type = res.headers.get('content-type') ?? '';
       if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return null;
       const read = readTrackFile(await res.text(), world, kind);
@@ -21018,9 +21385,9 @@ class App {
     this.travelRigs = {};
     this.travelCache = { key: '', things: [] };
     try {
-      const res = await fetch(`${import.meta.env.BASE_URL}assets-private/${pack}/travel.json`);
-      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return;
-      const data = (await res.json()) as { version?: number; rows?: TravelRow[]; rigs?: Record<string, TravelRig> };
+      // Asked only of a world whose pack is there (`packJson`: its probe has already answered by now).
+      const data = await packJson<{ version?: number; rows?: TravelRow[]; rigs?: Record<string, TravelRig> }>(pack, 'travel.json', import.meta.env.BASE_URL);
+      if (!data) return;
       // A pack written before the models were named carries no `model` on any row, so it reads as a
       // world whose terminals are there to press and not to see, and one written before the rigs
       // carries none, so its shuttles stand still as they always did. Refusing either outright would
@@ -21712,12 +22079,10 @@ class App {
     const stamp = worldStateStamp();
     const had = this.padsFor.get(pack);
     if (had && had.stamp === stamp) return had.p;
-    const base = `${import.meta.env.BASE_URL}assets-private/${pack}/`;
-    const json = async (file: string): Promise<unknown> => {
-      const res = await fetch(`${base}${file}`);
-      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-      return res.json();
-    };
+    // Through the pack's own files (`packFiles.ts`): nothing asked of a world with no pack, and a miss asked once a session.
+    // Never behind the manifest's probe: a ticket bought, or a boarding, asks for a far world's pads, whose manifest (up
+    // to 2.8 MB) nothing has fetched yet and the arrival would fetch again; each file's own 404 is remembered instead.
+    const json = (file: string): Promise<unknown> => packJson(pack, file, import.meta.env.BASE_URL, { probe: false });
     const p = (async () => {
       try {
         const [travel, pois] = await Promise.all([json('travel.json'), json('pois.json')]);
@@ -21936,9 +22301,9 @@ class App {
     this.fittingRows = [];
     this.fittingRowsIn = false;
     try {
-      const res = await fetch(`${import.meta.env.BASE_URL}assets-private/${pack}/fittings.json`);
-      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return;
-      const data = (await res.json()) as { version?: number; rows?: FittingRow[] };
+      // Asked only of a world whose pack is there (`packJson`).
+      const data = await packJson<{ version?: number; rows?: FittingRow[] }>(pack, 'fittings.json', import.meta.env.BASE_URL);
+      if (!data) return;
       if (!Array.isArray(data.rows) || data.version !== FITTINGS_PACK_VERSION) return;
       if (this.fittingRowsFor !== pack) return;
       this.fittingRows = data.rows;
@@ -22522,7 +22887,10 @@ class App {
    */
   private async fetchPlacements(layer: PlacementLayer, pack: string, frame: 'ground' | 'space'): Promise<PlacementRead | null> {
     try {
-      const res = await fetch(`${import.meta.env.BASE_URL}${placementsPath(layer, pack)}`, { cache: 'no-store' });
+      // A built game asks only for a file its own list says it ships (`shippedAsk`); the dev server hands no list and
+      // every file is asked for, which is what the editor's first save of a world's file needs (`packFiles.ts`).
+      const res = await fetchPublic(placementsPath(layer, pack), { cache: 'no-store' }, import.meta.env.BASE_URL);
+      if (!res) return null;
       const type = res.headers.get('content-type') ?? '';
       if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return null;
       const read = readPlacementsFile(await res.text(), pack, frame);

@@ -14,6 +14,8 @@
 // Space's point positions, Deep Space's fields and its Star Destroyer): such points carry
 // `source: 'invented'`, such scenery `invented: true` (the converter's INVENTED_* tables in space.mjs).
 
+import { knownAbsent, packJson } from '../world/packFiles.ts';
+
 export type Vec3 = [number, number, number];
 
 export interface SpaceStation {
@@ -343,29 +345,34 @@ const packs = new Map<string, Promise<SpacePack | null>>();
 /**
  * The pack's space.json (`${baseUrl}assets-private/<zone>/space.json`), fetched once per zone and shared
  * (the world and the catalogue use the same promise). A response that is not JSON (Vite answers a
- * missing file with index.html and a 200) is null, as `AssetPack` treats it. Only a converted pack (one
- * with `hyperspace`) is remembered: a missing or older one is fetched again next time, so a reconversion
- * mid-session needs no reload. Callers that ask at the same moment still share the one fetch in flight.
+ * missing file with index.html and a 200) is null, as `AssetPack` treats it. A converted pack (one with
+ * `hyperspace`) is kept for the session, and so is a missing one, which is a 404 and only a 404
+ * (`knownAbsent`: the galaxy tab asked again for every unconverted zone on every showing, each a request
+ * that could only miss; a zone converted mid-session is seen after a reload, or after
+ * `__debug.files({ forget: true })`); a page handed back or a failed request is asked again next time, as is
+ * an older pack, so its reconversion mid-session needs no reload. Callers asking at the same moment share
+ * one fetch.
  */
 export function loadSpacePack(baseUrl: string, zone: string): Promise<SpacePack | null> {
   const key = `${baseUrl}|${zone}`;
   const had = packs.get(key);
   if (had) return had;
   const p = (async (): Promise<SpacePack | null> => {
-    try {
-      const res = await fetch(`${baseUrl}assets-private/${zone}/space.json`);
-      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-      const raw = (await res.json()) as Partial<SpacePack>;
-      return raw && typeof raw === 'object' ? normalise(zone, raw) : null;
-    } catch {
-      return null;
-    }
-  })();
+    // The zone's own file says whether the zone is converted, so it is asked without waiting on the manifest's probe.
+    const raw = await packJson<Partial<SpacePack>>(zone, 'space.json', baseUrl, { probe: false });
+    return raw && typeof raw === 'object' ? normalise(zone, raw) : null;
+  })().catch(() => null);
   packs.set(key, p);
   void p.then((pack) => {
-    if ((!pack || !pack.hyperspace) && packs.get(key) === p) packs.delete(key);
+    if (packs.get(key) !== p) return;
+    if (pack ? !pack.hyperspace : !knownAbsent(zone, 'space.json', baseUrl)) packs.delete(key);
   });
   return p;
+}
+
+/** Every zone's answer forgotten (`__debug.files({ forget: true })`): the next ask fetches again. */
+export function forgetSpacePacks(): void {
+  packs.clear();
 }
 
 export interface Destination {

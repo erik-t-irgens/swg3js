@@ -22,6 +22,7 @@
 
 import * as THREE from 'three';
 import type { CoverPoint } from '../core/fx/cloudMath.ts';
+import { packJson } from './packFiles.ts';
 
 /** One weather level of a world, as `clouds.json` records it. */
 export interface CloudLevel {
@@ -207,14 +208,11 @@ export function loadCloudVolumes(base = ''): Promise<{ base: THREE.Data3DTexture
   return volumesOnce;
 }
 
-/** A world's measured sky, fetched from its pack. Null when the `clouds` command has not been run. */
+/**
+ * A world's measured sky, fetched from its pack. Null when the `clouds` command has not been run, and never asked of a
+ * world it writes none for (a space zone, the gallery, a world with no pack: `packFiles.ts`).
+ */
 export async function loadCloudPack(packId: string, base = ''): Promise<CloudPack | null> {
-  try {
-    const res = await fetch(`${base}assets-private/${packId}/clouds.json`);
-    if (!res.ok) return null;
-    const pack = (await res.json()) as CloudPack;
-    return pack?.format === 1 && Array.isArray(pack.levels) ? pack : null;
-  } catch {
-    return null;
-  }
+  const pack = await packJson<CloudPack>(packId, 'clouds.json', base);
+  return pack?.format === 1 && Array.isArray(pack.levels) ? pack : null;
 }

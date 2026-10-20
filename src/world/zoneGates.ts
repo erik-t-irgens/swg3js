@@ -22,6 +22,7 @@
 // after every arrival on foot.
 
 import { PLANETS, type PlanetDef, type PlanetZone } from '../data/planets.ts';
+import { packJson } from './packFiles.ts';
 
 /** A gate as a pack's gates.json carries it: the point in the snapshot's own frame, and the join. */
 export interface GateRow {
@@ -167,8 +168,9 @@ export function zoneOfPack(packId: string): { planet: PlanetDef; zone: PlanetZon
  * The gates of the world being played, and the clock that keeps them out of a fight.
  *
  * The file is fetched once per pack and kept, so walking back and forth between two zones costs one
- * request each. A world with no gates costs one request that answers nothing, and everything below
- * then answers "no gate", which is what every pack converted before this does.
+ * request each. A world that is not split into zones asks for none (`packHolds`), and a zone with no
+ * gates costs one request a session that answers nothing; everything below then answers "no gate",
+ * which is what every pack converted before this does.
  */
 export class ZoneGates {
   private readonly packs = new Map<string, Promise<GatePack | null>>();
@@ -197,12 +199,9 @@ export class ZoneGates {
     this.foughtAt = -1e9;
     let p = this.packs.get(packId);
     if (!p) {
-      p = fetch(`${baseUrl}assets-private/${packId}/gates.json`)
-        .then(async (res) => {
-          if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-          return (await res.json()) as GatePack;
-        })
-        .catch(() => null);
+      // Asked only of a planet split into zones (`packHolds`): the converter writes gates for nothing else, and every
+      // other world's ask was a request that could only miss.
+      p = packJson<GatePack>(packId, 'gates.json', baseUrl);
       this.packs.set(packId, p);
     }
     void p.then((pack) => {

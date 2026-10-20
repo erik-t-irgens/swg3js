@@ -8,6 +8,7 @@ import { DOORS_PACK_VERSION, type DoorsFile } from './doorMath.ts';
 import { CARD_LIGHT_TUNE } from './cardLight.ts';
 import { prepareCardModel, registerPackCards, registerSharedCards } from './cardRule.ts';
 import { prepareSwayModel } from './floraSway.ts';
+import { manifestText } from './packFiles.ts';
 import type { LayoutStateBlock } from './worldState.ts';
 
 export interface CellLight {
@@ -393,13 +394,17 @@ export class AssetPack {
     return new AssetPack(manifest, baseUrl);
   }
 
-  /** `base` is the site's own root (the build's base URL unless a test names one). */
+  /**
+   * `base` is the site's own root (the build's base URL unless a test names one). The manifest is the pack's one probe
+   * (`manifestText` in `packFiles.ts`): shared with whatever is waiting on whether the pack is there, never asked for a
+   * world that declares no pack, and asked once a session for one whose pack is missing.
+   */
   static async load(planetId: string, base: string = import.meta.env.BASE_URL): Promise<AssetPack | null> {
     const baseUrl = `${base}assets-private/${planetId}/`;
     try {
-      const res = await fetch(`${baseUrl}manifest.json`);
-      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-      const manifest = (await res.json()) as PackManifest;
+      const text = await manifestText(planetId, base);
+      if (text === null) return null;
+      const manifest = JSON.parse(text) as PackManifest;
       // The leaf card shaders, known before any of the pack's models load, so a placed object wearing one is ruled
       // as it loads exactly as a planted one is: every world's flora cards (`flora-cards.json` beside the packs,
       // read once a session), since a world's placed trees can wear a shader only another world plants, and the
@@ -413,31 +418,37 @@ export class AssetPack {
       } catch {
         pack.layout = null;
       }
+      // The cells' walkable floors and the doors in their doorways are written only for a pack with portal buildings
+      // (a model with cells): a pack with none (every space zone, two of Kashyyyk's zones) has neither file, and is
+      // not asked for them.
+      const cells = Object.values(manifest.categories).some((list) => list.some((d) => !!d.cells?.length));
       // The cells' walkable floors, written beside the manifest rather than in it (the manifests
       // are written indented and a floor is thousands of plain numbers). A pack converted before
       // they were read has no such file: the cells keep no floor and everything that walks indoors
       // steers straight at its goal, which is what it did before this existed.
-      try {
-        const fr = await fetch(`${baseUrl}floors.json`);
-        if (fr.ok && (fr.headers.get('content-type') ?? '').includes('json')) {
-          const floors = (await fr.json()) as { version?: number; models?: Record<string, Record<string, { floor?: CellFloor; graph?: CellGraph }>> };
-          if (floors.version === FLOOR_PACK_VERSION && floors.models) {
-            for (const list of Object.values(manifest.categories)) {
-              for (const def of list) {
-                const byCell = floors.models[def.id];
-                if (!byCell || !def.cells) continue;
-                for (const cell of def.cells) {
-                  const block = byCell[String(cell.index)];
-                  if (!block) continue;
-                  if (block.floor) cell.floor = block.floor;
-                  if (block.graph) cell.graph = block.graph;
+      if (cells) {
+        try {
+          const fr = await fetch(`${baseUrl}floors.json`);
+          if (fr.ok && (fr.headers.get('content-type') ?? '').includes('json')) {
+            const floors = (await fr.json()) as { version?: number; models?: Record<string, Record<string, { floor?: CellFloor; graph?: CellGraph }>> };
+            if (floors.version === FLOOR_PACK_VERSION && floors.models) {
+              for (const list of Object.values(manifest.categories)) {
+                for (const def of list) {
+                  const byCell = floors.models[def.id];
+                  if (!byCell || !def.cells) continue;
+                  for (const cell of def.cells) {
+                    const block = byCell[String(cell.index)];
+                    if (!block) continue;
+                    if (block.floor) cell.floor = block.floor;
+                    if (block.graph) cell.graph = block.graph;
+                  }
                 }
               }
             }
           }
+        } catch {
+          /* no floors in this pack: the game steers, as it always has */
         }
-      } catch {
-        /* no floors in this pack: the game steers, as it always has */
       }
       // The trees' and rocks' own collision shapes, beside the manifest as the floors are. A pack
       // converted before the pass has none, and its plantings stand on the guessed cylinders.
@@ -451,14 +462,16 @@ export class AssetPack {
       }
       // The doors in the buildings' doorways, beside the manifest as the floors are. Only a pack with
       // portal buildings has the file; one converted before the pass has none and its doorways stand open.
-      try {
-        const dr = await fetch(`${baseUrl}doors.json`);
-        if (dr.ok && (dr.headers.get('content-type') ?? '').includes('json')) {
-          const doors = (await dr.json()) as DoorsFile;
-          if (doors.version === DOORS_PACK_VERSION && doors.models && doors.styles) pack.doors = doors;
+      if (cells) {
+        try {
+          const dr = await fetch(`${baseUrl}doors.json`);
+          if (dr.ok && (dr.headers.get('content-type') ?? '').includes('json')) {
+            const doors = (await dr.json()) as DoorsFile;
+            if (doors.version === DOORS_PACK_VERSION && doors.models && doors.styles) pack.doors = doors;
+          }
+        } catch {
+          /* no doors in this pack */
         }
-      } catch {
-        /* no doors in this pack */
       }
       await pack.loadObjectEffects();
       return pack;

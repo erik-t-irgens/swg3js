@@ -44,6 +44,12 @@ function method(text: string, signature: string): string {
   const wait = settle.indexOf('while ((!this.world.bodiesUp || wildWaiting > 0) && performance.now() < kicked + LOADING_TUNE.standWaitMs)');
   ok(again > people && wait > again && wait < sweep, 'the people again just before the sweep, then the bodies, and any creature site still waiting for its ground, waited for, bounded by standWaitMs from when they were first stood');
   ok(/let wildWaiting = this\.world\.standWildNow\(this\.player\.worldPos\);/.test(settle), "the wait is handed the creatures' own count of sites waiting for their ground");
+  // The fourth wave: every shape a person's or a rack weapon's material can take, compiled behind the screen.
+  const personWarm = settle.indexOf('const personWarm = this.world.warmPersonShapes()');
+  const personWait = settle.indexOf('await personWarm;');
+  ok(personWarm > firstLoop && personWarm < people, "the people's shapes are begun after the settle's first loop and before anybody is stood");
+  ok(personWait > personWarm && personWait < sweep && settle.lastIndexOf("this.loadingScreen.setWhat(\"the people's shaders\");", personWait) > personWarm, "and waited for before the sweep, said under the title as they are");
+  ok(/const personWarm = this\.world\.warmPersonShapes\(\)\.catch\(/.test(settle), 'a warm that fails is said and never stops the screen');
   ok(/const kicked = performance\.now\(\);/.test(settle) && settle.indexOf('const kicked') < people, 'the bound runs from the first stand');
   ok(/the people here, \$\{n\.up\} of \$\{n\.of\}/.test(settle), "the line under the title says the people here, n of m");
   ok(/if \(wildWaiting > 0\) wildWaiting = this\.world\.standWildNow/.test(settle.slice(wait)), 'a creature site waiting for its ground is tried again inside the bound');
@@ -164,6 +170,16 @@ function method(text: string, signature: string): string {
   ok(/const shown = !document\.hidden;\s*if \(!SHADER_PACING \|\| this\.behindScreen \|\| this\.programs\.idle\(performance\.now\(\), shown\)\)/.test(waiter), 'its entry is the single-instant test, by the long bound on a page on screen');
   ok(/const byIdle = SHADER_PACING && !this\.behindScreen && shown;/.test(waiter) && /if \(byIdle\) this\.programs\.noteIdleBuilt\(/.test(waiter), "and what the entry test's own outright build makes on a page on screen is counted with the flushes");
   ok(/async prepareActor\(root: THREE\.Object3D, label\?: string, roomsLater\?: RoomJob\)[\s\S]{0,1100}await this\.compileReady\(\[root\], label, roomsLater \? \{ roomsLater \} : undefined\);/.test(world), 'prepareActor hands the queue its label (and the room deferral its handle)');
+}
+
+// --- the loading screen's own picture (the fifth wave) -------------------------------------------------------------------
+
+{
+  const loading = readFileSync(new URL('../../../src/ui/loading.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const code = loading.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  ok(!/toDataURL|toBlob|getImageData/.test(code), "the loading screen reads nothing back: the stand-in picture is the canvas itself, never encoded with toDataURL");
+  ok(/<canvas class="grey"[^>]*hidden><\/canvas>/.test(loading) && /<canvas class="colour"[^>]*hidden><\/canvas>/.test(loading) && /this\.paintStandIn\(greyCtx,[^)]*\);\s*this\.paintStandIn\(colourCtx,[^)]*\);\s*this\.showLayers\(true\);/.test(loading), 'it is drawn twice, onto two canvases that stand where the two pictures would');
+  ok(/void loadingPicture\(planet, this\.baseUrl\)\.then\(\(src\) => \{\s*if \(ask !== this\.pictureAsk\) return;/.test(loading) && !/assets-private\/loading\/\$\{planet\.id\}\.png/.test(code), "and a picture is asked for only where the loading command's own index lists one (`loadingPicture`), the answer for another world's screen dropped");
 }
 
 console.log(`\nloadingWiring: ${checks} checks passed`);

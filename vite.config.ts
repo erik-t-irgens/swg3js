@@ -5,6 +5,7 @@ import { defineConfig, type Plugin } from 'vite';
 import { STORY_FILE, listStorySet } from './server/storySet.mjs';
 import { placementFileOf } from './src/story/placementPath.ts';
 import { trackFileOf } from './src/race/trackPath.ts';
+import { shippedPublic } from './tools/dev/shippedPublic.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PRIVATE_DIR = path.resolve(ROOT, 'assets-private');
@@ -247,6 +248,35 @@ function tracksEditor(): Plugin {
 }
 
 /**
+ * `virtual:shipped-public`: in a build, the list of the tracked `public/tracks`, `public/placements` and `public/dem` files
+ * the release carries (`tools/dev/shippedPublic.mjs`), so a built game asks for a world's tracks, its permanent
+ * placements and a raster only when it has them; on the dev server `null`, no list at all, and every such file is asked
+ * for and answered from the disk (`placementFiles`, `trackFiles`). Never kept current by a watcher: the module is fixed
+ * in the page's loaded graph, so a list changed in dev would reload the page at the editor's first save of a world's
+ * file, or tell the page not to fetch the file that save had just written. The player's own story's index is no part of
+ * it: the launcher serves a folder the player names at run time (`storyDir`), which no list made here can know, so the
+ * page asks for it at every boot.
+ */
+function shippedPublicList(): Plugin {
+  const id = 'virtual:shipped-public';
+  let build = false;
+  return {
+    name: 'shipped-public',
+    configResolved(config) {
+      build = config.command === 'build';
+    },
+    resolveId(source) {
+      return source === id ? `\0${id}` : null;
+    },
+    load(source) {
+      if (source !== `\0${id}`) return null;
+      if (!build) return 'export default null;';
+      return `export default ${JSON.stringify(shippedPublic(ROOT))};`;
+    },
+  };
+}
+
+/**
  * Serves the git-ignored assets-private/ folder (converted SWG content) at
  * /assets-private/ in dev and copies it into dist/ on build. The Pages
  * workflow builds from a clean checkout, so nothing private ever deploys.
@@ -280,7 +310,7 @@ function privateAssets(): Plugin {
 
 export default defineConfig({
   base: './',
-  plugins: [privateAssets(), privateStory(), placementFiles(), placementsEditor(), trackFiles(), tracksEditor()],
+  plugins: [privateAssets(), privateStory(), placementFiles(), placementsEditor(), trackFiles(), tracksEditor(), shippedPublicList()],
   build: { target: 'es2022', sourcemap: false },
   // PORT lets a launcher assign the port; without it Vite picks its own default, so `npm run dev`
   // behaves exactly as before.

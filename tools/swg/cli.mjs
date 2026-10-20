@@ -4608,8 +4608,11 @@ switch (cmd) {
       console.log(`  ${id.padEnd(10)} <- ${best.name} (${best.dds.width}x${best.dds.height}${hits.length > 1 ? `, of ${hits.length}` : ''})`);
     }
     const pictured = Object.keys(index).length;
-    // Keyed by planet, and its late stamp beside them under `late`, which no planet is called: only `status` and the
-    // converter's driver read this file (the game asks for <planet>.png by name).
+    // Keyed by planet id, each row `{ file }` with the rest beside it, and its late stamp under `late`, which no planet is
+    // called. The game reads it (`loadingPicture` in src/world/packFiles.ts) to know which worlds have a picture: it asks
+    // for `row.file` only where the index lists the world, and draws its own for every other, so re-keying this file or
+    // writing a picture it does not list takes that world's loading picture away. `status` and the converter's driver
+    // read it too.
     writeFileSync(join(outDir, 'index.json'), JSON.stringify(withLate(index, vfs, 'loading'), null, 2));
     const missing = planets.map(([id]) => id).filter((id) => !index[id]);
     console.log(`-> ${outDir}: ${pictured} planets${missing.length ? `; none found for ${missing.join(', ')} (the game draws its own)` : ''}`);

@@ -67,7 +67,8 @@ const named = (root: THREE.Object3D, name: string) => materialsOf(root).find((m)
 function serve(files: Record<string, unknown>): void {
   (globalThis as unknown as { fetch: unknown }).fetch = async (url: string) => {
     const body = Object.prototype.hasOwnProperty.call(files, url) ? files[url] : undefined;
-    return body === undefined ? { ok: false, status: 404, headers: { get: () => 'text/html' }, json: async () => null } : { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => JSON.parse(JSON.stringify(body)) };
+    // `text` as well: a pack's manifest is read as text since the performance pass's fifth wave (`manifestText`).
+    return body === undefined ? { ok: false, status: 404, headers: { get: () => 'text/html' }, json: async () => null, text: async () => '' } : { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => JSON.parse(JSON.stringify(body)), text: async () => JSON.stringify(body) };
   };
 }
 

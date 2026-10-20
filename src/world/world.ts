@@ -31,7 +31,7 @@ import { FALLBACK_LAVA_STYLE, groupLava, lavaStyleFor, type LavaStyle } from './
 import { applyLavaHarm, LAVA_HARM, lavaHarmReport, lavaTickDamage, newLavaHold, resetLavaHarm, resetLavaHold, stepLavaHold, tuneLavaHarm, type LavaHarmTune } from './lavaHarmMath.ts';
 import { burnReport, clearBurn, newPlayerBurn, takeBurn, tunePlayerBurn, type PlayerBurn, type PlayerBurnTune } from '../combat/burnMath.ts';
 import type { HeatSources, LavaHeatTable } from './heatSources';
-import { REFLECTIONS, joinModelReflections, setEnvironment } from './envmap';
+import { DOME_CUBE, DomeCapture, REFLECTIONS, joinModelReflections, setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FLORA_WARM, FloraPlanter, plantedShadow } from './flora.ts';
 import { clientPlantDistance, FLORA_TUNE, plantReachOf, PlantSweep } from './floraReach.ts';
@@ -66,6 +66,7 @@ import { wildLife, type WildDeps } from './wildLife.ts';
 import { standingList } from './ngeOverlay.ts';
 import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, brigadeBodies, personDormant, rosterRows, ruinsOf, type RosterRow, type RuinsCircle } from './restuss.ts';
 import { releaseWorldStates, stateNow, standsIn, takeWorldStates } from './worldState.ts';
+import { shippedAsk } from './packFiles.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { conversationPack } from './conversationPack.ts';
@@ -84,7 +85,8 @@ import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
 import { isShadowCast, isShadowOnly } from '../core/fxRegistry.ts';
 import { ProgramQueue, materialsUnder, pendingPrograms, resolveLinks, type OwnJob } from '../core/programQueue.ts';
 import { LINK_TUNE, LinkFlight, linkMode, type ReadyProgram } from '../core/linkMode.ts';
-import { ROOM_DEFER, deferRooms, type RoomCompile, type RoomJob, type RoomQueue } from './roomDefer.ts';
+import { ROOM_DEFER, deferRooms, urgentRooms, type RoomCompile, type RoomJob, type RoomQueue } from './roomDefer.ts';
+import { PERSON_KEYS_STATS, PERSON_KEYS_TUNE, PERSON_KEYS_WARM, allWarmed, isPersonMaterial, normalisePerson, noteWarmed, signatureStandIns, takesNormalScale, type ProgramLike, type ProgramsOf } from './personKeys.ts';
 import { PASS_STATES } from './passScenes.ts';
 import { PACE_TUNE, QueueWatch, framesFor } from '../core/programPace.ts';
 import { noteProgramTime, pacingHard, shaderBudget } from '../core/shaderWatch.ts';
@@ -805,9 +807,16 @@ export class World {
   renderer: THREE.WebGLRenderer | null = null;
   private pmrem: THREE.PMREMGenerator | null = null;
   /**
-   * The filtered environment reflective surfaces see, kept as its whole render target: disposing only a
-   * render target's texture frees nothing in three, so every capture of the sky used to leave a target
-   * behind on the GPU, one every few seconds for as long as a world was played.
+   * Our own sky's capture into a kept cube and a kept PMREM target, through a generator of its own (`DomeCapture`,
+   * `domePmrem`): made and warmed with the shared generator, written in place every capture, never disposed.
+   */
+  private dome: DomeCapture | null = null;
+  /** The pack the sky in force came out of: the world's own, or the one it borrows its sky from (`PlanetDef.borrowSky`). */
+  private skyPack: AssetPack | null = null;
+  /**
+   * The filtered environment reflective surfaces see when it is a target of its own to free (an area's own cube map,
+   * the 'game' source), kept as its whole render target: disposing only a render target's texture frees nothing in
+   * three. The dome's kept target is never here, since it is never freed.
    */
   private envTarget: THREE.WebGLRenderTarget | null = null;
   private envTexture: THREE.Texture | null = null;
@@ -1523,7 +1532,10 @@ export class World {
     this.terrain = new Terrain(planet);
     // A planet whose ground is real-world elevation. The raster arrives after the world is already
     // standing, so the ground is remade once it lands rather than held up waiting for it.
-    if (planet.dem) {
+    // A built game asks for the raster only where its own list ships it (`shippedAsk`): two of the four rasters stayed on
+    // another machine and are not committed, and their worlds stand on the planet's own noise.
+    if (planet.dem && !shippedAsk(`${planet.dem.url}/base16.raw`)) console.info(`${planet.id}: its elevation raster is not in this build, so the ground is the planet's own noise`);
+    else if (planet.dem) {
       const d = planet.dem;
       this.terrain.demDetail = d.detail ?? 0;
       void import('./demTerrain').then(async ({ loadDemPatch }) => {
@@ -2644,6 +2656,7 @@ export class World {
     }
     this.dropSky();
     this.swgSky = sky;
+    this.skyPack = pack;
     this.scene.add(sky.group, sky.cloudGroup);
     markActor(sky.group);
     markActor(sky.cloudGroup);
@@ -2665,6 +2678,7 @@ export class World {
       this.swgSky.dispose(this.scene, (m) => this.forgetMaterials(m));
       this.swgSky = null;
     }
+    this.skyPack = null;
     this.sky.visible = true;
     this.day.swg = false;
     this.day.fixed = null;
@@ -2713,6 +2727,23 @@ export class World {
   }
 
   /**
+   * The dome's own capture (`DomeCapture`): a generator of its own, its cube shader compiled and one capture of an empty
+   * scene made here, behind the first loading screen, which makes the kept target and builds nothing the shared
+   * generator's warm-up has not (the same sources at the same 128). Every capture after it writes the same two targets.
+   */
+  private makeDome(renderer: THREE.WebGLRenderer): DomeCapture {
+    const dome = new DomeCapture(new THREE.PMREMGenerator(renderer));
+    try {
+      dome.domePmrem.compileCubemapShader();
+      const empty = new THREE.Scene();
+      dome.capture((camera) => camera.update(renderer, empty));
+    } catch (err) {
+      console.warn('sky: the dome\'s capture could not be warmed; its first reflection will cost a frame', err);
+    }
+    return dome;
+  }
+
+  /**
    * The environment reflective surfaces see: our own sky dome, filtered again every few seconds as it
    * changes, which is the default (`REFLECTIONS.source` 'sky'); or, with the source set to 'game', the
    * block's own day or night cube map out of the client's files when the pack has one and the dome
@@ -2722,17 +2753,21 @@ export class World {
     const sky = this.swgSky;
     if (!sky || !this.renderer) return;
     this.pmrem ??= this.makePmrem(this.renderer);
+    const dome = (this.dome ??= this.makeDome(this.renderer));
     // The heaviest block's cube for the hour (the weather's mix picks the block), by its first face:
     // a new area or level with another cube loads that one; a cube that failed is never asked again.
     const cube = REFLECTIONS.source === 'game' ? (this.day.isDay ? sky.environment.day : sky.environment.night) : null;
-    const usable = cube && cube.faces.length && !this.envFailed.has(cube.faces[0]) ? cube : null;
-    if (usable) {
+    // The cube's files are the sky's own pack's: a world that borrows another's sky has no pack of its own (`this.pack`
+    // is null there, and reading it threw as the 'game' source was taken up on a real-elevation world).
+    const skyPack = this.skyPack;
+    const usable = skyPack && cube && cube.faces.length && !this.envFailed.has(cube.faces[0]) ? cube : null;
+    if (usable && skyPack) {
       const want = usable.faces[0];
       if (this.envWant === want) return;
       this.envWant = want;
       const pmrem = this.pmrem;
       new THREE.CubeTextureLoader().load(
-        usable.faces.map((f) => this.pack!.url(f)),
+        usable.faces.map((f) => skyPack.url(f)),
         (tex) => {
           // Another cube was asked for (or the sky went) while this one came: not wanted any more.
           if (this.swgSky !== sky || this.envWant !== want) {
@@ -2740,9 +2775,10 @@ export class World {
             return;
           }
           tex.colorSpace = THREE.SRGBColorSpace;
+          // The area's own cube, at its file's own size, through the shared generator into a target of its own.
           const target = pmrem.fromCubemap(tex);
           tex.dispose();
-          this.useEnvironment(target);
+          this.useEnvironment(target.texture, target);
         },
         undefined,
         () => {
@@ -2758,22 +2794,35 @@ export class World {
     if (this.envTimer < 4) return;
     this.envTimer = 0;
     // Filtered from a 128 px cube like every other environment water may see, so swapping to it
-    // never changes a water material's program key (envMapCubeUVHeight is in that key).
-    this.useEnvironment(this.pmrem.fromScene(sky.domeScene, 0.04, 1, 20000, { size: 128 }));
+    // never changes a water material's program key (envMapCubeUVHeight is in that key): rendered into the
+    // dome's kept cube and filtered into its kept target in place (`DomeCapture`), so a capture makes no
+    // target and the texture every surface holds stays the same object.
+    const renderer = this.renderer;
+    // The way before it, a target made every capture, kept only to compare the look by (`reflections({ dome: 'scene' })`).
+    if (REFLECTIONS.dome === 'scene') {
+      const made = this.pmrem.fromScene(sky.domeScene, 0.04, 1, 20000, { size: DOME_CUBE });
+      this.useEnvironment(made.texture, made);
+      return;
+    }
+    const captured = dome.capture((camera) => camera.update(renderer, sky.domeScene));
+    if (captured) this.useEnvironment(captured, null);
   }
 
   /**
-   * A new environment for every reflective surface: it is handed to all of them first and only then is
-   * the last one freed, so nothing registered is ever left sampling a target that has gone. The
-   * interior cells' own copies are registered too (`assetPack.ts`), and water follows through its
-   * listener.
+   * The environment for every reflective surface: handed to all of them only when it is another texture than the one
+   * they hold (the dome's capture is the same texture every time, filled in place, so a capture tells nobody anything),
+   * and only then is the last target of its own freed, so nothing registered is ever left sampling a target that has
+   * gone. `own` is the target to free when this one is replaced (an area's own cube's), null for the dome's kept one. The
+   * interior cells' own copies are registered too (`assetPack.ts`), and water follows through its listener.
    */
-  private useEnvironment(target: THREE.WebGLRenderTarget): void {
+  private useEnvironment(texture: THREE.Texture, own: THREE.WebGLRenderTarget | null): void {
     const old = this.envTarget;
-    this.envTarget = target;
-    this.envTexture = target.texture;
-    setEnvironment(target.texture, 1);
-    old?.dispose();
+    this.envTarget = own;
+    if (this.envTexture !== texture) {
+      this.envTexture = texture;
+      setEnvironment(texture, 1);
+    }
+    if (old && old !== own) old.dispose();
   }
 
   /**
@@ -2852,6 +2901,18 @@ export class World {
    */
   recaptureSky(): void {
     this.envTimer = 99;
+  }
+
+  /**
+   * What the dome's captures have made, for `__debug.reflections()`: how many captures, how many targets (one for the
+   * session), cubes refused for their size, the kept target's height (the one in every reflective program's key), and
+   * whether the environment every surface holds is the dome's kept texture now (the 'game' source on an area with a cube
+   * of its own holds that cube's instead).
+   */
+  domeReport(): { captures: number; targetsMade: number; refused: number; height: number | null; held: boolean } {
+    const d = this.dome;
+    const target = d?.target ?? null;
+    return { captures: d?.stats.captures ?? 0, targetsMade: d?.stats.targetsMade ?? 0, refused: d?.stats.refused ?? 0, height: target ? target.height : null, held: !!target && this.envTexture === target.texture };
   }
 
   /** Where reflections come from changed (`setReflectionSource`): the next refresh takes it up. */
@@ -4925,13 +4986,17 @@ export class World {
           this.compiledMaterials.add(m);
           isNew = true;
           const std = m as THREE.MeshStandardMaterial;
-          if (std.normalMap && std.normalScale) std.normalScale.copy(this.normalScale);
+          if (takesNormalScale(m)) std.normalScale.copy(this.normalScale);
           // The only place an animated surface is joined: this material is in the scene now.
           if (m.userData.swgTrack || m.userData.swgScroll || m.userData.swgDetail) surfaces.adopt(m);
           // And a model's reflection (worn, held, flown, ridden, a creature's), where its shader has a cube: the
           // environment is in the program key, so it goes on here, before anything compiles, on every path that
           // loads something in play. A planet's own materials registered as their pack loaded them.
           if (m.userData.swgCube === true) joinModelReflections(m);
+          // And a skinned material's or a rack weapon's maps made one superset, with the environment at nought where it
+          // has no cube (the performance pass's fourth wave, `personKeys.ts`): every one of them is in the program key,
+          // so here, after the cube's own join and before the cascades and every wrap below, in this same iteration.
+          if (isPersonMaterial(m, o)) normalisePerson(m, o);
         }
         if (csm && !this.csmMaterials.has(m) && !(m as THREE.ShaderMaterial).isShaderMaterial && m.userData.unlit !== true) {
           csm.setupMaterial(m);
@@ -5385,9 +5450,27 @@ export class World {
       if (ROOM_DEFER.on && this.wouldQueue() && !World.hasLight(objects) && meshes.some((m) => World.passesOf(m).includes(INTERIOR_LAYER))) {
         later.ready = false;
         await this.queueOrBuild(meshes, what, true, this.worldOnlyJob);
-        // The rooms half as work of its own, tied to the life of what it compiles (`deferRooms`): an owner gone compiles
-        // nothing, and work a world's unload lets go leaves the handle not ready, asking again when a body is wanted.
-        deferRooms(later, meshes, `${what} (its rooms)`, this.roomsOnly, this.roomQueue);
+        // The fourth wave (`personKeys.ts`): a body whose every material came out on a program the person warm built has
+        // its rooms programs built already, since the warm compiled every shape of the product for both passes. Its rooms
+        // pass is found at the urgent rank (`urgentRooms`: key lookups, paced by the frame's budget like any queued work,
+        // so a look of twenty meshes never walks the scene's lights twenty times on one frame, and a key the warm did
+        // not build is issued and polled, never built and waited for outright), and it is room-ready a frame or two
+        // after it is shown: the doorway's half-second window stays only for a body with a material outside the product.
+        // Read off the renderer's own records, so nothing is taken as warm that three would not find; one whose rooms
+        // pass built after all is counted and said once.
+        if (allWarmed(meshes, this.programsOf)) {
+          PERSON_KEYS_STATS.roomReady++;
+          urgentRooms(later, meshes, `${what} (its rooms, warm)`, this.roomsOnly, this.roomQueue, (built) => {
+            if (built > 0) {
+              PERSON_KEYS_STATS.roomMissed++;
+              if (PERSON_KEYS_STATS.roomMissed === 1) console.warn(`personKeys: ${what} was taken for warm and its rooms pass built ${built} program(s): the product's reading has a hole`);
+            }
+          });
+        } else {
+          // The rooms half as work of its own, tied to the life of what it compiles (`deferRooms`): an owner gone compiles
+          // nothing, and work a world's unload lets go leaves the handle not ready, asking again when a body is wanted.
+          deferRooms(later, meshes, `${what} (its rooms)`, this.roomsOnly, this.roomQueue);
+        }
         return;
       }
       await this.queueOrBuild(meshes, what, true);
@@ -5844,6 +5927,11 @@ export class World {
       this.adoptMaterials(this.grassStand);
       objects.push(this.grassStand);
     }
+    // Every shape a person's or a rack weapon's material can take (the fourth wave, `personKeys.ts`): behind a screen
+    // `warmPersonShapes` built them before anybody was stood and each costs a key lookup here, and a sweep in play for the
+    // other effects target (the Effects switch) builds them for that target too.
+    const people = PERSON_KEYS_TUNE.on && this.csm ? this.personStandIns() : [];
+    for (const o of people) objects.push(o);
     // Every placed model the old rule would have loaded around the arrival, whose tier the model rule loads
     // later (step 6, `warmPlaced`): a stand-in each, compiled here and let go of after. Only a sweep behind a
     // screen takes them; the Effects switch's in play leaves them for the next one.
@@ -5859,6 +5947,7 @@ export class World {
       if (i + SWEEP_BATCH > placedFrom) placedPrograms += built;
       onProgress(Math.min(objects.length, i + SWEEP_BATCH), objects.length, (r.info.programs?.length ?? 0) - before);
     });
+    if (people.length) noteWarmed(this.programsOf);
     // The shadows' depth programs (`compileShadowDepth`): the loading sweep never builds a depth program, so one
     // stand-in per depth combination is drawn into the shadow maps here as a frame draws them, under the shadow
     // pass's own lights -- the flora's swaying shadows (`floraSway.ts`) over everything the sweep compiled, the
@@ -6006,6 +6095,63 @@ export class World {
     this.shadowHold.dirtyAll();
   }
 
+  /** The programs a material has been compiled for, off this world's renderer's own records (`personKeys.ts`). Nothing is copied. */
+  readonly programsOf: ProgramsOf = (m) => {
+    const props = this.renderer?.properties as unknown as { has(o: object): boolean; get(o: object): { programs?: Map<unknown, ProgramLike> } } | undefined;
+    if (!props || !props.has(m)) return null;
+    return props.get(m).programs?.values() ?? null;
+  };
+
+  /** Whether the fourth wave's stand-ins have been marked as actors (drawn, so compiled, in both passes). */
+  private personStandInsMarked = false;
+
+  /**
+   * The fourth wave's stand-ins (`signatureStandIns`), one a shape of the product: marked as actors once, so every
+   * compile takes them for the world's pass and the rooms', and adopted (normalised, set up for the cascades, wrapped)
+   * as any person's material is, which after the first time is a set lookup a material. Never in the scene.
+   */
+  private personStandIns(): THREE.Mesh[] {
+    const list = signatureStandIns();
+    if (!this.personStandInsMarked) {
+      for (const s of list) markActor(s);
+      this.personStandInsMarked = true;
+    }
+    for (const s of list) this.adoptMaterials(s);
+    return list;
+  }
+
+  /**
+   * The fourth wave's warm (`personKeys.ts`): every shape of the product compiled for both passes, behind a loading
+   * screen, before anybody is stood, so the people stood behind it find their programs built, and so does every person,
+   * creature and weapon made ready in play after it. Polled in parallel where the machine links in the background
+   * (`sweepBatches`), every program finished before it answers. The session's first screen builds them (about two dozen
+   * programs a pass); every screen after finds them built and costs a key lookup a stand-in and pass. Answers how many
+   * of the stand-ins' programs were new.
+   */
+  async warmPersonShapes(): Promise<number> {
+    const r = this.renderer;
+    const camera = this.camera;
+    if (!r || !camera || !this.csm || !PERSON_KEYS_TUNE.on) return 0;
+    const t0 = performance.now();
+    let highest = -1;
+    for (const p of (r.info.programs ?? []) as unknown as ProgramLike[]) if (p.id > highest) highest = p.id;
+    const list = this.personStandIns();
+    await this.sweepBatches(r, camera, list, this.compileTarget(), () => {});
+    noteWarmed(this.programsOf);
+    let built = 0;
+    for (const p of PERSON_KEYS_WARM.programs) if (p.id > highest) built++;
+    const ms = performance.now() - t0;
+    const w = PERSON_KEYS_WARM;
+    if (w.warms === 0) {
+      w.firstMs = ms;
+      w.firstBuilt = built;
+    }
+    w.warms++;
+    w.lastMs = ms;
+    w.lastBuilt = built;
+    return built;
+  }
+
   /**
    * The cascades' light boxes as they stand after this frame's `csm.update`, for the creatures' shadow
    * rule (commit 3c, `refreshCascadeBoxes`): the very frusta three culls each cascade's casters against.
@@ -6148,8 +6294,12 @@ export class World {
   warmUp(center: THREE.Vector3): void {
     this.exclusions = [{ x: center.x, z: center.z, r: 14 }];
     // The environment filter's own programs, built here with everything else's rather than in the
-    // loader callback that brings the first cube in, which lands after the screen has lifted.
-    if (this.renderer) this.pmrem ??= this.makePmrem(this.renderer);
+    // loader callback that brings the first cube in, which lands after the screen has lifted; and the
+    // dome's own capture with its kept targets beside it.
+    if (this.renderer) {
+      this.pmrem ??= this.makePmrem(this.renderer);
+      this.dome ??= this.makeDome(this.renderer);
+    }
     // The sound of the place, as early as it can be had: on an arrival this runs before the pack is
     // in, so it usually only hands the weather its channel sink and the first frames of `update` do
     // the rest, still behind the loading screen.
@@ -7452,7 +7602,8 @@ export class World {
       if (!m) return;
       for (const mat of Array.isArray(m) ? m : [m]) {
         const std = mat as THREE.MeshStandardMaterial;
-        if (std.normalMap && std.normalScale) {
+        // The flat normal a person's material was given (`personKeys.ts`) has no slope for a scale to move.
+        if (takesNormalScale(std)) {
           std.normalScale.set(x, y);
           n++;
         }

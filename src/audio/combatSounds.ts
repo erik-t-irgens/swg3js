@@ -22,6 +22,7 @@
 import type { SoundSpace } from './distance.ts';
 import type { LoopHost } from './emitters.ts';
 import { surfaceWord, type SurfaceSource } from './footsteps.ts';
+import { packJson } from '../world/packFiles.ts';
 
 /**
  * What the world can say about a collider, over and above what it can say about a point. A foot
@@ -462,13 +463,11 @@ export class CombatSounds {
     this.packId = packId;
     this.surfaceState = 'loading';
     const token = this.token;
-    void fetch(`${this.baseUrl}assets-private/${packId}/sounds.json`)
-      .then(async (res) => (res.ok ? ((await res.json()) as { surfaces?: Record<string, string> }) : null))
-      .catch(() => null)
-      .then((pack) => {
-        if (token !== this.token) return;
-        this.adoptSurfaces(pack?.surfaces ?? null);
-      });
+    // The world's one `sounds.json`, read once for its three readers (`packFiles.ts`).
+    void packJson<{ surfaces?: Record<string, string> }>(packId, 'sounds.json', this.baseUrl, { shared: true }).then((pack) => {
+      if (token !== this.token) return;
+      this.adoptSurfaces(pack?.surfaces ?? null);
+    });
   }
 
   /** A planet's object surfaces read elsewhere (the node test). */

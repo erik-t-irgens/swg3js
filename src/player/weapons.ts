@@ -198,8 +198,14 @@ export class WeaponCatalogue {
             m.frustumCulled = false;
             // What is held is never wet (CLAUDE.md), whoever prepares it first: a mobile's weapon is prepared
             // before it is hung on a bone, where the wet wrap's own test (under a bone) could not yet see it,
-            // and its wet programs were a family of their own built in play, about 400 ms apiece.
-            for (const mat of Array.isArray(m.material) ? m.material : [m.material]) if (mat) mat.userData.dry = true;
+            // and its wet programs were a family of their own built in play, about 400 ms apiece. And a rack
+            // weapon's materials are normalised with the people's onto shapes warmed once a session (`personKeys.ts`),
+            // which the world tells by this mark, since nothing else about a rigid mesh says it is held.
+            for (const mat of Array.isArray(m.material) ? m.material : [m.material]) {
+              if (!mat) continue;
+              mat.userData.dry = true;
+              mat.userData.swgRack = true;
+            }
           }
         });
         return gltf.scene;
