@@ -173,7 +173,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 // `distanceWords` is the interface's own spelling of a distance, threshold and all, so the death
 // card's rows read exactly as the group roster's do.
 import { distanceWords, Hud, hudBindingsChanged, keyLabel, Roster, ROSTER_TUNE } from './ui/hud';
-import { HOVER_TUNE, specFor, vehicleOfCollider, type DriveInput } from './vehicles/vehicle';
+import { BIG_SHIP_TURN, bigShipTurnShare, HOVER_TUNE, specFor, vehicleOfCollider, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
 import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
 import { fxPassDef, isFxSettingKey, type FxPassId } from './core/fxRegistry.ts';
@@ -7361,6 +7361,20 @@ class App {
         if (!v) return 'no vehicle';
         Object.assign(v.spec, patch);
         return v.spec;
+      },
+      /**
+       * How a big hull's turn falls off with its size (BIG_SHIP_TURN in vehicles/vehicle.ts): `bigShipTurn()` reports
+       * the rule and the share it gives a 100 m, 300 m and 1,600 m hull; `bigShipTurn({ from: 40, power: 0.7, least:
+       * 0.06 })` moves it for the next hull spawned or stood (a ship already out keeps its rate; `vehicleTune({
+       * turnRate })` moves that one).
+       */
+      bigShipTurn: (patch: Partial<typeof BIG_SHIP_TURN> = {}) => {
+        for (const k of ['from', 'power', 'least'] as const) {
+          const n = patch[k];
+          if (typeof n === 'number' && Number.isFinite(n) && n >= 0) BIG_SHIP_TURN[k] = n;
+        }
+        const at = (m: number): string => `${(bigShipTurnShare(m) * 100).toFixed(0)}%`;
+        return { ...BIG_SHIP_TURN, share: { '100 m': at(100), '300 m': at(300), '1600 m': at(1600) } };
       },
       /**
        * How a machine on its springs keeps its feet, and how its speed comes down when its top speed falls

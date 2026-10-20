@@ -148,6 +148,21 @@ export function vehicleKindOf(name: string): VehicleKind | null {
   return null;
 }
 
+/**
+ * How a big hull's turn falls off with its size (ours, the owner's to judge: every hull over 18 m used to turn at one
+ * rate, a capital ship as fast as a gunboat). A hull whose larger of length and height is over `from` metres turns at
+ * `(from / size) ^ power` of a big hull's rate, never under `least` of it: a 150 m corvette about two fifths, a 1.6 km
+ * Star Destroyer the least. Read when a hull is spawned, so a change reaches the next one stood
+ * (`__debug.bigShipTurn({ ... })`).
+ */
+export const BIG_SHIP_TURN = { from: 40, power: 0.7, least: 0.06 };
+
+/** The share of a big hull's turn rate a hull of this size keeps (`BIG_SHIP_TURN`); 1 at or under `from` metres. */
+export function bigShipTurnShare(size: number, tune = BIG_SHIP_TURN): number {
+  if (!(size > tune.from)) return 1;
+  return Math.max(tune.least, (tune.from / size) ** tune.power);
+}
+
 /** Whether a flyer is a hover car (a landspeeder, a skiff) rather than an aircraft. */
 export function isHoverCar(name: string): boolean {
   return !/jetpack|gunship|airspeeder|xj6|xj_6|starfighter|air_?speeder|flying/.test(name.toLowerCase());
@@ -199,6 +214,8 @@ export function specFor(kind: VehicleKind, id: string, label: string, bounds: Ve
       // Sized by length: a fighter is nimble, a freighter ponderous. Speeds are what the ground can
       // show; space flight is for later.
       const big = length > 18;
+      // A pack's bounds may carry their corners swapped (the BOX lesson), so the size is taken as a magnitude.
+      const turnShare = big ? bigShipTurnShare(Math.max(Math.abs(length), Math.abs(height))) : 1;
       return {
         ...base,
         ship: true,
@@ -210,7 +227,7 @@ export function specFor(kind: VehicleKind, id: string, label: string, bounds: Ve
         reverseSpeed: 6,
         accel: big ? 14 : 30,
         brake: big ? 18 : 40,
-        turnRate: big ? 0.5 : 1.1,
+        turnRate: big ? 0.5 * turnShare : 1.1,
         turnAuthorityAt: 0,
         grip: 1,
         bank: big ? 0.5 : 1.0,

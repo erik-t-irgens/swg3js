@@ -187,6 +187,12 @@ interface EngineGlow {
   spots: THREE.Object3D[];
 }
 
+/**
+ * Garage hulls whose model is authored facing the other way from every other ship's, so drawn as converted they fly stern
+ * first with their engine glows at the bow (the owner saw it on the Star Destroyer): `instance` turns each half round.
+ */
+export const HULLS_FACING_BACK: ReadonlySet<string> = new Set(['star_destroyer']);
+
 export class Garage {
   readonly vehicles: VehicleDef[] = [];
   /** The game's projectiles, by index, when the ships pack carries them. */
@@ -432,7 +438,14 @@ export class Garage {
     loaded.scene.traverse((o) => {
       if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned = true;
     });
-    return { model: skinned ? cloneSkinned(loaded.scene) : loaded.scene.clone(), animations: loaded.animations };
+    const model = skinned ? cloneSkinned(loaded.scene) : loaded.scene.clone();
+    // A hull whose model faces the other way from every other ship's is turned half round here, before anything is
+    // hung on it or measured: the box, the colliders, the glows and the cockpit are all read through world matrices.
+    if (HULLS_FACING_BACK.has(def.id)) {
+      model.rotation.y += Math.PI;
+      model.updateMatrixWorld(true);
+    }
+    return { model, animations: loaded.animations };
   }
 
   /** How a ship's bolt looks, from the projectile table, or null when the pack has no table. */
