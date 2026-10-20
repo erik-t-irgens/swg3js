@@ -1,6 +1,19 @@
 import { GRAND_CANYON_LOK } from '../world/demShader.ts';
 export type TreeStyle = 'none' | 'palm' | 'pine' | 'round' | 'dead' | 'giant' | 'swamp';
 
+/**
+ * A world's own arrival (`PlanetDef.arrival`, worked out by `src/world/arrival.ts`), kept here rather than imported,
+ * since this file ships with the server and the release carries only what it names.
+ */
+export interface WorldArrival {
+  /** The place in the client's raw frame, as `/loc`, a story's `near` and a placement row write it. */
+  readonly raw: { readonly x: number; readonly z: number };
+  /** The height a body stands at there, absolute, never measured against the ground. */
+  readonly y: number;
+  /** Radians in the game's frame, a body facing `(sin, cos)`; absent, the way an arrival always faced. */
+  heading?: number;
+}
+
 /** One terrain of a planet the game split into separate zones (Kashyyyk), each its own converted pack. */
 export interface PlanetZone {
   id: string;
@@ -50,6 +63,13 @@ export interface PlanetDef {
    * but in the copy the player is in.
    */
   instances?: boolean;
+  /**
+   * Where this world brings a player in and back when nothing else says -- a travel with no place of its own, a
+   * character new to it, a death with no cloning facility near (`src/world/arrival.ts`): a raw place, an absolute
+   * height and a heading in the game's frame, turned into the game's frame by the world's own places file. Only a
+   * world with no zones; absent, the flattest dry spot near the layout centre (`World.spawnPoint`).
+   */
+  arrival?: WorldArrival;
   /** Downward acceleration in m/s². Real planets vary; SWG feel is snappier than Earth. */
   gravity: number;
   sky: { top: number; horizon: number; sunColor: number; suns: number; sunElevation: number; sunAzimuth: number };
@@ -266,6 +286,10 @@ export const PLANETS: PlanetDef[] = [
     tagline: 'Rivers of fire',
     description: 'A volcanic hell of lava rivers, black rock and mining platforms, where the Empire hides what it does not want found.',
     seed: 2005,
+    // The Mensix Mining Facility's landing deck, where the game brought visitors in: the deck's own middle (cell 0's
+    // floor, 230.06 high) with a body's standing height on it, facing the door into the landing deck room; the
+    // heading is ours and the owner's to change (`__debug.arrival({ heading })`).
+    arrival: { raw: { x: -2478.1, z: 1620.0 }, y: 230.4, heading: -0.37 },
     gravity: 22,
     sky: { top: 0x3a1f1c, horizon: 0xc2522a, sunColor: 0xffb070, suns: 1, sunElevation: 0.55, sunAzimuth: 3.6 },
     fog: { color: 0x5a2a20, density: 0.0046 },

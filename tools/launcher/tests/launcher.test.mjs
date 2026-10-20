@@ -451,6 +451,12 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   const packedPaths = new Set(packed.map((f) => f.path));
   const lost = refFiles.filter((f) => !packedPaths.has(f));
   ok(!lost.length, `the release carries the Core3 reference, all ${refFiles.length} files${lost.length ? ` (missing ${lost.join(', ')})` : ''}`);
+  // So is the reference of SOE's own people for Kashyyyk and Mustafar (tools/swg/ngeref.mjs): left out of a release,
+  // every launcher player's Kashyyyk and Mustafar stand nobody and only `spawns`' own line says why.
+  const ngeIndex = JSON.parse(readFileSync(join(root, 'tools', 'swg', 'ngeref', 'index.json'), 'utf8'));
+  const ngeFiles = ['index.json', ngeIndex.files.tables, ...Object.values(ngeIndex.files.zones)].map((f) => `tools/swg/ngeref/${f}`);
+  const ngeLost = ngeFiles.filter((f) => !packedPaths.has(f));
+  ok(ngeFiles.length >= 10 && !ngeLost.length, `the release carries the reference of SOE's own people for Kashyyyk and Mustafar, all ${ngeFiles.length} files${ngeLost.length ? ` (missing ${ngeLost.join(', ')})` : ''}`);
   // SOE's final names list is what every player's converter mounts SOE's final client by (tools/swg/finalnames.mjs);
   // left out of a release, a launcher player's conversion is the publish 54 world with nothing to say why.
   ok(packedPaths.has('tools/swg/manifests/final-names.json'), "the release carries SOE's final names list (tools/swg/manifests/final-names.json)");
@@ -673,8 +679,9 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   ok(FULL_CONVERSION_BYTES >= 17 * 1024 ** 3, 'and the figure is above what a full conversion really comes to');
 }
 
-// The owner's local NGE overlay (`spawns --nge`, tools/swg/ngepack.mjs) is his install's alone: nothing a launcher
-// runs ever names it, so a launcher player converts and plays exactly what every other player does.
+// A live copy of SOE's server data (`spawns --nge=<folder>`, tools/swg/ngepack.mjs) is the owner's alone: nothing a
+// launcher runs ever names one, so a launcher player converts from the reference every converter carries, exactly
+// what every other player does.
 {
   for (const f of ['tools/swg/convertPlan.mjs', 'tools/swg/convertDrive.mjs', 'tools/launcher/main.mjs', 'tools/launcher/plan.mjs']) {
     const text = readFileSync(join(root, ...f.split('/')), 'utf8');

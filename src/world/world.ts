@@ -566,8 +566,8 @@ export class World {
   refuseMobiles: (() => string | null) | null = null;
   /**
    * Set by the game: whether a server others share holds the world this arrival is for, answered once the
-   * line can say (`serverHoldsFor` in `ngeOverlay.ts`). The owner's local overlay asks it behind the loading
-   * screen and is left out where a server holds the world, unless he says otherwise. None, and nobody does.
+   * line can say (`serverHoldsFor` in `ngeOverlay.ts`). The NGE overlay asks it behind the loading screen only
+   * while it is set to stand where no server holds the world (`alone`, a comparison). None, and nobody does.
    */
   serverHoldsWorld: (() => Promise<boolean>) | null = null;
   /**
@@ -578,8 +578,8 @@ export class World {
   worldStatesReady: (() => Promise<void>) | null = null;
   /**
    * Set by the game: where this world brings the player in and back, in the world's frame (the arrival, a
-   * teleport's spot, and so where a death comes round on a world with no cloning facility). The owner's local
-   * overlay keeps its people and herds who pick a fight on sight that far off it (`NGE_OVERLAY_TUNE.arrivalClear`).
+   * teleport's spot, and so where a death comes round on a world with no cloning facility). The NGE overlay keeps
+   * its people and herds who pick a fight on sight that far off it (`NGE_OVERLAY_TUNE.arrivalClear`).
    * None, and nothing is kept off.
    */
   arrivalPoint: (() => { readonly x: number; readonly z: number } | null) | null = null;
@@ -1756,7 +1756,7 @@ export class World {
     // world as it was.
     await Promise.race([conversationPack.pending, new Promise<void>((r) => setTimeout(r, 4000))]);
     if (token !== this.loadToken) return null;
-    // The owner's local overlay's people last of all (`standingList` in `ngeOverlay.ts`), so every row before them
+    // The NGE overlay's people last of all (`standingList` in `ngeOverlay.ts`), so every row before them
     // keeps its place in the list, and so its `stood:` name, in every browser; stood behind this same loading
     // screen with the rest.
     const people = wildLife.peopleRows() as StandingRow[];
@@ -7014,7 +7014,7 @@ export class World {
         // The outdoor walk grid, once this world has one: a site laid on a cliff or in a lake is moved
         // to open ground, or not stood.
         walkable: (x, z) => (outdoorNav.ready ? outdoorNav.walkable(x, z) : null),
-        // Where the player comes in and back, which the owner's local overlay's herds that pick a fight keep clear of.
+        // Where the player comes in and back, which the NGE overlay's herds that pick a fight keep clear of.
         arrival: () => this.arrivalPoint?.() ?? null,
         nest: {
           scene: this.scene,
@@ -7182,7 +7182,7 @@ export class World {
         keeps: (m) => this.followers.holds(m),
         // A world of copies stands nobody but in the copy the player is in.
         scope: (x, y, z) => this.inCopy(x, y, z),
-        // Where the player comes in and back, which the owner's local overlay's people who pick a fight keep clear of.
+        // Where the player comes in and back, which the NGE overlay's people who pick a fight keep clear of.
         arrival: () => this.arrivalPoint?.() ?? null,
         // One of them the story killed for this character is never stood here again.
         gone: (key) => this.peopleGone?.(key) ?? false,

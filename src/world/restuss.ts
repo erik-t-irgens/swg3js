@@ -91,7 +91,7 @@ export interface PersonLike {
 
 /**
  * Whether a standing row is skipped when the world's people are stood: one tagged with a state the world does not
- * stand in, and in the ruins every row of Core3's own (no herald, nobody of ours, nothing of the local overlay)
+ * stand in, and in the ruins every row of Core3's own (no herald, nobody of ours, nothing of the NGE overlay)
  * inside the circle. Never taken off its list: only skipped.
  */
 export function personDormant(r: PersonLike, stands: (tag?: string | null) => boolean, ruins: RuinsCircle | null): boolean {

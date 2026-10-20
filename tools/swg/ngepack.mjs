@@ -1,15 +1,17 @@
 // The NGE overlay's rules: what SOE's own placements for Kashyyyk and Mustafar come to in a pack the game
-// already reads, on the owner's own install only.
+// already reads, for every player.
 //
-// **What this is and what it is not.** The owner keeps a local copy of SOE's server data (his decision of
-// 2026-10-02: "Read a local copy of the NGE data at conversion time, into assets-private only"). `spawns
-// --nge=<folder>` reads it (`nge.mjs`, the reader) and this file turns what it read into the very shapes
-// the Core3 half writes: a `WildPack` per zone and a `WildManifest` for the fleet, under `<out>/nge/`, every
-// name the overlay writes prefixed `nge:` so nothing it holds can ever be read as one of Core3's, and every
-// row marked `src: 'nge'`. Nothing of the copy is committed, shipped or quoted: this file names the copy's
-// table paths, its column and objvar names, and the few generic spawner scripts and templates a row's kind is
-// told by (`kindOf`) -- format knowledge, as `core3.mjs` names Core3's fields -- and nothing else of it: no row,
-// no creature, no place, no count. The node test runs it on a miniature tree of TEST names written at run time.
+// **What this is and what it is not.** Core3 places nobody on those worlds; SOE's own server data does. By the
+// owner's decision of 2026-10-19 the rows of it every client needs (which creature stands where, how many, over
+// which areas, in which rooms) are committed as `tools/swg/ngeref/` (`ngeref.mjs` writes and reads it) and every
+// `spawns` reads them by default, so every player who converts gets the same people; `--nge=<folder>` reads the
+// owner's live copy instead (`nge.mjs`, the reader), and `--nge=none` leaves them out. Either way this file turns
+// what was read into the very shapes the Core3 half writes: a `WildPack` per zone and a `WildManifest` for the
+// fleet, under `<out>/nge/`, every name the overlay writes prefixed `nge:` so nothing it holds can ever be read as
+// one of Core3's, and every row marked `src: 'nge'`. No model, texture, sound, string, script or quest of the
+// game's is read or written: this file names the copy's table paths, its column and objvar names, and the few
+// generic spawner scripts and templates a row's kind is told by (`kindOf`), which is format knowledge, as
+// `core3.mjs` names Core3's fields. The node test runs it on a miniature tree of TEST names written at run time.
 //
 // **What the server did, and what is ours.** A placed spawner picked a row of its type table, drew a point in
 // its disc of `fltRadius`, stood the creature with the spawner's default behaviour (0 wander, 1 stand guard, 2
@@ -33,8 +35,12 @@ import { cellIndexByName, copiesIn } from './instances.mjs';
 import { gameOf, packRow, roomsOf, SPAWNS_FORMAT } from './spawnpack.mjs';
 import { flattenWithWorldTransforms } from './ws.mjs';
 
-/** The overlay's own shape: bumped when a row, the manifest or the index changes meaning; `status` asks again below it. */
-export const NGE_FORMAT = 1;
+/**
+ * The overlay's own shape: bumped when a row, the manifest or the index changes meaning; `status` asks again below
+ * it. 2: a row of a table that writes no objid is named by a hash of what it says rather than by the text itself
+ * (`rowIds`), so its key moved, and the index says whether it came from the reference or a copy.
+ */
+export const NGE_FORMAT = 2;
 
 /** Every name the overlay writes begins with this, so a merge can never overwrite or be read as one of Core3's. */
 export const NGE_PREFIX = 'nge:';
@@ -101,16 +107,19 @@ export function ngeKey(zone, area, copy, id, i) {
  * no `objid` column at all and every row of theirs reads nought there; keyed by that nought, every spawner of
  * such an area shared one set of keys and so drew the same creature at the same offset from its own middle, the
  * same respawn and the same heading. A row named by what it says keeps its name when the table's rows are put
- * in another order, as the crews' rows do.
+ * in another order, as the crews' rows do. What it says is kept as sixteen hex of its hash, never as the text,
+ * which carries the row's scripts and would otherwise be written into the reference beside the converter; a row
+ * the reference hands over already carries its name (`id`), worked out here when the reference was written.
  */
 export function rowIds(table) {
   const twins = new Map();
   return table.map((r) => {
+    if (r.id !== undefined) return String(r.id);
     if (Number(r.objid) > 0) return String(r.objid);
     const said = String(r.said ?? '');
     const twin = twins.get(said) ?? 0;
     twins.set(said, twin + 1);
-    return `said:${said}#${twin}`;
+    return `said:${createHash('sha1').update(said).digest('hex').slice(0, 16)}#${twin}`;
   });
 }
 
@@ -607,8 +616,9 @@ export function zoneOverlay(input) {
     const z0 = Number(a.z1) || 0;
     // Each row's own name in its table, whether the table writes an objid or not (`rowIds`).
     const ids = rowIds(table);
-    // The rows of this copy, carried into the snapshot's frame (the corner added to a top-level object).
-    const rows = table.map((r, i) => ({ ...r, id: ids[i], area: a.area, copy, inCell: (Number(r.container) || 0) !== 0 || (Number(r.cell_index) || 0) !== 0, x: x0 + (Number(r.px) || 0), y: Number(r.py) || 0, z: z0 + (Number(r.pz) || 0), q: [Number(r.qw), Number(r.qx), Number(r.qy), Number(r.qz)], kind: kindOf(r.server_template_crc, r.scripts, r.objvars) }));
+    // The rows of this copy, carried into the snapshot's frame (the corner added to a top-level object). A row the
+    // reference hands over says its kind already (`ngeref.mjs`), since its scripts are not kept.
+    const rows = table.map((r, i) => ({ ...r, id: ids[i], area: a.area, copy, inCell: (Number(r.container) || 0) !== 0 || (Number(r.cell_index) || 0) !== 0, x: x0 + (Number(r.px) || 0), y: Number(r.py) || 0, z: z0 + (Number(r.pz) || 0), q: [Number(r.qw), Number(r.qx), Number(r.qy), Number(r.qz)], kind: r.kind ?? kindOf(r.server_template_crc, r.scripts, r.objvars) }));
     const points = new Map();
     for (const r of rows) {
       if (r.kind !== 'waypoint' || r.inCell) continue;
@@ -709,16 +719,18 @@ export function zoneOverlay(input) {
   const regions = input.regions?.length ? regionAreas(input.regions, input.lists ?? new Map(), input.lairOf ?? (() => null), (n) => joined.has(`${NGE_PREFIX}${n}`)) : { areas: [], noSpawn: [], groups: {}, lairs: {}, dropped: 0, other: 0, lairsLost: 0 };
   const poolsOut = {};
   for (const row of statics) for (const [pool] of row.draw ?? []) if (!poolsOut[pool] && pools.has(pool)) poolsOut[pool] = pools.get(pool);
-  const frame = { objects: objectFrame(objects, input.layout?.objects), ground: heightCheck(written, groundAt ?? (() => Number.NaN)) };
+  // The placed objects' check is the one the reference recorded when it was written, where the rows came from it
+  // (`frameObjects`): it keeps the measurement and not the thousands of objects it was made over.
+  const frame = { objects: input.frameObjects ?? objectFrame(objects, input.layout?.objects), ground: heightCheck(written, groundAt ?? (() => Number.NaN)) };
   return { statics, areas: regions.areas, noSpawn: regions.noSpawn, groups: regions.groups, lairs: regions.lairs, pools: poolsOut, counts: { ...counts, rows: statics.length, areas: regions.areas.length, noSpawn: regions.noSpawn.length, dropped: regions.dropped, lairsLost: regions.lairsLost, copies: [...copies.values()].reduce((s, n) => s + n, 0) }, gated, unresolved: [...unresolved].sort(), frame };
 }
 
-/** The pack one zone's overlay is written as: a `WildPack` at the spawns format, every row the overlay's. */
-export function zonePack(zone, z) {
+/** The pack one zone's overlay is written as: a `WildPack` at the spawns format, every row the overlay's. `local` says it came from a live copy rather than the reference. */
+export function zonePack(zone, z, local = false) {
   return {
     format: SPAWNS_FORMAT,
     planet: zone,
-    local: true,
+    local,
     source: { statics: 'nge', areas: 'nge', creaturePlaces: 'invented', scatter: 'drawn' },
     frameCheck: z.frame,
     counts: z.counts,
@@ -778,14 +790,16 @@ export function crewsOf(rows) {
 }
 
 /**
- * The whole overlay, from a reader over the copy (`makeNgeReader`) and what the converted packs hold: the index,
- * the fleet's manifest and a pack per zone. `zones` are the zones whose packs are converted; `packOf(zone)`
- * their `{ layout, manifest, stamp }`; `groundOf(zone)` the pack's own ground; `snapOf(zone)` an empty snapshot
- * with the zone's buildouts merged (null without the archives, and then no crew stands); `clientAreas(zone)` the
- * client's own area rows (null without the archives, and then the copy's shared table's, which agree);
- * `catalogue` the mobiles catalogue.
+ * The whole overlay, from a reader (`makeNgeReader` over a live copy, or `ngeRefReader` over the reference beside
+ * the converter, which answers every question alike) and what the converted packs hold: the index, the fleet's
+ * manifest and a pack per zone. `zones` are the zones whose packs are converted; `packOf(zone)` their `{ layout,
+ * manifest, stamp }`; `groundOf(zone)` the pack's own ground; `snapOf(zone)` an empty snapshot with the zone's
+ * buildouts merged (null without the archives, and then no crew stands); `clientAreas(zone)` the client's own
+ * area rows (null without the archives, and then the copy's shared table's, which agree); `catalogue` the mobiles
+ * catalogue.
  */
 export function buildNgeOverlay({ reader, zones, packOf, groundOf, snapOf, clientAreas, catalogue, converted }) {
+  const local = reader.roots.kind !== 'reference';
   const creatures = reader.creatures();
   const isCreature = (n) => creatures.has(String(n ?? '').trim());
   const byTemplate = new Map();
@@ -829,12 +843,13 @@ export function buildNgeOverlay({ reader, zones, packOf, groundOf, snapOf, clien
       manifest: pack.manifest,
       joined,
       groundAt: groundOf?.(zone) ?? (() => Number.NaN),
+      frameObjects: reader.frameOf?.(zone) ?? null,
     });
     for (const u of z.unresolved) unresolved.add(u);
     for (const [k, n] of Object.entries(z.gated)) gated[k] = (gated[k] ?? 0) + n;
     Object.assign(groups, z.groups);
     Object.assign(lairs, z.lairs);
-    packs[zone] = zonePack(zone, z);
+    packs[zone] = zonePack(zone, z, local);
     zoneIndex[zone] = { ...z.counts, crews: crews.map((c) => c.table), layout: pack.stamp ?? null, frame: z.frame };
   }
   // The creatures the rows, the pools and the lairs stand, each with its own numbers out of SOE's tables.
@@ -861,13 +876,15 @@ export function buildNgeOverlay({ reader, zones, packOf, groundOf, snapOf, clien
   const bodiless = joined.bodiless();
   const sum = (k) => Object.values(zoneIndex).reduce((s, z) => s + (z[k] ?? 0), 0);
   const counts = { rows: sum('rows'), statics: sum('statics'), corpses: sum('corpses'), crew: sum('crew'), spawners: sum('spawners'), patrols: sum('patrols'), sites: sum('sites'), areas: sum('areas'), creatures: Object.keys(creaturesOut).length, withGame, lairs: Object.keys(lairs).length, groups: Object.keys(groups).length, unresolved: unresolved.size + bodiless.length, gated: sum('gated'), dropped: sum('dropped'), routeLost: sum('routeLost'), crewLost: sum('crewLost'), noBody: sum('noBody'), noRoom: sum('noRoom'), inCell: sum('inCell'), crewTablesLeft: crewLeft };
-  const manifest = { format: SPAWNS_FORMAT, local: true, source: 'nge', converted, counts, creatures: creaturesOut, lairs, groups, nests: {}, camps: {}, campModels: {}, dressGroups: {}, weaponGroups };
+  const manifest = { format: SPAWNS_FORMAT, local, source: 'nge', converted, counts, creatures: creaturesOut, lairs, groups, nests: {}, camps: {}, campModels: {}, dressGroups: {}, weaponGroups };
   const id = reader.identity();
   const index = {
     format: NGE_FORMAT,
-    local: true,
+    local,
     source: 'nge',
-    note: "SOE's own placements for Kashyyyk and Mustafar, read from the owner's local NGE copy at conversion time (spawns --nge). Local only: never committed, never shipped.",
+    note: local
+      ? "SOE's own placements for Kashyyyk and Mustafar, read from a live copy of SOE's server data at conversion time (spawns --nge=<folder>)."
+      : "SOE's own placements for Kashyyyk and Mustafar, read from the reference beside the converter (tools/swg/ngeref), which every converter reads by default.",
     converted,
     copy: { root: reader.roots.root, kind: reader.roots.kind, files: id.files, sha1: id.sha1 },
     catalogue: { converted: catalogue?.converted ?? null, entries: catalogue?.entries?.length ?? 0 },
@@ -889,7 +906,7 @@ export function buildNgeOverlay({ reader, zones, packOf, groundOf, snapOf, clien
  */
 export function ngeArg(argv) {
   for (const w of argv ?? []) {
-    if (w === '--nge') return { refuse: 'name the folder: --nge=<the NGE copy> (or --nge=none to take the overlay away)' };
+    if (w === '--nge') return { refuse: 'name the folder: --nge=<the NGE copy> (or --nge=none to leave SOE\'s people for Kashyyyk and Mustafar out; with no --nge the reference beside the converter is read)' };
     if (!String(w).startsWith('--nge=')) continue;
     const value = String(w).slice('--nge='.length);
     if (!value) return { refuse: 'name the folder: --nge=<the NGE copy>' };
@@ -900,43 +917,80 @@ export function ngeArg(argv) {
 }
 
 /**
- * Where the overlay is written: `<out>/nge`, and only where git ignores it (`ignored`) or it is outside the
- * repository altogether (`outside`); a folder git would take (`tracked`) is refused, since nothing of the copy
- * may ever be committed. `ignoredOf(path)` is the cli's `git check-ignore`, handed in.
+ * Where an overlay read from a live copy is written: `<out>/nge`, and only where git ignores it (`ignored`) or it
+ * is outside the repository altogether (`outside`); a folder git would take (`tracked`) is refused, since a
+ * converted pack is never committed. `ignoredOf(path)` is the cli's `git check-ignore`, handed in.
  */
 export function overlayTarget(out, ignoredOf) {
   const dir = `${String(out).replace(/[\\/]+$/, '')}/nge`;
   const says = ignoredOf(dir);
   if (says === 'ignored' || says === 'outside') return { dir };
-  return { refuse: `${dir} is not ignored by git, and nothing of the NGE copy may ever be committed: write the overlay into the git-ignored assets-private` };
+  return { refuse: `${dir} is not ignored by git, and a converted pack is never committed: write the overlay into the git-ignored assets-private` };
 }
 
-/** Whether the NGE copy named is inside this repository, which is refused: the copy is never brought into it. */
+/** Whether the NGE copy named is inside this repository, which is refused: the copy is read where it stands and never brought into it. */
 export function sourceInside(src, repo) {
   const rel = relative(repo, src);
   return !rel || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 /**
- * What `status` says of the overlay, from its index and what stands now (`now`: the catalogue's `converted` and
- * each zone's layout stamp, `null` for a zone whose pack is gone). Null with no index: a player without the
- * overlay is never told of it. `ask` is the command to run again with the folder the index recorded, and why;
- * it is said in the report and never put in the to-do list, so no launcher ever runs `--nge`.
+ * The index `spawns --nge=none` leaves in place of an overlay: SOE's people for Kashyyyk and Mustafar left out by
+ * choice, which the game reads as no world listed and `status` as a choice not to ask about again.
+ */
+export function noneIndex(converted) {
+  return { format: NGE_FORMAT, source: 'nge', none: true, note: "SOE's own people for Kashyyyk and Mustafar left out by choice (spawns --nge=none); spawns without it stands them.", converted, zones: {} };
+}
+
+/** The command that stands SOE's people again from the reference: the one a launcher runs. */
+const REF_COMMAND = 'spawns <out-dir> --swg=<swg-dir> --retail-only';
+
+/**
+ * What `status` says of SOE's own people for Kashyyyk and Mustafar, from the index the last `spawns` wrote and what
+ * stands now (`now`: the catalogue's `converted`; `layouts`, each zone's layout stamp where its pack is converted
+ * and null where it is not; and `reference`, the reference beside the converter, `{ sha1 }`, or null where this
+ * checkout or release lost it). Null where there is nothing to say: no index and no zone converted.
+ *
+ * `ask` is the run to make again and why. Where the people came from the reference -- or are not there at all --
+ * it is `need`, a step on the to-do list a launcher runs, since every converter reads the reference by default:
+ * asked while no index lists them, while the index is older, was made from another reference, joined another
+ * catalogue or other layouts, or misses a zone converted since; never on a file's being there alone. An overlay
+ * the owner read from a live copy (`--nge=<folder>`) is asked again by hand only, with that folder, since no
+ * launcher ever names one; and one left out by choice (`--nge=none`) is not asked about at all.
  */
 export function ngeStatus(index, now) {
-  if (!index) return null;
+  const layouts = now?.layouts ?? {};
+  const converted = Object.keys(layouts).filter((z) => layouts[z] !== null && layouts[z] !== undefined);
+  const ref = now?.reference ?? null;
+  if (!index) {
+    if (!converted.length) return null;
+    if (!ref) return { line: `  nge: ${converted.join(', ')} converted, and the reference of SOE's own people (tools/swg/ngeref) is missing: they stand nobody`, ask: null };
+    return { line: `  nge: SOE's own people for ${converted.join(', ')} are not in the packs (the reference beside the converter is ${ref.sha1})`, ask: { need: true, command: REF_COMMAND, why: `SOE's own people for Kashyyyk and Mustafar (${converted.join(', ')}) are not in the packs (nge/index.json); the reference beside the converter is ${ref.sha1}` } };
+  }
+  if (index.none) return { line: "  nge: SOE's own people for Kashyyyk and Mustafar left out by choice (spawns --nge=none); spawns without it stands them", ask: null };
   const zones = Object.keys(index.zones ?? {});
   const people = zones.reduce((s, z) => s + (index.zones[z].rows ?? 0), 0);
   const areas = zones.reduce((s, z) => s + (index.zones[z].areas ?? 0), 0);
-  const line = `  nge overlay (local, never shipped): ${zones.join(', ') || 'no zone'}: ${people} people, ${areas} wild areas, from ${index.copy?.root ?? '?'}, ${String(index.converted ?? '').slice(0, 10) || '?'}`;
+  const when = String(index.converted ?? '').slice(0, 10) || '?';
+  const fromRef = index.copy?.kind === 'reference';
+  const line = fromRef
+    ? `  nge: SOE's own people for ${zones.join(', ') || 'no zone'}: ${people} people, ${areas} wild areas, from the reference ${index.copy?.sha1 ?? '?'}${ref && ref.sha1 !== index.copy?.sha1 ? ` (the reference beside the converter is ${ref.sha1})` : ''}, ${when}`
+    : `  nge: SOE's own people for ${zones.join(', ') || 'no zone'}: ${people} people, ${areas} wild areas, read from a live copy at ${index.copy?.root ?? '?'} (--nge), ${when}`;
   let why = null;
-  if (!(index.format >= NGE_FORMAT)) why = 'it is from an older converter';
+  if (!(index.format >= NGE_FORMAT)) why = 'they are from an older converter';
+  else if (fromRef && ref && ref.sha1 !== index.copy?.sha1) why = 'the reference beside the converter changed since';
   else if ((now?.catalogue ?? null) !== (index.catalogue?.converted ?? null)) why = 'the mobiles catalogue was converted again since, and the bodies may join differently';
   else {
-    const moved = zones.filter((z) => (now?.layouts?.[z] ?? null) !== (index.zones[z].layout ?? null));
+    const moved = zones.filter((z) => (layouts[z] ?? null) !== (index.zones[z].layout ?? null));
+    const added = converted.filter((z) => !zones.includes(z));
     if (moved.length) why = `the layout of ${moved.join(', ')} moved since`;
+    else if (fromRef && added.length) why = `${added.join(', ')} was converted since and has none`;
   }
-  return { line, ask: why ? { command: `spawns <out-dir> --swg=<swg-dir> --nge=${index.copy?.root ?? '<the NGE copy>'} --retail-only`, why } : null };
+  if (!why) return { line, ask: null };
+  // An overlay from before the reference (W3's, a copy's) is stood again from the reference by default too: a
+  // copy's root is named only for an index that says it came from one.
+  if (fromRef || !index.copy?.root || !(index.format >= NGE_FORMAT)) return { line, ask: { need: !!ref, command: REF_COMMAND, why } };
+  return { line, ask: { need: false, command: `spawns <out-dir> --swg=<swg-dir> --nge=${index.copy.root} --retail-only`, why } };
 }
 
 /** A file's stamp, as the index records each zone's layout: the first twelve hex of its bytes' SHA-1. */

@@ -196,6 +196,7 @@ import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { destinationFor, loadGalaxyFile, planetOfRouteId, routeFactsOf, systemOf, systemOfPack, systemsOfWorlds } from './data/galaxy';
 import { HOMES_MOVE_VERSION, homeKey, homes, routeHomeWord } from './net/homes.ts';
 import { NGE_OVERLAY_TUNE, ngeOverlay, serverHoldsFor, whereOf } from './world/ngeOverlay.ts';
+import { arrivalInGame, hasOwnArrival, type ArrivalPlace } from './world/arrival.ts';
 // A world's states (Restuss as the living launch city or its ruins), and Restuss's own rules and dials.
 import { WORLD_STATES, WORLD_STATE_TUNE, WORLD_STATE_WORDS, arrivalWait, cleanStates, fileInState, inState, localWorldState, serverWorldStates, setLocalWorldState, setServerStates, stateNews, standsIn, statesInForce, tuneWorldStateWait, waitForHail, worldStateOf, worldStateSource, worldStateStamp } from './world/worldState.ts';
 import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, fittingDormant, tuneRestuss, tuneRestussRoster } from './world/restuss.ts';
@@ -2892,7 +2893,7 @@ class App {
        * not in that figure: asked of every site at once it would generate the whole world's ground.
        *
        * `sources` counts the sites laid and the areas they were laid over by where the area came from, Core3's or
-       * the owner's local overlay's (`nge`: Mustafar's spawn regions, `ngeOverlay.ts`), with the overlay's people.
+       * the overlay of SOE's own (`nge`: Mustafar's spawn regions, `ngeOverlay.ts`), with the overlay's people.
        */
       wild: (opts?: { go?: boolean; restand?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean; coverage?: boolean }) => {
         const moved = opts?.tune ? wildLife.retune(opts.tune) : [];
@@ -2917,7 +2918,7 @@ class App {
         return {
           ready: wildLife.ready,
           ...wildLife.last,
-          // The sites and the areas by where they came from: Core3's own, or the owner's local overlay's (`nge`).
+          // The sites and the areas by where they came from: Core3's own, or the overlay of SOE's own (`nge`).
           sources: wildLife.bySource(),
           nge: ngeOverlay.report(),
           // The no-spawn circles of ours over what SOE's last publishes added to this world, and the sites they kept off.
@@ -2964,10 +2965,10 @@ class App {
        * `__debug.mobileTune({ perch })`.
        *
        * `sources` counts the rows, and the bodies standing, by where each came from: Core3's, the heralds', the
-       * people of ours, and the owner's local overlay of SOE's own (`nge`, Kashyyyk and Mustafar, `ngeOverlay.ts`),
-       * whose state is `nge`. `{ nge: 'alone' | 'always' | 'never' }` says where that overlay stands from the next
-       * arrival: where no server holds the world, on a server as well, or nowhere (in memory;
-       * `localStorage['swg.nge'] = '0'` or `'always'` keeps it in this browser). `{ roamEvery: [8, 20] }` is how often,
+       * people of ours, and the overlay of SOE's own (`nge`, Kashyyyk and Mustafar, `ngeOverlay.ts`, which every
+       * converter writes from the reference beside it), whose state is `nge`. `{ nge: 'always' | 'alone' | 'never' }`
+       * says where that overlay stands from the next arrival, to compare: everywhere (the default), only where no
+       * server holds the world, or nowhere (in memory only). `{ roamEvery: [8, 20] }` is how often,
        * in seconds, one of its people whose spawner let it loiter steps about, live; null takes `postEvery`'s.
        * `{ arrivalClear: 64 }` is how many metres its people and herds who pick a fight on sight are kept from where
        * the player comes in and back (the arrival, a teleport's spot, where a death comes round), live; nought stands
@@ -2975,13 +2976,13 @@ class App {
        */
       people: (opts?: { go?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean; where?: string; mood?: boolean; gcw?: GcwSide; restand?: boolean; story?: boolean; perch?: boolean; nge?: string; roamEvery?: [number, number] | null; arrivalClear?: number }) => {
         if (opts?.perch) return this.world.mobiles ? this.world.mobiles.perchReport(this.player.worldPos) : 'no world loaded';
-        // How far the local overlay's people and herds who pick a fight keep from where the player comes in and back, live.
+        // How far the overlay's people and herds who pick a fight keep from where the player comes in and back, live.
         if (opts?.arrivalClear !== undefined) {
           const c = opts.arrivalClear;
           if (typeof c !== 'number' || !Number.isFinite(c) || c < 0) return { refused: 'arrivalClear: metres, nought or more' };
           NGE_OVERLAY_TUNE.arrivalClear = c;
         }
-        // How often a person of the local overlay whose spawner let it loiter or wander takes a step, live (a post
+        // How often a person of the overlay whose spawner let it loiter or wander takes a step, live (a post
         // reads it at each step): a pair of seconds, or null for the standing people's own `postEvery`.
         if (opts?.roamEvery !== undefined) {
           const r = opts.roamEvery;
@@ -2989,13 +2990,12 @@ class App {
           else if (Array.isArray(r) && r.length === 2 && r.every((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0)) NGE_OVERLAY_TUNE.roamEvery = [Math.min(r[0], r[1]), Math.max(r[0], r[1])];
           else return { refused: 'roamEvery: a pair of seconds, least and most, or null' };
         }
-        // Where the owner's local overlay stands (`ngeOverlay.ts`): in memory, read at the next arrival; the stored
-        // switch is his to keep (`localStorage['swg.nge']`).
+        // Where the overlay of SOE's own people stands (`ngeOverlay.ts`), to compare: in memory, read at the next arrival.
         if (opts?.nge !== undefined) {
           const where = whereOf(opts.nge);
-          if (!where) return { refused: `nge: 'alone', 'always' or 'never' (it was ${JSON.stringify(opts.nge)})` };
+          if (!where) return { refused: `nge: 'always', 'alone' or 'never' (it was ${JSON.stringify(opts.nge)})` };
           NGE_OVERLAY_TUNE.where = where;
-          return { nge: ngeOverlay.report(), note: `from the next arrival (a travel, or the select screen and back): ${where === 'alone' ? 'stood where no server holds the world' : where === 'always' ? 'stood on a server too, where only this browser holds and sees them' : 'left out everywhere'}; localStorage['swg.nge'] = '0' or 'always' keeps it in this browser` };
+          return { nge: ngeOverlay.report(), note: `from the next arrival (a travel, or the select screen and back): ${where === 'alone' ? 'stood only where no server holds the world' : where === 'always' ? 'stood everywhere, on a server as the world\'s own seeded bodies (the default)' : 'left out everywhere'}; in memory only` };
         }
         if (opts?.story) {
           const book = this.story.book;
@@ -6792,6 +6792,65 @@ class App {
       travel: (id: string) => {
         void this.travel(planetById(id));
         return `travelling to ${id}`;
+      },
+      /**
+       * A world's own arrival (`PlanetDef.arrival`, `src/world/arrival.ts`; Mustafar's landing deck is the one there
+       * is): `await arrival()` says this world's in the raw frame and the game's, the spawn a death comes round at,
+       * where the player stands and how far over the terrain, and what stands under their feet (the floor the
+       * physics finds straight down, which on the deck is the building's own collider and not the ground 125 m below).
+       * `{ heading }` turns the way a body faces there, in radians in the game's frame, from the next arrival (in
+       * memory); `{ go: true }` stands the player there now, facing it, as an arrival would: at once where its floor is
+       * built here, else under a loading screen with the world moved there first, as a death far from it comes round.
+       */
+      arrival: async (opts?: { heading?: number; go?: boolean; planet?: string }) => {
+        const planet = opts?.planet ? planetById(opts.planet) : this.world.planet;
+        if (!planet?.arrival) return { planet: planet?.id ?? null, arrival: null, note: 'this world names no arrival of its own: it arrives at the flattest dry spot near its layout centre' };
+        if (opts?.heading !== undefined) {
+          if (typeof opts.heading !== 'number' || !Number.isFinite(opts.heading)) return { refused: 'heading: radians in the game\'s frame' };
+          planet.arrival.heading = opts.heading;
+        }
+        const home = await this.homeOf(planet, planet === this.world.planet ? this.zone : undefined);
+        const here = planet === this.world.planet;
+        let note = '';
+        if (opts?.go && here && home) {
+          const at = new THREE.Vector3(home.x, home.y, home.z);
+          this.spawn.copy(at);
+          if (this.traveling) note = 'a crossing is under way: go stands you there once it is over';
+          else if (this.floorUnder(at)) {
+            // Its floor is built here: stood on it at once.
+            this.player.reset(at);
+            if (home.heading !== null) {
+              this.player.heading = home.heading;
+              this.cam.yaw = home.heading + Math.PI;
+            }
+            this.world.jumpTo(at);
+            this.physics.stepOnce();
+          } else if (!(await this.standAtHome(at, home, 'arriving', 'so you stand on the ground under it'))) {
+            // From far off the facility's collision is not here: moved there under a loading screen first, as a death is.
+            note = 'its floor did not come in, so you stand on the ground under it';
+          }
+        }
+        const p = this.player.pos;
+        // Straight down from half a metre over the feet, the player's own body stepped over.
+        const hit = here ? this.physics.groundDistance(p.x, p.y + 0.5, p.z, 400, this.player.body) : null;
+        const floor = hit === null ? null : hit - 0.5;
+        return {
+          planet: planet.id,
+          raw: { ...planet.arrival.raw },
+          y: planet.arrival.y,
+          heading: planet.arrival.heading ?? null,
+          game: home,
+          ...(here
+            ? {
+                spawn: this.spawn.toArray().map((n) => Number(n.toFixed(2))),
+                atHome: !!home && Math.hypot(p.x - home.x, p.z - home.z) < 1,
+                player: p.toArray().map((n) => Number(n.toFixed(2))),
+                overTerrain: Number((p.y - this.world.terrain.heightAt(p.x, p.z)).toFixed(2)),
+                floorBelow: floor === null || !Number.isFinite(floor) ? null : Number(floor.toFixed(2)),
+              }
+            : {}),
+          ...(opts?.go && !here ? { note: 'go stands you there on its own world only: travel there first' } : note ? { note } : {}),
+        };
       },
       /**
        * The System Map's lists (`await jumps()` for the zone flown in, `jumps('space_light1')` for another): every system's title,
@@ -11365,15 +11424,9 @@ class App {
     });
     // Aboard a ship's rooms nothing is stood, whoever asks (the console, the spawner, the wildlife).
     this.world.refuseMobiles = () => (this.player?.aboard ? 'nothing can be stood aboard a ship’s rooms' : null);
-    // The owner's local overlay of SOE's own people for Kashyyyk and Mustafar (`ngeOverlay.ts`): its index asked for
-    // once a session (one miss for anybody without it), where it stands the owner's to keep in this browser
-    // (`localStorage['swg.nge']`, '0' or 'always'), and whether a server holds the world answered for each arrival.
-    try {
-      const kept = whereOf(localStorage.getItem('swg.nge'));
-      if (kept) NGE_OVERLAY_TUNE.where = kept;
-    } catch {
-      /* a page that refuses storage keeps the default */
-    }
+    // The overlay of SOE's own people for Kashyyyk and Mustafar (`ngeOverlay.ts`), which every converter writes from
+    // the reference beside it: its index asked for once a session (one miss for packs converted before it), and
+    // whether a server holds the world answered for an arrival only while it is set to stand where none does.
     void ngeOverlay.fetchIndex(import.meta.env.BASE_URL);
     this.world.serverHoldsWorld = () => this.serverHoldsHere();
     // An arrival on a world with states (Restuss) waits a moment for a saved server's hail first (`worldStatesHere`).
@@ -15768,7 +15821,10 @@ class App {
     this.loadingScreen.setProgress(0.04);
     // A character kept in a dungeon copy is in a room, which can lie below the ground: not lifted onto it.
     this.arriveIndoors = !!planet.instances;
-    this.arrive(planet, c.zone, c.pos ? new THREE.Vector3(c.pos[0], c.pos[1], c.pos[2]) : undefined);
+    // The world's own arrival (Mustafar's landing deck), worked out from its places file before the world is in: where
+    // a character new to it stands, and where a death on it comes round.
+    const home = await this.homeOf(planet, c.zone);
+    this.arrive(planet, c.zone, c.pos ? new THREE.Vector3(c.pos[0], c.pos[1], c.pos[2]) : undefined, home);
     if (c.heading !== undefined) {
       this.player.heading = c.heading;
       this.cam.yaw = c.heading + Math.PI;
@@ -16467,8 +16523,27 @@ class App {
   /** The zone of a multi-terrain planet the player is in, when the planet has zones. */
   private zone: string | undefined;
 
-  /** Load a planet and stand the player at its spawn, or at `at` (where a character last stood). */
-  private arrive(planet: PlanetDef, zoneId?: string, at?: THREE.Vector3): void {
+  /**
+   * A world's own arrival in the game's frame (`PlanetDef.arrival`, `src/world/arrival.ts`), from the layout centre
+   * its places file carries -- the file a teleport reads before it travels, so the place is known before the world
+   * is -- or null for a world that names none, or whose places file will not read (it then arrives as any world does).
+   */
+  private async homeOf(planet: PlanetDef, zoneId?: string): Promise<ArrivalPlace | null> {
+    if (!planet.arrival || !hasOwnArrival(planet)) return null;
+    const centre = await this.poisFileOf(packIdOf(planet, zoneId)).then(
+      (f) => f.center,
+      () => null,
+    );
+    return centre ? arrivalInGame(planet.arrival, centre) : null;
+  }
+
+  /**
+   * Load a planet and stand the player at its spawn, or at `at` (where a character last stood). `home` is the
+   * world's own arrival (`homeOf`): the spawn a death comes round at, and where a player stands when no `at` says
+   * otherwise, at its own height and facing its own way, never moved to open ground near it nor lifted to the
+   * terrain under it (the Mensix deck hangs about 125 m over it).
+   */
+  private arrive(planet: PlanetDef, zoneId?: string, at?: THREE.Vector3, home: ArrivalPlace | null = null): void {
     this.zone = planet.zones?.length ? (planet.zones.find((z) => z.id === zoneId) ?? planet.zones[0]).id : undefined;
     this.postfx?.reset();
     this.marks.clear();
@@ -16539,7 +16614,8 @@ class App {
         if (this.placeNamesFor === placesFor) this.placeNames = list;
       })
       .catch(() => { });
-    this.spawn = this.world.spawnPoint();
+    this.spawn = home ? new THREE.Vector3(home.x, home.y, home.z) : this.world.spawnPoint();
+    this.arrivalHome = home;
     const stand = at ?? this.spawn;
     this.player.reset(stand);
     this.world.warmUp(stand);
@@ -16548,6 +16624,12 @@ class App {
     grappleSounds.renew();
     this.physics.stepOnce();
     this.cam.yaw = Math.PI;
+    // Standing at the world's own arrival, facing its own way (a character saved somewhere keeps where it stood,
+    // and the heading it was saved with is put back by the caller).
+    if (home && !at && home.heading !== null) {
+      this.player.heading = home.heading;
+      this.cam.yaw = home.heading + Math.PI;
+    }
     this.hud.setPlanet(planet);
     this.minimap.setName(planet.name);
     this.map.setCurrent(planet.id, this.zone);
@@ -16618,8 +16700,9 @@ class App {
       // in a hideout under the street): a room can lie below the ground, and the travel stands them in it.
       if (p.mounted || p.aboard || p.noclip || this.arriveIndoors || this.world.inside) return;
       // Still standing where we arrived: move to open ground now that the real city is in.
-      // A character back where it stood stays put.
-      if (clearSpawn && !at && p.pos.distanceTo(arrivalSpawn) < 4) {
+      // A character back where it stood stays put, and so does one at the world's own arrival, which is its own
+      // place on purpose (the Mensix deck: open ground near it is the valley floor about 125 m below).
+      if (clearSpawn && !at && !home && p.pos.distanceTo(arrivalSpawn) < 4) {
         this.spawn.copy(clearSpawn);
         p.reset(clearSpawn.clone().setY(clearSpawn.y + 0.1));
         return;
@@ -16649,6 +16732,8 @@ class App {
   private dressingBuilt: Promise<void> = Promise.resolve();
   /** The arrival under way is a room's, which the arrival's own lift to the ground must leave alone. */
   private arriveIndoors = false;
+  /** The world's own arrival this world was arrived at with (`homeOf`), or null: the spawn a ship coming down leaves be. */
+  private arrivalHome: ArrivalPlace | null = null;
 
   /**
    * Go to another world. With `ship`, arrive flying it: the ship carried up into space, or down
@@ -16706,6 +16791,10 @@ class App {
     // Into space with no ship carried (the galaxy map): arriveInSpace puts the ship at the zone's own arrival, so the world
     // streams from there. Read before anyone leaves a ship, so nothing waits between the leave and the unload.
     const spaceArrival = !crossing && planet.space ? arrivalAt(await loadSpacePack(import.meta.env.BASE_URL, packIdOf(planet, zoneId))) : null;
+    // And a world's own arrival on the ground (Mustafar's landing deck), from its places file, for the same reason:
+    // where a travel with no place of its own comes out (a galaxy shuttle to a world with no port among them), and
+    // where a death on it comes round whatever brought the player.
+    const home = planet.space ? null : await this.homeOf(planet, zoneId);
     const p = this.player;
     // Off the ship before the world it stands in goes: its room's physics world goes with it.
     if (p.aboard) {
@@ -16730,7 +16819,7 @@ class App {
     // A room's arrival is left where the travel stands it, and not lifted to the ground (`arrive`).
     this.arriveIndoors = !!(opts?.into || opts?.indoors || planet.instances);
     // A jump's arrival, the group's, a spot of the caller's, or the zone's (above) is where the world streams from, not the zone's spawn.
-    this.arrive(planet, zoneId, crossing?.arrival?.pos ?? besideAt ?? opts?.at ?? (spaceArrival ? new THREE.Vector3(spaceArrival[0], spaceArrival[1], spaceArrival[2]) : undefined));
+    this.arrive(planet, zoneId, crossing?.arrival?.pos ?? besideAt ?? opts?.at ?? (spaceArrival ? new THREE.Vector3(spaceArrival[0], spaceArrival[1], spaceArrival[2]) : undefined), home);
     // Into a dungeon copy: the copy the group's id picks, and the world streamed round it from here on.
     // Following the group there instead, the player is beside the leader already, in the copy they went to.
     const copy = opts?.into ? await this.copyFor(opts.into) : null;
@@ -16868,9 +16957,11 @@ class App {
       else console.warn(`travel: the ${def.id} arrived with no fight to carry its damage onto`);
     }
     // Turned to the arrival's facing before anyone is put in it, so the rooms and the seat follow the hull's final frame.
+    // Where it comes out is where a death comes round, but on a world with an arrival of its own (Mustafar's deck)
+    // that stays the spawn: a ship come down out of space is put in the air over the world.
     if (arrival) {
       v.teleport(at, arrival.quaternion, 0);
-      this.spawn.copy(at);
+      if (!this.arrivalHome) this.spawn.copy(at);
     }
     const room = v.interior;
     if (room && (crew || room.pilotSpot)) {
@@ -22037,7 +22128,7 @@ class App {
   }
 
   /**
-   * Whether a server others share holds the world arriving, for the owner's local overlay (`serverHoldsFor` in
+   * Whether a server others share holds the world arriving, for the overlay of SOE's own people set to `alone` (`serverHoldsFor` in
    * `ngeOverlay.ts`): asked a tenth of a second at a time from the moment it is asked, so it needs no frame, and
    * never longer than the props keeper's own wait for an answer.
    */
@@ -23224,6 +23315,12 @@ class App {
    * sets them down, rather than left adrift where the zone's arrival is.
    */
   private respawn(): void {
+    // At this world's own arrival with no floor under it here (Mustafar's deck, from a death far from it): the world
+    // is moved there under a loading screen first, as at a facility, or the player is stood in the air (`respawnHome`).
+    if (this.spawnNeedsWorld()) {
+      void this.respawnHome();
+      return;
+    }
     this.death.classList.remove('on');
     this.deathChoices = [];
     this.player.endRagdoll();
@@ -23245,6 +23342,84 @@ class App {
       this.messages.system(`you come round at ${rescue.port || 'the port'} your shuttle was going to`);
       this.putDownAtPort(rescue.pack, rescue.port);
     }
+  }
+
+  /**
+   * Whether something solid stands under a place within a step of it: a ray from half a metre over it two metres
+   * down, the player's own body and every corpse stepped over (`Physics.groundDistance`). Asked of a world's own
+   * arrival, whose floor is a building's collision high over the ground, which the streamer makes only near the
+   * player and drops again once they are past its reach.
+   */
+  private floorUnder(at: THREE.Vector3): boolean {
+    return this.physics.groundDistance(at.x, at.y + 0.5, at.z, 2, this.player.body) !== null;
+  }
+
+  /**
+   * Whether a plain respawn must move the world before it stands the player at the spawn: the spawn is this world's
+   * own arrival (`arrivalHome`, Mustafar's deck about 125 m over the ground) and nothing solid is under it now, which
+   * is the case whenever the death was far enough off for the facility's collision to have gone. A shuttle's rescue
+   * moves the player anyway and is `respawn`'s, and so is anything while a crossing is already under way.
+   */
+  private spawnNeedsWorld(): boolean {
+    const home = this.arrivalHome;
+    if (!home || this.rideRescue || this.traveling) return false;
+    const s = this.spawn;
+    if ((s.x - home.x) ** 2 + (s.z - home.z) ** 2 > 1 || Math.abs(s.y - home.y) > 1) return false;
+    return !this.floorUnder(s);
+  }
+
+  /** A death come round at this world's own arrival when its floor is not built here (`spawnNeedsWorld`, `standAtHome`). */
+  private async respawnHome(): Promise<void> {
+    if (this.traveling) return;
+    this.death.classList.remove('on');
+    this.deathChoices = [];
+    this.player.endRagdoll();
+    this.dying = false;
+    await this.standAtHome(this.spawn.clone(), this.arrivalHome, 'coming round', 'so you come round on the ground under it');
+  }
+
+  /**
+   * Stand the player at this world's own arrival (`at`, facing `home`'s heading where it names one) the way a teleport
+   * stands them, and as `respawnAt` stands them at a facility: under a loading screen, off whatever they rode or stood
+   * in, the world moved there and waited for (`settle`), and only then stood on the floor, since a building past the
+   * streamer's reach has no collision here yet and this arrival stands on one high over the ground (Mustafar's deck,
+   * about 125 m up). Should the floor still not be there when the wait gives up, they are stood on the ground under it
+   * and the line says so (`words`). Everything after the screen goes up is in a `try`, so a throw cannot leave
+   * `traveling` set and the screen up for good. Says whether they stood on the floor.
+   */
+  private async standAtHome(at: THREE.Vector3, home: ArrivalPlace | null, what: string, words: string): Promise<boolean> {
+    const planet = this.world.planet;
+    this.traveling = true;
+    this.input.captured = false;
+    this.map.hide();
+    this.loadingScreen.show(planet, planet.name, what);
+    const p = this.player;
+    let onFloor = false;
+    try {
+      this.stepOffForRespawn();
+      p.reset(at);
+      this.world.jumpTo(at);
+      this.physics.stepOnce();
+      await this.settle();
+      // A ray finds nothing until the world has stepped: the floor is read after this one.
+      this.physics.stepOnce();
+      onFloor = this.floorUnder(at);
+      if (onFloor) p.reset(at);
+      else {
+        p.reset(new THREE.Vector3(at.x, this.world.terrain.heightAt(at.x, at.z) + 0.3, at.z));
+        this.messages.system(`the floor ${planet.name} brings you in on has not come in yet, ${words}`);
+      }
+      if (home && home.heading !== null) {
+        p.heading = home.heading;
+        this.cam.yaw = home.heading + Math.PI;
+      }
+      this.physics.stepOnce();
+    } finally {
+      await this.loadingScreen.hide();
+      this.traveling = false;
+      this.freeMouse(false);
+    }
+    return onFloor;
   }
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
