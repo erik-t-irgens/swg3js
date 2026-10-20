@@ -120,6 +120,7 @@ import { furnitureOn, isFurniture } from './furnitureHost.ts';
 import { coverChunk, coverFrom, FAR_TILE_TUNE, makeFarTileCut, writeKept, type FarTileCut } from './farTile.ts';
 import { refreshCascadeBoxes } from './bodyCull.ts';
 import { ShadowHold, ShadowMovers, listVehicleMovers, moverGroundInto, shadowCameraFar, type FarDepth } from './shadowCadence.ts';
+import { SHADOW_SPLIT_TUNE, shadowSplitsVersion, softShare, splitBreaks } from './shadowSplits.ts';
 import { ShadowBatches, shadowBatchMaterial } from './shadowBatches.ts';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
 import { Dust } from '../vehicles/dust';
@@ -928,6 +929,8 @@ export class World {
    * Never saved.
    */
   shadowFarDepth: FarDepth = 'whole';
+  /** The split tune's version the cascades were last fitted to (`shadowSplits.ts`): a slider or a console line moving it refits them once. */
+  private splitsApplied = -1;
 
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
     this.shadowBatches = new ShadowBatches(scene);
@@ -4230,7 +4233,10 @@ export class World {
     // The sun, sky light and their shadows stay on the world layer: rooms are lit by their own
     // lights, as in the client, and never by sunlight through the walls.
     if (!shadows || this.csm) return;
-    this.csm = new CSM({ camera, parent: this.scene, cascades: 3, maxFar: this.shadowDistance, mode: 'practical', shadowMapSize: this.shadowMapSize, lightDirection: new THREE.Vector3(0.3, -1, 0.2).normalize(), lightIntensity: 2, lightMargin: LIGHT_MARGIN, lightNear: LIGHT_NEAR, lightFar: LIGHT_MARGIN + this.shadowDistance });
+    // The near map ends at a reach of its own whatever the shadow distance, so the shadows round the player stay sharp
+    // however far the far map reaches (`shadowSplits.ts`; `scheme: 'practical'` is three's own split, as it was).
+    this.splitsApplied = shadowSplitsVersion();
+    this.csm = new CSM({ camera, parent: this.scene, cascades: 3, maxFar: this.shadowDistance, mode: 'custom', customSplitsCallback: (amount: number, near: number, far: number, target: number[]) => splitBreaks(amount, near, far, SHADOW_SPLIT_TUNE, target), shadowMapSize: this.shadowMapSize, lightDirection: new THREE.Vector3(0.3, -1, 0.2).normalize(), lightIntensity: 2, lightMargin: LIGHT_MARGIN, lightNear: LIGHT_NEAR, lightFar: LIGHT_MARGIN + this.shadowDistance });
     this.csm.fade = true;
     // The lights to the holds and the portal renderer, and nothing else done to them: their `autoUpdate` is three's
     // default until the first `decide`, and is written by `ShadowHold.decide` and `dirtyAll` alone from then on.
@@ -4331,7 +4337,9 @@ export class World {
       l.shadow.normalBias = SHADOW_NORMAL_BIAS_TEXELS * texel;
       // Back to normalised depth, which is the unit three stores this one in.
       l.shadow.bias = -(SHADOW_BIAS_TEXELS * texel) / (cam.far - cam.near);
-      l.shadow.radius = this.shadowRadius;
+      // The page's softness in this map's own texels, times the map's own share (`shadowSplits.ts`): the far maps' texels are
+      // larger, so the same share already blurs them more, and the owner sets how much more.
+      l.shadow.radius = this.shadowRadius * softShare(this.csm?.lights.indexOf(l) ?? 0);
       // A retune keeps the weather's fade.
       l.shadow.intensity = this.shadowIntensity * this.weatherShadowScale;
       if (l.shadow.mapSize.width !== size) {
@@ -6012,6 +6020,12 @@ export class World {
     if (this.camera) setSwayEye(this.camera.position);
     const csm = this.csm;
     if (csm) {
+      // The splits or the maps' softness moved (a slider, a console line): the cascades refitted once, every map drawn whole.
+      if (this.splitsApplied !== shadowSplitsVersion()) {
+        this.splitsApplied = shadowSplitsVersion();
+        csm.updateFrustums();
+        this.applyShadowQuality();
+      }
       csm.lightDirection.copy(this.day.lightDir).negate().normalize();
       csm.update();
       // Between the fit and the matrices, and nowhere else (the sixth wave, `shadowCadence.ts`): a cascade held this

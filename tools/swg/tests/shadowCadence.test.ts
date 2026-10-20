@@ -653,27 +653,39 @@ const groundSamples = (zn: number, zf: number, out: THREE.Vector3[]): number => 
   const { SHADOW_DIALS, shadowDialsFor } = await import('../../../src/world/shadowDials.ts');
   const { allDials, dialMoved, movedLine, resetDials } = await import('../../../src/ui/dials.ts');
   ok(shadowDialsFor('shadowPass') === SHADOW_DIALS && shadowDialsFor('crowd') === null, 'the debug menu finds the shadow pass\'s sliders under `shadowPass` and nowhere else');
+  const { SHADOW_SPLIT_TUNE } = await import('../../../src/world/shadowSplits.ts');
+  const SPLITS0 = JSON.stringify(SHADOW_SPLIT_TUNE);
   const keys = allDials(SHADOW_DIALS).map((d) => d.key);
-  ok(keys.join() === 'tune.maxAgeMs.1,tune.maxAgeMs.2,tune.fastMover,tune.coverDeep', `the sliders are the numbers of the owner's eye and nothing else (${keys.join(', ')})`);
+  ok(keys.join() === 'splits.nearReach,splits.midReach,splits.soft.0,splits.soft.1,splits.soft.2,tune.maxAgeMs.1,tune.maxAgeMs.2,tune.fastMover,tune.coverDeep', `the sliders are the numbers of the owner's eye and nothing else (${keys.join(', ')})`);
+  // Both tables, flattened to one record of their own numbers, so a slider is caught moving a number of the other.
+  const both = (): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(SHADOW_PASS_TUNE)) out[`tune.${k}`] = JSON.stringify(v);
+    for (const [k, v] of Object.entries(SHADOW_SPLIT_TUNE)) out[`splits.${k}`] = JSON.stringify(v);
+    return out;
+  };
   const strays: string[] = [];
   for (const d of allDials(SHADOW_DIALS)) {
     if (d.kind !== 'number') continue;
     resetDials(SHADOW_DIALS);
-    const before = JSON.stringify(SHADOW_PASS_TUNE);
+    const was = both();
     const v = d.get() === d.max ? d.min : d.max;
     d.set(v);
-    const after = JSON.parse(JSON.stringify(SHADOW_PASS_TUNE)) as Record<string, unknown>;
-    const was = JSON.parse(before) as Record<string, unknown>;
-    const moved = Object.keys(after).filter((k) => JSON.stringify(after[k]) !== JSON.stringify(was[k]));
-    if (d.get() !== v || moved.length !== 1 || !dialMoved(SHADOW_DIALS, d)) strays.push(`${d.key} (${moved.join(', ')})`);
+    const after = both();
+    const moved = Object.keys(after).filter((k) => after[k] !== was[k]);
+    if (d.get() !== v || moved.length !== 1 || !d.key.startsWith(moved[0]) || !dialMoved(SHADOW_DIALS, d)) strays.push(`${d.key} (${moved.join(', ')})`);
   }
   ok(strays.length === 0, `each slider moves its own number and no other (${strays.join('; ') || 'all'})`);
   resetDials(SHADOW_DIALS);
-  allDials(SHADOW_DIALS)[1].set(100);
+  allDials(SHADOW_DIALS).find((d) => d.key === 'tune.maxAgeMs.2')!.set(100);
   const line = movedLine(SHADOW_DIALS);
   ok(line === '__debug.shadowPass({ tune: { maxAgeMs: { 2: 100 } } })', `the line that keeps them is the console's own (${line})`);
   resetDials(SHADOW_DIALS);
-  ok(JSON.stringify(SHADOW_PASS_TUNE.maxAgeMs) === JSON.stringify(TUNE0.maxAgeMs) && SHADOW_PASS_TUNE.fastMover === TUNE0.fastMover && SHADOW_PASS_TUNE.coverDeep === TUNE0.coverDeep, 'Reset all puts every number back where it shipped');
+  allDials(SHADOW_DIALS).find((d) => d.key === 'splits.nearReach')!.set(24);
+  const splitLine = movedLine(SHADOW_DIALS);
+  ok(splitLine === '__debug.shadowPass({ splits: { nearReach: 24 } })', `and a split's line is the console's own too (${splitLine})`);
+  resetDials(SHADOW_DIALS);
+  ok(JSON.stringify(SHADOW_PASS_TUNE.maxAgeMs) === JSON.stringify(TUNE0.maxAgeMs) && SHADOW_PASS_TUNE.fastMover === TUNE0.fastMover && SHADOW_PASS_TUNE.coverDeep === TUNE0.coverDeep && JSON.stringify(SHADOW_SPLIT_TUNE) === SPLITS0, 'Reset all puts every number back where it shipped, the splits included');
   // The line, pasted back, sets exactly that.
   tuneShadowPass({ maxAgeMs: { 2: 100 } });
   ok(SHADOW_PASS_TUNE.maxAgeMs.join() === '0,13,100', 'and the line pasted back sets exactly that');

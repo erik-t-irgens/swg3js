@@ -170,7 +170,7 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
     knobs: [
       { key: 'shadows', label: 'Shadows', hint: 'The sun\'s cascaded shadow maps. Off is the second biggest saving.', kind: 'toggle' },
       { key: 'shadowMapSize', label: 'Shadow resolution', hint: 'The edge of each cascade\'s map. Each step doubles the memory; 4096 is crisp, 1024 is cheap.', kind: 'select', options: [{ value: 1024, label: '1024' }, { value: 2048, label: '2048' }, { value: 4096, label: '4096' }] },
-      { key: 'shadowDistance', label: 'Shadow distance', hint: 'How far the cascades reach. Shorter is cheaper and sharper up close.', kind: 'range', min: 80, max: 800, step: 20, format: (v) => `${v} m` },
+      { key: 'shadowDistance', label: 'Shadow distance', hint: 'How far the sun\'s shadows reach. The shadows near you stay sharp at any distance; farther ones are softer, and longer costs a little more.', kind: 'range', min: 80, max: 800, step: 20, format: (v) => `${v} m` },
       { key: 'shadowSoftness', label: 'Shadow softness', hint: 'Blur in map texels: 1 crisp, 3 soft.', kind: 'range', min: 1, max: 3, step: 0.1, format: (v) => v.toFixed(1) },
       { key: 'shadowCasterRadius', label: 'Smallest shadow caster', hint: 'Placed buildings and props at least this big (radius, metres) cast, what players put down included; trees and plants follow the Flora switches. Larger leaves out the small props, saving a draw call per cascade each.', kind: 'range', min: 0.5, max: 8, step: 0.1, format: (v) => `${v.toFixed(1)} m` },
     ],

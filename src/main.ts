@@ -39,6 +39,7 @@ import { CROWD_SWITCHES, CROWD_TUNE, listsMover, tuneCrowd, type CrowdTune } fro
 import { crowdDialsFor } from './world/mobiles/crowdDials.ts';
 import { shadowDialsFor } from './world/shadowDials.ts';
 import { SHADOW_PASS_TUNE, tuneShadowPass } from './world/shadowCadence.ts';
+import { SHADOW_SPLIT_TUNE, splitEnds, tuneShadowSplits } from './world/shadowSplits.ts';
 import type { AbReport } from './core/perfMath.ts';
 import { FAR_TILE_TUNE } from './world/farTile.ts';
 import { FAR_PROBE, FAR_PROBE_STATS } from './world/mobiles/groundProbe.ts';
@@ -9204,15 +9205,20 @@ class App {
        * `SHADOW_PASS_TUNE` (in memory, never saved; the debug menu has the numbers of the eye as sliders), `{ redraw: true }`
        * marks every cascade dirty, `{ farDepth: 'slice' }` puts the far map's old depth back to compare with 'whole' (which
        * ships, Q8), `{ groundShadows }` sets the switch that measures, and `{ compare: 'hold' }` / `{ compare: 'batches' }`
-       * are the picture tests on the effects' scene target. None of it is saved.
+       * are the picture tests on the effects' scene target. `{ splits: { nearReach, midReach, soft, scheme } }` moves where
+       * each map ends and how soft each is (`src/world/shadowSplits.ts`: the near map at a reach of its own whatever the
+       * shadow distance, so near shadows stay sharp at any range; `scheme: 'practical'` is three's old split, to compare),
+       * refitting the cascades on the next frame; the answer's `splits` says each map's reach in metres. None of it is saved.
        */
-      shadowPass: (opts?: { tune?: Record<string, unknown>; redraw?: boolean; farDepth?: 'slice' | 'whole'; groundShadows?: 'on' | 'off'; compare?: 'hold' | 'batches' }) => {
-        const words = opts?.tune ? tuneShadowPass(opts.tune) : [];
+      shadowPass: (opts?: { tune?: Record<string, unknown>; splits?: Record<string, unknown>; redraw?: boolean; farDepth?: 'slice' | 'whole'; groundShadows?: 'on' | 'off'; compare?: 'hold' | 'batches' }) => {
+        const words = [...(opts?.tune ? tuneShadowPass(opts.tune) : []), ...(opts?.splits ? tuneShadowSplits(opts.splits) : [])];
         if (opts?.tune) this.world.shadowHold.dirtyAll();
         if (opts?.redraw) this.world.shadowHold.dirtyAll();
         if (opts?.farDepth || opts?.groundShadows) this.world.setShadowSwitches({ farDepth: opts.farDepth, groundShadows: opts.groundShadows });
         const compared = opts?.compare ? this.shadowCompare(opts.compare) : null;
-        return { ...(words.length ? { words } : {}), ...(compared ? { compared } : {}), ...this.shadowPassReport() };
+        const reach = this.settings.shadowDistance;
+        const splits = { ...SHADOW_SPLIT_TUNE, soft: [...SHADOW_SPLIT_TUNE.soft], endsMetres: splitEnds(3, this.cam.camera.near, reach).map((m) => Math.round(m * 10) / 10), distance: reach };
+        return { ...(words.length ? { words } : {}), ...(compared ? { compared } : {}), splits, ...this.shadowPassReport() };
       },
       /**
        * The indoor pathing: `nav()` says whether this pack carries floor meshes at all, how many
