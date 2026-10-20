@@ -11,9 +11,11 @@
 // **How.** A shadow lookup counts an occluder only when it lies nearer the sun than the receiver by more than
 // the bias. So a card's lookups are handed a bias lowered by how far the ray from the leaf toward the sun stays
 // inside its own crown -- the box of its model's card vertices in the model's own frame -- converted to the
-// light's depth: the light camera is orthographic and every cascade has the same depth range, so metres convert
-// by one division (`uSwgLeafRange`, the range's far less its near). An occluder inside the crown along that ray
-// does not count; one beyond it (a neighbour, a wall) does. A more negative bias lightens (the depth is not
+// light's depth: the light camera is orthographic, so metres convert by one division, by the range (far less near)
+// of the cascade being looked up (`uSwgLeafRange`, one a cascade, picked by the lookup's own index): the cascades'
+// ranges are not one number, the far map's reaching its whole band (`farDepth` 'whole'), and divided by the near
+// cascade's range the far band's leaves skipped about twice the metres they should. An occluder inside the crown
+// along that ray does not count; one beyond it (a neighbour, a wall) does. A more negative bias lightens (the depth is not
 // reversed). The skip has a floor in texels of each cascade (`acne`, 4), since three's five-tap lookup with
 // its one-texel normal bias made a sunlit card whose normals lie in its own plane lose 18 to 47% of its sun
 // to its own surface.
@@ -103,8 +105,11 @@ const CSM_BLOCK = '#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct ) && defined
 const PLAIN_BLOCK = '#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct ) && !defined( USE_CSM ) && !defined( CSM_CASCADES )';
 /** Every directional lookup's call: the fade branch's, the no-fade branch's and the plain branch's are this text. */
 const LOOKUP = 'getShadow( directionalShadowMap[ i ], directionalLightShadow.shadowMapSize, directionalLightShadow.shadowIntensity, directionalLightShadow.shadowBias, directionalLightShadow.shadowRadius, vDirectionalShadowCoord[ i ] )';
-/** The same call with the card's share and bias. */
-const LOOKUP_CARD = 'getShadow( directionalShadowMap[ i ], directionalLightShadow.shadowMapSize, swgLeafIntensity( directionalLightShadow.shadowIntensity ), swgLeafBias( directionalLightShadow.shadowBias ), directionalLightShadow.shadowRadius, vDirectionalShadowCoord[ i ] )';
+/**
+ * The same call with the card's share and bias, the bias handed the cascade's index (the unrolled loop's own, a constant
+ * in every copy) so the skip goes into that cascade's own depth range.
+ */
+const LOOKUP_CARD = 'getShadow( directionalShadowMap[ i ], directionalLightShadow.shadowMapSize, swgLeafIntensity( directionalLightShadow.shadowIntensity ), swgLeafBias( directionalLightShadow.shadowBias, UNROLLED_LOOP_INDEX ), directionalLightShadow.shadowRadius, vDirectionalShadowCoord[ i ] )';
 
 /** The fade branch's lookup (:156). */
 export const FADE_LOOKUP = `directLight.color *= ( directLight.visible && receiveShadow ) ? ${LOOKUP} : 1.0;`;
@@ -186,8 +191,9 @@ export function cardLightsBegin(chunk: string): LightsBeginEdit {
 }
 
 /**
- * Before any light: how far this leaf's ray toward the sun stays inside its own crown, in the light's depth.
- * The direction's components are kept off nought so no division is by it; a box behind the point skips nothing.
+ * Before any light: how far this leaf's ray toward the sun stays inside its own crown, in metres (each lookup takes it
+ * into its own cascade's depth, `swgLeafBias`). The direction's components are kept off nought so no division is by
+ * it; a box behind the point skips nothing.
  */
 const CARD_SKIP = /* glsl */ `
 #ifdef SWG_LEAF_SHADOW
@@ -198,7 +204,7 @@ const CARD_SKIP = /* glsl */ `
 	vec3 swgLeafT2 = ( swgLeafBoxMax - vSwgLeafPos ) / swgLeafDir;
 	vec3 swgLeafFar = max( swgLeafT1, swgLeafT2 );
 	float swgLeafExit = min( min( swgLeafFar.x, swgLeafFar.y ), swgLeafFar.z );
-	swgLeafSkip = max( swgLeafExit, 0.0 ) * vSwgLeafScale / max( uSwgLeafRange, 1e-3 );
+	swgLeafSkip = max( swgLeafExit, 0.0 ) * vSwgLeafScale;
 }
 #endif
 `;

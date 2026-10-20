@@ -437,12 +437,13 @@ export function chooseDepthProgram(_r: unknown, _o: unknown, _c: unknown, _s: un
  * own. Three's one shared depth material keeps the program it chose last until something it checks moves, so each
  * stand-in makes it choose again under this set's lights (`chooseDepthProgram`), or the shared keys would come to one.
  * Not culled; never in a scene but while the warm-up draws them; their geometry and materials are the session's.
- * Only instanced: every caster the page's switches and slider can turn on is an instanced mesh (a tier's copies, a
- * level group's, a thing put down in play, a flora batch, a chunk's own plants), and what is not (a building's rooms,
- * a captured place) casts as it always did.
+ * Instanced and not (the performance pass's sixth wave): every caster the page's switches and slider can turn on is an
+ * instanced mesh (a tier's copies, a level group's, a thing put down in play, a flora batch, a chunk's own plants), and
+ * the casters that are not -- a door's leaf, a camp's wire, a vehicle's pieces, a standing shuttle's -- built their depth
+ * program on the frame they first cast (one 649 ms on Direct3D 11), so the same fifteen are made plain as well: thirty.
  */
-const plainCombos = new Map<string, THREE.InstancedMesh[]>();
-export function plainDepthCombos(set: string): THREE.InstancedMesh[] {
+const plainCombos = new Map<string, THREE.Mesh[]>();
+export function plainDepthCombos(set: string): THREE.Mesh[] {
   let out = plainCombos.get(set);
   if (out) return out;
   const g = new THREE.BufferGeometry();
@@ -452,23 +453,62 @@ export function plainDepthCombos(set: string): THREE.InstancedMesh[] {
   const picture = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
   picture.needsUpdate = true;
   out = [];
-  for (const side of [THREE.FrontSide, THREE.DoubleSide, THREE.BackSide]) {
-    for (const kind of ['plain', 'pictured', 'cut', 'alphaPictured', 'alphaCut'] as const) {
-      const alpha = kind === 'alphaPictured' || kind === 'alphaCut';
-      const m = new THREE.MeshStandardMaterial({ side, map: kind === 'plain' ? null : picture, alphaMap: alpha ? picture : null, alphaTest: kind === 'cut' || kind === 'alphaCut' ? 0.5 : 0 });
-      m.name = `plain depth combination (${set}, ${side === THREE.FrontSide ? 'cast from the back' : side === THREE.DoubleSide ? 'both sides' : 'cast from the front'}, ${kind})`;
-      const s = new THREE.InstancedMesh(g, m, 1);
-      s.setMatrixAt(0, new THREE.Matrix4());
-      s.castShadow = true;
-      s.receiveShadow = true;
-      s.frustumCulled = false;
-      s.name = 'plain depth stand-in';
-      s.onBeforeShadow = chooseDepthProgram as THREE.Object3D['onBeforeShadow'];
-      out.push(s);
+  for (const instanced of [true, false]) {
+    for (const side of [THREE.FrontSide, THREE.DoubleSide, THREE.BackSide]) {
+      for (const kind of ['plain', 'pictured', 'cut', 'alphaPictured', 'alphaCut'] as const) {
+        const alpha = kind === 'alphaPictured' || kind === 'alphaCut';
+        const m = new THREE.MeshStandardMaterial({ side, map: kind === 'plain' ? null : picture, alphaMap: alpha ? picture : null, alphaTest: kind === 'cut' || kind === 'alphaCut' ? 0.5 : 0 });
+        m.name = `plain depth combination (${set}, ${instanced ? 'instanced' : 'not instanced'}, ${side === THREE.FrontSide ? 'cast from the back' : side === THREE.DoubleSide ? 'both sides' : 'cast from the front'}, ${kind})`;
+        let s: THREE.Mesh;
+        if (instanced) {
+          const im = new THREE.InstancedMesh(g, m, 1);
+          im.setMatrixAt(0, new THREE.Matrix4());
+          s = im;
+        } else s = new THREE.Mesh(g, m);
+        s.castShadow = true;
+        s.receiveShadow = true;
+        s.frustumCulled = false;
+        s.name = 'plain depth stand-in';
+        s.onBeforeShadow = chooseDepthProgram as THREE.Object3D['onBeforeShadow'];
+        out.push(s);
+      }
     }
   }
   plainCombos.set(set, out);
   return out;
+}
+
+/**
+ * The shadow batches' one depth combination (the performance pass's sixth wave, `shadowBatches.ts`): a batch of one
+ * instance on the batches' own material, front-sided, so three draws it through its shared depth material from its back
+ * with `USE_BATCHING` in the key, one light set's worth. Its hook steps the depth material's version (as every plain
+ * stand-in's does) and then runs the batch's own shadow hook, which lists its instance for the draw. Made once a set and
+ * kept; never in a scene but while the warm-up draws it.
+ */
+const batchCombos = new Map<string, THREE.BatchedMesh>();
+export function batchedDepthCombo(set: string, material: THREE.Material): THREE.BatchedMesh {
+  let b = batchCombos.get(set);
+  if (b) return b;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0], 3));
+  g.setIndex([0, 1, 2]);
+  b = new THREE.BatchedMesh(1, 3, 3, material);
+  b.sortObjects = false;
+  b.perObjectFrustumCulled = false;
+  const id = b.addGeometry(g);
+  b.addInstance(id);
+  b.castShadow = true;
+  b.receiveShadow = false;
+  b.frustumCulled = false;
+  b.name = 'batched depth stand-in';
+  const own = THREE.BatchedMesh.prototype.onBeforeShadow;
+  const self = b;
+  b.onBeforeShadow = function (r, o, c, sc, geo, depth, group) {
+    depth.needsUpdate = true;
+    own.call(self, r, o, c, sc, geo, depth, group);
+  };
+  batchCombos.set(set, b);
+  return b;
 }
 
 /**

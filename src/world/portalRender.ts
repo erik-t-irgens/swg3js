@@ -25,7 +25,7 @@
 import * as THREE from 'three';
 import type { Building, CellState } from './layoutStream';
 import { isShadowOnly } from '../core/fxRegistry.ts';
-import { CNT, PASS, PERF, perf } from '../core/perf.ts';
+import { CNT, PASS, PERF, perf, SEC } from '../core/perf.ts';
 import { cullOn, ExitNarrowing, exitFrustum, isQuarantined, markQuarantined, MAX_BUILDINGS, PORTAL_CULL, PortalVisibility, walkCameraCell, type CameraCell } from './portalVis.ts';
 import { ActorRoutes, ROUTE_PASS } from './portalCull.ts';
 import { furnitureOn, maskSeen } from './furnitureHost.ts';
@@ -168,6 +168,21 @@ export class PortalRenderer {
   shadowsWanted = true;
   /** What each pass of the last frame drew, for the console hook. */
   readonly passLog: { label: string; calls: number; triangles: number }[] = [];
+
+  /**
+   * The sun's cascade lights (the world hands them over as its cascades are made; empty until then): what a whole draw
+   * outside a frame asks for every map of itself (`drawShadowsOnly`), whatever the hold decided last.
+   */
+  shadowLights: readonly THREE.DirectionalLight[] = [];
+
+  /**
+   * What the world does round every shadow pass (the performance pass's sixth wave): `before` as the pass begins (the
+   * shadow batches follow their sources and take over their casting for the pass, `shadowBatches.ts`), `after` once it
+   * is over or when a frame has none (`drew` false), in a `finally` whatever the pass threw (the sources' casting put
+   * back, and the cascades' holds told what was drawn, `shadowCadence.ts`). `whole` is a draw outside a frame
+   * (`drawShadowsOnly`). Null until the world sets it: then nothing is batched and nothing is recorded.
+   */
+  shadowPassHooks: { before(whole: boolean): void; after(drew: boolean, whole: boolean): void } | null = null;
 
   /**
    * The rooms' one pool of lights (`World.updateInteriorLights`), when a hint rather than the player's own
@@ -417,14 +432,21 @@ export class PortalRenderer {
     const r = this.renderer;
     if (!r.shadowMap.enabled) return;
     r.shadowMap.needsUpdate = true;
+    // Every map asked for here, outside any hook: the stand-ins are drawn into every cascade and key their programs
+    // whatever the cascades' holds decided last (a held light's own `autoUpdate` is false).
+    const lights = this.shadowLights;
+    for (let i = 0; i < lights.length; i++) lights[i].shadow.needsUpdate = true;
     this.shadingShadows = true;
     const strays = this.strays;
+    const hooks = this.shadowPassHooks;
     try {
+      hooks?.before(true);
       // Through the shadow pass's own scene, as a frame's shadow pass draws: the depth programs are keyed on its set.
       r.render(this.passScenes.forShadows(scene), this.shadowProbe);
     } finally {
       this.shadingShadows = false;
       this.strays = strays;
+      hooks?.after(true, true);
     }
   }
 
@@ -659,9 +681,12 @@ export class PortalRenderer {
    */
   private renderShadows(scene: THREE.Scene, view: Building | null): void {
     const r = this.renderer;
-    // Off, or faded to nothing by a storm (the cascades' intensity is 0, so the stale maps cannot show).
+    const hooks = this.shadowPassHooks;
+    // Off, or faded to nothing by a storm (the cascades' intensity is 0, so the stale maps cannot show): a frame with no
+    // shadow pass, which the cascades' holds are told of (every cascade drawn whole once there is one again).
     if (!r.shadowMap.enabled || !this.shadowsWanted) {
       SHADOW_STRAYS.seen = 0;
+      hooks?.after(false, false);
       return;
     }
     // The rooms of the building the camera is in cast into the sun's shadows only with furniture drawn
@@ -671,6 +696,13 @@ export class PortalRenderer {
     r.shadowMap.needsUpdate = true;
     this.shadingShadows = true;
     try {
+      // The hooks timed on a line of their own (`shadowHooks`), apart from the pass's own `shadows`.
+      perf.begin(SEC.shadowHooks);
+      try {
+        hooks?.before(false);
+      } finally {
+        perf.end(SEC.shadowHooks);
+      }
       // Through the shadow pass's own scene (`passScenes.ts`): its light set is every light at once and stays so.
       this.pass('shadows', this.passScenes.forShadows(scene), this.shadowProbe, PASS.shadows);
     } finally {
@@ -680,6 +712,13 @@ export class PortalRenderer {
       // after the frame that last met one.
       SHADOW_STRAYS.seen = this.strays;
       perf.count(CNT.strays, this.strays);
+      // The batches' sources put back and the holds told what was drawn, whatever the pass threw.
+      perf.begin(SEC.shadowHooks);
+      try {
+        hooks?.after(true, false);
+      } finally {
+        perf.end(SEC.shadowHooks);
+      }
     }
     if (view) this.showInterior(view, false);
   }
@@ -694,6 +733,20 @@ export class PortalRenderer {
    * (`__debug.mobileTune({ passMatrices: 'every' })`).
    */
   matrixOnce = true;
+
+  /**
+   * The frame's one walk of the scene's matrices, made outright before the shadow pass (the performance pass's sixth
+   * wave): the same walk at the same moment of the frame that the shadow pass's own `render` made (so the bodies' skips
+   * and the skeleton-once rule are untouched), timed as `sceneWalk`, and the scene's own walk turned off for the rest of
+   * the frame. With `matrixOnce` off nothing is done here and every pass walks as it always did.
+   */
+  private walkOnce(scene: THREE.Scene): void {
+    if (!this.matrixOnce) return;
+    perf.begin(SEC.sceneWalk);
+    if (scene.matrixWorldAutoUpdate) scene.updateMatrixWorld();
+    perf.end(SEC.sceneWalk);
+    scene.matrixWorldAutoUpdate = false;
+  }
 
   /**
    * Draw the frame. `view` is the building the camera is in (null = outside); `buildings` are
@@ -734,13 +787,17 @@ export class PortalRenderer {
       if (skipWorld) {
         SHADOW_STRAYS.seen = 0;
         perf.count(CNT.cullSkips, 1);
+        this.walkOnce(scene);
+        // No shadow pass this frame: the cascades' holds are told (every cascade drawn whole once there is one again).
+        this.shadowPassHooks?.after(false, false);
       } else {
         // Only what stands outdoors casts into the sun's shadows.
         routes?.route(ROUTE_PASS.shadows, null, null);
+        // The scene's matrix walk, made here outright where the shadow pass's own `render` made it and timed on a line
+        // of its own (`sceneWalk`), so the report's `shadows` is the shadow pass and nothing else.
+        this.walkOnce(scene);
         this.renderShadows(scene, view);
       }
-      // The shadow pass, when there is one, walked the scene.
-      if (this.passes > 0 && this.matrixOnce) scene.matrixWorldAutoUpdate = false;
       r.state.buffers.stencil.setClear(1);
       r.clear(true, true, true);
       this.setRef(1);

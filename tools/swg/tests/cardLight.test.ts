@@ -11,13 +11,15 @@
 //      not proof of what the rows mean); 3 and 4 read the rows `CARD_ROWS` names;
 //   4b. what the game hands the shader: a ramp of known bytes read through `readCardRows` (the sky's own call, its
 //      text pinned) and handed to `updateCardLight` lands in every uniform as its row's bytes over 255, times the
-//      row's light scale under `rampScale: 'alpha'`, at the rows the tune names live; and a rooms pass puts the light
+//      row's light scale under `rampScale: 'alpha'`, at the rows the tune names live; each cascade's own depth range
+//      lands at its own index (the far map's is the longer since `farDepth` 'whole'); and a rooms pass puts the light
 //      out and back;
 //   5. the two sides in the mirror: under `'face'` a mirrored copy's d is its twin's negated for any sun, under
 //      `'stored'` its twin's own; the stored normal out of the plane is the converted one; `pointFlat` 0 keeps the
 //      normal, 1 gives the face, and no blend yields a zero or a NaN;
 //   6. the transformed text, on the real `CSMShader.lights_fragment_begin`: the two lookups the cascades make
-//      edited and their `receiveShadow` guards intact, three's light put out before exactly the three sun
+//      edited and their `receiveShadow` guards intact, each handed its own cascade's index once unrolled as three
+//      unrolls it (so the skip goes into that cascade's own range), three's light put out before exactly the three sun
 //      `RE_Direct` calls and the one in the loop of lights that cast no shadow, the no-cascade branch byte for
 //      byte, the card light before the wet sheen, the face blend once straight after `geometryNormal` is declared,
 //      the stored normal's varying written once and read only by the sum, the shadow offset turned toward the light
@@ -32,11 +34,11 @@ import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import { CSMShader } from 'three/examples/jsm/csm/CSMShader.js';
 import { applyGradePixel, createGradeParams, createGradeSource, deriveGrade, lookFor, type Vec3 } from '../../../src/core/fx/gradeMath.ts';
-import { CARD_LIGHT_STATS, CARD_LIGHT_SUM, CARD_LIGHT_TUNE, CARD_LIGHT_UNIFORMS, CARD_ROWS, SHADOW_OFFSET, SHADOW_OFFSET_CARD, injectCardLight, readCardRows, setCardLightTune, setCardRoomPass, updateCardLight, type CardSkyRows, type RampRead } from '../../../src/world/cardLight.ts';
+import { CARD_LIGHT_PARS, CARD_LIGHT_STATS, CARD_LIGHT_SUM, CARD_LIGHT_TUNE, CARD_LIGHT_UNIFORMS, CARD_ROWS, SHADOW_OFFSET, SHADOW_OFFSET_CARD, injectCardLight, readCardRows, setCardLightTune, setCardRoomPass, updateCardLight, type CardSkyRows, type RampRead } from '../../../src/world/cardLight.ts';
 import { CARD_ROWS_DEFAULT } from '../../../src/world/cardLightMath.ts';
 import { acesForward, acesInverse, capBloom, clientDisplay, clientLight, clientScene, displayOf, linearToSrgb, luminance, pointFlatNormal, sideDot, srgbToLinear, storedNormal, type CardColours, type Rgb } from '../../../src/world/cardLightMath.ts';
 import { applyCard } from '../../../src/world/cardRule.ts';
-import { cardLightsBegin } from '../../../src/world/leafShadow.ts';
+import { cardLightsBegin, leafBias } from '../../../src/world/leafShadow.ts';
 import { applySpec } from '../../../src/world/specular.ts';
 import { applyWetness } from '../../../src/world/wetness.ts';
 import { glslVariant, redeclared } from './glslScan.ts';
@@ -303,7 +305,19 @@ const lumBytes = (p: number[]) => 0.2126 * lin(p[0]) + 0.7152 * lin(p[1]) + 0.07
   setCardLightTune({ ...was, rows: { ...CARD_ROWS_DEFAULT } });
   ok(JSON.stringify(CARD_ROWS) === JSON.stringify(CARD_ROWS_DEFAULT) && CARD_ROWS.front === 1 && CARD_ROWS.tangent === 9 && CARD_ROWS.back === 8, 'the rows ship as front 1, tangent 9, back 8 (and ambient 0, fill 3, bounce 4, shadow 7)');
   // The sun handed over is the one the leaf skip turns into each model's frame, unit; the range is the light's depth.
-  ok(Math.abs(u.uSwgLeafSun.value.length() - 1) < 1e-12 && Math.abs(u.uSwgLeafSun.value.dot(sun.clone().normalize()) - 1) < 1e-12 && u.uSwgLeafRange.value === 300, 'the sun goes over unit and toward it, and the range as given');
+  ok(Math.abs(u.uSwgLeafSun.value.length() - 1) < 1e-12 && Math.abs(u.uSwgLeafSun.value.dot(sun.clone().normalize()) - 1) < 1e-12 && u.uSwgLeafRange.value.toArray().every((r) => r === 300), 'the sun goes over unit and toward it, and one range given is every cascade\'s');
+  // Each cascade's own range, as the world hands them since the far map reaches its whole band: a cascade past the list
+  // takes the last, and a range of nought leaves the one there.
+  updateCardLight(readCardRows(blank(), ramp, column), sun, new Float64Array([469, 469, 965]));
+  const perCascade = u.uSwgLeafRange.value.toArray();
+  updateCardLight(readCardRows(blank(), ramp, column), sun, new Float64Array([0, 0, 0, 0]));
+  ok(perCascade.join() === '469,469,965,965' && u.uSwgLeafRange.value.toArray().join() === '469,469,965,965', `each cascade's own range by its index, the last standing for any past the list (${perCascade.join(', ')}), and noughts leave them`);
+  // So the skip in metres is the same in every cascade: what a lookup takes off its bias, times its own range, is the
+  // crown's metres, whatever that range is (the JavaScript mirror of `swgLeafBias`).
+  const skipM = 6;
+  const backInMetres = perCascade.slice(0, 3).map((r) => (leafBias(-1e-4, 0, r, 4, 1) - leafBias(-1e-4, skipM, r, 4, 1)) * r);
+  ok(backInMetres.every((m) => Math.abs(m - skipM) < 1e-9), `a crown's skip of ${skipM} m is ${skipM} m into every cascade's own depth (${backInMetres.map((m) => m.toFixed(6)).join(', ')})`);
+  updateCardLight(readCardRows(blank(), ramp, column), sun, 300);
   // The sky reads the rows through this very function, with its own three readers, and the world hands what it read over.
   const sky = readFileSync(fileURLToPath(new URL('../../../src/world/sky.ts', import.meta.url)), 'utf8');
   const world = readFileSync(fileURLToPath(new URL('../../../src/world/world.ts', import.meta.url)), 'utf8');
@@ -384,7 +398,26 @@ const lumBytes = (p: number[]) => 0.2126 * lin(p[0]) + 0.7152 * lin(p[1]) + 0.07
   const plain = t.indexOf('#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct ) && !defined( USE_CSM ) && !defined( CSM_CASCADES )');
   const mid = t.slice(csm, plain);
   const count = (s: string, x: string) => s.split(x).length - 1;
-  ok(count(mid, 'swgLeafBias( directionalLightShadow.shadowBias )') === 2 && count(mid, 'swgLeafIntensity( directionalLightShadow.shadowIntensity )') === 2, 'exactly the two lookups the cascades make are handed the card\'s bias and share (the fade branch and the no-fade one)');
+  ok(count(mid, 'swgLeafBias( directionalLightShadow.shadowBias, UNROLLED_LOOP_INDEX )') === 2 && count(mid, 'swgLeafIntensity( directionalLightShadow.shadowIntensity )') === 2, 'exactly the two lookups the cascades make are handed the card\'s bias and share (the fade branch and the no-fade one), the bias with the cascade\'s own index');
+  // Unrolled as three unrolls a loop (`WebGLProgram`'s `unrollLoops`, its loop bounds the light counts), every lookup is
+  // handed its own cascade's index as a constant, so the skip goes into that cascade's own range.
+  {
+    const unrolled = t
+      .replace(/NUM_DIR_LIGHT_SHADOWS/g, '3')
+      .replace(/NUM_DIR_LIGHTS/g, '4')
+      .replace(/#pragma unroll_loop_start\s+for\s*\(\s*int\s+i\s*=\s*(\d+)\s*;\s*i\s*<\s*(\d+)\s*;\s*i\s*\+\+\s*\)\s*{([\s\S]+?)}\s+#pragma unroll_loop_end/g, (_m, a: string, b: string, body: string) => {
+        let s = '';
+        for (let i = Number(a); i < Number(b); i++) s += body.replace(/\[\s*i\s*\]/g, `[ ${i} ]`).replace(/UNROLLED_LOOP_INDEX/g, String(i));
+        return s;
+      });
+    const umid = unrolled.slice(unrolled.indexOf('defined( USE_CSM ) && defined( CSM_CASCADES )'), unrolled.indexOf('!defined( USE_CSM ) && !defined( CSM_CASCADES )'));
+    const byIndex = [0, 1, 2, 3].map((i) => count(umid, `swgLeafBias( directionalLightShadow.shadowBias, ${i} )`));
+    ok(byIndex.join() === '2,2,2,2' && !umid.includes('swgLeafBias( directionalLightShadow.shadowBias, UNROLLED_LOOP_INDEX )'), `unrolled, the fade and the no-fade lookups of each light are handed that light's own index (${byIndex.join(', ')}; the fourth, the fill, behind its light count's #if)`);
+    const fn = CARD_LIGHT_PARS.slice(CARD_LIGHT_PARS.indexOf('float swgLeafBias('), CARD_LIGHT_PARS.indexOf('float swgLeafIntensity('));
+    ok(/swgCascade == 0 \? uSwgLeafRange\.x : \( swgCascade == 1 \? uSwgLeafRange\.y : \( swgCascade == 2 \? uSwgLeafRange\.z : uSwgLeafRange\.w \) \)/.test(fn) && fn.includes('swgLeafSkip / max( swgRange, 1e-3 )'), 'and the bias takes the skip, in metres, over that cascade\'s own range');
+    const worldTs = readFileSync(fileURLToPath(new URL('../../../src/world/world.ts', import.meta.url)), 'utf8');
+    ok(worldTs.includes('const c = lights[i < lights.length ? i : lights.length - 1].shadow.camera;') && worldTs.includes('r[i] = c.far - c.near;') && worldTs.includes('updateCardLight(L.card, this.day.lightDir, r);'), "the world hands every cascade's own range, each from its own light's shadow camera");
+  }
   ok(count(mid, '( directLight.visible && receiveShadow ) ? getShadow(') === 2, 'and both keep their receiveShadow guard');
   const plainOrig = chunk.slice(chunk.indexOf('#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct ) && !defined( USE_CSM ) && !defined( CSM_CASCADES )'));
   ok(t.slice(plain) === plainOrig, 'the no-cascade branch is left byte for byte as three wrote it');

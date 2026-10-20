@@ -196,7 +196,9 @@ const setup = { src: null, world: null, file: { size: 256 }, near: nearTiling, f
   Object.assign(GRASS_SHADOW_TUNE, GRASS_SHADOW_DEFAULTS);
   const worldTs = readFileSync(new URL('../../../src/world/world.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   ok(/this\.grass\?\.update\(camPos, 1\);\s*this\.farCards\?\.update\(camPos\);[\s\S]{0,200}this\.grass\?\.applyCast\(camPos\);/.test(worldTs), 'the world asks which chunks cast every frame, after the grass has moved its window');
-  ok(/csm\.update\(\);[\s\S]{0,120}\}\s*this\.syncGrassShadows\(\);/.test(worldTs), 'and hands the grass the cascades every frame after they moved');
+  // Since the performance pass's sixth wave the cascades' holds sit between the fit and the matrices, and the grass is
+  // handed them after both (a held cascade's matrix is its map's), with the batches' two gauges between.
+  ok(/csm\.update\(\);[\s\S]{0,900}?refreshCascadeBoxes\(csm\.lights, this\.cascadeBoxes\);\s*\}\s*(perf\.gauge\([^;]*\);\s*)*this\.syncGrassShadows\(\);/.test(worldTs), 'and hands the grass the cascades every frame after they moved');
   // The world's side of the hooks and the receive, which only a browser runs: pinned as text.
   ok(/cascadeOf: \(cam\) => \{\s*const lights = this\.csm\?\.lights;\s*if \(lights\) for \(let i = 0; i < lights\.length; i\+\+\) if \(lights\[i\]\.shadow\.camera === cam\) return i;\s*return 0;/.test(worldTs), 'the world names a cascade by its own shadow camera, which is what the hooks\' fourth argument is');
   const sync = worldTs.slice(worldTs.indexOf('  private syncGrassShadows(): void {'), worldTs.indexOf('  warmUp(center: THREE.Vector3): void {'));

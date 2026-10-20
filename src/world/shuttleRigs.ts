@@ -43,6 +43,7 @@ import { OUTSIDE, type SoundSpace } from '../audio/distance.ts';
 import type { EffectHandle } from './particles.ts';
 import { inSight, poseRigAction, rampFootOf, type Pad } from './rigPath.ts';
 import { surfaces } from './surfaces.ts';
+import { listShuttleMover, type ShadowMovers } from './shadowCadence.ts';
 import { markFires, rigPose, shuttleShake, windowOpen, type RigClips, type RigPose, type ShuttleState, type ShuttleTimes, type TravelRig } from './travelTerminal.ts';
 
 /** Every number of ours about the drawn shuttles. */
@@ -707,6 +708,9 @@ interface Stood {
    */
   ramp?: THREE.Vector3 | null;
   footprint?: { minX: number; maxX: number; minZ: number; maxZ: number } | null;
+  /** Its body joint's place last frame while it flew, and whether that is known: what its speed as a shadow mover is worked out from. */
+  moverAt: Float64Array;
+  moverKnown: boolean;
 }
 
 const tmpPose: RigPose = { role: 'sky', seconds: 0, shown: false };
@@ -792,6 +796,17 @@ export class ShuttleRigs {
     out.z = e[14];
     out.radius = 2 * s.radius;
     return true;
+  }
+
+  /**
+   * The stood shuttles in flight, as fast movers for the cascades' holds (`shadowCadence.ts`): each one shown and not in
+   * its `ground` role writes its body joint's place (worked out from its parents now, `updateWorldMatrix(true, false)`:
+   * `update` poses it by its mixer after the frame's last walk and before the shadows, so read from that walk it would be
+   * a frame behind), its radius, and its speed from that place against the last frame's, when that is faster than
+   * `fastMover`; one on its pad or not shown writes nothing and forgets its last place. Allocates nothing.
+   */
+  shadowMovers(out: ShadowMovers): void {
+    for (let i = 0; i < this.stood.length; i++) listShuttleMover(out, this.stood[i]);
   }
 
   /** Every stood shuttle's root, for the motion blur: the root stays on its pad and the joints move. */
@@ -935,6 +950,8 @@ export class ShuttleRigs {
       fx,
       body: joints.getObjectByName('root') ?? joints,
       doors,
+      moverAt: new Float64Array(3),
+      moverKnown: false,
     };
     this.stood.push(s);
     this.byKey.set(key, s);

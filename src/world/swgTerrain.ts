@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { TERRAIN_GROUND_TUNE, type EnvironmentFamily, type Layer } from '../swg/terrain/generator.ts';
 import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, rampNames, readColorRampFile, readColorReference, TerrainSampler, UPPER_PAD, waterTables, type ColorRamp, type ColorReference, type GroundProbe, type PoleBlock, type RadialPole, type TerrainTemplate } from '../swg/terrain/trn.ts';
 import { groundChunkAt, groundShift, type GroundShift } from './groundTiles.ts';
+import { FarGridIndex } from './farGridIndex.ts';
 
 export interface BuildingLayerSource {
   bytes: ArrayBuffer;
@@ -83,6 +84,14 @@ export class SwgTerrain {
   private readonly pending = new Map<number, Pending>();
   private readonly requested = new Set<string>();
   private readonly farGrids = new Map<string, FarGrid>();
+  /** The same grids by number (`farGridIndex.ts`), so a lookup on a frame's path builds no string key: filed and taken out beside `farGrids`. */
+  private readonly farIndex = new FarGridIndex<FarGrid>();
+  /** A far grid by its corner and tiling: by number where the index files it, else by its string key. Makes nothing on the first way. */
+  private farGridAt(gx0: number, gz0: number, size: number, res: number): FarGrid | null {
+    const g = this.farIndex.get(gx0, gz0, size, res);
+    if (g !== undefined) return g;
+    return this.farGrids.get(SwgTerrain.farKey(gx0, gz0, size, res)) ?? null;
+  }
   /** How many chunk grids were generated synchronously on the main thread (diagnostics). */
   syncGenerations = 0;
   /** Lakes, pools and lava flows in game coordinates. */
@@ -250,7 +259,7 @@ export class SwgTerrain {
     const s = this.groundShift;
     const gx0 = groundChunkAt(gx, s.x, farSize) * farSize + s.x;
     const gz0 = groundChunkAt(gz, s.z, farSize) * farSize + s.z;
-    const grid = this.farGrids.get(SwgTerrain.farKey(gx0, gz0, farSize, farRes));
+    const grid = this.farGridAt(gx0, gz0, farSize, farRes);
     if (!grid) return null;
     const step = farSize / farRes;
     const n = farRes + 3;
@@ -276,7 +285,7 @@ export class SwgTerrain {
   /**
    * The far grid's own sample at lattice point (i, j), game x `groundShift.x + i·step` and z likewise, with no
    * interpolation, or null while its grid is not made: what a race-driven hull's look-ahead reads once a point and
-   * keeps (`raceMath.ts`, `LatticeRing`), since every far lookup builds its key.
+   * keeps (`raceMath.ts`, `LatticeRing`).
    */
   farSampleAt(i: number, j: number, farSize: number, farRes: number): number | null {
     const step = farSize / farRes;
@@ -285,7 +294,7 @@ export class SwgTerrain {
     const gz = s.z + j * step;
     const cx = groundChunkAt(gx, s.x, farSize);
     const cz = groundChunkAt(gz, s.z, farSize);
-    const grid = this.farGrids.get(SwgTerrain.farKey(cx * farSize + s.x, cz * farSize + s.z, farSize, farRes));
+    const grid = this.farGridAt(cx * farSize + s.x, cz * farSize + s.z, farSize, farRes);
     if (!grid) return null;
     const n = farRes + 3;
     const col = Math.min(n - 1, Math.max(0, i - cx * farRes + 1));
@@ -374,6 +383,7 @@ export class SwgTerrain {
         }
       }
       this.farGrids.set(key, out);
+      this.farIndex.set(gx0, gz0, size, res, out);
       return out;
     };
     if (sync || !this.worker || !this.workerReady) {
@@ -487,6 +497,7 @@ export class SwgTerrain {
 
   releaseFarGrid(gx0: number, gz0: number, size: number, res: number): void {
     this.farGrids.delete(SwgTerrain.farKey(gx0, gz0, size, res));
+    this.farIndex.delete(gx0, gz0, size, res);
   }
 
   /** Forget pole blocks farther than `blockRadius` blocks from a game-space point. */
@@ -524,6 +535,7 @@ export class SwgTerrain {
     this.pending.clear();
     this.requested.clear();
     this.farGrids.clear();
+    this.farIndex.clear();
     this.sampler.invalidateAll();
   }
 }

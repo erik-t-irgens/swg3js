@@ -324,12 +324,22 @@ export const FX_TYPICAL_CPU_MS = 0.9;
  * `shadowOnly`: drawn into the shadow maps and in no view pass (the portal renderer's shadow camera
  * sees every layer; its view passes see 0 or 1 plus 31): what first person hides of the player
  * (`src/player/headHide.ts`).
+ *
+ * `shadowCast`: drawn into the shadow maps and in no view pass, as `shadowOnly` is, but warmed for no pass at all: a
+ * region tier's still placed casters batched as one draw (`src/world/shadowBatches.ts`), whose colour program no frame
+ * ever draws. Every layer named: 0 the world, 1 a building's rooms, 28 the shadow batches, 29 first person's hidden
+ * head, 30 the heat, 31 the actors.
  */
-export const FX_LAYERS = { heat: 30, shadowOnly: 29 } as const;
+export const FX_LAYERS = { heat: 30, shadowOnly: 29, shadowCast: 28 } as const;
 
 /** A mask first person has put on the shadow-only layer: markActor leaves it, passesOf warms it as an actor's. */
 export function isShadowOnly(mask: number): boolean {
   return (mask & (1 << FX_LAYERS.shadowOnly)) !== 0;
+}
+
+/** A mask on the shadow batches' layer and no other: drawn by the shadow pass alone, warmed for no view pass (`passesOf`). */
+export function isShadowCast(mask: number): boolean {
+  return mask === 1 << FX_LAYERS.shadowCast;
 }
 
 const DEFAULT_KEYS = new Set(Object.keys(FX_DEFAULTS));

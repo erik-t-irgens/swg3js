@@ -17,7 +17,7 @@ import { detailWrap } from './detailMap.ts';
 import { specWrap } from './specular.ts';
 import { cardWrap, isCard, prepareCardModel, setCardRule } from './cardRule.ts';
 import { CARD_LIGHT_TUNE, cardReceives, setCardRoomPass, updateCardLight } from './cardLight.ts';
-import { SWAY_TUNE, disposeStandIn, hangSwayDepth, plainDepthCombos, setSwayEye, setSwayRoomPass, skinnedDepthCombos, stepSway, swayDepthCombos, swayDepthStandIns, swayWrap } from './floraSway.ts';
+import { SWAY_TUNE, batchedDepthCombo, disposeStandIn, hangSwayDepth, plainDepthCombos, setSwayEye, setSwayRoomPass, skinnedDepthCombos, stepSway, swayDepthCombos, swayDepthStandIns, swayWrap } from './floraSway.ts';
 import { resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
@@ -81,7 +81,7 @@ import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import { roomOverhead } from './nav/navMesh.ts';
 import type { SunInfo } from '../core/postfx';
 import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
-import { isShadowOnly } from '../core/fxRegistry.ts';
+import { isShadowCast, isShadowOnly } from '../core/fxRegistry.ts';
 import { ProgramQueue, materialsUnder, pendingPrograms, resolveLinks, type OwnJob } from '../core/programQueue.ts';
 import { LINK_TUNE, LinkFlight, linkMode, type ReadyProgram } from '../core/linkMode.ts';
 import { ROOM_DEFER, deferRooms, type RoomCompile, type RoomJob, type RoomQueue } from './roomDefer.ts';
@@ -119,6 +119,8 @@ import { cullOn, markNarrowRoot } from './portalVis.ts';
 import { furnitureOn, isFurniture } from './furnitureHost.ts';
 import { coverChunk, coverFrom, FAR_TILE_TUNE, makeFarTileCut, writeKept, type FarTileCut } from './farTile.ts';
 import { refreshCascadeBoxes } from './bodyCull.ts';
+import { ShadowHold, ShadowMovers, listVehicleMovers, moverGroundInto, shadowCameraFar, type FarDepth } from './shadowCadence.ts';
+import { ShadowBatches, shadowBatchMaterial } from './shadowBatches.ts';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
 import { Dust } from '../vehicles/dust';
 import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../vehicles/garage';
@@ -319,6 +321,8 @@ const SHADOW_BIAS_TEXELS = 0.5;
  */
 const LIGHT_MARGIN = 150;
 const LIGHT_NEAR = 1;
+/** The cascades' lights before there are any (a world with shadows off from the start): handed to the holds, never written. */
+const NO_CASCADE_LIGHTS: THREE.DirectionalLight[] = [];
 /** How dark a shadow goes, 0..1. The ambient decides what light still reaches it. */
 const SHADOW_INTENSITY = 1;
 /**
@@ -333,6 +337,8 @@ interface Chunk {
   cx: number;
   cz: number;
   group: THREE.Group;
+  /** Its ground's mesh: casting into the sun's shadows unless the measuring switch `groundShadows` is 'off'. */
+  ground: THREE.Mesh;
   colliders: Collider[];
   heights: Float32Array;
   /** Where its ground mesh and heightfield start (`Terrain.chunkOrigin`): its bucket's corner moved onto the client's height points. */
@@ -755,16 +761,15 @@ export class World {
   private readonly groundAtCached = (x: number, z: number): number | null => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES);
   /**
    * The ground's height where the world already holds it (a built block, or a far grid), or null: never
-   * made on the spot, as `terrain.heightAt` would. A far grid's lookup builds its key, so a caller on the
-   * frame path asks a few a frame.
+   * made on the spot, as `terrain.heightAt` would. A far grid is found by number (`farGridIndex.ts`), so a
+   * lookup builds no key.
    */
   groundIfCached(x: number, z: number): number | null {
     return this.groundAtCached(x, z);
   }
   /**
    * What a race-driven hull reads of the ground ahead (`src/vehicles/raceDrive.ts`): a built block only, the far grid
-   * only at its own 16 m lattice points (each read once and kept by the drive, since every far lookup builds its key),
-   * and the flat water. Never `heightAt`, which would generate a block on the main thread. Made once; it reads the
+   * only at its own 16 m lattice points (each read once and kept by the drive), and the flat water. Never `heightAt`, which would generate a block on the main thread. Made once; it reads the
    * terrain of the world loaded now.
    */
   readonly raceGround: RaceGround = {
@@ -900,7 +905,32 @@ export class World {
   readonly weaponFx: ParticleEffects;
   private readonly warmedFx = new Set<string>();
 
+  /**
+   * The sun's cascades drawn by age, each held where its map was drawn (the performance pass's sixth wave,
+   * `shadowCadence.ts`): decided in `updateShadows` between `csm.update` and `refreshCascadeBoxes`, told what was drawn by
+   * the portal renderer's hooks, made dirty by the world's own events.
+   */
+  readonly shadowHold = new ShadowHold();
+  /** This frame's fast movers, filled by the game after the shuttles are posed and before `updateShadows`. */
+  readonly shadowMovers = new ShadowMovers();
+  /** Each loaded region tier's still placed casters as one draw for the shadow pass (`shadowBatches.ts`). */
+  readonly shadowBatches: ShadowBatches;
+  /**
+   * The ground's chunks casting into the sun's shadows ('on', today) or not ('off'): a switch that measures what a batch
+   * of the ground could save, never a look that ships (`groundShadows`, never saved).
+   */
+  groundShadows: 'on' | 'off' = 'on';
+  /**
+   * Each shadow camera's depth (`shadowCameraFar`): 'whole', the owner's answer to Q8 and what ships, LIGHT_MARGIN plus
+   * the larger of the shadow distance and its own box's width, which reaches every receiver of its slice (only the far
+   * cascade's moves, to about 966 m), so the far shadows reach the ground across the sun they used to miss; 'slice' the
+   * old depth (LIGHT_MARGIN plus the shadow distance), kept for the perf switch `farDepth`'s A/B and the owner's line 10.
+   * Never saved.
+   */
+  shadowFarDepth: FarDepth = 'whole';
+
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
+    this.shadowBatches = new ShadowBatches(scene);
     // How the program queue issues and polls in `parallel` mode (`linkMode.ts`): the mode and the tab's visibility read
     // at every pump, an object's programs not yet resolved, and the resolve itself.
     this.programs.links = {
@@ -1856,6 +1886,8 @@ export class World {
       // null, which is the behaviour this had before -- a tier drawn the moment it loads -- and is
       // the way to see for yourself what the hold is worth on your own machine.
       if (SHADER_PACING) this.layoutStream.prepare = (objects) => this.prepareStreamed(objects);
+      // Each tier's still placed casters batched for the shadow pass once its meshes are shown (`shadowBatches.ts`).
+      this.layoutStream.shadowBatches = this.shadowBatches;
       // A fountain's or a pool's water is drawn by the water system (the owner's call): reflecting,
       // rippling and ringed by rain like a lake, and never swelling.
       this.layoutStream.waterSurface = (geometry, matrix, name) => this.basinWaterBody(geometry, matrix, name);
@@ -1981,6 +2013,8 @@ export class World {
 
   private unload(): void {
     this.loadGeneration++;
+    // Every arrival draws every cascade whole: a map held from the world that is going covers nothing of the next.
+    this.shadowHold.dirtyAll();
     // Everything still queued belonged to the world that is going: the objects are about to be
     // taken out of the scene, and whoever was waiting on one (a tier holding itself back until it
     // can be drawn without a stall) is answered rather than left waiting for ever.
@@ -3021,11 +3055,22 @@ export class World {
     fog.color.copy(L.fog);
     // The client's fog is Direct3D's EXP2, the same curve as three's, so the density carries over as is.
     fog.density = L.fogDensity * this.fogScale * this.userFog;
-    // The leaf cards' light (`cardLight.ts`): the ramp's rows for them, the sun's direction toward it, and the
-    // light's depth range their own crown's skip is converted by. Written into existing vectors; nothing allocated.
-    const cam = this.csm?.lights[0]?.shadow.camera;
-    updateCardLight(L.card, this.day.lightDir, cam ? cam.far - cam.near : 0);
+    // The leaf cards' light (`cardLight.ts`): the ramp's rows for them, the sun's direction toward it, and each
+    // cascade's own depth range, which their crown's skip is converted by in that cascade's lookup (the far map's range
+    // is the longer one since `farDepth` 'whole'). Written into existing arrays and vectors; nothing allocated.
+    const lights = this.csm?.lights;
+    if (lights && lights.length) {
+      const r = this.leafRanges;
+      for (let i = 0; i < r.length; i++) {
+        const c = lights[i < lights.length ? i : lights.length - 1].shadow.camera;
+        r[i] = c.far - c.near;
+      }
+      updateCardLight(L.card, this.day.lightDir, r);
+    } else updateCardLight(L.card, this.day.lightDir, 0);
   }
+
+  /** Each cascade's depth range (far less near), for the leaf cards' skip (`applySwgLighting`): written in place. */
+  private readonly leafRanges = new Float64Array(4);
 
   private disposeChunk(c: Chunk): void {
     this.floraField?.remove(c.key);
@@ -4168,11 +4213,29 @@ export class World {
     // The world pass drawn from inside a building may leave out what these hold when it misses the
     // exits: the placed objects' instanced meshes hang off the scene, the ground's chunks and far tiles off its root.
     if (!portals.narrowParents.includes(this.scene)) portals.narrowParents.push(this.scene, this.chunkRoot);
+    // Round every shadow pass (the sixth wave): the batches follow their sources and take over their casting for the
+    // pass alone, and the cascades' holds are told what was drawn, the batches' sources put back first whatever happens.
+    const batches = this.shadowBatches;
+    const hold = this.shadowHold;
+    portals.shadowPassHooks = {
+      before: () => batches.around(),
+      after: (drew, whole) => {
+        try {
+          batches.restore();
+        } finally {
+          hold.drawn(this.csm?.lights ?? NO_CASCADE_LIGHTS, drew, whole);
+        }
+      },
+    };
     // The sun, sky light and their shadows stay on the world layer: rooms are lit by their own
     // lights, as in the client, and never by sunlight through the walls.
     if (!shadows || this.csm) return;
     this.csm = new CSM({ camera, parent: this.scene, cascades: 3, maxFar: this.shadowDistance, mode: 'practical', shadowMapSize: this.shadowMapSize, lightDirection: new THREE.Vector3(0.3, -1, 0.2).normalize(), lightIntensity: 2, lightMargin: LIGHT_MARGIN, lightNear: LIGHT_NEAR, lightFar: LIGHT_MARGIN + this.shadowDistance });
     this.csm.fade = true;
+    // The lights to the holds and the portal renderer, and nothing else done to them: their `autoUpdate` is three's
+    // default until the first `decide`, and is written by `ShadowHold.decide` and `dirtyAll` alone from then on.
+    this.shadowHold.bind(this.csm.lights);
+    portals.shadowLights = this.csm.lights;
     this.applyShadowQuality();
     this.sun.castShadow = false;
     this.sun.visible = false;
@@ -4249,13 +4312,19 @@ export class World {
     this.applyShadowQuality();
   }
 
-  /** Push the current bias, blur and darkness onto every cascade. */
+  /**
+   * Push the current bias, blur and darkness onto every cascade. Every cascade is drawn whole on the next frame after it
+   * (`dirtyAll`): it runs on every frustum refit (a resize, a field-of-view refit, the shadow distance), on a map made
+   * anew and on `farDepth` moved, each of which changes what a held map was drawn with.
+   */
   private applyShadowQuality(): void {
     const size = this.shadowMapSize;
     for (const l of this.csm?.lights ?? []) {
       const cam = l.shadow.camera;
       cam.near = LIGHT_NEAR;
-      cam.far = LIGHT_MARGIN + this.shadowDistance;
+      // `farDepth` 'whole' (the owner's Q8, what ships): the range made long enough to reach every receiver of the
+      // cascade's own slice, which its box's width (the slice's diameter) does; 'slice' the old depth, for comparing.
+      cam.far = shadowCameraFar(this.shadowFarDepth, LIGHT_MARGIN, this.shadowDistance, cam.right - cam.left);
       cam.updateProjectionMatrix();
       // One texel of this cascade, in metres: its map covers the whole cascade box.
       const texel = (cam.right - cam.left) / size;
@@ -4272,6 +4341,26 @@ export class World {
         l.shadow.map = null;
       }
     }
+    this.shadowHold.dirtyAll();
+  }
+
+  /**
+   * The two shadow switches (never saved, nothing compiles either way): `groundShadows` 'off' takes every standing
+   * chunk's ground out of the shadow maps (and builds new chunks the same while it holds), what a batch of the ground
+   * could save, and measures only; `farDepth` 'slice' gives each shadow camera the old depth that ended short of the far
+   * band's ground across the sun, to compare with 'whole', which ships (Q8). Answers both.
+   */
+  setShadowSwitches(o: { groundShadows?: 'on' | 'off'; farDepth?: FarDepth }): { groundShadows: 'on' | 'off'; farDepth: FarDepth } {
+    if ((o.groundShadows === 'on' || o.groundShadows === 'off') && o.groundShadows !== this.groundShadows) {
+      this.groundShadows = o.groundShadows;
+      const cast = o.groundShadows === 'on';
+      for (const c of this.chunks.values()) c.ground.castShadow = cast;
+    }
+    if ((o.farDepth === 'slice' || o.farDepth === 'whole') && o.farDepth !== this.shadowFarDepth) {
+      this.shadowFarDepth = o.farDepth;
+      this.applyShadowQuality();
+    }
+    return { groundShadows: this.groundShadows, farDepth: this.shadowFarDepth };
   }
 
   /**
@@ -5089,6 +5178,9 @@ export class World {
 
   /** Which passes draw an object: the world's, an interior's, or both for an actor. */
   private static passesOf(o: THREE.Object3D): number[] {
+    // A shadow batch (`shadowBatches.ts`) is drawn by the shadow pass alone: no view pass draws it, so no warm-up or
+    // sweep builds a colour program for it.
+    if (isShadowCast(o.layers.mask)) return World.NO_PASSES;
     const interior = o.layers.isEnabled(INTERIOR_LAYER);
     // What first person hides of the player is drawn in every pass once it is shown again: warmed for both.
     const actor = o.layers.isEnabled(ACTOR_LAYER) || isShadowOnly(o.layers.mask);
@@ -5165,6 +5257,8 @@ export class World {
   /** The world pass's layer alone and the rooms' alone, for those turns. */
   private static readonly WORLD_ONLY: readonly number[] = [0];
   private static readonly ROOMS_ONLY: readonly number[] = [INTERIOR_LAYER];
+  /** No pass at all (a shadow batch's): never written to. */
+  private static readonly NO_PASSES: number[] = [];
   /** An empty group, compiled under layer 0 to put the world pass's lights back after a room's compile the old way. Kept, never added. */
   private readonly compileNothing = new THREE.Group();
   /** An object's programs not yet resolved, as the queue's `parallel` mode asks for them: one array, refilled. */
@@ -5791,7 +5885,7 @@ export class World {
    * What the last warm of the depth programs did, for the console: the sway's stand-ins a set, the programs built,
    * whether shadows were on, whether the grass's depth material was drawn, and the plain combinations a set.
    */
-  readonly shadowDepthWarm = { standIns: 0, programs: 0, shadows: false, grass: false, plain: 0, skinned: 0 };
+  readonly shadowDepthWarm = { standIns: 0, programs: 0, shadows: false, grass: false, plain: 0, skinned: 0, batched: 0, ms: 0 };
 
   /**
    * Build the shadows' depth programs from stand-ins (see `compileEverything`) by drawing them into the shadow maps
@@ -5824,7 +5918,9 @@ export class World {
     warm.grass = false;
     warm.plain = 0;
     warm.skinned = 0;
+    warm.batched = 0;
     if (!portals || !camera || !this.csm || !r.shadowMap.enabled) return;
+    const started = performance.now();
     // The scene's own swaying meshes first, then a source for every combination a swaying material can cast with
     // (`swayDepthCombos`): a placed tier streamed in after this screen lifts may bring one nothing here had.
     const swaying = [...(meshes.filter((o) => (o as THREE.Mesh).isMesh) as THREE.Mesh[]), ...swayDepthCombos()];
@@ -5849,10 +5945,13 @@ export class World {
       const standIns = swayDepthStandIns(swaying, set.name);
       const plain = plainDepthCombos(set.name);
       const skinned = skinnedDepthCombos(set.name);
+      // The shadow batches' one combination (the sixth wave): a batch of one on their own material, cast from its back.
+      const batched = batchedDepthCombo(set.name, shadowBatchMaterial());
       warm.standIns = standIns.length;
       warm.plain = plain.length;
       warm.skinned = skinned.length;
-      const drawn: THREE.Object3D[] = [...standIns, ...plain, ...skinned];
+      warm.batched = 1;
+      const drawn: THREE.Object3D[] = [...standIns, ...plain, ...skinned, batched];
       for (const s of drawn) {
         s.position.copy(at);
         s.frustumCulled = false;
@@ -5893,6 +5992,10 @@ export class World {
     // world pass's set is put back. With a scene of its own the shadow pass's state is its own and nothing is put back.
     if (!perPass) this.withLayers(camera, 0, () => this.withTarget(r, bound, () => r.compile(nothing, camera, this.scene)));
     warm.programs = (r.info.programs?.length ?? 0) - before;
+    warm.ms = performance.now() - started;
+    // The stand-ins were drawn into every map at whatever pose the cascades stood: every cascade is drawn whole on the
+    // next frame, whatever the portal renderer's hooks did.
+    this.shadowHold.dirtyAll();
   }
 
   /**
@@ -5911,8 +6014,18 @@ export class World {
     if (csm) {
       csm.lightDirection.copy(this.day.lightDir).negate().normalize();
       csm.update();
+      // Between the fit and the matrices, and nowhere else (the sixth wave, `shadowCadence.ts`): a cascade held this
+      // frame has its light and target put back where its map was drawn from before anything works its matrix out, so
+      // every reader sees one cascade whose matrix is the one its map was drawn with.
+      if (this.camera) {
+        const drawn = this.shadowHold.decide(csm.lights, csm, this.camera, now, this.shadowMovers);
+        perf.count(CNT.cascadesDrawn, drawn);
+        perf.count(CNT.holdsRefused, this.shadowHold.refusedNow);
+      }
       refreshCascadeBoxes(csm.lights, this.cascadeBoxes);
     }
+    perf.gauge(CNT.batchedCasters, this.shadowBatches.casters);
+    perf.gauge(CNT.shadowBatches, this.shadowBatches.standing);
     this.syncGrassShadows();
     if (now - this.csmScanAt > SCAN_TUNE.everyMs) {
       this.csmScanAt = now;
@@ -5921,6 +6034,53 @@ export class World {
       perf.end(SEC.scan);
     }
     this.drainCompiles();
+  }
+
+  /**
+   * For the hold's picture test (`__debug.shadowPass({ compare: 'hold' })`): every cascade past the first moved off this
+   * frame's fit by whole texels across the light (`tx`, `ty`) and `along` metres toward its slice, as a box fitted to an
+   * earlier view stands, and every matrix worked out again from there. The console's alone; it allocates.
+   */
+  shadowDisplace(tx: number, ty: number, along: number): void {
+    const csm = this.csm;
+    if (!csm) return;
+    const x = new THREE.Vector3();
+    const y = new THREE.Vector3();
+    const z = new THREE.Vector3();
+    const m = new THREE.Matrix4();
+    for (let i = 1; i < csm.lights.length; i++) {
+      const l = csm.lights[i];
+      const dir = new THREE.Vector3().subVectors(l.target.position, l.position).normalize();
+      m.lookAt(new THREE.Vector3(), dir, new THREE.Vector3(0, 1, 0)).extractBasis(x, y, z);
+      const cam = l.shadow.camera;
+      const texel = (cam.right - cam.left) / l.shadow.mapSize.width;
+      const off = x.multiplyScalar(tx * texel).add(y.multiplyScalar(ty * texel)).add(dir.multiplyScalar(along));
+      l.position.add(off);
+      l.target.position.add(off);
+    }
+    refreshCascadeBoxes(csm.lights, this.cascadeBoxes);
+  }
+
+  /** Each vehicle's place last frame (x, y, z, and 1 once known), for its speed as a shadow mover: kept per hull. */
+  private readonly moverLast = new WeakMap<Vehicle, Float64Array>();
+
+  /**
+   * The world's vehicles as fast movers for the cascades' holds (`shadowCadence.ts`): each shown hull moving faster than
+   * `fastMover`, by its own `speed` or, where that is larger, how far it went since last frame over the frame's step (a
+   * hull whose pose is written for it, a shuttle trip's on its clips or a run's, carries no speed of its own; never
+   * `body.linvel()`, which makes an object a call). A shuttle that carries somebody is its rig made a vehicle, and so is
+   * among them. Allocates nothing but a hull's first record.
+   */
+  vehicleMovers(out: ShadowMovers): void {
+    listVehicleMovers(out, this.vehicles, this.moverLast);
+  }
+
+  /**
+   * The cached ground under each listed mover, NaN where nothing cached answers (`moverGroundInto` over `groundAtCached`,
+   * which never makes a block and never builds a far grid's key: `SwgTerrain.heightIfCached` finds a far grid by number).
+   */
+  moverGround(out: ShadowMovers): void {
+    moverGroundInto(out, this.groundAtCached);
   }
 
   /** Where each cascade ends, metres, for the grass's cast count: a kept array written in place. */
@@ -7412,6 +7572,8 @@ export class World {
     const r = this.renderer;
     if (!r || r.shadowMap.enabled === on) return;
     r.shadowMap.enabled = on;
+    // Shadows back on: every cascade drawn whole on the next frame, whatever was held when they went off.
+    if (on) this.shadowHold.dirtyAll();
     this.scene.traverse((o) => {
       const m = (o as THREE.Mesh).material;
       if (!m) return;
@@ -7441,6 +7603,8 @@ export class World {
 
   /** Move the streamed world to a far-away point at once (teleporting), forgetting any building state. */
   jumpTo(center: THREE.Vector3): void {
+    // Every cascade drawn whole at the new place on the next frame: a map held from the old one covers nothing here.
+    this.shadowHold.dirtyAll();
     this.stream(center, Infinity);
     this.streamFar(center, Infinity);
     this.layoutStream?.update(center);
@@ -7815,6 +7979,8 @@ export class World {
       // waits for what stands round where it stopped before the ship is handed back.
       if (!this.streamHold) this.layoutStream.update(playerPos, this.cellState?.building ?? null);
       this.packStatus = `${this.packBase}; ${this.layoutStream.status}${this.particles ? `; ${this.particles.status}` : ''}`;
+      // A tier's shadow batch filled for at most `buildSliceMs` of this frame; nothing to do once every one is whole.
+      this.shadowBatches.build();
       perf.end(SEC.layout);
     }
     // The client's own detail levels for the placed objects and the flora, from the eye (steps 7 and 8).
@@ -9069,7 +9235,8 @@ export class World {
     const mesh = new THREE.Mesh(geometry, this.groundMaterial);
     this.chunkMaterial = mesh.material as THREE.Material;
     mesh.receiveShadow = true;
-    mesh.castShadow = true;
+    // Off only while the measuring switch `groundShadows` says so (`setShadowSwitches`), so a chunk made then is the same.
+    mesh.castShadow = this.groundShadows === 'on';
     group.add(mesh);
     const exclude = this.layoutStream ? [...this.exclusions, ...this.layoutStream.exclusionsFor(cx, cz)] : this.exclusions;
     // The planet's own flora replaces the procedural props once its models are loaded.
@@ -9104,7 +9271,7 @@ export class World {
     this.chunkRoot.add(group);
     const mx = (cx + 0.5) * CHUNK_SIZE;
     const mz = (cz + 0.5) * CHUNK_SIZE;
-    const chunk: Chunk = { key, cx, cz, group, colliders, heights, origin, physics: null, trees, plants, flora: this.flora ? propGroup : null, floraData, mx, my: this.terrain.heightAt(mx, mz), mz };
+    const chunk: Chunk = { key, cx, cz, group, ground: mesh, colliders, heights, origin, physics: null, trees, plants, flora: this.flora ? propGroup : null, floraData, mx, my: this.terrain.heightAt(mx, mz), mz };
     this.chunks.set(key, chunk);
     // Its plants shown or not from the moment it is made, by the eye the last sweep measured from, so a
     // chunk made far off never shows its plants for the quarter second until the next sweep (step 5).

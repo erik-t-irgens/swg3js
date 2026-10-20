@@ -853,5 +853,174 @@ const pausedFrame = (ms: number, calls = 999, body?: () => void) => {
   } else console.log("skip nothing allocated by the crowd's frame: run with node --expose-gc to measure");
 }
 
+// ---------------------------------------------------------------------------------------------
+// The sixth wave: nothing allocated by a frame of the town's shadow pass's own work -- the movers listed from vehicles,
+// a shuttle in flight and a peer, the ground under them read through the far grids found by number
+// (`moverGroundInto`, `FarGridIndex`), the holds' decision with its guards (three's real `CSM` in node, the view turning,
+// with a big step now and then that the guards refuse), and the shadow batches following their sources (a plain tier
+// mesh and a level group, repacked now and then) and swapping their casting round the pass -- over windows with a
+// repack, a refusal and a fast mover in them, and over windows without. Two things in such a frame are not the wave's
+// and are left out of what is held: `refreshCascadeBoxes`, which is three's own `updateMatrices` and makes numbers in
+// node whatever the wave does, and the level group's own sweep, whose repack makes its numbers in the frame it repacks
+// (measured with every part of the wave taken out, and only what the wave adds to it held).
+{
+  const gc = (globalThis as { gc?: (o?: { type?: string }) => void }).gc;
+  if (gc) {
+    const { CSM } = await import('three/examples/jsm/csm/CSM.js');
+    const { ShadowHold, ShadowMovers, listPeerMover, listShuttleMover, listVehicleMovers, moverGroundInto, shadowCameraFar } = await import('../../../src/world/shadowCadence.ts');
+    const { ShadowBatches } = await import('../../../src/world/shadowBatches.ts');
+    const { LevelGroup } = await import('../../../src/world/levelGroup.ts');
+    const { FarGridIndex } = await import('../../../src/world/farGridIndex.ts');
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, 1600 / 900, 0.05, 9000);
+    const csm = new CSM({ camera, parent: scene, cascades: 3, maxFar: 320, mode: 'practical', shadowMapSize: 2048, lightDirection: new THREE.Vector3(0.3, -1, 0.2).normalize(), lightIntensity: 2, lightMargin: 150, lightNear: 1, lightFar: 470 });
+    csm.fade = true;
+    csm.updateFrustums();
+    for (const l of csm.lights) {
+      l.shadow.camera.near = 1;
+      // The depth the game ships (`farDepth` 'whole', the owner's Q8).
+      l.shadow.camera.far = shadowCameraFar('whole', 150, 320, l.shadow.camera.right - l.shadow.camera.left);
+      l.shadow.camera.updateProjectionMatrix();
+      l.shadow.map = {} as THREE.WebGLRenderTarget;
+    }
+    csm.lightDirection.copy(new THREE.Vector3(0.83, 0.51, -0.21).normalize()).negate();
+    const lights = csm.lights;
+    const hold = new ShadowHold();
+    const movers = new ShadowMovers();
+    // The movers' sources: a vehicle (its body moved by the physics' whole sixtieths, its group copying it before them), a
+    // stood shuttle's joint, a peer.
+    const vehicle = { group: { position: new THREE.Vector3(0, 1, -150), visible: true }, speed: 0, radius: 2, disposed: false, holding: false };
+    const vehicles = [vehicle];
+    const last = new WeakMap<object, Float64Array>();
+    let bodyZ = -150;
+    let stepAcc = 0;
+    let steps = 0;
+    // The ground under the movers as the world reads it: the far grids found by number (`SwgTerrain.heightIfCached`'s way),
+    // a cell's grid giving the ground; what the terrain's own read of a height costs is the terrain's, so this answers a
+    // whole number.
+    const farIndex = new FarGridIndex<{ h: number }>();
+    for (let i = -4; i < 4; i++) for (let j = -4; j < 4; j++) farIndex.set(i * 512 + 1, j * 512 + 1, 512, 32, { h: 0 });
+    const groundOf = (x: number, z: number): number | null => (farIndex.get(Math.floor((x - 1) / 512) * 512 + 1, Math.floor((z - 1) / 512) * 512 + 1, 512, 32) ? 0 : null);
+    const joint = new THREE.Object3D();
+    scene.add(joint);
+    const shuttle = { shown: true, role: 'land', body: joint, radius: 20, moverAt: new Float64Array(3), moverKnown: false };
+    const peer = { group: { visible: true, position: new THREE.Vector3(10, 2, -60) }, vel: new THREE.Vector3(), vehicle: null };
+    // The batches' sources: a plain tier mesh of eight copies and a level group of six copies on two levels.
+    const mat = new THREE.MeshStandardMaterial();
+    const box = new THREE.BoxGeometry(4, 6, 4);
+    const plain = new THREE.InstancedMesh(box, mat, 8);
+    const m4 = new THREE.Matrix4();
+    for (let i = 0; i < 8; i++) plain.setMatrixAt(i, m4.makeTranslation(i * 12, 3, -40));
+    plain.castShadow = true;
+    plain.computeBoundingSphere();
+    scene.add(plain);
+    const copies = Array.from({ length: 6 }, (_, i) => ({ x: i * 20, y: 0, z: -90, q: new THREE.Quaternion() }));
+    const prim = (g: THREE.BufferGeometry) => ({ geometry: g, material: mat, cell: -1 });
+    const levels = [
+      { near: 0, far: 80, level: 0, primitives: [prim(new THREE.BoxGeometry(6, 20, 6)), prim(new THREE.BoxGeometry(3, 3, 3))] },
+      { near: 80, far: 1e9, level: 1, primitives: [prim(new THREE.BoxGeometry(6, 18, 6))] },
+    ];
+    const group = new LevelGroup(copies, levels, new THREE.Vector3(0, 10, 0), 12, (p, n) => {
+      const mesh = new THREE.InstancedMesh(p.geometry, p.material, n);
+      mesh.castShadow = true;
+      scene.add(mesh);
+      return mesh;
+    }, true);
+    const batches = new ShadowBatches(scene);
+    batches.take([plain], [group]);
+    batches.buildAll();
+    let f = 0;
+    let events = true;
+    // False takes every part of the wave out of the frame and leaves the rest of it (the camera, the CSM, the sweep).
+    let wave = true;
+    // The view's turn a frame, worked out once: a yaw handed to `rotation.set` from the frame is a number handed across a
+    // call, which the test's own frame would box whenever the compiler leaves that call out (the frame's own garbage,
+    // not the wave's).
+    const TURNS = 3142;
+    const turns: THREE.Matrix4[] = [];
+    for (let k = 0; k < TURNS; k++) {
+      camera.position.set(0, 1.8, 0);
+      camera.rotation.set(-0.1, k * 0.002, 0, 'YXZ');
+      camera.updateMatrixWorld();
+      turns.push(camera.matrixWorld.clone());
+    }
+    const shadowFrame = () => {
+      f++;
+      const now = f * 7;
+      // The view turning slowly, and with events a 40-degree step every 97 frames (0.7 rad), which the guards refuse.
+      camera.matrixWorld.copy(turns[(f + (events && f % 97 === 0 ? 350 : 0)) % TURNS]);
+      // With events a fast vehicle 150 m ahead (no speed of its own: its places give it, its body moving 50 m/s on the
+      // physics' whole sixtieths), a shuttle descending and a peer swinging; without, all still.
+      vehicle.group.position.z = bodyZ;
+      if (wave) movers.steps[0] = steps;
+      stepAcc += 1 / 144;
+      while (stepAcc >= 1 / 60) {
+        stepAcc -= 1 / 60;
+        steps++;
+        if (events) bodyZ = bodyZ < -400 ? -150 : bodyZ - 50 / 60;
+      }
+      joint.position.set(0, events ? 200 - (f % 300) : 0, -200);
+      peer.vel.set(events ? 35 : 0, 0, 0);
+      csm.update();
+      if (wave) {
+        movers.dt[0] = 1 / 144;
+        movers.begin();
+        listVehicleMovers(movers, vehicles, last);
+        listShuttleMover(movers, shuttle);
+        listPeerMover(movers, peer);
+        moverGroundInto(movers, groundOf);
+        hold.decide(lights, csm, camera, now, movers);
+      }
+      for (let i = 0; i < lights.length; i++) if (lights[i].shadow.autoUpdate) lights[i].shadow.needsUpdate = false;
+      // With events a repack every 50 frames (the eye near, then far).
+      if (events && f % 50 === 0) group.sweep(0, 2, (f / 50) % 2 === 0 ? -90 : -2000, 1, Number.POSITIVE_INFINITY);
+      if (wave) {
+        batches.around();
+        batches.restore();
+        hold.drawn(lights, true, false);
+      }
+    };
+    for (let i = 0; i < 6000; i++) shadowFrame();
+    let gcs = 0;
+    const obs = new PerformanceObserver((list) => {
+      gcs += list.getEntries().length;
+    });
+    obs.observe({ entryTypes: ['gc'] });
+    const youngSpace = () => v8.getHeapSpaceStatistics().find((s) => s.space_name === 'new_space')?.space_used_size ?? 0;
+    const settle = () => new Promise<void>((r) => setTimeout(r, 30));
+    const measure = async (withEvents: boolean, withWave: boolean): Promise<number> => {
+      events = withEvents;
+      wave = withWave;
+      let best = Infinity;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        for (let i = 0; i < 3000; i++) shadowFrame();
+        // A minor collection: a full one throws optimised code away and the window would measure its re-warming.
+        gc({ type: 'minor' });
+        await settle();
+        gcs = 0;
+        const before = youngSpace();
+        for (let i = 0; i < 2000; i++) shadowFrame();
+        const after = youngSpace();
+        await settle();
+        const per = (after - before) / 2000;
+        if (gcs === 0 && per < best) best = per;
+      }
+      return best;
+    };
+    // Each held as what the wave adds to the same frame with every part of it taken out, since what three's own code in
+    // that frame makes depends on what the rest of this file taught the compiler before it.
+    const busy = await measure(true, true);
+    const busyBase = await measure(true, false);
+    const quiet = await measure(false, true);
+    const quietBase = await measure(false, false);
+    obs.disconnect();
+    const decisions = hold.decisions;
+    const added = busy - busyBase;
+    const addedQuiet = quiet - quietBase;
+    ok(Number.isFinite(busy) && Number.isFinite(busyBase) && added < 4, `a frame of the shadow pass's own work with fast movers, refused holds and repacks in it makes no garbage of its own (${added.toFixed(2)} bytes a frame: ${busy.toFixed(2)} with it, ${busyBase.toFixed(2)} the frame without it, the sweep's repacks in both; ${decisions} decisions)`);
+    ok(Number.isFinite(quiet) && Number.isFinite(quietBase) && addedQuiet < 4, `nor one with nothing moving and nothing repacked (${addedQuiet.toFixed(2)} bytes a frame: ${quiet.toFixed(2)} with it, ${quietBase.toFixed(2)} without)`);
+  } else console.log("skip nothing allocated by the shadow pass's frame: run with node --expose-gc to measure");
+}
+
 Object.defineProperty(performance, 'now', { value: realNow, configurable: true, writable: true });
 console.log(`\n${checks} checks passed`);

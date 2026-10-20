@@ -319,7 +319,7 @@ export function leafShadowSelfTest(renderer: THREE.WebGLRenderer): LeafShadowSel
     const toward = new THREE.Vector3(1, 0.3, 1).normalize();
     const sun = stageSun(stage, toward, Math.PI, 5);
     CARD_LIGHT_UNIFORMS.uSwgLeafSun.value.copy(toward);
-    CARD_LIGHT_UNIFORMS.uSwgLeafRange.value = sun.shadow.camera.far - sun.shadow.camera.near;
+    CARD_LIGHT_UNIFORMS.uSwgLeafRange.value.setScalar(sun.shadow.camera.far - sun.shadow.camera.near);
     stage.view(new THREE.Vector3(0, 0, 5), new THREE.Vector3(0, 0, 0));
     // Card A's left half lies behind card B from the sun; its right half is in the open.
     const left = 0.5 - 0.5 / (2 * 1.4);

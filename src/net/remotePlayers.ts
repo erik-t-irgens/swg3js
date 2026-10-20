@@ -24,6 +24,7 @@ import { glidePeerTurn, yawOf } from './peerTurn.ts';
 import { newPeerRope, readPeerRope, type PeerRope } from './peerRope.ts';
 import { RECKON_TUNE, newReckonState, readReckon, reckonStepIn, reckonsIn, type ReckonState } from './peerReckon.ts';
 import { sharedClock } from '../world/sharedClock.ts';
+import { listPeerMover, type ShadowMovers } from '../world/shadowCadence.ts';
 
 /**
  * One peer, as everything that hangs something on a peer sees them: their body in the physics, a
@@ -1424,6 +1425,23 @@ export class RemotePlayers {
       if (rv?.obj) out.add(rv.obj, false, 'remoteVehicle', reckoned ? rv.sentVel : rv.vel);
     }
   }
+
+  /**
+   * The peers as fast movers for the sun's cascade holds (`shadowCadence.ts`), shaped like `collectMovers`: each shown
+   * peer's ride, by the velocity its game sent while its picture is reckoned and else the relay's, and their figure by the
+   * relay's (so a friend swinging on a rope at 35 m/s counts), each written only while faster than `fastMover`; the ride's
+   * radius its picture's own, a figure's a metre. `forEach` with a kept callback, so not even an iterator is made.
+   */
+  shadowMovers(out: ShadowMovers): void {
+    this.moverOut = out;
+    this.remotes.forEach(this.moverOf);
+    this.moverOut = null;
+  }
+
+  private moverOut: ShadowMovers | null = null;
+  private readonly moverOf = (r: Remote): void => {
+    if (this.moverOut) listPeerMover(this.moverOut, r);
+  };
 
   dispose(): void {
     for (const id of [...this.remotes.keys()]) this.remove(id);

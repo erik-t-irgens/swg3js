@@ -93,7 +93,8 @@ export const CARD_LIGHT_UNIFORMS = {
   uSwgCardSunSide: { value: 0 },
   uSwgCardPointFlat: { value: 0.5 },
   uSwgLeafSun: { value: new THREE.Vector3(0, 1, 0) },
-  uSwgLeafRange: { value: 470 },
+  /** Each cascade's depth range (its shadow camera's far less near), by cascade: the skip's metres into that cascade's own depth. */
+  uSwgLeafRange: { value: new THREE.Vector4(470, 470, 470, 470) },
   uSwgLeafSelf: { value: 1 },
   uSwgLeafShare: { value: 1 },
   uSwgLeafAcne: { value: 4 },
@@ -324,7 +325,7 @@ ${CARD_CURVE_PARS}#endif
 #ifdef SWG_LEAF_SHADOW
 uniform vec3 swgLeafBoxMin;
 uniform vec3 swgLeafBoxMax;
-uniform float uSwgLeafRange;
+uniform vec4 uSwgLeafRange;
 uniform float uSwgLeafSelf;
 uniform float uSwgLeafShare;
 uniform float uSwgLeafAcne;
@@ -334,10 +335,12 @@ varying float vSwgLeafScale;
 float swgLeafSkip = 0.0;
 #endif
 // The bias and the share a card's directional lookup is handed (leafShadow.ts): its cascade's own, lowered by
-// the floor and by how far its ray toward the sun stays inside its own crown, and the share of the darkening.
-float swgLeafBias( const in float swgBias ) {
+// the floor and by how far its ray toward the sun stays inside its own crown, that skip's metres taken into this
+// cascade's own depth by its own range (the cascades' ranges differ: the far one reaches its whole band).
+float swgLeafBias( const in float swgBias, const in int swgCascade ) {
 	#ifdef SWG_LEAF_SHADOW
-		return swgBias * ( 1.0 + 2.0 * uSwgLeafAcne * uSwgLeafSelf ) - swgLeafSkip * uSwgLeafSelf;
+		float swgRange = swgCascade == 0 ? uSwgLeafRange.x : ( swgCascade == 1 ? uSwgLeafRange.y : ( swgCascade == 2 ? uSwgLeafRange.z : uSwgLeafRange.w ) );
+		return swgBias * ( 1.0 + 2.0 * uSwgLeafAcne * uSwgLeafSelf ) - swgLeafSkip / max( swgRange, 1e-3 ) * uSwgLeafSelf;
 	#else
 		return swgBias;
 	#endif
@@ -537,9 +540,11 @@ function bytesInto(out: THREE.Vector3, linear: THREE.Color, scale: number, t: Ca
  * The frame's colours and sun into the shared uniforms, from `World.applySwgLighting`: the rows the sky blended in
  * linear light turned back into bytes (blending them in linear light first is ours; the client's own blend is
  * client code), the sun's direction (toward it), the fill's (our runtime's own, 45 degrees up on the far side
- * from the sun) and the light's depth range. Writes into the existing vectors and allocates nothing.
+ * from the sun) and each cascade's depth range (`range`: one number for every cascade, or each cascade's own in order, a
+ * cascade past the list taking the last; a range of nought or less leaves the one there). Writes into the existing
+ * vectors and allocates nothing.
  */
-export function updateCardLight(rows: CardSkyRows, sun: THREE.Vector3, range: number): void {
+export function updateCardLight(rows: CardSkyRows, sun: THREE.Vector3, range: number | ArrayLike<number>): void {
   const t = CARD_LIGHT_TUNE;
   const u = CARD_LIGHT_UNIFORMS;
   bytesInto(u.uSwgCardFront.value, rows.front, rows.frontScale, t);
@@ -558,7 +563,19 @@ export function updateCardLight(rows: CardSkyRows, sun: THREE.Vector3, range: nu
     if (h > 1e-6) u.uSwgCardFillDir.value.set(-sun.x / h, 1, -sun.z / h).normalize();
     else u.uSwgCardFillDir.value.set(0, 1, 0);
   }
-  if (range > 0) u.uSwgLeafRange.value = range;
+  const ranges = u.uSwgLeafRange.value;
+  if (typeof range === 'number') {
+    if (range > 0) ranges.setScalar(range);
+  } else {
+    let last = 0;
+    for (let i = 0; i < 4; i++) {
+      const v = i < range.length ? range[i] : last;
+      if (v > 0) {
+        ranges.setComponent(i, v);
+        last = v;
+      }
+    }
+  }
   if (!ready) {
     ready = true;
     writeCardLightUniforms();

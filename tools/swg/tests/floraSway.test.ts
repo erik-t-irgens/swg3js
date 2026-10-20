@@ -57,14 +57,18 @@ const meshesOf = (scenes: THREE.Object3D[]): THREE.Mesh[] => {
   ok(/this\.withTarget\(r, bound, \(\) => portals\.drawShadowsOnly/.test(body) && body.includes('new THREE.WebGLRenderTarget('), 'with a target bound, as a shadow draw always has one');
   ok(body.includes('this.scene.add(s)') && body.includes('this.scene.remove(s)') && body.indexOf('this.scene.remove(s)') > body.indexOf('finally'), 'and the stand-ins stand in the scene for those draws alone, taken out whatever happens');
   const portal = readFileSync(fileURLToPath(new URL('../../../src/world/portalRender.ts', import.meta.url)), 'utf8');
-  const draw = portal.slice(portal.indexOf('drawShadowsOnly(scene'), portal.indexOf('drawShadowsOnly(scene') + 600);
+  // The method whole (since the performance pass's sixth wave it also asks every cascade's map and calls the hooks).
+  const drawAt = portal.indexOf('drawShadowsOnly(scene');
+  const drawEnd = drawAt >= 0 ? portal.slice(drawAt).search(/\r?\n {2}\}\r?\n/) : -1;
+  const draw = drawAt >= 0 && drawEnd > 0 ? portal.slice(drawAt, drawAt + drawEnd) : '';
   ok(draw.includes('this.shadingShadows = true') && draw.includes('r.shadowMap.needsUpdate = true') && draw.includes('r.render(this.passScenes.forShadows(scene), this.shadowProbe)'), "the portal renderer's shadow-only draw is its own shadow pass: the probe, through the shadow pass's own scene, the maps marked for drawing, and its stray draws dropped");
   ok(src.indexOf('this.compileShadowDepth(r, target, objects)') > src.indexOf('this.compileFor(r, camera, objects.slice(i, i + BATCH), target)') && src.indexOf('this.compileShadowDepth(r, target, objects)') < src.indexOf('for (const s of placed) s.dispose()'), "after the sweep's own compiles, over everything it compiled, before the placed stand-ins are let go");
   ok(body.includes('...swayDepthCombos()]') && body.indexOf('...swayDepthCombos()]') < body.indexOf('swayDepthStandIns(swaying, set.name)'), 'and over the fixed combinations as well, so a placed tier streamed in later finds its depth program built');
   // Wave 8: the plain combinations and the grass's depth material go into the very same draws (and since the
   // performance pass's second wave the skinned bodies' combinations too).
   const loop = body.slice(body.indexOf('for (const set of sets) {'));
-  const drawn = loop.indexOf('const drawn: THREE.Object3D[] = [...standIns, ...plain, ...skinned];');
+  // The performance pass's sixth wave added the shadow batches' one combination after them.
+  const drawn = loop.indexOf('const drawn: THREE.Object3D[] = [...standIns, ...plain, ...skinned, batched];');
   const added = loop.indexOf('this.scene.add(s);');
   const shadowDraw = loop.indexOf('portals.drawShadowsOnly(this.scene)');
   ok(drawn > 0 && added > drawn && shadowDraw > added && /for \(const s of drawn\) \{[\s\S]{0,160}this\.scene\.add\(s\);/.test(loop) && /finally \{\s*for \(const s of drawn\) this\.scene\.remove\(s\);/.test(loop), 'the plain and skinned combinations stand in the scene beside the sway\'s stand-ins for the shadow-only draw of each light set, and are taken out in the `finally`');

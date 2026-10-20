@@ -55,11 +55,13 @@ for (const defs of [new Set<string>(), new Set(['USE_FOG']), new Set(['USE_FOG',
 // The trees' chunk and the card light's declarations held to the text they had before either was cut (SHA-256 of
 // each as it stood at 8e16276, measured from that commit's own modules): a part that gained or lost so much as a
 // newline at a join would change every tree's and every card's program key, and every one of them would be built
-// again. A change made on purpose moves the hash here with it.
+// again. A change made on purpose moves the hash here with it: the card light's moved with the performance pass's sixth
+// wave, whose leaf skip takes each cascade's own depth range (`uSwgLeafRange` a vec4, `swgLeafBias` handed the
+// cascade's index).
 const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
 ok(sha(SWAY_PARS) === 'bd2f0e8473272e9cf9a6bd34e8ed6b97b253e09fc6d2b9c59ee8737db9a00eb8' && SWAY_PARS.length === 2205, `the trees' chunk is the very text it was before it was cut in three (sha-256 ${sha(SWAY_PARS).slice(0, 12)}, ${SWAY_PARS.length} characters)`);
 ok(SWAY_PARS.includes('uniform vec2 uSwayFade;\nuniform vec4 uSwayShape;\nuniform vec4 uSwayAxis;\nfloat swgSwayHash(') && SWAY_PARS === SWAY_SHARED_PARS + SWAY_MODEL_PARS + SWAY_FUNCTIONS, 'and its three parts meet with one newline at each join, as the uncut chunk read');
-ok(sha(CARD_LIGHT_PARS) === '6e7ecb90147f2ef633b119c4ce72fc7ec18e2e65767c3cd2f712543151deee12' && CARD_LIGHT_PARS.length === 3160, `the card light's declarations are the very text they were before the curve was cut out of them (sha-256 ${sha(CARD_LIGHT_PARS).slice(0, 12)}, ${CARD_LIGHT_PARS.length} characters)`);
+ok(sha(CARD_LIGHT_PARS) === '3ed47f08c02fdbb3317f99148d532907446eddb6b47e83524ae2135705fb3e15' && CARD_LIGHT_PARS.length === 3470, `the card light's declarations are the very text they were before the curve was cut out of them (sha-256 ${sha(CARD_LIGHT_PARS).slice(0, 12)}, ${CARD_LIGHT_PARS.length} characters)`);
 ok(CARD_LIGHT_PARS.includes(`varying vec3 vSwgStoredNormal;\n${CARD_CURVE_PARS}#endif\n`) && CARD_CURVE_PARS.startsWith('// Three\'s ACES fit carried back') && CARD_CURVE_PARS.endsWith('}\n'), 'and the curve sits in them where it always did, between the stored normal and the `#endif`');
 ok(count(GRASS_VERTEX, SWAY_FUNCTIONS) === 1 && count(GRASS_VERTEX, SWAY_SHARED_PARS) === 1, 'the sway\'s functions and its shared uniforms are in the grass exactly once');
 ok(count(GRASS_VERTEX, 'vec3 swgSwayOffset(') === 1 && count(GRASS_VERTEX, 'swgSwayOffset(') === 2, 'its one function, defined once and called once a vertex');

@@ -23,6 +23,7 @@ import { boxDistance, floorAt, footprintOf, gameX, gameZ, hostRadiusOf, hostReac
 import { namedCellIndex } from './cloning.ts';
 import { buildingWithRoomIn } from './roomOf.ts';
 import { LevelGroup } from './levelGroup.ts';
+import type { ShadowBatches, TierBatch } from './shadowBatches.ts';
 import { LOD_LEVEL_TUNE, sweepDue } from './lodLevels.ts';
 import type { BuildingDoors, DoorsFile } from './doorMath.ts';
 import type { DressingStand, StandAnswer } from './permanent.ts';
@@ -299,6 +300,13 @@ interface LoadedTier {
    * is the region's own and holds placements whose build was skipped or never reached.
    */
   instances: number;
+  /**
+   * How many of `meshes` the bulk build made (`instance`): a placement made in play pushes its own after them and only
+   * ever splices its own out, so these lead the list for the tier's life. What the shadow batches may take of it.
+   */
+  bulk: number;
+  /** Its still casters batched for the shadow pass (`shadowBatches.ts`), once its meshes are shown; null for none. */
+  batch: TierBatch | null;
 }
 
 /**
@@ -1699,17 +1707,43 @@ export class LayoutStreamer {
    */
   private async loadTier(region: Region, tier: number): Promise<void> {
     const loaded = await this.buildTier(region, tier);
-    if (!loaded || !this.prepare || !loaded.meshes.length) return;
-    // The meshes went in hidden: they are shown once their programs exist, so no frame is ever the
-    // first to draw a material nothing had built. The tier is already recorded, so an unload while
-    // this waits takes them out in the ordinary way and the guard below drops the reveal.
-    try {
-      await this.prepare(loaded.meshes);
-    } catch (err) {
-      console.warn('snapshot: a tier could not be compiled ahead of its first draw; shown anyway', err);
+    if (!loaded) return;
+    if (this.prepare && loaded.meshes.length) {
+      // The meshes went in hidden: they are shown once their programs exist, so no frame is ever the
+      // first to draw a material nothing had built. The tier is already recorded, so an unload while
+      // this waits takes them out in the ordinary way and the guard below drops the reveal.
+      try {
+        await this.prepare(loaded.meshes);
+      } catch (err) {
+        console.warn('snapshot: a tier could not be compiled ahead of its first draw; shown anyway', err);
+      }
+      if (this.disposed || region.tiers[tier] !== loaded) return;
+      for (const mesh of loaded.meshes) this.reveal(mesh);
     }
-    if (this.disposed || region.tiers[tier] !== loaded) return;
-    for (const mesh of loaded.meshes) this.reveal(mesh);
+    // Shown, its still casters go to the shadow batches (with no `prepare` they were shown as they were made).
+    if (!this.disposed && region.tiers[tier] === loaded) this.batchTier(loaded);
+  }
+
+  /** What the shadow batches are, for the streamer (`shadowBatches.ts`); null leaves every caster as it was. */
+  shadowBatches: ShadowBatches | null = null;
+
+  /**
+   * A shown tier's still casters handed to the shadow batches: its own instanced meshes of the bulk build that are not
+   * a level group's (handed over as their groups), nor furniture, nor of a material that never casts; the batches judge
+   * the rest (their side, their cut, their layer) and leave whatever they do not take casting as it always did.
+   */
+  private batchTier(loaded: LoadedTier): void {
+    const sb = this.shadowBatches;
+    if (!sb || loaded.batch) return;
+    const plain: THREE.InstancedMesh[] = [];
+    const n = Math.min(loaded.bulk, loaded.meshes.length);
+    for (let i = 0; i < n; i++) {
+      const m = loaded.meshes[i] as THREE.InstancedMesh;
+      if (!m.isInstancedMesh || this.levelOfMesh.has(m) || this.furnitureOfMesh.has(m) || m.userData.casterRadius === undefined) continue;
+      if (!castsShadow(m.material)) continue;
+      plain.push(m);
+    }
+    loaded.batch = sb.take(plain, loaded.levels);
   }
 
   /** The loading half of a tier, holding one of the streamer's slots for exactly as long as it loads. */
@@ -1885,7 +1919,7 @@ export class LayoutStreamer {
     }
     this.loadedModels += byModel.size;
     this.loadedInstances += objects.length;
-    return { meshes, buildings, objects, effects, waters, furniture, levels, instances: objects.length };
+    return { meshes, buildings, objects, effects, waters, furniture, levels, instances: objects.length, bulk: meshes.length, batch: null };
   }
 
   /** Whether each loaded model's pack files it as flora, asked once a model (`packFlora`). */
@@ -2381,6 +2415,9 @@ export class LayoutStreamer {
   private unloadTier(region: Region, tier: number): void {
     const t = region.tiers[tier];
     if (!t || t === 'loading') return;
+    // Its shadow batch goes with it (its geometry and textures; the material is the session's).
+    if (t.batch) this.shadowBatches?.drop(t.batch);
+    t.batch = null;
     for (const b of t.buildings) this.dropInterior(b);
     for (const mesh of t.meshes) {
       this.scene.remove(mesh);

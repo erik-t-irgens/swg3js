@@ -63,7 +63,13 @@ const SECTION_DEFS = [
   { key: 'draw', parent: '' },
   { key: 'roomAir', parent: 'draw' },
   { key: 'portals', parent: 'draw' },
+  // The scene's one matrix walk a frame, made just before the shadow pass (the performance pass's sixth wave), so the
+  // `shadows` line under it is the shadow pass and nothing else.
+  { key: 'sceneWalk', parent: 'portals' },
   { key: 'shadows', parent: 'portals' },
+  // The work round each shadow pass (the sixth wave's hooks: the batches following their sources and swapping their
+  // casting, the cascades' holds told what was drawn), timed apart so neither line hides the other's cost.
+  { key: 'shadowHooks', parent: 'portals' },
   { key: 'worldPass', parent: 'portals' },
   { key: 'interiors', parent: 'portals' },
   { key: 'doorways', parent: 'portals' },
@@ -158,6 +164,12 @@ const COUNTER_DEFS = [
   { key: 'bodiesSkipped', group: 'people', label: 'bodies skipped', kind: 'mean', scale: 1 },
   { key: 'emptyOff', group: 'people', label: 'empty meshes off', kind: 'last', scale: 1 },
   { key: 'smallOff', group: 'people', label: 'small parts off', kind: 'last', scale: 1 },
+  // The sixth wave: the sun's cascades drawn this frame (`shadowCadence.ts`), the holds a guard refused, and the still
+  // casters the shadow batches draw and the batches standing (`shadowBatches.ts`).
+  { key: 'cascadesDrawn', group: 'shadows', label: 'cascades drawn', kind: 'mean', scale: 1 },
+  { key: 'holdsRefused', group: 'shadows', label: 'holds refused', kind: 'sum', scale: 1 },
+  { key: 'batchedCasters', group: 'shadows', label: 'batched casters', kind: 'last', scale: 1 },
+  { key: 'shadowBatches', group: 'shadows', label: 'shadow batches', kind: 'last', scale: 1 },
   { key: 'strays', group: '', label: 'strays', kind: 'mean', scale: 1 },
   { key: 'caster0', group: '', label: 'caster0', kind: 'mean', scale: 1 },
   { key: 'caster1', group: '', label: 'caster1', kind: 'mean', scale: 1 },

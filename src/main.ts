@@ -37,6 +37,9 @@ import { LOD_TUNE } from './world/mobiles/lod.ts';
 import { BODY_WALK, BODY_WALK_STATS, endBodyWalkFrame } from './world/mobiles/bodyGroup.ts';
 import { CROWD_SWITCHES, CROWD_TUNE, listsMover, tuneCrowd, type CrowdTune } from './world/mobiles/crowd.ts';
 import { crowdDialsFor } from './world/mobiles/crowdDials.ts';
+import { shadowDialsFor } from './world/shadowDials.ts';
+import { SHADOW_PASS_TUNE, tuneShadowPass } from './world/shadowCadence.ts';
+import type { AbReport } from './core/perfMath.ts';
 import { FAR_TILE_TUNE } from './world/farTile.ts';
 import { FAR_PROBE, FAR_PROBE_STATS } from './world/mobiles/groundProbe.ts';
 import { FLORA_WARM } from './world/flora.ts';
@@ -604,6 +607,8 @@ interface PerfDebugOptions {
   census?: boolean;
   ab?: { key: string; a?: unknown; b?: unknown };
   fly?: { speed?: number; seconds?: number; heading?: number; alt?: number };
+  /** Degrees a second the camera's yaw turns on every frame of play the run or the window lasts, both sides of an A/B alike: a turning case. */
+  spin?: number;
   mark?: string;
   at?: string;
   marks?: boolean;
@@ -620,6 +625,8 @@ const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false
 (window as unknown as { __stats: typeof stats }).__stats = stats;
 const tmp = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
+/** The world's up, for the shadow picture test's step of the view (`shadowCompare`). */
+const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const roomLightSpots: import('./vehicles/interior').RoomLight[] = [];
 /** Handed to the feet where a manager has no list yet, so no frame makes an empty array of its own. */
 const EMPTY_BODIES: readonly never[] = [];
@@ -855,6 +862,8 @@ class App {
    * safety timer measures from.
    */
   private perfFlight: { speed: number; heading: number; seconds: number; alt: number; t: number; dist: number; wasNoclip: boolean; wasTiming: boolean; askedAt: number; startedAt: number; resolve: (r: TraceReport | null) => void } | null = null;
+  /** Radians a second the frame report turns the view's yaw while a run with `spin` lasts (nought otherwise). */
+  private perfSpin = 0;
   private readonly canvas = document.getElementById('game') as HTMLCanvasElement;
   private readonly ui = document.getElementById('ui') as HTMLElement;
   private readonly renderer: THREE.WebGLRenderer;
@@ -1916,6 +1925,49 @@ class App {
       },
       values: [false, true],
       note: 'the four exact fixes of the third wave at once: both walk skips, the empty meshes and the mover list',
+    });
+    // The sixth wave, each first value the old way: the far cascades drawn by age and held where their maps were drawn
+    // (`shadowCadence.ts`), and a tier's still casters drawn into the shadow maps as one batch (`shadowBatches.ts`); and
+    // both at once against neither. The ground casting or not measures and changes nothing that ships; and each shadow
+    // map's depth: 'slice' the old one, which left the far band's ground across the sun unshadowed, 'whole' the owner's
+    // answer to Q8, which ships.
+    registerPerfSwitch('shadowCadence', {
+      get: () => SHADOW_PASS_TUNE.cadence,
+      set: (v) => {
+        SHADOW_PASS_TUNE.cadence = !!v;
+        this.world.shadowHold.dirtyAll();
+      },
+      values: [false, true],
+      note: "the middle and far cascades drawn only once their maps reach their ages (`SHADOW_PASS_TUNE.maxAgeMs`), each held where it was drawn while it covers the view; false draws every cascade every frame. What stands still is drawn the same; a moving thing's shadow 54 to 320 m off may trail it by up to the ages",
+    });
+    registerPerfSwitch('shadowBatches', {
+      get: () => SHADOW_PASS_TUNE.batches,
+      set: (v) => (SHADOW_PASS_TUNE.batches = !!v),
+      values: [false, true],
+      note: "each loaded region tier's still placed casters drawn into the shadow maps as one batch, the sources casting nothing for the pass; false leaves every source casting as it always did (the batches stay built). `localStorage['swg.shadowBatches'] = '0'` makes none at all from the next load",
+    });
+    registerPerfSwitch('shadowBoth', {
+      get: () => (SHADOW_PASS_TUNE.cadence && SHADOW_PASS_TUNE.batches ? true : !SHADOW_PASS_TUNE.cadence && !SHADOW_PASS_TUNE.batches ? false : 'mixed'),
+      set: (v) => {
+        if (v !== true && v !== false) return;
+        SHADOW_PASS_TUNE.cadence = v;
+        SHADOW_PASS_TUNE.batches = v;
+        this.world.shadowHold.dirtyAll();
+      },
+      values: [false, true],
+      note: 'the cadence and the batches at once, against neither',
+    });
+    registerPerfSwitch('groundShadows', {
+      get: () => this.world.groundShadows,
+      set: (v) => this.world.setShadowSwitches({ groundShadows: v === 'off' ? 'off' : 'on' }),
+      values: ['on', 'off'],
+      note: "measures, never ships: 'off' takes the ground's chunks out of the shadow maps, the most a batch of the ground could save",
+    });
+    registerPerfSwitch('farDepth', {
+      get: () => this.world.shadowFarDepth,
+      set: (v) => this.world.setShadowSwitches({ farDepth: v === 'whole' ? 'whole' : 'slice' }),
+      values: ['slice', 'whole'],
+      note: "each shadow camera's depth: 'whole' (ships, the owner's Q8) reaches its whole slice (the far one about 908 m), so the far shadows reach the ground across the sun; 'slice' is the old depth, which left the far band's ground there unshadowed, to compare",
     });
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
     this.world.attachCamera(this.cam.camera, true, this.portals);
@@ -5269,7 +5321,7 @@ class App {
           colours: { front: bytes(u.uSwgCardFront.value), tangent: bytes(u.uSwgCardTangent.value), back: bytes(u.uSwgCardBack.value), ambient: bytes(u.uSwgCardAmbient.value), fill: bytes(u.uSwgCardFill.value), bounce: bytes(u.uSwgCardBounce.value), row7: bytes(u.uSwgCardRow7.value), row7Alpha: Math.round(u.uSwgCardRow7Alpha.value * 255) },
           sun: u.uSwgLeafSun.value.toArray().map((v) => Number(v.toFixed(3))),
           fillDirection: u.uSwgCardFillDir.value.toArray().map((v) => Number(v.toFixed(3))),
-          leafRange: Number(u.uSwgLeafRange.value.toFixed(1)),
+          leafRange: u.uSwgLeafRange.value.toArray().slice(0, 3).map((v) => Number(v.toFixed(1))),
           escapeHatches: { light: CARD_LIGHT_ON ? 'on' : "off (localStorage['swg.cardLight'] = '0')", leafShadow: LEAF_SHADOW_ON ? 'on' : "off (localStorage['swg.leafShadow'] = 'all')" },
           cards: { marked: CARD_LIGHT_STATS.marked, wrapped: CARD_LIGHT_STATS.injected, uninstalled: CARD_LIGHT_STATS.missingAnchor, missing: [...CARD_LIGHT_STATS.missing], replaced: { ...CARD_LIGHT_STATS.replaced } },
           cardMeshesNotReceiving: notReceiving,
@@ -6467,10 +6519,14 @@ class App {
           gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
           if (was) this.renderer.setRenderTarget(was);
         };
+        // The cascades decided before each frame drawn, as play decides them, so the bench times the shadow pass the
+        // frames really draw (held cascades skipped) rather than whatever the last frame of play left due.
+        this.world.updateShadows(performance.now());
         this.drawFrame();
         sync();
         const t0 = performance.now();
         for (let i = 0; i < n; i++) {
+          this.world.updateShadows(performance.now());
           this.drawFrame();
           sync();
         }
@@ -9065,6 +9121,24 @@ class App {
         };
       },
       /**
+       * The town's shadow pass (the sixth wave, `src/world/shadowCadence.ts`, `shadowBatches.ts`): each cascade's age now
+       * and its limit, how often it was drawn a second, whether it is held this frame and why it was last drawn, and its
+       * held box's offset from this frame's fit; the guards' refusals a second by reason; the batches; the movers listed
+       * this frame and the cascades they reach; the plain casters' warm; the switches and the frame rate. `{ tune }` moves
+       * `SHADOW_PASS_TUNE` (in memory, never saved; the debug menu has the numbers of the eye as sliders), `{ redraw: true }`
+       * marks every cascade dirty, `{ farDepth: 'slice' }` puts the far map's old depth back to compare with 'whole' (which
+       * ships, Q8), `{ groundShadows }` sets the switch that measures, and `{ compare: 'hold' }` / `{ compare: 'batches' }`
+       * are the picture tests on the effects' scene target. None of it is saved.
+       */
+      shadowPass: (opts?: { tune?: Record<string, unknown>; redraw?: boolean; farDepth?: 'slice' | 'whole'; groundShadows?: 'on' | 'off'; compare?: 'hold' | 'batches' }) => {
+        const words = opts?.tune ? tuneShadowPass(opts.tune) : [];
+        if (opts?.tune) this.world.shadowHold.dirtyAll();
+        if (opts?.redraw) this.world.shadowHold.dirtyAll();
+        if (opts?.farDepth || opts?.groundShadows) this.world.setShadowSwitches({ farDepth: opts.farDepth, groundShadows: opts.groundShadows });
+        const compared = opts?.compare ? this.shadowCompare(opts.compare) : null;
+        return { ...(words.length ? { words } : {}), ...(compared ? { compared } : {}), ...this.shadowPassReport() };
+      },
+      /**
        * The indoor pathing: `nav()` says whether this pack carries floor meshes at all, how many
        * rooms name one, how many have been read, how many searches have been asked for and what
        * became of each, and what the last one cost; `nav({ reach: 0.6, every: 0.25 })` moves any of
@@ -10736,7 +10810,7 @@ class App {
       // The race drive's, the engines' and a race run's numbers of feel, as sliders when `race`, `engines` or `track` is
       // picked, the NPC ship ladder's tiers 6 to 10 when `npcShips` is, how a far body is drawn when `crowd` is, and
       // the world's own dials (Restuss's state) when theirs is.
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? worldDialsFor(helper),
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? worldDialsFor(helper),
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -11669,6 +11743,8 @@ class App {
     if (!this.world.day.paused) this.placeBar.follow(this.world.day.time * 24);
     this.effects.update(dt);
     this.world.updateWeatherView(dt);
+    // A shoot's frame lists no fast mover: nothing it draws flies.
+    this.world.shadowMovers.begin();
     this.world.updateShadows(performance.now());
     this.player.drawBlades(dt, cam);
     this.stepAudio(dt);
@@ -17922,6 +17998,10 @@ class App {
     // fire along the nose; the bolts are the game's own and strike what a blaster's would, ships included.
     if (simulate && pilot?.spec.ship && !this.hyperspace.drives(pilot)) this.aimShip(pilot, dt);
     else this.shipLeadValid = false;
+    // The physics steps the hulls' places stand at as each copies its body's below (the frame's own step comes after):
+    // what the cascades' fast movers time a hull's distance in, never the frame's step (`listVehicleMovers`). Above the
+    // race's pair, which a test reads as neighbours.
+    this.world.shadowMovers.steps[0] = this.physics.steps;
     // Other players' rides drawn near the hull the player races, for its turn's nudge away from them.
     this.fillRaceNear(pilot === player.mounted ? pilot : null);
     for (const v of this.world.vehicles) {
@@ -19547,7 +19627,15 @@ class App {
       const b = 'b' in o.ab ? o.ab.b : sw.values[1];
       const frames = o.frames ?? 240;
       waitForPlay(`the run starts then (${frames} frames of play); \`await __debug.perf({ cancel: true })\` stops it`);
-      const r = await perf.ab(o.ab.key, a, b, frames, o.block ?? PERF_TUNE.block);
+      const spin = typeof o.spin === 'number' && Number.isFinite(o.spin) ? o.spin : 0;
+      this.perfSpin = (spin * Math.PI) / 180;
+      let r: AbReport;
+      try {
+        r = await perf.ab(o.ab.key, a, b, frames, o.block ?? PERF_TUNE.block);
+      } finally {
+        this.perfSpin = 0;
+      }
+      if (spin) r.notes.push(`the view turned at ${spin} degrees a second for the whole run, both sides alike`);
       say(perf.formatAb(r));
       return r;
     }
@@ -19591,9 +19679,17 @@ class App {
     perf.ensureFrames(n);
     if (o.gpu === true && this.postfx?.timer.enabled) say('perf: the effects chain\'s own timer is on and holds the GPU timer for the whole scene; `__debug.fxTiming(false)` first for GPU times by pass');
     waitForPlay(`the report prints here after ${n} frames of play`);
-    const fresh = await perf.whenTimed(n);
+    const spin = typeof o.spin === 'number' && Number.isFinite(o.spin) ? o.spin : 0;
+    this.perfSpin = (spin * Math.PI) / 180;
+    let fresh: number;
+    try {
+      fresh = await perf.whenTimed(n);
+    } finally {
+      this.perfSpin = 0;
+    }
     const r = perf.report(n);
     if (fresh < n) r.notes.push(`the wait ran out with ${fresh} of ${n} frames of play since it was asked; the rest are from before`);
+    if (spin) r.notes.push(`the view turned at ${spin} degrees a second for the window`);
     say(perf.format(r));
     return r;
   }
@@ -19962,6 +20058,206 @@ class App {
     }
   }
 
+  /** What `__debug.shadowPass()` reports: the cascades, the refusals, the batches, the movers, the warm, the switches. The console's alone. */
+  private shadowPassReport(): Record<string, unknown> {
+    const w = this.world;
+    const hold = w.shadowHold.report(performance.now());
+    const m = w.shadowMovers;
+    const movers: { kind: string; speed: number; reaches: number[] }[] = [];
+    for (let j = 0; j < m.n; j++) {
+      const reaches: number[] = [];
+      for (let i = 0; i < 4; i++) if (m.reached[j] & (1 << i)) reaches.push(i);
+      movers.push({ kind: m.kind[j], speed: Number(m.speed[j].toFixed(1)), reaches });
+    }
+    const warm = w.shadowDepthWarm;
+    return {
+      frameRate: hold.frameRate,
+      cascades: hold.cascades,
+      refusedPerSecond: hold.refusedPerSecond,
+      batches: w.shadowBatches.report(),
+      movers: { listed: m.n, over: m.over, list: movers },
+      warm: { plain: warm.plain, skinned: warm.skinned, batched: warm.batched, sway: warm.standIns, programs: warm.programs, ms: Number(warm.ms.toFixed(1)) },
+      switches: { cadence: SHADOW_PASS_TUNE.cadence, batches: SHADOW_PASS_TUNE.batches, groundShadows: w.groundShadows, farDepth: w.shadowFarDepth },
+      tune: { ...SHADOW_PASS_TUNE, maxAgeMs: [...SHADOW_PASS_TUNE.maxAgeMs] },
+    };
+  }
+
+  /**
+   * The shadow pass's picture tests (`__debug.shadowPass({ compare })`), read off the effects' scene target as the portal
+   * renderer drew it (never the canvas, whose effects move every frame), every frame drawn preceded by `updateShadows` so
+   * the holds decide as in play, the people out and nothing stepped between draws. `'hold'`: two fresh draws (the noise
+   * floor); the held maps from boxes moved as a fit some frames old stands (37 and -23 texels across the light, 7.3 m
+   * toward the slice), the view standing, and again from a step the middle cascade's guards take too (6 and -4 texels, 1.5 m:
+   * `gentle`); and the turning pair, the view stepped 4 degrees between the held maps' draw
+   * and the frame grabbed, against a fresh draw at the stepped view, with the old depth (`farDepth` 'slice') and with the
+   * depth that ships ('whole'); and `farGround`, the two fresh draws at the stepped view against each other, which is the
+   * share of the picture the far map's whole depth (Q8) shades that the old one left unshadowed.
+   * `'batches'`: two draws with the batches off against one with them on, every batch made whole first. Each pair says
+   * the share of pixels over 8 and over 32 levels (sRGB, out of the linear target) and the mean, and the last pictures
+   * are kept as PNG addresses on `window.__shadowPictures`. Allocates freely; the switches are put back as they were.
+   */
+  private shadowCompare(kind: 'hold' | 'batches'): Record<string, unknown> {
+    if (!this.inWorld) return { error: 'no world to draw' };
+    const fx = this.postfx;
+    const target = fx ? fx.sceneTarget : null;
+    if (!target) return { error: 'the effects are off: the picture tests read their scene target (turn Effects on)' };
+    const w = this.world;
+    const t = SHADOW_PASS_TUNE;
+    const cam = this.cam.camera;
+    const wasTune = { cadence: t.cadence, batches: t.batches, ages: [...t.maxAgeMs] };
+    const wasPeople = this.peopleSwitch();
+    const wasFar = w.shadowFarDepth;
+    const W = target.width;
+    const H = target.height;
+    const raw = new Uint16Array(W * H * 4);
+    const toLevel = (h: number): number => {
+      const v = THREE.DataUtils.fromHalfFloat(h);
+      const c = v <= 0 ? 0 : v >= 1 ? 1 : v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+      return Math.round(c * 255);
+    };
+    const grab = (): Uint8Array => {
+      w.updateShadows(performance.now());
+      this.drawFrame();
+      this.renderer.readRenderTargetPixels(target, 0, 0, W, H, raw);
+      const out = new Uint8Array(W * H * 3);
+      for (let i = 0, k = 0; i < raw.length; i += 4, k += 3) {
+        out[k] = toLevel(raw[i]);
+        out[k + 1] = toLevel(raw[i + 1]);
+        out[k + 2] = toLevel(raw[i + 2]);
+      }
+      return out;
+    };
+    const differ = (a: Uint8Array, b: Uint8Array): { over8: number; over32: number; mean: number } => {
+      let o8 = 0;
+      let o32 = 0;
+      let sum = 0;
+      const n = a.length / 3;
+      for (let k = 0; k < a.length; k += 3) {
+        const d = Math.max(Math.abs(a[k] - b[k]), Math.abs(a[k + 1] - b[k + 1]), Math.abs(a[k + 2] - b[k + 2]));
+        sum += d;
+        if (d > 8) o8++;
+        if (d > 32) o32++;
+      }
+      return { over8: Number(((100 * o8) / n).toFixed(3)), over32: Number(((100 * o32) / n).toFixed(4)), mean: Number((sum / n).toFixed(3)) };
+    };
+    const png = (a: Uint8Array, b?: Uint8Array): string => {
+      const c = document.createElement('canvas');
+      c.width = W;
+      c.height = H;
+      const g = c.getContext('2d');
+      if (!g) return '';
+      const img = g.createImageData(W, H);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const k = ((H - 1 - y) * W + x) * 3;
+          const o = (y * W + x) * 4;
+          if (b) {
+            const d = Math.max(Math.abs(a[k] - b[k]), Math.abs(a[k + 1] - b[k + 1]), Math.abs(a[k + 2] - b[k + 2]));
+            img.data[o] = d > 32 ? 255 : d > 8 ? 255 : 0;
+            img.data[o + 1] = d > 32 ? 0 : d > 8 ? 200 : 0;
+            img.data[o + 2] = 0;
+            if (d <= 8) {
+              img.data[o] = img.data[o + 1] = img.data[o + 2] = a[k] >> 2;
+            }
+          } else {
+            img.data[o] = a[k];
+            img.data[o + 1] = a[k + 1];
+            img.data[o + 2] = a[k + 2];
+          }
+          img.data[o + 3] = 255;
+        }
+      }
+      g.putImageData(img, 0, 0);
+      return c.toDataURL('image/png');
+    };
+    const pictures: Record<string, string> = {};
+    const decisions = (): string => w.shadowHold.reason.slice(0, 3).join(' ');
+    try {
+      this.setPeopleSwitch('out');
+      if (kind === 'batches') {
+        t.cadence = false;
+        w.shadowBatches.buildAll();
+        t.batches = false;
+        grab();
+        const a1 = grab();
+        const a2 = grab();
+        t.batches = true;
+        grab();
+        const b = grab();
+        pictures.unbatched = png(a2);
+        pictures.batched = png(b);
+        pictures.diff = png(a2, b);
+        (window as unknown as { __shadowPictures: unknown }).__shadowPictures = pictures;
+        return { kind, size: [W, H], floor: differ(a1, a2), batched: differ(a2, b), batches: w.shadowBatches.report() };
+      }
+      // The noise floor: two fresh draws.
+      t.cadence = false;
+      grab();
+      const a1 = grab();
+      const a2 = grab();
+      // The held maps, the view standing: every cascade drawn at boxes moved off the fit, then held there.
+      t.cadence = true;
+      t.maxAgeMs.length = 0;
+      t.maxAgeMs.push(0, 1e9, 1e9);
+      w.shadowHold.dirtyAll();
+      w.updateShadows(performance.now());
+      w.shadowDisplace(37, -23, 7.3);
+      this.drawFrame();
+      const held = grab();
+      const heldWhy = decisions();
+      pictures.fresh = png(a2);
+      pictures.held = png(held);
+      pictures.heldDiff = png(a2, held);
+      // The same with a step the middle cascade's guards take as well (6 and -4 texels, 1.5 m), so both far maps are held.
+      w.shadowHold.dirtyAll();
+      w.updateShadows(performance.now());
+      w.shadowDisplace(6, -4, 1.5);
+      this.drawFrame();
+      const gentle = grab();
+      const gentleWhy = decisions();
+      pictures.gentle = png(gentle);
+      pictures.gentleDiff = png(a2, gentle);
+      // The turning pair: a fresh draw at this view, the view stepped 4 degrees, held where the guards let it be, against
+      // a fresh draw at the stepped view; with the old depth, then with the far map's depth reaching its whole slice (Q8).
+      const freshAt: Record<string, Uint8Array> = {};
+      const turn = (whole: boolean): Record<string, unknown> => {
+        w.setShadowSwitches({ farDepth: whole ? 'whole' : 'slice' });
+        t.cadence = true;
+        w.shadowHold.dirtyAll();
+        grab();
+        cam.rotateOnWorldAxis(UP_AXIS, (4 * Math.PI) / 180);
+        cam.updateMatrixWorld();
+        const stepped = grab();
+        const why = decisions();
+        t.cadence = false;
+        const fresh = grab();
+        cam.rotateOnWorldAxis(UP_AXIS, (-4 * Math.PI) / 180);
+        cam.updateMatrixWorld();
+        const tag = whole ? 'Whole' : 'Slice';
+        freshAt[tag] = fresh;
+        pictures[`turnFresh${tag}`] = png(fresh);
+        pictures[`turnHeld${tag}`] = png(stepped);
+        pictures[`turnDiff${tag}`] = png(fresh, stepped);
+        return { farDepth: whole ? 'whole' : 'slice', decisions: why, pair: differ(fresh, stepped) };
+      };
+      const turnSlice = turn(false);
+      const turnWhole = turn(true);
+      // The far band's ground the whole depth gives back: the two fresh draws at the stepped view, old depth against new.
+      pictures.farGroundDiff = png(freshAt.Slice, freshAt.Whole);
+      const farGround = differ(freshAt.Slice, freshAt.Whole);
+      (window as unknown as { __shadowPictures: unknown }).__shadowPictures = pictures;
+      return { kind, size: [W, H], floor: differ(a1, a2), held: { decisions: heldWhy, pair: differ(a2, held) }, gentle: { decisions: gentleWhy, pair: differ(a2, gentle) }, turning: [turnSlice, turnWhole], farGround };
+    } finally {
+      t.cadence = wasTune.cadence;
+      t.batches = wasTune.batches;
+      t.maxAgeMs.length = 0;
+      t.maxAgeMs.push(...wasTune.ages);
+      w.setShadowSwitches({ farDepth: wasFar });
+      this.setPeopleSwitch(wasPeople);
+      w.shadowHold.dirtyAll();
+    }
+  }
+
   /** The `people` perf switch as it stands: the creatures' and people's container out of the scene, hidden, or in. */
   private peopleSwitch(): 'on' | 'out' | 'hidden' {
     const group = this.world.mobiles?.group;
@@ -20308,6 +20604,22 @@ class App {
     for (let i = 0; i < leaves.length; i++) out.add(leaves[i], false, 'vehicle', null, null, true);
     this.remotes.collectMovers(out);
   };
+
+  /**
+   * This frame's fast movers for the sun's cascade holds (`shadowCadence.ts`): the world's vehicles (a shuttle that
+   * carries somebody among them, its rig made a vehicle), the stood shuttles in flight, and every other player's ride and
+   * figure, each written only while faster than `fastMover`, with the cached ground under each. After `stepAudio`, which
+   * poses the shuttles, and before `updateShadows`. Allocates nothing.
+   */
+  private fillShadowMovers(dt: number): void {
+    const m = this.world.shadowMovers;
+    m.dt[0] = dt;
+    m.begin();
+    this.world.vehicleMovers(m);
+    this.shuttleRigs?.shadowMovers(m);
+    this.remotes.shadowMovers(m);
+    this.world.moverGround(m);
+  }
 
   /** The follow sphere of the vehicle followed now, and what it was measured from: dropped when nothing is followed. */
   private followRoot: THREE.Object3D | null = null;
@@ -28475,6 +28787,8 @@ class App {
       // The frame report's flight (`__debug.perf({ fly })`): the body carried along over the ground at a
       // set speed, on frames of play only, which are the only ones its trace records.
       if (this.perfFlight && simulate) this.stepPerfFlight(dt);
+      // The frame report's turning case (`__debug.perf({ spin })`): the view's yaw turned at a set rate on frames of play only.
+      else if (this.perfSpin !== 0 && simulate) this.cam.yaw += this.perfSpin * dt;
       perf.end(SEC.player);
 
       perf.begin(SEC.vehicles);
@@ -28609,6 +28923,9 @@ class App {
       if (player.mounted?.riderHidden) player.group.visible = false;
       // After the physics step and the camera: the falling weather around this frame's camera.
       this.world.updateWeatherView(dt);
+      // What moves fast enough to draw a far cascade every frame it could cast into (the sixth wave): after `stepAudio`
+      // above, which poses the shuttles, and before the cascades are decided.
+      this.fillShadowMovers(dt);
       this.world.updateShadows(performance.now());
 
       // The short bar of things you can press. Its state is gathered a few times a second into one

@@ -220,6 +220,11 @@ export class LevelGroup {
     return this.draws.length;
   }
 
+  /** Copy `i`'s own place and turn, as the group was handed it, into `out`: where a shadow batch stands that copy (`shadowBatches.ts`). */
+  matrixOf(i: number, out: THREE.Matrix4): THREE.Matrix4 {
+    return out.fromArray(this.mats, i * 16);
+  }
+
   /** Its programs exist: each level shown as its copies say. */
   setReady(): void {
     if (this.ready) return;

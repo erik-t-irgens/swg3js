@@ -266,8 +266,10 @@ const PACKS = process.env.SWG3JS_PACKS ?? fileURLToPath(new URL('../../../assets
     const s = m as THREE.MeshStandardMaterial;
     return `${instanced}|${sideOf(m)}|${s.alphaTest > 0}|${s.map ? s.map.channel : 'none'}|${s.alphaMap ? s.alphaMap.channel : 'none'}`;
   };
-  const fixed = new Set(combos.map((c) => keyOf(true, c.material as THREE.Material)));
-  ok(combos.length === fixed.size && fixed.size === 15 && combos.every((c) => c.isInstancedMesh && c.castShadow && !c.customDepthMaterial), `the warm-up's plain combinations are ${fixed.size} instanced casters on three's own depth material, each a way apart`);
+  const instancedOf = (c: THREE.Mesh): boolean => (c as THREE.InstancedMesh).isInstancedMesh === true;
+  const fixed = new Set(combos.map((c) => keyOf(instancedOf(c), c.material as THREE.Material)));
+  // The sixth wave added the fifteen that are not instanced (a door's leaf, a camp's wire, a vehicle's pieces).
+  ok(combos.length === fixed.size && fixed.size === 30 && combos.filter(instancedOf).length === 15 && combos.every((c) => c.castShadow && !c.customDepthMaterial), `the warm-up's plain combinations are ${fixed.size} casters on three's own depth material, fifteen instanced and fifteen not, each a way apart`);
   ok(plainDepthCombos('test') === combos && plainDepthCombos('other') !== combos && (plainDepthCombos('other')[0].material as THREE.Material) !== combos[0].material, 'kept for the session by light set, each set with sources of its own (so each gets a clone of its own)');
   // Three's own rule, played over them as its shadow pass draws them (`WebGLShadowMap.getDepthMaterial`, then
   // `WebGLRenderer.setProgram`): a caster with a picture or an alpha picture and a cut is drawn through a clone made
@@ -278,24 +280,30 @@ const PACKS = process.env.SWG3JS_PACKS ?? fileURLToPath(new URL('../../../assets
   const play = (hook: boolean): Set<string> => {
     const shared = new THREE.MeshDepthMaterial();
     let seenVersion = shared.version;
+    // Three also chooses again when the draw's instancing differs from the shared material's last draw's.
+    let lastInstanced: boolean | null = null;
     const chosen = new Set<string>();
     for (const c of combos) {
       const m = c.material as THREE.MeshStandardMaterial;
+      const inst = instancedOf(c);
       const clone = (!!m.map || !!m.alphaMap) && m.alphaTest > 0;
       const depth = clone ? new THREE.MeshDepthMaterial() : shared;
       depth.side = sideOf(m);
       depth.map = m.map;
       depth.alphaMap = m.alphaMap;
       if (hook) c.onBeforeShadow(null as never, c, null as never, null as never, c.geometry, depth, null as never);
-      if (clone || depth.version !== seenVersion) chosen.add(keyOf(true, m));
-      if (!clone) seenVersion = shared.version;
+      if (clone || depth.version !== seenVersion || (!clone && inst !== lastInstanced)) chosen.add(keyOf(inst, m));
+      if (!clone) {
+        seenVersion = shared.version;
+        lastInstanced = inst;
+      }
     }
     return chosen;
   };
   ok(combos.every((c) => c.onBeforeShadow === chooseDepthProgram), 'every one hangs the hook that makes the depth material three hands it choose its program again');
   const withHook = play(true);
   const without = play(false);
-  ok(withHook.size === fixed.size && without.size < fixed.size, `under three's rule each of the ${fixed.size} chooses a program of its own (${withHook.size}); without the hook the shared material's ${fixed.size - 6} keys would have come to none of their own (${without.size} chosen, the clones'), left for a live frame`);
+  ok(withHook.size === fixed.size && without.size < fixed.size, `under three's rule each of the ${fixed.size} chooses a program of its own (${withHook.size}); without the hook the shared material's ${fixed.size - 12} keys would have come to almost none of their own (${without.size} chosen, the clones' and the two where the instancing turned), left for a live frame`);
   const packs = floraPacks(PACKS);
   if (!packs.length) console.log(`skip the packs: no pack with flora under ${PACKS}`);
   else {

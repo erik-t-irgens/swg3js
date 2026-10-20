@@ -6,7 +6,10 @@
 // off both are the first wave's (its fourteen variants, no depth combinations), so the hatch compares against the old
 // way rather than a mix of the two. With the packs on disk
 // (SWG3JS_PACKS, else assets-private) every converted skinned primitive's combination, padded to its rung, must be
-// inside both lists; that part prints counts only.
+// inside both lists; that part prints counts only. And since the sixth wave the plain casters' list (`plainDepthCombos`):
+// thirty, every side by every way a picture can be in the key, instanced and not, beside the shadow batches' one
+// combination cast from the back, with every rigid primitive the placed pieces, camps, doors, the garage, the ships and
+// the shuttles carry inside it.
 import assert from 'node:assert/strict';
 import { closeSync, existsSync, openSync, readdirSync, readSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -143,6 +146,60 @@ function glbs(dir: string, out: string[]): string[] {
     ok(missedVelocity.size === 0, `every one's velocity variant, padded to its rung, is in the warm list (${[...missedVelocity].map(([k, n]) => `${k}:${n}`).join(' ') || 'none missed'})`);
     ok(missedDepth.size === 0, `every one's depth combination, padded to its rung, is in the warm list (${[...missedDepth].map(([k, n]) => `${k}:${n}`).join(' ') || 'none missed'})`);
     ok(pastTop === 0, `no converted skinned primitive carries more targets than the top rung, so none keeps its own count (${pastTopFiles.join(', ') || 'none'})`);
+  }
+}
+
+// ---- 4. The plain casters' combinations (the sixth wave): instanced and not, and the shadow batches' one. ----
+{
+  const { plainDepthCombos, batchedDepthCombo } = await import('../../../src/world/floraSway.ts');
+  const { shadowBatchMaterial } = await import('../../../src/world/shadowBatches.ts');
+  const kindOfPlain = (m: THREE.MeshStandardMaterial): string => {
+    const cut = m.alphaTest > 0;
+    if (m.alphaMap) return cut ? 'alphaCut' : 'alphaPictured';
+    return m.map ? (cut ? 'cut' : 'pictured') : 'plain';
+  };
+  const plain = plainDepthCombos('warmLists.test');
+  const plainKeys = new Set(plain.map((s) => `${(s as THREE.InstancedMesh).isInstancedMesh === true} ${sideWord((s.material as THREE.Material).side)} ${kindOfPlain(s.material as THREE.MeshStandardMaterial)}`));
+  ok(plain.length === 30 && plainKeys.size === 30, `the plain combinations are thirty, each its own key (${plainKeys.size})`);
+  for (const inst of [true, false]) for (const side of ['back', 'double', 'front']) for (const kind of ['plain', 'pictured', 'cut', 'alphaPictured', 'alphaCut']) ok(plainKeys.has(`${inst} ${side} ${kind}`), `${inst ? 'instanced' : 'not instanced'}, drawn from ${side === 'double' ? 'both sides' : `the ${side}`}, ${kind}, is in it`);
+  const batched = batchedDepthCombo('warmLists.test', shadowBatchMaterial());
+  const bm = batched.material as THREE.Material;
+  ok(batched.isBatchedMesh && bm.side === THREE.FrontSide && bm.shadowSide === null && batched.castShadow && !batched.frustumCulled, 'the batches\' one combination is a batch cast from its back (a front-sided material with no shadow side)');
+  ok(batchedDepthCombo('warmLists.test', shadowBatchMaterial()) === batched, 'kept for the session by set');
+
+  // Every placed piece's, every camp and door piece's, every garage vehicle's, ship's and shuttle piece's depth combination
+  // on the packs on disk falls inside the plain list (counts only).
+  const PLAIN_FOLDERS = ['doors', join('spawns', 'nests'), 'gallery', 'ships', 'travel'];
+  const worlds = existsSync(PACKS) ? readdirSync(PACKS, { withFileTypes: true }).filter((d) => d.isDirectory() && existsSync(join(PACKS, d.name, 'manifest.json'))).map((d) => d.name) : [];
+  const files = [...PLAIN_FOLDERS, ...worlds].flatMap((f) => glbs(join(PACKS, f), []));
+  if (!files.length) console.log(`skip the packs' plain casters: no pack under ${PACKS}`);
+  else {
+    let primitives = 0;
+    const seen = new Map<string, number>();
+    const missed = new Map<string, string>();
+    for (const file of files) {
+      const j = glbJson(file) as (GltfJson & { materials?: { alphaMode?: string; doubleSided?: boolean; pbrMetallicRoughness?: { baseColorTexture?: unknown }; extras?: { swg?: { alphaMap?: number; alphaTest?: number } } }[] }) | null;
+      if (!j?.meshes) continue;
+      const skinned = new Set<number>();
+      for (const n of j.nodes ?? []) if (n.skin !== undefined && n.mesh !== undefined) skinned.add(n.mesh);
+      j.meshes.forEach((mesh, mi) => {
+        if (skinned.has(mi)) return;
+        for (const p of mesh.primitives ?? []) {
+          primitives++;
+          const mat = p.material !== undefined ? j.materials?.[p.material] : undefined;
+          const map = !!mat?.pbrMetallicRoughness?.baseColorTexture;
+          const alpha = typeof mat?.extras?.swg?.alphaMap === 'number';
+          const cut = mat?.alphaMode === 'MASK' || (mat?.extras?.swg?.alphaTest ?? 0) > 0;
+          const side = mat?.doubleSided ? 'double' : 'back';
+          const kind = alpha ? (cut ? 'alphaCut' : 'alphaPictured') : map ? (cut ? 'cut' : 'pictured') : cut ? 'cut without a picture' : 'plain';
+          const key = `${side} ${kind}`;
+          seen.set(key, (seen.get(key) ?? 0) + 1);
+          if (!plainKeys.has(`true ${key}`) || !plainKeys.has(`false ${key}`)) missed.set(key, relative(PACKS, file));
+        }
+      });
+    }
+    console.log(`     ${primitives} rigid primitives over ${files.length} models (placed pieces, camps, doors, the garage, ships, shuttles): ${[...seen].map(([k, n]) => `${k} ${n}`).join(', ')}`);
+    ok(primitives > 0 && missed.size === 0, `every one's depth combination, instanced or not, is in the plain list (${[...missed].map(([k, f]) => `${k}: ${f}`).join('; ') || 'none missed'})`);
   }
 }
 

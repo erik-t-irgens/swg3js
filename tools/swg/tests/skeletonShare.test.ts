@@ -468,7 +468,9 @@ function skinnedUnder(root: THREE.Object3D): THREE.SkinnedMesh[] {
   ok(/if \(\(p === 'prone'\) !== wasProne\) this\.applyCull\(\);\s*(\/\/[^\n]*\n\s*)*else if \(\(p === 'kneel'\) !== wasKneeling\) this\.applyCull\(\);/.test(setNpc), 'and so does a fighter');
   // The shadow rule: the manager asks the world's boxes with the same slack as the screen, and the world refreshes them after the cascades move.
   ok(/sphere\.radius = radius \+ tune\.shadowSlack;\s*inCascades = reachesCascades\(boxes, sphere\);/.test(manager) && /i\.inCascades = inCascades;/.test(manager), "the manager asks whether a body's sphere, with the shadow slack, reaches a cascade's box");
-  ok(/csm\.update\(\);\s*refreshCascadeBoxes\(csm\.lights, this\.cascadeBoxes\);/.test(worldSrc) && /shadowBoxes: \(\) => \(this\.csm \? this\.cascadeBoxes : null\),/.test(worldSrc), 'and the world hands it the boxes, refreshed right after the cascades move');
+  // Since the performance pass's sixth wave the cascades' holds are decided between the two (a held light is put back
+  // before its matrix is worked out), and nothing else is.
+  ok(/csm\.update\(\);\s*(\/\/[^\n]*\n\s*)*if \(this\.camera\) \{\s*const drawn = this\.shadowHold\.decide\([^;]*\);\s*perf\.count\([^;]*\);\s*perf\.count\([^;]*\);\s*\}\s*refreshCascadeBoxes\(csm\.lights, this\.cascadeBoxes\);/.test(worldSrc) &&/shadowBoxes: \(\) => \(this\.csm \? this\.cascadeBoxes : null\),/.test(worldSrc), 'and the world hands it the boxes, refreshed right after the cascades move');
 }
 
 console.log(`\n${checks} checks passed`);

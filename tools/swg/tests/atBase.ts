@@ -15,16 +15,22 @@ export const PASS_BASE = '4cb694d57d260065341d73ca5214955b59f8051e';
 
 const REPO = fileURLToPath(new URL('../../../', import.meta.url));
 
-/** `rel` (from the repository's root) as it stood at `PASS_BASE`, imported; null where git cannot answer. */
-export async function atBase<T>(rel: string): Promise<T | null> {
+/**
+ * `rel` (from the repository's root) as it stood at `rev` (by default `PASS_BASE`), imported; null where git cannot answer.
+ * Its relative imports and its imports of three are pointed at today's tree, so a module that imports three shares the
+ * very instance the test does (a scratch folder has no `node_modules` to find it in).
+ */
+export async function atBase<T>(rel: string, rev: string = PASS_BASE): Promise<T | null> {
   let text: string;
   try {
-    text = execFileSync('git', ['show', `${PASS_BASE}:${rel}`], { cwd: REPO, encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\r\n/g, '\n');
+    text = execFileSync('git', ['show', `${rev}:${rel}`], { cwd: REPO, encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\r\n/g, '\n');
   } catch {
     return null;
   }
   const from = dirname(resolve(REPO, rel));
-  const out = text.replace(/from '(\.\.?\/[^']+)'/g, (_m, p: string) => `from '${pathToFileURL(resolve(from, p)).href}'`);
+  const out = text
+    .replace(/from '(\.\.?\/[^']+)'/g, (_m, p: string) => `from '${pathToFileURL(resolve(from, p)).href}'`)
+    .replace(/from '(three(?:\/[^']*)?)'/g, (_m, p: string) => `from '${import.meta.resolve(p)}'`);
   const dir = mkdtempSync(join(tmpdir(), 'swg3js-at-base-'));
   const file = join(dir, rel.split('/').pop()!);
   writeFileSync(file, out);
