@@ -17,7 +17,7 @@ import * as THREE from 'three';
 import { ActorRoutes, ROUTE_KIND, ROUTE_PASS, ROUTE_TUNE } from '../../../src/world/portalCull.ts';
 import { PORTAL_CULL, PortalVisibility, type PortalCullTune, type VisBuilding } from '../../../src/world/portalVis.ts';
 import { PortalRenderer } from '../../../src/world/portalRender.ts';
-import { ROOM_DEFER, ROOM_DEFER_STATS, deferRooms, roomJob, type RoomCompile, type RoomQueue } from '../../../src/world/roomDefer.ts';
+import { ROOM_DEFER, ROOM_DEFER_STATS, deferRooms, roomJob, urgentRooms, type RoomCompile, type RoomQueue } from '../../../src/world/roomDefer.ts';
 import { ProgramQueue } from '../../../src/core/programQueue.ts';
 import type { Portal } from '../../../src/world/assetPack.ts';
 
@@ -289,6 +289,47 @@ function place(r: ActorRoutes, x: number, y: number, z: number, radius: number):
   deferRooms(notPromoted, [obj('f')], 'a look that stays outdoors (its rooms)', compile, queue);
   await pumpAll();
   ok(compiled[0] === 'scenery tier3', `and without that the scenery pushed first is compiled first, so the check above can fail (${compiled.join()})`);
+
+  // A warm body's rooms pass (`urgentRooms`, the fourth wave): through the same queue, at the urgent rank, not counted as
+  // deferred, ready once it is answered, and what its turns built handed over then.
+  compiled.length = 0;
+  const lookups: RoomCompile = (o) => {
+    compiled.push(nameOf(o));
+    return { made: 0, done: true };
+  };
+  const deferredBefore = ROOM_DEFER_STATS.deferred;
+  void q.push([obj('tier4')], 'the placed-object streamer');
+  const warm = roomJob();
+  const builtSeen: number[] = [];
+  urgentRooms(warm, [obj('w1'), obj('w2')], 'a warm look (its rooms, warm)', lookups, queue, (n) => builtSeen.push(n));
+  ok(!warm.ready && ROOM_DEFER_STATS.deferred === deferredBefore, 'pushed, the handle is not ready until it is answered, and it is not counted as a deferral');
+  ok(compiled.length === 0, 'and nothing is compiled on the call itself: its turns wait for the queue, like any other work');
+  await pumpAll();
+  ok(compiled[0] === 'w1' && compiled[1] === 'w2' && compiled.includes('scenery tier4') && warm.ready, `its turns go ahead of the scenery pushed before it, and it is ready once answered (${compiled.join()})`);
+  ok(builtSeen.join() === '0', 'and what its turns built (nothing: key lookups) is handed over once, as it is answered');
+  compiled.length = 0;
+  const hole = roomJob();
+  const holeSeen: number[] = [];
+  urgentRooms(hole, [obj('h1'), obj('h2')], 'a look the warm missed (its rooms, warm)', compile, queue, (n) => holeSeen.push(n));
+  await pumpAll();
+  ok(hole.ready && holeSeen.join() === '2', `a rooms pass that built after all is counted (${holeSeen.join()}): the hole the console names`);
+  compiled.length = 0;
+  const warmGone = roomJob();
+  const goneSeen: number[] = [];
+  urgentRooms(warmGone, [obj('g')], 'a warm look trimmed (its rooms, warm)', lookups, queue, (n) => goneSeen.push(n));
+  warmGone.gone = true;
+  await pumpAll();
+  ok(compiled.length === 0 && !warmGone.ready && goneSeen.length === 0, 'an owner gone while it waits compiles nothing, is never ready and hands nothing over');
+  compiled.length = 0;
+  const warmDropped = roomJob();
+  const droppedSeen: number[] = [];
+  urgentRooms(warmDropped, [obj('x')], 'a warm look a world let go (its rooms, warm)', compile, queue, (n) => droppedSeen.push(n));
+  q.clear();
+  await tick();
+  ok(!warmDropped.ready && droppedSeen.length === 0, 'let go unbuilt by a world unloading, it stays not ready and hands nothing over');
+  warmDropped.promote();
+  await pumpAll();
+  ok(compiled.join() === 'x' && warmDropped.ready && droppedSeen.join() === '1', 'asked for again, it is built, ready, and hands over what it built');
 }
 
 // ---- 6. No light is hung under a mobile's or a fighter's root. ----

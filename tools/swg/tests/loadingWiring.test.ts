@@ -44,6 +44,12 @@ function method(text: string, signature: string): string {
   const wait = settle.indexOf('while ((!this.world.bodiesUp || wildWaiting > 0) && performance.now() < kicked + LOADING_TUNE.standWaitMs)');
   ok(again > people && wait > again && wait < sweep, 'the people again just before the sweep, then the bodies, and any creature site still waiting for its ground, waited for, bounded by standWaitMs from when they were first stood');
   ok(/let wildWaiting = this\.world\.standWildNow\(this\.player\.worldPos\);/.test(settle), "the wait is handed the creatures' own count of sites waiting for their ground");
+  // The fourth wave: every shape a person's or a rack weapon's material can take, compiled behind the screen.
+  const personWarm = settle.indexOf('const personWarm = this.world.warmPersonShapes()');
+  const personWait = settle.indexOf('await personWarm;');
+  ok(personWarm > firstLoop && personWarm < people, "the people's shapes are begun after the settle's first loop and before anybody is stood");
+  ok(personWait > personWarm && personWait < sweep && settle.lastIndexOf("this.loadingScreen.setWhat(\"the people's shaders\");", personWait) > personWarm, "and waited for before the sweep, said under the title as they are");
+  ok(/const personWarm = this\.world\.warmPersonShapes\(\)\.catch\(/.test(settle), 'a warm that fails is said and never stops the screen');
   ok(/const kicked = performance\.now\(\);/.test(settle) && settle.indexOf('const kicked') < people, 'the bound runs from the first stand');
   ok(/the people here, \$\{n\.up\} of \$\{n\.of\}/.test(settle), "the line under the title says the people here, n of m");
   ok(/if \(wildWaiting > 0\) wildWaiting = this\.world\.standWildNow/.test(settle.slice(wait)), 'a creature site waiting for its ground is tried again inside the bound');

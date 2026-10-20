@@ -282,7 +282,10 @@ export function isReflective(material: THREE.Material): material is THREE.MeshSt
   return !!m.isMeshStandardMaterial && (m.metalnessMap !== null || m.metalness > 0.05 || m.roughness < 0.5);
 }
 
-/** Whether anything under `root` would take a preview's own environment (`EnvironmentSwap`): a shader with a cube, or with `plain` one with none. */
+/**
+ * Whether anything under `root` would take a preview's own environment (`EnvironmentSwap`): a shader with a cube, a
+ * person's material the fourth wave gave the environment at nought (`swgPersonEnv`), or with `plain` one with none.
+ */
 export function takesEnvironment(root: THREE.Object3D, plain = false): boolean {
   let any = false;
   root.traverse((o) => {
@@ -291,7 +294,7 @@ export function takesEnvironment(root: THREE.Object3D, plain = false): boolean {
     if (!mat) return;
     for (const m of Array.isArray(mat) ? mat : [mat]) {
       if (!(m as THREE.MeshStandardMaterial).isMeshStandardMaterial) continue;
-      if (m.userData.swgCube === true || (plain && m.userData.swgCube === false)) any = true;
+      if (m.userData.swgCube === true || m.userData.swgPersonEnv === true || (plain && m.userData.swgCube === false)) any = true;
     }
   });
   return any;
@@ -382,6 +385,10 @@ export class EnvironmentSwap {
     let k: number;
     if (cube === true) k = REFLECTIONS.models ? 1 : 0;
     else if (cube === false && this.plainToo) k = REFLECTIONS.plain;
+    // A person's material the fourth wave gave the world's environment at nought (`personKeys.ts`, `swgPersonEnv`, its
+    // strength nought by `swgEnvBase`): the world's filtered texture is nothing in this context, so it takes the studio,
+    // at a share of nought as before. One whose superset the pixel test has taken off carries none and is left alone.
+    else if (m.userData.swgPersonEnv === true && m.envMap !== null) k = REFLECTIONS.plain;
     else return;
     const i = this.count++;
     this.held[i] = m;

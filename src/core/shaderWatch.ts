@@ -681,6 +681,14 @@ export class ProgramWatch {
   }
 
   /**
+   * The phase a cache key was last built in, or null for one the history does not hold (built before the watch, or
+   * dropped by its cap): what the person keys' count of programs built in play reads a material's own programs by.
+   */
+  phaseOf(cacheKey: string): ProgramPhase | null {
+    return this.history.get(cacheKey)?.phase ?? null;
+  }
+
+  /**
    * The same records with each one's cache key beside it, for whatever must sort them by what the program is rather
    * than by its label (`playKindOf`): the console's own list leaves the keys out, which are long.
    */

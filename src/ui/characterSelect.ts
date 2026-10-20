@@ -355,6 +355,11 @@ export class CharacterSelect {
     );
   }
 
+  /** The stage's own preview, made if the stage has not made it yet: for the person keys' self test (`__debug.personKeys`). */
+  stagePreview(): CharacterPreview {
+    return this.previewFor();
+  }
+
   private previewFor(): PreviewHooks {
     if (this.preview) return this.preview;
     const p: PreviewHooks = new CharacterPreview();

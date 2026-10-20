@@ -9,6 +9,9 @@
 // (`ActorRoutes`, its `F_NOROOM` flag) never show the body in a building's pass, and with the routes off for the frame
 // the portal renderer hides every body on the world's pending list around each rooms pass. A record that counts in a
 // room while not room-ready has its job made urgent (`RoomJob.promote`). A body stood indoors keeps both passes urgent.
+// A body whose every material is on programs the person warm built (the fourth wave, `personKeys.ts`) has its rooms
+// pass pushed at the urgent rank instead (`urgentRooms`): key lookups, paced like the rest, ready a frame or two after
+// the body is shown rather than half a second.
 //
 // The deferred work is tied to the life of what it compiles, both ways round (`deferRooms`). Its owner going (a cached
 // look trimmed while its rooms batch waits, a fighter let go) marks the handle `gone`, and the queued work then compiles
@@ -73,10 +76,30 @@ const NOTHING: CompileStep = Object.freeze({ made: 0, done: true }) as CompileSt
 export function deferRooms(later: RoomJob, objects: THREE.Object3D[], label: string, compile: RoomCompile, queue: RoomQueue): void {
   if (later.gone) return;
   ROOM_DEFER_STATS.deferred++;
-  pushRooms(later, objects, label, compile, queue, false);
+  pushRooms(later, objects, label, compile, queue, false, null);
 }
 
-function pushRooms(later: RoomJob, objects: THREE.Object3D[], label: string, compile: RoomCompile, queue: RoomQueue, urgent: boolean): void {
+/**
+ * The rooms pass of a body whose every material is on programs a warm built already (the fourth wave's people,
+ * `personKeys.ts`): pushed at the urgent rank under `later`, so finding them is key lookups paced by the frame's budget
+ * like any queued work, and nothing is built or waited for outright on the frame that asked (a key the warm did not
+ * build is issued and polled as any program built in play). `later` is ready once it is answered, a frame or two
+ * later, and is otherwise the same life as a deferral's: a gone owner compiles nothing, work let go stays not ready and
+ * is asked for again. `built`, if given, is handed what the turns built once the job is answered: nought, unless the
+ * warm's reading has a hole. Not counted as deferred.
+ */
+export function urgentRooms(later: RoomJob, objects: THREE.Object3D[], label: string, compile: RoomCompile, queue: RoomQueue, built?: (made: number) => void): void {
+  if (later.gone) return;
+  let made = 0;
+  const counted: RoomCompile = (o, allowance, resolve) => {
+    const step = compile(o, allowance, resolve);
+    made += step.made;
+    return step;
+  };
+  pushRooms(later, objects, label, counted, queue, true, built ? () => built(made) : null);
+}
+
+function pushRooms(later: RoomJob, objects: THREE.Object3D[], label: string, compile: RoomCompile, queue: RoomQueue, urgent: boolean, answered: (() => void) | null): void {
   later.ready = false;
   let lost = false;
   const own: OwnJob = {
@@ -101,6 +124,7 @@ function pushRooms(later: RoomJob, objects: THREE.Object3D[], label: string, com
       later.ready = true;
       later.promote = noop;
       later.resume = noop;
+      if (answered) answered();
       return;
     }
     // Let go unbuilt: not ready, and asked for again the first time a body of it is wanted.
@@ -108,7 +132,7 @@ function pushRooms(later: RoomJob, objects: THREE.Object3D[], label: string, com
     const again = (asUrgent: boolean) => (): void => {
       if (later.ready || later.gone) return;
       if (asUrgent) ROOM_DEFER_STATS.promoted++;
-      pushRooms(later, objects, label, compile, queue, asUrgent);
+      pushRooms(later, objects, label, compile, queue, asUrgent, answered);
     };
     later.promote = again(true);
     later.resume = again(false);

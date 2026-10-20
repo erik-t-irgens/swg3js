@@ -84,7 +84,8 @@ import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
 import { isShadowCast, isShadowOnly } from '../core/fxRegistry.ts';
 import { ProgramQueue, materialsUnder, pendingPrograms, resolveLinks, type OwnJob } from '../core/programQueue.ts';
 import { LINK_TUNE, LinkFlight, linkMode, type ReadyProgram } from '../core/linkMode.ts';
-import { ROOM_DEFER, deferRooms, type RoomCompile, type RoomJob, type RoomQueue } from './roomDefer.ts';
+import { ROOM_DEFER, deferRooms, urgentRooms, type RoomCompile, type RoomJob, type RoomQueue } from './roomDefer.ts';
+import { PERSON_KEYS_STATS, PERSON_KEYS_TUNE, PERSON_KEYS_WARM, allWarmed, isPersonMaterial, normalisePerson, noteWarmed, signatureStandIns, takesNormalScale, type ProgramLike, type ProgramsOf } from './personKeys.ts';
 import { PASS_STATES } from './passScenes.ts';
 import { PACE_TUNE, QueueWatch, framesFor } from '../core/programPace.ts';
 import { noteProgramTime, pacingHard, shaderBudget } from '../core/shaderWatch.ts';
@@ -4925,13 +4926,17 @@ export class World {
           this.compiledMaterials.add(m);
           isNew = true;
           const std = m as THREE.MeshStandardMaterial;
-          if (std.normalMap && std.normalScale) std.normalScale.copy(this.normalScale);
+          if (takesNormalScale(m)) std.normalScale.copy(this.normalScale);
           // The only place an animated surface is joined: this material is in the scene now.
           if (m.userData.swgTrack || m.userData.swgScroll || m.userData.swgDetail) surfaces.adopt(m);
           // And a model's reflection (worn, held, flown, ridden, a creature's), where its shader has a cube: the
           // environment is in the program key, so it goes on here, before anything compiles, on every path that
           // loads something in play. A planet's own materials registered as their pack loaded them.
           if (m.userData.swgCube === true) joinModelReflections(m);
+          // And a skinned material's or a rack weapon's maps made one superset, with the environment at nought where it
+          // has no cube (the performance pass's fourth wave, `personKeys.ts`): every one of them is in the program key,
+          // so here, after the cube's own join and before the cascades and every wrap below, in this same iteration.
+          if (isPersonMaterial(m, o)) normalisePerson(m, o);
         }
         if (csm && !this.csmMaterials.has(m) && !(m as THREE.ShaderMaterial).isShaderMaterial && m.userData.unlit !== true) {
           csm.setupMaterial(m);
@@ -5385,9 +5390,27 @@ export class World {
       if (ROOM_DEFER.on && this.wouldQueue() && !World.hasLight(objects) && meshes.some((m) => World.passesOf(m).includes(INTERIOR_LAYER))) {
         later.ready = false;
         await this.queueOrBuild(meshes, what, true, this.worldOnlyJob);
-        // The rooms half as work of its own, tied to the life of what it compiles (`deferRooms`): an owner gone compiles
-        // nothing, and work a world's unload lets go leaves the handle not ready, asking again when a body is wanted.
-        deferRooms(later, meshes, `${what} (its rooms)`, this.roomsOnly, this.roomQueue);
+        // The fourth wave (`personKeys.ts`): a body whose every material came out on a program the person warm built has
+        // its rooms programs built already, since the warm compiled every shape of the product for both passes. Its rooms
+        // pass is found at the urgent rank (`urgentRooms`: key lookups, paced by the frame's budget like any queued work,
+        // so a look of twenty meshes never walks the scene's lights twenty times on one frame, and a key the warm did
+        // not build is issued and polled, never built and waited for outright), and it is room-ready a frame or two
+        // after it is shown: the doorway's half-second window stays only for a body with a material outside the product.
+        // Read off the renderer's own records, so nothing is taken as warm that three would not find; one whose rooms
+        // pass built after all is counted and said once.
+        if (allWarmed(meshes, this.programsOf)) {
+          PERSON_KEYS_STATS.roomReady++;
+          urgentRooms(later, meshes, `${what} (its rooms, warm)`, this.roomsOnly, this.roomQueue, (built) => {
+            if (built > 0) {
+              PERSON_KEYS_STATS.roomMissed++;
+              if (PERSON_KEYS_STATS.roomMissed === 1) console.warn(`personKeys: ${what} was taken for warm and its rooms pass built ${built} program(s): the product's reading has a hole`);
+            }
+          });
+        } else {
+          // The rooms half as work of its own, tied to the life of what it compiles (`deferRooms`): an owner gone compiles
+          // nothing, and work a world's unload lets go leaves the handle not ready, asking again when a body is wanted.
+          deferRooms(later, meshes, `${what} (its rooms)`, this.roomsOnly, this.roomQueue);
+        }
         return;
       }
       await this.queueOrBuild(meshes, what, true);
@@ -5844,6 +5867,11 @@ export class World {
       this.adoptMaterials(this.grassStand);
       objects.push(this.grassStand);
     }
+    // Every shape a person's or a rack weapon's material can take (the fourth wave, `personKeys.ts`): behind a screen
+    // `warmPersonShapes` built them before anybody was stood and each costs a key lookup here, and a sweep in play for the
+    // other effects target (the Effects switch) builds them for that target too.
+    const people = PERSON_KEYS_TUNE.on && this.csm ? this.personStandIns() : [];
+    for (const o of people) objects.push(o);
     // Every placed model the old rule would have loaded around the arrival, whose tier the model rule loads
     // later (step 6, `warmPlaced`): a stand-in each, compiled here and let go of after. Only a sweep behind a
     // screen takes them; the Effects switch's in play leaves them for the next one.
@@ -5859,6 +5887,7 @@ export class World {
       if (i + SWEEP_BATCH > placedFrom) placedPrograms += built;
       onProgress(Math.min(objects.length, i + SWEEP_BATCH), objects.length, (r.info.programs?.length ?? 0) - before);
     });
+    if (people.length) noteWarmed(this.programsOf);
     // The shadows' depth programs (`compileShadowDepth`): the loading sweep never builds a depth program, so one
     // stand-in per depth combination is drawn into the shadow maps here as a frame draws them, under the shadow
     // pass's own lights -- the flora's swaying shadows (`floraSway.ts`) over everything the sweep compiled, the
@@ -6004,6 +6033,63 @@ export class World {
     // The stand-ins were drawn into every map at whatever pose the cascades stood: every cascade is drawn whole on the
     // next frame, whatever the portal renderer's hooks did.
     this.shadowHold.dirtyAll();
+  }
+
+  /** The programs a material has been compiled for, off this world's renderer's own records (`personKeys.ts`). Nothing is copied. */
+  readonly programsOf: ProgramsOf = (m) => {
+    const props = this.renderer?.properties as unknown as { has(o: object): boolean; get(o: object): { programs?: Map<unknown, ProgramLike> } } | undefined;
+    if (!props || !props.has(m)) return null;
+    return props.get(m).programs?.values() ?? null;
+  };
+
+  /** Whether the fourth wave's stand-ins have been marked as actors (drawn, so compiled, in both passes). */
+  private personStandInsMarked = false;
+
+  /**
+   * The fourth wave's stand-ins (`signatureStandIns`), one a shape of the product: marked as actors once, so every
+   * compile takes them for the world's pass and the rooms', and adopted (normalised, set up for the cascades, wrapped)
+   * as any person's material is, which after the first time is a set lookup a material. Never in the scene.
+   */
+  private personStandIns(): THREE.Mesh[] {
+    const list = signatureStandIns();
+    if (!this.personStandInsMarked) {
+      for (const s of list) markActor(s);
+      this.personStandInsMarked = true;
+    }
+    for (const s of list) this.adoptMaterials(s);
+    return list;
+  }
+
+  /**
+   * The fourth wave's warm (`personKeys.ts`): every shape of the product compiled for both passes, behind a loading
+   * screen, before anybody is stood, so the people stood behind it find their programs built, and so does every person,
+   * creature and weapon made ready in play after it. Polled in parallel where the machine links in the background
+   * (`sweepBatches`), every program finished before it answers. The session's first screen builds them (about two dozen
+   * programs a pass); every screen after finds them built and costs a key lookup a stand-in and pass. Answers how many
+   * of the stand-ins' programs were new.
+   */
+  async warmPersonShapes(): Promise<number> {
+    const r = this.renderer;
+    const camera = this.camera;
+    if (!r || !camera || !this.csm || !PERSON_KEYS_TUNE.on) return 0;
+    const t0 = performance.now();
+    let highest = -1;
+    for (const p of (r.info.programs ?? []) as unknown as ProgramLike[]) if (p.id > highest) highest = p.id;
+    const list = this.personStandIns();
+    await this.sweepBatches(r, camera, list, this.compileTarget(), () => {});
+    noteWarmed(this.programsOf);
+    let built = 0;
+    for (const p of PERSON_KEYS_WARM.programs) if (p.id > highest) built++;
+    const ms = performance.now() - t0;
+    const w = PERSON_KEYS_WARM;
+    if (w.warms === 0) {
+      w.firstMs = ms;
+      w.firstBuilt = built;
+    }
+    w.warms++;
+    w.lastMs = ms;
+    w.lastBuilt = built;
+    return built;
   }
 
   /**
@@ -7452,7 +7538,8 @@ export class World {
       if (!m) return;
       for (const mat of Array.isArray(m) ? m : [m]) {
         const std = mat as THREE.MeshStandardMaterial;
-        if (std.normalMap && std.normalScale) {
+        // The flat normal a person's material was given (`personKeys.ts`) has no slope for a scale to move.
+        if (takesNormalScale(std)) {
           std.normalScale.set(x, y);
           n++;
         }

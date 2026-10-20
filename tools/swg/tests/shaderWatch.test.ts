@@ -327,6 +327,9 @@ const row = (key: string, name = '', type = 'MeshStandardMaterial'): { id: numbe
   const churn = watch.sample(swapped, 'play', 148);
   ok(churn.made === 1 && churn.dropped === 1 && churn.live === 2, 'a frame that made one and dropped one is caught, which the renderer\'s own count would report as quiet');
   ok(churn.first.includes('5 dir, 12 point'), 'and names what was made');
+  // The phase each key was built in, which `__debug.personKeys().inPlay` reads a material's own programs by.
+  ok(watch.phaseOf(world.cacheKey) === 'loading' && watch.phaseOf(swapped[1].cacheKey) === 'play', 'a key answers the phase it was built in (`phaseOf`): behind the screen, or in play');
+  ok(watch.phaseOf('a key no sample ever held') === null, 'and one the history does not hold answers null, never a phase');
 
   // A key asked for again after its program went is the expensive mistake, and is counted apart.
   watch.sample([world, row(makeKey(ROOM_PASS))], 'play', 164);

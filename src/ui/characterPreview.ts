@@ -415,6 +415,59 @@ export class CharacterPreview {
     this.pitch = 0.05;
   }
 
+  /**
+   * One picture of `root` drawn as this preview draws its doll -- its lights, its studio swapped on for the draw, the
+   * figure stood at the origin and framed head to toe -- straight into a target of its own (sRGB, a clear background),
+   * for the person keys' pixel test (`__debug.personKeys({ selfTest: true })`). The doll's own figure is hidden for the
+   * draw and the clone let go after; the clone's geometry is the body's and is never disposed here (that would free the
+   * world renderer's buffers too). Answers the target's RGBA, bottom row first. The console's alone: it compiles in
+   * this context and allocates freely.
+   */
+  testPicture(root: THREE.Object3D, size = 256): Uint8Array {
+    const copy = cloneSkinned(root);
+    copy.position.set(0, 0, 0);
+    copy.quaternion.identity();
+    copy.updateMatrixWorld(true);
+    copy.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh) m.frustumCulled = false;
+    });
+    const box = meshBounds(copy);
+    const size3 = box.getSize(new THREE.Vector3());
+    const centre = box.getCenter(new THREE.Vector3());
+    copy.position.sub(new THREE.Vector3(centre.x, box.min.y, centre.z));
+    const camera = new THREE.PerspectiveCamera(this.camera.fov, 1, this.camera.near, this.camera.far);
+    camera.layers.enableAll();
+    const half = Math.max(0.2, size3.y / 2);
+    camera.position.set(0, half, this.fitDistance(size3));
+    camera.lookAt(0, half, 0);
+    const target = new THREE.WebGLRenderTarget(size, size, { type: THREE.UnsignedByteType, colorSpace: THREE.SRGBColorSpace });
+    const shown = this.model ? this.model.visible : true;
+    if (this.model) this.model.visible = false;
+    this.pivot.add(copy);
+    const r = this.renderer;
+    const prev = r.getRenderTarget();
+    const clear = r.getClearColor(new THREE.Color());
+    const alpha = r.getClearAlpha();
+    const out = new Uint8Array(size * size * 4);
+    this.envSwap.on(copy, this.studio.textureFor(copy));
+    try {
+      r.setRenderTarget(target);
+      r.setClearColor(0x000000, 0);
+      r.clear();
+      r.render(this.scene, camera);
+      r.readRenderTargetPixels(target, 0, 0, size, size, out);
+    } finally {
+      this.envSwap.off();
+      r.setRenderTarget(prev);
+      r.setClearColor(clear, alpha);
+      this.pivot.remove(copy);
+      if (this.model) this.model.visible = shown;
+      target.dispose();
+    }
+    return out;
+  }
+
   /** Stop drawing and let go of the clone and its buffers in this context. The next `refresh` makes another. */
   release(): void {
     this.stop();
