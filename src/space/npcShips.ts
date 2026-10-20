@@ -3,6 +3,8 @@
 // a while after one is wiped out), and the ships stood from the NPC tab. Each one is an ordinary garage
 // hull built with its tier chassis's fit (the components picked by `pickLoadout`, invented), compiled
 // hidden and held before it is shown, fought through the world's ship contacts and flown by its brain.
+// Any garage ship hull may be stood the same way for a side and tier picked (`standHull`), flying as a
+// type of ours made from the hull's own fields (`hullNpc.ts`).
 //
 // While play is paused (a panel, the map, the menu) every NPC ship is held where it is and nothing
 // thinks, fires or streams; on the first simulated frame each goes on at the cruise it had. Which
@@ -15,11 +17,13 @@ import type { Garage, VehicleDef } from '../vehicles/garage';
 import type { ResolvedFit } from '../vehicles/shipFit';
 import type { Vehicle } from '../vehicles/vehicle';
 import { WING_AUTO } from '../vehicles/wings.ts';
+import { cellIndexOf } from '../vehicles/cells.ts';
 import type { FormationName, NpcTypeDef } from './combatData';
 import { ShipContact, type ShipContacts } from './contacts';
-import type { ShipFaction } from './factions';
+import { FACTION_LABEL, type ShipFaction } from './factions.ts';
+import { HULL_TIERS, NPC_SIDES, hullLayout, hullNpcPlan, npcSideOf, npcTierOf, slotOf, type HullLayoutBase } from './hullNpc.ts';
 import { pickLoadout, seeded } from './loadout';
-import { NpcBrain, type BrainContext } from './npcBrain';
+import { LEASH, NpcBrain, type BrainContext } from './npcBrain';
 import { formationPoint } from './pilot';
 import { FACTION_FORMATION, anchorRecipes, anchorsOf, groupTypes, type AnchorFaction, type Recipe, type SpacePackLike } from './roster';
 
@@ -56,6 +60,25 @@ export interface NpcGroup {
   called: boolean;
   /** Ships still being built for it. */
   pending: number;
+  /**
+   * How far its formation slots are spread over the table's: 1 for every group but one of hulls bigger than a fighter
+   * stood by `standHull` (`hullSpread`), whose slots at the table's own spacing would stand the hulls in each other.
+   */
+  spread: number;
+  /**
+   * Past this from the player its members are not drawn (`HIDE_BEYOND` for every group but one of hulls bigger than a
+   * fighter, `hullLayout`'s `drawReach`: a Star Destroyer patrol stands kilometres past `HIDE_BEYOND` from the start).
+   */
+  drawReach: number;
+  /** How far from its anchor, or where it was stood, its pilots chase (`LEASH` for every group but one of big hulls). */
+  leash: number;
+}
+
+/** How a group is spread, drawn and leashed: what `newGroup` takes; a `HullLayout` is one. */
+interface GroupScale {
+  spread: number;
+  drawReach: number;
+  leash: number;
 }
 
 export interface PatrolAnchor {
@@ -122,6 +145,12 @@ const HAND_AHEAD = 700;
 const HAND_ABOVE = 150;
 /** A spawn's speed, as a share of the top. */
 const LAUNCH_SHARE = 0.6;
+/** Every typed group's (a patrol's, a family's): the table's own slots, drawn to HIDE_BEYOND, leashed to LEASH. */
+const TYPED_SCALE: GroupScale = { spread: 1, drawReach: HIDE_BEYOND, leash: LEASH };
+/** What a hull stood for a side is laid out from (`hullLayout`): this manager's and the brain's own numbers. */
+const LAYOUT_BASE: HullLayoutBase = { hide: HIDE_BEYOND, leash: LEASH, routeOut: ROUTE_OUT[1], routeRise: ROUTE_RISE, above: HAND_ABOVE };
+/** A slot's [x, y, z], kept for `slotOffset`. */
+const slotArr = [0, 0, 0];
 
 const Z = new THREE.Vector3(0, 0, 1);
 const tmp = new THREE.Vector3();
@@ -204,38 +233,59 @@ export class NpcShipManager {
     return seeded(this.seed);
   }
 
-  private newGroup(faction: ShipFaction, anchor: PatrolAnchor | null, byHand: boolean, route: THREE.Vector3[], home: THREE.Vector3): NpcGroup {
-    const g: NpcGroup = { id: this.nextGroupId++, faction, formation: FACTION_FORMATION[faction] ?? 'arrow', members: [], anchor, route, waypoint: 0, byHand, engaged: false, home: home.clone(), called: false, pending: 0 };
+  private newGroup(faction: ShipFaction, anchor: PatrolAnchor | null, byHand: boolean, route: THREE.Vector3[], home: THREE.Vector3, scale: GroupScale = TYPED_SCALE): NpcGroup {
+    const g: NpcGroup = {
+      id: this.nextGroupId++,
+      faction,
+      formation: FACTION_FORMATION[faction] ?? 'arrow',
+      members: [],
+      anchor,
+      route,
+      waypoint: 0,
+      byHand,
+      engaged: false,
+      home: home.clone(),
+      called: false,
+      pending: 0,
+      spread: scale.spread,
+      drawReach: scale.drawReach,
+      leash: scale.leash,
+    };
     this.groups.push(g);
     return g;
   }
 
-  /** Four points round a centre, `out` metres beyond `radius`, rising and sinking within ROUTE_RISE in space (level on a planet). */
-  private makeRoute(centre: THREE.Vector3, radius: number, rng: () => number): THREE.Vector3[] {
+  /** Four points round a centre, `out` metres beyond `radius`, rising and sinking within ROUTE_RISE in space (level on a planet, `above` over the ground). */
+  private makeRoute(centre: THREE.Vector3, radius: number, rng: () => number, above = HAND_ABOVE): THREE.Vector3[] {
     const r = radius + ROUTE_OUT[0] + (ROUTE_OUT[1] - ROUTE_OUT[0]) * rng();
     const turn = rng() * Math.PI * 2;
     const out: THREE.Vector3[] = [];
     for (let i = 0; i < 4; i++) {
       const a = turn + (i * Math.PI) / 2;
       const p = new THREE.Vector3(centre.x + Math.cos(a) * r, centre.y + (this.deps.space ? (rng() * 2 - 1) * ROUTE_RISE : 0), centre.z + Math.sin(a) * r);
-      this.raise(p);
+      this.raise(p, above);
       out.push(p);
     }
     return out;
   }
 
-  /** On a planet, a point at least HAND_ABOVE over the ground. */
-  private raise(p: THREE.Vector3): THREE.Vector3 {
+  /** On a planet, a point at least `above` (HAND_ABOVE unless said) over the ground. */
+  private raise(p: THREE.Vector3, above = HAND_ABOVE): THREE.Vector3 {
     const g = this.deps.groundAt;
-    if (g) p.y = Math.max(p.y, g(p.x, p.z) + HAND_ABOVE);
+    if (g) p.y = Math.max(p.y, g(p.x, p.z) + above);
     return p;
   }
 
-  /** A group's formation slot `i` in the leader's frame (the table's row, or behind and to the side past its rows). */
+  /** A group's formation slot `i` in the leader's frame (the table's row, or behind and to the side past its rows), spread by the group's own spread. */
   private slotOffset(g: NpcGroup, i: number, out: THREE.Vector3): THREE.Vector3 {
     const rows = this.deps.ships.data?.formation(g.formation, !this.deps.space) ?? [];
-    const row = rows[i];
-    return row ? out.set(row[0], row[1], row[2]) : out.set((i % 2 ? 1 : -1) * 40 * Math.ceil(i / 2), 0, -40 * i);
+    return out.fromArray(slotOf(rows, i, g.spread, slotArr));
+  }
+
+  /** The refusal when `count` more would pass the cap (every ship out and every one being built counted), else null. */
+  private capRefusal(count: number): string | null {
+    if (this.ships.length + this.pending + count <= NPC_SHIP_CAP) return null;
+    return `at most ${NPC_SHIP_CAP} NPC ships at once (${this.ships.length} out${this.pending ? `, ${this.pending} coming` : ''}): clear some first`;
   }
 
   /**
@@ -249,7 +299,8 @@ export class NpcShipManager {
     if (!types.length) return `no NPC type of the family ${family}`;
     let type = types[0];
     for (const t of types) if (Math.abs(t.tier - tier) < Math.abs(type.tier - tier)) type = t;
-    if (this.ships.length + this.pending + count > NPC_SHIP_CAP) return `at most ${NPC_SHIP_CAP} NPC ships at once (${this.ships.length} out${this.pending ? `, ${this.pending} coming` : ''}): clear some first`;
+    const full = this.capRefusal(count);
+    if (full) return full;
     const rng = this.newRng();
     tmp.copy(dir);
     if (tmp.lengthSq() < 1e-6) tmp.copy(Z);
@@ -276,16 +327,81 @@ export class NpcShipManager {
   }
 
   /**
-   * Build one NPC ship: its hull from the garage with its tier chassis's fit (the components picked by tier,
-   * invented), prepared and held while hidden, then its contact and combat, its full attitude and speed, its
-   * brain; shown and put in the world's list only then. A spawn that finds the manager disposed (the world
-   * went) or cleared at any wait throws away what it made. `slot` is the formation slot `at` was worked out
+   * Stand `count` of a garage ship hull (any `source: 'ship'` def, the room ships among them) as NPC ships flying for
+   * `side` (one of `NPC_SIDES`, never the player's) at `tier` (1 to 10, every reader of it through the ladder), as a
+   * type of ours made from the hull's own fields (`hullNpcPlan`): the tier chassis's fit where an NPC type the hull
+   * draws has one, the hull's stock fit otherwise. Stood `ahead` metres (700 by default) ahead of `from` along `dir`,
+   * facing back toward it, in the side's formation spread to the hull's size, and further out when the hull is too big
+   * for 700 m (`hullAhead`). The NPC tab and the console both come here. Returns the sentence for the count line.
+   */
+  async standHull(hullId: string, side: unknown, tier: unknown, count: 1 | 3, from: THREE.Vector3, dir: THREE.Vector3, ahead = HAND_AHEAD): Promise<string> {
+    const faction = npcSideOf(side);
+    if (!faction) return `a ship flies for ${NPC_SIDES.join(', ')}; not ${typeof side === 'string' ? `'${side}'` : String(side)}`;
+    const t = npcTierOf(tier);
+    if (t === null) return `a tier is a whole number from ${HULL_TIERS.least} to ${HULL_TIERS.most}; not ${String(tier)}`;
+    const data = this.deps.ships.data;
+    if (!data) return 'no combat.json in the ships pack: convert the ships again';
+    const full = this.capRefusal(count);
+    if (full) return full;
+    const epoch = this.epoch;
+    const garage = await this.deps.garage();
+    if (this.disposed || epoch !== this.epoch) return 'the NPC ships were cleared meanwhile';
+    this.garageNow = garage;
+    const want = hullId.toLowerCase();
+    const hull = garage.vehicles.find((d) => d.source === 'ship' && d.id === hullId) ?? garage.vehicles.find((d) => d.source === 'ship' && d.id.toLowerCase() === want);
+    if (!hull) return `no garage ship ${hullId}`;
+    // Spawns begun while the garage loaded count too.
+    const stillFull = this.capRefusal(count);
+    if (stillFull) return stillFull;
+    const plan = hullNpcPlan(hull, faction, t, data.file.types, (c) => !!data.chassis(c)?.fit);
+    // Laid out for its size (`hullLayout`): a fighter exactly as a typed one is; a bigger hull's slots spread by its
+    // radius, stood out past its own sphere, held higher over the ground on a planet by as much as it is wider than a
+    // fighter, and drawn and leashed as far as its size asks, so no member stands past its own draw distance or leash.
+    const rows = data.formation(FACTION_FORMATION[faction] ?? 'arrow', !this.deps.space);
+    const lay = hullLayout(hull.bounds, rows, count, Math.max(50, ahead), LAYOUT_BASE);
+    const rng = this.newRng();
+    tmp.copy(dir);
+    if (tmp.lengthSq() < 1e-6) tmp.copy(Z);
+    tmp.normalize();
+    const lead = this.raise(from.clone().addScaledVector(tmp, lay.reach), lay.above);
+    const q = lookAlong(lead, from, new THREE.Quaternion());
+    const g = this.newGroup(faction, null, true, this.makeRoute(lead, lay.radius, rng, lay.above), lead, lay);
+    const notes: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const at = new THREE.Vector3();
+      formationPoint(lead, q, slotV.fromArray(lay.slots[i]), at);
+      this.raise(at, lay.above);
+      const r = await this.stand(plan.type, hull, at, q, g, rng);
+      if (this.disposed || epoch !== this.epoch) return 'the NPC ships were cleared meanwhile';
+      if (typeof r === 'string') notes.push(r);
+    }
+    if (!g.members.length && !g.pending) this.dropGroup(g);
+    const got = g.members.length;
+    const fit = plan.fit === 'tier' && plan.from ? `fitted as ${plan.from.id}` : 'on its stock fit';
+    const what = `${plan.type.name} flying for ${FACTION_LABEL[faction]} at tier ${t}${t > 5 ? ' (read through the ladder)' : ''}, ${fit}`;
+    if (!got) return `no ${plan.type.name} could be stood: ${notes.join('; ') || 'unknown'}`;
+    return `${got === 1 ? 'one' : got} ${what}, ${Math.round(lay.reach)} m ahead${this.simulating ? '' : ', held until the panel closes'}${notes.length ? ` (${notes.join('; ')})` : ''}`;
+  }
+
+  /**
+   * Build one NPC ship of a type the combat file carries (`stand`). `slot` is the formation slot `at` was worked out
    * for; the ship takes the group's next place, so one that failed to build leaves no gap in the order.
    */
   async spawnType(typeId: string, at: THREE.Vector3, q: THREE.Quaternion, group: NpcGroup, slot: number, rng: () => number): Promise<NpcShip | string> {
+    const type = this.deps.ships.data?.typeById(typeId) ?? null;
+    if (!type) return `no NPC type ${typeId}`;
+    return this.stand(type, null, at, q, group, rng);
+  }
+
+  /**
+   * Build one NPC ship: its hull from the garage (`hull`, or the one its type is drawn with) with its tier chassis's
+   * fit (the components picked by tier, invented) or the hull's stock fit, prepared and held while hidden, then its
+   * contact and combat, its full attitude and speed, its brain; shown and put in the world's list only then. A spawn
+   * that finds the manager disposed (the world went) or cleared at any wait throws away what it made.
+   */
+  private async stand(type: NpcTypeDef, hull: VehicleDef | null, at: THREE.Vector3, q: THREE.Quaternion, group: NpcGroup, rng: () => number): Promise<NpcShip | string> {
     const data = this.deps.ships.data;
-    const type = data?.typeById(typeId) ?? null;
-    if (!data || !type) return `no NPC type ${typeId}`;
+    if (!data) return `no NPC type ${type.id}`;
     const epoch = this.epoch;
     this.pending++;
     group.pending++;
@@ -294,7 +410,7 @@ export class NpcShipManager {
       const garage = await this.deps.garage();
       this.garageNow = garage;
       if (this.disposed || epoch !== this.epoch) return 'the world changed';
-      const hullDef = garage.vehicles.find((d) => d.id === type.hull && d.source === 'ship') ?? garage.find(type.hull);
+      const hullDef = hull ?? garage.vehicles.find((d) => d.id === type.hull && d.source === 'ship') ?? garage.find(type.hull);
       if (!hullDef) return `no garage hull ${type.hull}`;
       const chassis = data.chassis(type.chassis);
       // Nobody sits in it: no cockpit frame, no rooms; its wings and engine parts stay. With the tier chassis's
@@ -305,6 +421,11 @@ export class NpcShipManager {
       const fit = garage.resolve(npcDef, picked);
       v = await this.deps.spawnHull(npcDef, fit, at, headingOf(q));
       if (this.disposed || epoch !== this.epoch) return 'the world changed';
+      // A hull that is itself a portal building carries its rooms in its model, often larger than the hull round them:
+      // nobody boards an NPC ship, so they stay hidden as a player's ship's do until someone is aboard (`reveal`).
+      v.group.traverse((o) => {
+        if (cellIndexOf(o) > 0) o.visible = false;
+      });
       // What the garage made after the vehicle: the clear glass stand-ins (the glows and trails compiled with the hull).
       const extras: THREE.Object3D[] = [...v.glows, ...v.trails.map((t) => t.mesh), ...v.group.children.filter((o) => o.userData.paneStandIn === true)];
       if (extras.length) await this.deps.prepareExtras(extras);
@@ -338,7 +459,7 @@ export class NpcShipManager {
       // A spawn a travel cancelled (garage.ts SpawnCancelled, told by its name) is no fault worth a warning.
       if (err instanceof Error && err.name === 'SpawnCancelled') return 'the world changed';
       this.tally.failed++;
-      if (msg !== this.lastNote) console.warn(`npc ships: ${typeId} was not stood`, err);
+      if (msg !== this.lastNote) console.warn(`npc ships: ${type.id} was not stood`, err);
       this.lastNote = msg;
       return msg;
     } finally {
@@ -387,14 +508,15 @@ export class NpcShipManager {
       }
     }
     const p = this.deps.playerPos;
-    const far = HIDE_BEYOND * HIDE_BEYOND;
     for (let i = 0; i < this.ships.length; i++) {
       const s = this.ships[i];
       // A patrol put away by `stream` just now is disposed and leaves the list on the next update: its body is gone.
       if (!s.ready || s.vehicle.disposed) continue;
       s.brain.think(dt, now, this.ctx);
-      // Far away: not drawn (the glow's closure then feeds its trails nothing); it still flies.
-      const show = s.vehicle.pos.distanceToSquared(p) <= far;
+      // Far away: not drawn (the glow's closure then feeds its trails nothing); it still flies. How far is its group's
+      // (HIDE_BEYOND, or a big hull's own `drawReach`, which its layout stands every member within).
+      const far = s.group.drawReach;
+      const show = s.vehicle.pos.distanceToSquared(p) <= far * far;
       if (s.vehicle.group.visible !== show) s.vehicle.group.visible = show;
     }
     this.ms.think = performance.now() - t0;
@@ -525,11 +647,18 @@ export class NpcShipManager {
     if (i >= 0) this.groups.splice(i, 1);
   }
 
-  /** How many NPC ships are out (of a family, when given). */
+  /** How many NPC ships are out (of a family of the game's types, when given; a hull stood for a side is its own row's). */
   count(family?: string): number {
     if (!family) return this.ships.length;
     let n = 0;
-    for (const s of this.ships) if (s.type.family === family) n++;
+    for (const s of this.ships) if (s.type.family === family && !s.type.standIn) n++;
+    return n;
+  }
+
+  /** How many of a garage hull are out as NPC ships stood for a side (`standHull`). */
+  countHull(hull: string): number {
+    let n = 0;
+    for (const s of this.ships) if (s.type.standIn && s.type.hull === hull) n++;
     return n;
   }
 
@@ -598,7 +727,7 @@ export class NpcShipManager {
       npcBolts: this.npcBolts,
       tally: { ...this.tally },
       anchors: this.anchors.map((a) => ({ name: a.name, faction: a.faction, distance: n0(a.pos.distanceTo(p)), groups: a.slots.map((s) => `${s.recipe}: ${s.none ? 'no types' : s.state}${s.state === 'asleep' && s.respawnAt > this.now ? ` (back in ${n0(s.respawnAt - this.now)} s)` : ''}`) })),
-      groups: this.groups.map((g) => ({ id: g.id, faction: g.faction, formation: g.formation, byHand: g.byHand, anchor: g.anchor?.name ?? null, engaged: g.engaged, pending: g.pending, members: g.members.map(member) })),
+      groups: this.groups.map((g) => ({ id: g.id, faction: g.faction, formation: g.formation, byHand: g.byHand, anchor: g.anchor?.name ?? null, engaged: g.engaged, pending: g.pending, ...(g.spread !== 1 || g.drawReach !== HIDE_BEYOND || g.leash !== LEASH ? { spread: Number(g.spread.toFixed(2)), drawReach: n0(g.drawReach), leash: n0(g.leash) } : {}), members: g.members.map(member) })),
     };
   }
 

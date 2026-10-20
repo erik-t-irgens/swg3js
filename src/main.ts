@@ -312,6 +312,7 @@ import { ZONE_TIER } from './space/roster';
 import { fillTaunt, pickLine } from './space/taunts';
 import { componentLine } from './space/shipStats';
 import { TIER_LADDER_TUNE, ladderLine, tuneTierLadder } from './space/tierLadder.ts';
+import { HULL_NPC_TUNE, NPC_SIDES, hullNameOf, hullWords, npcShipRoute, tuneHullNpc } from './space/hullNpc.ts';
 import { targetable, type CombatStatus } from './space/shipCombat';
 import type { ShipSpawner } from './ui/npcUi';
 import { HyperspaceCatalogue, arrivalAt, landmarksOf, loadSpacePack, type Destination } from './space/spaceData';
@@ -6844,15 +6845,21 @@ class App {
        * (side, formation, members: type, tier, state, target, shields/armour/hull, shots, hits, distance, ready, paused),
        * NPC bolts in the air, the programs, the portal set's and the cascades' sizes (`materials`, the leak check), and
        * `ms: { think, physics }`. `{ patrols: false }` stops the patrols streaming in, `{ passive: true }` every NPC's fire,
-       * `{ clear: true }` takes every NPC ship away.
+       * `{ clear: true }` takes every NPC ship away, the hulls stood for a side among them.
        */
-      npcShips: (opts: { patrols?: boolean; passive?: boolean; clear?: boolean; ladder?: true | Parameters<typeof tuneTierLadder>[0] } = {}) => {
+      npcShips: (opts: { patrols?: boolean; passive?: boolean; clear?: boolean; ladder?: true | Parameters<typeof tuneTierLadder>[0]; hulls?: true | Partial<typeof HULL_NPC_TUNE> } = {}) => {
         // Tiers 6 to 10 (SOE's families from publish 55 on): `{ ladder: true }` prints the ladder, an object moves it. The
         // skill reaches every pilot in the air at once (the brain reads it at each think); a ship's fit and its strength
         // are made when it is stood, so those reach the next ship stood.
         if (opts.ladder) {
           if (opts.ladder !== true) tuneTierLadder(opts.ladder);
           return { ladder: JSON.parse(JSON.stringify(TIER_LADDER_TUNE)), line: ladderLine(), note: 'skill: ships in the air now; grade and strength: the next ship stood' };
+        }
+        // How a group of hulls bigger than a fighter stood for a side is laid out (src/space/hullNpc.ts): `{ hulls: true }`
+        // prints it, an object moves it; the next group stood takes it.
+        if (opts.hulls) {
+          if (opts.hulls !== true) tuneHullNpc(opts.hulls);
+          return { hulls: { ...HULL_NPC_TUNE }, note: 'slotFits: the radius the formation tables fit, a bigger hull spreads its slots by its own over it; aheadClear: the least room left before the point stood ahead of; the next group stood' };
         }
         const mgr = this.world.npcShips;
         const data = this.world.ships.data;
@@ -6875,20 +6882,30 @@ class App {
       },
       /**
        * Stand NPC ships ahead of the view: `await npcShip('tiefighter_tier1', { distance: 400 })` one of a type, or a family
-       * with `{ tier, count: 3 }` for a patrol in formation; 700 m ahead by default, facing you. Returns the sentence.
+       * with `{ tier, count: 3 }` for a patrol in formation; 700 m ahead by default, facing you. Any garage ship hull flies
+       * for a side picked (`standHull`, src/space/hullNpc.ts): `await npcShip('yt1300', { faction: 'pirate', tier: 3, count: 3 })`,
+       * the hull by its garage id, the side neutral and the tier 1 unless said; naming a side asks for the hull even where a
+       * family has its name (the X-wing's), and a name no type or family has is taken as a hull. Returns the sentence.
        */
-      npcShip: async (what = 'tiefighter', opts: { tier?: number; count?: 1 | 3; distance?: number } = {}) => {
+      npcShip: async (what = 'tiefighter', opts: { tier?: number; count?: 1 | 3; distance?: number; faction?: string } = {}) => {
         const mgr = this.world.npcShips;
         const data = this.world.ships.data;
         if (!mgr) return 'no world loaded';
         if (!data) return "no combat.json in the ships pack: convert the ships again (npm run swg -- ships '@SWG' assets-private --retail-only)";
-        const type = data.typeById(what);
-        const family = type ? type.family : what;
-        const tier = opts.tier ?? type?.tier ?? (this.world.planet.space ? (ZONE_TIER[this.world.planet.id] ?? 3) : 3);
         const p = this.player;
         const flown = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
         const from = (flown ? flown.pos : p.worldPos).clone();
         const dir = this.cam.camera.getWorldDirection(new THREE.Vector3());
+        const type = data.typeById(what);
+        // A hull for a side, or the game's own types (`npcShipRoute`: a side named asks for the hull, else a name no type
+        // or family has is taken as one, the side neutral and the tier 1 unless said).
+        const route = npcShipRoute(what, opts, { type: !!type, family: data.typesOfFamily(what).length > 0 });
+        if (route.to === 'hull') {
+          if (!route.named && !(await this.loadGarage()).vehicles.some((d) => d.source === 'ship' && d.id.toLowerCase() === what.toLowerCase())) return `no NPC type, family or garage ship ${what}`;
+          return mgr.standHull(route.hull, route.side, route.tier, route.count, from, dir, route.ahead);
+        }
+        const family = type ? type.family : what;
+        const tier = opts.tier ?? type?.tier ?? (this.world.planet.space ? (ZONE_TIER[this.world.planet.id] ?? 3) : 3);
         return mgr.spawnFamily(family, tier, opts.count === 3 ? 3 : 1, from, dir, opts.distance ?? 700);
       },
       /**
@@ -25797,6 +25814,12 @@ class App {
     } else {
       this.npcUi.attach(this.spawnerDeps());
       this.npcUi.show();
+      // Its list of hulls any of which may be stood as an NPC is the garage's ships: loaded now if nothing has yet.
+      if (!this.garage && !this.world.garage) {
+        void this.loadGarage().then(() => {
+          if (this.npcUi.open) this.npcUi.render();
+        });
+      }
     }
     this.freeMouse(true);
   }
@@ -25987,8 +26010,36 @@ class App {
         const dir = this.cam.camera.getWorldDirection(new THREE.Vector3());
         return mgr.spawnFamily(family, tier, count, from, dir);
       },
-      clear: (family) => this.world.npcShips?.clear(family ? (s) => s.type.family === family : undefined) ?? 0,
+      // A family's clear leaves a hull stood for a side (a type of ours of the same family) to its own row.
+      clear: (family) => this.world.npcShips?.clear(family ? (s) => s.type.family === family && !s.type.standIn : undefined) ?? 0,
       count: (family) => this.world.npcShips?.count(family) ?? 0,
+      // Any garage ship hull as an NPC (src/space/hullNpc.ts): named as the game names an NPC type it draws, else in the
+      // garage's words, with the garage's words and its class under the name. Null until the garage is in.
+      hulls: () => {
+        const g = this.garage ?? this.world.garage;
+        if (!g) return null;
+        const types = this.world.ships.data?.file.types ?? [];
+        return g.vehicles
+          .filter((d) => d.source === 'ship')
+          .map((d) => {
+            const name = hullNameOf(d, types);
+            const words = hullWords(d);
+            return { hull: d.id, label: name, sub: `${name === words ? '' : `${words} · `}${d.class ?? 'ship'}` };
+          })
+          .sort((a, b) => a.label.localeCompare(b.label) || a.hull.localeCompare(b.hull));
+      },
+      sides: () => NPC_SIDES.map((s) => ({ id: s, label: FACTION_LABEL[s] })),
+      spawnHull: async (hull, side, tier, count) => {
+        const mgr = this.world.npcShips;
+        if (!mgr) return 'no world to stand them in';
+        const p = this.player;
+        const flown = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+        const from = (flown ? flown.pos : p.worldPos).clone();
+        const dir = this.cam.camera.getWorldDirection(new THREE.Vector3());
+        return mgr.standHull(hull, side, tier, count, from, dir);
+      },
+      clearHull: (hull) => this.world.npcShips?.clear((s) => s.type.standIn === true && s.type.hull === hull) ?? 0,
+      countHull: (hull) => this.world.npcShips?.countHull(hull) ?? 0,
     };
   }
 

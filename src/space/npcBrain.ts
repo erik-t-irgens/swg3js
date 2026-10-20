@@ -15,6 +15,7 @@ import type { DriveInput } from '../vehicles/vehicle';
 import { NpcWingHand, npcFighting } from '../vehicles/wings.ts';
 import { ShipContact, type ShipContacts } from './contacts';
 import { shipHostile } from './factions';
+import { slotOf } from './hullNpc.ts';
 import { AVOID_TUNE, PILOT_SKILL, aimPoint, formationPoint, pushApart, skillOfTier, skillStick, slotCruise, steerToward, toLocal, type PilotSkill, type Stick } from './pilot';
 import { targetable } from './shipCombat';
 import type { NpcShip } from './npcShips';
@@ -26,7 +27,10 @@ export type BrainState = 'patrol' | 'formation' | 'engage' | 'breakoff' | 'evade
 export const SKILL = PILOT_SKILL;
 /** How far a pilot sees a ship it would attack (metres), in space and near a planet (invented). */
 export const DETECT = { space: 1500, planet: 800 };
-/** How far from its anchor (or where it was stood) a pilot chases before it turns back (invented). */
+/**
+ * How far from its anchor (or where it was stood) a pilot chases before it turns back (invented): every group's own
+ * `leash`, which is this for every group but one of hulls bigger than a fighter (`hullLayout`).
+ */
 export const LEASH = 4000;
 /** The least height over the ground a pilot flies at on a planet (invented). */
 export const MIN_ALTITUDE = 60;
@@ -111,6 +115,8 @@ const shotFrom = new THREE.Vector3();
 const shotDir = new THREE.Vector3();
 const inherit = new THREE.Vector3();
 const attitude = new THREE.Quaternion();
+/** A formation slot's [x, y, z], kept (`slotOf`). */
+const slotArr = [0, 0, 0];
 
 /**
  * A ship's velocity without asking the physics (whose `linvel()` makes an object per call): a flying hull is set to
@@ -169,7 +175,7 @@ export class NpcBrain {
   /** Within the leash of the group's anchor (or where it was stood): nothing farther is chased. Made once. */
   private readonly leashed = (t: Living): boolean => {
     const g = this.ship.group;
-    return t.pos.distanceToSquared(g.anchor ? g.anchor.pos : g.home) <= LEASH * LEASH;
+    return t.pos.distanceToSquared(g.anchor ? g.anchor.pos : g.home) <= g.leash * g.leash;
   };
 
   constructor(
@@ -224,7 +230,7 @@ export class NpcBrain {
         this.fleeFrom.copy(target.pos);
       } else if (this.state !== 'breakoff' && this.state !== 'evade' && this.state !== 'flee') this.state = 'engage';
       // Beyond the leash: let go and go back.
-      if (this.state !== 'flee' && pos.distanceToSquared(home) > LEASH * LEASH) {
+      if (this.state !== 'flee' && pos.distanceToSquared(home) > group.leash * group.leash) {
         this.drop();
         this.state = 'return';
       }
@@ -410,11 +416,14 @@ export class NpcBrain {
     if (!best && leader && leader.brain.target && alive(leader.brain.target, me) && leashed(leader.brain.target)) best = leader.brain.target;
     if (!best) {
       const range = ctx.space ? DETECT.space : DETECT.planet;
-      let bestD = range * range;
+      let bestD = Infinity;
       for (const c of ships.list) {
         if (c === me || !alive(c, me) || !shipHostile(me.faction, c.faction) || !leashed(c)) continue;
         const d2 = c.pos.distanceToSquared(me.pos);
-        if (d2 < bestD) {
+        // Seen from the part of each hull that stands out past a fitted hull's sphere (nought for every typed hull, so
+        // `range` itself): a Star Destroyer is seen as far off its bow as a fighter is off its own, and sees as far.
+        const sees = range + me.reachToward(c.pos) + c.reachToward(me.pos);
+        if (d2 < bestD && d2 < sees * sees) {
           bestD = d2;
           best = c;
         }
@@ -462,11 +471,9 @@ export class NpcBrain {
     const lv = leader.vehicle;
     leaderNose.set(0, 0, 1).applyQuaternion(lv.group.quaternion);
     const rows = ctx.ships.data?.formation(this.ship.group.formation, !space) ?? [];
-    const i = this.ship.slot;
-    const row = rows[i];
-    if (row) slotV.set(row[0], row[1], row[2]);
-    // A slot past the table's rows: behind and to either side, 40 m a step.
-    else slotV.set((i % 2 ? 1 : -1) * 40 * Math.ceil(i / 2), 0, -40 * i);
+    // The table's row, or past its rows behind and to either side; spread as the manager laid it (1 for every group but
+    // one of big hulls stood by hand, `hullSpread`): the one rule the manager stands a group by (`slotOf`).
+    slotV.fromArray(slotOf(rows, this.ship.slot, this.ship.group.spread, slotArr));
     formationPoint(lv.pos, lv.group.quaternion, slotV, slotPt);
   }
 
@@ -512,7 +519,10 @@ export class NpcBrain {
     const combat = this.ship.contact.combat;
     if (!combat || !v.guns.length) return;
     const w = combat.weaponOfGun(combat.nextGun % v.guns.length);
-    if (dist > w.range) return;
+    // In reach from the part of each hull standing out past a fitted hull's sphere toward the other (nought for every
+    // typed hull, so the gun's own range from the middles): a hull longer than its guns reach otherwise never fired, nor
+    // was fired on, since the break-off keeps the two spheres apart.
+    if (dist > w.range + this.ship.contact.reachToward(target.pos) + (target instanceof ShipContact ? target.reachToward(pos) : 0)) return;
     tmp.copy(aim).sub(pos);
     const d = tmp.length();
     if (d < 1e-3 || tmp.dot(nose) < d * Math.cos(THREE.MathUtils.degToRad(this.skill.gunConeDeg))) return;

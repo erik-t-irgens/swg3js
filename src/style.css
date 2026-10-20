@@ -744,6 +744,7 @@ b { color: var(--accent); font-weight: 600; }
 #ship-hud .comms-line .who { font-weight: 600; }
 #ship-hud .status { position: absolute; left: 50%; bottom: 128px; transform: translateX(-50%); padding: 3px 10px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 5px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; white-space: nowrap; }
 .cat-hands select.ship-tier { max-width: 40px; }
+.cat-hands select.ship-side { max-width: 92px; }
 .ship-row .cat-name small { color: var(--muted); }
 
 /* The Escape menu: a nav down the left, a page on the right. */
