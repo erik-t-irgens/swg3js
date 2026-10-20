@@ -21,7 +21,7 @@ import { cellIndexOf } from '../vehicles/cells.ts';
 import type { FormationName, NpcTypeDef } from './combatData';
 import { ShipContact, type ShipContacts } from './contacts';
 import { FACTION_LABEL, type ShipFaction } from './factions.ts';
-import { HULL_TIERS, NPC_SIDES, hullLayout, hullNpcPlan, npcSideOf, npcTierOf, slotOf, type HullLayoutBase } from './hullNpc.ts';
+import { HULL_FITTED_RADIUS, HULL_TIERS, NPC_SIDES, hullLayout, hullNpcPlan, hullRadiusOf, inTheWay, npcSideOf, npcTierOf, slotOf, standsInside, type HullLayoutBase, type InTheWay } from './hullNpc.ts';
 import { pickLoadout, seeded } from './loadout';
 import { LEASH, NpcBrain, type BrainContext } from './npcBrain';
 import { formationPoint } from './pilot';
@@ -200,6 +200,8 @@ export class NpcShipManager {
   private garageNow: Garage | null = null;
   private readonly ctx: BrainContext;
   private lastNote = '';
+  /** The places of the stands from the NPC tab still being built, each held until its stand is done (`inTheWay`). */
+  private readonly coming: InTheWay[] = [];
 
   constructor(private readonly deps: NpcShipDeps) {
     this.ctx = {
@@ -301,23 +303,57 @@ export class NpcShipManager {
     for (const t of types) if (Math.abs(t.tier - tier) < Math.abs(type.tier - tier)) type = t;
     const full = this.capRefusal(count);
     if (full) return full;
+    const epoch = this.epoch;
+    // A family whose hull is bigger than a fighter (the gunboats, freighters and transports the ships pack's NPC-only
+    // hulls draw) is laid out by its size, as a hull stood for a side is (`hullLayout`): at the tables' own spacing
+    // three of them stood in each other. A fighter's family is stood exactly as it always was.
+    const garage = await this.deps.garage();
+    if (this.disposed || epoch !== this.epoch) return 'the NPC ships were cleared meanwhile';
+    this.garageNow = garage;
+    // Spawns begun while the garage loaded count too.
+    const stillFull = this.capRefusal(count);
+    if (stillFull) return stillFull;
+    const hullDef = garage.vehicles.find((d) => d.id === type.hull && d.source === 'ship') ?? null;
+    const faction = (type.faction ?? 'neutral') as ShipFaction;
+    const lay = hullDef?.bounds && hullRadiusOf(hullDef.bounds) > HULL_FITTED_RADIUS ? hullLayout(hullDef.bounds, data.formation(FACTION_FORMATION[faction] ?? 'arrow', !this.deps.space), count, Math.max(50, ahead), LAYOUT_BASE) : null;
     const rng = this.newRng();
     tmp.copy(dir);
     if (tmp.lengthSq() < 1e-6) tmp.copy(Z);
     tmp.normalize();
-    const lead = this.raise(from.clone().addScaledVector(tmp, Math.max(50, ahead)));
+    const lead = lay ? this.raise(from.clone().addScaledVector(tmp, lay.reach), lay.above) : this.raise(from.clone().addScaledVector(tmp, Math.max(50, ahead)));
     const q = lookAlong(lead, from, new THREE.Quaternion());
-    const faction = (type.faction ?? 'neutral') as ShipFaction;
-    const g = this.newGroup(faction, null, true, this.makeRoute(lead, 0, rng), lead);
-    const epoch = this.epoch;
+    // Every member's place before the first is built: a big hull's where its layout says, asked first whether any would
+    // stand inside a ship already out or still being built (`standsInside`).
+    const places: THREE.Vector3[] = [];
+    if (lay) {
+      for (let i = 0; i < count; i++) {
+        const at = new THREE.Vector3();
+        formationPoint(lead, q, slotV.fromArray(lay.slots[i]), at);
+        places.push(this.raise(at, lay.above));
+      }
+      const inside = this.standsInsideOut(places, lay.radius);
+      if (inside) return `a ${type.name} would stand inside the ${inside} already out there: face another way, or clear it first`;
+    }
+    const g = lay ? this.newGroup(faction, null, true, this.makeRoute(lead, lay.radius, rng, lay.above), lead, lay) : this.newGroup(faction, null, true, this.makeRoute(lead, 0, rng), lead);
+    // A fighter's family exactly as it always was, at its table's own slots.
+    if (!lay) {
+      for (let i = 0; i < count; i++) {
+        const at = new THREE.Vector3();
+        formationPoint(lead, q, this.slotOffset(g, i, slotV), at);
+        places.push(this.raise(at));
+      }
+    }
+    // Held as coming while they are built, so a big hull asked for meanwhile is not stood inside them.
+    const held = this.holdPlaces(places, lay ? lay.radius : (hullDef?.bounds ? hullRadiusOf(hullDef.bounds) : 0) || HULL_FITTED_RADIUS, type.name);
     const notes: string[] = [];
-    for (let i = 0; i < count; i++) {
-      const at = new THREE.Vector3();
-      formationPoint(lead, q, this.slotOffset(g, i, slotV), at);
-      this.raise(at);
-      const r = await this.spawnType(type.id, at, q, g, i, rng);
-      if (this.disposed || epoch !== this.epoch) return 'the NPC ships were cleared meanwhile';
-      if (typeof r === 'string') notes.push(r);
+    try {
+      for (let i = 0; i < count; i++) {
+        const r = await this.spawnType(type.id, places[i], q, g, i, rng);
+        if (this.disposed || epoch !== this.epoch) return 'the NPC ships were cleared meanwhile';
+        if (typeof r === 'string') notes.push(r);
+      }
+    } finally {
+      this.releasePlaces(held);
     }
     if (!g.members.length && !g.pending) this.dropGroup(g);
     const got = g.members.length;
@@ -334,7 +370,7 @@ export class NpcShipManager {
    * facing back toward it, in the side's formation spread to the hull's size, and further out when the hull is too big
    * for 700 m (`hullAhead`). The NPC tab and the console both come here. Returns the sentence for the count line.
    */
-  async standHull(hullId: string, side: unknown, tier: unknown, count: 1 | 3, from: THREE.Vector3, dir: THREE.Vector3, ahead = HAND_AHEAD): Promise<string> {
+  async standHull(hullId: string, side: unknown, tier: unknown, count: 1 | 3, from: THREE.Vector3, dir: THREE.Vector3, ahead = HAND_AHEAD, as: { name: string; endOfWar: string } | null = null): Promise<string> {
     const faction = npcSideOf(side);
     if (!faction) return `a ship flies for ${NPC_SIDES.join(', ')}; not ${typeof side === 'string' ? `'${side}'` : String(side)}`;
     const t = npcTierOf(tier);
@@ -353,7 +389,8 @@ export class NpcShipManager {
     // Spawns begun while the garage loaded count too.
     const stillFull = this.capRefusal(count);
     if (stillFull) return stillFull;
-    const plan = hullNpcPlan(hull, faction, t, data.file.types, (c) => !!data.chassis(c)?.fit);
+    // One of the End of War's ships (`as`) flies as this hull under its own name and id.
+    const plan = hullNpcPlan(hull, faction, t, data.file.types, (c) => !!data.chassis(c)?.fit, as);
     // Laid out for its size (`hullLayout`): a fighter exactly as a typed one is; a bigger hull's slots spread by its
     // radius, stood out past its own sphere, held higher over the ground on a planet by as much as it is wider than a
     // fighter, and drawn and leashed as far as its size asks, so no member stands past its own draw distance or leash.
@@ -365,15 +402,30 @@ export class NpcShipManager {
     tmp.normalize();
     const lead = this.raise(from.clone().addScaledVector(tmp, lay.reach), lay.above);
     const q = lookAlong(lead, from, new THREE.Quaternion());
-    const g = this.newGroup(faction, null, true, this.makeRoute(lead, lay.radius, rng, lay.above), lead, lay);
-    const notes: string[] = [];
+    const places: THREE.Vector3[] = [];
     for (let i = 0; i < count; i++) {
       const at = new THREE.Vector3();
       formationPoint(lead, q, slotV.fromArray(lay.slots[i]), at);
       this.raise(at, lay.above);
-      const r = await this.stand(plan.type, hull, at, q, g, rng);
-      if (this.disposed || epoch !== this.epoch) return 'the NPC ships were cleared meanwhile';
-      if (typeof r === 'string') notes.push(r);
+      places.push(at);
+    }
+    // A hull bigger than a fitted one is never stood inside a ship already out or still being built (`standsInside`); a
+    // fighter's own formation table keeps its spheres apart, and it is never asked, as a fighter's family is not.
+    const inside = lay.radius > HULL_FITTED_RADIUS ? this.standsInsideOut(places, lay.radius) : null;
+    if (inside) return `a ${plan.type.name} would stand inside the ${inside} already out there: face another way, or clear it first`;
+    const g = this.newGroup(faction, null, true, this.makeRoute(lead, lay.radius, rng, lay.above), lead, lay);
+    // Held as coming while they are built, so a big hull asked for meanwhile is not stood inside them.
+    const held = this.holdPlaces(places, lay.radius || HULL_FITTED_RADIUS, plan.type.name);
+    const notes: string[] = [];
+    try {
+      for (let i = 0; i < count; i++) {
+        const at = places[i];
+        const r = await this.stand(plan.type, hull, at, q, g, rng);
+        if (this.disposed || epoch !== this.epoch) return 'the NPC ships were cleared meanwhile';
+        if (typeof r === 'string') notes.push(r);
+      }
+    } finally {
+      this.releasePlaces(held);
     }
     if (!g.members.length && !g.pending) this.dropGroup(g);
     const got = g.members.length;
@@ -655,10 +707,41 @@ export class NpcShipManager {
     return n;
   }
 
-  /** How many of a garage hull are out as NPC ships stood for a side (`standHull`). */
+  /**
+   * The name of the ship out, or the stand still being built, that a hull of `radius` stood at `places` would stand
+   * inside, or null (`standsInside` over `inTheWay`).
+   */
+  private standsInsideOut(places: readonly THREE.Vector3[], radius: number): string | null {
+    const out = inTheWay(this.ships, this.coming);
+    const j = standsInside(places, radius, out);
+    return j < 0 ? null : out[j].name;
+  }
+
+  /** Hold a stand's places as coming (`inTheWay`) until `releasePlaces`, which the stand calls however it ends. */
+  private holdPlaces(places: readonly THREE.Vector3[], radius: number, name: string): InTheWay[] {
+    const held = places.map((p) => ({ x: p.x, y: p.y, z: p.z, radius, name }));
+    this.coming.push(...held);
+    return held;
+  }
+
+  private releasePlaces(held: readonly InTheWay[]): void {
+    for (const h of held) {
+      const i = this.coming.indexOf(h);
+      if (i >= 0) this.coming.splice(i, 1);
+    }
+  }
+
+  /** How many of a garage hull are out as NPC ships stood for a side (`standHull`), the End of War's apart. */
   countHull(hull: string): number {
     let n = 0;
-    for (const s of this.ships) if (s.type.standIn && s.type.hull === hull) n++;
+    for (const s of this.ships) if (s.type.standIn && s.type.hull === hull && !s.type.endOfWar) n++;
+    return n;
+  }
+
+  /** How many of one of the End of War's ships are out (`standHull` with its name). */
+  countEndOfWar(id: string): number {
+    let n = 0;
+    for (const s of this.ships) if (s.type.endOfWar === id) n++;
     return n;
   }
 

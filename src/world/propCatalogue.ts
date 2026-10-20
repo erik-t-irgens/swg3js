@@ -21,7 +21,10 @@ export const PROPS_PACK_VERSION = 1;
 /** One prop: a thing in the game, drawn with one of the pack's models. */
 export interface PropDef {
   id: string;
-  template: string;
+  /** The game's template; null on a prop of ours (`ours`), which no template names. */
+  template: string | null;
+  /** A prop of ours (tools/swg/oursEntries.mjs): SOE's art no template names, stood by a row of our table, in the group `ours`. */
+  ours?: boolean;
   /** The two folders below `object/`, which is how the panel groups them. */
   group: string;
   model: string;
@@ -42,6 +45,8 @@ interface PropModel {
   appearance?: string;
   /** A brazier's fire, a fountain's spray, a chimney's smoke: parts of the appearance, placed with it. */
   effects?: { file: string; id: string; transform?: number[]; cell?: number }[];
+  /** A skeletal appearance stood still (`idle`: its idle's first frame; `bind`: its bind pose), written with no skin. */
+  skeletal?: 'idle' | 'bind';
 }
 
 interface PropsManifest {
@@ -103,6 +108,12 @@ export class PropCatalogue {
 
   find(id: string): PropDef | null {
     return this.byId.get(id) ?? null;
+  }
+
+  /** How many props are drawn with a skeletal appearance stood still (the converter's `skeletal` on their model); 0 before it lands. */
+  get skeletalCount(): number {
+    const still = new Set((this.manifest?.models ?? []).filter((m) => m.skeletal).map((m) => m.id));
+    return this.all.filter((p) => still.has(p.model)).length;
   }
 
   /** The groups the pack has, each with how many things are in it, most first. */

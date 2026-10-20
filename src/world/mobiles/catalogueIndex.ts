@@ -237,8 +237,12 @@ function speciesLabel(species: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/** The group the bodies of ours stand in, under the humanoid NPCs whatever kind their table makes them. */
+export const OURS_GROUP = { kind: 'npc', key: 'ours', label: 'Entries of ours: bodies no template names', note: "SOE's own art, stood by our table" } as const;
+
 /** Where one entry sits in the tree: its category, its group's key, label and note. */
 export function placeOf(e: MobileEntry): { kind: string; key: string; label: string; note: string } {
+  if (e.ours) return { ...OURS_GROUP };
   for (const flag of EXTRA_FLAGS) {
     if (e.flags?.includes(flag)) {
       const [label, note] = EXTRA_LABELS[flag];

@@ -207,17 +207,20 @@ export function isHairKey(key: string): boolean {
 export interface HairEntry {
   id: string;
   kind?: string;
-  template?: string;
+  template?: string | null;
+  /** A hairstyle of ours (tools/swg/oursEntries.mjs) has no template folder: the species and genders it fits (`bothan_male`). */
+  fits?: readonly string[];
 }
 
 /**
  * A species' hairstyles out of a wardrobe, both genders' (a species' hair suits both): every hair entry
- * whose template is under that species' hair folder or whose id names it. A wardrobe folder holds every
- * species' hair, so the Singing Mountain Clan's, under a folder of their own, are never anyone's.
+ * whose template is under that species' hair folder or whose id names it, and every one of ours whose
+ * fits name the species. A wardrobe folder holds every species' hair, so the Singing Mountain Clan's,
+ * under a folder of their own, are never anyone's.
  */
 export function hairOfSpecies<T extends HairEntry>(items: readonly T[], species: string): T[] {
   const s = species.toLowerCase();
-  return items.filter((i) => i.kind === 'hair' && ((i.template ?? '').toLowerCase().includes(`/hair/${s}/`) || i.id.toLowerCase().includes(`hair_${s}_`)));
+  return items.filter((i) => i.kind === 'hair' && ((i.template ?? '').toLowerCase().includes(`/hair/${s}/`) || i.id.toLowerCase().includes(`hair_${s}_`) || (i.fits ?? []).some((f) => f === `${s}_male` || f === `${s}_female`)));
 }
 
 /** slot -> the id occupying it, from worn pieces and the arrangement each went on with, in wear order. */

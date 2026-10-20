@@ -7,6 +7,8 @@
 // at creation or only later through the image designer. So the grid is three groups. This species and
 // gender's styles come first, in the table's order with the creation styles ahead of the image designer's.
 // Then the same species' other gender's, which is ours: the game never let a man wear a woman's style.
+// Then the hairstyles of ours the creator table carries for the species and gender (late appearance files no
+// template names, stood by entries of ours: tools/swg/oursEntries.mjs), in a group of their own and marked so.
 // Then whatever the wardrobe converted that no row names, "Not in the game's creator": one Bothan male
 // style, four Trandoshan female ones, and the Sullustan's eighteen, which the game never offered at all
 // (each of those is two templates, `_f` and `_m`, wearing one mesh a wardrobe folder). In both later groups
@@ -32,7 +34,7 @@
 // Pure, with no DOM and no three, so a node test can run it over the real wardrobe and table.
 import { hairOfSpecies, type HairEntry } from '../core/inventory.ts';
 import { bareName, hairNone, type CreatorGroup, type CreatorHair, type CreatorRow, type CreatorSpecies, type CreatorTable } from './creatorModel.ts';
-import { initialsOf, type GiveCell } from './giveModel.ts';
+import { OURS_NOTE, initialsOf, type GiveCell } from './giveModel.ts';
 
 /**
  * Every number of the grid's, all ours. `cell` is a cell's width in pixels, which `style.css` states again
@@ -49,10 +51,13 @@ export const HAIR_TUNE = {
 export interface HairItem extends HairEntry {
   icon?: string | null;
   parts?: readonly { file?: string; name?: string }[];
+  /** A hairstyle of ours (tools/swg/oursEntries.mjs), and its name of ours. */
+  ours?: boolean;
+  name?: string | null;
 }
 
-/** The grid's groups: own gender, other gender, not in the table, or (with no table) the one list of before. */
-export type HairGroupId = 'own' | 'other' | 'untabled' | 'styles';
+/** The grid's groups: own gender, other gender, ours, not in the table, or (with no table) the one list of before. */
+export type HairGroupId = 'own' | 'other' | 'ours' | 'untabled' | 'styles';
 
 export interface HairGroup {
   id: HairGroupId;
@@ -103,9 +108,9 @@ export function styleLabel(id: string): string {
 
 const GENDER_WORDS = { female: "Women's styles", male: "Men's styles" } as const;
 
-/** The table's rows for a species and gender, creation styles first, each kept only where the wardrobe has it. */
+/** The table's own rows for a species and gender, creation styles first, each kept only where the wardrobe has it (the rows of ours apart). */
 function tableStyles(entry: CreatorSpecies | undefined, have: ReadonlyMap<string, HairItem>): { row: CreatorHair; item: HairItem }[] {
-  const rows = (entry?.hair ?? []).filter((h) => h.inArchives !== false && have.has(h.id));
+  const rows = (entry?.hair ?? []).filter((h) => !h.ours && h.inArchives !== false && have.has(h.id));
   return [...rows.filter((h) => h.creation), ...rows.filter((h) => !h.creation)].map((row) => ({ row, item: have.get(row.id)! }));
 }
 
@@ -132,7 +137,8 @@ export function hairCells(table: CreatorTable | null | undefined, items: readonl
     const on = item ? worn === item.id : !worn;
     const icon = item?.icon && dir ? `${dir}${item.icon}` : null;
     const n = item ? hairStyleNumber(item.id) : null;
-    const note = !item ? 'no hair' : row ? (row.creation ? 'offered at creation' : `the image designer's${row.skill ? ` (skill level ${row.skill})` : ''}`) : group === 'untabled' ? "converted, but never in the game's creator" : '';
+    const ours = !!item?.ours;
+    const note = !item ? 'no hair' : ours ? OURS_NOTE : row ? (row.creation ? 'offered at creation' : `the image designer's${row.skill ? ` (skill level ${row.skill})` : ''}`) : group === 'untabled' ? "converted, but never in the game's creator" : '';
     return {
       id: item?.id ?? NO_HAIR,
       name,
@@ -146,6 +152,7 @@ export function hairCells(table: CreatorTable | null | undefined, items: readonl
       unseen: false,
       fit: 'ok',
       other: group === 'other',
+      ours,
       group,
       title: [item?.id ?? 'no hair', item?.template ?? '', note].filter(Boolean).join('\n'),
       note,
@@ -156,8 +163,8 @@ export function hairCells(table: CreatorTable | null | undefined, items: readonl
 
   const groups: HairGroup[] = [];
   if (!table || !entry) {
-    // The list of before: every style of the species, either gender's, named by its id's words.
-    const list = all.map((item) => ({ item, label: item.id.replace(/^hair_[a-z]+_(male|female)_?/, '').replace(/_/g, ' ') || item.id })).sort((a, b) => a.label.localeCompare(b.label));
+    // The list of before: every style of the species, either gender's, named by its id's words (one of ours by its name of ours).
+    const list = all.map((item) => ({ item, label: (item.ours && item.name) || item.id.replace(/^hair_[a-z]+_(male|female)_?/, '').replace(/_/g, ' ') || item.id })).sort((a, b) => a.label.localeCompare(b.label));
     groups.push({ id: 'styles', label: 'Styles', note: 'for this species', cells: [cell(null, 'styles', 'None'), ...list.map((s) => cell(s.item, 'styles', s.label))] });
     return { groups, none: true, worn, styles: list.length, fromTable: false };
   }
@@ -181,6 +188,14 @@ export function hairCells(table: CreatorTable | null | undefined, items: readonl
     theirs.push(s);
   }
   for (const s of theirs) offered.add(s.item.id);
+  // The hairstyles of ours this species and gender's rows name (tools/swg/oursEntries.mjs: SOE's art no template names),
+  // in the table's order, each where the wardrobe has it: a group of their own, so none passes for the game's.
+  const mine: { row: CreatorHair; item: HairItem }[] = [];
+  for (const row of entry.hair ?? []) {
+    if (!row.ours || offered.has(row.id) || !have.has(row.id)) continue;
+    mine.push({ row, item: have.get(row.id)! });
+    offered.add(row.id);
+  }
   // What no row of either gender names, this gender's first, a style whose meshes are already shown left out.
   const tabled = new Set([...(entry.hair ?? []), ...(otherEntry?.hair ?? [])].map((h) => h.id));
   const loose: HairItem[] = [];
@@ -196,10 +211,11 @@ export function hairCells(table: CreatorTable | null | undefined, items: readonl
   const creation = own.filter((s) => s.row.creation).length;
   if (own.length) groups.push({ id: 'own', label: GENDER_WORDS[gender], note: `the game's own: ${creation} at creation${own.length > creation ? `, ${own.length - creation} through the image designer` : ''}`, cells: own.map((s) => cell(s.item, 'own', styleLabel(s.item.id), s.row)) });
   if (theirs.length) groups.push({ id: 'other', label: GENDER_WORDS[other], note: 'ours: the game kept each gender to its own', cells: theirs.map((s) => cell(s.item, 'other', styleLabel(s.item.id), s.row)) });
-  if (loose.length) groups.push({ id: 'untabled', label: "Not in the game's creator", note: 'ours: converted, never offered', cells: loose.map((i) => cell(i, 'untabled', styleLabel(i.id))) });
+  if (mine.length) groups.push({ id: 'ours', label: 'Entries of ours', note: "SOE's art that no template of the game's names", cells: mine.map((s) => cell(s.item, 'ours', s.row.name || s.item.name || styleLabel(s.item.id), s.row)) });
+  if (loose.length) groups.push({ id: 'untabled', label: "Not in the game's creator", note: 'ours: converted, never offered', cells: loose.map((i) => cell(i, 'untabled', (i.ours && i.name) || styleLabel(i.id))) });
   const none = hairNone(entry, true).offer && groups.length > 0;
   if (none) groups[0].cells.unshift(cell(null, groups[0].id, 'None'));
-  return { groups, none, worn, styles: own.length + theirs.length + loose.length, fromTable: true };
+  return { groups, none, worn, styles: own.length + theirs.length + mine.length + loose.length, fromTable: true };
 }
 
 /**

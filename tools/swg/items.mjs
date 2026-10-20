@@ -117,7 +117,15 @@ export function itemText(vfs, template, id, caches) {
 export function itemSlots(vfs, template, caches) {
   const raw = resolveTemplateParam(vfs, template, 'arrangementDescriptorFilename', stringParam, caches.params);
   if (!raw) return null;
-  const file = raw.replace(/\\/g, '/').replace(/^\//, '');
+  return arrangementSlots(vfs, raw, caches);
+}
+
+/**
+ * An arrangement file's slots, parsed (cached per file); null when it is not in the archives or will not read. What a
+ * template names, or what an entry of ours takes (oursEntries.mjs: a garment of ours names the client arrangement).
+ */
+export function arrangementSlots(vfs, raw, caches) {
+  const file = String(raw).replace(/\\/g, '/').replace(/^\//, '');
   if (caches.arrangements.has(file)) return caches.arrangements.get(file);
   let slots = null;
   try {

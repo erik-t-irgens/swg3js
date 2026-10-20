@@ -176,8 +176,9 @@ else {
       const hairOf = (w: string, species: string) => {
         const key = `${w}:${species}`;
         if (hairVars.has(key)) return hairVars.get(key)!;
-        const wardrobe = JSON.parse(readFileSync(join(root, 'wardrobe', w, 'wardrobe.json'), 'utf8')) as { items: { kind: string; template: string; parts: { name: string }[] }[] };
-        const meshes = new Set(wardrobe.items.filter((i) => i.kind === 'hair' && i.template.includes(`/hair/${species}/`)).flatMap((i) => i.parts.map((p) => p.name)));
+        // A hairstyle of ours has no template and names its species in its fits (oursEntries.mjs).
+        const wardrobe = JSON.parse(readFileSync(join(root, 'wardrobe', w, 'wardrobe.json'), 'utf8')) as { items: { kind: string; template: string | null; fits?: string[]; parts: { name: string }[] }[] };
+        const meshes = new Set(wardrobe.items.filter((i) => i.kind === 'hair' && ((i.template ?? '').includes(`/hair/${species}/`) || (i.fits ?? []).some((f) => f.startsWith(`${species}_`)))).flatMap((i) => i.parts.map((p) => p.name)));
         const cz = JSON.parse(readFileSync(join(root, 'wardrobe', w, 'customize.json'), 'utf8')) as { recipes: { mesh: string }[] };
         const names = new Set<string>();
         for (const r of cz.recipes) if (meshes.has(r.mesh)) for (const d of recipeVariableDefs(r as never)) names.add(bare(d.name));

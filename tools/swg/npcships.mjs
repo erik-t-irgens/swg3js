@@ -21,6 +21,13 @@ import { compatClasses } from './shipfit.mjs';
 export const COMBAT_FORMAT = 1;
 
 /**
+ * The ships manifest's `npcHulls`: written when a run made the NPC-only hulls (`npcOnlyHullPicks`) and combat.json's End
+ * of War list with them. A pack without it was converted before, and `status` asks for the ships again: every install
+ * gains the hulls the NPC types that had none fly (and the End of War's ships, where SOE's final files are mounted).
+ */
+export const NPC_HULLS_FORMAT = 1;
+
+/**
  * The side each family flies for. The server decided this; the table is invented, after the game's own
  * names (the TIEs are the Empire's, the Alliance flew the lettered wings, the Hutts and the Z-95s are the
  * pirates' as the taunt tables have them). A family none of these matches is neutral.
@@ -33,6 +40,59 @@ export const NPC_FACTIONS = { imperial: /^tie/, rebel: /^(xwing|ywing|awing|bwin
  * prototype hull names are kept here in case a tiered template ever carries one.
  */
 export const NOT_LADDER = /^(nova_orion_|basic_|prototype_|experimental_ship)|_npe$/;
+
+/**
+ * The End of War's capital ships and stations, by template id (`object/ship/shared_<id>.iff`): untiered NPC templates SOE's
+ * last publishes added, which no ladder reads. Each is listed in the NPC tab by its own name as a type of a tier of its own
+ * and stood through the hull path every garage hull takes (`standHull`). A side each [ours: the server's], and, for the
+ * two whose appearance no hull of the ships pack shares, the garage hull that is the same ship [ours]: the corvette and
+ * the Star Destroyer the garage flies are drawn from their own templates with their rooms, which the NPC path hides.
+ * The rest are drawn by a hull of the pack's NPC-only path (`npcOnlyHullPicks`).
+ */
+export const END_OF_WAR = {
+  eow_corvette: { faction: 'rebel', hull: 'corellian_corvette' },
+  eow_imperial_lancer: { faction: 'imperial' },
+  eow_nebulon_frigate: { faction: 'rebel' },
+  eow_rebel_transport: { faction: 'rebel' },
+  eow_star_destroyer: { faction: 'imperial', hull: 'star_destroyer' },
+  eow_stardestroyer: { faction: 'imperial', hull: 'star_destroyer' },
+  spacestation_imperial_gcw: { faction: 'imperial' },
+  spacestation_rebel_gcw: { faction: 'rebel' },
+};
+
+/**
+ * The ships pack's NPC-only hulls: a hull of the pack's for every appearance an NPC type flies that no player hull
+ * shares (the gunboats, freighters, transports, the pods, the Kessel mine turret, the smuggler warlord's ship, the `_npc`
+ * YT-1300, YKL-37R, Y-8 and Decimator), and for the End of War's ships that name no garage hull. One template an
+ * appearance, converted as a player hull is (its client data, its chassis's stock fit) but with no rooms, listed for
+ * the NPC types and the NPC tab and never in the garage. Its id is `npc_<family>`, the family of the template picked:
+ * the one whose family sorts first, its lowest tier first, so a run picks the same one every time. `templates` the NPC
+ * templates (tiered and the End of War's), `appearanceOf(template)`, `playerAppearances` a Set of the appearances the
+ * player hulls draw (lower case). Pure.
+ */
+export function npcOnlyHullPicks({ templates, appearanceOf, playerAppearances }) {
+  const byAppearance = new Map();
+  for (const template of [...(templates ?? [])].map(norm).sort()) {
+    const id = idOf(template);
+    const parts = typeParts(id);
+    const eow = END_OF_WAR[id] ?? null;
+    if (!parts && !eow) continue;
+    if (parts && NOT_LADDER.test(parts.family)) continue;
+    if (eow?.hull) continue;
+    let app = null;
+    try {
+      app = norm(appearanceOf(template)).toLowerCase();
+    } catch {
+      app = null;
+    }
+    if (!app || playerAppearances.has(app)) continue;
+    const family = parts ? parts.family : id;
+    const tier = parts ? parts.tier : 0;
+    const have = byAppearance.get(app);
+    if (!have || family < have.family || (family === have.family && tier < have.tier)) byAppearance.set(app, { template, family, tier, appearance: app });
+  }
+  return [...byAppearance.values()].sort((a, b) => a.family.localeCompare(b.family)).map((p) => ({ template: p.template, id: `npc_${p.family}`, appearance: p.appearance }));
+}
 
 /** The taunt tables the game reads (each with its `_low` for tiers 1 and 2). */
 export const TAUNT_TABLES = ['imperial', 'imperial_low', 'rebel', 'rebel_low', 'blacksun', 'blacksun_low', 'hutt', 'hutt_low', 'generic', 'generic_low'];
@@ -310,6 +370,30 @@ export function buildCombat(deps) {
     if (!chassisWanted.get(chassis).includes(hull)) chassisWanted.get(chassis).push(hull);
   }
   types.sort((a, b) => a.family.localeCompare(b.family) || a.tier - b.tier);
+  // The End of War's ships (`END_OF_WAR`), each by its own name, drawn by the hull whose template has its appearance,
+  // else the garage hull the table names; one with neither is left out with why. The name is the type table's, else
+  // the template's own (`objectNameOf`), else words.
+  const endOfWar = [];
+  for (const template of [...(deps.endOfWar ?? [])].map(norm).sort()) {
+    const id = idOf(template);
+    const row = END_OF_WAR[id];
+    if (!row || seen.has(id)) continue;
+    seen.add(id);
+    let app = null;
+    try {
+      app = norm(deps.appearanceOf(template)).toLowerCase();
+    } catch (err) {
+      notes.push(`${id}: appearance not read (${err.message})`);
+    }
+    const ids = app ? hullsByAppearance.get(app) : null;
+    const hull = ids?.length ? [...ids].sort()[0] : row.hull && ships.some((sh) => sh.id === row.hull) ? row.hull : null;
+    if (!hull) {
+      skipped.push({ id, why: app ? `no hull of the ships pack shares ${app}` : 'no appearance' });
+      continue;
+    }
+    const name = deps.nameOf?.(id) || deps.objectNameOf?.(template) || wordsOf(id);
+    endOfWar.push({ id, name, template, hull, faction: row.faction, chassis: chassisNameOf(id, rows) });
+  }
   const chassis = {};
   const chassisRecord = (name) => {
     const row = rows.get(name);
@@ -337,6 +421,7 @@ export function buildCombat(deps) {
     target: targetRowsOf(deps.targetRows, { particle, effect }),
     chassis,
     types,
+    endOfWar,
     hulls,
     skipped,
     counts: null,
@@ -352,6 +437,7 @@ export function combatCounts(file) {
     types: types.length,
     families: new Set(types.map((t) => t.family)).size,
     hulls: new Set(types.map((t) => t.hull)).size,
+    endOfWar: (file?.endOfWar ?? []).length,
     skipped: (file?.skipped ?? []).length,
     fits: Object.values(file?.chassis ?? {}).filter((c) => c.fit).length,
     formations: Object.keys(file?.formations ?? {}).length,
@@ -367,7 +453,7 @@ export function combatLine(file) {
   const noHull = (file?.skipped ?? []).filter((s) => /^no garage hull/.test(s.why)).length;
   const other = c.skipped - noHull;
   const left = c.skipped ? ` (${[noHull ? `${noHull} left out: no garage hull shares their appearance` : '', other ? `${other} left out for other reasons` : ''].filter(Boolean).join('; ')})` : '';
-  return `combat: ${c.types} NPC ship types in ${c.families} families on ${c.hulls} hulls${left}, ${c.fits} tier fits, ${c.formations} formations, ${c.taunts} taunt tables, ${c.hitLayers} hit layers, target effects ${c.target ? 'yes' : 'no'}`;
+  return `combat: ${c.types} NPC ship types in ${c.families} families on ${c.hulls} hulls${left}${c.endOfWar ? `, ${c.endOfWar} End of War ships` : ''}, ${c.fits} tier fits, ${c.formations} formations, ${c.taunts} taunt tables, ${c.hitLayers} hit layers, target effects ${c.target ? 'yes' : 'no'}`;
 }
 
 /**

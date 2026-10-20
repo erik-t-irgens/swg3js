@@ -71,8 +71,10 @@ const LAUNCHER_FILES = ['tools/launcher/main.mjs', 'tools/launcher/checks.mjs', 
 /**
  * The converter's data files, beside its modules. `final-names.json` is SOE's final names list (names and places only,
  * the owner's one exception to the hard rule, tools/swg/finalnames.mjs), which every player's converter mounts.
+ * `ours-entries.json` is the table of ours over SOE's late appearance files no template names (paths, menus and names
+ * of ours only, tools/swg/oursEntries.mjs), which `wardrobe`, `customization`, `mobiles` and `props` read.
  */
-const CONVERTER_DATA = ['tools/swg/README.md', 'tools/swg/manifests/retail.json', 'tools/swg/manifests/final-names.json', 'tools/swg/regions/regions.json'];
+const CONVERTER_DATA = ['tools/swg/README.md', 'tools/swg/manifests/retail.json', 'tools/swg/manifests/final-names.json', 'tools/swg/manifests/ours-entries.json', 'tools/swg/regions/regions.json'];
 
 /** Where the pack's own build of the game goes: the only dist folder a release is ever packed from. */
 export const PACK_DIST = join(ROOT, 'launcher-build', 'dist');

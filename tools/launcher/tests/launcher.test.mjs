@@ -460,6 +460,10 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   // SOE's final names list is what every player's converter mounts SOE's final client by (tools/swg/finalnames.mjs);
   // left out of a release, a launcher player's conversion is the publish 54 world with nothing to say why.
   ok(packedPaths.has('tools/swg/manifests/final-names.json'), "the release carries SOE's final names list (tools/swg/manifests/final-names.json)");
+  // The table of entries of ours (tools/swg/oursEntries.mjs) is read by path, which the import check cannot see: left
+  // out, a launcher player's wardrobe, creator table, mobiles and props would stand none of them and `status` would
+  // ask for them again after every conversion.
+  ok(packedPaths.has('tools/swg/manifests/ours-entries.json'), 'the release carries the table of entries of ours (tools/swg/manifests/ours-entries.json)');
   // And the launcher's page runs `status` itself, with no `.env` beside the release: it must hand it the player's own
   // SWG folder whenever that folder's check passed, or the page and the conversion drive answer two different things.
   const mainSrc = readFileSync(join(root, 'tools', 'launcher', 'main.mjs'), 'utf8');

@@ -13,6 +13,7 @@ import { childOf, childrenOf, isForm, readCString } from './iff.mjs';
 import { DIRECTION, R, skinData } from './skeletal.mjs';
 import { buildGlb, everyKeyEquals } from './glb.mjs';
 import { MATERIAL_FORMAT } from './surface.mjs';
+import { oursId } from './oursEntries.mjs';
 
 /**
  * Bump whenever the conversion changes what **any** unit holds: every record then reads
@@ -1161,11 +1162,13 @@ export function wardrobeIndex(wardrobeJson) {
   const chosen = new Map();
   // Several items can share a mesh (a quest copy of an armour piece, an invisible suit reusing a
   // vest): prefer the one named after the mesh, then the shortest id, then the catalogue's order.
+  // An entry of ours never takes a mesh the game's own item wears (oursEntries.mjs).
   const named = (item) => stemOf(item.sat ?? '').replace(/_(m|f)$/, '') === item.id;
   for (const item of wardrobeJson?.items ?? []) {
     for (const part of item.parts ?? []) {
       const have = chosen.get(part.name);
-      const better = !have || (named(item) && !named(have)) || (named(item) === named(have) && item.id.length < have.id.length);
+      if (have && item.ours && !have.ours) continue;
+      const better = !have || (have.ours && !item.ours) || (named(item) && !named(have)) || (named(item) === named(have) && item.id.length < have.id.length);
       if (!better) continue;
       chosen.set(part.name, item);
       out.set(part.name, item.id);
@@ -1609,16 +1612,31 @@ function targetFor({ baseSkeleton, gender, skeletons, speciesWardrobe = null }) 
  * every entry with its name, size, colours, outfit and stats; every model, pack and wearable
  * folder with its signature and state. Converts nothing.
  */
-export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = null, log = () => {}, warn = () => {} }) {
+export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = null, ours = null, log = () => {}, warn = () => {} }) {
   const rows = scan.scanTemplates(vfs);
+  const templateCount = rows.length;
+  // The bodies of ours (oursEntries.mjs: `ours` is the table's NPC rows), after every template, as rows of the same
+  // shape: a body variant stands as its own appearance; a garment dresses the body its fits name, as an appearance of
+  // its own (`ours_<garment>`) whose model wears it (`wear`). A row whose appearance or body the mount has not got is
+  // counted and left out.
+  const oursCount = { taken: 0, missing: 0 };
+  for (const r of ours ?? []) {
+    const body = norm(r.fits?.[0] ?? r.appearance);
+    if (!vfs.has(norm(r.appearance)) || !vfs.has(body)) {
+      oursCount.missing++;
+      continue;
+    }
+    rows.push({ template: null, ours: r, folder: 'ours', base: stemOf(r.appearance), appearance: body, appearanceExists: true, clientData: null, cdf: null, values: {}, objectName: null, description: null, wear: r.fits ? [norm(r.appearance)] : null });
+  }
   const bodies = scan.playerBodies(vfs);
   const caches = {};
   const excluded = [];
   const live = [];
   for (const row of rows) {
-    const appearanceId = row.appearance ? appearanceIdOf(row.appearance) : null;
+    // A garment of ours is an appearance of its own on its body, so it is never the body's model.
+    const appearanceId = row.ours?.fits ? `ours_${stemOf(row.ours.appearance)}` : row.appearance ? appearanceIdOf(row.appearance) : null;
     const why = exclusionOf({ folder: row.folder, appearance: row.appearance, appearanceExists: row.appearanceExists, appearanceId });
-    if (why) excluded.push({ template: row.template, why });
+    if (why) excluded.push({ template: row.template ?? row.ours.appearance, why });
     else live.push({ ...row, appearanceId });
   }
   const scans = new Map();
@@ -1627,7 +1645,7 @@ export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = 
   for (const row of live) {
     const s = scans.get(row.appearanceId);
     const why = exclusionOf({ folder: row.folder, appearance: row.appearance, table: s.table, appearanceId: row.appearanceId });
-    if (why) excluded.push({ template: row.template, why });
+    if (why) excluded.push({ template: row.template ?? row.ours.appearance, why });
     else kept.push(row);
   }
   const byAppearance = new Map();
@@ -1637,7 +1655,7 @@ export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = 
   const lookup = scan.nameLookup(vfs);
   const speciesIndex = io?.readJson('characters/index.json') ?? null;
   const speciesById = new Map((speciesIndex?.species ?? []).map((s) => [s.id, s]));
-  const nameSources = { objectName: 0, otherTable: 0, fileKey: 0, label: 0, generic: 0 };
+  const nameSources = { objectName: 0, otherTable: 0, fileKey: 0, label: 0, generic: 0, ours: 0 };
   const entries = [];
   const combosByAppearance = new Map();
   for (const row of kept) {
@@ -1647,8 +1665,10 @@ export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = 
     const family = kind === 'creature' ? creatureFamilyOf(s.table) : kind === 'droid' ? 'machine' : kind === 'special' ? 'special' : null;
     if (kind === 'creature' && !FAMILIES.has(stemOf(s.table ?? ''))) warn(`  family unknown for table ${stemOf(s.table ?? '')}, taken as herd`);
     const params = resolveParams(row.values);
-    const gender = genderOf({ templateGender: params.gender, appearanceId: row.appearanceId, faceRig: s.skeletons[1]?.file ?? null, hierarchy: s.hierarchy });
-    const name = displayNameOf({ template: row.template, folder: row.folder, objectName: row.objectName, description: row.description, lookup });
+    // A body of ours is named by the table (a name of ours) and its gender read off its own appearance's name.
+    const gender = genderOf({ templateGender: params.gender, appearanceId: row.ours ? stemOf(row.ours.appearance) : row.appearanceId, faceRig: s.skeletons[1]?.file ?? null, hierarchy: s.hierarchy });
+    const name = row.ours ? { name: row.ours.name, source: 'ours', subtitle: null } : displayNameOf({ template: row.template, folder: row.folder, objectName: row.objectName, description: row.description, lookup });
+    if (row.ours) oursCount.taken++;
     nameSources[name.source]++;
     if (name.subtitle) nameSources.generic++;
     const readable = new Set(body ? (speciesById.get(body.species)?.variables ?? []).map((v) => (typeof v === 'string' ? v : v.name)) : s.readable);
@@ -1657,10 +1677,10 @@ export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = 
     if (!body) {
       const list = combosByAppearance.get(row.appearanceId) ?? combosByAppearance.set(row.appearanceId, new Map()).get(row.appearanceId);
       const combo = list.get(key) ?? list.set(key, { key, values: split.values, templates: [] }).get(key);
-      combo.templates.push(row.template);
+      combo.templates.push(row.template ?? row.ours.appearance);
     }
     entries.push({
-      id: entryIdOf(row.template), template: row.template, kind, folder: row.folder,
+      id: row.ours ? oursId(row.ours) : entryIdOf(row.template), template: row.template, kind, folder: row.folder, ...(row.ours ? { ours: true } : {}),
       group: '', name: name.name, nameSource: name.source, subtitle: name.subtitle,
       ...(name.description ? { description: name.description } : {}),
       flags: [], gender,
@@ -1685,11 +1705,14 @@ export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = 
     const dropped = form === 'glb' ? chosen.dropped : [];
     if (dropped.length) log(`  ${id}: ${dropped.length} colour combinations over the cap of ${options.maxVariants ?? 32}, shown in the base colours`);
     const file = form === 'parts' ? `mobiles/models/${id}/parts.json` : form === 'glb' ? `mobiles/models/${id}.glb` : null;
+    // A garment of ours worn on its body (the only appearance that wears anything at conversion): in its signature,
+    // and left out of every other's, so no unit of the game's own changes its signature.
+    const wear = list.find((r) => r.wear)?.wear ?? null;
     const sig = form ? signatureOf(form === 'glb'
-      ? { f: MOBILES_FORMAT, m: MATERIAL_FORMAT, source: source.key, sat: s.sat, form, base: chosen.base.values, variants: chosen.variants.map((v) => [v.id, v.values]) }
+      ? { f: MOBILES_FORMAT, m: MATERIAL_FORMAT, source: source.key, sat: s.sat, form, base: chosen.base.values, variants: chosen.variants.map((v) => [v.id, v.values]), ...(wear ? { wear } : {}) }
       : { f: MOBILES_FORMAT, m: MATERIAL_FORMAT, source: source.key, sat: s.sat, form, base: chosen.base.values }) : null;
     appearances.set(id, {
-      id, sat: s.sat, form, file, record: form ? `mobiles/models/${id}.json` : null, sig,
+      id, sat: s.sat, form, file, record: form ? `mobiles/models/${id}.json` : null, sig, ...(wear ? { wear } : {}),
       pack: null, skeletons: s.skeletons, joints: s.joints, bounds: s.bounds,
       sizeClass: sizeClassOf(s.bounds), readable: s.readable, base: chosen.base.values,
       variants, variantList: form === 'glb' ? chosen.variants : [], riderPose: s.riderPose,
@@ -1802,6 +1825,8 @@ export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = 
     e.group = e.kind === 'creature' ? `creatures/${e.family}` : e.kind === 'droid' ? 'droids' : e.kind === 'special' ? 'specials'
       : e.kind === 'dressed' ? `dressed/${e.species}`
         : `npcs/${keywords.includes('hostile') ? 'hostile' : keywords.includes('faction') ? 'faction' : keywords.includes('civilian') ? 'civilian' : 'other'}`;
+    // The bodies of ours stand in a group of their own, whatever kind their table makes them.
+    if (e.ours) e.group = 'ours';
     if (e.kind === 'dressed') e.speciesReady = !!io?.exists(`characters/${e.species}/parts.json`);
     delete e.family;
     delete e.comboKey;
@@ -1811,7 +1836,7 @@ export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = 
   entries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const wardrobeReport = {};
   for (const [w, references] of Object.entries(wardrobeUse).sort()) wardrobeReport[w] = { references, present: present.has(w) };
-  return { source, options, entries, excluded, appearances, packs, wearables, wardrobes: wardrobeReport, wardrobesPresent: present, nameSources, failed: [], templates: rows.length };
+  return { source, options, entries, excluded, appearances, packs, wearables, wardrobes: wardrobeReport, wardrobesPresent: present, nameSources, failed: [], templates: templateCount, ours: oursCount };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1825,10 +1850,11 @@ const mb = (n) => `${(n / 1e6).toFixed(1)} MB`;
  * is wiring and this can be driven by a test or a scratch script.
  */
 export function runMobiles(ctx) {
-  const { vfs, scan, io, convert, options = {}, source, code, core3Stats = null, log = console.log, warn = console.warn } = ctx;
+  const { vfs, scan, io, convert, options = {}, source, code, core3Stats = null, ours = null, log = console.log, warn = console.warn } = ctx;
   const started = Date.now();
   const previous = io.readJson('mobiles/catalogue.json');
-  const plan = planMobiles({ vfs, scan, io, options, source, core3Stats, log, warn });
+  // `ours`, the table of entries of ours (oursEntries.mjs): its NPC rows are planned beside the templates.
+  const plan = planMobiles({ vfs, scan, io, options, source, core3Stats, ours: (ours?.rows ?? []).filter((r) => r.menu === 'npc'), log, warn });
   const units = [...unitList({ appearances: Object.fromEntries([...plan.appearances].filter(([, a]) => a.form)), packs: Object.fromEntries(plan.packs), wearables: Object.fromEntries(plan.wearables) })];
   const records = new Map();
   const sizeOf = (p) => io.size(p);
@@ -1950,7 +1976,7 @@ export function runMobiles(ctx) {
     try {
       if (a.form === 'glb') {
         const tmp = `${a.file}.tmp`;
-        const info = convert.model(a.sat, tmp, a.base);
+        const info = convert.model(a.sat, tmp, a.base, a.wear ?? []);
         const baseBytes = io.readFile(tmp);
         const files = [{ path: a.file, bytes: baseBytes.length }];
         const renames = [[tmp, a.file]];
@@ -1958,7 +1984,7 @@ export function runMobiles(ctx) {
         for (const v of a.variantList) {
           const file = `mobiles/variants/${id}/${v.id}.glb`;
           try {
-            convert.model(a.sat, `${file}.tmp`, v.values);
+            convert.model(a.sat, `${file}.tmp`, v.values, a.wear ?? []);
             const bytes = io.readFile(`${file}.tmp`);
             if (bytes.equals(baseBytes)) {
               io.remove(`${file}.tmp`);
@@ -2034,8 +2060,11 @@ export function runMobiles(ctx) {
     options: { retailOnly: !!plan.source.retailOnly, core3: plan.core3Mode, core3Kept: plan.core3Kept, only: options.only ?? null, match: options.match ?? null, limit: options.limit ?? null, maxVariants: options.maxVariants ?? 32 },
     wardrobes: plan.wardrobes,
   });
-  io.writeJsonAtomic('mobiles/catalogue.json', catalogue, 0);
   const full = !options.only && !options.match && !options.limit;
+  // The bodies of ours it planned, by the table's key, which `status` asks after: written by a whole run only.
+  if (full && ours && !ours.broken && ours.key) catalogue.ours = { key: ours.key, taken: plan.ours?.taken ?? 0, missing: plan.ours?.missing ?? 0 };
+  io.writeJsonAtomic('mobiles/catalogue.json', catalogue, 0);
+  if ((plan.ours?.taken ?? 0) || (plan.ours?.missing ?? 0)) log(`  entries of ours: ${plan.ours.taken} bodies${plan.ours.missing ? `, ${plan.ours.missing} left out: their appearance or body is not in this mount` : ''}`);
   if (full) {
     const claimed = new Set(['mobiles/catalogue.json']);
     for (const u of units) claimed.add(u.record);

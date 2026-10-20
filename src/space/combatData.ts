@@ -33,6 +33,22 @@ export interface NpcTypeDef {
    * never on one the combat file carries: the manager counts and clears those apart from the game's families.
    */
   standIn?: true;
+  /** Set on a type of ours standing one of the End of War's ships (its id, `eow_corvette`): the NPC tab counts and clears those by it. */
+  endOfWar?: string;
+}
+
+/**
+ * One of the End of War's capital ships or stations (tools/swg/npcships.mjs `END_OF_WAR`): an untiered NPC template the
+ * NPC tab lists by its own name, a side each, drawn by `hull` and stood through the hull path (`standHull`).
+ */
+export interface EndOfWarDef {
+  /** The template's base name (`eow_imperial_lancer`). */
+  id: string;
+  name: string;
+  template: string;
+  hull: string;
+  faction: NpcFaction;
+  chassis: string | null;
 }
 
 export interface CombatChassis {
@@ -68,6 +84,8 @@ export interface CombatFile {
   };
   chassis: Record<string, CombatChassis>;
   types: NpcTypeDef[];
+  /** The End of War's ships; absent on a file written before them. */
+  endOfWar?: EndOfWarDef[];
   hulls: Record<string, HullFx>;
   skipped: { id: string; why: string }[];
   counts?: { types: number; families: number; hulls: number; skipped: number; fits: number; formations: number; taunts: number; hitLayers: number; target: boolean };
@@ -170,6 +188,11 @@ export class CombatData {
 
   chassis(name: string): CombatChassis | null {
     return Object.prototype.hasOwnProperty.call(this.file.chassis, name) ? this.file.chassis[name] : null;
+  }
+
+  /** The End of War's ships, by name; an empty list for a file written before them. */
+  endOfWar(): readonly EndOfWarDef[] {
+    return this.file.endOfWar ?? [];
   }
 
   hullFx(id: string): HullFx | null {

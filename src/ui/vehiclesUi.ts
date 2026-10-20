@@ -142,7 +142,7 @@ export class VehiclesUi {
     }
     this.body.innerHTML = html.join('');
     this.groups.wire(this.body);
-    this.count.textContent = `${shown} of ${g.vehicles.length}`;
+    this.count.textContent = `${shown} of ${g.vehicles.filter((v) => !v.npc).length}`;
     for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-id]')) {
       b.addEventListener('click', () => {
         const def = g.vehicles.find((v) => v.id === b.dataset.id);

@@ -88,7 +88,12 @@ export interface WardrobeRow {
   slots?: string[][] | null;
   parts?: readonly unknown[];
   fit?: ItemFit;
+  /** An entry of ours (tools/swg/oursEntries.mjs): SOE's art that no template names, stood by a row of our table. */
+  ours?: boolean;
 }
+
+/** What a cell of ours says of itself, in the examine strip and the hover text: the one sentence every menu uses. */
+export const OURS_NOTE = "an entry of ours: SOE's own art, which no template of the game's names";
 
 /** As much of a weapon's manifest entry as the give screen reads. */
 export interface WeaponRow {
@@ -131,6 +136,8 @@ export interface GiveCell {
   fit: Fit;
   /** Authored for the other gender's body. */
   other: boolean;
+  /** An entry of ours, not the game's (`OURS_NOTE`): the cell wears a corner mark saying so. */
+  ours: boolean;
   /** The group it is listed under (a slot for clothes, a class for weapons). */
   group: string;
   /** The hover text: everything that will not fit on a 76-pixel cell. */
@@ -225,7 +232,9 @@ export function buildWardrobeView(items: readonly WardrobeRow[], opts: WardrobeO
     const picture: Picture = item.icon ? 'icon' : meshless ? 'unseen' : 'blank';
     const takes = item.slots?.length ? `takes: ${item.slots.map((a) => slotWords(a)).join(' or ')}` : '';
     const unseen = picture === 'unseen' || fit === 'hide';
+    const ours = !!item.ours;
     const note = [
+      ours ? OURS_NOTE : '',
       fit === 'block' ? `${speciesWords(opts.species, true)} cannot wear this` : '',
       unseen ? `worn unseen on ${speciesWords(opts.species, false)}: it takes its slots and draws nothing` : '',
       other ? `authored for the ${item.gender === 'f' ? "women's" : "men's"} body` : '',
@@ -246,6 +255,7 @@ export function buildWardrobeView(items: readonly WardrobeRow[], opts: WardrobeO
       unseen,
       fit,
       other,
+      ours,
       group,
       title: [item.id, note].filter(Boolean).join('\n'),
       note,
@@ -298,6 +308,7 @@ export function buildWeaponView(items: readonly WeaponRow[], opts: WeaponOptions
       unseen: false,
       fit: 'ok',
       other: false,
+      ours: false,
       group: w.class,
       title: [w.id, note].filter(Boolean).join('\n'),
       note,
@@ -316,6 +327,8 @@ export interface PropRow {
   description?: string | null;
   icon?: string | null;
   size?: { w: number; h: number; d: number };
+  /** A prop of ours (tools/swg/oursEntries.mjs): SOE's art no template names. */
+  ours?: boolean;
 }
 
 export interface PropOptions {
@@ -349,6 +362,7 @@ export function buildPropView(items: readonly PropRow[], opts: PropOptions): Giv
     const s = p.size;
     const size = s && (s.w || s.h || s.d) ? `${s.w.toFixed(1)} x ${s.h.toFixed(1)} x ${s.d.toFixed(1)} m` : '';
     const held = opts.held === p.id;
+    const ours = !!p.ours;
     const cell: GiveCell = {
       id: p.id,
       name,
@@ -362,9 +376,10 @@ export function buildPropView(items: readonly PropRow[], opts: PropOptions): Giv
       unseen: false,
       fit: 'ok',
       other: false,
+      ours,
       group: p.group,
-      title: [p.id, size].filter(Boolean).join('\n'),
-      note: size,
+      title: [p.id, ours ? OURS_NOTE : '', size].filter(Boolean).join('\n'),
+      note: [ours ? OURS_NOTE : '', size].filter(Boolean).join(' · '),
       description: p.description?.trim() ?? '',
     };
     (byGroup.get(p.group) ?? byGroup.set(p.group, []).get(p.group)!).push(cell);
@@ -471,7 +486,9 @@ export interface CellLook {
 export function giveCellHtml(c: GiveCell, look: CellLook): string {
   const cls = ['bp-cell', c.on ? look.on : '', look.more ?? '', c.unseen ? 'hide' : '', c.mark ? 'marked' : '', look.selected ? 'sel' : ''].filter(Boolean).join(' ');
   const pic = c.picture === 'icon' && c.icon ? `<img src="${escapeHtml(c.icon)}" loading="lazy" decoding="async" alt="">` : `<span class="bp-initials">${escapeHtml(c.initials)}</span>`;
-  const tag = c.unseen ? '<span class="give-tag">unseen</span>' : c.other ? '<span class="give-tag">other</span>' : '';
+  // An entry of ours says so before anything else it might say: that it is not the game's is the first thing a player
+  // choosing it should know.
+  const tag = c.ours ? '<span class="give-tag">ours</span>' : c.unseen ? '<span class="give-tag">unseen</span>' : c.other ? '<span class="give-tag">other</span>' : '';
   const label = c.tag ? `<small>${escapeHtml(c.tag)}</small><br>${escapeHtml(c.label)}` : escapeHtml(c.label);
   const mark = c.mark ? `<span class="give-id">${escapeHtml(c.mark)}</span>` : '';
   return `<div class="${cls}" role="button" tabindex="0" data-id="${escapeHtml(c.id)}" data-initials="${escapeHtml(c.initials)}" title="${escapeHtml(c.title)}"><span class="bp-pic">${pic}${tag}${look.corner ?? ''}</span><span class="bp-name">${label}</span>${mark}</div>`;

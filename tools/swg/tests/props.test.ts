@@ -133,11 +133,14 @@ function note(what: string): void {
     // Nothing enormous: the space stations are out, so what is left is furniture and structures a
     // player might really stand. This is what would trip if that exclusion were ever lost.
     // The cap is the pack's own late world's: 974 MB measured on the mount before SOE's final names list, 1,228 MB
-    // with it (729 more props, 275 of them trading-card decorations, none of them a space station).
-    const bytes = m.models.reduce((a, d) => a + statSync(join('assets-private', 'props', d.file)).size, 0);
+    // with it (729 more props, 275 of them trading-card decorations, none of them a space station). The skeletal props
+    // (a `.sat` drawn still, which a pack written so marks `skeletal` on the model) are held to a cap of their own:
+    // 221 MB over 366 models measured on SOE complete's pilot conversion, none of them a station.
+    const bytes = (skeletal: boolean) => m.models.filter((d) => !!(d as { skeletal?: boolean }).skeletal === skeletal).reduce((a, d) => a + statSync(join('assets-private', 'props', d.file)).size, 0);
     const late = (m as { late?: { state?: string } }).late?.state;
     const cap = late === 'applied' || late === 'final' ? 1400 : 1100;
-    ok(bytes / 1e6 < cap, `the whole pack's models are ${(bytes / 1e6).toFixed(0)} MB, which is under the cap of ${cap} MB that would say the space stations had crept back in`);
+    ok(bytes(false) / 1e6 < cap, `the pack's static models are ${(bytes(false) / 1e6).toFixed(0)} MB, which is under the cap of ${cap} MB that would say the space stations had crept back in`);
+    ok(bytes(true) / 1e6 < 300, `and its skeletal props ${(bytes(true) / 1e6).toFixed(0)} MB, under their own cap of 300 MB`);
   }
 }
 

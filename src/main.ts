@@ -258,7 +258,7 @@ import { PropCatalogue, type PropDef } from './world/propCatalogue.ts';
 import { PROP_TUNE, NO_TURN, liftTo as propLiftTo, propSpot, propVerdict, pushBy, spinOf, tiltOf, turnAbout, type PropTurn, type PropVerdict } from './world/propPlace.ts';
 import { letGoOf, placedProps, propsKey, type LetGo, type PlacedDeps, type PlacedProp } from './world/propsPlaced.ts';
 import { HOUSING_TUNE, LocalHomes, MOVE_SAYS, atDoorDoes, atDoorOf, awayText, backHouseText, houseName, inHandHouseText, isLocalHome, localMoveOf, moveDropped, movedHouseText, myBuildings, pickedHouseText, placeLocalHome, type HomeStore, type HouseMove, type LocalHome, type LocalHomeDeps, type LocalHomeLanding, type MyBuilding } from './world/myBuildings.ts';
-import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, standsSolid, type StandAnswer, type StoodRow, type WorldKind } from './world/permanent.ts';
+import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, propStandOf, standsSolid, type StandAnswer, type StoodRow, type WorldKind } from './world/permanent.ts';
 import { PLACEMENT_LAYERS, fromGame, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
 import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, driftText, forceText, groundMoved, homeStaysText, inHandText, keptText, nextDestination, nextStateChoice, notYoursText, pickedUpText, removedText, rowFromHouse, rowFromProp, savedText, stateChoiceText, takeOutText, yawOfTurn, type BuildingSource, type Destination as KeptIn, type HandSource, type HomeSource } from './world/permanentEdit.ts';
 import { EDITOR_HEADER, EDITOR_HEADER_VALUE, PLACEMENTS_ENDPOINT_TUNE, type PlacementReply, type PlacementReplyOk } from './world/placementEdits.ts';
@@ -314,7 +314,7 @@ import { ZONE_TIER } from './space/roster';
 import { fillTaunt, pickLine } from './space/taunts';
 import { componentLine } from './space/shipStats';
 import { TIER_LADDER_TUNE, ladderLine, tuneTierLadder } from './space/tierLadder.ts';
-import { HULL_NPC_TUNE, NPC_SIDES, hullNameOf, hullWords, npcShipRoute, tuneHullNpc } from './space/hullNpc.ts';
+import { END_OF_WAR_TUNE, HULL_NPC_TUNE, NPC_SIDES, endOfWarRows, hullNameOf, hullWords, npcShipRoute, tuneEndOfWar, tuneHullNpc } from './space/hullNpc.ts';
 import { targetable, type CombatStatus } from './space/shipCombat';
 import type { ShipSpawner } from './ui/npcUi';
 import { HyperspaceCatalogue, arrivalAt, landmarksOf, loadSpacePack, type Destination } from './space/spaceData';
@@ -5514,7 +5514,7 @@ class App {
         if (!c) return 'the player is not assembled from parts';
         const w = await c.catalogue(import.meta.env.BASE_URL);
         const re = find ? new RegExp(find, 'i') : null;
-        const hits = w.items.filter((i) => !re || re.test(i.id) || re.test(i.template));
+        const hits = w.items.filter((i) => !re || re.test(i.id) || re.test(i.template ?? ''));
         return { total: w.items.length, matched: hits.length, items: hits.slice(0, 40).map((i) => `${i.id} (${i.kind}, layer ${i.parts[0]?.occlusionLayer})`) };
       },
       remove: (name: string) => {
@@ -6907,7 +6907,15 @@ class App {
        * `ms: { think, physics }`. `{ patrols: false }` stops the patrols streaming in, `{ passive: true }` every NPC's fire,
        * `{ clear: true }` takes every NPC ship away, the hulls stood for a side among them.
        */
-      npcShips: (opts: { patrols?: boolean; passive?: boolean; clear?: boolean; ladder?: true | Parameters<typeof tuneTierLadder>[0]; hulls?: true | Partial<typeof HULL_NPC_TUNE> } = {}) => {
+      npcShips: (opts: { patrols?: boolean; passive?: boolean; clear?: boolean; ladder?: true | Parameters<typeof tuneTierLadder>[0]; hulls?: true | Partial<typeof HULL_NPC_TUNE>; endOfWar?: true | Partial<typeof END_OF_WAR_TUNE> } = {}) => {
+        // The End of War's ships in the NPC tab (src/space/hullNpc.ts): `{ endOfWar: true }` prints their tier and the
+        // list, `{ endOfWar: { tier: 7 } }` moves the tier they are stood at; the next one stood takes it.
+        if (opts.endOfWar) {
+          if (opts.endOfWar !== true) tuneEndOfWar(opts.endOfWar);
+          const g = this.garage ?? this.world.garage;
+          const rows = endOfWarRows(this.world.ships.data?.endOfWar() ?? [], g ? new Set(g.vehicles.filter((d) => d.source === 'ship').map((d) => d.id)) : null);
+          return { endOfWar: { ...END_OF_WAR_TUNE }, ships: rows.map((r) => `${r.name} (${r.id}, ${r.faction}, on ${r.hull})${r.ok ? '' : `: ${r.why}`}`), note: 'tier: the tier of their own they are stood at, read through the ladder above 5; the next one stood' };
+        }
         // Tiers 6 to 10 (SOE's families from publish 55 on): `{ ladder: true }` prints the ladder, an object moves it. The
         // skill reaches every pilot in the air at once (the brain reads it at each think); a ship's fit and its strength
         // are made when it is stood, so those reach the next ship stood.
@@ -8237,6 +8245,15 @@ class App {
        * `status` would print as far as these packs can say it. Fetches nothing.
        */
       late: () => this.lateReport(),
+      /**
+       * What each menu holds of the entries of ours (tools/swg/oursEntries.mjs: SOE's art no template names, stood by our
+       * committed table, marked ours in every menu), and the paths this wave opened beside them: per wardrobe folder its
+       * stamp and the clothes and hairstyles of ours; the creator table's hair rows of ours by species; the props of ours
+       * and how many skeletal props stand still; the NPC tab's bodies of ours with whether each can be stood; the End of
+       * War's ships with their sides; and the ships pack's NPC-only hulls. From what the game has already fetched; a menu
+       * not fetched yet says so (open it once). Fetches nothing.
+       */
+      oursEntries: () => this.oursReport(),
       /**
        * Move the blade's axis in the hand to see where it looks right. `grip({ source: 'tags' })` swaps in the axis
        * the importer read from the game's own tag geometry (when it could), `grip({ source: 'solved' })` the one
@@ -13045,6 +13062,38 @@ class App {
       remembered,
       last: this.hairChange,
     };
+  }
+
+  /** `__debug.oursEntries()`: what each menu holds of the entries of ours, read off what the game has fetched (see its README row). */
+  private oursReport(): Record<string, unknown> {
+    const base = import.meta.env.BASE_URL;
+    const out: Record<string, unknown> = {};
+    const wardrobes = [...Character.wardrobesNow()].filter(([dir]) => dir.includes('/assets-private/wardrobe/'));
+    out.wardrobes = wardrobes.length
+      ? Object.fromEntries(
+          wardrobes.map(([dir, w]) => [
+            dir.replace(/\/$/, '').split('/').pop() ?? dir,
+            { stamp: w.ours ?? null, clothes: w.items.filter((i) => i.ours && i.kind !== 'hair').map((i) => `${i.name ?? i.id} (${i.id})`), hair: w.items.filter((i) => i.ours && i.kind === 'hair').map((i) => `${i.name ?? i.id} (${i.id})`) },
+          ]),
+        )
+      : 'no wardrobe fetched yet: open the Clothes or Appearance tab once';
+    const table = creatorTableNow(base);
+    out.hairRows = table === undefined ? "the creator's table has not landed yet" : !table ? 'no creator table converted' : Object.fromEntries(Object.entries(table.species).map(([s, e]) => [s, (e.hair ?? []).filter((h) => h.ours).map((h) => h.name ?? h.id)] as const).filter(([, l]) => l.length));
+    out.props = this.props.loaded
+      ? { ours: this.props.all.filter((p) => p.ours).map((p) => `${p.name ?? p.id} (${p.id})`), skeletal: this.props.skeletalCount }
+      : 'the props pack has not landed yet: open the Props tab once';
+    const cat = this.world.mobileCatalogue;
+    out.npcs = cat
+      ? cat.file.entries.filter((e) => e.ours).map((e) => {
+          const r = cat.ready(e);
+          return `${e.name} (${e.id})${r.ok ? '' : `: ${r.why}`}`;
+        })
+      : 'the creature and NPC catalogue has not landed yet';
+    const g = this.garage ?? this.world.garage;
+    const combat = this.world.ships.data;
+    out.endOfWar = !combat ? 'the NPC ship types (ships/combat.json) have not landed yet' : endOfWarRows(combat.endOfWar(), g ? new Set(g.vehicles.filter((d) => d.source === 'ship').map((d) => d.id)) : null).map((r) => `${r.name} (${r.id}, ${r.faction}, on ${r.hull})${r.ok ? '' : `: ${r.why}`}`);
+    out.npcHulls = g ? g.vehicles.filter((d) => d.npc).map((d) => d.id) : 'the garage has not loaded yet: open the spawner (B) once';
+    return out;
   }
 
   /**
@@ -22602,7 +22651,7 @@ class App {
    * and what to wait on for it to be built, or null.
    */
   private standDressingRow(row: PlacementRow, g: GamePlace, key: string): StandAnswer | null {
-    const s = dressingStandOf(row, g, key, (thing) => this.props.find(thing), (template) => isSeat(template) || isTableTemplate(template));
+    const s = dressingStandOf(row, g, key, (thing) => propStandOf(this.props.find(thing)), (template) => isSeat(template) || isTableTemplate(template));
     if (!s) return null;
     if (row.pack === 'props') return this.props.pack ? this.world.standPlacement(s, this.props.pack) : null;
     if (row.pack === 'gallery') return this.dressingGallery ? this.world.standPlacement(s, this.dressingGallery) : null;
@@ -24688,7 +24737,7 @@ class App {
       stand: async (row) => {
         const def = this.props.find(row.id);
         if (!def) return false;
-        return this.world.placeProp(def.model, { key: `prop:${row.thing}`, at: { x: row.x, y: row.y, z: row.z }, yaw: 0, turn: row.q, pack: this.props.pack, inside: !!row.inside, solid: true, template: def.template });
+        return this.world.placeProp(def.model, { key: `prop:${row.thing}`, at: { x: row.x, y: row.y, z: row.z }, yaw: 0, turn: row.q, pack: this.props.pack, inside: !!row.inside, solid: true, template: def.template ?? undefined });
       },
       clear: (thing) => {
         this.world.unplaceBuilding(`prop:${thing}`);
@@ -25338,7 +25387,7 @@ class App {
   /** Whether a props row's thing is a seat or a table, which stands passable unless its row says otherwise. */
   private isFurnitureThing(thing: string | undefined): boolean {
     const def = thing ? this.props.find(thing) : null;
-    return !!def && (isSeat(def.template) || isTableTemplate(def.template));
+    return !!def && !!def.template && (isSeat(def.template) || isTableTemplate(def.template));
   }
 
   /** Whether a row stands solid: its own word, else the default, by the very rule it is stood by (`standsSolid`). */
@@ -26219,8 +26268,28 @@ class App {
         const dir = this.cam.camera.getWorldDirection(new THREE.Vector3());
         return mgr.standHull(hull, side, tier, count, from, dir);
       },
-      clearHull: (hull) => this.world.npcShips?.clear((s) => s.type.standIn === true && s.type.hull === hull) ?? 0,
+      clearHull: (hull) => this.world.npcShips?.clear((s) => s.type.standIn === true && s.type.hull === hull && !s.type.endOfWar) ?? 0,
       countHull: (hull) => this.world.npcShips?.countHull(hull) ?? 0,
+      // The End of War's capital ships and stations (combat.json's `endOfWar`): each by its own name for its own side, at
+      // the tier of their own (`END_OF_WAR_TUNE`), stood through the hull path; ready while the garage holds its hull.
+      endOfWar: () => {
+        const g = this.garage ?? this.world.garage;
+        const list = this.world.ships.data?.endOfWar() ?? [];
+        return { rows: endOfWarRows(list, g ? new Set(g.vehicles.filter((d) => d.source === 'ship').map((d) => d.id)) : null), tier: END_OF_WAR_TUNE.tier };
+      },
+      spawnEndOfWar: async (id, count) => {
+        const mgr = this.world.npcShips;
+        if (!mgr) return 'no world to stand them in';
+        const e = this.world.ships.data?.endOfWar().find((x) => x.id === id);
+        if (!e) return `no End of War ship ${id}`;
+        const p = this.player;
+        const flown = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+        const from = (flown ? flown.pos : p.worldPos).clone();
+        const dir = this.cam.camera.getWorldDirection(new THREE.Vector3());
+        return mgr.standHull(e.hull, e.faction, END_OF_WAR_TUNE.tier, count, from, dir, undefined, { name: e.name, endOfWar: e.id });
+      },
+      clearEndOfWar: (id) => this.world.npcShips?.clear((s) => s.type.endOfWar === id) ?? 0,
+      countEndOfWar: (id) => this.world.npcShips?.countEndOfWar(id) ?? 0,
     };
   }
 

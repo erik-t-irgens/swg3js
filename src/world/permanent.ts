@@ -96,6 +96,14 @@ export interface DressingStand {
  * seats and tables of ours are never solid either. Null for a thing the catalogue does not hold, or a row with
  * no model.
  */
+/**
+ * A props catalogue thing as `dressingStandOf`'s `thingOf` reads one: a prop of ours, which no template names, stands
+ * with an empty template, so it is no seat or table and carries no client data's effects.
+ */
+export function propStandOf(def: { model: string; template: string | null } | null): { model: string; template: string } | null {
+  return def ? { model: def.model, template: def.template ?? '' } : null;
+}
+
 export function dressingStandOf(row: PlacementRow, g: GamePlace, key: string, thingOf: (thing: string) => { model: string; template: string } | null, furniture: (template: string) => boolean): DressingStand | null {
   const at = { key, x: g.x, y: g.y, z: g.z, q: g.q, inside: !!row.inside, ...(row.clear && row.clear > 0 ? { clear: row.clear } : {}) };
   if (row.pack === 'props') {

@@ -296,7 +296,7 @@ if (!existsSync(tableFile) || !existsSync(indexFile)) {
 } else {
   const table = JSON.parse(readFileSync(tableFile, 'utf8')) as CreatorTable;
   const index = JSON.parse(readFileSync(indexFile, 'utf8')) as { species: { id: string; species: string; gender: string; wardrobe: string | null }[] };
-  const wardrobes = new Map<string, { items: (HairItem & { variables?: { name: string; private: boolean; meshes?: string[] }[] })[] }>();
+  const wardrobes = new Map<string, { ours?: { key: string; taken: number; missing: number }; items: (HairItem & { variables?: { name: string; private: boolean; meshes?: string[] }[] })[] }>();
   const wardrobe = (w: string) => {
     if (!wardrobes.has(w)) wardrobes.set(w, JSON.parse(readFileSync(`${ROOT}wardrobe/${w}/wardrobe.json`, 'utf8')));
     return wardrobes.get(w)!;
@@ -317,11 +317,19 @@ if (!existsSync(tableFile) || !existsSync(indexFile)) {
     counts.push(`${sp.id} ${g.groups.map((x) => `${x.id}:${x.cells.filter((c) => c.id !== NO_HAIR).length}`).join(' ') || 'no styles'}${g.none ? ' +none' : ''}`);
     if (!g.groups.length) continue;
     // The table's own order, creation styles first, the rows the archives lack skipped.
-    const want = (entry?.hair ?? []).filter((h) => h.inArchives);
+    // The table's own rows; the hairstyles of ours it carries stand in a group of their own (held below).
+    const want = (entry?.hair ?? []).filter((h) => h.inArchives && !h.ours);
     const wantOrder = [...want.filter((h) => h.creation), ...want.filter((h) => !h.creation)].map((h) => h.id);
     ok((own ? own.cells.filter((c) => c.id !== NO_HAIR).map((c) => c.id) : []).join() === wantOrder.join(), `${sp.id}: this gender's styles are the table's, creation first (${wantOrder.length})`);
     ok(g.none && g.groups[0].cells[0].id === NO_HAIR, `${sp.id}: no hair is offered, leading the grid, whatever the table says (it says ${entry?.bald === false ? 'may not' : 'may'})`);
-    ok(g.groups.every((x) => x.cells.every((c) => c.id === NO_HAIR || (/beard/.test(c.id) ? /^Beard \d+$/ : /^Style \d+$/).test(c.label))), `${sp.id}: every cell reads "Style N", a beard "Beard N"`);
+    ok(g.groups.every((x) => x.cells.every((c) => c.id === NO_HAIR || c.ours || (/beard/.test(c.id) ? /^Beard \d+$/ : /^Style \d+$/).test(c.label))), `${sp.id}: every cell of the game's reads "Style N", a beard "Beard N"`);
+    // The hairstyles of ours: exactly the table's rows of ours for this species and gender, in its order, each named as
+    // the table names it and marked ours, wherever the wardrobe was converted with the entries of ours (its `ours`
+    // stamp): read off the creator table alone, so a hairstyle of ours the wardrobe failed to convert is a failure here
+    // rather than a row both sides quietly leave out. A wardrobe from before the entries of ours stands none.
+    const oursWant = wardrobe(sp.wardrobe!).ours ? (entry?.hair ?? []).filter((h) => h.ours) : [];
+    const oursGot = g.groups.find((x) => x.id === 'ours')?.cells ?? [];
+    ok(oursGot.map((c) => c.id).join() === oursWant.map((h) => h.id).join() && oursGot.every((c, i) => c.ours && c.label === oursWant[i].name), `${sp.id}: the hairstyles of ours are the table's rows of ours, named and marked (${oursWant.length})`);
     ok(g.groups.every((x) => x.cells.every((c) => c.id === NO_HAIR || c.picture === 'icon')), `${sp.id}: every style has its picture`);
     const seen = g.groups.flatMap((x) => x.cells.map((c) => c.id)).filter((x) => x !== NO_HAIR);
     ok(new Set(seen).size === seen.length, `${sp.id}: no style is offered twice`);
@@ -344,7 +352,13 @@ if (!existsSync(tableFile) || !existsSync(indexFile)) {
         if (!sp.wardrobe || !existsSync(`${ROOT}wardrobe/${sp.wardrobe}/wardrobe.json`)) continue;
         const items = wardrobe(sp.wardrobe).items;
         const gender = sp.gender === 'female' ? 'female' : 'male';
-        const r = againstBase(flatGrid(oldGrid.hairCells(table, items, sp.species, gender, null), items), flatGrid(hairCells(table, items, sp.species, gender, null), items));
+        // The group of ours is this wave's and is held above; the rest is held to the base, which is handed the table
+        // and the wardrobe without their rows and entries of ours (it would read them as the species' own, or as styles
+        // no row names).
+        const now = hairCells(table, items, sp.species, gender, null);
+        const baseTable = { ...table, species: Object.fromEntries(Object.entries(table.species).map(([k, e]) => [k, e.hair ? { ...e, hair: e.hair.filter((h) => !h.ours) } : e])) } as typeof table;
+        const baseItems = items.filter((i) => !(i as { ours?: boolean }).ours);
+        const r = againstBase(flatGrid(oldGrid.hairCells(baseTable, baseItems, sp.species, gender, null), items), flatGrid({ ...now, groups: now.groups.filter((x) => x.id !== 'ours') }, items));
         if (!r.ok) wrong.push(`${sp.id}: ${r.why}`);
         if (r.dropped.length) dropped.push(`${sp.id} ${r.dropped.length}`);
       }
@@ -362,11 +376,13 @@ if (!existsSync(tableFile) || !existsSync(indexFile)) {
     const g = gridOf('human_female')!;
     // With SOE's final names list the human wardrobe also carries five styles no row of the table names, which come
     // after the men's in a group of their own; before it, there is no such group.
-    const shape = g.groups.map((x) => x.id).join();
+    // The hairstyles of ours (the bangs and the Singing Mountain hologram on a pack converted with them) stand after the
+    // men's in a group of their own.
+    const shape = g.groups.map((x) => x.id).filter((x) => x !== 'ours').join();
     ok(shape === (late ? 'own,other,untabled' : 'own,other') && g.groups[0].cells[0].id === NO_HAIR, `a human female: her styles with no hair leading, then the men's${late ? ', then the five no row names' : ''} (${g.groups.map((x) => `${x.id} ${x.cells.length}`).join(', ')})`);
-    if (late) ok(g.groups[2].cells.length === 5, `and those are five (${g.groups[2]?.cells.length})`);
+    if (late) ok(g.groups.find((x) => x.id === 'untabled')?.cells.length === 5, `and those are five (${g.groups.find((x) => x.id === 'untabled')?.cells.length})`);
     ok(!g.groups[0].cells.some((c) => c.id === 'hair_human_female_s33'), 'the style the archives lack is not offered');
-    ok(g.groups[1].cells.length === table.species.human_male.hair!.filter((h) => h.inArchives).length, "and every one of the men's");
+    ok(g.groups[1].cells.length === table.species.human_male.hair!.filter((h) => h.inArchives && !h.ours).length, "and every one of the men's");
   }
   for (const id of ['twilek_female', 'twilek_male', 'zabrak_female', 'zabrak_male', 'trandoshan_female', 'trandoshan_male']) {
     const g = gridOf(id)!;
@@ -395,7 +411,8 @@ if (!existsSync(tableFile) || !existsSync(indexFile)) {
     ok(gridOf('wookiee_female')!.groups.find((x) => x.id === 'own')?.cells.filter((c) => c.id !== NO_HAIR).length === 12, 'a Wookiee woman has her twelve styles from the table');
     for (const id of ['wookiee_male', 'wookiee_female']) {
       const g = gridOf(id)!;
-      ok(g.groups.map((x) => x.id).join() === 'own', `${id}: their own group alone, the other gender's twelve wearing the same meshes (${g.groups.map((x) => `${x.id} ${x.cells.length}`).join(', ')})`);
+      // (A Wookiee man's two beards of ours stand in a group of their own after it.)
+      ok(g.groups.map((x) => x.id).filter((x) => x !== 'ours').join() === 'own', `${id}: their own group alone, the other gender's twelve wearing the same meshes (${g.groups.map((x) => `${x.id} ${x.cells.length}`).join(', ')})`);
     }
   }
 

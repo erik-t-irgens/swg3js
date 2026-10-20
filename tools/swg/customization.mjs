@@ -33,6 +33,10 @@
 //
 // The rows repeat a colour under several tabs (the skin on the body tab, the face tab and a species' own);
 // such a row is kept once, under the first tab it came in, with the others in `alsoIn`.
+//
+// Beside the table's own rows each species' hair list carries the hairstyles of ours that fit it (oursEntries.mjs:
+// late appearance files no template names, stood by an entry of ours), marked `ours` and never a creation style.
+import { oursHairRow, oursRows } from './oursEntries.mjs';
 
 /** What this module writes; `status` asks again for a file older than this. */
 export const CUSTOMIZATION_FORMAT = 1;
@@ -86,7 +90,7 @@ function rowOf(r, word) {
  * has(path) }`: a parsed datatable (`{ rows }`) or null, a string table (a Map) or null, a palette's
  * entries (`[[r, g, b, a], ...]`) or null, and whether a file is in the archives. Nothing else is opened.
  */
-export function buildCustomization(read) {
+export function buildCustomization(read, { ours = null } = {}) {
   const data = read.table(TABLES.data);
   if (!data?.rows?.length) throw new Error(`${TABLES.data} is not in the archives`);
   const groupFlags = new Map((read.table(TABLES.groups)?.rows ?? []).map((r) => [r.CUSTOMIZATION_GROUP, r]));
@@ -95,7 +99,7 @@ export function buildCustomization(read) {
   const words = read.strings(WORDS) ?? new Map();
   const word = (k) => words.get(k) ?? null;
   const out = { format: CUSTOMIZATION_FORMAT, source: CUSTOMIZATION_SOURCES.join(', '), species: {}, palettes: {} };
-  const counts = { rows: 0, words: 0, hair: 0, hairMissing: 0, palettes: 0, colours: 0, skipped: [] };
+  const counts = { rows: 0, words: 0, hair: 0, hairMissing: 0, ours: 0, oursMissing: 0, palettes: 0, colours: 0, skipped: [] };
   for (const id of [...new Set(data.rows.map((r) => r.SPECIES_GENDER))]) {
     const groups = [];
     const rows = [];
@@ -123,6 +127,18 @@ export function buildCustomization(read) {
       .map((h) => ({ template: h.SHARED_TEMPLATE, id: itemIdOf(h.SHARED_TEMPLATE), inArchives: read.has(h.SHARED_TEMPLATE), creation: !!h.AVAILABLE_AT_CREATION, skill: h.SKILL_MOD_VALUE }));
     counts.hair += hair.length;
     counts.hairMissing += hair.filter((h) => !h.inArchives).length;
+    // The hairstyles of ours for this species and gender (oursEntries.mjs), after the table's own rows, each marked
+    // ours and never a creation style; one whose appearance the archives have not got is left out and counted. The
+    // grid lays them out in a group of their own.
+    for (const r of oursRows(ours, 'hair')) {
+      if (!r.fits.includes(id)) continue;
+      if (!read.has(r.appearance)) {
+        counts.oursMissing++;
+        continue;
+      }
+      hair.push(oursHairRow(r));
+      counts.ours++;
+    }
     out.species[id] = { ...(bald.has(id) ? { bald: bald.get(id) } : {}), groups, rows, ...(hair.length ? { hair } : {}) };
   }
   for (const p of read.table(TABLES.palettes)?.rows ?? []) {

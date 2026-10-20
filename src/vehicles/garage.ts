@@ -131,6 +131,12 @@ export interface VehicleDef {
   hybrid?: { cockpit: string; engines: string } | null;
   /** The garage vehicle whose client data this one sounds by, when it is not its own (a hybrid's engine pod). */
   soundFrom?: { id: string; template?: string } | null;
+  /**
+   * A hull of the ships pack's NPC-only path (`npcOnlyHullPicks`, tools/swg/npcships.mjs): what an NPC type with no
+   * player hull flies (a gunboat, a freighter, the End of War's lancer), stood by the NPC types and the NPC tab and never
+   * in the garage's own list (`byKind`) or anything that asks for a hull a player flies.
+   */
+  npc?: boolean;
 }
 
 export interface ShipWeapon {
@@ -252,7 +258,7 @@ export class Garage {
         type Attachment = NonNullable<VehicleDef['attachments']>[number];
         type Cockpit = NonNullable<VehicleDef['cockpit']>;
         type Portals = NonNullable<import('./interior').InteriorDef['portals']>;
-        const manifest = (await res.json()) as { late?: unknown; ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[]; weapon?: ShipWeapon | null; chassis?: string | null; wingOpenSpeedFactor?: number; fit?: FitDef | null }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells; portals?: Portals }[] };
+        const manifest = (await res.json()) as { late?: unknown; ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[]; weapon?: ShipWeapon | null; chassis?: string | null; wingOpenSpeedFactor?: number; fit?: FitDef | null; npc?: boolean }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells; portals?: Portals }[] };
         g.late.ships = manifest.late ?? null;
         const modelByFile = new Map((manifest.models ?? []).map((m) => [m.file, m]));
         for (const sh of manifest.ships) {
@@ -281,6 +287,7 @@ export class Garage {
             riderPose: 'space_sitting',
             // Only with the components to resolve it against: a fit whose names cannot be looked up would hang nothing.
             fit: sh.fit && g.components.length ? sh.fit : null,
+            ...(sh.npc ? { npc: true } : {}),
           });
         }
       }
@@ -437,7 +444,8 @@ export class Garage {
 
   byKind(): Map<VehicleKind, VehicleDef[]> {
     const out = new Map<VehicleKind, VehicleDef[]>();
-    for (const v of this.vehicles) (out.get(v.kind) ?? out.set(v.kind, []).get(v.kind)!).push(v);
+    // An NPC-only hull is flown by NPC types and stood from the NPC tab, never spawned from the garage's own list.
+    for (const v of this.vehicles) if (!v.npc) (out.get(v.kind) ?? out.set(v.kind, []).get(v.kind)!).push(v);
     return out;
   }
 

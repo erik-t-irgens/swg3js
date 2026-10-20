@@ -19,9 +19,22 @@
 //
 // Dependency-free but for node's own modules; the conversion itself is handed in, so this stays
 // testable. Shared with tools/swg/tests/props.test.ts.
+import { oursId } from './oursEntries.mjs';
 
 /** The pack this writes. A pack written by an older run is asked for again rather than read. */
 export const PROPS_PACK_VERSION = 1;
+
+/**
+ * The skeletal props: a template whose appearance is a skeleton's (a `.sat`: the creature statues, the armour lying
+ * about, the beast trophies) is stood still and written as an ordinary prop's model (cli.mjs `convertSat`'s `bake`).
+ * A pack carries this number once it was written so; `status` asks for one that does not, since every skeletal
+ * template was left out before (437 of them over SOE's final files), and the pack's version stays 1 so a build
+ * that reads none of this reads the pack as it always did.
+ */
+export const PROPS_SKELETAL_FORMAT = 1;
+
+/** The group the props of ours are shown under (oursEntries.mjs): one of their own, whatever folder their art is from. */
+export const OURS_PROP_GROUP = 'ours';
 
 /**
  * What counts as a prop: scenery and furniture, and nothing the game already has a home for.
@@ -132,14 +145,42 @@ export function buildProps(templates, deps, { log = () => {}, limit = Infinity }
   return { props, skipped };
 }
 
+/**
+ * The props of ours (oursEntries.mjs): each table row stood as a template's prop is, by `deps.convert(row)` (`{ model,
+ * file, bounds, icon }` or `{ skip }`), in the group of their own, named as the table names it and marked ours. A row
+ * whose appearance `deps.has` says the mount has not got is left out and counted (`missing`), never an error.
+ */
+export function buildOursProps(rows, deps) {
+  const props = [];
+  const skipped = [];
+  let missing = 0;
+  for (const row of rows ?? []) {
+    if (!deps.has(row.appearance)) {
+      missing++;
+      continue;
+    }
+    const r = deps.convert(row);
+    if (!r || r.skip) {
+      skipped.push({ template: null, appearance: row.appearance, why: r?.skip ?? 'failed' });
+      continue;
+    }
+    const id = oursId(row);
+    props.push({ id, template: null, group: OURS_PROP_GROUP, model: r.model, file: r.file, bounds: r.bounds ?? null, size: propSize(r.bounds), name: row.name, description: null, ...(r.icon !== undefined ? { icon: r.icon } : {}), ours: true });
+  }
+  return { props, skipped, missing };
+}
+
 /** What `status` reads back. */
 export function propCounts(manifest) {
   const props = manifest?.props ?? [];
+  const skeletalModels = new Set((manifest?.models ?? []).filter((m) => m.skeletal).map((m) => m.id));
   return {
     props: props.length,
     models: new Set(props.map((p) => p.model)).size,
     groups: new Set(props.map((p) => p.group)).size,
     named: props.filter((p) => p.name).length,
     iconed: props.filter((p) => p.icon).length,
+    skeletal: props.filter((p) => skeletalModels.has(p.model)).length,
+    ours: props.filter((p) => p.ours).length,
   };
 }

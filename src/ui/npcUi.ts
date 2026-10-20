@@ -76,6 +76,16 @@ export interface ShipSpawner {
   /** Take away every NPC ship stood from a hull's row; returns how many. */
   clearHull(hull: string): number;
   countHull(hull: string): number;
+  /**
+   * The End of War's capital ships and stations (`endOfWarRows`): each by its own name with its side, the tier they fly
+   * at (a tier of their own) and whether it can be stood now. Empty with a combat file written before them; left out by
+   * a game that offers none.
+   */
+  endOfWar?(): { rows: import('../space/hullNpc.ts').EndOfWarRow[]; tier: number };
+  /** Stand one of them, or three in its side's formation; resolves to the sentence for the count line. */
+  spawnEndOfWar?(id: string, count: 1 | 3): Promise<string>;
+  clearEndOfWar?(id: string): number;
+  countEndOfWar?(id: string): number;
 }
 
 /**
@@ -453,8 +463,31 @@ export class NpcUi {
       const key = `ships:${g.faction}`;
       out.push(groupHtml(key, g.label, g.rows.length, note, this.groups.isOpen(key, false), rows.join('')));
     }
+    out.push(this.endOfWarHtml(ships));
     out.push(this.hullsHtml(ships));
     return out.join('');
+  }
+
+  /**
+   * The End of War's capital ships and stations: a row each by its own name, with the side it flies for and one, patrol
+   * and clear, all at the tier of their own the group's note gives. A row that cannot be stood says why and offers no
+   * button. Nothing with a combat file written before them.
+   */
+  private endOfWarHtml(ships: ShipSpawner): string {
+    const eow = ships.endOfWar?.();
+    if (!eow || !eow.rows.length) return '';
+    const sides = new Map(ships.sides().map((s) => [s.id, s.label]));
+    const html = eow.rows.map((r) => {
+      const id = escapeHtml(r.id);
+      const side = escapeHtml(sides.get(r.faction) ?? r.faction);
+      const hands = r.ok
+        ? `<span class="cat-badge" data-eow-count="${id}"></span><button data-eow-one="${id}" title="stand one ahead of you">one</button><button data-eow-patrol="${id}" title="stand three in its side's formation ahead of you">patrol</button><button data-eow-clear="${id}" title="take away every one of these stood from here">clear</button>`
+        : `<small>${escapeHtml(r.why ?? '')}</small>`;
+      return `<div class="cat-item ship-row" data-eow-row="${id}" title="${id} on the ${escapeHtml(r.hull)} hull"><span class="cat-name">${escapeHtml(r.name)} <small>${side}</small></span><span class="cat-hands">${hands}</span></div>`;
+    });
+    const key = 'ships:eow';
+    const note = `the End of War's, each for its own side at a tier of their own (${eow.tier}${eow.tier > 5 ? ', read through the ladder' : ''}); nothing moves while this panel is open`;
+    return groupHtml(key, 'End of War starships', eow.rows.length, note, this.groups.isOpen(key, false), html.join(''));
   }
 
   /**
@@ -578,7 +611,8 @@ export class NpcUi {
     const facts = [e.id, e.group, s ? `${Math.round(s.hp)} health` : '', s?.aggression ?? '', s ? `reach ${s.reach.toFixed(1)} m` : '', s?.ranged ? `shoots to ${Math.round(s.ranged.range)} m` : ''].filter(Boolean).join(' · ');
     const title = `${facts}${why ? `\n${why}` : ''}${short ? `\nthe outfit is short: ${e.outfitNotReady ?? 'some pieces were not converted'}` : ''}`;
     const sub = e.subtitle ? ` <small>${escapeHtml(e.subtitle)}</small>` : '';
-    const tag = why ? ' <small class="mob-tag">unavailable</small>' : short ? ' <small class="mob-tag">outfit short</small>' : '';
+    // A body of ours says so beside its name, whatever else it says.
+    const tag = `${e.ours ? ' <small class="mob-tag">ours</small>' : ''}${why ? ' <small class="mob-tag">unavailable</small>' : short ? ' <small class="mob-tag">outfit short</small>' : ''}`;
     const id = escapeHtml(e.id);
     return `<div class="cat-item mob-row${why ? ' unavailable' : ''}${short ? ' short' : ''}" data-entry="${id}" title="${escapeHtml(title)}"><span class="cat-name">${escapeHtml(e.name)}${sub}${tag}</span><span class="cat-hands"><span class="cat-badge" data-count="${id}"></span><button data-spawn="${id}" title="${why ? escapeHtml(why) : 'stand one ahead of you'}">spawn</button><button data-clear="${id}" title="take away every one stood from here">clear</button></span></div>`;
   }
@@ -690,6 +724,16 @@ export class NpcUi {
       );
     } else if (d.hullClear !== undefined && deps.ships) {
       this.say(`${deps.ships.clearHull(d.hullClear)} taken away`);
+    } else if ((d.eowOne !== undefined || d.eowPatrol !== undefined) && deps.ships?.spawnEndOfWar) {
+      const id = (d.eowOne ?? d.eowPatrol)!;
+      const count: 1 | 3 = d.eowOne !== undefined ? 1 : 3;
+      this.say(`standing ${count === 1 ? 'one' : 'a patrol'}…`);
+      void deps.ships.spawnEndOfWar(id, count).then(
+        (s) => this.say(s),
+        (err: unknown) => this.say(`not stood: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    } else if (d.eowClear !== undefined && deps.ships?.clearEndOfWar) {
+      this.say(`${deps.ships.clearEndOfWar(d.eowClear)} taken away`);
     }
   }
 
@@ -740,6 +784,11 @@ export class NpcUi {
       }
       for (const el of this.body.querySelectorAll<HTMLElement>('[data-hull-count]')) {
         const n = ships.countHull(el.dataset.hullCount ?? '');
+        const text = n ? `${n} out` : '';
+        if (el.textContent !== text) el.textContent = text;
+      }
+      for (const el of this.body.querySelectorAll<HTMLElement>('[data-eow-count]')) {
+        const n = ships.countEndOfWar?.(el.dataset.eowCount ?? '') ?? 0;
         const text = n ? `${n} out` : '';
         if (el.textContent !== text) el.textContent = text;
       }

@@ -50,11 +50,15 @@ export interface CreatorRow {
 }
 
 export interface CreatorHair {
-  template: string;
+  /** The hair template; absent on a hairstyle of ours, which no template names. */
+  template?: string;
   id: string;
   inArchives: boolean;
   creation: boolean;
-  skill: number;
+  skill?: number;
+  /** A hairstyle of ours (tools/swg/oursEntries.mjs), laid out in a group of its own, and its name of ours. */
+  ours?: boolean;
+  name?: string;
 }
 
 export interface CreatorSpecies {

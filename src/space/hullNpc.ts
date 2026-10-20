@@ -100,7 +100,7 @@ export interface HullNpcPlan {
  * (`hasTierFit(chassis)`: the combat file built a fit for that chassis), the type nearest the tier in it (the lower on a
  * tie, as `spawnFamily` picks); none, the stock fit, and the chassis the hull flies as when it is its own.
  */
-export function hullNpcPlan(h: HullLike, side: NpcFaction, tier: number, types: readonly NpcTypeDef[], hasTierFit: (chassis: string) => boolean): HullNpcPlan {
+export function hullNpcPlan(h: HullLike, side: NpcFaction, tier: number, types: readonly NpcTypeDef[], hasTierFit: (chassis: string) => boolean, as: { name: string; endOfWar: string } | null = null): HullNpcPlan {
   const family = hullFamilyOf(h);
   const base = familyOf(family);
   let from: NpcTypeDef | null = null;
@@ -114,10 +114,12 @@ export function hullNpcPlan(h: HullLike, side: NpcFaction, tier: number, types: 
     } else if (r === best && from && Math.abs(t.tier - tier) < Math.abs(from.tier - tier)) from = t;
   }
   const style = /^(.+)_(s\d+)$/.exec(family);
-  // The type of ours: the hull's own fields, the side and tier asked. Never in the combat file (`standIn`).
+  // The type of ours: the hull's own fields, the side and tier asked. Never in the combat file (`standIn`). One of the End
+  // of War's ships (`as`) takes its own name and id, so the NPC tab counts and clears it as itself.
   const type: NpcTypeDef = {
-    id: `${h.id}_as_${side}_tier${tier}`,
-    name: hullNameOf(h, types),
+    id: as ? `${as.endOfWar}_as_${side}_tier${tier}` : `${h.id}_as_${side}_tier${tier}`,
+    name: as ? as.name : hullNameOf(h, types),
+    ...(as ? { endOfWar: as.endOfWar } : {}),
     family,
     base: style ? style[1] : family,
     style: style ? style[2] : null,
@@ -133,10 +135,12 @@ export function hullNpcPlan(h: HullLike, side: NpcFaction, tier: number, types: 
 }
 
 /**
- * The bounding radius (metres) of the largest of the game's own NPC hulls, which its formation tables, the NPC ships'
- * draw distance, their leash and their pilots' sight and gun reach were all made for [ours: a Black Sun heavy's box comes
- * to 15 m across its longer side and 17 m to its corner, and every typed hull is smaller (`hullNpc.test.ts` reads the
- * pack); a hull no bigger than this is laid out, drawn, leashed and measured exactly as a typed one is].
+ * The bounding radius (metres) of the largest of the hulls the zones' patrols fly, which the game's formation tables,
+ * the NPC ships' draw distance, their leash and their pilots' sight and gun reach were all made for [ours: a Black Sun
+ * heavy's box comes to 15 m across its longer side and 17 m to its corner, and every patrol hull is smaller
+ * (`hullNpc.test.ts` reads the pack); a hull no bigger than this is laid out, drawn, leashed and measured exactly as a
+ * typed one always was, and a bigger one -- a hull stood for a side, or a family on one of the ships pack's NPC-only
+ * hulls (the gunboats, freighters, transports) -- by its size (`hullLayout`)].
  */
 export const HULL_FITTED_RADIUS = 17;
 
@@ -299,6 +303,91 @@ export function reachBeyond(radius: number, hx: number, hy: number, hz: number, 
   const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
   const support = d > 1e-9 ? (Math.abs(dx) * hx + Math.abs(dy) * hy + Math.abs(dz) * hz) / d : radius;
   return Math.max(0, Math.min(radius, support) - HULL_FITTED_RADIUS);
+}
+
+/**
+ * The first ship already out that a hull about to be stood would stand inside, or -1: each place it is to stand at
+ * (`at`, its spheres of `radius`) against each ship out (its place and its own radius). The NPC tab stands every hull it
+ * is asked for at the same distance along the view, so three of the End of War's ships stood one after another from one
+ * spot stood inside each other and wrecked each other within seconds; a hull bigger than a fitted one is refused in words
+ * instead (the fighters' spheres are small enough that their own tables keep them apart, and they are never asked).
+ * What is "out" is `inTheWay`'s: the ships out and the stands still being built.
+ */
+export function standsInside(at: readonly { x: number; y: number; z: number }[], radius: number, out: readonly { x: number; y: number; z: number; radius: number }[]): number {
+  for (let j = 0; j < out.length; j++) {
+    const o = out[j];
+    const reach = radius + o.radius;
+    for (const p of at) {
+      const dx = p.x - o.x;
+      const dy = p.y - o.y;
+      const dz = p.z - o.z;
+      if (dx * dx + dy * dy + dz * dz < reach * reach) return j;
+    }
+  }
+  return -1;
+}
+
+/** A ship out, or a stand still being built, as `standsInside` reads one: its place, its radius and what it is called. */
+export interface InTheWay {
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+  name: string;
+}
+
+/**
+ * Everything a hull about to be stood must not stand inside, in the order `standsInside` answers by: every ship out
+ * whose vehicle has not gone (its place, its own radius, its type's name), then every stand still being built
+ * (`coming`, each place a stand from the NPC tab was given, held from before its first wait until it is done). A big
+ * hull takes seconds to build behind its hold, so with the ships out alone two quick presses on one row stood the
+ * second inside the first, which is the very wreck the refusal is for. Pure.
+ */
+export function inTheWay(ships: readonly { vehicle: { disposed: boolean; pos: { x: number; y: number; z: number }; radius: number }; type: { name: string } }[], coming: readonly InTheWay[]): InTheWay[] {
+  const out: InTheWay[] = [];
+  for (const s of ships) if (!s.vehicle.disposed) out.push({ x: s.vehicle.pos.x, y: s.vehicle.pos.y, z: s.vehicle.pos.z, radius: s.vehicle.radius, name: s.type.name });
+  for (const c of coming) out.push(c);
+  return out;
+}
+
+/**
+ * The End of War's ships in the NPC tab: the tier they fly at, a tier of their own [ours: 5, the highest of the game's
+ * own ladder before SOE's late tiers, since the End of War's capital ships were its strongest; read through the ladder
+ * like any tier, so a stand at 6 to 10 takes what the ladder's dials say]. Live through `__debug.npcShips({ endOfWar })`,
+ * reaching the next one stood.
+ */
+export const END_OF_WAR_TUNE = { tier: 5 };
+
+/** Move the End of War's tier live: a whole number from 1 to 10; anything else is ignored. Answers the table. */
+export function tuneEndOfWar(patch: Partial<typeof END_OF_WAR_TUNE>): typeof END_OF_WAR_TUNE {
+  const t = npcTierOf(patch.tier);
+  if (t !== null) END_OF_WAR_TUNE.tier = t;
+  return END_OF_WAR_TUNE;
+}
+
+/** One of the End of War's ships as the NPC tab lists it, and whether it can be stood now. */
+export interface EndOfWarRow {
+  id: string;
+  name: string;
+  faction: NpcFaction;
+  hull: string;
+  ok: boolean;
+  /** Why it cannot be stood, in a sentence; null when it can. */
+  why: string | null;
+}
+
+/**
+ * The NPC tab's rows for the End of War's ships (`CombatData.endOfWar`), by name: each can be stood while the garage holds
+ * the hull it is drawn by (`hulls`, the garage's ship ids; null while the garage loads). The one rule the tab and its test
+ * ask, as `readinessOf` is the people's.
+ */
+export function endOfWarRows(list: readonly { id: string; name: string; faction: NpcFaction; hull: string }[], hulls: ReadonlySet<string> | null): EndOfWarRow[] {
+  return [...list]
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+    .map((e) => {
+      const why = !hulls ? 'the garage is loading' : !hulls.has(e.hull) ? `its hull ${e.hull} is not in the garage (convert the ships again)` : null;
+      return { id: e.id, name: e.name, faction: e.faction, hull: e.hull, ok: !why, why };
+    });
 }
 
 /** What the console's `npcShip(what, opts)` was asked. */

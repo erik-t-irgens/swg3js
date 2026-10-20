@@ -919,6 +919,116 @@ export function hardpointsKept(skin) {
   return skin.hardpoints.map((h) => ({ name: h.name, joint: skin.joints[h.joint].name }));
 }
 
+/**
+ * A skinned model's meshes stood as a still model, for a skeletal appearance the props tab stands as a prop: every
+ * vertex and normal carried by its weighted joints from the bind pose to `pose` (`poseAtFrame`'s joint-local
+ * rotations and translations, SWG space; null is the bind pose, which moves nothing), the joints, weights and blend
+ * targets dropped, and the whole set down so its lowest point stands at the origin's height (`lift`, the metres it
+ * was raised, negative when lowered): a helmet authored at a body's head height lies on the floor as a dropped one
+ * does, and a creature posed in its idle stands on its feet. `meshes` are convertSat's (positions in SWG space, X not
+ * yet mirrored); the answer's `bounds` are mirrored as convertSat's own are. Pure: nothing is read or written.
+ */
+export function bakePose(meshes, skeleton, pose = null) {
+  const count = skeleton.joints.length;
+  let skinMats = null;
+  if (pose) {
+    const bind = poseAtFrame(skeleton, null, 0);
+    const world = (list) => {
+      const out = [];
+      skeleton.joints.forEach((j, i) => {
+        const local = matFromTR(list[i].rotation, list[i].translation);
+        out[i] = j.parent >= 0 ? matMul(out[j.parent], local) : local;
+      });
+      return out;
+    };
+    const bindWorld = world(bind);
+    const poseWorld = world(pose);
+    skinMats = [];
+    for (let i = 0; i < count; i++) skinMats[i] = matMul(poseWorld[i], matInvertRigid(bindWorld[i]));
+  }
+  const out = [];
+  let minY = Infinity;
+  for (const mesh of meshes) {
+    const groups = mesh.groups.map((g) => ({
+      ...g,
+      primitives: g.primitives.map((p) => {
+        const n = p.positions.length / 3;
+        const positions = new Float32Array(p.positions.length);
+        const normals = p.normals ? new Float32Array(p.normals.length) : null;
+        for (let v = 0; v < n; v++) {
+          const x = p.positions[v * 3], y = p.positions[v * 3 + 1], z = p.positions[v * 3 + 2];
+          let ox = x, oy = y, oz = z;
+          let nx = normals ? p.normals[v * 3] : 0, ny = normals ? p.normals[v * 3 + 1] : 0, nz = normals ? p.normals[v * 3 + 2] : 0;
+          if (skinMats && p.joints && p.weights) {
+            ox = oy = oz = 0;
+            let ax = 0, ay = 0, az = 0;
+            let total = 0;
+            for (let k = 0; k < 4; k++) {
+              const w = p.weights[v * 4 + k];
+              if (!w) continue;
+              const m = skinMats[p.joints[v * 4 + k]];
+              if (!m) continue;
+              total += w;
+              ox += w * (m[0] * x + m[4] * y + m[8] * z + m[12]);
+              oy += w * (m[1] * x + m[5] * y + m[9] * z + m[13]);
+              oz += w * (m[2] * x + m[6] * y + m[10] * z + m[14]);
+              if (normals) {
+                ax += w * (m[0] * nx + m[4] * ny + m[8] * nz);
+                ay += w * (m[1] * nx + m[5] * ny + m[9] * nz);
+                az += w * (m[2] * nx + m[6] * ny + m[10] * nz);
+              }
+            }
+            if (total > 0) {
+              ox /= total;
+              oy /= total;
+              oz /= total;
+              const len = Math.hypot(ax, ay, az);
+              if (normals && len > 0) {
+                nx = ax / len;
+                ny = ay / len;
+                nz = az / len;
+              }
+            } else {
+              ox = x;
+              oy = y;
+              oz = z;
+            }
+          }
+          positions[v * 3] = ox;
+          positions[v * 3 + 1] = oy;
+          positions[v * 3 + 2] = oz;
+          if (normals) {
+            normals[v * 3] = nx;
+            normals[v * 3 + 1] = ny;
+            normals[v * 3 + 2] = nz;
+          }
+          if (oy < minY) minY = oy;
+        }
+        return { positions, normals, uvs: p.uvs, indices: p.indices };
+      }),
+    }));
+    out.push({ name: mesh.name, groups });
+  }
+  const lift = Number.isFinite(minY) ? -minY : 0;
+  const bounds = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+  for (const mesh of out) {
+    for (const g of mesh.groups) {
+      for (const p of g.primitives) {
+        for (let i = 0; i < p.positions.length; i += 3) {
+          p.positions[i + 1] += lift;
+          // Mirrored as the converter's bounds are, so the manifest's box is the drawn model's.
+          const q = [-p.positions[i], p.positions[i + 1], p.positions[i + 2]];
+          for (let k = 0; k < 3; k++) {
+            if (q[k] < bounds.min[k]) bounds.min[k] = q[k];
+            if (q[k] > bounds.max[k]) bounds.max[k] = q[k];
+          }
+        }
+      }
+    }
+  }
+  return { meshes: out, lift, bounds: Number.isFinite(bounds.min[0]) ? bounds : null };
+}
+
 /** Vertex streams for one mesh generator's shader groups, as buildGlb primitives with skin data. */
 export function skinnedPrimitives(mgn, skeleton) {
   const jointIndex = new Map(skeleton.joints.map((j, i) => [j.name.toLowerCase(), i]));

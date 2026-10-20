@@ -21,7 +21,7 @@ import {
 import type { NpcFaction, NpcTypeDef } from '../../../src/space/combatData.ts';
 import { PILOT_SKILL, formationPoint } from '../../../src/space/pilot.ts';
 import { pickLoadout, seeded } from '../../../src/space/loadout.ts';
-import { FACTION_FORMATION } from '../../../src/space/roster.ts';
+import { FACTION_FORMATION, GROUPS } from '../../../src/space/roster.ts';
 import type { ComponentDef, FitDef } from '../../../src/vehicles/shipFit.ts';
 import { tauntTableOf } from '../npcships.mjs';
 
@@ -285,7 +285,9 @@ else {
   if (!components.length) {
     note(`no components.json under ${PACKS}/ships: "every hull that flies its stock fit has one" and "the tier fit's parts are pickLoadout's" are not checked (a pack without it is built as its stock tree)`);
   } else {
-    ok(hulls.filter((h) => !hasTier(h)).every((h) => !!h.fit), 'every hull that flies its stock fit has one, as a player gets it');
+    // A hull of the NPC-only path with no chassis row (the End of War's lancer, frigate and transport, the two GCW
+    // stations) has no fit at all and flies the stock tree its client data hangs, as a pack without components.json does.
+    ok(hulls.filter((h) => !hasTier(h) && h.chassis).every((h) => !!h.fit), 'every hull with a chassis that flies its stock fit has one, as a player gets it');
     // The tier fit is picked as a typed ship's is: every part a component of the pack in a slot of the fit.
     let picked = 0;
     let inFit = true;
@@ -317,10 +319,16 @@ else {
   if (yt) ok(hullNpcPlan(yt, 'pirate', 3, types, hasTierFit).fit === 'stock', 'a YT-1300 flies its stock fit (no NPC type draws it)');
   const corv = by('corellian_corvette');
   if (corv) ok(hullNpcPlan(corv, 'neutral', 1, types, hasTierFit).type.chassis === 'player_corvette', 'the corvette flies on its own chassis');
-  // The game's own NPC hulls are the fitted size: measured, laid out and drawn as they always were.
+  // The hulls the zones' patrols fly (the rosters' families) are the fitted size: measured, laid out and drawn as they
+  // always were. The NPC-only path's hulls (the gunboats, freighters, transports) are bigger, and a family on one is
+  // laid out by its size wherever it is stood (`spawnFamily`, as `standHull`, below).
+  const rosterFamilies = new Set(Object.values(GROUPS).flatMap((list) => list.flatMap((g) => g.families)));
+  const patrolHulls = new Set(types.filter((t) => rosterFamilies.has(t.base) || rosterFamilies.has(t.family)).map((t) => t.hull));
+  const bigPatrol = hulls.filter((h) => patrolHulls.has(h.id) && h.bounds && (hullRadiusOf(h.bounds) > HULL_FITTED_RADIUS || Math.max(Math.abs(h.bounds.max[0] - h.bounds.min[0]), Math.abs(h.bounds.max[2] - h.bounds.min[2])) / 2 > HULL_FITTED_RADIUS));
+  ok(patrolHulls.size > 0 && bigPatrol.length === 0, `every hull the zones' patrols fly is no bigger than a fitted hull (${patrolHulls.size} hulls), so a patrol's group, its draw distance, its leash and its pilots' sight and reach are what they were${bigPatrol.length ? `: ${bigPatrol.map((h) => h.id).join(', ')}` : ''}`);
   const typedHulls = new Set(types.map((t) => t.hull));
-  const bigTyped = hulls.filter((h) => typedHulls.has(h.id) && h.bounds && (hullRadiusOf(h.bounds) > HULL_FITTED_RADIUS || Math.max(Math.abs(h.bounds.max[0] - h.bounds.min[0]), Math.abs(h.bounds.max[2] - h.bounds.min[2])) / 2 > HULL_FITTED_RADIUS));
-  ok(bigTyped.length === 0, `every hull an NPC type of the game's is drawn on is no bigger than a fitted hull (${typedHulls.size} hulls), so its group, its draw distance, its leash and its pilots' sight and reach are what they were${bigTyped.length ? `: ${bigTyped.map((h) => h.id).join(', ')}` : ''}`);
+  const bigTyped = hulls.filter((h) => typedHulls.has(h.id) && h.bounds && hullRadiusOf(h.bounds) > HULL_FITTED_RADIUS);
+  note(`${bigTyped.length} hulls an NPC type of the game's flies are bigger than a fitted hull (the NPC-only path's: ${bigTyped.map((h) => h.id).slice(0, 8).join(', ')}${bigTyped.length > 8 ? ', ...' : ''}), laid out by their size`);
   // Every hull's lone ship and patrol of three, in each side's formation, in space and on a planet: apart, clear of the
   // point, every member within its draw distance and its leash; and within those two at the knob's ends as well.
   const bad: string[] = [];
@@ -357,7 +365,8 @@ else {
   const spawner = mainSrc.slice(mainSrc.indexOf('private shipSpawner(): ShipSpawner {'), mainSrc.indexOf('private crosshairBody()'));
   const consoleAt = mainSrc.indexOf('npcShip: async (');
   const consoleBody = mainSrc.slice(consoleAt, mainSrc.indexOf('shipCombat: (', consoleAt));
-  ok(calls === 2 && spawner.includes('return mgr.standHull(hull, side, tier, count, from, dir);') && /spawnHull: async \(hull, side, tier, count\) => \{/.test(spawner), "the NPC tab's spawner hands the manager's standHull the hull, side, tier and count it was given");
+  ok(calls === 3 && spawner.includes('return mgr.standHull(hull, side, tier, count, from, dir);') && /spawnHull: async \(hull, side, tier, count\) => \{/.test(spawner), "the NPC tab's spawner hands the manager's standHull the hull, side, tier and count it was given");
+  ok(spawner.includes('return mgr.standHull(e.hull, e.faction, END_OF_WAR_TUNE.tier, count, from, dir, undefined, { name: e.name, endOfWar: e.id });') && /spawnEndOfWar: async \(id, count\) => \{/.test(spawner), "the End of War's row hands standHull its hull, its own side, the tier of their own and its name and id");
   ok(
     consoleBody.includes('const route = npcShipRoute(what, opts, { type: !!type, family: data.typesOfFamily(what).length > 0 });') &&
       consoleBody.includes("if (route.to === 'hull') {") &&
@@ -386,7 +395,7 @@ else {
   ok(
     standHull.includes('const faction = npcSideOf(side);') &&
       standHull.includes('const t = npcTierOf(tier);') &&
-      standHull.includes('const plan = hullNpcPlan(hull, faction, t, data.file.types,') &&
+      standHull.includes('const plan = hullNpcPlan(hull, faction, t, data.file.types, (c) => !!data.chassis(c)?.fit, as);') &&
       standHull.includes('const g = this.newGroup(faction, null, true, this.makeRoute(lead, lay.radius, rng, lay.above), lead, lay);') &&
       standHull.includes('const r = await this.stand(plan.type, hull, at, q, g, rng);'),
     'standHull plans the hull for the side and tier asked, stands its group for that side and builds each ship as the plan\'s type',
@@ -399,6 +408,26 @@ else {
       !/hullSpread\(|hullAhead\(|hullRadiusOf\(/.test(standHull),
     'standHull stands its group where hullLayout says, by nothing worked out beside it',
   );
+  // A big hull is refused, never stood, inside a ship already out or still being built: the places the layout gives are
+  // asked of `standsInside` before any group is made, in the hull path (only for a hull bigger than a fitted one, as the
+  // family path asks only with a big hull's layout) and in a big family's; what is asked about is `inTheWay`'s, the ships
+  // out and every stand's places, which each stand holds from before its first wait until it is done, however it ends.
+  {
+    const family = shipsSrc.slice(shipsSrc.indexOf('async spawnFamily('), shipsSrc.indexOf('async standHull('));
+    const hullAsk = 'const inside = lay.radius > HULL_FITTED_RADIUS ? this.standsInsideOut(places, lay.radius) : null;';
+    const familyAsk = 'const inside = this.standsInsideOut(places, lay.radius);';
+    const refused = /if \(inside\) return `a \$\{(plan\.)?type\.name\} would stand inside the \$\{inside\} already out there/;
+    const before = (src: string, ask: string) => src.includes(ask) && src.indexOf(ask) < src.indexOf('const g = ') && refused.test(src);
+    ok(before(standHull, hullAsk) && before(family, familyAsk) && family.indexOf('if (lay) {') < family.indexOf(familyAsk) && shipsSrc.includes('const j = standsInside(places, radius, out);'), "standHull (a hull bigger than a fitted one) and a big family's stand ask whether any place would stand inside a ship already out before a group is made, and refuse in words; a fighter is never asked");
+    ok(shipsSrc.includes('const out = inTheWay(this.ships, this.coming);') && shipsSrc.includes('return j < 0 ? null : out[j].name;'), 'what a stand is asked about is every ship out and every stand still being built (inTheWay), named by the very list asked');
+    // Held with nothing awaited between the ask and the hold, so no other stand can slip in between them.
+    const holds = (src: string, ask: string, held: string, wait: string) => {
+      const at = src.indexOf(held);
+      const tryAt = src.indexOf('try {', at);
+      return at > src.indexOf(ask) && !src.slice(src.indexOf(ask), at).includes('await') && at < src.indexOf(wait) && tryAt > at && tryAt < src.indexOf(wait) && /\} finally \{\s*this\.releasePlaces\(held\);\s*\}/.test(src.slice(tryAt));
+    };
+    ok(holds(standHull, hullAsk, 'const held = this.holdPlaces(places, lay.radius || HULL_FITTED_RADIUS, plan.type.name);', 'await this.stand(') && holds(family, familyAsk, 'const held = this.holdPlaces(places, lay ? lay.radius : (hullDef?.bounds ? hullRadiusOf(hullDef.bounds) : 0) || HULL_FITTED_RADIUS, type.name);', 'await this.spawnType('), 'each stand holds every place it was given straight after the ask and before it first waits, and lets them go in a finally however it ends');
+  }
   const capAt = [...standHull.matchAll(/this\.capRefusal\(count\)/g)].map((m) => m.index ?? -1);
   const garageAt = standHull.indexOf('await this.deps.garage()');
   ok(capAt.length === 2 && garageAt > 0 && capAt[0] < garageAt && capAt[1] > garageAt && /this\.ships\.length \+ this\.pending \+ count <= NPC_SHIP_CAP/.test(shipsSrc), 'standHull counts against the cap before the garage is awaited, and again after it');
@@ -414,10 +443,41 @@ else {
   );
   ok(
     shipsSrc.includes('if (s.type.family === family && !s.type.standIn) n++;') &&
-      shipsSrc.includes('if (s.type.standIn && s.type.hull === hull) n++;') &&
+      shipsSrc.includes('if (s.type.standIn && s.type.hull === hull && !s.type.endOfWar) n++;') &&
+      shipsSrc.includes('if (s.type.endOfWar === id) n++;') &&
       mainSrc.includes('clear: (family) => this.world.npcShips?.clear(family ? (s) => s.type.family === family && !s.type.standIn : undefined) ?? 0,') &&
-      mainSrc.includes('clearHull: (hull) => this.world.npcShips?.clear((s) => s.type.standIn === true && s.type.hull === hull) ?? 0,'),
-    "a family's count and clear leave the hulls of ours to their own row, which counts and clears them by hull",
+      mainSrc.includes('clearHull: (hull) => this.world.npcShips?.clear((s) => s.type.standIn === true && s.type.hull === hull && !s.type.endOfWar) ?? 0,') &&
+      mainSrc.includes('clearEndOfWar: (id) => this.world.npcShips?.clear((s) => s.type.endOfWar === id) ?? 0,'),
+    "a family's count and clear leave the hulls of ours to their own row, which counts and clears them by hull, and the End of War's to theirs, by id",
+  );
+  // A family on a hull bigger than a fighter is laid out by its size, by the one rule a hull stood for a side is.
+  const spawnFamily = shipsSrc.slice(shipsSrc.indexOf('async spawnFamily('), shipsSrc.indexOf('async standHull('));
+  ok(
+    spawnFamily.includes('hullRadiusOf(hullDef.bounds) > HULL_FITTED_RADIUS ? hullLayout(hullDef.bounds, data.formation(FACTION_FORMATION[faction] ?? \'arrow\', !this.deps.space), count, Math.max(50, ahead), LAYOUT_BASE) : null') &&
+      spawnFamily.includes('formationPoint(lead, q, slotV.fromArray(lay.slots[i]), at);') &&
+      spawnFamily.includes('this.newGroup(faction, null, true, this.makeRoute(lead, lay.radius, rng, lay.above), lead, lay)') &&
+      spawnFamily.includes('this.newGroup(faction, null, true, this.makeRoute(lead, 0, rng), lead)') &&
+      spawnFamily.includes('formationPoint(lead, q, this.slotOffset(g, i, slotV), at);') &&
+      spawnFamily.includes('const r = await this.spawnType(type.id, places[i], q, g, i, rng);'),
+    "a family on a hull bigger than a fighter (the NPC-only path's) is stood where hullLayout says, and a fighter's family exactly as it always was",
+  );
+  // The End of War's row: its one and patrol buttons, its count and clear, and the garage hulls its readiness is asked
+  // against, each a hand-over no behaviour test makes (`endOfWar.test.ts` runs the rows' rule on lists of its own).
+  ok(
+    uiSrc.includes('const id = (d.eowOne ?? d.eowPatrol)!;') &&
+      uiSrc.includes('const count: 1 | 3 = d.eowOne !== undefined ? 1 : 3;') &&
+      uiSrc.includes('void deps.ships.spawnEndOfWar(id, count).then(') &&
+      uiSrc.includes('<button data-eow-one="${id}"') &&
+      uiSrc.includes('<button data-eow-patrol="${id}"') &&
+      uiSrc.includes("this.say(`${deps.ships.clearEndOfWar(d.eowClear)} taken away`);") &&
+      uiSrc.includes("const n = ships.countEndOfWar?.(el.dataset.eowCount ?? '') ?? 0;"),
+    "the End of War row's one and patrol buttons hand the spawner its id and one or three, and its count and clear are its own",
+  );
+  ok(
+    mainSrc.includes('countEndOfWar: (id) => this.world.npcShips?.countEndOfWar(id) ?? 0,') &&
+      mainSrc.includes("return { rows: endOfWarRows(list, g ? new Set(g.vehicles.filter((d) => d.source === 'ship').map((d) => d.id)) : null), tier: END_OF_WAR_TUNE.tier };") &&
+      mainSrc.includes("const e = this.world.ships.data?.endOfWar().find((x) => x.id === id);"),
+    "the game counts the End of War's ships by their own id, and asks their readiness against every ship hull of the garage, the NPC-only ones among them",
   );
   ok(
     shipsSrc.includes('const TYPED_SCALE: GroupScale = { spread: 1, drawReach: HIDE_BEYOND, leash: LEASH };') &&

@@ -229,7 +229,8 @@ export interface Wardrobe {
     id: string;
     kind: string;
     gender: string;
-    template: string;
+    /** The item's template; null on an entry of ours (`ours`), which no template names. */
+    template: string | null;
     parts: PartDef[];
     /** The game's name and description (null when its string tables lack them); absent on a pack converted before they were read. */
     name?: string | null;
@@ -255,7 +256,15 @@ export interface Wardrobe {
      * list; our dye is not on it): what the backpack's small swatch reads a palette index by.
      */
     variables?: { name: string; private: boolean; kind?: 'palette' | 'index'; default?: number; palette?: string; colors?: number[][] }[];
+    /**
+     * An entry of ours (tools/swg/oursEntries.mjs): SOE's art that no template names, stood by a row of our table and
+     * marked so in every menu; a hairstyle of ours carries the species and genders it fits (`fits`), having no template.
+     */
+    ours?: boolean;
+    fits?: string[];
   }[];
+  /** The entries of ours this folder was converted with (the table's key, how many stood, how many the mount lacked). */
+  ours?: { key: string; taken: number; missing: number };
 }
 
 /** What first person does with one part, worked out once (Character.prepareHead) from its data and its skin. */
@@ -445,7 +454,7 @@ export class Character {
     const key = item.id;
     const existing = this.parts.get(key);
     if (existing) existing.worn = true;
-    else await this.addPart(key, item.parts, true, { kind: item.kind, template: item.template });
+    else await this.addPart(key, item.parts, true, { kind: item.kind, template: item.template ?? undefined });
     this.applyOcclusion();
     return true;
   }
@@ -882,7 +891,7 @@ export class Character {
     // share a mesh stay two items, each with its own copy, and neither can be mistaken for the other.
     // A piece this species wears unseen is an empty part, so every path that dresses agrees on it.
     if (existing) existing.worn = true;
-    else await this.addPart(id, this.wornUnseen(item) ? [] : item.parts, true, { kind: item.kind, template: item.template });
+    else await this.addPart(id, this.wornUnseen(item) ? [] : item.parts, true, { kind: item.kind, template: item.template ?? undefined });
     this.applyOcclusion();
     return true;
   }
@@ -913,7 +922,7 @@ export class Character {
       }
       const item = w.items.find((i) => i.id === key);
       if (!item) return { found: false, meshes: [] };
-      make = () => this.addPart(key, this.wornUnseen(item) ? [] : item.parts, false, { kind: item.kind, template: item.template });
+      make = () => this.addPart(key, this.wornUnseen(item) ? [] : item.parts, false, { kind: item.kind, template: item.template ?? undefined });
     }
     // Checked again after the catalogue's await: another ask may have loaded it, or be loading it.
     if (this.parts.has(key)) return found();

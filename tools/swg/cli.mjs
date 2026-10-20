@@ -35,7 +35,7 @@
 //   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...] [--no-moods]   the player's character as <out-dir>/player/<id>.glb + manifest.json
 //                                                               [--jka=<Jedi Academy GameData or base dir>] [--jka-anims=BOTH_A1_T__B_,...]  adds Jedi Academy's saber attacks, jumps and rolls, retargeted
 //   node tools/swg/cli.mjs loading <swg-dir> <out-dir> [--match=ui_load] [--list]   the game's loading-screen pictures, one per planet, as <out-dir>/loading/<planet>.png
-//   node tools/swg/cli.mjs wardrobe <swg-dir> <out-dir> [--gender=male|female] [--kind=wearables,hair] [--match=...] [--limit=N] [--no-icons] [--no-dye]   every wearable and hairstyle as parts, with names, slots, species rules, pictures and colours
+//   node tools/swg/cli.mjs wardrobe <swg-dir> <out-dir> [--gender=male|female] [--kind=wearables,hair] [--match=...] [--limit=N] [--no-icons] [--no-dye]   every wearable and hairstyle as parts, with names, slots, species rules, pictures and colours, and the garments and hairstyles of ours (manifests/ours-entries.json)
 //   node tools/swg/cli.mjs parts <swg-dir> <out-dir> [--template=...] [--wear=...] [--no-moods]   body, head and worn items as separate GLBs on one shared skeleton
 //   node tools/swg/cli.mjs clips-save <model.glb> <out.clips> [--only=BOTH_]   lift a model's animations into a bundle that survives re-conversion
 //   node tools/swg/cli.mjs clips-apply <model.glb> <in.clips> [--drop=BOTH_]   put a bundle's animations back onto a model, joints matched by name
@@ -119,10 +119,13 @@
 //                                                                  volumetric march reads (<out-dir>/clouds/, 8 MB, invented and the same on
 //                                                                  every world). It reads converted packs and no archive, so it takes no
 //                                                                  <swg-dir>, and it must run after sky
-//   node tools/swg/cli.mjs props <swg-dir> <out-dir> [--limit=N] [--no-icons]   every prop and every piece of furniture in the game as one pack a
+//   node tools/swg/cli.mjs props <swg-dir> <out-dir> [--limit=N] [--no-icons] [--skeletal-pose=bind|idle]   every prop and every piece of furniture in the game as one pack a
 //                                                                  player can put down: 8,596 things in 2,894 models (about 900 MB), keyed on what
 //                                                                  a thing is rather than on where one happens to stand. The space stations are
-//                                                                  left out, since the space command already converts every one of them
+//                                                                  left out, since the space command already converts every one of them. A skeletal
+//                                                                  prop stands still at its own idle's first frame (--skeletal-pose=bind: its bind pose,
+//                                                                  kept by every later run that names no pose), and the props of ours
+//                                                                  (manifests/ours-entries.json) stand in a group of their own
 //   node tools/swg/cli.mjs travel <swg-dir> <out-dir> [--core3=<dir>]   where each world's travel terminals, ticket collectors and shuttles really
 //                                                                  stood, as <pack>/travel.json with the models that draw them; none of it is in a
 //                                                                  snapshot, because travel was the server's, so it reads the emulator's scripts
@@ -216,7 +219,7 @@ import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
 import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
-import { R, composeMeshes, hardpointsKept, keptHardpoints, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
+import { R, bakePose, composeMeshes, hardpointsKept, keptHardpoints, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
 import { resolveAppearanceToMesh, resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { exportParticle, parseParticleEffect } from './particle.mjs';
 import { exportSwoosh, swooshStatus } from './swoosh.mjs';
@@ -224,7 +227,8 @@ import { defaultJkaClips, importJkaClips } from './jka.mjs';
 import { extractClips, readGlb, replaceClips, skinJoints } from './glbclips.mjs';
 import { packClips, retargetClips, unpackClips } from './clipbundle.mjs';
 import { encodePng } from './png.mjs';
-import { describeItem, itemPackStatus, newItemCaches, parseSlotDescriptor, readAppearanceTable, speciesColumn, wardrobeChoice, wardrobeFit, PLAYER_SLOTS } from './items.mjs';
+import { arrangementSlots, columnSpecies, describeItem, itemPackStatus, newItemCaches, parseSlotDescriptor, readAppearanceTable, speciesColumn, wardrobeChoice, wardrobeFit, PLAYER_SLOTS } from './items.mjs';
+import { oursAsk, oursPassedOver, oursRows, oursStamp, oursTable, oursWardrobePlan } from './oursEntries.mjs';
 import { iconMeshes, renderThumbnail, thumbTexture } from './thumbnail.mjs';
 import { effectAlphaMode, shaderTextures } from './sht.mjs';
 import { bakeShader, describeShader, describeVariables, loadImage, loadShader, parseBlueprint, parsePalette, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
@@ -244,7 +248,7 @@ import {
   buildDroids, buildSlots, chassisNameFor, componentKey, componentList, droidHeadRows, fitStatus, hullTokens, isPaintShader, loadoutsLine, mergePaintVariables,
   mergeRecipes, modalLooks, paintedMainImage, paintGlow, pickStock, recipeImages, SHIP_FIT_FORMAT, stockPairs, stockWeapon, trimPaintShader, wingOpenSpeedFactorOf,
 } from './shipfit.mjs';
-import { buildCombat, combatCounts, combatLine, combatStatus, FORMATIONS, TAUNT_TABLES } from './npcships.mjs';
+import { buildCombat, combatCounts, combatLine, combatStatus, END_OF_WAR, FORMATIONS, NPC_HULLS_FORMAT, npcOnlyHullPicks, TAUNT_TABLES } from './npcships.mjs';
 import { resolveTemplateParam } from './objtemplate.mjs';
 import { setStringId } from './items.mjs';
 import * as M from './mobiles.mjs';
@@ -289,7 +293,7 @@ import { readTemplate, stringParam } from './objtemplate.mjs';
 import { statusJson } from './statusplan.mjs';
 // Only `status` needs these two here; the `travel` command itself loads the whole module when it runs.
 import { rowsLost, TRAVEL_OWN_MODELS } from './travel.mjs';
-import { PROPS_PACK_VERSION, propCounts as propCountsOf } from './props.mjs';
+import { PROPS_PACK_VERSION, PROPS_SKELETAL_FORMAT, propCounts as propCountsOf } from './props.mjs';
 import { placementPackLines, placementRows, placementsFolder } from './placementsStatus.mjs';
 /** The shape of deeds.json. A pack written by an older run is asked for again rather than read. */
 const DEED_PACK_VERSION = 1;
@@ -1949,7 +1953,7 @@ function bakeGlowSplit(vfs, shaderPath, shader, image, ctx) {
  * `paint` (the gallery's skinned vehicles) bakes a paint shader as a ship's is (skinnedTexture), and
  * `info.shaders` names every shader the model kept, for the paint's recipes.
  */
-function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [], moreHardpoints = null, moods = false, rigOnly = false, paint = false } = {}) {
+function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [], moreHardpoints = null, moods = false, rigOnly = false, paint = false, bake = false } = {}) {
   let satPath = path.replace(/\\/g, '/');
   if (/\.iff$/i.test(satPath)) {
     const cache = new Map();
@@ -2311,6 +2315,18 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     return info;
   }
   mkdirSync(dirname(outFile), { recursive: true });
+  // Stood still (`bake`, the props tab's skeletal props): the meshes carried into the first frame of the table's own
+  // idle where the table has one, else left at the bind pose, and set down on their lowest point (`bakePose`), then
+  // written as a model with no skin, which the streamer draws, casts and culls as any other prop's.
+  if (bake) {
+    // `bake: 'bind'` stands every one at its bind pose, whatever its table holds (the props command's --skeletal-pose).
+    const idle = bake === 'bind' ? null : (clips.find((c) => c.name === 'idle') ?? null);
+    const baked = bakePose(meshes, skeleton, idle ? poseAtFrame(skeleton, idle.animation, 0) : null);
+    info.baked = { pose: idle ? 'idle' : 'bind', lift: Number(baked.lift.toFixed(4)), meshes: baked.meshes, textures };
+    info.bounds = baked.bounds ?? info.bounds;
+    writeFileSync(outFile, buildGlb(baked.meshes, { flipX: true, textures }));
+    return info;
+  }
   // A rig alone -- its joints and its clips, and none of its meshes -- for an appearance whose own
   // mesh is a placeholder and whose look hangs on its joints (the shuttles: travel.mjs).
   if (rigOnly) writeFileSync(outFile, buildGlb([], { flipX: true, skin, animations: skin.clips }));
@@ -2745,6 +2761,8 @@ function floraCardsCurrent(packDir, defs) {
 
 /** The clips a rig's manifest names (its clip list and its speeds), for a named product. */
 const clipNamesOf = (m) => [...(m?.clips ?? []), ...Object.keys(m?.clipSpeeds ?? {})];
+/** The commands that stand entries of ours (oursEntries.mjs), each stamping the table's key into the file `status` reads. */
+const OURS_COMMANDS = new Set(['wardrobe', 'customization', 'mobiles', 'props']);
 /** The dances only SOE's final body table names (`appearance/lat/all_m.lat`, re-issued in publish 58): the named product of a rig converted from it. */
 const LATE_DANCES = /(^|:)dance_3[3-6]$/;
 
@@ -2757,6 +2775,7 @@ const LATE_DANCES = /(^|:)dance_3[3-6]$/;
  */
 function lateStatus(dir, readJson, need) {
   const list = finalNamesList();
+  const ours = oursTable();
   const swg = options.swg || process.env.SWG || '';
   const probe = list.broken || !swg ? null : probeInstall(swg, list);
   const current = (command) => ({ key: list.broken ? null : list.key, v: LATE_STAMP_VERSION[command] ?? 1 });
@@ -2800,7 +2819,18 @@ function lateStatus(dir, readJson, need) {
       else if (f.stamp && lateWorld(f.stamp) !== 'publish54' && f.stamp.key === current(entry.command).key) counts.current++;
       // A refusal the probe cannot see (its archives unmoved since) is what the line says, since the probe says serves.
       else if (f.stamp?.state === 'refused' && f.stamp.key === current(entry.command).key && f.stamp.why) counts.refused ??= f.stamp.why;
-      // The named products, only while the stamp says SOE's final files were mounted.
+      // The entries of ours (oursEntries.mjs), by the table's key in the file: every row is a late appearance, so
+      // `oursAsk` asks only where the stamp says SOE's final files were mounted, by the names list (`applied`) or by an
+      // install's own final indexes (`final`). A catalogue never planned with a table of ours is asked for the mobiles'
+      // plain run, which makes every unit again: the one rebuild this wave brings, since its code sits in the mobiles'
+      // code stamp. One planned with another table only needs planning again (`--skip-existing`, the entry's own ask):
+      // a renamed row moves no unit's signature, and a body or garment that changed redoes only its own unit.
+      if (OURS_COMMANDS.has(entry.command)) {
+        const why = oursAsk(f.json.ours ?? null, f.stamp, ours);
+        if (why && entry.command === 'mobiles' && !f.json.ours) need(`mobiles <swg-dir> ${dir} --retail-only`, `${f.rel} was ${why}`);
+        else if (why) ask(f.what, why, f.rel);
+      }
+      // The named products, only while the stamp says SOE's final files were mounted by the names list.
       if (f.stamp?.state !== 'applied') continue;
       if (entry.command === 'player' && !clipNamesOf(f.json.players?.[0]).some((c) => LATE_DANCES.test(c))) ask(f.what, "its clips lack the dances only SOE's final body table names (dance_33 to dance_36)", f.rel);
       if ((entry.command === 'parts' || entry.command === 'species') && f.rel.endsWith('parts.json') && !clipNamesOf(f.json).some((c) => LATE_DANCES.test(c))) ask(f.what, "its clips lack the dances only SOE's final body table names (dance_33 to dance_36)", f.rel);
@@ -3211,9 +3241,11 @@ function packStatus(dir) {
     need(`props <swg-dir> ${dir} --retail-only`, 'no props converted: the Props tab has nothing in it');
   } else {
     const P = propCountsOf(propsPack);
-    console.log(`  props: ${P.props} in ${P.models} models over ${P.groups} groups (${P.named} named, ${P.iconed} with a picture)`);
+    console.log(`  props: ${P.props} in ${P.models} models over ${P.groups} groups (${P.named} named, ${P.iconed} with a picture, ${P.skeletal} skeletal stood still, ${P.ours} of ours)`);
     if ((propsPack.version ?? 0) !== PROPS_PACK_VERSION) need(`props <swg-dir> ${dir} --retail-only`, 'the props pack is an older shape than this build reads');
     else if ((propsPack.materialFormat ?? 1) < MATERIAL_FORMAT) need(`props <swg-dir> ${dir} --retail-only`, `the props' models were ${MATERIAL_WHY}`);
+    // The skeletal props (props.mjs `PROPS_SKELETAL_FORMAT`): a pack without the mark left every skeletal template out.
+    if ((propsPack.skeletalFormat ?? 0) < PROPS_SKELETAL_FORMAT) need(`props <swg-dir> ${dir} --retail-only`, 'the skeletal props (creature statues, armour lying about, beast trophies) were left out: converted before they could be stood still');
     if (objEffectsStale(join(dir, 'props'), ['manifest.json'])) need(`objeffects <swg-dir> ${dir} --retail-only`, 'a brazier or a fountain put down from the Props tab has no fire or spray (props/objeffects.json)');
   }
   // The only music in this game is the music players make, and it is the one pack that was reported
@@ -3399,6 +3431,8 @@ function packStatus(dir) {
     if (fits.old || !comps || !existsSync(join(dir, 'ships/customize.json'))) need(`ships <swg-dir> ${dir} --retail-only`, 'the ships have no loadouts or paint (converted before ship customization)');
     else if (!fits.astromechs && astromechModels) need(`ships <swg-dir> ${dir} --retail-only`, 'the astromechs were converted after the ships; the ships command links them');
     if (combat.stale) need(`ships <swg-dir> ${dir} --retail-only`, combat.why);
+    // The NPC-only hulls and the End of War's ships (npcships.mjs `NPC_HULLS_FORMAT`): a pack without the mark has none.
+    if ((ships.npcHulls ?? 0) < NPC_HULLS_FORMAT) need(`ships <swg-dir> ${dir} --retail-only`, 'the NPC types with no player hull (the gunboats, freighters, transports, pods) and the End of War ships have no hulls: converted before the NPC-only hulls');
     // The rooms' walkable floors, on the hulls that have rooms at all.
     const roomy = (ships.models ?? []).filter((m) => m.cells && m.cells.length);
     const shipFloors = readJson(join(dir, 'ships/floors.json'));
@@ -4184,8 +4218,9 @@ function mobilesConvert(vfs, outRoot) {
   const at = (rel) => join(outRoot, rel);
   const warningsOf = (info) => [...info.missing.map((m) => `missing ${m}`), ...info.skipped];
   return {
-    model(sat, outRel, values) {
-      const info = convertSat(vfs, sat, at(outRel), { animations: false, variables: new Map(Object.entries(values)) });
+    // `wear`: what a body of ours is dressed in at conversion (a garment of ours on the body its fits name).
+    model(sat, outRel, values, wear = []) {
+      const info = convertSat(vfs, sat, at(outRel), { animations: false, variables: new Map(Object.entries(values)), wear });
       if (!info.meshes.some((m) => m.shaders > 0)) throw new Error('no mesh survived');
       return {
         joints: info.joints,
@@ -4761,6 +4796,8 @@ switch (cmd) {
       source,
       code: mobilesCodeStamp(),
       core3Stats,
+      // The bodies of ours (oursEntries.mjs): its NPC rows planned beside the templates.
+      ours: oursTable(),
       options: {
         plan: flags.has('--plan'),
         skipExisting: flags.has('--skip-existing'),
@@ -4933,19 +4970,29 @@ switch (cmd) {
     wantThumbs = icons;
     if (icons) mkdirSync(join(outDir, 'icons'), { recursive: true });
     const seenIds = new Set();
-    const arrangementSlots = new Set();
+    const slotNamesSeen = new Set();
     let took = 0, tableMissing = 0, unconverted = 0, unseen = 0, duplicates = 0;
     let done = 0;
-    for (const tpl of templates) {
+    // The garments and hairstyles of ours (oursEntries.mjs `oursWardrobePlan`), after every template: the late appearance
+    // files no template names, each stood as a template's entry is and marked ours. A row is taken in a folder of a gender
+    // its fits name; a row built for another skeleton (an Ithorian's halo in a human folder) is passed over quietly
+    // (`oursPassedOver`), and one whose appearance the mount has not got is counted and left out.
+    const ours = oursTable();
+    const speciesOfGender = [...new Set(Object.keys(appearanceTable.values().next().value ?? {}).map(columnSpecies).filter(Boolean))];
+    const oursPlan = oursWardrobePlan(ours, { gender, kinds, has, match, speciesOfGender });
+    const sources = [...templates.map((tpl) => ({ tpl, oursItem: null, kind: tpl.split('/')[2] })), ...oursPlan.take.map((o) => ({ tpl: null, oursItem: o, kind: o.kind }))];
+    const oursCount = { taken: 0, missing: oursPlan.missing, otherSkeleton: 0 };
+    for (const { tpl, oursItem, kind } of sources) {
       if (done >= limit) break;
-      const id = basename(tpl).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
-      if (match && !match.test(tpl)) continue;
-      const kind = tpl.split('/')[2];
-      const desc = describeItem(vfs, tpl, id, itemCaches);
-      for (const alt of desc.slots ?? []) for (const slot of alt) arrangementSlots.add(slot);
-      const row = appearanceTable.get(`shared_${id}`) ?? null;
+      const oursRow = oursItem?.row ?? null;
+      const id = oursItem ? oursItem.id : basename(tpl).replace(/^shared_/, '').replace(/\.[^.]+$/, '');
+      if (match && tpl && !match.test(tpl)) continue;
+      // A row of ours takes the client arrangement it names (a hairstyle the hair slot, as every hair template does).
+      const desc = oursItem ? { name: oursItem.name, description: null, slots: arrangementSlots(vfs, oursItem.arrangement, itemCaches) } : describeItem(vfs, tpl, id, itemCaches);
+      for (const alt of desc.slots ?? []) for (const slot of alt) slotNamesSeen.add(slot);
+      const row = oursRow ? null : (appearanceTable.get(`shared_${id}`) ?? null);
       try {
-        let satPath = resolveTemplateString(vfs, tpl, ['appearanceFilename'], new Map());
+        let satPath = oursRow ? oursRow.appearance : resolveTemplateString(vfs, tpl, ['appearanceFilename'], new Map());
         if (!satPath) throw new Error('no appearance in its template chain');
         satPath = satPath.replace(/\\/g, '/').replace(/^\//, '');
         // The gender swap below, as the template alone would have had it: what "took the table's appearance" counts against.
@@ -5054,14 +5101,18 @@ switch (cmd) {
           }
         }
         seenIds.add(id);
-        // The rest of the gender's species; this folder's own wears the entry's `sat`, whatever its cell names.
-        const fit = wardrobeFit(row, gender, satPath, has, speciesId);
+        // The rest of the gender's species; this folder's own wears the entry's `sat`, whatever its cell names. A row of
+        // ours carries what its plan marks it with instead (`oursWardrobePlan`'s `mark`): `ours`, the `fit` that blocks
+        // the gender's bodies its fits leave out, and a hairstyle's own fits (`hairOfSpecies`).
+        const fit = oursItem ? undefined : wardrobeFit(row, gender, satPath, has, speciesId);
         // `colour` (and `dyeCover`) are written once every piece is converted, from the recipes the run ends with.
-        catalogue.push({ id, template: tpl, kind, sat: satPath, gender: usedOtherGender ? (gender === 'm' ? 'f' : 'm') : gender, name: desc.name, description: desc.description, slots: desc.slots, icon, ...(fit ? { fit } : {}), parts: entries, variables: customizationList(vfs, info) });
+        catalogue.push({ id, template: tpl, kind, sat: satPath, gender: usedOtherGender ? (gender === 'm' ? 'f' : 'm') : gender, name: desc.name, description: desc.description, slots: desc.slots, icon, ...(fit ? { fit } : {}), parts: entries, variables: customizationList(vfs, info), ...(oursItem ? oursItem.mark : {}) });
+        if (oursItem) oursCount.taken++;
         done++;
         if (done % 50 === 0) console.log(`  ${done} converted...`);
       } catch (err) {
-        failed.push(`${id}: ${err.message}`);
+        if (oursItem && oursPassedOver(err)) oursCount.otherSkeleton++;
+        else failed.push(`${id}: ${err.message}`);
       }
     }
     const bytes = catalogue.reduce((a, c) => a + c.parts.reduce((b, p) => b + p.bytes, 0), 0);
@@ -5079,6 +5130,17 @@ switch (cmd) {
         const share = c.parts.reduce((a, p) => ({ shown: a.shown + (dyedMeshes.get(p.name)?.shown ?? 0), covered: a.covered + (dyedMeshes.get(p.name)?.covered ?? 0) }), { shown: 0, covered: 0 });
         if (share.shown) c.dyeCover = Math.round((share.covered / share.shown) * 1e4) / 1e4;
       }
+      // A garment of ours names only the palettes a recipe of it reads: the Kubaz goggles' lens shader carries a
+      // palette its passes lay on no picture a recipe can render, so a colour row for it would move nothing. Every
+      // piece of the game's own already holds to this (dyeConvert.test.ts), so the rule reaches only the entries of ours.
+      for (const c of catalogue) {
+        if (!c.ours) continue;
+        c.variables = c.variables.flatMap((v) => {
+          if (v.kind !== 'palette' || !v.meshes?.length) return [v];
+          const meshes = v.meshes.filter((m) => (byMesh.get(m) ?? []).some((r) => (r.shader?.palettes ?? []).some((p) => p.variable.replace(/^.*\//, '') === v.name)));
+          return meshes.length ? [{ ...v, meshes }] : [];
+        });
+      }
     }
     // Stamped, so `status` can tell a wardrobe converted before a change to how a surface is read
     // from one converted after it. **This is the write the `wardrobe` command makes**; the other
@@ -5088,8 +5150,11 @@ switch (cmd) {
     // out on purpose with --no-dye, which is the owner's choice and not asked for again.
     // The late world it was converted from (finalnames.mjs): a run of part of the wardrobe writes none, since its
     // file then lists only what it converted and the folder must be converted whole to stand for one world.
-    const wardrobeLate = lateFor(vfs, 'wardrobe', { partial: !!match || Number.isFinite(limit) || !['wearables', 'hair'].every((k) => kinds.includes(k)) });
-    writeFileSync(join(outDir, 'wardrobe.json'), JSON.stringify({ species: speciesId, gender, skeleton: baseSkeletonFile, materialFormat: MATERIAL_FORMAT, ...(wardrobeLate ? { late: wardrobeLate } : {}), ...(dyeOn ? { dyeFormat: DYE_FORMAT } : { noDye: true }), items: catalogue }, null, 2));
+    const wardrobePartial = !!match || Number.isFinite(limit) || !['wearables', 'hair'].every((k) => kinds.includes(k));
+    const wardrobeLate = lateFor(vfs, 'wardrobe', { partial: wardrobePartial });
+    // The entries of ours it stood (oursEntries.mjs), by the table's key: written by a whole run only, as the late stamp is.
+    const wardrobeOurs = wardrobePartial ? null : oursStamp(ours, oursCount.taken, oursCount.missing);
+    writeFileSync(join(outDir, 'wardrobe.json'), JSON.stringify({ species: speciesId, gender, skeleton: baseSkeletonFile, materialFormat: MATERIAL_FORMAT, ...(wardrobeLate ? { late: wardrobeLate } : {}), ...(wardrobeOurs ? { ours: wardrobeOurs } : {}), ...(dyeOn ? { dyeFormat: DYE_FORMAT } : { noDye: true }), items: catalogue }, null, 2));
     if (recipes.length) {
       // The palettes the recipes name, and the three garment palettes no piece names, kept for a picker. Ours is
       // set after: `exportPalettes` writes `[]` for a palette the archives have not got, and an empty palette
@@ -5127,11 +5192,12 @@ switch (cmd) {
     console.log(`   ${withMorphs} carry body-shape morphs; ${otherGender} exist only in the other gender's mesh`);
     const counted = itemPackStatus(catalogue);
     console.log(`   ${counted.named} named, ${counted.slotted} with slots, ${counted.iconed} icons, ${counted.fitted} with species rules, ${unseen} worn unseen, ${took} took the table's appearance (${tableMissing} of its paths missing, ${unconverted} would not convert), ${duplicates} repeated ids`);
+    console.log(`   entries of ours: ${oursCount.taken} stood${oursCount.otherSkeleton ? `, ${oursCount.otherSkeleton} built for another skeleton passed over` : ''}${oursCount.missing ? `, ${oursCount.missing} left out: their appearance is not in this mount` : ''}${ours.broken ? ` (the table cannot be used: ${ours.broken})` : ''}`);
     // Slots the arrangements name that the player has not (a door or a strut in a file that is no garment).
     try {
       if (vfs.has(PLAYER_SLOTS)) {
         const playerSlots = new Set(parseSlotDescriptor(parseIff(vfs.read(PLAYER_SLOTS))));
-        const foreign = [...arrangementSlots].filter((s) => !playerSlots.has(s)).sort();
+        const foreign = [...slotNamesSeen].filter((s) => !playerSlots.has(s)).sort();
         if (foreign.length) console.log(`   slots the arrangements name that the player has not: ${foreign.join(', ')}`);
       }
     } catch (err) {
@@ -5222,8 +5288,9 @@ switch (cmd) {
       has: (p) => vfs.has(p),
     };
     let built;
+    const ours = oursTable();
     try {
-      built = buildCustomization(read);
+      built = buildCustomization(read, { ours });
     } catch (err) {
       console.error(`customization: ${err.message}`);
       process.exitCode = 1;
@@ -5232,6 +5299,9 @@ switch (cmd) {
     const { file, counts } = built;
     const target = join(pos[2], ...CUSTOMIZATION_FILE.split('/'));
     mkdirSync(dirname(target), { recursive: true });
+    // The hairstyles of ours it laid out (oursEntries.mjs), by the table's key, which `status` asks after.
+    const customOurs = oursStamp(ours, counts.ours, counts.oursMissing);
+    if (customOurs) file.ours = customOurs;
     const text = JSON.stringify(withLate(file, vfs, 'customization'));
     writeFileSync(target, text);
     // And progress's challenge table beside it (tools/swg/conTable.mjs): one more small retail table, written
@@ -5244,7 +5314,7 @@ switch (cmd) {
     }
     const levelsTarget = join(pos[2], ...LEVELS_FILE.split('/'));
     writeFileSync(levelsTarget, JSON.stringify(con));
-    console.log(`customization: ${Object.keys(file.species).length} species, ${counts.rows} rows (${counts.words} with the client's words), ${counts.hair} hairstyles (${counts.hairMissing} the archives have not got), ${counts.palettes} palettes (${counts.colours} creator colours)${counts.skipped.length ? `, ${counts.skipped.length} interface palette${counts.skipped.length === 1 ? '' : 's'} left unread by rule` : ''}, the challenge table, ${con.rows ? `${con.rows.length} levels` : `none (${con.why})`}`);
+    console.log(`customization: ${Object.keys(file.species).length} species, ${counts.rows} rows (${counts.words} with the client's words), ${counts.hair} hairstyles (${counts.hairMissing} the archives have not got) and ${counts.ours} of ours${counts.oursMissing ? ` (${counts.oursMissing} left out: not in this mount)` : ''}, ${counts.palettes} palettes (${counts.colours} creator colours)${counts.skipped.length ? `, ${counts.skipped.length} interface palette${counts.skipped.length === 1 ? '' : 's'} left unread by rule` : ''}, the challenge table, ${con.rows ? `${con.rows.length} levels` : `none (${con.why})`}`);
     console.log(`  ${(text.length / 1024).toFixed(0)} KB in ${((Date.now() - t0) / 1000).toFixed(1)} s -> ${target}`);
     console.log(`  -> ${levelsTarget}`);
     break;
@@ -6072,6 +6142,33 @@ switch (cmd) {
     // With the chassis table read, a player template with no chassis row is a placeholder and is left out (ships.mjs).
     const chassisOf = chassisRows.size ? (t) => chassisNameFor(t.replace(/^.*\/shared_/, '').replace(/\.iff$/, ''), (n) => chassisRows.has(n)) : undefined;
     const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior, extrasOf, weaponOf, chassisOf }, { log: console.log, limit });
+    // The NPC-only hulls (npcships.mjs `npcOnlyHullPicks`): a hull for every appearance an NPC type flies that no player
+    // hull shares, and for the End of War's ships that name no garage hull, converted as a player hull is but with no
+    // rooms, marked `npc` so the garage never lists them, and given to the NPC types and the NPC tab. Not with --limit,
+    // whose manifest is part of the pack; a --match run takes the ones it matches and keeps the rest.
+    const npcTemplates = vfs.list('object/ship/shared_').filter((p) => /^object\/ship\/shared_[^/]+\.iff$/.test(p) && (/_tier\d+\.iff$/.test(p) || Object.hasOwn(END_OF_WAR, p.replace(/^.*\/shared_/, '').replace(/\.iff$/, ''))));
+    const appearanceAt = (t) => resolveTemplateString(vfs, t, ['appearanceFilename'], cache);
+    let npcHulls = null;
+    if (!Number.isFinite(limit)) {
+      const t0 = Date.now();
+      const playerAppearances = new Set(ships.map((sh) => String(appearanceAt(sh.template) ?? '').replace(/\\/g, '/').replace(/^\//, '').toLowerCase()).filter(Boolean));
+      const picks = npcOnlyHullPicks({ templates: npcTemplates, appearanceOf: appearanceAt, playerAppearances }).filter((p) => !match || match.test(p.template));
+      const before = new Set(models.keys());
+      const built = buildShips(picks.map((p) => p.template), { convert, interiorOf: () => null, convertInterior, extrasOf, weaponOf }, { log: () => {} });
+      const pickOf = new Map(picks.map((p) => [p.template, p]));
+      for (const sh of built.ships) {
+        const p = pickOf.get(sh.template);
+        sh.id = p.id;
+        sh.label = p.id.replace(/^npc_/, '').replace(/_/g, ' ');
+        sh.npc = true;
+      }
+      ships.push(...built.ships);
+      ships.sort((a, b) => a.class.localeCompare(b.class) || a.id.localeCompare(b.id));
+      skipped.push(...built.skipped.map((s) => ({ ...s, npc: true })));
+      const bytes = [...models.keys()].filter((id) => !before.has(id)).reduce((a, id) => a + (existsSync(join(outDir, `${id}.glb`)) ? statSync(join(outDir, `${id}.glb`)).size : 0), 0);
+      npcHulls = { hulls: built.ships.length, left: built.skipped.length, bytes, seconds: (Date.now() - t0) / 1000 };
+      console.log(`npc-only hulls: ${built.ships.length} of ${picks.length} converted (${built.ships.map((sh) => sh.id).join(', ')}), ${(bytes / 1e6).toFixed(1)} MB in ${npcHulls.seconds.toFixed(1)} s${built.skipped.length ? `; left out: ${built.skipped.map((s) => `${s.template} (${s.why})`).join('; ')}` : ''}`);
+    }
     // components.json: every component a slot can take (with its name and, for a gun, its bolt), and the
     // droids: the flight computers, and each astromech the mobiles pack holds, with the heads a hull draws
     // it as instead (the N-1's), converted here with the ships (so before the manifest's models are listed).
@@ -6118,7 +6215,7 @@ switch (cmd) {
       }
       paintMaker.write(list);
     }
-    const manifest = withLate({ classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed), materialFormat: MATERIAL_FORMAT, assembly: SHIP_ASSEMBLY_FORMAT, ...(components ? { fitFormat: SHIP_FIT_FORMAT } : {}) }, vfs, 'ships');
+    const manifest = withLate({ classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed), materialFormat: MATERIAL_FORMAT, assembly: SHIP_ASSEMBLY_FORMAT, ...(components ? { fitFormat: SHIP_FIT_FORMAT } : {}), ...(npcHulls ? { npcHulls: NPC_HULLS_FORMAT } : {}) }, vfs, 'ships');
     if (projectiles.length) writeFileSync(join(outDir, 'projectiles.json'), JSON.stringify({ projectiles, weapons }, null, 2));
     if (match) {
       // A matched run redoes some ships: the rest keep their place in the manifest.
@@ -6130,6 +6227,9 @@ switch (cmd) {
         const late = lateFor(vfs, 'ships', { partial: true, old });
         if (late) manifest.late = late;
         else delete manifest.late;
+        // The NPC-only hulls this run did not match are the old manifest's: it stands for them only if that one did.
+        if (old.npcHulls) manifest.npcHulls = old.npcHulls;
+        else delete manifest.npcHulls;
         const done = new Set(ships.map((sh) => sh.id));
         const files = new Set(manifest.models.map((m) => m.file));
         manifest.ships = [...(old.ships ?? []).filter((sh) => !done.has(sh.id) && !match.test(sh.template)), ...ships].sort((a, b) => a.class.localeCompare(b.class) || a.id.localeCompare(b.id));
@@ -6186,11 +6286,17 @@ switch (cmd) {
         }
         const combat = buildCombat({
           templates: vfs.list('object/ship/shared_').filter((p) => /^object\/ship\/shared_[^/]+_tier\d+\.iff$/.test(p)),
+          // The End of War's untiered ships (npcships.mjs `END_OF_WAR`), listed by their own names.
+          endOfWar: npcTemplates.filter((p) => !/_tier\d+\.iff$/.test(p)),
           appearanceOf: (t) => resolveTemplateString(vfs, t, ['appearanceFilename'], cache),
           ships: manifest.ships,
           chassisRows,
           slotNames,
           nameOf: (id) => localize(vfs, `space/space_mobile_type:${id}`, labelCache),
+          objectNameOf: (t) => {
+            const sid = resolveTemplateParam(vfs, t, 'objectName', setStringId, paramCache);
+            return sid ? localize(vfs, `${sid.table}:${sid.key}`, labelCache) : null;
+          },
           formations: Object.fromEntries(FORMATIONS.map((n) => [n, tableRows(`datatables/space/formation/${n}.iff`)])),
           taunts: tauntTables,
           hitEffectRows: tableRows('datatables/space/ship_hit_effects.iff'),
@@ -7610,8 +7716,9 @@ switch (cmd) {
   }
 
   case 'props': {
-    // <swg-dir> <out-dir> [--limit=N] [--no-icons]: every prop and every piece of furniture in the
-    // game as one pack, so a player can put any of it down anywhere.
+    // <swg-dir> <out-dir> [--limit=N] [--no-icons] [--skeletal-pose=bind|idle]: every prop and every piece of furniture in
+    // the game as one pack, so a player can put any of it down anywhere. A skeletal appearance stands still at its own
+    // idle's first frame, or with --skeletal-pose=bind at its bind pose; a run that names no pose keeps the pack's last.
     //
     // The worlds' packs already carry whatever their own snapshots place; this is the catalogue,
     // keyed on what a thing is rather than on where one happens to stand. `tools/swg/props.mjs` says
@@ -7633,45 +7740,89 @@ switch (cmd) {
     const models = new Map();
     const cache = new Map();
     let converted = 0;
-    const convert = (template) => {
-      const r = resolveTemplateMesh(vfs, template, cache);
-      if (r.skip) return { skip: r.skip };
-      if (r.particle) return { skip: 'particle effect' };
-      if (r.skeletal) return { skip: 'skeletal appearance' };
-      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
-      const source = single ? r.parts[0].mesh : r.appearance;
-      const id = familyOf(source);
+    // The skeletal props' cost, said at the end: how many stood at their idle's first frame and how many at the bind
+    // pose, and the bytes and seconds they took. `--skeletal-pose=bind` stands every one at its bind pose (how a skeletal
+    // prop stands is the owner's to judge; the default takes its own idle where its table has one). The choice is written
+    // into the manifest (`skeletalPose`) and a run that names none keeps the one the pack was last converted at, as a
+    // `--no-dye` is kept, so a run `status` asks for another reason never stands them back at their idle;
+    // `--skeletal-pose=idle` puts each one's own idle back.
+    const skeletal = { idle: 0, bind: 0, bytes: 0, ms: 0 };
+    let poseKept = null;
+    if (options['skeletal-pose'] === undefined && existsSync(join(outDir, 'manifest.json'))) {
+      try {
+        poseKept = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')).skeletalPose ?? null;
+      } catch {
+        poseKept = null; // a manifest cut short keeps nothing
+      }
+    }
+    const skeletalPose = (options['skeletal-pose'] ?? poseKept) === 'bind' ? 'bind' : 'idle';
+    // A model's id is its source's family, a skeleton's with `_still` after it: a family drops the extension, so a
+    // skeletal `at_st.sat` and a static `at_st.apt` were one model, and the Hoth AT-ST display (a `.apt`) wore the
+    // walker stood still. Should a clash be left even so (a static family that itself ends `_still`), it takes a number.
+    const kindOfId = new Map();
+    const modelIdOf = (source, skinned) => {
+      const base = skinned ? `${familyOf(source)}_still` : familyOf(source);
+      let id = base;
+      for (let n = 2; kindOfId.has(id) && kindOfId.get(id) !== skinned; n++) id = `${base}_${n}`;
+      kindOfId.set(id, skinned);
+      return id;
+    };
+    // Three-quarters and a little from above, which is how a chair, a crate or a table reads: the weapon view is
+    // side-on and would draw a cabinet as a rectangle. Mirrored as its model is.
+    const PROP_ICON = { view: 'wear', yawDeg: 32, pitchDeg: 22 };
+    const iconOf = (id, groups, textures, flipX) => {
+      if (!icons) return null;
+      try {
+        const pic = renderThumbnail(iconMeshes(groups, textures), { ...PROP_ICON, flipX });
+        if (!pic) return null;
+        writeFileSync(join(outDir, 'icons', `${id}.png`), encodePng(pic.width, pic.height, pic.rgba));
+        return `icons/${id}.png`;
+      } catch {
+        return null; // a prop with no picture is still a prop
+      }
+    };
+    /**
+     * One model of the pack, once per source: a mesh or composite appearance as it always was, or a skeletal one
+     * (`skinned`) stood still by `convertSat`'s `bake` -- at the first frame of its own table's idle where it has one,
+     * at its bind pose otherwise, set down on its lowest point -- and written with no skin, so the streamer stands,
+     * casts and culls it as it does every other prop and nothing compiles for it in play.
+     */
+    const modelOf = (source, skinned) => {
+      const id = modelIdOf(source, skinned);
       if (!models.has(id)) {
         try {
-          const conv = convertOne(vfs, source, join(outDir, `${id}.glb`));
-          const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
-          const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
-          let icon = null;
-          if (icons && conv.tris) {
-            try {
+          if (skinned) {
+            const t0 = Date.now();
+            const file = join(outDir, `${id}.glb`);
+            const info = convertSat(vfs, source, file, { animations: skeletalPose === 'bind' ? false : '=idle', maxAnimations: 1, bake: skeletalPose === 'bind' ? 'bind' : true });
+            const tris = info.meshes.reduce((a, m) => a + m.triangles, 0);
+            const groups = info.baked.meshes.flatMap((m) => m.groups);
+            const icon = tris ? iconOf(id, groups, info.baked.textures, true) : null;
+            skeletal[info.baked.pose]++;
+            skeletal.bytes += statSync(file).size;
+            skeletal.ms += Date.now() - t0;
+            models.set(id, { id, file: `${id}.glb`, bounds: info.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] }, triangles: tris, icon, appearance: source, skeletal: info.baked.pose, ...(tris ? {} : { failed: 'no triangles' }) });
+          } else {
+            const conv = convertOne(vfs, source, join(outDir, `${id}.glb`));
+            const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+            const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+            let icon = null;
+            if (icons && conv.tris) {
               const textures = new Map();
               for (const g of conv.mesh.groups) {
                 const t = textureFor(vfs, g.shader);
                 if (t) textures.set(g.shader, t);
               }
-              // Three-quarters and a little from above, which is how a chair, a crate or a table
-              // reads: the weapon view is side-on and would draw a cabinet as a rectangle.
-              const pic = renderThumbnail(iconMeshes(conv.mesh.groups, textures), { view: 'wear', yawDeg: 32, pitchDeg: 22, flipX: conv.flipX });
-              if (pic) {
-                writeFileSync(join(outDir, 'icons', `${id}.png`), encodePng(pic.width, pic.height, pic.rgba));
-                icon = `icons/${id}.png`;
-              }
-            } catch {
-              /* a prop with no picture is still a prop */
+              icon = iconOf(id, conv.mesh.groups, textures, conv.flipX);
             }
+            // The effects a composite appearance lists beside its mesh (a `.cmp` PART naming a `.prt`: a
+            // candle's flame, some lamps). That route is small -- 85 prop templates over 44 appearances,
+            // and not one brazier. The fire, spray and glow nearly everything else carries hangs from the
+            // template's client data instead and is written per template by the `objeffects` pass
+            // (`clientfx.mjs`); the streamer places both.
+            const effects = attachedEffects(vfs, conv.effects, outDir, '../props/');
+            models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, icon, appearance: source, ...(effects.length ? { effects } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
           }
-          // The effects a composite appearance lists beside its mesh (a `.cmp` PART naming a `.prt`: a
-          // candle's flame, some lamps). That route is small -- 85 prop templates over 44 appearances,
-          // and not one brazier. The fire, spray and glow nearly everything else carries hangs from the
-          // template's client data instead and is written per template by the `objeffects` pass
-          // (`clientfx.mjs`); the streamer places both.
-          const effects = attachedEffects(vfs, conv.effects, outDir, '../props/');
-          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, icon, appearance: source, ...(effects.length ? { effects } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
           converted++;
           if (converted % 250 === 0) console.log(`  ${converted} models so far`);
         } catch (err) {
@@ -7682,6 +7833,15 @@ switch (cmd) {
       if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
       return { model: id, file: def.file, bounds: def.bounds, icon: def.icon ?? null };
     };
+    /** What an appearance (a template's, or a row of ours) stands as: its one mesh, its composite, or its skeleton. */
+    const fromResolved = (r) => {
+      if (r.skip) return { skip: r.skip };
+      if (r.particle) return { skip: 'particle effect' };
+      if (r.skeletal) return modelOf(r.skeletal, true);
+      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
+      return modelOf(single ? r.parts[0].mesh : r.appearance, false);
+    };
+    const convert = (template) => fromResolved(resolveTemplateMesh(vfs, template, cache));
     const templates = [...galleryTemplates(vfs, 'object/tangible/'), ...galleryTemplates(vfs, 'object/static/'), ...galleryTemplates(vfs, 'object/installation/')];
     console.log(`props: ${templates.length} templates under the three roots`);
     const appearanceCache = new Map();
@@ -7692,11 +7852,21 @@ switch (cmd) {
         return null;
       }
     };
-    const { props, skipped } = P.buildProps(templates, { convert, describe: (template, id) => describeItem(vfs, template, id, itemCaches), appearanceOf }, { log: console.log, limit: options.limit ? Number(options.limit) : Infinity });
-    const manifest = withLate({ version: P.PROPS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, props, models: [...models.values()].filter((m) => !m.failed), skipped }, vfs, 'props');
+    const limit = options.limit ? Number(options.limit) : Infinity;
+    const { props, skipped } = P.buildProps(templates, { convert, describe: (template, id) => describeItem(vfs, template, id, itemCaches), appearanceOf }, { log: console.log, limit });
+    // The props of ours (oursEntries.mjs): the late appearance files no template names, each stood as a template's
+    // prop is and marked ours, in a group of their own. One whose appearance this mount has not got is left out and counted.
+    const ours = oursTable();
+    const oursBuilt = P.buildOursProps(oursRows(ours, 'props'), { convert: (row) => fromResolved(resolveAppearanceToMesh(vfs, row.appearance)), has: (p) => vfs.has(p) });
+    props.push(...oursBuilt.props);
+    skipped.push(...oursBuilt.skipped);
+    const whole = !Number.isFinite(limit);
+    const manifest = withLate({ version: P.PROPS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, skeletalFormat: P.PROPS_SKELETAL_FORMAT, skeletalPose, ...(whole ? { ours: oursStamp(ours, oursBuilt.props.length, oursBuilt.missing) ?? undefined } : {}), props, models: [...models.values()].filter((m) => !m.failed), skipped }, vfs, 'props');
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 1));
     const c = P.propCounts(manifest);
     console.log(`-> ${outDir}: ${c.props} props in ${c.models} models over ${c.groups} groups; ${c.named} named, ${c.iconed} with a picture, ${skipped.length} left out`);
+    console.log(`   skeletal props: ${skeletal.idle + skeletal.bind} models stood still (${skeletal.idle} at their idle's first frame, ${skeletal.bind} at the bind pose), ${(skeletal.bytes / 1e6).toFixed(1)} MB in ${(skeletal.ms / 1000).toFixed(1)} s; ${c.skeletal} props wear them${poseKept === 'bind' ? '; every one at its bind pose, kept from the last run (--skeletal-pose=idle puts each one\'s own idle back)' : ''}`);
+    console.log(`   entries of ours: ${oursBuilt.props.length} props${oursBuilt.missing ? `, ${oursBuilt.missing} left out: their appearance is not in this mount` : ''}${oursBuilt.skipped.length ? `, ${oursBuilt.skipped.length} would not convert` : ''}`);
     break;
   }
 

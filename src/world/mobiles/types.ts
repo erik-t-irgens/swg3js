@@ -48,6 +48,11 @@ export interface MobileEntry {
   kind: MobileKind;
   folder: string;
   group: string;
+  /**
+   * A body of ours (tools/swg/oursEntries.mjs): SOE's art no template names, stood by a row of our table (`ours/<stem>`),
+   * listed in a group of its own and marked so.
+   */
+  ours?: boolean;
   name: string;
   subtitle: string | null;
   description?: string;
