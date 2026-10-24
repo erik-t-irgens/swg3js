@@ -102,6 +102,38 @@ const AIR_GROUPS: DialGroup[] = [
       dial('grains', 'blast', 'Grains a blast throws', 0, 1000, 10, '', 'At a thermal detonator\'s radius; others by theirs.'),
     ],
   },
+  {
+    title: 'The drifting sand',
+    note: 'The air near the ground must pass a threshold before the sand\'s pattern moves: min(the wind × over + add, cap), so the planet\'s own breeze leaves it lying and a jet moves it.',
+    dials: [
+      dial('ground', 'liftOver', 'Threshold over the wind', 0.5, 3, 0.05, '×', 'How far over the planet\'s own wind the air must blow to move sand.'),
+      dial('ground', 'liftAdd', 'Threshold over the wind, plus', 0, 15, 0.1, 'm/s', 'And this much more.'),
+      dial('ground', 'liftCap', 'Threshold never over', 1, 40, 0.5, 'm/s', 'The threshold\'s ceiling, so a real gale\'s gusts still drift the sand.'),
+      dial('ground', 'liftSpan', 'Lift comes in over', 0.5, 20, 0.5, 'm/s', 'How much faster than the threshold the air must blow to move the sand fully.'),
+      dial('ground', 'lift', 'Sand moves at', 0, 2, 0.01, '× air', 'The pattern\'s speed as a share of the air\'s, on sand; less on ground that moves less.'),
+      dial('ground', 'hold', 'Tracks hold for', 0, 12, 0.1, 's', 'How long a moved patch lies untouched before it begins to heal.'),
+      dial('ground', 'heal', 'Then heal over', 0.5, 30, 0.5, 's', 'How long it then takes to heal (about 95% gone by then), on sand; slower on ground that heals slower.'),
+      dial('ground', 'darkening', 'Pressed ground darker by', 0, 0.6, 0.01, '', 'How much darker the floor of a deep print, rut or pit is at most.'),
+      dial('ground', 'darkenScale', 'Darkening per metre of depth', 0, 30, 0.5, '×', 'How fast the darkening comes in with a dent\'s depth.'),
+      dial('ground', 'shade', 'Dust shadow at most', 0, 1, 0.01, '', 'How much of the sun the thickest dust between the ground and the sun takes off the ground under it.'),
+    ],
+  },
+  {
+    title: 'Prints, ruts and pits',
+    note: 'Every depth is times how far the ground gives: none in rock, sand at one, mud two and a half times as deep.',
+    dials: [
+      dial('prints', 'footDepth', 'Footprint depth', 0, 0.2, 0.001, 'm', 'How deep a person\'s foot presses into sand.'),
+      dial('prints', 'footAlong', 'Footprint length', 0.1, 0.8, 0.01, 'm', 'A person\'s print from heel to toe.'),
+      dial('prints', 'footAcross', 'Footprint width', 0.05, 0.5, 0.01, 'm', 'A person\'s print across.'),
+      dial('prints', 'fade', 'Prints fade over', 2, 120, 1, 's', 'How long a print, a rut or a pit takes to fill back in on sand; slower on ground that heals slower.'),
+      dial('prints', 'rut', 'Rut dug', 0, 2, 0.01, 'm/s', 'How fast a speeder skimming the sand digs its rut, at a full bite.'),
+      dial('prints', 'bowl', 'Rut width', 0.3, 5, 0.05, 'm', 'Half the width of a speeder\'s rut.'),
+      dial('prints', 'scour', 'Pit scoured', 0, 0.02, 0.0001, 'm/s', 'How fast a jet blowing down scours its pit, for each metre a second it lands at.'),
+      dial('prints', 'craterDepth', 'Crater depth', 0, 0.5, 0.01, '× radius', 'A blast\'s crater, as a share of its radius.'),
+      dial('prints', 'craterAcross', 'Crater width', 0.1, 1.5, 0.01, '× radius', 'Half a blast\'s crater across, as a share of its radius.'),
+      dial('prints', 'craterReach', 'A blast still digs from', 0, 2, 0.05, '× radius', 'How high over the ground a blast still presses a crater into it, as a share of its radius: shallower the higher it went off, none past this.'),
+    ],
+  },
 ];
 
 /** The air's dials, with the values the game shipped (read once, as this module loads, before anything can move them). */

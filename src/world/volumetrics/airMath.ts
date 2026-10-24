@@ -215,6 +215,157 @@ export function airFrameNumbersIn(r: AirFrameNumbers): void {
   r.lightStep = L.step * (sun < L.sunCap ? sun : L.sunCap) * (L.refSteps / (r.lightSteps > 0 ? r.lightSteps : 1));
 }
 
+// ---------------------------------------------------------------------------------------------- the dents' kinds
+
+/** Kind 0: a round bowl with a raised lip (pits, ruts, craters). Kind 1: a footprint, toe and heel along +x. */
+export const DENT_KIND = { bowl: 0, foot: 1 } as const;
+
+// ---------------------------------------------------------------------------------------------- the 10 Hz clock
+
+/** The clock every accumulating write of the ground counts on (the offsets' age, the dents' stamps and fade): what it has banked, this frame's `dt`, and the ticks it crossed. */
+export interface TickClock {
+  acc: number;
+  dt: number;
+  ticks: number;
+}
+
+/** A tenth of a second: the clock's tick. */
+export const TICK = 0.1;
+
+/**
+ * The ticks this frame crossed, into `c.ticks` (no number crosses the call): a tick every tenth of a second of the
+ * frames' own time, whatever the frame rate, so what is counted or stamped a tick is the same at 30 and at 240 frames.
+ * A hitch is held to ten ticks, so a long frame never banks a backlog.
+ */
+export function tickClockIn(c: TickClock): void {
+  const dt = c.dt > 0 && Number.isFinite(c.dt) ? c.dt : 0;
+  let a = c.acc + dt;
+  if (a > TICK * 10) a = TICK * 10;
+  // Counted with a whisker spare, so a run of frames that sums to exactly a tenth crosses it however the sums round.
+  const n = Math.floor((a + 1e-9) / TICK);
+  c.ticks = n;
+  c.acc = a - n * TICK;
+  if (c.acc < 0) c.acc = 0;
+}
+
+// ---------------------------------------------------------------------------------------------- the ground [demo]
+
+/**
+ * How strongly the air lifts the ground's pattern at a texel: `smoothstep(L, L + span, speed) · moves` [demo
+ * `land.html:553`], `L` the lift threshold (`liftThreshold`). The shader's line, for the tests.
+ */
+export function sandLift(speed: number, threshold: number, span: number, moves: number): number {
+  return smoothstep(threshold, threshold + span, speed) * moves;
+}
+
+/**
+ * How fast a moved patch heals toward nought, a second: nothing until it has held `hold` seconds, then up to three of its
+ * time constants across `heal` seconds, times the ground's own "heals" (never under 0.02) [demo `land.html:559`]. `age`
+ * is in ticks of the 10 Hz clock.
+ */
+export function sandHealRate(ageTicks: number, hold: number, heal: number, heals: number): number {
+  return smoothstep(hold, hold + 1, ageTicks * TICK) * (3 / (heal > 0.1 ? heal : 0.1)) * (heals > 0.02 ? heals : 0.02);
+}
+
+/**
+ * One frame of the offsets at a texel, in the shader's order, into `s` (`o` the offset, `age` in ticks): `o(x − u·dt)
+ * − u·dt` where the air lifts it -- `s` as handed in is the texel read upstream, `o(x − u·dt)`, which the shader reads
+ * there and a caller here hands in as it stands -- the age started again where the lift passes `reset` and otherwise
+ * grown by the ticks crossed, and past the hold healed by `exp(−rate · dt)`. Float64 arithmetic: the tests run it
+ * through the field's float32 store and a half-float one of their own.
+ */
+export interface SandTexel {
+  ox: number;
+  oz: number;
+  age: number;
+}
+export function sandStep(s: SandTexel, ux: number, uz: number, lift: number, dt: number, ticks: number, heals: number, t = AIR_TUNE.ground): void {
+  s.ox -= ux * dt;
+  s.oz -= uz * dt;
+  s.age = lift > t.ageReset ? 0 : Math.min(s.age + ticks, t.ageCap);
+  const k = sandHealRate(s.age, t.hold, t.heal, heals);
+  if (k > 0) {
+    const f = Math.exp(-k * dt);
+    s.ox *= f;
+    s.oz *= f;
+  }
+}
+
+/**
+ * The picture shift the tile ground samples one of its layers at, in the picture's own units (one repeat a 4 m tile):
+ * the carried offset `o` (metres, world x and z) turned into the picture's frame -- the picture runs along the
+ * terrain's x, which is the world's −x when the pictures are the client's way round (`frameZ` +1) -- times the layer's
+ * own "moves", the art dial and the window's edge fade. **A uniform branch**: at a dial of nought nothing is worked out
+ * and the shift is exactly nought, so the sample coordinate `uv + shift` is `uv` itself to the texture lookup (which
+ * reads +0 and −0 alike). The offset is made finite before it is used. Into `out` (x, y).
+ */
+export function groundShift(ox: number, oz: number, moves: number, art: number, fade: number, frameZ: number, out: { x: number; y: number }): { x: number; y: number } {
+  out.x = 0;
+  out.y = 0;
+  if (art !== 0) {
+    const fx = Number.isFinite(ox) ? ox : 0;
+    const fz = Number.isFinite(oz) ? oz : 0;
+    const k = 0.25 * art * moves * fade;
+    out.x = -frameZ * fx * k;
+    out.y = fz * k;
+  }
+  return out;
+}
+
+/**
+ * Pressed ground darker by its dent [demo `land.html:939`]: `c · (1 − clamp(depth · scale, 0, most))`, the depth
+ * (metres, finite) times the prints' dial. A uniform branch round the whole term: at a dial of nought `c` is answered
+ * as it came, to the bit.
+ */
+export function dentDarken(c: number, depth: number, art: number, scale = AIR_TUNE.ground.darkenScale, most = AIR_TUNE.ground.darkening): number {
+  if (art === 0) return c;
+  const d = (Number.isFinite(depth) ? depth : 0) * art;
+  const k = d * scale;
+  return c * (1 - (k < 0 ? 0 : k > most ? most : k));
+}
+
+/**
+ * A normal bent by a dent [demo `land.html:927-933`]: the slope of the depth across `2t` metres (`dx`, `dz` the
+ * differences of the depth a texel either side, finite), times the dial, added to the normal's x and z and the whole
+ * made a unit again. A uniform branch: at a dial of nought, or where the ground is flat, the normal is answered as it
+ * came, to the bit (a `normalize` round an unchanged normal would move its last bits). Into `out`.
+ */
+export function dentNormal(nx: number, ny: number, nz: number, dx: number, dz: number, t: number, art: number, out: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  out.x = nx;
+  out.y = ny;
+  out.z = nz;
+  if (art === 0) return out;
+  const sx = ((Number.isFinite(dx) ? dx : 0) * art) / (2 * t);
+  const sz = ((Number.isFinite(dz) ? dz : 0) * art) / (2 * t);
+  if (sx === 0 && sz === 0) return out;
+  const x = nx + sx;
+  const z = nz + sz;
+  const len = Math.sqrt(x * x + ny * ny + z * z);
+  if (!(len > 1e-9)) return out;
+  out.x = x / len;
+  out.y = ny / len;
+  out.z = z / len;
+  return out;
+}
+
+/**
+ * The dust's shadow on the ground (the second wave): the sun's direct light at a pixel times `1 − art · share · (1 −
+ * T) · fade`, `T` the light pass's transmittance there (finite, held to 0..1). A uniform branch: at a dial of nought
+ * the light is answered as it came, to the bit.
+ */
+export function dustShade(light: number, transmittance: number, art: number, fade: number, share = AIR_TUNE.ground.shade): number {
+  if (art === 0) return light;
+  const T = Number.isFinite(transmittance) ? (transmittance < 0 ? 0 : transmittance > 1 ? 1 : transmittance) : 1;
+  const k = 1 - art * share * (1 - T) * fade;
+  if (k === 1) return light;
+  return light * k;
+}
+
+/** One tick of the dents' fade at a texel: `exp(−0.1 · ticks · max(heals, 0.02) / fade)` [demo `land.html:727`, on the tick]. */
+export function dentFade(ticks: number, heals: number, fade = AIR_TUNE.prints.fade): number {
+  return Math.exp(-((TICK * ticks) / (fade > 0.1 ? fade : 0.1)) * (heals > 0.02 ? heals : 0.02));
+}
+
 // ---------------------------------------------------------------------------------------------- the engine [demo]
 
 /** The free jet's reach: 1.2 + 0.32 · exit, metres [demo `land.html:1437`]. */

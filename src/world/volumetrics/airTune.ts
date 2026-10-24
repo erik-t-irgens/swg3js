@@ -262,6 +262,73 @@ export const AIR_TUNE = {
     wreckRadius: 6,
     wreckPush: 14,
   },
+  /**
+   * The ground's carried offsets (the second wave, the design's §2.7): how fast the air must blow before the sand's
+   * pattern moves, how far it moves, and how it heals. The threshold is `min(W · liftOver + liftAdd, liftCap)` m/s, `W`
+   * the weather's wind before any slab's share, so the planet's own breeze never moves sand and a jet does, and a real
+   * gale's gusts still drift it [demo `land.html:1895`].
+   */
+  ground: {
+    liftOver: 1.05,
+    liftAdd: 1.5,
+    liftCap: 13,
+    /** The lift rises over this many m/s above the threshold: smoothstep(L, L + span, |v|) [demo `land.html:553`]. */
+    liftSpan: 7,
+    /** The pattern moves at the air's speed times this, times the lift and the ground's own "moves" [demo `land.html:554`]. */
+    lift: 0.35,
+    /** Where the lift passes this a texel's age starts again: it is being moved [demo `land.html:558`]. */
+    ageReset: 0.04,
+    /** Seconds a moved patch holds untouched before it heals [demo]. */
+    hold: 2.5,
+    /** Seconds it then takes to heal (three of its time constants, about 95% gone) [demo]. */
+    heal: 6,
+    /** How much darker pressed ground is at most [demo `land.html:939`], and the dent depth (metres) times this that reaches it. */
+    darkening: 0.18,
+    darkenScale: 6,
+    /** How much of the sun the dust's shadow on the ground takes at most: the demo's mix(1, lit, 0.8) [demo `land.html:942`]. */
+    shade: 0.8,
+    /** A texel's age is counted in ticks of the 10 Hz clock, held under this (a half float holds every whole number to 2048) [ours]. */
+    ageCap: 2000,
+  },
+  /**
+   * The dents: footprints, a speeder's rut, a scour pit under a jet, a crater (the second wave, the design's §2.7). Every
+   * depth is metres, times the ground's own "gives" where it is stamped [demo `land.html:671-729`, `:1594-1614`,
+   * `:1715-1767`]. The field is a square of `square` metres round the camera, read with its last `squareEdge` metres
+   * faded [ours].
+   */
+  prints: {
+    /** A footprint, toe and heel, its length and width, metres, and how deep, times the body's own scale [demo `land.html:1764`]. */
+    footAlong: 0.32,
+    footAcross: 0.15,
+    footDepth: 0.035,
+    /** Seconds a print takes to fade on ground that heals at 1 (sand): exp(-0.1 · heals / fade) a tick of the 10 Hz clock [demo `land.html:727`]. */
+    fade: 25,
+    /** A speeder's rut, its bowl's radius, metres, and how deep it digs a second at a bite of 1 [demo `land.html:1730`: 0.0055 a frame at 60]. */
+    bowl: 1.7,
+    rut: 0.33,
+    /** A scour pit under a jet: metres a second at an impact of 1 m/s [demo `land.html:1498`: 2.5e-5 a frame at 60, read a second]. */
+    scour: 1.5e-3,
+    /** The pit's radius, `nozzle + widen · distance to the ground + add`, metres [demo `land.html:1498`]. */
+    scourWiden: 0.12,
+    scourAdd: 0.5,
+    /** A crater: `across · radius` across and `depth · radius` deep at a blast's radius [ours, the demo's 3.4 and 1.15 m at a thermal detonator's 7]. */
+    craterAcross: 0.49,
+    craterDepth: 0.16,
+    /**
+     * How far over the ground a blast still presses it, as a share of its radius: a crater as deep as above at the
+     * ground, shallower the higher it went off, none past this (a ship destroyed in flight, a splash on a wall metres
+     * up press nothing) [ours: half its radius, so a grenade bouncing at knee height or a speeder wrecked at its ride
+     * height still digs, and a fighter overhead does not].
+     */
+    craterReach: 0.5,
+    /** Metres across the dent square round the camera, and the metres at its edge a dent fades over [ours]. */
+    square: 128,
+    squareEdge: 4,
+    /** A continuous stamp's path is laid at this share of its radius apart, so a rut is a trough and not a row of pits [ours]. */
+    spacing: 0.5,
+    /** A foot more than this many metres off the ground under it (a crate, a step) leaves a decal, not a dent [ours]. */
+    groundGap: 0.75,
+  },
 };
 
 export type AirTune = typeof AIR_TUNE;
@@ -272,8 +339,11 @@ export interface TuneAnswer {
   rebuild: boolean;
 }
 
-/** A tune key whose number is spent when the window is placed, so a move of it starts every field again at the next step (a jump: class T, never a program). */
-const REBUILD_KEYS = new Set(['window.size']);
+/**
+ * A tune key whose number is spent when the window (or the dent square) is placed, so a move of it starts every field
+ * again at the next step (a jump: class T, never a program).
+ */
+const REBUILD_KEYS = new Set(['window.size', 'prints.square']);
 
 /**
  * Move numbers of the table, as `{ group: { key: value } }`: a number that is not finite, a key the table has not got,
@@ -299,7 +369,7 @@ export function tuneAir(o: Record<string, unknown>): TuneAnswer {
         notes.push(`air: ${g}.${k} must be a finite number`);
         continue;
       }
-      if ((g === 'forces' && (k === 'splats' || k === 'dust')) || (g === 'volume' && k === 'maxSteps')) {
+      if ((g === 'forces' && (k === 'splats' || k === 'dust' || k === 'dents')) || (g === 'volume' && k === 'maxSteps')) {
         notes.push(`air: ${g}.${k} is a loop bound compiled into the programs and is not moved live`);
         continue;
       }

@@ -2,6 +2,7 @@
 // Every value has a default, a range and a live effect; the menu shows them, the game applies them.
 // The effects' own keys live in `fxRegistry.ts`, which the menu and a plain node test read as well.
 import { FX_DEFAULTS, type FxSettings } from './fxRegistry.ts';
+import { volFillQuality, volStampQuality } from '../world/volumetrics/volSettings.ts';
 
 export interface Settings extends FxSettings {
   /** Mouse look speed, 1 is the game's own. */
@@ -213,6 +214,22 @@ export interface Settings extends FxSettings {
   volFromForce: boolean;
   /** Grenades, mines, charges, splash and wrecks stir the air. */
   volFromBlasts: boolean;
+  /** The ground's pattern drifts under a strong jet and heals back (the carried offsets). */
+  volSand: boolean;
+  /** The carried offsets' grid as a multiple of the air's: 2, 3, 4 or 6. */
+  volSandDetail: number;
+  /** Footprints, ruts, scour pits and craters pressed into the ground. */
+  volPrints: boolean;
+  /** The dents' texels over their 128 m square: 1024, 2048 or 4096. */
+  volPrintDetail: number;
+  /** How far the drifting sand moves the ground's own pictures, 0 (not at all) to 1. */
+  volArtSand: number;
+  /** How deep the dents show, their bent light and their darkening, 0 (none) to 1.5. */
+  volArtPrints: number;
+  /** How dark the dust's shadow on the ground is, 0 (none) to 1. */
+  volArtShade: number;
+  /** A footstep on ground that keeps marks presses a dent rather than laying a decal. */
+  volFromFeet: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -335,6 +352,16 @@ export const DEFAULT_SETTINGS: Settings = {
   volFromEngines: true,
   volFromForce: true,
   volFromBlasts: true,
+  // The second wave's: the ground's effects on and at High, and every art dial at the demo's full look (the owner's to
+  // turn down; at nought each leaves the ground's own art exactly as it is).
+  volSand: true,
+  volSandDetail: 4,
+  volPrints: true,
+  volPrintDetail: 2048,
+  volArtSand: 1,
+  volArtPrints: 1,
+  volArtShade: 1,
+  volFromFeet: true,
   ...FX_DEFAULTS,
 };
 
@@ -385,6 +412,9 @@ export function loadSettings(): Settings {
       const v = saved[k];
       if (typeof v === typeof DEFAULT_SETTINGS[k]) (out as unknown as Record<string, unknown>)[k] = v;
     }
+    // A volumetrics quality key a later wave added, which a file saved before it never wrote, takes the preset the
+    // file's other quality keys hold: a Low chosen before stays Low rather than reading Custom.
+    volFillQuality(saved, out);
   } catch {
     /* none saved, or not ours */
   }
@@ -394,7 +424,10 @@ export function loadSettings(): Settings {
 
 export function saveSettings(s: Settings): void {
   try {
-    const changed = Object.fromEntries(Object.entries(s).filter(([k, v]) => v !== DEFAULT_SETTINGS[k as keyof Settings]));
+    const changed: Record<string, unknown> = Object.fromEntries(Object.entries(s).filter(([k, v]) => v !== DEFAULT_SETTINGS[k as keyof Settings]));
+    // The volumetrics' wave the file was written in, where it holds a quality key, so a quality key a later wave adds is
+    // filled only in a file from before it (`volFillQuality`), never in one that left it out for being at its default.
+    volStampQuality(changed);
     if (Object.keys(changed).length) localStorage.setItem(KEY, JSON.stringify(changed));
     else localStorage.removeItem(KEY);
   } catch {

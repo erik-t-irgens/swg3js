@@ -485,6 +485,10 @@ export class AirVolumePass implements FxPass {
       field('colour', 'rgb'),
       field('medium', 'a'),
       field('light', 'r'),
+      // The ground's (the second wave's): the carried offsets, metres in red and green (a quarter metre to full), the
+      // dents, metres in red (ten centimetres to full).
+      field('offsets', 'rgb', 4),
+      field('dents', 'r', 10),
     ];
   }
 

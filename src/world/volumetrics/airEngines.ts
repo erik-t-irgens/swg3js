@@ -103,6 +103,8 @@ export function pushEngines(hulls: readonly AirHull[], forces: AirForces): void 
         a[6] = share;
         a[7] = vx;
         a[8] = vz;
+        // The source a rut or a pit is gathered under between ticks: this hull and this engine, steady for its life.
+        a[9] = v.group.id * 64 + (k < 62 ? k : 62);
         forces.engineArgs();
       }
     }
@@ -125,6 +127,7 @@ export function pushEngines(hulls: readonly AirHull[], forces: AirForces): void 
         a[6] = exit;
         a[7] = vx;
         a[8] = vz;
+        a[9] = v.group.id * 64 + 63;
         forces.engineArgs();
       }
     }

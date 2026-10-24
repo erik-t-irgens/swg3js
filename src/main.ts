@@ -39,10 +39,14 @@ import { CROWD_SWITCHES, CROWD_TUNE, listsMover, tuneCrowd, type CrowdTune } fro
 import { crowdDialsFor } from './world/mobiles/crowdDials.ts';
 import { shadowDialsFor } from './world/shadowDials.ts';
 import { AIR_DRAW, probeAirDraws, type AirDrawMode } from './world/volumetrics/airDraw.ts';
-import { AIR_TUNE, tuneAir } from './world/volumetrics/airTune.ts';
+import { AIR_TUNE, GROUND_CLASS_NAMES, tuneAir, type GroundClass } from './world/volumetrics/airTune.ts';
 import { airDialsFor } from './world/volumetrics/airDials.ts';
 import { isVolKey, presetOf, VOL_APPLY_CLASS, VOL_KEYS, VOL_PRESET_LABELS, VOL_TUNE, volConsoleToSettings, volMemoryMB, volQualityFrom, type VolKey } from './world/volumetrics/volSettings.ts';
 import { AirVolumePass } from './core/fx/airVolume.ts';
+import { createFxQuad, FX_CAMERA } from './core/fx/pass.ts';
+import { resolveLinks } from './core/programQueue.ts';
+import { LIVE_GROUND_OVERRIDES } from './world/volumetrics/groundResponse.ts';
+import { groundAirSelfTest } from './world/volumetrics/airGround.ts';
 import { SHADOW_PASS_TUNE, tuneShadowPass } from './world/shadowCadence.ts';
 import { SHADOW_SPLIT_TUNE, splitEnds, tuneShadowSplits } from './world/shadowSplits.ts';
 import type { AbReport } from './core/perfMath.ts';
@@ -434,7 +438,7 @@ import { AudioSystem, type ListenerPose } from './audio/audio.ts';
 import { OUTSIDE, type SoundSpace } from './audio/distance.ts';
 import type { AmbienceTune } from './audio/ambience.ts';
 import type { WorldSourceTune } from './audio/emitters.ts';
-import { BodySounds, type BodyLists, type FootTune, type PlayerBody } from './audio/footsteps.ts';
+import { BodySounds, type BodyLists, type FootStep, type FootTune, type PlayerBody } from './audio/footsteps.ts';
 import { combatSounds, GENERIC_GUN, type CombatTables, type CombatTune } from './audio/combatSounds.ts';
 import { vehicleSounds, type SoundVehicle, type VehicleTables, type VehicleTune } from './audio/vehicleSounds.ts';
 import { sabers } from './audio/saberSounds.ts';
@@ -871,10 +875,16 @@ interface AirDebugOptions {
   draw?: AirDrawMode;
   /** Known inputs through every program, held to `airMath.ts`, with the link logs. */
   selfTest?: boolean;
+  /** A dent stamped where you look (half extents along and across, metres; its depth before the ground's give; 'foot' or 'bowl'). */
+  dent?: { along?: number; across?: number; depth?: number; kind?: 'foot' | 'bowl'; heading?: number };
+  /** Families overridden live, `<world>:<id>` or a name to a class (null takes the override away). */
+  family?: Record<string, string | null>;
+  /** The ground's air variant drawn at its dials nought and one against the plain ground and `groundGate`'s mirror. */
+  groundSelfTest?: boolean;
 }
 
 /** The fields `__debug.air({ view })` shows. */
-const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'inscatter', 'clear'] as const;
+const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'offsets', 'dents', 'inscatter', 'clear'] as const;
 
 /**
  * `localStorage['swg.vol'] = '0'`: the volumetrics are never constructed this session and the master greys on the page
@@ -887,6 +897,8 @@ const VOL_HATCH_OFF = ((): boolean => {
     return false;
   }
 })();
+/** What the notice says while the master turned on in play builds what it needs (`reconcileVolumetrics`). */
+const VOL_WARM_NOTICE = 'Volumetrics on: preparing shaders';
 
 class App {
   private torch!: THREE.SpotLight;
@@ -1822,6 +1834,12 @@ class App {
     });
     registerPerfSwitch('airVolumeShadows', { get: () => this.volSoftValue('airVolumeShadows'), set: (v) => this.volSoft('airVolumeShadows', !!v), values: [false, true], note: "the cascades' shadow on the dust" });
     registerPerfSwitch('volLight', { get: () => this.volSoftValue('volLight'), set: (v) => this.volSoft('volLight', !!v), values: [false, true], note: 'the light pass toward the sun (the dust\'s dark heart)' });
+    // The ground's (the second wave's): soft too, never the real master (the design's §3.5). `zero` is every art dial at
+    // nought with the dust's amount nought, the variant still worn; `off` the ground back on its plain material and the
+    // volume unwanted, the field, its targets and both grounds' programs kept; `one` every art dial at one. The zero-dial
+    // diff is `crowd({ compare: 'volGroundArt' })` (nought pixels), and `crowd({ compare: 'volGroundArtOne' })` must differ.
+    registerPerfSwitch('volGroundArt', { get: () => this.groundArtSoft, set: (v) => this.setGroundArtSoft(String(v)), values: ['zero', 'off'], note: "the ground's air variant at every art dial nought against the plain ground (the zero-dial diff): the scene must not differ by a pixel" });
+    registerPerfSwitch('volGroundArtOne', { get: () => this.groundArtSoft, set: (v) => this.setGroundArtSoft(String(v)), values: ['zero', 'one'], note: "the ground's air variant at every art dial nought against every one at one: it must differ, or the diff proved nothing" });
     registerPerfSwitch('insideCull', { get: () => PORTAL_CULL.mode, set: (v) => (PORTAL_CULL.mode = v === 'all' ? 'all' : 'rooms'), values: ['all', 'rooms'], note: "'all' draws every room, the world and its shadows as before; 'rooms' lets the four cuts below apply" });
     registerPerfSwitch('insideSkip', { get: () => PORTAL_CULL.insideSkip, set: (v) => (PORTAL_CULL.insideSkip = !!v), values: [false, true], note: 'inside with no exit reachable: no world pass, no shadow pass, no weather' });
     registerPerfSwitch('seenRooms', { get: () => PORTAL_CULL.seenRooms, set: (v) => (PORTAL_CULL.seenRooms = !!v), values: [false, true], note: 'only the rooms the portal flood reached are drawn, inside and through doors' });
@@ -6326,7 +6344,7 @@ class App {
         if (unknown.length) console.warn(`footsteps: nothing here is tuned by ${unknown.join(', ')}`);
         const log = this.feet.log.slice(-Math.max(1, n));
         console.table(log);
-        return { ...this.feet.status(), ground: { familyChunksHeld: this.inWorld ? this.world.terrain.familyChunks : 0, familyChunks: FAMILY_TUNE.familyChunks }, recent: log };
+        return { ...this.feet.status(), ground: { familyChunksHeld: this.inWorld ? this.world.terrain.familyChunks : 0, familyChunks: FAMILY_TUNE.familyChunks, standingKept: this.inWorld ? this.world.terrain.familyKeep : 0 }, recent: log };
       },
       /**
        * The prints feet leave, headless: the last dozen laid (the body, the ground, which foot,
@@ -12378,6 +12396,29 @@ class App {
       air.blast(p.x, p.y, p.z, radius, push, 0);
       out.blast = { at: [Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10, Math.round(p.z * 10) / 10], radius, push, queued: air.forces.oneCount };
     }
+    if (o.dent) {
+      const p = look();
+      const e = o.dent;
+      const foot = e.kind === 'foot';
+      const P = AIR_TUNE.prints;
+      const along = Number.isFinite(e.along) ? (e.along as number) : foot ? P.footAlong / 2 : 1;
+      const across = Number.isFinite(e.across) ? (e.across as number) : foot ? P.footAcross / 2 : along;
+      const depth = Number.isFinite(e.depth) ? (e.depth as number) : foot ? P.footDepth : 0.1;
+      const heading = Number.isFinite(e.heading) ? ((e.heading as number) * Math.PI) / 180 : Math.atan2(-Math.cos(this.cam.yaw), -Math.sin(this.cam.yaw));
+      const laid = air.forces.dent(p.x, p.z, along, across, heading, depth, foot ? 1 : 0);
+      out.dent = { at: [Math.round(p.x * 10) / 10, Math.round(p.z * 10) / 10], along, across, depth, kind: foot ? 'foot' : 'bowl', laid, give: Math.round((air.dents?.givesAt(p.x, p.z) ?? 0) * 100) / 100 };
+      if (!laid) notes.push(!air.dents ? "no dents: this browser cannot blend into a float target" : !air.forces.dents ? 'no dents kept now: the prints are off, the ground does not wear the air here, or the field is not stepping' : 'not laid: off the dent square, or on ground that gives nothing');
+    }
+    if (o.family) {
+      for (const [key, cls] of Object.entries(o.family)) {
+        if (cls === null) LIVE_GROUND_OVERRIDES.delete(key);
+        else if ((GROUND_CLASS_NAMES as readonly string[]).includes(cls)) LIVE_GROUND_OVERRIDES.set(key, cls as GroundClass);
+        else notes.push(`no ground class "${cls}": ${GROUND_CLASS_NAMES.join(', ')}`);
+      }
+      this.world.refreshAirTables();
+      out.family = Object.fromEntries(LIVE_GROUND_OVERRIDES);
+    }
+    if (o.groundSelfTest) out.groundSelfTest = groundAirSelfTest(this.renderer);
     if (o.view !== undefined) {
       if (o.view === null) out.view = this.postfx?.fxView(null) ?? null;
       else if ((AIR_VIEWS as readonly string[]).includes(o.view)) out.view = this.postfx ? this.postfx.fxView(`airVolume.${o.view}`) : 'the effects are off: turn Effects on to see a field';
@@ -12412,19 +12453,125 @@ class App {
 
   /**
    * The volumetrics' settings into the one record the frame reads (`VOL_TUNE`), with the console's values past the page's
-   * ends over them. The master is class A in this wave: turned on in play with no field built at this world's arrival
-   * (or no volume on the chain), it says it takes effect at the next one and builds nothing now; turned off it acts at
-   * once (the step stops, the field's targets are freed, its materials kept); turned on again where this session's field
-   * and pass already stand, at once. Nothing here builds a program.
+   * ends over them. The master is class W from the second wave: turned on in play it warms what it needs off the frame,
+   * the old picture drawn meanwhile (`reconcileVolumetrics`); turned off it acts at once (the ground back on its plain
+   * material at the next frame, the step stopped, the field's targets freed, every material kept for a later on).
+   * Nothing here builds a program.
    */
   private applyVolumetrics(key?: keyof Settings): void {
     const was = VOL_TUNE.on;
     volQualityFrom(this.settings, VOL_TUNE, this.volOver);
     if (VOL_HATCH_OFF) VOL_TUNE.on = false;
     if (key !== 'volumetrics' && key !== undefined) return;
-    if (VOL_TUNE.on && !was) {
-      if (!this.world.air || (this.postfx && !this.postfx.pass('airVolume'))) this.messages.note('Volumetrics: from the next arrival');
-    } else if (!VOL_TUNE.on && was) this.world.air?.releaseTargets();
+    if (VOL_TUNE.on && !was) this.queueVolumetrics();
+    else if (!VOL_TUNE.on && was) this.world.air?.releaseTargets();
+  }
+
+  /** The master moved in play: take it in one go on the next microtask, as the Effects switch is (`queueEffects`). */
+  private queueVolumetrics(): void {
+    if (this.volQueued) return;
+    this.volQueued = true;
+    queueMicrotask(() => {
+      this.volQueued = false;
+      void this.reconcileVolumetrics();
+    });
+  }
+  private volQueued = false;
+  private volBusy = false;
+  private volAgain = false;
+  /** The master's in-play warm is under way: the page says "preparing shaders" beside it. */
+  private volWarming = false;
+
+  /**
+   * Bring the volumetrics in line with the master, in play (class W, the design's §3.2): with it on and nothing built for
+   * this world's light set, a notice goes up, the moving air is made (targets and materials, nothing drawn), its
+   * materials, the volume pass's and both grounds' stand-ins go through the world's program queue -- whose parallel links
+   * block no frame on Direct3D 11 and which builds one a frame elsewhere -- with the old picture drawn meanwhile, and only
+   * when every one has linked does the world take the field and the chain the pass; the chooser then swaps the ground at
+   * the next frame. A change of mind during the wait (the master off, a travel, the Effects switch) throws the work away
+   * and looks again. A field this session already made is warmed the same way, which costs key lookups.
+   */
+  private async reconcileVolumetrics(): Promise<void> {
+    if (this.volBusy) {
+      this.volAgain = true;
+      return;
+    }
+    this.volBusy = true;
+    try {
+      do {
+        this.volAgain = false;
+        // Off: `applyVolumetrics` took the off half at once. Out of a world: the next arrival builds it (`prepareAir`).
+        if (!VOL_TUNE.on || VOL_HATCH_OFF || !this.inWorld) continue;
+        const had = this.world.air;
+        const air = had ?? this.world.makeAir();
+        const chain = this.postfx;
+        const world = this.world.packId;
+        if (air.refused) {
+          console.info(`volumetrics: the moving air cannot run on this machine: ${air.refused}`);
+          if (!had) this.world.takeAir(air);
+          continue;
+        }
+        this.volWarming = true;
+        this.notice.set(VOL_WARM_NOTICE);
+        this.menu.redrawGraphics();
+        const jobs: Promise<void>[] = [];
+        const field = air.warmJob();
+        if (field) jobs.push(this.world.programJob(field.objects, 'volumetrics: the moving air', true, { compile: (o, _allowance, resolve) => ({ made: field.compile(o, resolve), done: true }) }));
+        // The volume's pass, made and warmed before the chain is given it, so no frame decides about it half built.
+        let pass: AirVolumePass | null = null;
+        if (chain && !chain.pass('airVolume')) {
+          pass = new AirVolumePass(() => this.world.air);
+          const target = chain.compileTarget;
+          const objects = pass.materials().map((m) => m.object ?? createFxQuad(m.material));
+          jobs.push(this.world.programJob(objects, 'volumetrics: the dust in the picture', true, { compile: (o, _allowance, resolve) => ({ made: this.compileFxObject(o, target, resolve), done: true }) }));
+        }
+        // Both grounds, one stand-in each, through the queue as any scene object is (their lights are the world pass's).
+        const stands = this.world.groundStandInsFor(air);
+        if (stands.length) jobs.push(this.world.compileReady(stands, 'volumetrics: the ground'));
+        await Promise.all(jobs);
+        // A change of mind, or another world arrived meanwhile (whose screen built a field of its own): throw this away.
+        const changed = !VOL_TUNE.on || VOL_HATCH_OFF || !this.inWorld || this.postfx !== chain || this.world.packId !== world || (this.world.air !== null && this.world.air !== air);
+        if (changed) {
+          pass?.dispose();
+          if (!had && this.world.air !== air) air.dispose();
+          // And looks again (the Effects switch's rule, the design's §3.2): with the master still on, in a world, the
+          // loop warms for the chain and the field as they stand now -- a new chain's pass, another world's field (key
+          // lookups when its screen built it) -- and with it off, or out of a world, the top of the loop stops it.
+          this.volAgain = true;
+          continue;
+        }
+        if (pass && this.postfx && !this.postfx.pass('airVolume')) this.postfx.registerPass(pass);
+        else pass?.dispose();
+        if (!had) this.world.takeAir(air);
+      } while (this.volAgain);
+    } finally {
+      this.volBusy = false;
+      if (this.volWarming) {
+        // What the warm built is filed while it still counts as covered (the old picture drawn, the new materials worn by
+        // nothing yet), as the Effects switch's is: sampled now, before the flag goes and the next frame's sample would
+        // call it play.
+        this.sampleShaders(this.shaderPhase());
+        this.volWarming = false;
+        // The Effects switch's own warm, if one runs, puts its progress up again at its next step.
+        if (!this.fxBusy) this.notice.set(null);
+        this.menu.redrawGraphics();
+      }
+    }
+  }
+
+  /** One of a pass's materials compiled for the target it draws into, finished when asked (the in-play warm's own compile). */
+  private compileFxObject(o: THREE.Object3D, target: THREE.WebGLRenderTarget, resolve: boolean): number {
+    const r = this.renderer;
+    const before = r.info.programs?.length ?? 0;
+    const prev = r.getRenderTarget();
+    r.setRenderTarget(target);
+    try {
+      r.compile(o, FX_CAMERA);
+    } finally {
+      r.setRenderTarget(prev);
+    }
+    if (resolve) resolveLinks(r, o);
+    return (r.info.programs?.length ?? 0) - before;
   }
 
   /**
@@ -12458,14 +12605,59 @@ class App {
   /** Console values of the volumetrics past the page's ends: in force now, never saved (`__debug.volumetrics`). */
   private readonly volOver: Partial<Record<VolKey, number | boolean>> = {};
 
+  /** The ground's soft state for the frame report's compare (`volGroundArt`, `volGroundArtOne`); 'set' is the settings'. */
+  private groundArtSoft = 'set';
+
   /**
-   * What the page says beside a volumetrics knob (`Menu.knobState`): the master greys with the hatch, and says "from the
-   * next arrival" while it is on with nothing built for it yet.
+   * The ground's soft state: `zero` (every art dial and the dust's amount at nought, the variant worn), `off` (the
+   * chooser on the plain ground, the volume unwanted, nothing freed), `one` (every art dial at one), anything else the
+   * settings as they stand. In force at once -- the ground swapped and its uniforms written now, since a compare draws
+   * with nothing stepped -- and never saved; the real master is never moved.
+   */
+  private setGroundArtSoft(v: string): void {
+    const mode = v === 'zero' || v === 'off' || v === 'one' ? v : 'set';
+    this.groundArtSoft = mode;
+    for (const k of ['volArtSand', 'volArtPrints', 'volArtShade', 'airVolumeAmount'] as const) delete this.volOver[k];
+    this.world.airGroundSoftOff = mode === 'off';
+    if (this.postfx) {
+      if (mode === 'off') this.postfx.override.airVolume = false;
+      else delete this.postfx.override.airVolume;
+    }
+    if (mode === 'zero') {
+      this.volOver.volArtSand = 0;
+      this.volOver.volArtPrints = 0;
+      this.volOver.volArtShade = 0;
+      this.volOver.airVolumeAmount = 0;
+    } else if (mode === 'one') {
+      this.volOver.volArtSand = 1;
+      this.volOver.volArtPrints = 1;
+      this.volOver.volArtShade = 1;
+    }
+    this.applyVolumetrics();
+    const over = { ...this.settings } as unknown as Record<string, unknown>;
+    for (const [k, value] of Object.entries(this.volOver)) over[k] = value;
+    this.postfx?.configure(over as unknown as Settings);
+    this.world.syncGround();
+  }
+
+  /**
+   * What the page says beside a volumetrics knob (`Menu.knobState`): the master greys with the hatch, says "preparing
+   * shaders" while its in-play warm runs, and "from the next arrival" while it is on out of a world with nothing built
+   * for it yet; the prints grey on a browser that cannot blend into a float target (every footprint is then today's
+   * decal); and the ground's switches say so where this world's ground is not drawn the way the air's variant needs.
    */
   private volKnobState(key: string): { note?: string; off?: string } | null {
-    if (key !== 'volumetrics') return null;
-    if (VOL_HATCH_OFF) return { off: "off at load: localStorage['swg.vol'] is '0'" };
-    if (VOL_TUNE.on && (!this.world.air || (this.postfx && !this.postfx.pass('airVolume')))) return { note: 'from the next arrival' };
+    if (key === 'volumetrics') {
+      if (VOL_HATCH_OFF) return { off: "off at load: localStorage['swg.vol'] is '0'" };
+      if (this.volWarming) return { note: 'preparing shaders' };
+      if (VOL_TUNE.on && !this.inWorld && !this.world.air) return { note: 'from the next arrival' };
+      return null;
+    }
+    if (key === 'volPrints' || key === 'volPrintDetail' || key === 'volArtPrints' || key === 'volFromFeet') {
+      const air = this.world.air;
+      if (air && !air.floatBlend) return { off: 'this browser cannot blend into a float target (EXT_float_blend), so every footprint is the flat print it always was' };
+    }
+    if ((key === 'volSand' || key === 'volPrints') && this.inWorld && !this.world.groundTakesAir) return { note: 'not on this world: its ground is not drawn the way the air needs (a pack converted before, or a real-elevation world)' };
     return null;
   }
 
@@ -12501,7 +12693,9 @@ class App {
       on: VOL_TUNE.on,
       hatch: VOL_HATCH_OFF,
       built: !!this.world.air,
+      warming: this.volWarming,
       onChain: !!this.postfx?.pass('airVolume'),
+      ground: { takesAir: this.world.groundTakesAir, wearsAir: this.world.groundWearsAirNow, softOff: this.world.airGroundSoftOff, floatBlend: this.world.air ? this.world.air.floatBlend : null, soft: this.groundArtSoft },
       preset: VOL_PRESET_LABELS[presetOf(this.settings)],
       memoryMB: volMemoryMB(VOL_TUNE, size?.x ?? window.innerWidth, size?.y ?? window.innerHeight),
       tune: { ...VOL_TUNE },
@@ -13070,6 +13264,16 @@ class App {
   }
 
   /**
+   * The feet's one listener, chained once (the volumetrics' second wave, the design's §2.7): a step on ground that keeps
+   * marks presses a dent in the moving air's field and lays no decal; any other step -- indoors, on a deck, off the dent
+   * square, on rock, with the prints or the master off, or no field at all -- lays today's decal exactly as today. A step
+   * is one or the other, never both. A bound field, so the wiring makes no closure.
+   */
+  private readonly stepPrint = (step: FootStep): void => {
+    if (!this.world.air?.dentStep(step)) footprints.stepHook(step);
+  };
+
+  /**
    * What every body's clips marked since the last frame: the feet, the voices, and the loops a
    * standing body makes. The three lists are the managers' own arrays and the player's record is a
    * field, so this allocates nothing.
@@ -13093,8 +13297,10 @@ class App {
       // The second listener beside the sound: the world lays a print where a foot lands, on the
       // frame the clip's own mark says it lands and never on a clock of its own. The hook is the
       // same bound function every time, so nothing is made here, and the feet a body had last put
-      // down go with the planet, as the marks themselves do.
-      this.feet.onStep = footprints.stepHook;
+      // down go with the planet, as the marks themselves do. Chained, never replaced (the volumetrics' one owner for a
+      // footprint, `stepPrint`): a step the moving air presses as a dent lays no decal, and every other step lays
+      // today's decal exactly as before.
+      this.feet.onStep = this.stepPrint;
       footprints.leave();
     }
     // The shared table that names the nine terrain surfaces arrives with the sound bank, some
@@ -16937,7 +17143,7 @@ class App {
    */
   private shaderPhase(): ProgramPhase {
     if (this.loadingScreen.open || this.traveling) return 'loading';
-    if (this.fxBusy || this.hyperspace.covered) return 'covered';
+    if (this.fxBusy || this.volWarming || this.hyperspace.covered) return 'covered';
     if (!this.inWorld || !this.started) return 'boot';
     return 'play';
   }
@@ -20806,12 +21012,13 @@ class App {
   }
 
   /**
-   * A switch's two values compared on one picture (`__debug.crowd({ compare })`): the frame is drawn three times with its
-   * first value and twice with its second, with nothing stepped between, and read back after each -- the scene as the
-   * portal renderer drew it, before the effects, where an exact fix must leave every value the same (`scene`), and the
-   * canvas, where the effects' own frame-to-frame easing and noise move a few hundred pixels whatever the switch says
-   * (`canvas`, beside two draws of the first value: `noise`). The console's alone: it allocates the pictures, and the
-   * switch is put back as it was.
+   * A switch's two values compared on one picture (`__debug.crowd({ compare })`): the frame is drawn four times with each
+   * value, with nothing stepped between, and read back after each -- the scene as the portal renderer drew it, before
+   * the effects, where an exact fix must leave every value the same (`scene`), and the canvas, where the effects' own
+   * frame-to-frame easing and noise move a few hundred pixels whatever the switch says (`canvas`, beside two draws of
+   * each value as far apart as the two values' are: `noise`, `noiseAfter`, each with where on the picture it falls and
+   * the milliseconds between the reads). The console's alone: it allocates the pictures, and the switch is put back as
+   * it was.
    */
   private crowdCompare(key: string): Record<string, unknown> {
     const sw = PERF_SWITCHES.get(key);
@@ -20823,7 +21030,7 @@ class App {
     const h = size.y;
     const fx = this.postfx;
     const scene = fx ? fx.sceneTarget : null;
-    const grab = (): { canvas: Uint8Array; scene: Uint16Array | null } => {
+    const grab = (): { canvas: Uint8Array; scene: Uint16Array | null; at: number } => {
       this.drawFrame();
       const px = new Uint8Array(w * h * 4);
       const was = this.renderer.getRenderTarget();
@@ -20835,18 +21042,27 @@ class App {
         raw = new Uint16Array(scene.width * scene.height * 4);
         this.renderer.readRenderTargetPixels(scene, 0, 0, scene.width, scene.height, raw);
       }
-      return { canvas: px, scene: raw };
+      return { canvas: px, scene: raw, at: performance.now() };
     };
-    const differ = (x: ArrayLike<number> | null, y: ArrayLike<number> | null): { pixels: number; worst: number } | null => {
+    // Where on the canvas the pixels differ, in an eight-by-four grid of the picture (bottom row first, as read back):
+    // a switch's own difference stands where what it moved stands, the canvas's own drift wherever that drifts.
+    const differ = (x: ArrayLike<number> | null, y: ArrayLike<number> | null, cols = 0): { pixels: number; worst: number; where?: number[] } | null => {
       if (!x || !y) return null;
       let pixels = 0;
       let worst = 0;
+      const where = cols > 0 ? new Array<number>(32).fill(0) : null;
       for (let i = 0; i < x.length; i += 4) {
         const d = Math.max(Math.abs(x[i] - y[i]), Math.abs(x[i + 1] - y[i + 1]), Math.abs(x[i + 2] - y[i + 2]));
-        if (d > 0) pixels++;
+        if (d > 0) {
+          pixels++;
+          if (where) {
+            const p = i >> 2;
+            where[Math.min(3, Math.floor(((p / cols) | 0) / (h / 4))) * 8 + Math.min(7, Math.floor((p % cols) / (cols / 8)))]++;
+          }
+        }
         if (d > worst) worst = d;
       }
-      return { pixels, worst };
+      return where ? { pixels, worst, where } : { pixels, worst };
     };
     const before = sw.get();
     const [a, b] = sw.values;
@@ -20855,13 +21071,22 @@ class App {
     const grainWas = fx ? fx.override.grainVignette : undefined;
     if (fx) fx.override.grainVignette = false;
     try {
+      // The noise is measured over the very spacing the switch is: two draws apart, as the second value's picture is
+      // from the first's (its warming draw between). Measured one draw apart, as it once was, an exact switch showed
+      // half as much again as its noise wherever the canvas was still settling (the dust's history on Vulkan:
+      // `passMatrices` 10,307 against 7,230), and the zero-dial diff read the canvas's own drift as the ground's.
       sw.set(a);
       grab();
       const a1 = grab();
+      grab();
       const a2 = grab();
       sw.set(b);
       grab();
       const b1 = grab();
+      // And the second value's own noise, as far apart again: a switch whose canvas differs by more than both draws'
+      // own drift moved something; the milliseconds between the reads say how much of the clock the drift had.
+      grab();
+      const b2 = grab();
       const inScene = differ(a2.scene, b1.scene);
       return {
         key,
@@ -20869,7 +21094,8 @@ class App {
         b,
         size: [w, h],
         scene: { noise: differ(a1.scene, a2.scene), switched: inScene },
-        canvas: { noise: differ(a1.canvas, a2.canvas), switched: differ(a2.canvas, b1.canvas) },
+        canvas: { noise: differ(a1.canvas, a2.canvas, w), switched: differ(a2.canvas, b1.canvas, w), noiseAfter: differ(b1.canvas, b2.canvas, w) },
+        ms: { noise: Math.round(a2.at - a1.at), switched: Math.round(b1.at - a2.at), noiseAfter: Math.round(b2.at - b1.at) },
         same: inScene !== null && inScene.pixels === 0,
       };
     } finally {
@@ -21576,7 +21802,9 @@ class App {
       } while (this.fxAgain || this.settings.effects !== !!this.postfx);
     } finally {
       this.fxBusy = false;
-      this.notice.set(null);
+      // Every volumetrics setting also passes through here (it is an effects setting); the master's own warm may have its
+      // notice up meanwhile, which is not this switch's to take down.
+      this.notice.set(this.volWarming ? VOL_WARM_NOTICE : null);
       this.lastPrograms = this.renderer.info.programs?.length ?? 0;
     }
   }

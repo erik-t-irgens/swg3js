@@ -6,8 +6,8 @@
 //
 // The master and the volume's own rows are the effects registry's (`FX_KNOBS`, `group: 'volumetrics'`), taken from
 // there so a row and its setting cannot drift apart and the Effects section leaves them out. A row shows only from
-// the wave that builds what it moves: the later waves' rows (the ground, smoke and fog, water and lava, the grass)
-// are not in this build at all, so no switch here does nothing.
+// the wave that builds what it moves: the later waves' rows (smoke and fog, water and lava, the grass) are not in
+// this build at all, so no switch here does nothing.
 import { FX_KNOBS, type FxKnobDef } from '../core/fxRegistry.ts';
 import type { Settings } from '../core/settings.ts';
 import { VOL_PRESET_LABELS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_RANGES, presetOf } from '../world/volumetrics/volSettings.ts';
@@ -62,10 +62,22 @@ export const VOLUMETRICS: readonly { title: string; knobs: readonly Knob[] }[] =
     ],
   },
   {
+    title: 'The ground',
+    knobs: [
+      { key: 'volSand', label: 'Drifting sand', kind: 'toggle', requires: ['volumetrics'], hint: 'Where a strong jet or a gale blows over sand, snow, ash or dirt, the ground\'s own pattern drifts with it, holds a moment, and heals back over a few seconds; rock, paving and grass barely move. On the ground the client draws its own way (every converted world); a world drawn the older way or a real-elevation one keeps its ground as it is.' },
+      { key: 'volSandDetail', label: 'Drifting sand detail', kind: 'select', options: R.volSandDetail.options.map((v) => ({ value: v, label: times(v) })), requires: ['volumetrics', 'volSand'], hint: 'The drift\'s own grid over the air\'s: ×4 is 37.5 cm at the default air detail.' },
+      { key: 'volPrints', label: 'Prints and pits', kind: 'toggle', requires: ['volumetrics'], hint: 'Ruts behind a speeder, a pit scoured under a hovering ship, a crater where a grenade went off, and footprints pressed into sand, snow, mud and dirt (in place of the flat print there), each by how deep the ground gives, healing over half a minute. Rock and paving take none, and a foot there leaves the print it always did.' },
+      { key: 'volPrintDetail', label: 'Prints detail', kind: 'select', options: R.volPrintDetail.options.map((v) => ({ value: v, label: `${v} (${((128 / v) * 100).toFixed(1)} cm)` })), requires: ['volumetrics', 'volPrints'], hint: 'How finely the marks are kept over the 128 m square round you. 4096 is 67 MB on the card.' },
+    ],
+  },
+  {
     title: 'Over the game\'s own art',
     knobs: [
       fxKnob('airVolumeAmount'),
       { key: 'volStormThin', label: 'Storm sheets thinned', kind: 'range', min: R.volStormThin.min, max: R.volStormThin.max, step: R.volStormThin.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics'], hint: 'While the dust draws a dust storm, the game\'s own storm sheets thin by this much: 0 keeps them as they are, 100% stands them down. Half, to begin with, since their streaks show the wind at a scale the air cannot.' },
+      { key: 'volArtSand', label: 'Drift over the ground', kind: 'range', min: R.volArtSand.min, max: R.volArtSand.max, step: R.volArtSand.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volSand'], hint: 'How far the drifting sand moves the ground\'s own pictures. 0 leaves them exactly as they are.' },
+      { key: 'volArtPrints', label: 'Prints over the ground', kind: 'range', min: R.volArtPrints.min, max: R.volArtPrints.max, step: R.volArtPrints.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volPrints'], hint: 'How deep the prints, ruts and pits read: the light they bend and how much darker pressed ground is. 0 leaves the ground exactly as it is, and every footprint is the flat print it always was.' },
+      { key: 'volArtShade', label: 'Dust shades the ground', kind: 'range', min: R.volArtShade.min, max: R.volArtShade.max, step: R.volArtShade.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volLight'], hint: 'How much of the sun the dust between the ground and the sun takes off the ground under it, while the dust is drawn. 0 leaves the ground\'s light exactly as it is.' },
     ],
   },
   {
@@ -74,6 +86,7 @@ export const VOLUMETRICS: readonly { title: string; knobs: readonly Knob[] }[] =
       { key: 'volFromEngines', label: 'Engines', kind: 'toggle', requires: ['volumetrics', 'volAir'], hint: 'Every engine near you blows the air, and a ship or a flyer holding itself up blows down under it.' },
       { key: 'volFromForce', label: 'The Force', kind: 'toggle', requires: ['volumetrics', 'volAir'], hint: 'A push shoves the air along its cone, a pull draws it back, a repulse rings it away.' },
       { key: 'volFromBlasts', label: 'Blasts', kind: 'toggle', requires: ['volumetrics', 'volAir'], hint: 'Grenades, mines, charges, a gun\'s splash and a wreck blow the air outward and lift dust.' },
+      { key: 'volFromFeet', label: 'Feet', kind: 'toggle', requires: ['volumetrics', 'volPrints'], hint: 'A foot on sand, snow, mud or dirt near you presses a print into the ground in place of the flat print laid there before. Off, every footprint is the flat one.' },
     ],
   },
 ];

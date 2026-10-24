@@ -6,9 +6,9 @@
 //
 // Plain type stripping: every module here imports only `.ts`-suffixed modules.
 import assert from 'node:assert/strict';
-import { DEFAULT_SETTINGS, type Settings } from '../../../src/core/settings.ts';
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings } from '../../../src/core/settings.ts';
 import { FX_DEFAULTS, FX_KNOBS, isFxSettingKey } from '../../../src/core/fxRegistry.ts';
-import { isVolKey, newVolTune, presetOf, VOL_APPLY_CLASS, VOL_FX_KEYS, VOL_KEYS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_QUALITY_KEYS, VOL_RANGES, VOL_SCENE_KEYS, VOL_TUNE, volConsoleToSettings, volMemoryMB, volQualityFrom } from '../../../src/world/volumetrics/volSettings.ts';
+import { isVolKey, newVolTune, presetOf, VOL_APPLY_CLASS, VOL_FX_KEYS, VOL_KEYS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_QUALITY_ADDED, VOL_QUALITY_KEYS, VOL_QUALITY_LATER, VOL_QUALITY_STAMP, VOL_QUALITY_WAVE, VOL_RANGES, VOL_SCENE_KEYS, VOL_TUNE, volConsoleToSettings, volFillQuality, volMemoryMB, volQualityFrom } from '../../../src/world/volumetrics/volSettings.ts';
 import { VOL_PAGE_KEYS, VOLUMETRICS } from '../../../src/ui/volPage.ts';
 
 let checks = 0;
@@ -44,16 +44,29 @@ const types: Record<string, string> = {
   volFromEngines: 'boolean',
   volFromForce: 'boolean',
   volFromBlasts: 'boolean',
+  // The second wave's: the ground keeps what passes.
+  volSand: 'boolean',
+  volSandDetail: 'number',
+  volPrints: 'boolean',
+  volPrintDetail: 'number',
+  volArtSand: 'number',
+  volArtPrints: 'number',
+  volArtShade: 'number',
+  volFromFeet: 'boolean',
 };
 for (const k of VOL_KEYS) ok(typeof S[k] === types[k], `"${k}" is in the defaults as a ${types[k]}`);
 ok(Object.keys(types).length === VOL_KEYS.length, 'and those are every key the pass speaks for, no more');
 for (const k of VOL_FX_KEYS) ok(isFxSettingKey(k) && (FX_DEFAULTS as unknown as Record<string, unknown>)[k] === S[k], `"${k}" is the effects registry's, with the same default there`);
 for (const k of VOL_SCENE_KEYS) ok(!isFxSettingKey(k), `"${k}" is a scene key the chain never reads`);
 ok(VOL_KEYS.every((k) => isVolKey(k)) && !isVolKey('effects') && !isVolKey('bloom'), 'isVolKey answers the pass\'s keys and nothing else');
-for (const k of VOL_KEYS) ok(['A', 'C', 'T', 'U'].includes(VOL_APPLY_CLASS[k as keyof typeof VOL_APPLY_CLASS]), `"${k}" says how it takes effect (${VOL_APPLY_CLASS[k as keyof typeof VOL_APPLY_CLASS]})`);
-ok(VOL_APPLY_CLASS.volumetrics === 'A', 'the master is class A in this wave: on waits for an arrival');
+for (const k of VOL_KEYS) ok(['W', 'C', 'T', 'U', 'M'].includes(VOL_APPLY_CLASS[k as keyof typeof VOL_APPLY_CLASS]), `"${k}" says how it takes effect (${VOL_APPLY_CLASS[k as keyof typeof VOL_APPLY_CLASS]})`);
+ok(VOL_APPLY_CLASS.volumetrics === 'W', 'the master is class W from the second wave: on in play, its programs built off the frame behind a notice');
+ok(VOL_APPLY_CLASS.volSand === 'M' && VOL_APPLY_CLASS.volPrints === 'M', 'the sand and the prints are class M: the ground changes material, both already compiled');
+ok(VOL_APPLY_CLASS.volSandDetail === 'T' && VOL_APPLY_CLASS.volPrintDetail === 'T', 'their details are class T: a target made again');
+ok(VOL_APPLY_CLASS.volArtSand === 'U' && VOL_APPLY_CLASS.volArtPrints === 'U' && VOL_APPLY_CLASS.volArtShade === 'U' && VOL_APPLY_CLASS.volFromFeet === 'C', 'the art dials are uniforms and the feet a switch the frame reads');
+ok(S.volSand === true && S.volPrints === true && S.volFromFeet === true && S.volArtSand === 1 && S.volArtPrints === 1 && S.volArtShade === 1, 'the ground\'s switches start on and its art dials at one: nothing shows while the master is off');
 // No later wave's key is in this build at all, shown or hidden.
-for (const later of ['volAirLayers', 'volSmoke', 'volFog', 'volSmokeDetail', 'volSand', 'volSandDetail', 'volPrints', 'volPrintDetail', 'volCurrent', 'volLiquidDetail', 'volLava', 'volGrass', 'volArtSand', 'volArtPrints', 'volArtShade', 'volArtWater', 'volArtLava', 'volArtGrass', 'volFromFeet', 'volFromPeers']) {
+for (const later of ['volAirLayers', 'volSmoke', 'volFog', 'volSmokeDetail', 'volCurrent', 'volLiquidDetail', 'volLava', 'volGrass', 'volArtWater', 'volArtLava', 'volArtGrass', 'volFromPeers']) {
   ok(!(later in S), `"${later}" (a later wave's) is not in this build`);
 }
 
@@ -83,7 +96,40 @@ for (const k of VOL_QUALITY_KEYS) {
 }
 // A preset writes quality and nothing else: no switch, no art dial.
 for (const name of VOL_PRESET_NAMES) for (const k of Object.keys(VOL_PRESETS[name])) ok((VOL_QUALITY_KEYS as readonly string[]).includes(k), `${name} writes "${k}", a quality key`);
-ok(!(VOL_QUALITY_KEYS as readonly string[]).some((k) => ['volumetrics', 'airVolume', 'volAir', 'volDust', 'volKickUp', 'volLight', 'airVolumeAmount', 'volStormThin', 'volFromEngines', 'volFromForce', 'volFromBlasts'].includes(k)), 'no switch and no art dial is a quality key');
+ok(!(VOL_QUALITY_KEYS as readonly string[]).some((k) => ['volumetrics', 'airVolume', 'volAir', 'volDust', 'volKickUp', 'volLight', 'airVolumeAmount', 'volStormThin', 'volFromEngines', 'volFromForce', 'volFromBlasts', 'volSand', 'volPrints', 'volArtSand', 'volArtPrints', 'volArtShade', 'volFromFeet'].includes(k)), 'no switch and no art dial is a quality key');
+
+// --- a file saved before a wave added a quality key ---
+{
+  const earlier = VOL_QUALITY_KEYS.filter((k) => !VOL_QUALITY_LATER.includes(k));
+  ok(VOL_QUALITY_LATER.every((k) => (VOL_QUALITY_KEYS as readonly string[]).includes(k) && (VOL_QUALITY_ADDED[k] ?? 0) > 1 && (VOL_QUALITY_ADDED[k] ?? 0) <= VOL_QUALITY_WAVE), 'every later quality key is a quality key, of a wave after the first and no later than this build\'s');
+  for (const name of VOL_PRESET_NAMES) {
+    // The first wave's file: only what differed from the defaults, no stamp, none of the later keys.
+    const saved: Record<string, unknown> = {};
+    for (const k of earlier) if (VOL_PRESETS[name][k] !== (S as Record<string, unknown>)[k]) saved[k] = VOL_PRESETS[name][k];
+    const merged = { ...DEFAULT_SETTINGS, ...saved } as Settings;
+    volFillQuality(saved, merged);
+    ok(presetOf(merged) === name, `a ${name} saved in the first wave still reads ${name}: the later keys take its values`);
+  }
+  {
+    // This build's file: Ultra with the sand moved to High's own 4, which saving leaves out as the default.
+    const s = { ...DEFAULT_SETTINGS, ...VOL_PRESETS.ultra, volSandDetail: 4 } as Settings;
+    const saved: Record<string, unknown> = { [VOL_QUALITY_STAMP]: VOL_QUALITY_WAVE };
+    for (const [k, v] of Object.entries(s)) if (v !== (S as Record<string, unknown>)[k]) saved[k] = v;
+    ok(!('volSandDetail' in saved), 'a sand detail at the default is left out of the file');
+    const merged = { ...DEFAULT_SETTINGS, ...saved } as Settings;
+    ok(volFillQuality(saved, merged) === 0 && merged.volSandDetail === 4 && presetOf(merged) === 'custom', 'and the stamp keeps it at the default on load: Custom, not filled back to Ultra\'s');
+  }
+  {
+    const saved: Record<string, unknown> = { volAirDetail: 64, volAirSolve: 33 };
+    const merged = { ...DEFAULT_SETTINGS, ...saved } as Settings;
+    ok(volFillQuality(saved, merged) === 0 && merged.volSandDetail === S.volSandDetail, 'a first wave\'s Custom fills nothing');
+    const low: Record<string, unknown> = { volSandDetail: 6 };
+    for (const k of earlier) if (VOL_PRESETS.low[k] !== (S as Record<string, unknown>)[k]) low[k] = VOL_PRESETS.low[k];
+    const m2 = { ...DEFAULT_SETTINGS, ...low } as Settings;
+    volFillQuality(low, m2);
+    ok(m2.volSandDetail === 6 && m2.volPrintDetail === VOL_PRESETS.low.volPrintDetail, 'a later key the file did write is kept, the one it did not is filled');
+  }
+}
 
 // --- the kept record ---
 {
@@ -92,9 +138,11 @@ ok(!(VOL_QUALITY_KEYS as readonly string[]).some((k) => ['volumetrics', 'airVolu
   ok(back === out, 'volQualityFrom writes into the record it is handed and answers it');
   ok(out.on === false && out.air && out.dust && out.kickUp && out.light && out.volume, 'the defaults write the master off and every switch under it on');
   ok(out.airDetail === 128 && out.solve === 20 && out.rate === 60 && out.dustDetail === 4 && out.lightDetail === 2 && out.lightSteps === 26 && out.volumeSteps === 16 && out.volumeResolution === 0.5, 'and High\'s numbers');
-  const odd = { ...DEFAULT_SETTINGS, volAirDetail: 100, volDustDetail: 5, volAirSolve: 999, volLightSteps: -4, airVolumeAmount: Number.NaN } as Settings;
+  ok(out.sand && out.prints && out.fromFeet && out.sandDetail === 4 && out.printDetail === 2048 && out.artSand === 1 && out.artPrints === 1 && out.artShade === 1, 'and the ground\'s: the sand and the prints on, High\'s details, the art dials at one');
+  const odd = { ...DEFAULT_SETTINGS, volAirDetail: 100, volDustDetail: 5, volAirSolve: 999, volLightSteps: -4, airVolumeAmount: Number.NaN, volSandDetail: 5, volPrintDetail: 999, volArtPrints: 9, volArtShade: -1 } as Settings;
   volQualityFrom(odd, out);
   ok(out.airDetail === 128 && out.dustDetail === 4 && out.solve === 40 && out.lightSteps === 12 && out.volumeAmount === 1, 'a hand-edited file is held to the page: a detail not on the list takes High\'s, a range its ends, a NaN its default');
+  ok(out.sandDetail === 4 && out.printDetail === 2048 && out.artPrints === 1.5 && out.artShade === 0, 'the ground\'s details and art dials the same way');
   volQualityFrom(DEFAULT_SETTINGS, out, { volAirSolve: 60, volumetrics: true });
   ok(out.solve === 60 && out.on === true, 'a console value past the page\'s end is in force through `over`');
   const fields = Object.keys(newVolTune());
@@ -127,6 +175,29 @@ const fxRows = FX_KNOBS.filter((k) => k.group === 'volumetrics').map((k) => k.ke
 ok(fxRows.length === VOL_FX_KEYS.length && VOL_FX_KEYS.every((k) => fxRows.includes(k)), 'the effects registry\'s volumetrics rows are exactly the pass\'s FX keys');
 ok(VOLUMETRICS[0].knobs[1].kind === 'preset' && typeof VOLUMETRICS[0].knobs[1].presetOf === 'function', 'the preset is a knob of its own kind beside the master');
 for (const g of VOLUMETRICS) for (const k of g.knobs) if (k.key !== 'volumetrics') ok(!!k.requires?.includes('volumetrics'), `"${k.key}" greys under the master`);
+
+// --- through the settings' own storage ---
+{
+  const bag = new Map<string, string>();
+  (globalThis as unknown as { localStorage: unknown }).localStorage = {
+    getItem: (k: string) => (bag.has(k) ? bag.get(k)! : null),
+    setItem: (k: string, v: string) => void bag.set(k, v),
+    removeItem: (k: string) => void bag.delete(k),
+  };
+  const ultraSand = { ...DEFAULT_SETTINGS, ...VOL_PRESETS.ultra, volSandDetail: 4 } as Settings;
+  saveSettings(ultraSand);
+  const written = JSON.parse(bag.get('swg.settings') ?? '{}') as Record<string, unknown>;
+  ok(written[VOL_QUALITY_STAMP] === VOL_QUALITY_WAVE && !('volSandDetail' in written), 'a save carries the wave it was written in, and leaves a default out');
+  const back = loadSettings();
+  ok(back.volSandDetail === 4 && presetOf(back) === 'custom', 'and loads back as it was saved: Ultra with High\'s sand detail is Custom');
+  const firstWave: Record<string, unknown> = {};
+  for (const k of VOL_QUALITY_KEYS) if (!VOL_QUALITY_LATER.includes(k) && VOL_PRESETS.low[k] !== (S as Record<string, unknown>)[k]) firstWave[k] = VOL_PRESETS.low[k];
+  bag.set('swg.settings', JSON.stringify(firstWave));
+  ok(presetOf(loadSettings()) === 'low', 'a Low saved by the first wave, with no stamp, loads as Low');
+  bag.clear();
+  ok(presetOf(loadSettings()) === 'high', 'and nothing saved is High');
+  delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
+}
 
 // --- memory ---
 ok(volMemoryMB(newVolTune(), 2560, 1440) > 10 && volMemoryMB(newVolTune(), 2560, 1440) < 120, `High at 2560x1440 is about ${volMemoryMB(newVolTune(), 2560, 1440)} MB (the design's ~55)`);

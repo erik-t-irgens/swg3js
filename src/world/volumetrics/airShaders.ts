@@ -128,6 +128,7 @@ uniform vec4 uVortP;
 #define uStrength uVortP.x
 #define uDt uVortP.y
 #define uCap uVortP.z
+#define uEdge uVortP.w
 ${CURL}
 void main() {
   int t = tileOf(vUv);
@@ -143,6 +144,10 @@ void main() {
   f /= length(f) + 1e-5;
   f *= uStrength * c;
   f.y *= -1.0;
+  // None across the window's edge band: the curl there reads the held inflow outside against the air inside, and
+  // confined it pumped jets along the edges that grew to the cap and filled the window (the second wave measured it).
+  float edgeD = min(min(l.x, 1.0 - l.x), min(l.y, 1.0 - l.y));
+  f *= smoothstep(0.0, uEdge, edgeD);
   vec2 v = velAt(uVel, l, t) + f * uDt;
   gl_FragColor = finite4(vec4(clamp(v, vec2(-uCap), vec2(uCap)), 0.0, 1.0));
 }
@@ -456,6 +461,151 @@ uniform vec4 uValue;
 void main() { gl_FragColor = uValue; }
 `;
 
+/**
+ * The ground's carried offsets, every frame (the second wave, the design's §2.7): how far the pattern shown at each
+ * texel has been carried from where it rests, in metres (RG), and its age in ticks of the 10 Hz clock (B). Where the
+ * air near the ground passes the lift threshold the pattern is carried at `lift` of its speed times the ground's own
+ * "moves" -- `o_new(x) = o(x − u·dt) − u·dt` [demo `land.html:544-564`, restated for offsets] -- and its age starts
+ * again; elsewhere the age grows by the ticks this frame crossed (never by `dt`, which a half float truncates) and,
+ * past the hold, the offset heals toward nought, which truncation only helps. Still air copies a texel exactly. Out
+ * of the window the ground lies as it rests; inside a solid, nothing moves.
+ */
+export const OFFSETS_FRAGMENT = /* glsl */ `
+precision highp float;
+varying vec2 vUv;
+uniform vec4 uWindow;
+uniform vec2 uWind;
+uniform float uWindShare;
+uniform sampler2D uOffsets;
+uniform sampler2D uVel;
+uniform sampler2D uResponse;
+uniform sampler2D uColour;
+uniform sampler2D uObstacles;
+uniform float uObstacleOver;
+uniform vec2 uVelShift;
+uniform vec2 uSandShift;
+// The frame's dt, the lift threshold and its span, and the share of the air's speed the pattern moves at; then the
+// ticks this frame crossed, where the age starts again, the hold and the heal in seconds; then the age's cap: vectors,
+// so a frame writes no number into a uniform object.
+uniform vec4 uSandP;
+uniform vec4 uSandQ;
+uniform vec4 uSandR;
+#define uDt uSandP.x
+#define uLift uSandP.y
+#define uLiftSpan uSandP.z
+#define uLiftShare uSandP.w
+#define uTicks uSandQ.x
+#define uAgeReset uSandQ.y
+#define uHold uSandQ.z
+#define uHeal uSandQ.w
+#define uAgeCap uSandR.x
+vec4 finite4(vec4 v) { return (any(isnan(v)) || any(isinf(v))) ? vec4(0.0, 0.0, uAgeCap, 0.0) : v; }
+vec2 velAt(vec2 l) {
+  vec2 q = l + uVelShift;
+  if (q.x < 0.0 || q.y < 0.0 || q.x > 1.0 || q.y > 1.0) return uWind * uWindShare;
+  return texture(uVel, q).xy;
+}
+vec4 offsetsAt(vec2 q) {
+  if (q.x < 0.0 || q.y < 0.0 || q.x > 1.0 || q.y > 1.0) return vec4(0.0, 0.0, uAgeCap, 0.0);
+  return texture(uOffsets, q);
+}
+void main() {
+  vec2 l = vUv;
+  if (texture(uObstacles, l).r > uObstacleOver) { gl_FragColor = vec4(0.0, 0.0, uAgeCap, 0.0); return; }
+  vec2 v = velAt(l);
+  float sp = length(v);
+  // On land only, by the ground's own "moves" (rock nought, sand one).
+  float land = abs(texture(uColour, l).a - 0.3333) < 0.1 ? 1.0 : 0.0;
+  vec4 resp = texture(uResponse, l);
+  float lift = smoothstep(uLift, uLift + uLiftSpan, sp) * resp.r * land;
+  vec2 u = v * (lift * uLiftShare);
+  vec4 s = offsetsAt(l - u * uDt / uWindow.z + uSandShift);
+  vec2 o = s.xy - u * uDt;
+  float age = lift > uAgeReset ? 0.0 : min(s.z + uTicks, uAgeCap);
+  float k = smoothstep(uHold, uHold + 1.0, age * 0.1) * (3.0 / max(uHeal, 0.1)) * max(resp.g, 0.02);
+  if (k > 0.0) o *= exp(-k * uDt);
+  gl_FragColor = finite4(vec4(o, age, 0.0));
+}
+`;
+
+/**
+ * A dent stamp: an instanced quad in the toroidal field's own uv (the CPU worked out each stamp's place and any copy
+ * across a wrap line), turned along its way, reaching 1.4 of its half extents so a bowl's lip fits [demo
+ * `land.html:677-684`]. Placed in clip space, never through a camera.
+ */
+export const DENT_STAMP_VERTEX = /* glsl */ `
+attribute vec4 aStampA;
+attribute vec4 aStampB;
+varying vec2 vLocal;
+varying vec2 vDepthKind;
+void main() {
+  vec2 lc = position.xy * 1.4;
+  vec2 dir = aStampB.xy;
+  vec2 nrm = vec2(-dir.y, dir.x);
+  vec2 w = aStampA.xy + dir * lc.x * aStampA.z + nrm * lc.y * aStampA.w;
+  vLocal = lc;
+  vDepthKind = aStampB.zw;
+  gl_Position = vec4(w * 2.0 - 1.0, 0.0, 1.0);
+}
+`;
+
+/**
+ * Its depth, added to what is there: a bowl with a raised lip (anything pushed into sand leaves one), or a footprint's
+ * toe and heel along its way [demo `land.html:686-700`], times the depth (metres, the ground's give already in it).
+ */
+export const DENT_STAMP_FRAGMENT = /* glsl */ `
+precision highp float;
+varying vec2 vLocal;
+varying vec2 vDepthKind;
+void main() {
+  float d;
+  if (vDepthKind.y < 0.5) {
+    float r = length(vLocal);
+    float bowl = 1.0 - smoothstep(0.0, 1.0, r);
+    float lipR = (r - 1.08) / 0.16;
+    float lip = exp(-lipR * lipR) * 0.30;
+    d = bowl * bowl - lip;
+  } else {
+    vec2 q = vLocal;
+    float toe = 1.0 - length(vec2((q.x - 0.42) / 0.58, q.y / 0.86));
+    float heel = 1.0 - length(vec2((q.x + 0.55) / 0.42, q.y / 0.70));
+    d = smoothstep(0.0, 0.55, clamp(max(toe, heel), 0.0, 1.0));
+  }
+  float v = d * vDepthKind.x;
+  gl_FragColor = vec4((isnan(v) || isinf(v)) ? 0.0 : v, 0.0, 0.0, 0.0);
+}
+`;
+
+/**
+ * The dents' fade on a tick of the 10 Hz clock, blended as a multiply of what is there: each texel by
+ * `exp(-k · max(heals, floor))`, its heals read off the air's response raster at the texel's own world place (the
+ * field is toroidal: texel i stands for world texel `k0 + ((i - k0) mod n)`), a cell not known yet or a liquid healing
+ * at one [demo `land.html:720-729`, moved to a fixed tick so it is frame-rate independent].
+ */
+export const DENT_FADE_FRAGMENT = /* glsl */ `
+precision highp float;
+varying vec2 vUv;
+uniform vec4 uWindow;
+uniform sampler2D uResponse;
+uniform sampler2D uColour;
+// The square's first texel (x, z), its texels across and its metres a texel; the rate this draw and the floor on heals.
+uniform vec4 uDentSquare;
+uniform vec2 uFadeP;
+void main() {
+  vec2 i = floor(vUv * uDentSquare.z);
+  vec2 k = uDentSquare.xy + mod(i - uDentSquare.xy, uDentSquare.z);
+  vec2 w = (k + 0.5) * uDentSquare.w;
+  vec2 l = (w - uWindow.xy) / uWindow.z;
+  float heals = 1.0;
+  if (l.x >= 0.0 && l.y >= 0.0 && l.x <= 1.0 && l.y <= 1.0) {
+    float land = abs(texture(uColour, l).a - 0.3333) < 0.1 ? 1.0 : 0.0;
+    if (land > 0.5) heals = texture(uResponse, l).g;
+  }
+  float f = exp(-uFadeP.x * max(heals, uFadeP.y));
+  gl_FragColor = vec4((isnan(f) || isinf(f)) ? 1.0 : f);
+}
+`;
+
 /** Every fragment shader of the air's own passes by name, for the scanner and the self test. */
 export const AIR_FRAGMENTS: Readonly<Record<string, string>> = {
   splat: SPLAT_FRAGMENT,
@@ -468,4 +618,7 @@ export const AIR_FRAGMENTS: Readonly<Record<string, string>> = {
   light: LIGHT_FRAGMENT,
   obstacle: OBSTACLE_FRAGMENT,
   fill: FILL_FRAGMENT,
+  offsets: OFFSETS_FRAGMENT,
+  dentStamp: DENT_STAMP_FRAGMENT,
+  dentFade: DENT_FADE_FRAGMENT,
 };

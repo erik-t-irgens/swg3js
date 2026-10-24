@@ -125,8 +125,19 @@ function nameClass(f: FamilyFacts): GroundClass | null {
   return best ?? ruleClass(f.name);
 }
 
+/**
+ * Overrides set live from the console (`__debug.air({ family: { 'kashyyyk_main:18': 'rock' } })`), keyed as the
+ * committed ones are and asked before them; a texture upload when the world's tables are made again, never a program.
+ * Empty unless somebody set one this session.
+ */
+export const LIVE_GROUND_OVERRIDES = new Map<string, GroundClass>();
+
 /** A family's class on a world (`world` the pack id), and what decided it. */
 export function classifyFamily(world: string, f: FamilyFacts): FamilyClass {
+  if (LIVE_GROUND_OVERRIDES.size) {
+    const live = LIVE_GROUND_OVERRIDES.get(`${world}:${f.id}`) ?? LIVE_GROUND_OVERRIDES.get(f.name);
+    if (live) return { cls: live, by: 'override', why: 'set from the console this session' };
+  }
   const scoped = GROUND_OVERRIDES[`${world}:${f.id}`];
   if (scoped) return { cls: scoped[0], by: 'override', why: scoped[1] };
   const named = Object.prototype.hasOwnProperty.call(GROUND_OVERRIDES, f.name) ? GROUND_OVERRIDES[f.name] : undefined;
@@ -165,4 +176,26 @@ export function fillResponseTable(world: string, families: Iterable<FamilyFacts>
     out[f.id * 4 + 3] = Math.round(r.dust * 255);
   }
   return fallback;
+}
+
+/**
+ * The per-layer response lookup for a world's layers: four bytes a layer (moves, heals, gives, dust), each layer
+ * its family's, from the response table by family id (`fillResponseTable`'s layout) and the tile set's layer list
+ * (family id to its children's layers). Into `out` (four bytes a layer, `layers` of them); a layer no family names is
+ * nought (it does not move). Answers how many layers were filed.
+ */
+export function fillLayerResponse(childLayers: ReadonlyMap<number, readonly number[]>, response: Uint8Array, out: Uint8Array): number {
+  out.fill(0);
+  const layers = out.length >> 2;
+  const families = response.length >> 2;
+  let n = 0;
+  for (const [family, list] of childLayers) {
+    if (!(family >= 0 && family < families)) continue;
+    for (const layer of list) {
+      if (!(layer >= 0 && layer < layers)) continue;
+      for (let c = 0; c < 4; c++) out[layer * 4 + c] = response[family * 4 + c];
+      n++;
+    }
+  }
+  return n;
 }

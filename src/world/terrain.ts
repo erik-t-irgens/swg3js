@@ -35,13 +35,24 @@ const reachOf = (a: Anchor) => a.r * 2.5 + 40;
 export const CHUNK_RES = 32;
 
 /**
- * INVENTED: how many chunks' shader-family grids are kept, for reading what the ground is made of
- * under a foot. A grid is 35 x 35 int32s, about 4.9 KB, so this is under a megabyte; the view holds
- * a hundred or so chunks at most, and the oldest go first. They are the same arrays the ground
- * meshes were built from, held rather than copied. Live through
- * `__debug.footsteps({ familyChunks: n })`, which reports how many are held beside it.
+ * INVENTED: how many chunks' shader-family grids are kept at the least, for reading what the ground is
+ * made of under a foot (and for the moving air's rasters). A grid is 35 x 35 int32s, about 4.9 KB. They
+ * are the same arrays the ground meshes were built from, held rather than copied; a chunk's goes when the
+ * chunk does (`forgetChunkFamilies`), and past the cap the oldest go first. Never fewer than can stand at
+ * once (`familyKeepFor`, which the world writes as `familyKeep`): the stream keeps a chunk until it is
+ * past the view radius and one more, 225 chunks at the default six, so a cap of 192 alone -- with the
+ * grids of chunks long gone still holding places in it -- let the oldest grids of chunks still standing
+ * go, the ones nearest where the player had been longest, and the feet and the air read that ground as
+ * unknown until the chunk was built again. Live through `__debug.footsteps({ familyChunks: n })`, which
+ * reports how many are held beside it.
  */
 export const FAMILY_TUNE = { familyChunks: 192 };
+
+/** How many chunks can stand at once at a view radius: the stream drops one only past the radius and one more. */
+export function familyKeepFor(viewRadius: number): number {
+  const r = Math.max(0, Math.floor(viewRadius)) + 1;
+  return (2 * r + 1) * (2 * r + 1);
+}
 
 /**
  * A chunk's two indices as one small integer, which a map takes as a key with nothing made (the far grids' and the
@@ -348,7 +359,7 @@ export class Terrain {
       // Filed a second time by number, so the moving air's strips can ask on a frame with no key built (`familyIdAt`).
       const n = familyChunkNumber(cx, cz);
       if (n >= 0) this.familyByNumber.set(n, grid);
-      while (this.chunkFamilies.size > FAMILY_TUNE.familyChunks) {
+      while (this.chunkFamilies.size > Math.max(FAMILY_TUNE.familyChunks, this.familyKeep)) {
         const oldest = this.chunkFamilies.keys().next().value as string | undefined;
         if (oldest === undefined) break;
         const gone = this.chunkFamilies.get(oldest);
@@ -363,6 +374,8 @@ export class Terrain {
 
   /** The chunks' family grids, newest last; a planet's own, so a travel takes them with the terrain. */
   private readonly chunkFamilies = new Map<string, FamilyGrid>();
+  /** How many grids are kept at the least: every chunk that can stand at once (`familyKeepFor`), written by the world. */
+  familyKeep = 0;
 
   /**
    * The shader family the ground is painted with at a point, 0 for none and null where no chunk has
@@ -376,6 +389,22 @@ export class Terrain {
 
   /** The chunks' family grids by number (`familyChunkNumber`), beside the string-keyed map that owns them. */
   private readonly familyByNumber = new Map<number, FamilyGrid>();
+
+  /**
+   * A chunk taken down (the world's `disposeChunk`): its family grid goes with it, so the grids held are the chunks that
+   * stand. Kept past their chunks, they filled the cap and the oldest grids of chunks still standing were let go first:
+   * circling a place within the view's reach, the chunks round it never went and were never built again, and their
+   * ground read as unknown to the feet and the moving air for as long as they stood (measured: a whole window of the
+   * air's raster unknown on Tatooine's dunes after two laps of teleports 350 m round it).
+   */
+  forgetChunkFamilies(cx: number, cz: number): void {
+    const key = `${cx},${cz}`;
+    const g = this.chunkFamilies.get(key);
+    if (!g) return;
+    this.chunkFamilies.delete(key);
+    const n = familyChunkNumber(cx, cz);
+    if (n >= 0 && this.familyByNumber.get(n) === g) this.familyByNumber.delete(n);
+  }
 
   /**
    * `familyAt` with no key built: the family at a point, 0 for none painted and -1 where no chunk is built (null's

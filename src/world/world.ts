@@ -48,7 +48,7 @@ import { GROUND_DRAW_TUNE, groundChunkAt, groundChunkOrigin, type CornerName, ty
 import { AssetPack, lowerLevels, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
-import { CHUNK_SIZE, chunkHeightfield, FAR_TILE_DROP, Terrain } from './terrain';
+import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { TERRAIN_GROUND_TUNE } from '../swg/terrain/generator.ts';
 import type { GroundRules } from './demShader';
@@ -130,6 +130,7 @@ import { AirField, newAirFrameInput, type AirWorld } from './volumetrics/airFiel
 import type { GroundSampler } from './volumetrics/airRaster.ts';
 import type { SolidBoxSource } from './volumetrics/airObstacles.ts';
 import { fillResponseTable, type FamilyFacts } from './volumetrics/groundResponse.ts';
+import { groundAirMaterial, groundMaterialFor, groundWearsAir, makeAirGroundUniforms, swapGroundMaterial, type GroundChoice } from './volumetrics/airGround.ts';
 import { sheddingCount, stormSheetFactor } from './volumetrics/airMath.ts';
 import { AIR_TUNE } from './volumetrics/airTune.ts';
 import { VOL_TUNE } from './volumetrics/volSettings.ts';
@@ -684,6 +685,29 @@ export class World {
    * builds another. Made the first time a world's ground is drawn that way.
    */
   private groundTilesMat: THREE.MeshStandardMaterial | null = null;
+  /**
+   * The tile ground's air variant (the volumetrics' second wave, `airGround.ts`): the session's too, never disposed, made
+   * the first time a field exists to read, and worn in place of the plain one while the chooser says (`groundWearsAir`).
+   */
+  private groundAirMat: THREE.MeshStandardMaterial | null = null;
+  /**
+   * The variant's uniforms, the session's like the variant itself: the objects its program reads, which the field the
+   * world has taken writes into (`takeAir`, `AirField.bindGround`). A field's own would bind the variant for good to the
+   * first field ever made, and that one is thrown away whenever the in-play warm is (a travel, the master off).
+   */
+  private readonly airGroundU = makeAirGroundUniforms();
+  /** Which of the two the ground's meshes wear now: the chooser's last answer, so a change walks them once (`syncGroundMaterial`). */
+  private groundWorn: THREE.Material | null = null;
+  /** What the chooser is asked, kept and refilled (`groundChoice`). */
+  private readonly groundAsk: GroundChoice = { on: false, tiles: false, sand: false, prints: false, field: false, softOff: false };
+  /**
+   * The frame report's soft off for the ground (`volGroundArt`'s `off`): the choosers back on their plain materials and
+   * nothing else moved -- the field, its targets and both grounds' programs kept -- so an A/B compares pictures and
+   * rebuilds nothing.
+   */
+  airGroundSoftOff = false;
+  /** One mesh each of the plain tile ground and its air variant, compiled by every loading screen's sweep while the master is on; never in the scene. */
+  private groundStandIns: THREE.Mesh[] = [];
   /** Texture anisotropy the renderer supports, set once by main. */
   static anisotropy = 4;
   /** Detailed ground chunks each way around the player, and coarse far tiles; the settings move them. */
@@ -3169,10 +3193,35 @@ export class World {
    */
   ensureAir(): AirField | null {
     if (this.air || !VOL_TUNE.on || !this.renderer) return this.air;
-    this.air = new AirField(this.renderer, VOL_TUNE, this.airWorld);
-    this.air.forces.onGrains = this.throwBlastGrains;
-    this.airTablesFor = { textures: undefined, swg: undefined };
+    this.takeAir(this.makeAir());
     return this.air;
+  }
+
+  /**
+   * A moving air made and not yet given to the world (class W, the master turned on in play: its programs are warmed
+   * off the frame first, `App.reconcileVolumetrics`), with the ground's air variant made for it. Nothing drawn.
+   */
+  makeAir(): AirField {
+    const air = new AirField(this.renderer!, VOL_TUNE, this.airWorld);
+    air.forces.onGrains = this.throwBlastGrains;
+    this.groundAirFor();
+    return air;
+  }
+
+  /**
+   * The world takes a field (an arrival's, or the in-play warm's once every program it needs has linked), and with it
+   * the ground variant's uniforms: from now on this field, and no other, writes what the variant reads.
+   */
+  takeAir(air: AirField): void {
+    if (this.air && this.air !== air) this.air.bindGround(null);
+    this.air = air;
+    air.bindGround(this.airGroundU);
+    this.airTablesFor = { textures: undefined, swg: undefined };
+  }
+
+  /** Make the family tables again at the next frame (a family overridden from the console: a texture upload, no program). */
+  refreshAirTables(): void {
+    this.airTablesFor = { textures: undefined, swg: undefined };
   }
 
   /**
@@ -3209,6 +3258,11 @@ export class World {
     air.raster.familyResponse = response;
     air.raster.familyColour = colour;
     air.raster.clear();
+    // The same responses by picture layer, for the ground's variant: each layer moves by its own family's response (a
+    // texture upload; no program). A world drawn the older way, or a real-elevation one, keeps every layer still.
+    const tiles = textures?.tiles;
+    const depth = (textures?.texture.image as { depth?: number } | undefined)?.depth ?? 1;
+    air.setLayerResponse(tiles && this.terrain?.swg ? tiles.childLayers : new Map(), response, tiles ? depth : 1);
   }
 
   /**
@@ -3242,9 +3296,14 @@ export class World {
     inp.sunY = tmpV.y;
     inp.sunZ = tmpV.z;
     inp.time = this.simTime;
-    // Something reads the air (§2.4): the volume, on the chain and wanted, which is Effects on with its switch on. With
-    // nothing reading it the rasters are kept (the grains read them) and nothing is stepped.
-    inp.reading = reading;
+    // The ground's meshes on the chooser's material (the second wave), and whether that is the air's variant, which is
+    // what the field keeps its offsets and dents for.
+    this.syncGroundMaterial();
+    inp.ground = this.groundWearsAirNow;
+    // Something reads the air (§2.4): the volume, on the chain and wanted, which is Effects on with its switch on, or
+    // the ground wearing the air's variant. With nothing reading it the rasters are kept (the grains read them) and
+    // nothing is stepped.
+    inp.reading = reading || inp.ground;
     inp.where = this.airSoftOff ? 'held off by the frame report' : !this.planet ? 'no world' : this.planet.space ? 'in space there is no air' : this.groundTextures?.empty ? 'the ground here is never drawn' : viewInBuilding ? 'the camera is in a building' : this.inside ? 'the player is in a building' : null;
     if (inp.where === null) this.airTables(air);
     const hull = this.weatherHull;
@@ -3336,6 +3395,9 @@ export class World {
 
   private disposeChunk(c: Chunk): void {
     this.floraField?.remove(c.key);
+    // Its ground's family grid with it: the terrain then holds the grids of the chunks that stand, never an old one's
+    // in place of a standing chunk's (`Terrain.forgetChunkFamilies`).
+    this.terrain.forgetChunkFamilies(c.cx, c.cz);
     // Its grass first, taken down and freed by the field that keeps its record.
     this.grass?.chunkGone(c.cx, c.cz);
     this.chunkRoot.remove(c.group);
@@ -3484,9 +3546,113 @@ export class World {
     if (!this.groundTextures || !(this.terrain.swg || this.terrain.demShader)) return this.terrainMat;
     // The client's own tiled ground needs the tiler, which needs real SWG terrain under it.
     if (this.groundTextures.tiles && this.terrain.swg) {
-      return (this.groundTilesMat ??= groundTilesMaterial(groundTileUniforms(), this.csm));
+      const plain = (this.groundTilesMat ??= groundTilesMaterial(groundTileUniforms(), this.csm));
+      // The volumetrics' chooser (the second wave): the air variant while the master, the field and a ground switch say
+      // so; with the master off, always the plain one, today's material with today's key.
+      return groundMaterialFor(this.groundChoice(), plain, this.groundAirMat);
     }
     return this.groundTextures.groundMaterial(this.csm);
+  }
+
+  /** What the ground chooser is asked now, into the kept record. */
+  private groundChoice(): GroundChoice {
+    const c = this.groundAsk;
+    const air = this.air;
+    c.on = VOL_TUNE.on;
+    c.tiles = !!(this.groundTextures?.tiles && this.terrain.swg);
+    c.sand = VOL_TUNE.sand;
+    c.prints = VOL_TUNE.prints && air !== null && air.floatBlend;
+    c.field = air !== null && air.refused === null;
+    c.softOff = this.airGroundSoftOff;
+    return c;
+  }
+
+  /**
+   * The ground's air variant (made the first time a field is, the session's from then on), over the session's own record
+   * of its uniforms (`airGroundU`), never a field's: the cascades set up first and the material joined to the cascades'
+   * set, as the plain one is when a world's ground is loaded.
+   */
+  groundAirFor(): THREE.MeshStandardMaterial {
+    if (!this.groundAirMat) {
+      this.groundAirMat = groundAirMaterial(groundTileUniforms(), this.airGroundU, this.csm);
+      this.csmMaterials.add(this.groundAirMat);
+    }
+    return this.groundAirMat;
+  }
+
+  /**
+   * One stand-in mesh each of the plain tile ground and its air variant (a triangle, receiving shadows as a chunk does),
+   * for a sweep or the in-play warm to compile whichever the scene is not wearing (`compileEverything`, class W): so a
+   * ground switch, the master turned on, or the soft off changes which compiled material a chunk wears and builds
+   * nothing. Empty where the ground is not the tile program or there is no field.
+   */
+  groundStandInsFor(air: AirField | null): THREE.Mesh[] {
+    if (!air || air.refused !== null || !this.groundTextures?.tiles || !this.terrain.swg) return [];
+    const plain = (this.groundTilesMat ??= groundTilesMaterial(groundTileUniforms(), this.csm));
+    this.csmMaterials.add(plain);
+    const variant = this.groundAirFor();
+    if (!this.groundStandIns.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 2, 0, 0, 0, 0, 2], 3));
+      g.setAttribute('normal', new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 0], 3));
+      g.setAttribute('aGroundLayers', new THREE.BufferAttribute(new Uint8Array(12), 4));
+      g.setAttribute('aGroundBlend', new THREE.BufferAttribute(new Uint8Array(12), 4));
+      g.setAttribute('aGroundTint', new THREE.BufferAttribute(new Uint8Array(9).fill(255), 3, true));
+      for (const m of [plain, variant]) {
+        const mesh = new THREE.Mesh(g, m);
+        mesh.name = 'ground stand-in';
+        mesh.receiveShadow = true;
+        mesh.frustumCulled = false;
+        this.groundStandIns.push(mesh);
+      }
+    }
+    this.groundStandIns[0].material = plain;
+    this.groundStandIns[1].material = variant;
+    return this.groundStandIns;
+  }
+
+  /**
+   * The ground's meshes on the chooser's material (class M): when its answer moves -- a ground switch, the master, the
+   * field taken, the soft off -- every chunk and far tile wearing the other ground is handed this one, both already
+   * compiled; a steady frame asks the chooser and walks nothing. On the plain ground of before (a version-3 pack) and a
+   * real-elevation world nothing is ever swapped.
+   */
+  private syncGroundMaterial(): void {
+    const plain = this.groundTilesMat;
+    const variant = this.groundAirMat;
+    if (!plain || !variant || !this.groundTextures?.tiles || !this.terrain.swg) {
+      this.groundWorn = plain;
+      return;
+    }
+    const want = groundWearsAir(this.groundChoice()) ? variant : plain;
+    if (want === this.groundWorn) return;
+    const other = want === variant ? plain : variant;
+    // Every chunk's meshes and every far tile (`swapGroundMaterial`, which the node test runs on stand-ins); the lists
+    // are made only here, when the answer moves.
+    const groups: THREE.Object3D[] = [];
+    for (const c of this.chunks.values()) groups.push(c.group);
+    swapGroundMaterial(groups, this.farTiles.values(), other, want);
+    this.groundWorn = want;
+    this.chunkMaterial = want;
+  }
+
+  /** Whether the ground's meshes wear the air variant now (what the field's ground marks are kept for). */
+  get groundWearsAirNow(): boolean {
+    return this.groundWorn !== null && this.groundWorn === this.groundAirMat;
+  }
+
+  /** Whether this world's ground can take the air at all: the tile program on a converted world's own terrain. */
+  get groundTakesAir(): boolean {
+    return !!(this.groundTextures?.tiles && this.terrain?.swg);
+  }
+
+  /**
+   * The ground put on the chooser's material now rather than at the next frame, and the field's ground uniforms written
+   * again: the frame report's compare draws at once with nothing stepped (`volGroundArt`).
+   */
+  syncGround(): void {
+    this.syncGroundMaterial();
+    this.air?.groundUniformsNow();
   }
 
   private async loadFlora(pack: AssetPack, swg: SwgTerrain): Promise<void> {
@@ -6124,6 +6290,14 @@ export class World {
     if (this.grassStand) {
       this.adoptMaterials(this.grassStand);
       objects.push(this.grassStand);
+    }
+    // The tile ground and its air variant, one stand-in each, with the volumetrics master on (the second wave): so the
+    // one the scene is not wearing is built too, and a ground switch or the master's soft off swaps compiled materials.
+    if (this.air && VOL_TUNE.on) {
+      for (const o of this.groundStandInsFor(this.air)) {
+        this.adoptMaterials(o);
+        objects.push(o);
+      }
     }
     // Every shape a person's or a rack weapon's material can take (the fourth wave, `personKeys.ts`): behind a screen
     // `warmPersonShapes` built them before anybody was stood and each costs a key lookup here, and a sweep in play for the
@@ -9303,6 +9477,9 @@ export class World {
     this.streamPcz = pcz;
     if (pcx === this.lastCx && pcz === this.lastCz && budget !== Infinity) return;
 
+    // The terrain keeps a family grid for every chunk that can stand at this radius (the feet and the moving air read
+    // them), never fewer: past the view radius and one more is where a chunk goes.
+    this.terrain.familyKeep = familyKeepFor(this.viewRadius);
     const wanted: { cx: number; cz: number; d: number }[] = [];
     const R = this.viewRadius;
     for (let dz = -R; dz <= R; dz++) {

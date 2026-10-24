@@ -12,12 +12,15 @@
 //   3. the programs' text: the ground's tile program and its key, the version-3 ground's bump injection, the water for
 //      every variant (lit and both mask twins, waves and flat, hooked and plain), the ripples' module, and the lava with
 //      and without its crust, byte for byte what the old tree makes;
+//   4. the choosers (the second wave's): with the master off the ground's chooser hands every chunk today's tile
+//      material by identity whatever else it is told, the sweep compiles no ground stand-in, and every footstep is
+//      today's decal;
 //   6. nothing runs: the field with the master off answers and the renderer is never touched, and the dust pool's
 //      motes (the dust or the master off) are the old pool's to the bit, the same spawns and steps, seeded alike;
-//   7. no resize, of any of the field's detail dials, disposes a material.
+//   7. no resize, of any of the field's detail dials (the sand's and the prints' with them), disposes a material.
 //
-// (Item 4, the choosers, is the second wave's: this wave swaps no material. The installed passes and every program the
-// game links are the browser's, §4.2.) It fails loudly when git cannot answer.
+// (The installed passes, every program the game links and the zero-dial picture are the browser's, §4.2.) It fails
+// loudly when git cannot answer.
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { readFileSync, rmSync } from 'node:fs';
@@ -308,6 +311,51 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
     }
   }
   ok(resized === 60 && disposed === 0, `across every air, dust and light detail (${resized} resizes) no material was disposed: a program is never let go to be built again on a live frame`);
+  // The second wave's details: the carried offsets' and the dents' targets made again at every size, the same.
+  tune.sand = true;
+  tune.prints = true;
+  let sized = 0;
+  const dents = (field as unknown as { dents: { target: { width: number } | null } | null }).dents;
+  for (const sand of [2, 3, 4, 6]) {
+    for (const print of [1024, 2048, 4096]) {
+      tune.sandDetail = sand;
+      tune.printDetail = print;
+      ensure();
+      if (dents?.target?.width === print) sized++;
+    }
+  }
+  ok(sized === 12 && disposed === 0, `across every sand and print detail (${sized} sizes, the dents' target at each) no material was disposed`);
+  tune.on = false;
+  field.releaseTargets();
+}
+
+// --- 4. the choosers (the second wave's): with the master off the ground is today's material, and no footprint is the air's ---
+{
+  const { groundMaterialFor, groundWearsAir } = await import(pathToFileURL(join(NEW, 'world', 'volumetrics', 'airGround.ts')).href);
+  const plain = { name: 'plain' };
+  const variant = { name: 'variant' };
+  let every = true;
+  let combos = 0;
+  for (let bits = 0; bits < 32; bits++) {
+    const c = { on: false, tiles: !!(bits & 1), sand: !!(bits & 2), prints: !!(bits & 4), field: !!(bits & 8), softOff: !!(bits & 16) };
+    combos++;
+    if (groundMaterialFor(c, plain, variant) !== plain || groundWearsAir(c) !== false || groundMaterialFor(c, plain, null) !== plain) every = false;
+  }
+  ok(every, `with the master off the chooser hands every chunk today's material, by identity, over all ${combos} combinations of the rest`);
+  const world = readFileSync(join(NEW, 'world', 'world.ts'), 'utf8').replace(/\r\n/g, '\n');
+  ok(/if \(this\.air && VOL_TUNE\.on\) \{\n\s+for \(const o of this\.groundStandInsFor\(this\.air\)\)/.test(world) && /groundStandInsFor\(air: AirField \| null\): THREE\.Mesh\[\] \{\n\s+if \(!air \|\| air\.refused !== null/.test(world), 'and the sweep compiles no ground stand-in: with the master off at an arrival there is no field, and with none there are none');
+  const { AirField, newAirFrameInput } = await import(pathToFileURL(join(NEW, 'world', 'volumetrics', 'airField.ts')).href);
+  const { newVolTune } = await import(pathToFileURL(join(NEW, 'world', 'volumetrics', 'volSettings.ts')).href);
+  const gl = { getExtension: () => ({}) };
+  const stub = new Proxy({}, { get: (_t, k) => (k === 'getContext' ? () => gl : () => undefined) });
+  const field = new AirField(stub, newVolTune(), { ground: { sample: () => false }, boxes: null, hulls: [] });
+  const inp = newAirFrameInput();
+  inp.dt = 1 / 60;
+  inp.reading = true;
+  inp.ground = true;
+  field.update(inp);
+  const step = { key: 1, kind: 'player', label: 'you', surface: 'sand', from: 'terrain', x: 0, y: 0, z: 0, heading: 0, scale: 1, inside: false, deck: null, ground: null };
+  ok(field.dentStep(step) === false && field.feetCounts.off === 1 && field.feetCounts.decal === 1 && field.feetCounts.dents === 0, "and every footstep is today's decal: the air answers no to it");
 }
 
 const ms = Math.round(performance.now() - t0);

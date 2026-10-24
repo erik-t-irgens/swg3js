@@ -15,10 +15,12 @@ import v8 from 'node:v8';
 import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks';
 import * as THREE from 'three';
 import { AirField, newAirFrameInput } from '../../../src/world/volumetrics/airField.ts';
+import { makeAirGroundUniforms } from '../../../src/world/volumetrics/airGround.ts';
 import type { AirHull } from '../../../src/world/volumetrics/airEngines.ts';
 import type { GroundSample, GroundSampler } from '../../../src/world/volumetrics/airRaster.ts';
 import { newVolTune } from '../../../src/world/volumetrics/volSettings.ts';
 import { Dust, type GrainGround } from '../../../src/vehicles/dust.ts';
+import type { FootStep } from '../../../src/audio/footsteps.ts';
 
 const gc = (globalThis as { gc?: (o?: { type: 'minor' }) => void }).gc;
 if (!gc) {
@@ -97,6 +99,9 @@ const tune = newVolTune();
 tune.on = true;
 const field = new AirField(renderer, tune, { ground, boxes: null, hulls });
 field.forces.onGrains = null;
+// Bound to a record of the ground variant's uniforms, as the world binds the field it takes: every frame then copies the
+// field's own values into it (`copyAirGround`), which is measured with the rest.
+field.bindGround(makeAirGroundUniforms());
 
 // The dust pool, made with a stand-in page for its sprite, its grains falling onto the field's own raster.
 const g = globalThis as unknown as { document?: unknown };
@@ -112,6 +117,9 @@ const DT = 1 / 144;
 const inp = newAirFrameInput();
 inp.dt = DT;
 inp.reading = true;
+// The ground wears the air's variant (the second wave): the carried offsets drawn every frame, the dents' square placed,
+// the engines' pits and ruts gathered and laid on the 10 Hz tick, and a footstep pressed every so often.
+inp.ground = true;
 inp.windHeading = 0.6;
 inp.windSpeed = 7;
 inp.storm = 0.4;
@@ -119,6 +127,8 @@ inp.sunX = 0.4;
 inp.sunY = 0.6;
 inp.sunZ = 0.69;
 const state = { frame: 0, camX: 0.25, camZ: -0.5, moved: 0, movingCalls: 0 };
+// A foot landing, the feet's own kept record as `BodySounds` fills it: on the sand by the camera, its height the ground's.
+const step: FootStep = { key: 7, kind: 'mobile', label: 'a walker', surface: 'sand', from: 'terrain', x: 2, y: 0, z: 1, heading: 0.3, scale: 1, inside: false, deck: null, ground: null };
 
 function steady(): void {
   const f = state.frame++;
@@ -128,6 +138,13 @@ function steady(): void {
   // A blast and a push queued every frame (each a one-shot owed the next step), so their code runs as the frame's does.
   field.blast(5, 0, 5, 7, 14, 0);
   field.force(0, 0, 0, 1, 0, 1, 1, 16);
+  // A footstep twice a second, walking: today's prints' rules, a dent pressed.
+  if ((f & 63) === 0) {
+    step.x = state.camX + ((f >> 6) & 7) * 0.5;
+    step.z = state.camZ + 1;
+    step.y = ((step.x | 0) >> 4) & 3;
+    field.dentStep(step);
+  }
   field.update(inp);
   // The world's half of the frame: the grains' ground handed over, grains thrown, the pool stepped.
   const w = field.win;
@@ -208,6 +225,8 @@ if (process.argv[2] === 'part') {
   const call =
     name === 'steady'
       ? steady
+      : name === 'moving'
+      ? moving
       : name === 'update'
       ? () => field.update(inp)
       : name === 'dust'
@@ -272,9 +291,14 @@ if (process.argv[2] === 'off') {
 const s = await measure(steady, FRAMES);
 const stepped = field.stepping;
 const engines = field.forces.engineCount;
+// The engines' pits and ruts held as continuous sources at the steady frame's end (the moving frames leave them behind).
+const sources = field.dents?.slots ?? 0;
 const MOVING = 50_000;
 const resetsBefore = field.win.resets;
 const m = await measure(moving, MOVING);
 // The share of the moving frames whose window really moved a cell, and that none of them jumped.
 const movedShare = state.moved / Math.max(1, state.movingCalls);
-console.log(JSON.stringify({ frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));
+// The ground's marks really ran: what the dents counted (prints pressed, stamps laid, ticks faded) and the feet.
+const dentCounts = { oneShots: 0, laid: 0, dropped: 0, slots: 0, noGive: 0, offSquare: 0, ticks: 0, cleared: 0 };
+field.dents?.takeCounts(dentCounts);
+console.log(JSON.stringify({ frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet: { ...field.feetCounts } }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));

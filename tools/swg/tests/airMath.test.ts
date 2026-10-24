@@ -6,7 +6,10 @@
 // second the same at 60, 144 and 240 frames; four four-engine hulls and a grenade fit with the grenade whole and the
 // drops counted), driven here by hand on the forces alone, and through the field's own frame in `airFrame.test.ts`,
 // which is what holds the field to them; the inflow; the dust's settling after 20 s the same at 60, 144 and 240 frames; the swirl per metre; the
-// lift threshold; the slope gate; the wind the weather builds for the water.
+// lift threshold; the slope gate; the wind the weather builds for the water; and the second wave's drifting sand, its
+// offsets stepped in float64 against research2's half-float truncation (a heal from above and from below both reach
+// nought, the age counted on the 10 Hz tick reaching the hold within a tick at 30, 60, 144 and 240 frames a second, and a
+// steady drift far out stalling in half floats, which is why the field is float32).
 //
 // Plain type stripping; synthetic numbers only.
 import assert from 'node:assert/strict';
@@ -37,11 +40,18 @@ import {
   sheddingCount,
   slabWeight,
   slopeGate,
+  sandHealRate,
+  sandLift,
+  sandStep,
   splatRadius,
   spreadBite,
   stormSheetFactor,
   swirlAt,
+  TICK,
+  tickClockIn,
   windVector,
+  type SandTexel,
+  type TickClock,
 } from '../../../src/world/volumetrics/airMath.ts';
 import { AIR_TUNE } from '../../../src/world/volumetrics/airTune.ts';
 import { AirForces, SPLAT_BATCH } from '../../../src/world/volumetrics/airForces.ts';
@@ -354,5 +364,95 @@ ok(sheddingCount(9, 164, 0.0556, 1) === 9 && sheddingCount(8, 164, 0.05, 0.6) ==
 ok(sheddingCount(8, 164, 0.05, 31 / 255) === 0 && sheddingCount(9, 164, 0.0556, 31 / 255) === 0 && sheddingCount(11, 164, 0.0667, 26 / 255) === 0 && sheddingCount(9, 164, 0.0556, 0) === 0 && sheddingCount(9, 164, 0.0556, Number.NaN) === 0, 'and none on rock, paving, mud or water, at a twentieth of a second or the longer intervals 144 and 30 frames a second make');
 ok(blastGrains(7) === AIR_TUNE.grains.blast && blastGrains(14) === 2 * AIR_TUNE.grains.blast && blastGrains(Number.NaN) === 0, 'a blast throws 300 grains at a thermal detonator\'s radius, by radius over 7');
 ok(stormSheetFactor(false, 1, 0.5) === 1 && stormSheetFactor(true, 0, 0.5) === 1 && stormSheetFactor(true, 0.5, 0) === 1 && stormSheetFactor(true, 0.5, 0.5) === 0.5, 'the storm sheets: 1 unless the volume drew the storm, then 1 - thin');
+
+// --- the drifting sand's offsets (the second wave): float64 against the field's float32 store, half floats the control ---
+{
+  // The offsets live in RGBA32F (the field makes them so, `airMarks.test.ts` reads the type): the hold and the heal are
+  // run here through that store, `Math.fround`. Half floats (research2 §5.1: a half-float store on this machine
+  // truncates toward nought) are kept only as the control the drift below stalls in, which is why the store is float32.
+  // The age is counted in ticks of the 10 Hz clock, whole numbers either store holds exactly up to the cap.
+  const f32 = new Float32Array(1);
+  const u32 = new Uint32Array(f32.buffer);
+  const half = (x: number): number => {
+    f32[0] = x;
+    const b = u32[0];
+    const sign = b & 0x80000000 ? -1 : 1;
+    const exp = ((b >>> 23) & 0xff) - 127 + 15;
+    if (exp >= 31) return sign * 65504;
+    if (exp <= 0) {
+      if (exp < -10) return sign * 0;
+      const m = ((b & 0x7fffff) | 0x800000) >>> (14 - exp);
+      return sign * m * 2 ** -24;
+    }
+    return sign * (1 + ((b & 0x7fffff) >>> 13) / 1024) * 2 ** (exp - 15);
+  };
+  const G = AIR_TUNE.ground;
+  const run = (fps: number, start: number, store: (x: number) => number, seconds: number) => {
+    const clock: TickClock = { acc: 0, dt: 1 / fps, ticks: 0 };
+    const s: SandTexel = { ox: start, oz: -start / 2, age: 0 };
+    let held = -1;
+    let gone = -1;
+    for (let i = 0; i < seconds * fps; i++) {
+      tickClockIn(clock);
+      // Still air: nothing lifts it, so only the age and the heal move it.
+      sandStep(s, 0, 0, 0, clock.dt, clock.ticks, 1);
+      s.ox = store(s.ox);
+      s.oz = store(s.oz);
+      s.age = store(s.age);
+      const t = (i + 1) / fps;
+      if (held < 0 && s.age * TICK >= G.hold) held = t;
+      if (gone < 0 && s.ox === 0 && s.oz === 0) gone = t;
+    }
+    return { s, held, gone };
+  };
+  for (const fps of [30, 60, 144, 240]) {
+    const f = run(fps, 0.5, (x) => x, 60);
+    const s = run(fps, 0.5, Math.fround, 60);
+    ok(Math.abs(f.held - G.hold) <= TICK + 1e-9 && Math.abs(s.held - G.hold) <= TICK + 1e-9, `at ${fps} frames a second the age reaches the ${G.hold} s hold at ${f.held.toFixed(3)} s in float64 and ${s.held.toFixed(3)} s in the field's float32: within one tick`);
+  }
+  // A heal from above and one from below both come down to nothing, and the same way in the float32 store as in float64.
+  for (const start of [0.5, -0.5]) {
+    const f = run(144, start, (x) => x, 60);
+    const s = run(144, start, Math.fround, 60);
+    ok(Math.abs(f.s.ox) < 1e-6 && Math.abs(s.s.ox) < 1e-6 && Math.abs(s.s.oz) < 1e-6 && Math.abs(s.s.ox - f.s.ox) <= Math.abs(f.s.ox) * 1e-3 + 1e-30, `an offset of ${start} m held still heals from ${start > 0 ? 'above' : 'below'} to under 1e-6 in 60 s, in float64 (${f.s.ox.toExponential(2)}) and in the field's float32 (${s.s.ox.toExponential(2)}) alike`);
+  }
+  // Moved patch, then held: the heal waits out the hold whatever the store.
+  {
+    const s: SandTexel = { ox: 0.5, oz: 0, age: 0 };
+    sandStep(s, 2, 0, 1, 1 / 60, 0, 1);
+    ok(near(s.ox, 0.5 - 2 / 60) && s.age === 0, 'lifted, the patch is carried against the air by u·dt and its age starts again');
+    const k0 = sandHealRate(0, G.hold, G.heal, 1);
+    const k1 = sandHealRate(Math.round((G.hold + 1) / TICK), G.hold, G.heal, 1);
+    ok(k0 === 0 && near(k1, 3 / G.heal) && near(sandHealRate(1000, G.hold, G.heal, 0), (3 / G.heal) * 0.02), 'it does not heal until it has held, then at three time constants over the heal, by the ground\'s heals (never under 0.02)');
+  }
+  // Why the offsets are float32 where the design had half floats: in a steady drift an offset grows toward the window's
+  // own size (the upwind edge's pattern smeared downwind; 141 m measured on Tatooine's dunes), where a half float's step
+  // is 6 to 12 cm and a frame's carry a few millimetres. Carried 10 s at 3 m/s and the demo's share from 100 m out:
+  {
+    const carry = (fps: number, store: (x: number) => number): number => {
+      let o = -100;
+      const dt = 1 / fps;
+      for (let i = 0; i < fps * 10; i++) o = store(o - 3 * G.lift * dt);
+      return o;
+    };
+    const want = -100 - 3 * G.lift * 10;
+    const f32 = [60, 144, 240].map((fps) => carry(fps, Math.fround));
+    const halves = [60, 144, 240].map((fps) => carry(fps, half));
+    ok(f32.every((v) => Math.abs(v - want) < 0.01) && halves.every((v) => Math.abs(v - want) > 1), `a drift carried 10 s from 100 m out comes to ${want.toFixed(2)} m in float32 at 60, 144 and 240 frames a second, and stored as half floats to ${halves.map((v) => v.toFixed(2)).join(', ')} m: it stalls (a frame's carry under the store's step, truncated away)`);
+  }
+  ok(sandLift(5, 6, 7, 1) === 0 && near(sandLift(20, 6, 7, 1), 1) && near(sandLift(20, 6, 7, 0.5), 0.5) && sandLift(20, 6, 7, 0) === 0, 'the lift: nothing under the threshold, all past its span, by the ground\'s moves (rock nought)');
+  const shader = readFileSync(join(here, '..', '..', '..', 'src', 'world', 'volumetrics', 'airShaders.ts'), 'utf8');
+  ok(shader.includes('vec4 s = offsetsAt(l - u * uDt / uWindow.z + uSandShift);') && shader.includes('float age = lift > uAgeReset ? 0.0 : min(s.z + uTicks, uAgeCap);') && shader.includes('float k = smoothstep(uHold, uHold + 1.0, age * 0.1) * (3.0 / max(uHeal, 0.1)) * max(resp.g, 0.02);') && shader.includes('vec2 o = s.xy - u * uDt;') && shader.includes('if (k > 0.0) o *= exp(-k * uDt);'), "and the offsets' shader is sandStep line for line: read upstream of the texel by u·dt (and the window's pending scroll), carried, aged on the tick, healed past the hold");
+  const c: TickClock = { acc: 0, dt: 1 / 7, ticks: 0 };
+  let ticks = 0;
+  for (let i = 0; i < 700; i++) {
+    tickClockIn(c);
+    ticks += c.ticks;
+  }
+  ok(ticks === 1000 || ticks === 999, `the 10 Hz clock counts ${ticks} ticks over 100 s of frames a seventh of a second long`);
+  c.dt = 30;
+  tickClockIn(c);
+  ok(c.ticks === 10, 'and a hitch of 30 s banks only ten');
+}
 
 console.log(`\n${checks} checks passed`);

@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import { chunkBeforeNeeds, glslVariant, redeclared, reservedWords, sizesInText, unbalanced, undefinedCalls, uniformNames, uniformWrites } from './glslScan.ts';
-import { AIR_FRAGMENTS, AIR_VERTEX, OBSTACLE_VERTEX } from '../../../src/world/volumetrics/airShaders.ts';
+import { AIR_FRAGMENTS, AIR_VERTEX, DENT_STAMP_VERTEX, OBSTACLE_VERTEX } from '../../../src/world/volumetrics/airShaders.ts';
 import { AIR_VOLUME_FRAGMENTS, AirVolumePass } from '../../../src/core/fx/airVolume.ts';
 import { AirField, newAirFrameInput } from '../../../src/world/volumetrics/airField.ts';
 import { newVolTune, VOL_RANGES } from '../../../src/world/volumetrics/volSettings.ts';
@@ -44,9 +44,9 @@ ok(sizesInText('vec2 t = 1.0 / 128.0;', [128]).length === 1 && sizesInText('unif
 
 // --- every shader string of the pass ---
 const sizes: number[] = [];
-for (const n of VOL_RANGES.volAirDetail.options) for (const f of [1, ...VOL_RANGES.volDustDetail.options, ...VOL_RANGES.volLightDetail.options]) sizes.push(n * f);
-sizes.push(AIR_TUNE.window.size);
-const all: Record<string, string> = { ...Object.fromEntries(Object.entries(AIR_FRAGMENTS).map(([k, v]) => [`air.${k}`, v])), ...Object.fromEntries(Object.entries(AIR_VOLUME_FRAGMENTS).map(([k, v]) => [`airVolume.${k}`, v])), 'air.vertex': AIR_VERTEX, 'air.obstacleVertex': OBSTACLE_VERTEX };
+for (const n of VOL_RANGES.volAirDetail.options) for (const f of [1, ...VOL_RANGES.volDustDetail.options, ...VOL_RANGES.volLightDetail.options, ...VOL_RANGES.volSandDetail.options]) sizes.push(n * f);
+sizes.push(AIR_TUNE.window.size, AIR_TUNE.prints.square, ...VOL_RANGES.volPrintDetail.options);
+const all: Record<string, string> = { ...Object.fromEntries(Object.entries(AIR_FRAGMENTS).map(([k, v]) => [`air.${k}`, v])), ...Object.fromEntries(Object.entries(AIR_VOLUME_FRAGMENTS).map(([k, v]) => [`airVolume.${k}`, v])), 'air.vertex': AIR_VERTEX, 'air.obstacleVertex': OBSTACLE_VERTEX, 'air.dentStampVertex': DENT_STAMP_VERTEX };
 for (const [name, text] of Object.entries(all)) {
   const reserved = reservedWords(text);
   ok(reserved.length === 0, `${name}: no reserved word as a name${reserved.length ? `: ${reserved.join(', ')}` : ''}`);
@@ -63,9 +63,12 @@ for (const [name, text] of Object.entries(all)) {
   ok(!text.includes('`'), `${name}: no backtick inside the template`);
 }
 for (const name of ['march', 'resolve', 'composite']) ok(/if \(any\(isnan\(o\)\) \|\| any\(isinf\(o\)\)\)/.test(AIR_VOLUME_FRAGMENTS[name]), `airVolume.${name} zeroes a NaN or an Inf before it writes`);
-for (const name of ['splat', 'vort', 'div', 'jacobi', 'grad', 'advect', 'dust', 'light']) ok(AIR_FRAGMENTS[name].includes('finite4('), `air.${name} writes through finite4, so a NaN never leaves it`);
+for (const name of ['splat', 'vort', 'div', 'jacobi', 'grad', 'advect', 'dust', 'light', 'offsets']) ok(AIR_FRAGMENTS[name].includes('finite4('), `air.${name} writes through finite4, so a NaN never leaves it`);
 ok(!/\bfxHalfTaps\s*\(|import[^;]*\bfxHalfTaps\b|FX_HALF_TAPS/.test(source('core/fx/airVolume.ts')),"the volume's upsample is its own size's, never fxHalfTaps (the clouds' bug)");
 ok(!/sampler2DShadow/.test(AIR_VERTEX) && !/textureLod\(tShadow|texture\(tShadow/.test(AIR_VERTEX), 'no shadow compare in a vertex stage');
+// The swirl is faded out across the window's edge band (the second wave measured it pumping jets along the edges, where
+// the curl reads the held inflow against the air inside, up to the cap and over the whole window in still air).
+ok(AIR_FRAGMENTS.vort.includes('#define uEdge uVortP.w') && AIR_FRAGMENTS.vort.includes('f *= smoothstep(0.0, uEdge, edgeD);') && source('world/volumetrics/airField.ts').includes('vp.w = AIR_TUNE.window.edge;'), "the swirl fades to nothing across the window's edge band, the band written every step");
 ok(AIR_VOLUME_FRAGMENTS.march.includes('depth < uFar * 0.999'), "a far-plane depth texel is sky in the march, never a surface (the clouds' bug)");
 
 // --- the materials, built in node ---
@@ -76,10 +79,18 @@ const field = new AirField(stub, newVolTune(), { ground: { sample: () => false }
 const pass = new AirVolumePass(() => field);
 const fieldMats = field.materials();
 const volumeMats = pass.materials().map((m) => m.material as THREE.ShaderMaterial);
-ok(fieldMats.length === 10 && volumeMats.length === 3, 'the field lists its ten materials and the volume its three (the warm-up\'s lists)');
+ok(fieldMats.length === 13 && volumeMats.length === 3, "the field lists its thirteen materials (the first wave's ten, the carried offsets and the dents' stamp and fade) and the volume its three (the warm-up's lists)");
 for (const m of [...fieldMats, ...volumeMats]) {
   if (m.name === 'air.obstacles') {
     ok(m.blending === THREE.CustomBlending && m.blendEquation === THREE.MaxEquation && m.toneMapped === false && m.depthTest === false && m.depthWrite === false, 'air.obstacles: MAX-blended on purpose, no tone curve, no depth');
+    continue;
+  }
+  if (m.name === 'air.dentStamp') {
+    ok(m.blending === THREE.CustomBlending && m.blendEquation === THREE.AddEquation && m.blendSrc === THREE.OneFactor && m.blendDst === THREE.OneFactor && m.toneMapped === false && m.depthTest === false && m.depthWrite === false, 'air.dentStamp: added into the dents on purpose (each stamp its depth), no tone curve, no depth');
+    continue;
+  }
+  if (m.name === 'air.dentFade') {
+    ok(m.blending === THREE.CustomBlending && m.blendEquation === THREE.AddEquation && m.blendSrc === THREE.ZeroFactor && m.blendDst === THREE.SrcColorFactor && m.toneMapped === false && m.depthTest === false && m.depthWrite === false, 'air.dentFade: multiplies the dents down on purpose (dst times its own rate), no tone curve, no depth');
     continue;
   }
   ok(m.blending === THREE.NoBlending && m.toneMapped === false && m.depthTest === false && m.depthWrite === false, `${m.name}: NoBlending, no tone curve, no depth test or write`);

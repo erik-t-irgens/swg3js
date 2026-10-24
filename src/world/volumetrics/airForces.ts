@@ -21,9 +21,10 @@
 //
 // Pure: no three, nothing of the page; the node tests drive the very class the game does.
 import { AIR_TUNE } from './airTune.ts';
-import { blastGrains, slabWeight } from './airMath.ts';
+import { blastGrains, DENT_KIND, slabWeight } from './airMath.ts';
 import type { FluidWindow } from './fluidWindow.ts';
 import { MEDIUM_BYTE, type AirRaster } from './airRaster.ts';
+import type { AirDents } from './airDents.ts';
 
 /** One-shot velocity shoves a step can be owed: [x, z, radius, height over the ground, dvx, dvz, reach]. */
 const ONE_MAX = 256;
@@ -66,6 +67,12 @@ export class AirForces {
   dust = true;
   /** The grains a blast throws, while the kick-up is on; null for none. */
   onGrains: GrainThrow | null = null;
+  /**
+   * The dents (the second wave): a blast's crater, the console's and the feet's prints, and the scour pits and ruts the
+   * engines gather (`gatherDents`); null while the prints are off, the ground keeps no marks here, or this browser
+   * cannot blend into a float target.
+   */
+  dents: AirDents | null = null;
   /** Where the window stands and the ground under it: set by the field. */
   window: FluidWindow | null = null;
   raster: AirRaster | null = null;
@@ -77,6 +84,8 @@ export class AirForces {
   readonly oneShots = new Float32Array(ONE_MAX * ONE_W);
   oneCount = 0;
   readonly engines = new Float32Array(ENGINE_MAX * ENG_W);
+  /** Each engine's source (its hull's group id times 64 and its own index; -1 for the console's): what a rut's or a pit's depth is gathered under between ticks. */
+  readonly engineKeys = new Float64Array(ENGINE_MAX);
   engineCount = 0;
   readonly dustOne = new Float32Array(DUST_MAX * DUST_W);
   dustCount = 0;
@@ -89,8 +98,8 @@ export class AirForces {
   readonly dustBatch = new Float32Array(DUST_BATCH * 4);
   dustBatchCount = 0;
 
-  /** An engine handed over: x, y, z, the exhaust's way dx, dy, dz, its exit m/s, the hull's vx, vz (`engineArgs`). */
-  readonly arg = new Float64Array(9);
+  /** An engine handed over: x, y, z, the exhaust's way dx, dy, dz, its exit m/s, the hull's vx, vz, and its source key (`engineArgs`). */
+  readonly arg = new Float64Array(10);
   /** The step's `dt` for `buildStepBatch` and the frame's for `buildDustBatch`, set by the field before each. */
   stepDt = 1 / 60;
   frameDt = 1 / 60;
@@ -177,7 +186,7 @@ export class AirForces {
    * in XZ. Continuous: written into this frame's table, applied once a step scaled by the step. The console's and the
    * tests' way in; the frame's is `arg` and `engineArgs`.
    */
-  engine(x: number, y: number, z: number, dx: number, dy: number, dz: number, exit: number, vx: number, vz: number): void {
+  engine(x: number, y: number, z: number, dx: number, dy: number, dz: number, exit: number, vx: number, vz: number, key = -1): void {
     const a = this.arg;
     a[0] = x;
     a[1] = y;
@@ -188,6 +197,7 @@ export class AirForces {
     a[6] = exit;
     a[7] = vx;
     a[8] = vz;
+    a[9] = key;
     this.engineArgs();
   }
 
@@ -230,6 +240,7 @@ export class AirForces {
     e[k + 6] = exit;
     e[k + 7] = a[7];
     e[k + 8] = a[8];
+    this.engineKeys[this.engineCount] = Number.isFinite(a[9]) ? a[9] : -1;
     const cx = a[0] - this.camX;
     const cz = a[2] - this.camZ;
     const d = Math.sqrt(cx * cx + cz * cz);
@@ -403,6 +414,111 @@ export class AirForces {
     q[0] = x;
     q[1] = z;
     if (grains && this.dust && this.mediumHere() === MEDIUM_BYTE.land) grains(x, y, z, blastGrains(radius), 8 + 16 * Math.min(2, scale));
+    // A crater, by the blast's own radius: the demo's 3.4 m bowl 1.15 m deep at a thermal detonator's 7 [ours scaling],
+    // taken by how far the ground there gives (none in rock) -- and only by a blast near enough the ground to press it:
+    // full at the ground, shallower the higher it went off, none past `craterReach` of its radius over the ground under
+    // it, nor where that ground is not read yet. A ship destroyed in flight, or a splash on a wall metres up, digs
+    // nothing in the sand below.
+    const P = AIR_TUNE.prints;
+    const across = P.craterAcross * radius;
+    const dents = this.dents;
+    q[0] = x;
+    q[1] = z;
+    if (dents && across > 0 && this.groundHere()) {
+      const over = y - this.g.h;
+      const reach = P.craterReach * radius;
+      const near = over <= 0 ? 1 : reach > 0 ? 1 - over / reach : 0;
+      if (near > 0) {
+        const o = dents.oq;
+        o[0] = x;
+        o[1] = z;
+        o[2] = across;
+        o[3] = across;
+        o[4] = 1;
+        o[5] = 0;
+        o[6] = P.craterDepth * radius * near;
+        o[7] = DENT_KIND.bowl;
+        dents.oneShotArgs();
+      }
+    }
+  }
+
+  /**
+   * A mark in the ground (the force API's `dent`, §2.10): its middle, its half extents along and across (metres), the
+   * way "along" points (radians from world +x toward +z), its depth (metres, before the ground's give) and its kind
+   * (`DENT_KIND`). One-shot: drawn by this frame's step. Answers whether it was laid -- false off the dent square, on
+   * ground that gives nothing, with the prints off, or with the field off here.
+   */
+  dent(x: number, z: number, along: number, across: number, angle: number, depth: number, kind: number): boolean {
+    const d = this.dents;
+    if (!this.active || !d) return false;
+    if (!(Number.isFinite(angle) && Number.isFinite(kind))) {
+      this.counts.notFinite++;
+      return false;
+    }
+    return d.oneShot(x, z, along, across, Math.cos(angle), Math.sin(angle), depth, kind > 0.5 ? DENT_KIND.foot : DENT_KIND.bowl);
+  }
+
+  /**
+   * Every engine of this frame's table into the dents (the second wave): where its jet meets the ground, a scour pit
+   * (`prints.scour` metres a second at an impact of 1 m/s, its radius the nozzle's plus the jet's widening to the
+   * ground [demo `land.html:1498`]); where a low nozzle's spread bites instead, a rut under it (`prints.rut` a second at
+   * a bite of 1, `prints.bowl` across [demo `land.html:1730`]) -- whichever pushes harder, as `expandEngine` chooses.
+   * The depth is this frame's (`frameDt`, set by the field), gathered per source and laid on the next tick
+   * (`AirDents.gatherArgs`).
+   */
+  gatherDents(): void {
+    const d = this.dents;
+    const dt = this.frameDt;
+    if (!d || !this.active || !this.fromEngines || !(dt > 0)) return;
+    const E = AIR_TUNE.engine;
+    const P = AIR_TUNE.prints;
+    const cap = AIR_TUNE.solver.cap * E.capShare;
+    const e = this.engines;
+    const gq = d.gq;
+    for (let i = 0; i < this.engineCount; i++) {
+      const k = i * ENG_W;
+      const x = e[k];
+      const y = e[k + 1];
+      const z = e[k + 2];
+      const dx = e[k + 3];
+      const dy = e[k + 4];
+      const dz = e[k + 5];
+      const exit = e[k + 6];
+      this.q[0] = x;
+      this.q[1] = z;
+      if (!this.groundHere()) continue;
+      const h = y - this.g.h;
+      // `engineReach`, `engineSpeed`, `nozzleRadius`, `impactSpeed` within its reach, `spreadBite`: as `expandEngine` has them.
+      const reach = E.reachBase + E.reachPerSpeed * exit;
+      const vEff = exit < cap ? exit : cap;
+      const r0 = E.nozzleBase + E.nozzlePerSpeed * exit;
+      const groundT = dy < -0.02 ? h / -dy : Infinity;
+      const imp = groundT < reach * E.impactReach && dy < 0 ? (vEff / (1 + groundT / (0.3 * reach))) * Math.sqrt(-dy) : 0;
+      const vx = e[k + 7];
+      const vz = e[k + 8];
+      const speed = Math.sqrt(vx * vx + vz * vz);
+      let ge = 1 - (h - E.spreadLow) / E.spreadSpan;
+      ge = ge > 0 ? (ge < 1 ? ge : 1) : 0;
+      const bite = ge * (E.spreadBase + speed / E.spreadSpeed);
+      const impPush = imp * E.impactPush;
+      const spreadPush = bite * E.spreadPush;
+      if (impPush < 0.15 && spreadPush < 0.15) continue;
+      gq[0] = this.engineKeys[i];
+      if (impPush >= spreadPush) {
+        gq[1] = x + dx * groundT;
+        gq[2] = z + dz * groundT;
+        gq[3] = r0 + groundT * P.scourWiden + P.scourAdd;
+        gq[4] = P.scour * imp * dt;
+      } else {
+        gq[1] = x;
+        gq[2] = z;
+        gq[3] = P.bowl;
+        gq[4] = P.rut * bite * dt;
+      }
+      gq[5] = DENT_KIND.bowl;
+      d.gatherArgs();
+    }
   }
 
   /**

@@ -4,8 +4,10 @@
 // building; the volume's factory into the chain only with the master on; the arrival's registration only with the master
 // on and the pass missing; the field's materials into the sweep only with the master on; every volumetrics key routed;
 // the Force, the blasts and the wreck at their sites; the grains' gate in `emitDust`, today's lines left as they stood;
-// the storm sheets' factor at the channel's rate; the world letting the field go at an unload. A review once deleted each
-// of a wave's hand-overs with every suite green, which is why they are pinned here.
+// the storm sheets' factor at the channel's rate; the world letting the field go at an unload; and the second wave's: a
+// footstep the air's before it is the decal's, the ground's chooser in the getter every chunk asks, both grounds in the
+// sweep, and the master in play warming through the world's queue and taken only after. A review once deleted each of a
+// wave's hand-overs with every suite green, which is why they are pinned here.
 //
 // Plain type stripping; it reads the commit before the pass out of git for `emitDust` as it stood (and fails loudly
 // when git cannot answer).
@@ -100,5 +102,53 @@ ok(/if \(!air \|\| !this\.camera\) \{\n\s+this\.weather\.stormSheetScale = 1;\n\
 
 // --- the unload ---
 ok(world.includes('this.air?.forgetWorld();') && after(world, 'this.air?.forgetWorld();', 'this.weather.stormSheetScale = 1;', 6), 'an unload lets the field forget the world and puts the sheets back');
+
+// --- the ground keeps what passes (the second wave) ---
+// One owner for a footprint: the feet hand every step to the air first, and lay today's decal only where it says no.
+ok(main.includes('this.feet.onStep = this.stepPrint;') && /private readonly stepPrint = \(step: FootStep\): void => \{\n\s+if \(!this\.world\.air\?\.dentStep\(step\)\) footprints\.stepHook\(step\);\n\s+\};/.test(main), "the feet's steps go to the air's dents first and to today's decal only where the air lays none");
+ok(count(main, 'footprints.stepHook(') === 1 && count(main, '.dentStep(') === 1, 'and nowhere else: a step is one or the other, never both');
+// The ground's chooser, in the one getter every new chunk asks, and today's material whenever it says plain.
+ok(/if \(this\.groundTextures\.tiles && this\.terrain\.swg\) \{\n\s+const plain = \(this\.groundTilesMat \?\?= groundTilesMaterial\(groundTileUniforms\(\), this\.csm\)\);[\s\S]{0,300}return groundMaterialFor\(this\.groundChoice\(\), plain, this\.groundAirMat\);/.test(world), "a new chunk's ground is the chooser's: the plain tile material unless the master, the field and a ground switch say the air's");
+ok(after(world, 'this.syncGroundMaterial();', 'inp.ground = this.groundWearsAirNow;', 2) && after(world, 'inp.ground = this.groundWearsAirNow;', 'inp.reading = reading || inp.ground;', 5), "the frame puts the ground on the chooser's material, tells the field whether its variant is worn, and the worn variant reads the air");
+ok(/if \(this\.air && VOL_TUNE\.on\) \{\n\s+for \(const o of this\.groundStandInsFor\(this\.air\)\) \{/.test(world), "a sweep compiles both grounds' stand-ins with the master on, so a ground switch swaps compiled materials");
+ok(count(world, 'new AirField(') === 1 && /makeAir\(\): AirField \{\n\s+const air = new AirField\(this\.renderer!, VOL_TUNE, this\.airWorld\);/.test(world), 'the field is still made in one place');
+// The variant is the session's and reads the session's record of its uniforms, which only the field the world took
+// writes (a field's own would bind the variant for good to the first field made, which the in-play warm throws away).
+ok(world.includes('private readonly airGroundU = makeAirGroundUniforms();') && world.includes('this.groundAirMat = groundAirMaterial(groundTileUniforms(), this.airGroundU, this.csm);') && count(world, 'groundAirMaterial(') === 1, "the variant is made once, over the world's own record of its uniforms, never a field's");
+ok(/takeAir\(air: AirField\): void \{\n\s+if \(this\.air && this\.air !== air\) this\.air\.bindGround\(null\);\n\s+this\.air = air;\n\s+air\.bindGround\(this\.airGroundU\);/.test(world) && count(world, '.bindGround(') === 2 && count(world, 'this.air = ') === 1, 'the field the world takes is bound to that record, the one before let go, and nothing else binds or sets the field');
+// What the chooser is asked and how the ground is swapped (the pure halves are airGround.test's; these lines are only the game's).
+ok(world.includes('c.prints = VOL_TUNE.prints && air !== null && air.floatBlend;') && world.includes('c.field = air !== null && air.refused === null;') && world.includes('c.sand = VOL_TUNE.sand;') && world.includes('c.on = VOL_TUNE.on;'), "the chooser is asked the master, the sand, the prints only where floats blend, and a field that runs");
+ok(world.includes('this.groundStandIns[0].material = plain;') && world.includes('this.groundStandIns[1].material = variant;'), "the sweep's stand-ins wear one ground each: the plain one is warmed too, so turning a ground switch off builds nothing");
+ok(/for \(const c of this\.chunks\.values\(\)\) groups\.push\(c\.group\);\n\s+swapGroundMaterial\(groups, this\.farTiles\.values\(\), other, want\);/.test(world), "a change of the chooser's answer swaps every chunk's ground and every far tile");
+ok(world.includes('this.terrain.familyKeep = familyKeepFor(this.viewRadius);'), "the terrain keeps a family grid for every chunk that can stand, which the air's rasters and the feet read");
+{
+  // The stream drops a chunk only past the view radius and one more (`if (far > this.viewRadius + 1)`), so that many
+  // stand at once; at the default six it is 225, past the 192 grids the terrain kept, and the oldest still standing --
+  // nearest where the player had been longest -- read as unknown ground until built again.
+  const terrain = src('world/terrain.ts');
+  ok(world.includes('if (far > this.viewRadius + 1) {') && terrain.includes('while (this.chunkFamilies.size > Math.max(FAMILY_TUNE.familyChunks, this.familyKeep)) {'), 'which the stream keeps until it is past the radius and one more, and the terrain never evicts below');
+  ok(/private disposeChunk\(c: Chunk\): void \{\n\s+this\.floraField\?\.remove\(c\.key\);\n[\s\S]{0,300}this\.terrain\.forgetChunkFamilies\(c\.cx, c\.cz\);/.test(world) && /forgetChunkFamilies\(cx: number, cz: number\): void \{[\s\S]{0,400}this\.chunkFamilies\.delete\(key\);[\s\S]{0,200}this\.familyByNumber\.delete\(n\);/.test(terrain), "and a chunk's grid goes with the chunk, so a grid of one long gone never holds the place of one standing");
+  const { familyKeepFor } = await import('../../../src/world/terrain.ts');
+  let every = true;
+  for (let r = 0; r <= 16; r++) {
+    let standing = 0;
+    for (let dz = -(r + 1); dz <= r + 1; dz++) for (let dx = -(r + 1); dx <= r + 1; dx++) if (Math.max(Math.abs(dx), Math.abs(dz)) <= r + 1) standing++;
+    if (familyKeepFor(r) !== standing) every = false;
+  }
+  ok(every && familyKeepFor(6) === 225, `the floor is every chunk that can stand, at every radius from nought to sixteen (${familyKeepFor(6)} at the default six)`);
+}
+// The master in play (class W): queued, its programs through the world's queue, taken only once they have linked.
+ok(/if \(VOL_TUNE\.on && !was\) this\.queueVolumetrics\(\);\n\s+else if \(!VOL_TUNE\.on && was\) this\.world\.air\?\.releaseTargets\(\);/.test(main), 'the master turned on in play queues its warm; turned off it frees the targets at once');
+{
+  const r = main.slice(main.indexOf('private async reconcileVolumetrics('), main.indexOf('private compileFxObject('));
+  ok(r.length > 0 && r.includes('this.notice.set(VOL_WARM_NOTICE);') && main.includes("const VOL_WARM_NOTICE = 'Volumetrics on: preparing shaders';") && r.includes('this.world.programJob(field.objects,') && r.includes('this.world.compileReady(stands,') && r.includes('await Promise.all(jobs);'), "it says so, and the field's materials, the volume's and both grounds' stand-ins go through the world's queue");
+  ok(main.includes('this.notice.set(this.volWarming ? VOL_WARM_NOTICE : null);') && r.includes('if (!this.fxBusy) this.notice.set(null);'), "the Effects switch's reconcile, which every volumetrics setting also passes through, leaves the master's notice up (it took it down the first time round)");
+  ok(main.includes("if (this.fxBusy || this.volWarming || this.hyperspace.covered) return 'covered';") && r.indexOf('this.sampleShaders(this.shaderPhase());') < r.indexOf('this.volWarming = false;'), 'and what the warm builds is filed as covered, sampled before the flag goes, as the Effects switch\'s is');
+  const awaited = r.indexOf('await Promise.all(jobs);');
+  ok(awaited > 0 && r.indexOf('this.postfx.registerPass(pass)') > awaited && r.lastIndexOf('if (!had) this.world.takeAir(air);') > awaited, 'and only after every one has linked does the chain take the pass and the world the field');
+  ok(r.includes('this.world.packId !== world') && r.includes('this.postfx !== chain'), 'a travel or a new chain during the wait throws the work away');
+  ok(/if \(changed\) \{\n\s+pass\?\.dispose\(\);\n\s+if \(!had && this\.world\.air !== air\) air\.dispose\(\);[\s\S]{0,500}this\.volAgain = true;\n\s+continue;/.test(r), 'and looks again (the master still on, in a world: warmed for the chain and the field as they stand now)');
+}
+ok(main.includes("registerPerfSwitch('volGroundArt',") && main.includes("registerPerfSwitch('volGroundArtOne',"), "the frame report's zero-dial diff and its control are switches it compares by picture");
 
 console.log(`\n${checks} checks passed`);

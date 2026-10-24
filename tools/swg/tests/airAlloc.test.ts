@@ -5,8 +5,12 @@
 // the light, and the dust pool's grains stepped onto the field's raster -- held under 0.2 bytes a frame; a frame whose
 // window moves at 167 m/s (every frame of a ride or a flight: the rasters shifted, the strips asked, the shifts carried)
 // held to the same line, since its ground is a stand-in that makes nothing and whatever it makes is the air's own (it
-// made 13 bytes a frame until the raster's shift stopped handing the window's mean across a call); and with the master
-// off, a million calls of each method of the force API and of the field's frame make nothing.
+// made 13 bytes a frame until the raster's shift stopped handing the window's mean across a call); the ground's marks of
+// the second wave in both -- the carried offsets, the dent square placed and its strips cleared, the engines' pits and
+// ruts gathered and laid on the 10 Hz tick and faded, a crater a frame and a footprint pressed every 64th (32 bytes a
+// frame until the square was placed from its own record rather than handed the camera's place across a call, and a tick
+// boxed the texel's metres in a `Vector4.set`); and with the master off, a million calls of each method of the force API
+// and of the field's frame make nothing.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +26,8 @@ const script = fileURLToPath(new URL('./airAlloc.ts', import.meta.url));
 const run = (...args: string[]): string => execFileSync(process.execPath, ['--expose-gc', '--allow-natives-syntax', script, ...args], { encoding: 'utf8', timeout: 600_000 }).trim().split('\n').pop() ?? '{}';
 
 type Moving = { frames: number; made: number; scavenges: number; movedShare: number; resets: number };
-type Steady = { skipped?: string; frames: number; made: number; scavenges: number; stepping: boolean; engines: number; grains: number; moving: Moving };
+type Ground = { sources: number; dents: { oneShots: number; laid: number; ticks: number; cleared: number }; feet: { dents: number } };
+type Steady = { skipped?: string; frames: number; made: number; scavenges: number; stepping: boolean; engines: number; grains: number; ground: Ground; moving: Moving };
 const clean = (m: { made: number; scavenges: number; frames: number }): boolean => m.scavenges === 0 && m.made / m.frames < 0.2;
 const better = (a: { made: number; scavenges: number }, b: { made: number; scavenges: number }): boolean => a.scavenges < b.scavenges || (a.scavenges === b.scavenges && a.made < b.made);
 // Cleanest of three runs, the steady frame and the moving one each on its own (a run caught while the engine is still
@@ -43,6 +48,8 @@ if (!best) throw new Error('no measure');
 if (best.skipped) note(`the allocation measure was skipped: ${best.skipped}`);
 else {
   ok(best.stepping && best.engines === 12 && best.grains > 0, `the frame measured steps the air with ${best.engines} engines in its table (ten and two downwashes) and ${best.grains} grains in the pool`);
+  const gd = best.ground;
+  ok(gd.sources > 0 && gd.dents.laid > 0 && gd.dents.ticks > 0 && gd.dents.cleared > 0 && gd.feet.dents > 0, `and the ground's marks with it (the second wave): ${gd.sources} engines' pits and ruts held, ${gd.dents.laid} stamps laid, ${gd.dents.ticks} ticks faded, ${gd.dents.cleared} strips cleared, ${gd.feet.dents} footprints pressed as dents`);
   const per = best.made / best.frames;
   ok(best.scavenges === 0 && per < 0.2, `a steady frame makes ${per.toFixed(3)} bytes (${best.made} over ${best.frames} frames, ${best.scavenges} collections), under 0.2`);
   const mv = bestMoving!;
