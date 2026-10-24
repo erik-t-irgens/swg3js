@@ -7,6 +7,7 @@ import { INTERFACE, notifyBindingsChanged, onBindingsChanged, type Knob } from '
 import { keyLabel } from './hud.ts';
 import { GAMEPLAY } from './gameplayPage.ts';
 import { FLORA } from './floraPage.ts';
+import { VOLUMETRICS } from './volPage.ts';
 import { multiplayerMarkup, type CharacterCopy } from './multiplayerPage.ts';
 import { resetWindows } from './drag.ts';
 import { compilerVerdict, verdictNote } from '../core/shaderWatch.ts';
@@ -179,8 +180,11 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
     // Straight from the effects registry, so a knob and its setting can never drift apart. An
     // effect that is not written yet keeps its key but hides its knob.
     title: 'Effects',
-    knobs: FX_KNOBS.filter((k) => (k.pass === null || fxPassDef(k.pass).live) && (!k.product || fxProductDef(k.product).live)),
+    // The volumetrics' own rows stand in their own sections just below, never here as well.
+    knobs: FX_KNOBS.filter((k) => !k.group && (k.pass === null || fxPassDef(k.pass).live) && (!k.product || fxProductDef(k.product).live)),
   },
+  // Air you can see, after the Effects: the master, its preset, and each effect's own switch and detail (`volPage.ts`).
+  ...VOLUMETRICS,
   {
     // Scene content like the weather below: it works with the effects off, and its cost is fixed
     // per frame rather than per pixel of water on screen.
@@ -275,6 +279,12 @@ export class Menu {
   onSetting: (key: keyof Settings, value: number | boolean | string) => void = () => {};
   /** A panel's own click, played by the game's interface sounds. */
   onUiSound: (action: 'panelOpen' | 'panelClose' | 'confirm' | 'select' | 'rollover' | 'increment') => void = () => {};
+  /**
+   * What the game has to say about a knob beside its hint, and whether it is greyed for a reason of its own: the
+   * volumetrics master turned on in play says "from the next arrival", and greys "off at load" when the module was
+   * never constructed (`localStorage['swg.vol'] = '0'`). Null for nothing.
+   */
+  knobState: (key: keyof Settings) => { note?: string; off?: string } | null = () => null;
 
   /** The emotes page's source, given by the game once a character is up. */
   emotes: EmoteSource | null = null;
@@ -557,15 +567,26 @@ export class Menu {
       .map((k) => {
         const v = this.settings[k.key];
         let control: string;
-        if (k.kind === 'toggle') control = `<label class="switch"><input type="checkbox" data-key="${k.key}"${v ? ' checked' : ''} /><span></span></label>`;
+        if (k.kind === 'preset') {
+          // Worked out from the settings each time the page is drawn; a name that is none of the sets reads as its own word.
+          const now = k.presetOf ? k.presetOf(this.settings) : '';
+          const sets = k.presets ?? [];
+          const other = sets.some((p) => p.name === now) ? '' : `<option value="" selected>${k.otherLabel ?? 'Custom'}</option>`;
+          control = `<select data-preset="${k.key}">${other}${sets.map((p) => `<option value="${p.name}"${p.name === now ? ' selected' : ''}>${p.label}</option>`).join('')}</select>`;
+        } else if (k.kind === 'toggle') control = `<label class="switch"><input type="checkbox" data-key="${k.key}"${v ? ' checked' : ''} /><span></span></label>`;
         else if (k.kind === 'select') control = `<select data-key="${k.key}">${k.options!.map((o) => `<option value="${o.value}"${o.value === v ? ' selected' : ''}>${o.label}</option>`).join('')}</select>`;
         else if (k.kind === 'choice') control = `<select data-key="${k.key}">${k.choices!.map((o) => `<option value="${o.value}"${o.value === v ? ' selected' : ''}>${o.label}</option>`).join('')}</select>`;
         else control = `<input type="range" data-key="${k.key}" min="${k.min}" max="${k.max}" step="${k.step}" value="${v}" /><span class="value">${k.format ? k.format(v as number) : String(v)}</span>`;
         // What this knob waits on: it is greyed, and says so, while any of them is off.
         const off = k.requires?.filter((key) => !this.settings[key]) ?? [];
         const labels = off.map((key) => this.labelOf(key));
-        const hint = labels.length ? `${k.hint} (off while ${labels.join(' and ')} ${labels.length > 1 ? 'are' : 'is'} off)` : k.hint;
-        return `<div class="knob${labels.length ? ' disabled' : ''}"><div class="knob-label">${k.label}<small>${hint}</small></div><div class="knob-control">${control}</div></div>`;
+        let hint = labels.length ? `${k.hint} (off while ${labels.join(' and ')} ${labels.length > 1 ? 'are' : 'is'} off)` : k.hint;
+        // The game's own word on this knob now (the volumetrics master's "from the next arrival"), and a greying of its own.
+        const state = k.kind === 'preset' ? null : this.knobState(k.key);
+        if (state?.note) hint = `${hint} <b>${state.note}</b>`;
+        if (state?.off) hint = `${hint} (${state.off})`;
+        const grey = labels.length > 0 || !!state?.off;
+        return `<div class="knob${grey ? ' disabled' : ''}"><div class="knob-label">${k.label}<small>${hint}</small></div><div class="knob-control">${control}</div></div>`;
       })
       .join('');
   }
@@ -598,6 +619,24 @@ export class Menu {
       // A slider's own tick, from the game's own table. It is on `change`, not `input`: `input`
       // fires for every pixel of a drag, and the row is the one the game used for a single step.
       if (knob.kind === 'range') el.addEventListener('change', () => this.onUiSound('increment'));
+    }
+    // A preset row: each value of the set chosen goes through the page's own setter, as if every knob were moved by
+    // hand, and the page is drawn again so every knob and the row's own reading show what now stands.
+    for (const el of body.querySelectorAll<HTMLSelectElement>('select[data-preset]')) {
+      const knob = all.find((k) => k.kind === 'preset' && k.key === el.dataset.preset);
+      if (!knob) continue;
+      el.addEventListener('change', () => {
+        const set = knob.presets?.find((p) => p.name === el.value);
+        if (!set) return;
+        for (const [key, value] of Object.entries(set.values)) {
+          if (value !== undefined && this.settings[key as keyof Settings] !== value) this.setValue(key as keyof Settings, value);
+        }
+        this.onUiSound('select');
+        const scroll = body.scrollTop;
+        this.showPage(this.page);
+        const again = this.root.querySelector<HTMLElement>('.menu-body');
+        if (again) again.scrollTop = scroll;
+      });
     }
   }
 

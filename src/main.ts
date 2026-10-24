@@ -38,6 +38,11 @@ import { BODY_WALK, BODY_WALK_STATS, endBodyWalkFrame } from './world/mobiles/bo
 import { CROWD_SWITCHES, CROWD_TUNE, listsMover, tuneCrowd, type CrowdTune } from './world/mobiles/crowd.ts';
 import { crowdDialsFor } from './world/mobiles/crowdDials.ts';
 import { shadowDialsFor } from './world/shadowDials.ts';
+import { AIR_DRAW, probeAirDraws, type AirDrawMode } from './world/volumetrics/airDraw.ts';
+import { AIR_TUNE, tuneAir } from './world/volumetrics/airTune.ts';
+import { airDialsFor } from './world/volumetrics/airDials.ts';
+import { isVolKey, presetOf, VOL_APPLY_CLASS, VOL_KEYS, VOL_PRESET_LABELS, VOL_TUNE, volConsoleToSettings, volMemoryMB, volQualityFrom, type VolKey } from './world/volumetrics/volSettings.ts';
+import { AirVolumePass } from './core/fx/airVolume.ts';
 import { SHADOW_PASS_TUNE, tuneShadowPass } from './world/shadowCadence.ts';
 import { SHADOW_SPLIT_TUNE, splitEnds, tuneShadowSplits } from './world/shadowSplits.ts';
 import type { AbReport } from './core/perfMath.ts';
@@ -846,6 +851,43 @@ interface TrackConsoleOpts {
   need?: string;
 }
 
+/** What `__debug.air` takes (`App.airDebug`). */
+interface AirDebugOptions {
+  /** Time empty full-screen passes the given way (§7.3 of the design), `draws` a batch over `batches`. */
+  probe?: AirDrawMode;
+  draws?: number;
+  batches?: number;
+  /** Move numbers of `AIR_TUNE`: `{ group: { key: value } }`. */
+  tune?: Record<string, unknown>;
+  /** Stand the demos' movable engine where you look (metres up, m/s out, heading and tilt in degrees), or take it away (null). */
+  engine?: { height?: number; exit?: number; heading?: number; tilt?: number } | null;
+  /** A blast where you look. */
+  blast?: { radius?: number; push?: number };
+  /** Read the fields back; `at` points (game x, z) answer the dust within `radius` and the light there. */
+  measure?: boolean | { at?: [number, number][]; radius?: number };
+  /** Show a field through the debug view, or null to put the picture back. */
+  view?: string | null;
+  /** Draw the step the plain way or inside one render call. */
+  draw?: AirDrawMode;
+  /** Known inputs through every program, held to `airMath.ts`, with the link logs. */
+  selfTest?: boolean;
+}
+
+/** The fields `__debug.air({ view })` shows. */
+const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'inscatter', 'clear'] as const;
+
+/**
+ * `localStorage['swg.vol'] = '0'`: the volumetrics are never constructed this session and the master greys on the page
+ * ("off at load"), the hatch the grass and the sway have. Read once, as the game loads.
+ */
+const VOL_HATCH_OFF = ((): boolean => {
+  try {
+    return localStorage.getItem('swg.vol') === '0';
+  } catch {
+    return false;
+  }
+})();
+
 class App {
   private torch!: THREE.SpotLight;
   private torchOn = false;
@@ -1585,6 +1627,8 @@ class App {
   private readonly roomAirBuffer = new THREE.Vector2();
   /** The eye in the world, for the camera's building choice each frame (nothing cloned per frame). */
   private readonly cameraEye = new THREE.Vector3();
+  /** Whether the last frame's draw found the camera in a building's view: what the moving air reads this frame. */
+  private lastViewBuilding = false;
 
   constructor(private readonly physics: Physics) {
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true });
@@ -1696,6 +1740,10 @@ class App {
     // of its own, so its program never loses the environment between worlds: a hull a jump carries to another
     // system, and whatever its crew wear and hold, are drawn all through the unload (`envmap.ts`).
     setEnvironmentStandIn(this.world.waterBodies.blackEnvironment);
+    // The volumetrics' settings into the one record the frame reads (`VOL_TUNE`) before the chain is built: the chain is
+    // given the volume pass only with the master on (`makePostFX`). With `swg.vol` '0' the master is held off for the
+    // session and nothing of the pass is ever made.
+    this.applyVolumetrics();
     // The effects chain is built only now: the water reflections pass is handed the world's water
     // bodies, so a chain made before the world exists throws on boot.
     if (S.effects) this.postfx = this.makePostFX();
@@ -1747,6 +1795,33 @@ class App {
     perf.attach(this.renderer.getContext() as WebGL2RenderingContext);
     registerPerfSwitch('passMatrices', { get: () => this.portals.matrixOnce, set: (v) => (this.portals.matrixOnce = !!v), values: [false, true], note: 'false walks the scene matrices every pass (the old way), true once a frame' });
     // Step 1, drawing only what can be seen through the portals: the whole of it, and each cut apart.
+    // The volumetrics' A/B switches: soft offs that never move the real master or a setting (the master off frees the
+    // fields, and on waits for an arrival in this wave), so an A/B measures the work and builds nothing. `volumetrics`
+    // false holds the step and the volume off; the other three move one thing each, as their settings would.
+    registerPerfSwitch('volumetrics', {
+      get: () => !this.world.airSoftOff,
+      set: (v) => {
+        this.world.airSoftOff = !v;
+        if (this.postfx) {
+          if (v) delete this.postfx.override.airVolume;
+          else this.postfx.override.airVolume = false;
+        }
+      },
+      values: [false, true],
+      note: 'false holds the moving air still and the volume unwanted, its targets and programs kept; true as the settings have it',
+    });
+    registerPerfSwitch('airVolume', {
+      get: () => this.postfx?.override.airVolume !== false,
+      set: (v) => {
+        if (!this.postfx) return;
+        if (v) delete this.postfx.override.airVolume;
+        else this.postfx.override.airVolume = false;
+      },
+      values: [false, true],
+      note: 'the dust in the picture drawn or not, the moving air stepping either way',
+    });
+    registerPerfSwitch('airVolumeShadows', { get: () => this.volSoftValue('airVolumeShadows'), set: (v) => this.volSoft('airVolumeShadows', !!v), values: [false, true], note: "the cascades' shadow on the dust" });
+    registerPerfSwitch('volLight', { get: () => this.volSoftValue('volLight'), set: (v) => this.volSoft('volLight', !!v), values: [false, true], note: 'the light pass toward the sun (the dust\'s dark heart)' });
     registerPerfSwitch('insideCull', { get: () => PORTAL_CULL.mode, set: (v) => (PORTAL_CULL.mode = v === 'all' ? 'all' : 'rooms'), values: ['all', 'rooms'], note: "'all' draws every room, the world and its shadows as before; 'rooms' lets the four cuts below apply" });
     registerPerfSwitch('insideSkip', { get: () => PORTAL_CULL.insideSkip, set: (v) => (PORTAL_CULL.insideSkip = !!v), values: [false, true], note: 'inside with no exit reachable: no world pass, no shadow pass, no weather' });
     registerPerfSwitch('seenRooms', { get: () => PORTAL_CULL.seenRooms, set: (v) => (PORTAL_CULL.seenRooms = !!v), values: [false, true], note: 'only the rooms the portal flood reached are drawn, inside and through doors' });
@@ -9315,6 +9390,13 @@ class App {
         const splits = { ...SHADOW_SPLIT_TUNE, soft: [...SHADOW_SPLIT_TUNE.soft], endsMetres: splitEnds(3, this.cam.camera.near, reach).map((m) => Math.round(m * 10) / 10), distance: reach };
         return { ...(words.length ? { words } : {}), ...(compared ? { compared } : {}), splits, ...this.shadowPassReport() };
       },
+      /** The volumetrics pass's moving air (`src/world/volumetrics/`): see the README's Debugging rows. */
+      air: (opts?: AirDebugOptions) => this.airDebug(opts ?? {}),
+      /**
+       * Every volumetrics setting in force with its apply class, the preset and the memory; `{ on, preset, <key>: value }`
+       * writes settings in memory and applies them, never saved (past a page's range, live, the setting left alone).
+       */
+      volumetrics: (opts?: Record<string, unknown>) => this.volumetricsDebug(opts ?? {}),
       /**
        * The indoor pathing: `nav()` says whether this pack carries floor meshes at all, how many
        * rooms name one, how many have been read, how many searches have been asked for and what
@@ -10986,8 +11068,8 @@ class App {
       holdKeys: (ms) => this.holdGameKeys(ms),
       // The race drive's, the engines' and a race run's numbers of feel, as sliders when `race`, `engines` or `track` is
       // picked, the NPC ship ladder's tiers 6 to 10 when `npcShips` is, how a far body is drawn when `crowd` is, and
-      // the world's own dials (Restuss's state) when theirs is.
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? worldDialsFor(helper),
+      // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper),
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -11430,6 +11512,8 @@ class App {
     // The menu's own clicks, from the game's interface table.
     this.menu.onUiSound = (action) => void this.audio.ui.play(action);
     this.menu.onSetting = (key) => this.applySetting(key);
+    // The volumetrics master's word beside its knob: "from the next arrival", or greyed with the hatch.
+    this.menu.knobState = (key) => this.volKnobState(key);
     // Escape: in the world it opens the menu (the browser drops the pointer lock on it, which is
     // caught below); with the menu up it resumes; with a panel or the map up it closes that.
     window.addEventListener('keydown', (e) => {
@@ -12070,6 +12154,9 @@ class App {
   /** A setting moved in the menu: it takes effect now. */
   private applySetting(key: keyof Settings): void {
     const S = this.settings;
+    // The volumetrics (`src/world/volumetrics/`): every key of the pass, and the Effects switch the volume rides on, into
+    // the one record the frame reads; the pass's own FX keys go on to the chain below as every effect's do.
+    if (isVolKey(key) || key === 'effects') this.applyVolumetrics(key);
     switch (key) {
       case 'renderScale':
         this.renderer.setPixelRatio(S.renderScale);
@@ -12239,6 +12326,188 @@ class App {
     this.world.farCards?.applyCast();
     if (this.cam) this.world.grass?.applyCast(this.cam.camera.position);
     if (CARD_LIGHT_TUNE.shadow !== leavesWere) this.world.applyCardShadow();
+  }
+
+  /** `__debug.air`: the moving air in numbers, its tune, its test sources and its probes (`src/world/volumetrics/`). */
+  private airDebug(o: AirDebugOptions): Record<string, unknown> {
+    if (o.probe) {
+      const draws = Math.max(10, Math.min(5000, Math.round(o.draws ?? 200)));
+      const batches = Math.max(3, Math.min(201, Math.round(o.batches ?? 31)));
+      return { probe: probeAirDraws(this.renderer, o.probe, draws, batches) };
+    }
+    const out: Record<string, unknown> = {};
+    const notes: string[] = [];
+    if (o.tune) {
+      const answer = tuneAir(o.tune);
+      notes.push(...answer.notes);
+      if (answer.rebuild) notes.push("the window's size moved: every field starts again from its inflow at the next step");
+    }
+    if (o.draw === 'calls' || o.draw === 'direct') AIR_DRAW.mode = o.draw;
+    const air = this.world.air;
+    if (!air) {
+      notes.push(VOL_HATCH_OFF ? "the volumetrics are off at load (localStorage['swg.vol'] = '0')" : VOL_TUNE.on ? 'the master is on: the moving air is built at the next arrival' : 'the volumetrics master is off: nothing of the moving air is made');
+      return { ...out, built: false, on: VOL_TUNE.on, notes };
+    }
+    // Where you look: the crosshair's line to the ground, 12 m out when it meets nothing nearer.
+    const look = (): THREE.Vector3 => {
+      const at = this.player.worldPos;
+      const f = this.cam.forward(new THREE.Vector3());
+      f.y = 0;
+      if (f.lengthSq() < 1e-6) f.set(0, 0, 1);
+      f.normalize();
+      const p = new THREE.Vector3(at.x + f.x * 12, at.y, at.z + f.z * 12);
+      p.y = this.world.groundIfCached(p.x, p.z) ?? at.y;
+      return p;
+    };
+    if (o.engine === null) {
+      air.testEngine = null;
+      notes.push('the test engine is taken away');
+    } else if (o.engine) {
+      const e = o.engine;
+      const p = look();
+      const height = Number.isFinite(e.height) ? (e.height as number) : 2;
+      const heading = ((Number.isFinite(e.heading) ? (e.heading as number) : (Math.atan2(-Math.sin(this.cam.yaw), -Math.cos(this.cam.yaw)) * 180) / Math.PI) * Math.PI) / 180;
+      const tilt = ((Number.isFinite(e.tilt) ? (e.tilt as number) : 60) * Math.PI) / 180;
+      air.testEngine = { x: p.x, y: p.y + height, z: p.z, dx: Math.sin(heading) * Math.cos(tilt), dy: -Math.sin(tilt), dz: Math.cos(heading) * Math.cos(tilt), exit: Number.isFinite(e.exit) ? (e.exit as number) : 40 };
+      out.engine = { ...air.testEngine };
+    }
+    if (o.blast) {
+      const p = look();
+      const radius = Number.isFinite(o.blast.radius) ? (o.blast.radius as number) : AIR_TUNE.blast.radiusRef;
+      const push = Number.isFinite(o.blast.push) ? (o.blast.push as number) : AIR_TUNE.blast.pushRef;
+      air.blast(p.x, p.y, p.z, radius, push, 0);
+      out.blast = { at: [Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10, Math.round(p.z * 10) / 10], radius, push, queued: air.forces.oneCount };
+    }
+    if (o.view !== undefined) {
+      if (o.view === null) out.view = this.postfx?.fxView(null) ?? null;
+      else if ((AIR_VIEWS as readonly string[]).includes(o.view)) out.view = this.postfx ? this.postfx.fxView(`airVolume.${o.view}`) : 'the effects are off: turn Effects on to see a field';
+      else notes.push(`no field "${o.view}": ${AIR_VIEWS.join(', ')}`);
+    }
+    if (o.selfTest) out.selfTest = air.selfTest();
+    if (o.measure) {
+      const m = typeof o.measure === 'object' ? o.measure : {};
+      const measured = air.measure(m.at ?? [], Number.isFinite(m.radius) ? (m.radius as number) : 4);
+      // The lit sample: the volume's own in-scatter where each point, 1.2 m over its ground, stands on the screen.
+      const pass = this.postfx?.pass<AirVolumePass>('airVolume');
+      if (measured && pass) {
+        const cam = this.cam.camera;
+        cam.updateMatrixWorld();
+        for (const at of measured.at as { x: number; z: number; lit?: unknown }[]) {
+          const p = new THREE.Vector3(at.x, (this.world.groundIfCached(at.x, at.z) ?? this.player.worldPos.y) + 1.2, at.z);
+          const ahead = p.clone().applyMatrix4(cam.matrixWorldInverse).z < 0;
+          p.project(cam);
+          at.lit = ahead ? pass.sampleAt(this.renderer, (p.x + 1) / 2, (p.y + 1) / 2) : null;
+        }
+      }
+      out.measure = measured;
+    }
+    const volume = this.postfx?.pass<AirVolumePass>('airVolume');
+    return {
+      ...air.report(),
+      volume: volume ? { ...volume.report(), wanted: this.postfx!.passWanted('airVolume') } : 'not on the chain',
+      ...out,
+      ...(notes.length ? { notes } : {}),
+    };
+  }
+
+  /**
+   * The volumetrics' settings into the one record the frame reads (`VOL_TUNE`), with the console's values past the page's
+   * ends over them. The master is class A in this wave: turned on in play with no field built at this world's arrival
+   * (or no volume on the chain), it says it takes effect at the next one and builds nothing now; turned off it acts at
+   * once (the step stops, the field's targets are freed, its materials kept); turned on again where this session's field
+   * and pass already stand, at once. Nothing here builds a program.
+   */
+  private applyVolumetrics(key?: keyof Settings): void {
+    const was = VOL_TUNE.on;
+    volQualityFrom(this.settings, VOL_TUNE, this.volOver);
+    if (VOL_HATCH_OFF) VOL_TUNE.on = false;
+    if (key !== 'volumetrics' && key !== undefined) return;
+    if (VOL_TUNE.on && !was) {
+      if (!this.world.air || (this.postfx && !this.postfx.pass('airVolume'))) this.messages.note('Volumetrics: from the next arrival');
+    } else if (!VOL_TUNE.on && was) this.world.air?.releaseTargets();
+  }
+
+  /**
+   * An arrival's half of the master (class A): with it on, the world's moving air made if the session has none, and the
+   * volume registered on the live chain if the chain was built without it (the master turned on at the select screen,
+   * in the creator or in play). Called behind a loading screen only, before the effects' warm-up compiles the pass.
+   */
+  private prepareAir(): void {
+    if (!VOL_TUNE.on || VOL_HATCH_OFF) return;
+    const air = this.world.ensureAir();
+    if (air?.refused) console.info(`volumetrics: the moving air cannot run on this machine: ${air.refused}`);
+    if (this.postfx && !this.postfx.pass('airVolume')) this.postfx.registerPass(new AirVolumePass(() => this.world.air));
+  }
+
+  /** A volumetrics switch as it is in force: the frame report's soft value over the setting. */
+  private volSoftValue(key: 'airVolumeShadows' | 'volLight'): boolean {
+    const over = this.volOver[key];
+    return typeof over === 'boolean' ? over : this.settings[key];
+  }
+
+  /** A volumetrics switch moved for an A/B (`__debug.perf({ ab })`): in force now, the setting left alone, nothing built. */
+  private volSoft(key: 'airVolumeShadows' | 'volLight', on: boolean): void {
+    if (on === this.settings[key]) delete this.volOver[key];
+    else this.volOver[key] = on;
+    this.applyVolumetrics();
+    const over = { ...this.settings } as unknown as Record<string, unknown>;
+    for (const [k, v] of Object.entries(this.volOver)) over[k] = v;
+    this.postfx?.configure(over as unknown as Settings);
+  }
+
+  /** Console values of the volumetrics past the page's ends: in force now, never saved (`__debug.volumetrics`). */
+  private readonly volOver: Partial<Record<VolKey, number | boolean>> = {};
+
+  /**
+   * What the page says beside a volumetrics knob (`Menu.knobState`): the master greys with the hatch, and says "from the
+   * next arrival" while it is on with nothing built for it yet.
+   */
+  private volKnobState(key: string): { note?: string; off?: string } | null {
+    if (key !== 'volumetrics') return null;
+    if (VOL_HATCH_OFF) return { off: "off at load: localStorage['swg.vol'] is '0'" };
+    if (VOL_TUNE.on && (!this.world.air || (this.postfx && !this.postfx.pass('airVolume')))) return { note: 'from the next arrival' };
+    return null;
+  }
+
+  /**
+   * Every volumetrics setting in force with its apply class, the preset it works out to and the memory it costs; with
+   * fields, writes them in memory and applies them (never saved; past a page's range live, the setting left alone).
+   */
+  private volumetricsDebug(o: Record<string, unknown>): Record<string, unknown> {
+    const notes: string[] = [];
+    const list = volConsoleToSettings(o);
+    for (const c of list) {
+      if (c.inRange) {
+        delete this.volOver[c.key];
+        (this.settings as unknown as Record<string, unknown>)[c.key] = c.value;
+        this.applySetting(c.key);
+      } else {
+        this.volOver[c.key] = c.value;
+        notes.push(`${c.key} ${String(c.value)} is past the Graphics page's range: in force now, but the page keeps its own value, and the next slider moved or a reload puts that back`);
+      }
+    }
+    if (list.some((c) => !c.inRange)) {
+      this.applyVolumetrics();
+      const over = { ...this.settings } as unknown as Record<string, unknown>;
+      for (const [k, v] of Object.entries(this.volOver)) over[k] = v;
+      this.postfx?.configure(over as unknown as Settings);
+    }
+    if (list.length) this.menu.redrawGraphics();
+    const S = this.settings as unknown as Record<string, unknown>;
+    const settings: Record<string, { value: unknown; class: string; over?: unknown }> = {};
+    for (const k of VOL_KEYS) settings[k] = { value: S[k], class: VOL_APPLY_CLASS[k as VolKey], ...(k in this.volOver ? { over: this.volOver[k as VolKey] } : {}) };
+    const size = this.postfx?.size;
+    return {
+      on: VOL_TUNE.on,
+      hatch: VOL_HATCH_OFF,
+      built: !!this.world.air,
+      onChain: !!this.postfx?.pass('airVolume'),
+      preset: VOL_PRESET_LABELS[presetOf(this.settings)],
+      memoryMB: volMemoryMB(VOL_TUNE, size?.x ?? window.innerWidth, size?.y ?? window.innerHeight),
+      tune: { ...VOL_TUNE },
+      settings,
+      ...(notes.length ? { notes } : {}),
+    };
   }
 
   /** A flora shadow switch flipped outside the settings (the frame report's A/B): the tune moved, then the world walked as `applyFlora` walks it. */
@@ -16543,6 +16812,11 @@ class App {
     this.effects.warmUp();
     this.world.bolts.warmUp();
     for (const id of ['jedi', 'bounty_hunter'] as ClassId[]) this.kitFor(id).warmUp?.();
+    // The volumetrics (`src/world/volumetrics/`) with the master on at this screen: the moving air built if this session
+    // has none yet (in its first wave the master's "on" waits for an arrival, and this is it), and the chain given the
+    // volume pass if it lacks one, before the effects' warm-up below compiles it; the air's own materials are compiled
+    // by the sweep. With the master off, nothing.
+    this.prepareAir();
     // Every pass and product too, whether it is on or not, so turning one on later or the sun
     // coming on screen for the first time never compiles on a live frame.
     if (this.postfx) {
@@ -18640,6 +18914,8 @@ class App {
           if (player.takeDamage(25)) this.hurtFrom(null);
         } else if (player.aboard?.vehicle === v) this.thrownOutOfShip(v);
         this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);
+        // The moving air takes the wreck's blast beside its ring (`World.air`, null with the volumetrics off).
+        this.world.air?.blast(v.pos.x, v.pos.y, v.pos.z, AIR_TUNE.blast.wreckRadius + v.radius, AIR_TUNE.blast.wreckPush, 0);
         this.effects.burst(v.pos, 0xffc080, 2 + v.radius, 0.4);
         this.effects.flash(v.pos, 0xffa050, 60, 20, 0.35);
         // Through the world, so a painted ship's own material copies leave the portal set and the cascades with it; a
@@ -20511,6 +20787,9 @@ class App {
     const at = this.player.worldPos;
     const eye = this.cameraEye.set(at.x, at.y + 1.5, at.z);
     const view = this.portals.cameraCell(this.world.cellState, eye, cam.position, this.world.buildings).building;
+    // Whether the camera is in a building's view, kept for the moving air's next frame (`World.updateAir`), which runs
+    // before this draw finds it.
+    this.lastViewBuilding = view !== null;
     // The furniture drawn per building or everywhere, as the switch stands (only a change does anything).
     this.world.syncFurniture();
     // The frame's visible set, once, with the camera's final pose: which rooms can be seen and whether
@@ -21216,7 +21495,9 @@ class App {
     };
     // The specks are made per chain: a pass belongs to one, and switching Effects builds a second in
     // the background and disposes the first, which would take a shared pass's points with it.
-    installEffects(fx, { water: this.world.waterBodies, heat: this.heat, collectMovers: this.collectMovers, collectDofGlows: this.collectDofGlows, specks: () => new UnderwaterSpecksPass() });
+    // The volume over the moving air only with the volumetrics master on (a factory, as the specks are, since a chain is
+    // disposed whole when the Effects switch builds another); an arrival with the master on gives a chain without it one.
+    installEffects(fx, { water: this.world.waterBodies, heat: this.heat, collectMovers: this.collectMovers, collectDofGlows: this.collectDofGlows, specks: () => new UnderwaterSpecksPass(), air: VOL_TUNE.on ? () => new AirVolumePass(() => this.world.air) : undefined });
     // The motion blur's variants met after the warm-up go on the world's program queue as jobs carrying their own
     // compile (keyed on the empty light set of their own draws), never compiled synchronously on the frame that met
     // them nor by the world's own compile, which would key them on a pass's lights.
@@ -29606,6 +29887,11 @@ class App {
       if (player.mounted?.riderHidden) player.group.visible = false;
       // After the physics step and the camera: the falling weather around this frame's camera.
       this.world.updateWeatherView(dt);
+      // The moving air (`src/world/volumetrics/`), right after the weather's view half and with this frame's camera: its
+      // window, its sources and its step. Whether the camera is in a building's view is last frame's draw's word.
+      perf.passBegin(PASS.air);
+      this.world.updateAir(dt, simulate, this.lastViewBuilding, this.postfx !== null && this.postfx.passWanted('airVolume'));
+      perf.passEnd(PASS.air);
       // What moves fast enough to draw a far cascade every frame it could cast into (the sixth wave): after `stepAudio`
       // above, which poses the shuttles, and before the cascades are decided.
       this.fillShadowMovers(dt);

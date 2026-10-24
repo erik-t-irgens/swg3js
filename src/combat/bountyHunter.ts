@@ -988,6 +988,9 @@ export class BountyHunterKit implements Kit {
     // The loose props: a blast takes every direction, so no cone, and reaches half as far again as
     // it does for a body, exactly as it does for a vehicle above.
     shoveLooseProps(at, radius * 1.5, 1, null, 12 + damage * 0.1);
+    // The moving air (the volumetrics; null while they are off): its ring of shoves, its dust and its grains, by this
+    // blast's own radius and push.
+    world.air?.blast(at.x, at.y, at.z, radius, push, 0);
     const dp = player.pos.distanceTo(at);
     // Your own blast is your own doing: it buys no Fortitude, and a roll does not dodge it.
     if (dp < radius * 0.7 && !player.mounted) player.takeDamage(damage * player.stats.blastSelf * (1 - dp / (radius * 0.7)), false, 'self');

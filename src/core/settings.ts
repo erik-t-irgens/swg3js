@@ -182,6 +182,37 @@ export interface Settings extends FxSettings {
    * a server that keeps one stands it for everybody.
    */
   restuss: 'living' | 'ruins';
+  // The volumetrics' scene content (src/world/volumetrics/volSettings.ts speaks for these): the moving air, the dust it
+  // carries and the light through it, each with its own detail, what may stir it, and how far the game's own storm
+  // sheets thin while the dust draws a storm. The master and the volume's own keys are the effects' (fxRegistry.ts).
+  /** The air moves: one layer of it over the ground near you, stirred by engines, blasts and the Force. */
+  volAir: boolean;
+  /** Cells across the air's 192 m square: 64, 96, 128, 160 or 192. */
+  volAirDetail: number;
+  /** Pressure steps a solve, 8 to 40. */
+  volAirSolve: number;
+  /** Solver steps a second: 30 or 60. */
+  volAirRate: number;
+  /** The air carries dust off sand and dirt, and none off rock, paving or water. */
+  volDust: boolean;
+  /** The dust's own grid as a multiple of the air's: 2, 3, 4 or 6. */
+  volDustDetail: number;
+  /** The motes behind a machine are grains thrown up that fall back to the sand, not motes that only rise. */
+  volKickUp: boolean;
+  /** The dust shades itself toward the sun: a lit face and a dark heart. */
+  volLight: boolean;
+  /** The light's grid as a multiple of the air's: 1, 2 or 3. */
+  volLightDetail: number;
+  /** Steps toward the sun, 12 to 40. */
+  volLightSteps: number;
+  /** How far the game's own storm sheets thin while the dust draws the storm, 0 (kept) to 1 (stood down). */
+  volStormThin: number;
+  /** Every engine and every hovering hull stirs the air. */
+  volFromEngines: boolean;
+  /** The Force push, pull and repulse stir the air. */
+  volFromForce: boolean;
+  /** Grenades, mines, charges, splash and wrecks stir the air. */
+  volFromBlasts: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -287,6 +318,23 @@ export const DEFAULT_SETTINGS: Settings = {
   difficulty: 1,
   // The owner's (2026-10-19, the pass's design §10 Q1): Restuss stands as its ruins, how SOE's live game ended.
   restuss: 'ruins',
+  // The volumetrics': every switch on under the master (which is off, an effects key), every detail at the High
+  // preset (`VOL_PRESETS` in volSettings.ts), and the storm sheets thinned to half while the dust draws the storm
+  // (ours, the design's Q7: their streaks show the wind at a scale the air's cells cannot).
+  volAir: true,
+  volAirDetail: 128,
+  volAirSolve: 20,
+  volAirRate: 60,
+  volDust: true,
+  volDustDetail: 4,
+  volKickUp: true,
+  volLight: true,
+  volLightDetail: 2,
+  volLightSteps: 26,
+  volStormThin: 0.5,
+  volFromEngines: true,
+  volFromForce: true,
+  volFromBlasts: true,
   ...FX_DEFAULTS,
 };
 

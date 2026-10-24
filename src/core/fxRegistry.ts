@@ -62,6 +62,23 @@ export interface FxSettings {
   filmGrainStrength: number;
   vignette: boolean;
   vignetteStrength: number;
+  // The volumetrics pass's own (src/world/volumetrics/): the master over all of it, and the volume's own switch and
+  // quality. The master is an effects key only because the volume's row requires it (`requires`); the moving air,
+  // the dust and the light pass are scene content and run with Effects off, as the weather does.
+  /** The master: air you can see, the ground keeping what passes, smoke and fog. Off is today's game exactly. */
+  volumetrics: boolean;
+  /** The dust in the air, marched in the picture: needs Effects and the master. */
+  airVolume: boolean;
+  /** How much of the march reaches the picture, 0 to 1.5; at 0 the pass refuses and costs nothing. */
+  airVolumeAmount: number;
+  /** The share of the screen the march runs at: 0.25, 0.5 or 1. */
+  airVolumeResolution: number;
+  /** Density samples a ray, 6 to 48 (a uniform under a loop bound of 48). */
+  airVolumeSteps: number;
+  /** A reprojected history that hides the march's grain. */
+  airVolumeHistory: boolean;
+  /** The sun's cascades shade the dust: in a building's shadow it is dark. */
+  airVolumeShadows: boolean;
 }
 
 export type FxPassId =
@@ -72,6 +89,7 @@ export type FxPassId =
   | 'heatHaze'
   | 'lightShafts'
   | 'volumetricClouds'
+  | 'airVolume'
   | 'godRays'
   | 'underwater'
   | 'depthOfField'
@@ -98,6 +116,11 @@ export interface FxPassDef {
   stage: FxStage;
   /** On when any of these settings is true. Empty: only `required` or a console override turns it on. */
   toggles: readonly (keyof FxSettings)[];
+  /**
+   * Wanted only while every one of these is on, whatever its toggles or a console override say (`fxPassWanted`): the
+   * volume under the volumetrics master. No other pass has any, so every other pass decides exactly as it always did.
+   */
+  requires?: readonly (keyof FxSettings)[];
   /** Always drawn, cannot be forced off from the console. */
   required: boolean;
   /** The most it can ask for; the pass's own `needs(ctx)` returns a subset each frame. */
@@ -149,6 +172,8 @@ export interface FxKnobDef {
   format?: (v: number) => string;
   /** Greyed while any of these is off. */
   requires: readonly (keyof FxSettings)[];
+  /** Shown in a section of its own rather than among the Effects: the volumetrics' rows stand on the Graphics page's Volumetrics section (`src/ui/volPage.ts`). */
+  group?: 'volumetrics';
 }
 
 /**
@@ -197,6 +222,14 @@ export const FX_DEFAULTS: FxSettings = {
   filmGrainStrength: 0.3,
   vignette: true,
   vignetteStrength: 0.25,
+  // Off until the owner has been through the test sheet (the design's decision 1, Q1); the rest at the High preset.
+  volumetrics: false,
+  airVolume: true,
+  airVolumeAmount: 1,
+  airVolumeResolution: 0.5,
+  airVolumeSteps: 16,
+  airVolumeHistory: true,
+  airVolumeShadows: true,
 };
 
 const two = (v: number) => v.toFixed(2);
@@ -253,6 +286,14 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'filmGrainStrength', pass: 'grainVignette', label: 'Film grain strength', kind: 'range', min: 0, max: 1, step: 0.05, format: two, requires: ['effects', 'filmGrain'], hint: '0.2 fine, 0.5 film, 1 coarse.' },
   { key: 'vignette', pass: 'grainVignette', label: 'Vignette', kind: 'toggle', requires: ['effects'], hint: 'The picture’s corners a little darker, as through a lens; a touch more while aiming.' },
   { key: 'vignetteStrength', pass: 'grainVignette', label: 'Vignette strength', kind: 'range', min: 0, max: 1, step: 0.05, format: two, requires: ['effects', 'vignette'], hint: '0.25 barely there, 0.5 noticeable, 1 heavy.' },
+  // The volumetrics' rows, shown in the Graphics page's Volumetrics section and never among the Effects above.
+  { key: 'volumetrics', pass: null, group: 'volumetrics', label: 'Volumetrics', kind: 'toggle', requires: [], hint: 'Air that moves and dust you can see: a ship hovering over sand blows dust out from under it, a speeder lifts it off sand and dirt and none off rock or paving, a grenade blows it outward, a storm is real dust you fly through, lit by the sun. Off is the game exactly as it was. Turned on in play it takes effect at your next arrival, which prepares its shaders behind the loading screen. Nothing of it runs indoors or in space.' },
+  { key: 'airVolume', pass: 'airVolume', group: 'volumetrics', label: 'Dust in the air', kind: 'toggle', requires: ['effects', 'volumetrics'], hint: 'The airborne dust marched through in the picture, with a lit face, a dark heart and the shade of buildings and trees on it. Off, the air still moves and the grains still fall, but the dust itself is not drawn. Needs Effects.' },
+  { key: 'airVolumeResolution', pass: 'airVolume', group: 'volumetrics', label: 'Dust resolution', kind: 'select', options: cloudQuality, requires: ['effects', 'volumetrics', 'airVolume'], hint: 'The share of the screen the dust is marched at, smoothed back up along edges by depth. Quarter costs about a quarter of half; dust has no hard edges of its own to lose.' },
+  { key: 'airVolumeSteps', pass: 'airVolume', group: 'volumetrics', label: 'Dust samples', kind: 'range', min: 6, max: 48, step: 2, format: (v) => `${v}`, requires: ['effects', 'volumetrics', 'airVolume'], hint: 'How many times each ray samples the dust, spent only where the air is. Fewer is grainier and cheaper.' },
+  { key: 'airVolumeHistory', pass: 'airVolume', group: 'volumetrics', label: 'Smooth the dust over frames', kind: 'toggle', requires: ['effects', 'volumetrics', 'airVolume'], hint: 'Each frame is blended into the last, which hides the grain a few samples leave. Off shows each frame as it is marched.' },
+  { key: 'airVolumeShadows', pass: 'airVolume', group: 'volumetrics', label: 'Shadows in the dust', kind: 'toggle', requires: ['effects', 'volumetrics', 'airVolume'], hint: 'The sun\'s own shadows fall in the dust: under a hovering ship or in a street\'s shade it is dark. Off lights all of it.' },
+  { key: 'airVolumeAmount', pass: 'airVolume', group: 'volumetrics', label: 'Dust over the picture', kind: 'range', min: 0, max: 1.5, step: 0.05, format: two, requires: ['effects', 'volumetrics', 'airVolume'], hint: 'How much of the dust reaches the picture: 1 as designed, 0 none at all (and then the pass costs nothing), 1.5 thicker.' },
 ];
 
 /**
@@ -267,6 +308,7 @@ export const FX_PASSES: readonly FxPassDef[] = [
   { id: 'heatHaze', stage: 'scene', toggles: ['heatHaze'], required: false, needs: ['heat', 'linearDepthHalf'], budgetMs: 0.16, typical: false, canBeLast: false, live: true, why: 'Displaces what the surfaces look like, so it follows every surface pass; before the atmosphere and the lens, since the air and the glass sit between the heat and the eye.' },
   { id: 'lightShafts', stage: 'scene', toggles: ['lightShafts'], required: false, needs: ['linearDepthHalf', 'normalsHalf'], budgetMs: 0.3, typical: false, canBeLast: false, live: true, why: 'Daylight scattered in the air of the room the camera is in, from its doorways, the sunlit patch where it lands, and the glow around the room\'s lamps. Evaluated per pixel along the view ray and stopped by the scene depth, which scene meshes cannot read. Atmosphere: after the surface passes (SSAO has darkened the corners the patch lands among), before god rays, depth of field, motion blur and bloom, so the beams defocus, smear and bloom with the room.' },
   { id: 'volumetricClouds', stage: 'scene', toggles: ['volumetricClouds'], required: false, needs: ['linearDepthHalf'], budgetMs: 6, typical: false, canBeLast: false, live: true, why: 'Cloud the sky is really made of rather than a sheet drawn across it: a raymarch through a slab overhead, lit by the very sun, ambient and haze the rest of the scene is lit by, which is how each world keeps its own colour with no table of its own. After the surface passes, so occlusion, blade light and reflections have already settled what the surfaces are, and after the heat, since the air sits between the heat and the eye; before the god rays, so the sky they are drawn from is the cloudy one and a broken deck makes shafts by itself; before depth of field, motion blur, bloom and the grade, so the clouds defocus, smear, spill and are graded with the picture. It marches at a fraction of the screen and comes back through a depth-aware upsample, since a plain one haloes every ridge. By far the most expensive pass here, which is why it is off by default and has a quality of its own.' },
+  { id: 'airVolume', stage: 'scene', toggles: ['airVolume'], requires: ['volumetrics'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.6, typical: false, canBeLast: false, live: true, why: 'The dust the moving air carries (src/world/volumetrics/), marched through the band of air over the ground near you and integrated past it, lit by the very sun and ambient the scene is lit by, darkened by the dust between it and the sun and by the sun\'s own cascades, and composited as the scene times what it lets through plus what it scatters. After the clouds, so the nearer layer is composited last over the farther; before the god rays, the depth of field, the motion blur, the bloom and the grade, so the dust is rayed, defocused, smeared, spilled and graded with the picture. It marches at a share of the screen through an upsample of its own size, and refuses with a reason indoors, in space, under water, at an amount of nought and while nothing is airborne. Not typical: the typical frame has 0.07 ms left, and its cost is a line of the frame report of its own.' },
   { id: 'godRays', stage: 'scene', toggles: ['godRays'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.25, typical: true, canBeLast: false, live: true, why: 'Scattered sunlight. Before depth of field, since rays are far light that should soften with the far background they overlay, and before the blur and the bloom so they smear and spill like the sun.' },
   { id: 'underwater', stage: 'scene', toggles: ['underwater'], required: false, needs: [], budgetMs: 0.12, typical: false, canBeLast: false, live: true, why: 'What the water between the eye and each pixel does to it, and the shimmer of the light bending through the ripples overhead. After the god rays, so scattered sunlight is graded by the water it comes through like anything else; before the lens, so the aperture and the shutter soften and smear what the water has already done. It reads the full-resolution scene depth itself and asks for no product, and it draws on no frame the camera is dry.' },
   { id: 'depthOfField', stage: 'lens', toggles: ['depthOfField'], required: false, needs: ['linearDepthHalf', 'dofGlow'], budgetMs: 0.35, typical: false, canBeLast: false, live: true, why: 'The aperture needs colour and depth aligned, so it comes before motion blur; before bloom so a defocused highlight blooms as a disc.' },
@@ -362,6 +404,27 @@ export function fxProductDef(id: FxProductId): FxProductDef {
   const def = PRODUCT_BY_ID.get(id);
   if (!def) throw new Error(`fx: no product "${id}" in the registry`);
   return def;
+}
+
+/**
+ * Whether a pass's settings ask for it (with a console override, when one is given): the one rule `PostFX.passWanted`
+ * and the frame's own decision both ask. A pass that requires a key that is off is not wanted, whatever else says
+ * so; past that, a required pass always is, and any other when one of its toggles is on, unless the console says
+ * otherwise. For every pass with no `requires`, this is the rule as it always stood.
+ */
+export function fxPassWanted(def: FxPassDef, settings: FxSettings, override?: boolean): boolean {
+  const req = def.requires;
+  if (req) for (let i = 0; i < req.length; i++) if (!settings[req[i]]) return false;
+  if (def.required) return true;
+  let setting = false;
+  const toggles = def.toggles;
+  for (let i = 0; i < toggles.length; i++) {
+    if (settings[toggles[i]]) {
+      setting = true;
+      break;
+    }
+  }
+  return override ?? setting;
 }
 
 export function fxPassIndex(id: FxPassId): number {

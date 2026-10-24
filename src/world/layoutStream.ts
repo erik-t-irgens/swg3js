@@ -404,6 +404,27 @@ export interface CellState {
   cell: number;
 }
 
+/**
+ * One solid placed object as the moving air's obstacles take it (`LayoutStreamer.forEachSolidBox`): its box's middle on
+ * the ground, its half sizes along its own X and Z, which way its own X points (cos, sin in world XZ), and how tall it
+ * stands over its base. A kept record, written afresh for each object. `room` is set for one of a building's rooms
+ * (a cell past its outside) rather than the object's own box: its top is then the room's over the building's origin.
+ */
+export interface SolidBox {
+  x: number;
+  z: number;
+  hx: number;
+  hz: number;
+  cos: number;
+  sin: number;
+  top: number;
+  room: boolean;
+}
+
+/** `forEachSolidBox`'s own scratch, so a walk makes nothing. */
+const solidQ = new THREE.Quaternion();
+const solidV = new THREE.Vector3();
+
 /** The one empty effect list every object without any shares, so a lookup allocates nothing. */
 const NO_EFFECTS: readonly PackEffect[] = [];
 
@@ -1162,6 +1183,99 @@ export class LayoutStreamer {
       out.push({ x: o.x, z: o.z, radius, template: o.template, model: o.model });
     }
     return out;
+  }
+
+  /**
+   * Every solid placed object whose middle stands inside the rectangle, as a turned box, for the moving air's obstacles
+   * (`src/world/volumetrics/airObstacles.ts`): standing in this world's state (never one lying dormant), out of doors
+   * (not contained), given collision by the sweep's own rule (`collidesByRule`), with a model box of its own (its two
+   * corners taken componentwise, never the snapshot's radius), and neither flora (a canopy's box is not a wall) nor a
+   * particle effect. Runtime placements are in the same regions and come with them. `visit` is a kept function and
+   * `box` a kept record written afresh for each: nothing is made, and a visit answering false stops the walk.
+   *
+   * An object whose own box is wider than `roomsOver` either way (its larger half, metres) is visited with each of its
+   * rooms after it, `room` set: a compound's one box round its own courtyard is no wall, but the halls round that
+   * courtyard are rooms, which the volume must keep its dust out of when it sees them through a door from outside.
+   */
+  forEachSolidBox(x0: number, z0: number, x1: number, z1: number, box: SolidBox, visit: (box: SolidBox) => boolean, roomsOver = Infinity): void {
+    const rx0 = Math.floor(x0 / REGION) - 1;
+    const rx1 = Math.floor(x1 / REGION) + 1;
+    const rz0 = Math.floor(z0 / REGION) - 1;
+    const rz1 = Math.floor(z1 / REGION) + 1;
+    const q = solidQ;
+    for (let rz = rz0; rz <= rz1; rz++) {
+      for (let rx = rx0; rx <= rx1; rx++) {
+        const region = this.regionsByNumber.get(regionNumber(rx, rz));
+        if (!region) continue;
+        const lists = region.objects;
+        for (let t = 0; t < lists.length; t++) {
+          const list = lists[t];
+          for (let i = 0; i < list.length; i++) {
+            const o = list[i];
+            if (o.contained || !collidesByRule(o)) continue;
+            const def = this.defOf(o.model);
+            if (!def || def.particle) continue;
+            const b = def.bounds;
+            if (!b || !b.min || !b.max || b.min.length < 3 || b.max.length < 3) continue;
+            if (this.pack.isFlora?.(def) === true) continue;
+            const ax = b.min[0];
+            const bx = b.max[0];
+            const ay = b.min[1];
+            const by = b.max[1];
+            const az = b.min[2];
+            const bz = b.max[2];
+            const hx = Math.abs(bx - ax) / 2;
+            const hz = Math.abs(bz - az) / 2;
+            const top = Math.abs(by - ay);
+            if (!(hx > 0.05 && hz > 0.05 && top > 0) || !Number.isFinite(hx + hz + top)) continue;
+            // The box's own middle, turned with the object, and its local X axis on the ground.
+            q.copy(o.q);
+            solidV.set((ax + bx) / 2, 0, (az + bz) / 2).applyQuaternion(q);
+            const cx = o.x + solidV.x;
+            const cz = o.z + solidV.z;
+            if (cx < x0 || cz < z0 || cx > x1 || cz > z1) continue;
+            solidV.set(1, 0, 0).applyQuaternion(q);
+            const l = Math.sqrt(solidV.x * solidV.x + solidV.z * solidV.z);
+            const cos = l > 1e-6 ? solidV.x / l : 1;
+            const sin = l > 1e-6 ? solidV.z / l : 0;
+            box.x = cx;
+            box.z = cz;
+            box.hx = hx;
+            box.hz = hz;
+            box.cos = cos;
+            box.sin = sin;
+            box.top = top;
+            box.room = false;
+            if (!visit(box)) return;
+            // A compound wider than `roomsOver`: its rooms (every cell past its outside, cell 0), each its own box in
+            // the building's own frame turned with it, its top the room's over the building's origin, which stands on
+            // its ground line. A room under the ground has no top over it and is left out.
+            const cells = def.cells;
+            if (!cells || !((hx > hz ? hx : hz) > roomsOver)) continue;
+            for (let c = 0; c < cells.length; c++) {
+              const cell = cells[c];
+              if (!(cell.index > 0)) continue;
+              const cb = cell.bounds;
+              if (!cb || !cb.min || !cb.max || cb.min.length < 3 || cb.max.length < 3) continue;
+              const rhx = Math.abs(cb.max[0] - cb.min[0]) / 2;
+              const rhz = Math.abs(cb.max[2] - cb.min[2]) / 2;
+              const rtop = Math.max(cb.min[1], cb.max[1]);
+              if (!(rhx > 0.05 && rhz > 0.05 && rtop > 0) || !Number.isFinite(rhx + rhz + rtop)) continue;
+              solidV.set((cb.min[0] + cb.max[0]) / 2, 0, (cb.min[2] + cb.max[2]) / 2).applyQuaternion(q);
+              box.x = o.x + solidV.x;
+              box.z = o.z + solidV.z;
+              box.hx = rhx;
+              box.hz = rhz;
+              box.cos = cos;
+              box.sin = sin;
+              box.top = rtop;
+              box.room = true;
+              if (!visit(box)) return;
+            }
+          }
+        }
+      }
+    }
   }
 
   /** How many of the layout's objects lie dormant, of a world state this world does not stand in (`worldState.ts`). */

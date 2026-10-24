@@ -57,6 +57,8 @@ const SECTION_DEFS = [
   { key: 'physics', parent: '' },
   { key: 'camera', parent: '' },
   { key: 'audio', parent: '' },
+  // The moving air's frame (`World.updateAir`, the volumetrics): its window, its sources and its step, on the main thread.
+  { key: 'air', parent: '' },
   { key: 'hud', parent: '' },
   // The material scan a few times a second (step 6): the roots added since, or the whole scene.
   { key: 'scan', parent: '' },
@@ -96,10 +98,10 @@ const SECTION_DEPTH = SECTION_DEFS.map((d) => {
 // Passes: what the renderer is drawing for, so every draw is counted against it.
 
 /** A kind of pass, for `perf.passBegin(PASS.world)`. `other` is anything drawn outside those. */
-export const PASS = Object.freeze({ shadows: 0, world: 1, interior: 2, doorways: 3, weather: 4, post: 5, other: 6 });
-const PASS_NAMES = ['shadows', 'world', 'interior', 'doorways', 'weather', 'post', 'other'] as const;
+export const PASS = Object.freeze({ shadows: 0, world: 1, interior: 2, doorways: 3, weather: 4, post: 5, other: 6, air: 7 });
+const PASS_NAMES = ['shadows', 'world', 'interior', 'doorways', 'weather', 'post', 'other', 'air'] as const;
 const NPASS = PASS_NAMES.length;
-const PASS_SECTION = [SEC.shadows, SEC.worldPass, SEC.interiors, SEC.doorways, SEC.weather, SEC.post, -1];
+const PASS_SECTION = [SEC.shadows, SEC.worldPass, SEC.interiors, SEC.doorways, SEC.weather, SEC.post, -1, SEC.air];
 /** What is counted per pass kind. */
 const PF = { draws: 0, skinned: 1, instanced: 2, instances: 3, triangles: 4, calls: 5 } as const;
 const NPF = 6;

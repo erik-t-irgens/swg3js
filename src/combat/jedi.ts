@@ -874,6 +874,9 @@ export class JediKit implements Kit {
     // camera's forward, which is the same cone the bodies above are chosen with. It is measured from
     // `worldPos` and not `pos`, because a prop only ever stands in the world's own frame.
     shoveLooseProps(player.worldPos, 16, sign, tmp, sign > 0 ? 18 : 10);
+    // The moving air (the volumetrics; null while they are off): the same cone, out to the same 16 m. Never aboard, where
+    // the shove happens in a hull's rooms and not out in the air.
+    if (!player.aboard) world.air?.force(player.worldPos.x, player.worldPos.y, player.worldPos.z, tmp.x, tmp.z, 1, sign, 16);
   }
 
   /** Repulse: a blast in every direction from the player. */
@@ -903,6 +906,8 @@ export class JediKit implements Kit {
     }
     // Every loose prop within reach, in every direction: no cone, as the bodies above take none.
     shoveLooseProps(player.worldPos, 10, 1, null, 20);
+    // And the moving air, all round to the same 10 m.
+    if (!player.aboard) world.air?.force(player.worldPos.x, player.worldPos.y, player.worldPos.z, 0, 0, 1, 1, 10);
   }
 
   /**

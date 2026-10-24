@@ -43,6 +43,15 @@ export const CHUNK_RES = 32;
  */
 export const FAMILY_TUNE = { familyChunks: 192 };
 
+/**
+ * A chunk's two indices as one small integer, which a map takes as a key with nothing made (the far grids' and the
+ * regions' pattern), or -1 past 4095 chunks either way on an axis (262 km, past anything the game has).
+ */
+export function familyChunkNumber(cx: number, cz: number): number {
+  if (cx < -4095 || cx > 4095 || cz < -4095 || cz > 4095) return -1;
+  return (cx + 4096) * 8192 + (cz + 4096);
+}
+
 // The grid itself and the lookup into it live beside the footsteps that read them, where a test of what
 // is underfoot reads them without a terrain; a rule about what is underfoot that nothing can check is the
 // kind that quietly goes wrong. (This module loads in node too now: `groundAlign.test.ts` builds chunks.)
@@ -334,11 +343,19 @@ export class Terrain {
     if (r.families) {
       const key = `${cx},${cz}`;
       this.chunkFamilies.delete(key);
-      this.chunkFamilies.set(key, { fams: r.families, ox: origin.x, oz: origin.z, step: CHUNK_SIZE / CHUNK_RES, w: CHUNK_RES + 3 });
+      const grid: FamilyGrid = { fams: r.families, ox: origin.x, oz: origin.z, step: CHUNK_SIZE / CHUNK_RES, w: CHUNK_RES + 3 };
+      this.chunkFamilies.set(key, grid);
+      // Filed a second time by number, so the moving air's strips can ask on a frame with no key built (`familyIdAt`).
+      const n = familyChunkNumber(cx, cz);
+      if (n >= 0) this.familyByNumber.set(n, grid);
       while (this.chunkFamilies.size > FAMILY_TUNE.familyChunks) {
         const oldest = this.chunkFamilies.keys().next().value as string | undefined;
         if (oldest === undefined) break;
+        const gone = this.chunkFamilies.get(oldest);
         this.chunkFamilies.delete(oldest);
+        const comma = oldest.indexOf(',');
+        const on = familyChunkNumber(Number(oldest.slice(0, comma)), Number(oldest.slice(comma + 1)));
+        if (on >= 0 && this.familyByNumber.get(on) === gone) this.familyByNumber.delete(on);
       }
     }
     return { geometry: r.geometry, heights: r.heights!, origin };
@@ -355,6 +372,24 @@ export class Terrain {
   familyAt(x: number, z: number): number | null {
     const g = this.chunkFamilies.get(`${Math.floor(x / CHUNK_SIZE)},${Math.floor(z / CHUNK_SIZE)}`);
     return g ? sampleFamily(g, x, z) : null;
+  }
+
+  /** The chunks' family grids by number (`familyChunkNumber`), beside the string-keyed map that owns them. */
+  private readonly familyByNumber = new Map<number, FamilyGrid>();
+
+  /**
+   * `familyAt` with no key built: the family at a point, 0 for none painted and -1 where no chunk is built (null's
+   * place, so the answer is always a small integer). The moving air's strips ask it for many cells a frame.
+   */
+  familyIdAt(x: number, z: number): number {
+    const n = familyChunkNumber(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+    if (n < 0) return -1;
+    const g = this.familyByNumber.get(n);
+    if (!g) return -1;
+    const i = Math.round((x - g.ox) / g.step) + 1;
+    const j = Math.round((z - g.oz) / g.step) + 1;
+    if (i < 0 || j < 0 || i >= g.w || j >= g.w) return -1;
+    return g.fams[j * g.w + i] ?? 0;
   }
 
   /**

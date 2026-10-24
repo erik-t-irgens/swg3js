@@ -125,7 +125,14 @@ import { ShadowHold, ShadowMovers, listVehicleMovers, moverGroundInto, shadowCam
 import { SHADOW_SPLIT_TUNE, shadowSplitsVersion, softShare, splitBreaks } from './shadowSplits.ts';
 import { ShadowBatches, shadowBatchMaterial } from './shadowBatches.ts';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
-import { Dust } from '../vehicles/dust';
+import { Dust, type GrainGround } from '../vehicles/dust';
+import { AirField, newAirFrameInput, type AirWorld } from './volumetrics/airField.ts';
+import type { GroundSampler } from './volumetrics/airRaster.ts';
+import type { SolidBoxSource } from './volumetrics/airObstacles.ts';
+import { fillResponseTable, type FamilyFacts } from './volumetrics/groundResponse.ts';
+import { sheddingCount, stormSheetFactor } from './volumetrics/airMath.ts';
+import { AIR_TUNE } from './volumetrics/airTune.ts';
+import { VOL_TUNE } from './volumetrics/volSettings.ts';
 import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../vehicles/garage';
 import { fitKey, type ResolvedFit } from '../vehicles/shipFit';
 import { inTurn } from '../vehicles/shipMounts';
@@ -886,6 +893,54 @@ export class World {
   private readonly dust = new Dust();
   private dustDue = 0;
   private readonly dustColor = new THREE.Color();
+  /**
+   * The moving air (`src/world/volumetrics/airField.ts`): null unless the volumetrics master was on at a loading screen
+   * (`ensureAir`, class A in its first wave), and then kept for the session, its materials built once behind that screen
+   * and never again. Every caller reaches it as `world.air?.…`, so with the master off nothing is made and nothing runs.
+   */
+  air: AirField | null = null;
+  /** What the field is told each frame, kept and refilled (`updateAir`). */
+  private readonly airInput = newAirFrameInput();
+  /** The ground as the field asks it: the cached heights only (never `heightAt`), the chunks' families, the liquid. */
+  private readonly airGround: GroundSampler = {
+    sample: (x, z, out) => {
+      const t = this.terrain;
+      if (!t) return false;
+      let h = t.nearHeightIfCached(x, z);
+      if (h === null) h = t.heightIfCached(x, z, FAR_TILE, FAR_RES);
+      if (h === null || !Number.isFinite(h)) return false;
+      const family = t.familyIdAt(x, z);
+      // On a world with families, a point no built chunk covers is not known yet and is asked again later.
+      if (family < 0 && t.swg) return false;
+      out.h = h;
+      out.family = family;
+      out.medium = this.lavaAt(x, h, z) > 0 ? 3 : t.waterHeightAt(x, z) > h ? 2 : 1;
+      return true;
+    },
+  };
+  /** The streamer's solid boxes, through whichever streamer the world holds now. */
+  private readonly airBoxes: SolidBoxSource = {
+    forEachSolidBox: (x0, z0, x1, z1, box, visit, roomsOver) => {
+      this.layoutStream?.forEachSolidBox(x0, z0, x1, z1, box, visit, roomsOver);
+    },
+  };
+  private readonly airWorld: AirWorld = { ground: this.airGround, boxes: this.airBoxes, hulls: this.vehicles };
+  /** What the family tables were last made from: the ground's textures and the terrain's own generator, by identity. */
+  private airTablesFor: { textures: unknown; swg: unknown } = { textures: undefined, swg: undefined };
+  /** The ground a grain falls onto while the air's dust and kick-up are on (`Dust.ground`), refilled each frame from the field. */
+  private readonly grainGround: GrainGround = { ox: 0, oz: 0, cell: 1, n: 0, height: new Float32Array(0), known: new Uint8Array(0), gravity: 9.8, rest: 0.4 };
+  private readonly grainColour = new THREE.Color();
+  /** A blast's grains, thrown into the dust pool in the colour of the ground under it (the forces call it). */
+  private readonly throwBlastGrains = (x: number, y: number, z: number, count: number, speed: number): void => {
+    const air = this.air;
+    if (!air || !this.dust.ground) return;
+    this.airGroundColour(air, x, z, this.grainColour);
+    this.dust.throwGrains(x, y, z, count, speed, this.grainColour);
+  };
+  /** Motes thrown since the console last asked (`air().motes`). */
+  private airMotes = 0;
+  /** The frame report's soft off (`perf({ ab: { key: 'volumetrics' } })`): the air held still, its targets and programs kept. */
+  airSoftOff = false;
   /**
    * A fixed pool of lights for building interiors, on the interior layer only: the cell the
    * player is in borrows them. A fixed count keeps the shader variants stable, so entering a new
@@ -2052,6 +2107,14 @@ export class World {
     // (src/combat/clash.ts). The step holds no renderer between steps, so there is nothing here
     // to free -- this is only the ring saying so rather than waiting for the clock to go back.
     clashes.clear();
+    // The moving air keeps its materials for the session and lets this world go: the next frame places its window
+    // afresh (the jump rule, every field to its inflow), the family tables are made again from the next world's ground,
+    // no grain falls onto the old raster and the storm sheets are today's until the volume draws again.
+    this.air?.forgetWorld();
+    this.airTablesFor = { textures: undefined, swg: undefined };
+    this.airMotes = 0;
+    this.dust.ground = null;
+    this.weather.stormSheetScale = 1;
     // Every bed, emitter and weather channel let go before the things they follow are disposed: the
     // particle effects go a few lines down, and a loop left on one would follow a point in a world
     // that has gone. The sky and the effects are wired again on the next planet's first frames.
@@ -3057,6 +3120,10 @@ export class World {
     if (this.dustDue < 0.05) return;
     const interval = this.dustDue;
     this.dustDue = 0;
+    // The volumetrics' dust (`src/world/volumetrics/`): with the master and its dust on and the field running, a machine
+    // throws motes only where the ground sheds them (the response's dust under it, so none on rock, paving or a
+    // liquid) and, with the kick-up on, as grains that fall back onto the air's own height raster. Otherwise, today's.
+    const air = this.air !== null && VOL_TUNE.on && VOL_TUNE.dust && this.air.forces.active ? this.air : null;
     for (const v of this.vehicles) {
       const speed = Math.abs(v.speed);
       if (v.spec.animal || v.groundedPoints < 2 || v.onWater || speed < 2.5) continue;
@@ -3069,8 +3136,139 @@ export class World {
       tmpV.set(0, 0, -l * 0.35).applyQuaternion(tmpQ).add(v.pos);
       const vel = v.body.linvel();
       const count = Math.round(interval * (12 + 70 * Math.min(1, speed / 35)) * (0.6 + Math.min(1.4, w * 0.35)));
+      if (air) {
+        const w0 = air.win;
+        // The motes a second the count above is made of, before its rounding: the ground's share is judged on a fixed
+        // twentieth of a second, so what rock throws does not hang on the frame rate (`sheddingCount`).
+        const perSecond = (12 + 70 * Math.min(1, speed / 35)) * (0.6 + Math.min(1.4, w * 0.35));
+        const shed = sheddingCount(count, perSecond, interval, air.raster.dustAt(w0.ox, w0.oz, w0.cell, tmpV.x, tmpV.z));
+        this.airMotes += shed;
+        if (shed > 0) this.dust.spawn(tmpV.x, ground, tmpV.z, shed, vel.x, vel.z, Math.max(0.6, w * 0.9), this.groundColorAt(tmpV.x, tmpV.z, this.dustColor), VOL_TUNE.kickUp);
+        continue;
+      }
       this.dust.spawn(tmpV.x, ground, tmpV.z, count, vel.x, vel.z, Math.max(0.6, w * 0.9), this.groundColorAt(tmpV.x, tmpV.z, this.dustColor));
     }
+  }
+
+  /** The dust's colour the air's raster holds at a point (sRGB bytes), into `out` in linear light; the fallback's outside it. */
+  private airGroundColour(air: AirField, x: number, z: number, out: THREE.Color): THREE.Color {
+    const w = air.win;
+    const r = air.raster;
+    const i = Math.floor((x - w.ox) / w.cell);
+    const j = Math.floor((z - w.oz) / w.cell);
+    if (i >= 0 && j >= 0 && i < r.n && j < r.n && r.known[j * r.n + i]) {
+      const k = (j * r.n + i) * 4;
+      return out.setRGB(r.colour[k] / 255, r.colour[k + 1] / 255, r.colour[k + 2] / 255, THREE.SRGBColorSpace);
+    }
+    return out.setHex(AIR_TUNE.dust.fallbackColour, THREE.SRGBColorSpace);
+  }
+
+  /**
+   * Make the moving air if the volumetrics master is on and the world has none (class A: an arrival's loading screen
+   * calls it, never a frame). The field is kept for the session; with the master off nothing is made. Answers it.
+   */
+  ensureAir(): AirField | null {
+    if (this.air || !VOL_TUNE.on || !this.renderer) return this.air;
+    this.air = new AirField(this.renderer, VOL_TUNE, this.airWorld);
+    this.air.forces.onGrains = this.throwBlastGrains;
+    this.airTablesFor = { textures: undefined, swg: undefined };
+    return this.air;
+  }
+
+  /**
+   * Each family's response and dust colour for this world (`groundResponse.ts`, the ground's mean colours), made when
+   * the world's terrain or ground textures change -- an arrival's event, never a steady frame's -- and every cell of the
+   * raster asked again so the new tables reach it.
+   */
+  private airTables(air: AirField): void {
+    const textures = this.groundTextures;
+    const swg = this.terrain?.swg ?? null;
+    const was = this.airTablesFor;
+    if (was.textures === textures && was.swg === swg) return;
+    this.airTablesFor = { textures, swg };
+    const families: FamilyFacts[] = [];
+    if (swg) for (const f of swg.template.generator.shaderGroup.families.values()) families.push(f);
+    else if (this.terrain?.demFamilies) for (const [name, id] of this.terrain.demFamilies) families.push({ id, name, surface: '', children: [] });
+    let most = 0;
+    for (const f of families) if (f.id > most) most = f.id;
+    const size = Math.min(4096, most + 1);
+    const response = new Uint8Array(size * 4);
+    const colour = new Uint8Array(size * 4);
+    fillResponseTable(this.packId ?? '', families, response);
+    const c = new THREE.Color();
+    for (const f of families) {
+      if (!(f.id >= 0 && f.id < size)) continue;
+      const mean = textures?.averageColor(f.id);
+      if (!mean) continue;
+      c.copy(mean).convertLinearToSRGB();
+      colour[f.id * 4] = Math.round(Math.min(1, Math.max(0, c.r)) * 255);
+      colour[f.id * 4 + 1] = Math.round(Math.min(1, Math.max(0, c.g)) * 255);
+      colour[f.id * 4 + 2] = Math.round(Math.min(1, Math.max(0, c.b)) * 255);
+      colour[f.id * 4 + 3] = 255;
+    }
+    air.raster.familyResponse = response;
+    air.raster.familyColour = colour;
+    air.raster.clear();
+  }
+
+  /**
+   * The moving air's frame (the design's §2.4): right after the weather's view half, with this frame's camera. The window
+   * placed, the rasters' strips filled, the obstacles, the engines, the step while something reads it; the grains' ground
+   * and the storm sheets' thinning handed over. In space, on the ground the client never drew, with the camera in a
+   * building's view (last frame's draw) or the player in a cell, the field does nothing and says why. Allocates nothing.
+   */
+  updateAir(dt: number, simulate: boolean, viewInBuilding: boolean, reading: boolean): void {
+    const air = this.air;
+    if (!air || !this.camera) {
+      this.weather.stormSheetScale = 1;
+      this.dust.ground = null;
+      return;
+    }
+    const inp = this.airInput;
+    const cam = this.camera.position;
+    inp.dt = dt;
+    inp.simulate = simulate;
+    inp.camX = cam.x;
+    inp.camY = cam.y;
+    inp.camZ = cam.z;
+    const ws = this.weather.state;
+    inp.windHeading = ws.windHeading;
+    inp.windSpeed = ws.windSpeed;
+    inp.storm = ws.enabled ? this.weather.fx.dust : 0;
+    tmpV.copy(this.sun.position).sub(this.sun.target.position);
+    if (tmpV.lengthSq() > 1e-9) tmpV.normalize();
+    else tmpV.set(0, 1, 0);
+    inp.sunX = tmpV.x;
+    inp.sunY = tmpV.y;
+    inp.sunZ = tmpV.z;
+    inp.time = this.simTime;
+    // Something reads the air (§2.4): the volume, on the chain and wanted, which is Effects on with its switch on. With
+    // nothing reading it the rasters are kept (the grains read them) and nothing is stepped.
+    inp.reading = reading;
+    inp.where = this.airSoftOff ? 'held off by the frame report' : !this.planet ? 'no world' : this.planet.space ? 'in space there is no air' : this.groundTextures?.empty ? 'the ground here is never drawn' : viewInBuilding ? 'the camera is in a building' : this.inside ? 'the player is in a building' : null;
+    if (inp.where === null) this.airTables(air);
+    const hull = this.weatherHull;
+    const b = hull?.spec.bounds;
+    air.setHull(hull && b ? hull.group.matrixWorld : null, b ? b.min : null, b ? b.max : null);
+    air.update(inp);
+    // The grains fall onto the field's own height raster while its dust and the kick-up are on.
+    if (air.forces.active && VOL_TUNE.dust && VOL_TUNE.kickUp) {
+      const g = this.grainGround;
+      const w = air.win;
+      g.ox = w.ox;
+      g.oz = w.oz;
+      g.cell = w.cell;
+      g.n = air.raster.n;
+      g.height = air.raster.height;
+      g.known = air.raster.known;
+      g.gravity = AIR_TUNE.grains.gravity;
+      g.rest = AIR_TUNE.grains.rest;
+      this.dust.ground = g;
+    } else this.dust.ground = null;
+    // The game's own storm sheets thinned while the volume drew the storm (it says so a frame late), else today's.
+    this.weather.stormSheetScale = stormSheetFactor(air.volumeDrew, inp.storm, VOL_TUNE.stormThin);
+    air.volumeDrew = false;
+    air.noteDust(this.airMotes, this.dust.grainsFlying, this.dust.grainsLying, this.weather.stormSheetScale);
   }
 
   /** The colour of the ground at a point: its texture family's mean on a real planet, the palette's elsewhere. */
@@ -5973,6 +6171,10 @@ export class World {
       this.withTarget(r, target, () => r.compile(o, camera));
       this.programs.countLinks(resolveLinks(r, o));
     }
+    // The moving air's own materials, with the volumetrics master on: each compiled for the target it draws into, its
+    // link finished (`AirField.warm`). Their keys carry no light, fog or tone curve, so the sweep for either effects
+    // target finds them built after the first.
+    if (this.air && VOL_TUNE.on) await this.air.warm();
     return (r.info.programs?.length ?? 0) - before;
   }
 

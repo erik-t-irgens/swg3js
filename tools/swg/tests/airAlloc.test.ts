@@ -1,0 +1,61 @@
+// Nothing allocates in a frame (the volumetrics design's rule 4, §8 Tests): `airAlloc.ts` in a node process of its own,
+// cleanest of three runs, over 100,000 steady frames of the moving air's CPU side -- the real `AirField.update` with ten
+// engines and two downwashes read from stand-in hulls that throw if asked for a velocity, a blast and a push queued
+// every frame, the rasters with the window standing still, the solver's steps and every uniform written, the dust and
+// the light, and the dust pool's grains stepped onto the field's raster -- held under 0.2 bytes a frame; a frame whose
+// window moves at 167 m/s (every frame of a ride or a flight: the rasters shifted, the strips asked, the shifts carried)
+// held to the same line, since its ground is a stand-in that makes nothing and whatever it makes is the air's own (it
+// made 13 bytes a frame until the raster's shift stopped handing the window's mean across a call); and with the master
+// off, a million calls of each method of the force API and of the field's frame make nothing.
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+let checks = 0;
+const ok = (cond: boolean, what: string): void => {
+  assert.ok(cond, what);
+  checks++;
+  console.log(`ok   ${what}`);
+};
+const note = (s: string): void => console.log(`note ${s}`);
+const script = fileURLToPath(new URL('./airAlloc.ts', import.meta.url));
+const run = (...args: string[]): string => execFileSync(process.execPath, ['--expose-gc', '--allow-natives-syntax', script, ...args], { encoding: 'utf8', timeout: 600_000 }).trim().split('\n').pop() ?? '{}';
+
+type Moving = { frames: number; made: number; scavenges: number; movedShare: number; resets: number };
+type Steady = { skipped?: string; frames: number; made: number; scavenges: number; stepping: boolean; engines: number; grains: number; moving: Moving };
+const clean = (m: { made: number; scavenges: number; frames: number }): boolean => m.scavenges === 0 && m.made / m.frames < 0.2;
+const better = (a: { made: number; scavenges: number }, b: { made: number; scavenges: number }): boolean => a.scavenges < b.scavenges || (a.scavenges === b.scavenges && a.made < b.made);
+// Cleanest of three runs, the steady frame and the moving one each on its own (a run caught while the engine is still
+// optimising its loop boxes numbers in the code it falls back on).
+let best: Steady | null = null;
+let bestMoving: Moving | null = null;
+for (let i = 0; i < 3; i++) {
+  const got = JSON.parse(run()) as Steady;
+  if (got.skipped) {
+    best = got;
+    break;
+  }
+  if (!best || better(got, best)) best = got;
+  if (!bestMoving || better(got.moving, bestMoving)) bestMoving = got.moving;
+  if (clean(best) && clean(bestMoving)) break;
+}
+if (!best) throw new Error('no measure');
+if (best.skipped) note(`the allocation measure was skipped: ${best.skipped}`);
+else {
+  ok(best.stepping && best.engines === 12 && best.grains > 0, `the frame measured steps the air with ${best.engines} engines in its table (ten and two downwashes) and ${best.grains} grains in the pool`);
+  const per = best.made / best.frames;
+  ok(best.scavenges === 0 && per < 0.2, `a steady frame makes ${per.toFixed(3)} bytes (${best.made} over ${best.frames} frames, ${best.scavenges} collections), under 0.2`);
+  const mv = bestMoving!;
+  ok(mv.movedShare > 0.5 && mv.resets === 0, `the moving frames move the window a cell or more on ${(mv.movedShare * 100).toFixed(0)}% of them and never jump`);
+  const mper = mv.made / mv.frames;
+  ok(mv.scavenges === 0 && mper < 0.2, `a frame whose window moves at 167 m/s makes ${mper.toFixed(3)} bytes (${mv.made} over ${mv.frames} frames, ${mv.scavenges} collections), under 0.2: the air's own, its ground a stand-in that makes nothing`);
+}
+
+const off = JSON.parse(run('off')) as { skipped?: string; off?: Record<string, { made: number; scavenges: number }>; active?: boolean };
+if (off.skipped) note(`the master-off measure was skipped: ${off.skipped}`);
+else {
+  ok(off.active === false, 'with the master off the forces are inactive');
+  for (const [k, m] of Object.entries(off.off ?? {})) ok(m.scavenges === 0 && m.made / 1_000_000 < 0.01, `with the master off a million calls of ${k} make ${(m.made / 1_000_000).toFixed(4)} bytes each, nothing`);
+}
+
+console.log(`\n${checks} checks passed`);

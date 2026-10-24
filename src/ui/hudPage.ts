@@ -8,12 +8,23 @@
 // the test needs no browser at all.
 import { HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, type Settings } from '../core/settings.ts';
 
-/** One control on a settings page. `choice` is a list whose values are words rather than numbers. */
+/**
+ * One control on a settings page. `choice` is a list whose values are words rather than numbers. `preset` is a list
+ * of named sets of values (the volumetrics' Low to Ultra): it writes each value of the set chosen through the page's
+ * own setter and stores nothing of its own, and which set the settings hold is worked out from them each time the
+ * page is drawn (`presetOf`), Custom when none; its `key` is the switch it belongs to, for the greying alone.
+ */
 export interface Knob {
   key: keyof Settings;
   label: string;
   hint: string;
-  kind: 'range' | 'toggle' | 'select' | 'choice';
+  kind: 'range' | 'toggle' | 'select' | 'choice' | 'preset';
+  /** A preset row's sets, in the order shown. */
+  presets?: readonly { name: string; label: string; values: Readonly<Partial<Record<keyof Settings, number | boolean | string>>> }[];
+  /** A preset row's reading of the settings: the name of the set they hold, or one that is none of `presets` (Custom). */
+  presetOf?: (s: Settings) => string;
+  /** The words shown for a name `presetOf` answers that is none of the sets. */
+  otherLabel?: string;
   min?: number;
   max?: number;
   step?: number;

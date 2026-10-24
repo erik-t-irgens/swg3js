@@ -38,6 +38,12 @@ export interface FxInstallDeps {
    * the first, which would take a shared pass's geometry and program with it.
    */
   specks?: () => FxPass;
+  /**
+   * Makes the volumetrics' volume pass (`src/core/fx/airVolume.ts`, reading the moving air through `AirSource`). A
+   * factory for the specks' reason, handed over only while the volumetrics master is on: with it off the chain is
+   * built exactly as it always was, with no such pass registered at all.
+   */
+  air?: () => FxPass;
 }
 
 export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
@@ -62,6 +68,9 @@ export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
   // nothing at all, which is the state of every install that has not run the `clouds` command.
   // Where it sits in the chain is the registry's business, not this line's.
   postfx.registerPass(new CloudsPass());
+  // The dust in the moving air, when the game hands over a way to make it (the volumetrics master on). Where it sits
+  // in the chain -- after the clouds, before the god rays -- is the registry's.
+  if (deps.air) postfx.registerPass(deps.air());
   // The look under water needs nothing from the game here either: it reads whether the camera is
   // under a surface, how deep, and which body's colour and opacity from the frame context, and asks
   // for no product. It draws on no frame the camera is dry. Where it sits in the chain is the

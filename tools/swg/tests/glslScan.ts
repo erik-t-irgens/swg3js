@@ -2,8 +2,13 @@
 // shader by its text pins its words and not its program: the blade glow pass once declared `own` twice in
 // one scope of `bladeLight`, which every GLSL compiler refuses, and the whole pass stayed unlinked in every
 // browser while every test passed. These helpers are shared by the tests that read a shader's text
-// (`bladeGlow.test.ts`, `ssao.test.ts`): one GLSL function's text, the source as one variant of its
-// `#ifdef` branches would be compiled, and the one fault a compiler refuses that no type check here sees.
+// (`bladeGlow.test.ts`, `ssao.test.ts`, `airShaders.test.ts`): one GLSL function's text, the source as one variant of
+// its `#ifdef` branches would be compiled, and the one fault a compiler refuses that no type check here sees.
+//
+// And the volumetrics handoff's two checkers, ported (there is no Python on this machine, and theirs examined none of the
+// game's own shader strings): a reserved word used as a name, unbalanced brackets, one of three's chunks included before
+// what it reads is declared, a size written into the text, and a uniform a shader declares that its material does not
+// (`reservedWords`, `unbalanced`, `chunkBeforeNeeds`, `sizesInText`, `uniformNames`).
 
 /** One GLSL function's whole text, from its return type to its closing brace; '' when there is none. */
 export function glslFunction(glsl: string, name: string): string {
@@ -159,6 +164,163 @@ export function redeclared(glsl: string): string[] {
       declare(stack[stack.length - 1], name);
       i++;
     }
+  }
+  return out;
+}
+
+/** The text with its comments and preprocessor lines taken out: what the word checks read. */
+function codeOf(glsl: string): string {
+  return glsl
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+    .replace(/^\s*#[^\n]*/gm, ' ');
+}
+
+/**
+ * GLSL ES 3.00's reserved words (the handoff's list), which a shader may not use as names. `flat`, `smooth` and `layout`
+ * are reserved as names too but are qualifiers where they stand before a declaration or a `(`, which is allowed.
+ */
+const RESERVED = new Set(
+  'half double fixed input output filter active asm cast class common enum extern external goto inline interface long namespace noinline partition public resource row_major short sizeof static superp template this typedef union unsigned using volatile packed sample smooth flat centroid layout invariant precise subroutine noperspective buffer shared coherent restrict readonly writeonly'.split(
+    ' ',
+  ),
+);
+const QUALIFIER_WORDS = new Set(['flat', 'smooth', 'centroid', 'invariant', 'layout']);
+
+/** Every reserved word the text uses as a name (comments and directives aside; a qualifier in its place allowed). */
+export function reservedWords(glsl: string): string[] {
+  const code = codeOf(glsl);
+  const out = new Set<string>();
+  const re = /\b([A-Za-z_]\w*)\b(\s*\(?)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(code))) {
+    const w = m[1];
+    if (!RESERVED.has(w)) continue;
+    const after = code.slice(m.index + w.length).match(/^\s*(\S+)/)?.[1] ?? '';
+    // A qualifier stands before a type or a qualifier list: `flat out vec2 x;`, `layout(location = 0) out ...`.
+    if (QUALIFIER_WORDS.has(w) && (w === 'layout' ? after.startsWith('(') : /^(in|out|varying|uniform|highp|mediump|lowp|float|int|uint|vec|ivec|uvec|mat)/.test(after))) continue;
+    out.add(w);
+  }
+  return [...out].sort();
+}
+
+/** Whether the code's braces and parentheses are unbalanced (comments and directives aside); the bracket that is off, or ''. */
+export function unbalanced(glsl: string): string {
+  const code = codeOf(glsl);
+  const count = (c: string): number => code.split(c).length - 1;
+  if (count('{') !== count('}')) return `{ ${count('{')} against } ${count('}')}`;
+  if (count('(') !== count(')')) return `( ${count('(')} against ) ${count(')')}`;
+  if (count('[') !== count(']')) return `[ ${count('[')} against ] ${count(']')}`;
+  return '';
+}
+
+/** Names three's own chunks reach for, which the surrounding shader must have declared before including them. */
+const CHUNK_NEEDS: Readonly<Record<string, readonly string[]>> = {
+  fog_vertex: ['mvPosition'],
+  worldpos_vertex: ['transformed'],
+  normal_fragment_maps: ['normal'],
+  dithering_fragment: ['gl_FragColor'],
+};
+
+/** Every chunk the text includes before declaring what it reads, as `chunk: name`. */
+export function chunkBeforeNeeds(glsl: string): string[] {
+  const out: string[] = [];
+  for (const [chunk, names] of Object.entries(CHUNK_NEEDS)) {
+    const at = glsl.indexOf(`#include <${chunk}>`);
+    if (at < 0) continue;
+    const before = glsl.slice(0, at);
+    for (const n of names) if (!new RegExp(`\\b${n}\\b`).test(before)) out.push(`${chunk}: ${n}`);
+  }
+  return out;
+}
+
+/**
+ * Every number written into the code that is one of `sizes` (a grid, a field, a window), as the literal and where it
+ * stands; a number only as an array's size (`[128]`) or a loop's bound (`< 48`, `<= 48`) is allowed, which is the one
+ * place a `MAX_*` constant may appear.
+ */
+export function sizesInText(glsl: string, sizes: readonly number[]): string[] {
+  const code = codeOf(glsl);
+  const out: string[] = [];
+  const re = /(?<![\w.])(\d+(?:\.\d*)?|\.\d+)(?![\w.])/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(code))) {
+    const v = Number(m[1]);
+    if (!sizes.includes(v)) continue;
+    const before = code.slice(Math.max(0, m.index - 3), m.index);
+    const after = code.slice(m.index + m[1].length, m.index + m[1].length + 1);
+    if (before.endsWith('[') && after === ']') continue;
+    if (/<=?\s?$/.test(before)) continue;
+    out.push(`${m[1]} at "${code.slice(Math.max(0, m.index - 24), m.index + m[1].length + 8).replace(/\s+/g, ' ').trim()}"`);
+  }
+  return out;
+}
+
+/** GLSL ES 3.00's own functions, constructors and keywords that stand before a `(` (what a shader may call without defining). */
+const GLSL_CALLABLE = new Set(
+  'if for while return switch texture texture2D textureLod textureGrad texelFetch textureSize textureProj vec2 vec3 vec4 ivec2 ivec3 ivec4 uvec2 uvec3 uvec4 bvec2 bvec3 bvec4 mat2 mat3 mat4 float int uint bool max min clamp mix step smoothstep exp exp2 log log2 pow sqrt inversesqrt abs sign floor ceil fract mod round trunc dot cross length distance normalize reflect refract sin cos tan asin acos atan sinh cosh tanh degrees radians any all not isnan isinf lessThan lessThanEqual greaterThan greaterThanEqual equal notEqual fwidth dFdx dFdy transpose inverse determinant outerProduct floatBitsToInt intBitsToFloat packHalf2x16 unpackHalf2x16 layout'.split(' '),
+);
+
+/**
+ * Every function the code calls that is neither GLSL's own nor defined in the text (comments and directives aside): a
+ * pass that calls a helper only another pass's text defines compiles in no browser, and node compiles nothing (the
+ * dust pass once called `finite4` with no `finite4` of its own and stayed unlinked).
+ */
+export function undefinedCalls(glsl: string): string[] {
+  const code = codeOf(glsl);
+  const defined = new Set<string>();
+  const def = /\b[A-Za-z_]\w*\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = def.exec(code))) defined.add(m[1]);
+  const out = new Set<string>();
+  const call = /\b([A-Za-z_]\w*)\s*\(/g;
+  while ((m = call.exec(code))) {
+    const n = m[1];
+    if (GLSL_CALLABLE.has(n) || defined.has(n)) continue;
+    out.add(n);
+  }
+  return [...out].sort();
+}
+
+/** Every uniform a GLSL text declares, by name (arrays by their name alone). */
+export function uniformNames(glsl: string): string[] {
+  const out = new Set<string>();
+  const re = /^\s*uniform\s+(?:(?:highp|mediump|lowp)\s+)?\w+\s+(\w+)\s*(?:\[[^\]]*\])?\s*;/gm;
+  const plain = codeOf(glsl);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(plain))) out.add(m[1]);
+  return [...out].sort();
+}
+
+/**
+ * The handoff's second checker, ported to this repository's own shape: in a TypeScript source, every write
+ * `<name>.uniforms.<key>` and, through an alias `const <a> = <x>.<name>.uniforms;` (or `= this.<name>.uniforms;`),
+ * every `<a>.<key>`, each with the materials it may be written to (an alias name reused for several materials in
+ * several functions stands for all of them, and a key is accepted if any of them declares it, as the handoff's did),
+ * so a test can hold each to the uniforms the material really has.
+ */
+export function uniformWrites(ts: string): { materials: string[]; key: string; via: string }[] {
+  const out: { materials: string[]; key: string; via: string }[] = [];
+  const seen = new Set<string>();
+  const add = (materials: string[], key: string, via: string) => {
+    const k = `${materials.join('/')}.${key}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ materials, key, via });
+  };
+  const direct = /\b(\w+)\.uniforms\.(\w+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = direct.exec(ts))) add([m[1]], m[2], `${m[1]}.uniforms`);
+  const aliases = new Map<string, Set<string>>();
+  const alias = /const (\w+) = (?:[\w.]*\.)?(\w+)\.uniforms;/g;
+  while ((m = alias.exec(ts))) {
+    if (!aliases.has(m[1])) aliases.set(m[1], new Set());
+    aliases.get(m[1])!.add(m[2]);
+  }
+  for (const [a, mats] of aliases) {
+    const use = new RegExp(`\\b${a}\\.((?:u|t)[A-Z]\\w*)\\b`, 'g');
+    let u: RegExpExecArray | null;
+    while ((u = use.exec(ts))) add([...mats].sort(), u[1], a);
   }
   return out;
 }

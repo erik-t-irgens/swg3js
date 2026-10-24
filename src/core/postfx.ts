@@ -27,7 +27,7 @@
 //   R12. Nothing is multisampled: the renderer resolves a multisampled target at the end of every
 //        render call, and the portal renderer makes a dozen a frame.
 import * as THREE from 'three';
-import { FX_PASSES, FX_PRODUCTS, FX_TYPICAL_CPU_MS, fxPassDef, fxPassIndex, fxProductDef, type FxPassDef, type FxPassId, type FxProductDef, type FxProductId, type FxSettings } from './fxRegistry.ts';
+import { FX_PASSES, FX_PRODUCTS, FX_TYPICAL_CPU_MS, fxPassDef, fxPassIndex, fxPassWanted, fxProductDef, type FxPassDef, type FxPassId, type FxProductDef, type FxProductId, type FxSettings } from './fxRegistry.ts';
 import { createContext, updateContext, type FxFrameContext, type FxFrameInput } from './fx/context';
 import type { FxPass, FxProduct, FxWarmItem } from './fx/pass';
 import { createFxQuad, FX_CAMERA } from './fx/pass';
@@ -255,10 +255,9 @@ export class PostFX {
    */
   passWanted(id: FxPassId): boolean {
     if (!this.byPassId.has(id)) return false;
-    const def = fxPassDef(id);
-    if (def.required) return true;
-    const setting = def.toggles.length > 0 && anyOn(this.settings, def.toggles);
-    return this.override[id] ?? setting;
+    // The registry's one rule, which the frame's own decision asks too: a pass whose `requires` are not all on (the
+    // volume with the volumetrics master off) is not wanted, and every other pass decides as it always did.
+    return fxPassWanted(fxPassDef(id), this.settings, this.override[id]);
   }
 
   /** Take the settings as they now are: flags and strengths, and a resize for a pass whose size is one of them. */
@@ -269,12 +268,60 @@ export class PostFX {
     // on either of the two and not on the resolution alone.
     const cloudQuality = this.settings.volumetricCloudQuality;
     const cloudAmount = this.settings.volumetricCloudAmount;
+    const s0 = this.settings;
+    const air = [s0.airVolumeResolution, s0.airVolumeAmount, s0.airVolumeSteps, s0.airVolumeHistory, s0.airVolumeShadows, s0.volumetrics];
     Object.assign(this.settings, settings);
     if (this.settings.ssaoResolution !== ssao) this.byPassId.get('ssao')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
     if (this.settings.waterReflectionResolution !== water) this.byPassId.get('waterReflections')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
     if (this.settings.volumetricCloudQuality !== cloudQuality || this.settings.volumetricCloudAmount !== cloudAmount) {
       this.byPassId.get('volumetricClouds')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
     }
+    // The volume takes its quality and strength from `setSize` too, never by reading the settings in a frame: its target
+    // is resized only when its share of the screen moved, and the rest are numbers it keeps.
+    if (
+      this.settings.airVolumeResolution !== air[0] ||
+      this.settings.airVolumeAmount !== air[1] ||
+      this.settings.airVolumeSteps !== air[2] ||
+      this.settings.airVolumeHistory !== air[3] ||
+      this.settings.airVolumeShadows !== air[4] ||
+      this.settings.volumetrics !== air[5]
+    ) {
+      this.byPassId.get('airVolume')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+    }
+  }
+
+  /**
+   * Compile the named passes' materials for where they draw and wait for their links, as `warmUp` does for every
+   * pass: a pass registered on a live chain at an arrival (the volume, when the volumetrics master was turned on
+   * after the chain was built) is warmed here behind that loading screen. Answers the programs built.
+   */
+  async warmPasses(ids: readonly FxPassId[]): Promise<number> {
+    const r = this.renderer;
+    const before = r.info.programs?.length ?? 0;
+    const jobs: Promise<unknown>[] = [];
+    const compileOn = (target: THREE.WebGLRenderTarget | null, object: THREE.Object3D) => {
+      const prev = r.getRenderTarget();
+      r.setRenderTarget(target);
+      try {
+        jobs.push(r.compileAsync(object, FX_CAMERA).catch(() => {}));
+      } finally {
+        r.setRenderTarget(prev);
+      }
+    };
+    const compiled: THREE.Object3D[] = [];
+    for (let i = 0; i < this.passes.length; i++) {
+      if (!ids.includes(this.passes[i].id)) continue;
+      for (const m of this.passes[i].materials()) {
+        const where = m.where ?? (this.defs[i].canBeLast ? 'both' : 'target');
+        const object = m.object ?? fullscreenMesh(m.material);
+        compiled.push(object);
+        if (where !== 'screen') compileOn(this.bufferA, object);
+        if (where !== 'target') compileOn(null, object);
+      }
+    }
+    await Promise.all(jobs);
+    for (const o of compiled) resolveLinks(r, o);
+    return (r.info.programs?.length ?? 0) - before;
   }
 
   begin(): void {
@@ -314,12 +361,8 @@ export class PostFX {
       const def = this.defs[i];
       const pass = this.passes[i];
       this.missing[i] = null;
-      let on: boolean;
-      if (def.required) on = true;
-      else {
-        const setting = def.toggles.length > 0 && anyOn(this.settings, def.toggles);
-        on = (this.override[def.id] ?? setting) && pass.enabled(ctx);
-      }
+      // `fxPassWanted` is the registry's rule (`passWanted` asks it too); a required pass never asks its own `enabled`.
+      let on = fxPassWanted(def, this.settings, this.override[def.id]) && (def.required || pass.enabled(ctx));
       if (on) {
         const needs = pass.needs(ctx);
         for (let k = 0; k < needs.length; k++) {

@@ -289,6 +289,11 @@ export class Weather {
   readonly roofs: RoofGrid;
   /** The effects chain's view of the state (a kept object). */
   readonly fx = { overcast: 0, rain: 0, snow: 0, dust: 0, wetness: 0 };
+  /**
+   * What a dust channel's rate is multiplied by: 1 - `volStormThin` while the volumetrics' dust draws the storm, and
+   * exactly 1 otherwise, which leaves the sheets today's (written by the world each frame, `stormSheetFactor`).
+   */
+  stormSheetScale = 1;
   /** Console: false skips the weather pass (to time it). */
   drawPass = true;
 
@@ -1009,6 +1014,9 @@ export class Weather {
     for (let i = this.channels.length - 1; i >= 0; i--) {
       const ch = this.channels[i];
       ch.handle.rateScale = active ? ch.weight * density * this.outside : 0;
+      // A dust storm's sheets thin while the volumetrics' dust draws the storm (`stormSheetFactor`): exactly 1, and so
+      // not applied at all, with the volumetrics off or not drawing it.
+      if (ch.kind === 'dust' && this.stormSheetScale !== 1) ch.handle.rateScale *= this.stormSheetScale;
       // The game's rain sheets are near solid; the setting thins rain alone, never dust or snow.
       ch.handle.alphaScale = ch.kind === 'rain' ? THREE.MathUtils.clamp(this.settings.rainOpacity, 0, 1) : 1;
       // Only an effect with particles of its own: the attachment-only ones (the light dust storm,
@@ -1172,6 +1180,7 @@ export class Weather {
       waitingFor: this.pendingRows?.name ?? null,
       shadows: r2(this.sky?.lighting.shadowScale ?? 1),
       channels: this.channels.map((c) => ({ file: c.file, kind: c.kind, rate: r2(c.handle.rateScale), particles: fx?.particlesOf(c.handle) ?? 0 })),
+      stormSheets: r2(this.stormSheetScale),
       failed: [...this.failedFiles],
       quads: fx?.quads ?? 0,
       roofs: this.roofs.describe(),
