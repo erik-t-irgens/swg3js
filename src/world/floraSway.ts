@@ -29,6 +29,7 @@ import { padLeafBox } from './cardLight.ts';
 import { warmLadder } from './personKeys.ts';
 import { chainHas, wrapCompile, type Wrappable } from './compileHooks.ts';
 import { SWAY_APPLY, SWAY_DEFAULTS, SWAY_PARS, cyclesPerWrap, measureSway, omegaOf, stepClock, swayExcursion, swayOffset, swayPeriod, swaySelected, type SwayFrame, type SwayPrimitive, type SwayShape, type SwayTune } from './swayMath.ts';
+import { applyTreesForm, windTreesChosen } from './windTrees.ts';
 
 export { SWAY_DEFAULTS, type SwayTune } from './swayMath.ts';
 
@@ -247,11 +248,30 @@ export function injectSway(shader: THREE.WebGLProgramParametersWithUniforms, mat
 export const SWAY_HOOK = Symbol('sway');
 const wrapped = new WeakSet<THREE.Material>();
 
+/**
+ * The trees' gust form each material was first wrapped in (the volumetrics' wave 7a, `windTrees.ts`): chosen at the arrival
+ * that wrapped it, and kept, so a material wrapped again (the cascades replaced its hook) keeps its form and its program.
+ * A material never wrapped (a depth combination's source) says it by `userData.swgSwayForm`.
+ */
+const formOf = new WeakMap<THREE.Material, boolean>();
+function swayFormOf(m: THREE.Material): boolean {
+  let f = formOf.get(m);
+  if (f === undefined) {
+    f = m.userData.swgSwayForm === true || (m.userData.swgSwayForm === undefined && windTreesChosen());
+    formOf.set(m, f);
+  }
+  return f;
+}
+
 /** The material scan's call (`World.adoptMaterials`), after the card rule's, in the same iteration: a material of a swaying model is wrapped. */
 export function swayWrap(m: THREE.Material): void {
   if (!SWAY_ON || typeof m.userData.swgSway !== 'string' || !(m as THREE.MeshStandardMaterial).isMeshStandardMaterial) return;
   if (chainHas(m.onBeforeCompile, SWAY_HOOK)) return;
-  wrapCompile(m as unknown as Wrappable, SWAY_HOOK, 'sway', (shader) => injectSway(shader as unknown as THREE.WebGLProgramParametersWithUniforms, m));
+  // The trees' gust form, where the arrival chose it: the chunk's output rewritten after it is put in, under a key of its own.
+  const form = swayFormOf(m);
+  wrapCompile(m as unknown as Wrappable, SWAY_HOOK, form ? 'sway-wind7' : 'sway', (shader) => {
+    if (injectSway(shader as unknown as THREE.WebGLProgramParametersWithUniforms, m) && form) applyTreesForm(shader as unknown as { vertexShader: string; uniforms: Record<string, unknown> }, false);
+  });
   if (!wrapped.has(m)) {
     wrapped.add(m);
     SWAY_STATS.wrapped++;
@@ -265,6 +285,13 @@ function swayDepthHook(this: THREE.Material, shader: THREE.WebGLProgramParameter
 function swayDepthKey(): string {
   return 'swg-sway-depth';
 }
+/** The trees' gust form's own: the chunk, then the form's rewrite (`windTrees.ts`), under a key of its own. */
+function swayDepthFormHook(this: THREE.Material, shader: THREE.WebGLProgramParametersWithUniforms): void {
+  if (injectSway(shader, this)) applyTreesForm(shader as unknown as { vertexShader: string; uniforms: Record<string, unknown> }, true);
+}
+function swayDepthFormKey(): string {
+  return 'swg-sway-depth-wind7';
+}
 
 const depthOf = new WeakMap<THREE.Material, THREE.MeshDepthMaterial>();
 
@@ -275,8 +302,10 @@ export function swayDepthFor(source: THREE.Material): THREE.MeshDepthMaterial {
     d = new THREE.MeshDepthMaterial();
     d.name = `sway depth (${source.name})`;
     d.userData.swgSway = source.userData.swgSway;
-    d.onBeforeCompile = swayDepthHook as unknown as THREE.MeshDepthMaterial['onBeforeCompile'];
-    d.customProgramCacheKey = swayDepthKey;
+    // The source's own form (the trees' gust form where the arrival that wrapped it chose it).
+    const form = swayFormOf(source);
+    d.onBeforeCompile = (form ? swayDepthFormHook : swayDepthHook) as unknown as THREE.MeshDepthMaterial['onBeforeCompile'];
+    d.customProgramCacheKey = form ? swayDepthFormKey : swayDepthKey;
     depthOf.set(source, d);
     SWAY_STATS.depthMaterials++;
     const depth = d;
@@ -326,7 +355,8 @@ export function swayDepthStandIns(meshes: readonly THREE.Mesh[], twin = ''): THR
     const g = mesh.geometry;
     const side = shadowSideOf(m);
     const instanced = (mesh as THREE.InstancedMesh).isInstancedMesh === true;
-    const key = `${instanced}|${side}|${s.alphaTest > 0}|${!!s.map}|${s.map?.channel ?? 0}|${!!s.alphaMap}|${!!g.attributes.uv1}|${!!g.attributes.uv2}`;
+    const form = swayFormOf(m);
+    const key = `${instanced}|${side}|${s.alphaTest > 0}|${!!s.map}|${s.map?.channel ?? 0}|${!!s.alphaMap}|${!!g.attributes.uv1}|${!!g.attributes.uv2}${form ? '|wind7' : ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const d = twin ? depthTwin(m, twin, key) : swayDepthFor(m);
@@ -364,8 +394,10 @@ function depthTwin(source: THREE.Material, tag: string, key: string): THREE.Mesh
     d = new THREE.MeshDepthMaterial();
     d.name = `sway depth stand-in (${tag})`;
     d.userData.swgSway = source.userData.swgSway;
-    d.onBeforeCompile = swayDepthHook as unknown as THREE.MeshDepthMaterial['onBeforeCompile'];
-    d.customProgramCacheKey = swayDepthKey;
+    // The combination's form is in its key (`|wind7`): the trees' gust form's twin its own hook and program key.
+    const form = swayFormOf(source);
+    d.onBeforeCompile = (form ? swayDepthFormHook : swayDepthHook) as unknown as THREE.MeshDepthMaterial['onBeforeCompile'];
+    d.customProgramCacheKey = form ? swayDepthFormKey : swayDepthKey;
     twins.set(k, d);
   }
   return d;
@@ -387,8 +419,22 @@ export const SWAY_COMBO_KEY = 'sway depth combination';
  * drawn, `swayDepthStandIns`).
  */
 let combos: THREE.Mesh[] | null = null;
-export function swayDepthCombos(): THREE.Mesh[] {
-  if (combos) return combos;
+let formCombos: THREE.Mesh[] | null = null;
+/**
+ * `form`: the trees' gust form's twelve (the volumetrics' wave 7a): the same combinations, their sources marked
+ * `swgSwayForm`, so their depth stand-ins carry the form's hook and key. Drawn behind a screen beside the plain twelve
+ * whenever an arrival chose the form or a material of this session wears it.
+ */
+export function swayDepthCombos(form = false): THREE.Mesh[] {
+  if (form) {
+    formCombos ??= makeSwayCombos(true);
+    return formCombos;
+  }
+  combos ??= makeSwayCombos(false);
+  return combos;
+}
+
+function makeSwayCombos(form: boolean): THREE.Mesh[] {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0], 3));
   g.setAttribute('normal', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1, 0, 0, 1], 3));
@@ -401,13 +447,13 @@ export function swayDepthCombos(): THREE.Mesh[] {
       for (const kind of ['plain', 'pictured', 'cut'] as const) {
         const m = new THREE.MeshStandardMaterial({ map: kind === 'plain' ? null : picture, alphaTest: kind === 'cut' ? 0.5 : 0, side: THREE.FrontSide });
         m.shadowSide = both ? THREE.DoubleSide : null;
-        m.name = `${SWAY_COMBO_KEY} (${instanced ? 'instanced' : 'plain'}, ${both ? 'both sides' : 'back'}, ${kind})`;
+        m.name = `${SWAY_COMBO_KEY} (${instanced ? 'instanced' : 'plain'}, ${both ? 'both sides' : 'back'}, ${kind}${form ? ', the trees\' gust form' : ''})`;
         m.userData.swgSway = SWAY_COMBO_KEY;
+        m.userData.swgSwayForm = form;
         out.push(instanced ? new THREE.InstancedMesh(g, m, 1) : new THREE.Mesh(g, m));
       }
     }
   }
-  combos = out;
   return out;
 }
 

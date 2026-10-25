@@ -63,7 +63,9 @@ const meshesOf = (scenes: THREE.Object3D[]): THREE.Mesh[] => {
   const draw = drawAt >= 0 && drawEnd > 0 ? portal.slice(drawAt, drawAt + drawEnd) : '';
   ok(draw.includes('this.shadingShadows = true') && draw.includes('r.shadowMap.needsUpdate = true') && draw.includes('r.render(this.passScenes.forShadows(scene), this.shadowProbe)'), "the portal renderer's shadow-only draw is its own shadow pass: the probe, through the shadow pass's own scene, the maps marked for drawing, and its stray draws dropped");
   ok(src.indexOf('this.compileShadowDepth(r, target, objects)') > src.indexOf('this.compileFor(r, camera, objects.slice(i, i + BATCH), target)') && src.indexOf('this.compileShadowDepth(r, target, objects)') < src.indexOf('for (const s of placed) s.dispose()'), "after the sweep's own compiles, over everything it compiled, before the placed stand-ins are let go");
-  ok(body.includes('...swayDepthCombos()]') && body.indexOf('...swayDepthCombos()]') < body.indexOf('swayDepthStandIns(swaying, set.name)'), 'and over the fixed combinations as well, so a placed tier streamed in later finds its depth program built');
+  // (The volumetrics' wave 7a adds the trees' gust form's twelve after them, once any material wears the form.)
+  const combosAt = body.indexOf('...swayDepthCombos(), ...(form ? swayDepthCombos(true) : [])]');
+  ok(combosAt >= 0 && combosAt < body.indexOf('swayDepthStandIns(swaying, set.name)') && body.includes('const form = windTreesChosen() || windTreesEverUsed();'), 'and over the fixed combinations as well (and the trees\' gust form\'s, once any material wears it), so a placed tier streamed in later finds its depth program built');
   // Wave 8: the plain combinations and the grass's depth material go into the very same draws (and since the
   // performance pass's second wave the skinned bodies' combinations too).
   const loop = body.slice(body.indexOf('for (const set of sets) {'));

@@ -20,6 +20,7 @@ import { AirField, newAirFrameInput } from '../../../src/world/volumetrics/airFi
 import { makeAirGroundUniforms } from '../../../src/world/volumetrics/airGround.ts';
 import { makeLiquidUniforms } from '../../../src/world/volumetrics/airLiquid.ts';
 import { makeGrassAirUniforms } from '../../../src/world/volumetrics/airGrass.ts';
+import { setWindArm, standLocalDevil } from '../../../src/world/wind.ts';
 import { newShuttleJets, type AirHull } from '../../../src/world/volumetrics/airEngines.ts';
 import { newNearRides, RIDE_FLAG, RIDE_KIND } from '../../../src/net/nearRides.ts';
 import type { GroundSample, GroundSampler } from '../../../src/world/volumetrics/airRaster.ts';
@@ -163,6 +164,10 @@ field.bindGround(makeAirGroundUniforms());
 field.bindLiquid(makeLiquidUniforms());
 // The sixth wave's: bound to a record of the grass's twin, as the world binds the field it takes (written every frame).
 field.bindGrass(makeGrassAirUniforms());
+// The seventh wave's: the unified wind's arm on, so every frame hands the forces a devil of this browser's own (`pushDevils`
+// into `vortexNow`), writes the gust shed's rate and the grass's wind and sheen; its own step is `windAlloc.ts`'s.
+setWindArm({ master: true, wind: true, devils: true, trees: true, art: 1 });
+standLocalDevil(6, -4, 0, 1e12);
 const pokeSink = { strength: 0.5 };
 field.forces.onPoke = (p) => {
   pokeSink.strength = p.strength;
@@ -430,6 +435,8 @@ if (process.argv[2] === 'why' && (s.scavenges > 0 || s.made / FRAMES >= 0.2)) {
 }
 const stepped = field.stepping;
 const engines = field.forces.engineCount;
+// The seventh wave's parts really ran on the steady frames: the devil handed to the forces on the last of them.
+const w7 = { handed: field.windDevilsReport().handed };
 // The engines' pits and ruts held as continuous sources at the steady frame's end (the moving frames leave them behind).
 const sources = field.dents?.slots ?? 0;
 const MOVING = 50_000;
@@ -478,4 +485,4 @@ const w6 = { peers: sr.sources?.peers ?? 0, shuttles: sr.sources?.shuttles ?? 0,
 const lq = sr.liquid;
 const w5 = { stepped: lq?.stepped ?? false, bound: lq?.bound ?? false, pokes: lq?.pokes ?? 0, water: lq?.told?.water ?? 0, lava: lq?.told?.lava ?? 0, sink: pokeSink.strength };
 const stormColour = field.stormColour.value;
-console.log(JSON.stringify({ w4, w5, w6, frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet }, third: { fronts: sr.sources?.fronts ?? 0, droppedFronts: sr.sources?.droppedFronts ?? 0, storm: [stormColour.r, stormColour.g, stormColour.b], sand: sr.sand?.picture ?? null, cycles: sr.sand?.phases.cycles ?? null, mote: [...mote] }, w3: { smoke: sr.sources?.smoke ?? 0, droppedSmoke: sr.sources?.droppedSmoke ?? 0, smokeLive: field.smokeLive, wisps: sr.wisps?.inForce ?? null, noise: sr.wisps?.noise ?? null, layers: sr.layers?.air ?? 0, fogLevel: inp.fogLevel }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));
+console.log(JSON.stringify({ w4, w5, w6, w7, frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet }, third: { fronts: sr.sources?.fronts ?? 0, droppedFronts: sr.sources?.droppedFronts ?? 0, storm: [stormColour.r, stormColour.g, stormColour.b], sand: sr.sand?.picture ?? null, cycles: sr.sand?.phases.cycles ?? null, mote: [...mote] }, w3: { smoke: sr.sources?.smoke ?? 0, droppedSmoke: sr.sources?.droppedSmoke ?? 0, smokeLive: field.smokeLive, wisps: sr.wisps?.inForce ?? null, noise: sr.wisps?.noise ?? null, layers: sr.layers?.air ?? 0, fogLevel: inp.fogLevel }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));

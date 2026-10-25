@@ -289,6 +289,16 @@ export interface Settings extends FxSettings {
   volArtGrass: number;
   /** Other players' rides stir the air on this screen (from where it draws them, with a thrust of ours). */
   volFromPeers: boolean;
+  /**
+   * The seventh wave's: one wind every reader takes, updated by the weather -- a profile for each kind of weather over the
+   * game's own Wind Speed Scale, travelling gusts every player sees alike, the calm day's dirt (`volWind`); dust devils
+   * (`volWindDevils`); the trees taking each gust where they stand, chosen at an arrival (`volWindTrees`); and how strong
+   * the gusts, the devils and the gust shed are over the game's own wind, 0 (today's) to 1.5 (`volArtWind`).
+   */
+  volWind: boolean;
+  volWindDevils: boolean;
+  volWindTrees: boolean;
+  volArtWind: number;
   /** The terrain's ribbons drawn: the strips of lava (or water) its ribbon affectors lay down a slope (Mustafar's lava falls), which the game never drew. */
   waterRibbons: boolean;
 }
@@ -469,6 +479,12 @@ export const DEFAULT_SETTINGS: Settings = {
   volGrass: true,
   volArtGrass: 1,
   volFromPeers: true,
+  // The seventh wave's (under the master, which starts off): the unified wind, its devils and the trees' gust form on,
+  // the wind's art at its full look (at nought, the same as `volWind` off, the wind is today's for every reader).
+  volWind: true,
+  volWindDevils: true,
+  volWindTrees: true,
+  volArtWind: 1,
   // Off (ours, the owner's standing order for the pass: off, the game is today's): the terrain's ribbons were never drawn
   // here, and drawing them is a look of the world beside the water's own settings, not an effect of the volumetrics.
   waterRibbons: false,

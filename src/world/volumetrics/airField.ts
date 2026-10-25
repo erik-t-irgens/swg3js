@@ -44,6 +44,8 @@ import { PRINT_TUNE } from '../footprints.ts';
 import type { FootStep } from '../../audio/footsteps.ts';
 import { liquidTileCells, type VolTune } from './volSettings.ts';
 import { crustPhaseIn, liquidOff, newCrustPhase, RippleCarryPass, type LiquidUniforms } from './airLiquid.ts';
+import { WIND_FRAME, WIND_LOCAL_DEVIL, WIND_STATE, WIND_TUNE, wind7Uniforms, windPattern } from '../wind.ts';
+import { DEVIL_W, gustFlat, newGustAt } from '../windMath.ts';
 
 /**
  * Everything the volume reads of the air, by reference (§2.8): the kept uniform objects whose `value` is each field's
@@ -689,7 +691,7 @@ export class AirField implements AirSource {
   private input: AirFrameInput = newAirFrameInput();
   /** The numbers the console reads (`report`). */
   private readonly stats = { frames: 0, steps: 0, draws: 0, cpuMs: 0, resets: 0, lastScrollX: 0, lastScrollZ: 0, stepped: false, motes: 0, grainsFlying: 0, grainsLying: 0, sheets: 1 };
-  private readonly counts: ForceCounts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0, peers: 0, shuttles: 0 };
+  private readonly counts: ForceCounts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0, peers: 0, shuttles: 0, devils: 0, droppedDevils: 0 };
 
   constructor(renderer: THREE.WebGLRenderer, tune: VolTune, world: AirWorld) {
     this.renderer = renderer;
@@ -723,7 +725,9 @@ export class AirField implements AirSource {
       uSlabCount: this.slabCount,
     };
     const liquid = { uLiquidP: { value: this.liquidP }, uLiquidQ: { value: this.liquidQ }, uLiquidR: { value: this.liquidR } };
-    const gust ={ uNoise: { value: this.noise }, uNoiseTexel: { value: 1 / NOISE_SIZE }, uGustTime: { value: this.gustTime } };
+    // The unified wind's one uniform object (the seventh wave), by reference on every program that reads it: made here,
+    // with the master on, never with it off; its `on` is nought until the weather's step first writes it.
+    const gust = { uNoise: { value: this.noise }, uNoiseTexel: { value: 1 / NOISE_SIZE }, uGustTime: { value: this.gustTime }, uWind7: wind7Uniforms().uWind7 };
     // How the field's own passes read each slab's air out of the atlas (`slabVelAt`), shared by reference (the third wave).
     const slabVel = { uSlabTiles: this.slabTiles, uSlabScale: this.slabScale, uSlabShare: this.slabShare, uAtlasHalf: this.atlasHalf };
     const groundTint = {
@@ -773,6 +777,7 @@ export class AirField implements AirSource {
           uDustBatch: { value: this.forces.dustBatch },
           uDustShapeBatch: { value: this.forces.dustShapeBatch },
           uDustCount: { value: 0 },
+          uShedP: { value: this.shedP },
         },
         true,
       ),
@@ -1475,10 +1480,33 @@ export class AirField implements AirSource {
     const t = this.tune;
     const on = stepped && t.on && t.air && t.grass && this.vel !== null && this.win.placed;
     const p = rec.uAirGrassP.value;
+    const wd = rec.uAirGrassWind.value;
+    const sh = rec.uAirGrassSheen.value;
     if (!on) {
       rec.uAirGrassVel.value = null;
       p.x = 0;
+      wd.w = 0;
+      sh.x = 0;
       return;
+    }
+    // The seventh wave's, under the unified wind's arm alone: its mean as a vector (the lean outside the window), a far
+    // card's share of that lean, and the sheen of a bent stalk.
+    if (WIND_STATE.on) {
+      const F = WIND_FRAME;
+      const Gw = WIND_TUNE.grass;
+      // The mean as slab 0's own air takes it (the inflow's scale and the low layer's share of the wind), so the lean
+      // outside the window continues the lean the near tufts take from slab 0 inside it, one wind across the edge band.
+      const s0 = F.mean * AIR_TUNE.wind.scale * AIR_TUNE.slabs.windShare;
+      wd.x = Math.sin(F.heading) * s0;
+      wd.y = Math.cos(F.heading) * s0;
+      wd.z = Gw.farLean;
+      wd.w = 1;
+      sh.x = Gw.sheen * WIND_STATE.art;
+      sh.y = Gw.sheenGrey;
+      sh.z = Gw.sheenLift;
+    } else {
+      wd.w = 0;
+      sh.x = 0;
     }
     rec.uAirGrassVel.value = this.vel![0].texture;
     const w = this.win;
@@ -1655,9 +1683,59 @@ export class AirField implements AirSource {
         return this.flowTex;
       case 'liquid':
         return this.vel ? this.vel[0].texture : null;
+      // The seventh wave's: the unified wind's gusts over the window, from the pack, on the processor (no program).
+      case 'gusts':
+        return this.gustView();
       default:
         return null;
     }
+  }
+
+  /** The gusts' view's picture, made the first time it is shown and filled again at most four times a second. */
+  private gustTex: THREE.DataTexture | null = null;
+  private gustAt = -1;
+  private readonly gustAsk = newGustAt();
+
+  /**
+   * The unified wind's gusts over the window as a picture (`air({ view: 'gusts' })`): each texel's k, patch and veer by
+   * `gustFlat` from the pack the frame's readers hold, red k over two, green the patch, blue the veer plus a half. Nothing
+   * compiled: a data texture three uploads, the debug view's own program drawing it. Black with the unified wind off.
+   */
+  private gustView(): THREE.Texture {
+    const N = 64;
+    if (!this.gustTex) {
+      this.gustTex = new THREE.DataTexture(new Uint8Array(N * N * 4), N, N, THREE.RGBAFormat, THREE.UnsignedByteType);
+      this.gustTex.minFilter = THREE.NearestFilter;
+      this.gustTex.magFilter = THREE.NearestFilter;
+    }
+    if (this.gustAt >= 0 && this.worldTime - this.gustAt < 0.25) return this.gustTex;
+    this.gustAt = this.worldTime;
+    const px = this.gustTex.image.data as Uint8Array;
+    const w = this.win;
+    const pack = wind7Uniforms().uWind7.value;
+    const on = WIND_STATE.on && pack[27] > 0.5 && w.placed;
+    const g = this.gustAsk;
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const o = (j * N + i) * 4;
+        if (!on) {
+          px[o] = 0;
+          px[o + 1] = 0;
+          px[o + 2] = 0;
+          px[o + 3] = 255;
+          continue;
+        }
+        g.x = w.ox + ((i + 0.5) / N) * w.size;
+        g.z = w.oz + ((j + 0.5) / N) * w.size;
+        gustFlat(g, pack);
+        px[o] = Math.max(0, Math.min(255, Math.round((g.k / 2) * 255)));
+        px[o + 1] = Math.max(0, Math.min(255, Math.round(g.p * 255)));
+        px[o + 2] = Math.max(0, Math.min(255, Math.round((g.a + 0.5) * 255)));
+        px[o + 3] = 255;
+      }
+    }
+    this.gustTex.needsUpdate = true;
+    return this.gustTex;
   }
 
   /** Whether the field is stepping (the master and the air on, somewhere it runs, something reading it). */
@@ -1888,6 +1966,8 @@ export class AirField implements AirSource {
       f.frameDt = dt;
       f.gatherDents();
     }
+    // The unified wind's dust devils (the seventh wave): the nearest within the window, as continuous sources.
+    this.pushDevils();
     // The sources' frame walk (the design's §2.4), every frame the field runs, the dust on or off: the fronts' frame
     // ages move on (so a front is let go on time even with the dust off) and the engines' dust is worked out.
     f.frameDt = dt;
@@ -2100,6 +2180,132 @@ export class AirField implements AirSource {
   private frameDt = 0.5;
   private frameStorm = 0.5;
   private frameInflow = 0.5;
+  /** The seventh wave's gust shed, as the dust pass reads it: its rate (times the art, thinned when wet), the height, spread and rise it is laid with. */
+  private readonly shedP = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
+  /** The devils handed this frame (the console's), and the three nearest's places in the pattern's table (-1 the local one). */
+  private devilsHanded = 0;
+  private readonly devilPick = new Int32Array(3);
+  private readonly devilDist = new Float64Array(3);
+
+  /**
+   * The unified wind's dust devils into the forces (the seventh wave, the design's §2.17): the world's devils near (the
+   * pattern's list, which every browser lists alike) and this browser's own (`__debug.wind({ devil })`), at most
+   * `devils.inWindow` (three) of those whose reach touches the window, nearest the camera first, each at its envelope and
+   * the wind's art; none with the arm or the devils off. Nothing made: a kept pick of three.
+   */
+  private pushDevils(): void {
+    const camX = this.input.camX;
+    const camZ = this.input.camZ;
+    const f = this.forces;
+    f.devilCount = 0;
+    this.devilsHanded = 0;
+    if (!WIND_STATE.on || !WIND_STATE.devils) return;
+    const D = WIND_TUNE.devils;
+    const most = D.inWindow < 3 ? (D.inWindow > 0 ? Math.round(D.inWindow) : 0) : 3;
+    if (most <= 0) return;
+    f.devilSpin = D.spin;
+    f.devilShoves = D.shoves;
+    f.devilInflow = D.inflow;
+    f.devilSigma = D.sigma;
+    f.devilHeights[0] = D.h0;
+    f.devilHeights[1] = D.h1;
+    f.devilHeights[2] = D.h2;
+    f.devilHeights[3] = D.h3;
+    const pick = this.devilPick;
+    const dist = this.devilDist;
+    let n = 0;
+    const p = windPattern();
+    const count = p ? p.devilCount : 0;
+    const half = this.win.size * 0.5;
+    // The pattern's devils, then the local one (index -1), each into the kept pick of the nearest.
+    for (let i = -1; i < count; i++) {
+      let x: number;
+      let z: number;
+      let core: number;
+      if (i < 0) {
+        if (!(WIND_LOCAL_DEVIL.until > WIND_FRAME.t)) continue;
+        x = WIND_LOCAL_DEVIL.x;
+        z = WIND_LOCAL_DEVIL.z;
+        core = WIND_LOCAL_DEVIL.core;
+      } else {
+        const o = i * DEVIL_W;
+        x = p!.devils[o];
+        z = p!.devils[o + 1];
+        core = p!.devils[o + 4];
+      }
+      const dx = x - camX;
+      const dz = z - camZ;
+      const reach = half + D.reach * core;
+      if (dx < -reach || dx > reach || dz < -reach || dz > reach) continue;
+      const d2 = dx * dx + dz * dz;
+      let at = n < most ? n : most;
+      while (at > 0 && dist[at - 1] > d2) {
+        if (at < most) {
+          dist[at] = dist[at - 1];
+          pick[at] = pick[at - 1];
+        }
+        at--;
+      }
+      if (at < most) {
+        dist[at] = d2;
+        pick[at] = i;
+        if (n < most) n++;
+      }
+    }
+    const art = WIND_STATE.art;
+    // Each into the forces' kept record and taken with nothing handed (a number handed to a call is boxed).
+    const v = f.vq;
+    for (let k = 0; k < n; k++) {
+      const i = pick[k];
+      if (i < 0) {
+        const L = WIND_LOCAL_DEVIL;
+        v[0] = L.x;
+        v[1] = L.z;
+        v[2] = L.core;
+        v[3] = L.swirl * art;
+        v[4] = 1;
+        v[5] = D.dust * art;
+      } else {
+        const o = i * DEVIL_W;
+        const T = p!.devils;
+        const env = T[o + 13];
+        const sw = T[o + 5];
+        v[0] = T[o];
+        v[1] = T[o + 1];
+        v[2] = T[o + 4];
+        v[3] = Math.abs(sw) * env * art;
+        v[4] = sw < 0 ? -1 : 1;
+        v[5] = D.dust * env * art;
+      }
+      f.vortexNow();
+    }
+    this.devilsHanded = f.devilCount;
+  }
+
+  /** The devils handed this frame and why none can be (the console's). */
+  windDevilsReport(): { handed: number; why: string | null } {
+    return { handed: this.devilsHanded, why: this.refused ? `the moving air cannot run here: ${this.refused}` : this.why };
+  }
+
+  /**
+   * The calm day's dirt (the seventh wave, the design's §2.17): the gust shed's rate times the wind's art, thinned on wet
+   * ground as the blowing sand is (none past `sand.wetFull`); nought with the unified wind's arm off, where the pass's own
+   * branch is not taken either. Written by its components, as every number the frame writes.
+   */
+  private writeShed(): void {
+    const sh = this.shedP;
+    const S7 = WIND_TUNE.shed;
+    if (WIND_STATE.on) {
+      const wet = WEATHER_UNIFORMS.uWetness.value;
+      const wetFull = AIR_TUNE.sand.wetFull > 1e-3 ? AIR_TUNE.sand.wetFull : 1e-3;
+      let wk = wet / wetFull;
+      wk = wk < 0 ? 0 : wk > 1 ? 1 : wk;
+      sh.x = S7.rate * WIND_STATE.art * (1 - wk * wk * (3 - 2 * wk));
+    } else sh.x = 0;
+    sh.y = S7.at;
+    sh.z = S7.sigma;
+    sh.w = S7.rise;
+  }
 
   /** The obstacle map drawn again: cleared, then the boxes MAX-blended into it (run plain, `AirDrawer.runPlain`). */
   private readonly obstacleDraw = (): void => {
@@ -2220,6 +2426,7 @@ export class AirField implements AirSource {
       stq.z = D.streamSpread;
       stq.w = D.streamRise;
       this.writeLaw();
+      this.writeShed();
       u.uDustCount.value = n;
       this.gustTime.x = AIR_TUNE.wind.gust;
       this.gustTime.y = this.worldTime;
@@ -4138,6 +4345,8 @@ export class AirField implements AirSource {
     this.flowTex?.dispose();
     this.flowTex = null;
     this.flowU.value = null;
+    this.gustTex?.dispose();
+    this.gustTex = null;
     this.carry.dispose();
     this.kick.dispose();
     this.rain.dispose();

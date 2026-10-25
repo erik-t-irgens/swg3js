@@ -18,6 +18,8 @@ import { specWrap } from './specular.ts';
 import { cardWrap, isCard, prepareCardModel, setCardRule } from './cardRule.ts';
 import { CARD_LIGHT_TUNE, cardReceives, setCardRoomPass, updateCardLight } from './cardLight.ts';
 import { SWAY_TUNE, batchedDepthCombo, disposeStandIn, hangSwayDepth, plainDepthCombos, setSwayEye, setSwayRoomPass, skinnedDepthCombos, stepSway, swayDepthCombos, swayDepthStandIns, swayWrap } from './floraSway.ts';
+import { chooseWindTrees, windTreesChosen, windTreesEverUsed } from './windTrees.ts';
+import { WIND_STATE, writeWindDay } from './wind.ts';
 import { resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { addSimBody, pokeWaterSimIn, rippleCarrySet, rippleStateTarget, setRippleCarry, stepWaterSim, waterSimReady, WATER_SIM_WINDOW, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
@@ -1727,6 +1729,10 @@ export class World {
 
   load(planet: PlanetDef, packId = packIdOf(planet)): void {
     this.unload();
+    // The trees' gust form (the volumetrics' seventh wave) chosen as this arrival begins, before any flora material is
+    // wrapped or anything compiled: the master, the unified wind and its trees' switch on. A material wrapped in an
+    // earlier arrival keeps its form; turned on or off in play it waits for the next arrival both ways.
+    chooseWindTrees(WIND_STATE.master && WIND_STATE.wind && WIND_STATE.trees);
     // The world left behind's states are let go: until this one's pack has been read, every world's stand in what an
     // arrival would take now (`worldState.ts`).
     releaseWorldStates();
@@ -3883,7 +3889,9 @@ export class World {
     inp.camZ = cam.z;
     const ws = this.weather.state;
     inp.windHeading = ws.windHeading;
-    inp.windSpeed = ws.windSpeed;
+    // The wind's mean (the seventh wave): the inflow outside the window and the sand's threshold read it, the gusts living
+    // in the relax target; with the unified wind's arm off it is the speed itself.
+    inp.windSpeed = ws.windMean;
     inp.storm = ws.enabled ? this.weather.fx.dust : 0;
     tmpV.copy(this.sun.position).sub(this.sun.target.position);
     if (tmpV.lengthSq() > 1e-9) tmpV.normalize();
@@ -3998,7 +4006,8 @@ export class World {
     f.camX = cam.x;
     f.camY = cam.y;
     f.camZ = cam.z;
-    const s = (Number.isFinite(ws.windSpeed) ? ws.windSpeed : 0) * AIR_TUNE.wind.scale;
+    // The wind's mean, as the air's inflow takes it (the seventh wave: the gusts are the program's own branch).
+    const s = (Number.isFinite(ws.windMean) ? ws.windMean : 0) * AIR_TUNE.wind.scale;
     f.windX = Math.sin(ws.windHeading) * s;
     f.windZ = Math.cos(ws.windHeading) * s;
     this.renderer?.getDrawingBufferSize(this.rainBuf);
@@ -4546,6 +4555,8 @@ export class World {
   private grassAirDepthDrawn = false;
   /** The frame report's soft off for the grass (`perf({ ab: { key: 'volGrass' } })`, and `volGroundArt` 'off'): the plain grass, both built. */
   grassSoftOff = false;
+  /** The shared clock's day for the unified wind's devils (`writeWindDay`), a kept record (wave 7a). */
+  private readonly windDayCount = { shared: 0.5, wall: 0.5 };
   /** What the chooser was asked last, and whether the grass wears its twin now. */
   private readonly grassAsk = newGrassChoice();
   private grassWornAir = false;
@@ -7480,7 +7491,10 @@ export class World {
     const started = performance.now();
     // The scene's own swaying meshes first, then a source for every combination a swaying material can cast with
     // (`swayDepthCombos`): a placed tier streamed in after this screen lifts may bring one nothing here had.
-    const swaying = [...(meshes.filter((o) => (o as THREE.Mesh).isMesh) as THREE.Mesh[]), ...swayDepthCombos()];
+    // And the trees' gust form's own twelve (the volumetrics' seventh wave), where this arrival chose the form or a material
+    // of this session wears it: their depth programs come only from a draw, and this is where the world draws one.
+    const form = windTreesChosen() || windTreesEverUsed();
+    const swaying = [...(meshes.filter((o) => (o as THREE.Mesh).isMesh) as THREE.Mesh[]), ...swayDepthCombos(), ...(form ? swayDepthCombos(true) : [])];
     // One set, the shadow pass's own, while it has a scene of its own; the world's and the rooms' in turn the old way.
     const perPass = PASS_STATES.mode === 'perPass';
     const sets = perPass
@@ -9651,6 +9665,12 @@ export class World {
     if (this.swgSky) {
       // What the sky needs from the weather (the area, the level, the blend, the wind) comes first.
       this.weatherWorld.daylight = this.day.daylight;
+      // The day the unified wind's devils are born by (the seventh wave): the shared one with a server, the visible one
+      // without, written only under its arm.
+      if (WIND_STATE.on) {
+        sharedClock.dayCountIn(this.day, this.windDayCount);
+        writeWindDay(this.day.time, this.day.dayLengthSeconds, this.windDayCount.shared);
+      }
       this.weather.update(dt, playerPos, this.weatherWorld);
       this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);
       this.refreshEnvironment(dt);

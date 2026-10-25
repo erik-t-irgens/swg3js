@@ -26,6 +26,8 @@
 // Nothing here is made on a frame: the materials with the world, their numbers in kept vectors.
 import * as THREE from 'three';
 import { AIR_TUNE } from './airTune.ts';
+import { WIND7_GLSL } from '../windMath.ts';
+import { wind7Uniforms } from '../wind.ts';
 
 /** The record both twins hold by reference. */
 export interface GrassAirUniforms {
@@ -39,6 +41,15 @@ export interface GrassAirUniforms {
   uAirGrassHalf: { value: THREE.Vector2 };
   /** x how far the air bends the grass (`volArtGrass`; nought, the plain grass), y the speed of a full lean (m/s), z the most it leans, w how far the top sinks with it. */
   uAirGrassP: { value: THREE.Vector4 };
+  /**
+   * The seventh wave's: x and y the unified wind's mean as a vector as slab 0's air takes it (m/s along x and z: the mean
+   * times the inflow's scale and the low layer's share, so the lean outside the window continues the window's own), z a
+   * far card's share of the lean outside the window, w one under the wind's arm (the outside lean and the sheen read
+   * nothing at nought).
+   */
+  uAirGrassWind: { value: THREE.Vector4 };
+  /** The seventh wave's sheen of a bent stalk: x its strength (nought, none), y how far toward grey, z how much paler. */
+  uAirGrassSheen: { value: THREE.Vector4 };
 }
 
 /** A fresh record: every number a double from its first write, the share nought (the twin draws the plain grass). */
@@ -49,6 +60,8 @@ export function makeGrassAirUniforms(): GrassAirUniforms {
     uAirGrassRect: { value: new THREE.Vector4(0.5, 0.5, 0.5, 0.5) },
     uAirGrassHalf: { value: new THREE.Vector2(0.5, 0.5) },
     uAirGrassP: { value: new THREE.Vector4(0.5, AIR_TUNE.grass.full, AIR_TUNE.grass.most, AIR_TUNE.grass.sink) },
+    uAirGrassWind: { value: new THREE.Vector4(0.5, 0.5, 0.5, 0.5) },
+    uAirGrassSheen: { value: new THREE.Vector4(0.5, 0.5, 1.5, 0.5) },
   };
   grassAirOff(u);
   return u;
@@ -58,6 +71,8 @@ export function makeGrassAirUniforms(): GrassAirUniforms {
 export function grassAirOff(u: GrassAirUniforms): void {
   u.uAirGrassVel.value = null;
   u.uAirGrassP.value.x = 0;
+  u.uAirGrassWind.value.w = 0;
+  u.uAirGrassSheen.value.x = 0;
 }
 
 /** The session's one record: the world's field writes it (`AirField.writeGrass`), both twins hold it by reference. */
@@ -106,23 +121,99 @@ vec3 swgAirLean( vec3 base, float lev, float h ) {
 	float sp = length( v );
 	if ( sp < 1e-3 ) return vec3( 0.0 );
 	float k = swgAirGrassReach( lev, h, swgAirGrassBend( sp, edge ) );
-	// W7a: the unified wind's lean outside the window (faded in across the edge band as this fades out) and the sheen go here.
+	// W7a: the unified wind's lean outside the window (faded in across the edge band as this fades out) and the sheen are
+	// swgAirWind7 and swgAirSheenOf below, laid on after this one.
 	return vec3( v.x / sp * k, - uAirGrassP.w * k, v.y / sp * k );
+}
+`;
+
+/**
+ * The seventh wave's half (the design's §2.17): outside the air's window, where no air is stepped, a tuft leans by the
+ * unified wind itself at its foot (`w7Target` of the mean's vector: the gust there scales and turns it), through the same
+ * wheat's law, faded in across the window's edge band exactly as the window's own lean fades out there, so the two make
+ * one lean; a far card takes `uAirGrassWind.z` of it (a far card can stand for a whole tree). And the sheen: a stalk bent
+ * shows its paler side, by how far its point leans for its height (`lean · level`), times the sheen's strength. Both
+ * nought by a uniform branch with the unified wind's arm off, so the twin draws the sixth wave's grass to the bit there.
+ */
+export const GRASS_AIR_WIND7_PARS = /* glsl */ `
+// The volumetrics' seventh wave: the unified wind's lean outside the window, and the sheen (airGrass.ts).
+uniform vec4 uAirGrassWind;
+uniform vec4 uAirGrassSheen;
+varying float vSwgAirSheen;
+${WIND7_GLSL}
+vec3 swgAirWind7( vec3 base, float lev, float h, bool isFar ) {
+	if ( uAirGrassP.x <= 0.0 || uAirGrassWind.w <= 0.0 || ! w7On() ) return vec3( 0.0 );
+	vec2 l = vec2( ( base.x - uAirGrassWin.x ) / uAirGrassWin.z, ( base.z - uAirGrassWin.y ) / uAirGrassWin.z );
+	bool inside = l.x >= 0.0 && l.y >= 0.0 && l.x <= 1.0 && l.y <= 1.0;
+	// The window's own lean takes over across its edge band: a near tuft inside the window takes 1 - that ease here, a
+	// far card all of it wherever it stands (the window's lean never reaches a far card), times its own share.
+	float share = isFar ? uAirGrassWind.z : ( inside ? 1.0 - swgAirGrassEdge( l.x, l.y ) : 1.0 );
+	if ( share <= 0.0 ) return vec3( 0.0 );
+	vec2 w = w7Target( base.xz, uAirGrassWind.xy );
+	float sp = length( w );
+	if ( ! ( sp >= 1e-3 ) ) return vec3( 0.0 );
+	float k = swgAirGrassReach( lev, h, swgAirGrassBend( sp, share ) );
+	return vec3( w.x / sp * k, - uAirGrassP.w * k, w.y / sp * k );
+}
+// The sheen at a point of a tuft whose lean is d: lean / (level · height) is the bend times the level, times the strength.
+float swgAirSheenOf( vec3 d, float lev, float h ) {
+	if ( uAirGrassSheen.x <= 0.0 || lev <= 1e-3 || h <= 1e-4 ) return 0.0;
+	return clamp( length( d.xz ) / ( lev * h ), 0.0, 1.0 ) * uAirGrassSheen.x;
+}
+`;
+
+/** The sheen in the fragment stage: the display value toward a paler grey of itself, by the vertex stage's share. */
+export const GRASS_AIR_SHEEN_FRAG = /* glsl */ `
+// The volumetrics' seventh wave: a bent stalk's paler side (airGrass.ts).
+uniform vec4 uAirGrassSheen;
+varying float vSwgAirSheen;
+// Written by its components (no vector arithmetic), so the test runs this very function as script.
+vec3 swgAirSheen( vec3 c ) {
+	if ( ! ( vSwgAirSheen > 0.0 ) ) return c;
+	float g = c.x * 0.2126 + c.y * 0.7152 + c.z * 0.0722;
+	float s = clamp( vSwgAirSheen, 0.0, 1.0 );
+	float px = min( mix( c.x, g, uAirGrassSheen.y ) * uAirGrassSheen.z, 1.0 );
+	float py = min( mix( c.y, g, uAirGrassSheen.y ) * uAirGrassSheen.z, 1.0 );
+	float pz = min( mix( c.z, g, uAirGrassSheen.y ) * uAirGrassSheen.z, 1.0 );
+	return vec3( mix( c.x, px, s ), mix( c.y, py, s ), mix( c.z, pz, s ) );
 }
 `;
 
 /** Where the reads go: before the grass's own `main`, which the text holds exactly once. */
 const MAIN_FROM = 'void main() {';
-const MAIN_TO = `${GRASS_AIR_PARS}\nvoid main() {`;
-/** The lean, laid on straight after the trees' sway (a near tuft only: a far card is a tree's). */
+const MAIN_TO = `${GRASS_AIR_PARS}\n${GRASS_AIR_WIND7_PARS}\nvoid main() {`;
+/**
+ * The lean, laid on straight after the trees' sway (the window's a near tuft only: a far card is a tree's), the seventh
+ * wave's outside the window after it, and the sheen from how far the two moved the point.
+ */
 const SWAY_FROM = 'swgP += swgSwayOffset( vec3( 0.0, position.y * swgH, 0.0 ), swgModel ) * swgScale;';
-const SWAY_TO = 'swgP += swgSwayOffset( vec3( 0.0, position.y * swgH, 0.0 ), swgModel ) * swgScale;\n\tif ( ! swgFar ) swgP += swgAirLean( swgBase, position.y, aSwgSize.y * swgScale );';
+const SWAY_TO = [
+  'swgP += swgSwayOffset( vec3( 0.0, position.y * swgH, 0.0 ), swgModel ) * swgScale;',
+  '\tvec3 swgAirFrom = swgP;',
+  '\tif ( ! swgFar ) swgP += swgAirLean( swgBase, position.y, aSwgSize.y * swgScale );',
+  '\tswgP += swgAirWind7( swgBase, position.y, aSwgSize.y * swgScale, swgFar );',
+  '\tvSwgAirSheen = swgAirSheenOf( swgP - swgAirFrom, position.y, aSwgSize.y * swgScale );',
+].join('\n');
 
 /** The twin's replacements in the order they are made, each `[from, to]` (the tests undo them on the twin's text and must find the base's own). */
 export const GRASS_AIR_EDITS: readonly (readonly [string, string])[] = [
   [MAIN_FROM, MAIN_TO],
   [SWAY_FROM, SWAY_TO],
 ];
+
+/** The colour twin's fragment replacements (the seventh wave's sheen), in order, each `[from, to]`; the depth twin's fragment is its base's. */
+const SHEEN_FROM = 'vec3 swgDisplay = clamp( swgTexel.rgb * swgTint * swgLight, 0.0, 1.0 );';
+export const GRASS_AIR_FRAG_EDITS: readonly (readonly [string, string])[] = [
+  [MAIN_FROM, `${GRASS_AIR_SHEEN_FRAG}\nvoid main() {`],
+  [SHEEN_FROM, `${SHEEN_FROM}\n\tswgDisplay = swgAirSheen( swgDisplay );`],
+];
+
+/** The colour twin's fragment text from the base's own, every replacement made or none (null). */
+export function grassAirFragText(fragment: string): string | null {
+  let f: string | null = fragment;
+  for (const [from, to] of GRASS_AIR_FRAG_EDITS) if (f) f = replaceOnce(f, from, to);
+  return f;
+}
 
 /** `text` with `from` replaced by `to`, or null where `from` is not found exactly once. */
 function replaceOnce(text: string, from: string, to: string): string | null {
@@ -150,11 +241,16 @@ export const GRASS_AIR_DEFINE = 'SWG_GRASS_AIR';
 export function grassAirTwin(base: THREE.ShaderMaterial, u: GrassAirUniforms = GRASS_AIR_U): THREE.ShaderMaterial | null {
   const vertex = grassAirText(base.vertexShader);
   if (!vertex) return null;
+  // The depth material's fragment draws no colour, so it takes no sheen; the colour material's takes it or no twin is made.
+  const depth = base.defines !== undefined && (base.defines as Record<string, unknown>).SWG_GRASS_DEPTH !== undefined;
+  const fragment = depth ? base.fragmentShader : grassAirFragText(base.fragmentShader);
+  if (!fragment) return null;
   const twin = new THREE.ShaderMaterial({
     name: `${base.name}+air`,
     vertexShader: vertex,
-    fragmentShader: base.fragmentShader,
-    uniforms: { ...base.uniforms, ...u },
+    fragmentShader: fragment,
+    // The unified wind's one uniform object by reference (the seventh wave): the twin is made only with the master on.
+    uniforms: { ...base.uniforms, ...u, uWind7: wind7Uniforms().uWind7 },
     defines: { ...base.defines, [GRASS_AIR_DEFINE]: '' },
     fog: base.fog,
     lights: false,

@@ -17,6 +17,7 @@ import { DUST_BATCH, SMOKE_BATCH, SPLAT_BATCH } from './airForces.ts';
 import { FOG_DIV_MOST } from './airFog.ts';
 import { GROUND_DECODE_GLSL, GROUND_TINT_GLSL } from '../terrainTextures.ts';
 import { LIQUID_TARGET_GLSL } from './airLiquid.ts';
+import { WIND7_GLSL } from '../windMath.ts';
 
 /** The light pass's loop bound: no setting asks for more steps toward the sun. */
 export const MAX_LIGHT_STEPS = 48;
@@ -339,6 +340,7 @@ vec2 windHere(vec2 w, vec2 wind) {
 export const ADVECT_FRAGMENT = /* glsl */ `
 ${ATLAS_COMMON}
 ${GUST}
+${WIND7_GLSL}
 ${LIQUID_UNIFORMS}
 uniform sampler2D uVel;
 // The liquid's own flow, m/s along x and z in window uv (a ribbon's, the fifth wave's flow raster).
@@ -370,7 +372,10 @@ void main() {
     return;
   }
   vec2 v = velAt(uVel, back, t) / (1.0 + uDiss * uDt);
-  v = mix(v, windHere(w, inflowOf(t)), clamp(uRelax * uDt, 0.0, 1.0));
+  // The pull's target (the seventh wave's airTarget): under the unified wind's arm the slab's share of the wind where it
+  // travels as a gust, turned by its veer and times its k (w7Target), every player's gust at the same place; else the
+  // air's own gust cells (windHere), as before.
+  v = mix(v, airTarget(w, inflowOf(t)), clamp(uRelax * uDt, 0.0, 1.0));
   if (uSlabCount > 1 && uCouple > 0.0) {
     vec2 acc = vec2(0.0);
     float n = 0.0;
@@ -502,10 +507,14 @@ varying vec2 vUv;
 uniform vec4 uWindow;
 uniform vec2 uWind;
 ${GUST}
+${WIND7_GLSL}
 ${SRGB}
 ${AIR_ERF_GLSL}
 ${AIR_FOLDED_CDF_GLSL}
 ${SLAB_VEL}
+// The seventh wave's gust shed: x its rate a second (times the wind's art, thinned on wet ground), y the height it is laid
+// at, z its spread, w its rise.
+uniform vec4 uShedP;
 uniform vec4 uGroundTint;
 uniform vec4 uGroundTintRef;
 ${GROUND_TINT_GLSL}
@@ -552,6 +561,13 @@ uniform vec4 uStreamQ;
 #define uMin2 uDustLawB.x
 #define uMax2 uDustLawB.y
 #define uAgeCap uDustLawB.z
+// The dust a gust patch sheds this step at world place wp, before the ground's give (the seventh wave's calm-day dirt):
+// its rate times the patch there times the step, nought off the unified wind's arm or at a rate of nought (the tests run
+// this very function).
+float w7ShedAt(vec2 wp) {
+  if (!w7On() || !(uShedP.x > 0.0)) return 0.0;
+  return uShedP.x * w7Gust(wp).z * uDt;
+}
 uniform vec3 uStormColour;
 uniform vec2 uSlopeGate;
 uniform vec4 uDustBatch[${DUST_BATCH}];
@@ -722,10 +738,20 @@ void main() {
     }
     vec2 wp = uWindow.xy + l * uWindow.z;
     if (uStorm > 0.0) {
-      float st = uStormShed * uStorm * gustAt(wp, uWind) * uDt * uStormWeight;
+      // The storm's gust: the unified wind's k there under its arm (the seventh wave), the air's own cells otherwise.
+      float st = uStormShed * uStorm * (w7On() ? w7Gust(wp).x : gustAt(wp, uWind)) * uDt * uStormWeight;
       if (tiles > 1.5) st *= slabShare(k, 0.0, sqrt(max(uStormSigma2, 1e-6)));
       add += st;
       shapeAdd.y += st * uStormSigma2;
+    }
+    // The calm day's dirt (the seventh wave): a gust patch sheds dust as it passes, laid low and rising a little, so a
+    // veil lifts where a gust runs over loose ground and never a storm; by the patch, since a calm gust never passes the
+    // sand's threshold.
+    float sg = w7ShedAt(wp);
+    if (sg > 0.0) {
+      if (tiles > 1.5) sg *= slabShare(k, uShedP.y, uShedP.z);
+      add += sg;
+      shapeAdd += sg * vec4(uShedP.y, uShedP.z * uShedP.z + uShedP.y * uShedP.y, uShedP.w, 0.0);
     }
     // Streamers (the third wave, the design's §2.6): where the air near the ground runs past the threshold, loose ground
     // sheds off a crest (the height raster bending down along the wind) and beside a solid's edge, gusty rather than

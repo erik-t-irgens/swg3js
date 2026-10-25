@@ -67,6 +67,12 @@ const SMOKE_ONE_MAX = 32;
  * power, step age, frame age, frame turn, step turn, this frame's radius from, to, share of its way from, to].
  */
 const FRONT_W = 16;
+/**
+ * The unified wind's dust devils of this frame (the seventh wave, `vortex`): [x, z, core, swirl (m/s), sense (±1), dust a
+ * second]. Continuous sources, a slot each, written afresh each frame and applied once a step, at most three.
+ */
+const DEVIL_SLOT_W = 6;
+export const DEVIL_SLOTS = 3;
 
 /** What the forces counted, since the field last read them. */
 export interface ForceCounts {
@@ -88,9 +94,12 @@ export interface ForceCounts {
   /** The sixth wave's: the engines of this frame's table that were another player's ride, and a stood shuttle's (among `engines`). */
   peers: number;
   shuttles: number;
+  /** The seventh wave's: dust devils handed (frames times devils), and a fourth refused. */
+  devils: number;
+  droppedDevils: number;
 }
 
-const freshCounts = (): ForceCounts => ({ engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0, peers: 0, shuttles: 0 });
+const freshCounts = (): ForceCounts => ({ engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0, peers: 0, shuttles: 0, devils: 0, droppedDevils: 0 });
 
 /** The golden angle as a share of a turn: a front's bearings turn by it each step and each frame, so a sparse ring fills. */
 const GOLDEN = (3 - Math.sqrt(5)) / 2;
@@ -182,6 +191,16 @@ export class AirForces {
   /** The Force's fronts alive (`FRONT_W` numbers a row), sized once from the tune. */
   readonly fronts = new Float64Array(Math.max(1, Math.floor(AIR_TUNE.forces.fronts)) * FRONT_W);
   frontCount = 0;
+  /** The unified wind's dust devils of this frame (`DEVIL_SLOT_W` numbers a slot), written afresh each frame (`vortex`). */
+  readonly devilSlots = new Float64Array(DEVIL_SLOTS * DEVIL_SLOT_W);
+  devilCount = 0;
+  /** How hard a devil's shoves drive its air toward its swirl, and its shoves round the core (the wind's tune, set by the field). */
+  devilSpin = 1;
+  devilShoves = 8;
+  devilInflow = 0.15;
+  /** A devil's column of dust: its four heights and their spread (the wind's tune, set by the field). */
+  readonly devilHeights = new Float64Array([0.5, 3, 7, 12]);
+  devilSigma = 1.5;
   /** Each engine of this frame's table, its dust as the frame walk worked it out (`frameSources`). */
   readonly engineDust = new Float64Array(ENGINE_MAX * ENG_DUST_W);
   /** The dust's own texel, metres (the field's dust grid over the window): the floor the fronts' dust is laid at. */
@@ -443,6 +462,209 @@ export class AirForces {
   }
 
   /**
+   * A dust devil (the seventh wave, the design's §2.10 and §2.17), handed by the unified wind's step each frame: its core
+   * at (x, z), the core's radius, its swirl at the core (m/s), its sense (+1 one way round, −1 the other) and the dust its
+   * core lifts a second. A continuous source, one slot a devil, written afresh each frame (`devilCount` set to nought by
+   * the field first) and applied once a step: tangential shoves round its core and a little inflow, reaching every slab
+   * (`stepDevils`), and a column of dust laid at its heights where the ground gives dust (`dustDevils`). At most three;
+   * a fourth is refused and counted.
+   */
+  vortex(x: number, z: number, core: number, swirl: number, sense: number, rate: number): void {
+    const v = this.vq;
+    v[0] = x;
+    v[1] = z;
+    v[2] = core;
+    v[3] = swirl;
+    v[4] = sense;
+    v[5] = rate;
+    this.vortexNow();
+  }
+
+  /** A devil's numbers for `vortexNow` (x, z, core, swirl, sense, rate): the field's frame writes them here and calls with nothing. */
+  readonly vq = new Float64Array(6);
+
+  /** `vortex` with its numbers in `vq` (the frame's form: a number handed to a call the compiler leaves out is boxed). */
+  vortexNow(): void {
+    const v = this.vq;
+    const x = v[0];
+    const z = v[1];
+    const core = v[2];
+    const swirl = v[3];
+    const sense = v[4];
+    const rate = v[5];
+    if (!this.active) return;
+    if (!(Number.isFinite(x) && Number.isFinite(z) && Number.isFinite(core) && Number.isFinite(swirl) && Number.isFinite(rate))) {
+      this.counts.notFinite++;
+      return;
+    }
+    const q = this.q;
+    q[0] = x;
+    q[1] = z;
+    q[2] = 4 * (core > 0 ? core : 0);
+    if (!this.nearHere()) {
+      this.counts.offWindow++;
+      return;
+    }
+    if (this.devilCount >= DEVIL_SLOTS) {
+      this.counts.droppedDevils++;
+      return;
+    }
+    const k = this.devilCount * DEVIL_SLOT_W;
+    const d = this.devilSlots;
+    d[k] = x;
+    d[k + 1] = z;
+    d[k + 2] = core > 0.2 ? core : 0.2;
+    d[k + 3] = swirl > 0 ? swirl : 0;
+    d[k + 4] = sense < 0 ? -1 : 1;
+    d[k + 5] = rate > 0 ? rate : 0;
+    this.devilCount++;
+    this.counts.devils++;
+  }
+
+  /**
+   * Every devil's shoves for this step, into the velocity batch at `n` (after the one-shots and the fronts, before the
+   * engines): `devilShoves` round its core at the core's radius, each the core's size, tangential by its sense with a
+   * little inflow, worth its swirl times the air's own pull and decay (`relax + dissipation`, which a steady swirl must make
+   * up) times `devilSpin`, times the step's `dt`; reaching every slab (laid at slab 1's middle with a reach of 24 m).
+   * Answers the next free place.
+   */
+  private stepDevils(n: number): number {
+    const d = this.devilSlots;
+    const sp = this.sp;
+    const dt = this.stepDt;
+    const per = this.devilShoves > 2 ? Math.round(this.devilShoves) : 2;
+    const S = AIR_TUNE.solver;
+    const drive = (S.relax + S.dissipation) * this.devilSpin;
+    for (let i = 0; i < this.devilCount; i++) {
+      const k = i * DEVIL_SLOT_W;
+      const x = d[k];
+      const z = d[k + 1];
+      const core = d[k + 2];
+      const dv = d[k + 3] * drive * dt;
+      const sense = d[k + 4];
+      for (let j = 0; j < per; j++) {
+        if (n >= SPLAT_BATCH) {
+          this.counts.droppedSplats += per - j;
+          break;
+        }
+        const b = (j / per) * Math.PI * 2;
+        const c = Math.cos(b);
+        const s = Math.sin(b);
+        sp[0] = x + c * core;
+        sp[1] = z + s * core;
+        sp[2] = core;
+        sp[3] = 6;
+        sp[4] = (-s * sense - c * this.devilInflow) * dv;
+        sp[5] = (c * sense - s * this.devilInflow) * dv;
+        sp[6] = 24;
+        n = this.put(n);
+      }
+    }
+    return n;
+  }
+
+  /**
+   * Every devil's column of dust for this frame, into the dust batch at `n` (after the fronts', before the engines'): a
+   * splat at each of its four heights at the core, the core's size, its share of the dust a second times the frame's `dt`,
+   * each with the column's own spread and no rise of its own (laid at its heights: the dust's laws would pull a rise back
+   * within a few metres). Only where the ground under the core gives dust. Answers the next free place.
+   */
+  private dustDevils(n: number): number {
+    const d = this.devilSlots;
+    const sd = this.sd;
+    const fdt = this.frameDt;
+    const cell = this.window ? this.window.cell : 1.5;
+    for (let i = 0; i < this.devilCount; i++) {
+      const k = i * DEVIL_SLOT_W;
+      const amount = (d[k + 5] * fdt) / 4;
+      if (!(amount > 0)) continue;
+      this.q[0] = d[k];
+      this.q[1] = d[k + 1];
+      if (!this.givesDustHere()) continue;
+      for (let h = 0; h < 4; h++) {
+        if (n >= DUST_BATCH) {
+          this.counts.droppedDust++;
+          break;
+        }
+        sd[0] = d[k];
+        sd[1] = d[k + 1];
+        sd[2] = d[k + 2];
+        sd[3] = amount;
+        sd[4] = this.devilHeights[h];
+        sd[5] = this.devilSigma;
+        sd[6] = 0;
+        this.dustFloor = cell;
+        n = this.putDust(n);
+      }
+    }
+    return n;
+  }
+
+  /**
+   * Every devil's particles for the frame (the fourth wave's records, from the seventh wave's devils): at its core, leaves
+   * off grass and litter, puffs off sand, ash and dirt, by its share of the dust it lifts, the fraction carried per devil.
+   */
+  private devilParticles(): void {
+    const sp = this.spawns!;
+    const P = AIR_TUNE.particles;
+    const dt = this.frameDt > 0 && Number.isFinite(this.frameDt) ? this.frameDt : 0;
+    if (!(dt > 0)) return;
+    const d = this.devilSlots;
+    const a = sp.arg;
+    const o = this.oq;
+    for (let i = 0; i < this.devilCount; i++) {
+      const k = i * DEVIL_SLOT_W;
+      const x = d[k];
+      const z = d[k + 1];
+      this.q[0] = x;
+      this.q[1] = z;
+      if (this.mediumHere() !== MEDIUM_BYTE.land) continue;
+      if (!this.groundHere()) continue;
+      const gy = this.g.h;
+      const c = this.classHere();
+      const swirl = d[k + 3];
+      const share = swirl / 10;
+      const s = share < 2 ? share : 2;
+      // A key of the devil's slot apart from every engine's (an engine's is its hull's id times 64 and its own index).
+      o.key = -100 - i;
+      a[0] = x;
+      a[2] = z;
+      a[8] = this.packedHere();
+      a[11] = 0;
+      a[13] = KICK_LOOK.plain;
+      a[14] = d[k + 2];
+      a[15] = 0;
+      if (c === CLASS_INDEX.grass || c === CLASS_INDEX.litter) {
+        o.kind = KICK_KIND.leaf;
+        o.amount = P.leafRate * s * dt;
+        a[1] = gy + 0.1;
+        a[4] = 0;
+        a[5] = 2;
+        a[6] = 0;
+        a[7] = swirl * 0.3;
+        a[9] = P.leafSize;
+        a[10] = P.leafLife;
+        a[12] = KICK_KIND.leaf;
+        a[3] = this.oweCount();
+        if (a[3] >= 1) sp.addArgs();
+      } else if (c === CLASS_INDEX.sand || c === CLASS_INDEX.ash || c === CLASS_INDEX.dirt) {
+        o.kind = KICK_KIND.puff;
+        o.amount = P.puffRate * s * dt;
+        a[1] = gy + 0.4;
+        a[4] = 0;
+        a[5] = 1;
+        a[6] = 0;
+        a[7] = swirl * 0.2;
+        a[9] = P.puffSize;
+        a[10] = P.puffLife;
+        a[12] = KICK_KIND.puff;
+        a[3] = this.oweCount();
+        if (a[3] >= 1) sp.addArgs();
+      }
+    }
+  }
+
+  /**
    * The sources' frame walk (the design's §2.4), every frame the field runs, the dust on or off and before the dust's
    * batch: each front's frame age moves on by the frame's `dt` and the band it crosses this frame is kept on its row (a
    * front whose step age and frame age have both passed its time is let go first, so its last band has been laid), and
@@ -489,6 +711,7 @@ export class AirForces {
     if (this.spawns && this.owed) {
       this.engineParticles();
       this.frontParticles();
+      if (this.devilCount > 0) this.devilParticles();
     }
     // The fifth wave's: where an engine's jet meets water, the ripples pressed.
     if (this.onPoke) this.enginePokes();
@@ -1541,6 +1764,8 @@ export class AirForces {
     }
     // A short event before the engines: what does not fit is dropped and counted.
     n = this.stepFronts(n);
+    // The unified wind's devils (the seventh wave), ranked before the engines: three at most.
+    if (this.devilCount > 0) n = this.stepDevils(n);
     // The engines, strongest over distance first.
     const count = this.engineCount;
     const e = this.engines;
@@ -1710,6 +1935,7 @@ export class AirForces {
     }
     this.dustCount = 0;
     n = this.dustFronts(n);
+    if (this.devilCount > 0) n = this.dustDevils(n);
     const ed = this.engineDust;
     for (let i = 0; i < this.engineCount; i++) {
       const o = i * ENG_DUST_W;
@@ -1796,6 +2022,7 @@ export class AirForces {
   clear(): void {
     this.oneCount = 0;
     this.engineCount = 0;
+    this.devilCount = 0;
     this.dustCount = 0;
     this.splatCount = 0;
     this.dustBatchCount = 0;

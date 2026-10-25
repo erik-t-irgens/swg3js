@@ -19,6 +19,7 @@ import { CARD_CURVE_PARS } from '../cardLight.ts';
 import { GRASS_SHADOW_PARS } from '../grass.ts';
 import { SLAB_VEL_GLSL, SRGB_GLSL } from './airShaders.ts';
 import { CLASS_INDEX, KICK_KINDS, SPAWN_MOST } from './airSpawn.ts';
+import { WIND7_GLSL } from '../windMath.ts';
 
 /**
  * The shared hash and the colour packing: a 32-bit integer mix (`airHash` in `airSpawn.ts` is its mirror) and a colour
@@ -157,6 +158,7 @@ uniform vec4 uPickSize;
 uniform vec4 uStreak;
 // x one where a drop of spray landing back on the water leaves a ring (the fifth wave: the current and the ripples on).
 uniform vec4 uRing;
+${WIND7_GLSL}
 layout(location = 0) out highp vec4 o0;
 layout(location = 1) out highp vec4 o1;
 layout(location = 2) out highp vec4 o2;
@@ -167,6 +169,12 @@ float wallTop(vec2 l) {
   return r > uObstacleOver ? r : 0.0;
 }
 ${KICK_ORO_GLSL}
+// The unified wind's gust patch over a cell of the window (the seventh wave): a gust sheds leaves and puffs as it passes,
+// as the trees take it. Never a streak (a storm's), and nothing with the unified wind off. Written by its components, so
+// the tests run this very function.
+bool kickGustSheds(vec2 lc, int kind) {
+  return w7On() && kind != 3 && w7Gust(vec2(uWindow.x + lc.x * uWindow.z, uWindow.y + lc.y * uWindow.z)).z > 0.5;
+}
 // A dead slot's record in this frame's range of its kind's ring: the first of the kind's records (r0 to r1) whose
 // cumulative count is past the slot's place in the range, or -1 (recordOf in airSpawn.ts, the mirror).
 int kickRecordOf(float ring, int r0, int r1) {
@@ -298,7 +306,7 @@ void main() {
       bool leafy = c == ${CLASS_INDEX.grass} || c == ${CLASS_INDEX.litter};
       bool sandy = c == ${CLASS_INDEX.sand} || c == ${CLASS_INDEX.ash} || c == ${CLASS_INDEX.dirt};
       vec2 a0 = airAt(lc, 0.5);
-      bool ok = (kind == 0 ? leafy : sandy) && length(a0) > kickPickThreshold(kind) && wallTop(lc) <= 0.0 && (kind != 3 || uPick.w > 0.0);
+      bool ok = (kind == 0 ? leafy : sandy) && (length(a0) > kickPickThreshold(kind) || kickGustSheds(lc, kind)) && wallTop(lc) <= 0.0 && (kind != 3 || uPick.w > 0.0);
       if (ok) {
         float h0 = kind == 0 ? 0.05 : (kind == 1 ? 0.3 : mix(uStreak.x, uStreak.y, airRand(rs + 14u)));
         pos = vec3(lc.x * uWindow.z, groundAt(lc) + h0 - cornerY, lc.y * uWindow.z);
@@ -722,6 +730,7 @@ uniform vec4 uAnchor;
 uniform vec4 uRainWin;
 // x the snow's flutter, y the pool's width.
 uniform vec4 uRainQ;
+${WIND7_GLSL}
 layout(location = 0) out highp vec4 o0;
 layout(location = 1) out highp vec4 o1;
 float groundAt(vec2 l) { return texture(uGround, clamp(l, 0.0, 1.0)).r; }
@@ -794,7 +803,9 @@ void main() {
     bool inWin = live && l.x >= 0.0 && l.y >= 0.0 && l.x <= 1.0 && l.y <= 1.0;
     float g = inWin ? groundAt(l) : 0.0;
     float h = inWin ? pos.y + uAnchor.y - g : 1.5;
-    vec2 air = live ? airAt(l, max(h, 0.0)) : inflowAt(1.5);
+    // With the air not stepped this frame, the inflow; under the unified wind, the inflow as the gust at the drop's place
+    // turns and scales it (the seventh wave), so the rain's lean walks with the gusts there too.
+    vec2 air = live ? airAt(l, max(h, 0.0)) : (w7On() ? w7Target(pos.xz + uAnchor.xz, inflowAt(1.5)) : inflowAt(1.5));
     float w = 0.0;
     if (inWin) w = airOroAt(l, air.x, air.y, uRainWin.z);
     vec3 target = vec3(air.x, -fall + w, air.y);

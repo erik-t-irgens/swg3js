@@ -22,6 +22,7 @@ import { AIR_VERTEX } from './airShaders.ts';
 import { RAIN_DRAW_FRAGMENT, RAIN_DRAW_VERTEX, RAIN_FILL_FRAGMENT, RAIN_UPDATE_FRAGMENT } from './airParticleShaders.ts';
 import { AIR_TUNE } from './airTune.ts';
 import { WEATHER_UNIFORMS } from '../wetness.ts';
+import { wind7Uniforms } from '../wind.ts';
 
 /** The pool's texture width: every count by preset is a whole number of its rows. */
 export const RAIN_WIDTH = 128;
@@ -137,6 +138,7 @@ export class RainPool {
       uniforms: {
         uWindow: src.window,
         uWind: { value: this.wind },
+        uWind7: wind7Uniforms().uWind7,
         uSlabTiles: src.slabTiles,
         uSlabScale: src.slabScale,
         uSlabShare: src.slabShare,

@@ -17,6 +17,9 @@
 //      today's decal;
 //   5. the weather (the fourth wave's): its own particle shader's text and uniforms are the old ones, its rain and snow
 //      sheets start whole with nothing of ours on its pass, and its pass draws and stencils as the old one did;
+//   6c. the wind's lines (the seventh wave's first half): the weather stepped through both trees with the unified wind's
+//      arm off three ways (the master off, its switch off, its art at nought), every wind reader frame for frame the
+//      old weather's; nothing of it made; the flora's sway wrap the old one's with the trees' form off;
 //   6. nothing runs: the field with the master off answers and the renderer is never touched, and the dust pool's
 //      motes (the dust or the master off) are the old pool's to the bit, the same spawns and steps, seeded alike;
 //   7. no resize, of any of the field's detail dials (the sand's and the prints' with them), disposes a material.
@@ -25,7 +28,7 @@
 // loudly when git cannot answer.
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
-import { readFileSync, rmSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { extractOldSrc, PRE_PASS, REPO } from './airTrees.ts';
@@ -648,6 +651,169 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
   const diffAt = so5.findIndex((s, i) => s !== sn5[i]);
   const castFrames = so5.filter((s) => s.endsWith('#1')).length;
   ok(diffAt === -1 && so5.length === 120 && castFrames > 30 && castFrames < 120, `its view half over 120 scripted frames (rain, snow, dust and fog weighed in turn, the sheets' quads, wet ground, nothing): every channel's rate and alpha and every roof cast the old weather's (${castFrames} frames cast)${diffAt >= 0 ? `; first differs at frame ${diffAt}: ${so5[diffAt]} against ${sn5[diffAt]}` : ''}`);
+}
+
+// --- 6c. the wind's lines (the seventh wave's first half): with its arm off, today's weather to the bit ---
+{
+  // The weather's step through both trees over the same scripted frames, its sky a stand-in whose scale moves, the shared
+  // clock (with no server, the wall clock) stood in: the heading, the speed, the water's and the flora's wind, the wet
+  // state, the sky's wind and every channel's placement equal frame for frame by `Object.is` -- with the master off, again
+  // with the master on and the unified wind's switch off, and again with its art at nought (the arm off each time).
+  const [o, n] = await both('world/weather.ts');
+  const [oWater, nWater] = await both('world/water.ts');
+  const [oFlora, nFlora] = await both('world/floraSway.ts');
+  const windNew = await load(NEW, 'world/wind.ts');
+  const setWindArm = windNew.setWindArm as (o: { master: boolean; wind: boolean; devils: boolean; trees: boolean; art: number }) => void;
+  const WIND_STATE = windNew.WIND_STATE as { on: boolean };
+  const madeBefore = (windNew.wind7UniformsMade as () => boolean)();
+  type W = Record<string, unknown> & { update(dt: number, p: unknown, ctx: unknown): void; updateView(dt: number, c: unknown, ctx: unknown): void; state: Record<string, unknown> };
+  const run = (m: Mod, water: Mod, flora: Mod, arm: { master: boolean; wind: boolean; art: number }): string[] => {
+    setWindArm({ master: arm.master, wind: arm.wind, devils: true, trees: true, art: arm.art });
+    const w = new (m.Weather as new (p: unknown) => W)({ world: null });
+    const x = w as unknown as Record<string, unknown>;
+    const setWindArgs: number[] = [];
+    let aloftFrames = 0;
+    let meanApart = 0;
+    const lighting = { windSpeedScale: 3, shadowScale: 1 };
+    const blocks = [0, 1, 2, 3, 4].map((l) => ({ weatherIndex: l, windSpeedScale: 2 + l, cameraEffect: l >= 2 ? { file: l >= 3 ? 'fx_dust.prt' : 'fx_rain.prt', kind: l >= 3 ? 'dust' : 'rain', strength: 0.5 + l * 0.1 } : null }));
+    x.sky = {
+      lighting,
+      data: { blocks, weather: { effects: null } },
+      texturesReady: () => true,
+      ensureTextures: () => Promise.resolve(),
+      setMix: () => undefined,
+      setWind: (h: number) => void setWindArgs.push(h),
+      setOvercast: () => undefined,
+      sheetAloft: new Float64Array(3),
+      sheetAloftOn: false,
+      mixLength: 0,
+      mixBlock: () => null,
+      mixWeights: new Float64Array(4),
+    };
+    x.reason = null;
+    x.hasWeatherData = true;
+    x.seed = 12345;
+    x.weights = [0.3, 0.25, 0.2, 0.15, 0.1];
+    x.levels = 5;
+    x.current = { name: '', byLevel: Int16Array.from([0, 1, 2, 3, 4]) };
+    type Handle = { rateScale: number; alphaScale: number; file: string };
+    x.fxEffects = {
+      quads: 0,
+      batchMaterials: [],
+      kill: null,
+      place: (file: string): Handle => ({ rateScale: 0, alphaScale: 1, file }),
+      move: (): void => undefined,
+      remove: (): void => undefined,
+      particlesOf: (): number => 5,
+      soundsOf: (): string[] => [],
+      update: (): void => undefined,
+    };
+    (x.roofs as { update: () => void }).update = () => undefined;
+    const WW = water.WATER_WIND as { value: { x: number; y: number } };
+    const FW = flora.FLORA_WIND as { x: number; z: number; strength: number };
+    const wet = x.wet as { wetness: number; puddles: number; snowCover: number };
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(3, 1.7, -2);
+    const player = new THREE.Vector3(10, 0, -4);
+    const vctx = { inside: false, aboard: false, underground: false, fog: null, groundAt: () => 0, waterAt: () => -Infinity, vehicles: [], hull: null, ridden: null };
+    const wctx = { daylight: 0.8, groundAt: () => 0 };
+    const out: string[] = [];
+    const realNow = Date.now;
+    let now = 1.79e12;
+    Date.now = () => now;
+    try {
+      for (let f = 0; f < 240; f++) {
+        now += 1000 / 60 + (f % 7) * 3;
+        lighting.windSpeedScale = 3 + 2.5 * Math.sin(f * 0.07);
+        w.update(1 / 60, player, wctx);
+        if ((x.sky as { sheetAloftOn: boolean }).sheetAloftOn) aloftFrames++;
+        if (m === n && !Object.is(w.state.windMean, w.state.windSpeed)) meanApart++;
+        w.updateView(1 / 60, camera, vctx);
+        const ch = (x.channels as { file: string; matrix: THREE.Matrix4 }[]).map((c) => `${c.file}:${c.matrix.elements.join(',')}`).join('|');
+        out.push([w.state.windHeading, w.state.windSpeed, WW.value.x, WW.value.y, FW.x, FW.z, FW.strength, wet.wetness, wet.puddles, wet.snowCover, setWindArgs[setWindArgs.length - 1], ch].map((v) => (typeof v === 'number' ? (Object.is(v, -0) ? '-0' : String(v)) : String(v))).join(';'));
+      }
+    } finally {
+      Date.now = realNow;
+    }
+    // The new tree's sky is told nothing is held (today's drift) on every frame; the old one has no such flag.
+    if (m === n && aloftFrames !== 0) out.push('the sheets were handed a wind aloft with nothing held');
+    // And its mean is the speed itself on every frame (what the September clouds' feed and the drying now read).
+    if (m === n && meanApart !== 0) out.push(`the mean stood apart from the speed on ${meanApart} frames`);
+    return out;
+  };
+  for (const arm of [
+    { master: false, wind: true, art: 1, what: 'the master off' },
+    { master: true, wind: false, art: 1, what: "the master on and the unified wind's switch off" },
+    { master: true, wind: true, art: 0, what: "the master on and the wind's art at nought" },
+  ]) {
+    const a = run(o, oWater, oFlora, arm);
+    const b = run(n, nWater, nFlora, arm);
+    const at = a.findIndex((s, i) => s !== b[i]);
+    ok(!WIND_STATE.on && at === -1 && a.length === 240 && b.length === 240 && new Set(a.map((s) => s.split(';')[1])).size > 10, `the weather's wind lines with ${arm.what}: the heading, the speed, the water's and the flora's wind, the wet state, the sky's wind and every channel's placement over 240 frames equal to the old weather's by Object.is${at >= 0 ? `; first differs at frame ${at}: ${a[at]} against ${b[at]}` : ''}`);
+  }
+  setWindArm({ master: false, wind: true, devils: true, trees: true, art: 1 });
+  // The uniform is made only by what the master on builds (the field, its pools, the grass's twin, the trees' form): the
+  // field section 6 built above made it in this process, so its makers are held as text and the pattern by its absence.
+  void madeBefore;
+  const makers: string[] = [];
+  const walk = (dir: string): void => {
+    for (const e of (readdirSync(dir, { withFileTypes: true }) as import('node:fs').Dirent[])) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (p.endsWith('.ts') && readFileSync(p, 'utf8').includes('wind7Uniforms()')) makers.push(p.slice(NEW.length + 1).replace(/\\/g, '/'));
+    }
+  };
+  walk(NEW);
+  const allowed = ['world/wind.ts', 'world/windTrees.ts', 'world/windSelfTest.ts', 'world/volumetrics/airField.ts', 'world/volumetrics/airParticles.ts', 'world/volumetrics/airRain.ts', 'world/volumetrics/airGrass.ts'];
+  ok((windNew.windPattern as () => unknown)() === null && makers.every((m) => allowed.includes(m)), `and nothing of the unified wind is made by the weather with its arm off: no pattern, and its one uniform asked for only by what the master on builds (${makers.join(', ')})`);
+  // The sky's sheets with nothing held: `sheetWind(null, …)` keeps today's drift line (the sheets' own test, `sky.ts`).
+  const skySrc = readFileSync(join(NEW, 'world', 'sky.ts'), 'utf8').replace(/\r\n/g, '\n');
+  ok(/sheetWind\(bottom: number \| null, top: number \| null, veer: number\): void \{/.test(skySrc) && /if \(!this\.sheetAloftOn\) \{\n\s+\/\/ Drift in texture repeats per second: the client's wind, but never quite still\.\n\s+const perSecond = Math\.max\(\(layer\.speed \* L\.windSpeedScale\) \/ size, CLOUD_MIN_DRIFT\);\n\s+\/\/ Toward the wind's heading, as the rain leans and the dust blows\.\n\s+driftScroll\(scroll\.s, this\.windHeading, perSecond, dt\);/.test(skySrc), "the sky's sheets take a wind aloft only when one is handed them, today's drift line otherwise");
+  // The flora's wrap and its depth materials with the trees' form off: the same injected text and keys as the old tree's.
+  const wrapOf = (m: Mod): ((mat: THREE.Material) => void) | null => (typeof m.swayWrap === 'function' ? (m.swayWrap as (mat: THREE.Material) => void) : null);
+  const oWrap = wrapOf(oFlora);
+  const nWrap = wrapOf(nFlora);
+  if (oWrap && nWrap) {
+    const text = (wrap: (mat: THREE.Material) => void): string => {
+      const mat = new THREE.MeshStandardMaterial();
+      mat.userData.swgSway = 'a stand-in planting';
+      wrap(mat);
+      const shader = { vertexShader: THREE.ShaderLib.standard.vertexShader, fragmentShader: THREE.ShaderLib.standard.fragmentShader, uniforms: {} as Record<string, unknown>, defines: {} };
+      mat.onBeforeCompile?.(shader as unknown as THREE.WebGLProgramParametersWithUniforms, undefined as unknown as THREE.WebGLRenderer);
+      return `${mat.customProgramCacheKey()}|${shader.vertexShader}|${Object.keys(shader.uniforms).sort().join()}`;
+    };
+    const a = text(oWrap);
+    const b = text(nWrap);
+    ok(a === b && a.includes('swgSwayOffset'), "the flora's sway wrap with the trees' form off: the same injected text, uniforms and key as the old tree's");
+  } else ok(false, 'both trees export swayWrap');
+  // Its depth materials and the depth combinations the screens draw, with the form off: today's text, uniforms and keys.
+  type DepthFor = (m: THREE.Material) => THREE.MeshDepthMaterial;
+  type Combos = (form?: boolean) => THREE.Mesh[];
+  const depthText = (depthFor: DepthFor, combos: Combos): string => {
+    const src = new THREE.MeshStandardMaterial();
+    src.userData.swgSway = 'a stand-in planting';
+    const parts: string[] = [];
+    for (const d of [depthFor(src), ...combos().map((c) => depthFor(c.material as THREE.Material))]) {
+      const shader = { vertexShader: THREE.ShaderLib.depth.vertexShader, fragmentShader: THREE.ShaderLib.depth.fragmentShader, uniforms: {} as Record<string, unknown>, defines: {} };
+      d.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, undefined as unknown as THREE.WebGLRenderer);
+      parts.push(`${d.customProgramCacheKey()}|${shader.vertexShader}|${Object.keys(shader.uniforms).sort().join()}`);
+    }
+    return `${combos().length}#${parts.join('##')}`;
+  };
+  const oD = depthText(oFlora.swayDepthFor as DepthFor, oFlora.swayDepthCombos as Combos);
+  const nD = depthText(nFlora.swayDepthFor as DepthFor, nFlora.swayDepthCombos as Combos);
+  ok(oD === nD && oD.startsWith('12#') && oD.includes('swg-sway-depth|'), "and its depth materials and the twelve depth combinations a screen draws, with the form off: the same injected text, uniforms and keys as the old tree's");
+  // The grass's own material and its depth material with the master off are held to the old tree's, text and key, in 4b
+  // above (the wave's lean and sheen live in the twin, which the master off never makes); here, that its module reads
+  // nothing of the unified wind. And the September clouds' feed takes the mean, the speed itself with the arm off (held
+  // above, frame for frame).
+  const newGrass = readFileSync(join(NEW, 'world', 'grass.ts'), 'utf8');
+  ok(!newGrass.includes('uWind7') && !/\bw7[A-Z]/.test(newGrass) && !newGrass.includes('wind.ts'), "the grass's own module reads nothing of the unified wind: its lean and sheen are the twin's alone");
+  const oldMain = readFileSync(join(OLD, 'main.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const newMain = readFileSync(join(NEW, 'main.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const oldFeed = /const look = cloudLook\(.*\);/.exec(oldMain)?.[0] ?? '';
+  const newFeed = /const look = cloudLook\(.*\);/.exec(newMain)?.[0] ?? '';
+  ok(oldFeed.includes('on ? w.windSpeed : 0') && newFeed === oldFeed.replace('on ? w.windSpeed : 0', 'on ? w.windMean : 0'), "the September clouds' feed reads the mean where it read the speed and nothing else moved (the mean the speed itself with the arm off, frame for frame above)");
 }
 
 // --- 5b. the particles' picture accessor (the fourth wave's): it answers a held picture and starts nothing ---

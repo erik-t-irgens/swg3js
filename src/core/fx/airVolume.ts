@@ -827,6 +827,9 @@ export class AirVolumePass implements FxPass {
       // with the liquid's tile beside the slabs (as `velocity`).
       field('flow', 'rgb', 1 / 2),
       field('liquid', 'rgb', 1 / 20),
+      // The seventh wave's: the unified wind's gusts over the window (red the speed factor k, half to full; green the patch;
+      // blue the veer, half a radian either side of middle grey), worked out on the processor from the pack when shown.
+      field('gusts', 'rgb', 1),
     ];
   }
 

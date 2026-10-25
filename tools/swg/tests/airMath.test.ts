@@ -861,4 +861,78 @@ ok(sandLift(5, 6, 7, 1) === 0 && near(sandLift(20, 6, 7, 1), 1) && sandLift(20, 
   ok(all, `the dispatch by the medium under each push, a jet and a blast alike: every one shoves the air (the liquid's tile takes its share in the splat pass); water presses the ripples and lifts nothing; lava, a flow's or the sea's where it stands over the ground, presses nothing, lifts nothing and throws no grain; the sea's dry land is land and lifts its dust (${lines.join('; ')})`);
 }
 
+// --- the seventh wave's: a dust devil through the real AirForces ---
+{
+  const f = forcesAt();
+  f.devilCount = 0;
+  f.vortex(10, -5, 2, 10, 1, 0.6);
+  const n = f.buildStepBatch(1 / 60);
+  // Each shove sits on the core's ring and pushes round it the devil's way (counter-clockwise seen from above with sense +1:
+  // the tangent (-sin, cos) about the core), with a little inflow toward it.
+  let tangential = true;
+  let around = 0;
+  for (let i = 0; i < n; i++) {
+    const x = f.window!.ox + f.splatA[i * 4] * f.window!.size;
+    const z = f.window!.oz + f.splatA[i * 4 + 1] * f.window!.size;
+    const rx = x - 10;
+    const rz = z - -5;
+    const r = Math.hypot(rx, rz);
+    const vx = f.splatB[i * 4];
+    const vz = f.splatB[i * 4 + 1];
+    const t = (rx * vz - rz * vx) / Math.max(r, 1e-9);
+    const inward = -(rx * vx + rz * vz) / Math.max(r, 1e-9);
+    if (!(Math.abs(r - 2) < 0.05 && t > 0 && inward > 0 && inward < t)) tangential = false;
+    around += t;
+  }
+  ok(n === Math.round(f.devilShoves) && tangential, `a devil's shoves sit on its core's ring and push round it its own way with a little inflow (${n} shoves)`);
+  // The other sense turns the other way.
+  const g = forcesAt();
+  g.devilCount = 0;
+  g.vortex(10, -5, 2, 10, -1, 0.6);
+  const m = g.buildStepBatch(1 / 60);
+  let other = 0;
+  for (let i = 0; i < m; i++) {
+    const rx = g.window!.ox + g.splatA[i * 4] * g.window!.size - 10;
+    const rz = g.window!.oz + g.splatA[i * 4 + 1] * g.window!.size + 5;
+    other += (rx * g.splatB[i * 4 + 1] - rz * g.splatB[i * 4]) / Math.hypot(rx, rz);
+  }
+  ok(around > 0 && other < 0 && Math.abs(around + other) < 1e-6 * Math.abs(around), 'and the other sense turns the other way, as hard');
+  // Its shove a second is the same at 60 and 144 frames (applied once a step), and nothing a frame that takes no step.
+  const over = (fps: number): number => {
+    const h = forcesAt();
+    const clock = { steps: 0, acc: 0 };
+    let sum = 0;
+    let steps = 0;
+    for (let frame = 0; frame < fps * 5; frame++) {
+      h.devilCount = 0;
+      h.vortex(0, 0, 2, 10, 1, 0.6);
+      fixedSteps(clock.acc, 1 / fps, 60, 3, clock);
+      for (let s = 0; s < clock.steps; s++) {
+        steps++;
+        const k = h.buildStepBatch(1 / 60);
+        for (let i = 0; i < k; i++) sum += Math.hypot(h.splatB[i * 4], h.splatB[i * 4 + 1]);
+      }
+    }
+    return (sum / Math.max(steps, 1)) * 60;
+  };
+  const a60 = over(60);
+  const a144 = over(144);
+  ok(a60 > 0 && Math.abs(a144 - a60) / a60 < 1e-9, `a devil drives its air alike at 60 and 144 frames a second, once a step (${a60.toFixed(3)} and ${a144.toFixed(3)} a second)`);
+  // Its column of dust at its four heights where the ground gives dust.
+  const d = forcesAt();
+  d.devilCount = 0;
+  d.vortex(4, 4, 2, 10, 1, 0.6);
+  walk(d);
+  const dust = d.buildDustBatch(1 / 60);
+  ok(dust >= 4, `and its column of dust is laid at its heights where the ground gives dust (${dust} splats)`);
+  // Three taken, a fourth refused, and none whose stir cannot reach the window.
+  const t4 = forcesAt();
+  t4.devilCount = 0;
+  for (let i = 0; i < 4; i++) t4.vortex(i * 5, 0, 2, 10, 1, 0.6);
+  t4.vortex(5000, 0, 2, 10, 1, 0.6);
+  const counts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0, peers: 0, shuttles: 0, devils: 0, droppedDevils: 0 };
+  t4.takeCounts(counts);
+  ok(t4.devilCount === 3 && counts.devils === 3 && counts.droppedDevils === 1 && counts.offWindow === 1, 'three devils taken a frame, a fourth refused and counted, and one past the window never taken');
+}
+
 console.log(`\n${checks} checks passed`);

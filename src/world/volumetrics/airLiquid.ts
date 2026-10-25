@@ -174,14 +174,22 @@ export function detailCarried(flow: number, drift: number, detailFlow: number, d
 /**
  * What the liquid is pulled toward (the solver's advect pass, the liquid tile alone): the wind times the medium's own
  * share of it, gusts and all, plus the liquid's own flow there (a ribbon's, the flow raster `uFlowR`) times its share
- * (`uLiquidR.y`). One function, so the seventh wave's one wind sets the target here and nowhere else. Needs the gusts'
- * `windHere` and the uniforms `uFlowR` and `uLiquidR`.
+ * (`uLiquidR.y`). One function, so the seventh wave's one wind sets the target here and nowhere else: under its arm the
+ * unified wind there (`w7Target`, the air's own branch), else the gusts' `windHere`. Needs those two, `w7On` and the
+ * uniforms `uFlowR` and `uLiquidR`.
  */
 export const LIQUID_TARGET_GLSL = /* glsl */ `
+// The wind the air and the liquid are pulled toward at world place w, for an inflow wind (the seventh wave): under the
+// unified wind's arm the wind where its gust travels (w7Target), else the air's own gust cells (windHere), as before. One
+// function, the advect's and the liquid's, so the tests run this very choice.
+vec2 airTarget(vec2 w, vec2 wind) {
+  return w7On() ? w7Target(w, wind) : windHere(w, wind);
+}
 vec2 liquidTarget(vec2 w, vec2 l, float windShare) {
   vec2 own = texture(uFlowR, clamp(l, 0.0, 1.0)).xy * uLiquidR.y;
   if (any(isnan(own)) || any(isinf(own))) own = vec2(0.0);
-  return windHere(w, uWind * windShare) + own;
+  vec2 wind = uWind * windShare;
+  return airTarget(w, wind) + own;
 }
 `;
 

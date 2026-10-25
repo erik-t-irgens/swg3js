@@ -49,6 +49,7 @@ import { OPEN_ROOF_GRID, OPEN_ROOF_MAP, WEATHER_UNIFORMS } from './wetness';
 import { WATER_WIND, WATER_WIND_FULL } from './water';
 import { FLORA_WIND } from './floraSway.ts';
 import { sharedClock, sharedNote } from './sharedClock.ts';
+import { WIND_FRAME, WIND_HOLD, WIND_STATE, WIND_TUNE, attachWind, detachWind, stepWind7, stepWindAloft } from './wind.ts';
 
 export interface WeatherSettings {
   weather: boolean;
@@ -105,6 +106,14 @@ export interface WeatherState {
   snowCover: number;
   windHeading: number;
   windSpeed: number;
+  /**
+   * The unified wind's mean (the volumetrics' wave 7a): with its arm off the same number as `windSpeed`; under it the
+   * profile's mean `S`, the pulse in it and no gust, which drying, the air's inflow, the sand's threshold, the flora's
+   * strength and the September clouds read.
+   */
+  windMean: number;
+  /** A gust's veer at the player under the W7 arm (radians), nought with it off. */
+  windVeer: number;
   /** 0..1 how much the camera effect plays. */
   outside: number;
   underwater: boolean;
@@ -229,6 +238,8 @@ function passStencil(m: THREE.Material, portalView: boolean): void {
  * 0, emitters: true })` twice shows a particle moving along +Z if it is right.
  */
 export const DUST_YAW_OFFSET = Math.PI / 2;
+/** Degrees to radians (the wind's aloft veer is kept in degrees). */
+const DEG = Math.PI / 180;
 /** Kinds that fall and lean with the wind, and how far at most (radians). */
 const RAIN_TILT_MAX = THREE.MathUtils.degToRad(25);
 const SNOW_TILT_MAX = THREE.MathUtils.degToRad(35);
@@ -291,6 +302,8 @@ export class Weather {
     snowCover: 0,
     windHeading: 0,
     windSpeed: 0,
+    windMean: 0,
+    windVeer: 0,
     outside: 1,
     underwater: false,
     hull: null,
@@ -389,9 +402,11 @@ export class Weather {
 
   // Wind, what falls, how wet.
   private readonly wind: WindNow = { heading: 0, gust: 1 };
-  private heldHeading: number | null = null;
   private windHeading = 0;
   private windSpeed = 0;
+  /** The unified wind's mean and veer (wave 7a): the speed itself and nought with its arm off. */
+  private windMean = 0;
+  private windVeer = 0;
   private rain = 0;
   private snow = 0;
   private dust = 0;
@@ -484,6 +499,8 @@ export class Weather {
     });
     this.seed = seedOf(opts.packId);
     this.weights = climateFor(opts.packId, this.levels);
+    // The unified wind's world (wave 7a): references kept; nothing of it is made until its arm first steps.
+    attachWind(opts.packId, planet.id, this.seed, this.weights, this.levels, data.blocks);
     if (!data.weather) console.info('weather: sky.json has no camera effects; run: npm run swg -- sky @SWG all assets-private --retail-only');
     else {
       // Every effect any row or any forced kind may play, made and uploaded now, so a storm that
@@ -540,6 +557,7 @@ export class Weather {
     this.channels.length = 0;
     this.fxEffects?.dispose();
     this.fxEffects = null;
+    detachWind();
     this.sky = null;
     this.terrain = null;
     this.reason = 'no sky';
@@ -626,9 +644,12 @@ export class Weather {
     this.updateHeldNote();
   }
 
-  /** Console: hold the wind's heading (radians), or null to follow the schedule. */
+  /**
+   * Console: hold the wind's heading (radians), or null to follow the schedule. It writes the unified wind's hold
+   * (`WIND_HOLD.heading`, wave 7a), the record `__debug.wind` writes too, so every reader takes it whatever the master.
+   */
   holdWind(heading: number | null): void {
-    this.heldHeading = heading === null || !Number.isFinite(heading) ? null : heading;
+    WIND_HOLD.heading = heading === null || !Number.isFinite(heading) ? null : heading;
   }
 
   /** The shadow factor the world applies to the cascades: the mix's, or 1 with storms not dimming shadows. */
@@ -865,21 +886,52 @@ export class Weather {
     }
     this.applyMix();
 
-    // The wind: its heading drifts over twenty minutes, it gusts over half a minute, and its
-    // strength is the rows' own scale (last frame's, which changes slowly).
-    windAt(this.seed, clock, this.wind);
-    this.windHeading = this.heldHeading ?? this.wind.heading;
-    this.windSpeed = sky.lighting.windSpeedScale * this.wind.gust;
-    sky.setWind(this.windHeading);
-    // The heading as a direction in XZ, the way the sky and the falling effects read it (0 is +Z,
-    // turning toward +X), so the surface runs with the clouds and the rain's lean, not across them.
-    WATER_WIND.value
-      .set(Math.sin(this.windHeading), Math.cos(this.windHeading))
-      .multiplyScalar(Math.min(this.windSpeed / WATER_WIND_FULL, 1));
-    // The flora's own (`floraSway.ts`): the heading apart from the strength, which the water's loses at nought.
-    FLORA_WIND.x = Math.sin(this.windHeading);
-    FLORA_WIND.z = Math.cos(this.windHeading);
-    FLORA_WIND.strength = Math.min(this.windSpeed / WATER_WIND_FULL, 1);
+    if (!WIND_STATE.on) {
+      // The wind: its heading drifts over twenty minutes, it gusts over half a minute, and its
+      // strength is the rows' own scale (last frame's, which changes slowly). The hold's terms
+      // (`WIND_HOLD`, the volumetrics' wave 7a: the owner's slider, with the master on or off) are
+      // today's own numbers by `Object.is` while nothing is held.
+      windAt(this.seed, clock, this.wind);
+      this.windHeading = WIND_HOLD.heading ?? this.wind.heading;
+      // A held gust share scales today's pulse about one; with none, `this.wind.gust` itself, today's own line.
+      const hg = WIND_HOLD.gust;
+      this.windSpeed = WIND_HOLD.speed ?? sky.lighting.windSpeedScale * (hg === null ? this.wind.gust : 1 + (this.wind.gust - 1) * hg);
+      this.windMean = this.windSpeed;
+      this.windVeer = 0;
+      sky.setWind(this.windHeading);
+      // The heading as a direction in XZ, the way the sky and the falling effects read it (0 is +Z,
+      // turning toward +X), so the surface runs with the clouds and the rain's lean, not across them.
+      WATER_WIND.value
+        .set(Math.sin(this.windHeading), Math.cos(this.windHeading))
+        .multiplyScalar(Math.min(this.windSpeed / WATER_WIND_FULL, 1));
+      // The flora's own (`floraSway.ts`): the heading apart from the strength, which the water's loses at nought.
+      FLORA_WIND.x = Math.sin(this.windHeading);
+      FLORA_WIND.z = Math.cos(this.windHeading);
+      FLORA_WIND.strength = Math.min(this.windSpeed / WATER_WIND_FULL, 1);
+      // The sky's sheets: today's line, or while a speed is held its metres a second at the wind aloft with no floor (a
+      // held nought stands them still), since the sheets read the rows' scale and nearly all of them sit at their drift's
+      // floor whatever the wind.
+      const hsp = WIND_HOLD.speed;
+      if (hsp !== null) {
+        const sa = sky.sheetAloft;
+        sa[0] = hsp * WIND_TUNE.aloft.bottom;
+        sa[1] = hsp * WIND_TUNE.aloft.top;
+        sa[2] = WIND_TUNE.aloft.veerTop * DEG;
+        sky.sheetAloftOn = true;
+      } else if (WIND_STATE.decks) {
+        // A cloud deck of the next wave draws (its feed sets `decks`): its decks drift at the world's wind aloft whatever
+        // `volWind` is, and the sheets kept over them with them, at the world's travel speed aloft and never under the floor.
+        // Nothing else of the unified wind is read here; with no deck this branch is never taken (today's line below).
+        WIND_FRAME.t = clock;
+        this.stepSheetsAloft(sky, active);
+      } else sky.sheetAloftOn = false;
+    } else {
+      // The clock and the player's place handed in the step's own record (a number handed to a call is boxed).
+      WIND_FRAME.t = clock;
+      WIND_FRAME.px = playerPos.x;
+      WIND_FRAME.pz = playerPos.z;
+      this.stepUnifiedWind(sky, active);
+    }
 
     // What falls.
     this.collect(active);
@@ -891,7 +943,9 @@ export class Weather {
       this.seedWetPending = false;
       if (active) seedWet(this.wet, this.seed, this.weights, clock, (l) => this.fallingAt(l, 'rain'), (l) => this.fallingAt(l, 'snow'));
     }
-    stepWet(this.wet, dt, this.rain, this.snow, ctx.daylight, this.windSpeed);
+    // Drying takes the wind's mean (the speed itself with the unified wind's arm off), so how wet the ground is never
+    // flickers with the gusts.
+    stepWet(this.wet, dt, this.rain, this.snow, ctx.daylight, this.windMean);
     const wetOn = this.settings.wetSurfaces && active ? 1 : 0;
     const U = WEATHER_UNIFORMS;
     U.uWetness.value = this.wet.wetness * wetOn;
@@ -908,6 +962,73 @@ export class Weather {
     }
     this.copyState(active);
     this.cpu.update += (performance.now() - t0 - this.cpu.update) / 60;
+  }
+
+  /**
+   * The unified wind's step, under its arm (the volumetrics' wave 7a, the design's §2.17): the heading the shared one
+   * (the walk and its wobble) or the held, the speed at the player the profile's mean times the gust there, the mean apart
+   * for drying, the flora and the air, and a gust's veer; the flora's strength from the mean along the heading alone (no
+   * plant takes the player's own gust or veer), the water's from the speed along the heading and the veer; the sky's
+   * sheets at the world's wind aloft, floored, or a held speed's with no floor. The travel's level is the schedule's, a
+   * forced one, or nought with the Weather setting off, as the weather's own is.
+   */
+  private stepUnifiedWind(sky: SwgSky, active: boolean): void {
+    const F = WIND_FRAME;
+    this.windLevels(active);
+    stepWind7(sky);
+    this.windHeading = F.heading;
+    this.windMean = F.mean;
+    this.windSpeed = F.speed;
+    this.windVeer = F.veer;
+    sky.setWind(this.windHeading);
+    let wh = this.windHeading;
+    if (this.windVeer !== 0) wh += this.windVeer;
+    WATER_WIND.value.set(Math.sin(wh), Math.cos(wh)).multiplyScalar(Math.min(this.windSpeed / WATER_WIND_FULL, 1));
+    FLORA_WIND.x = Math.sin(this.windHeading);
+    FLORA_WIND.z = Math.cos(this.windHeading);
+    FLORA_WIND.strength = Math.min(this.windMean / WATER_WIND_FULL, 1);
+    // The sheets' wind aloft, written straight into the sky's kept array (a number handed to a call is boxed): a held
+    // speed's with no floor, else the world's travel speed aloft, floored.
+    const A = WIND_TUNE.aloft;
+    const sa = sky.sheetAloft;
+    const hsp = WIND_HOLD.speed;
+    if (hsp !== null) {
+      sa[0] = hsp * A.bottom;
+      sa[1] = hsp * A.top;
+    } else {
+      sa[0] = Math.max(F.travel * A.bottom, A.floor);
+      sa[1] = Math.max(F.travel * A.top, A.floor);
+    }
+    sa[2] = A.veerTop * DEG;
+    sky.sheetAloftOn = true;
+  }
+
+  /**
+   * The levels the unified wind's travel reads (`WIND_FRAME.level` and `.forced`): the weather's continuous level, and a
+   * level held for the travel -- the console's force or the settings', or level 0 with the Weather setting off, as the
+   * weather's own wind is.
+   */
+  private windLevels(active: boolean): void {
+    const F = WIND_FRAME;
+    F.level = this.level;
+    const forced = this.forced?.level ?? (this.settings.weatherForce >= 0 ? this.settings.weatherForce : null);
+    F.forced = !active ? 0 : forced;
+  }
+
+  /**
+   * The sky's sheets at the world's travel speed aloft while a deck of the next wave draws with the unified wind's arm off
+   * (`WIND_STATE.decks`): the pure travel's speed alone, never under the floor, the heading today's (`sky.setWind` above).
+   */
+  private stepSheetsAloft(sky: SwgSky, active: boolean): void {
+    const F = WIND_FRAME;
+    this.windLevels(active);
+    stepWindAloft();
+    const A = WIND_TUNE.aloft;
+    const sa = sky.sheetAloft;
+    sa[0] = Math.max(F.travel * A.bottom, A.floor);
+    sa[1] = Math.max(F.travel * A.top, A.floor);
+    sa[2] = A.veerTop * DEG;
+    sky.sheetAloftOn = true;
   }
 
   /** The kind forced now (the console's, else the setting's), or null for the area's own. */
@@ -1108,6 +1229,9 @@ export class Weather {
    */
   private placement(kind: WeatherKind, sideways: boolean, at: THREE.Vector3, out: THREE.Matrix4): void {
     let yaw = this.windHeading;
+    // A gust's veer at the camera under the unified wind's arm (wave 7a); added only where it is not nought, since a
+    // negative zero plus nought is not itself.
+    if (this.windVeer !== 0) yaw += this.windVeer;
     let tilt = 0;
     if (sideways) yaw += DUST_YAW_OFFSET;
     else if (kind === 'rain' || kind === 'snow') tilt = Math.min(Math.atan((Math.min(this.windSpeed, 15) * 0.5) / 8), kind === 'rain' ? RAIN_TILT_MAX : SNOW_TILT_MAX);
@@ -1177,6 +1301,8 @@ export class Weather {
     s.snowCover = this.wet.snowCover;
     s.windHeading = this.windHeading;
     s.windSpeed = this.windSpeed;
+    s.windMean = this.windMean;
+    s.windVeer = this.windVeer;
     const f = this.fx;
     f.overcast = this.overcast;
     f.rain = this.rain;
@@ -1214,7 +1340,7 @@ export class Weather {
       wetness: r2(s.wetness),
       puddles: r2(s.puddles),
       snowCover: r2(s.snowCover),
-      wind: { heading: Math.round(deg), speed: r2(s.windSpeed), held: this.heldHeading !== null },
+      wind: { heading: Math.round(deg), speed: r2(s.windSpeed), mean: r2(s.windMean), held: WIND_HOLD.heading !== null || WIND_HOLD.speed !== null || WIND_HOLD.gust !== null, unified: WIND_STATE.on },
       outside: r2(s.outside),
       underwater: s.underwater,
       hull: s.hull,

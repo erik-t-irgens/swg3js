@@ -236,7 +236,7 @@ ok(main.includes("if (kind === 'repulse') air.force(at.x, at.y, at.z, 0, 0, powe
   // The pictures: a file the survey found in no pack of a world is never asked of it, and only a 404 is remembered.
   ok(world.includes(": [KICK_KIND.spray, ['particles/pt_fountain_splash_alpha.png'], [`${props}particles/pt_fountain_splash_alpha.png`, pack.url('particles/pt_fountain_splash_alpha.png')]],") && world.includes('[KICK_KIND.leaf, leaf, leaf.map((f) => pack.url(f))],') && /if \(res\.status === 404\) \{\n\s+this\.airPictureMissing\.add\(u\);/.test(world) && count(world, 'this.airPictureMissing.add(') === 1, "the spray's picture is asked of the props pack first (eight worlds' own packs hold it, the rest none), a leaf never of the props pack, and an address is remembered missing only on a 404");
   ok(main.includes("registerPerfSwitch('volParticles',") && main.includes("registerPerfSwitch('volRain',"), "the frame report's switches for the kick-up and the rain");
-  ok(main.includes("'carry', 'class', 'flow', 'liquid'] as const;") && src('core/fx/airVolume.ts').includes("field('class', 'r', 255 / 12),"), "air({ view: 'class' }) shows the class raster through the volume's own debug list (and the fifth wave's flow and liquid views after it)");
+  ok(main.includes("'carry', 'class', 'flow', 'liquid', 'gusts'] as const;") && src('core/fx/airVolume.ts').includes("field('class', 'r', 255 / 12),"), "air({ view: 'class' }) shows the class raster through the volume's own debug list (and the fifth wave's flow and liquid views after it, and the seventh wave's gusts)");
   ok(main.includes('const taken = kind >= 0 && air.kickBurst(kind, count, p.x, p.y + 1, p.z);') && main.includes('out.particles = air.kick.count(this.renderer, air.win.ox, air.win.oz, { x: p.x, z: p.z, radius })') && main.includes("out.rainMeasure = air.rain.measure(this.renderer, (x, z) => roofs.topAt(x, z), { x: p.x, z: p.z, radius })"), 'the console stands a burst of a kind at the crosshair and reads the pools back');
 }
 
@@ -319,6 +319,41 @@ ok(main.includes("if (kind === 'repulse') air.force(at.x, at.y, at.z, 0, 0, powe
   ok(main.includes("registerPerfSwitch('volGrass',") && /this\.world\.grassSoftOff = mode === 'off';/.test(main) && main.includes('this.volOver.volArtGrass = 0;'), "the frame report's grass switch, and the ground's zero-dial diff takes the grass's bend to nought with the ground's");
   ok(main.includes("if ((key === 'volGrass' || key === 'volArtGrass') && this.inWorld && this.world.grassWaitsForScreen)"), 'the page says when the twin waits for the next arrival');
   ok(field.includes('this.writeGrass(this.live);') && after(field, 'this.writeLiquid(this.live);', 'this.writeGrass(this.live);', 3), "the grass's record is written every frame beside the liquids', plain on any frame the field did not step");
+}
+
+// --- the seventh wave's first half: the unified wind ---
+{
+  const weatherSrc = src('world/weather.ts');
+  const field = src('world/volumetrics/airField.ts');
+  const shaders = src('world/volumetrics/airShaders.ts');
+  const parts = src('world/volumetrics/airParticleShaders.ts');
+  const liquid = src('world/volumetrics/airLiquid.ts');
+  const grassAir = src('world/volumetrics/airGrass.ts');
+  const flora = src('world/floraSway.ts');
+  // The arm from the settings, once a setting moves, never read on a frame.
+  ok(count(main, 'setWindArm(') === 1 && main.includes('setWindArm({ master: VOL_TUNE.on, wind: VOL_TUNE.wind, devils: VOL_TUNE.windDevils, trees: VOL_TUNE.windTrees, art: VOL_TUNE.artWind });'), 'the arm is written from the settings in applyVolumetrics, and nowhere else');
+  // The weather's one step: today's lines in the arm's absence, the unified step under it.
+  ok(/if \(!WIND_STATE\.on\) \{\n\s+\/\/ The wind:[\s\S]{0,400}windAt\(this\.seed, clock, this\.wind\);\n\s+this\.windHeading = WIND_HOLD\.heading \?\? this\.wind\.heading;\n[\s\S]{0,200}const hg = WIND_HOLD\.gust;\n\s+this\.windSpeed = WIND_HOLD\.speed \?\? sky\.lighting\.windSpeedScale \* \(hg === null \? this\.wind\.gust : 1 \+ \(this\.wind\.gust - 1\) \* hg\);/.test(weatherSrc) && /WIND_FRAME\.t = clock;\n\s+WIND_FRAME\.px = playerPos\.x;\n\s+WIND_FRAME\.pz = playerPos\.z;\n\s+this\.stepUnifiedWind\(sky, active\);/.test(weatherSrc), "the weather's wind is today's lines with the hold's terms off the arm (`this.wind.gust` itself with nothing held), the unified step under it");
+  ok(weatherSrc.includes('stepWet(this.wet, dt, this.rain, this.snow, ctx.daylight, this.windMean);') && weatherSrc.includes('if (this.windVeer !== 0) yaw += this.windVeer;') && weatherSrc.includes('FLORA_WIND.strength = Math.min(this.windMean / WATER_WIND_FULL, 1);'), "the drying takes the mean, a channel's yaw the veer under its branch, and the flora's strength the mean (no plant takes the player's own gust)");
+  // The world: the arrival's choice of the trees' form, the day for the devils, the air's mean, the form's depth warmed.
+  ok(/load\(planet: PlanetDef, packId = packIdOf\(planet\)\): void \{\n\s+this\.unload\(\);\n[\s\S]{0,400}chooseWindTrees\(WIND_STATE\.master && WIND_STATE\.wind && WIND_STATE\.trees\);/.test(world) && count(world, 'chooseWindTrees(') === 1 &&world.includes('const swaying = [...(meshes.filter((o) => (o as THREE.Mesh).isMesh) as THREE.Mesh[]), ...swayDepthCombos(), ...(form ? swayDepthCombos(true) : [])];'), "an arrival chooses the trees' form before anything is wrapped, and a screen draws the form's depth combinations when any material wears it");
+  ok(/if \(WIND_STATE\.on\) \{\n\s+sharedClock\.dayCountIn\(this\.day, this\.windDayCount\);\n\s+writeWindDay\(this\.day\.time, this\.day\.dayLengthSeconds, this\.windDayCount\.shared\);\n\s+\}\n\s+this\.weather\.update\(dt, playerPos, this\.weatherWorld\);/.test(world), "the devils' day is written under the arm straight before the weather steps: the shared one with a server, the visible one without");
+  ok(world.includes('inp.windSpeed = ws.windMean;'), "the air is handed the wind's mean (the gusts are its own, from the pattern)");
+  // The air: its relax target and the liquid's, the gust shed, the devils, the kick-up's and the rain's readers.
+  ok(shaders.includes('v = mix(v, airTarget(w, inflowOf(t)), clamp(uRelax * uDt, 0.0, 1.0));') && liquid.includes('return w7On() ? w7Target(w, wind) : windHere(w, wind);') && liquid.includes('return airTarget(w, wind) + own;') && count(shaders, 'windHere(w, inf)') === 0, "the air's relax target and the liquid's are one function (airTarget, run by windTrees.test): the unified wind under its arm, today's gusts otherwise");
+  ok(/if \(give > 0\.0\) \{[\s\S]*float sg = w7ShedAt\(wp\);\n\s+if \(sg > 0\.0\) \{[\s\S]*add \+= sg;[\s\S]*add \*= give;/.test(shaders) && count(shaders, 'w7ShedAt(') === 2 && field.includes('uShedP: { value: this.shedP }') && /this\.writeShed\(\);/.test(field), "the dust pass sheds a gust's dust (w7ShedAt, run by windTrees.test) inside the ground's give and before it is taken, so over rock a tenth and over water none; its rate the field writes each frame");
+  // The off arm's one branch beside the hold: the sheets at the world's wind aloft while a deck of the next wave draws.
+  ok(/\} else if \(WIND_STATE\.decks\) \{[\s\S]{0,400}WIND_FRAME\.t = clock;\n\s+this\.stepSheetsAloft\(sky, active\);\n\s+\} else sky\.sheetAloftOn = false;/.test(weatherSrc), "with the arm off the sheets take the world's wind aloft only under a held speed or while a deck draws (WIND_STATE.decks, the next wave's), today's drift otherwise");
+  ok(field.includes('const s0 = F.mean * AIR_TUNE.wind.scale * AIR_TUNE.slabs.windShare;') && field.includes('wd.x = Math.sin(F.heading) * s0;'), "the grass's lean outside the window takes the mean as slab 0's air does (the inflow's scale and the low layer's share), so it continues the lean inside");
+  ok(after(field, 'this.pushDevils();', 'f.frameSources();', 6) && field.includes('f.vortexNow();') && field.includes('uWind7: wind7Uniforms().uWind7'), "the devils are handed to the forces before the frame's sources are walked, and the air's programs hold the one uniform by reference");
+  ok(parts.includes('(length(a0) > kickPickThreshold(kind) || kickGustSheds(lc, kind))') && parts.includes('(w7On() ? w7Target(pos.xz + uAnchor.xz, inflowAt(1.5)) : inflowAt(1.5))') && src('world/volumetrics/airParticles.ts').includes('uWind7: wind7Uniforms().uWind7,') && src('world/volumetrics/airRain.ts').includes('uWind7: wind7Uniforms().uWind7,'), "a gust sheds leaves and puffs, the rain leans with the gusts where the air is not stepped, and both pools hold the uniform");
+  // The grass's twin and the trees' form.
+  ok(grassAir.includes("uniforms: { ...base.uniforms, ...u, uWind7: wind7Uniforms().uWind7 },") && grassAir.includes('swgP += swgAirWind7( swgBase, position.y, aSwgSize.y * swgScale, swgFar );') && grassAir.includes('swgDisplay = swgAirSheen( swgDisplay );'), "the grass's twin leans by the unified wind outside the window and shows its sheen");
+  ok(!src('world/grass.ts').includes('uWind7') && !src('world/swayMath.ts').includes('uWind7'), "the grass's own material and the sway chunk never read the unified wind (the trees' form is a rewrite in the wrap, never the chunk)");
+  ok(flora.includes("wrapCompile(m as unknown as Wrappable, SWAY_HOOK, form ? 'sway-wind7' : 'sway', (shader) => {") && flora.includes('if (injectSway(shader as unknown as THREE.WebGLProgramParametersWithUniforms, m) && form) applyTreesForm('), "the sway wrap writes the trees' form after the chunk, under a key of its own, only where the arrival chose it");
+  // The console and the menu.
+  ok(main.includes('wind: (opts?: WindDebugOptions | null) => windDebug(opts, this.windDebugCtx()),') && main.includes('?? windDialsFor(helper)') && main.includes("'carry', 'class', 'flow', 'liquid', 'gusts'] as const;"), "the console's wind helper, its dials in the debug menu and the gusts' view");
+  ok(main.includes("registerPerfSwitch('volWind',") && main.includes("registerPerfSwitch('volWindArt',"), "the frame report's two switches for the wind's off-proof and its zero-dial compare");
 }
 
 console.log(`\n${checks} checks passed`);

@@ -86,13 +86,18 @@ const types: Record<string, string> = {
   volGrass: 'boolean',
   volArtGrass: 'number',
   volFromPeers: 'boolean',
+  // The seventh wave's (7a): the unified wind, its devils, the trees in its gusts, and its art dial.
+  volWind: 'boolean',
+  volWindDevils: 'boolean',
+  volWindTrees: 'boolean',
+  volArtWind: 'number',
 };
 for (const k of VOL_KEYS) ok(typeof S[k] === types[k], `"${k}" is in the defaults as a ${types[k]}`);
 ok(Object.keys(types).length === VOL_KEYS.length, 'and those are every key the pass speaks for, no more');
 for (const k of VOL_FX_KEYS) ok(isFxSettingKey(k) && (FX_DEFAULTS as unknown as Record<string, unknown>)[k] === S[k], `"${k}" is the effects registry's, with the same default there`);
 for (const k of VOL_SCENE_KEYS) ok(!isFxSettingKey(k), `"${k}" is a scene key the chain never reads`);
 ok(VOL_KEYS.every((k) => isVolKey(k)) && !isVolKey('effects') && !isVolKey('bloom'), 'isVolKey answers the pass\'s keys and nothing else');
-for (const k of VOL_KEYS) ok(['W', 'C', 'T', 'U', 'M'].includes(VOL_APPLY_CLASS[k as keyof typeof VOL_APPLY_CLASS]), `"${k}" says how it takes effect (${VOL_APPLY_CLASS[k as keyof typeof VOL_APPLY_CLASS]})`);
+for (const k of VOL_KEYS) ok(['W', 'C', 'T', 'U', 'M', 'A'].includes(VOL_APPLY_CLASS[k as keyof typeof VOL_APPLY_CLASS]), `"${k}" says how it takes effect (${VOL_APPLY_CLASS[k as keyof typeof VOL_APPLY_CLASS]})`);
 ok(VOL_APPLY_CLASS.volumetrics === 'W', 'the master is class W from the second wave: on in play, its programs built off the frame behind a notice');
 ok(VOL_APPLY_CLASS.volSand === 'M' && VOL_APPLY_CLASS.volPrints === 'M', 'the sand and the prints are class M: the ground changes material, both already compiled');
 ok(VOL_APPLY_CLASS.volSandDetail === 'T' && VOL_APPLY_CLASS.volPrintDetail === 'T', 'their details are class T: a target made again');
@@ -110,8 +115,17 @@ ok(!(VOL_QUALITY_KEYS as readonly string[]).includes('volDustBright') && !(VOL_Q
 ok(VOL_APPLY_CLASS.volGrass === 'M' && VOL_APPLY_CLASS.volArtGrass === 'U' && VOL_APPLY_CLASS.volFromPeers === 'C', "the sixth wave's: the grass swaps built materials, its bend is a uniform, the peers a switch the frame reads");
 ok(S.volGrass === true && S.volArtGrass === 1 && S.volFromPeers === true, 'the grass and the peers start on, the bend at one: nothing shows while the master is off');
 ok(!(VOL_QUALITY_KEYS as readonly string[]).some((k) => ['volGrass', 'volArtGrass', 'volFromPeers'].includes(k)), 'and none of the three is a quality key: no preset writes them and no stamp moves');
+// The seventh wave's first half (7a): the wind and its devils are switches the frame reads (the arm), its art a uniform
+// (the pack's strengths), and the trees' form class A, taken at the next arrival (its programs come only from a screen).
+ok(VOL_APPLY_CLASS.volWind === 'C' && VOL_APPLY_CLASS.volWindDevils === 'C' && VOL_APPLY_CLASS.volArtWind === 'U' && VOL_APPLY_CLASS.volWindTrees === 'A', "the seventh wave's: the wind and its devils switches the frame reads, its art a uniform, the trees' form at the next arrival");
+ok(S.volWind === true && S.volWindDevils === true && S.volWindTrees === true && S.volArtWind === 1, 'the wind, its devils and the trees start on, the art at one: nothing of it runs while the master is off');
+ok(!(VOL_QUALITY_KEYS as readonly string[]).some((k) => ['volWind', 'volWindDevils', 'volWindTrees', 'volArtWind'].includes(k)), 'and none of the four is a quality key: no preset writes them and no stamp moves');
+{
+  const t = newVolTune();
+  ok(t.wind === true && t.windDevils === true && t.windTrees === true && t.artWind === 1, "the kept record's seventh-wave fields start at the defaults' own values");
+}
 // No later wave's key is in this build at all, shown or hidden.
-for (const later of ['volWind', 'volWindArt', 'volArtWind', 'volClouds', 'volCloudSheets']) {
+for (const later of ['volWindArt', 'volClouds', 'volCloudSheets']) {
   ok(!(later in S), `"${later}" (a later wave's) is not in this build`);
 }
 {

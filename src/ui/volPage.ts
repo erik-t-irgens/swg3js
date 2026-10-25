@@ -6,8 +6,8 @@
 //
 // The master and the volume's own rows are the effects registry's (`FX_KNOBS`, `group: 'volumetrics'`), taken from
 // there so a row and its setting cannot drift apart and the Effects section leaves them out. A row shows only from
-// the wave that builds what it moves: the later waves' rows (the grass, the wind and the clouds) are not in this build at
-// all, so no switch here does nothing.
+// the wave that builds what it moves: the later waves' rows (the clouds) are not in this build at all, so no switch here
+// does nothing.
 import { FX_KNOBS, type FxKnobDef } from '../core/fxRegistry.ts';
 import type { Settings } from '../core/settings.ts';
 import { VOL_PRESET_LABELS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_RANGES, presetOf } from '../world/volumetrics/volSettings.ts';
@@ -120,6 +120,15 @@ export const VOLUMETRICS: readonly { title: string; knobs: readonly Knob[] }[] =
       { key: 'volArtWater', label: 'Current over the water', kind: 'range', min: R.volArtWater.min, max: R.volArtWater.max, step: R.volArtWater.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volCurrent'], hint: 'How far the current moves the water\'s own fine pattern and carries its ripples. 0 leaves the water exactly as it is.' },
       { key: 'volArtLava', label: 'Crust carried and torn', kind: 'range', min: R.volArtLava.min, max: R.volArtLava.max, step: R.volArtLava.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volLava'], hint: 'How far the lava\'s flow carries and tears its crust. 0 leaves the lava exactly as it is.' },
       { key: 'volArtGrass', label: 'Grass bent by the air', kind: 'range', min: R.volArtGrass.min, max: R.volArtGrass.max, step: R.volArtGrass.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volGrass'], hint: 'How far the moving air bends the grass near you. 0 leaves the grass exactly as it sways today.' },
+      { key: 'volArtWind', label: 'Gusts over the wind', kind: 'range', min: R.volArtWind.min, max: R.volArtWind.max, step: R.volArtWind.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volWind'], hint: 'How strong the travelling gusts, the dust devils and the dust a gust lifts on a calm day are over the game\'s own wind. 0 leaves the wind exactly as it is today for everything that reads it, the same as the unified wind off.' },
+    ],
+  },
+  {
+    title: 'The wind',
+    knobs: [
+      { key: 'volWind', label: 'One wind', kind: 'toggle', requires: ['volumetrics'], hint: 'One wind every reader takes, updated by the weather: each kind of weather its own wind over the game\'s own strength, never dead still on a calm day, its heading wandering by the weather; gusts that travel across the ground, the same for every player in the same place at the same moment, lifting a veil of dust off loose ground as they pass, bending the grass in a wave and the trees one after another; the rain leaning in them, the water and the sky\'s clouds moving with the wind aloft. Off, the wind is today\'s one wind for the whole world. The debug menu\'s wind sliders hold it whether this is on or off.' },
+      { key: 'volWindDevils', label: 'Dust devils', kind: 'toggle', requires: ['volumetrics', 'volWind', 'volAir'], hint: 'Now and then by day a small whirl of dust crosses dry ground near you, the same devil for every player standing there, swirling the air, blowing sand in its core and standing a column of dust, more often on a clear day and in a dust storm. None over rock, water or forest litter, and none on the jungle and forest worlds.' },
+      { key: 'volWindTrees', label: 'Trees in the gusts', kind: 'toggle', requires: ['volumetrics', 'volWind'], hint: 'Each tree takes a gust as it reaches the tree, so a gust walks through a wood tree by tree. Its shaders are built behind a loading screen, so turned on or off it takes effect at the next arrival. Off, the trees sway at the day\'s wind and no longer take each gust as it passes.' },
     ],
   },
   {

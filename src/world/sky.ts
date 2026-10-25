@@ -182,6 +182,19 @@ const CLOUD_FADE = [5500, 8600];
 /** Clouds a touch smaller than the straight scaling gives, and a floor on how slowly they drift (repeats per second). */
 const CLOUD_SIZE_TRIM = 0.7;
 const CLOUD_MIN_DRIFT = 1 / 240;
+
+/**
+ * One frame of a sheet's drift under the wind aloft (`SwgSky.sheetWind`, the volumetrics' wave 7a) into its scroll `s`: the
+ * altitude's speed (`aloft[0]` the lower sheet's, slot 0, `aloft[1]` the upper's) over the sheet's repeat in metres
+ * (`size · altitude / 10 · 0.7`, what the shader is handed), repeats a second toward the heading, the upper sheet's turned
+ * by `aloft[2]` radians the way a heading turns, and with no floor, so a held nought stands the sheet still. Pure, so the
+ * hold's test runs this very arithmetic.
+ */
+export function driftAloft(s: { x: number; y: number }, aloft: ArrayLike<number>, slot: number, heading: number, size: number, altitude: number, dt: number): void {
+  const repeat = size * (altitude / CLIENT_CLOUD_HEIGHT) * CLOUD_SIZE_TRIM;
+  const v = slot === 0 ? aloft[0] : aloft[1];
+  driftScroll(s, slot === 0 ? heading : heading + aloft[2], v / repeat, dt);
+}
 /** Seconds in the client's day, which its celestial cycle times count in. */
 const CLIENT_DAY_SECONDS = 86400;
 
@@ -445,6 +458,7 @@ export class SwgSky {
     this.failedTextures = failed;
     this.defaultBlock = data.blocks.find((b) => b.weatherIndex === 0) ?? data.blocks[0] ?? EMPTY_BLOCK;
     for (let i = 0; i < MIX_MAX; i++) this.mix.push({ block: this.defaultBlock, weight: i === 0 ? 1 : 0 });
+    this.mixWeights[0] = 1;
     for (const b of data.blocks) {
       const key = b.name.toLowerCase();
       const list = this.families.get(key);
@@ -842,15 +856,24 @@ export class SwgSky {
     if (n <= 0) {
       this.mix[0].block = this.defaultBlock;
       this.mix[0].weight = 1;
+      this.mixWeights[0] = 1;
       this.mixCount = 1;
       return;
     }
     for (let i = 0; i < n; i++) {
       this.mix[i].block = blocks[i];
       this.mix[i].weight = weights[i];
+      this.mixWeights[i] = weights[i];
     }
     this.mixCount = n;
   }
+
+  /**
+   * The mix's weights as a kept typed array beside the entries (the volumetrics' wave 7a): the unified wind blends its
+   * profile from them every frame, and an element read hands nothing across a call, where `mixWeight(i)` hands back a
+   * number made at each call the compiler leaves out. Only the first `mixLength` mean anything.
+   */
+  readonly mixWeights = new Float64Array(MIX_MAX);
 
   /**
    * This frame's mix, read-only, for anything that must follow the sky exactly rather than guess at
@@ -875,6 +898,36 @@ export class SwgSky {
   setWind(heading: number): void {
     this.windHeading = heading;
   }
+
+  /**
+   * The sheets' wind in metres a second (the volumetrics' wave 7a, the design's §2.17), each altitude's speed or null:
+   * while it holds numbers each sheet drifts at its altitude's speed (`bottom` for the lower, `top` for the upper, turned
+   * from the heading by `veer` radians) over its repeat in metres, with no floor, so a held nought stands the sky still;
+   * while it holds null the drift is today's line. The weather writes it every frame: a held speed's (with the master on
+   * or off), the unified wind's aloft under its arm, null otherwise.
+   */
+  sheetWind(bottom: number | null, top: number | null, veer: number): void {
+    if (bottom === null || top === null) {
+      this.sheetAloftOn = false;
+      return;
+    }
+    this.sheetAloft[0] = bottom;
+    this.sheetAloft[1] = top;
+    this.sheetAloft[2] = veer;
+    this.sheetAloftOn = true;
+  }
+
+  /** What `sheetWind` holds (the console's, and the hold's test). */
+  sheetWindNow(): { bottom: number | null; top: number | null; veer: number } {
+    return this.sheetAloftOn ? { bottom: this.sheetAloft[0], top: this.sheetAloft[1], veer: this.sheetAloft[2] } : { bottom: null, top: null, veer: 0 };
+  }
+  /**
+   * The wind aloft as `sheetWind` holds it: [bottom, top, veer] in a kept array, used while `sheetAloftOn`. The weather
+   * writes it straight in every frame under the unified wind's arm (`sheetWind`'s numbers would each be made as they
+   * crossed the call).
+   */
+  readonly sheetAloft = new Float64Array(3);
+  sheetAloftOn = false;
 
   /**
    * How overcast the weather is (0 clear, 1 a full storm): the sun and moon fade out behind it. The
@@ -1294,11 +1347,17 @@ export class SwgSky {
         this.cloudScroll.set(file, scroll);
       }
       if (scroll.at !== this.frameNo) {
-        // Drift in texture repeats per second: the client's wind, but never quite still.
         scroll.at = this.frameNo;
-        const perSecond = Math.max((layer.speed * L.windSpeedScale) / size, CLOUD_MIN_DRIFT);
-        // Toward the wind's heading, as the rain leans and the dust blows.
-        driftScroll(scroll.s, this.windHeading, perSecond, dt);
+        if (!this.sheetAloftOn) {
+          // Drift in texture repeats per second: the client's wind, but never quite still.
+          const perSecond = Math.max((layer.speed * L.windSpeedScale) / size, CLOUD_MIN_DRIFT);
+          // Toward the wind's heading, as the rain leans and the dust blows.
+          driftScroll(scroll.s, this.windHeading, perSecond, dt);
+        } else {
+          // The wind aloft (`sheetWind`): its metres a second over the sheet's repeat in metres, with no floor, the upper
+          // sheet turned from the heading by the veer.
+          driftAloft(scroll.s, this.sheetAloft, slot, this.windHeading, size, c.altitude, dt);
+        }
       }
       u.uMap.value = tex;
       u.uOpacity.value = w[k];

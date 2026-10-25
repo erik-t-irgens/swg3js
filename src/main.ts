@@ -42,6 +42,11 @@ import { AIR_DRAW, checkAirTargets, probeAirDraws, type AirDrawMode } from './wo
 import { AIR_TUNE, GROUND_CLASS_NAMES, tuneAir, tuneFogLooks, GROUND_FOG_LOOKS, type GroundClass } from './world/volumetrics/airTune.ts';
 import { FORCE_WAVE, FORCE_WAVE_SPEED, setForceWave } from './combat/forceWaveTune.ts';
 import { airDialsFor } from './world/volumetrics/airDials.ts';
+import { setWindArm, WIND_STATE } from './world/wind.ts';
+import { setWindNowSource, windDialsFor } from './world/windDials.ts';
+import { windDebug, type WindDebugContext, type WindDebugOptions } from './world/windDebug.ts';
+import { windTreesChosen, windTreesReport } from './world/windTrees.ts';
+import { windSelfTest } from './world/windSelfTest.ts';
 import { MEDIUM_BYTE } from './world/volumetrics/airRaster.ts';
 import { isVolKey, presetOf, VOL_APPLY_CLASS, VOL_KEYS, VOL_PRESET_LABELS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_QUALITY_KEYS, VOL_RANGES, VOL_TUNE, volConsoleToSettings, volMemoryMB, volQualityFrom, type VolKey, type VolQualityKey } from './world/volumetrics/volSettings.ts';
 import { AirVolumePass } from './core/fx/airVolume.ts';
@@ -937,7 +942,7 @@ interface AirDebugOptions {
 }
 
 /** The fields `__debug.air({ view })` shows. */
-const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'shape', 'tint', 'offsets', 'dents', 'inscatter', 'clear', 'smokeField', 'fogField', 'smokeTint', 'bands', 'carry', 'class', 'flow', 'liquid'] as const;
+const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'shape', 'tint', 'offsets', 'dents', 'inscatter', 'clear', 'smokeField', 'fogField', 'smokeTint', 'bands', 'carry', 'class', 'flow', 'liquid', 'gusts'] as const;
 /** The fifth wave's views drawn by the liquids themselves: the current on the water, the crust's carry on the lava. */
 const AIR_LIQUID_VIEWS = ['current', 'crust'] as const;
 
@@ -1905,6 +1910,35 @@ class App {
       },
       values: [false, true],
       note: "false puts the grass and the far cards back on today's material (the air at their feet unread); true as the settings have it",
+    });
+    // The seventh wave's: the unified wind's arm held off softly (every setting left alone, every program kept), and its
+    // art at nought against that soft off (the zero-dial compare: both draw today's wind, so they must not differ by a pixel).
+    registerPerfSwitch('volWind', {
+      get: () => (WIND_STATE.soft ? 'off' : 'on'),
+      set: (v) => {
+        WIND_STATE.soft = v === 'off';
+        this.applyVolumetrics();
+      },
+      values: ['off', 'on'],
+      note: "off holds the unified wind's arm off (today's one wind for every reader), its programs and settings kept; on as the settings have it",
+    });
+    registerPerfSwitch('volWindArt', {
+      get: () => (WIND_STATE.soft ? 'off' : this.volOver.volArtWind === 0 ? 'zero' : 'set'),
+      set: (v) => {
+        delete this.volOver.volArtWind;
+        WIND_STATE.soft = v === 'off';
+        if (v === 'zero') this.volOver.volArtWind = 0;
+        this.applyVolumetrics();
+      },
+      values: ['zero', 'off'],
+      note: "the wind's art at nought against the unified wind held off: the same programs either way, the scene must not differ by a pixel",
+    });
+    // What the wind's dials read of the world now (the hold's "held" choice, the read-outs where the player stands).
+    setWindNowSource({
+      speed: () => this.world.weather.state.windSpeed,
+      heading: () => this.world.weather.state.windHeading,
+      at: () => ({ x: this.player.worldPos.x, z: this.player.worldPos.z }),
+      level: () => this.world.weather.state.level,
     });
     registerPerfSwitch('airVolume', {
       get: () => this.postfx?.override.airVolume !== false,
@@ -9538,6 +9572,12 @@ class App {
       /** The volumetrics pass's moving air (`src/world/volumetrics/`): see the README's Debugging rows. */
       air: (opts?: AirDebugOptions) => (opts?.budget ? this.airBudget(opts.budget === true ? {} : opts.budget) : this.airDebug(opts ?? {})),
       /**
+       * The unified wind (the volumetrics' seventh wave, `src/world/wind.ts`): with nothing, the report; `{ speed, heading, gust }`
+       * holds (with the master on or off), `null` or `{ hold: false }` lets go; `{ at: [x, z], t }` a point; `{ tune }`,
+       * `{ devil: true }` and `{ selfTest: true }`. See the README's Debugging rows.
+       */
+      wind: (opts?: WindDebugOptions | null) => windDebug(opts, this.windDebugCtx()),
+      /**
        * Every volumetrics setting in force with its apply class, the preset and the memory; `{ on, preset, <key>: value }`
        * writes settings in memory and applies them, never saved (past a page's range, live, the setting left alone).
        */
@@ -11222,7 +11262,7 @@ class App {
       // The race drive's, the engines' and a race run's numbers of feel, as sliders when `race`, `engines` or `track` is
       // picked, the NPC ship ladder's tiers 6 to 10 when `npcShips` is, how a far body is drawn when `crowd` is, and
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper),
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper),
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -12837,6 +12877,34 @@ class App {
     return { renderer: this.backend, width, height, medium, rows, notes };
   }
 
+  /** What `__debug.wind` reads of the game (the seventh wave's console, `windDebug.ts`), made once. */
+  private windDebugCtx(): WindDebugContext {
+    if (this.windCtx) return this.windCtx;
+    const look = (): { x: number; z: number } | null => {
+      if (!this.inWorld) return null;
+      const at = this.player.worldPos;
+      const f = this.cam.forward(new THREE.Vector3());
+      f.y = 0;
+      if (f.lengthSq() < 1e-6) f.set(0, 0, 1);
+      f.normalize();
+      return { x: at.x + f.x * 12, z: at.z + f.z * 12 };
+    };
+    this.windCtx = {
+      weather: () => {
+        const s = this.world.weather.state;
+        return { windHeading: s.windHeading, windSpeed: s.windSpeed, windMean: s.windMean, windVeer: s.windVeer, level: s.level, scheduled: s.scheduled, enabled: s.enabled, reason: s.reason };
+      },
+      sheets: () => this.world.swgSky?.sheetWindNow() ?? null,
+      player: () => (this.inWorld ? { x: this.player.worldPos.x, z: this.player.worldPos.z } : null),
+      crosshair: look,
+      air: () => this.world.air?.windDevilsReport() ?? { handed: 0, why: 'no moving air: the master is off, or not built yet' },
+      trees: () => windTreesReport(),
+      selfTest: () => (this.renderer ? windSelfTest(this.renderer) : null),
+    };
+    return this.windCtx;
+  }
+  private windCtx: WindDebugContext | null = null;
+
   /**
    * The volumetrics' settings into the one record the frame reads (`VOL_TUNE`), with the console's values past the page's
    * ends over them. The master is class W from the second wave: turned on in play it warms what it needs off the frame,
@@ -12848,6 +12916,9 @@ class App {
     const was = VOL_TUNE.on;
     volQualityFrom(this.settings, VOL_TUNE, this.volOver);
     if (VOL_HATCH_OFF) VOL_TUNE.on = false;
+    // The unified wind's arm (the seventh wave): the master, its switch and its art above nought, written here when a
+    // setting moves and never read from the settings on a frame.
+    setWindArm({ master: VOL_TUNE.on, wind: VOL_TUNE.wind, devils: VOL_TUNE.windDevils, trees: VOL_TUNE.windTrees, art: VOL_TUNE.artWind });
     // A wisps mode whose march the in-play warm did not build is built now, off the frame (the fourth wave).
     if (key === 'volDustWisps' && VOL_TUNE.on) this.warmWispMode();
     // The fourth wave's meshes: the master off takes them out of the scenes at once (the weather's hand-overs today's);
@@ -13159,6 +13230,13 @@ class App {
     if ((key === 'volSand' || key === 'volPrints') && this.inWorld && !this.world.groundTakesAir) return { note: 'not on this world: its ground is not drawn the way the air needs (a pack converted before, or a real-elevation world)' };
     // The sixth wave's: turned on in play while the grass casts, its twin's shadow program is drawn only behind a screen.
     if ((key === 'volGrass' || key === 'volArtGrass') && this.inWorld && this.world.grassWaitsForScreen) return { note: "from the next arrival: the grass casts its shadow, and the leaning grass's shadow program is drawn behind a loading screen" };
+    // The seventh wave's: the trees' gust form is chosen at an arrival and never in play (their shadow programs come only
+    // from a screen's draw), so a change of it waits for the next one.
+    if ((key === 'volWindTrees' || key === 'volWind') && this.inWorld) {
+      const want = VOL_TUNE.on && VOL_TUNE.wind && VOL_TUNE.windTrees;
+      if (want !== windTreesChosen()) return { note: want ? 'from the next arrival: the trees take each gust where they stand through programs chosen at an arrival' : 'the trees keep the gusts until the next arrival (their programs were chosen at this one); with the unified wind off they sway as before' };
+    }
+    if (key === 'volWindDevils' && VOL_TUNE.on && !VOL_TUNE.air) return { note: 'the dust devils stir the moving air, which is off: none is seen' };
     return null;
   }
 
@@ -21100,8 +21178,10 @@ class App {
     }
     const w = this.world.weather.state;
     const on = w.enabled;
-    // A dust storm has the sky already; rain and snow leave it, and a rainy sky wants its cloud.
-    const look = cloudLook(this.cloudPacks.get(id) ?? null, on ? w.level : 0, on ? w.windSpeed : 0, on && w.dust >= CLOUD_TUNE.standDownDust);
+    // A dust storm has the sky already; rain and snow leave it, and a rainy sky wants its cloud. The wind's mean, not the
+    // gust at the player's feet (the seventh wave: the same number with the unified wind's arm off), since this pass's
+    // drift is a time times a speed and a gust there would jump the whole field.
+    const look = cloudLook(this.cloudPacks.get(id) ?? null, on ? w.level : 0, on ? w.windMean : 0, on && w.dust >= CLOUD_TUNE.standDownDust);
     const l = pass.look;
     const force = this.cloudForce;
     l.coverage = force.coverage ?? (worthDrawing(look) ? look.coverage : 0);

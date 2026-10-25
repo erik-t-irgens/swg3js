@@ -65,6 +65,10 @@ export const VOL_SCENE_KEYS = [
   'volGrass',
   'volArtGrass',
   'volFromPeers',
+  'volWind',
+  'volWindDevils',
+  'volWindTrees',
+  'volArtWind',
 ] as const satisfies readonly (keyof Settings)[];
 
 /** The volumetrics' keys the effects chain reads (`fxRegistry.ts`): the master and the volume's own. */
@@ -124,6 +128,8 @@ export const VOL_RANGES = {
   volArtLava: { min: 0, max: 1, step: 0.05 },
   // The sixth wave's: how far the moving air bends the grass.
   volArtGrass: { min: 0, max: 1, step: 0.05 },
+  // The seventh wave's: how strong the travelling gusts, the devils and the gust shed are over the game's own wind.
+  volArtWind: { min: 0, max: 1.5, step: 0.05 },
 } as const;
 
 /** The quality keys a preset writes, in this build. */
@@ -338,6 +344,14 @@ export interface VolTune {
   grass: boolean;
   artGrass: number;
   fromPeers: boolean;
+  /**
+   * The seventh wave's: the unified wind (its arm, with the master and its art above nought), its devils, the trees' gust
+   * form (chosen at an arrival), and how strong its gusts, devils and shed are over the game's own wind.
+   */
+  wind: boolean;
+  windDevils: boolean;
+  windTrees: boolean;
+  artWind: number;
 }
 
 export function newVolTune(): VolTune {
@@ -402,6 +416,10 @@ export function newVolTune(): VolTune {
     grass: true,
     artGrass: 0.5,
     fromPeers: true,
+    wind: true,
+    windDevils: true,
+    windTrees: true,
+    artWind: 0.5,
   };
   // The game's own rain and snow sheets stand down whole while ours falls (`volRainThin`, `volSnowThin` 1, the settings'
   // defaults), written after the record is made so each field is still a double from its first write; the fifth and sixth
@@ -411,6 +429,7 @@ export function newVolTune(): VolTune {
   t.artWater = 1;
   t.artLava = 1;
   t.artGrass = 1;
+  t.artWind = 1;
   return t;
 }
 
@@ -491,6 +510,11 @@ export function volQualityFrom(s: Pick<Settings, VolKey | 'effects'>, out: VolTu
   // Past the page's end from the console, held only to what cannot break anything (no lean against the air).
   out.artGrass = over.volArtGrass !== undefined ? Math.max(0, Math.min(4, n('volArtGrass'))) : clampRange(n('volArtGrass'), R.volArtGrass, 1);
   out.fromPeers = b('volFromPeers');
+  out.wind = b('volWind');
+  out.windDevils = b('volWindDevils');
+  out.windTrees = b('volWindTrees');
+  // Past the page's end from the console, held only to what cannot break anything (no gust against the wind).
+  out.artWind = over.volArtWind !== undefined ? Math.max(0, Math.min(4, n('volArtWind'))) : clampRange(n('volArtWind'), R.volArtWind, 1);
   return out;
 }
 
@@ -500,7 +524,7 @@ export function volQualityFrom(s: Pick<Settings, VolKey | 'effects'>, out: VolTu
  * frame with the old picture drawn meanwhile and changes over when every one has linked. Nothing here builds a program
  * on a live frame.
  */
-export const VOL_APPLY_CLASS: Readonly<Record<VolKey, 'W' | 'C' | 'T' | 'U' | 'M'>> = {
+export const VOL_APPLY_CLASS: Readonly<Record<VolKey, 'W' | 'C' | 'T' | 'U' | 'M' | 'A'>> = {
   volumetrics: 'W',
   airVolume: 'C',
   airVolumeAmount: 'U',
@@ -567,6 +591,13 @@ export const VOL_APPLY_CLASS: Readonly<Record<VolKey, 'W' | 'C' | 'T' | 'U' | 'M
   volGrass: 'M',
   volArtGrass: 'U',
   volFromPeers: 'C',
+  // The seventh wave's: the unified wind a gate on the CPU (the weather's arm) and a uniform branch in every program that
+  // reads it (C, read as C and U), its devils a gate, its art a uniform; the trees' gust form chosen at an arrival both
+  // ways (A: every swaying mesh casts through a custom depth material, whose program only a shadow-pass draw makes).
+  volWind: 'C',
+  volWindDevils: 'C',
+  volWindTrees: 'A',
+  volArtWind: 'U',
 };
 
 /**
@@ -639,7 +670,10 @@ export function volConsoleToSettings(o: Record<string, unknown>): VolConsoleSett
       key === 'volCurrent' ||
       key === 'volLava' ||
       key === 'volGrass' ||
-      key === 'volFromPeers';
+      key === 'volFromPeers' ||
+      key === 'volWind' ||
+      key === 'volWindDevils' ||
+      key === 'volWindTrees';
     if (wantsBool) {
       if (typeof v === 'boolean') out.set(key, { key, value: v, inRange: true });
       continue;

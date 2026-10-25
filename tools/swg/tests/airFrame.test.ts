@@ -18,7 +18,10 @@
 //   - a draw that throws stops the air and says why, and never throws out of the frame;
 //   - (the third wave) a gas cloud's puffs by its whole sphere and by a full batch, the frame's own smoke laid before a
 //     blast's; a blast's held smoke fading over its hold and let go; a dust field a layer three tiles wide; the wisps'
-//     phases at the field's own clock; the carried sand's fade by the frame's own dt.
+//     phases at the field's own clock; the carried sand's fade by the frame's own dt;
+//   - (the seventh wave) the unified wind's devils handed as continuous sources every frame and applied once a step,
+//     none off its arm or its devils' switch; the gust shed's rate written under the arm; its one uniform held by
+//     reference and written in place.
 //
 // Plain type stripping; synthetic numbers only.
 import assert from 'node:assert/strict';
@@ -67,6 +70,9 @@ interface Draw {
   sandC?: [number, number, number, number];
   /** The dust pass's tiles and slab tops (`uDustR`: x the tiles, one or three). */
   dustR?: [number, number, number, number];
+  /** The dust pass's step and settling (`uDustP`: x the step), and the seventh wave's gust shed (`uShedP`: x its rate). */
+  dustP?: [number, number, number, number];
+  shedP?: [number, number, number, number];
   /** A fill's values: the colour and density, and (the dust's two-output fill) the shape. */
   value?: [number, number, number, number];
   shapeValue?: [number, number, number, number];
@@ -100,6 +106,8 @@ function standIn(): { renderer: THREE.WebGLRenderer; draws: Draw[]; throwOn: { n
       d.dustBatch = Array.from((u.uDustBatch.value as Float32Array).subarray(0, d.dustCount * 4));
       d.shapeBatch = Array.from((u.uDustShapeBatch.value as Float32Array).subarray(0, d.dustCount * 4));
       d.dustR = v4(u.uDustR.value);
+      d.dustP = v4(u.uDustP.value);
+      if (u.uShedP) d.shedP = v4(u.uShedP.value);
     } else if (name === 'air.offsets') {
       d.sandP = v4(u.uSandP.value);
       d.sandQ = v4(u.uSandQ.value);
@@ -939,6 +947,87 @@ const near = (a: number, b: number, eps = 1e-9): boolean => Math.abs(a - b) <= e
   r.field.ringsWanted = false;
   r.frame(1 / 60);
   ok(k.ring.x === 0, 'not wanted: none kept');
+}
+
+// --- the seventh wave: the unified wind's devils and its one uniform, through the field's own frame ---
+{
+  const W = await import('../../../src/world/wind.ts');
+  const r = rig();
+  settle(r);
+  const u = W.wind7Uniforms().uWind7;
+  const arr = u.value;
+  const mats = Object.fromEntries(r.field.materials().map((m) => [m.name, m.uniforms]));
+  ok(mats['air.advect'].uWind7 === u && mats['air.dust'].uWind7 === u, "the solver's relax and the dust pass hold the unified wind's one uniform object by reference");
+  // The arm off: no devil is handed, and the gust shed's rate is nought.
+  W.setWindArm({ master: true, wind: false, devils: true, trees: true, art: 1 });
+  W.WIND_FRAME.t = 1000;
+  W.standLocalDevil(4, -3, 1000, 60);
+  r.frame(1 / 60);
+  const shed = mats['air.dust'].uShedP.value as THREE.Vector4;
+  ok(r.field.forces.devilCount === 0 && shed.x === 0, 'with the unified wind off no devil is handed and no gust sheds');
+  // The arm on: the local devil handed as a continuous source every frame, its shoves applied once a step.
+  W.setWindArm({ master: true, wind: true, devils: true, trees: true, art: 1 });
+  let every = true;
+  let shoves = 0;
+  let steps = 0;
+  for (let i = 0; i < 144; i++) {
+    const d = r.frame(1 / 144);
+    if (r.field.forces.devilCount !== 1) every = false;
+    for (const s of named(d, 'air.splat')) {
+      steps++;
+      shoves += s.splatCount ?? 0;
+    }
+  }
+  const per = Math.round(r.field.forces.devilShoves);
+  ok(every && steps >= 59 && steps <= 61 && shoves === per * steps, `under the arm a devil is handed every frame (144 of 144) and its ${per} shoves drawn once a step (${shoves} over ${steps} steps)`);
+  ok(shed.x > 0 && shed.x === W.WIND_TUNE.shed.rate * W.WIND_STATE.art && shed.y === W.WIND_TUNE.shed.at, `and the gust shed's rate is the tune's times the art (${shed.x})`);
+  ok(u.value === arr && mats['air.advect'].uWind7 === u, 'the uniform is written in place, never a new object or a new array');
+  ok(r.field.windDevilsReport().handed === 1, "the console's report counts the devil handed this frame");
+  // Its devils off: none.
+  W.setWindArm({ master: true, wind: true, devils: false, trees: true, art: 1 });
+  r.frame(1 / 60);
+  ok(r.field.forces.devilCount === 0, "with the devils' switch off none is handed");
+  W.WIND_LOCAL_DEVIL.until = -Infinity;
+  W.setWindArm({ master: false, wind: true, devils: true, trees: true, art: 1 });
+}
+
+// --- the seventh wave: the gust shed laid by the second, whatever the frame rate; the grass's outside lean on slab 0's wind ---
+{
+  const W = await import('../../../src/world/wind.ts');
+  W.setWindArm({ master: true, wind: true, devils: false, trees: true, art: 1 });
+  const lines: string[] = [];
+  let alike = true;
+  for (const fps of [60, 144, 240]) {
+    const r = rig();
+    settle(r);
+    let laid = 0;
+    let seconds = 0;
+    for (let i = 0; i < fps * 3; i++) {
+      seconds += 1 / fps;
+      for (const d of named(r.frame(1 / fps), 'air.dust')) laid += (d.shedP?.[0] ?? 0) * (d.dustP?.[0] ?? 0);
+    }
+    const perSecond = laid / seconds;
+    lines.push(`${fps} fps: ${perSecond.toFixed(5)} a second`);
+    // A fixed step's worth at most either way: what the steps of three seconds can leave owed at either end.
+    if (!(Math.abs(perSecond - W.WIND_TUNE.shed.rate) <= W.WIND_TUNE.shed.rate / 60 + 1e-12)) alike = false;
+  }
+  ok(alike, `the gust shed's rate is laid by the dust pass's own step, the same a second at 60, 144 and 240 frames (${lines.join(', ')}, the tune's ${W.WIND_TUNE.shed.rate})`);
+  // The grass's lean outside the window: the unified wind's mean along its heading as slab 0's own air takes it, the very
+  // inflow the field hands the relax pass times the low layer's share, so one wind leans the near tufts and the far.
+  const r = rig();
+  r.tune.grass = true;
+  const rec = makeGrassAirUniforms();
+  r.field.bindGrass(rec);
+  W.WIND_FRAME.mean = r.inp.windSpeed;
+  W.WIND_FRAME.heading = r.inp.windHeading;
+  settle(r);
+  r.frame(1 / 60);
+  const wd = rec.uAirGrassWind.value;
+  const share = AIR_TUNE.slabs.windShare;
+  const inflow = r.field.wind.value;
+  ok(wd.w === 1 && Math.abs(wd.x - inflow.x * share) < 1e-12 && Math.abs(wd.y - inflow.y * share) < 1e-12 && Math.hypot(wd.x, wd.y) > 0, `the grass's lean outside the window takes the unified wind's mean as slab 0's air does: the field's own inflow (${inflow.x.toFixed(3)}, ${inflow.y.toFixed(3)}) times the low layer's ${share}`);
+  r.field.bindGrass(null);
+  W.setWindArm({ master: false, wind: true, devils: true, trees: true, art: 1 });
 }
 
 // --- a draw that throws stops the air, never the frame ---

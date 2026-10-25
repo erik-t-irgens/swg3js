@@ -24,6 +24,7 @@ import { KICK_KINDS, SPAWN_MOST, SPAWN_W, type SpawnTable } from './airSpawn.ts'
 import { AIR_TUNE } from './airTune.ts';
 import { CARD_LIGHT_UNIFORMS } from '../cardLight.ts';
 import { GRASS_UNIFORMS } from '../grass.ts';
+import { wind7Uniforms } from '../wind.ts';
 
 /** The pool's texture width: every count by preset is a whole number of its rows. */
 export const KICK_WIDTH = 128;
@@ -219,6 +220,7 @@ export class KickPool {
       uniforms: {
         uWindow: src.window,
         uWind: src.wind,
+        uWind7: wind7Uniforms().uWind7,
         uSlabTiles: src.slabTiles,
         uSlabScale: src.slabScale,
         uSlabShare: src.slabShare,

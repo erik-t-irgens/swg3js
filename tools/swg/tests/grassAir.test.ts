@@ -65,7 +65,23 @@ const T = (await load('world/volumetrics/airTune.ts')) as typeof import('../../.
     }
     const after = `${base.customProgramCacheKey()}|${JSON.stringify(base.defines)}|${base.vertexShader}|${base.fragmentShader}`;
     if (before !== after) all = false;
-    if (twin.vertexShader !== A.grassAirText(base.vertexShader) || twin.fragmentShader !== base.fragmentShader) all = false;
+    // The colour twin's fragment takes the seventh wave's sheen (its own two replacements, undone below); the depth's is its base's.
+    const fragWant = what === 'depth' ? base.fragmentShader : A.grassAirFragText(base.fragmentShader);
+    if (twin.vertexShader !== A.grassAirText(base.vertexShader) || fragWant === null || twin.fragmentShader !== fragWant) all = false;
+    if (what === 'colour') {
+      let f: string | null = twin.fragmentShader;
+      for (const [from, to] of [...A.GRASS_AIR_FRAG_EDITS].reverse()) {
+        if (f === null) break;
+        const i = f.indexOf(to);
+        if (i < 0 || f.indexOf(to, i + to.length) >= 0) f = null;
+        else f = f.slice(0, i) + from + f.slice(i + to.length);
+      }
+      if (f !== base.fragmentShader) all = false;
+      const fs = glslVariant(twin.fragmentShader, new Set(Object.keys(twin.defines as Record<string, unknown>)));
+      if (reservedWords(fs).length || unbalanced(fs) !== '' || redeclared(fs).length) all = false;
+      if (!uniformNames(fs).includes('uAirGrassSheen') || !('uAirGrassSheen' in twin.uniforms)) all = false;
+    }
+    if (twin.uniforms.uWind7 === undefined) all = false;
     // Exactly its lean made in: each replacement's text is in the twin once, and taken out again, last first, the base's
     // own text comes back to the byte.
     let undone: string | null = twin.vertexShader;
@@ -118,7 +134,7 @@ const T = (await load('world/volumetrics/airTune.ts')) as typeof import('../../.
     }
     twin.dispose();
   }
-  ok(all, "the grass's twin, colour and depth: the base's text and key untouched, the twin's text exactly its lean made in (after the trees' sway, a near tuft only, the W7a pointer beside it), a define of its own, every flag in the key and every uniform object the base's, the session's grass record beside them; its text passes the scans");
+  ok(all, "the grass's twin, colour and depth: the base's text and key untouched, the twin's text exactly its lean made in (after the trees' sway, a near tuft only, the unified wind's lean outside the window and the sheen beside it), the colour twin's fragment exactly the sheen made in, a define of its own, every flag in the key and every uniform object the base's, the session's grass record and the unified wind's uniform beside them; its text passes the scans");
   ok(A.grassAirText('void main() {}') === null && A.grassAirTwin(Object.assign(G.grassMaterial(), { vertexShader: 'void main() {}' })) === null, 'a base whose text has moved gets no twin at all (null), never a twin half made');
   ok(A.grassAirText(G.GRASS_VERTEX)!.split('swgAirLean(').length === 3, "and the lean is defined once and called once");
 }
