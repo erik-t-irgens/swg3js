@@ -859,6 +859,24 @@ interface GrassChunk {
 export const GRASS_STATS = { builds: 0, buildMs: 0, lastBuildMs: 0, place: placeStats() as PlaceStats, farBuilds: 0, farBuildMs: 0, farPlace: placeStats() as PlaceStats };
 
 /**
+ * One mesh on a material and the depth material it hangs (the chooser's swap): written only where it differs, and the
+ * depth material only on a mesh that hangs one. Answers 1 where the mesh moved, 0 otherwise.
+ */
+export function wearMesh(mesh: THREE.Mesh | null, material: THREE.Material, depth: THREE.Material | null): number {
+  if (!mesh) return 0;
+  let moved = 0;
+  if (mesh.material !== material) {
+    mesh.material = material;
+    moved = 1;
+  }
+  if (depth && mesh.customDepthMaterial && mesh.customDepthMaterial !== depth) {
+    mesh.customDepthMaterial = depth;
+    moved = 1;
+  }
+  return moved;
+}
+
+/**
  * The grass of the chunks in a window round the eye: built a chunk a frame, nearest first, when the eye's chunk
  * changes or a circle moves; taken down when a chunk leaves the window or goes. A frame that changes nothing does
  * nothing and allocates nothing.
@@ -871,15 +889,29 @@ export class GrassField {
   private pending = false;
   private readonly circles: FloraCircle[] = [];
   private scratch: TuftBuffers | null = null;
-  readonly material: THREE.ShaderMaterial;
+  /** The material every chunk's mesh wears: the session's plain one, or its twin that leans in the moving air (`wear`). */
+  material: THREE.ShaderMaterial;
   readonly host: GrassHost;
-  /** The casting depth material every chunk's mesh hangs (`grassDepthMaterial`), or none. */
-  readonly depth: THREE.Material | null;
+  /** The casting depth material every chunk's mesh hangs (`grassDepthMaterial`, or its twin), or none. */
+  depth: THREE.Material | null;
 
   constructor(material: THREE.ShaderMaterial, host: GrassHost, depth: THREE.Material | null = null) {
     this.material = material;
     this.host = host;
     this.depth = depth;
+  }
+
+  /**
+   * Every chunk's mesh, and every one built after, on these two (the volumetrics' sixth wave: the plain grass or its
+   * twin, both built, so the swap builds nothing). A mesh hangs the depth material whether or not it casts, as it is made.
+   * Answers how many meshes moved. Called only when the chooser's answer moves.
+   */
+  wear(material: THREE.ShaderMaterial, depth: THREE.Material | null): number {
+    this.material = material;
+    if (depth) this.depth = depth;
+    let n = 0;
+    for (const c of this.chunks) n += wearMesh(c.mesh, material, this.depth);
+    return n;
   }
 
   /**
@@ -1192,7 +1224,8 @@ export class FarCards {
   private eyeTx = Number.NaN;
   private eyeTz = Number.NaN;
   private scratch: TuftBuffers | null = null;
-  readonly material: THREE.ShaderMaterial;
+  /** The material every tile's mesh wears: the session's plain one, or its twin (`wear`). */
+  material: THREE.ShaderMaterial;
   readonly host: GrassHost;
   readonly root: THREE.Object3D;
   /** The far tiles' size, their samples' spacing and how far under its true height the far ground is drawn (the world's). */
@@ -1205,8 +1238,8 @@ export class FarCards {
     return this.circles;
   };
 
-  /** The casting depth material every tile's mesh hangs (`grassDepthMaterial`), or none. */
-  readonly depth: THREE.Material | null;
+  /** The casting depth material every tile's mesh hangs (`grassDepthMaterial`, or its twin), or none. */
+  depth: THREE.Material | null;
 
   constructor(material: THREE.ShaderMaterial, host: GrassHost, root: THREE.Object3D, tileSize: number, drop: number, depth: THREE.Material | null = null) {
     this.material = material;
@@ -1216,6 +1249,15 @@ export class FarCards {
     this.drop = drop;
     this.depth = depth;
     GRASS_UNIFORMS.uSwgGrassFarLift.value = drop;
+  }
+
+  /** Every tile's mesh, and every one built after, on these two (`GrassField.wear`'s rule). Answers how many moved. */
+  wear(material: THREE.ShaderMaterial, depth: THREE.Material | null): number {
+    this.material = material;
+    if (depth) this.depth = depth;
+    let n = 0;
+    for (const t of this.tiles) n += wearMesh(t.mesh, material, this.depth);
+    return n;
   }
 
   /** Every far mesh casts while the far cards cast (on a toggle; a tile built casts as it is made). */

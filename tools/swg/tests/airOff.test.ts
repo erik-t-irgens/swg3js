@@ -520,6 +520,50 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
   ok(field.dentStep(step) === false && field.feetCounts.off === 1 && field.feetCounts.decal === 1 && field.feetCounts.dents === 0, "and every footstep is today's decal: the air answers no to it");
 }
 
+// --- 4b. the sixth wave's: with the master off the grass is today's material and its key, and nothing of the peers runs ---
+{
+  const [o, n] = await both('world/grass.ts');
+  type Mat = { name: string; vertexShader: string; fragmentShader: string; defines: Record<string, unknown>; fog: boolean; side: number; shadowSide: number | null; customProgramCacheKey(): string; uniforms: Record<string, unknown> };
+  const pairs: [string, Mat, Mat][] = [
+    ['grass', (o.grassMaterial as () => Mat)(), (n.grassMaterial as () => Mat)()],
+    ['grass depth', (o.grassDepthMaterial as () => Mat)(), (n.grassDepthMaterial as () => Mat)()],
+  ];
+  for (const [what, a, b] of pairs) {
+    const key = (m: Mat): string => `${m.name}|${m.vertexShader}|${m.fragmentShader}|${JSON.stringify(m.defines)}|${m.fog}|${m.side}|${m.shadowSide}|${m.customProgramCacheKey()}|${Object.keys(m.uniforms).sort().join(',')}`;
+    ok(key(a) === key(b), `the ${what} material: its text, defines, flags and uniform names byte for byte the old tree's (its program key unchanged)`);
+  }
+  ok(Object.keys(o.GRASS_UNIFORMS as object).join() === Object.keys(n.GRASS_UNIFORMS as object).join(), "the grass's own uniforms are the old ones");
+  const { grassMaterialFor, grassWearsAir } = await import(pathToFileURL(join(NEW, 'world', 'volumetrics', 'airGrass.ts')).href);
+  const plain = { name: 'plain' };
+  const twin = { name: 'twin' };
+  let every = true;
+  let combos = 0;
+  for (let bits = 0; bits < 64; bits++) {
+    const c = { on: false, grass: !!(bits & 1), field: !!(bits & 2), softOff: !!(bits & 4), built: !!(bits & 8), casting: !!(bits & 16), depthDrawn: !!(bits & 32) };
+    combos++;
+    if (grassMaterialFor(c, plain, twin) !== plain || grassWearsAir(c) !== false) every = false;
+  }
+  ok(every, `with the master off the grass's chooser hands every chunk and far tile today's material, by identity, over all ${combos} combinations of the rest`);
+  const world = readFileSync(join(NEW, 'world', 'world.ts'), 'utf8').replace(/\r\n/g, '\n');
+  ok(/grassStandInsFor\(air: AirField \| null\): THREE\.Mesh\[\] \{\n\s+if \(!air \|\| air\.refused !== null \|\| !VOL_TUNE\.on\) return \[\];/.test(world) && /const twinTuft = VOL_TUNE\.on && this\.grassAirDepth && this\.grassAirStand \? this\.grassAirStand : null;/.test(world) && /private grassAirFor\(\): THREE\.ShaderMaterial \| null \{\n\s+if \(!VOL_TUNE\.on \|\| !this\.grassMat\) return this\.grassAirMat;/.test(world), "and nothing of the twin is made, compiled or drawn into the shadow maps with the master off");
+  // The world's own hand-over into that chooser: the master as it is (with it off, the field the session kept and the
+  // twin built long ago still leave the grass plain), the switch, a field built for the frames' target, the soft off.
+  const GRASS_CHOICE_BODY = /private grassChoice\(air: AirField \| null\): ReturnType<typeof newGrassChoice> \{\n\s+const c = this\.grassAsk;\n\s+c\.on = VOL_TUNE\.on;\n\s+c\.grass = VOL_TUNE\.grass;\n\s+c\.field = air !== null && air\.refused === null && this\.airBuiltNow\(\);\n\s+c\.softOff = this\.grassSoftOff;\n\s+c\.built = this\.grassAirBuilt;\n/;
+  ok(GRASS_CHOICE_BODY.test(world), "the world asks the grass's chooser the master as it stands, the switch, a field that runs and is built for the frames' target, and the frame report's soft off");
+  ok(/const stirs = VOL_TUNE\.on && VOL_TUNE\.air && VOL_TUNE\.fromEngines/.test(world), "nor are other players' rides or a shuttle's engines asked for: the records stay empty");
+  const { pushEngines } = await import(pathToFileURL(join(NEW, 'world', 'volumetrics', 'airEngines.ts')).href);
+  const { AirForces } = await import(pathToFileURL(join(NEW, 'world', 'volumetrics', 'airForces.ts')).href);
+  const { newNearRides } = await import(pathToFileURL(join(NEW, 'net', 'nearRides.ts')).href);
+  const f = new AirForces();
+  const rides = newNearRides(4);
+  rides.n = 1;
+  rides.kind[0] = 1;
+  rides.flags[0] = 1;
+  rides.vx[0] = 20;
+  pushEngines([], f, rides, null);
+  ok(f.engineCount === 0 && f.counts.peers === 0, "and a ride handed to a field that is off (the master off) is never taken");
+}
+
 // --- 5. the weather (the fourth wave's): with the master off its sheets, its pass and its own shader are today's ---
 {
   const [o, n] = await both('world/weather.ts');

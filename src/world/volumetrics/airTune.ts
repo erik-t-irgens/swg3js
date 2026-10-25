@@ -410,6 +410,12 @@ export const AIR_TUNE = {
     impactAt: 0.3,
     impactSigma: 0.3,
     impactRise: 0.15,
+    /**
+     * A stood shuttle's engine (the sixth wave): straight down from each joint whose flame its clip lights, for as long
+     * as that flame's window is open, exit m/s [ours: a ship's own, `exitShip`, since a shuttle's engines are a ship's;
+     * the transport lights four, so its pad is blasted by four jets as its flames show].
+     */
+    exitShuttle: 60,
   },
   force: {
     /** A Force push's shove, m/s, and a pull's back toward the player [ours]. */
@@ -882,6 +888,44 @@ export const AIR_TUNE = {
     /** A drop of spray landing back on the water rings it: field units at its middle, and its radius in the drop's sizes [ours]. */
     ringDepth: 0.08,
     ringSize: 6,
+  },
+  /**
+   * Other players' rides (the sixth wave, the design's §2.12 and decision 23): no engine heat crosses the wire, so a ride
+   * drawn here stirs the air by a thrust of ours by its kind, times how hard it is reckoned to run off its speed alone, from
+   * the rear of its box along its tail; a ship or a flyer holding itself up blows down as a hull of ours does. Every number
+   * [ours] and a dial.
+   */
+  peers: {
+    /** A peer's ride's exit by kind at full run, m/s [ours: a hull of ours of the same kind's own, `engine.exit*`, so a friend's speeder stirs as yours does]. */
+    speeder: 28,
+    pod: 45,
+    flyer: 35,
+    ship: 60,
+    /** How hard a ride is reckoned to run: `idle` at rest [code: the glows' own floor for a running drive, `engineHeatOf`'s 0.3], all of it from `fullAt` m/s [ours: about a speeder's cruise]. */
+    idle: 0.3,
+    fullAt: 20,
+    /** Under this speed a ride is taken for parked and its engines for off, m/s [code: the speeder's own `running` test, `speeder.ts`]. */
+    runFrom: 1,
+    /** How far back along the box's half length the nozzle stands: 1 the rear face [ours: the middle of the tail, 0.8]. */
+    rear: 0.8,
+    /**
+     * A ship or a flyer whose underside stands more than this over the floor its kind flies from holds itself up and blows
+     * down, metres [code: a hull of ours's own margin, `aboveFloor`'s `fly.floor + 0.05`, so a friend's ship resting on its
+     * springs (1.5 m up, its floor) blows nothing, as yours does not, and one hovering higher blows as yours does].
+     */
+    hover: 0.05,
+    /** How far round the camera rides are asked for, metres [ours: the window's corners and a jet's reach past them]. */
+    reach: 200,
+  },
+  /**
+   * The grass leaning in the moving air at its foot (the sixth wave, the design's §14): `clamp(|v| / full, 0, most)`
+   * [demo `land.html:1230`'s wheat], the top sinking by `sink` of that at its tip [demo `land.html:1240`], laid on the
+   * trees' own sway, never in place of it. Every number a dial; the share of it drawn is the page's `volArtGrass`.
+   */
+  grass: {
+    full: 13,
+    most: 0.85,
+    sink: 0.45,
   },
 };
 

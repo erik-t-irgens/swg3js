@@ -22,7 +22,9 @@ import { AIR_DRAW, AirDrawer, compileAirMaterial } from './airDraw.ts';
 import { atlasLayout, MAX_TILES, tileRects } from './airAtlas.ts';
 import { airFrameNumbersIn, dustDecayFrame, dustLawIn, dustShapeStep, fixedStepsIn, smokeStep, newAirFrameNumbers, newDustLaw, newSandPhase, newStormEase, sandJitter, sandPhaseIn, sandStrength, shapeFloor, stormEaseIn, tickClockIn, tintedColourIn, type AirFrameNumbers, type DustLaw, type FixedClock, type SandPhase, type ShapeTexel, type StormEase, type TickClock } from './airMath.ts';
 import { AirForces, DUST_BATCH, SMOKE_BATCH, SPLAT_BATCH, type ForceCounts } from './airForces.ts';
-import { pushEngines, type AirHull } from './airEngines.ts';
+import { pushEngines, type AirHull, type ShuttleJets } from './airEngines.ts';
+import type { NearRides } from '../../net/nearRides.ts';
+import { grassAirOff, grassLeanIn, newGrassLean, type GrassAirUniforms } from './airGrass.ts';
 import { AirRaster, MEDIUM_BYTE, type GroundSampler } from './airRaster.ts';
 import { AirObstacles, type SolidBoxSource } from './airObstacles.ts';
 import { newWindow, PLACE, placeWindowIn, type WindowPlace } from './fluidWindow.ts';
@@ -280,6 +282,13 @@ export interface AirWorld {
    * reference (the fourth wave); a field given none keeps its own, which keep nothing out (the tests', the console's).
    */
   rainHull?: RainHull;
+  /**
+   * The sixth wave's, kept records the world refills before each frame: other players' rides drawn near the camera
+   * (`RemotePlayers.nearRides`) and the stood shuttles' engines lit now (`ShuttleRigs.jetsInto`). None for a field
+   * given neither (the tests', the console's).
+   */
+  rides?: NearRides;
+  jets?: ShuttleJets;
 }
 
 type Pair = [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget];
@@ -680,7 +689,7 @@ export class AirField implements AirSource {
   private input: AirFrameInput = newAirFrameInput();
   /** The numbers the console reads (`report`). */
   private readonly stats = { frames: 0, steps: 0, draws: 0, cpuMs: 0, resets: 0, lastScrollX: 0, lastScrollZ: 0, stepped: false, motes: 0, grainsFlying: 0, grainsLying: 0, sheets: 1 };
-  private readonly counts: ForceCounts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0 };
+  private readonly counts: ForceCounts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0, peers: 0, shuttles: 0 };
 
   constructor(renderer: THREE.WebGLRenderer, tune: VolTune, world: AirWorld) {
     this.renderer = renderer;
@@ -1437,6 +1446,62 @@ export class AirField implements AirSource {
     return this.liquidBound;
   }
 
+  /**
+   * The session's record of the grass's twin (`GRASS_AIR_U`, which both of the grass's twins hold by reference, the sixth
+   * wave), which this field writes from now on at the end of every frame, or null to stop: the liquid's rule, so a field
+   * made and thrown away never leaves the grass reading a texture nobody steps; let go, the record's share is put to nought.
+   */
+  bindGrass(shared: GrassAirUniforms | null): void {
+    if (this.grassBound && this.grassBound !== shared) grassAirOff(this.grassBound);
+    this.grassBound = shared;
+    if (shared) this.writeGrass(false);
+  }
+
+  /** The record this field writes while it is the world's (the tests' and the console's). */
+  get boundGrass(): GrassAirUniforms | null {
+    return this.grassBound;
+  }
+
+  private grassBound: GrassAirUniforms | null = null;
+
+  /**
+   * What the grass's twin reads this frame, into the bound record (the components of kept vectors): the velocity atlas,
+   * the window, slab 0's rectangle and half a texel, and the art share with the lean's own numbers -- the share nought on
+   * any frame the field did not step, or with the grass's switch off, so the twin draws the plain grass.
+   */
+  private writeGrass(stepped: boolean): void {
+    const rec = this.grassBound;
+    if (!rec) return;
+    const t = this.tune;
+    const on = stepped && t.on && t.air && t.grass && this.vel !== null && this.win.placed;
+    const p = rec.uAirGrassP.value;
+    if (!on) {
+      rec.uAirGrassVel.value = null;
+      p.x = 0;
+      return;
+    }
+    rec.uAirGrassVel.value = this.vel![0].texture;
+    const w = this.win;
+    const wv = rec.uAirGrassWin.value;
+    wv.x = w.ox;
+    wv.y = w.oz;
+    wv.z = w.size;
+    wv.w = AIR_TUNE.window.edge;
+    const rect = rec.uAirGrassRect.value;
+    rect.x = this.tiles[0];
+    rect.y = this.tiles[1];
+    rect.z = this.tiles[2];
+    rect.w = this.tiles[3];
+    const h = rec.uAirGrassHalf.value;
+    h.x = this.atlasHalf.value.x;
+    h.y = this.atlasHalf.value.y;
+    const G = AIR_TUNE.grass;
+    p.x = t.artGrass;
+    p.y = G.full;
+    p.z = G.most;
+    p.w = G.sink;
+  }
+
   /** Whether the liquid's tile is stepped (the master and the air on, the field live, the current or the lava on). */
   get liquidLive(): boolean {
     return this.live && this.liquidCells > 0 && this.vel !== null;
@@ -1738,7 +1803,7 @@ export class AirField implements AirSource {
       drawObstacles = true;
     }
     // The engines of this frame, into the forces' table.
-    pushEngines(this.world.hulls, f);
+    pushEngines(this.world.hulls, f, this.world.rides ?? null, this.world.jets ?? null);
     const te = this.testEngine;
     if (te && f.fromEngines) {
       const a = f.arg;
@@ -2028,6 +2093,8 @@ export class AirField implements AirSource {
     if (this.bound) copyAirGround(g, this.bound);
     // The liquids' readers (the fifth wave's), every frame, plain on any frame the tile was not stepped.
     this.writeLiquid(this.live);
+    // The grass's twin (the sixth wave's), the same way.
+    this.writeGrass(this.live);
   }
 
   private frameDt = 0.5;
@@ -3061,7 +3128,19 @@ export class AirField implements AirSource {
       sand: { picture: this.sandTex ? 'whole' : this.sandPic ? `${this.sandPic.rows} of ${SAND_SIZE} rows made` : 'not begun (the grey stand-in)', phases: { tA: r2(this.phase.tA), tB: r2(this.phase.tB), cycles: [this.phase.kA, this.phase.kB] } },
       raster: { unknown: this.raster.unknown, asked: this.raster.asked, lowest: r2(this.raster.lowest), highest: r2(this.raster.highest), mean: r2(this.raster.mean) },
       obstacles: { boxes: this.obs.count, dropped: this.obs.dropped, gathers: this.obs.gathers, tooWide: this.obs.tooWide, rooms: this.obs.rooms, widest: { half: round4(this.obs.largest), at: [Math.round(this.obs.largestX), Math.round(this.obs.largestZ)], top: round4(this.obs.largestTop) } },
-      sources: { ...this.counts, queuedOneShots: this.forces.oneCount, enginesThisFrame: this.forces.engineCount, frontsAlive: this.forces.frontCount },
+      // The sixth wave's among them: `peers` and `shuttles` (the engines since the console last read that were another
+      // player's ride or a stood shuttle's), and the rides and the jets the world handed this frame.
+      sources: {
+        ...this.counts,
+        queuedOneShots: this.forces.oneCount,
+        enginesThisFrame: this.forces.engineCount,
+        frontsAlive: this.forces.frontCount,
+        ridesNear: this.world.rides?.n ?? 0,
+        ridesAt: Array.from({ length: this.world.rides?.n ?? 0 }, (_, i) => [r2(this.world.rides!.x[i]), r2(this.world.rides!.y[i]), r2(this.world.rides!.z[i])]),
+        jetsLit: this.world.jets?.n ?? 0,
+        jetsAt: Array.from({ length: this.world.jets?.n ?? 0 }, (_, i) => [r2(this.world.jets!.x[i]), r2(this.world.jets!.y[i]), r2(this.world.jets!.z[i])]),
+      },
+      grass: { bound: this.grassBound !== null, share: this.grassBound ? r2(this.grassBound.uAirGrassP.value.x) : 0, reading: this.grassBound?.uAirGrassVel.value !== null && this.grassBound !== null },
       batch: { splats: this.forces.splatCount, of: SPLAT_BATCH, dust: this.forces.dustBatchCount, ofDust: DUST_BATCH },
       steps: this.stats.steps,
       draws: this.stats.draws,
@@ -3130,6 +3209,45 @@ export class AirField implements AirSource {
     const vx = THREE.DataUtils.fromHalfFloat(read.data[p]);
     const vz = THREE.DataUtils.fromHalfFloat(read.data[p + 1]);
     return { vx: Math.round(vx * 1000) / 1000, vz: Math.round(vz * 1000) / 1000, speed: Math.round(Math.sqrt(vx * vx + vz * vz) * 1000) / 1000, medium: this.raster.mediumAt(w.ox, w.oz, w.cell, x, z) };
+  }
+
+  /**
+   * The grass's lean at a world point (console only, a GPU sync; the sixth wave): slab 0's air read back there, the way
+   * the twin reads it, and the twin's own lean worked out from it by its CPU mirror (`grassLeanIn`) at the share the
+   * record holds now, for the top of a tuft `h` metres tall: how far over along the air and how far down, metres. Null
+   * off the window or with no record bound.
+   */
+  grassLeanAt(x: number, z: number, h = 1): { vx: number; vz: number; speed: number; share: number; over: number; down: number } | null {
+    const rec = this.grassBound;
+    if (!this.vel || !rec || !this.win.placed) return null;
+    const w = this.win;
+    const lx = (x - w.ox) / w.size;
+    const lz = (z - w.oz) / w.size;
+    if (!(lx >= 0 && lz >= 0 && lx <= 1 && lz <= 1)) return null;
+    const tgt = this.vel[0];
+    const read = readHalf(this.renderer, tgt);
+    if (!read) return null;
+    const px = Math.min(tgt.width - 1, Math.floor((this.tiles[0] + lx * this.tiles[2]) * tgt.width));
+    const py = Math.min(tgt.height - 1, Math.floor((this.tiles[1] + lz * this.tiles[3]) * tgt.height));
+    const p = (py * tgt.width + px) * read.comps;
+    const vx = THREE.DataUtils.fromHalfFloat(read.data[p]);
+    const vz = THREE.DataUtils.fromHalfFloat(read.data[p + 1]);
+    const P = rec.uAirGrassP.value;
+    const r = newGrassLean();
+    r.lx = lx;
+    r.ly = lz;
+    r.vx = vx;
+    r.vz = vz;
+    r.lev = 1;
+    r.h = h;
+    r.share = P.x;
+    r.full = P.y;
+    r.most = P.z;
+    r.sink = P.w;
+    r.edgeBand = rec.uAirGrassWin.value.w;
+    grassLeanIn(r);
+    const r3 = (v: number): number => Math.round(v * 1000) / 1000;
+    return { vx: r3(vx), vz: r3(vz), speed: r3(Math.sqrt(vx * vx + vz * vz)), share: r3(P.x), over: r3(Math.sqrt(r.x * r.x + r.z * r.z)), down: r3(-r.y) };
   }
 
   /** The most current anywhere on the liquid's tile, m/s (console only, a GPU sync): what the carry is handed at most. */

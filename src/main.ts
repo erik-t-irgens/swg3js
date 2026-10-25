@@ -42,7 +42,8 @@ import { AIR_DRAW, checkAirTargets, probeAirDraws, type AirDrawMode } from './wo
 import { AIR_TUNE, GROUND_CLASS_NAMES, tuneAir, tuneFogLooks, GROUND_FOG_LOOKS, type GroundClass } from './world/volumetrics/airTune.ts';
 import { FORCE_WAVE, FORCE_WAVE_SPEED, setForceWave } from './combat/forceWaveTune.ts';
 import { airDialsFor } from './world/volumetrics/airDials.ts';
-import { isVolKey, presetOf, VOL_APPLY_CLASS, VOL_KEYS, VOL_PRESET_LABELS, VOL_TUNE, volConsoleToSettings, volMemoryMB, volQualityFrom, type VolKey } from './world/volumetrics/volSettings.ts';
+import { MEDIUM_BYTE } from './world/volumetrics/airRaster.ts';
+import { isVolKey, presetOf, VOL_APPLY_CLASS, VOL_KEYS, VOL_PRESET_LABELS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_QUALITY_KEYS, VOL_RANGES, VOL_TUNE, volConsoleToSettings, volMemoryMB, volQualityFrom, type VolKey, type VolQualityKey } from './world/volumetrics/volSettings.ts';
 import { AirVolumePass } from './core/fx/airVolume.ts';
 import { createFxQuad, FX_CAMERA } from './core/fx/pass.ts';
 import { resolveLinks } from './core/programQueue.ts';
@@ -920,6 +921,19 @@ interface AirDebugOptions {
    * weather's grid says is roofed (none should, past a frame), and their lean and fall, near the crosshair too.
    */
   rain?: { share?: number | null; snow?: boolean | null; measure?: boolean; radius?: number };
+  /**
+   * The sixth wave's budget (`App.airBudget`, a promise): every preset in turn on the spot, and with `keys` every quality
+   * key of every wave through its values at High, each measured over `frames` frames after `settle` (the moving air's
+   * own line, CPU and GPU, the effects' line, the frame, and the memory by the design's arithmetic), against the master
+   * held off; with `keys` true, or naming them, also the fifth wave's current and crust switched off and on. The settings
+   * are put back after. Only from the console; it allocates as it likes.
+   */
+  budget?: true | { frames?: number; settle?: number; keys?: boolean | (VolQualityKey | 'volCurrent' | 'volLava')[]; presets?: boolean };
+  /**
+   * The sixth wave's grass: `at` reads slab 0's air back where you look (or at a game point) and works the twin's lean
+   * out of it by its CPU mirror, for the top of a tuft `h` metres tall (1 by default), at the share in force (a GPU sync).
+   */
+  grass?: { at?: [number, number] | true; h?: number };
 }
 
 /** The fields `__debug.air({ view })` shows. */
@@ -1881,6 +1895,16 @@ class App {
       set: (v) => (this.world.liquidSoftOff = !v),
       values: [false, true],
       note: 'false puts the water and the lava back on today\'s materials (the current and the crust unread); true as the settings have it',
+    });
+    // The sixth wave's: the grass back on its plain material (both built), the air unread by it.
+    registerPerfSwitch('volGrass', {
+      get: () => !this.world.grassSoftOff,
+      set: (v) => {
+        this.world.grassSoftOff = !v;
+        this.world.syncGrass();
+      },
+      values: [false, true],
+      note: "false puts the grass and the far cards back on today's material (the air at their feet unread); true as the settings have it",
     });
     registerPerfSwitch('airVolume', {
       get: () => this.postfx?.override.airVolume !== false,
@@ -9512,7 +9536,7 @@ class App {
         return { ...(words.length ? { words } : {}), ...(compared ? { compared } : {}), splits, ...this.shadowPassReport() };
       },
       /** The volumetrics pass's moving air (`src/world/volumetrics/`): see the README's Debugging rows. */
-      air: (opts?: AirDebugOptions) => this.airDebug(opts ?? {}),
+      air: (opts?: AirDebugOptions) => (opts?.budget ? this.airBudget(opts.budget === true ? {} : opts.budget) : this.airDebug(opts ?? {})),
       /**
        * Every volumetrics setting in force with its apply class, the preset and the memory; `{ on, preset, <key>: value }`
        * writes settings in memory and applies them, never saved (past a page's range, live, the setting left alone).
@@ -10069,6 +10093,14 @@ class App {
     this.remotes.prepareVehicle = (roots) => this.world.vehiclePrepare(roots);
     // A peer's painted ship owns copies of its materials: out of the world's sets when they go (read at call time).
     this.remotes.forget = (m) => this.world.forgetMaterials(m);
+    // The moving air's sixth wave: other players' rides stir it from where this screen draws them, and a stood shuttle's
+    // engines while a flame its clip lights is in its window. Nothing of anybody's is sent for either.
+    this.world.airPeerRides = (out) => {
+      this.remotes.nearRidesKept(out);
+    };
+    this.world.airShuttleJets = (out) => {
+      this.shuttleRigs?.jetsInto(out);
+    };
     // The other players' blades keep their renderers for the next peer; the ones over that go, and a
     // disposed material must leave the portal renderer's set and the cascades' map with them.
     remoteBlades.forget = (m) => this.world.forgetMaterials(m);
@@ -12625,6 +12657,12 @@ class App {
       }
       out.liquid = lq;
     }
+    if (o.grass?.at) {
+      // The sixth wave's: the grass's lean where you look, out of the twin's own arithmetic on the air read back there.
+      const p = o.grass.at === true ? look() : new THREE.Vector3(o.grass.at[0], 0, o.grass.at[1]);
+      const h = Number.isFinite(o.grass.h) ? Math.max(0.05, o.grass.h as number) : 1;
+      out.grassLean = { x: Math.round(p.x * 10) / 10, z: Math.round(p.z * 10) / 10, h, ...(air.grassLeanAt(p.x, p.z, h) ?? { none: 'off the window, no record bound, or not stepped yet' }) };
+    }
     if (o.view !== undefined) {
       // A view of the march's own or the ground's goes off when any other is asked, the picture's too.
       air.dustView = 0;
@@ -12682,13 +12720,121 @@ class App {
     const r2 = (v: number): number => Math.round(v * 100) / 100;
     const particles = report.particles as Record<string, unknown> | undefined;
     if (particles) particles.sheets = { storm: r2(wx.stormSheetScale), rain: r2(wx.rainSheetScale), snow: r2(wx.snowSheetScale), oursDraws: wx.airRainDraws };
+    // The sixth wave's grass: what the field writes for it (`report.grass`) beside what the chooser has it wear.
+    const grass = { ...(report.grass as Record<string, unknown> | undefined), ...this.world.grassAirStatus() };
     return {
       ...report,
+      grass,
       fogHour: this.world.fogReport(),
       volume: volume ? { ...volume.report(), wanted: this.postfx!.passWanted('airVolume') } : 'not on the chain',
       ...out,
       ...(notes.length ? { notes } : {}),
     };
+  }
+
+  /**
+   * `__debug.air({ budget })` (the sixth wave, the design's §7.2): every preset in turn on the spot, and with `keys` every
+   * quality key of every wave through its values at High, each written in memory as the console writes it (never saved),
+   * left `settle` frames for its targets to be made, then timed over `frames` frames of play -- the moving air's own line
+   * on the CPU and the GPU, the effects' line beside it (the volume is drawn in the chain), the whole frame -- with the
+   * memory by the design's arithmetic (`volMemoryMB`), against a first row with the master held off softly (nothing freed).
+   * The GPU column is null where the browser gives no timer query (headless Chrome has given none in every wave): the
+   * owner's own Chrome answers it through this same line. The settings in force before are put back after.
+   */
+  private async airBudget(o: { frames?: number; settle?: number; keys?: boolean | (VolQualityKey | 'volCurrent' | 'volLava')[]; presets?: boolean }): Promise<Record<string, unknown>> {
+    const air = this.world.air;
+    if (!air || !VOL_TUNE.on || air.refused) return { notes: [!air ? 'no moving air: the master is off, or not built yet (turn it on and arrive)' : air.refused ? `the moving air cannot run here: ${air.refused}` : 'the master is off'] };
+    const frames = Math.max(20, Math.min(600, Math.round(o.frames ?? 90)));
+    const settle = Math.max(5, Math.min(300, Math.round(o.settle ?? 30)));
+    const S = this.settings as unknown as Record<string, unknown>;
+    // The fifth wave's two liquid switches, which no preset moves, timed beside the quality keys: off and on.
+    const LIQUID_SWITCHES = ['volCurrent', 'volLava'] as const;
+    const before: Record<string, unknown> = {};
+    for (const k of VOL_QUALITY_KEYS) before[k] = S[k];
+    for (const k of LIQUID_SWITCHES) before[k] = S[k];
+    const gpuWas = PERF_TUNE.gpu;
+    PERF_TUNE.gpu = true;
+    const size = this.postfx?.size;
+    const width = size?.x ?? window.innerWidth;
+    const height = size?.y ?? window.innerHeight;
+    const r3 = (v: number | null | undefined): number | null => (v === null || v === undefined || !Number.isFinite(v) ? null : Math.round(v * 1000) / 1000);
+    type Row = { row: string; airCpuMs: number | null; airGpuMs: number | null; postCpuMs: number | null; postGpuMs: number | null; frameMs: number | null; memoryMB: number; preset: string };
+    const rows: Row[] = [];
+    const time = async (label: string): Promise<void> => {
+      await this.waitFrames(settle, 2000);
+      // A wisps mode moved is warmed off the frame: the timing waits for it, or it would time the last ready mode.
+      for (let i = 0; i < 600 && this.wispWarming.size; i++) await this.waitFrames(1, 100);
+      perf.resetGpu();
+      perf.ensureFrames(frames);
+      await perf.whenTimed(frames);
+      const rep = perf.report(frames);
+      const pass = (name: string) => rep.passes.find((p) => p.name === name);
+      const a = pass('air');
+      const p = pass('post');
+      rows.push({ row: label, airCpuMs: r3(a?.ms), airGpuMs: r3(a?.gpuMs), postCpuMs: r3(p?.ms), postGpuMs: r3(p?.gpuMs), frameMs: r3(rep.frame.p50), memoryMB: VOL_TUNE.on && !this.world.airSoftOff ? volMemoryMB(VOL_TUNE, width, height) : 0, preset: VOL_PRESET_LABELS[presetOf(this.settings)] });
+    };
+    const notes: string[] = [];
+    try {
+      // The master held off softly first (`perf({ ab: { key: 'volumetrics' } })`'s way): the floor every row is read against.
+      const softWas = this.world.airSoftOff;
+      const sw = PERF_SWITCHES.get('volumetrics');
+      sw?.set(false);
+      await time('master held off');
+      sw?.set(!softWas);
+      if (o.presets !== false) {
+        for (const name of VOL_PRESET_NAMES) {
+          this.volumetricsDebug({ preset: name });
+          await time(`preset ${name}`);
+        }
+      }
+      if (o.keys) {
+        const asked = Array.isArray(o.keys) ? (o.keys as string[]) : null;
+        const keys = asked ? (asked.filter((k) => (VOL_QUALITY_KEYS as readonly string[]).includes(k)) as VolQualityKey[]) : [...VOL_QUALITY_KEYS];
+        for (const k of keys) {
+          const R = (VOL_RANGES as Record<string, { options?: readonly number[]; min?: number; max?: number; step?: number }>)[k];
+          const high = VOL_PRESETS.high[k];
+          const values: (number | boolean)[] = typeof high === 'boolean' ? [false, true] : R?.options ? [...R.options] : R && R.min !== undefined && R.max !== undefined ? [R.min, high as number, R.max] : [high];
+          for (const v of values) {
+            this.volumetricsDebug({ preset: 'high', [k]: v });
+            await time(`${k} ${String(v)} (at High)`);
+          }
+        }
+        // The water's current and the lava's crust, each off and on at High: they cost only where the window holds water or
+        // lava (the medium the rows below name), so a row taken over dry land measures the switch and nothing it moves.
+        const switches = asked ? LIQUID_SWITCHES.filter((k) => asked.includes(k)) : [...LIQUID_SWITCHES];
+        for (const k of switches) {
+          for (const v of [false, true]) {
+            this.volumetricsDebug({ preset: 'high', [k]: v });
+            await time(`${k} ${String(v)} (at High)`);
+          }
+        }
+      }
+    } finally {
+      this.volumetricsDebug(before);
+      PERF_TUNE.gpu = gpuWas;
+    }
+    const gpu = rows.some((r) => r.airGpuMs !== null);
+    if (!gpu) notes.push("no GPU timer answered in this browser (headless Chrome gives none): the GPU columns are null; run `await __debug.air({ budget: true })` in a visible Chrome to fill them");
+    notes.push(`at ${width}×${height}; each row ${frames} frames after ${settle} to settle; the volume is drawn in the effects' line (post), so its cost is that line less the first row's`);
+    // What the window held under the rows: the liquid's tile, the current and the crust cost nothing past their switches
+    // where there is no water or lava in it.
+    const ras = this.world.air?.raster;
+    let land = 0;
+    let water = 0;
+    let lava = 0;
+    if (ras) {
+      for (let i = 3; i < ras.colour.length; i += 4) {
+        const m = ras.colour[i];
+        if (m === MEDIUM_BYTE.land) land++;
+        else if (m === MEDIUM_BYTE.water) water++;
+        else if (m === MEDIUM_BYTE.lava) lava++;
+      }
+    }
+    const cells = land + water + lava;
+    const share = (k: number): number => (cells > 0 ? Math.round((k / cells) * 1000) / 1000 : 0);
+    const medium = { land: share(land), water: share(water), lava: share(lava) };
+    if (medium.water + medium.lava < 0.01) notes.push('the window held no water or lava (under a hundredth of its cells): the liquid rows measured their switches over land, not a current or a crust moving; run it again standing over a lake and over lava for those');
+    return { renderer: this.backend, width, height, medium, rows, notes };
   }
 
   /**
@@ -12793,6 +12939,11 @@ class App {
           if (masks.length) jobs.push(this.world.programJob(masks, 'volumetrics: the water\'s mask', true, { compile: (o, _allowance, resolve) => ({ made: this.compileFxObject(o, target, resolve), done: true }) }));
         }
         jobs.push(this.world.rainWarmJob(air));
+        // The sixth wave's: the grass's twin that leans in the moving air, one tuft against the world pass as any scene
+        // object is. Its depth program cannot be compiled, only drawn, so while the grass casts the twin waits for the next
+        // loading screen to draw it (`World.grassWaitsForScreen`, which the page says beside the switch).
+        const grass = this.world.grassStandInsFor(air);
+        if (grass.length) jobs.push(this.world.compileReady(grass, 'volumetrics: the grass'));
         // The blowing sand's picture (wave 2b's), a slice of rows a frame, uploaded only once whole: the swap waits for it.
         jobs.push(this.sandSlices(air));
         // The wisps' noise (the third wave's), a layer a frame, uploaded only once whole and made once a session.
@@ -12817,8 +12968,13 @@ class App {
         if (pass && this.postfx && !this.postfx.pass('airVolume')) this.postfx.registerPass(pass);
         else pass?.dispose();
         if (!had) this.world.takeAir(air);
+        // Every variant this warm compiled is built for the frames' own target now (the choosers wear none for a target
+        // nothing compiled them for: an Effects switch made with the master off compiled none).
+        this.world.airBuilt();
         // The water's and the lava's variants this warm built: the chooser wears them from the next frame.
         this.world.liquidBuilt(liquidCovered);
+        // And the grass's twin (built for the frames' own target now).
+        if (grass.length) this.world.grassBuilt();
         // The wisps mode in force now, where its march is not built (moved during this warm, or while the master was off
         // with the pass already on the chain from an earlier warm): built off the frame in its turn, the volume drawing the
         // last ready mode meanwhile.
@@ -12955,8 +13111,10 @@ class App {
   private setGroundArtSoft(v: string): void {
     const mode = v === 'zero' || v === 'off' || v === 'one' ? v : 'set';
     this.groundArtSoft = mode;
-    for (const k of ['volArtSand', 'volArtPrints', 'volArtShade', 'airVolumeAmount'] as const) delete this.volOver[k];
+    for (const k of ['volArtSand', 'volArtPrints', 'volArtShade', 'volArtGrass', 'airVolumeAmount'] as const) delete this.volOver[k];
     this.world.airGroundSoftOff = mode === 'off';
+    // The grass's twin with the ground (the sixth wave): its art at nought, back on its plain material, or at one.
+    this.world.grassSoftOff = mode === 'off';
     if (this.postfx) {
       if (mode === 'off') this.postfx.override.airVolume = false;
       else delete this.postfx.override.airVolume;
@@ -12965,17 +13123,20 @@ class App {
       this.volOver.volArtSand = 0;
       this.volOver.volArtPrints = 0;
       this.volOver.volArtShade = 0;
+      this.volOver.volArtGrass = 0;
       this.volOver.airVolumeAmount = 0;
     } else if (mode === 'one') {
       this.volOver.volArtSand = 1;
       this.volOver.volArtPrints = 1;
       this.volOver.volArtShade = 1;
+      this.volOver.volArtGrass = 1;
     }
     this.applyVolumetrics();
     const over = { ...this.settings } as unknown as Record<string, unknown>;
     for (const [k, value] of Object.entries(this.volOver)) over[k] = value;
     this.postfx?.configure(over as unknown as Settings);
     this.world.syncGround();
+    this.world.syncGrass();
   }
 
   /**
@@ -12996,6 +13157,8 @@ class App {
       if (air && !air.floatBlend) return { off: 'this browser cannot blend into a float target (EXT_float_blend), so every footprint is the flat print it always was' };
     }
     if ((key === 'volSand' || key === 'volPrints') && this.inWorld && !this.world.groundTakesAir) return { note: 'not on this world: its ground is not drawn the way the air needs (a pack converted before, or a real-elevation world)' };
+    // The sixth wave's: turned on in play while the grass casts, its twin's shadow program is drawn only behind a screen.
+    if ((key === 'volGrass' || key === 'volArtGrass') && this.inWorld && this.world.grassWaitsForScreen) return { note: "from the next arrival: the grass casts its shadow, and the leaning grass's shadow program is drawn behind a loading screen" };
     return null;
   }
 

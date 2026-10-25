@@ -138,6 +138,9 @@ import { AIR_TUNE, FOG_LOOKS_STAMP, GROUND_FOG_LOOKS } from './volumetrics/airTu
 import { FogDayCount, fogDayOf, fogHourIn, newFogHour, type FogDay } from './volumetrics/airFog.ts';
 import { VOL_TUNE } from './volumetrics/volSettings.ts';
 import { LIQUID_U, lavaCrustMaterial, lavaMaterialFor, lavaWearsCrust, liquidOff, waterWearsAir, type LiquidChoice } from './volumetrics/airLiquid.ts';
+import { GRASS_AIR_U, grassAirTwin, grassWaitsForScreen, grassWearsAir, newGrassChoice } from './volumetrics/airGrass.ts';
+import { newShuttleJets, type ShuttleJets } from './volumetrics/airEngines.ts';
+import { newNearRides, type NearRides } from '../net/nearRides.ts';
 import { ribbonAt, ribbonTriangles, type GameRibbon, type RibbonPoint } from '../swg/terrain/ribbons.ts';
 import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../vehicles/garage';
 import { fitKey, type ResolvedFit } from '../vehicles/shipFit';
@@ -1050,7 +1053,14 @@ export class World {
    * What the field reads of the world; from wave 2b the session ground material's own tint uniforms, which the
    * dust pass holds by reference so its colour is tinted in the drawn ground's own mode.
    */
-  private readonly airWorld: AirWorld = { ground: this.airGround, boxes: this.airBoxes, hulls: this.vehicles, groundTint: groundTileUniforms(), rainHull: PARTICLE_UNIFORMS };
+  private readonly airWorld: AirWorld = { ground: this.airGround, boxes: this.airBoxes, hulls: this.vehicles, groundTint: groundTileUniforms(), rainHull: PARTICLE_UNIFORMS, rides: newNearRides(16), jets: newShuttleJets(16) };
+  /**
+   * The sixth wave's: whoever draws other players' rides and stands the shuttles hands the air them here (the App, from
+   * `RemotePlayers.nearRidesKept` and `ShuttleRigs.jetsInto`), each writing into the kept record it is handed; none, and
+   * the field reads neither. The rides are asked about the camera, as far round it as `AIR_TUNE.peers.reach`.
+   */
+  airPeerRides: ((out: NearRides) => void) | null = null;
+  airShuttleJets: ((out: ShuttleJets) => void) | null = null;
   /**
    * The fourth wave's pictures (`airPictures`): what each of the kick-up's leaves, puffs and spray draws with, borrowed
    * from an effect that already holds it (the world's or the weather's) or this world's own copy, loaded behind a loading
@@ -3379,12 +3389,14 @@ export class World {
     if (this.air && this.air !== air) {
       this.air.bindGround(null);
       this.air.bindLiquid(null);
+      this.air.bindGrass(null);
       // The field let go takes its meshes with it: only the world's field stands in the scenes.
       this.unhangAir(this.air);
     }
     this.air = air;
     air.bindGround(this.airGroundU);
     air.bindLiquid(LIQUID_U);
+    air.bindGrass(GRASS_AIR_U);
     this.airTablesFor = { textures: undefined, swg: undefined, tone: -1 };
     this.syncAirMeshes();
   }
@@ -3574,7 +3586,7 @@ export class World {
     c.on = VOL_TUNE.on;
     c.current = VOL_TUNE.current;
     c.lava = VOL_TUNE.lava;
-    c.field = air.refused === null;
+    c.field = air.refused === null && this.airBuiltNow();
     c.softOff = this.liquidSoftOff;
     const water = waterWearsAir(c);
     const lava = lavaWearsCrust(c);
@@ -3830,6 +3842,26 @@ export class World {
     inp.fogTop = hold.top !== null ? hold.top : fh.top;
   }
 
+  /**
+   * Other players' rides near the camera and the stood shuttles' lit engines into the field's kept records (the sixth
+   * wave), each only while its switch would let it stir anything: the master, the moving air and the engines on, and for
+   * the rides `volFromPeers`. Empty otherwise, so the field reads none.
+   */
+  private writeAirRides(cam: THREE.Vector3): void {
+    const rides = this.airWorld.rides!;
+    const jets = this.airWorld.jets!;
+    rides.n = 0;
+    jets.n = 0;
+    const stirs = VOL_TUNE.on && VOL_TUNE.air && VOL_TUNE.fromEngines && this.planet !== null && !this.planet.space;
+    if (stirs && VOL_TUNE.fromPeers && this.airPeerRides) {
+      rides.atX = cam.x;
+      rides.atZ = cam.z;
+      rides.reach = AIR_TUNE.peers.reach;
+      this.airPeerRides(rides);
+    }
+    if (stirs && this.airShuttleJets) this.airShuttleJets(jets);
+  }
+
   updateAir(dt: number, simulate: boolean, viewInBuilding: boolean, reading: boolean): void {
     const air = this.air;
     if (!air || !this.camera) {
@@ -3871,6 +3903,9 @@ export class World {
     this.writeRainFrame(air, dt);
     // The fifth wave's water and lava on the chooser's materials, before the field's step reads whether anything wants it.
     this.syncLiquid(air);
+    // The sixth wave's: the grass on the chooser's material, and what stirs the air that no hull of this world is.
+    this.syncGrassAir(air);
+    this.writeAirRides(cam);
     // Something reads the air (§2.4): the volume, on the chain and wanted, which is Effects on with its switch on, or
     // the ground wearing the air's variant, or (the fourth wave) what the air carries besides dust -- the kick-up with
     // its switch on, the rain of ours falling -- or (the fifth) the water or the lava wearing what reads its current.
@@ -4247,9 +4282,32 @@ export class World {
     c.tiles = !!(this.groundTextures?.tiles && this.terrain.swg);
     c.sand = VOL_TUNE.sand;
     c.prints = VOL_TUNE.prints && air !== null && air.floatBlend;
-    c.field = air !== null && air.refused === null;
+    c.field = air !== null && air.refused === null && this.airBuiltNow();
     c.softOff = this.airGroundSoftOff;
     return c;
+  }
+
+  /**
+   * The effects targets the volumetrics' variants (both grounds, the water's current and the lava's crust, the grass's
+   * twin) were compiled for with the master on, by a sweep (`compileEverything`, its own target or the Effects switch's
+   * other one) or the master's in-play warm (`airBuilt`): at most the frames' own and the one being changed over to. A
+   * chooser wears a variant only for a target in here (`airBuiltNow`, read into each chooser's `field`), because a
+   * program is keyed on the target the frames draw into (the tone mapping is in the key): with the master off, the
+   * Effects switch's sweep compiles none of them, a kept field then said "built" for a target nothing had compiled
+   * them for, and the master turned on in play put them on at the next frame, where three built them.
+   */
+  private readonly airBuiltFor = new Set<THREE.WebGLRenderTarget | null>();
+
+  /** The volumetrics' variants compiled for `target` (the frames' own by default): the choosers may wear them there. */
+  airBuilt(target: THREE.WebGLRenderTarget | null = this.compileTarget()): void {
+    const now = this.compileTarget();
+    for (const t of this.airBuiltFor) if (t !== now && t !== target) this.airBuiltFor.delete(t);
+    this.airBuiltFor.add(target);
+  }
+
+  /** Whether the volumetrics' variants are compiled for the target the frames draw into now. */
+  private airBuiltNow(): boolean {
+    return this.airBuiltFor.has(this.compileTarget());
   }
 
   /**
@@ -4471,6 +4529,108 @@ export class World {
     this.grassStand ??= grassStandIn(mat);
     this.adoptMaterials(this.grassStand);
     console.info(`grass: ${loaded.file.layers} pictures (${[...loaded.file.shaders.values()].filter((e) => e.near).length} near, ${[...loaded.file.shaders.values()].filter((e) => e.far).length} far), reach ${flora.radial.maximumDistance} m on ${flora.radial.tileSize} m tiles, far cards to ${flora.farRadial.maximumDistance} m`);
+  }
+
+  /**
+   * The sixth wave's twins of the grass's two materials (`airGrass.ts`): made the first time the master is on with the
+   * grass's own made, the session's from then on, as the plain ones are; null where the grass's text has moved (the twin
+   * is made whole or not at all) or there is no grass yet.
+   */
+  private grassAirMat: THREE.ShaderMaterial | null = null;
+  private grassAirDepth: THREE.ShaderMaterial | null = null;
+  /** One tuft drawn with the twin, compiled behind every loading screen with the master on and never shown. */
+  private grassAirStand: THREE.Mesh | null = null;
+  /** The twin's colour program built for the frames' own target (a sweep's, or the master's in-play warm's). */
+  private grassAirBuilt = false;
+  /** A loading screen has drawn the twin's depth program into the shadow maps this session (`compileShadowDepth`). */
+  private grassAirDepthDrawn = false;
+  /** The frame report's soft off for the grass (`perf({ ab: { key: 'volGrass' } })`, and `volGroundArt` 'off'): the plain grass, both built. */
+  grassSoftOff = false;
+  /** What the chooser was asked last, and whether the grass wears its twin now. */
+  private readonly grassAsk = newGrassChoice();
+  private grassWornAir = false;
+
+  /** The twins made if they can be (the master on, the grass's own made); answers the colour twin, or null. */
+  private grassAirFor(): THREE.ShaderMaterial | null {
+    if (!VOL_TUNE.on || !this.grassMat) return this.grassAirMat;
+    this.grassAirMat ??= grassAirTwin(this.grassMat);
+    if (this.grassDepth) this.grassAirDepth ??= grassAirTwin(this.grassDepth);
+    return this.grassAirMat;
+  }
+
+  /**
+   * One stand-in tuft of the twin, adopted, for a sweep or the master's in-play warm to compile (class W): so the chooser's
+   * swap builds nothing. Empty without a field, with the master off, or before any world had grass.
+   */
+  grassStandInsFor(air: AirField | null): THREE.Mesh[] {
+    if (!air || air.refused !== null || !VOL_TUNE.on) return [];
+    const twin = this.grassAirFor();
+    if (!twin) return [];
+    this.grassAirStand ??= grassStandIn(twin);
+    this.adoptMaterials(this.grassAirStand);
+    return [this.grassAirStand];
+  }
+
+  /** The twin's colour program is built for the frames' own target (the master's in-play warm has linked): the chooser may wear it. */
+  grassBuilt(): void {
+    if (this.grassAirStand) this.grassAirBuilt = true;
+  }
+
+  /** What the grass's chooser is asked now, into the kept record. */
+  private grassChoice(air: AirField | null): ReturnType<typeof newGrassChoice> {
+    const c = this.grassAsk;
+    c.on = VOL_TUNE.on;
+    c.grass = VOL_TUNE.grass;
+    c.field = air !== null && air.refused === null && this.airBuiltNow();
+    c.softOff = this.grassSoftOff;
+    c.built = this.grassAirBuilt;
+    // The grass casts only where there is a shadow pass at all: with shadows off no depth program is ever wanted.
+    c.casting = (GRASS_SHADOW_TUNE.cast || GRASS_SHADOW_TUNE.farCast) && !!this.renderer?.shadowMap.enabled;
+    c.depthDrawn = this.grassAirDepthDrawn;
+    return c;
+  }
+
+  /**
+   * The grass's and the far cards' meshes on the chooser's material (class M, the sixth wave): the twin while the master,
+   * `volGrass` and a field say so and it is built (and, while the grass casts, its depth program drawn by a screen), the
+   * plain one otherwise -- both built, so the swap builds nothing. Once a frame from `updateAir`; a steady frame asks the
+   * chooser and walks nothing.
+   */
+  private syncGrassAir(air: AirField | null): void {
+    const plain = this.grassMat;
+    const twin = this.grassAirMat;
+    const want = plain !== null && twin !== null && grassWearsAir(this.grassChoice(air));
+    if (want === this.grassWornAir) return;
+    this.grassWornAir = want;
+    if (!plain) return;
+    const mat = want && twin ? twin : plain;
+    const depth = want && this.grassAirDepth ? this.grassAirDepth : this.grassDepth;
+    this.grass?.wear(mat, depth);
+    this.farCards?.wear(mat, depth);
+  }
+
+  /** The grass put on the chooser's material now rather than at the next frame (the frame report's compare draws at once). */
+  syncGrass(): void {
+    this.syncGrassAir(this.air);
+  }
+
+  /** Whether the twin is wanted and waits for the next loading screen to draw its depth program (what the page says). */
+  get grassWaitsForScreen(): boolean {
+    return this.grassAirMat !== null && grassWaitsForScreen(this.grassChoice(this.air));
+  }
+
+  /** The grass's twin in words for the console (`__debug.air()`). */
+  grassAirStatus(): Record<string, unknown> {
+    const c = this.grassChoice(this.air);
+    return {
+      worn: this.grassWornAir ? 'the twin that leans in the moving air (key grass+air)' : 'the plain grass',
+      made: this.grassAirMat !== null,
+      built: this.grassAirBuilt,
+      depthDrawn: this.grassAirDepthDrawn,
+      casting: c.casting,
+      waitsForScreen: this.grassAirMat !== null && grassWaitsForScreen(c),
+      softOff: this.grassSoftOff,
+    };
   }
 
   /** The world's grass and far cards let go of: their meshes down, their pictures freed. The material stays the session's. */
@@ -7197,6 +7357,9 @@ export class World {
     // The tile ground and its air variant, one stand-in each, with the volumetrics master on (the second wave): so the
     // one the scene is not wearing is built too, and a ground switch or the master's soft off swaps compiled materials.
     let liquidCovered: THREE.Material[] | null = null;
+    let grassCovered = false;
+    // The variants below compiled for this sweep's target, whichever it is (`airBuilt`, after the batches).
+    const airCovered = this.air !== null && VOL_TUNE.on && this.air.refused === null;
     if (this.air && VOL_TUNE.on) {
       for (const o of this.groundStandInsFor(this.air)) {
         this.adoptMaterials(o);
@@ -7210,6 +7373,11 @@ export class World {
       }
       // A sweep for the frames' own target builds what waits for a warm too; one for the other effects path does not.
       if (opts.target === undefined) liquidCovered = this.liquidUnbuiltNow();
+      // The grass's twin that leans in the moving air (the sixth wave), one tuft: so the chooser's swap builds nothing.
+      for (const o of this.grassStandInsFor(this.air)) {
+        objects.push(o);
+        if (opts.target === undefined) grassCovered = true;
+      }
     }
     // Every shape a person's or a rack weapon's material can take (the fourth wave, `personKeys.ts`): behind a screen
     // `warmPersonShapes` built them before anybody was stood and each costs a key lookup here, and a sweep in play for the
@@ -7232,7 +7400,9 @@ export class World {
       onProgress(Math.min(objects.length, i + SWEEP_BATCH), objects.length, (r.info.programs?.length ?? 0) - before);
     });
     if (people.length) noteWarmed(this.programsOf);
+    if (airCovered) this.airBuilt(target);
     if (liquidCovered) this.liquidBuilt(liquidCovered);
+    if (grassCovered) this.grassBuilt();
     // The shadows' depth programs (`compileShadowDepth`): the loading sweep never builds a depth program, so one
     // stand-in per depth combination is drawn into the shadow maps here as a frame draws them, under the shadow
     // pass's own lights -- the flora's swaying shadows (`floraSway.ts`) over everything the sweep compiled, the
@@ -7271,7 +7441,7 @@ export class World {
    * What the last warm of the depth programs did, for the console: the sway's stand-ins a set, the programs built,
    * whether shadows were on, whether the grass's depth material was drawn, and the plain combinations a set.
    */
-  readonly shadowDepthWarm = { standIns: 0, programs: 0, shadows: false, grass: false, plain: 0, skinned: 0, batched: 0, ms: 0 };
+  readonly shadowDepthWarm = { standIns: 0, programs: 0, shadows: false, grass: false, grassAir: false, plain: 0, skinned: 0, batched: 0, ms: 0 };
 
   /**
    * Build the shadows' depth programs from stand-ins (see `compileEverything`) by drawing them into the shadow maps
@@ -7302,6 +7472,7 @@ export class World {
     const warm = this.shadowDepthWarm;
     warm.shadows = r.shadowMap.enabled;
     warm.grass = false;
+    warm.grassAir = false;
     warm.plain = 0;
     warm.skinned = 0;
     warm.batched = 0;
@@ -7327,6 +7498,10 @@ export class World {
     // The grass's stand-in casts with the grass's depth material for the first set's draw alone (grass is drawn in the
     // world pass only), then is put back as it was: it hangs no cascade hooks, so it is drawn into every cascade.
     const tuft = this.grassStand && this.grassDepth ? this.grassStand : null;
+    // And the twin's (the volumetrics' sixth wave), on a stand-in tuft of its own beside it, with the master on: a custom
+    // depth material's program comes only from a draw, and this is where the world draws one, so the twin is worn while
+    // the grass casts only once a screen has been here (`grassAirDepthDrawn`).
+    const twinTuft = VOL_TUNE.on && this.grassAirDepth && this.grassAirStand ? this.grassAirStand : null;
     for (const set of sets) {
       const standIns = swayDepthStandIns(swaying, set.name);
       const plain = plainDepthCombos(set.name);
@@ -7353,6 +7528,15 @@ export class World {
         tuft.updateMatrixWorld(true);
         this.scene.add(tuft);
       }
+      const withTwin = twinTuft !== null && set === sets[0];
+      if (withTwin) {
+        twinTuft.customDepthMaterial = this.grassAirDepth!;
+        twinTuft.castShadow = true;
+        twinTuft.position.copy(at);
+        twinTuft.updateMatrix();
+        twinTuft.updateMatrixWorld(true);
+        this.scene.add(twinTuft);
+      }
       try {
         // The set's lights first: the shadow pass's own scene primed (a compile of nothing through its proxy), or the
         // old way a compile of nothing under that pass's layers. Then the draw.
@@ -7360,12 +7544,21 @@ export class World {
         else this.withLayers(camera, set.layer, () => this.withTarget(r, bound, () => r.compile(nothing, camera, this.scene)));
         this.withTarget(r, bound, () => portals.drawShadowsOnly(this.scene));
         if (withTuft) warm.grass = true;
+        if (withTwin) {
+          warm.grassAir = true;
+          this.grassAirDepthDrawn = true;
+        }
       } finally {
         for (const s of drawn) this.scene.remove(s);
         if (withTuft) {
           this.scene.remove(tuft);
           tuft.castShadow = false;
           tuft.customDepthMaterial = undefined;
+        }
+        if (withTwin) {
+          this.scene.remove(twinTuft);
+          twinTuft.castShadow = false;
+          twinTuft.customDepthMaterial = undefined;
         }
       }
       this.programs.countLinks(resolveLinks(r, standIns.map((s) => s.customDepthMaterial!).filter(Boolean)));

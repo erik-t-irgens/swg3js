@@ -283,6 +283,12 @@ export interface Settings extends FxSettings {
   volArtWater: number;
   /** How far the crust is carried and torn, 0 (today's) to 1. */
   volArtLava: number;
+  /** The sixth wave's: the grass near you leans in the moving air at its foot (a twin of its one material). */
+  volGrass: boolean;
+  /** How far the moving air bends the grass, 0 (today's) to 1. */
+  volArtGrass: number;
+  /** Other players' rides stir the air on this screen (from where it draws them, with a thrust of ours). */
+  volFromPeers: boolean;
   /** The terrain's ribbons drawn: the strips of lava (or water) its ribbon affectors lay down a slope (Mustafar's lava falls), which the game never drew. */
   waterRibbons: boolean;
 }
@@ -414,7 +420,10 @@ export const DEFAULT_SETTINGS: Settings = {
   // The second wave's: the ground's effects on and at High, and every art dial at the demo's full look (the owner's to
   // turn down; at nought each leaves the ground's own art exactly as it is).
   volSand: true,
-  volSandDetail: 4,
+  // ×2 from the sixth wave (the design's decision 54): from wave 2b the offsets carry a smooth field and the grains are
+  // the picture's, so twice the air's grid draws the same at a quarter of the memory (`VOL_QUALITY_MOVED` moves a file's
+  // old preset row onto its new one).
+  volSandDetail: 2,
   volPrints: true,
   volPrintDetail: 2048,
   volArtSand: 1,
@@ -455,6 +464,11 @@ export const DEFAULT_SETTINGS: Settings = {
   volLava: true,
   volArtWater: 1,
   volArtLava: 1,
+  // The sixth wave's: the grass leans in the moving air, its art at its full look (at nought the grass is exactly as it
+  // is), and other players' rides stir the air.
+  volGrass: true,
+  volArtGrass: 1,
+  volFromPeers: true,
   // Off (ours, the owner's standing order for the pass: off, the game is today's): the terrain's ribbons were never drawn
   // here, and drawing them is a look of the world beside the water's own settings, not an effect of the volumetrics.
   waterRibbons: false,

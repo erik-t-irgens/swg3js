@@ -5,9 +5,10 @@
 // **A preset is worked out, never stored** (the design's decision 4): `presetOf` answers the name whose every
 // quality key matches, else Custom, so it cannot drift from its dials and an old settings file needs nothing. A
 // preset writes the quality keys and nothing else, never a switch (what is drawn) and never an art dial (taste).
-// It writes and compares only the keys whose knobs this build has (the grass's and the clouds' not yet),
+// It writes and compares only the keys whose knobs this build has (the clouds' not yet),
 // and a file saved before a wave added a quality key takes that key from the preset its other keys hold
-// (`volFillQuality`), so a wave that adds a quality key never turns an existing choice into Custom.
+// (`volFillQuality`), so a wave that adds a quality key never turns an existing choice into Custom; a file saved before
+// a wave moved a key's preset rows (`VOL_QUALITY_MOVED`) takes its preset's new row the same way.
 //
 // Pure: types only from the settings, so the node tests run exactly what the page and the console run.
 import type { Settings } from '../../core/settings.ts';
@@ -61,6 +62,9 @@ export const VOL_SCENE_KEYS = [
   'volLava',
   'volArtWater',
   'volArtLava',
+  'volGrass',
+  'volArtGrass',
+  'volFromPeers',
 ] as const satisfies readonly (keyof Settings)[];
 
 /** The volumetrics' keys the effects chain reads (`fxRegistry.ts`): the master and the volume's own. */
@@ -118,6 +122,8 @@ export const VOL_RANGES = {
   volLiquidDetail: { options: [64, 96, 128, 192] as readonly number[] },
   volArtWater: { min: 0, max: 1, step: 0.05 },
   volArtLava: { min: 0, max: 1, step: 0.05 },
+  // The sixth wave's: how far the moving air bends the grass.
+  volArtGrass: { min: 0, max: 1, step: 0.05 },
 } as const;
 
 /** The quality keys a preset writes, in this build. */
@@ -139,7 +145,20 @@ export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>>
  * written at the default: only the stamp tells them apart, and a key of a wave the file already knew is never filled.
  */
 export const VOL_QUALITY_STAMP = 'volQualityWave';
-export const VOL_QUALITY_WAVE = 5;
+export const VOL_QUALITY_WAVE = 6;
+
+/**
+ * A quality key whose preset rows a later wave moved (the sixth wave's `volSandDetail`, the design's decision 54: from
+ * wave 2b the blowing sand's offsets carry only a smooth field, the grains being the picture's, so twice the air's grid
+ * draws the same at a quarter of the memory), with the wave that moved them, the rows and the default before the move.
+ * A file stamped before that wave whose value is its own preset's old row takes the preset's new row (`volFillQuality`),
+ * so a Low or an Ultra saved before never reads Custom; a file that left the key out for being at the old default holds
+ * the old default where its other keys hold no preset (a Custom keeps what it was drawn with), and the new default
+ * otherwise, which is its preset's new row.
+ */
+export const VOL_QUALITY_MOVED: Readonly<Partial<Record<VolQualityKey, { wave: number; oldDefault: number | boolean; old: Readonly<Record<VolPresetName, number | boolean>> }>>> = {
+  volSandDetail: { wave: 6, oldDefault: 4, old: { low: 3, medium: 4, high: 4, ultra: 6 } },
+};
 
 /**
  * The stamp into a settings file about to be saved (what differs from the defaults), only when it holds a quality key:
@@ -163,13 +182,14 @@ export const VOL_PRESET_NAMES: readonly VolPresetName[] = ['low', 'medium', 'hig
  * What each preset writes [ours, the design's §3.4]; High is the default and the demos' own. The third wave's: one,
  * two, three and three layers of air; smoke and fog at the air's grid on Low and twice it above; the wisps off, bands,
  * one octave of noise and two (the design's Q18); and a dust field a layer on Ultra alone, never by default on any other
- * (the owner's Q19: "only as an ultra option").
+ * (the owner's Q19: "only as an ultra option"). The sixth wave's: the blowing sand at twice the air's grid on Low, Medium
+ * and High and three times on Ultra (`VOL_QUALITY_MOVED`, the design's decision 54).
  */
 export const VOL_PRESETS: Readonly<Record<VolPresetName, Readonly<Record<VolQualityKey, number | boolean>>>> = {
-  low: { volAirDetail: 64, volAirSolve: 10, volAirRate: 30, volDustDetail: 3, volLightDetail: 1, volLightSteps: 16, volSandDetail: 3, volPrintDetail: 1024, airVolumeResolution: 0.25, airVolumeSteps: 8, airVolumeHistory: true, airVolumeShadows: false, volAirLayers: 1, volSmokeDetail: 1, volDustWisps: 0, volDustLayers: false, volParticleDetail: 0.5, volParticleShadows: false, volRainDetail: 4096, volLiquidDetail: 64 },
-  medium: { volAirDetail: 96, volAirSolve: 14, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 20, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 12, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 2, volSmokeDetail: 2, volDustWisps: 1, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 8192, volLiquidDetail: 96 },
-  high: { volAirDetail: 128, volAirSolve: 20, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 26, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 16, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 2, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 16384, volLiquidDetail: 128 },
-  ultra: { volAirDetail: 192, volAirSolve: 28, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 32, volSandDetail: 6, volPrintDetail: 2048, airVolumeResolution: 1, airVolumeSteps: 24, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 3, volDustLayers: true, volParticleDetail: 2, volParticleShadows: true, volRainDetail: 32768, volLiquidDetail: 192 },
+  low: { volAirDetail: 64, volAirSolve: 10, volAirRate: 30, volDustDetail: 3, volLightDetail: 1, volLightSteps: 16, volSandDetail: 2, volPrintDetail: 1024, airVolumeResolution: 0.25, airVolumeSteps: 8, airVolumeHistory: true, airVolumeShadows: false, volAirLayers: 1, volSmokeDetail: 1, volDustWisps: 0, volDustLayers: false, volParticleDetail: 0.5, volParticleShadows: false, volRainDetail: 4096, volLiquidDetail: 64 },
+  medium: { volAirDetail: 96, volAirSolve: 14, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 20, volSandDetail: 2, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 12, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 2, volSmokeDetail: 2, volDustWisps: 1, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 8192, volLiquidDetail: 96 },
+  high: { volAirDetail: 128, volAirSolve: 20, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 26, volSandDetail: 2, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 16, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 2, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 16384, volLiquidDetail: 128 },
+  ultra: { volAirDetail: 192, volAirSolve: 28, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 32, volSandDetail: 3, volPrintDetail: 2048, airVolumeResolution: 1, airVolumeSteps: 24, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 3, volDustLayers: true, volParticleDetail: 2, volParticleShadows: true, volRainDetail: 32768, volLiquidDetail: 192 },
 };
 
 /** The preset whose every quality key in `keys` the settings hold, or 'custom'. */
@@ -201,12 +221,32 @@ export function volFillQuality(saved: Readonly<Record<string, unknown>>, merged:
   const wave = typeof stamp === 'number' && Number.isFinite(stamp) ? stamp : 1;
   const earlier = VOL_QUALITY_KEYS.filter((k) => !VOL_QUALITY_LATER.includes(k));
   const name = presetOf(merged, earlier);
-  if (name === 'custom') return 0;
+  const m = merged as unknown as Record<string, unknown>;
   let n = 0;
-  for (const k of VOL_QUALITY_LATER) {
-    if (k in saved || (VOL_QUALITY_ADDED[k] ?? 1) <= wave) continue;
-    (merged as unknown as Record<string, unknown>)[k] = VOL_PRESETS[name][k];
-    n++;
+  if (name !== 'custom') {
+    for (const k of VOL_QUALITY_LATER) {
+      if (k in saved || (VOL_QUALITY_ADDED[k] ?? 1) <= wave) continue;
+      m[k] = VOL_PRESETS[name][k];
+      n++;
+    }
+  }
+  // A key whose rows a later wave moved, in a file that knew the key (stamped at or after the wave that added it) and
+  // was written before the move: its old row is its preset's new one, and a key left out for being at the old default
+  // is the old default where the file holds no preset (a file that never knew the key was filled above, from the new rows).
+  for (const k of VOL_QUALITY_KEYS) {
+    const mv = VOL_QUALITY_MOVED[k];
+    if (!mv || wave >= mv.wave || (VOL_QUALITY_ADDED[k] ?? 1) > wave) continue;
+    const others = presetOf(merged, VOL_QUALITY_KEYS.filter((q) => q !== k && !VOL_QUALITY_MOVED[q]));
+    const had = k in saved ? saved[k] : mv.oldDefault;
+    if (others !== 'custom' && had === mv.old[others]) {
+      if (m[k] !== VOL_PRESETS[others][k]) {
+        m[k] = VOL_PRESETS[others][k];
+        n++;
+      }
+    } else if (!(k in saved) && m[k] !== mv.oldDefault) {
+      m[k] = mv.oldDefault;
+      n++;
+    }
   }
   return n;
 }
@@ -291,6 +331,13 @@ export interface VolTune {
   liquidDetail: number;
   artWater: number;
   artLava: number;
+  /**
+   * The sixth wave's: the grass's twin worn (it leans in the moving air at its foot), how far the air bends it, and
+   * whether other players' rides stir the air here.
+   */
+  grass: boolean;
+  artGrass: number;
+  fromPeers: boolean;
 }
 
 export function newVolTune(): VolTune {
@@ -318,7 +365,7 @@ export function newVolTune(): VolTune {
     volumeHistory: true,
     volumeShadows: true,
     sand: true,
-    sandDetail: 4,
+    sandDetail: 2,
     prints: true,
     printDetail: 2048,
     // Ones a fraction may be written into start as a fraction, so each is a double from its first write.
@@ -352,14 +399,18 @@ export function newVolTune(): VolTune {
     liquidDetail: 128,
     artWater: 0.5,
     artLava: 0.5,
+    grass: true,
+    artGrass: 0.5,
+    fromPeers: true,
   };
   // The game's own rain and snow sheets stand down whole while ours falls (`volRainThin`, `volSnowThin` 1, the settings'
-  // defaults), written after the record is made so each field is still a double from its first write; the fifth wave's
-  // art dials likewise at their full look.
+  // defaults), written after the record is made so each field is still a double from its first write; the fifth and sixth
+  // waves' art dials likewise at their full look.
   t.rainThin = 1;
   t.snowThin = 1;
   t.artWater = 1;
   t.artLava = 1;
+  t.artGrass = 1;
   return t;
 }
 
@@ -401,7 +452,7 @@ export function volQualityFrom(s: Pick<Settings, VolKey | 'effects'>, out: VolTu
   out.volumeHistory = b('airVolumeHistory');
   out.volumeShadows = b('airVolumeShadows');
   out.sand = b('volSand');
-  out.sandDetail = snap(n('volSandDetail'), R.volSandDetail.options, 4);
+  out.sandDetail = snap(n('volSandDetail'), R.volSandDetail.options, 2);
   out.prints = b('volPrints');
   out.printDetail = snap(n('volPrintDetail'), R.volPrintDetail.options, 2048);
   // An art dial past the page's end from the console is held only to what cannot break anything (no negative depth).
@@ -436,6 +487,10 @@ export function volQualityFrom(s: Pick<Settings, VolKey | 'effects'>, out: VolTu
   // Past the page's end from the console, held only to what cannot break anything (no negative carry).
   out.artWater = over.volArtWater !== undefined ? Math.max(0, Math.min(4, n('volArtWater'))) : clampRange(n('volArtWater'), R.volArtWater, 1);
   out.artLava = over.volArtLava !== undefined ? Math.max(0, Math.min(4, n('volArtLava'))) : clampRange(n('volArtLava'), R.volArtLava, 1);
+  out.grass = b('volGrass');
+  // Past the page's end from the console, held only to what cannot break anything (no lean against the air).
+  out.artGrass = over.volArtGrass !== undefined ? Math.max(0, Math.min(4, n('volArtGrass'))) : clampRange(n('volArtGrass'), R.volArtGrass, 1);
+  out.fromPeers = b('volFromPeers');
   return out;
 }
 
@@ -506,6 +561,12 @@ export const VOL_APPLY_CLASS: Readonly<Record<VolKey, 'W' | 'C' | 'T' | 'U' | 'M
   volLava: 'M',
   volArtWater: 'U',
   volArtLava: 'U',
+  // The sixth wave's: the grass swaps between its plain material and its twin, both compiled (M; with grass casting on
+  // the twin waits for a loading screen to draw its depth program, the page says so), the bend a uniform, the peers a
+  // source the frame reads.
+  volGrass: 'M',
+  volArtGrass: 'U',
+  volFromPeers: 'C',
 };
 
 /**
@@ -576,7 +637,9 @@ export function volConsoleToSettings(o: Record<string, unknown>): VolConsoleSett
       key === 'volRain' ||
       key === 'volSnow' ||
       key === 'volCurrent' ||
-      key === 'volLava';
+      key === 'volLava' ||
+      key === 'volGrass' ||
+      key === 'volFromPeers';
     if (wantsBool) {
       if (typeof v === 'boolean') out.set(key, { key, value: v, inRange: true });
       continue;

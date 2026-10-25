@@ -399,6 +399,31 @@ const AIR_GROUPS: DialGroup[] = [
       dial('solver', 'liquidCap', 'Fastest current', 1, 60, 0.5, 'm/s', 'The most the water or the lava ever moves.'),
     ],
   },
+  {
+    title: 'Other players and the shuttles',
+    note: 'Another player\'s ride stirs the air on your screen from where you see it, with a push of ours by its kind (no engine heat crosses the wire); a stood shuttle blows straight down from each engine while its flame is lit.',
+    dials: [
+      dial('peers', 'speeder', 'Their speeder\'s exit', 0, 150, 1, 'm/s', 'Another player\'s speeder or bike, running all out.', kmh),
+      dial('peers', 'pod', 'Their pod\'s exit', 0, 150, 1, 'm/s', 'Another player\'s pod, running all out.', kmh),
+      dial('peers', 'flyer', 'Their flyer\'s exit', 0, 150, 1, 'm/s', 'Another player\'s flyer, running all out.', kmh),
+      dial('peers', 'ship', 'Their ship\'s exit', 0, 150, 1, 'm/s', 'Another player\'s ship, running all out (its downwash is the Engines group\'s, as yours is).', kmh),
+      dial('peers', 'idle', 'Running at a crawl', 0, 1, 0.05, '', 'How hard their engines are taken to run just past a standstill, as a share of all out.'),
+      dial('peers', 'fullAt', 'All out from', 1, 120, 1, 'm/s', 'The speed from which their engines are taken to run all out.', kmh),
+      dial('peers', 'runFrom', 'Parked under', 0, 10, 0.1, 'm/s', 'Slower than this, their ride is taken for parked and blows nothing aft.'),
+      dial('peers', 'rear', 'Nozzle back along the tail', 0, 1.5, 0.05, '× half length', 'Where the push leaves their ride: 1 the back of its box.'),
+      dial('peers', 'hover', 'Holds itself up from', 0, 10, 0.05, 'm', 'Their ship or flyer whose underside stands this far over the floor its kind flies from (a ship 1.5 m, a flyer 0.5 m, as yours) blows down under it.'),
+      dial('engine', 'exitShuttle', 'Shuttle\'s engines', 0, 150, 1, 'm/s', 'Each of a landing or departing shuttle\'s engines, straight down while its flame is lit.', kmh),
+    ],
+  },
+  {
+    title: 'The grass',
+    note: 'The grass near you leans in the air at its foot, laid on its own sway: the air already carries the gusts, so it takes none of its own. How far it bends overall is the Graphics page\'s "Grass bent by the air".',
+    dials: [
+      dial('grass', 'full', 'Leans all the way at', 1, 40, 0.5, 'm/s', 'The wind at a tuft\'s foot that bends it as far as it goes.', kmh),
+      dial('grass', 'most', 'Leans at most', 0, 1.5, 0.05, '', 'How far over the grass goes in the strongest air, as a share of its height.'),
+      dial('grass', 'sink', 'Top sinks as it leans', 0, 1, 0.05, '', 'How far down a bent tuft\'s top comes, as a share of how far over it goes.'),
+    ],
+  },
 ];
 
 /** One number of a world's fog look (`GROUND_FOG_LOOKS`), as a slider set through `tuneFogLooks`. */

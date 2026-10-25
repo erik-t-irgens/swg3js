@@ -34,6 +34,7 @@ import { SMOKE_BATCH } from '../../../src/world/volumetrics/airForces.ts';
 import { newWispPhase, wispPhaseIn } from '../../../src/world/volumetrics/airNoise.ts';
 import type { AirHull } from '../../../src/world/volumetrics/airEngines.ts';
 import { crustPhaseIn, makeLiquidUniforms, newCrustPhase } from '../../../src/world/volumetrics/airLiquid.ts';
+import { makeGrassAirUniforms } from '../../../src/world/volumetrics/airGrass.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string): void => {
@@ -880,6 +881,50 @@ const near = (a: number, b: number, eps = 1e-9): boolean => Math.abs(a - b) <= e
   // Let go, the record is put to nought: every reader plain by its own branch.
   r.field.bindLiquid(null);
   ok(rec.uAirLiquidVel.value === null && rec.uAirLiquidP.value.x === 0 && rec.uAirLiquidP.value.y === 0, 'let go, the record is nought: every reader draws the plain liquid');
+}
+
+// --- the sixth wave: what the field hands the grass's twin ---
+{
+  const r = rig();
+  // The camera off the diagonal, so the window's corner has x and z apart (a swap of them shows).
+  r.inp.camX = 37;
+  r.inp.camZ = -55;
+  settle(r);
+  const rec = makeGrassAirUniforms();
+  r.field.bindGrass(rec);
+  ok(r.field.boundGrass === rec, 'a grass record bound is the one the field writes');
+  r.tune.artGrass = 0.37;
+  r.frame(1 / 60);
+  const mats = Object.fromEntries(r.field.materials().map((m) => [m.name, m.uniforms]));
+  const tiles = mats['air.splat'].uTiles.value as Float32Array;
+  const slabs = mats['air.splat'].uSlabCount.value as number;
+  const rect = rec.uAirGrassRect.value;
+  ok(slabs > 1 && rect.x === tiles[0] && rect.y === tiles[1] && rect.z === tiles[2] && rect.w === tiles[3] && !(rect.x === tiles[4] && rect.y === tiles[5]), `the twin is handed slab 0's own rectangle in the atlas, the first tile's (${[rect.x, rect.y, rect.z, rect.w].map((v) => v.toFixed(4)).join(', ')}): never a higher slab's or the liquid's`);
+  const w = r.field.win;
+  const wv = rec.uAirGrassWin.value;
+  ok(w.ox !== w.oz && wv.x === w.ox && wv.y === w.oz && wv.z === w.size && wv.w === AIR_TUNE.window.edge, `the window's corner, x then z (${wv.x}, ${wv.y}), its size and the edge band`);
+  ok(rec.uAirGrassVel.value !== null && rec.uAirGrassHalf.value.x === r.field.atlasHalf.value.x && rec.uAirGrassHalf.value.y === r.field.atlasHalf.value.y, "the air's velocity atlas, and half its texel");
+  const p = rec.uAirGrassP.value;
+  const G6 = AIR_TUNE.grass;
+  ok(p.x === 0.37 && p.y === G6.full && p.z === G6.most && p.w === G6.sink, `the art share as the page sets it (${p.x}) and the lean's own numbers (${p.y}, ${p.z}, ${p.w})`);
+  // A frame the field does not run (the camera in a building's view): nought, the plain grass by its own branch.
+  r.inp.where = 'the camera is in a building';
+  r.frame(1 / 60);
+  ok(!r.field.stepping && p.x === 0 && rec.uAirGrassVel.value === null, 'on a frame the field did not run, the share is nought and there is no atlas to read');
+  r.inp.where = null;
+  r.frame(1 / 60);
+  ok(r.field.stepping && p.x === 0.37 && rec.uAirGrassVel.value !== null, 'and the next frame it runs hands them back');
+  r.tune.grass = false;
+  r.frame(1 / 60);
+  ok(p.x === 0 && rec.uAirGrassVel.value === null, "with the grass's switch off, nought");
+  r.tune.grass = true;
+  r.frame(1 / 60);
+  ok(p.x === 0.37, 'and on again, the share');
+  // Let go, the record is put to nought.
+  r.field.bindGrass(null);
+  ok(rec.uAirGrassVel.value === null && rec.uAirGrassP.value.x === 0 && r.field.boundGrass === null, 'let go, the record is nought: the twin draws the plain grass');
+  r.frame(1 / 60);
+  ok(rec.uAirGrassP.value.x === 0, 'and a field let go writes it no more');
 }
 
 // --- the fifth wave: the spray's ring flag follows the world's word ---

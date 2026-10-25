@@ -23,6 +23,8 @@ import { hangHeld } from './peerHands.ts';
 import { glidePeerTurn, yawOf } from './peerTurn.ts';
 import { newPeerRope, readPeerRope, type PeerRope } from './peerRope.ts';
 import { RECKON_TUNE, newReckonState, readReckon, reckonStepIn, reckonsIn, type ReckonState } from './peerReckon.ts';
+import { nearRidesIn, rideKindOf, RIDE_KIND, type NearRides } from './nearRides.ts';
+import { specFor } from '../vehicles/vehicle.ts';
 import { sharedClock } from '../world/sharedClock.ts';
 import { listPeerMover, type ShadowMovers } from '../world/shadowCadence.ts';
 
@@ -182,6 +184,10 @@ interface RemoteVehicle {
   gait: PodGait | null;
   /** A creature they ride (the garage def's `source`), known once the picture is in: a creature to the grapple's rope. */
   mount: boolean;
+  /** What the ride is to the moving air (`rideKindOf`: nothing, or a speeder's, a pod's, a flyer's or a ship's thrust), known once the picture is in. */
+  airKind: number;
+  /** The floor its kind flies from (a hull of ours of that kind's own `spec.fly.floor`, `rideFloorOf`), nought for one that does not fly: what the air holds its underside to. */
+  airFloor: number;
 }
 
 /**
@@ -794,7 +800,7 @@ export class RemotePlayers {
     }
     if (!r.vehicle || r.vehicle.id !== veh.id) {
       this.dropVehicle(r);
-      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, role: veh.role, vel: new THREE.Vector3(), heardAt: 0, reck: newReckonState(), reckoned: false, sentVel: new THREE.Vector3(), wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null, gait: null, mount: false };
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, role: veh.role, vel: new THREE.Vector3(), heardAt: 0, reck: newReckonState(), reckoned: false, sentVel: new THREE.Vector3(), wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null, gait: null, mount: false, airKind: 0, airFloor: 0 };
       r.vehicle = rv;
       r.ride.first = true;
       void this.bringVehicle(r, rv);
@@ -860,6 +866,11 @@ export class RemotePlayers {
       rv.gait = gait;
       // A creature they ride (the very test `Garage` sets `spec.animal` by): a creature to the grapple's rope, as every mount is.
       rv.mount = def.source === 'creature';
+      rv.airKind = rideKindOf(def);
+      // The floor its kind flies from, as a hull of ours of that kind is specified (`specFor`'s own `fly.floor`): the air
+      // takes a ship or a flyer of theirs to hold itself up only above it, as `aboveFloor` takes a hull of ours.
+      const flies = rv.airKind === RIDE_KIND.ship ? 'ship' : rv.airKind === RIDE_KIND.flyer ? 'flyer' : null;
+      rv.airFloor = flies ? (specFor(flies, def.id, def.label, def.bounds ?? { min: [-0.5, 0, -1], max: [0.5, 1, 1] }).fly?.floor ?? 0) : 0;
       rv.build = def.fit ? build : null;
       rv.paint = paint;
       rv.fit = fit;
@@ -1328,6 +1339,24 @@ export class RemotePlayers {
       out.n++;
     }
     return out.n;
+  }
+
+  /**
+   * Every shown peer's ride within `reach` of a point (flat) into the moving air's kept record (`nearRides.ts`, the
+   * volumetrics' sixth wave): each ride's place, the velocity its game sent while the picture is reckoned (else the
+   * glide's, as `vehiclePose` reads it), its turn, its kind, whether it is driven or set down, its box, its key. A ride
+   * clamped onto another ship is left out, as `nearPictures` leaves it. Nothing is allocated.
+   */
+  nearRides(at: { x: number; z: number }, reach: number, out: NearRides): number {
+    out.atX = at.x;
+    out.atZ = at.z;
+    out.reach = reach;
+    return nearRidesIn(this.remotes, out);
+  }
+
+  /** `nearRides` about the place and reach the record already holds (the frame's: no number handed across a call). */
+  nearRidesKept(out: NearRides): number {
+    return nearRidesIn(this.remotes, out);
   }
 
   /**

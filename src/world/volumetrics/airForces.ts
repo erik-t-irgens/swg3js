@@ -85,9 +85,12 @@ export interface ForceCounts {
   /** Smoke sources handed in (a frame's, held and one-shot), and dropped for a full table or batch. */
   smoke: number;
   droppedSmoke: number;
+  /** The sixth wave's: the engines of this frame's table that were another player's ride, and a stood shuttle's (among `engines`). */
+  peers: number;
+  shuttles: number;
 }
 
-const freshCounts = (): ForceCounts => ({ engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0 });
+const freshCounts = (): ForceCounts => ({ engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0, peers: 0, shuttles: 0 });
 
 /** The golden angle as a share of a turn: a front's bearings turn by it each step and each frame, so a sparse ring fills. */
 const GOLDEN = (3 - Math.sqrt(5)) / 2;
@@ -264,6 +267,19 @@ export class AirForces {
     if (i < 0 || j < 0 || i >= n || j >= n) return false;
     const k = (j * n + i) * 4;
     return r.colour[k + 3] === MEDIUM_BYTE.land && r.response[k + 3] > 0;
+  }
+
+  /**
+   * Whether the point in `arg` (x, y, z) stands more than `arg[3]` metres over the known ground under it: false outside
+   * the window or where the ground is not known yet (the sixth wave's: whether another player's ship holds itself up).
+   */
+  overGroundArgs(): boolean {
+    const a = this.arg;
+    const q = this.q;
+    q[0] = a[0];
+    q[1] = a[2];
+    if (!this.groundHere()) return false;
+    return a[1] - this.g.h > a[3];
   }
 
   /** The ground's height under the point in `q` into `this.g.h`, or false (outside the window, or not known yet). */

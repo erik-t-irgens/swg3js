@@ -36,7 +36,8 @@ type Third = { fronts: number; droppedFronts: number; storm: number[]; sand: str
 type W3 = { smoke: number; droppedSmoke: number; smokeLive: boolean; wisps: string | null; noise: string | null; layers: number; fogLevel: number };
 type W4 = { kickSteps: number; kickStarted: number; kickHidden: number; rainSteps: number; rainDrawing: boolean };
 type W5 = { stepped: boolean; bound: boolean; pokes: number; water: number; lava: number; sink: number };
-type Steady = { skipped?: string; w4: W4; w5: W5; frames: number; made: number; scavenges: number; stepping: boolean; engines: number; grains: number; ground: Ground; third: Third; w3: W3; moving: Moving };
+type W6 = { peers: number; shuttles: number; grassBound: boolean; grassShare: number; grassReading: boolean };
+type Steady = { skipped?: string; w4: W4; w5: W5; w6: W6; frames: number; made: number; scavenges: number; stepping: boolean; engines: number; grains: number; ground: Ground; third: Third; w3: W3; moving: Moving };
 const clean = (m: { made: number; scavenges: number; frames: number }): boolean => m.scavenges === 0 && m.made / m.frames < 0.2;
 const better = (a: { made: number; scavenges: number }, b: { made: number; scavenges: number }): boolean => a.scavenges < b.scavenges || (a.scavenges === b.scavenges && a.made < b.made);
 // Cleanest of three runs, the steady frame and the moving one each on its own (a run caught while the engine is still
@@ -56,7 +57,9 @@ for (let i = 0; i < 3; i++) {
 if (!best) throw new Error('no measure');
 if (best.skipped) note(`the allocation measure was skipped: ${best.skipped}`);
 else {
-  ok(best.stepping && best.engines === 12 && best.grains > 0, `the frame measured steps the air with ${best.engines} engines in its table (ten and two downwashes) and ${best.grains} grains in the pool`);
+  ok(best.stepping && best.engines === 16 && best.grains > 0, `the frame measured steps the air with ${best.engines} engines in its table (our hulls' ten and two downwashes, another player's speeder and their hovering ship's downwash, a shuttle's two engines) and ${best.grains} grains in the pool`);
+  const w6 = best.w6;
+  ok(w6.peers > 100_000 && w6.shuttles > 100_000 && w6.grassBound && w6.grassShare === 1 && w6.grassReading, `and the sixth wave's with it: the other players' rides (${w6.peers}) and the shuttle's engines (${w6.shuttles}) taken into the table every frame, and the grass's record written (its share ${w6.grassShare})`);
   const gd = best.ground;
   ok(gd.sources > 0 && gd.dents.laid > 0 && gd.dents.ticks > 0 && gd.dents.cleared > 0 && gd.feet.dents > 0, `and the ground's marks with it (the second wave): ${gd.sources} engines' pits and ruts held, ${gd.dents.laid} stamps laid, ${gd.dents.ticks} ticks faded, ${gd.dents.cleared} strips cleared, ${gd.feet.dents} footprints pressed as dents`);
   const th = best.third;

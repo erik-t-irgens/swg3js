@@ -19,7 +19,9 @@ import * as THREE from 'three';
 import { AirField, newAirFrameInput } from '../../../src/world/volumetrics/airField.ts';
 import { makeAirGroundUniforms } from '../../../src/world/volumetrics/airGround.ts';
 import { makeLiquidUniforms } from '../../../src/world/volumetrics/airLiquid.ts';
-import type { AirHull } from '../../../src/world/volumetrics/airEngines.ts';
+import { makeGrassAirUniforms } from '../../../src/world/volumetrics/airGrass.ts';
+import { newShuttleJets, type AirHull } from '../../../src/world/volumetrics/airEngines.ts';
+import { newNearRides, RIDE_FLAG, RIDE_KIND } from '../../../src/net/nearRides.ts';
 import type { GroundSample, GroundSampler } from '../../../src/world/volumetrics/airRaster.ts';
 import { newVolTune } from '../../../src/world/volumetrics/volSettings.ts';
 import { Dust, type GrainGround } from '../../../src/vehicles/dust.ts';
@@ -108,7 +110,32 @@ const tune = newVolTune();
 tune.on = true;
 // The drawn ground's tint uniforms, held by reference as the world hands them over: normalised, with a reference.
 const groundTint = { uGroundTint: { value: new THREE.Vector4(2, 1.6, 1, 0) }, uGroundTintRef: { value: new THREE.Vector4(0.42, 0.37, 0.3, 0.38) } };
-const field = new AirField(renderer, tune, { ground, boxes: null, hulls, groundTint });
+// The sixth wave's: two other players' rides (a speeder driven, a ship of theirs holding itself up) and a stood shuttle's
+// two lit engines, in the kept records the world refills before each frame (their places moved each frame below).
+const rides = newNearRides(8);
+rides.n = 2;
+rides.kind[0] = RIDE_KIND.speeder;
+rides.flags[0] = RIDE_FLAG.driven;
+rides.vx[0] = 18;
+rides.half[0] = 2.5;
+rides.qw[0] = 1;
+rides.key[0] = 9001;
+rides.kind[1] = RIDE_KIND.ship;
+rides.flags[1] = RIDE_FLAG.driven;
+rides.y[1] = 11;
+rides.low[1] = -2;
+rides.half[1] = 6;
+rides.qw[1] = 1;
+rides.key[1] = 9002;
+const jets = newShuttleJets(4);
+jets.n = 2;
+for (let k = 0; k < 2; k++) {
+  jets.x[k] = 30 + k * 6;
+  jets.y[k] = 6;
+  jets.z[k] = 20;
+  jets.key[k] = 9100 * 64 + k;
+}
+const field = new AirField(renderer, tune, { ground, boxes: null, hulls, groundTint, rides, jets });
 field.forces.onGrains = null;
 // The raster's tint as the world writes it from those uniforms each frame: the normalised mode, so `tintedAt` runs
 // `tintGamma`'s arithmetic for every cell the storm's colour and the motes read.
@@ -134,6 +161,8 @@ field.bindGround(makeAirGroundUniforms());
 // writes the current's texture, window, rectangle, shares and the crust's phases into it), a push meeting the water handed
 // to a sink that keeps nothing, and the spray's rings wanted (their flag written into the kick-up's update each frame).
 field.bindLiquid(makeLiquidUniforms());
+// The sixth wave's: bound to a record of the grass's twin, as the world binds the field it takes (written every frame).
+field.bindGrass(makeGrassAirUniforms());
 const pokeSink = { strength: 0.5 };
 field.forces.onPoke = (p) => {
   pokeSink.strength = p.strength;
@@ -215,6 +244,12 @@ function steady(): void {
     walker.from = who === 7 && !SKIP.includes('water') ? 'water' : 'terrain';
     field.kickFeet(walker);
   }
+  // The other players' rides where this screen draws them, as the world writes them before the frame (the sixth wave's).
+  rides.x[0] = state.camX + 12;
+  rides.y[0] = 0.8;
+  rides.z[0] = state.camZ + 6;
+  rides.x[1] = state.camX - 18;
+  rides.z[1] = state.camZ + 14;
   field.update(inp);
   // The fourth wave's rain, as the world steps it after the field's frame: its frame record written field by field.
   if (!SKIP.includes('rain')) {
@@ -434,10 +469,13 @@ const kick = field.kick;
 let kickStarted = 0;
 for (let k = 0; k < 4; k++) kickStarted += kick.stats.spawned[k];
 const w4 = { kickSteps: kick.stats.steps, kickStarted, kickHidden: kick.stats.hiddenWhileRun, rainSteps: field.rain.stats.steps, rainDrawing: field.rain.drawing };
-const sr = field.report() as { sand?: { picture: string; phases: { cycles: number[] } }; sources?: { fronts: number; droppedFronts: number; smoke: number; droppedSmoke: number }; wisps?: { inForce: string; noise: string }; layers?: { air: number }; liquid?: { stepped: boolean; bound: boolean; pokes: number; told: { water: number; lava: number } | null } };
+const sr = field.report() as { sand?: { picture: string; phases: { cycles: number[] } }; sources?: { fronts: number; droppedFronts: number; smoke: number; droppedSmoke: number; peers: number; shuttles: number }; wisps?: { inForce: string; noise: string }; layers?: { air: number }; liquid?: { stepped: boolean; bound: boolean; pokes: number; told: { water: number; lava: number } | null }; grass?: { bound: boolean; share: number; reading: boolean } };
+// The sixth wave's parts really ran: the other players' rides and the shuttle's engines taken into the table every frame,
+// and the grass's record written (its share, its texture).
+const w6 = { peers: sr.sources?.peers ?? 0, shuttles: sr.sources?.shuttles ?? 0, grassBound: sr.grass?.bound ?? false, grassShare: sr.grass?.share ?? 0, grassReading: sr.grass?.reading ?? false };
 // The fifth wave's parts really ran (one report: it takes the counts as it reads them): the liquid's tile stepped, its
 // record written, pushes landing on the water poked.
 const lq = sr.liquid;
 const w5 = { stepped: lq?.stepped ?? false, bound: lq?.bound ?? false, pokes: lq?.pokes ?? 0, water: lq?.told?.water ?? 0, lava: lq?.told?.lava ?? 0, sink: pokeSink.strength };
 const stormColour = field.stormColour.value;
-console.log(JSON.stringify({ w4, w5, frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet }, third: { fronts: sr.sources?.fronts ?? 0, droppedFronts: sr.sources?.droppedFronts ?? 0, storm: [stormColour.r, stormColour.g, stormColour.b], sand: sr.sand?.picture ?? null, cycles: sr.sand?.phases.cycles ?? null, mote: [...mote] }, w3: { smoke: sr.sources?.smoke ?? 0, droppedSmoke: sr.sources?.droppedSmoke ?? 0, smokeLive: field.smokeLive, wisps: sr.wisps?.inForce ?? null, noise: sr.wisps?.noise ?? null, layers: sr.layers?.air ?? 0, fogLevel: inp.fogLevel }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));
+console.log(JSON.stringify({ w4, w5, w6, frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet }, third: { fronts: sr.sources?.fronts ?? 0, droppedFronts: sr.sources?.droppedFronts ?? 0, storm: [stormColour.r, stormColour.g, stormColour.b], sand: sr.sand?.picture ?? null, cycles: sr.sand?.phases.cycles ?? null, mote: [...mote] }, w3: { smoke: sr.sources?.smoke ?? 0, droppedSmoke: sr.sources?.droppedSmoke ?? 0, smokeLive: field.smokeLive, wisps: sr.wisps?.inForce ?? null, noise: sr.wisps?.noise ?? null, layers: sr.layers?.air ?? 0, fogLevel: inp.fogLevel }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));

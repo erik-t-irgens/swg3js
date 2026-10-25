@@ -44,6 +44,7 @@ import type { EffectHandle } from './particles.ts';
 import { inSight, poseRigAction, rampFootOf, type Pad } from './rigPath.ts';
 import { surfaces } from './surfaces.ts';
 import { listShuttleMover, type ShadowMovers } from './shadowCadence.ts';
+import type { ShuttleJets } from './volumetrics/airEngines.ts';
 import { markFires, rigPose, shuttleShake, windowOpen, type RigClips, type RigPose, type ShuttleState, type ShuttleTimes, type TravelRig } from './travelTerminal.ts';
 
 /** Every number of ours about the drawn shuttles. */
@@ -417,6 +418,32 @@ export class RigFx {
       }
     }
     this.sweepDying(true);
+  }
+
+  /**
+   * The flames whose windows are open in the clip it was last stepped in, as engines for the moving air (the volumetrics'
+   * sixth wave): each flame's joint in the world (brought up to date by that step) and a key steady for its window, into
+   * the kept record after what it holds, as many as it has room for. Read by the window's own clock, never by whether the
+   * flame was near enough to be lit, so every screen's pad is blasted on the same shared instant the flames light.
+   */
+  jetsInto(out: ShuttleJets): void {
+    const c = this.live;
+    if (!c || this.role === null) return;
+    const now = this.at;
+    const lit = c.lit;
+    const most = out.x.length;
+    for (let i = 0; i < lit.length; i++) {
+      if (out.n >= most) return;
+      const l = lit[i];
+      if (!windowOpen(l.t, l.seconds, now)) continue;
+      const e = l.joint.matrixWorld.elements;
+      const k = out.n;
+      out.x[k] = e[12];
+      out.y[k] = e[13];
+      out.z[k] = e[14];
+      out.key[k] = l.joint.id * 64 + (i < 63 ? i : 63);
+      out.n++;
+    }
   }
 
   /**
@@ -1046,6 +1073,20 @@ export class ShuttleRigs {
   drive(fx: RigFx, pose: () => RigDrive | null): void {
     if (this.driven.some((d) => d.fx === fx)) return;
     this.driven.push({ fx, pose });
+  }
+
+  /**
+   * Every shuttle's engines lit this frame, as the moving air reads them (the volumetrics' sixth wave): each stood one
+   * shown, and each flown hull's set, after their update, into the kept record (emptied first). Nothing is allocated.
+   */
+  jetsInto(out: ShuttleJets): number {
+    out.n = 0;
+    for (let i = 0; i < this.stood.length; i++) {
+      const s = this.stood[i];
+      if (s.shown) s.fx.jetsInto(out);
+    }
+    for (let i = 0; i < this.driven.length; i++) this.driven[i].fx.jetsInto(out);
+    return out.n;
   }
 
   /** Stop stepping a flown hull's set, and take everything it placed or started away with it. */
