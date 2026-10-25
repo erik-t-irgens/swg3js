@@ -47,6 +47,32 @@ export interface TintReference {
  * the hue kept, and no pole past `cap` in brightness), 3 each channel to its own median, each held to `cap`.
  */
 export function tintGamma(c: readonly [number, number, number], mode: number, ref: TintReference | null, cap: number, out: [number, number, number]): [number, number, number] {
+  const a = TINT_ASK;
+  a.mode = mode;
+  a.ref = ref;
+  a.cap = cap;
+  return tintGammaOf(c, a, out);
+}
+
+/** How the tint is asked for, in a kept record: the mode, the world's reference and the gain cap (`tintGamma`'s three). */
+export interface TintAsk {
+  mode: number;
+  ref: TintReference | null;
+  cap: number;
+}
+
+/** `tintGamma`'s own record, so the wrapper makes nothing. */
+const TINT_ASK: TintAsk = { mode: 0, ref: null, cap: 1.5 };
+
+/**
+ * `tintGamma` over a kept record (the volumetrics' dust colour asks it every frame): the cap is a fraction, and a
+ * fraction handed across a call the compiler does not build in is a number made, which the record keeps from happening
+ * whichever way the compiler decides. `tintGamma` is this, so the two are one arithmetic to the bit.
+ */
+export function tintGammaOf(c: readonly [number, number, number], a: TintAsk, out: [number, number, number]): [number, number, number] {
+  const mode = a.mode;
+  const ref = a.ref;
+  const cap = a.cap;
   if (mode < 0.5) {
     out[0] = out[1] = out[2] = 1;
     return out;
@@ -57,15 +83,19 @@ export function tintGamma(c: readonly [number, number, number], mode: number, re
     out[2] = c[2];
     return out;
   }
+  // The reference is read as `ref != null ? … : 1`, never `ref?.… ?? 1`: the optional chain's undefined arm makes the
+  // value a tagged one, so the double the reference holds was boxed on every call (5.7 bytes a call in node, measured,
+  // which the volumetrics' dust colour asks every frame). The same numbers to the bit.
   if (mode < 2.5) {
     const lum = c[0] * LUMA[0] + c[1] * LUMA[1] + c[2] * LUMA[2];
-    const gain = Math.min(1 / Math.max(ref?.luminance ?? 1, 1e-3), cap / Math.max(lum, 1e-6));
+    const refLum = ref != null ? ref.luminance : 1;
+    const gain = Math.min(1 / Math.max(refLum, 1e-3), cap / Math.max(lum, 1e-6));
     out[0] = c[0] * gain;
     out[1] = c[1] * gain;
     out[2] = c[2] * gain;
     return out;
   }
-  for (let i = 0; i < 3; i++) out[i] = Math.min(c[i] / Math.max(ref?.rgb[i] ?? 1, 1e-3), cap);
+  for (let i = 0; i < 3; i++) out[i] = Math.min(c[i] / Math.max(ref != null ? ref.rgb[i] : 1, 1e-3), cap);
   return out;
 }
 

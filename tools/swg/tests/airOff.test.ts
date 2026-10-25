@@ -264,7 +264,7 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
   field.forces.force(0, 0, 0, 1, 0, 1, 1, 16);
   field.forces.engine(0, 1, 0, 0, -1, 0, 40, 0, 0);
   recording = false;
-  ok(calls.length === 0 && field.forces.oneCount === 0 && field.forces.engineCount === 0, 'with the master off the field touches no renderer and no GL call, and every force answers before touching anything');
+  ok(calls.length === 0 && field.forces.oneCount === 0 && field.forces.engineCount === 0 && field.forces.frontCount === 0, "with the master off the field touches no renderer and no GL call, and every force answers before touching anything (wave 2b's fronts' table included)");
 
   // The same once the window has been placed: the field stepped with the master on, then made to do nothing without
   // letting go of its targets (the player in a building, then the moving air turned off), so a force inside the window
@@ -274,7 +274,7 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
     tune.on = true;
     field.update(inp);
     ok(field.forces.active && field.win.placed, 'with the master on the field steps and its window is placed round the camera');
-    const counts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0 };
+    const counts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0 };
     for (const [why, set, unset] of [
       ['the player in a building', () => (inp.where = 'a test: indoors'), () => (inp.where = null)],
       ['the moving air off', () => (tune.air = false), () => (tune.air = true)],
@@ -287,7 +287,7 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
       field.forces.engine(0, 1, 0, 0, -1, 0, 40, 0, 0);
       field.forces.takeCounts(counts);
       const none = Object.values(counts).every((n) => n === 0);
-      ok(!field.forces.active && field.win.placed && field.forces.oneCount === 0 && field.forces.engineCount === 0 && field.forces.dustCount === 0 && none, `${why}, the window placed: a blast, a push and an engine at its middle are refused before anything is queued or counted (${JSON.stringify(counts)})`);
+      ok(!field.forces.active && field.win.placed && field.forces.oneCount === 0 && field.forces.engineCount === 0 && field.forces.dustCount === 0 && field.forces.frontCount === 0 && none, `${why}, the window placed: a blast, a push and an engine at its middle are refused before anything is queued or counted (${JSON.stringify(counts)})`);
       unset();
     }
     tune.on = false;
@@ -327,6 +327,107 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
   ok(sized === 12 && disposed === 0, `across every sand and print detail (${sized} sizes, the dents' target at each) no material was disposed`);
   tune.on = false;
   field.releaseTargets();
+}
+
+// --- 6b. the shared modules wave 2b edits, each held to the old tree with the master off ---
+{
+  // `terrainTextures.ts` exports the text of its own tint and decode and interpolates it back where it stood (item 3
+  // holds the tile program's whole text and key above); here, that the exported text is exactly the old program's.
+  const [o, n] = await both('world/terrainTextures.ts');
+  const tiles = (m: Mod) => {
+    const s = physical();
+    (m.injectGroundTiles as (s: unknown, u: unknown) => boolean)(s, (m.makeGroundTileUniforms as () => unknown)());
+    return s;
+  };
+  const a = tiles(o);
+  const tint = n.GROUND_TINT_GLSL as string;
+  const decode = n.GROUND_DECODE_GLSL as string;
+  ok(typeof tint === 'string' && typeof decode === 'string' && a.vertexShader.split(tint).length === 2 && a.fragmentShader.split(decode).length === 2, "the tile program's own tint and decode, exported, are the old program's text to the byte, each once at its place");
+  // `toneColour` at a tone of nought is `averageColor`, the same walk, by Object.is: called on a stand-in of the
+  // textures' own fields (a two-layer picture of random bytes), through the old class's averageColor and the new's.
+  const size = 64;
+  const data = new Uint8Array(size * size * 4 * 2);
+  let s = 99;
+  for (let i = 0; i < data.length; i++) data[i] = (s = (Math.imul(s, 1664525) + 1013904223) >>> 0) >>> 24;
+  const stand = () => ({ layerIndex: new Map([[7, 1], [3, 0]]), averages: new Map(), texture: { image: { data, width: size, height: size } } });
+  const OldTT = o.TerrainTextures as { prototype: { averageColor(f: number): import('three').Color | null } };
+  const NewTT = n.TerrainTextures as { prototype: { averageColor(f: number): import('three').Color | null; toneColour(f: number, tone: number, out: import('three').Color): import('three').Color | null } };
+  let same = true;
+  for (const f of [3, 7]) {
+    const was = OldTT.prototype.averageColor.call(stand(), f)!;
+    const now = NewTT.prototype.averageColor.call(stand(), f)!;
+    const tone = NewTT.prototype.toneColour.call(stand(), f, 0, new THREE.Color())!;
+    if (!Object.is(was.r, now.r) || !Object.is(was.g, now.g) || !Object.is(was.b, now.b)) same = false;
+    if (!Object.is(was.r, tone.r) || !Object.is(was.g, tone.g) || !Object.is(was.b, tone.b)) same = false;
+  }
+  ok(same && NewTT.prototype.toneColour.call(stand(), 99, 0.5, new THREE.Color()) === null, "averageColor is the old one's, and toneColour at a tone of nought is it to the bit (null for a family with no picture)");
+}
+{
+  // `terrain.ts` keeps the chunk's colour-map bytes beside its families and answers them (`colourIdAt`): over a real
+  // world's built chunk, `familyIdAt`, `familyAt` and `surfaceAt` (what the feet read) are the old tree's at every pole,
+  // and `colourIdAt` the pole's own bytes. A machine with no converted world says so and checks nothing here.
+  const packs = process.env.SWG3JS_PACKS ?? join(REPO, 'assets-private');
+  const world = ['tatooine', 'naboo'].find((w) => {
+    try {
+      readFileSync(join(packs, w, 'terrain.trn'));
+      readFileSync(join(packs, w, 'layout.json'));
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (!world) console.log(`note no converted Tatooine or Naboo under ${packs}: the terrain's family and colour reads are not held here`);
+  else {
+    const dir = join(packs, world);
+    const bytes = (rel: string): ArrayBuffer | null => {
+      try {
+        const b = readFileSync(join(dir, rel));
+        return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
+      } catch {
+        return null;
+      }
+    };
+    const m = /"center"\s*:\s*\{\s*"x"\s*:\s*(-?[\d.]+)\s*,\s*"z"\s*:\s*(-?[\d.]+)/.exec(readFileSync(join(dir, 'layout.json'), 'utf8').slice(0, 8000))!;
+    const cx = Number(m[1]);
+    const cz = Number(m[2]);
+    const planet = { id: 'test', seed: 1, palette: { low: 0x808080, mid: 0x808080, high: 0x808080, slope: 0x808080, shore: 0x808080 }, terrain: { base: 0, amplitude: 10, frequency: 0.01, octaves: 1, ridged: 0, flatten: 1, detail: 0 }, water: null };
+    type T = { attachSwg(s: unknown): void; tiler: unknown; prepareChunk(x: number, z: number, b: boolean): void; buildChunk(x: number, z: number): { origin: { x: number; z: number } }; familyIdAt(x: number, z: number): number; familyAt(x: number, z: number): number | null; surfaceAt(x: number, z: number): string | null; colourIdAt?(x: number, z: number): number };
+    const build = async (root: string): Promise<{ t: T; swg: { groundIfCached(x: number, z: number, out: { color: number }): boolean } }> => {
+      const S = (await load(root, 'world/swgTerrain.ts')).SwgTerrain as { create(trn: ArrayBuffer, a: unknown[], x: number, z: number, f: (file: string) => Promise<ArrayBuffer | null>): Promise<unknown> };
+      const TT = (await load(root, 'world/terrain.ts')).Terrain as new (p: unknown) => T;
+      const swg = await S.create(bytes('terrain.trn')!, [], cx, cz, async (file) => bytes(file));
+      const t = new TT(planet);
+      t.attachSwg(swg);
+      const order = new Map<number, number>();
+      t.tiler = { rank: (f: number) => order.get(f) ?? f, layer: (f: number) => f, corners: [0, 1, 2, 3], census: new Float64Array(5) };
+      t.prepareChunk(1, -1, true);
+      t.buildChunk(1, -1);
+      return { t, swg: swg as { groundIfCached(x: number, z: number, out: { color: number }): boolean } };
+    };
+    const old = await build(OLD);
+    const now = await build(NEW);
+    const origin = now.t.buildChunk(1, -1).origin;
+    let fams = true;
+    let cols = true;
+    let poles = 0;
+    const pole = { family: 0, choice: 0, color: 0 } as { color: number };
+    for (let j = 0; j <= 32; j += 3) {
+      for (let i = 0; i <= 32; i += 3) {
+        const x = origin.x + i * 2;
+        const z = origin.z + j * 2;
+        // `familyIdAt` is the first wave's (the old tree has none): it answers by number what the old `familyAt` answers.
+        const was = old.t.familyAt(x, z);
+        if (was === null || was !== now.t.familyAt(x, z) || was !== now.t.familyIdAt(x, z) || old.t.surfaceAt(x, z) !== now.t.surfaceAt(x, z)) fams = false;
+        if (now.swg.groundIfCached(x, z, pole)) {
+          poles++;
+          if (now.t.colourIdAt!(x, z) !== (pole.color & 0xffffff)) cols = false;
+        }
+      }
+    }
+    ok(fams, `${world}: on a built chunk the family the feet and the air's strips read (familyAt, surfaceAt, and familyIdAt by number) is the old tree's at every pole asked`);
+    ok(cols && poles > 50, `and colourIdAt answers each pole's own colour-map bytes (${poles} poles), by number`);
+    ok(now.t.colourIdAt!(origin.x + 5000, origin.z + 5000) === -1, 'and -1 where no chunk is built: a tint of one');
+  }
 }
 
 // --- 4. the choosers (the second wave's): with the master off the ground is today's material, and no footprint is the air's ---

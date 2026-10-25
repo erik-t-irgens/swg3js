@@ -106,6 +106,11 @@ export const AIR_TUNE = {
     dents: 256,
     /** How many of the strongest engines take their whole 16 splats; the rest take 8 [ours]. */
     engineFull: 4,
+    /** The Force's fronts alive at once, a kept table's rows: a ninth is dropped and counted [ours; sizes a table, not moved live]. */
+    fronts: 8,
+    /** The most shoves one front lays on a fixed step, and the most dust splats it lays a frame [ours, technical]. */
+    frontShoves: 24,
+    frontDust: 8,
   },
   wind: {
     /** The weather's wind speed taken as metres a second, times this [ours: the weather's `windSpeedScale` read as m/s, research1 §4.3]. */
@@ -129,10 +134,39 @@ export const AIR_TUNE = {
     stormShed: 0.6,
     /** The storm's dust the window's inflow carries, times the storm's level [ours]. */
     stormInflow: 0.35,
-    /** Metres the dust thins over above the ground: exp(-h / height) [demo `land.html:1144`]. */
+    /**
+     * H₀, metres: the unit that keeps a unit of dust's column at the first wave's optical depth (0.55 · D · 1.8) wherever
+     * its mass sits [demo `land.html:1144`'s scale height]. From wave 2b it is no longer a height the dust stands
+     * to (each source lifts its own, below) and no longer a slider: moving it would thicken every unit of dust at once.
+     */
     height: 1.8,
-    /** The height it rises to as the storm rises, metres [ours]. */
+    /** A full storm's mean height, metres: the storm's dust stands as the half-normal of this, and only the storm's [ours]. */
     stormHeight: 12,
+    /**
+     * Each source's own lift, 1; at 0 every source is laid as the storm is (on the ground, the half-normal of the calm
+     * mean height, not rising), the nearest the carried shape comes to the first wave's column, for comparing [ours].
+     */
+    lift: 1,
+    /** How fast a patch's rise relaxes toward its fall, a second (a time constant of 0.91 s) [demo grains' drag `land.html:1007`]. */
+    drag: 1.1,
+    /** How fast lifted dust sinks once its rise has died, m/s [ours: a 2 m lift is back down within what settling leaves of it]. */
+    fall: 0.5,
+    /** How fast a patch spreads, m² a second [ours: from 0.25 m to about 1 m in two seconds]. */
+    spreadRate: 0.25,
+    /** The thinnest and the widest a patch is, metres [ours]. */
+    spreadMin: 0.15,
+    spreadMax: 4,
+    /** A patch's age is held under this, seconds (the wisps of the next wave erode older dust more) [ours]. */
+    ageCap: 60,
+    /**
+     * The share of a family's picture, darkest first, left out of the dust's colour: 0.5 takes the lighter half, the
+     * part the sun lights rather than the gaps between grains; 0 is the whole picture's mean, the first wave's [ours].
+     */
+    tone: 0.5,
+    /** How much of the colour map's own tint the dust takes, 1 the drawn ground's own, 0 none, for comparing [ours]. */
+    tint: 1,
+    /** Seconds the storm's colour takes to come to the window's own as the storm moves over new ground [ours]. */
+    stormEase: 3,
     /** How much light a unit of dust takes, a metre [demo `land.html:1144`]. */
     extinction: 0.55,
     /** The slope over which ground stops shedding, degrees: shed times 1 - smoothstep(from, to, slope) [ours, research3 Q8]. */
@@ -158,10 +192,16 @@ export const AIR_TUNE = {
     sunScale: 0.75,
     /** The steps the demo's reach was set at; fewer steps are lengthened by 26 / steps so the reach in metres holds [ours]. */
     refSteps: 26,
-    /** How much a unit of dust takes from the sun on the way [demo `land.html:653`]. */
-    dust: 0.55,
-    /** The transmittance is exp(-k · sum) [demo `land.html:661`]. */
-    k: 0.16,
+    /**
+     * The four heights over the ground the light toward the sun is taken at, metres, lowest first (the design's
+     * `light.heights`) [ours: the band a speeder's dust and a storm's lower half live in]; the march interpolates between
+     * them and holds the highest above it. How strongly the dust shades itself is the page's `volDustSelfShadow`, which
+     * replaced the demo's per-step `dust` 0.55 and `k` 0.16, whose product counted no metres.
+     */
+    h0: 0,
+    h1: 2,
+    h2: 5,
+    h3: 10,
   },
   volume: {
     /** The loop bound of the march: no setting asks for more [ours]. */
@@ -185,6 +225,14 @@ export const AIR_TUNE = {
     ambient: 1,
     /** How much the sun lights the dust, times the sun the scene is lit by [ours]. */
     sun: 1,
+    /**
+     * The clear bubble round the lens: dust within `nearFrom` metres of the camera is not drawn and is back in full by
+     * `nearTo` [ours: the owner's "a metre or two"], extinction and in-scatter alike. Both at nought, no fade at all.
+     */
+    nearFrom: 0.5,
+    nearTo: 2.5,
+    /** The march looks this many of a patch's spreads over its peak height for dust [ours]. */
+    bandSigmas: 3,
   },
   engine: {
     /** Exit speed by kind, times the engine's heat, m/s [ours]. */
@@ -235,6 +283,21 @@ export const AIR_TUNE = {
     downwashFlyer: 18,
     /** The downwash is gone at this forward speed, m/s [ours]. */
     downwashFade: 25,
+    /**
+     * How a jet skimming the ground lifts its dust (the spread: a speeder, a bike, a pod): laid `spreadAt` metres up,
+     * `spreadSigma` thick, rising at `spreadRise` of `(1.7 + 0.24 · speed) · bite`, the demo's grains' own throw [demo
+     * `land.html:1717`, `:1738-1739`], halved because fine dust is lofted by the wake rather than thrown [ours]; the speed
+     * held at `spreadRiseSpeed`, the demo's speeder's own top (`land.html:1705-1706`), so a racing pod's dust keeps the
+     * arc's shape -- unheld it would climb 17.6 m and fade there, a wall for whoever follows [ours].
+     */
+    spreadAt: 0.3,
+    spreadSigma: 0.25,
+    spreadRise: 0.5,
+    spreadRiseSpeed: 30,
+    /** A jet meeting the ground (the impact): laid low, rising at this share of the impact's speed, so a hovering ship's ring rises at its edge [ours]. */
+    impactAt: 0.3,
+    impactSigma: 0.3,
+    impactRise: 0.15,
   },
   force: {
     /** A Force push's shove, m/s, and a pull's back toward the player [ours]. */
@@ -244,8 +307,41 @@ export const AIR_TUNE = {
     repulse: 30,
     /** Metres up the column a power stirs [ours]. */
     column: 4,
-    /** A power's dust, at this share of a blast's [ours]. */
-    dustShare: 0.5,
+    /**
+     * The powers as fronts (wave 2b, the design's §2.15), every one [ours] and a dial: a push runs out over
+     * `pushTime` from `pushFrom` to its reach, the quickest ("about a second, more gradual like the speeders"); a pull
+     * rolls in from `pullFrom` times its reach to `pullTo`, a body's reach short of the player, slow at first; a repulse's
+     * ring runs out from `repulseFrom` (the inner metre keeps 6.3% of its dust), a burst that outruns a push.
+     */
+    pushTime: 0.9,
+    pullTime: 1.2,
+    repulseTime: 0.8,
+    pushFrom: 1,
+    pullFrom: 1,
+    pullTo: 1.5,
+    repulseFrom: 1.5,
+    /** Out: `1 - (1 - s)^ease`, fast then slowing, as a blast wave; in: `s^ease`, slow far out and quickening [ours]. */
+    pushEase: 2,
+    pullEase: 2,
+    repulseEase: 2,
+    /** Degrees either side of the aim a push or a pull sweeps: the first wave's shoves' own spread [ours]. */
+    arc: 50,
+    /** A front's shoves' radius as a share of its reach, never under a cell: one number where the first wave had 0.18 and 0.25 [ours]. */
+    shoveShare: 0.16,
+    /** A front's dust: a band seen travelling rather than a wall, a third of a blast's centre dust [ours]. */
+    dust: 1.2,
+    /** The band's width near the player, metres, and how much it grows a metre travelled: "starts small then expands" [ours]. */
+    dustWidth: 0.6,
+    dustGrow: 0.1,
+    /** The dust over the way: `sin(π s)^this`, none at the start, most halfway, none at the end [ours]. */
+    dustShape: 1,
+    /** A push's or a pull's dust laid this low, this thick, rising this fast: about 0.6 m of rise over a second [ours]. */
+    dustLow: 0.2,
+    dustSpread: 0.2,
+    dustKick: 1.5,
+    /** A repulse's ring's dust, a little stronger than a push's [ours]. */
+    repulseSpread: 0.25,
+    repulseKick: 2,
   },
   blast: {
     /** A blast's ring of shoves: 22 of 75 m/s at 2 m [demo `land.html:1596-1598`], times push / 14 (the thermal detonator's) [ours]. */
@@ -261,12 +357,19 @@ export const AIR_TUNE = {
     /** A wreck's blast: radius 6 + the hull's, push 14 [ours]. */
     wreckRadius: 6,
     wreckPush: 14,
+    /**
+     * A blast's dust: laid `liftAt` up, `liftSigma` thick and rising at `liftRise`, both times radius / 7 -- the demo's
+     * grains leave at +0.4 m with a mean launch of about 12.6 m/s (`land.html:1605-1608`), and the dust half that [ours].
+     */
+    liftAt: 0.5,
+    liftSigma: 0.5,
+    liftRise: 6,
   },
   /**
-   * The ground's carried offsets (the second wave, the design's §2.7): how fast the air must blow before the sand's
-   * pattern moves, how far it moves, and how it heals. The threshold is `min(W · liftOver + liftAdd, liftCap)` m/s, `W`
-   * the weather's wind before any slab's share, so the planet's own breeze never moves sand and a jet does, and a real
-   * gale's gusts still drift it [demo `land.html:1895`].
+   * The carry over the ground (the second wave, the design's §2.7): how fast the air must blow before the sand blows. The
+   * threshold is `min(W · liftOver + liftAdd, liftCap)` m/s, `W` the weather's wind before any slab's share, so the
+   * planet's own breeze never moves sand and a jet does, and a real gale's gusts still drift it [demo `land.html:1895`].
+   * From wave 2b it carries the blowing sand of ours (`sand`), never the ground's own picture.
    */
   ground: {
     liftOver: 1.05,
@@ -274,21 +377,45 @@ export const AIR_TUNE = {
     liftCap: 13,
     /** The lift rises over this many m/s above the threshold: smoothstep(L, L + span, |v|) [demo `land.html:553`]. */
     liftSpan: 7,
-    /** The pattern moves at the air's speed times this, times the lift and the ground's own "moves" [demo `land.html:554`]. */
+    /** The blowing sand is carried at the air's speed times this, times the lift [demo `land.html:554`]. */
     lift: 0.35,
-    /** Where the lift passes this a texel's age starts again: it is being moved [demo `land.html:558`]. */
-    ageReset: 0.04,
-    /** Seconds a moved patch holds untouched before it heals [demo]. */
-    hold: 2.5,
-    /** Seconds it then takes to heal (three of its time constants, about 95% gone) [demo]. */
-    heal: 6,
     /** How much darker pressed ground is at most [demo `land.html:939`], and the dent depth (metres) times this that reaches it. */
     darkening: 0.18,
     darkenScale: 6,
     /** How much of the sun the dust's shadow on the ground takes at most: the demo's mix(1, lit, 0.8) [demo `land.html:942`]. */
     shade: 0.8,
-    /** A texel's age is counted in ticks of the 10 Hz clock, held under this (a half float holds every whole number to 2048) [ours]. */
-    ageCap: 2000,
+  },
+  /**
+   * The blowing sand of ours (wave 2b, the design's §2.7): a picture of our own laid over the still ground where
+   * the air passes the threshold, carried by two phases of the carry above, each restarted every `cycle`. Every one
+   * [ours] and a dial (research-amend-ground §2.10 says why each starts where it does).
+   */
+  sand: {
+    /** Seconds a phase is carried before it starts again: a stretch at a jet's edge under 2.2 times, the streaks coming and going over about a cycle. */
+    cycle: 1.6,
+    /** A thin veil: the still ground shows through the thickest streak. */
+    opacity: 0.6,
+    /** Grains in flight are lit on every side and read lighter than the ground they leave. */
+    bright: 1.25,
+    /** Metres a repeat of the picture: grain clumps of 0.25-1 m and patches of 2-4 m. */
+    scale: 8,
+    /** Seconds of carry a streak is blurred along: 0.8 m at a 10 m/s carry. */
+    streak: 0.08,
+    /** The carry, m/s, at which it begins and is full: just over the threshold, full about halfway up the lift's span. */
+    from: 0.2,
+    full: 2,
+    /** Where the grains are cut out of the picture's red, and how soft their edge (a bit over a third show at full). */
+    grains: 0.55,
+    soft: 0.12,
+    /** The half width of the patches' step round a half on the picture's green. */
+    patches: 0.2,
+    /** How much grains in flight flatten the ripples' relief and shine. */
+    flatten: 0.6,
+    /** Picture texels a pixel at which it begins to fade and is gone: grains a quarter of a pixel and smaller are not drawn. */
+    fadeFrom: 2,
+    fadeTo: 8,
+    /** Wet ground does not blow: none past this wetness. */
+    wetFull: 0.3,
   },
   /**
    * The dents: footprints, a speeder's rut, a scour pit under a jet, a crater (the second wave, the design's §2.7). Every
@@ -375,6 +502,10 @@ export function tuneAir(o: Record<string, unknown>): TuneAnswer {
       }
       if (g === 'obstacles' && k === 'instances') {
         notes.push('air: obstacles.instances sizes the obstacles\' buffers, made once with the field for the session, and is not moved live');
+        continue;
+      }
+      if (g === 'forces' && k === 'fronts') {
+        notes.push("air: forces.fronts sizes the Force's fronts' table, made once with the field, and is not moved live");
         continue;
       }
       group[k] = n;

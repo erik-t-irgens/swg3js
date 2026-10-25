@@ -49,6 +49,8 @@ interface Rec {
   fade?: number;
   fadeFloor?: number;
   sandShift?: [number, number];
+  /** A fill's value, as it was handed at that draw. */
+  value?: [number, number, number, number];
 }
 
 function standIn(): { renderer: THREE.WebGLRenderer; draws: Rec[]; bound: unknown[]; compiledFor: unknown[] } {
@@ -74,6 +76,9 @@ function standIn(): { renderer: THREE.WebGLRenderer; draws: Rec[]; bound: unknow
     } else if (name === 'air.offsets') {
       const s = u.uSandShift.value as THREE.Vector2;
       d.sandShift = [s.x, s.y];
+    } else if (name === 'air.fill') {
+      const v = u.uValue.value as THREE.Vector4;
+      d.value = [v.x, v.y, v.z, v.w];
     }
     draws.push(d);
   };
@@ -320,11 +325,12 @@ function runSource(fps: number, seconds: number, engine: { x: number; y: number;
   ok(g.uAirDentQ.value.x === 1 / sq.n && g.uAirDentQ.value.y === sq.t && r.field.dents!.target!.width === sq.n, 'and a texel in its uv and in metres, of the target the dents are drawn into');
   const ground = src('world/volumetrics/airGround.ts');
   ok(ground.includes('vec2 gAirDuv = gAirD / uAirDentP.z;'), "the ground reads the dents at the world point over the square's size, with repeat wrapping: the stamp's own fract(x / size), toroidal, wherever the square stands");
+  ok(ground.includes('vec2 gAirD = gAirW;'), 'a print is read where it was pressed: the blowing sand of wave 2b never drags it (the second wave read it at the offset)');
   const art = g.uAirArt.value;
-  ok(art.x === r.tune.artSand && art.y === r.tune.artPrints && art.z === 0 && art.w === 1, `the art as the frame leaves it: the drift's and the prints' dials, and no shade with nothing drawn by the volume (${art.toArray().join(', ')})`);
+  ok(art.x === r.tune.artSand && art.y === r.tune.artPrints && art.z === 0 && art.w === 1, `the art as the frame leaves it: the sand's and the prints' dials, and no shade with nothing drawn by the volume (${art.toArray().join(', ')})`);
   r.tune.sand = false;
   r.frame(1 / 60);
-  ok(art.x === 0 && art.y === r.tune.artPrints, "the drifting sand off: the drift's dial is nought, the prints' as it was");
+  ok(art.x === 0 && art.y === r.tune.artPrints, "the blowing sand off: the sand's dial is nought, the prints' as it was");
   r.tune.sand = true;
   r.inp.ground = false;
   r.frame(1 / 60);
@@ -384,7 +390,7 @@ function runSource(fps: number, seconds: number, engine: { x: number; y: number;
   ok(moved.length === 1 && Math.abs(moved[0].sandShift![0] - 4 / w.cells) < 1e-12 && Math.abs(moved[0].sandShift![1] + 2 / w.cells) < 1e-12, `a window moved four cells east and two south hands the offsets pass its pending scroll, (${moved[0]?.sandShift?.map((v) => v.toFixed(5)).join(', ')}): the move over the cells`);
   const next = named(r.frame(1 / 240), 'air.offsets');
   ok(next.length === 1 && next[0].sandShift![0] === 0 && next[0].sandShift![1] === 0, 'and the pass after owes nothing');
-  ok(src('world/volumetrics/airShaders.ts').includes('vec4 s = offsetsAt(l - u * uDt / uWindow.z + uSandShift);'), 'which the pass reads upstream of the texel, carried by the air: the shader\'s own line');
+  ok(src('world/volumetrics/airShaders.ts').includes('vec4 o = offsetsAt(l - u * uDt / uWindow.z + uSandShift) - vec4(u, u) * uDt;'), 'which the pass reads upstream of the texel, both phases carried by the air: the shader\'s own line (wave 2b\'s)');
 }
 
 // --- float32, and each target let go while its switch is off ---
@@ -405,6 +411,8 @@ function runSource(fps: number, seconds: number, engine: { x: number; y: number;
   r.tune.prints = true;
   const back = r.frame(1 / 60);
   ok(pair.every((t) => t.width === sand) && dents.width === r.tune.printDetail && named(back, 'air.fill').length === 2 && named(back, 'air.offsets').length === 1 && before !== null, 'and on again, made again at their sizes, the offsets filled at rest and carried that frame');
+  const fills = named(back, 'air.fill').filter((d) => pair.includes(d.target as THREE.WebGLRenderTarget));
+  ok(fills.length === 2 && fills.every((d) => d.value!.every((x) => x === 0)), 'the offsets are filled at nought: both phases carried nothing (wave 2b\'s, where the second wave filled an age)');
   const vol = src('world/volumetrics/volSettings.ts');
   ok(vol.includes('bytes += s * s * 16 * 2;') && !vol.includes('RGBA16F pair'), "the page's memory estimate counts the offsets at sixteen bytes a texel, as they are made");
 }

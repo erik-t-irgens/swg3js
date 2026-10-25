@@ -6,10 +6,12 @@
 // second the same at 60, 144 and 240 frames; four four-engine hulls and a grenade fit with the grenade whole and the
 // drops counted), driven here by hand on the forces alone, and through the field's own frame in `airFrame.test.ts`,
 // which is what holds the field to them; the inflow; the dust's settling after 20 s the same at 60, 144 and 240 frames; the swirl per metre; the
-// lift threshold; the slope gate; the wind the weather builds for the water; and the second wave's drifting sand, its
-// offsets stepped in float64 against research2's half-float truncation (a heal from above and from below both reach
-// nought, the age counted on the 10 Hz tick reaching the hold within a tick at 30, 60, 144 and 240 frames a second, and a
-// steady drift far out stalling in half floats, which is why the field is float32).
+// lift threshold; the slope gate; the wind the weather builds for the water; wave 2b's blowing sand (its two
+// phases restarted with their overshoot at 30 to 240 frames a second, the carry in float32 bounded by u × cycle and alike
+// at every rate where half floats drift by the rate, the strength read off the phases continuous where the older phase
+// alone jumps); and the Force's fronts through the real `AirForces` (each kind's radius over its time, the dust laid and
+// the shove given alike at 30, 60, 144 and 240 frames, a repulse's middle clear, a pull's first dust at its reach, a
+// push's band its own width at High and the texel's at Low, the ninth dropped, `dropOwed` and `clear` letting go).
 //
 // Plain type stripping; synthetic numbers only.
 import assert from 'node:assert/strict';
@@ -25,7 +27,13 @@ import {
   dustDecayFrame,
   dustHeight,
   exitSpeed,
+  FRONT_KIND,
+  frontRadiusIn,
+  frontTime,
+  HALF_NORMAL,
   lightStep,
+  newFrontAt,
+  newSandPhase,
   newAirFrameNumbers,
   engineReach,
   engineSpeed,
@@ -40,18 +48,15 @@ import {
   sheddingCount,
   slabWeight,
   slopeGate,
-  sandHealRate,
   sandLift,
-  sandStep,
+  sandPhaseIn,
+  sandStrength,
   splatRadius,
   spreadBite,
   stormSheetFactor,
+  stormWeight,
   swirlAt,
-  TICK,
-  tickClockIn,
   windVector,
-  type SandTexel,
-  type TickClock,
 } from '../../../src/world/volumetrics/airMath.ts';
 import { AIR_TUNE } from '../../../src/world/volumetrics/airTune.ts';
 import { AirForces, SPLAT_BATCH } from '../../../src/world/volumetrics/airForces.ts';
@@ -135,9 +140,15 @@ function ship(h: number, speed: number): AirHull {
   };
   return hull as unknown as AirHull;
 }
+/** The sources' frame walk the field runs every frame before the dust's batch (wave 2b's): the engines' dust worked out. */
+function walk(f: AirForces, dt = 1 / 60): void {
+  f.frameDt = dt;
+  f.frameSources();
+}
 for (const h of [5, 10, 15]) {
   const f = forcesAt();
   pushEngines([ship(h, 0)], f);
+  walk(f);
   const dust = f.buildDustBatch(1 / 60);
   const splats = f.buildStepBatch(1 / 60);
   let downward = false;
@@ -181,6 +192,7 @@ for (const h of [5, 10, 15]) {
 {
   const f = forcesAt();
   pushEngines([ship(10, 40)], f);
+  walk(f);
   ok(f.buildDustBatch(1 / 60) === 0, 'none at 40 m/s forward: the downwash fades out in flight and level engines reach no ground');
   ok(downwashExit(AIR_TUNE.engine.downwashShip, 0) === AIR_TUNE.engine.downwashShip && downwashExit(AIR_TUNE.engine.downwashShip, 40) === 0, 'the downwash: whole hovering, none past its fade');
 }
@@ -242,8 +254,12 @@ ok(src('vehicles/enginePlumes.ts').includes('const dx = -g[8];') && ['a[3] = -g[
     const checks2 = [
       [r.windX, w.x],
       [r.windZ, w.z],
-      [r.inflowDust, inflowDust(r.storm > 0 ? r.storm : 0)],
+      // From wave 2b the storm's inflow is laid at its weight, H(storm) / H₀, and stands as its half-normal.
+      [r.inflowDust, inflowDust(r.storm > 0 ? r.storm : 0) * stormWeight(r.storm > 0 ? r.storm : 0)],
       [r.dustHeight, dustHeight(r.storm > 0 ? r.storm : 0)],
+      [r.stormWeight, stormWeight(r.storm > 0 ? r.storm : 0)],
+      [r.stormSigma, HALF_NORMAL * dustHeight(r.storm > 0 ? r.storm : 0)],
+      [r.sunElevation, Math.max(0.05, lightElevation(r.sunY))],
       [r.decay, dustDecayFrame(r.dt, AIR_TUNE.dust.settle)],
       [r.swirl, swirlAt(r.cell)],
       [r.sunAcrossX, across.x],
@@ -323,7 +339,7 @@ ok(splatRadius(0.2, 1.5) === 1.5 && splatRadius(4, 1.5) === 4, 'a splat is never
     const x = f.window!.ox + u * f.window!.size;
     if (Math.abs(x - -30) > 5) grenade = false;
   }
-  const counts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0 };
+  const counts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0 };
   f.takeCounts(counts);
   ok(n <= SPLAT_BATCH && grenade && counts.droppedSplats > 0, `four four-engine hulls and a grenade: the batch holds ${n} of ${SPLAT_BATCH}, the grenade whole and first, and ${counts.droppedSplats} dropped and counted`);
 }
@@ -365,94 +381,252 @@ ok(sheddingCount(8, 164, 0.05, 31 / 255) === 0 && sheddingCount(9, 164, 0.0556, 
 ok(blastGrains(7) === AIR_TUNE.grains.blast && blastGrains(14) === 2 * AIR_TUNE.grains.blast && blastGrains(Number.NaN) === 0, 'a blast throws 300 grains at a thermal detonator\'s radius, by radius over 7');
 ok(stormSheetFactor(false, 1, 0.5) === 1 && stormSheetFactor(true, 0, 0.5) === 1 && stormSheetFactor(true, 0.5, 0) === 1 && stormSheetFactor(true, 0.5, 0.5) === 0.5, 'the storm sheets: 1 unless the volume drew the storm, then 1 - thin');
 
-// --- the drifting sand's offsets (the second wave): float64 against the field's float32 store, half floats the control ---
+// --- the blowing sand (wave 2b): two phases of the second wave's carry, each restarted every cycle ---
+/** A half float as research2 §5.1 found this machine's store does it: truncated toward nought. */
+const f32h = new Float32Array(1);
+const u32h = new Uint32Array(f32h.buffer);
+const half = (x: number): number => {
+  f32h[0] = x;
+  const b = u32h[0];
+  const sign = b & 0x80000000 ? -1 : 1;
+  const exp = ((b >>> 23) & 0xff) - 127 + 15;
+  if (exp >= 31) return sign * 65504;
+  if (exp <= 0) {
+    if (exp < -10) return sign * 0;
+    const m = ((b & 0x7fffff) | 0x800000) >>> (14 - exp);
+    return sign * m * 2 ** -24;
+  }
+  return sign * (1 + ((b & 0x7fffff) >>> 13) / 1024) * 2 ** (exp - 15);
+};
 {
-  // The offsets live in RGBA32F (the field makes them so, `airMarks.test.ts` reads the type): the hold and the heal are
-  // run here through that store, `Math.fround`. Half floats (research2 §5.1: a half-float store on this machine
-  // truncates toward nought) are kept only as the control the drift below stalls in, which is why the store is float32.
-  // The age is counted in ticks of the 10 Hz clock, whole numbers either store holds exactly up to the cap.
-  const f32 = new Float32Array(1);
-  const u32 = new Uint32Array(f32.buffer);
-  const half = (x: number): number => {
-    f32[0] = x;
-    const b = u32[0];
-    const sign = b & 0x80000000 ? -1 : 1;
-    const exp = ((b >>> 23) & 0xff) - 127 + 15;
-    if (exp >= 31) return sign * 65504;
-    if (exp <= 0) {
-      if (exp < -10) return sign * 0;
-      const m = ((b & 0x7fffff) | 0x800000) >>> (14 - exp);
-      return sign * m * 2 ** -24;
-    }
-    return sign * (1 + ((b & 0x7fffff) >>> 13) / 1024) * 2 ** (exp - 15);
-  };
-  const G = AIR_TUNE.ground;
-  const run = (fps: number, start: number, store: (x: number) => number, seconds: number) => {
-    const clock: TickClock = { acc: 0, dt: 1 / fps, ticks: 0 };
-    const s: SandTexel = { ox: start, oz: -start / 2, age: 0 };
-    let held = -1;
-    let gone = -1;
-    for (let i = 0; i < seconds * fps; i++) {
-      tickClockIn(clock);
-      // Still air: nothing lifts it, so only the age and the heal move it.
-      sandStep(s, 0, 0, 0, clock.dt, clock.ticks, 1);
-      s.ox = store(s.ox);
-      s.oz = store(s.oz);
-      s.age = store(s.age);
-      const t = (i + 1) / fps;
-      if (held < 0 && s.age * TICK >= G.hold) held = t;
-      if (gone < 0 && s.ox === 0 && s.oz === 0) gone = t;
-    }
-    return { s, held, gone };
-  };
+  // The phases' clock: each restart keeps its overshoot, the cycles are counted, phase B stays half a cycle on.
+  const T = AIR_TUNE.sand.cycle;
   for (const fps of [30, 60, 144, 240]) {
-    const f = run(fps, 0.5, (x) => x, 60);
-    const s = run(fps, 0.5, Math.fround, 60);
-    ok(Math.abs(f.held - G.hold) <= TICK + 1e-9 && Math.abs(s.held - G.hold) <= TICK + 1e-9, `at ${fps} frames a second the age reaches the ${G.hold} s hold at ${f.held.toFixed(3)} s in float64 and ${s.held.toFixed(3)} s in the field's float32: within one tick`);
+    const c = newSandPhase(T);
+    c.dt = 1 / fps;
+    let restarts = 0;
+    let overshoot = true;
+    let bounded = true;
+    for (let i = 0; i < fps * 10; i++) {
+      const before = c.tA;
+      sandPhaseIn(c);
+      if (c.restartA) {
+        restarts++;
+        if (!near(c.tA, before + c.dt - T, 1e-9)) overshoot = false;
+      }
+      if (!(c.tA >= 0 && c.tA < T && c.tB >= 0 && c.tB < T)) bounded = false;
+    }
+    const gap = (((c.tB - c.tA) % T) + T) % T;
+    ok(overshoot && bounded && restarts === c.kA && c.kA === Math.floor(10 / T) && c.kB === Math.floor((10 + T / 2) / T) && near(gap, T / 2, 1e-6), `at ${fps} frames a second the phases restart every ${T} s with their overshoot kept, A ${c.kA} times and B ${c.kB} in 10 s, B half a cycle on throughout`);
   }
-  // A heal from above and one from below both come down to nothing, and the same way in the float32 store as in float64.
-  for (const start of [0.5, -0.5]) {
-    const f = run(144, start, (x) => x, 60);
-    const s = run(144, start, Math.fround, 60);
-    ok(Math.abs(f.s.ox) < 1e-6 && Math.abs(s.s.ox) < 1e-6 && Math.abs(s.s.oz) < 1e-6 && Math.abs(s.s.ox - f.s.ox) <= Math.abs(f.s.ox) * 1e-3 + 1e-30, `an offset of ${start} m held still heals from ${start > 0 ? 'above' : 'below'} to under 1e-6 in 60 s, in float64 (${f.s.ox.toExponential(2)}) and in the field's float32 (${s.s.ox.toExponential(2)}) alike`);
-  }
-  // Moved patch, then held: the heal waits out the hold whatever the store.
-  {
-    const s: SandTexel = { ox: 0.5, oz: 0, age: 0 };
-    sandStep(s, 2, 0, 1, 1 / 60, 0, 1);
-    ok(near(s.ox, 0.5 - 2 / 60) && s.age === 0, 'lifted, the patch is carried against the air by u·dt and its age starts again');
-    const k0 = sandHealRate(0, G.hold, G.heal, 1);
-    const k1 = sandHealRate(Math.round((G.hold + 1) / TICK), G.hold, G.heal, 1);
-    ok(k0 === 0 && near(k1, 3 / G.heal) && near(sandHealRate(1000, G.hold, G.heal, 0), (3 / G.heal) * 0.02), 'it does not heal until it has held, then at three time constants over the heal, by the ground\'s heals (never under 0.02)');
-  }
-  // Why the offsets are float32 where the design had half floats: in a steady drift an offset grows toward the window's
-  // own size (the upwind edge's pattern smeared downwind; 141 m measured on Tatooine's dunes), where a half float's step
-  // is 6 to 12 cm and a frame's carry a few millimetres. Carried 10 s at 3 m/s and the demo's share from 100 m out:
-  {
-    const carry = (fps: number, store: (x: number) => number): number => {
-      let o = -100;
-      const dt = 1 / fps;
-      for (let i = 0; i < fps * 10; i++) o = store(o - 3 * G.lift * dt);
-      return o;
-    };
-    const want = -100 - 3 * G.lift * 10;
-    const f32 = [60, 144, 240].map((fps) => carry(fps, Math.fround));
-    const halves = [60, 144, 240].map((fps) => carry(fps, half));
-    ok(f32.every((v) => Math.abs(v - want) < 0.01) && halves.every((v) => Math.abs(v - want) > 1), `a drift carried 10 s from 100 m out comes to ${want.toFixed(2)} m in float32 at 60, 144 and 240 frames a second, and stored as half floats to ${halves.map((v) => v.toFixed(2)).join(', ')} m: it stalls (a frame's carry under the store's step, truncated away)`);
-  }
-  ok(sandLift(5, 6, 7, 1) === 0 && near(sandLift(20, 6, 7, 1), 1) && near(sandLift(20, 6, 7, 0.5), 0.5) && sandLift(20, 6, 7, 0) === 0, 'the lift: nothing under the threshold, all past its span, by the ground\'s moves (rock nought)');
+}
+{
+  // The carry of one texel under a steady 10 m/s, the shader's two lines: carried, and where its phase restarted, only
+  // what it was carried since. In float32 (the field's store) it is the exact -u·t at every rate and bounded by u × cycle;
+  // in half floats it drifts by an amount that grows with the frame rate (research-amend-ground §2.2's table).
+  const T = AIR_TUNE.sand.cycle;
+  const u = 10;
+  const run = (fps: number, store: (x: number) => number): { worst: number; most: number } => {
+    const c = newSandPhase(T);
+    c.dt = 1 / fps;
+    let oA = 0;
+    let exact = 0;
+    let worst = 0;
+    let most = 0;
+    for (let i = 0; i < fps * 3.5; i++) {
+      sandPhaseIn(c);
+      oA = store(oA - u * c.dt);
+      exact = exact - u * c.dt;
+      if (c.restartA) {
+        oA = store(-u * c.tA);
+        exact = -u * c.tA;
+      }
+      if (Math.abs(exact) > most) most = Math.abs(exact);
+      const e = Math.abs(oA - exact);
+      if (e > worst) worst = e;
+    }
+    return { worst: worst / most, most };
+  };
+  const f = [60, 144, 240].map((fps) => run(fps, Math.fround));
+  const h = [60, 144, 240].map((fps) => run(fps, half));
+  ok(f.every((r) => r.worst < 1e-5 && r.most <= u * T + 1e-9), `in float32 the carry is the law's to ${f.map((r) => (r.worst * 100).toFixed(5)).join(', ')}% at 60, 144 and 240 frames a second and never past u × cycle (${(u * T).toFixed(1)} m)`);
+  ok(h[1].worst > 10 * f[1].worst && h[2].worst > 10 * f[2].worst && h[1].worst > 0.005 && h[2].worst > 0.005, `and stored as half floats it drifts by ${h.map((r) => (r.worst * 100).toFixed(2)).join(', ')}% (the control): which is why the pair is float32`);
+}
+{
+  // Where it is blowing, read off the two phases: a jet carrying 10 m/s on at 1.0 s over 0.3 s and off at 4.0 s over
+  // 0.3 s. `sandStrength` moves by less in a frame the more frames there are; the older phase's own |o| / t jumps at
+  // every restart (the control); and in the steady carry it reads the carry.
+  const T = AIR_TUNE.sand.cycle;
+  const carryAt = (t: number): number => 10 * Math.min(1, Math.max(0, (t - 1) / 0.3)) * (1 - Math.min(1, Math.max(0, (t - 4) / 0.3)));
+  const run = (fps: number): { step: number; older: number; steady: number } => {
+    const c = newSandPhase(T);
+    c.dt = 1 / fps;
+    let oA = 0;
+    let oB = 0;
+    let last = Number.NaN;
+    let lastOld = Number.NaN;
+    let step = 0;
+    let older = 0;
+    let steady = 0;
+    for (let i = 0; i < fps * 6; i++) {
+      const t = (i + 1) / fps;
+      sandPhaseIn(c);
+      const u = carryAt(t);
+      oA -= u * c.dt;
+      oB -= u * c.dt;
+      if (c.restartA) oA = -u * c.tA;
+      if (c.restartB) oB = -u * c.tB;
+      const s = sandStrength(oA, 0, oB, 0, c.tA, c.tB, T);
+      const old = c.tA > c.tB ? Math.abs(oA) / c.tA : Math.abs(oB) / c.tB;
+      if (Number.isFinite(last)) step = Math.max(step, Math.abs(s - last));
+      if (Number.isFinite(lastOld)) older = Math.max(older, Math.abs(old - lastOld));
+      last = s;
+      lastOld = old;
+      if (Math.abs(t - 3.5) < 0.5 / fps) steady = s;
+    }
+    return { step, older, steady };
+  };
+  const r = [60, 144, 240].map(run);
+  ok(r[0].step > r[1].step && r[1].step > r[2].step && r[0].step < 0.5, `the strength is continuous: its largest change in a frame ${r.map((x) => x.step.toFixed(3)).join(', ')} m/s at 60, 144 and 240 frames, shrinking with the frame`);
+  ok(r.every((x) => x.older > 1), `where the older phase's own |o| / t jumps by ${r.map((x) => x.older.toFixed(2)).join(', ')} m/s at its restarts (the control)`);
+  ok(r.every((x) => Math.abs(x.steady - 10) < 0.05), `and in the steady carry it reads the carry: ${r.map((x) => x.steady.toFixed(3)).join(', ')} m/s of 10`);
+}
+ok(sandLift(5, 6, 7, 1) === 0 && near(sandLift(20, 6, 7, 1), 1) && sandLift(20, 6, 7, 0) === 0, 'the lift: nothing under the threshold, all past its span (the carry takes it with moves one; coverage is the pixel\'s)');
+{
   const shader = readFileSync(join(here, '..', '..', '..', 'src', 'world', 'volumetrics', 'airShaders.ts'), 'utf8');
-  ok(shader.includes('vec4 s = offsetsAt(l - u * uDt / uWindow.z + uSandShift);') && shader.includes('float age = lift > uAgeReset ? 0.0 : min(s.z + uTicks, uAgeCap);') && shader.includes('float k = smoothstep(uHold, uHold + 1.0, age * 0.1) * (3.0 / max(uHeal, 0.1)) * max(resp.g, 0.02);') && shader.includes('vec2 o = s.xy - u * uDt;') && shader.includes('if (k > 0.0) o *= exp(-k * uDt);'), "and the offsets' shader is sandStep line for line: read upstream of the texel by u·dt (and the window's pending scroll), carried, aged on the tick, healed past the hold");
-  const c: TickClock = { acc: 0, dt: 1 / 7, ticks: 0 };
-  let ticks = 0;
-  for (let i = 0; i < 700; i++) {
-    tickClockIn(c);
-    ticks += c.ticks;
+  const lines = [
+    'float lift = smoothstep(uLift, uLift + uLiftSpan, length(v)) * land;',
+    'vec4 o = offsetsAt(l - u * uDt / uWindow.z + uSandShift) - vec4(u, u) * uDt;',
+    'if (uSandQ.x > 0.5) o.xy = -u * uSandQ.y;',
+    'if (uSandQ.z > 0.5) o.zw = -u * uSandQ.w;',
+  ];
+  ok(lines.every((l) => shader.includes(l)) && !shader.includes('uAgeReset') && !shader.includes('resp.r * land'), "and the offsets' shader is the two phases line for line: no \"moves\" factor, no age and no heal");
+}
+
+// --- the Force's fronts (wave 2b), through the real AirForces ---
+{
+  const F = AIR_TUNE.force;
+  const fa = newFrontAt();
+  const at = (kind: number, reach: number, s: number): number => {
+    fa.kind = kind;
+    fa.reach = reach;
+    fa.age = s * frontTime(kind);
+    frontRadiusIn(fa);
+    return fa.r;
+  };
+  ok(near(at(FRONT_KIND.push, 16, 0), F.pushFrom) && near(at(FRONT_KIND.push, 16, 1), 16) && near(at(FRONT_KIND.push, 16, 0.5), F.pushFrom + (16 - F.pushFrom) * (1 - 0.5 ** F.pushEase)), "a push runs out from its start to its reach, fast then slowing");
+  ok(near(at(FRONT_KIND.pull, 16, 0), 16 * F.pullFrom) && near(at(FRONT_KIND.pull, 16, 1), F.pullTo) && near(at(FRONT_KIND.pull, 16, 0.5), 16 * F.pullFrom + (F.pullTo - 16 * F.pullFrom) * 0.5 ** F.pullEase), "a pull rolls in from its reach to a body's reach short of the feet, slow at first");
+  ok(near(at(FRONT_KIND.repulse, 10, 0), F.repulseFrom) && near(at(FRONT_KIND.repulse, 10, 1), 10) && near(at(FRONT_KIND.repulse, 10, 2), 10), 'a repulse opens from its start to its reach and holds there');
+
+  /** A front made at the window's middle and run for three seconds at `fps`, the field's own order a frame; what it laid. */
+  const frontRun = (fps: number, kind: 'push' | 'pull' | 'repulse', cells = 128, dustDetail = 4) => {
+    const f = new AirForces();
+    f.active = true;
+    const w = newWindow();
+    placeWindow(w, 0, 0, AIR_TUNE.window.size, cells, AIR_TUNE.window.jump);
+    const r = ground();
+    r.resize(cells);
+    r.familyResponse = new Uint8Array([0, 0, 0, 0, 255, 255, 255, 255]);
+    r.familyColour = new Uint8Array([0, 0, 0, 0, 200, 170, 120, 255]);
+    r.fillAll(flat, w.ox, w.oz, w.cell);
+    f.window = w;
+    f.raster = r;
+    f.dustTexel = w.size / (cells * dustDetail);
+    const reach = kind === 'repulse' ? 10 : 16;
+    f.force(0, 0, 0, kind === 'repulse' ? 0 : 1, 0, 1, kind === 'pull' ? -1 : 1, reach);
+    const clock = { steps: 0, acc: 0 };
+    let shove = 0;
+    let dust = 0;
+    let first: { x: number; z: number; rho: number }[] | null = null;
+    const splats: { x: number; z: number; rho: number; amount: number }[] = [];
+    for (let frame = 0; frame < fps * 3; frame++) {
+      const dt = 1 / fps;
+      f.frameDt = dt;
+      f.frameSources();
+      fixedSteps(clock.acc, dt, 60, 3, clock);
+      for (let s = 0; s < clock.steps; s++) {
+        const n = f.buildStepBatch(1 / 60);
+        for (let i = 0; i < n; i++) shove += Math.sqrt(f.splatB[i * 4] ** 2 + f.splatB[i * 4 + 1] ** 2);
+        f.consumeOneShots();
+      }
+      const n = f.buildDustBatch(dt);
+      const now: { x: number; z: number; rho: number }[] = [];
+      for (let i = 0; i < n; i++) {
+        const b = f.dustBatch;
+        const rho = Math.sqrt(1 / b[i * 4 + 2]) * w.size;
+        const x = w.ox + b[i * 4] * w.size;
+        const z = w.oz + b[i * 4 + 1] * w.size;
+        dust += b[i * 4 + 3] * Math.PI * rho * rho;
+        splats.push({ x, z, rho, amount: b[i * 4 + 3] });
+        if (b[i * 4 + 3] > 0) now.push({ x, z, rho });
+      }
+      if (!first && now.length) first = now;
+    }
+    const counts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0 };
+    f.takeCounts(counts);
+    const densityAt = (x: number, z: number): number => {
+      let d = 0;
+      for (const s of splats) d += s.amount * Math.exp(-((x - s.x) ** 2 + (z - s.z) ** 2) / (s.rho * s.rho));
+      return d;
+    };
+    return { shove, dust, first: first ?? [], left: f.frontCount, counts, densityAt, cell: w.cell };
+  };
+  for (const kind of ['push', 'pull', 'repulse'] as const) {
+    const runs = [30, 60, 144, 240].map((fps) => frontRun(fps, kind));
+    const d0 = runs[3].dust;
+    const s0 = runs[3].shove;
+    ok(runs.every((x) => Math.abs(x.dust - d0) / d0 < 0.01 && Math.abs(x.shove - s0) / s0 < 1e-9 && x.left === 0), `a ${kind}'s dust laid (${runs.map((x) => x.dust.toFixed(2)).join(', ')} density·m²) and its shove given are alike at 30, 60, 144 and 240 frames a second, and it is let go once both its clocks have passed its time`);
   }
-  ok(ticks === 1000 || ticks === 999, `the 10 Hz clock counts ${ticks} ticks over 100 s of frames a seventh of a second long`);
-  c.dt = 30;
-  tickClockIn(c);
-  ok(c.ticks === 10, 'and a hitch of 30 s banks only ten');
+  {
+    const rep = frontRun(60, 'repulse');
+    let ring = 0;
+    for (let r = 1; r <= 10; r += 0.25) for (const a of [0, 1.1, 2.3, 4.0]) ring = Math.max(ring, rep.densityAt(r * Math.cos(a), r * Math.sin(a)));
+    const centre = rep.densityAt(0, 0);
+    ok(centre < 0.1 * ring, `a repulse's middle is clear: ${centre.toFixed(4)} at the feet against its ring's ${ring.toFixed(4)}`);
+    const pull = frontRun(60, 'pull');
+    ok(pull.first.length > 0 && pull.first.every((s) => Math.abs(Math.sqrt(s.x * s.x + s.z * s.z) - 16 * AIR_TUNE.force.pullFrom) < 0.15), `a pull's first dust is laid at its reach (${pull.first.map((s) => Math.sqrt(s.x * s.x + s.z * s.z).toFixed(2)).join(', ')} m)`);
+    const high = frontRun(60, 'push');
+    const low = frontRun(60, 'push', 64, 3);
+    const lowTexel = AIR_TUNE.window.size / (64 * 3);
+    // The first frame's band has travelled a few tenths of a metre already (a push starts fast), so it is its width and a little.
+    ok(high.first.length > 0 && high.first.every((s) => Math.abs(s.rho - AIR_TUNE.force.dustWidth) < 0.05) && low.first.length > 0 && low.first.every((s) => Math.abs(s.rho - Math.max(AIR_TUNE.force.dustWidth, lowTexel)) < 0.05), `a push's first band is ${high.first[0]?.rho.toFixed(2)} m wide at High (its own width over the dust's 0.375 m texel) and ${low.first[0]?.rho.toFixed(2)} m at Low (the dust's texel), never the air's cell`);
+  }
+  {
+    // An engine's dust is still floored at the air's cell: at Low (a 3 m cell) a jet landing just under its nozzle.
+    const f = new AirForces();
+    f.active = true;
+    const w = newWindow();
+    placeWindow(w, 0, 0, AIR_TUNE.window.size, 64, AIR_TUNE.window.jump);
+    const r = ground();
+    r.resize(64);
+    r.familyResponse = new Uint8Array([0, 0, 0, 0, 255, 255, 255, 255]);
+    r.familyColour = new Uint8Array([0, 0, 0, 0, 200, 170, 120, 255]);
+    r.fillAll(flat, w.ox, w.oz, w.cell);
+    f.window = w;
+    f.raster = r;
+    f.dustTexel = 1;
+    f.engine(0, 0.3, 0, 0, -1, 0, 30, 0, 0);
+    walk(f);
+    const n = f.buildDustBatch(1 / 60);
+    const rho = n > 0 ? Math.sqrt(1 / f.dustBatch[2]) * w.size : 0;
+    ok(n > 0 && rho >= w.cell - 1e-6, `and an engine's dust at Low is still at least the air's cell (${rho.toFixed(2)} m against a ${w.cell} m cell)`);
+  }
+  {
+    const f = forcesAt();
+    for (let i = 0; i < 9; i++) f.force(0, 0, 0, 1, 0, 1, 1, 16);
+    const counts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0 };
+    f.takeCounts(counts);
+    ok(f.frontCount === AIR_TUNE.forces.fronts && counts.droppedFronts === 1 && counts.fronts === AIR_TUNE.forces.fronts, `the ${AIR_TUNE.forces.fronts + 1}th front at once is dropped and counted`);
+    f.dropOwed();
+    ok(f.frontCount === 0, 'a frame stepping nothing lets every front go (dropOwed)');
+    f.force(0, 0, 0, 1, 0, 1, 1, 16);
+    f.clear();
+    ok(f.frontCount === 0, 'and so does a jump (clear)');
+    f.force(0, 0, 0, 1, 0, Number.NaN, 1, 16);
+    f.force(500, 0, 500, 1, 0, 1, 1, 16);
+    f.takeCounts(counts);
+    ok(f.frontCount === 0 && counts.notFinite === 1 && counts.offWindow === 1, 'a front not a number or off the window does nothing and is counted');
+  }
 }
 
 console.log(`\n${checks} checks passed`);

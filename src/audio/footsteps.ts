@@ -250,6 +250,11 @@ export interface FamilyGrid {
   oz: number;
   step: number;
   w: number;
+  /**
+   * Each sample's colour-map bytes, three a sample, the array the mesh was built from (held, not copied), on a chunk
+   * built the client's way; null on one built without the tile program (the volumetrics' dust reads it, `colourIdAt`).
+   */
+  cols?: Uint8Array | null;
 }
 
 /**

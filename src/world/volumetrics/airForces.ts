@@ -19,9 +19,17 @@
 // `engineSpeed`, `nozzleRadius`, `jetSpeedAt`, `jetRadiusAt`, `impactSpeed` and `spreadBite`, which `airMath.test.ts`
 // holds this class's batches to. The one-shots (a blast, a push) are events, not frames, and take plain arguments.
 //
+// **From wave 2b each dust splat carries the shape it is laid with** (the design's §2.14): beside its amount a
+// second `vec4`, `(μ₀, σ₀, w₀, —)`, the height it is laid at, its spread and its rise, by source -- a jet skimming the
+// ground lays it low and throws it up behind the machine, a jet meeting the ground lays a low ring, a blast throws it
+// high, a Force front lays it low with a gentle rise. And **a Force power is a front** (§2.15): a row of a kept table,
+// its band swept on each fixed step for the air and on each frame for the dust, so both are the same at every frame
+// rate. **The sources' frame walk** (`frameSources`) runs every frame the field runs, the dust on or off: it ages the
+// fronts and works out each engine's ground point, impact and spread, which the dust's batch then reads.
+//
 // Pure: no three, nothing of the page; the node tests drive the very class the game does.
 import { AIR_TUNE } from './airTune.ts';
-import { blastGrains, DENT_KIND, slabWeight } from './airMath.ts';
+import { blastGrains, DENT_KIND, FRONT_KIND, frontRadiusIn, HALF_NORMAL, liftPeakIn, newFrontAt, newLiftPeak, slabWeight } from './airMath.ts';
 import type { FluidWindow } from './fluidWindow.ts';
 import { MEDIUM_BYTE, type AirRaster } from './airRaster.ts';
 import type { AirDents } from './airDents.ts';
@@ -32,12 +40,19 @@ const ONE_W = 7;
 /** Engines a frame: [x, y, z, dx, dy, dz, exit, vx, vz, key]. */
 export const ENGINE_MAX = 64;
 const ENG_W = 10;
-/** One-shot dust a frame can be owed: [x, z, radius, amount]. */
+/** Each engine's dust as the frame walk works it out: [x, z, radius, rate a second, μ₀, σ₀, w₀, 1 where it lays any]. */
+const ENG_DUST_W = 8;
+/** One-shot dust a frame can be owed: [x, z, radius, amount, μ₀, σ₀, w₀]. */
 const DUST_MAX = 64;
-const DUST_W = 4;
+const DUST_W = 7;
 /** The splat batches' sizes: the shaders' loop bounds, compiled into the programs. */
 export const SPLAT_BATCH = 128;
 export const DUST_BATCH = 32;
+/**
+ * The Force's fronts (`AIR_TUNE.forces.fronts`, read once as the table is made): [kind, x, z, y, aim x, aim z, reach,
+ * power, step age, frame age, frame turn, step turn, this frame's radius from, to, share of its way from, to].
+ */
+const FRONT_W = 16;
 
 /** What the forces counted, since the field last read them. */
 export interface ForceCounts {
@@ -50,9 +65,15 @@ export interface ForceCounts {
   notFinite: number;
   blasts: number;
   forces: number;
+  /** Fronts begun, and fronts dropped for a full table (a ninth at once). */
+  fronts: number;
+  droppedFronts: number;
 }
 
-const freshCounts = (): ForceCounts => ({ engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0 });
+const freshCounts = (): ForceCounts => ({ engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0 });
+
+/** The golden angle as a share of a turn: a front's bearings turn by it each step and each frame, so a sparse ring fills. */
+const GOLDEN = (3 - Math.sqrt(5)) / 2;
 
 /** The grains a blast throws, handed to whoever keeps the dust pool (`World`). */
 export type GrainThrow = (x: number, y: number, z: number, count: number, speed: number) => void;
@@ -94,13 +115,29 @@ export class AirForces {
   readonly splatA = new Float32Array(SPLAT_BATCH * 4);
   readonly splatB = new Float32Array(SPLAT_BATCH * 4);
   splatCount = 0;
-  /** The frame's dust batch: (u, v, 1 / r², amount). */
+  /** The frame's dust batch: (u, v, 1 / r², amount), and each splat's shape beside it (μ₀, σ₀, w₀, 0). */
   readonly dustBatch = new Float32Array(DUST_BATCH * 4);
+  readonly dustShapeBatch = new Float32Array(DUST_BATCH * 4);
   dustBatchCount = 0;
+  /**
+   * The highest a lift laid this frame will stand, metres over the ground (`liftPeakIn`'s top: its peak and
+   * `bandSigmas` of its spread then), nought for none: what the field keeps the march's band by.
+   */
+  liftTop = 0.5;
+
+  /** The Force's fronts alive (`FRONT_W` numbers a row), sized once from the tune. */
+  readonly fronts = new Float64Array(Math.max(1, Math.floor(AIR_TUNE.forces.fronts)) * FRONT_W);
+  frontCount = 0;
+  /** Each engine of this frame's table, its dust as the frame walk worked it out (`frameSources`). */
+  readonly engineDust = new Float64Array(ENGINE_MAX * ENG_DUST_W);
+  /** The dust's own texel, metres (the field's dust grid over the window): the floor the fronts' dust is laid at. */
+  dustTexel = 0.375;
+  /** The floor `putDust` lays its next splat at, metres, set by its caller (a fraction from the start, so never boxed). */
+  private dustFloor = 0.375;
 
   /** An engine handed over: x, y, z, the exhaust's way dx, dy, dz, its exit m/s, the hull's vx, vz, and its source key (`engineArgs`). */
   readonly arg = new Float64Array(10);
-  /** The step's `dt` for `buildStepBatch` and the frame's for `buildDustBatch`, set by the field before each. */
+  /** The step's `dt` for `buildStepBatch` and the frame's for `buildDustBatch` and `frameSources`, set by the field before each. */
   stepDt = 1 / 60;
   frameDt = 1 / 60;
 
@@ -112,8 +149,11 @@ export class AirForces {
   private readonly so = new Float64Array(7);
   /** A splat for `put`: x, z, radius, height over the ground, dvx, dvz, reach. */
   private readonly sp = new Float64Array(7);
-  /** A dust splat for `putDust`: x, z, radius, amount. */
-  private readonly sd = new Float64Array(4);
+  /** A dust splat for `putDust`: x, z, radius, amount, and the shape it is laid with, μ₀, σ₀, w₀. */
+  private readonly sd = new Float64Array(DUST_W);
+  /** Where a front is (`frontRadiusIn`) and where a lift peaks (`liftPeakIn`): kept records, so no number crosses a call. */
+  private readonly fa = newFrontAt();
+  private readonly lp = newLiftPeak();
 
   /** The counts as they stand, and starts them again. */
   takeCounts(out: ForceCounts): ForceCounts {
@@ -285,7 +325,10 @@ export class AirForces {
 
   /**
    * A Force push (`sign` +1) or pull (-1) from a point along a direction in XZ, out to `reach` metres; or all round when
-   * the direction is nought (the repulse). One-shot: twelve shoves through the cone (dot ≥ 0.35), or sixteen in a ring.
+   * the direction is nought (the repulse). From wave 2b a **front** (the design's §2.15): a row of the kept table,
+   * its air laid on each fixed step and its dust on each frame by the band the front crossed (`stepFronts`,
+   * `dustFronts`), so a push's wave runs out over about a second, a pull's rolls in from its reach and a repulse's ring
+   * opens with its middle clear. The checks and the count are the first wave's; a ninth at once is dropped and counted.
    */
   force(x: number, y: number, z: number, dx: number, dz: number, power: number, sign: number, reach: number): void {
     if (!this.active || !this.fromForce) return;
@@ -301,70 +344,271 @@ export class AirForces {
       this.counts.offWindow++;
       return;
     }
-    const F = AIR_TUNE.force;
-    const cell = this.window ? this.window.cell : 1.5;
-    const col = F.column;
-    const len = Math.sqrt(dx * dx + dz * dz);
-    const so = this.so;
-    const sd = this.sd;
     this.counts.forces++;
-    if (len < 1e-6) {
-      // The repulse: a ring of sixteen shoves outward, at a third and two thirds of its reach.
-      const s = F.repulse * power;
-      const r = reach * 0.25;
-      for (let k = 0; k < 16; k++) {
-        const b = (k / 16) * Math.PI * 2;
-        const c = Math.cos(b);
-        const n = Math.sin(b);
-        const at = reach * (k & 1 ? 0.66 : 0.33);
-        const fall = 1 - at / (reach * 1.2);
-        so[0] = x + c * at;
-        so[1] = z + n * at;
-        so[2] = cell > r ? cell : r;
-        so[3] = col * 0.5;
-        so[4] = c * s * fall;
-        so[5] = n * s * fall;
-        so[6] = col;
-        this.shove();
-      }
-      const rd = reach * 0.5;
-      sd[0] = x;
-      sd[1] = z;
-      sd[2] = cell > rd ? cell : rd;
-      sd[3] = F.dustShare * AIR_TUNE.blast.dust * (reach / AIR_TUNE.blast.radiusRef);
-      this.dustOneShot();
+    const rows = this.fronts.length / FRONT_W;
+    if (this.frontCount >= rows) {
+      this.counts.droppedFronts++;
       return;
     }
-    const fx = dx / len;
-    const fz = dz / len;
-    const s = (sign > 0 ? F.push : F.pull) * power;
-    const r = reach * 0.18;
-    // Twelve shoves through the cone: four bearings across it (the cone is dot ≥ 0.35, about ±69°, kept to ±50° here
-    // so the edge shoves still point ahead) at a quarter, a half and three quarters of the reach.
-    for (let k = 0; k < 12; k++) {
-      const a = (-0.5 + (k % 4) / 3) * 1.75;
-      const ca = Math.cos(a);
-      const sa = Math.sin(a);
-      const bx = fx * ca - fz * sa;
-      const bz = fx * sa + fz * ca;
-      const at = reach * (0.25 + 0.25 * Math.floor(k / 4));
-      const fall = 1 - at / (reach * 1.1);
-      const v = sign > 0 ? s * fall : -s * fall;
-      so[0] = x + bx * at;
-      so[1] = z + bz * at;
-      so[2] = cell > r ? cell : r;
-      so[3] = col * 0.5;
-      so[4] = bx * v;
-      so[5] = bz * v;
-      so[6] = col;
-      this.shove();
+    const len = Math.sqrt(dx * dx + dz * dz);
+    const t = this.fronts;
+    const k = this.frontCount * FRONT_W;
+    t[k] = len < 1e-6 ? FRONT_KIND.repulse : sign > 0 ? FRONT_KIND.push : FRONT_KIND.pull;
+    t[k + 1] = x;
+    t[k + 2] = z;
+    t[k + 3] = y;
+    t[k + 4] = len < 1e-6 ? 1 : dx / len;
+    t[k + 5] = len < 1e-6 ? 0 : dz / len;
+    t[k + 6] = reach;
+    t[k + 7] = power;
+    for (let c = 8; c < FRONT_W; c++) t[k + c] = 0;
+    this.frontCount++;
+    this.counts.fronts++;
+  }
+
+  /**
+   * The sources' frame walk (the design's §2.4), every frame the field runs, the dust on or off and before the dust's
+   * batch: each front's frame age moves on by the frame's `dt` and the band it crosses this frame is kept on its row (a
+   * front whose step age and frame age have both passed its time is let go first, so its last band has been laid), and
+   * each engine's dust -- where its jet meets the ground or bites under its nozzle, how much a second, and the shape it is
+   * laid with -- is worked out into `engineDust`, which the dust's batch reads with the dust on. `frameDt` set by the field.
+   */
+  frameSources(): void {
+    const dt = this.frameDt > 0 && Number.isFinite(this.frameDt) ? this.frameDt : 0;
+    const t = this.fronts;
+    // Let go of the fronts finished on both clocks (moved down over: a table, not a list).
+    let w = 0;
+    const F = AIR_TUNE.force;
+    for (let i = 0; i < this.frontCount; i++) {
+      const k = i * FRONT_W;
+      // `frontTime` written out (a number handed back across a call is a number made, every front every frame).
+      const T0 = t[k] === FRONT_KIND.push ? F.pushTime : t[k] === FRONT_KIND.pull ? F.pullTime : F.repulseTime;
+      const T = T0 > 1e-3 ? T0 : 1e-3;
+      if (t[k + 8] >= T && t[k + 9] >= T) continue;
+      if (w !== i) for (let c = 0; c < FRONT_W; c++) t[w * FRONT_W + c] = t[k + c];
+      w++;
     }
-    const rd = reach * 0.4;
-    sd[0] = x + fx * rd;
-    sd[1] = z + fz * rd;
-    sd[2] = cell > rd ? cell : rd;
-    sd[3] = F.dustShare * AIR_TUNE.blast.dust * (reach / AIR_TUNE.blast.radiusRef);
-    this.dustOneShot();
+    this.frontCount = w;
+    const fa = this.fa;
+    for (let i = 0; i < this.frontCount; i++) {
+      const k = i * FRONT_W;
+      const a0 = t[k + 9];
+      const a1 = a0 + dt;
+      t[k + 9] = a1;
+      fa.kind = t[k];
+      fa.reach = t[k + 6];
+      fa.age = a0;
+      frontRadiusIn(fa);
+      t[k + 12] = fa.r;
+      t[k + 14] = fa.s;
+      fa.age = a1;
+      frontRadiusIn(fa);
+      t[k + 13] = fa.r;
+      t[k + 15] = fa.s;
+    }
+    this.engineSources();
+  }
+
+  /** Each engine's dust for the frame walk, into `engineDust`: the jet's impact or its spread, whichever lays more. */
+  private engineSources(): void {
+    const E = AIR_TUNE.engine;
+    const cap = AIR_TUNE.solver.cap * E.capShare;
+    const e = this.engines;
+    const out = this.engineDust;
+    for (let i = 0; i < this.engineCount; i++) {
+      const k = i * ENG_W;
+      const o = i * ENG_DUST_W;
+      out[o + 7] = 0;
+      const x = e[k];
+      const y = e[k + 1];
+      const z = e[k + 2];
+      const dx = e[k + 3];
+      const dy = e[k + 4];
+      const dz = e[k + 5];
+      const exit = e[k + 6];
+      this.q[0] = x;
+      this.q[1] = z;
+      if (!this.groundHere()) continue;
+      const h = y - this.g.h;
+      // `engineReach`, `engineSpeed`, `impactSpeed` within its reach, `spreadBite`: as `expandEngine` has them.
+      const reach = E.reachBase + E.reachPerSpeed * exit;
+      const vEff = exit < cap ? exit : cap;
+      const groundT = dy < -0.02 ? h / -dy : Infinity;
+      const imp = groundT < reach * E.impactReach && dy < 0 ? (vEff / (1 + groundT / (0.3 * reach))) * Math.sqrt(-dy) : 0;
+      const vx = e[k + 7];
+      const vz = e[k + 8];
+      const speed = Math.sqrt(vx * vx + vz * vz);
+      let ge = 1 - (h - E.spreadLow) / E.spreadSpan;
+      ge = ge > 0 ? (ge < 1 ? ge : 1) : 0;
+      const bite = ge * (E.spreadBase + speed / E.spreadSpeed);
+      const fromImpact = imp * E.impactDust;
+      const fromSpread = bite * E.spreadDust;
+      if (fromImpact <= 0 && fromSpread <= 0) continue;
+      if (fromImpact >= fromSpread) {
+        // `nozzleRadius` and the jet's widening to the ground; laid low in a ring that rises as the wall jet slows.
+        const r = E.nozzleBase + E.nozzlePerSpeed * exit + groundT * E.widen + 0.8;
+        out[o] = x + dx * groundT;
+        out[o + 1] = z + dz * groundT;
+        out[o + 2] = r * 1.2;
+        out[o + 3] = fromImpact;
+        out[o + 4] = E.impactAt;
+        out[o + 5] = E.impactSigma;
+        out[o + 6] = E.impactRise * imp;
+      } else {
+        // Behind the machine, as the demo's speeder throws it: low, and up at its grains' throw, held at the demo's top speed.
+        const bx = speed > 0.1 ? -vx / speed : 0;
+        const bz = speed > 0.1 ? -vz / speed : 0;
+        const held = speed < E.spreadRiseSpeed ? speed : E.spreadRiseSpeed;
+        out[o] = x + bx * 2;
+        out[o + 1] = z + bz * 2;
+        out[o + 2] = 2.2;
+        out[o + 3] = fromSpread;
+        out[o + 4] = E.spreadAt;
+        out[o + 5] = E.spreadSigma;
+        out[o + 6] = E.spreadRise * (1.7 + 0.24 * held) * (bite < 1 ? bite : 1);
+      }
+      out[o + 7] = 1;
+    }
+  }
+
+  /**
+   * Every front's shoves for this step, into the velocity batch at `n` (after the one-shots, before the engines): the band
+   * the front crosses this step, `m` shoves along its arc at its middle radius, each worth `shove · fall · dr · spacing /
+   * (π ρ²)`, so a parcel the whole front passes is given `shove · fall` in all whatever the step, the speed or the
+   * spacing; the bearings turned by the golden angle each step. The step age moves on here. Answers the next free place.
+   */
+  private stepFronts(n: number): number {
+    const t = this.fronts;
+    const F = AIR_TUNE.force;
+    const most = AIR_TUNE.forces.frontShoves;
+    const dt = this.stepDt;
+    const cell = this.window ? this.window.cell : 1.5;
+    const fa = this.fa;
+    const sp = this.sp;
+    for (let i = 0; i < this.frontCount; i++) {
+      const k = i * FRONT_W;
+      const kind = t[k];
+      const a0 = t[k + 8];
+      const a1 = a0 + dt;
+      t[k + 8] = a1;
+      fa.kind = kind;
+      fa.reach = t[k + 6];
+      fa.age = a0;
+      frontRadiusIn(fa);
+      const r0 = fa.r;
+      fa.age = a1;
+      frontRadiusIn(fa);
+      const r1 = fa.r;
+      const dr = r1 > r0 ? r1 - r0 : r0 - r1;
+      if (!(dr > 0)) continue;
+      const reach = t[k + 6];
+      const r = 0.5 * (r0 + r1);
+      const rho0 = F.shoveShare * reach;
+      const rho = rho0 > cell ? rho0 : cell;
+      // `frontHalfArc` written out, as `frontTime` is in the walk.
+      const half = kind === FRONT_KIND.repulse ? Math.PI : (F.arc * Math.PI) / 180;
+      const arcLen = 2 * half * r;
+      let m = Math.ceil(arcLen / (1.2 * rho));
+      m = m < 2 ? 2 : m > most ? most : m;
+      const spacing = arcLen / m;
+      const fall0 = 1 - r / (reach * (kind === FRONT_KIND.repulse ? 1.2 : 1.1));
+      const fall = fall0 > 0 ? fall0 : 0;
+      const strength = (kind === FRONT_KIND.push ? F.push : kind === FRONT_KIND.pull ? F.pull : F.repulse) * t[k + 7] * fall;
+      const dv = (strength * dr * spacing) / (Math.PI * rho * rho);
+      const turn = (t[k + 11] * GOLDEN) % 1;
+      t[k + 11] += 1;
+      const fx = t[k + 4];
+      const fz = t[k + 5];
+      const sgn = kind === FRONT_KIND.pull ? -1 : 1;
+      const col = F.column;
+      for (let j = 0; j < m; j++) {
+        if (n >= SPLAT_BATCH) {
+          this.counts.droppedSplats += m - j;
+          break;
+        }
+        const b = -half + ((j + turn) / m) * 2 * half;
+        const c = Math.cos(b);
+        const s = Math.sin(b);
+        const bx = fx * c - fz * s;
+        const bz = fx * s + fz * c;
+        sp[0] = t[k + 1] + bx * r;
+        sp[1] = t[k + 2] + bz * r;
+        sp[2] = rho;
+        sp[3] = col * 0.5;
+        sp[4] = bx * dv * sgn;
+        sp[5] = bz * dv * sgn;
+        sp[6] = col;
+        n = this.put(n);
+      }
+    }
+    return n;
+  }
+
+  /**
+   * Every front's dust for this frame, into the dust batch at `n` (after the one-shot dust, before the engines): the band
+   * the frame walk kept, `m` splats on its arc at its middle radius (turned by the golden angle each frame), each worth
+   * `dust · power · sin(π s)^shape · dr · spacing / (π ρ_d²)`, so none is laid at the start, most halfway and none at the
+   * end; the band `ρ_d` starts at `dustWidth` and grows with the metres travelled, floored at the dust's own texel and
+   * not the air's cell, or it could not start small. Only where the ground gives dust. Answers the next free place.
+   */
+  private dustFronts(n: number): number {
+    const t = this.fronts;
+    const F = AIR_TUNE.force;
+    const most = AIR_TUNE.forces.frontDust;
+    const sd = this.sd;
+    const floor = this.dustTexel;
+    for (let i = 0; i < this.frontCount; i++) {
+      const k = i * FRONT_W;
+      const kind = t[k];
+      const r0 = t[k + 12];
+      const r1 = t[k + 13];
+      const dr = r1 > r0 ? r1 - r0 : r0 - r1;
+      if (!(dr > 0)) continue;
+      const reach = t[k + 6];
+      const r = 0.5 * (r0 + r1);
+      // `frontFrom` and `frontHalfArc` written out, as in the step's shoves.
+      const from = kind === FRONT_KIND.push ? F.pushFrom : kind === FRONT_KIND.pull ? reach * F.pullFrom : F.repulseFrom;
+      const travelled = r > from ? r - from : from - r;
+      const rd0 = F.dustWidth + F.dustGrow * travelled;
+      const rho = rd0 > floor ? rd0 : floor;
+      const half = kind === FRONT_KIND.repulse ? Math.PI : (F.arc * Math.PI) / 180;
+      const arcLen = 2 * half * r;
+      let m = Math.ceil(arcLen / (1.2 * rho));
+      m = m < 1 ? 1 : m > most ? most : m;
+      const spacing = arcLen / m;
+      const sm = 0.5 * (t[k + 14] + t[k + 15]);
+      const sine = Math.sin(Math.PI * sm);
+      const shape = Math.pow(sine > 0 ? sine : 0, F.dustShape);
+      const amount = (F.dust * t[k + 7] * shape * dr * spacing) / (Math.PI * rho * rho);
+      const turn = (t[k + 10] * GOLDEN) % 1;
+      t[k + 10] += 1;
+      if (!(amount > 0)) continue;
+      const fx = t[k + 4];
+      const fz = t[k + 5];
+      const repulse = kind === FRONT_KIND.repulse;
+      for (let j = 0; j < m; j++) {
+        if (n >= DUST_BATCH) {
+          this.counts.droppedDust += m - j;
+          break;
+        }
+        const b = -half + ((j + turn) / m) * 2 * half;
+        const c = Math.cos(b);
+        const s = Math.sin(b);
+        sd[0] = t[k + 1] + (fx * c - fz * s) * r;
+        sd[1] = t[k + 2] + (fx * s + fz * c) * r;
+        sd[2] = rho;
+        sd[3] = amount;
+        sd[4] = F.dustLow;
+        sd[5] = repulse ? F.repulseSpread : F.dustSpread;
+        sd[6] = repulse ? F.repulseKick : F.dustKick;
+        this.q[0] = sd[0];
+        this.q[1] = sd[1];
+        if (!this.givesDustHere()) continue;
+        this.dustFloor = floor;
+        n = this.putDust(n);
+      }
+    }
+    return n;
   }
 
   /** A blast: the gadget's own radius and push. One-shot: a ring of shoves outward, dust, the grains. `smoke` is the third wave's. */
@@ -409,6 +653,10 @@ export class AirForces {
     sd[1] = z;
     sd[2] = cell > rd ? cell : rd;
     sd[3] = B.dust * scale;
+    // Thrown high: laid half a metre up and rising fast, both by the blast's radius over a thermal detonator's.
+    sd[4] = B.liftAt;
+    sd[5] = B.liftSigma * scale;
+    sd[6] = B.liftRise * scale;
     this.dustOneShot();
     const grains = this.onGrains;
     q[0] = x;
@@ -522,9 +770,10 @@ export class AirForces {
   }
 
   /**
-   * The step's velocity batch: the one-shots owed first, then every engine of this frame's table by strength over
-   * distance, its rates times the step's `dt`. Answers how many splats the batch holds. The one-shots stay owed until
-   * `consumeOneShots`, which the field calls after the first step of a frame has drawn them.
+   * The step's velocity batch: the one-shots owed first, then the Force's fronts (their step ages moved on), then every
+   * engine of this frame's table by strength over distance, its rates times the step's `dt`. Answers how many splats the
+   * batch holds. The one-shots stay owed until `consumeOneShots`, which the field calls after the first step of a frame
+   * has drawn them.
    */
   buildStepBatch(dt?: number): number {
     if (dt !== undefined) this.stepDt = dt;
@@ -545,6 +794,8 @@ export class AirForces {
       for (let c = 0; c < 7; c++) sp[c] = o[k + c];
       n = this.put(n);
     }
+    // A short event before the engines: what does not fit is dropped and counted.
+    n = this.stepFronts(n);
     // The engines, strongest over distance first.
     const count = this.engineCount;
     const e = this.engines;
@@ -682,12 +933,15 @@ export class AirForces {
   }
 
   /**
-   * The frame's dust batch: the one-shot dust owed, then each engine's dust at its impact or under its nozzle, a rate
-   * times the frame's `dt` (the dust is laid every frame). The response's dust and the slope's gate are the shader's,
-   * per texel. Answers how many it holds; the one-shot dust is spent.
+   * The frame's dust batch: the one-shot dust owed, then the Force's fronts' bands this frame, then each engine's dust as
+   * the frame walk worked it out (at its impact or under its nozzle, a rate times the frame's `dt`: the dust is laid
+   * every frame), each splat with the shape it is laid with. The response's dust and the slope's gate are the shader's,
+   * per texel. Answers how many it holds; the one-shot dust is spent. `frameSources` runs first, every frame the field
+   * runs.
    */
   buildDustBatch(dt?: number): number {
     if (dt !== undefined) this.frameDt = dt;
+    this.liftTop = 0;
     const w = this.window;
     if (!w || !w.placed || !this.dust) {
       this.dustCount = 0;
@@ -696,6 +950,7 @@ export class AirForces {
     }
     const fdt = this.frameDt;
     const sd = this.sd;
+    const cell = w.cell;
     let n = 0;
     const d = this.dustOne;
     for (let i = 0; i < this.dustCount; i++) {
@@ -704,76 +959,52 @@ export class AirForces {
         break;
       }
       const k = i * DUST_W;
-      for (let c = 0; c < 4; c++) sd[c] = d[k + c];
+      for (let c = 0; c < DUST_W; c++) sd[c] = d[k + c];
+      this.dustFloor = cell;
       n = this.putDust(n);
     }
     this.dustCount = 0;
-    const E = AIR_TUNE.engine;
-    const cap = AIR_TUNE.solver.cap * E.capShare;
-    const e = this.engines;
+    n = this.dustFronts(n);
+    const ed = this.engineDust;
     for (let i = 0; i < this.engineCount; i++) {
+      const o = i * ENG_DUST_W;
+      if (ed[o + 7] !== 1) continue;
       if (n >= DUST_BATCH) {
         this.counts.droppedDust++;
         continue;
       }
-      const k = i * ENG_W;
-      const x = e[k];
-      const y = e[k + 1];
-      const z = e[k + 2];
-      const dx = e[k + 3];
-      const dy = e[k + 4];
-      const dz = e[k + 5];
-      const exit = e[k + 6];
-      this.q[0] = x;
-      this.q[1] = z;
-      if (!this.groundHere()) continue;
-      const h = y - this.g.h;
-      // `engineReach`, `engineSpeed`, `impactSpeed` within its reach, `spreadBite`: as `expandEngine` has them.
-      const reach = E.reachBase + E.reachPerSpeed * exit;
-      const vEff = exit < cap ? exit : cap;
-      const groundT = dy < -0.02 ? h / -dy : Infinity;
-      const imp = groundT < reach * E.impactReach && dy < 0 ? (vEff / (1 + groundT / (0.3 * reach))) * Math.sqrt(-dy) : 0;
-      const vx = e[k + 7];
-      const vz = e[k + 8];
-      const speed = Math.sqrt(vx * vx + vz * vz);
-      let ge = 1 - (h - E.spreadLow) / E.spreadSpan;
-      ge = ge > 0 ? (ge < 1 ? ge : 1) : 0;
-      const bite = ge * (E.spreadBase + speed / E.spreadSpeed);
-      const fromImpact = imp * E.impactDust;
-      const fromSpread = bite * E.spreadDust;
-      if (fromImpact <= 0 && fromSpread <= 0) continue;
-      if (fromImpact >= fromSpread) {
-        // `nozzleRadius` and the jet's widening to the ground.
-        const r = E.nozzleBase + E.nozzlePerSpeed * exit + groundT * E.widen + 0.8;
-        sd[0] = x + dx * groundT;
-        sd[1] = z + dz * groundT;
-        sd[2] = r * 1.2;
-        sd[3] = fromImpact * fdt;
-      } else {
-        // Behind the machine, as the demo's speeder throws it.
-        const bx = speed > 0.1 ? -vx / speed : 0;
-        const bz = speed > 0.1 ? -vz / speed : 0;
-        sd[0] = x + bx * 2;
-        sd[1] = z + bz * 2;
-        sd[2] = 2.2;
-        sd[3] = fromSpread * fdt;
-      }
+      sd[0] = ed[o];
+      sd[1] = ed[o + 1];
+      sd[2] = ed[o + 2];
+      sd[3] = ed[o + 3] * fdt;
+      sd[4] = ed[o + 4];
+      sd[5] = ed[o + 5];
+      sd[6] = ed[o + 6];
       // Only where the ground under the splat gives dust: over water, lava, mud or wet sand the dust pass lays nothing,
       // and a splat counted there would hold `hasAir` up with nothing airborne.
       this.q[0] = sd[0];
       this.q[1] = sd[1];
       if (!this.givesDustHere()) continue;
+      this.dustFloor = cell;
       n = this.putDust(n);
     }
     this.dustBatchCount = n;
     return n;
   }
 
-  /** The dust splat in `sd` (a world point) into the batch at `n`; answers the next free place. */
+  /**
+   * The dust splat in `sd` (a world point, its amount and its shape) into the batch at `n`, its radius never under
+   * `floor` metres -- the air's cell for the engines', the blasts' and the one-shots' (as the first wave laid them), the
+   * dust's own texel for the fronts' bands (or a band could not start small) -- with its shape beside it (each source's
+   * own lift, moved toward the storm's at `dust.lift` under one), and the highest it will stand kept for the march's
+   * band. The floor is `dustFloor`, set by the caller: a metre count handed across the call was a number made at every
+   * splat. Answers the next free place.
+   */
   private putDust(n: number): number {
     const w = this.window!;
     const sd = this.sd;
-    const r = sd[2] > w.cell ? sd[2] : w.cell;
+    const floor = this.dustFloor;
+    const r = sd[2] > floor ? sd[2] : floor;
     const rr = r / w.size;
     const k = n * 4;
     const out = this.dustBatch;
@@ -781,27 +1012,46 @@ export class AirForces {
     out[k + 1] = (sd[1] - w.oz) / w.size;
     out[k + 2] = 1 / (rr * rr);
     out[k + 3] = sd[3];
+    const D = AIR_TUNE.dust;
+    const lift = D.lift > 0 ? (D.lift < 1 ? D.lift : 1) : 0;
+    const restSigma = HALF_NORMAL * D.height;
+    const mu0 = sd[4] * lift;
+    const sigma0 = sd[5] * lift + restSigma * (1 - lift);
+    const w0 = sd[6] * lift;
+    const shape = this.dustShapeBatch;
+    shape[k] = mu0;
+    shape[k + 1] = sigma0;
+    shape[k + 2] = w0;
+    shape[k + 3] = 0;
+    const lp = this.lp;
+    lp.mu0 = mu0;
+    lp.sigma0 = sigma0;
+    lp.w0 = w0;
+    liftPeakIn(lp);
+    if (lp.top > this.liftTop) this.liftTop = lp.top;
     return n + 1;
   }
 
   /**
-   * Drop the one-shots owed and the one-shot dust (the field calls it on a frame that steps nothing: nothing reads the
-   * air, or the air does nothing here). A one-shot is kept only until the next step takes it, and when there is no step
-   * to come it must not wait for one that may come minutes on, where its blast is long gone; nor fill its queue and
-   * count the drops meanwhile.
+   * Drop the one-shots owed, the one-shot dust and the Force's fronts (the field calls it on a frame that steps nothing:
+   * nothing reads the air, or the air does nothing here). A one-shot is kept only until the next step takes it, and when
+   * there is no step to come it must not wait for one that may come minutes on, where its blast is long gone; nor fill
+   * its queue and count the drops meanwhile. A front is a second long and must not resume minutes later either.
    */
   dropOwed(): void {
     this.oneCount = 0;
     this.dustCount = 0;
+    this.frontCount = 0;
   }
 
-  /** Drop everything owed (a jump, a new world, the air turned off). */
+  /** Drop everything owed (a jump, a new world, the air turned off), the fronts with it. */
   clear(): void {
     this.oneCount = 0;
     this.engineCount = 0;
     this.dustCount = 0;
     this.splatCount = 0;
     this.dustBatchCount = 0;
+    this.frontCount = 0;
   }
 }
 

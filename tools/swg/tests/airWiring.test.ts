@@ -83,7 +83,8 @@ ok(after(main, 'this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);', 'this.w
   for (const l of lines(was)) if (l && !lines(now).includes(l)) kept = false;
   ok(kept, "every line emitDust had stands in it today: the count and today's spawn are untouched");
   ok(now.includes('const air = this.air !== null && VOL_TUNE.on && VOL_TUNE.dust && this.air.forces.active ? this.air : null;'), 'the air is asked only with the master and the dust on and the field running');
-  ok(now.includes('const shed = sheddingCount(count, perSecond, interval, air.raster.dustAt(w0.ox, w0.oz, w0.cell, tmpV.x, tmpV.z));') && now.includes('this.groundColorAt(tmpV.x, tmpV.z, this.dustColor), VOL_TUNE.kickUp);'), "then the count is the ground's share of today's, judged on a fixed twentieth of a second, thrown as grains with the kick-up on");
+  ok(now.includes('const shed = sheddingCount(count, perSecond, interval, air.raster.dustAt(w0.ox, w0.oz, w0.cell, tmpV.x, tmpV.z));') && now.includes('this.airGroundColour(air, tmpV.x, tmpV.z, this.dustColor), VOL_TUNE.kickUp);'), "then the count is the ground's share of today's, judged on a fixed twentieth of a second, thrown as grains with the kick-up on, in the cell's tinted colour (wave 2b's)");
+  ok(/private airGroundColour\(air: AirField, x: number, z: number, out: THREE\.Color\): THREE\.Color \{[\s\S]{0,400}r\.tintedAt\(i, j, c\)\) return out\.setRGB\(c\[0\], c\[1\], c\[2\]\);/.test(world), "the motes' colour with the air's dust on is the raster's tintedAt (the lighter tones times the colour map's tint), the fallback's outside the window");
   // The motes a second handed over are the very ones today's count is rounded from: the same expression, so the two
   // can never disagree about how fast a machine throws.
   const countRate = /const count = Math\.round\(interval \* (\(12 \+ 70 \* Math\.min\(1, speed \/ 35\)\) \* \(0\.6 \+ Math\.min\(1\.4, w \* 0\.35\)\))\);/.exec(now);
@@ -150,5 +151,24 @@ ok(/if \(VOL_TUNE\.on && !was\) this\.queueVolumetrics\(\);\n\s+else if \(!VOL_T
   ok(/if \(changed\) \{\n\s+pass\?\.dispose\(\);\n\s+if \(!had && this\.world\.air !== air\) air\.dispose\(\);[\s\S]{0,500}this\.volAgain = true;\n\s+continue;/.test(r), 'and looks again (the master still on, in a world: warmed for the chain and the field as they stand now)');
 }
 ok(main.includes("registerPerfSwitch('volGroundArt',") && main.includes("registerPerfSwitch('volGroundArtOne',"), "the frame report's zero-dial diff and its control are switches it compares by picture");
+
+// --- wave 2b's hand-overs, which only the game makes ---
+ok(world.includes('out.tint = t.colourIdAt(x, z);'), "the raster's strips read the pole's colour-map bytes beside its family, by number");
+ok(world.includes('groundTint: groundTileUniforms() };') && src('world/volumetrics/airField.ts').includes('uGroundTint: world.groundTint?.uGroundTint ??') && src('world/volumetrics/airField.ts').includes('uGroundTintRef: world.groundTint?.uGroundTintRef ??'), "the dust pass holds the session ground material's own tint uniforms by reference, so the dust is tinted in the drawn ground's mode");
+ok(/const gu = this\.airWorld\.groundTint!;[\s\S]{0,400}air\.raster\.tintMode = gt\.x;\n\s+air\.raster\.tintCap = gt\.y;\n\s+air\.raster\.tintRef = tr;/.test(world), "and the raster's own tintedAt (the motes, the storm's colour) reads the same mode, cap and reference each frame");
+ok(world.includes('const lit = textures?.toneColour(f.id, tone, c);') && world.includes('if (was.textures === textures && was.swg === swg && was.tone === tone) return;'), "each family's colour is its lighter tones at the dust's tone, worked out again when the dial moves");
+ok(world.includes('air.setLayerResponse(tiles && this.terrain?.swg ? tiles.childLayers : new Map(), response, tiles ? depth : 1, colour);'), "and the per-layer lookup takes the colour row the blowing sand is drawn in");
+ok(world.includes('const toneOnly = was.textures === textures && was.swg === swg;') && /if \(toneOnly\) air\.raster\.repaintColour\(\);\r?\n\s+else air\.raster\.clear\(\);/.test(world), "a move of the dust's tone alone paints the colours again into the cells the raster knows (AirRaster.repaintColour), where a new world or new pictures clear it: dragging the dial must not forget the ground under the dust");
+{
+  const field = src('world/volumetrics/airField.ts');
+  const upd = field.slice(field.indexOf('  update(inp: AirFrameInput): void {'), field.indexOf('  groundUniformsNow(): void {'));
+  ok(upd.includes('f.frameSources();') && upd.indexOf('f.frameSources();') < upd.indexOf('this.drawer.run(this.runFrame, this.home);') && upd.indexOf('if (!inp.reading) {') < upd.indexOf('f.frameSources();'), "the sources' frame walk runs every frame the field runs, before its draws, the dust on or off");
+}
+ok(main.includes("if (kind === 'repulse') air.force(at.x, at.y, at.z, 0, 0, power, 1, reach);") && main.includes("else air.force(at.x, at.y, at.z, dir.x, dir.z, power, kind === 'push' ? 1 : -1, reach);"), "air({ force }) makes a front at the feet along the view through the field's own force, as a Jedi's power does");
+{
+  const r = main.slice(main.indexOf('private async reconcileVolumetrics('), main.indexOf('private compileFxObject('));
+  ok(r.includes('jobs.push(this.sandSlices(air));') && r.indexOf('jobs.push(this.sandSlices(air));') < r.indexOf('await Promise.all(jobs);') && /while \(!air\.sandSlice\(\)\) await this\.waitFrames\(1, 100\);/.test(main), "the in-play warm makes the blowing sand's picture a slice a frame, and the swap waits for it whole");
+  ok(/async warm\(\): Promise<number> \{[\s\S]{0,200}while \(!this\.sandSlice\(SAND_SIZE\)\);/.test(src('world/volumetrics/airField.ts')), 'behind a loading screen it is made outright');
+}
 
 console.log(`\n${checks} checks passed`);

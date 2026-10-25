@@ -20,16 +20,20 @@ import { createFxQuad, FX_CAMERA } from '../../core/fx/pass.ts';
 import { AIR_TUNE } from './airTune.ts';
 import { AIR_DRAW, AirDrawer, compileAirMaterial } from './airDraw.ts';
 import { atlasLayout, MAX_TILES, tileRects } from './airAtlas.ts';
-import { airFrameNumbersIn, dustDecayFrame, fixedStepsIn, lightStep, lightTransmittance, newAirFrameNumbers, tickClockIn, type AirFrameNumbers, type FixedClock, type TickClock } from './airMath.ts';
+import { airFrameNumbersIn, dustDecayFrame, dustLawIn, dustShapeStep, fixedStepsIn, newAirFrameNumbers, newDustLaw, newSandPhase, newStormEase, sandJitter, sandPhaseIn, sandStrength, shapeFloor, stormEaseIn, tickClockIn, tintedColourIn, type AirFrameNumbers, type DustLaw, type FixedClock, type SandPhase, type ShapeTexel, type StormEase, type TickClock } from './airMath.ts';
 import { AirForces, DUST_BATCH, SPLAT_BATCH, type ForceCounts } from './airForces.ts';
 import { pushEngines, type AirHull } from './airEngines.ts';
 import { AirRaster, MEDIUM_BYTE, type GroundSampler } from './airRaster.ts';
 import { AirObstacles, type SolidBoxSource } from './airObstacles.ts';
 import { newWindow, PLACE, placeWindowIn, type WindowPlace } from './fluidWindow.ts';
-import { ADVECT_FRAGMENT, AIR_VERTEX, DIV_FRAGMENT, DUST_FRAGMENT, FILL_FRAGMENT, GRAD_FRAGMENT, JACOBI_FRAGMENT, LIGHT_FRAGMENT, OFFSETS_FRAGMENT, SPLAT_FRAGMENT, VORT_FRAGMENT } from './airShaders.ts';
+import { ADVECT_FRAGMENT, AIR_VERTEX, DIV_FRAGMENT, DUST_FRAGMENT, FILL_DUST_FRAGMENT, FILL_FRAGMENT, GRAD_FRAGMENT, JACOBI_FRAGMENT, LIGHT_FRAGMENT, OFFSETS_FRAGMENT, SPLAT_FRAGMENT, VORT_FRAGMENT } from './airShaders.ts';
 import { AirDents, DENT_KIND, placeDentSquareIn, type DentCounts } from './airDents.ts';
 import { copyAirGround, type AirGroundUniforms } from './airGround.ts';
 import { fillLayerResponse } from './groundResponse.ts';
+import { lightDepthAt, lightMarchFor, lightMarchIn, type LightMarchAsk, type LightSample } from './airLight.ts';
+import { newSandPicture, SAND_ROWS_A_FRAME, SAND_SIZE, sandPictureRows, type SandPicture } from './airSand.ts';
+import { srgbDecode, tintGamma } from '../groundMath.ts';
+import { WEATHER_UNIFORMS } from '../wetness.ts';
 import { PRINT_TUNE } from '../footprints.ts';
 import type { FootStep } from '../../audio/footsteps.ts';
 import type { VolTune } from './volSettings.ts';
@@ -41,6 +45,12 @@ import type { VolTune } from './volSettings.ts';
  */
 export interface AirSource {
   readonly dust: { value: THREE.Texture | null };
+  /**
+   * The shape the dust carries (from wave 2b): the dust pair's second attachment, rewritten in place at every
+   * swap, premultiplied by the density -- D·μ, D·(σ² + μ²), D·w, D·age (the design's §2.14).
+   */
+  readonly shape: { value: THREE.Texture | null };
+  /** The light toward the sun: from wave 2b an optical depth at each of four heights over the ground (`lightHeights`). */
   readonly light: { value: THREE.Texture | null };
   readonly height: { value: THREE.Texture | null };
   readonly obstacles: { value: THREE.Texture | null };
@@ -50,12 +60,26 @@ export interface AirSource {
   readonly lightShift: { value: THREE.Vector2 };
   /** The window's lowest and highest known ground, and its mean, metres. */
   readonly band: { value: THREE.Vector3 };
-  /** The storm's dust outside the window (a density), and the dust's height scale at this storm, metres. */
+  /** The storm's dust outside the window (a density, laid at the storm's weight from wave 2b), and its spread, metres (its half-normal's σ). */
   readonly inflow: { value: THREE.Vector2 };
-  /** The storm's dust colour, linear. */
+  /** The storm's dust colour, linear, eased toward the window's own shedding ground (from wave 2b). */
   readonly stormColour: { value: THREE.Color };
   /** The light pass is on (1) or the volume reads a transmittance of one (0). */
   readonly lightOn: { value: number };
+  /** The four heights over the ground the light's four channels were taken at, metres, lowest first. */
+  readonly lightHeights: { value: THREE.Vector4 };
+  /**
+   * The dust's look for the march (from wave 2b): x how bright it is drawn (`volDustBright`), y the debug view
+   * (0 none, 1 the carried colour, 2 its height, 3 its spread, 4 its age), z the band's top over the ground (`bandTop`),
+   * w the thinnest a patch is (`dust.spreadMin`).
+   */
+  readonly look: { value: THREE.Vector4 };
+  /**
+   * The top of the band the march looks in, metres over the ground: the highest any lift queued in the last
+   * `airborneFor` seconds will stand and the storm's, never under four of H₀, never over `volume.above` (the design's
+   * §2.14).
+   */
+  readonly bandTop: number;
   /** The box the weather keeps rain out of (the hull the player rides or stands in): world to its frame, and its half sizes; w 0 for none. */
   readonly hullInverse: { value: THREE.Matrix4 };
   readonly hullBox: { value: THREE.Vector4 };
@@ -73,11 +97,44 @@ export interface AirSource {
   debugTexture(name: string): THREE.Texture | null;
 }
 
-/** What measure reads of the ground's marks (the second wave). */
+/**
+ * What measure reads of the ground's marks (the second wave): from wave 2b the blowing sand's two phases (the
+ * largest offset of either, and the share of the window where the sand blows at all, its strength by the shader's own
+ * rule over a twentieth of a metre a second), the dents, and at each point the largest offset and the deepest dent.
+ */
 export interface GroundMeasure {
-  offsets: { peak: number; moved: number; peakAt: [number, number] | null } | null;
+  offsets: { peak: number; moved: number; peakAt: [number, number] | null; blowing: number } | null;
   dents: { peak: number; total: number; pressed: number; peakAt: [number, number] | null } | null;
   ground: { x: number; z: number; offset: number | null; dent: number | null }[];
+}
+
+/**
+ * What measure reads at a point: the most dust within the radius and, at that texel (from wave 2b), the mean
+ * height, spread and age it carries and its carried colour (`rgb / a`, linear); the light toward the sun at the ground
+ * (`exp(−τ(0))`) and its optical depth at the four heights; what the ground there sheds, and its medium.
+ */
+export interface MeasurePoint {
+  x: number;
+  z: number;
+  dust: number | null;
+  mu: number | null;
+  sigma: number | null;
+  age: number | null;
+  colour: [number, number, number] | null;
+  light: number | null;
+  tau: number[] | null;
+  shed: number;
+  medium: string;
+}
+
+/** The dust's shape read back (from wave 2b): the mass-weighted mean height and spread over the window, the highest mean and where, and the ages. */
+export interface ShapeMeasure {
+  mu: number;
+  sigma: number;
+  highest: number;
+  highestAt: [number, number] | null;
+  youngest: number | null;
+  oldest: number | null;
 }
 
 /** What the world tells the field each frame, a kept record. */
@@ -114,6 +171,12 @@ export interface AirWorld {
   ground: GroundSampler;
   boxes: SolidBoxSource | null;
   hulls: readonly AirHull[];
+  /**
+   * The session ground material's own tint uniforms (`groundTileUniforms()`'s `uGroundTint` and `uGroundTintRef`), held
+   * by the dust pass by reference so it takes the colour map's tint in the drawn ground's own mode (from wave 2b);
+   * a field given none keeps its own at a tint of one (the tests', the console's).
+   */
+  groundTint?: { uGroundTint: { value: THREE.Vector4 }; uGroundTintRef: { value: THREE.Vector4 } };
 }
 
 type Pair = [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget];
@@ -140,7 +203,11 @@ function noiseTexture(): THREE.DataTexture {
   return t;
 }
 
-function fieldTarget(w: number, h: number, format: THREE.PixelFormat, type: THREE.TextureDataType, name: string): THREE.WebGLRenderTarget {
+/**
+ * A field's target; `count` 2 makes it two textures one draw writes (the dust's colour and its shape, from the third
+ * wave), each named `name` and its index, `textures[0]` being `texture` as three has it.
+ */
+function fieldTarget(w: number, h: number, format: THREE.PixelFormat, type: THREE.TextureDataType, name: string, count = 1): THREE.WebGLRenderTarget {
   const t = new THREE.WebGLRenderTarget(Math.max(1, w), Math.max(1, h), {
     format,
     type,
@@ -151,8 +218,10 @@ function fieldTarget(w: number, h: number, format: THREE.PixelFormat, type: THRE
     wrapS: THREE.ClampToEdgeWrapping,
     wrapT: THREE.ClampToEdgeWrapping,
     generateMipmaps: false,
+    count,
   });
   t.texture.name = name;
+  for (let i = 1; i < t.textures.length; i++) t.textures[i].name = `${name}.${i}`;
   return t;
 }
 
@@ -168,7 +237,8 @@ function dataTexture(data: Float32Array | Uint8Array, n: number, format: THREE.P
   return t;
 }
 
-function material(name: string, fragment: string, uniforms: Record<string, THREE.IUniform>): THREE.ShaderMaterial {
+/** A pass's material; `glsl3` for one that writes outputs of its own (`layout(location = n) out`), as the dust pass does from wave 2b. */
+function material(name: string, fragment: string, uniforms: Record<string, THREE.IUniform>, glsl3 = false): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     name,
     vertexShader: AIR_VERTEX,
@@ -178,7 +248,21 @@ function material(name: string, fragment: string, uniforms: Record<string, THREE
     toneMapped: false,
     depthTest: false,
     depthWrite: false,
+    ...(glsl3 ? { glslVersion: THREE.GLSL3 } : {}),
   });
+}
+
+/** A one-texel grey picture the sand's lookup reads until its own picture is whole (a texture swap, never a program). */
+function sandStandIn(): THREE.DataTexture {
+  const t = new THREE.DataTexture(new Uint8Array([128, 128, 128, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+  t.wrapS = THREE.RepeatWrapping;
+  t.wrapT = THREE.RepeatWrapping;
+  t.minFilter = THREE.LinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  t.generateMipmaps = false;
+  t.needsUpdate = true;
+  t.name = 'air.sand.standIn';
+  return t;
 }
 
 /** The renderer state the step puts back. */
@@ -191,15 +275,26 @@ interface Saved {
 
 export class AirField implements AirSource {
   readonly dust = { value: null as THREE.Texture | null };
+  readonly shape = { value: null as THREE.Texture | null };
   readonly light = { value: null as THREE.Texture | null };
   readonly height = { value: null as THREE.Texture | null };
   readonly obstacles = { value: null as THREE.Texture | null };
   readonly window = { value: new THREE.Vector4(0, 0, 192, 1.5) };
   readonly lightShift = { value: new THREE.Vector2() };
   readonly band = { value: new THREE.Vector3() };
-  readonly inflow = { value: new THREE.Vector2(0, AIR_TUNE.dust.height) };
+  readonly inflow = { value: new THREE.Vector2(0, 2.256) };
   readonly stormColour = { value: new THREE.Color(0.6, 0.45, 0.3) };
   readonly lightOn = { value: 1 };
+  readonly lightHeights = { value: new THREE.Vector4(AIR_TUNE.light.h0, AIR_TUNE.light.h1, AIR_TUNE.light.h2, AIR_TUNE.light.h3) };
+  readonly look = { value: new THREE.Vector4(0.6, 0, 7.2, AIR_TUNE.dust.spreadMin) };
+  /** The band's top (`AirSource.bandTop`), a fraction from the start so it is a double from its first write. */
+  bandTop = 7.2;
+  /**
+   * The debug view the march draws in place of the in-scatter (`air({ view })`): 0 none, 1 the carried colour, 2 its
+   * height, 3 its spread, 4 its age; and the blowing sand's own view on the ground (`air({ view: 'sand' })`).
+   */
+  dustView = 0;
+  sandView = false;
   readonly hullInverse = { value: new THREE.Matrix4() };
   readonly hullBox = { value: new THREE.Vector4() };
   volumeDrew = false;
@@ -242,10 +337,33 @@ export class AirField implements AirSource {
   private heightTex: THREE.DataTexture | null = null;
   private responseTex: THREE.DataTexture | null = null;
   private colourTex: THREE.DataTexture | null = null;
+  /** The colour map's own bytes a cell (wave 2b's tint raster), which the dust pass tints its colour by. */
+  private tintTex: THREE.DataTexture | null = null;
   /** The response raster's and the colour raster's textures as kept uniform objects, which the dents' fade reads. */
   private readonly responseU = { value: null as THREE.Texture | null };
   private readonly colourU = { value: null as THREE.Texture | null };
-  private readonly mats: Record<'splat' | 'vort' | 'div' | 'jacobi' | 'grad' | 'advect' | 'dust' | 'light' | 'fill' | 'offsets', THREE.ShaderMaterial>;
+  private readonly mats: Record<'splat' | 'vort' | 'div' | 'jacobi' | 'grad' | 'advect' | 'dust' | 'light' | 'fill' | 'fillDust' | 'offsets', THREE.ShaderMaterial>;
+  /** The dust's laws worked out once a frame (`dustLawIn`), and the vectors the pass reads them through. */
+  private readonly law: DustLaw = newDustLaw();
+  private readonly dustLaw = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
+  private readonly dustLawB = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
+  /** The light pass's numbers beside `lightP` (the k, the storm's spread, one over the sun's sine, the thinnest spread) and its four heights. */
+  private readonly lightQ = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
+  private readonly lightM: LightMarchAsk = { sunX: 0.5, sunZ: 0.5, step: 0.5, slant: 0.5, rise: 0.5, steps: 26, k: 0.5, inflow: 0.5, stormSigma: 0.5, invSin: 0.5, size: 192, heights: [0, 2, 5, 10], elevation: 0.5 };
+  /** The blowing sand's two phases (`sandPhaseIn`), and where each phase's picture stands since its restart. */
+  private readonly phase: SandPhase = newSandPhase();
+  private readonly jitter = { x: 0.5, y: 0.5 };
+  /** The blowing sand's picture: made whole behind a loading screen (`warm`) or a slice a frame in play (`sandSlice`), a grey stand-in until then. */
+  private sandPic: SandPicture | null = null;
+  private sandTex: THREE.DataTexture | null = null;
+  private readonly sandStand = sandStandIn();
+  /** The storm's colour eased toward the window's own (`stormEaseIn`), when it last read the window, and its scratch. */
+  private readonly storm: StormEase = newStormEase();
+  private stormReadAt = -1e9;
+  private readonly tinted: [number, number, number] = [0.5, 0.5, 0.5];
+  /** The highest band top a lift queued, and when (the band the march looks in, `bandTop`). */
+  private liftTopKept = 0.5;
+  private liftTopAt = -1e9;
   private readonly quad: THREE.Mesh;
   /** Each field's size now, so a dial that moves one is a resize and nothing else. */
   private sized = { cells: 0, dust: 0, light: 0, sand: 0 };
@@ -286,10 +404,14 @@ export class AirField implements AirSource {
   /** The per-layer response lookup's texture, and its bytes (four a layer), made again only when a world's layer count changes. */
   private layerTex: THREE.DataTexture | null = null;
   private layerBytes: Uint8Array = new Uint8Array(4);
-  /** The numbers the offsets pass takes each frame, in vectors (no number written into a uniform object). */
+  /**
+   * The numbers the offsets pass takes each frame, in vectors (no number written into a uniform object): the frame, the
+   * threshold, its span and the share; from wave 2b whether each phase restarted and its seconds since (`sandQ`),
+   * and the inflow's own phases (`sandR`), in place of the second wave's age and heal.
+   */
   private readonly sandP = new THREE.Vector4(1 / 60, 3.5, AIR_TUNE.ground.liftSpan, AIR_TUNE.ground.lift);
-  private readonly sandQ = new THREE.Vector4(0, AIR_TUNE.ground.ageReset, AIR_TUNE.ground.hold, AIR_TUNE.ground.heal);
-  private readonly sandR = new THREE.Vector4(AIR_TUNE.ground.ageCap, 0, 0, 0);
+  private readonly sandQ = new THREE.Vector4(0, 0.5, 0, 0.5);
+  private readonly sandR = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
   /** The bodies whose feet press dents: which foot is next and where the last print was (`dentStep`). */
   private readonly feet = new Map<number, { left: boolean; x: number; z: number; laid: boolean; seen: number }>();
   private feetSeen = 0;
@@ -312,8 +434,10 @@ export class AirField implements AirSource {
   private readonly advectP = new THREE.Vector4(1 / 60, AIR_TUNE.solver.dissipation, AIR_TUNE.solver.relax, 0);
   private readonly gustTime = new THREE.Vector2(AIR_TUNE.wind.gust, 0.5);
   private readonly dustP = new THREE.Vector4(1 / 60, 1, 0.5, AIR_TUNE.dust.stormShed);
-  private readonly dustQ = new THREE.Vector4(0.5, 0, 0, 0);
-  private readonly lightP = new THREE.Vector4(1, AIR_TUNE.light.dust, AIR_TUNE.light.k, 0.5);
+  /** The storm's dust outside (at its weight), its spread squared, how much of the ground's tint the dust takes, the storm's weight. */
+  private readonly dustQ = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
+  /** The light pass's step across, along the slant and up it, and the storm's dust outside. */
+  private readonly lightP = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
   /**
    * The tune's numbers the programs take as plain float uniforms -- how far up and down a push reaches (`slabs.reach`),
    * the height over a slab's floor at which a solid stops it (`obstacles.over`) and slab 0's share of the wind
@@ -334,7 +458,7 @@ export class AirField implements AirSource {
   private input: AirFrameInput = newAirFrameInput();
   /** The numbers the console reads (`report`). */
   private readonly stats = { frames: 0, steps: 0, draws: 0, cpuMs: 0, resets: 0, lastScrollX: 0, lastScrollZ: 0, stepped: false, motes: 0, grainsFlying: 0, grainsLying: 0, sheets: 1 };
-  private readonly counts: ForceCounts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0 };
+  private readonly counts: ForceCounts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0 };
 
   constructor(renderer: THREE.WebGLRenderer, tune: VolTune, world: AirWorld) {
     this.renderer = renderer;
@@ -369,37 +493,61 @@ export class AirField implements AirSource {
       jacobi: material('air.jacobi', JACOBI_FRAGMENT, { ...common, uPrs: { value: null }, uDiv: { value: null }, uJacobiP: { value: this.jacobiP }, uShift: { value: new THREE.Vector2() } }),
       grad: material('air.grad', GRAD_FRAGMENT, { ...common, uPrs: { value: null }, uVel: { value: null } }),
       advect: material('air.advect', ADVECT_FRAGMENT, { ...common, ...gust, uVel: { value: null }, uAdvectP: { value: this.advectP } }),
-      dust: material('air.dust', DUST_FRAGMENT, {
+      // The dust pass (GLSL 3 from wave 2b: two outputs, the colour and its shape), holding the session ground
+      // material's own tint uniforms by reference so its colour is tinted in the drawn ground's own mode.
+      dust: material(
+        'air.dust',
+        DUST_FRAGMENT,
+        {
+          uWindow: this.window,
+          uWind: common.uWind,
+          ...gust,
+          uDust: { value: null },
+          uShape: { value: null },
+          uVel: { value: null },
+          uObstacles: this.obstacles,
+          uResponse: { value: null },
+          uColour: { value: null },
+          uTint: { value: null },
+          uGround: this.height,
+          uGroundTint: world.groundTint?.uGroundTint ?? { value: new THREE.Vector4(0, 1.6, 0, 0) },
+          uGroundTintRef: world.groundTint?.uGroundTintRef ?? { value: new THREE.Vector4(1, 1, 1, 1) },
+          uVelShift: { value: new THREE.Vector2() },
+          uDustShift: { value: new THREE.Vector2() },
+          uGroundTexel: { value: new THREE.Vector2(1, 1) },
+          uObstacleOver: common.uObstacleOver,
+          uDustP: { value: this.dustP },
+          uDustQ: { value: this.dustQ },
+          uDustLaw: { value: this.dustLaw },
+          uDustLawB: { value: this.dustLawB },
+          uStormColour: this.stormColour,
+          uSlopeGate: { value: new THREE.Vector2(AIR_TUNE.dust.slopeFrom, AIR_TUNE.dust.slopeTo) },
+          uDustBatch: { value: this.forces.dustBatch },
+          uDustShapeBatch: { value: this.forces.dustShapeBatch },
+          uDustCount: { value: 0 },
+          uWindShare: this.windShare,
+        },
+        true,
+      ),
+      light: material('air.light', LIGHT_FRAGMENT, {
         uWindow: this.window,
-        uWind: common.uWind,
-        ...gust,
         uDust: { value: null },
-        uVel: { value: null },
-        uObstacles: this.obstacles,
-        uResponse: { value: null },
-        uColour: { value: null },
+        uShape: { value: null },
         uGround: this.height,
-        uVelShift: { value: new THREE.Vector2() },
-        uDustShift: { value: new THREE.Vector2() },
-        uGroundTexel: { value: new THREE.Vector2(1, 1) },
-        uObstacleOver: common.uObstacleOver,
-        uDustP: { value: this.dustP },
-        uDustQ: { value: this.dustQ },
-        uStormColour: this.stormColour,
-        uSlopeGate: { value: new THREE.Vector2(AIR_TUNE.dust.slopeFrom, AIR_TUNE.dust.slopeTo) },
-        uDustBatch: { value: this.forces.dustBatch },
-        uDustCount: { value: 0 },
-        uWindShare: this.windShare,
+        uSunDir: { value: new THREE.Vector2(0, 1) },
+        uSteps: { value: 26 },
+        uLightP: { value: this.lightP },
+        uLightQ: { value: this.lightQ },
+        uLightH: this.lightHeights,
       }),
-      light: material('air.light', LIGHT_FRAGMENT, { uWindow: this.window, uDust: { value: null }, uSunDir: { value: new THREE.Vector2(0, 1) }, uSteps: { value: 26 }, uLightP: { value: this.lightP } }),
       fill: material('air.fill', FILL_FRAGMENT, { uValue: { value: new THREE.Vector4() } }),
+      fillDust: material('air.fillDust', FILL_DUST_FRAGMENT, { uValue: { value: new THREE.Vector4() }, uShapeValue: { value: new THREE.Vector4() } }, true),
       offsets: material('air.offsets', OFFSETS_FRAGMENT, {
         uWindow: this.window,
         uWind: common.uWind,
         uWindShare: this.windShare,
         uOffsets: { value: null },
         uVel: { value: null },
-        uResponse: this.responseU,
         uColour: this.colourU,
         uObstacles: this.obstacles,
         uObstacleOver: common.uObstacleOver,
@@ -419,33 +567,41 @@ export class AirField implements AirSource {
       this.dents.window = this.win;
       this.dents.raster = this.raster;
     }
+    const S = AIR_TUNE.sand;
     this.ground = {
       uAirOffsets: { value: null },
       uAirDents: { value: null },
       uAirLayers: { value: null },
       uAirLight: this.light,
+      uAirSand: { value: this.sandStand },
       uAirWindow: this.window,
       uAirArt: { value: new THREE.Vector4(0, 0, 0, 0) },
       uAirDentP: { value: new THREE.Vector4(0, 0, AIR_TUNE.prints.square, AIR_TUNE.prints.squareEdge) },
       uAirDentQ: { value: new THREE.Vector4(1 / 2048, AIR_TUNE.prints.square / 2048, 0, 0) },
       uAirShift: { value: new THREE.Vector4() },
       uAirMisc: { value: new THREE.Vector4(AIR_TUNE.window.edge, AIR_TUNE.ground.darkenScale, AIR_TUNE.ground.darkening, AIR_TUNE.ground.shade) },
+      uAirPhase: { value: new THREE.Vector4(0.5, 0.5, 0, 1 / S.cycle) },
+      uAirJitter: { value: new THREE.Vector4(0.5, 0.5, 0.5, 0.5) },
+      uAirSandP: { value: new THREE.Vector4(S.opacity, S.bright, S.scale, S.streak) },
+      uAirSandQ: { value: new THREE.Vector4(S.from, S.full, S.grains, S.soft) },
+      uAirSandR: { value: new THREE.Vector4(S.flatten, S.fadeFrom / SAND_SIZE, S.fadeTo / SAND_SIZE, S.patches) },
     };
     this.setLayerResponse(new Map(), new Uint8Array(4));
   }
 
   /**
-   * The per-layer response lookup the ground's variant reads (each picture layer its family's moves, heals, gives and
-   * dust), from the world's tile set and its response table, made at a world's load (`fillLayerResponse`'s bytes): a
-   * texture upload and nothing more, so a family overridden from the console takes effect at once. A world with no
-   * tile set hands an empty map, and every layer stands still.
+   * The per-layer lookup the ground's variant reads, two rows (from wave 2b): row 0 each picture layer's family's
+   * moves, heals, gives and dust, row 1 its lighter tones as sRGB bytes (`colour`, four bytes by family id, the colour
+   * raster's own bytes), from the world's tile set, made at a world's load (`fillLayerResponse`): a texture upload and
+   * nothing more, so a family overridden from the console takes effect at once. A world with no tile set hands an empty
+   * map, and nothing blows over any layer.
    */
-  setLayerResponse(childLayers: ReadonlyMap<number, readonly number[]>, response: Uint8Array, layers = 1): void {
+  setLayerResponse(childLayers: ReadonlyMap<number, readonly number[]>, response: Uint8Array, layers = 1, colour: Uint8Array = new Uint8Array(0)): void {
     const n = Math.max(1, Math.floor(layers));
-    if (!this.layerTex || this.layerBytes.length !== n * 4) {
+    if (!this.layerTex || this.layerBytes.length !== n * 8) {
       this.layerTex?.dispose();
-      this.layerBytes = new Uint8Array(n * 4);
-      const t = new THREE.DataTexture(this.layerBytes, n, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+      this.layerBytes = new Uint8Array(n * 8);
+      const t = new THREE.DataTexture(this.layerBytes, n, 2, THREE.RGBAFormat, THREE.UnsignedByteType);
       t.minFilter = THREE.NearestFilter;
       t.magFilter = THREE.NearestFilter;
       t.wrapS = THREE.ClampToEdgeWrapping;
@@ -455,11 +611,11 @@ export class AirField implements AirSource {
       this.layerTex = t;
       this.ground.uAirLayers.value = t;
     }
-    fillLayerResponse(childLayers, response, this.layerBytes);
+    fillLayerResponse(childLayers, response, this.layerBytes, colour);
     this.layerTex.needsUpdate = true;
   }
 
-  /** The per-layer response as it stands, for the console: each layer's four bytes. */
+  /** The per-layer lookup as it stands, for the console: each layer's four bytes of response, then a row of its colour. */
   layerResponse(): Uint8Array {
     return this.layerBytes;
   }
@@ -492,7 +648,7 @@ export class AirField implements AirSource {
 
   /** Every material of the field, with what it draws into: the warm-up's list (R6) and the scanner's. */
   materials(): THREE.ShaderMaterial[] {
-    const list = [this.mats.splat, this.mats.vort, this.mats.div, this.mats.jacobi, this.mats.grad, this.mats.advect, this.mats.dust, this.mats.light, this.mats.fill, this.obs.material, this.mats.offsets];
+    const list = [this.mats.splat, this.mats.vort, this.mats.div, this.mats.jacobi, this.mats.grad, this.mats.advect, this.mats.dust, this.mats.light, this.mats.fill, this.mats.fillDust, this.obs.material, this.mats.offsets];
     if (this.dents) list.push(this.dents.stampMaterial, this.dents.fadeMaterial);
     return list;
   }
@@ -508,7 +664,7 @@ export class AirField implements AirSource {
     const quad = (m: THREE.Material): THREE.Mesh => createFxQuad(m);
     const m = this.mats;
     pairs.push([m.splat, quad(m.splat), this.vel![0]], [m.vort, quad(m.vort), this.vel![0]], [m.div, quad(m.div), this.div!], [m.jacobi, quad(m.jacobi), this.prs![0]], [m.grad, quad(m.grad), this.vel![0]], [m.advect, quad(m.advect), this.vel![0]]);
-    pairs.push([m.dust, quad(m.dust), this.dustPair![0]], [m.light, quad(m.light), this.lightTarget!], [m.fill, quad(m.fill), this.vel![0]], [this.obs.material, this.obs.mesh, this.obstacleMap]);
+    pairs.push([m.dust, quad(m.dust), this.dustPair![0]], [m.light, quad(m.light), this.lightTarget!], [m.fill, quad(m.fill), this.vel![0]], [m.fillDust, quad(m.fillDust), this.dustPair![0]], [this.obs.material, this.obs.mesh, this.obstacleMap]);
     pairs.push([m.offsets, quad(m.offsets), this.offsetsPair![0]]);
     const d = this.dents;
     if (d) {
@@ -566,6 +722,8 @@ export class AirField implements AirSource {
    */
   async warm(): Promise<number> {
     if (this.refused) return 0;
+    // The blowing sand's picture, made outright behind the screen (about 11 ms) and uploaded with it.
+    while (!this.sandSlice(SAND_SIZE));
     const r = this.renderer;
     const before = r.info.programs?.length ?? 0;
     const pairs = this.warmPairs();
@@ -583,6 +741,34 @@ export class AirField implements AirSource {
     // The question three's own first draw asks, behind the screen: a deferred driver finishes the link here.
     for (const [mat, obj, target] of pairs) compileAirMaterial(r, mat, obj, target);
     return (r.info.programs?.length ?? 0) - before;
+  }
+
+  /**
+   * A slice of the blowing sand's picture (`rows` rows, `SAND_ROWS_A_FRAME` in the in-play warm): when the last row is
+   * made the picture becomes a texture, mipmapped and repeating, and takes the stand-in's place in the ground's lookup --
+   * a texture swap, never a program, and never a picture uploaded part made. Answers whether it is whole.
+   */
+  sandSlice(rows = SAND_ROWS_A_FRAME): boolean {
+    if (this.sandTex) return true;
+    const pic = this.sandPic ?? (this.sandPic = newSandPicture());
+    if (!sandPictureRows(pic, pic.rows, rows)) return false;
+    const t = new THREE.DataTexture(pic.bytes, SAND_SIZE, SAND_SIZE, THREE.RGBAFormat, THREE.UnsignedByteType);
+    t.wrapS = THREE.RepeatWrapping;
+    t.wrapT = THREE.RepeatWrapping;
+    t.magFilter = THREE.LinearFilter;
+    t.minFilter = THREE.LinearMipmapLinearFilter;
+    t.generateMipmaps = true;
+    t.needsUpdate = true;
+    t.name = 'air.sand';
+    this.sandTex = t;
+    this.ground.uAirSand.value = t;
+    if (this.bound) copyAirGround(this.ground, this.bound);
+    return true;
+  }
+
+  /** Whether the blowing sand's picture is whole (the in-play warm's swap waits for it). */
+  get sandWhole(): boolean {
+    return this.sandTex !== null;
   }
 
   /** Make or resize the targets for the tune's detail (class T): materials are never touched. Answers whether anything was resized. */
@@ -616,8 +802,11 @@ export class AirField implements AirSource {
       this.vel = [fieldTarget(layout.width, layout.height, THREE.RGFormat, THREE.HalfFloatType, 'air.vel.a'), fieldTarget(layout.width, layout.height, THREE.RGFormat, THREE.HalfFloatType, 'air.vel.b')];
       this.prs = [fieldTarget(layout.width, layout.height, THREE.RedFormat, THREE.HalfFloatType, 'air.prs.a'), fieldTarget(layout.width, layout.height, THREE.RedFormat, THREE.HalfFloatType, 'air.prs.b')];
       this.div = fieldTarget(layout.width, layout.height, THREE.RedFormat, THREE.HalfFloatType, 'air.div');
-      this.dustPair = [fieldTarget(dust, dust, THREE.RGBAFormat, THREE.FloatType, 'air.dust.a'), fieldTarget(dust, dust, THREE.RGBAFormat, THREE.FloatType, 'air.dust.b')];
-      this.lightTarget = fieldTarget(light, light, THREE.RedFormat, THREE.UnsignedByteType, 'air.light');
+      // The dust and the shape it carries, one draw writing both (wave 2b's two-texture pair), float32 each.
+      this.dustPair = [fieldTarget(dust, dust, THREE.RGBAFormat, THREE.FloatType, 'air.dust.a', 2), fieldTarget(dust, dust, THREE.RGBAFormat, THREE.FloatType, 'air.dust.b', 2)];
+      // An optical depth toward the sun at each of four heights, half floats (filtered linearly on every browser that
+      // runs the field: the dust's own float targets need more than this does).
+      this.lightTarget = fieldTarget(light, light, THREE.RGBAFormat, THREE.HalfFloatType, 'air.light');
       // Offsets round nought heal both ways under a half float's truncation, and still air copies a texel exactly.
       this.offsetsPair = [fieldTarget(sand, sand, THREE.RGBAFormat, THREE.FloatType, 'air.offsets.a'), fieldTarget(sand, sand, THREE.RGBAFormat, THREE.FloatType, 'air.offsets.b')];
     } else {
@@ -633,12 +822,15 @@ export class AirField implements AirSource {
     this.heightTex?.dispose();
     this.responseTex?.dispose();
     this.colourTex?.dispose();
+    this.tintTex?.dispose();
     this.heightTex = dataTexture(this.raster.height, cells, THREE.RedFormat, THREE.FloatType, 'air.height');
     this.responseTex = dataTexture(this.raster.response, cells, THREE.RGBAFormat, THREE.UnsignedByteType, 'air.response');
     this.colourTex = dataTexture(this.raster.colour, cells, THREE.RGBAFormat, THREE.UnsignedByteType, 'air.colour');
+    this.tintTex = dataTexture(this.raster.tint, cells, THREE.RGBAFormat, THREE.UnsignedByteType, 'air.tint');
     this.height.value = this.heightTex;
     this.mats.dust.uniforms.uResponse.value = this.responseTex;
     this.mats.dust.uniforms.uColour.value = this.colourTex;
+    this.mats.dust.uniforms.uTint.value = this.tintTex;
     this.responseU.value = this.responseTex;
     this.colourU.value = this.colourTex;
     (this.mats.dust.uniforms.uGroundTexel.value as THREE.Vector2).set(1 / cells, 1 / cells);
@@ -650,7 +842,8 @@ export class AirField implements AirSource {
     s.dust = dust;
     s.light = light;
     s.sand = sand;
-    this.dust.value = this.dustPair![0].texture;
+    this.dust.value = this.dustPair![0].textures[0];
+    this.shape.value = this.dustPair![0].textures[1];
     this.light.value = this.lightTarget!.texture;
     this.ground.uAirOffsets.value = this.offsetsPair![0].texture;
     this.needsFill = true;
@@ -698,6 +891,10 @@ export class AirField implements AirSource {
     switch (name) {
       case 'dust':
         return this.dust.value;
+      case 'shape':
+        return this.shape.value;
+      case 'tint':
+        return this.tintTex;
       case 'velocity':
         return this.vel ? this.vel[0].texture : null;
       case 'obstacles':
@@ -815,6 +1012,7 @@ export class AirField implements AirSource {
       this.heightTex!.needsUpdate = true;
       this.responseTex!.needsUpdate = true;
       this.colourTex!.needsUpdate = true;
+      this.tintTex!.needsUpdate = true;
       this.raster.dirty = false;
     }
     let drawObstacles = code !== PLACE.still;
@@ -854,8 +1052,17 @@ export class AirField implements AirSource {
     airFrameNumbersIn(nu);
     this.wind.x = nu.windX;
     this.wind.z = nu.windZ;
-    this.inflow.value.set(nu.inflowDust, nu.dustHeight);
+    // The storm's dust outside, at its weight, and its spread: the half-normal of the storm's own mean height.
+    const inflow = this.inflow.value;
+    inflow.x = nu.inflowDust;
+    inflow.y = nu.stormSigma;
     this.lightOn.value = t.light ? 1 : 0;
+    this.raster.tintShare = AIR_TUNE.dust.tint;
+    this.frameDt = dt;
+    this.frameStorm = inp.storm > 0 && Number.isFinite(inp.storm) ? inp.storm : 0;
+    this.frameInflow = nu.inflowDust;
+    this.easeStorm();
+    this.writeLook();
     if (!inp.reading) {
       this.why = 'nothing reads the air: the dust is off, or Effects are, and the ground keeps nothing';
       // The rasters are kept for the grains; what the blasts and pushes queued is dropped, since no step will take it
@@ -894,6 +1101,18 @@ export class AirField implements AirSource {
       f.frameDt = dt;
       f.gatherDents();
     }
+    // The sources' frame walk (the design's §2.4), every frame the field runs, the dust on or off: the fronts' frame
+    // ages move on (so a front is let go on time even with the dust off) and the engines' dust is worked out.
+    f.frameDt = dt;
+    f.dustTexel = w.size / (t.airDetail * t.dustDetail);
+    f.frameSources();
+    // The blowing sand's two phases, on the frame's own clock.
+    if (t.sand && inp.ground) {
+      const ph = this.phase;
+      ph.dt = dt;
+      ph.cycle = AIR_TUNE.sand.cycle;
+      sandPhaseIn(ph);
+    }
     const r = this.renderer;
     const sv = this.saved;
     sv.target = r.getRenderTarget();
@@ -902,9 +1121,6 @@ export class AirField implements AirSource {
     r.getClearColor(sv.colour);
     r.autoClear = false;
     this.drawer.mode = AIR_DRAW.mode;
-    this.frameDt = dt;
-    this.frameStorm = inp.storm > 0 && Number.isFinite(inp.storm) ? inp.storm : 0;
-    this.frameInflow = nu.inflowDust;
     try {
       // The obstacles first, and always a render call of their own (`AirDrawer.drawMesh`): only then does three upload
       // the boxes a gather wrote, whichever way the step's stages are drawn.
@@ -979,7 +1195,7 @@ export class AirField implements AirSource {
   /**
    * What the ground's variant reads, written in place once a frame (no number into a uniform object: the components of
    * kept vectors). `placed`: the window stands and the field's targets with it. Each art dial is nought while its own
-   * effect is off -- the drift with the sand off, the prints with no dents kept, the shade unless the volume drew the
+   * effect is off -- the blowing sand with the sand off, the prints with no dents kept, the shade unless the volume drew the
    * dust last frame with the light pass on -- so the variant draws exactly the plain ground for any it does not keep.
    */
   private writeGround(placed: boolean): void {
@@ -1014,6 +1230,44 @@ export class AirField implements AirSource {
     misc.y = AIR_TUNE.ground.darkenScale;
     misc.z = AIR_TUNE.ground.darkening;
     misc.w = AIR_TUNE.ground.shade;
+    // The blowing sand (wave 2b's): its phases and where each phase's picture stands since its restart, and the
+    // tune's look, each pair of edges held a little apart (a smoothstep with equal edges is undefined).
+    const S = AIR_TUNE.sand;
+    const ph = this.phase;
+    const cycle = S.cycle > 1e-3 ? S.cycle : 1e-3;
+    const pv = g.uAirPhase.value;
+    pv.x = ph.tA;
+    pv.y = ph.tB;
+    pv.z = this.sandView ? 1 : 0;
+    pv.w = 1 / cycle;
+    const jv = g.uAirJitter.value;
+    const jit = this.jitter;
+    sandJitter(2 * ph.kA, jit);
+    jv.x = jit.x;
+    jv.y = jit.y;
+    sandJitter(2 * ph.kB + 1, jit);
+    jv.z = jit.x;
+    jv.w = jit.y;
+    // Wet ground does not blow: the opacity times what the weather's wetness leaves of it, on the CPU.
+    const wet = WEATHER_UNIFORMS.uWetness.value;
+    const wetFull = S.wetFull > 1e-3 ? S.wetFull : 1e-3;
+    let wk = wet / wetFull;
+    wk = wk < 0 ? 0 : wk > 1 ? 1 : wk;
+    const sp = g.uAirSandP.value;
+    sp.x = S.opacity * (1 - wk * wk * (3 - 2 * wk));
+    sp.y = S.bright;
+    sp.z = S.scale > 1e-3 ? S.scale : 1e-3;
+    sp.w = S.streak;
+    const sq = g.uAirSandQ.value;
+    sq.x = S.from;
+    sq.y = S.full > S.from + 1e-3 ? S.full : S.from + 1e-3;
+    sq.z = S.grains;
+    sq.w = S.soft > 1e-3 ? S.soft : 1e-3;
+    const sr = g.uAirSandR.value;
+    sr.x = S.flatten;
+    sr.y = S.fadeFrom / SAND_SIZE;
+    sr.z = (S.fadeTo > S.fadeFrom + 1e-3 ? S.fadeTo : S.fadeFrom + 1e-3) / SAND_SIZE;
+    sr.w = S.patches > 1e-3 ? S.patches : 1e-3;
     // Into the session's record the variant reads, while this is the world's field.
     if (this.bound) copyAirGround(g, this.bound);
   }
@@ -1098,14 +1352,17 @@ export class AirField implements AirSource {
       this.stats.steps++;
       this.lightDue = true;
     }
-    // The dust, every frame, carried by the air as it stands (its pending scroll not yet carried if no step ran).
+    // The dust, every frame, carried by the air as it stands (its pending scroll not yet carried if no step ran), the
+    // shape it carries with it by the six laws (wave 2b's), both written by one draw.
     if (t.dust) {
       f.frameDt = dt;
       const n = f.buildDustBatch();
       if (n > 0) this.lastLift = this.worldTime;
+      this.keepBand();
       const u = m.dust.uniforms;
       const dust = this.dustPair!;
-      u.uDust.value = dust[0].texture;
+      u.uDust.value = dust[0].textures[0];
+      u.uShape.value = dust[0].textures[1];
       u.uVel.value = vel[0].texture;
       (u.uVelShift.value as THREE.Vector2).copy(this.solverShift);
       (u.uDustShift.value as THREE.Vector2).copy(this.dustShift);
@@ -1114,19 +1371,26 @@ export class AirField implements AirSource {
       dp.y = nu.decay;
       dp.z = this.frameStorm;
       dp.w = AIR_TUNE.dust.stormShed;
-      this.dustQ.x = this.frameInflow;
+      const dq = this.dustQ;
+      dq.x = this.frameInflow;
+      dq.y = nu.stormSigma * nu.stormSigma;
+      dq.z = AIR_TUNE.dust.tint;
+      dq.w = nu.stormWeight;
+      this.writeLaw();
       u.uDustCount.value = n;
       this.gustTime.x = AIR_TUNE.wind.gust;
       this.gustTime.y = this.worldTime;
       (u.uSlopeGate.value as THREE.Vector2).set(AIR_TUNE.dust.slopeFrom, AIR_TUNE.dust.slopeTo);
       d.draw(m.dust, dust[1]);
       swap(dust);
-      this.dust.value = dust[0].texture;
+      this.dust.value = dust[0].textures[0];
+      this.shape.value = dust[0].textures[1];
       this.dustShift.set(0, 0);
       this.dustLive = true;
     }
-    // The ground's carried offsets, every frame by the frame's own dt, while the ground wears the air's variant and the
-    // drifting sand is on: carried by slab 0's air past the lift threshold, aged on the 10 Hz clock, healed after the hold.
+    // The blowing sand's two phases, every frame by the frame's own dt, while the ground wears the air's variant and the
+    // sand is on: each carried by slab 0's air past the lift threshold, and restarted every cycle with its overshoot
+    // (wave 2b's, in place of the second wave's age and heal).
     if (t.sand && this.input.ground) {
       const u = m.offsets.uniforms;
       const pair = this.offsetsPair!;
@@ -1141,40 +1405,179 @@ export class AirField implements AirSource {
       const sp = this.sandP;
       sp.x = dt;
       // The lift threshold over the weather's own wind before any slab's share [demo `land.html:1895`].
-      const ws = nu.windX * nu.windX + nu.windZ * nu.windZ;
-      const lift = Math.sqrt(ws) * G.liftOver + G.liftAdd;
-      sp.y = lift < G.liftCap ? lift : G.liftCap;
+      const ws = Math.sqrt(nu.windX * nu.windX + nu.windZ * nu.windZ);
+      const thr0 = ws * G.liftOver + G.liftAdd;
+      const thr = thr0 < G.liftCap ? thr0 : G.liftCap;
+      sp.y = thr;
       sp.z = G.liftSpan;
       sp.w = G.lift;
+      const ph = this.phase;
       const sq = this.sandQ;
-      sq.x = this.frameTicks;
-      sq.y = G.ageReset;
-      sq.z = G.hold;
-      sq.w = G.heal;
-      this.sandR.x = G.ageCap;
+      sq.x = ph.restartA;
+      sq.y = ph.tA;
+      sq.z = ph.restartB;
+      sq.w = ph.tB;
+      // A parcel from outside the window carries the inflow's own phases: the window's wind at slab 0's share, lifted by
+      // the same rule (nought but in a gale past the threshold's cap, since the threshold sits over the wind).
+      const share = AIR_TUNE.slabs.windShare;
+      const inSpeed = ws * share;
+      // `smoothstep(thr, thr + span, inSpeed)`, written out so no number crosses a call on the frame.
+      const span = G.liftSpan > 1e-3 ? G.liftSpan : 1e-3;
+      let st = (inSpeed - thr) / span;
+      st = st < 0 ? 0 : st > 1 ? 1 : st;
+      const inLift = st * st * (3 - 2 * st) * G.lift * share;
+      const sr = this.sandR;
+      sr.x = -nu.windX * inLift * ph.tA;
+      sr.y = -nu.windZ * inLift * ph.tA;
+      sr.z = -nu.windX * inLift * ph.tB;
+      sr.w = -nu.windZ * inLift * ph.tB;
       d.draw(m.offsets, pair[1]);
       swap(pair);
       this.ground.uAirOffsets.value = pair[0].texture;
       this.sandShift.set(0, 0);
     }
-    // The light toward the sun, once a frame that stepped.
+    // The light toward the sun, once a frame that stepped: an optical depth at four heights (wave 2b's).
     if (t.light && this.lightDue) {
       const lu = m.light.uniforms;
       (lu.uSunDir.value as THREE.Vector2).set(nu.sunAcrossX, nu.sunAcrossZ);
       lu.uSteps.value = t.lightSteps;
+      const lm = this.lightM;
+      lm.elevation = nu.sunElevation;
+      lm.steps = t.lightSteps;
+      lightMarchIn(lm);
       const lp = this.lightP;
-      lp.x = nu.lightStep;
-      lp.y = AIR_TUNE.light.dust;
-      lp.z = AIR_TUNE.light.k;
+      lp.x = lm.step;
+      lp.y = lm.slant;
+      lp.z = lm.rise;
       lp.w = this.frameInflow;
-      lu.uDust.value = this.dustPair![0].texture;
+      const lq = this.lightQ;
+      lq.x = t.dustSelfShadow * AIR_TUNE.dust.extinction * AIR_TUNE.dust.height;
+      lq.y = nu.stormSigma;
+      lq.z = lm.invSin;
+      lq.w = AIR_TUNE.dust.spreadMin;
+      this.writeHeights();
+      lu.uDust.value = this.dustPair![0].textures[0];
+      lu.uShape.value = this.dustPair![0].textures[1];
       d.draw(m.light, this.lightTarget!);
       this.lightShift.value.set(0, 0);
       this.lightDue = false;
     }
   };
 
-  /** Every field to its inflow: the air to the wind's share, the pressure to nought, the dust to the storm's, the light to one. */
+  /** The laws' numbers for this frame (`dustLawIn`, over the frame's `dt`), into the dust pass's vectors. */
+  private writeLaw(): void {
+    const law = this.law;
+    law.dt = this.frameDt;
+    dustLawIn(law);
+    const a = this.dustLaw;
+    a.x = law.e;
+    a.y = law.i;
+    a.z = law.fall;
+    a.w = law.grow;
+    const b = this.dustLawB;
+    b.x = law.min2;
+    b.y = law.max2;
+    b.z = law.ageCap;
+  }
+
+  /** The light's four heights from the tune, into the vector the light pass and the march both read (lowest first, never out of order). */
+  private writeHeights(): void {
+    const L = AIR_TUNE.light;
+    const h = this.lightHeights.value;
+    h.x = L.h0;
+    h.y = L.h1 > h.x ? L.h1 : h.x + 0.01;
+    h.z = L.h2 > h.y ? L.h2 : h.y + 0.01;
+    h.w = L.h3 > h.z ? L.h3 : h.z + 0.01;
+  }
+
+  /**
+   * The band the march looks in (the design's §2.14): the highest top of a lift queued this frame is kept for
+   * `airborneFor` seconds, beside the storm's `bandSigmas` of its spread; the band is the larger, never under four of H₀
+   * and never over `volume.above`.
+   */
+  private keepBand(): void {
+    const V = AIR_TUNE.volume;
+    const top = this.forces.liftTop;
+    const now = this.worldTime;
+    if (now - this.liftTopAt > V.airborneFor) this.liftTopKept = 0;
+    if (top > 0 && top >= this.liftTopKept) {
+      this.liftTopKept = top;
+      this.liftTopAt = now;
+    }
+  }
+
+  /** The look the march reads (`AirSource.look`) and the band's top, from the tune and the storm as they stand: once a frame. */
+  private writeLook(): void {
+    const V = AIR_TUNE.volume;
+    const H0 = AIR_TUNE.dust.height;
+    let top = 4 * H0;
+    if (this.worldTime - this.liftTopAt <= V.airborneFor && this.liftTopKept > top) top = this.liftTopKept;
+    const storm = this.nums.storm > 0 ? V.bandSigmas * this.nums.stormSigma : 0;
+    if (storm > top) top = storm;
+    this.bandTop = top < V.above ? top : V.above;
+    const l = this.look.value;
+    l.x = this.tune.dustBright;
+    l.y = this.dustView;
+    l.z = this.bandTop;
+    l.w = AIR_TUNE.dust.spreadMin;
+    this.writeHeights();
+  }
+
+  /**
+   * The storm's colour eased toward the window's own (the design's §2.14): while a storm blows, at most every
+   * `stormEase / 4` seconds, the shedding cells' colour weighted by their dust over every eighth cell each way (through
+   * `tintedAt`, as the dust pass works it out), and then eased over `stormEase` (`stormEaseIn`). With no storm it holds.
+   */
+  private easeStorm(): void {
+    if (!(this.frameStorm > 0)) return;
+    const D = AIR_TUNE.dust;
+    const s = this.storm;
+    const ease = D.stormEase > 0.05 ? D.stormEase : 0.05;
+    if (this.worldTime - this.stormReadAt >= ease / 4) {
+      this.stormReadAt = this.worldTime;
+      const r = this.raster;
+      const n = r.n;
+      const out = this.tinted;
+      let wr = 0;
+      let wg = 0;
+      let wb = 0;
+      let wt = 0;
+      for (let j = 4; j < n; j += 8) {
+        for (let i = 4; i < n; i += 8) {
+          const k = (j * n + i) * 4;
+          if (r.colour[k + 3] !== MEDIUM_BYTE.land) continue;
+          const give = r.response[k + 3] / 255;
+          if (!(give > 0)) continue;
+          if (!r.tintedAt(i, j, out)) continue;
+          wr += out[0] * give;
+          wg += out[1] * give;
+          wb += out[2] * give;
+          wt += give;
+        }
+      }
+      if (wt > 0) {
+        s.tr = wr / wt;
+        s.tg = wg / wt;
+        s.tb = wb / wt;
+      }
+    }
+    const c = this.stormColour.value;
+    s.r = c.r;
+    s.g = c.g;
+    s.b = c.b;
+    s.dt = this.frameDt;
+    s.ease = ease;
+    stormEaseIn(s);
+    c.r = s.r;
+    c.g = s.g;
+    c.b = s.b;
+  }
+
+  /**
+   * Every field to its inflow: the air to the wind's share, the pressure to nought, the dust to the storm's at its weight
+   * with its shape (the half-normal standing on the ground, both outputs in one draw), the light to an optical depth of
+   * nought (a transmittance of one, from wave 2b).
+   */
   private fillFields(): void {
     const d = this.drawer;
     const v = this.mats.fill.uniforms.uValue.value as THREE.Vector4;
@@ -1186,18 +1589,22 @@ export class AirField implements AirSource {
     d.draw(this.mats.fill, this.div!);
     const c = this.stormColour.value;
     const inflow = this.frameInflow;
-    v.set(c.r * inflow, c.g * inflow, c.b * inflow, inflow);
-    for (const tg of this.dustPair!) d.draw(this.mats.fill, tg);
-    v.set(1, 0, 0, 1);
+    const fd = this.mats.fillDust.uniforms;
+    (fd.uValue.value as THREE.Vector4).set(c.r * inflow, c.g * inflow, c.b * inflow, inflow);
+    const sigma = this.nums.stormSigma;
+    (fd.uShapeValue.value as THREE.Vector4).set(0, inflow * sigma * sigma, 0, 0);
+    for (const tg of this.dustPair!) d.draw(this.mats.fillDust, tg);
+    v.set(0, 0, 0, 0);
     d.draw(this.mats.fill, this.lightTarget!);
-    this.dust.value = this.dustPair![0].texture;
+    this.dust.value = this.dustPair![0].textures[0];
+    this.shape.value = this.dustPair![0].textures[1];
     this.fillOffsets();
   }
 
-  /** The ground at rest: nothing carried, every texel long healed (with every field, or the offsets alone after a resize). */
+  /** The ground at rest: nothing carried by either phase (with every field, or the offsets alone after a resize). */
   private fillOffsets(): void {
     const v = this.mats.fill.uniforms.uValue.value as THREE.Vector4;
-    v.set(0, 0, AIR_TUNE.ground.ageCap, 0);
+    v.set(0, 0, 0, 0);
     for (const tg of this.offsetsPair!) this.drawer.draw(this.mats.fill, tg);
     this.ground.uAirOffsets.value = this.offsetsPair![0].texture;
     this.sandShift.set(0, 0);
@@ -1218,6 +1625,7 @@ export class AirField implements AirSource {
     this.lightTarget = null;
     this.sized = { cells: 0, dust: 0, light: 0, sand: 0 };
     this.dust.value = null;
+    this.shape.value = null;
     this.light.value = null;
     this.dustLive = false;
     this.win.placed = false;
@@ -1442,10 +1850,12 @@ export class AirField implements AirSource {
       refused: this.refused,
       draw: this.drawer.mode,
       window: { origin: [r2(w.ox), r2(w.oz)], size: w.size, cell: r2(w.cell), lastScroll: [this.stats.lastScrollX, this.stats.lastScrollZ], resets: this.stats.resets },
-      grids: { air: `${t.airDetail}² RG16F pair, R16F pressure pair`, dust: `${t.airDetail * t.dustDetail}² RGBA32F pair`, light: `${t.airDetail * t.lightDetail}² R8`, obstacles: `${t.airDetail}² RG16F (red the walls, green the walls and a compound's rooms)`, rasters: `${t.airDetail}² R32F height, RGBA8 response and colour` },
+      grids: { air: `${t.airDetail}² RG16F pair, R16F pressure pair`, dust: `${t.airDetail * t.dustDetail}² RGBA32F pair of two textures (the colour and density, the shape it carries)`, light: `${t.airDetail * t.lightDetail}² RGBA16F (an optical depth toward the sun at ${AIR_TUNE.light.h0}, ${AIR_TUNE.light.h1}, ${AIR_TUNE.light.h2} and ${AIR_TUNE.light.h3} m)`, obstacles: `${t.airDetail}² RG16F (red the walls, green the walls and a compound's rooms)`, rasters: `${t.airDetail}² R32F height, RGBA8 response, colour and the colour map's tint` },
+      shape: { bandTop: r2(this.bandTop), view: ['none', 'carried', 'lift', 'spread', 'age'][this.dustView] ?? 'none', sandView: this.sandView, stormColour: [r2(this.stormColour.value.r), r2(this.stormColour.value.g), r2(this.stormColour.value.b)], stormSigma: r2(this.inflow.value.y) },
+      sand: { picture: this.sandTex ? 'whole' : this.sandPic ? `${this.sandPic.rows} of ${SAND_SIZE} rows made` : 'not begun (the grey stand-in)', phases: { tA: r2(this.phase.tA), tB: r2(this.phase.tB), cycles: [this.phase.kA, this.phase.kB] } },
       raster: { unknown: this.raster.unknown, asked: this.raster.asked, lowest: r2(this.raster.lowest), highest: r2(this.raster.highest), mean: r2(this.raster.mean) },
       obstacles: { boxes: this.obs.count, dropped: this.obs.dropped, gathers: this.obs.gathers, tooWide: this.obs.tooWide, rooms: this.obs.rooms, widest: { half: round4(this.obs.largest), at: [Math.round(this.obs.largestX), Math.round(this.obs.largestZ)], top: round4(this.obs.largestTop) } },
-      sources: { ...this.counts, queuedOneShots: this.forces.oneCount, enginesThisFrame: this.forces.engineCount },
+      sources: { ...this.counts, queuedOneShots: this.forces.oneCount, enginesThisFrame: this.forces.engineCount, frontsAlive: this.forces.frontCount },
       batch: { splats: this.forces.splatCount, of: SPLAT_BATCH, dust: this.forces.dustBatchCount, ofDust: DUST_BATCH },
       steps: this.stats.steps,
       draws: this.stats.draws,
@@ -1497,18 +1907,21 @@ export class AirField implements AirSource {
    * and the air's fastest; with `points`, the most dust within `radius` metres of each and the light pass's
    * transmittance toward the sun there. Never on a frame path.
    */
-  measure(points: readonly (readonly [number, number])[] = [], radius = 4): ({ dustTotal: number; dustPeak: number; peakAt: [number, number] | null; speedPeak: number; speed: { mean: number; peakAt: [number, number] | null; liftAt: number; overLift: number; overFourWinds: number }; samples: number; at: { x: number; z: number; dust: number | null; light: number | null; shed: number; medium: string }[]; solid: number | null; roomsOnly: number | null; tallest: number; upwind: { velocity: [number, number]; inflow: [number, number]; off: number } | null } & GroundMeasure) | null {
+  measure(points: readonly (readonly [number, number])[] = [], radius = 4): ({ dustTotal: number; dustPeak: number; peakAt: [number, number] | null; speedPeak: number; speed: { mean: number; peakAt: [number, number] | null; liftAt: number; overLift: number; overFourWinds: number }; samples: number; at: MeasurePoint[]; solid: number | null; roomsOnly: number | null; tallest: number; upwind: { velocity: [number, number]; inflow: [number, number]; off: number } | null; shape: ShapeMeasure | null } & GroundMeasure) | null {
     if (!this.dustPair || !this.vel) return null;
     const r = this.renderer;
     const dt = this.dustPair[0];
     const buf = readFloat(r, dt);
     if (!buf) return null;
+    // The shape the dust carries, the pair's second texture (from wave 2b).
+    const sbuf = readFloat(r, dt, 1);
     const w0 = this.win;
     const lt = this.lightTarget;
-    const lr = lt ? readByte(r, lt) : null;
-    const at0: { x: number; z: number; dust: number | null; light: number | null; shed: number; medium: string }[] = [];
+    const lr = lt ? readHalf(r, lt) : null;
+    const at0: MeasurePoint[] = [];
     for (const [x, z] of points) {
       let most: number | null = null;
+      let mostAt = -1;
       const span = Math.ceil(radius / (w0.size / dt.width));
       const ci = Math.floor(((x - w0.ox) / w0.size) * dt.width);
       const cj = Math.floor(((z - w0.oz) / w0.size) * dt.height);
@@ -1516,18 +1929,44 @@ export class AirField implements AirSource {
         for (let i = ci - span; i <= ci + span; i++) {
           if (i < 0 || j < 0 || i >= dt.width || j >= dt.height) continue;
           const a = buf[(j * dt.width + i) * 4 + 3];
-          if (Number.isFinite(a) && (most === null || a > most)) most = a;
+          if (Number.isFinite(a) && (most === null || a > most)) {
+            most = a;
+            mostAt = j * dt.width + i;
+          }
         }
       }
+      // The light pass's optical depth toward the sun at its four heights there, and the transmittance at the ground.
       let light: number | null = null;
+      let tau: number[] | null = null;
       if (lt && lr) {
         const li = Math.floor(((x - w0.ox) / w0.size) * lt.width);
         const lj = Math.floor(((z - w0.oz) / w0.size) * lt.height);
-        if (li >= 0 && lj >= 0 && li < lt.width && lj < lt.height) light = Math.round((lr.data[(lj * lt.width + li) * lr.comps] / 255) * 1000) / 1000;
+        if (li >= 0 && lj >= 0 && li < lt.width && lj < lt.height) {
+          const p = (lj * lt.width + li) * lr.comps;
+          tau = [];
+          for (let c = 0; c < Math.min(4, lr.comps); c++) tau.push(round4(THREE.DataUtils.fromHalfFloat(lr.data[p + c])));
+          light = round4(Math.exp(-Math.max(0, tau[0])));
+        }
+      }
+      // The densest texel's carried shape: its mean height, spread and age.
+      let mu: number | null = null;
+      let sigma: number | null = null;
+      let age: number | null = null;
+      let colour: [number, number, number] | null = null;
+      if (most !== null && most >= 1e-5 && mostAt >= 0) {
+        const k = mostAt * 4;
+        colour = [round4(buf[k] / most), round4(buf[k + 1] / most), round4(buf[k + 2] / most)];
+        if (sbuf) {
+          const m = sbuf[k] / most;
+          mu = round4(m);
+          sigma = round4(Math.sqrt(Math.max(sbuf[k + 1] / most - m * m, AIR_TUNE.dust.spreadMin * AIR_TUNE.dust.spreadMin)));
+          age = round4(sbuf[k + 3] / most);
+        }
       }
       const medium = this.raster.mediumAt(w0.ox, w0.oz, w0.cell, x, z);
-      at0.push({ x, z, dust: most === null ? null : Math.round(most * 10000) / 10000, light, shed: Math.round(this.raster.dustAt(w0.ox, w0.oz, w0.cell, x, z) * 1000) / 1000, medium: medium === 85 ? 'land' : medium === 170 ? 'water' : medium === 255 ? 'lava' : 'unknown' });
+      at0.push({ x, z, dust: most === null ? null : Math.round(most * 10000) / 10000, mu, sigma, age, colour, light, tau, shed: Math.round(this.raster.dustAt(w0.ox, w0.oz, w0.cell, x, z) * 1000) / 1000, medium: medium === 85 ? 'land' : medium === 170 ? 'water' : medium === 255 ? 'lava' : 'unknown' });
     }
+    const shape = sbuf ? this.shapeOver(buf, sbuf, dt.width, dt.height) : null;
     let total = 0;
     let peak = 0;
     let at = -1;
@@ -1614,7 +2053,47 @@ export class AirField implements AirSource {
       solid = round4(n / cells);
       roomsOnly = round4(g / cells);
     }
-    return { dustTotal: Math.round(total * 1000) / 1000, dustPeak: Math.round(peak * 10000) / 10000, peakAt, speedPeak: Math.round(speedPeak * 100) / 100, speed: { mean: Math.round((speedSum / Math.max(1, v.width * v.height)) * 100) / 100, peakAt: speedAt >= 0 ? [Math.round((w0.ox + ((speedAt % v.width) + 0.5) * (w0.size / v.width)) * 10) / 10, Math.round((w0.oz + (Math.floor(speedAt / v.width) + 0.5) * (w0.size / v.height)) * 10) / 10] : null, liftAt: round4(liftAt), overLift: round4(overLift / Math.max(1, v.width * v.height)), overFourWinds: round4(overWind / Math.max(1, v.width * v.height)) }, samples: dt.width * dt.height, at: at0, solid, roomsOnly, tallest: round4(tallest), upwind, ...this.measureGround(points, radius) };
+    return { dustTotal: Math.round(total * 1000) / 1000, dustPeak: Math.round(peak * 10000) / 10000, peakAt, speedPeak: Math.round(speedPeak * 100) / 100, speed: { mean: Math.round((speedSum / Math.max(1, v.width * v.height)) * 100) / 100, peakAt: speedAt >= 0 ? [Math.round((w0.ox + ((speedAt % v.width) + 0.5) * (w0.size / v.width)) * 10) / 10, Math.round((w0.oz + (Math.floor(speedAt / v.width) + 0.5) * (w0.size / v.height)) * 10) / 10] : null, liftAt: round4(liftAt), overLift: round4(overLift / Math.max(1, v.width * v.height)), overFourWinds: round4(overWind / Math.max(1, v.width * v.height)) }, samples: dt.width * dt.height, at: at0, solid, roomsOnly, tallest: round4(tallest), upwind, shape, ...this.measureGround(points, radius) };
+  }
+
+  /**
+   * The dust's shape over the window, read back (console only): the mean height and spread weighted by the dust's mass,
+   * the highest mean of any texel holding more than a trace and where it is, and the youngest and oldest dust.
+   */
+  private shapeOver(buf: Float32Array, sbuf: Float32Array, width: number, height: number): ShapeMeasure {
+    const w = this.win;
+    const trace = 1e-3;
+    let mass = 0;
+    let m1 = 0;
+    let m2 = 0;
+    let highest = 0;
+    let highestAt = -1;
+    let youngest: number | null = null;
+    let oldest: number | null = null;
+    for (let i = 0; i < width * height; i++) {
+      const D = buf[i * 4 + 3];
+      if (!(D >= trace) || !Number.isFinite(D)) continue;
+      const k = i * 4;
+      const mu = sbuf[k] / D;
+      const q = sbuf[k + 1] / D;
+      const age = sbuf[k + 3] / D;
+      if (!Number.isFinite(mu) || !Number.isFinite(q)) continue;
+      mass += D;
+      m1 += sbuf[k];
+      m2 += sbuf[k + 1];
+      if (mu > highest) {
+        highest = mu;
+        highestAt = i;
+      }
+      if (Number.isFinite(age)) {
+        if (youngest === null || age < youngest) youngest = age;
+        if (oldest === null || age > oldest) oldest = age;
+      }
+    }
+    const mean = mass > 0 ? m1 / mass : 0;
+    const spread = mass > 0 ? Math.sqrt(Math.max(m2 / mass - mean * mean, 0)) : 0;
+    const at: [number, number] | null = highestAt >= 0 ? [Math.round((w.ox + ((highestAt % width) + 0.5) * (w.size / width)) * 10) / 10, Math.round((w.oz + (Math.floor(highestAt / width) + 0.5) * (w.size / height)) * 10) / 10] : null;
+    return { mu: round4(mean), sigma: round4(spread), highest: round4(highest), highestAt: at, youngest: youngest === null ? null : round4(youngest), oldest: oldest === null ? null : round4(oldest) };
   }
 
   /**
@@ -1625,26 +2104,33 @@ export class AirField implements AirSource {
   private measureGround(points: readonly (readonly [number, number])[], radius: number): GroundMeasure {
     const r = this.renderer;
     const w = this.win;
-    let offsets: { peak: number; moved: number; peakAt: [number, number] | null } | null = null;
+    let offsets: { peak: number; moved: number; peakAt: [number, number] | null; blowing: number } | null = null;
     const op = this.offsetsPair;
     const oread = op ? readFloat(r, op[0]) : null;
     if (op && oread) {
       const n = op[0].width;
       let peak = 0;
       let moved = 0;
+      let blowing = 0;
       let at = -1;
+      const ph = this.phase;
+      const from = AIR_TUNE.sand.from;
       for (let i = 0; i < n * n; i++) {
-        const x = oread[i * 4];
-        const z = oread[i * 4 + 1];
-        const m = Math.sqrt(x * x + z * z);
+        const ax = oread[i * 4];
+        const az = oread[i * 4 + 1];
+        const bx = oread[i * 4 + 2];
+        const bz = oread[i * 4 + 3];
+        const m = Math.max(Math.sqrt(ax * ax + az * az), Math.sqrt(bx * bx + bz * bz));
         if (!Number.isFinite(m)) continue;
         if (m > 0.01) moved++;
+        // Blowing where the shader's strength would lay any sand: the carry read off the two phases past `sand.from`.
+        if (sandStrength(ax, az, bx, bz, ph.tA, ph.tB, AIR_TUNE.sand.cycle) > from) blowing++;
         if (m > peak) {
           peak = m;
           at = i;
         }
       }
-      offsets = { peak: round4(peak), moved, peakAt: at >= 0 ? [Math.round((w.ox + ((at % n) + 0.5) * (w.size / n)) * 10) / 10, Math.round((w.oz + (Math.floor(at / n) + 0.5) * (w.size / n)) * 10) / 10] : null };
+      offsets = { peak: round4(peak), moved, peakAt: at >= 0 ? [Math.round((w.ox + ((at % n) + 0.5) * (w.size / n)) * 10) / 10, Math.round((w.oz + (Math.floor(at / n) + 0.5) * (w.size / n)) * 10) / 10] : null, blowing: round4(blowing / (n * n)) };
     }
     let dents: { peak: number; total: number; pressed: number; peakAt: [number, number] | null } | null = null;
     const d = this.dents;
@@ -1681,9 +2167,8 @@ export class AirField implements AirSource {
         for (let j = cj - span; j <= cj + span; j++) {
           for (let i = ci - span; i <= ci + span; i++) {
             if (i < 0 || j < 0 || i >= n || j >= n) continue;
-            const ox = oread[(j * n + i) * 4];
-            const oz = oread[(j * n + i) * 4 + 1];
-            const m = Math.sqrt(ox * ox + oz * oz);
+            const p = (j * n + i) * 4;
+            const m = Math.max(Math.sqrt(oread[p] * oread[p] + oread[p + 1] * oread[p + 1]), Math.sqrt(oread[p + 2] * oread[p + 2] + oread[p + 3] * oread[p + 3]));
             if (Number.isFinite(m) && (off === null || m > off)) off = m;
           }
         }
@@ -1711,9 +2196,13 @@ export class AirField implements AirSource {
 
   /**
    * Known inputs through the programs, read back and held to `airMath.ts` (console only, a GPU sync, never in a frame):
-   * the fill, the dust settling over one tenth of a second of still air with nothing lifting it, and the light pass over
-   * even dust toward a sun 35 degrees up. Each answer says what it expected and what it read; every material's link log
-   * is listed. The fields are filled again from their inflow afterwards, so the air starts again from the wind.
+   * the fills (the dust's both outputs under both draw ways, the light's optical depth of nought), the dust settling
+   * over one tenth of a second of still air with a rising patch's shape and a falling one's stepped by the six laws
+   * (`dustShapeStep`, through the floor the pass writes through), a splat's amount and shape, and its colour against
+   * `tintedColourIn` over known bytes in the drawn ground's own tint mode, and the light pass's four heights over even
+   * dust toward a sun 35 degrees up against `lightDepthAt`. Each answer says what it expected and what it read; every
+   * material's link log is listed. The fields are filled again from their inflow afterwards, so the air starts again
+   * from the wind.
    */
   selfTest(): Record<string, unknown> {
     if (this.refused) return { refused: this.refused };
@@ -1743,29 +2232,73 @@ export class AirField implements AirSource {
       const mid = (this.vel![0].height >> 1) * this.vel![0].width + (this.vel![0].width >> 1);
       note('fill: velocity x', 3, vr ? THREE.DataUtils.fromHalfFloat(vr.data[mid * vr.comps]) : null, 0.01);
       note('fill: velocity z', -2, vr ? THREE.DataUtils.fromHalfFloat(vr.data[mid * vr.comps + 1]) : null, 0.01);
-      // The dust settling over 0.1 s in still air, nothing solid, nothing lifting it.
+      // Still air, nothing solid.
       value.set(0, 0, 0, 1);
       d.draw(fill, this.vel![0]);
       r.setClearColor(0x000000, 0);
       d.clear(this.obstacleMap);
       const dust = this.dustPair!;
-      value.set(0.2, 0.1, 0.05, 0.5);
-      d.draw(fill, dust[0]);
+      const fd = this.mats.fillDust.uniforms;
+      const fdV = fd.uValue.value as THREE.Vector4;
+      const fdS = fd.uShapeValue.value as THREE.Vector4;
+      const mid4 = ((dust[0].height >> 1) * dust[0].width + (dust[0].width >> 1)) * 4;
+      const dmid = mid4 + 3;
+      // The fill writes both of the dust's outputs, under both draw ways (wave 2b's two-texture pair).
+      for (const way of ['calls', 'direct'] as const) {
+        d.mode = way;
+        fdV.set(0.2, 0.1, 0.05, 0.5);
+        fdS.set(0.15, 0.08, -0.2, 1);
+        d.run(() => d.draw(this.mats.fillDust, dust[0]), this.home);
+        const a = readFloat(r, dust[0]);
+        const b = readFloat(r, dust[0], 1);
+        note(`fill (${way}): the dust's density`, 0.5, a ? a[dmid] : null, 1e-6);
+        note(`fill (${way}): the shape's second moment`, 0.08, b ? b[mid4 + 1] : null, 1e-6);
+        note(`fill (${way}): the shape's rise, below nought`, -0.2, b ? b[mid4 + 2] : null, 1e-6);
+      }
+      d.mode = 'calls';
+      // The dust settling over 0.1 s in still air, nothing lifting it, and its shape stepped by the six laws, once a
+      // rising patch and once a falling one (its rise below nought, which the floor must leave alone), each under one of
+      // the two draw ways: held to `dustShapeStep` through the floor the pass writes through (`shapeFloor`).
       const u = this.mats.dust.uniforms;
-      u.uDust.value = dust[0].texture;
       u.uVel.value = this.vel![0].texture;
       (u.uVelShift.value as THREE.Vector2).set(0, 0);
       (u.uDustShift.value as THREE.Vector2).set(0, 0);
-      this.dustP.set(0.1, dustDecayFrame(0.1, AIR_TUNE.dust.settle), 0, AIR_TUNE.dust.stormShed);
-      this.dustQ.x = 0;
-      u.uDustCount.value = 0;
-      d.draw(this.mats.dust, dust[1]);
-      const dr = readFloat(r, dust[1]);
-      const dmid = ((dust[1].height >> 1) * dust[1].width + (dust[1].width >> 1)) * 4 + 3;
-      note('dust: settles as (1 + h / settle)^(-dt / h)', 0.5 * dustDecayFrame(0.1, AIR_TUNE.dust.settle), dr ? dr[dmid] : null, 1e-4);
+      const decay = dustDecayFrame(0.1, AIR_TUNE.dust.settle);
+      const lawDt = 0.1;
+      const patches: { name: string; way: 'calls' | 'direct'; mu: number; s2: number; w: number; age: number }[] = [
+        { name: 'a rising patch', way: 'calls', mu: 0.3, s2: 0.0625, w: 2, age: 0.5 },
+        { name: 'a falling patch', way: 'direct', mu: 1.5, s2: 0.25, w: -0.4, age: 3 },
+      ];
+      for (const p of patches) {
+        const D0 = 0.5;
+        fdV.set(0.2, 0.1, 0.05, D0);
+        fdS.set(D0 * p.mu, D0 * (p.s2 + p.mu * p.mu), D0 * p.w, D0 * p.age);
+        d.draw(this.mats.fillDust, dust[0]);
+        u.uDust.value = dust[0].textures[0];
+        u.uShape.value = dust[0].textures[1];
+        this.dustP.set(lawDt, decay, 0, AIR_TUNE.dust.stormShed);
+        this.dustQ.set(0, 0, AIR_TUNE.dust.tint, 1);
+        this.frameDt = lawDt;
+        this.writeLaw();
+        u.uDustCount.value = 0;
+        d.mode = p.way;
+        d.run(() => d.draw(this.mats.dust, dust[1]), this.home);
+        d.mode = 'calls';
+        const dr = readFloat(r, dust[1]);
+        const sr = readFloat(r, dust[1], 1);
+        const t: ShapeTexel = { d: D0 * decay, r: D0 * p.mu * decay, g: D0 * (p.s2 + p.mu * p.mu) * decay, b: D0 * p.w * decay, a: D0 * p.age * decay };
+        dustShapeStep(t, this.law);
+        shapeFloor(t);
+        note(`dust (${p.way}): ${p.name} settles as (1 + h / settle)^(-dt / h)`, D0 * decay, dr ? dr[dmid] : null, 1e-4);
+        note(`dust (${p.way}): ${p.name}, D·μ by the laws`, t.r, sr ? sr[mid4] : null, 1e-4 + 1e-4 * Math.abs(t.r));
+        note(`dust (${p.way}): ${p.name}, D·(σ² + μ²) by the laws`, t.g, sr ? sr[mid4 + 1] : null, 1e-4 + 1e-4 * Math.abs(t.g));
+        note(`dust (${p.way}): ${p.name}, D·w by the laws (signed)`, t.b, sr ? sr[mid4 + 2] : null, 1e-4 + 1e-4 * Math.abs(t.b));
+        note(`dust (${p.way}): ${p.name}, D·age by the laws`, t.a, sr ? sr[mid4 + 3] : null, 1e-4 + 1e-4 * Math.abs(t.a));
+      }
       // The frame's dust batch, one splat on the middle texel of nothing: first over a ground of known dust (white land,
       // all dust, flat), so the batch and the shader are held apart from the rasters; then over the window's own ground,
-      // held to what the CPU raster says that cell gives. Settling is turned off for both (decay 1).
+      // held to what the CPU rasters say the ground there gives, read as the pass reads them. Settling is turned off for
+      // both (decay 1).
       {
         const D = dust[1];
         const cx = ((D.width >> 1) + 0.5) / D.width;
@@ -1777,56 +2310,154 @@ export class AirField implements AirSource {
         batch[1] = cz;
         batch[2] = 1 / (rr * rr);
         batch[3] = amount;
+        const shapeBatch = this.forces.dustShapeBatch;
+        shapeBatch[0] = 0.3;
+        shapeBatch[1] = 0.25;
+        shapeBatch[2] = 3;
+        shapeBatch[3] = 0;
         const known = this.knownGround();
         const keepGround = this.height.value;
-        value.set(0, 0, 0, 0);
+        fdV.set(0, 0, 0, 0);
+        fdS.set(0, 0, 0, 0);
         try {
-          d.draw(fill, dust[0]);
-          u.uDust.value = dust[0].texture;
+          d.draw(this.mats.fillDust, dust[0]);
+          u.uDust.value = dust[0].textures[0];
+          u.uShape.value = dust[0].textures[1];
           this.dustP.set(1 / 60, 1, 0, 0);
+          this.frameDt = 1 / 60;
+          this.writeLaw();
           u.uDustCount.value = 1;
           (u.uSlopeGate.value as THREE.Vector2).set(AIR_TUNE.dust.slopeFrom, AIR_TUNE.dust.slopeTo);
           u.uResponse.value = known.response;
           u.uColour.value = known.colour;
+          u.uTint.value = known.tint;
           this.height.value = known.height;
           d.draw(this.mats.dust, D);
           const kr = readFloat(r, D);
+          const ks = readFloat(r, D, 1);
           note('dust: a batch splat lays its amount over ground that gives all its dust', amount, kr ? kr[dmid] : null, 1e-3);
+          // The splat lays its own shape beside its dust: D·μ₀ and D·(σ₀² + μ₀²) where nothing was.
+          note("dust: the splat's shape, D·μ₀", amount * 0.3, ks ? ks[mid4] : null, 1e-3);
+          note("dust: the splat's shape, D·(σ₀² + μ₀²)", amount * (0.25 * 0.25 + 0.3 * 0.3), ks ? ks[mid4 + 1] : null, 1e-3);
+          note("dust: the splat's shape, D·w₀", amount * 3, ks ? ks[mid4 + 2] : null, 1e-3);
+          // The colour of a splat over a known colour and a known tint, against the dust pass's mirror (`tintedColourIn`)
+          // in the drawn ground's own mode, read off the tile program's uniforms the pass holds by reference.
+          d.draw(this.mats.fillDust, dust[0]);
+          u.uColour.value = known.colourLit;
+          u.uTint.value = known.tintLit;
+          d.draw(this.mats.dust, D);
+          const cr = readFloat(r, D);
+          const gt = u.uGroundTint.value as THREE.Vector4;
+          const gr0 = u.uGroundTintRef.value as THREE.Vector4;
+          const ref = { rgb: [gr0.x, gr0.y, gr0.z] as const, luminance: gr0.w };
+          const want = tintedColourIn(KNOWN_COLOUR, 0, KNOWN_TINT, 0, AIR_TUNE.dust.tint, srgbDecode, (c, out) => tintGamma(c, gt.x, ref, gt.y, out), { c: [0, 0, 0], t: [0, 0, 0] }, [0, 0, 0]);
+          const got = cr && cr[dmid] > 1e-6 ? [cr[mid4] / cr[dmid], cr[mid4 + 1] / cr[dmid], cr[mid4 + 2] / cr[dmid]] : null;
+          for (let ch = 0; ch < 3; ch++) note(`dust: a splat's colour, channel ${ch}, the lighter tones times the ground's tint (mode ${gt.x})`, want[ch], got ? got[ch] : null, 1e-3);
           u.uResponse.value = this.responseTex;
           u.uColour.value = this.colourTex;
+          u.uTint.value = this.tintTex;
           this.height.value = keepGround;
-          d.draw(fill, dust[0]);
+          d.draw(this.mats.fillDust, dust[0]);
           d.draw(this.mats.dust, D);
           const gr = readFloat(r, D);
+          // What the pass gives there, read as the pass reads it: the rasters filtered linearly at the texel's middle
+          // (a texel off its cell's middle takes a share of the cells round it), the land test on the filtered medium
+          // byte, and the slope's gate from the filtered heights a cell either way. Read off the one cell alone, the
+          // check failed wherever the window's middle stood on a border of two grounds or on a slope (a town's paving).
           const n = this.raster.n;
-          const ci = Math.min(n - 1, Math.floor(cx * n));
-          const cj = Math.min(n - 1, Math.floor(cz * n));
-          const k = (cj * n + ci) * 4;
-          const land = this.raster.colour[k + 3] === MEDIUM_BYTE.land ? 1 : 0;
-          const give = (this.raster.response[k + 3] / 255) * land;
-          note(`dust: over the window's own ground, the raster's dust there (${round4(give)}, ${land ? 'land' : 'not land'})`, amount * give, gr ? gr[dmid] : null, 0.15 * amount * give + 2e-3);
+          const at = (a: ArrayLike<number>, c: number, s: number, u: number, v: number): number => {
+            const x = u * n - 0.5;
+            const y = v * n - 0.5;
+            const i0 = Math.floor(x);
+            const j0 = Math.floor(y);
+            const fx = x - i0;
+            const fy = y - j0;
+            const get = (i: number, j: number): number => a[((Math.min(n - 1, Math.max(0, j)) * n + Math.min(n - 1, Math.max(0, i))) * s) + c];
+            return (get(i0, j0) * (1 - fx) + get(i0 + 1, j0) * fx) * (1 - fy) + (get(i0, j0 + 1) * (1 - fx) + get(i0 + 1, j0 + 1) * fx) * fy;
+          };
+          const rv = this.raster;
+          const land = Math.abs(at(rv.colour, 3, 4, cx, cz) / 255 - 0.3333) < 0.1 ? 1 : 0;
+          const tx = 1 / n;
+          const gx = (at(rv.height, 0, 1, cx + tx, cz) - at(rv.height, 0, 1, cx - tx, cz)) / (2 * this.win.cell);
+          const gz = (at(rv.height, 0, 1, cx, cz + tx) - at(rv.height, 0, 1, cx, cz - tx)) / (2 * this.win.cell);
+          const slope = (Math.atan(Math.sqrt(gx * gx + gz * gz)) * 180) / Math.PI;
+          const sf = AIR_TUNE.dust.slopeFrom;
+          const st = AIR_TUNE.dust.slopeTo;
+          let sg = st > sf ? (slope - sf) / (st - sf) : slope < sf ? 0 : 1;
+          sg = sg < 0 ? 0 : sg > 1 ? 1 : sg;
+          const gate = 1 - sg * sg * (3 - 2 * sg);
+          const give = (at(rv.response, 3, 4, cx, cz) / 255) * land * gate;
+          note(`dust: over the window's own ground, the raster's dust there as the pass reads it (${round4(give)}: ${land ? 'land' : 'not land'}, a ${round4(slope)}° slope)`, amount * give, gr ? gr[dmid] : null, 0.15 * amount * give + 2e-3);
         } finally {
           u.uResponse.value = this.responseTex;
           u.uColour.value = this.colourTex;
+          u.uTint.value = this.tintTex;
           this.height.value = keepGround;
           u.uDustCount.value = 0;
         }
       }
-      // The light pass over even dust of 0.5, the sun 35 degrees up, toward +X.
-      value.set(0.2, 0.1, 0.05, 0.5);
-      d.draw(fill, dust[0]);
-      const el = (35 * Math.PI) / 180;
-      const steps = this.tune.lightSteps;
-      const lu = this.mats.light.uniforms;
-      (lu.uSunDir.value as THREE.Vector2).set(1, 0);
-      lu.uSteps.value = steps;
-      this.lightP.set(lightStep(el, steps), AIR_TUNE.light.dust, AIR_TUNE.light.k, 0);
-      lu.uDust.value = dust[0].texture;
-      d.draw(this.mats.light, this.lightTarget!);
+      // A fill writes the light an optical depth of nought (a transmittance of one), from wave 2b.
       const lt = this.lightTarget!;
-      const lr = readByte(r, lt);
       const lmid = (lt.height >> 1) * lt.width + (lt.width >> 1);
-      note('light: exp(-k · steps · dust · share)', lightTransmittance(steps * 0.5 * AIR_TUNE.light.dust), lr ? lr.data[lmid * lr.comps] / 255 : null, 1.5 / 255);
+      value.set(0, 0, 0, 0);
+      d.draw(fill, lt);
+      const lf = readHalf(r, lt);
+      note('light: a fill writes an optical depth of nought', 0, lf ? THREE.DataUtils.fromHalfFloat(lf.data[lmid * lf.comps]) : null, 1e-6);
+      // The light pass at its four heights over even dust of 0.5 at 0.3 ± 0.25 m on flat ground, the sun 35 degrees up
+      // toward +X, against the mirror (`lightDepthAt`) of the march's own extinction.
+      {
+        const known = this.knownGround();
+        const keepGround = this.height.value;
+        try {
+          this.height.value = known.height;
+          const D0 = 0.5;
+          const mu = 0.3;
+          const sigma = 0.25;
+          fdV.set(0.2, 0.1, 0.05, D0);
+          fdS.set(D0 * mu, D0 * (sigma * sigma + mu * mu), 0, 0);
+          d.draw(this.mats.fillDust, dust[0]);
+          const el = (35 * Math.PI) / 180;
+          const steps = this.tune.lightSteps;
+          const lm = this.lightM;
+          lightMarchFor(el, steps, lm);
+          lm.sunX = 1;
+          lm.sunZ = 0;
+          lm.k = this.tune.dustSelfShadow * AIR_TUNE.dust.extinction * AIR_TUNE.dust.height;
+          lm.inflow = 0;
+          lm.stormSigma = 1;
+          lm.size = this.win.size;
+          this.writeHeights();
+          const hv = this.lightHeights.value;
+          lm.heights = [hv.x, hv.y, hv.z, hv.w];
+          const lu = this.mats.light.uniforms;
+          (lu.uSunDir.value as THREE.Vector2).set(1, 0);
+          lu.uSteps.value = steps;
+          this.lightP.set(lm.step, lm.slant, lm.rise, 0);
+          this.lightQ.set(lm.k, 1, lm.invSin, AIR_TUNE.dust.spreadMin);
+          lu.uDust.value = dust[0].textures[0];
+          lu.uShape.value = dust[0].textures[1];
+          d.draw(this.mats.light, lt);
+          const lr = readHalf(r, lt);
+          const want = lightDepthAt(
+            (_u: number, _v: number, s: LightSample) => {
+              s.d = D0;
+              s.mu = mu;
+              s.sigma = sigma;
+              s.ground = 0;
+            },
+            0.5,
+            0.5,
+            lm,
+            [0, 0, 0, 0],
+          );
+          for (let c = 0; c < 4; c++) {
+            const got = lr ? THREE.DataUtils.fromHalfFloat(lr.data[lmid * lr.comps + c]) : null;
+            note(`light: the optical depth toward the sun at ${lm.heights[c]} m`, want[c], got, 2e-3 + 2e-3 * want[c]);
+          }
+        } finally {
+          this.height.value = keepGround;
+        }
+      }
     } finally {
       d.mode = mode;
       r.setRenderTarget(sv.target);
@@ -1844,14 +2475,21 @@ export class AirField implements AirSource {
     return { ok: checks.every((c) => c.ok), checks, logs };
   }
 
-  private known: { response: THREE.DataTexture; colour: THREE.DataTexture; height: THREE.DataTexture } | null = null;
+  private known: KnownGround | null = null;
 
-  /** One texel each of white land that gives all its dust, flat at nought: the self test's ground (made the first time it runs). */
-  private knownGround(): { response: THREE.DataTexture; colour: THREE.DataTexture; height: THREE.DataTexture } {
+  /**
+   * One texel each of white land that gives all its dust, flat at nought, with no colour map (a tint of one); and a
+   * coloured land under a known tint (`KNOWN_COLOUR`, `KNOWN_TINT`): the self test's ground (made the first time it runs).
+   */
+  private knownGround(): KnownGround {
     if (!this.known) {
+      const byte = (data: Uint8Array, name: string): THREE.DataTexture => dataTexture(data, 1, THREE.RGBAFormat, THREE.UnsignedByteType, name);
       this.known = {
-        response: dataTexture(new Uint8Array([255, 255, 255, 255]), 1, THREE.RGBAFormat, THREE.UnsignedByteType, 'air.selfTest.response'),
-        colour: dataTexture(new Uint8Array([255, 255, 255, MEDIUM_BYTE.land]), 1, THREE.RGBAFormat, THREE.UnsignedByteType, 'air.selfTest.colour'),
+        response: byte(new Uint8Array([255, 255, 255, 255]), 'air.selfTest.response'),
+        colour: byte(new Uint8Array([255, 255, 255, MEDIUM_BYTE.land]), 'air.selfTest.colour'),
+        tint: byte(new Uint8Array([255, 255, 255, 0]), 'air.selfTest.tint'),
+        colourLit: byte(new Uint8Array(KNOWN_COLOUR), 'air.selfTest.colourLit'),
+        tintLit: byte(new Uint8Array(KNOWN_TINT), 'air.selfTest.tintLit'),
         height: dataTexture(new Float32Array([0]), 1, THREE.RedFormat, THREE.FloatType, 'air.selfTest.height'),
       };
     }
@@ -1860,7 +2498,7 @@ export class AirField implements AirSource {
 
   dispose(): void {
     this.releaseTargets();
-    if (this.known) for (const t of [this.known.response, this.known.colour, this.known.height]) t.dispose();
+    if (this.known) for (const t of [this.known.response, this.known.colour, this.known.tint, this.known.colourLit, this.known.tintLit, this.known.height]) t.dispose();
     this.known = null;
     this.obstacleMap.dispose();
     this.home.dispose();
@@ -1868,6 +2506,9 @@ export class AirField implements AirSource {
     this.heightTex?.dispose();
     this.responseTex?.dispose();
     this.colourTex?.dispose();
+    this.tintTex?.dispose();
+    this.sandTex?.dispose();
+    this.sandStand.dispose();
     for (const m of Object.values(this.mats)) m.dispose();
     this.obs.dispose();
     this.dents?.dispose();
@@ -1880,6 +2521,20 @@ export class AirField implements AirSource {
 
 const ZERO2 = new THREE.Vector2();
 const hullShift = new THREE.Matrix4();
+
+/** The self test's grounds (`AirField.knownGround`). */
+interface KnownGround {
+  response: THREE.DataTexture;
+  colour: THREE.DataTexture;
+  tint: THREE.DataTexture;
+  colourLit: THREE.DataTexture;
+  tintLit: THREE.DataTexture;
+  height: THREE.DataTexture;
+}
+
+/** A land's lighter tones (sRGB bytes, the medium byte in alpha) and a pole's colour-map bytes, for the self test's colour. */
+const KNOWN_COLOUR: readonly number[] = [200, 150, 100, MEDIUM_BYTE.land];
+const KNOWN_TINT: readonly number[] = [180, 120, 90, 255];
 const round4 = (v: number): number => Math.round(v * 10000) / 10000;
 
 /** How many components the card hands back reading `target` (its own read format: a red target may read as red alone). */
@@ -1904,11 +2559,11 @@ function readHalf(r: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget): { da
   }
 }
 
-/** An RGBA float target read back whole (console only), or null. */
-function readFloat(r: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget): Float32Array | null {
+/** An RGBA float target read back whole (console only), its `index`th texture for a target of several, or null. */
+function readFloat(r: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget, index = 0): Float32Array | null {
   try {
     const data = new Float32Array(target.width * target.height * 4);
-    r.readRenderTargetPixels(target, 0, 0, target.width, target.height, data);
+    r.readRenderTargetPixels(target, 0, 0, target.width, target.height, data, undefined, index);
     return data;
   } catch {
     return null;
@@ -1925,18 +2580,6 @@ function readRed(r: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget): Float
     const out = new Float32Array(target.width * target.height);
     for (let i = 0; i < out.length; i++) out[i] = data[i * comps];
     return out;
-  } catch {
-    return null;
-  }
-}
-
-/** A byte target read back whole (console only), or null. */
-function readByte(r: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget): { data: Uint8Array; comps: number } | null {
-  try {
-    const comps = readComps(r, target);
-    const data = new Uint8Array(target.width * target.height * comps);
-    r.readRenderTargetPixels(target, 0, 0, target.width, target.height, data);
-    return { data, comps };
   } catch {
     return null;
   }

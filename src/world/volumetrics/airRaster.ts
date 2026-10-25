@@ -8,7 +8,15 @@
 // A cell that is unknown takes no dust and no response (its medium byte is nought) and carries the window's mean
 // height, so nothing that reads it ever reads a NaN. The heights are float32: half floats step a metre at 1-2 km.
 //
+// **The colour raster stays bytes** (wave 2b, the design's §2.3): its RGB the family's lighter tones as sRGB, its
+// alpha the medium byte, which six readers compare as a byte. Beside it a **tint raster** holds each cell's pole's own
+// colour-map bytes, copied from the chunk the ground was built from as numbers it hands back whole (no number converted
+// on a moving frame), alpha 255 where the pole is known; the dust pass works the tint out per texel with the tile
+// program's own functions, and the CPU, where it needs the cell's colour (the motes, the storm's colour), through
+// `tintedAt` with the ground's own `tintGamma` and a decode table made once from its `srgbDecode`.
+//
 // Pure: no three; the field uploads these arrays as textures.
+import { srgbDecode, tintGammaOf, type TintAsk, type TintReference } from '../groundMath.ts';
 
 /** What the world answers for one point of the ground; the sampler writes it and answers false where it knows nothing yet. */
 export interface GroundSample {
@@ -18,7 +26,19 @@ export interface GroundSample {
   family: number;
   /** 1 land, 2 water, 3 lava. */
   medium: number;
+  /** The pole's colour-map bytes packed `0xRRGGBB`, or -1 where there are none (no chunk built, no colour map). */
+  tint: number;
 }
+
+/** sRGB bytes decoded, once, by the ground's own `srgbDecode`: what `tintedAt` reads a colour byte through. */
+const DECODE = ((): Float64Array => {
+  const t = new Float64Array(256);
+  for (let i = 0; i < 256; i++) t[i] = srgbDecode(i / 255);
+  return t;
+})();
+
+/** The decode table, for the tests (each byte `srgbDecode`'s by `Object.is`). */
+export const BYTE_DECODE: Readonly<Float64Array> = DECODE;
 
 export interface GroundSampler {
   sample(x: number, z: number, out: GroundSample): boolean;
@@ -33,10 +53,26 @@ export class AirRaster {
   height = new Float32Array(0);
   /** Moves, heals, gives over 3, dust: four bytes a cell. */
   response = new Uint8Array(0);
-  /** The dust's colour as sRGB bytes and the medium byte (`MEDIUM_BYTE`). */
+  /** The dust's colour as sRGB bytes (the family's lighter tones) and the medium byte (`MEDIUM_BYTE`). */
   colour = new Uint8Array(0);
+  /** The pole's own colour-map bytes, alpha 255 where known and there is a colour map, nought otherwise (a tint of one). */
+  tint = new Uint8Array(0);
   /** 1 where the cell is known. */
   known = new Uint8Array(0);
+  /**
+   * The family each known cell was painted from, plus one (nought for none): so a new colour table (the owner's `dust.tone`
+   * dial) repaints the colour bytes in place (`repaintColour`) rather than forgetting every cell and asking the world again
+   * over seconds, which left the dust laying nothing and the march reading a flat mean ground meanwhile.
+   */
+  fam = new Uint16Array(0);
+  /**
+   * How the ground's tint is drawn now, as `tintedAt` works it out: the tile program's mode (`COLOUR_MODES`' index), the
+   * world's colour reference, the gain cap, and how much of it the dust takes (`dust.tint`). Written by the world.
+   */
+  tintMode = 0;
+  tintRef: TintReference | null = null;
+  tintCap = 1.6;
+  tintShare = 1;
   /** Set when an array moved since the field last uploaded it. */
   dirty = false;
   /** The known cells' lowest, highest and mean ground (the volume's band and the far integral's ground). */
@@ -53,7 +89,12 @@ export class AirRaster {
   familyColour: Uint8Array = new Uint8Array(0);
   /** The colour a cell takes whose family has none: sRGB bytes. */
   fallback = [204, 168, 117];
-  private readonly s: GroundSample = { h: 0, family: -1, medium: 0 };
+  private readonly s: GroundSample = { h: 0, family: -1, medium: 0, tint: -1 };
+  /** `tintedAt`'s scratch: the tint's bytes as 0..1, and what `tintGamma` made of them. */
+  private readonly tc: [number, number, number] = [0.5, 0.5, 0.5];
+  private readonly tg: [number, number, number] = [0.5, 0.5, 0.5];
+  /** `tintedAt`'s ask of `tintGammaOf`: the mode, the reference and the cap (a fraction from the start, so never boxed). */
+  private readonly tintAsk: TintAsk = { mode: 0, ref: null, cap: 1.5 };
 
   /** A raster of `n` a side, every cell unknown. */
   resize(n: number): void {
@@ -62,7 +103,9 @@ export class AirRaster {
     this.height = new Float32Array(n * n);
     this.response = new Uint8Array(n * n * 4);
     this.colour = new Uint8Array(n * n * 4);
+    this.tint = new Uint8Array(n * n * 4);
     this.known = new Uint8Array(n * n);
+    this.fam = new Uint16Array(n * n);
     this.clear();
   }
 
@@ -71,7 +114,9 @@ export class AirRaster {
     this.height.fill(this.mean);
     this.response.fill(0);
     this.colour.fill(0);
+    this.tint.fill(0);
     this.known.fill(0);
+    this.fam.fill(0);
     this.unknown = this.n * this.n;
     this.cursor = 0;
     this.dirty = true;
@@ -95,7 +140,9 @@ export class AirRaster {
     shiftGrid(this.height, n, 1, dx, dz, 0);
     shiftGrid(this.response, n, 4, dx, dz, 0);
     shiftGrid(this.colour, n, 4, dx, dz, 0);
+    shiftGrid(this.tint, n, 4, dx, dz, 0);
     shiftGrid(this.known, n, 1, dx, dz, 0);
+    shiftGrid(this.fam, n, 1, dx, dz, 0);
     let unknown = 0;
     const kn = this.known;
     const h = this.height;
@@ -186,11 +233,13 @@ export class AirRaster {
     const cell = this.askCell;
     this.asked++;
     const was = this.known[k];
+    s.tint = -1;
     if (!src.sample(this.askOx + (i + 0.5) * cell, this.askOz + (j + 0.5) * cell, s) || !Number.isFinite(s.h)) {
       if (was) {
         this.known[k] = 0;
         this.colour[k * 4 + 3] = 0;
         this.response[k * 4 + 3] = 0;
+        this.tint[k * 4 + 3] = 0;
         this.unknown++;
         this.dirty = true;
       }
@@ -199,7 +248,6 @@ export class AirRaster {
     this.height[k] = s.h;
     const fam = s.family;
     const fr = this.familyResponse;
-    const fc = this.familyColour;
     const known = fam >= 0 && fam * 4 + 3 < fr.length;
     const p = k * 4;
     if (s.medium !== 1) {
@@ -220,7 +268,38 @@ export class AirRaster {
       this.response[p + 2] = 51;
       this.response[p + 3] = 153;
     }
-    if (known && fam * 4 + 3 < fc.length && fc[fam * 4 + 3] > 0) {
+    this.fam[k] = fam >= 0 && fam < 65535 ? fam + 1 : 0;
+    this.paintColour(p, known ? fam : -1);
+    this.colour[p + 3] = s.medium === 3 ? 255 : s.medium === 2 ? 170 : 85;
+    // The pole's own colour-map bytes as the terrain hands them back, a whole number packed (a version-3 pack, a
+    // real-elevation world or a pole no built chunk covers answers none: a tint of one).
+    const tint = s.tint;
+    if (tint >= 0) {
+      this.tint[p] = (tint >> 16) & 255;
+      this.tint[p + 1] = (tint >> 8) & 255;
+      this.tint[p + 2] = tint & 255;
+      this.tint[p + 3] = 255;
+    } else {
+      this.tint[p] = 255;
+      this.tint[p + 1] = 255;
+      this.tint[p + 2] = 255;
+      this.tint[p + 3] = 0;
+    }
+    if (!was) {
+      this.known[k] = 1;
+      this.unknown--;
+    }
+    this.dirty = true;
+  }
+
+  /**
+   * The colour bytes at `p` from the family table (`fam`, -1 for a family the response table does not know): the
+   * family's lighter tones where it has a colour, else the fallback. A cell's medium byte is not touched. Whole numbers
+   * only cross the call.
+   */
+  private paintColour(p: number, fam: number): void {
+    const fc = this.familyColour;
+    if (fam >= 0 && fam * 4 + 3 < fc.length && fc[fam * 4 + 3] > 0) {
       this.colour[p] = fc[fam * 4];
       this.colour[p + 1] = fc[fam * 4 + 1];
       this.colour[p + 2] = fc[fam * 4 + 2];
@@ -229,10 +308,23 @@ export class AirRaster {
       this.colour[p + 1] = this.fallback[1];
       this.colour[p + 2] = this.fallback[2];
     }
-    this.colour[p + 3] = s.medium === 3 ? 255 : s.medium === 2 ? 170 : 85;
-    if (!was) {
-      this.known[k] = 1;
-      this.unknown--;
+  }
+
+  /**
+   * A new colour table (the world's `familyColour`, made again when the owner's `dust.tone` dial moves) painted into every
+   * known cell's colour bytes from the family it was painted from, in one walk: the heights, the response, the medium
+   * byte, the tint and what is known all stand as they were, so the dust lays on as before and nothing is asked of the
+   * world again. The same bytes a cell asked afresh would take (`ask`'s own rule).
+   */
+  repaintColour(): void {
+    const n2 = this.n * this.n;
+    const kn = this.known;
+    const fa = this.fam;
+    const fr = this.familyResponse;
+    for (let k = 0; k < n2; k++) {
+      if (!kn[k]) continue;
+      const fam = fa[k] - 1;
+      this.paintColour(k * 4, fam >= 0 && fam * 4 + 3 < fr.length ? fam : -1);
     }
     this.dirty = true;
   }
@@ -260,6 +352,53 @@ export class AirRaster {
       this.mean = sum / count;
       for (let k = 0; k < n2; k++) if (!kn[k]) h[k] = this.mean;
     }
+  }
+
+  /**
+   * A cell's dust colour in linear light, into `out` (the dust pass's own colour, the motes' and the storm's): the colour
+   * raster's lighter tones decoded through the table, times the ground's own tint of the cell's pole (`tintGamma` in the
+   * drawn ground's mode, then `srgbDecode`), blended toward one by `tintShare`; a tint of one where the cell has no
+   * colour-map bytes. Answers false, and writes nothing, for a cell not known yet. Nothing made: the scratch is kept.
+   */
+  tintedAt(i: number, j: number, out: [number, number, number]): boolean {
+    const n = this.n;
+    if (i < 0 || j < 0 || i >= n || j >= n) return false;
+    const k = j * n + i;
+    if (this.known[k] !== 1) return false;
+    const p = k * 4;
+    const c = this.colour;
+    const t = this.tint;
+    const share = this.tintShare;
+    if (t[p + 3] > 0) {
+      const tc = this.tc;
+      tc[0] = t[p] / 255;
+      tc[1] = t[p + 1] / 255;
+      tc[2] = t[p + 2] / 255;
+      // The ask in a kept record (`tintGammaOf`, which `tintGamma` is): the cap handed across the call as a number was a
+      // number made in a process whose compiler did not build the call in (16 bytes a mote, a run in three, measured).
+      const ask = this.tintAsk;
+      ask.mode = this.tintMode;
+      ask.ref = this.tintRef;
+      ask.cap = this.tintCap;
+      const tg = tintGammaOf(tc, ask, this.tg);
+      out[0] = DECODE[c[p]] * (1 + (srgbDecode(tg[0]) - 1) * share);
+      out[1] = DECODE[c[p + 1]] * (1 + (srgbDecode(tg[1]) - 1) * share);
+      out[2] = DECODE[c[p + 2]] * (1 + (srgbDecode(tg[2]) - 1) * share);
+    } else {
+      out[0] = DECODE[c[p]];
+      out[1] = DECODE[c[p + 1]];
+      out[2] = DECODE[c[p + 2]];
+    }
+    return true;
+  }
+
+  /** The cell under a world point, as `i + j · n`, or -1 outside the window. */
+  cellAt(ox: number, oz: number, cell: number, x: number, z: number): number {
+    const i = Math.floor((x - ox) / cell);
+    const j = Math.floor((z - oz) / cell);
+    const n = this.n;
+    if (i < 0 || j < 0 || i >= n || j >= n) return -1;
+    return j * n + i;
   }
 
   /** The ground's height at a world point by the nearest cell, into `out.h`; false outside the window or where unknown. */
@@ -298,7 +437,7 @@ export class AirRaster {
  * Move a grid's content by (-dx, -dz) cells in place, `c` values a cell, filling what comes in with `fill`: the
  * window moving +dx means what was at column i is now at column i - dx.
  */
-export function shiftGrid(a: Float32Array | Uint8Array, n: number, c: number, dx: number, dz: number, fill: number): void {
+export function shiftGrid(a: Float32Array | Uint8Array | Uint16Array, n: number, c: number, dx: number, dz: number, fill: number): void {
   const row = n * c;
   if (dz > 0) {
     a.copyWithin(0, dz * row, n * row);

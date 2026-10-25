@@ -354,7 +354,8 @@ export class Terrain {
     if (r.families) {
       const key = `${cx},${cz}`;
       this.chunkFamilies.delete(key);
-      const grid: FamilyGrid = { fams: r.families, ox: origin.x, oz: origin.z, step: CHUNK_SIZE / CHUNK_RES, w: CHUNK_RES + 3 };
+      // The colour-map bytes beside the families (the array the mesh was built from, held), for the dust's tint.
+      const grid: FamilyGrid = { fams: r.families, ox: origin.x, oz: origin.z, step: CHUNK_SIZE / CHUNK_RES, w: CHUNK_RES + 3, cols: r.colours };
       this.chunkFamilies.set(key, grid);
       // Filed a second time by number, so the moving air's strips can ask on a frame with no key built (`familyIdAt`).
       const n = familyChunkNumber(cx, cz);
@@ -419,6 +420,24 @@ export class Terrain {
     const j = Math.round((z - g.oz) / g.step) + 1;
     if (i < 0 || j < 0 || i >= g.w || j >= g.w) return -1;
     return g.fams[j * g.w + i] ?? 0;
+  }
+
+  /**
+   * The colour-map bytes the ground was tinted with at a point, by number as `familyIdAt` answers the family (the same
+   * nearest sample of the same chunk): packed as 0xRRGGBB, -1 where no chunk is built or the chunk was built without
+   * the tile program (no colour map: a tint of one). The moving air's strips copy them into its tint raster; the
+   * answer is always a small integer, so nothing is made asking it.
+   */
+  colourIdAt(x: number, z: number): number {
+    const n = familyChunkNumber(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+    if (n < 0) return -1;
+    const g = this.familyByNumber.get(n);
+    if (!g || !g.cols) return -1;
+    const i = Math.round((x - g.ox) / g.step) + 1;
+    const j = Math.round((z - g.oz) / g.step) + 1;
+    if (i < 0 || j < 0 || i >= g.w || j >= g.w) return -1;
+    const k = (j * g.w + i) * 3;
+    return (g.cols[k] << 16) | (g.cols[k + 1] << 8) | g.cols[k + 2];
   }
 
   /**
@@ -583,7 +602,7 @@ export class Terrain {
     if (g.skirt === 0) geo.userData = { fullIndex: identity.slice(), n, ox, oz, step };
   }
 
-  private buildGrid(ox: number, oz: number, size: number, n: number, opts: { skirt: number; yOffset?: number; wantHeights: boolean }, samples?: FarGrid): { geometry: THREE.BufferGeometry; heights: Float32Array | null; families: Int32Array | null } {
+  private buildGrid(ox: number, oz: number, size: number, n: number, opts: { skirt: number; yOffset?: number; wantHeights: boolean }, samples?: FarGrid): { geometry: THREE.BufferGeometry; heights: Float32Array | null; families: Int32Array | null; colours: Uint8Array | null } {
     const step = size / n;
     const yOff = opts.yOffset ?? 0;
     const w = n + 3;
@@ -736,7 +755,7 @@ export class Terrain {
     const geo = new THREE.BufferGeometry();
     if (fams && tiler && kids && cols && swg) {
       this.tiledAttributes(geo, { ox, oz, n, step, w, skirt: opts.skirt, gridCount, skirtSource, positions, normals, indices, fams, kids, cols, tiler, swg });
-      return { geometry: geo, heights: physHeights, families: fams };
+      return { geometry: geo, heights: physHeights, families: fams, colours: cols };
     }
     if (fams) {
       // Textured ground: every triangle carries the families of its three corners and each vertex
@@ -780,13 +799,13 @@ export class Terrain {
       geo.setIndex(new THREE.BufferAttribute(identity, 1));
       geo.computeBoundingSphere();
       if (opts.skirt === 0) geo.userData = { fullIndex: identity.slice(), n, ox, oz, step };
-      return { geometry: geo, heights: physHeights, families: fams };
+      return { geometry: geo, heights: physHeights, families: fams, colours: null };
     }
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.setIndex(indices);
     geo.computeBoundingSphere();
-    return { geometry: geo, heights: physHeights, families: fams };
+    return { geometry: geo, heights: physHeights, families: fams, colours: null };
   }
 }

@@ -64,6 +64,12 @@ for (const [name, text] of Object.entries(all)) {
 }
 for (const name of ['march', 'resolve', 'composite']) ok(/if \(any\(isnan\(o\)\) \|\| any\(isinf\(o\)\)\)/.test(AIR_VOLUME_FRAGMENTS[name]), `airVolume.${name} zeroes a NaN or an Inf before it writes`);
 for (const name of ['splat', 'vort', 'div', 'jacobi', 'grad', 'advect', 'dust', 'light', 'offsets']) ok(AIR_FRAGMENTS[name].includes('finite4('), `air.${name} writes through finite4, so a NaN never leaves it`);
+// The dust takes its ground's tint by the tile program's own two functions, never a copy of them.
+{
+  const dust = AIR_FRAGMENTS.dust;
+  ok(dust.includes('vec3 groundTintOf( const in vec3 c ) {') && dust.includes('vec3 groundDecode( const in vec3 c ) {') && (dust.match(/vec3 groundTintOf\(/g) ?? []).length === 1 && (dust.match(/vec3 groundDecode\(/g) ?? []).length === 1, "the dust pass holds the tile program's groundTintOf and groundDecode, once each");
+  ok(source('world/volumetrics/airShaders.ts').includes('${GROUND_TINT_GLSL}') && source('world/volumetrics/airShaders.ts').includes('${GROUND_DECODE_GLSL}') && !source('world/volumetrics/airShaders.ts').includes('vec3 groundTintOf('), 'interpolated from the tile program\'s own exported text, never written out again');
+}
 ok(!/\bfxHalfTaps\s*\(|import[^;]*\bfxHalfTaps\b|FX_HALF_TAPS/.test(source('core/fx/airVolume.ts')),"the volume's upsample is its own size's, never fxHalfTaps (the clouds' bug)");
 ok(!/sampler2DShadow/.test(AIR_VERTEX) && !/textureLod\(tShadow|texture\(tShadow/.test(AIR_VERTEX), 'no shadow compare in a vertex stage');
 // The swirl is faded out across the window's edge band (the second wave measured it pumping jets along the edges, where
@@ -79,7 +85,25 @@ const field = new AirField(stub, newVolTune(), { ground: { sample: () => false }
 const pass = new AirVolumePass(() => field);
 const fieldMats = field.materials();
 const volumeMats = pass.materials().map((m) => m.material as THREE.ShaderMaterial);
-ok(fieldMats.length === 13 && volumeMats.length === 3, "the field lists its thirteen materials (the first wave's ten, the carried offsets and the dents' stamp and fade) and the volume its three (the warm-up's lists)");
+ok(fieldMats.length === 14 && volumeMats.length === 3, "the field lists its fourteen materials (the first wave's ten, the dust's two-output fill of the third, the blowing sand's offsets and the dents' stamp and fade) and the volume its three (the warm-up's lists)");
+// The dust pass and its fill write two outputs (wave 2b's two-texture pair): GLSL 3, each output declared once
+// and written, at locations 0 and 1.
+{
+  const mats = (field as unknown as { mats: Record<string, THREE.ShaderMaterial> }).mats;
+  for (const [name, outs] of [
+    ['dust', ['oDust', 'oShape']],
+    ['fillDust', ['oDust', 'oShape']],
+  ] as const) {
+    const m = mats[name];
+    const text = m.fragmentShader;
+    const declared = outs.every((o, i) => (text.match(new RegExp(`layout\\(location = ${i}\\) out highp vec4 ${o};`, 'g')) ?? []).length === 1);
+    const written = outs.every((o) => new RegExp(`\\b${o}\\s*=`).test(text));
+    ok(m.glslVersion === THREE.GLSL3 && declared && written && !text.includes('gl_FragColor'), `air.${name}: GLSL 3, its two outputs (${outs.join(', ')}) each declared once at its own location and written, and no gl_FragColor`);
+  }
+  ok(Object.entries(mats).every(([k, m]) => (k === 'dust' || k === 'fillDust' ? m.glslVersion === THREE.GLSL3 : m.glslVersion !== THREE.GLSL3)), 'and every other pass keeps its one output as it was');
+  const dust = mats.dust.fragmentShader;
+  ok(dust.includes('oShape = finite4(vec4(max(s.r, 0.0), max(s.g, 0.0), s.b, max(s.a, 0.0)));') && dust.includes('oDust = finite4(max(d, vec4(0.0)));'), "the dust pass's floor at nought is every channel's but the shape's B (D·w, signed: the fall)");
+}
 for (const m of [...fieldMats, ...volumeMats]) {
   if (m.name === 'air.obstacles') {
     ok(m.blending === THREE.CustomBlending && m.blendEquation === THREE.MaxEquation && m.toneMapped === false && m.depthTest === false && m.depthWrite === false, 'air.obstacles: MAX-blended on purpose, no tone curve, no depth');

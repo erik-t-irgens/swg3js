@@ -23,6 +23,7 @@ import { FX_FULLSCREEN_VERTEX, FX_LINEARIZE, FX_SLAB, FX_VIEW_POS } from './glsl
 import { SSAO_CSM_FADE_MARGIN } from './ssaoMath.ts';
 import type { AirSource } from '../../world/volumetrics/airField.ts';
 import { AIR_TUNE } from '../../world/volumetrics/airTune.ts';
+import { AIR_ERF_GLSL, AIR_PROFILE_GLSL } from '../../world/volumetrics/airShaders.ts';
 
 /** The march's loop bound: no setting asks for more samples (`AIR_TUNE.volume.maxSteps`, 48). */
 export const MAX_VOLUME_STEPS = 48;
@@ -37,6 +38,7 @@ precision highp sampler2DShadow;
 varying vec2 vUv;
 uniform sampler2D uDepth;
 uniform sampler2D uDust;
+uniform sampler2D uShape;
 uniform sampler2D uLight;
 uniform sampler2D uHeight;
 uniform sampler2D uObstacles;
@@ -77,10 +79,24 @@ uniform vec2 uCascade[3];
 uniform float uShadowRange;
 uniform int uCascadeFade;
 uniform float uShadowsOn;
+// From wave 2b: the light pass's four heights over the ground; the dust's look (how bright, the debug view, the
+// band's top, the thinnest spread); and H₀ with the near fade's two ends.
+uniform vec4 uLightH;
+uniform vec4 uLook;
+uniform vec4 uShapeP;
+#define uBright uLook.x
+#define uDustView uLook.y
+#define uBandTop uLook.z
+#define uSpreadMin uLook.w
+#define uH0 uShapeP.x
+#define uNearFrom uShapeP.y
+#define uNearTo uShapeP.z
 
 ${FX_LINEARIZE}
 ${FX_VIEW_POS}
 ${FX_SLAB}
+${AIR_ERF_GLSL}
+${AIR_PROFILE_GLSL}
 
 const float CSM_FADE_MARGIN = ${SSAO_CSM_FADE_MARGIN.toFixed(4)};
 
@@ -117,29 +133,35 @@ bool inWin(vec2 uv) { return uv.x >= 0.0 && uv.y >= 0.0 && uv.x <= 1.0 && uv.y <
 float phaseOf(float mu) { return uPhase.x + uPhase.y * pow(max(mu, 0.0), uPhase.z); }
 // How far a point is over the ground of the window under it.
 float overGround(vec3 p) { return p.y - texture(uHeight, windowUv(p)).r; }
-// Where the dust thins out: past four of its height scales, or the band's top.
-float bandTop() { return min(uAbove, 4.0 * uInflow.y); }
+// Where the dust thins out: the band's top the field worked out from the lifts it queued and the storm (from wave
+// 2b), never under four of H₀ and never over the band's own ceiling.
+float bandTop() { return min(uAbove, uBandTop); }
 bool inHull(vec3 p) {
   if (uHullBox.w < 0.5) return false;
   vec3 q = (uHullInverse * vec4(p, 1.0)).xyz;
   return all(lessThan(abs(q), uHullBox.xyz));
 }
+// The optical depth toward the sun at h metres over the ground, from the light pass's four heights: piecewise linear
+// between them, held at the lowest's below it and the highest's above it (lightDepthAtHeight is its mirror).
+float lightTau(vec4 t, float h) {
+  if (h <= uLightH.x) return t.x;
+  if (h <= uLightH.y) return mix(t.x, t.y, (h - uLightH.x) / max(uLightH.y - uLightH.x, 1e-3));
+  if (h <= uLightH.z) return mix(t.y, t.z, (h - uLightH.y) / max(uLightH.z - uLightH.y, 1e-3));
+  if (h <= uLightH.w) return mix(t.z, t.w, (h - uLightH.z) / max(uLightH.w - uLightH.z, 1e-3));
+  return t.w;
+}
 // The optical depth of the storm's dust along t0..t1 of a ray past the window, in closed form over the window's mean
-// ground: D · ∫ exp(-max(y - G, 0) / H) dt.
+// ground (from wave 2b): D standing as the half-normal of the storm's spread, nought under the ground,
+// D · (erf(b / σ√2) − erf(a / σ√2)) / |dy| (farHalfNormalDepth is its mirror).
 float farDepth(float t0, float t1, float cy, float dy, float D) {
   if (t1 <= t0 || D <= 0.0) return 0.0;
   float G = uBand.z;
-  float H = max(uInflow.y, 1e-3);
+  float s = max(uInflow.y, 1e-3);
   float y0 = cy + dy * t0 - G;
   float y1 = cy + dy * t1 - G;
-  if (abs(dy) < 1e-4) return D * exp(-max(y0, 0.0) / H) * (t1 - t0);
-  // Under the mean ground the dust is at its full; above it falls off.
-  float tg = clamp((G - cy) / dy, t0, t1);
-  float under = (y0 < 0.0 && y1 < 0.0) ? (t1 - t0) : (y0 < 0.0 ? tg - t0 : (y1 < 0.0 ? t1 - tg : 0.0));
-  float a0 = max(y0, 0.0);
-  float a1 = max(y1, 0.0);
-  float over = abs(H / dy * (exp(-a0 / H) - exp(-a1 / H)));
-  return D * (under + over);
+  if (abs(dy) < 1e-4) return D * airProfile(y0, 0.0, s) * (t1 - t0);
+  float k = 1.0 / (1.4142135623730951 * s);
+  return D * abs(airErf(max(y1, 0.0) * k) - airErf(max(y0, 0.0) * k)) / abs(dy);
 }
 void main() {
   vec3 dir = normalize(uViewToWorld * fxViewPos(vUv, 1.0, uTanHalfFov));
@@ -156,6 +178,11 @@ void main() {
   float ph = phaseOf(mu);
   vec3 acc = vec3(0.0);
   float T = 1.0;
+  // The debug view (a uniform branch): the first dusty sample's carried colour or shape, drawn opaque in place of the
+  // in-scatter.
+  bool viewing = uDustView > 0.5;
+  bool viewed = false;
+  vec3 view = vec3(0.0);
   float jitter = bayer4(gl_FragCoord.xy + vec2(mod(uFrame, 4.0), mod(floor(uFrame / 4.0), 4.0)));
   if (tb > ta) {
     // Where the ray lies in the band of air: height-only taps, a segment's margin each side.
@@ -192,13 +219,27 @@ void main() {
         if (texture(uObstacles, uv).g > hy) continue;
         if (inHull(p)) continue;
         vec4 d = texture(uDust, uv);
-        float dens = max(d.a, 0.0) * exp(-hy / max(uInflow.y, 1e-3)) * uExtinction * uAmount;
+        float D = max(d.a, 0.0);
+        if (D < 1e-5) continue;
+        // The patch's own carried shape (wave 2b's): its folded profile at its mean height and spread, so a
+        // unit of dust keeps the first wave's column wherever its mass sits.
+        vec4 sh = texture(uShape, uv);
+        float mu = sh.r / D;
+        float sg = sqrt(max(sh.g / D - mu * mu, uSpreadMin * uSpreadMin));
+        float dens = D * uH0 * airProfile(hy, mu, sg) * uExtinction * uAmount;
+        // The clear bubble round the lens: a uniform branch round the whole term, never a smoothstep of equal edges.
+        if (uNearTo > uNearFrom) dens *= smoothstep(uNearFrom, uNearTo, t);
         if (dens < 1e-4) continue;
         vec3 tint = d.a > 1e-4 ? d.rgb / d.a : uStormColour;
-        float toSun = uLightOn > 0.5 ? texture(uLight, uv + uLightShift).r : 1.0;
+        if (viewing) {
+          view = uDustView < 1.5 ? tint : vec3(uDustView < 2.5 ? mu / 10.0 : (uDustView < 3.5 ? sg / 4.0 : (sh.a / D) / 20.0));
+          viewed = true;
+          break;
+        }
+        float toSun = uLightOn > 0.5 ? exp(-max(lightTau(texture(uLight, uv + uLightShift), hy), 0.0)) : 1.0;
         float viewZ = dot(p - uCamera, uCamFwd);
         float vis = sunShadow(p, viewZ);
-        vec3 lit = tint * (uSunColor * ph * toSun * vis * uLightK.x + uAmbient * uLightK.y);
+        vec3 lit = tint * (uSunColor * ph * toSun * vis * uLightK.x + uAmbient * uLightK.y) * uBright;
         float fogT = exp(-(uFogDensity * t) * (uFogDensity * t));
         float a = 1.0 - exp(-dens * dt);
         acc += T * lit * a * fogT;
@@ -206,16 +247,22 @@ void main() {
       }
     }
   }
+  if (viewed) {
+    vec4 vo = vec4(view, 0.0);
+    if (any(isnan(vo)) || any(isinf(vo))) vo = vec4(0.0, 0.0, 0.0, 1.0);
+    gl_FragColor = vo;
+    return;
+  }
   // Past the window: the storm's dust along the rest of the ray, to the far reach, in closed form.
   if (uInflow.x > 0.0 && T > 0.02) {
     vec2 box = fxSlab(uCamera, dir, vec3(uWindow.x, -1e7, uWindow.y), vec3(uWindow.x + uWindow.z, 1e7, uWindow.y + uWindow.z));
     float t0 = max(box.y, 0.0);
     float t1 = min(tScene, uFarReach);
     if (t1 > t0) {
-      float tau = farDepth(t0, t1, uCamera.y, dir.y, uInflow.x * uExtinction * uAmount);
+      float tau = farDepth(t0, t1, uCamera.y, dir.y, uInflow.x * uH0 * uExtinction * uAmount);
       float mid = 0.5 * (t0 + t1);
       float fogT = exp(-(uFogDensity * mid) * (uFogDensity * mid));
-      vec3 lit = uStormColour * (uSunColor * ph * uLightK.x + uAmbient * uLightK.y);
+      vec3 lit = uStormColour * (uSunColor * ph * uLightK.x + uAmbient * uLightK.y) * uBright;
       float a = 1.0 - exp(-tau);
       acc += T * lit * a * fogT;
       T *= 1.0 - a;
@@ -376,6 +423,7 @@ export class AirVolumePass implements FxPass {
       uniforms: {
         uDepth: { value: null },
         uDust: { value: null },
+        uShape: { value: null },
         uLight: { value: null },
         uHeight: { value: null },
         uObstacles: { value: null },
@@ -416,6 +464,9 @@ export class AirVolumePass implements FxPass {
         uShadowRange: { value: 1 },
         uCascadeFade: { value: 0 },
         uShadowsOn: { value: 1 },
+        uLightH: { value: new THREE.Vector4(0, 2, 5, 10) },
+        uLook: { value: new THREE.Vector4(0.6, 0, 7.2, AIR_TUNE.dust.spreadMin) },
+        uShapeP: { value: new THREE.Vector4(AIR_TUNE.dust.height, AIR_TUNE.volume.nearFrom, AIR_TUNE.volume.nearTo, 0) },
       },
     });
     this.resolveMat = new THREE.ShaderMaterial({
@@ -484,9 +535,13 @@ export class AirVolumePass implements FxPass {
       field('response', 'rgb'),
       field('colour', 'rgb'),
       field('medium', 'a'),
-      field('light', 'r'),
-      // The ground's (the second wave's): the carried offsets, metres in red and green (a quarter metre to full), the
-      // dents, metres in red (ten centimetres to full).
+      // The light toward the sun (wave 2b's): an optical depth at four heights, the ground's in red, four to full.
+      field('light', 'rgb', 1 / 4),
+      // The shape the dust carries (premultiplied: D·μ in red, D·(σ² + μ²) in green, D·w in blue), and the tint raster.
+      field('shape', 'rgb', 1 / 4),
+      field('tint', 'rgb'),
+      // The ground's (the second wave's): the blowing sand's two phases, metres in red and green (phase A, a quarter
+      // metre to full), the dents, metres in red (ten centimetres to full).
       field('offsets', 'rgb', 4),
       field('dents', 'r', 10),
     ];
@@ -595,7 +650,16 @@ export class AirVolumePass implements FxPass {
     (u.uCamFwd.value as THREE.Vector3).set(-e[8], -e[9], -e[10]).normalize();
     u.uDepth.value = ctx.products.linearDepthHalf ?? null;
     u.uDust.value = src.dust.value;
+    u.uShape.value = src.shape.value;
     u.uLight.value = src.light.value;
+    (u.uLightH.value as THREE.Vector4).copy(src.lightHeights.value);
+    (u.uLook.value as THREE.Vector4).copy(src.look.value);
+    // H₀ and the near fade's two ends, its near end never past its far one.
+    const sp = u.uShapeP.value as THREE.Vector4;
+    const V = AIR_TUNE.volume;
+    sp.x = AIR_TUNE.dust.height;
+    sp.y = V.nearFrom < V.nearTo ? V.nearFrom : V.nearTo;
+    sp.z = V.nearTo;
     u.uHeight.value = src.height.value;
     u.uObstacles.value = src.obstacles.value;
     (u.uWindow.value as THREE.Vector4).copy(src.window.value);

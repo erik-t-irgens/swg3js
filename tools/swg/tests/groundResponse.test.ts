@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { classifyFamily, fillResponseTable, GROUND_OVERRIDES, responseOf, ruleClass, SURFACE_ALLOWS, surfaceWordOf, type FamilyFacts } from '../../../src/world/volumetrics/groundResponse.ts';
+import { classifyFamily, fillLayerResponse, fillResponseTable, GROUND_OVERRIDES, responseOf, ruleClass, SURFACE_ALLOWS, surfaceWordOf, type FamilyFacts } from '../../../src/world/volumetrics/groundResponse.ts';
 import { GROUND_CLASS_NAMES, GROUND_RESPONSE_CLASSES } from '../../../src/world/volumetrics/airTune.ts';
 import { parseTerrainTemplate } from '../../../src/swg/terrain/trn.ts';
 import { groundWorlds, PACKS } from './terrainHarness.ts';
@@ -80,6 +80,39 @@ for (const [k, [cls]] of Object.entries(GROUND_OVERRIDES)) ok(GROUND_CLASS_NAMES
   const fall = fillResponseTable('', [{ id: 2, name: 'sand_bumpy', surface: '', children: [] }, { id: 5, name: 'qqq', surface: '', children: [] }, { id: 99, name: 'sand', surface: '', children: [] }], out);
   ok(out[2 * 4 + 3] === 255 && out[2 * 4] === 255 && fall === 1 && out[5 * 4 + 3] === Math.round(GROUND_RESPONSE_CLASSES.dirt.dust * 255), 'the table: four bytes a family by id, a family past its size left out, the fallback counted');
   ok(responseOf('mud').dust === 0 && responseOf('wetsand').dust === 0 && responseOf('rock').dust < 0.2, 'mud and wet sand throw no dust, rock almost none');
+}
+// --- the per-layer lookup the ground's variant reads: two rows of four bytes a layer ---
+{
+  // Five families' responses and three families' colours (family 4 has a response and no colour row); six layers, two
+  // of them named by no family; a family past the response table and a layer past the lookup left out.
+  const response = new Uint8Array(5 * 4);
+  for (let f = 0; f < 5; f++) for (let c = 0; c < 4; c++) response[f * 4 + c] = 10 * (f + 1) + c;
+  const colour = new Uint8Array(4 * 4);
+  for (let f = 0; f < 4; f++) for (let c = 0; c < 4; c++) colour[f * 4 + c] = 100 + 20 * f + c;
+  const layers = 6;
+  const out = new Uint8Array(layers * 8).fill(77);
+  const childLayers = new Map<number, number[]>([
+    [1, [0, 3]],
+    [2, [1]],
+    [4, [5]],
+    [9, [2]],
+    [3, [7]],
+  ]);
+  const filed = fillLayerResponse(childLayers, response, out, colour);
+  const row = layers * 4;
+  const rowOf = (r: number, layer: number): number[] => Array.from(out.subarray(r * row + layer * 4, r * row + layer * 4 + 4));
+  const respOf = (f: number): number[] => Array.from(response.subarray(f * 4, f * 4 + 4));
+  const colOf = (f: number): number[] => Array.from(colour.subarray(f * 4, f * 4 + 4));
+  const eq = (a: number[], b: number[]): boolean => a.length === b.length && a.every((v, i) => v === b[i]);
+  const zero = [0, 0, 0, 0];
+  ok(filed === 4 && out.length >> 3 === layers, `the lookup holds out.length / 8 layers (${layers}) in two rows, and files a layer for every family's child it can (${filed}: a family past the table and a layer past the lookup left out)`);
+  ok(eq(rowOf(0, 0), respOf(1)) && eq(rowOf(0, 3), respOf(1)) && eq(rowOf(0, 1), respOf(2)) && eq(rowOf(0, 5), respOf(4)), "row 0 holds each layer's family's response bytes (moves, heals, gives, dust)");
+  ok(eq(rowOf(1, 0), colOf(1)) && eq(rowOf(1, 3), colOf(1)) && eq(rowOf(1, 1), colOf(2)), "row 1 its family's colour bytes, never written over row 0");
+  ok(eq(rowOf(1, 5), zero) && eq(rowOf(0, 5), respOf(4)), 'a family outside the colour table leaves its layer\'s colour row at nought, its response row filed');
+  ok(eq(rowOf(0, 2), zero) && eq(rowOf(1, 2), zero) && eq(rowOf(0, 4), zero) && eq(rowOf(1, 4), zero), 'a layer no family names (or only one past the response table) is nought in both rows: nothing blows over it');
+  const plain = new Uint8Array(layers * 8).fill(5);
+  fillLayerResponse(childLayers, response, plain);
+  ok(eq(Array.from(plain.subarray(0, row)), Array.from(out.subarray(0, row))) && plain.subarray(row).every((v) => v === 0), 'with no colour table, row 0 the same and row 1 all nought');
 }
 
 // --- every world on disk ---

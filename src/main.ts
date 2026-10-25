@@ -38,7 +38,7 @@ import { BODY_WALK, BODY_WALK_STATS, endBodyWalkFrame } from './world/mobiles/bo
 import { CROWD_SWITCHES, CROWD_TUNE, listsMover, tuneCrowd, type CrowdTune } from './world/mobiles/crowd.ts';
 import { crowdDialsFor } from './world/mobiles/crowdDials.ts';
 import { shadowDialsFor } from './world/shadowDials.ts';
-import { AIR_DRAW, probeAirDraws, type AirDrawMode } from './world/volumetrics/airDraw.ts';
+import { AIR_DRAW, checkAirTargets, probeAirDraws, type AirDrawMode } from './world/volumetrics/airDraw.ts';
 import { AIR_TUNE, GROUND_CLASS_NAMES, tuneAir, type GroundClass } from './world/volumetrics/airTune.ts';
 import { airDialsFor } from './world/volumetrics/airDials.ts';
 import { isVolKey, presetOf, VOL_APPLY_CLASS, VOL_KEYS, VOL_PRESET_LABELS, VOL_TUNE, volConsoleToSettings, volMemoryMB, volQualityFrom, type VolKey } from './world/volumetrics/volSettings.ts';
@@ -47,6 +47,7 @@ import { createFxQuad, FX_CAMERA } from './core/fx/pass.ts';
 import { resolveLinks } from './core/programQueue.ts';
 import { LIVE_GROUND_OVERRIDES } from './world/volumetrics/groundResponse.ts';
 import { groundAirSelfTest } from './world/volumetrics/airGround.ts';
+import type { AirField } from './world/volumetrics/airField.ts';
 import { SHADOW_PASS_TUNE, tuneShadowPass } from './world/shadowCadence.ts';
 import { SHADOW_SPLIT_TUNE, splitEnds, tuneShadowSplits } from './world/shadowSplits.ts';
 import type { AbReport } from './core/perfMath.ts';
@@ -869,8 +870,14 @@ interface AirDebugOptions {
   blast?: { radius?: number; push?: number };
   /** Read the fields back; `at` points (game x, z) answer the dust within `radius` and the light there. */
   measure?: boolean | { at?: [number, number][]; radius?: number };
-  /** Show a field through the debug view, or null to put the picture back. */
+  /**
+   * Show a field through the debug view, or null to put the picture back; from wave 2b also `carried`, `lift`,
+   * `spread` and `age` (the dust's carried colour, height, spread and age, drawn by the march itself in place of the
+   * in-scatter) and `sand` (the blowing sand's strength over the ground, drawn by the ground's variant).
+   */
   view?: string | null;
+  /** A Force front at your feet along the view (wave 2b's): push, pull or repulse, its reach in metres and its power. */
+  force?: { kind?: 'push' | 'pull' | 'repulse'; reach?: number; power?: number };
   /** Draw the step the plain way or inside one render call. */
   draw?: AirDrawMode;
   /** Known inputs through every program, held to `airMath.ts`, with the link logs. */
@@ -881,10 +888,15 @@ interface AirDebugOptions {
   family?: Record<string, string | null>;
   /** The ground's air variant drawn at its dials nought and one against the plain ground and `groundGate`'s mirror. */
   groundSelfTest?: boolean;
+  /** The two targets the dust's shape and the light's heights need, drawn and read back on this renderer (`checkAirTargets`). */
+  targets?: boolean;
 }
 
 /** The fields `__debug.air({ view })` shows. */
-const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'offsets', 'dents', 'inscatter', 'clear'] as const;
+const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'shape', 'tint', 'offsets', 'dents', 'inscatter', 'clear'] as const;
+
+/** The views the march draws itself (`AirSource.look`'s y), in its own order: the dust's carried colour, height, spread and age. */
+const AIR_MARCH_VIEWS = ['carried', 'lift', 'spread', 'age'] as const;
 
 /**
  * `localStorage['swg.vol'] = '0'`: the volumetrics are never constructed this session and the master greys on the page
@@ -12353,6 +12365,7 @@ class App {
       const batches = Math.max(3, Math.min(201, Math.round(o.batches ?? 31)));
       return { probe: probeAirDraws(this.renderer, o.probe, draws, batches) };
     }
+    if (o.targets) return { targets: checkAirTargets(this.renderer) };
     const out: Record<string, unknown> = {};
     const notes: string[] = [];
     if (o.tune) {
@@ -12418,11 +12431,39 @@ class App {
       this.world.refreshAirTables();
       out.family = Object.fromEntries(LIVE_GROUND_OVERRIDES);
     }
+    if (o.force) {
+      // A front at the feet along the view, as a Jedi's power makes one (`jedi.ts`'s own call, never touched).
+      const f = o.force;
+      const at = this.player.worldPos;
+      const dir = this.cam.forward(new THREE.Vector3());
+      dir.y = 0;
+      if (dir.lengthSq() < 1e-6) dir.set(0, 0, 1);
+      dir.normalize();
+      const kind = f.kind === 'pull' || f.kind === 'repulse' ? f.kind : 'push';
+      const reach = Number.isFinite(f.reach) ? (f.reach as number) : kind === 'repulse' ? 10 : 16;
+      const power = Number.isFinite(f.power) ? (f.power as number) : 1;
+      const before = air.forces.frontCount;
+      if (kind === 'repulse') air.force(at.x, at.y, at.z, 0, 0, power, 1, reach);
+      else air.force(at.x, at.y, at.z, dir.x, dir.z, power, kind === 'push' ? 1 : -1, reach);
+      out.force = { kind, at: [Math.round(at.x * 10) / 10, Math.round(at.z * 10) / 10], reach, power, made: air.forces.frontCount > before, alive: air.forces.frontCount };
+      if (air.forces.frontCount === before) notes.push(!air.forces.active ? 'no front: the moving air is not stepping here' : !air.forces.fromForce ? 'no front: the Force does not stir the air (volFromForce is off)' : 'no front: off the window, not a number, or eight already running (the counts say which)');
+    }
     if (o.groundSelfTest) out.groundSelfTest = groundAirSelfTest(this.renderer);
     if (o.view !== undefined) {
+      // A view of the march's own or the ground's goes off when any other is asked, the picture's too.
+      air.dustView = 0;
+      air.sandView = false;
       if (o.view === null) out.view = this.postfx?.fxView(null) ?? null;
-      else if ((AIR_VIEWS as readonly string[]).includes(o.view)) out.view = this.postfx ? this.postfx.fxView(`airVolume.${o.view}`) : 'the effects are off: turn Effects on to see a field';
-      else notes.push(`no field "${o.view}": ${AIR_VIEWS.join(', ')}`);
+      else if ((AIR_MARCH_VIEWS as readonly string[]).includes(o.view)) {
+        air.dustView = (AIR_MARCH_VIEWS as readonly string[]).indexOf(o.view) + 1;
+        this.postfx?.fxView(null);
+        out.view = `the march draws the first dusty sample's ${o.view === 'carried' ? 'carried colour (rgb / a, linear)' : o.view === 'lift' ? 'mean height, grey over 0 to 10 m' : o.view === 'spread' ? 'spread, grey over 0 to 4 m' : 'age, grey over 0 to 20 s'} in place of the in-scatter`;
+      } else if (o.view === 'sand') {
+        air.sandView = true;
+        this.postfx?.fxView(null);
+        out.view = "the ground draws the blowing sand's strength over each layer, grey, in place of its colour (while the sand's dial is above nought)";
+      } else if ((AIR_VIEWS as readonly string[]).includes(o.view)) out.view = this.postfx ? this.postfx.fxView(`airVolume.${o.view}`) : 'the effects are off: turn Effects on to see a field';
+      else notes.push(`no field "${o.view}": ${[...AIR_VIEWS, ...AIR_MARCH_VIEWS, 'sand'].join(', ')}`);
     }
     if (o.selfTest) out.selfTest = air.selfTest();
     if (o.measure) {
@@ -12528,6 +12569,8 @@ class App {
         // Both grounds, one stand-in each, through the queue as any scene object is (their lights are the world pass's).
         const stands = this.world.groundStandInsFor(air);
         if (stands.length) jobs.push(this.world.compileReady(stands, 'volumetrics: the ground'));
+        // The blowing sand's picture (wave 2b's), a slice of rows a frame, uploaded only once whole: the swap waits for it.
+        jobs.push(this.sandSlices(air));
         await Promise.all(jobs);
         // A change of mind, or another world arrived meanwhile (whose screen built a field of its own): throw this away.
         const changed = !VOL_TUNE.on || VOL_HATCH_OFF || !this.inWorld || this.postfx !== chain || this.world.packId !== world || (this.world.air !== null && this.world.air !== air);
@@ -12557,6 +12600,14 @@ class App {
         this.menu.redrawGraphics();
       }
     }
+  }
+
+  /**
+   * The blowing sand's picture made a slice a frame (`AirField.sandSlice`, `SAND_ROWS_A_FRAME` rows, about 1.5 ms each),
+   * for the master's in-play warm; a hidden tab, which draws no frames, goes on after a tenth of a second each.
+   */
+  private async sandSlices(air: AirField): Promise<void> {
+    while (!air.sandSlice()) await this.waitFrames(1, 100);
   }
 
   /** One of a pass's materials compiled for the target it draws into, finished when asked (the in-play warm's own compile). */

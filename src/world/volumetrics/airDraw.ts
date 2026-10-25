@@ -177,6 +177,125 @@ export function compileAirMaterial(renderer: THREE.WebGLRenderer, material: THRE
   props.currentProgram?.getUniforms();
 }
 
+/** What `checkAirTargets` found: each target wave 2b's dust and light need, written and read back. */
+export interface AirTargetCheck {
+  ok: boolean;
+  /** A two-texture float32 target drawn by one program with two outputs, the plain way and the direct way: each attachment read back. */
+  twoOutputs: { mode: AirDrawMode; first: number[] | null; second: number[] | null; ok: boolean }[];
+  /** A half-float target drawn into and read back, and the same texture filtered linearly half a texel between two values. */
+  halfFloat: { written: number[] | null; filtered: number | null; ok: boolean };
+  note: string;
+}
+
+const TWO_OUTPUT_FRAGMENT = /* glsl */ `
+precision highp float;
+varying vec2 vUv;
+uniform vec4 uA;
+uniform vec4 uB;
+layout(location = 0) out vec4 oFirst;
+layout(location = 1) out vec4 oSecond;
+void main() {
+  oFirst = uA;
+  oSecond = uB;
+}`;
+
+const HALF_WRITE_FRAGMENT = /* glsl */ `
+precision highp float;
+varying vec2 vUv;
+uniform vec4 uA;
+uniform vec4 uB;
+void main() { gl_FragColor = vUv.x < 0.5 ? uA : uB; }`;
+
+const HALF_READ_FRAGMENT = /* glsl */ `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D uSrc;
+void main() { gl_FragColor = vec4(texture(uSrc, vec2(0.5, 0.5)).r, 0.0, 0.0, 1.0); }`;
+
+/**
+ * The two checks wave 2b builds on (DESIGN §10's Start), on the game's own renderer: (1) a two-attachment float32
+ * target written by one program with two outputs, drawn the plain way and the direct way, both attachments read back --
+ * nothing of the air drew into a multi-target before; (2) a half-float target rendered into and read back, and filtered
+ * linearly half a texel between two values -- the light pass's four heights. Console only: it allocates as it likes and
+ * puts the renderer's target back.
+ */
+export function checkAirTargets(renderer: THREE.WebGLRenderer): AirTargetCheck {
+  const near = (a: number[] | null, b: readonly number[], tol: number): boolean => !!a && a.length === b.length && a.every((v, i) => Math.abs(v - b[i]) <= tol);
+  const prev = renderer.getRenderTarget();
+  const auto = renderer.autoClear;
+  renderer.autoClear = false;
+  const opts = { depthBuffer: false, stencilBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, generateMipmaps: false } as const;
+  const two = new THREE.WebGLRenderTarget(4, 4, { ...opts, type: THREE.FloatType, format: THREE.RGBAFormat, count: 2 });
+  const home = new THREE.WebGLRenderTarget(1, 1, { ...opts, type: THREE.HalfFloatType, format: THREE.RedFormat });
+  const half = new THREE.WebGLRenderTarget(2, 1, { ...opts, type: THREE.HalfFloatType, format: THREE.RGBAFormat });
+  const one = new THREE.WebGLRenderTarget(1, 1, { ...opts, type: THREE.FloatType, format: THREE.RGBAFormat });
+  const mk = (fragment: string, uniforms: Record<string, THREE.IUniform>, glsl3: boolean): THREE.ShaderMaterial =>
+    new THREE.ShaderMaterial({ vertexShader: FX_FULLSCREEN_VERTEX, fragmentShader: fragment, uniforms, blending: THREE.NoBlending, toneMapped: false, depthTest: false, depthWrite: false, ...(glsl3 ? { glslVersion: THREE.GLSL3 } : {}) });
+  const twoMat = mk(TWO_OUTPUT_FRAGMENT, { uA: { value: new THREE.Vector4() }, uB: { value: new THREE.Vector4() } }, true);
+  const writeMat = mk(HALF_WRITE_FRAGMENT, { uA: { value: new THREE.Vector4(0, 0.25, 1.5, 3) }, uB: { value: new THREE.Vector4(1, 0.5, 2.5, 10) } }, false);
+  const readMat = mk(HALF_READ_FRAGMENT, { uSrc: { value: half.texture } }, false);
+  const drawer = new AirDrawer(renderer);
+  const out: AirTargetCheck = { ok: false, twoOutputs: [], halfFloat: { written: null, filtered: null, ok: false }, note: '' };
+  try {
+    compileAirMaterial(renderer, twoMat, createFxQuad(twoMat), two);
+    compileAirMaterial(renderer, writeMat, createFxQuad(writeMat), half);
+    compileAirMaterial(renderer, readMat, createFxQuad(readMat), one);
+    const read = (index: number): number[] | null => {
+      try {
+        const b = new Float32Array(4 * 4 * 4);
+        renderer.readRenderTargetPixels(two, 0, 0, 4, 4, b, undefined, index);
+        return Array.from(b.subarray(5 * 4, 5 * 4 + 4));
+      } catch {
+        return null;
+      }
+    };
+    const cases: [AirDrawMode, number[], number[]][] = [
+      ['calls', [1, 2, 3, 4], [5, -6, 7, 8]],
+      ['direct', [-1.5, 0.25, 9, 0.125], [11, 12, -0.5, 13]],
+    ];
+    for (const [mode, a, b] of cases) {
+      drawer.mode = mode;
+      (twoMat.uniforms.uA.value as THREE.Vector4).fromArray(a);
+      (twoMat.uniforms.uB.value as THREE.Vector4).fromArray(b);
+      drawer.run(() => drawer.draw(twoMat, two), home);
+      const first = read(0);
+      const second = read(1);
+      out.twoOutputs.push({ mode, first, second, ok: near(first, a, 1e-6) && near(second, b, 1e-6) && drawer.broken === null });
+    }
+    drawer.mode = 'calls';
+    drawer.run(() => drawer.draw(writeMat, half), home);
+    let written: number[] | null = null;
+    try {
+      const h = new Uint16Array(2 * 4);
+      renderer.readRenderTargetPixels(half, 0, 0, 2, 1, h);
+      written = Array.from(h, (v) => THREE.DataUtils.fromHalfFloat(v));
+    } catch {
+      written = null;
+    }
+    drawer.run(() => drawer.draw(readMat, one), home);
+    let filtered: number | null = null;
+    try {
+      const f = new Float32Array(4);
+      renderer.readRenderTargetPixels(one, 0, 0, 1, 1, f);
+      filtered = f[0];
+    } catch {
+      filtered = null;
+    }
+    out.halfFloat = { written, filtered, ok: near(written, [0, 0.25, 1.5, 3, 1, 0.5, 2.5, 10], 1e-3) && filtered !== null && Math.abs(filtered - 0.5) <= 2e-3 };
+  } finally {
+    renderer.setRenderTarget(prev);
+    renderer.autoClear = auto;
+    for (const t of [two, home, half, one]) t.dispose();
+    for (const m of [twoMat, writeMat, readMat]) m.dispose();
+    drawer.dispose();
+  }
+  out.ok = out.twoOutputs.every((c) => c.ok) && out.halfFloat.ok;
+  out.note = out.ok
+    ? 'both draw ways write both attachments of a two-texture float32 target, and a half-float target renders and filters linearly'
+    : 'a check failed: see each case. Nothing falls back on its own: the dust pass writes its shape as its second output whichever way it is drawn (no second draw is built), and the field refuses to run at all only where float targets cannot be rendered into (EXT_color_buffer_float, which covers the light\'s half floats), so a failure here with the field running is a fault to report';
+  return out;
+}
+
 /** What a probe found: the median and mean microseconds a draw cost the main thread, over its batches. */
 export interface AirProbeResult {
   mode: AirDrawMode;

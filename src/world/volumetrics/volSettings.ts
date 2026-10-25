@@ -36,6 +36,8 @@ export const VOL_SCENE_KEYS = [
   'volArtPrints',
   'volArtShade',
   'volFromFeet',
+  'volDustBright',
+  'volDustSelfShadow',
 ] as const satisfies readonly (keyof Settings)[];
 
 /** The volumetrics' keys the effects chain reads (`fxRegistry.ts`): the master and the volume's own. */
@@ -74,6 +76,10 @@ export const VOL_RANGES = {
   volArtSand: { min: 0, max: 1, step: 0.05 },
   volArtPrints: { min: 0, max: 1.5, step: 0.05 },
   volArtShade: { min: 0, max: 1, step: 0.05 },
+  // Wave 2b's look of the dust: how bright it is drawn (1 the first wave's sun and ambient, 0.6 the start, the
+  // design's §2.8 arithmetic) and how strongly it shades itself toward the sun (1 the march's own extinction).
+  volDustBright: { min: 0, max: 2, step: 0.05 },
+  volDustSelfShadow: { min: 0, max: 2, step: 0.05 },
 } as const;
 
 /** The quality keys a preset writes, in this build. */
@@ -206,6 +212,9 @@ export interface VolTune {
   artShade: number;
   /** A footstep on ground that keeps marks presses a dent rather than laying today's decal. */
   fromFeet: boolean;
+  /** How bright the dust is drawn (both its sun and its ambient), and how strongly it shades itself toward the sun (wave 2b's). */
+  dustBright: number;
+  dustSelfShadow: number;
 }
 
 export function newVolTune(): VolTune {
@@ -241,6 +250,8 @@ export function newVolTune(): VolTune {
     artPrints: 0.5,
     artShade: 0.5,
     fromFeet: true,
+    dustBright: 0.5,
+    dustSelfShadow: 0.5,
   };
 }
 
@@ -290,6 +301,9 @@ export function volQualityFrom(s: Pick<Settings, VolKey | 'effects'>, out: VolTu
   out.artPrints = over.volArtPrints !== undefined ? Math.max(0, Math.min(4, n('volArtPrints'))) : clampRange(n('volArtPrints'), R.volArtPrints, 1);
   out.artShade = over.volArtShade !== undefined ? Math.max(0, Math.min(1, n('volArtShade'))) : clampRange(n('volArtShade'), R.volArtShade, 1);
   out.fromFeet = b('volFromFeet');
+  // The dust's look: past the page's end from the console, held only to what cannot break anything (nothing negative).
+  out.dustBright = over.volDustBright !== undefined ? Math.max(0, Math.min(8, n('volDustBright'))) : clampRange(n('volDustBright'), R.volDustBright, 0.6);
+  out.dustSelfShadow = over.volDustSelfShadow !== undefined ? Math.max(0, Math.min(8, n('volDustSelfShadow'))) : clampRange(n('volDustSelfShadow'), R.volDustSelfShadow, 1);
   return out;
 }
 
@@ -329,6 +343,8 @@ export const VOL_APPLY_CLASS: Readonly<Record<VolKey, 'W' | 'C' | 'T' | 'U' | 'M
   volArtPrints: 'U',
   volArtShade: 'U',
   volFromFeet: 'C',
+  volDustBright: 'U',
+  volDustSelfShadow: 'U',
 };
 
 /** One console field as a setting: the key, its value, and whether the page's control can hold it. */
@@ -400,14 +416,16 @@ export function volMemoryMB(t: VolTune, width: number, height: number): number {
   // Velocity pair RG16F (4 bytes), pressure pair R16F (2), divergence R16F, obstacles RG16F (red the walls, green the
   // walls and a compound's rooms: 4).
   let bytes = cells * (4 * 2 + 2 * 2 + 2 + 4);
-  // The rasters: height R32F, response RGBA8, colour RGBA8.
-  bytes += cells * (4 + 4 + 4);
-  // The dust pair, RGBA32F.
+  // The rasters: height R32F, response RGBA8, colour RGBA8, and (wave 2b's) the colour map's tint RGBA8.
+  bytes += cells * (4 + 4 + 4 + 4);
+  // The dust pair, RGBA32F, two attachments each from wave 2b: the colour and density, and the shape it carries.
   const d = n * t.dustDetail;
-  bytes += d * d * 16 * 2;
-  // The light, R8.
+  bytes += d * d * 16 * 2 * 2;
+  // The light toward the sun: RGBA16F from wave 2b, an optical depth at each of four heights.
   const l = n * t.lightDetail;
-  bytes += l * l;
+  bytes += l * l * 8;
+  // The blowing sand's picture, 256² RGBA8 with its mips (wave 2b's), while the master is on.
+  bytes += Math.round(256 * 256 * 4 * (4 / 3));
   // The ground's carried offsets, an RGBA32F pair (16 bytes a texel: float32, since a half float stalls a drift), and the
   // dents, one R32F target over their square (the second wave's): each held only while its switch is on, a texel across
   // otherwise (`AirField.ensureTargets`), so each is counted only then.

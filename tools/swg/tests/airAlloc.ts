@@ -49,12 +49,14 @@ const renderer = {
   properties: { get: (): object => ({}) },
 } as unknown as THREE.WebGLRenderer;
 
-// The ground: rolling sand, whole metres (a number the engine hands back without making one), every cell known.
+// The ground: rolling sand, whole metres (a number the engine hands back without making one), every cell known, its
+// pole's colour-map bytes a tint that is not one (wave 2b's tint raster, filled in the moving frames' strips).
 const ground: GroundSampler = {
   sample(x: number, z: number, out: GroundSample): boolean {
     out.h = ((x | 0) >> 4) & 3;
     out.family = 1;
     out.medium = 1;
+    out.tint = 0x806040 | (((z | 0) & 15) << 4);
     return true;
   },
 };
@@ -97,8 +99,19 @@ hulls.push(hull(-15, -18, true, 7));
 
 const tune = newVolTune();
 tune.on = true;
-const field = new AirField(renderer, tune, { ground, boxes: null, hulls });
+// The drawn ground's tint uniforms, held by reference as the world hands them over: normalised, with a reference.
+const groundTint = { uGroundTint: { value: new THREE.Vector4(2, 1.6, 1, 0) }, uGroundTintRef: { value: new THREE.Vector4(0.42, 0.37, 0.3, 0.38) } };
+const field = new AirField(renderer, tune, { ground, boxes: null, hulls, groundTint });
 field.forces.onGrains = null;
+// The raster's tint as the world writes it from those uniforms each frame: the normalised mode, so `tintedAt` runs
+// `tintGamma`'s arithmetic for every cell the storm's colour and the motes read.
+field.raster.tintMode = 2;
+field.raster.tintCap = 1.6;
+field.raster.tintRef = { rgb: [0.42, 0.37, 0.3], luminance: 0.38 };
+// The blowing sand's picture made whole before anything is measured (the in-play warm's slices, here at once).
+while (!field.sandSlice(256)) {
+  // a slice at a time
+}
 // Bound to a record of the ground variant's uniforms, as the world binds the field it takes: every frame then copies the
 // field's own values into it (`copyAirGround`), which is measured with the rest.
 field.bindGround(makeAirGroundUniforms());
@@ -129,15 +142,25 @@ inp.sunZ = 0.69;
 const state = { frame: 0, camX: 0.25, camZ: -0.5, moved: 0, movingCalls: 0 };
 // A foot landing, the feet's own kept record as `BodySounds` fills it: on the sand by the camera, its height the ground's.
 const step: FootStep = { key: 7, kind: 'mobile', label: 'a walker', surface: 'sand', from: 'terrain', x: 2, y: 0, z: 1, heading: 0.3, scale: 1, inside: false, deck: null, ground: null };
+/** The motes' colour, read through `tintedAt` as the world's emitter reads it: a kept record. */
+const mote: [number, number, number] = [0.5, 0.5, 0.5];
 
 function steady(): void {
   const f = state.frame++;
   inp.camX = state.camX;
   inp.camZ = state.camZ;
   inp.time += DT;
-  // A blast and a push queued every frame (each a one-shot owed the next step), so their code runs as the frame's does.
+  // A blast queued every frame (a one-shot owed the next step), so its code runs as the frame's does.
   field.blast(5, 0, 5, 7, 14, 0);
-  field.force(0, 0, 0, 1, 0, 1, 1, 16);
+  // A push, a pull and a repulse begun every 70 frames: fronts alive through about half the frames, each walked every
+  // frame, its air laid on each step and its dust on each frame by the band it crossed (wave 2b).
+  if (f % 70 === 0) {
+    field.force(0, 0, 0, 1, 0, 1, 1, 16);
+    field.force(0, 0, 0, 0, 1, 1, -1, 16);
+    field.force(2, 0, 2, 0, 0, 1, 1, 12);
+  }
+  // A mote's colour, as the world's emitter asks it of the field's own raster.
+  field.raster.tintedAt(32 + (f & 63), 64, mote);
   // A footstep twice a second, walking: today's prints' rules, a dent pressed.
   if ((f & 63) === 0) {
     step.x = state.camX + ((f >> 6) & 7) * 0.5;
@@ -296,9 +319,34 @@ const sources = field.dents?.slots ?? 0;
 const MOVING = 50_000;
 const resetsBefore = field.win.resets;
 const m = await measure(moving, MOVING);
+if (process.argv[2] === 'why' && (m.scavenges > 0 || m.made / MOVING >= 0.2)) {
+  // A process whose moving frames came out dirty (the bimodal case): where they make it, over a window of the very
+  // frames measured, the sampling heap profiler keeping what the minor collector took (W2's way of finding them).
+  const { Session } = await import('node:inspector/promises');
+  const session = new Session();
+  session.connect();
+  await session.post('HeapProfiler.enable');
+  await session.post('HeapProfiler.startSampling', { samplingInterval: 64, includeObjectsCollectedByMinorGC: true, includeObjectsCollectedByMajorGC: true });
+  frames(moving, 20_000);
+  const { profile } = (await session.post('HeapProfiler.stopSampling')) as { profile: { head: WhyNode } };
+  type WhyNode = { callFrame: { functionName: string; url: string; lineNumber: number }; selfSize: number; children: WhyNode[] };
+  const sites = new Map<string, number>();
+  const walk = (n: WhyNode, path: string): void => {
+    const here = `${n.callFrame.functionName || '(anon)'} ${n.callFrame.url.split('/').pop()}:${n.callFrame.lineNumber + 1}`;
+    if (n.selfSize > 0) sites.set(`${here} <- ${path}`, (sites.get(`${here} <- ${path}`) ?? 0) + n.selfSize);
+    for (const c of n.children) walk(c, here);
+  };
+  walk(profile.head, '');
+  for (const [k, v] of [...sites].sort((a, b) => b[1] - a[1]).slice(0, 10)) console.error((v / 20_000).toFixed(2), 'B a frame', k);
+}
 // The share of the moving frames whose window really moved a cell, and that none of them jumped.
 const movedShare = state.moved / Math.max(1, state.movingCalls);
 // The ground's marks really ran: what the dents counted (prints pressed, stamps laid, ticks faded) and the feet.
 const dentCounts = { oneShots: 0, laid: 0, dropped: 0, slots: 0, noGive: 0, offSquare: 0, ticks: 0, cleared: 0 };
 field.dents?.takeCounts(dentCounts);
-console.log(JSON.stringify({ frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet: { ...field.feetCounts } }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));
+// Wave 2b's parts really ran: the fronts begun and dropped, the storm's colour eased off the tinted window, the
+// sand's two phases restarted, the sand's picture whole.
+const feet = { ...field.feetCounts };
+const sr = field.report() as { sand?: { picture: string; phases: { cycles: number[] } }; sources?: { fronts: number; droppedFronts: number } };
+const stormColour = field.stormColour.value;
+console.log(JSON.stringify({ frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet }, third: { fronts: sr.sources?.fronts ?? 0, droppedFronts: sr.sources?.droppedFronts ?? 0, storm: [stormColour.r, stormColour.g, stormColour.b], sand: sr.sand?.picture ?? null, cycles: sr.sand?.phases.cycles ?? null, mote: [...mote] }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));

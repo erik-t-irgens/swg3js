@@ -20,6 +20,10 @@ import { GGX_ANCHOR } from './specular.ts';
 import { childIndexOf, type ShaderGroup } from '../swg/terrain/generator.ts';
 import { COLOUR_MODES, cornerOrder, GROUND_DRAW_TUNE, maskCode, tilesFit, type GroundTiler } from './groundTiles.ts';
 import { CLOUD_GREY, CLOUD_METRES, CLOUD_PERIOD, LUMA, bumpNormal, cloudShade, cloudUv, composeTile, flatShine, srgbDecode, tintGamma, type MaskSample, type TintReference } from './groundMath.ts';
+import { lighterTone } from './volumetrics/airMath.ts';
+
+/** `toneColour`'s scratch: the lighter tones' means and how many samples were taken. */
+const TONE_SCRATCH = { r: 0.5, g: 0.5, b: 0.5, n: 0 };
 
 /** One child of a family, as terrain shaders version 4 writes it. */
 export interface ShaderChildDef {
@@ -284,6 +288,32 @@ export function setGroundClock(seconds: number, u: GroundTileUniforms = groundTi
 
 const glslFloat = (v: number): string => (Number.isInteger(v) ? `${v}.0` : String(v));
 
+/**
+ * The colour map's tint in the client's gamma, the tile program's own function (`groundMath.tintGamma` is its mirror),
+ * reading `uGroundTint` and `uGroundTintRef`, which whoever interpolates it declares. Exported (from the volumetrics'
+ * wave 2b) so the dust pass takes its ground's tint by these very lines and never a copy; interpolated back into
+ * `TILE_VERTEX_PARS` at the very place it stood, so the tile program's text and key are what they were to the byte.
+ */
+export const GROUND_TINT_GLSL = `vec3 groundTintOf( const in vec3 c ) {
+	if ( uGroundTint.x < 0.5 ) return vec3( 1.0 );
+	if ( uGroundTint.x < 1.5 ) return c;
+	if ( uGroundTint.x < 2.5 ) {
+		float lum = dot( c, vec3( ${glslFloat(LUMA[0])}, ${glslFloat(LUMA[1])}, ${glslFloat(LUMA[2])} ) );
+		return c * min( 1.0 / max( uGroundTintRef.a, 1e-3 ), uGroundTint.y / max( lum, 1e-6 ) );
+	}
+	return min( c / max( uGroundTintRef.rgb, vec3( 1e-3 ) ), vec3( uGroundTint.y ) );
+}`;
+
+/**
+ * sRGB's decode, the tile program's own function (`groundMath.srgbDecode` is its mirror), exported and interpolated back
+ * into `TILE_FRAGMENT_PARS` at its place for the same reason as `GROUND_TINT_GLSL`.
+ */
+export const GROUND_DECODE_GLSL = `vec3 groundDecode( const in vec3 c ) {
+	vec3 lo = c * ( 1.0 / 12.92 );
+	vec3 hi = pow( ( max( c, vec3( 0.0 ) ) + 0.055 ) * ( 1.0 / 1.055 ), vec3( 2.4 ) );
+	return mix( hi, lo, vec3( lessThanEqual( c, vec3( 0.04045 ) ) ) );
+}`;
+
 /** Vertex: the tile attributes and what is worked out from them, after `#include <common>`. */
 const TILE_VERTEX_PARS = /* glsl */ `
 // The ground drawn the client's way (src/world/terrainTextures.ts, groundTiles.ts): each triangle's tile.
@@ -299,15 +329,7 @@ varying vec2 vGroundTile;
 varying vec2 vGroundUV;
 varying vec3 vGroundTint;
 // The colour map's tint in the client's gamma (groundMath.tintGamma): off, the client's, normalised, per channel.
-vec3 groundTintOf( const in vec3 c ) {
-	if ( uGroundTint.x < 0.5 ) return vec3( 1.0 );
-	if ( uGroundTint.x < 1.5 ) return c;
-	if ( uGroundTint.x < 2.5 ) {
-		float lum = dot( c, vec3( ${glslFloat(LUMA[0])}, ${glslFloat(LUMA[1])}, ${glslFloat(LUMA[2])} ) );
-		return c * min( 1.0 / max( uGroundTintRef.a, 1e-3 ), uGroundTint.y / max( lum, 1e-6 ) );
-	}
-	return min( c / max( uGroundTintRef.rgb, vec3( 1e-3 ) ), vec3( uGroundTint.y ) );
-}
+${GROUND_TINT_GLSL}
 `;
 
 /** Vertex, after `#include <worldpos_vertex>`: the terrain-space picture coordinate (one repeat a 4 m tile) and the tile's data. */
@@ -383,11 +405,7 @@ float groundMask( const in float code, const in vec2 dx, const in vec2 dy ) {
 	return uGroundLook.y > 0.5 ? m : step( 0.5, m );
 }
 // sRGB's own curve each way (groundMath.srgbDecode, srgbEncode); the decode runs on past one.
-vec3 groundDecode( const in vec3 c ) {
-	vec3 lo = c * ( 1.0 / 12.92 );
-	vec3 hi = pow( ( max( c, vec3( 0.0 ) ) + 0.055 ) * ( 1.0 / 1.055 ), vec3( 2.4 ) );
-	return mix( hi, lo, vec3( lessThanEqual( c, vec3( 0.04045 ) ) ) );
-}
+${GROUND_DECODE_GLSL}
 vec3 groundEncode( const in vec3 c ) {
 	vec3 lo = c * 12.92;
 	vec3 hi = 1.055 * pow( max( c, vec3( 1e-6 ) ), vec3( 1.0 / 2.4 ) ) - 0.055;
@@ -409,9 +427,10 @@ vec3 groundCloudShade( const in vec3 lit ) {
  * Fragment, after `#include <map_fragment>`: the tile's colour and its bump, the bottom layer and each overlay
  * by its mask in turn. Derivatives are taken once at the top, where every pixel of the quad runs, and handed to
  * every sample, so the branches on how many layers a tile holds (most hold one) never ask a texture for a
- * derivative inside them.
+ * derivative inside them. Exported (from the volumetrics' wave 2b) so the air's variant can hold itself to finding this
+ * text in its program unchanged.
  */
-const TILE_MAP = /* glsl */ `
+export const TILE_MAP = /* glsl */ `
 {
 	vec2 gDx = dFdx( vGroundUV );
 	vec2 gDy = dFdy( vGroundUV );
@@ -973,6 +992,24 @@ export class TerrainTextures {
     c = new THREE.Color(r / n / 255, g / n / 255, b / n / 255).convertSRGBToLinear();
     this.averages.set(familyId, c);
     return c;
+  }
+
+  /**
+   * The lighter tones of a family's texture (the volumetrics' wave 2b, the design's §2.14), linear, into `out`: the
+   * same sparse walk as `averageColor`, a luminance histogram of it, and the mean of the samples above the cut that
+   * leaves out the darkest `tone` of them (`lighterTone`, `airMath.ts`), so the dust takes the part of the ground the sun
+   * lights rather than the gaps between its grains. At `tone` 0 it is `averageColor`'s colour to the bit. Null without a
+   * picture. Kept nowhere: the world works it out when it builds its tables and again when the owner's dial moves.
+   */
+  toneColour(familyId: number, tone: number, out: THREE.Color): THREE.Color | null {
+    const layer = this.layerIndex.get(familyId);
+    if (layer === undefined) return null;
+    const img = this.texture.image as { data: Uint8Array; width: number; height: number };
+    const per = img.width * img.height * 4;
+    const m = TONE_SCRATCH;
+    lighterTone(img.data, layer * per, (layer + 1) * per, 4 * 37, tone, m);
+    if (!(m.n > 0)) return null;
+    return out.setRGB(m.r, m.g, m.b).convertSRGBToLinear();
   }
 
   dispose(): void {

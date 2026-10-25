@@ -222,7 +222,7 @@ export interface Settings extends FxSettings {
   volPrints: boolean;
   /** The dents' texels over their 128 m square: 1024, 2048 or 4096. */
   volPrintDetail: number;
-  /** How far the drifting sand moves the ground's own pictures, 0 (not at all) to 1. */
+  /** How strongly the blowing sand shows over the still ground, 0 (none) to 1. */
   volArtSand: number;
   /** How deep the dents show, their bent light and their darkening, 0 (none) to 1.5. */
   volArtPrints: number;
@@ -230,6 +230,10 @@ export interface Settings extends FxSettings {
   volArtShade: number;
   /** A footstep on ground that keeps marks presses a dent rather than laying a decal. */
   volFromFeet: boolean;
+  /** How bright the dust is drawn, 0 to 2 (1 the first wave's light, 0.6 the start). */
+  volDustBright: number;
+  /** How strongly the dust shades itself toward the sun, 0 (not at all) to 2 (1 the march's own extinction). */
+  volDustSelfShadow: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -362,6 +366,10 @@ export const DEFAULT_SETTINGS: Settings = {
   volArtPrints: 1,
   volArtShade: 1,
   volFromFeet: true,
+  // Wave 2b's look of the dust [ours, the design's §2.8]: at 0.6 fresh dust on sand at noon comes out about its
+  // ground's own brightness; at a self-shadow of 1 the dust shades itself exactly as the march's own extinction says.
+  volDustBright: 0.6,
+  volDustSelfShadow: 1,
   ...FX_DEFAULTS,
 };
 

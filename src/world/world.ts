@@ -939,6 +939,8 @@ export class World {
       out.h = h;
       out.family = family;
       out.medium = this.lavaAt(x, h, z) > 0 ? 3 : t.waterHeightAt(x, z) > h ? 2 : 1;
+      // The pole's own colour-map bytes, packed, by number as the family is (wave 2b's tint raster); -1 for none.
+      out.tint = t.colourIdAt(x, z);
       return true;
     },
   };
@@ -948,9 +950,15 @@ export class World {
       this.layoutStream?.forEachSolidBox(x0, z0, x1, z1, box, visit, roomsOver);
     },
   };
-  private readonly airWorld: AirWorld = { ground: this.airGround, boxes: this.airBoxes, hulls: this.vehicles };
-  /** What the family tables were last made from: the ground's textures and the terrain's own generator, by identity. */
-  private airTablesFor: { textures: unknown; swg: unknown } = { textures: undefined, swg: undefined };
+  /**
+   * What the field reads of the world; from wave 2b the session ground material's own tint uniforms, which the
+   * dust pass holds by reference so its colour is tinted in the drawn ground's own mode.
+   */
+  private readonly airWorld: AirWorld = { ground: this.airGround, boxes: this.airBoxes, hulls: this.vehicles, groundTint: groundTileUniforms() };
+  /** What the family tables were last made from: the ground's textures and the terrain's own generator, by identity, and the dust's tone. */
+  private airTablesFor: { textures: unknown; swg: unknown; tone: number } = { textures: undefined, swg: undefined, tone: -1 };
+  /** The world's colour reference as the raster's `tintedAt` reads it, refilled each frame from the ground's own uniform (nothing made). */
+  private readonly airTintRef: { rgb: [number, number, number]; luminance: number } = { rgb: [0.5, 0.5, 0.5], luminance: 0.5 };
   /** The ground a grain falls onto while the air's dust and kick-up are on (`Dust.ground`), refilled each frame from the field. */
   private readonly grainGround: GrainGround = { ox: 0, oz: 0, cell: 1, n: 0, height: new Float32Array(0), known: new Uint8Array(0), gravity: 9.8, rest: 0.4 };
   private readonly grainColour = new THREE.Color();
@@ -2135,7 +2143,7 @@ export class World {
     // afresh (the jump rule, every field to its inflow), the family tables are made again from the next world's ground,
     // no grain falls onto the old raster and the storm sheets are today's until the volume draws again.
     this.air?.forgetWorld();
-    this.airTablesFor = { textures: undefined, swg: undefined };
+    this.airTablesFor = { textures: undefined, swg: undefined, tone: -1 };
     this.airMotes = 0;
     this.dust.ground = null;
     this.weather.stormSheetScale = 1;
@@ -3167,25 +3175,30 @@ export class World {
         const perSecond = (12 + 70 * Math.min(1, speed / 35)) * (0.6 + Math.min(1.4, w * 0.35));
         const shed = sheddingCount(count, perSecond, interval, air.raster.dustAt(w0.ox, w0.oz, w0.cell, tmpV.x, tmpV.z));
         this.airMotes += shed;
-        if (shed > 0) this.dust.spawn(tmpV.x, ground, tmpV.z, shed, vel.x, vel.z, Math.max(0.6, w * 0.9), this.groundColorAt(tmpV.x, tmpV.z, this.dustColor), VOL_TUNE.kickUp);
+        // In the cell's own tinted colour, as the air's dust works it out (wave 2b's): one cell a machine.
+        if (shed > 0) this.dust.spawn(tmpV.x, ground, tmpV.z, shed, vel.x, vel.z, Math.max(0.6, w * 0.9), this.airGroundColour(air, tmpV.x, tmpV.z, this.dustColor), VOL_TUNE.kickUp);
         continue;
       }
       this.dust.spawn(tmpV.x, ground, tmpV.z, count, vel.x, vel.z, Math.max(0.6, w * 0.9), this.groundColorAt(tmpV.x, tmpV.z, this.dustColor));
     }
   }
 
-  /** The dust's colour the air's raster holds at a point (sRGB bytes), into `out` in linear light; the fallback's outside it. */
+  /**
+   * The dust's colour at a point as the air's dust works it out, into `out` in linear light: the cell's lighter tones
+   * times the colour map's tint of its pole in the drawn ground's own mode (`AirRaster.tintedAt`, from wave 2b);
+   * the fallback's outside the window or where the ground is not known yet.
+   */
   private airGroundColour(air: AirField, x: number, z: number, out: THREE.Color): THREE.Color {
     const w = air.win;
     const r = air.raster;
     const i = Math.floor((x - w.ox) / w.cell);
     const j = Math.floor((z - w.oz) / w.cell);
-    if (i >= 0 && j >= 0 && i < r.n && j < r.n && r.known[j * r.n + i]) {
-      const k = (j * r.n + i) * 4;
-      return out.setRGB(r.colour[k] / 255, r.colour[k + 1] / 255, r.colour[k + 2] / 255, THREE.SRGBColorSpace);
-    }
+    const c = this.airTinted;
+    if (i >= 0 && j >= 0 && i < r.n && j < r.n && r.known[j * r.n + i] && r.tintedAt(i, j, c)) return out.setRGB(c[0], c[1], c[2]);
     return out.setHex(AIR_TUNE.dust.fallbackColour, THREE.SRGBColorSpace);
   }
+  /** `airGroundColour`'s kept tuple. */
+  private readonly airTinted: [number, number, number] = [0.5, 0.5, 0.5];
 
   /**
    * Make the moving air if the volumetrics master is on and the world has none (class A: an arrival's loading screen
@@ -3216,12 +3229,12 @@ export class World {
     if (this.air && this.air !== air) this.air.bindGround(null);
     this.air = air;
     air.bindGround(this.airGroundU);
-    this.airTablesFor = { textures: undefined, swg: undefined };
+    this.airTablesFor = { textures: undefined, swg: undefined, tone: -1 };
   }
 
   /** Make the family tables again at the next frame (a family overridden from the console: a texture upload, no program). */
   refreshAirTables(): void {
-    this.airTablesFor = { textures: undefined, swg: undefined };
+    this.airTablesFor = { textures: undefined, swg: undefined, tone: -1 };
   }
 
   /**
@@ -3233,8 +3246,13 @@ export class World {
     const textures = this.groundTextures;
     const swg = this.terrain?.swg ?? null;
     const was = this.airTablesFor;
-    if (was.textures === textures && was.swg === swg) return;
-    this.airTablesFor = { textures, swg };
+    const tone = AIR_TUNE.dust.tone;
+    if (was.textures === textures && was.swg === swg && was.tone === tone) return;
+    // Only the dust's tone moved (the owner's dial, dragged a frame at a time): the colours are painted again into the
+    // cells the raster knows, and nothing is forgotten -- a clear left every cell unknown for seconds, the dust laying
+    // nothing, the feet back on decals and the march reading a flat mean ground under dust already standing.
+    const toneOnly = was.textures === textures && was.swg === swg;
+    this.airTablesFor = { textures, swg, tone };
     const families: FamilyFacts[] = [];
     if (swg) for (const f of swg.template.generator.shaderGroup.families.values()) families.push(f);
     else if (this.terrain?.demFamilies) for (const [name, id] of this.terrain.demFamilies) families.push({ id, name, surface: '', children: [] });
@@ -3244,12 +3262,14 @@ export class World {
     const response = new Uint8Array(size * 4);
     const colour = new Uint8Array(size * 4);
     fillResponseTable(this.packId ?? '', families, response);
+    // Each family's lighter tones at the dust's tone (wave 2b's: the part of the picture the sun lights, not its
+    // gaps), a CPU walk at a world's load and again when the owner's dial moves.
     const c = new THREE.Color();
     for (const f of families) {
       if (!(f.id >= 0 && f.id < size)) continue;
-      const mean = textures?.averageColor(f.id);
-      if (!mean) continue;
-      c.copy(mean).convertLinearToSRGB();
+      const lit = textures?.toneColour(f.id, tone, c);
+      if (!lit) continue;
+      c.convertLinearToSRGB();
       colour[f.id * 4] = Math.round(Math.min(1, Math.max(0, c.r)) * 255);
       colour[f.id * 4 + 1] = Math.round(Math.min(1, Math.max(0, c.g)) * 255);
       colour[f.id * 4 + 2] = Math.round(Math.min(1, Math.max(0, c.b)) * 255);
@@ -3257,12 +3277,14 @@ export class World {
     }
     air.raster.familyResponse = response;
     air.raster.familyColour = colour;
-    air.raster.clear();
-    // The same responses by picture layer, for the ground's variant: each layer moves by its own family's response (a
-    // texture upload; no program). A world drawn the older way, or a real-elevation one, keeps every layer still.
+    if (toneOnly) air.raster.repaintColour();
+    else air.raster.clear();
+    // The same responses and colours by picture layer, for the ground's variant: how much of the blowing sand shows over
+    // each layer and in what colour (a texture upload; no program). A world drawn the older way, or a real-elevation
+    // one, has nothing blow over any layer.
     const tiles = textures?.tiles;
     const depth = (textures?.texture.image as { depth?: number } | undefined)?.depth ?? 1;
-    air.setLayerResponse(tiles && this.terrain?.swg ? tiles.childLayers : new Map(), response, tiles ? depth : 1);
+    air.setLayerResponse(tiles && this.terrain?.swg ? tiles.childLayers : new Map(), response, tiles ? depth : 1, colour);
   }
 
   /**
@@ -3306,6 +3328,19 @@ export class World {
     inp.reading = reading || inp.ground;
     inp.where = this.airSoftOff ? 'held off by the frame report' : !this.planet ? 'no world' : this.planet.space ? 'in space there is no air' : this.groundTextures?.empty ? 'the ground here is never drawn' : viewInBuilding ? 'the camera is in a building' : this.inside ? 'the player is in a building' : null;
     if (inp.where === null) this.airTables(air);
+    // How the drawn ground tints its colour now, for the raster's own `tintedAt` (the motes, the storm's colour): the
+    // session ground material's mode, gain cap and the world's reference, read off its uniforms in place.
+    const gu = this.airWorld.groundTint!;
+    const gt = gu.uGroundTint.value;
+    const gref = gu.uGroundTintRef.value;
+    const tr = this.airTintRef;
+    tr.rgb[0] = gref.x;
+    tr.rgb[1] = gref.y;
+    tr.rgb[2] = gref.z;
+    tr.luminance = gref.w;
+    air.raster.tintMode = gt.x;
+    air.raster.tintCap = gt.y;
+    air.raster.tintRef = tr;
     const hull = this.weatherHull;
     const b = hull?.spec.bounds;
     air.setHull(hull && b ? hull.group.matrixWorld : null, b ? b.min : null, b ? b.max : null);

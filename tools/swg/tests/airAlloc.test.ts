@@ -9,8 +9,11 @@
 // the second wave in both -- the carried offsets, the dent square placed and its strips cleared, the engines' pits and
 // ruts gathered and laid on the 10 Hz tick and faded, a crater a frame and a footprint pressed every 64th (32 bytes a
 // frame until the square was placed from its own record rather than handed the camera's place across a call, and a tick
-// boxed the texel's metres in a `Vector4.set`); and with the master off, a million calls of each method of the force API
-// and of the field's frame make nothing.
+// boxed the texel's metres in a `Vector4.set`); wave 2b's in both -- the dust's shape numbers worked out every
+// frame, the sand's two phases restarted, a push, a pull and a repulse begun every 70 frames and walked, the storm's
+// weight and its colour eased off the window through `tintedAt` in the normalised tint mode, a mote's colour read the
+// same way every frame, the tint raster's strips filled in the moving frames from a ground whose tint is not one; and
+// with the master off, a million calls of each method of the force API and of the field's frame make nothing.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +30,8 @@ const run = (...args: string[]): string => execFileSync(process.execPath, ['--ex
 
 type Moving = { frames: number; made: number; scavenges: number; movedShare: number; resets: number };
 type Ground = { sources: number; dents: { oneShots: number; laid: number; ticks: number; cleared: number }; feet: { dents: number } };
-type Steady = { skipped?: string; frames: number; made: number; scavenges: number; stepping: boolean; engines: number; grains: number; ground: Ground; moving: Moving };
+type Third = { fronts: number; droppedFronts: number; storm: number[]; sand: string | null; cycles: number[] | null; mote: number[] };
+type Steady = { skipped?: string; frames: number; made: number; scavenges: number; stepping: boolean; engines: number; grains: number; ground: Ground; third: Third; moving: Moving };
 const clean = (m: { made: number; scavenges: number; frames: number }): boolean => m.scavenges === 0 && m.made / m.frames < 0.2;
 const better = (a: { made: number; scavenges: number }, b: { made: number; scavenges: number }): boolean => a.scavenges < b.scavenges || (a.scavenges === b.scavenges && a.made < b.made);
 // Cleanest of three runs, the steady frame and the moving one each on its own (a run caught while the engine is still
@@ -50,6 +54,9 @@ else {
   ok(best.stepping && best.engines === 12 && best.grains > 0, `the frame measured steps the air with ${best.engines} engines in its table (ten and two downwashes) and ${best.grains} grains in the pool`);
   const gd = best.ground;
   ok(gd.sources > 0 && gd.dents.laid > 0 && gd.dents.ticks > 0 && gd.dents.cleared > 0 && gd.feet.dents > 0, `and the ground's marks with it (the second wave): ${gd.sources} engines' pits and ruts held, ${gd.dents.laid} stamps laid, ${gd.dents.ticks} ticks faded, ${gd.dents.cleared} strips cleared, ${gd.feet.dents} footprints pressed as dents`);
+  const th = best.third;
+  const tinted = th.storm.every((v) => Number.isFinite(v) && v > 0) && th.mote.every((v) => Number.isFinite(v) && v > 0) && (th.storm[0] !== 0.6 || th.storm[1] !== 0.45);
+  ok(th.fronts > 0 && th.droppedFronts === 0 && th.sand === 'whole' && (th.cycles?.[0] ?? 0) > 0 && (th.cycles?.[1] ?? 0) > 0 && tinted, `and wave 2b's with it: ${th.fronts} fronts begun and none dropped, the sand's picture ${th.sand} and its phases restarted ${th.cycles?.join(' and ')} times, the storm's colour eased to (${th.storm.map((v) => v.toFixed(3)).join(', ')}) and a mote read at (${th.mote.map((v) => v.toFixed(3)).join(', ')})`);
   const per = best.made / best.frames;
   ok(best.scavenges === 0 && per < 0.2, `a steady frame makes ${per.toFixed(3)} bytes (${best.made} over ${best.frames} frames, ${best.scavenges} collections), under 0.2`);
   const mv = bestMoving!;

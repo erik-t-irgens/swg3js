@@ -179,21 +179,25 @@ export function fillResponseTable(world: string, families: Iterable<FamilyFacts>
 }
 
 /**
- * The per-layer response lookup for a world's layers: four bytes a layer (moves, heals, gives, dust), each layer
- * its family's, from the response table by family id (`fillResponseTable`'s layout) and the tile set's layer list
- * (family id to its children's layers). Into `out` (four bytes a layer, `layers` of them); a layer no family names is
- * nought (it does not move). Answers how many layers were filed.
+ * The per-layer lookup for a world's layers, two rows of four bytes a layer: row 0 each layer's family's response
+ * (moves, heals, gives, dust: `fillResponseTable`'s layout), row 1 (from wave 2b) its family's colour as the dust
+ * takes it (the lighter tones as sRGB bytes, `colour`'s layout by family id, alpha 255 where the family has one), from
+ * the tile set's layer list (family id to its children's layers). Into `out` (`layers` texels a row, two rows); a layer
+ * no family names is nought (nothing blows over it). Answers how many layers were filed.
  */
-export function fillLayerResponse(childLayers: ReadonlyMap<number, readonly number[]>, response: Uint8Array, out: Uint8Array): number {
+export function fillLayerResponse(childLayers: ReadonlyMap<number, readonly number[]>, response: Uint8Array, out: Uint8Array, colour: Uint8Array = new Uint8Array(0)): number {
   out.fill(0);
-  const layers = out.length >> 2;
+  const layers = out.length >> 3;
   const families = response.length >> 2;
+  const coloured = colour.length >> 2;
+  const row = layers * 4;
   let n = 0;
   for (const [family, list] of childLayers) {
     if (!(family >= 0 && family < families)) continue;
     for (const layer of list) {
       if (!(layer >= 0 && layer < layers)) continue;
       for (let c = 0; c < 4; c++) out[layer * 4 + c] = response[family * 4 + c];
+      if (family < coloured) for (let c = 0; c < 4; c++) out[row + layer * 4 + c] = colour[family * 4 + c];
       n++;
     }
   }

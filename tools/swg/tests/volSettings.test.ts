@@ -53,6 +53,9 @@ const types: Record<string, string> = {
   volArtPrints: 'number',
   volArtShade: 'number',
   volFromFeet: 'boolean',
+  // Wave 2b's look of the dust.
+  volDustBright: 'number',
+  volDustSelfShadow: 'number',
 };
 for (const k of VOL_KEYS) ok(typeof S[k] === types[k], `"${k}" is in the defaults as a ${types[k]}`);
 ok(Object.keys(types).length === VOL_KEYS.length, 'and those are every key the pass speaks for, no more');
@@ -65,6 +68,13 @@ ok(VOL_APPLY_CLASS.volSand === 'M' && VOL_APPLY_CLASS.volPrints === 'M', 'the sa
 ok(VOL_APPLY_CLASS.volSandDetail === 'T' && VOL_APPLY_CLASS.volPrintDetail === 'T', 'their details are class T: a target made again');
 ok(VOL_APPLY_CLASS.volArtSand === 'U' && VOL_APPLY_CLASS.volArtPrints === 'U' && VOL_APPLY_CLASS.volArtShade === 'U' && VOL_APPLY_CLASS.volFromFeet === 'C', 'the art dials are uniforms and the feet a switch the frame reads');
 ok(S.volSand === true && S.volPrints === true && S.volFromFeet === true && S.volArtSand === 1 && S.volArtPrints === 1 && S.volArtShade === 1, 'the ground\'s switches start on and its art dials at one: nothing shows while the master is off');
+ok(S.volDustBright === 0.6 && S.volDustSelfShadow === 1, "the dust's look starts at the design's: brightness 0.6 (fresh dust on sand at noon about its ground's own), self-shadow 1 (the march's own extinction)");
+ok(VOL_APPLY_CLASS.volDustBright === 'U' && VOL_APPLY_CLASS.volDustSelfShadow === 'U', "the dust's look is two uniforms: nothing built, nothing made again");
+ok(!(VOL_QUALITY_KEYS as readonly string[]).includes('volDustBright') && !(VOL_QUALITY_KEYS as readonly string[]).includes('volDustSelfShadow'), 'and no quality key, so no preset writes them and no stamp moves');
+{
+  const t = newVolTune();
+  ok(!Number.isInteger(t.dustBright) && !Number.isInteger(t.dustSelfShadow), 'their fields in the kept record start as fractions, so each is a double from its first write');
+}
 // No later wave's key is in this build at all, shown or hidden.
 for (const later of ['volAirLayers', 'volSmoke', 'volFog', 'volSmokeDetail', 'volCurrent', 'volLiquidDetail', 'volLava', 'volGrass', 'volArtWater', 'volArtLava', 'volArtGrass', 'volFromPeers']) {
   ok(!(later in S), `"${later}" (a later wave's) is not in this build`);
@@ -139,6 +149,12 @@ ok(!(VOL_QUALITY_KEYS as readonly string[]).some((k) => ['volumetrics', 'airVolu
   ok(out.on === false && out.air && out.dust && out.kickUp && out.light && out.volume, 'the defaults write the master off and every switch under it on');
   ok(out.airDetail === 128 && out.solve === 20 && out.rate === 60 && out.dustDetail === 4 && out.lightDetail === 2 && out.lightSteps === 26 && out.volumeSteps === 16 && out.volumeResolution === 0.5, 'and High\'s numbers');
   ok(out.sand && out.prints && out.fromFeet && out.sandDetail === 4 && out.printDetail === 2048 && out.artSand === 1 && out.artPrints === 1 && out.artShade === 1, 'and the ground\'s: the sand and the prints on, High\'s details, the art dials at one');
+  ok(out.dustBright === 0.6 && out.dustSelfShadow === 1, "and the dust's look");
+  volQualityFrom({ ...DEFAULT_SETTINGS, volDustBright: 5, volDustSelfShadow: -2 } as Settings, out);
+  ok(out.dustBright === 2 && out.dustSelfShadow === 0, "a hand-edited look is held to the page's ends");
+  volQualityFrom(DEFAULT_SETTINGS, out, { volDustBright: 3 });
+  ok(out.dustBright === 3, "and one from the console past them is in force through `over`");
+  volQualityFrom(DEFAULT_SETTINGS, out);
   const odd = { ...DEFAULT_SETTINGS, volAirDetail: 100, volDustDetail: 5, volAirSolve: 999, volLightSteps: -4, airVolumeAmount: Number.NaN, volSandDetail: 5, volPrintDetail: 999, volArtPrints: 9, volArtShade: -1 } as Settings;
   volQualityFrom(odd, out);
   ok(out.airDetail === 128 && out.dustDetail === 4 && out.solve === 40 && out.lightSteps === 12 && out.volumeAmount === 1, 'a hand-edited file is held to the page: a detail not on the list takes High\'s, a range its ends, a NaN its default');
