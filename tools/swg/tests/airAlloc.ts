@@ -112,6 +112,12 @@ field.raster.tintRef = { rgb: [0.42, 0.37, 0.3], luminance: 0.38 };
 while (!field.sandSlice(256)) {
   // a slice at a time
 }
+// The third wave's: the wisps' noise whole (so the mode is in force: noise by default, bands with `bands` as the second
+// argument, which runs the bands' pass every frame), three layers of air, smoke and fog on.
+while (!field.noiseSlice(64)) {
+  // a slice at a time
+}
+if (process.argv[2] === 'bands') tune.wisps = 1;
 // Bound to a record of the ground variant's uniforms, as the world binds the field it takes: every frame then copies the
 // field's own values into it (`copyAirGround`), which is measured with the rest.
 field.bindGround(makeAirGroundUniforms());
@@ -139,7 +145,13 @@ inp.storm = 0.4;
 inp.sunX = 0.4;
 inp.sunY = 0.6;
 inp.sunZ = 0.69;
+// A foggy morning burning off (the third wave): the bank on the wind and the ground's emission, the burn in the decay.
+inp.fogLevel = 0.6;
+inp.fogBurn = 0.3;
+inp.fogTop = 5.5;
 const state = { frame: 0, camX: 0.25, camZ: -0.5, moved: 0, movingCalls: 0 };
+/** A part of the frame left out (`AIR_SKIP`), to find which part makes what: never set by the test. */
+const SKIP = process.env.AIR_SKIP ?? '';
 // A foot landing, the feet's own kept record as `BodySounds` fills it: on the sand by the camera, its height the ground's.
 const step: FootStep = { key: 7, kind: 'mobile', label: 'a walker', surface: 'sand', from: 'terrain', x: 2, y: 0, z: 1, heading: 0.3, scale: 1, inside: false, deck: null, ground: null };
 /** The motes' colour, read through `tintedAt` as the world's emitter reads it: a kept record. */
@@ -150,8 +162,13 @@ function steady(): void {
   inp.camX = state.camX;
   inp.camZ = state.camZ;
   inp.time += DT;
-  // A blast queued every frame (a one-shot owed the next step), so its code runs as the frame's does.
-  field.blast(5, 0, 5, 7, 14, 0);
+  // A blast queued every frame (a one-shot owed the next step), so its code runs as the frame's does; every 90th with its
+  // smoke (the third wave's held source, the table never full), and a gas cloud's smoke laid every frame.
+  // Two call sites, each a literal: a number picked by a condition and handed across a call is one the test makes, which
+  // is the measure's own and never the game's (a blast's smoke is the tune's own number there).
+  if (f % 90 === 0 && SKIP !== 'blastSmoke') field.blast(5, 0, 5, 7, 14, 2.6);
+  else field.blast(5, 0, 5, 7, 14, 0);
+  if (SKIP !== 'smoke') field.smoke(-6, 1, 4, 2.5, 1, 0x40c060);
   // A push, a pull and a repulse begun every 70 frames: fronts alive through about half the frames, each walked every
   // frame, its air laid on each step and its dust on each frame by the band it crossed (wave 2b).
   if (f % 70 === 0) {
@@ -162,7 +179,7 @@ function steady(): void {
   // A mote's colour, as the world's emitter asks it of the field's own raster.
   field.raster.tintedAt(32 + (f & 63), 64, mote);
   // A footstep twice a second, walking: today's prints' rules, a dent pressed.
-  if ((f & 63) === 0) {
+  if ((f & 63) === 0 && SKIP !== 'dent') {
     step.x = state.camX + ((f >> 6) & 7) * 0.5;
     step.z = state.camZ + 1;
     step.y = ((step.x | 0) >> 4) & 3;
@@ -347,6 +364,6 @@ field.dents?.takeCounts(dentCounts);
 // Wave 2b's parts really ran: the fronts begun and dropped, the storm's colour eased off the tinted window, the
 // sand's two phases restarted, the sand's picture whole.
 const feet = { ...field.feetCounts };
-const sr = field.report() as { sand?: { picture: string; phases: { cycles: number[] } }; sources?: { fronts: number; droppedFronts: number } };
+const sr = field.report() as { sand?: { picture: string; phases: { cycles: number[] } }; sources?: { fronts: number; droppedFronts: number; smoke: number; droppedSmoke: number }; wisps?: { inForce: string; noise: string }; layers?: { air: number } };
 const stormColour = field.stormColour.value;
-console.log(JSON.stringify({ frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet }, third: { fronts: sr.sources?.fronts ?? 0, droppedFronts: sr.sources?.droppedFronts ?? 0, storm: [stormColour.r, stormColour.g, stormColour.b], sand: sr.sand?.picture ?? null, cycles: sr.sand?.phases.cycles ?? null, mote: [...mote] }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));
+console.log(JSON.stringify({ frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet }, third: { fronts: sr.sources?.fronts ?? 0, droppedFronts: sr.sources?.droppedFronts ?? 0, storm: [stormColour.r, stormColour.g, stormColour.b], sand: sr.sand?.picture ?? null, cycles: sr.sand?.phases.cycles ?? null, mote: [...mote] }, w3: { smoke: sr.sources?.smoke ?? 0, droppedSmoke: sr.sources?.droppedSmoke ?? 0, smokeLive: field.smokeLive, wisps: sr.wisps?.inForce ?? null, noise: sr.wisps?.noise ?? null, layers: sr.layers?.air ?? 0, fogLevel: inp.fogLevel }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));

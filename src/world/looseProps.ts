@@ -420,12 +420,14 @@ class LoosePropPool {
 
   /**
    * Shove every prop within `range` of a point: `sign` 1 away from it and -1 toward it, and with an
-   * `aim` only the ones roughly along it (the Force's push and pull are a cone, a blast is not).
+   * `aim` only the ones roughly along it (the Force's push and pull are a cone, a blast is not). With `only`, only the
+   * props it answers true for (a Force wave that travels, the ones its front reaches this step); none, every one as before.
    */
-  shove(from: THREE.Vector3, range: number, sign: number, aim: THREE.Vector3 | null, power: number): number {
+  shove(from: THREE.Vector3, range: number, sign: number, aim: THREE.Vector3 | null, power: number, only: PropGate | null = null): number {
     let moved = 0;
     for (let i = 0; i < this.props.length; i++) {
       const p = this.props[i];
+      if (only && !only(p.pos.x, p.pos.y, p.pos.z, p)) continue;
       tmpDir.copy(p.pos).sub(from);
       const d = tmpDir.length();
       if (d > range) continue;
@@ -587,9 +589,12 @@ export function hookablePropAhead(from: THREE.Vector3, dir: THREE.Vector3, range
  * point and -1 toward it; `aim` narrows it to a cone (the powers), null takes every direction (a
  * blast). Returns how many were moved. Nothing is allocated.
  */
-export function shoveLooseProps(from: THREE.Vector3, range: number, sign: number, aim: THREE.Vector3 | null = null, power = PROPS.shove): number {
-  return current?.shove(from, range, sign, aim, power) ?? 0;
+export function shoveLooseProps(from: THREE.Vector3, range: number, sign: number, aim: THREE.Vector3 | null = null, power = PROPS.shove, only: PropGate | null = null): number {
+  return current?.shove(from, range, sign, aim, power, only) ?? 0;
 }
+
+/** Which props a shove takes (a Force wave that travels: those its front reaches this step), by place and by the prop itself. */
+export type PropGate = (x: number, y: number, z: number, key: object) => boolean;
 
 /**
  * The seam the grip uses: the nearest prop within `range` and inside `cone` of `dir`, as a `Living`

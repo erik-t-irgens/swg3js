@@ -56,6 +56,13 @@ const types: Record<string, string> = {
   // Wave 2b's look of the dust.
   volDustBright: 'number',
   volDustSelfShadow: 'number',
+  // The third wave's: layers of air, smoke and fog, the wisps, a dust field a layer.
+  volAirLayers: 'number',
+  volSmoke: 'boolean',
+  volFog: 'boolean',
+  volSmokeDetail: 'number',
+  volDustWisps: 'number',
+  volDustLayers: 'boolean',
 };
 for (const k of VOL_KEYS) ok(typeof S[k] === types[k], `"${k}" is in the defaults as a ${types[k]}`);
 ok(Object.keys(types).length === VOL_KEYS.length, 'and those are every key the pass speaks for, no more');
@@ -76,9 +83,18 @@ ok(!(VOL_QUALITY_KEYS as readonly string[]).includes('volDustBright') && !(VOL_Q
   ok(!Number.isInteger(t.dustBright) && !Number.isInteger(t.dustSelfShadow), 'their fields in the kept record start as fractions, so each is a double from its first write');
 }
 // No later wave's key is in this build at all, shown or hidden.
-for (const later of ['volAirLayers', 'volSmoke', 'volFog', 'volSmokeDetail', 'volCurrent', 'volLiquidDetail', 'volLava', 'volGrass', 'volArtWater', 'volArtLava', 'volArtGrass', 'volFromPeers']) {
+for (const later of ['volCurrent', 'volLiquidDetail', 'volLava', 'volGrass', 'volArtWater', 'volArtLava', 'volArtGrass', 'volFromPeers', 'volParticleDetail', 'volRainDetail']) {
   ok(!(later in S), `"${later}" (a later wave's) is not in this build`);
 }
+// The third wave's: the layers, smoke and fog details and a field a layer are targets made again (class T), the wisps a
+// march material a mode (class M, the Start's decision), smoke and fog switches the frame reads (C); a dust field a layer
+// is off by default and on Ultra alone (the owner's answer).
+ok(VOL_APPLY_CLASS.volAirLayers === 'T' && VOL_APPLY_CLASS.volSmokeDetail === 'T' && VOL_APPLY_CLASS.volDustLayers === 'T', "the layers, the smoke's detail and a dust field a layer are class T: targets made again");
+ok(VOL_APPLY_CLASS.volDustWisps === 'M', 'the wisps are class M: one march material a mode, all four compiled while the master is on');
+ok(VOL_APPLY_CLASS.volSmoke === 'C' && VOL_APPLY_CLASS.volFog === 'C', 'smoke and fog are switches the frame reads');
+ok(S.volDustLayers === false && VOL_PRESETS.ultra.volDustLayers === true && VOL_PRESET_NAMES.filter((n) => VOL_PRESETS[n].volDustLayers === true).join() === 'ultra', 'a dust field a layer is off by default and on Ultra alone');
+ok(S.volSmoke === true && S.volFog === true && S.volAirLayers === 3 && S.volDustWisps === 2 && S.volSmokeDetail === 2, "High's third-wave numbers are the defaults: three layers, smoke and fog on, one octave of wisps");
+ok(VOL_PRESETS.low.volDustWisps === 0 && VOL_PRESETS.medium.volDustWisps === 1 && VOL_PRESETS.high.volDustWisps === 2 && VOL_PRESETS.ultra.volDustWisps === 3, 'the wisps by preset: off, bands, noise, noise ×2');
 
 // --- presets ---
 ok(presetOf(DEFAULT_SETTINGS) === 'high', 'the defaults work out to High');
@@ -128,6 +144,15 @@ ok(!(VOL_QUALITY_KEYS as readonly string[]).some((k) => ['volumetrics', 'airVolu
     ok(!('volSandDetail' in saved), 'a sand detail at the default is left out of the file');
     const merged = { ...DEFAULT_SETTINGS, ...saved } as Settings;
     ok(volFillQuality(saved, merged) === 0 && merged.volSandDetail === 4 && presetOf(merged) === 'custom', 'and the stamp keeps it at the default on load: Custom, not filled back to Ultra\'s');
+  }
+  for (const name of VOL_PRESET_NAMES) {
+    // The second wave's file (stamped 2): its own wave's keys written where they differ, none of the third wave's.
+    const w3 = VOL_QUALITY_KEYS.filter((k) => (VOL_QUALITY_ADDED[k] ?? 1) >= 3);
+    const saved: Record<string, unknown> = { [VOL_QUALITY_STAMP]: 2 };
+    for (const k of VOL_QUALITY_KEYS) if (!w3.includes(k) && VOL_PRESETS[name][k] !== (S as Record<string, unknown>)[k]) saved[k] = VOL_PRESETS[name][k];
+    const merged = { ...DEFAULT_SETTINGS, ...saved } as Settings;
+    volFillQuality(saved, merged);
+    ok(presetOf(merged) === name && w3.every((k) => merged[k] === VOL_PRESETS[name][k]), `a ${name} saved in the second wave reads ${name}: the third wave's keys (${w3.join(', ')}) are filled from its own preset`);
   }
   {
     const saved: Record<string, unknown> = { volAirDetail: 64, volAirSolve: 33 };

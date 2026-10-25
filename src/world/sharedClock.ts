@@ -326,6 +326,20 @@ export class SharedClock {
     return t - Math.floor(t);
   }
 
+  /**
+   * The day counted as `timeOfDay` counts it, unfloored, into `out` (the fog's day, `FogDayCount`): `shared` the shared
+   * clock's continuous day (its anchor and the planet's phase; NaN with no server), `wall` this machine's own
+   * (`now / length + phase`). Written into a record, so nothing crosses the call on the frame.
+   */
+  dayCountIn(day: { readonly dayLengthSeconds: number; readonly phase: number }, out: { shared: number; wall: number }): void {
+    const len = day.dayLengthSeconds > 0 ? day.dayLengthSeconds : 1;
+    const phase = Number.isFinite(day.phase) ? day.phase : 0;
+    const now = this.now();
+    out.wall = now / (len * 1000) + phase;
+    if (this.state === 'off') out.shared = Number.NaN;
+    else out.shared = this.dayAt ? this.dayFrom + (now - this.dayAt) / (len * 1000) + phase : out.wall;
+  }
+
   report(): { where: ClockState; offsetMs: number; aimMs: number; rttMs: number; samples: number; waiting: boolean; weatherLagMs: number; refused: number; dayAt: number; dayFrom: number } {
     return {
       where: this.state,

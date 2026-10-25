@@ -49,6 +49,11 @@ export interface AirGroundUniforms {
    * the sun (an optical depth at four heights, the ground's in red), the sand's picture.
    */
   uAirOffsets: { value: THREE.Texture | null };
+  /**
+   * The sand carried in the air (the third wave): its colour premultiplied by its amount, and the amount, lifted where the
+   * ground blows and carried over any ground, so a streak blown off sand runs on over rock and fades there.
+   */
+  uAirCarry: { value: THREE.Texture | null };
   uAirDents: { value: THREE.Texture | null };
   uAirLayers: { value: THREE.Texture | null };
   uAirLight: { value: THREE.Texture | null };
@@ -87,6 +92,7 @@ export function makeAirGroundUniforms(): AirGroundUniforms {
   const S = AIR_TUNE.sand;
   return {
     uAirOffsets: { value: null },
+    uAirCarry: { value: null },
     uAirDents: { value: null },
     uAirLayers: { value: null },
     uAirLight: { value: null },
@@ -120,6 +126,7 @@ function copy4(from: THREE.Vector4, to: THREE.Vector4): void {
  */
 export function copyAirGround(from: AirGroundUniforms, to: AirGroundUniforms): void {
   to.uAirOffsets.value = from.uAirOffsets.value;
+  to.uAirCarry.value = from.uAirCarry.value;
   to.uAirDents.value = from.uAirDents.value;
   to.uAirLayers.value = from.uAirLayers.value;
   to.uAirLight.value = from.uAirLight.value;
@@ -174,6 +181,7 @@ export const TILE_GLOBALS_READ: readonly string[] = ['vec3 gGroundW =', 'vec4 gG
 
 const AIR_GROUND_PARS = /* glsl */ `
 uniform sampler2D uAirOffsets;
+uniform sampler2D uAirCarry;
 uniform sampler2D uAirDents;
 uniform sampler2D uAirLayers;
 uniform sampler2D uAirLight;
@@ -193,6 +201,7 @@ uniform vec4 uAirSandR;
 // its coverage, the dent's slope here, and how much of the sun the dust's shadow leaves.
 float gAirSandStr = 0.0;
 float gAirSand = 0.0;
+vec4 gAirCarry = vec4( 0.0 );
 vec2 gAirDentSlope = vec2( 0.0 );
 float gAirShade = 1.0;
 float airFinite( const in float v ) { return ( isnan( v ) || isinf( v ) ) ? 0.0 : v; }
@@ -245,6 +254,8 @@ if ( uAirArt.w > 0.5 ) {
 			float gAirFoot = max( length( gAirPDx ), length( gAirPDy ) );
 			gAirSandStr = smoothstep( uAirSandQ.x, uAirSandQ.y, gAirSpeed ) * gAirIn * ( 1.0 - smoothstep( uAirSandR.y, uAirSandR.z, gAirFoot ) );
 			if ( gAirSandStr > 0.0 ) {
+				// The sand carried in the air (the third wave): what was lifted off ground that blows, carried here.
+				gAirCarry = airFinite4( texture( uAirCarry, gAirUv + uAirShift.xy ) );
 				vec2 gAirDir = -( gAirO.xy * gAirKA + gAirO.zw * gAirKB );
 				float gAirDl = length( gAirDir );
 				gAirDir = gAirDl > 1e-5 ? gAirDir / gAirDl : vec2( 0.0 );
@@ -308,11 +319,16 @@ if ( uAirArt.x != 0.0 && gAirSandStr > 0.0 ) {
 	gAirCol = mix( gAirCol, groundDecode( airLayer( vGroundLayers.z, 1 ).rgb ), gGroundW.y );
 	gAirCov = mix( gAirCov, airBlows( vGroundLayers.w ), gGroundW.z );
 	gAirCol = mix( gAirCol, groundDecode( airLayer( vGroundLayers.w, 1 ).rgb ), gGroundW.z );
-	float gAirA = gAirSand * gAirCov;
+	// The sand carried in the air (the third wave, the owner's "it should continue over the rock but die off normally"):
+	// over ground that does not blow it stands for the streaks blown onto it, in the colour of the ground they left, and
+	// over ground that does the pixel's own coverage holds as it was.
+	float gAirCover = max( gAirCov, gAirCarry.a );
+	vec3 gAirCarried = gAirCarry.a > 1e-4 ? gAirCarry.rgb / gAirCarry.a : vec3( 0.0 );
+	float gAirA = gAirSand * gAirCover;
 	if ( uAirPhase.z > 0.5 ) {
-		diffuseColor.rgb = vec3( gAirSandStr * gAirCov );
+		diffuseColor.rgb = vec3( gAirSandStr * gAirCover );
 	} else if ( gAirA > 0.0 ) {
-		vec3 gAirSandColour = gAirCol * groundDecode( vGroundTint ) * uAirSandP.y;
+		vec3 gAirSandColour = ( gAirCarry.a > gAirCov ? gAirCarried : gAirCol * groundDecode( vGroundTint ) ) * uAirSandP.y;
 		diffuseColor.rgb = mix( diffuseColor.rgb, gAirSandColour, gAirA );
 		gGroundBump = mix( gGroundBump, vec4( 0.5, 0.5, 1.0, 0.0 ), gAirA * uAirSandR.x );
 	}
@@ -490,7 +506,9 @@ export function groundAirSelfTest(renderer: THREE.WebGLRenderer): GroundAirSelfT
   const sand = new THREE.DataTexture(new Uint8Array([picture[0], picture[1], 128, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
   const tau = 0.7;
   const light = new THREE.DataTexture(new Float32Array([tau, tau, tau, tau]), 1, 1, THREE.RGBAFormat, THREE.FloatType);
-  for (const t of [offsets, dents, layers, light, sand]) {
+  // No sand in the air (the third wave's carried streak): the test's blowing comes from the offsets alone.
+  const carry = new THREE.DataTexture(new Float32Array([0, 0, 0, 0]), 1, 1, THREE.RGBAFormat, THREE.FloatType);
+  for (const t of [offsets, dents, layers, light, sand, carry]) {
     t.minFilter = t.magFilter = THREE.NearestFilter;
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
     t.generateMipmaps = false;
@@ -501,6 +519,7 @@ export function groundAirSelfTest(renderer: THREE.WebGLRenderer): GroundAirSelfT
   const bright = 1.25;
   const air: AirGroundUniforms = {
     uAirOffsets: { value: offsets },
+    uAirCarry: { value: carry },
     uAirDents: { value: dents },
     uAirLayers: { value: layers },
     uAirLight: { value: light },
@@ -682,7 +701,7 @@ export function groundAirSelfTest(renderer: THREE.WebGLRenderer): GroundAirSelfT
     plain.dispose();
     variant.dispose();
     geometry.dispose();
-    for (const t of [colour, offsets, dents, layers, light, sand, u.uGroundBump.value, u.uGroundMask.value, u.uGroundClouds.value]) t.dispose();
+    for (const t of [colour, offsets, carry, dents, layers, light, sand, u.uGroundBump.value, u.uGroundMask.value, u.uGroundClouds.value]) t.dispose();
     ambient.dispose();
     sun.dispose();
     rt.dispose();

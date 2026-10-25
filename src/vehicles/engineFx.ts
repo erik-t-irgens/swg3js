@@ -10,6 +10,10 @@
 // record, made the first frame it races.
 import * as THREE from 'three';
 import { ENGINE_TUNE, sideBand, type EngineSet } from './drivetrain.ts';
+import { AIR_TUNE } from '../world/volumetrics/airTune.ts';
+
+/** The sphere a damaged side's smoke is laid over in the moving air, metres [ours: an engine's own size]. */
+const ENGINE_SMOKE_RADIUS = 1.2;
 
 /** The three bands' effects, relative to the ships pack: light smoke, burning, heavy smoke. */
 export const ENGINE_FX_FILES: readonly string[] = ['particles/fx_pt_smoking_thruster_light.json', 'particles/fx_pt_burning_thruster_2.json', 'particles/fx_pt_smoking_thruster_heavy.json'];
@@ -67,6 +71,12 @@ export class EngineFx {
   private pass = 0;
   /** Effects lit, ever, and how many are standing now: for the console. */
   readonly counts = { lit: 0, out: 0 };
+  /**
+   * Where a damaged side's smoke goes into the moving air beside the effect (the volumetrics' third wave, `World.air`'s
+   * `smoke`; null for none): called every frame a side shows a band, at the side's point, at `smoke.burning` times the
+   * band's share, grey. Cosmetic.
+   */
+  smokeSink: ((x: number, y: number, z: number, radius: number, rate: number, colour: number) => void) | null = null;
 
   /** The ship effects to play through (the session's, `World.shipFx`). */
   attach(host: EngineFxHost | null): void {
@@ -130,6 +140,14 @@ export class EngineFx {
           } else if (side.handle) {
             this.place(side);
             host.move(side.handle, m4);
+          }
+          // The band's smoke into the moving air beside the effect: light smoke a half, burning one, heavy smoke one and a
+          // half of `smoke.burning`, the heavier the darker.
+          const sink = this.smokeSink;
+          if (sink && side.band > 0) {
+            if (!side.handle) this.place(side);
+            const share = side.band === 1 ? 0.5 : side.band === 2 ? 1 : 1.5;
+            sink(at.x, at.y, at.z, ENGINE_SMOKE_RADIUS, AIR_TUNE.smoke.burning * share, side.band === 3 ? 0x2e2c2a : 0x55524e);
           }
         }
       }

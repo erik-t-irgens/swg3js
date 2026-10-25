@@ -421,6 +421,28 @@ export class AirRaster {
     return this.colour[(j * n + i) * 4 + 3];
   }
 
+  /**
+   * The share of sand's grains a machine throws at a world point while the kick-up is on (the third wave, the owner's
+   * answer of 2026-10-24): one where the ground sheds whole (sand, ash), `hard` on rock and paving (ground that neither
+   * moves nor gives: "drastically reduced, but not fully gone"), the response's dust share on any other land, and nought
+   * over water or lava, on mud or wet sand (which shed no dust), outside the window or where the ground is not known.
+   */
+  grainShareAt(ox: number, oz: number, cell: number, x: number, z: number, hard: number): number {
+    const i = Math.floor((x - ox) / cell);
+    const j = Math.floor((z - oz) / cell);
+    const n = this.n;
+    if (i < 0 || j < 0 || i >= n || j >= n) return 0;
+    const k = j * n + i;
+    if (!this.known[k]) return 0;
+    const p = k * 4;
+    if (this.colour[p + 3] !== MEDIUM_BYTE.land) return 0;
+    const dust = this.response[p + 3];
+    if (dust >= 255) return 1;
+    if (dust === 0) return 0;
+    if (this.response[p] === 0 && this.response[p + 2] === 0) return hard > 0 ? (hard < 1 ? hard : 1) : 0;
+    return dust / 255;
+  }
+
   /** The response's dust byte at a world point over 255 (nought outside, unknown, or on a liquid). */
   dustAt(ox: number, oz: number, cell: number, x: number, z: number): number {
     const i = Math.floor((x - ox) / cell);

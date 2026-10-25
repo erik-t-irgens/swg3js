@@ -105,6 +105,9 @@ const target = (pos = new THREE.Vector3()): Hittable & { seen: (StrikeKind | nul
 
   const jedi = src('combat/jedi.ts');
   ok((jedi.match(/strikeAs\('force', /g) ?? []).length === 4 && !/[^.\w]\w+\.damage\(/.test(jedi.replace(/strikeAs\([^;]*;/g, '')), "every Force power's blow is the Force's, and the Jedi kit deals no blow any other way");
+  // The knock that travels with its wave (the volumetrics' third wave) lands its blows in its own module, the Force's two.
+  const knock = src('combat/forceWaveKnock.ts');
+  ok((knock.match(/strikeAs\('force', /g) ?? []).length === 2 && !/[^.\w]\w+\.damage\(/.test(knock.replace(/strikeAs\([^;]*;/g, '')), "and the travelling knock's blows are the Force's too, dealt no other way");
   ok(/const who = playerStrike\(ctx, frame, radius, damage, push, SABER_SPARK, now\);/.test(jedi) && /sweepCapsule\(ctx, a, b, spec\.radius, spec\.damage, this\.hit,/.test(src('combat/unarmed.ts')), "the saber and the fists strike through the player's striker, which is melee (run above)");
   const sweep = src('combat/sweep.ts');
   ok(/mine\.kind = 'melee';\s*return mine;/.test(sweep) && /if \(who\.kind\) STRIKE\.kind = who\.kind;\s*try \{\s*c\.damage\(who\.damage, who\.from, who\.push, who\.source\);\s*\} finally \{\s*STRIKE\.kind = was;/.test(sweep), "and that striker says so on every call, whatever a fighter's left in it");

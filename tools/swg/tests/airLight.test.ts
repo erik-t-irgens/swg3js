@@ -9,9 +9,11 @@
 // Plain type stripping.
 import assert from 'node:assert/strict';
 import { lightDepthAt, lightDepthAtHeight, lightElevation, lightMarchFor, lightMarchIn, lightReach, lightSunAcross, type LightMarch, type LightMarchAsk, type LightSample } from '../../../src/world/volumetrics/airLight.ts';
-import { erfApprox, foldedProfile, HALF_NORMAL, lightStep } from '../../../src/world/volumetrics/airMath.ts';
+import { erfApprox, foldedProfile, HALF_NORMAL, lightStep, smokeAtHeight } from '../../../src/world/volumetrics/airMath.ts';
 import { AIR_TUNE } from '../../../src/world/volumetrics/airTune.ts';
-import { AIR_ERF_GLSL, AIR_PROFILE_GLSL, LIGHT_FRAGMENT, MAX_LIGHT_STEPS } from '../../../src/world/volumetrics/airShaders.ts';
+import { AIR_ERF_GLSL, AIR_FOG_PROFILE_GLSL, AIR_PROFILE_GLSL, AIR_SMOKE_AT_GLSL, LIGHT_FRAGMENT, MAX_LIGHT_STEPS } from '../../../src/world/volumetrics/airShaders.ts';
+import { fogProfile } from '../../../src/world/volumetrics/airFog.ts';
+import { glslFunctions } from './glslRun.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string): void => {
@@ -109,6 +111,72 @@ for (const sun of [67.5, 30]) {
   ok(tail, `the storm's tall inflow, stepped then finished past the reach by the half-normal's tail, is its whole column above each height along the slant (${out.map((t) => t.toFixed(3)).join(', ')})`);
 }
 
+// --- the third wave: smoke and fog in the sum, at the four heights, by the demo's coefficients ---
+{
+  const S = AIR_TUNE.slabs;
+  const mids: [number, number, number, number] = [S.centre, S.centre1, S.centre2, S.ceiling2 + 2];
+  for (const sun of [67.5, 30]) {
+    const el = deg(sun);
+    const m = march(el, 600, 1);
+    const air = (smoke: number, fog: number): LightMarch => ({ ...m, k: 0, air: { smokeK: smoke, fogK: fog, mids, fogTop: 20 } });
+    // A level layer of smoke the same in every slab: smokeAt is that amount from slab 0's middle to slab 2's.
+    const smoked = (_u: number, _v: number, s: LightSample): void => {
+      s.d = 0;
+      s.mu = 0;
+      s.sigma = 1;
+      s.ground = 0;
+      s.s0 = 1;
+      s.s1 = 1;
+      s.s2 = 1;
+      s.fog = 0;
+    };
+    const fogged = (_u: number, _v: number, s: LightSample): void => {
+      s.d = 0;
+      s.mu = 0;
+      s.sigma = 1;
+      s.ground = 0;
+      s.s0 = 0;
+      s.s1 = 0;
+      s.s2 = 0;
+      s.fog = 1;
+    };
+    const ts = lightDepthAt(smoked, 0.5, 0.5, air(0.85, 0.32), [0, 0, 0, 0]);
+    const tf = lightDepthAt(fogged, 0.5, 0.5, air(0.85, 0.32), [0, 0, 0, 0]);
+    let sOk = true;
+    let fOk = true;
+    const wantS: number[] = [];
+    const wantF: number[] = [];
+    for (let j = 0; j < 4; j++) {
+      // The integral of each profile along the slant, numerically (the march's own lines), from the height to the reach's top.
+      const h = m.heights[j];
+      const top = h + m.steps * m.rise;
+      let ws = 0;
+      let wf = 0;
+      const n = 20000;
+      for (let i = 0; i < n; i++) {
+        const y = h + ((i + 0.5) / n) * (top - h);
+        const smoothstep = (a: number, b: number, x: number): number => {
+          const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+          return t * t * (3 - 2 * t);
+        };
+        const sAt = y < mids[0] ? smoothstep(-0.3, mids[0] * 0.6, y) : y < mids[2] ? 1 : 1 - smoothstep(mids[2], mids[3], y);
+        ws += 0.85 * sAt * ((top - h) / n);
+        wf += 0.32 * (y < 0 ? 0 : 1 - smoothstep(0.55 * 20, 20, y)) * ((top - h) / n);
+      }
+      ws /= Math.sin(el);
+      wf /= Math.sin(el);
+      wantS.push(ws);
+      wantF.push(wf);
+      if (Math.abs(ts[j] - ws) > 3e-3 * Math.max(ws, 1e-3) + 1e-6) sOk = false;
+      if (Math.abs(tf[j] - wf) > 3e-3 * Math.max(wf, 1e-3) + 1e-6) fOk = false;
+    }
+    ok(sOk, `smoke at a level 1 in every slab, a sun at ${sun}°: the depth toward the sun at the four heights is 0.85 of its profile along the slant (${wantS.map((w) => w.toFixed(2)).join(', ')})`);
+    ok(fOk, `fog at 1 under a 20 m top: 0.32 of its profile along the slant (${wantF.map((w) => w.toFixed(2)).join(', ')})`);
+    const neither = lightDepthAt(smoked, 0.5, 0.5, { ...m, k: 0 }, [1, 1, 1, 1]);
+    if (sun === 30) ok(neither.every((t) => t === 0), 'with no smoke and fog asked (the pass before the third wave), the same smoke adds nothing');
+  }
+}
+
 // --- the march reads between the heights ---
 {
   const τ = [1.2, 0.6, 0.2, 0.05];
@@ -165,13 +233,15 @@ for (const sun of [67.5, 30]) {
 {
   const L = LIGHT_FRAGMENT;
   ok(L.includes('vec2 stepUv = uSunDir * uStep / uWindow.z;') && L.includes('float x = float(k) - 0.5;') && L.includes('vec2 q = vUv + stepUv * x;'), 'the shader steps toward the sun from the texel, each step at its middle, in window uv');
-  ok(L.includes('d = uInflow;') && L.includes('sigma = uStormSigma;') && L.includes('g = g0;'), "out of the window the storm's dust, standing on the texel's own ground");
+  ok(L.includes('sum += uInflow * profile4(uLightH + vec4(x * uRise), 0.0, uStormSigma);'), "out of the window the storm's dust, standing on the texel's own ground");
   ok(L.includes('mu = s.r / d;') && L.includes('sigma = sqrt(max(s.g / d - mu * mu, uSpreadMin * uSpreadMin));') && L.includes('if (d >= 1e-5) {'), 'inside it the carried shape, a trace reading the rest shape');
-  ok(L.includes('sum += d * profile4(uLightH + vec4(x * uRise - (g - g0)), mu, sigma);') && L.includes('vec4 tau = uK * sum * uSlant;'), "the four heights' folded profile, the ground's rise taken off, summed along the slant");
+  ok(L.includes('hk = uLightH + vec4(x * uRise - (g - g0));') && L.includes('sum += d * profile4(hk, mu, sigma);') && L.includes('vec4 tau = uK * sum * uSlant + sumAir * uSlant;'), "the four heights' folded profile, the ground's rise taken off, summed along the slant (each dust tile's, and the smoke and fog beside it)");
+  ok(L.includes('if (air) sumAir += smokeFog4(hk, texture(uSmoke, q));') && L.includes('o[j] = uLightR.x * smokeAt(y, s.xyz) + uLightR.y * s.w * fogProfileAt(y, uLightR.z);'), 'the smoke and fog join the sum at the same four heights, each at its own extinction (the third wave), only while either is carried');
+  ok(L.includes(AIR_SMOKE_AT_GLSL.trim()) && L.includes(AIR_FOG_PROFILE_GLSL.trim()), "and read through the march's own smoke and fog lines, never a copy");
   ok(L.includes('tau += uK * uInflow * uInvSin * (vec4(1.0) - vec4(airErf(hEnd.x * r), airErf(hEnd.y * r), airErf(hEnd.z * r), airErf(hEnd.w * r)));'), "past the reach the storm's tail by erf");
   ok(L.includes('gl_FragColor = finite4(max(tau, vec4(0.0)));') && !L.includes('exp(-uK'), 'written as optical depths, never a transmittance: the march takes exp(−τ) itself');
   ok(L.includes(`for (int k = 1; k <= ${MAX_LIGHT_STEPS}; k++)`) && L.includes('if (k > uSteps) break;') && MAX_LIGHT_STEPS >= 40, 'its steps a uniform under a fixed bound that every setting fits, so the steps dial builds no program');
-  ok((L.match(/texture\(/g) ?? []).length === 4, 'and a step reads the dust, its shape and the ground (the texel\'s own ground once, before the loop)');
+  ok((L.match(/texture\(/g) ?? []).length === 5, 'and a step reads the dust, its shape, the ground and the smoke (the texel\'s own ground once, before the loop)');
   // The two shared functions' bodies, run: each GLSL text turned into script word for word (a `float` declaration a `let`,
   // a built-in its Math namesake) and evaluated against its mirror over a sweep. Pinning a signature alone let a body
   // lose the ground's mirror image or erf its square with every suite green, and nothing in the browser sees the erf
@@ -202,6 +272,36 @@ for (const sun of [67.5, 30]) {
   }
   ok(erfSame, "airErf's body, run, is erfApprox's to 1e-12 from −4 to 4 (the coefficients and the exp(−a·a) term alike)");
   ok(profileSame && foldedProfile(0.5, 0.3, 0.25) > 0, `airProfile's body, run, is foldedProfile's over ${sampled} heights, means and spreads (both Gaussians, the floor on the spread, nought under the ground, 1/sqrt(2π) over σ)`);
+  // The third wave's two shared functions the march and this pass both read, run the same way (`glslRun.ts`): smokeAt
+  // against smokeAtHeight, fogProfileAt against fogProfile, over heights, smokes and slab middles. Pinned by their text
+  // alone, the two ends of a mix could swap or the fog's 55% move with every suite green.
+  let smokeSame = true;
+  let smokeSwept = 0;
+  for (const [m0, m1, m2, top] of [
+    [1.75, 6.25, 12.5, 16],
+    [1.5, 6, 12, 18],
+    [1, 1.0005, 9, 9],
+    [2, 5, 11, 30],
+  ]) {
+    const f = glslFunctions(AIR_SMOKE_AT_GLSL, ['smokeAt'], { uSlabMid: { x: m0, y: m1, z: m2, w: top } });
+    for (const [a, b, c] of [
+      [0.9, 0.4, 0.1],
+      [0, 1, 0],
+      [0.2, 0.2, 2],
+    ]) {
+      for (let h = -1; h <= 32; h += 0.173) {
+        const got = f.smokeAt(h, { x: a, y: b, z: c });
+        const want = smokeAtHeight(h, a, b, c, m0, m1, m2, top);
+        if (Math.abs(got - want) > 1e-12 * Math.max(1, Math.abs(want))) smokeSame = false;
+        smokeSwept++;
+      }
+    }
+  }
+  ok(smokeSame, `smokeAt's body, run, is smokeAtHeight's over ${smokeSwept} heights, smokes and slab middles (each slab's own at its middle, linear between, faded in from the ground and out by the band's top)`);
+  const fog = glslFunctions(AIR_FOG_PROFILE_GLSL, ['fogProfileAt']);
+  let fogSame = true;
+  for (const top of [0, -1, 0.5, 4, 9.5, 25]) for (let h = -2; h <= 30; h += 0.11) if (Math.abs(fog.fogProfileAt(h, top) - fogProfile(h, top)) > 1e-12) fogSame = false;
+  ok(fogSame, "fogProfileAt's body, run, is fogProfile's: full to 55% of its top, gone at it, nothing under the ground or under a top of nought");
 }
 
 console.log(`\n${checks} checks passed`);

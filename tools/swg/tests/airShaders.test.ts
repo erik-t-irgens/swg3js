@@ -62,8 +62,8 @@ for (const [name, text] of Object.entries(all)) {
   ok(u.length === 0, `${name}: every function it calls is GLSL's own or its own${u.length ? ` (it calls ${u.join(', ')} and never defines it)` : ''}`);
   ok(!text.includes('`'), `${name}: no backtick inside the template`);
 }
-for (const name of ['march', 'resolve', 'composite']) ok(/if \(any\(isnan\(o\)\) \|\| any\(isinf\(o\)\)\)/.test(AIR_VOLUME_FRAGMENTS[name]), `airVolume.${name} zeroes a NaN or an Inf before it writes`);
-for (const name of ['splat', 'vort', 'div', 'jacobi', 'grad', 'advect', 'dust', 'light', 'offsets']) ok(AIR_FRAGMENTS[name].includes('finite4('), `air.${name} writes through finite4, so a NaN never leaves it`);
+for (const name of ['march', 'march.bands', 'march.noise', 'march.noise2', 'resolve', 'composite']) ok(/if \(any\(isnan\(o\)\) \|\| any\(isinf\(o\)\)\)/.test(AIR_VOLUME_FRAGMENTS[name]), `airVolume.${name} zeroes a NaN or an Inf before it writes`);
+for (const name of ['splat', 'vort', 'div', 'jacobi', 'grad', 'advect', 'dust', 'light', 'offsets', 'smoke']) ok(AIR_FRAGMENTS[name].includes('finite4('), `air.${name} writes through finite4, so a NaN never leaves it`);
 // The dust takes its ground's tint by the tile program's own two functions, never a copy of them.
 {
   const dust = AIR_FRAGMENTS.dust;
@@ -85,14 +85,17 @@ const field = new AirField(stub, newVolTune(), { ground: { sample: () => false }
 const pass = new AirVolumePass(() => field);
 const fieldMats = field.materials();
 const volumeMats = pass.materials().map((m) => m.material as THREE.ShaderMaterial);
-ok(fieldMats.length === 14 && volumeMats.length === 3, "the field lists its fourteen materials (the first wave's ten, the dust's two-output fill of the third, the blowing sand's offsets and the dents' stamp and fade) and the volume its three (the warm-up's lists)");
-// The dust pass and its fill write two outputs (wave 2b's two-texture pair): GLSL 3, each output declared once
-// and written, at locations 0 and 1.
+ok(fieldMats.length === 16 && volumeMats.length === 6, "the field lists its sixteen materials (the first wave's ten, the dust's two-output fill, the blowing sand's offsets, the dents' stamp and fade, and the third wave's smoke and fog and the wisps' bands) and the volume its six (the march once a wisps mode, the resolve, the composite: the warm-up's lists)");
+ok(volumeMats.slice(0, 4).map((m) => `${m.name}:${(m.defines as Record<string, number>).WISP_MODE}`).join() === 'fx.airVolume.march:0,fx.airVolume.march.bands:1,fx.airVolume.march.noise:2,fx.airVolume.march.noise2:3' && volumeMats.slice(1, 4).every((m) => m.uniforms === volumeMats[0].uniforms), 'the march is a material a wisps mode (the Start\'s decision, class M), every one over the same uniforms by reference');
+// The dust pass, its fill, the offsets and (the third wave) the smoke and fog write two outputs: GLSL 3, each output
+// declared once and written, at locations 0 and 1.
 {
   const mats = (field as unknown as { mats: Record<string, THREE.ShaderMaterial> }).mats;
   for (const [name, outs] of [
     ['dust', ['oDust', 'oShape']],
     ['fillDust', ['oDust', 'oShape']],
+    ['offsets', ['oOffsets', 'oCarry']],
+    ['smoke', ['oSmoke', 'oTint']],
   ] as const) {
     const m = mats[name];
     const text = m.fragmentShader;
@@ -100,7 +103,8 @@ ok(fieldMats.length === 14 && volumeMats.length === 3, "the field lists its four
     const written = outs.every((o) => new RegExp(`\\b${o}\\s*=`).test(text));
     ok(m.glslVersion === THREE.GLSL3 && declared && written && !text.includes('gl_FragColor'), `air.${name}: GLSL 3, its two outputs (${outs.join(', ')}) each declared once at its own location and written, and no gl_FragColor`);
   }
-  ok(Object.entries(mats).every(([k, m]) => (k === 'dust' || k === 'fillDust' ? m.glslVersion === THREE.GLSL3 : m.glslVersion !== THREE.GLSL3)), 'and every other pass keeps its one output as it was');
+  ok(Object.entries(mats).every(([k, m]) => (k === 'dust' || k === 'fillDust' || k === 'offsets' || k === 'smoke' ? m.glslVersion === THREE.GLSL3 : m.glslVersion !== THREE.GLSL3)), 'and every other pass keeps its one output as it was');
+  ok(source('world/volumetrics/airField.ts').includes('for (const tg of this.offsetsPair!) this.drawer.draw(this.mats.fillDust, tg);') && source('world/volumetrics/airField.ts').includes('for (const tg of this.smokePair!) this.drawer.draw(this.mats.fillDust, tg);'), 'a pair of two textures is filled by the two-output fill, never the one-output fill (which leaves its second texture undefined)');
   const dust = mats.dust.fragmentShader;
   ok(dust.includes('oShape = finite4(vec4(max(s.r, 0.0), max(s.g, 0.0), s.b, max(s.a, 0.0)));') && dust.includes('oDust = finite4(max(d, vec4(0.0)));'), "the dust pass's floor at nought is every channel's but the shape's B (D·w, signed: the fall)");
 }
@@ -140,7 +144,7 @@ for (const m of [...fieldMats, ...volumeMats]) {
     if (!known.some((m) => w.key in m.uniforms)) bad.push(`${w.materials.join('/')}.${w.key} via ${w.via}`);
   }
   ok(writesField.length > 20 && bad.length === 0, `airField.ts: every one of its ${writesField.length} uniform writes is declared on its material${bad.length ? `: ${bad.join(', ')}` : ''}`);
-  const byVolume: Record<string, THREE.ShaderMaterial> = { marchMat: volumeMats[0], resolveMat: volumeMats[1], compositeMat: volumeMats[2] };
+  const byVolume: Record<string, THREE.ShaderMaterial> = { marchMat: volumeMats[0], resolveMat: volumeMats[4], compositeMat: volumeMats[5] };
   const writesVolume = uniformWrites(source('core/fx/airVolume.ts'));
   bad = [];
   for (const w of writesVolume) {

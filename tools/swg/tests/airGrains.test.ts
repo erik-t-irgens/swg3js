@@ -15,7 +15,7 @@ import { Dust, type GrainGround } from '../../../src/vehicles/dust.ts';
 import { AirRaster, type GroundSample } from '../../../src/world/volumetrics/airRaster.ts';
 import { newWindow, placeWindow } from '../../../src/world/volumetrics/fluidWindow.ts';
 import { fillResponseTable } from '../../../src/world/volumetrics/groundResponse.ts';
-import { sheddingCount, stormSheetFactor } from '../../../src/world/volumetrics/airMath.ts';
+import { grainShedIn, newGrainShed, sheddingCount, stormSheetFactor } from '../../../src/world/volumetrics/airMath.ts';
 import { AIR_TUNE } from '../../../src/world/volumetrics/airTune.ts';
 
 let checks = 0;
@@ -140,6 +140,54 @@ for (const [name, list] of rates) {
   ok(rockNone, `${name}: a machine on rock, on paving or over water throws no motes, at every speed and width`);
   ok(sandSame, `${name}: and on sand exactly today's count`);
   ok(worstOff <= 0.5, `${name}: and on ground that sheds a share, the motes it throws are the fixed twentieth's rate to within half a mote an interval (worst ${worstOff.toFixed(2)})`);
+}
+
+// --- the third wave: with the kick-up on, grains off rock and paving at a small share, none over water ---
+// The owner's answer (2026-10-24): "drastically reduced over pavement and rock, but not fully gone". `grainShareAt` is
+// the share of sand's grains (one on sand, `grains.hard` on rock and paving, nought over water), and `grainShedIn` the
+// rule that throws it, the fraction each machine is owed carried to its next interval so a road throws a grit every so
+// often at any frame rate. Ten seconds of a speeder at 20 m/s, 2.5 m wide.
+{
+  const hard = AIR_TUNE.grains.hard;
+  const shareAt = (x: number, z: number): number => raster.grainShareAt(w.ox, w.oz, w.cell, x, z, hard);
+  ok(shareAt(-20, 0) === 1 && shareAt(20, 0) === hard && shareAt(20, 50) === hard && shareAt(80, 80) === 0, `the share of sand's grains: one on sand, ${hard} on rock and on paving, nought over water`);
+  const run = (fps: number, x: number, z: number): number => {
+    const r = newGrainShed();
+    r.carry = 0;
+    let thrown = 0;
+    const perSecond = perSecondOf(20, 2.5);
+    for (const interval of intervals(fps, 0, 10, 3)) {
+      r.count = countOf(interval, 20, 2.5);
+      r.perSecond = perSecond;
+      r.interval = interval;
+      r.share = shareAt(x, z);
+      grainShedIn(r);
+      thrown += r.out;
+    }
+    return thrown;
+  };
+  for (const fps of [60, 144]) {
+    const sand = run(fps, -20, 0);
+    const rock = run(fps, 20, 0);
+    const paving = run(fps, 20, 50);
+    const water = run(fps, 80, 80);
+    ok(rock > 0 && paving > 0, `${fps} fps: off rock and paving some grains still fly (${rock} and ${paving} in ten seconds)`);
+    ok(rock < 0.25 * sand && paving < 0.25 * sand, `${fps} fps: well under sand's (${sand})`);
+    ok(water === 0, `${fps} fps: and over water none at all`);
+  }
+  // Off rock the share is judged at the motes a second, the fraction carried, so the rate is the frame rate's no matter;
+  // on sand it is today's count to the motes, whose own rounding of each interval it keeps (that is today's and not the
+  // pass's: 800 at 60 and 720 at 144 here).
+  const r60 = run(60, 20, 0);
+  const r144 = run(144, 20, 0);
+  const p60 = run(60, 20, 50);
+  const p144 = run(144, 20, 50);
+  ok(Math.abs(r60 - r144) <= 0.03 * Math.max(r60, r144) + 2 && Math.abs(p60 - p144) <= 0.03 * Math.max(p60, p144) + 2, `alike at 60 and 144 frames a second (rock ${r60} and ${r144}, paving ${p60} and ${p144})`);
+  // What rock throws is its share of the motes a second over the run, whatever the dial says: the share is the dial.
+  let span = 0;
+  for (const interval of intervals(60, 0, 10, 3)) span += interval;
+  const want = hard * perSecondOf(20, 2.5) * span;
+  ok(Math.abs(r60 - want) <= 1 + 1e-9, `off rock a machine throws the dial's share of the motes a second (${r60} against ${want.toFixed(1)} at grains.hard ${hard}), the fraction carried and never lost`);
 }
 
 // --- a grain falls onto the raster and lies there, alike at three frame rates ---

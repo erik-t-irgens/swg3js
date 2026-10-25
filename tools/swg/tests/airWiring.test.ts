@@ -63,10 +63,38 @@ ok(main.includes("this.menu.knobState = (key) => this.volKnobState(key);"), 'the
 ok(main.includes("VOL_HATCH_OFF = ((): boolean => {") && main.includes("localStorage.getItem('swg.vol') === '0'") && main.includes('if (VOL_HATCH_OFF) VOL_TUNE.on = false;'), "localStorage['swg.vol'] '0' holds the master off for the session");
 
 // --- the forces at their sites ---
-ok(count(jedi, 'world.air?.force(') === 2 && jedi.includes('world.air?.force(player.worldPos.x, player.worldPos.y, player.worldPos.z, tmp.x, tmp.z, 1, sign, 16)') && jedi.includes('world.air?.force(player.worldPos.x, player.worldPos.y, player.worldPos.z, 0, 0, 1, 1, 10)'), "the Force's push, pull and repulse stir the air, at their own reach");
+// The instant knock of before and (the third wave) the knock that travels both stir the air the same way: two sites each.
+ok(count(jedi, 'world.air?.force(') === 4 && count(jedi, 'world.air?.force(player.worldPos.x, player.worldPos.y, player.worldPos.z, tmp.x, tmp.z, 1, sign, 16)') === 2 && count(jedi, 'world.air?.force(player.worldPos.x, player.worldPos.y, player.worldPos.z, 0, 0, 1, 1, 10)') === 2, "the Force's push, pull and repulse stir the air, at their own reach, whether the knock is instant or travels");
 ok(after(jedi, 'shoveLooseProps(player.worldPos, 16, sign, tmp, sign > 0 ? 18 : 10);', 'world.air?.force(', 4) && after(jedi, 'shoveLooseProps(player.worldPos, 10, 1, null, 20);', 'world.air?.force(', 3), 'beside the loose props they shove');
-ok(hunter.includes('world.air?.blast(at.x, at.y, at.z, radius, push, 0);') && after(hunter, 'shoveLooseProps(at, radius * 1.5, 1, null, 12 + damage * 0.1);', 'world.air?.blast(', 4), "every blast of the kit's (grenade, charge, mine, a gun's splash) stirs the air by its own radius and push");
-ok(after(main, 'this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);', 'this.world.air?.blast(v.pos.x, v.pos.y, v.pos.z, AIR_TUNE.blast.wreckRadius + v.radius, AIR_TUNE.blast.wreckPush, 0);', 3), "a wreck's blast beside its ring");
+ok(after(jedi, 'this.waves.begin(sign > 0 ? FRONT_KIND.push : FRONT_KIND.pull,', 'world.air?.force(', 2) && after(jedi, 'this.waves.begin(FRONT_KIND.repulse,', 'world.air?.force(', 2), "and the travelling knock begins its wave in the same step as the air's front, which reads the one speed (`FORCE_WAVE`)");
+ok(jedi.includes('if (FORCE_WAVE.travels) this.shoveWave(ctx, 1);') && jedi.includes('if (FORCE_WAVE.travels) this.shoveWave(ctx, -1);') && jedi.includes('if (FORCE_WAVE.travels) this.repulseWave(ctx);'), 'push, pull and repulse take the travelling way only while the Gameplay switch says so');
+{
+  // Code only (comments say which pass it came with): no graphics setting, no volumetrics record, nothing of the chain.
+  const code = (s: string): string => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const graphics = /VOL_TUNE|volSettings|fxRegistry|FX_DEFAULTS|airVolume|settings\.vol|\.effects\b/;
+  ok(!graphics.test(code(src('combat/forceWave.ts'))) && !graphics.test(code(src('combat/forceWaveTune.ts'))) && !/VOL_TUNE|volSettings/.test(code(jedi)), 'and nothing of the knock reads a graphics setting');
+}
+ok(main.includes('setForceWave(S.forceKnockTravels, S.forceWaveSpeed);') && main.includes("case 'forceKnockTravels':") && main.includes("case 'forceWaveSpeed':"), "the Gameplay page's two settings reach the knock's record at load and whenever either moves");
+ok(hunter.includes('world.air?.blast(at.x, at.y, at.z, radius, push, AIR_TUNE.smoke.blastHold);') && after(hunter, 'shoveLooseProps(at, radius * 1.5, 1, null, 12 + damage * 0.1);', 'world.air?.blast(', 4), "every blast of the kit's (grenade, charge, mine, a gun's splash) stirs the air by its own radius and push, and leaves its smoke");
+ok(after(main, 'this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);', 'this.world.air?.blast(v.pos.x, v.pos.y, v.pos.z, AIR_TUNE.blast.wreckRadius + v.radius, AIR_TUNE.blast.wreckPush, AIR_TUNE.smoke.wreckHold);', 4), "a wreck's blast beside its ring, smoking as it burns");
+// The third wave's smoke at its sites: the gas cloud's every frame and its puffs only where the volume does not draw it,
+// the sting the CPU sphere above, unchanged; the damaged engines' beside engineFx's own.
+{
+  const clouds = hunter.slice(hunter.indexOf('private stepClouds(ctx: KitContext): void {'), hunter.indexOf('Everything a blast or a beam can hurt'));
+  ok(clouds.includes('air?.smoke(cl.pos.x, cl.pos.y, cl.pos.z, cl.radius, AIR_TUNE.smoke.cloud, cl.spec.color);') && clouds.includes('if (!(air && air.drawsSmokeAt(cl.pos.x, cl.pos.z, cl.radius)) && Math.random() < dt * 12) {'), "a gas cloud lays its smoke into the air every frame, and its puffs are drawn whenever the volume is not drawing that smoke over the cloud's whole sphere");
+  ok(clouds.indexOf('h.damage(cl.spec.damage * 0.1, cl.pos, 0, ctx.world.playerTarget);') > 0 && clouds.indexOf('if (h.dead || h.pos.distanceTo(cl.pos) > cl.radius) continue;') > 0 && !/air[\s\S]{0,80}damage|drawsSmokeAt[\s\S]{0,200}damage/.test(clouds.slice(0, clouds.indexOf('air?.smoke('))), 'and what it stings is the sphere, read before and apart from anything drawn');
+  ok(main.includes('this.engineFx.smokeSink = (x, y, z, radius, rate, colour) => this.world.air?.smoke(x, y, z, radius, rate, colour);') && src('vehicles/engineFx.ts').includes('sink(at.x, at.y, at.z, ENGINE_SMOKE_RADIUS, AIR_TUNE.smoke.burning * share,'), "a damaged engine's band smokes into the air beside its effect");
+}
+// The fog's hour, from the shared clock, never this machine's; the noise made in slices in play.
+ok(world.includes('count.time = day.time;\n    sharedClock.dayCountIn(day, count);\n    count.step();\n    const idx = count.day;') && after(world, 'inp.time = this.simTime;', 'this.writeFogHour(inp);', 2), "the fog's day is the drawn day counted against the shared clock, and the hour is worked out every frame into the field's input");
+// The air's ground over standing water is the water's surface (the third wave's smoke check found the fog on the lake bed
+// 40 m under it); lava keeps the ground, the lava world's whole sea being lava.
+ok(world.includes('const water = lava ? h : t.waterHeightAt(x, z);') && world.includes('out.h = !lava && water > h ? water : h;') && world.includes('out.medium = lava ? 3 : water > h ? 2 : 1;'), "the air's ground sampler stands the air on a lake's surface, never its bed, and keeps the ground under lava");
+{
+  const r = main.slice(main.indexOf('private async reconcileVolumetrics('), main.indexOf('private compileFxObject('));
+  ok(r.includes('jobs.push(this.noiseSlices(air));') && r.indexOf('jobs.push(this.noiseSlices(air));') < r.indexOf('await Promise.all(jobs);') && /while \(!air\.noiseSlice\(\)\) await this\.waitFrames\(1, 100\);/.test(main), "the in-play warm makes the wisps' noise a layer a frame, and the swap waits for it whole");
+  ok(/async warm\(\): Promise<number> \{[\s\S]{0,400}while \(!this\.noiseSlice\(NOISE3_SIZE\)\);/.test(src('world/volumetrics/airField.ts')), 'behind a loading screen it is made outright');
+}
 
 // --- the grains' gate in emitDust, today's lines as they stood ---
 {
@@ -83,7 +111,8 @@ ok(after(main, 'this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);', 'this.w
   for (const l of lines(was)) if (l && !lines(now).includes(l)) kept = false;
   ok(kept, "every line emitDust had stands in it today: the count and today's spawn are untouched");
   ok(now.includes('const air = this.air !== null && VOL_TUNE.on && VOL_TUNE.dust && this.air.forces.active ? this.air : null;'), 'the air is asked only with the master and the dust on and the field running');
-  ok(now.includes('const shed = sheddingCount(count, perSecond, interval, air.raster.dustAt(w0.ox, w0.oz, w0.cell, tmpV.x, tmpV.z));') && now.includes('this.airGroundColour(air, tmpV.x, tmpV.z, this.dustColor), VOL_TUNE.kickUp);'), "then the count is the ground's share of today's, judged on a fixed twentieth of a second, thrown as grains with the kick-up on, in the cell's tinted colour (wave 2b's)");
+  ok(now.includes('else shed = sheddingCount(count, perSecond, interval, air.raster.dustAt(w0.ox, w0.oz, w0.cell, tmpV.x, tmpV.z));') && now.includes('this.airGroundColour(air, tmpV.x, tmpV.z, this.dustColor), VOL_TUNE.kickUp);'), "then the count is the ground's share of today's, judged on a fixed twentieth of a second, thrown as grains with the kick-up on, in the cell's tinted colour (wave 2b's)");
+  ok(now.includes('g.share = air.raster.grainShareAt(w0.ox, w0.oz, w0.cell, tmpV.x, tmpV.z, AIR_TUNE.grains.hard);') && now.includes('grainShedIn(g);') && now.includes('carry.c = g.carry;') && /if \(VOL_TUNE\.kickUp\) \{/.test(now), "with the kick-up on (the third wave), the grains off rock and paving are `grains.hard` of sand's, the fraction each machine is owed carried to its next interval");
   ok(/private airGroundColour\(air: AirField, x: number, z: number, out: THREE\.Color\): THREE\.Color \{[\s\S]{0,400}r\.tintedAt\(i, j, c\)\) return out\.setRGB\(c\[0\], c\[1\], c\[2\]\);/.test(world), "the motes' colour with the air's dust on is the raster's tintedAt (the lighter tones times the colour map's tint), the fallback's outside the window");
   // The motes a second handed over are the very ones today's count is rounded from: the same expression, so the two
   // can never disagree about how fast a machine throws.
@@ -168,7 +197,7 @@ ok(main.includes("if (kind === 'repulse') air.force(at.x, at.y, at.z, 0, 0, powe
 {
   const r = main.slice(main.indexOf('private async reconcileVolumetrics('), main.indexOf('private compileFxObject('));
   ok(r.includes('jobs.push(this.sandSlices(air));') && r.indexOf('jobs.push(this.sandSlices(air));') < r.indexOf('await Promise.all(jobs);') && /while \(!air\.sandSlice\(\)\) await this\.waitFrames\(1, 100\);/.test(main), "the in-play warm makes the blowing sand's picture a slice a frame, and the swap waits for it whole");
-  ok(/async warm\(\): Promise<number> \{[\s\S]{0,200}while \(!this\.sandSlice\(SAND_SIZE\)\);/.test(src('world/volumetrics/airField.ts')), 'behind a loading screen it is made outright');
+  ok(/async warm\(\): Promise<number> \{[\s\S]{0,400}while \(!this\.sandSlice\(SAND_SIZE\)\);/.test(src('world/volumetrics/airField.ts')), 'behind a loading screen it is made outright');
 }
 
 console.log(`\n${checks} checks passed`);

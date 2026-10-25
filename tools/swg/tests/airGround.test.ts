@@ -75,7 +75,9 @@ ok(count(fs, 'airFinite') >= 6 && fs.includes('vec4 gAirO = airFinite4( texture(
   const before = new Set(uniformNames(plainFs));
   const added = uniformNames(fs).filter((n) => !before.has(n));
   const samplers = added.filter((n) => new RegExp(`uniform\\s+sampler2D\\s+${n}\\s*;`).test(fs));
-  ok(samplers.length === 5 && ['uAirOffsets', 'uAirDents', 'uAirLayers', 'uAirLight', 'uAirSand'].every((n) => samplers.includes(n)), `the samplers it adds are five (${samplers.join(', ')}): fourteen of sixteen with the tile program's own`);
+  // Six from the third wave (the sand carried in the air, `uAirCarry`): fifteen of the sixteen Direct3D 11 allows with
+  // the tile program's own, one under the ceiling (W3-notes.md records the design's fourteen as a deviation).
+  ok(samplers.length === 6 && ['uAirOffsets', 'uAirCarry', 'uAirDents', 'uAirLayers', 'uAirLight', 'uAirSand'].every((n) => samplers.includes(n)), `the samplers it adds are six (${samplers.join(', ')}): fifteen of sixteen with the tile program's own`);
   ok(added.length === Object.keys(air).length && added.every((n) => n in v.uniforms && (v.uniforms as Record<string, unknown>)[n] === (air as unknown as Record<string, unknown>)[n]), `every uniform it declares is on the shader, the very objects the field writes (${added.length})`);
   ok(uniformNames(fs).length === new Set(uniformNames(fs)).size, 'and none is declared twice');
 }

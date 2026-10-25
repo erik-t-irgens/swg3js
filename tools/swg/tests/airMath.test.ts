@@ -48,10 +48,14 @@ import {
   sheddingCount,
   slabWeight,
   slopeGate,
+  sandCarryStep,
   sandLift,
+  sandOverlay,
   sandPhaseIn,
   sandStrength,
+  smokeStep,
   splatRadius,
+  streamerRate,
   spreadBite,
   stormSheetFactor,
   stormWeight,
@@ -496,11 +500,111 @@ ok(sandLift(5, 6, 7, 1) === 0 && near(sandLift(20, 6, 7, 1), 1) && sandLift(20, 
   const shader = readFileSync(join(here, '..', '..', '..', 'src', 'world', 'volumetrics', 'airShaders.ts'), 'utf8');
   const lines = [
     'float lift = smoothstep(uLift, uLift + uLiftSpan, length(v)) * land;',
-    'vec4 o = offsetsAt(l - u * uDt / uWindow.z + uSandShift) - vec4(u, u) * uDt;',
+    'vec2 back = l - u * uDt / uWindow.z + uSandShift;',
+    'vec4 o = offsetsAt(back) - vec4(u, u) * uDt;',
     'if (uSandQ.x > 0.5) o.xy = -u * uSandQ.y;',
     'if (uSandQ.z > 0.5) o.zw = -u * uSandQ.w;',
   ];
   ok(lines.every((l) => shader.includes(l)) && !shader.includes('uAgeReset') && !shader.includes('resp.r * land'), "and the offsets' shader is the two phases line for line: no \"moves\" factor, no age and no heal");
+}
+
+// --- the third wave: smoke climbing, the coupling, the streamers ---
+{
+  // Smoke dies and climbs as exact exponentials of the frame: ten seconds alike at 60 and 144, its sum only decaying.
+  const run = (fps: number): [number, number, number] => {
+    const s: [number, number, number] = [1, 0, 0];
+    for (let f = 0; f < fps * 10; f++) smokeStep(s, 1 / fps);
+    return s;
+  };
+  const a = run(60);
+  const b = run(144);
+  const S = AIR_TUNE.smoke;
+  ok(a.every((v, i) => Math.abs(v - b[i]) < 0.01 * Math.max(1e-3, v)), `smoke laid low climbs into the layers above alike at 60 and 144 frames a second (${a.map((v) => v.toFixed(4)).join(', ')} after ten seconds)`);
+  ok(near(a[0] + a[1] + a[2], Math.exp(-S.decay * 10), 1e-9), 'and climbing only moves it between the layers: the sum is the decay alone');
+  ok(near(a[0], Math.exp(-(S.decay + S.climb0) * 10), 1e-9) && near(b[0], a[0], 1e-9), `the low layer keeps exactly exp(−(decay + climb0) · 10 s) of itself at any frame rate (${a[0].toFixed(5)}), whatever the climb's dials say`);
+  const one: [number, number, number] = [0.4, 0.2, 0.1];
+  smokeStep(one, 0);
+  ok(one[0] === 0.4 && one[1] === 0.2 && one[2] === 0.1, 'a frame of nought changes nothing');
+  const shader = readFileSync(join(here, '..', '..', '..', 'src', 'world', 'volumetrics', 'airShaders.ts'), 'utf8');
+  ok(shader.includes('if (t > 0) { acc += velAt(uVel, l, t - 1); n += 1.0; }') && shader.includes('if (t + 1 < uTileCount) { acc += velAt(uVel, l, t + 1); n += 1.0; }') && shader.includes('if (n > 0.0) v = mix(v, acc / n, clamp(uCouple * uDt, 0.0, 1.0));'), "the coupling reads each neighbour layer from the state every tile began the stage with (the advect's own input), so the order the tiles draw in changes nothing");
+  ok(shader.includes('s0 *= uSmokeDecay;') && shader.includes('float up0 = s0 * uClimb0;') && shader.includes('s1 += up0 - up1;') && shader.includes('s2 += up1;'), "the smoke pass's decay and climb are smokeStep's lines");
+  // The streamers: a sharp crest of sand in a wind past the threshold sheds; a rock crest none; under the threshold none.
+  const D = AIR_TUNE.dust;
+  const crest = streamerRate(D.streamWind + 6, -D.streamCurve, 0, 1, 1);
+  ok(crest > 0 && near(crest, D.streamCrest, 1e-9), `a sharp crest of sand in a wind past ${D.streamWind} m/s streams at the crest's rate (${crest} a second)`);
+  ok(streamerRate(D.streamWind + 6, -D.streamCurve, 1, 0, 1) === 0 && streamerRate(D.streamWind + 6, -D.streamCurve, 0, 0, 1) === 0, 'a rock crest, and rock by a wall, stream none (the ground does not move)');
+  ok(streamerRate(D.streamWind - 1, -D.streamCurve, 1, 1, 1) === 0 && streamerRate(D.streamWind + 6, D.streamCurve, 0, 1, 1) === 0, 'and none under the threshold, nor off a hollow');
+  ok(near(streamerRate(D.streamWind + 6, 0, 1, 1, 1), D.streamOnEdge, 1e-9), "beside a solid's edge at the edge's rate");
+  ok(shader.includes('float moves = texture(uResponse, l).r;') && shader.includes('float rate = gust * (crest * uStreamP.y + edge * uStreamP.z) * moves;'), "the dust pass's line is streamerRate's: by how much the ground moves");
+}
+
+// --- the third wave: sand carried in the air, lifted only where the ground blows and carried on over any ground ---
+// The owner's answer (2026-10-24): "if it starts on sand, it should continue over the rock but die off normally". A row of
+// cells, sand upwind and rock downwind, slab 0's air at `v`: the carried sand advected as the offsets pass carries it --
+// at the blown grains' own speed, the air's times its lift past the threshold times the share (`v · lift · ground.lift`,
+// worked out at the destination texel, so the strength rides the very picture it masks), from upwind, linear -- then kept
+// and lifted by `sandCarryStep` (the pass's own line); the ground's coverage the larger of the pixel's own and the
+// carried, through `sandOverlay`. Where the air over the rock falls under the threshold the grains stop, and what was
+// carried there stands and fades.
+{
+  const G = AIR_TUNE.ground;
+  const keepOf = (dt: number): number => Math.exp(-AIR_TUNE.sand.carryFade * dt);
+  // No weather wind: the threshold is `liftAdd` (the field's `min(W · liftOver + liftAdd, liftCap)` at W nought).
+  const thr = Math.min(G.liftAdd, G.liftCap);
+  const v = thr + G.liftSpan + 8.5;
+  const carry = v * sandLift(v, thr, G.liftSpan, 1) * G.lift;
+  const n = 200;
+  const cell = 0.25;
+  const runRow = (fps: number, sandUpwind: boolean, seconds = 10, airAt: (i: number, t: number) => number = () => v): Float64Array => {
+    let c: Float64Array = new Float64Array(n);
+    let next: Float64Array = new Float64Array(n);
+    const dt = 1 / fps;
+    for (let f = 0; f < Math.round(fps * seconds); f++) {
+      const t = f * dt;
+      for (let i = 0; i < n; i++) {
+        // The pass's own lines at the destination: `lift = smoothstep(…, length(v)) · land`, `u = v · (lift · share)`.
+        const vi = airAt(i, t);
+        const lift = sandLift(vi, thr, G.liftSpan, 1);
+        const u = vi * lift * G.lift;
+        const x = i - (u * dt) / cell;
+        const i0 = Math.floor(x);
+        const ft = x - i0;
+        const a = i0 < 0 || i0 >= n ? 0 : c[i0];
+        const b = i0 + 1 < 0 || i0 + 1 >= n ? 0 : c[i0 + 1];
+        const blows = sandUpwind && i < n / 2 ? 1 : 0;
+        next[i] = sandCarryStep(a * (1 - ft) + b * ft, keepOf(dt), blows, lift);
+      }
+      const s = c;
+      c = next;
+      next = s;
+    }
+    return c;
+  };
+  const a60 = runRow(60, true);
+  const a144 = runRow(144, true);
+  const none = runRow(60, false);
+  // A cell 2 m onto the rock (the boundary at cell 100), and one a second's carry further on.
+  const at2 = 100 + Math.round(2 / cell);
+  const atOn = at2 + Math.round(carry / cell);
+  const art = 1;
+  const rockCover = (c: number): number => Math.max(0, c);
+  ok(carry > 0 && a60[at2] > 0.05 && sandOverlay(0.3, 0.6, rockCover(a60[at2]), 0.8, art) !== 0.3, `sand blown off the sand runs on over the rock at the grains' own ${carry.toFixed(2)} m/s (slab 0's ${v} m/s times its lift and the share) and is drawn there (${a60[at2].toFixed(3)} carried 2 m on)`);
+  ok(a60[atOn] < a60[at2] && near(a60[atOn] / a60[at2], Math.exp(-AIR_TUNE.sand.carryFade), 0.03), `and dies away at its own rate as it is carried (${(a60[atOn] / a60[at2]).toFixed(3)} left a second's carry further on, exp(-${AIR_TUNE.sand.carryFade} × 1 s) is ${Math.exp(-AIR_TUNE.sand.carryFade).toFixed(3)})`);
+  ok(Math.abs(a60[at2] - a144[at2]) < 0.02 && Math.abs(a60[atOn] - a144[atOn]) < 0.02, `alike at 60 and 144 frames a second (${a60[at2].toFixed(3)} and ${a144[at2].toFixed(3)} 2 m on)`);
+  ok(none.every((x) => x === 0) && Object.is(sandOverlay(0.3, 0.6, rockCover(none[at2]), 0.8, art), 0.3), 'over rock with nothing that blows upwind nothing is carried and nothing is drawn');
+  ok(Object.is(sandOverlay(0.3, 0.6, rockCover(a60[at2]), 0.8, 0), 0.3), "and at the sand's art dial nought nothing is written, carried sand or not");
+  ok(a60[50] === 1, "over the sand itself the lift holds the carried amount at the ground's own");
+  // The air over the rock falling still for a second after ten seconds of wind: the grains stop where they are and what was
+  // carried there fades by exactly the dial's exponential, nothing more lifted and nothing carried on, at both rates.
+  for (const fps of [60, 144]) {
+    const still = runRow(fps, true, 11, (i, t) => (i >= n / 2 && t >= 10 ? 0 : v));
+    const was = runRow(fps, true, 10);
+    ok(near(still[at2] / was[at2], Math.exp(-AIR_TUNE.sand.carryFade), 1e-6) && near(still[atOn] / was[atOn], Math.exp(-AIR_TUNE.sand.carryFade), 1e-6), `${fps} fps: with the air over the rock falling under the threshold the carried sand stands where it lay and fades (${(still[at2] / was[at2]).toFixed(4)} left after a second)`);
+  }
+  const shader = readFileSync(join(here, '..', '..', '..', 'src', 'world', 'volumetrics', 'airShaders.ts'), 'utf8');
+  const ground = readFileSync(join(here, '..', '..', '..', 'src', 'world', 'volumetrics', 'airGround.ts'), 'utf8');
+  ok(shader.includes('vec2 u = v * (lift * uLiftShare);') && shader.includes('vec2 back = l - u * uDt / uWindow.z + uSandShift;') && shader.includes('vec4 c = (back.x < 0.0 || back.y < 0.0 || back.x > 1.0 || back.y > 1.0) ? vec4(0.0) : texture(uCarry, back);') && shader.includes('c *= uSandC.x;') && shader.includes('float lifted = min(resp.r, resp.a) * land * clamp(lift * uSandC.y, 0.0, 1.0);') && shader.includes('if (lifted > c.a) {'), "the offsets pass carries the sand from where the air brought it, keeps it by the frame's exponential and lifts it only where the ground blows: sandCarryStep's lines");
+  ok(ground.includes('float gAirCover = max( gAirCov, gAirCarry.a );') && ground.indexOf('gAirCarry = airFinite4( texture( uAirCarry, gAirUv + uAirShift.xy ) );') > ground.indexOf('if ( gAirSandStr > 0.0 ) {'), "the ground covers by the larger of the pixel's own and the carried, read only behind the sand's dial and a strength to lay");
 }
 
 // --- the Force's fronts (wave 2b), through the real AirForces ---

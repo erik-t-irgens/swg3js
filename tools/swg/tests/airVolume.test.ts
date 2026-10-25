@@ -10,12 +10,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
-import { AIR_VOLUME_FRAGMENTS, AirVolumePass, MAX_VOLUME_STEPS } from '../../../src/core/fx/airVolume.ts';
+import { AIR_MARCH_SOURCE, AIR_VOLUME_FRAGMENTS, AirVolumePass, MAX_VOLUME_STEPS } from '../../../src/core/fx/airVolume.ts';
+import { AIR_FOG_PROFILE_GLSL, AIR_SMOKE_AT_GLSL } from '../../../src/world/volumetrics/airShaders.ts';
 import { createContext } from '../../../src/core/fx/context.ts';
 import { FX_DEFAULTS, FX_PASSES, fxPassWanted, type FxSettings } from '../../../src/core/fxRegistry.ts';
 import { FX_FULLSCREEN_VERTEX } from '../../../src/core/fx/glsl.ts';
 import type { AirSource } from '../../../src/world/volumetrics/airField.ts';
-import { farHalfNormalDepth, foldedProfile, nearFade } from '../../../src/world/volumetrics/airMath.ts';
+import { farHalfNormalDepth, foldedProfile, nearFade, smokeAtHeight } from '../../../src/world/volumetrics/airMath.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string): void => {
@@ -28,9 +29,32 @@ const source = (p: string): string => readFileSync(join(here, '..', '..', '..', 
 const near = (a: number, b: number, eps = 1e-9): boolean => Math.abs(a - b) <= eps;
 
 /** A stand-in air: what the volume reads, with dust in the air and carried this frame unless told otherwise. */
-function air(airborne = true, dust: THREE.Texture | null = new THREE.Texture(), dustLive = true): AirSource {
+function air(airborne = true, dust: THREE.Texture | null = new THREE.Texture(), dustLive = true, smokeLive = false): AirSource {
   return {
     dustLive,
+    smokeLive,
+    smokeField: { value: smokeLive ? new THREE.Texture() : null },
+    smokeTint: { value: null },
+    dustTiles: { value: new THREE.Vector2(1, 0.5 / 512) },
+    velocity: { value: null },
+    slabTiles: { value: [new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4()] },
+    slabScale: { value: new THREE.Vector4(1, 1, 1, 1) },
+    slabShare: { value: new THREE.Vector4(0.72, 1, 1.32, 0) },
+    atlasHalf: { value: new THREE.Vector2() },
+    wind: { value: new THREE.Vector2() },
+    slabTop: { value: new THREE.Vector2(3.5, 9) },
+    slabMid: { value: new THREE.Vector4(1.5, 6, 12, 18) },
+    fog: { value: new THREE.Vector4(4, 1, 1 / 60, 0.5) },
+    fogDrift: { value: new THREE.Vector2() },
+    noise2: { value: null },
+    noise3: { value: null },
+    bands: { value: null },
+    wispMode: 0,
+    wispA: { value: new THREE.Vector4() },
+    wispB: { value: new THREE.Vector4() },
+    wispC: { value: new THREE.Vector4() },
+    keepTable: { value: new Float32Array(16).fill(1) },
+    airView: 0,
     dust: { value: dust },
     shape: { value: new THREE.Texture() },
     lightHeights: { value: new THREE.Vector4(0, 2, 5, 10) },
@@ -86,6 +110,10 @@ src = air(true, null);
 ok(why()?.includes('not stepping') === true, 'the air not stepping (its dust off, or nothing reading it): it refuses');
 src = air(true, new THREE.Texture(), false);
 ok(why()?.includes('not stepping') === true && !pass.enabled(ctx), "a field that keeps its dust texture but did not carry it this frame (the moving air or the dust turned off with the master on): it refuses rather than draw the frozen dust, in a storm too");
+src = air(true, new THREE.Texture(), false, true);
+ok(why() === null, 'with the dust off and smoke or fog carried this frame (the third wave), it draws them');
+src = air(true, null, false, false);
+ok(why()?.includes('not stepping') === true, 'with neither carried, it refuses');
 src = air();
 pass.setSize(1600, 900, { ...on, volumetrics: false });
 ok(why()?.includes('master is off') === true, 'and the master off: it refuses, whatever its own switch says');
@@ -97,7 +125,7 @@ ok(!def.typical && def.budgetMs > 0 && !def.canBeLast, 'it is not in the typical
 // --- materials, the target, resizes ---
 pass.setSize(1600, 900, on);
 const mats = pass.materials();
-ok(mats.length === 3 && mats.map((m) => (m.material as THREE.ShaderMaterial).name).join() === 'fx.airVolume.march,fx.airVolume.resolve,fx.airVolume.composite', 'it lists the march, the resolve and the composite for the warm-up');
+ok(mats.length === 6 && mats.map((m) => (m.material as THREE.ShaderMaterial).name).join() === 'fx.airVolume.march,fx.airVolume.march.bands,fx.airVolume.march.noise,fx.airVolume.march.noise2,fx.airVolume.resolve,fx.airVolume.composite', 'it lists the march once a wisps mode (all four, class M), the resolve and the composite for the warm-up');
 let disposed = 0;
 for (const m of mats) m.material.addEventListener('dispose', () => disposed++);
 for (const r of [0.25, 0.5, 1, 0.5, 0.25]) {
@@ -124,10 +152,10 @@ const m = AIR_VOLUME_FRAGMENTS.march;
 ok((m.match(/texture\(uLight,/g) ?? []).length === 1 && m.indexOf('texture(uLight,') > m.indexOf(`for (int i = 0; i < ${MAX_VOLUME_STEPS}; i++)`), 'the light pass is sampled once a step, inside the march');
 
 // --- wave 2b: the carried shape, the light at the sample's height, the near fade, the views, the band ---
-ok(m.includes('vec4 sh = texture(uShape, uv);') && m.includes('float mu = sh.r / D;') && m.includes('float sg = sqrt(max(sh.g / D - mu * mu, uSpreadMin * uSpreadMin));') && m.includes('float dens = D * uH0 * airProfile(hy, mu, sg) * uExtinction * uAmount;'), "the march reads the shape each patch carries and draws its folded profile at H₀: a unit of dust keeps the first wave's column wherever its mass sits");
+ok(m.includes('vec4 sh = texture(uShape, uv);') && m.includes('mu = sh.r / D;') && m.includes('sg = sqrt(max(sh.g / D - mu * mu, uSpreadMin * uSpreadMin));') && m.includes('float dens = D * uH0 * airProfile(hy, mu, sg) * uExtinction * uAmount;'), "the march reads the shape each patch carries and draws its folded profile at H₀: a unit of dust keeps the first wave's column wherever its mass sits");
 ok(!m.includes('exp(-hy / max(uInflow.y'), "the first wave's one height scale for the whole window is gone");
 ok(m.includes('exp(-max(lightTau(texture(uLight, uv + uLightShift), hy), 0.0))') && m.includes('if (h <= uLightH.x) return t.x;') && m.includes('return t.w;'), "the light toward the sun is taken at the sample's own height: τ interpolated over the four, exp(−τ)");
-ok(m.includes('* uBright;') && (m.match(/\* uBright;/g) ?? []).length === 2, 'the brightness multiplies the dust\'s light in the window and past it');
+ok(m.includes('vec3 tint = (colD * uBright + colS * densS + uFogColor * densF) / max(densD + densS + densF, 1e-6);') && (m.match(/\* uBright;/g) ?? []).length === 1, "the brightness multiplies the dust's share of the light in the window (never the smoke's or the fog's) and the storm's past it");
 {
   // The near fade: a uniform branch round the whole term, never a smoothstep of its two ends anywhere else.
   const smooths = m.match(/smoothstep\(uNearFrom, uNearTo, t\)/g) ?? [];
@@ -174,6 +202,35 @@ ok(m.includes('float bandTop() { return min(uAbove, uBandTop); }') && source('co
 }
 ok(m.includes('if (inHull(p)) continue;'), "the ridden hull's box is empty air");
 ok(m.includes('texture(uObstacles, uv).g > hy') && !m.includes('texture(uObstacles, uv).r'), "inside a solid, below its top, no dust is taken: the map's green, which holds a compound's rooms as well as the walls");
+
+// --- the third wave: smoke and fog, the dust's tiles, the wisps ---
+{
+  const src0 = AIR_MARCH_SOURCE;
+  ok(src0.includes(AIR_SMOKE_AT_GLSL.trim()) && src0.includes(AIR_FOG_PROFILE_GLSL.trim()) && src0.includes('float sm = smokeAt(hy, s.xyz);'), "smoke is read between the slabs' middles by the shared smokeAt (the light pass's own), never a copy");
+  // The mirror at the slab centres: each slab's own smoke exactly there, linear between, fading in under slab 0's middle.
+  const S0 = 0.9;
+  const S1 = 0.4;
+  const S2 = 0.1;
+  const [m0, m1, m2, top] = [1.5, 6, 12, 18];
+  ok(near(smokeAtHeight(m0, S0, S1, S2, m0, m1, m2, top), S0) && near(smokeAtHeight(m1, S0, S1, S2, m0, m1, m2, top), S1) && near(smokeAtHeight(m2, S0, S1, S2, m0, m1, m2, top), S2), "smoke is each slab's own at the slab's middle");
+  ok(near(smokeAtHeight((m0 + m1) / 2, S0, S1, S2, m0, m1, m2, top), (S0 + S1) / 2) && near(smokeAtHeight((m1 + m2) / 2, S0, S1, S2, m0, m1, m2, top), (S1 + S2) / 2), 'and linear between them, with no step at a slab\'s edge');
+  ok(smokeAtHeight(0, S0, S1, S2, m0, m1, m2, top) < S0 && smokeAtHeight(top, S0, S1, S2, m0, m1, m2, top) === 0, "fading in from the ground under slab 0's middle and out by the band's top");
+  ok(src0.includes('densF = s.w * fogProfileAt(hy, ftop) * uAirQ.y * uAmount;') && src0.includes('float ftop = uFog.x * (uAirQ.w + (1.0 + uAirQ.z - uAirQ.w) * tn);'), "the fog under a top varied by the noise (fogTopAt's line), never one number");
+  ok(src0.includes('vec2 tileUv(int k, vec2 q) {') && src0.includes('if (float(k) >= uAirR.y) break;'), "the dust a tile at a time: one, or a field a layer (Ultra's)");
+  // The wisps: a material a mode, the noise only by textureLod (never the implicit derivatives inside the divergent loop),
+  // the erosion and the age term each in a uniform branch round the whole term, all of it compiled out with the mode off.
+  ok(!/texture\(uNoise3/.test(src0) && (src0.match(/textureLod\(uNoise3,/g) ?? []).length === 4 && src0.includes('return lightTau(textureLod(uBands, q, 0.0), hy);'), 'the wisps read their noise and their bands only through textureLod');
+  ok(src0.includes('if (uWispC.x > 0.0) {') && src0.includes('if (uWispB.w > 0.0) ag = smoothstep(0.0, uWispB.w, age);') && src0.includes('float e = uWispC.x * (0.4 + 0.6 * clamp(abs(hy - dmu) / sg, 0.0, 1.0)) * ag;'), 'the erosion is a uniform branch on erode above nought, the age term one on ageWisp above nought, stronger at a patch\'s top and bottom');
+  ok(src0.includes('float keep = mix(1.0, cut, clamp(ee / max(uWispC.y, 1e-3), 0.0, 1.0));') && src0.includes('if (uWispC.z > 0.0) keep /= max(mix(1.0, expectedKeep(ee), uWispC.z), uWispC.w);'), "the erosion's remap is one at an erosion of nought, and keepColumn divides by a keep never under keepFloor");
+  const off = AIR_VOLUME_FRAGMENTS.march;
+  const wispStart = src0.indexOf('#if WISP_MODE > 0');
+  ok(off.startsWith('#define WISP_MODE 0\n') && wispStart > 0 && src0.indexOf('wispNoise(') > wispStart, "with the mode off every line of the wisps is compiled out (the march of before, with the third wave's smoke and fog)");
+  ok(AIR_VOLUME_FRAGMENTS['march.noise2'].startsWith('#define WISP_MODE 3\n') && src0.includes('#if WISP_MODE == 3'), 'noise ×2 adds the finer octave on the air a layer up');
+  ok(source('core/fx/airVolume.ts').includes('g.render(this.marchQuads[mode], FX_CAMERA);'), 'the frame draws the march of the mode the field has in force');
+  // The fog past the window, and the puffs' rule's amount.
+  ok(src0.includes('tau += uAirR.x * fogProfileAt(uCamera.y + dir.y * tj - uBand.z, uFog.x) * st;'), 'past the window the fog the hour carries in, under the hour\'s top over the window\'s mean ground');
+  ok(source('core/fx/airVolume.ts').includes('src.volumeAmount = this.q.amount;'), "the volume tells the field its amount each frame it draws (the gas cloud's puffs read it)");
+}
 
 // --- the chain resizes it on its settings ---
 const postfx = source('core/postfx.ts');

@@ -39,7 +39,8 @@ import { CROWD_SWITCHES, CROWD_TUNE, listsMover, tuneCrowd, type CrowdTune } fro
 import { crowdDialsFor } from './world/mobiles/crowdDials.ts';
 import { shadowDialsFor } from './world/shadowDials.ts';
 import { AIR_DRAW, checkAirTargets, probeAirDraws, type AirDrawMode } from './world/volumetrics/airDraw.ts';
-import { AIR_TUNE, GROUND_CLASS_NAMES, tuneAir, type GroundClass } from './world/volumetrics/airTune.ts';
+import { AIR_TUNE, GROUND_CLASS_NAMES, tuneAir, tuneFogLooks, GROUND_FOG_LOOKS, type GroundClass } from './world/volumetrics/airTune.ts';
+import { FORCE_WAVE, FORCE_WAVE_SPEED, setForceWave } from './combat/forceWaveTune.ts';
 import { airDialsFor } from './world/volumetrics/airDials.ts';
 import { isVolKey, presetOf, VOL_APPLY_CLASS, VOL_KEYS, VOL_PRESET_LABELS, VOL_TUNE, volConsoleToSettings, volMemoryMB, volQualityFrom, type VolKey } from './world/volumetrics/volSettings.ts';
 import { AirVolumePass } from './core/fx/airVolume.ts';
@@ -866,8 +867,10 @@ interface AirDebugOptions {
   tune?: Record<string, unknown>;
   /** Stand the demos' movable engine where you look (metres up, m/s out, heading and tilt in degrees), or take it away (null). */
   engine?: { height?: number; exit?: number; heading?: number; tilt?: number } | null;
-  /** A blast where you look. */
-  blast?: { radius?: number; push?: number };
+  /** A blast where you look, with its smoke for `smoke` seconds (the grenade's own by default). */
+  blast?: { radius?: number; push?: number; smoke?: number };
+  /** Whether the volume draws smoke where you look now (the gas cloud's puffs are drawn where it does not). */
+  puffs?: boolean;
   /** Read the fields back; `at` points (game x, z) answer the dust within `radius` and the light there. */
   measure?: boolean | { at?: [number, number][]; radius?: number };
   /**
@@ -890,10 +893,22 @@ interface AirDebugOptions {
   groundSelfTest?: boolean;
   /** The two targets the dust's shape and the light's heights need, drawn and read back on this renderer (`checkAirTargets`). */
   targets?: boolean;
+  /**
+   * The ground fog (the third wave): `day` true forces a fog morning on today's draw (false gives it back), `level` and
+   * `top` hold the hour's level and top (null releases each); the emission is still the field's.
+   */
+  fog?: { day?: boolean; level?: number | null; top?: number | null };
+  /** Smoke at the crosshair (the third wave): a sphere of `radius` metres fed at `rate` a second for `seconds` (2.6 by default), in a colour. */
+  smoke?: { radius?: number; rate?: number; seconds?: number; colour?: number };
+  /** Move the fog's looks by world: `{ naboo: { morning: 1 } }` (`tuneFogLooks`); the day's draw is made again at once. */
+  fogLooks?: Record<string, unknown>;
 }
 
 /** The fields `__debug.air({ view })` shows. */
-const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'shape', 'tint', 'offsets', 'dents', 'inscatter', 'clear'] as const;
+const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'shape', 'tint', 'offsets', 'dents', 'inscatter', 'clear', 'smokeField', 'fogField', 'smokeTint', 'bands', 'carry'] as const;
+
+/** The third wave's views the march draws itself (`AirSource.airView`): the first sample's smoke, fog, or the wisps' keep. */
+const AIR_AIR_VIEWS = ['smoke', 'fog', 'wisps'] as const;
 
 /** The views the march draws itself (`AirSource.look`'s y), in its own order: the dust's carried colour, height, spread and age. */
 const AIR_MARCH_VIEWS = ['carried', 'lift', 'spread', 'age'] as const;
@@ -1711,6 +1726,8 @@ class App {
     this.targetFx = new TargetFx(this.world.shipFx);
     // A race-driven hull's damaged engines smoke and burn through the same ship effects (src/vehicles/engineFx.ts).
     this.engineFx.attach(this.world.shipFx);
+    // And their smoke into the moving air beside the effect (the volumetrics' third wave; nothing with them off).
+    this.engineFx.smokeSink = (x, y, z, radius, rate, colour) => this.world.air?.smoke(x, y, z, radius, rate, colour);
     this.world.renderer = this.renderer;
     // The sound of the place: the area's beds, the game's placed sound objects and the loops its
     // particle effects name. The numbering of buildings and boarded hulls is this class's, so that a
@@ -1794,6 +1811,8 @@ class App {
     this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
     // How hard the world's own bodies are, before any of them is stood: each reads it as it stands.
     setDifficulty(S.difficulty);
+    // Whether the Force's knock travels with its wave, and how fast (the Gameplay page's; gameplay, read by no graphics).
+    setForceWave(S.forceKnockTravels, S.forceWaveSpeed);
     // How Restuss stands with no server's word on it: the world state's own setting is the one kept, and the page's
     // row shows it (`worldState.ts`).
     S.restuss = (localWorldState(RESTUSS_KEY) ?? WORLD_STATES[RESTUSS_KEY].default) as Settings['restuss'];
@@ -3252,6 +3271,19 @@ class App {
           .slice(0, 3)
           .map(({ t, d }) => ({ who: t.label, away: Math.round(d), hp: Math.round((t as { hp?: number }).hp ?? 0), of: Math.round((t as { maxHp?: number }).maxHp ?? 0) }));
         return { scale: DIFFICULTY.scale, range: { ...DIFFICULTY_RANGE }, kept: this.settings.difficulty, nearest: near };
+      },
+      /**
+       * The Force's knock and its wave (the volumetrics' third wave, the owner's answer to Q16): `travels` false knocks
+       * every body in reach the instant the power is used, as before; true knocks each when the wave reaches it; `speed`
+       * how fast the wave runs (1 the air's own, about a second to the reach). Writes the Gameplay page's settings in memory
+       * and never saves them (a reload puts the page's back); gameplay, read by no graphics setting. With nothing it says
+       * what is in force and how many waves are running.
+       */
+      forceWave: (o?: { travels?: boolean; speed?: number }) => {
+        if (o && typeof o.travels === 'boolean') this.settings.forceKnockTravels = o.travels;
+        if (o && typeof o.speed === 'number' && Number.isFinite(o.speed)) this.settings.forceWaveSpeed = Math.min(FORCE_WAVE_SPEED.max, Math.max(FORCE_WAVE_SPEED.min, o.speed));
+        if (o) setForceWave(this.settings.forceKnockTravels, this.settings.forceWaveSpeed);
+        return { travels: FORCE_WAVE.travels, speed: FORCE_WAVE.speed, range: { ...FORCE_WAVE_SPEED }, running: this.jediKit().waves.waves.length, kept: { travels: this.settings.forceKnockTravels, speed: this.settings.forceWaveSpeed } };
       },
       /**
        * Restuss in both of its states (`src/world/worldState.ts`, `src/world/restuss.ts`). With nothing it says how
@@ -12261,6 +12293,11 @@ class App {
         setDifficulty(S.difficulty);
         this.world.applyDifficulty();
         break;
+      case 'forceKnockTravels':
+      case 'forceWaveSpeed':
+        // The knock and the air's wave read the one record at once; a wave already running keeps its own start.
+        setForceWave(S.forceKnockTravels, S.forceWaveSpeed);
+        break;
       case 'restuss':
         // Taken at the next arrival on Rori: this browser's own setting, or the admin's word on a server that keeps it.
         this.messages.system(this.chooseWorldState(RESTUSS_KEY, S.restuss));
@@ -12406,8 +12443,10 @@ class App {
       const p = look();
       const radius = Number.isFinite(o.blast.radius) ? (o.blast.radius as number) : AIR_TUNE.blast.radiusRef;
       const push = Number.isFinite(o.blast.push) ? (o.blast.push as number) : AIR_TUNE.blast.pushRef;
-      air.blast(p.x, p.y, p.z, radius, push, 0);
-      out.blast = { at: [Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10, Math.round(p.z * 10) / 10], radius, push, queued: air.forces.oneCount };
+      // Its smoke too (the third wave): a grenade's own `smoke.blastHold` seconds unless told otherwise.
+      const smoke = Number.isFinite(o.blast.smoke) ? Math.max(0, o.blast.smoke as number) : AIR_TUNE.smoke.blastHold;
+      air.blast(p.x, p.y, p.z, radius, push, smoke);
+      out.blast = { at: [Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10, Math.round(p.z * 10) / 10], radius, push, smoke, queued: air.forces.oneCount };
     }
     if (o.dent) {
       const p = look();
@@ -12449,11 +12488,45 @@ class App {
       if (air.forces.frontCount === before) notes.push(!air.forces.active ? 'no front: the moving air is not stepping here' : !air.forces.fromForce ? 'no front: the Force does not stir the air (volFromForce is off)' : 'no front: off the window, not a number, or eight already running (the counts say which)');
     }
     if (o.groundSelfTest) out.groundSelfTest = groundAirSelfTest(this.renderer);
+    if (o.puffs) {
+      const p = look();
+      out.puffs = { at: [Math.round(p.x * 10) / 10, Math.round(p.z * 10) / 10], smokeDrawn: air.drawsSmokeAt(p.x, p.z), puffsDrawn: !air.drawsSmokeAt(p.x, p.z) };
+    }
+    if (o.fogLooks) {
+      notes.push(...tuneFogLooks(o.fogLooks));
+      this.world.fogLooksMoved();
+    }
+    if (o.fog) {
+      const h = this.world.airFogHold;
+      if (o.fog.day !== undefined) h.day = o.fog.day === true;
+      if (o.fog.level !== undefined) h.level = o.fog.level === null || !Number.isFinite(o.fog.level) ? null : Math.max(0, o.fog.level);
+      if (o.fog.top !== undefined) h.top = o.fog.top === null || !Number.isFinite(o.fog.top) ? null : Math.max(0, o.fog.top);
+      if (h.day && !GROUND_FOG_LOOKS[this.world.packId ?? '']) notes.push(`${this.world.packId}: no fog row, so a fog morning is forced at the morning's 0.8 and a 4 m top`);
+      if (h.day) notes.push('a fog morning is forced on today\'s draw: the fog stands from midnight to first light and burns off over three hours (__debug.time to go there)');
+    }
+    if (o.smoke) {
+      const p = look();
+      const s = o.smoke;
+      const radius = Number.isFinite(s.radius) ? Math.max(0.2, s.radius as number) : 2;
+      const rate = Number.isFinite(s.rate) ? Math.max(0, s.rate as number) : AIR_TUNE.smoke.cloud;
+      const seconds = Number.isFinite(s.seconds) ? Math.max(0, s.seconds as number) : AIR_TUNE.smoke.blastHold;
+      const colour = Number.isFinite(s.colour) ? (s.colour as number) : 0x55524e;
+      const before = air.forces.smokeHeldCount;
+      air.forces.heldSmoke(p.x, p.y + 1, p.z, radius, rate, colour, seconds);
+      out.smoke = { at: [Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10, Math.round(p.z * 10) / 10], radius, rate, seconds, held: air.forces.smokeHeldCount > before, drawnThere: air.drawsSmokeAt(p.x, p.z, radius) };
+      if (air.forces.smokeHeldCount === before) notes.push(!air.forces.active ? 'no smoke: the moving air is not stepping here' : !air.forces.smokeOn ? 'no smoke: the smoke is off (volSmoke)' : 'no smoke: off the window, or the held table is full');
+    }
     if (o.view !== undefined) {
       // A view of the march's own or the ground's goes off when any other is asked, the picture's too.
       air.dustView = 0;
       air.sandView = false;
+      air.airView = 0;
       if (o.view === null) out.view = this.postfx?.fxView(null) ?? null;
+      else if ((AIR_AIR_VIEWS as readonly string[]).includes(o.view)) {
+        air.airView = (AIR_AIR_VIEWS as readonly string[]).indexOf(o.view) + 1;
+        this.postfx?.fxView(null);
+        out.view = `the march draws the first sample's ${o.view === 'smoke' ? 'smoke, a slab a channel (slab 0 red, 1 green, 2 blue)' : o.view === 'fog' ? 'fog, grey' : "wisps' keep (white whole, black eaten away), where they erode"} in place of the in-scatter`;
+      }
       else if ((AIR_MARCH_VIEWS as readonly string[]).includes(o.view)) {
         air.dustView = (AIR_MARCH_VIEWS as readonly string[]).indexOf(o.view) + 1;
         this.postfx?.fxView(null);
@@ -12463,7 +12536,7 @@ class App {
         this.postfx?.fxView(null);
         out.view = "the ground draws the blowing sand's strength over each layer, grey, in place of its colour (while the sand's dial is above nought)";
       } else if ((AIR_VIEWS as readonly string[]).includes(o.view)) out.view = this.postfx ? this.postfx.fxView(`airVolume.${o.view}`) : 'the effects are off: turn Effects on to see a field';
-      else notes.push(`no field "${o.view}": ${[...AIR_VIEWS, ...AIR_MARCH_VIEWS, 'sand'].join(', ')}`);
+      else notes.push(`no field "${o.view}": ${[...AIR_VIEWS, ...AIR_MARCH_VIEWS, ...AIR_AIR_VIEWS, 'sand'].join(', ')}`);
     }
     if (o.selfTest) out.selfTest = air.selfTest();
     if (o.measure) {
@@ -12486,6 +12559,7 @@ class App {
     const volume = this.postfx?.pass<AirVolumePass>('airVolume');
     return {
       ...air.report(),
+      fogHour: this.world.fogReport(),
       volume: volume ? { ...volume.report(), wanted: this.postfx!.passWanted('airVolume') } : 'not on the chain',
       ...out,
       ...(notes.length ? { notes } : {}),
@@ -12571,6 +12645,8 @@ class App {
         if (stands.length) jobs.push(this.world.compileReady(stands, 'volumetrics: the ground'));
         // The blowing sand's picture (wave 2b's), a slice of rows a frame, uploaded only once whole: the swap waits for it.
         jobs.push(this.sandSlices(air));
+        // The wisps' noise (the third wave's), a layer a frame, uploaded only once whole and made once a session.
+        jobs.push(this.noiseSlices(air));
         await Promise.all(jobs);
         // A change of mind, or another world arrived meanwhile (whose screen built a field of its own): throw this away.
         const changed = !VOL_TUNE.on || VOL_HATCH_OFF || !this.inWorld || this.postfx !== chain || this.world.packId !== world || (this.world.air !== null && this.world.air !== air);
@@ -12608,6 +12684,14 @@ class App {
    */
   private async sandSlices(air: AirField): Promise<void> {
     while (!air.sandSlice()) await this.waitFrames(1, 100);
+  }
+
+  /**
+   * The wisps' 64³ noise made a layer a frame (`AirField.noiseSlice`, `NOISE_LAYERS_A_FRAME`, about 2 ms each), for the
+   * master's in-play warm; made once a session and only with the master on, uploaded only once whole.
+   */
+  private async noiseSlices(air: AirField): Promise<void> {
+    while (!air.noiseSlice()) await this.waitFrames(1, 100);
   }
 
   /** One of a pass's materials compiled for the target it draws into, finished when asked (the in-play warm's own compile). */
@@ -19171,8 +19255,9 @@ class App {
           if (player.takeDamage(25)) this.hurtFrom(null);
         } else if (player.aboard?.vehicle === v) this.thrownOutOfShip(v);
         this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);
-        // The moving air takes the wreck's blast beside its ring (`World.air`, null with the volumetrics off).
-        this.world.air?.blast(v.pos.x, v.pos.y, v.pos.z, AIR_TUNE.blast.wreckRadius + v.radius, AIR_TUNE.blast.wreckPush, 0);
+        // The moving air takes the wreck's blast beside its ring (`World.air`, null with the volumetrics off), and from the
+        // third wave its smoke, fed for `smoke.wreckHold` seconds as the wreck burns.
+        this.world.air?.blast(v.pos.x, v.pos.y, v.pos.z, AIR_TUNE.blast.wreckRadius + v.radius, AIR_TUNE.blast.wreckPush, AIR_TUNE.smoke.wreckHold);
         this.effects.burst(v.pos, 0xffc080, 2 + v.radius, 0.4);
         this.effects.flash(v.pos, 0xffa050, 60, 20, 0.35);
         // Through the world, so a painted ship's own material copies leave the portal set and the cascades with it; a

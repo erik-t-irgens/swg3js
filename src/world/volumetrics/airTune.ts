@@ -41,6 +41,84 @@ export type GroundClass = keyof typeof GROUND_RESPONSE_CLASSES;
 /** Every class name, in the table's order. */
 export const GROUND_CLASS_NAMES = Object.keys(GROUND_RESPONSE_CLASSES) as GroundClass[];
 
+/**
+ * One world's fog (the third wave, the owner's answer of 2026-10-24: "the amount of fog and how often it happens should
+ * be variable as well, so not every morning is foggy"): the chance a given morning, and a given evening, is foggy, the
+ * range its thickness is drawn from (a level of 1 is the design's densest morning), and the height it fills to at dawn,
+ * metres. Whether a day is foggy, and how thick, is drawn from the world and the day's number on the shared clock
+ * (`FogDayCount`, `fogDayOf`, `airFog.ts`), so every player agrees and a player alone sees the same. It does not follow
+ * the weather (the owner allowed a rainy area foggier the morning after, if cheap and shared): the weather's levels are an
+ * area's rows while the draw is the world's, and joining them would make the day's draw ask which area the player stands
+ * in, so two players on one world could see two fogs. Left out by choice; the chance is the row's alone.
+ */
+export interface FogLook {
+  morning: number;
+  evening: number;
+  morningLo: number;
+  morningHi: number;
+  eveningLo: number;
+  eveningHi: number;
+  top: number;
+}
+
+/**
+ * Every world that fogs, by its pack's id, every number [ours] and the owner's to judge (`__debug.air({ fogLooks })`,
+ * the "Fog by world" dials). Rori and Naboo, lakes and marsh, most often of the temperate worlds (three mornings in
+ * four); Corellia and Talus clearly less (one in three); the jungles and forests (Yavin 4, Endor, Kashyyyk's zones,
+ * Dathomir) often and thick; Dantooine's dry plains sometimes and thin. **Never** Tatooine, Lok or Mustafar, nor a space
+ * zone, the world of copies, the real-elevation worlds or anything else the table does not name: a world with no row
+ * never fogs.
+ */
+export const GROUND_FOG_LOOKS: Record<string, FogLook> = {
+  naboo: { morning: 0.75, evening: 0.35, morningLo: 0.4, morningHi: 0.8, eveningLo: 0.15, eveningHi: 0.35, top: 4 },
+  rori: { morning: 0.75, evening: 0.4, morningLo: 0.4, morningHi: 0.8, eveningLo: 0.2, eveningHi: 0.4, top: 5 },
+  yavin4: { morning: 0.7, evening: 0.5, morningLo: 0.5, morningHi: 1, eveningLo: 0.3, eveningHi: 0.6, top: 6 },
+  endor: { morning: 0.65, evening: 0.45, morningLo: 0.5, morningHi: 0.9, eveningLo: 0.25, eveningHi: 0.5, top: 6 },
+  dathomir: { morning: 0.55, evening: 0.4, morningLo: 0.4, morningHi: 0.8, eveningLo: 0.25, eveningHi: 0.5, top: 5 },
+  kashyyyk_main: { morning: 0.6, evening: 0.45, morningLo: 0.5, morningHi: 0.9, eveningLo: 0.3, eveningHi: 0.6, top: 8 },
+  kashyyyk_hunting: { morning: 0.6, evening: 0.45, morningLo: 0.5, morningHi: 0.9, eveningLo: 0.3, eveningHi: 0.6, top: 8 },
+  kashyyyk_dead_forest: { morning: 0.6, evening: 0.45, morningLo: 0.5, morningHi: 0.9, eveningLo: 0.3, eveningHi: 0.6, top: 8 },
+  kashyyyk_rryatt_trail: { morning: 0.6, evening: 0.45, morningLo: 0.5, morningHi: 0.9, eveningLo: 0.3, eveningHi: 0.6, top: 8 },
+  kashyyyk_north_dungeons: { morning: 0.6, evening: 0.45, morningLo: 0.5, morningHi: 0.9, eveningLo: 0.3, eveningHi: 0.6, top: 8 },
+  kashyyyk_south_dungeons: { morning: 0.6, evening: 0.45, morningLo: 0.5, morningHi: 0.9, eveningLo: 0.3, eveningHi: 0.6, top: 8 },
+  dantooine: { morning: 0.35, evening: 0.2, morningLo: 0.3, morningHi: 0.6, eveningLo: 0.1, eveningHi: 0.3, top: 3 },
+  corellia: { morning: 0.33, evening: 0.15, morningLo: 0.2, morningHi: 0.45, eveningLo: 0.05, eveningHi: 0.2, top: 3 },
+  talus: { morning: 0.33, evening: 0.2, morningLo: 0.25, morningHi: 0.5, eveningLo: 0.1, eveningHi: 0.25, top: 4 },
+};
+
+/**
+ * Move numbers of the fog's looks, as `{ world: { key: value } }` (`__debug.air({ fogLooks })`): a world the table has
+ * not got, a key a row has not got, or a number that is not finite is refused in words; a chance is held to 0..1 and
+ * every other number to nought or more. Answers the words.
+ */
+/** Moved whenever a fog look moves (`tuneFogLooks`): the world makes the day's draw again when it sees it change. */
+export const FOG_LOOKS_STAMP = { n: 0 };
+
+export function tuneFogLooks(o: Record<string, unknown>): string[] {
+  FOG_LOOKS_STAMP.n++;
+  const notes: string[] = [];
+  for (const [w, v] of Object.entries(o)) {
+    const row = GROUND_FOG_LOOKS[w];
+    if (!row || v === null || typeof v !== 'object') {
+      notes.push(`air: no world "${w}" fogs (a world with no row never fogs)`);
+      continue;
+    }
+    const r = row as unknown as Record<string, number>;
+    for (const [k, n] of Object.entries(v as Record<string, unknown>)) {
+      if (!(k in r)) {
+        notes.push(`air: no number "${w}.${k}" in a fog look`);
+        continue;
+      }
+      if (typeof n !== 'number' || !Number.isFinite(n)) {
+        notes.push(`air: ${w}.${k} must be a finite number`);
+        continue;
+      }
+      r[k] = k === 'morning' || k === 'evening' ? Math.min(1, Math.max(0, n)) : Math.max(0, n);
+    }
+  }
+  return notes;
+}
+
 /** The numbers of the pass. */
 export const AIR_TUNE = {
   window: {
@@ -126,6 +204,18 @@ export const AIR_TUNE = {
     ceiling: 3.5,
     centre: 1.5,
     windShare: 0.72,
+    /** Slab 1 (the third wave): 3.5 to 9 m, its middle 6 m, the weather's own wind [demo `land.html:225`]. */
+    floor1: 3.5,
+    ceiling1: 9,
+    centre1: 6,
+    windShare1: 1,
+    /** Slab 2: 9 to 16 m, its middle 12 m, a third again of the weather's wind: the shear that bends a plume [demo `land.html:226`]. */
+    floor2: 9,
+    ceiling2: 16,
+    centre2: 12,
+    windShare2: 1.32,
+    /** How fast neighbouring slabs share their momentum, a second, each read from the state before the step [demo `land.html:586-598`]. */
+    couple: 0.6,
   },
   dust: {
     /** Seconds the dust takes to settle: it decays as 1 / (1 + dt / settle) [demo `land.html:1850`]. */
@@ -174,6 +264,22 @@ export const AIR_TUNE = {
     slopeTo: 40,
     /** The colour dust takes where the ground's own is not known yet: the demo's sand, sRGB [demo `land.html:630`]. */
     fallbackColour: 0xcca875,
+    /**
+     * Streamers (the third wave): where the air near the ground runs past `streamWind` m/s, loose ground sheds off a dune's
+     * crest facing the wind and within `streamEdge` metres of a solid's edge, gusty rather than constant [demo
+     * `land.html:604-630`: 9 m/s and three texels, here in metres]. `streamCrest` and `streamOnEdge` are the demo's own
+     * 3 and 2.4 a second; `streamCurve` is the crest's sharpness, metres of height over metres squared, at which a crest
+     * sheds in full [ours: a dune's ridge bends about that much over a cell].
+     */
+    streamWind: 9,
+    streamEdge: 3,
+    streamCrest: 3,
+    streamOnEdge: 2.4,
+    streamCurve: 0.15,
+    /** The shape a streamer is laid with: low, thin and barely rising, so it reads as a skin of sand blown off the crest [ours]. */
+    streamHeight: 0.35,
+    streamSpread: 0.3,
+    streamRise: 0.6,
   },
   grains: {
     /** The pull on a grain thrown up, m/s² [ours: the world's own]. */
@@ -184,6 +290,12 @@ export const AIR_TUNE = {
     blast: 300,
     /** Seconds a grain from a blast lives at most [demo `land.html:1609`]. */
     blastLife: 3,
+    /**
+     * The share of sand's grains a machine throws off rock and paving (the owner's "drastically reduced over pavement and
+     * rock, but not fully gone", 2026-10-24): a tenth, so a speeder crossing a road still flicks a grit or two behind it
+     * while on sand it throws a spray [ours]. Over water none at all: water throws spray, a later wave's.
+     */
+    hard: 0.1,
   },
   light: {
     /** Metres a step of the march toward the sun is long: 0.64 · min(3.5, 0.75 / tan elevation) [demo `land.html:648`, `:1552`]. */
@@ -416,6 +528,111 @@ export const AIR_TUNE = {
     fadeTo: 8,
     /** Wet ground does not blow: none past this wetness. */
     wetFull: 0.3,
+    /**
+     * The sand in the air (the third wave, the owner's "if it starts on sand, it should continue over the rock but die off
+     * normally"): it is lifted only where the ground blows and the air passes the threshold, carried by the air over any
+     * ground, and dies away at this rate a second [ours: half gone in about half a second, so a streak blown off a dune runs
+     * a few metres onto the rock below it and fades, and never a whole slab of rock streaked].
+     */
+    carryFade: 1.5,
+  },
+  /**
+   * Smoke (the third wave, the design's §2.6): one channel a slab, carried by its own slab's air, dying at `decay` a
+   * second and climbing a share of itself into the slab above each second [demo `land.html:571-579`, `:1829-1845`].
+   */
+  smoke: {
+    decay: 0.1,
+    /** Slab 0's and slab 1's share climbing a second [demo LAYERS' `up`]; slab 2 climbs nowhere. */
+    climb0: 0.55,
+    climb1: 0.28,
+    /** A blast's smoke: 3 into slab 0 and 0.9 into slab 1 at once, slab 0 fed for `blastHold` seconds after, all times radius / 7 [demo `land.html:1601-1602`, `:1774-1779`]. */
+    blast0: 3,
+    blast1: 0.9,
+    blastHold: 2.6,
+    blastFeed: 2.4,
+    /** A wreck: the same, held this many seconds [ours]. */
+    wreckHold: 6,
+    /** A gas cloud's smoke a second inside its sphere, about one unit of density held there [ours]. */
+    cloud: 1,
+    /** A burning part's smoke a second [ours: a plume that reads beside the game's own smoke effect]. */
+    burning: 0.6,
+    /** Below this volume amount the gas cloud's puffs come back: too faint a volume to show the danger [ours]. */
+    puffsBelow: 0.25,
+    /** How much light a unit of smoke takes a metre in the march [demo `land.html:1145`: 0.85]. */
+    extinction: 0.85,
+    /** A held source reaches the slabs by its height over the ground: exp(-((middle - h) / reach)²), metres [ours: a burning part 3 m up smokes slab 0 and 1 alike]. */
+    reach: 2,
+    /** The march's smoke colour where nothing tinted it, linear [demo `land.html:1158`]. */
+    greyR: 0.3,
+    greyG: 0.28,
+    greyB: 0.27,
+    /** Seconds the march keeps looking up to the band's ceiling after smoke was last laid, while it climbs and thins [ours: a decay of 0.1 leaves 5% after 30 s]. */
+    linger: 30,
+  },
+  /**
+   * Fog (the third wave): emitted and carried, never imposed (the design's §2.6), on a morning or evening the world's
+   * own draw for the day says is foggy (`GROUND_FOG_LOOKS`, the owner's 2026-10-24 answer). Every number [ours] but the
+   * decay [demo `land.html:1883`] and a dial.
+   */
+  fog: {
+    decay: 0.05,
+    /** The inflow's bank on the wind, times the hour's level. */
+    bank: 0.8,
+    /** What each land cell emits a second, times the level; patchy by a slow noise of `patchScale` metres a cell drifting at `patchDrift` m/s. */
+    emit: 0.04,
+    patchScale: 30,
+    patchDrift: 0.3,
+    /** Over water half as much again. */
+    overWater: 1.5,
+    /** Down the ground's fall line at this speed where it leans past `drainFrom` degrees: it pools in hollows. */
+    drain: 0.6,
+    drainFrom: 2,
+    /**
+     * The densest a hollow piles fog to as the drainage converges on it, in the field's own units (a level-1 morning's
+     * ground settles at emit / decay, 0.8): pooled fog stands thick, never a solid wall however long the morning [ours].
+     */
+    poolMost: 3,
+    /** The decay rises by this much a second as the morning's fog thins from its peak: it burns off. */
+    burn: 0.15,
+    /** The height it fills to rises from the look's toward this as it thins, metres. */
+    topMax: 16,
+    /**
+     * The top is never one number (the owner's "height differences"): a slow noise of `topScale` metres a cell, drifting
+     * on the wind, raises it by up to `topRise` and lowers it to `topLow` of itself, so banks stand taller in places and
+     * thin to ground-hugging wisps in others [ours].
+     */
+    topScale: 60,
+    topRise: 0.6,
+    topLow: 0.35,
+    /** How much light a unit of fog takes a metre in the march [demo `land.html:1152`: 0.32]. */
+    extinction: 0.32,
+    /** The share of the emission's noise below which a patch emits nothing at all: banks with gaps [ours]. */
+    gaps: 0.35,
+    /** Seconds the march keeps looking for fog after the hour stops bringing it, while what came thins away [ours]. */
+    linger: 60,
+  },
+  /**
+   * The wisps (the third wave, the design's §2.14): a 3D noise of ours carried by each layer's own air eroding the dust,
+   * more at a patch's top and bottom and as it ages, so it breaks into curls and is no longer full from top to bottom.
+   * Every one [ours] and a dial.
+   */
+  wisps: {
+    /** The noise's scale, a repeat of 1 / scale metres (20 m), 31 cm a texel. */
+    scale: 0.05,
+    /** Taller than wide: the noise read with the height times this. */
+    stretch: 2,
+    /** Seconds a phase of the flow noise is carried before it starts again. */
+    period: 1.5,
+    /** How hard it erodes, and the erosion at which its cut pattern is in full (fresh dust stays whole). */
+    erode: 0.45,
+    erodeFull: 0.15,
+    /** Seconds over which a patch comes to its full erosion as it ages; 0, no age term. */
+    ageWisp: 1.5,
+    /** 0 erosion takes mass away; 1 the mean opacity held, divided by the expected keep never under `keepFloor`. */
+    keepColumn: 0,
+    keepFloor: 0.25,
+    /** The second octave's share in the noise ×2 mode [ours: the bench's 0.35]. */
+    octave: 0.35,
   },
   /**
    * The dents: footprints, a speeder's rut, a scour pit under a jet, a crater (the second wave, the design's §2.7). Every
@@ -496,7 +713,7 @@ export function tuneAir(o: Record<string, unknown>): TuneAnswer {
         notes.push(`air: ${g}.${k} must be a finite number`);
         continue;
       }
-      if ((g === 'forces' && (k === 'splats' || k === 'dust' || k === 'dents')) || (g === 'volume' && k === 'maxSteps')) {
+      if ((g === 'forces' && (k === 'splats' || k === 'dust' || k === 'dents' || k === 'smoke')) || (g === 'volume' && k === 'maxSteps')) {
         notes.push(`air: ${g}.${k} is a loop bound compiled into the programs and is not moved live`);
         continue;
       }

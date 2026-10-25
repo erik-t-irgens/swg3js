@@ -11,6 +11,10 @@ import { strikeAs } from './strikeTag.ts';
 import { BrushClock, SABER_HIT, bodyTeleported, brushDamage, noteBrush, saberSwingStart, type HitLedger } from './saberHit.ts';
 import { roomFrame } from '../vehicles/surfaceRoom.ts';
 import { loosePropAhead, shoveLooseProps } from '../world/looseProps.ts';
+import { FRONT_KIND } from '../world/volumetrics/airMath.ts';
+import { ForceWaves } from './forceWave.ts';
+import { WaveKnock } from './forceWaveKnock.ts';
+import { FORCE_WAVE } from './forceWaveTune.ts';
 import type { BoltFrame } from './bolts';
 import type { EffectHandle, ParticleEffects } from '../world/particles';
 import { Unarmed } from './unarmed';
@@ -117,6 +121,15 @@ export class JediKit implements Kit {
   private repulseCd = 0;
   private slowCd = 0;
   private pullCd = 0;
+  /**
+   * The Force's waves (the volumetrics pass's third wave, the owner's Q16): while `FORCE_WAVE.travels` a push, a pull or
+   * a repulse begins a wave here and each body is knocked when its front arrives (`WaveKnock.step`, `forceWaveKnock.ts`),
+   * by the power's own arithmetic; with it off the power is the instant knock of before (`shove`, `repulse`, untouched).
+   * The world the waves were begun in, so a travel lets them go. Gameplay: it reads no graphics setting.
+   */
+  readonly waves = new ForceWaves();
+  private readonly knock = new WaveKnock(this.waves);
+  private wavePlanet: unknown = null;
   /** Last style change, for the HUD. */
   styleNote = '';
   private readonly hitThisSwing = new Set<Hittable>();
@@ -407,6 +420,14 @@ export class JediKit implements Kit {
       this.sweep(ctx, a, b, 0.55, player.thrown.returning ? THROW.returnHitDamage : THROW.hitDamage, this.hitThisLeg, 3);
     }
 
+    // The Force's waves on (the knock that travels, `FORCE_WAVE`): each body a wave's front reaches this step is knocked
+    // as the power knocks it (`WaveKnock.step`, the loop the node test drives); a world left lets every wave go.
+    if (this.wavePlanet !== planet) {
+      this.waves.clear();
+      this.wavePlanet = planet;
+    }
+    if (this.waves.waves.length > 0) this.knock.step(ctx);
+
     // The powers in the slots.
     this.healCd = Math.max(0, this.healCd - dt);
     this.repulseCd = Math.max(0, this.repulseCd - dt);
@@ -449,7 +470,8 @@ export class JediKit implements Kit {
         case 'push':
           if (onFoot && pressed && res.value >= 25) {
             res.value -= 25;
-            this.shove(ctx, 1);
+            if (FORCE_WAVE.travels) this.shoveWave(ctx, 1);
+            else this.shove(ctx, 1);
             sabers.power(powerVoice(powerById(id)), 'once');
           }
           break;
@@ -457,7 +479,8 @@ export class JediKit implements Kit {
           if (onFoot && pressed && res.value >= 20 && this.pullCd <= 0) {
             res.value -= 20;
             this.pullCd = 1.5;
-            this.shove(ctx, -1);
+            if (FORCE_WAVE.travels) this.shoveWave(ctx, -1);
+            else this.shove(ctx, -1);
             // The game's own throw, looking where the pull does. Its row puts it on what it
             // reached, and a pull reaches everything ahead rather than one body, so it stands at
             // the hand: `partPoint`'s own answer when there is nothing to put it on.
@@ -479,7 +502,8 @@ export class JediKit implements Kit {
           if (onFoot && pressed && res.value >= 40 && this.repulseCd <= 0) {
             res.value -= 40;
             this.repulseCd = 4;
-            this.repulse(ctx);
+            if (FORCE_WAVE.travels) this.repulseWave(ctx);
+            else this.repulse(ctx);
             sabers.power(powerVoice(powerById(id)), 'once');
           }
           break;
@@ -911,6 +935,34 @@ export class JediKit implements Kit {
   }
 
   /**
+   * Push (`sign` 1) or Pull (-1) as a wave that travels (`FORCE_WAVE.travels`): the ring and the air's front at the
+   * press, as `shove` makes them, and the wave begun here, measured from where the player stands now along the way the
+   * camera looks, out to the same 16 m; the bodies, vehicles and props are knocked as its front reaches them
+   * (`WaveKnock.step`), each by `shove`'s own arithmetic.
+   */
+  private shoveWave(ctx: KitContext, sign: number): void {
+    const { player, world, cam, effects } = ctx;
+    cam.forward(tmp);
+    effects.ring(player.worldPos, sign > 0 ? 0xbfe0ff : 0xffd0a0, 12, 0.45);
+    const p = player.pos;
+    const wp = player.worldPos;
+    this.waves.begin(sign > 0 ? FRONT_KIND.push : FRONT_KIND.pull, p.x, p.y, p.z, wp.x, wp.y, wp.z, tmp.x, tmp.y, tmp.z, 16);
+    if (!player.aboard) world.air?.force(player.worldPos.x, player.worldPos.y, player.worldPos.z, tmp.x, tmp.z, 1, sign, 16);
+  }
+
+  /** Repulse as a wave that travels: its ring, burst and flash and the air's ring at the press, and the wave begun, out to 10 m all round. */
+  private repulseWave(ctx: KitContext): void {
+    const { player, world, effects } = ctx;
+    effects.ring(player.worldPos, 0xbfe0ff, 18, 0.5);
+    effects.burst(tmp.copy(player.worldPos).setY(player.worldPos.y + 1), 0xdfefff, 3, 0.3);
+    effects.flash(tmp, 0xbfe0ff, 40, 14, 0.25);
+    const p = player.pos;
+    const wp = player.worldPos;
+    this.waves.begin(FRONT_KIND.repulse, p.x, p.y, p.z, wp.x, wp.y, wp.z, 1, 0, 0, 10);
+    if (!player.aboard) world.air?.force(player.worldPos.x, player.worldPos.y, player.worldPos.z, 0, 0, 1, 1, 10);
+  }
+
+  /**
    * Hurt every creature a capsule between two points touches, each once per `already` (the damage
    * is the style's, with the rage already in it). With a `path`, the capsule is stepped along
    * everything the blade covered since last frame rather than cast at its two ends alone, and with
@@ -962,6 +1014,8 @@ export class JediKit implements Kit {
     this.dropAllFx();
     // The brush's ring holds the bodies it last touched; nothing else will ever let go of them.
     this.brush.clear();
+    // And the Force's waves still travelling, with the bodies they have knocked.
+    this.waves.clear();
     for (const path of this.bladePaths) path.reset();
     this.bodyAt = -Infinity;
     this.scene.remove(this.aura);

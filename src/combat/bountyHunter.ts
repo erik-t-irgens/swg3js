@@ -14,6 +14,7 @@ import { Unarmed } from './unarmed';
 import { THROW_BALL, THROW_SHAPE, lobbed, throwVelocity } from './demoMath.ts';
 import { STRIKE, strikeAs, type StrikeKind } from './strikeTag.ts';
 import { PROGRESS_RULES } from '../progress/tune.ts';
+import { AIR_TUNE } from '../world/volumetrics/airTune.ts';
 
 /** A charge in the world: a thrown grenade or flechette mine on its fuse, a trip mine on its wall, a det pack waiting for the key. */
 interface Charge {
@@ -460,7 +461,15 @@ export class BountyHunterKit implements Kit {
         // Standing in your own cloud is your own doing, as your own blast is.
         if (!p.mounted && p.pos.distanceTo(cl.pos) < cl.radius * 0.8) p.takeDamage(cl.spec.dot ? cl.spec.dot.dps * 0.5 : 2, false, 'self');
       }
-      if (Math.random() < dt * 12) {
+      // The moving air carries the cloud's smoke in its own colour (the volumetrics' third wave; null with them off):
+      // cosmetic, laid where the sting is and nothing reads it back. The sting above stays this sphere, whatever is drawn.
+      const air = ctx.world.air;
+      air?.smoke(cl.pos.x, cl.pos.y, cl.pos.z, cl.radius, AIR_TUNE.smoke.cloud, cl.spec.color);
+      // The puffs show where the danger hangs whenever the volume is not drawing that smoke (the master, the smoke or
+      // the volume off, Effects off, the amount under its floor, a refusal, the cloud's sphere reaching the window's
+      // fading edge or off it, a full batch that dropped a cloud's smoke): a danger is always drawn, by the smoke or by
+      // its puffs.
+      if (!(air && air.drawsSmokeAt(cl.pos.x, cl.pos.z, cl.radius)) && Math.random() < dt * 12) {
         tmp.set(cl.pos.x + (Math.random() - 0.5) * cl.radius * 1.4, cl.pos.y + Math.random() * 1.8, cl.pos.z + (Math.random() - 0.5) * cl.radius * 1.4);
         effects.burst(tmp, cl.spec.color, 1.2 + Math.random() * 1.5, 0.8);
       }
@@ -989,8 +998,8 @@ export class BountyHunterKit implements Kit {
     // it does for a body, exactly as it does for a vehicle above.
     shoveLooseProps(at, radius * 1.5, 1, null, 12 + damage * 0.1);
     // The moving air (the volumetrics; null while they are off): its ring of shoves, its dust and its grains, by this
-    // blast's own radius and push.
-    world.air?.blast(at.x, at.y, at.z, radius, push, 0);
+    // blast's own radius and push, and (the third wave) its smoke, fed for `smoke.blastHold` seconds after.
+    world.air?.blast(at.x, at.y, at.z, radius, push, AIR_TUNE.smoke.blastHold);
     const dp = player.pos.distanceTo(at);
     // Your own blast is your own doing: it buys no Fortitude, and a roll does not dodge it.
     if (dp < radius * 0.7 && !player.mounted) player.takeDamage(damage * player.stats.blastSelf * (1 - dp / (radius * 0.7)), false, 'self');

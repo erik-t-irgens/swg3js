@@ -8,7 +8,7 @@
 // Pure: it imports the tune table and the dials' own types and nothing of the page.
 import type { DialGroup, DialSet, NumberDial } from '../../ui/dials.ts';
 import { readDials } from '../../ui/dials.ts';
-import { AIR_TUNE, tuneAir } from './airTune.ts';
+import { AIR_TUNE, GROUND_FOG_LOOKS, tuneAir, tuneFogLooks, type FogLook } from './airTune.ts';
 
 type Group = keyof typeof AIR_TUNE;
 
@@ -189,7 +189,109 @@ const AIR_GROUPS: DialGroup[] = [
       dial('prints', 'craterReach', 'A blast still digs from', 0, 2, 0.05, '× radius', 'How high over the ground a blast still presses a crater into it, as a share of its radius: shallower the higher it went off, none past this.'),
     ],
   },
+  {
+    title: 'Layers of air',
+    note: 'The third wave\'s three layers over the ground (to 3.5, 9 and 16 m): each its own share of the wind, and their momentum shared between neighbours.',
+    dials: [
+      dial('slabs', 'windShare', 'Low layer\'s wind', 0, 2, 0.01, '×', 'The layer near the ground, as a share of the weather\'s wind: slower, held back by the ground.'),
+      dial('slabs', 'windShare1', 'Middle layer\'s wind', 0, 2, 0.01, '×', 'The layer from 3.5 to 9 m.'),
+      dial('slabs', 'windShare2', 'High layer\'s wind', 0, 3, 0.01, '×', 'The layer from 9 to 16 m: the shear that bends a plume over as it rises.'),
+      dial('slabs', 'couple', 'Layers share their motion', 0, 5, 0.05, '/s', 'How fast a jet\'s push in one layer is felt in the layers beside it.'),
+      dial('dust', 'streamWind', 'Sand streams off crests from', 2, 30, 0.5, 'm/s', 'How fast the air near the ground must blow before loose sand streams off a dune\'s crest and off a building\'s edge.'),
+      dial('dust', 'streamCrest', 'Crest streaming', 0, 10, 0.1, '/s', 'How much a sharp crest sheds a second, at full gust.'),
+      dial('dust', 'streamOnEdge', 'Edge streaming', 0, 10, 0.1, '/s', 'How much ground beside a wall or a building\'s edge sheds a second.'),
+      dial('dust', 'streamEdge', 'Edge reaches', 0.5, 10, 0.1, 'm', 'How far from a solid\'s edge the ground still streams.'),
+      dial('dust', 'streamCurve', 'Crest sharp enough at', 0.01, 1, 0.01, 'm/m²', 'How sharply the ground must bend over a crest for it to shed in full.'),
+      dial('grains', 'hard', 'Grains off rock and paving', 0, 1, 0.01, '× sand', 'How many grains a machine throws off rock and paving, as a share of what it throws off sand. None ever off water.'),
+      dial('sand', 'carryFade', 'Blown sand dies away', 0, 10, 0.05, '/s', 'How fast sand blown off a dune fades as it is carried on over rock: higher, it runs a shorter way onto the rock.'),
+    ],
+  },
+  {
+    title: 'Smoke',
+    note: 'Smoke from blasts, wrecks, burning engines and gas grenades, one channel a layer, carried by its own layer\'s air and climbing.',
+    dials: [
+      dial('smoke', 'decay', 'Smoke thins', 0, 1, 0.01, '/s', 'How fast smoke dies away on its own.'),
+      dial('smoke', 'climb0', 'Smoke climbs from the low layer', 0, 3, 0.01, '/s', 'How much of the low layer\'s smoke rises into the middle one a second.'),
+      dial('smoke', 'climb1', 'And from the middle layer', 0, 3, 0.01, '/s', 'How much of the middle layer\'s smoke rises into the high one a second.'),
+      dial('smoke', 'blast0', 'A blast\'s smoke low', 0, 10, 0.1, '', 'The puff a thermal detonator leaves in the low layer; others by their radius.'),
+      dial('smoke', 'blast1', 'And in the middle layer', 0, 10, 0.1, '', 'The puff it leaves in the middle layer.'),
+      dial('smoke', 'blastFeed', 'A blast burns on', 0, 10, 0.1, '/s', 'How much smoke the blast\'s fire feeds the low layer a second as it burns down.'),
+      dial('smoke', 'blastHold', 'For', 0, 10, 0.1, 's', 'How long a blast burns.'),
+      dial('smoke', 'wreckHold', 'A wreck burns for', 0, 30, 0.5, 's', 'How long a wrecked machine smokes.'),
+      dial('smoke', 'cloud', 'A gas cloud\'s smoke', 0, 5, 0.05, '/s', 'How much smoke a gas grenade\'s cloud lays a second inside itself.'),
+      dial('smoke', 'burning', 'A burning engine\'s smoke', 0, 5, 0.05, '/s', 'How much smoke a burning engine lays a second (light smoke a half, heavy one and a half).'),
+      dial('smoke', 'puffsBelow', 'Puffs come back under', 0, 1.5, 0.05, '', 'Below this amount of dust over the picture the gas cloud\'s puffs are drawn again: too faint a volume to show the danger.'),
+      dial('smoke', 'extinction', 'Smoke thickness', 0, 3, 0.05, '', 'How much light a unit of smoke takes.'),
+      dial('smoke', 'reach', 'A source reaches the layers over', 0.3, 6, 0.1, 'm', 'How far up and down a held source of smoke reaches the layers from its own height.'),
+    ],
+  },
+  {
+    title: 'Fog',
+    note: 'The ground fog the hour brings on a foggy day: carried in on the wind and rising off the ground in patches, pooling in hollows, burning off.',
+    dials: [
+      dial('fog', 'decay', 'Fog thins', 0, 1, 0.005, '/s', 'How fast fog dies away on its own.'),
+      dial('fog', 'bank', 'Bank on the wind', 0, 3, 0.05, '', 'How much fog the wind carries in from beyond the square that follows you, at the hour\'s level.'),
+      dial('fog', 'emit', 'Ground gives off', 0, 0.5, 0.005, '/s', 'How much fog the ground gives off a second, at the hour\'s level.'),
+      dial('fog', 'patchScale', 'Patches across', 5, 200, 1, 'm', 'How big the patches the ground gives fog off in are.'),
+      dial('fog', 'gaps', 'Gaps between banks', 0, 0.95, 0.01, '', 'How much of the ground gives off no fog at all: higher, more and wider gaps.'),
+      dial('fog', 'overWater', 'More over water', 0, 4, 0.05, '×', 'How much more fog water gives off than land.'),
+      dial('fog', 'drain', 'Fog slides downhill at', 0, 4, 0.05, 'm/s', 'How fast fog slides down a slope into the hollows.'),
+      dial('fog', 'drainFrom', 'Slides on slopes from', 0, 30, 0.5, '°', 'The slope past which fog slides at its full speed (gentler, slower).'),
+      dial('fog', 'poolMost', 'Pools at most', 0.5, 20, 0.1, '', 'How thick fog piles up in a hollow as it slides in, at most (a foggy morning\'s open ground settles near 0.8).'),
+      dial('fog', 'burn', 'Burns off', 0, 2, 0.01, '/s', 'How much faster the morning\'s fog thins as it burns off.'),
+      dial('fog', 'topMax', 'Lifts to', 1, 40, 0.5, 'm', 'How high the fog fills to as it thins and lifts.'),
+      dial('fog', 'topScale', 'Top varies across', 5, 300, 1, 'm', 'How far apart the fog\'s taller and lower parts are.'),
+      dial('fog', 'topRise', 'Top rises by', 0, 2, 0.05, '×', 'How much taller the fog stands in its tallest parts.'),
+      dial('fog', 'topLow', 'Top falls to', 0, 1, 0.05, '×', 'How low the fog lies in its thinnest parts, as a share of its top.'),
+      dial('fog', 'extinction', 'Fog thickness', 0, 2, 0.01, '', 'How much light a unit of fog takes.'),
+    ],
+  },
+  {
+    title: 'Fog by world',
+    note: 'How often a world\'s mornings and evenings are foggy (a share of days, every player\'s the same), the range a foggy morning\'s and evening\'s thickness is drawn from, and how high its fog fills to at first light. A world not listed never fogs.',
+    dials: Object.keys(GROUND_FOG_LOOKS).flatMap((w) => [
+      fogDial(w, 'morning', 'mornings foggy', 0, 1, 0.01, ''),
+      fogDial(w, 'evening', 'evenings foggy', 0, 1, 0.01, ''),
+      fogDial(w, 'morningLo', 'thinnest foggy morning', 0, 2, 0.05, ''),
+      fogDial(w, 'morningHi', 'thickest morning', 0, 2, 0.05, ''),
+      fogDial(w, 'eveningLo', 'thinnest foggy evening', 0, 2, 0.05, ''),
+      fogDial(w, 'eveningHi', 'thickest evening', 0, 2, 0.05, ''),
+      fogDial(w, 'top', 'fog top', 0.5, 20, 0.5, 'm'),
+    ]),
+  },
+  {
+    title: 'Wisps',
+    note: 'A noise of ours carried by each layer\'s air, eroding the dust and the fog more at a cloud\'s top and bottom and as it ages.',
+    dials: [
+      dial('wisps', 'scale', 'Wisps\' size', 0.01, 0.3, 0.005, '/m', 'How many wisps a metre: a repeat of one over this.'),
+      dial('wisps', 'stretch', 'Taller than wide', 0.5, 6, 0.1, '×', 'How much the wisps are drawn out up and down.'),
+      dial('wisps', 'period', 'Pattern renews every', 0.3, 6, 0.05, 's', 'How long the pattern is carried before it quietly starts again.'),
+      dial('wisps', 'erode', 'How hard they erode', 0, 1, 0.01, '', 'How much of a cloud the wisps eat away.'),
+      dial('wisps', 'erodeFull', 'Fully cut from', 0.01, 1, 0.01, '', 'The erosion at which the pattern is cut in full; fresh dust stays whole below it.'),
+      dial('wisps', 'ageWisp', 'Comes in over', 0, 10, 0.1, 's', 'How long a fresh cloud takes to come to its full erosion as it ages; 0, at once.'),
+      dial('wisps', 'keepColumn', 'Hold the cloud\'s thickness', 0, 1, 0.05, '', 'At 1 the holes the wisps open are made up for by what is left, so a cloud is as thick overall; at 0 they take the dust away.'),
+      dial('wisps', 'keepFloor', 'Never thicken past', 0.05, 1, 0.01, '', 'The least the holding divides by, so it never blows up.'),
+      dial('wisps', 'octave', 'The finer layer\'s share', 0, 1, 0.01, '', 'In the noise ×2 mode, how much of the wisps the finer layer on the air above makes.'),
+    ],
+  },
 ];
+
+/** One number of a world's fog look (`GROUND_FOG_LOOKS`), as a slider set through `tuneFogLooks`. */
+function fogDial(world: string, key: keyof FogLook, label: string, min: number, max: number, step: number, unit: string): NumberDial {
+  const row = GROUND_FOG_LOOKS[world] as unknown as Record<string, number>;
+  return {
+    kind: 'number',
+    key: `fogLooks.${world}.${key}`,
+    label: `${world}: ${label}`,
+    note: `${world}'s ${label}.`,
+    min,
+    max,
+    step,
+    unit,
+    get: () => row[key],
+    set: (v) => tuneFogLooks({ [world]: { [key]: v } }),
+  };
+}
 
 /** The air's dials, with the values the game shipped (read once, as this module loads, before anything can move them). */
 export const AIR_DIALS: DialSet = { helper: 'air', groups: AIR_GROUPS, shipped: readDials(AIR_GROUPS) };

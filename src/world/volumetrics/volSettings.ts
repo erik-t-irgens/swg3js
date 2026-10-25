@@ -5,7 +5,7 @@
 // **A preset is worked out, never stored** (the design's decision 4): `presetOf` answers the name whose every
 // quality key matches, else Custom, so it cannot drift from its dials and an old settings file needs nothing. A
 // preset writes the quality keys and nothing else, never a switch (what is drawn) and never an art dial (taste).
-// It writes and compares only the keys whose knobs this build has (no layer count and no smoke or liquid detail yet),
+// It writes and compares only the keys whose knobs this build has (no particle or liquid detail yet),
 // and a file saved before a wave added a quality key takes that key from the preset its other keys hold
 // (`volFillQuality`), so a wave that adds a quality key never turns an existing choice into Custom.
 //
@@ -38,6 +38,12 @@ export const VOL_SCENE_KEYS = [
   'volFromFeet',
   'volDustBright',
   'volDustSelfShadow',
+  'volAirLayers',
+  'volSmoke',
+  'volFog',
+  'volSmokeDetail',
+  'volDustWisps',
+  'volDustLayers',
 ] as const satisfies readonly (keyof Settings)[];
 
 /** The volumetrics' keys the effects chain reads (`fxRegistry.ts`): the master and the volume's own. */
@@ -80,20 +86,25 @@ export const VOL_RANGES = {
   // design's §2.8 arithmetic) and how strongly it shades itself toward the sun (1 the march's own extinction).
   volDustBright: { min: 0, max: 2, step: 0.05 },
   volDustSelfShadow: { min: 0, max: 2, step: 0.05 },
+  // The third wave's: layers of air, smoke's and fog's grid over the air's, and the wisps' mode (off, bands, noise,
+  // noise ×2).
+  volAirLayers: { options: [1, 2, 3] as readonly number[] },
+  volSmokeDetail: { options: [1, 2, 3] as readonly number[] },
+  volDustWisps: { options: [0, 1, 2, 3] as readonly number[] },
 } as const;
 
 /** The quality keys a preset writes, in this build. */
-export const VOL_QUALITY_KEYS = ['volAirDetail', 'volAirSolve', 'volAirRate', 'volDustDetail', 'volLightDetail', 'volLightSteps', 'volSandDetail', 'volPrintDetail', 'airVolumeResolution', 'airVolumeSteps', 'airVolumeHistory', 'airVolumeShadows'] as const satisfies readonly (keyof Settings)[];
+export const VOL_QUALITY_KEYS = ['volAirDetail', 'volAirSolve', 'volAirRate', 'volDustDetail', 'volLightDetail', 'volLightSteps', 'volSandDetail', 'volPrintDetail', 'airVolumeResolution', 'airVolumeSteps', 'airVolumeHistory', 'airVolumeShadows', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers'] as const satisfies readonly (keyof Settings)[];
 
 /**
  * The quality keys a wave added after the first: a settings file saved before its wave never wrote them, so with
  * nothing done it would load at the default (High's) and an earlier Low or Ultra would read Custom. `volFillQuality`
  * gives such a file the preset its other quality keys hold, at load.
  */
-export const VOL_QUALITY_LATER: readonly VolQualityKey[] = ['volSandDetail', 'volPrintDetail'];
+export const VOL_QUALITY_LATER: readonly VolQualityKey[] = ['volSandDetail', 'volPrintDetail', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers'];
 
 /** The wave each later quality key came in, against the wave a settings file says it was saved in (`VOL_QUALITY_STAMP`). */
-export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>> = { volSandDetail: 2, volPrintDetail: 2 };
+export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>> = { volSandDetail: 2, volPrintDetail: 2, volAirLayers: 3, volSmokeDetail: 3, volDustWisps: 3, volDustLayers: 3 };
 
 /**
  * The key a saved settings file carries the wave it was written in under, and this build's wave. The file keeps only
@@ -101,7 +112,7 @@ export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>>
  * written at the default: only the stamp tells them apart, and a key of a wave the file already knew is never filled.
  */
 export const VOL_QUALITY_STAMP = 'volQualityWave';
-export const VOL_QUALITY_WAVE = 2;
+export const VOL_QUALITY_WAVE = 3;
 
 /**
  * The stamp into a settings file about to be saved (what differs from the defaults), only when it holds a quality key:
@@ -121,12 +132,17 @@ export type VolQualityKey = (typeof VOL_QUALITY_KEYS)[number];
 export type VolPresetName = 'low' | 'medium' | 'high' | 'ultra';
 export const VOL_PRESET_NAMES: readonly VolPresetName[] = ['low', 'medium', 'high', 'ultra'];
 
-/** What each preset writes [ours, the design's §3.4]; High is the default and the demos' own. */
+/**
+ * What each preset writes [ours, the design's §3.4]; High is the default and the demos' own. The third wave's: one,
+ * two, three and three layers of air; smoke and fog at the air's grid on Low and twice it above; the wisps off, bands,
+ * one octave of noise and two (the design's Q18); and a dust field a layer on Ultra alone, never by default on any other
+ * (the owner's Q19: "only as an ultra option").
+ */
 export const VOL_PRESETS: Readonly<Record<VolPresetName, Readonly<Record<VolQualityKey, number | boolean>>>> = {
-  low: { volAirDetail: 64, volAirSolve: 10, volAirRate: 30, volDustDetail: 3, volLightDetail: 1, volLightSteps: 16, volSandDetail: 3, volPrintDetail: 1024, airVolumeResolution: 0.25, airVolumeSteps: 8, airVolumeHistory: true, airVolumeShadows: false },
-  medium: { volAirDetail: 96, volAirSolve: 14, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 20, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 12, airVolumeHistory: true, airVolumeShadows: true },
-  high: { volAirDetail: 128, volAirSolve: 20, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 26, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 16, airVolumeHistory: true, airVolumeShadows: true },
-  ultra: { volAirDetail: 192, volAirSolve: 28, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 32, volSandDetail: 6, volPrintDetail: 2048, airVolumeResolution: 1, airVolumeSteps: 24, airVolumeHistory: true, airVolumeShadows: true },
+  low: { volAirDetail: 64, volAirSolve: 10, volAirRate: 30, volDustDetail: 3, volLightDetail: 1, volLightSteps: 16, volSandDetail: 3, volPrintDetail: 1024, airVolumeResolution: 0.25, airVolumeSteps: 8, airVolumeHistory: true, airVolumeShadows: false, volAirLayers: 1, volSmokeDetail: 1, volDustWisps: 0, volDustLayers: false },
+  medium: { volAirDetail: 96, volAirSolve: 14, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 20, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 12, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 2, volSmokeDetail: 2, volDustWisps: 1, volDustLayers: false },
+  high: { volAirDetail: 128, volAirSolve: 20, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 26, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 16, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 2, volDustLayers: false },
+  ultra: { volAirDetail: 192, volAirSolve: 28, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 32, volSandDetail: 6, volPrintDetail: 2048, airVolumeResolution: 1, airVolumeSteps: 24, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 3, volDustLayers: true },
 };
 
 /** The preset whose every quality key in `keys` the settings hold, or 'custom'. */
@@ -215,6 +231,13 @@ export interface VolTune {
   /** How bright the dust is drawn (both its sun and its ambient), and how strongly it shades itself toward the sun (wave 2b's). */
   dustBright: number;
   dustSelfShadow: number;
+  /** The third wave's: layers of air (1 to 3), smoke and fog, their grid over the air's, the wisps' mode, a dust field a layer. */
+  airLayers: number;
+  smoke: boolean;
+  fog: boolean;
+  smokeDetail: number;
+  wisps: number;
+  dustLayers: boolean;
 }
 
 export function newVolTune(): VolTune {
@@ -252,6 +275,12 @@ export function newVolTune(): VolTune {
     fromFeet: true,
     dustBright: 0.5,
     dustSelfShadow: 0.5,
+    airLayers: 3,
+    smoke: true,
+    fog: true,
+    smokeDetail: 2,
+    wisps: 2,
+    dustLayers: false,
   };
 }
 
@@ -304,6 +333,12 @@ export function volQualityFrom(s: Pick<Settings, VolKey | 'effects'>, out: VolTu
   // The dust's look: past the page's end from the console, held only to what cannot break anything (nothing negative).
   out.dustBright = over.volDustBright !== undefined ? Math.max(0, Math.min(8, n('volDustBright'))) : clampRange(n('volDustBright'), R.volDustBright, 0.6);
   out.dustSelfShadow = over.volDustSelfShadow !== undefined ? Math.max(0, Math.min(8, n('volDustSelfShadow'))) : clampRange(n('volDustSelfShadow'), R.volDustSelfShadow, 1);
+  out.airLayers = snap(n('volAirLayers'), R.volAirLayers.options, 3);
+  out.smoke = b('volSmoke');
+  out.fog = b('volFog');
+  out.smokeDetail = snap(n('volSmokeDetail'), R.volSmokeDetail.options, 2);
+  out.wisps = snap(n('volDustWisps'), R.volDustWisps.options, 2);
+  out.dustLayers = b('volDustLayers');
   return out;
 }
 
@@ -345,6 +380,14 @@ export const VOL_APPLY_CLASS: Readonly<Record<VolKey, 'W' | 'C' | 'T' | 'U' | 'M
   volFromFeet: 'C',
   volDustBright: 'U',
   volDustSelfShadow: 'U',
+  volAirLayers: 'T',
+  volSmoke: 'C',
+  volFog: 'C',
+  volSmokeDetail: 'T',
+  // A march material a mode, all four compiled with the master on (the third wave's Start measured the one program with
+  // its modes as branches too dear: `W3-notes.md`), and the bands' pass a gate.
+  volDustWisps: 'M',
+  volDustLayers: 'T',
 };
 
 /** One console field as a setting: the key, its value, and whether the page's control can hold it. */
@@ -394,7 +437,10 @@ export function volConsoleToSettings(o: Record<string, unknown>): VolConsoleSett
       key === 'volFromBlasts' ||
       key === 'volSand' ||
       key === 'volPrints' ||
-      key === 'volFromFeet';
+      key === 'volFromFeet' ||
+      key === 'volSmoke' ||
+      key === 'volFog' ||
+      key === 'volDustLayers';
     if (wantsBool) {
       if (typeof v === 'boolean') out.set(key, { key, value: v, inRange: true });
       continue;
@@ -413,14 +459,24 @@ export function volConsoleToSettings(o: Record<string, unknown>): VolConsoleSett
 export function volMemoryMB(t: VolTune, width: number, height: number): number {
   const n = t.airDetail;
   const cells = n * n;
-  // Velocity pair RG16F (4 bytes), pressure pair R16F (2), divergence R16F, obstacles RG16F (red the walls, green the
-  // walls and a compound's rooms: 4).
-  let bytes = cells * (4 * 2 + 2 * 2 + 2 + 4);
+  // Velocity pair RG16F (4 bytes), pressure pair R16F (2), divergence R16F: a tile each of the layers of air, side by
+  // side in one atlas (the third wave's); obstacles RG16F (red the walls, green the walls and a compound's rooms: 4).
+  const layers = t.airLayers > 1 ? (t.airLayers < 3 ? t.airLayers : 3) : 1;
+  let bytes = cells * layers * (4 * 2 + 2 * 2 + 2) + cells * 4;
   // The rasters: height R32F, response RGBA8, colour RGBA8, and (wave 2b's) the colour map's tint RGBA8.
   bytes += cells * (4 + 4 + 4 + 4);
-  // The dust pair, RGBA32F, two attachments each from wave 2b: the colour and density, and the shape it carries.
+  // The dust pair, RGBA32F, two attachments each from wave 2b: the colour and density, and the shape it carries; a tile
+  // a layer with the dust field a layer on (Ultra's).
   const d = n * t.dustDetail;
-  bytes += d * d * 16 * 2 * 2;
+  bytes += d * d * 16 * 2 * 2 * (t.dustLayers ? 3 : 1);
+  // Smoke and fog (the third wave's): an RGBA32F pair of two attachments, a smoke a layer and the fog, and the smoke's tint.
+  if (t.smoke || t.fog) {
+    const s = n * t.smokeDetail;
+    bytes += s * s * 16 * 2 * 2;
+  }
+  // The wisps' noise, 64³ R8 with its mips, while the master is on and the wisps are; the bands RGBA8 at the dust's size.
+  if (t.wisps > 0) bytes += Math.round(64 * 64 * 64 * (8 / 7));
+  if (t.wisps === 1) bytes += d * d * 4;
   // The light toward the sun: RGBA16F from wave 2b, an optical depth at each of four heights.
   const l = n * t.lightDetail;
   bytes += l * l * 8;
@@ -431,7 +487,8 @@ export function volMemoryMB(t: VolTune, width: number, height: number): number {
   // otherwise (`AirField.ensureTargets`), so each is counted only then.
   if (t.sand) {
     const s = n * t.sandDetail;
-    bytes += s * s * 16 * 2;
+    // The two phases and (the third wave's) the sand carried in the air, each an RGBA32F pair.
+    bytes += s * s * 16 * 2 * 2;
   }
   if (t.prints) bytes += t.printDetail * t.printDetail * 4;
   // The volume's march and its two histories, RGBA16F at its share of the screen.

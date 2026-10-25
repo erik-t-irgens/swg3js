@@ -5,6 +5,7 @@
 // Every function here takes and answers plain numbers or writes a kept record the caller hands it; nothing allocates.
 // Pure: no three.
 import { AIR_TUNE } from './airTune.ts';
+import { FORCE_WAVE, FORCE_WAVE_SPEED } from '../../combat/forceWaveTune.ts';
 
 const clamp01 = (v: number): number => (v > 0 ? (v < 1 ? v : 1) : 0);
 
@@ -521,6 +522,132 @@ export function stormWeight(storm: number, d = AIR_TUNE.dust): number {
 /** sqrt(π/2): a half-normal of spread σ has a mean height of σ / this. */
 export const HALF_NORMAL = Math.sqrt(Math.PI / 2);
 
+/**
+ * The folded Gaussian's mass below `h` metres (the third wave): `½ (erf((h − μ)/σ√2) + erf((h + μ)/σ√2))`, nought at or
+ * under the ground. The shaders' `airFoldedBelow`, line for line.
+ */
+export function foldedBelow(h: number, mu: number, sigma: number): number {
+  if (!(h > 0)) return 0;
+  const k = 1 / (Math.SQRT2 * (sigma > 1e-4 ? sigma : 1e-4));
+  const v = 0.5 * (erfApprox((h - mu) * k) + erfApprox((h + mu) * k));
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/**
+ * The share of a patch standing in each slab (the dust's blended backtrace, the third wave): slab 0 to its top, slab 1
+ * between the two tops, slab 2 above; into `out`, summing to one.
+ */
+export function slabShares(mu: number, sigma: number, top0: number, top1: number, out: [number, number, number]): [number, number, number] {
+  const a = foldedBelow(top0, mu, sigma);
+  const b = foldedBelow(top1, mu, sigma);
+  out[0] = a;
+  out[1] = b - a > 0 ? b - a : 0;
+  out[2] = 1 - b > 0 ? 1 - b : 0;
+  return out;
+}
+
+/**
+ * The air a texel of dust rides with one field (the dust pass's blended backtrace): each slab's velocity weighted by its
+ * share of the patch, so dust thrown high rides the faster upper wind. A texel with no dust (density under 1e-5) takes
+ * the shape of the dust about to flow into it, read where the slabs' mean air brings it from (`upwind`), and rides as
+ * that would; with nothing there either it rides slab 0's, the rest shape standing there. Into `out`.
+ *
+ * Read off the empty texel's own rest shape, a patch high in slab 1 crossing into a low building's column -- where slab
+ * 0 stands still and slab 1 flows over -- was read in at slab 0's nought and never entered it, so no dust ever crossed a
+ * roof (the third wave's smoke check); and the front of any high patch crept into clear air at the ground's slower
+ * speed.
+ */
+export function dustRideVelocity(d: number, mu: number, sigma: number, v: readonly { x: number; z: number }[], top0: number, top1: number, out: { x: number; z: number }, minSigma = AIR_TUNE.dust.spreadMin, upwind?: { d: number; mu: number; sigma: number }): { x: number; z: number } {
+  const w: [number, number, number] = [1, 0, 0];
+  if (d >= 1e-5) slabShares(mu, sigma, top0, top1, w);
+  else if (upwind && upwind.d >= 1e-5) slabShares(upwind.mu, upwind.sigma, top0, top1, w);
+  else slabShares(0, minSigma, top0, top1, w);
+  const s = w[0] + w[1] + w[2];
+  out.x = (v[0].x * w[0] + v[1].x * w[1] + v[2].x * w[2]) / (s > 1e-6 ? s : 1e-6);
+  out.z = (v[0].z * w[0] + v[1].z * w[1] + v[2].z * w[2]) / (s > 1e-6 ? s : 1e-6);
+  return out;
+}
+
+/**
+ * The dust over a solid of top `top` (the third wave's height-aware kill, the design's §2.14): the share of the patch's
+ * folded profile standing above the top, `m = Q(a) + Q(b)` (`a = (T − μ)/σ`, `b = (T + μ)/σ`), and that share's own mean,
+ * `(μ Q(a) + σ φ(a) − μ Q(b) + σ φ(b)) / m`, and that share's own spread squared, from its second moment
+ * `((μ² + σ²) m + σ (φ(a)(μ + T) + φ(b)(T − μ))) / m` less the mean squared, into `out`. The dust pass keeps `m` of the
+ * texel and gives it that mean and that spread, so a patch is the share above the roof and nothing else; a top of nought
+ * keeps it all where it is.
+ *
+ * The spread is the share's own, never the patch's held: the dust over a solid is cut again at every step it stays there,
+ * and with the spread held each cut lifted the mean by about a spread again, so a patch lying over a roof in still air
+ * climbed without end (19 km in six seconds in the third wave's smoke, where the float32 moments then lost the spread to
+ * cancellation and it ran away). With the share's own spread each cut narrows the patch and lifts it less, and it settles
+ * just over the roof.
+ */
+export function aboveSolid(mu: number, sigma: number, top: number, out: { share: number; mean: number; spread2?: number }): { share: number; mean: number; spread2?: number } {
+  if (!(top > 0)) {
+    out.share = 1;
+    out.mean = mu;
+    out.spread2 = sigma * sigma;
+    return out;
+  }
+  const s = sigma > 1e-4 ? sigma : 1e-4;
+  const a = (top - mu) / s;
+  const b = (top + mu) / s;
+  const qa = 0.5 - 0.5 * erfApprox(a / Math.SQRT2);
+  const qb = 0.5 - 0.5 * erfApprox(b / Math.SQRT2);
+  const pa = Math.exp(-0.5 * a * a) / ROOT_TWO_PI;
+  const pb = Math.exp(-0.5 * b * b) / ROOT_TWO_PI;
+  const m0 = qa + qb;
+  const m = m0 < 0 ? 0 : m0 > 1 ? 1 : m0;
+  out.share = m;
+  if (m > 1e-12) {
+    const mean = (mu * qa + s * pa - mu * qb + s * pb) / m;
+    const second = ((mu * mu + s * s) * m0 + s * (pa * (mu + top) + pb * (top - mu))) / m;
+    const v = second - mean * mean;
+    out.mean = mean < 0 ? 0 : mean;
+    out.spread2 = v > 0 ? v : 0;
+  } else {
+    out.mean = top;
+    out.spread2 = s * s;
+  }
+  return out;
+}
+
+/**
+ * The smoke at `hy` metres over the ground (the third wave): linear between the slabs' middles, fading in from the ground
+ * under slab 0's and out over slab 2's by `top` [demo `land.html:1077-1082`]. The shaders' `smokeAt`, line for line.
+ */
+export function smokeAtHeight(hy: number, s0: number, s1: number, s2: number, m0: number, m1: number, m2: number, top: number): number {
+  if (hy < m0) return s0 * smoothstep(-0.3, m0 * 0.6, hy);
+  if (hy < m1) return s0 + (s1 - s0) * ((hy - m0) / (m1 - m0 > 1e-3 ? m1 - m0 : 1e-3));
+  if (hy < m2) return s1 + (s2 - s1) * ((hy - m1) / (m2 - m1 > 1e-3 ? m2 - m1 : 1e-3));
+  if (top > m2) return s2 * (1 - smoothstep(m2, top, hy));
+  return 0;
+}
+
+/**
+ * One frame of the smoke's decay and climb at a texel (the smoke pass's own arithmetic, the third wave), in place: each
+ * slab dies by `exp(−decay dt)`, then slab 0 and slab 1 each lose `1 − exp(−climb dt)` of themselves to the slab above.
+ * Each factor an exact exponential, so a run of frames climbs as the same time at any rate (to the order the two are
+ * taken in: within a frame they are taken one after the other).
+ */
+export function smokeStep(s: [number, number, number], dt: number, decay = AIR_TUNE.smoke.decay, climb0 = AIR_TUNE.smoke.climb0, climb1 = AIR_TUNE.smoke.climb1): void {
+  const t = dt > 0 && Number.isFinite(dt) ? dt : 0;
+  const k = Math.exp(-decay * t);
+  const c0 = 1 - Math.exp(-climb0 * t);
+  const c1 = 1 - Math.exp(-climb1 * t);
+  let a = s[0] * k;
+  let b = s[1] * k;
+  let c = s[2] * k;
+  const up0 = a * c0;
+  const up1 = b * c1;
+  a -= up0;
+  b += up0 - up1;
+  c += up1;
+  s[0] = a;
+  s[1] = b;
+  s[2] = c;
+}
+
 /** The storm's dust's spread, metres: the half-normal of the storm's own mean height (2.26 m calm, 15 m in a full storm). */
 export function stormSigma(storm: number, d = AIR_TUNE.dust): number {
   return HALF_NORMAL * stormHeightAt(storm, d);
@@ -689,10 +816,15 @@ export function newFrontAt(): FrontAt {
   return { kind: 0, reach: 0.5, age: 0.5, r: 0.5, s: 0.5 };
 }
 
-/** A front's time to cross its way, seconds, by kind. */
+/**
+ * A front's time to cross its way, seconds, by kind: its own time over the wave's one speed (the Gameplay page's,
+ * `FORCE_WAVE.speed`, which the knock reads too, so the air's wave and the knock arrive together).
+ */
 export function frontTime(kind: number, f = AIR_TUNE.force): number {
   const t = kind === FRONT_KIND.push ? f.pushTime : kind === FRONT_KIND.pull ? f.pullTime : f.repulseTime;
-  return t > 1e-3 ? t : 1e-3;
+  const sp = FORCE_WAVE.speed > FORCE_WAVE_SPEED.min ? FORCE_WAVE.speed : FORCE_WAVE_SPEED.min;
+  const ts = t / sp;
+  return ts > 1e-3 ? ts : 1e-3;
 }
 
 export function frontRadiusIn(r: FrontAt): void {
@@ -700,8 +832,9 @@ export function frontRadiusIn(r: FrontAt): void {
   const kind = r.kind;
   const reach = r.reach;
   // `frontTime` written out: a number handed back across a call the compiler does not build in is a number made, and
-  // this runs for every front on every frame and step.
-  const t0 = kind === FRONT_KIND.push ? F.pushTime : kind === FRONT_KIND.pull ? F.pullTime : F.repulseTime;
+  // this runs for every front on every frame and step. Over the wave's one speed (the knock's too).
+  const sp = FORCE_WAVE.speed > FORCE_WAVE_SPEED.min ? FORCE_WAVE.speed : FORCE_WAVE_SPEED.min;
+  const t0 = (kind === FRONT_KIND.push ? F.pushTime : kind === FRONT_KIND.pull ? F.pullTime : F.repulseTime) / sp;
   let s = r.age / (t0 > 1e-3 ? t0 : 1e-3);
   s = s > 0 ? (s < 1 ? s : 1) : 0;
   let from = 0;
@@ -942,6 +1075,80 @@ export function sheddingCount(count: number, perSecond: number, interval: number
   if (!(whole > 0)) return 0;
   const span = interval > 0 && Number.isFinite(interval) ? interval : SHED_BASIS;
   return Math.round((whole * span) / SHED_BASIS);
+}
+
+/**
+ * The grains a machine throws while the kick-up is on (the third wave, the owner's answer of 2026-10-24: "drastically
+ * reduced over pavement and rock, but not fully gone. Water should just kick up water"), in a kept record: in, today's
+ * `count` for the interval, the machine's motes a second before today's rounding (`perSecond`), the interval and the
+ * ground's grain `share` (`AirRaster.grainShareAt`: one on sand, the response's dust elsewhere, `grains.hard` on rock and
+ * paving, nought over water, lava, mud and wet sand), and the machine's own `carry`, what it was owed of a grain; out,
+ * the grains to throw now (`out`) and the carry kept. Sand throws today's count exactly; anything less throws its share of
+ * the motes a second over the interval, the fraction carried to the next, so a road throws a grit every so often at any
+ * frame rate rather than none (the rule before rounded a twentieth of a second's share down to nothing).
+ */
+export interface GrainShed {
+  count: number;
+  perSecond: number;
+  interval: number;
+  share: number;
+  carry: number;
+  out: number;
+}
+
+export function newGrainShed(): GrainShed {
+  return { count: 0, perSecond: 0.5, interval: 0.05, share: 0.5, carry: 0.5, out: 0 };
+}
+
+export function grainShedIn(r: GrainShed): void {
+  if (r.share >= 1) {
+    r.out = r.count;
+    return;
+  }
+  const s = r.share > 0 && Number.isFinite(r.share) ? r.share : 0;
+  if (!(s > 0)) {
+    r.carry = 0;
+    r.out = 0;
+    return;
+  }
+  const rate = r.perSecond > 0 && Number.isFinite(r.perSecond) ? r.perSecond : 0;
+  const span = r.interval > 0 && Number.isFinite(r.interval) ? r.interval : 0;
+  const c = r.carry > 0 && Number.isFinite(r.carry) ? r.carry : 0;
+  const want = rate * span * s + c;
+  const n = Math.floor(want);
+  r.out = n;
+  r.carry = want - n;
+}
+
+/**
+ * The sand in the air at a texel, one frame (the third wave's carried sand, the offsets pass's own lines): what was carried
+ * here kept by `keep` (`exp(−carryFade dt)`), and where the ground under it blows (`blows`, min(moves, dust)) and the air
+ * passes the threshold (`lift` over nought), the greater of that and what the ground lifts, `blows · min(lift · soft, 1)`.
+ * Over rock nothing is lifted and what came fades. The ground's overlay draws `max(the pixel's own coverage, this)`.
+ */
+export function sandCarryStep(carried: number, keep: number, blows: number, lift: number, soft = 20): number {
+  const c = (Number.isFinite(carried) && carried > 0 ? carried : 0) * keep;
+  const l0 = lift * soft;
+  const lifted = blows * (l0 > 0 ? (l0 < 1 ? l0 : 1) : 0);
+  return lifted > c ? lifted : c;
+}
+
+/**
+ * A streamer's rate a second at a texel (the dust pass's own line, the third wave): the gust over the threshold (a
+ * smoothstep over 6 m/s past `streamWind`), times the crest's sharpness over `streamCurve` (the height bending down along
+ * the wind, `curve` below nought) at the crest's rate plus the edge's rate beside a solid, times how much the ground moves
+ * (none off rock or paving), times the gusts' patchiness `patch` (0 to 1.8). Before the ground's own dust and the slope's
+ * gate, which the pass lays every source through.
+ */
+export function streamerRate(speed: number, curve: number, edge: number, moves: number, patch: number, d = AIR_TUNE.dust): number {
+  if (!(d.streamWind > 0) || !(moves > 0)) return 0;
+  const g0 = (speed - d.streamWind) / 6;
+  const g = g0 > 0 ? (g0 < 1 ? g0 : 1) : 0;
+  const gust = g * g * (3 - 2 * g);
+  if (!(gust > 0)) return 0;
+  const c0 = -curve / (d.streamCurve > 1e-4 ? d.streamCurve : 1e-4);
+  const crest = c0 > 0 ? (c0 < 1 ? c0 : 1) : 0;
+  return gust * (crest * d.streamCrest + (edge > 0 ? 1 : 0) * d.streamOnEdge) * moves * patch;
 }
 
 /** The grains a blast throws: `grains.blast` at a thermal detonator's radius, by radius over its [demo `land.html:1604-1610`]. */

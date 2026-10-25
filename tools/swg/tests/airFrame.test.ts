@@ -15,7 +15,10 @@
 //   - with the stages drawn directly, the obstacles are still a render call of their own (three uploads a mesh's
 //     boxes only then);
 //   - a running engine over water, lava or mud lifts nothing and keeps nothing airborne;
-//   - a draw that throws stops the air and says why, and never throws out of the frame.
+//   - a draw that throws stops the air and says why, and never throws out of the frame;
+//   - (the third wave) a gas cloud's puffs by its whole sphere and by a full batch, the frame's own smoke laid before a
+//     blast's; a blast's held smoke fading over its hold and let go; a dust field a layer three tiles wide; the wisps'
+//     phases at the field's own clock; the carried sand's fade by the frame's own dt.
 //
 // Plain type stripping; synthetic numbers only.
 import assert from 'node:assert/strict';
@@ -27,6 +30,8 @@ import type { GroundSample, GroundSampler } from '../../../src/world/volumetrics
 import type { SolidBox } from '../../../src/world/layoutStream.ts';
 import { newVolTune, type VolTune } from '../../../src/world/volumetrics/volSettings.ts';
 import { HALF_NORMAL, liftPeakIn, newLiftPeak } from '../../../src/world/volumetrics/airMath.ts';
+import { SMOKE_BATCH } from '../../../src/world/volumetrics/airForces.ts';
+import { newWispPhase, wispPhaseIn } from '../../../src/world/volumetrics/airNoise.ts';
 import type { AirHull } from '../../../src/world/volumetrics/airEngines.ts';
 
 let checks = 0;
@@ -56,6 +61,10 @@ interface Draw {
   /** The offsets pass's numbers: the frame and the lift's (`uSandP`), each phase's restart and seconds (`uSandQ`). */
   sandP?: [number, number, number, number];
   sandQ?: [number, number, number, number];
+  /** The third wave's: what the sand carried in the air keeps over the frame, and its lift's soft step (`uSandC`). */
+  sandC?: [number, number, number, number];
+  /** The dust pass's tiles and slab tops (`uDustR`: x the tiles, one or three). */
+  dustR?: [number, number, number, number];
   /** A fill's values: the colour and density, and (the dust's two-output fill) the shape. */
   value?: [number, number, number, number];
   shapeValue?: [number, number, number, number];
@@ -88,9 +97,11 @@ function standIn(): { renderer: THREE.WebGLRenderer; draws: Draw[]; throwOn: { n
       d.dustCount = u.uDustCount.value as number;
       d.dustBatch = Array.from((u.uDustBatch.value as Float32Array).subarray(0, d.dustCount * 4));
       d.shapeBatch = Array.from((u.uDustShapeBatch.value as Float32Array).subarray(0, d.dustCount * 4));
+      d.dustR = v4(u.uDustR.value);
     } else if (name === 'air.offsets') {
       d.sandP = v4(u.uSandP.value);
       d.sandQ = v4(u.uSandQ.value);
+      d.sandC = v4(u.uSandC.value);
     } else if (name === 'air.jacobi') d.shift = v2(u.uShift as { value: THREE.Vector2 });
     else if (name === 'air.fill') d.value = v4(u.uValue.value);
     else if (name === 'air.fillDust') {
@@ -308,10 +319,196 @@ const near = (a: number, b: number, eps = 1e-9): boolean => Math.abs(a - b) <= e
     const mats = Object.fromEntries(r.field.materials().map((m) => [m.name, m.uniforms]));
     ok(mats['air.splat'].uReachScale.value === 1.7, 'the splat pass reaches a slab by the new reach');
     ok(mats['air.splat'].uObstacleOver.value === 1.4 && mats['air.dust'].uObstacleOver.value === 1.4 && mats['air.advect'].uObstacleOver.value === 1.4, 'the solver and the dust stop at a solid by its new height over the floor');
-    ok(mats['air.dust'].uWindShare.value === 0.6 && (mats['air.splat'].uTileSlab.value as Float32Array)[2] === Math.fround(0.6), "and the dust's edge and the solver's inflow take the new share of the wind together");
+    ok((mats['air.dust'].uSlabShare.value as THREE.Vector4).x === 0.6 && (mats['air.splat'].uTileSlab.value as Float32Array)[2] === Math.fround(0.6), "and the dust's edge (through the slabs' read, from the third wave) and the solver's inflow take the new share of the wind together");
   } finally {
     tuneAir({ slabs: { reach: was.reach, windShare: was.windShare }, obstacles: { over: was.over } });
   }
+}
+
+// --- the third wave: the layers, smoke and fog, the gas cloud's puffs, the wisps' bands ---
+{
+  const r = rig();
+  settle(r);
+  const mats = Object.fromEntries(r.field.materials().map((m) => [m.name, m.uniforms]));
+  ok((mats['air.splat'].uTileCount.value as number) === 3 && (mats['air.advect'].uAdvectP.value as THREE.Vector4).w === AIR_TUNE.slabs.couple, `three layers of air solved by default, the coupling folded into the advect at ${AIR_TUNE.slabs.couple} a second`);
+  const ts = mats['air.splat'].uTileSlab.value as Float32Array;
+  ok(ts[0] === AIR_TUNE.slabs.floor && near(ts[5], AIR_TUNE.slabs.centre1, 1e-6) && near(ts[10], AIR_TUNE.slabs.windShare2, 1e-6), "each tile carries its own slab's floor, middle and share of the wind");
+  // A gas cloud's smoke every frame: carried this frame, the pass handed its batch centred on the cloud.
+  const before = r.draws.length;
+  r.field.smoke(-20, 1, 10, 2.5, 1, 0x40c060);
+  r.frame(1 / 60);
+  const smokeDraws = r.draws.slice(before).filter((d) => d.name === 'air.smoke');
+  const w = r.field.win;
+  const batch = r.field.forces.smokeBatch;
+  ok(smokeDraws.length === 1 && r.field.smokeLive && r.field.forces.smokeBatchCount === 1 && near(batch[0], (-20 - w.ox) / w.size, 1e-6) && near(batch[1], (10 - w.oz) / w.size, 1e-6), "a gas cloud's smoke is laid every frame, centred on its record, and the smoke and fog pass draws once a frame");
+  ok(r.field.hasAir(), 'and the march looks while smoke is in the air');
+  // The puffs' rule: drawn while the volume is not drawing the smoke.
+  r.field.volumeDrew = false;
+  r.frame(1 / 60);
+  ok(!r.field.drawsSmokeAt(-20, 10), 'the volume did not draw last frame (Effects off, the volume off or refusing): the puffs are drawn');
+  r.field.volumeDrew = true;
+  r.field.volumeAmount = 1;
+  r.frame(1 / 60);
+  ok(r.field.drawsSmokeAt(-20, 10), 'it drew, at its full amount: the smoke is drawn and the puffs are not');
+  ok(!r.field.drawsSmokeAt(w.ox + 1, w.oz + 1), 'but a cloud at the window\'s fading edge, or off it, keeps its puffs');
+  r.field.volumeDrew = true;
+  r.field.volumeAmount = AIR_TUNE.smoke.puffsBelow * 0.5;
+  r.frame(1 / 60);
+  ok(!r.field.drawsSmokeAt(-20, 10), "under the amount's floor the volume is too faint to show the danger: the puffs come back");
+  r.field.volumeAmount = 1;
+  r.tune.smoke = false;
+  r.field.volumeDrew = true;
+  r.frame(1 / 60);
+  ok(!r.field.drawsSmokeAt(-20, 10) && !r.field.forces.smokeOn, 'with the smoke off (volSmoke) none is taken and the puffs are drawn');
+  r.tune.smoke = true;
+  r.tune.on = false;
+  ok(!r.field.drawsSmokeAt(-20, 10), 'with the master off, the puffs');
+  r.tune.on = true;
+  // The fog: the hour's level carried in on the wind and emitted, never relaxed toward a level.
+  r.inp.fogLevel = 0.7;
+  r.inp.fogBurn = 0.2;
+  r.inp.fogTop = 5;
+  const fogDraws = r.frame(1 / 60).filter((d) => d.name === 'air.smoke');
+  const fp = mats['air.smoke'].uFogP.value as THREE.Vector4;
+  const fr = mats['air.smoke'].uFogR.value as THREE.Vector4;
+  ok(fogDraws.length === 1 && near(fp.y, AIR_TUNE.fog.emit * 0.7, 1e-9) && near(fp.z, AIR_TUNE.fog.bank * 0.7, 1e-9) && near(fp.x, Math.exp(-(AIR_TUNE.fog.decay + AIR_TUNE.fog.burn * 0.2) / 60), 1e-9) && fr.w === 1, "the hour's level sets the bank on the wind and the ground's emission; the burn raises the decay");
+  ok(r.field.fog.value.x === 5 && r.field.fog.value.y === 1 && r.field.hasAir(), "the march is told the hour's top and that fog is carried, and looks");
+  r.inp.fogLevel = 0;
+  r.frame(1 / 60);
+  ok(fp.y === 0 && fp.z === 0, 'a clear hour emits nothing and banks nothing: no level imposed');
+  // The wisps: off until the noise is whole; then the setting's mode, and the bands pass drawn only in the bands mode.
+  ok(r.field.wispMode === 0, 'the wisps are off while the noise is not made');
+  while (!r.field.noiseSlice(16)) {
+    // a slice at a time
+  }
+  r.tune.wisps = 1;
+  const bandsFrame = r.frame(1 / 60);
+  ok(r.field.wispMode === 1 && bandsFrame.filter((d) => d.name === 'air.bands').length === 1, 'in the bands mode the bands pass draws once a frame at the dust\'s size');
+  r.tune.wisps = 2;
+  const noiseFrame = r.frame(1 / 60);
+  ok(r.field.wispMode === 2 && noiseFrame.filter((d) => d.name === 'air.bands').length === 0, 'in the noise mode it draws none: the march reads the noise itself');
+  r.tune.airLayers = 1;
+  r.frame(1 / 60);
+  ok((mats['air.splat'].uTileCount.value as number) === 1 && (mats['air.advect'].uAdvectP.value as THREE.Vector4).w === 0, 'one layer: one tile, no coupling');
+  const sc = r.field.slabScale.value;
+  ok(near(sc.y, AIR_TUNE.slabs.windShare1 / AIR_TUNE.slabs.windShare, 1e-9) && near(sc.z, AIR_TUNE.slabs.windShare2 / AIR_TUNE.slabs.windShare, 1e-9), 'and the layers not solved read the low one\'s air times the ratio of their shares');
+}
+
+// --- the third wave: the puffs by the cloud's sphere and by a full batch, through the field's own frame ---
+{
+  const r = rig();
+  settle(r);
+  const w = r.field.win;
+  const e = AIR_TUNE.window.edge;
+  const shown = (): void => {
+    r.field.volumeDrew = true;
+    r.field.volumeAmount = 1;
+  };
+  // A cloud whose middle stands two metres inside the edge band's line, its sphere reaching into the band.
+  const x = w.ox + w.size * e + 2;
+  const z = w.oz + w.size / 2;
+  r.field.smoke(x, 1, z, 3, 1, 0x40c060);
+  shown();
+  r.frame(1 / 60);
+  ok(r.field.smokeLive && r.field.drawsSmokeAt(x, z) && !r.field.drawsSmokeAt(x, z, 3), "a cloud whose middle is clear of the window's fading edge but whose 3 m sphere reaches into it keeps its puffs (the sphere is tested, not the middle)");
+  ok(r.field.drawsSmokeAt(w.ox + w.size / 2, z, 3), 'and one whose whole sphere stands well inside is drawn as smoke');
+  // The frame's own sources (the dangers') are laid first: a full batch drops a blast's puff, never a gas cloud's smoke.
+  const before = r.field.forces.takeCounts({ engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0 });
+  ok(before.droppedSmoke === 0, 'nothing dropped yet');
+  r.field.blast(w.ox + w.size / 2, 0, z + 10, AIR_TUNE.blast.radiusRef, AIR_TUNE.blast.pushRef, AIR_TUNE.smoke.blastHold);
+  for (let i = 0; i < SMOKE_BATCH; i++) r.field.smoke(w.ox + w.size / 2 + (i % 8) * 3, 1, z - 20 + Math.floor(i / 8) * 3, 2, 1, 0x40c060);
+  shown();
+  r.frame(1 / 60);
+  const full = r.field.forces.takeCounts({ engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0 });
+  const B = r.field.forces.smokeBatch;
+  let clouds = 0;
+  for (let i = 0; i < r.field.forces.smokeBatchCount; i++) if (near(B[i * 4 + 3], AIR_TUNE.smoke.cloud / 60, 1e-6)) clouds++;
+  ok(r.field.forces.smokeBatchCount === SMOKE_BATCH && clouds === SMOKE_BATCH && full.droppedSmoke >= 1, `with ${SMOKE_BATCH} gas clouds and a blast in one frame, the batch holds every cloud's smoke and drops the blast's (${full.droppedSmoke} dropped)`);
+  ok(r.field.drawsSmokeAt(w.ox + w.size / 2, z, 2), 'and every cloud was laid, so the volume draws them');
+  // One cloud more than the frame's table takes: that danger's smoke is lost, so every cloud keeps its puffs.
+  for (let i = 0; i <= SMOKE_BATCH; i++) r.field.smoke(w.ox + w.size / 2, 1, z, 2, 1, 0x40c060);
+  shown();
+  r.frame(1 / 60);
+  ok(!r.field.drawsSmokeAt(w.ox + w.size / 2, z, 2), `a frame that handed ${SMOKE_BATCH + 1} clouds' smoke to a table of ${SMOKE_BATCH} lost one: every cloud's puffs are drawn, so no danger is left unshown`);
+  r.field.smoke(w.ox + w.size / 2, 1, z, 2, 1, 0x40c060);
+  shown();
+  r.frame(1 / 60);
+  ok(r.field.drawsSmokeAt(w.ox + w.size / 2, z, 2), 'and once a batch takes them all again, the smoke is drawn');
+}
+
+// --- the third wave: a blast's held smoke fades over its hold and is let go, through the field's own frame ---
+{
+  const r = rig();
+  settle(r);
+  const w = r.field.win;
+  const x = w.ox + w.size / 2;
+  const z = w.oz + w.size / 2;
+  const S = AIR_TUNE.smoke;
+  const hold = S.blastHold;
+  const dt = 1 / 60;
+  r.field.blast(x, 0, z, AIR_TUNE.blast.radiusRef, AIR_TUNE.blast.pushRef, hold);
+  ok(r.field.forces.smokeHeldCount === 1, 'a blast holds one smoke source for its hold');
+  const B = r.field.forces.smokeBatch;
+  let worst = 0;
+  let frames = 0;
+  let firstLaid = -1;
+  let gone = -1;
+  for (let i = 1; i <= Math.ceil(hold / dt) + 6; i++) {
+    r.frame(dt);
+    const n = r.field.forces.smokeBatchCount;
+    // The first frame lays the one-shot puff ahead of the held source; after it the held source alone.
+    const k = i === 1 ? 1 : 0;
+    const want = S.blastFeed * Math.max(0, Math.min(1, 1 - ((i - 0.5) * dt) / hold)) * dt;
+    if (n > k) {
+      worst = Math.max(worst, Math.abs(B[k * 4 + 3] - want) / Math.max(want, 1e-9));
+      frames++;
+      if (firstLaid < 0) firstLaid = i;
+    }
+    if (gone < 0 && r.field.forces.smokeHeldCount === 0) gone = i;
+  }
+  ok(firstLaid === 1 && frames >= Math.floor(hold / dt) - 1 && worst < 1e-5, `the held source is laid every frame at its feed times (1 − t / hold), fading over ${hold} s (${frames} frames, worst ${(worst * 100).toExponential(1)}% off)`);
+  ok(gone > 0 && Math.abs(gone * dt - hold) <= 2 * dt && r.field.forces.smokeBatchCount === 0, `and let go once its hold has passed (${(gone * dt).toFixed(3)} s), laying nothing after`);
+}
+
+// --- the third wave: a dust field a layer (Ultra's), the wisps' phases and the sand's fade at the frame ---
+{
+  const r = rig();
+  settle(r);
+  const pair = (): { width: number; height: number }[] => (r.field as unknown as { dustPair: { width: number; height: number }[] }).dustPair;
+  const dust = r.tune.airDetail * r.tune.dustDetail;
+  const one = named(r.frame(1 / 60), 'air.dust')[0];
+  ok(pair()[0].width === dust && r.field.dustTiles.value.x === 1 && one.dustR![0] === 1, `one dust field by default: its pair ${dust} wide, the dust pass and the march told one tile`);
+  r.tune.dustLayers = true;
+  const three = named(r.frame(1 / 60), 'air.dust')[0];
+  ok(pair()[0].width === 3 * dust && pair()[0].height === dust && pair()[1].width === 3 * dust, `a dust field a layer: the dust pair three tiles wide (${pair()[0].width} by ${pair()[0].height})`);
+  ok(r.field.dustTiles.value.x === 3 && near(r.field.dustTiles.value.y, 0.5 / dust, 1e-12) && three.dustR![0] === 3, 'the dust pass draws three tiles and the march is handed three (`dustTiles`, which the volume copies into its own uniform)');
+  r.tune.dustLayers = false;
+  r.frame(1 / 60);
+  ok(pair()[0].width === dust && r.field.dustTiles.value.x === 1, 'and back to one when it is turned off');
+  // The wisps' two phases at the field's own clock: phase one's weight is the cross, so a phase's restart carries none.
+  const ph = newWispPhase();
+  let same = true;
+  for (let i = 0; i < 90; i++) {
+    r.frame(i % 3 === 0 ? 1 / 144 : 1 / 60);
+    ph.time = (r.field as unknown as { worldTime: number }).worldTime;
+    ph.period = AIR_TUNE.wisps.period;
+    wispPhaseIn(ph);
+    const b = r.field.wispB.value;
+    if (b.x !== ph.p0 || b.y !== ph.p1 || b.z !== ph.cross || b.w !== AIR_TUNE.wisps.ageWisp) same = false;
+  }
+  ok(same, "the wisps' phases handed to the march and the bands are wispPhaseIn's at the field's own clock, frame by frame: phase one's weight the cross");
+  // The sand carried in the air keeps exp(−carryFade dt) of itself over the frame, at any frame rate.
+  r.inp.ground = true;
+  r.tune.sand = true;
+  let fade = true;
+  let drawn = 0;
+  for (const fdt of [1 / 60, 1 / 144, 1 / 30, 1 / 60]) {
+    for (const d of named(r.frame(fdt), 'air.offsets')) {
+      drawn++;
+      if (d.sandC![0] !== Math.exp(-AIR_TUNE.sand.carryFade * d.sandP![0]) || d.sandP![0] !== fdt) fade = false;
+    }
+  }
+  ok(drawn === 4 && fade, `the offsets pass is handed, every frame, what the carried sand keeps over that frame's own dt: exp(−${AIR_TUNE.sand.carryFade} dt) at 60, 144 and 30 frames a second`);
 }
 
 // --- the obstacles, a render call of their own when the stages are drawn directly ---
@@ -383,7 +580,13 @@ const near = (a: number, b: number, eps = 1e-9): boolean => Math.abs(a - b) <= e
   r.frame(1 / 60);
   r.inp.camX += 2000;
   const jump = r.frame(1 / 60);
-  const fills = named(jump, 'air.fillDust');
+  // The two-output fill also clears the offsets' and (the third wave) the smoke's pairs, each to nothing: the dust's are
+  // the dust pair's own targets.
+  const dustPair = (r.field as unknown as { dustPair: unknown[] }).dustPair;
+  const allFills = named(jump, 'air.fillDust');
+  const fills = allFills.filter((d) => dustPair.includes(d.target));
+  const others = allFills.filter((d) => !dustPair.includes(d.target));
+  ok(others.length === 4 && others.every((d) => d.value!.every((x) => x === 0) && d.shapeValue!.every((x) => x === 0)), 'and the offsets\' and the smoke\'s pairs, both of their textures, to nothing');
   const inflow = r.field.inflow.value;
   ok(fills.length === 2 && fills.every((d) => pairOf(d.target) === 2) && fills.every((d) => near(d.value![3], inflow.x, 1e-6) && near(d.shapeValue![1], inflow.x * inflow.y * inflow.y, 1e-4) && d.shapeValue![0] === 0 && d.shapeValue![2] === 0), `a jump fills both of the dust's pairs through both outputs: the storm's dust at its weight (${inflow.x.toFixed(3)}) and its half-normal's shape standing on the ground (σ ${inflow.y.toFixed(2)} m)`);
   const lightTarget = (r.field as unknown as { lightTarget: unknown }).lightTarget;

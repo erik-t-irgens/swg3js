@@ -6,7 +6,7 @@
 //
 // The master and the volume's own rows are the effects registry's (`FX_KNOBS`, `group: 'volumetrics'`), taken from
 // there so a row and its setting cannot drift apart and the Effects section leaves them out. A row shows only from
-// the wave that builds what it moves: the later waves' rows (smoke and fog, water and lava, the grass) are not in
+// the wave that builds what it moves: the later waves' rows (particles and rain, water and lava, the grass) are not in
 // this build at all, so no switch here does nothing.
 import { FX_KNOBS, type FxKnobDef } from '../core/fxRegistry.ts';
 import type { Settings } from '../core/settings.ts';
@@ -53,12 +53,23 @@ export const VOLUMETRICS: readonly { title: string; knobs: readonly Knob[] }[] =
       { key: 'volAirDetail', label: 'Air detail', kind: 'select', options: R.volAirDetail.options.map((v) => ({ value: v, label: cellOf(v) })), requires: ['volumetrics', 'volAir'], hint: 'How finely the air is worked out over the 192 m square that follows you. Finer swirls smaller; it costs little either way.' },
       { key: 'volAirSolve', label: 'Air pressure steps', kind: 'range', min: R.volAirSolve.min, max: R.volAirSolve.max, step: R.volAirSolve.step, format: (v) => `${v}`, requires: ['volumetrics', 'volAir'], hint: 'How carefully the air is kept from piling up: more makes it flow round buildings and out from under a jet more truly. The dearest part of the air, and still cheap.' },
       { key: 'volAirRate', label: 'Air rate', kind: 'select', options: R.volAirRate.options.map((v) => ({ value: v, label: `${v} a second` })), requires: ['volumetrics', 'volAir'], hint: 'How often the air is worked out. The dust it carries moves every frame either way, so 30 is smooth too.' },
+      { key: 'volAirLayers', label: 'Layers of air', kind: 'select', options: R.volAirLayers.options.map((v) => ({ value: v, label: v === 1 ? 'One (to 3.5 m)' : v === 2 ? 'Two (to 9 m)' : 'Three (to 16 m)' })), requires: ['volumetrics', 'volAir'], hint: 'How many layers of air are worked out, one over the other: near the ground the wind is slower, higher up faster, so smoke bends over as it rises and a jet at the ground does not stir smoke fifteen metres up. With fewer, the highest worked out stands in for the rest.' },
       { key: 'volDust', label: 'Dust', kind: 'toggle', requires: ['volumetrics', 'volAir'], hint: 'The air carries dust: off sand and dirt under engines and blasts, none off rock, paving or water, and a storm\'s on the wind. Off, the air moves with nothing in it.' },
       { key: 'volDustDetail', label: 'Dust detail', kind: 'select', options: R.volDustDetail.options.map((v) => ({ value: v, label: times(v) })), requires: ['volumetrics', 'volAir', 'volDust'], hint: 'The dust\'s own grid over the air\'s: ×4 is 37.5 cm at the default air detail. Finer shows finer wisps.' },
-      { key: 'volKickUp', label: 'Grains that fall back', kind: 'toggle', requires: ['volumetrics', 'volAir', 'volDust'], hint: 'The motes a machine throws behind it are sand that flies up and falls back to the ground, and a blast throws a shower of it. Off, they are the motes that only rise, as before; either way none come off rock, paving or water while the dust is on.' },
+      { key: 'volDustWisps', label: 'Wisps', kind: 'select', options: R.volDustWisps.options.map((v) => ({ value: v, label: ['Off', 'Bands (cheap)', 'Noise', 'Noise ×2 (dearest)'][v] ?? `${v}` })), requires: ['volumetrics', 'volAir', 'volDust'], hint: 'The dust and the fog break into curling wisps carried by the air, more at a cloud\'s top and bottom and more as it ages, so a cloud is no longer full from top to bottom. Bands is the cheap road, its curls only as fine as four heights; noise ×2 adds a finer layer running on the air above.' },
+      { key: 'volDustLayers', label: 'A dust field a layer (Ultra)', kind: 'toggle', requires: ['volumetrics', 'volAir', 'volDust'], hint: 'The dust kept apart in each layer of air rather than in one field carrying how high each cloud stands, so a storm\'s high dust really runs ahead of its low dust. Three times the dust\'s memory and its passes; off but on Ultra.' },
+      { key: 'volKickUp', label: 'Grains that fall back', kind: 'toggle', requires: ['volumetrics', 'volAir', 'volDust'], hint: 'The motes a machine throws behind it are sand that flies up and falls back to the ground, and a blast throws a shower of it: only a few off rock and paving (a tenth of sand\'s to start, a dial), and none over water. Off, they are the motes that only rise, as before, and none of those come off rock, paving or water while the dust is on.' },
       { key: 'volLight', label: 'Dust shades itself', kind: 'toggle', requires: ['volumetrics', 'volAir'], hint: 'The dust between a cloud and the sun darkens it: a lit face toward the sun and a dark heart. Off, all of it is lit alike.' },
       { key: 'volLightDetail', label: 'Dust shading detail', kind: 'select', options: R.volLightDetail.options.map((v) => ({ value: v, label: times(v) })), requires: ['volumetrics', 'volAir', 'volLight'], hint: 'The shading\'s grid over the air\'s.' },
       { key: 'volLightSteps', label: 'Dust shading steps', kind: 'range', min: R.volLightSteps.min, max: R.volLightSteps.max, step: R.volLightSteps.step, format: (v) => `${v}`, requires: ['volumetrics', 'volAir', 'volLight'], hint: 'Steps toward the sun; fewer are longer, so the shade reaches as far either way.' },
+    ],
+  },
+  {
+    title: 'Smoke and fog',
+    knobs: [
+      { key: 'volSmoke', label: 'Smoke', kind: 'toggle', requires: ['volumetrics', 'volAir'], hint: 'Blasts, wrecks, burning engines and gas grenades leave smoke the air carries, climbing and bending over with the wind. A gas cloud is drawn as its smoke while this shows it, and as its puffs whenever it does not; what it does to whoever stands in it never changes.' },
+      { key: 'volFog', label: 'Ground fog', kind: 'toggle', requires: ['volumetrics', 'volAir'], hint: 'On a foggy morning or evening (some worlds often, some sometimes, Tatooine, Lok and Mustafar never; every player on a server sees the same days) fog comes in on the wind and rises off the ground in banks with gaps between them, pooling in hollows and burning off as the morning warms.' },
+      { key: 'volSmokeDetail', label: 'Smoke and fog detail', kind: 'select', options: R.volSmokeDetail.options.map((v) => ({ value: v, label: times(v) })), requires: ['volumetrics', 'volAir'], hint: 'The smoke\'s and the fog\'s own grid over the air\'s.' },
     ],
   },
   {

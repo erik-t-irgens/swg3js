@@ -1190,7 +1190,8 @@ export class LayoutStreamer {
    * (`src/world/volumetrics/airObstacles.ts`): standing in this world's state (never one lying dormant), out of doors
    * (not contained), given collision by the sweep's own rule (`collidesByRule`), with a model box of its own (its two
    * corners taken componentwise, never the snapshot's radius), and neither flora (a canopy's box is not a wall) nor a
-   * particle effect. Runtime placements are in the same regions and come with them. `visit` is a kept function and
+   * particle effect; its `top` how far the box stands over the object's origin, nothing buried under it counted. Runtime
+   * placements are in the same regions and come with them. `visit` is a kept function and
    * `box` a kept record written afresh for each: nothing is made, and a visit answering false stops the walk.
    *
    * An object whose own box is wider than `roomsOver` either way (its larger half, metres) is visited with each of its
@@ -1226,7 +1227,10 @@ export class LayoutStreamer {
             const bz = b.max[2];
             const hx = Math.abs(bx - ax) / 2;
             const hz = Math.abs(bz - az) / 2;
-            const top = Math.abs(by - ay);
+            // Its top over its own origin, which stands on its ground line, the higher corner taken (as a room's is): a
+            // house's foundation buried 16 m under its doorstep is no part of how tall it stands, and read as the box's
+            // whole height a cottage stood 25 m tall and blocked every slab of the air (the third wave's smoke check).
+            const top = ay > by ? ay : by;
             if (!(hx > 0.05 && hz > 0.05 && top > 0) || !Number.isFinite(hx + hz + top)) continue;
             // The box's own middle, turned with the object, and its local X axis on the ground.
             q.copy(o.q);

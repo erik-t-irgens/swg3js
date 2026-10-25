@@ -49,8 +49,9 @@ interface Rec {
   fade?: number;
   fadeFloor?: number;
   sandShift?: [number, number];
-  /** A fill's value, as it was handed at that draw. */
+  /** A fill's value, as it was handed at that draw, and (a two-output fill) its second texture's. */
   value?: [number, number, number, number];
+  shapeValue?: [number, number, number, number];
 }
 
 function standIn(): { renderer: THREE.WebGLRenderer; draws: Rec[]; bound: unknown[]; compiledFor: unknown[] } {
@@ -79,6 +80,11 @@ function standIn(): { renderer: THREE.WebGLRenderer; draws: Rec[]; bound: unknow
     } else if (name === 'air.fill') {
       const v = u.uValue.value as THREE.Vector4;
       d.value = [v.x, v.y, v.z, v.w];
+    } else if (name === 'air.fillDust') {
+      const v = u.uValue.value as THREE.Vector4;
+      const s = u.uShapeValue.value as THREE.Vector4;
+      d.value = [v.x, v.y, v.z, v.w];
+      d.shapeValue = [s.x, s.y, s.z, s.w];
     }
     draws.push(d);
   };
@@ -390,7 +396,7 @@ function runSource(fps: number, seconds: number, engine: { x: number; y: number;
   ok(moved.length === 1 && Math.abs(moved[0].sandShift![0] - 4 / w.cells) < 1e-12 && Math.abs(moved[0].sandShift![1] + 2 / w.cells) < 1e-12, `a window moved four cells east and two south hands the offsets pass its pending scroll, (${moved[0]?.sandShift?.map((v) => v.toFixed(5)).join(', ')}): the move over the cells`);
   const next = named(r.frame(1 / 240), 'air.offsets');
   ok(next.length === 1 && next[0].sandShift![0] === 0 && next[0].sandShift![1] === 0, 'and the pass after owes nothing');
-  ok(src('world/volumetrics/airShaders.ts').includes('vec4 o = offsetsAt(l - u * uDt / uWindow.z + uSandShift) - vec4(u, u) * uDt;'), 'which the pass reads upstream of the texel, both phases carried by the air: the shader\'s own line (wave 2b\'s)');
+  ok(src('world/volumetrics/airShaders.ts').includes('vec2 back = l - u * uDt / uWindow.z + uSandShift;') && src('world/volumetrics/airShaders.ts').includes('vec4 o = offsetsAt(back) - vec4(u, u) * uDt;'), 'which the pass reads upstream of the texel, both phases carried by the air: the shader\'s own line (wave 2b\'s; the sand in the air, the third wave\'s, read from the same place)');
 }
 
 // --- float32, and each target let go while its switch is off ---
@@ -410,11 +416,12 @@ function runSource(fps: number, seconds: number, engine: { x: number; y: number;
   r.tune.sand = true;
   r.tune.prints = true;
   const back = r.frame(1 / 60);
-  ok(pair.every((t) => t.width === sand) && dents.width === r.tune.printDetail && named(back, 'air.fill').length === 2 && named(back, 'air.offsets').length === 1 && before !== null, 'and on again, made again at their sizes, the offsets filled at rest and carried that frame');
-  const fills = named(back, 'air.fill').filter((d) => pair.includes(d.target as THREE.WebGLRenderTarget));
-  ok(fills.length === 2 && fills.every((d) => d.value!.every((x) => x === 0)), 'the offsets are filled at nought: both phases carried nothing (wave 2b\'s, where the second wave filled an age)');
+  // From the third wave the pair is two textures (the two phases, and the sand carried in the air), so the two-output fill.
+  const fills = named(back, 'air.fillDust').filter((d) => pair.includes(d.target as THREE.WebGLRenderTarget));
+  ok(pair.every((t) => t.width === sand) && dents.width === r.tune.printDetail && fills.length === 2 && named(back, 'air.offsets').length === 1 && before !== null, 'and on again, made again at their sizes, the offsets filled at rest and carried that frame');
+  ok(fills.every((d) => d.value!.every((x) => x === 0) && d.shapeValue!.every((x) => x === 0)), 'the offsets are filled at nought: both phases carried nothing (wave 2b\'s, where the second wave filled an age) and no sand in the air (the third wave\'s)');
   const vol = src('world/volumetrics/volSettings.ts');
-  ok(vol.includes('bytes += s * s * 16 * 2;') && !vol.includes('RGBA16F pair'), "the page's memory estimate counts the offsets at sixteen bytes a texel, as they are made");
+  ok(/if \(t\.sand\) \{\n\s+const s = n \* t\.sandDetail;\n[^\n]*\n\s+bytes \+= s \* s \* 16 \* 2 \* 2;/.test(vol.replace(/\r\n/g, '\n')) && !vol.includes('RGBA16F pair'), "the page's memory estimate counts the offsets at sixteen bytes a texel, two textures a target (the third wave's carried sand), as they are made");
 }
 
 // --- a footprint the dents owned, and a frame that keeps no marks ---

@@ -19,8 +19,9 @@
 // the steps change (`lightStep`, `airMath.ts`): a low sun reaches far across the ground, a high one a short way.
 //
 // Pure: no three.
-import { erfApprox, foldedProfile, lightStep } from './airMath.ts';
+import { erfApprox, foldedProfile, lightStep, smokeAtHeight } from './airMath.ts';
 import { AIR_TUNE } from './airTune.ts';
+import { fogProfile } from './airFog.ts';
 
 /** What one march is asked: the sun across the ground, the step, its slant and rise, how many, the self-shadow, the inflow, the window, the heights. */
 export interface LightMarch {
@@ -43,6 +44,12 @@ export interface LightMarch {
   size: number;
   /** The four heights over the point's ground, metres, lowest first. */
   heights: readonly [number, number, number, number];
+  /**
+   * The third wave's smoke and fog on the way (none when absent): their own extinctions times the self-shadow (the
+   * march's 0.85 and 0.32, `smoke.extinction` and `fog.extinction`), the slabs' middles and the band's top the smoke is
+   * read between (`smokeAtHeight`), and the fog's top (a level one: the march varies its own).
+   */
+  air?: { smokeK: number; fogK: number; mids: readonly [number, number, number, number]; fogTop: number };
 }
 
 /** What the march reads at a point inside the window: the dust's density, the mean height and spread it carries, and the ground there. */
@@ -51,6 +58,11 @@ export interface LightSample {
   mu: number;
   sigma: number;
   ground: number;
+  /** The third wave's: each slab's smoke and the fog there (nought when absent). */
+  s0?: number;
+  s1?: number;
+  s2?: number;
+  fog?: number;
 }
 
 /** The light's own numbers for an elevation and a step count (the tests' and the console's), into `m`. */
@@ -99,9 +111,11 @@ export function lightDepthAt(sample: (u: number, v: number, s: LightSample) => v
   const du = (m.sunX * m.step) / m.size;
   const dv = (m.sunZ * m.step) / m.size;
   const sMin = AIR_TUNE.dust.spreadMin;
+  const air = m.air;
   for (let j = 0; j < 4; j++) {
     const h0 = m.heights[j];
     let sum = 0;
+    let sumAir = 0;
     for (let k = 1; k <= m.steps; k++) {
       const x = k - 0.5;
       const qu = u + du * x;
@@ -110,7 +124,8 @@ export function lightDepthAt(sample: (u: number, v: number, s: LightSample) => v
       let mu: number;
       let sigma: number;
       let g: number;
-      if (qu < 0 || qv < 0 || qu > 1 || qv > 1) {
+      const inside = !(qu < 0 || qv < 0 || qu > 1 || qv > 1);
+      if (!inside) {
         d = m.inflow;
         mu = 0;
         sigma = m.stormSigma;
@@ -122,9 +137,12 @@ export function lightDepthAt(sample: (u: number, v: number, s: LightSample) => v
         sigma = s.d >= 1e-5 ? s.sigma : sMin;
         g = s.ground;
       }
-      sum += d * foldedProfile(h0 + x * m.rise - (g - g0), mu, sigma);
+      const h = h0 + x * m.rise - (g - g0);
+      sum += d * foldedProfile(h, mu, sigma);
+      // Smoke and fog (the third wave), inside the window only: each at its own extinction times the self-shadow.
+      if (air && inside) sumAir += air.smokeK * smokeAtHeight(h, s.s0 ?? 0, s.s1 ?? 0, s.s2 ?? 0, air.mids[0], air.mids[1], air.mids[2], air.mids[3]) + air.fogK * (s.fog ?? 0) * fogProfile(h, air.fogTop);
     }
-    let tau = m.k * sum * m.slant;
+    let tau = m.k * sum * m.slant + sumAir * m.slant;
     if (m.inflow > 0) {
       const hEnd = h0 + m.steps * m.rise;
       tau += m.k * m.inflow * (1 - erfApprox(hEnd / (Math.SQRT2 * (m.stormSigma > 1e-3 ? m.stormSigma : 1e-3)))) * m.invSin;

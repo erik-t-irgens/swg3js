@@ -33,6 +33,7 @@ import { blastGrains, DENT_KIND, FRONT_KIND, frontRadiusIn, HALF_NORMAL, liftPea
 import type { FluidWindow } from './fluidWindow.ts';
 import { MEDIUM_BYTE, type AirRaster } from './airRaster.ts';
 import type { AirDents } from './airDents.ts';
+import { FORCE_WAVE, FORCE_WAVE_SPEED } from '../../combat/forceWaveTune.ts';
 
 /** One-shot velocity shoves a step can be owed: [x, z, radius, height over the ground, dvx, dvz, reach]. */
 const ONE_MAX = 256;
@@ -48,6 +49,18 @@ const DUST_W = 7;
 /** The splat batches' sizes: the shaders' loop bounds, compiled into the programs. */
 export const SPLAT_BATCH = 128;
 export const DUST_BATCH = 32;
+/** The smoke's batch a frame (the third wave): three `vec4`s a splat, 96 of D3D11's 1024 fragment vectors. */
+export const SMOKE_BATCH = 32;
+/**
+ * Smoke sources (the third wave): [x, z, radius, amount, share of slab 0, 1, 2, r, g, b, seconds left, seconds held]. A
+ * frame's own table (a gas cloud, a burning part: handed in every frame, laid at its rate times the frame's `dt`), and a
+ * held one (a blast's and a wreck's feed, fading over their hold), and the one-shots owed to the next frame (a blast's
+ * first puff, laid whole).
+ */
+const SMOKE_W = 12;
+const SMOKE_FRAME_MAX = 32;
+const SMOKE_HELD_MAX = 32;
+const SMOKE_ONE_MAX = 32;
 /**
  * The Force's fronts (`AIR_TUNE.forces.fronts`, read once as the table is made): [kind, x, z, y, aim x, aim z, reach,
  * power, step age, frame age, frame turn, step turn, this frame's radius from, to, share of its way from, to].
@@ -68,9 +81,12 @@ export interface ForceCounts {
   /** Fronts begun, and fronts dropped for a full table (a ninth at once). */
   fronts: number;
   droppedFronts: number;
+  /** Smoke sources handed in (a frame's, held and one-shot), and dropped for a full table or batch. */
+  smoke: number;
+  droppedSmoke: number;
 }
 
-const freshCounts = (): ForceCounts => ({ engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0 });
+const freshCounts = (): ForceCounts => ({ engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0 });
 
 /** The golden angle as a share of a turn: a front's bearings turn by it each step and each frame, so a sparse ring fills. */
 const GOLDEN = (3 - Math.sqrt(5)) / 2;
@@ -124,6 +140,31 @@ export class AirForces {
    * `bandSigmas` of its spread then), nought for none: what the field keeps the march's band by.
    */
   liftTop = 0.5;
+
+  /** Smoke carried at all (`volSmoke`): with it off no smoke source is taken. */
+  smokeOn = true;
+  /** The smoke sources of this frame, held ones, and one-shots owed (`SMOKE_W` numbers a row). */
+  readonly smokeFrame = new Float64Array(SMOKE_FRAME_MAX * SMOKE_W);
+  smokeFrameCount = 0;
+  readonly smokeHeld = new Float64Array(SMOKE_HELD_MAX * SMOKE_W);
+  smokeHeldCount = 0;
+  readonly smokeOne = new Float64Array(SMOKE_ONE_MAX * SMOKE_W);
+  smokeOneCount = 0;
+  /** The frame's smoke batch: (u, v, 1 / r², amount), each slab's share, and its colour (linear). */
+  readonly smokeBatch = new Float32Array(SMOKE_BATCH * 4);
+  readonly smokeShare = new Float32Array(SMOKE_BATCH * 4);
+  readonly smokeColour = new Float32Array(SMOKE_BATCH * 4);
+  smokeBatchCount = 0;
+  /**
+   * This frame's own smoke sources (a gas cloud's, a burning part's) a full table refused since the last batch, and how
+   * many the last batch saw refused: while any was, the field answers that it draws no cloud's smoke, so every gas cloud's
+   * puffs are drawn (`AirField.drawsSmokeAt`). Laid first and the table no longer than the batch, a source the table took
+   * is always laid.
+   */
+  frameSmokeLost = 0;
+  frameSmokeLostLast = 0;
+  /** A smoke source handed over: x, y, z, radius, rate, colour (0xRRGGBB, sRGB), seconds held (0 for the frame's), one-shot amount (`smokeArgs`). */
+  readonly smokeArg = new Float64Array(8);
 
   /** The Force's fronts alive (`FRONT_W` numbers a row), sized once from the tune. */
   readonly fronts = new Float64Array(Math.max(1, Math.floor(AIR_TUNE.forces.fronts)) * FRONT_W);
@@ -379,10 +420,12 @@ export class AirForces {
     // Let go of the fronts finished on both clocks (moved down over: a table, not a list).
     let w = 0;
     const F = AIR_TUNE.force;
+    // The wave's one speed, which the knock reads too (`FORCE_WAVE`, the Gameplay page's).
+    const sp = FORCE_WAVE.speed > FORCE_WAVE_SPEED.min ? FORCE_WAVE.speed : FORCE_WAVE_SPEED.min;
     for (let i = 0; i < this.frontCount; i++) {
       const k = i * FRONT_W;
       // `frontTime` written out (a number handed back across a call is a number made, every front every frame).
-      const T0 = t[k] === FRONT_KIND.push ? F.pushTime : t[k] === FRONT_KIND.pull ? F.pullTime : F.repulseTime;
+      const T0 = (t[k] === FRONT_KIND.push ? F.pushTime : t[k] === FRONT_KIND.pull ? F.pullTime : F.repulseTime) / sp;
       const T = T0 > 1e-3 ? T0 : 1e-3;
       if (t[k + 8] >= T && t[k + 9] >= T) continue;
       if (w !== i) for (let c = 0; c < FRONT_W; c++) t[w * FRONT_W + c] = t[k + c];
@@ -611,8 +654,200 @@ export class AirForces {
     return n;
   }
 
-  /** A blast: the gadget's own radius and push. One-shot: a ring of shoves outward, dust, the grains. `smoke` is the third wave's. */
-  blast(x: number, y: number, z: number, radius: number, push: number, _smoke: number): void {
+  /**
+   * Smoke held at a point (the force API's `smoke`, the third wave): a gas cloud's or a burning part's, handed in every
+   * frame it lasts and laid at `rate` a second over that frame, in its colour (`0xRRGGBB`, sRGB), shared into the slabs by
+   * its height over the ground (`slabWeight`'s rule at a reach of `smokeReach`). Answers at once with the field off, the
+   * smoke off, the point not a number or off the window.
+   */
+  smoke(x: number, y: number, z: number, radius: number, rate: number, colour: number): void {
+    const a = this.smokeArg;
+    a[0] = x;
+    a[1] = y;
+    a[2] = z;
+    a[3] = radius;
+    a[4] = rate;
+    a[5] = colour;
+    a[6] = 0;
+    a[7] = 0;
+    this.smokeArgs();
+  }
+
+  /** Smoke held at a point for `seconds`, fading over them (a source that outlives the frame: the console's). */
+  heldSmoke(x: number, y: number, z: number, radius: number, rate: number, colour: number, seconds: number): void {
+    const a = this.smokeArg;
+    a[0] = x;
+    a[1] = y;
+    a[2] = z;
+    a[3] = radius;
+    a[4] = rate;
+    a[5] = colour;
+    a[6] = seconds > 0 ? seconds : 0;
+    a[7] = 0;
+    this.smokeArgs();
+  }
+
+  /**
+   * The smoke source in `smokeArg` (`smoke`'s rule, no number handed across a call): `[6]` seconds held (nought: this
+   * frame's alone, else a held source fading over them), `[7]` a one-shot amount laid whole at the next frame (nought for
+   * none). A full table drops the source and counts it.
+   */
+  smokeArgs(): void {
+    if (!this.active || !this.smokeOn) return;
+    const a = this.smokeArg;
+    for (let i = 0; i < 8; i++) {
+      if (!Number.isFinite(a[i])) {
+        this.counts.notFinite++;
+        return;
+      }
+    }
+    const q = this.q;
+    q[0] = a[0];
+    q[1] = a[2];
+    q[2] = a[3];
+    if (!this.nearHere()) {
+      this.counts.offWindow++;
+      return;
+    }
+    const held = a[6];
+    const one = a[7];
+    let table: Float64Array;
+    let k: number;
+    if (one > 0) {
+      if (this.smokeOneCount >= SMOKE_ONE_MAX) {
+        this.counts.droppedSmoke++;
+        return;
+      }
+      table = this.smokeOne;
+      k = this.smokeOneCount++ * SMOKE_W;
+    } else if (held > 0) {
+      if (this.smokeHeldCount >= SMOKE_HELD_MAX) {
+        this.counts.droppedSmoke++;
+        return;
+      }
+      table = this.smokeHeld;
+      k = this.smokeHeldCount++ * SMOKE_W;
+    } else {
+      if (this.smokeFrameCount >= SMOKE_FRAME_MAX) {
+        this.counts.droppedSmoke++;
+        // A danger's smoke (a gas cloud's) not taken: the puffs are drawn for every cloud until a batch takes them all.
+        this.frameSmokeLost++;
+        return;
+      }
+      table = this.smokeFrame;
+      k = this.smokeFrameCount++ * SMOKE_W;
+    }
+    // Its height over the ground there, shared into the slabs by their middles (unknown ground: a metre up).
+    const h = this.groundHere() ? a[1] - this.g.h : 1;
+    const S = AIR_TUNE.slabs;
+    const r = AIR_TUNE.smoke.reach > 0.1 ? AIR_TUNE.smoke.reach : 0.1;
+    const d0 = (S.centre - h) / r;
+    const d1 = (S.centre1 - h) / r;
+    const d2 = (S.centre2 - h) / r;
+    let w0 = Math.exp(-d0 * d0);
+    let w1 = Math.exp(-d1 * d1);
+    let w2 = Math.exp(-d2 * d2);
+    const ws = w0 + w1 + w2;
+    if (ws > 1e-6) {
+      w0 /= ws;
+      w1 /= ws;
+      w2 /= ws;
+    } else if (h > S.centre2) {
+      w0 = 0;
+      w1 = 0;
+      w2 = 1;
+    } else {
+      w0 = 1;
+      w1 = 0;
+      w2 = 0;
+    }
+    const c = a[5] > 0 ? a[5] : 0;
+    table[k] = a[0];
+    table[k + 1] = a[2];
+    table[k + 2] = a[3];
+    table[k + 3] = one > 0 ? one : a[4];
+    table[k + 4] = w0;
+    table[k + 5] = w1;
+    table[k + 6] = w2;
+    table[k + 7] = SRGB_BYTE[(c >> 16) & 255];
+    table[k + 8] = SRGB_BYTE[(c >> 8) & 255];
+    table[k + 9] = SRGB_BYTE[c & 255];
+    table[k + 10] = held;
+    table[k + 11] = held;
+    this.counts.smoke++;
+  }
+
+  /**
+   * The frame's smoke batch (`frameDt` set by the field): this frame's own sources first, at their rates times the frame's
+   * `dt` (the gas clouds' and the burning parts': a danger's smoke is never the one a full batch drops, and the frame's
+   * table is no longer than the batch, so whatever the table took is laid), then the one-shots owed laid whole, then each
+   * held source at its rate fading over its hold (and aged; one past its hold let go); the frame's table and the one-shots
+   * spent. Answers how many splats the batch holds. Whether any frame source was lost since the last batch, to a full
+   * table, is kept for the puffs (`frameSmokeLostLast`).
+   */
+  buildSmokeBatch(): number {
+    const w = this.window;
+    const dt = this.frameDt > 0 && Number.isFinite(this.frameDt) ? this.frameDt : 0;
+    let n = 0;
+    this.frameSmokeLostLast = this.frameSmokeLost;
+    this.frameSmokeLost = 0;
+    if (w && w.placed && this.smokeOn) {
+      for (let i = 0; i < this.smokeFrameCount; i++) n = this.putSmoke(this.smokeFrame, i * SMOKE_W, dt, n);
+      for (let i = 0; i < this.smokeOneCount; i++) n = this.putSmoke(this.smokeOne, i * SMOKE_W, 1, n);
+      let keep = 0;
+      for (let i = 0; i < this.smokeHeldCount; i++) {
+        const k = i * SMOKE_W;
+        const t = this.smokeHeld;
+        const left = t[k + 10];
+        const hold = t[k + 11] > 1e-6 ? t[k + 11] : 1e-6;
+        // Fading over its hold, the demo's (1 - t / hold) [demo `land.html:1776`], at the middle of the frame.
+        const f0 = (left - 0.5 * dt) / hold;
+        const f = f0 > 0 ? (f0 < 1 ? f0 : 1) : 0;
+        n = this.putSmoke(t, k, f * dt, n);
+        t[k + 10] = left - dt;
+        if (t[k + 10] > 0) {
+          if (keep !== i) for (let c = 0; c < SMOKE_W; c++) t[keep * SMOKE_W + c] = t[k + c];
+          keep++;
+        }
+      }
+      this.smokeHeldCount = keep;
+    }
+    this.smokeOneCount = 0;
+    this.smokeFrameCount = 0;
+    this.smokeBatchCount = n;
+    return n;
+  }
+
+  /** One smoke source of `table` at `k` into the batch at `n`, its amount times `scale`; answers the next free place. */
+  private putSmoke(table: Float64Array, k: number, scale: number, n: number): number {
+    const w = this.window!;
+    const amount = table[k + 3] * scale;
+    if (!(amount > 0)) return n;
+    if (n >= SMOKE_BATCH) {
+      this.counts.droppedSmoke++;
+      return n;
+    }
+    const r0 = table[k + 2];
+    const r = r0 > w.cell ? r0 : w.cell;
+    const rr = r / w.size;
+    const o = n * 4;
+    this.smokeBatch[o] = (table[k] - w.ox) / w.size;
+    this.smokeBatch[o + 1] = (table[k + 1] - w.oz) / w.size;
+    this.smokeBatch[o + 2] = 1 / (rr * rr);
+    this.smokeBatch[o + 3] = amount;
+    this.smokeShare[o] = table[k + 4];
+    this.smokeShare[o + 1] = table[k + 5];
+    this.smokeShare[o + 2] = table[k + 6];
+    this.smokeShare[o + 3] = 0;
+    this.smokeColour[o] = table[k + 7];
+    this.smokeColour[o + 1] = table[k + 8];
+    this.smokeColour[o + 2] = table[k + 9];
+    this.smokeColour[o + 3] = 0;
+    return n + 1;
+  }
+
+  /** A blast: the gadget's own radius and push. One-shot: a ring of shoves outward, dust, the grains, and (the third wave) `smoke` seconds of smoke after. */
+  blast(x: number, y: number, z: number, radius: number, push: number, smoke: number): void {
     if (!this.active || !this.fromBlasts) return;
     if (!(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) && Number.isFinite(radius) && Number.isFinite(push))) {
       this.counts.notFinite++;
@@ -662,6 +897,46 @@ export class AirForces {
     q[0] = x;
     q[1] = z;
     if (grains && this.dust && this.mediumHere() === MEDIUM_BYTE.land) grains(x, y, z, blastGrains(radius), 8 + 16 * Math.min(2, scale));
+    // Its smoke (the third wave): a puff into slab 0 and slab 1 at once, and slab 0 fed as it burns for `smoke` seconds,
+    // fading [demo `land.html:1601-1602`, `:1774-1779`], each by the blast's radius over a thermal detonator's.
+    if (smoke > 0 && Number.isFinite(smoke) && this.smokeOn) {
+      const Sm = AIR_TUNE.smoke;
+      const total = (Sm.blast0 + Sm.blast1) * scale;
+      if (total > 0 && this.smokeOneCount < SMOKE_ONE_MAX) {
+        const k = this.smokeOneCount++ * SMOKE_W;
+        const t = this.smokeOne;
+        t[k] = x;
+        t[k + 1] = z;
+        t[k + 2] = 0.5 * radius;
+        t[k + 3] = total;
+        t[k + 4] = (Sm.blast0 * scale) / total;
+        t[k + 5] = (Sm.blast1 * scale) / total;
+        t[k + 6] = 0;
+        t[k + 7] = Sm.greyR;
+        t[k + 8] = Sm.greyG;
+        t[k + 9] = Sm.greyB;
+        t[k + 10] = 0;
+        t[k + 11] = 0;
+        this.counts.smoke++;
+      } else if (total > 0) this.counts.droppedSmoke++;
+      if (Sm.blastFeed > 0 && this.smokeHeldCount < SMOKE_HELD_MAX) {
+        const k = this.smokeHeldCount++ * SMOKE_W;
+        const t = this.smokeHeld;
+        t[k] = x;
+        t[k + 1] = z;
+        t[k + 2] = 0.4 * radius;
+        t[k + 3] = Sm.blastFeed * scale;
+        t[k + 4] = 1;
+        t[k + 5] = 0;
+        t[k + 6] = 0;
+        t[k + 7] = Sm.greyR;
+        t[k + 8] = Sm.greyG;
+        t[k + 9] = Sm.greyB;
+        t[k + 10] = smoke;
+        t[k + 11] = smoke;
+        this.counts.smoke++;
+      } else if (Sm.blastFeed > 0) this.counts.droppedSmoke++;
+    }
     // A crater, by the blast's own radius: the demo's 3.4 m bowl 1.15 m deep at a thermal detonator's 7 [ours scaling],
     // taken by how far the ground there gives (none in rock) -- and only by a blast near enough the ground to press it:
     // full at the ground, shallower the higher it went off, none past `craterReach` of its radius over the ground under
@@ -1042,9 +1317,12 @@ export class AirForces {
     this.oneCount = 0;
     this.dustCount = 0;
     this.frontCount = 0;
+    this.smokeOneCount = 0;
+    this.smokeHeldCount = 0;
+    this.smokeFrameCount = 0;
   }
 
-  /** Drop everything owed (a jump, a new world, the air turned off), the fronts with it. */
+  /** Drop everything owed (a jump, a new world, the air turned off), the fronts and the smoke with it. */
   clear(): void {
     this.oneCount = 0;
     this.engineCount = 0;
@@ -1052,8 +1330,24 @@ export class AirForces {
     this.splatCount = 0;
     this.dustBatchCount = 0;
     this.frontCount = 0;
+    this.smokeOneCount = 0;
+    this.smokeHeldCount = 0;
+    this.smokeFrameCount = 0;
+    this.smokeBatchCount = 0;
+    this.frameSmokeLost = 0;
+    this.frameSmokeLostLast = 0;
   }
 }
+
+/** sRGB bytes into linear light, made once (the smoke's colour, handed in as `0xRRGGBB`): a table read, so a source handed in every frame makes no number. */
+const SRGB_BYTE = ((): Float64Array => {
+  const t = new Float64Array(256);
+  for (let b = 0; b < 256; b++) {
+    const c = b / 255;
+    t[b] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+  return t;
+})();
 
 /** A slab's weight for a splat at `height` over the ground with this `reach`: the shader's rule, for the tests. */
 export function splatSlabWeight(slabCentre: number, height: number, reach: number): number {

@@ -105,4 +105,29 @@ ok(seen.length === 2 && seen.every((b) => !b.room), 'asked with no line, every b
   obs.dispose();
 }
 
+// The third wave's: a building's top is how far its box stands over its origin, never the box's whole height. A player
+// house's box reaches 16 m under its doorstep (its foundation), and read whole a 9 m cottage stood 25 m tall and blocked
+// every slab of the air, so smoke and dust never crossed its roof. A box written with its larger corner first is taken
+// componentwise; a box wholly under the origin stands over nothing and is left out.
+{
+  const FOUNDED = { id: 'founded', file: 'founded.glb', bounds: { min: [-8, -16, -6], max: [8, 9, 6] }, triangles: 24 };
+  const SWAPPED = { id: 'swapped', file: 'swapped.glb', bounds: { min: [5, 4.5, 5], max: [-5, -1, -5] }, triangles: 24 };
+  const BURIED = { id: 'buried', file: 'buried.glb', bounds: { min: [-3, -6, -3], max: [3, -0.5, 3] }, triangles: 24 };
+  const hb = await makeStreamer(
+    [
+      { template: 'object/founded', model: 'founded', x: -1000, y: 0, z: 1000, q: [1, 0, 0, 0], radius: 15 },
+      { template: 'object/swapped', model: 'swapped', x: -1040, y: 0, z: 1000, q: [1, 0, 0, 0], radius: 8 },
+      { template: 'object/buried', model: 'buried', x: -1080, y: 0, z: 1000, q: [1, 0, 0, 0], radius: 5 },
+    ],
+    { defs: [FOUNDED as unknown as Def, SWAPPED as unknown as Def, BURIED as unknown as Def] },
+  );
+  const got: SolidBox[] = [];
+  hb.stream.forEachSolidBox(900, 900, 1200, 1100, rec, (b) => (got.push({ ...b }), true));
+  const founded = got.find((b) => b.hx === 8);
+  const swapped = got.find((b) => b.hx === 5);
+  ok(!!founded && founded.top === 9, `a house whose box reaches 16 m under its origin stands 9 m tall, not 25 (${founded?.top})`);
+  ok(!!swapped && swapped.top === 4.5, `a box written with its larger corner first stands at its higher corner (${swapped?.top})`);
+  ok(got.length === 2 && !got.some((b) => b.hx === 3), 'a box wholly under its origin stands over nothing and is left out');
+}
+
 console.log(`\n${checks} checks passed`);

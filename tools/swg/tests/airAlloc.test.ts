@@ -31,7 +31,8 @@ const run = (...args: string[]): string => execFileSync(process.execPath, ['--ex
 type Moving = { frames: number; made: number; scavenges: number; movedShare: number; resets: number };
 type Ground = { sources: number; dents: { oneShots: number; laid: number; ticks: number; cleared: number }; feet: { dents: number } };
 type Third = { fronts: number; droppedFronts: number; storm: number[]; sand: string | null; cycles: number[] | null; mote: number[] };
-type Steady = { skipped?: string; frames: number; made: number; scavenges: number; stepping: boolean; engines: number; grains: number; ground: Ground; third: Third; moving: Moving };
+type W3 = { smoke: number; droppedSmoke: number; smokeLive: boolean; wisps: string | null; noise: string | null; layers: number; fogLevel: number };
+type Steady = { skipped?: string; frames: number; made: number; scavenges: number; stepping: boolean; engines: number; grains: number; ground: Ground; third: Third; w3: W3; moving: Moving };
 const clean = (m: { made: number; scavenges: number; frames: number }): boolean => m.scavenges === 0 && m.made / m.frames < 0.2;
 const better = (a: { made: number; scavenges: number }, b: { made: number; scavenges: number }): boolean => a.scavenges < b.scavenges || (a.scavenges === b.scavenges && a.made < b.made);
 // Cleanest of three runs, the steady frame and the moving one each on its own (a run caught while the engine is still
@@ -63,6 +64,18 @@ else {
   ok(mv.movedShare > 0.5 && mv.resets === 0, `the moving frames move the window a cell or more on ${(mv.movedShare * 100).toFixed(0)}% of them and never jump`);
   const mper = mv.made / mv.frames;
   ok(mv.scavenges === 0 && mper < 0.2, `a frame whose window moves at 167 m/s makes ${mper.toFixed(3)} bytes (${mv.made} over ${mv.frames} frames, ${mv.scavenges} collections), under 0.2: the air's own, its ground a stand-in that makes nothing`);
+  const w3 = best.w3;
+  ok(w3.layers === 3 && w3.smokeLive && w3.smoke > 0 && w3.wisps === 'noise' && w3.noise === 'whole' && w3.fogLevel > 0, `and the third wave's with it: three layers of air, smoke laid (${w3.smoke} sources, ${w3.droppedSmoke} dropped) and carried with a foggy morning's bank and emission, the wisps' noise whole and its phases worked out every frame in the noise mode`);
+  // The bands' mode: its pass a frame at the dust's size, the same lines.
+  let bands: Steady | null = null;
+  let bandsMoving: Moving | null = null;
+  for (let i = 0; i < 3; i++) {
+    const got = JSON.parse(run('bands')) as Steady;
+    if (!bands || better(got, bands)) bands = got;
+    if (!bandsMoving || better(got.moving, bandsMoving)) bandsMoving = got.moving;
+    if (clean(bands) && clean(bandsMoving)) break;
+  }
+  ok(bands!.w3.wisps === 'bands' && clean(bands!) && clean(bandsMoving!), `in the bands mode (its pass every frame) a steady frame makes ${(bands!.made / bands!.frames).toFixed(3)} bytes and a moving one ${(bandsMoving!.made / bandsMoving!.frames).toFixed(3)}, under 0.2`);
 }
 
 const off = JSON.parse(run('off')) as { skipped?: string; off?: Record<string, { made: number; scavenges: number }>; active?: boolean };

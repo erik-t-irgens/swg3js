@@ -15,6 +15,11 @@
 //
 // Every value import here carries its extension and nothing of `clouds.ts` is imported, so the node test loads it
 // under plain type stripping.
+//
+// **From the third wave** it draws smoke and fog beside the dust, the dust in every tile of a field a layer, and the
+// wisps: one march material a wisps mode (`WISP_MODE` 0 off, 1 bands, 2 noise, 3 noise ×2), all four compiled while the
+// master is on and switched by the mode the field has in force (class M), since the Start's measurement found the one
+// program with the modes as uniform branches too dear on Direct3D 11 (`W3-notes.md`).
 import * as THREE from 'three';
 import type { FxProductId, FxSettings } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context.ts';
@@ -23,7 +28,7 @@ import { FX_FULLSCREEN_VERTEX, FX_LINEARIZE, FX_SLAB, FX_VIEW_POS } from './glsl
 import { SSAO_CSM_FADE_MARGIN } from './ssaoMath.ts';
 import type { AirSource } from '../../world/volumetrics/airField.ts';
 import { AIR_TUNE } from '../../world/volumetrics/airTune.ts';
-import { AIR_ERF_GLSL, AIR_PROFILE_GLSL } from '../../world/volumetrics/airShaders.ts';
+import { AIR_ERF_GLSL, AIR_FOG_PROFILE_GLSL, AIR_PROFILE_GLSL, AIR_SMOKE_AT_GLSL } from '../../world/volumetrics/airShaders.ts';
 
 /** The march's loop bound: no setting asks for more samples (`AIR_TUNE.volume.maxSteps`, 48). */
 export const MAX_VOLUME_STEPS = 48;
@@ -91,12 +96,32 @@ uniform vec4 uShapeP;
 #define uH0 uShapeP.x
 #define uNearFrom uShapeP.y
 #define uNearTo uShapeP.z
+// The third wave's: smoke (a slab a channel) and the fog (alpha), the smoke's colour, the gust noise the fog's top is
+// varied by; the fog's hour (its top, whether it is carried, the top noise's cells a metre, the level) and the top
+// noise's drift; whether the dust, the smoke and the fog are drawn and the view (0 none, 1 smoke, 2 fog, 3 the wisps'
+// keep); the smoke's and the fog's extinction, the top's rise and its low share; the fog past the window, the dust's tiles
+// and half a texel of one, the march's pixel angle; the smoke's colour where nothing tinted it.
+uniform sampler2D uSmoke;
+uniform sampler2D uSmokeTint;
+uniform sampler2D uNoise2;
+uniform vec4 uFog;
+uniform vec2 uFogDrift;
+uniform vec4 uAirP;
+uniform vec4 uAirQ;
+uniform vec4 uAirR;
+uniform vec3 uSmokeGrey;
+#define uDustOn uAirP.x
+#define uSmokeOn uAirP.y
+#define uFogOn uAirP.z
+#define uAirView uAirP.w
 
 ${FX_LINEARIZE}
 ${FX_VIEW_POS}
 ${FX_SLAB}
 ${AIR_ERF_GLSL}
 ${AIR_PROFILE_GLSL}
+${AIR_SMOKE_AT_GLSL}
+${AIR_FOG_PROFILE_GLSL}
 
 const float CSM_FADE_MARGIN = ${SSAO_CSM_FADE_MARGIN.toFixed(4)};
 
@@ -133,8 +158,8 @@ bool inWin(vec2 uv) { return uv.x >= 0.0 && uv.y >= 0.0 && uv.x <= 1.0 && uv.y <
 float phaseOf(float mu) { return uPhase.x + uPhase.y * pow(max(mu, 0.0), uPhase.z); }
 // How far a point is over the ground of the window under it.
 float overGround(vec3 p) { return p.y - texture(uHeight, windowUv(p)).r; }
-// Where the dust thins out: the band's top the field worked out from the lifts it queued and the storm (from wave
-// 2b), never under four of H₀ and never over the band's own ceiling.
+// Where the air thins out: the band's top the field worked out from the lifts it queued, the storm, the smoke lingering and
+// the fog's varied top (the third wave's high band), never under four of H₀ and never over the band's own ceiling.
 float bandTop() { return min(uAbove, uBandTop); }
 bool inHull(vec3 p) {
   if (uHullBox.w < 0.5) return false;
@@ -142,7 +167,8 @@ bool inHull(vec3 p) {
   return all(lessThan(abs(q), uHullBox.xyz));
 }
 // The optical depth toward the sun at h metres over the ground, from the light pass's four heights: piecewise linear
-// between them, held at the lowest's below it and the highest's above it (lightDepthAtHeight is its mirror).
+// between them, held at the lowest's below it and the highest's above it (lightDepthAtHeight is its mirror). The wisps'
+// bands are read across the same four heights by the same rule.
 float lightTau(vec4 t, float h) {
   if (h <= uLightH.x) return t.x;
   if (h <= uLightH.y) return mix(t.x, t.y, (h - uLightH.x) / max(uLightH.y - uLightH.x, 1e-3));
@@ -163,6 +189,106 @@ float farDepth(float t0, float t1, float cy, float dy, float D) {
   float k = 1.0 / (1.4142135623730951 * s);
   return D * abs(airErf(max(y1, 0.0) * k) - airErf(max(y0, 0.0) * k)) / abs(dy);
 }
+// A dust tile's uv (a field a layer, Ultra's: three tiles side by side), clamped half a texel inside the tile.
+vec2 tileUv(int k, vec2 q) {
+  if (uAirR.y < 1.5) return q;
+  float h = uAirR.z;
+  return vec2((float(k) + clamp(q.x, h, 1.0 - h)) / uAirR.y, clamp(q.y, h, 1.0 - h));
+}
+// One dust tile's patch at a sample: its density by its carried shape (wave 2b's folded profile at H₀), and its colour,
+// mean height, spread, age and rise for the views and the wisps.
+float dustAt(vec2 uv, float hy, out vec3 tint, out float mu, out float sg, out float age, out float rise) {
+  tint = uStormColour;
+  mu = 0.0;
+  sg = uSpreadMin;
+  age = 0.0;
+  rise = 0.0;
+  vec4 d = texture(uDust, uv);
+  float D = max(d.a, 0.0);
+  if (D < 1e-5) return 0.0;
+  // The patch's own carried shape (wave 2b's): its folded profile at its mean height and spread, so a unit of dust keeps
+  // the first wave's column wherever its mass sits.
+  vec4 sh = texture(uShape, uv);
+  mu = sh.r / D;
+  sg = sqrt(max(sh.g / D - mu * mu, uSpreadMin * uSpreadMin));
+  age = sh.a / D;
+  rise = sh.b / D;
+  tint = d.a > 1e-4 ? d.rgb / d.a : uStormColour;
+  float dens = D * uH0 * airProfile(hy, mu, sg) * uExtinction * uAmount;
+  return dens;
+}
+#if WISP_MODE > 0
+// The wisps (the third wave, the design's §2.14): the slabs' air read at a height (blended between the slabs' middles as
+// the smoke is), a noise carried by it in two phases cross-faded (or, in the bands mode, the bands' pass read across the
+// light's four heights), and the erosion's remap that is one at an erosion of nought.
+uniform sampler2D uVelAtlas;
+uniform vec4 uSlabTiles[3];
+uniform vec4 uSlabScale;
+uniform vec4 uSlabShare;
+uniform vec2 uAtlasHalf;
+uniform vec2 uWind;
+// The noise's scale a metre, its stretch, the flow's period, the second octave's share; the two phases, the cross-fade
+// and the age term's seconds; erode, erodeFull, keepColumn and keepFloor; the expected keep at sixteen erosions.
+uniform vec4 uWispA;
+uniform vec4 uWispB;
+uniform vec4 uWispC;
+uniform float uKeepTable[16];
+#if WISP_MODE == 1
+uniform sampler2D uBands;
+#else
+uniform highp sampler3D uNoise3;
+#endif
+vec2 slabVelM(vec2 q, int k) {
+  if (q.x < 0.0 || q.y < 0.0 || q.x > 1.0 || q.y > 1.0) return uWind * uSlabShare[k];
+  vec4 r = uSlabTiles[k];
+  vec2 a = r.xy + clamp(q * r.zw, uAtlasHalf, r.zw - uAtlasHalf);
+  return textureLod(uVelAtlas, a, 0.0).xy * uSlabScale[k];
+}
+vec2 velAtHeight(vec2 q, float hy) {
+  if (hy < uSlabMid.x) return slabVelM(q, 0);
+  if (hy < uSlabMid.y) return mix(slabVelM(q, 0), slabVelM(q, 1), (hy - uSlabMid.x) / max(uSlabMid.y - uSlabMid.x, 1e-3));
+  if (hy < uSlabMid.z) return mix(slabVelM(q, 1), slabVelM(q, 2), (hy - uSlabMid.y) / max(uSlabMid.z - uSlabMid.y, 1e-3));
+  return slabVelM(q, 2);
+}
+// The eroding noise at a sample (0 to 1): textureLod at a level worked out from the sample's distance, never the
+// implicit derivatives inside the march's divergent loop.
+float wispNoise(vec3 p, vec2 q, float hy, float rise, float t) {
+#if WISP_MODE == 1
+  return lightTau(textureLod(uBands, q, 0.0), hy);
+#else
+  vec2 v = velAtHeight(q, hy);
+  vec3 flow = vec3(v.x, rise, v.y) * uWispA.z;
+  vec3 c = vec3(p.x, hy * uWispA.y, p.z) * uWispA.x;
+  float lod = max(log2(max(t * uAirR.w * uWispA.x * float(textureSize(uNoise3, 0).x), 1e-6)), 0.0);
+  float n = mix(textureLod(uNoise3, c - flow * uWispB.x * uWispA.x, lod).r, textureLod(uNoise3, c - flow * uWispB.y * uWispA.x + 0.37, lod).r, uWispB.z);
+#if WISP_MODE == 3
+  // The second octave at twice the scale, carried by the air a layer up: the upper wisps run ahead of the lower.
+  vec2 v2 = velAtHeight(q, hy + (uSlabMid.y - uSlabMid.x));
+  vec3 flow2 = vec3(v2.x, rise, v2.y) * uWispA.z;
+  vec3 c2 = c * 2.03;
+  float n2 = mix(textureLod(uNoise3, c2 - flow2 * uWispB.x * uWispA.x * 2.03, lod + 1.0).r, textureLod(uNoise3, c2 - flow2 * uWispB.y * uWispA.x * 2.03 + 0.61, lod + 1.0).r, uWispB.z);
+  n = mix(n, n2, uWispA.w);
+#endif
+  return n;
+#endif
+}
+// The expected keep at an erosion, from the table (linear between its entries): what keepColumn divides by.
+float expectedKeep(float e) {
+  float x = clamp(e, 0.0, 1.0) * 15.0;
+  int i = int(floor(x));
+  int j = i + 1 < 16 ? i + 1 : 15;
+  return mix(uKeepTable[i], uKeepTable[j], x - float(i));
+}
+// The erosion's keep (wispKeep is its mirror): the cut brought in over the first erodeFull of erosion, one exactly at an
+// erosion of nought, and with keepColumn the mean opacity held through the table, never divided by under keepFloor.
+float wispKeep(float n, float e) {
+  float ee = min(e, 1.0);
+  float cut = clamp((n - ee) / max(1.0 - ee, 1e-3), 0.0, 1.0);
+  float keep = mix(1.0, cut, clamp(ee / max(uWispC.y, 1e-3), 0.0, 1.0));
+  if (uWispC.z > 0.0) keep /= max(mix(1.0, expectedKeep(ee), uWispC.z), uWispC.w);
+  return keep;
+}
+#endif
 void main() {
   vec3 dir = normalize(uViewToWorld * fxViewPos(vUv, 1.0, uTanHalfFov));
   // A far-plane depth texel is sky, not a surface nine kilometres off.
@@ -178,9 +304,10 @@ void main() {
   float ph = phaseOf(mu);
   vec3 acc = vec3(0.0);
   float T = 1.0;
-  // The debug view (a uniform branch): the first dusty sample's carried colour or shape, drawn opaque in place of the
-  // in-scatter.
+  // The debug views (uniform branches): the first dusty sample's carried colour or shape, or (the third wave's) the first
+  // sample's smoke, fog or the wisps' keep, drawn opaque in place of the in-scatter.
   bool viewing = uDustView > 0.5;
+  bool airViewing = uAirView > 0.5;
   bool viewed = false;
   vec3 view = vec3(0.0);
   float jitter = bayer4(gl_FragCoord.xy + vec2(mod(uFrame, 4.0), mod(floor(uFrame / 4.0), 4.0)));
@@ -218,28 +345,97 @@ void main() {
         // channel: every wall, and the rooms of a compound too wide to be a wall itself (airObstacles.ts).
         if (texture(uObstacles, uv).g > hy) continue;
         if (inHull(p)) continue;
-        vec4 d = texture(uDust, uv);
-        float D = max(d.a, 0.0);
-        if (D < 1e-5) continue;
-        // The patch's own carried shape (wave 2b's): its folded profile at its mean height and spread, so a
-        // unit of dust keeps the first wave's column wherever its mass sits.
-        vec4 sh = texture(uShape, uv);
-        float mu = sh.r / D;
-        float sg = sqrt(max(sh.g / D - mu * mu, uSpreadMin * uSpreadMin));
-        float dens = D * uH0 * airProfile(hy, mu, sg) * uExtinction * uAmount;
-        // The clear bubble round the lens: a uniform branch round the whole term, never a smoothstep of equal edges.
-        if (uNearTo > uNearFrom) dens *= smoothstep(uNearFrom, uNearTo, t);
-        if (dens < 1e-4) continue;
-        vec3 tint = d.a > 1e-4 ? d.rgb / d.a : uStormColour;
-        if (viewing) {
-          view = uDustView < 1.5 ? tint : vec3(uDustView < 2.5 ? mu / 10.0 : (uDustView < 3.5 ? sg / 4.0 : (sh.a / D) / 20.0));
+        // The dust, a tile at a time (one, or a field a layer), each eroded by the wisps.
+        float densD = 0.0;
+        vec3 colD = vec3(0.0);
+        float keepSeen = 1.0;
+#if WISP_MODE > 0
+        bool haveN = false;
+        float wn = 0.5;
+#endif
+        if (uDustOn > 0.5) {
+          for (int k = 0; k < 3; k++) {
+            if (float(k) >= uAirR.y) break;
+            vec3 tint;
+            float dmu;
+            float sg;
+            float age;
+            float rise;
+            float dk = dustAt(tileUv(k, uv), hy, tint, dmu, sg, age, rise);
+            if (dk <= 0.0) continue;
+            if (viewing) {
+              view = uDustView < 1.5 ? tint : vec3(uDustView < 2.5 ? dmu / 10.0 : (uDustView < 3.5 ? sg / 4.0 : age / 20.0));
+              viewed = true;
+              break;
+            }
+#if WISP_MODE > 0
+            if (uWispC.x > 0.0) {
+              if (!haveN) {
+                wn = wispNoise(p, uv, hy, rise, t);
+                haveN = true;
+              }
+              float ag = 1.0;
+              if (uWispB.w > 0.0) ag = smoothstep(0.0, uWispB.w, age);
+              float e = uWispC.x * (0.4 + 0.6 * clamp(abs(hy - dmu) / sg, 0.0, 1.0)) * ag;
+              float kp = wispKeep(wn, e);
+              dk *= kp;
+              keepSeen = min(keepSeen, kp);
+            }
+#endif
+            densD += dk;
+            colD += tint * dk;
+          }
+          if (viewed) break;
+        }
+        // Smoke and fog (the third wave): smoke interpolated between the slabs' middles in its own colour; the fog under
+        // its varied top, in the scene's own fog colour, eroded by the wisps as the dust is.
+        float densS = 0.0;
+        float densF = 0.0;
+        vec3 colS = uSmokeGrey;
+        if (uSmokeOn > 0.5) {
+          vec4 s = texture(uSmoke, uv);
+          float sm = smokeAt(hy, s.xyz);
+          if (sm > 1e-6) {
+            densS = sm * uAirQ.x * uAmount;
+            vec4 st = texture(uSmokeTint, uv);
+            colS = st.a > 1e-4 ? st.rgb / st.a : uSmokeGrey;
+          }
+          if (uFogOn > 0.5 && s.w > 1e-6) {
+            float tn = texture(uNoise2, (p.xz * uFog.z - uFogDrift) / float(textureSize(uNoise2, 0).x)).r;
+            float ftop = uFog.x * (uAirQ.w + (1.0 + uAirQ.z - uAirQ.w) * tn);
+            densF = s.w * fogProfileAt(hy, ftop) * uAirQ.y * uAmount;
+#if WISP_MODE > 0
+            if (uWispC.x > 0.0 && densF > 0.0) {
+              if (!haveN) {
+                wn = wispNoise(p, uv, hy, 0.0, t);
+                haveN = true;
+              }
+              float kf = wispKeep(wn, uWispC.x * (0.4 + 0.6 * clamp(hy / max(ftop, 1e-3), 0.0, 1.0)));
+              densF *= kf;
+              keepSeen = min(keepSeen, kf);
+            }
+#endif
+          }
+          if (airViewing && (sm > 1e-6 || s.w > 1e-6 || keepSeen < 1.0)) {
+            view = uAirView < 1.5 ? s.xyz : (uAirView < 2.5 ? vec3(s.w) : vec3(keepSeen));
+            viewed = true;
+            break;
+          }
+        } else if (airViewing && uAirView > 2.5 && keepSeen < 1.0) {
+          view = vec3(keepSeen);
           viewed = true;
           break;
         }
+        float dens = densD + densS + densF;
+        // The clear bubble round the lens: a uniform branch round the whole term, never a smoothstep of equal edges.
+        if (uNearTo > uNearFrom) dens *= smoothstep(uNearFrom, uNearTo, t);
+        if (dens < 1e-4) continue;
+        // What scatters here: the dust's carried colour at its brightness, the smoke's, the fog's, weighted by each one's share.
+        vec3 tint = (colD * uBright + colS * densS + uFogColor * densF) / max(densD + densS + densF, 1e-6);
         float toSun = uLightOn > 0.5 ? exp(-max(lightTau(texture(uLight, uv + uLightShift), hy), 0.0)) : 1.0;
         float viewZ = dot(p - uCamera, uCamFwd);
         float vis = sunShadow(p, viewZ);
-        vec3 lit = tint * (uSunColor * ph * toSun * vis * uLightK.x + uAmbient * uLightK.y) * uBright;
+        vec3 lit = tint * (uSunColor * ph * toSun * vis * uLightK.x + uAmbient * uLightK.y);
         float fogT = exp(-(uFogDensity * t) * (uFogDensity * t));
         float a = 1.0 - exp(-dens * dt);
         acc += T * lit * a * fogT;
@@ -254,19 +450,34 @@ void main() {
     return;
   }
   // Past the window: the storm's dust along the rest of the ray, to the far reach, in closed form.
-  if (uInflow.x > 0.0 && T > 0.02) {
-    vec2 box = fxSlab(uCamera, dir, vec3(uWindow.x, -1e7, uWindow.y), vec3(uWindow.x + uWindow.z, 1e7, uWindow.y + uWindow.z));
-    float t0 = max(box.y, 0.0);
-    float t1 = min(tScene, uFarReach);
-    if (t1 > t0) {
-      float tau = farDepth(t0, t1, uCamera.y, dir.y, uInflow.x * uH0 * uExtinction * uAmount);
-      float mid = 0.5 * (t0 + t1);
-      float fogT = exp(-(uFogDensity * mid) * (uFogDensity * mid));
-      vec3 lit = uStormColour * (uSunColor * ph * uLightK.x + uAmbient * uLightK.y) * uBright;
-      float a = 1.0 - exp(-tau);
-      acc += T * lit * a * fogT;
-      T *= 1.0 - a;
+  vec2 box = fxSlab(uCamera, dir, vec3(uWindow.x, -1e7, uWindow.y), vec3(uWindow.x + uWindow.z, 1e7, uWindow.y + uWindow.z));
+  float t0 = max(box.y, 0.0);
+  float t1 = min(tScene, uFarReach);
+  if (uInflow.x > 0.0 && T > 0.02 && t1 > t0) {
+    float tau = farDepth(t0, t1, uCamera.y, dir.y, uInflow.x * uH0 * uExtinction * uAmount);
+    float mid = 0.5 * (t0 + t1);
+    float fogT = exp(-(uFogDensity * mid) * (uFogDensity * mid));
+    vec3 lit = uStormColour * (uSunColor * ph * uLightK.x + uAmbient * uLightK.y) * uBright;
+    float a = 1.0 - exp(-tau);
+    acc += T * lit * a * fogT;
+    T *= 1.0 - a;
+  }
+  // And the fog the hour carries in on the wind past the window (the third wave), six taps of its profile over the
+  // window's mean ground under the hour's top.
+  if (uAirR.x > 0.0 && T > 0.02 && t1 > t0) {
+    float st = (t1 - t0) / 6.0;
+    float tau = 0.0;
+    for (int j = 0; j < 6; j++) {
+      float tj = t0 + st * (float(j) + 0.5);
+      tau += uAirR.x * fogProfileAt(uCamera.y + dir.y * tj - uBand.z, uFog.x) * st;
     }
+    tau *= uAirQ.y * uAmount;
+    float mid = 0.5 * (t0 + t1);
+    float fogT = exp(-(uFogDensity * mid) * (uFogDensity * mid));
+    vec3 lit = uFogColor * (uSunColor * ph * uLightK.x + uAmbient * uLightK.y);
+    float a = 1.0 - exp(-tau);
+    acc += T * lit * a * fogT;
+    T *= 1.0 - a;
   }
   vec4 o = vec4(acc, T);
   if (any(isnan(o)) || any(isinf(o))) o = vec4(0.0, 0.0, 0.0, 1.0);
@@ -364,8 +575,23 @@ void main() {
 }
 `;
 
-/** Every fragment shader of the volume, for the scanner. */
-export const AIR_VOLUME_FRAGMENTS: Readonly<Record<string, string>> = { march: MARCH_FRAGMENT, resolve: RESOLVE_FRAGMENT, composite: COMPOSITE_FRAGMENT };
+/** The wisps' modes, the march material each is drawn with (`WISP_MODE`). */
+export const WISP_MODES = ['off', 'bands', 'noise', 'noise2'] as const;
+
+/**
+ * Every fragment shader of the volume, for the scanner: the march once a wisps mode, as the program three builds for it
+ * (its `#define` first), the resolve and the composite.
+ */
+export const AIR_VOLUME_FRAGMENTS: Readonly<Record<string, string>> = {
+  march: `#define WISP_MODE 0\n${MARCH_FRAGMENT}`,
+  'march.bands': `#define WISP_MODE 1\n${MARCH_FRAGMENT}`,
+  'march.noise': `#define WISP_MODE 2\n${MARCH_FRAGMENT}`,
+  'march.noise2': `#define WISP_MODE 3\n${MARCH_FRAGMENT}`,
+  resolve: RESOLVE_FRAGMENT,
+  composite: COMPOSITE_FRAGMENT,
+};
+/** The march's source as written, before a mode is defined over it. */
+export const AIR_MARCH_SOURCE = MARCH_FRAGMENT;
 
 function target(name: string): THREE.WebGLRenderTarget {
   const t = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, generateMipmaps: false });
@@ -387,10 +613,12 @@ export class AirVolumePass implements FxPass {
   readonly id = 'airVolume' as const;
   readonly timerLabel = 'pass:airVolume';
   private readonly source: () => AirSource | null;
+  /** The march's own material for each wisps mode, and the one with the mode off (whose uniforms every one shares). */
+  private readonly marchMats: THREE.ShaderMaterial[];
   private readonly marchMat: THREE.ShaderMaterial;
   private readonly resolveMat: THREE.ShaderMaterial;
   private readonly compositeMat: THREE.ShaderMaterial;
-  private readonly marchQuad: THREE.Mesh;
+  private readonly marchQuads: THREE.Mesh[];
   private readonly resolveQuad: THREE.Mesh;
   private readonly compositeQuad: THREE.Mesh;
   private readonly current: THREE.WebGLRenderTarget;
@@ -404,7 +632,7 @@ export class AirVolumePass implements FxPass {
   private frame = 0;
   private historyValid = false;
   /** What the last frame did, for the console. */
-  last = { drew: false, size: [0, 0] as [number, number], steps: 0, history: false, shadows: 0 };
+  last = { drew: false, size: [0, 0] as [number, number], steps: 0, history: false, shadows: 0, wisps: 0 };
 
   constructor(source: () => AirSource | null) {
     this.source = source;
@@ -412,15 +640,9 @@ export class AirVolumePass implements FxPass {
     this.noShadow.name = 'fx.airVolume.noShadow';
     this.noShadow.compareFunction = THREE.LessEqualCompare;
     this.noShadow.needsUpdate = true;
-    this.marchMat = new THREE.ShaderMaterial({
-      name: 'fx.airVolume.march',
-      vertexShader: FX_FULLSCREEN_VERTEX,
-      fragmentShader: MARCH_FRAGMENT,
-      blending: THREE.NoBlending,
-      toneMapped: false,
-      depthTest: false,
-      depthWrite: false,
-      uniforms: {
+    const S = AIR_TUNE.smoke;
+    const F = AIR_TUNE.fog;
+    const marchUniforms: Record<string, THREE.IUniform> = {
         uDepth: { value: null },
         uDust: { value: null },
         uShape: { value: null },
@@ -467,8 +689,46 @@ export class AirVolumePass implements FxPass {
         uLightH: { value: new THREE.Vector4(0, 2, 5, 10) },
         uLook: { value: new THREE.Vector4(0.6, 0, 7.2, AIR_TUNE.dust.spreadMin) },
         uShapeP: { value: new THREE.Vector4(AIR_TUNE.dust.height, AIR_TUNE.volume.nearFrom, AIR_TUNE.volume.nearTo, 0) },
-      },
-    });
+        // The third wave's: smoke and fog, the fog's top noise, the slabs' middles, the dust's tiles and the wisps.
+        uSmoke: { value: null },
+        uSmokeTint: { value: null },
+        uNoise2: { value: null },
+        uFog: { value: new THREE.Vector4() },
+        uFogDrift: { value: new THREE.Vector2() },
+        uAirP: { value: new THREE.Vector4(1, 0, 0, 0) },
+        uAirQ: { value: new THREE.Vector4(S.extinction, F.extinction, F.topRise, F.topLow) },
+        uAirR: { value: new THREE.Vector4(0, 1, 0.5 / 512, 1e-3) },
+        uSmokeGrey: { value: new THREE.Vector3(S.greyR, S.greyG, S.greyB) },
+        uSlabMid: { value: new THREE.Vector4(AIR_TUNE.slabs.centre, AIR_TUNE.slabs.centre1, AIR_TUNE.slabs.centre2, AIR_TUNE.slabs.ceiling2 + 2) },
+        uVelAtlas: { value: null },
+        uSlabTiles: { value: [new THREE.Vector4(0, 0, 1, 1), new THREE.Vector4(0, 0, 1, 1), new THREE.Vector4(0, 0, 1, 1)] },
+        uSlabScale: { value: new THREE.Vector4(1, 1, 1, 1) },
+        uSlabShare: { value: new THREE.Vector4(1, 1, 1, 0) },
+        uAtlasHalf: { value: new THREE.Vector2(0.5 / 128, 0.5 / 128) },
+        uWind: { value: new THREE.Vector2() },
+        uWispA: { value: new THREE.Vector4(AIR_TUNE.wisps.scale, AIR_TUNE.wisps.stretch, AIR_TUNE.wisps.period, AIR_TUNE.wisps.octave) },
+        uWispB: { value: new THREE.Vector4(0, 0.5, 1, AIR_TUNE.wisps.ageWisp) },
+        uWispC: { value: new THREE.Vector4(AIR_TUNE.wisps.erode, AIR_TUNE.wisps.erodeFull, AIR_TUNE.wisps.keepColumn, AIR_TUNE.wisps.keepFloor) },
+        uKeepTable: { value: new Float32Array(16).fill(1) },
+        uBands: { value: null },
+        uNoise3: { value: null },
+    };
+    // One march material a wisps mode, every one over the same uniforms by reference (the Start's decision, class M).
+    this.marchMats = WISP_MODES.map(
+      (mode, i) =>
+        new THREE.ShaderMaterial({
+          name: i === 0 ? 'fx.airVolume.march' : `fx.airVolume.march.${mode}`,
+          vertexShader: FX_FULLSCREEN_VERTEX,
+          fragmentShader: MARCH_FRAGMENT,
+          defines: { WISP_MODE: i },
+          blending: THREE.NoBlending,
+          toneMapped: false,
+          depthTest: false,
+          depthWrite: false,
+          uniforms: marchUniforms,
+        }),
+    );
+    this.marchMat = this.marchMats[0];
     this.resolveMat = new THREE.ShaderMaterial({
       name: 'fx.airVolume.resolve',
       vertexShader: FX_FULLSCREEN_VERTEX,
@@ -508,7 +768,7 @@ export class AirVolumePass implements FxPass {
         uNearFar: { value: new THREE.Vector2(0.05, 9000) },
       },
     });
-    this.marchQuad = createFxQuad(this.marchMat);
+    this.marchQuads = this.marchMats.map((m) => createFxQuad(m));
     this.resolveQuad = createFxQuad(this.resolveMat);
     this.compositeQuad = createFxQuad(this.compositeMat);
     this.current = target('fx.airVolume.march');
@@ -544,6 +804,13 @@ export class AirVolumePass implements FxPass {
       // metre to full), the dents, metres in red (ten centimetres to full).
       field('offsets', 'rgb', 4),
       field('dents', 'r', 10),
+      // The third wave's: smoke a slab a channel (slab 0 red, 1 green, 2 blue), the fog (alpha, one to full), the
+      // smoke's colour, the wisps' bands at the light's four heights, the sand carried in the air (its amount in alpha).
+      field('smokeField', 'rgb', 1),
+      field('fogField', 'a', 1),
+      field('smokeTint', 'rgb', 1),
+      field('bands', 'rgb', 1),
+      field('carry', 'a', 1),
     ];
   }
 
@@ -600,10 +867,12 @@ export class AirVolumePass implements FxPass {
     if (ctx.portalView) return 'the camera is in a building';
     if (ctx.inside) return 'the player is in a building';
     if (ctx.cameraSubmerged) return 'the camera is under water';
-    // The dust carried this frame, never the last texture a switch left behind: with the moving air or the dust turned
-    // off (the master on) the field keeps its targets, and that texture is a frame frozen where it was, or sliding with
-    // the window (`AirSource.dustLive`).
-    if (!src.dust.value || !src.dustLive) return 'the air is not stepping its dust (the moving air or the dust is off)';
+    // The dust, or (the third wave) the smoke and fog, carried this frame, never the last texture a switch left behind:
+    // with the moving air or the dust turned off (the master on) the field keeps its targets, and that texture is a frame
+    // frozen where it was, or sliding with the window (`AirSource.dustLive`, `smokeLive`).
+    const dust = !!src.dust.value && src.dustLive;
+    const smoke = !!src.smokeField?.value && src.smokeLive === true;
+    if (!dust && !smoke) return 'the air is not stepping its dust, smoke or fog (the moving air, or the dust and the smoke and the fog, are off)';
     if (!src.hasAir()) return 'nothing is airborne';
     return null;
   }
@@ -706,8 +975,59 @@ export class AirVolumePass implements FxPass {
       u.uShadowRange.value = C.range;
       u.uCascadeFade.value = C.fade ? 1 : 0;
     }
+    // The third wave's: what is drawn, smoke and fog, the dust's tiles and the wisps, each read off the field by reference
+    // or copied into the kept uniform objects (nothing made a frame).
+    const smokeLive = !!src.smokeField?.value && src.smokeLive === true;
+    const fogOn = smokeLive && src.fog.value.y > 0.5;
+    const ap = u.uAirP.value as THREE.Vector4;
+    ap.x = src.dust.value && src.dustLive ? 1 : 0;
+    ap.y = smokeLive ? 1 : 0;
+    ap.z = fogOn ? 1 : 0;
+    ap.w = src.airView;
+    u.uSmoke.value = src.smokeField.value;
+    u.uSmokeTint.value = src.smokeTint.value;
+    u.uNoise2.value = src.noise2.value;
+    (u.uFog.value as THREE.Vector4).copy(src.fog.value);
+    (u.uFogDrift.value as THREE.Vector2).copy(src.fogDrift.value);
+    const Sm = AIR_TUNE.smoke;
+    const Fg = AIR_TUNE.fog;
+    const aq = u.uAirQ.value as THREE.Vector4;
+    aq.x = Sm.extinction;
+    aq.y = Fg.extinction;
+    aq.z = Fg.topRise;
+    aq.w = Fg.topLow;
+    (u.uSmokeGrey.value as THREE.Vector3).set(Sm.greyR, Sm.greyG, Sm.greyB);
+    const ar = u.uAirR.value as THREE.Vector4;
+    // The fog the hour carries in past the window: its bank times the level times the patches' mean share.
+    const gaps = Fg.gaps > 0 ? (Fg.gaps < 0.99 ? Fg.gaps : 0.99) : 0;
+    ar.x = fogOn ? Fg.bank * src.fog.value.w * (1 - gaps) * 0.5 : 0;
+    ar.y = src.dustTiles.value.x;
+    ar.z = src.dustTiles.value.y;
+    // A march pixel's angle, radians: the wisps' level of detail by the sample's distance.
+    ar.w = (2 * ctx.tanHalfFov.y) / (this.current.height > 0 ? this.current.height : 1);
+    (u.uSlabMid.value as THREE.Vector4).copy(src.slabMid.value);
+    const mode = src.wispMode > 0 && src.wispMode < 4 ? src.wispMode : 0;
+    if (mode > 0) {
+      u.uVelAtlas.value = src.velocity.value;
+      const st = u.uSlabTiles.value as THREE.Vector4[];
+      const ss = src.slabTiles.value;
+      st[0].copy(ss[0]);
+      st[1].copy(ss[1]);
+      st[2].copy(ss[2]);
+      (u.uSlabScale.value as THREE.Vector4).copy(src.slabScale.value);
+      (u.uSlabShare.value as THREE.Vector4).copy(src.slabShare.value);
+      (u.uAtlasHalf.value as THREE.Vector2).copy(src.atlasHalf.value);
+      (u.uWind.value as THREE.Vector2).copy(src.wind.value);
+      (u.uWispA.value as THREE.Vector4).copy(src.wispA.value);
+      (u.uWispB.value as THREE.Vector4).copy(src.wispB.value);
+      (u.uWispC.value as THREE.Vector4).copy(src.wispC.value);
+      u.uKeepTable.value = src.keepTable.value;
+      u.uBands.value = src.bands.value;
+      u.uNoise3.value = src.noise3.value;
+    }
+    this.last.wisps = mode;
     g.setRenderTarget(this.current);
-    g.render(this.marchQuad, FX_CAMERA);
+    g.render(this.marchQuads[mode], FX_CAMERA);
     let shown: THREE.Texture = this.current.texture;
     if (this.q.history) {
       const r = this.resolveMat.uniforms;
@@ -735,6 +1055,7 @@ export class AirVolumePass implements FxPass {
     g.setRenderTarget(output);
     g.render(this.compositeQuad, FX_CAMERA);
     src.volumeDrew = true;
+    src.volumeAmount = this.q.amount;
     this.last.drew = true;
     this.last.size[0] = this.current.width;
     this.last.size[1] = this.current.height;
@@ -744,18 +1065,17 @@ export class AirVolumePass implements FxPass {
     return true;
   }
 
+  /** Every material for the warm-up: the march once a wisps mode (all four, class M), the resolve and the composite. */
   materials(): FxWarmItem[] {
-    return [
-      { material: this.marchMat, object: this.marchQuad, where: 'target' },
-      { material: this.resolveMat, object: this.resolveQuad, where: 'target' },
-      { material: this.compositeMat, object: this.compositeQuad, where: 'target' },
-    ];
+    const list: FxWarmItem[] = this.marchMats.map((m, i) => ({ material: m, object: this.marchQuads[i], where: 'target' as const }));
+    list.push({ material: this.resolveMat, object: this.resolveQuad, where: 'target' }, { material: this.compositeMat, object: this.compositeQuad, where: 'target' });
+    return list;
   }
 
   dispose(): void {
     this.current.dispose();
     for (const t of this.histories) t.dispose();
-    this.marchMat.dispose();
+    for (const m of this.marchMats) m.dispose();
     this.resolveMat.dispose();
     this.compositeMat.dispose();
     this.noShadow.dispose();

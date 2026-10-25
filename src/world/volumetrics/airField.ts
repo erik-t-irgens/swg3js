@@ -20,18 +20,19 @@ import { createFxQuad, FX_CAMERA } from '../../core/fx/pass.ts';
 import { AIR_TUNE } from './airTune.ts';
 import { AIR_DRAW, AirDrawer, compileAirMaterial } from './airDraw.ts';
 import { atlasLayout, MAX_TILES, tileRects } from './airAtlas.ts';
-import { airFrameNumbersIn, dustDecayFrame, dustLawIn, dustShapeStep, fixedStepsIn, newAirFrameNumbers, newDustLaw, newSandPhase, newStormEase, sandJitter, sandPhaseIn, sandStrength, shapeFloor, stormEaseIn, tickClockIn, tintedColourIn, type AirFrameNumbers, type DustLaw, type FixedClock, type SandPhase, type ShapeTexel, type StormEase, type TickClock } from './airMath.ts';
-import { AirForces, DUST_BATCH, SPLAT_BATCH, type ForceCounts } from './airForces.ts';
+import { airFrameNumbersIn, dustDecayFrame, dustLawIn, dustShapeStep, fixedStepsIn, smokeStep, newAirFrameNumbers, newDustLaw, newSandPhase, newStormEase, sandJitter, sandPhaseIn, sandStrength, shapeFloor, stormEaseIn, tickClockIn, tintedColourIn, type AirFrameNumbers, type DustLaw, type FixedClock, type SandPhase, type ShapeTexel, type StormEase, type TickClock } from './airMath.ts';
+import { AirForces, DUST_BATCH, SMOKE_BATCH, SPLAT_BATCH, type ForceCounts } from './airForces.ts';
 import { pushEngines, type AirHull } from './airEngines.ts';
 import { AirRaster, MEDIUM_BYTE, type GroundSampler } from './airRaster.ts';
 import { AirObstacles, type SolidBoxSource } from './airObstacles.ts';
 import { newWindow, PLACE, placeWindowIn, type WindowPlace } from './fluidWindow.ts';
-import { ADVECT_FRAGMENT, AIR_VERTEX, DIV_FRAGMENT, DUST_FRAGMENT, FILL_DUST_FRAGMENT, FILL_FRAGMENT, GRAD_FRAGMENT, JACOBI_FRAGMENT, LIGHT_FRAGMENT, OFFSETS_FRAGMENT, SPLAT_FRAGMENT, VORT_FRAGMENT } from './airShaders.ts';
+import { ADVECT_FRAGMENT, AIR_VERTEX, BANDS_FRAGMENT, DIV_FRAGMENT, DUST_FRAGMENT, FILL_DUST_FRAGMENT, FILL_FRAGMENT, GRAD_FRAGMENT, JACOBI_FRAGMENT, LIGHT_FRAGMENT, OFFSETS_FRAGMENT, SMOKE_FRAGMENT, SPLAT_FRAGMENT, VORT_FRAGMENT } from './airShaders.ts';
 import { AirDents, DENT_KIND, placeDentSquareIn, type DentCounts } from './airDents.ts';
 import { copyAirGround, type AirGroundUniforms } from './airGround.ts';
 import { fillLayerResponse } from './groundResponse.ts';
 import { lightDepthAt, lightMarchFor, lightMarchIn, type LightMarchAsk, type LightSample } from './airLight.ts';
 import { newSandPicture, SAND_ROWS_A_FRAME, SAND_SIZE, sandPictureRows, type SandPicture } from './airSand.ts';
+import { KEEP_TABLE, NOISE_LAYERS_A_FRAME, NOISE_SIZE as NOISE3_SIZE, keepTable, newNoiseVolume, newWispPhase, noiseLayers, wispPhaseIn, type NoiseVolume, type WispPhase } from './airNoise.ts';
 import { srgbDecode, tintGamma } from '../groundMath.ts';
 import { WEATHER_UNIFORMS } from '../wetness.ts';
 import { PRINT_TUNE } from '../footprints.ts';
@@ -93,8 +94,53 @@ export interface AirSource {
   readonly dustLive: boolean;
   /** Written by the volume pass each frame it draws (the storm sheets' thinning reads it a frame later). */
   volumeDrew: boolean;
+  /** Written by the volume pass each frame it draws: its amount over the picture (the third wave's puffs rule reads it). */
+  volumeAmount?: number;
   /** One of the fields by name, as it stands now, for the debug view (`__debug.air({ view })`); null for none. */
   debugTexture(name: string): THREE.Texture | null;
+  /**
+   * The third wave's, every one by reference. Smoke and fog: a smoke a slab and the fog (RGBA32F), and the smoke's colour
+   * premultiplied by its sum; whether the field carried them this frame (`smokeLive`, the volume reads none it did not);
+   * the dust's tiles (one, or three with a field a layer) and half a texel of one in its own uv.
+   */
+  readonly smokeField: { value: THREE.Texture | null };
+  readonly smokeTint: { value: THREE.Texture | null };
+  readonly smokeLive: boolean;
+  readonly dustTiles: { value: THREE.Vector2 };
+  /** The velocity atlas as it stands, and how each slab is read out of it (`slabVelAt`'s uniforms), for the wisps. */
+  readonly velocity: { value: THREE.Texture | null };
+  readonly slabTiles: { value: THREE.Vector4[] };
+  readonly slabScale: { value: THREE.Vector4 };
+  readonly slabShare: { value: THREE.Vector4 };
+  readonly atlasHalf: { value: THREE.Vector2 };
+  /** The wind, m/s in world XZ (a velocity read outside the window is it times the slab's share). */
+  readonly wind: { value: THREE.Vector2 };
+  /** Slab 0's and 1's tops (the slab a height stands in), and the slabs' middles with the band's top (`smokeAt`). */
+  readonly slabTop: { value: THREE.Vector2 };
+  readonly slabMid: { value: THREE.Vector4 };
+  /**
+   * The fog: x the hour's top over the ground, metres; y whether the fog is carried (1) or not; z the top's noise scale
+   * (noise cells a metre, read from the gust noise, `noise2`); w the hour's level. `fogDrift` is the top noise's drift
+   * along the wind, noise cells, kept within the noise's repeat.
+   */
+  readonly fog: { value: THREE.Vector4 };
+  readonly fogDrift: { value: THREE.Vector2 };
+  readonly noise2: { value: THREE.Texture | null };
+  /**
+   * The wisps: the noise volume (null until made whole), the bands (Medium's road; null otherwise), the mode in force (0
+   * off, 1 bands, 2 noise, 3 noise ×2: which march material the volume draws with), the flow's numbers (`uWispA` scale,
+   * stretch, period, the second octave's share; `uWispB` the two phases and the cross-fade, the age term's seconds; `uWispC`
+   * erode, erodeFull, keepColumn, keepFloor), and the expected-keep table.
+   */
+  readonly noise3: { value: THREE.Texture | null };
+  readonly bands: { value: THREE.Texture | null };
+  readonly wispMode: number;
+  readonly wispA: { value: THREE.Vector4 };
+  readonly wispB: { value: THREE.Vector4 };
+  readonly wispC: { value: THREE.Vector4 };
+  readonly keepTable: { value: Float32Array };
+  /** What the march shows in place of the in-scatter for the third wave's views: 0 none, 1 smoke, 2 fog, 3 the wisps' keep. */
+  readonly airView: number;
 }
 
 /**
@@ -103,7 +149,7 @@ export interface AirSource {
  * rule over a twentieth of a metre a second), the dents, and at each point the largest offset and the deepest dent.
  */
 export interface GroundMeasure {
-  offsets: { peak: number; moved: number; peakAt: [number, number] | null; blowing: number } | null;
+  offsets: { peak: number; moved: number; peakAt: [number, number] | null; blowing: number; carried: number } | null;
   dents: { peak: number; total: number; pressed: number; peakAt: [number, number] | null } | null;
   ground: { x: number; z: number; offset: number | null; dent: number | null }[];
 }
@@ -125,6 +171,32 @@ export interface MeasurePoint {
   tau: number[] | null;
   shed: number;
   medium: string;
+}
+
+/**
+ * Smoke and fog read back (the third wave): each slab's smoke summed over the window and its peak, the fog's sum, peak and
+ * the share of the window it stands past a tenth over, and where the smoke and the fog peak.
+ */
+export interface SmokeMeasure {
+  slabs: [number, number, number];
+  smokePeak: number;
+  smokeAt: [number, number] | null;
+  fogTotal: number;
+  fogPeak: number;
+  fogAt: [number, number] | null;
+  fogged: number;
+  /** The fog's own middle (the fog-weighted mean place), null with none. */
+  fogMiddle: [number, number] | null;
+  /**
+   * The fog over the window's lowest and highest quarter of known ground (the raster's own cells, each the mean of the fog
+   * texels in it): pooling shows as `hollow` over `rise`.
+   */
+  hollow: number | null;
+  rise: number | null;
+  /** The fog on a coarse 16 by 16 grid over the window, row by row (+Z rows, +X columns), for comparing two reads. */
+  fogGrid: number[];
+  /** The fog at each asked point (the most within the radius), and the smoke's three slabs there. */
+  at: { x: number; z: number; fog: number | null; smoke: [number, number, number] | null }[];
 }
 
 /** The dust's shape read back (from wave 2b): the mass-weighted mean height and spread over the window, the highest mean and where, and the ages. */
@@ -160,10 +232,23 @@ export interface AirFrameInput {
   ground: boolean;
   /** Why the air does nothing here (in space, in the world of copies, indoors), or null. */
   where: string | null;
+  /**
+   * The fog the hour brings (the third wave, `airFog.ts`): the level `F(t)` the inflow's bank and the ground's emission go
+   * by (nought on a day the world's draw says is clear, or a world with no row), how far the morning's fog has burnt off
+   * (0 to 1), and the top it fills to over the ground, metres. Worked out by the world from the shared day.
+   */
+  fogLevel: number;
+  fogBurn: number;
+  fogTop: number;
 }
 
 export function newAirFrameInput(): AirFrameInput {
-  return { dt: 0, simulate: true, camX: 0, camY: 0, camZ: 0, windHeading: 0, windSpeed: 0, storm: 0, sunX: 0, sunY: 1, sunZ: 0, time: 0, reading: false, ground: false, where: null };
+  // The fog's numbers take a fraction first so each is a double from its first write, then nought: no fog until told.
+  const r: AirFrameInput = { dt: 0, simulate: true, camX: 0, camY: 0, camZ: 0, windHeading: 0, windSpeed: 0, storm: 0, sunX: 0, sunY: 1, sunZ: 0, time: 0, reading: false, ground: false, where: null, fogLevel: 0.5, fogBurn: 0.5, fogTop: 0.5 };
+  r.fogLevel = 0;
+  r.fogBurn = 0;
+  r.fogTop = 0;
+  return r;
 }
 
 /** What the world gives the field to read: the ground, the solid boxes and the hulls. */
@@ -182,6 +267,7 @@ export interface AirWorld {
 type Pair = [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget];
 
 const NOISE_SIZE = 128;
+const DEG = Math.PI / 180;
 
 /** A tileable value-noise texture, one lattice cell a texel, read with linear filtering and repeat: the gusts' noise. */
 function noiseTexture(): THREE.DataTexture {
@@ -298,8 +384,38 @@ export class AirField implements AirSource {
   readonly hullInverse = { value: new THREE.Matrix4() };
   readonly hullBox = { value: new THREE.Vector4() };
   volumeDrew = false;
+  /** Written by the volume pass each frame it draws: its amount over the picture (the gas cloud's puffs read it). */
+  volumeAmount = 0.5;
+  /** Whether the volume drew last frame, kept at the top of each update before the world clears `volumeDrew`. */
+  private drewLastFrame = false;
   /** Set by `update` once the dust pass has drawn this frame, cleared at the top of every update (`AirSource.dustLive`). */
   dustLive = false;
+  // The third wave's (`AirSource`): smoke and fog, the slabs as the field's own passes read them, the fog's top, the wisps.
+  readonly smokeField = { value: null as THREE.Texture | null };
+  readonly smokeTint = { value: null as THREE.Texture | null };
+  smokeLive = false;
+  readonly dustTiles = { value: new THREE.Vector2(1, 0.5 / 512) };
+  readonly velocity = { value: null as THREE.Texture | null };
+  readonly slabTiles = { value: [new THREE.Vector4(0, 0, 1, 1), new THREE.Vector4(0, 0, 1, 1), new THREE.Vector4(0, 0, 1, 1)] };
+  readonly slabScale = { value: new THREE.Vector4(1, 1, 1, 1) };
+  readonly slabShare = { value: new THREE.Vector4(AIR_TUNE.slabs.windShare, AIR_TUNE.slabs.windShare1, AIR_TUNE.slabs.windShare2, 0) };
+  readonly atlasHalf = { value: new THREE.Vector2(0.5 / 128, 0.5 / 128) };
+  readonly wind = { value: new THREE.Vector2() };
+  readonly slabTop = { value: new THREE.Vector2(AIR_TUNE.slabs.ceiling, AIR_TUNE.slabs.ceiling1) };
+  readonly slabMid = { value: new THREE.Vector4(AIR_TUNE.slabs.centre, AIR_TUNE.slabs.centre1, AIR_TUNE.slabs.centre2, AIR_TUNE.slabs.ceiling2 + 2) };
+  readonly fog = { value: new THREE.Vector4() };
+  readonly fogDrift = { value: new THREE.Vector2() };
+  readonly noise2 = { value: null as THREE.Texture | null };
+  readonly noise3 = { value: null as THREE.Texture | null };
+  readonly bands = { value: null as THREE.Texture | null };
+  /** The wisps' mode in force (the march material the volume draws with): the setting's, or off while the noise is not made. */
+  wispMode = 0;
+  readonly wispA = { value: new THREE.Vector4(AIR_TUNE.wisps.scale, AIR_TUNE.wisps.stretch, AIR_TUNE.wisps.period, AIR_TUNE.wisps.octave) };
+  readonly wispB = { value: new THREE.Vector4(0.5, 0.5, 0.5, AIR_TUNE.wisps.ageWisp) };
+  readonly wispC = { value: new THREE.Vector4(AIR_TUNE.wisps.erode, AIR_TUNE.wisps.erodeFull, AIR_TUNE.wisps.keepColumn, AIR_TUNE.wisps.keepFloor) };
+  readonly keepTable = { value: new Float32Array(KEEP_TABLE).fill(1) };
+  /** The third wave's views in the march: 0 none, 1 smoke, 2 fog, 3 the wisps' keep (`air({ view })`). */
+  airView = 0;
 
   /** The force API (§2.10): every caller writes here. */
   readonly forces = new AirForces();
@@ -342,7 +458,46 @@ export class AirField implements AirSource {
   /** The response raster's and the colour raster's textures as kept uniform objects, which the dents' fade reads. */
   private readonly responseU = { value: null as THREE.Texture | null };
   private readonly colourU = { value: null as THREE.Texture | null };
-  private readonly mats: Record<'splat' | 'vort' | 'div' | 'jacobi' | 'grad' | 'advect' | 'dust' | 'light' | 'fill' | 'fillDust' | 'offsets', THREE.ShaderMaterial>;
+  private readonly mats: Record<'splat' | 'vort' | 'div' | 'jacobi' | 'grad' | 'advect' | 'dust' | 'light' | 'fill' | 'fillDust' | 'offsets' | 'smoke' | 'bands', THREE.ShaderMaterial>;
+  /**
+   * Smoke and fog (the third wave): an RGBA32F pair of two textures (a smoke a slab and the fog; the smoke's colour
+   * premultiplied by its sum), held at a texel across while both are off; the wisps' bands (RGBA8 at the dust's size, only
+   * in the bands mode, a texel across otherwise); the noise volume, made once a session with the master on, a slice a frame
+   * in play, uploaded only once whole.
+   */
+  private smokePair: Pair | null = null;
+  private bandsTarget: THREE.WebGLRenderTarget | null = null;
+  private noiseVol: NoiseVolume | null = null;
+  private noiseTex: THREE.Data3DTexture | null = null;
+  private readonly wispPhase: WispPhase = newWispPhase();
+  /** The erosion's full point the keep table was last worked out for (the table follows `wisps.erodeFull`). */
+  private keepFor = -1;
+  /** What the smoke still owes of the window's moves, in window uv; when smoke was last laid (`hasAir`). */
+  private readonly smokeShift = new THREE.Vector2();
+  private lastSmoke = -Infinity;
+  /** When the hour last brought fog (`hasAir` holds the march on for `fog.linger` after it, while what came thins away). */
+  private lastFog = -Infinity;
+  /** The fog patches' drift along the wind, noise cells at `fog.patchScale`, kept within the noise's own repeat. */
+  private fogDriftX = 0.5;
+  private fogDriftZ = 0.5;
+  /** The smoke and fog pass's numbers, in vectors (no number written into a uniform object). */
+  private readonly smokeP = new THREE.Vector4(1 / 60, 0.5, 0.5, 0.5);
+  private readonly fogP = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
+  private readonly fogQ = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
+  private readonly fogR = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
+  /** The densest the drainage piles fog to (`fog.poolMost`). */
+  private readonly fogS = new THREE.Vector4(AIR_TUNE.fog.poolMost, 0, 0, 0);
+  private readonly slabFloor = new THREE.Vector4(0, AIR_TUNE.slabs.floor1, AIR_TUNE.slabs.floor2, 0);
+  /** The dust pass's third-wave numbers: its tiles and half texel, the slabs' tops; the streamers'. */
+  private readonly dustR = new THREE.Vector4(1, 0.5 / 512, AIR_TUNE.slabs.ceiling, AIR_TUNE.slabs.ceiling1);
+  private readonly streamP = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
+  private readonly streamQ = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
+  /** The light pass's smoke and fog: their extinctions times the self-shadow, the fog's top, whether either is in the air. */
+  private readonly lightR = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
+  /** What the sand in the air keeps over a frame, and its lift's soft step. */
+  private readonly sandC = new THREE.Vector4(0.5, 20, 0, 0);
+  /** The tile count every solver stage reads (the layers of air solved). */
+  private readonly tileCount: { value: number };
   /** The dust's laws worked out once a frame (`dustLawIn`), and the vectors the pass reads them through. */
   private readonly law: DustLaw = newDustLaw();
   private readonly dustLaw = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
@@ -366,10 +521,12 @@ export class AirField implements AirSource {
   private liftTopAt = -1e9;
   private readonly quad: THREE.Mesh;
   /** Each field's size now, so a dial that moves one is a resize and nothing else. */
-  private sized = { cells: 0, dust: 0, light: 0, sand: 0 };
+  private sized = { cells: 0, dust: 0, light: 0, sand: 0, layers: 0, tiles: 0, smoke: 0, bands: 0 };
   private needsFill = true;
   /** The offsets alone were made again at a new size and start at rest at the next frame that steps (`fillOffsets`). */
   private sandFill = false;
+  /** Smoke and fog alone were made again at a new size and start empty at the next frame that steps. */
+  private smokeFill = false;
   private readonly solverShift = new THREE.Vector2();
   private readonly dustShift = new THREE.Vector2();
   /** What the offsets still owe of the window's moves, in window uv (carried by their own pass, as the dust's are). */
@@ -423,7 +580,7 @@ export class AirField implements AirSource {
   private readonly nums: AirFrameNumbers = newAirFrameNumbers();
   /** Where the window is asked to stand this frame. */
   private readonly place: WindowPlace = { camX: 0.5, camZ: 0.5, size: 192, cells: 128, jump: 0.5 };
-  private readonly wind = { x: 0.5, z: 0.5 };
+  private readonly windXZ = { x: 0.5, z: 0.5 };
   /**
    * The numbers the passes take each step or frame, in vectors the frame writes a component of: a number written into a
    * three uniform object's `value` is a number made (that field holds textures too, so it is never a plain double),
@@ -458,12 +615,13 @@ export class AirField implements AirSource {
   private input: AirFrameInput = newAirFrameInput();
   /** The numbers the console reads (`report`). */
   private readonly stats = { frames: 0, steps: 0, draws: 0, cpuMs: 0, resets: 0, lastScrollX: 0, lastScrollZ: 0, stepped: false, motes: 0, grainsFlying: 0, grainsLying: 0, sheets: 1 };
-  private readonly counts: ForceCounts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0 };
+  private readonly counts: ForceCounts = { engines: 0, oneShots: 0, dust: 0, droppedSplats: 0, droppedDust: 0, offWindow: 0, notFinite: 0, blasts: 0, forces: 0, fronts: 0, droppedFronts: 0, smoke: 0, droppedSmoke: 0 };
 
   constructor(renderer: THREE.WebGLRenderer, tune: VolTune, world: AirWorld) {
     this.renderer = renderer;
     this.tune = tune;
     this.world = world;
+    this.volumeAmount = 0;
     this.drawer = new AirDrawer(renderer);
     this.refused = AirField.refusal(renderer);
     // Red the walls the solver and the dust stop at; green the walls and a compound's rooms, which the volume keeps its
@@ -475,17 +633,25 @@ export class AirField implements AirSource {
     this.noise = noiseTexture();
     this.forces.window = this.win;
     this.forces.raster = this.raster;
+    this.noise2.value = this.noise;
+    this.tileCount = { value: 1 };
     const common = {
       uWindow: this.window,
       uTiles: { value: this.tiles },
       uTileSlab: { value: this.tileSlab },
-      uTileCount: { value: 1 },
+      uTileCount: this.tileCount,
       uAtlasSize: { value: new THREE.Vector2(1, 1) },
       uObstacles: this.obstacles,
-      uWind: { value: new THREE.Vector2() },
+      uWind: this.wind,
       uObstacleOver: this.obstacleOver,
     };
     const gust = { uNoise: { value: this.noise }, uNoiseTexel: { value: 1 / NOISE_SIZE }, uGustTime: { value: this.gustTime } };
+    // How the field's own passes read each slab's air out of the atlas (`slabVelAt`), shared by reference (the third wave).
+    const slabVel = { uSlabTiles: this.slabTiles, uSlabScale: this.slabScale, uSlabShare: this.slabShare, uAtlasHalf: this.atlasHalf };
+    const groundTint = {
+      uGroundTint: world.groundTint?.uGroundTint ?? { value: new THREE.Vector4(0, 1.6, 0, 0) },
+      uGroundTintRef: world.groundTint?.uGroundTintRef ?? { value: new THREE.Vector4(1, 1, 1, 1) },
+    };
     this.mats = {
       splat: material('air.splat', SPLAT_FRAGMENT, { ...common, uVel: { value: null }, uShift: { value: new THREE.Vector2() }, uSplatA: { value: this.forces.splatA }, uSplatB: { value: this.forces.splatB }, uSplatCount: { value: 0 }, uReachScale: this.reachScale }),
       vort: material('air.vort', VORT_FRAGMENT, { ...common, uVel: { value: null }, uVortP: { value: this.vortP } }),
@@ -494,7 +660,8 @@ export class AirField implements AirSource {
       grad: material('air.grad', GRAD_FRAGMENT, { ...common, uPrs: { value: null }, uVel: { value: null } }),
       advect: material('air.advect', ADVECT_FRAGMENT, { ...common, ...gust, uVel: { value: null }, uAdvectP: { value: this.advectP } }),
       // The dust pass (GLSL 3 from wave 2b: two outputs, the colour and its shape), holding the session ground
-      // material's own tint uniforms by reference so its colour is tinted in the drawn ground's own mode.
+      // material's own tint uniforms by reference so its colour is tinted in the drawn ground's own mode; from the third
+      // wave it reads each slab's air (`slabVel`), a field a layer side by side when the dust has one.
       dust: material(
         'air.dust',
         DUST_FRAGMENT,
@@ -502,6 +669,8 @@ export class AirField implements AirSource {
           uWindow: this.window,
           uWind: common.uWind,
           ...gust,
+          ...slabVel,
+          ...groundTint,
           uDust: { value: null },
           uShape: { value: null },
           uVel: { value: null },
@@ -510,8 +679,6 @@ export class AirField implements AirSource {
           uColour: { value: null },
           uTint: { value: null },
           uGround: this.height,
-          uGroundTint: world.groundTint?.uGroundTint ?? { value: new THREE.Vector4(0, 1.6, 0, 0) },
-          uGroundTintRef: world.groundTint?.uGroundTintRef ?? { value: new THREE.Vector4(1, 1, 1, 1) },
           uVelShift: { value: new THREE.Vector2() },
           uDustShift: { value: new THREE.Vector2() },
           uGroundTexel: { value: new THREE.Vector2(1, 1) },
@@ -520,12 +687,14 @@ export class AirField implements AirSource {
           uDustQ: { value: this.dustQ },
           uDustLaw: { value: this.dustLaw },
           uDustLawB: { value: this.dustLawB },
+          uDustR: { value: this.dustR },
+          uStreamP: { value: this.streamP },
+          uStreamQ: { value: this.streamQ },
           uStormColour: this.stormColour,
           uSlopeGate: { value: new THREE.Vector2(AIR_TUNE.dust.slopeFrom, AIR_TUNE.dust.slopeTo) },
           uDustBatch: { value: this.forces.dustBatch },
           uDustShapeBatch: { value: this.forces.dustShapeBatch },
           uDustCount: { value: 0 },
-          uWindShare: this.windShare,
         },
         true,
       ),
@@ -534,28 +703,91 @@ export class AirField implements AirSource {
         uDust: { value: null },
         uShape: { value: null },
         uGround: this.height,
+        uSmoke: { value: null },
         uSunDir: { value: new THREE.Vector2(0, 1) },
         uSteps: { value: 26 },
         uLightP: { value: this.lightP },
         uLightQ: { value: this.lightQ },
         uLightH: this.lightHeights,
+        uLightR: { value: this.lightR },
+        uDustTiles: this.dustTiles,
+        uSlabMid: this.slabMid,
       }),
       fill: material('air.fill', FILL_FRAGMENT, { uValue: { value: new THREE.Vector4() } }),
       fillDust: material('air.fillDust', FILL_DUST_FRAGMENT, { uValue: { value: new THREE.Vector4() }, uShapeValue: { value: new THREE.Vector4() } }, true),
-      offsets: material('air.offsets', OFFSETS_FRAGMENT, {
+      // The blowing sand's two phases and (the third wave) the sand carried in the air: two outputs, GLSL 3.
+      offsets: material(
+        'air.offsets',
+        OFFSETS_FRAGMENT,
+        {
+          uWindow: this.window,
+          uWind: common.uWind,
+          ...slabVel,
+          ...groundTint,
+          uOffsets: { value: null },
+          uCarry: { value: null },
+          uVel: { value: null },
+          uColour: this.colourU,
+          uResponse: this.responseU,
+          uTint: { value: null },
+          uObstacles: this.obstacles,
+          uObstacleOver: common.uObstacleOver,
+          uVelShift: { value: new THREE.Vector2() },
+          uSandShift: { value: new THREE.Vector2() },
+          uSandP: { value: this.sandP },
+          uSandQ: { value: this.sandQ },
+          uSandR: { value: this.sandR },
+          uSandC: { value: this.sandC },
+        },
+        true,
+      ),
+      // Smoke and fog (the third wave): one pass a frame, two outputs.
+      smoke: material(
+        'air.smoke',
+        SMOKE_FRAGMENT,
+        {
+          uWindow: this.window,
+          uWind: common.uWind,
+          ...gust,
+          ...slabVel,
+          uSmoke: { value: null },
+          uSmokeTint: { value: null },
+          uVel: { value: null },
+          uObstacles: this.obstacles,
+          uGround: this.height,
+          uColour: this.colourU,
+          uVelShift: { value: new THREE.Vector2() },
+          uSmokeShift: { value: new THREE.Vector2() },
+          uGroundTexel: { value: new THREE.Vector2(1, 1) },
+          uObstacleOver: common.uObstacleOver,
+          uSmokeP: { value: this.smokeP },
+          uFogP: { value: this.fogP },
+          uFogQ: { value: this.fogQ },
+          uFogR: { value: this.fogR },
+          uFogS: { value: this.fogS },
+          uSlabFloor: { value: this.slabFloor },
+          uSmokeBatch: { value: this.forces.smokeBatch },
+          uSmokeShare: { value: this.forces.smokeShare },
+          uSmokeColour: { value: this.forces.smokeColour },
+          uSmokeCount: { value: 0 },
+        },
+        true,
+      ),
+      // The wisps' bands (the third wave, the bands mode alone): the flow noise at the light's four heights.
+      bands: material('air.bands', BANDS_FRAGMENT, {
         uWindow: this.window,
         uWind: common.uWind,
-        uWindShare: this.windShare,
-        uOffsets: { value: null },
+        ...slabVel,
         uVel: { value: null },
-        uColour: this.colourU,
-        uObstacles: this.obstacles,
-        uObstacleOver: common.uObstacleOver,
+        uDust: { value: null },
+        uShape: { value: null },
+        uNoise3: this.noise3,
         uVelShift: { value: new THREE.Vector2() },
-        uSandShift: { value: new THREE.Vector2() },
-        uSandP: { value: this.sandP },
-        uSandQ: { value: this.sandQ },
-        uSandR: { value: this.sandR },
+        uLightH: this.lightHeights,
+        uWispA: this.wispA,
+        uWispB: this.wispB,
+        uDustTiles: this.dustTiles,
+        uSlabTop: this.slabTop,
       }),
     };
     this.quad = createFxQuad(this.mats.fill);
@@ -570,6 +802,7 @@ export class AirField implements AirSource {
     const S = AIR_TUNE.sand;
     this.ground = {
       uAirOffsets: { value: null },
+      uAirCarry: { value: null },
       uAirDents: { value: null },
       uAirLayers: { value: null },
       uAirLight: this.light,
@@ -648,7 +881,7 @@ export class AirField implements AirSource {
 
   /** Every material of the field, with what it draws into: the warm-up's list (R6) and the scanner's. */
   materials(): THREE.ShaderMaterial[] {
-    const list = [this.mats.splat, this.mats.vort, this.mats.div, this.mats.jacobi, this.mats.grad, this.mats.advect, this.mats.dust, this.mats.light, this.mats.fill, this.mats.fillDust, this.obs.material, this.mats.offsets];
+    const list = [this.mats.splat, this.mats.vort, this.mats.div, this.mats.jacobi, this.mats.grad, this.mats.advect, this.mats.dust, this.mats.light, this.mats.fill, this.mats.fillDust, this.obs.material, this.mats.offsets, this.mats.smoke, this.mats.bands];
     if (this.dents) list.push(this.dents.stampMaterial, this.dents.fadeMaterial);
     return list;
   }
@@ -666,6 +899,10 @@ export class AirField implements AirSource {
     pairs.push([m.splat, quad(m.splat), this.vel![0]], [m.vort, quad(m.vort), this.vel![0]], [m.div, quad(m.div), this.div!], [m.jacobi, quad(m.jacobi), this.prs![0]], [m.grad, quad(m.grad), this.vel![0]], [m.advect, quad(m.advect), this.vel![0]]);
     pairs.push([m.dust, quad(m.dust), this.dustPair![0]], [m.light, quad(m.light), this.lightTarget!], [m.fill, quad(m.fill), this.vel![0]], [m.fillDust, quad(m.fillDust), this.dustPair![0]], [this.obs.material, this.obs.mesh, this.obstacleMap]);
     pairs.push([m.offsets, quad(m.offsets), this.offsetsPair![0]]);
+    // The third wave's: smoke and fog (their pair at its size, or a texel across while both are off: a program's key hangs
+    // on no target's size), and the wisps' bands (likewise a texel across outside the bands mode), so every program exists
+    // and the switches build nothing.
+    pairs.push([m.smoke, quad(m.smoke), this.smokePair![0]], [m.bands, quad(m.bands), this.bandsTarget!]);
     const d = this.dents;
     if (d) {
       // The dents' target is made at its own size, or a texel across while the prints are off (a program's key does not
@@ -722,8 +959,10 @@ export class AirField implements AirSource {
    */
   async warm(): Promise<number> {
     if (this.refused) return 0;
-    // The blowing sand's picture, made outright behind the screen (about 11 ms) and uploaded with it.
+    // The blowing sand's picture, made outright behind the screen (about 11 ms) and uploaded with it; and the wisps'
+    // noise (the third wave's, about a tenth of a second), likewise.
     while (!this.sandSlice(SAND_SIZE));
+    while (!this.noiseSlice(NOISE3_SIZE));
     const r = this.renderer;
     const before = r.info.programs?.length ?? 0;
     const pairs = this.warmPairs();
@@ -771,12 +1010,61 @@ export class AirField implements AirSource {
     return this.sandTex !== null;
   }
 
+  /**
+   * A slice of the wisps' noise (`layers` layers of its 64, `NOISE_LAYERS_A_FRAME` in the in-play warm, about 2 ms each;
+   * the third wave's): when the last is made the volume becomes a repeating, mipmapped 3D texture the march and the bands
+   * read, and its expected-keep table is worked out from what it counted -- never uploaded part made, and made once a
+   * session. Answers whether it is whole.
+   */
+  noiseSlice(layers = NOISE_LAYERS_A_FRAME): boolean {
+    if (this.noiseTex) return true;
+    const v = this.noiseVol ?? (this.noiseVol = newNoiseVolume());
+    if (!noiseLayers(v, layers)) return false;
+    const t = new THREE.Data3DTexture(v.bytes, NOISE3_SIZE, NOISE3_SIZE, NOISE3_SIZE);
+    t.format = THREE.RedFormat;
+    t.type = THREE.UnsignedByteType;
+    t.wrapS = THREE.RepeatWrapping;
+    t.wrapT = THREE.RepeatWrapping;
+    t.wrapR = THREE.RepeatWrapping;
+    t.magFilter = THREE.LinearFilter;
+    t.minFilter = THREE.LinearMipmapLinearFilter;
+    t.generateMipmaps = true;
+    t.unpackAlignment = 1;
+    t.needsUpdate = true;
+    t.name = 'air.noise3';
+    this.noiseTex = t;
+    this.noise3.value = t;
+    this.keepFor = -1;
+    this.syncKeepTable();
+    return true;
+  }
+
+  /** Whether the wisps' noise is whole (the in-play warm's swap waits for it). */
+  get noiseWhole(): boolean {
+    return this.noiseTex !== null;
+  }
+
+  /** The expected-keep table again from the noise's own histogram, when `wisps.erodeFull` has moved (never a texel read again). */
+  private syncKeepTable(): void {
+    const v = this.noiseVol;
+    const ef = AIR_TUNE.wisps.erodeFull;
+    if (!v || !this.noiseTex || ef === this.keepFor) return;
+    this.keepFor = ef;
+    keepTable(v.histogram, ef, this.keepTable.value);
+  }
+
   /** Make or resize the targets for the tune's detail (class T): materials are never touched. Answers whether anything was resized. */
   private ensureTargets(): boolean {
     const t = this.tune;
     const cells = t.airDetail;
     const dust = cells * t.dustDetail;
     const light = cells * t.lightDetail;
+    // The third wave's: the layers of air (tiles of the atlas), the dust's tiles (a field a layer, Ultra's), smoke and
+    // fog (a texel across while both are off), the bands (a texel across outside the bands mode).
+    const layers = t.airLayers > 1 ? (t.airLayers < 3 ? t.airLayers : 3) : 1;
+    const tiles = t.dustLayers ? 3 : 1;
+    const smoke = t.smoke || t.fog ? cells * t.smokeDetail : 1;
+    const bands = t.wisps === 1 ? dust : 1;
     // The carried offsets and the dents hold their storage only while their own switch is on: off, each is a texel
     // across (its programs kept, since a program's key hangs on no target's size), so what the page's memory estimate
     // leaves out for a switch that is off is really given back -- the dents at 4096 are 64 MB.
@@ -786,35 +1074,52 @@ export class AirField implements AirSource {
     // dents, cleared at its next placing, and nothing of the air starts again for it.
     const d = this.dents;
     if (d !== null) d.ensure(t.prints ? t.printDetail : 1);
-    if (s.cells === cells && s.dust === dust && s.light === light && this.vel) {
+    if (s.cells === cells && s.dust === dust && s.light === light && s.layers === layers && s.tiles === tiles && this.vel) {
       // The offsets alone resized (the sand switched, or its detail moved): they start again at rest at the next frame
-      // that steps, and nothing else of the air does.
+      // that steps, and nothing else of the air does. Likewise smoke and fog, and the bands.
       if (s.sand !== sand) {
         for (const tg of this.offsetsPair!) tg.setSize(sand, sand);
         s.sand = sand;
         this.sandShift.set(0, 0);
         this.sandFill = true;
       }
+      if (s.smoke !== smoke) {
+        for (const tg of this.smokePair!) tg.setSize(smoke, smoke);
+        s.smoke = smoke;
+        this.smokeShift.set(0, 0);
+        this.smokeFill = true;
+      }
+      if (s.bands !== bands) {
+        this.bandsTarget!.setSize(bands, bands);
+        s.bands = bands;
+      }
       return false;
     }
-    const layout = atlasLayout(cells, 1, 0);
+    const layout = atlasLayout(cells, layers, 0);
     if (!this.vel) {
       this.vel = [fieldTarget(layout.width, layout.height, THREE.RGFormat, THREE.HalfFloatType, 'air.vel.a'), fieldTarget(layout.width, layout.height, THREE.RGFormat, THREE.HalfFloatType, 'air.vel.b')];
       this.prs = [fieldTarget(layout.width, layout.height, THREE.RedFormat, THREE.HalfFloatType, 'air.prs.a'), fieldTarget(layout.width, layout.height, THREE.RedFormat, THREE.HalfFloatType, 'air.prs.b')];
       this.div = fieldTarget(layout.width, layout.height, THREE.RedFormat, THREE.HalfFloatType, 'air.div');
-      // The dust and the shape it carries, one draw writing both (wave 2b's two-texture pair), float32 each.
-      this.dustPair = [fieldTarget(dust, dust, THREE.RGBAFormat, THREE.FloatType, 'air.dust.a', 2), fieldTarget(dust, dust, THREE.RGBAFormat, THREE.FloatType, 'air.dust.b', 2)];
+      // The dust and the shape it carries, one draw writing both (wave 2b's two-texture pair), float32 each; a tile a
+      // layer side by side with a field a layer (the third wave's).
+      this.dustPair = [fieldTarget(dust * tiles, dust, THREE.RGBAFormat, THREE.FloatType, 'air.dust.a', 2), fieldTarget(dust * tiles, dust, THREE.RGBAFormat, THREE.FloatType, 'air.dust.b', 2)];
       // An optical depth toward the sun at each of four heights, half floats (filtered linearly on every browser that
       // runs the field: the dust's own float targets need more than this does).
       this.lightTarget = fieldTarget(light, light, THREE.RGBAFormat, THREE.HalfFloatType, 'air.light');
-      // Offsets round nought heal both ways under a half float's truncation, and still air copies a texel exactly.
-      this.offsetsPair = [fieldTarget(sand, sand, THREE.RGBAFormat, THREE.FloatType, 'air.offsets.a'), fieldTarget(sand, sand, THREE.RGBAFormat, THREE.FloatType, 'air.offsets.b')];
+      // Offsets round nought heal both ways under a half float's truncation, and still air copies a texel exactly; the
+      // sand carried in the air beside them (the third wave's second texture), float32 as its fade is slow.
+      this.offsetsPair = [fieldTarget(sand, sand, THREE.RGBAFormat, THREE.FloatType, 'air.offsets.a', 2), fieldTarget(sand, sand, THREE.RGBAFormat, THREE.FloatType, 'air.offsets.b', 2)];
+      // Smoke and fog: 0.05 and 0.10 a second decays vanish in a half float's truncation, so float32 (the design's §2.3).
+      this.smokePair = [fieldTarget(smoke, smoke, THREE.RGBAFormat, THREE.FloatType, 'air.smoke.a', 2), fieldTarget(smoke, smoke, THREE.RGBAFormat, THREE.FloatType, 'air.smoke.b', 2)];
+      this.bandsTarget = fieldTarget(bands, bands, THREE.RGBAFormat, THREE.UnsignedByteType, 'air.bands');
     } else {
       for (const p of [this.vel, this.prs!]) for (const tg of p) tg.setSize(layout.width, layout.height);
       this.div!.setSize(layout.width, layout.height);
-      for (const tg of this.dustPair!) tg.setSize(dust, dust);
+      for (const tg of this.dustPair!) tg.setSize(dust * tiles, dust);
       this.lightTarget!.setSize(light, light);
       for (const tg of this.offsetsPair!) tg.setSize(sand, sand);
+      for (const tg of this.smokePair!) tg.setSize(smoke, smoke);
+      this.bandsTarget!.setSize(bands, bands);
     }
     this.obstacleMap.setSize(cells, cells);
     this.raster.resize(cells);
@@ -831,46 +1136,116 @@ export class AirField implements AirSource {
     this.mats.dust.uniforms.uResponse.value = this.responseTex;
     this.mats.dust.uniforms.uColour.value = this.colourTex;
     this.mats.dust.uniforms.uTint.value = this.tintTex;
+    this.mats.offsets.uniforms.uTint.value = this.tintTex;
     this.responseU.value = this.responseTex;
     this.colourU.value = this.colourTex;
     (this.mats.dust.uniforms.uGroundTexel.value as THREE.Vector2).set(1 / cells, 1 / cells);
+    (this.mats.smoke.uniforms.uGroundTexel.value as THREE.Vector2).set(1 / cells, 1 / cells);
     tileRects(layout, this.tiles);
     this.tileSlab.fill(0);
+    this.tileCount.value = layout.tiles.length;
+    this.atlasHalf.value.set(0.5 / layout.width, 0.5 / layout.height);
+    this.dustTiles.value.set(tiles, 0.5 / dust);
+    this.dustR.x = tiles;
+    this.dustR.y = 0.5 / dust;
     this.syncTune();
     for (const k of ['splat', 'vort', 'div', 'jacobi', 'grad', 'advect'] as const) (this.mats[k].uniforms.uAtlasSize.value as THREE.Vector2).set(layout.width, layout.height);
     s.cells = cells;
     s.dust = dust;
     s.light = light;
     s.sand = sand;
+    s.layers = layers;
+    s.tiles = tiles;
+    s.smoke = smoke;
+    s.bands = bands;
     this.dust.value = this.dustPair![0].textures[0];
     this.shape.value = this.dustPair![0].textures[1];
     this.light.value = this.lightTarget!.texture;
-    this.ground.uAirOffsets.value = this.offsetsPair![0].texture;
+    this.smokeField.value = this.smokePair![0].textures[0];
+    this.smokeTint.value = this.smokePair![0].textures[1];
+    this.bands.value = this.bandsTarget!.texture;
+    this.velocity.value = this.vel[0].texture;
+    this.ground.uAirOffsets.value = this.offsetsPair![0].textures[0];
+    this.ground.uAirCarry.value = this.offsetsPair![0].textures[1];
     this.needsFill = true;
     return true;
   }
 
   /**
-   * The tune's numbers the programs take outside the frame's own vectors, from `AIR_TUNE` as it stands: slab 0's floor,
-   * middle and share of the wind into the atlas's tile table (a typed array, written in place), and the reach, the
-   * solid's height and the share into their uniforms only when they moved (a double written into a uniform object is a
-   * number made). Called at every step and when the targets are made, so every number of the table moves live.
+   * The tune's numbers the programs take outside the frame's own vectors, from `AIR_TUNE` as it stands: each slab's floor,
+   * middle and share of the wind into the atlas's tile table (a typed array, written in place), how each slab is read out
+   * of it by the field's other passes (`slabVelAt`: the highest slab solved standing in for one not, its wind times the
+   * ratio of the shares), the slabs' tops and middles, and the reach, the solid's height and the share into their uniforms
+   * only when they moved (a double written into a uniform object is a number made). Called at every step and when the
+   * targets are made, so every number of the table moves live.
    */
   private syncTune(): void {
     const sl = AIR_TUNE.slabs;
     const ts = this.tileSlab;
+    const n = this.tileCount.value;
     ts[0] = sl.floor;
     ts[1] = sl.centre;
     ts[2] = sl.windShare;
+    if (n > 1) {
+      ts[4] = sl.floor1;
+      ts[5] = sl.centre1;
+      ts[6] = sl.windShare1;
+    }
+    if (n > 2) {
+      ts[8] = sl.floor2;
+      ts[9] = sl.centre2;
+      ts[10] = sl.windShare2;
+    }
+    const rects = this.tiles;
+    const st = this.slabTiles.value;
+    const sc = this.slabScale.value;
+    const sh = this.slabShare.value;
+    sh.x = sl.windShare;
+    sh.y = sl.windShare1;
+    sh.z = sl.windShare2;
+    for (let k = 0; k < 3; k++) {
+      const solved = k < n ? k : n - 1;
+      const o = solved * 4;
+      const r = st[k];
+      r.x = rects[o];
+      r.y = rects[o + 1];
+      r.z = rects[o + 2];
+      r.w = rects[o + 3];
+      const from = solved === 0 ? sl.windShare : solved === 1 ? sl.windShare1 : sl.windShare2;
+      const to = k === 0 ? sl.windShare : k === 1 ? sl.windShare1 : sl.windShare2;
+      const ratio = from > 1e-6 ? to / from : 1;
+      if (k === 0) sc.x = ratio;
+      else if (k === 1) sc.y = ratio;
+      else sc.z = ratio;
+    }
+    const top = this.slabTop.value;
+    top.x = sl.ceiling;
+    top.y = sl.ceiling1;
+    this.dustR.z = sl.ceiling;
+    this.dustR.w = sl.ceiling1;
+    const mid = this.slabMid.value;
+    mid.x = sl.centre;
+    mid.y = sl.centre1;
+    mid.z = sl.centre2;
+    mid.w = sl.ceiling2 + 2;
+    const fl = this.slabFloor;
+    fl.x = sl.floor;
+    fl.y = sl.floor1;
+    fl.z = sl.floor2;
     if (this.reachScale.value !== sl.reach) this.reachScale.value = sl.reach;
     if (this.windShare.value !== sl.windShare) this.windShare.value = sl.windShare;
     const over = AIR_TUNE.obstacles.over;
     if (this.obstacleOver.value !== over) this.obstacleOver.value = over;
+    this.syncKeepTable();
   }
 
-  /** Whether anything is airborne: a source lifted dust in the last `airborneFor` seconds, or the storm is up. */
+  /**
+   * Whether anything is airborne: a source lifted dust or smoke in the last `airborneFor` seconds, the storm is up, or
+   * the hour brings fog (the third wave's).
+   */
   hasAir(): boolean {
-    return this.input.storm > 0 || this.worldTime - this.lastLift < AIR_TUNE.volume.airborneFor;
+    const V = AIR_TUNE.volume.airborneFor;
+    return this.input.storm > 0 || this.worldTime - this.lastLift < V || (this.tune.smoke && this.worldTime - this.lastSmoke < AIR_TUNE.smoke.linger) || (this.tune.fog && this.worldTime - this.lastFog < AIR_TUNE.fog.linger);
   }
 
   /**
@@ -879,6 +1254,37 @@ export class AirField implements AirSource {
    */
   blast(x: number, y: number, z: number, radius: number, push: number, smoke: number): void {
     this.forces.blast(x, y, z, radius, push, smoke);
+  }
+
+  /**
+   * Smoke held at a point this frame (the force API's `smoke`, the third wave): a gas cloud's, a burning part's, at
+   * `rate` a second over its sphere in its own colour (`0xRRGGBB`, sRGB). Cosmetic: nothing that stings reads it back. A
+   * queue write; answers at once with the field off, the smoke off or the point off the window.
+   */
+  smoke(x: number, y: number, z: number, radius: number, rate: number, colour: number): void {
+    this.forces.smoke(x, y, z, radius, rate, colour);
+  }
+
+  /**
+   * Whether the volume is drawing a cloud's smoke (the gas cloud's puffs, the third wave): the field carried its smoke
+   * last frame, the volume drew last frame (the master, the volume and Effects on, nothing refusing it), its amount is at
+   * least `smoke.puffsBelow`, the last batch took every frame source handed to it (a full table drops a danger's smoke,
+   * and then every cloud keeps its puffs), and the cloud's whole sphere, `radius` metres about `(x, z)`, is on the window
+   * clear of its fading edge band. Otherwise the puffs are drawn, so a danger is always shown. Reads nothing but kept
+   * fields.
+   */
+  drawsSmokeAt(x: number, z: number, radius = 0): boolean {
+    const t = this.tune;
+    if (!t.on || !t.air || !t.smoke || this.refused || this.drawer.broken) return false;
+    if (!this.smokeLive || !this.drewLastFrame || !(this.volumeAmount >= AIR_TUNE.smoke.puffsBelow)) return false;
+    if (this.forces.frameSmokeLostLast > 0) return false;
+    const w = this.win;
+    if (!w.placed) return false;
+    const r = radius > 0 && Number.isFinite(radius) ? radius / w.size : 0;
+    const u = (x - w.ox) / w.size;
+    const v = (z - w.oz) / w.size;
+    const e = AIR_TUNE.window.edge;
+    return u - r > e && v - r > e && u + r < 1 - e && v + r < 1 - e;
   }
 
   /** A Force push (`sign` +1) or pull (-1) through a cone along (dx, dz), or a repulse's ring with the direction nought. */
@@ -912,6 +1318,17 @@ export class AirField implements AirSource {
         return this.ground.uAirOffsets.value;
       case 'dents':
         return this.dents ? this.dents.texture : null;
+      // The third wave's: smoke (a slab a channel) and the fog (alpha), the smoke's colour, the wisps' bands, the sand
+      // carried in the air.
+      case 'smokeField':
+      case 'fogField':
+        return this.smokeField.value;
+      case 'smokeTint':
+        return this.smokeTint.value;
+      case 'bands':
+        return this.bands.value;
+      case 'carry':
+        return this.ground.uAirCarry.value;
       default:
         return null;
     }
@@ -930,14 +1347,19 @@ export class AirField implements AirSource {
     this.input = inp;
     const t = this.tune;
     const f = this.forces;
+    this.drewLastFrame = this.volumeDrew;
     this.stats.stepped = false;
     this.dustLive = false;
+    this.smokeLive = false;
     const dt = inp.dt > 0 && Number.isFinite(inp.dt) ? (inp.dt < 0.1 ? inp.dt : 0.1) : 0;
     this.worldTime += dt;
     f.fromEngines = t.fromEngines;
     f.fromForce = t.fromForce;
     f.fromBlasts = t.fromBlasts;
     f.dust = t.dust;
+    // Smoke taken at all (the third wave's `volSmoke`): with it off no source is queued and the gas cloud keeps its puffs.
+    f.smokeOn = t.smoke;
+    if (t.fog && inp.fogLevel > 0) this.lastFog = this.worldTime;
     f.camX = inp.camX;
     f.camZ = inp.camZ;
     const why = this.refused ?? this.drawer.broken ?? (!t.on ? 'the volumetrics master is off' : !t.air ? 'the moving air is off' : inp.where);
@@ -980,6 +1402,7 @@ export class AirField implements AirSource {
       this.solverShift.set(0, 0);
       this.dustShift.set(0, 0);
       this.sandShift.set(0, 0);
+      this.smokeShift.set(0, 0);
       this.lightShift.value.set(0, 0);
       this.stats.resets++;
     } else if (code === PLACE.moved) {
@@ -992,6 +1415,8 @@ export class AirField implements AirSource {
       this.dustShift.y += sz;
       this.sandShift.x += sx;
       this.sandShift.y += sz;
+      this.smokeShift.x += sx;
+      this.smokeShift.y += sz;
       this.lightShift.value.x += sx;
       this.lightShift.value.y += sz;
     }
@@ -1050,8 +1475,8 @@ export class AirField implements AirSource {
     nu.sunZ = inp.sunZ;
     nu.lightSteps = t.lightSteps;
     airFrameNumbersIn(nu);
-    this.wind.x = nu.windX;
-    this.wind.z = nu.windZ;
+    this.windXZ.x = nu.windX;
+    this.windXZ.z = nu.windZ;
     // The storm's dust outside, at its weight, and its spread: the half-normal of the storm's own mean height.
     const inflow = this.inflow.value;
     inflow.x = nu.inflowDust;
@@ -1063,6 +1488,7 @@ export class AirField implements AirSource {
     this.frameInflow = nu.inflowDust;
     this.easeStorm();
     this.writeLook();
+    this.writeAirLook();
     if (!inp.reading) {
       this.why = 'nothing reads the air: the dust is off, or Effects are, and the ground keeps nothing';
       // The rasters are kept for the grains; what the blasts and pushes queued is dropped, since no step will take it
@@ -1289,12 +1715,15 @@ export class AirField implements AirSource {
     const d = this.drawer;
     const f = this.forces;
     const dt = this.frameDt;
-    (this.mats.splat.uniforms.uWind.value as THREE.Vector2).set(this.wind.x, this.wind.z);
+    (this.mats.splat.uniforms.uWind.value as THREE.Vector2).set(this.windXZ.x, this.windXZ.z);
     this.syncTune();
     if (this.needsFill) {
       this.fillFields();
       this.needsFill = false;
-    } else if (this.sandFill) this.fillOffsets();
+    } else {
+      if (this.sandFill) this.fillOffsets();
+      if (this.smokeFill) this.fillSmoke();
+    }
     // The solver's fixed steps.
     const clock = this.clock;
     clock.dt = dt;
@@ -1344,6 +1773,8 @@ export class AirField implements AirSource {
       ap.x = sdt;
       ap.y = AIR_TUNE.solver.dissipation;
       ap.z = AIR_TUNE.solver.relax;
+      // The slabs' coupling (the third wave), with more than one layer solved.
+      ap.w = this.tileCount.value > 1 ? AIR_TUNE.slabs.couple : 0;
       this.gustTime.x = AIR_TUNE.wind.gust;
       this.gustTime.y = this.worldTime;
       d.draw(m.advect, vel[1]);
@@ -1376,6 +1807,19 @@ export class AirField implements AirSource {
       dq.y = nu.stormSigma * nu.stormSigma;
       dq.z = AIR_TUNE.dust.tint;
       dq.w = nu.stormWeight;
+      // The streamers (the third wave): the threshold, the crest's and the edge's rates and the edge's reach in window uv;
+      // the crest's sharpness and the shape a streamer is laid with.
+      const D = AIR_TUNE.dust;
+      const stp = this.streamP;
+      stp.x = D.streamWind;
+      stp.y = D.streamCrest;
+      stp.z = D.streamOnEdge;
+      stp.w = D.streamEdge / this.win.size;
+      const stq = this.streamQ;
+      stq.x = D.streamCurve;
+      stq.y = D.streamHeight;
+      stq.z = D.streamSpread;
+      stq.w = D.streamRise;
       this.writeLaw();
       u.uDustCount.value = n;
       this.gustTime.x = AIR_TUNE.wind.gust;
@@ -1388,6 +1832,10 @@ export class AirField implements AirSource {
       this.dustShift.set(0, 0);
       this.dustLive = true;
     }
+    // Smoke and fog (the third wave), every frame by the frame's own dt, while either is on.
+    if (t.smoke || t.fog) this.stepSmoke(vel[0].texture);
+    // The wisps' bands (the bands mode alone), once the dust of this frame is carried.
+    if (this.wispMode === 1 && this.dustLive) this.stepBands(vel[0].texture);
     // The blowing sand's two phases, every frame by the frame's own dt, while the ground wears the air's variant and the
     // sand is on: each carried by slab 0's air past the lift threshold, and restarted every cycle with its overshoot
     // (wave 2b's, in place of the second wave's age and heal).
@@ -1395,13 +1843,14 @@ export class AirField implements AirSource {
       const u = m.offsets.uniforms;
       const pair = this.offsetsPair!;
       const G = AIR_TUNE.ground;
-      u.uOffsets.value = pair[0].texture;
+      u.uOffsets.value = pair[0].textures[0];
+      u.uCarry.value = pair[0].textures[1];
       u.uVel.value = vel[0].texture;
       (u.uVelShift.value as THREE.Vector2).copy(this.solverShift);
       (u.uSandShift.value as THREE.Vector2).copy(this.sandShift);
       const uw = u.uWind.value as THREE.Vector2;
-      uw.x = this.wind.x;
-      uw.y = this.wind.z;
+      uw.x = this.windXZ.x;
+      uw.y = this.windXZ.z;
       const sp = this.sandP;
       sp.x = dt;
       // The lift threshold over the weather's own wind before any slab's share [demo `land.html:1895`].
@@ -1431,9 +1880,15 @@ export class AirField implements AirSource {
       sr.y = -nu.windZ * inLift * ph.tA;
       sr.z = -nu.windX * inLift * ph.tB;
       sr.w = -nu.windZ * inLift * ph.tB;
+      // The sand carried in the air (the third wave): what it keeps over the frame (an exact exponential of the frame's
+      // dt, so a streak runs as far onto rock at any frame rate) and its lift's soft step.
+      const sc = this.sandC;
+      sc.x = Math.exp(-AIR_TUNE.sand.carryFade * dt);
+      sc.y = 20;
       d.draw(m.offsets, pair[1]);
       swap(pair);
-      this.ground.uAirOffsets.value = pair[0].texture;
+      this.ground.uAirOffsets.value = pair[0].textures[0];
+      this.ground.uAirCarry.value = pair[0].textures[1];
       this.sandShift.set(0, 0);
     }
     // The light toward the sun, once a frame that stepped: an optical depth at four heights (wave 2b's).
@@ -1458,6 +1913,14 @@ export class AirField implements AirSource {
       this.writeHeights();
       lu.uDust.value = this.dustPair![0].textures[0];
       lu.uShape.value = this.dustPair![0].textures[1];
+      // The smoke and the fog on the way to the sun (the third wave): their own extinctions times the self-shadow, the
+      // hour's fog top (a level one here: the march varies it), and whether either was carried this frame.
+      lu.uSmoke.value = this.smokePair![0].textures[0];
+      const lr = this.lightR;
+      lr.x = t.dustSelfShadow * AIR_TUNE.smoke.extinction;
+      lr.y = t.dustSelfShadow * AIR_TUNE.fog.extinction;
+      lr.z = this.input.fogTop;
+      lr.w = this.smokeLive ? 1 : 0;
       d.draw(m.light, this.lightTarget!);
       this.lightShift.value.set(0, 0);
       this.lightDue = false;
@@ -1478,6 +1941,102 @@ export class AirField implements AirSource {
     b.x = law.min2;
     b.y = law.max2;
     b.z = law.ageCap;
+  }
+
+  /**
+   * Smoke and fog (the third wave, the design's §2.6), one draw a frame by the frame's own dt: the smoke batch laid (none
+   * with the smoke off), the decay and the climb as exact exponentials of the frame, the fog's decay with the burn, its
+   * emission and its bank by the hour's level (nought on a clear day), its drainage, and the patches' drift along the wind.
+   * Every number goes through a kept vector; nothing crosses a call but the velocity texture.
+   */
+  private stepSmoke(vel: THREE.Texture): void {
+    const t = this.tune;
+    const f = this.forces;
+    const dt = this.frameDt;
+    const u = this.mats.smoke.uniforms;
+    const pair = this.smokePair!;
+    f.frameDt = dt;
+    const n = f.buildSmokeBatch();
+    if (n > 0) this.lastSmoke = this.worldTime;
+    u.uSmoke.value = pair[0].textures[0];
+    u.uSmokeTint.value = pair[0].textures[1];
+    u.uVel.value = vel;
+    (u.uVelShift.value as THREE.Vector2).copy(this.solverShift);
+    (u.uSmokeShift.value as THREE.Vector2).copy(this.smokeShift);
+    u.uSmokeCount.value = n;
+    const S = AIR_TUNE.smoke;
+    const F = AIR_TUNE.fog;
+    const sp = this.smokeP;
+    sp.x = dt;
+    sp.y = Math.exp(-S.decay * dt);
+    sp.z = 1 - Math.exp(-S.climb0 * dt);
+    sp.w = 1 - Math.exp(-S.climb1 * dt);
+    const inp = this.input;
+    const level = t.fog && inp.fogLevel > 0 ? inp.fogLevel : 0;
+    const burn = inp.fogBurn > 0 ? inp.fogBurn : 0;
+    const fp = this.fogP;
+    fp.x = Math.exp(-(F.decay + F.burn * burn) * dt);
+    fp.y = F.emit * level;
+    fp.z = F.bank * level;
+    fp.w = F.drain;
+    const fq = this.fogQ;
+    fq.x = Math.tan((F.drainFrom > 0 ? F.drainFrom : 0) * DEG);
+    fq.y = F.overWater;
+    const cells = 1 / (F.patchScale > 0.5 ? F.patchScale : 0.5);
+    fq.z = cells;
+    fq.w = F.gaps > 0 ? (F.gaps < 0.99 ? F.gaps : 0.99) : 0;
+    // The patches drift along the wind at `patchDrift` m/s, in noise cells, kept within the noise's repeat (exact, so the
+    // wrap is never seen).
+    const wx = this.windXZ.x;
+    const wz = this.windXZ.z;
+    const ws = Math.sqrt(wx * wx + wz * wz);
+    if (ws > 1e-4) {
+      const k = (F.patchDrift * dt * cells) / ws;
+      this.fogDriftX = (this.fogDriftX + wx * k) % NOISE_SIZE;
+      this.fogDriftZ = (this.fogDriftZ + wz * k) % NOISE_SIZE;
+      const tc = 1 / (F.topScale > 0.5 ? F.topScale : 0.5);
+      const kt = (F.patchDrift * dt * tc) / ws;
+      const td = this.fogDrift.value;
+      td.x = (td.x + wx * kt) % NOISE_SIZE;
+      td.y = (td.y + wz * kt) % NOISE_SIZE;
+    }
+    const fr = this.fogR;
+    fr.x = this.fogDriftX;
+    fr.y = this.fogDriftZ;
+    fr.z = t.smoke ? 1 : 0;
+    fr.w = t.fog ? 1 : 0;
+    this.fogS.x = F.poolMost > 0 ? F.poolMost : 0;
+    this.gustTime.x = AIR_TUNE.wind.gust;
+    this.gustTime.y = this.worldTime;
+    this.drawer.draw(this.mats.smoke, pair[1]);
+    swap(pair);
+    this.smokeField.value = pair[0].textures[0];
+    this.smokeTint.value = pair[0].textures[1];
+    this.smokeShift.set(0, 0);
+    this.smokeLive = true;
+  }
+
+  /** The wisps' bands (the bands mode, the third wave): the flow noise at the light's four heights, a pass at the dust's size. */
+  private stepBands(vel: THREE.Texture): void {
+    const u = this.mats.bands.uniforms;
+    u.uVel.value = vel;
+    u.uDust.value = this.dustPair![0].textures[0];
+    u.uShape.value = this.dustPair![0].textures[1];
+    (u.uVelShift.value as THREE.Vector2).copy(this.solverShift);
+    this.drawer.draw(this.mats.bands, this.bandsTarget!);
+    this.bands.value = this.bandsTarget!.texture;
+  }
+
+  /** Smoke and fog to nothing, both of their textures (with every field, or alone after a resize). */
+  private fillSmoke(): void {
+    const fd = this.mats.fillDust.uniforms;
+    (fd.uValue.value as THREE.Vector4).set(0, 0, 0, 0);
+    (fd.uShapeValue.value as THREE.Vector4).set(0, 0, 0, 0);
+    for (const tg of this.smokePair!) this.drawer.draw(this.mats.fillDust, tg);
+    this.smokeField.value = this.smokePair![0].textures[0];
+    this.smokeTint.value = this.smokePair![0].textures[1];
+    this.smokeShift.set(0, 0);
+    this.smokeFill = false;
   }
 
   /** The light's four heights from the tune, into the vector the light pass and the march both read (lowest first, never out of order). */
@@ -1514,6 +2073,14 @@ export class AirField implements AirSource {
     if (this.worldTime - this.liftTopAt <= V.airborneFor && this.liftTopKept > top) top = this.liftTopKept;
     const storm = this.nums.storm > 0 ? V.bandSigmas * this.nums.stormSigma : 0;
     if (storm > top) top = storm;
+    // The third wave's high band: smoke climbs through the slabs, so while any lingers the march looks to the ceiling;
+    // the fog to the highest its varied top can stand.
+    if (this.tune.smoke && this.worldTime - this.lastSmoke < AIR_TUNE.smoke.linger) top = V.above;
+    if (this.tune.fog && this.worldTime - this.lastFog < AIR_TUNE.fog.linger) {
+      const F = AIR_TUNE.fog;
+      const ft = (this.input.fogTop > 0 ? this.input.fogTop : 0) * (1 + (F.topRise > 0 ? F.topRise : 0));
+      if (ft > top) top = ft;
+    }
     this.bandTop = top < V.above ? top : V.above;
     const l = this.look.value;
     l.x = this.tune.dustBright;
@@ -1521,6 +2088,45 @@ export class AirField implements AirSource {
     l.z = this.bandTop;
     l.w = AIR_TUNE.dust.spreadMin;
     this.writeHeights();
+  }
+
+  /**
+   * The third wave's look for the march, once a frame: the fog's hour (its top, whether it is carried, the top noise's
+   * cells a metre, the level), the wisps' mode in force (the setting's, or off while the noise is not whole, and the bands
+   * mode only while its target stands at the dust's size), their flow's two phases on the field's own clock and the
+   * tune's numbers, every one written into a kept vector's components.
+   */
+  private writeAirLook(): void {
+    const t = this.tune;
+    const F = AIR_TUNE.fog;
+    const inp = this.input;
+    const fv = this.fog.value;
+    fv.x = inp.fogTop > 0 ? inp.fogTop : 0;
+    fv.y = t.fog ? 1 : 0;
+    fv.z = 1 / (F.topScale > 0.5 ? F.topScale : 0.5);
+    fv.w = t.fog && inp.fogLevel > 0 ? inp.fogLevel : 0;
+    const mode = t.wisps > 0 && t.wisps < 4 && this.noiseTex !== null ? t.wisps : 0;
+    this.wispMode = mode === 1 && (this.bandsTarget === null || this.bandsTarget.width < 2) ? 0 : mode;
+    const W = AIR_TUNE.wisps;
+    const ph = this.wispPhase;
+    ph.time = this.worldTime;
+    ph.period = W.period;
+    wispPhaseIn(ph);
+    const a = this.wispA.value;
+    a.x = W.scale;
+    a.y = W.stretch;
+    a.z = W.period;
+    a.w = W.octave;
+    const b = this.wispB.value;
+    b.x = ph.p0;
+    b.y = ph.p1;
+    b.z = ph.cross;
+    b.w = W.ageWisp;
+    const c = this.wispC.value;
+    c.x = W.erode;
+    c.y = W.erodeFull > 1e-3 ? W.erodeFull : 1e-3;
+    c.z = W.keepColumn;
+    c.w = W.keepFloor;
   }
 
   /**
@@ -1582,13 +2188,15 @@ export class AirField implements AirSource {
     const d = this.drawer;
     const v = this.mats.fill.uniforms.uValue.value as THREE.Vector4;
     const share = AIR_TUNE.slabs.windShare;
-    v.set(this.wind.x * share, this.wind.z * share, 0, 1);
+    v.set(this.windXZ.x * share, this.windXZ.z * share, 0, 1);
     for (const tg of this.vel!) d.draw(this.mats.fill, tg);
     v.set(0, 0, 0, 1);
     for (const tg of this.prs!) d.draw(this.mats.fill, tg);
     d.draw(this.mats.fill, this.div!);
     const c = this.stormColour.value;
-    const inflow = this.frameInflow;
+    // With a dust field a layer (Ultra's), each tile starts with an even share of the storm's dust, which the inflow
+    // then sorts into its slabs' own shares within a crossing of the window: the column's sum is the storm's.
+    const inflow = this.frameInflow / (this.dustR.x > 1.5 ? this.dustR.x : 1);
     const fd = this.mats.fillDust.uniforms;
     (fd.uValue.value as THREE.Vector4).set(c.r * inflow, c.g * inflow, c.b * inflow, inflow);
     const sigma = this.nums.stormSigma;
@@ -1599,14 +2207,20 @@ export class AirField implements AirSource {
     this.dust.value = this.dustPair![0].textures[0];
     this.shape.value = this.dustPair![0].textures[1];
     this.fillOffsets();
+    this.fillSmoke();
   }
 
-  /** The ground at rest: nothing carried by either phase (with every field, or the offsets alone after a resize). */
+  /**
+   * The ground at rest: nothing carried by either phase, and no sand in the air (with every field, or the offsets alone
+   * after a resize): both of the pair's textures, so the two-output fill.
+   */
   private fillOffsets(): void {
-    const v = this.mats.fill.uniforms.uValue.value as THREE.Vector4;
-    v.set(0, 0, 0, 0);
-    for (const tg of this.offsetsPair!) this.drawer.draw(this.mats.fill, tg);
-    this.ground.uAirOffsets.value = this.offsetsPair![0].texture;
+    const fd = this.mats.fillDust.uniforms;
+    (fd.uValue.value as THREE.Vector4).set(0, 0, 0, 0);
+    (fd.uShapeValue.value as THREE.Vector4).set(0, 0, 0, 0);
+    for (const tg of this.offsetsPair!) this.drawer.draw(this.mats.fillDust, tg);
+    this.ground.uAirOffsets.value = this.offsetsPair![0].textures[0];
+    this.ground.uAirCarry.value = this.offsetsPair![0].textures[1];
     this.sandShift.set(0, 0);
     this.sandFill = false;
   }
@@ -1614,20 +2228,29 @@ export class AirField implements AirSource {
   /** Free the targets (the master turned off in play): the materials are kept for a later on, which makes them again (class T). */
   releaseTargets(): void {
     this.targetGen++;
-    for (const p of [this.vel, this.prs, this.dustPair, this.offsetsPair]) if (p) for (const tg of p) tg.dispose();
+    for (const p of [this.vel, this.prs, this.dustPair, this.offsetsPair, this.smokePair]) if (p) for (const tg of p) tg.dispose();
     this.div?.dispose();
     this.lightTarget?.dispose();
+    this.bandsTarget?.dispose();
     this.vel = null;
     this.prs = null;
     this.dustPair = null;
     this.offsetsPair = null;
+    this.smokePair = null;
+    this.bandsTarget = null;
     this.div = null;
     this.lightTarget = null;
-    this.sized = { cells: 0, dust: 0, light: 0, sand: 0 };
+    this.sized = { cells: 0, dust: 0, light: 0, sand: 0, layers: 0, tiles: 0, smoke: 0, bands: 0 };
     this.dust.value = null;
     this.shape.value = null;
     this.light.value = null;
+    this.smokeField.value = null;
+    this.smokeTint.value = null;
+    this.bands.value = null;
+    this.velocity.value = null;
     this.dustLive = false;
+    this.smokeLive = false;
+    this.wispMode = 0;
     this.win.placed = false;
     this.forces.clear();
     // The dents' target too: a later on makes it again at its size (class T), and the ground reads nothing meanwhile.
@@ -1637,6 +2260,7 @@ export class AirField implements AirSource {
       this.dents.target = null;
     }
     this.ground.uAirOffsets.value = null;
+    this.ground.uAirCarry.value = null;
     this.ground.uAirDents.value = null;
     this.dentsLive = false;
     this.writeGround(false);
@@ -1655,8 +2279,11 @@ export class AirField implements AirSource {
     this.feet.clear();
     this.testEngine = null;
     this.lastLift = -Infinity;
+    this.lastSmoke = -Infinity;
+    this.lastFog = -Infinity;
     this.volumeDrew = false;
     this.dustLive = false;
+    this.smokeLive = false;
     this.dentsLive = false;
     this.why = 'not yet stepped';
     this.writeGround(false);
@@ -1850,7 +2477,7 @@ export class AirField implements AirSource {
       refused: this.refused,
       draw: this.drawer.mode,
       window: { origin: [r2(w.ox), r2(w.oz)], size: w.size, cell: r2(w.cell), lastScroll: [this.stats.lastScrollX, this.stats.lastScrollZ], resets: this.stats.resets },
-      grids: { air: `${t.airDetail}² RG16F pair, R16F pressure pair`, dust: `${t.airDetail * t.dustDetail}² RGBA32F pair of two textures (the colour and density, the shape it carries)`, light: `${t.airDetail * t.lightDetail}² RGBA16F (an optical depth toward the sun at ${AIR_TUNE.light.h0}, ${AIR_TUNE.light.h1}, ${AIR_TUNE.light.h2} and ${AIR_TUNE.light.h3} m)`, obstacles: `${t.airDetail}² RG16F (red the walls, green the walls and a compound's rooms)`, rasters: `${t.airDetail}² R32F height, RGBA8 response, colour and the colour map's tint` },
+      grids: { air: `${this.tileCount.value} layer${this.tileCount.value > 1 ? 's' : ''} of ${t.airDetail}² RG16F pair, R16F pressure pair`, dust: `${t.dustLayers ? '3 tiles of ' : ''}${t.airDetail * t.dustDetail}² RGBA32F pair of two textures (the colour and density, the shape it carries)`, smoke: this.smokePair ? `${this.smokePair[0].width}² RGBA32F pair of two textures (a smoke a slab and the fog, the smoke's colour)` : 'not made', bands: this.bandsTarget && this.bandsTarget.width > 1 ? `${this.bandsTarget.width}² RGBA8` : 'not made (only in the bands mode)', light: `${t.airDetail * t.lightDetail}² RGBA16F (an optical depth toward the sun at ${AIR_TUNE.light.h0}, ${AIR_TUNE.light.h1}, ${AIR_TUNE.light.h2} and ${AIR_TUNE.light.h3} m)`, obstacles: `${t.airDetail}² RG16F (red the walls, green the walls and a compound's rooms)`, rasters: `${t.airDetail}² R32F height, RGBA8 response, colour and the colour map's tint` },
       shape: { bandTop: r2(this.bandTop), view: ['none', 'carried', 'lift', 'spread', 'age'][this.dustView] ?? 'none', sandView: this.sandView, stormColour: [r2(this.stormColour.value.r), r2(this.stormColour.value.g), r2(this.stormColour.value.b)], stormSigma: r2(this.inflow.value.y) },
       sand: { picture: this.sandTex ? 'whole' : this.sandPic ? `${this.sandPic.rows} of ${SAND_SIZE} rows made` : 'not begun (the grey stand-in)', phases: { tA: r2(this.phase.tA), tB: r2(this.phase.tB), cycles: [this.phase.kA, this.phase.kB] } },
       raster: { unknown: this.raster.unknown, asked: this.raster.asked, lowest: r2(this.raster.lowest), highest: r2(this.raster.highest), mean: r2(this.raster.mean) },
@@ -1863,11 +2490,16 @@ export class AirField implements AirSource {
       // in the step made a number every frame.
       timing: 'see __debug.perf(): the air line',
       hasAir: this.hasAir(),
-      wind: { x: r2(this.wind.x), z: r2(this.wind.z) },
+      wind: { x: r2(this.windXZ.x), z: r2(this.windXZ.z) },
       storm: r2(this.input.storm),
       motes: this.stats.motes,
       grains: { flying: this.stats.grainsFlying, lying: this.stats.grainsLying },
       stormSheets: r2(this.stats.sheets),
+      // The third wave's: smoke and fog carried this frame, the smoke batch, the fog's hour, the wisps.
+      smoke: { on: t.smoke, carried: this.smokeLive, batch: this.forces.smokeBatchCount, ofBatch: SMOKE_BATCH, held: this.forces.smokeHeldCount },
+      fog: { on: t.fog, level: r2(this.input.fogLevel), burn: r2(this.input.fogBurn), top: r2(this.input.fogTop), lingering: this.worldTime - this.lastFog < AIR_TUNE.fog.linger },
+      wisps: { setting: ['off', 'bands', 'noise', 'noise ×2'][t.wisps] ?? 'off', inForce: ['off', 'bands', 'noise', 'noise ×2'][this.wispMode] ?? 'off', noise: this.noiseTex ? 'whole' : this.noiseVol ? `${this.noiseVol.layers} of ${NOISE3_SIZE} layers made` : 'not begun', phase: [r2(this.wispPhase.p0), r2(this.wispPhase.p1)], cross: r2(this.wispPhase.cross) },
+      layers: { air: this.tileCount.value, dust: t.dustLayers ? 3 : 1, couple: this.tileCount.value > 1 ? AIR_TUNE.slabs.couple : 0 },
       ground: this.groundReport(),
     };
   }
@@ -1907,7 +2539,7 @@ export class AirField implements AirSource {
    * and the air's fastest; with `points`, the most dust within `radius` metres of each and the light pass's
    * transmittance toward the sun there. Never on a frame path.
    */
-  measure(points: readonly (readonly [number, number])[] = [], radius = 4): ({ dustTotal: number; dustPeak: number; peakAt: [number, number] | null; speedPeak: number; speed: { mean: number; peakAt: [number, number] | null; liftAt: number; overLift: number; overFourWinds: number }; samples: number; at: MeasurePoint[]; solid: number | null; roomsOnly: number | null; tallest: number; upwind: { velocity: [number, number]; inflow: [number, number]; off: number } | null; shape: ShapeMeasure | null } & GroundMeasure) | null {
+  measure(points: readonly (readonly [number, number])[] = [], radius = 4): ({ dustTotal: number; dustPeak: number; peakAt: [number, number] | null; dustMiddle: [number, number] | null; speedPeak: number; speed: { mean: number; peakAt: [number, number] | null; liftAt: number; overLift: number; overFourWinds: number }; samples: number; at: MeasurePoint[]; solid: number | null; roomsOnly: number | null; tallest: number; upwind: { velocity: [number, number]; inflow: [number, number]; off: number } | null; shape: ShapeMeasure | null; smokeFog: SmokeMeasure | null } & GroundMeasure) | null {
     if (!this.dustPair || !this.vel) return null;
     const r = this.renderer;
     const dt = this.dustPair[0];
@@ -1970,10 +2602,17 @@ export class AirField implements AirSource {
     let total = 0;
     let peak = 0;
     let at = -1;
+    // The dust's own middle (density-weighted), in a tile's own texels (the Ultra key's tiles laid side by side are one
+    // window each), so a blast's dust and a speeder's can be followed apart by measuring each alone.
+    const tw = this.tune.dustLayers ? dt.width / 3 : dt.width;
+    let mx = 0;
+    let mz = 0;
     for (let i = 0; i < dt.width * dt.height; i++) {
       const a = buf[i * 4 + 3];
       if (!Number.isFinite(a)) continue;
       total += a;
+      mx += a * (((i % dt.width) % tw) + 0.5);
+      mz += a * (Math.floor(i / dt.width) + 0.5);
       if (a > peak) {
         peak = a;
         at = i;
@@ -1988,7 +2627,7 @@ export class AirField implements AirSource {
     let speedAt = -1;
     let overLift = 0;
     let overWind = 0;
-    const ws = Math.sqrt(this.wind.x * this.wind.x + this.wind.z * this.wind.z);
+    const ws = Math.sqrt(this.windXZ.x * this.windXZ.x + this.windXZ.z * this.windXZ.z);
     const G = AIR_TUNE.ground;
     const liftAt = Math.min(ws * G.liftOver + G.liftAdd, G.liftCap);
     const read = readHalf(r, v);
@@ -2010,8 +2649,8 @@ export class AirField implements AirSource {
       // The edge the wind comes in through (the slab-0 tile is the whole atlas in this wave): its mean velocity one texel
       // in, against the inflow the solver holds outside the window (the wind times slab 0's share).
       const share = AIR_TUNE.slabs.windShare;
-      const ix = this.wind.x * share;
-      const iz = this.wind.z * share;
+      const ix = this.windXZ.x * share;
+      const iz = this.windXZ.z * share;
       if (ix * ix + iz * iz > 1e-6) {
         const alongX = Math.abs(ix) >= Math.abs(iz);
         const n = alongX ? v.height : v.width;
@@ -2033,6 +2672,7 @@ export class AirField implements AirSource {
     }
     const w = this.win;
     const peakAt: [number, number] | null = at >= 0 ? [Math.round((w.ox + ((at % dt.width) + 0.5) * (w.size / dt.width)) * 10) / 10, Math.round((w.oz + (Math.floor(at / dt.width) + 0.5) * (w.size / dt.height)) * 10) / 10] : null;
+    const dustMiddle: [number, number] | null = total > 1e-6 ? [Math.round((w.ox + (mx / total) * (w.size / tw)) * 10) / 10, Math.round((w.oz + (mz / total) * (w.size / dt.height)) * 10) / 10] : null;
     // How much of the window the obstacle map holds solid to the air and the dust (red, a top over `over`), and its
     // tallest; and how much the volume keeps clear of dust besides (green: the walls and a compound's rooms).
     let solid: number | null = null;
@@ -2053,7 +2693,133 @@ export class AirField implements AirSource {
       solid = round4(n / cells);
       roomsOnly = round4(g / cells);
     }
-    return { dustTotal: Math.round(total * 1000) / 1000, dustPeak: Math.round(peak * 10000) / 10000, peakAt, speedPeak: Math.round(speedPeak * 100) / 100, speed: { mean: Math.round((speedSum / Math.max(1, v.width * v.height)) * 100) / 100, peakAt: speedAt >= 0 ? [Math.round((w0.ox + ((speedAt % v.width) + 0.5) * (w0.size / v.width)) * 10) / 10, Math.round((w0.oz + (Math.floor(speedAt / v.width) + 0.5) * (w0.size / v.height)) * 10) / 10] : null, liftAt: round4(liftAt), overLift: round4(overLift / Math.max(1, v.width * v.height)), overFourWinds: round4(overWind / Math.max(1, v.width * v.height)) }, samples: dt.width * dt.height, at: at0, solid, roomsOnly, tallest: round4(tallest), upwind, shape, ...this.measureGround(points, radius) };
+    return { dustTotal: Math.round(total * 1000) / 1000, dustPeak: Math.round(peak * 10000) / 10000, peakAt, dustMiddle, speedPeak: Math.round(speedPeak * 100) / 100, speed: { mean: Math.round((speedSum / Math.max(1, v.width * v.height)) * 100) / 100, peakAt: speedAt >= 0 ? [Math.round((w0.ox + ((speedAt % v.width) + 0.5) * (w0.size / v.width)) * 10) / 10, Math.round((w0.oz + (Math.floor(speedAt / v.width) + 0.5) * (w0.size / v.height)) * 10) / 10] : null, liftAt: round4(liftAt), overLift: round4(overLift / Math.max(1, v.width * v.height)), overFourWinds: round4(overWind / Math.max(1, v.width * v.height)) }, samples: dt.width * dt.height, at: at0, solid, roomsOnly, tallest: round4(tallest), upwind, shape, smokeFog: this.measureSmoke(points, radius), ...this.measureGround(points, radius) };
+  }
+
+  /** Smoke and fog read back (console only, a GPU sync): null while neither is carried or the pair is a texel across. */
+  private measureSmoke(points: readonly (readonly [number, number])[], radius: number): SmokeMeasure | null {
+    const sp = this.smokePair;
+    if (!sp || sp[0].width < 2) return null;
+    const t = sp[0];
+    const buf = readFloat(this.renderer, t);
+    if (!buf) return null;
+    const w = this.win;
+    const n = t.width;
+    const slabs: [number, number, number] = [0, 0, 0];
+    let sPeak = 0;
+    let sAt = -1;
+    let fTotal = 0;
+    let fPeak = 0;
+    let fAt = -1;
+    let fogged = 0;
+    let fx = 0;
+    let fz = 0;
+    const G = 16;
+    const grid = new Array<number>(G * G).fill(0);
+    const gridN = new Array<number>(G * G).fill(0);
+    for (let i = 0; i < n * t.height; i++) {
+      const k = i * 4;
+      const s = buf[k] + buf[k + 1] + buf[k + 2];
+      if (Number.isFinite(s)) {
+        slabs[0] += buf[k];
+        slabs[1] += buf[k + 1];
+        slabs[2] += buf[k + 2];
+        if (s > sPeak) {
+          sPeak = s;
+          sAt = i;
+        }
+      }
+      const f = buf[k + 3];
+      if (Number.isFinite(f)) {
+        fTotal += f;
+        fx += f * ((i % n) + 0.5);
+        fz += f * (Math.floor(i / n) + 0.5);
+        const g = Math.floor(((Math.floor(i / n) + 0.5) / t.height) * G) * G + Math.floor((((i % n) + 0.5) / n) * G);
+        grid[g] += f;
+        gridN[g]++;
+        if (f > 0.1) fogged++;
+        if (f > fPeak) {
+          fPeak = f;
+          fAt = i;
+        }
+      }
+    }
+    const cell = w.size / n;
+    const place = (i: number): [number, number] => [Math.round((w.ox + ((i % n) + 0.5) * cell) * 10) / 10, Math.round((w.oz + (Math.floor(i / n) + 0.5) * cell) * 10) / 10];
+    // The fog over the lowest and the highest quarter of the known ground, each raster cell the mean of its fog texels.
+    let hollow: number | null = null;
+    let rise: number | null = null;
+    const r = this.raster;
+    if (r.n > 1 && n % r.n === 0) {
+      const per = n / r.n;
+      const cells: [number, number][] = [];
+      for (let j = 0; j < r.n; j++) {
+        for (let i = 0; i < r.n; i++) {
+          if (!r.known[j * r.n + i]) continue;
+          let sum = 0;
+          let cnt = 0;
+          for (let b = 0; b < per; b++) {
+            for (let a = 0; a < per; a++) {
+              const f = buf[((j * per + b) * n + (i * per + a)) * 4 + 3];
+              if (Number.isFinite(f)) {
+                sum += f;
+                cnt++;
+              }
+            }
+          }
+          if (cnt) cells.push([r.height[j * r.n + i], sum / cnt]);
+        }
+      }
+      if (cells.length >= 8) {
+        cells.sort((p, q) => p[0] - q[0]);
+        const q = Math.max(1, Math.floor(cells.length / 4));
+        let lo = 0;
+        let hi = 0;
+        for (let i = 0; i < q; i++) {
+          lo += cells[i][1];
+          hi += cells[cells.length - 1 - i][1];
+        }
+        hollow = round4(lo / q);
+        rise = round4(hi / q);
+      }
+    }
+    const area = cell * cell;
+    const at: SmokeMeasure['at'] = [];
+    for (const [x, z] of points) {
+      let fog: number | null = null;
+      let smoke: [number, number, number] | null = null;
+      let best = -1;
+      const span = Math.ceil(radius / cell);
+      const ci = Math.floor((x - w.ox) / cell);
+      const cj = Math.floor((z - w.oz) / cell);
+      for (let j = cj - span; j <= cj + span; j++) {
+        for (let i = ci - span; i <= ci + span; i++) {
+          if (i < 0 || j < 0 || i >= n || j >= t.height) continue;
+          const k = (j * n + i) * 4;
+          if (Number.isFinite(buf[k + 3]) && (fog === null || buf[k + 3] > fog)) fog = buf[k + 3];
+          const s = buf[k] + buf[k + 1] + buf[k + 2];
+          if (Number.isFinite(s) && s > best) {
+            best = s;
+            smoke = [round4(buf[k]), round4(buf[k + 1]), round4(buf[k + 2])];
+          }
+        }
+      }
+      at.push({ x, z, fog: fog === null ? null : round4(fog), smoke });
+    }
+    return {
+      slabs: [round4(slabs[0] * area), round4(slabs[1] * area), round4(slabs[2] * area)],
+      smokePeak: round4(sPeak),
+      smokeAt: sAt >= 0 ? place(sAt) : null,
+      fogTotal: round4(fTotal * area),
+      fogPeak: round4(fPeak),
+      fogAt: fAt >= 0 ? place(fAt) : null,
+      fogged: round4(fogged / (n * t.height)),
+      fogMiddle: fTotal > 1e-6 ? [Math.round((w.ox + (fx / fTotal) * cell) * 10) / 10, Math.round((w.oz + (fz / fTotal) * cell) * 10) / 10] : null,
+      hollow,
+      rise,
+      fogGrid: grid.map((v, i) => round4(gridN[i] ? v / gridN[i] : 0)),
+      at,
+    };
   }
 
   /**
@@ -2104,14 +2870,18 @@ export class AirField implements AirSource {
   private measureGround(points: readonly (readonly [number, number])[], radius: number): GroundMeasure {
     const r = this.renderer;
     const w = this.win;
-    let offsets: { peak: number; moved: number; peakAt: [number, number] | null; blowing: number } | null = null;
+    let offsets: { peak: number; moved: number; peakAt: [number, number] | null; blowing: number; carried: number } | null = null;
     const op = this.offsetsPair;
     const oread = op ? readFloat(r, op[0]) : null;
+    // The sand carried in the air (the third wave): the share of the window where it stands past a twentieth.
+    const cread = op ? readFloat(r, op[0], 1) : null;
     if (op && oread) {
       const n = op[0].width;
       let peak = 0;
       let moved = 0;
       let blowing = 0;
+      let carried = 0;
+      if (cread) for (let i = 0; i < n * n; i++) if (cread[i * 4 + 3] > 0.05) carried++;
       let at = -1;
       const ph = this.phase;
       const from = AIR_TUNE.sand.from;
@@ -2130,7 +2900,7 @@ export class AirField implements AirSource {
           at = i;
         }
       }
-      offsets = { peak: round4(peak), moved, peakAt: at >= 0 ? [Math.round((w.ox + ((at % n) + 0.5) * (w.size / n)) * 10) / 10, Math.round((w.oz + (Math.floor(at / n) + 0.5) * (w.size / n)) * 10) / 10] : null, blowing: round4(blowing / (n * n)) };
+      offsets = { peak: round4(peak), moved, peakAt: at >= 0 ? [Math.round((w.ox + ((at % n) + 0.5) * (w.size / n)) * 10) / 10, Math.round((w.oz + (Math.floor(at / n) + 0.5) * (w.size / n)) * 10) / 10] : null, blowing: round4(blowing / (n * n)), carried: round4(carried / (n * n)) };
     }
     let dents: { peak: number; total: number; pressed: number; peakAt: [number, number] | null } | null = null;
     const d = this.dents;
@@ -2434,6 +3204,9 @@ export class AirField implements AirSource {
           lu.uSteps.value = steps;
           this.lightP.set(lm.step, lm.slant, lm.rise, 0);
           this.lightQ.set(lm.k, 1, lm.invSin, AIR_TUNE.dust.spreadMin);
+          // No smoke or fog on the way (the third wave's), so the dust alone is held to its mirror.
+          this.lightR.set(0, 0, 0, 0);
+          lu.uSmoke.value = this.smokePair![0].textures[0];
           lu.uDust.value = dust[0].textures[0];
           lu.uShape.value = dust[0].textures[1];
           d.draw(this.mats.light, lt);
@@ -2456,6 +3229,45 @@ export class AirField implements AirSource {
           }
         } finally {
           this.height.value = keepGround;
+        }
+      }
+      // Smoke and fog (the third wave): a known smoke a slab and fog in still air over nothing solid, no source and no
+      // emission, stepped over a tenth of a second under each draw way, held to `smokeStep` (the decay, then the climb)
+      // and to the fog's own decay; the smoke's colour dies with it.
+      {
+        const sm = this.smokePair!;
+        const smid = ((sm[0].height >> 1) * sm[0].width + (sm[0].width >> 1)) * 4;
+        const su = this.mats.smoke.uniforms;
+        const S = AIR_TUNE.smoke;
+        const F = AIR_TUNE.fog;
+        const sdt = 0.1;
+        for (const way of ['calls', 'direct'] as const) {
+          fdV.set(0.4, 0.2, 0.1, 0.3);
+          fdS.set(0.08, 0.06, 0.04, 0.7);
+          d.draw(this.mats.fillDust, sm[0]);
+          su.uSmoke.value = sm[0].textures[0];
+          su.uSmokeTint.value = sm[0].textures[1];
+          su.uVel.value = this.vel![0].texture;
+          (su.uVelShift.value as THREE.Vector2).set(0, 0);
+          (su.uSmokeShift.value as THREE.Vector2).set(0, 0);
+          su.uSmokeCount.value = 0;
+          this.smokeP.set(sdt, Math.exp(-S.decay * sdt), 1 - Math.exp(-S.climb0 * sdt), 1 - Math.exp(-S.climb1 * sdt));
+          this.fogP.set(Math.exp(-F.decay * sdt), 0, 0, 0);
+          this.fogQ.set(1, 1, 0.03, 0.5);
+          this.fogR.set(0, 0, 1, 1);
+          this.fogS.set(AIR_TUNE.fog.poolMost, 0, 0, 0);
+          d.mode = way;
+          d.run(() => d.draw(this.mats.smoke, sm[1]), this.home);
+          d.mode = 'calls';
+          const a = readFloat(r, sm[1]);
+          const b = readFloat(r, sm[1], 1);
+          const want: [number, number, number] = [0.4, 0.2, 0.1];
+          smokeStep(want, sdt, S.decay, S.climb0, S.climb1);
+          note(`smoke (${way}): slab 0 decays and climbs (smokeStep)`, want[0], a ? a[smid] : null, 1e-5);
+          note(`smoke (${way}): slab 1 takes slab 0's climb and gives its own`, want[1], a ? a[smid + 1] : null, 1e-5);
+          note(`smoke (${way}): slab 2 takes slab 1's climb`, want[2], a ? a[smid + 2] : null, 1e-5);
+          note(`smoke (${way}): the fog decays as exp(-decay dt)`, 0.3 * Math.exp(-F.decay * sdt), a ? a[smid + 3] : null, 1e-5);
+          note(`smoke (${way}): the smoke's colour dies with it`, 0.7 * Math.exp(-S.decay * sdt), b ? b[smid + 3] : null, 1e-5);
         }
       }
     } finally {
@@ -2509,6 +3321,9 @@ export class AirField implements AirSource {
     this.tintTex?.dispose();
     this.sandTex?.dispose();
     this.sandStand.dispose();
+    this.noiseTex?.dispose();
+    this.noiseTex = null;
+    this.noise3.value = null;
     for (const m of Object.values(this.mats)) m.dispose();
     this.obs.dispose();
     this.dents?.dispose();

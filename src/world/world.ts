@@ -131,8 +131,9 @@ import type { GroundSampler } from './volumetrics/airRaster.ts';
 import type { SolidBoxSource } from './volumetrics/airObstacles.ts';
 import { fillResponseTable, type FamilyFacts } from './volumetrics/groundResponse.ts';
 import { groundAirMaterial, groundMaterialFor, groundWearsAir, makeAirGroundUniforms, swapGroundMaterial, type GroundChoice } from './volumetrics/airGround.ts';
-import { sheddingCount, stormSheetFactor } from './volumetrics/airMath.ts';
-import { AIR_TUNE } from './volumetrics/airTune.ts';
+import { grainShedIn, newGrainShed, sheddingCount, stormSheetFactor } from './volumetrics/airMath.ts';
+import { AIR_TUNE, FOG_LOOKS_STAMP, GROUND_FOG_LOOKS } from './volumetrics/airTune.ts';
+import { FogDayCount, fogDayOf, fogHourIn, newFogHour, type FogDay } from './volumetrics/airFog.ts';
 import { VOL_TUNE } from './volumetrics/volSettings.ts';
 import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../vehicles/garage';
 import { fitKey, type ResolvedFit } from '../vehicles/shipFit';
@@ -925,6 +926,28 @@ export class World {
   air: AirField | null = null;
   /** What the field is told each frame, kept and refilled (`updateAir`). */
   private readonly airInput = newAirFrameInput();
+  /**
+   * The ground fog's hour (the third wave, `airFog.ts`): the world's draw for the day on the shared clock, worked out again
+   * only when the day's number or the world moves (or the looks are tuned, `fogLooksMoved`), and the hour's level, burn
+   * and top from it every frame. The console's hold (`air({ fog })`): a level and a top held (null releases) and a fog
+   * morning forced on the day's draw.
+   */
+  readonly airFogHold = { level: null as number | null, top: null as number | null, day: false };
+  private readonly fogDay: FogDay = { morning: 0, evening: 0, eveningBefore: 0 };
+  private readonly fogHour = newFogHour();
+  /** The drawn day's number, counted against the shared clock (`FogDayCount`): stepped at the drawn midnight, never by the wall. */
+  private readonly fogCount = new FogDayCount();
+  private fogDayIdx = Number.NaN;
+  private fogDayWorld = '';
+  private fogLooksSeen = -1;
+  /** The fog's looks were moved from the console: the day's draw is made again next frame. */
+  fogLooksMoved(): void {
+    this.fogDayIdx = Number.NaN;
+  }
+  /** The fog's day and hour as they stand, for the console. */
+  fogReport(): { world: string; day: number; draw: FogDay; level: number; burn: number; top: number; hold: { level: number | null; top: number | null; day: boolean } } {
+    return { world: this.fogDayWorld, day: this.fogDayIdx, draw: { ...this.fogDay }, level: this.airInput.fogLevel, burn: this.airInput.fogBurn, top: this.airInput.fogTop, hold: { ...this.airFogHold } };
+  }
   /** The ground as the field asks it: the cached heights only (never `heightAt`), the chunks' families, the liquid. */
   private readonly airGround: GroundSampler = {
     sample: (x, z, out) => {
@@ -936,9 +959,14 @@ export class World {
       const family = t.familyIdAt(x, z);
       // On a world with families, a point no built chunk covers is not known yet and is asked again later.
       if (family < 0 && t.swg) return false;
-      out.h = h;
+      const lava = this.lavaAt(x, h, z) > 0;
+      const water = lava ? h : t.waterHeightAt(x, z);
+      // Over standing water the air's ground is the water's surface (the third wave): the fog lies on a lake and drains
+      // over it as over level ground, never down its bed 40 m under the surface, and the smoke and the dust carried over
+      // it stand on the surface too. Lava keeps the ground: the lava world's sea is hidden under it.
+      out.h = !lava && water > h ? water : h;
       out.family = family;
-      out.medium = this.lavaAt(x, h, z) > 0 ? 3 : t.waterHeightAt(x, z) > h ? 2 : 1;
+      out.medium = lava ? 3 : water > h ? 2 : 1;
       // The pole's own colour-map bytes, packed, by number as the family is (wave 2b's tint raster); -1 for none.
       out.tint = t.colourIdAt(x, z);
       return true;
@@ -3171,9 +3199,25 @@ export class World {
       if (air) {
         const w0 = air.win;
         // The motes a second the count above is made of, before its rounding: the ground's share is judged on a fixed
-        // twentieth of a second, so what rock throws does not hang on the frame rate (`sheddingCount`).
+        // twentieth of a second, so what rock throws does not hang on the frame rate (`sheddingCount`). With the kick-up
+        // on (the third wave, the owner's answer): grains off rock and paving at `grains.hard` of sand's, none over
+        // water, the fraction each machine is owed carried to its next interval (`grainShedIn`), so a road throws a grit
+        // every so often at any frame rate.
         const perSecond = (12 + 70 * Math.min(1, speed / 35)) * (0.6 + Math.min(1.4, w * 0.35));
-        const shed = sheddingCount(count, perSecond, interval, air.raster.dustAt(w0.ox, w0.oz, w0.cell, tmpV.x, tmpV.z));
+        let shed: number;
+        if (VOL_TUNE.kickUp) {
+          const g = this.grainShed;
+          let carry = this.grainCarry.get(v);
+          if (!carry) this.grainCarry.set(v, (carry = { c: 0.5 }));
+          g.count = count;
+          g.perSecond = perSecond;
+          g.interval = interval;
+          g.share = air.raster.grainShareAt(w0.ox, w0.oz, w0.cell, tmpV.x, tmpV.z, AIR_TUNE.grains.hard);
+          g.carry = carry.c;
+          grainShedIn(g);
+          carry.c = g.carry;
+          shed = g.out;
+        } else shed = sheddingCount(count, perSecond, interval, air.raster.dustAt(w0.ox, w0.oz, w0.cell, tmpV.x, tmpV.z));
         this.airMotes += shed;
         // In the cell's own tinted colour, as the air's dust works it out (wave 2b's): one cell a machine.
         if (shed > 0) this.dust.spawn(tmpV.x, ground, tmpV.z, shed, vel.x, vel.z, Math.max(0.6, w * 0.9), this.airGroundColour(air, tmpV.x, tmpV.z, this.dustColor), VOL_TUNE.kickUp);
@@ -3199,6 +3243,9 @@ export class World {
   }
   /** `airGroundColour`'s kept tuple. */
   private readonly airTinted: [number, number, number] = [0.5, 0.5, 0.5];
+  /** The grains' rule's kept record, and what each machine is owed of a grain (made once a machine, the first time it throws). */
+  private readonly grainShed = newGrainShed();
+  private readonly grainCarry = new WeakMap<object, { c: number }>();
 
   /**
    * Make the moving air if the volumetrics master is on and the world has none (class A: an arrival's loading screen
@@ -3293,6 +3340,41 @@ export class World {
    * and the storm sheets' thinning handed over. In space, on the ground the client never drew, with the camera in a
    * building's view (last frame's draw) or the player in a cell, the field does nothing and says why. Allocates nothing.
    */
+  /**
+   * The fog the hour brings into the field's input (the third wave, the owner's 2026-10-24 answer): the world's draw for
+   * the day, hashed from its id and the drawn day's number, counted against the clock every player shares (`FogDayCount`:
+   * the shared day while the drawn time follows it, stepped at the drawn midnight otherwise, never the wall less the drawn
+   * time), made again only when either moves; then the hour's level, burn and top from the drawn time of day. A world the
+   * table has no row for never fogs; the console's hold stands over both.
+   */
+  private writeFogHour(inp: { fogLevel: number; fogBurn: number; fogTop: number }): void {
+    const id = this.packId ?? '';
+    const look = GROUND_FOG_LOOKS[id];
+    const day = this.day;
+    const count = this.fogCount;
+    count.time = day.time;
+    sharedClock.dayCountIn(day, count);
+    count.step();
+    const idx = count.day;
+    if (idx !== this.fogDayIdx || id !== this.fogDayWorld || FOG_LOOKS_STAMP.n !== this.fogLooksSeen) {
+      fogDayOf(id, idx, this.fogDay);
+      this.fogDayIdx = idx;
+      this.fogDayWorld = id;
+      this.fogLooksSeen = FOG_LOOKS_STAMP.n;
+    }
+    const hold = this.airFogHold;
+    const fh = this.fogHour;
+    fh.time = day.time;
+    fh.morning = hold.day ? (look ? look.morningHi : 0.8) : this.fogDay.morning;
+    fh.evening = this.fogDay.evening;
+    fh.eveningBefore = hold.day ? fh.morning : this.fogDay.eveningBefore;
+    fh.lookTop = look ? look.top : 4;
+    fogHourIn(fh);
+    inp.fogLevel = hold.level !== null ? hold.level : look || hold.day ? fh.level : 0;
+    inp.fogBurn = hold.level !== null ? 0 : fh.burn;
+    inp.fogTop = hold.top !== null ? hold.top : fh.top;
+  }
+
   updateAir(dt: number, simulate: boolean, viewInBuilding: boolean, reading: boolean): void {
     const air = this.air;
     if (!air || !this.camera) {
@@ -3318,6 +3400,7 @@ export class World {
     inp.sunY = tmpV.y;
     inp.sunZ = tmpV.z;
     inp.time = this.simTime;
+    this.writeFogHour(inp);
     // The ground's meshes on the chooser's material (the second wave), and whether that is the air's variant, which is
     // what the field keeps its offsets and dents for.
     this.syncGroundMaterial();

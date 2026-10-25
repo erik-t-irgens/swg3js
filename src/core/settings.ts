@@ -183,6 +183,13 @@ export interface Settings extends FxSettings {
    * a server that keeps one stands it for everybody.
    */
   restuss: 'living' | 'ruins';
+  /**
+   * A Force push, pull or repulse knocks a body when its wave reaches it (dodgeable), rather than at the press
+   * (`src/combat/forceWaveTune.ts`). Gameplay: it reads no graphics setting.
+   */
+  forceKnockTravels: boolean;
+  /** How fast a Force power's wave runs, and with it the knock, times the air's own wave (0.25 to 4). */
+  forceWaveSpeed: number;
   // The volumetrics' scene content (src/world/volumetrics/volSettings.ts speaks for these): the moving air, the dust it
   // carries and the light through it, each with its own detail, what may stir it, and how far the game's own storm
   // sheets thin while the dust draws a storm. The master and the volume's own keys are the effects' (fxRegistry.ts).
@@ -234,6 +241,18 @@ export interface Settings extends FxSettings {
   volDustBright: number;
   /** How strongly the dust shades itself toward the sun, 0 (not at all) to 2 (1 the march's own extinction). */
   volDustSelfShadow: number;
+  /** Layers of air over the ground (the third wave): 1, 2 or 3; the higher carry smoke and high dust on the faster wind. */
+  volAirLayers: number;
+  /** The air carries smoke: blasts, wrecks, burning engines and the gas clouds. */
+  volSmoke: boolean;
+  /** Ground fog on the mornings and evenings a world's day draws foggy. */
+  volFog: boolean;
+  /** Smoke's and fog's own grid as a multiple of the air's: 1, 2 or 3. */
+  volSmokeDetail: number;
+  /** How the dust breaks into wisps: 0 off, 1 bands, 2 noise, 3 noise ×2. */
+  volDustWisps: number;
+  /** A dust field for each layer of air, so high dust really runs ahead of low (Ultra only). */
+  volDustLayers: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -339,6 +358,10 @@ export const DEFAULT_SETTINGS: Settings = {
   difficulty: 1,
   // The owner's (2026-10-19, the pass's design §10 Q1): Restuss stands as its ruins, how SOE's live game ended.
   restuss: 'ruins',
+  // The owner's (2026-10-24, the volumetrics design's Q16: "Let's make it both"): a Force power's knock travels with its
+  // wave, at the air's own pace; the switch off puts back the instant knock to compare.
+  forceKnockTravels: true,
+  forceWaveSpeed: 1,
   // The volumetrics': every switch on under the master (which is off, an effects key), every detail at the High
   // preset (`VOL_PRESETS` in volSettings.ts), and the storm sheets thinned to half while the dust draws the storm
   // (ours, the design's Q7: their streaks show the wind at a scale the air's cells cannot).
@@ -370,6 +393,14 @@ export const DEFAULT_SETTINGS: Settings = {
   // ground's own brightness; at a self-shadow of 1 the dust shades itself exactly as the march's own extinction says.
   volDustBright: 0.6,
   volDustSelfShadow: 1,
+  // The third wave's, at the High preset: three layers of air, smoke and fog on, their grid twice the air's, the dust's
+  // wisps one octave of noise; a dust field a layer is Ultra's alone (the owner's Q19) and starts off.
+  volAirLayers: 3,
+  volSmoke: true,
+  volFog: true,
+  volSmokeDetail: 2,
+  volDustWisps: 2,
+  volDustLayers: false,
   ...FX_DEFAULTS,
 };
 
