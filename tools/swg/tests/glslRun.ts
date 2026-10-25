@@ -3,7 +3,9 @@
 // handed in -- and run against its mirror over a sweep. A body pinned only by its text can lose a term, swap two
 // arguments or scale a constant with every suite green (the volumetrics' third wave's review did all three); run, it
 // cannot. Scalars only: a vector is handed in as an object with `x`, `y`, `z` and `w`, and read by its components, which
-// is all the functions run this way do.
+// is all the functions run this way do; a `void` function runs too, writing the globals declared beside it (each a `let`
+// of the script's own), and a sampler or a matrix parameter is whatever the test hands in, read through the stand-ins it
+// puts in `env` (`texture`, `textureGrad`, `vec3`).
 //
 // Plain type stripping.
 
@@ -20,10 +22,14 @@ export const GLSL_SCALARS: Readonly<Record<string, (...a: number[]) => number>> 
 };
 
 const TYPES = '(?:float|int|bool|vec2|vec3|vec4)';
+/** What a function may answer: a type, or nothing (a `void` one writes globals, which run as the script's own `let`s). */
+const RETURNS = '(?:void|float|int|bool|vec2|vec3|vec4)';
+/** What a parameter may be: a type or a sampler, with a precision before it or not (stood in from `env` when run). */
+const PARAMS = '(?:(?:highp|mediump|lowp)\\s+)?(?:float|int|bool|vec2|vec3|vec4|mat3|sampler2D|sampler3D)';
 
 /** One function's text out of a shader's source, header to its own closing brace; throws when it is not there. */
 export function glslFunctionText(src: string, name: string): string {
-  const head = new RegExp(`\\b${TYPES}\\s+${name}\\s*\\(`).exec(src);
+  const head = new RegExp(`\\b${RETURNS}\\s+${name}\\s*\\(`).exec(src);
   if (!head) throw new Error(`no GLSL function ${name} in the source`);
   const open = src.indexOf('{', head.index);
   let depth = 0;
@@ -77,7 +83,7 @@ export function glslHash(src: string): { airHash: (x: number) => number; airRand
 export function glslFunctions(glsl: string, names: readonly string[], env: Record<string, unknown> = {}): Record<string, (...a: unknown[]) => number> {
   const body = glsl
     .replace(/^\s*uniform[^;]*;\s*$/gm, '')
-    .replace(new RegExp(`\\b${TYPES}\\s+(\\w+)\\s*\\(([^)]*)\\)\\s*\\{`, 'g'), (_m, fn: string, params: string) => `function ${fn}(${params.replace(new RegExp(`\\b(?:in|out|inout)?\\s*${TYPES}\\s+`, 'g'), '').trim()}) {`)
+    .replace(new RegExp(`\\b${RETURNS}\\s+(\\w+)\\s*\\(([^)]*)\\)\\s*\\{`, 'g'), (_m, fn: string, params: string) => `function ${fn}(${params.replace(new RegExp(`\\b(?:(?:in|out|inout)\\s+)?${PARAMS}\\s+`, 'g'), '').trim()}) {`)
     .replace(new RegExp(`\\b${TYPES}\\s+(?=\\w)`, 'g'), 'let ')
     .replace(/\bint\(/g, 'Math.trunc(')
     .replace(/\bfloat\(/g, 'Number(')

@@ -375,6 +375,30 @@ const AIR_GROUPS: DialGroup[] = [
       dial('rain', 'snowAlpha', 'Snow\'s thickness', 0, 1, 0.01, '', 'How opaque a flake is.'),
     ],
   },
+  {
+    title: 'Water and lava',
+    note: 'The current under the water and the lava, a layer of its own the same solver steps, the land its shore: what moves the water\'s fine detail and its ripples, and drags the lava\'s crust.',
+    dials: [
+      dial('liquid', 'waterRelax', 'Water follows the wind', 0, 3, 0.01, '/s', 'How fast the water\'s current is pulled toward its share of the wind.'),
+      dial('liquid', 'waterWind', 'Water\'s share of the wind', 0, 1, 0.01, '', 'How much of the wind the water\'s current comes to.'),
+      dial('liquid', 'waterDiss', 'Water\'s stirring dies away', 0, 3, 0.01, '/s', 'How fast a current a boat or a blast stirred fades on its own.'),
+      dial('liquid', 'waterSwirl', 'Water swirls', 0, 2, 0.05, '×', 'How much of the air\'s swirl the water keeps: the eddies behind an island.'),
+      dial('liquid', 'lavaRelax', 'Lava stills', 0, 5, 0.05, '/s', 'How hard the lava is pulled back to stillness (or to its own flow down a fall).'),
+      dial('liquid', 'lavaDiss', 'Lava\'s stirring dies away', 0, 5, 0.05, '/s', 'How fast a current stirred in the lava fades on its own.'),
+      dial('liquid', 'lavaWind', 'Lava\'s share of the wind', 0, 0.5, 0.01, '', 'How much of the wind the lava follows (none, as the demo has it).'),
+      dial('liquid', 'lavaSwirl', 'Lava swirls', 0, 2, 0.05, '×', 'How much of the air\'s swirl the lava keeps (none, as the demo has it).'),
+      dial('liquid', 'push', 'A push moves the liquid', 0, 2, 0.05, '×', 'How much of a jet\'s, a blast\'s or the Force\'s push the water and the lava under it take.'),
+      dial('liquid', 'ribbonFlow', 'Lava falls\' own flow', 0, 3, 0.05, '×', 'How much of a drawn lava fall\'s own speed down its run the lava there is pulled toward.'),
+      dial('liquid', 'detailFlow', 'Water\'s detail rides the current', 0, 2, 0.05, '×', 'How fast the water\'s fine detail drifts with the current, as a share of the current\'s own speed.'),
+      dial('liquid', 'crustCycle', 'Lava crust\'s cycle', 0.5, 12, 0.1, 's', 'How long each of the crust\'s two phases is carried before it starts again (they cross-fade half a cycle apart).'),
+      dial('liquid', 'jetPoke', 'A jet rings the water', 0, 0.05, 0.0005, '', 'How hard a jet landing on the water presses the ripples, a second, at an impact of 1 m/s.'),
+      dial('liquid', 'jetPokeRadius', 'Jet ring\'s reach', 0, 6, 0.1, 'm', 'How much wider than the jet\'s own spread the ripples are pressed.'),
+      dial('liquid', 'blastPoke', 'A blast rings the water', 0, 4, 0.05, '', 'How hard a thermal detonator over the water presses the ripples; others by their radius.'),
+      dial('liquid', 'ringDepth', 'Spray rings the water', 0, 0.5, 0.005, '', 'How hard a drop of spray landing back on the water presses a ring.'),
+      dial('liquid', 'ringSize', 'Spray ring\'s size', 1, 20, 0.5, '× drop', 'How wide that ring is, in the drop\'s own sizes.'),
+      dial('solver', 'liquidCap', 'Fastest current', 1, 60, 0.5, 'm/s', 'The most the water or the lava ever moves.'),
+    ],
+  },
 ];
 
 /** One number of a world's fog look (`GROUND_FOG_LOOKS`), as a slider set through `tuneFogLooks`. */

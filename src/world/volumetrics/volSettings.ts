@@ -5,7 +5,7 @@
 // **A preset is worked out, never stored** (the design's decision 4): `presetOf` answers the name whose every
 // quality key matches, else Custom, so it cannot drift from its dials and an old settings file needs nothing. A
 // preset writes the quality keys and nothing else, never a switch (what is drawn) and never an art dial (taste).
-// It writes and compares only the keys whose knobs this build has (no particle or liquid detail yet),
+// It writes and compares only the keys whose knobs this build has (the grass's and the clouds' not yet),
 // and a file saved before a wave added a quality key takes that key from the preset its other keys hold
 // (`volFillQuality`), so a wave that adds a quality key never turns an existing choice into Custom.
 //
@@ -56,6 +56,11 @@ export const VOL_SCENE_KEYS = [
   'volRainDetail',
   'volRainThin',
   'volSnowThin',
+  'volCurrent',
+  'volLiquidDetail',
+  'volLava',
+  'volArtWater',
+  'volArtLava',
 ] as const satisfies readonly (keyof Settings)[];
 
 /** The volumetrics' keys the effects chain reads (`fxRegistry.ts`): the master and the volume's own. */
@@ -109,20 +114,24 @@ export const VOL_RANGES = {
   volRainDetail: { options: [4096, 8192, 16384, 32768] as readonly number[] },
   volRainThin: { min: 0, max: 1, step: 0.05 },
   volSnowThin: { min: 0, max: 1, step: 0.05 },
+  // The fifth wave's: the liquid tile's cells over the 192 m square (3, 2, 1.5 or 1.0 m a cell), and the two art dials.
+  volLiquidDetail: { options: [64, 96, 128, 192] as readonly number[] },
+  volArtWater: { min: 0, max: 1, step: 0.05 },
+  volArtLava: { min: 0, max: 1, step: 0.05 },
 } as const;
 
 /** The quality keys a preset writes, in this build. */
-export const VOL_QUALITY_KEYS = ['volAirDetail', 'volAirSolve', 'volAirRate', 'volDustDetail', 'volLightDetail', 'volLightSteps', 'volSandDetail', 'volPrintDetail', 'airVolumeResolution', 'airVolumeSteps', 'airVolumeHistory', 'airVolumeShadows', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers', 'volParticleDetail', 'volParticleShadows', 'volRainDetail'] as const satisfies readonly (keyof Settings)[];
+export const VOL_QUALITY_KEYS = ['volAirDetail', 'volAirSolve', 'volAirRate', 'volDustDetail', 'volLightDetail', 'volLightSteps', 'volSandDetail', 'volPrintDetail', 'airVolumeResolution', 'airVolumeSteps', 'airVolumeHistory', 'airVolumeShadows', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers', 'volParticleDetail', 'volParticleShadows', 'volRainDetail', 'volLiquidDetail'] as const satisfies readonly (keyof Settings)[];
 
 /**
  * The quality keys a wave added after the first: a settings file saved before its wave never wrote them, so with
  * nothing done it would load at the default (High's) and an earlier Low or Ultra would read Custom. `volFillQuality`
  * gives such a file the preset its other quality keys hold, at load.
  */
-export const VOL_QUALITY_LATER: readonly VolQualityKey[] = ['volSandDetail', 'volPrintDetail', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers', 'volParticleDetail', 'volParticleShadows', 'volRainDetail'];
+export const VOL_QUALITY_LATER: readonly VolQualityKey[] = ['volSandDetail', 'volPrintDetail', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers', 'volParticleDetail', 'volParticleShadows', 'volRainDetail', 'volLiquidDetail'];
 
 /** The wave each later quality key came in, against the wave a settings file says it was saved in (`VOL_QUALITY_STAMP`). */
-export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>> = { volSandDetail: 2, volPrintDetail: 2, volAirLayers: 3, volSmokeDetail: 3, volDustWisps: 3, volDustLayers: 3, volParticleDetail: 4, volParticleShadows: 4, volRainDetail: 4 };
+export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>> = { volSandDetail: 2, volPrintDetail: 2, volAirLayers: 3, volSmokeDetail: 3, volDustWisps: 3, volDustLayers: 3, volParticleDetail: 4, volParticleShadows: 4, volRainDetail: 4, volLiquidDetail: 5 };
 
 /**
  * The key a saved settings file carries the wave it was written in under, and this build's wave. The file keeps only
@@ -130,7 +139,7 @@ export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>>
  * written at the default: only the stamp tells them apart, and a key of a wave the file already knew is never filled.
  */
 export const VOL_QUALITY_STAMP = 'volQualityWave';
-export const VOL_QUALITY_WAVE = 4;
+export const VOL_QUALITY_WAVE = 5;
 
 /**
  * The stamp into a settings file about to be saved (what differs from the defaults), only when it holds a quality key:
@@ -157,10 +166,10 @@ export const VOL_PRESET_NAMES: readonly VolPresetName[] = ['low', 'medium', 'hig
  * (the owner's Q19: "only as an ultra option").
  */
 export const VOL_PRESETS: Readonly<Record<VolPresetName, Readonly<Record<VolQualityKey, number | boolean>>>> = {
-  low: { volAirDetail: 64, volAirSolve: 10, volAirRate: 30, volDustDetail: 3, volLightDetail: 1, volLightSteps: 16, volSandDetail: 3, volPrintDetail: 1024, airVolumeResolution: 0.25, airVolumeSteps: 8, airVolumeHistory: true, airVolumeShadows: false, volAirLayers: 1, volSmokeDetail: 1, volDustWisps: 0, volDustLayers: false, volParticleDetail: 0.5, volParticleShadows: false, volRainDetail: 4096 },
-  medium: { volAirDetail: 96, volAirSolve: 14, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 20, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 12, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 2, volSmokeDetail: 2, volDustWisps: 1, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 8192 },
-  high: { volAirDetail: 128, volAirSolve: 20, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 26, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 16, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 2, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 16384 },
-  ultra: { volAirDetail: 192, volAirSolve: 28, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 32, volSandDetail: 6, volPrintDetail: 2048, airVolumeResolution: 1, airVolumeSteps: 24, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 3, volDustLayers: true, volParticleDetail: 2, volParticleShadows: true, volRainDetail: 32768 },
+  low: { volAirDetail: 64, volAirSolve: 10, volAirRate: 30, volDustDetail: 3, volLightDetail: 1, volLightSteps: 16, volSandDetail: 3, volPrintDetail: 1024, airVolumeResolution: 0.25, airVolumeSteps: 8, airVolumeHistory: true, airVolumeShadows: false, volAirLayers: 1, volSmokeDetail: 1, volDustWisps: 0, volDustLayers: false, volParticleDetail: 0.5, volParticleShadows: false, volRainDetail: 4096, volLiquidDetail: 64 },
+  medium: { volAirDetail: 96, volAirSolve: 14, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 20, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 12, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 2, volSmokeDetail: 2, volDustWisps: 1, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 8192, volLiquidDetail: 96 },
+  high: { volAirDetail: 128, volAirSolve: 20, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 26, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 16, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 2, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 16384, volLiquidDetail: 128 },
+  ultra: { volAirDetail: 192, volAirSolve: 28, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 32, volSandDetail: 6, volPrintDetail: 2048, airVolumeResolution: 1, airVolumeSteps: 24, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 3, volDustLayers: true, volParticleDetail: 2, volParticleShadows: true, volRainDetail: 32768, volLiquidDetail: 192 },
 };
 
 /** The preset whose every quality key in `keys` the settings hold, or 'custom'. */
@@ -273,6 +282,15 @@ export interface VolTune {
   rainDetail: number;
   rainThin: number;
   snowThin: number;
+  /**
+   * The fifth wave's: the water's current (the liquid tile, the water's variant, the ripples carried), the lava's crust,
+   * the liquid tile's cells over the square, and how far each is laid over the game's own art.
+   */
+  current: boolean;
+  lava: boolean;
+  liquidDetail: number;
+  artWater: number;
+  artLava: number;
 }
 
 export function newVolTune(): VolTune {
@@ -329,11 +347,19 @@ export function newVolTune(): VolTune {
     rainDetail: 16384,
     rainThin: 0.5,
     snowThin: 0.5,
+    current: true,
+    lava: true,
+    liquidDetail: 128,
+    artWater: 0.5,
+    artLava: 0.5,
   };
   // The game's own rain and snow sheets stand down whole while ours falls (`volRainThin`, `volSnowThin` 1, the settings'
-  // defaults), written after the record is made so each field is still a double from its first write.
+  // defaults), written after the record is made so each field is still a double from its first write; the fifth wave's
+  // art dials likewise at their full look.
   t.rainThin = 1;
   t.snowThin = 1;
+  t.artWater = 1;
+  t.artLava = 1;
   return t;
 }
 
@@ -404,6 +430,12 @@ export function volQualityFrom(s: Pick<Settings, VolKey | 'effects'>, out: VolTu
   out.rainDetail = snap(n('volRainDetail'), R.volRainDetail.options, 16384);
   out.rainThin = clampRange(n('volRainThin'), R.volRainThin, 1);
   out.snowThin = clampRange(n('volSnowThin'), R.volSnowThin, 1);
+  out.current = b('volCurrent');
+  out.lava = b('volLava');
+  out.liquidDetail = snap(n('volLiquidDetail'), R.volLiquidDetail.options, 128);
+  // Past the page's end from the console, held only to what cannot break anything (no negative carry).
+  out.artWater = over.volArtWater !== undefined ? Math.max(0, Math.min(4, n('volArtWater'))) : clampRange(n('volArtWater'), R.volArtWater, 1);
+  out.artLava = over.volArtLava !== undefined ? Math.max(0, Math.min(4, n('volArtLava'))) : clampRange(n('volArtLava'), R.volArtLava, 1);
   return out;
 }
 
@@ -467,7 +499,22 @@ export const VOL_APPLY_CLASS: Readonly<Record<VolKey, 'W' | 'C' | 'T' | 'U' | 'M
   volRainDetail: 'T',
   volRainThin: 'U',
   volSnowThin: 'U',
+  // The fifth wave's: the current and the crust swap compiled materials (M; the current also gates the ripples' carry, a
+  // gate), and either with the liquid tile's detail sizes the atlas (T: the air starts again, its programs kept).
+  volCurrent: 'M',
+  volLiquidDetail: 'T',
+  volLava: 'M',
+  volArtWater: 'U',
+  volArtLava: 'U',
 };
+
+/**
+ * The liquid tile's cells a side over the window (the fifth wave's): the setting's while the current or the lava is
+ * on, nought (no tile at all) while both are off, so neither costs a cell of the atlas while it is off.
+ */
+export function liquidTileCells(t: Pick<VolTune, 'current' | 'lava' | 'liquidDetail'>): number {
+  return t.current || t.lava ? t.liquidDetail : 0;
+}
 
 /** One console field as a setting: the key, its value, and whether the page's control can hold it. */
 export interface VolConsoleSetting {
@@ -527,7 +574,9 @@ export function volConsoleToSettings(o: Record<string, unknown>): VolConsoleSett
       key === 'volStreaks' ||
       key === 'volParticleShadows' ||
       key === 'volRain' ||
-      key === 'volSnow';
+      key === 'volSnow' ||
+      key === 'volCurrent' ||
+      key === 'volLava';
     if (wantsBool) {
       if (typeof v === 'boolean') out.set(key, { key, value: v, inRange: true });
       continue;
@@ -550,6 +599,12 @@ export function volMemoryMB(t: VolTune, width: number, height: number): number {
   // side in one atlas (the third wave's); obstacles RG16F (red the walls, green the walls and a compound's rooms: 4).
   const layers = t.airLayers > 1 ? (t.airLayers < 3 ? t.airLayers : 3) : 1;
   let bytes = cells * layers * (4 * 2 + 2 * 2 + 2) + cells * 4;
+  // The liquid tile (the fifth wave's), its own size beside the slabs in the same atlas, while the current or the lava
+  // is on; and the liquid's own flow raster, RG32F (8), at the air's size.
+  if (t.current || t.lava) {
+    const lq = liquidTileCells(t);
+    bytes += lq * lq * (4 * 2 + 2 * 2 + 2) + cells * 8;
+  }
   // The rasters: height R32F, response RGBA8, colour RGBA8, and (wave 2b's) the colour map's tint RGBA8.
   bytes += cells * (4 + 4 + 4 + 4);
   // The dust pair, RGBA32F, two attachments each from wave 2b: the colour and density, and the shape it carries; a tile

@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings } from '../../../src/core/settings.ts';
 import { FX_DEFAULTS, FX_KNOBS, isFxSettingKey } from '../../../src/core/fxRegistry.ts';
-import { isVolKey, newVolTune, presetOf, VOL_APPLY_CLASS, VOL_FX_KEYS, VOL_KEYS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_QUALITY_ADDED, VOL_QUALITY_KEYS, VOL_QUALITY_LATER, VOL_QUALITY_STAMP, VOL_QUALITY_WAVE, VOL_RANGES, VOL_SCENE_KEYS, VOL_TUNE, volConsoleToSettings, volFillQuality, volMemoryMB, volQualityFrom } from '../../../src/world/volumetrics/volSettings.ts';
+import { isVolKey, liquidTileCells, newVolTune, presetOf, VOL_APPLY_CLASS, VOL_FX_KEYS, VOL_KEYS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_QUALITY_ADDED, VOL_QUALITY_KEYS, VOL_QUALITY_LATER, VOL_QUALITY_STAMP, VOL_QUALITY_WAVE, VOL_RANGES, VOL_SCENE_KEYS, VOL_TUNE, volConsoleToSettings, volFillQuality, volMemoryMB, volQualityFrom } from '../../../src/world/volumetrics/volSettings.ts';
 import { VOL_PAGE_KEYS, VOLUMETRICS } from '../../../src/ui/volPage.ts';
 
 let checks = 0;
@@ -76,6 +76,12 @@ const types: Record<string, string> = {
   volRainDetail: 'number',
   volRainThin: 'number',
   volSnowThin: 'number',
+  // The fifth wave's: the water's current and the lava's, the liquid's tile, the two art dials.
+  volCurrent: 'boolean',
+  volLiquidDetail: 'number',
+  volLava: 'boolean',
+  volArtWater: 'number',
+  volArtLava: 'number',
 };
 for (const k of VOL_KEYS) ok(typeof S[k] === types[k], `"${k}" is in the defaults as a ${types[k]}`);
 ok(Object.keys(types).length === VOL_KEYS.length, 'and those are every key the pass speaks for, no more');
@@ -96,9 +102,17 @@ ok(!(VOL_QUALITY_KEYS as readonly string[]).includes('volDustBright') && !(VOL_Q
   ok(!Number.isInteger(t.dustBright) && !Number.isInteger(t.dustSelfShadow), 'their fields in the kept record start as fractions, so each is a double from its first write');
 }
 // No later wave's key is in this build at all, shown or hidden.
-for (const later of ['volCurrent', 'volLiquidDetail', 'volLava', 'volGrass', 'volArtWater', 'volArtLava', 'volArtGrass', 'volFromPeers']) {
+for (const later of ['volGrass', 'volArtGrass', 'volFromPeers']) {
   ok(!(later in S), `"${later}" (a later wave's) is not in this build`);
 }
+// The fifth wave's: the current and the lava are class M (the water and the lava change material, both built), the
+// liquid's tile a target made again (T), the two art dials uniforms (U); on by default at the art dials' one, and the
+// liquid's tile by preset 64 to 192 cells. The water's ribbons switch is the water's own, beside its settings, and off.
+ok(VOL_APPLY_CLASS.volCurrent === 'M' && VOL_APPLY_CLASS.volLava === 'M' && VOL_APPLY_CLASS.volLiquidDetail === 'T' && VOL_APPLY_CLASS.volArtWater === 'U' && VOL_APPLY_CLASS.volArtLava === 'U', "the fifth wave's: the current and the lava swap built materials, the tile is a target made again, the art dials are uniforms");
+ok(S.volCurrent === true && S.volLava === true && S.volArtWater === 1 && S.volArtLava === 1 && S.volLiquidDetail === 128, 'the current and the lava start on, their art at one and the tile at High\'s 128: nothing shows while the master is off');
+ok(VOL_PRESETS.low.volLiquidDetail === 64 && VOL_PRESETS.medium.volLiquidDetail === 96 && VOL_PRESETS.high.volLiquidDetail === 128 && VOL_PRESETS.ultra.volLiquidDetail === 192, "the liquid's tile by preset: 64, 96, 128 and 192 cells");
+ok(liquidTileCells({ current: false, lava: false, liquidDetail: 128 }) === 0 && liquidTileCells({ current: true, lava: false, liquidDetail: 128 }) === 128 && liquidTileCells({ current: false, lava: true, liquidDetail: 96 }) === 96, "the liquid's tile is made only while the current or the lava is on: none with both off, so no memory is spent on it");
+ok(S.waterRibbons === false && !isVolKey('waterRibbons'), "the terrain's ribbons are the water's own switch, not the pass's, and off: off is today's game");
 // The third wave's: the layers, smoke and fog details and a field a layer are targets made again (class T), the wisps a
 // march material a mode (class M, the Start's decision), smoke and fog switches the frame reads (C); a dust field a layer
 // is off by default and on Ultra alone (the owner's answer).
@@ -114,7 +128,7 @@ ok(VOL_PRESETS.low.volDustWisps === 0 && VOL_PRESETS.medium.volDustWisps === 1 &
 ok(['volParticles', 'volLeaves', 'volPuffs', 'volSpray', 'volStreaks', 'volRain', 'volSnow'].every((k) => VOL_APPLY_CLASS[k as keyof typeof VOL_APPLY_CLASS] === 'C') && VOL_APPLY_CLASS.volParticleDetail === 'T' && VOL_APPLY_CLASS.volRainDetail === 'T' && VOL_APPLY_CLASS.volParticleShadows === 'U' && VOL_APPLY_CLASS.volRainThin === 'U' && VOL_APPLY_CLASS.volSnowThin === 'U', "the fourth wave's switches are read by the frame, its counts are targets made again, the leaves' shadow and the thinning are uniforms");
 ok(S.volParticles === true && S.volLeaves === true && S.volPuffs === true && S.volSpray === true && S.volStreaks === true && S.volRain === true && S.volSnow === false && S.volRainThin === 1 && S.volSnowThin === 1, 'the particles, every kind and the rain start on, the snow off; the game\'s own sheets stood down whole while ours falls');
 ok(VOL_PRESETS.low.volParticleDetail === 0.5 && VOL_PRESETS.medium.volParticleDetail === 1 && VOL_PRESETS.high.volParticleDetail === 1 && VOL_PRESETS.ultra.volParticleDetail === 2 && VOL_PRESETS.low.volRainDetail === 4096 && VOL_PRESETS.ultra.volRainDetail === 32768 && VOL_PRESETS.low.volParticleShadows === false, "the pools' counts by preset: half, whole, whole and twice High's particles; 4,096 to 32,768 drops; the leaves' shadow off on Low");
-ok(VOL_QUALITY_WAVE === 4 && VOL_QUALITY_ADDED.volParticleDetail === 4 && VOL_QUALITY_ADDED.volRainDetail === 4 && VOL_QUALITY_ADDED.volParticleShadows === 4, "this build saves its files as the fourth wave's, and its three quality keys say so");
+ok(VOL_QUALITY_WAVE === 5 && VOL_QUALITY_ADDED.volParticleDetail === 4 && VOL_QUALITY_ADDED.volRainDetail === 4 && VOL_QUALITY_ADDED.volParticleShadows === 4 && VOL_QUALITY_ADDED.volLiquidDetail === 5, "this build saves its files as the fifth wave's; the fourth wave's three quality keys and the fifth's one say which wave added them");
 
 // --- presets ---
 ok(presetOf(DEFAULT_SETTINGS) === 'high', 'the defaults work out to High');

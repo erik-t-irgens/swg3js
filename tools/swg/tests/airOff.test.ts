@@ -194,8 +194,67 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
   ok(same, 'and every one is the same key, defines and text');
 }
 {
+  // The ripples (the fifth wave hangs a carry on them, `setRippleCarry`, only with the master and the current on): with
+  // no carry hung, the old module's step and today's make the same draws, in the same order, into the same targets, with
+  // the same step uniforms (the scroll, the state read, the pokes, the coupling and the damping) over a run of frames of
+  // every kind -- a first frame, frames the window slides on, frames with no step at all, a poke -- through a renderer
+  // that records rather than draws. Their step's text is the old one too, and the module only grew.
+  const [wo, wn] = await both('world/waterSim.ts');
+  const record = (m: Mod): string[] => {
+    const calls: string[] = [];
+    const targets: unknown[] = [];
+    const id = (t: unknown): number => {
+      if (t === null) return -1;
+      let i = targets.indexOf(t);
+      if (i < 0) i = targets.push(t) - 1;
+      return i;
+    };
+    let target: unknown = null;
+    const gl = { getExtension: (n: string) => (n === 'EXT_color_buffer_float' || n === 'OES_texture_float_linear' ? {} : null) };
+    const renderer = {
+      getContext: () => gl,
+      getRenderTarget: () => target,
+      setRenderTarget: (t: unknown) => {
+        target = t;
+      },
+      clear: () => void calls.push(`clear ${id(target)}`),
+      render: (scene: { children: { material?: { uniforms?: Record<string, { value: unknown }> } }[] }) => {
+        const mat = scene.children[0]?.material;
+        const u = mat?.uniforms;
+        if (u && u.uScroll) {
+          const s = u.uScroll.value as import('three').Vector2;
+          const pokes = (u.uPokes.value as import('three').Vector4[]).map((p) => p.toArray().map((v) => v.toFixed(6)).join(',')).join(';');
+          calls.push(`step into ${id(target)} from ${id((u.uState.value as unknown) ?? null)} scroll ${s.x.toFixed(9)},${s.y.toFixed(9)} c2 ${u.uC2.value} damp ${u.uDamp.value} pokes ${pokes}`);
+        } else calls.push(`splat into ${id(target)}`);
+      },
+      autoClear: true,
+      getClearAlpha: () => 1,
+      getClearColor: (c: import('three').Color) => c,
+      setClearColor: () => undefined,
+    };
+    (m.configureWaterSim as (s: unknown) => void)({ waterRipples: true, waterRippleDetail: 512, waterRippleHeight: 1, waterRipplePersistence: 0.85 });
+    const step = m.stepWaterSim as (r: unknown, x: number, z: number, y: number, dt: number, cy?: number) => void;
+    let x = 10;
+    let z = -4;
+    for (let f = 0; f < 60; f++) {
+      if (f === 7) (m.pokeWaterSim as (x: number, z: number, s: number, r: number) => void)(x + 3, z - 2, 0.6, 1.2);
+      x += f % 5 === 0 ? 0.9 : 0.05;
+      z -= f % 3 === 0 ? 0.4 : 0;
+      step(renderer, x, z, 0, f % 4 === 1 ? 1 / 240 : 1 / 60, 3);
+      calls.push(`frame ${f} tex ${id((m.WATER_SIM_TEX as { value: unknown }).value)}`);
+    }
+    (m.disposeWaterSim as () => void)();
+    return calls;
+  };
+  const a = record(wo);
+  const b = record(wn);
+  let same = a.length === b.length && a.length > 100;
+  for (let i = 0; i < a.length && same; i++) if (a[i] !== b[i]) same = false;
+  ok(same, `the ripples with no carry hung: the old step's ${a.length} draws and frames, in order, into the same targets with the same uniforms`);
+  ok((wn.rippleCarrySet as () => boolean)() === false, 'and no carry is hung unless the world hangs one');
   const fold = (p: string) => readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
-  ok(fold(join(OLD, 'world', 'waterSim.ts')) === fold(join(NEW, 'world', 'waterSim.ts')), "the ripples' module is the old one to the byte (its step's programs are its own and not exported): this wave touches nothing of it");
+  const stepText = (t: string) => t.slice(t.indexOf('const STEP_FRAG'), t.indexOf('interface Rig'));
+  ok(stepText(fold(join(OLD, 'world', 'waterSim.ts'))) === stepText(fold(join(NEW, 'world', 'waterSim.ts'))) && stepText(fold(join(NEW, 'world', 'waterSim.ts'))).length > 1000, "the ripples' step program's text is the old one to the byte");
   const [o, n] = await both('world/lava.ts');
   const [so, sn] = await both('world/lavaStyle.ts');
   const lava = (m: Mod, s: Mod, crust: boolean) => {

@@ -118,7 +118,7 @@ const field = new AirField(stub, newVolTune(), { ground: { sample: () => false }
 const pass = new AirVolumePass(() => field);
 const fieldMats = field.materials();
 const volumeMats = pass.materials().map((m) => m.material as THREE.ShaderMaterial);
-ok(fieldMats.length === 25 && volumeMats.length === 6, "the field lists its twenty-five materials (the first wave's ten, the dust's two-output fill, the blowing sand's offsets, the dents' stamp and fade, the third wave's smoke and fog and the wisps' bands, and the fourth wave's kick-up update, fill and four draws and the rain's update, fill and draw) and the volume its six (the march once a wisps mode, the resolve, the composite: the warm-up's lists)");
+ok(fieldMats.length === 27 && volumeMats.length === 6, "the field lists its twenty-seven materials (the first wave's ten, the dust's two-output fill, the blowing sand's offsets, the dents' stamp and fade, the third wave's smoke and fog and the wisps' bands, the fourth wave's kick-up update, fill and four draws and the rain's update, fill and draw, and the fifth wave's spray rings and ripple carry) and the volume its six (the march once a wisps mode, the resolve, the composite: the warm-up's lists)");
 // The fourth wave's pools: their updates and fills GLSL 3, three outputs the kick-up's and two the rain's, each declared
 // once at its own location and written; their draws as each is meant to be drawn.
 {
@@ -177,6 +177,10 @@ for (const m of [...fieldMats, ...volumeMats]) {
   }
   if (m.name === 'air.dentStamp') {
     ok(m.blending === THREE.CustomBlending && m.blendEquation === THREE.AddEquation && m.blendSrc === THREE.OneFactor && m.blendDst === THREE.OneFactor && m.toneMapped === false && m.depthTest === false && m.depthWrite === false, 'air.dentStamp: added into the dents on purpose (each stamp its depth), no tone curve, no depth');
+    continue;
+  }
+  if (m.name === 'air.kick.rings') {
+    ok(m.blending === THREE.CustomBlending && m.blendEquation === THREE.AddEquation && m.blendSrc === THREE.OneFactor && m.blendDst === THREE.OneFactor && m.blendSrcAlpha === THREE.ZeroFactor && m.blendDstAlpha === THREE.OneFactor && m.toneMapped === false && m.depthTest === false && m.depthWrite === false, "air.kick.rings: added into the ripples' height on purpose (each ring its depth, the state's other channels kept), no tone curve, no depth");
     continue;
   }
   if (m.name === 'air.dentFade') {

@@ -40,7 +40,8 @@ import { srgbDecode, tintGamma } from '../groundMath.ts';
 import { WEATHER_UNIFORMS } from '../wetness.ts';
 import { PRINT_TUNE } from '../footprints.ts';
 import type { FootStep } from '../../audio/footsteps.ts';
-import type { VolTune } from './volSettings.ts';
+import { liquidTileCells, type VolTune } from './volSettings.ts';
+import { crustPhaseIn, liquidOff, newCrustPhase, RippleCarryPass, type LiquidUniforms } from './airLiquid.ts';
 
 /**
  * Everything the volume reads of the air, by reference (§2.8): the kept uniform objects whose `value` is each field's
@@ -541,8 +542,27 @@ export class AirField implements AirSource {
   private readonly lightR = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
   /** What the sand in the air keeps over a frame, and its lift's soft step. */
   private readonly sandC = new THREE.Vector4(0.5, 20, 0, 0);
-  /** The tile count every solver stage reads (the layers of air solved). */
+  /** The tile count every solver stage reads (the layers of air solved, and the liquid's tile where there is one). */
   private readonly tileCount: { value: number };
+  /** How many of the tiles are the air's slabs (the liquid's tile, where there is one, is the last): the coupling's count. */
+  private readonly slabCount = { value: 1 };
+  /**
+   * The liquid's tile (the fifth wave, the design's §2.9): its cells a side (nought for none: the current and the lava
+   * both off), its numbers in vectors the frame writes in place, the flow raster's texture, the session's record this
+   * field writes while it is the world's (`bindLiquid`), the console's view, the crust's two phases, and the ripples'
+   * carry (`RippleCarryPass`, made once with the field; the world hangs it on the ripples).
+   */
+  private liquidCells = 0;
+  private readonly liquidP = new THREE.Vector4(AIR_TUNE.liquid.waterRelax, AIR_TUNE.liquid.waterDiss, AIR_TUNE.liquid.lavaRelax, AIR_TUNE.liquid.lavaDiss);
+  private readonly liquidQ = new THREE.Vector4(AIR_TUNE.liquid.waterWind, 0.5, 0.5, 0.5);
+  private readonly liquidR = new THREE.Vector4(AIR_TUNE.liquid.push, AIR_TUNE.liquid.ribbonFlow, AIR_TUNE.solver.liquidCap, 0.5);
+  private flowTex: THREE.DataTexture | null = null;
+  private readonly flowU = { value: null as THREE.Texture | null };
+  private liquidBound: LiquidUniforms | null = null;
+  /** The console's view on the liquids (0 none, 1 the current on the water, 2 the crust's carry on the lava). */
+  liquidView = 0;
+  private readonly crust = newCrustPhase();
+  readonly carry = new RippleCarryPass();
   /** The dust's laws worked out once a frame (`dustLawIn`), and the vectors the pass reads them through. */
   private readonly law: DustLaw = newDustLaw();
   private readonly dustLaw = new THREE.Vector4(0.5, 0.5, 0.5, 0.5);
@@ -566,7 +586,7 @@ export class AirField implements AirSource {
   private liftTopAt = -1e9;
   private readonly quad: THREE.Mesh;
   /** Each field's size now, so a dial that moves one is a resize and nothing else. */
-  private sized = { cells: 0, dust: 0, light: 0, sand: 0, layers: 0, tiles: 0, smoke: 0, bands: 0 };
+  private sized = { cells: 0, dust: 0, light: 0, sand: 0, layers: 0, tiles: 0, smoke: 0, bands: 0, liquid: 0 };
   private needsFill = true;
   /** The offsets alone were made again at a new size and start at rest at the next frame that steps (`fillOffsets`). */
   private sandFill = false;
@@ -689,8 +709,12 @@ export class AirField implements AirSource {
       uObstacles: this.obstacles,
       uWind: this.wind,
       uObstacleOver: this.obstacleOver,
+      // The fifth wave's: the medium byte the liquid's tile is solid by, and the slabs' count the coupling counts over.
+      uMedium: this.colourU,
+      uSlabCount: this.slabCount,
     };
-    const gust = { uNoise: { value: this.noise }, uNoiseTexel: { value: 1 / NOISE_SIZE }, uGustTime: { value: this.gustTime } };
+    const liquid = { uLiquidP: { value: this.liquidP }, uLiquidQ: { value: this.liquidQ }, uLiquidR: { value: this.liquidR } };
+    const gust ={ uNoise: { value: this.noise }, uNoiseTexel: { value: 1 / NOISE_SIZE }, uGustTime: { value: this.gustTime } };
     // How the field's own passes read each slab's air out of the atlas (`slabVelAt`), shared by reference (the third wave).
     const slabVel = { uSlabTiles: this.slabTiles, uSlabScale: this.slabScale, uSlabShare: this.slabShare, uAtlasHalf: this.atlasHalf };
     const groundTint = {
@@ -698,12 +722,12 @@ export class AirField implements AirSource {
       uGroundTintRef: world.groundTint?.uGroundTintRef ?? { value: new THREE.Vector4(1, 1, 1, 1) },
     };
     this.mats = {
-      splat: material('air.splat', SPLAT_FRAGMENT, { ...common, uVel: { value: null }, uShift: { value: new THREE.Vector2() }, uSplatA: { value: this.forces.splatA }, uSplatB: { value: this.forces.splatB }, uSplatCount: { value: 0 }, uReachScale: this.reachScale }),
-      vort: material('air.vort', VORT_FRAGMENT, { ...common, uVel: { value: null }, uVortP: { value: this.vortP } }),
+      splat: material('air.splat', SPLAT_FRAGMENT, { ...common, ...liquid, uVel: { value: null }, uShift: { value: new THREE.Vector2() }, uSplatA: { value: this.forces.splatA }, uSplatB: { value: this.forces.splatB }, uSplatCount: { value: 0 }, uReachScale: this.reachScale }),
+      vort: material('air.vort', VORT_FRAGMENT, { ...common, ...liquid, uVel: { value: null }, uVortP: { value: this.vortP } }),
       div: material('air.div', DIV_FRAGMENT, { ...common, uVel: { value: null } }),
       jacobi: material('air.jacobi', JACOBI_FRAGMENT, { ...common, uPrs: { value: null }, uDiv: { value: null }, uJacobiP: { value: this.jacobiP }, uShift: { value: new THREE.Vector2() } }),
       grad: material('air.grad', GRAD_FRAGMENT, { ...common, uPrs: { value: null }, uVel: { value: null } }),
-      advect: material('air.advect', ADVECT_FRAGMENT, { ...common, ...gust, uVel: { value: null }, uAdvectP: { value: this.advectP } }),
+      advect: material('air.advect', ADVECT_FRAGMENT, { ...common, ...gust, ...liquid, uVel: { value: null }, uFlowR: this.flowU, uAdvectP: { value: this.advectP } }),
       // The dust pass (GLSL 3 from wave 2b: two outputs, the colour and its shape), holding the session ground
       // material's own tint uniforms by reference so its colour is tinted in the drawn ground's own mode; from the third
       // wave it reads each slab's air (`slabVel`), a field a layer side by side when the dust has one.
@@ -964,6 +988,8 @@ export class AirField implements AirSource {
     // The fourth wave's: the pools' updates and fills, and their draws (scene materials the sweep's stand-ins and the
     // weather's own compile build).
     list.push(...this.kick.materials(), ...this.rain.materials());
+    // The fifth wave's: the ripples' carry (the spray's rings are the kick-up's, above).
+    list.push(this.carry.material);
     return list;
   }
 
@@ -991,6 +1017,10 @@ export class AirField implements AirSource {
     const rn = this.rain;
     pairs.push([k.updateMaterial, quad(k.updateMaterial), k.pair![0]], [k.fillMaterial, quad(k.fillMaterial), k.pair![0]]);
     pairs.push([rn.updateMaterial, quad(rn.updateMaterial), rn.pair![0]], [rn.fillMaterial, quad(rn.fillMaterial), rn.pair![0]]);
+    // The fifth wave's: the ripples' carry and the spray's rings, each for a target as the ripples' state is (a target of
+    // its own: a program's key hangs on no target's size or format beyond its being one), so the current and the rings
+    // build nothing when they are turned on.
+    pairs.push([this.carry.material, this.carry.mesh, this.vel![0]], [k.ringMaterial, k.ringMesh, this.vel![0]]);
     const d = this.dents;
     if (d) {
       // The dents' target is made at its own size, or a texel across while the prints are off (a program's key does not
@@ -1157,6 +1187,8 @@ export class AirField implements AirSource {
     // across (its programs kept, since a program's key hangs on no target's size), so what the page's memory estimate
     // leaves out for a switch that is off is really given back -- the dents at 4096 are 64 MB.
     const sand = t.sand ? cells * t.sandDetail : 1;
+    // The fifth wave's liquid tile, its own size (`volLiquidDetail`), none while the current and the lava are both off.
+    const liquid = liquidTileCells(t);
     const s = this.sized;
     // The dents' own size is their own field's (world-anchored, a square of their own): a new detail is a new field of
     // dents, cleared at its next placing, and nothing of the air starts again for it.
@@ -1166,7 +1198,7 @@ export class AirField implements AirSource {
     // pool made again starts empty, and nothing of the air starts again for it.
     this.kick.ensure(t.particles ? t.particleDetail : 1 / 64);
     this.rain.ensure(t.rain || t.snow ? t.rainDetail : 128);
-    if (s.cells === cells && s.dust === dust && s.light === light && s.layers === layers && s.tiles === tiles && this.vel) {
+    if (s.cells === cells && s.dust === dust && s.light === light && s.layers === layers && s.tiles === tiles && s.liquid === liquid && this.vel) {
       // The offsets alone resized (the sand switched, or its detail moved): they start again at rest at the next frame
       // that steps, and nothing else of the air does. Likewise smoke and fog, and the bands.
       if (s.sand !== sand) {
@@ -1187,7 +1219,7 @@ export class AirField implements AirSource {
       }
       return false;
     }
-    const layout = atlasLayout(cells, layers, 0);
+    const layout = atlasLayout(cells, layers, liquid);
     if (!this.vel) {
       this.vel = [fieldTarget(layout.width, layout.height, THREE.RGFormat, THREE.HalfFloatType, 'air.vel.a'), fieldTarget(layout.width, layout.height, THREE.RGFormat, THREE.HalfFloatType, 'air.vel.b')];
       this.prs = [fieldTarget(layout.width, layout.height, THREE.RedFormat, THREE.HalfFloatType, 'air.prs.a'), fieldTarget(layout.width, layout.height, THREE.RedFormat, THREE.HalfFloatType, 'air.prs.b')];
@@ -1230,6 +1262,10 @@ export class AirField implements AirSource {
     this.klassTex.minFilter = THREE.NearestFilter;
     this.klassTex.magFilter = THREE.NearestFilter;
     this.klass.value = this.klassTex;
+    // The liquid's own flow (the fifth wave's), two floats a cell, read linearly by the liquid's advect.
+    this.flowTex?.dispose();
+    this.flowTex = dataTexture(this.raster.flow, cells, THREE.RGFormat, THREE.FloatType, 'air.flow');
+    this.flowU.value = this.flowTex;
     this.tintU.value = this.tintTex;
     this.height.value = this.heightTex;
     this.mats.dust.uniforms.uResponse.value = this.responseTex;
@@ -1243,6 +1279,9 @@ export class AirField implements AirSource {
     tileRects(layout, this.tiles);
     this.tileSlab.fill(0);
     this.tileCount.value = layout.tiles.length;
+    this.slabCount.value = liquid > 0 ? layout.tiles.length - 1 : layout.tiles.length;
+    this.liquidCells = liquid;
+    s.liquid = liquid;
     this.atlasHalf.value.set(0.5 / layout.width, 0.5 / layout.height);
     this.dustTiles.value.set(tiles, 0.5 / dust);
     this.dustR.x = tiles;
@@ -1281,7 +1320,9 @@ export class AirField implements AirSource {
   private syncTune(): void {
     const sl = AIR_TUNE.slabs;
     const ts = this.tileSlab;
-    const n = this.tileCount.value;
+    const n = this.slabCount.value;
+    // The liquid's tile (the fifth wave's), the last: its row says what it is (w one) and its share of the wind outside.
+    if (this.liquidCells > 0) this.syncLiquid(n * 4);
     ts[0] = sl.floor;
     ts[1] = sl.centre;
     ts[2] = sl.windShare;
@@ -1336,6 +1377,119 @@ export class AirField implements AirSource {
     const over = AIR_TUNE.obstacles.over;
     if (this.obstacleOver.value !== over) this.obstacleOver.value = over;
     this.syncKeepTable();
+  }
+
+  /**
+   * The liquid's tile's row of the atlas's tile table at `o` and its numbers (the fifth wave), from `AIR_TUNE.liquid` as
+   * it stands, component by component: water's and lava's pull and dissipation, each one's share of the wind (the
+   * current's switch off, water takes none) and of the swirl, a push's share, a ribbon's flow's share, the liquid's cap.
+   * The lava's switch off takes nothing away here: its crust reads nought (`writeLiquid`), and lava held still costs no
+   * more than lava moving.
+   */
+  private syncLiquid(o: number): void {
+    const L = AIR_TUNE.liquid;
+    const ts = this.tileSlab;
+    const water = this.tune.current;
+    ts[o] = 0;
+    ts[o + 1] = 0;
+    ts[o + 2] = water ? L.waterWind : 0;
+    ts[o + 3] = 1;
+    const p = this.liquidP;
+    p.x = L.waterRelax;
+    p.y = L.waterDiss;
+    p.z = L.lavaRelax;
+    p.w = L.lavaDiss;
+    const q = this.liquidQ;
+    q.x = water ? L.waterWind : 0;
+    q.y = L.lavaWind;
+    q.z = L.waterSwirl;
+    q.w = L.lavaSwirl;
+    const r = this.liquidR;
+    r.x = L.push;
+    r.y = L.ribbonFlow;
+    r.z = AIR_TUNE.solver.liquidCap;
+    // The swirl is held per metre (`swirlAt`): the frame's swirl is the air's cell's, so the liquid's tile, whose cells
+    // are its own size, takes it times the air's cell over its own (one wherever the two details agree, as every preset has them).
+    const sized = this.sized;
+    r.w = sized.cells > 0 && sized.liquid > 0 ? sized.liquid / sized.cells : 1;
+  }
+
+  /** The flow raster uploaded again (it moved: a ribbon's flow asked in, or the window moved over one). */
+  private uploadFlow(): void {
+    if (this.flowTex) this.flowTex.needsUpdate = true;
+    this.raster.flowDirty = false;
+  }
+
+  /**
+   * The session's record of the liquid's uniforms (`LIQUID_U`, which the water's current variant, its masks, the lava's
+   * crust twins and the ripples' carry hold by reference), which this field writes from now on at the end of every frame,
+   * or null to stop. A field never bound writes nothing they read, so one made and thrown away never leaves the water
+   * reading a texture nobody steps; let go, the record is put to nought (every reader plain by its own branch).
+   */
+  bindLiquid(shared: LiquidUniforms | null): void {
+    if (this.liquidBound && this.liquidBound !== shared) liquidOff(this.liquidBound);
+    this.liquidBound = shared;
+    if (shared) this.writeLiquid(false);
+  }
+
+  /** The record this field writes while it is the world's (the tests' and the console's). */
+  get boundLiquid(): LiquidUniforms | null {
+    return this.liquidBound;
+  }
+
+  /** Whether the liquid's tile is stepped (the master and the air on, the field live, the current or the lava on). */
+  get liquidLive(): boolean {
+    return this.live && this.liquidCells > 0 && this.vel !== null;
+  }
+
+  /**
+   * What the liquids' readers take this frame, into the bound record (no number into a uniform object: the components
+   * of kept vectors): the velocity atlas as it stands, the window, the liquid tile's rectangle and half a texel, the art
+   * shares (each nought while its own effect is off or the tile was not stepped this frame, so every reader draws the
+   * plain liquid), the detail's share of the current, the view, and the crust's two phases on the field's own clock.
+   */
+  private writeLiquid(stepped: boolean): void {
+    const rec = this.liquidBound;
+    if (!rec) return;
+    const t = this.tune;
+    const on = stepped && t.on && t.air && this.liquidCells > 0 && this.vel !== null && this.win.placed;
+    const p = rec.uAirLiquidP.value;
+    if (!on) {
+      rec.uAirLiquidVel.value = null;
+      p.x = 0;
+      p.y = 0;
+      p.w = 0;
+      return;
+    }
+    rec.uAirLiquidVel.value = this.vel![0].texture;
+    const w = this.win;
+    const wv = rec.uAirLiquidWin.value;
+    wv.x = w.ox;
+    wv.y = w.oz;
+    wv.z = w.size;
+    wv.w = AIR_TUNE.window.edge;
+    const o = this.slabCount.value * 4;
+    const rect = rec.uAirLiquidRect.value;
+    rect.x = this.tiles[o];
+    rect.y = this.tiles[o + 1];
+    rect.z = this.tiles[o + 2];
+    rect.w = this.tiles[o + 3];
+    const h = rec.uAirLiquidHalf.value;
+    h.x = this.atlasHalf.value.x;
+    h.y = this.atlasHalf.value.y;
+    p.x = t.current ? t.artWater : 0;
+    p.y = t.lava ? t.artLava : 0;
+    p.z = AIR_TUNE.liquid.detailFlow;
+    p.w = this.liquidView;
+    const c = this.crust;
+    c.time = this.worldTime;
+    c.cycle = AIR_TUNE.liquid.crustCycle;
+    crustPhaseIn(c);
+    const q = rec.uAirLiquidQ.value;
+    q.x = c.tA;
+    q.y = c.tB;
+    q.z = c.wB;
+    q.w = 1 / (AIR_TUNE.liquid.crustCycle > 1e-3 ? AIR_TUNE.liquid.crustCycle : 1e-3);
   }
 
   /**
@@ -1431,6 +1585,11 @@ export class AirField implements AirSource {
       // The fourth wave's class raster (each ground class's index over the window).
       case 'class':
         return this.klassTex;
+      // The fifth wave's: the liquid's own flow (a ribbon's), and the atlas with the liquid's tile beside the slabs.
+      case 'flow':
+        return this.flowTex;
+      case 'liquid':
+        return this.vel ? this.vel[0].texture : null;
       default:
         return null;
     }
@@ -1570,6 +1729,7 @@ export class AirField implements AirSource {
       this.tintTex!.needsUpdate = true;
       this.klassTex!.needsUpdate = true;
       this.raster.dirty = false;
+      if (this.raster.flowDirty) this.uploadFlow();
     }
     let drawObstacles = code !== PLACE.still;
     this.obs.time = this.worldTime;
@@ -1866,6 +2026,8 @@ export class AirField implements AirSource {
     sr.w = S.patches > 1e-3 ? S.patches : 1e-3;
     // Into the session's record the variant reads, while this is the world's field.
     if (this.bound) copyAirGround(g, this.bound);
+    // The liquids' readers (the fifth wave's), every frame, plain on any frame the tile was not stepped.
+    this.writeLiquid(this.live);
   }
 
   private frameDt = 0.5;
@@ -1944,7 +2106,7 @@ export class AirField implements AirSource {
       ap.y = AIR_TUNE.solver.dissipation;
       ap.z = AIR_TUNE.solver.relax;
       // The slabs' coupling (the third wave), with more than one layer solved.
-      ap.w = this.tileCount.value > 1 ? AIR_TUNE.slabs.couple : 0;
+      ap.w = this.slabCount.value > 1 ? AIR_TUNE.slabs.couple : 0;
       this.gustTime.x = AIR_TUNE.wind.gust;
       this.gustTime.y = this.worldTime;
       d.draw(m.advect, vel[1]);
@@ -2210,7 +2372,35 @@ export class AirField implements AirSource {
     kf.shadows = t.particleShadows;
     this.renderer.getDrawingBufferSize?.(this.bufSize);
     kf.screen = this.bufSize.y;
+    // The fifth wave's ring flag: a drop of spray landing back on the water is kept a frame for the rings' draw.
+    k.ring.x = this.ringsWanted ? 1 : 0;
     k.step(this.kickDraw, vel, this.spawns);
+  }
+
+  /**
+   * Whether a drop of spray landing back on the water presses a ring into the ripples (the fifth wave): written by the
+   * world each frame -- the master, the current, the ripples and the spray on, and a ripple state this browser can blend
+   * into.
+   */
+  ringsWanted = false;
+
+  /**
+   * The spray's rings of this frame pressed into the ripples' state (`target`, the state the ripples' next step reads;
+   * `win` its window), after the frame's update and only on a frame it ran with the spray on. Called by the world after
+   * `update`. A render call of its own, the renderer's target put back.
+   */
+  ringsInto(target: THREE.WebGLRenderTarget | null, win: THREE.Vector4): void {
+    if (!target || !this.ringsWanted || !this.live || !this.kick.shown || !this.tune.spray || this.drawer.broken) return;
+    const r = this.renderer;
+    const prev = r.getRenderTarget();
+    const auto = r.autoClear;
+    r.autoClear = false;
+    try {
+      this.kick.drawRings(r, target, win);
+    } finally {
+      r.setRenderTarget(prev);
+      r.autoClear = auto;
+    }
   }
   private readonly bufSize = new THREE.Vector2(1920, 1080);
 
@@ -2612,7 +2802,8 @@ export class AirField implements AirSource {
     this.bandsTarget = null;
     this.div = null;
     this.lightTarget = null;
-    this.sized = { cells: 0, dust: 0, light: 0, sand: 0, layers: 0, tiles: 0, smoke: 0, bands: 0 };
+    this.sized = { cells: 0, dust: 0, light: 0, sand: 0, layers: 0, tiles: 0, smoke: 0, bands: 0, liquid: 0 };
+    this.liquidCells = 0;
     this.dust.value = null;
     this.shape.value = null;
     this.light.value = null;
@@ -2887,10 +3078,81 @@ export class AirField implements AirSource {
       smoke: { on: t.smoke, carried: this.smokeLive, batch: this.forces.smokeBatchCount, ofBatch: SMOKE_BATCH, held: this.forces.smokeHeldCount },
       fog: { on: t.fog, level: r2(this.input.fogLevel), burn: r2(this.input.fogBurn), top: r2(this.input.fogTop), lingering: this.worldTime - this.lastFog < AIR_TUNE.fog.linger },
       wisps: { setting: ['off', 'bands', 'noise', 'noise ×2'][t.wisps] ?? 'off', inForce: ['off', 'bands', 'noise', 'noise ×2'][this.wispMode] ?? 'off', noise: this.noiseTex ? 'whole' : this.noiseVol ? `${this.noiseVol.layers} of ${NOISE3_SIZE} layers made` : 'not begun', phase: [r2(this.wispPhase.p0), r2(this.wispPhase.p1)], cross: r2(this.wispPhase.cross) },
-      layers: { air: this.tileCount.value, dust: t.dustLayers ? 3 : 1, couple: this.tileCount.value > 1 ? AIR_TUNE.slabs.couple : 0 },
+      layers: { air: this.slabCount.value, dust: t.dustLayers ? 3 : 1, couple: this.slabCount.value > 1 ? AIR_TUNE.slabs.couple : 0 },
       ground: this.groundReport(),
       particles: this.particleReport(),
+      liquid: this.liquidReport(),
     };
+  }
+
+  /**
+   * The fifth wave's in numbers (no readback here; `air({ liquid: { probe } })` reads the tile back): the tile's size and
+   * whether it is stepped, what the readers are told (the art shares, the view, the crust's phases), the record bound, the
+   * pokes the pushes laid on the water since the console last read, and the rings.
+   */
+  private liquidReport(): Record<string, unknown> {
+    const t = this.tune;
+    const rec = this.liquidBound;
+    const pokes = this.forces.pokes;
+    this.forces.pokes = 0;
+    const r3 = (v: number): number => Math.round(v * 1000) / 1000;
+    return {
+      current: t.current,
+      lava: t.lava,
+      tile: this.liquidCells > 0 ? `${this.liquidCells}² beside the slabs in the RG16F atlas` : 'none (the current and the lava both off)',
+      stepped: this.liquidLive,
+      bound: rec !== null,
+      told: rec ? { water: r3(rec.uAirLiquidP.value.x), lava: r3(rec.uAirLiquidP.value.y), detailFlow: r3(rec.uAirLiquidP.value.z), view: ['none', 'current', 'crust'][rec.uAirLiquidP.value.w] ?? 'none', crust: { tA: r3(rec.uAirLiquidQ.value.x), tB: r3(rec.uAirLiquidQ.value.y), wB: r3(rec.uAirLiquidQ.value.z) } } : null,
+      flow: { cells: this.raster.n, any: this.raster.flow.some((v) => v !== 0) },
+      pokes,
+      rings: { wanted: this.ringsWanted, draws: this.kick.ringDraws },
+      carry: { runs: this.carry.stats.runs, lastSeconds: r3(this.carry.stats.lastSeconds) },
+    };
+  }
+
+  /**
+   * The liquid's tile read back at a world point (console only, a GPU sync): the current there, m/s, or null outside the
+   * window, with no tile or before the field has stepped it. Never on a frame path.
+   */
+  liquidAt(x: number, z: number): { vx: number; vz: number; speed: number; medium: number } | null {
+    if (!this.vel || this.liquidCells <= 0 || !this.win.placed) return null;
+    const w = this.win;
+    const lx = (x - w.ox) / w.size;
+    const lz = (z - w.oz) / w.size;
+    if (!(lx >= 0 && lz >= 0 && lx <= 1 && lz <= 1)) return null;
+    const o = this.slabCount.value * 4;
+    const tgt = this.vel[0];
+    const read = readHalf(this.renderer, tgt);
+    if (!read) return null;
+    const px = Math.min(tgt.width - 1, Math.floor((this.tiles[o] + lx * this.tiles[o + 2]) * tgt.width));
+    const py = Math.min(tgt.height - 1, Math.floor((this.tiles[o + 1] + lz * this.tiles[o + 3]) * tgt.height));
+    const p = (py * tgt.width + px) * read.comps;
+    const vx = THREE.DataUtils.fromHalfFloat(read.data[p]);
+    const vz = THREE.DataUtils.fromHalfFloat(read.data[p + 1]);
+    return { vx: Math.round(vx * 1000) / 1000, vz: Math.round(vz * 1000) / 1000, speed: Math.round(Math.sqrt(vx * vx + vz * vz) * 1000) / 1000, medium: this.raster.mediumAt(w.ox, w.oz, w.cell, x, z) };
+  }
+
+  /** The most current anywhere on the liquid's tile, m/s (console only, a GPU sync): what the carry is handed at most. */
+  liquidPeak(): number | null {
+    if (!this.vel || this.liquidCells <= 0) return null;
+    const o = this.slabCount.value * 4;
+    const tgt = this.vel[0];
+    const read = readHalf(this.renderer, tgt);
+    if (!read) return null;
+    const x0 = Math.round(this.tiles[o] * tgt.width);
+    const y0 = Math.round(this.tiles[o + 1] * tgt.height);
+    const n = this.liquidCells;
+    let peak = 0;
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const p = ((y0 + j) * tgt.width + x0 + i) * read.comps;
+        const vx = THREE.DataUtils.fromHalfFloat(read.data[p]);
+        const vz = THREE.DataUtils.fromHalfFloat(read.data[p + 1]);
+        const s = Math.sqrt(vx * vx + vz * vz);
+        if (Number.isFinite(s) && s > peak) peak = s;
+      }
+    }
+    return Math.round(peak * 1000) / 1000;
   }
 
   /**
@@ -3755,6 +4017,10 @@ export class AirField implements AirSource {
     this.layerTex = null;
     this.klassTex?.dispose();
     this.klassTex = null;
+    this.flowTex?.dispose();
+    this.flowTex = null;
+    this.flowU.value = null;
+    this.carry.dispose();
     this.kick.dispose();
     this.rain.dispose();
     this.drawer.dispose();

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { AssetPack } from './assetPack';
 import type { PlanetDef } from '../data/planets';
 import { currentEnvironment, onEnvironment } from './envmap';
-import { createWaterMaskMaterial, createWaterMaterial, setWaterEnvSpecular, WATER_FX_FOG, WATER_FX_TRACED, waveReach, type WaterMaterial } from './water';
+import { createWaterAirMaterial, createWaterMaskMaterial, createWaterMaterial, setWaterEnvSpecular, WATER_FX_FOG, WATER_FX_TRACED, waveReach, type WaterMaterial } from './water';
 import { readWaterPack, waterLookFor, type WaterLook, type WaterPackData } from './waterLook';
 import { packNamesImmunity, setLavaImmunity } from './lavaImmunity';
 import { lavaImmuneTemplates } from './lavaHarmMath';
@@ -52,6 +52,14 @@ export interface WaterBody {
   readonly bounds: THREE.Box3;
   /** In the camera's frustum and within the fog's reach this frame (set by beginFrame). */
   inFrustum: boolean;
+  /**
+   * The current variant (the volumetrics' fifth wave, `createWaterAirMaterial`) and its mask twins, made only while the
+   * master is on (`makeAir`), null otherwise; and whether the body wears it now (`wearAir`, class M: a swap between built
+   * materials, never a program).
+   */
+  air: WaterMaterial | null;
+  airMasks: readonly [WaterMaterial, WaterMaterial] | null;
+  wearsAir: boolean;
 }
 
 export interface WaterBodyDescription {
@@ -68,6 +76,8 @@ export interface WaterBodyDescription {
   inFrustum: boolean;
   centre: [number, number] | null;
   height: number;
+  /** The material the body wears: today's `plain`, or the volumetrics' current variant (`air`, key `…-air`). */
+  variant: 'plain' | 'air';
 }
 
 export interface WaterFxDescription {
@@ -251,11 +261,87 @@ export class WaterBodies {
     const masks = [createWaterMaskMaterial(lit, THREE.BackSide), createWaterMaskMaterial(lit, THREE.FrontSide)] as const;
     const twins = [this.makeTwin(mesh, masks[0], 'back'), this.makeTwin(mesh, masks[1], 'front')] as const;
     this.maskList.push(masks[0], masks[1]);
-    const body: WaterBody = { mesh, lit, twins, masks, key: { group: 0, order: 0, z: 0, id: mesh.id }, role, look, bounds, inFrustum: false };
+    const body: WaterBody = { mesh, lit, twins, masks, key: { group: 0, order: 0, z: 0, id: mesh.id }, role, look, bounds, inFrustum: false, air: null, airMasks: null, wearsAir: false };
     this.list.push(body);
     this.assignEnvironment(body);
     return body;
   }
+
+  /**
+   * The volumetrics' current variant and its two mask twins for every body that has none (the fifth wave: made only
+   * while the master is on, behind a loading screen or before the master's in-play warm compiles them; never worn until
+   * the chooser says so). The variant shares the lit material's uniform objects and the session's liquid record; its mask
+   * twins are keyed off it. Answers how many bodies were given one, each new variant pushed onto `made` where it is
+   * handed (the world's list of what waits for a warm). Nothing is compiled here.
+   */
+  makeAir(made?: THREE.Material[]): number {
+    let n = 0;
+    for (const b of this.list) {
+      if (b.air) continue;
+      const air = createWaterAirMaterial(b.lit);
+      const masks = [createWaterMaskMaterial(air, THREE.BackSide), createWaterMaskMaterial(air, THREE.FrontSide)] as const;
+      b.air = air;
+      b.airMasks = masks;
+      this.maskList.push(masks[0], masks[1]);
+      this.assignEnvironment(b);
+      made?.push(air);
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * Every body onto its current variant or back onto its plain material (class M, the chooser's answer): the mesh and
+   * both twins handed materials already built. A body with no variant, or one whose variant `ready` says is not built
+   * yet (the world's: made in play, its warm not done), keeps its plain one. Answers how many wear it.
+   */
+  wearAir(on: boolean, ready?: (m: THREE.Material) => boolean): number {
+    let n = 0;
+    for (const b of this.list) {
+      const want = on && b.air !== null && (ready === undefined || ready(b.air));
+      if (want) n++;
+      if (want === b.wearsAir) continue;
+      b.wearsAir = want;
+      b.mesh.material = want ? b.air! : b.lit;
+      const m = want ? b.airMasks! : b.masks;
+      b.twins[0].material = m[0];
+      b.twins[1].material = m[1];
+    }
+    return n;
+  }
+
+  /**
+   * One stand-in of each current variant's own program (and of its plain material's, so whichever the scene is not
+   * wearing is built too), on each body's own geometry, for the world's sweep and the master's in-play warm. Deduped by
+   * the program key and the geometry's attributes, as `warmObjects` dedupes the masks. Made afresh each call.
+   */
+  litStandIns(): THREE.Mesh[] {
+    const out: THREE.Mesh[] = [];
+    const seen = new Set<string>();
+    for (const b of this.list) {
+      if (!b.air) continue;
+      const attrs = Object.keys(b.mesh.geometry.attributes).sort().join(',');
+      for (const m of [b.lit, b.air]) {
+        const key = `${m.userData.air ? 'air' : 'plain'}|${b.lit.userData.waves}|${attrs}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const s = new THREE.Mesh(b.mesh.geometry, m);
+        s.name = `water stand-in:${b.mesh.name}`;
+        s.receiveShadow = b.mesh.receiveShadow;
+        s.frustumCulled = false;
+        out.push(s);
+      }
+    }
+    return out;
+  }
+
+  /** The current variants' mask twins as objects to compile the effects' way (the master's in-play warm). */
+  airMaskStandIns(): THREE.Object3D[] {
+    return this.warmObjects().filter((o) => ((o as THREE.Mesh).material as WaterMaterial).userData?.air === true);
+  }
+
+  /** What disposes a body's current variant hands to the world first (`World.forgetMaterials`), set by the world. */
+  forget: ((mats: THREE.Material[]) => void) | null = null;
 
   private makeTwin(mesh: THREE.Mesh, mask: WaterMaterial, side: string): THREE.Mesh {
     const twin = new THREE.Mesh(mesh.geometry, mask);
@@ -271,7 +357,7 @@ export class WaterBodies {
   /** Give a body a new look (the pack arrived after the procedural sea was made). Uniforms and textures only. */
   restyle(body: WaterBody, look: WaterLook): void {
     body.look = look;
-    for (const m of [body.lit, ...body.masks]) {
+    for (const m of [body.lit, ...body.masks, ...(body.air ? [body.air, ...body.airMasks!] : [])]) {
       m.color.set(look.color);
       m.opacity = look.opacity;
       m.userData.look = look;
@@ -363,6 +449,12 @@ export class WaterBodies {
       b.lit.envMapIntensity = k;
       b.masks[0].envMapIntensity = k;
       b.masks[1].envMapIntensity = k;
+      const air = b.air;
+      if (air) {
+        air.envMapIntensity = k;
+        b.airMasks![0].envMapIntensity = k;
+        b.airMasks![1].envMapIntensity = k;
+      }
     }
     this.twinsLastFrame = this.twinsThisFrame;
     this.twinsThisFrame = 0;
@@ -460,7 +552,8 @@ export class WaterBodies {
     const seen = new Set<string>();
     for (const b of this.list) {
       const attrs = Object.keys(b.mesh.geometry.attributes).sort().join(',');
-      for (const mask of b.masks) {
+      // The current variant's twins too where the body has one (the fifth wave's: keyed off it, `…-air`).
+      for (const mask of b.airMasks ? [...b.masks, ...b.airMasks] : b.masks) {
         const key = `${mask.customProgramCacheKey()}|${mask.side}|${attrs}`;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -497,6 +590,7 @@ export class WaterBodies {
         inFrustum: b.inFrustum,
         centre: b.role === 'lake' ? meanXZ(b.mesh) : null,
         height: b.mesh.position.y + (box.min.y + box.max.y) / 2,
+        variant: b.wearsAir ? 'air' : 'plain',
       };
     });
     // Sort a lake list by how near it is, so the one being looked at is at the top.
@@ -541,6 +635,23 @@ export class WaterBodies {
       const i = this.maskList.indexOf(mask);
       if (i >= 0) this.maskList.splice(i, 1);
       mask.dispose();
+    }
+    // The current variant (the fifth wave's): out of the world's sets first, as the world does for the lit one.
+    if (body.air) {
+      const mats: THREE.Material[] = [body.air, ...body.airMasks!];
+      this.forget?.(mats);
+      for (const mask of body.airMasks!) {
+        const i = this.maskList.indexOf(mask);
+        if (i >= 0) this.maskList.splice(i, 1);
+      }
+      for (const m of mats) m.dispose();
+      body.air = null;
+      body.airMasks = null;
+    }
+    // A body worn on its variant goes back to its plain material, so whatever holds the mesh holds a live material.
+    if (body.wearsAir) {
+      body.mesh.material = body.lit;
+      body.wearsAir = false;
     }
     body.lit.dispose();
   }
@@ -618,7 +729,7 @@ export class WaterBodies {
       return;
     }
     const k = this.intensityFor(body);
-    for (const m of [body.lit, ...body.masks]) {
+    for (const m of [body.lit, ...body.masks, ...(body.air ? [body.air, ...body.airMasks!] : [])]) {
       m.envMap = tex;
       m.envMapIntensity = k;
     }

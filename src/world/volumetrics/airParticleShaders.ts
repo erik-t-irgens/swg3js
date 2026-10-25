@@ -155,6 +155,8 @@ uniform vec4 uPickLife;
 uniform vec4 uPickSize;
 // x a streak's lowest start, y its highest.
 uniform vec4 uStreak;
+// x one where a drop of spray landing back on the water leaves a ring (the fifth wave: the current and the ripples on).
+uniform vec4 uRing;
 layout(location = 0) out highp vec4 o0;
 layout(location = 1) out highp vec4 o1;
 layout(location = 2) out highp vec4 o2;
@@ -315,6 +317,7 @@ void main() {
   }
   if (!alive && !born) return;
   bool dead = false;
+  bool landed = false;
   if (alive) {
     vec2 l = pos.xz / uWindow.z;
     float g = groundAt(l);
@@ -362,7 +365,10 @@ void main() {
         spare = 1e-4;
       }
       // Spray falls back into the water it rose from: its spare is that surface's world height.
-      if (kind == 2 && v.y < 0.0 && pos.y + cornerY < spare && age > 0.1) dead = true;
+      if (kind == 2 && v.y < 0.0 && pos.y + cornerY < spare && age > 0.1) {
+        dead = true;
+        landed = true;
+      }
       if (age >= life) dead = true;
     }
     age += dt;
@@ -373,7 +379,15 @@ void main() {
       if (all(lessThan(abs(hp), uHullBox.xyz))) dead = true;
     }
   }
-  if (dead) return;
+  if (dead) {
+    // A drop landed back in the water (the fifth wave's): a dead slot for this one frame with its place kept and a
+    // spare of -1, which the ring draw reads and turns into a ring in the ripples; any slot next frame takes it over.
+    if (landed && uRing.x > 0.5 && fin4(vec4(pos, age))) {
+      o0 = vec4(pos, age);
+      o2 = vec4(seed, sz, -1.0, col);
+    }
+    return;
+  }
   vec4 r0 = vec4(pos, age);
   vec4 r1 = vec4(v, max(life, 1e-3));
   vec4 r2 = vec4(seed, sz, spare, col);
@@ -970,6 +984,74 @@ void main() {
 }
 `;
 
+/**
+ * The spray's rings (the fifth wave, the design's §2.9): one instanced quad a slot of the spray's rows, its state read by
+ * `gl_InstanceID`; a slot the update marked as a drop that landed back in the water this frame (`ringLanded`: its life
+ * nought and its spare -1) is a quad over its place in the ripples' window (their v runs against world Z: `ringU`,
+ * `ringV`), `liquid.ringSize` of its own size across (never under a texel of the ripples), every other slot collapsed
+ * outside the target. Drawn additively into the ripples' state.
+ */
+export const RING_VERTEX = /* glsl */ `
+precision highp float;
+precision highp int;
+uniform highp sampler2D uS0;
+uniform highp sampler2D uS1;
+uniform highp sampler2D uS2;
+// x the spray's first row, y the pool's width, z the kick corner's height (unused), w the ring's size in the drop's sizes.
+uniform vec4 uRingK;
+// The ripples' window: origin x, origin z, metres across, metres a texel.
+uniform vec4 uRingW;
+// x the ring's depth (field units), y unused, z and w the air window's corner x and z.
+uniform vec4 uRingP;
+varying vec2 vRing;
+// A drop that landed back in the water this frame: the update kept its slot dead (life nought) with a spare of -1. A
+// living drop's spare is its water's own height, which over a sea standing below -0.5 m is as negative as the mark, so
+// the life is asked first (the kick draw's own test of a dead slot).
+bool ringLanded(float life, float spare) {
+  return life <= 0.0 && spare == -1.0;
+}
+// The ripples' u and v of a world x and z: u along world X from their origin, v against world Z.
+float ringU(float x) {
+  return (x - uRingW.x) / uRingW.z;
+}
+float ringV(float z) {
+  return 1.0 - (z - uRingW.y) / uRingW.z;
+}
+void main() {
+  int W = int(uRingK.y + 0.5);
+  int i = gl_InstanceID;
+  ivec2 t = ivec2(i % W, int(uRingK.x + 0.5) + i / W);
+  vec4 s1 = texelFetch(uS1, t, 0);
+  vec4 s2 = texelFetch(uS2, t, 0);
+  vRing = vec2(0.0);
+  if (!ringLanded(s1.w, s2.z) || uRingW.z <= 0.0) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  vec4 s0 = texelFetch(uS0, t, 0);
+  vec2 xz = s0.xz + uRingP.zw;
+  float r = max(s2.y * uRingK.w, uRingW.w);
+  vec2 uv = vec2(ringU(xz.x), ringV(xz.y));
+  // The quad is three of the ring's radii each way: a Gaussian's whole.
+  vec2 q = position.xy * 2.0;
+  vec2 p = uv + q * (3.0 * r / uRingW.z);
+  vRing = q * 3.0;
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+  if (any(isnan(gl_Position)) || any(isinf(gl_Position))) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+}
+`;
+
+/** A ring pressed into the ripples' height (the red channel only, as a fast arrival's punch is). */
+export const RING_FRAGMENT = /* glsl */ `
+precision highp float;
+uniform vec4 uRingP;
+varying vec2 vRing;
+void main() {
+  float g = exp(-dot(vRing, vRing));
+  gl_FragColor = vec4(-uRingP.x * g, 0.0, 0.0, 0.0);
+}
+`;
+
 /** Every particle shader by name, for the scanner and the self test. */
 export const AIR_PARTICLE_SHADERS: Readonly<Record<string, string>> = {
   kickUpdate: KICK_UPDATE_FRAGMENT,
@@ -980,4 +1062,6 @@ export const AIR_PARTICLE_SHADERS: Readonly<Record<string, string>> = {
   rainFill: RAIN_FILL_FRAGMENT,
   rainDrawVertex: RAIN_DRAW_VERTEX,
   rainDrawFragment: RAIN_DRAW_FRAGMENT,
+  ringVertex: RING_VERTEX,
+  ringFragment: RING_FRAGMENT,
 };

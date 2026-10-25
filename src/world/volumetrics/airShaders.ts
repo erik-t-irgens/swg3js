@@ -16,6 +16,7 @@ import { MAX_TILES } from './airAtlas.ts';
 import { DUST_BATCH, SMOKE_BATCH, SPLAT_BATCH } from './airForces.ts';
 import { FOG_DIV_MOST } from './airFog.ts';
 import { GROUND_DECODE_GLSL, GROUND_TINT_GLSL } from '../terrainTextures.ts';
+import { LIQUID_TARGET_GLSL } from './airLiquid.ts';
 
 /** The light pass's loop bound: no setting asks for more steps toward the sun. */
 export const MAX_LIGHT_STEPS = 48;
@@ -43,6 +44,11 @@ uniform vec4 uWindow;
 uniform sampler2D uObstacles;
 uniform vec2 uWind;
 uniform float uObstacleOver;
+// The colour raster, whose alpha is each cell's medium byte (unknown 0, land 85, water 170, lava 255): the liquid tile's
+// obstacle is every cell that is not a liquid (the fifth wave). And how many of the tiles are slabs (the liquid tile, where
+// there is one, is the last), which the slabs' coupling counts over.
+uniform sampler2D uMedium;
+uniform int uSlabCount;
 
 int tileOf(vec2 a) {
   for (int i = 0; i < ${MAX_TILES}; i++) {
@@ -60,9 +66,18 @@ vec2 atlasAt(vec2 l, int t) {
   vec2 half_ = 0.5 / (r.zw * uAtlasSize);
   return r.xy + clamp(l, half_, 1.0 - half_) * r.zw;
 }
-// A solid stands over this slab's floor here: the obstacle map is in window uv, and is never solid outside it.
+// Whether tile t is the liquid's (its slab row's w is one).
+bool liquidTile(int t) { return uTileSlab[t].w > 0.5; }
+// The liquid at window place l: 0 none (land, or not known yet), 1 water, 2 lava, read off the medium byte by its middles.
+int mediumAt(vec2 l) {
+  float a = texture(uMedium, clamp(l, 0.0, 1.0)).a;
+  return a > 0.83 ? 2 : (a > 0.5 ? 1 : 0);
+}
+// A solid stands over this slab's floor here: the obstacle map is in window uv, and is never solid outside it. In the
+// liquid's tile the land is the solid, whatever stands on it.
 float solidAt(vec2 l, int t) {
   if (outsideOf(l)) return 0.0;
+  if (liquidTile(t)) return mediumAt(l) == 0 ? 1.0 : 0.0;
   return texture(uObstacles, l).r > uTileSlab[t].x + uObstacleOver ? 1.0 : 0.0;
 }
 vec2 inflowOf(int t) { return uWind * uTileSlab[t].z; }
@@ -74,11 +89,49 @@ vec4 finite4(vec4 v) { return (any(isnan(v)) || any(isinf(v))) ? vec4(0.0) : v; 
 `;
 
 /**
+ * The liquid tile's numbers (the fifth wave, the design's §2.9), each a vector the frame writes in place: water's pull
+ * toward its target and its own dissipation, lava's two (`uLiquidP`); each medium's share of the wind and of the swirl
+ * (`uLiquidQ`); a push's share, a ribbon's own flow's share and the liquid's fastest (`uLiquidR`).
+ */
+const LIQUID_UNIFORMS = /* glsl */ `
+uniform vec4 uLiquidP;
+uniform vec4 uLiquidQ;
+uniform vec4 uLiquidR;
+// The liquid's own numbers by its medium (1 water, 2 lava; the land is the tile's solid and never asks): its pull toward
+// its target, its dissipation, its share of the wind and its share of the swirl at the tile's own cell.
+float liquidRelax(int medium) {
+  return medium == 2 ? uLiquidP.z : uLiquidP.x;
+}
+float liquidDiss(int medium) {
+  return medium == 2 ? uLiquidP.w : uLiquidP.y;
+}
+float liquidWindShare(int medium) {
+  return medium == 2 ? uLiquidQ.y : uLiquidQ.x;
+}
+float liquidSwirl(int medium) {
+  return (medium == 2 ? uLiquidQ.w : uLiquidQ.z) * uLiquidR.w;
+}
+// The liquid's fastest under the air's own.
+float liquidCap(float cap) {
+  return min(cap, uLiquidR.z);
+}
+// One component of the liquid's advect: the back-traced velocity v dissipated at diss, pulled toward its target at relax
+// over the step dt, held to the liquid's fastest.
+float liquidStep(float v, float target, float relax, float diss, float dt) {
+  float lv = v / (1.0 + diss * dt);
+  lv = mix(lv, target, clamp(relax * dt, 0.0, 1.0));
+  return clamp(lv, -uLiquidR.z, uLiquidR.z);
+}
+`;
+
+/**
  * The splat: the velocity read at the window's pending scroll (carried by this, the first pass after a move to read
- * it), plus every splat of the batch, each weighted by how far its height over the ground is from the slab's middle.
+ * it), plus every splat of the batch, each weighted by how far its height over the ground is from the slab's middle --
+ * in the liquid's tile from its surface, times a push's share of the liquid (`uLiquidR.x`).
  */
 export const SPLAT_FRAGMENT = /* glsl */ `
 ${ATLAS_COMMON}
+${LIQUID_UNIFORMS}
 uniform sampler2D uVel;
 uniform vec2 uShift;
 uniform vec4 uSplatA[${SPLAT_BATCH}];
@@ -89,7 +142,9 @@ void main() {
   int t = tileOf(vUv);
   vec2 l = localOf(vUv, t);
   vec2 v = velAt(uVel, l + uShift, t);
-  float centre = uTileSlab[t].y;
+  bool liquid = liquidTile(t);
+  float centre = liquid ? 0.0 : uTileSlab[t].y;
+  float share = liquid ? uLiquidR.x : 1.0;
   for (int i = 0; i < ${SPLAT_BATCH}; i++) {
     if (i >= uSplatCount) break;
     vec4 a = uSplatA[i];
@@ -101,7 +156,7 @@ void main() {
     float k = (centre - a.w) / reach;
     float w = exp(-k * k);
     if (w < 0.02) continue;
-    v += b.xy * exp(-e) * w;
+    v += b.xy * exp(-e) * w * share;
   }
   if (solidAt(l, t) > 0.5) v = vec2(0.0);
   gl_FragColor = finite4(vec4(v, 0.0, 1.0));
@@ -125,6 +180,7 @@ float curlAt(sampler2D vel, vec2 l, int t, vec2 tx) {
  */
 export const VORT_FRAGMENT = /* glsl */ `
 ${ATLAS_COMMON}
+${LIQUID_UNIFORMS}
 uniform sampler2D uVel;
 // The swirl at this cell, the step and the cap, in one vector so a frame writes no number into a uniform object.
 uniform vec4 uVortP;
@@ -145,14 +201,18 @@ void main() {
   float ct = curlAt(uVel, l + vec2(0.0, tx.y), t, tx);
   vec2 f = 0.5 * vec2(abs(ct) - abs(cb), abs(cr) - abs(cl));
   f /= length(f) + 1e-5;
-  f *= uStrength * c;
+  // In the liquid's tile, each medium's own share of the swirl (lava none) at the tile's own cell, and the liquid's own fastest.
+  bool liquid = liquidTile(t);
+  float swirl = liquid ? liquidSwirl(mediumAt(l)) : 1.0;
+  float cap = liquid ? liquidCap(uCap) : uCap;
+  f *= uStrength * c * swirl;
   f.y *= -1.0;
   // None across the window's edge band: the curl there reads the held inflow outside against the air inside, and
   // confined it pumped jets along the edges that grew to the cap and filled the window (the second wave measured it).
   float edgeD = min(min(l.x, 1.0 - l.x), min(l.y, 1.0 - l.y));
   f *= smoothstep(0.0, uEdge, edgeD);
   vec2 v = velAt(uVel, l, t) + f * uDt;
-  gl_FragColor = finite4(vec4(clamp(v, vec2(-uCap), vec2(uCap)), 0.0, 1.0));
+  gl_FragColor = finite4(vec4(clamp(v, vec2(-cap), vec2(cap)), 0.0, 1.0));
 }
 `;
 
@@ -279,27 +339,43 @@ vec2 windHere(vec2 w, vec2 wind) {
 export const ADVECT_FRAGMENT = /* glsl */ `
 ${ATLAS_COMMON}
 ${GUST}
+${LIQUID_UNIFORMS}
 uniform sampler2D uVel;
+// The liquid's own flow, m/s along x and z in window uv (a ribbon's, the fifth wave's flow raster).
+uniform sampler2D uFlowR;
 // The step, the dissipation, the pull toward the wind and the slabs' coupling, in one vector.
 uniform vec4 uAdvectP;
 #define uDt uAdvectP.x
 #define uDiss uAdvectP.y
 #define uRelax uAdvectP.z
 #define uCouple uAdvectP.w
+${LIQUID_TARGET_GLSL}
 void main() {
   int t = tileOf(vUv);
   vec2 l = localOf(vUv, t);
   if (solidAt(l, t) > 0.5) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
   vec2 v0 = velAt(uVel, l, t);
   vec2 back = l - v0 * uDt / uWindow.z;
-  vec2 v = velAt(uVel, back, t) / (1.0 + uDiss * uDt);
   vec2 w = uWindow.xy + l * uWindow.z;
+  if (liquidTile(t)) {
+    // The liquid's tile (the fifth wave): water pulled toward its share of the wind and lava toward stillness, either
+    // toward its own flow besides (liquidTarget), each by its medium's own pull and dissipation, held to the liquid's
+    // fastest; never coupled to the air's slabs.
+    int m = mediumAt(l);
+    float relax = liquidRelax(m);
+    float diss = liquidDiss(m);
+    vec2 lv = velAt(uVel, back, t);
+    vec2 tg = liquidTarget(w, l, liquidWindShare(m));
+    gl_FragColor = finite4(vec4(liquidStep(lv.x, tg.x, relax, diss, uDt), liquidStep(lv.y, tg.y, relax, diss, uDt), 0.0, 1.0));
+    return;
+  }
+  vec2 v = velAt(uVel, back, t) / (1.0 + uDiss * uDt);
   v = mix(v, windHere(w, inflowOf(t)), clamp(uRelax * uDt, 0.0, 1.0));
-  if (uTileCount > 1 && uCouple > 0.0) {
+  if (uSlabCount > 1 && uCouple > 0.0) {
     vec2 acc = vec2(0.0);
     float n = 0.0;
     if (t > 0) { acc += velAt(uVel, l, t - 1); n += 1.0; }
-    if (t + 1 < uTileCount) { acc += velAt(uVel, l, t + 1); n += 1.0; }
+    if (t + 1 < uSlabCount) { acc += velAt(uVel, l, t + 1); n += 1.0; }
     if (n > 0.0) v = mix(v, acc / n, clamp(uCouple * uDt, 0.0, 1.0));
   }
   gl_FragColor = finite4(vec4(v, 0.0, 1.0));

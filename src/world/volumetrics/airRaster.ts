@@ -32,6 +32,12 @@ export interface GroundSample {
   medium: number;
   /** The pole's colour-map bytes packed `0xRRGGBB`, or -1 where there are none (no chunk built, no colour map). */
   tint: number;
+  /**
+   * The liquid's own flow there, m/s along x and z (the fifth wave: a ribbon's velocity along its run where the terrain's
+   * lava falls are drawn), nought where it has none. The raster sets both to nought before every ask.
+   */
+  flowX: number;
+  flowZ: number;
 }
 
 /** sRGB bytes decoded, once, by the ground's own `srgbDecode`: what `tintedAt` reads a colour byte through. */
@@ -75,6 +81,19 @@ export class AirRaster {
    * puffs and streaks off sand, ash and dirt), which neither the response bytes nor the medium byte name.
    */
   klass = new Uint8Array(0);
+  /**
+   * The liquid's own flow at each cell, m/s along x and z (the fifth wave's flow raster: a ribbon's velocity where the
+   * terrain's lava falls are drawn), nought where it has none: what the liquid tile is pulled toward beside its share of
+   * the wind (`LIQUID_TARGET_GLSL`).
+   */
+  flow = new Float32Array(0);
+  /** Set when the flow moved since the field last uploaded it (most frames it has not: a world with no ribbon never writes it). */
+  flowDirty = false;
+  /**
+   * How many cells hold a flow other than nought: a window's move or a clear dirties the flow only while there is any,
+   * so on a world with no ribbon (every world but one) the flow raster is never uploaded again after it is made.
+   */
+  flowCells = 0;
   /** Each family's class index by family id, from the world's table (`fillClassTable`); a family past it is dirt's. */
   familyClass: Uint8Array = new Uint8Array(0);
   /**
@@ -101,7 +120,7 @@ export class AirRaster {
   familyColour: Uint8Array = new Uint8Array(0);
   /** The colour a cell takes whose family has none: sRGB bytes. */
   fallback = [204, 168, 117];
-  private readonly s: GroundSample = { h: 0, family: -1, medium: 0, tint: -1 };
+  private readonly s: GroundSample = { h: 0, family: -1, medium: 0, tint: -1, flowX: 0.5, flowZ: 0.5 };
   /** `tintedAt`'s scratch: the tint's bytes as 0..1, and what `tintGamma` made of them. */
   private readonly tc: [number, number, number] = [0.5, 0.5, 0.5];
   private readonly tg: [number, number, number] = [0.5, 0.5, 0.5];
@@ -119,6 +138,7 @@ export class AirRaster {
     this.known = new Uint8Array(n * n);
     this.fam = new Uint16Array(n * n);
     this.klass = new Uint8Array(n * n);
+    this.flow = new Float32Array(n * n * 2);
     this.clear();
   }
 
@@ -131,6 +151,10 @@ export class AirRaster {
     this.known.fill(0);
     this.fam.fill(0);
     this.klass.fill(0);
+    this.flow.fill(0);
+    // A raster of nought flow already uploads nothing new (a resize's texture is made fresh with its data).
+    if (this.flowCells > 0) this.flowDirty = true;
+    this.flowCells = 0;
     this.unknown = this.n * this.n;
     this.cursor = 0;
     this.dirty = true;
@@ -158,6 +182,15 @@ export class AirRaster {
     shiftGrid(this.known, n, 1, dx, dz, 0);
     shiftGrid(this.fam, n, 1, dx, dz, 0);
     shiftGrid(this.klass, n, 1, dx, dz, 0);
+    // The flow moves (and is uploaded again) only where it holds any: what leaves the window takes its count with it.
+    if (this.flowCells > 0) {
+      shiftGrid(this.flow, n, 2, dx, dz, 0);
+      this.flowDirty = true;
+      const fl = this.flow;
+      let cells = 0;
+      for (let k = 0; k < fl.length; k += 2) if (fl[k] !== 0 || fl[k + 1] !== 0) cells++;
+      this.flowCells = cells;
+    }
     let unknown = 0;
     const kn = this.known;
     const h = this.height;
@@ -249,6 +282,8 @@ export class AirRaster {
     this.asked++;
     const was = this.known[k];
     s.tint = -1;
+    s.flowX = 0;
+    s.flowZ = 0;
     if (!src.sample(this.askOx + (i + 0.5) * cell, this.askOz + (j + 0.5) * cell, s) || !Number.isFinite(s.h)) {
       if (was) {
         this.known[k] = 0;
@@ -291,6 +326,18 @@ export class AirRaster {
     this.klass[k] = s.medium !== 1 ? 0 : fam >= 0 && fam < fc.length && fc[fam] > 0 ? fc[fam] : DIRT_CLASS;
     this.paintColour(p, known ? fam : -1);
     this.colour[p + 3] = s.medium === 3 ? 255 : s.medium === 2 ? 170 : 85;
+    // The liquid's own flow (the fifth wave's), written only where it moved, so a world with none never dirties it.
+    const fx = s.medium !== 1 && Number.isFinite(s.flowX) ? s.flowX : 0;
+    const fz = s.medium !== 1 && Number.isFinite(s.flowZ) ? s.flowZ : 0;
+    const fl = this.flow;
+    if (fl[k * 2] !== fx || fl[k * 2 + 1] !== fz) {
+      const had = fl[k * 2] !== 0 || fl[k * 2 + 1] !== 0;
+      const has = fx !== 0 || fz !== 0;
+      if (had !== has) this.flowCells += has ? 1 : -1;
+      fl[k * 2] = fx;
+      fl[k * 2 + 1] = fz;
+      this.flowDirty = true;
+    }
     // The pole's own colour-map bytes as the terrain hands them back, a whole number packed (a version-3 pack, a
     // real-elevation world or a pole no built chunk covers answers none: a tint of one).
     const tint = s.tint;

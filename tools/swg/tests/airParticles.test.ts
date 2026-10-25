@@ -41,7 +41,7 @@ import { CLASS_INDEX, KICK_KIND, KICK_LOOK, newOwed, OwedTable, packColour, reco
 import { driftOver, leafRestIn, oroLiftAt, pickThreshold, pullShare, streakLength, type LeafRest } from '../../../src/world/volumetrics/airParticleMath.ts';
 import { KICK_COUNTS, KICK_WIDTH, KickPool, kickBytes, kickRows, newKickLight } from '../../../src/world/volumetrics/airParticles.ts';
 import { rainBytes } from '../../../src/world/volumetrics/airRain.ts';
-import { KICK_DRAW_FRAGMENT, KICK_DRAW_VERTEX, KICK_LIFT_GLSL, KICK_ORO_GLSL, KICK_STREAK_GLSL, KICK_UPDATE_FRAGMENT } from '../../../src/world/volumetrics/airParticleShaders.ts';
+import { KICK_DRAW_FRAGMENT, KICK_DRAW_VERTEX, KICK_LIFT_GLSL, KICK_ORO_GLSL, KICK_STREAK_GLSL, KICK_UPDATE_FRAGMENT, RING_VERTEX } from '../../../src/world/volumetrics/airParticleShaders.ts';
 import { glslFunctions, glslFunctionText } from './glslRun.ts';
 
 let checks = 0;
@@ -368,7 +368,7 @@ function run(r: Rig, fps: number, seconds: number): { starts: number[]; wake: nu
   ok(d.on[KICK_KIND.leaf][0] === 0 && d.on[KICK_KIND.leaf][1] === 2 && d.on[KICK_KIND.puff][0] === 2 && d.on[KICK_KIND.puff][1] === 3 && d.on[KICK_KIND.spray][0] === 3 && d.on[KICK_KIND.spray][1] === 4, 'sorted by kind, each kind\'s records a run of its own');
   ok(d.recA[3] === 3 && d.recA[7] === 8 && d.recA[11] === 2 && d.recA[15] === 4, 'their counts cumulative within each kind');
   ok(Math.abs(d.recA[0] - (10 - w.ox)) < 1e-9 && Math.abs(d.recA[1] - (1 - d.corner)) < 1e-9 && Math.abs(d.recA[2] - (2 - w.oz)) < 1e-9, "a record's place taken to the window's corner and the pool's own corner height");
-  ok(Math.abs(Array.from(r.field.kick.updateMaterial.uniforms.uRecC.value as Float32Array)[3 * 4 + 3] - 0.25) < 1e-6 && /if \(kind == 2 && v\.y < 0\.0 && pos\.y \+ cornerY < spare && age > 0\.1\) dead = true;/.test(r.field.kick.updateMaterial.fragmentShader), "spray's water surface kept a world height, which the program meets with the place plus the corner's height (so a corner moved later never leaves it wrong)");
+  ok(Math.abs(Array.from(r.field.kick.updateMaterial.uniforms.uRecC.value as Float32Array)[3 * 4 + 3] - 0.25) < 1e-6 && /if \(kind == 2 && v\.y < 0\.0 && pos\.y \+ cornerY < spare && age > 0\.1\) \{\n\s*dead = true;\n\s*landed = true;/.test(r.field.kick.updateMaterial.fragmentShader), "spray's water surface kept a world height, which the program meets with the place plus the corner's height (so a corner moved later never leaves it wrong)");
   const size = k.rows[KICK_KIND.leaf] * KICK_WIDTH;
   const next = r.frame(1 / 60)[0];
   ok(next.kind[KICK_KIND.leaf][2] === (headBefore[KICK_KIND.leaf] + 8) % size && next.kind[KICK_KIND.puff][2] === (headBefore[KICK_KIND.puff] + 2) % (k.rows[KICK_KIND.puff] * KICK_WIDTH), "each kind's ring head moved on by what it started");
@@ -426,7 +426,7 @@ function run(r: Rig, fps: number, seconds: number): { starts: number[]; wake: nu
   const rows = kickRows(2);
   ok(sized === 5 && disposed === 0 && rows.every((n, i) => n * KICK_WIDTH === KICK_COUNTS[i] * 2), `five details made, no material disposed, and each kind's slots its count at the detail (${rows.map((n) => n * KICK_WIDTH).join(', ')} at ×2)`);
   ok(kp.meshes.every((m) => (m.geometry as THREE.InstancedBufferGeometry).instanceCount === kp.rows[kp.meshes.indexOf(m)] * KICK_WIDTH), 'each draw instances exactly its kind\'s slots, no instanced attribute');
-  ok(kp.materials().length === 6 && kp.blendMaterials.every((m) => m.vertexShader === kp.cutMaterial.vertexShader && m.fragmentShader === kp.cutMaterial.fragmentShader && m.defines?.KICK_CUT === undefined) && kp.cutMaterial.defines?.KICK_CUT === '', 'two draw programs: the leaves cut (one define), the puffs, spray and streaks blended over the same text');
+  ok(kp.materials().length === 7 && kp.materials()[6] === kp.ringMaterial && kp.blendMaterials.every((m) => m.vertexShader === kp.cutMaterial.vertexShader && m.fragmentShader === kp.cutMaterial.fragmentShader && m.defines?.KICK_CUT === undefined) && kp.cutMaterial.defines?.KICK_CUT === '', 'two draw programs: the leaves cut (one define), the puffs, spray and streaks blended over the same text');
 }
 
 // The window's whole-cell scroll and the corner's moves carried (§2.16): what the field hands the update as the moves owed
@@ -682,6 +682,24 @@ function run(r: Rig, fps: number, seconds: number): { starts: number[]; wake: nu
   ok(/const air = this\.world\.air;\n\s+if \(!air\?\.dentStep\(step\)\) footprints\.stepHook\(step\);\n\s+if \(air\) air\.kickFeet\(step\);/.test(main), "a running foot's leaves and spray are asked beside the print, never in its place");
   const field = source('world/volumetrics/airField.ts');
   ok(field.includes("if (!t.on || !t.air || !t.particles || !t.fromFeet || !this.forces.active || step.inside || step.deck !== null) return false;"), 'the feet kick nothing with the master, the air, the particles or the feet off, indoors or on a deck');
+}
+
+// --- the fifth wave: a drop of spray landing back in the water rings it, and nothing else does ---
+{
+  // The ring draw's own choice of slot and its place in the ripples, run as script out of its program.
+  const uRingW = { x: 100, y: -40, z: 192, w: 0.375 };
+  const ring = glslFunctions(['ringLanded', 'ringU', 'ringV'].map((f) => glslFunctionText(RING_VERTEX, f)).join('\n'), ['ringLanded', 'ringU', 'ringV'], { uRingW });
+  const landed = (life: number, spare: number): boolean => ring.ringLanded(life, spare) as unknown as boolean;
+  ok(landed(0, -1), 'a slot the update kept dead (life nought) with a spare of -1 is a drop that landed: a ring');
+  ok(!landed(0.8, -160) && !landed(0.8, -210) && !landed(0.3, -1) && !landed(1.2, -0.7), "a living drop is never a ring whatever its spare: over Naboo's seas at -160 and -210 m, and even a drop whose water stands at exactly -1 m (its life is asked first)");
+  ok(!landed(0, 0) && !landed(0, 12.5) && !landed(0, -0.5), 'nor a slot simply dead (all nought), nor one whose spare is any other height');
+  ok(Math.abs((ring.ringU(100 + 192 * 0.25) as number) - 0.25) < 1e-12 && Math.abs((ring.ringV(-40 + 192 * 0.25) as number) - 0.75) < 1e-12, "a ring stands at the ripples' u along world X and their v against world Z (rippleCarry.test holds both to waterSim's own pokes at every detail)");
+  ok(RING_VERTEX.includes('vec4 s1 = texelFetch(uS1, t, 0);') && RING_VERTEX.includes('if (!ringLanded(s1.w, s2.z) || uRingW.z <= 0.0) {') && RING_VERTEX.includes('vec2 uv = vec2(ringU(xz.x), ringV(xz.y));'), 'the ring draw asks ringLanded of each slot\'s life and spare and places it by ringU and ringV: the functions run here');
+  // The update keeps a landed drop, and nothing else, for its ring: dead (o1 nought), its place kept, its spare -1.
+  ok(/o0 = vec4\(0\.0\);\n\s*o1 = vec4\(0\.0\);\n\s*o2 = vec4\(0\.0\);/.test(KICK_UPDATE_FRAGMENT) && /if \(dead\) \{\n(?:\s*\/\/[^\n]*\n)*\s*if \(landed && uRing\.x > 0\.5 && fin4\(vec4\(pos, age\)\)\) \{\n\s*o0 = vec4\(pos, age\);\n\s*o2 = vec4\(seed, sz, -1\.0, col\);\n\s*\}\n\s*return;\n\s*\}/.test(KICK_UPDATE_FRAGMENT), "the update keeps a drop that landed, while the field wants rings, as a dead slot (its life nought) with its place and a spare of -1, and every other dead slot all nought");
+  const r = rig();
+  const kp = r.field.kick;
+  ok(kp.ringMaterial.uniforms.uS1 === kp.cutMaterial.uniforms.uS1 && kp.ringMaterial.uniforms.uS2 === kp.cutMaterial.uniforms.uS2 && kp.ringMaterial.uniforms.uS0 === kp.cutMaterial.uniforms.uS0, "the ring draw reads the state the update just wrote through the very objects the pool's draws read (life included), handed the new state as the pair is swapped");
 }
 
 console.log(`\n${checks} checks passed`);

@@ -1471,6 +1471,79 @@ export class AffectorInert extends Affector {
 }
 
 /**
+ * A ribbon's own data (ARIB, the terrain's AffectorRibbon): a strip of water or lava laid down a slope along points
+ * that each carry their own height -- the lava falls of Mustafar -- with its width, the metres a repeat of its shader,
+ * its velocity, the width of the pool it starts in (its end cap), the ground family the client painted under it with
+ * that family's feather, its water shader and its water type. Read as the client's loader reads each version (the
+ * first three keep no height a point and the first two no water type; a version before the fourth has no cap of its
+ * own and takes its width).
+ */
+export interface RibbonData {
+  version: number;
+  points: { x: number; z: number; h: number }[];
+  width: number;
+  shaderSize: number;
+  velocity: number;
+  capWidth: number;
+  familyId: number;
+  featherFunction: number;
+  featherDistance: number;
+  shader: string;
+  waterType: number;
+}
+
+/**
+ * The ribbon affector, still inert on the ground (the client painted its family under the strip, which this port does
+ * not: the ground stays as it has always been drawn here), its own data read beside its header so the world can draw
+ * the strip's water (`ribbons.ts`). A version it cannot read keeps `ribbon` null.
+ */
+export class AffectorRibbon extends AffectorInert {
+  ribbon: RibbonData | null = null;
+
+  override load(form: IffForm): void {
+    super.load(form);
+    const v = form.children[0];
+    if (!v || !isForm(v)) return;
+    const version = Number.parseInt(v.type, 10);
+    const dataForm = formChild(v, 'DATA');
+    const chunk = dataForm ? chunkChild(dataForm, 'DATA') : undefined;
+    if (!chunk || !(version >= 0 && version <= 5)) return;
+    try {
+      const r = new ChunkReader(chunk.data);
+      const n = r.int32();
+      if (!(n >= 0 && n < 100000)) return;
+      const points: RibbonData['points'] = [];
+      for (let i = 0; i < n; i++) {
+        const x = r.float();
+        const z = r.float();
+        // From the fourth version (0003) every point carries its own height; before it each stood at nought.
+        points.push({ x, z, h: version >= 3 ? r.float() : 0 });
+      }
+      const width = r.float();
+      if (version <= 2) r.float(); // a depth the client no longer reads
+      const shaderSize = version >= 1 ? r.float() : 64;
+      const velocity = version >= 1 ? r.float() : 1;
+      let capWidth = width;
+      let familyId = 0;
+      let featherFunction = 0;
+      let featherDistance = 0.5;
+      if (version >= 4) capWidth = r.float();
+      else r.int32(); // an old forward direction the client no longer reads
+      if (version >= 5) {
+        familyId = r.int32();
+        featherFunction = r.int32();
+        featherDistance = clamp(0, r.float(), 1);
+      }
+      const shader = r.string();
+      const waterType = version >= 2 && r.remaining >= 4 ? r.int32() : 0;
+      this.ribbon = { version, points, width, shaderSize, velocity, capWidth, familyId, featherFunction, featherDistance, shader, waterType };
+    } catch {
+      this.ribbon = null;
+    }
+  }
+}
+
+/**
  * AffectorFloraStatic (AFSC collidable, AFSN non-collidable): marks poles with a flora family.
  * Whether a pole gets flora is decided by a random number seeded from the pole's world position,
  * so every client and server plants the same trees.
@@ -2857,7 +2930,11 @@ export function loadLayerItem(form: IffForm, group: FractalGroup): LayerItem | n
       break;
     }
     default:
-      if (INERT_AFFECTORS.has(t)) {
+      if (t === 'ARIB') {
+        // Inert on the ground as every other in the set, its own data read beside its header (`AffectorRibbon`).
+        item = new AffectorRibbon(t);
+        (item as AffectorRibbon).load(form);
+      } else if (INERT_AFFECTORS.has(t)) {
         item = new AffectorInert(t);
         (item as AffectorInert).load(form);
       }

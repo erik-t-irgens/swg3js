@@ -823,6 +823,10 @@ export class AirVolumePass implements FxPass {
       // The fourth wave's: the class raster (`CLASS_INDEX`, a byte: sand 1 to wet sand 12, nought for water and the
       // unknown), red, a twelfth of the way a class, so grass and litter read bright and sand dark.
       field('class', 'r', 255 / 12),
+      // The fifth wave's: the liquid's own flow (a ribbon's, m/s in red and green, two to full), and the velocity atlas
+      // with the liquid's tile beside the slabs (as `velocity`).
+      field('flow', 'rgb', 1 / 2),
+      field('liquid', 'rgb', 1 / 20),
     ];
   }
 

@@ -526,7 +526,7 @@ ok(sandLift(5, 6, 7, 1) === 0 && near(sandLift(20, 6, 7, 1), 1) && sandLift(20, 
   smokeStep(one, 0);
   ok(one[0] === 0.4 && one[1] === 0.2 && one[2] === 0.1, 'a frame of nought changes nothing');
   const shader = readFileSync(join(here, '..', '..', '..', 'src', 'world', 'volumetrics', 'airShaders.ts'), 'utf8');
-  ok(shader.includes('if (t > 0) { acc += velAt(uVel, l, t - 1); n += 1.0; }') && shader.includes('if (t + 1 < uTileCount) { acc += velAt(uVel, l, t + 1); n += 1.0; }') && shader.includes('if (n > 0.0) v = mix(v, acc / n, clamp(uCouple * uDt, 0.0, 1.0));'), "the coupling reads each neighbour layer from the state every tile began the stage with (the advect's own input), so the order the tiles draw in changes nothing");
+  ok(shader.includes('if (t > 0) { acc += velAt(uVel, l, t - 1); n += 1.0; }') && shader.includes('if (t + 1 < uSlabCount) { acc += velAt(uVel, l, t + 1); n += 1.0; }') && shader.includes('if (n > 0.0) v = mix(v, acc / n, clamp(uCouple * uDt, 0.0, 1.0));'), "the coupling reads each neighbour layer from the state every tile began the stage with (the advect's own input), so the order the tiles draw in changes nothing; counted over the slabs alone, never the liquid's tile (the fifth wave)");
   ok(shader.includes('s0 *= uSmokeDecay;') && shader.includes('float up0 = s0 * uClimb0;') && shader.includes('s1 += up0 - up1;') && shader.includes('s2 += up1;'), "the smoke pass's decay and climb are smokeStep's lines");
   // The streamers: a sharp crest of sand in a wind past the threshold sheds; a rock crest none; under the threshold none.
   const D = AIR_TUNE.dust;
@@ -731,6 +731,134 @@ ok(sandLift(5, 6, 7, 1) === 0 && near(sandLift(20, 6, 7, 1), 1) && sandLift(20, 
     f.takeCounts(counts);
     ok(f.frontCount === 0 && counts.notFinite === 1 && counts.offWindow === 1, 'a front not a number or off the window does nothing and is counted');
   }
+}
+
+// --- the fifth wave: the pushes dispatched by the medium under them (the caller never decides) ---
+{
+  // A stand-in world: water for x < 0 (its surface the ground there, as the world's sampler has it), land beyond.
+  const shore = { sample: (x: number, _z: number, out: GroundSample) => ((out.h = 0), (out.family = 1), (out.medium = x < 0 ? 2 : 1), true) };
+  const at = (): AirForces => {
+    const f = new AirForces();
+    f.active = true;
+    const w = newWindow();
+    placeWindow(w, 0, 0, AIR_TUNE.window.size, 128, AIR_TUNE.window.jump);
+    const r = ground();
+    r.fillAll(shore, w.ox, w.oz, w.cell);
+    f.window = w;
+    f.raster = r;
+    return f;
+  };
+  const pokes: { x: number; z: number; strength: number; radius: number }[] = [];
+  const poke = (p: { x: number; z: number; strength: number; radius: number }): void => void pokes.push({ ...p });
+  // A jet pointed down 2 m over the water, and the same over the land.
+  for (const [x, water] of [[-30, true], [30, false]] as const) {
+    pokes.length = 0;
+    const f = at();
+    f.onPoke = poke;
+    f.engine(x, 2, 0, 0, -1, 0, 30, 0, 0);
+    walk(f);
+    ok(water ? pokes.length === 1 && Math.abs(pokes[0].x - x) < 1e-9 && pokes[0].strength > 0 && pokes[0].radius > AIR_TUNE.liquid.jetPokeRadius : pokes.length === 0, water ? `a jet landing on water presses the ripples where it lands (${pokes[0]?.strength.toFixed(4)} field units this frame over ${pokes[0]?.radius.toFixed(2)} m)` : 'the same jet over land presses nothing');
+  }
+  {
+    pokes.length = 0;
+    const f = at();
+    f.engine(-30, 2, 0, 0, -1, 0, 30, 0, 0);
+    walk(f);
+    ok(pokes.length === 0 && f.pokes === 0, 'with no poke hung (the current off) a jet over water presses nothing');
+  }
+  for (const [x, water] of [[-30, true], [30, false]] as const) {
+    pokes.length = 0;
+    const f = at();
+    f.onPoke = poke;
+    f.blast(x, 0.5, 0, AIR_TUNE.blast.radiusRef, AIR_TUNE.blast.pushRef, 0);
+    ok(water ? pokes.length === 1 && Math.abs(pokes[0].strength - AIR_TUNE.liquid.blastPoke) < 1e-12 : pokes.length === 0, water ? `a thermal detonator over water presses the ripples at blastPoke (${AIR_TUNE.liquid.blastPoke}), by its radius over its own` : 'and over land not at all');
+  }
+  // The same jet's push still reaches the air's batch over either: the liquid's tile takes its share in the splat pass,
+  // weighted from the surface by the push's own share (`liquid.push`), never decided here.
+  const f = at();
+  f.onPoke = poke;
+  f.engine(-30, 2, 0, 0, -1, 0, 30, 0, 0);
+  walk(f);
+  ok(f.buildStepBatch(1 / 60) > 0, "the jet's own shoves are queued as ever: the splat pass gives the liquid's tile its share");
+  const shaders = readFileSync(join(here, '..', '..', '..', 'src', 'world', 'volumetrics', 'airShaders.ts'), 'utf8').replace(/\r\n/g, '\n');
+  ok(shaders.includes('float centre = liquid ? 0.0 : uTileSlab[t].y;') && shaders.includes('float share = liquid ? uLiquidR.x : 1.0;') && shaders.includes('v += b.xy * exp(-e) * w * share;'), "in the splat pass the liquid's tile weighs a push from its surface, times a push's share of the liquid");
+  ok(shaders.includes('if (liquidTile(t)) return mediumAt(l) == 0 ? 1.0 : 0.0;') && shaders.includes("return a > 0.83 ? 2 : (a > 0.5 ? 1 : 0);"), "and the liquid's tile is solid wherever the medium byte is land or not known (85 and nought), water at 170 and lava at 255");
+}
+
+// --- the fifth wave: the flow raster uploads only where there is a flow ---
+{
+  const r = ground();
+  const w = newWindow();
+  placeWindow(w, 0, 0, AIR_TUNE.window.size, 128, AIR_TUNE.window.jump);
+  r.fillAll(flat, w.ox, w.oz, w.cell);
+  r.flowDirty = false;
+  r.shift(3, -2);
+  ok(!r.flowDirty && r.flowCells === 0, 'a world with no lava fall: a window move leaves the flow raster unwritten and not to be uploaded again');
+  r.clear();
+  ok(!r.flowDirty, 'nor does a clear');
+  // A fall's flow over a strip of cells: asked in, it dirties the raster, moves with the window and is counted.
+  const fall = { sample: (x: number, _z: number, out: GroundSample) => ((out.h = 0), (out.family = 1), (out.medium = x > 0 && x < 6 ? 3 : 1), (out.flowX = x > 0 && x < 6 ? 0.8 : 0), (out.flowZ = 0), true) };
+  r.fillAll(fall, w.ox, w.oz, w.cell);
+  const cells = r.flowCells;
+  ok(r.flowDirty && cells > 0, `a fall's flow asked in dirties the raster (${cells} cells flowing)`);
+  r.flowDirty = false;
+  r.shift(1, 0);
+  ok(r.flowDirty && r.flowCells === cells, 'a window move carries it, dirtying it again, the cells counted after the move');
+  r.shift(-128, 0);
+  ok(r.flowDirty && r.flowCells === 0, 'a jump clears it (dirtied, so the cleared raster is uploaded) and counts none');
+}
+
+// --- the fifth wave: the dispatch over the air, water, lava and a lava sea, on one stand-in world ---
+{
+  // West of x = -20 water; from -20 to 20 a lava flow; east of 20 Mustafar's kind of lava sea, a liquid at -1 m that is
+  // lava only where it stands over the ground there (the world's own "over a flow means over one": `World.lavaAt`), the
+  // ground rising from -3 m at x = 20 to +5 m at x = 90, so the sea's near half is lava and its far half dry land.
+  const seaAt = -1;
+  const groundAt = (x: number): number => (x < 20 ? 0 : -3 + ((x - 20) / 70) * 8);
+  const world = {
+    sample: (x: number, _z: number, out: GroundSample) => {
+      const h = groundAt(x);
+      out.h = h;
+      out.family = 1;
+      out.medium = x < -20 ? 2 : x < 20 ? 3 : seaAt > h ? 3 : 1;
+      return true;
+    },
+  };
+  const at = (): AirForces => {
+    const f = new AirForces();
+    f.active = true;
+    const w = newWindow();
+    placeWindow(w, 0, 0, AIR_TUNE.window.size, 128, AIR_TUNE.window.jump);
+    const r = ground();
+    r.fillAll(world, w.ox, w.oz, w.cell);
+    f.window = w;
+    f.raster = r;
+    return f;
+  };
+  const pokes: number[] = [];
+  const grains: number[] = [];
+  const lines: string[] = [];
+  let all = true;
+  // A jet bearing down 2 m over each, and a thermal detonator: what each medium does with them.
+  for (const [x, what] of [[-50, 'water'], [0, 'lava'], [30, 'the lava sea where it stands over the ground'], [80, 'the lava sea\'s dry land']] as const) {
+    pokes.length = 0;
+    grains.length = 0;
+    const f = at();
+    f.onPoke = (p) => void pokes.push(p.strength);
+    f.onGrains = (gx) => void grains.push(gx);
+    const gy = groundAt(x);
+    f.engine(x, gy + 2, 0, 0, -1, 0, 30, 0, 0);
+    walk(f);
+    const dust = f.buildDustBatch(1 / 60);
+    const shoves = f.buildStepBatch(1 / 60);
+    f.blast(x, gy + 0.5, 0, AIR_TUNE.blast.radiusRef, AIR_TUNE.blast.pushRef, 0);
+    const water = what === 'water';
+    const land = what === 'the lava sea\'s dry land';
+    const ok1 = shoves > 0 && (water ? pokes.length === 2 && dust === 0 && grains.length === 0 : land ? pokes.length === 0 && dust > 0 && grains.length === 1 : pokes.length === 0 && dust === 0 && grains.length === 0);
+    if (!ok1) all = false;
+    lines.push(`${what}: ${shoves} shoves, ${dust} dust, ${pokes.length} pokes, ${grains.length} grain bursts`);
+  }
+  ok(all, `the dispatch by the medium under each push, a jet and a blast alike: every one shoves the air (the liquid's tile takes its share in the splat pass); water presses the ripples and lifts nothing; lava, a flow's or the sea's where it stands over the ground, presses nothing, lifts nothing and throws no grain; the sea's dry land is land and lifts its dust (${lines.join('; ')})`);
 }
 
 console.log(`\n${checks} checks passed`);

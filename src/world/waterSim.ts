@@ -248,6 +248,51 @@ interface Rig {
   stepMat: THREE.ShaderMaterial;
 }
 
+/**
+ * The ripples carried by the liquid's current (the volumetrics' fifth wave, `airLiquid.ts`'s `RippleCarryPass`): set by
+ * the world only while the master, the current and its art share are on, and null otherwise, when the step below is
+ * today's line for line. Set, a frame's first step is preceded by the carry, which draws the state read where the
+ * current brought it from (and the window's whole-texel move with it) into the next state, owed every second and every
+ * move since it last ran -- a frame with no step loses neither, where today's path drops a stepless frame's move -- and
+ * the step then runs with no scroll. `ask` is where the owed numbers are written (no number handed across a call).
+ */
+export interface RippleCarry {
+  readonly ask: { scrollU: number; scrollV: number; seconds: number };
+  /** Draw `from` carried into `to`; answers whether it drew (a share of nought draws nothing, and the step scrolls as today). */
+  run(renderer: THREE.WebGLRenderer, from: THREE.WebGLRenderTarget, to: THREE.WebGLRenderTarget): boolean;
+}
+
+let carry: RippleCarry | null = null;
+/** What the carry is owed: the window's moves in uv and the seconds since it last ran (held to a quarter second). */
+const carryOwed = { u: 0, v: 0, seconds: 0 };
+/** The longest the carry carries over at once: a hitch or a hidden tab must not throw the ripples across the window. */
+const CARRY_MOST = 0.25;
+
+/** Hang the ripples' carry on the step, or take it off (null: today's step, line for line). */
+export function setRippleCarry(c: RippleCarry | null): void {
+  if (c === carry) return;
+  carry = c;
+  carryOwed.u = 0;
+  carryOwed.v = 0;
+  carryOwed.seconds = 0;
+}
+
+/** Whether a carry is hung on the step (the console's and the tests'). */
+export function rippleCarrySet(): boolean {
+  return carry !== null;
+}
+
+/**
+ * The ripples' state as it stands, for something that draws into it additively (the spray's rings, the fifth wave), or
+ * null where there is none or this browser cannot blend into it (a float32 state needs `EXT_float_blend`; a half float
+ * blends on every WebGL2 browser).
+ */
+export function rippleStateTarget(renderer: THREE.WebGLRenderer): THREE.WebGLRenderTarget | null {
+  if (!rig || failed) return null;
+  if (rig.read.texture.type === THREE.FloatType && !renderer.getContext().getExtension('EXT_float_blend')) return null;
+  return rig.read;
+}
+
 let rig: Rig | null = null;
 let failed = false;
 const bodies: SimBody[] = [];
@@ -411,6 +456,29 @@ export function pokeWaterSim(x: number, z: number, strength: number, radiusM = 0
   pokeNext = (pokeNext + 1) % MAX_POKES;
 }
 
+/** A poke's numbers in a kept record (the volumetrics' fifth wave: a push meeting water), so none crosses a call. */
+export interface WaterPokeAsk {
+  x: number;
+  z: number;
+  strength: number;
+  radius: number;
+}
+
+/** `pokeWaterSim` over a kept record, written field by field (a frame's poke makes no number). */
+export function pokeWaterSimIn(p: WaterPokeAsk): void {
+  if (Number.isNaN(originX)) return;
+  const u = (p.x - originX) / WINDOW;
+  const v = 1 - (p.z - originZ) / WINDOW;
+  if (!(u >= 0 && u <= 1 && v >= 0 && v <= 1) || !Number.isFinite(p.strength)) return;
+  const k = pokes[pokeNext];
+  const r = p.radius / TEXEL;
+  k.x = u;
+  k.y = v;
+  k.z = r > 1 ? r : 1;
+  k.w = p.strength;
+  pokeNext = (pokeNext + 1) % MAX_POKES;
+}
+
 /** True once the field exists, so callers can fall back where the hardware cannot run it. */
 export function waterSimReady(): boolean {
   return !!rig && !failed;
@@ -517,6 +585,15 @@ export function stepWaterSim(
   renderer.clear(true, false, false);
   renderer.render(rig.splatScene, rig.splatCam);
 
+  if (carry !== null) {
+    stepCarried(renderer, carry, dt);
+    renderer.setRenderTarget(prevTarget);
+    renderer.autoClear = prevAutoClear;
+    renderer.setClearColor(saveColor, prevAlpha);
+    WATER_SIM_TEX.value = rig.read.texture;
+    return;
+  }
+
   // A fixed step, however long the frame was, so the wave speed does not ride on the frame rate
   // and a hitch cannot push the scheme past what it can hold.
   accumulator = Math.min(accumulator + dt, FIXED_DT * MAX_STEPS);
@@ -540,6 +617,54 @@ export function stepWaterSim(
   renderer.setClearColor(saveColor, prevAlpha);
 
   WATER_SIM_TEX.value = rig.read.texture;
+}
+
+/** A carried scroll for the step when the carry drew nothing (a share of nought this frame). */
+const owedScroll = new THREE.Vector2();
+
+/**
+ * The steps with a carry hung on them (`setRippleCarry`): the owed moves and seconds gathered every frame, stepped or
+ * not; on a frame's first step the carry draws the state carried into the next and the step follows with no scroll, or,
+ * where the carry drew nothing, the step takes the owed moves as today's takes the frame's. Pokes as today's.
+ */
+function stepCarried(renderer: THREE.WebGLRenderer, c: RippleCarry, dt: number): void {
+  const r = rig!;
+  carryOwed.u += scroll.x;
+  carryOwed.v += scroll.y;
+  const s = carryOwed.seconds + (dt > 0 && Number.isFinite(dt) ? dt : 0);
+  carryOwed.seconds = s < CARRY_MOST ? s : CARRY_MOST;
+  accumulator = Math.min(accumulator + dt, FIXED_DT * MAX_STEPS);
+  let steps = 0;
+  while (accumulator >= FIXED_DT && steps < MAX_STEPS) {
+    accumulator -= FIXED_DT;
+    steps++;
+    let carried = false;
+    if (steps === 1) {
+      const a = c.ask;
+      a.scrollU = carryOwed.u;
+      a.scrollV = carryOwed.v;
+      a.seconds = carryOwed.seconds;
+      carried = c.run(renderer, r.read, r.write);
+      if (carried) {
+        const swap = r.read;
+        r.read = r.write;
+        r.write = swap;
+      }
+      owedScroll.x = carried ? 0 : carryOwed.u;
+      owedScroll.y = carried ? 0 : carryOwed.v;
+      carryOwed.u = 0;
+      carryOwed.v = 0;
+      carryOwed.seconds = 0;
+    }
+    (r.stepMat.uniforms.uScroll.value as THREE.Vector2).copy(steps === 1 ? owedScroll : ZERO);
+    r.stepMat.uniforms.uState.value = r.read.texture;
+    renderer.setRenderTarget(r.write);
+    renderer.render(r.stepScene, r.stepCam);
+    const swap = r.read;
+    r.read = r.write;
+    r.write = swap;
+    if (steps === 1) for (const p of pokes) p.w = 0;
+  }
 }
 
 
@@ -644,4 +769,7 @@ export function disposeWaterSim(): void {
   WATER_SIM_ON.value = 0;
   originX = Number.NaN;
   accumulator = 0;
+  carryOwed.u = 0;
+  carryOwed.v = 0;
+  carryOwed.seconds = 0;
 }

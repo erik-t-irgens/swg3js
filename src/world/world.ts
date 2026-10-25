@@ -19,7 +19,7 @@ import { cardWrap, isCard, prepareCardModel, setCardRule } from './cardRule.ts';
 import { CARD_LIGHT_TUNE, cardReceives, setCardRoomPass, updateCardLight } from './cardLight.ts';
 import { SWAY_TUNE, batchedDepthCombo, disposeStandIn, hangSwayDepth, plainDepthCombos, setSwayEye, setSwayRoomPass, skinnedDepthCombos, stepSway, swayDepthCombos, swayDepthStandIns, swayWrap } from './floraSway.ts';
 import { resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
-import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
+import { addSimBody, pokeWaterSimIn, rippleCarrySet, rippleStateTarget, setRippleCarry, stepWaterSim, waterSimReady, WATER_SIM_WINDOW, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
 import { basinFootprint, basinLevelNear, basinLook, basinTopAt, type BasinFootprint } from './basinWater.ts';
 import { envLightFrom, isLavaWater, shaderKey, type WaterLook } from './waterLook';
@@ -137,6 +137,8 @@ import { grainShedIn, newGrainShed, sheddingCount, stormSheetFactor } from './vo
 import { AIR_TUNE, FOG_LOOKS_STAMP, GROUND_FOG_LOOKS } from './volumetrics/airTune.ts';
 import { FogDayCount, fogDayOf, fogHourIn, newFogHour, type FogDay } from './volumetrics/airFog.ts';
 import { VOL_TUNE } from './volumetrics/volSettings.ts';
+import { LIQUID_U, lavaCrustMaterial, lavaMaterialFor, lavaWearsCrust, liquidOff, waterWearsAir, type LiquidChoice } from './volumetrics/airLiquid.ts';
+import { ribbonAt, ribbonTriangles, type GameRibbon, type RibbonPoint } from '../swg/terrain/ribbons.ts';
 import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../vehicles/garage';
 import { fitKey, type ResolvedFit } from '../vehicles/shipFit';
 import { inTurn } from '../vehicles/shipMounts';
@@ -894,6 +896,46 @@ export class World {
   /** Lava where the terrain puts it: one merged mesh per look (loadLava). */
   private readonly localLava: THREE.Mesh[] = [];
   private readonly lavaMaterials: LavaMaterial[] = [];
+  /**
+   * The volumetrics' fifth wave on the lava: each drawn lava mesh's plain material and its crust twin (made only while
+   * the master is on, `makeLiquidVariants`), the chooser's last answers for the water and the lava (so a change walks the
+   * meshes once), and whether anything worn reads the liquid's tile (which the field steps it for).
+   */
+  private readonly lavaCrust = new Map<THREE.Mesh, { plain: THREE.ShaderMaterial; crust: THREE.ShaderMaterial }>();
+  private liquidWater = false;
+  private liquidLava = false;
+  private liquidReading = false;
+  /** How many water bodies wear their current variant now (what a push meeting the water presses the ripples for). */
+  private liquidWaterWorn = 0;
+  private readonly liquidChoiceRec: LiquidChoice = { on: false, current: false, lava: false, field: false, softOff: false };
+  /**
+   * The variants made in play and not yet built (a current variant's lit material, a crust twin): never worn until the warm
+   * that compiled them for the frames' own target says so (`liquidBuilt`), or the chooser would hand three a program to
+   * build on a live frame -- the master turned on in play over a field the session kept, ribbons stood in play, a basin
+   * an in-play Effects sweep found. Made behind a screen or a tunnel they are never in it: the sweep after builds them
+   * before anything is seen. Emptied with the world.
+   */
+  private readonly liquidUnbuilt = new Set<THREE.Material>();
+  /** Whether a variant may be worn: built, or made behind a screen (the chooser's kept predicate, made once). */
+  private readonly liquidReady = (m: THREE.Material): boolean => !this.liquidUnbuilt.has(m);
+  /** The frame report's soft off for the liquids (every swapped material back on its plain one). */
+  liquidSoftOff = false;
+  /**
+   * The terrain's ribbons (Mustafar's lava falls, the survey's: `ARIB` affectors this game never drew), in the game's
+   * frame, and their meshes while the Graphics page's switch (`waterRibbons`) has them drawn: one merged mesh a look,
+   * worn in the lava's own look (`wter_lava_01_fast`, which no converted pack carries, in the world's first look). Built
+   * only when the switch is on; off, nothing of them is made and the world is today's.
+   */
+  private ribbons: GameRibbon[] = [];
+  private readonly ribbonMeshes: THREE.Mesh[] = [];
+  private readonly ribbonOwned: THREE.ShaderMaterial[] = [];
+  private ribbonGeometries: THREE.BufferGeometry[] = [];
+  private ribbonsWanted = false;
+  private ribbonsShown = false;
+  private ribbonsBusy = false;
+  private readonly ribbonHit: RibbonPoint = { h: 0, fx: 0, fz: 0, type: 0 };
+  /** What the ribbons' drawing came to, for the console (`__debug.water()`). */
+  readonly ribbonStatus = { ribbons: 0, quads: 0, shown: false, looks: [] as string[], why: null as string | null };
   /** Per table (shared with the heat haze) and merged. */
   private readonly lavaGeometries: THREE.BufferGeometry[] = [];
   /** Owned by this planet: never the runtime noise or the stand-in ramp, which live for the app. */
@@ -985,6 +1027,14 @@ export class World {
       out.h = !lava && water > h ? water : h;
       out.family = family;
       out.medium = lava ? 3 : water > h ? 2 : 1;
+      // The terrain's ribbons while they are drawn (the fifth wave): lava over the ground there, flowing down the ribbon's
+      // run at its own velocity, which the liquid's tile is pulled toward. Lava keeps the ground, as a flow's does.
+      if (this.ribbonsShown && out.medium !== 3 && ribbonAt(this.ribbons, x, z, this.ribbonHit) && this.ribbonHit.type === 1 && this.ribbonHit.h > h - 0.5) {
+        out.h = h;
+        out.medium = 3;
+        out.flowX = this.ribbonHit.fx;
+        out.flowZ = this.ribbonHit.fz;
+      }
       // The pole's own colour-map bytes, packed, by number as the family is (wave 2b's tint raster); -1 for none.
       out.tint = t.colourIdAt(x, z);
       return true;
@@ -2315,6 +2365,20 @@ export class World {
     }
     this.localWater.length = 0;
     this.dropLava();
+    // The terrain's ribbons go with the world they were read from (a world with no lava never reads any, and the switch
+    // turned on there must build nothing of the last world's), and the liquids' chooser starts afresh: what was worn,
+    // read and waiting was this world's, and on a dry world nothing is.
+    this.ribbons = [];
+    this.ribbonStatus.ribbons = 0;
+    this.ribbonStatus.quads = 0;
+    this.ribbonStatus.looks = [];
+    this.ribbonStatus.why = null;
+    this.liquidWater = false;
+    this.liquidLava = false;
+    this.liquidReading = false;
+    this.liquidWaterWorn = 0;
+    this.liquidUnbuilt.clear();
+    this.liquidDirty = true;
     this.cellState = null;
     this.lightHint.state = null;
     this.lightHint.cell = 0;
@@ -3301,6 +3365,9 @@ export class World {
     const air = new AirField(this.renderer!, VOL_TUNE, this.airWorld);
     air.forces.onGrains = this.throwBlastGrains;
     this.groundAirFor();
+    // The fifth wave's: the water's current variants and the lava's crust twins for what this world holds, made now so
+    // the warm that follows (behind a screen, or the master's in-play warm) compiles them.
+    this.makeLiquidVariants();
     return air;
   }
 
@@ -3311,11 +3378,13 @@ export class World {
   takeAir(air: AirField): void {
     if (this.air && this.air !== air) {
       this.air.bindGround(null);
+      this.air.bindLiquid(null);
       // The field let go takes its meshes with it: only the world's field stands in the scenes.
       this.unhangAir(this.air);
     }
     this.air = air;
     air.bindGround(this.airGroundU);
+    air.bindLiquid(LIQUID_U);
     this.airTablesFor = { textures: undefined, swg: undefined, tone: -1 };
     this.syncAirMeshes();
   }
@@ -3363,6 +3432,176 @@ export class World {
   kickStandInsFor(air: AirField | null): THREE.Mesh[] {
     if (!air || air.refused !== null) return [];
     return air.kick.standIns;
+  }
+
+  /**
+   * The fifth wave's materials for what this world holds (the master on): every water body's current variant and its
+   * mask twins (`WaterBodies.makeAir`) and every drawn lava mesh's crust twin (`lavaCrustMaterial`, a lava's own text
+   * with the carry made in, all of it or none). Idempotent; nothing compiled and nothing worn here. A body or a mesh made
+   * after it (a basin streamed in play) keeps its plain material until the next warm makes its variant.
+   */
+  makeLiquidVariants(): void {
+    if (!VOL_TUNE.on) return;
+    this.waterBodies.forget ??= (mats) => {
+      this.forgetMaterials(mats);
+      for (const m of mats) this.liquidUnbuilt.delete(m);
+    };
+    const fresh = this.liquidFresh;
+    fresh.length = 0;
+    let made = this.waterBodies.makeAir(fresh);
+    for (const list of [this.localLava, this.ribbonMeshes]) {
+      for (const m of list) {
+        if (this.lavaCrust.has(m)) continue;
+        const plain = m.material as THREE.ShaderMaterial;
+        const crust = lavaCrustMaterial(plain);
+        if (!crust) continue;
+        this.lavaCrust.set(m, { plain, crust });
+        fresh.push(crust);
+        made++;
+      }
+    }
+    if (made > 0) {
+      // Made in play, none is worn before the warm that compiles it says so (`liquidBuilt`); behind a screen or a
+      // tunnel the sweep after builds them before anything is seen.
+      if (!this.playerWaiting()) for (const m of fresh) this.liquidUnbuilt.add(m);
+      this.liquidDirty = true;
+      // Every variant adopted now, each body's and each mesh's own (the stand-ins compiled are one a program key, and a
+      // variant not adopted when it is first worn draws, for the frames before the scan reaches it, under a key the warm
+      // never built: the cascades' hook and the other wraps are in the key). Nothing compiled here.
+      const holder = new THREE.Mesh();
+      for (const b of this.waterBodies.bodies) {
+        if (!b.air) continue;
+        holder.geometry = b.mesh.geometry;
+        holder.receiveShadow = b.mesh.receiveShadow;
+        holder.material = b.air;
+        this.adoptMaterials(holder);
+      }
+      for (const [mesh, pair] of this.lavaCrust) {
+        holder.geometry = mesh.geometry;
+        holder.receiveShadow = mesh.receiveShadow;
+        holder.material = pair.crust;
+        this.adoptMaterials(holder);
+      }
+    }
+  }
+
+  /** Something new may need putting on the chooser's material (a variant made, a mesh added): the next sync walks them. */
+  private liquidDirty = false;
+  /** `makeLiquidVariants`' kept list of what one call made. */
+  private readonly liquidFresh: THREE.Material[] = [];
+
+  /**
+   * The variants not yet built, as they stand now: what a warm compiling `liquidStandInsFor`'s stand-ins covers, taken
+   * straight after them and handed back to `liquidBuilt` once that warm has linked (the master's in-play warm, a sweep for
+   * the frames' own target). A variant made after it waits for the next.
+   */
+  liquidUnbuiltNow(): THREE.Material[] {
+    return [...this.liquidUnbuilt];
+  }
+
+  /** These variants' programs are built for the frames' own target: the chooser may wear them from the next frame. */
+  liquidBuilt(list: readonly THREE.Material[]): void {
+    let any = false;
+    for (const m of list) if (this.liquidUnbuilt.delete(m)) any = true;
+    if (any) this.liquidDirty = true;
+  }
+
+  /** How many variants wait for a warm (the console's and the tests'). */
+  get liquidWaiting(): number {
+    return this.liquidUnbuilt.size;
+  }
+
+  /** Whether the water or the lava wears what reads the liquid's tile now (the console's). */
+  get liquidWorn(): boolean {
+    return this.liquidReading;
+  }
+
+  /** The liquids in words for the console (`__debug.water()`): what the water and the lava wear, and the ribbons. */
+  liquidStatus(): Record<string, unknown> {
+    let crusts = 0;
+    for (const [mesh, pair] of this.lavaCrust) if (mesh.material === pair.crust) crusts++;
+    return {
+      water: this.liquidWater ? 'its current variant (key …-air)' : 'today\'s plain water',
+      lava: this.liquidLava ? `the crust twins (${crusts} of ${this.lavaCrust.size} meshes)` : `today's plain lava (${this.lavaCrust.size} twins made)`,
+      softOff: this.liquidSoftOff,
+      // Variants made in play and not yet built: worn once their warm has linked.
+      waiting: this.liquidUnbuilt.size,
+      carry: rippleCarrySet(),
+      ribbons: { ...this.ribbonStatus, wanted: this.ribbonsWanted, meshes: this.ribbonMeshes.length },
+    };
+  }
+
+  /**
+   * One stand-in each of the water's plain and current programs and of each lava look's plain and crust programs (the
+   * fifth wave), for the sweep and the master's in-play warm to compile whichever the scene is not wearing (class W):
+   * so the chooser's swap between them builds nothing. Empty without a field or with the master off.
+   */
+  liquidStandInsFor(air: AirField | null): THREE.Mesh[] {
+    if (!air || air.refused !== null || !VOL_TUNE.on) return [];
+    this.makeLiquidVariants();
+    const out = this.waterBodies.litStandIns();
+    const seen = new Set<string>();
+    for (const [mesh, pair] of this.lavaCrust) {
+      // Keyed as the water's are, by the program's defines and the geometry's attributes (which three keys a program on).
+      const attrs = Object.keys(mesh.geometry.attributes).sort().join(',');
+      for (const m of [pair.plain, pair.crust]) {
+        const key = `${m.defines?.USE_MIX !== undefined}|${m.defines?.LAVA_AIR !== undefined}|${attrs}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const s = new THREE.Mesh(mesh.geometry, m);
+        s.name = `lava stand-in:${mesh.name}`;
+        s.frustumCulled = false;
+        out.push(s);
+      }
+    }
+    return out;
+  }
+
+  /** The water's current variants' mask twins, to compile the effects' way (the master's in-play warm). */
+  liquidMaskStandIns(): THREE.Object3D[] {
+    return VOL_TUNE.on ? this.waterBodies.airMaskStandIns() : [];
+  }
+
+  /**
+   * The water's and the lava's meshes on the chooser's materials (class M, the fifth wave), when its answers move or
+   * something new was made: the water bodies and their twins handed their current variants or their plain materials, every
+   * lava mesh its crust twin or its plain one -- all built. And whether anything worn reads the liquid's tile (which the
+   * field steps it for), the ripples' carry hung or taken off, and the spray's rings wanted. Once a frame, from
+   * `updateAir`; a steady frame asks the chooser and walks nothing.
+   */
+  private syncLiquid(air: AirField): void {
+    const c = this.liquidChoiceRec;
+    c.on = VOL_TUNE.on;
+    c.current = VOL_TUNE.current;
+    c.lava = VOL_TUNE.lava;
+    c.field = air.refused === null;
+    c.softOff = this.liquidSoftOff;
+    const water = waterWearsAir(c);
+    const lava = lavaWearsCrust(c);
+    if (water !== this.liquidWater || lava !== this.liquidLava || this.liquidDirty) {
+      this.liquidDirty = false;
+      // Only what is built: a variant made in play waits for its warm (`liquidUnbuilt`), its plain material worn meanwhile.
+      const worn = this.waterBodies.wearAir(water, this.liquidReady);
+      let crusts = 0;
+      for (const [mesh, pair] of this.lavaCrust) {
+        const want = lavaMaterialFor(c, pair.plain, this.liquidUnbuilt.has(pair.crust) ? null : pair.crust);
+        if (mesh.material !== want) mesh.material = want;
+        if (want === pair.crust) crusts++;
+      }
+      this.liquidWater = water;
+      this.liquidLava = lava;
+      this.liquidWaterWorn = worn;
+      this.liquidReading = worn > 0 || crusts > 0;
+    }
+    // The ripples carried by the current (the design's §2.9): hung only while the water wears its current, its art share is
+    // over nought and the field steps the tile; taken off otherwise, when the ripples step today's way, line for line.
+    const carry = water && VOL_TUNE.artWater > 0 && this.liquidReading && air.liquidLive && waterSimReady();
+    if (carry !== rippleCarrySet()) setRippleCarry(carry ? air.carry : null);
+    // A drop of spray landing back on the water rings it while the ripples carry the current and there is a state to
+    // press into.
+    air.ringsWanted = carry && VOL_TUNE.particles && VOL_TUNE.spray && this.renderer !== null && rippleStateTarget(this.renderer) !== null;
+    // A push meeting the water presses the ripples while the water wears its current.
+    air.forces.onPoke = water && this.liquidWaterWorn > 0 ? pokeWaterSimIn : null;
   }
 
   /**
@@ -3599,6 +3838,8 @@ export class World {
       this.weather.snowSheetScale = 1;
       this.weather.airRainDraws = false;
       this.dust.ground = null;
+      // No field: the ripples step today's way (the fifth wave's carry taken off).
+      if (rippleCarrySet()) setRippleCarry(null);
       return;
     }
     const inp = this.airInput;
@@ -3628,11 +3869,13 @@ export class World {
     // Raw `dt`, as the field and the weather's own sheets take it: the rain falls on behind a panel as they do. The share
     // is read back off the pool's kept record (`frame.share`), never handed back across the call.
     this.writeRainFrame(air, dt);
+    // The fifth wave's water and lava on the chooser's materials, before the field's step reads whether anything wants it.
+    this.syncLiquid(air);
     // Something reads the air (§2.4): the volume, on the chain and wanted, which is Effects on with its switch on, or
     // the ground wearing the air's variant, or (the fourth wave) what the air carries besides dust -- the kick-up with
-    // its switch on, the rain of ours falling. With nothing reading it the rasters are kept (the grains read them) and
-    // nothing is stepped.
-    inp.reading = reading || inp.ground || (VOL_TUNE.particles && (VOL_TUNE.leaves || VOL_TUNE.puffs || VOL_TUNE.spray || VOL_TUNE.streaks)) || air.rain.frame.share > 0;
+    // its switch on, the rain of ours falling -- or (the fifth) the water or the lava wearing what reads its current.
+    // With nothing reading it the rasters are kept (the grains read them) and nothing is stepped.
+    inp.reading = reading || inp.ground || (VOL_TUNE.particles && (VOL_TUNE.leaves || VOL_TUNE.puffs || VOL_TUNE.spray || VOL_TUNE.streaks)) || air.rain.frame.share > 0 || this.liquidReading;
     inp.where = this.airSoftOff ? 'held off by the frame report' : !this.planet ? 'no world' : this.planet.space ? 'in space there is no air' : this.groundTextures?.empty ? 'the ground here is never drawn' : viewInBuilding ? 'the camera is in a building' : this.inside ? 'the player is in a building' : null;
     if (inp.where === null) this.airTables(air);
     // How the drawn ground tints its colour now, for the raster's own `tintedAt` (the motes, the storm's colour): the
@@ -3657,6 +3900,8 @@ export class World {
     // still), then the weather's hand-overs: the pass and the roof grid kept for our drops, and the game's own rain or
     // snow sheets thinned while ours draws that fall, exactly 1 otherwise.
     air.stepRain();
+    // The spray's rings of this frame into the ripples' state the next step reads (the fifth wave's).
+    if (air.ringsWanted && this.renderer) air.ringsInto(rippleStateTarget(this.renderer), WATER_SIM_WINDOW.value);
     const drew = air.rain.drawing;
     this.weather.airRainDraws = drew;
     this.weather.rainSheetScale = sheetFactor(drew && !air.rain.frame.snow, VOL_TUNE.rainThin);
@@ -4860,9 +5105,14 @@ export class World {
   private async loadLava(pack: AssetPack, swg: SwgTerrain): Promise<void> {
     const token = this.loadToken;
     const data = this.waterBodies.data;
+    // The terrain's ribbons (the survey's lava falls), drawn after the lava they wear if the switch has them on.
+    this.ribbons = swg.ribbons;
+    this.ribbonStatus.ribbons = swg.ribbons.length;
+    this.ribbonStatus.quads = swg.ribbons.reduce((n, r) => n + r.quads.length / 12, 0);
     const tables = swg.waterTables.filter((w) => isLavaWater(w.shader, w.waterType, data?.shaders[w.shader]));
     if (!tables.length) {
       this.heat?.setLava([]);
+      if (this.ribbonsWanted && this.ribbons.length) await this.syncRibbons();
       return;
     }
     if (!data) console.warn('lava: no water.json in this pack, drawn in the stand-in look (npm run swg -- water @SWG all assets-private --retail-only)');
@@ -4901,6 +5151,211 @@ export class World {
     }
     if (token !== this.loadToken) return discard();
     this.commitLava(tables, { materials, geometries, meshes, heatTables, looks, owned });
+    // Behind the arrival's screen, before its sweep: the ribbons' meshes stood now are compiled with the scene.
+    if (this.ribbonsWanted && this.ribbons.length) await this.syncRibbons();
+  }
+
+  /**
+   * The terrain's ribbons drawn or not (the Graphics page's `waterRibbons`, beside the water's settings): on, every
+   * ribbon of this world in its own look's lava (its shader's where the pack has it, else the world's first lava look,
+   * else the stand-in), one merged mesh a look, made ready through the program queue before it is stood in play (behind
+   * a screen it is stood at once and the sweep compiles it); off, taken away and let go. Nothing of them is made while the
+   * switch is off.
+   */
+  setRibbons(on: boolean): void {
+    this.ribbonsWanted = on;
+    void this.syncRibbons();
+  }
+
+  private async syncRibbons(): Promise<void> {
+    if (this.ribbonsBusy) return;
+    this.ribbonsBusy = true;
+    try {
+      for (let guard = 0; guard < 4; guard++) {
+        const want = this.ribbonsWanted && this.ribbons.length > 0 && !!this.renderer;
+        if (want === this.ribbonsShown) break;
+        if (!want) {
+          this.dropRibbons();
+          continue;
+        }
+        const token = this.loadToken;
+        const meshes = await this.buildRibbons(token);
+        if (token !== this.loadToken || !this.ribbonsWanted) {
+          this.dropRibbonParts(meshes);
+          continue;
+        }
+        if (!meshes.length) break;
+        // In play the meshes are made ready first (the queue's issue and poll: no frame waits on a link).
+        if (!this.behindScreen) await this.compileReady(meshes, 'water: the lava falls');
+        if (token !== this.loadToken || !this.ribbonsWanted) {
+          this.dropRibbonParts(meshes);
+          continue;
+        }
+        for (const m of meshes) this.scene.add(m);
+        this.ribbonMeshes.push(...meshes);
+        this.ribbonsShown = true;
+        this.ribbonStatus.shown = true;
+        // Their crust twins, where the master is on: behind a screen worn at the next sync (the sweep builds them); in
+        // play made ready through the queue first and worn only then (`liquidBuilt`), the plain lava drawn meanwhile.
+        if (this.air && VOL_TUNE.on) {
+          this.makeLiquidVariants();
+          if (!this.playerWaiting()) await this.readyRibbonCrusts(meshes, token);
+        }
+      }
+    } finally {
+      this.ribbonsBusy = false;
+    }
+  }
+
+  /**
+   * The crust twins of ribbons stood in play (class W): a stand-in a twin on its mesh's own geometry through the world's
+   * queue, then handed to the chooser (`liquidBuilt`) if the world is still the one they were made for. Nothing is worn
+   * before; a travel meanwhile hands nothing.
+   */
+  private async readyRibbonCrusts(meshes: readonly THREE.Mesh[], token: number): Promise<void> {
+    const crusts: THREE.Material[] = [];
+    const stands: THREE.Mesh[] = [];
+    for (const m of meshes) {
+      const pair = this.lavaCrust.get(m);
+      if (!pair || !this.liquidUnbuilt.has(pair.crust)) continue;
+      crusts.push(pair.crust);
+      const s = new THREE.Mesh(m.geometry, pair.crust);
+      s.name = `lava stand-in:${m.name}`;
+      s.frustumCulled = false;
+      stands.push(s);
+    }
+    if (!stands.length) return;
+    await this.compileReady(stands, 'water: the lava falls\' crust');
+    if (token === this.loadToken) this.liquidBuilt(crusts);
+  }
+
+  /**
+   * One merged mesh a look of this world's ribbons, in the lava's own material: a look the world already draws is worn as
+   * it is (its material shared, so no new program); a look the pack carries and nobody draws is made from the pack's own
+   * textures; a shader the pack has no entry for (`wter_lava_01_fast` on every converted Mustafar) wears the world's first
+   * look, or the stand-in where there is none. Answers the meshes, none stood.
+   */
+  private async buildRibbons(token: number): Promise<THREE.Mesh[]> {
+    const pack = this.pack;
+    const data = this.waterBodies.data;
+    const groups = new Map<string, GameRibbon[]>();
+    let water = 0;
+    for (const r of this.ribbons) {
+      // A ribbon of water (none on the retail worlds: every one is Mustafar's lava) is left out and counted.
+      if (!isLavaWater(r.shader, r.waterType, data?.shaders[r.shader])) {
+        water++;
+        continue;
+      }
+      const k = r.shader || '';
+      let g = groups.get(k);
+      if (!g) groups.set(k, (g = []));
+      g.push(r);
+    }
+    const out: THREE.Mesh[] = [];
+    const looks: string[] = [];
+    const cache = new Map<string, THREE.Texture>();
+    const owned: THREE.Texture[] = [];
+    for (const [shader, list] of groups) {
+      const entry = data?.shaders[shader];
+      let material: THREE.ShaderMaterial | null = null;
+      let look = '';
+      if (entry && entry.kind === 'lava') {
+        const style = lavaStyleFor(shader, entry);
+        material = this.lavaMaterials.find((m) => m.userData.style === style.key) ?? null;
+        look = style.key;
+        if (!material && pack) {
+          try {
+            const textures = await loadLavaTextures(pack, style, World.anisotropy, cache, owned);
+            if (token !== this.loadToken) break;
+            const made = createLavaMaterial(style, list[0].shaderSize, textures);
+            this.ribbonOwned.push(made);
+            material = made;
+          } catch {
+            material = null;
+          }
+        }
+      }
+      if (!material) {
+        material = this.lavaMaterials[0] ?? null;
+        look = material ? `${shader || 'no shader'} as the world's ${material.userData.style}` : look;
+      }
+      if (!material) {
+        const made = createLavaMaterial({ ...FALLBACK_LAVA_STYLE, key: `stand-in:${shader}` }, list[0].shaderSize, standInLavaTextures());
+        this.ribbonOwned.push(made);
+        material = made;
+        look = `${shader || 'no shader'} as the stand-in`;
+      }
+      const parts: THREE.BufferGeometry[] = [];
+      for (const r of list) {
+        const t = ribbonTriangles(r);
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(t.position, 3));
+        g.setIndex(new THREE.Uint32BufferAttribute(t.index, 1));
+        parts.push(g);
+      }
+      const merged = mergeGeometries(parts);
+      for (const p of parts) p.dispose();
+      if (!merged) continue;
+      this.ribbonGeometries.push(merged);
+      const mesh = new THREE.Mesh(merged, material);
+      mesh.name = `lava:ribbons:${shader}`;
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      mesh.frustumCulled = false;
+      out.push(mesh);
+      looks.push(`${list.length} on ${look}`);
+    }
+    this.ribbonTextures.push(...owned);
+    if (water) looks.push(`${water} of water left out (only the lava's are drawn)`);
+    this.ribbonStatus.looks = looks;
+    this.ribbonStatus.why = out.length ? null : 'no ribbon of this world could be drawn';
+    return out;
+  }
+
+  /** The textures a ribbon look of its own loaded (disposed with the ribbons). */
+  private ribbonTextures: THREE.Texture[] = [];
+
+  /** Meshes a build made and nobody stood (a travel or the switch off meanwhile): let go. */
+  private dropRibbonParts(meshes: THREE.Mesh[]): void {
+    for (const m of meshes) {
+      const i = this.ribbonGeometries.indexOf(m.geometry);
+      if (i >= 0) this.ribbonGeometries.splice(i, 1);
+      m.geometry.dispose();
+    }
+    if (!this.ribbonsShown) this.dropRibbonOwned();
+  }
+
+  private dropRibbonOwned(): void {
+    this.forgetMaterials(this.ribbonOwned);
+    for (const m of this.ribbonOwned) m.dispose();
+    this.ribbonOwned.length = 0;
+    for (const t of this.ribbonTextures) t.dispose();
+    this.ribbonTextures.length = 0;
+  }
+
+  /** Every ribbon mesh out of the scene and let go, with its crust twin and whatever look it made of its own. */
+  private dropRibbons(): void {
+    for (const m of this.ribbonMeshes) {
+      this.scene.remove(m);
+      const pair = this.lavaCrust.get(m);
+      if (pair) {
+        this.forgetMaterials([pair.crust]);
+        this.liquidUnbuilt.delete(pair.crust);
+        pair.crust.dispose();
+        this.lavaCrust.delete(m);
+      }
+    }
+    this.ribbonMeshes.length = 0;
+    for (const g of this.ribbonGeometries) g.dispose();
+    this.ribbonGeometries.length = 0;
+    this.dropRibbonOwned();
+    this.ribbonsShown = false;
+    this.ribbonStatus.shown = false;
+  }
+
+  /** The ribbon over a game point (its surface's height, flow and type), while the ribbons are drawn; false otherwise. */
+  ribbonHere(x: number, z: number): boolean {
+    return this.ribbonsShown && ribbonAt(this.ribbons, x, z, this.ribbonHit);
   }
 
   /** One look's tables as one merged mesh; a look that fails is left out on its own and never stops the rest. */
@@ -4948,6 +5403,14 @@ export class World {
   /** Every lava piece this planet owns, gone; the heat haze lets go of the tables first, since their geometries go with them. */
   private dropLava(): void {
     this.heat?.setLava([]);
+    // The terrain's ribbons go with the lava they are drawn in, and every crust twin (the fifth wave's) with its mesh.
+    this.dropRibbons();
+    for (const pair of this.lavaCrust.values()) {
+      this.forgetMaterials([pair.crust]);
+      this.liquidUnbuilt.delete(pair.crust);
+      pair.crust.dispose();
+    }
+    this.lavaCrust.clear();
     for (const m of this.localLava) this.scene.remove(m);
     this.localLava.length = 0;
     this.forgetMaterials(this.lavaMaterials);
@@ -6733,11 +7196,20 @@ export class World {
     }
     // The tile ground and its air variant, one stand-in each, with the volumetrics master on (the second wave): so the
     // one the scene is not wearing is built too, and a ground switch or the master's soft off swaps compiled materials.
+    let liquidCovered: THREE.Material[] | null = null;
     if (this.air && VOL_TUNE.on) {
       for (const o of this.groundStandInsFor(this.air)) {
         this.adoptMaterials(o);
         objects.push(o);
       }
+      // The water's current variants and the lava's crust twins with their plain programs (the fifth wave): the chooser's
+      // swap between them, and the master's soft off, build nothing.
+      for (const o of this.liquidStandInsFor(this.air)) {
+        this.adoptMaterials(o);
+        objects.push(o);
+      }
+      // A sweep for the frames' own target builds what waits for a warm too; one for the other effects path does not.
+      if (opts.target === undefined) liquidCovered = this.liquidUnbuiltNow();
     }
     // Every shape a person's or a rack weapon's material can take (the fourth wave, `personKeys.ts`): behind a screen
     // `warmPersonShapes` built them before anybody was stood and each costs a key lookup here, and a sweep in play for the
@@ -6760,6 +7232,7 @@ export class World {
       onProgress(Math.min(objects.length, i + SWEEP_BATCH), objects.length, (r.info.programs?.length ?? 0) - before);
     });
     if (people.length) noteWarmed(this.programsOf);
+    if (liquidCovered) this.liquidBuilt(liquidCovered);
     // The shadows' depth programs (`compileShadowDepth`): the loading sweep never builds a depth program, so one
     // stand-in per depth combination is drawn into the shadow maps here as a frame draws them, under the shadow
     // pass's own lights -- the flora's swaying shadows (`floraSway.ts`) over everything the sweep compiled, the
@@ -9008,6 +9481,8 @@ export class World {
     for (const m of this.waterMaterials) m.userData.uniforms.uTime.value = this.waterTime;
     // Modulo the shader's own loop, whose flow × loopTime is whole: the noise wraps without a seam.
     for (const m of this.lavaMaterials) m.uniforms.uFlowTime.value = this.waterTime % m.userData.loopTime;
+    // A lava fall drawn in a look of its own (a pack style nobody else draws, or the stand-in) flows on the same clock.
+    for (const m of this.ribbonOwned) m.uniforms.uFlowTime.value = this.waterTime % m.userData.loopTime;
     this.emitRipples(dt, playerPos);
     // The field is stepped after its bodies have moved and before anything is drawn, so the water
     // shader reads the surface those bodies just made.

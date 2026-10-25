@@ -33,6 +33,7 @@ import { HALF_NORMAL, liftPeakIn, newLiftPeak } from '../../../src/world/volumet
 import { SMOKE_BATCH } from '../../../src/world/volumetrics/airForces.ts';
 import { newWispPhase, wispPhaseIn } from '../../../src/world/volumetrics/airNoise.ts';
 import type { AirHull } from '../../../src/world/volumetrics/airEngines.ts';
+import { crustPhaseIn, makeLiquidUniforms, newCrustPhase } from '../../../src/world/volumetrics/airLiquid.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string): void => {
@@ -330,7 +331,8 @@ const near = (a: number, b: number, eps = 1e-9): boolean => Math.abs(a - b) <= e
   const r = rig();
   settle(r);
   const mats = Object.fromEntries(r.field.materials().map((m) => [m.name, m.uniforms]));
-  ok((mats['air.splat'].uTileCount.value as number) === 3 && (mats['air.advect'].uAdvectP.value as THREE.Vector4).w === AIR_TUNE.slabs.couple, `three layers of air solved by default, the coupling folded into the advect at ${AIR_TUNE.slabs.couple} a second`);
+  ok((mats['air.splat'].uSlabCount.value as number) === 3 && (mats['air.splat'].uTileCount.value as number) === 4 && (mats['air.advect'].uAdvectP.value as THREE.Vector4).w === AIR_TUNE.slabs.couple, `three layers of air solved by default (and, from the fifth wave, the liquid's tile beside them: four tiles), the coupling folded into the advect at ${AIR_TUNE.slabs.couple} a second`);
+  ok((mats['air.splat'].uTileSlab.value as Float32Array)[15] === 1 && (mats['air.splat'].uTileSlab.value as Float32Array)[3] === 0, "the liquid's tile is the last and says so in its row (w one), the slabs' rows saying nought");
   const ts = mats['air.splat'].uTileSlab.value as Float32Array;
   ok(ts[0] === AIR_TUNE.slabs.floor && near(ts[5], AIR_TUNE.slabs.centre1, 1e-6) && near(ts[10], AIR_TUNE.slabs.windShare2, 1e-6), "each tile carries its own slab's floor, middle and share of the wind");
   // A gas cloud's smoke every frame: carried this frame, the pass handed its batch centred on the cloud.
@@ -389,7 +391,7 @@ const near = (a: number, b: number, eps = 1e-9): boolean => Math.abs(a - b) <= e
   ok(r.field.wispMode === 2 && noiseFrame.filter((d) => d.name === 'air.bands').length === 0, 'in the noise mode it draws none: the march reads the noise itself');
   r.tune.airLayers = 1;
   r.frame(1 / 60);
-  ok((mats['air.splat'].uTileCount.value as number) === 1 && (mats['air.advect'].uAdvectP.value as THREE.Vector4).w === 0, 'one layer: one tile, no coupling');
+  ok((mats['air.splat'].uSlabCount.value as number) === 1 && (mats['air.splat'].uTileCount.value as number) === 2 && (mats['air.advect'].uAdvectP.value as THREE.Vector4).w === 0, "one layer: one slab's tile (and the liquid's beside it), no coupling");
   const sc = r.field.slabScale.value;
   ok(near(sc.y, AIR_TUNE.slabs.windShare1 / AIR_TUNE.slabs.windShare, 1e-9) && near(sc.z, AIR_TUNE.slabs.windShare2 / AIR_TUNE.slabs.windShare, 1e-9), 'and the layers not solved read the low one\'s air times the ratio of their shares');
 }
@@ -811,6 +813,87 @@ const near = (a: number, b: number, eps = 1e-9): boolean => Math.abs(a - b) <= e
     for (let i = 0; i < Math.ceil((V.airborneFor + 0.5) * 60); i++) r.frame(1 / 60);
     ok(r.field.bandTop === Math.min(H4, V.above), `and ${V.airborneFor} s after the last lift it is four of H₀ again (${r.field.bandTop} m)`);
   }
+}
+
+// --- the fifth wave: what the field hands the liquids' readers, and the liquid tile in the atlas ---
+{
+  const r = rig();
+  settle(r);
+  const rec = makeLiquidUniforms();
+  r.field.bindLiquid(rec);
+  ok(r.field.boundLiquid === rec, 'a record bound is the one the field writes');
+  r.frame(1 / 60);
+  const mats = Object.fromEntries(r.field.materials().map((m) => [m.name, m.uniforms]));
+  const tiles = mats['air.splat'].uTiles.value as Float32Array;
+  const slab = mats['air.splat'].uTileSlab.value as Float32Array;
+  const count = mats['air.splat'].uTileCount.value as number;
+  const slabs = mats['air.splat'].uSlabCount.value as number;
+  const o = slabs * 4;
+  const rect = rec.uAirLiquidRect.value;
+  ok(count === slabs + 1 && slab[o + 3] === 1 && rect.x === tiles[o] && rect.y === tiles[o + 1] && rect.z === tiles[o + 2] && rect.w === tiles[o + 3], `the readers are handed the liquid tile's own rectangle in the atlas, the last tile's, whose row says it is the liquid's (${[rect.x, rect.y, rect.z, rect.w].map((v) => v.toFixed(4)).join(', ')}): never a slab's`);
+  ok(rec.uAirLiquidVel.value !== null && rec.uAirLiquidWin.value.x === r.field.win.ox && rec.uAirLiquidWin.value.z === r.field.win.size, "with the air's velocity atlas and the window it stands in");
+  // The crust's two phases on the field's own clock.
+  const worldTime = (r.field as unknown as { worldTime: number }).worldTime;
+  const ph = newCrustPhase();
+  ph.time = worldTime;
+  ph.cycle = AIR_TUNE.liquid.crustCycle;
+  crustPhaseIn(ph);
+  const q = rec.uAirLiquidQ.value;
+  ok(worldTime > 0 && q.x === ph.tA && q.y === ph.tB && q.z === ph.wB && q.w === 1 / AIR_TUNE.liquid.crustCycle, `the crust's phases are crustPhaseIn's at the field's own clock (${worldTime.toFixed(3)} s): A ${q.x.toFixed(3)} s, B ${q.y.toFixed(3)} s, B weighing ${q.z.toFixed(3)}`);
+  // The art shares by switch.
+  const p = rec.uAirLiquidP.value;
+  ok(p.x === r.tune.artWater && p.y === r.tune.artLava && p.z === AIR_TUNE.liquid.detailFlow && r.tune.artWater > 0 && r.tune.artLava > 0, `with the current and the lava on, each reader is told its own art share (${p.x}, ${p.y}) and the detail's share of the current`);
+  // The liquid tile's own numbers, laid out where the solver's passes read them.
+  const L5 = AIR_TUNE.liquid;
+  const lp = mats['air.advect'].uLiquidP.value as THREE.Vector4;
+  const lq = mats['air.advect'].uLiquidQ.value as THREE.Vector4;
+  const lr = mats['air.advect'].uLiquidR.value as THREE.Vector4;
+  ok(lp.x === L5.waterRelax && lp.y === L5.waterDiss && lp.z === L5.lavaRelax && lp.w === L5.lavaDiss, "the solver is handed water's pull and dissipation in x and y, lava's in z and w (the places the advect's liquidRelax and liquidDiss read)");
+  ok(lq.x === L5.waterWind && lq.y === L5.lavaWind && lq.z === L5.waterSwirl && lq.w === L5.lavaSwirl && slab[o + 2] === Math.fround(L5.waterWind), "each medium's share of the wind (x water, y lava) and of the swirl (z, w), the liquid tile's own row taking water's share as its inflow");
+  ok(lr.x === L5.push && lr.y === L5.ribbonFlow && lr.z === AIR_TUNE.solver.liquidCap && lr.w === 1, `a push's share, a ribbon's flow's share and the liquid's fastest, the swirl's cell ratio one at a detail the air shares (${lr.w})`);
+  // The current's switch off: water takes no share of the wind and its reader is told nought; the lava keeps its own.
+  r.tune.current = false;
+  r.frame(1 / 60);
+  ok(p.x === 0 && p.y === r.tune.artLava && lq.x === 0 && slab[o + 2] === 0 && (mats['air.splat'].uSlabCount.value as number) === slabs, 'the current off: the water is told nought and its tile takes no wind (row and solver both), the lava still carried, the tile kept');
+  r.tune.current = true;
+  r.tune.lava = false;
+  r.frame(1 / 60);
+  ok(p.x === r.tune.artWater && p.y === 0 && lq.x === L5.waterWind, 'the lava off: the lava is told nought, the water its share');
+  // Both off: no liquid tile, the slabs alone, every one solved.
+  r.tune.current = false;
+  r.frame(1 / 60);
+  const tc = mats['air.splat'].uTileCount.value as number;
+  const sc = mats['air.splat'].uSlabCount.value as number;
+  let noLiquidRow = true;
+  for (let i = 0; i < tc; i++) if ((mats['air.splat'].uTileSlab.value as Float32Array)[i * 4 + 3] !== 0) noLiquidRow = false;
+  ok(tc === 3 && sc === 3 && noLiquidRow && p.x === 0 && p.y === 0, `the current and the lava both off: three tiles and three slabs solved, no row says it is the liquid's, and every reader is told nought (${tc} tiles, ${sc} slabs)`);
+  r.tune.airLayers = 1;
+  r.frame(1 / 60);
+  ok((mats['air.splat'].uTileCount.value as number) === 1 && (mats['air.splat'].uSlabCount.value as number) === 1, 'and at one layer, one tile and one slab');
+  r.tune.lava = true;
+  r.frame(1 / 60);
+  ok((mats['air.splat'].uTileCount.value as number) === 2 && (mats['air.splat'].uSlabCount.value as number) === 1 && (mats['air.splat'].uTileSlab.value as Float32Array)[7] === 1, 'one switch on again: the liquid tile beside the one slab (two tiles, one slab, the last row the liquid\'s)');
+  r.tune.airLayers = 3;
+  r.tune.current = true;
+  r.frame(1 / 60);
+  ok((mats['air.splat'].uTileCount.value as number) === 4 && (mats['air.splat'].uSlabCount.value as number) === 3, 'and three layers with the current back: four tiles, three slabs');
+  // Let go, the record is put to nought: every reader plain by its own branch.
+  r.field.bindLiquid(null);
+  ok(rec.uAirLiquidVel.value === null && rec.uAirLiquidP.value.x === 0 && rec.uAirLiquidP.value.y === 0, 'let go, the record is nought: every reader draws the plain liquid');
+}
+
+// --- the fifth wave: the spray's ring flag follows the world's word ---
+{
+  const r = rig();
+  settle(r);
+  const k = r.field.kick;
+  ok((k.updateMaterial.uniforms.uRing as { value: THREE.Vector4 }).value === k.ring, "the update material reads the pool's own ring flag");
+  r.field.ringsWanted = true;
+  r.frame(1 / 60);
+  ok(k.ring.x === 1, 'rings wanted: the update keeps a drop that landed back in the water a frame for its ring');
+  r.field.ringsWanted = false;
+  r.frame(1 / 60);
+  ok(k.ring.x === 0, 'not wanted: none kept');
 }
 
 // --- a draw that throws stops the air, never the frame ---

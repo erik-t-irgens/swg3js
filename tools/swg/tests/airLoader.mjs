@@ -1,5 +1,7 @@
-// The off-proof's module hooks (the volumetrics design's §4.0): registered with `module.register` by `airOff.test.ts`
-// alone, never by any other suite, whose plain type stripping stays the rule they are held to.
+// The off-proof's module hooks (the volumetrics design's §4.0): registered with `module.register` by `airOff.test.ts`, and
+// from the fifth wave by `waterCurrent.test.ts` and `lavaCrust.test.ts` over today's tree alone (the water's and the lava's
+// modules name their neighbours without an extension); never by any other suite, whose plain type stripping stays the
+// rule they are held to.
 //
 // Inside its roots -- the tree checked out of the commit before the volumetrics pass, and today's `src/` -- it resolves
 // an extensionless relative import to its `.ts` (or a folder's `index.ts`), and transpiles every `.ts` with the

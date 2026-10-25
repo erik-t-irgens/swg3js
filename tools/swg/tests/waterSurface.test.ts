@@ -217,7 +217,7 @@ const ABOVE = 5;
 
   // The mask twin shares the lit material's uniform objects, so the reflections weight what the lit
   // water blends: that is what keeps a traced reflection and the surface's own alpha in step.
-  ok(has("installWaterHook(mask, lit.userData.uniforms, 'mask', lit.userData.waves)"), 'the mask twin shares the lit material\'s uniforms, so the depth it hides by is the same number the reflections weight');
+  ok(has("installWaterHook(mask, lit.userData.uniforms, 'mask', lit.userData.waves, lit.userData.air === true)"), 'the mask twin shares the lit material\'s uniforms, so the depth it hides by is the same number the reflections weight (and from the volumetrics\' fifth wave is keyed off the current variant it was made from)');
 }
 
 // --- the console knob, last, because it writes the live tuning ---

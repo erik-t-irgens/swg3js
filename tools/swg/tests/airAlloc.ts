@@ -18,6 +18,7 @@ import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks
 import * as THREE from 'three';
 import { AirField, newAirFrameInput } from '../../../src/world/volumetrics/airField.ts';
 import { makeAirGroundUniforms } from '../../../src/world/volumetrics/airGround.ts';
+import { makeLiquidUniforms } from '../../../src/world/volumetrics/airLiquid.ts';
 import type { AirHull } from '../../../src/world/volumetrics/airEngines.ts';
 import type { GroundSample, GroundSampler } from '../../../src/world/volumetrics/airRaster.ts';
 import { newVolTune } from '../../../src/world/volumetrics/volSettings.ts';
@@ -57,7 +58,11 @@ const ground: GroundSampler = {
   sample(x: number, z: number, out: GroundSample): boolean {
     out.h = ((x | 0) >> 4) & 3;
     out.family = 1;
-    out.medium = 1;
+    // A lake south of z -14 (the fifth wave's: the liquid's tile has water to step, and one hovering ship's downwash
+    // lands on it and presses the ripples), and a lava fall's flow at its west end.
+    out.medium = z < -14 ? (x < -40 ? 3 : 2) : 1;
+    out.flowX = x < -40 && z < -14 ? 0.5 : 0;
+    out.flowZ = x < -40 && z < -14 ? -1 : 0;
     out.tint = 0x806040 | (((z | 0) & 15) << 4);
     return true;
   },
@@ -125,6 +130,15 @@ if ((process.env.AIR_SKIP ?? '').includes('particles')) tune.particles = false;
 // Bound to a record of the ground variant's uniforms, as the world binds the field it takes: every frame then copies the
 // field's own values into it (`copyAirGround`), which is measured with the rest.
 field.bindGround(makeAirGroundUniforms());
+// The fifth wave's: bound to a record of the liquids' uniforms as the world binds the field it takes (every frame then
+// writes the current's texture, window, rectangle, shares and the crust's phases into it), a push meeting the water handed
+// to a sink that keeps nothing, and the spray's rings wanted (their flag written into the kick-up's update each frame).
+field.bindLiquid(makeLiquidUniforms());
+const pokeSink = { strength: 0.5 };
+field.forces.onPoke = (p) => {
+  pokeSink.strength = p.strength;
+};
+field.ringsWanted = true;
 
 // The dust pool, made with a stand-in page for its sprite, its grains falling onto the field's own raster.
 const g = globalThis as unknown as { document?: unknown };
@@ -420,6 +434,10 @@ const kick = field.kick;
 let kickStarted = 0;
 for (let k = 0; k < 4; k++) kickStarted += kick.stats.spawned[k];
 const w4 = { kickSteps: kick.stats.steps, kickStarted, kickHidden: kick.stats.hiddenWhileRun, rainSteps: field.rain.stats.steps, rainDrawing: field.rain.drawing };
-const sr = field.report() as { sand?: { picture: string; phases: { cycles: number[] } }; sources?: { fronts: number; droppedFronts: number; smoke: number; droppedSmoke: number }; wisps?: { inForce: string; noise: string }; layers?: { air: number } };
+const sr = field.report() as { sand?: { picture: string; phases: { cycles: number[] } }; sources?: { fronts: number; droppedFronts: number; smoke: number; droppedSmoke: number }; wisps?: { inForce: string; noise: string }; layers?: { air: number }; liquid?: { stepped: boolean; bound: boolean; pokes: number; told: { water: number; lava: number } | null } };
+// The fifth wave's parts really ran (one report: it takes the counts as it reads them): the liquid's tile stepped, its
+// record written, pushes landing on the water poked.
+const lq = sr.liquid;
+const w5 = { stepped: lq?.stepped ?? false, bound: lq?.bound ?? false, pokes: lq?.pokes ?? 0, water: lq?.told?.water ?? 0, lava: lq?.told?.lava ?? 0, sink: pokeSink.strength };
 const stormColour = field.stormColour.value;
-console.log(JSON.stringify({ w4, frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet }, third: { fronts: sr.sources?.fronts ?? 0, droppedFronts: sr.sources?.droppedFronts ?? 0, storm: [stormColour.r, stormColour.g, stormColour.b], sand: sr.sand?.picture ?? null, cycles: sr.sand?.phases.cycles ?? null, mote: [...mote] }, w3: { smoke: sr.sources?.smoke ?? 0, droppedSmoke: sr.sources?.droppedSmoke ?? 0, smokeLive: field.smokeLive, wisps: sr.wisps?.inForce ?? null, noise: sr.wisps?.noise ?? null, layers: sr.layers?.air ?? 0, fogLevel: inp.fogLevel }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));
+console.log(JSON.stringify({ w4, w5, frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet }, third: { fronts: sr.sources?.fronts ?? 0, droppedFronts: sr.sources?.droppedFronts ?? 0, storm: [stormColour.r, stormColour.g, stormColour.b], sand: sr.sand?.picture ?? null, cycles: sr.sand?.phases.cycles ?? null, mote: [...mote] }, w3: { smoke: sr.sources?.smoke ?? 0, droppedSmoke: sr.sources?.droppedSmoke ?? 0, smokeLive: field.smokeLive, wisps: sr.wisps?.inForce ?? null, noise: sr.wisps?.noise ?? null, layers: sr.layers?.air ?? 0, fogLevel: inp.fogLevel }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));

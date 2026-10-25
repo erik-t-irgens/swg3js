@@ -458,7 +458,7 @@ import type { BreathTune } from './player/breathMath.ts';
 import { FLORA_CLEAR } from './world/floraClear.ts';
 import { FLORA_COLLISION, FLORA_COLLISION_DEFAULTS } from './world/floraCollision.ts';
 import type { LavaSinkTune } from './player/lavaSinkMath.ts';
-import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
+import { configureWaterSim, pokeWaterSim, rippleCarrySet, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
 import { setWaterSurface, WATER_SURFACE_BAND, WATER_SURFACE_HIDE } from './world/water';
 import type { WaterSurfaceTune } from './world/waterSurfaceMath.ts';
 import { RANGE } from './world/gallery';
@@ -859,6 +859,11 @@ interface TrackConsoleOpts {
 
 /** What `__debug.air` takes (`App.airDebug`). */
 interface AirDebugOptions {
+  /**
+   * The liquids (the fifth wave): `at` reads the liquid's tile back where you look (or at a game point), `peak` the most
+   * current anywhere on it, `poke` presses the ripples where you look (as a push meeting water does).
+   */
+  liquid?: { at?: [number, number] | true; peak?: boolean; poke?: number };
   /** Time empty full-screen passes the given way (§7.3 of the design), `draws` a batch over `batches`. */
   probe?: AirDrawMode;
   draws?: number;
@@ -918,7 +923,9 @@ interface AirDebugOptions {
 }
 
 /** The fields `__debug.air({ view })` shows. */
-const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'shape', 'tint', 'offsets', 'dents', 'inscatter', 'clear', 'smokeField', 'fogField', 'smokeTint', 'bands', 'carry', 'class'] as const;
+const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'shape', 'tint', 'offsets', 'dents', 'inscatter', 'clear', 'smokeField', 'fogField', 'smokeTint', 'bands', 'carry', 'class', 'flow', 'liquid'] as const;
+/** The fifth wave's views drawn by the liquids themselves: the current on the water, the crust's carry on the lava. */
+const AIR_LIQUID_VIEWS = ['current', 'crust'] as const;
 
 /** The third wave's views the march draws itself (`AirSource.airView`): the first sample's smoke, fog, or the wisps' keep. */
 const AIR_AIR_VIEWS = ['smoke', 'fog', 'wisps'] as const;
@@ -1868,6 +1875,13 @@ class App {
       values: [false, true],
       note: 'false holds the moving air still and the volume unwanted, its targets and programs kept; true as the settings have it',
     });
+    // The fifth wave's: the water and the lava back on their plain materials (both built), the liquid's tile unread.
+    registerPerfSwitch('volLiquid', {
+      get: () => !this.world.liquidSoftOff,
+      set: (v) => (this.world.liquidSoftOff = !v),
+      values: [false, true],
+      note: 'false puts the water and the lava back on today\'s materials (the current and the crust unread); true as the settings have it',
+    });
     registerPerfSwitch('airVolume', {
       get: () => this.postfx?.override.airVolume !== false,
       set: (v) => {
@@ -2161,6 +2175,8 @@ class App {
     this.roomAir = new RoomAir(this.scene, this.world, this.portals, this.settings);
     // The water's height field reads these each step, so the menu's knobs need no apply case.
     configureWaterSim(this.settings);
+    // The terrain's ribbons as the setting has them (off unless the player turned them on: nothing of them is made).
+    this.world.setRibbons(this.settings.waterRibbons);
     this.roomAirInput = { dt: 0, camera: this.cam.camera, view: null, cell: null, aboard: null, cameraInHull: false, playerPos: this.player.pos, sun: null, overcast: 0, dust: 0, bufferHeight: 1 };
     this.litSources.world = this.world;
     this.litSources.effects = this.effects;
@@ -4451,7 +4467,16 @@ class App {
         if (opts?.draft !== undefined && Number.isFinite(opts.draft)) WATER_SIM_DRAFT.value = Math.max(0, opts.draft);
         if (opts?.impact !== undefined && Number.isFinite(opts.impact)) WATER_SIM_IMPACT.value = Math.max(0, opts.impact);
         if (opts?.poke) pokeWaterSim(opts.poke[0], opts.poke[1], 0.6, 1.2);
-        return waterSimDebug();
+        // The volumetrics' fifth wave: whether the current carries the ripples (the carry hung, how often it ran and the
+        // seconds it carried last, the peak travel that is: the tile's fastest times those seconds, read back), and the
+        // spray's rings (drawn frames, and the drops that landed on the last frame read back).
+        const air = this.world.air;
+        const peak = air ? air.liquidPeak() : null;
+        const rings = air?.kick.count(this.renderer, air.win.ox, air.win.oz) ?? null;
+        const carry = air
+          ? { hung: rippleCarrySet(), runs: air.carry.stats.runs, lastSeconds: Math.round(air.carry.stats.lastSeconds * 1000) / 1000, peakCurrent: peak, peakTravelM: peak !== null ? Math.round(peak * air.carry.stats.lastSeconds * 1000) / 1000 : null, sprayRings: { wanted: air.ringsWanted, draws: air.kick.ringDraws, landedLastFrame: rings ? rings.rings : null } }
+          : { hung: rippleCarrySet(), note: 'no moving air: the ripples step today\'s way' };
+        return { ...waterSimDebug(), carry };
       },
       /**
        * Every shader program the renderer holds, what makes each one differ from the next, and what
@@ -5989,7 +6014,22 @@ class App {
         });
         return out;
       },
-      water: (x: number, z: number) => this.world.terrain.waterHeightAt(x, z),
+      /**
+       * `water(x, z)` the water table's height at a game point, as ever; `water()` with no point names what every water
+       * body wears (today's plain material, or the volumetrics' current variant, key `…-air`), what the lava wears (its
+       * plain look or its crust twins) and the terrain's ribbons (drawn or not, their looks).
+       */
+      water: (x?: number | { ribbons?: boolean }, z?: number) => {
+        if (typeof x === 'number' && typeof z === 'number') return this.world.terrain.waterHeightAt(x, z);
+        // `water({ ribbons: true })` draws the terrain's lava falls (the Graphics page's switch, written in memory and
+        // never saved, as every console line with a setting is).
+        if (x && typeof x === 'object' && typeof x.ribbons === 'boolean') {
+          this.settings.waterRibbons = x.ribbons;
+          this.applySetting('waterRibbons');
+        }
+        const bodies = this.world.waterBodies.describe(this.cam.camera.position).bodies.map((b) => ({ name: b.name, role: b.role, variant: b.variant, inFrustum: b.inFrustum }));
+        return { bodies, ...this.world.liquidStatus() };
+      },
       /**
        * The **second** water reader and its knobs: the sea with the swell in it, which is what
        * floats on it reads and what nothing else may. `sea()` reports the numbers in force, the
@@ -6271,6 +6311,7 @@ class App {
         const mask = fx?.product('waterMask') as unknown as { allocated: boolean; drawn: number; idleFor(ctx: unknown): number } | undefined;
         return {
           ...bodies.describe(this.cam.camera.position),
+          liquids: this.world.liquidStatus(),
           pass: pass && row ? { drewLastFrame: row.drewLastFrame, why: row.why ?? null, gpuMs: row.gpuMs, tune: { ...pass.tune } } : null,
           mask: mask && fx ? { allocated: mask.allocated, drawn: mask.drawn, idleSeconds: Number(mask.idleFor(fx.ctx).toFixed(1)) } : null,
         };
@@ -12244,6 +12285,10 @@ class App {
         this.postfx?.setSize();
         this.world.onCameraResized();
         break;
+      case 'waterRibbons':
+        // The terrain's ribbons (the volumetrics' fifth wave's survey: Mustafar's lava falls), drawn or let go.
+        this.world.setRibbons(S.waterRibbons);
+        break;
       case 'fov':
         this.cam.baseFov = S.fov;
         break;
@@ -12564,12 +12609,38 @@ class App {
       out.smoke = { at: [Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10, Math.round(p.z * 10) / 10], radius, rate, seconds, held: air.forces.smokeHeldCount > before, drawnThere: air.drawsSmokeAt(p.x, p.z, radius) };
       if (air.forces.smokeHeldCount === before) notes.push(!air.forces.active ? 'no smoke: the moving air is not stepping here' : !air.forces.smokeOn ? 'no smoke: the smoke is off (volSmoke)' : 'no smoke: off the window, or the held table is full');
     }
+    if (o.liquid) {
+      // The fifth wave's: the liquid's tile read back, its peak, and a poke where you look.
+      const L = o.liquid;
+      const lq: Record<string, unknown> = { worn: this.world.liquidWorn, stepped: air.liquidLive };
+      if (L.at) {
+        const p = L.at === true ? look() : new THREE.Vector3(L.at[0], 0, L.at[1]);
+        lq.at = { x: Math.round(p.x * 10) / 10, z: Math.round(p.z * 10) / 10, ...(air.liquidAt(p.x, p.z) ?? { none: 'off the window, no tile, or not stepped yet' }) };
+      }
+      if (L.peak) lq.peak = air.liquidPeak();
+      if (Number.isFinite(L.poke)) {
+        const p = look();
+        pokeWaterSim(p.x, p.z, L.poke as number, AIR_TUNE.liquid.jetPokeRadius);
+        lq.poked = [Math.round(p.x * 10) / 10, Math.round(p.z * 10) / 10];
+      }
+      out.liquid = lq;
+    }
     if (o.view !== undefined) {
       // A view of the march's own or the ground's goes off when any other is asked, the picture's too.
       air.dustView = 0;
       air.sandView = false;
       air.airView = 0;
+      air.liquidView = 0;
       if (o.view === null) out.view = this.postfx?.fxView(null) ?? null;
+      else if ((AIR_LIQUID_VIEWS as readonly string[]).includes(o.view)) {
+        air.liquidView = (AIR_LIQUID_VIEWS as readonly string[]).indexOf(o.view) + 1;
+        this.postfx?.fxView(null);
+        out.view =
+          o.view === 'current'
+            ? 'the water wearing its current draws the current in place of its colour: its direction in red and green (half grey still), its speed in blue (2 m/s full)'
+            : "the lava wearing its crust twin draws the crust's carry: the current's speed in red (5 m/s full), its share there in green";
+        if (!this.world.liquidWorn) notes.push('nothing wears the liquids\' variants now: the master, the current or the lava off, or no field');
+      }
       else if ((AIR_AIR_VIEWS as readonly string[]).includes(o.view)) {
         air.airView = (AIR_AIR_VIEWS as readonly string[]).indexOf(o.view) + 1;
         this.postfx?.fxView(null);
@@ -12584,7 +12655,7 @@ class App {
         this.postfx?.fxView(null);
         out.view = "the ground draws the blowing sand's strength over each layer, grey, in place of its colour (while the sand's dial is above nought)";
       } else if ((AIR_VIEWS as readonly string[]).includes(o.view)) out.view = this.postfx ? this.postfx.fxView(`airVolume.${o.view}`) : 'the effects are off: turn Effects on to see a field';
-      else notes.push(`no field "${o.view}": ${[...AIR_VIEWS, ...AIR_MARCH_VIEWS, ...AIR_AIR_VIEWS, 'sand'].join(', ')}`);
+      else notes.push(`no field "${o.view}": ${[...AIR_VIEWS, ...AIR_MARCH_VIEWS, ...AIR_AIR_VIEWS, ...AIR_LIQUID_VIEWS, 'sand'].join(', ')}`);
     }
     if (o.selfTest) out.selfTest = air.selfTest();
     if (o.measure) {
@@ -12709,6 +12780,18 @@ class App {
         // the world pass, and the rain's draw against the weather's own scene, as its sheets are compiled.
         const kicks = this.world.kickStandInsFor(air);
         if (kicks.length) jobs.push(this.world.compileReady(kicks, 'volumetrics: the kick-up'));
+        // The fifth wave's: the water's current variants and the lava's crust twins with their plain programs, against the
+        // world pass as any scene object is, and the current variants' mask twins the effects' way, as the water mask's own.
+        const liquids = this.world.liquidStandInsFor(air);
+        // What they cover of the variants made in play: worn only once this warm has linked (`liquidBuilt` below), or a
+        // field the session kept would put this world's new variants on at the next frame and three build them there.
+        const liquidCovered = this.world.liquidUnbuiltNow();
+        if (liquids.length) jobs.push(this.world.compileReady(liquids, 'volumetrics: the water and the lava'));
+        if (chain) {
+          const masks = this.world.liquidMaskStandIns();
+          const target = chain.compileTarget;
+          if (masks.length) jobs.push(this.world.programJob(masks, 'volumetrics: the water\'s mask', true, { compile: (o, _allowance, resolve) => ({ made: this.compileFxObject(o, target, resolve), done: true }) }));
+        }
         jobs.push(this.world.rainWarmJob(air));
         // The blowing sand's picture (wave 2b's), a slice of rows a frame, uploaded only once whole: the swap waits for it.
         jobs.push(this.sandSlices(air));
@@ -12734,6 +12817,8 @@ class App {
         if (pass && this.postfx && !this.postfx.pass('airVolume')) this.postfx.registerPass(pass);
         else pass?.dispose();
         if (!had) this.world.takeAir(air);
+        // The water's and the lava's variants this warm built: the chooser wears them from the next frame.
+        this.world.liquidBuilt(liquidCovered);
         // The wisps mode in force now, where its march is not built (moved during this warm, or while the master was off
         // with the pass already on the chain from an earlier warm): built off the frame in its turn, the volume drawing the
         // last ready mode meanwhile.
@@ -12834,6 +12919,9 @@ class App {
     this.world.syncAirMeshes();
     this.loadingScreen.setWhat('the air');
     await this.world.airPictures(AIR_PICTURE_WAIT_MS);
+    // The fifth wave's: this world's water current variants and lava crust twins made before the effects' warm-up
+    // compiles the variants' mask twins (the sweep compiles the rest).
+    if (air && !air.refused) this.world.makeLiquidVariants();
   }
 
   /** A volumetrics switch as it is in force: the frame report's soft value over the setting. */

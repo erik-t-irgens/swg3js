@@ -19,7 +19,7 @@
 // readback of their own.
 import * as THREE from 'three';
 import { AIR_VERTEX } from './airShaders.ts';
-import { KICK_DRAW_FRAGMENT, KICK_DRAW_VERTEX, KICK_FILL_FRAGMENT, KICK_UPDATE_FRAGMENT } from './airParticleShaders.ts';
+import { KICK_DRAW_FRAGMENT, KICK_DRAW_VERTEX, KICK_FILL_FRAGMENT, KICK_UPDATE_FRAGMENT, RING_FRAGMENT, RING_VERTEX } from './airParticleShaders.ts';
 import { KICK_KINDS, SPAWN_MOST, SPAWN_W, type SpawnTable } from './airSpawn.ts';
 import { AIR_TUNE } from './airTune.ts';
 import { CARD_LIGHT_UNIFORMS } from '../cardLight.ts';
@@ -122,6 +122,8 @@ export interface KickCount {
   flying: number;
   pickups: number;
   wake: number;
+  /** Drops of spray that landed back in the water on the frame read (the fifth wave's rings). */
+  rings: number;
 }
 
 export class KickPool {
@@ -194,6 +196,20 @@ export class KickPool {
   private readonly s0 = { value: null as THREE.Texture | null };
   private readonly s1 = { value: null as THREE.Texture | null };
   private readonly s2 = { value: null as THREE.Texture | null };
+  /**
+   * The spray's rings (the fifth wave): the update's flag (x one: a drop landing back on the water is kept a frame as a
+   * ring), and the draw that presses each into the ripples' state, additive, one instance a spray slot.
+   */
+  readonly ring = new THREE.Vector4(0, 0, 0, 0);
+  readonly ringMaterial: THREE.ShaderMaterial;
+  readonly ringMesh: THREE.Mesh;
+  private readonly ringScene = new THREE.Scene();
+  private readonly ringCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  private readonly ringK = new THREE.Vector4(0, KICK_WIDTH, 0, 6);
+  private readonly ringW = new THREE.Vector4(0, 0, 0, 0.375);
+  private readonly ringP = new THREE.Vector4(0.08, 0, 0, 0);
+  /** Frames the ring draw ran (the console's `ripples()`). */
+  ringDraws = 0;
 
   constructor(src: KickSources, light: KickLight) {
     this.updateMaterial = new THREE.ShaderMaterial({
@@ -240,6 +256,7 @@ export class KickPool {
         uPickLife: { value: this.pickLife },
         uPickSize: { value: this.pickSize },
         uStreak: { value: this.streak },
+        uRing: { value: this.ring },
       },
       blending: THREE.NoBlending,
       toneMapped: false,
@@ -357,11 +374,64 @@ export class KickPool {
       mesh.frustumCulled = false;
       return mesh;
     });
+    // The spray's rings: additive into the ripples' state (a half float there blends on every WebGL2 browser, a float32
+    // one only with `EXT_float_blend`, which `rippleStateTarget` asks).
+    this.ringMaterial = new THREE.ShaderMaterial({
+      name: 'air.kick.rings',
+      vertexShader: RING_VERTEX,
+      fragmentShader: RING_FRAGMENT,
+      uniforms: { uS0: this.s0, uS1: this.s1, uS2: this.s2, uRingK: { value: this.ringK }, uRingW: { value: this.ringW }, uRingP: { value: this.ringP } },
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneFactor,
+      blendEquationAlpha: THREE.AddEquation,
+      blendSrcAlpha: THREE.ZeroFactor,
+      blendDstAlpha: THREE.OneFactor,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.ringMaterial.userData.unlit = true;
+    this.ringMaterial.userData.dry = true;
+    this.ringMesh = new THREE.Mesh(quadGeometry(), this.ringMaterial);
+    this.ringMesh.name = 'air.kick.rings';
+    this.ringMesh.frustumCulled = false;
+    this.ringScene.add(this.ringMesh);
+    this.ringScene.matrixAutoUpdate = false;
+    this.ringScene.matrixWorldAutoUpdate = false;
   }
 
   /** Every material of the pool, for the warm and the scanner. */
   materials(): THREE.ShaderMaterial[] {
-    return [this.updateMaterial, this.fillMaterial, this.cutMaterial, ...this.blendMaterials];
+    return [this.updateMaterial, this.fillMaterial, this.cutMaterial, ...this.blendMaterials, this.ringMaterial];
+  }
+
+  /**
+   * The spray's rings pressed into the ripples' state (`target`, the state the ripples' next step reads), after this
+   * frame's update: the spray's slots read, a ring where a drop landed back in the water this frame. `win` is the
+   * ripples' window (`WATER_SIM_WINDOW`'s vector); the air window's corner is `frame`'s. A render call of its own, the
+   * renderer's target put back by the caller. Nothing is made.
+   */
+  drawRings(renderer: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget, win: THREE.Vector4): void {
+    const k = this.ringK;
+    k.x = this.rowStart[2];
+    k.y = KICK_WIDTH;
+    k.z = this.cornerY;
+    k.w = AIR_TUNE.liquid.ringSize;
+    const w = this.ringW;
+    w.x = win.x;
+    w.y = win.y;
+    w.z = win.z;
+    w.w = win.w;
+    const p = this.ringP;
+    p.x = AIR_TUNE.liquid.ringDepth;
+    p.z = this.frame.ox;
+    p.w = this.frame.oz;
+    (this.ringMesh.geometry as THREE.InstancedBufferGeometry).instanceCount = this.rows[2] * KICK_WIDTH;
+    renderer.setRenderTarget(target);
+    renderer.render(this.ringScene, this.ringCamera);
+    this.ringDraws++;
   }
 
   /** The targets at a detail (×0.5, ×1, ×2; class T): made again only when it moved, every slot dead. Answers whether it resized. */
@@ -682,11 +752,13 @@ export class KickPool {
     } catch {
       return null;
     }
-    const out = { live: [0, 0, 0, 0] as [number, number, number, number], lying: 0, flying: 0, pickups: 0, wake: 0, nearLeaves: near ? 0 : null };
+    const out = { live: [0, 0, 0, 0] as [number, number, number, number], lying: 0, flying: 0, pickups: 0, wake: 0, rings: 0, nearLeaves: near ? 0 : null };
     for (let k = 0; k < KICK_KINDS; k++) {
       for (let r = this.rowStart[k]; r < this.rowStart[k] + this.rows[k]; r++) {
         for (let x = 0; x < KICK_WIDTH; x++) {
           const i = (r * KICK_WIDTH + x) * 4;
+          // A drop that landed back in the water this frame (the fifth wave's ring flag).
+          if (k === 2 && !(s1[i + 3] > 0) && s2[i + 2] === -1) out.rings++;
           if (!(s1[i + 3] > 0)) continue;
           out.live[k]++;
           const look = Math.floor(s2[i]);
@@ -712,7 +784,7 @@ export class KickPool {
   dispose(): void {
     this.release();
     for (const m of this.materials()) m.dispose();
-    for (const mesh of [...this.meshes, ...this.standIns]) mesh.geometry.dispose();
+    for (const mesh of [...this.meshes, ...this.standIns, this.ringMesh]) mesh.geometry.dispose();
     this.stand.dispose();
   }
 }

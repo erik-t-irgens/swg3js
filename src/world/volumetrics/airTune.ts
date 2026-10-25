@@ -837,6 +837,52 @@ export const AIR_TUNE = {
     /** How opaque a flake is. */
     snowAlpha: 0.8,
   },
+  /**
+   * Water and lava (the fifth wave, the design's §2.9): the liquid tile of the atlas, the same solver over the cells
+   * whose medium is water or lava, land its obstacle. Every number a dial; tagged by where it came from.
+   */
+  liquid: {
+    /**
+     * Water: how fast it is pulled toward its share of the wind, a second, that share, and how fast its own motion dies,
+     * a second [demo `water.html:1216`, the lake's row]; how much of the air's swirl it keeps [demo: the lake's swirl share
+     * of 1]. The pull's target is one function (`LIQUID_TARGET_GLSL`, `airLiquid.ts`), which the seventh wave's one wind
+     * will set by the air's own branch.
+     */
+    waterRelax: 0.25,
+    waterWind: 0.12,
+    waterDiss: 0.12,
+    waterSwirl: 1,
+    /** Lava: pulled hard toward stillness (or its ribbon's own flow), its motion dying fast, no wind and no swirl [demo `water.html:1217`]. */
+    lavaRelax: 1.4,
+    lavaDiss: 1.7,
+    lavaWind: 0,
+    lavaSwirl: 0,
+    /**
+     * How hard a push of the air pushes the liquid under it, a share of what the air takes [demo: the water demo's engine
+     * shoved its current as the land demo's shoved the air].
+     */
+    push: 1,
+    /**
+     * A ribbon's own flow (Mustafar's lava falls, the terrain's `velocity` read as metres a second along its run): the
+     * share of it the liquid is pulled toward [ours: 1, the file's own speed as it stands].
+     */
+    ribbonFlow: 1,
+    /** How fast the water's own surface detail drifts with the current, a share of the current's own speed [ours: 1, its own speed]. */
+    detailFlow: 1,
+    /** The lava crust's flow cycle, seconds: two phases half a cycle apart, so a restart is never seen [ours: lava moves slowly, and a crust stretched over a longer cycle reads as torn]. */
+    crustCycle: 3,
+    /**
+     * A jet or a blast over water presses the ripples (`pokeWaterSim`): field units a second at an impact of 1 m/s, and the
+     * radius, metres, over the jet's own [ours: a hovering ship rings the water under it as a wading body does].
+     */
+    jetPoke: 0.006,
+    jetPokeRadius: 1.2,
+    /** A blast over water: field units at a thermal detonator's radius, scaled by radius over it [ours]. */
+    blastPoke: 0.8,
+    /** A drop of spray landing back on the water rings it: field units at its middle, and its radius in the drop's sizes [ours]. */
+    ringDepth: 0.08,
+    ringSize: 6,
+  },
 };
 
 export type AirTune = typeof AIR_TUNE;

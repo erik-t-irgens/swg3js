@@ -6,8 +6,8 @@
 //
 // The master and the volume's own rows are the effects registry's (`FX_KNOBS`, `group: 'volumetrics'`), taken from
 // there so a row and its setting cannot drift apart and the Effects section leaves them out. A row shows only from
-// the wave that builds what it moves: the later waves' rows (water and lava, the grass, the wind and the clouds) are not
-// in this build at all, so no switch here does nothing.
+// the wave that builds what it moves: the later waves' rows (the grass, the wind and the clouds) are not in this build at
+// all, so no switch here does nothing.
 import { FX_KNOBS, type FxKnobDef } from '../core/fxRegistry.ts';
 import type { Settings } from '../core/settings.ts';
 import { VOL_PRESET_LABELS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_RANGES, presetOf } from '../world/volumetrics/volSettings.ts';
@@ -95,12 +95,15 @@ export const VOLUMETRICS: readonly { title: string; knobs: readonly Knob[] }[] =
     ],
   },
   {
-    title: 'The ground',
+    title: 'The ground, water and lava',
     knobs: [
       { key: 'volSand', label: 'Blowing sand', kind: 'toggle', requires: ['volumetrics'], hint: 'Blowing sand streaks over sand, snow, ash and dirt where a jet or a gale passes, and stops a moment after; the ground\'s own picture never moves, and mud, wet sand, rock and paving never blow. On the ground the client draws its own way (every converted world); a world drawn the older way or a real-elevation one keeps its ground as it is.' },
       { key: 'volSandDetail', label: 'Blowing sand detail', kind: 'select', options: R.volSandDetail.options.map((v) => ({ value: v, label: times(v) })), requires: ['volumetrics', 'volSand'], hint: 'The blowing sand\'s own grid over the air\'s: ×4 is 37.5 cm at the default air detail.' },
       { key: 'volPrints', label: 'Prints and pits', kind: 'toggle', requires: ['volumetrics'], hint: 'Ruts behind a speeder, a pit scoured under a hovering ship, a crater where a grenade went off, and footprints pressed into sand, snow, mud and dirt (in place of the flat print there), each by how deep the ground gives, healing over half a minute. Rock and paving take none, and a foot there leaves the print it always did.' },
       { key: 'volPrintDetail', label: 'Prints detail', kind: 'select', options: R.volPrintDetail.options.map((v) => ({ value: v, label: `${v} (${((128 / v) * 100).toFixed(1)} cm)` })), requires: ['volumetrics', 'volPrints'], hint: 'How finely the marks are kept over the 128 m square round you. 4096 is 67 MB on the card.' },
+      { key: 'volCurrent', label: 'Water current', kind: 'toggle', requires: ['volumetrics'], hint: 'Lakes and the sea near you have a current: the wind drives it round shores and islands and it sheds eddies behind them, a jet, a blast or a push stirs it, and the water\'s own fine pattern and its ripples drift with it. A jet or a blast over water rings it, and a drop of spray that falls back rings it where it lands. Off, the water is as it was.' },
+      { key: 'volLava', label: 'Lava\'s crust', kind: 'toggle', requires: ['volumetrics'], hint: 'Lava\'s crust is carried by the lava\'s own flow and torn where an engine, a blast or the Force stirs it, the glow showing through. Off, the lava flows as it always did.' },
+      { key: 'volLiquidDetail', label: 'Water and lava detail', kind: 'select', options: R.volLiquidDetail.options.map((v) => ({ value: v, label: cellOf(v) })), requires: ['volumetrics'], hint: 'How finely the current and the lava\'s flow are worked out over the 192 m square round you. Moving it, or turning the current and the crust both off or one on, starts the moving air again.' },
     ],
   },
   {
@@ -113,6 +116,8 @@ export const VOLUMETRICS: readonly { title: string; knobs: readonly Knob[] }[] =
       { key: 'volArtShade', label: 'Dust shades the ground', kind: 'range', min: R.volArtShade.min, max: R.volArtShade.max, step: R.volArtShade.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volLight'], hint: 'How much of the sun the dust between the ground and the sun takes off the ground under it, while the dust is drawn. 0 leaves the ground\'s light exactly as it is.' },
       { key: 'volRainThin', label: 'Rain sheets stood down', kind: 'range', min: R.volRainThin.min, max: R.volRainThin.max, step: R.volRainThin.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volRain'], hint: 'While our rain falls, the game\'s own rain sheets stand down by this much: 100% to begin with, since their one lean for the whole sky against each drop\'s own lean in a gust reads as two rains; 0 keeps them.' },
       { key: 'volSnowThin', label: 'Snow sheets stood down', kind: 'range', min: R.volSnowThin.min, max: R.volSnowThin.max, step: R.volSnowThin.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volSnow'], hint: 'While our snow falls, the game\'s own snow sheets stand down by this much. With our snow off they are untouched whatever this says.' },
+      { key: 'volArtWater', label: 'Current over the water', kind: 'range', min: R.volArtWater.min, max: R.volArtWater.max, step: R.volArtWater.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volCurrent'], hint: 'How far the current moves the water\'s own fine pattern and carries its ripples. 0 leaves the water exactly as it is.' },
+      { key: 'volArtLava', label: 'Crust carried and torn', kind: 'range', min: R.volArtLava.min, max: R.volArtLava.max, step: R.volArtLava.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volLava'], hint: 'How far the lava\'s flow carries and tears its crust. 0 leaves the lava exactly as it is.' },
     ],
   },
   {

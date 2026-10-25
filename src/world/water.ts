@@ -4,6 +4,7 @@ import { GLSL_OCT_ENCODE } from '../core/glslOct';
 import { RAIN_RINGS_GLSL, WEATHER_PARS_GLSL, WEATHER_UNIFORMS } from './wetness';
 import { WATER_SIM_ON, WATER_SIM_RELIEF, WATER_SIM_TEX, WATER_SIM_WINDOW } from './waterSim';
 import { surfaceBandFor, surfaceHideUniform, tuneWaterSurface, WATER_SURFACE_TUNE, type WaterSurfaceTune } from './waterSurfaceMath.ts';
+import { LIQUID_U, WATER_FLOW_FROM, WATER_FLOW_TO, WATER_VIEW_FROM, WATER_VIEW_TO, waterCurrentGlsl } from './volumetrics/airLiquid.ts';
 
 /**
  * Water: a physically based surface that reflects the sky's environment map, moved by a
@@ -38,7 +39,8 @@ export interface WaterUniforms {
 }
 
 export interface WaterMaterial extends THREE.MeshPhysicalMaterial {
-  userData: { uniforms: WaterUniforms; look: WaterLook; variant: 'lit' | 'mask'; waves: boolean; water: true };
+  /** `air` marks the volumetrics' current variant and its mask twins (the fifth wave), keyed `…-air`. */
+  userData: { uniforms: WaterUniforms; look: WaterLook; variant: 'lit' | 'mask'; waves: boolean; water: true; air?: true };
 }
 
 /** One value for every water material: the reflections pass takes the environment term over while it runs. */
@@ -649,8 +651,37 @@ export function createWaterMaskMaterial(lit: WaterMaterial, side: typeof THREE.F
   // Added to STANDARD and PHYSICAL, which the physical material's constructor sets and needs.
   mask.defines = { ...mask.defines, WATER_FX_MASK: '' };
   mask.userData = { ...lit.userData, variant: 'mask' };
-  installWaterHook(mask, lit.userData.uniforms, 'mask', lit.userData.waves);
+  // The twins of the volumetrics' current variant are keyed off it (`…-air`): the same flow in the mask as in the lit water.
+  installWaterHook(mask, lit.userData.uniforms, 'mask', lit.userData.waves, lit.userData.air === true);
   return mask;
+}
+
+/**
+ * The volumetrics' current variant of a lit water material (the fifth wave, the design's §2.9): the same look and every
+ * uniform object of the lit material shared by reference, the session's liquid record beside them (`LIQUID_U`), and the
+ * one line where today's water asks its detail's flow (`flowAt`) given the liquid tile's current instead
+ * (`waterAirFlow`: `f + k (c − f)`, `f` itself at an art share of nought by a uniform branch). Its key is `…-air`, so the
+ * plain material's text and key never move; its mask twins are made from it (`createWaterMaskMaterial`). Worn only while
+ * the chooser says so (`waterMaterialFor`); never compiled here.
+ */
+export function createWaterAirMaterial(lit: WaterMaterial): WaterMaterial {
+  const mat = new THREE.MeshPhysicalMaterial({
+    color: lit.color,
+    transparent: lit.transparent,
+    opacity: lit.opacity,
+    roughness: lit.roughness,
+    metalness: lit.metalness,
+    ior: lit.ior,
+    specularIntensity: lit.specularIntensity,
+    depthWrite: lit.depthWrite,
+    side: lit.side,
+    envMap: lit.envMap,
+    envMapIntensity: lit.envMapIntensity,
+  }) as WaterMaterial;
+  const uniforms = { ...lit.userData.uniforms, ...LIQUID_U } as WaterUniforms;
+  mat.userData = { ...lit.userData, uniforms, variant: 'lit', air: true };
+  installWaterHook(mat, uniforms, 'lit', lit.userData.waves, true);
+  return mat;
 }
 
 /**
@@ -660,10 +691,54 @@ export function createWaterMaskMaterial(lit: WaterMaterial, side: typeof THREE.F
  * its own closure and its own `external`, so one variant never runs another's hook; only the
  * uniform objects are shared.
  */
-function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 'lit' | 'mask', waves: boolean): void {
+function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 'lit' | 'mask', waves: boolean, air = false): void {
   let external: ((shader: THREE.WebGLProgramParametersWithUniforms, renderer: THREE.WebGLRenderer) => void) | null = null;
   const ours = (shader: THREE.WebGLProgramParametersWithUniforms, renderer: THREE.WebGLRenderer) => {
     external?.call(mat, shader, renderer);
+    if (air) {
+      plainWater(shader, uniforms);
+      airWater(shader);
+      return;
+    }
+    plainWater(shader, uniforms);
+  };
+  Object.defineProperty(mat, 'onBeforeCompile', {
+    configurable: true,
+    get: () => ours,
+    set: (fn: typeof external) => {
+      external = fn;
+    },
+  });
+  mat.customProgramCacheKey = () => `swg-water-7-${variant}-rain-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}${air ? '-air' : ''}`;
+}
+
+/**
+ * The volumetrics' current variant's text over today's (the fifth wave): the liquid's functions after the pars, today's
+ * one flow line given the current, and the console's view after the foam. All of it or none: a line not found exactly
+ * once leaves the text today's and says so once (the plain water drawn under the variant's key, never a broken program).
+ */
+function airWater(shader: THREE.WebGLProgramParametersWithUniforms): void {
+  const pars = `${MASK_PARS_GLSL}\n${WEATHER_PARS_GLSL}`;
+  const f = shader.fragmentShader;
+  const once = (s: string, find: string): boolean => {
+    const i = s.indexOf(find);
+    return i >= 0 && s.indexOf(find, i + find.length) < 0;
+  };
+  if (!once(f, pars) || !once(f, WATER_FLOW_FROM) || !once(f, WATER_VIEW_FROM)) {
+    if (!airWaterWarned) console.warn('water: the current variant could not find its lines in the water text; it draws today\'s water');
+    airWaterWarned = true;
+    return;
+  }
+  shader.fragmentShader = f
+    .replace(pars, `${pars}\n${waterCurrentGlsl(DETAIL_FLOW, DETAIL_CYCLE)}`)
+    .replace(WATER_FLOW_FROM, WATER_FLOW_TO)
+    .replace(WATER_VIEW_FROM, WATER_VIEW_TO);
+}
+let airWaterWarned = false;
+
+/** Today's water injections into `shader`, line for line (both variants and both materials). */
+function plainWater(shader: THREE.WebGLProgramParametersWithUniforms, uniforms: WaterUniforms): void {
+  {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying vec3 vWetPos;\nvarying vec3 vWetUp;`)
@@ -780,15 +855,7 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
           normal = normalize(mix(normal, vn, 0.92));
         }`,
       );
-  };
-  Object.defineProperty(mat, 'onBeforeCompile', {
-    configurable: true,
-    get: () => ours,
-    set: (fn: typeof external) => {
-      external = fn;
-    },
-  });
-  mat.customProgramCacheKey = () => `swg-water-7-${variant}-rain-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
+  }
 }
 
 /**

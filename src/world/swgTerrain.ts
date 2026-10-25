@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { TERRAIN_GROUND_TUNE, type EnvironmentFamily, type Layer } from '../swg/terrain/generator.ts';
 import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, rampNames, readColorRampFile, readColorReference, TerrainSampler, UPPER_PAD, waterTables, type ColorRamp, type ColorReference, type GroundProbe, type PoleBlock, type RadialPole, type TerrainTemplate } from '../swg/terrain/trn.ts';
 import { groundChunkAt, groundShift, type GroundShift } from './groundTiles.ts';
+import { gameRibbon, terrainRibbons, type GameRibbon } from '../swg/terrain/ribbons.ts';
 import { FarGridIndex } from './farGridIndex.ts';
 
 export interface BuildingLayerSource {
@@ -96,6 +97,8 @@ export class SwgTerrain {
   syncGenerations = 0;
   /** Lakes, pools and lava flows in game coordinates. */
   readonly waterTables: SwgWaterTable[] = [];
+  /** The terrain's ribbons (strips of water or lava down a slope, `ribbons.ts`) in game coordinates. */
+  readonly ribbons: GameRibbon[] = [];
   /** The colour ramps the terrain's colour affectors name, and which of them the pack carried. */
   readonly ramps: { named: string[]; loaded: number };
   /** How bright the world's colour map runs (the terrain command's measure, beside the ramps), or null where the pack has none. */
@@ -137,6 +140,9 @@ export class SwgTerrain {
       }
       this.waterTables.push({ name: w.name, height: w.height, points, shader: w.shader, waterType: w.waterType, shaderSize: w.shaderSize, minX, maxX, minZ, maxZ });
     }
+    // The terrain's ribbons (Mustafar's lava falls), in the game's frame: drawn only where a setting asks (`World`), and
+    // never a water table, so nothing that asks the water here (the feet, the swim, the lava's harm) meets one.
+    for (const r of terrainRibbons(this.template.generator)) this.ribbons.push(gameRibbon(r, (x) => this.toGameX(x), (z) => this.toGameZ(z)));
     if (typeof Worker !== 'undefined') {
       try {
         this.worker = new Worker(new URL('../swg/terrain/worker.ts', import.meta.url), { type: 'module' });

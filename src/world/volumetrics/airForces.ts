@@ -106,6 +106,15 @@ export class AirForces {
   /** The grains a blast throws, while the kick-up is on; null for none. */
   onGrains: GrainThrow | null = null;
   /**
+   * The ripples pressed where a push meets water (the fifth wave, the design's §2.9: a jet's impact, a hovering ship's
+   * downwash, a blast -- the caller never decides; the cell's medium does), handed the kept record `poke` (no number
+   * crosses the call). Set by the world while the current is on (`pokeWaterSimIn`); null for none.
+   */
+  onPoke: ((p: { x: number; z: number; strength: number; radius: number }) => void) | null = null;
+  readonly poke = { x: 0.5, z: 0.5, strength: 0.5, radius: 0.5 };
+  /** The pokes laid since the console last asked (`air()`'s `liquid.pokes`). */
+  pokes = 0;
+  /**
    * The dents (the second wave): a blast's crater, the console's and the feet's prints, and the scour pits and ruts the
    * engines gather (`gatherDents`); null while the prints are off, the ground keeps no marks here, or this browser
    * cannot blend into a float target.
@@ -464,6 +473,51 @@ export class AirForces {
     if (this.spawns && this.owed) {
       this.engineParticles();
       this.frontParticles();
+    }
+    // The fifth wave's: where an engine's jet meets water, the ripples pressed.
+    if (this.onPoke) this.enginePokes();
+  }
+
+  /**
+   * Each engine's jet meeting water presses the ripples (the fifth wave, `liquid.jetPoke` field units a second at an
+   * impact of 1 m/s, over the jet's own spread plus `liquid.jetPokeRadius` metres): the impact worked out as the dust's
+   * walk works it out (`engineParticles`), the poke laid where the jet lands, and only where the cell there is water.
+   */
+  private enginePokes(): void {
+    const E = AIR_TUNE.engine;
+    const L = AIR_TUNE.liquid;
+    const poke = this.onPoke!;
+    const cap = AIR_TUNE.solver.cap * E.capShare;
+    const dt = this.frameDt > 0 && Number.isFinite(this.frameDt) ? this.frameDt : 0;
+    if (!(dt > 0) || !(L.jetPoke > 0)) return;
+    const e = this.engines;
+    const p = this.poke;
+    for (let i = 0; i < this.engineCount; i++) {
+      const k = i * ENG_W;
+      const dy = e[k + 4];
+      if (!(dy < -0.02)) continue;
+      this.q[0] = e[k];
+      this.q[1] = e[k + 2];
+      if (!this.groundHere()) continue;
+      const exit = e[k + 6];
+      const h = e[k + 1] - this.g.h;
+      const reach = E.reachBase + E.reachPerSpeed * exit;
+      const vEff = exit < cap ? exit : cap;
+      const groundT = h / -dy;
+      if (!(groundT < reach * E.impactReach)) continue;
+      const imp = (vEff / (1 + groundT / (0.3 * reach))) * Math.sqrt(-dy);
+      if (!(imp > 0)) continue;
+      const px = e[k] + e[k + 3] * groundT;
+      const pz = e[k + 2] + e[k + 5] * groundT;
+      this.q[0] = px;
+      this.q[1] = pz;
+      if (this.mediumHere() !== MEDIUM_BYTE.water) continue;
+      p.x = px;
+      p.z = pz;
+      p.strength = L.jetPoke * imp * dt;
+      p.radius = E.nozzleBase + E.nozzlePerSpeed * exit + groundT * E.widen + L.jetPokeRadius;
+      poke(p);
+      this.pokes++;
     }
   }
 
@@ -1286,6 +1340,17 @@ export class AirForces {
     q[0] = x;
     q[1] = z;
     if (grains && this.dust && this.mediumHere() === MEDIUM_BYTE.land) grains(x, y, z, blastGrains(radius), 8 + 16 * Math.min(2, scale));
+    // Over water a blast presses the ripples too (the fifth wave's): by its radius over a thermal detonator's.
+    const poke = this.onPoke;
+    if (poke && this.mediumHere() === MEDIUM_BYTE.water) {
+      const p = this.poke;
+      p.x = x;
+      p.z = z;
+      p.strength = AIR_TUNE.liquid.blastPoke * scale;
+      p.radius = 0.5 * radius;
+      poke(p);
+      this.pokes++;
+    }
     // Its smoke (the third wave): a puff into slab 0 and slab 1 at once, and slab 0 fed as it burns for `smoke` seconds,
     // fading [demo `land.html:1601-1602`, `:1774-1779`], each by the blast's radius over a thermal detonator's.
     if (smoke > 0 && Number.isFinite(smoke) && this.smokeOn) {

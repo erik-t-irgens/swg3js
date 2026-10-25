@@ -273,6 +273,18 @@ export interface Settings extends FxSettings {
   /** How far the game's own rain and snow sheets stand down while ours falls, 0 (kept) to 1 (stood down). */
   volRainThin: number;
   volSnowThin: number;
+  /** The fifth wave's: water has a current the wind and whatever stirs it drives, its surface detail and ripples carried by it. */
+  volCurrent: boolean;
+  /** The liquid tile's cells over the 192 m square: 64, 96, 128 or 192. */
+  volLiquidDetail: number;
+  /** Lava's crust is carried by the lava's own flow and torn where something stirs it. */
+  volLava: boolean;
+  /** How far the current moves the water's own surface detail and carries the ripples, 0 (today's) to 1. */
+  volArtWater: number;
+  /** How far the crust is carried and torn, 0 (today's) to 1. */
+  volArtLava: number;
+  /** The terrain's ribbons drawn: the strips of lava (or water) its ribbon affectors lay down a slope (Mustafar's lava falls), which the game never drew. */
+  waterRibbons: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -436,6 +448,16 @@ export const DEFAULT_SETTINGS: Settings = {
   volRainDetail: 16384,
   volRainThin: 1,
   volSnowThin: 1,
+  // The fifth wave's, at the High preset: the current and the crust on, the liquid tile 128 cells over the square, and
+  // both art dials at their full look (at nought each leaves the water's and the lava's own art exactly as it is).
+  volCurrent: true,
+  volLiquidDetail: 128,
+  volLava: true,
+  volArtWater: 1,
+  volArtLava: 1,
+  // Off (ours, the owner's standing order for the pass: off, the game is today's): the terrain's ribbons were never drawn
+  // here, and drawing them is a look of the world beside the water's own settings, not an effect of the volumetrics.
+  waterRibbons: false,
   ...FX_DEFAULTS,
 };
 
