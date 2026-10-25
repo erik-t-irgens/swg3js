@@ -134,8 +134,12 @@ export interface WeatherViewContext {
 /** A vehicle slower than this (m/s) and not ridden or flying is a roof for the grid (a parked ship, a landed hull). */
 const PARKED_SPEED = 1;
 
-/** The shared uniforms of the weather particles' own shader: the roof map and the hull box. */
-const PARTICLE_UNIFORMS = {
+/**
+ * The shared uniforms of the weather particles' own shader: the roof map and the hull box. Exported for the volumetrics'
+ * rain of ours (the fourth wave, `airRain.ts`), whose draw discards under a roof and inside the ridden hull by these very
+ * objects, held by reference so the two can never part.
+ */
+export const PARTICLE_UNIFORMS = {
   uRoofMap: WEATHER_UNIFORMS.uRoofMap,
   uRoofGrid: WEATHER_UNIFORMS.uRoofGrid,
   uKillSlack: { value: KILL_SLACK },
@@ -201,6 +205,20 @@ export const WEATHER_PARTICLE_SHADER: ParticleShader = {
   `,
   uniforms: PARTICLE_UNIFORMS,
 };
+
+/** The weather pass's stencil on one material: outside no stencil test at all (rain may fall in front of a doorway), inside only through the exits (2). */
+function passStencil(m: THREE.Material, portalView: boolean): void {
+  m.stencilWrite = portalView;
+  if (portalView) {
+    m.stencilFunc = THREE.EqualStencilFunc;
+    m.stencilRef = 2;
+    m.stencilFuncMask = 0xff;
+    m.stencilWriteMask = 0x00;
+    m.stencilFail = THREE.KeepStencilOp;
+    m.stencilZFail = THREE.KeepStencilOp;
+    m.stencilZPass = THREE.KeepStencilOp;
+  }
+}
 
 /**
  * The storms' emitters (dust, and the snow storm built the same way) blow sideways: each is turned
@@ -294,6 +312,22 @@ export class Weather {
    * exactly 1 otherwise, which leaves the sheets today's (written by the world each frame, `stormSheetFactor`).
    */
   stormSheetScale = 1;
+  /**
+   * What a rain channel's and a snow channel's rates are multiplied by (the volumetrics' fourth wave): 1 - `volRainThin`
+   * (or `volSnowThin`) while the rain of ours draws that fall, and exactly 1 otherwise, which leaves the sheets today's
+   * (written by the world each frame, `sheetFactor`). Each starts a fraction and is made 1 in the constructor, so the
+   * field is a double from its first write (a fraction written into a field that began a small integer boxes it).
+   */
+  rainSheetScale = 0.5;
+  snowSheetScale = 0.5;
+  /**
+   * Whether the rain of ours draws in this scene this frame (written by the world): the pass then draws though no sheet
+   * has a quad, and the roof grid is kept, since our drops are discarded under its roofs as the sheets are. False with
+   * the volumetrics off, which leaves both today's.
+   */
+  airRainDraws = false;
+  /** Materials of ours drawn in this scene (the rain's), which take the pass's stencil as the sheets' batches do. Kept. */
+  readonly airMaterials: THREE.Material[] = [];
   /** Console: false skips the weather pass (to time it). */
   drawPass = true;
 
@@ -403,6 +437,8 @@ export class Weather {
   private readonly cpu = { update: 0, view: 0 };
 
   constructor(physics: Physics) {
+    this.rainSheetScale = 1;
+    this.snowSheetScale = 1;
     this.roofs = new RoofGrid(physics);
     this.kill = { topAt: (x, z) => this.roofs.topAt(x, z), slack: KILL_SLACK, hull: null };
     this.sources = {
@@ -1017,6 +1053,9 @@ export class Weather {
       // A dust storm's sheets thin while the volumetrics' dust draws the storm (`stormSheetFactor`): exactly 1, and so
       // not applied at all, with the volumetrics off or not drawing it.
       if (ch.kind === 'dust' && this.stormSheetScale !== 1) ch.handle.rateScale *= this.stormSheetScale;
+      // Likewise the rain's and the snow's sheets while the rain of ours draws that fall (the fourth wave).
+      if (ch.kind === 'rain' && this.rainSheetScale !== 1) ch.handle.rateScale *= this.rainSheetScale;
+      if (ch.kind === 'snow' && this.snowSheetScale !== 1) ch.handle.rateScale *= this.snowSheetScale;
       // The game's rain sheets are near solid; the setting thins rain alone, never dust or snow.
       ch.handle.alphaScale = ch.kind === 'rain' ? THREE.MathUtils.clamp(this.settings.rainOpacity, 0, 1) : 1;
       // Only an effect with particles of its own: the attachment-only ones (the light dust storm,
@@ -1043,7 +1082,7 @@ export class Weather {
     const wetOn = active && this.settings.wetSurfaces;
     const wet = wetOn && (this.wet.wetness > 0.005 || this.wet.puddles > 0.005 || this.wet.snowCover > 0.005);
     const high = ground !== null && cam.y - ground > HIGH_FROM;
-    if ((falling || fx.quads > 0 || wet) && !high) {
+    if ((falling || fx.quads > 0 || wet || this.airRainDraws) && !high) {
       this.parkedTimer -= dt;
       if (this.parkedTimer <= 0) {
         this.parkedTimer = 0.5;
@@ -1089,26 +1128,30 @@ export class Weather {
   /** The weather pass: after the portal renderer, into whatever it drew into. From inside a building, only through its exits (stencil 2). */
   draw(renderer: THREE.WebGLRenderer, camera: THREE.PerspectiveCamera, portalView: boolean): void {
     const fx = this.fxEffects;
-    if (!this.drawPass || !fx || fx.quads === 0) return;
+    if (!this.drawPass || !fx || (fx.quads === 0 && !this.airRainDraws)) return;
     const mats = fx.batchMaterials;
-    for (let i = 0; i < mats.length; i++) {
-      const m = mats[i];
-      // Outside no stencil test at all: rain may fall in front of a doorway.
-      m.stencilWrite = portalView;
-      if (portalView) {
-        m.stencilFunc = THREE.EqualStencilFunc;
-        m.stencilRef = 2;
-        m.stencilFuncMask = 0xff;
-        m.stencilWriteMask = 0x00;
-        m.stencilFail = THREE.KeepStencilOp;
-        m.stencilZFail = THREE.KeepStencilOp;
-        m.stencilZPass = THREE.KeepStencilOp;
-      }
-    }
+    for (let i = 0; i < mats.length; i++) passStencil(mats[i], portalView);
+    // The rain of ours takes the very same stencil (a stencil is not in a program's key).
+    for (let i = 0; i < this.airMaterials.length; i++) passStencil(this.airMaterials[i], portalView);
     const mask = camera.layers.mask;
     camera.layers.set(0);
     renderer.render(this.scene, camera);
     camera.layers.mask = mask;
+  }
+
+  /** The Graphics page's weather density, as the sheets take it (the rain of ours takes the same share). */
+  get fallDensity(): number {
+    return Math.max(0, this.settings.weatherDensity);
+  }
+
+  /** The Graphics page's rain opacity, as the sheets take it. */
+  get rainOpacity(): number {
+    return THREE.MathUtils.clamp(this.settings.rainOpacity, 0, 1);
+  }
+
+  /** A picture the weather's effects already hold, loaded and not failed (`ParticleEffects.loadedTexture`), or null. Starts nothing. */
+  effectTexture(file: string): THREE.Texture | null {
+    return this.fxEffects?.loadedTexture(file) ?? null;
   }
 
   private copyState(active: boolean): void {
@@ -1181,6 +1224,10 @@ export class Weather {
       shadows: r2(this.sky?.lighting.shadowScale ?? 1),
       channels: this.channels.map((c) => ({ file: c.file, kind: c.kind, rate: r2(c.handle.rateScale), particles: fx?.particlesOf(c.handle) ?? 0 })),
       stormSheets: r2(this.stormSheetScale),
+      // The rain's and the snow's sheets beside it (the volumetrics' fourth wave): exactly 1 unless the rain of ours draws that fall.
+      rainSheets: r2(this.rainSheetScale),
+      snowSheets: r2(this.snowSheetScale),
+      airRainDraws: this.airRainDraws,
       failed: [...this.failedFiles],
       quads: fx?.quads ?? 0,
       roofs: this.roofs.describe(),

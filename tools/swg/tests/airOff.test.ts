@@ -15,6 +15,8 @@
 //   4. the choosers (the second wave's): with the master off the ground's chooser hands every chunk today's tile
 //      material by identity whatever else it is told, the sweep compiles no ground stand-in, and every footstep is
 //      today's decal;
+//   5. the weather (the fourth wave's): its own particle shader's text and uniforms are the old ones, its rain and snow
+//      sheets start whole with nothing of ours on its pass, and its pass draws and stencils as the old one did;
 //   6. nothing runs: the field with the master off answers and the renderer is never touched, and the dust pool's
 //      motes (the dust or the master off) are the old pool's to the bit, the same spawns and steps, seeded alike;
 //   7. no resize, of any of the field's detail dials (the sand's and the prints' with them), disposes a material.
@@ -457,6 +459,110 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
   field.update(inp);
   const step = { key: 1, kind: 'player', label: 'you', surface: 'sand', from: 'terrain', x: 0, y: 0, z: 0, heading: 0, scale: 1, inside: false, deck: null, ground: null };
   ok(field.dentStep(step) === false && field.feetCounts.off === 1 && field.feetCounts.decal === 1 && field.feetCounts.dents === 0, "and every footstep is today's decal: the air answers no to it");
+}
+
+// --- 5. the weather (the fourth wave's): with the master off its sheets, its pass and its own shader are today's ---
+{
+  const [o, n] = await both('world/weather.ts');
+  type Shader = { vertex: string; fragment: string; uniforms: Record<string, { value: unknown }> };
+  const so = o.WEATHER_PARTICLE_SHADER as Shader;
+  const sn = n.WEATHER_PARTICLE_SHADER as Shader;
+  ok(so.vertex === sn.vertex && so.fragment === sn.fragment && Object.keys(so.uniforms).join() === Object.keys(sn.uniforms).join() && (n.PARTICLE_UNIFORMS as unknown) === sn.uniforms, "the weather's own particle shader: the same text and uniforms, its uniform object now exported as it stands (the rain of ours holds it by reference)");
+  type W = { draw(r: unknown, c: unknown, portalView: boolean): void; rainSheetScale?: number; snowSheetScale?: number; airRainDraws?: boolean; airMaterials?: unknown[]; scene: import('three').Scene };
+  const make = (m: Mod): W => new (m.Weather as new (p: unknown) => W)({ world: null });
+  const wo = make(o);
+  const wn = make(n);
+  ok(wn.rainSheetScale === 1 && wn.snowSheetScale === 1 && wn.airRainDraws === false && wn.airMaterials?.length === 0, "a weather made today starts with its rain and snow sheets whole, our rain not drawing and no material of ours on its pass");
+  // The pass, drawn by both through a renderer that records what it was asked, over the sheets' quads and the view.
+  const drawn = (w: W, quads: number, portalView: boolean): string => {
+    const batch = new THREE.MeshBasicMaterial();
+    (w as unknown as { fxEffects: unknown }).fxEffects = { quads, batchMaterials: [batch] };
+    const calls: string[] = [];
+    const renderer = { render: (scene: unknown) => calls.push(scene === w.scene ? 'scene' : 'other') };
+    const camera = { layers: new THREE.Layers() };
+    camera.layers.enableAll();
+    w.draw(renderer, camera, portalView);
+    return `${calls.join()}|${batch.stencilWrite}|${batch.stencilFunc}|${batch.stencilRef}|${batch.stencilZPass}|${camera.layers.mask}`;
+  };
+  let same = true;
+  for (const quads of [0, 3]) for (const pv of [false, true]) if (drawn(wo, quads, pv) !== drawn(wn, quads, pv)) same = false;
+  ok(same, "its pass, with the sheets' quads and none, outside and through a building's exits: the same draws and the same stencil as the old weather's");
+  // Its view half stepped (`updateView`) through both trees over the same scripted frames, with no rain of ours: what
+  // falls and what it weighs, the sheets' quads, the wet ground and nothing at all. Frame by frame each channel's rate
+  // and alpha, and whether the roof grid cast, are the old weather's (§4.1 item 6b's fourth-wave half).
+  const stepped = (w: W): string[] => {
+    const x = w as unknown as Record<string, unknown>;
+    let casts = 0;
+    (x.roofs as { update: () => void }).update = () => void casts++;
+    type Handle = { rateScale: number; alphaScale: number; file: string };
+    let quads = 3;
+    x.fxEffects = {
+      get quads(): number {
+        return quads;
+      },
+      batchMaterials: [],
+      kill: null,
+      place: (file: string): Handle => ({ rateScale: 0, alphaScale: 1, file }),
+      move: (): void => undefined,
+      remove: (): void => undefined,
+      particlesOf: (h: Handle): number => (h.file.includes('fog') ? 0 : 5),
+      soundsOf: (): string[] => [],
+      update: (): void => undefined,
+    };
+    x.reason = null;
+    x.sky = {};
+    x.hasWeatherData = true;
+    const files = x.wantFile as string[];
+    const kinds = x.wantKind as string[];
+    const weights = x.wantWeight as Float32Array;
+    files.length = 0;
+    kinds.length = 0;
+    files.push('fx_rain_heavy.prt', 'fx_snow.prt', 'fx_dust.prt', 'fx_fog.prt');
+    kinds.push('rain', 'snow', 'dust', 'fog');
+    const wet = x.wet as { wetness: number; puddles: number; snowCover: number };
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(3, 1.7, -2);
+    const ctx = { inside: false, aboard: false, underground: false, fog: null, groundAt: () => 0, waterAt: () => -Infinity, vehicles: [], hull: null, ridden: null };
+    const out: string[] = [];
+    for (let f = 0; f < 120; f++) {
+      const phase = f < 30 ? 0 : f < 60 ? 1 : f < 90 ? 2 : 3;
+      x.wantCount = phase === 3 ? 0 : 4;
+      weights[0] = phase === 0 ? 0.8 : phase === 1 ? 0.2 : 0;
+      weights[1] = phase === 1 ? 0.6 : 0;
+      weights[2] = phase === 0 ? 0.3 : 0;
+      weights[3] = phase < 2 ? 0.5 : 0;
+      quads = phase === 0 ? 3 : 0;
+      wet.puddles = phase === 2 ? 0.3 : 0;
+      const before = casts;
+      (w as unknown as { updateView(dt: number, c: unknown, ctx: unknown): void }).updateView(1 / 60, camera, ctx);
+      const ch = (x.channels as { file: string; handle: Handle }[]).map((c) => `${c.file}:${c.handle.rateScale.toFixed(6)}:${c.handle.alphaScale}`).join('|');
+      out.push(`${ch}#${casts - before}`);
+    }
+    return out;
+  };
+  const so5 = stepped(make(o));
+  const sn5 = stepped(make(n));
+  const diffAt = so5.findIndex((s, i) => s !== sn5[i]);
+  const castFrames = so5.filter((s) => s.endsWith('#1')).length;
+  ok(diffAt === -1 && so5.length === 120 && castFrames > 30 && castFrames < 120, `its view half over 120 scripted frames (rain, snow, dust and fog weighed in turn, the sheets' quads, wet ground, nothing): every channel's rate and alpha and every roof cast the old weather's (${castFrames} frames cast)${diffAt >= 0 ? `; first differs at frame ${diffAt}: ${so5[diffAt]} against ${sn5[diffAt]}` : ''}`);
+}
+
+// --- 5b. the particles' picture accessor (the fourth wave's): it answers a held picture and starts nothing ---
+{
+  const { ParticleEffects } = await load(NEW, 'world/particles.ts');
+  const scene = new THREE.Scene();
+  const fx = new (ParticleEffects as new (s: unknown, base: string) => Record<string, unknown>)(scene, '/nowhere/');
+  const textures = fx.textures as Map<string, unknown>;
+  const ready = fx.textureReady as Map<string, unknown>;
+  const loaded = (fx.loadedTexture as (f: string) => unknown).call(fx, 'particles/pt_leaf_single.png');
+  ok(loaded === null && textures.size === 0 && ready.size === 0 && scene.children.length === 0, "particles.ts's loadedTexture answers null for a picture it does not hold and starts no load, makes no texture and adds nothing to the scene");
+  const held = new THREE.Texture({ width: 32, height: 32 });
+  textures.set('particles/pt_sand_cloud.png', held);
+  const empty = new THREE.Texture();
+  textures.set('particles/pt_leaf.png', empty);
+  const answer = (fx.loadedTexture as (f: string) => unknown).call(fx, 'particles/pt_sand_cloud.png');
+  const notYet = (fx.loadedTexture as (f: string) => unknown).call(fx, 'particles/pt_leaf.png');
+  ok(answer === held && notYet === null && textures.size === 2 && ready.size === 0, 'and the one it holds, loaded, by identity; one still loading (no picture yet) is null; nothing more made either way');
 }
 
 const ms = Math.round(performance.now() - t0);

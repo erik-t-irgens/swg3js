@@ -232,6 +232,43 @@ ok(m.includes('texture(uObstacles, uv).g > hy') && !m.includes('texture(uObstacl
   ok(source('core/fx/airVolume.ts').includes('src.volumeAmount = this.q.amount;'), "the volume tells the field its amount each frame it draws (the gas cloud's puffs read it)");
 }
 
+// --- the fourth wave's cold warm: a wisps mode whose march is not linked is never drawn, the last ready one stands in ---
+{
+  // The pass's own frame through a stand-in renderer that records the material of every quad it is asked to draw.
+  const drawn: string[] = [];
+  const g = {
+    setRenderTarget: (): void => undefined,
+    render: (o: THREE.Object3D): void => void drawn.push(((o as THREE.Mesh).material as THREE.Material).name),
+  };
+  const out = new THREE.WebGLRenderTarget(4, 4, { depthTexture: new THREE.DepthTexture(4, 4) });
+  const c2 = createContext(g as unknown as THREE.WebGLRenderer, { ...FX_DEFAULTS }, out);
+  const s = air();
+  const p = new AirVolumePass(() => s);
+  p.setSize(1600, 900, on);
+  const marchOf = (): string | undefined => {
+    drawn.length = 0;
+    p.render(c2, out, null);
+    return drawn.find((n) => n.startsWith('fx.airVolume.march'));
+  };
+  const items = p.warmMaterials(2);
+  ok(p.ready.join() === 'false,false,true,false' && (items[0].material as THREE.ShaderMaterial).name === 'fx.airVolume.march.noise', "the master's in-play warm builds the mode in force alone (noise) and marks only it ready");
+  (s as { wispMode: number }).wispMode = 3;
+  ok(marchOf() === 'fx.airVolume.march.noise', 'a frame asking for noise ×2 before its march is linked draws the noise march, the last ready mode');
+  (s as { wispMode: number }).wispMode = 1;
+  ok(marchOf() === 'fx.airVolume.march.noise', 'and so does one asking for the bands');
+  p.ready[3] = true;
+  (s as { wispMode: number }).wispMode = 3;
+  ok(marchOf() === 'fx.airVolume.march.noise2', 'once noise ×2 is marked ready (its march linked off the frame), the frame draws it');
+  (s as { wispMode: number }).wispMode = 1;
+  ok(marchOf() === 'fx.airVolume.march.noise2', 'and a mode still not ready then draws as the last one drawn, noise ×2, never a march unlinked');
+  p.ready.fill(true);
+  ok(marchOf() === 'fx.airVolume.march.bands', 'behind a loading screen every mode is built, and each draws as asked');
+  p.warmMaterials(0);
+  (s as { wispMode: number }).wispMode = 2;
+  ok(marchOf() === 'fx.airVolume.march' && p.ready.join() === 'true,false,false,false', 'with the wisps off in force at the warm, only the plain march is ready and every other mode draws as it');
+  p.dispose();
+}
+
 // --- the chain resizes it on its settings ---
 const postfx = source('core/postfx.ts');
 ok(postfx.includes("this.byPassId.get('airVolume')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);") && postfx.includes('this.settings.airVolumeResolution !== air[0]'), "the chain's configure resizes the volume when its share of the screen moves");

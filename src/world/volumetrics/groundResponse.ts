@@ -15,7 +15,7 @@
 // Naboo names its sand with, Mustafar's volcanic ground, forest litter and wet shore sand.
 //
 // Pure: no three and nothing of the page.
-import { GROUND_RESPONSE_CLASSES, type GroundClass } from './airTune.ts';
+import { GROUND_CLASS_NAMES, GROUND_RESPONSE_CLASSES, type GroundClass } from './airTune.ts';
 
 /** What a family is to the classifier: its id and name, SOE's surface template (empty for none), and the shaders it draws. */
 export interface FamilyFacts {
@@ -176,6 +176,21 @@ export function fillResponseTable(world: string, families: Iterable<FamilyFacts>
     out[f.id * 4 + 3] = Math.round(r.dust * 255);
   }
   return fallback;
+}
+
+/**
+ * The class table for a world's families, by family id (the fourth wave's class raster): each family's class's place in
+ * the response table plus one (`CLASS_INDEX` in `airSpawn.ts`), by the very classifier the response table is filled by. A
+ * family id past `out` is not filed. Answers how many were filed.
+ */
+export function fillClassTable(world: string, families: Iterable<FamilyFacts>, out: Uint8Array): number {
+  let n = 0;
+  for (const f of families) {
+    if (!(f.id >= 0 && f.id < out.length)) continue;
+    out[f.id] = GROUND_CLASS_NAMES.indexOf(classifyFamily(world, f).cls) + 1;
+    n++;
+  }
+  return n;
 }
 
 /**

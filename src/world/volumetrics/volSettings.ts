@@ -44,6 +44,18 @@ export const VOL_SCENE_KEYS = [
   'volSmokeDetail',
   'volDustWisps',
   'volDustLayers',
+  'volParticles',
+  'volLeaves',
+  'volPuffs',
+  'volSpray',
+  'volStreaks',
+  'volParticleDetail',
+  'volParticleShadows',
+  'volRain',
+  'volSnow',
+  'volRainDetail',
+  'volRainThin',
+  'volSnowThin',
 ] as const satisfies readonly (keyof Settings)[];
 
 /** The volumetrics' keys the effects chain reads (`fxRegistry.ts`): the master and the volume's own. */
@@ -91,20 +103,26 @@ export const VOL_RANGES = {
   volAirLayers: { options: [1, 2, 3] as readonly number[] },
   volSmokeDetail: { options: [1, 2, 3] as readonly number[] },
   volDustWisps: { options: [0, 1, 2, 3] as readonly number[] },
+  // The fourth wave's: the kick-up pool's counts as a share of High's (2,048 leaves, 256 puffs, 1,024 spray and 1,024
+  // streaks), the drops in the rain's box, and the game's own rain and snow sheets stood down while ours falls.
+  volParticleDetail: { options: [0.5, 1, 2] as readonly number[] },
+  volRainDetail: { options: [4096, 8192, 16384, 32768] as readonly number[] },
+  volRainThin: { min: 0, max: 1, step: 0.05 },
+  volSnowThin: { min: 0, max: 1, step: 0.05 },
 } as const;
 
 /** The quality keys a preset writes, in this build. */
-export const VOL_QUALITY_KEYS = ['volAirDetail', 'volAirSolve', 'volAirRate', 'volDustDetail', 'volLightDetail', 'volLightSteps', 'volSandDetail', 'volPrintDetail', 'airVolumeResolution', 'airVolumeSteps', 'airVolumeHistory', 'airVolumeShadows', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers'] as const satisfies readonly (keyof Settings)[];
+export const VOL_QUALITY_KEYS = ['volAirDetail', 'volAirSolve', 'volAirRate', 'volDustDetail', 'volLightDetail', 'volLightSteps', 'volSandDetail', 'volPrintDetail', 'airVolumeResolution', 'airVolumeSteps', 'airVolumeHistory', 'airVolumeShadows', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers', 'volParticleDetail', 'volParticleShadows', 'volRainDetail'] as const satisfies readonly (keyof Settings)[];
 
 /**
  * The quality keys a wave added after the first: a settings file saved before its wave never wrote them, so with
  * nothing done it would load at the default (High's) and an earlier Low or Ultra would read Custom. `volFillQuality`
  * gives such a file the preset its other quality keys hold, at load.
  */
-export const VOL_QUALITY_LATER: readonly VolQualityKey[] = ['volSandDetail', 'volPrintDetail', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers'];
+export const VOL_QUALITY_LATER: readonly VolQualityKey[] = ['volSandDetail', 'volPrintDetail', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers', 'volParticleDetail', 'volParticleShadows', 'volRainDetail'];
 
 /** The wave each later quality key came in, against the wave a settings file says it was saved in (`VOL_QUALITY_STAMP`). */
-export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>> = { volSandDetail: 2, volPrintDetail: 2, volAirLayers: 3, volSmokeDetail: 3, volDustWisps: 3, volDustLayers: 3 };
+export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>> = { volSandDetail: 2, volPrintDetail: 2, volAirLayers: 3, volSmokeDetail: 3, volDustWisps: 3, volDustLayers: 3, volParticleDetail: 4, volParticleShadows: 4, volRainDetail: 4 };
 
 /**
  * The key a saved settings file carries the wave it was written in under, and this build's wave. The file keeps only
@@ -112,7 +130,7 @@ export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>>
  * written at the default: only the stamp tells them apart, and a key of a wave the file already knew is never filled.
  */
 export const VOL_QUALITY_STAMP = 'volQualityWave';
-export const VOL_QUALITY_WAVE = 3;
+export const VOL_QUALITY_WAVE = 4;
 
 /**
  * The stamp into a settings file about to be saved (what differs from the defaults), only when it holds a quality key:
@@ -139,10 +157,10 @@ export const VOL_PRESET_NAMES: readonly VolPresetName[] = ['low', 'medium', 'hig
  * (the owner's Q19: "only as an ultra option").
  */
 export const VOL_PRESETS: Readonly<Record<VolPresetName, Readonly<Record<VolQualityKey, number | boolean>>>> = {
-  low: { volAirDetail: 64, volAirSolve: 10, volAirRate: 30, volDustDetail: 3, volLightDetail: 1, volLightSteps: 16, volSandDetail: 3, volPrintDetail: 1024, airVolumeResolution: 0.25, airVolumeSteps: 8, airVolumeHistory: true, airVolumeShadows: false, volAirLayers: 1, volSmokeDetail: 1, volDustWisps: 0, volDustLayers: false },
-  medium: { volAirDetail: 96, volAirSolve: 14, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 20, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 12, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 2, volSmokeDetail: 2, volDustWisps: 1, volDustLayers: false },
-  high: { volAirDetail: 128, volAirSolve: 20, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 26, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 16, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 2, volDustLayers: false },
-  ultra: { volAirDetail: 192, volAirSolve: 28, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 32, volSandDetail: 6, volPrintDetail: 2048, airVolumeResolution: 1, airVolumeSteps: 24, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 3, volDustLayers: true },
+  low: { volAirDetail: 64, volAirSolve: 10, volAirRate: 30, volDustDetail: 3, volLightDetail: 1, volLightSteps: 16, volSandDetail: 3, volPrintDetail: 1024, airVolumeResolution: 0.25, airVolumeSteps: 8, airVolumeHistory: true, airVolumeShadows: false, volAirLayers: 1, volSmokeDetail: 1, volDustWisps: 0, volDustLayers: false, volParticleDetail: 0.5, volParticleShadows: false, volRainDetail: 4096 },
+  medium: { volAirDetail: 96, volAirSolve: 14, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 20, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 12, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 2, volSmokeDetail: 2, volDustWisps: 1, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 8192 },
+  high: { volAirDetail: 128, volAirSolve: 20, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 26, volSandDetail: 4, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 16, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 2, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 16384 },
+  ultra: { volAirDetail: 192, volAirSolve: 28, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 32, volSandDetail: 6, volPrintDetail: 2048, airVolumeResolution: 1, airVolumeSteps: 24, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 3, volDustLayers: true, volParticleDetail: 2, volParticleShadows: true, volRainDetail: 32768 },
 };
 
 /** The preset whose every quality key in `keys` the settings hold, or 'custom'. */
@@ -238,10 +256,27 @@ export interface VolTune {
   smokeDetail: number;
   wisps: number;
   dustLayers: boolean;
+  /**
+   * The fourth wave's: the kick-up pool and its four kinds (leaves, puffs, spray, fine streaks), its count as a share of
+   * High's, whether the leaves take the sun's shadow; the rain and the snow of ours, the drops in the box, and how far the
+   * game's own rain and snow sheets stand down while ours falls.
+   */
+  particles: boolean;
+  leaves: boolean;
+  puffs: boolean;
+  spray: boolean;
+  streaks: boolean;
+  particleDetail: number;
+  particleShadows: boolean;
+  rain: boolean;
+  snow: boolean;
+  rainDetail: number;
+  rainThin: number;
+  snowThin: number;
 }
 
 export function newVolTune(): VolTune {
-  return {
+  const t: VolTune = {
     on: false,
     effects: true,
     air: true,
@@ -281,7 +316,25 @@ export function newVolTune(): VolTune {
     smokeDetail: 2,
     wisps: 2,
     dustLayers: false,
+    particles: true,
+    leaves: true,
+    puffs: true,
+    spray: true,
+    streaks: true,
+    particleDetail: 1,
+    particleShadows: true,
+    rain: true,
+    // Off until the owner says (the design's Q13): our snow is built with the rain and draws nothing until turned on.
+    snow: false,
+    rainDetail: 16384,
+    rainThin: 0.5,
+    snowThin: 0.5,
   };
+  // The game's own rain and snow sheets stand down whole while ours falls (`volRainThin`, `volSnowThin` 1, the settings'
+  // defaults), written after the record is made so each field is still a double from its first write.
+  t.rainThin = 1;
+  t.snowThin = 1;
+  return t;
 }
 
 /** The session's one record: written by the game from the settings (`volQualityFrom`) whenever one moves, read by the frame. */
@@ -339,6 +392,18 @@ export function volQualityFrom(s: Pick<Settings, VolKey | 'effects'>, out: VolTu
   out.smokeDetail = snap(n('volSmokeDetail'), R.volSmokeDetail.options, 2);
   out.wisps = snap(n('volDustWisps'), R.volDustWisps.options, 2);
   out.dustLayers = b('volDustLayers');
+  out.particles = b('volParticles');
+  out.leaves = b('volLeaves');
+  out.puffs = b('volPuffs');
+  out.spray = b('volSpray');
+  out.streaks = b('volStreaks');
+  out.particleDetail = snap(n('volParticleDetail'), R.volParticleDetail.options, 1);
+  out.particleShadows = b('volParticleShadows');
+  out.rain = b('volRain');
+  out.snow = b('volSnow');
+  out.rainDetail = snap(n('volRainDetail'), R.volRainDetail.options, 16384);
+  out.rainThin = clampRange(n('volRainThin'), R.volRainThin, 1);
+  out.snowThin = clampRange(n('volSnowThin'), R.volSnowThin, 1);
   return out;
 }
 
@@ -384,10 +449,24 @@ export const VOL_APPLY_CLASS: Readonly<Record<VolKey, 'W' | 'C' | 'T' | 'U' | 'M
   volSmoke: 'C',
   volFog: 'C',
   volSmokeDetail: 'T',
-  // A march material a mode, all four compiled with the master on (the third wave's Start measured the one program with
-  // its modes as branches too dear: `W3-notes.md`), and the bands' pass a gate.
-  volDustWisps: 'M',
+  // A march material a mode (the third wave's Start measured the one program with its modes as branches too dear:
+  // `W3-notes.md`), the bands' pass a gate. Behind a loading screen all four are built; the master turned on in play
+  // builds the mode in force alone, and a mode not yet built is warmed off the frame when moved to (the fourth wave): W.
+  volDustWisps: 'W',
   volDustLayers: 'T',
+  // The fourth wave's: every switch a gate on the CPU (a draw or a pass), the counts targets and instance counts.
+  volParticles: 'C',
+  volLeaves: 'C',
+  volPuffs: 'C',
+  volSpray: 'C',
+  volStreaks: 'C',
+  volParticleDetail: 'T',
+  volParticleShadows: 'U',
+  volRain: 'C',
+  volSnow: 'C',
+  volRainDetail: 'T',
+  volRainThin: 'U',
+  volSnowThin: 'U',
 };
 
 /** One console field as a setting: the key, its value, and whether the page's control can hold it. */
@@ -440,7 +519,15 @@ export function volConsoleToSettings(o: Record<string, unknown>): VolConsoleSett
       key === 'volFromFeet' ||
       key === 'volSmoke' ||
       key === 'volFog' ||
-      key === 'volDustLayers';
+      key === 'volDustLayers' ||
+      key === 'volParticles' ||
+      key === 'volLeaves' ||
+      key === 'volPuffs' ||
+      key === 'volSpray' ||
+      key === 'volStreaks' ||
+      key === 'volParticleShadows' ||
+      key === 'volRain' ||
+      key === 'volSnow';
     if (wantsBool) {
       if (typeof v === 'boolean') out.set(key, { key, value: v, inRange: true });
       continue;
@@ -491,6 +578,14 @@ export function volMemoryMB(t: VolTune, width: number, height: number): number {
     bytes += s * s * 16 * 2 * 2;
   }
   if (t.prints) bytes += t.printDetail * t.printDetail * 4;
+  // The fourth wave's pools (each a row a kind, or of drops, while its switch is off): the kick-up pool three RGBA32F
+  // attachments a slot ping-ponged, the rain two a drop.
+  const KICK = [2048, 256, 1024, 1024];
+  const pd = t.particles ? t.particleDetail : 1 / 64;
+  let kickRows = 0;
+  for (const c of KICK) kickRows += Math.max(1, Math.round((c * pd) / 128));
+  bytes += kickRows * 128 * 16 * 3 * 2;
+  bytes += Math.max(1, Math.round((t.rain || t.snow ? t.rainDetail : 128) / 128)) * 128 * 16 * 2 * 2;
   // The volume's march and its two histories, RGBA16F at its share of the screen.
   if (t.volume) {
     const vw = Math.max(1, Math.round(width * t.volumeResolution));

@@ -17,6 +17,10 @@ import { AIR_VOLUME_FRAGMENTS, AirVolumePass } from '../../../src/core/fx/airVol
 import { AirField, newAirFrameInput } from '../../../src/world/volumetrics/airField.ts';
 import { newVolTune, VOL_RANGES } from '../../../src/world/volumetrics/volSettings.ts';
 import { AIR_TUNE } from '../../../src/world/volumetrics/airTune.ts';
+import { AIR_PARTICLE_SHADERS, KICK_LIFT_GLSL } from '../../../src/world/volumetrics/airParticleShaders.ts';
+import { oroLift, vortLift } from '../../../src/world/volumetrics/airParticleMath.ts';
+import { airHash, airRand } from '../../../src/world/volumetrics/airSpawn.ts';
+import { glslFunctions, glslHash } from './glslRun.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string): void => {
@@ -46,7 +50,7 @@ ok(sizesInText('vec2 t = 1.0 / 128.0;', [128]).length === 1 && sizesInText('unif
 const sizes: number[] = [];
 for (const n of VOL_RANGES.volAirDetail.options) for (const f of [1, ...VOL_RANGES.volDustDetail.options, ...VOL_RANGES.volLightDetail.options, ...VOL_RANGES.volSandDetail.options]) sizes.push(n * f);
 sizes.push(AIR_TUNE.window.size, AIR_TUNE.prints.square, ...VOL_RANGES.volPrintDetail.options);
-const all: Record<string, string> = { ...Object.fromEntries(Object.entries(AIR_FRAGMENTS).map(([k, v]) => [`air.${k}`, v])), ...Object.fromEntries(Object.entries(AIR_VOLUME_FRAGMENTS).map(([k, v]) => [`airVolume.${k}`, v])), 'air.vertex': AIR_VERTEX, 'air.obstacleVertex': OBSTACLE_VERTEX, 'air.dentStampVertex': DENT_STAMP_VERTEX };
+const all: Record<string, string> = { ...Object.fromEntries(Object.entries(AIR_FRAGMENTS).map(([k, v]) => [`air.${k}`, v])), ...Object.fromEntries(Object.entries(AIR_VOLUME_FRAGMENTS).map(([k, v]) => [`airVolume.${k}`, v])), 'air.vertex': AIR_VERTEX, 'air.obstacleVertex': OBSTACLE_VERTEX, 'air.dentStampVertex': DENT_STAMP_VERTEX, ...Object.fromEntries(Object.entries(AIR_PARTICLE_SHADERS).map(([k, v]) => [`particles.${k}`, v])) };
 for (const [name, text] of Object.entries(all)) {
   const reserved = reservedWords(text);
   ok(reserved.length === 0, `${name}: no reserved word as a name${reserved.length ? `: ${reserved.join(', ')}` : ''}`);
@@ -61,6 +65,35 @@ for (const [name, text] of Object.entries(all)) {
   const u = undefinedCalls(text);
   ok(u.length === 0, `${name}: every function it calls is GLSL's own or its own${u.length ? ` (it calls ${u.join(', ')} and never defines it)` : ''}`);
   ok(!text.includes('`'), `${name}: no backtick inside the template`);
+}
+// The kick-up's two draws are one text under a define: each variant scanned for a name declared twice.
+for (const name of ['kickDrawVertex', 'kickDrawFragment']) {
+  const twice = redeclared(glslVariant(AIR_PARTICLE_SHADERS[name], new Set(['KICK_CUT'])));
+  ok(twice.length === 0, `particles.${name} with KICK_CUT: no name declared twice in one scope${twice.length ? `: ${twice.join(', ')}` : ''}`);
+}
+// The particles' updates never write a NaN or an Inf: a NaN in a position is a quad across the screen.
+ok(AIR_PARTICLE_SHADERS.kickUpdate.includes('if (!fin4(r0) || !fin4(r1) || !fin4(r2)) return;') && AIR_PARTICLE_SHADERS.rainUpdate.includes('if (any(isnan(a)) || any(isinf(a)) || any(isnan(b)) || any(isinf(b))) {'), "the kick-up's and the rain's updates write nothing that is not finite (a dead slot, a drop born again at the box's top)");
+ok(!/sampler2DShadow|swgGrassShadow\(/.test(AIR_PARTICLE_SHADERS.kickDrawVertex) && AIR_PARTICLE_SHADERS.kickDrawFragment.includes('swgGrassShadow(vSwgShadowPos, vSwgShadowLd)'), "the leaves' shadow is tapped in the fragment stage, never a shadow compare in a vertex stage (the grass's lesson)");
+// The lifts' and the hash's lines, run as script against their mirrors (the hash's in unsigned 32-bit arithmetic, `glslHash`).
+{
+  const L = { x: 0.5, y: 3, z: 3, w: 0.15 };
+  const LB = { x: 0.5, y: 3, z: 0, w: 1 };
+  const fns = glslFunctions(KICK_LIFT_GLSL, ['airOroLift', 'airVortLift'], { uLift: L, uLiftB: LB });
+  let same = true;
+  for (const [vx, vz, gx, gz] of [[3, 0, 0.5, 0], [-4, 2, 0.3, -0.8], [20, 20, 1, 1], [0, 0, 2, 2], [-30, 1, 0.9, 0]]) if (Math.abs(fns.airOroLift(vx, vz, gx, gz) - oroLift(vx, vz, gx, gz, L.x, L.z)) > 1e-12) same = false;
+  for (const curl of [0, 0.3, 0.6, -2, 5, 40, -40]) if (Math.abs(fns.airVortLift(curl) - vortLift(curl, L.w, LB.x, LB.y)) > 1e-12) same = false;
+  ok(same && oroLift(20, 20, 1, 1, 0.5, 3) === 3 && oroLift(-20, 0, 1, 0, 0.5, 3) === -3 && vortLift(0.4, 0.15, 0.5, 3) === 0, "the orographic and vortex lifts: the programs' own lines, run, are the mirrors', each held to its most and the swirl's from its threshold");
+  // The hash and the share drawn from it, read statement by statement out of each program that holds them and run in
+  // unsigned 32-bit arithmetic: every shift and constant the program's own, held to the mirror over a sweep.
+  for (const name of ['kickUpdate', 'kickDrawVertex', 'rainUpdate', 'rainDrawVertex']) {
+    const h = glslHash(AIR_PARTICLE_SHADERS[name]);
+    let hashSame = true;
+    for (let i = 0; i < 4000; i++) {
+      const x = (Math.imul(i, 2654435761) + 0x9e37) >>> 0;
+      if (h.airHash(x) !== airHash(x) || h.airRand(x) !== airRand(x)) hashSame = false;
+    }
+    ok(hashSame && airHash(0x12345) !== airHash(0x12346), `particles.${name}: its hash, run, is the mirror's over 4,000 keys, so a test can say which slot does what with no card`);
+  }
 }
 for (const name of ['march', 'march.bands', 'march.noise', 'march.noise2', 'resolve', 'composite']) ok(/if \(any\(isnan\(o\)\) \|\| any\(isinf\(o\)\)\)/.test(AIR_VOLUME_FRAGMENTS[name]), `airVolume.${name} zeroes a NaN or an Inf before it writes`);
 for (const name of ['splat', 'vort', 'div', 'jacobi', 'grad', 'advect', 'dust', 'light', 'offsets', 'smoke']) ok(AIR_FRAGMENTS[name].includes('finite4('), `air.${name} writes through finite4, so a NaN never leaves it`);
@@ -85,7 +118,33 @@ const field = new AirField(stub, newVolTune(), { ground: { sample: () => false }
 const pass = new AirVolumePass(() => field);
 const fieldMats = field.materials();
 const volumeMats = pass.materials().map((m) => m.material as THREE.ShaderMaterial);
-ok(fieldMats.length === 16 && volumeMats.length === 6, "the field lists its sixteen materials (the first wave's ten, the dust's two-output fill, the blowing sand's offsets, the dents' stamp and fade, and the third wave's smoke and fog and the wisps' bands) and the volume its six (the march once a wisps mode, the resolve, the composite: the warm-up's lists)");
+ok(fieldMats.length === 25 && volumeMats.length === 6, "the field lists its twenty-five materials (the first wave's ten, the dust's two-output fill, the blowing sand's offsets, the dents' stamp and fade, the third wave's smoke and fog and the wisps' bands, and the fourth wave's kick-up update, fill and four draws and the rain's update, fill and draw) and the volume its six (the march once a wisps mode, the resolve, the composite: the warm-up's lists)");
+// The fourth wave's pools: their updates and fills GLSL 3, three outputs the kick-up's and two the rain's, each declared
+// once at its own location and written; their draws as each is meant to be drawn.
+{
+  const byName = new Map(fieldMats.map((m) => [m.name, m]));
+  for (const [name, outs] of [
+    ['air.kick', ['o0', 'o1', 'o2']],
+    ['air.kick.fill', ['o0', 'o1', 'o2']],
+    ['air.rain', ['o0', 'o1']],
+    ['air.rain.fill', ['o0', 'o1']],
+  ] as const) {
+    const m = byName.get(name)!;
+    const text = m.fragmentShader;
+    const declared = outs.every((o, i) => (text.match(new RegExp(`layout\\(location = ${i}\\) out highp vec4 ${o};`, 'g')) ?? []).length === 1);
+    const written = outs.every((o) => new RegExp(`\\b${o}\\s*=`).test(text));
+    ok(m.glslVersion === THREE.GLSL3 && declared && written && !text.includes('gl_FragColor'), `${name}: GLSL 3, its ${outs.length} outputs each declared once at its own location and written, and no gl_FragColor`);
+  }
+  const leaves = byName.get('air.kick.leaves')!;
+  ok(!leaves.transparent && leaves.depthWrite && leaves.depthTest && leaves.side === THREE.DoubleSide && leaves.fog && (leaves.defines as Record<string, string>).KICK_CUT === '', 'air.kick.leaves: cut, opaque, writing depth, both faces, in the fog');
+  for (const name of ['air.kick.puffs', 'air.kick.spray', 'air.kick.streaks']) {
+    const m = byName.get(name)!;
+    ok(m.transparent && !m.depthWrite && m.depthTest && m.blending === THREE.NormalBlending && m.fog && m.vertexShader === leaves.vertexShader, `${name}: blended over the depth it tests and writes none, the leaves' text without the define`);
+  }
+  const drops = byName.get('air.rain.drops')!;
+  ok(drops.transparent && !drops.depthWrite && drops.blending === THREE.NormalBlending && !drops.fog, 'air.rain.drops: blended, writing no depth, its fog its own (the weather\'s scene has none)');
+  for (const m of [leaves, drops, ...['air.kick.puffs', 'air.kick.spray', 'air.kick.streaks'].map((n) => byName.get(n)!)]) ok(m.userData.unlit === true && m.userData.dry === true, `${m.name}: unlit and dry, so no scan ever changes its program's key`);
+}
 ok(volumeMats.slice(0, 4).map((m) => `${m.name}:${(m.defines as Record<string, number>).WISP_MODE}`).join() === 'fx.airVolume.march:0,fx.airVolume.march.bands:1,fx.airVolume.march.noise:2,fx.airVolume.march.noise2:3' && volumeMats.slice(1, 4).every((m) => m.uniforms === volumeMats[0].uniforms), 'the march is a material a wisps mode (the Start\'s decision, class M), every one over the same uniforms by reference');
 // The dust pass, its fill, the offsets and (the third wave) the smoke and fog write two outputs: GLSL 3, each output
 // declared once and written, at locations 0 and 1.
@@ -108,7 +167,10 @@ ok(volumeMats.slice(0, 4).map((m) => `${m.name}:${(m.defines as Record<string, n
   const dust = mats.dust.fragmentShader;
   ok(dust.includes('oShape = finite4(vec4(max(s.r, 0.0), max(s.g, 0.0), s.b, max(s.a, 0.0)));') && dust.includes('oDust = finite4(max(d, vec4(0.0)));'), "the dust pass's floor at nought is every channel's but the shape's B (D·w, signed: the fall)");
 }
+// The scene's draws (the kick-up's four and the rain's) were held above; every other pass is a full-screen one.
+const SCENE_DRAWS = new Set(['air.kick.leaves', 'air.kick.puffs', 'air.kick.spray', 'air.kick.streaks', 'air.rain.drops']);
 for (const m of [...fieldMats, ...volumeMats]) {
+  if (SCENE_DRAWS.has(m.name)) continue;
   if (m.name === 'air.obstacles') {
     ok(m.blending === THREE.CustomBlending && m.blendEquation === THREE.MaxEquation && m.toneMapped === false && m.depthTest === false && m.depthWrite === false, 'air.obstacles: MAX-blended on purpose, no tone curve, no depth');
     continue;
@@ -126,7 +188,9 @@ for (const m of [...fieldMats, ...volumeMats]) {
 // Every uniform each shader declares is on its material.
 const THREE_OWN = new Set(['modelViewMatrix', 'projectionMatrix', 'modelMatrix', 'viewMatrix', 'normalMatrix', 'cameraPosition', 'isOrthographic']);
 for (const m of [...fieldMats, ...volumeMats]) {
-  const declared = uniformNames(m.fragmentShader).concat(uniformNames(m.vertexShader)).filter((n) => !THREE_OWN.has(n));
+  // As each material compiles its text: its own defines choose the branches (the kick-up's leaves and the rest share one).
+  const defs = new Set(Object.keys((m.defines as Record<string, unknown>) ?? {}));
+  const declared = uniformNames(glslVariant(m.fragmentShader, defs)).concat(uniformNames(glslVariant(m.vertexShader, defs))).filter((n) => !THREE_OWN.has(n));
   const missing = declared.filter((n) => !(n in m.uniforms));
   ok(missing.length === 0, `${m.name}: every uniform its shaders declare is on the material${missing.length ? ` (missing ${missing.join(', ')})` : ''}`);
 }
@@ -153,6 +217,23 @@ for (const m of [...fieldMats, ...volumeMats]) {
     if (!known.some((m) => w.key in m.uniforms)) bad.push(`${w.materials.join('/')}.${w.key} via ${w.via}`);
   }
   ok(writesVolume.length > 20 && bad.length === 0, `airVolume.ts: every one of its ${writesVolume.length} uniform writes is declared on its material${bad.length ? `: ${bad.join(', ')}` : ''}`);
+  // The fourth wave's pools, each file's writes to its own materials.
+  for (const [file, mats] of [
+    ['world/volumetrics/airParticles.ts', { updateMaterial: field.kick.updateMaterial, cutMaterial: field.kick.cutMaterial }],
+    ['world/volumetrics/airRain.ts', { updateMaterial: field.rain.updateMaterial, drawMaterial: field.rain.drawMaterial }],
+  ] as const) {
+    const writes = uniformWrites(source(file));
+    const by = mats as Record<string, THREE.ShaderMaterial>;
+    const wrong: string[] = [];
+    let known = 0;
+    for (const w of writes) {
+      const ms = w.materials.map((n) => by[n]).filter(Boolean);
+      if (!ms.length) continue;
+      known++;
+      if (!ms.some((m) => w.key in m.uniforms)) wrong.push(`${w.materials.join('/')}.${w.key} via ${w.via}`);
+    }
+    ok(known > 0 && wrong.length === 0, `${file.split('/').pop()}: every one of its ${known} uniform writes to a material it names is declared there${wrong.length ? `: ${wrong.join(', ')}` : ''}`);
+  }
 }
 // The field's own frame with the master off touches nothing: no GL call from the stub (it has none to make).
 {

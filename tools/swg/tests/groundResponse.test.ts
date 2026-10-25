@@ -7,8 +7,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { classifyFamily, fillLayerResponse, fillResponseTable, GROUND_OVERRIDES, responseOf, ruleClass, SURFACE_ALLOWS, surfaceWordOf, type FamilyFacts } from '../../../src/world/volumetrics/groundResponse.ts';
+import { classifyFamily, fillClassTable, fillLayerResponse, fillResponseTable, GROUND_OVERRIDES, responseOf, ruleClass, SURFACE_ALLOWS, surfaceWordOf, type FamilyFacts } from '../../../src/world/volumetrics/groundResponse.ts';
 import { GROUND_CLASS_NAMES, GROUND_RESPONSE_CLASSES } from '../../../src/world/volumetrics/airTune.ts';
+import { CLASS_INDEX } from '../../../src/world/volumetrics/airSpawn.ts';
 import { parseTerrainTemplate } from '../../../src/swg/terrain/trn.ts';
 import { groundWorlds, PACKS } from './terrainHarness.ts';
 
@@ -80,6 +81,24 @@ for (const [k, [cls]] of Object.entries(GROUND_OVERRIDES)) ok(GROUND_CLASS_NAMES
   const fall = fillResponseTable('', [{ id: 2, name: 'sand_bumpy', surface: '', children: [] }, { id: 5, name: 'qqq', surface: '', children: [] }, { id: 99, name: 'sand', surface: '', children: [] }], out);
   ok(out[2 * 4 + 3] === 255 && out[2 * 4] === 255 && fall === 1 && out[5 * 4 + 3] === Math.round(GROUND_RESPONSE_CLASSES.dirt.dust * 255), 'the table: four bytes a family by id, a family past its size left out, the fallback counted');
   ok(responseOf('mud').dust === 0 && responseOf('wetsand').dust === 0 && responseOf('rock').dust < 0.2, 'mud and wet sand throw no dust, rock almost none');
+}
+// --- the class table the kick-up's class raster reads (the fourth wave): which kind each ground throws ---
+{
+  // CLASS_INDEX's own rule written out: a class's place in the response table plus one (nought unknown or a liquid).
+  const index = (cls: string): number => GROUND_CLASS_NAMES.indexOf(cls as (typeof GROUND_CLASS_NAMES)[number]) + 1;
+  const out = new Uint8Array(8).fill(222);
+  const fams: FamilyFacts[] = [
+    { id: 1, name: 'grss_dsrt_dry', surface: '', children: [] },
+    { id: 3, name: 'sand_bumpy', surface: '', children: [] },
+    { id: 4, name: 'dirt_kash_leaves', surface: '', children: [] },
+    { id: 6, name: 'rock_dath_desertash', surface: '', children: [] },
+    { id: 8, name: 'sand', surface: '', children: [] },
+    { id: -1, name: 'sand', surface: '', children: [] },
+  ];
+  const filed = fillClassTable('', fams, out);
+  ok(out[1] === index('grass') && out[3] === index('sand') && out[4] === index('litter') && out[6] === index('ash'), `each family filed by id as its class's place in the response table plus one (grass ${out[1]}, sand ${out[3]}, forest litter ${out[4]}, ash ${out[6]})`);
+  ok(out[1] === CLASS_INDEX.grass && out[3] === CLASS_INDEX.sand && out[4] === CLASS_INDEX.litter && out[6] === CLASS_INDEX.ash && Math.min(...Object.values(CLASS_INDEX)) === 1, "and that is the kick-up's own class index (CLASS_INDEX), never nought for a classed family");
+  ok(filed === 4 && out[0] === 222 && out[2] === 222 && out[5] === 222 && out[7] === 222, `a family past the table (id 8 of 8) or below it is not filed, nor any id no family names (${filed} filed)`);
 }
 // --- the per-layer lookup the ground's variant reads: two rows of four bytes a layer ---
 {

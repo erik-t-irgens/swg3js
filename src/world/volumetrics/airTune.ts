@@ -673,6 +673,170 @@ export const AIR_TUNE = {
     /** A foot more than this many metres off the ground under it (a crate, a step) leaves a decal, not a dent [ours]. */
     groundGap: 0.75,
   },
+  /**
+   * What the air carries besides dust (the fourth wave, the design's §2.16): leaves, puffs of sand, spray and fine streaks
+   * of ours, each a particle on the graphics card pulled toward the air at its own height. Every number [ours] and a dial
+   * unless it says otherwise; the spray thrown behind a machine crossing water takes the game's own trail's look (the
+   * owner's Q14, `W4-notes.md`), read out of `appearance/pt_vehicle_water_trail.prt` on this machine and cited here.
+   */
+  particles: {
+    /** Seconds each kind takes to come to the air's own speed: a lighter thing follows sooner (a speeder's swirl shows in a leaf within half a second). */
+    tauLeaf: 0.6,
+    tauPuff: 0.3,
+    tauSpray: 0.4,
+    /** A fine streak is the lightest thing the air carries: it follows a gust almost at once [ours]. */
+    tauStreak: 0.15,
+    /** Gravity by kind, a share of the world's 9.8 m/s² (a leaf floats, a puff hangs, spray falls back). */
+    gravLeaf: 0.08,
+    gravPuff: 0,
+    gravSpray: 0.6,
+    gravStreak: 0.02,
+    /** A falling leaf's own drag on its fall, a second. */
+    leafDrag: 0.8,
+    /** A leaf's flutter, a side push along a phase of its own, m/s². */
+    leafFlutter: 3,
+    /** How fast each kind turns about its own middle, rad/s: a leaf tumbling about once a second, a puff barely, spray a little. */
+    spinLeaf: 6,
+    spinPuff: 0.4,
+    spinSpray: 2,
+    /** The orographic lift: air blown against a slope or a wall rises (and sinks in the lee), times this, over a fixed span, held under its most. */
+    oroK: 0.5,
+    oroSpan: 3,
+    oroMax: 3,
+    /** The vortex lift: a swirl tighter than `vortFrom` a second lofts what it carries, times this, held under its most. */
+    vortK: 0.15,
+    vortFrom: 0.5,
+    vortMax: 3,
+    /** Seconds a leaf lies where it lands before it fades, and the share of the sand's lift threshold that lifts it again. */
+    leafRest: 4,
+    liftLeaf: 0.8,
+    /** A dead slot's chance a second of trying a random cell for a pickup by the wind alone (a pool of 2,048 tries about a hundred a second). */
+    pickupRate: 0.05,
+    /** What engines lay a second: leaves at a bite of 1, puffs, and spray at an impact of `sprayAt` m/s. */
+    leafRate: 24,
+    puffRate: 4,
+    sprayRate: 30,
+    sprayAt: 10,
+    /** A blast's burst of each by its ground, at a thermal detonator's radius (`burstRadius`), scaled by radius over it. */
+    leafBurst: 40,
+    puffBurst: 12,
+    sprayBurst: 60,
+    burstRadius: 7,
+    /** Sizes, metres: a leaf between the game's own two leaf effects' 0.05 and 0.1, a puff a clump of the dust round it, a drop of spray. */
+    leafSize: 0.07,
+    puffSize: 1.2,
+    spraySize: 0.12,
+    /** How much a puff and spray grow over their life (to 2.2 and 1.5 times their size). */
+    puffGrow: 1.2,
+    sprayGrow: 0.5,
+    /** How opaque a puff and a drop of spray are at their thickest. */
+    puffAlpha: 0.5,
+    sprayAlpha: 0.6,
+    /** Lives, seconds: a leaf flutters down over seconds, a puff goes a little before the dust it stands in, spray falls back within a second or so. */
+    leafLife: 6,
+    puffLife: 2.5,
+    sprayLife: 1.2,
+    /** How far a leaf's pale picture is tinted toward the ground's own carried colour, so it matches the cover it came off. */
+    leafTint: 0.6,
+    /** A sprite fades over the last `near` metres to the eye and is not drawn inside half of it; none stands taller than `clamp` of the screen's half-height. */
+    near: 2.5,
+    clamp: 0.15,
+    /** A puff's lower edge fades over this many metres of its height over the ground. */
+    puffFloor: 0.5,
+    /**
+     * The spray behind a machine crossing water, the game's own trail's look [code: `pt_vehicle_water_trail.prt`, its two
+     * emitters]: particles a metre travelled (its spacings 0.25 and 0.15 m read as the distance between particles, an
+     * inference), 0.25 m across growing to 1 m, 0.75 s, thrown at 4 m/s over a half sphere, under 1.25 times gravity, in by
+     * a fifth of its life and out from 0.88 of it.
+     */
+    wakePerMetre: 10.67,
+    wakeSize: 0.25,
+    wakeGrow: 3,
+    wakeLife: 0.75,
+    wakeThrow: 4,
+    wakeGrav: 1.25,
+    wakeIn: 0.19,
+    wakeOut: 0.88,
+    wakeAlpha: 0.7,
+    /**
+     * The fine streaks of ours (the owner's Q7): thin streaks carried by the air and stretched along their own motion,
+     * apart from the mass of dust, lifted in a dust storm and in a strong wash. A second at a wash of `streakWash` m/s;
+     * a blast's burst; a storm's pickup at this share of the dead slots' tries.
+     */
+    streakRate: 40,
+    streakWash: 10,
+    streakBurst: 30,
+    streakStorm: 1,
+    /** A streak's life, seconds; its length is its speed over `streakTrail` seconds, held between its least and most, metres. */
+    streakLife: 1.5,
+    streakTrail: 0.08,
+    streakMin: 0.25,
+    streakMax: 3,
+    /** A streak's width, metres (never under the rain's `minPx` on the screen), and how opaque it is at its thickest. */
+    streakWidth: 0.025,
+    streakAlpha: 0.35,
+    /** How high over the ground a streak is lifted at its start, metres, between these. */
+    streakLow: 0.2,
+    streakHigh: 2.5,
+    /**
+     * The share of the sand's lift threshold the air must pass to lift a streak in a storm (the storm's strength scales
+     * the tries). The threshold rises with the wind itself (`ground.liftOver`), and a storm's own air at half a metre is
+     * its lowest layer's share of that wind, so at one share no storm ever lifted one (the smoke check: none in a full
+     * storm at 15 m/s, the threshold held at its 13 m/s cap); at 0.4 a full storm's air near the ground passes it.
+     */
+    streakLift: 0.4,
+    /** A running foot (over `feetRun` m/s from one step to the next) kicks up this many leaves off grass and litter, and this many drops of spray in water. */
+    feetRun: 4,
+    feetLeaves: 2,
+    feetSpray: 6,
+    /**
+     * What a Force front lifts as it runs, a metre of its travel, at each of its four samples along the arc: leaves off
+     * grass and litter, puffs and streaks off sand, ash and dirt, spray off water [ours: a front's band reads as a scatter
+     * of each, the dust carrying its mass].
+     */
+    frontLeaves: 1.5,
+    frontPuffs: 0.15,
+    frontStreaks: 0.6,
+    frontSpray: 3,
+  },
+  /**
+   * The rain of ours (the fourth wave, the design's §2.16): drops of our own drawing in a box round the camera, carried by
+   * the air, killed under roofs by the weather's own roof grid; and snow by the same programs, off until the owner says.
+   * Every number [ours] and a dial unless it says otherwise.
+   */
+  rain: {
+    /** The box's half-width, metres: inside the roof grid's 36 m half, so every drop is killed by a real roof. */
+    reach: 32,
+    /** How far under and over the camera the box reaches, metres. */
+    below: 4,
+    above: 18,
+    /** How fast a drop falls in still air [code: the game's own sheets fall at 8 m/s], and how soon it takes the air's speed. */
+    fall: 8,
+    tau: 0.35,
+    /** A streak's length in seconds of its fall (a frame and a half at 30 fps), its width, and the least it is on the screen in pixels. */
+    streak: 0.045,
+    width: 0.012,
+    minPx: 1.2,
+    /** How opaque a single streak is: faint, the rain read from thousands of them. */
+    alpha: 0.35,
+    /** A streak lit as a white surface under the sky's own light would be; its alpha decides how much of it shows. */
+    bright: 1,
+    /** The backlight, `base + lift · max(0, μ)^power` of the sun behind the drop: rain is most visible against the light. */
+    backBase: 0.5,
+    backLift: 1.5,
+    backPower: 8,
+    /** The main light comes in from nought to this height of the sun's direction (a streak at dusk takes only the sky's ambient). */
+    sunUpTo: 0.1,
+    /** The share of the box's outer edge a drop fades over. */
+    edgeFade: 0.1,
+    /** Snow: how fast a flake falls and follows the air, its slow flutter (a fifth of a leaf's) and its size, metres. */
+    snowFall: 1.2,
+    snowTau: 1.5,
+    snowFlutter: 0.6,
+    snowSize: 0.01,
+    /** How opaque a flake is. */
+    snowAlpha: 0.8,
+  },
 };
 
 export type AirTune = typeof AIR_TUNE;

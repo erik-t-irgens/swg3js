@@ -33,6 +33,9 @@ import { fillLayerResponse } from './groundResponse.ts';
 import { lightDepthAt, lightMarchFor, lightMarchIn, type LightMarchAsk, type LightSample } from './airLight.ts';
 import { newSandPicture, SAND_ROWS_A_FRAME, SAND_SIZE, sandPictureRows, type SandPicture } from './airSand.ts';
 import { KEEP_TABLE, NOISE_LAYERS_A_FRAME, NOISE_SIZE as NOISE3_SIZE, keepTable, newNoiseVolume, newWispPhase, noiseLayers, wispPhaseIn, type NoiseVolume, type WispPhase } from './airNoise.ts';
+import { KickPool, newKickLight, type KickLight } from './airParticles.ts';
+import { RainPool, type RainHull } from './airRain.ts';
+import { KICK_KIND, KICK_KINDS, KICK_LOOK, leafyClass, OwedTable, packColour, SpawnTable, WHITE_PACKED } from './airSpawn.ts';
 import { srgbDecode, tintGamma } from '../groundMath.ts';
 import { WEATHER_UNIFORMS } from '../wetness.ts';
 import { PRINT_TUNE } from '../footprints.ts';
@@ -141,6 +144,15 @@ export interface AirSource {
   readonly keepTable: { value: Float32Array };
   /** What the march shows in place of the in-scatter for the third wave's views: 0 none, 1 smoke, 2 fog, 3 the wisps' keep. */
   readonly airView: number;
+  /**
+   * The fourth wave's, by reference: the velocity atlas's pending scroll (window uv) a frame that took no fixed step still
+   * owes it, as the dust reads it (`velocity` above is the atlas itself); the ground class raster (R8, the class's index,
+   * nought unknown or a liquid); and `live`, true on a frame the field ran its update (the velocity texture current, W1's
+   * meaning of stepped), never "a fixed step fell this frame".
+   */
+  readonly velShift: { value: THREE.Vector2 };
+  readonly klass: { value: THREE.Texture | null };
+  readonly live: boolean;
 }
 
 /**
@@ -262,6 +274,11 @@ export interface AirWorld {
    * a field given none keeps its own at a tint of one (the tests', the console's).
    */
   groundTint?: { uGroundTint: { value: THREE.Vector4 }; uGroundTintRef: { value: THREE.Vector4 } };
+  /**
+   * The weather's own particle uniforms the rain's draw discards by (its kill slack and the ridden hull's box), by
+   * reference (the fourth wave); a field given none keeps its own, which keep nothing out (the tests', the console's).
+   */
+  rainHull?: RainHull;
 }
 
 type Pair = [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget];
@@ -416,14 +433,41 @@ export class AirField implements AirSource {
   readonly keepTable = { value: new Float32Array(KEEP_TABLE).fill(1) };
   /** The third wave's views in the march: 0 none, 1 smoke, 2 fog, 3 the wisps' keep (`air({ view })`). */
   airView = 0;
+  // The fourth wave's (`AirSource`): the air's pending scroll, the class raster, whether the field ran its update.
+  readonly velShift = { value: new THREE.Vector2() };
+  readonly klass = { value: null as THREE.Texture | null };
+  live = false;
+  /**
+   * What the air carries besides dust (the fourth wave, `airParticles.ts`, `airRain.ts`): the kick-up pool and the rain,
+   * made with the field (their materials at once, their targets in `ensureTargets`), the frame's spawn records the
+   * sources write (`forces.spawns`, while the particles are on), what each continuous source is owed between frames, and
+   * the sky's light both read (written by the world each frame).
+   */
+  readonly kick: KickPool;
+  readonly rain: RainPool;
+  readonly spawns = new SpawnTable();
+  readonly owed = new OwedTable();
+  readonly kickLight: KickLight = newKickLight();
+  /** The class raster's texture, made with the other rasters' at their size. */
+  private klassTex: THREE.DataTexture | null = null;
+  /** The kick-up pool's draws' own `draw` (the field's drawer), and the bodies whose running feet kick leaves and spray. */
+  private readonly kickDraw = (m: THREE.ShaderMaterial, t: THREE.WebGLRenderTarget): void => this.drawer.draw(m, t);
+  /** Each body's last step for the kick-up's feet: its key (NaN none), place and moment, sixty-four bodies at most. */
+  private readonly feetKey = new Float64Array(64).fill(Number.NaN);
+  private readonly feetX = new Float64Array(64);
+  private readonly feetZ = new Float64Array(64);
+  private readonly feetT = new Float64Array(64).fill(-Infinity);
+  /** The kick-up's feet: steps handed over since the console last asked, and those that kicked anything up. */
+  readonly kickFeetCounts = { steps: 0, kicked: 0 };
 
   /** The force API (§2.10): every caller writes here. */
   readonly forces = new AirForces();
   /**
    * The console's movable engine (`__debug.air({ engine })`, the demos' own): a nozzle standing where it was put, read
-   * into the engines' table every frame like a hull's until it is taken away. Null for none.
+   * into the engines' table every frame like a hull's until it is taken away, standing still unless given the velocity
+   * of a machine it rides (`vx`, `vz`: the fourth wave's wake and a skim's bite read it). Null for none.
    */
-  testEngine: { x: number; y: number; z: number; dx: number; dy: number; dz: number; exit: number } | null = null;
+  testEngine: { x: number; y: number; z: number; dx: number; dy: number; dz: number; exit: number; vx?: number; vz?: number } | null = null;
   readonly raster = new AirRaster();
   readonly win = newWindow();
   /** Why the field cannot run on this machine (no float targets), or null. */
@@ -455,9 +499,10 @@ export class AirField implements AirSource {
   private colourTex: THREE.DataTexture | null = null;
   /** The colour map's own bytes a cell (wave 2b's tint raster), which the dust pass tints its colour by. */
   private tintTex: THREE.DataTexture | null = null;
-  /** The response raster's and the colour raster's textures as kept uniform objects, which the dents' fade reads. */
+  /** The response raster's and the colour raster's textures as kept uniform objects, which the dents' fade reads (and, the colour's and the tint's, the particles' pickups). */
   private readonly responseU = { value: null as THREE.Texture | null };
   private readonly colourU = { value: null as THREE.Texture | null };
+  private readonly tintU = { value: null as THREE.Texture | null };
   private readonly mats: Record<'splat' | 'vort' | 'div' | 'jacobi' | 'grad' | 'advect' | 'dust' | 'light' | 'fill' | 'fillDust' | 'offsets' | 'smoke' | 'bands', THREE.ShaderMaterial>;
   /**
    * Smoke and fog (the third wave): an RGBA32F pair of two textures (a smoke a slab and the fog; the smoke's colour
@@ -791,6 +836,39 @@ export class AirField implements AirSource {
       }),
     };
     this.quad = createFxQuad(this.mats.fill);
+    // What the air carries besides dust (the fourth wave): its materials made now, its targets with the rest's.
+    this.kick = new KickPool(
+      {
+        window: this.window,
+        wind: this.wind,
+        height: this.height,
+        obstacles: this.obstacles,
+        klass: this.klass,
+        colour: this.colourU,
+        tint: this.tintU,
+        light: this.light,
+        lightShift: this.lightShift,
+        lightHeights: this.lightHeights,
+        slabTiles: this.slabTiles,
+        slabScale: this.slabScale,
+        slabShare: this.slabShare,
+        atlasHalf: this.atlasHalf,
+        slabMid: this.slabMid,
+        obstacleOver: this.obstacleOver,
+        hullInverse: this.hullInverse,
+        hullBox: this.hullBox,
+        groundTint: groundTint.uGroundTint,
+        groundTintRef: groundTint.uGroundTintRef,
+      },
+      this.kickLight,
+    );
+    const hull: RainHull = world.rainHull ?? { uKillSlack: { value: 0.15 }, uHullOn: { value: 0 }, uHullToLocal: { value: new THREE.Matrix4() }, uHullMin: { value: new THREE.Vector3() }, uHullMax: { value: new THREE.Vector3() } };
+    this.rain = new RainPool(
+      { height: this.height, obstacles: this.obstacles, slabTiles: this.slabTiles, slabScale: this.slabScale, slabShare: this.slabShare, atlasHalf: this.atlasHalf, slabMid: this.slabMid, obstacleOver: this.obstacleOver, hullInverse: this.hullInverse, hullBox: this.hullBox, window: this.window },
+      hull,
+      this.kickLight.sunDir,
+    );
+    this.forces.owed = this.owed;
     // The dents only where a float target can be blended into: a stamp adds and the fade multiplies.
     const gl = renderer.getContext() as WebGL2RenderingContext | null;
     this.floatBlend = !!gl && typeof gl.getExtension === 'function' && !!gl.getExtension('EXT_float_blend');
@@ -883,6 +961,9 @@ export class AirField implements AirSource {
   materials(): THREE.ShaderMaterial[] {
     const list = [this.mats.splat, this.mats.vort, this.mats.div, this.mats.jacobi, this.mats.grad, this.mats.advect, this.mats.dust, this.mats.light, this.mats.fill, this.mats.fillDust, this.obs.material, this.mats.offsets, this.mats.smoke, this.mats.bands];
     if (this.dents) list.push(this.dents.stampMaterial, this.dents.fadeMaterial);
+    // The fourth wave's: the pools' updates and fills, and their draws (scene materials the sweep's stand-ins and the
+    // weather's own compile build).
+    list.push(...this.kick.materials(), ...this.rain.materials());
     return list;
   }
 
@@ -903,6 +984,13 @@ export class AirField implements AirSource {
     // on no target's size), and the wisps' bands (likewise a texel across outside the bands mode), so every program exists
     // and the switches build nothing.
     pairs.push([m.smoke, quad(m.smoke), this.smokePair![0]], [m.bands, quad(m.bands), this.bandsTarget!]);
+    // The fourth wave's pools: their updates and fills for the very targets they draw into (each a texel row across while
+    // its switch is off: a program's key hangs on no target's size). Their draws are scene materials, built by the
+    // sweep's stand-ins (`World.kickStandIns`) and the weather's own compile.
+    const k = this.kick;
+    const rn = this.rain;
+    pairs.push([k.updateMaterial, quad(k.updateMaterial), k.pair![0]], [k.fillMaterial, quad(k.fillMaterial), k.pair![0]]);
+    pairs.push([rn.updateMaterial, quad(rn.updateMaterial), rn.pair![0]], [rn.fillMaterial, quad(rn.fillMaterial), rn.pair![0]]);
     const d = this.dents;
     if (d) {
       // The dents' target is made at its own size, or a texel across while the prints are off (a program's key does not
@@ -1074,6 +1162,10 @@ export class AirField implements AirSource {
     // dents, cleared at its next placing, and nothing of the air starts again for it.
     const d = this.dents;
     if (d !== null) d.ensure(t.prints ? t.printDetail : 1);
+    // The fourth wave's pools, each its own size (class T), a row a kind (and a row of drops) while its switch is off: a
+    // pool made again starts empty, and nothing of the air starts again for it.
+    this.kick.ensure(t.particles ? t.particleDetail : 1 / 64);
+    this.rain.ensure(t.rain || t.snow ? t.rainDetail : 128);
     if (s.cells === cells && s.dust === dust && s.light === light && s.layers === layers && s.tiles === tiles && this.vel) {
       // The offsets alone resized (the sand switched, or its detail moved): they start again at rest at the next frame
       // that steps, and nothing else of the air does. Likewise smoke and fog, and the bands.
@@ -1128,10 +1220,17 @@ export class AirField implements AirSource {
     this.responseTex?.dispose();
     this.colourTex?.dispose();
     this.tintTex?.dispose();
+    this.klassTex?.dispose();
     this.heightTex = dataTexture(this.raster.height, cells, THREE.RedFormat, THREE.FloatType, 'air.height');
     this.responseTex = dataTexture(this.raster.response, cells, THREE.RGBAFormat, THREE.UnsignedByteType, 'air.response');
     this.colourTex = dataTexture(this.raster.colour, cells, THREE.RGBAFormat, THREE.UnsignedByteType, 'air.colour');
     this.tintTex = dataTexture(this.raster.tint, cells, THREE.RGBAFormat, THREE.UnsignedByteType, 'air.tint');
+    // The class raster (the fourth wave's), an index a cell: read nearest, never blended between two classes.
+    this.klassTex = dataTexture(this.raster.klass, cells, THREE.RedFormat, THREE.UnsignedByteType, 'air.class');
+    this.klassTex.minFilter = THREE.NearestFilter;
+    this.klassTex.magFilter = THREE.NearestFilter;
+    this.klass.value = this.klassTex;
+    this.tintU.value = this.tintTex;
     this.height.value = this.heightTex;
     this.mats.dust.uniforms.uResponse.value = this.responseTex;
     this.mats.dust.uniforms.uColour.value = this.colourTex;
@@ -1329,6 +1428,9 @@ export class AirField implements AirSource {
         return this.bands.value;
       case 'carry':
         return this.ground.uAirCarry.value;
+      // The fourth wave's class raster (each ground class's index over the window).
+      case 'class':
+        return this.klassTex;
       default:
         return null;
     }
@@ -1351,6 +1453,8 @@ export class AirField implements AirSource {
     this.stats.stepped = false;
     this.dustLive = false;
     this.smokeLive = false;
+    this.live = false;
+    this.kick.shown = false;
     const dt = inp.dt > 0 && Number.isFinite(inp.dt) ? (inp.dt < 0.1 ? inp.dt : 0.1) : 0;
     this.worldTime += dt;
     f.fromEngines = t.fromEngines;
@@ -1359,6 +1463,11 @@ export class AirField implements AirSource {
     f.dust = t.dust;
     // Smoke taken at all (the third wave's `volSmoke`): with it off no source is queued and the gas cloud keeps its puffs.
     f.smokeOn = t.smoke;
+    // The fourth wave's spawn records, taken while the particles are on (a blast between frames writes them, on this
+    // frame's word); each kind's switch is read where the pool's frame is (`kickCorner`). Nothing more of the wave is
+    // written here: every line added to this method costs its calls their place in the compiler's budget, and with one
+    // more call of its own a steady frame of the measure made 35 bytes in one process in four (writeLook left out).
+    f.spawns = t.on && t.air && t.particles ? this.spawns : null;
     if (t.fog && inp.fogLevel > 0) this.lastFog = this.worldTime;
     f.camX = inp.camX;
     f.camZ = inp.camZ;
@@ -1378,6 +1487,9 @@ export class AirField implements AirSource {
       if (!this.refused && !this.drawer.broken) this.layOwed();
       this.dents?.dropOwed();
       this.writeGround(false);
+      // The particles step only where the air does: what was staged for them is spent, their draws hidden.
+      this.spawns.clear();
+      this.kick.hide(false);
       return;
     }
     f.active = true;
@@ -1391,13 +1503,24 @@ export class AirField implements AirSource {
     pl.jump = W.jump;
     const code = placeWindowIn(this.win, pl);
     const w = this.win;
-    this.window.value.set(w.ox, w.oz, w.size, w.cell);
+    // Component by component, never a `set`: a call the compiler leaves out of this method (its budget is full) boxes
+    // every number handed to it, which made a steady frame 35 bytes in one process in four once the fourth wave's calls
+    // joined the budget.
+    const wv = this.window.value;
+    wv.x = w.ox;
+    wv.y = w.oz;
+    wv.z = w.size;
+    wv.w = w.cell;
     if (code === PLACE.first || code === PLACE.jump || resized) {
       this.raster.clear();
       this.obs.forget();
       f.clear();
       // A jump starts the dent field clean as well (the window's rule, §2.2): its square is placed afresh and cleared.
       this.dents?.clear();
+      // The kick-up pool starts empty with the window, and at a jump the rain fills afresh about its own anchor too (a
+      // jump clears both pools, §2.16); its anchor's own jump catches the rest (the moving air off, a pause in a fall).
+      this.kick.clear();
+      if (code === PLACE.jump) this.rain.clear();
       this.needsFill = true;
       this.solverShift.set(0, 0);
       this.dustShift.set(0, 0);
@@ -1419,6 +1542,10 @@ export class AirField implements AirSource {
       this.smokeShift.y += sz;
       this.lightShift.value.x += sx;
       this.lightShift.value.y += sz;
+      // The kick-up pool's positions are relative to the window's corner: its whole-cell move is owed them, in metres.
+      const ks = this.kick.shift;
+      ks.x += w.moveX * w.cell;
+      ks.z += w.moveZ * w.cell;
     }
     this.stats.lastScrollX = w.moveX;
     this.stats.lastScrollZ = w.moveZ;
@@ -1432,12 +1559,16 @@ export class AirField implements AirSource {
     fa.margin = W.stripMargin;
     fa.budgetMs = W.stripBudgetMs * (fillAll ? 10 : 1);
     this.raster.fillIn(this.world.ground, now);
-    this.band.value.set(this.raster.lowest, this.raster.highest, this.raster.mean);
+    const bv = this.band.value;
+    bv.x = this.raster.lowest;
+    bv.y = this.raster.highest;
+    bv.z = this.raster.mean;
     if (this.raster.dirty) {
       this.heightTex!.needsUpdate = true;
       this.responseTex!.needsUpdate = true;
       this.colourTex!.needsUpdate = true;
       this.tintTex!.needsUpdate = true;
+      this.klassTex!.needsUpdate = true;
       this.raster.dirty = false;
     }
     let drawObstacles = code !== PLACE.still;
@@ -1458,8 +1589,8 @@ export class AirField implements AirSource {
       a[4] = te.dy;
       a[5] = te.dz;
       a[6] = te.exit;
-      a[7] = 0;
-      a[8] = 0;
+      a[7] = te.vx !== undefined && Number.isFinite(te.vx) ? te.vx : 0;
+      a[8] = te.vz !== undefined && Number.isFinite(te.vz) ? te.vz : 0;
       a[9] = -1;
       f.engineArgs();
     }
@@ -1498,8 +1629,13 @@ export class AirField implements AirSource {
       this.layOwed();
       this.dents?.dropOwed();
       this.writeGround(true);
+      this.spawns.clear();
+      this.kick.hide(false);
       return;
     }
+    // The kick-up pool's corner and this frame's numbers (the fourth wave), before the sources' frame walk stages their
+    // records: the corner's height moves only by whole metres, its move owed as a shift.
+    this.kickCorner();
     // The ground's marks (the second wave): kept only while the ground wears the air's variant and the prints are on,
     // on a browser that blends floats. The square follows the camera in whole texels, its leaving strips cleared at the
     // draw; the 10 Hz clock the age, the stamps and the fade count on moves on; the engines gather their pits and ruts.
@@ -1564,10 +1700,44 @@ export class AirField implements AirSource {
       this.dentsLive = false;
     }
     this.stats.stepped = this.drawer.broken === null;
+    this.live = this.stats.stepped;
     this.why = this.drawer.broken ? `the step failed: ${this.drawer.broken}` : null;
     this.stats.frames++;
     this.stats.draws = this.drawer.count();
     this.writeGround(true);
+    // The kick-up pool's draws: shown on a frame its update drew (every frame the field runs with the particles on),
+    // hidden on any other, so a pool nobody stepped never hangs in the air.
+    this.kickDraws();
+  }
+
+  /**
+   * The kick-up pool's frame (the fourth wave): each kind's switch into the spawn records and the pool, its numbers for
+   * this frame read from the field's own (`frameDt`, the window, the input record), and its corner placed.
+   */
+  private kickCorner(): void {
+    const t = this.tune;
+    const sp = this.spawns;
+    sp.on[KICK_KIND.leaf] = t.leaves;
+    sp.on[KICK_KIND.puff] = t.puffs;
+    sp.on[KICK_KIND.spray] = t.spray;
+    sp.on[KICK_KIND.streak] = t.streaks;
+    for (let k = 0; k < KICK_KINDS; k++) this.kick.on[k] = sp.on[k];
+    const kf = this.kick.frame;
+    const w = this.win;
+    kf.dt = this.frameDt;
+    kf.ox = w.ox;
+    kf.oz = w.oz;
+    kf.camY = this.input.camY;
+    kf.storm = this.frameStorm;
+    kf.edge = AIR_TUNE.window.edge;
+    this.kick.placeCorner();
+  }
+
+  /** The frame's records spent and the kick-up's draws written, or hidden where the field did not run its update. */
+  private kickDraws(): void {
+    this.spawns.clear();
+    if (this.live && this.kick.shown) this.kick.writeDraws();
+    else this.kick.hide(this.live && this.tune.particles);
   }
 
   /**
@@ -1834,6 +2004,9 @@ export class AirField implements AirSource {
     }
     // Smoke and fog (the third wave), every frame by the frame's own dt, while either is on.
     if (t.smoke || t.fog) this.stepSmoke(vel[0].texture);
+    // What the air carries besides dust (the fourth wave): the kick-up pool, every frame the field runs, after the dust
+    // and the smoke (after the solver with them off), reading the air as it stands with its pending scroll.
+    if (t.particles) this.stepKick(vel[0].texture);
     // The wisps' bands (the bands mode alone), once the dust of this frame is carried.
     if (this.wispMode === 1 && this.dustLive) this.stepBands(vel[0].texture);
     // The blowing sand's two phases, every frame by the frame's own dt, while the ground wears the air's variant and the
@@ -2014,6 +2187,205 @@ export class AirField implements AirSource {
     this.smokeTint.value = pair[0].textures[1];
     this.smokeShift.set(0, 0);
     this.smokeLive = true;
+  }
+
+  /**
+   * The kick-up pool's update (the fourth wave): the air's pending scroll, the sand's lift threshold over the weather's own
+   * wind (the blowing sand's, which leaves and pickups go by), the dust's look and the switches the draws read, then the
+   * pool's own step over this frame's records. Every number through the pool's kept record.
+   */
+  private stepKick(vel: THREE.Texture): void {
+    const k = this.kick;
+    const kf = k.frame;
+    const t = this.tune;
+    k.velShift.x = this.solverShift.x;
+    k.velShift.y = this.solverShift.y;
+    const G = AIR_TUNE.ground;
+    const nu = this.nums;
+    const ws = Math.sqrt(nu.windX * nu.windX + nu.windZ * nu.windZ);
+    const thr0 = ws * G.liftOver + G.liftAdd;
+    kf.threshold = thr0 < G.liftCap ? thr0 : G.liftCap;
+    kf.bright = t.dustBright;
+    kf.lightOn = t.light && this.light.value !== null;
+    kf.shadows = t.particleShadows;
+    this.renderer.getDrawingBufferSize?.(this.bufSize);
+    kf.screen = this.bufSize.y;
+    k.step(this.kickDraw, vel, this.spawns);
+  }
+  private readonly bufSize = new THREE.Vector2(1920, 1080);
+
+  /**
+   * The rain's frame (the fourth wave), called by the world after `update` on every path out of it, so the drops read this
+   * frame's window and textures and fall past a doorway while the air indoors stands still: the anchor placed on this
+   * frame's camera, the drops stepped with the air's velocity where the field ran its update (`live`) and the wind's inflow
+   * otherwise (no air raster read then), the draw's numbers written. The world writes `rain.frame` first; a share of
+   * nought (no rain or snow falling, space, the world of copies), the master off or the field refused draws nothing.
+   */
+  stepRain(): void {
+    const r = this.rain;
+    const t = this.tune;
+    const f = r.frame;
+    if (this.refused || this.drawer.broken || !t.on || !(t.rain || t.snow) || !(f.share > 0)) {
+      r.drawing = false;
+      r.mesh.visible = false;
+      return;
+    }
+    r.ensure(t.rainDetail);
+    // A step of nothing (a driven frame of no time): the drops hang where they are, drawn as they stood once they have stepped.
+    if (!(f.dt > 0)) {
+      r.drawing = r.stats.steps > 0 && !r.needsFill;
+      r.writeDraws();
+      return;
+    }
+    r.placeAnchor();
+    f.live = this.live && this.vel !== null;
+    f.winX = this.win.ox;
+    f.winZ = this.win.oz;
+    f.winSize = this.win.size;
+    r.velShift.x = this.solverShift.x;
+    r.velShift.y = this.solverShift.y;
+    this.rainVel = f.live ? this.vel![0].texture : null;
+    const g = this.renderer;
+    const sv = this.saved;
+    sv.target = g.getRenderTarget();
+    sv.autoClear = g.autoClear;
+    sv.alpha = g.getClearAlpha();
+    g.getClearColor(sv.colour);
+    g.autoClear = false;
+    try {
+      this.drawer.runPlain(this.rainStep);
+    } finally {
+      g.setRenderTarget(sv.target);
+      g.autoClear = sv.autoClear;
+      g.setClearColor(sv.colour, sv.alpha);
+    }
+    r.drawing = this.drawer.broken === null;
+    r.writeDraws();
+  }
+  private rainVel: THREE.Texture | null = null;
+  private readonly rainStep = (): void => {
+    this.rain.step(this.kickDraw, this.rainVel);
+  };
+
+  /**
+   * One foot landing, for the kick-up (the feet's chain, beside the dents' `dentStep`, the owner's `volFromFeet`): a running
+   * foot -- faster than `feetRun` m/s from the body's last step -- kicks a couple of leaves off grass and forest litter,
+   * and spray where it wades. Answers whether it kicked anything; never on a deck or indoors.
+   */
+  kickFeet(step: FootStep): boolean {
+    const t = this.tune;
+    const c = this.kickFeetCounts;
+    c.steps++;
+    if (!t.on || !t.air || !t.particles || !t.fromFeet || !this.forces.active || step.inside || step.deck !== null) return false;
+    // Each body's last step in a fixed table of typed arrays (a body seen longest ago gives its place up): a step is on a
+    // frame's path, and an object's number fields can be widened to a kind whose every write makes a number.
+    const fk = this.feetKey;
+    const fx = this.feetX;
+    const fz = this.feetZ;
+    const ft = this.feetT;
+    const now = this.worldTime;
+    let at = -1;
+    let oldest = 0;
+    for (let i = 0; i < fk.length; i++) {
+      if (fk[i] === step.key) {
+        at = i;
+        break;
+      }
+      if (ft[i] < ft[oldest]) oldest = i;
+    }
+    if (at < 0) {
+      fk[oldest] = step.key;
+      fx[oldest] = step.x;
+      fz[oldest] = step.z;
+      ft[oldest] = now;
+      return false;
+    }
+    const dx = step.x - fx[at];
+    const dz = step.z - fz[at];
+    const gap = now - ft[at];
+    fx[at] = step.x;
+    fz[at] = step.z;
+    ft[at] = now;
+    const P = AIR_TUNE.particles;
+    if (!(gap > 1e-3) || !(Math.sqrt(dx * dx + dz * dz) / gap > P.feetRun)) return false;
+    const w = this.win;
+    const r = this.raster;
+    const i = Math.floor((step.x - w.ox) / w.cell);
+    const j = Math.floor((step.z - w.oz) / w.cell);
+    if (i < 0 || j < 0 || i >= r.n || j >= r.n || r.known[j * r.n + i] !== 1) return false;
+    const cell = j * r.n + i;
+    const medium = r.colour[cell * 4 + 3];
+    const a = this.spawns.arg;
+    a[0] = step.x;
+    a[1] = r.height[cell] + 0.1;
+    a[2] = step.z;
+    a[13] = KICK_LOOK.plain;
+    a[14] = 0.3;
+    a[15] = 3;
+    if (step.from === 'water' || medium === MEDIUM_BYTE.water) {
+      a[3] = P.feetSpray;
+      a[4] = 0;
+      a[5] = 2.5;
+      a[6] = 0;
+      a[7] = 1.2;
+      a[8] = WHITE_PACKED;
+      a[9] = P.spraySize;
+      a[10] = P.sprayLife;
+      a[11] = r.height[cell];
+      a[12] = KICK_KIND.spray;
+    } else if (medium === MEDIUM_BYTE.land && leafyClass(r.klass[cell])) {
+      a[3] = P.feetLeaves;
+      a[4] = 0;
+      a[5] = 1.5;
+      a[6] = 0;
+      a[7] = 1;
+      a[8] = this.packedAt(i, j);
+      a[9] = P.leafSize;
+      a[10] = P.leafLife;
+      a[11] = 0;
+      a[12] = KICK_KIND.leaf;
+    } else return false;
+    const ok = this.spawns.addArgs();
+    if (ok) c.kicked++;
+    return ok;
+  }
+
+  /** A cell's carried colour (`tintedAt`, linear), packed for a record (white where the cell is not known). */
+  private packedAt(i: number, j: number): number {
+    const out = this.tinted;
+    if (!this.raster.tintedAt(i, j, out)) return WHITE_PACKED;
+    return packColour(out[0], out[1], out[2]);
+  }
+
+  /**
+   * A burst of a kind at a world point, for the console (`__debug.air({ particles: { kind, count } })`): its own record, as
+   * a blast's would be, in the ground's colour there. Answers whether it was taken (the particles on, the field running,
+   * the kind on, a place in the frame's table).
+   */
+  kickBurst(kind: number, count: number, x: number, y: number, z: number): boolean {
+    if (!this.forces.spawns || !(kind >= 0 && kind < KICK_KINDS)) return false;
+    const P = AIR_TUNE.particles;
+    const w = this.win;
+    const i = Math.floor((x - w.ox) / w.cell);
+    const j = Math.floor((z - w.oz) / w.cell);
+    const a = this.spawns.arg;
+    a[0] = x;
+    a[1] = y;
+    a[2] = z;
+    a[3] = count;
+    a[4] = 0;
+    a[5] = kind === KICK_KIND.spray ? 4 : kind === KICK_KIND.streak ? 3 : 2;
+    a[6] = 0;
+    a[7] = kind === KICK_KIND.streak ? 4 : 2;
+    a[8] = kind === KICK_KIND.spray ? WHITE_PACKED : this.packedAt(i, j);
+    a[9] = kind === KICK_KIND.leaf ? P.leafSize : kind === KICK_KIND.puff ? P.puffSize : kind === KICK_KIND.spray ? P.spraySize : P.streakWidth;
+    a[10] = kind === KICK_KIND.leaf ? P.leafLife : kind === KICK_KIND.puff ? P.puffLife : kind === KICK_KIND.spray ? P.sprayLife : P.streakLife;
+    a[11] = kind === KICK_KIND.spray ? y - 0.5 : 0;
+    a[12] = kind;
+    a[13] = KICK_LOOK.plain;
+    a[14] = 1;
+    a[15] = 4;
+    return this.spawns.addArgs();
   }
 
   /** The wisps' bands (the bands mode, the third wave): the flow noise at the light's four heights, a pass at the dust's size. */
@@ -2264,6 +2636,11 @@ export class AirField implements AirSource {
     this.ground.uAirDents.value = null;
     this.dentsLive = false;
     this.writeGround(false);
+    // The fourth wave's pools too: made again at their sizes by a later on, their materials kept.
+    this.kick.release();
+    this.rain.release();
+    this.spawns.clear();
+    this.live = false;
   }
 
   /**
@@ -2287,6 +2664,17 @@ export class AirField implements AirSource {
     this.dentsLive = false;
     this.why = 'not yet stepped';
     this.writeGround(false);
+    // The fourth wave's: the pools start empty in the next world, nothing staged or owed carried across.
+    this.kick.clear();
+    this.kick.hide(false);
+    this.rain.clear();
+    this.rain.drawing = false;
+    this.rain.mesh.visible = false;
+    this.spawns.clear();
+    this.owed.clear();
+    this.feetKey.fill(Number.NaN);
+    this.feetT.fill(-Infinity);
+    this.live = false;
   }
 
   /**
@@ -2501,6 +2889,42 @@ export class AirField implements AirSource {
       wisps: { setting: ['off', 'bands', 'noise', 'noise ×2'][t.wisps] ?? 'off', inForce: ['off', 'bands', 'noise', 'noise ×2'][this.wispMode] ?? 'off', noise: this.noiseTex ? 'whole' : this.noiseVol ? `${this.noiseVol.layers} of ${NOISE3_SIZE} layers made` : 'not begun', phase: [r2(this.wispPhase.p0), r2(this.wispPhase.p1)], cross: r2(this.wispPhase.cross) },
       layers: { air: this.tileCount.value, dust: t.dustLayers ? 3 : 1, couple: this.tileCount.value > 1 ? AIR_TUNE.slabs.couple : 0 },
       ground: this.groundReport(),
+      particles: this.particleReport(),
+    };
+  }
+
+  /**
+   * The fourth wave's in numbers (no readback: `air({ particles: { count: true } })` reads the pool back): each kind's
+   * switch, slots and picture (or why it has none), what the sources asked for since the console last read, the frames the
+   * pool stepped and those it was hidden while the field ran (none, or the draw hangs), the rain's drawing and anchor.
+   */
+  private particleReport(): Record<string, unknown> {
+    const t = this.tune;
+    const k = this.kick;
+    const names = ['leaves', 'puffs', 'spray', 'streaks'];
+    const kinds: Record<string, unknown> = {};
+    for (let i = 0; i < KICK_KINDS; i++) kinds[names[i]] = { on: k.on[i], slots: k.rows[i] * k.width, drawn: k.meshes[i].visible, picture: i === 3 ? 'ours, drawn in the shader' : k.pictures[i] ? k.pictures[i]!.name || 'borrowed' : null, why: k.why[i], spawned: k.stats.spawned[i] };
+    const seen = this.spawns.seen;
+    this.spawns.resetSeen();
+    for (let i = 0; i < KICK_KINDS; i++) k.stats.spawned[i] = 0;
+    const r = this.rain;
+    const feet = { ...this.kickFeetCounts };
+    this.kickFeetCounts.steps = 0;
+    this.kickFeetCounts.kicked = 0;
+    return {
+      on: t.particles,
+      live: this.live,
+      kinds,
+      asked: seen,
+      steps: k.stats.steps,
+      hiddenWhileRun: k.stats.hiddenWhileRun,
+      fills: k.stats.fills,
+      corner: { y: k.cornerY },
+      feet,
+      // The sky's light the blended kinds and the rain take (linear), as the world wrote it this frame.
+      light: { sun: this.kickLight.sunColour.value.toArray().map((v) => Math.round(v * 1000) / 1000), ambient: this.kickLight.ambient.value.toArray().map((v) => Math.round(v * 1000) / 1000), sunDir: this.kickLight.sunDir.value.toArray().map((v) => Math.round(v * 1000) / 1000) },
+      blur: 'the particles blur only with the camera: their motion lives in a texture the motion blur cannot read',
+      rain: { on: t.rain, snow: t.snow, drawing: r.drawing, drops: r.count, share: Math.round(r.frame.share * 1000) / 1000, live: r.frame.live, anchor: [r.anchor.x, r.anchor.y, r.anchor.z], steps: r.stats.steps, readAir: r.stats.live, inflow: r.stats.inflow, anchorMoves: r.stats.anchorMoves, jumps: r.stats.jumps, fills: r.stats.fills },
     };
   }
 
@@ -3329,6 +3753,10 @@ export class AirField implements AirSource {
     this.dents?.dispose();
     this.layerTex?.dispose();
     this.layerTex = null;
+    this.klassTex?.dispose();
+    this.klassTex = null;
+    this.kick.dispose();
+    this.rain.dispose();
     this.drawer.dispose();
     void this.quad;
   }

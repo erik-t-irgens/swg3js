@@ -12,8 +12,10 @@
 // boxed the texel's metres in a `Vector4.set`); wave 2b's in both -- the dust's shape numbers worked out every
 // frame, the sand's two phases restarted, a push, a pull and a repulse begun every 70 frames and walked, the storm's
 // weight and its colour eased off the window through `tintedAt` in the normalised tint mode, a mote's colour read the
-// same way every frame, the tint raster's strips filled in the moving frames from a ground whose tint is not one; and
-// with the master off, a million calls of each method of the force API and of the field's frame make nothing.
+// same way every frame, the tint raster's strips filled in the moving frames from a ground whose tint is not one; the
+// fourth wave's in both -- the kick-up pool stepped every frame over its records, a footstep handed to it, the rain's
+// frame written and stepped; and with the master off, a million calls of each method of the force API and of the
+// field's frame make nothing.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -32,7 +34,8 @@ type Moving = { frames: number; made: number; scavenges: number; movedShare: num
 type Ground = { sources: number; dents: { oneShots: number; laid: number; ticks: number; cleared: number }; feet: { dents: number } };
 type Third = { fronts: number; droppedFronts: number; storm: number[]; sand: string | null; cycles: number[] | null; mote: number[] };
 type W3 = { smoke: number; droppedSmoke: number; smokeLive: boolean; wisps: string | null; noise: string | null; layers: number; fogLevel: number };
-type Steady = { skipped?: string; frames: number; made: number; scavenges: number; stepping: boolean; engines: number; grains: number; ground: Ground; third: Third; w3: W3; moving: Moving };
+type W4 = { kickSteps: number; kickStarted: number; kickHidden: number; rainSteps: number; rainDrawing: boolean };
+type Steady = { skipped?: string; w4: W4; frames: number; made: number; scavenges: number; stepping: boolean; engines: number; grains: number; ground: Ground; third: Third; w3: W3; moving: Moving };
 const clean = (m: { made: number; scavenges: number; frames: number }): boolean => m.scavenges === 0 && m.made / m.frames < 0.2;
 const better = (a: { made: number; scavenges: number }, b: { made: number; scavenges: number }): boolean => a.scavenges < b.scavenges || (a.scavenges === b.scavenges && a.made < b.made);
 // Cleanest of three runs, the steady frame and the moving one each on its own (a run caught while the engine is still
@@ -66,6 +69,8 @@ else {
   ok(mv.scavenges === 0 && mper < 0.2, `a frame whose window moves at 167 m/s makes ${mper.toFixed(3)} bytes (${mv.made} over ${mv.frames} frames, ${mv.scavenges} collections), under 0.2: the air's own, its ground a stand-in that makes nothing`);
   const w3 = best.w3;
   ok(w3.layers === 3 && w3.smokeLive && w3.smoke > 0 && w3.wisps === 'noise' && w3.noise === 'whole' && w3.fogLevel > 0, `and the third wave's with it: three layers of air, smoke laid (${w3.smoke} sources, ${w3.droppedSmoke} dropped) and carried with a foggy morning's bank and emission, the wisps' noise whole and its phases worked out every frame in the noise mode`);
+  const w4 = best.w4;
+  ok(w4.kickSteps > 100_000 && w4.kickStarted > 0 && w4.kickHidden === 0 && w4.rainSteps > 100_000 && w4.rainDrawing, `and the fourth wave's with it: the kick-up stepped every frame (${w4.kickSteps} steps, ${w4.kickStarted} particles started from the engines', blasts' and fronts' records, never hidden while the field ran) and the rain stepped and drawn every frame (${w4.rainSteps} steps)`);
   // The bands' mode: its pass a frame at the dust's size, the same lines.
   let bands: Steady | null = null;
   let bandsMoving: Moving | null = null;

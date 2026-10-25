@@ -633,6 +633,15 @@ export class AirVolumePass implements FxPass {
   private historyValid = false;
   /** What the last frame did, for the console. */
   last = { drew: false, size: [0, 0] as [number, number], steps: 0, history: false, shadows: 0, wisps: 0 };
+  /**
+   * Which wisps modes' march materials are built and linked (the fourth wave, W3's carried cold warm): every one behind a
+   * loading screen (`materials()`, the warm-up compiles them all), and only the mode in force when the master is turned on
+   * in play (`warmMaterials`), the others behind the notice when the mode is moved (`App.warmWispMode`, class W). A frame
+   * draws the mode asked only once it is ready, and the last ready one meanwhile, so no frame waits on a link.
+   */
+  readonly ready: boolean[] = [true, true, true, true];
+  /** The last mode drawn (what a mode not yet ready is drawn as). */
+  private drawnMode = 0;
 
   constructor(source: () => AirSource | null) {
     this.source = source;
@@ -811,6 +820,9 @@ export class AirVolumePass implements FxPass {
       field('smokeTint', 'rgb', 1),
       field('bands', 'rgb', 1),
       field('carry', 'a', 1),
+      // The fourth wave's: the class raster (`CLASS_INDEX`, a byte: sand 1 to wet sand 12, nought for water and the
+      // unknown), red, a twelfth of the way a class, so grass and litter read bright and sand dark.
+      field('class', 'r', 255 / 12),
     ];
   }
 
@@ -1006,7 +1018,12 @@ export class AirVolumePass implements FxPass {
     // A march pixel's angle, radians: the wisps' level of detail by the sample's distance.
     ar.w = (2 * ctx.tanHalfFov.y) / (this.current.height > 0 ? this.current.height : 1);
     (u.uSlabMid.value as THREE.Vector4).copy(src.slabMid.value);
-    const mode = src.wispMode > 0 && src.wispMode < 4 ? src.wispMode : 0;
+    const want = src.wispMode > 0 && src.wispMode < 4 ? src.wispMode : 0;
+    // A mode whose material is still being built in the background draws as the last one ready (`ready`).
+    let mode = want;
+    if (!this.ready[mode]) mode = this.ready[this.drawnMode] ? this.drawnMode : this.ready.indexOf(true);
+    if (mode < 0) return false;
+    this.drawnMode = mode;
     if (mode > 0) {
       u.uVelAtlas.value = src.velocity.value;
       const st = u.uSlabTiles.value as THREE.Vector4[];
@@ -1063,6 +1080,23 @@ export class AirVolumePass implements FxPass {
     this.last.history = this.q.history;
     this.last.shadows = on ? C.count : 0;
     return true;
+  }
+
+  /**
+   * What the master turned on in play warms (the fourth wave, W3's carried cold warm): the march of the wisps mode in force
+   * alone, the resolve and the composite, every other mode marked not ready until it is warmed in its turn (`marchItem`,
+   * `ready`). On a cold Direct3D 11 profile the four large march materials were most of the warm's frame gaps.
+   */
+  warmMaterials(mode: number): FxWarmItem[] {
+    const m = mode > 0 && mode < 4 ? mode : 0;
+    for (let i = 0; i < this.ready.length; i++) this.ready[i] = i === m;
+    return [this.marchItem(m), { material: this.resolveMat, object: this.resolveQuad, where: 'target' }, { material: this.compositeMat, object: this.compositeQuad, where: 'target' }];
+  }
+
+  /** One wisps mode's march, for a warm of its own. */
+  marchItem(mode: number): FxWarmItem {
+    const m = mode > 0 && mode < 4 ? mode : 0;
+    return { material: this.marchMats[m], object: this.marchQuads[m], where: 'target' };
   }
 
   /** Every material for the warm-up: the march once a wisps mode (all four, class M), the resolve and the composite. */

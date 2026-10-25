@@ -34,6 +34,7 @@ import type { FluidWindow } from './fluidWindow.ts';
 import { MEDIUM_BYTE, type AirRaster } from './airRaster.ts';
 import type { AirDents } from './airDents.ts';
 import { FORCE_WAVE, FORCE_WAVE_SPEED } from '../../combat/forceWaveTune.ts';
+import { CLASS_INDEX, KICK_KIND, KICK_LOOK, newOwed, WHITE_PACKED, type OwedTable, type SpawnTable } from './airSpawn.ts';
 
 /** One-shot velocity shoves a step can be owed: [x, z, radius, height over the ground, dvx, dvz, reach]. */
 const ONE_MAX = 256;
@@ -175,6 +176,15 @@ export class AirForces {
   dustTexel = 0.375;
   /** The floor `putDust` lays its next splat at, metres, set by its caller (a fraction from the start, so never boxed). */
   private dustFloor = 0.375;
+  /**
+   * The fourth wave's: the frame's spawn records (set by the field while the particles are on, null otherwise), what
+   * each continuous source is owed of a particle between frames, the fraction asked (`owe`'s kept record), and a cell's
+   * carried colour (`tintedAt`'s scratch).
+   */
+  spawns: SpawnTable | null = null;
+  owed: OwedTable | null = null;
+  private readonly oq = newOwed();
+  private readonly tc: [number, number, number] = [0.5, 0.5, 0.5];
 
   /** An engine handed over: x, y, z, the exhaust's way dx, dy, dz, its exit m/s, the hull's vx, vz, and its source key (`engineArgs`). */
   readonly arg = new Float64Array(10);
@@ -450,6 +460,383 @@ export class AirForces {
       t[k + 15] = fa.s;
     }
     this.engineSources();
+    // The fourth wave's particles, from the same walk (the dust on or off): what each engine and each front throws up.
+    if (this.spawns && this.owed) {
+      this.engineParticles();
+      this.frontParticles();
+    }
+  }
+
+  /** The ground class under the point in `q` (the class raster's index), nought outside, unknown or a liquid. */
+  private classHere(): number {
+    const w = this.window;
+    const r = this.raster;
+    if (!w || !r) return 0;
+    const i = Math.floor((this.q[0] - w.ox) / w.cell);
+    const j = Math.floor((this.q[1] - w.oz) / w.cell);
+    const n = r.n;
+    if (i < 0 || j < 0 || i >= n || j >= n) return 0;
+    return r.klass[j * n + i];
+  }
+
+  /**
+   * The carried colour of the cell under the point in `q`, packed for a record (the shaders' `airUnpackColour`): the cell's
+   * lighter tones times the colour map's tint (`tintedAt`, as the dust's and the motes'), white where it is not known.
+   * Written out here: `packColour`'s lines, so no number crosses a call on the frame.
+   */
+  private packedHere(): number {
+    const w = this.window;
+    const r = this.raster;
+    if (!w || !r) return WHITE_PACKED;
+    const i = Math.floor((this.q[0] - w.ox) / w.cell);
+    const j = Math.floor((this.q[1] - w.oz) / w.cell);
+    const c = this.tc;
+    if (!r.tintedAt(i, j, c)) return WHITE_PACKED;
+    const a = c[0] > 0 ? (c[0] < 1 ? Math.pow(c[0], 1 / 2.2) : 1) : 0;
+    const b = c[1] > 0 ? (c[1] < 1 ? Math.pow(c[1], 1 / 2.2) : 1) : 0;
+    const d = c[2] > 0 ? (c[2] < 1 ? Math.pow(c[2], 1 / 2.2) : 1) : 0;
+    return Math.floor(a * 255 + 0.5) * 65536 + Math.floor(b * 255 + 0.5) * 256 + Math.floor(d * 255 + 0.5);
+  }
+
+  /** `amount` of a particle owed to `key`'s `kind` taken whole (the fraction carried): the count, through the kept record. */
+  private oweCount(): number {
+    const ow = this.owed;
+    if (!ow) return 0;
+    ow.owe(this.oq);
+    return this.oq.n;
+  }
+
+  /**
+   * Each engine's particles for the frame (the fourth wave, the design's §2.16), where its jet meets the ground or bites
+   * under its nozzle -- the dust's own choice of the two: over water spray, at a hovering ship's impact the design's drops
+   * and behind a machine skimming it the game's own trail's look by the distance it travels (the owner's Q14); over grass
+   * and forest litter leaves; over sand, ash and dirt puffs, and fine streaks where the jet blows hard on the ground (the
+   * owner's Q7). Never a grain or dust over water (the owner's Q6: water throws water). Each kind's count a rate times the
+   * frame's `dt` with the fraction carried per engine.
+   */
+  private engineParticles(): void {
+    const sp = this.spawns!;
+    const E = AIR_TUNE.engine;
+    const P = AIR_TUNE.particles;
+    const cap = AIR_TUNE.solver.cap * E.capShare;
+    const dt = this.frameDt > 0 && Number.isFinite(this.frameDt) ? this.frameDt : 0;
+    if (!(dt > 0)) return;
+    const e = this.engines;
+    const a = sp.arg;
+    const o = this.oq;
+    for (let i = 0; i < this.engineCount; i++) {
+      const k = i * ENG_W;
+      const x = e[k];
+      const y = e[k + 1];
+      const z = e[k + 2];
+      const dx = e[k + 3];
+      const dy = e[k + 4];
+      const dz = e[k + 5];
+      const exit = e[k + 6];
+      this.q[0] = x;
+      this.q[1] = z;
+      if (!this.groundHere()) continue;
+      const h = y - this.g.h;
+      // `engineReach`, `engineSpeed`, `impactSpeed` within its reach, `spreadBite`: as the dust's walk has them.
+      const reach = E.reachBase + E.reachPerSpeed * exit;
+      const vEff = exit < cap ? exit : cap;
+      const groundT = dy < -0.02 ? h / -dy : Infinity;
+      const imp = groundT < reach * E.impactReach && dy < 0 ? (vEff / (1 + groundT / (0.3 * reach))) * Math.sqrt(-dy) : 0;
+      const vx = e[k + 7];
+      const vz = e[k + 8];
+      const speed = Math.sqrt(vx * vx + vz * vz);
+      let ge = 1 - (h - E.spreadLow) / E.spreadSpan;
+      ge = ge > 0 ? (ge < 1 ? ge : 1) : 0;
+      const bite = ge * (E.spreadBase + speed / E.spreadSpeed);
+      const fromImpact = imp * E.impactDust;
+      const fromSpread = bite * E.spreadDust;
+      if (fromImpact <= 0 && fromSpread <= 0) continue;
+      const atImpact = fromImpact >= fromSpread;
+      const bx = speed > 0.1 ? -vx / speed : 0;
+      const bz = speed > 0.1 ? -vz / speed : 0;
+      const px = atImpact ? x + dx * groundT : x + bx * 2;
+      const pz = atImpact ? z + dz * groundT : z + bz * 2;
+      this.q[0] = px;
+      this.q[1] = pz;
+      const medium = this.mediumHere();
+      if (!this.groundHere()) continue;
+      const gy = this.g.h;
+      const key = this.engineKeys[i];
+      o.key = key;
+      a[0] = px;
+      a[2] = pz;
+      a[15] = 0;
+      if (medium === MEDIUM_BYTE.water) {
+        // Spray (the water's own surface is the raster's ground there, the third wave's).
+        o.kind = KICK_KIND.spray;
+        a[1] = gy + 0.1;
+        a[8] = WHITE_PACKED;
+        a[11] = gy;
+        a[12] = KICK_KIND.spray;
+        if (atImpact) {
+          o.amount = ((P.sprayRate * imp) / (P.sprayAt > 0.1 ? P.sprayAt : 0.1)) * dt;
+          const up = imp * 0.25;
+          a[4] = 0;
+          a[5] = up < 2 ? 2 : up > 6 ? 6 : up;
+          a[6] = 0;
+          a[7] = 1.5;
+          a[9] = P.spraySize;
+          a[10] = P.sprayLife;
+          a[13] = KICK_LOOK.plain;
+          a[14] = E.nozzleBase + E.nozzlePerSpeed * exit + groundT * E.widen + 0.8;
+        } else {
+          // The game's own trail: a particle every so many metres travelled, thrown up over a half sphere behind.
+          o.amount = P.wakePerMetre * speed * dt * (bite < 1 ? bite : 1);
+          a[4] = vx * 0.2;
+          a[5] = P.wakeThrow * 0.7;
+          a[6] = vz * 0.2;
+          a[7] = P.wakeThrow * 0.5;
+          a[9] = P.wakeSize;
+          a[10] = P.wakeLife;
+          a[13] = KICK_LOOK.wake;
+          a[14] = 0.6;
+        }
+        a[3] = this.oweCount();
+        if (a[3] >= 1) sp.addArgs();
+        continue;
+      }
+      if (medium !== MEDIUM_BYTE.land) continue;
+      const c = this.classHere();
+      const share = atImpact ? imp / (P.sprayAt > 0.1 ? P.sprayAt : 0.1) : bite;
+      const s = share < 2 ? share : 2;
+      const colour = this.packedHere();
+      a[8] = colour;
+      a[11] = 0;
+      a[13] = KICK_LOOK.plain;
+      if (c === CLASS_INDEX.grass || c === CLASS_INDEX.litter) {
+        o.kind = KICK_KIND.leaf;
+        o.amount = P.leafRate * s * dt;
+        a[1] = gy + 0.1;
+        a[4] = vx * 0.3;
+        a[5] = 1.5;
+        a[6] = vz * 0.3;
+        a[7] = 1.2;
+        a[9] = P.leafSize;
+        a[10] = P.leafLife;
+        a[12] = KICK_KIND.leaf;
+        a[14] = 1;
+        a[3] = this.oweCount();
+        if (a[3] >= 1) sp.addArgs();
+      } else if (c === CLASS_INDEX.sand || c === CLASS_INDEX.ash || c === CLASS_INDEX.dirt) {
+        o.kind = KICK_KIND.puff;
+        o.amount = P.puffRate * s * dt;
+        a[1] = gy + 0.4;
+        a[4] = vx * 0.2;
+        a[5] = 0.6;
+        a[6] = vz * 0.2;
+        a[7] = 0.6;
+        a[9] = P.puffSize;
+        a[10] = P.puffLife;
+        a[12] = KICK_KIND.puff;
+        a[14] = 1.2;
+        a[3] = this.oweCount();
+        if (a[3] >= 1) sp.addArgs();
+        // Fine streaks where the jet blows hard on the ground: its speed where it lands, or a low nozzle's own.
+        const wash = atImpact ? imp : vEff * ge;
+        const from = P.streakWash > 0.1 ? P.streakWash : 0.1;
+        let st = (wash - 0.5 * from) / (0.5 * from);
+        st = st < 0 ? 0 : st > 1 ? 1 : st;
+        st = st * st * (3 - 2 * st);
+        if (st > 0) {
+          o.kind = KICK_KIND.streak;
+          o.amount = P.streakRate * st * dt;
+          a[1] = gy + P.streakLow;
+          a[4] = vx * 0.4;
+          a[5] = 1.5;
+          a[6] = vz * 0.4;
+          a[7] = 2;
+          a[9] = P.streakWidth;
+          a[10] = P.streakLife;
+          a[12] = KICK_KIND.streak;
+          a[14] = 1.5;
+          a[3] = this.oweCount();
+          if (a[3] >= 1) sp.addArgs();
+        }
+      }
+    }
+  }
+
+  /**
+   * Each Force front's particles for the frame (the fourth wave): at four points along its band this frame, what the ground
+   * there throws up -- leaves, puffs and streaks, spray off water -- a share for every metre the front travelled.
+   */
+  private frontParticles(): void {
+    const sp = this.spawns!;
+    const t = this.fronts;
+    const P = AIR_TUNE.particles;
+    const F = AIR_TUNE.force;
+    const a = sp.arg;
+    const o = this.oq;
+    for (let i = 0; i < this.frontCount; i++) {
+      const k = i * FRONT_W;
+      const r0 = t[k + 12];
+      const r1 = t[k + 13];
+      const dr = r1 > r0 ? r1 - r0 : r0 - r1;
+      if (!(dr > 0)) continue;
+      const r = 0.5 * (r0 + r1);
+      const repulse = t[k] === FRONT_KIND.repulse;
+      const half = repulse ? Math.PI : (F.arc * Math.PI) / 180;
+      const fx = t[k + 4];
+      const fz = t[k + 5];
+      for (let j = 0; j < 4; j++) {
+        const b = -half + ((j + 0.5) / 4) * 2 * half;
+        const cb = Math.cos(b);
+        const sb = Math.sin(b);
+        const px = t[k + 1] + (fx * cb - fz * sb) * r;
+        const pz = t[k + 2] + (fx * sb + fz * cb) * r;
+        this.q[0] = px;
+        this.q[1] = pz;
+        if (!this.groundHere()) continue;
+        const gy = this.g.h;
+        const medium = this.mediumHere();
+        o.key = 100000 + i * 4 + j;
+        a[0] = px;
+        a[2] = pz;
+        a[15] = 2;
+        a[13] = KICK_LOOK.plain;
+        a[14] = 0.8;
+        if (medium === MEDIUM_BYTE.water) {
+          o.kind = KICK_KIND.spray;
+          o.amount = P.frontSpray * dr;
+          a[1] = gy + 0.1;
+          a[4] = fx * 2;
+          a[5] = 3;
+          a[6] = fz * 2;
+          a[7] = 1.5;
+          a[8] = WHITE_PACKED;
+          a[9] = P.spraySize;
+          a[10] = P.sprayLife;
+          a[11] = gy;
+          a[12] = KICK_KIND.spray;
+          a[3] = this.oweCount();
+          if (a[3] >= 1) sp.addArgs();
+          continue;
+        }
+        if (medium !== MEDIUM_BYTE.land) continue;
+        const c = this.classHere();
+        a[8] = this.packedHere();
+        a[11] = 0;
+        if (c === CLASS_INDEX.grass || c === CLASS_INDEX.litter) {
+          o.kind = KICK_KIND.leaf;
+          o.amount = P.frontLeaves * dr;
+          a[1] = gy + 0.1;
+          a[4] = fx * 2;
+          a[5] = 1.8;
+          a[6] = fz * 2;
+          a[7] = 1;
+          a[9] = P.leafSize;
+          a[10] = P.leafLife;
+          a[12] = KICK_KIND.leaf;
+          a[3] = this.oweCount();
+          if (a[3] >= 1) sp.addArgs();
+        } else if (c === CLASS_INDEX.sand || c === CLASS_INDEX.ash || c === CLASS_INDEX.dirt) {
+          o.kind = KICK_KIND.puff;
+          o.amount = P.frontPuffs * dr;
+          a[1] = gy + 0.4;
+          a[4] = fx;
+          a[5] = 0.8;
+          a[6] = fz;
+          a[7] = 0.5;
+          a[9] = P.puffSize;
+          a[10] = P.puffLife;
+          a[12] = KICK_KIND.puff;
+          a[3] = this.oweCount();
+          if (a[3] >= 1) sp.addArgs();
+          o.kind = KICK_KIND.streak;
+          o.amount = P.frontStreaks * dr;
+          a[1] = gy + P.streakLow;
+          a[4] = fx * 4;
+          a[5] = 1;
+          a[6] = fz * 4;
+          a[7] = 1.5;
+          a[9] = P.streakWidth;
+          a[10] = P.streakLife;
+          a[12] = KICK_KIND.streak;
+          a[3] = this.oweCount();
+          if (a[3] >= 1) sp.addArgs();
+        }
+      }
+    }
+  }
+
+  /**
+   * A blast's burst of particles (the fourth wave), at its own call and never through the one-shot dust's path (which
+   * answers at once with the dust off): by the ground under it, spray off water, leaves off grass and litter, puffs and
+   * streaks off sand, ash and dirt, each by the blast's radius over a thermal detonator's; nothing from a blast that went
+   * off higher over the ground than its own radius.
+   */
+  private blastParticles(x: number, y: number, z: number, radius: number): void {
+    const sp = this.spawns;
+    if (!sp) return;
+    const P = AIR_TUNE.particles;
+    const q = this.q;
+    q[0] = x;
+    q[1] = z;
+    if (!this.groundHere()) return;
+    const gy = this.g.h;
+    if (y - gy > radius) return;
+    const scale = radius / (P.burstRadius > 0.1 ? P.burstRadius : 0.1);
+    const medium = this.mediumHere();
+    const a = sp.arg;
+    a[0] = x;
+    a[2] = z;
+    a[15] = 1;
+    a[13] = KICK_LOOK.plain;
+    a[4] = 0;
+    a[6] = 0;
+    if (medium === MEDIUM_BYTE.water) {
+      a[1] = gy + 0.2;
+      a[3] = Math.round(P.sprayBurst * scale);
+      a[5] = 7;
+      a[7] = 4;
+      a[8] = WHITE_PACKED;
+      a[9] = P.spraySize * 1.5;
+      a[10] = P.sprayLife;
+      a[11] = gy;
+      a[12] = KICK_KIND.spray;
+      a[14] = 0.3 * radius;
+      sp.addArgs();
+      return;
+    }
+    if (medium !== MEDIUM_BYTE.land) return;
+    const c = this.classHere();
+    a[8] = this.packedHere();
+    a[11] = 0;
+    if (c === CLASS_INDEX.grass || c === CLASS_INDEX.litter) {
+      a[1] = gy + 0.2;
+      a[3] = Math.round(P.leafBurst * scale);
+      a[5] = 6;
+      a[7] = 4;
+      a[9] = P.leafSize;
+      a[10] = P.leafLife;
+      a[12] = KICK_KIND.leaf;
+      a[14] = 0.4 * radius;
+      sp.addArgs();
+    } else if (c === CLASS_INDEX.sand || c === CLASS_INDEX.ash || c === CLASS_INDEX.dirt) {
+      a[1] = gy + 0.5;
+      a[3] = Math.round(P.puffBurst * scale);
+      a[5] = 3;
+      a[7] = 2;
+      a[9] = P.puffSize;
+      a[10] = P.puffLife;
+      a[12] = KICK_KIND.puff;
+      a[14] = 0.5 * radius;
+      sp.addArgs();
+      a[1] = gy + P.streakLow;
+      a[3] = Math.round(P.streakBurst * scale);
+      a[5] = 8;
+      a[7] = 6;
+      a[9] = P.streakWidth;
+      a[10] = P.streakLife;
+      a[12] = KICK_KIND.streak;
+      a[14] = 0.3 * radius;
+      sp.addArgs();
+    }
   }
 
   /** Each engine's dust for the frame walk, into `engineDust`: the jet's impact or its spread, whichever lays more. */
@@ -861,6 +1248,8 @@ export class AirForces {
       this.counts.offWindow++;
       return;
     }
+    // Its particles first (the fourth wave): they hang on the particles' switch alone, never the dust's.
+    this.blastParticles(x, y, z, radius);
     const B = AIR_TUNE.blast;
     const cell = this.window ? this.window.cell : 1.5;
     const rr = B.ringShare * radius;

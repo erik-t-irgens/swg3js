@@ -8,7 +8,9 @@
 // and every uniform written, the dust and the light; and the dust pool's grains, thrown and stepped onto the field's own
 // height raster. A frame whose window moves -- every frame of a ride or a flight -- is measured apart and held to the
 // same line: its ground here is a stand-in that makes nothing, so whatever such a frame makes is the air's own (in the
-// game the terrain's cached readers ask the world, which is the world's cost and not measured here).
+// game the terrain's cached readers ask the world, which is the world's cost and not measured here). The fourth wave's in
+// both: the kick-up pool stepped every frame over the records the engines (on sand: puffs and fine streaks), the blasts
+// and the fronts write, a footstep handed to it, and the rain's frame written and stepped after the field's.
 //
 // Run: node --expose-gc --allow-natives-syntax tools/swg/tests/airAlloc.ts
 import v8 from 'node:v8';
@@ -118,6 +120,8 @@ while (!field.noiseSlice(64)) {
   // a slice at a time
 }
 if (process.argv[2] === 'bands') tune.wisps = 1;
+// The kick-up left out (`AIR_SKIP=particles`), to tell its share from the rest's: never set by the test.
+if ((process.env.AIR_SKIP ?? '').includes('particles')) tune.particles = false;
 // Bound to a record of the ground variant's uniforms, as the world binds the field it takes: every frame then copies the
 // field's own values into it (`copyAirGround`), which is measured with the rest.
 field.bindGround(makeAirGroundUniforms());
@@ -154,6 +158,8 @@ const state = { frame: 0, camX: 0.25, camZ: -0.5, moved: 0, movingCalls: 0 };
 const SKIP = process.env.AIR_SKIP ?? '';
 // A foot landing, the feet's own kept record as `BodySounds` fills it: on the sand by the camera, its height the ground's.
 const step: FootStep = { key: 7, kind: 'mobile', label: 'a walker', surface: 'sand', from: 'terrain', x: 2, y: 0, z: 1, heading: 0.3, scale: 1, inside: false, deck: null, ground: null };
+/** The crowd's steps for the kick-up (the fourth wave): one kept record, its body and place rewritten for each step. */
+const walker: FootStep = { key: 20, kind: 'mobile', label: 'a walker', surface: 'sand', from: 'terrain', x: 2.5, y: 0.5, z: 1.5, heading: 0.3, scale: 1, inside: false, deck: null, ground: null };
 /** The motes' colour, read through `tintedAt` as the world's emitter reads it: a kept record. */
 const mote: [number, number, number] = [0.5, 0.5, 0.5];
 
@@ -185,7 +191,30 @@ function steady(): void {
     step.y = ((step.x | 0) >> 4) & 3;
     field.dentStep(step);
   }
+  // The fourth wave's feet: a crowd's steps handed to the kick-up beside the dents, as the feet hand every body's (eight
+  // walkers each stepping every 64th frame, the eighth running through water, so a record of spray is staged too).
+  if (!SKIP.includes('kickFeet') && (f & 7) === 0) {
+    const who = (f >> 3) & 7;
+    walker.key = 20 + who;
+    walker.x = state.camX + who * 3 + ((f >> 6) & 7) * (who === 7 ? 3 : 0.5);
+    walker.z = state.camZ - 4;
+    walker.from = who === 7 && !SKIP.includes('water') ? 'water' : 'terrain';
+    field.kickFeet(walker);
+  }
   field.update(inp);
+  // The fourth wave's rain, as the world steps it after the field's frame: its frame record written field by field.
+  if (!SKIP.includes('rain')) {
+    const rf = field.rain.frame;
+    rf.dt = DT;
+    rf.share = 0.6;
+    rf.camX = state.camX;
+    rf.camY = 1.7;
+    rf.camZ = state.camZ;
+    rf.windX = 3.95;
+    rf.windZ = 5.78;
+    rf.alpha = 0.2;
+    field.stepRain();
+  }
   // The world's half of the frame: the grains' ground handed over, grains thrown, the pool stepped.
   const w = field.win;
   grainGround.ox = w.ox;
@@ -283,7 +312,9 @@ if (process.argv[2] === 'part') {
               }
             : name === 'run'
               ? () => f.runFrame()
-              : () => undefined;
+              : name === 'kickFeet'
+                ? () => field.kickFeet(walker)
+                : () => undefined;
   if (process.argv[4] === 'profile') {
     // Where what it makes is made: the sampling heap profiler over the part, keeping what the minor collector took.
     const { Session } = await import('node:inspector/promises');
@@ -329,6 +360,25 @@ if (process.argv[2] === 'off') {
   process.exit(0);
 }
 const s = await measure(steady, FRAMES);
+if (process.argv[2] === 'why' && (s.scavenges > 0 || s.made / FRAMES >= 0.2)) {
+  // A process whose steady frames came out dirty (the bimodal case): where, over a window of the very frames measured.
+  const { Session } = await import('node:inspector/promises');
+  const session = new Session();
+  session.connect();
+  await session.post('HeapProfiler.enable');
+  await session.post('HeapProfiler.startSampling', { samplingInterval: 64, includeObjectsCollectedByMinorGC: true, includeObjectsCollectedByMajorGC: true });
+  frames(steady, 20_000);
+  const { profile } = (await session.post('HeapProfiler.stopSampling')) as { profile: { head: SteadyNode } };
+  type SteadyNode = { callFrame: { functionName: string; url: string; lineNumber: number }; selfSize: number; children: SteadyNode[] };
+  const sites = new Map<string, number>();
+  const walk = (n: SteadyNode, path: string): void => {
+    const here = `${n.callFrame.functionName || '(anon)'} ${n.callFrame.url.split('/').pop()}:${n.callFrame.lineNumber + 1}`;
+    if (n.selfSize > 0) sites.set(`${here} <- ${path}`, (sites.get(`${here} <- ${path}`) ?? 0) + n.selfSize);
+    for (const c of n.children) walk(c, here);
+  };
+  walk(profile.head, '');
+  for (const [k, v] of [...sites].sort((a, b) => b[1] - a[1]).slice(0, 10)) console.error((v / 20_000).toFixed(2), 'B a steady frame', k);
+}
 const stepped = field.stepping;
 const engines = field.forces.engineCount;
 // The engines' pits and ruts held as continuous sources at the steady frame's end (the moving frames leave them behind).
@@ -364,6 +414,12 @@ field.dents?.takeCounts(dentCounts);
 // Wave 2b's parts really ran: the fronts begun and dropped, the storm's colour eased off the tinted window, the
 // sand's two phases restarted, the sand's picture whole.
 const feet = { ...field.feetCounts };
+// The fourth wave's parts really ran (read before the report, which counts the kinds' starts afresh): the kick-up
+// stepped with records of its kinds, and the rain stepped and drawn.
+const kick = field.kick;
+let kickStarted = 0;
+for (let k = 0; k < 4; k++) kickStarted += kick.stats.spawned[k];
+const w4 = { kickSteps: kick.stats.steps, kickStarted, kickHidden: kick.stats.hiddenWhileRun, rainSteps: field.rain.stats.steps, rainDrawing: field.rain.drawing };
 const sr = field.report() as { sand?: { picture: string; phases: { cycles: number[] } }; sources?: { fronts: number; droppedFronts: number; smoke: number; droppedSmoke: number }; wisps?: { inForce: string; noise: string }; layers?: { air: number } };
 const stormColour = field.stormColour.value;
-console.log(JSON.stringify({ frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet }, third: { fronts: sr.sources?.fronts ?? 0, droppedFronts: sr.sources?.droppedFronts ?? 0, storm: [stormColour.r, stormColour.g, stormColour.b], sand: sr.sand?.picture ?? null, cycles: sr.sand?.phases.cycles ?? null, mote: [...mote] }, w3: { smoke: sr.sources?.smoke ?? 0, droppedSmoke: sr.sources?.droppedSmoke ?? 0, smokeLive: field.smokeLive, wisps: sr.wisps?.inForce ?? null, noise: sr.wisps?.noise ?? null, layers: sr.layers?.air ?? 0, fogLevel: inp.fogLevel }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));
+console.log(JSON.stringify({ w4, frames: FRAMES, made: s.made, scavenges: s.scavenges, stepping: stepped, engines, grains: dust.grainsFlying + dust.grainsLying, ground: { sources, dents: dentCounts, feet }, third: { fronts: sr.sources?.fronts ?? 0, droppedFronts: sr.sources?.droppedFronts ?? 0, storm: [stormColour.r, stormColour.g, stormColour.b], sand: sr.sand?.picture ?? null, cycles: sr.sand?.phases.cycles ?? null, mote: [...mote] }, w3: { smoke: sr.sources?.smoke ?? 0, droppedSmoke: sr.sources?.droppedSmoke ?? 0, smokeLive: field.smokeLive, wisps: sr.wisps?.inForce ?? null, noise: sr.wisps?.noise ?? null, layers: sr.layers?.air ?? 0, fogLevel: inp.fogLevel }, moving: { frames: MOVING, made: m.made, scavenges: m.scavenges, movedShare, resets: field.win.resets - resetsBefore } }));

@@ -17,6 +17,10 @@
 //
 // Pure: no three; the field uploads these arrays as textures.
 import { srgbDecode, tintGammaOf, type TintAsk, type TintReference } from '../groundMath.ts';
+import { CLASS_INDEX } from './airSpawn.ts';
+
+/** The class a known cell whose family the table has none for takes: dirt's, as its response is (the design's §2.7). */
+const DIRT_CLASS = CLASS_INDEX.dirt;
 
 /** What the world answers for one point of the ground; the sampler writes it and answers false where it knows nothing yet. */
 export interface GroundSample {
@@ -66,6 +70,14 @@ export class AirRaster {
    */
   fam = new Uint16Array(0);
   /**
+   * Each cell's ground class (the fourth wave, `CLASS_INDEX`: the class's place in the response table plus one), nought
+   * where the cell is not known or is a liquid: which kind of particle the ground throws (leaves off grass and litter,
+   * puffs and streaks off sand, ash and dirt), which neither the response bytes nor the medium byte name.
+   */
+  klass = new Uint8Array(0);
+  /** Each family's class index by family id, from the world's table (`fillClassTable`); a family past it is dirt's. */
+  familyClass: Uint8Array = new Uint8Array(0);
+  /**
    * How the ground's tint is drawn now, as `tintedAt` works it out: the tile program's mode (`COLOUR_MODES`' index), the
    * world's colour reference, the gain cap, and how much of it the dust takes (`dust.tint`). Written by the world.
    */
@@ -106,6 +118,7 @@ export class AirRaster {
     this.tint = new Uint8Array(n * n * 4);
     this.known = new Uint8Array(n * n);
     this.fam = new Uint16Array(n * n);
+    this.klass = new Uint8Array(n * n);
     this.clear();
   }
 
@@ -117,6 +130,7 @@ export class AirRaster {
     this.tint.fill(0);
     this.known.fill(0);
     this.fam.fill(0);
+    this.klass.fill(0);
     this.unknown = this.n * this.n;
     this.cursor = 0;
     this.dirty = true;
@@ -143,6 +157,7 @@ export class AirRaster {
     shiftGrid(this.tint, n, 4, dx, dz, 0);
     shiftGrid(this.known, n, 1, dx, dz, 0);
     shiftGrid(this.fam, n, 1, dx, dz, 0);
+    shiftGrid(this.klass, n, 1, dx, dz, 0);
     let unknown = 0;
     const kn = this.known;
     const h = this.height;
@@ -240,6 +255,7 @@ export class AirRaster {
         this.colour[k * 4 + 3] = 0;
         this.response[k * 4 + 3] = 0;
         this.tint[k * 4 + 3] = 0;
+        this.klass[k] = 0;
         this.unknown++;
         this.dirty = true;
       }
@@ -269,6 +285,10 @@ export class AirRaster {
       this.response[p + 3] = 153;
     }
     this.fam[k] = fam >= 0 && fam < 65535 ? fam + 1 : 0;
+    // The class (the fourth wave's): a liquid's nought (spray is the medium byte's), a family the table has none for
+    // dirt's, as its response is.
+    const fc = this.familyClass;
+    this.klass[k] = s.medium !== 1 ? 0 : fam >= 0 && fam < fc.length && fc[fam] > 0 ? fc[fam] : DIRT_CLASS;
     this.paintColour(p, known ? fam : -1);
     this.colour[p + 3] = s.medium === 3 ? 255 : s.medium === 2 ? 170 : 85;
     // The pole's own colour-map bytes as the terrain hands them back, a whole number packed (a version-3 pack, a

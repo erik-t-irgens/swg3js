@@ -902,10 +902,23 @@ interface AirDebugOptions {
   smoke?: { radius?: number; rate?: number; seconds?: number; colour?: number };
   /** Move the fog's looks by world: `{ naboo: { morning: 1 } }` (`tuneFogLooks`); the day's draw is made again at once. */
   fogLooks?: Record<string, unknown>;
+  /**
+   * What the air carries besides dust (the fourth wave): a burst of `count` of a kind (leaves, puffs, spray, streaks) at
+   * the crosshair a metre over the ground, as a blast's would be; `count: true` alone reads the pool back (a GPU sync):
+   * each kind's live slots, the leaves lying and flying, the wind's pickups and the wake's spray, and the leaves within
+   * `radius` of the crosshair.
+   */
+  particles?: { kind?: 'leaves' | 'puffs' | 'spray' | 'streaks'; count?: number | boolean; radius?: number };
+  /**
+   * The rain of ours: `share` holds its share of the slots whatever the weather (null releases), `snow` holds snow or
+   * rain (null releases), `measure` reads the drops back (a GPU sync): how many stand, how many under a roof the
+   * weather's grid says is roofed (none should, past a frame), and their lean and fall, near the crosshair too.
+   */
+  rain?: { share?: number | null; snow?: boolean | null; measure?: boolean; radius?: number };
 }
 
 /** The fields `__debug.air({ view })` shows. */
-const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'shape', 'tint', 'offsets', 'dents', 'inscatter', 'clear', 'smokeField', 'fogField', 'smokeTint', 'bands', 'carry'] as const;
+const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'shape', 'tint', 'offsets', 'dents', 'inscatter', 'clear', 'smokeField', 'fogField', 'smokeTint', 'bands', 'carry', 'class'] as const;
 
 /** The third wave's views the march draws itself (`AirSource.airView`): the first sample's smoke, fog, or the wisps' keep. */
 const AIR_AIR_VIEWS = ['smoke', 'fog', 'wisps'] as const;
@@ -926,6 +939,8 @@ const VOL_HATCH_OFF = ((): boolean => {
 })();
 /** What the notice says while the master turned on in play builds what it needs (`reconcileVolumetrics`). */
 const VOL_WARM_NOTICE = 'Volumetrics on: preparing shaders';
+/** How long a loading screen waits for the kick-up's pictures (`World.airPictures`), ms; one landing after is handed over then. Ours. */
+const AIR_PICTURE_WAIT_MS = 3000;
 
 class App {
   private torch!: THREE.SpotLight;
@@ -1865,6 +1880,9 @@ class App {
     });
     registerPerfSwitch('airVolumeShadows', { get: () => this.volSoftValue('airVolumeShadows'), set: (v) => this.volSoft('airVolumeShadows', !!v), values: [false, true], note: "the cascades' shadow on the dust" });
     registerPerfSwitch('volLight', { get: () => this.volSoftValue('volLight'), set: (v) => this.volSoft('volLight', !!v), values: [false, true], note: 'the light pass toward the sun (the dust\'s dark heart)' });
+    // The fourth wave's: the kick-up pool (leaves, puffs, spray, streaks) and the rain of ours, each as its switch would.
+    registerPerfSwitch('volParticles', { get: () => this.volSoftValue('volParticles'), set: (v) => this.volSoft('volParticles', !!v), values: [false, true], note: 'the leaves, puffs, spray and streaks the air carries (the pool shrinks to a row a kind while off, no program built)' });
+    registerPerfSwitch('volRain', { get: () => this.volSoftValue('volRain'), set: (v) => this.volSoft('volRain', !!v), values: [false, true], note: "the rain of ours (the game's own sheets whole again while off)" });
     // The ground's (the second wave's): soft too, never the real master (the design's §3.5). `zero` is every art dial at
     // nought with the dust's amount nought, the variant still worn; `off` the ground back on its plain material and the
     // volume unwanted, the field, its targets and both grounds' programs kept; `one` every art dial at one. The zero-dial
@@ -12496,6 +12514,36 @@ class App {
       notes.push(...tuneFogLooks(o.fogLooks));
       this.world.fogLooksMoved();
     }
+    if (o.particles) {
+      // The fourth wave's: a burst at the crosshair, and the pool read back.
+      const pp = o.particles;
+      const names = ['leaves', 'puffs', 'spray', 'streaks'] as const;
+      const p = look();
+      if (pp.kind !== undefined) {
+        const kind = names.indexOf(pp.kind);
+        const count = typeof pp.count === 'number' && Number.isFinite(pp.count) ? Math.max(1, Math.min(500, Math.round(pp.count))) : 40;
+        const taken = kind >= 0 && air.kickBurst(kind, count, p.x, p.y + 1, p.z);
+        out.burst = { kind: pp.kind, count, at: [Math.round(p.x * 10) / 10, Math.round((p.y + 1) * 10) / 10, Math.round(p.z * 10) / 10], taken };
+        if (!taken) notes.push(kind < 0 ? `no kind "${pp.kind}": ${names.join(', ')}` : !air.forces.spawns ? 'not taken: the particles are off (volParticles), or the moving air is not stepping here' : 'not taken: the frame\'s records are full (32 a frame)');
+      }
+      if (pp.count === true) {
+        const radius = Number.isFinite(pp.radius) ? Math.max(0.5, pp.radius as number) : 6;
+        out.particles = air.kick.count(this.renderer, air.win.ox, air.win.oz, { x: p.x, z: p.z, radius }) ?? 'no pool yet';
+      }
+    }
+    if (o.rain) {
+      const h = this.world.airRainHold;
+      if (o.rain.share !== undefined) h.share = o.rain.share === null || !Number.isFinite(o.rain.share) ? null : Math.max(0, Math.min(1, o.rain.share));
+      if (o.rain.snow !== undefined) h.snow = o.rain.snow === null ? null : o.rain.snow === true;
+      out.rainHold = { ...h };
+      if (h.share !== null) notes.push(`the rain of ours held at ${h.share} of its slots${h.snow === true ? ', as snow' : h.snow === false ? ', as rain' : ''}, whatever the weather (share: null releases); the game's own sheets thin only while the weather has them falling`);
+      if (o.rain.measure) {
+        const p = look();
+        const radius = Number.isFinite(o.rain.radius) ? Math.max(0.5, o.rain.radius as number) : 4;
+        const roofs = this.world.weather.roofs;
+        out.rainMeasure = air.rain.measure(this.renderer, (x, z) => roofs.topAt(x, z), { x: p.x, z: p.z, radius }) ?? 'no drops yet';
+      }
+    }
     if (o.fog) {
       const h = this.world.airFogHold;
       if (o.fog.day !== undefined) h.day = o.fog.day === true;
@@ -12557,8 +12605,14 @@ class App {
       out.measure = measured;
     }
     const volume = this.postfx?.pass<AirVolumePass>('airVolume');
+    const report = air.report();
+    // The game's own sheets' factors beside the rain of ours (the fourth wave): exactly 1 while ours does not draw that fall.
+    const wx = this.world.weather;
+    const r2 = (v: number): number => Math.round(v * 100) / 100;
+    const particles = report.particles as Record<string, unknown> | undefined;
+    if (particles) particles.sheets = { storm: r2(wx.stormSheetScale), rain: r2(wx.rainSheetScale), snow: r2(wx.snowSheetScale), oursDraws: wx.airRainDraws };
     return {
-      ...air.report(),
+      ...report,
       fogHour: this.world.fogReport(),
       volume: volume ? { ...volume.report(), wanted: this.postfx!.passWanted('airVolume') } : 'not on the chain',
       ...out,
@@ -12577,6 +12631,12 @@ class App {
     const was = VOL_TUNE.on;
     volQualityFrom(this.settings, VOL_TUNE, this.volOver);
     if (VOL_HATCH_OFF) VOL_TUNE.on = false;
+    // A wisps mode whose march the in-play warm did not build is built now, off the frame (the fourth wave).
+    if (key === 'volDustWisps' && VOL_TUNE.on) this.warmWispMode();
+    // The fourth wave's meshes: the master off takes them out of the scenes at once (the weather's hand-overs today's);
+    // they go back in only once their programs exist, at the field's take, at an arrival and at the end of the master's
+    // in-play warm (`reconcileVolumetrics`), and every switch of theirs is the field's to read each frame.
+    if (!VOL_TUNE.on) this.world.syncAirMeshes();
     if (key !== 'volumetrics' && key !== undefined) return;
     if (VOL_TUNE.on && !was) this.queueVolumetrics();
     else if (!VOL_TUNE.on && was) this.world.air?.releaseTargets();
@@ -12637,12 +12697,19 @@ class App {
         if (chain && !chain.pass('airVolume')) {
           pass = new AirVolumePass(() => this.world.air);
           const target = chain.compileTarget;
-          const objects = pass.materials().map((m) => m.object ?? createFxQuad(m.material));
+          // The march of the wisps mode in force alone (the fourth wave, W3's carried cold warm): the other three are built
+          // in their turn when the mode is moved (`warmWispMode`), so a cold warm builds one large march and not four.
+          const objects = pass.warmMaterials(VOL_TUNE.wisps).map((m) => m.object ?? createFxQuad(m.material));
           jobs.push(this.world.programJob(objects, 'volumetrics: the dust in the picture', true, { compile: (o, _allowance, resolve) => ({ made: this.compileFxObject(o, target, resolve), done: true }) }));
         }
         // Both grounds, one stand-in each, through the queue as any scene object is (their lights are the world pass's).
         const stands = this.world.groundStandInsFor(air);
         if (stands.length) jobs.push(this.world.compileReady(stands, 'volumetrics: the ground'));
+        // What the air carries besides dust (the fourth wave): the kick-up's two draw programs, one stand-in each against
+        // the world pass, and the rain's draw against the weather's own scene, as its sheets are compiled.
+        const kicks = this.world.kickStandInsFor(air);
+        if (kicks.length) jobs.push(this.world.compileReady(kicks, 'volumetrics: the kick-up'));
+        jobs.push(this.world.rainWarmJob(air));
         // The blowing sand's picture (wave 2b's), a slice of rows a frame, uploaded only once whole: the swap waits for it.
         jobs.push(this.sandSlices(air));
         // The wisps' noise (the third wave's), a layer a frame, uploaded only once whole and made once a session.
@@ -12652,7 +12719,12 @@ class App {
         const changed = !VOL_TUNE.on || VOL_HATCH_OFF || !this.inWorld || this.postfx !== chain || this.world.packId !== world || (this.world.air !== null && this.world.air !== air);
         if (changed) {
           pass?.dispose();
-          if (!had && this.world.air !== air) air.dispose();
+          // A field thrown away leaves the world's material sets first: the warm adopted its pools' draws (the kick-up's
+          // stand-ins went through `compileReady`), and the portal renderer's set and the compiled set are strong.
+          if (!had && this.world.air !== air) {
+            this.world.forgetMaterials(air.materials());
+            air.dispose();
+          }
           // And looks again (the Effects switch's rule, the design's §3.2): with the master still on, in a world, the
           // loop warms for the chain and the field as they stand now -- a new chain's pass, another world's field (key
           // lookups when its screen built it) -- and with it off, or out of a world, the top of the loop stops it.
@@ -12662,6 +12734,14 @@ class App {
         if (pass && this.postfx && !this.postfx.pass('airVolume')) this.postfx.registerPass(pass);
         else pass?.dispose();
         if (!had) this.world.takeAir(air);
+        // The wisps mode in force now, where its march is not built (moved during this warm, or while the master was off
+        // with the pass already on the chain from an earlier warm): built off the frame in its turn, the volume drawing the
+        // last ready mode meanwhile.
+        this.warmWispMode();
+        // The kick-up's and the rain's meshes into their scenes now their programs exist (the take does it for a new
+        // field), and this world's pictures for the kick-up (a picture landing later swaps a texture, no program).
+        this.world.syncAirMeshes();
+        void this.world.airPictures();
       } while (this.volAgain);
     } finally {
       this.volBusy = false;
@@ -12671,12 +12751,42 @@ class App {
         // call it play.
         this.sampleShaders(this.shaderPhase());
         this.volWarming = false;
-        // The Effects switch's own warm, if one runs, puts its progress up again at its next step.
-        if (!this.fxBusy) this.notice.set(null);
+        // The Effects switch's own warm, if one runs, puts its progress up again at its next step; a wisps mode still
+        // warming keeps the notice until it is done (`warmWispMode` takes it down).
+        if (!this.fxBusy && !this.wispWarming.size) this.notice.set(null);
         this.menu.redrawGraphics();
       }
     }
   }
+
+  /**
+   * A wisps mode whose march is not built yet (the master turned on in play builds the mode in force alone: the fourth
+   * wave, W3's carried cold warm), built through the world's program queue (class W) with the notice up and the volume
+   * drawing the last ready mode meanwhile; marked ready once linked. A mode already ready, or one being built, does nothing.
+   */
+  private warmWispMode(): void {
+    const chain = this.postfx;
+    const pass = chain?.pass('airVolume') as AirVolumePass | undefined;
+    const mode = VOL_TUNE.wisps;
+    if (!chain || !pass || pass.ready[mode] || this.wispWarming.has(mode) || !this.inWorld) return;
+    this.wispWarming.add(mode);
+    this.notice.set(VOL_WARM_NOTICE);
+    const item = pass.marchItem(mode);
+    const target = chain.compileTarget;
+    const o = item.object ?? createFxQuad(item.material);
+    void this.world
+      .programJob([o], 'volumetrics: the wisps', true, { compile: (obj, _allowance, resolve) => ({ made: this.compileFxObject(obj, target, resolve), done: true }) })
+      .then(() => {
+        if (this.postfx === chain) pass.ready[mode] = true;
+      })
+      .finally(() => {
+        // Filed as covered while it still counts so, as the master's own warm is.
+        this.sampleShaders(this.shaderPhase());
+        this.wispWarming.delete(mode);
+        if (!this.wispWarming.size && !this.volWarming && !this.fxBusy) this.notice.set(null);
+      });
+  }
+  private readonly wispWarming = new Set<number>();
 
   /**
    * The blowing sand's picture made a slice a frame (`AirField.sandSlice`, `SAND_ROWS_A_FRAME` rows, about 1.5 ms each),
@@ -12714,21 +12824,26 @@ class App {
    * volume registered on the live chain if the chain was built without it (the master turned on at the select screen,
    * in the creator or in play). Called behind a loading screen only, before the effects' warm-up compiles the pass.
    */
-  private prepareAir(): void {
+  private async prepareAir(): Promise<void> {
     if (!VOL_TUNE.on || VOL_HATCH_OFF) return;
     const air = this.world.ensureAir();
     if (air?.refused) console.info(`volumetrics: the moving air cannot run on this machine: ${air.refused}`);
     if (this.postfx && !this.postfx.pass('airVolume')) this.postfx.registerPass(new AirVolumePass(() => this.world.air));
+    // The fourth wave's: the kick-up's and the rain's meshes in their scenes (so the sweep below compiles them with the
+    // scene), and this world's pictures for the kick-up, uploaded behind this screen, waited for a few seconds at most.
+    this.world.syncAirMeshes();
+    this.loadingScreen.setWhat('the air');
+    await this.world.airPictures(AIR_PICTURE_WAIT_MS);
   }
 
   /** A volumetrics switch as it is in force: the frame report's soft value over the setting. */
-  private volSoftValue(key: 'airVolumeShadows' | 'volLight'): boolean {
+  private volSoftValue(key: 'airVolumeShadows' | 'volLight' | 'volParticles' | 'volRain'): boolean {
     const over = this.volOver[key];
     return typeof over === 'boolean' ? over : this.settings[key];
   }
 
   /** A volumetrics switch moved for an A/B (`__debug.perf({ ab })`): in force now, the setting left alone, nothing built. */
-  private volSoft(key: 'airVolumeShadows' | 'volLight', on: boolean): void {
+  private volSoft(key: 'airVolumeShadows' | 'volLight' | 'volParticles' | 'volRain', on: boolean): void {
     if (on === this.settings[key]) delete this.volOver[key];
     else this.volOver[key] = on;
     this.applyVolumetrics();
@@ -13402,10 +13517,14 @@ class App {
    * The feet's one listener, chained once (the volumetrics' second wave, the design's §2.7): a step on ground that keeps
    * marks presses a dent in the moving air's field and lays no decal; any other step -- indoors, on a deck, off the dent
    * square, on rock, with the prints or the master off, or no field at all -- lays today's decal exactly as today. A step
-   * is one or the other, never both. A bound field, so the wiring makes no closure.
+   * is one or the other, never both. A bound field, so the wiring makes no closure. And beside either (the fourth wave,
+   * the owner's `volFromFeet`): a running foot kicks a couple of leaves off grass and forest litter, or spray where it
+   * wades (`AirField.kickFeet`, which asks every switch itself and does nothing with the master off).
    */
   private readonly stepPrint = (step: FootStep): void => {
-    if (!this.world.air?.dentStep(step)) footprints.stepHook(step);
+    const air = this.world.air;
+    if (!air?.dentStep(step)) footprints.stepHook(step);
+    if (air) air.kickFeet(step);
   };
 
   /**
@@ -17157,12 +17276,14 @@ class App {
     // has none yet (in its first wave the master's "on" waits for an arrival, and this is it), and the chain given the
     // volume pass if it lacks one, before the effects' warm-up below compiles it; the air's own materials are compiled
     // by the sweep. With the master off, nothing.
-    this.prepareAir();
+    await this.prepareAir();
     // Every pass and product too, whether it is on or not, so turning one on later or the sun
     // coming on screen for the first time never compiles on a live frame.
     if (this.postfx) {
       const warmed = await this.postfx.warmUp();
       if (warmed) console.info(`effects: ${warmed} programs warmed`);
+      // Every wisps mode's march is built now, behind the screen: the in-play warm's "only the mode in force" is over.
+      (this.postfx.pass('airVolume') as AirVolumePass | undefined)?.ready.fill(true);
     }
     // Space combat's effects (hits, target brackets, explosions, damage bands, every projectile): their batches
     // made hidden and their textures uploaded, so the first hit neither compiles nor uploads.
@@ -17278,7 +17399,7 @@ class App {
    */
   private shaderPhase(): ProgramPhase {
     if (this.loadingScreen.open || this.traveling) return 'loading';
-    if (this.fxBusy || this.volWarming || this.hyperspace.covered) return 'covered';
+    if (this.fxBusy || this.volWarming || this.wispWarming.size > 0 || this.hyperspace.covered) return 'covered';
     if (!this.inWorld || !this.started) return 'boot';
     return 'play';
   }
@@ -21940,7 +22061,7 @@ class App {
       this.fxBusy = false;
       // Every volumetrics setting also passes through here (it is an effects setting); the master's own warm may have its
       // notice up meanwhile, which is not this switch's to take down.
-      this.notice.set(this.volWarming ? VOL_WARM_NOTICE : null);
+      this.notice.set(this.volWarming || this.wispWarming.size > 0 ? VOL_WARM_NOTICE : null);
       this.lastPrograms = this.renderer.info.programs?.length ?? 0;
     }
   }

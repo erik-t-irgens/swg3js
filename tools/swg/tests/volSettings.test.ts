@@ -63,6 +63,19 @@ const types: Record<string, string> = {
   volSmokeDetail: 'number',
   volDustWisps: 'number',
   volDustLayers: 'boolean',
+  // The fourth wave's: what the air carries besides dust, and the rain and snow of ours.
+  volParticles: 'boolean',
+  volLeaves: 'boolean',
+  volPuffs: 'boolean',
+  volSpray: 'boolean',
+  volStreaks: 'boolean',
+  volParticleDetail: 'number',
+  volParticleShadows: 'boolean',
+  volRain: 'boolean',
+  volSnow: 'boolean',
+  volRainDetail: 'number',
+  volRainThin: 'number',
+  volSnowThin: 'number',
 };
 for (const k of VOL_KEYS) ok(typeof S[k] === types[k], `"${k}" is in the defaults as a ${types[k]}`);
 ok(Object.keys(types).length === VOL_KEYS.length, 'and those are every key the pass speaks for, no more');
@@ -83,18 +96,25 @@ ok(!(VOL_QUALITY_KEYS as readonly string[]).includes('volDustBright') && !(VOL_Q
   ok(!Number.isInteger(t.dustBright) && !Number.isInteger(t.dustSelfShadow), 'their fields in the kept record start as fractions, so each is a double from its first write');
 }
 // No later wave's key is in this build at all, shown or hidden.
-for (const later of ['volCurrent', 'volLiquidDetail', 'volLava', 'volGrass', 'volArtWater', 'volArtLava', 'volArtGrass', 'volFromPeers', 'volParticleDetail', 'volRainDetail']) {
+for (const later of ['volCurrent', 'volLiquidDetail', 'volLava', 'volGrass', 'volArtWater', 'volArtLava', 'volArtGrass', 'volFromPeers']) {
   ok(!(later in S), `"${later}" (a later wave's) is not in this build`);
 }
 // The third wave's: the layers, smoke and fog details and a field a layer are targets made again (class T), the wisps a
 // march material a mode (class M, the Start's decision), smoke and fog switches the frame reads (C); a dust field a layer
 // is off by default and on Ultra alone (the owner's answer).
 ok(VOL_APPLY_CLASS.volAirLayers === 'T' && VOL_APPLY_CLASS.volSmokeDetail === 'T' && VOL_APPLY_CLASS.volDustLayers === 'T', "the layers, the smoke's detail and a dust field a layer are class T: targets made again");
-ok(VOL_APPLY_CLASS.volDustWisps === 'M', 'the wisps are class M: one march material a mode, all four compiled while the master is on');
+ok(VOL_APPLY_CLASS.volDustWisps === 'W', "the wisps are class W from the fourth wave: one march material a mode, all four built behind a loading screen, and the master's in-play warm building the mode in force alone, a mode moved to later warmed off the frame (W3's carried cold warm)");
 ok(VOL_APPLY_CLASS.volSmoke === 'C' && VOL_APPLY_CLASS.volFog === 'C', 'smoke and fog are switches the frame reads');
 ok(S.volDustLayers === false && VOL_PRESETS.ultra.volDustLayers === true && VOL_PRESET_NAMES.filter((n) => VOL_PRESETS[n].volDustLayers === true).join() === 'ultra', 'a dust field a layer is off by default and on Ultra alone');
 ok(S.volSmoke === true && S.volFog === true && S.volAirLayers === 3 && S.volDustWisps === 2 && S.volSmokeDetail === 2, "High's third-wave numbers are the defaults: three layers, smoke and fog on, one octave of wisps");
 ok(VOL_PRESETS.low.volDustWisps === 0 && VOL_PRESETS.medium.volDustWisps === 1 && VOL_PRESETS.high.volDustWisps === 2 && VOL_PRESETS.ultra.volDustWisps === 3, 'the wisps by preset: off, bands, noise, noise ×2');
+// The fourth wave's: the kinds and the rain switches the frame reads, the pools' counts targets made again, the
+// leaves' shadow and the sheets' thinning uniforms; the particles, every kind and the rain on, the snow off until asked
+// (the owner's), the game's own sheets wholly stood down while ours falls.
+ok(['volParticles', 'volLeaves', 'volPuffs', 'volSpray', 'volStreaks', 'volRain', 'volSnow'].every((k) => VOL_APPLY_CLASS[k as keyof typeof VOL_APPLY_CLASS] === 'C') && VOL_APPLY_CLASS.volParticleDetail === 'T' && VOL_APPLY_CLASS.volRainDetail === 'T' && VOL_APPLY_CLASS.volParticleShadows === 'U' && VOL_APPLY_CLASS.volRainThin === 'U' && VOL_APPLY_CLASS.volSnowThin === 'U', "the fourth wave's switches are read by the frame, its counts are targets made again, the leaves' shadow and the thinning are uniforms");
+ok(S.volParticles === true && S.volLeaves === true && S.volPuffs === true && S.volSpray === true && S.volStreaks === true && S.volRain === true && S.volSnow === false && S.volRainThin === 1 && S.volSnowThin === 1, 'the particles, every kind and the rain start on, the snow off; the game\'s own sheets stood down whole while ours falls');
+ok(VOL_PRESETS.low.volParticleDetail === 0.5 && VOL_PRESETS.medium.volParticleDetail === 1 && VOL_PRESETS.high.volParticleDetail === 1 && VOL_PRESETS.ultra.volParticleDetail === 2 && VOL_PRESETS.low.volRainDetail === 4096 && VOL_PRESETS.ultra.volRainDetail === 32768 && VOL_PRESETS.low.volParticleShadows === false, "the pools' counts by preset: half, whole, whole and twice High's particles; 4,096 to 32,768 drops; the leaves' shadow off on Low");
+ok(VOL_QUALITY_WAVE === 4 && VOL_QUALITY_ADDED.volParticleDetail === 4 && VOL_QUALITY_ADDED.volRainDetail === 4 && VOL_QUALITY_ADDED.volParticleShadows === 4, "this build saves its files as the fourth wave's, and its three quality keys say so");
 
 // --- presets ---
 ok(presetOf(DEFAULT_SETTINGS) === 'high', 'the defaults work out to High');
@@ -189,6 +209,40 @@ ok(!(VOL_QUALITY_KEYS as readonly string[]).some((k) => ['volumetrics', 'airVolu
   const fields = Object.keys(newVolTune());
   ok(fields.every((f) => typeof (VOL_TUNE as unknown as Record<string, unknown>)[f] === typeof (newVolTune() as unknown as Record<string, unknown>)[f]), 'the session\'s record has every field, its first values the right types');
   ok(newVolTune().stormThin === 0.5 && Number.isInteger(newVolTune().stormThin) === false, 'a field that holds a fraction starts as one');
+  volQualityFrom(DEFAULT_SETTINGS, out);
+  ok(out.particles && out.leaves && out.puffs && out.spray && out.streaks && out.rain && !out.snow && out.particleDetail === 1 && out.rainDetail === 16384 && out.rainThin === 1 && out.snowThin === 1, "and the fourth wave's: the particles, every kind and the rain on, the snow off, High's counts");
+  volQualityFrom({ ...DEFAULT_SETTINGS, volParticleDetail: 3, volRainDetail: 999, volRainThin: 4 } as Settings, out);
+  ok(out.particleDetail === 1 && out.rainDetail === 16384 && out.rainThin === 1, "a hand-edited count not on the list takes High's, the thinning held to its ends");
+  // Every switch of the fourth wave, moved away from its default alone, moves its own field of the record and no other's
+  // (a switch written as its default would pass every check above).
+  const SWITCHES: [keyof Settings, keyof typeof out][] = [
+    ['volParticles', 'particles'],
+    ['volLeaves', 'leaves'],
+    ['volPuffs', 'puffs'],
+    ['volSpray', 'spray'],
+    ['volStreaks', 'streaks'],
+    ['volParticleShadows', 'particleShadows'],
+    ['volRain', 'rain'],
+    ['volSnow', 'snow'],
+    ['volFromFeet', 'fromFeet'],
+  ];
+  const base = { ...volQualityFrom(DEFAULT_SETTINGS, newVolTune()) } as unknown as Record<string, unknown>;
+  for (const [key, field] of SWITCHES) {
+    const flipped = !(S[key] as boolean);
+    const got = volQualityFrom({ ...DEFAULT_SETTINGS, [key]: flipped } as Settings, newVolTune()) as unknown as Record<string, unknown>;
+    const others = Object.keys(base).filter((f) => f !== field && got[f] !== base[f]);
+    ok(got[field] === flipped && others.length === 0, `"${key}" flipped to ${flipped} moves the record's "${String(field)}" and nothing else${others.length ? ` (also moved: ${others.join(', ')})` : ''}`);
+  }
+  for (const [key, field, v] of [['volRainThin', 'rainThin', 0.25], ['volSnowThin', 'snowThin', 0.4], ['volParticleDetail', 'particleDetail', 2], ['volRainDetail', 'rainDetail', 4096]] as [keyof Settings, string, number][]) {
+    const got = volQualityFrom({ ...DEFAULT_SETTINGS, [key]: v } as Settings, newVolTune()) as unknown as Record<string, unknown>;
+    ok(got[field] === v, `"${key}" at ${v} is the record's "${field}"`);
+  }
+  // The record a node test builds (`newVolTune`) is the record the game's defaults write, for the fourth wave's fields:
+  // a harness run on the one never stands at numbers the shipped game does not.
+  const fresh = newVolTune() as unknown as Record<string, unknown>;
+  const W4 = ['particles', 'leaves', 'puffs', 'spray', 'streaks', 'particleDetail', 'particleShadows', 'rain', 'snow', 'rainDetail', 'rainThin', 'snowThin'];
+  const differ = W4.filter((f) => fresh[f] !== base[f]);
+  ok(differ.length === 0, `newVolTune() holds the fourth wave's every field at the defaults' own value${differ.length ? ` (differs: ${differ.map((f) => `${f} ${String(fresh[f])} against ${String(base[f])}`).join(', ')})` : ''}`);
 }
 
 // --- the console ---

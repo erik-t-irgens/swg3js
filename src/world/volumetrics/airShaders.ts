@@ -1234,6 +1234,13 @@ void main() {
 }
 `;
 
+/**
+ * The slabs' air read in the window's uv (`slabVelAt`) and sRGB bytes into linear light (`srgbToLinear`), for the fourth
+ * wave's particles and rain (`airParticleShaders.ts`): the very lines the field's own passes read with, never a copy.
+ */
+export const SLAB_VEL_GLSL = SLAB_VEL;
+export const SRGB_GLSL = SRGB;
+
 /** Every fragment shader of the air's own passes by name, for the scanner and the self test. */
 export const AIR_FRAGMENTS: Readonly<Record<string, string>> = {
   splat: SPLAT_FRAGMENT,

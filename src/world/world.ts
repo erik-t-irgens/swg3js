@@ -11,7 +11,7 @@ import { MobileCatalogue } from './mobiles/catalogue';
 import { scratchWanted } from './spawnSeed.ts';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
-import { Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
+import { PARTICLE_UNIFORMS, Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
 import { WEATHER_UNIFORMS, WET_WRAP, wetWrap } from './wetness';
 import { detailWrap } from './detailMap.ts';
 import { specWrap } from './specular.ts';
@@ -129,7 +129,9 @@ import { Dust, type GrainGround } from '../vehicles/dust';
 import { AirField, newAirFrameInput, type AirWorld } from './volumetrics/airField.ts';
 import type { GroundSampler } from './volumetrics/airRaster.ts';
 import type { SolidBoxSource } from './volumetrics/airObstacles.ts';
-import { fillResponseTable, type FamilyFacts } from './volumetrics/groundResponse.ts';
+import { fillClassTable, fillResponseTable, type FamilyFacts } from './volumetrics/groundResponse.ts';
+import { fallShare, rainColourIn, sheetFactor, type RainLight } from './volumetrics/airParticleMath.ts';
+import { KICK_KIND } from './volumetrics/airSpawn.ts';
 import { groundAirMaterial, groundMaterialFor, groundWearsAir, makeAirGroundUniforms, swapGroundMaterial, type GroundChoice } from './volumetrics/airGround.ts';
 import { grainShedIn, newGrainShed, sheddingCount, stormSheetFactor } from './volumetrics/airMath.ts';
 import { AIR_TUNE, FOG_LOOKS_STAMP, GROUND_FOG_LOOKS } from './volumetrics/airTune.ts';
@@ -153,6 +155,22 @@ import { clashes } from '../combat/clash.ts';
 
 const tmpQ = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
+
+/**
+ * The rain's colour's kept record (the volumetrics' fourth wave, `rainColourIn`), every number field and element made a
+ * fraction first and then set to its start, so each is a double from its first write: the sky's scales and the brightness
+ * are fractions written every raining frame into a record that began as small integers otherwise.
+ */
+function newRainLight(): RainLight & { ambient: [number, number, number]; main: [number, number, number] } {
+  const L = { ambient: [0.3, 0.3, 0.3] as [number, number, number], ambientScale: 0.5, main: [0.5, 0.5, 0.5] as [number, number, number], mainScale: 0.5, sunY: 0.5, overcast: 0.5, sunUpTo: 0.1, bright: 0.5 };
+  L.ambientScale = 1;
+  L.main[0] = 1;
+  L.main[1] = 1;
+  L.main[2] = 1;
+  L.mainScale = 1;
+  L.bright = 1;
+  return L;
+}
 /** The box a world of copies tests a standing person against (`World.inCopy`), kept so the test allocates nothing. */
 const copyBox = new THREE.Box3();
 /** The ground's normal under a foot, for the print laid there; a step allocates nothing. */
@@ -982,7 +1000,19 @@ export class World {
    * What the field reads of the world; from wave 2b the session ground material's own tint uniforms, which the
    * dust pass holds by reference so its colour is tinted in the drawn ground's own mode.
    */
-  private readonly airWorld: AirWorld = { ground: this.airGround, boxes: this.airBoxes, hulls: this.vehicles, groundTint: groundTileUniforms() };
+  private readonly airWorld: AirWorld = { ground: this.airGround, boxes: this.airBoxes, hulls: this.vehicles, groundTint: groundTileUniforms(), rainHull: PARTICLE_UNIFORMS };
+  /**
+   * The fourth wave's pictures (`airPictures`): what each of the kick-up's leaves, puffs and spray draws with, borrowed
+   * from an effect that already holds it (the world's or the weather's) or this world's own copy, loaded behind a loading
+   * screen or the master's in-play warm and let go with the world (`dropAirPictures`); the copies this world loaded are
+   * disposed then, the borrowed ones never. A copy's address that answered nothing is not asked again this session.
+   */
+  private readonly airPictureCopies: THREE.Texture[] = [];
+  private readonly airPictureMissing = new Set<string>();
+  private airPicturesFor = '';
+  /** The rain's colour's kept record and answer (`rainColourIn`); every number field a double from the start (`newRainLight`). */
+  private readonly rainLight = newRainLight();
+  private readonly rainRgb: [number, number, number] = [0.5, 0.5, 0.5];
   /** What the family tables were last made from: the ground's textures and the terrain's own generator, by identity, and the dust's tone. */
   private airTablesFor: { textures: unknown; swg: unknown; tone: number } = { textures: undefined, swg: undefined, tone: -1 };
   /** The world's colour reference as the raster's `tintedAt` reads it, refilled each frame from the ground's own uniform (nothing made). */
@@ -2175,6 +2205,12 @@ export class World {
     this.airMotes = 0;
     this.dust.ground = null;
     this.weather.stormSheetScale = 1;
+    // The fourth wave's: every picture the kick-up borrowed let go before the effects that hold them are disposed below
+    // and the weather detaches, this world's own copies disposed, and the sheets and the pass today's again.
+    this.dropAirPictures();
+    this.weather.rainSheetScale = 1;
+    this.weather.snowSheetScale = 1;
+    this.weather.airRainDraws = false;
     // Every bed, emitter and weather channel let go before the things they follow are disposed: the
     // particle effects go a few lines down, and a loop left on one would follow a point in a world
     // that has gone. The sky and the effects are wired again on the next planet's first frames.
@@ -3273,10 +3309,185 @@ export class World {
    * the ground variant's uniforms: from now on this field, and no other, writes what the variant reads.
    */
   takeAir(air: AirField): void {
-    if (this.air && this.air !== air) this.air.bindGround(null);
+    if (this.air && this.air !== air) {
+      this.air.bindGround(null);
+      // The field let go takes its meshes with it: only the world's field stands in the scenes.
+      this.unhangAir(this.air);
+    }
     this.air = air;
     air.bindGround(this.airGroundU);
     this.airTablesFor = { textures: undefined, swg: undefined, tone: -1 };
+    this.syncAirMeshes();
+  }
+
+  /**
+   * The fourth wave's meshes where they draw (class P: an add or a remove, no program): the kick-up's four in the world's
+   * scene and the rain's in the weather's own, while the master is on and the field can run; out of both otherwise, with
+   * the weather's hand-overs today's. They stand there with every switch of theirs off too, hidden, so the sweep behind
+   * every loading screen compiles them with the scene and a switch moved in play builds nothing; the field hides and
+   * shows them each frame. Called when the field is taken, the master or a kind's switch moves, and at an arrival.
+   */
+  syncAirMeshes(): void {
+    const air = this.air;
+    const want = air !== null && VOL_TUNE.on && air.refused === null;
+    if (!air) return;
+    if (!want) {
+      this.unhangAir(air);
+      return;
+    }
+    for (const m of air.kick.meshes) if (m.parent !== this.scene) this.scene.add(m);
+    if (air.rain.mesh.parent !== this.weather.scene) this.weather.scene.add(air.rain.mesh);
+    const mats = this.weather.airMaterials;
+    if (!mats.includes(air.rain.drawMaterial)) mats.push(air.rain.drawMaterial);
+  }
+
+  /** A field's meshes out of both scenes and its material off the weather's list, the hand-overs today's. */
+  private unhangAir(air: AirField): void {
+    for (const m of air.kick.meshes) m.removeFromParent();
+    air.rain.mesh.removeFromParent();
+    air.rain.drawing = false;
+    air.rain.mesh.visible = false;
+    const mats = this.weather.airMaterials;
+    const i = mats.indexOf(air.rain.drawMaterial);
+    if (i >= 0) mats.splice(i, 1);
+    this.weather.rainSheetScale = 1;
+    this.weather.snowSheetScale = 1;
+    this.weather.airRainDraws = false;
+  }
+
+  /**
+   * One stand-in each of the kick-up's two draw programs (the leaves' cut one and the blended kinds' one), for the
+   * master's in-play warm, which compiles them through the world's queue against the world pass's scene (the meshes
+   * themselves stand in the scene from the take on, and every later sweep compiles them there). None without a field.
+   */
+  kickStandInsFor(air: AirField | null): THREE.Mesh[] {
+    if (!air || air.refused !== null) return [];
+    return air.kick.standIns;
+  }
+
+  /**
+   * The rain's draw compiled for the frames' target against the weather's own scene (no lights, no fog), as the weather's
+   * sheets are, through the world's program queue: the master's in-play warm's half for the rain (class W). Resolves
+   * once its link is done; nothing without a field.
+   */
+  rainWarmJob(air: AirField | null): Promise<void> {
+    const r = this.renderer;
+    const camera = this.camera;
+    if (!air || air.refused !== null || !r || !camera) return Promise.resolve();
+    const mesh = air.rain.mesh;
+    return this.programJob([mesh], 'volumetrics: the rain', true, {
+      compile: (o, _allowance, resolve) => {
+        const was = r.info.programs?.length ?? 0;
+        this.withTarget(r, this.compileTarget(), () => r.compile(o, camera, this.weather.scene));
+        if (resolve) this.programs.countLinks(resolveLinks(r, o));
+        return { made: (r.info.programs?.length ?? 0) - was, done: true };
+      },
+    });
+  }
+
+  /**
+   * The kick-up's pictures for this world (§2.16; the owner's Q14 recorded in W4-notes.md): the leaf (`pt_leaf` where
+   * Corellia's pack carries the green one, `pt_leaf_single` everywhere else), the game's sand cloud for the puffs, and
+   * the fountain splash for the spray -- Dathomir's own `pt_sm_splash_bright` there -- since the game's own vehicle water
+   * trail's splash is in no converted pack (the trail keeps its look: its sizes, colour, life and throw are the tune's
+   * `wake*`). Each is borrowed from an effect of this world's or the weather's that already holds it, else loaded as this
+   * world's own copy from the world's pack and then the props pack's, `renderer.initTexture` behind the screen; a kind
+   * with no picture draws nothing and says why. Bounded by `waitMs`; a load that lands after hands its picture over then.
+   * Behind a loading screen or the in-play warm only, never in a frame.
+   */
+  async airPictures(waitMs = 3000): Promise<void> {
+    const air = this.air;
+    const pack = this.pack;
+    if (!air || air.refused !== null || !VOL_TUNE.on || !this.planet || this.planet.space || !pack) return;
+    const id = this.packId ?? '';
+    if (this.airPicturesFor === id) return;
+    this.airPicturesFor = id;
+    const props = `${import.meta.env.BASE_URL}assets-private/props/`;
+    // Each kind's pictures by name, and where a copy is asked for, in order, by the packs the design's survey found holding
+    // each (W4-notes.md §1): the leaf in every ground world's own pack (the props pack has none); the sand cloud in the
+    // world's own and the props pack; the fountain splash in the props pack and eight worlds' own, so the props pack is
+    // asked first and a world without it is never asked for it (Dathomir's own splash is its pack's).
+    const leaf = id === 'corellia' ? ['particles/pt_leaf.png', 'particles/pt_leaf_single.png'] : ['particles/pt_leaf_single.png'];
+    const want: [number, string[], string[]][] = [
+      [KICK_KIND.leaf, leaf, leaf.map((f) => pack.url(f))],
+      [KICK_KIND.puff, ['particles/pt_sand_cloud.png'], [pack.url('particles/pt_sand_cloud.png'), `${props}particles/pt_sand_cloud.png`]],
+      id === 'dathomir'
+        ? [KICK_KIND.spray, ['particles/pt_sm_splash_bright.png', 'particles/pt_fountain_splash_alpha.png'], [pack.url('particles/pt_sm_splash_bright.png'), `${props}particles/pt_fountain_splash_alpha.png`]]
+        : [KICK_KIND.spray, ['particles/pt_fountain_splash_alpha.png'], [`${props}particles/pt_fountain_splash_alpha.png`, pack.url('particles/pt_fountain_splash_alpha.png')]],
+    ];
+    const jobs: Promise<void>[] = [];
+    for (const [kind, files, addresses] of want) {
+      let held: THREE.Texture | null = null;
+      for (const f of files) {
+        held = this.particles?.loadedTexture(f) ?? this.weather.effectTexture(f);
+        if (held) break;
+      }
+      if (held) {
+        air.kick.setPicture(kind, held, null);
+        continue;
+      }
+      // A copy of its own, by the addresses in order; one that answered missing (a 404, and only that) is not asked again.
+      jobs.push(this.loadAirPicture(addresses.filter((u) => !this.airPictureMissing.has(u))).then((t) => {
+        if (this.air !== air || this.airPicturesFor !== id) {
+          t?.dispose();
+          return;
+        }
+        if (t) {
+          this.airPictureCopies.push(t);
+          if (this.renderer) this.renderer.initTexture(t);
+          air.kick.setPicture(kind, t, null);
+        } else air.kick.setPicture(kind, null, `no ${files.map((f) => f.replace('particles/', '').replace('.png', '')).join(' or ')} in this world's pack or the props pack`);
+      }));
+    }
+    if (!jobs.length) return;
+    await Promise.race([Promise.all(jobs), new Promise((r) => setTimeout(r, Math.max(0, waitMs)))]);
+  }
+
+  /**
+   * The first of the addresses that loads, as a picture of the particles' own settings, or null. Fetched first so the
+   * answer is known: a 404, and only a 404, is remembered for the session (the performance pass's rule for asking); a page
+   * handed back for a missing file (`vite preview` answers one with a 200), a failed request or a picture that would not
+   * decode is a moment's, and is asked again at the next world.
+   */
+  private async loadAirPicture(urls: string[]): Promise<THREE.Texture | null> {
+    const loader = new THREE.TextureLoader();
+    for (const u of urls) {
+      let blob: Blob | null = null;
+      try {
+        const res = await fetch(u);
+        if (res.status === 404) {
+          this.airPictureMissing.add(u);
+          continue;
+        }
+        if (!res.ok || (res.headers.get('content-type') ?? '').includes('text/html')) continue;
+        blob = await res.blob();
+      } catch {
+        continue;
+      }
+      const local = URL.createObjectURL(blob);
+      const t = await new Promise<THREE.Texture | null>((resolve) => {
+        loader.load(local, (tex) => resolve(tex), undefined, () => resolve(null));
+      });
+      URL.revokeObjectURL(local);
+      if (t) {
+        t.colorSpace = THREE.SRGBColorSpace;
+        t.flipY = false;
+        t.wrapS = THREE.ClampToEdgeWrapping;
+        t.wrapT = THREE.ClampToEdgeWrapping;
+        t.name = `air.${u.slice(u.lastIndexOf('/') + 1)}`;
+        t.needsUpdate = true;
+        return t;
+      }
+    }
+    return null;
+  }
+
+  /** Every borrowed picture let go to the pool's stand-in and this world's own copies disposed (an unload, the master off). */
+  dropAirPictures(): void {
+    this.air?.kick.dropPictures();
+    for (const t of this.airPictureCopies) t.dispose();
+    this.airPictureCopies.length = 0;
+    this.airPicturesFor = '';
   }
 
   /** Make the family tables again at the next frame (a family overridden from the console: a texture upload, no program). */
@@ -3309,6 +3520,11 @@ export class World {
     const response = new Uint8Array(size * 4);
     const colour = new Uint8Array(size * 4);
     fillResponseTable(this.packId ?? '', families, response);
+    // Each family's ground class (the fourth wave's: leaves off grass and forest litter, puffs and streaks off sand, ash
+    // and dirt), as the class raster's byte reads it (`CLASS_INDEX`).
+    const klass = new Uint8Array(size);
+    fillClassTable(this.packId ?? '', families, klass);
+    air.raster.familyClass = klass;
     // Each family's lighter tones at the dust's tone (wave 2b's: the part of the picture the sun lights, not its
     // gaps), a CPU walk at a world's load and again when the owner's dial moves.
     const c = new THREE.Color();
@@ -3379,6 +3595,9 @@ export class World {
     const air = this.air;
     if (!air || !this.camera) {
       this.weather.stormSheetScale = 1;
+      this.weather.rainSheetScale = 1;
+      this.weather.snowSheetScale = 1;
+      this.weather.airRainDraws = false;
       this.dust.ground = null;
       return;
     }
@@ -3405,10 +3624,15 @@ export class World {
     // what the field keeps its offsets and dents for.
     this.syncGroundMaterial();
     inp.ground = this.groundWearsAirNow;
+    // The fourth wave's frame for the rain of ours, before the field's step reads whether anything wants the air.
+    // Raw `dt`, as the field and the weather's own sheets take it: the rain falls on behind a panel as they do. The share
+    // is read back off the pool's kept record (`frame.share`), never handed back across the call.
+    this.writeRainFrame(air, dt);
     // Something reads the air (§2.4): the volume, on the chain and wanted, which is Effects on with its switch on, or
-    // the ground wearing the air's variant. With nothing reading it the rasters are kept (the grains read them) and
+    // the ground wearing the air's variant, or (the fourth wave) what the air carries besides dust -- the kick-up with
+    // its switch on, the rain of ours falling. With nothing reading it the rasters are kept (the grains read them) and
     // nothing is stepped.
-    inp.reading = reading || inp.ground;
+    inp.reading = reading || inp.ground || (VOL_TUNE.particles && (VOL_TUNE.leaves || VOL_TUNE.puffs || VOL_TUNE.spray || VOL_TUNE.streaks)) || air.rain.frame.share > 0;
     inp.where = this.airSoftOff ? 'held off by the frame report' : !this.planet ? 'no world' : this.planet.space ? 'in space there is no air' : this.groundTextures?.empty ? 'the ground here is never drawn' : viewInBuilding ? 'the camera is in a building' : this.inside ? 'the player is in a building' : null;
     if (inp.where === null) this.airTables(air);
     // How the drawn ground tints its colour now, for the raster's own `tintedAt` (the motes, the storm's colour): the
@@ -3427,7 +3651,16 @@ export class World {
     const hull = this.weatherHull;
     const b = hull?.spec.bounds;
     air.setHull(hull && b ? hull.group.matrixWorld : null, b ? b.min : null, b ? b.max : null);
+    this.writeKickLight(air);
     air.update(inp);
+    // The rain of ours on every path out of the field's frame (it falls past a doorway while the air indoors stands
+    // still), then the weather's hand-overs: the pass and the roof grid kept for our drops, and the game's own rain or
+    // snow sheets thinned while ours draws that fall, exactly 1 otherwise.
+    air.stepRain();
+    const drew = air.rain.drawing;
+    this.weather.airRainDraws = drew;
+    this.weather.rainSheetScale = sheetFactor(drew && !air.rain.frame.snow, VOL_TUNE.rainThin);
+    this.weather.snowSheetScale = sheetFactor(drew && air.rain.frame.snow, VOL_TUNE.snowThin);
     // The grains fall onto the field's own height raster while its dust and the kick-up are on.
     if (air.forces.active && VOL_TUNE.dust && VOL_TUNE.kickUp) {
       const g = this.grainGround;
@@ -3446,6 +3679,95 @@ export class World {
     this.weather.stormSheetScale = stormSheetFactor(air.volumeDrew, inp.storm, VOL_TUNE.stormThin);
     air.volumeDrew = false;
     air.noteDust(this.airMotes, this.dust.grainsFlying, this.dust.grainsLying, this.weather.stormSheetScale);
+  }
+
+  /**
+   * The rain of ours's frame into the pool's kept record (the fourth wave; no number handed across a call): which falls
+   * (snow where more snow than rain falls, each on its own switch), its share of the slots -- the weather's fall times the
+   * page's density times how much of the sky is over the camera, the sheets' own share; nought in space, in the world of
+   * copies, under water, with the weather off or the master off -- its alpha (the page's rain opacity for rain), the
+   * camera, the weather's wind at the air's own scale, the screen's height, the sky's colour for the streaks and the
+   * scene's fog. The share is the record's (`frame.share`), never an answer handed back across the call, which boxes a
+   * fraction on every raining frame. A `dt` of nought (a driven step of nothing) leaves the drops hanging where they are.
+   */
+  private writeRainFrame(air: AirField, dt: number): void {
+    const f = air.rain.frame;
+    const fx = this.weather.fx;
+    const ws = this.weather.state;
+    const planet = this.planet;
+    // The console's hold (`air({ rain })`) stands over the weather's fall and its kind.
+    const hold = this.airRainHold;
+    const snowFalls = hold.snow !== null ? hold.snow : fx.snow > fx.rain;
+    const kindOn = snowFalls ? VOL_TUNE.snow : VOL_TUNE.rain;
+    // Nothing while the mesh is not hung in the weather's scene (the master's in-play warm not done): the sheets stay whole.
+    const hung = air.rain.mesh.parent === this.weather.scene;
+    const share =
+      !hung || !VOL_TUNE.on || !planet || planet.space || planet.instances || ws.underwater || !kindOn
+        ? 0
+        : hold.share !== null
+          ? fallShare(hold.share, 1, ws.outside)
+          : !ws.enabled
+            ? 0
+            : fallShare(snowFalls ? fx.snow : fx.rain, this.weather.fallDensity, ws.outside);
+    f.dt = dt;
+    f.share = share;
+    f.snow = snowFalls;
+    f.alpha = snowFalls ? AIR_TUNE.rain.snowAlpha : this.weather.rainOpacity * AIR_TUNE.rain.alpha;
+    if (!(share > 0)) return;
+    const cam = this.camera!.position;
+    f.camX = cam.x;
+    f.camY = cam.y;
+    f.camZ = cam.z;
+    const s = (Number.isFinite(ws.windSpeed) ? ws.windSpeed : 0) * AIR_TUNE.wind.scale;
+    f.windX = Math.sin(ws.windHeading) * s;
+    f.windZ = Math.cos(ws.windHeading) * s;
+    this.renderer?.getDrawingBufferSize(this.rainBuf);
+    f.screen = this.rainBuf.y > 1 ? this.rainBuf.y : 1080;
+    // The streaks' colour: the sky's own ambient and main light at their own scales, the sun's height and the overcast.
+    const L = this.swgSky?.lighting;
+    const rl = this.rainLight;
+    if (L) {
+      rl.ambient[0] = L.ambient.r;
+      rl.ambient[1] = L.ambient.g;
+      rl.ambient[2] = L.ambient.b;
+      rl.ambientScale = L.ambientScale;
+      rl.main[0] = L.main.r;
+      rl.main[1] = L.main.g;
+      rl.main[2] = L.main.b;
+      rl.mainScale = L.mainScale;
+    }
+    rl.sunY = this.day.sunDir.y;
+    rl.overcast = fx.overcast;
+    rl.sunUpTo = AIR_TUNE.rain.sunUpTo;
+    rl.bright = AIR_TUNE.rain.bright;
+    const c = rainColourIn(rl, this.rainRgb);
+    air.rain.colour.setRGB(c[0], c[1], c[2]);
+    // The scene's fog, as the sheets take theirs (the weather's own scene has none).
+    const fog = this.scene.fog;
+    if (fog instanceof THREE.FogExp2) {
+      air.rain.fogDensity.value = fog.density;
+      air.rain.fogColour.value.copy(fog.color);
+    } else air.rain.fogDensity.value = 0;
+  }
+  private readonly rainBuf = new THREE.Vector2(1920, 1080);
+  /** The console's hold over the rain of ours (`air({ rain })`): a share of its slots and a kind, null each for the weather's. */
+  readonly airRainHold = { share: null as number | null, snow: null as boolean | null };
+
+  /**
+   * The sky's light the kick-up's blended kinds and the rain take, into the field's kept record: the sun's direction, its
+   * colour at the day's daylight (the volume's own reading: dark once it has set, whole in space) and the sky's ambient.
+   */
+  private writeKickLight(air: AirField): void {
+    const k = air.kickLight;
+    const d = k.sunDir.value;
+    d.copy(this.sun.position).sub(this.sun.target.position);
+    if (d.lengthSq() > 1e-9) d.normalize();
+    else d.set(0, 1, 0);
+    const space = !!this.planet?.space;
+    const up = space ? 1 : this.day.sunDir.y > 0.02 ? this.day.daylight : 0;
+    k.sunColour.value.copy(this.sun.color).multiplyScalar(up > 0 ? up : 0);
+    const L = this.swgSky?.lighting;
+    if (L) k.ambient.value.copy(L.ambient);
   }
 
   /** The colour of the ground at a point: its texture family's mean on a real planet, the palette's elsewhere. */

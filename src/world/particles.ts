@@ -1444,6 +1444,17 @@ export class ParticleEffects {
     return p;
   }
 
+  /**
+   * A picture these effects already hold, loaded and not failed, or null (the volumetrics' fourth wave borrows the game's
+   * own leaf, sand cloud and splash this way rather than fetching a copy). Starts no load and makes nothing.
+   */
+  loadedTexture(file: string): THREE.Texture | null {
+    const t = this.textures.get(file);
+    if (!t || this.textureErrors.has(file) || this.disposed) return null;
+    const img = t.image as { width?: number } | null | undefined;
+    return img && (img.width ?? 0) > 0 ? t : null;
+  }
+
   private texture(file: string): THREE.Texture {
     let t = this.textures.get(file);
     if (!t) {

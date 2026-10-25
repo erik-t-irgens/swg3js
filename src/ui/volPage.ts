@@ -6,8 +6,8 @@
 //
 // The master and the volume's own rows are the effects registry's (`FX_KNOBS`, `group: 'volumetrics'`), taken from
 // there so a row and its setting cannot drift apart and the Effects section leaves them out. A row shows only from
-// the wave that builds what it moves: the later waves' rows (particles and rain, water and lava, the grass) are not in
-// this build at all, so no switch here does nothing.
+// the wave that builds what it moves: the later waves' rows (water and lava, the grass, the wind and the clouds) are not
+// in this build at all, so no switch here does nothing.
 import { FX_KNOBS, type FxKnobDef } from '../core/fxRegistry.ts';
 import type { Settings } from '../core/settings.ts';
 import { VOL_PRESET_LABELS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_RANGES, presetOf } from '../world/volumetrics/volSettings.ts';
@@ -73,6 +73,21 @@ export const VOLUMETRICS: readonly { title: string; knobs: readonly Knob[] }[] =
     ],
   },
   {
+    title: 'What the air carries besides dust',
+    knobs: [
+      { key: 'volParticles', label: 'Leaves, puffs and spray', kind: 'toggle', requires: ['volumetrics', 'volAir'], hint: 'The air carries things besides its dust: leaves off grass and forest floor, puffs of the game\'s own sand cloud off sand, spray off water, and fine streaks of blowing sand -- thrown up by engines, blasts, the Force and running feet, and picked up by a gust or a storm with nothing near. They swirl in the same air the dust does, settle, and blow on again.' },
+      { key: 'volLeaves', label: 'Leaves', kind: 'toggle', requires: ['volumetrics', 'volAir', 'volParticles'], hint: 'Leaves off grass and forest floor, in the game\'s own leaf picture tinted toward the ground they came off. They flutter down, lie a few seconds and blow on again as a speeder passes.' },
+      { key: 'volPuffs', label: 'Puffs of sand', kind: 'toggle', requires: ['volumetrics', 'volAir', 'volParticles'], hint: 'Puffs of the game\'s own sand cloud off sand, ash and dirt, in the dust\'s own colour, for depth in a trail or a blast.' },
+      { key: 'volSpray', label: 'Spray', kind: 'toggle', requires: ['volumetrics', 'volAir', 'volParticles'], hint: 'Spray off water: thrown up under a hovering ship, by a blast, and behind any machine crossing water as the game\'s own vehicle trail was (its look; its picture is not in the converted packs, so the fountains\' spray picture stands in). Water throws water and never sand or dust.' },
+      { key: 'volStreaks', label: 'Fine streaks', kind: 'toggle', requires: ['volumetrics', 'volAir', 'volParticles'], hint: 'Thin streaks of blowing sand, of our own drawing, carried by the air and stretched along their own motion, apart from the mass of dust: lifted in a dust storm and in a strong wash of an engine or a blast.' },
+      { key: 'volParticleDetail', label: 'How many', kind: 'select', options: R.volParticleDetail.options.map((v) => ({ value: v, label: v === 0.5 ? 'Half' : v === 1 ? 'High\'s' : 'Twice' })), requires: ['volumetrics', 'volAir', 'volParticles'], hint: 'How many the air holds at most: at High 2,048 leaves, 256 puffs, 1,024 drops of spray and 1,024 streaks.' },
+      { key: 'volParticleShadows', label: 'Leaves in shadow', kind: 'toggle', requires: ['volumetrics', 'volAir', 'volParticles', 'volLeaves'], hint: 'A leaf in the shade of a tree or a wall is darkened as a leaf of the trees is. They cast no shadow of their own.' },
+      { key: 'volRain', label: 'Rain', kind: 'toggle', requires: ['volumetrics'], hint: 'Rain of our own drawing near you, carried by the air: it leans in a gust, sweeps round a corner, thins in a building\'s lee and stops under roofs. It falls with the moving air off too (on the wind alone), and through a doorway seen from inside.' },
+      { key: 'volSnow', label: 'Snow', kind: 'toggle', requires: ['volumetrics'], hint: 'Snow by the same drops, drifting on the air. Off to begin with: the game\'s own snow is untouched until you turn ours on.' },
+      { key: 'volRainDetail', label: 'Rain detail', kind: 'select', options: R.volRainDetail.options.map((v) => ({ value: v, label: `${v.toLocaleString('en-GB')} drops` })), requires: ['volumetrics'], hint: 'How many drops stand in the box round you (64 m across).' },
+    ],
+  },
+  {
     title: "The dust's look",
     knobs: [
       { key: 'volDustBright', label: 'Dust brightness', kind: 'range', min: R.volDustBright.min, max: R.volDustBright.max, step: R.volDustBright.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volAir', 'volDust'], hint: 'How bright the dust is drawn, its sunlit side and its shade alike. At 60% fresh dust on sand at noon is about as bright as the sand it came off; at 100% it is lit as the first dust was, brighter than its ground.' },
@@ -96,6 +111,8 @@ export const VOLUMETRICS: readonly { title: string; knobs: readonly Knob[] }[] =
       { key: 'volArtSand', label: 'Blowing sand over the ground', kind: 'range', min: R.volArtSand.min, max: R.volArtSand.max, step: R.volArtSand.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volSand'], hint: 'How strongly the blowing sand shows. 0 leaves the ground exactly as it is.' },
       { key: 'volArtPrints', label: 'Prints over the ground', kind: 'range', min: R.volArtPrints.min, max: R.volArtPrints.max, step: R.volArtPrints.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volPrints'], hint: 'How deep the prints, ruts and pits read: the light they bend and how much darker pressed ground is. 0 leaves the ground exactly as it is, and every footprint is the flat print it always was.' },
       { key: 'volArtShade', label: 'Dust shades the ground', kind: 'range', min: R.volArtShade.min, max: R.volArtShade.max, step: R.volArtShade.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volLight'], hint: 'How much of the sun the dust between the ground and the sun takes off the ground under it, while the dust is drawn. 0 leaves the ground\'s light exactly as it is.' },
+      { key: 'volRainThin', label: 'Rain sheets stood down', kind: 'range', min: R.volRainThin.min, max: R.volRainThin.max, step: R.volRainThin.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volRain'], hint: 'While our rain falls, the game\'s own rain sheets stand down by this much: 100% to begin with, since their one lean for the whole sky against each drop\'s own lean in a gust reads as two rains; 0 keeps them.' },
+      { key: 'volSnowThin', label: 'Snow sheets stood down', kind: 'range', min: R.volSnowThin.min, max: R.volSnowThin.max, step: R.volSnowThin.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['volumetrics', 'volSnow'], hint: 'While our snow falls, the game\'s own snow sheets stand down by this much. With our snow off they are untouched whatever this says.' },
     ],
   },
   {
@@ -104,7 +121,7 @@ export const VOLUMETRICS: readonly { title: string; knobs: readonly Knob[] }[] =
       { key: 'volFromEngines', label: 'Engines', kind: 'toggle', requires: ['volumetrics', 'volAir'], hint: 'Every engine near you blows the air, and a ship or a flyer holding itself up blows down under it.' },
       { key: 'volFromForce', label: 'The Force', kind: 'toggle', requires: ['volumetrics', 'volAir'], hint: 'A push sends a wave of air out along its cone over about a second, raising a band of dust as it runs; a pull rolls one in toward you from its reach; a repulse opens a ring with its middle clear.' },
       { key: 'volFromBlasts', label: 'Blasts', kind: 'toggle', requires: ['volumetrics', 'volAir'], hint: 'Grenades, mines, charges, a gun\'s splash and a wreck blow the air outward and lift dust.' },
-      { key: 'volFromFeet', label: 'Feet', kind: 'toggle', requires: ['volumetrics', 'volPrints'], hint: 'A foot on sand, snow, mud or dirt near you presses a print into the ground in place of the flat print laid there before. Off, every footprint is the flat one.' },
+      { key: 'volFromFeet', label: 'Feet', kind: 'toggle', requires: ['volumetrics'], hint: 'A foot on sand, snow, mud or dirt near you presses a print into the ground in place of the flat print laid there before (with the prints on), and a running foot kicks up a couple of leaves off grass and spray where it wades (with the leaves or spray on). Off, every footprint is the flat one and nothing is kicked up.' },
     ],
   },
 ];

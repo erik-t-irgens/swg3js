@@ -253,6 +253,26 @@ export interface Settings extends FxSettings {
   volDustWisps: number;
   /** A dust field for each layer of air, so high dust really runs ahead of low (Ultra only). */
   volDustLayers: boolean;
+  /** The air carries particles besides dust (the fourth wave): leaves, puffs of sand, spray, fine streaks. */
+  volParticles: boolean;
+  /** Each kind on its own: leaves off grass and forest floor, puffs off sand, spray off water, fine streaks in a storm or a strong wash. */
+  volLeaves: boolean;
+  volPuffs: boolean;
+  volSpray: boolean;
+  volStreaks: boolean;
+  /** How many particles the air holds, a share of High's: 0.5, 1 or 2. */
+  volParticleDetail: number;
+  /** Leaves take the sun's shadow. */
+  volParticleShadows: boolean;
+  /** Rain of ours, carried by the air round buildings. */
+  volRain: boolean;
+  /** Snow of ours by the same drops (off until the owner says). */
+  volSnow: boolean;
+  /** Drops in the box round you: 4096, 8192, 16384 or 32768. */
+  volRainDetail: number;
+  /** How far the game's own rain and snow sheets stand down while ours falls, 0 (kept) to 1 (stood down). */
+  volRainThin: number;
+  volSnowThin: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -401,6 +421,21 @@ export const DEFAULT_SETTINGS: Settings = {
   volSmokeDetail: 2,
   volDustWisps: 2,
   volDustLayers: false,
+  // The fourth wave's, at the High preset: every kind on, the count High's, the leaves in the sun's shadow; our rain on
+  // and our snow off until the owner says (the design's Q13); the game's own rain and snow sheets stood down while ours
+  // falls (ours, Q12: their one lean for the whole sky against each drop's own reads as two rains).
+  volParticles: true,
+  volLeaves: true,
+  volPuffs: true,
+  volSpray: true,
+  volStreaks: true,
+  volParticleDetail: 1,
+  volParticleShadows: true,
+  volRain: true,
+  volSnow: false,
+  volRainDetail: 16384,
+  volRainThin: 1,
+  volSnowThin: 1,
   ...FX_DEFAULTS,
 };
 

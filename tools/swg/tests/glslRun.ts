@@ -35,6 +35,41 @@ export function glslFunctionText(src: string, name: string): string {
 }
 
 /**
+ * The particles' 32-bit hash (`airHash`) and the share drawn from it (`airRand`), out of a shader's own source, as script
+ * (the volumetrics' fourth wave): node has no unsigned 32-bit integer, so each statement of the hash is read by its shape
+ * and written out with `Math.imul` and `>>> 0`, and a statement of any other shape throws, so a hash rewritten some other
+ * way fails its test rather than running as something it is not. Its shifts and constants are the source's own.
+ */
+export function glslHash(src: string): { airHash: (x: number) => number; airRand: (x: number) => number } {
+  const m = /uint airHash\(uint x\) \{([\s\S]*?)\n\}/.exec(src);
+  if (!m) throw new Error('no airHash(uint x) in the source');
+  const steps: ((x: number) => number)[] = [];
+  for (const raw of m[1].split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line === 'return x;') continue;
+    const xs = /^x \^= x >> (\d+)u;$/.exec(line);
+    const mul = /^x \*= (0x[0-9a-fA-F]+)u;$/.exec(line);
+    if (xs) {
+      const s = Number(xs[1]);
+      steps.push((x) => (x ^ (x >>> s)) >>> 0);
+    } else if (mul) {
+      const c = Number(mul[1]);
+      steps.push((x) => Math.imul(x, c) >>> 0);
+    } else throw new Error(`airHash: a statement of no shape this reader knows: ${line}`);
+  }
+  const airHash = (x0: number): number => {
+    let x = x0 >>> 0;
+    for (const f of steps) x = f(x);
+    return x;
+  };
+  const r = /float airRand\(uint x\) \{ return float\(airHash\(x\) >> (\d+)u\) \* \(1\.0 \/ ([\d.]+)\); \}/.exec(src);
+  if (!r) throw new Error('no airRand(uint x) of the known shape in the source');
+  const shift = Number(r[1]);
+  const over = 1 / Number(r[2]);
+  return { airHash, airRand: (x) => (airHash(x) >>> shift) * over };
+}
+
+/**
  * The named functions of `glsl` (one function's text or several, uniforms beside them ignored), as script: each typed
  * header a `function`, each typed declaration a `let`, `int(` and `float(` the casts, the Math built-ins Math's, and every
  * other name it reads from `env` (the uniforms and the scalar built-ins, `GLSL_SCALARS` by default).
