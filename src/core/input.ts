@@ -28,6 +28,8 @@ export type Action =
   | 'noclip'
   | 'noclipFaster'
   | 'noclipSlower'
+  // Noclip's down, held. X alone and never Ctrl: flying forward and down held W with it, and Ctrl+W closes the tab.
+  | 'noclipDown'
   | 'flashlight'
   // The grappling hook: fire and let go, the two held reels, the boost off the line, the haul. The four
   // after the first borrow walk's, crouch's, jump's and the torch's keys, which mean nothing on the rope.
@@ -114,6 +116,8 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   noclip: ['KeyN'],
   noclipFaster: ['Equal', 'NumpadAdd'],
   noclipSlower: ['Minus', 'NumpadSubtract'],
+  // Shares X with the crouch and the reel-out on purpose: read only while noclip flies, when neither of those is.
+  noclipDown: ['KeyX'],
   flashlight: ['KeyF'],
   // The grappling hook. Fire is the side button nearest the thumb ("Mouse 4", the browser's button 3), the
   // owner's choice; the other four share their keys with walk, crouch, jump and the torch on purpose, as the

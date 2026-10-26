@@ -181,12 +181,14 @@ export class PropCatalogue {
   /**
    * Let this world's copy of the pack go.
    *
-   * Called where a world is left, as the gallery pack behind a house is. The catalogue survives:
+   * Called where a world is left, as the gallery pack behind a house is, and through the same hand
+   * (`World.releaseGuest`), which takes the pack's materials out of the portal renderer's set and the
+   * cascades' map before it disposes them: a dispose alone left them in both. The catalogue survives:
    * the next world mints a fresh pack from the same list with nothing fetched but the models it
    * really stands.
    */
-  release(): void {
-    this.assets?.dispose();
+  release(releaseGuest: (pack: AssetPack) => void): void {
+    if (this.assets) releaseGuest(this.assets);
     this.assets = null;
   }
 

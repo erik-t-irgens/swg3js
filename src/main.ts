@@ -23919,8 +23919,9 @@ class App {
   private async enterPlaced(pack: string): Promise<void> {
     placedProps.leave();
     // The last world's copy of the props pack goes with the last world: its materials joined that
-    // world's cascades and the portal renderer's set, and nothing but a dispose takes them out.
-    this.props.release();
+    // world's cascades and the portal renderer's set, which hold them strongly, so it is let go through
+    // the world's own hand for a guest, which takes them out of both before it disposes the pack.
+    this.props.release((p) => this.world.releaseGuest(p));
     // The catalogue only where there is something to stand -- this machine's rows, or the server's -- and
     // the world always.
     if ((this.placedStore().get(propsKey(pack)) || keptProps.rows.size) && !this.props.loaded) {

@@ -265,7 +265,7 @@ const KEY = 'swg3js.bindings';
   const holders = (code: string) => (Object.keys(DEFAULT_BINDINGS) as Action[]).filter((a) => DEFAULT_BINDINGS[a].includes(code));
   ok(holders('Mouse3').join() === 'grappleFire', 'Mouse 4 (the back side button) is the grapple\'s fire alone');
   ok(holders('ShiftLeft').join() === 'walk,reelIn' && holders('ShiftRight').join() === 'walk,reelIn', 'Shift is the walk\'s and the reel-in\'s');
-  ok(holders('ControlLeft').join() === 'crouch' && holders('KeyX').join() === 'crouch,reelOut', 'Ctrl is the crouch\'s alone, and X the crouch\'s and the reel-out\'s');
+  ok(holders('ControlLeft').join() === 'crouch' && holders('KeyX').join() === 'crouch,noclipDown,reelOut', 'Ctrl is the crouch\'s alone, and X the crouch\'s, noclip\'s down and the reel-out\'s');
   ok(holders('Space').join() === 'jump,grappleBoost', 'Space is the jump\'s and the boost\'s');
   ok(holders('KeyF').sort().join() === 'flashlight,grappleHaul,placeLift', 'F is the torch\'s, the placing height\'s and the haul\'s');
   const keys = Object.keys(DEFAULT_BINDINGS);
@@ -279,7 +279,7 @@ const KEY = 'swg3js.bindings';
   const walked = loadedBindings({ walk: ['CapsLock'] });
   ok(walked.walk.join() === 'CapsLock' && walked.reelIn.join() === 'ShiftLeft,ShiftRight', 'the walk moved to Caps Lock leaves the reel-in on Shift, which nobody chose');
   const xed = loadedBindings({ emote2: ['KeyX'] });
-  ok(xed.emote2.join() === 'KeyX' && xed.reelOut.length === 0 && xed.crouch.join() === 'ControlLeft,ControlRight', 'an emote put on X takes it off the reel-out and the crouch, which keeps Ctrl');
+  ok(xed.emote2.join() === 'KeyX' && xed.reelOut.length === 0 && xed.noclipDown.length === 0 && xed.crouch.join() === 'ControlLeft,ControlRight', 'an emote put on X takes it off the reel-out, noclip\'s down and the crouch, which keeps Ctrl');
   // Whose choice emptied the fire: told only when it was somebody else's.
   store.set(KEY, JSON.stringify({ block: ['Mouse3'] }));
   const theirs = new Input(canvas);

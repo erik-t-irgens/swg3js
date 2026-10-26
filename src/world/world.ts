@@ -2414,11 +2414,10 @@ export class World {
     this.pack?.dispose();
     // The houses' pack goes with the world it was used in, although it is not the world's own. Its
     // materials joined this world's shadow cascades and the portal renderer's set when they were
-    // prepared, and nothing but a dispose takes them out again: kept across a world change it would
-    // be a leak in both, which shows as a stutter the next time the shadow distance moves. Fetching
-    // it again is a manifest and whichever buildings are put down, and only for a player who puts
-    // one down at all.
-    this.housePack?.then((p) => p?.dispose()).catch(() => undefined);
+    // prepared, and a dispose alone leaves them in both (the two hold strongly), so it is let go
+    // through `releaseGuest`. Fetching it again is a manifest and whichever buildings are put down,
+    // and only for a player who puts one down at all.
+    this.housePack?.then((p) => this.releaseGuest(p)).catch(() => undefined);
     this.housePack = null;
     surfaces.sweep();
     this.pack = null;
@@ -5946,6 +5945,19 @@ export class World {
     if (this.pack && this.pack.manifest.planet === 'gallery') return Promise.resolve(this.pack);
     this.housePack ??= AssetPack.load('gallery');
     return this.housePack;
+  }
+
+  /**
+   * Let a guest pack go (the houses' gallery pack, a world's copy of the props pack): its materials out of
+   * the portal renderer's set and the cascades' map first, then the pack disposed. Both sets hold what they
+   * are given strongly, so a dispose alone left every guest model a world ever stood in both, the set walked
+   * a dozen times a frame growing by a pack's worth with each world visited. The world's own pack is let go
+   * the same way in `unload`; never call this with it.
+   */
+  releaseGuest(pack: AssetPack | null | undefined): void {
+    if (!pack || pack === this.pack) return;
+    this.forgetMaterials(pack.loadedMaterials());
+    pack.dispose();
   }
 
   /**

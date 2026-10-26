@@ -84,6 +84,7 @@ const ACTION_LABELS: Record<Action, string> = {
   noclip: 'Noclip fly',
   noclipFaster: 'Noclip faster',
   noclipSlower: 'Noclip slower',
+  noclipDown: 'Noclip down (hold)',
   flashlight: 'Flashlight',
   grappleFire: 'Grapple: fire, or let go',
   reelIn: 'Grapple: reel in (hold)',

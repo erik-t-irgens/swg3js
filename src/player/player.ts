@@ -3109,7 +3109,8 @@ export class Player {
     if (input.held('right')) move.add(rgt);
     if (input.held('left')) move.sub(rgt);
     if (input.held('jump')) move.y += 1;
-    if (input.held('crouch')) move.y -= 1;
+    // Down is an action of its own on X, never the crouch's Ctrl: W held with Ctrl closes the tab.
+    if (input.held('noclipDown')) move.y -= 1;
     const moving = move.lengthSq() > 0;
     if (moving) move.normalize();
     const speed = this.noclipSpeed * (input.held('walk') ? 3.5 : 1) * this.speedMultiplier;
