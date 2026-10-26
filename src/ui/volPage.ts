@@ -6,8 +6,7 @@
 //
 // The master and the volume's own rows are the effects registry's (`FX_KNOBS`, `group: 'volumetrics'`), taken from
 // there so a row and its setting cannot drift apart and the Effects section leaves them out. A row shows only from
-// the wave that builds what it moves: the later waves' rows (the clouds) are not in this build at all, so no switch here
-// does nothing.
+// the wave that builds what it moves, so no switch here does nothing (the seventh wave's second half brings the clouds').
 import { FX_KNOBS, type FxKnobDef } from '../core/fxRegistry.ts';
 import type { Settings } from '../core/settings.ts';
 import { VOL_PRESET_LABELS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_RANGES, presetOf } from '../world/volumetrics/volSettings.ts';
@@ -129,6 +128,29 @@ export const VOLUMETRICS: readonly { title: string; knobs: readonly Knob[] }[] =
       { key: 'volWind', label: 'One wind', kind: 'toggle', requires: ['volumetrics'], hint: 'One wind every reader takes, updated by the weather: each kind of weather its own wind over the game\'s own strength, never dead still on a calm day, its heading wandering by the weather; gusts that travel across the ground, the same for every player in the same place at the same moment, lifting a veil of dust off loose ground as they pass, bending the grass in a wave and the trees one after another; the rain leaning in them, the water and the sky\'s clouds moving with the wind aloft. Off, the wind is today\'s one wind for the whole world. The debug menu\'s wind sliders hold it whether this is on or off.' },
       { key: 'volWindDevils', label: 'Dust devils', kind: 'toggle', requires: ['volumetrics', 'volWind', 'volAir'], hint: 'Now and then by day a small whirl of dust crosses dry ground near you, the same devil for every player standing there, swirling the air, blowing sand in its core and standing a column of dust, more often on a clear day and in a dust storm. None over rock, water or forest litter, and none on the jungle and forest worlds.' },
       { key: 'volWindTrees', label: 'Trees in the gusts', kind: 'toggle', requires: ['volumetrics', 'volWind'], hint: 'Each tree takes a gust as it reaches the tree, so a gust walks through a wood tree by tree. Its shaders are built behind a loading screen, so turned on or off it takes effect at the next arrival. Off, the trees sway at the day\'s wind and no longer take each gust as it passes.' },
+    ],
+  },
+  {
+    title: 'The clouds',
+    knobs: [
+      fxKnob('volClouds'),
+      fxKnob('volCloudsResolution'),
+      fxKnob('volCloudsSteps'),
+      fxKnob('volCloudsLight'),
+      fxKnob('volCloudsHistory'),
+      { key: 'volCloudsWeather', label: 'Cloud map detail', kind: 'select', options: R.volCloudsWeather.options.map((v) => ({ value: v, label: `${v} (${Math.round(52000 / v)} m)` })), requires: ['effects', 'volumetrics', 'volClouds'], hint: "How finely the game's own cloud pictures are laid over the 52 km of sky round you: where a deck is heaped, where it is a layer, how thick. Finer keeps a picture's smaller features." },
+      { key: 'volCloudsSmear', label: 'Gusts stream the clouds', kind: 'toggle', requires: ['effects', 'volumetrics', 'volClouds'], hint: "The wind's gusts at a cloud's scale shear the decks where they blow and stream a cloud's edges. Off, the decks drift whole on the wind aloft." },
+      { key: 'volCloudsLow', label: 'Low deck', kind: 'toggle', requires: ['effects', 'volumetrics', 'volClouds'], hint: 'In rain, snow and the sunless overcast a deck of cloud hangs a couple of hundred metres over the ground, hills standing in it, which a ship flies through. On a fair day there is none.' },
+      { key: 'volCloudsHoles', label: 'Ships hole the clouds', kind: 'toggle', requires: ['effects', 'volumetrics', 'volClouds', 'volCloudsLow'], hint: "A ship, a flying car or a shuttle flying through the low deck punches a hole that drifts off on the wind and fills raggedly over a minute or so." },
+    ],
+  },
+  {
+    title: "The clouds' look",
+    knobs: [
+      { key: 'volCloudsBright', label: 'Cloud brightness', kind: 'range', min: R.volCloudsBright.min, max: R.volCloudsBright.max, step: R.volCloudsBright.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['effects', 'volumetrics', 'volClouds'], hint: "How bright the clouds are lit, by the sun and by the sky's own colour alike." },
+      { key: 'volCloudsArt', label: 'Pictures shape the decks', kind: 'range', min: R.volCloudsArt.min, max: R.volCloudsArt.max, step: R.volCloudsArt.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['effects', 'volumetrics', 'volClouds'], hint: "How far the game's own cloud pictures shape the decks: at 0 the clouds are even noise at the sky's coverage, for comparing." },
+      fxKnob('volCloudsAmount'),
+      { key: 'volCloudSheets', label: "The sky's sheet kept over the deck", kind: 'range', min: R.volCloudSheets.min, max: R.volCloudSheets.max, step: R.volCloudSheets.step, format: (v) => `${Math.round(v * 100)}%`, requires: ['effects', 'volumetrics', 'volClouds'], hint: "How much of the sky's own top cloud sheet stays drawn over the deck, as a painted high veil drifting with it. At 0 none: drawn as well, the sheets and the deck are the same cloud twice." },
     ],
   },
   {

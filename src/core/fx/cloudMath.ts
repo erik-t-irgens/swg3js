@@ -154,3 +154,87 @@ export function cutForCover(coverage: number, curve: readonly CoverPoint[]): num
   }
   return curve[curve.length - 1].cut;
 }
+
+/** The thresholds the calibration measures at: fine where the sky is changing fastest. */
+export const COVER_CUTS = [0.2, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95];
+
+/** The march's numbers the calibration reads: the slab, its steps, the volumes' scales and the density rule's own. */
+export type CoverMarch = Pick<typeof CLOUD_MARCH, 'bottom' | 'top' | 'steps' | 'baseScale' | 'detailScale' | 'density' | 'detailBite' | 'erodeBite' | 'feather'>;
+
+/**
+ * How much sky each threshold really fills, measured by marching the volumes (moved here from the converter's
+ * `cloudnoise.mjs`, which imports it back, so the converter and the game's calibration worker run one sweep).
+ *
+ * **Why this and not the billow's own ends.** `billowRange` says where the billow channel lies, and a cut placed between
+ * its ends gives that share of the *channel* above the cut. Three things then stand between that and the share of sky
+ * anybody sees. The base volume's own erosion channels take a bite out of whatever survived the cut and the detail volume
+ * takes another, which together eat most of a thin sky: measured, a world asking for a quarter of the sky was getting
+ * half a per cent of the deck and nothing at all overhead, and sixteen of the game's eighteen worlds ask for a quarter or
+ * less. And in the other direction a ray crosses eight hundred metres of deck, so once there *is* cloud the sky fills
+ * much faster than the volume does. Neither is arithmetic; both come out of the volume. So the sweep marches a grid of
+ * rays straight up through the deck at a set of cuts, writes down what share of them found cloud, and the game reads
+ * that table backwards.
+ *
+ * Straight up is the honest direction to measure in: it is the shortest way through the deck and so the least cloud any
+ * ray will find, and it is the one direction whose answer does not depend on where the camera happens to be standing.
+ *
+ * `decks` is the profile's (two for the sky's slab, as the converter has always measured it; one for the low deck).
+ */
+export function coverCurve(base: Uint8Array, detail: Uint8Array, baseSize: number, detailSize: number, march: CoverMarch, decks = 2, cuts: readonly number[] = COVER_CUTS, rays = 64): CoverPoint[] {
+  const b = [0, 0, 0, 0];
+  const d = [0, 0, 0, 0];
+  const steps = march.steps;
+  const span = march.top - march.bottom;
+  const stepLen = span / steps;
+  const tune = { ...CLOUD_MARCH, ...march };
+  const out: CoverPoint[] = [];
+  for (const cut of cuts) {
+    let covered = 0;
+    for (let ry = 0; ry < rays; ry++) {
+      for (let rx = 0; rx < rays; rx++) {
+        // Spread over a good few kilometres of ground, which is several periods of the base volume.
+        const px = (rx / rays) * march.baseScale * 3;
+        const pz = (ry / rays) * march.baseScale * 3;
+        let od = 0;
+        for (let i = 0; i < steps; i++) {
+          const py = march.bottom + (i + 0.5) * stepLen;
+          const h = (py - march.bottom) / span;
+          volumeTexel(base, baseSize, Math.round((px / march.baseScale) * baseSize), Math.round((py / march.baseScale) * baseSize), Math.round((pz / march.baseScale) * baseSize), b);
+          volumeTexel(detail, detailSize, Math.round((px / march.detailScale) * detailSize), Math.round((py / march.detailScale) * detailSize), Math.round((pz / march.detailScale) * detailSize), d);
+          od += densityFrom(b, d, h, cut, decks, tune) * march.density * stepLen;
+        }
+        // Half the light stopped is the line between a covered sky and a hazy one.
+        if (1 - Math.exp(-od) >= 0.5) covered++;
+      }
+    }
+    out.push({ cut: Math.round(cut * 1000) / 1000, sky: Math.round((covered / (rays * rays)) * 1000) / 1000 });
+  }
+  return out;
+}
+
+/** The most points a cover curve the clouds' weather pass reads may hold (its uniform array's length). */
+export const COVER_POINTS = 16;
+
+/**
+ * `cutForCover` as GLSL, over a curve handed as `uniform vec2 uCover[16]` (cut, sky) and its length `uCoverN`: the very
+ * piecewise line, which the node test holds to the function above. Reads its own uniforms by those names.
+ */
+export const CUT_FOR_GLSL = /* glsl */ `
+float cutFor(float c) {
+  float want = clamp(c, 0.0, 1.0);
+  int n = int(uCoverN);
+  if (n <= 0) return 1.0;
+  if (want >= uCover[0].y) return uCover[0].x;
+  for (int i = 1; i < ${COVER_POINTS}; i++) {
+    if (i >= n) break;
+    vec2 a = uCover[i - 1];
+    vec2 b = uCover[i];
+    if (want >= b.y) {
+      float span = a.y - b.y;
+      float t = span > 1e-6 ? (want - b.y) / span : 0.0;
+      return b.x + (a.x - b.x) * t;
+    }
+  }
+  return uCover[n - 1].x;
+}
+`;

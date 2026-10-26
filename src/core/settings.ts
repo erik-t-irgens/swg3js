@@ -299,6 +299,21 @@ export interface Settings extends FxSettings {
   volWindDevils: boolean;
   volWindTrees: boolean;
   volArtWind: number;
+  /**
+   * The seventh wave's clouds (their switch, quality and strength are the effects', `fxRegistry.ts`): the weather map's
+   * texels over its 52 km square (`volCloudsWeather`: 256, 512 or 1024); the gusts streaming a cloud's edges
+   * (`volCloudsSmear`); the low deck in rain and overcast (`volCloudsLow`) and the holes a hull punches in it
+   * (`volCloudsHoles`); how bright the clouds are lit, 0 to 2 (`volCloudsBright`); how far the game's own pictures shape the
+   * decks, 0 to 1 (`volCloudsArt`); and the share of the sky's top sheet kept over the deck as a painted veil, 0 to 1
+   * (`volCloudSheets`).
+   */
+  volCloudsWeather: number;
+  volCloudsSmear: boolean;
+  volCloudsLow: boolean;
+  volCloudsHoles: boolean;
+  volCloudsBright: number;
+  volCloudsArt: number;
+  volCloudSheets: number;
   /** The terrain's ribbons drawn: the strips of lava (or water) its ribbon affectors lay down a slope (Mustafar's lava falls), which the game never drew. */
   waterRibbons: boolean;
 }
@@ -485,6 +500,16 @@ export const DEFAULT_SETTINGS: Settings = {
   volWindDevils: true,
   volWindTrees: true,
   volArtWind: 1,
+  // The seventh wave's clouds (under the master, off), at the High preset: the weather map at 512 texels, the smear, the
+  // low deck and its holes on; both look dials at their full look, and none of the sky's own sheets kept over the deck
+  // (the design's decision 90: drawn as well they are the cloud twice over).
+  volCloudsWeather: 512,
+  volCloudsSmear: true,
+  volCloudsLow: true,
+  volCloudsHoles: true,
+  volCloudsBright: 1,
+  volCloudsArt: 1,
+  volCloudSheets: 0,
   // Off (ours, the owner's standing order for the pass: off, the game is today's): the terrain's ribbons were never drawn
   // here, and drawing them is a look of the world beside the water's own settings, not an effect of the volumetrics.
   waterRibbons: false,

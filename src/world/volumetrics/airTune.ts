@@ -927,6 +927,148 @@ export const AIR_TUNE = {
     most: 0.85,
     sink: 0.45,
   },
+  /**
+   * The clouds (the seventh wave's second half, the design's §2.18): one cloud system fed by the sky's own mix per deck,
+   * drifted at the world's wind aloft and smeared by the unified wind's own gust function at a cloud's scale, lit by the
+   * dome's own sky. Every number a dial with its reason, the technical ones said so; nothing here builds a program (every
+   * number a uniform). The march's own numbers start at the September march's [code, `cloudMath.ts`'s `CLOUD_MARCH`: a
+   * start the owner has seen], and the calibration is worked out again in a worker when one of them moves.
+   */
+  clouds: {
+    /** The slab, metres over sea level [code: the sheets' own altitudes, `sky.ts`'s 1,500 and 2,300 m]. */
+    bottom: 1500,
+    top: 2300,
+    /** How far along a ray the high slab is marched, metres [code: the September's 26 km]: past it the haze has the sky. */
+    reach: 26000,
+    /** Metres a period of the base volume and of the detail volume [code: the September's]. */
+    baseScale: 4200,
+    detailScale: 260,
+    /** How hard the detail and the base's own erosion eat a cloud's edge [code: the September's]. */
+    detailBite: 0.32,
+    erodeBite: 0.35,
+    /** How thick a metre of cloud is, and toward the sun [code: the September's]. */
+    density: 0.055,
+    lightDensity: 0.9,
+    /** The powder term that keeps a lit edge from a flat card [code: the September's]. */
+    powder: 0.42,
+    /** Scattering: forward, backward and their mix [code: the September's two lobes]. */
+    gForward: 0.72,
+    gBackward: -0.24,
+    gMix: 0.42,
+    /** How far the deck fades at its floor and ceiling, a share of its depth [code: the September's]. */
+    feather: 0.22,
+    /** Octaves of multiple scattering, each taking `msA` of the light, `msB` of the phase's g and `msC` of the extinction [ours: the usual start, so a cloud's body is not grey]. */
+    msA: 0.5,
+    msB: 0.5,
+    msC: 0.5,
+    octaves: 3,
+    /** The ambient from the dome's own sky (1) or the ramp's row the September read (0) [ours]. */
+    skyAmbient: 1,
+    /** How much of the ambient a deck's top and base take [code: the September's]. */
+    ambientTop: 0.55,
+    ambientBottom: 0.22,
+    /** How much of a picture's own brightness and colour a cloud takes (the albedo: `mix(1, brightness / albedoRef, artBright)` times the colour by `artTint`) [ours: half, so Mustafar's dark pictures stay darker and nothing goes brown]. */
+    artBright: 0.5,
+    artTint: 0.5,
+    /** A fair cloud's picture brightness, kept at an albedo of one [ours: the fair-weather pictures read 0.68 to 0.74]. */
+    albedoRef: 0.75,
+    /** The share of the scene's fog the decks are hazed by [ours: the sheets were never fogged, the September took it whole]. */
+    haze: 0.35,
+    /** A picture's alpha to a share of sky [ours: the client's sheets are faint; 1 gives the September's mean]. */
+    gain: 1.5,
+    /** How much of the sky a layer covers, and how thin it is per share of its picture [ours: a veil covers nearly the whole sky and stays translucent]. */
+    extent: 0.9,
+    thin: 0.15,
+    /** The picture's coefficient of variation read as heaps (at `kindTo` or over) or a layer (at `kindFrom` or under) [ours: the veils measure 0.16 to 0.31, the heaps 0.94 to 4.6]. */
+    kindFrom: 0.25,
+    kindTo: 1.0,
+    /** A layer thins the profile to the slab's middle share and lowers the erosion's bite by this share [ours]. */
+    layerDepth: 0.5,
+    layerErode: 0.6,
+    /** The wet overcast's layer where a row hangs a storm and no sheet: its cover and its thickness [ours]. */
+    overcastCover: 1,
+    overcastThick: 0.6,
+    /** The wet overcast's and the low deck's picture brightness, which no picture gives them [ours: a rain row's own pictures read 0.30 (the storm) to 0.54 (Dathomir's veil)]. */
+    overcastBright: 0.45,
+    /** The decks' gusts, a lattice this many times the world's gust size: patches of 600 m to 1.6 km [ours]. */
+    gustScale: 20,
+    /** The smear's two phases restart half of this apart, seconds [ours: a cloud's features change over a minute or two]. */
+    smearPeriod: 90,
+    /** How much of the gusts' displacement the pictures take, and its most, metres [ours: a third of a deck gust's patch at its middle size, so a picture shears and is never scrambled]. */
+    smearShare: 1,
+    smearMost: 400,
+    /** The detail volume's displacement's most, metres [ours: a quarter of the detail's 260 m period, so an edge streams and never slides past its own detail]. */
+    detailSmearMost: 65,
+    /** Streets: a deck's pictures drawn `1 + stretch · |wind|` times longer along its wind, at most `stretchMost`, frozen a smear phase [ours]. */
+    stretch: 0.03,
+    stretchMost: 2.5,
+    /** The history's share of this frame [ours: clouds change slowly]. */
+    history: 0.08,
+    /** The clear round the lens, metres: none nearer than `nearFrom`, full from `nearTo` [ours: a deck flown through shows cloud passing, never a grey card]. */
+    nearFrom: 15,
+    nearTo: 80,
+    /** A dust storm past this stands the decks down [code: the September's, `cloudLook.ts`]. */
+    standDownDust: 0.5,
+    /** Both decks under this coverage and no low deck: nothing to draw, nothing spent [code: the September's]. */
+    minCoverage: 0.02,
+    /** The march's empty steps grow by this, to at most this many times [ours, technical]. */
+    stepGrow: 1.6,
+    stepMost: 4,
+    /** The weather pass's square round the camera, metres [ours, technical: its texel the square over `volCloudsWeather`]. */
+    weatherSquare: 52000,
+  },
+  /**
+   * The low deck (the design's §2.18): a layer of its own near the ground in rain and the sunless overcast, flown
+   * through and holed by every hull. Every number a dial with its reason.
+   */
+  lowDeck: {
+    /** Its share of the wet overcast, and of the bottom picture's own cut on any other day [ours: Q22, none on a fair day]. */
+    cover: 1,
+    fair: 0,
+    /** Its floor over the regional ground and its depth, metres [ours: a flyer at its 260 m ceiling skims the base and every ship that climbs crosses it]. */
+    floor: 200,
+    depth: 180,
+    /** Its volumes' scale, a share of the high deck's [ours: 1,260 m and 78 m periods]. */
+    scale: 0.3,
+    /** How far it is marched, metres, faded over the last share [ours: the sky deck carries the rest]. */
+    reach: 6000,
+    reachFade: 0.33,
+    /** Seconds its ground is eased over [ours: a fast flight does not bob it]. */
+    groundEase: 20,
+    /** Its own gusts, this many times the world's gust size: patches of 180 to 480 m [ours]. */
+    gustScale: 6,
+    /** Its detail volume's displacement's most, metres [ours: a quarter of its detail's 78 m period, as the high slab's]. */
+    smearMost: 20,
+    /** Steps through it [ours, technical: a quality of its own; a hole's fine steps come on top]. */
+    steps: 16,
+    /** Its wind pass's square, metres [ours, technical: 256² over 8 km, 31 m texels]. */
+    windSquare: 8000,
+  },
+  /** The holes a hull punches in the low deck and the high slab (the design's §2.18): every number a dial with its reason. */
+  holes: {
+    /** Seconds a hole takes to fill to a third, and how much of its four neighbours a tick blurs in [ours: a hole that lasts the length of a fly-past]. */
+    fill: 45,
+    blur: 0.05,
+    /** A hole's radius: the hull's radius times `widen` and `wake` metres more [ours: a speeder's 10 m, a fighter's 15 to 20, a freighter's 30 to 60]. */
+    widen: 1.5,
+    wake: 6,
+    /** The square's last metres over which the field fades out [ours]. */
+    edge: 32,
+    /** How raggedly a hole closes: `smoothstep(edgeLift · h − edgeSoft, edgeLift · h, n)` [ours, feel; `edgeSoft` held at 0.02 or more]. */
+    edgeLift: 1.2,
+    edgeSoft: 0.2,
+    /** Seconds after a stamp its box asks for fine steps [ours: the fill's time to 1%]. */
+    liveFor: 200,
+    /** A stood shuttle's jet punches this radius, metres [ours: a shuttle is some 30 m across]. */
+    jetRadius: 20,
+    /** The fine steps through a live hole's box: at least `fineStep` metres, its own light every `fineLight` steps [ours, technical]. */
+    fineStep: 5,
+    fineLight: 4,
+    /** [ours, technical, refused live]: the field's square (512² texels over it), the stamps a tick, the fine steps' most. */
+    size: 1024,
+    most: 32,
+    fineMost: 32,
+  },
 };
 
 export type AirTune = typeof AIR_TUNE;
@@ -977,6 +1119,12 @@ export function tuneAir(o: Record<string, unknown>): TuneAnswer {
       }
       if (g === 'forces' && k === 'fronts') {
         notes.push("air: forces.fronts sizes the Force's fronts' table, made once with the field, and is not moved live");
+        continue;
+      }
+      // The clouds' (the seventh wave's): the hole field's square and its texels, the stamps a tick holds and the fine
+      // steps' loop bound are made into the programs and the targets once.
+      if (g === 'holes' && (k === 'size' || k === 'most' || k === 'fineMost')) {
+        notes.push(`air: holes.${k} is a size made into the hole field's programs and targets once, and is not moved live`);
         continue;
       }
       group[k] = n;

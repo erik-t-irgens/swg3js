@@ -407,6 +407,8 @@ export class Weather {
   /** The unified wind's mean and veer (wave 7a): the speed itself and nought with its arm off. */
   private windMean = 0;
   private windVeer = 0;
+  /** The shared seconds this frame's wind was worked out at (the clouds' decks' gusts read them: the seventh wave's second half). */
+  windClock = 0.5;
   private rain = 0;
   private snow = 0;
   private dust = 0;
@@ -850,6 +852,7 @@ export class Weather {
 
     // The level.
     const clock = this.clockSeconds();
+    this.windClock = clock;
     this.scheduleTimer -= dt;
     if (this.scheduleTimer <= 0 || snap) {
       scheduledLevel(this.seed, this.weights, clock, this.sched);

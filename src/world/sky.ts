@@ -198,6 +198,37 @@ export function driftAloft(s: { x: number; y: number }, aloft: ArrayLike<number>
 /** Seconds in the client's day, which its celestial cycle times count in. */
 const CLIENT_DAY_SECONDS = 86400;
 
+/**
+ * One image of a deck as the sky groups it (`SwgSky.cloudImages`, the volumetrics' seventh wave): a class with its
+ * numbers given at the start, since the feed writes it every frame and a class keeps its doubles in place.
+ */
+export class SkyCloudImage {
+  /** The picture's file as the row names it, or null with no image at this place of the pair. */
+  file: string | null = null;
+  /** The summed mix weight of the rows naming it. */
+  weight = 0.5;
+  /** The row's own size and speed, and the repeat the sheets draw it at, metres. */
+  size = 0.5;
+  speed = 0.5;
+  repeat = 0.5;
+  /** The loaded picture, or null while it loads (never the white stand-in a sheet binds meanwhile). */
+  texture: THREE.Texture | null = null;
+  /** The sky's own scroll for it, in repeats, and whether the sky has one yet. */
+  scrollX = 0.5;
+  scrollY = 0.5;
+  scrolled = false;
+  constructor() {
+    this.weight = 0;
+  }
+}
+/** A deck's two heaviest images, kept by the caller. */
+export interface SkyCloudImages {
+  readonly images: readonly [SkyCloudImage, SkyCloudImage];
+}
+export function newSkyCloudImages(): SkyCloudImages {
+  return { images: [new SkyCloudImage(), new SkyCloudImage()] };
+}
+
 const CLOUD_VERT = /* glsl */ `
   varying vec3 vWorld;
   void main() {
@@ -1292,29 +1323,7 @@ export class SwgSky {
     const files = this.groupFiles;
     const w = this.groupWeights;
     const layers = this.groupLayers;
-    const lw = this.groupLayerWeights;
-    let n = 0;
-    for (let i = 0; i < this.mixCount; i++) {
-      const e = this.mix[i];
-      const layer = slot === 0 ? e.block.cloudBottom : e.block.cloudTop;
-      if (!layer?.file || !(e.weight > 0)) continue;
-      let k = 0;
-      while (k < n && files[k] !== layer.file) k++;
-      if (k === n) {
-        files[n] = layer.file;
-        w[n] = 0;
-        layers[n] = layer;
-        lw[n] = -1;
-        n++;
-      }
-      w[k] += e.weight;
-      // The image's repeat and speed come from the heaviest block that names it.
-      if (e.weight > lw[k]) {
-        lw[k] = e.weight;
-        layers[k] = layer;
-      }
-    }
-    const top = heaviestTwo(w, n, this.topTwo);
+    const top = this.groupClouds(slot);
     const a = top[0];
     const b = top[1];
     for (let m = 0; m < 2; m++) {
@@ -1325,6 +1334,7 @@ export class SwgSky {
         c.file = null;
         c.mesh.visible = false;
         u.uOpacity.value = 0;
+        this.sheetWeights[slot * 2 + m] = 0;
         u.uMap.value = WHITE_TEX;
         continue;
       }
@@ -1337,6 +1347,7 @@ export class SwgSky {
         if (!this.failedTextures.has(file) && !this.textureLoads.has(file)) void this.loadTexture(file, 'cloud');
         c.mesh.visible = false;
         u.uOpacity.value = 0;
+        this.sheetWeights[slot * 2 + m] = 0;
         u.uMap.value = WHITE_TEX;
         continue;
       }
@@ -1361,13 +1372,119 @@ export class SwgSky {
       }
       u.uMap.value = tex;
       u.uOpacity.value = w[k];
+      this.sheetWeights[slot * 2 + m] = w[k];
       u.uRepeat.value = size * (c.altitude / CLIENT_CLOUD_HEIGHT) * CLOUD_SIZE_TRIM;
       (u.uScroll.value as THREE.Vector2).copy(scroll.s);
       (u.uCamera.value as THREE.Vector3).copy(camPos);
       // White by day and grey by night in the client, lit by the main light's colour.
       (u.uColor.value as THREE.Color).copy(L.main).multiplyScalar(isDay ? 1 : 0.5);
-      c.mesh.visible = this.sheetsOn && w[k] > 0.002;
+      // The volumetrics' clouds draw the deck: the top sheet's kept share of its opacity over it (`keepTopSheets`, the
+      // design's decision 90), every other sheet hidden; with nothing kept (always, with the master off) today's line.
+      if (slot === 1 && !this.sheetsOn && this.topKeep > 0) {
+        u.uOpacity.value = w[k] * this.topKeep;
+        c.mesh.visible = w[k] * this.topKeep > 0.002;
+      } else c.mesh.visible = this.sheetsOn && w[k] > 0.002;
     }
+  }
+
+  /**
+   * One altitude's grouping of the mix (slot 0 the lower, 1 the upper): its cloud images summed by weight into
+   * `groupFiles`, `groupWeights` and `groupLayers` (each image's repeat and speed the heaviest naming block's), and the two
+   * heaviest picked (`topTwo`). The one function the sheets and the volumetrics' decks both group by (`updateClouds`,
+   * `cloudImages`), so the two can never group the mix differently. Allocates nothing.
+   */
+  private groupClouds(slot: 0 | 1): Int32Array {
+    const files = this.groupFiles;
+    const w = this.groupWeights;
+    const layers = this.groupLayers;
+    const lw = this.groupLayerWeights;
+    let n = 0;
+    for (let i = 0; i < this.mixCount; i++) {
+      const e = this.mix[i];
+      const layer = slot === 0 ? e.block.cloudBottom : e.block.cloudTop;
+      if (!layer?.file || !(e.weight > 0)) continue;
+      let k = 0;
+      while (k < n && files[k] !== layer.file) k++;
+      if (k === n) {
+        files[n] = layer.file;
+        w[n] = 0;
+        layers[n] = layer;
+        lw[n] = -1;
+        n++;
+      }
+      w[k] += e.weight;
+      // The image's repeat and speed come from the heaviest block that names it.
+      if (e.weight > lw[k]) {
+        lw[k] = e.weight;
+        layers[k] = layer;
+      }
+    }
+    return heaviestTwo(w, n, this.topTwo);
+  }
+
+  /**
+   * The volumetrics' decks' read of the sky (the seventh wave's, the design's §2.18): one altitude's two heaviest images
+   * of the mix as the sheets group it (`groupClouds`), into the caller's kept record -- each image's file, summed weight,
+   * size, speed, its loaded texture or null (never the white stand-in a sheet binds while it loads), its repeat in metres
+   * and the sky's own scroll for it in repeats (the sheets' integral, as this frame's `update` left it). Read-only: it
+   * starts no load and moves no scroll. With the master off nothing calls it.
+   */
+  cloudImages(slot: 0 | 1, out: SkyCloudImages): void {
+    const files = this.groupFiles;
+    const w = this.groupWeights;
+    const layers = this.groupLayers;
+    const top = this.groupClouds(slot);
+    for (let m = 0; m < 2; m++) {
+      const k = top[m];
+      const im = out.images[m];
+      if (k < 0) {
+        im.file = null;
+        im.weight = 0;
+        im.texture = null;
+        continue;
+      }
+      const file = files[k]!;
+      const layer = layers[k]!;
+      const size = Math.max(1, layer.size || 8);
+      im.file = file;
+      im.weight = w[k];
+      im.size = size;
+      im.speed = layer.speed;
+      im.repeat = size * (CLOUD_ALTITUDES[slot] / CLIENT_CLOUD_HEIGHT) * CLOUD_SIZE_TRIM;
+      im.texture = this.textures.get(file) ?? null;
+      const scroll = this.cloudScroll.get(file);
+      im.scrollX = scroll ? scroll.s.x : 0;
+      im.scrollY = scroll ? scroll.s.y : 0;
+      im.scrolled = !!scroll;
+    }
+  }
+
+  /**
+   * The share of the top sheet's opacity kept over the volumetrics' deck while the deck draws and the sheets are down
+   * (`volCloudSheets`, the design's decision 90): a painted high veil. Nought whenever no deck is drawing, which is how
+   * the sheets are with the master off, since nothing calls this then. Written through to the top sheets at once, as the
+   * `sheets` setter writes through.
+   */
+  keepTopSheets(share: number): void {
+    const s = share > 0 ? (share < 1 ? share : 1) : 0;
+    if (s === this.topKeep) return;
+    this.topKeep = s;
+    if (this.sheetsOn) return;
+    for (let m = 0; m < 2; m++) {
+      const c = this.clouds[2 + m];
+      c.mesh.visible = s > 0 && c.file !== null && (c.mesh.material.uniforms.uOpacity.value as number) > 0.002;
+    }
+  }
+  /** The top sheet's kept share (`keepTopSheets`): nought unless a deck draws and keeps some. */
+  private topKeep = 0;
+
+  /**
+   * The dome's own uniform objects, by reference (the volumetrics' decks take the colour of the sky above them from the
+   * very gradients, flags, mix, hour and clear colour the dome draws with, the design's decision 102): never copied, so
+   * whatever the sky writes into them this frame the decks read.
+   */
+  get domeUniforms(): Readonly<Record<'uGradient' | 'uGradient2' | 'uGradientMix' | 'uTime' | 'uHasGradient' | 'uHasGradient2' | 'uClear', THREE.IUniform>> {
+    return this.dome.material.uniforms as Record<'uGradient' | 'uGradient2' | 'uGradientMix' | 'uTime' | 'uHasGradient' | 'uHasGradient2' | 'uClear', THREE.IUniform>;
   }
 
   /**
@@ -1500,9 +1617,16 @@ export class SwgSky {
     return n;
   }
 
+  /**
+   * A sheet's own weight, which is its opacity but while the volumetrics' deck keeps a share of the top sheet over itself
+   * (`keepTopSheets`): the lens flare goes on being dimmed by the sheets' weights (the design's decision 91), never by
+   * what is kept of them.
+   */
   private cloudOpacity(i: number): number {
-    return this.clouds[i].mesh.material.uniforms.uOpacity.value as number;
+    return this.sheetWeights[i];
   }
+  /** Each sheet's weight this frame, written beside its opacity in `updateClouds` (the same number unless kept). */
+  private readonly sheetWeights = new Float64Array(4);
 
   /** The cloud sheets drawn this frame, heaviest first (hidden or empty ones skipped), up to out.length; returns how many. Allocates nothing. */
   cloudLayers(out: readonly FxCloudLayer[]): number {
@@ -1525,7 +1649,7 @@ export class SwgSky {
       const mesh = this.clouds[order[i]].mesh;
       const u = mesh.material.uniforms;
       const tex = u.uMap.value as THREE.Texture | null;
-      const opacity = u.uOpacity.value as number;
+      const opacity = this.sheetWeights[order[i]];
       // The opacity is the sheet's own weight, which is the very test that sets `visible`, so this
       // reads the same sheets as before and goes on reading them while the march has them hidden.
       if (!tex || !(opacity > 0.002)) continue;

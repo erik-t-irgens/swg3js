@@ -5,7 +5,7 @@
 // **A preset is worked out, never stored** (the design's decision 4): `presetOf` answers the name whose every
 // quality key matches, else Custom, so it cannot drift from its dials and an old settings file needs nothing. A
 // preset writes the quality keys and nothing else, never a switch (what is drawn) and never an art dial (taste).
-// It writes and compares only the keys whose knobs this build has (the clouds' not yet),
+// It writes and compares only the keys whose knobs this build has (from the seventh wave the clouds' too),
 // and a file saved before a wave added a quality key takes that key from the preset its other keys hold
 // (`volFillQuality`), so a wave that adds a quality key never turns an existing choice into Custom; a file saved before
 // a wave moved a key's preset rows (`VOL_QUALITY_MOVED`) takes its preset's new row the same way.
@@ -69,10 +69,17 @@ export const VOL_SCENE_KEYS = [
   'volWindDevils',
   'volWindTrees',
   'volArtWind',
+  'volCloudsWeather',
+  'volCloudsSmear',
+  'volCloudsLow',
+  'volCloudsHoles',
+  'volCloudsBright',
+  'volCloudsArt',
+  'volCloudSheets',
 ] as const satisfies readonly (keyof Settings)[];
 
-/** The volumetrics' keys the effects chain reads (`fxRegistry.ts`): the master and the volume's own. */
-export const VOL_FX_KEYS = ['volumetrics', 'airVolume', 'airVolumeAmount', 'airVolumeResolution', 'airVolumeSteps', 'airVolumeHistory', 'airVolumeShadows'] as const satisfies readonly (keyof Settings)[];
+/** The volumetrics' keys the effects chain reads (`fxRegistry.ts`): the master, the volume's own and (the seventh wave) the clouds'. */
+export const VOL_FX_KEYS = ['volumetrics', 'airVolume', 'airVolumeAmount', 'airVolumeResolution', 'airVolumeSteps', 'airVolumeHistory', 'airVolumeShadows', 'volClouds', 'volCloudsAmount', 'volCloudsResolution', 'volCloudsSteps', 'volCloudsLight', 'volCloudsHistory'] as const satisfies readonly (keyof Settings)[];
 
 /** Every key the pass speaks for. */
 export const VOL_KEYS: readonly (keyof Settings)[] = [...VOL_FX_KEYS, ...VOL_SCENE_KEYS];
@@ -130,20 +137,30 @@ export const VOL_RANGES = {
   volArtGrass: { min: 0, max: 1, step: 0.05 },
   // The seventh wave's: how strong the travelling gusts, the devils and the gust shed are over the game's own wind.
   volArtWind: { min: 0, max: 1.5, step: 0.05 },
+  // The seventh wave's clouds: their share of the screen, the high slab's samples and the light's steps (uniforms under
+  // loop bounds of 128 and 8), the weather map's texels over its 52 km square, and the four look dials.
+  volCloudsResolution: { options: [0.25, 0.5, 1] as readonly number[] },
+  volCloudsSteps: { min: 16, max: 96, step: 8 },
+  volCloudsLight: { min: 2, max: 6, step: 1 },
+  volCloudsWeather: { options: [256, 512, 1024] as readonly number[] },
+  volCloudsAmount: { min: 0, max: 1.5, step: 0.05 },
+  volCloudsBright: { min: 0, max: 2, step: 0.05 },
+  volCloudsArt: { min: 0, max: 1, step: 0.05 },
+  volCloudSheets: { min: 0, max: 1, step: 0.05 },
 } as const;
 
 /** The quality keys a preset writes, in this build. */
-export const VOL_QUALITY_KEYS = ['volAirDetail', 'volAirSolve', 'volAirRate', 'volDustDetail', 'volLightDetail', 'volLightSteps', 'volSandDetail', 'volPrintDetail', 'airVolumeResolution', 'airVolumeSteps', 'airVolumeHistory', 'airVolumeShadows', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers', 'volParticleDetail', 'volParticleShadows', 'volRainDetail', 'volLiquidDetail'] as const satisfies readonly (keyof Settings)[];
+export const VOL_QUALITY_KEYS = ['volAirDetail', 'volAirSolve', 'volAirRate', 'volDustDetail', 'volLightDetail', 'volLightSteps', 'volSandDetail', 'volPrintDetail', 'airVolumeResolution', 'airVolumeSteps', 'airVolumeHistory', 'airVolumeShadows', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers', 'volParticleDetail', 'volParticleShadows', 'volRainDetail', 'volLiquidDetail', 'volCloudsResolution', 'volCloudsSteps', 'volCloudsLight', 'volCloudsWeather', 'volCloudsSmear'] as const satisfies readonly (keyof Settings)[];
 
 /**
  * The quality keys a wave added after the first: a settings file saved before its wave never wrote them, so with
  * nothing done it would load at the default (High's) and an earlier Low or Ultra would read Custom. `volFillQuality`
  * gives such a file the preset its other quality keys hold, at load.
  */
-export const VOL_QUALITY_LATER: readonly VolQualityKey[] = ['volSandDetail', 'volPrintDetail', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers', 'volParticleDetail', 'volParticleShadows', 'volRainDetail', 'volLiquidDetail'];
+export const VOL_QUALITY_LATER: readonly VolQualityKey[] = ['volSandDetail', 'volPrintDetail', 'volAirLayers', 'volSmokeDetail', 'volDustWisps', 'volDustLayers', 'volParticleDetail', 'volParticleShadows', 'volRainDetail', 'volLiquidDetail', 'volCloudsResolution', 'volCloudsSteps', 'volCloudsLight', 'volCloudsWeather', 'volCloudsSmear'];
 
 /** The wave each later quality key came in, against the wave a settings file says it was saved in (`VOL_QUALITY_STAMP`). */
-export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>> = { volSandDetail: 2, volPrintDetail: 2, volAirLayers: 3, volSmokeDetail: 3, volDustWisps: 3, volDustLayers: 3, volParticleDetail: 4, volParticleShadows: 4, volRainDetail: 4, volLiquidDetail: 5 };
+export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>> = { volSandDetail: 2, volPrintDetail: 2, volAirLayers: 3, volSmokeDetail: 3, volDustWisps: 3, volDustLayers: 3, volParticleDetail: 4, volParticleShadows: 4, volRainDetail: 4, volLiquidDetail: 5, volCloudsResolution: 7, volCloudsSteps: 7, volCloudsLight: 7, volCloudsWeather: 7, volCloudsSmear: 7 };
 
 /**
  * The key a saved settings file carries the wave it was written in under, and this build's wave. The file keeps only
@@ -151,7 +168,7 @@ export const VOL_QUALITY_ADDED: Readonly<Partial<Record<VolQualityKey, number>>>
  * written at the default: only the stamp tells them apart, and a key of a wave the file already knew is never filled.
  */
 export const VOL_QUALITY_STAMP = 'volQualityWave';
-export const VOL_QUALITY_WAVE = 6;
+export const VOL_QUALITY_WAVE = 7;
 
 /**
  * A quality key whose preset rows a later wave moved (the sixth wave's `volSandDetail`, the design's decision 54: from
@@ -192,10 +209,10 @@ export const VOL_PRESET_NAMES: readonly VolPresetName[] = ['low', 'medium', 'hig
  * and High and three times on Ultra (`VOL_QUALITY_MOVED`, the design's decision 54).
  */
 export const VOL_PRESETS: Readonly<Record<VolPresetName, Readonly<Record<VolQualityKey, number | boolean>>>> = {
-  low: { volAirDetail: 64, volAirSolve: 10, volAirRate: 30, volDustDetail: 3, volLightDetail: 1, volLightSteps: 16, volSandDetail: 2, volPrintDetail: 1024, airVolumeResolution: 0.25, airVolumeSteps: 8, airVolumeHistory: true, airVolumeShadows: false, volAirLayers: 1, volSmokeDetail: 1, volDustWisps: 0, volDustLayers: false, volParticleDetail: 0.5, volParticleShadows: false, volRainDetail: 4096, volLiquidDetail: 64 },
-  medium: { volAirDetail: 96, volAirSolve: 14, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 20, volSandDetail: 2, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 12, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 2, volSmokeDetail: 2, volDustWisps: 1, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 8192, volLiquidDetail: 96 },
-  high: { volAirDetail: 128, volAirSolve: 20, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 26, volSandDetail: 2, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 16, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 2, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 16384, volLiquidDetail: 128 },
-  ultra: { volAirDetail: 192, volAirSolve: 28, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 32, volSandDetail: 3, volPrintDetail: 2048, airVolumeResolution: 1, airVolumeSteps: 24, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 3, volDustLayers: true, volParticleDetail: 2, volParticleShadows: true, volRainDetail: 32768, volLiquidDetail: 192 },
+  low: { volAirDetail: 64, volAirSolve: 10, volAirRate: 30, volDustDetail: 3, volLightDetail: 1, volLightSteps: 16, volSandDetail: 2, volPrintDetail: 1024, airVolumeResolution: 0.25, airVolumeSteps: 8, airVolumeHistory: true, airVolumeShadows: false, volAirLayers: 1, volSmokeDetail: 1, volDustWisps: 0, volDustLayers: false, volParticleDetail: 0.5, volParticleShadows: false, volRainDetail: 4096, volLiquidDetail: 64, volCloudsResolution: 0.25, volCloudsSteps: 24, volCloudsLight: 2, volCloudsWeather: 256, volCloudsSmear: false },
+  medium: { volAirDetail: 96, volAirSolve: 14, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 20, volSandDetail: 2, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 12, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 2, volSmokeDetail: 2, volDustWisps: 1, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 8192, volLiquidDetail: 96, volCloudsResolution: 0.25, volCloudsSteps: 32, volCloudsLight: 3, volCloudsWeather: 512, volCloudsSmear: false },
+  high: { volAirDetail: 128, volAirSolve: 20, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 26, volSandDetail: 2, volPrintDetail: 2048, airVolumeResolution: 0.5, airVolumeSteps: 16, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 2, volDustLayers: false, volParticleDetail: 1, volParticleShadows: true, volRainDetail: 16384, volLiquidDetail: 128, volCloudsResolution: 0.25, volCloudsSteps: 48, volCloudsLight: 4, volCloudsWeather: 512, volCloudsSmear: true },
+  ultra: { volAirDetail: 192, volAirSolve: 28, volAirRate: 60, volDustDetail: 4, volLightDetail: 2, volLightSteps: 32, volSandDetail: 3, volPrintDetail: 2048, airVolumeResolution: 1, airVolumeSteps: 24, airVolumeHistory: true, airVolumeShadows: true, volAirLayers: 3, volSmokeDetail: 2, volDustWisps: 3, volDustLayers: true, volParticleDetail: 2, volParticleShadows: true, volRainDetail: 32768, volLiquidDetail: 192, volCloudsResolution: 0.5, volCloudsSteps: 64, volCloudsLight: 5, volCloudsWeather: 1024, volCloudsSmear: true },
 };
 
 /** The preset whose every quality key in `keys` the settings hold, or 'custom'. */
@@ -352,6 +369,24 @@ export interface VolTune {
   windDevils: boolean;
   windTrees: boolean;
   artWind: number;
+  /**
+   * The seventh wave's clouds: their switch (an effects key), share of the screen, samples, light steps, history and
+   * strength; the weather map's texels; the smear, the low deck and its holes; and the look dials (brightness, how far the
+   * pictures shape the decks, the share of the top sheet kept over the deck).
+   */
+  clouds: boolean;
+  cloudsResolution: number;
+  cloudsSteps: number;
+  cloudsLight: number;
+  cloudsHistory: boolean;
+  cloudsAmount: number;
+  cloudsWeather: number;
+  cloudsSmear: boolean;
+  cloudsLow: boolean;
+  cloudsHoles: boolean;
+  cloudsBright: number;
+  cloudsArt: number;
+  cloudSheets: number;
 }
 
 export function newVolTune(): VolTune {
@@ -420,6 +455,19 @@ export function newVolTune(): VolTune {
     windDevils: true,
     windTrees: true,
     artWind: 0.5,
+    clouds: true,
+    cloudsResolution: 0.25,
+    cloudsSteps: 48,
+    cloudsLight: 4,
+    cloudsHistory: true,
+    cloudsAmount: 0.5,
+    cloudsWeather: 512,
+    cloudsSmear: true,
+    cloudsLow: true,
+    cloudsHoles: true,
+    cloudsBright: 0.5,
+    cloudsArt: 0.5,
+    cloudSheets: 0.5,
   };
   // The game's own rain and snow sheets stand down whole while ours falls (`volRainThin`, `volSnowThin` 1, the settings'
   // defaults), written after the record is made so each field is still a double from its first write; the fifth and sixth
@@ -430,6 +478,11 @@ export function newVolTune(): VolTune {
   t.artLava = 1;
   t.artGrass = 1;
   t.artWind = 1;
+  // The clouds' at their full look and none of the sheets kept (fractions written first, so each is a double).
+  t.cloudsAmount = 1;
+  t.cloudsBright = 1;
+  t.cloudsArt = 1;
+  t.cloudSheets = 0;
   return t;
 }
 
@@ -515,6 +568,21 @@ export function volQualityFrom(s: Pick<Settings, VolKey | 'effects'>, out: VolTu
   out.windTrees = b('volWindTrees');
   // Past the page's end from the console, held only to what cannot break anything (no gust against the wind).
   out.artWind = over.volArtWind !== undefined ? Math.max(0, Math.min(4, n('volArtWind'))) : clampRange(n('volArtWind'), R.volArtWind, 1);
+  // The seventh wave's clouds: a step count past the page's end from the console held under its loop bound, a look dial
+  // only to what cannot break anything (nothing negative).
+  out.clouds = b('volClouds');
+  out.cloudsResolution = snap(n('volCloudsResolution'), R.volCloudsResolution.options, 0.25);
+  out.cloudsSteps = Math.round(over.volCloudsSteps !== undefined ? Math.max(1, Math.min(128, n('volCloudsSteps'))) : clampRange(n('volCloudsSteps'), R.volCloudsSteps, 48));
+  out.cloudsLight = Math.round(over.volCloudsLight !== undefined ? Math.max(1, Math.min(8, n('volCloudsLight'))) : clampRange(n('volCloudsLight'), R.volCloudsLight, 4));
+  out.cloudsHistory = b('volCloudsHistory');
+  out.cloudsAmount = over.volCloudsAmount !== undefined ? Math.max(0, Math.min(4, n('volCloudsAmount'))) : clampRange(n('volCloudsAmount'), R.volCloudsAmount, 1);
+  out.cloudsWeather = snap(n('volCloudsWeather'), R.volCloudsWeather.options, 512);
+  out.cloudsSmear = b('volCloudsSmear');
+  out.cloudsLow = b('volCloudsLow');
+  out.cloudsHoles = b('volCloudsHoles');
+  out.cloudsBright = over.volCloudsBright !== undefined ? Math.max(0, Math.min(8, n('volCloudsBright'))) : clampRange(n('volCloudsBright'), R.volCloudsBright, 1);
+  out.cloudsArt = over.volCloudsArt !== undefined ? Math.max(0, Math.min(1, n('volCloudsArt'))) : clampRange(n('volCloudsArt'), R.volCloudsArt, 1);
+  out.cloudSheets = over.volCloudSheets !== undefined ? Math.max(0, Math.min(1, n('volCloudSheets'))) : clampRange(n('volCloudSheets'), R.volCloudSheets, 0);
   return out;
 }
 
@@ -598,6 +666,22 @@ export const VOL_APPLY_CLASS: Readonly<Record<VolKey, 'W' | 'C' | 'T' | 'U' | 'M
   volWindDevils: 'C',
   volWindTrees: 'A',
   volArtWind: 'U',
+  // The seventh wave's clouds: the pass a gate, its share of the screen and the weather map's texels targets, its samples,
+  // light steps, strength and look uniforms, the smear and the low deck uniform branches of the one march (the Start's
+  // measure, `W7b-notes.md`), the holes' tick a gate.
+  volClouds: 'C',
+  volCloudsResolution: 'T',
+  volCloudsSteps: 'U',
+  volCloudsLight: 'U',
+  volCloudsHistory: 'C',
+  volCloudsAmount: 'U',
+  volCloudsWeather: 'T',
+  volCloudsSmear: 'U',
+  volCloudsLow: 'U',
+  volCloudsHoles: 'C',
+  volCloudsBright: 'U',
+  volCloudsArt: 'U',
+  volCloudSheets: 'U',
 };
 
 /**
@@ -673,7 +757,12 @@ export function volConsoleToSettings(o: Record<string, unknown>): VolConsoleSett
       key === 'volFromPeers' ||
       key === 'volWind' ||
       key === 'volWindDevils' ||
-      key === 'volWindTrees';
+      key === 'volWindTrees' ||
+      key === 'volClouds' ||
+      key === 'volCloudsHistory' ||
+      key === 'volCloudsSmear' ||
+      key === 'volCloudsLow' ||
+      key === 'volCloudsHoles';
     if (wantsBool) {
       if (typeof v === 'boolean') out.set(key, { key, value: v, inRange: true });
       continue;
@@ -744,5 +833,24 @@ export function volMemoryMB(t: VolTune, width: number, height: number): number {
     const vh = Math.max(1, Math.round(height * t.volumeResolution));
     bytes += vw * vh * 8 * 3;
   }
+  bytes += cloudsBytes(t, width, height);
   return Math.round((bytes / (1024 * 1024)) * 10) / 10;
+}
+
+/**
+ * The clouds' memory on the card (the seventh wave's): the noise volumes (the September's own, one copy shared: 128³
+ * and 32³ RGBA8), the weather map's two RGBA16F attachments at its texels, the low deck's wind (256² RGBA16F), the
+ * holes' RG32F pair (512²), and the march's two RGBA16F attachments and its two histories at its share of the screen.
+ * Arithmetic, never measured. Nought with the clouds off.
+ */
+export function cloudsBytes(t: Pick<VolTune, 'clouds' | 'cloudsWeather' | 'cloudsResolution'>, width: number, height: number): number {
+  if (!t.clouds) return 0;
+  let bytes = 128 * 128 * 128 * 4 + 32 * 32 * 32 * 4;
+  bytes += t.cloudsWeather * t.cloudsWeather * 8 * 2;
+  bytes += 256 * 256 * 8;
+  bytes += 512 * 512 * 8 * 2;
+  const cw = Math.max(1, Math.round(width * t.cloudsResolution));
+  const ch = Math.max(1, Math.round(height * t.cloudsResolution));
+  bytes += cw * ch * 8 * 4;
+  return bytes;
 }

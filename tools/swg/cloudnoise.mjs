@@ -22,6 +22,8 @@
 // three rising frequencies of Worley in green, blue and alpha, which the march subtracts from the
 // shape to eat its edges away. That is why it is one 128-cube fetch and not four.
 
+import { COVER_CUTS, coverCurve as coverCurveOf } from '../../src/core/fx/cloudMath.ts';
+
 /** How big each volume is, and what it costs. Ours; the technique's own numbers are these. */
 export const CLOUD_NOISE = {
   /** The base volume: the billow and three erosion frequencies. 128 cubed by four channels is 8 MB. */
@@ -270,36 +272,12 @@ export function buildDetail(size = CLOUD_NOISE.detailSize, tune = CLOUD_NOISE, o
  * the least cloud any ray will find, and it is the one direction whose answer does not depend on
  * where the camera happens to be standing.
  */
-export function coverCurve(base, detail, baseSize, detailSize, march, rule, cuts = COVER_CUTS, rays = 64) {
-  const b = [0, 0, 0, 0];
-  const d = [0, 0, 0, 0];
-  const steps = march.steps;
-  const span = march.top - march.bottom;
-  const stepLen = span / steps;
-  const out = [];
-  for (const cut of cuts) {
-    let covered = 0;
-    for (let ry = 0; ry < rays; ry++) {
-      for (let rx = 0; rx < rays; rx++) {
-        // Spread over a good few kilometres of ground, which is several periods of the base volume.
-        const px = (rx / rays) * march.baseScale * 3;
-        const pz = (ry / rays) * march.baseScale * 3;
-        let od = 0;
-        for (let i = 0; i < steps; i++) {
-          const py = march.bottom + (i + 0.5) * stepLen;
-          const h = (py - march.bottom) / span;
-          rule.volumeTexel(base, baseSize, Math.round((px / march.baseScale) * baseSize), Math.round((py / march.baseScale) * baseSize), Math.round((pz / march.baseScale) * baseSize), b);
-          rule.volumeTexel(detail, detailSize, Math.round((px / march.detailScale) * detailSize), Math.round((py / march.detailScale) * detailSize), Math.round((pz / march.detailScale) * detailSize), d);
-          od += rule.densityFrom(b, d, h, cut, 2, march) * march.density * stepLen;
-        }
-        // Half the light stopped is the line between a covered sky and a hazy one.
-        if (1 - Math.exp(-od) >= 0.5) covered++;
-      }
-    }
-    out.push({ cut: Math.round(cut * 1000) / 1000, sky: Math.round((covered / (rays * rays)) * 1000) / 1000 });
-  }
-  return out;
+export function coverCurve(base, detail, baseSize, detailSize, march, _rule, cuts = COVER_CUTS, rays = 64) {
+  // The sweep lives in `src/core/fx/cloudMath.ts` (the volumetrics' seventh wave moved it there, so the game's own
+  // calibration worker runs the very same one) and is imported back; `_rule` is that module, as the converter has always
+  // handed it, kept so the command's call reads as it did. The sky's slab is measured as two decks, as it always was.
+  return coverCurveOf(base, detail, baseSize, detailSize, march, 2, cuts, rays);
 }
 
-/** The thresholds the sweep measures at: fine where the sky is changing fastest. */
-export const COVER_CUTS = [0.2, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95];
+/** The thresholds the sweep measures at: fine where the sky is changing fastest (`cloudMath.ts`'s own). */
+export { COVER_CUTS };

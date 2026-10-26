@@ -142,6 +142,7 @@ import { VOL_TUNE } from './volumetrics/volSettings.ts';
 import { LIQUID_U, lavaCrustMaterial, lavaMaterialFor, lavaWearsCrust, liquidOff, waterWearsAir, type LiquidChoice } from './volumetrics/airLiquid.ts';
 import { GRASS_AIR_U, grassAirTwin, grassWaitsForScreen, grassWearsAir, newGrassChoice } from './volumetrics/airGrass.ts';
 import { newShuttleJets, type ShuttleJets } from './volumetrics/airEngines.ts';
+import { cloudsFeed, cloudsFeedMade } from './volumetrics/airCloudsFeed.ts';
 import { newNearRides, type NearRides } from '../net/nearRides.ts';
 import { ribbonAt, ribbonTriangles, type GameRibbon, type RibbonPoint } from '../swg/terrain/ribbons.ts';
 import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../vehicles/garage';
@@ -2913,6 +2914,9 @@ export class World {
   }
 
   private dropSky(): void {
+    // The clouds' borrowed pictures let go before the sky that owns them is disposed (W4's rule for borrowed textures): a
+    // disposed picture still bound would be uploaded again at the next draw. Only once the clouds have been made.
+    if (cloudsFeedMade()) cloudsFeed().letGoPictures();
     if (this.swgSky) {
       this.swgSky.dispose(this.scene, (m) => this.forgetMaterials(m));
       this.swgSky = null;
@@ -3866,6 +3870,26 @@ export class World {
       this.airPeerRides(rides);
     }
     if (stirs && this.airShuttleJets) this.airShuttleJets(jets);
+  }
+
+  /**
+   * What holes the clouds besides this world's own hulls (the seventh wave's second half, the design's §2.18): other
+   * players' rides round the point the record names (its `atX`, `atZ` and `reach`, written by the caller) and the stood
+   * shuttles' lit jets, into the clouds' own kept records; none in space. Nothing allocated.
+   */
+  cloudPunchers(rides: NearRides, jets: ShuttleJets): void {
+    rides.n = 0;
+    jets.n = 0;
+    if (!this.planet || this.planet.space) return;
+    if (this.airPeerRides) this.airPeerRides(rides);
+    if (this.airShuttleJets) this.airShuttleJets(jets);
+  }
+
+  /** The pack this world's sky came from (its own, or the one it borrows), whose `clouds.json` the clouds read; '' with none. */
+  get skyPackId(): string {
+    const root = this.skyPack?.root ?? '';
+    const parts = root.split('/').filter((s) => s.length > 0);
+    return parts.length ? parts[parts.length - 1] : '';
   }
 
   updateAir(dt: number, simulate: boolean, viewInBuilding: boolean, reading: boolean): void {

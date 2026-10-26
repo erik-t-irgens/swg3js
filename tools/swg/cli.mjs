@@ -3577,7 +3577,13 @@ function packStatus(dir) {
     if (!skyWorlds.length) console.log('  clouds: none yet, and none asked for until a world has a sky');
     else if (!volumes) need(`clouds ${dir}`, files ? `the noise the volumetric clouds march through was calibrated before the coverage was measured (format ${noise.format})` : 'the volumetric clouds have no noise to march through (clouds/)');
     else if (measured.length < skyWorlds.length) need(`clouds ${dir}`, `worlds whose sky has not been measured (${skyWorlds.filter((p) => !measured.includes(p)).join(', ')})`);
-    else console.log(`  clouds: ${measured.length} worlds measured, and the volumes the march reads`);
+    else {
+      // The volumetrics' clouds (the seventh wave) read each picture's own numbers beside the September's (`pictures`
+      // 2, `clouds.mjs`): seconds, no archive, and the noise volumes left as they are.
+      const unpictured = measured.filter((p) => readQuiet(join(dir, p, 'clouds.json'))?.pictures !== 2);
+      if (unpictured.length) need(`clouds ${dir} --no-noise`, `worlds whose cloud pictures the volumetrics' clouds have no numbers for (${unpictured.slice(0, 4).join(', ')}${unpictured.length > 4 ? ', ...' : ''}): they are drawn as heaps at the September's coverage`);
+      else console.log(`  clouds: ${measured.length} worlds measured, each picture's numbers read, and the volumes the march reads`);
+    }
   }
   const galaxyLine = galaxyStatus(readQuiet(join(dir, 'galaxy.json')));
   console.log(`  ${galaxyLine.line}`);
@@ -7471,7 +7477,9 @@ switch (cmd) {
     // And the two noise volumes the march reads. Nothing in them comes out of the archives -- they
     // are generic cloud noise, the same on every world, and the client drew its sky as flat sheets
     // and had none -- so the pack says `invented` on the made-up system's own precedent.
-    if (!options['no-noise']) {
+    // `--no-noise` is a bare flag (`flags`): `options` holds only a `--key=value`, so read there alone it was never true
+    // and every run built the volumes again (the seventh wave found it running the pictures' numbers alone).
+    if (!flags.has('--no-noise') && !options['no-noise']) {
       const { billowRange, buildBase, buildDetail, coverCurve, CLOUD_NOISE } = await import('./cloudnoise.mjs');
       const rule = await import('../../src/core/fx/cloudMath.ts');
       const dir = join(pos[1], 'clouds');

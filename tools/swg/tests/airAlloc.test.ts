@@ -90,6 +90,27 @@ else {
   ok(bands!.w3.wisps === 'bands' && clean(bands!) && clean(bandsMoving!), `in the bands mode (its pass every frame) a steady frame makes ${(bands!.made / bands!.frames).toFixed(3)} bytes and a moving one ${(bandsMoving!.made / bandsMoving!.frames).toFixed(3)}, under 0.2`);
 }
 
+// The seventh wave's second half: the clouds' feed alone, steady and moving, cleanest of three.
+{
+  type Clouds = { skipped?: string; steady: { frames: number; made: number; scavenges: number }; moving: { frames: number; made: number; scavenges: number }; smearing: boolean; low: number; stamped: number; remembered: number; live: boolean; why: string | null };
+  let c: Clouds | null = null;
+  for (let i = 0; i < 3; i++) {
+    const got = JSON.parse(run('clouds')) as Clouds;
+    if (got.skipped) {
+      c = got;
+      break;
+    }
+    if (!c || better(got.steady, c.steady) || better(got.moving, c.moving)) c = got;
+    if (clean(c.steady) && clean(c.moving)) break;
+  }
+  if (c?.skipped) note(`the clouds' measure was skipped: ${c.skipped}`);
+  else if (c) {
+    ok(c.smearing && c.low > 0 && c.stamped > 0 && c.remembered > 0 && c.live && c.why === null, `the clouds' frame measured walks the mix, writes the decks' packs (the smear on), draws the low deck (cover ${c.low}), stamps holes on the tick (${c.stamped}) for ${c.remembered} punchers and keeps a live box`);
+    ok(clean(c.steady), `a steady frame of the clouds' feed makes ${(c.steady.made / c.steady.frames).toFixed(3)} bytes (${c.steady.scavenges} collections), under 0.2`);
+    ok(clean(c.moving), `a frame of the clouds' feed whose camera moves at 167 m/s makes ${(c.moving.made / c.moving.frames).toFixed(3)} bytes (${c.moving.scavenges} collections), under 0.2`);
+  }
+}
+
 const off = JSON.parse(run('off')) as { skipped?: string; off?: Record<string, { made: number; scavenges: number }>; active?: boolean };
 if (off.skipped) note(`the master-off measure was skipped: ${off.skipped}`);
 else {

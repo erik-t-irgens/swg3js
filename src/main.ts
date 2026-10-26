@@ -42,7 +42,7 @@ import { AIR_DRAW, checkAirTargets, probeAirDraws, type AirDrawMode } from './wo
 import { AIR_TUNE, GROUND_CLASS_NAMES, tuneAir, tuneFogLooks, GROUND_FOG_LOOKS, type GroundClass } from './world/volumetrics/airTune.ts';
 import { FORCE_WAVE, FORCE_WAVE_SPEED, setForceWave } from './combat/forceWaveTune.ts';
 import { airDialsFor } from './world/volumetrics/airDials.ts';
-import { setWindArm, WIND_STATE } from './world/wind.ts';
+import { setWindArm, WIND_FRAME, WIND_STATE } from './world/wind.ts';
 import { setWindNowSource, windDialsFor } from './world/windDials.ts';
 import { windDebug, type WindDebugContext, type WindDebugOptions } from './world/windDebug.ts';
 import { windTreesChosen, windTreesReport } from './world/windTrees.ts';
@@ -50,6 +50,10 @@ import { windSelfTest } from './world/windSelfTest.ts';
 import { MEDIUM_BYTE } from './world/volumetrics/airRaster.ts';
 import { isVolKey, presetOf, VOL_APPLY_CLASS, VOL_KEYS, VOL_PRESET_LABELS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_QUALITY_KEYS, VOL_RANGES, VOL_TUNE, volConsoleToSettings, volMemoryMB, volQualityFrom, type VolKey, type VolQualityKey } from './world/volumetrics/volSettings.ts';
 import { AirVolumePass } from './core/fx/airVolume.ts';
+import { AirCloudsPass, CLOUD_VIEWS } from './core/fx/airClouds.ts';
+import { cloudPicturesOf, cloudsFeed, cloudsFeedMade, type CloudPictures, type CloudsSky } from './world/volumetrics/airCloudsFeed.ts';
+import { newNearRides } from './net/nearRides.ts';
+import { newShuttleJets } from './world/volumetrics/airEngines.ts';
 import { createFxQuad, FX_CAMERA } from './core/fx/pass.ts';
 import { resolveLinks } from './core/programQueue.ts';
 import { LIVE_GROUND_OVERRIDES } from './world/volumetrics/groundResponse.ts';
@@ -283,7 +287,7 @@ import { EditChip } from './ui/editChip.ts';
 import { PermanentPanel, editSlots, type PermanentPanelModel, type PermanentRowView } from './ui/permanentPanel.ts';
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
 import { CLOUD_MARCH, type CloudsPass } from './core/fx/clouds';
-import { CLOUD_TUNE, cloudLook, loadCloudPack, loadCloudVolumes, worthDrawing, type CloudPack } from './world/cloudLook.ts';
+import { CLOUD_TUNE, cloudLook, loadCloudNoise, loadCloudPack, loadCloudVolumes, worthDrawing, type CloudPack } from './world/cloudLook.ts';
 import { tuneUnderwater, unknownUnderwaterKeys, type UnderwaterTune } from './core/fx/underwaterMath.ts';
 import type { UnderwaterPass } from './core/fx/underwater';
 import { FIGURE_SPHERE, followDepth, measureLocalSphere, type FxMoverList, type LocalSphere, type VelocityProduct } from './core/fx/velocity';
@@ -1438,6 +1442,21 @@ class App {
   private cloudVolumesAsked = false;
   /** What the console is overriding the world's own sky with, so a clear world can be flown under an overcast. */
   private readonly cloudForce: { coverage: number | null; brightness: number | null; drift: number | null } = { coverage: null, brightness: null, drift: null };
+  /**
+   * The volumetrics' clouds (the seventh wave's second half): each sky pack's picture table, fetched once a pack for the
+   * session (a key with null: in flight, or no `clouds.json`); the sky the feed last read, and its pack; other players'
+   * rides and the stood shuttles' jets the holes read, kept records; whether last frame simulated (the holes' clock).
+   */
+  private readonly cloudPictureTables = new Map<string, CloudPictures | null>();
+  private cloudSkySeen: unknown = null;
+  private cloudSkyPack = '';
+  private readonly cloudRides = newNearRides(16);
+  private readonly cloudJets = newShuttleJets(16);
+  private airSimulate = false;
+  /** The cached ground under a point, for the low deck's floor (made once; never a generation). */
+  private readonly cloudGround = (q: { readonly x: number; readonly z: number }): number | null => this.world.groundIfCached(q.x, q.z);
+  /** The noise for the clouds: asked once a session in a warm or an arrival, never on a frame (`warmCloudNoise`). */
+  private cloudNoiseAsked: Promise<boolean> | null = null;
   /** What the debug mask draws: the player and whatever they ride or are aboard. */
   private readonly fxMaskObjects: THREE.Object3D[] = [];
   /** Work going on in the background: the Effects switch compiling every shader for the other path. */
@@ -1955,6 +1974,20 @@ class App {
     // The fourth wave's: the kick-up pool (leaves, puffs, spray, streaks) and the rain of ours, each as its switch would.
     registerPerfSwitch('volParticles', { get: () => this.volSoftValue('volParticles'), set: (v) => this.volSoft('volParticles', !!v), values: [false, true], note: 'the leaves, puffs, spray and streaks the air carries (the pool shrinks to a row a kind while off, no program built)' });
     registerPerfSwitch('volRain', { get: () => this.volSoftValue('volRain'), set: (v) => this.volSoft('volRain', !!v), values: [false, true], note: "the rain of ours (the game's own sheets whole again while off)" });
+    // The seventh wave's second half: the volumetrics' clouds drawn or not (the sheets, and the September pass where it is
+    // on, back while not), and the low deck and the holes as their switches would; every program and target kept.
+    registerPerfSwitch('airClouds', {
+      get: () => this.postfx?.override.airClouds !== false,
+      set: (v) => {
+        if (!this.postfx) return;
+        if (v) delete this.postfx.override.airClouds;
+        else this.postfx.override.airClouds = false;
+      },
+      values: [false, true],
+      note: "the volumetrics' clouds drawn or not: false gives the sky back to today's sheets (and the September pass where it is on)",
+    });
+    registerPerfSwitch('volCloudsLow', { get: () => this.volSoftValue('volCloudsLow'), set: (v) => this.volSoft('volCloudsLow', !!v), values: [false, true], note: 'the low deck under the rain (the march walks the high slab alone while off)' });
+    registerPerfSwitch('volCloudsHoles', { get: () => this.volSoftValue('volCloudsHoles'), set: (v) => this.volSoft('volCloudsHoles', !!v), values: [false, true], note: "the holes a hull punches (no tick, the march's keep one, while off)" });
     // The ground's (the second wave's): soft too, never the real master (the design's §3.5). `zero` is every art dial at
     // nought with the dust's amount nought, the variant still worn; `off` the ground back on its plain material and the
     // volume unwanted, the field, its targets and both grounds' programs kept; `one` every art dial at one. The zero-dial
@@ -5032,7 +5065,18 @@ class App {
        * let through (white where it found nothing), which is how to tell a march that drew nothing
        * from an upsample that threw it away.
        */
-      clouds: (opts?: Partial<typeof CLOUD_MARCH> & { coverage?: number | null; brightness?: number | null; drift?: number | null; standDownDust?: number | null }) => {
+      clouds: (opts?: Partial<typeof CLOUD_MARCH> & { coverage?: number | null; brightness?: number | null; drift?: number | null; standDownDust?: number | null } & { tune?: Record<string, unknown>; view?: string | null; hole?: { radius?: number; here?: boolean } | true; low?: boolean | null; probe?: 'hole'; bench?: boolean | { draws?: number } }) => {
+        // The volumetrics' clouds with the master on (the seventh wave's second half): their own report and knobs whenever
+        // they stand in for these, or when one of their own options is asked; otherwise the September's helper, today's.
+        const own = !!opts && ('tune' in opts || 'view' in opts || 'hole' in opts || 'low' in opts || 'probe' in opts);
+        // The wave's Start check, the console's only: the march as one program against its branches compiled out.
+        if (VOL_TUNE.on && opts && 'bench' in opts) {
+          const pass = this.postfx?.pass<AirCloudsPass>('airClouds');
+          if (!pass) return 'the clouds are not on the chain: turn Effects and the volumetrics master on';
+          const b = opts.bench;
+          return pass.benchShapes(this.renderer, typeof b === 'object' && b && Number.isFinite(b.draws) ? Math.max(1, Math.round(b.draws as number)) : 120);
+        }
+        if (VOL_TUNE.on && (own || this.postfx?.passWanted('airClouds'))) return this.airCloudsDebug(opts ?? {});
         const fx = this.postfx;
         const pass = fx?.pass<CloudsPass>('volumetricClouds');
         if (!fx || !pass) return 'the effects are off; turn Effects on in the menu';
@@ -12990,6 +13034,17 @@ class App {
           const objects = pass.warmMaterials(VOL_TUNE.wisps).map((m) => m.object ?? createFxQuad(m.material));
           jobs.push(this.world.programJob(objects, 'volumetrics: the dust in the picture', true, { compile: (o, _allowance, resolve) => ({ made: this.compileFxObject(o, target, resolve), done: true }) }));
         }
+        // The seventh wave's second half: the clouds' pass, made and its seven programs warmed before the chain is given it,
+        // and their noise fetched and put on the card inside this warm (never on a live frame; the September's own fetch
+        // shared). A chain that already holds the pass has its programs; the noise is the session's once uploaded.
+        let clouds: AirCloudsPass | null = null;
+        if (chain && !chain.pass('airClouds')) {
+          clouds = new AirCloudsPass(cloudsFeed());
+          const target = chain.compileTarget;
+          const objects = clouds.materials().map((m) => m.object ?? createFxQuad(m.material));
+          jobs.push(this.world.programJob(objects, 'volumetrics: the clouds', true, { compile: (o, _allowance, resolve) => ({ made: this.compileFxObject(o, target, resolve), done: true }) }));
+        }
+        if (chain) jobs.push(this.warmCloudNoise(clouds ?? chain.pass<AirCloudsPass>('airClouds') ?? null).then(() => {}));
         // Both grounds, one stand-in each, through the queue as any scene object is (their lights are the world pass's).
         const stands = this.world.groundStandInsFor(air);
         if (stands.length) jobs.push(this.world.compileReady(stands, 'volumetrics: the ground'));
@@ -13024,6 +13079,7 @@ class App {
         const changed = !VOL_TUNE.on || VOL_HATCH_OFF || !this.inWorld || this.postfx !== chain || this.world.packId !== world || (this.world.air !== null && this.world.air !== air);
         if (changed) {
           pass?.dispose();
+          clouds?.dispose();
           // A field thrown away leaves the world's material sets first: the warm adopted its pools' draws (the kick-up's
           // stand-ins went through `compileReady`), and the portal renderer's set and the compiled set are strong.
           if (!had && this.world.air !== air) {
@@ -13038,6 +13094,8 @@ class App {
         }
         if (pass && this.postfx && !this.postfx.pass('airVolume')) this.postfx.registerPass(pass);
         else pass?.dispose();
+        if (clouds && this.postfx && !this.postfx.pass('airClouds')) this.postfx.registerPass(clouds);
+        else clouds?.dispose();
         if (!had) this.world.takeAir(air);
         // Every variant this warm compiled is built for the frames' own target now (the choosers wear none for a target
         // nothing compiled them for: an Effects switch made with the master off compiled none).
@@ -13146,19 +13204,64 @@ class App {
     this.world.syncAirMeshes();
     this.loadingScreen.setWhat('the air');
     await this.world.airPictures(AIR_PICTURE_WAIT_MS);
+    await this.prepareClouds();
     // The fifth wave's: this world's water current variants and lava crust twins made before the effects' warm-up
     // compiles the variants' mask twins (the sweep compiles the rest).
     if (air && !air.refused) this.world.makeLiquidVariants();
   }
 
+  /**
+   * An arrival's half of the clouds (the seventh wave's second half), with the master on (`prepareAir` asks): their pass
+   * registered beside the volume's when the chain was built without it (the effects' warm-up compiles it with the
+   * chain), their noise fetched and put on the card behind this screen, never on a live frame, the calibration worker
+   * started, and the last world's holes, scrolls and pictures let go.
+   */
+  private async prepareClouds(): Promise<void> {
+    if (!VOL_TUNE.on || VOL_HATCH_OFF) return;
+    if (this.postfx && !this.postfx.pass('airClouds')) this.postfx.registerPass(new AirCloudsPass(cloudsFeed()));
+    cloudsFeed().reset();
+    this.loadingScreen.setWhat('the clouds');
+    await this.warmCloudNoise(this.postfx?.pass<AirCloudsPass>('airClouds') ?? null);
+  }
+
+  /**
+   * The clouds' noise volumes for the session (the seventh wave's second half): fetched through the September's own
+   * session cache (`loadCloudVolumes`, so the bytes are fetched once whichever pass asks), handed to the feed with the
+   * manifest's curve and the billow's top, put on the card by the pass (`uploadNoise`, timed into `uploadMs` for the
+   * notes), and the calibration worker started. Called only behind a loading screen (`prepareAir`) or inside the master's
+   * in-play warm (`reconcileVolumetrics`), never on a live frame; the fetch is asked once a session. False where the
+   * volumes are not converted (the pass then refuses in words and the sheets stay).
+   */
+  private async warmCloudNoise(pass: AirCloudsPass | null): Promise<boolean> {
+    this.cloudNoiseAsked ??= (async () => {
+      const base = import.meta.env.BASE_URL;
+      const [man, vols] = await Promise.all([loadCloudNoise(base), loadCloudVolumes(base)]);
+      if (!man || !vols) return false;
+      const feed = cloudsFeed();
+      feed.setNoise(vols.base, vols.detail, vols.cover, man.billow?.hi ?? Number.NaN);
+      // The worker fetches the volumes itself, from addresses made whole here (a module worker reads a relative one
+      // against its own file, not the page).
+      const at = (file: string): string => new URL(`${base}assets-private/clouds/${file}`, document.baseURI).href;
+      feed.startCalibration({ baseUrl: at(man.base.file), detailUrl: at(man.detail.file), baseSize: man.base.size, detailSize: man.detail.size });
+      return true;
+    })();
+    const ok = await this.cloudNoiseAsked;
+    this.cloudNoiseOk = ok;
+    const feed = cloudsFeed();
+    if (ok && pass && !feed.noiseUploaded) feed.uploadMs = pass.uploadNoise(this.renderer);
+    return ok;
+  }
+  /** Whether this install's cloud noise was found (null until the session's one ask has answered): the page's words. */
+  private cloudNoiseOk: boolean | null = null;
+
   /** A volumetrics switch as it is in force: the frame report's soft value over the setting. */
-  private volSoftValue(key: 'airVolumeShadows' | 'volLight' | 'volParticles' | 'volRain'): boolean {
+  private volSoftValue(key: 'airVolumeShadows' | 'volLight' | 'volParticles' | 'volRain' | 'volCloudsLow' | 'volCloudsHoles'): boolean {
     const over = this.volOver[key];
     return typeof over === 'boolean' ? over : this.settings[key];
   }
 
   /** A volumetrics switch moved for an A/B (`__debug.perf({ ab })`): in force now, the setting left alone, nothing built. */
-  private volSoft(key: 'airVolumeShadows' | 'volLight' | 'volParticles' | 'volRain', on: boolean): void {
+  private volSoft(key: 'airVolumeShadows' | 'volLight' | 'volParticles' | 'volRain' | 'volCloudsLow' | 'volCloudsHoles', on: boolean): void {
     if (on === this.settings[key]) delete this.volOver[key];
     else this.volOver[key] = on;
     this.applyVolumetrics();
@@ -13237,6 +13340,13 @@ class App {
       if (want !== windTreesChosen()) return { note: want ? 'from the next arrival: the trees take each gust where they stand through programs chosen at an arrival' : 'the trees keep the gusts until the next arrival (their programs were chosen at this one); with the unified wind off they sway as before' };
     }
     if (key === 'volWindDevils' && VOL_TUNE.on && !VOL_TUNE.air) return { note: 'the dust devils stir the moving air, which is off: none is seen' };
+    // The seventh wave's second half: the September clouds' row greys in words while the volumetrics' clouds stand in for
+    // it (its pass yields to theirs, `yieldsTo`), and the clouds say so where the noise was never converted.
+    if ((key === 'volumetricClouds' || key === 'volumetricCloudQuality' || key === 'volumetricCloudAmount') && this.postfx?.passWanted('airClouds')) return { off: "the Volumetrics section's clouds stand in for these" };
+    // Worded by what the session's one ask found, never by whether the noise is on the card yet (fetched and not yet up,
+    // it goes on behind the next Effects switch or loading screen; with Effects off nothing draws the clouds anyway).
+    if (key === 'volClouds' && VOL_TUNE.on && this.inWorld && this.cloudNoiseOk === false) return { note: 'no noise volumes on this install: npm run swg -- clouds assets-private' };
+    if (key === 'volClouds' && VOL_TUNE.on && this.inWorld && this.cloudNoiseOk === true && this.settings.effects && cloudsFeedMade() && !cloudsFeed().noiseUploaded) return { note: 'the clouds\' noise goes on the card behind the next loading screen' };
     return null;
   }
 
@@ -21157,6 +21267,13 @@ class App {
    */
   private feedClouds(): void {
     const sky = this.world.swgSky;
+    // The volumetrics' clouds stand in for these while they are wanted (the September pass yields to them, `yieldsTo`):
+    // fed and nothing else, so only one pass ever takes the sheets down. With the master off they are never on a chain.
+    if (this.postfx?.passWanted('airClouds')) {
+      this.feedAirClouds(this.postfx.pass<AirCloudsPass>('airClouds')!);
+      return;
+    }
+    if (WIND_STATE.decks) this.letGoDecks();
     const pass = this.settings.volumetricClouds ? this.postfx?.pass<CloudsPass>('volumetricClouds') : undefined;
     if (!pass) {
       if (sky) sky.sheets = true;
@@ -21190,6 +21307,208 @@ class App {
     l.drift = force.drift ?? look.drift;
     l.heading = w.windHeading;
     if (sky) sky.sheets = !pass.wouldDraw(!!this.world.planet?.space, this.world.inside);
+  }
+
+  /**
+   * The volumetrics' clouds' frame (the seventh wave's second half, the design's §2.18): the feed's kept input written
+   * from the world -- the sky, this world's picture table (its sky's own pack's `clouds.json`, fetched once a pack and
+   * never awaited), the weather's own numbers, the world's travel aloft, the hulls, other players' rides and the stood
+   * shuttles' jets, the cached ground -- the feed stepped, the dome's uniform objects bound by reference, and the sheets
+   * down while the decks draw, the top sheet's kept share over them. Nothing allocated unless a pack's table is first asked.
+   */
+  private feedAirClouds(pass: AirCloudsPass): void {
+    const sky = this.world.swgSky;
+    const feed = cloudsFeed();
+    const I = feed.input;
+    const cam = this.cam.camera.position;
+    I.dt = this.lastDt;
+    I.simulate = this.airSimulate;
+    I.camX = cam.x;
+    I.camY = cam.y;
+    I.camZ = cam.z;
+    const weather = this.world.weather;
+    const ws = weather.state;
+    const fx = weather.fx;
+    I.weatherOn = ws.enabled;
+    I.rain = ws.enabled ? fx.rain : 0;
+    I.snow = ws.enabled ? fx.snow : 0;
+    I.dust = ws.enabled ? fx.dust : 0;
+    I.heading = ws.windHeading;
+    I.windClock = weather.windClock;
+    I.travel = WIND_FRAME.travel;
+    I.space = !!this.world.planet?.space;
+    I.inside = this.world.inside;
+    I.sky = sky as CloudsSky | null;
+    // The pack the sky came from (its own, or the one it borrows), worked out when the sky changes; its picture table
+    // fetched once for the session and read as null until it lands.
+    if (sky !== this.cloudSkySeen) {
+      this.cloudSkySeen = sky;
+      this.cloudSkyPack = sky ? this.world.skyPackId : '';
+      // A new sky keeps no sheet over a deck until it is told (its own share starts at nought).
+      this.cloudKept = -1;
+      // A sky is made once a world, so a new one is a world the feed has not drawn: the last world's holes, scrolls,
+      // ground and pictures let go however it was reached. An arrival with the master on resets the feed behind its
+      // screen too, but the master turned off, a travel and the master on again in play reach here with nothing else to
+      // say the world changed.
+      if (sky) feed.reset();
+    }
+    const pk = this.cloudSkyPack;
+    if (pk && !this.cloudPictureTables.has(pk)) {
+      this.cloudPictureTables.set(pk, null);
+      void loadCloudPack(pk, import.meta.env.BASE_URL).then((p) => this.cloudPictureTables.set(pk, cloudPicturesOf(p)));
+    }
+    I.pictures = pk ? (this.cloudPictureTables.get(pk) ?? null) : null;
+    I.hulls = this.world.vehicles;
+    const rides = this.cloudRides;
+    rides.atX = cam.x;
+    rides.atZ = cam.z;
+    rides.reach = 512;
+    this.world.cloudPunchers(rides, this.cloudJets);
+    I.rides = rides;
+    I.jets = this.cloudJets;
+    I.groundAt = this.cloudGround;
+    feed.update();
+    if (sky) {
+      pass.bindDome(sky.domeUniforms);
+      // The same verdicts the frame's context hands the pass: the camera in a building's view (this draw's, kept a line
+      // before it was routed) and under water (`beginWaterFrame` worked it out just before this feed).
+      const draws = pass.wouldDraw(I.space, I.inside, this.lastViewBuilding, this.world.cameraWaterAt(this.cam.camera.position).submerged);
+      sky.sheets = !draws;
+      // The top sheet's kept share, told only when it moves (a number handed across a call each frame is one made).
+      const keep = draws ? VOL_TUNE.cloudSheets : 0;
+      if (keep !== this.cloudKept) {
+        this.cloudKept = keep;
+        sky.keepTopSheets(keep);
+      }
+    }
+  }
+  /** The share of the top sheet last kept over the decks (-1: the sky not yet told). */
+  private cloudKept = -0.5;
+
+  /** A deck stood down for good this frame (the master or `volClouds` off, the chain gone): the sheets the sky's again, today's. */
+  private letGoDecks(): void {
+    WIND_STATE.decks = false;
+    this.world.swgSky?.keepTopSheets(0);
+    this.cloudKept = 0;
+  }
+
+  /**
+   * `__debug.clouds()` with the master on (the seventh wave's second half, the design's §14c): each deck's images, weights,
+   * kinds and coverage, the overcast, the low deck, the holes, the decks' offsets and winds, the calibration and the cost.
+   * `tune` moves the `clouds` group's numbers (or `{ clouds, lowDeck, holes }`), `view` draws a uniform branch of the
+   * march, `hole` punches at the crosshair, `low` holds the low deck on or off (null lets go) and `probe: 'hole'` reads
+   * the march's transmittance at the newest hole's middle and beside it (a read-back, console only). Never saved.
+   */
+  private airCloudsDebug(o: { tune?: Record<string, unknown>; view?: string | null; hole?: { radius?: number; here?: boolean } | true; low?: boolean | null; probe?: 'hole' }): Record<string, unknown> {
+    const notes: string[] = [];
+    const out: Record<string, unknown> = {};
+    const fx = this.postfx;
+    const pass = fx?.pass<AirCloudsPass>('airClouds') ?? null;
+    const feed = cloudsFeed();
+    if (o.tune) {
+      const t = o.tune;
+      const grouped = 'clouds' in t || 'lowDeck' in t || 'holes' in t;
+      notes.push(...tuneAir(grouped ? t : { clouds: t }).notes);
+    }
+    if ('low' in o) feed.input.lowForce = o.low === true ? true : o.low === false ? false : null;
+    if (o.view !== undefined) {
+      if (!pass) notes.push('the clouds are not on the chain: turn Effects and the volumetrics master on');
+      else if (o.view === null) pass.view = 0;
+      else {
+        const i = (CLOUD_VIEWS as readonly string[]).indexOf(o.view);
+        if (i >= 0) pass.view = i + 1;
+        else notes.push(`no view "${o.view}": ${CLOUD_VIEWS.join(', ')}`);
+      }
+    }
+    if (o.hole) {
+      // Where the crosshair's ray meets a deck: the low deck's middle while it draws, else the slab's; in a band already,
+      // a few radii ahead along the ray.
+      const r = o.hole !== true && Number.isFinite(o.hole.radius) && (o.hole.radius as number) > 0 ? (o.hole.radius as number) : 60;
+      const here = o.hole !== true && o.hole.here === true;
+      const cam = this.cam.camera;
+      cam.updateMatrixWorld();
+      const p = cam.position;
+      const f = new THREE.Vector3();
+      cam.getWorldDirection(f);
+      const H = feed.holes;
+      const bands = [H.low.on ? H.low : null, H.high.on ? H.high : null];
+      let at: THREE.Vector3 | null = null;
+      for (const b of bands) {
+        if (!b || at) continue;
+        // `here`: straight over (or under) the camera, in the nearest deck that takes holes, as a ship climbing past would.
+        if (here) at = new THREE.Vector3(p.x, 0.5 * (b.bottom + b.top), p.z);
+        else if (p.y >= b.bottom && p.y <= b.top) at = p.clone().addScaledVector(f, 3 * r);
+        else {
+          const mid = 0.5 * (b.bottom + b.top);
+          const t = Math.abs(f.y) > 1e-4 ? (mid - p.y) / f.y : -1;
+          if (t > 0 && t < 20000) at = p.clone().addScaledVector(f, t);
+        }
+      }
+      if (!at) notes.push('the crosshair meets no deck that takes holes (look up or down at one, or turn the holes and the low deck on)');
+      else {
+        const n = H.punchAt(at.x, at.y, at.z, r);
+        out.hole = { at: [Math.round(at.x), Math.round(at.y), Math.round(at.z)], radius: r, decks: n };
+      }
+    }
+    // One ordinary frame first, so what is read is what a frame drew (in a world only: out of one there is nothing to draw).
+    if (this.inWorld) this.drawFrame();
+    else notes.push('not in a world: nothing drawn, the feed as it was last left');
+    if (o.probe === 'hole') out.probe = this.cloudHoleProbe(pass);
+    const row = fx?.describe().passes.find((p) => p.id === 'airClouds') ?? null;
+    return {
+      master: VOL_TUNE.on,
+      setting: VOL_TUNE.clouds,
+      wanted: fx?.passWanted('airClouds') ?? false,
+      ran: row?.drewLastFrame ?? null,
+      why: row?.why ?? null,
+      pass: pass ? pass.report() : 'not on the chain (Effects off, or the master turned on and its warm not done)',
+      sheets: this.world.swgSky?.sheets ?? null,
+      ...feed.report(),
+      noiseUploadMs: Math.round(feed.uploadMs * 100) / 100,
+      cost: fx && fx.timer.enabled ? { gpuMs: fx.timing().rows['pass:airClouds']?.gpuMs ?? null } : 'the frame report times it: __debug.perf()',
+      ...out,
+      ...(notes.length ? { notes } : {}),
+    };
+  }
+
+  /**
+   * The march's transmittance read back at the newest hole's middle as the camera projects it, and at a point of the
+   * same deck beside it (the hole's radius and a half sideways, never under 60 m): what says a hole is seen.
+   */
+  private cloudHoleProbe(pass: AirCloudsPass | null): Record<string, unknown> {
+    const feed = cloudsFeed();
+    // The console's own hole while it can still be open (two fills), else the newest anybody punched.
+    const hand = feed.holes.hand;
+    const handOpen = hand[0] === hand[0] && feed.holes.clock - hand[3] < 2 * AIR_TUNE.holes.fill;
+    const nw = handOpen ? hand : feed.holes.newest;
+    if (!pass) return { none: 'the clouds are not on the chain' };
+    if (!(nw[0] === nw[0])) return { none: 'no hole yet: fly a ship through a deck, or clouds({ hole: { radius } })' };
+    const deck = nw[0] === 0 ? feed.holes.low : feed.holes.high;
+    const x = nw[1] - deck.dx;
+    const z = nw[2] - deck.dz;
+    const y = 0.5 * (deck.bottom + deck.top);
+    const cam = this.cam.camera;
+    cam.updateMatrixWorld();
+    const read = (wx: number, wz: number): Record<string, unknown> => {
+      const v = new THREE.Vector3(wx, y, wz);
+      const ahead = v.clone().applyMatrix4(cam.matrixWorldInverse).z < 0;
+      v.project(cam);
+      const s = ahead ? pass.sampleAt(this.renderer, (v.x + 1) / 2, (v.y + 1) / 2) : null;
+      return { at: [Math.round(wx), Math.round(y), Math.round(wz)], screen: ahead ? [Math.round(((v.x + 1) / 2) * 1000) / 1000, Math.round(((v.y + 1) / 2) * 1000) / 1000] : null, ...(s ?? { none: ahead ? 'off the screen or nothing drawn' : 'behind the camera' }) };
+    };
+    // Beside it: along the screen's own right, on the deck's height, just past the hole's edge (so it stays on the screen
+    // whether the hole is seen across the deck or straight up through it).
+    const side = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 0);
+    side.y = 0;
+    if (side.lengthSq() < 1e-6) side.set(1, 0, 0);
+    side.normalize();
+    const hr = nw[4] > 0 ? nw[4] : 20;
+    const off = hr + Math.max(10, 0.2 * hr);
+    const hole = read(x, z);
+    const beside = read(x + side.x * off, z + side.z * off);
+    const hc = hole.clear as number | undefined;
+    const bc = beside.clear as number | undefined;
+    return { which: handOpen ? "the console's" : 'the newest', deck: nw[0] === 0 ? 'low' : 'high', age: Math.round((feed.holes.clock - nw[3]) * 10) / 10, hole, beside, lift: typeof hc === 'number' && typeof bc === 'number' ? Math.round((hc - bc) * 1000) / 1000 : null };
   }
 
   /**
@@ -22083,15 +22402,17 @@ class App {
     this.renderer.info.autoReset = false;
     info.calls = 0;
     info.triangles = 0;
+    // Decided before the scene is drawn, so the lit water and the reflections pass never disagree
+    // about who adds the water's environment term this frame. Before the clouds are fed, too: the
+    // camera's water it works out is what says the volumetrics' clouds refuse under water, and the
+    // sheets must come down only where those clouds really draw.
+    this.world.beginWaterFrame(cam, this.postfx?.passWanted('waterReflections') ?? false);
     // What the volumetric march is asked to draw, and whether the flat sheets stand down for it.
     // Before the scene is drawn, because the sheets are in it; the sky wrote their visibility in
     // `world.update`, so a toggle here is seen on the very frame it is made.
     this.feedClouds();
     // With the effects on, the passes draw into their target and the picture goes out through them.
     const postfx = this.postfx;
-    // Decided before the scene is drawn, so the lit water and the reflections pass never disagree
-    // about who adds the water's environment term this frame.
-    this.world.beginWaterFrame(cam, this.postfx?.passWanted('waterReflections') ?? false);
     postfx?.begin();
     perf.begin(SEC.portals);
     this.portals.render(this.scene, cam, view, this.world.buildings);
@@ -22311,7 +22632,7 @@ class App {
     // the background and disposes the first, which would take a shared pass's points with it.
     // The volume over the moving air only with the volumetrics master on (a factory, as the specks are, since a chain is
     // disposed whole when the Effects switch builds another); an arrival with the master on gives a chain without it one.
-    installEffects(fx, { water: this.world.waterBodies, heat: this.heat, collectMovers: this.collectMovers, collectDofGlows: this.collectDofGlows, specks: () => new UnderwaterSpecksPass(), air: VOL_TUNE.on ? () => new AirVolumePass(() => this.world.air) : undefined });
+    installEffects(fx, { water: this.world.waterBodies, heat: this.heat, collectMovers: this.collectMovers, collectDofGlows: this.collectDofGlows, specks: () => new UnderwaterSpecksPass(), air: VOL_TUNE.on ? () => new AirVolumePass(() => this.world.air) : undefined, clouds: VOL_TUNE.on ? () => new AirCloudsPass(cloudsFeed()) : undefined });
     // The motion blur's variants met after the warm-up go on the world's program queue as jobs carrying their own
     // compile (keyed on the empty light set of their own draws), never compiled synchronously on the frame that met
     // them nor by the world's own compile, which would key them on a pass's lights.
@@ -22373,6 +22694,9 @@ class App {
           }));
         });
         if (next) await next.warmUp();
+        // The volumetrics' clouds on the new chain (the master on) are given their noise behind this notice, never on a
+        // frame: the session's once uploaded, but an arrival made with Effects off had no pass to put it on the card with.
+        if (next && VOL_TUNE.on && !VOL_HATCH_OFF) await this.warmCloudNoise(next.pass<AirCloudsPass>('airClouds') ?? null);
         // The aside is the loading screen's, in the same words: nothing at all on a machine that
         // builds a program in a millisecond, and what it really costs on one that does not, since
         // this notice is the only thing on the screen while the switch takes its seconds.
@@ -30708,6 +31032,8 @@ class App {
       perf.passBegin(PASS.air);
       this.world.updateAir(dt, simulate, this.lastViewBuilding, this.postfx !== null && this.postfx.passWanted('airVolume'));
       perf.passEnd(PASS.air);
+      // The clouds' holes step on play's clock alone (the feed reads it before the scene is drawn, `feedAirClouds`).
+      this.airSimulate = simulate;
       // What moves fast enough to draw a far cascade every frame it could cast into (the sixth wave): after `stepAudio`
       // above, which poses the shuttles, and before the cascades are decided.
       this.fillShadowMovers(dt);

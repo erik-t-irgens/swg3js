@@ -187,7 +187,7 @@ ok(/if \(VOL_TUNE\.on && !was\) this\.queueVolumetrics\(\);\n\s+else if \(!VOL_T
   const awaited = r.indexOf('await Promise.all(jobs);');
   ok(awaited > 0 && r.indexOf('this.postfx.registerPass(pass)') > awaited && r.lastIndexOf('if (!had) this.world.takeAir(air);') > awaited, 'and only after every one has linked does the chain take the pass and the world the field');
   ok(r.includes('this.world.packId !== world') && r.includes('this.postfx !== chain'), 'a travel or a new chain during the wait throws the work away');
-  ok(/if \(changed\) \{\n\s+pass\?\.dispose\(\);\n(?:\s*\/\/[^\n]*\n)*\s+if \(!had && this\.world\.air !== air\) \{\n\s+this\.world\.forgetMaterials\(air\.materials\(\)\);\n\s+air\.dispose\(\);\n\s+\}[\s\S]{0,500}this\.volAgain = true;\n\s+continue;/.test(r), "and looks again (the master still on, in a world: warmed for the chain and the field as they stand now), a field thrown away leaving the world's material sets before it is disposed (its pools' draws were adopted by the warm)");
+  ok(/if \(changed\) \{\n\s+pass\?\.dispose\(\);\n(?:\s+clouds\?\.dispose\(\);\n)?(?:\s*\/\/[^\n]*\n)*\s+if \(!had && this\.world\.air !== air\) \{\n\s+this\.world\.forgetMaterials\(air\.materials\(\)\);\n\s+air\.dispose\(\);\n\s+\}[\s\S]{0,500}this\.volAgain = true;\n\s+continue;/.test(r), "and looks again (the master still on, in a world: warmed for the chain and the field as they stand now), a field thrown away leaving the world's material sets before it is disposed (its pools' draws were adopted by the warm)");
 }
 ok(main.includes("registerPerfSwitch('volGroundArt',") && main.includes("registerPerfSwitch('volGroundArtOne',"), "the frame report's zero-dial diff and its control are switches it compares by picture");
 
@@ -354,6 +354,88 @@ ok(main.includes("if (kind === 'repulse') air.force(at.x, at.y, at.z, 0, 0, powe
   // The console and the menu.
   ok(main.includes('wind: (opts?: WindDebugOptions | null) => windDebug(opts, this.windDebugCtx()),') && main.includes('?? windDialsFor(helper)') && main.includes("'carry', 'class', 'flow', 'liquid', 'gusts'] as const;"), "the console's wind helper, its dials in the debug menu and the gusts' view");
   ok(main.includes("registerPerfSwitch('volWind',") && main.includes("registerPerfSwitch('volWindArt',"), "the frame report's two switches for the wind's off-proof and its zero-dial compare");
+}
+
+// --- the seventh wave's second half: one cloud system ---
+{
+  const registry = src('core/fxRegistry.ts');
+  const postfx = src('core/postfx.ts');
+  const feedSrc = src('world/volumetrics/airCloudsFeed.ts');
+  const pass = src('core/fx/airClouds.ts');
+  const sky = src('world/sky.ts');
+  // `feedClouds` feeds the clouds first and returns; the decks let go only once they were set.
+  ok(/private feedClouds\(\): void \{\n\s+const sky = this\.world\.swgSky;\n[\s\S]{0,300}if \(this\.postfx\?\.passWanted\('airClouds'\)\) \{\n\s+this\.feedAirClouds\(this\.postfx\.pass<AirCloudsPass>\('airClouds'\)!\);\n\s+return;\n\s+\}\n\s+if \(WIND_STATE\.decks\) this\.letGoDecks\(\);\n\s+const pass = this\.settings\.volumetricClouds/.test(main), "feedClouds feeds the volumetrics' clouds first and returns, lets the decks go once they stand down, and its other lines today's");
+  ok(count(main, 'this.feedAirClouds(') === 1 && count(main, 'this.letGoDecks()') === 1, 'the clouds are fed in one place and let go in one');
+  // Registered only with the master on: the chain's factory, the arrival, the in-play warm.
+  ok(main.includes('clouds: VOL_TUNE.on ? () => new AirCloudsPass(cloudsFeed()) : undefined') && install.includes("if (deps.clouds) postfx.registerPass(deps.clouds());"), "the chain is handed the clouds' factory only with the master on");
+  {
+    const p = main.slice(main.indexOf('private async prepareClouds('), main.indexOf('private async warmCloudNoise('));
+    ok(count(main, 'await this.prepareClouds();') === 1 && after(main, 'await this.world.airPictures(AIR_PICTURE_WAIT_MS);', 'await this.prepareClouds();', 2) && p.indexOf('if (!VOL_TUNE.on || VOL_HATCH_OFF) return;') >= 0 && p.indexOf('if (!VOL_TUNE.on || VOL_HATCH_OFF) return;') < p.indexOf("if (this.postfx && !this.postfx.pass('airClouds')) this.postfx.registerPass(new AirCloudsPass(cloudsFeed()));") && p.includes("await this.warmCloudNoise(this.postfx?.pass<AirCloudsPass>('airClouds') ?? null);") && p.includes('cloudsFeed().reset();'), "the arrival (prepareAir, behind its screen) registers the clouds only with the master on and the pass missing, puts their noise on the card and lets the last world's holes go");
+    const r = main.slice(main.indexOf('private async reconcileVolumetrics('), main.indexOf('private compileFxObject('));
+    const awaited = r.indexOf('await Promise.all(jobs);');
+    ok(r.includes("clouds = new AirCloudsPass(cloudsFeed());") && r.includes("jobs.push(this.world.programJob(objects, 'volumetrics: the clouds', true,") && r.includes("if (chain) jobs.push(this.warmCloudNoise(clouds ?? chain.pass<AirCloudsPass>('airClouds') ?? null).then(() => {}));") && r.indexOf("if (clouds && this.postfx && !this.postfx.pass('airClouds')) this.postfx.registerPass(clouds);") > awaited && r.includes('clouds?.dispose();'), "the master's in-play warm builds the clouds' six programs and uploads their noise through the queue, and registers the pass only once every job has linked (or throws it away)");
+    // The noise is uploaded only in those three places (the master's warm, the arrival and the Effects switch's new chain,
+    // behind its notice), never on a frame.
+    const e = main.slice(main.indexOf('private async reconcileEffects('), main.indexOf('private die('));
+    ok(count(main, 'pass.uploadNoise(this.renderer)') === 1 && count(main, 'this.warmCloudNoise(') === 3 && pass.includes('renderer.initTexture(f.base);') && /if \(next\) await next\.warmUp\(\);\n(?:\s*\/\/[^\n]*\n)*\s+if \(next && VOL_TUNE\.on && !VOL_HATCH_OFF\) await this\.warmCloudNoise\(next\.pass<AirCloudsPass>\('airClouds'\) \?\? null\);/.test(e), "the noise is put on the card only by the master's warm, the arrival or the Effects switch's new chain behind its notice (an arrival made with Effects off had no pass to upload it with), never on a frame");
+    ok(/this\.cloudNoiseOk = ok;/.test(main) && main.includes("this.cloudNoiseOk === false) return { note: 'no noise volumes on this install"), 'the page says there are no noise volumes only once the session\'s ask found none, never because the noise is not on the card yet');
+  }
+  // What the frame hands the feed: every hand-over pinned, since every behaviour test makes its own.
+  {
+    const fa = main.slice(main.indexOf('private feedAirClouds('), main.indexOf('private letGoDecks('));
+    const lines = [
+      'I.dt = this.lastDt;',
+      'I.simulate = this.airSimulate;',
+      'I.camX = cam.x;',
+      'I.camY = cam.y;',
+      'I.camZ = cam.z;',
+      'I.weatherOn = ws.enabled;',
+      'I.rain = ws.enabled ? fx.rain : 0;',
+      'I.snow = ws.enabled ? fx.snow : 0;',
+      'I.dust = ws.enabled ? fx.dust : 0;',
+      'I.heading = ws.windHeading;',
+      'I.windClock = weather.windClock;',
+      'I.travel = WIND_FRAME.travel;',
+      'I.space = !!this.world.planet?.space;',
+      'I.inside = this.world.inside;',
+      'I.sky = sky as CloudsSky | null;',
+      'I.hulls = this.world.vehicles;',
+      'rides.atX = cam.x;',
+      'rides.atZ = cam.z;',
+      'this.world.cloudPunchers(rides, this.cloudJets);',
+      'I.rides = rides;',
+      'I.jets = this.cloudJets;',
+      'I.groundAt = this.cloudGround;',
+      'feed.update();',
+    ];
+    const missing = lines.filter((l) => !fa.includes(l));
+    ok(missing.length === 0 && fa.indexOf('I.groundAt = this.cloudGround;') < fa.indexOf('feed.update();') && fa.indexOf('this.world.cloudPunchers(rides, this.cloudJets);') < fa.indexOf('feed.update();') && main.includes('private readonly cloudGround = (q: { readonly x: number; readonly z: number }): number | null => this.world.groundIfCached(q.x, q.z);'), `the frame hands the clouds' feed the weather, the wind, the camera, the world's hulls, other players' rides and the stood shuttles' jets (the world's own walk), and the cached ground, before it steps it${missing.length ? `; missing: ${missing.join(' | ')}` : ''}`);
+    ok(/cloudPunchers\(rides: NearRides, jets: ShuttleJets\): void \{\n\s+rides\.n = 0;\n\s+jets\.n = 0;\n\s+if \(!this\.planet \|\| this\.planet\.space\) return;\n\s+if \(this\.airPeerRides\) this\.airPeerRides\(rides\);\n\s+if \(this\.airShuttleJets\) this\.airShuttleJets\(jets\);/.test(world) && feedSrc.includes('holes.stepKept(I.hulls, I.rides, I.jets);'), "the world fills the rides and jets from the very walks the air's own pushes read, and the feed steps the holes over all three");
+    // A new sky is a world the feed has not drawn: the last one's holes, scrolls, ground and pictures let go, however the
+    // world was reached (the master off, a travel and the master on again in play reach no arrival's reset).
+    ok(/if \(sky !== this\.cloudSkySeen\) \{\n\s+this\.cloudSkySeen = sky;[\s\S]{0,700}if \(sky\) feed\.reset\(\);\n\s+\}/.test(fa) && fa.indexOf('if (sky) feed.reset();') < fa.indexOf('feed.update();'), "a new sky resets the clouds' feed before it is stepped, however its world was reached");
+    // The sheets come down only where the pass draws: the same verdicts the frame's context hands it, the camera's water
+    // worked out before the feed.
+    const routed = main.slice(main.indexOf('private drawFrameRouted('), main.indexOf('private drawFrameRouted(') + 12000);
+    ok(routed.indexOf('this.world.beginWaterFrame(cam,') >= 0 && routed.indexOf('this.world.beginWaterFrame(cam,') < routed.indexOf('this.feedClouds();') && routed.includes('f.portalView = view !== null;') && routed.includes('f.cameraSubmerged = water.submerged;') && routed.includes('const water = this.world.cameraWaterAt(cam.position);'), "the camera's water is worked out before the clouds are fed, so the feed's question and the frame's context read the same verdict");
+  }
+  // `yieldsTo` on the September row alone, honoured by both of the chain's decisions.
+  ok(count(registry, 'yieldsTo:') === 1 && /id: 'volumetricClouds',[\s\S]{0,600}yieldsTo: \['airClouds'\],/.test(registry) && postfx.includes('return fxPassWanted(fxPassDef(id), this.settings, this.override[id], this.yielded);') && postfx.includes('let on = fxPassWanted(def, this.settings, this.override[def.id], this.yielded)'), "`yieldsTo` is on the September row alone and both of the chain's decisions honour it");
+  // The borrowed cloud textures let go at an unload, before the sky that owns them is disposed.
+  ok(/private dropSky\(\): void \{\n(?:\s*\/\/[^\n]*\n)*\s+if \(cloudsFeedMade\(\)\) cloudsFeed\(\)\.letGoPictures\(\);\n\s+if \(this\.swgSky\) \{/.test(world) && count(world, 'this.dropSky();') >= 2, "the borrowed cloud pictures are let go before the sky that owns them is dropped (an unload, a sky reloaded)");
+  // The feed sets the decks' flag while the pass is wanted (the weather then drives the sheets at the wind aloft).
+  ok(feedSrc.includes('WIND_STATE.decks = true;') && count(feedSrc, 'WIND_STATE.decks') === 1 + count(feedSrc, '`WIND_STATE.decks`'), "the feed sets WIND_STATE.decks while the clouds are wanted, and nothing else of it touches the flag");
+  // The dome's seven uniform objects handed to the march by reference, every frame the sky is there.
+  ok(main.includes('pass.bindDome(sky.domeUniforms);') && /u\.uGradient = dome\.uGradient;\n\s+u\.uGradient2 = dome\.uGradient2;\n\s+u\.uGradientMix = dome\.uGradientMix;\n\s+u\.uTime = dome\.uTime;\n\s+u\.uHasGradient = dome\.uHasGradient;\n\s+u\.uHasGradient2 = dome\.uHasGradient2;\n\s+u\.uClear = dome\.uClear;/.test(pass) && sky.includes('return this.dome.material.uniforms as Record<'), "the dome's seven uniform objects are put in the march's places by reference, never copied");
+  // The sheets down while the decks draw, the top's kept share over them, and a sky's own pictures through its pack.
+  ok(/const draws = pass\.wouldDraw\(I\.space, I\.inside, this\.lastViewBuilding, this\.world\.cameraWaterAt\(this\.cam\.camera\.position\)\.submerged\);\n\s+sky\.sheets = !draws;\n(?:\s*\/\/[^\n]*\n)*\s+const keep = draws \? VOL_TUNE\.cloudSheets : 0;\n\s+if \(keep !== this\.cloudKept\) \{\n\s+this\.cloudKept = keep;\n\s+sky\.keepTopSheets\(keep\);/.test(main) && main.includes('this.cloudKept = -1;') && main.includes('this.cloudSkyPack = sky ? this.world.skyPackId : \'\';'), "the sheets come down only while a deck really draws, the top's kept share over it, and the pictures' numbers are read from the sky's own pack");
+  // The holes' clock is play's.
+  ok(after(main, "this.world.updateAir(dt, simulate, this.lastViewBuilding,", 'this.airSimulate = simulate;', 4) && main.includes('I.simulate = this.airSimulate;'), "the holes step on play's clock alone");
+  // The September knob greys in words while the clouds stand in; the frame report's three switches.
+  ok(main.includes("if ((key === 'volumetricClouds' || key === 'volumetricCloudQuality' || key === 'volumetricCloudAmount') && this.postfx?.passWanted('airClouds')) return { off:"), "the September clouds' row greys, and says why, while the volumetrics' clouds stand in for it");
+  ok(main.includes("registerPerfSwitch('airClouds',") && main.includes("registerPerfSwitch('volCloudsLow',") && main.includes("registerPerfSwitch('volCloudsHoles',"), "the frame report's three switches for the clouds");
+  // `configure` resizes the clouds when one of their sizes moves.
+  ok(postfx.includes("this.byPassId.get('airClouds')?.setSize("), 'the chain resizes the clouds when their resolution or another of their numbers moves');
 }
 
 console.log(`\n${checks} checks passed`);

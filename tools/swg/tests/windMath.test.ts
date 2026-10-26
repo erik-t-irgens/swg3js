@@ -694,6 +694,75 @@ const GEOMETRY = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 
   ok(onWas === true && offNow === false && run.w7Mean() === U[25], "and its arm reads the pack's on slot and its mean the pack's mean");
 }
 
+// --- the clouds' decks (the seventh wave's second half): one gust function at a deck's scale ---
+{
+  // `phasesNow` (what the decks read with the arm off, when nothing packs the ground's) freezes, restarts and travels the
+  // phases exactly as `pack` does, at every moment across several restarts; and `packDeckNow` at a scale and share of one
+  // is `pack`'s own pack to the bit, but its mean, trees' share and arm, which a deck reads none of.
+  const pr = newProfile();
+  Object.assign(pr, WIND_PROFILES.rain);
+  const A = make();
+  const B = make();
+  const D = new Float32Array(PACK_FLOATS);
+  const cyc = WIND_TUNE.gusts.cycle;
+  const P = A as unknown as { phase: Float64Array; phaseTo: Float64Array; weight: Float64Array };
+  const Q = B as unknown as { phase: Float64Array; phaseTo: Float64Array; weight: Float64Array };
+  let phasesSame = true;
+  let packSame = true;
+  let moments = 0;
+  let restarts = 0;
+  let lastCycle = -1;
+  for (let s = 0; s < 1200; s++) {
+    const t = T0 + s * (cyc / 97);
+    A.pack(ask(pr, t));
+    B.arm = A.arm;
+    B.now = t;
+    B.phasesNow();
+    const c = Math.floor(t / cyc);
+    if (lastCycle >= 0 && c !== lastCycle) restarts++;
+    lastCycle = c;
+    for (let i = 0; i < 24; i++) if (!Object.is(P.phase[i], Q.phase[i])) phasesSame = false;
+    for (let i = 0; i < 4; i++) if (!Object.is(P.phaseTo[i], Q.phaseTo[i])) phasesSame = false;
+    for (let i = 0; i < 2; i++) if (!Object.is(P.weight[i], Q.weight[i])) phasesSame = false;
+    A.deckScale = 1;
+    A.deckShare = 1;
+    A.deckGust = A.gustStrength;
+    A.deckVeer = A.veer;
+    A.packDeckNow(D);
+    for (let i = 0; i < 25; i++) if (!Object.is(D[i], A.packOut[i])) packSame = false;
+    if (D[25] !== 1 || D[26] !== 0 || D[27] !== 1) packSame = false;
+    moments++;
+  }
+  ok(phasesSame && restarts >= 10, `phasesNow leaves the phases, their travel and their weights exactly where pack leaves them (Object.is) at ${moments} moments across ${restarts} restarts`);
+  ok(packSame, "packDeckNow at a scale and a share of one is pack's own pack to the bit (its mean one, its trees' share nought and its arm on, which a deck reads none of)");
+  // At a deck's own scale and share: each phase's lattice that many times larger, its travel that share of the pure travel,
+  // every other number the phases' own.
+  const G = 20;
+  const F = 0.4;
+  A.deckScale = G;
+  A.deckShare = F;
+  A.deckGust = 0.37;
+  A.deckVeer = 0.11;
+  A.packDeckNow(D);
+  const L = WIND_TUNE.gusts.lattice;
+  let scaled = true;
+  for (let ph = 0; ph < 2; ph++) {
+    const p = ph * 12;
+    const sh = P.phase[p + 1];
+    const ch = P.phase[p + 2];
+    const la = P.phase[p + 3] / G;
+    const lc = P.phase[p + 4] / G;
+    const tx = P.phaseTo[ph * 2] * F;
+    const tz = P.phaseTo[ph * 2 + 1] * F;
+    const along = (tx * sh + tz * ch) * la + P.phase[p + 7];
+    const across = (tx * ch - tz * sh) * lc + P.phase[p + 8];
+    if (!Object.is(D[12 + ph * 2], Math.fround(la)) || !Object.is(D[13 + ph * 2], Math.fround(lc))) scaled = false;
+    if (!Object.is(D[ph * 2], Math.fround(along - L * Math.floor(along / L))) || !Object.is(D[ph * 2 + 1], Math.fround(across - L * Math.floor(across / L)))) scaled = false;
+    if (!Object.is(D[4 + ph * 2], A.packOut[4 + ph * 2]) || !Object.is(D[5 + ph * 2], A.packOut[5 + ph * 2]) || !Object.is(D[16 + ph * 2], A.packOut[16 + ph * 2])) scaled = false;
+  }
+  ok(scaled && D[20] === Math.fround(0.37) && D[22] === Math.fround(0.11) && Object.is(D[8], A.packOut[8]) && Object.is(D[21], A.packOut[21]), `at a deck's scale (${G}) and share (${F}) each phase's lattice is ${G} times the world's and its travel ${F} of the pure travel, its strength and veer the deck's own, every other number the phases'`);
+}
+
 // --- the frame makes nothing: `windAlloc.ts` in processes of their own, a dozen at once ---
 {
   const { spawn } = await import('node:child_process');

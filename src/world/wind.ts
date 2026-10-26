@@ -648,6 +648,54 @@ export function stepWindAloft(): void {
   F.travel = Math.sqrt(p.su.x * p.su.x + p.su.z * p.su.z);
 }
 
+// ---------------------------------------------------------------------------------------------- the clouds' decks
+
+/**
+ * The clouds' decks' read of the wind (the seventh wave's second half, the design's §2.18), a kept record the clouds' feed
+ * writes: the shared second, and each pack's geometry -- its lattice this many times the world's gust size and its travel
+ * this share of the pure travel (the deck's aloft factor). A class, its numbers doubles from the start.
+ */
+class DeckAsk {
+  t = 0.5;
+  highScale = 0.5;
+  highShare = 0.5;
+  lowScale = 0.5;
+  lowShare = 0.5;
+}
+export const WIND_DECK_ASK = new DeckAsk();
+
+/**
+ * The two decks' packs of the very gust function (`WIND7_DECK` for the high slab, its own for the low deck), each bound to
+ * a pass's `uWind7` in place of the ground's: the arrays the clouds' weather pass and low wind pass hold by reference.
+ */
+export const WIND_DECK_PACKS = { high: new Float32Array(PACK_FLOATS), low: new Float32Array(PACK_FLOATS) };
+
+/**
+ * Both decks' packs for `WIND_DECK_ASK.t`, whatever `volWind` is (a deck reads the pure travel and the world's gusts, the
+ * design's decision 86): the world's pattern made if the arm has not made it, its phases frozen and travelled to that
+ * second as `pack` would leave them, the observer's gust strength and veer (blended from `sky`'s mix where the arm has not
+ * blended it this frame, the hold's gust share on the strength, never the art: the clouds' own smear dials are theirs).
+ * False with no world. Nothing allocated.
+ */
+export function packDecks(sky: WindSky | null): boolean {
+  const p = patternNow();
+  if (!p || !pending) return false;
+  if (!WIND_STATE.on && sky) blendObserver(sky, p.worldMult);
+  const A = WIND_DECK_ASK;
+  p.now = A.t;
+  p.phasesNow();
+  const hg = WIND_HOLD.gust;
+  p.deckGust = observer.gust * (hg === null ? 1 : hg);
+  p.deckVeer = observer.veer;
+  p.deckScale = A.highScale;
+  p.deckShare = A.highShare;
+  p.packDeckNow(WIND_DECK_PACKS.high);
+  p.deckScale = A.lowScale;
+  p.deckShare = A.lowShare;
+  p.packDeckNow(WIND_DECK_PACKS.low);
+  return true;
+}
+
 /** The observer's blend by kind of weather as it was last worked out (the console's): each kind's share of the sky's mix. */
 export function windBlendNow(): Record<string, number> {
   let total = 0;

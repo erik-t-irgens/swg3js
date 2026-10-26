@@ -44,6 +44,12 @@ export interface FxInstallDeps {
    * built exactly as it always was, with no such pass registered at all.
    */
   air?: () => FxPass;
+  /**
+   * Makes the volumetrics' clouds (`src/core/fx/airClouds.ts`, the seventh wave's second half), beside the volume and for
+   * the volume's reason, handed over only while the volumetrics master is on: with it off the chain is built exactly as it
+   * always was and the September clouds decide as they always did.
+   */
+  clouds?: () => FxPass;
 }
 
 export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
@@ -71,6 +77,9 @@ export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
   // The dust in the moving air, when the game hands over a way to make it (the volumetrics master on). Where it sits
   // in the chain -- after the clouds, before the god rays -- is the registry's.
   if (deps.air) postfx.registerPass(deps.air());
+  // The volumetrics' clouds, where the volume's master hands a way to make them; the September pass yields to them while
+  // they are wanted (the registry's `yieldsTo`), and where they sit is the registry's.
+  if (deps.clouds) postfx.registerPass(deps.clouds());
   // The look under water needs nothing from the game here either: it reads whether the camera is
   // under a surface, how deep, and which body's colour and opacity from the frame context, and asks
   // for no product. It draws on no frame the camera is dry. Where it sits in the chain is the

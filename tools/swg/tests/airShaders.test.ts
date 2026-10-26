@@ -21,6 +21,8 @@ import { AIR_PARTICLE_SHADERS, KICK_LIFT_GLSL } from '../../../src/world/volumet
 import { oroLift, vortLift } from '../../../src/world/volumetrics/airParticleMath.ts';
 import { airHash, airRand } from '../../../src/world/volumetrics/airSpawn.ts';
 import { glslFunctions, glslHash } from './glslRun.ts';
+import { AIR_CLOUD_FRAGMENTS, AirCloudsPass } from '../../../src/core/fx/airClouds.ts';
+import { AirCloudsFeed } from '../../../src/world/volumetrics/airCloudsFeed.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string): void => {
@@ -239,6 +241,75 @@ for (const m of [...fieldMats, ...volumeMats]) {
     ok(known > 0 && wrong.length === 0, `${file.split('/').pop()}: every one of its ${known} uniform writes to a material it names is declared there${wrong.length ? `: ${wrong.join(', ')}` : ''}`);
   }
 }
+// --- the seventh wave's second half: the clouds' seven programs, through the same checkers ---
+{
+  const feed = new AirCloudsFeed();
+  const cp = new AirCloudsPass(feed);
+  const items = cp.materials();
+  const mats = items.map((m) => m.material as THREE.ShaderMaterial);
+  ok(mats.length === 7 && mats.map((m) => m.name).join() === 'fx.airClouds.weather,fx.airClouds.lowWind,fx.airClouds.holes,fx.airClouds.march,fx.airClouds.marchHigh,fx.airClouds.resolve,fx.airClouds.composite', 'the clouds list their seven programs for the warm-up: the weather, the low deck\'s wind, the hole tick, the march, the march with the low deck compiled out, the resolve, the composite');
+  // The low deck's march of its own (the Start's finding): the one march's text with the low deck's branch alone compiled
+  // out, on a quad of its own (the warm compiles each item's object as it stands), sharing the march's uniform objects, and
+  // the frame drawing it whenever the low deck does not draw.
+  ok(mats[4].fragmentShader === AIR_CLOUD_FRAGMENTS.march.split('uLow.z > 0.5').join('false') && AIR_CLOUD_FRAGMENTS.march.includes('uLow.z > 0.5') && !mats[4].fragmentShader.includes('uLow.z > 0.5') && mats[4].fragmentShader.includes('uSmear.x > 0.5'), 'the high march is the one march with the low deck\'s branch alone compiled out (the smear stays a uniform branch)');
+  ok(items[3].object !== items[4].object && (items[4].object as THREE.Mesh).material === mats[4] && mats[4].uniforms === mats[3].uniforms, 'the high march stands on a quad of its own and shares the march\'s uniform objects');
+  ok(source('core/fx/airClouds.ts').includes('g.render(M.uLow.value.z > 0.5 ? this.marchQuad : this.marchHighQuad, FX_CAMERA);'), 'the frame draws the low deck\'s march only while the low deck draws, the high march otherwise');
+  // No size the targets are made at in the text: the weather's texels (a setting), the low wind's and the holes' squares
+  // and texels, the volumes' periods (every one a uniform).
+  const csizes = [...VOL_RANGES.volCloudsWeather.options, AIR_TUNE.holes.size, AIR_TUNE.clouds.weatherSquare, AIR_TUNE.lowDeck.windSquare, AIR_TUNE.clouds.baseScale, AIR_TUNE.clouds.detailScale];
+  for (const [name, text] of Object.entries(AIR_CLOUD_FRAGMENTS)) {
+    const reserved = reservedWords(text);
+    ok(reserved.length === 0, `airClouds.${name}: no reserved word as a name${reserved.length ? `: ${reserved.join(', ')}` : ''}`);
+    const b = unbalanced(text);
+    ok(b === '', `airClouds.${name}: brackets balanced${b ? ` (${b})` : ''}`);
+    const twice = redeclared(glslVariant(text, new Set()));
+    ok(twice.length === 0, `airClouds.${name}: no name declared twice in one scope${twice.length ? `: ${twice.join(', ')}` : ''}`);
+    const s = sizesInText(text, csizes);
+    ok(s.length === 0, `airClouds.${name}: no target's size in the text${s.length ? `: ${s.join('; ')}` : ''}`);
+    const u = undefinedCalls(text);
+    ok(u.length === 0, `airClouds.${name}: every function it calls is GLSL's own or its own${u.length ? ` (it calls ${u.join(', ')} and never defines it)` : ''}`);
+    ok(!text.includes('`'), `airClouds.${name}: no backtick inside the template`);
+  }
+  for (const m of mats) {
+    ok(m.blending === THREE.NoBlending && m.toneMapped === false && m.depthTest === false && m.depthWrite === false, `${m.name}: NoBlending, no tone curve, no depth test or write (the September's first bug: blending declared)`);
+    const defs = new Set(Object.keys((m.defines as Record<string, unknown>) ?? {}));
+    const declared = uniformNames(glslVariant(m.fragmentShader, defs)).concat(uniformNames(glslVariant(m.vertexShader, defs))).filter((n) => !THREE_OWN.has(n));
+    const missing = declared.filter((n) => !(n in m.uniforms));
+    ok(missing.length === 0, `${m.name}: every uniform its shaders declare is on the material${missing.length ? ` (missing ${missing.join(', ')})` : ''}`);
+  }
+  // Every uniform the pass writes is declared on the material it writes it to.
+  const byName: Record<string, THREE.ShaderMaterial> = { weatherMat: mats[0], lowWindMat: mats[1], holeMat: mats[2], marchMat: mats[3], marchHighMat: mats[4], resolveMat: mats[5], compositeMat: mats[6] };
+  const writes = uniformWrites(source('core/fx/airClouds.ts'));
+  const wrong: string[] = [];
+  let known = 0;
+  for (const w of writes) {
+    const ms = w.materials.map((n) => byName[n]).filter(Boolean);
+    if (!ms.length) continue;
+    known++;
+    if (!ms.some((m) => w.key in m.uniforms)) wrong.push(`${w.materials.join('/')}.${w.key} via ${w.via}`);
+  }
+  ok(known > 10 && wrong.length === 0, `airClouds.ts: every one of its ${known} uniform writes to a material it names is declared there${wrong.length ? `: ${wrong.join(', ')}` : ''}`);
+  // The two-output programs: GLSL 3, each output declared once at its own location and written.
+  for (const [m, outs] of [
+    [mats[0], ['oWeather', 'oWind']],
+    [mats[3], ['oCloud', 'oDist']],
+    [mats[4], ['oCloud', 'oDist']],
+  ] as const) {
+    const text = m.fragmentShader;
+    const declared = outs.every((o, i) => (text.match(new RegExp(`layout\\(location = ${i}\\) out highp vec4 ${o};`, 'g')) ?? []).length === 1);
+    const written = outs.every((o) => new RegExp(`\\b${o}\\s*=`).test(text));
+    ok(m.glslVersion === THREE.GLSL3 && declared && written && !text.includes('gl_FragColor'), `${m.name}: GLSL 3, its two outputs (${outs.join(', ')}) each declared once at its own location and written`);
+  }
+  // NaN and Inf zeroed by every program that writes the picture; a far-plane texel sky; no fxHalfTaps (the September's bugs).
+  for (const name of ['weather', 'holes', 'march', 'marchHigh', 'resolve', 'composite']) ok(/if \(any\(isnan\((o|od|w)\)\) \|\| any\(isinf\((o|od|w)\)\)\)/.test(AIR_CLOUD_FRAGMENTS[name]), `airClouds.${name} zeroes a NaN or an Inf before it writes`);
+  ok(AIR_CLOUD_FRAGMENTS.march.includes('depth < uFar * 0.999'), "a far-plane depth texel is sky in the clouds' march, never a surface (the September's second bug)");
+  ok(!/\bfxHalfTaps\s*\(|import[^;]*\bfxHalfTaps\b|FX_HALF_TAPS/.test(source('core/fx/airClouds.ts')), "the clouds' upsample is their own size's, never fxHalfTaps (the September's third bug)");
+  ok(!/sampler2DShadow/.test(AIR_CLOUD_FRAGMENTS.march), 'no shadow compare in the clouds');
+  // `cutFor` in the weather pass's text is the one the feed's curve is written for (the same sixteen pairs and count).
+  ok(AIR_CLOUD_FRAGMENTS.weather.includes('uniform vec2 uCover[16];') || AIR_CLOUD_FRAGMENTS.weather.includes('uCover[16]'), "the weather pass reads the cover curve as sixteen pairs, as the feed writes it");
+  cp.dispose();
+}
+
 // The field's own frame with the master off touches nothing: no GL call from the stub (it has none to make).
 {
   const t = newVolTune();

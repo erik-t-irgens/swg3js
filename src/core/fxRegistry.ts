@@ -79,6 +79,20 @@ export interface FxSettings {
   airVolumeHistory: boolean;
   /** The sun's cascades shade the dust: in a building's shadow it is dark. */
   airVolumeShadows: boolean;
+  // The seventh wave's clouds (src/core/fx/airClouds.ts): one cloud system under the master that stands in for the
+  // September pass while it is wanted (`yieldsTo`), its own switch, quality and strength.
+  /** The clouds marched from the game's own pictures, drifted by the one wind, a low deck holed by every hull. */
+  volClouds: boolean;
+  /** How much of the clouds reaches the picture, 0 to 1.5; at 0 the pass refuses and today's sheets are drawn. */
+  volCloudsAmount: number;
+  /** The share of the screen the clouds are marched at: 0.25, 0.5 or 1. */
+  volCloudsResolution: number;
+  /** Steps through the high slab, 16 to 96 (a uniform under a loop bound of 128). */
+  volCloudsSteps: number;
+  /** Steps toward the sun, 2 to 6 (a uniform under a loop bound of 8). */
+  volCloudsLight: number;
+  /** A reprojected history that hides the clouds' grain. */
+  volCloudsHistory: boolean;
 }
 
 export type FxPassId =
@@ -89,6 +103,7 @@ export type FxPassId =
   | 'heatHaze'
   | 'lightShafts'
   | 'volumetricClouds'
+  | 'airClouds'
   | 'airVolume'
   | 'godRays'
   | 'underwater'
@@ -121,6 +136,12 @@ export interface FxPassDef {
    * volume under the volumetrics master. No other pass has any, so every other pass decides exactly as it always did.
    */
   requires?: readonly (keyof FxSettings)[];
+  /**
+   * Unwanted while any of these passes is wanted (`fxPassWanted`): the September clouds, while the volumetrics' clouds
+   * stand in for them. No other pass has any, so every other pass decides exactly as it always did; and since the pass
+   * yielded to requires the volumetrics master, with the master off this decides as it always did.
+   */
+  yieldsTo?: readonly FxPassId[];
   /** Always drawn, cannot be forced off from the console. */
   required: boolean;
   /** The most it can ask for; the pass's own `needs(ctx)` returns a subset each frame. */
@@ -230,6 +251,13 @@ export const FX_DEFAULTS: FxSettings = {
   airVolumeSteps: 16,
   airVolumeHistory: true,
   airVolumeShadows: true,
+  // The seventh wave's clouds, under the master (off): on, at the High preset, at full strength.
+  volClouds: true,
+  volCloudsAmount: 1,
+  volCloudsResolution: 0.25,
+  volCloudsSteps: 48,
+  volCloudsLight: 4,
+  volCloudsHistory: true,
 };
 
 const two = (v: number) => v.toFixed(2);
@@ -294,6 +322,13 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'airVolumeHistory', pass: 'airVolume', group: 'volumetrics', label: 'Smooth the dust over frames', kind: 'toggle', requires: ['effects', 'volumetrics', 'airVolume'], hint: 'Each frame is blended into the last, which hides the grain a few samples leave. Off shows each frame as it is marched.' },
   { key: 'airVolumeShadows', pass: 'airVolume', group: 'volumetrics', label: 'Shadows in the dust', kind: 'toggle', requires: ['effects', 'volumetrics', 'airVolume'], hint: 'The sun\'s own shadows fall in the dust: under a hovering ship or in a street\'s shade it is dark. Off lights all of it.' },
   { key: 'airVolumeAmount', pass: 'airVolume', group: 'volumetrics', label: 'Dust over the picture', kind: 'range', min: 0, max: 1.5, step: 0.05, format: two, requires: ['effects', 'volumetrics', 'airVolume'], hint: 'How much of the dust reaches the picture: 1 as designed, 0 none at all (and then the pass costs nothing), 1.5 thicker.' },
+  // The seventh wave's clouds: their switch and quality on the Volumetrics section's "The clouds", their strength among the art dials.
+  { key: 'volClouds', pass: 'airClouds', group: 'volumetrics', label: 'Clouds', kind: 'toggle', requires: ['effects', 'volumetrics'], hint: "The sky's clouds marched as cloud rather than drawn as flat sheets, shaped by the game's own cloud pictures area by area (heaps where a picture is patchy, a layer where it is even, an overcast where a storm hangs no picture), drifting on the wind aloft and smeared by its gusts, lit by the sky's own colour; and in rain and overcast a low deck near the ground that a ship flies through and holes. Stands in for the unfinished volumetric clouds of the Effects page while it is on. Off, the sky's sheets are drawn as they always were. Needs Effects." },
+  { key: 'volCloudsResolution', pass: 'airClouds', group: 'volumetrics', label: 'Cloud resolution', kind: 'select', options: cloudQuality, requires: ['effects', 'volumetrics', 'volClouds'], hint: 'The share of the screen the clouds are marched at, smoothed back up along edges by depth and over frames. A quarter is enough for cloud, which has no hard edges of its own.' },
+  { key: 'volCloudsSteps', pass: 'airClouds', group: 'volumetrics', label: 'Cloud samples', kind: 'range', min: 16, max: 96, step: 8, format: (v) => `${v}`, requires: ['effects', 'volumetrics', 'volClouds'], hint: 'How many times each ray samples the high deck; empty sky is crossed in longer steps. Fewer is grainier and cheaper.' },
+  { key: 'volCloudsLight', pass: 'airClouds', group: 'volumetrics', label: 'Cloud light steps', kind: 'range', min: 2, max: 6, step: 1, format: (v) => `${v}`, requires: ['effects', 'volumetrics', 'volClouds'], hint: 'Steps toward the sun from each sample: how deep a cloud\'s own shade reaches.' },
+  { key: 'volCloudsHistory', pass: 'airClouds', group: 'volumetrics', label: 'Smooth the clouds over frames', kind: 'toggle', requires: ['effects', 'volumetrics', 'volClouds'], hint: 'Each frame blended into the last, which hides the grain a quarter of the screen leaves. Off shows each frame as it is marched.' },
+  { key: 'volCloudsAmount', pass: 'airClouds', group: 'volumetrics', label: 'Clouds over the picture', kind: 'range', min: 0, max: 1.5, step: 0.05, format: two, requires: ['effects', 'volumetrics', 'volClouds'], hint: "How much of the clouds reaches the picture: 1 as designed, 0 none at all (the pass then costs nothing and the sky's own sheets are drawn), 1.5 thicker." },
 ];
 
 /**
@@ -307,7 +342,10 @@ export const FX_PASSES: readonly FxPassDef[] = [
   { id: 'waterReflections', stage: 'scene', toggles: ['waterReflections'], required: false, needs: ['linearDepthHalf', 'waterMask'], budgetMs: 0.6, typical: false, canBeLast: false, live: true, why: 'Adds reflected scene light on water pixels. After occlusion so the reflected ground carries it, before the lens so reflections shimmer, defocus, smear and bloom like anything seen directly.' },
   { id: 'heatHaze', stage: 'scene', toggles: ['heatHaze'], required: false, needs: ['heat', 'linearDepthHalf'], budgetMs: 0.16, typical: false, canBeLast: false, live: true, why: 'Displaces what the surfaces look like, so it follows every surface pass; before the atmosphere and the lens, since the air and the glass sit between the heat and the eye.' },
   { id: 'lightShafts', stage: 'scene', toggles: ['lightShafts'], required: false, needs: ['linearDepthHalf', 'normalsHalf'], budgetMs: 0.3, typical: false, canBeLast: false, live: true, why: 'Daylight scattered in the air of the room the camera is in, from its doorways, the sunlit patch where it lands, and the glow around the room\'s lamps. Evaluated per pixel along the view ray and stopped by the scene depth, which scene meshes cannot read. Atmosphere: after the surface passes (SSAO has darkened the corners the patch lands among), before god rays, depth of field, motion blur and bloom, so the beams defocus, smear and bloom with the room.' },
-  { id: 'volumetricClouds', stage: 'scene', toggles: ['volumetricClouds'], required: false, needs: ['linearDepthHalf'], budgetMs: 6, typical: false, canBeLast: false, live: true, why: 'Cloud the sky is really made of rather than a sheet drawn across it: a raymarch through a slab overhead, lit by the very sun, ambient and haze the rest of the scene is lit by, which is how each world keeps its own colour with no table of its own. After the surface passes, so occlusion, blade light and reflections have already settled what the surfaces are, and after the heat, since the air sits between the heat and the eye; before the god rays, so the sky they are drawn from is the cloudy one and a broken deck makes shafts by itself; before depth of field, motion blur, bloom and the grade, so the clouds defocus, smear, spill and are graded with the picture. It marches at a fraction of the screen and comes back through a depth-aware upsample, since a plain one haloes every ridge. By far the most expensive pass here, which is why it is off by default and has a quality of its own.' },
+  { id: 'volumetricClouds', stage: 'scene', toggles: ['volumetricClouds'], yieldsTo: ['airClouds'], required: false, needs: ['linearDepthHalf'], budgetMs: 6, typical: false, canBeLast: false, live: true, why: 'Cloud the sky is really made of rather than a sheet drawn across it: a raymarch through a slab overhead, lit by the very sun, ambient and haze the rest of the scene is lit by, which is how each world keeps its own colour with no table of its own. After the surface passes, so occlusion, blade light and reflections have already settled what the surfaces are, and after the heat, since the air sits between the heat and the eye; before the god rays, so the sky they are drawn from is the cloudy one and a broken deck makes shafts by itself; before depth of field, motion blur, bloom and the grade, so the clouds defocus, smear, spill and are graded with the picture. It marches at a fraction of the screen and comes back through a depth-aware upsample, since a plain one haloes every ridge. By far the most expensive pass here, which is why it is off by default and has a quality of its own.' },
+  // The seventh wave's clouds: under the master (`requires`), the September pass yielding to them while they are wanted;
+  // their budget High's overcast with the low deck, the smear and a live hole at 2560×1440 [ours, the design's §7].
+  { id: 'airClouds', stage: 'scene', toggles: ['volClouds'], requires: ['volumetrics'], required: false, needs: ['linearDepthHalf'], budgetMs: 1.0, typical: false, canBeLast: false, live: true, why: "The sky's clouds marched as cloud (src/core/fx/airClouds.ts): the game's own cloud pictures per deck as a weather map over a 52 km square, heaps or a layer by each picture's kind, the wet overcast where a storm hangs none, drifting on the one wind aloft and smeared by its gusts at a cloud's scale; a low deck near the ground in rain and overcast, holed by every hull; lit by the dome's own sky with octaves of scattering and a history. Where the September clouds stand, and in their place while wanted (they yield to it); before the dust, so the farther layer is composited first; before the god rays, the lens and the grade. It marches at a share of the screen through an upsample of its own size, and refuses with a reason indoors, in space, under water, in a dust storm, at an amount of nought and with nothing to draw. Not typical: off by default under the master." },
   // The volume's budgets are the sixth wave's measurement (`air({ budget })`, High, the effects' line less the master
   // held off): 0.37 ms of the card at 2560×1440 and 0.17 at 1600×900 on Vulkan; Direct3D 11's line wanders by a quarter
   // of a millisecond between rows that are all High (0.03 to 0.56 ms, the middle about 0.3); and 0.01 to 0.04 ms of the
@@ -416,9 +454,19 @@ export function fxProductDef(id: FxProductId): FxProductDef {
  * so; past that, a required pass always is, and any other when one of its toggles is on, unless the console says
  * otherwise. For every pass with no `requires`, this is the rule as it always stood.
  */
-export function fxPassWanted(def: FxPassDef, settings: FxSettings, override?: boolean): boolean {
+export function fxPassWanted(def: FxPassDef, settings: FxSettings, override?: boolean, yielded?: (id: FxPassId) => boolean): boolean {
   const req = def.requires;
   if (req) for (let i = 0; i < req.length; i++) if (!settings[req[i]]) return false;
+  // A pass yields while a pass it yields to is wanted (the September clouds to the volumetrics' own): asked of the chain
+  // (`yielded`, which also says whether that pass is on the chain at all) or, with none handed, of the registry's own
+  // rule over the settings alone. Only the September row has any, so every other pass decides exactly as it always did.
+  const ys = def.yieldsTo;
+  if (ys) {
+    for (let i = 0; i < ys.length; i++) {
+      const y = ys[i];
+      if (yielded ? yielded(y) : fxPassWanted(fxPassDef(y), settings)) return false;
+    }
+  }
   if (def.required) return true;
   let setting = false;
   const toggles = def.toggles;

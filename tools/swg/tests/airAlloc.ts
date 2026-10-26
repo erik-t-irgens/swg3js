@@ -393,6 +393,161 @@ if (process.argv[2] === 'part') {
   console.log(name, (p.made / 50_000).toFixed(2), 'B a call', p.scavenges, 'collections');
   process.exit(0);
 }
+if (process.argv[2] === 'clouds') {
+  // The seventh wave's second half: the clouds' feed alone (`AirCloudsFeed.update`) over steady frames and frames whose
+  // camera moves at 167 m/s -- the sky's mix walked per deck through a stand-in sky, each picture's numbers looked up,
+  // the decks' offsets integrated and folded for every reader, each smear phase's streets frozen at its restart, the
+  // decks' packs of the one wind's gust function written (a world attached, the unified wind's arm off as with `volWind`
+  // off), the low deck's ground eased, the hull walk on the holes' 10 Hz tick with a capsule batch, other players' rides
+  // and the shuttles' jets in their kept records, and the live holes' boxes -- each held under 0.2 bytes a frame.
+  const { AirCloudsFeed, PictureImage, cloudPicturesOf } = await import('../../../src/world/volumetrics/airCloudsFeed.ts');
+  const { attachWind } = await import('../../../src/world/wind.ts');
+  const rows = [0, 1, 2, 3, 4].flatMap((l) => [0, 1, 2].map((r) => ({ weatherIndex: l, windSpeedScale: 2 + l * 2 + r * 0.3, cameraEffect: l >= 3 ? { kind: 'rain' } : null })));
+  attachWind('naboo', 'naboo', 7654321, [0.3, 0.25, 0.2, 0.15, 0.1], 5, rows);
+  setWindArm({ master: true, wind: false, devils: true, trees: true, art: 1 });
+  class Sky {
+    mixLength = 2;
+    readonly mixWeights = new Float64Array([0.7, 0.3, 0, 0]);
+    readonly blocks = [rows[0], rows[4]];
+    mixBlock(i: number): (typeof rows)[number] | null {
+      return i < 2 ? this.blocks[i] : null;
+    }
+    readonly lighting = { windSpeedScale: 3, shadowScale: 0.6, bounce: new THREE.Color(0.2, 0.2, 0.2), bounceScale: 1, ambient: new THREE.Color(0.3, 0.3, 0.35), ambientScale: 1 };
+    readonly sheetAloft = new Float64Array([8, 12, 0.2]);
+    sheetAloftOn = true;
+    readonly domeUniforms = { uGradient: { value: null }, uGradient2: { value: null }, uGradientMix: { value: 0 }, uTime: { value: 0.5 }, uHasGradient: { value: 0 }, uHasGradient2: { value: 0 }, uClear: { value: new THREE.Color() } };
+    readonly decks: InstanceType<typeof PictureImage>[][] = [[new PictureImage(), new PictureImage()], [new PictureImage(), new PictureImage()]];
+    cloudImages(slot: 0 | 1, out: { readonly images: readonly [InstanceType<typeof PictureImage>, InstanceType<typeof PictureImage>] }): void {
+      for (let m = 0; m < 2; m++) {
+        const a = this.decks[slot][m];
+        const b = out.images[m];
+        b.file = a.file;
+        b.weight = a.weight;
+        b.size = a.size;
+        b.speed = a.speed;
+        b.repeat = a.repeat;
+        b.texture = a.texture;
+        b.scrollX = a.scrollX;
+        b.scrollY = a.scrollY;
+        b.scrolled = a.scrolled;
+      }
+    }
+  }
+  const sky = new Sky();
+  const pic = (file: string, weight: number, repeat: number): InstanceType<typeof PictureImage> => {
+    const im = new PictureImage();
+    im.file = file;
+    im.weight = weight;
+    im.repeat = repeat;
+    im.size = repeat / 105;
+    im.texture = new THREE.Texture();
+    im.scrolled = true;
+    im.scrollX = 0.25;
+    im.scrollY = 0.75;
+    return im;
+  };
+  sky.decks[0][0] = pic('texture/heaps.png', 0.7, 945);
+  sky.decks[0][1] = pic('texture/storm.png', 0.3, 700);
+  sky.decks[1][0] = pic('texture/veil.png', 1, 1190);
+  const feed = new AirCloudsFeed();
+  const I = feed.input;
+  I.sky = sky as never;
+  I.pictures = cloudPicturesOf({ pictures: 2, tiles: { 'heaps.png': { coverage: 0.2, spread: 0.6, brightness: 0.72, colour: [230, 232, 240] }, 'storm.png': { coverage: 0.8, spread: 0.2, brightness: 0.3, colour: [90, 95, 100] }, 'veil.png': { coverage: 0.5, spread: 0.1, brightness: 0.6, colour: [200, 205, 215] } } });
+  I.weatherOn = true;
+  I.rain = 0.6;
+  I.snow = 0;
+  I.dust = 0;
+  I.heading = 0.7;
+  I.travel = 6;
+  I.windClock = 1000.5;
+  I.simulate = true;
+  I.dt = DT;
+  // The ground under the camera, whole metres (a number the engine hands back without making one).
+  const groundAt = (q: { readonly x: number; readonly z: number }): number | null => ((q.x | 0) >> 5) & 7;
+  I.groundAt = groundAt;
+  // Hulls flying through the low deck and the slab, rides and jets in their kept records.
+  const cloudHulls = [0, 1, 2, 3].map((i) => ({ group: new THREE.Group(), spec: { fly: { floor: 1.5 } }, airborne: true, altitude: 300, pos: new THREE.Vector3(i * 40, 250 + i * 10, 0), radius: 10 + i }));
+  I.hulls = cloudHulls;
+  const rides = newNearRides(4);
+  rides.n = 2;
+  for (let i = 0; i < 2; i++) {
+    rides.x[i] = 60 + i * 30;
+    rides.y[i] = 280;
+    rides.z[i] = -40;
+    rides.half[i] = 6;
+    rides.key[i] = 900 + i;
+    rides.kind[i] = RIDE_KIND.ship;
+  }
+  const jets = newShuttleJets(4);
+  jets.n = 1;
+  jets.x[0] = -30;
+  jets.y[0] = 260;
+  jets.z[0] = 20;
+  jets.key[0] = 77;
+  I.rides = rides;
+  I.jets = jets;
+  const ct = newVolTune();
+  ct.on = true;
+  ct.clouds = true;
+  ct.cloudsSmear = true;
+  ct.cloudsLow = true;
+  ct.cloudsHoles = true;
+  let frame = 0;
+  // A capsule batch every tick, as the pass draws the tick it is handed.
+  const H = new Float32Array(4);
+  const SL = new Float32Array(4);
+  const SH = new Float32Array(4);
+  const MV = new Float32Array(4);
+  const cap = new Float32Array(256);
+  const cloudStep = (): void => {
+    frame++;
+    // The hulls weave through the low deck's band.
+    for (let i = 0; i < cloudHulls.length; i++) {
+      const p = cloudHulls[i].pos;
+      p.x += 0.3;
+      p.y = 250 + ((frame + i * 37) & 127);
+    }
+    feed.update(ct);
+    if (feed.holes.prepareTick(H, SL, SH, MV, cap)) feed.holes.drawn();
+  };
+  // The camera's travel in a kept array (a closure's `let` written with a number makes one a write).
+  const camMove = new Float64Array(1);
+  const cloudMoving = (): void => {
+    camMove[0] += 167 * DT;
+    I.camX = camMove[0];
+    I.camZ = camMove[0] * 0.5;
+    cloudStep();
+  };
+  I.camX = 0;
+  I.camY = 2;
+  I.camZ = 0;
+  if (process.argv[3] === 'profile') {
+    // Where what a frame makes is made (the sampling heap profiler, keeping what the minor collector took).
+    const call = process.argv[4] === 'moving' ? cloudMoving : cloudStep;
+    frames(call, 50_000);
+    const { Session } = await import('node:inspector/promises');
+    const session = new Session();
+    session.connect();
+    await session.post('HeapProfiler.enable');
+    await session.post('HeapProfiler.startSampling', { samplingInterval: 64, includeObjectsCollectedByMinorGC: true, includeObjectsCollectedByMajorGC: true });
+    frames(call, 50_000);
+    type Node = { callFrame: { functionName: string; url: string; lineNumber: number }; selfSize: number; children: Node[] };
+    const { profile } = (await session.post('HeapProfiler.stopSampling')) as { profile: { head: Node } };
+    const sites = new Map<string, number>();
+    const walk = (n: Node, path: string): void => {
+      const here = `${n.callFrame.functionName || '(anon)'} ${n.callFrame.url.split('/').pop()}:${n.callFrame.lineNumber + 1}`;
+      if (n.selfSize > 0) sites.set(`${here} <- ${path}`, (sites.get(`${here} <- ${path}`) ?? 0) + n.selfSize);
+      for (const c of n.children) walk(c, here);
+    };
+    walk(profile.head, '');
+    for (const [k, v] of [...sites].sort((a, b) => b[1] - a[1]).slice(0, 15)) console.log((v / 50_000).toFixed(2), 'B a frame', k);
+    process.exit(0);
+  }
+  const cs = await measure(cloudStep, FRAMES);
+  const cm = await measure(cloudMoving, FRAMES);
+  console.log(JSON.stringify({ steady: { frames: FRAMES, made: cs.made, scavenges: cs.scavenges }, moving: { frames: FRAMES, made: cm.made, scavenges: cm.scavenges }, smearing: feed.smearing, low: feed.low, stamped: feed.holes.stamped, remembered: feed.holes.remembered, live: feed.holes.live(0), why: feed.why }));
+  process.exit(0);
+}
 if (process.argv[2] === 'off') {
   // The master off: the field holds no window, and every method of the force API answers before touching anything. A
   // million calls of each, from a field whose tune says off.

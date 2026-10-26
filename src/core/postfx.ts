@@ -256,9 +256,18 @@ export class PostFX {
   passWanted(id: FxPassId): boolean {
     if (!this.byPassId.has(id)) return false;
     // The registry's one rule, which the frame's own decision asks too: a pass whose `requires` are not all on (the
-    // volume with the volumetrics master off) is not wanted, and every other pass decides as it always did.
-    return fxPassWanted(fxPassDef(id), this.settings, this.override[id]);
+    // volume with the volumetrics master off) is not wanted, and every other pass decides as it always did; a pass that
+    // yields (the September clouds) asks this chain whether what it yields to is on it and wanted (`yielded`).
+    return fxPassWanted(fxPassDef(id), this.settings, this.override[id], this.yielded);
   }
+
+  /**
+   * Whether a pass another yields to is on this chain and wanted (the volumetrics' clouds, which the September pass
+   * yields to): kept as one function for the chain's life, so the frame's decision makes nothing. A pass the settings ask
+   * for but no chain holds yet (the master turned on in play, its warm still going) is not wanted, so the September
+   * clouds go on drawing until the new ones are there to stand in for them.
+   */
+  private readonly yielded = (id: FxPassId): boolean => this.passWanted(id);
 
   /** Take the settings as they now are: flags and strengths, and a resize for a pass whose size is one of them. */
   configure(settings: FxSettings): void {
@@ -270,6 +279,7 @@ export class PostFX {
     const cloudAmount = this.settings.volumetricCloudAmount;
     const s0 = this.settings;
     const air = [s0.airVolumeResolution, s0.airVolumeAmount, s0.airVolumeSteps, s0.airVolumeHistory, s0.airVolumeShadows, s0.volumetrics];
+    const clouds = [s0.volCloudsResolution, s0.volCloudsAmount, s0.volCloudsSteps, s0.volCloudsLight, s0.volCloudsHistory, s0.volumetrics];
     Object.assign(this.settings, settings);
     if (this.settings.ssaoResolution !== ssao) this.byPassId.get('ssao')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
     if (this.settings.waterReflectionResolution !== water) this.byPassId.get('waterReflections')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
@@ -287,6 +297,17 @@ export class PostFX {
       this.settings.volumetrics !== air[5]
     ) {
       this.byPassId.get('airVolume')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+    }
+    // The clouds (the seventh wave) likewise: their target resized only when their share of the screen moved.
+    if (
+      this.settings.volCloudsResolution !== clouds[0] ||
+      this.settings.volCloudsAmount !== clouds[1] ||
+      this.settings.volCloudsSteps !== clouds[2] ||
+      this.settings.volCloudsLight !== clouds[3] ||
+      this.settings.volCloudsHistory !== clouds[4] ||
+      this.settings.volumetrics !== clouds[5]
+    ) {
+      this.byPassId.get('airClouds')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
     }
   }
 
@@ -362,7 +383,7 @@ export class PostFX {
       const pass = this.passes[i];
       this.missing[i] = null;
       // `fxPassWanted` is the registry's rule (`passWanted` asks it too); a required pass never asks its own `enabled`.
-      let on = fxPassWanted(def, this.settings, this.override[def.id]) && (def.required || pass.enabled(ctx));
+      let on = fxPassWanted(def, this.settings, this.override[def.id], this.yielded) && (def.required || pass.enabled(ctx));
       if (on) {
         const needs = pass.needs(ctx);
         for (let k = 0; k < needs.length; k++) {

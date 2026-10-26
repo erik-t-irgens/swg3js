@@ -1298,6 +1298,9 @@ export class WindPattern {
       }
       this.pT = t;
       this.phaseTravel(ph);
+      // Each phase's travel since its start, kept for the clouds' decks (`packDeckNow`, the seventh wave's second half).
+      this.phaseTo[ph * 2] = this.to.x;
+      this.phaseTo[ph * 2 + 1] = this.to.z;
       const sh = this.phase[p + 1];
       const ch = this.phase[p + 2];
       const along = (this.to.x * sh + this.to.z * ch) * this.phase[p + 3] + this.phase[p + 7];
@@ -1362,6 +1365,96 @@ export class WindPattern {
       this.stepWind();
       this.travelSpeed = Math.sqrt(this.su.x * this.su.x + this.su.z * this.su.z);
     }
+  }
+
+  // ------------------------------------------------------------------- the clouds' decks (the seventh wave's second half)
+
+  /** Each phase's travel since its start (x, z, then the second phase's), as `pack` or `phasesNow` last left it. */
+  readonly phaseTo = new Float64Array(4);
+  /** A deck's geometry and strengths for `packDeckNow`, written by the caller: its lattice this many times the world's, its travel this share of the pure travel, its gust strength and veer. */
+  deckScale = 0.5;
+  deckShare = 0.5;
+  deckGust = 0.5;
+  deckVeer = 0.5;
+
+  /**
+   * The phases frozen and travelled to `now` as `pack` would leave them, without packing anything (the clouds' decks
+   * with the unified wind's arm off, when nothing packs the ground's): the same freeze, the same restarts, the same pure
+   * travel, into `phase` and `phaseTo`. Nothing allocated.
+   */
+  phasesNow(): void {
+    const t = this.now;
+    const T = this.tune.gusts.cycle > 1 ? this.tune.gusts.cycle : 1;
+    const headingHeld = this.holding && this.holdHeading !== null;
+    for (let ph = 0; ph < 2; ph++) {
+      const shifted = t / T + ph * 0.5;
+      const cyc = Math.floor(shifted);
+      const f = shifted - cyc;
+      const p = ph * 12;
+      this.freeze(ph, cyc);
+      if (this.phase[p] !== cyc || (this.heldFrozen[ph] === 1 && !headingHeld)) {
+        const q = this.pend;
+        for (let c = 0; c < 12; c++) this.phase[p + c] = q[c];
+        this.covers[ph] = q[12];
+        this.heldFrozen[ph] = headingHeld ? 1 : 0;
+      }
+      this.pT = t;
+      this.phaseTravel(ph);
+      this.phaseTo[ph * 2] = this.to.x;
+      this.phaseTo[ph * 2 + 1] = this.to.z;
+      const s = Math.sin(Math.PI * f);
+      this.weight[ph] = s * s;
+    }
+  }
+
+  /**
+   * The pack of this very gust function at a deck's geometry (`WIND7_DECK`, the design's §2.18) into `out`: each phase's
+   * lattice `deckScale` times the world's (its patches that much larger) and its travel `deckShare` of the pure travel
+   * (the deck's aloft factor), its gust strength `deckGust` and veer `deckVeer`; every other number the phases' own, as
+   * `pack` or `phasesNow` left them at this moment. So the gusts that cross the ground and the streams in a deck are one
+   * wind at two scales, read by `w7Gust` with this array bound to its `uWind7`. The mean `S` is left at one and `on` at
+   * one (a deck reads `k` and the veer alone). Nothing allocated.
+   */
+  packDeckNow(out: Float32Array): void {
+    const L = this.tune.gusts.lattice;
+    const G = this.deckScale > 1e-6 ? this.deckScale : 1;
+    const F = this.deckShare;
+    for (let ph = 0; ph < 2; ph++) {
+      const p = ph * 12;
+      const sh = this.phase[p + 1];
+      const ch = this.phase[p + 2];
+      const la = this.phase[p + 3] / G;
+      const lc = this.phase[p + 4] / G;
+      const tx = this.phaseTo[ph * 2] * F;
+      const tz = this.phaseTo[ph * 2 + 1] * F;
+      const along = (tx * sh + tz * ch) * la + this.phase[p + 7];
+      const across = (tx * ch - tz * sh) * lc + this.phase[p + 8];
+      out[ph * 2] = along - L * Math.floor(along / L);
+      out[ph * 2 + 1] = across - L * Math.floor(across / L);
+      out[4 + ph * 2] = sh;
+      out[5 + ph * 2] = ch;
+      out[12 + ph * 2] = la;
+      out[13 + ph * 2] = lc;
+      out[16 + ph * 2] = this.phase[p + 9];
+      out[17 + ph * 2] = this.phase[p + 10];
+    }
+    const w0 = this.weight[0];
+    const w1 = this.weight[1];
+    const sum = w0 + w1 > 1e-9 ? w0 + w1 : 1;
+    const norm = Math.sqrt(w0 * w0 + w1 * w1);
+    const n = norm > 1e-9 ? norm : 1;
+    out[8] = w0 / n;
+    out[9] = w1 / n;
+    out[10] = (w0 * this.phase[5] + w1 * this.phase[17]) / sum;
+    out[11] = this.tune.gusts.soft;
+    out[20] = this.deckGust;
+    out[21] = (w0 * this.phase[6] + w1 * this.phase[18]) / sum;
+    out[22] = this.deckVeer;
+    out[23] = this.tune.gusts.octave2;
+    out[24] = L;
+    out[25] = 1;
+    out[26] = 0;
+    out[27] = 1;
   }
 
   // ------------------------------------------------------------------- devils

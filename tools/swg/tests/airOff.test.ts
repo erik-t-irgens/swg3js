@@ -99,7 +99,9 @@ const store = new Map<string, string>();
   const [oldReg, newReg] = await both('core/fxRegistry.ts');
   const [oldPostfx] = await both('core/postfx.ts');
   const oldPassWanted = (oldPostfx.PostFX as { prototype: { passWanted: (this: unknown, id: string) => boolean } }).prototype.passWanted;
-  const fxPassWanted = newReg.fxPassWanted as (def: unknown, s: Record<string, unknown>, o?: boolean) => boolean;
+  const fxPassWanted = newReg.fxPassWanted as (def: unknown, s: Record<string, unknown>, o?: boolean, yielded?: (id: string) => boolean) => boolean;
+  // A chain holding nothing a pass yields to (the master off never registers the clouds of W7b): its `yielded` answers no.
+  const noYield = (): boolean => false;
   const newDefs = newReg.FX_PASSES as { id: string; toggles: string[]; required?: boolean; typical: boolean; budgetMs: number; requires?: string[] }[];
   const oldDefs = oldReg.FX_PASSES as { id: string; toggles: string[]; typical: boolean; budgetMs: number }[];
   const defaults = newReg.FX_DEFAULTS as Record<string, unknown>;
@@ -117,14 +119,49 @@ const store = new Map<string, string>();
           keys.forEach((k, i) => (s[k] = !!(bits & (1 << i))));
           const fake = { byPassId: new Map([[od.id, {}]]), settings: s, override: override === undefined ? {} : { [od.id]: override } };
           combos++;
-          if (oldPassWanted.call(fake, od.id) !== fxPassWanted(nd, s, override)) agree = false;
+          if (oldPassWanted.call(fake, od.id) !== fxPassWanted(nd, s, override, noYield)) agree = false;
         }
       }
     }
   }
-  ok(agree, `for every pass of the old chain, over ${combos} combinations of its switches, an override and the master, the registry's rule answers what the old passWanted answered`);
+  ok(agree, `for every pass of the old chain, over ${combos} combinations of its switches, an override and the master, the registry's rule answers what the old passWanted answered (on a chain holding nothing it yields to)`);
   const air = newDefs.find((d) => d.id === 'airVolume')!;
-  ok(!!air && air.requires?.includes('volumetrics') === true && !oldDefs.some((d) => d.id === 'airVolume'), 'the volume is the one new pass, and requires the master');
+  const newPasses = newDefs.filter((d) => !oldDefs.some((o2) => o2.id === d.id)).map((d) => d.id);
+  ok(!!air && air.requires?.includes('volumetrics') === true && newPasses.length === 2 && newPasses.includes('airVolume') && newPasses.includes('airClouds') && newDefs.find((d) => d.id === 'airClouds')!.requires?.includes('volumetrics') === true, 'the volume and the clouds are the two new passes, and each requires the master');
+  // W7b's `yieldsTo` (the design's §4.1 item 6c): the September row alone names it, it names the clouds alone, and the
+  // decision over every combination of the September switch, the clouds' switch, the master and the effects -- with the
+  // registry's own answer for whether the clouds are wanted, so nothing is stood in -- is the old chain's wherever the
+  // master is off; with it on and the clouds' switch on the September pass yields, and with the clouds' off decides as
+  // the old one did.
+  {
+    const yields = (newDefs as { id: string; yieldsTo?: string[] }[]).filter((d) => d.yieldsTo && d.yieldsTo.length);
+    ok(yields.length === 1 && yields[0].id === 'volumetricClouds' && yields[0].yieldsTo!.length === 1 && yields[0].yieldsTo![0] === 'airClouds', "`yieldsTo` is on the September clouds' row alone, and names the volumetrics' clouds alone");
+    const od = oldDefs.find((d) => d.id === 'volumetricClouds')!;
+    const nd = newDefs.find((d) => d.id === 'volumetricClouds')!;
+    let same = true;
+    let yieldsOn = true;
+    let todayOff = true;
+    let n = 0;
+    for (const sept of [false, true]) {
+      for (const clouds of [false, true]) {
+        for (const master of [false, true]) {
+          for (const effects of [false, true]) {
+            for (const override of [undefined, true, false]) {
+              const s: Record<string, unknown> = { ...defaults, volumetricClouds: sept, volClouds: clouds, volumetrics: master, effects };
+              const fake = { byPassId: new Map([[od.id, {}]]), settings: s, override: override === undefined ? {} : { [od.id]: override } };
+              const was = oldPassWanted.call(fake, od.id);
+              const now = fxPassWanted(nd, s, override);
+              n++;
+              if (!master && was !== now) same = false;
+              if (master && clouds && now) yieldsOn = false;
+              if (master && !clouds && was !== now) todayOff = false;
+            }
+          }
+        }
+      }
+    }
+    ok(same && yieldsOn && todayOff, `the September clouds' decision over ${n} combinations of its switch, the clouds', the master, the effects and an override: the old chain's wherever the master is off, yielding while the clouds are wanted, and the old chain's again with the clouds' switch off`);
+  }
   let unwanted = true;
   for (const v of [false, true]) for (const override of [undefined, true, false]) if (fxPassWanted(air, { ...defaults, volumetrics: false, airVolume: v }, override)) unwanted = false;
   ok(unwanted, 'with the master off the volume is unwanted whatever its own switch or an override says');
@@ -134,7 +171,7 @@ const store = new Map<string, string>();
   ok(oldTypical === newTypical, `the typical frame's effects still come to ${newTypical} ms`);
   // The chain's own code calls the rule both places it decides.
   const postfx = readFileSync(join(NEW, 'core', 'postfx.ts'), 'utf8');
-  ok(postfx.includes('return fxPassWanted(fxPassDef(id), this.settings, this.override[id]);') && postfx.includes('let on = fxPassWanted(def, this.settings, this.override[def.id]) && (def.required || pass.enabled(ctx));'), 'and the chain asks that rule both for passWanted and for its frame decision');
+  ok(postfx.includes('return fxPassWanted(fxPassDef(id), this.settings, this.override[id], this.yielded);') && postfx.includes('let on = fxPassWanted(def, this.settings, this.override[def.id], this.yielded) && (def.required || pass.enabled(ctx));') && postfx.includes('private readonly yielded = (id: FxPassId): boolean => this.passWanted(id);'), 'and the chain asks that rule both for passWanted and for its frame decision, a pass that yields asking the chain itself whether what it yields to is on it and wanted');
 }
 
 // --- 3. the programs' text ---
@@ -664,11 +701,13 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
   const [oFlora, nFlora] = await both('world/floraSway.ts');
   const windNew = await load(NEW, 'world/wind.ts');
   const setWindArm = windNew.setWindArm as (o: { master: boolean; wind: boolean; devils: boolean; trees: boolean; art: number }) => void;
-  const WIND_STATE = windNew.WIND_STATE as { on: boolean };
+  const WIND_STATE = windNew.WIND_STATE as { on: boolean; decks: boolean };
   const madeBefore = (windNew.wind7UniformsMade as () => boolean)();
   type W = Record<string, unknown> & { update(dt: number, p: unknown, ctx: unknown): void; updateView(dt: number, c: unknown, ctx: unknown): void; state: Record<string, unknown> };
-  const run = (m: Mod, water: Mod, flora: Mod, arm: { master: boolean; wind: boolean; art: number }): string[] => {
+  const run = (m: Mod, water: Mod, flora: Mod, arm: { master: boolean; wind: boolean; art: number; decks?: boolean }): string[] => {
     setWindArm({ master: arm.master, wind: arm.wind, devils: true, trees: true, art: arm.art });
+    // W7b's: a cloud deck of the new tree drawing (its feed sets the flag while its pass is wanted).
+    WIND_STATE.decks = m === n && !!arm.decks;
     const w = new (m.Weather as new (p: unknown) => W)({ world: null });
     const x = w as unknown as Record<string, unknown>;
     const setWindArgs: number[] = [];
@@ -735,8 +774,11 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
     } finally {
       Date.now = realNow;
     }
-    // The new tree's sky is told nothing is held (today's drift) on every frame; the old one has no such flag.
-    if (m === n && aloftFrames !== 0) out.push('the sheets were handed a wind aloft with nothing held');
+    // The new tree's sky is told nothing is held (today's drift) on every frame; the old one has no such flag. With a deck
+    // of W7b's drawing it is handed the world's wind aloft on every frame instead, and nothing else of the weather moves.
+    if (m === n && !arm.decks && aloftFrames !== 0) out.push('the sheets were handed a wind aloft with nothing held');
+    if (m === n && arm.decks && aloftFrames !== 240) out.push(`the sheets were handed the world's wind aloft on ${aloftFrames} of 240 frames while a deck drew`);
+    WIND_STATE.decks = false;
     // And its mean is the speed itself on every frame (what the September clouds' feed and the drying now read).
     if (m === n && meanApart !== 0) out.push(`the mean stood apart from the speed on ${meanApart} frames`);
     return out;
@@ -745,6 +787,7 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
     { master: false, wind: true, art: 1, what: 'the master off' },
     { master: true, wind: false, art: 1, what: "the master on and the unified wind's switch off" },
     { master: true, wind: true, art: 0, what: "the master on and the wind's art at nought" },
+    { master: true, wind: false, art: 1, decks: true, what: "the master on, the unified wind's switch off and a cloud deck of W7b's drawing (WIND_STATE.decks)" },
   ]) {
     const a = run(o, oWater, oFlora, arm);
     const b = run(n, nWater, nFlora, arm);
@@ -814,6 +857,146 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
   const oldFeed = /const look = cloudLook\(.*\);/.exec(oldMain)?.[0] ?? '';
   const newFeed = /const look = cloudLook\(.*\);/.exec(newMain)?.[0] ?? '';
   ok(oldFeed.includes('on ? w.windSpeed : 0') && newFeed === oldFeed.replace('on ? w.windSpeed : 0', 'on ? w.windMean : 0'), "the September clouds' feed reads the mean where it read the speed and nothing else moved (the mean the speed itself with the arm off, frame for frame above)");
+}
+
+// --- 6d. the clouds' lines (the seventh wave's second half): with no deck drawing, today's sheets and September clouds ---
+{
+  // The sky's sheets stepped through both trees' `SwgSky` over the same scripted mixes -- two areas crossfading, a row
+  // with a top sheet alone, a picture still loading, a weather row with none -- every sheet's opacity, map, repeat,
+  // scroll and visibility, and the lens flare's read of them (`cloudLayers`), equal frame for frame by `Object.is` with
+  // nothing kept over a deck (the master off: nothing calls `cloudImages` or `keepTopSheets`).
+  const [oSky, nSky] = await both('world/sky.ts');
+  const cloud = (file: string, size: number, speed: number) => ({ file, size, speed });
+  const row = (name: string, weatherIndex: number, bottom: ReturnType<typeof cloud> | null, top: ReturnType<typeof cloud> | null) => ({ name, weatherIndex, gradientSky: null, cloudBottom: bottom, cloudTop: top, ramp: null, shadows: true, fog: { enabled: false, min: 0, max: 0 }, dayEnvironment: null, nightEnvironment: null, windSpeedScale: 2 + weatherIndex });
+  const blocks = [
+    row('a', 0, cloud('texture/a_low.png', 9, 1.5), cloud('texture/a_high.png', 14, 2.5)),
+    row('b', 0, cloud('texture/b_low.png', 7, 0.8), null),
+    row('a', 2, null, cloud('texture/loading.png', 12, 3)),
+    row('a', 3, null, null),
+  ];
+  type Sky = Record<string, unknown> & { setMix(b: unknown[], w: ArrayLike<number>, n: number): void; cloudLayers(out: unknown[]): number };
+  const make = (m: Mod): Sky => {
+    const textures = new Map<string, unknown>();
+    // Every picture up but one, which stays loading (no load is started: it is marked failed, as a picture that never comes).
+    for (const f of ['texture/a_low.png', 'texture/a_high.png', 'texture/b_low.png']) {
+      const t = new THREE.Texture({ width: 64, height: 64 });
+      t.name = f;
+      textures.set(f, t);
+    }
+    const data = { planet: 'test', dayNightSplit: 0.5, sunElevationDegrees: 60, sun: null, supplementalSun: null, moon: null, supplementalMoon: null, celestials: [], stars: null, nightSky: null, skybox: null, blocks };
+    const S = m.SwgSky as new (d: unknown, t: unknown, p: unknown, f: Set<string>) => Sky;
+    return new S(data, textures, { root: '/nowhere/' }, new Set(['texture/loading.png']));
+  };
+  const L = { windSpeedScale: 3, main: new THREE.Color(1, 0.9, 0.8) };
+  const trace = (sky: Sky): string[] => {
+    const out: string[] = [];
+    const cam = new THREE.Vector3(5, 40, -3);
+    const layers = Array.from({ length: 4 }, () => ({ texture: null, altitude: 0, repeat: 0, scroll: new THREE.Vector2(), opacity: 0, fade: new THREE.Vector2(), texels: 0 }));
+    const update = (sky as unknown as { updateClouds(slot: 0 | 1, l: unknown, day: boolean, c: THREE.Vector3, dt: number): void }).updateClouds;
+    const pools = (sky as unknown as { clouds: { mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial> }[] }).clouds;
+    for (let f = 0; f < 300; f++) {
+      const t = f / 299;
+      // Two areas crossfading, then the storm rows coming in with the weather.
+      const w = f < 150 ? [1 - t * 2, t * 2, 0, 0] : [0.6 - (t - 0.5), 0.2, 0.2 + (t - 0.5) * 0.6, 0.4 * (t - 0.5)];
+      const sum = w.reduce((a, b) => a + Math.max(0, b), 0);
+      sky.setMix(blocks, w.map((v) => Math.max(0, v) / sum), 4);
+      L.windSpeedScale = 3 + Math.sin(f * 0.05);
+      update.call(sky, 0, L, f % 97 < 60, cam, 1 / 60);
+      update.call(sky, 1, L, f % 97 < 60, cam, 1 / 60);
+      const sheets = pools.map((c) => {
+        const u = c.mesh.material.uniforms;
+        const s = u.uScroll.value as THREE.Vector2;
+        return [u.uOpacity.value, (u.uMap.value as THREE.Texture).name || 'white', u.uRepeat.value, s.x, s.y, c.mesh.visible].join(',');
+      });
+      const n = sky.cloudLayers(layers);
+      const flare = layers.slice(0, n).map((l) => [(l.texture as THREE.Texture | null)?.name, l.altitude, l.repeat, l.scroll.x, l.scroll.y, l.opacity].join(',')).join('/');
+      out.push(`${sheets.join('|')}#${flare}`);
+    }
+    return out;
+  };
+  const a = trace(make(oSky));
+  const nsky = make(nSky);
+  const b = trace(nsky);
+  const at = a.findIndex((s, i) => s !== b[i]);
+  ok(at === -1 && a.length === 300 && new Set(a).size > 100, `the sky's four sheets over 300 frames of crossfading areas, a top sheet alone, a picture still loading and a row with none: every opacity, map, repeat, scroll and visibility and the lens flare's read of them equal to the old sky's, with no deck drawing${at >= 0 ? `; first differs at frame ${at}: ${a[at]} against ${b[at]}` : ''}`);
+  // The grouping is written once: `cloudImages` reads the very grouping `updateClouds` draws, and reads only.
+  const NS = nsky as unknown as { cloudImages(slot: 0 | 1, out: { images: Record<string, unknown>[] }): void; keepTopSheets(s: number): void; sheets: boolean; clouds: { mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>; file: string | null }[]; cloudScroll: Map<string, { s: THREE.Vector2 }> };
+  const im = () => ({ images: [{} as Record<string, unknown>, {} as Record<string, unknown>] });
+  const scrollsBefore = [...NS.cloudScroll.values()].map((v) => `${v.s.x},${v.s.y}`).join('|');
+  const bot = im();
+  const top = im();
+  NS.cloudImages(0, bot);
+  NS.cloudImages(1, top);
+  const scrollsAfter = [...NS.cloudScroll.values()].map((v) => `${v.s.x},${v.s.y}`).join('|');
+  const sheetFile = (i: number) => NS.clouds[i].file;
+  const sheetOp = (i: number) => NS.clouds[i].mesh.material.uniforms.uOpacity.value as number;
+  const matches = [0, 1].every((m) => (bot.images[m].file ?? null) === sheetFile(m) && (bot.images[m].texture ? Object.is(bot.images[m].weight, sheetOp(m)) : true)) && [0, 1].every((m) => (top.images[m].file ?? null) === sheetFile(2 + m) && (top.images[m].texture ? Object.is(top.images[m].weight, sheetOp(2 + m)) : true));
+  ok(matches && scrollsBefore === scrollsAfter && scrollsBefore.length > 0, "`cloudImages` hands each deck the very images and weights the sheets were drawn with, and moves no scroll and starts no load");
+  // `keepTopSheets`: with the sheets down, the top pair keeps that share of its opacity and the bottom pair stays hidden;
+  // nought hides them all again, and with the sheets up it changes nothing.
+  NS.sheets = false;
+  NS.keepTopSheets(0.5);
+  update0(nsky);
+  const kept = NS.clouds.map((c) => `${c.mesh.visible}:${c.mesh.material.uniforms.uOpacity.value}`);
+  // Each kept top sheet's opacity is its own weight this frame (what the sheets would have drawn) times the share kept,
+  // and its weight is still the whole (the lens flare reads the weight, never what is kept of it).
+  const weights = (nsky as unknown as { sheetWeights: Float64Array | Float32Array | number[] }).sheetWeights;
+  const keptOps = [2, 3].map((i) => NS.clouds[i].mesh.material.uniforms.uOpacity.value as number);
+  const shared = [2, 3].every((i, m) => !NS.clouds[i].file || weights[i] <= 0.002 || Object.is(keptOps[m], weights[i] * 0.5)) && [2, 3].some((i) => !!NS.clouds[i].file && weights[i] > 0.002);
+  NS.keepTopSheets(0);
+  update0(nsky);
+  const none = NS.clouds.every((c) => !c.mesh.visible);
+  NS.sheets = true;
+  ok(none && shared && kept[0].startsWith('false') && kept[1].startsWith('false') && NS.clouds.slice(2).some((c) => !!c.file) && kept.slice(2).some((k) => k.startsWith('true')), `keepTopSheets keeps the top sheets at exactly that share of their own weight over a deck (${kept.join(' ')}; weights ${[2, 3].map((i) => weights[i]).join(', ')}) and nought hides every sheet`);
+  function update0(sky: Sky): void {
+    const u = (sky as unknown as { updateClouds(slot: 0 | 1, l: unknown, day: boolean, c: THREE.Vector3, dt: number): void }).updateClouds;
+    u.call(sky, 0, L, true, new THREE.Vector3(), 0);
+    u.call(sky, 1, L, true, new THREE.Vector3(), 0);
+  }
+  // `cloudMath.ts`: every export the old tree had, the same (functions by their text, numbers and tables by value), and
+  // the September march's programs byte for byte with `coverCurve` moved in beside them.
+  const [oMath, nMath] = await both('core/fx/cloudMath.ts');
+  const differ: string[] = [];
+  for (const [k, v] of Object.entries(oMath)) {
+    const w = nMath[k];
+    const same = typeof v === 'function' ? typeof w === 'function' && String(v) === String(w) : JSON.stringify(v) === JSON.stringify(w);
+    if (!same) differ.push(k);
+  }
+  ok(differ.length === 0 && Object.keys(oMath).length > 3 && typeof nMath.coverCurve === 'function', `cloudMath.ts keeps all ${Object.keys(oMath).length} of its old exports as they were${differ.length ? ` (differ: ${differ.join(', ')})` : ''}, with coverCurve beside them`);
+  const [oClouds, nClouds] = await both('core/fx/clouds.ts');
+  const progs = (m: Mod): string => {
+    const p = new (m.CloudsPass as new () => Record<string, unknown>)();
+    const mats = ((p.materials as () => { material: THREE.ShaderMaterial }[]).call(p)).map((x) => `${x.material.name}|${x.material.vertexShader}|${x.material.fragmentShader}|${Object.keys(x.material.uniforms).sort().join()}`);
+    (p.dispose as () => void).call(p);
+    return mats.join('##');
+  };
+  const pa = progs(oClouds);
+  const pb = progs(nClouds);
+  ok(pa === pb && pa.length > 1000, `the September clouds' programs, every one of them, byte for byte the old tree's (${pa.length} characters)`);
+  // `clouds.ts` and `cloudLook.ts` untouched since the pass began.
+  for (const f of ['core/fx/clouds.ts', 'world/cloudLook.ts']) {
+    const o = readFileSync(join(OLD, f), 'utf8').replace(/\r\n/g, '\n');
+    const n = readFileSync(join(NEW, f), 'utf8').replace(/\r\n/g, '\n');
+    ok(o === n, `${f}: untouched since the pass began`);
+  }
+  // `feedClouds` feeds the volumetrics' clouds first and returns; everything after that is today's text.
+  const oldMain = readFileSync(join(OLD, 'main.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const newMain = readFileSync(join(NEW, 'main.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const body = (src: string): string => {
+    const i = src.indexOf('  private feedClouds(): void {');
+    const j = src.indexOf('\n  }\n', i);
+    return i >= 0 && j > i ? src.slice(i, j) : '';
+  };
+  const ob = body(oldMain);
+  const nb = body(newMain);
+  // The code after the new lines, its comments left out (W7a reworded the one over the look's wind).
+  const tail = (s: string) =>
+    s
+      .slice(s.indexOf('    const pass = this.settings.volumetricClouds'))
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('//'))
+      .join('\n');
+  ok(ob.length > 0 && nb.includes("if (this.postfx?.passWanted('airClouds')) {\n      this.feedAirClouds(this.postfx.pass<AirCloudsPass>('airClouds')!);\n      return;\n    }\n    if (WIND_STATE.decks) this.letGoDecks();\n") && tail(nb) === tail(ob).replace('on ? w.windSpeed : 0', 'on ? w.windMean : 0'), "feedClouds feeds the volumetrics' clouds first and returns, lets the decks go only once they were set, and every line after is today's (the mean where it read the speed, W7a's)");
 }
 
 // --- 5b. the particles' picture accessor (the fourth wave's): it answers a held picture and starts nothing ---

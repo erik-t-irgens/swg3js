@@ -91,6 +91,20 @@ const types: Record<string, string> = {
   volWindDevils: 'boolean',
   volWindTrees: 'boolean',
   volArtWind: 'number',
+  // The seventh wave's second half (7b): one cloud system.
+  volClouds: 'boolean',
+  volCloudsAmount: 'number',
+  volCloudsResolution: 'number',
+  volCloudsSteps: 'number',
+  volCloudsLight: 'number',
+  volCloudsHistory: 'boolean',
+  volCloudsWeather: 'number',
+  volCloudsSmear: 'boolean',
+  volCloudsLow: 'boolean',
+  volCloudsHoles: 'boolean',
+  volCloudsBright: 'number',
+  volCloudsArt: 'number',
+  volCloudSheets: 'number',
 };
 for (const k of VOL_KEYS) ok(typeof S[k] === types[k], `"${k}" is in the defaults as a ${types[k]}`);
 ok(Object.keys(types).length === VOL_KEYS.length, 'and those are every key the pass speaks for, no more');
@@ -124,9 +138,23 @@ ok(!(VOL_QUALITY_KEYS as readonly string[]).some((k) => ['volWind', 'volWindDevi
   const t = newVolTune();
   ok(t.wind === true && t.windDevils === true && t.windTrees === true && t.artWind === 1, "the kept record's seventh-wave fields start at the defaults' own values");
 }
-// No later wave's key is in this build at all, shown or hidden.
-for (const later of ['volWindArt', 'volClouds', 'volCloudSheets']) {
-  ok(!(later in S), `"${later}" (a later wave's) is not in this build`);
+// No later wave's key is in this build at all, shown or hidden (the far devils are Q20's, not this pass's).
+for (const later of ['volWindArt', 'volWindFarDevils']) {
+  ok(!(later in S), `"${later}" (no setting of this pass) is not in this build`);
+}
+// The seventh wave's second half (7b): the clouds' switch, their history and the holes switches the frame reads; their
+// resolution and weather map targets made again; their steps, light steps, smear, low deck and look uniforms; on by
+// default (nothing of them runs while the master is off), the sheets kept over a deck at nought.
+ok(VOL_APPLY_CLASS.volClouds === 'C' && VOL_APPLY_CLASS.volCloudsHistory === 'C' && VOL_APPLY_CLASS.volCloudsHoles === 'C' && VOL_APPLY_CLASS.volCloudsResolution === 'T' && VOL_APPLY_CLASS.volCloudsWeather === 'T' && ['volCloudsSteps', 'volCloudsLight', 'volCloudsAmount', 'volCloudsSmear', 'volCloudsLow', 'volCloudsBright', 'volCloudsArt', 'volCloudSheets'].every((k) => VOL_APPLY_CLASS[k as keyof typeof VOL_APPLY_CLASS] === 'U'), "the seventh wave's clouds: switches the frame reads, targets made again, uniforms; nothing of them a program built");
+ok(S.volClouds === true && S.volCloudsHistory === true && S.volCloudsSmear === true && S.volCloudsLow === true && S.volCloudsHoles === true && S.volCloudsAmount === 1 && S.volCloudsBright === 1 && S.volCloudsArt === 1 && S.volCloudSheets === 0 && S.volCloudsResolution === 0.25 && S.volCloudsSteps === 48 && S.volCloudsLight === 4 && S.volCloudsWeather === 512, "the clouds start on at High's numbers, the art at one, no sheet kept over a deck: nothing of them runs while the master is off");
+ok(VOL_PRESETS.low.volCloudsSteps === 24 && VOL_PRESETS.medium.volCloudsSteps === 32 && VOL_PRESETS.high.volCloudsSteps === 48 && VOL_PRESETS.ultra.volCloudsSteps === 64 && VOL_PRESETS.ultra.volCloudsResolution === 0.5 && VOL_PRESETS.low.volCloudsWeather === 256 && VOL_PRESETS.ultra.volCloudsWeather === 1024 && VOL_PRESETS.low.volCloudsSmear === false && VOL_PRESETS.medium.volCloudsSmear === false && VOL_PRESETS.high.volCloudsSmear === true && VOL_PRESETS.low.volCloudsLight === 2 && VOL_PRESETS.ultra.volCloudsLight === 5, "the clouds by preset: 24, 32, 48 and 64 steps, 2 to 5 light steps, a weather map of 256 to 1,024 texels, the smear from High, Ultra's march at half the screen");
+ok((['volCloudsResolution', 'volCloudsSteps', 'volCloudsLight', 'volCloudsWeather', 'volCloudsSmear'] as const).every((k) => (VOL_QUALITY_KEYS as readonly string[]).includes(k) && VOL_QUALITY_ADDED[k] === 7 && VOL_QUALITY_LATER.includes(k)) && !(VOL_QUALITY_KEYS as readonly string[]).some((k) => ['volClouds', 'volCloudsAmount', 'volCloudsHistory', 'volCloudsLow', 'volCloudsHoles', 'volCloudsBright', 'volCloudsArt', 'volCloudSheets'].includes(k)), "the clouds' five quality keys say the seventh wave added them, and no switch or look of theirs is a quality key");
+{
+  const t = newVolTune();
+  ok(t.clouds === true && t.cloudsHoles === true && t.cloudsLow === true && t.cloudsAmount === 1 && t.cloudsBright === 1 && t.cloudsArt === 1 && t.cloudSheets === 0, "the kept record's clouds start at the defaults' own values");
+  const hard = volQualityFrom(DEFAULT_SETTINGS, newVolTune(), { volCloudsSteps: 400, volCloudsLight: 40 });
+  ok(hard.cloudsSteps === 128 && hard.cloudsLight === 8, "a step count past the page's end from the console is held under the march's loop bounds (128 and 8)");
+  ok(volMemoryMB({ ...newVolTune(), on: true, clouds: true }, 1600, 900) > volMemoryMB({ ...newVolTune(), on: true, clouds: false }, 1600, 900), 'the clouds count their memory while they are on (the noise, the weather map, the holes, the march)');
 }
 {
   const t = newVolTune();
@@ -156,7 +184,7 @@ ok(VOL_PRESETS.low.volDustWisps === 0 && VOL_PRESETS.medium.volDustWisps === 1 &
 ok(['volParticles', 'volLeaves', 'volPuffs', 'volSpray', 'volStreaks', 'volRain', 'volSnow'].every((k) => VOL_APPLY_CLASS[k as keyof typeof VOL_APPLY_CLASS] === 'C') && VOL_APPLY_CLASS.volParticleDetail === 'T' && VOL_APPLY_CLASS.volRainDetail === 'T' && VOL_APPLY_CLASS.volParticleShadows === 'U' && VOL_APPLY_CLASS.volRainThin === 'U' && VOL_APPLY_CLASS.volSnowThin === 'U', "the fourth wave's switches are read by the frame, its counts are targets made again, the leaves' shadow and the thinning are uniforms");
 ok(S.volParticles === true && S.volLeaves === true && S.volPuffs === true && S.volSpray === true && S.volStreaks === true && S.volRain === true && S.volSnow === false && S.volRainThin === 1 && S.volSnowThin === 1, 'the particles, every kind and the rain start on, the snow off; the game\'s own sheets stood down whole while ours falls');
 ok(VOL_PRESETS.low.volParticleDetail === 0.5 && VOL_PRESETS.medium.volParticleDetail === 1 && VOL_PRESETS.high.volParticleDetail === 1 && VOL_PRESETS.ultra.volParticleDetail === 2 && VOL_PRESETS.low.volRainDetail === 4096 && VOL_PRESETS.ultra.volRainDetail === 32768 && VOL_PRESETS.low.volParticleShadows === false, "the pools' counts by preset: half, whole, whole and twice High's particles; 4,096 to 32,768 drops; the leaves' shadow off on Low");
-ok(VOL_QUALITY_WAVE === 6 && VOL_QUALITY_ADDED.volParticleDetail === 4 && VOL_QUALITY_ADDED.volRainDetail === 4 && VOL_QUALITY_ADDED.volParticleShadows === 4 && VOL_QUALITY_ADDED.volLiquidDetail === 5, "this build saves its files as the sixth wave's; the fourth wave's three quality keys and the fifth's one say which wave added them");
+ok(VOL_QUALITY_WAVE === 7 && VOL_QUALITY_ADDED.volParticleDetail === 4 && VOL_QUALITY_ADDED.volRainDetail === 4 && VOL_QUALITY_ADDED.volParticleShadows === 4 && VOL_QUALITY_ADDED.volLiquidDetail === 5, "this build saves its files as the seventh wave's; the fourth wave's three quality keys and the fifth's one say which wave added them");
 // The sixth wave moved the blowing sand's rows (decision 54): twice the air's grid on Low, Medium and High, three times on
 // Ultra, the default with them; the rows before the move kept beside it for the files written before.
 ok(VOL_PRESETS.low.volSandDetail === 2 && VOL_PRESETS.medium.volSandDetail === 2 && VOL_PRESETS.high.volSandDetail === 2 && VOL_PRESETS.ultra.volSandDetail === 3 && S.volSandDetail === 2, "the blowing sand by preset: ×2, ×2, ×2, ×3, the default High's ×2");
@@ -231,7 +259,7 @@ ok(!(VOL_QUALITY_KEYS as readonly string[]).some((k) => ['volumetrics', 'airVolu
     return out;
   };
   for (const name of VOL_PRESET_NAMES) {
-    for (const wave of [2, 3, 4, 5]) {
+    for (const wave of [2, 3, 4, 5, 6]) {
       // An earlier wave's file: its own wave's keys written where they differed from its own defaults, none of a later's.
       const later = VOL_QUALITY_KEYS.filter((k) => (VOL_QUALITY_ADDED[k] ?? 1) > wave);
       const saved = fileOf(name, wave);

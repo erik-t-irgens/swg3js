@@ -29,6 +29,20 @@ import { decodePng } from './png.mjs';
 export const CLOUDS_FORMAT = 1;
 
 /**
+ * The per-picture numbers the volumetrics' clouds read (the seventh wave's), written beside `format` and never instead
+ * of it: the September loader takes format 1 alone, so a bump would empty its clouds for a player with the master off.
+ * A file without this stamp is drawn as heaps at today's coverage.
+ */
+export const CLOUDS_PICTURES = 2;
+
+/** A picture's kind from its coefficient of variation: 1 a layer at `from` or under, 0 heaps at `to` or over (the clouds' `kindFrom`, `kindTo`). */
+export function layeredOf(mean, spread, from = 0.25, to = 1.0) {
+  const cov = spread / Math.max(mean, 1e-3);
+  const t = 1 - (cov - from) / (to - from);
+  return t < 0 ? 0 : t > 1 ? 1 : t;
+}
+
+/**
  * Measure one cloud sheet: how much of the sky it covers and how dark that cover is.
  *
  * Alpha is the coverage because that is literally what the sheet's alpha does -- it is drawn over
@@ -44,6 +58,12 @@ export function measureTile(png) {
   let solid = 0;
   let lumWeighted = 0;
   let weight = 0;
+  // The seventh wave's: the alpha's spread and its tenth, half and ninth tenth, and the alpha-weighted mean colour.
+  let alpha2 = 0;
+  let rW = 0;
+  let gW = 0;
+  let bW = 0;
+  const hist = new Uint32Array(256);
   for (let i = 0; i < n; i++) {
     const a = img.rgba[i * 4 + 3] / 255;
     alpha += a;
@@ -51,16 +71,41 @@ export function measureTile(png) {
     const lum = (img.rgba[i * 4] * 0.299 + img.rgba[i * 4 + 1] * 0.587 + img.rgba[i * 4 + 2] * 0.114) / 255;
     lumWeighted += lum * a;
     weight += a;
+    alpha2 += a * a;
+    rW += img.rgba[i * 4] * a;
+    gW += img.rgba[i * 4 + 1] * a;
+    bW += img.rgba[i * 4 + 2] * a;
+    hist[img.rgba[i * 4 + 3]]++;
   }
+  const mean = alpha / n;
+  const spread = Math.sqrt(Math.max(0, alpha2 / n - mean * mean));
+  const quantile = (q) => {
+    const want = q * n;
+    let seen = 0;
+    for (let v = 0; v < 256; v++) {
+      seen += hist[v];
+      if (seen >= want) return v / 255;
+    }
+    return 1;
+  };
+  const colourByte = (s) => Math.round(weight > 0 ? s / weight : 255);
   return {
     width: img.width,
     height: img.height,
     /** Mean alpha: the share of sky this sheet covers. */
-    coverage: round(alpha / n),
+    coverage: round(mean),
     /** The share of it that is opaque, which is what tells a deck from a haze. */
     solid: round(solid / n),
     /** Mean brightness of what is actually cloud, alpha-weighted. */
     brightness: round(weight > 0 ? lumWeighted / weight : 0),
+    // The seventh wave's (`CLOUDS_PICTURES`): how evenly the picture covers (its alpha's spread and three of its
+    // quantiles), its alpha-weighted mean colour as sRGB bytes, and its kind read from them (1 a layer, 0 heaps).
+    spread: round(spread),
+    q10: round(quantile(0.1)),
+    q50: round(quantile(0.5)),
+    q90: round(quantile(0.9)),
+    colour: [colourByte(rW), colourByte(gW), colourByte(bW)],
+    layered: round(layeredOf(mean, spread)),
   };
 }
 
@@ -116,7 +161,9 @@ export function measureWorld(root, pack) {
     const t = measureTile(readFileSync(file));
     if (t) tiles[path.basename(rel)] = t;
   }
-  return { format: CLOUDS_FORMAT, planet: sky.planet ?? pack, tiles, levels: gatherLevels(blocks, tiles) };
+  // `pictures` after everything the file held before, so the fields of before stand in their places and the September
+  // loader, which takes `format` 1 alone, reads the file as it always did.
+  return { format: CLOUDS_FORMAT, planet: sky.planet ?? pack, tiles, levels: gatherLevels(blocks, tiles), pictures: CLOUDS_PICTURES };
 }
 
 /** Measure every converted world under `root` and write each one's `clouds.json`. */
