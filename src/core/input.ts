@@ -80,7 +80,17 @@ export type Action =
   // The journal: the jobs, what the character witnessed, the documents to read and the ISB's file.
   | 'journal'
   // The map open on its Group tab: who is with you, and the asking. Only while a server holds a group.
-  | 'group';
+  | 'group'
+  // The world editor, on the dev server alone (`src/editor/`): on and off, the free camera's up and down, the cursor
+  // freed and taken back (Fly and Point), the library's find box, the body's return point set at the aim, and the world
+  // held still. Read only while the editor is on (all but `editor` itself), and never shown in a release.
+  | 'editor'
+  | 'editorUp'
+  | 'editorDown'
+  | 'editorPoint'
+  | 'editorSearch'
+  | 'editorBody'
+  | 'editorHold';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -190,6 +200,18 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   // before the roster became a tab of the map; now it is a binding like any other and shows on the
   // Controls page. With no server holding a group it does nothing at all.
   group: ['Period'],
+  // The world editor's keys (the dev server's alone). F2 takes a key nothing reads (SOE's own free camera was
+  // Ctrl+Shift+F9 and its free chase camera F2). Up and down borrow E and Space (the mount, the jump and the grapple's
+  // boost) and Q and X (the other trigger, the brake, the crouch, the reel-out and noclip's down), every one of which the
+  // editor mutes while it is on (`EDITOR_MUTES`); down is **never** Ctrl, since W held with Ctrl closes the tab. Tab is
+  // the target's (muted), the slash, N's noclip (muted) and Pause are free or muted the same way.
+  editor: ['F2'],
+  editorUp: ['KeyE', 'Space'],
+  editorDown: ['KeyQ', 'KeyX'],
+  editorPoint: ['Tab'],
+  editorSearch: ['Slash'],
+  editorBody: ['KeyN'],
+  editorHold: ['Pause'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 
@@ -197,7 +219,7 @@ const STORAGE_KEY = 'swg3js.bindings';
  * Actions only the dev server's tools read: kept in the table so a binding of one reads and keeps like any
  * other, and left off the Controls page of a release (`controlsActions`), where nothing reads them.
  */
-export const DEV_ONLY_ACTIONS: ReadonlySet<Action> = new Set<Action>(['placeLayer', 'trackGate']);
+export const DEV_ONLY_ACTIONS: ReadonlySet<Action> = new Set<Action>(['placeLayer', 'trackGate', 'editor', 'editorUp', 'editorDown', 'editorPoint', 'editorSearch', 'editorBody', 'editorHold']);
 
 /** The actions the Controls page lists: every one on the dev server, and in a release all but the dev server's own. */
 export function controlsActions(dev: boolean): Action[] {

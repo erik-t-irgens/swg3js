@@ -94,6 +94,25 @@ export function iconMeshes(groups, textures) {
 
 const rad = (d) => (d * Math.PI) / 180;
 
+/**
+ * The points of a mesh that stand at or over a ground line (`clip`, a height in the model's own frame), handed to `visit`
+ * as an edge (two vertex offsets into `positions`) and a share of it: every vertex over the line (share 0 of an edge from
+ * itself) and every point where an edge crosses it. What a building's picture is fitted to (`renderThumbnail`'s
+ * `groundClip`).
+ */
+function clippedPoints(indices, positions, clip, visit) {
+  for (let t = 0; t + 2 < indices.length; t += 3) {
+    for (let e = 0; e < 3; e++) {
+      const a = indices[t + e] * 3;
+      const b = indices[t + ((e + 1) % 3)] * 3;
+      const ya = positions[a + 1];
+      const yb = positions[b + 1];
+      if (ya >= clip) visit(a, a, 0);
+      if ((ya - clip) * (yb - clip) < 0) visit(a, b, (clip - ya) / (yb - ya));
+    }
+  }
+}
+
 /** Row-major 3x3 multiply. */
 function mul(a, b) {
   const o = new Array(9);
@@ -147,9 +166,17 @@ function viewMatrix(view, bounds, { yawDeg, pitchDeg, tiltDeg }) {
  * two hands of the bind pose) is drawn with its sides moved in towards the middle. Returns null when fewer than
  * minCoverage of the pixels are covered. `flipX: false` draws the client's own frame, unflipped, for a model written
  * with --no-flip (a GLB in the client's left-handed frame), so the picture is never the mirror of what the game shows.
+ *
+ * Two things the world editor's library asks (`tools/swg/library.mjs`), both absent by default, when this draws exactly
+ * what it always drew. `groundClip`, a height in the model's own frame: every pixel of the model under it is left out and
+ * the picture is fitted to what stands over it, which a building needs, since every player house's box reaches about
+ * sixteen metres under its doorstep and dropping whole triangles is not enough (the foundation walls span the line). And a
+ * mesh's `emissive` texture (with `emissiveFactor`, its glTF factor), added unlit over the shaded colour: the converter
+ * splits a glowing material's glow out of its base colour, so a sign's picture read darker than its sign without it.
  */
 export function renderThumbnail(meshes, { size = 96, supersample = 2, view = 'wear', yawDeg = 20, pitchDeg = 12,
-  tiltDeg = 30, light = [-0.45, 0.65, 0.6], ambient = 0.42, minCoverage = 0.004, flipX = true } = {}) {
+  tiltDeg = 30, light = [-0.45, 0.65, 0.6], ambient = 0.42, minCoverage = 0.004, flipX = true, groundClip = null } = {}) {
+  const clip = typeof groundClip === 'number' && Number.isFinite(groundClip) ? groundClip : null;
   const list = (meshes ?? []).filter((m) => m?.positions?.length >= 3 && m.indices?.length >= 3);
   if (!list.length) return null;
   const ss = Math.max(1, Math.round(supersample));
@@ -157,11 +184,24 @@ export function renderThumbnail(meshes, { size = 96, supersample = 2, view = 'we
   // The converter's GLB flip: X negated, on positions and normals alike.
   const sx = flipX === false ? 1 : -1;
 
-  // The model's bounds after the flip, over the vertices the triangles use.
+  // The model's bounds after the flip, over the vertices the triangles use (with a ground clip, over what stands over
+  // it: the vertices above the line and the points where an edge crosses it).
   const bmin = [Infinity, Infinity, Infinity];
   const bmax = [-Infinity, -Infinity, -Infinity];
+  const grow = (x, y, z) => {
+    if (x < bmin[0]) bmin[0] = x;
+    if (x > bmax[0]) bmax[0] = x;
+    if (y < bmin[1]) bmin[1] = y;
+    if (y > bmax[1]) bmax[1] = y;
+    if (z < bmin[2]) bmin[2] = z;
+    if (z > bmax[2]) bmax[2] = z;
+  };
   for (const m of list) {
     const p = m.positions;
+    if (clip !== null) {
+      clippedPoints(m.indices, p, clip, (a, b, f) => grow(sx * (p[a] + (p[b] - p[a]) * f), p[a + 1] + (p[b + 1] - p[a + 1]) * f, p[a + 2] + (p[b + 2] - p[a + 2]) * f));
+      continue;
+    }
     for (let t = 0; t < m.indices.length; t++) {
       const i = m.indices[t] * 3;
       const x = sx * p[i], y = p[i + 1], z = p[i + 2];
@@ -178,7 +218,8 @@ export function renderThumbnail(meshes, { size = 96, supersample = 2, view = 'we
   // piece is a speck. When nothing crosses the middle and the gap between the sides is wider than either side, each
   // side is moved in towards the middle until the gap is a tenth of the wider side.
   let pull = 0;
-  if (view === 'wear') {
+  // A building clipped at its ground is never a worn pair.
+  if (view === 'wear' && clip === null) {
     let leftMax = -Infinity, leftMin = Infinity, rightMin = Infinity, rightMax = -Infinity;
     for (const m of list) {
       const p = m.positions;
@@ -235,6 +276,19 @@ export function renderThumbnail(meshes, { size = 96, supersample = 2, view = 'we
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   list.forEach((m, k) => {
     const v = views[k].v;
+    if (clip !== null) {
+      // Fitted to what stands over the ground: the view is linear, so a crossing point in the view is the crossing of the
+      // two vertices' own places in the view at the same share of the edge.
+      clippedPoints(m.indices, m.positions, clip, (a, b, f) => {
+        const vx = v[a] + (v[b] - v[a]) * f;
+        const vy = v[a + 1] + (v[b + 1] - v[a + 1]) * f;
+        if (vx < x0) x0 = vx;
+        if (vx > x1) x1 = vx;
+        if (vy < y0) y0 = vy;
+        if (vy > y1) y1 = vy;
+      });
+      return;
+    }
     for (let t = 0; t < m.indices.length; t++) {
       const i = m.indices[t] * 3;
       if (v[i] < x0) x0 = v[i];
@@ -274,10 +328,17 @@ export function renderThumbnail(meshes, { size = 96, supersample = 2, view = 'we
     const { v, n } = views[k];
     const uv = m.uvs && m.texture ? m.uvs : null;
     const tex = uv ? m.texture : null;
+    const glowUv = m.uvs && m.emissive ? m.uvs : null;
+    const glow = glowUv ? m.emissive : null;
+    const gf = m.emissiveFactor ?? [1, 1, 1];
     const base = m.color ?? GREY;
     const idx = m.indices;
+    const mp = m.positions;
     for (let t = 0; t + 2 < idx.length; t += 3) {
       const a = idx[t], b = idx[t + 1], c = idx[t + 2];
+      // Clipped at the ground: a triangle wholly under it draws nothing; one across it is clipped pixel by pixel below.
+      const pyA = mp[a * 3 + 1], pyB = mp[b * 3 + 1], pyC = mp[c * 3 + 1];
+      if (clip !== null && pyA < clip && pyB < clip && pyC < clip) continue;
       const ax = (v[a * 3] - cx) * scale + S / 2, ay = S / 2 - (v[a * 3 + 1] - cy) * scale, az = v[a * 3 + 2];
       const bx = (v[b * 3] - cx) * scale + S / 2, by = S / 2 - (v[b * 3 + 1] - cy) * scale, bz = v[b * 3 + 2];
       const qx = (v[c * 3] - cx) * scale + S / 2, qy = S / 2 - (v[c * 3 + 1] - cy) * scale, qz = v[c * 3 + 2];
@@ -303,6 +364,8 @@ export function renderThumbnail(meshes, { size = 96, supersample = 2, view = 'we
           const w2 = 1 - w0 - w1;
           if (w0 < -1e-7 || w1 < -1e-7 || w2 < -1e-7) continue;
           const z = w0 * az + w1 * bz + w2 * qz;
+          // Under the ground line, pixel by pixel: a foundation wall spanning the line keeps only its part over it.
+          if (clip !== null && w0 * pyA + w1 * pyB + w2 * pyC < clip) continue;
           const o = py * S + px;
           if (z <= depth[o]) continue;
           let r = base[0], g = base[1], bl = base[2];
@@ -334,6 +397,13 @@ export function renderThumbnail(meshes, { size = 96, supersample = 2, view = 'we
           color[o * 3] = r * shade;
           color[o * 3 + 1] = g * shade;
           color[o * 3 + 2] = bl * shade;
+          if (glow) {
+            // The glow the converter split out of the base colour, added back unlit (its alpha is no part of a glow).
+            const e = sample(glow, w0 * glowUv[a * 2] + w1 * glowUv[b * 2] + w2 * glowUv[c * 2], w0 * glowUv[a * 2 + 1] + w1 * glowUv[b * 2 + 1] + w2 * glowUv[c * 2 + 1]);
+            color[o * 3] += e[0] * gf[0];
+            color[o * 3 + 1] += e[1] * gf[1];
+            color[o * 3 + 2] += e[2] * gf[2];
+          }
         }
       }
     }

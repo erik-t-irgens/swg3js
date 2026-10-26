@@ -251,6 +251,39 @@ export function floraColliders(data: FloraChunkData, out: Collider[] = [], t = F
 }
 
 /**
+ * A permanent row of a flora model, solid as a planting of it is (the world editor's trees): its model's own shapes
+ * through the row's own instance matrix (`m`, column-major, at its uniform `scale`; 1 until rows take a scale), where its
+ * pack has them; nothing at all for a NULL extent the client walked through (or the guess's slim trunk with
+ * `nullTrunk`); and the guess's one upright cylinder for a model the pack has no word on, stood from half a metre under
+ * the row's own height (`y`, its origin) to its top. Never the trimesh of every primitive the streamer builds for a
+ * placed model, leaf cards and all, which is a ceiling to walk on and a wall to swing a rope round. A tree is turned
+ * about up only in its shapes (`shapeParts`); a row tipped on its side keeps its shapes upright, which a note says.
+ */
+export function rowFloraParts(def: { collision?: FloraCollision } | null | undefined, m: ArrayLike<number>, scale: number, radius: number, height: number, y: number, t = FLORA_COLLISION, out: ColliderPart[] = []): ColliderPart[] {
+  const s = scale > 0 && Number.isFinite(scale) ? scale : 1;
+  const r = radius * s;
+  const h = height * s;
+  const x = m[12];
+  const z = m[14];
+  const c = t.rule === 'client' ? def?.collision : undefined;
+  const cylinder = (rr: number): ColliderPart[] => {
+    const p = part('cyl');
+    const base = y - 0.5;
+    const top = y + h;
+    p.x = x;
+    p.z = z;
+    p.r = rr;
+    p.hy = (top - base) / 2;
+    p.y = base + p.hy;
+    out.push(p);
+    return out;
+  };
+  if (!c) return cylinder(guessRadius(r, h, t));
+  if (!c.shapes.length) return t.nullTrunk && h > t.treeRatio * r ? cylinder(trunkRadius(r, t)) : out;
+  return shapeParts(c.shapes, m, 0, s, out);
+}
+
+/**
  * flora-collision.json onto a pack's flora defs, as floors.json goes onto its cells: each def whose
  * appearance the file has an entry for carries it as `collision`. A file of another shape is passed
  * over whole, and a def it has no entry for is left with none, which the planter takes as "no word"

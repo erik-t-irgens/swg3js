@@ -113,6 +113,10 @@
 //                                                                  see, with every texture taken down to the pixels it really covers. It opens no
 //                                                                  archive, so it takes no <swg-dir>, and it must run after the worlds it draws
 //                                                                  from. It writes only under <out-dir>/scenes and never touches a pack
+//   node tools/swg/cli.mjs library <out-dir>                       the world editor's library (the dev server's alone): an index of everything it
+//                                                                  can put down and a picture of every model that has none, drawn from the converted
+//                                                                  GLBs. It opens no archive and writes only under <out-dir>/library; status lists
+//                                                                  it and never asks for it
 //   node tools/swg/cli.mjs clouds <out-dir> [--no-noise]           what each converted world's sky is really like, measured off the cloud sheets
 //                                                                  the client drew it with (<pack>/clouds.json: how much of the sky each weather
 //                                                                  row covers and how dark that cover is), and the two noise volumes the
@@ -240,6 +244,7 @@ import { bleedCard } from './cardBleed.mjs';
 import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
 import { SANDBOX_ZONE, buildSandbox, pickSkyZone, sandboxStatus } from './sandbox.mjs';
+import { buildLibrary, libraryStatus } from './library.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
 import { borrowedHardpoint, engineRearPoint, gallerySatOptions, galleryPaintStatus, podSeatStatus, sebulbaStatus, skeletalModelEntry } from './gallery.mjs';
 import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from './saddles.mjs';
@@ -3539,6 +3544,9 @@ function packStatus(dir) {
   // The made-up system, if there is one: it is optional, so it is listed rather than asked for.
   const sandboxLine = sandboxStatus(readQuiet(join(dir, SANDBOX_ZONE, 'space.json')));
   console.log(`  ${sandboxLine.line}${sandboxLine.stale ? ` (sandbox <swg-dir> ${dir} --retail-only builds one)` : ''}`);
+  // The world editor's library (the dev server's alone): listed, with its command when it is missing or older than a pack
+  // it read, and never asked for, since a player's launcher has no use for it.
+  console.log(`  ${libraryStatus(dir).line}`);
   // The creation and selection places. Asked for rather than merely listed, because with none of
   // them those two screens fall back to a doll on a dark stage and nothing says why. A scene is
   // built from a planet pack, so one built before its world was last converted is stale: the models
@@ -8912,6 +8920,18 @@ switch (cmd) {
     );
     if (noWorld.length) console.log(`spawns: not converted yet, so left out: ${noWorld.join(', ')}`);
     if (ngeHalf) await ngeHalf();
+    break;
+  }
+  case 'library': {
+    // <out-dir>: the world editor's library (the dev server's alone, `tools/swg/library.mjs`): one index of every thing
+    // the editor can put down -- the props, the gallery's buildings, every ground world's placed templates and its
+    // planted flora -- and a picture of every model that has none, drawn from the converted GLBs by the converter's own
+    // rasteriser. It opens no archive, so it takes no <swg-dir> and nothing about `--retail-only` applies; it writes only
+    // under <out-dir>/library, and `status` lists it without ever asking for it.
+    if (!pos[1]) usage();
+    const out = buildLibrary({ root: pos[1], log: (line) => console.log(line) });
+    const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
+    console.log(`library: ${out.index.entries.length} entries (${Object.entries(out.bySource).map(([k, v]) => `${k} ${v}`).join(', ')}); ${out.drawn} pictures drawn, ${out.kept} kept from the last run, ${out.none} models drew nothing, ${out.swept} old pictures swept; ${out.pictures} library pictures, ${mb(out.bytes)}, in ${(out.ms / 1000).toFixed(1)}s`);
     break;
   }
   case 'scenes': {

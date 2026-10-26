@@ -399,7 +399,13 @@ export class AssetPack {
    * (`manifestText` in `packFiles.ts`): shared with whatever is waiting on whether the pack is there, never asked for a
    * world that declares no pack, and asked once a session for one whose pack is missing.
    */
-  static async load(planetId: string, base: string = import.meta.env.BASE_URL): Promise<AssetPack | null> {
+  /**
+   * `{ layout: false }` is the **light** load a guest world is read with (a Naboo tree stood on Tatooine or on a
+   * real-elevation world, `PlacementRow.from`): the manifest, the trees' collision shapes, the doors, the client data's
+   * effects and, for a pack with cells, the floors, and never `layout.json`, which is 0.3 to 4 MB of a world's placed
+   * objects nobody standing one model of it needs.
+   */
+  static async load(planetId: string, base: string = import.meta.env.BASE_URL, opts: { layout?: boolean } = {}): Promise<AssetPack | null> {
     const baseUrl = `${base}assets-private/${planetId}/`;
     try {
       const text = await manifestText(planetId, base);
@@ -412,11 +418,13 @@ export class AssetPack {
       await loadSharedCards(base);
       registerPackCards(manifest.cards);
       const pack = new AssetPack(manifest, baseUrl);
-      try {
-        const lr = await fetch(`${baseUrl}layout.json`);
-        if (lr.ok && (lr.headers.get('content-type') ?? '').includes('json')) pack.layout = (await lr.json()) as Layout;
-      } catch {
-        pack.layout = null;
+      if (opts.layout !== false) {
+        try {
+          const lr = await fetch(`${baseUrl}layout.json`);
+          if (lr.ok && (lr.headers.get('content-type') ?? '').includes('json')) pack.layout = (await lr.json()) as Layout;
+        } catch {
+          pack.layout = null;
+        }
       }
       // The cells' walkable floors and the doors in their doorways are written only for a pack with portal buildings
       // (a model with cells): a pack with none (every space zone, two of Kashyyyk's zones) has neither file, and is
@@ -489,6 +497,11 @@ export class AssetPack {
   private floraDef(id: string): PackModelDef | undefined {
     this.floraIds ??= new Map((this.manifest.categories.flora ?? []).map((d) => [d.id, d]));
     return this.floraIds.get(id);
+  }
+
+  /** The flora def a planted model loads by, or undefined for a model this pack does not plant (its collision shapes ride on it). */
+  floraDefOf(id: string): PackModelDef | undefined {
+    return this.floraDef(id);
   }
 
   /**

@@ -239,6 +239,11 @@ export const STEP_FACTS = {
   // client's string tables they are in. It reads every world's `spawns.json` and the fleet manifest, so it
   // waits for `spawns`, and writes only its own folder, so it holds that and nothing else.
   conversations: { order: 45, lock: 'conversations', needs: ['spawns'], seconds: 10, bytes: 0.4 * GB, measured: '118 conversations, 779 kinds of people, 183 string tables: 1.6 s, 304 MB, 1.3 MB written' },
+  // The world editor's library (the dev server's alone): an index of every thing it can put down and a picture of every
+  // model without one, out of the props, the gallery and every world's layout and flora. It reads the finished packs and
+  // opens no archive, writes only its own folder, and `status` never asks for it, so it is in no plan a launcher runs;
+  // it stands here, beside the others that read the packs, for a plan made by hand.
+  library: { order: 46, lock: 'library', needs: ['snapshot', 'flora', 'gallery', 'props'], seconds: 30, bytes: 0.5 * GB, measured: '(the design measured 1,125 models in 12.4 s, 7.7 MB)' },
 };
 
 // Which commands carry the planet (or the zone) they write, and **where** on their own command

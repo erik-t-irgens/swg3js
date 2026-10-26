@@ -222,7 +222,8 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   }
   // The plate's switch is asked before the call, not inside it: an "off" switch that still builds the
   // argument list turns nothing off.
-  ok(main.includes('if (simulate && this.settings.hudNameplate) {'), 'the plates are not tracked at all with the plate switched off');
+  // (Nor while the world editor flies: the hidden body has nothing under the crosshair to name.)
+  ok(/if \(simulate && this\.settings\.hudNameplate(?: && !this\.editor\?\.on)?\) \{/.test(main), 'the plates are not tracked at all with the plate switched off');
   // The long line is written only while the game is simulating. Half of its branches read the
   // eighth-of-a-second struct, which is emptied on the frame the game stops, and half read the
   // player directly: written over a panel the line would disagree with itself.
@@ -487,7 +488,8 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   const giveAt = lock.indexOf('this.giveUpHand()');
   const menuAt = lock.indexOf('this.openMenu()');
   ok(giveAt > 0 && menuAt > giveAt && /else if \(lost && !inHand\) this\.openMenu\(\);/.test(lock), "the lock's own listener gives up a thing in hand before it would open the menu, and opens it only with nothing in hand");
-  ok(/const lost = !this\.input\.locked && !this\.input\.captured && this\.inWorld && !this\.map\.open && !this\.anyPanelOpen\(\);/.test(lock) && /if \(lost && inHand && document\.hasFocus\(\)\) this\.giveUpHand\(\);/.test(lock), 'it gives up what is in hand on a lock lost to Escape alone: not to a panel or the map, and not to another window');
+  // (The world editor's clause, `&& !(this.editor?.on && this.editor.takesLockLoss())`, is held by `editorWiring.test.ts`.)
+  ok(/const lost = !this\.input\.locked && !this\.input\.captured && this\.inWorld && !this\.map\.open && !this\.anyPanelOpen\(\)(?: && !\(this\.editor\?\.on && this\.editor\.takesLockLoss\(\)\))?;/.test(lock) &&/if \(lost && inHand && document\.hasFocus\(\)\) this\.giveUpHand\(\);/.test(lock), 'it gives up what is in hand on a lock lost to Escape alone: not to a panel or the map, and not to another window');
   ok(/else if \(lost && !inHand && performance\.now\(\) - this\.handGivenUpAt < 300\) this\.handBackMouse\(\);/.test(lock), "and the lock going just after Escape gave a thing up asks for it back rather than opening the menu");
   const give = bodyOf(main, 'private giveUpHand(): void');
   ok(/this\.stopPlacing\(\);\s*this\.stopPlacingProp\(\);/.test(give) && /this\.menuClosedAt = now;/.test(give) && /this\.handGivenUpAt = now;/.test(give), 'giving it up shuts the menu out for a moment');

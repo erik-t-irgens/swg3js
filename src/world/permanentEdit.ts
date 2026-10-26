@@ -22,7 +22,7 @@
 // Pure: no three, no rapier, no DOM. Rule for this file (node runs it with type stripping for the tests):
 // every import with its `.ts` extension, no enum, no namespace, no constructor parameter properties.
 
-import { PLACEMENT_LIMITS, fromGame, placementsPath, type GamePlace, type PlacementFrame, type PlacementLayer, type PlacementRow } from '../story/placements.ts';
+import { PLACEMENT_LIMITS, fromGame, placementsPath, type GamePlace, type PlacementFrame, type PlacementLayer, type PlacementPack, type PlacementRow } from '../story/placements.ts';
 import type { PlacedProp } from './propsPlaced.ts';
 import type { KeptRow } from '../net/propsKept.ts';
 
@@ -220,6 +220,64 @@ export function rowFromProp(def: { id: string }, at: { x: number; y: number; z: 
   const row: DraftRow = { kind: 'prop', pack: 'props', thing: def.id, x: mm(g.x), y: mm(g.y), z: mm(g.z), q: g.q, ...keepOf(base) };
   if (inside) row.inside = true;
   return withGround(row, ground);
+}
+
+/**
+ * What the world editor takes in hand out of its library, as a row writes it: a props thing, a gallery model, or a model
+ * of a world's own pack (this world's, or another's named in `from`), with the object template it really is wherever one
+ * is known, so a world's brazier burns and a world's chair counts as the world's own wherever it is put.
+ */
+export interface EditorSource {
+  kind: 'prop' | 'building';
+  pack: PlacementPack;
+  thing?: string;
+  model?: string;
+  template?: string | null;
+  /** The ground world a world model comes from; null or this world's own pack id writes none. */
+  from?: string | null;
+  deed?: string | null;
+}
+
+/** A number cut to `digits` decimals, as the editor writes a turn: a diff that reads, which the reader renormalises. */
+function cut(v: number, digits: number): number {
+  const k = 10 ** digits;
+  return Math.round(v * k) / k;
+}
+
+/**
+ * The row the world editor writes for a thing put down, from wherever its library entry came: its place in the file's
+ * frame to `mm` metres (1 mm), its **whole** turn (three's `[x, y, z, w]`, a building tipped too: the editor allows it,
+ * with a note) to `turnDigits` decimals, whether it stands in a room, the flora it keeps off (`clear`, the caller's from
+ * the model's own footprint, held under the reader's backstop), the template it really is, the world its model comes
+ * from (written absent when it is this world), and out in the open the ground under it now. A row picked up and put
+ * down again (`base`) keeps its id and what was set on it by hand, its own `clear` among them.
+ */
+export function rowFromEditor(
+  src: EditorSource,
+  at: { x: number; y: number; z: number },
+  turn: readonly [number, number, number, number],
+  inside: boolean,
+  centre: { x: number; z: number } | null,
+  frame: PlacementFrame,
+  opts: { here: string; clear?: number; ground?: number | null; base?: PlacementRow | null; mm?: number; turnDigits?: number } = { here: '' },
+): DraftRow {
+  const g = fromGame({ x: at.x, y: at.y, z: at.z, q: [turn[0], turn[1], turn[2], turn[3]] }, centre, frame);
+  const step = opts.mm && opts.mm > 0 ? opts.mm : 0.001;
+  const place = (v: number) => Math.round(v / step) * step;
+  const digits = opts.turnDigits ?? 6;
+  const row: DraftRow = { kind: src.kind, pack: src.pack, x: mm(place(g.x)), y: mm(place(g.y)), z: mm(place(g.z)), q: [cut(g.q[0], digits), cut(g.q[1], digits), cut(g.q[2], digits), cut(g.q[3], digits)], ...keepOf(opts.base) };
+  if (src.pack === 'props') row.thing = src.thing;
+  else row.model = src.model;
+  // A gallery row picked up and put down keeps its deed, as the Housing tab's own save keeps it (`rowFromHouse`): the
+  // endpoint's put writes the whole row, and a deed dropped here is gone from the file, and with it the building's way
+  // back to its deed.
+  const deed = src.deed ?? (src.pack === 'gallery' && opts.base?.pack === 'gallery' ? opts.base.deed : null);
+  if (deed) row.deed = deed;
+  if (src.pack !== 'props' && src.template) row.template = src.template;
+  if (src.pack === 'world' && src.from && src.from !== opts.here) row.from = src.from;
+  if (inside) row.inside = true;
+  if (opts.base?.clear === undefined && opts.clear !== undefined && opts.clear > 0) row.clear = Math.min(PLACEMENT_LIMITS.circle, Math.round(opts.clear * 10) / 10);
+  return withGround(row, opts.ground);
 }
 
 /** The turn about up three's `[x, y, z, w]` holds for a yaw, radians (three's sense). */

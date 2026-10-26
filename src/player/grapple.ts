@@ -554,7 +554,9 @@ export type LetGoReason =
   // A vehicle (wave 3): a hull ran the rope out past its range; the hull the anchor is on was refitted; its wing started to swing.
   | 'ranOut'
   | 'refit'
-  | 'wing';
+  | 'wing'
+  // The world editor (the dev server's alone) took the body to carry as its camera.
+  | 'editor';
 
 /**
  * The ways out that put the body somewhere new, give it to something else or take it out of the world (§3.10): they end

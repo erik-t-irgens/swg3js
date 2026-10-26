@@ -657,7 +657,8 @@ const report = () => menu.report() as { picked: string | null; args: string; bus
   const roster = block('const groupUi = new GroupUi(');
   ok(/canOpen: \(\) =>/.test(roster) && !/freeMouse/.test(roster), "the group's roster, a tab of the map, takes and gives back no mouse of its own");
   ok(/elseHasMouse: \(\) => this\.anyPanelOpen\(\) \|\| this\.map\.open \|\| this\.mouseHeldElsewhere\(\)/.test(block('const tradeUi = new TradeUi(')), 'the trade window counts the windows that hold the mouse without being panels before handing it back');
-  ok(/this\.mouseHeldElsewhere = \(\) => tradeUi\.open \|\| this\.debugMenu\.open \|\| this\.talkNow !== null;/.test(main), 'and the debug menu is one of them, and so is a conversation; the group roster no longer is');
+  // (And the world editor's Point mode, which `editorWiring.test.ts` holds.)
+  ok(/this\.mouseHeldElsewhere = \(\) => tradeUi\.open \|\| this\.debugMenu\.open \|\| this\.talkNow !== null(?: \|\| !!this\.editor\?\.point)?;/.test(main), 'and the debug menu is one of them, and so is a conversation; the group roster no longer is');
   const hb = /private handBackMouse\(\): void \{\n\s*if \(this\.anyPanelOpen\(\) \|\| this\.map\.open \|\| this\.mouseHeldElsewhere\(\)\) return;\n\s*this\.freeMouse\(false\);/;
   ok(hb.test(main), 'handBackMouse leaves the mouse where it is while a panel, the map or one of those windows is up');
 }

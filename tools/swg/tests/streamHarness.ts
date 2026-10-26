@@ -139,9 +139,11 @@ export interface Harness {
 
 /**
  * A streamer over a world of `objects` (the rock by default) with the gallery's house and crate standing behind it;
- * `extra` adds models of its own to the world's pack, `flora` naming those it files as flora.
+ * `extra` adds models of its own to the world's pack, `flora` naming those it files as flora, and `effects` stands in
+ * for the particle player the world hands the streamer (`place(file, matrix, contained)` and `remove(handle)`), so a test
+ * can see what the streamer places and from which file.
  */
-export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, extra: { defs?: Def[]; models?: Record<string, ReturnType<typeof loadedOf>>; flora?: string[] } = {}): Promise<Harness> {
+export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, extra: { defs?: Def[]; models?: Record<string, ReturnType<typeof loadedOf>>; flora?: string[]; effects?: { place(file: string, m: THREE.Matrix4, contained: boolean): unknown; remove(h: unknown): void } } = {}): Promise<Harness> {
   const physics = await Physics.create();
   const scene = new THREE.Scene();
   const world = fakePack(
@@ -165,7 +167,7 @@ export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, 
     crate: loadedOf(CRATE, [{ geometry: boxGeo(1, 1, 1, 0), cell: -1 }]),
   });
   const layout = { planet: 'tatooine', center: { x: 0, z: 0 }, radius: 10000, objects };
-  const stream = new LayoutStreamer(scene, physics, world as never, layout as never, null, {});
+  const stream = new LayoutStreamer(scene, physics, world as never, layout as never, (extra.effects ?? null) as never, {});
   stream.useGuestPack(gallery as never);
   const s = stream as any;
   const at = new THREE.Vector3();

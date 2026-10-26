@@ -302,6 +302,7 @@ import { Notice } from './ui/notice';
 import { MESSAGES, MessageLine, plain, tuneMessages } from './ui/messages';
 import { COL, colourOf } from './core/palette';
 import { HudCanvas, OVERLAY_TUNE } from './ui/hudCanvas';
+import type { DialSet } from './ui/dials.ts';
 import { HUD_SIZES, layout, makeLayout, tuneSizes, type HudLayout, type HudSizes } from './ui/hudMath';
 import { ActionBar } from './ui/prompt';
 import { PROMPT, newPromptState, resetPromptState, tunePrompt, type PromptState } from './ui/promptRules';
@@ -971,6 +972,36 @@ const VOL_HATCH_OFF = ((): boolean => {
 const VOL_WARM_NOTICE = 'Volumetrics on: preparing shaders';
 /** How long a loading screen waits for the kick-up's pictures (`World.airPictures`), ms; one landing after is handed over then. Ours. */
 const AIR_PICTURE_WAIT_MS = 3000;
+
+/**
+ * The world editor as the game sees it (`src/editor/editorEntry.ts`, the dev server's alone). Declared here, the shipped
+ * side's port, so nothing a build carries imports the editor's folder: the editor is reached through one dynamic
+ * `import()` behind `import.meta.env.DEV` (`App.loadEditor`), and a build carries none of it.
+ */
+interface EditorApi {
+  readonly on: boolean;
+  /** Point mode: the cursor free, read by the editor's own pointer layer. */
+  readonly point: boolean;
+  /** The body's place while the editor flies (what stands for the character), or null with the editor off. */
+  readonly returnPlace: { x: number; y: number; z: number } | null;
+  readonly returnHeading: number;
+  readonly holdsLiving: boolean;
+  readonly livingStill: boolean;
+  /** Whether closing the tab asks first. */
+  readonly guards: boolean;
+  toggle(): void;
+  keys(dt: number, oldHand: boolean): void;
+  placeCamera(): void;
+  afterCamera(dt: number): void;
+  drawMarks(o: HudCanvas): void;
+  escape(): boolean;
+  takesLockLoss(): boolean;
+  canvasClick(): void;
+  worldGone(): void;
+  dials(helper: string): DialSet | null;
+  debug(o?: Record<string, unknown>): Promise<unknown>;
+  library(o?: Record<string, unknown>): Promise<unknown>;
+}
 
 class App {
   private torch!: THREE.SpotLight;
@@ -3883,6 +3914,29 @@ class App {
        * question waiting for its second click, what the editor last said, and the endpoint's own numbers
        * (`PLACEMENTS_ENDPOINT_TUNE`, the copy this build was made with: the dev server runs its own).
        */
+      /**
+       * The world editor (`src/editor/`, F2; the dev server's alone, and a release answers that it is): whether it is on,
+       * its mode, the anchor in the game's frame and the file's, its speed, the room the camera is in, the return point,
+       * what is in hand, the destination file, the last notes and the last write. `{ on }`, `{ mode: 'fly' | 'point' }`,
+       * `{ speed }`, `{ go: [x, z] | '<row id>' }`, `{ body: true }` (N), `{ take: '<source>:<id>' }` (a world's
+       * `'world:naboo:<id>'`), `{ place: true }` at the aim or `{ place: { x, y, z, yaw } }`, `{ remove: '<row id>' }`,
+       * `{ dest: 'story' | 'world' }`, `{ hold: true }` and `{ tune: { cam: { speed: 20 } } }`.
+       */
+      editor: async (opts?: Record<string, unknown>) => {
+        if (!import.meta.env.DEV) return "the world editor is the dev server's alone";
+        const ed = await this.loadEditor();
+        return ed ? ed.debug(opts) : 'the world editor would not load';
+      },
+      /**
+       * The world editor's library: whether the `library` pass's index is there and current, counts per source and
+       * pictures; `{ search: 'chair', source: 'props' }` the first matches, `{ source: 'flora', world: 'naboo' }`,
+       * `{ recent: true }`, `{ fav: '<source>:<id>' }`. The dev server's alone.
+       */
+      library: async (opts?: Record<string, unknown>) => {
+        if (!import.meta.env.DEV) return "the world editor is the dev server's alone";
+        const ed = await this.loadEditor();
+        return ed ? ed.library(opts) : 'the world editor would not load';
+      },
       placements: async (
         opts: {
           reload?: boolean;
@@ -6710,6 +6764,12 @@ class App {
             if (this.talkNow) this.stepTalk(dt);
             // And the hold that gets the companion up, while the use key is held down.
             this.stepRevive(dt);
+            // The world editor's keys first, as the frame loop reads them (the flight's ask, its presses, its mutes).
+            const edOn = this.editor?.on ? this.editor : null;
+            if (edOn) {
+              if (edOn.point) this.input.wheel = 0;
+              edOn.keys(dt, this.isPlacing || this.isPlacingProp);
+            }
             // A building or a prop in hand takes its keys, the click and a held key's mouse first, and mutes
             // the fight for the rest of the step, as the frame loop has it: so a hold can be driven from here.
             this.stepPlacingKeys(dt);
@@ -6737,8 +6797,10 @@ class App {
             if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
             // Where the player stands first, then one step of everything alive: without the first,
             // the brains would all chase where the player was when the helper was called.
-            this.world.setPlayerTarget(this.player.worldPos, !this.player.noclip && this.player.hp > 0 && !this.ride?.riding, (dmg, from) => this.player.takeDamage(dmg, false, recordHarmKind(this.hurtBy, from), this.hurtBy));
-            this.world.stepLiving(dt, this.player.worldPos, this.cam.camera);
+            // While the world editor flies, the character is its body's return point, never the camera (as the frame loop has it).
+            const edRet = this.editor?.returnPlace ?? null;
+            this.world.setPlayerTarget(edRet ? this.editorTarget.set(edRet.x, edRet.y, edRet.z) : this.player.worldPos, !edRet && !this.player.noclip && this.player.hp > 0 && !this.ride?.riding, (dmg, from) => this.player.takeDamage(dmg, false, recordHarmKind(this.hurtBy, from), this.hurtBy));
+            if (!this.world.livingStill) this.world.stepLiving(dt, this.player.worldPos, this.cam.camera);
             this.physics.step(dt);
             // The blades are drawn and then weighed against one another here as they are in the
             // frame loop. A driven tab draws no frames at all, and the clashes run on `simTime`
@@ -6751,6 +6813,8 @@ class App {
             this.stepClashes();
             this.effects.update(dt);
             this.updateCamera(null);
+            // The world editor's step after the camera, as the frame loop has it: the aim, the ghost and the clicks.
+            if (this.editor?.on) this.editor.afterCamera(dt);
             // The feet step with the simulation: the mixer is recording rather than playing, so a
             // helper can count the steps a walk took without the tab bursting into noise.
             const eye = this.cam.camera.position;
@@ -11306,7 +11370,8 @@ class App {
       // The race drive's, the engines' and a race run's numbers of feel, as sliders when `race`, `engines` or `track` is
       // picked, the NPC ship ladder's tiers 6 to 10 when `npcShips` is, how a far body is drawn when `crowd` is, and
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper),
+      // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -11327,7 +11392,8 @@ class App {
     // hands it back, so a panel closing under any of them leaves the pointer where it is.
     // A conversation holds the mouse the same way: it is no panel, since the world goes on round it.
     // The group's roster is not one of them: it is a tab of the map, which holds the mouse itself.
-    this.mouseHeldElsewhere = () => tradeUi.open || this.debugMenu.open || this.talkNow !== null;
+    // The world editor's Point mode holds the mouse too, so a panel closing leaves its cursor free.
+    this.mouseHeldElsewhere = () => tradeUi.open || this.debugMenu.open || this.talkNow !== null || !!this.editor?.point;
     // The backpack's own Trade button: ask whoever this player is standing by and looking at. It is
     // the same rule the chat line's /trade comes to, and the ledger is what refuses it when there is
     // no server, nobody there, or they are past the game's own 8 m.
@@ -11764,6 +11830,10 @@ class App {
         this.giveUpHand();
         return;
       }
+      // The world editor: a thing in its hand given up, else Fly dropped to Point; the menu only from Point with nothing to
+      // clear. Not while a panel or the map is up: that press shuts them, below, as it always has.
+      const panelUp = this.anyPanelOpen() || this.map.open;
+      if (this.editor?.on && !this.menu.open && !panelUp && this.editor.escape()) return;
       // A conversation is left, and that is all the press does; so is a call.
       if (this.talkNow && !this.menu.open) {
         this.endTalk();
@@ -11777,13 +11847,22 @@ class App {
       if (this.menu.open) {
         if (performance.now() - this.menuOpenedAt > 300) this.resume();
       }
-      else if (this.anyPanelOpen() || this.map.open) {
+      else if (panelUp) {
         this.closePanels();
         this.map.hide();
-        this.freeMouse(false);
+        // The world editor in Point keeps its cursor: only Fly takes the lock back.
+        if (this.editor?.on && this.editor.point) this.input.captured = false;
+        else this.freeMouse(false);
       } else this.openMenu();
     });
 
+    // While the world editor is on the page asks before it is closed: Ctrl+W with W held to fly closes a tab past anything
+    // a page can stop, and would lose the camera's place (`EDITOR_TUNE.guardUnload`, `swg.editor.guard` '0' the hatch).
+    window.addEventListener('beforeunload', (e) => {
+      if (!this.editor?.guards) return;
+      e.preventDefault();
+      e.returnValue = '';
+    });
     // Releasing the mouse leaves the game running and the world visible, so the wardrobe and the
     // map can be used with a cursor. Clicking the world takes the mouse back; the menu is only
     // for arriving and for dying, not for every Escape.
@@ -11794,7 +11873,9 @@ class App {
       // browser sends this and the key in either order, and whichever comes second finds the hand empty and
       // the menu refusing for a moment. Gone with the page out of focus (another window), what is in hand
       // is kept and the cursor stays free until the world is clicked, as the placing bar's hint says.
-      const lost = !this.input.locked && !this.input.captured && this.inWorld && !this.map.open && !this.anyPanelOpen();
+      // The world editor takes a lost lock for itself: in Fly it drops to Point, and in Point the release was its own,
+      // so the menu stays shut (`takesLockLoss`).
+      const lost = !this.input.locked && !this.input.captured && this.inWorld && !this.map.open && !this.anyPanelOpen() && !(this.editor?.on && this.editor.takesLockLoss());
       const inHand = this.isPlacing || this.isPlacingProp;
       if (lost && inHand && document.hasFocus()) this.giveUpHand();
       else if (lost && !inHand && performance.now() - this.handGivenUpAt < 300) this.handBackMouse();
@@ -11802,6 +11883,11 @@ class App {
       this.hud.setMouseFree(!this.input.locked && !this.map.open && !this.anyPanelOpen());
     });
     this.canvas.addEventListener('click', () => {
+      // The world editor's Point mode: its own click (back to Fly over empty ground, inside this gesture), never the lock here.
+      if (this.editor?.on && this.editor.point) {
+        this.editor.canvasClick();
+        return;
+      }
       // Not in a conversation, whose answers are clicked with the free mouse: a click beside them is no ask for the view.
       if (this.started && !this.input.locked && !this.map.open && !this.anyPanelOpen() && !this.traveling && !this.talkNow) this.input.requestLock();
     });
@@ -13857,7 +13943,8 @@ class App {
       return;
     }
     this.fillGrappleMark();
-    this.hud.draw();
+    // The on-foot crosshair and bars stand down while the world editor is on: its own marks are drawn below.
+    if (!this.editor?.on) this.hud.draw();
     // The waypoints' marks under the flight display's shapes, so the reticle is drawn over a mark that
     // happens to stand behind it rather than the other way round.
     const p = this.player;
@@ -13869,6 +13956,8 @@ class App {
     this.shipHud.draw();
     this.feedback.draw();
     if (this.cullShow) this.drawCullRects(o);
+    // The world editor's aim, its ghost's box and the box of what the aim rests on.
+    this.editor?.drawMarks(o);
     o.end();
   }
 
@@ -15106,7 +15195,8 @@ class App {
     }
     // A mark with no ground yet stands at the eye: the camera's own height, as the last frame left it.
     const eyeY = this.cam.camera.matrixWorld.elements[13];
-    this.waypointPlaces.gather(spots, at.x, at.y, at.z, eyeY, performance.now() / 1000, this.placeDeps, this.onWaypointReached);
+    // While the world editor flies the marks are drawn and measured from the camera, and nothing is "reached".
+    this.waypointPlaces.gather(spots, at.x, at.y, at.z, eyeY, performance.now() / 1000, this.placeDeps, this.editor?.on ? undefined : this.onWaypointReached);
     this.stepCities();
   }
 
@@ -16036,7 +16126,8 @@ class App {
     this.questHost.tick();
     this.remoteJobs.tick();
     const host = this.jobs;
-    if (simulate && this.inWorld && !this.dying) this.storyWatch.step(host.view(), this.watchPlace(), Date.now(), this.raiseStory);
+    // Not while the world editor flies: its camera is nobody's anchor, and a quest's area flown over raises nothing.
+    if (simulate && this.inWorld && !this.dying && !this.editor?.on) this.storyWatch.step(host.view(), this.watchPlace(), Date.now(), this.raiseStory);
     // Read again: what the detectors just raised may have moved a job on.
     const view = host.view();
     // The companion beside the player while they are with them, and told of going down and getting up: first,
@@ -16624,7 +16715,10 @@ class App {
     // turn it hears is upright and its own glide has caught up with it. Every relay keeps `q` and every browser already
     // slerps a figure to it, so this needs no restart.
     const leans = !p.aboard && !p.eva && p.grapple.leanSends;
-    const at = leans ? p.leanedAt(leanedAt) : p.worldPos;
+    // While the world editor flies, the player is where its body was kept (the return point), hidden (`j`): the server
+    // measures creature keeping, a group's reach and a duel's from the body, never from the camera.
+    const edRet = this.editor?.returnPlace ?? null;
+    const at = edRet ? leanedAt.set(edRet.x, edRet.y, edRet.z) : leans ? p.leanedAt(leanedAt) : p.worldPos;
     const n2 = (n: number) => Number(n.toFixed(2));
     const n3 = (n: number) => Number(n.toFixed(3));
     // The vehicle this player is on, so the others see it with them on it; and the figure's
@@ -16671,7 +16765,7 @@ class App {
     // (`j`). An ultra cruise is hidden the same way and for the same reason: at kilometres a second a
     // peer would be handed a place a kilometre from the last one ten times a second, which their side
     // glides through as a teleport and hands to their motion blur as a screen-wide smear.
-    const hidden = this.hyperspace.hiddenToPeers || this.ultraCruise.running || !!this.ride?.hidden;
+    const hidden = this.hyperspace.hiddenToPeers || this.ultraCruise.running || !!this.ride?.hidden || !!edRet;
     // The blade when it is out of the hand: where it is in the world and how far it has spun, so the
     // others draw it in the air rather than in a hand it is not in. Aboard, `thrown.pos` is in the
     // hull's frame, as everything aboard is, and is carried into the world here.
@@ -16689,7 +16783,7 @@ class App {
     // in that vehicle's own frame. Never while hidden: a figure nobody is shown has no rope to be seen with.
     const rope = hidden ? null : this.ropeForWire(now);
     // One or the other, never both: the hull a passenger stands in is sent by whoever flies it.
-    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, ...(pt === undefined ? {} : { pt }), ...(tb ? { tb } : {}), ...(rope ? { gr: rope.gr } : {}), ...(rope?.grf ? { grf: rope.grf } : {}), ...(inHull ? { in: inHull } : { veh }), ...(hidden ? { j: 1 as const } : {}) });
+    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(edRet ? (this.editor?.returnHeading ?? p.heading) : p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, ...(pt === undefined ? {} : { pt }), ...(tb ? { tb } : {}), ...(rope ? { gr: rope.gr } : {}), ...(rope?.grf ? { grf: rope.grf } : {}), ...(inHull ? { in: inHull } : { veh }), ...(hidden ? { j: 1 as const } : {}) });
   }
 
   /**
@@ -18057,7 +18151,10 @@ class App {
     // still waits there, and where the ticket goes from the lift-off on, so a character put back in the
     // middle of the trip is put down on the ground at one end of it and never in the air.
     const kept = this.ride?.keepPlace() ?? null;
-    let at = flying ? this.spawn : p.worldPos;
+    // While the world editor flies, the character is where its body was kept (the return point), never the camera:
+    // a tab closed or reloaded with the editor on comes back where the body stood.
+    const edRet = this.editor?.returnPlace ?? null;
+    let at = edRet ? this.keptAt.set(edRet.x, edRet.y, edRet.z) : flying ? this.spawn : p.worldPos;
     // Kept on another world: a trip there that has lifted off, or is being carried across. That world, at
     // its pad's collector (or the pad); a port there with no height of its own leaves the place last
     // written standing, since nothing of that world's ground is here to say how high it is.
@@ -18086,7 +18183,7 @@ class App {
     c.planet = this.world.planet?.id ?? c.planet;
     c.zone = this.zone;
     c.pos = [Number(at.x.toFixed(2)), Number(at.y.toFixed(2)), Number(at.z.toFixed(2))];
-    c.heading = Number(p.heading.toFixed(3));
+    c.heading = Number((edRet ? (this.editor?.returnHeading ?? p.heading) : p.heading).toFixed(3));
     c.played = Date.now();
     upsertCharacter(c);
   }
@@ -19080,6 +19177,11 @@ class App {
    * round from that same eye. A bridge pilot's first person is their own eyes. Allocates nothing.
    */
   private placeCamera(blocked: import('./core/camera').CameraBlocker | null, dt: number): void {
+    // The world editor's eye: the camera at the anchor with the eye's look, written into the orbit's own yaw and pitch.
+    if (this.editor?.on) {
+      this.editor.placeCamera();
+      return;
+    }
     const { player, input } = this;
     const flown = player.mounted ?? player.piloting;
     // Off every vehicle: the next ride's hovering cockpit starts its heading target afresh, even on the same hull.
@@ -19833,7 +19935,10 @@ class App {
     // each body is a clone and a compile. The perf flight's body counts as racing under `holdLiving: 'always'`, which is
     // how the hold's worth is measured. What the drive has to say goes to the message line, once.
     const racedNow = riding ? null : player.mounted;
-    this.world.livingHold = holdsLiving(racedNow, !!this.raceRun?.live) || (!!this.perfFlight && RACE_TUNE.on && RACE_TUNE.holdLiving === 'always');
+    // And while the world editor's eye flies faster than a run (`livingAbove`) or holds the world (Pause), which also
+    // leaves the living unstepped, frozen mid-pose, while the day and the weather go on.
+    this.world.livingHold = holdsLiving(racedNow, !!this.raceRun?.live) || (!!this.perfFlight && RACE_TUNE.on && RACE_TUNE.holdLiving === 'always') || !!this.editor?.holdsLiving;
+    this.world.livingStill = !!this.editor?.livingStill;
     const raceWords = racedNow?.race?.takeNote();
     if (raceWords) this.messages.system(raceWords);
     // The smoke and fire at every race-driven hull's damaged engines, put where the hulls stand after this step.
@@ -24283,7 +24388,9 @@ class App {
       this.standOutOf(key);
       this.world.unplaceBuilding(key);
     },
-    packReady: (pack) => (pack === 'props' ? !!this.props.pack : pack === 'gallery' ? !!this.dressingGallery : !!this.world.layoutCenter),
+    // A world row stands about `placeFrame` (the layout's centre, or (0, 0) on a world standing through a stand-in), and one
+    // naming another world (`from`) once that world's pack is in, light (`World.guestWorld`).
+    packReady: (pack, from) => (pack === 'props' ? !!this.props.pack : pack === 'gallery' ? !!this.dressingGallery : !!this.world.placeFrame && (!from || !!this.world.guestWorldNow(from))),
     generation: () => this.world.generation,
     label: (row) => this.dressingLabel(row),
   });
@@ -24343,6 +24450,8 @@ class App {
   /** The packs a world's rows stand out of, in hand before any is stood: the gallery's, the props pack and what its client data hangs on things. */
   private async dressingPacks(rows: readonly PlacementRow[]): Promise<void> {
     if (rows.some((r) => r.pack === 'gallery')) this.dressingGallery = await this.world.housesPack();
+    // Each other world a world row names (`from`), light: its manifest and its trees' shapes, never its layout.
+    for (const id of new Set(rows.filter((r) => r.pack === 'world' && r.from).map((r) => r.from as string))) await this.world.guestWorld(id);
     if (rows.some((r) => r.pack === 'props')) {
       try {
         await this.props.load();
@@ -24375,10 +24484,11 @@ class App {
     this.dressingBuilt = Promise.resolve();
     const planet = this.world.planet;
     const kind = this.worldKindOf(planet);
-    const centre = this.world.layoutCenter;
+    // The centre rows are written about: the layout's, or (0, 0) on a real-elevation world's stand-in (`placeFrame`).
+    const centre = this.world.placeFrame;
     this.dressingGallery = null;
     this.permanent.enter(pack, centre, kind, gen);
-    // A world with no layout has no streamer to stand anything in.
+    // A world with no layout and no stand-in has no streamer to stand anything in.
     if (!centre) return;
     const current = () => this.dressingRun === run && this.world.generation === gen && packIdOf(this.world.planet, this.zone) === pack;
     try {
@@ -24459,6 +24569,11 @@ class App {
     if (!s) return null;
     if (row.pack === 'props') return this.props.pack ? this.world.standPlacement(s, this.props.pack) : null;
     if (row.pack === 'gallery') return this.dressingGallery ? this.world.standPlacement(s, this.dressingGallery) : null;
+    // A row out of another world stands out of that world's pack alone, never this world's model of the same id.
+    if (s.from) {
+      const guest = this.world.guestWorldNow(s.from);
+      return guest ? this.world.standPlacement(s, guest) : null;
+    }
     return this.world.standPlacement(s, null);
   }
 
@@ -26933,7 +27048,8 @@ class App {
     if (!current()) return false;
     await this.dressingPacks([...(reply.story?.rows ?? []), ...(reply.world?.rows ?? [])]);
     if (!current()) return false;
-    void this.dressingWait(this.permanent.land(landed, reply.story, reply.world));
+    // Kept for whoever wrote it to wait on (the world editor takes its placed copies away once the row is built).
+    this.landBuilt = this.dressingWait(this.permanent.land(landed, reply.story, reply.world));
     this.noteDressing();
     this.storyStands.clear();
     void this.standSeats(pack);
@@ -26947,7 +27063,7 @@ class App {
     const kind = this.worldKindOf(this.world.planet);
     if (kind === 'copies') return "nothing stands for good in the dungeons' world of copies";
     if (building && kind === 'space') return 'nothing stands for good out here but props';
-    if (!this.world.layoutCenter) return 'this world has no layout to stand anything in';
+    if (!this.world.placeFrame) return 'this world has no layout to stand anything in';
     return null;
   }
 
@@ -27313,6 +27429,165 @@ class App {
         });
       };
     }
+  }
+
+  // ---- The world editor (`src/editor/`, the dev server's alone). ----
+
+  /** The world editor, once loaded: null until F2 or `__debug.editor` first asks for it, and always null in a build. */
+  private editor: EditorApi | null = null;
+  private editorLoading: Promise<EditorApi | null> | null = null;
+  /** The return point handed to the world as the player's place while the editor flies, kept. */
+  private readonly editorTarget = new THREE.Vector3();
+  /** What the last permanent write the editor made is waiting on to be built (`landPlacements`). */
+  private landBuilt: Promise<void> = Promise.resolve();
+
+  /**
+   * The world editor, loaded the first time it is asked for: the one dynamic `import()` of `src/editor/`, inside
+   * `import.meta.env.DEV`, so a build carries none of it. Null in a build and when it will not load.
+   */
+  private loadEditor(): Promise<EditorApi | null> {
+    if (!import.meta.env.DEV) return Promise.resolve(null);
+    if (this.editorLoading) return this.editorLoading;
+    this.editorLoading = import('./editor/editorEntry.ts')
+      .then((m) => {
+        const ed: EditorApi = m.makeEditor({
+          input: this.input,
+          player: this.player,
+          cam: this.cam,
+          world: this.world,
+          physics: this.physics,
+          props: this.props,
+          canvas: this.canvas,
+          ui: this.ui,
+          entryState: () => {
+            const p = this.player;
+            return {
+              mounted: !!p.mounted,
+              piloting: !!p.piloting,
+              aboard: !!p.aboard,
+              passenger: !!this.ride?.riding,
+              jumping: this.hyperspace.locksControls || this.hyperspace.phase === 'countdown',
+              cruising: this.ultraCruise.running,
+              travelling: this.traveling || !this.inWorld,
+              dead: this.dying || p.hp <= 0,
+              talking: this.talkNow !== null,
+            };
+          },
+          enterWorld: () => this.editorEnterWorld(),
+          leaveBody: (ret, way) => this.editorLeaveBody(ret, way),
+          floorUnder: (x, y, z) => this.floorUnder(new THREE.Vector3(x, y, z)),
+          keepsHeight: (x, y, z) => this.editorKeepsHeight(x, y, z),
+          fileRows: () => this.editorFileRows(),
+          fileCount: (layer) => (this.permanent.worldIn === this.editWorld() ? (this.permanent.fileOf(layer)?.rows.length ?? 0) : 0),
+          say: (words) => this.messages.system(words),
+          packId: () => this.editWorld(),
+          worldKind: () => this.worldKindOf(this.world.planet),
+          put: (row, dest, lifted) => this.editorPut(row, dest, lifted),
+          remove: (layer, id) => this.deletePermanent(layer, id),
+          lift: (id) => {
+            const s = this.permanent.lift(placementKey(id));
+            return s ? { row: s.row, layer: s.layer, label: s.label } : null;
+          },
+          restore: (id) => void this.dressingWait(this.permanent.restore(placementKey(id))),
+          stood: (id) => {
+            const s = this.permanent.rowOf(placementKey(id));
+            return s ? { x: s.x, y: s.y, z: s.z, layer: s.layer, label: s.label } : null;
+          },
+          here: (at, most) => this.editorHere(at, most),
+          guarded: (x, z, r) => this.permanent.guardedAt(x, z, r)?.label ?? null,
+          passable: (template) => !!template && (isSeat(template) || isTableTemplate(template)),
+        });
+        this.editor = ed;
+        return ed;
+      })
+      .catch((err: unknown) => {
+        console.warn('the world editor would not load', err);
+        this.editorLoading = null;
+        return null;
+      });
+    return this.editorLoading;
+  }
+
+  /**
+   * The game's side of the editor coming on: a thing in the old hand given up, any fight broken off, the story's
+   * detectors told every area was left (they are not stepped while the camera flies), the trainer left behind.
+   */
+  private editorEnterWorld(): void {
+    if (this.isPlacing || this.isPlacingProp) this.giveUpHand();
+    this.encounters.left();
+    this.teacher = null;
+    this.storyWatch.leaveAll(this.raiseStory);
+    if (this.player.noclip) this.player.toggleNoclip();
+  }
+
+  /**
+   * The body stood back where the editor kept it, the way the session chose (`leaveWay`): a plain reset where something
+   * solid is under it; exactly where it was where there is nothing to stand on and nothing it should fall to (a space
+   * zone, whose ground is never built; the drawn water, whose bed would drown it), its height kept and no ground read;
+   * otherwise the way a death far from a raised arrival comes round (`standAtHome`: a short loading screen, the world
+   * moved there and settled, the floor read). Its collider back, its health and noclip as they were, and its room found
+   * again at its place by the room's number (`enterCellAt`): a building that streamed out and back while the camera was
+   * away is a new object, and a room kept as one stood the body outside it, and the curtain's move forgets the room.
+   */
+  private editorLeaveBody(ret: { x: number; y: number; z: number; heading: number; cell: number; noclip: boolean; hp: number }, way: 'plain' | 'exact' | 'curtain'): void {
+    const p = this.player;
+    p.setEditorFlight(null);
+    const at = new THREE.Vector3(ret.x, ret.y, ret.z);
+    const after = (room: number): void => {
+      this.world.takeRoom(p.pos, room);
+      p.hp = Math.min(p.maxHp, ret.hp > 0 ? ret.hp : p.maxHp);
+      p.heading = ret.heading;
+      if (ret.noclip && !p.noclip) p.toggleNoclip();
+    };
+    if (way !== 'curtain') {
+      p.reset(at);
+      after(ret.cell);
+    } else void this.standAtHome(at, null, 'leaving the world editor', 'so the body stands on the ground under it').then((onFloor) => after(onFloor ? ret.cell : 0));
+  }
+
+  /** The rows of this world's two files as the permanent layer last read them (the library's Used here), none for another world's. */
+  private editorFileRows(): readonly { pack: string; thing?: string; model?: string; template?: string; from?: string }[] {
+    if (this.permanent.worldIn !== this.editWorld()) return [];
+    return [...(this.permanent.fileOf('world')?.rows ?? []), ...(this.permanent.fileOf('story')?.rows ?? [])];
+  }
+
+  /** Whether the body keeps its height at a place on leaving the editor: in a space zone, or in the drawn water standing over the ground. */
+  private editorKeepsHeight(x: number, y: number, z: number): boolean {
+    if (this.world.planet?.space) return true;
+    const ground = this.world.terrain.heightAt(x, z);
+    const water = this.world.terrain.waterHeightAt(x, z);
+    return Number.isFinite(water) && Number.isFinite(ground) && water > ground && y > ground;
+  }
+
+  /** A row the editor put down, written by the dev server's endpoint and stood as every permanent row is; a picked-up row moved. */
+  private async editorPut(row: object, dest: PlacementLayer, lifted: { id: string; layer: PlacementLayer } | null): Promise<{ ok: boolean; why: string; id: string; built: Promise<void> }> {
+    if (!import.meta.env.DEV) return { ok: false, why: "the editor is the dev server's", id: '', built: Promise.resolve() };
+    const pack = this.editWorld();
+    const gen = this.world.generation;
+    const op = lifted && lifted.layer !== dest ? { op: 'move', from: lifted.layer, layer: dest, world: pack, id: lifted.id, row } : { op: 'put', layer: dest, world: pack, row };
+    const reply = await this.postPlacements(op);
+    if (!reply.ok) return { ok: false, why: reply.why, id: '', built: Promise.resolve() };
+    this.editDest.confirmed[dest] = true;
+    this.landBuilt = Promise.resolve();
+    await this.landPlacements(reply, lifted ? placementKey(lifted.id) : null, pack, gen);
+    return { ok: true, why: '', id: reply.id, built: this.landBuilt };
+  }
+
+  /** The permanent rows round a place, nearest first, for the editor's Here tab. */
+  private editorHere(at: { x: number; y: number; z: number }, most: number): { id: string; layer: string; label: string; away: string; stood: boolean; bad: string | null }[] {
+    const r = this.permanent.report();
+    if (!r.current || r.world !== this.editWorld()) return [];
+    const rows: { d: number; view: { id: string; layer: string; label: string; away: string; stood: boolean; bad: string | null } }[] = [];
+    for (const x of r.rows) {
+      const s = x.stood ? this.permanent.rowOf(x.key) : null;
+      const row = s?.row ?? this.permanent.fileOf(x.layer)?.rows.find((f) => f.id === x.id) ?? null;
+      if (!row) continue;
+      const g = s ?? placementToGame(row, this.world.placeFrame, r.frame);
+      const d = Math.hypot(g.x - at.x, g.z - at.z);
+      rows.push({ d, view: { id: x.id, layer: x.layer, label: s?.label ?? this.dressingLabel(row), away: awayText(d), stood: x.stood, bad: x.why === 'inHand' ? null : x.why } });
+    }
+    rows.sort((a, b) => a.d - b.d);
+    return rows.slice(0, most).map((x) => x.view);
   }
 
   /** A story object or an area naming a row, onto the clipboard where the page may write it, else onto the console. */
@@ -30698,6 +30973,8 @@ class App {
       this.lastDt = dt;
       const input = this.input;
       const player = this.player;
+      // The world editor goes with its world (a travel, the select screen): off, the body stood by whatever moves it.
+      if (this.editor?.on && (this.traveling || !this.inWorld)) this.editor.worldGone();
       // A character standing in one of the captured places takes a path of its own: the world is
       // loaded and drawn and its sky runs, but nobody is playing, so none of the rest of this
       // frame -- the keys, the body, the fight, the streaming, the relay -- applies.
@@ -30784,6 +31061,16 @@ class App {
         // The debug menu's key, with the keyboard on the world. Pressed inside the menu the menu hears
         // it itself, and from one of its boxes it types a character and Escape is the way out.
         if (input.pressedAction('debugMenu')) this.debugMenu.toggle();
+        // The world editor (the dev server's alone): F2 loads it the first time and turns it on and off. While it is on
+        // its keys are read first, every action it borrows is muted for the rest of the frame, and in Point mode the
+        // game's wheel is drained unread (the editor takes its own over the canvas, so scrolling its window moves
+        // nothing). `keys` only reads and records: the aim and the clicks are resolved after the camera is placed.
+        if (import.meta.env.DEV && input.pressedAction('editor')) void this.loadEditor().then((ed) => ed?.toggle());
+        const ed = this.editor?.on ? this.editor : null;
+        if (ed) {
+          if (ed.point) input.wheel = 0;
+          ed.keys(dt, this.isPlacing || this.isPlacingProp);
+        }
         // A building or a prop in hand takes the click and its own two keys before anything else does,
         // one block for both (`stepPlacingKeys`): a click puts it down, R held turns it and F held raises
         // it with the mouse (shift with R tips and rolls a prop), Delete gives it up or puts it away, and
@@ -30923,7 +31210,8 @@ class App {
       // `from` is where whatever struck was standing: every creature, fighter, mobile and bolt already
       // passes it, and it is what turns the red flash into an arc on the side the blow came from.
       const hurt = (dmg: number, from?: THREE.Vector3) => {
-        if (!simulate || player.mounted || player.noclip || player.aboard) return;
+        // Nothing hurts a body the world editor has hidden and carries as its camera, as nothing hurts noclip's.
+        if (!simulate || player.mounted || player.noclip || player.aboard || this.editor?.on) return;
         // A blow god mode refused shows nothing: no red flash and no arc for a blow that did nothing. What
         // struck it is handed on, so a roll's dodge can name it; with nothing that struck and nowhere it came
         // from it is the surroundings' (the lava, the water, a fire's tick), which no roll dodges.
@@ -30949,9 +31237,13 @@ class App {
       }
       this.hud.setWeatherNote(this.heldNote());
       // A passenger in a shuttle is nobody's target: nothing could reach them, and a creature would chase a picture.
-      this.world.setPlayerTarget(player.worldPos, simulate && !player.noclip && !player.aboard && !this.dying && player.hp > 0 && !this.ride?.riding, hurt);
+      // While the world editor flies, the character is its body's return point, never the camera: the followers wait by
+      // it, and nothing targets it, as nothing targets noclip.
+      const edRet = this.editor?.returnPlace ?? null;
+      const standsAt = edRet ? this.editorTarget.set(edRet.x, edRet.y, edRet.z) : player.worldPos;
+      this.world.setPlayerTarget(standsAt, simulate && !edRet && !player.noclip && !player.aboard && !this.dying && player.hp > 0 && !this.ride?.riding, hurt);
       perf.begin(SEC.world);
-      this.world.update(dt, player.worldPos, this.cam.camera.position, fast, hurt, simulate && !player.mounted && !player.noclip && !player.aboard ? player : null);
+      this.world.update(dt, player.worldPos, this.cam.camera.position, fast, hurt, simulate && !edRet && !player.mounted && !player.noclip && !player.aboard ? player : null);
       perf.end(SEC.world);
       // The pool serves the latest request first when it is full (flashes age only in effects.update),
       // so the room lights go last and always keep their lights; the fighters' glows just before them,
@@ -30984,6 +31276,8 @@ class App {
       const room = player.aboard;
       perf.begin(SEC.camera);
       this.updateCamera(player.noclip ? null : room ? (from, to) => room.cameraBlock(from, to) : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside), dt);
+      // The world editor's step, from the camera just placed: the aim, the hover, the ghost and the clicks are this frame's.
+      if (simulate && this.editor?.on) this.editor.afterCamera(dt);
       perf.end(SEC.camera);
       // The ear sits at the camera, set after the frame's last camera move: aboard a ship, in the
       // cockpit or on foot, what is heard is what the picture is drawn from.
@@ -30993,7 +31287,8 @@ class App {
       this.stepTorch();
       // Out of the eyes the body stays in the picture and the head, hair and headwear draw into the shadows only (headHide.ts).
       if (player.rig) {
-        player.group.visible = true;
+        // Not while the world editor carries the body as its camera: hidden whole, it would stand in the picture.
+        if (!this.editor?.on) player.group.visible = true;
         // A conversation seen over the shoulder shows the head, whatever the wheel had the view at.
         player.rig.setHeadHidden(this.fpHeadForce ?? (this.cam.firstPerson && this.talkCam.blend < 0.5));
         // The head follows where the view looks (`src/player/lookAt.ts`). It is asked for here, after
@@ -31023,7 +31318,7 @@ class App {
           const still = rig.overriding || ((!!player.mounted || !!player.piloting) && LOOK.ride <= 0);
           rig.lookToward(wrapAngle(Math.atan2(headLook.x, headLook.z) - player.heading), this.cam.pitch, dt, simulate && !this.dying && player.hp > 0 && !still);
         }
-      } else player.group.visible = !this.cam.firstPerson; // the primitive placeholder body, before any rig
+      } else player.group.visible = !this.cam.firstPerson && !this.editor?.on; // the primitive placeholder body, before any rig
       // Seated in a ship without a cockpit frame the game drew no pilot: the whole figure, shadow included, is hidden.
       if (player.mounted?.riderHidden) player.group.visible = false;
       // After the physics step and the camera: the falling weather around this frame's camera.
@@ -31054,6 +31349,20 @@ class App {
           // The plate over a head goes with it: a name standing over a creature behind the death
           // card would be the same fault as a frozen reticle, and the plates are DOM, not canvas.
           this.plates.clear();
+        }
+      } else if (this.editor?.on) {
+        // The world editor: the bar of things to press and the plate over a head stand down (its own bar is up), and
+        // the waypoints' marks are still drawn, measured from the camera.
+        if (this.promptLive) {
+          this.promptLive = false;
+          this.actions.clear();
+          resetPromptState(this.promptState);
+          this.plates.clear();
+        }
+        this.promptClock -= rawDt;
+        if (this.promptClock <= 0) {
+          this.promptClock = 1 / Math.max(1, HUD_WIRING.promptHz);
+          this.gatherWaypoints();
         }
       } else {
         this.promptClock -= rawDt;
@@ -31194,7 +31503,8 @@ class App {
       else this.shipHud.setStatus(fight ? flownStatus : null, fight?.stats, fight ? fight.cond.parts : null, !!condition);
       // The body's own bars and the class's slot row stand down while the ship's condition is in their
       // place: a health bar that cannot change in flight read as a second, broken one.
-      this.showBodyBlock(!condition);
+      // And while the world editor is on, whose own bar stands in their place.
+      this.showBodyBlock(!condition && !this.editor?.on);
       // Why a landing was refused, said once when it changes: on the hull it is a state string the
       // long prompt interpolated, and the long prompt is now a setting.
       const landNote = aimed ? aimed.landNote : '';
@@ -31273,7 +31583,7 @@ class App {
       // The switch is asked here rather than left to the plates' own first line, so that with the
       // plate off nothing at all is done for it: the world's list is a kept array, but building the
       // argument list to be declined is the one place an "off" switch would not turn something off.
-      if (simulate && this.settings.hudNameplate) {
+      if (simulate && this.settings.hudNameplate && !this.editor?.on) {
         const pm = this.cam.camera.matrixWorld.elements;
         this.plateEye.set(pm[12], pm[13], pm[14]);
         this.plateDir.set(-pm[8], -pm[9], -pm[10]);

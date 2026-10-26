@@ -78,6 +78,9 @@ export const WINDOW_MIN: Readonly<Record<string, Readonly<Size>>> = Object.freez
   journal: { w: 620, h: 300 },
   // A document: a page of paper that can still be read, its pager and its foot.
   document: { w: 420, h: 320 },
+  // The world editor's window (the dev server's alone): the library's sources down the side beside a grid of pictures
+  // a few cells wide, and room for a group's header and a page under it. Ours.
+  editor: { w: 520, h: 420 },
 });
 
 /** The minimum of a window this table does not name. */

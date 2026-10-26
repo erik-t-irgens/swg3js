@@ -27,7 +27,8 @@ import type { ShadowBatches, TierBatch } from './shadowBatches.ts';
 import { LOD_LEVEL_TUNE, sweepDue } from './lodLevels.ts';
 import type { BuildingDoors, DoorsFile } from './doorMath.ts';
 import type { DressingStand, StandAnswer } from './permanent.ts';
-import { radiusOfBounds } from '../story/placements.ts';
+import { PLACEMENT_KEY_PREFIX, radiusOfBounds } from '../story/placements.ts';
+import { FLORA_COLLISION, rowFloraParts } from './floraCollision.ts';
 import { fileByState, standsIn } from './worldState.ts';
 
 /**
@@ -189,6 +190,12 @@ export interface PlacedObject {
   /** The snapshot's own word on where it stands (step 7): its building's index in the layout's objects, and its room. */
   hostIndex?: number;
   cell?: number;
+  /**
+   * The pack its model is looked up in **first**: another world's, light-loaded, for a permanent row naming `from` (a
+   * Naboo tree on Tatooine). Absent on everything else, which keeps the world-first lookup it always had, so a thing whose
+   * model id the world also carries draws exactly what it drew.
+   */
+  pack?: AssetPack;
 }
 
 /**
@@ -235,7 +242,22 @@ export interface RuntimePlacement {
    * thing put down in play is filed under a name of its own so a removal finds exactly it.
    */
   effectsOf?: string;
+  /** The pack its model is looked up in first (`PlacedObject.pack`): another world's, for a permanent row naming `from`. */
+  pack?: AssetPack;
 }
+
+/**
+ * Which of a building's rooms a point is in, by the world editor's rule (`cameraRoomAt`): the building, the room, and
+ * whether the room was taken by its box alone (a pack converted before the floors carries none). A kept record.
+ */
+export interface RoomAnswer {
+  building: Building | null;
+  cell: number;
+  byBox: boolean;
+}
+
+/** A room's own walkable floor tested under a point of the building's own frame, above `low`: the rule `cameraRoomAt` is handed. */
+export type FloorUnder = (floor: { v: number[]; t: number[] }, x: number, y: number, z: number, low: number) => boolean;
 
 /** A placed portal building; the player's cell inside it is tracked by crossing its portals. */
 export interface Building {
@@ -428,6 +450,11 @@ const solidV = new THREE.Vector3();
 /** The one empty effect list every object without any shares, so a lookup allocates nothing. */
 const NO_EFFECTS: readonly PackEffect[] = [];
 
+/** Whether a def is one of this pack's own, by identity: its placed entry, or the flora entry a planted model loads by. */
+function ownsDef(g: AssetPack, def: PackModelDef): boolean {
+  return g.find(def.id) === def || g.floraDefOf?.(def.id) === def;
+}
+
 /** What one object placed in play brought with it, so taking it out again is exact. */
 interface RuntimeRec {
   tier: LoadedTier;
@@ -610,6 +637,7 @@ export class LayoutStreamer {
   private doorTableOf(def: PackModelDef): DoorsFile | null {
     if (this.pack.find(def.id) === def) return this.pack.doors;
     for (const g of this.guests) if (g.find(def.id) === def) return g.doors;
+    for (const g of this.fromPacks) if (ownsDef(g, def)) return g.doors;
     return this.pack.doors;
   }
 
@@ -647,7 +675,25 @@ export class LayoutStreamer {
     if (pack && !this.guests.includes(pack)) this.guests.push(pack);
   }
 
-  private defOf(id: string): PackModelDef | undefined {
+  /**
+   * Other worlds' packs, light-loaded (`AssetPack.load(id, base, { layout: false })`), that a permanent row naming `from`
+   * stands its model out of. **Never** looked in for a bare id, as `guests` is: only an object carrying one of them as
+   * its `pack` is looked up there, and first, so a row that names no other world -- a player's own prop among them --
+   * finds exactly what it found before any of this. Kept here only so a def out of one is known by identity, for its
+   * effects' re-rooting, its doors and whether it is flora. The world releases them with itself.
+   */
+  private readonly fromPacks: AssetPack[] = [];
+
+  /** Know a guest world's pack, so what is stood out of it is re-rooted and ruled by it. Again with the same pack, nothing. */
+  useFromPack(pack: AssetPack | null): void {
+    if (pack && pack !== this.pack && !this.fromPacks.includes(pack)) this.fromPacks.push(pack);
+  }
+
+  private defOf(id: string, pack?: AssetPack): PackModelDef | undefined {
+    if (pack) {
+      const there = pack.find(id);
+      if (there) return there;
+    }
     const mine = this.pack.find(id);
     if (mine) return mine;
     for (const g of this.guests) {
@@ -657,7 +703,13 @@ export class LayoutStreamer {
     return undefined;
   }
 
-  private loadedOf(id: string): LoadedModel | null {
+  private loadedOf(id: string, pack?: AssetPack): LoadedModel | null {
+    if (pack) {
+      const there = pack.loaded(id);
+      if (there) return there;
+      // A row naming its own pack is that pack's model or nothing: never another world's of the same id.
+      if (pack.find(id)) return null;
+    }
     const mine = this.pack.loaded(id);
     if (mine) return mine;
     for (const g of this.guests) {
@@ -667,10 +719,20 @@ export class LayoutStreamer {
     return null;
   }
 
-  private modelOf(id: string): Promise<LoadedModel> {
+  private modelOf(id: string, pack?: AssetPack): Promise<LoadedModel> {
+    if (pack && pack.find(id)) return pack.model(id);
     if (this.pack.find(id)) return this.pack.model(id);
     for (const g of this.guests) if (g.find(id)) return g.model(id);
     return this.pack.model(id);
+  }
+
+  /**
+   * Whether a def is flora: the world's own pack says so by id, as it always has, or -- for a model out of another world
+   * (`from`) -- the pack it came from does. The union only adds: every world's own model answers what it answered.
+   */
+  private floraDefIs(def: PackModelDef, pack?: AssetPack): boolean {
+    if (this.pack.isFlora?.(def) === true) return true;
+    return !!pack && pack.isFlora?.(def) === true;
   }
 
   /**
@@ -688,22 +750,33 @@ export class LayoutStreamer {
    * first and then each pack standing behind it, whose files are re-rooted as `effectFile` does. Empty
    * for a template that hangs nothing, and for every template of a pack converted before the table.
    */
-  private templateEffects(template: string | undefined): readonly PackEffect[] {
+  private templateEffects(template: string | undefined, pack?: AssetPack): readonly PackEffect[] {
     if (!template) return NO_EFFECTS;
+    // A row out of another world (`from`) is that world's thing first: its table's effects, re-rooted to its folder.
+    if (pack && pack !== this.pack) {
+      const there = pack.objectEffects?.[template];
+      if (there) return this.rerooted(there, pack);
+    }
     const own = this.pack.objectEffects?.[template];
     if (own) return own;
     for (const g of this.guests) {
       const hit = g.objectEffects?.[template];
       if (!hit) continue;
-      const root = relativeRoot(this.pack.root, g.root);
-      return hit.map((e) => (e.file.startsWith('../') ? e : { ...e, file: root + e.file }));
+      return this.rerooted(hit, g);
     }
     return NO_EFFECTS;
+  }
+
+  /** A guest's effects named from this world's own folder, as the effects loader must be handed them. */
+  private rerooted(list: readonly PackEffect[], g: AssetPack): readonly PackEffect[] {
+    const root = relativeRoot(this.pack.root, g.root);
+    return list.map((e) => (e.file.startsWith('../') ? e : { ...e, file: root + e.file }));
   }
 
   private effectFile(def: PackModelDef, file: string): string {
     if (file.startsWith('../') || this.pack.find(def.id) === def) return file;
     for (const g of this.guests) if (g.find(def.id) === def) return relativeRoot(this.pack.root, g.root) + file;
+    for (const g of this.fromPacks) if (ownsDef(g, def)) return relativeRoot(this.pack.root, g.root) + file;
     return file;
   }
 
@@ -943,7 +1016,7 @@ export class LayoutStreamer {
    * still drawn -- a garage has no cells and is scenery).
    */
   async place(p: RuntimePlacement): Promise<Building | null> {
-    const def = this.defOf(p.model);
+    const def = this.defOf(p.model, p.pack);
     // Filed by the rule the layout's own objects were (step 6).
     const sizeTier = modelTier(p.radius, def?.bounds, !!def?.particle);
     const snapTier = snapshotTier(p.radius);
@@ -963,6 +1036,7 @@ export class LayoutStreamer {
       snapTier,
       footprint: 0,
       ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}),
+      ...(p.pack ? { pack: p.pack } : {}),
     };
     this.objects.push(placed);
     this.placedByKey.set(p.template, placed);
@@ -1025,11 +1099,11 @@ export class LayoutStreamer {
     const homeless: PlacedObject[] = [];
     for (const p of this.placedByKey.values()) if (p.contained && !p.host) homeless.push(p);
     for (const p of homeless) {
-      const a = this.furnitureIndex.assign(p, this.defOf(p.model), this.hostAnswer);
+      const a = this.furnitureIndex.assign(p, this.defOf(p.model, p.pack), this.hostAnswer);
       // A thing in the doorway stands partly outside and keeps no host, so filing it again would change nothing.
       if (a.host < 0 || this.hostObjects[a.host] !== building || a.flags & HOST_FLAG.doorway) continue;
       this.unplace(p.template);
-      void this.place({ model: p.model, template: p.template, x: p.x, y: p.y, z: p.z, q: p.q, radius: p.radius, inside: true, solid: p.solid, ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}) });
+      void this.place({ model: p.model, template: p.template, x: p.x, y: p.y, z: p.z, q: p.q, radius: p.radius, inside: true, solid: p.solid, ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}), ...(p.pack ? { pack: p.pack } : {}) });
     }
   }
 
@@ -1156,7 +1230,7 @@ export class LayoutStreamer {
         for (const list of region.objects) {
           for (const o of list) {
             if (o.contained) continue;
-            const def = this.defOf(o.model);
+            const def = this.defOf(o.model, o.pack);
             if (def?.particle) continue;
             const radius = modelReach(def?.bounds);
             if (!(radius > 0)) continue;
@@ -1214,11 +1288,12 @@ export class LayoutStreamer {
           for (let i = 0; i < list.length; i++) {
             const o = list[i];
             if (o.contained || !collidesByRule(o)) continue;
-            const def = this.defOf(o.model);
+            const def = this.defOf(o.model, o.pack);
             if (!def || def.particle) continue;
             const b = def.bounds;
             if (!b || !b.min || !b.max || b.min.length < 3 || b.max.length < 3) continue;
-            if (this.pack.isFlora?.(def) === true) continue;
+            // Flora by the world's own pack, or by the world a row's model came from (a Naboo tree on Tatooine is no wall).
+            if (this.floraDefIs(def, o.pack)) continue;
             const ax = b.min[0];
             const bx = b.max[0];
             const ay = b.min[1];
@@ -1282,6 +1357,81 @@ export class LayoutStreamer {
     }
   }
 
+  /**
+   * Every object filed in the regions a rectangle of the game's frame touches (a region round it either way, for a thing
+   * whose middle is just over the edge), handed to `visit` one at a time: what the world editor's aim walks its turned
+   * boxes over along its ray. Through `regionsByNumber`, never the string-keyed map, so a frame of it makes nothing;
+   * the rectangle is a kept record (a number handed across a call the compiler leaves out is boxed), `visit` is the
+   * caller's kept function, and answering false stops the walk.
+   */
+  forEachPlacedIn(rect: { x0: number; z0: number; x1: number; z1: number }, visit: (o: PlacedObject) => boolean): void {
+    const rx0 = Math.floor(Math.min(rect.x0, rect.x1) / REGION) - 1;
+    const rx1 = Math.floor(Math.max(rect.x0, rect.x1) / REGION) + 1;
+    const rz0 = Math.floor(Math.min(rect.z0, rect.z1) / REGION) - 1;
+    const rz1 = Math.floor(Math.max(rect.z0, rect.z1) / REGION) + 1;
+    for (let rz = rz0; rz <= rz1; rz++) {
+      for (let rx = rx0; rx <= rx1; rx++) {
+        const region = this.regionsByNumber.get(regionNumber(rx, rz));
+        if (!region) continue;
+        const lists = region.objects;
+        for (let t = 0; t < lists.length; t++) {
+          const list = lists[t];
+          for (let i = 0; i < list.length; i++) if (!visit(list[i])) return;
+        }
+      }
+    }
+  }
+
+  /** Each placed object's model box, looked up once and kept: what the world editor's aim tests its ray against. */
+  private readonly boxes = new WeakMap<PlacedObject, { min: number[]; max: number[] } | null>();
+
+  /** A placed object's own model box in its own frame (either corner may come first), or null for one with none. */
+  boxOf(o: PlacedObject): { min: number[]; max: number[] } | null {
+    let b = this.boxes.get(o);
+    if (b === undefined) {
+      const def = this.defOf(o.model, o.pack);
+      b = def && !def.particle && def.bounds && def.bounds.min.length >= 3 && def.bounds.max.length >= 3 ? def.bounds : null;
+      this.boxes.set(o, b);
+    }
+    return b;
+  }
+
+  /** The placed object filed under a key in play (a permanent row's `place/<id>`), or null. */
+  placedOf(key: string): PlacedObject | null {
+    return this.placedByKey.get(key) ?? null;
+  }
+
+  /** A model for the world editor's hand, loaded through whichever pack carries it, `pack` looked in first where given. */
+  modelFor(id: string, pack?: AssetPack): Promise<LoadedModel> {
+    return this.modelOf(id, pack);
+  }
+
+  /**
+   * The world editor's ghost of a loaded model: an instanced mesh of one per primitive, on the model's own geometry and
+   * materials, built as a placement made in play is (`addToTier`), so it builds no program the world would not: a
+   * portal building's cells left out (its rooms are the portal renderer's), the caster stamped by the same rule, drawn
+   * after the water where its material is. Not added to the scene, not shown and not filed: the editor hangs them,
+   * prepares them through `prepare`, writes their one matrix every frame (so they are never culled by a stale sphere)
+   * and shows them. A basin's water piece is drawn as the model draws it, never as a water body.
+   */
+  ghostMeshesOf(model: LoadedModel): THREE.InstancedMesh[] {
+    const out: THREE.InstancedMesh[] = [];
+    const flora = this.packFlora(model);
+    const rooms = model.interiorBoxes.length > 0 && model.portals.length > 0;
+    for (const prim of model.primitives) {
+      if (rooms && prim.cell > 0) continue;
+      const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
+      stampCaster(mesh, model.radius, flora || wearsCard(prim.material), 0);
+      mesh.castShadow = stampedCasts(mesh);
+      if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
+      mesh.receiveShadow = true;
+      mesh.frustumCulled = false;
+      mesh.visible = false;
+      out.push(mesh);
+    }
+    return out;
+  }
+
   /** How many of the layout's objects lie dormant, of a world state this world does not stand in (`worldState.ts`). */
   get dormantCount(): number {
     return this.dormant.length;
@@ -1326,7 +1476,11 @@ export class LayoutStreamer {
     const def = from.find(row.model);
     if (!def) return null;
     this.unplace(row.key);
-    if (from !== this.pack) this.useGuestPack(from);
+    // A world row naming another world (`from`) stands out of that world's pack, looked up there first for this row
+    // alone (`useFromPack`), never stood behind the world for every bare id as the gallery and the props are.
+    const crossWorld = !!row.from && from !== this.pack;
+    if (crossWorld) this.useFromPack(from);
+    else if (from !== this.pack) this.useGuestPack(from);
     if (row.clear && row.clear > 0) this.keepFloraOff(row.x, row.z, row.clear);
     const built = this.place({
       model: row.model,
@@ -1339,6 +1493,7 @@ export class LayoutStreamer {
       inside: row.inside,
       ...(row.solid !== undefined ? { solid: row.solid } : {}),
       ...(row.effectsOf ? { effectsOf: row.effectsOf } : {}),
+      ...(crossWorld ? { pack: from } : {}),
     });
     return { bounds: def.bounds ?? null, built };
   }
@@ -1400,7 +1555,7 @@ export class LayoutStreamer {
       const region = this.regions.get(`${rx},${rz}`);
       const state = region?.tiers[o.tier];
       // The loaded model's real extent, from its geometry, beside the manifest's radius.
-      const loaded = this.loadedOf(o.model);
+      const loaded = this.loadedOf(o.model, o.pack);
       let size = '';
       if (loaded) {
         const box = new THREE.Box3();
@@ -1411,7 +1566,7 @@ export class LayoutStreamer {
         const v = box.getSize(new THREE.Vector3());
         size = `${v.x.toFixed(2)}x${v.y.toFixed(2)}x${v.z.toFixed(2)} (${loaded.primitives.length} prims)`;
       }
-      out.push({ template: o.template, model: o.model, d: Math.round(d), radius: o.radius, size, tier: o.tier, contained: o.contained, inManifest: !!this.defOf(o.model), loaded: !!this.loadedOf(o.model), region: `${rx},${rz}`, regionState: state === null ? 'not loaded' : state === 'loading' ? 'loading' : state ? 'loaded' : 'no region', colliders: this.colliders.get(o)?.length ?? 0 });
+      out.push({ template: o.template, model: o.model, d: Math.round(d), radius: o.radius, size, tier: o.tier, contained: o.contained, inManifest: !!this.defOf(o.model, o.pack), loaded: !!this.loadedOf(o.model, o.pack), region: `${rx},${rz}`, regionState: state === null ? 'not loaded' : state === 'loading' ? 'loading' : state ? 'loaded' : 'no region', colliders: this.colliders.get(o)?.length ?? 0 });
     }
     return out.sort((a, b) => a.d - b.d);
   }
@@ -1731,7 +1886,7 @@ export class LayoutStreamer {
     while (queue.length && (built === 0 || performance.now() - t0 < HUGE_BUILD_MS)) {
       const job = queue[0];
       const o = job.o;
-      const model = this.loadedOf(o.model);
+      const model = this.loadedOf(o.model, o.pack);
       const cols = this.colliders.get(o);
       if (!model || !cols || job.prim >= model.primitives.length) {
         queue.shift();
@@ -1870,7 +2025,9 @@ export class LayoutStreamer {
     this.loads++;
     try {
       const objects = region.objects[tier];
-      const ids = [...new Set(objects.map((o) => o.model))];
+      // A row out of another world (`pack`) is always a placement made in play, built by `addToTier` out of its own
+      // pack; asked for here by its bare id it would be looked for in this world's and noted as failed.
+      const ids = [...new Set(objects.filter((o) => !o.pack).map((o) => o.model))];
       const models = new Map<string, LoadedModel>();
       for (const id of ids) {
         // Particle effects have no mesh to load; the effect player fetches their descriptions.
@@ -2058,7 +2215,23 @@ export class LayoutStreamer {
     let f = this.floraOf.get(model);
     if (f === undefined) {
       f = this.pack.isFlora?.(model.def) === true;
-      this.floraOf.set(model, f);
+      // Whose model it is: an answer is kept only once a pack this streamer knows is the one that loaded it.
+      let known = f || this.pack.loaded(model.def.id) === model;
+      // A model out of another world (`from`, a Naboo tree on Tatooine) is flora by that world's own word: its pack is
+      // the one that loaded it. The union only adds, so every world's own model answers what it answered.
+      if (!f) {
+        for (const g of this.fromPacks) {
+          if (g.loaded(model.def.id) !== model) continue;
+          f = g.isFlora?.(model.def) === true;
+          known = true;
+          break;
+        }
+      }
+      if (!known) for (const g of this.guests) if (g.loaded(model.def.id) === model) known = true;
+      // A model of a pack not known yet -- another world's, asked about (the world editor's ghost) before a row of it
+      // stood and handed its pack over (`useFromPack`) -- is answered and not kept: kept, its "not flora" outlived the
+      // pack's arrival, and the row stood a moment later collided by every triangle of its canopy for the rest of the world.
+      if (known) this.floraOf.set(model, f);
     }
     return f;
   }
@@ -2278,7 +2451,7 @@ export class LayoutStreamer {
     this.runtime.set(p, rec);
     this.loadedInstances++;
     loaded.instances++;
-    const def = this.defOf(p.model);
+    const def = this.defOf(p.model, p.pack);
     if (def?.particle) {
       if (this.effects) {
         rec.effects.push(this.effects.place(this.effectFile(def, def.file), tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE), false));
@@ -2288,7 +2461,7 @@ export class LayoutStreamer {
     }
     let model: LoadedModel;
     try {
-      model = await this.modelOf(p.model);
+      model = await this.modelOf(p.model, p.pack);
     } catch (err) {
       this.noteFailed(p.model, err);
       return null;
@@ -2302,7 +2475,7 @@ export class LayoutStreamer {
     }
     // A thing put down in play carries what its own template's client data hangs on it: a brazier from
     // the Props tab burns, a server-placed torch among the fittings flames.
-    const ownFx = this.effects ? this.templateEffects(p.effectsOf ?? p.template) : NO_EFFECTS;
+    const ownFx = this.effects ? this.templateEffects(p.effectsOf ?? p.template, p.pack) : NO_EFFECTS;
     if (this.effects && ownFx.length) {
       const localFx = new THREE.Matrix4();
       for (const fx of ownFx) rec.effects.push(this.effects.place(fx.file, localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.contained));
@@ -2607,9 +2780,28 @@ export class LayoutStreamer {
   }
 
   private addColliders(o: PlacedObject): void {
-    const model = this.loadedOf(o.model);
+    const model = this.loadedOf(o.model, o.pack);
     if (!model) return;
     const cols: R.Collider[] = [];
+    // A permanent row of a flora model (a tree the world editor put down, out of this world or another) is solid as a
+    // planting of it is, at the shapes the client authored for it (`rowFloraParts`): its trunk, a rock's cylinders,
+    // nothing at all for one the client walked through. Every triangle of a placed tree was a collider, its canopy a
+    // ceiling to walk on. Only for permanent rows: the snapshot's own placed trees keep their trimesh.
+    if (o.template.startsWith(PLACEMENT_KEY_PREFIX) && this.packFlora(model)) {
+      const m = tmpM.compose(tmpV.set(o.x, o.y, o.z), o.q, ONE);
+      const parts = rowFloraParts(model.def, m.elements, 1, model.radius, model.height, o.y, FLORA_COLLISION);
+      for (const part of parts) {
+        const col = this.physics.createStaticPart(part);
+        if (!col) continue;
+        if (o.contained) col.setCollisionGroups(groups(Group.interior, Group.all));
+        cols.push(col);
+        this.colliderTemplate.set(col.handle, o.effectsOf ?? o.template);
+      }
+      this.colliders.set(o, cols);
+      this.collidersMadeAt = this.physics.steps;
+      this.noteBlocker(o);
+      return;
+    }
     for (const prim of model.primitives) {
       const posAttr = prim.geometry.getAttribute('position');
       if (!posAttr || posAttr.count < 3) continue;
@@ -2712,7 +2904,7 @@ export class LayoutStreamer {
    */
   private noteBlocker(o: PlacedObject): void {
     if (o.contained || this.blockAt.has(o)) return;
-    const box = this.loadedOf(o.model)?.bounds;
+    const box = this.loadedOf(o.model, o.pack)?.bounds;
     if (!box) return;
     // **Extents and never corners.** A pack converted before the mesh reader took a BOX chunk's two
     // corners componentwise carries them the other way round -- seven models on one of the owner's
@@ -3084,6 +3276,51 @@ export class LayoutStreamer {
       if (this.cellAt(b, pos) > 0) return true;
     }
     return false;
+  }
+
+  /**
+   * The world editor's camera room (its rule is `src/editor/cameraRoom.ts`'s, handed in as `floorUnder`): of the streamed
+   * buildings whose prefilter holds the point (`indoorsAt`'s two compares), the smallest room whose box holds it
+   * (`cellAt`'s padded box) **and** whose own walkable floor has a triangle under it within the box's height, so a point
+   * beside a room that overhangs its hull, or above its roof, is outside. A room of a pack with no floors is taken by
+   * its box alone, and the answer says so (`byBox`). Re-decided from nothing every call: a free camera flown through a
+   * wall is in the next room the frame it crosses, where `trackCell` would keep the first. Written into `out`;
+   * nothing is made. `trackCell`, which the people and the fighters follow, is untouched.
+   */
+  cameraRoomAt(pos: THREE.Vector3, out: RoomAnswer, floorUnder: FloorUnder): RoomAnswer {
+    out.building = null;
+    out.cell = 0;
+    out.byBox = false;
+    let bestVolume = Infinity;
+    for (const b of this.buildings) {
+      if (Math.abs(b.x - pos.x) > b.radius + 4 || Math.abs(b.z - pos.z) > b.radius + 4) continue;
+      const cells = b.model.def.cells;
+      if (!cells) continue;
+      localA.copy(pos).applyMatrix4(b.inverse);
+      for (let i = 0; i < cells.length; i++) {
+        const c = cells[i];
+        if (c.index === 0) continue;
+        const bmin = c.bounds.min;
+        const bmax = c.bounds.max;
+        const x0 = Math.min(bmin[0], bmax[0]);
+        const x1 = Math.max(bmin[0], bmax[0]);
+        const y0 = Math.min(bmin[1], bmax[1]);
+        const y1 = Math.max(bmin[1], bmax[1]);
+        const z0 = Math.min(bmin[2], bmax[2]);
+        const z1 = Math.max(bmin[2], bmax[2]);
+        if (localA.x < x0 - 0.5 || localA.x > x1 + 0.5 || localA.y < y0 - 0.5 || localA.y > y1 + 0.5 || localA.z < z0 - 0.5 || localA.z > z1 + 0.5) continue;
+        const v = (x1 - x0) * (y1 - y0) * (z1 - z0);
+        if (!(v < bestVolume)) continue;
+        const floor = c.floor;
+        const byBox = !floor;
+        if (floor && !floorUnder(floor, localA.x, localA.y, localA.z, y0 - 0.5)) continue;
+        bestVolume = v;
+        out.building = b;
+        out.cell = c.index;
+        out.byBox = byBox;
+      }
+    }
+    return out;
   }
 
   /** The cell of a building whose bounds hold a world point (smallest first), or 0 for none. */

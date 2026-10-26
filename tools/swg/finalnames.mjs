@@ -355,6 +355,7 @@ export const LATE_EXEMPT = {
   music: 'the list has no row under player_music/',
   maps: 'the list has no row under texture/ui_map_ or datatables/buildout/areas_',
   sandbox: 'listed, never asked',
+  library: 'listed, never asked',
   navgrid: 'reads no archive; asked again by the layout it baked (layoutKey)',
   scenes: 'reads no archive; asked again whenever a world converts again',
   clouds: 'reads no archive; follows the sky it measures',

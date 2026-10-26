@@ -265,8 +265,10 @@ const KEY = 'swg3js.bindings';
   const holders = (code: string) => (Object.keys(DEFAULT_BINDINGS) as Action[]).filter((a) => DEFAULT_BINDINGS[a].includes(code));
   ok(holders('Mouse3').join() === 'grappleFire', 'Mouse 4 (the back side button) is the grapple\'s fire alone');
   ok(holders('ShiftLeft').join() === 'walk,reelIn' && holders('ShiftRight').join() === 'walk,reelIn', 'Shift is the walk\'s and the reel-in\'s');
-  ok(holders('ControlLeft').join() === 'crouch' && holders('KeyX').join() === 'crouch,noclipDown,reelOut', 'Ctrl is the crouch\'s alone, and X the crouch\'s, noclip\'s down and the reel-out\'s');
-  ok(holders('Space').join() === 'jump,grappleBoost', 'Space is the jump\'s and the boost\'s');
+  // Edited on purpose by the world editor's first wave: its down borrows X and its up Space, both muted by the editor
+  // while it is on and read by nothing else (DESIGN.md §2.14), and no editor default holds Ctrl.
+  ok(holders('ControlLeft').join() === 'crouch' && holders('KeyX').join() === 'crouch,noclipDown,reelOut,editorDown', 'Ctrl is the crouch\'s alone, and X the crouch\'s, noclip\'s down, the reel-out\'s and the world editor\'s down');
+  ok(holders('Space').join() === 'jump,grappleBoost,editorUp', 'Space is the jump\'s, the boost\'s and the world editor\'s up');
   ok(holders('KeyF').sort().join() === 'flashlight,grappleHaul,placeLift', 'F is the torch\'s, the placing height\'s and the haul\'s');
   const keys = Object.keys(DEFAULT_BINDINGS);
   const at = keys.indexOf('flashlight');

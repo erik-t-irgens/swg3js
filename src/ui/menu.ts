@@ -121,6 +121,13 @@ const ACTION_LABELS: Record<Action, string> = {
   waypoints: 'Waypoints (map tab)',
   journal: 'Journal (jobs, documents, the file)',
   group: 'Group (map tab)',
+  editor: import.meta.env.DEV ? 'World editor on and off (dev server only)' : '',
+  editorUp: import.meta.env.DEV ? 'World editor: fly up (dev server only)' : '',
+  editorDown: import.meta.env.DEV ? 'World editor: fly down (dev server only)' : '',
+  editorPoint: import.meta.env.DEV ? 'World editor: free the cursor and take it back (dev server only)' : '',
+  editorSearch: import.meta.env.DEV ? "World editor: the library's find box (dev server only)" : '',
+  editorBody: import.meta.env.DEV ? 'World editor: stand your body where you look when you leave (dev server only)' : '',
+  editorHold: import.meta.env.DEV ? 'World editor: hold the world still (dev server only)' : '',
 };
 
 /**

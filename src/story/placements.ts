@@ -77,6 +77,18 @@ export interface PlacementRow {
    * Cleaned only for its shape here, since this folder knows nothing of a world's states.
    */
   state?: string;
+  /**
+   * What a gallery or world row really is, as an object template (`object/...iff`): what its client data hangs on it
+   * (a world's brazier burns) and what counts a permanent chair as the world's own. Absent, its model is all it is. On a
+   * props row the thing's own template says it, and one written there is kept out as a field this build does not read.
+   */
+  template?: string;
+  /**
+   * The ground world a `pack: 'world'` row's model comes from, by its pack id: a Naboo tree on Tatooine or on Monument.
+   * Absent, this world's own pack (the editor writes it absent when it is this world). Only a row naming one is looked up
+   * in that pack first; on any other pack it is kept out as a field this build does not read.
+   */
+  from?: string;
   name?: string;
   note?: string;
   /** When it was written, milliseconds since the epoch. */
@@ -100,9 +112,16 @@ export interface PlacementEntry {
   layer: PlacementLayer;
 }
 
-/** The limits one shared reader holds every file to. Ours. */
+/**
+ * The limits one shared reader holds every file to. Ours. **The number limits are backstops**, far past any use, where
+ * every build agrees on what a committed file means (a row past one is skipped by every build): the developer's own soft
+ * lines are the world editor's notes (`EDITOR_TUNE`, dev only), never this reader's. Not live, for that reason: a backstop
+ * moved on one machine would make a file stand differently on another. The shape rules (the reach, the height, a unit
+ * turn, the words' lengths) are where a row stops being a row at all.
+ */
 export const PLACEMENT_LIMITS = {
-  rows: 2000,
+  /** Rows a file holds; the 2,001st and on stood from the world editor's pass on (it was 2,000). */
+  rows: 100000,
   /** Metres either way across the ground. */
   reach: 100000,
   /** Metres up or down. */
@@ -111,8 +130,10 @@ export const PLACEMENT_LIMITS = {
   unit: 1e-3,
   name: 80,
   note: 400,
-  /** The most `clear` and `guard` may be, metres. */
-  circle: 64,
+  /** The most `clear` and `guard` may be, metres (64 before the world editor; its note stands at 64 still). */
+  circle: 2000,
+  /** The longest `template` a row may name. */
+  template: 400,
 };
 
 /** The prefix every permanent row is filed under in the streamer. */
@@ -124,10 +145,18 @@ const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const NAME_ID = /^[A-Za-z0-9_.-]{1,96}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 /** The fields a row may carry; the reserved ones are read and set aside. */
-const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'name', 'note', 'at']);
+const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'name', 'note', 'at']);
 /** A world state's tag: its key and its value, each lower-case words. */
 const STATE = /^[a-z0-9_]+=[a-z0-9_]+$/;
-const RESERVED = new Set(['fill', 'locked', 'effectsOf']);
+/** An object template, as a row names one. */
+const TEMPLATE = /^object\/[a-z0-9_/.-]+\.iff$/;
+/** A ground world's pack id, as the endpoint's world names one. */
+const WORLD_ID = /^[a-z0-9_]{1,40}$/;
+/**
+ * Read and set aside. `cut` is Map-maker II's (ground cut away under a placed piece, a cave's mouth): reserved now so a row
+ * written with one keeps it across the editor's put and moves nothing in a build that does not read it.
+ */
+const RESERVED = new Set(['fill', 'locked', 'effectsOf', 'cut']);
 
 /** The streamer's key for a row's id. */
 export function placementKey(id: string): string {
@@ -214,6 +243,17 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
     if (typeof o.state === 'string' && STATE.test(o.state)) row.state = o.state;
     else unknown.push(`${id}.state`);
   }
+  // The template and the world a model comes from, read the way `state` is: one of the wrong shape, or on a pack it
+  // says nothing of (a props row's thing has its own template; only a world row names another world), is kept out of
+  // the row as a field this build does not read, with its note, and the row stands as it did without it.
+  if (o.template !== undefined) {
+    if (o.pack !== 'props' && typeof o.template === 'string' && o.template.length <= L.template && TEMPLATE.test(o.template)) row.template = o.template;
+    else unknown.push(`${id}.template`);
+  }
+  if (o.from !== undefined) {
+    if (o.pack === 'world' && typeof o.from === 'string' && WORLD_ID.test(o.from)) row.from = o.from;
+    else unknown.push(`${id}.from`);
+  }
   if (o.name !== undefined) {
     if (typeof o.name !== 'string' || o.name.length > L.name || CONTROL.test(o.name)) return `its name is words of ${L.name} characters at most`;
     row.name = o.name;
@@ -237,6 +277,21 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
  * and named.
  */
 export function readPlacementsFile(text: string, world: string, kindOfWorld: 'ground' | 'space'): PlacementRead {
+  return readFileOf(text, world, kindOfWorld, null);
+}
+
+/**
+ * The same read, with each row kept beside the very object it was read from (`raws[i]` for `rows[i]`): what the dev
+ * server's endpoint writes back as it found it, fields this build does not read included. One parse, where the endpoint
+ * used to parse a file a second time to get them.
+ */
+export function readPlacementsFileRaw(text: string, world: string, kindOfWorld: 'ground' | 'space'): PlacementRead & { raws: Record<string, unknown>[] } {
+  const raws: Record<string, unknown>[] = [];
+  const read = readFileOf(text, world, kindOfWorld, raws);
+  return { ...read, raws };
+}
+
+function readFileOf(text: string, world: string, kindOfWorld: 'ground' | 'space', raws: Record<string, unknown>[] | null): PlacementRead {
   const out: PlacementRead = { rows: [], skipped: [], unknown: [], problem: null };
   const doc = parseJsonc(text);
   if (doc.error) {
@@ -285,6 +340,7 @@ export function readPlacementsFile(text: string, world: string, kindOfWorld: 'gr
     }
     seen.add(row.id);
     out.rows.push(row);
+    if (raws) raws.push(raw as Record<string, unknown>);
   }
   return out;
 }
@@ -350,7 +406,27 @@ export function radiusOfBounds(b: { min: readonly number[]; max: readonly number
  */
 export function rowHash(row: PlacementRow): string {
   // The state only where a row has one, so a row with none answers exactly what it did before rows could carry one.
-  return JSON.stringify([row.kind, row.pack, row.thing ?? null, row.model ?? null, row.deed ?? null, row.x, row.y, row.z, row.q, row.solid ?? null, row.inside ?? null, row.clear ?? null, row.guard ?? null, ...(row.state ? [row.state] : [])]);
+  // Every field after it is **tagged** and only where present: with several optional appendices an untagged position
+  // could let one field's value pass for another's. The state keeps its untagged place as the first appendix, which is
+  // safe because a state always holds `=` and no tag does.
+  return JSON.stringify([
+    row.kind,
+    row.pack,
+    row.thing ?? null,
+    row.model ?? null,
+    row.deed ?? null,
+    row.x,
+    row.y,
+    row.z,
+    row.q,
+    row.solid ?? null,
+    row.inside ?? null,
+    row.clear ?? null,
+    row.guard ?? null,
+    ...(row.state ? [row.state] : []),
+    ...(row.template !== undefined ? ['template', row.template] : []),
+    ...(row.from !== undefined ? ['from', row.from] : []),
+  ]);
 }
 
 /**
@@ -412,7 +488,7 @@ export function mintPlacementId(base: string, taken: ReadonlySet<string>): strin
 }
 
 /** The field order a row is written in, so one row is always one line spelled the same way. */
-const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'name', 'note', 'at'];
+const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'name', 'note', 'at'];
 /** Every field a row of this build reads, in the order it is written. */
 export const PLACEMENT_FIELDS: readonly string[] = ORDER;
 const ORDERED = new Set<string>(ORDER);

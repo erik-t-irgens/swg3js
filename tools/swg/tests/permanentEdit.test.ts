@@ -75,8 +75,9 @@ const cleaned = (draft: object, id = 'x'): PlacementRow => {
     const back = ((yawOfTurn(g.q) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
     ok(Math.abs(g.x - state.x) < 6e-4 && Math.abs(g.y - state.y) < 6e-4 && Math.abs(g.z - state.z) < 6e-4 && Math.abs(back - yaw) < 1e-9 && draft.clear === 14.5 && draft.deed === 'tatooine_house_small_deed' && draft.kind === 'building' && draft.pack === 'gallery', `a building turned ${yaw.toFixed(2)} rad comes back where it stood, turned the same (${back.toFixed(4)}), its clear to the decimetre`);
   }
-  const noDeed = rowFromHouse({ x: 0, y: 0, z: 0, yaw: 0, clear: 99 }, 'ply_tato_cantina', null, centre, 'raw');
-  ok(noDeed.deed === undefined && noDeed.clear === 64, 'one taken by its model alone has no deed, and its clear is held to what a file may hold');
+  // What a file may hold is the backstop the world editor's pass raised from 64 m to 2,000 (`PLACEMENT_LIMITS.circle`).
+  const noDeed = rowFromHouse({ x: 0, y: 0, z: 0, yaw: 0, clear: 2500 }, 'ply_tato_cantina', null, centre, 'raw');
+  ok(noDeed.deed === undefined && noDeed.clear === 2000, 'one taken by its model alone has no deed, and its clear is held to what a file may hold');
   ok(sameTurn(yawTurn(1.2), [0, Math.sin(0.6), 0, Math.cos(0.6)]) && Math.abs(yawOfTurn(yawTurn(-0.7)) + 0.7) < 1e-12, 'a yaw is a turn about up, and back');
   // A row picked up by its model (its deed not one this build makes it from) and saved again keeps the deed its
   // file names: the endpoint's put replaces the whole row, so a deed left off here was gone from the file.

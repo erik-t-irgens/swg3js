@@ -20,8 +20,7 @@
 // a release carries none of the editor. Pure: no fs, no DOM. Rule for this file (node runs it with type
 // stripping): every import with its `.ts` extension, no enum, no namespace, no constructor parameter properties.
 
-import { parseJsonc } from '../story/jsonc.ts';
-import { PLACEMENT_FIELDS, PLACEMENT_LIMITS, isPlacementId, mintPlacementId, placementsFileText, placementsPath, readPlacementRow, readPlacementsFile, rowHash, type PlacementLayer, type PlacementRead, type PlacementRow } from '../story/placements.ts';
+import { PLACEMENT_FIELDS, PLACEMENT_LIMITS, isPlacementId, mintPlacementId, placementsFileText, placementsPath, readPlacementRow, readPlacementsFile, readPlacementsFileRaw, rowHash, type PlacementLayer, type PlacementRead, type PlacementRow } from '../story/placements.ts';
 
 /** Every number of the endpoint, all ours. Read where the dev server runs it, and not moved from the browser. */
 export const PLACEMENTS_ENDPOINT_TUNE = {
@@ -119,16 +118,19 @@ interface Held {
   text: string | null;
 }
 
-/** A layer's file opened, or why the editor will not write it. */
+/**
+ * A layer's file opened, or why the editor will not write it. Read **once**: the reader hands each row back beside the
+ * very object it was read from (`readPlacementsFileRaw`), where this used to parse the file a second time to get them.
+ */
 function openLayer(text: string | null, layer: PlacementLayer, world: string, kind: 'ground' | 'space'): Held | string {
   if (text === null) return { rows: [], read: null, text: null };
   const file = editFile(layer, world);
-  const read = readPlacementsFile(text, world, kind);
+  const full = readPlacementsFileRaw(text, world, kind);
+  const read: PlacementRead = { rows: full.rows, skipped: full.skipped, unknown: full.unknown, problem: full.problem };
   if (read.problem) return `${file} does not read (${read.problem}): mend it by hand first`;
   if (read.skipped.length) return `${file} holds rows this build cannot read (${read.skipped.slice(0, 3).map((s) => `${s.id}: ${s.why}`).join('; ')}): mend them by hand first, or the editor would write over them`;
   // Nothing was skipped, so the rows read are the file's rows, one for one and in order.
-  const raws = ((parseJsonc(text).value as { rows: unknown[] }).rows ?? []) as Record<string, unknown>[];
-  return { rows: read.rows.map((row, i) => ({ row, raw: raws[i] })), read, text };
+  return { rows: read.rows.map((row, i) => ({ row, raw: full.raws[i] })), read, text };
 }
 
 /** A row cleaned as the reader cleans one, under the id given and stamped now, or why it is refused. */
@@ -268,12 +270,15 @@ export function applyPlacementOp(op: unknown, current: { story: string | null; w
       continue;
     }
     const text = placementsFileText(world, frame, list.map((e) => e.raw as unknown as PlacementRow));
-    // Read back before anything is written: every row, the one written and the ones carried, as it was.
+    // Read back before anything is written: every row, the one written and the ones carried, as it was. Looked up in a
+    // map by id, so a put is linear in the file: one `find` a row was 669 ms at 10,000 rows and two seconds at 20,000.
     const back = readPlacementsFile(text, world, readKind);
     const lost = back.problem ?? (back.skipped.length ? back.skipped.map((s) => `${s.id}: ${s.why}`).join('; ') : null);
     if (lost) return no(500, `${editFile(l, world)} would not read back as the editor wrote it (${lost})`);
+    const backById = new Map<string, PlacementRow>();
+    for (const r of back.rows) backById.set(r.id, r);
     for (const e of list) {
-      const b = back.rows.find((r) => r.id === e.row.id);
+      const b = backById.get(e.row.id);
       if (!b || !sameRow(b, e.row)) return no(500, `${e.row.id} would not read back as the editor wrote it`);
     }
     writes.push({ layer: l, text });

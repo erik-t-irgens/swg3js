@@ -151,27 +151,46 @@ export function ghostVerdict(patch: Patch, at: { x: number; z: number }, yaw: nu
   state.lift = lift;
   state.note = v.note;
   if (!v.ok) return state;
-  // The sea is drawn over the ground rather than instead of it, so the ground test passes perfectly
-  // well on a lake bed and this is what keeps a house out of one.
-  for (let i = 0; i < probes.length; i++) {
-    if (deps.waterAt(probes[i].x, probes[i].z) > HEIGHTS[i]) {
-      state.why = 'that is under water';
-      return state;
-    }
+  if (probesUnderWater(probes, HEIGHTS, deps)) {
+    state.why = UNDER_WATER;
+    return state;
   }
   const mid = patchMiddle(patch, at, yaw, MIDDLE);
-  const mx = mid.x;
-  const mz = mid.z;
-  for (const s of deps.standing(mx, mz, clear)) {
-    if (!(s.radius > 0)) continue;
-    if (Math.hypot(s.x - mx, s.z - mz) < s.radius + clear) {
-      state.why = 'something is already standing there';
-      return state;
-    }
+  if (standingIn(mid.x, mid.z, clear, deps)) {
+    state.why = ALREADY_STANDING;
+    return state;
   }
   state.ok = true;
   state.why = null;
   return state;
+}
+
+/** The words a building under the drawn water is refused (a player) or noted (the world editor) in. */
+export const UNDER_WATER = 'that is under water';
+/** The words a building where the world already has something is refused or noted in. */
+export const ALREADY_STANDING = 'something is already standing there';
+
+/**
+ * Whether the drawn water stands over the ground at any of a patch's probes (`heights` the ground at each). The sea is
+ * drawn over the ground rather than instead of it, so the ground test passes perfectly well on a lake bed and this is
+ * what keeps a house out of one. The one test the player's verdict and the world editor's notes both ask.
+ */
+export function probesUnderWater(probes: readonly { x: number; z: number }[], heights: readonly number[], deps: Pick<GhostDeps, 'waterAt'>): boolean {
+  for (let i = 0; i < probes.length; i++) if (deps.waterAt(probes[i].x, probes[i].z) > heights[i]) return true;
+  return false;
+}
+
+/**
+ * What the world already has standing in a patch's circle (`clear` round its middle `mx`, `mz`), by its own radius: the
+ * first such thing, or null. A thing with no radius is in the way of nothing. The one test the player's verdict and the
+ * world editor's notes both ask.
+ */
+export function standingIn(mx: number, mz: number, clear: number, deps: Pick<GhostDeps, 'standing'>): { x: number; z: number; radius: number; template?: string } | null {
+  for (const s of deps.standing(mx, mz, clear)) {
+    if (!(s.radius > 0)) continue;
+    if (Math.hypot(s.x - mx, s.z - mz) < s.radius + clear) return s;
+  }
+  return null;
 }
 
 /** The wheel: a notch in or out, kept between the near and the far. */
@@ -478,4 +497,154 @@ export class PlacementGhost {
 /** The patch a deed asks for: its own footprint's, which is the grid the client measured with. */
 export function patchForFootprint(f: Footprint): Patch {
   return patchOfFootprint(f);
+}
+
+/** What the world editor's ghost needs of the game: where to hang its meshes, how to prepare them, and the actor layer. */
+export interface EditorGhostHost {
+  add(o: THREE.Object3D): void;
+  remove(o: THREE.Object3D): void;
+  /** The streamer's own prepare (`World.prepareLikeStreamed`): what every streamed tier is compiled through before it shows. */
+  prepare(meshes: THREE.Object3D[]): Promise<void>;
+  /** The layer a room's pass draws what stands in it with (`ACTOR_LAYER`). */
+  actorLayer: number;
+}
+
+/**
+ * The world editor's ghost (DESIGN.md §2.3), which is **not** the players' see-through ghost above: the thing in hand
+ * drawn as it will stand, on the very geometry, materials and instancing the streamer draws a placement with
+ * (`LayoutStreamer.ghostMeshesOf`), so it builds no program a placement of the same model would not -- a model the world
+ * already draws builds nothing, and one nobody has drawn yet is prepared through the streamer's own prepare and stays
+ * hidden until it has been (the editor draws its box on the overlay meanwhile). In a room it takes the actor layer, but
+ * only once a second prepare with that layer on has built its room-pass programs; until then it is its box alone.
+ * Its one matrix is written in place each frame. A click leaves copies of it on the same geometry and materials where it
+ * was put (`leaveBehind`), which the caller takes away once the stood row's own meshes are built, so there is no gap.
+ */
+export class EditorGhost {
+  /** The meshes in hand, one a primitive, hung hidden until prepared. */
+  meshes: THREE.InstancedMesh[] = [];
+  /** What is in hand, by the library's key; '' for nothing. */
+  key = '';
+  /** Prepared for the world's pass, and for a room's. */
+  ready = false;
+  roomReady = false;
+  /** Whether the last place it was put is in a room. */
+  inRoom = false;
+  private readonly host: EditorGhostHost;
+  private gen = 0;
+  private roomAsked = false;
+  private hidden = false;
+
+  constructor(host: EditorGhostHost) {
+    this.host = host;
+  }
+
+  /** Whether it is drawn now (prepared, and in a room prepared for that too). */
+  get shown(): boolean {
+    return this.meshes.length > 0 && !this.hidden && this.ready && (!this.inRoom || this.roomReady);
+  }
+
+  /** Take these meshes in hand (what was in hand goes): hung hidden, prepared, then shown where it was last put. */
+  set(key: string, meshes: THREE.InstancedMesh[]): void {
+    this.clear();
+    this.key = key;
+    this.meshes = meshes;
+    for (const m of meshes) {
+      m.visible = false;
+      this.host.add(m);
+    }
+    const g = ++this.gen;
+    const done = (): void => {
+      if (g !== this.gen) return;
+      this.ready = true;
+      this.apply();
+    };
+    this.host.prepare(meshes).then(done, done);
+  }
+
+  /** Put it at a matrix this frame, in a room or not. Nothing is made. */
+  place(m: THREE.Matrix4, inRoom: boolean): void {
+    for (const mesh of this.meshes) {
+      mesh.setMatrixAt(0, m);
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+    this.inRoom = inRoom;
+    if (inRoom && !this.roomAsked && this.ready) {
+      // Its room-pass programs, built once, through the same prepare, with the actor layer on while it is hidden.
+      this.roomAsked = true;
+      const g = this.gen;
+      for (const mesh of this.meshes) mesh.layers.enable(this.host.actorLayer);
+      const done = (): void => {
+        if (g !== this.gen) return;
+        this.roomReady = true;
+        this.apply();
+      };
+      this.host.prepare(this.meshes).then(done, done);
+    }
+    this.apply();
+  }
+
+  /** Hide it (nothing to aim at, a panel over the world) or show it again. */
+  setHidden(hidden: boolean): void {
+    this.hidden = hidden;
+    this.apply();
+  }
+
+  private apply(): void {
+    const show = this.shown;
+    const actor = this.inRoom && this.roomReady;
+    for (const mesh of this.meshes) {
+      mesh.visible = show;
+      if (this.roomReady) {
+        if (actor) mesh.layers.enable(this.host.actorLayer);
+        else mesh.layers.disable(this.host.actorLayer);
+      }
+    }
+  }
+
+  /**
+   * Copies of what is in hand where it stands now, on the same geometry and materials (no program), hung and shown as
+   * the ghost is: what stands in the gap between a click and the stood row's own meshes. The caller takes them away
+   * with `dropLeft`.
+   */
+  leaveBehind(): THREE.InstancedMesh[] {
+    const out: THREE.InstancedMesh[] = [];
+    if (!this.shown) return out;
+    for (const mesh of this.meshes) {
+      const c = new THREE.InstancedMesh(mesh.geometry, mesh.material, 1);
+      c.instanceMatrix.copy(mesh.instanceMatrix);
+      c.instanceMatrix.needsUpdate = true;
+      c.layers.mask = mesh.layers.mask;
+      c.castShadow = mesh.castShadow;
+      c.receiveShadow = mesh.receiveShadow;
+      c.renderOrder = mesh.renderOrder;
+      c.frustumCulled = false;
+      c.userData = { ...mesh.userData };
+      this.host.add(c);
+      out.push(c);
+    }
+    return out;
+  }
+
+  /** Copies left behind taken away: out of the scene, their instance buffers let go (never the shared geometry or materials). */
+  dropLeft(left: readonly THREE.InstancedMesh[]): void {
+    for (const c of left) {
+      this.host.remove(c);
+      c.dispose();
+    }
+  }
+
+  /** Nothing in hand: the meshes out of the scene and their instance buffers let go, the model's own left as they were. */
+  clear(): void {
+    this.gen++;
+    for (const m of this.meshes) {
+      this.host.remove(m);
+      m.dispose();
+    }
+    this.meshes = [];
+    this.key = '';
+    this.ready = false;
+    this.roomReady = false;
+    this.roomAsked = false;
+    this.inRoom = false;
+  }
 }

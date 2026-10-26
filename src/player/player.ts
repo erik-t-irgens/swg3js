@@ -264,6 +264,15 @@ function buildCharacter(): { group: THREE.Group; parts: Parts } {
   return { group, parts: { hips, torso, head, leftLeg, rightLeg, leftArm, rightArm, saber, blade, bladeTip, hilt, staffBlade, staffTip, saber2, hilt2, blade2, bladeTip2, saberLight, rifle, muzzle } };
 }
 
+/**
+ * The world editor's flight, as the body is handed to it (`setEditorFlight`): one frame of the free camera, moving the
+ * body's own place, which is the world's anchor. Declared here and implemented by the editor's own module (the dev
+ * server's alone, `src/editor/flyCam.ts`), so nothing shipped imports the editor.
+ */
+export interface EditorFlight {
+  step(dt: number, input: { mouseDX: number; mouseDY: number; locked: boolean }, pos: { x: number; y: number; z: number }): void;
+}
+
 export class Player {
   readonly group: THREE.Group;
   readonly pos = new THREE.Vector3();
@@ -1210,12 +1219,58 @@ export class Player {
   toggleNoclip(): void {
     this.grapple.letGo('noclip');
     this.noclip = !this.noclip;
+    this.setBodyFree(this.noclip);
+  }
+
+  /**
+   * The body's collider off (it flies through everything and stands on nothing) or back on where the body is now:
+   * noclip's toggle and the world editor's flight share it. The velocity is spent either way.
+   */
+  private setBodyFree(free: boolean): void {
     this.vel.set(0, 0, 0);
-    this.body.setEnabled(!this.noclip);
-    if (!this.noclip) {
+    this.body.setEnabled(!free);
+    if (!free) {
       this.body.setTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z }, true);
       this.grounded = false;
     }
+  }
+
+  /**
+   * The world editor's flight (`src/editor/flyCam.ts`, the dev server's alone), or null: while it is set the body is the
+   * free camera's eye -- the world's anchor, flown and hidden -- and nothing else of the body runs in `update`. Set and
+   * cleared by `setEditorFlight`, never directly.
+   */
+  private editorFlight: EditorFlight | null = null;
+
+  /** Whether the world editor flies the body. */
+  get editorFlying(): boolean {
+    return this.editorFlight !== null;
+  }
+
+  /**
+   * Hand the body to the world editor's flight, or take it back (null): the grapple lets go, noclip goes off, the
+   * collider goes off by noclip's own helper and the figure is hidden whole (its root, so its shadow goes too) while it
+   * flies; taken back, the collider comes back where the body stands and the figure shows again.
+   */
+  setEditorFlight(flight: EditorFlight | null): void {
+    if (flight) {
+      this.grapple.letGo('editor');
+      this.noclip = false;
+      this.rig?.stopOverride();
+      this.saber.holster();
+      this.thrown.cancel();
+      this.updateBlades();
+      this.editorFlight = flight;
+      this.setBodyFree(true);
+      this.swimming = false;
+      this.submerged = false;
+      this.group.visible = false;
+      return;
+    }
+    if (!this.editorFlight) return;
+    this.editorFlight = null;
+    this.setBodyFree(false);
+    this.group.visible = true;
   }
 
   toggleSaber(): void {
@@ -2297,6 +2352,19 @@ export class Player {
     // Dead: the body is the physics' now, and nothing else moves.
     if (this.ragdoll) {
       this.ragdollStep();
+      return;
+    }
+    // The world editor's free camera: the body is its eye, flown and hidden, and nothing else of the body runs -- no
+    // animation, no swim, no fire, no breath, no flow, no hazard -- so a camera flown under a lake drowns nobody. Ahead
+    // of everything, noclip's branch included, which never reaches it.
+    if (this.editorFlight) {
+      if (this.grapple.out) this.grapple.letGo('editor');
+      this.editorFlight.step(dt, input, this.pos);
+      this.vel.set(0, 0, 0);
+      this.grounded = false;
+      this.swimming = false;
+      this.submerged = false;
+      this.group.position.copy(this.pos);
       return;
     }
     this.regenDelay = Math.max(0, this.regenDelay - dt);

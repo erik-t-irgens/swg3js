@@ -24,6 +24,10 @@ export const Group = { terrain: 0x0001, exterior: 0x0002, interior: 0x0004, peer
 /** Rapier interaction groups: membership in the high half, filter in the low half. */
 export const groups = (membership: number, filter: number): number => ((membership << 16) | filter) >>> 0;
 
+/** The world editor's aim's two filters, worked out once: indoors a room's own floor and walls, never the ground or a shell. */
+const AIM_INSIDE = groups(Group.all, Group.all & ~(Group.terrain | Group.exterior));
+const AIM_OUTSIDE = groups(Group.all, Group.all);
+
 /** The player's capsule's solver groups: a member of `player` alone, taking every other's contacts. */
 export const PLAYER_SOLVER = groups(Group.player, Group.all);
 /** A body the player walks through: a member of everything, taking every contact but the player capsule's. */
@@ -651,6 +655,35 @@ export class Physics {
     if (!hit) return null;
     const t = hit.timeOfImpact;
     return { point: [from.x + ray.dir.x * t, from.y + ray.dir.y * t, from.z + ray.dir.z * t], normal: [hit.normal.x, hit.normal.y, hit.normal.z] };
+  }
+
+  /** The world editor's aim's ray, kept (its own: the other aim ray is another caller's). */
+  private readonly editorRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 });
+
+  /**
+   * The world editor's aim against what stands still (`stillOrWall`, so a shut door is a wall), only the colliders that
+   * exist near the anchor: the distance along the ray, the surface's normal and the collider, written into `out`; false
+   * when the ray meets nothing within `len`. Indoors the ground and the shells are left out, so a room's own floor and
+   * walls answer. The engine wraps the ray and hands its answer back as objects of its own; this makes none.
+   */
+  aimHit(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, len: number, inside: boolean, out: { toi: number; nx: number; ny: number; nz: number; handle: number }): boolean {
+    if (!(len > 1e-4)) return false;
+    const r = this.editorRay;
+    r.origin.x = ox;
+    r.origin.y = oy;
+    r.origin.z = oz;
+    r.dir.x = dx;
+    r.dir.y = dy;
+    r.dir.z = dz;
+    const filter = inside ? AIM_INSIDE : AIM_OUTSIDE;
+    const hit = this.world.castRayAndGetNormal(r, len, true, undefined, filter, undefined, undefined, this.stillOrWall);
+    if (!hit) return false;
+    out.toi = hit.timeOfImpact;
+    out.nx = hit.normal.x;
+    out.ny = hit.normal.y;
+    out.nz = hit.normal.z;
+    out.handle = hit.collider.handle;
+    return true;
   }
 
   /** The rays the room's air casts every frame, kept rather than made per call, and the one predicate both use. */

@@ -47,14 +47,14 @@ import { eyeSpeed, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, rideLodBias, steppedBias, swee
 import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.ts';
 import { GROUND_NORMAL, GROUND_TILES_WANTED, groundSelfTest, groundTileUniforms, groundTilesMaterial, setGroundClock, TerrainTextures, writeGroundDraw, type GroundSelfTest } from './terrainTextures.ts';
 import { GROUND_DRAW_TUNE, groundChunkAt, groundChunkOrigin, type CornerName, type GroundColour, type GroundShine } from './groundTiles.ts';
-import { AssetPack, lowerLevels, type LoadedModel } from './assetPack';
+import { AssetPack, lowerLevels, type Layout, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { TERRAIN_GROUND_TUNE } from '../swg/terrain/generator.ts';
 import type { GroundRules } from './demShader';
-import { LayoutStreamer, nearTierRange, type Building, type CellState, type PlacedObject, type WaterSurfaceHandle } from './layoutStream';
+import { LayoutStreamer, nearTierRange, type Building, type CellState, type FloorUnder, type PlacedObject, type RoomAnswer, type WaterSurfaceHandle } from './layoutStream';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchMiddle, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { DRESSING_TUNE, type DressingStand, type StandAnswer } from './permanent.ts';
 import { PLACEMENT_KEY_PREFIX } from '../story/placements.ts';
@@ -847,6 +847,11 @@ export class World {
    * step by the game (`holdsLiving`), read beside `streamHold` by the three streams of the living.
    */
   livingHold = false;
+  /**
+   * The world editor's hold (Pause, the dev server's alone): the living are not stepped at all, so they stand frozen
+   * mid-pose while the day and the weather go on. Written every step by the game; false everywhere else.
+   */
+  livingStill = false;
   /** The chunk the ground streams round, as the last `stream` found it (NaN before the first). */
   private streamPcx = Number.NaN;
   private streamPcz = Number.NaN;
@@ -1943,6 +1948,14 @@ export class World {
         }
         if (token !== this.loadToken) return null;
       }
+      // A world on the ground with no pack of its own (the real-elevation worlds, which say so: `pack: false`) still
+      // stands what is put on it: a stand-in pack and an empty layout under a streamer, so every permanent row, every
+      // player's prop and house and every world editor's row stands there out of the guest packs. `pack` stays null and
+      // `layoutCenter` with it, since some fifty readers take a centre to mean converted content: only the placements
+      // read `placeFrame`. Never a converted world whose pack is missing or failed to load: its rows are written about
+      // its own layout's centre, and stood about (0, 0) they would land kilometres off, so it keeps standing nothing.
+      if (planet.pack === false && !planet.space && !this.sceneOnly) await this.standInStreamer(planet.id, opts.keepOff, token);
+      if (token !== this.loadToken) return null;
       this.packStatus = planet.borrowSky ? 'sky only' : 'no pack';
       this.packProgress = 1;
       return null;
@@ -2203,6 +2216,87 @@ export class World {
     return this.layoutStream.clearSpawn(spawn, (x, z) => this.terrain.heightAt(x, z)) ?? new THREE.Vector3(spawn.x, this.terrain.heightAt(spawn.x, spawn.z), spawn.z);
   }
 
+  /**
+   * The stand-in a packless ground world places through (`loadPack`): an empty pack over the world's own folder
+   * (nothing is ever fetched from it, since every guest's files are re-rooted) and an empty layout centred on (0, 0),
+   * with a streamer and a `ParticleEffects` made over them exactly as the layout block makes them, and the permanent rows'
+   * flora circles kept off before the ground is built. The terrain anchors are not: a layout object there would raise
+   * the real-elevation ground to its feet. Its centre (0, 0) is `placeFrame`, which keeps every raw coordinate the world
+   * already prints (`/loc` and the minimap mirror about (0, 0) there).
+   */
+  private async standInStreamer(id: string, keepOff: Promise<{ raw: { x: number; z: number; r: number }[]; game: { x: number; z: number; r: number }[] } | null> | undefined, token: number): Promise<void> {
+    const base = `${import.meta.env.BASE_URL}assets-private/${id}/`;
+    const stand = AssetPack.from({ planet: id, categories: {} }, base);
+    const layout: Layout = { planet: id, center: { x: 0, z: 0 }, radius: 0, objects: [] };
+    this.layoutStream?.dispose();
+    this.particles?.dispose();
+    this.particles = new ParticleEffects(this.scene, stand.url(''));
+    this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
+    this.layoutStream = new LayoutStreamer(this.scene, this.physics, stand, layout, this.particles, { reach: this.streamReach(), hugeColliders: false, stands: standsIn });
+    if (SHADER_PACING) this.layoutStream.prepare = (objects) => this.prepareStreamed(objects);
+    this.layoutStream.shadowBatches = this.shadowBatches;
+    this.layoutStream.waterSurface = (geometry, matrix, name) => this.basinWaterBody(geometry, matrix, name);
+    this.layoutStream.doorHost = this.doors;
+    this.layoutStream.onFloraCircle = (e) => this.grass?.circleChanged(e.x, e.z, e.r);
+    this.layoutStream.onFloorGone = (x, z, footprint) => this.mobiles?.perchOver(x, z, footprint);
+    this.placeStandIn = { x: 0, z: 0 };
+    if (!keepOff) return;
+    const stream = this.layoutStream;
+    const circles = await Promise.race([keepOff.catch(() => null), new Promise<null>((r) => setTimeout(() => r(null), DRESSING_TUNE.floraWaitMs))]);
+    if (token !== this.loadToken || !circles || stream !== this.layoutStream) return;
+    for (const k of circles.raw) stream.keepFloraOff(rawToGameX(0, k.x), rawToGameZ(0, k.z), k.r);
+    for (const k of circles.game) stream.keepFloraOff(k.x, k.z, k.r);
+  }
+
+  /** The centre a world with no pack of its own places rows about ((0, 0)), or null; cleared with the world. */
+  private placeStandIn: { x: number; z: number } | null = null;
+
+  /**
+   * The world editor's floor rule while it flies its camera (`src/editor/cameraRoom.ts`, handed in by the dev server's
+   * editor alone): set, the player's room is the camera's, by `LayoutStreamer.cameraRoomAt`; null, the portals are
+   * followed as they always are. Let go with the world.
+   */
+  cameraRoomRule: FloorUnder | null = null;
+  /** What `cameraRoomAt` writes into, kept. */
+  readonly cameraRoom: RoomAnswer = { building: null, cell: 0, byBox: false };
+
+  /**
+   * Put the player in a room outright, by its number, at a place (the world editor standing its body back where it was):
+   * room `room` of the streamed building there that has it (`enterCellAt`, the data's answer, the box's where no building
+   * near has that room), or outside for nought. Found afresh from the place, never from a kept `CellState`: a building
+   * that streamed out and back while the camera was away is a new object. The portals are followed from there on.
+   */
+  takeRoom(pos: THREE.Vector3, room: number): void {
+    if (room > 0) {
+      this.enterCellAt(pos, room);
+      return;
+    }
+    this.cellState = null;
+    this.prevPlayerPos.copy(pos);
+  }
+
+  /** The editor's ghost and anything made like a streamed tier, prepared the streamer's own way (`prepareStreamed`), or adopted at once with no pacing. */
+  prepareLikeStreamed(objects: THREE.Object3D[]): Promise<void> {
+    if (SHADER_PACING) return this.prepareStreamed(objects);
+    for (const o of objects) this.adoptMaterials(o);
+    return Promise.resolve();
+  }
+
+  /** The streamer, for the world editor's own walks (its aim's boxes, its camera's room); null with no world. */
+  get streamer(): LayoutStreamer | null {
+    return this.layoutStream;
+  }
+
+  /**
+   * The centre the permanent placements are written about in the raw frame: the layout's centre where the world has a
+   * pack, (0, 0) on a packless ground world standing through its stand-in streamer, else null. Read only where
+   * placements are stood and the editor converts its frame; everything else keeps reading `layoutCenter`, which still
+   * means converted content.
+   */
+  get placeFrame(): { x: number; z: number } | null {
+    return this.layoutCenter ?? this.placeStandIn;
+  }
+
   private placeStructure(model: LoadedModel, x: number, z: number, rot: number): void {
     const y = this.terrain.heightAt(x, z);
     const obj = model.scene.clone();
@@ -2419,6 +2513,13 @@ export class World {
     // and only for a player who puts one down at all.
     this.housePack?.then((p) => this.releaseGuest(p)).catch(() => undefined);
     this.housePack = null;
+    // The other worlds light-loaded for a row naming `from` (a Naboo tree on Tatooine), or for the world editor's
+    // library, go with the world they stood behind, through the same hand.
+    for (const g of this.guestWorldsReady.values()) this.releaseGuest(g);
+    this.guestWorldsReady.clear();
+    this.guestWorlds.clear();
+    this.placeStandIn = null;
+    this.cameraRoomRule = null;
     surfaces.sweep();
     this.pack = null;
     this.packStatus = 'no pack';
@@ -5961,6 +6062,48 @@ export class World {
   }
 
   /**
+   * Another ground world's pack, light-loaded (`AssetPack.load(id, base, { layout: false })`: its manifest, its trees'
+   * collision shapes, its doors, its client data's effects and, where it has cells, its floors, never its layout), for a
+   * permanent row naming it in `from` and for the world editor's library: once a world, kept for the life of this world
+   * and let go with it through `releaseGuest`. This world's own id answers its own pack, never a second copy of it.
+   */
+  guestWorld(id: string): Promise<AssetPack | null> {
+    if (this.pack && this.pack.manifest.planet === id) return Promise.resolve(this.pack);
+    let p = this.guestWorlds.get(id);
+    if (!p) {
+      const asked = this.guestWorlds;
+      p = AssetPack.load(id, import.meta.env.BASE_URL, { layout: false })
+        .catch(() => null)
+        .then((g) => {
+          // Landed after its world went: nobody's now, let go at once rather than kept by the next world's list.
+          if (g && asked.get(id) !== p) {
+            this.releaseGuest(g);
+            return null;
+          }
+          if (g) this.guestWorldsReady.set(id, g);
+          return g;
+        });
+      this.guestWorlds.set(id, p);
+    }
+    return p;
+  }
+
+  /** A guest world already loaded, or null: what a synchronous stand reads (`guestWorld` loads it). */
+  guestWorldNow(id: string): AssetPack | null {
+    if (this.pack && this.pack.manifest.planet === id) return this.pack;
+    return this.guestWorldsReady.get(id) ?? null;
+  }
+
+  /** Every guest world asked for in this world, by pack id, and the ones that have landed. */
+  private readonly guestWorlds = new Map<string, Promise<AssetPack | null>>();
+  private readonly guestWorldsReady = new Map<string, AssetPack>();
+
+  /** This world's own pack, for the world editor's library: null on a packless world. */
+  get ownPack(): AssetPack | null {
+    return this.pack;
+  }
+
+  /**
    * Put a building on the ground in the world that is loaded, as a player placing a house does.
    *
    * This is the placing itself and the ground test in front of it; whether it is written down and
@@ -9464,7 +9607,16 @@ export class World {
   private updateInterior(playerPos: THREE.Vector3): void {
     if (!this.layoutStream) return;
     if (Number.isNaN(this.prevPlayerPos.x)) this.prevPlayerPos.copy(playerPos);
-    this.cellState = this.layoutStream.trackCell(this.cellState, this.prevPlayerPos, playerPos);
+    // While the world editor flies its camera (the anchor), the room is its own rule, re-decided every frame with no
+    // memory (`cameraRoomAt`): a camera flown in through a wall is in the room the frame it crosses, where following the
+    // portals would keep it outside. A new state only when the answer changes. Everybody else follows the portals.
+    const rule = this.cameraRoomRule;
+    if (rule) {
+      const a = this.layoutStream.cameraRoomAt(playerPos, this.cameraRoom, rule);
+      const now = this.cellState;
+      if (!a.building) this.cellState = null;
+      else if (!now || now.building !== a.building || now.cell !== a.cell) this.cellState = { building: a.building, cell: a.cell };
+    } else this.cellState = this.layoutStream.trackCell(this.cellState, this.prevPlayerPos, playerPos);
     this.prevPlayerPos.copy(playerPos);
     this.updateInteriorLights();
     const b = this.cellState?.building ?? null;
@@ -9764,7 +9916,7 @@ export class World {
     if (!this.playerTargetSet) this.setPlayerTarget(playerPos, true, onAttack);
     this.playerTargetSet = false;
     perf.begin(SEC.living);
-    this.stepLiving(dt, playerPos, this.camera);
+    if (!this.livingStill) this.stepLiving(dt, playerPos, this.camera);
     perf.end(SEC.living);
     if (target) this.turrets.update(dt, target, this.bolts);
     this.gallery?.update(dt, playerPos);

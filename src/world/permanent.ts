@@ -83,6 +83,11 @@ export interface DressingStand {
   solid?: boolean;
   clear?: number;
   effectsOf?: string;
+  /**
+   * The ground world a world row's model comes from (`PlacementRow.from`): the stand looks its model up in that pack
+   * first, a light guest standing behind the world (`LayoutStreamer.standPermanent`). Absent, this world's own.
+   */
+  from?: string;
 }
 
 /**
@@ -112,7 +117,10 @@ export function dressingStandOf(row: PlacementRow, g: GamePlace, key: string, th
     return { ...at, model: def.model, solid: standsSolid(row, furniture(def.template)), effectsOf: def.template };
   }
   if (!row.model) return null;
-  return { ...at, model: row.model, solid: standsSolid(row, false) };
+  // A gallery or world row's template is what it really is, handed on as the thing's own is: what its client data
+  // hangs on it (a world's brazier burns) and what `World.dataPlacedNear` counts a permanent chair as the world's own by.
+  // And its `from`, the world its model comes from. A row naming neither stands exactly as it always did.
+  return { ...at, model: row.model, solid: standsSolid(row, false), ...(row.template ? { effectsOf: row.template } : {}), ...(row.from && row.pack === 'world' ? { from: row.from } : {}) };
 }
 
 /**
@@ -201,8 +209,8 @@ export interface PermanentDeps {
   stand(row: PlacementRow, game: GamePlace, key: string): StandAnswer | null;
   /** Take what stands under `key` down. */
   unstand(key: string): void;
-  /** Whether a row's pack is on this machine and in hand now. */
-  packReady(pack: PlacementPack): boolean;
+  /** Whether a row's pack is on this machine and in hand now; `from`, the world a world row's model comes from, where it names one. */
+  packReady(pack: PlacementPack, from?: string): boolean;
   /** The world's generation now (`World.generation`). */
   generation(): number;
   /** What a row is called in words; its id when absent. */
@@ -405,7 +413,7 @@ export class PermanentLayer {
       const key = placementKey(e.row.id);
       // A row of a world state this world does not stand in (Restuss's rubble in the living city) is filed nowhere and
       // never taken out of its file; a state changes only at an arrival, so nothing is filed or unfiled mid-world.
-      const why: SkipReason | null = this.lifted.has(key) ? 'inHand' : this.kind === 'copies' ? 'copies' : this.kind === 'space' && e.row.kind === 'building' ? 'space' : e.row.state && !standsIn(e.row.state) ? 'otherState' : !this.deps.packReady(e.row.pack) ? 'noPack' : null;
+      const why: SkipReason | null = this.lifted.has(key) ? 'inHand' : this.kind === 'copies' ? 'copies' : this.kind === 'space' && e.row.kind === 'building' ? 'space' : e.row.state && !standsIn(e.row.state) ? 'otherState' : !this.deps.packReady(e.row.pack, e.row.from) ? 'noPack' : null;
       if (why) this.skips.set(key, { id: e.row.id, layer: e.layer, kind: e.row.kind, why });
       else want.push(e);
     }
@@ -554,5 +562,10 @@ export class PermanentLayer {
   /** The file a layer last read for this world, or null. */
   fileOf(layer: PlacementLayer): PlacementRead | null {
     return this.files[layer];
+  }
+
+  /** The world whose files this holds, or '' once that world has gone: `report().world` with nothing worked out. */
+  get worldIn(): string {
+    return this.current() ? this.world : '';
   }
 }
