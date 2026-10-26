@@ -26,7 +26,7 @@
 // Pure: no three, no rapier, no DOM. Rule for this file (node runs it with type stripping for the tests):
 // every import with its `.ts` extension, no enum, no namespace, no constructor parameter properties.
 
-import { mergeLayers, placementKey, radiusOfBounds, rowHash, syncPlan, toGame, type GamePlace, type PlacementEntry, type PlacementFrame, type PlacementLayer, type PlacementPack, type PlacementRead, type PlacementRow } from '../story/placements.ts';
+import { mergeLayers, placementKey, radiusOfBounds, rowHash, scaleOf, syncPlan, toGame, type GamePlace, type PlacementEntry, type PlacementFrame, type PlacementLayer, type PlacementPack, type PlacementRead, type PlacementRow } from '../story/placements.ts';
 import { standsIn } from './worldState.ts';
 
 /** Every number here is ours. Live through `__debug.placements({ tune })`. */
@@ -57,8 +57,13 @@ export interface PlacementBox {
 
 /** What standing one row gave. */
 export interface StandAnswer {
-  /** Its model's own box, in its own frame, or null for a model with none. */
+  /** Its model's own box, in its own frame, at the size it stands (its scale taken in), or null for a model with none. */
   bounds: PlacementBox | null;
+  /**
+   * What the stand set aside of the row and why, in words, or absent: a scale on a building with rooms (none this pass),
+   * a flora row's three scales taken as its largest. Said on the console and in the editor's lists, never a refusal.
+   */
+  note?: string;
   /**
    * Settles once its model is in and its programs are built, where it was filed into a tier already
    * standing; otherwise at once, the tier's own build being what does the work. What a loading screen waits
@@ -88,6 +93,8 @@ export interface DressingStand {
    * first, a light guest standing behind the world (`LayoutStreamer.standPermanent`). Absent, this world's own.
    */
   from?: string;
+  /** Its scale along its own axes (`PlacementRow.scale`), absent for none: what the streamer sets aside it decides and says. */
+  scale?: readonly [number, number, number];
 }
 
 /**
@@ -110,7 +117,8 @@ export function propStandOf(def: { model: string; template: string | null } | nu
 }
 
 export function dressingStandOf(row: PlacementRow, g: GamePlace, key: string, thingOf: (thing: string) => { model: string; template: string } | null, furniture: (template: string) => boolean): DressingStand | null {
-  const at = { key, x: g.x, y: g.y, z: g.z, q: g.q, inside: !!row.inside, ...(row.clear && row.clear > 0 ? { clear: row.clear } : {}) };
+  // A row's scale rides along only where it has one, so a row with none stands exactly as it always did.
+  const at = { key, x: g.x, y: g.y, z: g.z, q: g.q, inside: !!row.inside, ...(row.clear && row.clear > 0 ? { clear: row.clear } : {}), ...(row.scale !== undefined ? { scale: scaleOf(row) } : {}) };
   if (row.pack === 'props') {
     const def = row.thing ? thingOf(row.thing) : null;
     if (!def) return null;
@@ -209,6 +217,12 @@ export interface PermanentDeps {
   stand(row: PlacementRow, game: GamePlace, key: string): StandAnswer | null;
   /** Take what stands under `key` down. */
   unstand(key: string): void;
+  /**
+   * Take what stands under many keys down in one call, in the order given (props before the buildings they may stand
+   * in): a sync's removals handed over at once, so a thousand rows taken out are one pass over the streamer's lists
+   * (`LayoutStreamer.unplaceMany`) and not a thousand. Absent, `unstand` is asked a key at a time.
+   */
+  unstandMany?(keys: readonly string[]): void;
   /** Whether a row's pack is on this machine and in hand now; `from`, the world a world row's model comes from, where it names one. */
   packReady(pack: PlacementPack, from?: string): boolean;
   /** The world's generation now (`World.generation`). */
@@ -241,6 +255,15 @@ export interface StoodRow {
   v0: number;
   v1: number;
   label: string;
+  /** What its stand set aside of it, in words (`StandAnswer.note`), or absent. */
+  note?: string;
+}
+
+/** What one write did to one layer's file, as the page lands it (`landChanges`): the rows put, as stamped, and the ids taken out. */
+export interface LayerChange {
+  layer: PlacementLayer;
+  put: readonly PlacementRow[];
+  deleted: readonly string[];
 }
 
 /** What `report` says of one layer. */
@@ -423,30 +446,11 @@ export class PermanentLayer {
     // Down first, props before the buildings they may stand in, so nothing is let go of by a building only to
     // be taken down a moment later.
     const down = [...plan.remove, ...plan.change.map((e) => placementKey(e.row.id))];
-    down.sort((a, b) => (this.stood.get(a)?.row.kind === 'building' ? 1 : 0) - (this.stood.get(b)?.row.kind === 'building' ? 1 : 0));
-    for (const key of down) {
-      this.deps.unstand(key);
-      this.stood.delete(key);
-    }
+    this.takeDown(down);
     // Then up, buildings first (the plan's own order): changes and additions alike.
     const up = [...plan.change, ...plan.add];
-    up.sort((a, b) => (a.row.kind === 'building' ? 0 : 1) - (b.row.kind === 'building' ? 0 : 1));
     const builds: Promise<unknown>[] = [];
-    const stoodNow = new Set<string>();
-    for (const e of up) {
-      const key = placementKey(e.row.id);
-      stoodNow.add(key);
-      const g = toGame(e.row, this.centre, this.frame, this.place);
-      const answer = this.deps.stand(e.row, g, key);
-      if (answer === null) {
-        this.skips.set(key, { id: e.row.id, layer: e.layer, kind: e.row.kind, why: 'noModel' });
-        continue;
-      }
-      if (answer.built) builds.push(answer.built);
-      const s: StoodRow = { key, row: e.row, layer: e.layer, hash: rowHash(e.row), x: g.x, y: g.y, z: g.z, radius: radiusOfBounds(answer.bounds), ex: 1, ez: 0, u0: 0, u1: 0, v0: 0, v1: 0, label: this.deps.label?.(e.row) ?? e.row.id };
-      footprintOf(answer.bounds, g.q, s);
-      this.stood.set(key, s);
-    }
+    const stoodNow = this.standUp(up, builds);
     // What stood already and stands unchanged is called, layered and guarded as its row reads now: a row's
     // words and the layer it is in are not part of how it stands, so nothing re-stands it, but O's words and
     // the guard's width are read off the row and its layer.
@@ -459,6 +463,119 @@ export class PermanentLayer {
       s.layer = e.layer;
       s.label = this.deps.label?.(e.row) ?? e.row.id;
     }
+    this.guarded = [...this.stood.values()].filter(mayGuard);
+    return builds;
+  }
+
+  /** Keys taken down, props before the buildings they may stand in, in one call where the world takes one (`unstandMany`). */
+  private takeDown(down: string[]): void {
+    if (!down.length) return;
+    down.sort((a, b) => (this.stood.get(a)?.row.kind === 'building' ? 1 : 0) - (this.stood.get(b)?.row.kind === 'building' ? 1 : 0));
+    if (this.deps.unstandMany) this.deps.unstandMany(down);
+    else for (const key of down) this.deps.unstand(key);
+    for (const key of down) this.stood.delete(key);
+  }
+
+  /** Rows stood, buildings first; answers the keys stood, and pushes what to wait on for each to be built into `builds`. */
+  private standUp(up: PlacementEntry[], builds: Promise<unknown>[]): Set<string> {
+    up.sort((a, b) => (a.row.kind === 'building' ? 0 : 1) - (b.row.kind === 'building' ? 0 : 1));
+    const stoodNow = new Set<string>();
+    for (const e of up) {
+      const key = placementKey(e.row.id);
+      stoodNow.add(key);
+      const g = toGame(e.row, this.centre, this.frame, this.place);
+      const answer = this.deps.stand(e.row, g, key);
+      if (answer === null) {
+        this.skips.set(key, { id: e.row.id, layer: e.layer, kind: e.row.kind, why: 'noModel' });
+        continue;
+      }
+      if (answer.built) builds.push(answer.built);
+      const s: StoodRow = { key, row: e.row, layer: e.layer, hash: rowHash(e.row), x: g.x, y: g.y, z: g.z, radius: radiusOfBounds(answer.bounds), ex: 1, ez: 0, u0: 0, u1: 0, v0: 0, v1: 0, label: this.deps.label?.(e.row) ?? e.row.id, ...(answer.note ? { note: answer.note } : {}) };
+      footprintOf(answer.bounds, g.q, s);
+      this.stood.set(key, s);
+    }
+    return stoodNow;
+  }
+
+  /**
+   * A write of the world editor's landed by difference (DESIGN.md §2.11): each layer's held rows patched with what the
+   * write put and took out (by id, through an index kept beside each file's rows), and what stands brought to them **over
+   * the changed ids alone**, by the very rules a whole sync uses -- the world edit winning a clash, a row in hand left
+   * down, a state, a pack, a building in space -- so it stands and takes down exactly what a whole `setLayers` over the
+   * files as they now read would, and costs the page what changed rather than the file's size. `landed` are rows the
+   * editor held down (`lift`) that the write has now put somewhere: no longer held. Nothing is done for a world that has
+   * gone. Answers what to wait on for the rows stood to be built.
+   */
+  landChanges(changes: readonly LayerChange[], landed: readonly string[] = []): Promise<unknown>[] {
+    if (!this.current()) {
+      this.forgetStanding();
+      return [];
+    }
+    for (const key of landed) this.lifted.delete(key);
+    const ids = new Set<string>();
+    for (const c of changes) {
+      const f = this.files[c.layer] ?? { rows: [], skipped: [], unknown: [], problem: null };
+      const byId = new Map<string, number>();
+      f.rows.forEach((r, i) => byId.set(r.id, i));
+      let appended = false;
+      const gone = new Set<string>();
+      for (const id of c.deleted) {
+        if (byId.has(id)) gone.add(id);
+        ids.add(id);
+      }
+      for (const row of c.put) {
+        ids.add(row.id);
+        gone.delete(row.id);
+        const i = byId.get(row.id);
+        if (i !== undefined) f.rows[i] = row;
+        else {
+          byId.set(row.id, f.rows.length);
+          f.rows.push(row);
+          appended = true;
+        }
+      }
+      if (gone.size) f.rows = f.rows.filter((r) => !gone.has(r.id));
+      // The file is written one line a row sorted by id; the rows read back from it are in that order, and so are these.
+      if (appended) f.rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      this.files[c.layer] = f.rows.length || f.problem || f.skipped.length ? f : null;
+    }
+    for (const l of landed) {
+      const id = l.startsWith(placementKey('')) ? l.slice(placementKey('').length) : l;
+      ids.add(id);
+    }
+    const storyBy = new Map<string, PlacementRow>();
+    const worldBy = new Map<string, PlacementRow>();
+    for (const r of this.files.story?.rows ?? []) if (ids.has(r.id)) storyBy.set(r.id, r);
+    for (const r of this.files.world?.rows ?? []) if (ids.has(r.id)) worldBy.set(r.id, r);
+    const down: string[] = [];
+    const up: PlacementEntry[] = [];
+    for (const id of ids) {
+      const key = placementKey(id);
+      this.skips.delete(key);
+      const w = worldBy.get(id);
+      const s = storyBy.get(id);
+      if (w && s) this.skips.set(key, { id, layer: 'story', kind: s.kind, why: 'clash' });
+      const e: PlacementEntry | null = w ? { row: w, layer: 'world' } : s ? { row: s, layer: 'story' } : null;
+      const why: SkipReason | null = !e ? null : this.lifted.has(key) ? 'inHand' : this.kind === 'copies' ? 'copies' : this.kind === 'space' && e.row.kind === 'building' ? 'space' : e.row.state && !standsIn(e.row.state) ? 'otherState' : !this.deps.packReady(e.row.pack, e.row.from) ? 'noPack' : null;
+      if (e && why) this.skips.set(key, { id, layer: e.layer, kind: e.row.kind, why });
+      const was = this.stood.get(key);
+      if (!e || why) {
+        if (was) down.push(key);
+        continue;
+      }
+      if (!was) up.push(e);
+      else if (was.hash !== rowHash(e.row)) {
+        down.push(key);
+        up.push(e);
+      } else {
+        was.row = e.row;
+        was.layer = e.layer;
+        was.label = this.deps.label?.(e.row) ?? e.row.id;
+      }
+    }
+    this.takeDown(down);
+    const builds: Promise<unknown>[] = [];
+    this.standUp(up, builds);
     this.guarded = [...this.stood.values()].filter(mayGuard);
     return builds;
   }

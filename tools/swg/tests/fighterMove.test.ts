@@ -307,7 +307,9 @@ await Physics.create();
 {
   const streamSrc = readFileSync(join(root, 'src', 'world', 'layoutStream.ts'), 'utf8');
   ok(streamSrc.includes('topY: o.y + Math.max(box.min.y, box.max.y)'), 'the top of a model box is its higher end and never `max.y` on trust: a pack converted before the BOX chunk was read componentwise carries its corners the other way round, and such a blocker reads shorter than the feet of anything standing beside it and is refused silently, with no ray cast');
-  ok(streamSrc.includes('const hx = Math.abs(box.max.x - box.min.x) * 0.5;'), '... and its spans are extents for the same reason');
+  // Widened in the world editor's second wave on purpose: a row it scaled is a blocker at the size it stands (`* sx`, 1 for
+  // everything else), and the span is still an extent, the sign taken out before the scale.
+  ok(/const hx = Math\.abs\(box\.max\.x - box\.min\.x\) \* 0\.5( \* sx)?;/.test(streamSrc), '... and its spans are extents for the same reason');
   ok(/const far = reach \+ b\.radius;\s*\n\s*if \(dx \* dx \+ dz \* dz > far \* far\) continue;/.test(streamSrc), 'and what stands near a point is a squared distance over a flat list rather than a `hypot` over the collider map: the map is as many as fourteen hundred objects, the fill runs four times a step, and the early exit only fires once two dozen have been **accepted** — so it walked the whole map exactly where cover matters most, which is a body standing in the open');
   ok(!/for \(const \[o\] of this\.colliders\)/.test(streamSrc), '... and nothing destructures an entry of that map any more, which allocated a pair per object per pass');
   ok(/private noteBlocker\(o: PlacedObject\): void/.test(streamSrc) && /private forgetBlocker\(o: PlacedObject\): void/.test(streamSrc), 'the list is filled and emptied in the same two places the colliders themselves are');

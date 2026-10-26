@@ -6,7 +6,7 @@
 // editor's key block really applies these lists is pinned as text in `editorWiring.test.ts`.
 import assert from 'node:assert/strict';
 import { DEFAULT_BINDINGS, DEV_ONLY_ACTIONS, controlsActions, type Action } from '../../../src/core/input.ts';
-import { ALL_ACTIONS, EDITOR_ACTIONS, EDITOR_MUTES, EDITOR_READS, ctrlRule, editorDefaultCodes, editorMutes, shiftTips } from '../../../src/editor/editorKeys.ts';
+import { ALL_ACTIONS, CHORD_CODES, EDITOR_ACTIONS, EDITOR_MUTES, EDITOR_READS, ctrlChord, ctrlRule, editorDefaultCodes, editorMutes, shiftTips } from '../../../src/editor/editorKeys.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -47,6 +47,16 @@ const holders = (code: string): Action[] => (Object.keys(DEFAULT_BINDINGS) as Ac
   ok(shiftTips(true, false), "W2's rule: Shift with R tips while no move key is held");
   ok(!shiftTips(true, true), "W2's rule: with a move key held Shift is the fast flight and R turns");
   ok(!shiftTips(false, false), "W2's rule: without Shift, R turns");
+}
+
+{
+  // The Ctrl chords (W2): D duplicates, C copies, X cuts, Z undoes and Shift+Z redoes; nothing else is a chord (never Y,
+  // which would also open the Waypoints tab, and never V, which is the browser's own paste event).
+  ok(ctrlChord('KeyD', false) === 'dup' && ctrlChord('KeyD', true) === 'dup', 'Ctrl+D duplicates, with Shift or without');
+  ok(ctrlChord('KeyC', false) === 'copy' && ctrlChord('KeyX', false) === 'cut', 'Ctrl+C copies and Ctrl+X cuts');
+  ok(ctrlChord('KeyZ', false) === 'undo' && ctrlChord('KeyZ', true) === 'redo', 'Ctrl+Z undoes and Ctrl+Shift+Z redoes');
+  ok(['KeyY', 'KeyV', 'KeyA', 'KeyS', 'KeyW', 'Delete'].every((c) => ctrlChord(c, false) === null && ctrlChord(c, true) === null), 'Y, V and the rest are no chord of the editor\'s');
+  ok(CHORD_CODES.length === 4 && CHORD_CODES.every((c) => ctrlChord(c, false) !== null), 'and the block reads exactly the four codes that are chords');
 }
 
 console.log(`\n${checks} checks passed`);

@@ -48,6 +48,8 @@ export interface BoxedThing {
   z: number;
   q: { x: number; y: number; z: number; w: number };
   template: string;
+  /** Its scale along its own axes (a permanent row's), absent for none: its box is tested at the size it stands. */
+  scale?: { x: number; y: number; z: number };
 }
 
 /**
@@ -59,6 +61,11 @@ export interface BoxedThing {
 export function turnedBoxHit(r: AimRay, o: BoxedThing, b: { min: ArrayLike<number>; max: ArrayLike<number> }): void {
   const q = o.q;
   const sc = r.s > 0 ? 1 / r.s : 1;
+  // Its own scale along its own axes, where it has one (the frame is p + q (s ⊙ v), so the way back divides each axis).
+  const os = o.scale;
+  const scx = os ? sc / os.x : sc;
+  const scy = os ? sc / os.y : sc;
+  const scz = os ? sc / os.z : sc;
   const cx = -q.x;
   const cy = -q.y;
   const cz = -q.z;
@@ -71,18 +78,18 @@ export function turnedBoxHit(r: AimRay, o: BoxedThing, b: { min: ArrayLike<numbe
   let tx = 2 * (cy * vz - cz * vy);
   let ty = 2 * (cz * vx - cx * vz);
   let tz = 2 * (cx * vy - cy * vx);
-  const lox = (vx + cw * tx + (cy * tz - cz * ty)) * sc;
-  const loy = (vy + cw * ty + (cz * tx - cx * tz)) * sc;
-  const loz = (vz + cw * tz + (cx * ty - cy * tx)) * sc;
+  const lox = (vx + cw * tx + (cy * tz - cz * ty)) * scx;
+  const loy = (vy + cw * ty + (cz * tx - cx * tz)) * scy;
+  const loz = (vz + cw * tz + (cx * ty - cy * tx)) * scz;
   vx = r.dx;
   vy = r.dy;
   vz = r.dz;
   tx = 2 * (cy * vz - cz * vy);
   ty = 2 * (cz * vx - cx * vz);
   tz = 2 * (cx * vy - cy * vx);
-  const ldx = (vx + cw * tx + (cy * tz - cz * ty)) * sc;
-  const ldy = (vy + cw * ty + (cz * tx - cx * tz)) * sc;
-  const ldz = (vz + cw * tz + (cx * ty - cy * tx)) * sc;
+  const ldx = (vx + cw * tx + (cy * tz - cz * ty)) * scx;
+  const ldy = (vy + cw * ty + (cz * tx - cx * tz)) * scy;
+  const ldz = (vz + cw * tz + (cx * ty - cy * tx)) * scz;
   let t0 = 0;
   let t1 = r.len;
   for (let k = 0; k < 3; k++) {

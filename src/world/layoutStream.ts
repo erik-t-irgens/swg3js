@@ -196,6 +196,12 @@ export interface PlacedObject {
    * model id the world also carries draws exactly what it drew.
    */
   pack?: AssetPack;
+  /**
+   * How big it stands along its own axes: a permanent row's scale (the world editor's), absent for none, which is every
+   * snapshot object and everything else put down in play. A placement made in play is drawn, cast, collided and measured
+   * at it (`addToTier`, `addColliders`, `boundsOf`); the region tiers' bulk never holds one (folding is the next wave's).
+   */
+  scale?: THREE.Vector3;
 }
 
 /**
@@ -244,7 +250,23 @@ export interface RuntimePlacement {
   effectsOf?: string;
   /** The pack its model is looked up in first (`PlacedObject.pack`): another world's, for a permanent row naming `from`. */
   pack?: AssetPack;
+  /** How big it stands along its own axes (`PlacedObject.scale`); absent for none. */
+  scale?: THREE.Vector3;
 }
+
+/** A box `min`..`max` (either corner may come first) at a scale along its own axes: the corners scaled, which way round kept. */
+export function scaledBounds(b: { min: readonly number[]; max: readonly number[] }, s: { x: number; y: number; z: number }): { min: number[]; max: number[] } {
+  return { min: [b.min[0] * s.x, b.min[1] * s.y, b.min[2] * s.z], max: [b.max[0] * s.x, b.max[1] * s.y, b.max[2] * s.z] };
+}
+
+/** The largest of a scale's three axes: what a size that cannot take three (a caster's radius, a flora planting's shapes) takes. */
+export function largestAxis(s: { x: number; y: number; z: number } | undefined): number {
+  return s ? Math.max(s.x, s.y, s.z) : 1;
+}
+
+/** What the stand sets aside, in words: a scale on a building with rooms, and a flora row's three scales as one. */
+export const ROOMS_TAKE_NO_SCALE = 'a building with rooms takes no scale yet (it stands at its own size)';
+export const FLORA_TAKES_ONE_SCALE = 'a tree or a plant takes one scale (its largest axis): its trunk and its sway scale uniformly';
 
 /**
  * Which of a building's rooms a point is in, by the world editor's rule (`cameraRoomAt`): the building, the room, and
@@ -282,6 +304,11 @@ export interface Building {
   interiorCell?: Int16Array;
   /** Whether `interior` is currently built, so the sweep can tell "not yet" from "has none". */
   interiorBuilt: boolean;
+  /**
+   * Rooms built for a building put down in play beside the eye and held from the portal renderer while they compile with
+   * its shell (`addToTier`), with each one's room: moved into `interior` once their programs exist. Absent otherwise.
+   */
+  interiorHeld?: { meshes: THREE.Mesh[]; cells: number[] };
   /**
    * The furniture standing in its rooms, one group per tier, model and piece (commit 2b): the portal
    * renderer shows each with the rooms it can be seen in, in this building's pass. The one list for this
@@ -376,6 +403,39 @@ function regionNumber(rx: number, rz: number): number {
 const tmpM = new THREE.Matrix4();
 const tmpV = new THREE.Vector3();
 const ONE = new THREE.Vector3(1, 1, 1);
+const sfP = new THREE.Vector3();
+const sfQ = new THREE.Quaternion();
+const sfS = new THREE.Vector3();
+
+/**
+ * A list filtered **in place**, the kept items in their order: the same array, never a copy, since a tier's list is the
+ * region's own array (the collider sweep walks it) and the scene's children are three's. One pass.
+ */
+export function keepInPlace<T>(list: T[], keep: (item: T) => boolean): void {
+  let w = 0;
+  for (let r = 0; r < list.length; r++) {
+    const item = list[r];
+    if (keep(item)) list[w++] = item;
+  }
+  list.length = w;
+}
+
+/** Whether a scale is one number along all three axes (none at all counts). */
+function isUniform(s: { x: number; y: number; z: number } | undefined): boolean {
+  return !s || (s.x === s.y && s.y === s.z);
+}
+
+/**
+ * An effect's matrix on a scaled thing, its scale taken back out: the effect stands where the scaled model puts it, turned
+ * as the model turns it, at its own size, since a scale in the handle's matrix is half applied (an emitter's axes are
+ * normalised while its offsets and speeds go through the matrix). How big it burns is the attachments' `size`, a later
+ * wave's. With no scale the matrix is handed back untouched, so everything else places its effects exactly as before.
+ */
+function scaleFree(m: THREE.Matrix4, s: THREE.Vector3 | undefined): THREE.Matrix4 {
+  if (!s) return m;
+  m.decompose(sfP, sfQ, sfS);
+  return m.compose(sfP, sfQ, ONE);
+}
 const localA = new THREE.Vector3();
 const localB = new THREE.Vector3();
 /** The padded box a cell-follow tests a point against: one scratch, since a ship is followed as often as the player. */
@@ -449,6 +509,8 @@ const solidV = new THREE.Vector3();
 
 /** The one empty effect list every object without any shares, so a lookup allocates nothing. */
 const NO_EFFECTS: readonly PackEffect[] = [];
+/** No rooms made (`buildInterior`): one empty list, never written. */
+const NO_MESHES: THREE.Mesh[] = [];
 
 /** Whether a def is one of this pack's own, by identity: its placed entry, or the flora entry a planted model loads by. */
 function ownsDef(g: AssetPack, def: PackModelDef): boolean {
@@ -645,7 +707,7 @@ export class LayoutStreamer {
   private basinWater(prim: { geometry: THREE.BufferGeometry }, copies: readonly PlacedObject[], name: string, into: WaterSurfaceHandle[]): PlacedObject[] {
     const refused: PlacedObject[] = [];
     for (const p of copies) {
-      const h = this.waterSurface ? this.waterSurface(prim.geometry, new THREE.Matrix4().compose(tmpV.set(p.x, p.y, p.z), p.q, ONE), name) : null;
+      const h = this.waterSurface ? this.waterSurface(prim.geometry, new THREE.Matrix4().compose(tmpV.set(p.x, p.y, p.z), p.q, p.scale ?? ONE), name) : null;
       if (!h) {
         refused.push(p);
         continue;
@@ -701,6 +763,24 @@ export class LayoutStreamer {
       if (hit) return hit;
     }
     return undefined;
+  }
+
+  /**
+   * A model's entry as a thing at `scale` stands: the entry itself where there is no scale (so everything that is not a
+   * scaled permanent row reads exactly the entry it read), else a copy whose box is the scaled box. Made where a thing is
+   * placed or measured, never in a frame.
+   */
+  private scaledDef(def: PackModelDef | undefined, scale: THREE.Vector3 | undefined): PackModelDef | undefined {
+    if (!def || !scale || !def.bounds || def.bounds.min.length < 3 || def.bounds.max.length < 3) return def;
+    return { ...def, bounds: scaledBounds(def.bounds, scale) };
+  }
+
+  /** A placed object's model box at the size it stands (its scale taken in), or its model's own; null for none. */
+  private scaledBoxOf(o: PlacedObject): { min: number[]; max: number[] } | null {
+    const def = this.defOf(o.model, o.pack);
+    const b = def?.bounds;
+    if (!b || b.min.length < 3 || b.max.length < 3) return null;
+    return o.scale ? scaledBounds(b, o.scale) : b;
   }
 
   private loadedOf(id: string, pack?: AssetPack): LoadedModel | null {
@@ -1016,7 +1096,8 @@ export class LayoutStreamer {
    * still drawn -- a garage has no cells and is scenery).
    */
   async place(p: RuntimePlacement): Promise<Building | null> {
-    const def = this.defOf(p.model, p.pack);
+    // Its model's entry as it stands: its box at its scale, where it has one, for every size it is filed and judged by.
+    const def = this.scaledDef(this.defOf(p.model, p.pack), p.scale);
     // Filed by the rule the layout's own objects were (step 6).
     const sizeTier = modelTier(p.radius, def?.bounds, !!def?.particle);
     const snapTier = snapshotTier(p.radius);
@@ -1037,6 +1118,7 @@ export class LayoutStreamer {
       footprint: 0,
       ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}),
       ...(p.pack ? { pack: p.pack } : {}),
+      ...(p.scale ? { scale: p.scale } : {}),
     };
     this.objects.push(placed);
     this.placedByKey.set(p.template, placed);
@@ -1099,11 +1181,11 @@ export class LayoutStreamer {
     const homeless: PlacedObject[] = [];
     for (const p of this.placedByKey.values()) if (p.contained && !p.host) homeless.push(p);
     for (const p of homeless) {
-      const a = this.furnitureIndex.assign(p, this.defOf(p.model, p.pack), this.hostAnswer);
+      const a = this.furnitureIndex.assign(p, this.scaledDef(this.defOf(p.model, p.pack), p.scale), this.hostAnswer);
       // A thing in the doorway stands partly outside and keeps no host, so filing it again would change nothing.
       if (a.host < 0 || this.hostObjects[a.host] !== building || a.flags & HOST_FLAG.doorway) continue;
       this.unplace(p.template);
-      void this.place({ model: p.model, template: p.template, x: p.x, y: p.y, z: p.z, q: p.q, radius: p.radius, inside: true, solid: p.solid, ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}), ...(p.pack ? { pack: p.pack } : {}) });
+      void this.place({ model: p.model, template: p.template, x: p.x, y: p.y, z: p.z, q: p.q, radius: p.radius, inside: true, solid: p.solid, ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}), ...(p.pack ? { pack: p.pack } : {}), ...(p.scale ? { scale: p.scale } : {}) });
     }
   }
 
@@ -1150,6 +1232,48 @@ export class LayoutStreamer {
     this.dropFromTier(placed);
     this.lastColliderX = NaN;
     return true;
+  }
+
+  /**
+   * Many things taken back out at once, by the names they were placed under, in the order given (props before the
+   * buildings they stand in): what `unplace` does for each, with every list they are in walked **once** rather than once
+   * a thing -- the world's objects, each region's tier lists, each loaded tier's meshes and effects, and the scene's
+   * children -- so a thousand rows taken out by one action are one pass and not a thousand (`unplace` alone splices each
+   * list per thing, which is quadratic: measured in node, ten thousand crates one at a time 107 ms, at once 14 ms,
+   * `unplaceMany.test.ts`). Every list keeps the rest in their order, and a
+   * tier's list stays the region's own array (the collider sweep walks it). Answers how many were taken out.
+   */
+  unplaceMany(templates: readonly string[]): number {
+    const going = new Set<PlacedObject>();
+    for (const template of templates) {
+      const placed = this.placedByKey.get(template);
+      if (!placed || going.has(placed)) continue;
+      going.add(placed);
+      this.placedByKey.delete(template);
+      const circle = this.placedCircles.get(template);
+      if (circle) {
+        this.placedCircles.delete(template);
+        this.releasedCircles.add(circle);
+        this.onFloraCircle?.(circle);
+      }
+      const hostId = this.hostIds.get(placed);
+      if (hostId !== undefined) {
+        this.furnitureIndex.remove(hostId);
+        this.hostIds.delete(placed);
+        this.unhost(placed);
+      }
+    }
+    if (!going.size) return 0;
+    keepInPlace(this.objects, (o) => !going.has(o));
+    const regions = new Set<Region>();
+    for (const p of going) {
+      const region = this.regions.get(`${regionIndex(p.x)},${regionIndex(p.z)}`);
+      if (region) regions.add(region);
+    }
+    for (const region of regions) for (const list of region.objects) keepInPlace(list, (o) => !going.has(o));
+    this.dropManyFromTier(going);
+    this.lastColliderX = NaN;
+    return going.size;
   }
 
   /**
@@ -1232,7 +1356,8 @@ export class LayoutStreamer {
             if (o.contained) continue;
             const def = this.defOf(o.model, o.pack);
             if (def?.particle) continue;
-            const radius = modelReach(def?.bounds);
+            // At the size it stands: a permanent row scaled by the editor is in the way of what its scaled box covers.
+            const radius = modelReach(o.scale ? this.scaledBoxOf(o) : def?.bounds);
             if (!(radius > 0)) continue;
             const want = radius + reach;
             if ((o.x - x) ** 2 + (o.z - z) ** 2 > want * want) continue;
@@ -1294,12 +1419,14 @@ export class LayoutStreamer {
             if (!b || !b.min || !b.max || b.min.length < 3 || b.max.length < 3) continue;
             // Flora by the world's own pack, or by the world a row's model came from (a Naboo tree on Tatooine is no wall).
             if (this.floraDefIs(def, o.pack)) continue;
-            const ax = b.min[0];
-            const bx = b.max[0];
-            const ay = b.min[1];
-            const by = b.max[1];
-            const az = b.min[2];
-            const bz = b.max[2];
+            // At the size it stands (a scaled permanent row's box scaled along its own axes); 1 for everything else.
+            const sc = o.scale;
+            const ax = sc ? b.min[0] * sc.x : b.min[0];
+            const bx = sc ? b.max[0] * sc.x : b.max[0];
+            const ay = sc ? b.min[1] * sc.y : b.min[1];
+            const by = sc ? b.max[1] * sc.y : b.max[1];
+            const az = sc ? b.min[2] * sc.z : b.min[2];
+            const bz = sc ? b.max[2] * sc.z : b.max[2];
             const hx = Math.abs(bx - ax) / 2;
             const hz = Math.abs(bz - az) / 2;
             // Its top over its own origin, which stands on its ground line, the higher corner taken (as a room's is): a
@@ -1401,6 +1528,94 @@ export class LayoutStreamer {
     return this.placedByKey.get(key) ?? null;
   }
 
+  /** Whether the placement filed under a key is a building whose rooms the portal renderer draws (it takes no scale). */
+  placedHasRooms(key: string): boolean {
+    const p = this.placedByKey.get(key);
+    return !!p && !!this.runtime.get(p)?.building;
+  }
+
+  /** The meshes `editorCopies` hid, per placement, to show again. */
+  private readonly editorHidden = new WeakMap<PlacedObject, THREE.Object3D[]>();
+
+  /**
+   * The world editor's live picture of a placement made in play while it is moved, turned or scaled (DESIGN.md §2.6):
+   * copies of the meshes it draws **now**, on the same geometry, materials and instancing (an instanced mesh of one each,
+   * as `addToTier` makes them), so a copy builds no program -- a mesh still waiting on its programs is not copied. A
+   * piece drawn with a building's rooms (the furniture's own layer) is copied onto the world's and the actors' layers,
+   * which is what the furniture switch's old rule draws it with and what it is compiled for. Hung in the scene, not culled
+   * (its sphere is the model's, at its origin); the caller writes their one matrix, and takes them away with
+   * `dropEditorCopies`. A basin's water body is not copied.
+   */
+  editorCopies(key: string): THREE.InstancedMesh[] {
+    const p = this.placedByKey.get(key);
+    const rec = p ? this.runtime.get(p) : undefined;
+    const out: THREE.InstancedMesh[] = [];
+    if (!rec) return out;
+    for (const mesh of rec.meshes) {
+      const m = mesh as THREE.InstancedMesh;
+      if (!m.isInstancedMesh || !m.visible) continue;
+      const c = new THREE.InstancedMesh(m.geometry, m.material, 1);
+      c.instanceMatrix.copy(m.instanceMatrix);
+      c.instanceMatrix.needsUpdate = true;
+      c.layers.mask = m.layers.mask;
+      if (m.layers.isEnabled(INTERIOR_LAYER) && !m.layers.isEnabled(0)) {
+        c.layers.set(0);
+        c.layers.enable(ACTOR_LAYER);
+      }
+      c.castShadow = m.castShadow;
+      c.receiveShadow = m.receiveShadow;
+      c.renderOrder = m.renderOrder;
+      c.frustumCulled = false;
+      c.userData = { ...m.userData };
+      this.scene.add(c);
+      this.editorOut.add(c);
+      out.push(c);
+    }
+    return out;
+  }
+
+  /**
+   * Every copy `editorCopies` handed out and nobody has taken away yet: `dispose` takes them out with the world, since the
+   * scene outlives it and a copy left there would draw the next world on this one's freed geometry and materials.
+   */
+  private readonly editorOut = new Set<THREE.InstancedMesh>();
+
+  /** Copies `editorCopies` made, taken away: out of the scene and their instance buffers let go, never the shared geometry or materials. */
+  dropEditorCopies(copies: readonly THREE.InstancedMesh[]): void {
+    for (const c of copies) {
+      const mine = this.editorOut.delete(c);
+      if (!mine && !c.parent) continue;
+      c.removeFromParent();
+      c.dispose();
+    }
+  }
+
+  /**
+   * A placement's own meshes hidden while the editor's copies stand for it, or shown again: only those that were drawn
+   * when they were hidden come back, so one still waiting on its programs is never shown early. Its colliders stay where
+   * they are until the row is written and stood again.
+   */
+  setEditorHidden(key: string, hidden: boolean): void {
+    const p = this.placedByKey.get(key);
+    if (!p) return;
+    if (hidden) {
+      const rec = this.runtime.get(p);
+      if (!rec || this.editorHidden.has(p)) return;
+      const was: THREE.Object3D[] = [];
+      for (const m of rec.meshes) {
+        if (!m.visible) continue;
+        m.visible = false;
+        was.push(m);
+      }
+      this.editorHidden.set(p, was);
+      return;
+    }
+    const was = this.editorHidden.get(p);
+    if (!was) return;
+    this.editorHidden.delete(p);
+    for (const m of was) m.visible = true;
+  }
+
   /** A model for the world editor's hand, loaded through whichever pack carries it, `pack` looked in first where given. */
   modelFor(id: string, pack?: AssetPack): Promise<LoadedModel> {
     return this.modelOf(id, pack);
@@ -1482,6 +1697,8 @@ export class LayoutStreamer {
     if (crossWorld) this.useFromPack(from);
     else if (from !== this.pack) this.useGuestPack(from);
     if (row.clear && row.clear > 0) this.keepFloraOff(row.x, row.z, row.clear);
+    const sized = this.standScale(row.scale, def, crossWorld ? from : undefined);
+    const bounds = def.bounds ? (sized.scale ? scaledBounds(def.bounds, sized.scale) : def.bounds) : null;
     const built = this.place({
       model: row.model,
       template: row.key,
@@ -1489,13 +1706,31 @@ export class LayoutStreamer {
       y: row.y,
       z: row.z,
       q: new THREE.Quaternion(row.q[0], row.q[1], row.q[2], row.q[3]),
-      radius: radiusOfBounds(def.bounds),
+      radius: radiusOfBounds(bounds),
       inside: row.inside,
       ...(row.solid !== undefined ? { solid: row.solid } : {}),
       ...(row.effectsOf ? { effectsOf: row.effectsOf } : {}),
       ...(crossWorld ? { pack: from } : {}),
+      ...(sized.scale ? { scale: sized.scale } : {}),
     });
-    return { bounds: def.bounds ?? null, built };
+    return { bounds, built, ...(sized.note ? { note: sized.note } : {}) };
+  }
+
+  /**
+   * The scale a permanent row stands at, and what was set aside of it in words (DESIGN.md §2.7): none at all on a
+   * building with rooms (35 sites read a building's matrix with metric constants in its own frame: Map-maker II's
+   * audit), one scale (the largest axis) on flora (its collision extent and its sway take one), the three as written on
+   * anything else. Absent, or 1 along every axis, is no scale at all, so a row with none stands exactly as it did.
+   */
+  private standScale(s: readonly [number, number, number] | undefined, def: PackModelDef, pack?: AssetPack): { scale: THREE.Vector3 | null; note: string | null } {
+    if (!s || (s[0] === 1 && s[1] === 1 && s[2] === 1)) return { scale: null, note: null };
+    const rooms = !def.particle && !!def.cells?.some((c) => c.index > 0) && !!def.portals?.length;
+    if (rooms) return { scale: null, note: ROOMS_TAKE_NO_SCALE };
+    if ((s[0] !== s[1] || s[1] !== s[2]) && this.floraDefIs(def, pack)) {
+      const m = Math.max(s[0], s[1], s[2]);
+      return { scale: new THREE.Vector3(m, m, m), note: FLORA_TAKES_ONE_SCALE };
+    }
+    return { scale: new THREE.Vector3(s[0], s[1], s[2]), note: null };
   }
 
   private addExclusion(e: Exclusion): void {
@@ -2468,17 +2703,19 @@ export class LayoutStreamer {
     }
     // Taken away again, or its whole tier unloaded, while the model loaded.
     if (this.disposed || this.runtime.get(p) !== rec) return null;
-    tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
+    // At its scale, where it has one (a permanent row the world editor sized); `ONE` otherwise, exactly as before.
+    const scale = p.scale ?? ONE;
+    tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, scale);
     if (this.effects && model.def.effects?.length) {
       const localFx = new THREE.Matrix4();
-      for (const fx of model.def.effects) rec.effects.push(this.effects.place(this.effectFile(model.def, fx.file), localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), (fx.cell ?? 0) > 0));
+      for (const fx of model.def.effects) rec.effects.push(this.effects.place(this.effectFile(model.def, fx.file), scaleFree(localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.scale), (fx.cell ?? 0) > 0));
     }
     // A thing put down in play carries what its own template's client data hangs on it: a brazier from
     // the Props tab burns, a server-placed torch among the fittings flames.
     const ownFx = this.effects ? this.templateEffects(p.effectsOf ?? p.template, p.pack) : NO_EFFECTS;
     if (this.effects && ownFx.length) {
       const localFx = new THREE.Matrix4();
-      for (const fx of ownFx) rec.effects.push(this.effects.place(fx.file, localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.contained));
+      for (const fx of ownFx) rec.effects.push(this.effects.place(fx.file, scaleFree(localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.scale), p.contained));
     }
     loaded.effects.push(...rec.effects);
     let building: Building | null = null;
@@ -2492,17 +2729,19 @@ export class LayoutStreamer {
     for (const prim of model.primitives) {
       // A portal building's rooms are drawn per cell by the portal renderer, out of `buildInterior`.
       if (building && prim.cell > 0 && model.portals.length > 0) continue;
-      // A basin put down out in the open holds the water system's water, as the world's own do.
-      if (!p.contained && prim.cell <= 0 && isBasinWater(prim.material) && !this.basinWater(prim, [p], model.def.id, rec.waters).length) {
+      // A basin put down out in the open holds the water system's water, as the world's own do -- at one scale only: a
+      // basin stretched along one axis is drawn as the model draws its water, since a water body is level and round.
+      if (!p.contained && prim.cell <= 0 && isBasinWater(prim.material) && isUniform(p.scale) && !this.basinWater(prim, [p], model.def.id, rec.waters).length) {
         const h = rec.waters[rec.waters.length - 1];
         loaded.waters.push(h);
         rec.meshes.push(h.mesh);
         continue;
       }
       const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
-      mesh.setMatrixAt(0, tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE));
-      // A house or a prop put down in play by the same rule as a tier's copies, the page's slider included.
-      stampCaster(mesh, model.radius, this.packFlora(model) || wearsCard(prim.material), 0);
+      mesh.setMatrixAt(0, tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, scale));
+      // A house or a prop put down in play by the same rule as a tier's copies, the page's slider included: at the size
+      // it stands, its largest axis (1 with no scale).
+      stampCaster(mesh, p.scale ? model.radius * largestAxis(p.scale) : model.radius, this.packFlora(model) || wearsCard(prim.material), 0);
       mesh.castShadow = stampedCasts(mesh);
       if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
       // A thing standing in a room is drawn with the room, which is the actor layer -- the same line
@@ -2525,20 +2764,81 @@ export class LayoutStreamer {
         loaded.furniture.push(entry);
       }
     }
-    if (this.prepare && rec.meshes.length) {
+    // A house is put down where somebody is standing, so its rooms are wanted now rather than at the
+    // next sweep. NaN before the first sweep, which fails the test and leaves it to the sweep. With a
+    // prepare, they are made held and compiled with its shell (`buildInterior`'s `hold`), and given to the
+    // portal renderer only once their programs exist, as the shell is shown only then.
+    const roomsNow = !!building && Math.hypot(building.x - this.lastInteriorX, building.z - this.lastInteriorZ) - building.radius <= this.interiorRange(building);
+    const held = building && roomsNow && this.prepare ? this.buildInterior(building, true) : NO_MESHES;
+    if (this.prepare && (rec.meshes.length || held.length)) {
       try {
-        await this.prepare(rec.meshes);
+        await this.prepare(held.length ? [...rec.meshes, ...held] : rec.meshes);
       } catch (err) {
         console.warn('snapshot: an object placed in play could not be compiled ahead of its first draw; shown anyway', err);
       }
       if (this.disposed || this.runtime.get(p) !== rec) return building;
       for (const mesh of rec.meshes) this.reveal(mesh);
+      if (building) this.releaseInterior(building);
     }
-    // A house is put down where somebody is standing, so its rooms are wanted now rather than at the
-    // next sweep. NaN before the first sweep, which fails the test and leaves it to the sweep.
-    if (building && Math.hypot(building.x - this.lastInteriorX, building.z - this.lastInteriorZ) - building.radius <= this.interiorRange(building)) this.buildInterior(building);
+    if (building && roomsNow && !this.prepare) this.buildInterior(building);
     this.lastColliderX = Number.NaN;
     return building;
+  }
+
+  /**
+   * `dropFromTier` for many at once: each one's colliders, building, furniture, waters and effects let go as one would be,
+   * and its meshes taken out of the scene and out of their tier's list with each list walked once (`keepInPlace`), the
+   * scene's children included -- `Object3D.remove` looks each child up in the list, which is a pass a mesh.
+   */
+  private dropManyFromTier(going: ReadonlySet<PlacedObject>): void {
+    const meshes = new Set<THREE.Object3D>();
+    const effects = new Set<EffectHandle>();
+    const tiers = new Set<LoadedTier>();
+    for (const p of going) {
+      const rec = this.runtime.get(p);
+      this.runtime.delete(p);
+      this.removeColliders(p);
+      if (!rec) continue;
+      tiers.add(rec.tier);
+      if (rec.building) {
+        this.dropInterior(rec.building);
+        this.buildings.delete(rec.building);
+        const i = rec.tier.buildings.indexOf(rec.building);
+        if (i >= 0) rec.tier.buildings.splice(i, 1);
+        if (this.lastInside === rec.building) this.lastInside = null;
+      }
+      for (const mesh of rec.meshes) meshes.add(mesh);
+      this.dropFurniture(rec.furniture);
+      for (const e of rec.furniture) {
+        const i = rec.tier.furniture.indexOf(e);
+        if (i >= 0) rec.tier.furniture.splice(i, 1);
+      }
+      for (const w of rec.waters) {
+        w.remove();
+        const i = rec.tier.waters.indexOf(w);
+        if (i >= 0) rec.tier.waters.splice(i, 1);
+      }
+      if (this.effects) for (const h of rec.effects) {
+        this.effects.remove(h);
+        effects.add(h);
+      }
+      this.loadedInstances--;
+      rec.tier.instances--;
+    }
+    if (!meshes.size && !effects.size) return;
+    // Out of the scene in one pass: what `remove` does for each (its parent cleared and told), the list walked once.
+    for (const parent of new Set([...meshes].map((m) => m.parent).filter((p): p is THREE.Object3D => !!p))) keepInPlace(parent.children, (c) => !meshes.has(c));
+    for (const mesh of meshes) {
+      if (mesh.parent) {
+        mesh.parent = null;
+        mesh.dispatchEvent({ type: 'removed' } as never);
+      }
+      if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
+    }
+    for (const t of tiers) {
+      keepInPlace(t.meshes, (m) => !meshes.has(m));
+      if (effects.size) keepInPlace(t.effects, (h) => !effects.has(h));
+    }
   }
 
   /** Everything `addToTier` made for one placement, undone. */
@@ -2584,11 +2884,15 @@ export class LayoutStreamer {
   /**
    * Make a building's interior meshes. Geometry and materials are shared with the model, so
    * this is a handful of Object3Ds, not a copy of the mesh; the portal renderer shows them.
+   *
+   * With `hold` (a building put down in play beside the eye, `addToTier`) the rooms are made into the scene hidden and kept
+   * in `interiorHeld`, out of the portal renderer's reach, and handed back for the caller to compile with the building's
+   * shell; `releaseInterior` gives them to the portal renderer once their programs exist. Without it, as ever.
    */
-  private buildInterior(b: Building): void {
-    if (b.interiorBuilt) return;
+  private buildInterior(b: Building, hold = false): THREE.Mesh[] {
+    if (b.interiorBuilt) return NO_MESHES;
     b.interiorBuilt = true;
-    if (!b.model.portals.length) return;
+    if (!b.model.portals.length) return NO_MESHES;
     const made: THREE.Mesh[] = [];
     const cells: number[] = [];
     for (const prim of b.model.primitives) {
@@ -2603,17 +2907,18 @@ export class LayoutStreamer {
       mesh.receiveShadow = true;
       mesh.visible = false;
       mesh.layers.set(INTERIOR_LAYER);
-      b.interior.push(mesh);
+      if (!hold) b.interior.push(mesh);
       made.push(mesh);
     }
-    b.interiorCell = Int16Array.from(cells);
+    if (hold) b.interiorHeld = { meshes: made, cells };
+    else b.interiorCell = Int16Array.from(cells);
     // The doors in its doorways, with its rooms: made and prepared out of sight and shown when their
     // programs exist, and taken down with the rooms (`dropInterior`).
     if (this.doorHost) {
       const table = this.doorTableOf(b.model.def);
       if (table) this.doorHost.build(b, table);
     }
-    if (!made.length) return;
+    if (!made.length) return made;
     // Into the scene now, hidden, as they always have been: the portal renderer writes `visible`
     // itself for the cells it draws.
     //
@@ -2628,11 +2933,26 @@ export class LayoutStreamer {
     // asked for anyway, and it has the walk to the door to finish in; if the player beats it, the
     // frame that draws the cell builds the program exactly as it did before any of this, and the
     // frame loop's shader line says so.
+    //
+    // A building put down in play beside the eye has no walk to the door: the frame it stands is the frame its rooms are
+    // seen through its doors and windows, and each room's first draw built its program there and waited on its link (on a
+    // fresh profile every gallery house the world editor put down held one frame 300 to 400 ms so). Its rooms are held
+    // (`hold`) and compiled with its shell, which is hidden until then too, so the whole house shows at once.
     for (const mesh of made) this.scene.add(mesh);
-    if (!this.prepare) return;
+    if (hold || !this.prepare) return made;
     void this.prepare(made).catch((err) => {
       console.warn('snapshot: a building’s rooms could not be compiled ahead of being drawn', err);
     });
+    return made;
+  }
+
+  /** A building's held rooms (`buildInterior`'s `hold`) given to the portal renderer: their programs exist now. */
+  private releaseInterior(b: Building): void {
+    const held = b.interiorHeld;
+    if (!held) return;
+    b.interiorHeld = undefined;
+    for (const mesh of held.meshes) b.interior.push(mesh);
+    b.interiorCell = Int16Array.from(held.cells);
   }
 
   /** Drop a building's interior meshes. Shared geometry and materials are left alone. */
@@ -2640,6 +2960,9 @@ export class LayoutStreamer {
     if (!b.interiorBuilt) return;
     this.doorHost?.drop(b);
     for (const mesh of b.interior) this.scene.remove(mesh);
+    // Rooms still held while they compiled (a building taken up before it stood) go with the rest.
+    if (b.interiorHeld) for (const mesh of b.interiorHeld.meshes) this.scene.remove(mesh);
+    b.interiorHeld = undefined;
     b.interior.length = 0;
     b.interiorCell = undefined;
     b.interiorBuilt = false;
@@ -2788,8 +3111,9 @@ export class LayoutStreamer {
     // nothing at all for one the client walked through. Every triangle of a placed tree was a collider, its canopy a
     // ceiling to walk on. Only for permanent rows: the snapshot's own placed trees keep their trimesh.
     if (o.template.startsWith(PLACEMENT_KEY_PREFIX) && this.packFlora(model)) {
-      const m = tmpM.compose(tmpV.set(o.x, o.y, o.z), o.q, ONE);
-      const parts = rowFloraParts(model.def, m.elements, 1, model.radius, model.height, o.y, FLORA_COLLISION);
+      // At the row's one scale (a flora row's three were taken as its largest when it was stood).
+      const m = tmpM.compose(tmpV.set(o.x, o.y, o.z), o.q, o.scale ?? ONE);
+      const parts = rowFloraParts(model.def, m.elements, largestAxis(o.scale), model.radius, model.height, o.y, FLORA_COLLISION);
       for (const part of parts) {
         const col = this.physics.createStaticPart(part);
         if (!col) continue;
@@ -2811,13 +3135,24 @@ export class LayoutStreamer {
       if (this.waterSurface && !o.contained && prim.cell <= 0 && isBasinWater(prim.material)) continue;
       const idx = prim.geometry.getIndex();
       const indices = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
+      // A scaled row's colliders take the scale baked into their vertices (the engine's trimesh has none of its own), on
+      // the copy made here before it is cleaned, so a degenerate triangle is judged at the size it stands.
+      const verts = new Float32Array(posAttr.array as ArrayLike<number>);
+      const sc = o.scale;
+      if (sc) {
+        for (let k = 0; k + 2 < verts.length; k += 3) {
+          verts[k] *= sc.x;
+          verts[k + 1] *= sc.y;
+          verts[k + 2] *= sc.z;
+        }
+      }
       // Cleaned and flagged, as every other trimesh in the game is. This was the one path that did
       // neither, which mattered less while it carried a few hundred big models and matters a great
       // deal now that it carries the thousands of small ones a town's rooms are furnished with: a
       // degenerate triangle under a character controller is an engine panic after which every call
       // fails. Measured on the worst spot this change reaches it costs about sixty per cent more to
       // build and makes the first step after insertion twenty-six times cheaper.
-      const clean = cleanTrimesh(new Float32Array(posAttr.array as ArrayLike<number>), indices);
+      const clean = cleanTrimesh(verts, indices);
       // Nothing survived the clean: every triangle was degenerate. That is a mesh with no collision
       // to give rather than an error, and it is stepped over the way the huge path steps over one.
       if (!clean) continue;
@@ -2912,19 +3247,23 @@ export class LayoutStreamer {
     // would put a rock's top at or below the feet of anything standing beside it and refuse it
     // silently, with no ray cast and nothing to show for it. The spans survive either way once the
     // sign is taken out, and the middle is a midpoint whichever corner is which.
-    const hx = Math.abs(box.max.x - box.min.x) * 0.5;
-    const hz = Math.abs(box.max.z - box.min.z) * 0.5;
+    // At the size it stands (a scaled permanent row's box along its own axes); 1 for everything else.
+    const sx = o.scale ? o.scale.x : 1;
+    const sy = o.scale ? o.scale.y : 1;
+    const sz = o.scale ? o.scale.z : 1;
+    const hx = Math.abs(box.max.x - box.min.x) * 0.5 * sx;
+    const hz = Math.abs(box.max.z - box.min.z) * 0.5 * sz;
     // The disc that covers the model's own box whatever way it is turned. It over-blocks -- a
     // square kilometre of town by four to twelve times -- and that does not matter, because a
     // blocker never claims cover: it only says where to put a candidate, and the rays decide.
     const radius = Math.hypot(hx, hz);
     if (!(radius > 0)) return;
-    blockCentre.set((box.min.x + box.max.x) * 0.5, 0, (box.min.z + box.max.z) * 0.5).applyQuaternion(o.q);
+    blockCentre.set((box.min.x + box.max.x) * 0.5 * sx, 0, (box.min.z + box.max.z) * 0.5 * sz).applyQuaternion(o.q);
     this.blockAt.set(o, this.blockList.length);
     // A placed object is turned about the world's up on every world in the game, so the model's own
     // highest point is still its highest point. Anything tipped on its side would read low here, and
     // the rays would refuse the spot it offered rather than believe it.
-    this.blockList.push({ o, x: o.x + blockCentre.x, z: o.z + blockCentre.z, radius, topY: o.y + Math.max(box.min.y, box.max.y) });
+    this.blockList.push({ o, x: o.x + blockCentre.x, z: o.z + blockCentre.z, radius, topY: o.y + Math.max(box.min.y, box.max.y) * sy });
   }
 
   /** And forget it when its collision goes: the last record is swapped into the hole it leaves. */
@@ -3348,6 +3687,7 @@ export class LayoutStreamer {
 
   dispose(): void {
     this.disposed = true;
+    if (this.editorOut.size) this.dropEditorCopies([...this.editorOut]);
     for (const b of this.buildings) this.dropInterior(b);
     for (const region of this.regions.values()) for (let t = 0; t < TIERS.length; t++) this.unloadTier(region, t);
     for (const o of [...this.colliders.keys()]) this.removeColliders(o);

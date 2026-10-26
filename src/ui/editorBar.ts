@@ -19,6 +19,10 @@ const EDITOR_BAR_CSS = `
 #editor-bar .said { font-size: 11px; letter-spacing: 0.03em; color: var(--good); text-align: center; min-height: 1.2em; }
 #editor-bar .said.bad { color: var(--bad); }
 #editor-bar .hint { font-size: 10px; letter-spacing: 0.04em; color: var(--muted); text-align: center; }
+#editor-bar .sel { font-size: 11px; letter-spacing: 0.03em; color: var(--ink); text-align: center; min-height: 1.2em; }
+#editor-bar .files { font-size: 10px; letter-spacing: 0.03em; color: var(--muted); text-align: center; }
+#editor-bar .keys { white-space: pre; font-size: 10px; line-height: 1.45; color: var(--ink); background: color-mix(in srgb, var(--plate) 85%, transparent); border: 1px solid var(--rule); border-radius: 4px; padding: 6px 10px; text-align: left; }
+#editor-bar .keys:empty { display: none; }
 `;
 
 let styled = false;
@@ -41,11 +45,17 @@ export interface EditorBarView {
   said: string;
   saidOk: boolean;
   hint: string;
+  /** What is picked: how many, the first's name, id, file and raw place. */
+  sel: string;
+  /** Each file this world's edits touched and the destination, as git says it is: saved, not committed, committed, on main. */
+  files: string;
+  /** The key sheet (H), a line a key, or nothing. */
+  keys: string;
 }
 
 /** A view with nothing in it. */
 export function editorBarView(): EditorBarView {
-  return { mode: '', speed: '', hand: '', dest: '', room: '', notes: '', said: '', saidOk: true, hint: '' };
+  return { mode: '', speed: '', hand: '', dest: '', room: '', notes: '', said: '', saidOk: true, hint: '', sel: '', files: '', keys: '' };
 }
 
 /** The bar. */
@@ -61,17 +71,17 @@ export class EditorBar {
     const root = document.createElement('div');
     root.id = 'editor-bar';
     root.hidden = true;
-    root.innerHTML = '<div class="notes"></div><div class="said"></div><div class="row"><span class="mode"></span><span class="speed"></span><span class="hand"></span><span class="dest"></span><span class="room"></span></div><div class="hint"></div>';
+    root.innerHTML = '<div class="keys"></div><div class="notes"></div><div class="said"></div><div class="sel"></div><div class="row"><span class="mode"></span><span class="speed"></span><span class="hand"></span><span class="dest"></span><span class="room"></span></div><div class="files"></div><div class="hint"></div>';
     parent.appendChild(root);
     this.root = root;
     const q = (c: string) => root.querySelector<HTMLElement>(`.${c}`);
-    this.parts = { mode: q('mode'), speed: q('speed'), hand: q('hand'), dest: q('dest'), room: q('room'), notes: q('notes'), said: q('said'), saidOk: null, hint: q('hint') };
+    this.parts = { mode: q('mode'), speed: q('speed'), hand: q('hand'), dest: q('dest'), room: q('room'), notes: q('notes'), said: q('said'), saidOk: null, hint: q('hint'), sel: q('sel'), files: q('files'), keys: q('keys') };
   }
 
   /** Show the bar with this frame's words; only what changed is written. */
   show(v: EditorBarView): void {
     if (this.root.hidden) this.root.hidden = false;
-    for (const k of ['mode', 'speed', 'hand', 'dest', 'room', 'notes', 'said', 'hint'] as const) {
+    for (const k of ['mode', 'speed', 'hand', 'dest', 'room', 'notes', 'said', 'hint', 'sel', 'files', 'keys'] as const) {
       if (v[k] === this.last[k]) continue;
       this.last[k] = v[k];
       const el = this.parts[k];

@@ -5,7 +5,9 @@
 // camera's room; the story told at entry; the guard on closing the tab; the editor's step after the camera; the
 // three permanent-layer gates reading `placeFrame`; Escape left to a panel or the map that is up; the screen's three gates;
 // and the editor entry's own hand-overs (its mutes, the ghost's prepare, another world's pack handed over before its
-// model is asked about, a moved tune reaching the flight, N's refusal, the leave's room and height, the restart words).
+// model is asked about, a moved tune reaching the flight, N's refusal, the leave's room and height, the restart words);
+// and the second wave's (the batch and git's word through the game, the removals handed over at once, the dev server's
+// word dropped at a landed revision, the selection's frame and keys, the wheel, Delete, the paste, the hover's scale).
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -53,8 +55,13 @@ function after(src: string, marker: string, n = 2000): string {
 {
   // The editor's own hand-overs, in its entry (which node cannot load: it hangs on the page's three and the interface).
   const ed = read('src/editor/editorEntry.ts');
-  const keys = after(ed, '  keys(dt: number, oldHand: boolean): void {', 3200);
-  ok(/if \(ctrl\) \{[\s\S]{0,200}input\.mute\(ctrlRule\(ctrl\)\);\s*return;\s*\}/.test(keys), 'while Ctrl is held the key block mutes every action (`ctrlRule`) and reads nothing more');
+  const keys = after(ed, '  keys(dt: number, oldHand: boolean): void {', 6000);
+  // Widened in the second wave on purpose: while Ctrl is held the block reads the editor's own chords (raw keys, never an
+  // action) before it mutes every action, and still reads nothing else.
+  ok(/if \(ctrl\) \{[\s\S]{0,700}this\.edits\.chords\(\);\s*input\.mute\(ctrlRule\(ctrl\)\);\s*return;\s*\}/.test(keys), 'while Ctrl is held the key block reads only the editor\'s chords and mutes every action (`ctrlRule`), reading nothing more');
+  // And a hold or a drag made before Ctrl pauses: `idle` takes the frame's mouse and button edges from it, and the camera
+  // holds still while it has the mouse (the editing class's own test drives `idle`; this is the hand-over).
+  ok(/if \(ctrl\) \{[\s\S]{0,200}this\.edits\.idle\(\);\s*a\.look = !this\.session\.point && input\.locked && !this\.edits\.takesMouse;/.test(keys), 'while Ctrl is held the editing is told the frame is idle before the look is decided');
   ok(/input\.mute\(editorMutes\(oldHand\)\);\s*if \(!oldHand\) input\.mute\(TAKEN\);\s*\}/.test(keys), "and otherwise ends by muting what it borrows (`editorMutes`, the attack left for the old tabs' hand while it holds something) and the hand keys it took");
   ok(/prepare: \(meshes\) => host\.world\.prepareLikeStreamed\(meshes\),/.test(ed), "the ghost is prepared the streamer's own way, so a never-stood thing builds its programs off the frame");
   const take = after(ed, '  async take(e: LibraryEntry', 3000);
@@ -115,6 +122,33 @@ function after(src: string, marker: string, n = 2000): string {
   ok(main.includes("if (!this.world.placeFrame) return 'this world has no layout to stand anything in';"), "`editRefusal` reads `placeFrame`");
   ok(/for \(const id of new Set\(rows\.filter\(\(r\) => r\.pack === 'world' && r\.from\)\.map\(\(r\) => r\.from as string\)\)\) await this\.world\.guestWorld\(id\);/.test(main), "`dressingPacks` loads each other world a row names, light");
   ok(/if \(s\.from\) \{\s*const guest = this\.world\.guestWorldNow\(s\.from\);\s*return guest \? this\.world\.standPlacement\(s, guest\) : null;/.test(main), 'and a row out of another world stands out of that world alone');
+}
+
+{
+  // The second wave's hand-overs, which every behaviour test of the selection, the batch and the landing makes for itself.
+  ok(/batch: \(edits\) => this\.editorBatch\(edits\),\s*status: \(\) => this\.editorStatus\(\),\s*rowFor: \(id\) => this\.editorRowFor\(id\),/.test(main), "the editor's host writes a batch, asks git's word and reads a row through the game's own (editorBatch, editorStatus, editorRowFor)");
+  ok(/unstandMany: \(keys\) => \{\s*for \(const key of keys\) this\.standOutOf\(key\);\s*this\.world\.unplaceMany\(keys\);\s*\},/.test(main), "the permanent layer's removals go to the streamer at once (`unplaceMany`), everybody stood out of each first");
+  ok(/unplaceMany\(keys: readonly string\[\]\): number \{\s*return this\.layoutStream\?\.unplaceMany\(keys\) \?\? 0;/.test(world), "and the world hands them to its streamer's `unplaceMany`");
+  ok(main.includes("import.meta.hot.on('placements:changed', (d: PlacementWord) => this.placementWord(d));"), "the dev server's word goes through `placementWord`, which drops a revision already landed");
+  const ed = read('src/editor/editorEntry.ts');
+  ok(/batch: \(edits\) => host\.batch\(edits\),\s*status: \(\) => host\.status\(\),/.test(ed), "the entry hands the hand on the selection the host's batch and status");
+  ok(/this\.edits\.clock\.now = now;\s*this\.edits\.frame\(m\);\s*this\.moveEyeForEdits\(\);\s*endPointerFrame\(this\.pointer\);/.test(ed), "the selection's frame (the gizmo, the hold, the drag, the clicks, the marks) runs after the camera, its moment in the kept clock, and before the pointer's frame is spent");
+  ok(/this\.edits\.clock\.dt = dt;\s*this\.edits\.keys\(this\.window\?\.library\.typing \?\? false\);\s*\}/.test(ed), "the editing keys are read in the key block, the frame's seconds in the kept clock, before the mutes take what they borrow");
+  // This round's hand-overs (the fixer's), which the editing class's own test makes for itself.
+  const click = after(ed, '  canvasClick(): void {', 600);
+  ok(/if \(this\.hand \|\| !this\.pointer\.clicked\) return;\s*if \(this\.aim\.hover \|\| this\.edits\.handleHot \|\| !this\.edits\.clickGoesToFly\(\)\) return;\s*this\.pointer\.clicked = false;\s*this\.setPoint\(false\);/.test(click), "a plain click on empty ground in Point goes to Fly by the click alone (`clickGoesToFly`: nothing picked), never by whether a frame has seen the press");
+  ok(/if \(live\.snap\) \{\s*const s = EDITOR_TUNE\.snap;\s*this\.edits\.snapOn = s\.on;\s*if \(s\.grid > 0\) this\.edits\.grid = s\.grid;\s*if \(s\.angle > 0\) this\.edits\.angle = s\.angle;\s*\}/.test(ed), "a moved snap tune (the console's or a slider's) reaches the snapping live");
+  ok(/roomAt: \(x, y, z\) => \{\s*const s = w\.streamer;\s*if \(!s\) return false;\s*roomAsk\.set\(x, y, z\);\s*s\.cameraRoomAt\(roomAsk, roomAnswer, floorUnder\);\s*return !!roomAnswer\.building;\s*\},/.test(ed), "a row's room where it moves to is asked by the very rule a thing put down is written by (`cameraRoomAt` with `floorUnder`)");
+  ok(/dropCopies: \(c\) => dropCopiesAnyway\(w\.streamer, c\),/.test(ed) && /function dropCopiesAnyway\([\s\S]{0,200}?\): void \{\s*if \(stream\) stream\.dropEditorCopies\(copies\);\s*for \(const c of copies\) \{\s*if \(!c\.parent\) continue;\s*c\.removeFromParent\(\);\s*c\.dispose\(\);/.test(ed), "the editor's copies are taken away with or without a streamer standing (a write's release can come after a travel unloaded it)");
+  ok(/if \(this\.editorOut\.size\) this\.dropEditorCopies\(\[\.\.\.this\.editorOut\]\);/.test(read('src/world/layoutStream.ts')), "and a streamer's dispose takes away every copy it handed out and nobody took back");
+  ok(/this\.ghostM\.compose\(this\.ghostPos, hand\.q, hand\.scale\);\s*this\.ghost\.place\(this\.ghostM, inRoom\);/.test(ed) && /if \(!hand\.building && hand\.sBounds\) this\.ghostPos\.y -= lowestOf\(hand\.sBounds, hand\.q, this\.tmp\);/.test(ed), "a row picked up into the hand is drawn and stood at its own scale (its lowest point at that size), as it is written back");
+  ok(/if \(this\.edits\.takesMouse\) this\.edits\.wheelStep\(-wheel\);/.test(ed), 'the wheel steps the grid while a hand key is held on the selection');
+  ok(/else if \(!this\.edits\.deleteKey\(\)\) this\.deleteHovered\(\);/.test(ed), 'Delete takes the selection out, and the row under the aim when nothing is picked');
+  ok(/document\.addEventListener\('paste', \(e\) => \{\s*if \(!this\.session\.on \|\| typingIn\(e\.target\)\) return;\s*const text = e\.clipboardData\?\.getData\('text\/plain'\) \?\? null;/.test(ed), "a paste reads the document's own paste event, never the clipboard API (a prompt on localhost)");
+  ok(/if \(this\.session\.on && e\.ctrlKey && e\.code === 'KeyD' && !typingIn\(e\.target\)\) e\.preventDefault\(\);/.test(ed), "Ctrl+D is kept from the browser's bookmark while the editor is on");
+  ok(/this\.hoverM\.compose\(this\.tmp\.set\(hov\.x, hov\.y, hov\.z\), hov\.q, hov\.scale \?\? ONE\);/.test(ed), "the hover's box is drawn at the row's scale");
+  const vite = read('vite.config.ts');
+  ok(/const word = editFileOf\(/.test(vite) && /rev: revisionOfFile\(/.test(vite), "the dev server's watcher names a file's kind (`editFileOf`) and its revision");
 }
 
 console.log(`\n${checks} checks passed`);

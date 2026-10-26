@@ -16,20 +16,36 @@
 // layers. A layer left with no rows has its file taken away rather than left empty, so a dressing tried and
 // taken back leaves nothing behind for git to carry.
 //
+// **The world editor's one write is a batch** (`applyPlacementBatch`, DESIGN.md §2.11): every row an action changed,
+// in every file it touched, checked all or nothing -- each file read as it stands, every edit applied in order, every
+// row read back -- and any refusal writes nothing. Each edit may carry `was`, the row as the endpoint last answered it
+// (or null for a row that must not be there): a row edited by hand or by another tab since is refused by its id, which
+// is what keeps an undo from writing over somebody's work. One marked `keepAt` keeps the row's own `at` rather than the
+// moment's, so an undo puts a file back to its text before the action byte for byte. The answer carries only what
+// changed: for each file its revision (twelve hex of the SHA-1 of its text as written, handed in as `ctx.hash`), the
+// rows put as they were stamped and the ids taken out, never both layers read whole.
+//
 // Here rather than beside the reader in `src/story/`, whose every file ships with the server in every release:
 // a release carries none of the editor. Pure: no fs, no DOM. Rule for this file (node runs it with type
 // stripping): every import with its `.ts` extension, no enum, no namespace, no constructor parameter properties.
 
-import { PLACEMENT_FIELDS, PLACEMENT_LIMITS, isPlacementId, mintPlacementId, placementsFileText, placementsPath, readPlacementRow, readPlacementsFile, readPlacementsFileRaw, rowHash, type PlacementLayer, type PlacementRead, type PlacementRow } from '../story/placements.ts';
+import { EDIT_FILE_KINDS, PLACEMENT_FIELDS, PLACEMENT_LIMITS, editFilePath, isPlacementId, mintPlacementId, placementsFileText, placementsPath, readPlacementRow, readPlacementsFile, readPlacementsFileRaw, rowHash, type EditFileKind, type PlacementLayer, type PlacementRead, type PlacementRow } from '../story/placements.ts';
 
 /** Every number of the endpoint, all ours. Read where the dev server runs it, and not moved from the browser. */
 export const PLACEMENTS_ENDPOINT_TUNE = {
-  /** The largest body an ask may carry, bytes. */
-  bodyMax: 262144,
+  /**
+   * The largest body an ask may carry, bytes: a backstop tied to the row backstop (a batch of every row of a file is a
+   * few tens of megabytes), since it guards an endpoint that answers this machine's own page alone. It was 262,144 while
+   * every ask was one row.
+   */
+  bodyMax: 64 * 1024 * 1024,
   /** How many times a file is put in place over one another program holds open, and how long apart, ms. */
   renameTries: 6,
   renameWaitMs: 50,
 };
+
+/** The most edits one batch may carry: twice the rows a file may hold (a whole file moved to the other layer), a backstop. */
+export const BATCH_MOST = 2 * PLACEMENT_LIMITS.rows;
 
 /** The header the editor's own asks carry, and what it says. */
 export const EDITOR_HEADER = 'x-swg3js-dev';
@@ -38,10 +54,15 @@ export const EDITOR_HEADER_VALUE = 'placements';
 /** What kind of world a pack id is: decides the frame its files are written in, and the copies take none. */
 export type EditWorldKind = 'ground' | 'space' | 'copies';
 
-/** What an ask is judged against: every world there is, and the moment, which a written row is stamped with. */
+/**
+ * What an ask is judged against: every world there is, and the moment, which a written row is stamped with. `hash`, where
+ * handed in (the dev server's glue hands node's SHA-1), names a file's revision from the text written: twelve hex of its
+ * SHA-1. Absent, every revision is ''.
+ */
 export interface PlacementCtx {
   worlds: ReadonlyMap<string, EditWorldKind>;
   now: number;
+  hash?: (text: string) => string;
 }
 
 /** What is known of a request before its body is read. */
@@ -66,6 +87,8 @@ export interface PlacementReplyOk {
   file: string;
   story: PlacementRead | null;
   world: PlacementRead | null;
+  /** Each file written's revision ('' for one taken away), so the page drops the dev server's word about what it has landed. */
+  revs?: Partial<Record<PlacementLayer, string>>;
 }
 export interface PlacementReplyNo {
   ok: false;
@@ -73,10 +96,40 @@ export interface PlacementReplyNo {
 }
 export type PlacementReply = PlacementReplyOk | PlacementReplyNo;
 
+/** What a batch did to one file: its revision as written ('' taken away), how many rows it holds now, the rows put as stamped and the ids taken out. */
+export interface BatchFileAnswer {
+  file: string;
+  rev: string;
+  rows: number;
+  put: PlacementRow[];
+  deleted: string[];
+}
+
+/** A batch answered: each file it touched, and (the glue's) the endpoint's own milliseconds. */
+export interface PlacementBatchOk {
+  ok: true;
+  op: 'batch';
+  world: string;
+  files: Partial<Record<PlacementLayer, BatchFileAnswer>>;
+  ms?: number;
+}
+export type PlacementBatchReply = PlacementBatchOk | PlacementReplyNo;
+
+/** One edit of a batch: a row put into (or replacing one in) a file, or an id taken out of one, `was` its row as last answered. */
+export interface BatchEdit {
+  file: EditFileKind;
+  put?: Record<string, unknown>;
+  delete?: string;
+  /** The row as the endpoint last answered it (the cleaned row, `at` included), or null for a row that must not be there; absent asks nothing. */
+  was?: Record<string, unknown> | null;
+  /** The row's own `at` kept rather than the moment's: what an undo and a redo send, so a file goes back byte for byte. */
+  keepAt?: boolean;
+}
+
 /** An ask's answer: its status, its body, and what to write -- a file's whole text, or null to take the file away. */
 export interface PlacementAnswer {
   status: number;
-  body: PlacementReply;
+  body: PlacementReply | PlacementBatchOk;
   writes: { layer: PlacementLayer; text: string | null }[];
 }
 
@@ -177,7 +230,8 @@ export function applyPlacementOp(op: unknown, current: { story: string | null; w
   if (!op || typeof op !== 'object' || Array.isArray(op)) return no(400, 'an ask is an object');
   const o = op as Record<string, unknown>;
   const kind = o.op;
-  if (kind !== 'put' && kind !== 'delete' && kind !== 'move' && kind !== 'rename') return no(400, 'an ask is a put, a delete, a move or a rename');
+  if (kind === 'batch') return applyPlacementBatch(o, current, ctx);
+  if (kind !== 'put' && kind !== 'delete' && kind !== 'move' && kind !== 'rename') return no(400, 'an ask is a put, a delete, a move, a rename or a batch');
   if (o.layer !== 'story' && o.layer !== 'world') return no(400, 'its layer is story or world');
   const layer: PlacementLayer = o.layer;
   if (typeof o.world !== 'string' || !WORLD.test(o.world)) return no(400, 'its world is a pack id: a-z, 0-9 and _, 40 at most');
@@ -261,28 +315,190 @@ export function applyPlacementOp(op: unknown, current: { story: string | null; w
 
   const writes: { layer: PlacementLayer; text: string | null }[] = [];
   const reads: Record<PlacementLayer, PlacementRead | null> = { story: held.story.read, world: held.world.read };
+  const revs: Partial<Record<PlacementLayer, string>> = {};
   for (const l of LAYERS) {
     if (!touched.has(l)) continue;
-    const list = held[l].rows;
-    if (!list.length) {
-      if (held[l].text !== null) writes.push({ layer: l, text: null });
-      reads[l] = null;
+    const out = writeBack(held[l], l, world, frame, readKind);
+    if (typeof out === 'string') return no(500, out);
+    if (out.write) writes.push(out.write);
+    reads[l] = out.back;
+    revs[l] = out.write?.text ? (ctx.hash?.(out.write.text) ?? '') : '';
+  }
+  return { status: 200, body: { ok: true, op: kind, id, layer, file: editFile(layer, world), story: reads.story, world: reads.world, revs }, writes };
+}
+
+/**
+ * One layer's rows written back as a file's text and read back before anything is written: every row, the ones written
+ * and the ones carried, as it was. Looked up in a map by id, so a write is linear in the file (one `find` a row was 669 ms
+ * at 10,000 rows and two seconds at 20,000). A layer left with no rows is taken away (`text` null, `back` null), and one
+ * that was never there and is still empty writes nothing. Answers why not in words.
+ */
+function writeBack(h: Held, l: PlacementLayer, world: string, frame: 'raw' | 'game', readKind: 'ground' | 'space'): { write: { layer: PlacementLayer; text: string | null } | null; back: PlacementRead | null } | string {
+  const list = h.rows;
+  if (!list.length) return { write: h.text !== null ? { layer: l, text: null } : null, back: null };
+  const text = placementsFileText(world, frame, list.map((e) => e.raw as unknown as PlacementRow));
+  const back = readPlacementsFile(text, world, readKind);
+  const lost = back.problem ?? (back.skipped.length ? back.skipped.map((s) => `${s.id}: ${s.why}`).join('; ') : null);
+  if (lost) return `${editFile(l, world)} would not read back as the editor wrote it (${lost})`;
+  const backById = new Map<string, PlacementRow>();
+  for (const r of back.rows) backById.set(r.id, r);
+  for (const e of list) {
+    const b = backById.get(e.row.id);
+    if (!b || !sameRow(b, e.row)) return `${e.row.id} would not read back as the editor wrote it`;
+  }
+  return { write: { layer: l, text }, back };
+}
+
+/**
+ * The world editor's one write (`{ op: 'batch', world, edits }`, DESIGN.md §2.11): every edit applied in order to both
+ * layers as they stand, each file read back, and nothing written unless all of it holds. An edit is
+ * `{ file, put: row }` (a row put in, or replacing the one of its id in that file; a row with no id is given one from
+ * its thing or model, unique across both layers as they stand at that edit, and a given id is kept, refused only where
+ * the other layer holds it) or `{ file, delete: id }`, either with `was` (the row as the endpoint last answered it, or
+ * null for one that must not be there: a row that differs is refused by its id) and a put with `keepAt` (the row's own
+ * `at` kept). The kinds of file the editor's fifth wave writes (`removed`, `people`) are refused in words until it does.
+ * The answer names, for each file touched, its revision as written ('' for one taken away), how many rows it holds, the
+ * rows put as they were stamped (the last put of an id winning) and the ids taken out.
+ */
+export function applyPlacementBatch(o: Record<string, unknown>, current: { story: string | null; world: string | null }, ctx: PlacementCtx): PlacementAnswer {
+  if (typeof o.world !== 'string' || !WORLD.test(o.world)) return no(400, 'its world is a pack id: a-z, 0-9 and _, 40 at most');
+  const world = o.world;
+  const wk = ctx.worlds.get(world);
+  if (!wk) return no(404, `there is no world called ${world}`);
+  const edits = o.edits;
+  if (!Array.isArray(edits) || !edits.length) return no(400, 'a batch carries a list of edits');
+  if (edits.length > BATCH_MOST) return no(413, `a batch is ${BATCH_MOST} edits at most`);
+  if (wk === 'copies') return no(409, "nothing stands for good in the dungeons' world of copies");
+  const readKind = wk === 'space' ? 'space' : 'ground';
+  const frame = wk === 'space' ? 'game' : 'raw';
+  const held = {} as Record<PlacementLayer, Held>;
+  for (const l of LAYERS) {
+    const h = openLayer(current[l], l, world, readKind);
+    if (typeof h === 'string') return no(409, h);
+    held[l] = h;
+  }
+  const other = (l: PlacementLayer): PlacementLayer => (l === 'story' ? 'world' : 'story');
+  // Each layer's rows by id, kept in step with the list, so a batch of thousands is linear.
+  const index = {} as Record<PlacementLayer, Map<string, number>>;
+  const reindex = (l: PlacementLayer): void => {
+    const m = new Map<string, number>();
+    held[l].rows.forEach((e, i) => m.set(e.row.id, i));
+    index[l] = m;
+  };
+  for (const l of LAYERS) reindex(l);
+  const taken = new Set<string>([...index.story.keys(), ...index.world.keys()]);
+  const touched = new Set<PlacementLayer>();
+  const put = { story: new Map<string, PlacementRow>(), world: new Map<string, PlacementRow>() } as Record<PlacementLayer, Map<string, PlacementRow>>;
+  const deleted = { story: new Set<string>(), world: new Set<string>() } as Record<PlacementLayer, Set<string>>;
+  // Rows taken out wait to be spliced out together, once, at the end: a splice an edit is quadratic in a big file.
+  const gone = { story: new Set<number>(), world: new Set<number>() } as Record<PlacementLayer, Set<number>>;
+  for (let n = 0; n < edits.length; n++) {
+    const e = edits[n] as BatchEdit | null;
+    const at = `edit ${n + 1}`;
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return no(400, `${at} is not an edit`);
+    if (!(EDIT_FILE_KINDS as readonly unknown[]).includes(e.file)) return no(400, `${at}'s file is story, world, removed or people`);
+    if (e.file !== 'story' && e.file !== 'world') return no(400, `${at}: the ${e.file} file is the world editor's fifth wave's, which this endpoint does not write yet`);
+    const l: PlacementLayer = e.file;
+    const hasPut = e.put !== undefined;
+    const hasDel = e.delete !== undefined;
+    if (hasPut === hasDel) return no(400, `${at} is a put or a delete`);
+    // What stands under the id in this file now (an earlier edit of this batch included), for `was`.
+    const now = (id: string): PlacementRow | null => {
+      const i = index[l].get(id);
+      return i === undefined || gone[l].has(i) ? null : held[l].rows[i].row;
+    };
+    const wasHolds = (id: string): string | null => {
+      if (e.was === undefined) return null;
+      const cur = now(id);
+      if (e.was === null) return cur ? `${id} is in ${editFile(l, world)} already` : null;
+      if (!cur) return `${id} is not in ${editFile(l, world)} any more`;
+      const w = readPlacementRow({ ...e.was, id });
+      if (typeof w === 'string' || !sameRow(w, cur)) return `${id} has changed in ${editFile(l, world)} since the editor read it: undo refuses to write over it`;
+      return null;
+    };
+    if (hasDel) {
+      if (!isPlacementId(e.delete)) return no(400, `${at}: a delete names the row by its id`);
+      const id = e.delete;
+      const i = index[l].get(id);
+      if (i === undefined || gone[l].has(i)) return no(404, `${id} is not in ${editFile(l, world)}`);
+      const why = wasHolds(id);
+      if (why) return no(409, why);
+      gone[l].add(i);
+      index[l].delete(id);
+      taken.delete(id);
+      put[l].delete(id);
+      deleted[l].add(id);
+      touched.add(l);
       continue;
     }
-    const text = placementsFileText(world, frame, list.map((e) => e.raw as unknown as PlacementRow));
-    // Read back before anything is written: every row, the one written and the ones carried, as it was. Looked up in a
-    // map by id, so a put is linear in the file: one `find` a row was 669 ms at 10,000 rows and two seconds at 20,000.
-    const back = readPlacementsFile(text, world, readKind);
-    const lost = back.problem ?? (back.skipped.length ? back.skipped.map((s) => `${s.id}: ${s.why}`).join('; ') : null);
-    if (lost) return no(500, `${editFile(l, world)} would not read back as the editor wrote it (${lost})`);
-    const backById = new Map<string, PlacementRow>();
-    for (const r of back.rows) backById.set(r.id, r);
-    for (const e of list) {
-      const b = backById.get(e.row.id);
-      if (!b || !sameRow(b, e.row)) return no(500, `${e.row.id} would not read back as the editor wrote it`);
+    const asked = e.put;
+    if (!asked || typeof asked !== 'object' || Array.isArray(asked)) return no(400, `${at}: a put carries a row`);
+    let rid = asked.id;
+    if (rid === undefined || rid === null || rid === '') rid = mintPlacementId(typeof asked.thing === 'string' ? asked.thing : typeof asked.model === 'string' ? asked.model : 'place', taken);
+    if (!isPlacementId(rid)) return no(400, `${at}: its id is not a-z, 0-9, _ and - (64 at most, starting with a letter or a digit)`);
+    const id = rid;
+    const otherAt = index[other(l)].get(id);
+    if (otherAt !== undefined && !gone[other(l)].has(otherAt)) return no(409, `${id} is in ${layerWords(other(l))}`);
+    const why = wasHolds(id);
+    if (why) return no(409, why);
+    let stamp = ctx.now;
+    if (e.keepAt) {
+      if (typeof asked.at !== 'number' || !Number.isFinite(asked.at) || asked.at < 0) return no(400, `${at}: keepAt asks for a row carrying its own at`);
+      stamp = asked.at;
     }
-    writes.push({ layer: l, text });
-    reads[l] = back;
+    const row = cleanRow(asked, id, stamp);
+    if (typeof row === 'string') return no(400, `${id} is refused: ${row}`);
+    const i = index[l].get(id);
+    if (i !== undefined && !gone[l].has(i)) held[l].rows[i] = { row, raw: withExtras(row, held[l].rows[i].raw) };
+    else {
+      if (held[l].rows.length - gone[l].size >= PLACEMENT_LIMITS.rows) return no(409, `${editFile(l, world)} holds ${PLACEMENT_LIMITS.rows} rows, as many as a file may`);
+      index[l].set(id, held[l].rows.length);
+      held[l].rows.push({ row, raw: withExtras(row, null) });
+    }
+    taken.add(id);
+    deleted[l].delete(id);
+    put[l].set(id, row);
+    touched.add(l);
   }
-  return { status: 200, body: { ok: true, op: kind, id, layer, file: editFile(layer, world), story: reads.story, world: reads.world }, writes };
+  const writes: { layer: PlacementLayer; text: string | null }[] = [];
+  const files: Partial<Record<PlacementLayer, BatchFileAnswer>> = {};
+  for (const l of LAYERS) {
+    if (!touched.has(l)) continue;
+    if (gone[l].size) held[l].rows = held[l].rows.filter((_, i) => !gone[l].has(i));
+    const out = writeBack(held[l], l, world, frame, readKind);
+    if (typeof out === 'string') return no(500, out);
+    if (out.write) writes.push(out.write);
+    files[l] = { file: editFile(l, world), rev: out.write?.text ? (ctx.hash?.(out.write.text) ?? '') : '', rows: held[l].rows.length, put: [...put[l].values()], deleted: [...deleted[l]] };
+  }
+  return { status: 200, body: { ok: true, op: 'batch', world, files }, writes };
+}
+
+/**
+ * What a file is to git, from the read-only answers the dev server's glue gathers (`git status --porcelain`, whether it is
+ * in HEAD, whether it differs from main): `none` (no file, and none in HEAD), `untracked` (a file git has never been
+ * told of), `modified` (saved, not committed: changed, added or taken away since HEAD), `committed` (on this branch as it
+ * stands) or `main` (the same on main). Pure; the glue runs git, every call `--no-optional-locks`, so the editor never
+ * writes the index under the owner's own git.
+ */
+export type FileState = 'none' | 'untracked' | 'modified' | 'committed' | 'main';
+export function fileStateOf(f: { exists: boolean; inHead: boolean; porcelain: string | null; sameAsMain: boolean | null }): FileState {
+  const code = f.porcelain;
+  if (code === '??') return 'untracked';
+  if (code && code.trim()) return 'modified';
+  if (!f.exists) return f.inHead ? 'modified' : 'none';
+  if (!f.inHead) return 'untracked';
+  return f.sameAsMain ? 'main' : 'committed';
+}
+
+/** The files the status op asks git about for a world, relative to the checkout: its four kinds of placement file and its track file. */
+export function statusFiles(world: string): { kind: EditFileKind | 'track'; path: string }[] {
+  return [...EDIT_FILE_KINDS.map((k) => ({ kind: k, path: `public/${editFilePath(k, world)}` })), { kind: 'track' as const, path: `public/tracks/${world}.json` }];
+}
+
+/** Whether a status ask names a world it may be answered for: the world's pack id, or why not. */
+export function statusAsk(o: unknown, ctx: { worlds: ReadonlyMap<string, EditWorldKind> }): { world: string } | { status: number; why: string } {
+  const a = o && typeof o === 'object' ? (o as Record<string, unknown>) : null;
+  if (!a || typeof a.world !== 'string' || !WORLD.test(a.world)) return { status: 400, why: 'its world is a pack id: a-z, 0-9 and _, 40 at most' };
+  if (!ctx.worlds.has(a.world)) return { status: 404, why: `there is no world called ${a.world}` };
+  return { world: a.world };
 }

@@ -6203,6 +6203,11 @@ export class World {
     return this.layoutStream?.unplace(key) ?? false;
   }
 
+  /** Many placed in play taken back out at once, each list walked once (`LayoutStreamer.unplaceMany`). Answers how many went. */
+  unplaceMany(keys: readonly string[]): number {
+    return this.layoutStream?.unplaceMany(keys) ?? 0;
+  }
+
   /** How many things put down in play stand in the rooms of a building placed in play, by what it was filed under. */
   thingsInside(key: string): number {
     return this.layoutStream?.hostedBy(key) ?? 0;

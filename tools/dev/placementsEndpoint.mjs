@@ -13,11 +13,74 @@
 //
 // Asks are answered one at a time: each reads both files, changes one row and writes them back, and two at
 // once would each write back the other's file as it read it.
+//
+// The world editor's two asks (DESIGN.md §2.11): a **batch** (every row an action changed, in every file it touched,
+// checked all or nothing by the rules and written file by file, each through its own dot-named copy, so a rename refused
+// part way leaves the files before it written and the answer says so), and **status** (each of a world's placement
+// files and its track file as git sees it: untracked, saved and not committed, committed, or the same on main). Every
+// file written is told to the page with its revision, twelve hex of the SHA-1 of its text (`revisionOf`), after the
+// answer has gone, so the page drops the word about a file it has just landed. Git is only ever asked, read-only, and
+// every call carries `--no-optional-locks` (`git`), so the editor never writes the index under the owner's own git:
+// committing is the owner's.
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { PLACEMENTS_ENDPOINT_TUNE, EDITOR_HEADER, applyPlacementOp, refuseRequest } from '../../src/world/placementEdits.ts';
+import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { PLACEMENTS_ENDPOINT_TUNE, EDITOR_HEADER, applyPlacementOp, fileStateOf, refuseRequest, statusAsk, statusFiles } from '../../src/world/placementEdits.ts';
 import { PLANETS, packIdOf } from '../../src/data/planets.ts';
+
+/** A file's revision: twelve hex of the SHA-1 of its text as written. The dev server's watcher names a file it saw the same way. */
+export function revisionOf(text) {
+  return createHash('sha1').update(text, 'utf8').digest('hex').slice(0, 12);
+}
+
+/**
+ * One read-only ask of git in `cwd`: its output, and its exit code (a code that is not nought is an answer, not a fault:
+ * `diff --quiet` says "differs" that way). Every call goes through here and carries `--no-optional-locks`, so nothing the
+ * editor asks ever writes the index under the owner's own git.
+ */
+export function git(cwd, args) {
+  return new Promise((resolve) => {
+    execFile('git', ['--no-optional-locks', ...args], { cwd, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      const code = err ? (typeof err.code === 'number' ? err.code : -1) : 0;
+      resolve({ code, out: String(stdout ?? '') });
+    });
+  });
+}
+
+/**
+ * What git says of each of `paths` (relative to `cwd`, forward slashes): the branch, the ref main is read from (local
+ * `main`, else `origin/main`, else none), and for each path whether it exists, whether HEAD has it, its porcelain code
+ * and whether it is the same on main, classified by `fileStateOf`. Read-only throughout.
+ */
+export async function gitStates(cwd, paths) {
+  const branch = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).out.trim() || null;
+  let main = null;
+  for (const ref of ['main', 'origin/main']) {
+    if ((await git(cwd, ['rev-parse', '--verify', '--quiet', ref])).code === 0) {
+      main = ref;
+      break;
+    }
+  }
+  const status = await git(cwd, ['status', '--porcelain=v1', '-z', '--', ...paths]);
+  const codes = new Map();
+  for (const entry of status.out.split('\0')) {
+    if (entry.length < 4) continue;
+    codes.set(entry.slice(3).replace(/\\/g, '/'), entry.slice(0, 2));
+  }
+  const inHead = new Set((await git(cwd, ['ls-tree', '--name-only', 'HEAD', '--', ...paths])).out.split(/\r?\n/).filter(Boolean));
+  const files = [];
+  for (const p of paths) {
+    const exists = fs.existsSync(path.resolve(cwd, p));
+    const head = inHead.has(p);
+    const porcelain = codes.get(p) ?? null;
+    let sameAsMain = null;
+    if (main && exists && head && !porcelain) sameAsMain = (await git(cwd, ['diff', '--quiet', main, '--', p])).code === 0;
+    files.push({ path: p, exists, inHead: head, porcelain, sameAsMain, state: fileStateOf({ exists, inHead: head, porcelain, sameAsMain }) });
+  }
+  return { branch, main, files };
+}
 
 /** Every world a file may be for, by pack id, with what kind it is: each planet, each of its zones, each space zone. */
 export function worldKinds() {
@@ -158,8 +221,9 @@ let queue = Promise.resolve();
 
 /**
  * One ask, answered in its turn. `opts.dir` is the placements folder (`public/placements`), whose `story/` and
- * `world/` hold the two layers; `opts.notify({ layer, world })` is said for every file written, which the dev
- * server hands every page as `placements:changed`. The rest is for a test: `tune`, `now` and `worlds`.
+ * `world/` hold the two layers; `opts.notify({ kind, layer, world, rev })` is said for every file written, once the
+ * answer has gone, which the dev server hands every page as `placements:changed`; `opts.root` is the checkout git is
+ * asked in (the status op), by default the folder two above `dir`. The rest is for a test: `tune`, `now` and `worlds`.
  */
 export function handle(req, res, opts) {
   const run = queue.then(() => serve(req, res, opts));
@@ -167,7 +231,7 @@ export function handle(req, res, opts) {
   return run;
 }
 
-async function serve(req, res, { dir, notify = () => {}, tune = PLACEMENTS_ENDPOINT_TUNE, now = Date.now, worlds = worldKinds() }) {
+async function serve(req, res, { dir, root = path.resolve(dir, '..', '..'), notify = () => {}, tune = PLACEMENTS_ENDPOINT_TUNE, now = Date.now, worlds = worldKinds() }) {
   const h = req.headers ?? {};
   const length = h['content-length'] !== undefined ? Number(h['content-length']) : null;
   const refused = refuseRequest(
@@ -191,6 +255,20 @@ async function serve(req, res, { dir, notify = () => {}, tune = PLACEMENTS_ENDPO
   } catch {
     return answer(res, 400, { ok: false, why: 'an ask is JSON' });
   }
+  const t0 = performance.now();
+  // The status op: git asked, read-only, of a world's files. Nothing is written.
+  if (op && op.op === 'status') {
+    const asked = statusAsk(op, { worlds });
+    if ('status' in asked) return answer(res, asked.status, { ok: false, why: asked.why });
+    try {
+      const list = statusFiles(asked.world);
+      const states = await gitStates(root, list.map((f) => f.path));
+      const files = list.map((f, i) => ({ kind: f.kind, ...states.files[i] }));
+      return answer(res, 200, { ok: true, op: 'status', world: asked.world, branch: states.branch, main: states.main, files, ms: Math.round(performance.now() - t0) });
+    } catch (err) {
+      return answer(res, 500, { ok: false, why: `git could not be asked: ${err?.message ?? err}` });
+    }
+  }
   // The world is checked by the rules as well; it is only looked at here to know which files to read.
   const world = op && typeof op.world === 'string' && worlds.has(op.world) && /^[a-z0-9_]{1,40}$/.test(op.world) ? op.world : null;
   const files = { story: world ? fileFor(dir, 'story', world) : null, world: world ? fileFor(dir, 'world', world) : null };
@@ -200,7 +278,7 @@ async function serve(req, res, { dir, notify = () => {}, tune = PLACEMENTS_ENDPO
   } catch (err) {
     return answer(res, 500, { ok: false, why: `the files could not be read: ${err?.message ?? err}` });
   }
-  const out = applyPlacementOp(op, current, { worlds, now: now() });
+  const out = applyPlacementOp(op, current, { worlds, now: now(), hash: revisionOf });
   if (out.status !== 200) return answer(res, out.status, out.body);
   const written = [];
   try {
@@ -208,12 +286,17 @@ async function serve(req, res, { dir, notify = () => {}, tune = PLACEMENTS_ENDPO
       const file = files[w.layer];
       if (!file) throw new Error(`${w.layer} has no file for ${world}`);
       await writeWhole(file, w.text, tune);
-      written.push({ layer: w.layer, world });
+      written.push({ kind: w.layer, layer: w.layer, world, rev: w.text === null ? '' : revisionOf(w.text) });
     }
   } catch (err) {
+    // A rename refused part way: the files before it are written, and the answer names them, so the page reads them again.
+    const done = written.map((w) => files[w.layer]).filter(Boolean).map((f) => path.relative(root, f).replace(/\\/g, '/'));
+    answer(res, 500, { ok: false, why: `the file could not be written: ${err?.message ?? err}${done.length ? ` (written before it: ${done.join(', ')})` : ''}` });
     for (const w of written) notify(w);
-    return answer(res, 500, { ok: false, why: `the file could not be written: ${err?.message ?? err}` });
+    return;
   }
+  if (out.body && out.body.op === 'batch') out.body.ms = Math.round(performance.now() - t0);
+  // The answer first, then the word: the page lands the answer and drops the word about what it landed.
+  answer(res, 200, out.body);
   for (const w of written) notify(w);
-  return answer(res, 200, out.body);
 }

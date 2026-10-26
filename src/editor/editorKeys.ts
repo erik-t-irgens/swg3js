@@ -15,7 +15,62 @@
 import { DEFAULT_BINDINGS, type Action } from '../core/input.ts';
 
 /** The world editor's own actions, every one in `DEV_ONLY_ACTIONS`. */
-export const EDITOR_ACTIONS: readonly Action[] = ['editor', 'editorUp', 'editorDown', 'editorPoint', 'editorSearch', 'editorBody', 'editorHold'];
+export const EDITOR_ACTIONS: readonly Action[] = [
+  'editor',
+  'editorUp',
+  'editorDown',
+  'editorPoint',
+  'editorSearch',
+  'editorBody',
+  'editorHold',
+  // The second wave's: scale, the neighbour's snap, the nudges, the grid, the snap's switch, the ground, the focus, the
+  // hotbar, game view and the key sheet.
+  'editorScale',
+  'editorNeighbour',
+  'editorNudgeFwd',
+  'editorNudgeBack',
+  'editorNudgeLeft',
+  'editorNudgeRight',
+  'editorNudgeUp',
+  'editorNudgeDown',
+  'editorGridDown',
+  'editorGridUp',
+  'editorSnap',
+  'editorGround',
+  'editorFocus',
+  'editorHot1',
+  'editorHot2',
+  'editorHot3',
+  'editorHot4',
+  'editorHot5',
+  'editorHot6',
+  'editorHot7',
+  'editorHot8',
+  'editorHot9',
+  'editorGameView',
+  'editorKeys',
+];
+
+/** The hotbar's nine keys, slot 1 first. */
+export const HOTBAR_ACTIONS: readonly Action[] = ['editorHot1', 'editorHot2', 'editorHot3', 'editorHot4', 'editorHot5', 'editorHot6', 'editorHot7', 'editorHot8', 'editorHot9'];
+
+/**
+ * The editor's own Ctrl chords (DESIGN.md §2.14), read as raw keys by its block alone while Ctrl is held, every action
+ * muted for the frame meanwhile: Ctrl+D duplicates, Ctrl+C and Ctrl+X copy and cut, Ctrl+Z undoes and Ctrl+Shift+Z
+ * redoes (never Ctrl+Y, which would also open the Waypoints tab on Y). Ctrl+V is the browser's paste, read through the
+ * document's own `paste` event and never cancelled. Answers the chord a press makes, or null.
+ */
+export type CtrlChord = 'dup' | 'copy' | 'cut' | 'undo' | 'redo';
+export function ctrlChord(code: string, shift: boolean): CtrlChord | null {
+  if (code === 'KeyD') return 'dup';
+  if (code === 'KeyC') return 'copy';
+  if (code === 'KeyX') return 'cut';
+  if (code === 'KeyZ') return shift ? 'redo' : 'undo';
+  return null;
+}
+
+/** The codes the chords are read on, in the order the block asks them. */
+export const CHORD_CODES: readonly string[] = ['KeyD', 'KeyC', 'KeyX', 'KeyZ'];
 
 /**
  * What the editor reads of the game's own actions in their own sense, kept unmuted: the move keys fly, `walk` (Shift)
@@ -23,7 +78,7 @@ export const EDITOR_ACTIONS: readonly Action[] = ['editor', 'editorUp', 'editorD
  * the hand, O, Delete and L, and the panels a developer still wants (the map, the backpack, the waypoints, the journal,
  * the group, the debug menu) and the day's fast-forward, useful for judging light.
  */
-export const EDITOR_READS: readonly Action[] = ['forward', 'back', 'left', 'right', 'walk', 'freeLook', 'noclipFaster', 'noclipSlower', 'placeTurn', 'placeLift', 'takeProp', 'putAway', 'placeLayer', 'attack', 'map', 'inventory', 'waypoints', 'journal', 'group', 'debugMenu', 'fastForward'];
+export const EDITOR_READS: readonly Action[] = ['forward', 'back', 'left', 'right', 'walk', 'freeLook', 'noclipFaster', 'noclipSlower', 'placeTurn', 'placeLift', 'takeProp', 'putAway', 'placeLayer', 'attack', 'altFire', 'map', 'inventory', 'waypoints', 'journal', 'group', 'debugMenu', 'fastForward'];
 
 /**
  * What the editor mutes while it is on, for the whole frame after its block has read what it borrows (research5 §5.3,
@@ -109,7 +164,7 @@ const NONE: readonly Action[] = [];
 /**
  * The Shift rule (the owner's own two keys must not change sense under a key held to fly): Shift with R tips and rolls
  * only while no move key is held; with one held Shift is the fast flight and R turns. Answers whether this frame's
- * Shift+R is a tip. The next wave's (W2, the hand's turn): nothing of this wave reads it yet, and its test says so.
+ * Shift+R is a tip; the hand on the selection asks it (`EditorEdits.holdKind`).
  */
 export function shiftTips(shift: boolean, moving: boolean): boolean {
   return shift && !moving;

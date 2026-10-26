@@ -68,6 +68,46 @@ export const EDITOR_TUNE = {
     /** The most boxes outlined at once (W2), past which one box round them all. */
     most: 32,
   },
+  gizmo: {
+    /** How far the gizmo's handles reach out from the pivot, pixels on the screen at any distance: a fist's width. */
+    px: 90,
+    /** How thick its lines are, pixels. */
+    width: 2,
+  },
+  snap: {
+    /** Whether the grid and the angle snap at all (`\` turns it off and on for the session). */
+    on: true,
+    /** The grid a session starts on, metres: `PLACE_HOLD_TUNE`'s own prop lift step's neighbour, fine enough for a shelf. */
+    grid: 0.25,
+    /** The steps `[` and `]` go through, metres (0.1 and 0.25 are the placing hand's own lift steps). */
+    gridSteps: [0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16],
+    /** The angle a session starts on, degrees: the placing hand's own wheel step. */
+    angle: 15,
+    /** The angles Shift with `[` and `]` go through, degrees. */
+    angleSteps: [1, 5, 15, 45, 90],
+    /** The step a scale snaps to while snapping is on. */
+    scaleStep: 0.05,
+    /** The most Shift+End (and "On the surface") leans a thing's up toward a surface's, degrees. */
+    normalMaxDeg: 10,
+    /** Pixels within which V takes a moving selection's faces flush to a neighbour's. */
+    neighbourPx: 12,
+  },
+  nudge: {
+    /** The arrows go along the world axis nearest the camera's forward and right (off: the game's own -Z and +X). */
+    cameraRelative: true,
+  },
+  /** Metres a duplicate is offset from what it copies (0: in place, picked to be moved). */
+  dupOffset: 0,
+  /** A delete of more than this many rows asks once in the page. */
+  askAbove: 25,
+  /** Actions kept to undo, per world, for the session. */
+  undoMost: 200,
+  /** Milliseconds the bar waits after a write before it asks git what the files are now. */
+  statusDebounceMs: 500,
+  /** Metres round the first picked within which "all like this" picks (0: the whole file). */
+  likeReach: 0,
+  /** Past these a scale is said on the bar (a note, never a refusal: the reader's backstops are 0.001 and 1,000). */
+  scaleNote: { low: 0.05, high: 20 },
   /** Every action is written through at once, at most this many edits a request (W2's batch). */
   batchMost: 5000,
   /** Past this many rows in a file the bar says how big it is and that it ships in every release. */
@@ -164,9 +204,10 @@ export function tuneEditor(partial: unknown): string[] {
  * Which of the two numbers kept live beside the tune a partial names: what the editor takes again when a tune moves
  * (`TUNE_WATCH`). A path present in the partial counts, whatever the value; the tune itself has already refused a bad one.
  */
-export function liveTuned(partial: unknown): { speed: boolean; skyReach: boolean } {
+export function liveTuned(partial: unknown): { speed: boolean; skyReach: boolean; snap: boolean } {
   const o = partial && typeof partial === 'object' ? (partial as Record<string, unknown>) : null;
   const cam = o?.cam && typeof o.cam === 'object' ? (o.cam as Record<string, unknown>) : null;
   const aim = o?.aim && typeof o.aim === 'object' ? (o.aim as Record<string, unknown>) : null;
-  return { speed: !!cam && 'speed' in cam, skyReach: !!aim && 'skyReach' in aim };
+  const snap = o?.snap && typeof o.snap === 'object' ? (o.snap as Record<string, unknown>) : null;
+  return { speed: !!cam && 'speed' in cam, skyReach: !!aim && 'skyReach' in aim, snap: !!snap && ('on' in snap || 'grid' in snap || 'angle' in snap) };
 }

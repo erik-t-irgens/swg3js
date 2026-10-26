@@ -66,10 +66,31 @@ function groups(): DialGroup[] {
       ],
     },
     {
+      title: 'The hand on what is picked',
+      note: 'R held turns, F held raises, C held scales, Shift+R (not flying) tips and rolls; the gizmo is dragged with the left button.',
+      dials: [
+        dial('cam.scalePerPx', 'Scale a pixel', 0.0005, 0.02, 0.0005, '', 'How far a pixel of the mouse with C held scales: exp(this × pixels), mouse up larger.'),
+        dial('gizmo.px', 'Gizmo size', 30, 240, 5, 'px', 'How far the handles reach out from the pivot on the screen.'),
+        dial('gizmo.width', 'Gizmo lines', 0.5, 6, 0.25, 'px', 'How thick the handles are drawn.'),
+        dial('pick.hitPx', 'Handle reach', 3, 30, 1, 'px', 'How near the cursor must be to a handle to grab it.'),
+        dial('dupOffset', 'Duplicate offset', 0, 10, 0.25, 'm', 'How far Ctrl+D puts a copy from what it copies (0: in place).'),
+      ],
+    },
+    {
+      title: 'Snapping',
+      note: '[ and ] step the grid (Shift: the angle); \\ turns snapping off and on.',
+      dials: [
+        dial('snap.scaleStep', 'Scale step', 0.01, 0.5, 0.01, '', 'The step a scale snaps to while snapping is on, and the wheel with C held steps by.'),
+        dial('snap.normalMaxDeg', 'Lean at most', 0, 45, 1, '°', 'Shift+End leans a thing toward the surface under it by at most this.'),
+        dial('snap.neighbourPx', 'Flush within', 2, 40, 1, 'px', 'V held while dragging takes the faces flush to a neighbour within this.'),
+      ],
+    },
+    {
       title: 'The window',
       dials: [
         dial('window.width', 'Opens this wide', 400, 900, 10, 'px', 'How wide the window opens (from the next session; drag its corner meanwhile).'),
         dial('outline.width', 'Box lines', 0.5, 4, 0.25, 'px', 'How thick the boxes the editor draws are.'),
+        dial('outline.most', 'Boxes at most', 1, 200, 1, '', 'Past this many picked, one box round them all.'),
       ],
     },
   ];

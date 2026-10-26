@@ -266,8 +266,11 @@ export function holdState(): HoldState {
   return { which: null, since: 0, raw: 0, gain: 1 };
 }
 
-/** One frame's tumble, kept: `applyHold` writes it and reads it back at once. */
-const TUMBLE = { tip: 0, roll: 0 };
+/**
+ * One frame's tumble, kept: `applyHold` writes it and reads it back at once. Its numbers start as fractions (written
+ * before they are ever read): a field that starts as a small integer boxes every fraction written into it after.
+ */
+const TUMBLE = { tip: 0.5, roll: 0.5 };
 
 /**
  * One frame of a hold, into the thing in hand: `which` is what the keys (or the bar's buttons) make this
@@ -320,5 +323,219 @@ export function applyHold(
   h.gain = holdGain(tune.sideways ? Math.hypot(dx, dy) : dy, dt, tune);
   if (prop) turnAbout(prop.turn, 0, 1, 0, turn, prop.turn);
   else if (house) house.yaw = turnTo(house.yaw + turn);
+  return true;
+}
+
+/**
+ * One of several things held at once by the world editor's hand on its selection: where it stands in the game's frame,
+ * its turn (three's order) and its scale along its own axes, each written in place by `applyHoldMany`.
+ */
+export interface HeldThing {
+  x: number;
+  y: number;
+  z: number;
+  turn: PropTurn;
+  sx: number;
+  sy: number;
+  sz: number;
+}
+
+/**
+ * A turn, kept: the frame's whole turn worked out once and handed to every thing held (set to nought before each use; its
+ * fields start as fractions so the fractions written into them are never boxed).
+ */
+const FRAME_TURN: PropTurn = { x: 0.5, y: 0.5, z: 0.5, w: 0.5 };
+/** One thing's place about the pivot, kept (written before it is read). */
+const OFFSET = { x: 0.5, y: 0.5, z: 0.5 };
+
+/** `v` turned by `r` (a unit quaternion, three's order), written back into `v`: v + 2w(r × v) + 2 r × (r × v). */
+function turnVector(r: PropTurn, v: { x: number; y: number; z: number }): void {
+  const tx = 2 * (r.y * v.z - r.z * v.y);
+  const ty = 2 * (r.z * v.x - r.x * v.z);
+  const tz = 2 * (r.x * v.y - r.y * v.x);
+  const x = v.x + r.w * tx + (r.y * tz - r.z * ty);
+  const y = v.y + r.w * ty + (r.z * tx - r.x * tz);
+  const z = v.z + r.w * tz + (r.x * ty - r.y * tx);
+  v.x = x;
+  v.y = y;
+  v.z = z;
+}
+
+/** What a frame of the world editor's hand does: a hold of the placing hand's, or C's scale. */
+export type ManyHoldKind = HoldKind | 'scale';
+
+/** The world editor's held key, as `HoldState` is the placing hand's: what is held, since when, the rise so far and the last gain. */
+export interface ManyHoldState {
+  which: ManyHoldKind | null;
+  since: number;
+  raw: number;
+  gain: number;
+}
+
+/** A hold of the world editor's with nothing held. */
+export function manyHoldState(): ManyHoldState {
+  // Fractions from the start (each is set before it is read: `since` and `raw` as a hold begins, `gain` as it moves), so a
+  // fraction written into one is never boxed (measured: the editor's hold made numbers a frame with them whole).
+  return { which: null, since: 0.5, raw: 0.5, gain: 1.5 };
+}
+
+/**
+ * `applyHold` over a list (the world editor's hand on its selection, DESIGN.md §2.6): one frame of a held key worked out
+ * **once** -- a turn about the world's up (R), a tip and roll about the view's own level axes (Shift+R, `tumbleAxes`),
+ * a rise (F), or a uniform scale (C, `exp(scalePerPx * px)`, mouse up larger) -- and given to every thing about one
+ * `pivot`, each composed in the world's frame (`r * q`), so a selection turns as one piece. A rise is metres added, with
+ * no reach and no rounding: the editor's hand has no limits, and the file is rounded when it is written. Answers whether
+ * anything moved. The single thing's call (`applyHold`) is untouched, so the placing hand answers exactly as it did.
+ * The plain form, for the tests and the console: the frame's own call is `applyHoldManyIn`, its numbers in a kept record.
+ */
+export function applyHoldMany(
+  h: ManyHoldState,
+  which: ManyHoldKind | null,
+  dx: number,
+  dy: number,
+  dt: number,
+  sens: number,
+  axes: ViewAxes,
+  things: readonly HeldThing[],
+  pivot: { x: number; y: number; z: number },
+  scalePerPx: number,
+  now: number,
+  tune: PlaceHoldTune = PLACE_HOLD_TUNE,
+): boolean {
+  const a = PLAIN_ASK;
+  a.which = which;
+  a.dx = dx;
+  a.dy = dy;
+  a.dt = dt;
+  a.sens = sens;
+  a.axes = axes;
+  a.things = things;
+  a.pivot = pivot;
+  a.scalePerPx = scalePerPx;
+  a.now = now;
+  a.tune = tune;
+  return applyHoldManyIn(h, a);
+}
+
+/**
+ * One frame's ask of the world editor's hand, kept and written in place by its caller: what is held, the mouse's move in
+ * pixels, the frame's seconds, the sensitivity, the view's level axes, the things and their pivot, C's scale a pixel, the
+ * moment, the tune. Its numbers start as fractions, so writing one boxes nothing.
+ */
+export interface ManyHoldAsk {
+  which: ManyHoldKind | null;
+  dx: number;
+  dy: number;
+  dt: number;
+  sens: number;
+  axes: ViewAxes;
+  things: readonly HeldThing[];
+  pivot: { x: number; y: number; z: number };
+  scalePerPx: number;
+  now: number;
+  tune: PlaceHoldTune;
+}
+
+/** An ask with nothing in it, its numbers fractions. */
+export function manyHoldAsk(): ManyHoldAsk {
+  return { which: null, dx: 0.5, dy: 0.5, dt: 0.5, sens: 1.5, axes: { fx: 0.5, fz: 0.5, rx: 0.5, rz: 0.5 }, things: [], pivot: { x: 0.5, y: 0.5, z: 0.5 }, scalePerPx: 0.5, now: 0.5, tune: PLACE_HOLD_TUNE };
+}
+
+const PLAIN_ASK = manyHoldAsk();
+
+/**
+ * `applyHoldMany` over a kept record (the editor's frame): a number handed across a call the compiler leaves out is boxed,
+ * and the frame's own call handed four of them a frame. **The arithmetic of `holdGain`, `liftDelta` and `turnDelta` is
+ * their own lines written out**, in their own order, for the same reason (each answered its number across a call); the
+ * editor's hand test holds one thing alone to `applyHold`'s turn and lift to the bit, which a line written differently
+ * fails. A tip and roll still goes through `tumbleDeltas`, the placing hand's own (its `Math.hypot` makes a number a
+ * tumbling frame, kept for that bit-for-bit answer).
+ */
+export function applyHoldManyIn(h: ManyHoldState, a: ManyHoldAsk): boolean {
+  const which = a.which;
+  const dx = a.dx;
+  const dy = a.dy;
+  const dt = a.dt;
+  const sens = a.sens;
+  const things = a.things;
+  const pivot = a.pivot;
+  const tune = a.tune;
+  if (which !== h.which) {
+    h.which = which;
+    h.since = a.now;
+    h.raw = 0;
+  }
+  if (!which || (!dx && !dy) || !things.length) return false;
+  if (which === 'lift') {
+    // `liftDelta(dy, dt, sens, 'prop', tune)` and `holdGain(dy, dt, tune)`, written out.
+    if (!dy) return false;
+    const gv = Math.abs(dy) / Math.max(dt, tune.dtFloor);
+    const gspan = tune.fast - tune.knee;
+    const gt = gspan > 0 ? (gv - tune.knee) / gspan : gv > tune.knee ? 1 : 0;
+    const gain = 1 + (tune.most - 1) * Math.min(1, Math.max(0, gt));
+    const m = -dy * tune.liftPerPxProp * gain * sens;
+    const d = tune.flipLift ? -m : m;
+    if (!d) return false;
+    h.gain = gain;
+    h.raw += d;
+    for (let i = 0; i < things.length; i++) things[i].y += d;
+    return true;
+  }
+  if (which === 'scale') {
+    if (!dy) return false;
+    const f = Math.exp(-dy * a.scalePerPx * sens);
+    if (!(f > 0) || f === 1) return false;
+    for (let i = 0; i < things.length; i++) {
+      const t = things[i];
+      t.x = pivot.x + (t.x - pivot.x) * f;
+      t.y = pivot.y + (t.y - pivot.y) * f;
+      t.z = pivot.z + (t.z - pivot.z) * f;
+      t.sx *= f;
+      t.sy *= f;
+      t.sz *= f;
+    }
+    return true;
+  }
+  const r = FRAME_TURN;
+  r.x = 0;
+  r.y = 0;
+  r.z = 0;
+  r.w = 1;
+  let angle = 0;
+  const axes = a.axes;
+  if (which === 'tumble') {
+    const td = tumbleDeltas(dx, dy, dt, sens, tune, TUMBLE);
+    // The gain kept for the report alone (never the turn): `Math.sqrt` written out, since `Math.hypot` makes a number a call.
+    h.gain = holdGain(Math.sqrt(dx * dx + dy * dy), dt, tune);
+    // The very calls `tumbleBy` makes, onto the identity: the frame's turn, which each thing takes as one would.
+    tumbleBy(r, axes, td.tip, td.roll);
+  } else {
+    // `turnDelta(dy, dx, dt, sens, tune)` and its `holdGain`, written out in their own order.
+    const along = dy - (tune.sideways ? dx : 0);
+    if (!along) return false;
+    const px = tune.sideways ? Math.hypot(dx, dy) : Math.abs(dy);
+    const gv = Math.abs(px) / Math.max(dt, tune.dtFloor);
+    const gspan = tune.fast - tune.knee;
+    const gt = gspan > 0 ? (gv - tune.knee) / gspan : gv > tune.knee ? 1 : 0;
+    const gain = 1 + (tune.most - 1) * Math.min(1, Math.max(0, gt));
+    const rad = along * tune.turnPerPx * gain * sens * DEG;
+    angle = tune.flipTurn ? -rad : rad;
+    if (!angle) return false;
+    h.gain = gain;
+    turnAbout(r, 0, 1, 0, angle, r);
+  }
+  for (let i = 0; i < things.length; i++) {
+    const t = things[i];
+    OFFSET.x = t.x - pivot.x;
+    OFFSET.y = t.y - pivot.y;
+    OFFSET.z = t.z - pivot.z;
+    turnVector(r, OFFSET);
+    t.x = pivot.x + OFFSET.x;
+    t.y = pivot.y + OFFSET.y;
+    t.z = pivot.z + OFFSET.z;
+    // The same calls the single thing's hold makes, so one thing alone turns to the bit as `applyHold` turns it.
+    if (which === 'tumble') tumbleBy(t.turn, axes, TUMBLE.tip, TUMBLE.roll);
+    else turnAbout(t.turn, 0, 1, 0, angle, t.turn);
+  }
   return true;
 }

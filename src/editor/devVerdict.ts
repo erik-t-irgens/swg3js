@@ -130,15 +130,20 @@ export function limitNotes(file: string, rows: number, rowsNote: number, writeMs
   return out;
 }
 
-/** What the editor adds to a refusal an older endpoint gave (the dev server runs the endpoint code it first loaded until it restarts). */
-export const OLDER_ENDPOINT = 'the dev server is running an older endpoint: restart it';
+/**
+ * What the editor adds to a refusal an older endpoint gave. The dev server runs the endpoint code it first loaded until its
+ * **process** stops: Vite's own restart on a config change happens in the same process, whose module cache keeps the old
+ * endpoint and the old rules it imported, so only stopping `npm run dev` and starting it again takes the new one.
+ */
+export const OLDER_ENDPOINT = 'the dev server is running an older endpoint: stop npm run dev and start it again (its own restart keeps the old one)';
 
 /**
  * Whether a write's refusal is an older endpoint's (one loaded before this pass, which a running dev server keeps until it
  * restarts): a field it does not write (`template`, `from`), the old 2,000 rows a file, or the old 64 m circle.
  */
 export function olderEndpoint(why: string): boolean {
-  return /fields this build does not write|holds 2000 rows, as many as a file may|(clear|guard) is a number of metres from 0 to 64\b/.test(why);
+  // The second wave's too: an endpoint from before the batch and status ops names the four ops it knows.
+  return /fields this build does not write|holds 2000 rows, as many as a file may|(clear|guard) is a number of metres from 0 to 64\b|an ask is a put, a delete, a move or a rename$/.test(why);
 }
 
 /** A write's refusal, with the restart words where an older endpoint gave it. */

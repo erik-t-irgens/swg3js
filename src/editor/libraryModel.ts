@@ -238,6 +238,21 @@ export function usedHereKeys(v: LibraryView, rows: readonly UsedRow[], here: str
   return [...count].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([k]) => k);
 }
 
+/**
+ * The library's entry a row writes, by the rule `usedHereKeys` counts with (a props thing by its id; a gallery or world
+ * row by its model in its pack, its template's entry first, else any of that model, else the planting of it), or null:
+ * what the eyedropper takes in hand ("give me another of that") and a hotbar slot is set to. A search of the entries, on a
+ * click.
+ */
+export function entryForRow(v: LibraryView, r: UsedRow, here: string): LibraryEntry | null {
+  if (r.pack === 'props') return r.thing ? (v.byKey.get(`props:${r.thing}`) ?? null) : null;
+  if (!r.model) return null;
+  const pack = r.pack === 'gallery' ? 'gallery' : (r.from ?? here);
+  const kind = r.pack === 'gallery' ? 'buildings' : 'world';
+  const list = v.entries.filter((e) => e.s !== 'props' && (e.s === 'buildings' ? 'gallery' : e.p) === pack && e.m === r.model);
+  return list.find((e) => e.s === kind && !!r.template && e.t === r.template) ?? list.find((e) => e.s === kind) ?? list.find((e) => e.s === 'flora') ?? null;
+}
+
 /** What the library keeps per developer in local storage, through a port a test stands in for (and which may throw). */
 export interface LibraryStorage {
   getItem(key: string): string | null;

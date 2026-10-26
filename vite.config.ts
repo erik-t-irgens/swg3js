@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 import { STORY_FILE, listStorySet } from './server/storySet.mjs';
-import { placementFileOf } from './src/story/placementPath.ts';
+import { editFileOf } from './src/story/placementPath.ts';
 import { trackFileOf } from './src/race/trackPath.ts';
 import { shippedPublic } from './tools/dev/shippedPublic.mjs';
 
@@ -83,11 +84,25 @@ function privateStory(): Plugin {
 }
 
 /**
- * Tells the page when one of the permanent placements' files changes (`placements:changed`, a custom HMR
- * event naming the layer and the world), so an edit by hand, or the editor's own write, is stood without a
- * reload. Vite builds `public/` itself, and no module imports these files, so a save reloads nothing on its
- * own; this is the only word the page gets. A file in a dot folder or under a dot name says nothing, and
- * neither does anything that is not `<layer>/<world>.json` (`placementFileOf`).
+ * A file's revision: twelve hex of the SHA-1 of its text as it stands, '' for no file. The placements endpoint stamps
+ * every file it writes with the same (`tools/dev/placementsEndpoint.mjs`'s `revisionOf`), so the page can tell a word
+ * about a file it has already landed from one about a file somebody else changed.
+ */
+function revisionOfFile(file: string): string {
+  try {
+    return createHash('sha1').update(fs.readFileSync(file)).digest('hex').slice(0, 12);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Tells the page when one of the files under `public/placements/` changes (`placements:changed`, a custom HMR event
+ * naming the kind of file, the world and the file's revision as it now stands), so an edit by hand, or the editor's own
+ * write, is stood without a reload. Vite builds `public/` itself, and no module imports these files, so a save reloads
+ * nothing on its own; this is the only word the page gets. A file in a dot folder or under a dot name says nothing, and
+ * neither does anything that is not `<kind>/<world>.json` (`editFileOf`). The word keeps `layer` beside `kind` for a
+ * page built before the kinds, which reads `layer` and passes over anything but the two layers.
  *
  * On the dev server it also answers the page's ask for one of those files itself, from the disk as it stands at
  * that moment, and a file that is not there with a 404. Vite would answer from its own list of the public folder,
@@ -101,9 +116,9 @@ function placementFiles(): Plugin {
     configureServer(server) {
       server.middlewares.use('/placements', (req, res, next) => {
         if (req.method !== 'GET' && req.method !== 'HEAD') return next();
-        const word = placementFileOf(decodeURIComponent((req.url ?? '/').split('?')[0]));
+        const word = editFileOf(decodeURIComponent((req.url ?? '/').split('?')[0]));
         if (!word) return next();
-        const file = path.resolve(PLACEMENTS_DIR, word.layer, `${word.world}.json`);
+        const file = path.resolve(PLACEMENTS_DIR, word.kind, `${word.world}.json`);
         if (!file.startsWith(PLACEMENTS_DIR + path.sep)) return next();
         res.setHeader('Cache-Control', 'no-store');
         fs.readFile(file, (err, data) => {
@@ -122,17 +137,18 @@ function placementFiles(): Plugin {
       const changed = (file: string): void => {
         const abs = path.resolve(file);
         if (!abs.startsWith(PLACEMENTS_DIR + path.sep)) return;
-        const word = placementFileOf(path.relative(PLACEMENTS_DIR, abs));
+        const word = editFileOf(path.relative(PLACEMENTS_DIR, abs));
         if (!word) return;
-        // An editor saving a file touches it more than once: one word for the lot, per file.
-        const key = `${word.layer}/${word.world}`;
+        // An editor saving a file touches it more than once: one word for the lot, per file, with the revision the
+        // file stands at once it has settled (the page drops a word at a revision it has already landed).
+        const key = `${word.kind}/${word.world}`;
         const was = timers.get(key);
         if (was) clearTimeout(was);
         timers.set(
           key,
           setTimeout(() => {
             timers.delete(key);
-            server.ws.send('placements:changed', word);
+            server.ws.send('placements:changed', { kind: word.kind, layer: word.kind, world: word.world, rev: revisionOfFile(abs) });
           }, 150),
         );
       };
@@ -160,7 +176,7 @@ function placementsEditor(): Plugin {
       const glue = pathToFileURL(path.resolve(ROOT, 'tools', 'dev', 'placementsEndpoint.mjs')).href;
       server.middlewares.use('/__dev/placements', (req, res) => {
         import(/* @vite-ignore */ glue)
-          .then((m: { handle: (req: unknown, res: unknown, opts: unknown) => Promise<void> }) => m.handle(req, res, { dir: PLACEMENTS_DIR, notify: (word: { layer: string; world: string }) => server.ws.send('placements:changed', word) }))
+          .then((m: { handle: (req: unknown, res: unknown, opts: unknown) => Promise<void> }) => m.handle(req, res, { dir: PLACEMENTS_DIR, root: ROOT, notify: (word: { kind?: string; layer: string; world: string; rev?: string }) => server.ws.send('placements:changed', word) }))
           .catch((err: unknown) => {
             if (res.headersSent) return;
             res.statusCode = 500;

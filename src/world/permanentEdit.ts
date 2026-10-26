@@ -22,7 +22,7 @@
 // Pure: no three, no rapier, no DOM. Rule for this file (node runs it with type stripping for the tests):
 // every import with its `.ts` extension, no enum, no namespace, no constructor parameter properties.
 
-import { PLACEMENT_LIMITS, fromGame, placementsPath, type GamePlace, type PlacementFrame, type PlacementLayer, type PlacementPack, type PlacementRow } from '../story/placements.ts';
+import { PLACEMENT_LIMITS, fromGame, placementsPath, writtenScale, type GamePlace, type PlacementFrame, type PlacementLayer, type PlacementPack, type PlacementRow } from '../story/placements.ts';
 import type { PlacedProp } from './propsPlaced.ts';
 import type { KeptRow } from '../net/propsKept.ts';
 
@@ -199,7 +199,64 @@ function keepOf(base: PlacementRow | null | undefined): Partial<PlacementRow> {
   if (base.note !== undefined) out.note = base.note;
   // And the world state it stands in (rubble placed for Restuss's ruins), set from the editor's list.
   if (base.state !== undefined) out.state = base.state;
+  // And its size, which the world editor sets: picked up and put down again it stands as big as it stood.
+  if (base.scale !== undefined) out.scale = base.scale;
   return out;
+}
+
+/**
+ * A row the world editor moved, turned, raised or scaled (DESIGN.md §2.6), as it is written: every field it had (its
+ * `at` left out, which the endpoint stamps), its place and its whole turn carried into the file's frame (`fromGame`) and
+ * written to `mm` metres and `turnDigits` decimals, its scale along its own axes to `scaleDigits` (written the one way a
+ * scale is spelled: absent for none, one number where the three are alike), and out in the open the ground under its new
+ * place (`ground`, none in a room or a space zone). `clear` is the caller's: what the rule gives at the new size where the
+ * row's own still is what the rule gave at the old, else the row's own (`followClear`). `inside`, where the caller asked
+ * the room at the new place, is written (absent for none) and a room's row carries no `ground`; where the caller asked
+ * for the ground (`ground` given) and none is known, the old place's is not kept for the new.
+ */
+export function rowMoved(
+  row: PlacementRow,
+  place: GamePlace,
+  scale: readonly [number, number, number],
+  centre: { x: number; z: number } | null,
+  frame: PlacementFrame,
+  opts: { mm?: number; turnDigits?: number; scaleDigits?: number; ground?: number | null; clear?: number | null; inside?: boolean } = {},
+): PlacementRow {
+  const { at: _at, ...rest } = row;
+  const g = fromGame(place, centre, frame);
+  const step = opts.mm && opts.mm > 0 ? opts.mm : 0.001;
+  const near = (v: number) => mm(Math.round(v / step) * step);
+  const digits = opts.turnDigits ?? 6;
+  const sd = opts.scaleDigits ?? 4;
+  const s: [number, number, number] = [cut(scale[0], sd), cut(scale[1], sd), cut(scale[2], sd)];
+  const out: PlacementRow = { ...rest, x: near(g.x), y: near(g.y), z: near(g.z), q: [cut(g.q[0], digits), cut(g.q[1], digits), cut(g.q[2], digits), cut(g.q[3], digits)] };
+  const written = writtenScale(s);
+  if (written === undefined) delete out.scale;
+  else out.scale = written;
+  if (opts.clear !== undefined) {
+    if (opts.clear === null || !(opts.clear > 0)) delete out.clear;
+    else out.clear = Math.min(PLACEMENT_LIMITS.circle, Math.round(opts.clear * 10) / 10);
+  }
+  if (opts.inside !== undefined) {
+    if (opts.inside) out.inside = true;
+    else delete out.inside;
+  }
+  if (!out.inside && typeof opts.ground === 'number' && Number.isFinite(opts.ground)) out.ground = mm(opts.ground);
+  else if (out.inside || opts.ground !== undefined) delete out.ground;
+  return out;
+}
+
+/**
+ * The flora a row keeps off as its size changes (DESIGN.md §2.7): what the placing rule gives at its new size (`rule`,
+ * the caller's: a building's patch, nothing for a prop) where its own `clear` is still what the rule gave at its old
+ * size (to the decimetre it is written to), so a row the editor sized keeps its clearing in step; one set by hand is left
+ * as it is, `byHand` saying so for the bar. Answers the clear to write (null for none) and whether it was left.
+ */
+export function followClear(own: number | undefined, ruleOld: number, ruleNew: number): { clear: number | null; byHand: boolean } {
+  const roundTenth = (v: number) => Math.round(v * 10) / 10;
+  const had = own ?? 0;
+  if (Math.abs(had - roundTenth(Math.max(0, ruleOld))) < 0.051) return { clear: ruleNew > 0 ? roundTenth(ruleNew) : null, byHand: false };
+  return { clear: own ?? null, byHand: own !== undefined };
 }
 
 /** The ground a row was judged on, written out in the open only: a room's floor is not the ground, and moves with nothing. */

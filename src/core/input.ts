@@ -90,7 +90,35 @@ export type Action =
   | 'editorPoint'
   | 'editorSearch'
   | 'editorBody'
-  | 'editorHold';
+  | 'editorHold'
+  // The world editor's editing (its second wave): C held scales the selection, V held snaps a moving selection flush to its
+  // neighbour, the arrows and Page Up and Down nudge it, the brackets step the grid (with Shift the angle), the backslash
+  // turns snapping off and on, End drops it to the ground (Shift: to the surface's lean too), Home looks at it, the nine
+  // digits take the hotbar's things in hand (Shift: set a slot), G hides every mark to judge the place, H shows the keys.
+  | 'editorScale'
+  | 'editorNeighbour'
+  | 'editorNudgeFwd'
+  | 'editorNudgeBack'
+  | 'editorNudgeLeft'
+  | 'editorNudgeRight'
+  | 'editorNudgeUp'
+  | 'editorNudgeDown'
+  | 'editorGridDown'
+  | 'editorGridUp'
+  | 'editorSnap'
+  | 'editorGround'
+  | 'editorFocus'
+  | 'editorHot1'
+  | 'editorHot2'
+  | 'editorHot3'
+  | 'editorHot4'
+  | 'editorHot5'
+  | 'editorHot6'
+  | 'editorHot7'
+  | 'editorHot8'
+  | 'editorHot9'
+  | 'editorGameView'
+  | 'editorKeys';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -212,6 +240,33 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   editorSearch: ['Slash'],
   editorBody: ['KeyN'],
   editorHold: ['Pause'],
+  // The editor's editing keys: C the class switch's, V the kneel's and the roll's, the arrows the four emotes', 1 to 6 the
+  // ability slots' and G and H the emote wheel's and the help's (every one of which the editor mutes while it is on), and
+  // Page Up, Page Down, the brackets, the backslash, End, Home and 7 to 9, which nothing else reads. None holds Ctrl.
+  editorScale: ['KeyC'],
+  editorNeighbour: ['KeyV'],
+  editorNudgeFwd: ['ArrowUp'],
+  editorNudgeBack: ['ArrowDown'],
+  editorNudgeLeft: ['ArrowLeft'],
+  editorNudgeRight: ['ArrowRight'],
+  editorNudgeUp: ['PageUp'],
+  editorNudgeDown: ['PageDown'],
+  editorGridDown: ['BracketLeft'],
+  editorGridUp: ['BracketRight'],
+  editorSnap: ['Backslash'],
+  editorGround: ['End'],
+  editorFocus: ['Home'],
+  editorHot1: ['Digit1'],
+  editorHot2: ['Digit2'],
+  editorHot3: ['Digit3'],
+  editorHot4: ['Digit4'],
+  editorHot5: ['Digit5'],
+  editorHot6: ['Digit6'],
+  editorHot7: ['Digit7'],
+  editorHot8: ['Digit8'],
+  editorHot9: ['Digit9'],
+  editorGameView: ['KeyG'],
+  editorKeys: ['KeyH'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 
@@ -219,7 +274,41 @@ const STORAGE_KEY = 'swg3js.bindings';
  * Actions only the dev server's tools read: kept in the table so a binding of one reads and keeps like any
  * other, and left off the Controls page of a release (`controlsActions`), where nothing reads them.
  */
-export const DEV_ONLY_ACTIONS: ReadonlySet<Action> = new Set<Action>(['placeLayer', 'trackGate', 'editor', 'editorUp', 'editorDown', 'editorPoint', 'editorSearch', 'editorBody', 'editorHold']);
+export const DEV_ONLY_ACTIONS: ReadonlySet<Action> = new Set<Action>([
+  'placeLayer',
+  'trackGate',
+  'editor',
+  'editorUp',
+  'editorDown',
+  'editorPoint',
+  'editorSearch',
+  'editorBody',
+  'editorHold',
+  'editorScale',
+  'editorNeighbour',
+  'editorNudgeFwd',
+  'editorNudgeBack',
+  'editorNudgeLeft',
+  'editorNudgeRight',
+  'editorNudgeUp',
+  'editorNudgeDown',
+  'editorGridDown',
+  'editorGridUp',
+  'editorSnap',
+  'editorGround',
+  'editorFocus',
+  'editorHot1',
+  'editorHot2',
+  'editorHot3',
+  'editorHot4',
+  'editorHot5',
+  'editorHot6',
+  'editorHot7',
+  'editorHot8',
+  'editorHot9',
+  'editorGameView',
+  'editorKeys',
+]);
 
 /** The actions the Controls page lists: every one on the dev server, and in a release all but the dev server's own. */
 export function controlsActions(dev: boolean): Action[] {

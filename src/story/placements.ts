@@ -29,7 +29,7 @@ import { parseJsonc } from './jsonc.ts';
 import type { PlacementLayer } from './placementPath.ts';
 import { gameToRawX, gameToRawZ, rawToGameX, rawToGameZ } from './waypoints.ts';
 
-export { placementFileOf, placementsPath, type PlacementLayer } from './placementPath.ts';
+export { editFileOf, editFilePath, placementFileOf, placementsPath, EDIT_FILE_KINDS, type EditFileKind, type PlacementLayer } from './placementPath.ts';
 export const PLACEMENT_LAYERS: readonly PlacementLayer[] = ['story', 'world'];
 /** Which pack a row's model is found in: the props catalogue (by `thing`), the gallery's buildings, or this world's own. */
 export type PlacementPack = 'props' | 'gallery' | 'world';
@@ -89,6 +89,15 @@ export interface PlacementRow {
    * in that pack first; on any other pack it is kept out as a field this build does not read.
    */
   from?: string;
+  /**
+   * How big it stands: one number for anything, or `[x, y, z]` along a prop's own axes (the world editor's). Absent is
+   * 1, and the reader writes it so: `1`, `[1, 1, 1]` and `[s, s, s]` read as absent, absent and `s`, so one size has one
+   * spelling and the diff reads. Each number from `PLACEMENT_LIMITS.scaleMin` to `scaleMax`; one of any other shape (a
+   * scale of nought or below draws a model inside out or not at all) is kept out of the row as a field this build does
+   * not read, with its note, and the row stands at its own size. A building with rooms takes none this pass and a flora
+   * row takes its largest axis: the stand decides both, with a note, since only it knows the model.
+   */
+  scale?: number | [number, number, number];
   name?: string;
   note?: string;
   /** When it was written, milliseconds since the epoch. */
@@ -134,6 +143,9 @@ export const PLACEMENT_LIMITS = {
   circle: 2000,
   /** The longest `template` a row may name. */
   template: 400,
+  /** The least and the most a scale may be along any axis (a thousandth to a thousand: the editor's notes stand at 0.05 and 20). */
+  scaleMin: 0.001,
+  scaleMax: 1000,
 };
 
 /** The prefix every permanent row is filed under in the streamer. */
@@ -145,7 +157,7 @@ const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const NAME_ID = /^[A-Za-z0-9_.-]{1,96}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 /** The fields a row may carry; the reserved ones are read and set aside. */
-const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'name', 'note', 'at']);
+const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'scale', 'name', 'note', 'at']);
 /** A world state's tag: its key and its value, each lower-case words. */
 const STATE = /^[a-z0-9_]+=[a-z0-9_]+$/;
 /** An object template, as a row names one. */
@@ -176,6 +188,33 @@ export function isPlacementId(id: unknown): id is string {
 /** A finite number, or undefined. */
 function num(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+/**
+ * A scale as a row keeps it, or null for one of no shape a row takes: a number, or three, each within the backstops,
+ * written the one way it is spelled (`readPlacementRow`): 1 for no scale at all, a number where the three are alike, else
+ * the three. Nought or below, or past the backstops, is null: kept out of the row, never stood inside out.
+ */
+export function readScale(v: unknown): number | [number, number, number] | null {
+  const L = PLACEMENT_LIMITS;
+  const fits = (s: unknown): s is number => typeof s === 'number' && Number.isFinite(s) && s >= L.scaleMin && s <= L.scaleMax;
+  if (fits(v)) return v;
+  if (!Array.isArray(v) || v.length !== 3 || !v.every(fits)) return null;
+  const [x, y, z] = v as [number, number, number];
+  return x === y && y === z ? x : [x, y, z];
+}
+
+/** A row's scale along its own three axes: `[1, 1, 1]` for none. */
+export function scaleOf(row: Pick<PlacementRow, 'scale'>): [number, number, number] {
+  const s = row.scale;
+  if (s === undefined) return [1, 1, 1];
+  return typeof s === 'number' ? [s, s, s] : [s[0], s[1], s[2]];
+}
+
+/** A scale as a row writes it: absent for 1 along every axis, one number where the three are alike, else the three. */
+export function writtenScale(s: readonly [number, number, number]): number | [number, number, number] | undefined {
+  if (s[0] === s[1] && s[1] === s[2]) return s[0] === 1 ? undefined : s[0];
+  return [s[0], s[1], s[2]];
 }
 
 /**
@@ -253,6 +292,13 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
   if (o.from !== undefined) {
     if (o.pack === 'world' && typeof o.from === 'string' && WORLD_ID.test(o.from)) row.from = o.from;
     else unknown.push(`${id}.from`);
+  }
+  // A scale, read the way `state` is: one of no shape a row takes is kept out of it with its note, and the row stands at
+  // its own size; one along every axis 1 is no scale at all, and written absent.
+  if (o.scale !== undefined) {
+    const s = readScale(o.scale);
+    if (s === null) unknown.push(`${id}.scale`);
+    else if (s !== 1) row.scale = s;
   }
   if (o.name !== undefined) {
     if (typeof o.name !== 'string' || o.name.length > L.name || CONTROL.test(o.name)) return `its name is words of ${L.name} characters at most`;
@@ -426,6 +472,7 @@ export function rowHash(row: PlacementRow): string {
     ...(row.state ? [row.state] : []),
     ...(row.template !== undefined ? ['template', row.template] : []),
     ...(row.from !== undefined ? ['from', row.from] : []),
+    ...(row.scale !== undefined ? ['scale', row.scale] : []),
   ]);
 }
 
@@ -488,7 +535,7 @@ export function mintPlacementId(base: string, taken: ReadonlySet<string>): strin
 }
 
 /** The field order a row is written in, so one row is always one line spelled the same way. */
-const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'name', 'note', 'at'];
+const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'scale', 'name', 'note', 'at'];
 /** Every field a row of this build reads, in the order it is written. */
 export const PLACEMENT_FIELDS: readonly string[] = ORDER;
 const ORDERED = new Set<string>(ORDER);

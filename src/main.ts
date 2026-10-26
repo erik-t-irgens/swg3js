@@ -282,7 +282,7 @@ import { HOUSING_TUNE, LocalHomes, MOVE_SAYS, atDoorDoes, atDoorOf, awayText, ba
 import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, propStandOf, standsSolid, type StandAnswer, type StoodRow, type WorldKind } from './world/permanent.ts';
 import { PLACEMENT_LAYERS, fromGame, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
 import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, driftText, forceText, groundMoved, homeStaysText, inHandText, keptText, nextDestination, nextStateChoice, notYoursText, pickedUpText, removedText, rowFromHouse, rowFromProp, savedText, stateChoiceText, takeOutText, yawOfTurn, type BuildingSource, type Destination as KeptIn, type HandSource, type HomeSource } from './world/permanentEdit.ts';
-import { EDITOR_HEADER, EDITOR_HEADER_VALUE, PLACEMENTS_ENDPOINT_TUNE, type PlacementReply, type PlacementReplyOk } from './world/placementEdits.ts';
+import { EDITOR_HEADER, EDITOR_HEADER_VALUE, PLACEMENTS_ENDPOINT_TUNE, type BatchEdit, type PlacementBatchOk, type PlacementBatchReply, type PlacementReply, type PlacementReplyOk } from './world/placementEdits.ts';
 import { EditChip } from './ui/editChip.ts';
 import { PermanentPanel, editSlots, type PermanentPanelModel, type PermanentRowView } from './ui/permanentPanel.ts';
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
@@ -595,6 +595,13 @@ const HUD_WIRING = { gunBits: 32, heatIsHeadroom: true, promptHz: 8, nearbyHz: 4
  * whose rooms overhang its shell.
  */
 const WAYPOINT_ROOM_SLACK = 20;
+
+/**
+ * Ours (the dev server's alone): how long a revision this page's own placements write made waits for the dev server's word
+ * about it before it is forgotten (`ownRevs`). The word comes within the watcher's 150 ms of the write, or never (a watcher
+ * folds two quick writes into one word); ten seconds outlasts any batch an action is written as.
+ */
+const OWN_REV_KEEP_MS = 10_000;
 
 /** A world in words, from the pack it loads from: the planet's name, and the zone's after it. */
 function worldNameOf(pack: string): string {
@@ -1001,6 +1008,18 @@ interface EditorApi {
   dials(helper: string): DialSet | null;
   debug(o?: Record<string, unknown>): Promise<unknown>;
   library(o?: Record<string, unknown>): Promise<unknown>;
+}
+
+/**
+ * The dev server's word that a file under `public/placements/` changed (`placements:changed`): its kind (`editFileOf`),
+ * `layer` beside it for a page built before the kinds, its world, and its revision as it now stands ('' for a file taken
+ * away). A dev server built before the revisions sends `layer` and `world` alone.
+ */
+interface PlacementWord {
+  kind?: string;
+  layer?: string;
+  world?: string;
+  rev?: string;
 }
 
 class App {
@@ -4040,6 +4059,10 @@ class App {
           rows: rows.slice(0, 60),
           refused: r.refused,
           note: r.layers.story.source === 'none' && r.layers.world.source === 'none' ? `no permanent placements on ${here}: { snippet: 'example' } prints a file to try` : '',
+          // How many times a placement file was read whole this session, and the revision last landed per file: a write the
+          // page lands by its answer is never read again for the dev server's word about it.
+          reads: this.placementReads,
+          revs: Object.fromEntries(this.placementRevs),
           tune: { ...DRESSING_TUNE },
           ...(import.meta.env.DEV
             ? {
@@ -10437,12 +10460,10 @@ class App {
     // stands brought to it, in the world it is for and only while a world is being played (a travel brings
     // its own; the creator's places stand none).
     if (import.meta.hot) {
-      import.meta.hot.on('placements:changed', (d: { layer?: string; world?: string }) => {
-        if (!this.inWorld || this.traveling || this.world.sceneOnly) return;
-        const here = packIdOf(this.world.planet, this.zone);
-        if (d?.world !== here || (d.layer !== 'story' && d.layer !== 'world')) return;
-        void this.reloadDressing(here, d.layer);
-      });
+      // Routed by the kind of file the word names (`editFileOf`): the two layers of rows are read again, unless the word
+      // is about a revision this page has already landed (its own write's answer), and the kinds a later wave reads
+      // (`removed`, `people`) are passed over until it does.
+      import.meta.hot.on('placements:changed', (d: PlacementWord) => this.placementWord(d));
       // A world's track file edited while the dev server runs (by hand, or the editor's own save): read again, and the
       // corridors of the tracks it added or changed kept clear of the plants on the chunks built from now on.
       import.meta.hot.on('tracks:changed', (d: { world?: string }) => {
@@ -24388,6 +24409,11 @@ class App {
       this.standOutOf(key);
       this.world.unplaceBuilding(key);
     },
+    // A sync's removals at once: everybody stood out of each first, then every list the streamer keeps walked once.
+    unstandMany: (keys) => {
+      for (const key of keys) this.standOutOf(key);
+      this.world.unplaceMany(keys);
+    },
     // A world row stands about `placeFrame` (the layout's centre, or (0, 0) on a world standing through a stand-in), and one
     // naming another world (`from`) once that world's pack is in, light (`World.guestWorld`).
     packReady: (pack, from) => (pack === 'props' ? !!this.props.pack : pack === 'gallery' ? !!this.dressingGallery : !!this.world.placeFrame && (!from || !!this.world.guestWorldNow(from))),
@@ -24436,7 +24462,12 @@ class App {
       if (!res) return null;
       const type = res.headers.get('content-type') ?? '';
       if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return null;
-      const read = readPlacementsFile(await res.text(), pack, frame);
+      const text = await res.text();
+      // On the dev server, the text's own revision (the endpoint's: twelve hex of its SHA-1), which a reload stands as
+      // landed rather than the revision a word named before the file moved on.
+      if (import.meta.env.DEV) await this.noteReadRev(`${layer}/${pack}`, text);
+      const read = readPlacementsFile(text, pack, frame);
+      this.placementReads++;
       const file = `public/${placementsPath(layer, pack)}`;
       if (read.problem) console.warn(`placements: ${file} is not read: ${read.problem}`);
       for (const s of read.skipped) console.warn(`placements: ${file}: ${s.id} is skipped: ${s.why}`);
@@ -24514,7 +24545,7 @@ class App {
    * file changed, the console's `reload`): only rows that moved come down and go up again. Then the story
    * objects are looked for afresh and the seats planned again round what stands now.
    */
-  private async reloadDressing(pack: string, layer?: PlacementLayer): Promise<void> {
+  private async reloadDressing(pack: string, layer?: PlacementLayer, rev?: string): Promise<void> {
     const run = { pack, run: ++this.dressingRuns };
     this.dressingReload = run;
     const gen = this.world.generation;
@@ -24525,12 +24556,109 @@ class App {
     if (!current()) return;
     await this.dressingPacks(reads.flatMap((r) => r?.rows ?? []));
     if (!current()) return;
+    // The revision now stood is the text's own as it was read (`readRevs`), never the word's: the file can have moved on
+    // since the word was sent (an action written as several batches), and recorded against the word's, the next word,
+    // naming what was really read, read the file whole once more. Where the page cannot hash (no `crypto.subtle`), the
+    // word's, as before.
+    if (layer) {
+      const key = `${layer}/${pack}`;
+      const read = this.readRevs.get(key);
+      if (read !== undefined) this.placementRevs.set(key, read);
+      else if (typeof rev === 'string' && !globalThis.crypto?.subtle) this.placementRevs.set(key, rev);
+    }
     // Built in play, as anything put down in play is, hidden until its programs exist; nothing waits on it.
     void this.dressingWait(layer ? this.permanent.setLayer(layer, reads[0]) : this.permanent.setLayers(reads[0], reads[1]));
     this.noteDressing();
     this.storyStands.clear();
     void this.standSeats(pack);
     if (import.meta.env.DEV) this.refreshEditPanels();
+  }
+
+  /** How many times a placement file was read whole this session (`fetchPlacements`): the console's `placements().reads`. */
+  private placementReads = 0;
+  /** The revision last landed per file (`<kind>/<world>`): a write's answer, or a file read again for the dev server's word. */
+  private readonly placementRevs = new Map<string, string>();
+  /** The revision of the text each file (`<kind>/<world>`) was last read as on the dev server: twelve hex of its SHA-1, as the endpoint's. */
+  private readonly readRevs = new Map<string, string>();
+  /**
+   * Revisions this page's own writes made, per file, that the dev server's word may still be about (`ownRev`): each is
+   * dropped once when its word comes, and forgotten after `OWN_REV_KEEP_MS`. An action written as several batches makes a
+   * revision a batch, and the word about an earlier one comes after a later one has landed: checked against the last
+   * landed alone, it read the file whole for a write of this page's own.
+   */
+  private readonly ownRevs = new Map<string, { rev: string; at: number }[]>();
+
+  /**
+   * The revision of a file's text as read, into `readRevs` (twelve hex of the SHA-1 of its UTF-8, the endpoint's own
+   * `revisionOf`); nothing where the page cannot hash. A text the browser read with a byte-order mark hashes otherwise
+   * than the file and costs one more whole read at the next word, which is all a wrong revision can cost here.
+   */
+  private async noteReadRev(key: string, text: string): Promise<void> {
+    const subtle = globalThis.crypto?.subtle;
+    if (!subtle) return;
+    try {
+      const d = new Uint8Array(await subtle.digest('SHA-1', new TextEncoder().encode(text)));
+      let hex = '';
+      for (let i = 0; i < 6; i++) hex += d[i].toString(16).padStart(2, '0');
+      this.readRevs.set(key, hex);
+    } catch {
+      this.readRevs.delete(key);
+    }
+  }
+
+  /** A revision this page's own write made, noted so the word about it is dropped whenever it comes (`placementWord`). */
+  private noteOwnRev(key: string, rev: string): void {
+    if (!rev) return;
+    const now = performance.now();
+    const list = (this.ownRevs.get(key) ?? []).filter((r) => now - r.at < OWN_REV_KEEP_MS);
+    list.push({ rev, at: now });
+    if (list.length > 32) list.splice(0, list.length - 32);
+    this.ownRevs.set(key, list);
+  }
+
+  /** Whether a word's revision is one of this page's own writes still waiting for its word: taken off the list if so. */
+  private takeOwnRev(key: string, rev: string): boolean {
+    const list = this.ownRevs.get(key);
+    if (!list) return false;
+    const now = performance.now();
+    const i = list.findIndex((r) => r.rev === rev && now - r.at < OWN_REV_KEEP_MS);
+    if (i < 0) return false;
+    list.splice(i, 1);
+    return true;
+  }
+  /** Asks of the placements endpoint whose answers have not landed yet, and the dev server's words held until they have. */
+  private placementsInFlight = 0;
+  private readonly heldWords: PlacementWord[] = [];
+
+  /**
+   * The dev server's word that a file under `public/placements/` changed (`placements:changed`, its revision beside it):
+   * routed by the file's kind, dropped when it is a revision this page has already landed (the editor's own write, whose
+   * answer it stood by difference), held while a write of this page's is out (its answer may name the very revision), and
+   * otherwise read again and stood by difference as before. A word from a dev server built before the revisions carries
+   * none and is always read again.
+   */
+  private placementWord(d: PlacementWord): void {
+    if (!this.inWorld || this.traveling || this.world.sceneOnly) return;
+    const here = packIdOf(this.world.planet, this.zone);
+    const kind = d?.kind ?? d?.layer;
+    if (d?.world !== here) return;
+    // `removed` and `people` are the editor's fifth wave's files: nothing reads them yet.
+    if (kind !== 'story' && kind !== 'world') return;
+    if (this.placementsInFlight > 0) {
+      this.heldWords.push(d);
+      return;
+    }
+    if (typeof d.rev === 'string' && this.placementRevs.get(`${kind}/${here}`) === d.rev) return;
+    // A revision one of this page's own writes made, its word late behind a later one of the same action's: dropped.
+    if (typeof d.rev === 'string' && this.takeOwnRev(`${kind}/${here}`, d.rev)) return;
+    void this.reloadDressing(here, kind, d.rev);
+  }
+
+  /** The words held while a write was out, heard now that its answer has landed. */
+  private releaseHeldWords(): void {
+    if (this.placementsInFlight > 0 || !this.heldWords.length) return;
+    const words = this.heldWords.splice(0);
+    for (const w of words) this.placementWord(w);
   }
 
   /** What could not be stood, said once a sync on the console, so a row that never shows is not a mystery. */
@@ -27027,12 +27155,20 @@ class App {
   /** One ask of the dev server's placement editor, answered. */
   private async postPlacements(op: Record<string, unknown>): Promise<PlacementReply> {
     if (!import.meta.env.DEV) return { ok: false, why: "the editor is the dev server's" };
+    // Out until a moment after its answer comes back, which is when its caller lands it: the dev server's word about the
+    // file written is held meanwhile and heard once the answer's revision has landed (`placementWord`).
+    this.placementsInFlight++;
     try {
       const res = await fetch('/__dev/placements', { method: 'POST', headers: { 'Content-Type': 'application/json', [EDITOR_HEADER]: EDITOR_HEADER_VALUE }, body: JSON.stringify(op), cache: 'no-store' });
       const body = (await res.json().catch(() => null)) as PlacementReply | null;
       return body && typeof body === 'object' && typeof body.ok === 'boolean' ? body : { ok: false, why: `the dev server answered ${res.status}` };
     } catch (err) {
       return { ok: false, why: `the dev server's placement editor did not answer: ${err instanceof Error ? err.message : String(err)}` };
+    } finally {
+      setTimeout(() => {
+        this.placementsInFlight--;
+        this.releaseHeldWords();
+      }, 0);
     }
   }
 
@@ -27046,6 +27182,9 @@ class App {
     if (!import.meta.env.DEV) return false;
     const current = () => this.world.generation === gen && this.editWorld() === pack && this.permanent.worldId === pack && this.permanent.generation === gen;
     if (!current()) return false;
+    // The revisions it wrote, at once (before anything is awaited): the dev server's word about them is dropped.
+    for (const [l, rev] of Object.entries(reply.revs ?? {})) if (typeof rev === 'string') this.placementRevs.set(`${l}/${pack}`, rev);
+    for (const [l, rev] of Object.entries(reply.revs ?? {})) if (typeof rev === 'string') this.noteOwnRev(`${l}/${pack}`, rev);
     await this.dressingPacks([...(reply.story?.rows ?? []), ...(reply.world?.rows ?? [])]);
     if (!current()) return false;
     // Kept for whoever wrote it to wait on (the world editor takes its placed copies away once the row is built).
@@ -27496,6 +27635,12 @@ class App {
           here: (at, most) => this.editorHere(at, most),
           guarded: (x, z, r) => this.permanent.guardedAt(x, z, r)?.label ?? null,
           passable: (template) => !!template && (isSeat(template) || isTableTemplate(template)),
+          batch: (edits) => this.editorBatch(edits),
+          status: () => this.editorStatus(),
+          rowFor: (id) => this.editorRowFor(id),
+          standingRows: () => (this.permanent.worldIn === this.editWorld() ? [...this.permanent.standing].map((s) => ({ id: s.row.id, row: s.row, layer: s.layer, x: s.x, y: s.y, z: s.z })) : []),
+          idsTaken: () => new Set([...(this.permanent.fileOf('story')?.rows ?? []), ...(this.permanent.fileOf('world')?.rows ?? [])].map((r) => r.id)),
+          stoodNote: (id) => this.permanent.rowOf(placementKey(id))?.note ?? null,
         });
         this.editor = ed;
         return ed;
@@ -27571,6 +27716,57 @@ class App {
     this.landBuilt = Promise.resolve();
     await this.landPlacements(reply, lifted ? placementKey(lifted.id) : null, pack, gen);
     return { ok: true, why: '', id: reply.id, built: this.landBuilt };
+  }
+
+  /**
+   * One batch of the world editor's, written by the dev server's endpoint (`op: 'batch'`) and landed by difference: the
+   * revisions it wrote recorded at once (so the dev server's word about them is dropped), the packs its new rows stand out
+   * of brought in, and what stands brought to the files over the changed ids alone (`PermanentLayer.landChanges`), never a
+   * whole file read. Answers what each file came to and what to wait on for what it stood to be built.
+   */
+  private async editorBatch(edits: BatchEdit[]): Promise<{ ok: boolean; why: string; files: PlacementBatchOk['files']; ms: number; built: Promise<void> }> {
+    const no = (why: string) => ({ ok: false, why, files: {}, ms: 0, built: Promise.resolve() });
+    if (!import.meta.env.DEV) return no("the editor is the dev server's");
+    const pack = this.editWorld();
+    const gen = this.world.generation;
+    const reply = (await this.postPlacements({ op: 'batch', world: pack, edits })) as unknown as PlacementBatchReply;
+    if (!reply.ok) return no(reply.why);
+    const files = reply.files;
+    for (const l of PLACEMENT_LAYERS) {
+      const f = files[l];
+      if (f) this.placementRevs.set(`${l}/${pack}`, f.rev);
+    }
+    for (const l of PLACEMENT_LAYERS) if (files[l]) this.noteOwnRev(`${l}/${pack}`, files[l]!.rev);
+    const current = () => this.world.generation === gen && this.editWorld() === pack && this.permanent.worldId === pack && this.permanent.generation === gen;
+    let built: Promise<void> = Promise.resolve();
+    if (current()) {
+      await this.dressingPacks(PLACEMENT_LAYERS.flatMap((l) => files[l]?.put ?? []));
+      if (current()) {
+        const changes = PLACEMENT_LAYERS.filter((l) => !!files[l]).map((l) => ({ layer: l, put: files[l]!.put, deleted: files[l]!.deleted }));
+        built = this.dressingWait(this.permanent.landChanges(changes));
+        this.noteDressing();
+        this.storyStands.clear();
+        void this.standSeats(pack);
+        this.refreshEditPanels();
+      }
+    }
+    return { ok: true, why: '', files, ms: reply.ms ?? 0, built };
+  }
+
+  /** Git's word on this world's placement files and track file (the endpoint's read-only `status` op), or why not. */
+  private async editorStatus(): Promise<{ branch: string | null; main: string | null; files: { kind: string; path: string; state: 'none' | 'untracked' | 'modified' | 'committed' | 'main' }[] } | string> {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    const reply = (await this.postPlacements({ op: 'status', world: this.editWorld() })) as unknown as { ok: boolean; why?: string; branch?: string | null; main?: string | null; files?: { kind: string; path: string; state: 'none' | 'untracked' | 'modified' | 'committed' | 'main' }[] };
+    if (!reply.ok || !Array.isArray(reply.files)) return reply.why ?? 'git could not be asked';
+    return { branch: reply.branch ?? null, main: reply.main ?? null, files: reply.files };
+  }
+
+  /** A row of this world's two files by id (the world edit where both hold it), its layer and what it is called; null for none. */
+  private editorRowFor(id: string): { row: PlacementRow; layer: PlacementLayer; label: string } | null {
+    if (this.permanent.worldIn !== this.editWorld()) return null;
+    const had = this.editRowOf(id);
+    if (!had) return null;
+    return { row: had.row, layer: had.layer, label: this.permanent.rowOf(placementKey(id))?.label ?? this.dressingLabel(had.row) };
   }
 
   /** The permanent rows round a place, nearest first, for the editor's Here tab. */

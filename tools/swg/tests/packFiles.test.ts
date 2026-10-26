@@ -340,7 +340,10 @@ try {
     const handler = main.slice(main.indexOf("import.meta.hot.on('placements:changed'"), main.indexOf("import.meta.hot.on('tracks:changed'"));
     const reload = main.slice(main.indexOf('  private async reloadDressing('), main.indexOf('  private noteDressing('));
     const fetchBody = methodOf(main, '  private async fetchPlacements(');
-    ok(/void this\.reloadDressing\(here, d\.layer\);/.test(handler) && /this\.fetchPlacements\(l, pack, frame\)/.test(reload) && /await fetchPublic\(placementsPath\(layer, pack\), \{ cache: 'no-store' \}, import\.meta\.env\.BASE_URL\);/.test(fetchBody), "the dev server's `placements:changed` reads the file again through `fetchPublic`, which with no list asks for it");
+    // Widened in the world editor's second wave on purpose: the word goes through `placementWord`, which drops a revision
+    // the page has landed and otherwise reads the file again exactly as before.
+    const word = methodOf(main, '  private placementWord(');
+    ok(/this\.placementWord\(d\)/.test(handler) && /void this\.reloadDressing\(here, kind, d\.rev\);/.test(word) && /this\.fetchPlacements\(l, pack, frame\)/.test(reload) && /await fetchPublic\(placementsPath\(layer, pack\), \{ cache: 'no-store' \}, import\.meta\.env\.BASE_URL\);/.test(fetchBody), "the dev server's `placements:changed` reads the file again through `fetchPublic`, which with no list asks for it");
     ok(/await fetchPublic\(tracksPath\(world\), \{ cache: 'no-store' \}, import\.meta\.env\.BASE_URL\);/.test(methodOf(main, '  private async readTracks(')), "and a world's tracks are read the same way");
     ok(/import shippedPublic from 'virtual:shipped-public';\nsetShippedPublic\(shippedPublic\);/.test(main), 'the game hands the build\'s list over before anything asks');
     const vite = text('vite.config.ts');
