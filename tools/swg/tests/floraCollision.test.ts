@@ -252,7 +252,9 @@ const planting = (models: unknown[], at: [number, number, number][], yaws: numbe
   const flora = src('src/world/flora.ts');
   ok(/floraColliders\(data, colliders\)/.test(flora) && !/h > 2\.2 \* r/.test(flora), "the planter builds a chunk's colliders through the one rule, and the guess lives only there");
   const world = src('src/world/world.ts');
-  ok(/if \(p\.parts\) \{\s*for \(const part of p\.parts\) \{\s*const col = this\.physics\.createStaticPart\(part\);/.test(world), "a chunk's physics stands up each planting's own shapes");
+  // Map-maker II: the world stands a chunk's plantings through one function a node test runs too (chunkPhysics.ts).
+  const plantings = src('src/world/chunkPhysics.ts');
+  ok(/plantingColliders\(this\.physics, c\.colliders, this\.chunkGroundAt, cols\);/.test(world) && /if \(p\.parts\) \{\s*for \(const part of p\.parts\) \{\s*const col = physics\.createStaticPart\(part\);/.test(plantings), "a chunk's physics stands up each planting's own shapes");
   ok(/refreshFloraColliders\(\): void/.test(world) && /floraData,/.test(world), 'and keeps each chunk\'s plantings so the console can rebuild them');
   const pack = src('src/world/assetPack.ts');
   ok(/flora-collision\.json/.test(pack) && /mergeFloraCollision\(manifest\.categories\.flora/.test(pack), 'the pack merges flora-collision.json at load, as it does floors.json');

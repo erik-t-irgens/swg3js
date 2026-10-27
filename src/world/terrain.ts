@@ -6,6 +6,8 @@ import type { DemShader } from './demShader';
 import type { FarGrid, SwgTerrain } from './swgTerrain';
 import { sampleFamily, type FamilyGrid } from '../audio/footsteps.ts';
 import { groundChunkOrigin, NO_SHIFT, tileCode, tileLayers, type GroundShift, type GroundTiler } from './groundTiles.ts';
+import type { HeightEdits } from '../swg/terrain/heightEdits.ts';
+import { copyGround } from './groundRewrite.ts';
 
 export const CHUNK_SIZE = 64;
 /** How far under its true height a far tile's ground is drawn, so the near chunks win where they overlap; what stands on it (the far tree cards) stands that much lower too. */
@@ -229,7 +231,33 @@ export class Terrain {
     return this.swg ? this.swg.heightAt(x, z) : this.rawHeightAt(x, z);
   }
 
+  /**
+   * The ground's height edits on a world with no converted terrain (Map-maker II): added at both of `heightAt`'s returns
+   * on that path (inside a real-elevation patch, and after the noise's flatten zones and anchors), bilinear over the four
+   * poles round the point in the raw frame about (0, 0) (`gx = -x`), never inside `groundBeneathDem` (the feather's far
+   * end would count it twice). A converted world's edits are its cached blocks' (`SwgTerrain`). Null adds nothing, and
+   * every height is what it was to the bit; a nought delta is skipped, since `-0 + 0` is `+0`.
+   */
+  heights: HeightEdits | null = null;
+
+  /** A height with the edits laid on, at a game point of a world with no converted terrain. */
+  private edited(h: number, x: number, z: number): number {
+    const d = this.heights!.bilinear(-x, z);
+    return d !== 0 ? h + d : h;
+  }
+
   heightAt(x: number, z: number): number {
+    const h = this.groundRawAt(x, z);
+    if (this.heights === null || this.swg) return h;
+    return this.edited(h, x, z);
+  }
+
+  /**
+   * The ground's height with no height edit laid on it on a world with no converted terrain (what the sculpt brush works a
+   * real-elevation world's deltas out against: `rawAt`); a converted world's own height as `heightAt` answers it (its edits
+   * are in its cached blocks, whose raw copies the sampler keeps).
+   */
+  groundRawAt(x: number, z: number): number {
     // Inside a DEM patch the real ground wins, feathered out to the planet's own at the edge.
     // Put before everything else so the mesh, the heightfield and every query agree: they all
     // come through here, and `buildGrid` calls it once per sample for both.
@@ -371,6 +399,37 @@ export class Terrain {
       }
     }
     return { geometry: r.geometry, heights: r.heights!, origin };
+  }
+
+  /**
+   * A standing chunk's ground written again in place from the heights as they are now (Map-maker II: a sculpt stroke, an
+   * undo, a heights file landed late): built afresh exactly as `buildChunk` builds it, its family grid filed again with it
+   * (a ruled world's families move with the height), and every attribute and its heightfield's heights copied into the
+   * chunk's own (`groundRewrite.ts`), so its mesh, material and program stay. The tiler's census is put back as it was,
+   * since a rewrite is the same chunk counted once. Answers whether it could: a shape that does not match is left alone.
+   */
+  rewriteChunk(cx: number, cz: number, geometry: THREE.BufferGeometry, heights: Float32Array): boolean {
+    const tiler = this.tiler;
+    const census = tiler ? tiler.census.slice() : null;
+    const fresh = this.buildChunk(cx, cz);
+    if (tiler && census) tiler.census.set(census);
+    const ok = fresh.heights.length === heights.length && copyGround(geometry, fresh.geometry);
+    if (ok) heights.set(fresh.heights);
+    fresh.geometry.dispose();
+    return ok;
+  }
+
+  /**
+   * A standing far tile's ground written again in place (Map-maker II, at a stroke's end): built afresh from its far grid,
+   * which the stroke has laid again (`SwgTerrain.relayRect`), and its attributes copied in, its index -- its cut under the
+   * chunks -- kept. Answers whether it could; false where its grid is not cached or the shapes differ.
+   */
+  rewriteFarTile(tx: number, tz: number, size: number, res: number, geometry: THREE.BufferGeometry): boolean {
+    const fresh = this.buildFarTile(tx, tz, size, res, true);
+    if (!fresh) return false;
+    const ok = copyGround(geometry, fresh, true);
+    fresh.dispose();
+    return ok;
   }
 
   /** The chunks' family grids, newest last; a planet's own, so a travel takes them with the terrain. */

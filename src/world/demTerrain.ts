@@ -68,7 +68,7 @@ export function makeDemPatch(raw: ArrayBuffer, meta: DemMeta, where: { centreX?:
 
       // World to sample. A north-up raster holds its northernmost row first, and north here is -Z,
       // so row 0 sits at the -Z edge and v runs WITH z. Getting this backwards mirrors the patch
-      // north to south, which looks perfectly plausible and is wrong; `demSampler.test.mjs` pins it.
+      // north to south, which looks perfectly plausible and is wrong; `demSampler.test.ts` pins it.
       const u = ((dx + half) / this.size) * (n - 1);
       const v = ((dz + half) / this.size) * (n - 1);
       const x0 = Math.min(n - 2, Math.max(0, Math.floor(u)));

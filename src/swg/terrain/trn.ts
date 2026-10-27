@@ -6,6 +6,7 @@ import { BoundaryPolygon, BoundaryRectangle, Layer, ShaderGroup, TerrainGenerato
 import { PackedFixedPointMap, PackedIntegerMap } from './flora.ts';
 import { ChunkReader, chunkChild, formChild, isForm, parseIff, parseIffRoots, type IffForm } from './iff.ts';
 import { shaderKey } from './shaderKey.ts';
+import { layAsk, type HeightEdits } from './heightEdits.ts';
 
 export { shaderKey, rampKey, type ColorRamp };
 
@@ -413,6 +414,19 @@ export class TerrainSampler {
   private readonly blocks = new Map<string, PoleBlock>();
   private readonly building: Layer[] = [];
   readonly template: TerrainTemplate;
+  /**
+   * The ground's height edits (Map-maker II, `heightEdits.ts`), laid over every block as it enters the cache
+   * (`generateBlock`, `putBlock`) and over every cached block a stroke reaches (`relay`); null lays nothing, and every
+   * block is the generator's to the bit. Never read by `generate`, `generateChunk` or `baseHeightAt`: those stay raw.
+   */
+  heights: HeightEdits | null = null;
+  /**
+   * The raw heights of every cached block an edit may have moved, by block number: a block any tile touches keeps the
+   * generator's own heights beside the laid ones, so every write is from raw (a patched block, one generated afresh and
+   * one undone are the same bits) and the two copies of an edge pole always agree. Gone with its block.
+   */
+  private readonly raws = new Map<number, Float32Array>();
+  private readonly lay = layAsk();
 
   constructor(template: TerrainTemplate, blockWidth = 64) {
     this.template = template;
@@ -522,6 +536,12 @@ export class TerrainSampler {
     lines.push(row(`heights along x (${(-half * step).toFixed(0)}..${(half * step).toFixed(0)} m, ${step} m apart)`, (i) => d.heightMap[half * n + i]));
     lines.push(row(`heights along z (${(-half * step).toFixed(0)}..${(half * step).toFixed(0)} m, ${step} m apart)`, (i) => d.heightMap[i * n + half]));
     lines.push(`shader family at the point: ${d.shaderMap[d.probeIndex]}`);
+    // The generator's ground is raw: the height edits laid over it where it enters the cache are said beside it.
+    if (this.heights?.size) {
+      const at = this.heights.bilinear(x, z);
+      lines.push(`raw height at the point ${d.heightMap[d.probeIndex].toFixed(3)}, the height edits add ${at.toFixed(3)} there (${(d.heightMap[d.probeIndex] + at).toFixed(3)} edited)`);
+      lines.push(row('the edits along x', (i) => this.heights!.bilinear(startX + i * step, z)));
+    }
     return lines;
   }
 
@@ -536,6 +556,8 @@ export class TerrainSampler {
       const s = this.blockStart(blockX, blockZ);
       const g = this.generate(s.x, s.z, this.numberOfPoles, this.poleStep);
       b = { heights: g.heights, shaders: g.shaders, children: g.children, colors: g.colors, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, radialNear: g.radialNear, radialFar: g.radialFar, environments: g.environments, seasonal: g.seasonal };
+      // The height edits laid over it as it enters the cache, its raw heights kept beside (Map-maker II).
+      if (this.heights) this.layEntering(blockX, blockZ, b);
       this.blocks.set(`${blockX},${blockZ}`, b);
     }
     return b;
@@ -547,7 +569,130 @@ export class TerrainSampler {
 
   putBlock(blockX: number, blockZ: number, block: PoleBlock): void {
     this.lastBlock = undefined;
+    // A block the worker made enters the cache raw: the height edits in force are laid over it here, as they land.
+    if (this.heights) this.layEntering(blockX, blockZ, block);
     this.blocks.set(`${blockX},${blockZ}`, block);
+  }
+
+  /** A block's number, a map key with nothing made (the chunks' own pattern); -1 past 4095 blocks either way. */
+  private static blockNumber(bx: number, bz: number): number {
+    if (bx < -4095 || bx > 4095 || bz < -4095 || bz > 4095) return -1;
+    return (bx + 4096) * 8192 + (bz + 4096);
+  }
+
+  /**
+   * A block entering the cache (generated here or made by the worker, its heights the generator's): where any tile of the
+   * height edits touches its poles, its raw heights kept by its number and the edits laid over them; elsewhere left as it
+   * came and any raw copy of an earlier life let go.
+   */
+  private layEntering(bx: number, bz: number, b: PoleBlock): void {
+    const n = TerrainSampler.blockNumber(bx, bz);
+    const h = this.heights;
+    const step = this.poleStep;
+    const np = this.numberOfPoles;
+    const x0 = bx * this.blockWidth - ORIGIN_OFFSET * step;
+    const z0 = bz * this.blockWidth - ORIGIN_OFFSET * step;
+    if (n < 0 || !h || !h.touches(x0, z0, x0 + (np - 1) * step, z0 + (np - 1) * step)) {
+      if (n >= 0) this.raws.delete(n);
+      return;
+    }
+    const raw = b.heights.slice();
+    this.raws.set(n, raw);
+    this.layOne(raw, b.heights, x0, z0);
+  }
+
+  /** One block's heights laid from its raw copy (`HeightEdits.layIn`, every sample from raw). */
+  private layOne(raw: Float32Array, out: Float32Array, x0: number, z0: number): boolean {
+    const h = this.heights;
+    if (!h) {
+      out.set(raw);
+      return false;
+    }
+    const a = this.lay;
+    const step = this.poleStep;
+    const np = this.numberOfPoles;
+    a.raw = raw;
+    a.out = out;
+    a.x0 = x0;
+    a.dx = step;
+    a.z0 = z0;
+    a.dz = step;
+    a.nx = np;
+    a.nz = np;
+    const moved = h.layIn(a);
+    a.raw = null;
+    a.out = null;
+    return moved;
+  }
+
+  /**
+   * Every cached block whose poles a rectangle of the raw frame reaches laid again from its raw heights with the edits in
+   * force now (a stroke's stamp, an undo, a file landed or let go): a block with no raw copy yet is raw as it stands and is
+   * copied first. Answers how many blocks it laid. A stamp's work, never a frame's; allocates only a first raw copy.
+   */
+  relay(x0: number, z0: number, x1: number, z1: number): number {
+    const bw = this.blockWidth;
+    const step = this.poleStep;
+    const np = this.numberOfPoles;
+    const pad = ORIGIN_OFFSET * step;
+    const span = (np - 1) * step - pad;
+    const lx = Math.min(x0, x1);
+    const hx = Math.max(x0, x1);
+    const lz = Math.min(z0, z1);
+    const hz = Math.max(z0, z1);
+    let laid = 0;
+    for (let bz = Math.ceil((lz - span) / bw); bz <= Math.floor((hz + pad) / bw); bz++) {
+      for (let bx = Math.ceil((lx - span) / bw); bx <= Math.floor((hx + pad) / bw); bx++) {
+        const b = this.blockAt(bx, bz);
+        if (!b) continue;
+        const n = TerrainSampler.blockNumber(bx, bz);
+        if (n < 0) continue;
+        let raw = this.raws.get(n);
+        if (!raw) {
+          // Nothing was ever laid over it (no tile touched it as it entered): its heights are the generator's, and a block no
+          // tile touches now keeps no copy (an empty store laid over the cache copies nothing).
+          const h = this.heights;
+          const x0 = bx * bw - pad;
+          const z0 = bz * bw - pad;
+          if (!h || !h.touches(x0, z0, x0 + (np - 1) * step, z0 + (np - 1) * step)) continue;
+          raw = b.heights.slice();
+          this.raws.set(n, raw);
+        }
+        this.layOne(raw, b.heights, bx * bw - pad, bz * bw - pad);
+        laid++;
+      }
+    }
+    return laid;
+  }
+
+  /** Every cached block laid again (a store put in after blocks were cached, or let go): `relay` over the whole cache. */
+  relayAll(): number {
+    let laid = 0;
+    for (const key of this.blocks.keys()) {
+      const comma = key.indexOf(',');
+      const bx = Number(key.slice(0, comma));
+      const bz = Number(key.slice(comma + 1));
+      const bw = this.blockWidth;
+      laid += this.relay(bx * bw, bz * bw, bx * bw + bw - 1, bz * bw + bw - 1);
+    }
+    return laid;
+  }
+
+  /** A cached block's raw heights at a pole of the raw frame (its kept raw copy, else the block as it stands), or null where it is not cached. */
+  rawPoleAt(x: number, z: number): number | null {
+    const bw = this.blockWidth;
+    const bx = Math.floor(x / bw);
+    const bz = Math.floor(z / bw);
+    const b = this.blockAt(bx, bz);
+    if (!b) return null;
+    const n = TerrainSampler.blockNumber(bx, bz);
+    const raw = (n >= 0 ? this.raws.get(n) : undefined) ?? b.heights;
+    return raw[this.indexInBlock(x, z, bx, bz)];
+  }
+
+  /** How many blocks keep a raw copy (the console's). */
+  get rawCopies(): number {
+    return this.raws.size;
   }
 
   /**
@@ -692,13 +837,18 @@ export class TerrainSampler {
     this.lastBlock = undefined;
     for (const key of this.blocks.keys()) {
       const [x, z] = key.split(',').map(Number);
-      if (Math.max(Math.abs(x - blockX), Math.abs(z - blockZ)) > radius) this.blocks.delete(key);
+      if (Math.max(Math.abs(x - blockX), Math.abs(z - blockZ)) > radius) {
+        this.blocks.delete(key);
+        // Its raw copy goes with it: a block generated again is copied afresh as it enters.
+        if (this.raws.size) this.raws.delete(TerrainSampler.blockNumber(x, z));
+      }
     }
   }
 
   invalidateAll(): void {
     this.lastBlock = undefined;
     this.blocks.clear();
+    this.raws.clear();
   }
 
   /** Terrain height at a world point, from the tile fans exactly as the client's collision sees them. */
@@ -738,6 +888,7 @@ export class TerrainSampler {
     this.building.push(layer);
     this.lastBlock = undefined;
     this.blocks.clear();
+    this.raws.clear();
   }
 
   get buildingLayers(): readonly Layer[] {

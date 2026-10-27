@@ -142,8 +142,10 @@ export const OLDER_ENDPOINT = 'the dev server is running an older endpoint: stop
  * restarts): a field it does not write (`template`, `from`), the old 2,000 rows a file, or the old 64 m circle.
  */
 export function olderEndpoint(why: string): boolean {
-  // The second wave's too: an endpoint from before the batch and status ops names the four ops it knows.
-  return /fields this build does not write|holds 2000 rows, as many as a file may|(clear|guard) is a number of metres from 0 to 64\b|an ask is a put, a delete, a move or a rename$/.test(why);
+  // The second wave's too: an endpoint from before the batch and status ops names the four ops it knows. And Map-maker II's:
+  // an endpoint from before its kinds names the four kinds it knew, and one from before a kind's wave refuses it in that
+  // wave's words ("does not write yet"), which the editor, sending only the kinds its own wave writes, never meets otherwise.
+  return /fields this build does not write|holds 2000 rows, as many as a file may|(clear|guard) is a number of metres from 0 to 64\b|an ask is a put, a delete, a move or a rename$|'s file is story, world, removed or people$|which this endpoint does not write yet/.test(why);
 }
 
 /** A write's refusal, with the restart words where an older endpoint gave it. */

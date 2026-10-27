@@ -28,7 +28,7 @@ import { LOD_LEVEL_TUNE, sweepDue } from './lodLevels.ts';
 import type { BuildingDoors, DoorsFile } from './doorMath.ts';
 import type { DressingStand, StandAnswer } from './permanent.ts';
 import { PLACEMENT_KEY_PREFIX, radiusOfBounds } from '../story/placements.ts';
-import { FLORA_COLLISION, rowFloraParts } from './floraCollision.ts';
+import { FLORA_COLLISION, rowFloraParts, trunkRadius } from './floraCollision.ts';
 import { fileByState, standsIn } from './worldState.ts';
 
 /**
@@ -610,6 +610,39 @@ export interface SolidBox {
 /** `forEachSolidBox`'s own scratch, so a walk makes nothing. */
 const solidQ = new THREE.Quaternion();
 const solidV = new THREE.Vector3();
+
+/**
+ * One placed object's foot on the ground as the sculpt brush keeps off it or carries it (Map-maker II §2.4,
+ * `LayoutStreamer.forEachStandingFoot`): `kind` `'box'` a turned footprint (its middle, its half sizes along its own X and Z,
+ * which way its own X points), `'trunk'` a circle (`x`, `z`, `r`: a placed tree by its own collision parts, or a walk-through
+ * one by its trunk), `'carry'` a permanent row that is not a building, which the brush never keeps off and may carry
+ * (`template` names it, `y` where it stands). `owner` says whose it is: the game's (the snapshot's), ours (a permanent row)
+ * or a player's (a house or prop put down in play). A kept record, written afresh for each object.
+ */
+export interface StandingFoot {
+  kind: 'box' | 'trunk' | 'carry';
+  owner: 'game' | 'ours' | 'player';
+  template: string;
+  x: number;
+  z: number;
+  y: number;
+  hx: number;
+  hz: number;
+  cos: number;
+  sin: number;
+  r: number;
+}
+
+/** A foot's record, made once. */
+export function standingFoot(): StandingFoot {
+  return { kind: 'box', owner: 'game', template: '', x: 0.5, z: 0.5, y: 0.5, hx: 0.5, hz: 0.5, cos: 1, sin: 0.5, r: 0.5 };
+}
+
+/** `forEachStandingFoot`'s own scratch: the parts a placed tree's foot is worked out from, and its matrix. */
+const footParts: ColliderPartLike[] = [];
+const footM = new THREE.Matrix4();
+const footV = new THREE.Vector3();
+type ColliderPartLike = ReturnType<typeof rowFloraParts>[number];
 
 /** The one empty effect list every object without any shares, so a lookup allocates nothing. */
 const NO_EFFECTS: readonly PackEffect[] = [];
@@ -1624,6 +1657,102 @@ export class LayoutStreamer {
         }
       }
     }
+  }
+
+  /**
+   * Every placed object that stands on the ground near a rectangle of the game's frame, as the sculpt brush needs it
+   * (Map-maker II §2.4): its foot (`StandingFoot`) written afresh into `foot` for each and handed to `visit`. **Not
+   * `forEachSolidBox`**: that walk is the air's obstacles and leaves out every flora object and every object the size rule
+   * gives no collision, so a placed tree or a small prop of the game's would be neither kept off nor carried. Visited here:
+   * every object standing in this world's state, out of doors (not contained), not a particle effect -- the game's own by
+   * its turned, scaled box, or a placed tree by its trunk (the footprint of its own collision parts, `rowFloraParts`, or for a
+   * walk-through extent `trunkRadius`); a building of ours (a permanent row whose model has rooms or a building's mark) and
+   * every house and prop a player put down by box; every other permanent row as one to carry. **And what lies dormant**, of
+   * the world's other state (Restuss's living city while the ruins stand, or the ruins while it lives), by the same rules,
+   * the game's own: a stroke there would otherwise move the ground under a building the next arrival in that state stands,
+   * buried or in the air, as `objectsNear` refuses a house on either state's ground for the same reason. A walk's work at a
+   * stamp, never a frame's; `visit` answering false stops it.
+   */
+  forEachStandingFoot(x0: number, z0: number, x1: number, z1: number, foot: StandingFoot, visit: (f: StandingFoot) => boolean): void {
+    const rect = { x0, z0, x1, z1 };
+    let go = true;
+    this.forEachPlacedIn(rect, (o) => (go = this.standingFootOf(o, foot, visit)));
+    if (!go) return;
+    // What lies dormant: the list itself, a few hundred objects on the one world that has any, by its middle in the rectangle.
+    const lx = Math.min(x0, x1);
+    const hx = Math.max(x0, x1);
+    const lz = Math.min(z0, z1);
+    const hz = Math.max(z0, z1);
+    for (const o of this.dormant) {
+      if (o.x < lx || o.x > hx || o.z < lz || o.z > hz) continue;
+      if (!this.standingFootOf(o, foot, visit)) return;
+    }
+  }
+
+  /** One placed object's foot written into `foot` and handed to `visit` (`forEachStandingFoot`); true to go on walking. */
+  private standingFootOf(o: PlacedObject, foot: StandingFoot, visit: (f: StandingFoot) => boolean): boolean {
+    if (o.contained) return true;
+    const def = this.defOf(o.model, o.pack);
+    if (!def || def.particle) return true;
+    const ours = o.template.startsWith(PLACEMENT_KEY_PREFIX);
+    const runtime = this.runtime.get(o);
+    const fold = this.foldOf.get(o);
+    const owner: StandingFoot['owner'] = ours ? 'ours' : runtime ? 'player' : 'game';
+    const building = !!(runtime?.building || fold?.building) || !!def.cells?.length;
+    foot.owner = owner;
+    foot.template = o.template;
+    foot.x = o.x;
+    foot.z = o.z;
+    foot.y = o.y;
+    foot.r = 0;
+    foot.hx = 0;
+    foot.hz = 0;
+    foot.cos = 1;
+    foot.sin = 0;
+    if (ours && !building) {
+      foot.kind = 'carry';
+      return visit(foot);
+    }
+    const b = def.bounds;
+    const sc = o.scale;
+    // The game's own tree, by its trunk: its own collision parts' footprint, or the guess's slim trunk for one walked through.
+    if (owner === 'game' && this.floraDefIs(def, o.pack)) {
+      const model = this.loadedOf(o.model, o.pack);
+      const radius = model?.radius ?? (b ? radiusOfBounds(b) : 1);
+      const height = model?.height ?? (b ? Math.abs(b.max[1] - b.min[1]) : 1);
+      const s = sc ? Math.max(sc.x, sc.y, sc.z) : 1;
+      footParts.length = 0;
+      const m = footM.compose(footV.set(o.x, o.y, o.z), o.q, sc ?? ONE);
+      const parts = rowFloraParts(def, m.elements, s, radius, height, o.y, FLORA_COLLISION, footParts);
+      let r = 0;
+      for (const p of parts) {
+        const reach = Math.hypot(p.x - o.x, p.z - o.z) + (p.kind === 'box' || p.kind === 'mesh' ? Math.hypot(p.hx, p.hz) : p.r);
+        if (reach > r) r = reach;
+      }
+      foot.kind = 'trunk';
+      foot.r = parts.length ? r : trunkRadius(radius * s, FLORA_COLLISION);
+      return visit(foot);
+    }
+    if (!b || !b.min || !b.max || b.min.length < 3 || b.max.length < 3) return true;
+    const ax = sc ? b.min[0] * sc.x : b.min[0];
+    const bx = sc ? b.max[0] * sc.x : b.max[0];
+    const az = sc ? b.min[2] * sc.z : b.min[2];
+    const bz = sc ? b.max[2] * sc.z : b.max[2];
+    const hx = Math.abs(bx - ax) / 2;
+    const hz = Math.abs(bz - az) / 2;
+    if (!Number.isFinite(hx + hz)) return true;
+    solidQ.copy(o.q);
+    solidV.set((ax + bx) / 2, 0, (az + bz) / 2).applyQuaternion(solidQ);
+    foot.x = o.x + solidV.x;
+    foot.z = o.z + solidV.z;
+    solidV.set(1, 0, 0).applyQuaternion(solidQ);
+    const l = Math.sqrt(solidV.x * solidV.x + solidV.z * solidV.z);
+    foot.cos = l > 1e-6 ? solidV.x / l : 1;
+    foot.sin = l > 1e-6 ? solidV.z / l : 0;
+    foot.hx = hx;
+    foot.hz = hz;
+    foot.kind = 'box';
+    return visit(foot);
   }
 
   /**

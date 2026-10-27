@@ -161,6 +161,40 @@ export class AirRaster {
   }
 
   /**
+   * The cells of a game-frame rectangle marked unknown (Map-maker II: the ground under them was sculpted, painted or
+   * flooded), so the fill's own budgeted round asks them of the world again, the rest of the raster as it was; the cells
+   * are those of the window as the last fill laid it (its corner and cell). The one reader of the ground that does not heal
+   * by itself: it asks only unknown cells and the band a move uncovers. Kept arrays, nothing made. Answers how many it
+   * forgot.
+   */
+  forget(x0: number, z0: number, x1: number, z1: number): number {
+    const n = this.n;
+    if (!n) return 0;
+    const cell = this.askCell;
+    const i0 = Math.max(0, Math.floor((Math.min(x0, x1) - this.askOx) / cell));
+    const i1 = Math.min(n - 1, Math.floor((Math.max(x0, x1) - this.askOx) / cell));
+    const j0 = Math.max(0, Math.floor((Math.min(z0, z1) - this.askOz) / cell));
+    const j1 = Math.min(n - 1, Math.floor((Math.max(z0, z1) - this.askOz) / cell));
+    let forgot = 0;
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const k = j * n + i;
+        if (!this.known[k]) continue;
+        this.known[k] = 0;
+        this.colour[k * 4 + 3] = 0;
+        this.response[k * 4 + 3] = 0;
+        this.tint[k * 4 + 3] = 0;
+        this.klass[k] = 0;
+        this.height[k] = this.mean;
+        this.unknown++;
+        forgot++;
+      }
+    }
+    if (forgot) this.dirty = true;
+    return forgot;
+  }
+
+  /**
    * The window moved by (dx, dz) whole cells: every array's content moves the other way, and what comes in at the
    * leading edges is unknown until it is filled.
    */

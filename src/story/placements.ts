@@ -29,7 +29,7 @@ import { parseJsonc } from './jsonc.ts';
 import type { PlacementLayer } from './placementPath.ts';
 import { gameToRawX, gameToRawZ, rawToGameX, rawToGameZ } from './waypoints.ts';
 
-export { editFileOf, editFilePath, placementFileOf, placementsPath, EDIT_FILE_KINDS, type EditFileKind, type PlacementLayer } from './placementPath.ts';
+export { editFileOf, editFilePath, editFileWorld, placementFileOf, placementsPath, EDIT_FILE_KINDS, SHARED_EDIT_KINDS, type EditFileKind, type PlacementLayer } from './placementPath.ts';
 export const PLACEMENT_LAYERS: readonly PlacementLayer[] = ['story', 'world'];
 /** Which pack a row's model is found in: the props catalogue (by `thing`), the gallery's buildings, or this world's own. */
 export type PlacementPack = 'props' | 'gallery' | 'world';

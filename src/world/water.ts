@@ -172,6 +172,30 @@ export function updateWaterDepth(centerX: number, centerZ: number, heightAt: (x:
 }
 
 /**
+ * The cells of a game-frame rectangle asked again of the ground now (Map-maker II: a stroke's end sculpted it), the rest of
+ * the window as it was; the round-robin pass would reach them within about 24 frames anyway. Answers how many it asked.
+ */
+export function refreshWaterDepth(x0: number, z0: number, x1: number, z1: number, heightAt: (x: number, z: number) => number | null): number {
+  const origin = DEPTH.origin.value;
+  if (origin.x < -1e8) return 0;
+  const i0 = Math.max(0, Math.floor((Math.min(x0, x1) - origin.x) / DEPTH_CELL));
+  const i1 = Math.min(DEPTH_CELLS - 1, Math.floor((Math.max(x0, x1) - origin.x) / DEPTH_CELL));
+  const j0 = Math.max(0, Math.floor((Math.min(z0, z1) - origin.y) / DEPTH_CELL));
+  const j1 = Math.min(DEPTH_CELLS - 1, Math.floor((Math.max(z0, z1) - origin.y) / DEPTH_CELL));
+  let n = 0;
+  for (let j = j0; j <= j1; j++) {
+    for (let i = i0; i <= i1; i++) {
+      const h = heightAt(origin.x + (i + 0.5) * DEPTH_CELL, origin.y + (j + 0.5) * DEPTH_CELL);
+      if (h === null) continue;
+      depthHeights[j * DEPTH_CELLS + i] = h;
+      n++;
+    }
+  }
+  if (n) depthTexture.needsUpdate = true;
+  return n;
+}
+
+/**
  * Forget every height in the window, so the next passes fill it from the world that is there now.
  *
  * The window slides with the player and keeps what it already knows, which is right inside one world

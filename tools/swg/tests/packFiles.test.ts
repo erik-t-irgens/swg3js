@@ -343,7 +343,13 @@ try {
     // Widened in the world editor's second wave on purpose: the word goes through `placementWord`, which drops a revision
     // the page has landed and otherwise reads the file again exactly as before.
     const word = methodOf(main, '  private placementWord(');
-    ok(/this\.placementWord\(d\)/.test(handler) && /void this\.reloadDressing\(here, kind, d\.rev\);/.test(word) && /this\.fetchPlacements\(l, pack, frame\)/.test(reload) && /await fetchPublic\(placementsPath\(layer, pack\), \{ cache: 'no-store' \}, import\.meta\.env\.BASE_URL\);/.test(fetchBody), "the dev server's `placements:changed` reads the file again through `fetchPublic`, which with no list asks for it");
+    // Widened again in Map-maker II's groundwork: the word is routed by its file's kind (`editLayerOf`), the two row layers
+    // to `reloadDressing` exactly as before, and the heights (its first wave) read again through `fetchPublic` the same way
+    // (by `readHeights`, which `fetchHeights` and `reloadHeights` both ask: its fix round told a failed read from no file).
+    const route = methodOf(main, '  private editLayerOf(');
+    const heights = methodOf(main, '  private async readHeights(');
+    ok(/this\.placementWord\(d\)/.test(handler) && /const reload = this\.editLayerOf\(kind\);/.test(word) && /reload\(here, d\.rev\);/.test(word) && /if \(kind === 'story' \|\| kind === 'world'\) return \(pack, rev\) => void this\.reloadDressing\(pack, kind, rev\);/.test(route) && /this\.fetchPlacements\(l, pack, frame\)/.test(reload) && /await fetchPublic\(placementsPath\(layer, pack\), \{ cache: 'no-store' \}, import\.meta\.env\.BASE_URL\);/.test(fetchBody), "the dev server's `placements:changed` reads the file again through `fetchPublic`, which with no list asks for it");
+    ok(/if \(kind === 'heights'\) return \(pack, rev\) => void this\.reloadHeights\(pack, rev\);/.test(route) && /await fetchPublic\(path, \{ cache: 'no-store' \}, import\.meta\.env\.BASE_URL\);/.test(heights) && /const path = editFilePath\('heights', pack\);/.test(heights), "and a world's heights file is read again the same way when the word names it");
     ok(/await fetchPublic\(tracksPath\(world\), \{ cache: 'no-store' \}, import\.meta\.env\.BASE_URL\);/.test(methodOf(main, '  private async readTracks(')), "and a world's tracks are read the same way");
     ok(/import shippedPublic from 'virtual:shipped-public';\nsetShippedPublic\(shippedPublic\);/.test(main), 'the game hands the build\'s list over before anything asks');
     const vite = text('vite.config.ts');

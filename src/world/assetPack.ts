@@ -10,6 +10,7 @@ import { prepareCardModel, registerPackCards, registerSharedCards } from './card
 import { prepareSwayModel } from './floraSway.ts';
 import { manifestText } from './packFiles.ts';
 import type { LayoutStateBlock } from './worldState.ts';
+import { meshCellOf } from '../vehicles/cells.ts';
 
 export interface CellLight {
   type: number;
@@ -543,9 +544,10 @@ export class AssetPack {
           if (o instanceof THREE.Mesh) {
             o.castShadow = true;
             o.receiveShadow = true;
-            // GLTFLoader strips ':' from node names, so "cell:0:exterior" arrives as "cell0exterior".
-            const cellMatch = /^cell[:_]?(\d+)/.exec(o.name) ?? /^cell[:_]?(\d+)/.exec(o.parent?.name ?? '');
-            const cell = cellMatch ? Number(cellMatch[1]) : -1;
+            // GLTFLoader strips ':' from node names, so "cell:0:exterior" arrives as "cell0exterior", and a cell whose own
+            // name begins with a digit cannot be read back from that ("cell:17:4way" would be cell 174): the original name
+            // it keeps (`userData.name`) is read first, on the nearest node carrying one (`meshCellOf`).
+            const cell = meshCellOf(o);
             const mats = Array.isArray(o.material) ? o.material : [o.material];
             for (let i = 0; i < mats.length; i++) {
               let m = mats[i];

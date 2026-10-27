@@ -34,7 +34,7 @@ import { gameToRawX, gameToRawZ, rawToGameX, rawToGameZ } from '../story/waypoin
 import type { DialSet } from '../ui/dials.ts';
 import type { HudCanvas } from '../ui/hudCanvas.ts';
 import { EditorBar, editorBarView } from '../ui/editorBar.ts';
-import { EditorWindow, type HereRow, type SelectedView } from '../ui/editorWindow.ts';
+import { EditorWindow, type HereRow, type SculptToolsView, type SelectedView } from '../ui/editorWindow.ts';
 import { drawEditorMarks, marksView, projectBox, projectPoint } from '../ui/editorMarks.ts';
 import { EditorAim } from './aim.ts';
 import { floorUnder, roomWords } from './cameraRoom.ts';
@@ -42,7 +42,12 @@ import { PASSABLE_NOTE, buildingNotes, editorRefusal, limitNotes, notesLine, pro
 import { editorDialsFor } from './editorDials.ts';
 import { ALL_ACTIONS, ctrlRule, editorMutes } from './editorKeys.ts';
 import { EditorSession, returnRefusal, type EntryState, type LeaveWay, type ReturnPoint } from './editorSession.ts';
-import { BRUSH_TUNE, EDITOR_TUNE, LIBRARY_TUNE, TUNE_WATCH, liveTuned, tuneEditor } from './editorTune.ts';
+import { BRUSH_TUNE, EDITOR_TUNE, LIBRARY_TUNE, SCULPT_TUNE, TUNE_WATCH, liveTuned, tuneEditor, tuneSculpt } from './editorTune.ts';
+import { EditorSculpt, sculptTool, type SculptHost } from './editorSculpt.ts';
+import { SCULPT_FALLOFFS, SCULPT_MODES, type SculptMode } from './sculpt.ts';
+import { GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
+import { deflateBase64 } from '../world/editFiles/browserCodec.ts';
+import { standingFoot } from '../world/layoutStream.ts';
 import { FlyCam, stepSpeed } from './flyCam.ts';
 import { LIBRARY_SOURCES, LibraryKeep, ENTRY_FLAG, entryKey, entryName, fallbackEntries, libraryView, readLibraryIndex, searchLibrary, usedHereKeys, type LibraryEntry, type LibrarySource, type LibraryView } from './libraryModel.ts';
 import { attachPointer, endPointerFrame, pointerRecord } from './pointer.ts';
@@ -50,8 +55,9 @@ import { EditorEdits, type EditorBatch, type EditorFileState } from './editorEdi
 import type { RowChange } from './undo.ts';
 import { entryForRow } from './libraryModel.ts';
 import type { BatchEdit } from '../world/placementEdits.ts';
-import { EditorBrush, brushNearOf, type BrushNearThing } from './editorBrush.ts';
+import { EditorBrush, brushNearOf, scatterTool, type BrushNearThing } from './editorBrush.ts';
 import { brushRing, meantForWater, ringAsk, type RingGround } from './brush.ts';
+import { ToolList, toolFrame, type ToolDef, type ToolDraw } from './tools.ts';
 
 /** What the game hands the editor: its objects, and its own half of every rule the editor cannot reach itself. */
 export interface EditorHost {
@@ -318,7 +324,7 @@ export class Editor {
       hotbar: () => me.keep.hotbar,
       setHotbar: (slot, key) => me.keep.setHotbar(slot, key),
       refreshWindow: () => me.window?.refreshEdits(),
-      brushArmed: () => me.brush.armed,
+      toolArmed: () => me.tools.toolArmed(),
     });
     this.edits.destOf = () => this.session.dest;
     // The scatter brush (the third wave's): its entries out of the library, what stands near its disc, the ground under it.
@@ -355,6 +361,36 @@ export class Editor {
         ringAt.y = w.terrain.nearHeightIfCached(ringAt.x, ringAt.z) ?? Number.NaN;
       },
     };
+    // The Tools list (Map-maker II's groundwork): the scatter brush its first entry, exactly as built, on B.
+    this.tools.add(scatterTool(this.brush, () => this.brush.arm(this.hand?.key ?? null)));
+    // The sculpt brush (Map-maker II's first wave), on K: the world's height edits, raised, lowered, flattened and smoothed.
+    this.sculpt = new EditorSculpt(this.sculptHost());
+    this.tools.add(sculptTool(this.sculpt));
+    // The world asks which tiles a stroke under way holds before it lays a write's answer or the file read again over them.
+    const sculpt = this.sculpt;
+    w.heightsHeld = (tx, tz) => sculpt.holds(tx, tz);
+    GROUND_REWRITE_TUNE.frameMs = SCULPT_TUNE.frameMs;
+    GROUND_REWRITE_TUNE.floraHz = SCULPT_TUNE.floraHz;
+    // A tool's rings, drawn from this frame's camera (`vp`, written before any tool draws) round the aim: the record's
+    // radius at the ring's slot, into the marks' kept arrays. Nothing is made.
+    const marks = this.marks;
+    const ringAsk = this.ringAsk;
+    const ringGround = this.ringGround;
+    const vp = this.vp;
+    this.toolDraw = {
+      marks,
+      radius: 0.5,
+      ring(slot) {
+        ringAsk.radius = this.radius;
+        if (slot === 0) {
+          brushRing(ringAsk, ringGround, vp.elements, marks.ring, marks.ringVis);
+          marks.ringOn = true;
+        } else {
+          brushRing(ringAsk, ringGround, vp.elements, marks.ring2, marks.ring2Vis);
+          marks.ring2On = true;
+        }
+      },
+    };
     // A console line or a slider that moves the flight's speed or the sky's reach moves what is flown now.
     TUNE_WATCH.moved = (partial) => this.tuned(partial);
   }
@@ -363,12 +399,92 @@ export class Editor {
   readonly edits: EditorEdits;
   /** The scatter brush. */
   readonly brush: EditorBrush;
+  /** The sculpt brush (Map-maker II). */
+  readonly sculpt: EditorSculpt;
+
+  /** What the sculpt brush needs of the game: the world's height edits and their rebuild, what stands, the file's rows. */
+  private sculptHost(): SculptHost {
+    const h = this.host;
+    const w = h.world;
+    const me = this;
+    const foot = standingFoot();
+    const tmp = new THREE.Vector3();
+    const q = new THREE.Quaternion();
+    return {
+      get edits() {
+        return me.edits;
+      },
+      worldKind: () => h.worldKind(),
+      store: () => w.ensureHeights(),
+      // The raw height at a pole of the raw frame: a converted world's cached block's raw copy (the block made ready where it
+      // is not cached, a stamp's rare cost), a real-elevation world's ground with no edit laid on.
+      rawAt: (px, pz) => {
+        const x = px * 2;
+        const z = pz * 2;
+        const s = w.terrain.swg;
+        if (!s) return w.terrain.groundRawAt(-x, z);
+        let r = s.sampler.rawPoleAt(x, z);
+        if (r === null) {
+          s.heightAt(s.toGameX(x), s.toGameZ(z));
+          r = s.sampler.rawPoleAt(x, z);
+        }
+        return r ?? Number.NaN;
+      },
+      toRaw: (x, z, out) => {
+        const s = w.terrain.swg;
+        out.x = s ? s.toSwgX(x) : -x;
+        out.z = s ? s.toSwgZ(z) : z;
+      },
+      toGame: (x, z, out) => {
+        const s = w.terrain.swg;
+        out.x = s ? s.toGameX(x) : -x;
+        out.z = s ? s.toGameZ(z) : z;
+      },
+      changed: (r, end, fx, fz) => {
+        if (!(r.x0 <= r.x1)) {
+          if (end) w.endHeightsStroke();
+          return;
+        }
+        const s = w.terrain.swg;
+        const ax = s ? s.toGameX(r.x0) : -r.x0;
+        const bx = s ? s.toGameX(r.x1) : -r.x1;
+        const az = s ? s.toGameZ(r.z0) : r.z0;
+        const bz = s ? s.toGameZ(r.z1) : r.z1;
+        w.heightsChanged(Math.min(ax, bx), Math.min(az, bz), Math.max(ax, bx), Math.max(az, bz), end, fx, fz);
+      },
+      feet: (x0, z0, x1, z1, visit) => w.streamer?.forEachStandingFoot(x0, z0, x1, z1, foot, visit),
+      standing: () => h.standingRows(),
+      lowestOf: (id) => {
+        const o = w.streamer?.placedOf(placementKey(id)) ?? null;
+        const b = o ? w.streamer?.boxOf(o) : null;
+        if (!o || !b) return null;
+        const s = o.scale;
+        const sb = s ? { min: [b.min[0] * s.x, b.min[1] * s.y, b.min[2] * s.z], max: [b.max[0] * s.x, b.max[1] * s.y, b.max[2] * s.z] } : b;
+        q.copy(o.q);
+        return lowestOf(sb, q, tmp);
+      },
+      fileRow: (id) => w.heightRows.get(id) ?? null,
+      // As the file stands now, the editor's own writes included (`HeightRows`), never only as it was last read.
+      fileSize: () => ({ tiles: w.heightRows.size, bytes: w.heightRows.bytes }),
+      deflate: (bytes) => deflateBase64(bytes),
+      beginWork: () => w.beginGroundWork(),
+      noteStamp: () => w.noteStamp(),
+      say: (words, ok) => me.say(words, ok),
+    };
+  }
+  /** The Tools list (Map-maker II §2.3): one armed at a time, the scatter brush first. */
+  readonly tools = new ToolList();
+  /** What an armed tool is handed each frame and what it draws with, kept records. */
+  private readonly toolStep = toolFrame();
+  private readonly toolDraw: ToolDraw;
   /** The brush ring's ground and its ask, kept records. */
   private readonly ringGround: RingGround;
   private readonly ringAsk = ringAsk();
-  /** The brush's buttons this frame, read in the key block (Fly's) or off the pointer (Point's). */
+  /** An armed tool's buttons this frame, read in the key block (Fly's) or off the pointer (Point's): the left applies, the right the inverse. */
   private brushPaint = false;
   private brushErase = false;
+  /** The left button pressed this frame with Shift held (Fly's, read in the key block): a tool's sample, which writes nothing. */
+  private toolShiftPress = false;
   /** Ctrl held this frame (the key block's word): Point's brush buttons read as up too. */
   private ctrlHeld = false;
   /** When something last happened (a key, a button, an edit, a stroke, a flight), seconds: what the automatic fold waits out. */
@@ -406,6 +522,9 @@ export class Editor {
    * flight's speed, the sky's reach, and the snapping's switch, grid and angle (which `[`, `]` and `\` step for the session).
    */
   private tuned(partial: unknown): void {
+    // The sculpt brush's two rebuild numbers are the ground's own (`GROUND_REWRITE_TUNE`), whichever helper moved them.
+    GROUND_REWRITE_TUNE.frameMs = Math.max(0, SCULPT_TUNE.frameMs);
+    GROUND_REWRITE_TUNE.floraHz = Math.max(0.01, SCULPT_TUNE.floraHz);
     const live = liveTuned(partial);
     if (live.speed) this.fly.speed = clampSpeed(EDITOR_TUNE.cam.speed);
     if (live.skyReach) this.skyReach = clampSky(EDITOR_TUNE.aim.skyReach);
@@ -535,8 +654,9 @@ export class Editor {
 
   private leaveBody(ret: ReturnPoint, way: LeaveWay): void {
     this.giveUpHand();
-    this.brush.disarm();
+    this.tools.disarmAll();
     this.marks.ringOn = false;
+    this.marks.ring2On = false;
     this.edits.cancel(false);
     this.host.world.cameraRoomRule = null;
     this.window?.hide();
@@ -549,9 +669,12 @@ export class Editor {
 
   /** The world went with the editor on (a travel, the select screen): off with it, the body stood by whatever moved it. */
   worldGone(): void {
-    // The brush is let go first (a stroke under way ends unrecorded with its world's history, below).
-    this.brush.disarm();
+    // A sculpt stroke under way is dropped unwritten (its world's store went with the world), then whatever tool is armed
+    // is let go (a stroke under way ends unrecorded with its world's history, below).
+    this.sculpt.worldGone();
+    this.tools.disarmAll();
     this.marks.ringOn = false;
+    this.marks.ring2On = false;
     // Its selection, its history and anything under way go with the world, on or off.
     this.edits.worldGone();
     if (!this.session.on) return;
@@ -585,9 +708,10 @@ export class Editor {
       // A hold or a drag made before Ctrl pauses (`idle`: no mouse, no button edge) and keeps the camera still.
       this.edits.idle();
       a.look = !this.session.point && input.locked && !this.edits.takesMouse;
-      // A brush stroke ends: its buttons read as up while Ctrl is held (Point's too, `ctrlHeld`).
+      // A tool's stroke ends: its buttons read as up while Ctrl is held (Point's too, `ctrlHeld`).
       this.brushPaint = false;
       this.brushErase = false;
+      this.toolShiftPress = false;
       this.ctrlHeld = true;
       // The editor's own chords (Ctrl+D, C, X, Z, Shift+Z), read as raw keys; every action muted for the frame.
       if (!oldHand && !(this.window?.library.typing ?? false)) this.edits.chords();
@@ -618,8 +742,9 @@ export class Editor {
       }
       // A click in Fly is the attack's button, read here and muted below; in Point the pointer layer has it.
       if (!this.session.point && input.pressedAction('attack') && this.hand) this.pendingClick = true;
-      // B: the brush armed with the library's chosen entries (or what is in hand), or let go.
-      if (input.pressedAction('editorBrush')) void this.toggleBrush();
+      // A tool's key arms it (any other let go first) or lets it go: B the scatter brush, with the library's chosen entries
+      // (or what is in hand), K the sculpt brush (Map-maker II's first wave).
+      for (const t of this.tools.list) if (t.action && input.pressedAction(t.action)) void this.toggleTool(t.id);
       // The editing keys (the hand on the selection, the gizmo's buttons, the nudges, the snaps, the hotbar, the eyedropper,
       // game view and the key sheet), read before the mutes take what they borrow; the frame's seconds in its kept clock.
       this.edits.clock.dt = dt;
@@ -631,10 +756,15 @@ export class Editor {
     if (input.pressedAction('noclipSlower')) notches--;
     const wheel = this.session.point ? this.pointer.wheel : input.wheel;
     if (this.session.point) input.wheel = 0;
+    const armedTool = this.tools.armedTool;
     if (wheel) {
-      // With a hand key held on the selection the wheel steps its grid (the angle, the grid, the scale step).
-      if (this.edits.takesMouse) this.edits.wheelStep(-wheel);
-      else if (this.hand && this.aimKind === 'sky') {
+      // With a hand key held on the selection the wheel steps its grid (the angle, the grid, the scale step); never while a
+      // tool is armed (the selection takes no hold then), when C held with the wheel sizes the tool that has a size.
+      if (this.edits.takesMouse && !armedTool) this.edits.wheelStep(-wheel);
+      else if (armedTool?.size && input.held('editorScale')) {
+        const said = armedTool.size(-wheel);
+        if (said) this.say(said, true);
+      } else if (this.hand && this.aimKind === 'sky') {
         const t = EDITOR_TUNE.aim;
         this.skyReach = Math.min(t.skyFar, Math.max(t.skyNear, this.skyReach * (1 - wheel * t.skyStep)));
       } else notches -= wheel;
@@ -650,32 +780,46 @@ export class Editor {
     a.slow = input.held('freeLook');
     // A hold, a drag of the gizmo or an orbit has the mouse: the camera holds still.
     a.look = !this.session.point && input.locked && !this.edits.takesMouse;
-    // The brush's buttons in Fly, read before the mutes take them: the attack's paints, the other attack's erases.
-    this.brushPaint = this.brush.armed && !oldHand && !this.session.point && input.held('attack');
-    this.brushErase = this.brush.armed && !oldHand && !this.session.point && input.held('altAttack');
+    // An armed tool's buttons in Fly, read before the mutes take them: the attack's applies (paints, raises), the other
+    // attack's the inverse (erases, lowers). Shift with a press of the left samples and writes nothing (the Shift rule).
+    const toolOn = !!armedTool && !oldHand && !this.session.point;
+    const shift = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
+    this.toolShiftPress = toolOn && shift && input.pressedAction('attack');
+    this.brushPaint = toolOn && input.held('attack') && !(shift && armedTool?.id !== 'brush');
+    this.brushErase = toolOn && input.held('altAttack');
     input.mute(editorMutes(oldHand));
     if (!oldHand) input.mute(TAKEN);
   }
 
   /**
-   * B: the brush armed with the library's chosen entries (or, with none chosen, the thing in hand), or let go. Armed, the
-   * hand is given up, an edit under way given up and nothing is picked: its buttons are its own. Answers what was said.
+   * A tool's key (B the scatter brush, K the sculpt brush): armed, any other let go first (`ToolList.arm`), or let go.
+   * Armed, the hand is given up and an edit under way given up: its buttons are its own. What is picked stays picked and
+   * takes its holds again once the tool is put down (Map-maker II §2.3; the scatter brush let the selection go as it armed
+   * before the list, which the design's rule overturns). Answers what was said.
    */
-  async toggleBrush(): Promise<string> {
-    if (this.brush.armed) {
-      this.brush.disarm();
-      this.say('the brush let go', true);
-      return 'the brush let go';
+  async toggleTool(id: string): Promise<string> {
+    const t = this.tools.byId(id);
+    if (!t) return `no tool called ${id}`;
+    if (t.armed()) {
+      t.disarm();
+      const words = `${t.label} let go`;
+      this.say(words, true);
+      this.window?.refreshEdits();
+      return words;
     }
-    const said = await this.brush.arm(this.hand?.key ?? null);
-    if (this.brush.armed) {
+    const said = await this.tools.arm(id);
+    if (t.armed()) {
       this.giveUpHand();
       this.edits.cancel(false);
-      this.edits.sel.clear();
       this.window?.refreshEdits();
       this.window?.library.render();
     }
     return said;
+  }
+
+  /** B: the scatter brush armed with the library's chosen entries (or, with none chosen, the thing in hand), or let go. */
+  toggleBrush(): Promise<string> {
+    return this.toggleTool('brush');
   }
 
   /**
@@ -714,7 +858,7 @@ export class Editor {
     const looked = this.fly.yaw !== this.lastYaw || this.fly.pitch !== this.lastPitch;
     this.lastYaw = this.fly.yaw;
     this.lastPitch = this.fly.pitch;
-    if (looked || this.host.input.keysDown > 0 || this.pointer.buttons !== 0 || this.fly.moving > 0.05 || ed.busy || ed.writing || ed.stroking || this.hand || this.brush.mode || this.folding) {
+    if (looked || this.host.input.keysDown > 0 || this.pointer.buttons !== 0 || this.fly.moving > 0.05 || ed.busy || ed.writing || ed.stroking || this.hand || this.brush.mode || this.sculpt.mode || this.folding) {
       this.activeAt = now;
       return;
     }
@@ -751,9 +895,12 @@ export class Editor {
       this.giveUpHand();
       return true;
     }
-    if (this.brush.armed) {
-      this.brush.disarm();
-      this.say('the brush let go', true);
+    // A tool armed (the scatter brush, the sculpt brush): let go, a stroke under way ended as its button let go would.
+    const armed = this.tools.armedTool;
+    if (armed) {
+      this.tools.disarmAll();
+      this.say(`${armed.label} let go`, true);
+      this.window?.refreshEdits();
       return true;
     }
     // A hold or a drag under way: given up, the rows put back where their files have them, nothing written.
@@ -780,8 +927,8 @@ export class Editor {
    */
   canvasClick(): void {
     if (!this.session.on || !this.session.point) return;
-    // With the brush armed a click paints: it never takes the mouse back to Fly.
-    if (this.hand || this.brush.armed || !this.pointer.clicked) return;
+    // With a tool armed a click is the tool's: it never takes the mouse back to Fly.
+    if (this.hand || this.tools.toolArmed() || !this.pointer.clicked) return;
     if (this.aim.hover || this.edits.handleHot || !this.edits.clickGoesToFly()) return;
     this.pointer.clicked = false;
     this.setPoint(false);
@@ -839,18 +986,26 @@ export class Editor {
     this.aimKind = kind;
     const hit = this.aim.hit;
     const hand = this.hand;
-    // The brush: Fly's buttons were read in the key block; Point's are the pointer's over the canvas (left 1, right 4).
-    const brush = this.brush;
-    if (brush.armed) {
-      const ba = brush.ask;
-      const pb = this.session.point && this.pointer.over && !hand && !this.ctrlHeld ? this.pointer.buttons : 0;
-      ba.paint = this.session.point ? (pb & 1) !== 0 : this.brushPaint;
-      ba.erase = this.session.point ? (pb & 4) !== 0 : this.brushErase;
-      ba.cx = hit.x;
-      ba.cz = hit.z;
-      ba.valid = kind !== 'sky';
-      ba.dt = dt;
-      brush.frame();
+    // The armed tool: Fly's buttons were read in the key block; Point's are the pointer's over the canvas (left 1, right 4).
+    const tool = this.tools.armedTool;
+    if (tool) {
+      const f = this.toolStep;
+      const point = this.session.point;
+      const pb = point && this.pointer.over && !hand && !this.ctrlHeld ? this.pointer.buttons : 0;
+      const shift = this.host.input.isDown('ShiftLeft') || this.host.input.isDown('ShiftRight');
+      // Shift with a press of the left samples and writes nothing (every brush but the scatter brush, which was built without it).
+      const sampleOn = tool.id !== 'brush';
+      f.shift = shift;
+      f.sampled = sampleOn && (point ? shift && (this.pointer.pressed & 1) !== 0 && pb !== 0 : this.toolShiftPress);
+      f.apply = point ? (pb & 1) !== 0 && !(sampleOn && shift) : this.brushPaint;
+      f.inverse = point ? (pb & 4) !== 0 : this.brushErase;
+      f.x = hit.x;
+      f.y = hit.y;
+      f.z = hit.z;
+      f.valid = kind !== 'sky';
+      f.dt = dt;
+      f.now = now;
+      tool.step(f);
     }
     // What happened this frame, for the automatic fold's quiet (`EDITOR_TUNE.autoFoldIdle`).
     this.noteActivity(now);
@@ -915,19 +1070,19 @@ export class Editor {
     sv.fy = this.tmp.y;
     sv.fz = this.tmp.z;
     sv.focal = hh / (2 * Math.tan((cam.fov * Math.PI) / 360));
-    // The brush's ring on the ground round the aim, armed and over something (game view hides it with the rest).
-    if (brush.armed && kind !== 'sky') {
+    // The armed tool's rings on the ground round the aim, armed and over something (game view hides them with the rest).
+    m.ringOn = false;
+    m.ring2On = false;
+    m.ringErase = false;
+    if (tool && tool.armed() && kind !== 'sky') {
       const ra = this.ringAsk;
       ra.cx = hit.x;
       ra.cy = hit.y;
       ra.cz = hit.z;
-      ra.radius = BRUSH_TUNE.radius;
       ra.w = w;
       ra.h = hh;
-      brushRing(ra, this.ringGround, vp, m.ring, m.ringVis);
-      m.ringOn = true;
-      m.ringErase = brush.mode === 'erase';
-    } else m.ringOn = false;
+      tool.draw(this.toolDraw);
+    }
     this.edits.clock.now = now;
     this.edits.frame(m);
     this.moveEyeForEdits();
@@ -1006,9 +1161,9 @@ export class Editor {
       q.set(g.q[0], g.q[1], g.q[2], g.q[3]);
       yaw = 2 * Math.atan2(q.y, q.w);
     } else q.setFromAxisAngle(UP, yaw);
-    // What was in hand before goes back first (a row picked up stands again), and the brush is let go: its buttons are the hand's now.
+    // What was in hand before goes back first (a row picked up stands again), and any tool is let go: its buttons are the hand's now.
     this.giveUpHand();
-    if (this.brush.armed) this.brush.disarm();
+    this.tools.disarmAll();
     this.takeGen = gen;
     const bounds = got.bounds;
     const sc = base && !got.building ? scaleOfRow(base.row) : ([1, 1, 1] as [number, number, number]);
@@ -1339,11 +1494,11 @@ export class Editor {
     v.mode = s.point ? 'POINT' : 'FLY';
     v.speed = `${this.fly.speed < 10 ? this.fly.speed.toFixed(1) : Math.round(this.fly.speed)} m/s${s.hold ? ' · held' : ''}`;
     const hs = this.hand?.scale;
-    const br = this.brush;
+    const tool = this.tools.armedTool;
     v.hand = this.hand
       ? `in hand: ${this.hand.name}${hs && (hs.x !== 1 || hs.y !== 1 || hs.z !== 1) ? ` (scale ${hs.x === hs.y && hs.y === hs.z ? hs.x : `${hs.x} ${hs.y} ${hs.z}`})` : ''}${this.ghost.shown || !this.hand.bounds ? '' : ' (preparing)'}`
-      : br.armed
-        ? `brush: ${br.set.size} entr${br.set.size === 1 ? 'y' : 'ies'} · ${BRUSH_TUNE.radius} m · ${BRUSH_TUNE.density} a 100 m²${br.mode ? ` · ${br.mode === 'paint' ? 'painting' : 'erasing'}` : ' · LMB paints, RMB erases, B lets go'}`
+      : tool
+        ? (tool.barWords?.() ?? tool.label)
         : 'nothing in hand';
     v.dest = `→ ${destinationFile(s.dest, this.host.packId())}`;
     v.room = roomWords(this.host.world.cameraRoom);
@@ -1351,7 +1506,7 @@ export class Editor {
     v.said = this.said;
     v.saidOk = this.saidOk;
     const k = (a: Parameters<Input['pressedAction']>[0]) => input.bindings[a][0] ?? '';
-    v.hint = `WASD fly · ${k('editorUp')}/${k('editorDown')} up/down · Shift fast · Alt slow · wheel speed · ${k('editorPoint')} cursor · ${k('editorSearch')} find · click pick/put down · ${k('placeTurn')}/${k('placeLift')}/${k('editorScale')} held turn/raise/scale · ${k('takeProp')} pick up · ${k('putAway')} delete · ${k('placeLayer')} file · ${k('editorBrush')} brush · ${k('editorKeys')} keys · F2 leave`;
+    v.hint = `WASD fly · ${k('editorUp')}/${k('editorDown')} up/down · Shift fast · Alt slow · wheel speed · ${k('editorPoint')} cursor · ${k('editorSearch')} find · click pick/put down · ${k('placeTurn')}/${k('placeLift')}/${k('editorScale')} held turn/raise/scale · ${k('takeProp')} pick up · ${k('putAway')} delete · ${k('placeLayer')} file · ${k('editorBrush')} brush · ${k('editorSculpt')} sculpt · ${k('editorKeys')} keys · F2 leave`;
     bar.show(v);
   }
 
@@ -1466,6 +1621,7 @@ export class Editor {
           const r = h.world.streamer?.unfoldedReport();
           return { rows: r?.rows ?? 0, ms: r?.estMs ?? 0, folded: r?.folded ?? 0, folding: this.folding, auto: EDITOR_TUNE.autoFold, hint: EDITOR_TUNE.foldHint };
         })(),
+        list: this.tools.report((a) => capOf(this.host.input.bindings[a][0])),
         brush: {
           armed: this.brush.armed,
           entries: [...this.brush.set].map(([key, weight]) => {
@@ -1474,6 +1630,7 @@ export class Editor {
           }),
           switches: BRUSH_SWITCHES.map(([key, words]) => ({ key, words, on: BRUSH_TUNE[key] })),
         },
+        sculpt: this.sculptView(),
       }),
       setTool: (t: Record<string, unknown>) => this.setTool(t),
       refreshStatus: () => void this.edits.refreshStatus(),
@@ -1493,6 +1650,8 @@ export class Editor {
     // The third wave's: Fold now and the automatic fold, the brush armed, its entries' weights and its switches.
     if (t.fold === true) void this.foldNow().then(() => this.window?.refreshEdits());
     if (typeof t.autoFold === 'boolean') EDITOR_TUNE.autoFold = t.autoFold;
+    // The Tools list's own buttons: a tool armed (any other let go first) or let go.
+    if (typeof t.tool === 'string') void this.toggleTool(t.tool).then(() => this.window?.refreshEdits());
     if (t.brushArm === true && !this.brush.armed) void this.toggleBrush().then(() => this.window?.refreshEdits());
     if (t.brushArm === false && this.brush.armed) {
       this.brush.disarm();
@@ -1513,6 +1672,106 @@ export class Editor {
       const k = BRUSH_SWITCHES.find(([key]) => key === sw[0]);
       if (k) BRUSH_TUNE[k[0]] = sw[1];
     }
+    // The sculpt brush's (Map-maker II's first wave): its mode, flatten's ways and target and height, its falloff, its switches.
+    const st: Record<string, unknown> = {};
+    if (typeof t.sculptMode === 'string') st.mode = t.sculptMode;
+    if (typeof t.sculptFlat === 'string') st.flatMode = t.sculptFlat;
+    if (typeof t.sculptTarget === 'string') st.target = t.sculptTarget;
+    if (typeof t.sculptFalloff === 'string') st.falloff = t.sculptFalloff;
+    if (typeof t.sculptHeight === 'number' && Number.isFinite(t.sculptHeight)) {
+      st.height = t.sculptHeight;
+      st.target = 'typed';
+    }
+    const ss = t.sculptSwitch;
+    if (Array.isArray(ss) && typeof ss[1] === 'boolean' && SCULPT_SWITCHES.some(([key]) => key === ss[0])) st[ss[0] as string] = ss[1];
+    if (Object.keys(st).length) {
+      const no = tuneSculpt(st, GROUND_REWRITE_TUNE);
+      if (no.length) this.say(no.join('; '), false);
+    }
+  }
+
+  /** The sculpt brush as the Tools tab shows it: its mode, flatten's ways, target and height, its falloff, its switches and its file. */
+  private sculptView(): SculptToolsView {
+    const t = SCULPT_TUNE;
+    const w = this.host.world;
+    const f = w.heightsFileInfo;
+    const tiles = w.heightEdits?.size ?? 0;
+    // The file as it stands now, the editor's own writes included (`HeightRows`), its size about what its text comes to.
+    const bytes = w.heightRows.bytes;
+    const file = `public/placements/heights/${this.host.packId()}.json: ${tiles} tile${tiles === 1 ? '' : 's'}${bytes ? `, about ${(bytes / 1024).toFixed(1)} KB` : ''}${f.problem ? ` (not read: ${f.problem})` : ''}`;
+    const notes: string[] = [];
+    if (tiles) notes.push("The walk grid is the client's ground until the fifth wave: a body walking the sculpted ground follows the grid baked before it.");
+    if (this.sculpt.refusal()) notes.push(this.sculpt.refusal() as string);
+    return {
+      armed: this.sculpt.armed,
+      mode: t.mode,
+      flatMode: t.flatMode,
+      target: t.target,
+      height: t.target === 'sampled' ? t.sampled : t.height,
+      falloff: t.falloff,
+      falloffs: [...SCULPT_FALLOFFS],
+      switches: SCULPT_SWITCHES.map(([key, words]) => ({ key, words, on: t[key] })),
+      file,
+      note: notes.join(' '),
+    };
+  }
+
+  /**
+   * `__debug.sculpt(o)`: the store (its tiles and bytes, the file as last read), the armed mode and target, the dirty chunks
+   * waiting, the last stroke's stamps, chunks rewritten and milliseconds; `{ tune }`, `{ arm: mode }` (or `false`),
+   * `{ at: [x, z] }` the raw height, the edit and the ground there, and `{ stroke: { mode, x, z, r, seconds } }` a stroke run
+   * exactly as held and written -- a place given in the file's own frame (a `/loc` line on a planet), the aim where none is.
+   */
+  async sculptDebug(o?: Record<string, unknown>): Promise<unknown> {
+    const w = this.host.world;
+    const said: string[] = [];
+    const c = w.placeFrame;
+    const space = !!w.planet?.space;
+    const gameOf = (x: number, z: number): { x: number; z: number } => (space || !c ? { x, z } : { x: rawToGameX(c.x, x), z: rawToGameZ(c.z, z) });
+    let at: Record<string, unknown> | null = null;
+    if (o && typeof o === 'object') {
+      if (o.tune !== undefined) said.push(...tuneSculpt(o.tune, GROUND_REWRITE_TUNE));
+      if (typeof o.arm === 'string') {
+        if (!(SCULPT_MODES as readonly string[]).includes(o.arm)) said.push(`arm is one of ${SCULPT_MODES.join(', ')}`);
+        else {
+          SCULPT_TUNE.mode = o.arm as SculptMode;
+          if (!this.sculpt.armed) said.push(await this.toggleTool('sculpt'));
+          else said.push(`the sculpt brush: ${o.arm}`);
+        }
+      }
+      if (o.arm === false && this.sculpt.armed) said.push(await this.toggleTool('sculpt'));
+      if (Array.isArray(o.at) && o.at.length === 2) {
+        const g = gameOf(Number(o.at[0]), Number(o.at[1]));
+        const r = w.gameToRaw(g.x, g.z);
+        const sw = w.terrain.swg;
+        const raw = sw ? (sw.sampler.rawPoleAt(Math.round(r.x / 2) * 2, Math.round(r.z / 2) * 2) ?? Number.NaN) : w.terrain.groundRawAt(g.x, g.z);
+        const edit = w.heightEdits?.bilinear(r.x, r.z) ?? 0;
+        at = { file: [Number(o.at[0]), Number(o.at[1])], game: [round(g.x), round(g.z)], raw: round(raw), edit: round(edit), ground: round(w.terrain.heightAt(g.x, g.z)) };
+      }
+      const st = o.stroke as Record<string, unknown> | undefined;
+      if (st && typeof st === 'object') {
+        const mode = (SCULPT_MODES as readonly string[]).includes(st.mode as string) ? (st.mode as SculptMode) : 'raise';
+        const g = typeof st.x === 'number' && typeof st.z === 'number' ? gameOf(st.x, st.z) : { x: this.aim.hit.x, z: this.aim.hit.z };
+        const r = typeof st.r === 'number' ? st.r : SCULPT_TUNE.radius;
+        const seconds = typeof st.seconds === 'number' ? Math.max(0, Math.min(60, st.seconds)) : 1;
+        said.push(await this.sculpt.strokeAt(mode, g.x, g.z, r, seconds));
+      }
+    }
+    const store = w.heightEdits;
+    return {
+      store: { tiles: store?.size ?? 0, version: store?.version ?? 0, file: { ...w.heightsFileInfo, skipped: w.heightsFileInfo.skipped.length, rowsNow: w.heightRows.size, bytesNow: w.heightRows.bytes } },
+      tiles: store?.size ?? 0,
+      laidAtArrival: w.heightsLaidAtArrival,
+      rawCopies: w.terrain.swg?.sampler.rawCopies ?? 0,
+      armed: this.sculpt.armed,
+      sculpt: this.sculpt.report(),
+      dirty: w.groundDirtyCount,
+      lastStroke: { ...w.groundWork, ms: round(w.groundWork.ms) },
+      tune: { ...SCULPT_TUNE },
+      rebuild: { ...GROUND_REWRITE_TUNE },
+      ...(at ? { at } : {}),
+      ...(said.length ? { answered: said } : {}),
+    };
   }
 
   /** The first picked row as the Selected tab shows it, or null. */
@@ -1649,6 +1908,9 @@ export class Editor {
       // The third wave's: Fold now, and the brush.
       if (o.fold === true) said.push(await this.foldNow());
       if (o.brush && typeof o.brush === 'object') said.push(...(await this.brushDebug(o.brush as Record<string, unknown>)));
+      // Map-maker II's Tools list: a tool armed (or let go) by its id, as its key would; null lets whatever is armed go.
+      if (typeof o.tool === 'string') said.push(await this.toggleTool(o.tool));
+      else if (o.tool === null && this.tools.disarmAll()) said.push('every tool let go');
     }
     const p = h.player.pos;
     const c = h.world.placeFrame;
@@ -1679,6 +1941,8 @@ export class Editor {
       unfolded: h.world.streamer?.unfoldedReport() ?? null,
       autoFold: { on: EDITOR_TUNE.autoFold, idle: EDITOR_TUNE.autoFoldIdle, hint: EDITOR_TUNE.foldHint, quietFor: round(performance.now() / 1000 - this.activeAt), folding: this.folding },
       brush: this.brush.report(),
+      // The Tools list (Map-maker II's groundwork): every tool, its key as bound now and which is armed.
+      tools: this.tools.report((a) => capOf(this.host.input.bindings[a][0])),
       bar: { writes: this.bar?.writes ?? 0 },
       ...(said.length ? { answered: said } : {}),
     };
@@ -1710,7 +1974,8 @@ export class Editor {
     }
     if (b.weights && typeof b.weights === 'object') for (const [k, v] of Object.entries(b.weights as Record<string, unknown>)) br.setWeight(k, Number(v));
     if (b.arm === true && !br.armed) {
-      said.push(await br.arm(this.hand?.key ?? null));
+      // Through the Tools list, so another armed tool is let go first.
+      said.push(await this.tools.arm('brush'));
       if (br.armed) this.giveUpHand();
     }
     if (b.arm === false && br.armed) {
@@ -1808,6 +2073,7 @@ function keySheet(input: Input): string {
     `Ctrl+D duplicate · Ctrl+C copy · Ctrl+X cut · Ctrl+V paste at the aim (Shift: turned to you) · Ctrl+Z undo · Ctrl+Shift+Z redo`,
     `${k('putAway')} delete · ${k('takeProp')} pick up into the hand · MMB another of that · 1-9 hotbar (Shift+1-9 set) · ${k('placeLayer')} file`,
     `${k('editorBrush')} brush armed and let go (Shift+click entries in the library first) · LMB held paints · RMB held erases · Tools tab: Fold now`,
+    `${k('editorSculpt')} sculpt brush armed and let go · LMB held raises (or flattens, smooths: Tools tab) · RMB held lowers · C held with the wheel sizes it · Shift+click samples the height`,
     `${k('editorGameView')} game view · ${k('editorKeys')} this sheet · ${k('editorBody')} body here · ${k('editorHold')} hold the world · Esc give up / clear · F2 leave`,
   ].join('\n');
 }
@@ -1822,6 +2088,12 @@ const BRUSH_SWITCHES: readonly (readonly ['randomYaw' | 'align' | 'heightOn' | '
   ['heightOn', 'Height filter'],
   ['keepOffWater', 'Off the water'],
   ['keepOffStanding', 'Off what stands'],
+];
+
+/** The sculpt brush's switches, as the Tools tab shows them: each a key of `SCULPT_TUNE` and its words. */
+const SCULPT_SWITCHES: readonly (readonly ['keepOff' | 'carry', string])[] = [
+  ['keepOff', 'Off what stands'],
+  ['carry', 'Carry what stands on it'],
 ];
 
 /** What the editor's key block mutes after reading them in its own sense: the old hand must not read them too. */

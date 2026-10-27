@@ -104,6 +104,22 @@ export interface SelectedView {
   note2: string;
 }
 
+/** The sculpt brush as the Tools tab shows it (Map-maker II's first wave). */
+export interface SculptToolsView {
+  armed: boolean;
+  mode: 'raise' | 'lower' | 'flatten' | 'smooth';
+  /** Flatten's ways (both, raise only, lower only), where its height comes from, and the height. */
+  flatMode: 'both' | 'raise' | 'lower';
+  target: 'press' | 'sampled' | 'typed' | 'stamp';
+  height: number;
+  falloff: string;
+  falloffs: string[];
+  switches: { key: string; words: string; on: boolean }[];
+  /** The heights file: how many tiles, how many bytes, git's word, and the walk grid's stale line. */
+  file: string;
+  note: string;
+}
+
 /** What the window needs of the editor beside the library's own. */
 export interface EditorWindowHost extends LibraryHost {
   /** The rows standing round the camera, nearest first. */
@@ -139,7 +155,11 @@ export interface EditorWindowHost extends LibraryHost {
     files: string[];
     branch: string;
     fold?: { rows: number; ms: number; folded: number; folding: boolean; auto: boolean; hint: number };
+    /** The Tools list (Map-maker II): every tool, its key and whether it is armed; a click arms one (any other let go) or lets it go. */
+    list?: { id: string; label: string; key: string; armed: boolean }[];
     brush?: { armed: boolean; entries: { key: string; name: string; weight: number }[]; switches: { key: string; words: string; on: boolean }[] };
+    /** The sculpt brush (Map-maker II's first wave): its mode, flatten's target and its ways, its switches and its file. */
+    sculpt?: SculptToolsView;
   };
   setTool(t: Record<string, unknown>): void;
   refreshStatus(): void;
@@ -462,6 +482,44 @@ export class EditorWindow {
       });
       return b;
     };
+    // The Tools list (Map-maker II's groundwork): one armed at a time; a click arms one, any other let go first.
+    if (t.list?.length) {
+      h('TOOLS');
+      row(...t.list.map((x) => toggle(`${x.label[0].toUpperCase()}${x.label.slice(1)}${x.key ? ` (${x.key})` : ''}${x.armed ? ': armed' : ''}`, x.armed, { tool: x.id })));
+      this.note(el, 'One tool is armed at a time: its buttons are its own, the selection takes no hold meanwhile, and Escape lets it go.');
+    }
+    // The sculpt brush (Map-maker II's first wave): its mode, flatten's target and ways, its falloff and its switches.
+    if (t.sculpt) {
+      const s = t.sculpt;
+      h('SHAPING THE GROUND');
+      row(...(['raise', 'lower', 'flatten', 'smooth'] as const).map((m) => toggle(m[0].toUpperCase() + m.slice(1), s.mode === m, { sculptMode: m })));
+      if (s.mode === 'flatten') {
+        row(...(['both', 'raise', 'lower'] as const).map((m) => toggle(m === 'both' ? 'Both ways' : m === 'raise' ? 'Raise only' : 'Lower only', s.flatMode === m, { sculptFlat: m })));
+        row(...(['press', 'sampled', 'typed', 'stamp'] as const).map((m) => toggle(m === 'press' ? 'Height at the press' : m === 'sampled' ? 'Sampled (Shift+click)' : m === 'typed' ? 'Typed' : 'Every stamp', s.target === m, { sculptTarget: m })));
+        const f = document.createElement('label');
+        f.className = 'ed-field';
+        const sp = document.createElement('span');
+        sp.textContent = 'Height m';
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.step = 'any';
+        input.value = String(Math.round(s.height * 1000) / 1000);
+        input.addEventListener('change', () => {
+          const n = Number(input.value);
+          if (input.value.trim() !== '' && Number.isFinite(n)) this.host.setTool({ sculptHeight: n });
+        });
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === 'Escape') input.blur();
+        });
+        f.append(sp, input);
+        el.appendChild(f);
+      }
+      row(...s.falloffs.map((name) => toggle(name, s.falloff === name, { sculptFalloff: name })));
+      row(...s.switches.map((x) => toggle(x.words, x.on, { sculptSwitch: [x.key, !x.on] })));
+      this.note(el, s.file);
+      if (s.note) this.note(el, s.note);
+      this.note(el, 'K arms it: LMB held raises (or flattens, or smooths), RMB held lowers; C held with the wheel sizes it; Shift+click samples the height under it; a stroke is one undo. Its numbers are the sliders under The sculpt brush below.');
+    }
     h('SNAPPING');
     row(toggle(t.snapOn ? 'Snapping on' : 'Snapping off', t.snapOn, { snapOn: !t.snapOn }));
     row(...t.gridSteps.map((g) => toggle(`${g} m`, t.grid === g, { grid: g })));

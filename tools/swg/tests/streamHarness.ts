@@ -109,6 +109,8 @@ export interface SnapshotObject {
   z: number;
   q: number[];
   radius: number;
+  /** The world state it stands in (`<key>=<value>`, `worldState.ts`), or none for every state. */
+  state?: string;
 }
 
 /** The rock, standing at the game's (100, 0, 100): snapshot x -100. Its region (0,0) loads tier 0 when the player is near. */
@@ -143,7 +145,7 @@ export interface Harness {
  * for the particle player the world hands the streamer (`place(file, matrix, contained)` and `remove(handle)`), so a test
  * can see what the streamer places and from which file; `Streamer` builds another streamer class over the same packs.
  */
-export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, extra: { defs?: Def[]; models?: Record<string, ReturnType<typeof loadedOf>>; flora?: string[]; effects?: { place(file: string, m: THREE.Matrix4, contained: boolean): unknown; remove(h: unknown): void }; Streamer?: new (...args: any[]) => any } = {}): Promise<Harness> {
+export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, extra: { defs?: Def[]; models?: Record<string, ReturnType<typeof loadedOf>>; flora?: string[]; effects?: { place(file: string, m: THREE.Matrix4, contained: boolean): unknown; remove(h: unknown): void }; Streamer?: new (...args: any[]) => any; stands?: (tag?: string) => boolean } = {}): Promise<Harness> {
   const physics = await Physics.create();
   const scene = new THREE.Scene();
   const world = fakePack(
@@ -169,7 +171,8 @@ export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, 
   const layout = { planet: 'tatooine', center: { x: 0, z: 0 }, radius: 10000, objects };
   // `Streamer`: another streamer class over the same packs (a day-one test's, loaded out of git).
   const Ctor = (extra.Streamer ?? LayoutStreamer) as typeof LayoutStreamer;
-  const stream = new Ctor(scene, physics, world as never, layout as never, (extra.effects ?? null) as never, {});
+  // `stands`: which world states stand (`worldState.ts`), for a test of what lies dormant; every object's by default.
+  const stream = new Ctor(scene, physics, world as never, layout as never, (extra.effects ?? null) as never, extra.stands ? { stands: extra.stands } : {});
   stream.useGuestPack(gallery as never);
   const s = stream as any;
   const at = new THREE.Vector3();

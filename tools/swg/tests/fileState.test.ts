@@ -27,7 +27,7 @@ const ok = (cond: boolean, what: string) => {
   ok(fileStateOf({ exists: true, inHead: true, porcelain: ' M', sameAsMain: null }) === 'modified' && fileStateOf({ exists: false, inHead: true, porcelain: ' D', sameAsMain: null }) === 'modified' && fileStateOf({ exists: true, inHead: false, porcelain: 'A ', sameAsMain: null }) === 'modified', 'changed, taken away or added since HEAD: saved and not committed');
   ok(fileStateOf({ exists: true, inHead: true, porcelain: null, sameAsMain: false }) === 'committed' && fileStateOf({ exists: true, inHead: true, porcelain: null, sameAsMain: true }) === 'main', 'committed on this branch, or the same on main');
   const files = statusFiles('tatooine');
-  ok(files.map((f) => f.path).join() === 'public/placements/story/tatooine.json,public/placements/world/tatooine.json,public/placements/removed/tatooine.json,public/placements/people/tatooine.json,public/tracks/tatooine.json', `a world's status asks of its four placement files and its track file (${files.map((f) => f.kind).join(', ')})`);
+  ok(files.map((f) => f.path).join() === 'public/placements/story/tatooine.json,public/placements/world/tatooine.json,public/placements/removed/tatooine.json,public/placements/people/tatooine.json,public/placements/heights/tatooine.json,public/placements/paint/tatooine.json,public/placements/water/tatooine.json,public/placements/locations/tatooine.json,public/placements/looks/all.json,public/tracks/tatooine.json', `a world's status asks of every kind of edit file (Map-maker II's kinds, the looks every world's one file) and its track file (${files.map((f) => f.kind).join(', ')})`);
   const worlds = new Map([['tatooine', 'ground' as const]]);
   ok('world' in statusAsk({ op: 'status', world: 'tatooine' }, { worlds }) && !('world' in statusAsk({ op: 'status', world: '../x' }, { worlds })) && !('world' in statusAsk({ op: 'status', world: 'naboo' }, { worlds })), 'a status names a world there is, as a pack id');
 }
@@ -52,7 +52,8 @@ try {
     };
     const W = 'test_world';
     const paths = statusFiles(W).map((f) => f.path);
-    const [story, world, removed, people, track] = paths;
+    const [story, world, removed, people] = paths;
+    const track = paths[paths.length - 1];
     // On main: the track committed. On a branch: the world file committed; the story file added later, saved and not
     // committed; the people file untracked; the removed file none.
     file(track, '{"t":1}');

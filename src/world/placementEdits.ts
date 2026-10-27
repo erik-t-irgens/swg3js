@@ -25,11 +25,17 @@
 // changed: for each file its revision (twelve hex of the SHA-1 of its text as written, handed in as `ctx.hash`), the
 // rows put as they were stamped and the ids taken out, never both layers read whole.
 //
+// **A batch writes any kind of edit file** (Map-maker II, DESIGN.md §2.2): each kind is a module of its reader, cleaner,
+// writer, id rule and likeness (`EditKind`), the two row layers kinds over the very functions above (so what a batch of
+// theirs answers is what it answered before the kinds, which a test holds against e6c2578's own rules), and every other
+// kind named by its wave: the heights from Map-maker II's first (`heightsKind`), the rest refused in their wave's words.
+//
 // Here rather than beside the reader in `src/story/`, whose every file ships with the server in every release:
 // a release carries none of the editor. Pure: no fs, no DOM. Rule for this file (node runs it with type
 // stripping): every import with its `.ts` extension, no enum, no namespace, no constructor parameter properties.
 
 import { EDIT_FILE_KINDS, PLACEMENT_FIELDS, PLACEMENT_LIMITS, editFilePath, isPlacementId, mintPlacementId, placementsFileText, placementsPath, readPlacementRow, readPlacementsFile, readPlacementsFileRaw, rowHash, type EditFileKind, type PlacementLayer, type PlacementRead, type PlacementRow } from '../story/placements.ts';
+import { HEIGHTS_LIMITS, heightsFileText, isTileId, readHeightsFile, readTileRow, sameTile, tileWithExtras, type HeightTileRow } from './editFiles/heightsFile.ts';
 
 /** Every number of the endpoint, all ours. Read where the dev server runs it, and not moved from the browser. */
 export const PLACEMENTS_ENDPOINT_TUNE = {
@@ -63,6 +69,12 @@ export interface PlacementCtx {
   worlds: ReadonlyMap<string, EditWorldKind>;
   now: number;
   hash?: (text: string) => string;
+  /**
+   * The bytes of a row a kind keeps deflated (a tile of heights' deltas: deflate-raw, base64), inflated: node's own zlib,
+   * handed in by the dev server's glue, or null for bytes that do not inflate. Absent, a kind that needs it refuses in
+   * words rather than writing what it cannot read back.
+   */
+  inflate?: (b64: string) => Uint8Array | null;
 }
 
 /** What is known of a request before its body is read. */
@@ -96,21 +108,33 @@ export interface PlacementReplyNo {
 }
 export type PlacementReply = PlacementReplyOk | PlacementReplyNo;
 
+/**
+ * A row of any kind of edit file (DESIGN.md §2.2 of Map-maker II): its id, the moment the endpoint wrote it, and whatever
+ * its kind keeps beside them. A placement row is one; a tile of heights is one.
+ */
+export interface EditRow {
+  id: string;
+  at?: number;
+}
+
 /** What a batch did to one file: its revision as written ('' taken away), how many rows it holds now, the rows put as stamped and the ids taken out. */
-export interface BatchFileAnswer {
+export interface BatchFileAnswer<R extends EditRow = PlacementRow> {
   file: string;
   rev: string;
   rows: number;
-  put: PlacementRow[];
+  put: R[];
   deleted: string[];
 }
+
+/** Each file a batch touched: the two row layers' rows are placement rows, every other kind's rows its own. */
+export type BatchFiles = { story?: BatchFileAnswer<PlacementRow>; world?: BatchFileAnswer<PlacementRow> } & { [K in Exclude<EditFileKind, PlacementLayer>]?: BatchFileAnswer<EditRow> };
 
 /** A batch answered: each file it touched, and (the glue's) the endpoint's own milliseconds. */
 export interface PlacementBatchOk {
   ok: true;
   op: 'batch';
   world: string;
-  files: Partial<Record<PlacementLayer, BatchFileAnswer>>;
+  files: BatchFiles;
   ms?: number;
 }
 export type PlacementBatchReply = PlacementBatchOk | PlacementReplyNo;
@@ -126,11 +150,14 @@ export interface BatchEdit {
   keepAt?: boolean;
 }
 
-/** An ask's answer: its status, its body, and what to write -- a file's whole text, or null to take the file away. */
+/**
+ * An ask's answer: its status, its body, and what to write -- a file's whole text, or null to take the file away. `layer` is
+ * the kind of file (a row layer, or any other kind a batch writes), the name kept from when only the two layers were written.
+ */
 export interface PlacementAnswer {
   status: number;
   body: PlacementReply | PlacementBatchOk;
-  writes: { layer: PlacementLayer; text: string | null }[];
+  writes: { layer: EditFileKind; text: string | null }[];
 }
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
@@ -165,7 +192,7 @@ export function refuseRequest(meta: RequestMeta, tune: typeof PLACEMENTS_ENDPOIN
 }
 
 /** One layer's file as it stands: each row read, beside the very object it was read from. */
-interface Held {
+interface HeldRows {
   rows: { row: PlacementRow; raw: Record<string, unknown> }[];
   read: PlacementRead | null;
   text: string | null;
@@ -175,7 +202,7 @@ interface Held {
  * A layer's file opened, or why the editor will not write it. Read **once**: the reader hands each row back beside the
  * very object it was read from (`readPlacementsFileRaw`), where this used to parse the file a second time to get them.
  */
-function openLayer(text: string | null, layer: PlacementLayer, world: string, kind: 'ground' | 'space'): Held | string {
+function openLayer(text: string | null, layer: PlacementLayer, world: string, kind: 'ground' | 'space'): HeldRows | string {
   if (text === null) return { rows: [], read: null, text: null };
   const file = editFile(layer, world);
   const full = readPlacementsFileRaw(text, world, kind);
@@ -226,7 +253,7 @@ function no(status: number, why: string): PlacementAnswer {
  * Every row written is stamped with `ctx.now` and must read back exactly as it was cleaned, or nothing is
  * written. A refusal writes nothing.
  */
-export function applyPlacementOp(op: unknown, current: { story: string | null; world: string | null }, ctx: PlacementCtx): PlacementAnswer {
+export function applyPlacementOp(op: unknown, current: Partial<Record<EditFileKind, string | null>>, ctx: PlacementCtx): PlacementAnswer {
   if (!op || typeof op !== 'object' || Array.isArray(op)) return no(400, 'an ask is an object');
   const o = op as Record<string, unknown>;
   const kind = o.op;
@@ -241,9 +268,9 @@ export function applyPlacementOp(op: unknown, current: { story: string | null; w
   if (wk === 'copies') return no(409, "nothing stands for good in the dungeons' world of copies");
   const readKind = wk === 'space' ? 'space' : 'ground';
   const frame = wk === 'space' ? 'game' : 'raw';
-  const held = {} as Record<PlacementLayer, Held>;
+  const held = {} as Record<PlacementLayer, HeldRows>;
   for (const l of LAYERS) {
-    const h = openLayer(current[l], l, world, readKind);
+    const h = openLayer(current[l] ?? null, l, world, readKind);
     if (typeof h === 'string') return no(409, h);
     held[l] = h;
   }
@@ -333,7 +360,7 @@ export function applyPlacementOp(op: unknown, current: { story: string | null; w
  * at 10,000 rows and two seconds at 20,000). A layer left with no rows is taken away (`text` null, `back` null), and one
  * that was never there and is still empty writes nothing. Answers why not in words.
  */
-function writeBack(h: Held, l: PlacementLayer, world: string, frame: 'raw' | 'game', readKind: 'ground' | 'space'): { write: { layer: PlacementLayer; text: string | null } | null; back: PlacementRead | null } | string {
+function writeBack(h: HeldRows, l: PlacementLayer, world: string, frame: 'raw' | 'game', readKind: 'ground' | 'space'): { write: { layer: PlacementLayer; text: string | null } | null; back: PlacementRead | null } | string {
   const list = h.rows;
   if (!list.length) return { write: h.text !== null ? { layer: l, text: null } : null, back: null };
   const text = placementsFileText(world, frame, list.map((e) => e.raw as unknown as PlacementRow));
@@ -350,17 +377,149 @@ function writeBack(h: Held, l: PlacementLayer, world: string, frame: 'raw' | 'ga
 }
 
 /**
- * The world editor's one write (`{ op: 'batch', world, edits }`, DESIGN.md §2.11): every edit applied in order to both
- * layers as they stand, each file read back, and nothing written unless all of it holds. An edit is
- * `{ file, put: row }` (a row put in, or replacing the one of its id in that file; a row with no id is given one from
- * its thing or model, unique across both layers as they stand at that edit, and a given id is kept, refused only where
- * the other layer holds it) or `{ file, delete: id }`, either with `was` (the row as the endpoint last answered it, or
- * null for one that must not be there: a row that differs is refused by its id) and a put with `keepAt` (the row's own
- * `at` kept). The kinds of file the editor's fifth wave writes (`removed`, `people`) are refused in words until it does.
- * The answer names, for each file touched, its revision as written ('' for one taken away), how many rows it holds, the
- * rows put as they were stamped (the last put of an id winning) and the ids taken out.
+ * One kind of file the batch writes (Map-maker II's DESIGN.md §2.2): its shipped reader, an id rule, a cleaner, a writer,
+ * when two of its rows read alike, how many rows its file may hold, and which kinds share its ids. The two row layers are
+ * one kind each over the very functions the batch used before the kinds (`ROW_KINDS`), so what a batch of theirs answers
+ * is what it answered; every other kind adds one of these, and a kind whose wave has not come is refused in that wave's
+ * words (`EDIT_KINDS`' `notYet`).
  */
-export function applyPlacementBatch(o: Record<string, unknown>, current: { story: string | null; world: string | null }, ctx: PlacementCtx): PlacementAnswer {
+export interface EditKind<R extends EditRow = EditRow> {
+  readonly kind: EditFileKind;
+  /** The kinds whose ids are one space with this kind's: `rows` for the two row layers, null for a kind of its own. */
+  readonly group: 'rows' | null;
+  /** Whether a ground world alone keeps it (heights, paint, water): refused in a space zone, its pass a later one. */
+  readonly groundOnly: boolean;
+  /** The most rows its file may hold, a backstop every build agrees on. */
+  readonly most: number;
+  /** Whether an id is one its rows carry, and the words for one that is not. */
+  idOk(id: unknown): id is string;
+  readonly idWords: string;
+  /** A file opened as it stands, each row beside the very object it was read from, or why the editor will not write it. */
+  open(text: string | null, world: string, wk: 'ground' | 'space', ctx: PlacementCtx): Held<R> | string;
+  /** A row cleaned as the reader cleans one, under the id given and stamped `stamp`, or why it is refused. */
+  clean(asked: Record<string, unknown>, id: string, stamp: number, ctx: PlacementCtx): R | string;
+  /** A row read as the reader reads one (the `was` an edit carries), or why not. */
+  parse(v: Record<string, unknown>, ctx: PlacementCtx): R | string;
+  /** Two rows that stand and read the same. */
+  same(a: R, b: R): boolean;
+  /** A cleaned row to write, carrying what the row it replaces held that this build does not read. */
+  extras(row: R, was: Record<string, unknown> | null): Record<string, unknown>;
+  /** The rows as the file's text (one row a line, sorted by id). */
+  text(world: string, frame: 'raw' | 'game', rows: readonly Record<string, unknown>[]): string;
+  /** The file's text read back as the shipped reader reads it. */
+  read(text: string, world: string, wk: 'ground' | 'space', ctx: PlacementCtx): { rows: R[]; skipped: { id: string; why: string }[]; problem: string | null };
+  /** A fresh id for a put that names none, unique among `taken`: the row layers' own rule (`mintPlacementId`); a kind with none refuses an id-less put. */
+  mint?(asked: Record<string, unknown>, taken: ReadonlySet<string>): string;
+  /** The file it is kept in for a world, as the owner reads it. */
+  file(world: string): string;
+}
+
+/** One file as it stands: each row read, beside the very object it was read from. */
+export interface Held<R extends EditRow = PlacementRow> {
+  rows: { row: R; raw: Record<string, unknown> }[];
+  read: { rows: R[] } | null;
+  text: string | null;
+}
+
+/** The words a kind of file of a later wave is refused in, by kind: the batch writes none of them yet. */
+export const NOT_YET: Partial<Record<EditFileKind, string>> = {
+  removed: "the world editor's fifth wave's",
+  people: "the world editor's fifth wave's",
+  paint: "Map-maker II's second wave's",
+  water: "Map-maker II's fifth wave's",
+  locations: "Map-maker II's eighth wave's",
+  looks: "Map-maker II's thirteenth wave's",
+};
+
+/** A placement row layer as a kind of edit file: the very reader, cleaner, writer and likeness the batch used before the kinds. */
+function rowKind(layer: PlacementLayer): EditKind<PlacementRow> {
+  return {
+    kind: layer,
+    group: 'rows',
+    groundOnly: false,
+    // Read as the batch asks, as it always was: the backstop is one table every reader holds a file to.
+    get most() {
+      return PLACEMENT_LIMITS.rows;
+    },
+    idOk: isPlacementId,
+    idWords: 'its id is not a-z, 0-9, _ and - (64 at most, starting with a letter or a digit)',
+    open: (text, world, wk) => openLayer(text, layer, world, wk),
+    clean: (asked, id, stamp) => cleanRow(asked, id, stamp),
+    parse: (v) => readPlacementRow(v),
+    same: sameRow,
+    extras: withExtras,
+    text: (world, frame, rows) => placementsFileText(world, frame, rows as unknown as PlacementRow[]),
+    read: (text, world, wk) => readPlacementsFile(text, world, wk),
+    mint: (asked, taken) => mintPlacementId(typeof asked.thing === 'string' ? asked.thing : typeof asked.model === 'string' ? asked.model : 'place', taken),
+    file: (world) => editFile(layer, world),
+  };
+}
+
+/** The two row layers, kinds of edit file over the rules the batch has always run. */
+export const ROW_KINDS: Record<PlacementLayer, EditKind<PlacementRow>> = { story: rowKind('story'), world: rowKind('world') };
+
+/**
+ * The heights (Map-maker II's first wave, `editFiles/heightsFile.ts`): a tile a row, named by its place, its deltas checked
+ * through the inflate the glue hands in (node's zlib), a nought tile refused (it is taken out instead), a ground world's
+ * alone. No id is minted: a tile is named by where it lies.
+ */
+export const heightsKind: EditKind<HeightTileRow> = {
+  kind: 'heights',
+  group: null,
+  groundOnly: true,
+  most: HEIGHTS_LIMITS.tiles,
+  idOk: isTileId,
+  idWords: 'its id is not a tile\'s place ("tx,tz")',
+  open(text, world, wk, ctx) {
+    if (text === null) return { rows: [], read: null, text: null };
+    const file = heightsFile(world);
+    if (!ctx.inflate) return `${file} cannot be read here: the endpoint was handed no way to inflate a tile`;
+    const raws: Record<string, unknown>[] = [];
+    const read = readHeightsFile(text, world, wk, ctx.inflate, raws);
+    if (read.problem) return `${file} does not read (${read.problem}): mend it by hand first`;
+    if (read.skipped.length) return `${file} holds tiles this build cannot read (${read.skipped.slice(0, 3).map((s) => `${s.id}: ${s.why}`).join('; ')}): mend them by hand first, or the editor would write over them`;
+    return { rows: read.rows.map((row, i) => ({ row, raw: raws[i] })), read, text };
+  },
+  clean(asked, id, stamp, ctx) {
+    if (!ctx.inflate) return 'the endpoint was handed no way to inflate a tile';
+    const unknown: string[] = [];
+    const row = readTileRow({ ...asked, id, at: stamp }, unknown, ctx.inflate);
+    if (typeof row === 'string') return row;
+    if (unknown.length) return `it carries fields this build does not write: ${unknown.join(', ')}`;
+    return row;
+  },
+  parse: (v, ctx) => readTileRow(v, [], ctx.inflate),
+  same: sameTile,
+  extras: tileWithExtras,
+  text: (world, _frame, rows) => heightsFileText(world, rows),
+  read: (text, world, wk, ctx) => readHeightsFile(text, world, wk, ctx.inflate),
+  file: heightsFile,
+};
+
+/** The heights file for a world, as the owner reads it. */
+function heightsFile(world: string): string {
+  return `public/${editFilePath('heights', world)}`;
+}
+
+/**
+ * Every kind the batch writes now, by name: the two row layers, and from Map-maker II's first wave the heights. A kind
+ * named in `EDIT_FILE_KINDS` and missing here is refused in its wave's words (`NOT_YET`).
+ */
+export const EDIT_KINDS: Partial<Record<EditFileKind, EditKind<EditRow>>> = { story: ROW_KINDS.story as unknown as EditKind<EditRow>, world: ROW_KINDS.world as unknown as EditKind<EditRow>, heights: heightsKind as unknown as EditKind<EditRow> };
+
+/**
+ * The world editor's one write (`{ op: 'batch', world, edits }`, DESIGN.md §2.11): every edit applied in order to every
+ * file it names as they stand (the two row layers always opened, as before the kinds), each file read back, and nothing
+ * written unless all of it holds. An edit is `{ file, put: row }` (a row put in, or replacing the one of its id in that
+ * file; for the two row layers a row with no id is given one from its thing or model, unique across both layers as they
+ * stand at that edit, and a given id is kept, refused only where the other layer holds it) or `{ file, delete: id }`,
+ * either with `was` (the row as the endpoint last answered it, or null for one that must not be there: a row that differs
+ * is refused by its id) and a put with `keepAt` (the row's own `at` kept). A kind of file whose wave has not come is
+ * refused in its words (`NOT_YET`); a kind kept for the ground alone (heights, paint, water) in a space zone. The answer
+ * names, for each file touched, its revision as written ('' for one taken away), how many rows it holds, the rows put as
+ * they were stamped (the last put of an id winning) and the ids taken out.
+ */
+export function applyPlacementBatch(o: Record<string, unknown>, current: Partial<Record<EditFileKind, string | null>>, ctx: PlacementCtx): PlacementAnswer {
   if (typeof o.world !== 'string' || !WORLD.test(o.world)) return no(400, 'its world is a pack id: a-z, 0-9 and _, 40 at most');
   const world = o.world;
   const wk = ctx.worlds.get(world);
@@ -371,74 +530,106 @@ export function applyPlacementBatch(o: Record<string, unknown>, current: { story
   if (wk === 'copies') return no(409, "nothing stands for good in the dungeons' world of copies");
   const readKind = wk === 'space' ? 'space' : 'ground';
   const frame = wk === 'space' ? 'game' : 'raw';
-  const held = {} as Record<PlacementLayer, Held>;
-  for (const l of LAYERS) {
-    const h = openLayer(current[l], l, world, readKind);
-    if (typeof h === 'string') return no(409, h);
-    held[l] = h;
-  }
-  const other = (l: PlacementLayer): PlacementLayer => (l === 'story' ? 'world' : 'story');
-  // Each layer's rows by id, kept in step with the list, so a batch of thousands is linear.
-  const index = {} as Record<PlacementLayer, Map<string, number>>;
-  const reindex = (l: PlacementLayer): void => {
-    const m = new Map<string, number>();
-    held[l].rows.forEach((e, i) => m.set(e.row.id, i));
-    index[l] = m;
-  };
-  for (const l of LAYERS) reindex(l);
-  const taken = new Set<string>([...index.story.keys(), ...index.world.keys()]);
-  const touched = new Set<PlacementLayer>();
-  const put = { story: new Map<string, PlacementRow>(), world: new Map<string, PlacementRow>() } as Record<PlacementLayer, Map<string, PlacementRow>>;
-  const deleted = { story: new Set<string>(), world: new Set<string>() } as Record<PlacementLayer, Set<string>>;
+  // Each file a kind keeps, opened the first time an edit names it (the two row layers always, as before the kinds).
+  const held = new Map<EditFileKind, Held<EditRow>>();
+  // Each file's rows by id, kept in step with the list, so a batch of thousands is linear.
+  const index = new Map<EditFileKind, Map<string, number>>();
   // Rows taken out wait to be spliced out together, once, at the end: a splice an edit is quadratic in a big file.
-  const gone = { story: new Set<number>(), world: new Set<number>() } as Record<PlacementLayer, Set<number>>;
+  const gone = new Map<EditFileKind, Set<number>>();
+  const put = new Map<EditFileKind, Map<string, EditRow>>();
+  const deleted = new Map<EditFileKind, Set<string>>();
+  const touched = new Set<EditFileKind>();
+  /** The ids taken in each group of kinds that share theirs (the two row layers'), or in a kind's own. */
+  const taken = new Map<string, Set<string>>();
+  const groupOf = (k: EditKind<EditRow>): string => k.group ?? k.kind;
+  const openKind = (kind: EditFileKind, k: EditKind<EditRow>): string | null => {
+    if (held.has(kind)) return null;
+    const h = k.open(current[kind] ?? null, world, readKind, ctx);
+    if (typeof h === 'string') return h;
+    held.set(kind, h);
+    const m = new Map<string, number>();
+    h.rows.forEach((e, i) => m.set(e.row.id, i));
+    index.set(kind, m);
+    gone.set(kind, new Set());
+    put.set(kind, new Map());
+    deleted.set(kind, new Set());
+    const g = groupOf(k);
+    let t = taken.get(g);
+    if (!t) taken.set(g, (t = new Set()));
+    for (const id of m.keys()) t.add(id);
+    return null;
+  };
+  for (const l of LAYERS) {
+    const why = openKind(l, EDIT_KINDS[l]!);
+    if (why) return no(409, why);
+  }
+  /** The other kinds of a kind's group whose files hold an id now (the row layers' clash). */
+  const heldElsewhere = (kind: EditFileKind, k: EditKind<EditRow>, id: string): EditFileKind | null => {
+    if (!k.group) return null;
+    for (const [other, ok] of Object.entries(EDIT_KINDS) as [EditFileKind, EditKind<EditRow>][]) {
+      if (other === kind || ok.group !== k.group) continue;
+      const i = index.get(other)?.get(id);
+      if (i !== undefined && !gone.get(other)!.has(i)) return other;
+    }
+    return null;
+  };
   for (let n = 0; n < edits.length; n++) {
     const e = edits[n] as BatchEdit | null;
     const at = `edit ${n + 1}`;
     if (!e || typeof e !== 'object' || Array.isArray(e)) return no(400, `${at} is not an edit`);
-    if (!(EDIT_FILE_KINDS as readonly unknown[]).includes(e.file)) return no(400, `${at}'s file is story, world, removed or people`);
-    if (e.file !== 'story' && e.file !== 'world') return no(400, `${at}: the ${e.file} file is the world editor's fifth wave's, which this endpoint does not write yet`);
-    const l: PlacementLayer = e.file;
+    if (!(EDIT_FILE_KINDS as readonly unknown[]).includes(e.file)) return no(400, `${at}'s file is ${EDIT_FILE_KINDS.slice(0, -1).join(', ')} or ${EDIT_FILE_KINDS[EDIT_FILE_KINDS.length - 1]}`);
+    const l: EditFileKind = e.file;
+    const k = EDIT_KINDS[l];
+    if (!k) return no(400, `${at}: the ${l} file is ${NOT_YET[l] ?? 'a later wave\'s'}, which this endpoint does not write yet`);
+    if (k.groundOnly && wk === 'space') return no(409, `${at}: the ${l} file is the ground's: space maps are a later pass`);
+    const opened = openKind(l, k);
+    if (opened) return no(409, opened);
+    const rows = held.get(l)!;
+    const ix = index.get(l)!;
+    const gn = gone.get(l)!;
+    const pt = put.get(l)!;
+    const dl = deleted.get(l)!;
+    const tk = taken.get(groupOf(k))!;
     const hasPut = e.put !== undefined;
     const hasDel = e.delete !== undefined;
     if (hasPut === hasDel) return no(400, `${at} is a put or a delete`);
     // What stands under the id in this file now (an earlier edit of this batch included), for `was`.
-    const now = (id: string): PlacementRow | null => {
-      const i = index[l].get(id);
-      return i === undefined || gone[l].has(i) ? null : held[l].rows[i].row;
+    const now = (id: string): EditRow | null => {
+      const i = ix.get(id);
+      return i === undefined || gn.has(i) ? null : rows.rows[i].row;
     };
     const wasHolds = (id: string): string | null => {
       if (e.was === undefined) return null;
       const cur = now(id);
-      if (e.was === null) return cur ? `${id} is in ${editFile(l, world)} already` : null;
-      if (!cur) return `${id} is not in ${editFile(l, world)} any more`;
-      const w = readPlacementRow({ ...e.was, id });
-      if (typeof w === 'string' || !sameRow(w, cur)) return `${id} has changed in ${editFile(l, world)} since the editor read it: undo refuses to write over it`;
+      if (e.was === null) return cur ? `${id} is in ${k.file(world)} already` : null;
+      if (!cur) return `${id} is not in ${k.file(world)} any more`;
+      const w = k.parse({ ...e.was, id }, ctx);
+      if (typeof w === 'string' || !k.same(w, cur)) return `${id} has changed in ${k.file(world)} since the editor read it: undo refuses to write over it`;
       return null;
     };
     if (hasDel) {
-      if (!isPlacementId(e.delete)) return no(400, `${at}: a delete names the row by its id`);
+      if (!k.idOk(e.delete)) return no(400, `${at}: a delete names the row by its id`);
       const id = e.delete;
-      const i = index[l].get(id);
-      if (i === undefined || gone[l].has(i)) return no(404, `${id} is not in ${editFile(l, world)}`);
+      const i = ix.get(id);
+      if (i === undefined || gn.has(i)) return no(404, `${id} is not in ${k.file(world)}`);
       const why = wasHolds(id);
       if (why) return no(409, why);
-      gone[l].add(i);
-      index[l].delete(id);
-      taken.delete(id);
-      put[l].delete(id);
-      deleted[l].add(id);
+      gn.add(i);
+      ix.delete(id);
+      tk.delete(id);
+      pt.delete(id);
+      dl.add(id);
       touched.add(l);
       continue;
     }
     const asked = e.put;
     if (!asked || typeof asked !== 'object' || Array.isArray(asked)) return no(400, `${at}: a put carries a row`);
     let rid = asked.id;
-    if (rid === undefined || rid === null || rid === '') rid = mintPlacementId(typeof asked.thing === 'string' ? asked.thing : typeof asked.model === 'string' ? asked.model : 'place', taken);
-    if (!isPlacementId(rid)) return no(400, `${at}: its id is not a-z, 0-9, _ and - (64 at most, starting with a letter or a digit)`);
+    if ((rid === undefined || rid === null || rid === '') && k.mint) rid = k.mint(asked, tk);
+    if (!k.idOk(rid)) return no(400, `${at}: ${k.idWords}`);
     const id = rid;
-    const otherAt = index[other(l)].get(id);
-    if (otherAt !== undefined && !gone[other(l)].has(otherAt)) return no(409, `${id} is in ${layerWords(other(l))}`);
+    const clash = heldElsewhere(l, k, id);
+    if (clash) return no(409, `${id} is in ${clash === 'story' || clash === 'world' ? layerWords(clash) : `the ${clash} file`}`);
     const why = wasHolds(id);
     if (why) return no(409, why);
     let stamp = ctx.now;
@@ -446,31 +637,57 @@ export function applyPlacementBatch(o: Record<string, unknown>, current: { story
       if (typeof asked.at !== 'number' || !Number.isFinite(asked.at) || asked.at < 0) return no(400, `${at}: keepAt asks for a row carrying its own at`);
       stamp = asked.at;
     }
-    const row = cleanRow(asked, id, stamp);
+    const row = k.clean(asked, id, stamp, ctx);
     if (typeof row === 'string') return no(400, `${id} is refused: ${row}`);
-    const i = index[l].get(id);
-    if (i !== undefined && !gone[l].has(i)) held[l].rows[i] = { row, raw: withExtras(row, held[l].rows[i].raw) };
+    const i = ix.get(id);
+    if (i !== undefined && !gn.has(i)) rows.rows[i] = { row, raw: k.extras(row, rows.rows[i].raw) };
     else {
-      if (held[l].rows.length - gone[l].size >= PLACEMENT_LIMITS.rows) return no(409, `${editFile(l, world)} holds ${PLACEMENT_LIMITS.rows} rows, as many as a file may`);
-      index[l].set(id, held[l].rows.length);
-      held[l].rows.push({ row, raw: withExtras(row, null) });
+      if (rows.rows.length - gn.size >= k.most) return no(409, `${k.file(world)} holds ${k.most} rows, as many as a file may`);
+      ix.set(id, rows.rows.length);
+      rows.rows.push({ row, raw: k.extras(row, null) });
     }
-    taken.add(id);
-    deleted[l].delete(id);
-    put[l].set(id, row);
+    tk.add(id);
+    dl.delete(id);
+    pt.set(id, row);
     touched.add(l);
   }
-  const writes: { layer: PlacementLayer; text: string | null }[] = [];
-  const files: Partial<Record<PlacementLayer, BatchFileAnswer>> = {};
-  for (const l of LAYERS) {
+  const writes: { layer: EditFileKind; text: string | null }[] = [];
+  const files: Partial<Record<EditFileKind, BatchFileAnswer<EditRow>>> = {};
+  // In the order the kinds are named, so the two row layers come first and in their old order.
+  for (const l of EDIT_FILE_KINDS) {
     if (!touched.has(l)) continue;
-    if (gone[l].size) held[l].rows = held[l].rows.filter((_, i) => !gone[l].has(i));
-    const out = writeBack(held[l], l, world, frame, readKind);
+    const k = EDIT_KINDS[l]!;
+    const h = held.get(l)!;
+    const gn = gone.get(l)!;
+    if (gn.size) h.rows = h.rows.filter((_, i) => !gn.has(i));
+    const out = writeKindBack(k, h, l, world, frame, readKind, ctx);
     if (typeof out === 'string') return no(500, out);
     if (out.write) writes.push(out.write);
-    files[l] = { file: editFile(l, world), rev: out.write?.text ? (ctx.hash?.(out.write.text) ?? '') : '', rows: held[l].rows.length, put: [...put[l].values()], deleted: [...deleted[l]] };
+    files[l] = { file: k.file(world), rev: out.write?.text ? (ctx.hash?.(out.write.text) ?? '') : '', rows: h.rows.length, put: [...put.get(l)!.values()], deleted: [...deleted.get(l)!] };
   }
-  return { status: 200, body: { ok: true, op: 'batch', world, files }, writes };
+  return { status: 200, body: { ok: true, op: 'batch', world, files: files as BatchFiles }, writes };
+}
+
+/**
+ * One kind's file written back as its text and read back before anything is written: every row, the ones written and the
+ * ones carried, as it was. The two row layers' is `writeBack` itself; every other kind's the same steps through its own
+ * writer and reader. A file left with no rows is taken away, and one that was never there and is still empty writes nothing.
+ */
+function writeKindBack(k: EditKind<EditRow>, h: Held<EditRow>, l: EditFileKind, world: string, frame: 'raw' | 'game', readKind: 'ground' | 'space', ctx: PlacementCtx): { write: { layer: EditFileKind; text: string | null } | null } | string {
+  if (l === 'story' || l === 'world') return writeBack(h as unknown as HeldRows, l, world, frame, readKind);
+  const list = h.rows;
+  if (!list.length) return { write: h.text !== null ? { layer: l, text: null } : null };
+  const text = k.text(world, frame, list.map((e) => e.raw));
+  const back = k.read(text, world, readKind, ctx);
+  const lost = back.problem ?? (back.skipped.length ? back.skipped.map((s) => `${s.id}: ${s.why}`).join('; ') : null);
+  if (lost) return `${k.file(world)} would not read back as the editor wrote it (${lost})`;
+  const byId = new Map<string, EditRow>();
+  for (const r of back.rows) byId.set(r.id, r);
+  for (const e of list) {
+    const b = byId.get(e.row.id);
+    if (!b || !k.same(b, e.row)) return `${e.row.id} would not read back as the editor wrote it`;
+  }
+  return { write: { layer: l, text } };
 }
 
 /**
@@ -490,7 +707,10 @@ export function fileStateOf(f: { exists: boolean; inHead: boolean; porcelain: st
   return f.sameAsMain ? 'main' : 'committed';
 }
 
-/** The files the status op asks git about for a world, relative to the checkout: its four kinds of placement file and its track file. */
+/**
+ * The files the status op asks git about for a world, relative to the checkout: every kind of edit file (`EDIT_FILE_KINDS`:
+ * a kind every world shares by its one file) and its track file.
+ */
 export function statusFiles(world: string): { kind: EditFileKind | 'track'; path: string }[] {
   return [...EDIT_FILE_KINDS.map((k) => ({ kind: k, path: `public/${editFilePath(k, world)}` })), { kind: 'track' as const, path: `public/tracks/${world}.json` }];
 }

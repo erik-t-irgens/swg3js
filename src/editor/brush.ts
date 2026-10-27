@@ -233,6 +233,9 @@ export function eraseStamp(tune: Pick<BrushTune, 'radius' | 'eraseShare'>, cx: n
   return out;
 }
 
+/** How near a whole stamp the clock's owed share counts as it (`stampsDue`): far past a frame sum's rounding, far under any real share of a stamp. */
+const STAMP_HAIR = 1e-9;
+
 /** A stroke's clock: the seconds owed toward the next stamp. Kept, one a brush. */
 export interface BrushClock {
   owed: number;
@@ -246,7 +249,10 @@ export interface BrushClock {
 export function stampsDue(clock: BrushClock, dt: number, rate: number, most = 4): number {
   if (!(rate > 0) || !(dt >= 0)) return 0;
   clock.owed += dt * rate;
-  let n = Math.floor(clock.owed);
+  // A whole stamp owed to within a hair counts: a sum of `dt * rate` over frames lands a few units in the last place short of
+  // the whole number it stands for (144 frames of 1/144 at 30 a second sum to 30.999999999999996), and floored it lost a
+  // stamp at 144 frames a second that 30, 60 and 120 kept. Nothing is owed a hair under nought for long: the next frame adds.
+  let n = Math.floor(clock.owed + STAMP_HAIR);
   if (n > most) n = most;
   clock.owed -= n;
   if (clock.owed > 1) clock.owed = 1;

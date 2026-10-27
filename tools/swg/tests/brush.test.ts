@@ -177,7 +177,8 @@ function hostOver(hh: ReturnType<typeof makeHarness>, o: { src?: Partial<BrushSo
     return { n, most, owed: clock.owed };
   };
   const at = [20, 60, 144].map((fps) => over(fps, 3, 8));
-  ok(at.every((a) => Math.abs(a.n - (1 + 3 * 8)) <= 1), `a stroke of three seconds at 8 a second stamps ${at.map((a) => a.n).join(', ')} times at 20, 60 and 144 frames a second (${1 + 3 * 8} by the rate)`);
+  // Exactly, at every rate (Map-maker II's fix round: a sum of the frames' shares a hair short of a whole stamp lost one).
+  ok(at.every((a) => a.n === 1 + 3 * 8) && [30, 60, 120, 144, 165, 240].every((fps) => over(fps, 1, 30).n === 31), `a stroke of three seconds at 8 a second stamps ${at.map((a) => a.n).join(', ')} times at 20, 60 and 144 frames a second (${1 + 3 * 8} by the rate), and a second at 30 a second 31 times at every rate from 30 to 240`);
   const long = over(2, 3, 30);
   ok(long.most === 4 && long.owed <= 1, `and a long frame stamps at most four, carrying nothing past them (${long.owed} stamp owed after three half-second frames at 30 a second)`);
   const clock = { owed: 0 };

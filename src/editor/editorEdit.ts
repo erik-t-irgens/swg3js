@@ -27,35 +27,35 @@
 import * as THREE from 'three';
 import type { Input } from '../core/input.ts';
 import type { PlacedObject } from '../world/layoutStream.ts';
-import { PLACEMENT_LIMITS, scaleOf, toGame, mintPlacementId, placementKey, type PlacementLayer, type PlacementRow } from '../story/placements.ts';
+import { PLACEMENT_LIMITS, scaleOf, toGame, mintPlacementId, placementKey, type EditFileKind, type PlacementLayer, type PlacementRow } from '../story/placements.ts';
 import { rowMoved, followClear } from '../world/permanentEdit.ts';
 import { clearRadius, patchOfBounds } from '../world/housePlace.ts';
 import { applyHoldManyIn, manyHoldAsk, manyHoldState, tumbleAxes, type HeldThing, type ManyHoldKind } from '../world/placeHold.ts';
-import type { BatchEdit } from '../world/placementEdits.ts';
+import type { BatchEdit, EditRow } from '../world/placementEdits.ts';
 import { EDITOR_TUNE } from './editorTune.ts';
 import { CHORD_CODES, HOTBAR_ACTIONS, ctrlChord, shiftTips } from './editorKeys.ts';
 import { Selection, boxMode, inBox, likeThis, pivotOf, worldBox, type PivotThing } from './selection.ts';
 import { H, axesOfTurn, cursor, dragAt, gizmoDrag, gizmoLayout, grabAt, handlesFor, layoutGizmo, pickAt, ray3, rayAt, screenView, worldAxes, type Cursor, type HeldKey, type ScreenView } from './gizmo.ts';
 import { alikeToQuarter, droppedY, leanTo, nudgeAxis, snapFlush, snapPlace, snapValue, stepThrough, surfaceUnder, terrainNormal, type MovedAxes, type SurfaceHit, type WorldBox } from './snapping.ts';
-import { History, chunkEdits, doEdits, takeAnswered, type EditAction, type RowChange } from './undo.ts';
+import { History, chunkEdits, doEdits, noteAnswered, takeAnswered, type EditAction, type RowChange } from './undo.ts';
 import { clipText, copyRows, pasteAt, pasteSource, pastedRow, type ClipSet } from './clipboard.ts';
 import { entryForRow, type LibraryEntry } from './libraryModel.ts';
 import { refusalWords } from './devVerdict.ts';
 import { projectBox, selSlot, type MarksView } from '../ui/editorMarks.ts';
 
-/** One file a batch touched, as the page landed it. */
+/** One file a batch touched, as the page landed it: its rows are its kind's (a placement row, a tile of heights). */
 export interface EditorBatchFile {
   rev: string;
   rows: number;
-  put: PlacementRow[];
+  put: EditRow[];
   deleted: string[];
 }
 
-/** What one batch came to: its words when refused, each file it touched, the endpoint's own time, and when what it stood is built. */
+/** What one batch came to: its words when refused, each file it touched (by kind), the endpoint's own time, and when what it stood is built. */
 export interface EditorBatch {
   ok: boolean;
   why: string;
-  files: Partial<Record<PlacementLayer, EditorBatchFile>>;
+  files: Partial<Record<EditFileKind, EditorBatchFile>>;
   ms: number;
   built: Promise<void>;
 }
@@ -125,8 +125,11 @@ export interface EditEditor {
   setHotbar(slot: number, key: string | null): void;
   /** The window drawn again (a selection changed, a write landed). */
   refreshWindow(): void;
-  /** Whether the scatter brush is armed: its buttons paint and erase, and no click picks, boxes or orbits meanwhile. */
-  brushArmed?(): boolean;
+  /**
+   * Whether a tool of the Tools list is armed (the scatter brush, the sculpt brush, `tools.ts`): its buttons are its own,
+   * so no click picks, boxes or orbits meanwhile, and the selection takes no hold (C with the wheel sizes the tool).
+   */
+  toolArmed?(): boolean;
 }
 
 /**
@@ -318,9 +321,9 @@ export class EditorEdits {
   /** Where the last copy came from (words only). */
   private clipFromWorld = '';
 
-  /** Whether the brush is armed (its buttons are its own). */
+  /** Whether a tool is armed (its buttons are its own, and the selection takes no hold meanwhile). */
   private armed(): boolean {
-    return this.ed.brushArmed ? this.ed.brushArmed() : false;
+    return this.ed.toolArmed ? this.ed.toolArmed() : false;
   }
 
   /** Whether a hold, a drag or an orbit has the mouse this frame (the camera holds still). */
@@ -409,7 +412,9 @@ export class EditorEdits {
     const turn = input.held('placeTurn');
     const lift = input.held('placeLift');
     const scale = input.held('editorScale');
-    const canHold = this.sel.size > 0 && !this.ed.inHand() && !typing;
+    // No hold while a tool is armed (Map-maker II §2.3): C with the wheel sizes the tool, whatever is picked, and the picked
+    // rows take their holds again once it is put down.
+    const canHold = this.sel.size > 0 && !this.ed.inHand() && !typing && !this.armed();
     this.holdKind = !canHold ? null : turn ? (shiftTips(shift, moving) && this.tumbleOk ? 'tumble' : 'turn') : lift ? 'lift' : scale ? 'scale' : null;
     // The mouse this frame: Fly's movement (spent here, so the camera holds still), Point's cursor's own.
     let dx = 0;
@@ -582,7 +587,9 @@ export class EditorEdits {
     const key: HeldKey = !this.holdKind ? 'none' : this.holdKind === 'tumble' ? 'tumble' : this.holdKind;
     const gz = this.layout;
     gz.on = false;
-    if (hasPivot && !ed.inHand() && this.sel.size) {
+    // No gizmo while a tool is armed: its buttons are the tool's, and a press on a handle would drag the picked rows under
+    // the stroke (the rows stay picked, drawn by their boxes, and take the gizmo again once the tool is put down).
+    if (hasPivot && !ed.inHand() && this.sel.size && !this.armed()) {
       handlesFor(key, this.perAxis(), this.shown);
       for (let i = 0; i < this.shown.length; i++) gz.shown[i] = this.shown[i];
       // The arrows on the world's axes or the first row's own (the bar's button); the scale boxes always on the row's own,
@@ -1179,7 +1186,7 @@ export class EditorEdits {
     const chunks = chunkEdits(edits, EDITOR_TUNE.batchMost);
     this.writing = true;
     let ms = 0;
-    const answered: Partial<Record<PlacementLayer, Map<string, PlacementRow>>> = {};
+    const answered: Partial<Record<EditFileKind, Map<string, EditRow>>> = {};
     const files = new Set<string>();
     let built: Promise<void> = Promise.resolve();
     let refused = '';
@@ -1194,14 +1201,8 @@ export class EditorEdits {
         done++;
         ms += res.ms;
         built = built.then(() => res.built);
-        for (const layer of ['story', 'world'] as const) {
-          const f = res.files[layer];
-          if (!f) continue;
-          files.add(layer);
-          let m = answered[layer];
-          if (!m) answered[layer] = m = new Map();
-          for (const r of f.put) m.set(r.id, r);
-        }
+        // Every kind of file it touched, the rows each put by id (a later batch's over an earlier's).
+        for (const kind of noteAnswered(answered, res.files)) files.add(kind);
       }
     } finally {
       this.writing = false;
@@ -1623,6 +1624,9 @@ export class EditorEdits {
   async historyTo(n: number): Promise<string> {
     if (!this.sameWorld()) return 'a new world: nothing to undo here yet';
     if (this.live || this.writing) return 'an edit is under way';
+    // A brush's stroke under way (a button held): its tiles or rows are the stroke's until it is written, and an undo landed
+    // over them would be written over again by the stroke's own write.
+    if (this.stroking) return 'a stroke is under way';
     const to = Math.max(0, Math.min(this.history.actions.length, n));
     if (to === this.history.at) {
       const words = to === 0 ? 'nothing to undo' : 'nothing to redo';
@@ -1632,7 +1636,7 @@ export class EditorEdits {
     const plan = this.history.editsTo(to);
     const chunks = chunkEdits(plan.edits, EDITOR_TUNE.batchMost);
     this.writing = true;
-    const answered: Partial<Record<PlacementLayer, Map<string, PlacementRow>>> = {};
+    const answered: Partial<Record<EditFileKind, Map<string, EditRow>>> = {};
     let refused = '';
     let ms = 0;
     try {
@@ -1643,13 +1647,7 @@ export class EditorEdits {
           break;
         }
         ms += res.ms;
-        for (const layer of ['story', 'world'] as const) {
-          const f = res.files[layer];
-          if (!f) continue;
-          let m = answered[layer];
-          if (!m) answered[layer] = m = new Map();
-          for (const r of f.put) m.set(r.id, r);
-        }
+        noteAnswered(answered, res.files);
       }
     } finally {
       this.writing = false;

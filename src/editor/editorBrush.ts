@@ -24,6 +24,43 @@ import { leanTo } from './snapping.ts';
 import { entryForRow, entryKey, type LibraryView } from './libraryModel.ts';
 import type { EditorEdits, Stroke } from './editorEdit.ts';
 import type { RowChange } from './undo.ts';
+import type { ToolDef } from './tools.ts';
+
+/**
+ * The scatter brush as the Tools list's first entry (Map-maker II's §2.3), on B, behaving exactly as it was built: armed by
+ * the editor's own arming (`arm`, its entries out of the library), its frame the list's frame laid into its own ask (the
+ * left button paints, the right erases, the disc's middle where the aim meets the world), its ring at its radius in
+ * `bad` while it erases. It takes no size from the wheel: it was built without one, and C with the wheel is its radius
+ * slider's (`editor` dials) as it always was.
+ */
+export function scatterTool(brush: EditorBrush, arm: () => Promise<string>): ToolDef {
+  return {
+    id: 'brush',
+    action: 'editorBrush',
+    label: 'the scatter brush',
+    armed: () => brush.armed,
+    arm,
+    disarm: () => brush.disarm(),
+    step(f) {
+      const a = brush.ask;
+      a.paint = f.apply;
+      a.erase = f.inverse;
+      a.cx = f.x;
+      a.cz = f.z;
+      a.valid = f.valid;
+      a.dt = f.dt;
+      brush.frame();
+    },
+    draw(d) {
+      d.radius = BRUSH_TUNE.radius;
+      d.ring(0);
+      d.marks.ringErase = brush.mode === 'erase';
+    },
+    owns: (b) => b === 'apply' || b === 'inverse',
+    barWords: () => `brush: ${brush.set.size} entr${brush.set.size === 1 ? 'y' : 'ies'} · ${BRUSH_TUNE.radius} m · ${BRUSH_TUNE.density} a 100 m²${brush.mode ? ` · ${brush.mode === 'paint' ? 'painting' : 'erasing'}` : ' · LMB paints, RMB erases, B lets go'}`,
+    report: () => brush.report(),
+  };
+}
 
 /**
  * What one entry of the brush writes: the row's source, its model's box, whether it is meant for the water, and whether it

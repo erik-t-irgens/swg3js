@@ -4,6 +4,7 @@ import * as THREE from 'three';
 // ahead of time by a worker so streaming never stalls on generation.
 
 import { TERRAIN_GROUND_TUNE, type EnvironmentFamily, type Layer } from '../swg/terrain/generator.ts';
+import { layAsk, type HeightEdits } from '../swg/terrain/heightEdits.ts';
 import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, rampNames, readColorRampFile, readColorReference, TerrainSampler, UPPER_PAD, waterTables, type ColorRamp, type ColorReference, type GroundProbe, type PoleBlock, type RadialPole, type TerrainTemplate } from '../swg/terrain/trn.ts';
 import { groundChunkAt, groundShift, type GroundShift } from './groundTiles.ts';
 import { gameRibbon, terrainRibbons, type GameRibbon } from '../swg/terrain/ribbons.ts';
@@ -106,7 +107,7 @@ export class SwgTerrain {
   /** Where the ground's mesh stands against the 64 m buckets so its vertices fall on the poles (`groundTiles.ts`). */
   readonly groundShift: GroundShift;
 
-  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number, colorReference: ColorReference | null = null) {
+  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number, colorReference: ColorReference | null = null, heights: HeightEdits | null = null) {
     this.colorReference = colorReference;
     this.groundShift = groundShift(centerX, centerZ);
     this.template = parseTerrainTemplate(new Uint8Array(trn));
@@ -120,6 +121,9 @@ export class SwgTerrain {
     }
     this.ramps = { named, loaded: sent.length };
     this.sampler = new TerrainSampler(this.template);
+    // The world's height edits (Map-maker II), held from before any block is cached: every block and far grid takes them
+    // as it enters a cache, and the generator and its worker never see them.
+    this.sampler.heights = heights;
     this.centerX = centerX;
     this.centerZ = centerZ;
     for (const l of layers) {
@@ -172,7 +176,7 @@ export class SwgTerrain {
    * them through `fetchBytes` (pack-relative paths), and the colour ramps when the pack carries
    * them, then starts the worker.
    */
-  static async create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number, fetchBytes: (file: string) => Promise<ArrayBuffer | null>): Promise<SwgTerrain> {
+  static async create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number, fetchBytes: (file: string) => Promise<ArrayBuffer | null>, opts: { heights?: HeightEdits | null } = {}): Promise<SwgTerrain> {
     const probe = parseTerrainTemplate(new Uint8Array(trn));
     const bitmaps: { familyId: number; bytes: ArrayBuffer }[] = [];
     for (const b of bitmapFiles(probe)) {
@@ -196,8 +200,86 @@ export class SwgTerrain {
         console.warn(`terrain: ${COLOR_RAMP_FILE} could not be read; the colour ramps do nothing`, err);
       }
     }
-    return new SwgTerrain(trn, layers, bitmaps, ramps, centerX, centerZ, reference);
+    return new SwgTerrain(trn, layers, bitmaps, ramps, centerX, centerZ, reference, opts.heights ?? null);
   }
+
+  /** The height edits laid over this ground, or null. */
+  get heights(): HeightEdits | null {
+    return this.sampler.heights;
+  }
+
+  /**
+   * A store of height edits put in (or let go: null) after the ground was made, a file that landed late: every cached block
+   * and far grid laid again from raw with it. Answers how many grids it laid. What a chunk already built from them shows is
+   * the world's to rebuild (`World.heightsChanged`).
+   */
+  useHeights(store: HeightEdits | null): number {
+    this.sampler.heights = store;
+    let n = this.sampler.relayAll();
+    for (const g of this.farGrids.values()) if (this.layFar(g)) n++;
+    return n;
+  }
+
+  /**
+   * Every cached block and far grid whose samples a rectangle of the game's frame reaches, laid again from raw with the
+   * edits in force (a stroke's stamp, an undo, a file landed): the rectangle turned into the raw frame (x mirrored). Answers
+   * how many blocks and grids it laid. A stamp's work, never a frame's.
+   */
+  relayRect(gx0: number, gz0: number, gx1: number, gz1: number): { blocks: number; far: number } {
+    const x0 = this.toSwgX(gx1);
+    const x1 = this.toSwgX(gx0);
+    const z0 = this.toSwgZ(gz0);
+    const z1 = this.toSwgZ(gz1);
+    const blocks = this.sampler.relay(x0, z0, x1, z1);
+    let far = 0;
+    for (const g of this.farGrids.values()) {
+      const m = this.farMeta.get(g);
+      if (!m) continue;
+      const fx0 = Math.min(m.x0, m.x0 + (m.n - 1) * m.dx);
+      const fx1 = Math.max(m.x0, m.x0 + (m.n - 1) * m.dx);
+      const fz1 = m.z0 + (m.n - 1) * m.step;
+      if (fx1 < x0 || fx0 > x1 || fz1 < z0 || m.z0 > z1) continue;
+      if (this.layFar(g)) far++;
+    }
+    return { blocks, far };
+  }
+
+  /**
+   * One far grid laid from its raw samples with the edits in force: where none of its samples takes a delta it keeps no raw
+   * copy (and one it kept is put back). Answers whether it laid anything.
+   */
+  private layFar(g: FarGrid): boolean {
+    const m = this.farMeta.get(g);
+    if (!m) return false;
+    const h = this.sampler.heights;
+    const span = (m.n - 1) * m.step;
+    const fx0 = Math.min(m.x0, m.x0 + (m.n - 1) * m.dx);
+    if (!m.raw) {
+      if (!h || !h.touches(fx0, m.z0, fx0 + span, m.z0 + span)) return false;
+      m.raw = g.heights.slice();
+    }
+    if (!h) {
+      g.heights.set(m.raw);
+      return true;
+    }
+    const a = this.farLay;
+    a.raw = m.raw;
+    a.out = g.heights;
+    a.x0 = m.x0;
+    a.dx = m.dx;
+    a.z0 = m.z0;
+    a.dz = m.step;
+    a.nx = m.n;
+    a.nz = m.n;
+    h.layIn(a);
+    a.raw = null;
+    a.out = null;
+    return true;
+  }
+
+  /** Each far grid's place in the raw frame (its first column's x, the step along x in the game's column order, its first row's z, the step and the size) and, once an edit reached it, its raw heights. */
+  private readonly farMeta = new WeakMap<FarGrid, { x0: number; dx: number; z0: number; step: number; n: number; raw: Float32Array | null }>();
+  private readonly farLay = layAsk();
 
   get waterLevel(): number {
     return this.template.useGlobalWaterTable ? this.template.globalWaterTableHeight : -Infinity;
@@ -388,6 +470,10 @@ export class SwgTerrain {
           }
         }
       }
+      // Its place in the raw frame (column i is raw x = startX + (n - 1 - i) step, row j raw z = startZ + j step), and the
+      // height edits laid over it as it enters the cache (Map-maker II): every 16 m sample stands on a pole.
+      this.farMeta.set(out, { x0: startX + (n - 1) * step, dx: -step, z0: startZ, step, n, raw: null });
+      if (this.sampler.heights) this.layFar(out);
       this.farGrids.set(key, out);
       this.farIndex.set(gx0, gz0, size, res, out);
       return out;

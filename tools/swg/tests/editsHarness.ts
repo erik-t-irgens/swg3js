@@ -12,6 +12,7 @@ import { EDITOR_TUNE } from '../../../src/editor/editorTune.ts';
 import { applyPlacementOp, type BatchEdit, type PlacementBatchOk } from '../../../src/world/placementEdits.ts';
 import { placementKey, placementsFileText, readPlacementsFile, toGame, type PlacementLayer, type PlacementRow } from '../../../src/story/placements.ts';
 import { marksView, type MarksView } from '../../../src/ui/editorMarks.ts';
+import { inflateRawSync } from 'node:zlib';
 import type { ScreenView } from '../../../src/editor/gizmo.ts';
 
 /** What a harness is made with: the files' rows, the world's frame, and the world's answers a test wants to set. */
@@ -34,8 +35,17 @@ export interface HarnessOpts {
   box?: { min: number[]; max: number[] };
   point?: boolean;
   packId?: string;
-  /** Whether the brush is armed (the editor's `brushArmed`): no click picks, boxes or orbits while it is. None by default. */
+  /** Whether a tool is armed (the editor's `toolArmed`, which the brush's own `brushArmed` was): no click picks, boxes or orbits while it is. None by default. */
+  toolArmed?: () => boolean;
+  /** The same, by the name Map-maker I's brush tests use. */
   brushArmed?: () => boolean;
+  /** A heights file's text to start from (Map-maker II). */
+  heights?: string | null;
+  /**
+   * A write's heights answer landed as the game's page lands it (`App.editorBatch` handing it to `World.landHeights`): the
+   * tiles put and the ids taken out, the promise what the write built waits on. None by default.
+   */
+  onHeights?: (put: unknown[], deleted: string[]) => Promise<unknown>;
 }
 
 /** The stand-in input: actions held and pressed, raw keys down, the mouse's movement. */
@@ -55,7 +65,7 @@ export interface StandInput {
 
 export interface Harness {
   e: EditorEdits;
-  files: { story: string | null; world: string | null };
+  files: { story: string | null; world: string | null; heights?: string | null };
   rowsOf(l: PlacementLayer): Map<string, PlacementRow>;
   rowOf(id: string): PlacementRow | undefined;
   /** Where a row stands in the game's frame, its turn as three's quaternion and its scale. */
@@ -78,6 +88,15 @@ export interface Harness {
 
 const BOX = { min: [-0.5, 0, -0.5], max: [0.5, 1, 0.5] };
 
+/** A heights tile's deltas inflated as the dev server's glue inflates them (node's zlib), or null. */
+export function inflateTile(b64: string): Uint8Array | null {
+  try {
+    return new Uint8Array(inflateRawSync(Buffer.from(b64, 'base64')));
+  } catch {
+    return null;
+  }
+}
+
 /** A stand-in editor and the real editing round it. */
 export function makeHarness(opts: HarnessOpts = {}): Harness {
   const world = opts.world ?? 'tatooine';
@@ -87,7 +106,7 @@ export function makeHarness(opts: HarnessOpts = {}): Harness {
   const kind = frame === 'game' ? 'space' : 'ground';
   let clock = 1_800_000_000_000;
   let mark = 1;
-  const files: Harness['files'] = { story: opts.story ? placementsFileText(world, frame, opts.story) : null, world: opts.rows ? placementsFileText(world, frame, opts.rows) : null };
+  const files: Harness['files'] = { story: opts.story ? placementsFileText(world, frame, opts.story) : null, world: opts.rows ? placementsFileText(world, frame, opts.rows) : null, heights: opts.heights ?? null };
   const rowsOf = (l: PlacementLayer): Map<string, PlacementRow> => new Map((files[l] ? readPlacementsFile(files[l]!, world, kind).rows : []).map((r) => [r.id, r]));
   const rowOf = (id: string): PlacementRow | undefined => rowsOf('world').get(id) ?? rowsOf('story').get(id);
   const placedCache = new Map<string, { x: number; y: number; z: number; q: THREE.Quaternion; scale: THREE.Vector3 | null; template: string }>();
@@ -194,11 +213,14 @@ export function makeHarness(opts: HarnessOpts = {}): Harness {
     hit: () => ({ x: 0, y: 0, z: 0 }),
     batch: async (edits: BatchEdit[]): Promise<EditorBatch> => {
       batches.push(edits);
-      const a = applyPlacementOp({ op: 'batch', world, edits }, { ...files }, { worlds: new Map([[world, kind]]), now: (clock += 1000) });
+      const a = applyPlacementOp({ op: 'batch', world, edits }, { ...files }, { worlds: new Map([[world, kind]]), now: (clock += 1000), inflate: inflateTile });
       if (a.status !== 200 || !a.body.ok) return { ok: false, why: (a.body as { why: string }).why, files: {}, ms: 0, built: Promise.resolve() };
-      for (const w of a.writes) files[w.layer] = w.text;
+      for (const w of a.writes) (files as Record<string, string | null>)[w.layer] = w.text;
       const body = a.body as PlacementBatchOk;
-      return { ok: true, why: '', files: body.files as EditorBatch['files'], ms: 0, built: Promise.resolve() };
+      // The heights landed as the page lands them: begun at once, not waited for here, part of what the write built.
+      const hf = (body.files as Record<string, { put: unknown[]; deleted: string[] } | undefined>).heights;
+      const built = hf && opts.onHeights ? opts.onHeights(hf.put, hf.deleted).then(() => undefined) : Promise.resolve();
+      return { ok: true, why: '', files: body.files as EditorBatch['files'], ms: 0, built };
     },
     status: async () => 'no git here',
     say: (w: string) => said.push(w),
@@ -209,7 +231,7 @@ export function makeHarness(opts: HarnessOpts = {}): Harness {
     hotbar: () => [],
     setHotbar() {},
     refreshWindow() {},
-    ...(opts.brushArmed ? { brushArmed: opts.brushArmed } : {}),
+    ...(opts.toolArmed || opts.brushArmed ? { toolArmed: opts.toolArmed ?? opts.brushArmed } : {}),
   };
   EDITOR_TUNE.statusDebounceMs = 0;
   const e = new EditorEdits(host as unknown as EditEditor);

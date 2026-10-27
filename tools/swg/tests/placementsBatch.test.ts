@@ -111,7 +111,8 @@ const rows = (text: string | null) => (text ? readPlacementsFile(text, W, 'groun
   // The read-back looks rows up in a map, never a find a row (669 ms at 10,000 rows and two seconds at 20,000 that way).
   const src = fs.readFileSync(path.join(REPO, 'src', 'world', 'placementEdits.ts'), 'utf8').split(/\r?\n/).join('\n');
   ok(/const backById = new Map<string, PlacementRow>\(\);\s*for \(const r of back\.rows\) backById\.set\(r\.id, r\);/.test(src) && !/back\.rows\.find\(/.test(src), "the read-back is a map by id (writeBack's backById)");
-  ok(/if \(gone\[l\]\.size\) held\[l\]\.rows = held\[l\]\.rows\.filter/.test(src), 'and rows taken out are taken out together at the end, never spliced an edit');
+  // Map-maker II's generic batch keeps each kind's taken-out rows by kind (`gone.get(l)`) and filters them out once, at the end.
+  ok(/const gn = gone\.get\(l\)!;\s*if \(gn\.size\) h\.rows = h\.rows\.filter\(\(_, i\) => !gn\.has\(i\)\);/.test(src), 'and rows taken out are taken out together at the end, never spliced an edit');
   const g = fs.readFileSync(path.join(REPO, 'tools', 'dev', 'placementsEndpoint.mjs'), 'utf8').split(/\r?\n/).join('\n');
   ok(/answer\(res, 200, out\.body\);\s*for \(const w of written\) notify\(w\);/.test(g), 'the glue answers first and then tells the page, so the page lands the answer and drops the word about what it landed');
 }

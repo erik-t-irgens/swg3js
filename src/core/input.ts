@@ -120,7 +120,9 @@ export type Action =
   | 'editorGameView'
   | 'editorKeys'
   // The world editor's scatter brush (its third wave): B arms it with the library's chosen entries, and disarms it.
-  | 'editorBrush';
+  | 'editorBrush'
+  // Map-maker II's sculpt brush (its first wave): K arms it, and disarms it.
+  | 'editorSculpt';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -271,6 +273,8 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   editorKeys: ['KeyH'],
   // B, the spawner's (muted while the editor is on): the brush armed and let go.
   editorBrush: ['KeyB'],
+  // K, the saber style's (muted while the editor is on): the sculpt brush armed and let go (Map-maker II).
+  editorSculpt: ['KeyK'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 
@@ -313,6 +317,7 @@ export const DEV_ONLY_ACTIONS: ReadonlySet<Action> = new Set<Action>([
   'editorGameView',
   'editorKeys',
   'editorBrush',
+  'editorSculpt',
 ]);
 
 /** The actions the Controls page lists: every one on the dev server, and in a release all but the dev server's own. */

@@ -9,18 +9,22 @@
 // a created row back under its same id. An action bigger than one request goes as consecutive batches (`chunkEdits`),
 // one undo entry all the same.
 //
+// **Across kinds** (Map-maker II's groundwork): a change names any kind of edit file and its rows are that kind's
+// (`EditRow`: a placement row, a tile of heights), so one action may change rows of the files and tiles of the ground
+// together (a sculpt stroke carrying what stands on it) and one undo puts both back.
+//
 // Pure: no three, no DOM. Rule for this file (node runs it with type stripping): every import with its `.ts` extension,
 // no enum, no namespace, no constructor parameter properties.
 
-import type { PlacementLayer, PlacementRow } from '../story/placements.ts';
-import type { BatchEdit } from '../world/placementEdits.ts';
+import type { EditFileKind } from '../story/placements.ts';
+import type { BatchEdit, EditRow } from '../world/placementEdits.ts';
 
-/** One row an action changed: the file, its id, the row before (null: there was none) and after (null: there is none). */
+/** One row an action changed: the kind of file, its id, the row before (null: there was none) and after (null: there is none). */
 export interface RowChange {
-  file: PlacementLayer;
+  file: EditFileKind;
   id: string;
-  before: PlacementRow | null;
-  after: PlacementRow | null;
+  before: EditRow | null;
+  after: EditRow | null;
 }
 
 /** One action: what it was called in words, and every row it changed. */
@@ -30,7 +34,7 @@ export interface EditAction {
 }
 
 /** A row as a put carries it: every field it has (its `at` too, which a `keepAt` asks for). */
-function asPut(row: PlacementRow): Record<string, unknown> {
+function asPut(row: EditRow): Record<string, unknown> {
   return { ...row };
 }
 
@@ -80,8 +84,22 @@ export function chunkEdits(edits: readonly BatchEdit[], most: number): BatchEdit
   return out;
 }
 
-/** What a write answered for one file: the rows put as stamped, by id. */
-export type Answered = Partial<Record<PlacementLayer, ReadonlyMap<string, PlacementRow>>>;
+/** What a write answered for each kind of file: the rows put as stamped, by id. */
+export type Answered = Partial<Record<EditFileKind, ReadonlyMap<string, EditRow>>>;
+
+/** What one answer's files put, laid into `answered` by kind (each file's rows by id, a later batch's over an earlier's). Answers the kinds touched. */
+export function noteAnswered(answered: Partial<Record<EditFileKind, Map<string, EditRow>>>, files: Partial<Record<EditFileKind, { put: readonly EditRow[] } | undefined>>): EditFileKind[] {
+  const out: EditFileKind[] = [];
+  for (const kind of Object.keys(files) as EditFileKind[]) {
+    const f = files[kind];
+    if (!f) continue;
+    out.push(kind);
+    let m = answered[kind];
+    if (!m) answered[kind] = m = new Map();
+    for (const r of f.put) m.set(r.id, r);
+  }
+  return out;
+}
 
 /**
  * The rows the endpoint answered laid over the actions a write (or a jump through the history) put, so the next `was` is

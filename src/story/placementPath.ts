@@ -25,11 +25,22 @@ export function placementFileOf(rel: string): { layer: PlacementLayer; world: st
 }
 
 /**
- * Every kind of file the world editor writes under `public/placements/`: the two layers of rows, and from its fifth wave
- * the things taken away (`removed`) and the people placed (`people`). Map-maker II grows this list by a name a kind.
+ * Every kind of file the world editor writes under `public/placements/`: the two layers of rows; the things taken away
+ * (`removed`) and the people placed (`people`), Map-maker I's fifth wave carried into Map-maker II's twelfth; and
+ * Map-maker II's own, every one named at once (its groundwork wave, so the dev server restarts for the kinds once): the
+ * ground's heights (`heights`, its first wave), its paint (`paint`), its lakes and rivers (`water`), the places on the map
+ * (`locations`) and the looks people wear (`looks`, one file every world shares, `all.json`: `editFileWorld`).
  */
-export type EditFileKind = PlacementLayer | 'removed' | 'people';
-export const EDIT_FILE_KINDS: readonly EditFileKind[] = ['story', 'world', 'removed', 'people'];
+export type EditFileKind = PlacementLayer | 'removed' | 'people' | 'heights' | 'paint' | 'water' | 'locations' | 'looks';
+export const EDIT_FILE_KINDS: readonly EditFileKind[] = ['story', 'world', 'removed', 'people', 'heights', 'paint', 'water', 'locations', 'looks'];
+
+/** A kind every world shares one file of (its name segment is `all`), never a world's own. */
+export const SHARED_EDIT_KINDS: readonly EditFileKind[] = ['looks'];
+
+/** The name segment a kind's file for a world carries: the world's own pack id, or `all` for a kind every world shares. */
+export function editFileWorld(kind: EditFileKind, world: string): string {
+  return SHARED_EDIT_KINDS.includes(kind) ? 'all' : world;
+}
 
 /**
  * Which kind of file and which world a path below `public/placements/` names (`world/tatooine.json`), or null: anything
@@ -48,7 +59,7 @@ export function editFileOf(rel: string): { kind: EditFileKind; world: string } |
   return { kind: kind as EditFileKind, world };
 }
 
-/** The path a kind's file for a world is fetched from, under the build's own base. */
+/** The path a kind's file for a world is fetched from, under the build's own base (a kind every world shares: its one file). */
 export function editFilePath(kind: EditFileKind, world: string): string {
-  return `placements/${kind}/${world}.json`;
+  return `placements/${kind}/${editFileWorld(kind, world)}.json`;
 }

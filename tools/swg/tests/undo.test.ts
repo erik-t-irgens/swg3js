@@ -124,4 +124,37 @@ const chair = (id: string, x: number, at: number): PlacementRow => propRow(id, x
   ok(A.changes[0].after!.x === 12 && B.changes[0].after!.note === 'as stamped', 'done again over both, the older keeps its own `after` and the newer takes the answer');
 }
 
+{
+  // Map-maker II's groundwork: one action across two kinds of file -- a row of the world file and a tile of the heights file
+  // (the sculpt brush's carry writes exactly this) -- done, undone and done again through the real editing class, both files
+  // byte for byte each way, the tile's own moment kept.
+  const { deflateRawSync } = await import('node:zlib');
+  const tile = (v: number) => {
+    const d = new Float32Array(1024);
+    d[5] = v;
+    return deflateRawSync(Buffer.from(d.buffer)).toString('base64');
+  };
+  const { heightsFileText } = await import('../../../src/world/editFiles/heightsFile.ts');
+  const h = makeHarness({ rows: [chair('crate-1', 10, 1_700_000_000_001)], heights: heightsFileText('tatooine', [{ id: '0,0', d: tile(1), on: '00000000', at: 1_700_000_000_009 }]) });
+  const start = { ...h.files };
+  const was = h.rowOf('crate-1')!;
+  const s = h.e.beginStroke('sculpt (raise)');
+  const no = await h.e.strokeWrite(s, [
+    { file: 'heights', id: '0,0', before: { id: '0,0', d: tile(1), on: '00000000', at: 1_700_000_000_009 }, after: { id: '0,0', d: tile(2.5), on: '00000000' } },
+    { file: 'heights', id: '1,0', before: null, after: { id: '1,0', d: tile(0.5), on: '00000000' } },
+    { file: 'world', id: 'crate-1', before: was, after: { ...was, y: was.y + 1.5, at: undefined } as unknown as PlacementRow },
+  ]);
+  h.e.endStroke(s);
+  ok(no === '' && h.batches.length === 1, 'a stroke across two kinds is one batch');
+  ok(/"id": "1,0"/.test(h.files.heights ?? '') && h.rowOf('crate-1')!.y === was.y + 1.5, 'the tile and the carried row are written');
+  const done = { ...h.files };
+  await h.e.undo(1);
+  await h.settle();
+  ok(h.files.world === start.world && h.files.heights === start.heights, 'undone, both files are back byte for byte (the tile its own moment)');
+  await h.e.redo(1);
+  await h.settle();
+  ok(h.files.world === done.world && h.files.heights === done.heights, 'done again, both are what the stroke wrote byte for byte');
+  ok(h.e.history.actions.length === 1, 'the stroke is one entry in the history');
+}
+
 console.log(`\n${checks} checks passed`);

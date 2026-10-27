@@ -413,7 +413,10 @@ import { TRACK_TUNE, gateSizeFor, tuneTrack, type TrackTune } from './race/track
 import { TRACK_EDITOR_HEADER, TRACK_EDITOR_HEADER_VALUE, deleteGate, insertGate, moveGateTo, nudgeGate, resizeGate, roundPlace, trackEditFile, type TrackReply } from './race/trackEdits.ts';
 import { RaceHud, type RaceBlockView } from './ui/raceHud.ts';
 import { TrackList, type TrackListModel } from './ui/trackList.ts';
-import { World } from './world/world';
+import { World, type HeightsLoaded } from './world/world';
+import { editFilePath, type EditFileKind } from './story/placementPath.ts';
+import { deltasOf, readHeightsFile, storeOfRead, tileOfId, type HeightTileRow } from './world/editFiles/heightsFile.ts';
+import { inflateBase64 } from './world/editFiles/browserCodec.ts';
 import { MODEL_REFLECTIONS_AT_LOAD, PREVIEW_REFLECTIONS, REFLECTIONS, environmentIsStandIn, isRegisteredReflective, modelReflectiveCount, plainReflectiveCount, reflectiveCount, setEnvironmentStandIn, setModelReflections, setPlainReflections, setReflectionSource, type ReflectionSource } from './world/envmap';
 import { SPEC_TUNE, setSpecTune, specReport, specSelfTest, type SpecTune } from './world/specular.ts';
 import { cardsReport, setCardTune, type CardTune } from './world/cardRule.ts';
@@ -1013,6 +1016,8 @@ interface EditorApi {
   dials(helper: string): DialSet | null;
   debug(o?: Record<string, unknown>): Promise<unknown>;
   library(o?: Record<string, unknown>): Promise<unknown>;
+  /** The sculpt brush (Map-maker II): `__debug.sculpt`. */
+  sculptDebug(o?: Record<string, unknown>): Promise<unknown>;
 }
 
 /**
@@ -3961,6 +3966,19 @@ class App {
         const ed = await this.loadEditor();
         return ed ? ed.library(opts) : 'the world editor would not load';
       },
+      /**
+       * The world editor's sculpt brush (Map-maker II, K; the dev server's alone): the world's height edits (tiles, bytes,
+       * the file as last read, whether they were laid at the arrival), the armed mode and target, the chunks waiting for
+       * their ground and plantings, the last stroke's stamps, chunks rewritten, replanted, far tiles and milliseconds.
+       * `{ tune: { radius: 20 } }`, `{ arm: 'raise' | 'lower' | 'flatten' | 'smooth' }` (or `false`), `{ at: [x, z] }` the raw
+       * height, the edit and the ground at a `/loc` place, `{ stroke: { mode, x, z, r, seconds } }` a stroke run exactly as
+       * held and written (one undo).
+       */
+      sculpt: async (opts?: Record<string, unknown>) => {
+        if (!import.meta.env.DEV) return "the world editor is the dev server's alone";
+        const ed = await this.loadEditor();
+        return ed ? ed.sculptDebug(opts) : 'the world editor would not load';
+      },
       placements: async (
         opts: {
           reload?: boolean;
@@ -5650,6 +5668,8 @@ class App {
             colour: hex(probe.color),
             writes: probe.writes.map((w) => ({ affector: `${w.tag} ${w.name}`, operation: operations[w.operation] ?? `op ${w.operation}`, ramp: w.ramp, asked: hex(w.desired), amount: Number(w.amount.toFixed(3)), before: hex(w.before), after: hex(w.after) })),
             cached: { family: this.world.terrain.familyAt(p.x, p.z), child: swg.childIfCached(p.x, p.z), colour: hex(swg.colorIfCached(p.x, p.z)) },
+            // The generator's ground is raw; the height edits laid over it where it enters the cache are said beside it (Map-maker II).
+            height: { raw: Number((swg.sampler.rawPoleAt(probe.pole.x, probe.pole.z) ?? Number.NaN).toFixed(3)), edit: Number((swg.heights?.bilinear(probe.pole.x, probe.pole.z) ?? 0).toFixed(3)), ground: Number(this.world.terrain.heightAt(p.x, p.z).toFixed(3)) },
           },
         };
       },
@@ -11972,6 +11992,9 @@ class App {
     this.world.serverHoldsWorld = () => this.serverHoldsHere();
     // An arrival on a world with states (Restuss) waits a moment for a saved server's hail first (`worldStatesHere`).
     this.world.worldStatesReady = () => this.worldStatesHere();
+    // Each world's height edits (Map-maker II, `public/placements/heights/<world>.json`), fetched as its load begins and
+    // laid over the ground before it is made (`World.askHeights`).
+    this.world.heightsSource = (pack, kind) => this.fetchHeights(pack, kind);
     // Where this world brings the player in and back (the arrival, a teleport's spot, and where a death comes round
     // with no cloning facility near): the overlay's people and herds who pick a fight keep clear of it.
     this.world.arrivalPoint = () => this.spawn;
@@ -24665,8 +24688,10 @@ class App {
     const here = packIdOf(this.world.planet, this.zone);
     const kind = d?.kind ?? d?.layer;
     if (d?.world !== here) return;
-    // `removed` and `people` are the editor's fifth wave's files: nothing reads them yet.
-    if (kind !== 'story' && kind !== 'world') return;
+    // Routed by kind to the layer that reads it on the page (Map-maker II §2.2: the two row layers to the permanent layer,
+    // the heights to the ground's); a word for a kind with no layer yet (the later waves' files) is dropped.
+    const reload = this.editLayerOf(kind);
+    if (!reload) return;
     if (this.placementsInFlight > 0) {
       this.heldWords.push(d);
       return;
@@ -24674,7 +24699,18 @@ class App {
     if (typeof d.rev === 'string' && this.placementRevs.get(`${kind}/${here}`) === d.rev) return;
     // A revision one of this page's own writes made, its word late behind a later one of the same action's: dropped.
     if (typeof d.rev === 'string' && this.takeOwnRev(`${kind}/${here}`, d.rev)) return;
-    void this.reloadDressing(here, kind, d.rev);
+    reload(here, d.rev);
+  }
+
+  /**
+   * What the dev server's word about a kind of edit file does on the page (`placementWord`): the two row layers read again
+   * and stood by difference (`reloadDressing`), the heights read again and laid over the ground by difference
+   * (`reloadHeights`). Null for a kind no layer reads yet.
+   */
+  private editLayerOf(kind: string | undefined): ((pack: string, rev: string | undefined) => void) | null {
+    if (kind === 'story' || kind === 'world') return (pack, rev) => void this.reloadDressing(pack, kind, rev);
+    if (kind === 'heights') return (pack, rev) => void this.reloadHeights(pack, rev);
+    return null;
   }
 
   /** The words held while a write was out, heard now that its answer has landed. */
@@ -27808,14 +27844,20 @@ class App {
     const reply = (await this.postPlacements({ op: 'batch', world: pack, edits })) as unknown as PlacementBatchReply;
     if (!reply.ok) return no(reply.why);
     const files = reply.files;
-    for (const l of PLACEMENT_LAYERS) {
-      const f = files[l];
-      if (f) this.placementRevs.set(`${l}/${pack}`, f.rev);
+    // Every kind of file it wrote, its revision recorded at once (so the dev server's word about it is dropped).
+    const kinds = Object.keys(files) as EditFileKind[];
+    for (const k of kinds) {
+      const f = files[k];
+      if (f) this.placementRevs.set(`${k}/${pack}`, f.rev);
     }
-    for (const l of PLACEMENT_LAYERS) if (files[l]) this.noteOwnRev(`${l}/${pack}`, files[l]!.rev);
+    for (const k of kinds) if (files[k]) this.noteOwnRev(`${k}/${pack}`, files[k]!.rev);
+    // The heights it wrote, laid over the ground by difference (the tiles put and taken out), whatever else it wrote.
+    const hf = files.heights;
+    let heightsLanded: Promise<number> = Promise.resolve(0);
+    if (hf && this.world.generation === gen && this.editWorld() === pack) heightsLanded = this.world.landHeights(hf.put as HeightTileRow[], hf.deleted, inflateBase64, deltasOf, tileOfId);
     const current = () => this.world.generation === gen && this.editWorld() === pack && this.permanent.worldId === pack && this.permanent.generation === gen;
     let built: Promise<void> = Promise.resolve();
-    if (current()) {
+    if (current() && (files.story || files.world)) {
       await this.dressingPacks(PLACEMENT_LAYERS.flatMap((l) => files[l]?.put ?? []));
       if (current()) {
         const changes = PLACEMENT_LAYERS.filter((l) => !!files[l]).map((l) => ({ layer: l, put: files[l]!.put, deleted: files[l]!.deleted }));
@@ -27826,7 +27868,71 @@ class App {
         this.refreshEditPanels();
       }
     }
+    // The heights' landing is part of what was built (an undo's ground rewritten from the tiles it put back).
+    if (hf) built = Promise.all([built, heightsLanded]).then(() => undefined);
     return { ok: true, why: '', files, ms: reply.ms ?? 0, built };
+  }
+
+  /**
+   * A world's heights file (Map-maker II, `public/placements/heights/<world>.json`): read as the placement files are (a
+   * built game asks only for one its own list ships; the dev server answers from the disk), its tiles' deltas inflated by
+   * the browser's own `DecompressionStream` into a store (`storeOfRead`). Null for none; a space zone and the world of copies
+   * keep none.
+   */
+  private async fetchHeights(pack: string, kind: 'ground' | 'space' | 'copies'): Promise<HeightsLoaded | null> {
+    const got = await this.readHeights(pack, kind);
+    return got === 'unread' ? null : got;
+  }
+
+  /**
+   * `fetchHeights` telling "no file" (null: none in the build, a 404, a missing public file answered with the page) apart
+   * from "it could not be read" (`'unread'`: the fetch failed, the server answered with an error, the text did not come):
+   * an arrival takes both as no file, while a read again for the dev server's word leaves the ground as it stands on the
+   * second (`reloadHeights`), since the file may well still hold its tiles.
+   */
+  private async readHeights(pack: string, kind: 'ground' | 'space' | 'copies'): Promise<HeightsLoaded | null | 'unread'> {
+    if (kind !== 'ground') return null;
+    const path = editFilePath('heights', pack);
+    let text: string;
+    try {
+      const res = await fetchPublic(path, { cache: 'no-store' }, import.meta.env.BASE_URL);
+      if (!res || res.status === 404) return null;
+      const type = res.headers.get('content-type') ?? '';
+      if (res.ok && type.includes('text/html')) return null;
+      if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return 'unread';
+      text = await res.text();
+    } catch {
+      return 'unread';
+    }
+    try {
+      if (import.meta.env.DEV) await this.noteReadRev(`heights/${pack}`, text);
+      const read = readHeightsFile(text, pack, 'ground');
+      const { store, skipped } = await storeOfRead(read, inflateBase64);
+      if (read.unknown.length) console.warn(`heights: public/${path}: fields this build does not read: ${read.unknown.join(', ')}`);
+      return { store, rows: read.rows, bytes: text.length, skipped, problem: read.problem, rev: this.readRevs.get(`heights/${pack}`) ?? null };
+    } catch {
+      return 'unread';
+    }
+  }
+
+  /**
+   * The heights file read again (the dev server's word that it changed, written by another tab or by hand) and laid over
+   * the ground by difference (`World.replaceHeights`): only tiles that moved are rebuilt.
+   */
+  private async reloadHeights(pack: string, rev: string | undefined): Promise<void> {
+    const gen = this.world.generation;
+    const loaded = await this.readHeights(pack, this.world.planet.space ? 'space' : this.world.planet.instances ? 'copies' : 'ground');
+    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    // Not read (the fetch or the server failed): the ground left as it stands, since the file may well still hold its tiles,
+    // and every stroke over one of them would be refused as a tile already there were they let go here.
+    if (loaded === 'unread') {
+      console.warn(`heights: public/${editFilePath('heights', pack)} changed and could not be read again: the ground is left as it stood`);
+      return;
+    }
+    const read = this.readRevs.get(`heights/${pack}`);
+    if (read !== undefined) this.placementRevs.set(`heights/${pack}`, read);
+    else if (typeof rev === 'string') this.placementRevs.set(`heights/${pack}`, rev);
+    this.world.replaceHeights(loaded);
   }
 
   /** Git's word on this world's placement files and track file (the endpoint's read-only `status` op), or why not. */

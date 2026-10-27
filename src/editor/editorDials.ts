@@ -8,7 +8,64 @@
 
 import type { DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
-import { EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, tuneEditor } from './editorTune.ts';
+import { EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, tuneEditor, tuneSculpt } from './editorTune.ts';
+import { GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
+
+/**
+ * The sculpt brush's numbers of feel (Map-maker II §2.16), as `[key, label, min, max, step, unit, note]`: one list both
+ * sets read, the editor's (through `editor({ tune: { sculpt } })`, on the Tools tab) and `sculpt`'s own (through
+ * `sculpt({ tune })`, in the debug menu).
+ */
+const SCULPT_DIALS: [string, string, number, number, number, string, string][] = [
+  ['radius', 'Radius', 1, 200, 0.5, 'm', 'The disc (C held with the wheel steps it).'],
+  ['radiusStep', 'A notch steps it', 1.01, 2, 0.01, '×', 'One notch of the wheel with C held multiplies the radius by this.'],
+  ['radiusMin', 'Smallest', 0.5, 50, 0.5, 'm', 'The least the radius steps to.'],
+  ['radiusMax', 'Largest', 10, 500, 5, 'm', 'The most the radius steps to.'],
+  ['hard', 'Hard core', 0, 1, 0.01, '', 'The share of the radius at full strength before the feather begins.'],
+  ['strength', 'Strength', 0, 1, 0.01, '', 'How hard a stamp bites, every mode.'],
+  ['speed', 'Raise and lower', 0.05, 50, 0.05, 'm/s', 'Metres a second held at the middle.'],
+  ['tau', 'Flatten closes in', 0.02, 5, 0.01, 's', 'Seconds a flatten takes to close most of the way to its height.'],
+  ['smoothTau', 'Smooth closes in', 0.02, 5, 0.01, 's', 'Seconds a smooth takes to close most of the way to the mean.'],
+  ['rate', 'Rate', 1, 120, 1, '/s', 'Stamps a second while a button is held (the same ground at any frame rate).'],
+  ['keepMargin', 'Keep off by', 0, 20, 0.25, 'm', 'How far past what stands the ground is held.'],
+  ['keepFeather', 'Then fade over', 0, 40, 0.25, 'm', 'How far it fades back to the whole stroke.'],
+  ['keepTrunkMargin', 'Trunks kept by', 0, 5, 0.05, 'm', "How far past a placed tree's trunk."],
+  ['keepTrunkFeather', 'Trunks fade over', 0, 10, 0.1, 'm', 'How far that fades back.'],
+  ['carryNear', 'Carry within', 0, 2, 0.01, 'm', "A row whose foot stands this near its ground goes up and down with it."],
+  ['frameMs', 'Rebuild a frame', 0.25, 16, 0.25, 'ms', "The ground's rewrite and replant may spend this much of a frame."],
+  ['floraHz', 'Replant', 0.25, 30, 0.25, '/s', 'How many times a second a held stroke plants its ground again.'],
+];
+
+/** The sculpt brush's group, its dials set through `set` and read off `path` within the tune it names. */
+function sculptGroup(prefix: string, set: (k: string, v: number) => string[]): DialGroup {
+  return {
+    title: 'The sculpt brush',
+    note: 'K arms it; LMB held applies its mode, RMB held lowers (raise) or raises (lower). Its modes, flatten’s height and its switches are on the Tools tab.',
+    dials: SCULPT_DIALS.map(([k, label, min, max, step, unit, note]) => ({
+      kind: 'number' as const,
+      key: `tune.${prefix}${k}`,
+      label,
+      note,
+      min,
+      max,
+      step,
+      unit,
+      get: () => (SCULPT_TUNE as unknown as Record<string, number>)[k],
+      set: (v: number) => set(k, v),
+    })),
+  };
+}
+
+/** The `sculpt` helper's own dials (the debug menu's, when `sculpt` is picked): every number of feel in `SCULPT_TUNE`. */
+export function sculptDialSet(): DialSet {
+  const g = [sculptGroup('', (k, v) => tuneSculpt({ [k]: v }, GROUND_REWRITE_TUNE))];
+  const shipped = readDials(g);
+  for (const [k] of shipped) {
+    const v = (SCULPT_TUNE_DEFAULTS as unknown as Record<string, unknown>)[k.slice('tune.'.length)];
+    if (typeof v === 'number') shipped.set(k, v);
+  }
+  return { helper: 'sculpt', groups: g, shipped };
+}
 
 /** A number of `EDITOR_TUNE` by its path, as a slider. */
 function dial(path: string, label: string, min: number, max: number, step: number, unit: string, note: string): NumberDial {
@@ -104,6 +161,7 @@ function groups(): DialGroup[] {
         dial('brush.tries', 'Tries a plant', 1, 40, 1, '', 'Candidates a stamp tries for each plant it still wants.'),
       ],
     },
+    sculptGroup('sculpt.', (k, v) => tuneEditor({ sculpt: { [k]: v } })),
     {
       title: 'Folding',
       note: 'Rows written while their tier stands are drawn one by one until the next arrival or Fold now (Tools).',
@@ -140,5 +198,5 @@ export function editorDialSet(): DialSet {
 
 /** The debug menu's dials for `editor`, or null for another helper. */
 export function editorDialsFor(helper: string): DialSet | null {
-  return helper === 'editor' ? editorDialSet() : null;
+  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : null;
 }

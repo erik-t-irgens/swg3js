@@ -49,6 +49,100 @@ export const BRUSH_TUNE = {
   tries: 8,
 };
 
+/**
+ * The sculpt brush's numbers (Map-maker II, DESIGN.md §2.4 and §2.16's starts, `sculpt.ts`), live through
+ * `__debug.sculpt({ tune })` and its numbers of feel as sliders in the debug menu's `sculpt` dials. Every one the owner's to
+ * judge by hand; none was chosen by measuring. `frameMs` and `floraHz` are the ground's own rebuild's
+ * (`GROUND_REWRITE_TUNE`, which ships, since a heights file that lands late in a release is rebuilt the same way): a line
+ * that moves them here moves that.
+ */
+export const SCULPT_TUNE = {
+  /** The disc's radius, metres (a small hill), and a notch of C with the wheel's step between these. */
+  radius: 12,
+  radiusStep: 1.15,
+  radiusMin: 1,
+  radiusMax: 200,
+  /** The share of the radius at full strength before the feather begins. */
+  hard: 0.25,
+  /** The feather over the rest: the client's own (`generator.ts`), its smoothest to start. */
+  falloff: 'easeInOut' as 'linear' | 'easeIn' | 'easeOut' | 'easeInOut',
+  /** The mode LMB applies (RMB the inverse: lower for raise, raise for lower; flatten and smooth have none). */
+  mode: 'raise' as 'raise' | 'lower' | 'flatten' | 'smooth',
+  /** How hard a stamp bites (a share), and raise's and lower's metres a second held at the middle: a metre in half a second. */
+  strength: 1,
+  speed: 2,
+  /** Flatten's and smooth's seconds to close most of the way: a flatten closing in about a second. */
+  tau: 0.3,
+  smoothTau: 0.5,
+  /** Stamps a second while a button is held (the same ground at any frame rate). */
+  rate: 30,
+  /** Flatten's way: both, raise only (never lowers), lower only (never raises). */
+  flatMode: 'both' as 'both' | 'raise' | 'lower',
+  /** Flatten's height: the ground under the brush as the button went down, one Shift+clicked, the typed one, or each stamp's. */
+  target: 'press' as 'press' | 'sampled' | 'typed' | 'stamp',
+  /** The typed height and the last sampled one, absolute metres. */
+  height: 0,
+  sampled: 0,
+  /** Keep off what stands (the game's objects, its trees by their trunks, our buildings, the players' things): a building's doorstep not lifted. */
+  keepOff: true,
+  keepMargin: 2,
+  keepFeather: 4,
+  /** A placed tree's trunk: held at its foot without a forest becoming unsculptable. */
+  keepTrunkMargin: 0.5,
+  keepTrunkFeather: 2,
+  /** Carry what stands on the ground (our props and the brush's trees) up and down with it, within this of their foot. */
+  carry: true,
+  carryNear: 0.25,
+  /** The rebuild's milliseconds a frame and its replants a second (`GROUND_REWRITE_TUNE`, the same numbers). */
+  frameMs: 2,
+  floraHz: 4,
+  /** The file's soft lines (it ships in every release): the bar says when it is past them. */
+  tilesNote: 2000,
+  bytesNote: 8 * 1024 * 1024,
+  /** The most one stroke's tiles may hold for its undo, bytes deflated. */
+  undoBytes: 16 * 1024 * 1024,
+};
+
+/** The sculpt tune's shipped values, for a reset. */
+export const SCULPT_TUNE_DEFAULTS: typeof SCULPT_TUNE = JSON.parse(JSON.stringify(SCULPT_TUNE));
+
+/** The words each of the sculpt tune's names takes. */
+const SCULPT_WORDS: Record<string, readonly string[]> = {
+  falloff: ['linear', 'easeIn', 'easeOut', 'easeInOut'],
+  mode: ['raise', 'lower', 'flatten', 'smooth'],
+  flatMode: ['both', 'raise', 'lower'],
+  target: ['press', 'sampled', 'typed', 'stamp'],
+};
+
+/**
+ * `__debug.sculpt({ tune })`: the sculpt brush's numbers moved in memory, never saved, its words taken only from their own
+ * lists, and `frameMs`/`floraHz` handed to the ground's rebuild (`into`). Answers what was said.
+ */
+export function tuneSculpt(partial: unknown, into?: { frameMs: number; floraHz: number }): string[] {
+  const said: string[] = [];
+  if (!partial || typeof partial !== 'object' || Array.isArray(partial)) return ['sculpt({ tune }) takes an object'];
+  const numbers: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(partial as Record<string, unknown>)) {
+    const words = SCULPT_WORDS[k];
+    if (words) {
+      if (typeof v === 'string' && words.includes(v)) (SCULPT_TUNE as Record<string, unknown>)[k] = v;
+      else said.push(`${k} is one of ${words.join(', ')}`);
+      continue;
+    }
+    numbers[k] = v;
+  }
+  said.push(...tuneInto(SCULPT_TUNE as unknown as Record<string, unknown>, numbers));
+  const t = SCULPT_TUNE;
+  if (t.radiusMin > t.radiusMax) t.radiusMin = t.radiusMax;
+  t.radius = Math.min(t.radiusMax, Math.max(t.radiusMin, t.radius));
+  t.hard = Math.min(1, Math.max(0, t.hard));
+  if (into) {
+    into.frameMs = Math.max(0, t.frameMs);
+    into.floraHz = Math.max(0.01, t.floraHz);
+  }
+  return said;
+}
+
 /** Every number of the editor, ours. */
 export const EDITOR_TUNE = {
   cam: {
@@ -175,6 +269,8 @@ export const EDITOR_TUNE = {
   autoFoldIdle: 3,
   /** The scatter brush's numbers (`BRUSH_TUNE`, the same object). */
   brush: BRUSH_TUNE,
+  /** The sculpt brush's numbers (`SCULPT_TUNE`, the same object; its words move through `sculpt({ tune })`). */
+  sculpt: SCULPT_TUNE,
   window: {
     /** How wide the window opens, pixels, docked left: the library's grid of pictures and its sources down the side. */
     width: 560,

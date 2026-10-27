@@ -137,13 +137,13 @@ function after(src: string, marker: string, n = 2000): string {
   // This round's hand-overs (the fixer's), which the editing class's own test makes for itself.
   const click = after(ed, '  canvasClick(): void {', 600);
   // Widened in the third wave on purpose: with the brush armed a click paints and never goes to Fly.
-  ok(/if \(this\.hand \|\| this\.brush\.armed \|\| !this\.pointer\.clicked\) return;\s*if \(this\.aim\.hover \|\| this\.edits\.handleHot \|\| !this\.edits\.clickGoesToFly\(\)\) return;\s*this\.pointer\.clicked = false;\s*this\.setPoint\(false\);/.test(click), "a plain click on empty ground in Point goes to Fly by the click alone (`clickGoesToFly`: nothing picked), never by whether a frame has seen the press, nor while the brush is armed");
+  ok(/if \(this\.hand \|\| this\.tools\.toolArmed\(\) \|\| !this\.pointer\.clicked\) return;\s*if \(this\.aim\.hover \|\| this\.edits\.handleHot \|\| !this\.edits\.clickGoesToFly\(\)\) return;\s*this\.pointer\.clicked = false;\s*this\.setPoint\(false\);/.test(click), "a plain click on empty ground in Point goes to Fly by the click alone (`clickGoesToFly`: nothing picked), never by whether a frame has seen the press, nor while a tool is armed (Map-maker II: the list, not the brush alone)");
   ok(/if \(live\.snap\) \{\s*const s = EDITOR_TUNE\.snap;\s*this\.edits\.snapOn = s\.on;\s*if \(s\.grid > 0\) this\.edits\.grid = s\.grid;\s*if \(s\.angle > 0\) this\.edits\.angle = s\.angle;\s*\}/.test(ed), "a moved snap tune (the console's or a slider's) reaches the snapping live");
   ok(/roomAt: \(x, y, z\) => \{\s*const s = w\.streamer;\s*if \(!s\) return false;\s*roomAsk\.set\(x, y, z\);\s*s\.cameraRoomAt\(roomAsk, roomAnswer, floorUnder\);\s*return !!roomAnswer\.building;\s*\},/.test(ed), "a row's room where it moves to is asked by the very rule a thing put down is written by (`cameraRoomAt` with `floorUnder`)");
   ok(/dropCopies: \(c\) => dropCopiesAnyway\(w\.streamer, c\),/.test(ed) && /function dropCopiesAnyway\([\s\S]{0,200}?\): void \{\s*if \(stream\) stream\.dropEditorCopies\(copies\);\s*for \(const c of copies\) \{\s*if \(!c\.parent\) continue;\s*c\.removeFromParent\(\);\s*c\.dispose\(\);/.test(ed), "the editor's copies are taken away with or without a streamer standing (a write's release can come after a travel unloaded it)");
   ok(/if \(this\.editorOut\.size\) this\.dropEditorCopies\(\[\.\.\.this\.editorOut\]\);/.test(read('src/world/layoutStream.ts')), "and a streamer's dispose takes away every copy it handed out and nobody took back");
   ok(/this\.ghostM\.compose\(this\.ghostPos, hand\.q, hand\.scale\);\s*this\.ghost\.place\(this\.ghostM, inRoom\);/.test(ed) && /if \(!hand\.building && hand\.sBounds\) this\.ghostPos\.y -= lowestOf\(hand\.sBounds, hand\.q, this\.tmp\);/.test(ed), "a row picked up into the hand is drawn and stood at its own scale (its lowest point at that size), as it is written back");
-  ok(/if \(this\.edits\.takesMouse\) this\.edits\.wheelStep\(-wheel\);/.test(ed), 'the wheel steps the grid while a hand key is held on the selection');
+  ok(/if \(this\.edits\.takesMouse && !armedTool\) this\.edits\.wheelStep\(-wheel\);/.test(ed), 'the wheel steps the grid while a hand key is held on the selection, and never while a tool is armed (Map-maker II §2.3)');
   ok(/else if \(!this\.edits\.deleteKey\(\)\) this\.deleteHovered\(\);/.test(ed), 'Delete takes the selection out, and the row under the aim when nothing is picked');
   ok(/document\.addEventListener\('paste', \(e\) => \{\s*if \(!this\.session\.on \|\| typingIn\(e\.target\)\) return;\s*const text = e\.clipboardData\?\.getData\('text\/plain'\) \?\? null;/.test(ed), "a paste reads the document's own paste event, never the clipboard API (a prompt on localhost)");
   ok(/if \(this\.session\.on && e\.ctrlKey && e\.code === 'KeyD' && !typingIn\(e\.target\)\) e\.preventDefault\(\);/.test(ed), "Ctrl+D is kept from the browser's bookmark while the editor is on");
@@ -173,13 +173,21 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/if \(\(c\.placed === 'mesh' \|\| c\.placed === 'extent'\) && c\.placed !== FLORA_COLLISION\.placed\) \{[\s\S]{0,120}this\.world\.refreshPlacedFlora\(\);/.test(main), "the console's placed-flora collision rule makes the placed trees' colliders again");
   const ed = read('src/editor/editorEntry.ts');
   const aftercam = after(ed, '  afterCamera(dt: number): void {', 6000);
-  ok(/if \(brush\.armed\) \{[\s\S]{0,600}brush\.frame\(\);\s*\}\s*\/\/[^\n]*\n\s*this\.noteActivity\(now\);/.test(aftercam), "the brush's frame runs from the aim just cast, before the quiet the automatic fold waits for is noted");
-  ok(aftercam.indexOf('brushRing(ra, this.ringGround, vp, m.ring, m.ringVis);') > 0 && aftercam.indexOf('brushRing(') < aftercam.indexOf('this.edits.frame(m);'), "the brush's ring is projected from this frame's camera");
-  ok(/this\.giveUpHand\(\);\s*if \(this\.brush\.armed\) this\.brush\.disarm\(\);\s*this\.takeGen = gen;/.test(ed), 'taking a thing in hand lets the brush go');
-  ok(/if \(this\.brush\.armed\) \{\s*this\.brush\.disarm\(\);\s*this\.say\('the brush let go', true\);\s*return true;\s*\}/.test(after(ed, '  escape(): boolean {', 900)), 'Escape lets the brush go before it clears the selection');
-  ok(/worldGone\(\): void \{[\s\S]{0,200}this\.brush\.disarm\(\);/.test(ed) && /private leaveBody\([^)]*\): void \{\s*this\.giveUpHand\(\);\s*this\.brush\.disarm\(\);/.test(ed), 'the brush goes with the world and with the editor');
-  ok(/brushArmed: \(\) => me\.brush\.armed,/.test(ed), "the editing is told the brush is armed (no click picks, boxes or orbits meanwhile)");
-  ok(/if \(input\.pressedAction\('editorBrush'\)\) void this\.toggleBrush\(\);/.test(ed), 'B arms the brush and lets it go');
+  // Map-maker II's groundwork: the brush is the Tools list's first entry, and the list's frame, ring and lettings-go are its.
+  ok(/const tool = this\.tools\.armedTool;\s*if \(tool\) \{[\s\S]{0,1600}tool\.step\(f\);\s*\}\s*\/\/[^\n]*\n\s*this\.noteActivity\(now\);/.test(aftercam), "the armed tool's frame runs from the aim just cast, before the quiet the automatic fold waits for is noted");
+  ok(aftercam.indexOf('tool.draw(this.toolDraw);') > 0 && aftercam.indexOf('tool.draw(this.toolDraw);') < aftercam.indexOf('this.edits.frame(m);') && /brushRing\(ringAsk, ringGround, vp\.elements, marks\.ring, marks\.ringVis\);/.test(ed), "the armed tool's rings are projected from this frame's camera (`brushRing`)");
+  ok(/this\.giveUpHand\(\);\s*this\.tools\.disarmAll\(\);\s*this\.takeGen = gen;/.test(ed), 'taking a thing in hand lets the armed tool go');
+  ok(/const armed = this\.tools\.armedTool;\s*if \(armed\) \{\s*this\.tools\.disarmAll\(\);\s*this\.say\(`\$\{armed\.label\} let go`, true\);/.test(after(ed, '  escape(): boolean {', 1200)), 'Escape lets the armed tool go before it clears the selection');
+  ok(/worldGone\(\): void \{[\s\S]{0,400}this\.tools\.disarmAll\(\);/.test(ed) && /private leaveBody\([^)]*\): void \{\s*this\.giveUpHand\(\);\s*this\.tools\.disarmAll\(\);/.test(ed), 'the armed tool goes with the world and with the editor');
+  ok(/toolArmed: \(\) => me\.tools\.toolArmed\(\),/.test(ed), "the editing is told a tool is armed (no click picks, boxes or orbits meanwhile)");
+  ok(/for \(const t of this\.tools\.list\) if \(t\.action && input\.pressedAction\(t\.action\)\) void this\.toggleTool\(t\.id\);/.test(ed) && /this\.tools\.add\(scatterTool\(this\.brush,/.test(ed), "B arms the brush and lets it go (the list's first entry, on its own action)");
+  ok(/this\.tools\.add\(sculptTool\(this\.sculpt\)\);/.test(ed), 'K arms the sculpt brush (the list, on its own action)');
+  // The page's word on an edit file is routed by its kind (Map-maker II §2.2): the row layers to the permanent layer, the
+  // heights to the ground's, a kind with no layer yet dropped.
+  const word = after(main, '  private placementWord(d: PlacementWord): void {', 1800);
+  ok(/const reload = this\.editLayerOf\(kind\);\s*if \(!reload\) return;/.test(word), "a placement word is routed by its kind, and a kind no layer reads is dropped");
+  const layer = after(main, '  private editLayerOf(kind: string | undefined)', 600);
+  ok(/kind === 'story' \|\| kind === 'world'\) return \(pack, rev\) => void this\.reloadDressing\(pack, kind, rev\);/.test(layer) && /kind === 'heights'\) return \(pack, rev\) => void this\.reloadHeights\(pack, rev\);/.test(layer) && /return null;/.test(layer), 'the row layers read again into the permanent layer, the heights into the ground');
 }
 
 console.log(`\n${checks} checks passed`);

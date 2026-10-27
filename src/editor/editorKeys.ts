@@ -51,6 +51,8 @@ export const EDITOR_ACTIONS: readonly Action[] = [
   'editorKeys',
   // The third wave's: the scatter brush armed and let go.
   'editorBrush',
+  // Map-maker II's first wave: the sculpt brush armed and let go.
+  'editorSculpt',
 ];
 
 /** The hotbar's nine keys, slot 1 first. */

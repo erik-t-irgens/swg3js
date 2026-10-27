@@ -1,6 +1,7 @@
 // The placement editor's endpoint on the dev server, `POST /__dev/placements`: the files and the HTTP, and
 // nothing else. Who may ask and what an ask does are `src/world/placementEdits.ts`'s, which node runs as it
-// stands; this reads the request, reads the world's two files of permanent placements, hands both to those
+// stands; this reads the request, reads the world's two files of permanent placements (and every other kind of
+// edit file a batch names: Map-maker II's heights and the kinds after them, `kindsRead`), hands them to those
 // rules and writes what they say, each file whole: into a dot-named file beside it first, then put in place
 // with a rename, so the watcher (which says nothing for a dot name) and a release pack (which would refuse
 // one) never see half a file, and the dot-named one is gone afterwards on every path, a rename that failed
@@ -25,10 +26,25 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { PLACEMENTS_ENDPOINT_TUNE, EDITOR_HEADER, applyPlacementOp, fileStateOf, refuseRequest, statusAsk, statusFiles } from '../../src/world/placementEdits.ts';
+import { EDIT_FILE_KINDS, editFileWorld } from '../../src/story/placementPath.ts';
 import { PLANETS, packIdOf } from '../../src/data/planets.ts';
+
+/**
+ * A row's deflated bytes (a tile of heights' deltas: deflate-raw, base64) inflated by node's own zlib, or null for bytes
+ * that do not inflate: what the rules check a tile with before they write it (`PlacementCtx.inflate`).
+ */
+export function inflateRow(b64) {
+  try {
+    if (typeof b64 !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(b64)) return null;
+    return new Uint8Array(zlib.inflateRawSync(Buffer.from(b64, 'base64')));
+  } catch {
+    return null;
+  }
+}
 
 /** A file's revision: twelve hex of the SHA-1 of its text as written. The dev server's watcher names a file it saw the same way. */
 export function revisionOf(text) {
@@ -94,13 +110,25 @@ export function worldKinds() {
 }
 
 /**
- * Where a layer's file for a world is written, or null for a path that would leave its layer's folder:
- * the folder is `<dir>/<layer>`, and the file must be directly in it.
+ * Where a kind's file for a world is written, or null for a path that would leave its kind's folder: the folder is
+ * `<dir>/<kind>`, and the file must be directly in it, named for the world (or `all`, for a kind every world shares).
  */
 export function fileFor(dir, layer, world) {
   const folder = path.resolve(dir, layer);
-  const file = path.resolve(dir, layer, `${world}.json`);
+  const file = path.resolve(dir, layer, `${editFileWorld(layer, world)}.json`);
   return file.startsWith(folder + path.sep) && path.dirname(file) === folder ? file : null;
+}
+
+/** The kinds of file an ask reads: both row layers always, and every other kind a batch's edits name. */
+export function kindsRead(op) {
+  const out = ['story', 'world'];
+  if (op && op.op === 'batch' && Array.isArray(op.edits)) {
+    for (const e of op.edits) {
+      const k = e && typeof e === 'object' ? e.file : null;
+      if (typeof k === 'string' && EDIT_FILE_KINDS.includes(k) && !out.includes(k)) out.push(k);
+    }
+  }
+  return out;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -269,16 +297,18 @@ async function serve(req, res, { dir, root = path.resolve(dir, '..', '..'), noti
       return answer(res, 500, { ok: false, why: `git could not be asked: ${err?.message ?? err}` });
     }
   }
-  // The world is checked by the rules as well; it is only looked at here to know which files to read.
+  // The world is checked by the rules as well; it is only looked at here to know which files to read: both row layers,
+  // and every other kind of file a batch's edits name.
   const world = op && typeof op.world === 'string' && worlds.has(op.world) && /^[a-z0-9_]{1,40}$/.test(op.world) ? op.world : null;
-  const files = { story: world ? fileFor(dir, 'story', world) : null, world: world ? fileFor(dir, 'world', world) : null };
-  let current;
+  const files = {};
+  for (const k of kindsRead(op)) files[k] = world ? fileFor(dir, k, world) : null;
+  const current = {};
   try {
-    current = { story: await readText(files.story), world: await readText(files.world) };
+    for (const k of Object.keys(files)) current[k] = await readText(files[k]);
   } catch (err) {
     return answer(res, 500, { ok: false, why: `the files could not be read: ${err?.message ?? err}` });
   }
-  const out = applyPlacementOp(op, current, { worlds, now: now(), hash: revisionOf });
+  const out = applyPlacementOp(op, current, { worlds, now: now(), hash: revisionOf, inflate: inflateRow });
   if (out.status !== 200) return answer(res, out.status, out.body);
   const written = [];
   try {

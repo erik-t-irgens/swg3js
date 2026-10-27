@@ -187,17 +187,18 @@ for (const worldKind of ['ground', 'space'] as const) {
   const src = fs.readFileSync(path.join(REPO, 'src', 'main.ts'), 'utf8').split(/\r?\n/).join('\n');
   const word = src.match(/private placementWord\(d: PlacementWord\): void \{[\s\S]*?\n {2}\}/)?.[0] ?? '';
   ok(/if \(this\.placementsInFlight > 0\) \{\s*this\.heldWords\.push\(d\);\s*return;\s*\}\s*if \(typeof d\.rev === 'string' && this\.placementRevs\.get\(`\$\{kind\}\/\$\{here\}`\) === d\.rev\) return;/.test(word), "main's placementWord holds a word while a write is out, then drops one naming a revision already landed");
-  ok(/if \(kind !== 'story' && kind !== 'world'\) return;/.test(word), "and ignores the fifth wave's files, which nothing reads yet");
+  // Map-maker II's groundwork: routed by kind to the layer that reads it, a kind no layer reads yet dropped.
+  ok(/const reload = this\.editLayerOf\(kind\);\s*if \(!reload\) return;/.test(word), "and drops a word for a kind of file no layer reads yet (the later waves')");
   const batch = src.match(/private async editorBatch\([\s\S]*?\n {2}\}/)?.[0] ?? '';
-  ok(/const files = reply\.files;\s*for \(const l of PLACEMENT_LAYERS\) \{\s*const f = files\[l\];\s*if \(f\) this\.placementRevs\.set\(`\$\{l\}\/\$\{pack\}`, f\.rev\);\s*\}/.test(batch), "editorBatch records each file's revision the moment its answer comes, before anything is awaited");
+  ok(/const files = reply\.files;[\s\S]{0,200}for \(const k of kinds\) \{\s*const f = files\[k\];\s*if \(f\) this\.placementRevs\.set\(`\$\{k\}\/\$\{pack\}`, f\.rev\);\s*\}/.test(batch), "editorBatch records each file's revision the moment its answer comes, every kind it wrote, before anything is awaited");
   ok(/this\.permanent\.landChanges\(changes\)/.test(batch) && !/fetchPlacements|setLayers/.test(batch), 'and lands it by difference, reading no file whole');
   const post = src.match(/private async postPlacements\([\s\S]*?\n {2}\}/)?.[0] ?? '';
   ok(/this\.placementsInFlight\+\+;/.test(post) && /setTimeout\(\(\) => \{\s*this\.placementsInFlight--;\s*this\.releaseHeldWords\(\);\s*\}, 0\);/.test(post), 'a write counts as out until a moment after its answer, then the held words are heard');
   // An action written as several batches: the word about an earlier batch's revision comes after a later one has landed,
   // and is dropped as one of this page's own (each once), never read whole; a reload stands the revision of the text it
   // read, never the word's.
-  ok(/=== d\.rev\) return;\s*\/\/[^\n]*\n\s*if \(typeof d\.rev === 'string' && this\.takeOwnRev\(`\$\{kind\}\/\$\{here\}`, d\.rev\)\) return;\s*void this\.reloadDressing\(here, kind, d\.rev\);/.test(word), "a word naming a revision one of this page's own writes made is dropped, once, even after a later write has landed");
-  ok(/for \(const l of PLACEMENT_LAYERS\) if \(files\[l\]\) this\.noteOwnRev\(`\$\{l\}\/\$\{pack\}`, files\[l\]!\.rev\);/.test(batch), "every revision a batch wrote is noted as the page's own");
+  ok(/=== d\.rev\) return;\s*\/\/[^\n]*\n\s*if \(typeof d\.rev === 'string' && this\.takeOwnRev\(`\$\{kind\}\/\$\{here\}`, d\.rev\)\) return;\s*reload\(here, d\.rev\);/.test(word), "a word naming a revision one of this page's own writes made is dropped, once, even after a later write has landed");
+  ok(/for \(const k of kinds\) if \(files\[k\]\) this\.noteOwnRev\(`\$\{k\}\/\$\{pack\}`, files\[k\]!\.rev\);/.test(batch), "every revision a batch wrote, every kind, is noted as the page's own");
   ok(/for \(const \[l, rev\] of Object\.entries\(reply\.revs \?\? \{\}\)\) if \(typeof rev === 'string'\) this\.noteOwnRev\(`\$\{l\}\/\$\{pack\}`, rev\);/.test(src), 'and so is every revision a one-row write wrote');
   const reload = src.match(/private async reloadDressing\([\s\S]*?\n {2}\}/)?.[0] ?? '';
   ok(/const read = this\.readRevs\.get\(key\);\s*if \(read !== undefined\) this\.placementRevs\.set\(key, read\);/.test(reload) && /if \(import\.meta\.env\.DEV\) await this\.noteReadRev\(`\$\{layer\}\/\$\{pack\}`, text\);/.test(src), "a reload stands the revision of the text it read (its SHA-1, as the endpoint's), never the one the word named before the file moved on");

@@ -20,7 +20,12 @@ import { CARD_LIGHT_TUNE, cardReceives, setCardRoomPass, updateCardLight } from 
 import { SWAY_TUNE, batchedDepthCombo, disposeStandIn, hangSwayDepth, plainDepthCombos, setSwayEye, setSwayRoomPass, skinnedDepthCombos, stepSway, swayDepthCombos, swayDepthStandIns, swayWrap } from './floraSway.ts';
 import { chooseWindTrees, windTreesChosen, windTreesEverUsed } from './windTrees.ts';
 import { WIND_STATE, writeWindDay } from './wind.ts';
-import { resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
+import { refreshWaterDepth, resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
+import { HeightEdits, HEIGHT_TILE } from '../swg/terrain/heightEdits.ts';
+import type { HeightTileRow } from './editFiles/heightsFile.ts';
+import { decodeLanded, HeightRows, layLanded, layWhole, type HeldTiles } from './editFiles/heightsLand.ts';
+import { GROUND_REWRITE_TUNE, rectMeetsChunk } from './groundRewrite.ts';
+import { plantingColliders } from './chunkPhysics.ts';
 import { addSimBody, pokeWaterSimIn, rippleCarrySet, rippleStateTarget, setRippleCarry, stepWaterSim, waterSimReady, WATER_SIM_WINDOW, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
 import { basinFootprint, basinLevelNear, basinLook, basinTopAt, type BasinFootprint } from './basinWater.ts';
@@ -392,6 +397,8 @@ interface Chunk {
   flora: THREE.Group | null;
   /** Its plantings (step 7), kept so the trees' colliders can be worked out again when the console moves the rule; null for the procedural props. */
   floraData: FloraChunkData | null;
+  /** What grows on it as one group, the planet's flora or the procedural props: what a replant takes down and makes again (Map-maker II). */
+  props: THREE.Group;
   /** The chunk's middle in the world, on its ground: what the plant sweep measures from the eye. */
   mx: number;
   my: number;
@@ -1747,6 +1754,14 @@ export class World {
     this.packId = packId;
     this.terrain?.detachSwg();
     this.terrain = new Terrain(planet);
+    // The world's height edits (Map-maker II, `public/placements/heights/<world>.json`): asked for now, beside everything
+    // else the arrival fetches, and waited on (bounded) right before the ground that takes them is made -- the converted
+    // ground's sampler from its constructor (`loadPack`), a real-elevation world's terrain before its raster's
+    // `remakeGround` (below), any other ground world's once its pack has said it has none. A file later than the bound is
+    // laid over the ground as a stroke is.
+    this.askHeights(packId);
+    const demHeights = !!planet.dem && shippedAsk(`${planet.dem.url}/base16.raw`);
+    this.heightsByDem = demHeights;
     // A planet whose ground is real-world elevation. The raster arrives after the world is already
     // standing, so the ground is remade once it lands rather than held up waiting for it.
     // A built game asks for the raster only where its own list ships it (`shippedAsk`): two of the four rasters stayed on
@@ -1755,6 +1770,7 @@ export class World {
     else if (planet.dem) {
       const d = planet.dem;
       this.terrain.demDetail = d.detail ?? 0;
+      const terrainAtLoad = this.terrain;
       void import('./demTerrain').then(async ({ loadDemPatch }) => {
         try {
           const patch = await loadDemPatch(d.url, { size: d.size, lift: d.lift, feather: d.feather ?? 0 });
@@ -1767,9 +1783,25 @@ export class World {
           this.terrain.maxH = patch.maxHeight + patch.lift;
           this.terrain.floor = this.terrain.minH - 30;
           if (planet.ground) await this.loadBorrowedGround(planet.ground, patch.lift);
+          // The height edits laid on before the raster's ground is made again, so it is built with them (Map-maker II).
+          const terrain = this.terrain;
+          const store = await this.heightsReady();
+          if (this.terrain !== terrain) return;
+          if (store) {
+            terrain.heights = store;
+            this.heightsLaidAtArrival = true;
+          }
           this.remakeGround();
         } catch (err) {
           console.warn(`${planet.id}: its elevation did not load, so the ground is the planet's own noise`, err);
+          // The heights file still read and laid on the noise ground in its place (the same raw frame about (0, 0)), as the
+          // noise ground's own path lays it: left unread, its rows were never kept and every stroke over a tile the file holds
+          // was refused as one already there. Whichever of this and `loadPack`'s noise path asks second finds it installed.
+          if (this.terrain === terrainAtLoad) {
+            this.heightsByDem = false;
+            const store = await this.heightsReady();
+            if (store && this.terrain === terrainAtLoad) this.installHeights(store);
+          }
         }
       });
     }
@@ -1956,6 +1988,13 @@ export class World {
       // its own layout's centre, and stood about (0, 0) they would land kilometres off, so it keeps standing nothing.
       if (planet.pack === false && !planet.space && !this.sceneOnly) await this.standInStreamer(planet.id, opts.keepOff, token);
       if (token !== this.loadToken) return null;
+      // A ground world with no converted terrain whose raster is not coming (the noise ground): its height edits laid on now,
+      // through a stroke's rebuild over whatever ground already stands (a real-elevation world's raster installs its own).
+      if (!this.heightsByDem && !planet.space) {
+        const store = await this.heightsReady();
+        if (token !== this.loadToken) return null;
+        if (store) this.installHeights(store);
+      }
       this.packStatus = planet.borrowSky ? 'sky only' : 'no pack';
       this.packProgress = 1;
       return null;
@@ -2059,9 +2098,20 @@ export class World {
         try {
           const t0 = performance.now();
           TERRAIN_GROUND_TUNE.lifeDay = this.weather.lifeDayToday();
-          const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file));
+          // The world's height edits, held by the sampler from its constructor, before any block is cached (Map-maker II).
+          const heights = await this.heightsReady();
           if (token !== this.loadToken) return null;
+          const coming = this.terrain;
+          this.swgComingFor = coming;
+          const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file), { heights }).finally(() => {
+            if (this.swgComingFor === coming) this.swgComingFor = null;
+          });
+          if (token !== this.loadToken) return null;
+          if (heights) this.heightsLaidAtArrival = true;
           this.terrain.attachSwg(swg);
+          // A file the bound gave up on that landed while the ground was being made (kept for it by `installHeights`):
+          // handed to its sampler now, every cached block laid again with it and whatever ground stands rebuilt.
+          if (this.heightEdits && swg.heights !== this.heightEdits) this.installHeights(this.heightEdits, true);
           await this.waterBodies.load(pack, planet.id);
           if (token !== this.loadToken) return null;
           this.applySwgWater(swg);
@@ -2408,6 +2458,12 @@ export class World {
     this.weather.rainSheetScale = 1;
     this.weather.snowSheetScale = 1;
     this.weather.airRainDraws = false;
+    // The world's height edits and whatever of a stroke's rebuild still waited go with it (Map-maker II).
+    this.heightEdits = null;
+    this.heightsAsk = null;
+    this.groundDirty.clear();
+    this.floraDirty.clear();
+    this.floraFlush = false;
     // Every bed, emitter and weather channel let go before the things they follow are disposed: the
     // particle effects go a few lines down, and a loop left on one would follow a point in a world
     // that has gone. The sky and the effects are wired again on the next planet's first frames.
@@ -4297,6 +4353,9 @@ export class World {
     this.removeChunkPhysics(c);
   }
 
+  /** The ground under a planting's foot, for its guessed trunk (`plantingColliders`): one closure, made with the world. */
+  private readonly chunkGroundAt = (x: number, z: number): number => this.terrain.heightAt(x, z);
+
   private removeChunkPhysics(c: Chunk): void {
     if (!c.physics) return;
     for (const col of c.physics) this.physics.removeCollider(col);
@@ -4307,20 +4366,8 @@ export class World {
     if (c.physics) return;
     const cols: RAPIER.Collider[] = [];
     cols.push(chunkHeightfield(this.physics, c));
-    for (const p of c.colliders) {
-      // A planting with the client's own shapes stands on them, exactly where they are (`floraCollision.ts`).
-      if (p.parts) {
-        for (const part of p.parts) {
-          const col = this.physics.createStaticPart(part);
-          if (col) cols.push(col);
-        }
-        continue;
-      }
-      const ground = this.terrain.heightAt(p.x, p.z) - 0.5;
-      const halfH = (p.top - ground) / 2;
-      const col = this.physics.createStaticCylinder(p.x, ground + halfH, p.z, p.r, halfH);
-      if (col) cols.push(col);
-    }
+    // Its plantings after it, by the one function a node test stands them through too (`chunkPhysics.ts`).
+    plantingColliders(this.physics, c.colliders, this.chunkGroundAt, cols);
     c.physics = cols;
   }
 
@@ -9852,6 +9899,8 @@ export class World {
     // so a chunk made below is measured from where the eye is now.
     this.sweepFlora(camPos, dt);
     this.stream(playerPos, STREAM_BUDGET);
+    // A sculpt stroke's ground and plantings, a frame's share (Map-maker II): nothing on a frame with nothing dirty.
+    this.stepGroundRewrite(camPos);
     perf.end(SEC.stream);
     const plants = this.plantSweep.stats;
     perf.gauge(CNT.floraShown, plants.shown);
@@ -11145,24 +11194,7 @@ export class World {
     // Off only while the measuring switch `groundShadows` says so (`setShadowSwitches`), so a chunk made then is the same.
     mesh.castShadow = this.groundShadows === 'on';
     group.add(mesh);
-    const exclude = this.layoutStream ? [...this.exclusions, ...this.layoutStream.exclusionsFor(cx, cz)] : this.exclusions;
-    // The planet's own flora replaces the procedural props once its models are loaded.
-    let trees: THREE.Group | null = null;
-    let plants: THREE.Group | null = null;
-    let propGroup: THREE.Group;
-    let colliders: Collider[];
-    let floraData: FloraChunkData | null = null;
-    if (this.flora) {
-      const built = this.flora.buildForChunk(cx, cz, (x, z) => this.terrain.heightAt(x, z), exclude);
-      propGroup = built.group;
-      colliders = built.colliders;
-      trees = built.trees;
-      plants = built.plants;
-      floraData = built.data;
-    } else ({ group: propGroup, colliders } = this.props.buildForChunk(cx, cz, this.terrain, exclude));
-    propGroup.traverse((o) => {
-      if (o instanceof THREE.InstancedMesh) o.computeBoundingSphere();
-    });
+    const { group: propGroup, colliders, trees, plants, data: floraData } = this.chunkProps(cx, cz);
     group.add(propGroup);
     // The chunk's sphere in the world, ground and plants together, so the world pass drawn from inside a
     // building can leave the chunk out when it misses the exits' view (`markNarrowRoot`).
@@ -11178,7 +11210,7 @@ export class World {
     this.chunkRoot.add(group);
     const mx = (cx + 0.5) * CHUNK_SIZE;
     const mz = (cz + 0.5) * CHUNK_SIZE;
-    const chunk: Chunk = { key, cx, cz, group, ground: mesh, colliders, heights, origin, physics: null, trees, plants, flora: this.flora ? propGroup : null, floraData, mx, my: this.terrain.heightAt(mx, mz), mz };
+    const chunk: Chunk = { key, cx, cz, group, ground: mesh, colliders, heights, origin, physics: null, trees, plants, flora: this.flora ? propGroup : null, floraData, props: propGroup, mx, my: this.terrain.heightAt(mx, mz), mz };
     this.chunks.set(key, chunk);
     // Its plants shown or not from the moment it is made, by the eye the last sweep measured from, so a
     // chunk made far off never shows its plants for the quarter second until the next sweep (step 5).
@@ -11199,6 +11231,473 @@ export class World {
       }
     }
   }
+
+  /**
+   * What grows on a chunk, planted on the ground as it is now: the planet's own flora once its models are loaded, else
+   * the procedural props, each kept off the world's exclusions and the streamer's circles over the chunk. One path a chunk
+   * made and a chunk replanted both take (`createChunk`, `replantChunk`).
+   */
+  private chunkProps(cx: number, cz: number): { group: THREE.Group; colliders: Collider[]; trees: THREE.Group | null; plants: THREE.Group | null; data: FloraChunkData | null } {
+    const exclude = this.layoutStream ? [...this.exclusions, ...this.layoutStream.exclusionsFor(cx, cz)] : this.exclusions;
+    let trees: THREE.Group | null = null;
+    let plants: THREE.Group | null = null;
+    let group: THREE.Group;
+    let colliders: Collider[];
+    let data: FloraChunkData | null = null;
+    if (this.flora) {
+      const built = this.flora.buildForChunk(cx, cz, (x, z) => this.terrain.heightAt(x, z), exclude);
+      group = built.group;
+      colliders = built.colliders;
+      trees = built.trees;
+      plants = built.plants;
+      data = built.data;
+    } else ({ group, colliders } = this.props.buildForChunk(cx, cz, this.terrain, exclude));
+    group.traverse((o) => {
+      if (o instanceof THREE.InstancedMesh) o.computeBoundingSphere();
+    });
+    return { group, colliders, trees, plants, data };
+  }
+
+  /**
+   * A standing chunk's plantings made again on the ground as it is now (Map-maker II: a stroke moved the ground under
+   * them; W4's flora paint lands the same way). Never rewritten in place: a planting's matrix holds its foot's height and
+   * the chunk's instanced meshes keep no map from a slot back to its planting, and its colliders are made from the same
+   * data. So the old plantings are taken down (their instanced meshes disposed, out of the region batches), the chunk's
+   * flora built again by the path a chunk is made by (`chunkProps`, `FloraPlanter.buildForChunk`), handed to the region
+   * batches and the plant sweep, and the chunk's physics remade whole after it (`removeChunkPhysics`, then
+   * `addChunkPhysics`), so the heightfield and every planting's collider stand on the new ground together. The materials
+   * are this world's, adopted and compiled behind the arrival's screen, so nothing builds a program.
+   */
+  replantChunk(c: Chunk): void {
+    this.floraField?.remove(c.key);
+    const old = c.props;
+    c.group.remove(old);
+    old.traverse((o) => {
+      if (o instanceof THREE.InstancedMesh) o.dispose();
+      else if (o instanceof THREE.Mesh) o.geometry.dispose();
+    });
+    const built = this.chunkProps(c.cx, c.cz);
+    c.group.add(built.group);
+    c.props = built.group;
+    c.colliders = built.colliders;
+    c.trees = built.trees;
+    c.plants = built.plants;
+    c.flora = this.flora ? built.group : null;
+    c.floraData = built.data;
+    if (FLORA_WARM.on) {
+      const fresh = this.adoptMaterials(c.group);
+      if (fresh.length) this.compileObjects(fresh);
+    }
+    this.plantSweep.show(c, FLORA_TUNE);
+    if (built.data && this.floraField) {
+      this.floraField.add(c.key, c.cx, c.cz, built.data, c);
+      if (this.floraField.shown) built.group.visible = false;
+    }
+    this.chunkSphereAgain(c);
+    // The plantings' colliders and the heightfield made again together, from the new plantings and the new heights.
+    if (c.physics) {
+      this.removeChunkPhysics(c);
+      this.addChunkPhysics(c);
+    }
+  }
+
+  /** A chunk's sphere worked out again where its ground or plantings moved: the one the exit narrowing holds, written in place. */
+  private chunkSphereAgain(c: Chunk): void {
+    const s = chunkSphere(c.group);
+    if (!s) return;
+    const held = (c.group as THREE.Object3D & { exitCullSphere?: THREE.Sphere }).exitCullSphere;
+    if (held) held.copy(s);
+    else markNarrowRoot(c.group, s);
+  }
+
+  // ---- Map-maker II: the ground's height edits -------------------------------------------------------------------------
+
+  /**
+   * Where a world's heights file comes from: the page hands its fetch in (`App.fetchHeights`), which reads
+   * `public/placements/heights/<world>.json` and inflates its tiles into a store. Null asks for none (a test's world, the
+   * select screen's), and the ground is the client's to the bit.
+   */
+  heightsSource: ((pack: string, kind: 'ground' | 'space' | 'copies') => Promise<HeightsLoaded | null>) | null = null;
+  /** Whether this world's real-elevation raster is coming and installs the heights before it remakes the ground. */
+  private heightsByDem = false;
+  /**
+   * The terrain a converted ground is being made for, while `SwgTerrain.create` runs (`loadPack`): a heights file the bound
+   * gave up on that lands meanwhile is kept for it (`installHeights`) and handed to its sampler as it is attached.
+   */
+  private swgComingFor: Terrain | null = null;
+  /** The ask this arrival made, its world's generation beside it, and whether it has been installed. */
+  private heightsAsk: { gen: number; done: Promise<HeightsLoaded | null>; installed: boolean; late: boolean } | null = null;
+  /** The world's height edits in force, the very store the ground reads (the sampler's on a converted world, the terrain's otherwise), or null. */
+  heightEdits: HeightEdits | null = null;
+  /** What the last file read said, for the console: its tiles, its bytes, what it skipped and why it was not read. */
+  heightsFileInfo: { tiles: number; bytes: number; skipped: { id: string; why: string }[]; problem: string | null; rev: string | null } = { tiles: 0, bytes: 0, skipped: [], problem: null, rev: null };
+  /** Whether this world's edits were in place before its ground was first built (`sculpt().laidAtArrival`). */
+  heightsLaidAtArrival = false;
+  /** The chunks whose ground a stroke dirtied, by key, and those whose plantings wait to be made again. */
+  private readonly groundDirty = new Set<string>();
+  private readonly floraDirty = new Set<string>();
+  /** The game-frame rectangle a stroke has dirtied since it began, for its end's far tiles, air and depth. */
+  private readonly strokeRect = { x0: Infinity, z0: Infinity, x1: -Infinity, z1: -Infinity };
+  /** Where the rewrite works out from first: the brush, else the eye. */
+  private readonly rewriteFocus = { x: Number.NaN, z: Number.NaN };
+  /** When the held stroke's plantings were last made again, and whether the stroke's end asks for every one now. */
+  private floraLastAt = -Infinity;
+  private floraFlush = false;
+  /** The last stroke's work, for the console (`sculpt()`): stamps the editor said, chunks rewritten, replanted, far tiles, milliseconds. */
+  readonly groundWork = { stamps: 0, chunks: 0, replanted: 0, farTiles: 0, ms: 0, blocks: 0, farGrids: 0, failed: 0 };
+
+  /** The ask for this world's heights file, begun as its load begins (`load`). */
+  private askHeights(packId: string): void {
+    this.heightEdits = null;
+    this.heightsLaidAtArrival = false;
+    this.heightsFileInfo = { tiles: 0, bytes: 0, skipped: [], problem: null, rev: null };
+    this.heightRows.clear();
+    this.groundDirty.clear();
+    this.floraDirty.clear();
+    this.resetStrokeRect();
+    const src = this.heightsSource;
+    const planet = this.planet;
+    if (!src || this.sceneOnly) {
+      this.heightsAsk = null;
+      return;
+    }
+    const kind = planet.instances ? 'copies' : planet.space ? 'space' : 'ground';
+    const ask = { gen: this.generation, done: src(packId, kind).catch(() => null), installed: false, late: false };
+    this.heightsAsk = ask;
+    // A file later than the bound (`heightsReady` gave up on it): installed when it lands, through a stroke's rebuild over
+    // its tiles. Only then: a file that lands before the ground is made waits for `heightsReady`, which hands it to the
+    // ground as it is made (laid into a terrain the converted ground then replaces, it would have reached nothing).
+    void ask.done.then((loaded) => {
+      if (this.heightsAsk !== ask || ask.installed || !ask.late || this.generation !== ask.gen) return;
+      ask.installed = true;
+      this.takeHeightsFile(loaded);
+      if (loaded?.store.size) this.installHeights(loaded.store, true);
+    });
+  }
+
+  /**
+   * This world's heights file, waited on for at most `DRESSING_TUNE.floraWaitMs` (the small file has nearly always landed
+   * long before the pack): its store, or null for none or one still on its way, which is then installed late. Marks the ask
+   * installed, so it is laid once.
+   */
+  private async heightsReady(): Promise<HeightEdits | null> {
+    const ask = this.heightsAsk;
+    if (!ask || ask.installed) return null;
+    const loaded = await Promise.race([ask.done, new Promise<'late'>((r) => setTimeout(() => r('late'), DRESSING_TUNE.floraWaitMs))]);
+    if (loaded === 'late') {
+      // Given up on: the ask's own `then` lays it over the ground as it lands.
+      ask.late = true;
+      return null;
+    }
+    if (this.heightsAsk !== ask || ask.installed || this.generation !== ask.gen) return null;
+    ask.installed = true;
+    this.takeHeightsFile(loaded);
+    if (!loaded?.store.size) return null;
+    this.heightEdits = loaded.store;
+    return loaded.store;
+  }
+
+  /**
+   * The heights file's rows as it holds them now (its `at` too), by tile id: what the sculpt brush's write names as each tile
+   * was, kept current by every read and every answer (`HeightRows`), with about how many bytes the file comes to written.
+   */
+  readonly heightRows = new HeightRows();
+  /**
+   * Whether a stroke under way holds a tile (the editor's hand-over: `EditorSculpt.holds`), or null with no editor: a write's
+   * answer or a file read again never writes over a tile a stroke is stamping into (`layLanded`).
+   */
+  heightsHeld: HeldTiles = null;
+
+  /** A stroke ended with nothing more under it (its last stamp changed nothing): what heals only at its end redone. */
+  endHeightsStroke(): void {
+    this.endGroundStroke();
+  }
+
+  /** What a file read said, kept for the console. */
+  private takeHeightsFile(loaded: HeightsLoaded | null): void {
+    this.heightRows.takeAll(loaded?.rows ?? []);
+    this.heightsFileInfo = loaded ? { tiles: loaded.store.size, bytes: loaded.bytes, skipped: loaded.skipped, problem: loaded.problem, rev: loaded.rev } : { tiles: 0, bytes: 0, skipped: [], problem: null, rev: null };
+    if (loaded?.problem) console.warn(`heights: this world's heights file is not read: ${loaded.problem}`);
+    for (const s of loaded?.skipped ?? []) console.warn(`heights: tile ${s.id} is skipped: ${s.why}`);
+  }
+
+  /**
+   * A store put in as this world's edits: handed to the converted ground's sampler (`SwgTerrain.useHeights`, every cached
+   * block and far grid laid again) or the terrain itself on a world with none, and, where any ground already stands, the
+   * tiles it holds and the tiles the old one held rebuilt as a stroke rebuilds them. `late` says a file that landed after
+   * the ground was first built.
+   */
+  installHeights(store: HeightEdits | null, late = false): void {
+    const was = this.heightEdits;
+    const rect = { x0: Infinity, z0: Infinity, x1: -Infinity, z1: -Infinity };
+    for (const s of [was, store]) for (const t of s?.entries() ?? []) this.unionTile(rect, t.tx, t.tz);
+    this.heightEdits = store;
+    const swg = this.terrain.swg;
+    if (swg) {
+      swg.useHeights(store);
+      this.terrain.heights = null;
+    } else if (this.swgComingFor === this.terrain) {
+      // The converted ground is being made for this terrain (`loadPack`, inside `SwgTerrain.create`): kept for it, which
+      // takes it as it is attached. Laid on this terrain it would reach nothing, since a converted world's `heightAt` never
+      // reads it, and every later stroke would write into a store its sampler never read.
+      return;
+    } else this.terrain.heights = store;
+    if (!late && !this.chunks.size) this.heightsLaidAtArrival = true;
+    if (rect.x0 <= rect.x1) this.heightsChanged(rect.x0, rect.z0, rect.x1, rect.z1, true);
+  }
+
+  /** A tile's game-frame rectangle unioned into a rectangle (the raw frame mirrored in x about the world's centre). */
+  private unionTile(r: { x0: number; z0: number; x1: number; z1: number }, tx: number, tz: number): void {
+    const a = this.rawToGame(tx * HEIGHT_TILE, tz * HEIGHT_TILE);
+    const b = this.rawToGame((tx + 1) * HEIGHT_TILE, (tz + 1) * HEIGHT_TILE);
+    r.x0 = Math.min(r.x0, a.x, b.x);
+    r.x1 = Math.max(r.x1, a.x, b.x);
+    r.z0 = Math.min(r.z0, a.z, b.z);
+    r.z1 = Math.max(r.z1, a.z, b.z);
+  }
+
+  /** A raw-frame point in the game's frame: about the converted ground's centre, else about (0, 0) (a real-elevation world). */
+  rawToGame(x: number, z: number): { x: number; z: number } {
+    const swg = this.terrain.swg;
+    return swg ? { x: swg.toGameX(x), z: swg.toGameZ(z) } : { x: -x, z };
+  }
+
+  /** A game-frame point in the raw frame the heights are kept in (the inverse of `rawToGame`). */
+  gameToRaw(x: number, z: number): { x: number; z: number } {
+    const swg = this.terrain.swg;
+    return swg ? { x: swg.toSwgX(x), z: swg.toSwgZ(z) } : { x: -x, z };
+  }
+
+  /**
+   * The world's store of height edits, made empty and installed where it has none (the sculpt brush's first stamp). An
+   * empty store moves nothing: every block, chunk and height stays the generator's.
+   */
+  ensureHeights(): HeightEdits {
+    if (this.heightEdits) return this.heightEdits;
+    const store = new HeightEdits();
+    this.installHeights(store, true);
+    return store;
+  }
+
+  /**
+   * The ground under a game-frame rectangle moved by a height edit (a stamp, an undo, a file landed or read again): the
+   * cached blocks and far grids under it laid again from their raw copies at once, and every standing chunk whose sample
+   * window it meets put on the dirty lists, rewritten nearest `focus` first within `GROUND_REWRITE_TUNE.frameMs` a frame
+   * (`stepGroundRewrite`) and replanted at `floraHz`. `end` says the stroke is over: its plantings all made again at once,
+   * and its far tiles, far cards, the air raster's cells, the water's depth cells and the sun's held cascades redone.
+   */
+  heightsChanged(gx0: number, gz0: number, gx1: number, gz1: number, end: boolean, fx = Number.NaN, fz = Number.NaN): void {
+    const x0 = Math.min(gx0, gx1) - 2;
+    const x1 = Math.max(gx0, gx1) + 2;
+    const z0 = Math.min(gz0, gz1) - 2;
+    const z1 = Math.max(gz0, gz1) + 2;
+    const swg = this.terrain.swg;
+    if (swg) {
+      const r = swg.relayRect(x0, z0, x1, z1);
+      this.groundWork.blocks += r.blocks;
+      this.groundWork.farGrids += r.far;
+    }
+    for (const c of this.chunks.values()) {
+      if (!rectMeetsChunk(c.origin.x, c.origin.z, CHUNK_SIZE, x0, z0, x1, z1)) continue;
+      this.groundDirty.add(c.key);
+      this.floraDirty.add(c.key);
+    }
+    const s = this.strokeRect;
+    s.x0 = Math.min(s.x0, x0);
+    s.z0 = Math.min(s.z0, z0);
+    s.x1 = Math.max(s.x1, x1);
+    s.z1 = Math.max(s.z1, z1);
+    if (Number.isFinite(fx) && Number.isFinite(fz)) {
+      this.rewriteFocus.x = fx;
+      this.rewriteFocus.z = fz;
+    }
+    if (end) this.endGroundStroke();
+  }
+
+  /** A stroke ended: its plantings made again at once, and what heals only at its end redone over its rectangle. */
+  private endGroundStroke(): void {
+    // Every plantings waiting made again from the next frame on, each frame within the budget, until none waits.
+    this.floraFlush = this.floraDirty.size > 0;
+    const s = this.strokeRect;
+    if (!(s.x0 <= s.x1)) return;
+    // The far tiles under it, rebuilt in place from their far grids, and their tree cards made again.
+    const swg = this.terrain.swg;
+    for (const [key, t] of this.farTiles) {
+      const comma = key.indexOf(',');
+      const tx = Number(key.slice(0, comma));
+      const tz = Number(key.slice(comma + 1));
+      const o = groundChunkOrigin(tx, tz, this.terrain.groundShift, FAR_TILE);
+      // By the tile's whole grid, a far step past each side (its edge normals read that ring), as `relayRect` laid it again.
+      if (!rectMeetsChunk(o.x, o.z, FAR_TILE, s.x0, s.z0, s.x1, s.z1, FAR_TILE / FAR_RES)) continue;
+      if (this.terrain.rewriteFarTile(tx, tz, FAR_TILE, FAR_RES, t.geometry)) this.groundWork.farTiles++;
+      else this.groundWork.failed++;
+      if (this.farCards && swg) {
+        const grid = swg.farGrid(o.x, o.z, FAR_TILE, FAR_RES, false);
+        const step = FAR_TILE / FAR_RES;
+        this.farCards.tileGone(tx, tz);
+        if (grid) this.farCards.tileMade(tx, tz, o.x, o.z, { heights: grid.heights, colors: grid.colors, radialFar: grid.radialFar, n: FAR_RES + 3, step, gx0: o.x - step, gz0: o.z - step });
+      }
+    }
+    // The one reader of the ground that does not heal by itself, and the two that heal slowly.
+    this.air?.raster.forget(s.x0, s.z0, s.x1, s.z1);
+    if (this.waterMaterials.length) refreshWaterDepth(s.x0, s.z0, s.x1, s.z1, (x, z) => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES));
+    this.grass?.circleChanged((s.x0 + s.x1) / 2, (s.z0 + s.z1) / 2, Math.hypot(s.x1 - s.x0, s.z1 - s.z0) / 2);
+    this.shadowHold.dirtyAll();
+    this.resetStrokeRect();
+  }
+
+  private resetStrokeRect(): void {
+    const s = this.strokeRect;
+    s.x0 = Infinity;
+    s.z0 = Infinity;
+    s.x1 = -Infinity;
+    s.z1 = -Infinity;
+  }
+
+  /** How many chunks wait for their ground and their plantings (`sculpt().dirty`). */
+  get groundDirtyCount(): { ground: number; flora: number } {
+    return { ground: this.groundDirty.size, flora: this.floraDirty.size };
+  }
+
+  /** The editor said a stroke's stamp happened (for the console's count). */
+  noteStamp(): void {
+    this.groundWork.stamps++;
+  }
+
+  /** A new stroke's count begun. */
+  beginGroundWork(): void {
+    const w = this.groundWork;
+    w.stamps = 0;
+    w.chunks = 0;
+    w.replanted = 0;
+    w.farTiles = 0;
+    w.ms = 0;
+    w.blocks = 0;
+    w.farGrids = 0;
+    w.failed = 0;
+  }
+
+  /**
+   * A frame's share of a stroke's rebuild: the dirty chunks' ground rewritten nearest the brush first, each once, within
+   * `GROUND_REWRITE_TUNE.frameMs`, its heightfield made again from the new heights and its grass marked stale; then, at
+   * `floraHz` while a stroke is held and at once when it has ended, the dirty chunks whose ground is done replanted, their
+   * physics remade with them. Nothing at all on a frame with nothing dirty.
+   */
+  private stepGroundRewrite(eye: THREE.Vector3): void {
+    if (!this.groundDirty.size && !this.floraDirty.size) return;
+    const t0 = performance.now();
+    const budget = GROUND_REWRITE_TUNE.frameMs;
+    const fx = Number.isFinite(this.rewriteFocus.x) ? this.rewriteFocus.x : eye.x;
+    const fz = Number.isFinite(this.rewriteFocus.z) ? this.rewriteFocus.z : eye.z;
+    let first = true;
+    while (this.groundDirty.size && (first || performance.now() - t0 < budget)) {
+      first = false;
+      const c = this.nearestDirty(this.groundDirty, fx, fz);
+      if (!c) break;
+      this.groundDirty.delete(c.key);
+      if (this.terrain.rewriteChunk(c.cx, c.cz, c.ground.geometry, c.heights)) this.groundWork.chunks++;
+      else this.groundWork.failed++;
+      c.my = this.terrain.heightAt(c.mx, c.mz);
+      this.chunkSphereAgain(c);
+      // Its heightfield made again from the very heights the mesh now stands on (Rapier 0.20 has no shape to set on a
+      // collider, so the old one goes and a new one is made in its place, first in the chunk's list as `addChunkPhysics` keeps it).
+      if (c.physics && c.physics.length) {
+        this.physics.removeCollider(c.physics[0]);
+        c.physics[0] = chunkHeightfield(this.physics, c);
+      }
+      this.grass?.circleChanged(c.origin.x + CHUNK_SIZE / 2, c.origin.z + CHUNK_SIZE / 2, CHUNK_SIZE * 0.75);
+    }
+    const now = performance.now();
+    const due = this.floraFlush || now - this.floraLastAt >= 1000 / Math.max(0.01, GROUND_REWRITE_TUNE.floraHz);
+    if (due && this.floraDirty.size) {
+      this.floraLastAt = now;
+      let any = false;
+      while (this.floraDirty.size && (!any || performance.now() - t0 < budget)) {
+        const c = this.nearestDirty(this.floraDirty, fx, fz, this.groundDirty);
+        if (!c) break;
+        this.floraDirty.delete(c.key);
+        this.replantChunk(c);
+        this.groundWork.replanted++;
+        any = true;
+      }
+    }
+    if (!this.groundDirty.size && !this.floraDirty.size) {
+      this.floraFlush = false;
+      this.rewriteFocus.x = Number.NaN;
+      this.rewriteFocus.z = Number.NaN;
+    }
+    this.groundWork.ms += performance.now() - t0;
+  }
+
+  /** The standing chunk on a dirty list nearest a point, leaving out those on `not`; a key whose chunk has gone is struck off. */
+  private nearestDirty(list: Set<string>, x: number, z: number, not?: Set<string>): Chunk | null {
+    let best: Chunk | null = null;
+    let bestD = Infinity;
+    for (const key of list) {
+      const c = this.chunks.get(key);
+      if (!c) {
+        list.delete(key);
+        continue;
+      }
+      if (not?.has(key)) continue;
+      const dx = c.mx - x;
+      const dz = c.mz - z;
+      const d = dx * dx + dz * dz;
+      if (d < bestD) {
+        bestD = d;
+        best = c;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Tiles of the heights file landed (a write's answer, a file read again): each tile's deltas inflated and put in the store
+   * in force, a tile let go for each id taken out, and the ground rebuilt over every tile whose deltas moved. A tile whose
+   * deltas are the store's already (the editor's own stroke, held live) moves nothing, and one a stroke under way holds is
+   * left as it stamps it (`heightsHeld`, `layLanded`). The rules are `heightsLand.ts`'s, which a node test runs. Answers how
+   * many tiles moved.
+   */
+  async landHeights(put: readonly HeightTileRow[], deleted: readonly string[], inflate: (b64: string) => Promise<Uint8Array | null>, deltasOf: (bytes: Uint8Array | null) => Float32Array | string, tileOfId: (id: string) => { tx: number; tz: number }): Promise<number> {
+    const gen = this.generation;
+    // The file's rows as it now holds them, at once: the next stroke's write names them as they were.
+    this.heightRows.land(put, deleted);
+    const decoded = await decodeLanded(put, deleted, inflate, deltasOf, tileOfId, (w) => console.warn(w));
+    if (this.generation !== gen) return 0;
+    const store = this.ensureHeights();
+    const rect = { x0: Infinity, z0: Infinity, x1: -Infinity, z1: -Infinity };
+    const n = layLanded(store, decoded, this.heightsHeld, (tx, tz) => this.unionTile(rect, tx, tz));
+    if (n.moved) this.heightsChanged(rect.x0, rect.z0, rect.x1, rect.z1, true);
+    return n.moved;
+  }
+
+  /**
+   * The file read again whole (the dev server's word, the console's reload): its store laid over the one in force by
+   * difference, every tile that differs put or let go and the ground rebuilt over them, none a stroke under way holds touched
+   * (its write is what the file ends with there). Answers how many tiles moved.
+   */
+  replaceHeights(loaded: HeightsLoaded | null): number {
+    this.takeHeightsFile(loaded);
+    const next = loaded?.store ?? null;
+    const store = this.heightEdits ?? (next && next.size ? this.ensureHeights() : null);
+    if (!store) return 0;
+    const rect = { x0: Infinity, z0: Infinity, x1: -Infinity, z1: -Infinity };
+    const n = layWhole(store, next, this.heightsHeld, (tx, tz) => this.unionTile(rect, tx, tz));
+    if (n.held) console.warn(`heights: the file read again changed ${n.held} tile${n.held === 1 ? '' : 's'} a stroke under way is stamping into: the stroke's own write is what the file ends with there`);
+    if (n.moved) this.heightsChanged(rect.x0, rect.z0, rect.x1, rect.z1, true);
+    return n.moved;
+  }
+}
+
+/** What a world's heights file came to: its store, how many bytes the file was, what it skipped, why it was not read, its revision. */
+export interface HeightsLoaded {
+  store: HeightEdits;
+  /** The file's rows as read (their deltas still packed). */
+  rows: HeightTileRow[];
+  bytes: number;
+  skipped: { id: string; why: string }[];
+  problem: string | null;
+  rev: string | null;
 }
 
 const chunkBox = new THREE.Box3();
