@@ -34,6 +34,8 @@ export interface HarnessOpts {
   box?: { min: number[]; max: number[] };
   point?: boolean;
   packId?: string;
+  /** Whether the brush is armed (the editor's `brushArmed`): no click picks, boxes or orbits while it is. None by default. */
+  brushArmed?: () => boolean;
 }
 
 /** The stand-in input: actions held and pressed, raw keys down, the mouse's movement. */
@@ -207,6 +209,7 @@ export function makeHarness(opts: HarnessOpts = {}): Harness {
     hotbar: () => [],
     setHotbar() {},
     refreshWindow() {},
+    ...(opts.brushArmed ? { brushArmed: opts.brushArmed } : {}),
   };
   EDITOR_TUNE.statusDebounceMs = 0;
   const e = new EditorEdits(host as unknown as EditEditor);

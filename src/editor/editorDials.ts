@@ -86,6 +86,33 @@ function groups(): DialGroup[] {
       ],
     },
     {
+      title: 'The brush',
+      note: 'B arms it with the library entries Shift+clicked (or what is in hand); LMB held paints, RMB held erases. Its switches (yaw at random, lean to the ground, keep off water and what stands, the height filter) are on the Tools tab.',
+      dials: [
+        dial('brush.radius', 'Radius', 1, 64, 0.5, 'm', "The brush's disc."),
+        dial('brush.density', 'Density', 0.05, 50, 0.05, '/100 m²', 'The rows of its own entries a stroke fills the disc toward, counting what stands.'),
+        dial('brush.spacing', 'Spacing', 0, 20, 0.1, 'm', 'The least distance between two plants, and from anything standing.'),
+        dial('brush.rate', 'Rate', 0.5, 30, 0.5, '/s', 'Stamps a second while a button is held (the same at any frame rate).'),
+        dial('brush.scaleMin', 'Scale from', 0.05, 5, 0.05, '×', 'The least uniform scale a plant is drawn at.'),
+        dial('brush.scaleMax', 'Scale to', 0.05, 5, 0.05, '×', 'The most.'),
+        dial('brush.alignMax', 'Lean at most', 0, 45, 1, '°', 'With the lean on, how far a plant leans toward the ground.'),
+        dial('brush.slopeMin', 'Slope from', 0, 90, 1, '°', 'The least slope of ground a plant stands on.'),
+        dial('brush.slopeMax', 'Slope to', 0, 90, 1, '°', 'The most.'),
+        dial('brush.heightMin', 'Height from', -1000, 4000, 5, 'm', 'With the height filter on, the lowest ground a plant stands on.'),
+        dial('brush.heightMax', 'Height to', -1000, 10000, 5, 'm', 'The highest.'),
+        dial('brush.eraseShare', 'Erase takes', 0.05, 1, 0.05, '', 'The share of its own rows in the disc an erase stamp takes.'),
+        dial('brush.tries', 'Tries a plant', 1, 40, 1, '', 'Candidates a stamp tries for each plant it still wants.'),
+      ],
+    },
+    {
+      title: 'Folding',
+      note: 'Rows written while their tier stands are drawn one by one until the next arrival or Fold now (Tools).',
+      dials: [
+        dial('foldHint', 'Say past', 1, 5000, 1, 'rows', 'Past this many rows drawn one by one the bar offers Fold now.'),
+        dial('autoFoldIdle', 'Fold by itself after', 0.5, 30, 0.5, 's', 'With the automatic fold on (Tools), how long nothing must happen first.'),
+      ],
+    },
+    {
       title: 'The window',
       dials: [
         dial('window.width', 'Opens this wide', 400, 900, 10, 'px', 'How wide the window opens (from the next session; drag its corner meanwhile).'),

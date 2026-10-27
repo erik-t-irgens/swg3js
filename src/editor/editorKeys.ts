@@ -49,6 +49,8 @@ export const EDITOR_ACTIONS: readonly Action[] = [
   'editorHot9',
   'editorGameView',
   'editorKeys',
+  // The third wave's: the scatter brush armed and let go.
+  'editorBrush',
 ];
 
 /** The hotbar's nine keys, slot 1 first. */

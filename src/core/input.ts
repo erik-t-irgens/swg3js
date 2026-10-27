@@ -118,7 +118,9 @@ export type Action =
   | 'editorHot8'
   | 'editorHot9'
   | 'editorGameView'
-  | 'editorKeys';
+  | 'editorKeys'
+  // The world editor's scatter brush (its third wave): B arms it with the library's chosen entries, and disarms it.
+  | 'editorBrush';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -267,6 +269,8 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   editorHot9: ['Digit9'],
   editorGameView: ['KeyG'],
   editorKeys: ['KeyH'],
+  // B, the spawner's (muted while the editor is on): the brush armed and let go.
+  editorBrush: ['KeyB'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 
@@ -308,6 +312,7 @@ export const DEV_ONLY_ACTIONS: ReadonlySet<Action> = new Set<Action>([
   'editorHot9',
   'editorGameView',
   'editorKeys',
+  'editorBrush',
 ]);
 
 /** The actions the Controls page lists: every one on the dev server, and in a release all but the dev server's own. */
@@ -526,6 +531,11 @@ export class Input {
   /** A raw key held. Never muted: a mute is of an action (`mute`), and a raw read is nobody's action. */
   isDown(code: string): boolean {
     return !this.captured && this.down.has(code);
+  }
+
+  /** How many keys and buttons are held now, whatever they are bound to: the world editor's "nothing has come" for its automatic fold. */
+  get keysDown(): number {
+    return this.down.size;
   }
 
   /** A raw key pressed this frame. Never muted, for the same reason. */

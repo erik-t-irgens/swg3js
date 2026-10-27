@@ -277,16 +277,31 @@ export interface LayerReport {
 }
 
 /**
+ * What a world's arrival takes of its permanent rows before its ground is built and its streamer first updates: the
+ * circles the plants are kept off (`raw`, `game`), and where every row that would stand is (`hold`), whose regions'
+ * tiers wait for the rows to be filed so they fold into them (DESIGN.md §2.8). Each in the frame its file is written in
+ * (raw on a planet, the game's in a space zone). `hold` is optional for a caller that keeps circles alone.
+ */
+export interface DressingKeep {
+  raw: { x: number; z: number; r: number }[];
+  game: { x: number; z: number; r: number }[];
+  hold?: { raw: { x: number; z: number }[]; game: { x: number; z: number }[] };
+}
+
+/**
  * The circles a world's ground keeps its plants off before it is first built: every row of both layers that
  * asks for some (`clear`), the clashing story row left out as the sync leaves it out, in the frame its file
- * is written in (`raw` on a planet, `game` in a space zone). None in the world of copies, where nothing stands.
+ * is written in (`raw` on a planet, `game` in a space zone); and the place of every row that would stand (`hold`: no
+ * building in a space zone, none of a world state this world does not stand in), whose regions the streamer holds until
+ * the rows are filed. Neither in the world of copies, where nothing stands.
  */
-export function keepOffOf(story: PlacementRead | null, world: PlacementRead | null, kind: WorldKind): { raw: { x: number; z: number; r: number }[]; game: { x: number; z: number; r: number }[] } {
-  const out = { raw: [] as { x: number; z: number; r: number }[], game: [] as { x: number; z: number; r: number }[] };
+export function keepOffOf(story: PlacementRead | null, world: PlacementRead | null, kind: WorldKind): DressingKeep & { hold: NonNullable<DressingKeep['hold']> } {
+  const out = { raw: [] as { x: number; z: number; r: number }[], game: [] as { x: number; z: number; r: number }[], hold: { raw: [] as { x: number; z: number }[], game: [] as { x: number; z: number }[] } };
   if (kind === 'copies') return out;
   for (const { row } of mergeLayers(story?.rows ?? [], world?.rows ?? []).rows) {
-    if (!row.clear || !(row.clear > 0)) continue;
     if (kind === 'space' && row.kind === 'building') continue;
+    if (!row.state || standsIn(row.state)) (kind === 'space' ? out.hold.game : out.hold.raw).push({ x: row.x, z: row.z });
+    if (!row.clear || !(row.clear > 0)) continue;
     (kind === 'space' ? out.game : out.raw).push({ x: row.x, z: row.z, r: row.clear });
   }
   return out;

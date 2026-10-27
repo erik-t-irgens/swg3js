@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { boxGeo, loadedOf, makeStreamer, THREE } from './streamHarness.ts';
 
 const { dressingStandOf } = await import('../../../src/world/permanent.ts');
+const { FLORA_COLLISION } = await import('../../../src/world/floraCollision.ts');
 const { toGame } = await import('../../../src/story/placements.ts');
 
 let checks = 0;
@@ -84,7 +85,20 @@ async function standRow(id: string, model: string, x: number, z: number, from: u
   const h2 = await makeStreamer([{ template: 'object/tree', model: 'tree', x: -10, y: 0, z: 10, q: [1, 0, 0, 0], radius: 4 }], { defs: [TREE as never], models: { tree: loadedOf(TREE as never, [{ geometry: treeGeo(), cell: -1 }]) }, flora: ['tree'] });
   await h2.settle({ x: 10, z: 10 }, 60);
   const canopy = h2.rayDown(10 + 2.5, 10, 20);
-  ok(canopy !== null && Math.abs(canopy - 8) < 0.05, `the snapshot's own placed tree keeps its trimesh, canopy and all (${canopy?.toFixed(2)} m)`);
+  ok(FLORA_COLLISION.placed === 'mesh' && canopy !== null && Math.abs(canopy - 8) < 0.05, `the snapshot's own placed tree keeps its trimesh, canopy and all (${canopy?.toFixed(2)} m), the rule shipped ('mesh')`);
+  // `FLORA_COLLISION.placed` 'extent' (map-maker wave 3): the world's own placed trees collide by their own extent, made
+  // again where they stand; 'mesh' puts back every triangle, as before.
+  FLORA_COLLISION.placed = 'extent';
+  const let1 = h2.stream.refreshPlacedFlora();
+  await h2.settle({ x: 10, z: 10 }, 6);
+  const canopyX = h2.rayDown(10 + 2.5, 10, 20);
+  const trunkX = h2.rayDown(10, 10, 20);
+  ok(let1 === 1 && canopyX === null && trunkX !== null && Math.abs(trunkX - 3) < 0.05, `'extent': the snapshot's own tree collides by its trunk (${trunkX?.toFixed(2)} m) and its canopy passes (${let1} collider let go and made again)`);
+  FLORA_COLLISION.placed = 'mesh';
+  h2.stream.refreshPlacedFlora();
+  await h2.settle({ x: 10, z: 10 }, 6);
+  const canopyM = h2.rayDown(10 + 2.5, 10, 20);
+  ok(canopyM !== null && Math.abs(canopyM - 8) < 0.05, `and 'mesh' again, its trimesh as before (${canopyM?.toFixed(2)} m)`);
 }
 {
   // A guest world's tree: flora by its own pack's word, to the rule and to the air.

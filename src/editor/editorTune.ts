@@ -11,6 +11,44 @@
 // Pure: no three, no DOM. Rule for this file (node runs it with type stripping): every import with its `.ts` extension,
 // no enum, no namespace, no constructor parameter properties.
 
+/**
+ * The scatter brush's numbers (DESIGN.md §2.8, research5 §4.7's starts, `brush.ts`): `EDITOR_TUNE.brush` is this very
+ * object, so `__debug.editor({ tune: { brush: { spacing: 2 } } })` moves it. Every one the owner's to judge by hand.
+ */
+export const BRUSH_TUNE = {
+  /** The disc's radius, metres: a few trees' worth across. */
+  radius: 8,
+  /** The density it fills toward, rows of its own entries per 100 m² (Unreal's per 1,000 × 1,000 units): a light wood. */
+  density: 2,
+  /** The least distance between two plants, and between a plant and anything standing, metres: trunks never touch. */
+  spacing: 1.5,
+  /** Stamps a second while a button is held, at any frame rate. */
+  rate: 8,
+  /** A plant's yaw at random; off, the camera's heading. */
+  randomYaw: true,
+  /** A plant's uniform scale drawn between these: a wood of one tree's size reads as planted. */
+  scaleMin: 0.8,
+  scaleMax: 1.2,
+  /** A plant's up leaned toward the ground's (off), by at most this many degrees (Unreal's example). */
+  align: false,
+  alignMax: 10,
+  /** The ground's slope a plant may stand on, degrees: a tree on a cliff's face reads as an accident. */
+  slopeMin: 0,
+  slopeMax: 30,
+  /** The ground's height a plant may stand at (absolute metres), only with `heightOn`: none to none. */
+  heightOn: false,
+  heightMin: -1000,
+  heightMax: 10000,
+  /** Never in the drawn water unless the model is meant for it (the radial flora's own rule). */
+  keepOffWater: true,
+  /** Never inside what stands (a placed object's own box). */
+  keepOffStanding: true,
+  /** The share of its own rows in the disc an erase stroke's stamp takes: all of them. */
+  eraseShare: 1,
+  /** Candidates a stamp tries for each plant it still wants before it gives the rest up (ours: enough for a light wood). */
+  tries: 8,
+};
+
 /** Every number of the editor, ours. */
 export const EDITOR_TUNE = {
   cam: {
@@ -124,6 +162,19 @@ export const EDITOR_TUNE = {
   },
   /** Ctrl+W asks first while the editor is on (`localStorage['swg.editor.guard'] = '0'` at load is the hatch). */
   guardUnload: true,
+  /**
+   * Past this many permanent rows drawn one by one (filed while their tier stood), the bar says how many and what they
+   * cost, and offers Fold now (DESIGN.md §2.8): about 4 ms of frame at research3's measured rate.
+   */
+  foldHint: 200,
+  /**
+   * A Fold now by itself once more than `foldHint` rows are drawn one by one and nothing (a key, a drag, a stroke) has come
+   * for `autoFoldIdle` seconds. Off: a loading screen nobody asked for is a surprise (the owner's default, Q6).
+   */
+  autoFold: false,
+  autoFoldIdle: 3,
+  /** The scatter brush's numbers (`BRUSH_TUNE`, the same object). */
+  brush: BRUSH_TUNE,
   window: {
     /** How wide the window opens, pixels, docked left: the library's grid of pictures and its sources down the side. */
     width: 560,

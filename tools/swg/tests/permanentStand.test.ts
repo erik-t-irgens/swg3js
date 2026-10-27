@@ -65,6 +65,9 @@ function layerOver(h: Harness, gen: { n: number }) {
       return s ? h.stream.standPermanent(s, h.gallery as never) : null;
     },
     unstand: (key) => void h.stream.unplace(key),
+    // A sync's removals at once, as the game wires them (`World.unplaceMany`): the path every editor write and every sync
+    // takes, a folded row's own branch among them.
+    unstandMany: (keys) => void h.stream.unplaceMany(keys),
     packReady: () => true,
     generation: () => gen.n,
     label: (row) => row.name ?? row.id,
@@ -176,6 +179,11 @@ const colliderName = (h: Harness, o: unknown) => {
   const near = h.stream.objectsNear(out.x, out.z, 3).find((o) => o.template === 'place/bench');
   ok(near?.effectsOf === CRATE_TEMPLATE, `3: and is listed near with the template it really is (${near?.effectsOf})`);
   const meshes = h.scene.children.length;
+  // Filed before its tier loaded, the row was folded into the tier's bulk (map-maker wave 3): moved, its slot there is
+  // hidden in place (the bulk's mesh stays, a copy cannot be taken out of it) and it stands again on a mesh of its own
+  // until the next fold.
+  const wasFolded = !!h.s.foldOf.get(placed(h, 'place/bench'));
+  ok(wasFolded, '3: filed before its tier loaded, the row is folded into the bulk');
   // Moved into a tier already standing: what is waited on for it settles only once its programs are built.
   gate.arm();
   const builds = layer.setLayers(null, file([loose({ x: -(out.x + 2) }), ghost]));
@@ -190,7 +198,7 @@ const colliderName = (h: Harness, o: unknown) => {
   ok(built && h.meshesAt(out.x + 2, out.z) === 1 && h.hasRecord('place/bench'), '3: and settles once it is built and shown');
   await h.settle(out);
   ok([...h.s.placedByKey.keys()].filter((k: string) => k === 'place/bench').length === 1 && placed(h, 'place/bench').x === out.x + 2, '3: a row moved two metres is filed once, where it is now');
-  ok(h.scene.children.length === meshes && h.meshesAt(out.x, out.z) === 0 && h.meshesAt(out.x + 2, out.z) === 1, `3: and the scene holds as many meshes as before, the old one gone (${h.scene.children.length} against ${meshes})`);
+  ok(h.scene.children.length === meshes + (wasFolded ? 1 : 0) && h.meshesAt(out.x, out.z) === 0 && h.meshesAt(out.x + 2, out.z) === 1, `3: and the scene holds the meshes it did and the moved row's own, the old place drawing nothing (${h.scene.children.length} against ${meshes})`);
   // A name-only change re-stands nothing, and the row is called by its new name.
   const before = placed(h, 'place/bench');
   layer.setLayers(null, file([loose({ x: -(out.x + 2), name: 'Bench', note: 'renamed' }), ghost]));
@@ -252,6 +260,21 @@ const colliderName = (h: Harness, o: unknown) => {
   const k = keepOffOf(story, world, 'ground');
   ok(k.raw.length === 2 && k.game.length === 0 && k.raw.some((c) => c.r === 14.5) && !k.raw.some((c) => c.r === 3), '4: the plants are kept off what both layers ask, the clashing story row left out, in the raw frame');
   ok(keepOffOf(story, world, 'copies').raw.length === 0, '4: and nothing in the world of copies');
+  // The places whose regions an arrival holds (DESIGN.md §2.8): every row that would stand, whether or not it asks for a
+  // clear circle, in its file's frame; none of a world state this world does not stand in, no building in space, nothing
+  // in the world of copies.
+  const plainRow = { ...crateRow(), id: 'plain', x: -500, z: 20 };
+  const held = keepOffOf(story, file([hallRow([1, 0, 0, 0], { clear: 14.5 }), { ...crateRow(), id: 'locker', clear: 9 }, plainRow]), 'ground').hold;
+  ok(held.game.length === 0 && held.raw.length === 3 && held.raw.some((p) => p.x === -HALL_AT.x && p.z === HALL_AT.z) && held.raw.some((p) => p.x === -500 && p.z === 20), `4: the hold names every row that stands, a row with no clear among them, in the raw frame (${held.raw.length})`);
+  // Restuss's living city, which with no setting and no server stands in neither state but the ruins (the owner's default).
+  const { standsIn } = await import('../../../src/world/worldState.ts');
+  ok(!standsIn('restuss=living') && standsIn('restuss=ruins'), '4: (with no setting, Restuss stands in its ruins)');
+  const other = keepOffOf(null, file([{ ...plainRow, id: 'living', x: -520, state: 'restuss=living' } as Row, { ...plainRow, id: 'ruins', x: -510, state: 'restuss=ruins' } as Row, plainRow]), 'ground').hold;
+  ok(other.raw.length === 2 && !other.raw.some((p) => p.x === -520) && other.raw.some((p) => p.x === -510) && other.raw.some((p) => p.x === -500), `4: a row of a world state this world does not stand in is held nowhere, one of the state in force is (${other.raw.length})`);
+  const spaceFile = readPlacementsFile(placementsFileText('space_tatooine', 'game', [{ ...hallRow(), id: 'station-hall' }, { ...crateRow(), id: 'space-crate', x: 1500, z: 900, inside: false }]), 'space_tatooine', 'space');
+  const inSpace = keepOffOf(null, spaceFile, 'space').hold;
+  ok(inSpace.raw.length === 0 && inSpace.game.length === 1 && inSpace.game[0].x === 1500 && inSpace.game[0].z === 900, '4: in space a building is held nowhere and a prop in the game\'s own frame');
+  ok(keepOffOf(story, world, 'copies').hold.raw.length === 0 && keepOffOf(story, world, 'copies').hold.game.length === 0, '4: and nothing in the world of copies');
   const h = await makeStreamer();
   h.stream.keepFloraOff(300, 100, 14.5);
   h.stream.keepFloraOff(300, 100, 14.5);

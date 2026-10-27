@@ -109,6 +109,12 @@ export function collidesByRule(o: PlacedObject): boolean {
  * with its tier, whatever the player's distance, a piece at a time.
  */
 const COLLIDER_RADIUS_CAP = 600;
+/**
+ * What one mesh of a permanent row drawn on its own costs a frame, milliseconds: research3's measured rate on the owner's
+ * card (Direct3D 11, a real nine-piece tree as rows about 11 draw calls and 20 to 24 µs a frame with shadows, so about
+ * 2.4 µs a mesh). An estimate for the editor's bar and `editor().unfolded`, never a measurement of this frame.
+ */
+const FOLD_MS_PER_MESH = 0.0024;
 /** A huge object's collision is built in pieces of at most this many triangles (about 2 ms each with TRIMESH_FLAGS). */
 const HUGE_PIECE_TRIANGLES = 4000;
 /** Milliseconds of huge-object pieces built per update (at least one piece a call). */
@@ -198,10 +204,19 @@ export interface PlacedObject {
   pack?: AssetPack;
   /**
    * How big it stands along its own axes: a permanent row's scale (the world editor's), absent for none, which is every
-   * snapshot object and everything else put down in play. A placement made in play is drawn, cast, collided and measured
-   * at it (`addToTier`, `addColliders`, `boundsOf`); the region tiers' bulk never holds one (folding is the next wave's).
+   * snapshot object and everything else put down in play. It is drawn, cast, collided and measured at it wherever it
+   * stands: on its own meshes (`addToTier`) or folded into its tier's bulk (`instance`, its level group's copy).
    */
   scale?: THREE.Vector3;
+  /**
+   * A permanent row (only `standPermanent` files one): it **folds** into its region tier's bulk -- instanced with the
+   * snapshot's own copies of its model, at the client's levels, batched for the shadow pass -- whenever its tier is built
+   * with its model loaded before the split (`buildTier`), and takes the runtime path (meshes of its own) otherwise: filed
+   * while its tier stands, or while it was loading with a model nothing else in it uses. Taken down folded, it is hidden in
+   * place (`hideInPlace`), since a copy cannot be taken out of an instanced mesh. Absent on everything else, whose path is
+   * as it always was.
+   */
+  folded?: true;
 }
 
 /**
@@ -252,6 +267,8 @@ export interface RuntimePlacement {
   pack?: AssetPack;
   /** How big it stands along its own axes (`PlacedObject.scale`); absent for none. */
   scale?: THREE.Vector3;
+  /** A permanent row: it may fold into its tier's bulk (`PlacedObject.folded`). Only `standPermanent` passes it. */
+  fold?: true;
 }
 
 /** A box `min`..`max` (either corner may come first) at a scale along its own axes: the corners scaled, which way round kept. */
@@ -356,6 +373,34 @@ interface LoadedTier {
   bulk: number;
   /** Its still casters batched for the shadow pass (`shadowBatches.ts`), once its meshes are shown; null for none. */
   batch: TierBatch | null;
+  /**
+   * What the bulk build made for each permanent row folded into it (`FoldRec`), so taking one down or hiding it while the
+   * editor moves it is exact; null where none is folded (every tier of snapshot objects alone).
+   */
+  folds: Map<PlacedObject, FoldRec> | null;
+  /** Placements being built into it now (`addToTier` under way): `settled` waits for them within its range. */
+  building: number;
+  /** Its bulk's programs exist and its meshes are shown (or there was no `prepare`): what the editor's copies may be drawn on. */
+  ready: boolean;
+}
+
+/**
+ * What the bulk build made of one permanent row folded into its tier (`instance`): each instance slot it holds, in the
+ * order made (a thing in a building's rooms holds two, its building's furniture mesh and the old rule's one), its copy in
+ * a level group, what of its effects and basin water was placed for it (with what places them again), its building, and
+ * the slots' matrices as they were before it was hidden. `hidden` is 0 shown, 1 its meshes alone hidden (the world
+ * editor's live picture of it while it is moved), 2 taken down whole (its effects, water and building gone too). Nothing
+ * here is counted off the tier: a slot hidden is still a slot held.
+ */
+interface FoldRec {
+  tier: LoadedTier;
+  slots: { mesh: THREE.InstancedMesh; i: number }[];
+  level: { group: LevelGroup; i: number } | null;
+  fx: { file: string; m: THREE.Matrix4; contained: boolean; h: EffectHandle | null }[];
+  waters: { geometry: THREE.BufferGeometry; name: string; h: WaterSurfaceHandle | null }[];
+  building: Building | null;
+  saved: Float32Array | null;
+  hidden: 0 | 1 | 2;
 }
 
 /**
@@ -375,6 +420,13 @@ interface Region {
   objects: PlacedObject[][];
   tiers: (LoadedTier | 'loading' | null)[];
   /**
+   * Per tier, a count moved by every build begun (`buildTier`) and by every build let go under it (`refile`, `holdRegions`):
+   * a build is the tier's only while the count is the one it began with. A tier's own `'loading'` cannot say which build it
+   * is, and a build let go whose next began before it woke read the new build's `'loading'` as its own and stood a tier over
+   * the region's old list (Fold now racing a tier still loading its models), whose placements after it were never solid.
+   */
+  builds: number[];
+  /**
    * Per tier, how far past its buildings' rooms' own range the furniture it holds may stand from the region's
    * box (`hostReach`), or -1 for a tier holding no building's furniture: the floor under the tier's range
    * that keeps a room drawn through a door from being drawn empty (`regionRange`, step 6).
@@ -389,7 +441,7 @@ interface Region {
 
 /** A region with nothing in it yet. */
 function newRegion(rx: number, rz: number): Region {
-  return { rx, rz, cx: regionCentre(rx), cz: regionCentre(rz), objects: TIERS.map(() => []), tiers: TIERS.map(() => null), indoor: TIERS.map(() => -1), reach: 0 };
+  return { rx, rz, cx: regionCentre(rx), cz: regionCentre(rz), objects: TIERS.map(() => []), tiers: TIERS.map(() => null), builds: TIERS.map(() => 0), indoor: TIERS.map(() => -1), reach: 0 };
 }
 
 /**
@@ -423,6 +475,58 @@ export function keepInPlace<T>(list: T[], keep: (item: T) => boolean): void {
 /** Whether a scale is one number along all three axes (none at all counts). */
 function isUniform(s: { x: number; y: number; z: number } | undefined): boolean {
   return !s || (s.x === s.y && s.y === s.z);
+}
+
+/**
+ * A model's radius at the largest scale any of these copies stands at (the casters' size rule for one mesh drawing them
+ * all): the radius itself, untouched, where none has a scale, which is every snapshot object.
+ */
+function scaledRadius(radius: number, copies: readonly { scale?: { x: number; y: number; z: number } }[]): number {
+  let any = false;
+  let big = 0;
+  for (const p of copies) {
+    const s = p.scale;
+    const k = s ? Math.max(s.x, s.y, s.z) : 1;
+    if (s) any = true;
+    if (k > big) big = k;
+  }
+  return any ? radius * big : radius;
+}
+
+/**
+ * One model's copies split by the size they stand at, a mesh or a level group a list: every copy with no scale (every
+ * snapshot object, and every row stood at its own size) in the first, which is the very list handed in where none has one,
+ * and the scaled rows (the world editor's, folded into the bulk) after it, a list for each quarter of an octave their
+ * largest axis falls in. A mesh casts by the rule at its biggest copy's size (`scaledRadius`), so drawn in one mesh with the
+ * snapshot's own, one rock row stood four times its size had every copy of that rock in the tier cast as a rock four times
+ * its size under the page's smallest caster; split so, no copy of the game's is ever judged by a row's scale, and a scaled
+ * row by one at most a fifth over its own.
+ */
+function sizeBuckets<T extends { scale?: { x: number; y: number; z: number } }>(list: T[]): T[][] {
+  let any = false;
+  for (const p of list) {
+    if (p.scale) {
+      any = true;
+      break;
+    }
+  }
+  if (!any) return [list];
+  const plain: T[] = [];
+  const by = new Map<number, T[]>();
+  for (const p of list) {
+    const s = p.scale;
+    if (!s) {
+      plain.push(p);
+      continue;
+    }
+    const k = Math.round(Math.log2(Math.max(s.x, s.y, s.z, 1e-6)) * 4);
+    const l = by.get(k);
+    if (l) l.push(p);
+    else by.set(k, [p]);
+  }
+  const out: T[][] = plain.length ? [plain] : [];
+  for (const k of [...by.keys()].sort((a, b) => a - b)) out.push(by.get(k)!);
+  return out;
 }
 
 /**
@@ -525,6 +629,8 @@ interface RuntimeRec {
   effects: EffectHandle[];
   waters: WaterSurfaceHandle[];
   furniture: { g: FurnitureGroup; host: PlacedObject | null }[];
+  /** How many meshes it added to the unfolded count (a permanent row's own, `unfoldedMeshes`): what its going takes off. */
+  counted: number;
 }
 
 export class LayoutStreamer {
@@ -583,6 +689,25 @@ export class LayoutStreamer {
    * see) and this is where they are kept.
    */
   private readonly runtime = new Map<PlacedObject, RuntimeRec>();
+  /**
+   * What the bulk build made of each permanent row folded into a tier now (`FoldRec`), by its object: the tier's own
+   * `folds` beside it, so a removal finds it in one lookup. Emptied of a tier's as it unloads.
+   */
+  private readonly foldOf = new Map<PlacedObject, FoldRec>();
+  /**
+   * The permanent rows drawn on meshes of their own now (`addToTier` made a record for an object filed with `fold`), and
+   * those meshes: what the world editor's bar and `editor().unfolded` say a Fold now would take off the frame. Counted
+   * where the records are made and dropped, never walked.
+   */
+  private unfoldedRows = 0;
+  private unfoldedMeshes = 0;
+  /**
+   * Regions whose tiers wait to load (`holdRegions`): those a world's permanent rows fall in, held from before the first
+   * update until the rows are filed (`releaseRegions`), so rows filed before their tier loads fold into it. By region number.
+   */
+  private readonly held = new Set<number>();
+  /** Each guest world's pack a `from` row's model is looked up in, by a short name of its own: the tier's model map's key (`modelKey`). */
+  private readonly packTags = new WeakMap<AssetPack, string>();
   /**
    * What each object placed in play was filed under, which is its `template`: the runtime ones are
    * given a name of their own (a home carries the id the server gave it) and it is a name nothing
@@ -750,6 +875,22 @@ export class LayoutStreamer {
   useFromPack(pack: AssetPack | null): void {
     if (pack && pack !== this.pack && !this.fromPacks.includes(pack)) this.fromPacks.push(pack);
   }
+
+  /**
+   * What a tier's model map files an object's model under (`buildTier`): its id, or for a row out of another world
+   * (`pack`) that pack's own short name and the id, so the same id out of two packs is two models. Worked out at a tier's
+   * build, never in a frame (a guest pack is named the first time it is met).
+   */
+  private modelKey(o: PlacedObject): string {
+    if (!o.pack) return o.model;
+    let tag = this.packTags.get(o.pack);
+    if (!tag) {
+      tag = `#${this.packTagCount++}:`;
+      this.packTags.set(o.pack, tag);
+    }
+    return tag + o.model;
+  }
+  private packTagCount = 0;
 
   private defOf(id: string, pack?: AssetPack): PackModelDef | undefined {
     if (pack) {
@@ -1119,6 +1260,7 @@ export class LayoutStreamer {
       ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}),
       ...(p.pack ? { pack: p.pack } : {}),
       ...(p.scale ? { scale: p.scale } : {}),
+      ...(p.fold ? { folded: true as const } : {}),
     };
     this.objects.push(placed);
     this.placedByKey.set(p.template, placed);
@@ -1185,7 +1327,7 @@ export class LayoutStreamer {
       // A thing in the doorway stands partly outside and keeps no host, so filing it again would change nothing.
       if (a.host < 0 || this.hostObjects[a.host] !== building || a.flags & HOST_FLAG.doorway) continue;
       this.unplace(p.template);
-      void this.place({ model: p.model, template: p.template, x: p.x, y: p.y, z: p.z, q: p.q, radius: p.radius, inside: true, solid: p.solid, ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}), ...(p.pack ? { pack: p.pack } : {}), ...(p.scale ? { scale: p.scale } : {}) });
+      void this.place({ model: p.model, template: p.template, x: p.x, y: p.y, z: p.z, q: p.q, radius: p.radius, inside: true, solid: p.solid, ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}), ...(p.pack ? { pack: p.pack } : {}), ...(p.scale ? { scale: p.scale } : {}), ...(p.folded ? { fold: true as const } : {}) });
     }
   }
 
@@ -1528,10 +1670,17 @@ export class LayoutStreamer {
     return this.placedByKey.get(key) ?? null;
   }
 
-  /** Whether the placement filed under a key is a building whose rooms the portal renderer draws (it takes no scale). */
+  /**
+   * Whether the placement filed under a key is a building whose rooms the portal renderer draws (it takes no scale): its
+   * building where one stands, on its own meshes or folded into its tier, else its model's entry by the stand's own rule
+   * (`standScale`), so a row whose tier has not loaded answers what its stand decided.
+   */
   placedHasRooms(key: string): boolean {
     const p = this.placedByKey.get(key);
-    return !!p && !!this.runtime.get(p)?.building;
+    if (!p) return false;
+    if (this.runtime.get(p)?.building || this.foldOf.get(p)?.building) return true;
+    const def = this.defOf(p.model, p.pack);
+    return !!def && !def.particle && !!def.cells?.some((c) => c.index > 0) && !!def.portals?.length;
   }
 
   /** The meshes `editorCopies` hid, per placement, to show again. */
@@ -1548,30 +1697,61 @@ export class LayoutStreamer {
    */
   editorCopies(key: string): THREE.InstancedMesh[] {
     const p = this.placedByKey.get(key);
-    const rec = p ? this.runtime.get(p) : undefined;
     const out: THREE.InstancedMesh[] = [];
+    if (!p) return out;
+    // A row folded into its tier has no meshes of its own: its copies are made of the bulk's meshes it is drawn by (one per
+    // geometry and material it holds a slot in, and its level group's finest level), once the tier's programs exist.
+    const fold = this.foldOf.get(p);
+    if (fold) {
+      if (!fold.tier.ready || fold.hidden === 2) return out;
+      const seen = new Set<string>();
+      const from: THREE.InstancedMesh[] = [];
+      for (const s of fold.slots) from.push(s.mesh);
+      if (fold.level) for (const m of fold.level.group.draws[0].meshes) from.push(m);
+      for (const m of from) {
+        const id = `${m.geometry.uuid}|${(m.material as THREE.Material).uuid}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const c = this.copyOf(m);
+        c.setMatrixAt(0, tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, p.scale ?? ONE));
+        c.instanceMatrix.needsUpdate = true;
+        out.push(c);
+      }
+      return out;
+    }
+    const rec = this.runtime.get(p);
     if (!rec) return out;
     for (const mesh of rec.meshes) {
       const m = mesh as THREE.InstancedMesh;
       if (!m.isInstancedMesh || !m.visible) continue;
-      const c = new THREE.InstancedMesh(m.geometry, m.material, 1);
+      const c = this.copyOf(m);
       c.instanceMatrix.copy(m.instanceMatrix);
       c.instanceMatrix.needsUpdate = true;
-      c.layers.mask = m.layers.mask;
-      if (m.layers.isEnabled(INTERIOR_LAYER) && !m.layers.isEnabled(0)) {
-        c.layers.set(0);
-        c.layers.enable(ACTOR_LAYER);
-      }
-      c.castShadow = m.castShadow;
-      c.receiveShadow = m.receiveShadow;
-      c.renderOrder = m.renderOrder;
-      c.frustumCulled = false;
-      c.userData = { ...m.userData };
-      this.scene.add(c);
-      this.editorOut.add(c);
       out.push(c);
     }
     return out;
+  }
+
+  /**
+   * One copy of a drawn instanced mesh for the editor's live picture, on its geometry, material and layers (a room's
+   * furniture's on the world's and the actors', what the furniture switch's old rule draws it with), hung in the scene,
+   * never culled, and remembered so a world going takes it out (`editorOut`). Its one matrix is the caller's.
+   */
+  private copyOf(m: THREE.InstancedMesh): THREE.InstancedMesh {
+    const c = new THREE.InstancedMesh(m.geometry, m.material, 1);
+    c.layers.mask = m.layers.mask;
+    if (m.layers.isEnabled(INTERIOR_LAYER) && !m.layers.isEnabled(0)) {
+      c.layers.set(0);
+      c.layers.enable(ACTOR_LAYER);
+    }
+    c.castShadow = m.castShadow;
+    c.receiveShadow = m.receiveShadow;
+    c.renderOrder = m.renderOrder;
+    c.frustumCulled = false;
+    c.userData = { ...m.userData };
+    this.scene.add(c);
+    this.editorOut.add(c);
+    return c;
   }
 
   /**
@@ -1598,6 +1778,13 @@ export class LayoutStreamer {
   setEditorHidden(key: string, hidden: boolean): void {
     const p = this.placedByKey.get(key);
     if (!p) return;
+    // A row folded into its tier: its slots hidden in place (its meshes alone, as a runtime row's are), or shown again.
+    const fold = this.foldOf.get(p);
+    if (fold) {
+      if (hidden) this.hideInPlace(p, false);
+      else if (fold.hidden === 1) this.showInPlace(p);
+      return;
+    }
     if (hidden) {
       const rec = this.runtime.get(p);
       if (!rec || this.editorHidden.has(p)) return;
@@ -1614,6 +1801,128 @@ export class LayoutStreamer {
     if (!was) return;
     this.editorHidden.delete(p);
     for (const m of was) m.visible = true;
+  }
+
+  /**
+   * A folded row hidden where it stands (DESIGN.md §2.8), since a copy cannot be taken out of an instanced mesh: at each of
+   * its slots a matrix of **scale nought at the copy's own place** is written (never a zero matrix, which would grow the
+   * shadow batch's sphere and the mesh's own to the world's origin, where three could no longer cull them per cascade),
+   * the matrices it had kept to put back to the bit; its copy in a level group held at nothing; its basin water's meshes
+   * hidden. With `whole` (it is taken down: `unplace`) its effects and water are taken away and its building's rooms
+   * dropped and the building let go of as well. The tier's instance count is never counted off and no shared mesh is
+   * disposed: the slot is still held. Answers whether it was a folded row. Not a frame's work: an edit.
+   */
+  hideInPlace(o: PlacedObject, whole: boolean): boolean {
+    const r = this.foldOf.get(o);
+    if (!r) return false;
+    if (r.hidden === 0) {
+      // The slots' own matrices kept, then each written as the copy's place at no size.
+      const saved = r.saved ?? (r.saved = new Float32Array(r.slots.length * 16));
+      for (let k = 0; k < r.slots.length; k++) {
+        const { mesh, i } = r.slots[k];
+        const a = mesh.instanceMatrix.array as Float32Array;
+        const e = i * 16;
+        for (let j = 0; j < 16; j++) saved[k * 16 + j] = a[e + j];
+        a[e] = a[e + 1] = a[e + 2] = 0;
+        a[e + 4] = a[e + 5] = a[e + 6] = 0;
+        a[e + 8] = a[e + 9] = a[e + 10] = 0;
+        mesh.instanceMatrix.needsUpdate = true;
+      }
+      if (r.level) r.level.group.setHidden(r.level.i, true);
+      for (const w of r.waters) if (w.h) w.h.mesh.visible = false;
+      r.hidden = 1;
+    }
+    if (whole && r.hidden === 1) {
+      if (this.effects) {
+        for (const f of r.fx) {
+          if (!f.h) continue;
+          this.effects.remove(f.h);
+          const at = r.tier.effects.indexOf(f.h);
+          if (at >= 0) r.tier.effects.splice(at, 1);
+          f.h = null;
+        }
+      }
+      for (const w of r.waters) {
+        if (!w.h) continue;
+        w.h.remove();
+        const at = r.tier.waters.indexOf(w.h);
+        if (at >= 0) r.tier.waters.splice(at, 1);
+        w.h = null;
+      }
+      const b = r.building;
+      if (b) {
+        this.dropInterior(b);
+        this.buildings.delete(b);
+        const at = r.tier.buildings.indexOf(b);
+        if (at >= 0) r.tier.buildings.splice(at, 1);
+        if (this.lastInside === b) this.lastInside = null;
+      }
+      r.hidden = 2;
+    }
+    return true;
+  }
+
+  /**
+   * A row hidden in place shown again, as `hideInPlace` left it: its slots' matrices put back to the bit, its level copy
+   * picked by the next sweep (asked for now), its water's meshes shown, and where it was taken down whole its effects
+   * placed again, its water made again (prepared before it shows) and its building stood again, its rooms built by the
+   * next interiors sweep. Answers whether there was anything to show. The world editor's live hide given up, and a
+   * removal undone (the fifth wave's hidden world objects).
+   */
+  showInPlace(o: PlacedObject): boolean {
+    const r = this.foldOf.get(o);
+    if (!r || r.hidden === 0) return false;
+    const saved = r.saved;
+    for (let k = 0; k < r.slots.length; k++) {
+      const { mesh, i } = r.slots[k];
+      if (!saved) break;
+      const a = mesh.instanceMatrix.array as Float32Array;
+      const e = i * 16;
+      for (let j = 0; j < 16; j++) a[e + j] = saved[k * 16 + j];
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+    if (r.level) {
+      r.level.group.setHidden(r.level.i, false);
+      this.levelForce = true;
+    }
+    if (r.hidden === 2) {
+      if (this.effects) {
+        for (const f of r.fx) {
+          if (f.h) continue;
+          f.h = this.effects.place(f.file, f.m, f.contained);
+          r.tier.effects.push(f.h);
+        }
+      }
+      const made: THREE.Object3D[] = [];
+      for (const w of r.waters) {
+        if (w.h || !this.waterSurface) continue;
+        const h = this.waterSurface(w.geometry, tmpM.compose(tmpV.set(o.x, o.y, o.z), o.q, o.scale ?? ONE), w.name);
+        if (!h) continue;
+        w.h = h;
+        r.tier.waters.push(h);
+        if (this.prepare) {
+          h.mesh.visible = false;
+          made.push(h.mesh);
+        }
+      }
+      if (made.length && this.prepare) {
+        const tier = r.tier;
+        void this.prepare(made).then(
+          () => {
+            if (r.hidden === 0 && r.tier === tier) for (const m of made) m.visible = true;
+          },
+          () => undefined,
+        );
+      }
+      const b = r.building;
+      if (b && !this.buildings.has(b)) {
+        this.buildings.add(b);
+        r.tier.buildings.push(b);
+        this.lastInteriorX = Number.NaN;
+      }
+    } else if (r.tier.ready) for (const w of r.waters) if (w.h) w.h.mesh.visible = true;
+    r.hidden = 0;
+    return true;
   }
 
   /** A model for the world editor's hand, loaded through whichever pack carries it, `pack` looked in first where given. */
@@ -1712,6 +2021,9 @@ export class LayoutStreamer {
       ...(row.effectsOf ? { effectsOf: row.effectsOf } : {}),
       ...(crossWorld ? { pack: from } : {}),
       ...(sized.scale ? { scale: sized.scale } : {}),
+      // A permanent row folds into its tier's bulk where its tier is built with its model in (DESIGN.md §2.8): the one
+      // caller that asks, so every other placement's path is as it was.
+      fold: true,
     });
     return { bounds, built, ...(sized.note ? { note: sized.note } : {}) };
   }
@@ -1836,12 +2148,14 @@ export class LayoutStreamer {
     const room = this.roomRange();
     for (const region of this.regions.values()) {
       const d = boxDistance(px, pz, region.cx, region.cz);
+      // A region a world's permanent rows fall in waits for them to be filed (`holdRegions`).
+      const held = this.held.size > 0 && this.held.has(regionNumber(region.rx, region.rz));
       for (let t = 0; t < TIERS.length; t++) {
         const state = region.tiers[t];
         if (!region.objects[t].length) continue;
         const range = this.rangeOf(region, t, room);
         if (d <= range) {
-          if (state === null) candidates.push({ region, tier: t, d });
+          if (state === null && !held) candidates.push({ region, tier: t, d });
         } else if (state && state !== 'loading' && d > range * UNLOAD_SLACK) {
           this.unloadTier(region, t);
         }
@@ -1863,6 +2177,68 @@ export class LayoutStreamer {
   /** Scale the ranges the tiers load out to; what is now out of range drops on the next update, what is in loads. */
   setReach(scale: number): void {
     this.ranges = TIERS.map((t) => t.range * scale);
+  }
+
+  /**
+   * Hold the tiers of the regions these points of the game's frame fall in from loading (DESIGN.md §2.8): a world's
+   * permanent rows, known from its files before the streamer's first update, so they are filed into tiers not yet built
+   * and fold into them as the snapshot's own objects do. Every other region loads as it always has, so an arrival is
+   * held only where a row stands; a world with no rows holds nothing. A tier of a region newly held that has begun to load
+   * already (the frame loop updates a world's streamer from the moment it is made, and an arrival awaits its files and, in
+   * space, its effects before it holds) is let go -- one still loading its models stands nothing once they are in, one
+   * built is taken down -- and built again with the rows once the region is let go, or the rows filed into it meanwhile
+   * would each be drawn on meshes of their own. Answers how many regions are held.
+   */
+  holdRegions(points: readonly { x: number; z: number }[]): number {
+    for (const p of points) {
+      if (!Number.isFinite(p.x) || !Number.isFinite(p.z)) continue;
+      const rx = regionIndex(p.x);
+      const rz = regionIndex(p.z);
+      const n = regionNumber(rx, rz);
+      if (this.held.has(n)) continue;
+      this.held.add(n);
+      const region = this.regions.get(`${rx},${rz}`);
+      if (!region) continue;
+      for (let t = 0; t < TIERS.length; t++) {
+        const s = region.tiers[t];
+        if (s === 'loading') {
+          region.tiers[t] = null;
+          region.builds[t]++;
+        } else if (s) this.unloadTier(region, t);
+      }
+    }
+    return this.held.size;
+  }
+
+  /** The held regions let go: their tiers load at the next update, with whatever was filed into them meanwhile. */
+  releaseRegions(): void {
+    this.held.clear();
+  }
+
+  /** How many regions are held now. */
+  get heldRegions(): number {
+    return this.held.size;
+  }
+
+  /**
+   * The permanent rows drawn one by one now -- each on meshes of its own (`addToTier`), filed while its tier stood or
+   * with a model its tier had not loaded -- how many meshes they make, and what they cost a frame by the measured rate
+   * (`FOLD_MS_PER_MESH`): what a Fold now would take off the frame. Counted as the records are made, never walked.
+   */
+  unfoldedReport(): { rows: number; meshes: number; estMs: number; folded: number; held: number } {
+    let hidden = 0;
+    for (const r of this.foldOf.values()) if (r.hidden === 2) hidden++;
+    return { rows: this.unfoldedRows, meshes: this.unfoldedMeshes, estMs: Math.round(this.unfoldedMeshes * FOLD_MS_PER_MESH * 100) / 100, folded: this.foldOf.size - hidden, held: this.held.size };
+  }
+
+  /** How many permanent rows are drawn one by one now (`unfoldedReport`'s rows), read with nothing walked. */
+  get unfoldedCount(): number {
+    return this.unfoldedRows;
+  }
+
+  /** What they cost a frame by the measured rate, milliseconds (`unfoldedReport`'s estimate), read with nothing walked. */
+  get unfoldedMs(): number {
+    return this.unfoldedMeshes * FOLD_MS_PER_MESH;
   }
 
   /**
@@ -1987,15 +2363,20 @@ export class LayoutStreamer {
    * into its tier when that loads, as it does on arrival. It takes the floor from under anyone standing on a
    * placed object and the room from under anyone inside one, so the world calls it only behind a loading
    * screen and puts the player back in their room after (`World.refilePlaced`). Answers whether it changed
-   * anything.
+   * anything. `force` files again under the rule already in force: the world editor's Fold now (DESIGN.md §2.8), after
+   * which every tier is built again with the permanent rows filed in it, so they fold into the bulk.
    */
-  refile(rule: 'model' | 'snapshot'): boolean {
-    if (this.disposed || rule === this.filingRule) return false;
+  refile(rule: 'model' | 'snapshot', force = false): boolean {
+    if (this.disposed || (rule === this.filingRule && !force)) return false;
     for (const region of this.regions.values()) {
       for (let t = 0; t < TIERS.length; t++) {
         const s = region.tiers[t];
-        if (s === 'loading') region.tiers[t] = null;
-        else if (s) this.unloadTier(region, t);
+        // A build still loading its models is let go (its count moved), so it stands nothing once they are in, whatever
+        // build of the new list has begun by then.
+        if (s === 'loading') {
+          region.tiers[t] = null;
+          region.builds[t]++;
+        } else if (s) this.unloadTier(region, t);
       }
     }
     this.filingRule = rule;
@@ -2198,6 +2579,9 @@ export class LayoutStreamer {
         if (d > Math.min(this.rangeOf(region, t, room), within)) continue;
         const state = region.tiers[t];
         if (state === null || state === 'loading') return false;
+        // And the placements still being built into it (`addToTier`): a tier counted in before them lifted a loading
+        // screen on rows that filled in for minutes after (DESIGN.md §2.8).
+        if (state.building > 0) return false;
       }
     }
     return true;
@@ -2227,9 +2611,14 @@ export class LayoutStreamer {
       }
       if (this.disposed || region.tiers[tier] !== loaded) return;
       for (const mesh of loaded.meshes) this.reveal(mesh);
+      // A folded row hidden in place while its tier was being prepared stays hidden: its water was hidden by its record.
+      if (loaded.folds) for (const r of loaded.folds.values()) if (r.hidden !== 0) for (const w of r.waters) if (w.h) w.h.mesh.visible = false;
     }
     // Shown, its still casters go to the shadow batches (with no `prepare` they were shown as they were made).
-    if (!this.disposed && region.tiers[tier] === loaded) this.batchTier(loaded);
+    if (!this.disposed && region.tiers[tier] === loaded) {
+      loaded.ready = true;
+      this.batchTier(loaded);
+    }
   }
 
   /** What the shadow batches are, for the streamer (`shadowBatches.ts`); null leaves every caster as it was. */
@@ -2257,25 +2646,35 @@ export class LayoutStreamer {
   /** The loading half of a tier, holding one of the streamer's slots for exactly as long as it loads. */
   private async buildTier(region: Region, tier: number): Promise<LoadedTier | null> {
     region.tiers[tier] = 'loading';
+    // This build's own count (`Region.builds`): after every await it is the tier's only while the count is still this.
+    const build = ++region.builds[tier];
     this.loads++;
     try {
       const objects = region.objects[tier];
-      // A row out of another world (`pack`) is always a placement made in play, built by `addToTier` out of its own
-      // pack; asked for here by its bare id it would be looked for in this world's and noted as failed.
-      const ids = [...new Set(objects.filter((o) => !o.pack).map((o) => o.model))];
+      // The models its objects stand on, each loaded once, collected **before** the awaits: by id, and for a row out of
+      // another world (`pack`, a permanent row naming `from`) by that pack and id (`modelKey`), looked up in its own pack,
+      // so a folded Naboo tree on Tatooine is Naboo's even where Tatooine carries the same id. A row out of another world
+      // that is not folded is a placement made in play, built by `addToTier` out of its own pack.
+      const wanted = new Map<string, { id: string; pack: AssetPack | undefined }>();
+      for (const o of objects) {
+        if (o.pack && !o.folded) continue;
+        const key = this.modelKey(o);
+        if (!wanted.has(key)) wanted.set(key, { id: o.model, pack: o.pack });
+      }
       const models = new Map<string, LoadedModel>();
-      for (const id of ids) {
+      for (const [key, w] of wanted) {
         // Particle effects have no mesh to load; the effect player fetches their descriptions.
-        if (this.defOf(id)?.particle) continue;
+        if (this.defOf(w.id, w.pack)?.particle) continue;
         try {
-          models.set(id, await this.modelOf(id));
+          models.set(key, await this.modelOf(w.id, w.pack));
         } catch (err) {
           // Missing or broken model: its instances are skipped, once noted.
-          this.noteFailed(id, err);
+          this.noteFailed(w.id, err);
         }
         if (this.disposed) return null;
       }
-      if (region.tiers[tier] !== 'loading') return null;
+      // Let go meanwhile (`refile`, `holdRegions`): the `'loading'` there now may be a newer build's, over a list of its own.
+      if (region.tiers[tier] !== 'loading' || region.builds[tier] !== build) return null;
       // Anything a player put down is left out of the bulk build and added one at a time below.
       //
       // The bulk build makes **one instanced mesh per model for every copy of it**, and a copy cannot
@@ -2285,8 +2684,16 @@ export class LayoutStreamer {
       // `unplace` took nothing out: picking a prop back up left it standing and putting it down again
       // made a second one. Every prop stood on arrival was in exactly that state, since a world is
       // arrived in long before its tiers are built.
-      const runtimePlaced = objects.filter((o) => this.placedByKey.get(o.template) === o);
-      const bulk = runtimePlaced.length ? objects.filter((o) => this.placedByKey.get(o.template) !== o) : objects;
+      //
+      // Except a permanent row (`folded`, DESIGN.md §2.8), which goes into the bulk -- instanced, levelled and batched for
+      // the shadow pass with the snapshot's own -- **only when its model was loaded before this split**: the models were
+      // collected before the awaits above and the split is of the region's live array after them, so a row filed while the
+      // tier was loading whose model nothing else here uses is not in `models`, and the bulk would draw and collide nothing
+      // of it. That one takes the runtime path as any placement does. A folded row taken down is hidden in place
+      // (`hideInPlace`), which is what keeps the bug above from coming back.
+      const runtimePlaced = objects.filter((o) => this.placedByKey.get(o.template) === o && !(o.folded && models.has(this.modelKey(o))));
+      const runtimeSet = runtimePlaced.length ? new Set(runtimePlaced) : null;
+      const bulk = runtimeSet ? objects.filter((o) => !runtimeSet.has(o)) : objects;
       const loaded = this.instance(bulk, models);
       // The tier's list is the region's own array, runtime placements and all; only the instanced meshes are
       // the bulk's. `place` pushes into it and `unplace` splices out of it, and the collider sweep and
@@ -2314,14 +2721,15 @@ export class LayoutStreamer {
       return loaded;
     } finally {
       this.loads--;
-      if (region.tiers[tier] === 'loading') region.tiers[tier] = null;
+      // Only this build's `'loading'`: a newer build's is its own to end.
+      if (region.tiers[tier] === 'loading' && region.builds[tier] === build) region.tiers[tier] = null;
     }
   }
 
   private instance(objects: PlacedObject[], models: Map<string, LoadedModel>): LoadedTier {
     const byModel = new Map<LoadedModel, PlacedObject[]>();
     for (const o of objects) {
-      const m = models.get(o.model);
+      const m = models.get(this.modelKey(o));
       if (m) (byModel.get(m) ?? byModel.set(m, []).get(m)!).push(o);
     }
     const meshes: THREE.Object3D[] = [];
@@ -2331,28 +2739,49 @@ export class LayoutStreamer {
     const furniture: LoadedTier['furniture'] = [];
     const levels: LevelGroup[] = [];
     const localFx = new THREE.Matrix4();
+    // The tier made first, so a folded row's record names it; its counts are written at the end.
+    const loaded: LoadedTier = { meshes, buildings, objects, effects, waters, furniture, levels, instances: 0, bulk: 0, batch: null, folds: null, building: 0, ready: !this.prepare };
+    // What the bulk makes of each permanent row folded into it (`FoldRec`), made the first time it is met: none at all for a
+    // tier of snapshot objects alone.
+    const folds = new Map<PlacedObject, FoldRec>();
+    const foldRec = (p: PlacedObject): FoldRec => {
+      let r = folds.get(p);
+      if (!r) {
+        r = { tier: loaded, slots: [], level: null, fx: [], waters: [], building: null, saved: null, hidden: 0 };
+        folds.set(p, r);
+        this.foldOf.set(p, r);
+      }
+      return r;
+    };
+    // An effect placed for a copy; a folded row's kept with what places it again (`showInPlace`).
+    const placeFx = (p: PlacedObject, file: string, m: THREE.Matrix4, contained: boolean): void => {
+      const h = this.effects!.place(file, m, contained);
+      effects.push(h);
+      if (p.folded) foldRec(p).fx.push({ file, m: m.clone(), contained, h });
+    };
     if (this.effects) {
       for (const o of objects) {
-        const def = this.defOf(o.model);
+        const def = this.defOf(o.model, o.pack);
         if (def?.particle) effects.push(this.effects.place(this.effectFile(def, def.file), tmpM.compose(tmpV.set(o.x, o.y, o.z), o.q, ONE), o.contained));
       }
     }
     for (const [model, list] of byModel) {
-      // A model's attached effects (lamps, fountains, chimneys) play at every placed copy.
+      // A model's attached effects (lamps, fountains, chimneys) play at every placed copy: where its scale puts them, at
+      // their own size (`scaleFree`, which hands a matrix with no scale back untouched).
       if (this.effects && model.def.effects?.length) {
         for (const p of list) {
-          tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
-          for (const fx of model.def.effects) effects.push(this.effects.place(this.effectFile(model.def, fx.file), localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.contained || (fx.cell ?? 0) > 0));
+          tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, p.scale ?? ONE);
+          for (const fx of model.def.effects) placeFx(p, this.effectFile(model.def, fx.file), scaleFree(localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.scale), p.contained || (fx.cell ?? 0) > 0);
         }
       }
       // And what each placed copy's client data hangs on it, which differs between templates that
-      // share this model (one streetlamp mesh carries four colours of lamp).
+      // share this model (one streetlamp mesh carries four colours of lamp); a row out of another world, its world's.
       if (this.effects) {
         for (const p of list) {
-          const own = this.templateEffects(p.effectsOf ?? p.template);
+          const own = this.templateEffects(p.effectsOf ?? p.template, p.pack);
           if (!own.length) continue;
-          tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
-          for (const fx of own) effects.push(this.effects.place(fx.file, localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.contained));
+          tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, p.scale ?? ONE);
+          for (const fx of own) placeFx(p, fx.file, scaleFree(localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.scale), p.contained);
         }
       }
       const isBuilding = model.interiorBoxes.length > 0;
@@ -2363,6 +2792,7 @@ export class LayoutStreamer {
         const b: Building = { model, template: p.template, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [], interiorBuilt: false, object: p, furniture: this.furnitureList(p) };
         buildings.push(b);
         this.buildings.add(b);
+        if (p.folded) foldRec(p).building = b;
         return b;
       });
       // Step 7: a model whose pack carries the client's lower detail levels has its copies out in the open
@@ -2370,7 +2800,14 @@ export class LayoutStreamer {
       // the finest, drawn with their rooms. A model holding a basin's water is left as it was: the water
       // system takes that piece copy by copy, which a level's shared store cannot follow.
       const levelled = this.levelled(model) ? list.filter((p) => !p.contained) : null;
-      if (levelled && levelled.length) levels.push(this.levelGroup(model, levelled, meshes));
+      if (levelled && levelled.length) {
+        // A group a size (`sizeBuckets`): one, of exactly these copies, wherever none is a scaled row.
+        for (const copies of sizeBuckets(levelled)) {
+          const g = this.levelGroup(model, copies, meshes);
+          levels.push(g);
+          for (let i = 0; i < copies.length; i++) if (copies[i].folded) foldRec(copies[i]).level = { group: g, i };
+        }
+      }
       for (const prim of model.primitives) {
         // Interiors of portal buildings are drawn per building and per cell by the portal renderer,
         // so each placed building gets its own meshes; a building without portal data draws normally.
@@ -2382,12 +2819,24 @@ export class LayoutStreamer {
         if (!all.length) continue;
         // A fountain's or a pool's water standing out in the open is the water system's: a body per
         // copy, prepared with the tier's own meshes. One in a room stays the model's, since the room
-        // pass draws what stands indoors and a world water body is not drawn there.
+        // pass draws what stands indoors and a world water body is not drawn there. A copy stretched along
+        // one axis keeps the model's own water, as a runtime placement's does: a water body is level and round.
         if (this.waterSurface && prim.cell <= 0 && isBasinWater(prim.material)) {
           const before = waters.length;
-          const refused = this.basinWater(prim, all.filter((p) => !p.contained), model.def.id, waters);
+          const open = all.filter((p) => !p.contained && isUniform(p.scale));
+          const refused = this.basinWater(prim, open, model.def.id, waters);
+          // The water each folded copy was given, in the order `basinWater` gave it (the copies it did not refuse).
+          if (open.some((p) => p.folded)) {
+            const no = new Set(refused);
+            let k = before;
+            for (const p of open) {
+              if (no.has(p)) continue;
+              const h = waters[k++];
+              if (p.folded) foldRec(p).waters.push({ geometry: prim.geometry, name: model.def.id, h });
+            }
+          }
           for (let i = before; i < waters.length; i++) meshes.push(waters[i].mesh);
-          all = [...all.filter((p) => p.contained), ...refused];
+          all = [...all.filter((p) => p.contained || !isUniform(p.scale)), ...refused];
           if (!all.length) continue;
         }
         // Indoor and outdoor copies of one model go in **separate** meshes, because only the indoor
@@ -2400,15 +2849,20 @@ export class LayoutStreamer {
         // old rule made it, is built beside those and drawn instead while the furniture switch is off
         // (`splitCopies`): it shares their geometry, their material and so their programs, and the old
         // way is one flip away rather than a third more meshes than it ever drew.
-        for (const { list: instanced, role, host } of splitCopies<PlacedObject, PlacedObject>(all)) {
+        // And a mesh a size (`sizeBuckets`): exactly `all` wherever none is a scaled row.
+        for (const sized of sizeBuckets(all))
+        for (const { list: instanced, role, host } of splitCopies<PlacedObject, PlacedObject>(sized)) {
         const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, instanced.length);
         instanced.forEach((p, i) => {
-          tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
+          // At its scale where it has one (a folded permanent row's), and its slot kept so it can be hidden in place.
+          tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, p.scale ?? ONE);
           mesh.setMatrixAt(i, tmpM);
+          if (p.folded) foldRec(p).slots.push({ mesh, i });
         });
         // Objects placed inside buildings draw in every pass, like actors, so they show with the room.
         if (instanced[0].contained) mesh.layers.enable(ACTOR_LAYER);
-        stampCaster(mesh, model.radius, flora || wearsCard(prim.material), 0);
+        // Cast by the rule at the size its biggest copy stands (a folded row stood larger; the model's own otherwise).
+        stampCaster(mesh, scaledRadius(model.radius, instanced), flora || wearsCard(prim.material), 0);
         mesh.castShadow = stampedCasts(mesh);
         // A translucent fall or screen draws after the terrain water, which follows the player and
         // so always sorts nearer than this mesh's centre of all its placements.
@@ -2429,7 +2883,10 @@ export class LayoutStreamer {
     }
     this.loadedModels += byModel.size;
     this.loadedInstances += objects.length;
-    return { meshes, buildings, objects, effects, waters, furniture, levels, instances: objects.length, bulk: meshes.length, batch: null };
+    loaded.instances = objects.length;
+    loaded.bulk = meshes.length;
+    loaded.folds = folds.size ? folds : null;
+    return loaded;
   }
 
   /** Whether each loaded model's pack files it as flora, asked once a model (`packFlora`). */
@@ -2530,6 +2987,8 @@ export class LayoutStreamer {
     const radius = Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) / 2;
     const made: THREE.InstancedMesh[] = [];
     const flora = this.packFlora(model);
+    // Cast by the rule at the size its biggest copy stands (a folded row stood larger; the model's own otherwise).
+    const casterRadius = scaledRadius(model.radius, copies);
     const g = new LevelGroup(
       copies,
       model.levels!,
@@ -2537,7 +2996,7 @@ export class LayoutStreamer {
       radius,
       (prim, n, level) => {
         const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, n);
-        stampCaster(mesh, model.radius, flora || wearsCard(prim.material), level);
+        stampCaster(mesh, casterRadius, flora || wearsCard(prim.material), level);
         mesh.castShadow = stampedCasts(mesh);
         if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
         mesh.receiveShadow = true;
@@ -2682,8 +3141,27 @@ export class LayoutStreamer {
    * already expect to be handed -- and `runtime` remembers them so that taking it away is exact.
    */
   private async addToTier(loaded: LoadedTier, p: PlacedObject): Promise<Building | null> {
-    const rec: RuntimeRec = { tier: loaded, meshes: [], building: null, effects: [], waters: [], furniture: [] };
+    // Under way until it is shown or given up: what `settled` waits for within its tier's range.
+    loaded.building++;
+    try {
+      return await this.addToTierNow(loaded, p);
+    } finally {
+      loaded.building--;
+    }
+  }
+
+  /** A permanent row drawn on meshes of its own no longer: taken off the unfolded count (`unfoldedRows`). */
+  private forgetUnfolded(p: PlacedObject, rec: RuntimeRec): void {
+    if (!p.folded) return;
+    this.unfoldedRows--;
+    this.unfoldedMeshes -= rec.counted;
+    rec.counted = 0;
+  }
+
+  private async addToTierNow(loaded: LoadedTier, p: PlacedObject): Promise<Building | null> {
+    const rec: RuntimeRec = { tier: loaded, meshes: [], building: null, effects: [], waters: [], furniture: [], counted: 0 };
     this.runtime.set(p, rec);
+    if (p.folded) this.unfoldedRows++;
     this.loadedInstances++;
     loaded.instances++;
     const def = this.defOf(p.model, p.pack);
@@ -2764,6 +3242,11 @@ export class LayoutStreamer {
         loaded.furniture.push(entry);
       }
     }
+    // A permanent row drawn on meshes of its own until a fold takes it into its tier: its meshes counted for the bar.
+    if (p.folded) {
+      rec.counted = rec.meshes.length;
+      this.unfoldedMeshes += rec.counted;
+    }
     // A house is put down where somebody is standing, so its rooms are wanted now rather than at the
     // next sweep. NaN before the first sweep, which fails the test and leaves it to the sweep. With a
     // prepare, they are made held and compiled with its shell (`buildInterior`'s `hold`), and given to the
@@ -2798,7 +3281,12 @@ export class LayoutStreamer {
       const rec = this.runtime.get(p);
       this.runtime.delete(p);
       this.removeColliders(p);
-      if (!rec) continue;
+      // A row folded into its tier's bulk is hidden where it stands, its slot still held (`hideInPlace`).
+      if (!rec) {
+        this.hideInPlace(p, true);
+        continue;
+      }
+      this.forgetUnfolded(p, rec);
       tiers.add(rec.tier);
       if (rec.building) {
         this.dropInterior(rec.building);
@@ -2846,7 +3334,12 @@ export class LayoutStreamer {
     const rec = this.runtime.get(p);
     this.runtime.delete(p);
     this.removeColliders(p);
-    if (!rec) return;
+    // A row folded into its tier's bulk is hidden where it stands, its slot still held (`hideInPlace`).
+    if (!rec) {
+      this.hideInPlace(p, true);
+      return;
+    }
+    this.forgetUnfolded(p, rec);
     if (rec.building) {
       this.dropInterior(rec.building);
       this.buildings.delete(rec.building);
@@ -3050,8 +3543,12 @@ export class LayoutStreamer {
       this.removeColliders(o);
       // Anything placed in play that rode this tier goes with it, and its record with it, or a
       // later removal would take its meshes out twice and count its instance off twice.
+      const rec = this.runtime.get(o);
+      if (rec) this.forgetUnfolded(o, rec);
       this.runtime.delete(o);
     }
+    // What the bulk made of the rows folded into it goes with it (the slots of rows taken down meanwhile among them).
+    if (t.folds) for (const o of t.folds.keys()) this.foldOf.delete(o);
     // A huge object whose pieces were still being built stops being built.
     if (this.hugeQueue.length) {
       let keep = 0;
@@ -3109,8 +3606,9 @@ export class LayoutStreamer {
     // A permanent row of a flora model (a tree the world editor put down, out of this world or another) is solid as a
     // planting of it is, at the shapes the client authored for it (`rowFloraParts`): its trunk, a rock's cylinders,
     // nothing at all for one the client walked through. Every triangle of a placed tree was a collider, its canopy a
-    // ceiling to walk on. Only for permanent rows: the snapshot's own placed trees keep their trimesh.
-    if (o.template.startsWith(PLACEMENT_KEY_PREFIX) && this.packFlora(model)) {
+    // ceiling to walk on. Only for permanent rows: the snapshot's own placed trees keep their trimesh unless the knob says
+    // `'extent'` (`FLORA_COLLISION.placed`, to compare; changing the world's own trees is not the editor's pass).
+    if ((o.template.startsWith(PLACEMENT_KEY_PREFIX) || FLORA_COLLISION.placed === 'extent') && this.packFlora(model)) {
       // At the row's one scale (a flora row's three were taken as its largest when it was stood).
       const m = tmpM.compose(tmpV.set(o.x, o.y, o.z), o.q, o.scale ?? ONE);
       const parts = rowFloraParts(model.def, m.elements, largestAxis(o.scale), model.radius, model.height, o.y, FLORA_COLLISION);
@@ -3180,6 +3678,22 @@ export class LayoutStreamer {
     // Invisible to a query until the world has stepped: `builtAt` counts nothing solid until then.
     this.collidersMadeAt = this.physics.steps;
     this.noteBlocker(o);
+  }
+
+  /**
+   * The placed flora's colliders made again by the rule in force (`FLORA_COLLISION.placed` moved, `__debug.flora({
+   * collision: { placed } })`): every placed object of a flora model with collision now let go, the sweep building them
+   * again on the next update. A console's work, never a frame's. Answers how many were let go.
+   */
+  refreshPlacedFlora(): number {
+    const going: PlacedObject[] = [];
+    for (const o of this.colliders.keys()) {
+      const m = this.loadedOf(o.model, o.pack);
+      if (m && this.packFlora(m)) going.push(o);
+    }
+    for (const o of going) this.removeColliders(o);
+    this.lastColliderX = Number.NaN;
+    return going.length;
   }
 
   private removeColliders(o: PlacedObject): void {
@@ -3696,5 +4210,7 @@ export class LayoutStreamer {
     this.furnitureByHost.clear();
     this.furnitureSwaps.clear();
     this.levelGroups.length = 0;
+    this.foldOf.clear();
+    this.held.clear();
   }
 }

@@ -136,7 +136,8 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/this\.edits\.clock\.dt = dt;\s*this\.edits\.keys\(this\.window\?\.library\.typing \?\? false\);\s*\}/.test(ed), "the editing keys are read in the key block, the frame's seconds in the kept clock, before the mutes take what they borrow");
   // This round's hand-overs (the fixer's), which the editing class's own test makes for itself.
   const click = after(ed, '  canvasClick(): void {', 600);
-  ok(/if \(this\.hand \|\| !this\.pointer\.clicked\) return;\s*if \(this\.aim\.hover \|\| this\.edits\.handleHot \|\| !this\.edits\.clickGoesToFly\(\)\) return;\s*this\.pointer\.clicked = false;\s*this\.setPoint\(false\);/.test(click), "a plain click on empty ground in Point goes to Fly by the click alone (`clickGoesToFly`: nothing picked), never by whether a frame has seen the press");
+  // Widened in the third wave on purpose: with the brush armed a click paints and never goes to Fly.
+  ok(/if \(this\.hand \|\| this\.brush\.armed \|\| !this\.pointer\.clicked\) return;\s*if \(this\.aim\.hover \|\| this\.edits\.handleHot \|\| !this\.edits\.clickGoesToFly\(\)\) return;\s*this\.pointer\.clicked = false;\s*this\.setPoint\(false\);/.test(click), "a plain click on empty ground in Point goes to Fly by the click alone (`clickGoesToFly`: nothing picked), never by whether a frame has seen the press, nor while the brush is armed");
   ok(/if \(live\.snap\) \{\s*const s = EDITOR_TUNE\.snap;\s*this\.edits\.snapOn = s\.on;\s*if \(s\.grid > 0\) this\.edits\.grid = s\.grid;\s*if \(s\.angle > 0\) this\.edits\.angle = s\.angle;\s*\}/.test(ed), "a moved snap tune (the console's or a slider's) reaches the snapping live");
   ok(/roomAt: \(x, y, z\) => \{\s*const s = w\.streamer;\s*if \(!s\) return false;\s*roomAsk\.set\(x, y, z\);\s*s\.cameraRoomAt\(roomAsk, roomAnswer, floorUnder\);\s*return !!roomAnswer\.building;\s*\},/.test(ed), "a row's room where it moves to is asked by the very rule a thing put down is written by (`cameraRoomAt` with `floorUnder`)");
   ok(/dropCopies: \(c\) => dropCopiesAnyway\(w\.streamer, c\),/.test(ed) && /function dropCopiesAnyway\([\s\S]{0,200}?\): void \{\s*if \(stream\) stream\.dropEditorCopies\(copies\);\s*for \(const c of copies\) \{\s*if \(!c\.parent\) continue;\s*c\.removeFromParent\(\);\s*c\.dispose\(\);/.test(ed), "the editor's copies are taken away with or without a streamer standing (a write's release can come after a travel unloaded it)");
@@ -149,6 +150,36 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/this\.hoverM\.compose\(this\.tmp\.set\(hov\.x, hov\.y, hov\.z\), hov\.q, hov\.scale \?\? ONE\);/.test(ed), "the hover's box is drawn at the row's scale");
   const vite = read('vite.config.ts');
   ok(/const word = editFileOf\(/.test(vite) && /rev: revisionOfFile\(/.test(vite), "the dev server's watcher names a file's kind (`editFileOf`) and its revision");
+}
+
+{
+  // The third wave's hand-overs (folding, the forest and the brush), which the streamer's, the brush's and the editing's
+  // own tests each make for themselves.
+  ok(/try \{\s*await this\.standDressingHeld\(pack, gen\);\s*\} finally \{\s*this\.world\.releaseDressingHold\(gen\);\s*\}/.test(main), "an arrival's rows are filed with their regions held, and the hold is let go whatever comes of the stand (`finally`)");
+  ok(/for \(const k of circles\.game\) stream\.keepFloraOff\(k\.x, k\.z, k\.r\);\s*this\.holdDressing\(stream, circles\.hold, c\);/.test(world), "the world holds the regions its rows fall in as it loads");
+  {
+    // As soon as the rows' places are known, before the arrival's other waits (a space zone's effects and nebulae).
+    const load = after(world, '  async loadPack(', 60000);
+    const hold = load.indexOf('this.holdDressing(stream, circles.hold, c);');
+    ok(hold > 0 && hold > load.indexOf('this.layoutStream = new LayoutStreamer(') && hold < load.indexOf('await fx.prepare(f, this.renderer);') && hold < load.indexOf('await this.loadNebulae(pack);'), "and holds them before a space zone's effects and nebulae are awaited, with the streamer already made");
+  }
+  ok(/this\.holdDressing\(stream, circles\.hold, \{ x: 0, z: 0 \}\);/.test(world), "and so does a world with no pack of its own, about (0, 0)");
+  ok(/if \(!stream\.holdRegions\(points\)\) return;\s*this\.dressingHeld = stream;\s*setTimeout\(\(\) => \{\s*if \(this\.dressingHeld === stream\) this\.releaseDressingHold\(\);\s*\}, DRESSING_TUNE\.standWaitMs\);/.test(world), 'and lets them go after the stand\'s own wait at the latest');
+  ok(/releaseDressingHold\(gen = this\.loadGeneration\): void \{\s*if \(gen !== this\.loadGeneration\) return;/.test(world), "a release for a world since left lets nothing of the next one go");
+  ok(/fold: \(\) => this\.editorFold\(\),\s*busy: \(\) => this\.traveling \|\| !this\.inWorld,/.test(main), "the editor's Fold now is the game's curtain (`editorFold`), and it is told when the game is travelling");
+  const fold = after(main, '  private async editorFold(): Promise<string> {', 2600);
+  ok(fold.indexOf('this.loadingScreen.show(') > 0 && fold.indexOf('this.loadingScreen.show(') < fold.indexOf('this.world.refilePlaced(ls.filing, { force: true });') && /\} finally \{\s*await this\.loadingScreen\.hide\(/.test(fold), 'Fold now files every tier again behind the screen (shown first, hidden whatever comes of it)');
+  ok(fold.includes('compiled = await this.world.compileAllAsync(') && fold.indexOf('compileAllAsync(') < fold.indexOf('} finally {'), 'and builds what it made behind the screen');
+  ok(/if \(\(c\.placed === 'mesh' \|\| c\.placed === 'extent'\) && c\.placed !== FLORA_COLLISION\.placed\) \{[\s\S]{0,120}this\.world\.refreshPlacedFlora\(\);/.test(main), "the console's placed-flora collision rule makes the placed trees' colliders again");
+  const ed = read('src/editor/editorEntry.ts');
+  const aftercam = after(ed, '  afterCamera(dt: number): void {', 6000);
+  ok(/if \(brush\.armed\) \{[\s\S]{0,600}brush\.frame\(\);\s*\}\s*\/\/[^\n]*\n\s*this\.noteActivity\(now\);/.test(aftercam), "the brush's frame runs from the aim just cast, before the quiet the automatic fold waits for is noted");
+  ok(aftercam.indexOf('brushRing(ra, this.ringGround, vp, m.ring, m.ringVis);') > 0 && aftercam.indexOf('brushRing(') < aftercam.indexOf('this.edits.frame(m);'), "the brush's ring is projected from this frame's camera");
+  ok(/this\.giveUpHand\(\);\s*if \(this\.brush\.armed\) this\.brush\.disarm\(\);\s*this\.takeGen = gen;/.test(ed), 'taking a thing in hand lets the brush go');
+  ok(/if \(this\.brush\.armed\) \{\s*this\.brush\.disarm\(\);\s*this\.say\('the brush let go', true\);\s*return true;\s*\}/.test(after(ed, '  escape(): boolean {', 900)), 'Escape lets the brush go before it clears the selection');
+  ok(/worldGone\(\): void \{[\s\S]{0,200}this\.brush\.disarm\(\);/.test(ed) && /private leaveBody\([^)]*\): void \{\s*this\.giveUpHand\(\);\s*this\.brush\.disarm\(\);/.test(ed), 'the brush goes with the world and with the editor');
+  ok(/brushArmed: \(\) => me\.brush\.armed,/.test(ed), "the editing is told the brush is armed (no click picks, boxes or orbits meanwhile)");
+  ok(/if \(input\.pressedAction\('editorBrush'\)\) void this\.toggleBrush\(\);/.test(ed), 'B arms the brush and lets it go');
 }
 
 console.log(`\n${checks} checks passed`);

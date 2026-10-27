@@ -141,7 +141,10 @@ function method(text: string, signature: string): string {
   ok(/if \(this\.dying \|\| \(this\.traveling && !this\.curtainOnly\) \|\| !this\.inWorld\) this\.endComm\(\);/.test(main), "and so does the call's end");
   const reads = main.match(/[!=&|(]\s*this\.curtainOnly\b(?!\s*=[^=])/g) ?? [];
   const sets = main.match(/this\.curtainOnly = (true|false);/g) ?? [];
-  ok(reads.length === 2 && sets.length === 2, `and nothing else of the game reads it: two reads and the curtain's two sets (${reads.length} and ${sets.length})`);
+  // The world editor's Fold now (map-maker wave 3) is a curtain of the same kind, a moment and not a journey: its own two sets.
+  const fold = method(main, '  private async editorFold(): Promise<string> {');
+  const foldSets = fold.match(/this\.curtainOnly = (true|false);/g) ?? [];
+  ok(reads.length === 2 && sets.length === 4 && foldSets.length === 2, `and nothing else of the game reads it: two reads, the course curtain's two sets and the editor's Fold now's two (${reads.length}, ${sets.length} and ${foldSets.length})`);
 }
 
 // --- the sweep, the frame loop, the queue's own compiles -------------------------------------------------------------

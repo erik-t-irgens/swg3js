@@ -402,6 +402,87 @@ if (process.argv.includes('edits')) {
   console.log(JSON.stringify({ frames: FRAMES, made: steady.made, scavenges: steady.scavenges, holdMade: hold.made, holdScavenges: hold.scavenges, hold: live, picked: ed.sel.size }));
   process.exit(0);
 }
+// With `brush` (`brush.test.ts`, map-maker wave 3): the brush's frame while it is armed and no stroke is under way (its
+// buttons read, its kept ask written, `EditorBrush.frame`), and its ring: forty-eight ground points round the aim projected
+// (`brushRing`, the ground stood in as the aim's own rolling ground) and drawn as the marks draw them, the aim wandering.
+if (process.argv.includes('brush')) {
+  const { brushRing, ringAsk } = await import('../../../src/editor/brush.ts');
+  const { EditorBrush } = await import('../../../src/editor/editorBrush.ts');
+  const ra = ringAsk();
+  const rgAt = { x: 0.5, z: 0.5, y: 0.5 };
+  const rg = {
+    at: rgAt,
+    sample(): void {
+      rgAt.y = Math.sin(rgAt.x * 0.05) * 2 + Math.cos(rgAt.z * 0.07) * 2;
+    },
+  };
+  const bm = marksView();
+  const brush = new EditorBrush({
+    edits: { writing: false } as never,
+    source: async () => 'the measure paints nothing',
+    near: () => [],
+    ground: () => 0,
+    water: () => Number.NaN,
+    centre: () => null,
+    frame: () => 'raw',
+    packId: () => 'test',
+    inSpace: () => false,
+    dest: () => 'world',
+    cameraYaw: () => 0,
+    say() {},
+  });
+  brush.armed = true;
+  const bt = new Float64Array(2);
+  const brushFrame = (): void => {
+    bt[1]++;
+    bt[0] = bt[1] * 0.01;
+    const ba = brush.ask;
+    ba.paint = false;
+    ba.erase = false;
+    ba.cx = Math.sin(bt[0]) * 30;
+    ba.cz = -20 + Math.cos(bt[0]) * 10;
+    ba.valid = true;
+    ba.dt = 1 / 60;
+    brush.frame();
+    ra.cx = ba.cx;
+    ra.cy = 0.5;
+    ra.cz = ba.cz;
+    ra.radius = EDITOR_TUNE.brush.radius;
+    ra.w = 1600;
+    ra.h = 900;
+    brushRing(ra, rg, view.vp, bm.ring, bm.ringVis);
+    bm.ringOn = true;
+    bm.ringErase = bt[1] % 2 === 0;
+    drawEditorMarks(overlay, bm);
+  };
+  const brushFrames = (n: number): void => {
+    for (let i = 0; i < n; i++) brushFrame();
+  };
+  try {
+    new Function('f', '%NeverOptimizeFunction(f)')(brushFrames);
+  } catch {
+    // Without the flag the loop is left to the compiler.
+  }
+  brushFrames(20_000);
+  let bestB = { made: Infinity, scavenges: Infinity };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    brushFrames(10_000);
+    gc({ type: 'minor' });
+    await settle();
+    scavenges = 0;
+    const before = young();
+    brushFrames(FRAMES);
+    const made = young() - before;
+    await settle();
+    if (scavenges < bestB.scavenges || (scavenges === bestB.scavenges && made < bestB.made)) bestB = { made, scavenges };
+    if (bestB.scavenges === 0 && bestB.made <= 0) break;
+  }
+  let shown = 0;
+  for (let i = 0; i < bm.ringVis.length; i++) shown += bm.ringVis[i];
+  watch.disconnect();
+  console.log(JSON.stringify({ frames: FRAMES, made: bestB.made, scavenges: bestB.scavenges, ringShown: shown, armed: brush.armed, stroke: brush.mode }));
+  process.exit(0);
+}
 if (process.argv.includes('profile')) {
   // Where it is made, by the sampling heap profiler: `node --expose-gc tools/swg/tests/editorAllocOwn.ts profile`.
   const { Session } = await import('node:inspector/promises');

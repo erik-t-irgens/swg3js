@@ -125,6 +125,23 @@ export interface EditEditor {
   setHotbar(slot: number, key: string | null): void;
   /** The window drawn again (a selection changed, a write landed). */
   refreshWindow(): void;
+  /** Whether the scatter brush is armed: its buttons paint and erase, and no click picks, boxes or orbits meanwhile. */
+  brushArmed?(): boolean;
+}
+
+/**
+ * A brush stroke (`beginStroke`): the action its stamps wrote, as answered, recorded once as it ends; what went and what was
+ * refused; and the world it was begun in (`worldNow`), so a stamp after the world went writes nothing.
+ */
+export interface Stroke {
+  a: EditAction;
+  edits: number;
+  batches: number;
+  ms: number;
+  files: Set<string>;
+  refused: string;
+  ended: boolean;
+  world: number;
 }
 
 /** One picked row being moved: where it started, where it is going, and the copies drawn for it meanwhile. */
@@ -278,6 +295,9 @@ export class EditorEdits {
   /** The world went: its history, its selection and anything under way let go (nothing is written). The clipboard stays, to paste into the next. */
   worldGone(): void {
     this.cancel(false);
+    // A stroke under way goes with its world's history, unrecorded.
+    for (const s of this.strokes) s.ended = true;
+    this.strokes.clear();
     this.sel.clear();
     this.history.clear();
     this.fileStates = [];
@@ -297,6 +317,11 @@ export class EditorEdits {
 
   /** Where the last copy came from (words only). */
   private clipFromWorld = '';
+
+  /** Whether the brush is armed (its buttons are its own). */
+  private armed(): boolean {
+    return this.ed.brushArmed ? this.ed.brushArmed() : false;
+  }
 
   /** Whether a hold, a drag or an orbit has the mouse this frame (the camera holds still). */
   get takesMouse(): boolean {
@@ -420,8 +445,8 @@ export class EditorEdits {
       this.leftDown = input.held('attack');
       this.leftReleased = was && !this.leftDown;
       this.middlePressed = input.pressedAction('altFire');
-      // RMB held in Fly orbits the selection about its pivot.
-      this.orbiting = this.sel.size > 0 && !this.ed.inHand() && input.held('altAttack');
+      // RMB held in Fly orbits the selection about its pivot (with the brush armed it erases instead).
+      this.orbiting = this.sel.size > 0 && !this.ed.inHand() && !this.armed() && input.held('altAttack');
       if (this.dragging) {
         this.flyCursor.x += dx;
         this.flyCursor.y += dy;
@@ -598,9 +623,10 @@ export class EditorEdits {
     }
     // A box selection: Point, a drag from empty ground (one left behind by a click that went to Fly is let go).
     if (!ed.point) this.boxing = false;
+    const armed = this.armed();
     if (ed.point && !this.dragging) {
       const p = ed.pointer;
-      if (this.leftPressed && !this.quiet && !ed.inHand() && gz.hot < 0 && !ed.hoveredId()) {
+      if (this.leftPressed && !this.quiet && !armed && !ed.inHand() && gz.hot < 0 && !ed.hoveredId()) {
         this.boxing = true;
         this.boxX0 = p.x;
         this.boxY0 = p.y;
@@ -612,7 +638,7 @@ export class EditorEdits {
     }
     // A click with nothing in hand and nothing grabbed: the selection (Shift adds or takes away).
     const clicked = ed.point ? ed.pointer.clicked : this.leftReleased && !this.wasDrag;
-    if (clicked && !this.quiet && !ed.inHand() && !this.dragging && !this.live && gz.hot < 0) {
+    if (clicked && !this.quiet && !armed && !ed.inHand() && !this.dragging && !this.live && gz.hot < 0) {
       const shift = ed.input.isDown('ShiftLeft') || ed.input.isDown('ShiftRight');
       if (this.sel.click(ed.hoveredId(), shift)) ed.refreshWindow();
     }
@@ -1124,6 +1150,31 @@ export class EditorEdits {
       ed.say('a write is still going', false);
       return 'a write is still going';
     }
+    const sent = await this.send(a);
+    if (sent.done) this.history.record(a);
+    void sent.built.then(release, release);
+    if (!sent.done) release();
+    this.lastWrite = { label: a.label, edits: sent.edits, batches: sent.done, ms: Math.round(sent.ms), files: sent.files, said: sent.refused };
+    this.askStatus();
+    ed.refreshWindow();
+    if (sent.refused) {
+      const words = `${a.label} refused: ${refusalWords(sent.refused)}`;
+      ed.say(words, false);
+      return words;
+    }
+    const words = `${a.label}: ${a.changes.length} row${a.changes.length === 1 ? '' : 's'} written`;
+    ed.say(words, true);
+    return words;
+  }
+
+  /**
+   * An action's edits written as consecutive batches of at most `batchMost`, and the rows the endpoint answered laid over
+   * its `after`s (a refusal part way keeps what went, so it can be undone): nothing recorded and nothing said. What it came
+   * to: the batches that went, the endpoint's words where one was refused, its time, the files touched, the edits sent and
+   * when what it stood is built.
+   */
+  private async send(a: EditAction): Promise<{ done: number; refused: string; ms: number; files: string[]; edits: number; built: Promise<void> }> {
+    const ed = this.ed;
     const edits = doEdits(a);
     const chunks = chunkEdits(edits, EDITOR_TUNE.batchMost);
     this.writing = true;
@@ -1155,23 +1206,65 @@ export class EditorEdits {
     } finally {
       this.writing = false;
     }
-    if (done) {
-      // What was written is the action, kept with the rows as answered (a refusal part way keeps what went, so it can be undone).
-      takeAnswered([a], 'after', answered);
-      this.history.record(a);
+    // What was written is the action, kept with the rows as answered.
+    if (done) takeAnswered([a], 'after', answered);
+    return { done, refused, ms, files: [...files], edits: edits.length, built };
+  }
+
+  // ---- A brush stroke: each stamp written as it comes, the whole stroke one action. ----
+
+  /** The strokes begun and not yet ended (`beginStroke`), so a world going drops them unrecorded. */
+  private readonly strokes = new Set<Stroke>();
+
+  /** A stroke begun (the brush's LMB or RMB pressed): its stamps are written as they come and recorded as one action as it ends. */
+  beginStroke(label: string): Stroke {
+    this.sameWorld();
+    const s: Stroke = { a: { label, changes: [] }, edits: 0, batches: 0, ms: 0, files: new Set(), refused: '', ended: false, world: this.worldNow };
+    this.strokes.add(s);
+    return s;
+  }
+
+  /** Whether a stroke is under way. */
+  get stroking(): boolean {
+    return this.strokes.size > 0;
+  }
+
+  /**
+   * One stamp of a stroke written (its new rows, or the rows it takes out), the endpoint's answers kept in the stroke's
+   * action; nothing recorded until it ends. Answers the endpoint's words where it refused (the stroke keeps what went
+   * before), '' where it took them. Nothing is written while another write is out, or once the stroke has ended or its
+   * world gone: the caller asks again, or not at all.
+   */
+  async strokeWrite(s: Stroke, changes: RowChange[]): Promise<string> {
+    if (s.ended || !changes.length) return '';
+    if (s.world !== this.worldNow || !this.sameWorld()) return 'the world went';
+    if (this.writing) return 'a write is still going';
+    const a: EditAction = { label: s.a.label, changes };
+    const sent = await this.send(a);
+    s.batches += sent.done;
+    s.ms += sent.ms;
+    for (const f of sent.files) s.files.add(f);
+    if (sent.done) {
+      for (const c of a.changes) s.a.changes.push(c);
+      s.edits += sent.edits;
     }
-    void built.then(release, release);
-    if (!done) release();
-    this.lastWrite = { label: a.label, edits: edits.length, batches: done, ms: Math.round(ms), files: [...files], said: refused };
+    if (sent.refused) s.refused = sent.refused;
+    return sent.refused;
+  }
+
+  /** A stroke ended (its button let go, the brush let go): what it wrote recorded as one action, and said. Ending it again does nothing. */
+  endStroke(s: Stroke): string {
+    if (s.ended) return '';
+    s.ended = true;
+    this.strokes.delete(s);
+    if (s.world !== this.worldNow) return '';
+    if (s.a.changes.length) this.history.record(s.a);
+    this.lastWrite = { label: s.a.label, edits: s.edits, batches: s.batches, ms: Math.round(s.ms), files: [...s.files], said: s.refused };
     this.askStatus();
-    ed.refreshWindow();
-    if (refused) {
-      const words = `${a.label} refused: ${refusalWords(refused)}`;
-      ed.say(words, false);
-      return words;
-    }
-    const words = `${a.label}: ${a.changes.length} row${a.changes.length === 1 ? '' : 's'} written`;
-    ed.say(words, true);
+    this.ed.refreshWindow();
+    const n = s.a.changes.length;
+    const words = s.refused ? `${s.a.label} refused part way (${n} row${n === 1 ? '' : 's'} written before): ${refusalWords(s.refused)}` : `${s.a.label}: ${n} row${n === 1 ? '' : 's'} written`;
+    this.ed.say(words, !s.refused);
     return words;
   }
 
@@ -1370,7 +1463,8 @@ export class EditorEdits {
   // ---- Duplicate, copy, paste, delete. ----
 
   /** New ids for rows of these models, unique across both files and each other. */
-  private mintIds(bases: readonly string[]): string[] {
+  /** Ids minted from each base, unique across both files and each other (a key filed once: DESIGN.md §10 risk 4). */
+  mintIds(bases: readonly string[]): string[] {
     const taken = this.ed.idsTaken();
     return bases.map((b) => {
       const id = mintPlacementId(b, taken);

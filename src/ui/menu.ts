@@ -152,6 +152,7 @@ const ACTION_LABELS: Record<Action, string> = {
   editorHot9: import.meta.env.DEV ? 'World editor: hotbar 9 (dev server only)' : '',
   editorGameView: import.meta.env.DEV ? 'World editor: game view, every mark hidden (dev server only)' : '',
   editorKeys: import.meta.env.DEV ? "World editor: the key sheet (dev server only)" : '',
+  editorBrush: import.meta.env.DEV ? 'World editor: the scatter brush armed and let go (dev server only)' : '',
 };
 
 /**

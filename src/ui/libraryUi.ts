@@ -1,7 +1,8 @@
 // The world editor's library (DESIGN.md §2.5): everything it can put down, as the Props tab shows its things -- the
 // pictures the `library` pass baked, in folding groups, a page at a time -- with the sources down the side, a find box,
 // a world to choose for the world models and the flora, Recent, Favourites and Used here (what this world's files already
-// stand). A click takes an entry in hand.
+// stand). A click takes an entry in hand; from the third wave a Shift+click chooses it for the scatter brush (its cell
+// dashed in `good`), or lets it go.
 //
 // **No frame is stalled.** Only a group that is opened builds its cells, a page of `LIBRARY_TUNE.page` at a time, the
 // next as its sentinel comes into view (`IntersectionObserver`); every picture is `<img loading="lazy"
@@ -33,6 +34,8 @@ const LIBRARY_CSS = `
 .lib-cell { position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--rule); border-radius: 3px; padding: 4px; cursor: pointer; }
 .lib-cell:hover { border-color: var(--edge); }
 .lib-cell.held { border-color: color-mix(in srgb, var(--accent) 70%, transparent); }
+.lib-cell.brush { border-style: dashed; border-color: color-mix(in srgb, var(--good) 70%, transparent); }
+.lib-cell.brush .lib-name { color: var(--good); }
 .lib-cell img, .lib-cell .lib-initials { width: 64px; height: 64px; object-fit: contain; }
 .lib-cell .lib-initials { display: flex; align-items: center; justify-content: center; font-size: 18px; letter-spacing: 0.06em; color: var(--muted); background: var(--void); border-radius: 2px; }
 .lib-cell .lib-name { font-size: 10px; line-height: 1.2; color: var(--muted); text-align: center; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -68,6 +71,12 @@ export interface LibraryHost {
   status(): string;
   /** The entries this world's files already stand, most used first (`usedHereKeys`). */
   usedHere(): string[];
+  /**
+   * Shift+click (the third wave's): an entry chosen for the scatter brush or let go of; answers whether it is chosen now.
+   * And whether an entry is chosen, to mark its cell. Absent: Shift+click takes the entry in hand as a click does.
+   */
+  brushToggle?(key: string): boolean;
+  brushed?(key: string): boolean;
 }
 
 /** The three lists that are not sources. */
@@ -257,6 +266,7 @@ export class LibraryUi {
     b.type = 'button';
     b.className = 'lib-cell';
     if (key === held) b.classList.add('held');
+    if (this.host.brushed?.(key)) b.classList.add('brush');
     b.dataset.key = key;
     const name = entryName(e);
     b.title = `${name}\n${e.id}${e.t ? `\n${e.t}` : ''}\n${e.p}`;
@@ -296,6 +306,11 @@ export class LibraryUi {
     if (t?.dataset.star) {
       const on = this.host.keep.toggleFavourite(key);
       t.classList.toggle('on', on);
+      return;
+    }
+    // Shift+click: chosen for the brush, or let go of (the cell marked).
+    if (e.shiftKey && this.host.brushToggle) {
+      cell.classList.toggle('brush', this.host.brushToggle(key));
       return;
     }
     for (const c of this.groupsEl.querySelectorAll('.lib-cell.held')) c.classList.remove('held');

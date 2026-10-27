@@ -12,6 +12,12 @@
 // a level with nothing at it is hidden rather than drawn with no copies (three would still make the draw).
 // A group all of whose copies lie past its lowest switch, or inside its first, is settled once and left
 // alone until that stops being so. Nothing is allocated by a sweep.
+//
+// A permanent row folded into its tier (the world editor's, map-maker wave 3) is a copy like any other, at its own scale --
+// its matrix composed with it, its middle measured where the scale puts it, and its distance taken over its largest axis,
+// so a tree stood twice its size keeps each level out twice as far -- and it can be hidden in place (`setHidden`), held at
+// nothing whatever the eye picks, since a copy cannot be taken out of an instance store. A group of snapshot objects alone
+// has no scale and nothing hidden, and picks exactly as it did before either existed.
 import * as THREE from 'three';
 import type { ModelLevel, Primitive } from './assetPack.ts';
 import { keepUploadRange, type UploadRange } from './uploadRange.ts';
@@ -30,16 +36,21 @@ interface LevelDraw {
   range: UploadRange;
 }
 
-/** A copy, as the group reads it: where it stands and how it is turned. */
+/**
+ * A copy, as the group reads it: where it stands, how it is turned, and how big it stands along its own axes (a permanent
+ * row folded into its tier, the world editor's scale; absent for every snapshot object, which stands at its own size).
+ */
 export interface LevelCopy {
   x: number;
   y: number;
   z: number;
   q: THREE.Quaternion;
+  scale?: { x: number; y: number; z: number };
 }
 
 const tmpM = new THREE.Matrix4();
 const tmpV = new THREE.Vector3();
+const tmpS = new THREE.Vector3();
 const ONE = new THREE.Vector3(1, 1, 1);
 
 /**
@@ -143,6 +154,22 @@ export class LevelGroup {
   repacks = 0;
   /** A mesh the portal renderer hid for failing to draw, which nothing shows again (`isQuarantined`). */
   broken: ((o: THREE.Object3D) => boolean) | null = null;
+  /**
+   * Per copy, its distance from the eye is multiplied by this before its level is picked: one over its largest scale, so a
+   * copy stood twice its size keeps each level out twice as far (the screen size the client's switch distances were set
+   * for). Null where no copy has a scale (every snapshot group), which picks exactly as it always has.
+   */
+  private readonly dk: Float32Array | null;
+  /** The least and the most of `dk`, for settling the whole group at once by its sphere (1 and 1 with none). */
+  private readonly kMin: number;
+  private readonly kMax: number;
+  /**
+   * Per copy, whether it is hidden in place (a permanent row folded into its tier and taken down, or the world editor's
+   * live hide while it is moved): held at the "drawn at nothing" bucket whatever the eye picks, so its instance stays
+   * where it is and nothing is counted off. `hiddenCount` copies are.
+   */
+  readonly hidden: Uint8Array;
+  private hiddenCount = 0;
 
   /**
    * `levels` is the model's, finest first; `centre` the middle, in the model's frame, of the box of what the
@@ -163,6 +190,7 @@ export class LevelGroup {
     this.cy = new Float32Array(n);
     this.cz = new Float32Array(n);
     this.level = new Int8Array(n).fill(-1);
+    this.hidden = new Uint8Array(n);
     const L = levels.length;
     this.nears = new Float32Array(L);
     for (let k = 0; k < L; k++) this.nears[k] = levels[k].near;
@@ -170,6 +198,13 @@ export class LevelGroup {
     this.beyond = far > 0 && far < 1e8 ? far : Number.POSITIVE_INFINITY;
     this.start = new Int32Array(L + 2);
     this.order = new Int32Array(n);
+    // A copy's scale only where one has one: a group of none is made and picks exactly as it always was.
+    let scaled = false;
+    for (let i = 0; i < n; i++) if (copies[i].scale) scaled = true;
+    this.dk = scaled ? new Float32Array(n) : null;
+    let kMin = 1;
+    let kMax = 1;
+    let most = 1;
     let x0 = Infinity;
     let y0 = Infinity;
     let z0 = Infinity;
@@ -178,12 +213,24 @@ export class LevelGroup {
     let z1 = -Infinity;
     for (let i = 0; i < n; i++) {
       const c = copies[i];
-      tmpM.compose(tmpV.set(c.x, c.y, c.z), c.q, ONE);
+      const s = c.scale;
+      tmpM.compose(tmpV.set(c.x, c.y, c.z), c.q, s ? tmpS.set(s.x, s.y, s.z) : ONE);
       tmpM.toArray(this.mats, i * 16);
-      tmpV.copy(centre).applyQuaternion(c.q);
+      // The middle the copy is measured from, where its scale puts it.
+      tmpV.copy(centre);
+      if (s) tmpV.multiply(tmpS);
+      tmpV.applyQuaternion(c.q);
       this.cx[i] = c.x + tmpV.x;
       this.cy[i] = c.y + tmpV.y;
       this.cz[i] = c.z + tmpV.z;
+      if (this.dk) {
+        const big = s ? Math.max(s.x, s.y, s.z) : 1;
+        const k = big > 0 ? 1 / big : 1;
+        this.dk[i] = k;
+        if (i === 0 || k < kMin) kMin = k;
+        if (i === 0 || k > kMax) kMax = k;
+        if (big > most) most = big;
+      }
       x0 = Math.min(x0, this.cx[i]);
       y0 = Math.min(y0, this.cy[i]);
       z0 = Math.min(z0, this.cz[i]);
@@ -191,10 +238,12 @@ export class LevelGroup {
       y1 = Math.max(y1, this.cy[i]);
       z1 = Math.max(z1, this.cz[i]);
     }
+    this.kMin = this.dk ? Math.fround(kMin) : 1;
+    this.kMax = this.dk ? Math.fround(kMax) : 1;
     this.sx = (x0 + x1) / 2;
     this.sy = (y0 + y1) / 2;
     this.sz = (z0 + z1) / 2;
-    this.sr = Math.hypot(x1 - x0, y1 - y0, z1 - z0) / 2 + Math.max(0, radius);
+    this.sr = Math.hypot(x1 - x0, y1 - y0, z1 - z0) / 2 + Math.max(0, radius) * most;
     this.draws = [];
     for (let k = 0; k < L; k++) {
       const attr = new THREE.InstancedBufferAttribute(new Float32Array(n * 16), 16);
@@ -268,8 +317,11 @@ export class LevelGroup {
       const dy = this.sy - ey;
       const dz = this.sz - ez;
       const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      const least = Math.max(0, d - this.sr);
-      const most = d + this.sr;
+      // Each copy's distance is taken over its scale (`dk`), so the whole group is past a line only when its nearest
+      // point is past it at the least of them, and inside one only when its farthest is inside it at the most; 1 and 1
+      // with no scale, which is the rule as it always was.
+      const least = Math.max(0, d - this.sr) * this.kMin;
+      const most = (d + this.sr) * this.kMax;
       if (!(beyond < Number.POSITIVE_INFINITY) && least >= this.nears[L - 1] * scale * (1 + h)) whole = L - 1;
       else if (beyond < Number.POSITIVE_INFINITY && least >= beyond * scale * (1 + h)) whole = L;
       else if (most < this.nears[1] * scale * (1 - h) && most < beyond * scale * (1 - h)) whole = 0;
@@ -278,17 +330,26 @@ export class LevelGroup {
     if (whole >= 0) {
       if (this.settled !== whole) {
         this.level.fill(whole);
+        // A copy hidden in place stays at nothing whatever the group settles at.
+        if (this.hiddenCount > 0) for (let i = 0; i < this.n; i++) if (this.hidden[i]) this.level[i] = L;
         this.settled = whole;
         changed = true;
       }
     } else {
       this.settled = -1;
       const lv = this.level;
+      const dk = this.dk;
+      const hid = this.hiddenCount > 0 ? this.hidden : null;
       for (let i = 0; i < this.n; i++) {
-        const dx = this.cx[i] - ex;
-        const dy = this.cy[i] - ey;
-        const dz = this.cz[i] - ez;
-        const want = levelOf(Math.sqrt(dx * dx + dy * dy + dz * dz), this.nears, L, scale, h, lv[i], beyond);
+        let want: number;
+        if (hid && hid[i]) want = L;
+        else {
+          const dx = this.cx[i] - ex;
+          const dy = this.cy[i] - ey;
+          const dz = this.cz[i] - ez;
+          const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          want = levelOf(dk ? d * dk[i] : d, this.nears, L, scale, h, lv[i], beyond);
+        }
         if (want !== lv[i]) {
           lv[i] = want;
           changed = true;
@@ -298,6 +359,29 @@ export class LevelGroup {
     if (changed) this.repack(false);
     else if (shadowMoved) this.applyShadows();
     return changed;
+  }
+
+  /**
+   * One copy hidden in place, or shown again (`LayoutStreamer.hideInPlace`, `showInPlace`): hidden, it is put at the
+   * "drawn at nothing" bucket and every level packed again now, so it is gone from this frame on and the shadow batch
+   * follows it by the repack count; shown, it starts at the finest until the next sweep (which the streamer asks for at
+   * once) picks its level. Its matrix and the group's instance stores are left as they are: nothing is counted off.
+   */
+  setHidden(i: number, on: boolean): void {
+    if (!(i >= 0 && i < this.n)) return;
+    const was = this.hidden[i] === 1;
+    if (was === on) return;
+    this.hidden[i] = on ? 1 : 0;
+    this.hiddenCount += on ? 1 : -1;
+    this.level[i] = on ? this.draws.length : 0;
+    // Settled whole no longer holds: the next sweep picks every copy again.
+    this.settled = -1;
+    this.repack(false);
+  }
+
+  /** How many of its copies are hidden in place now. */
+  get hiddenCopies(): number {
+    return this.hiddenCount;
   }
 
   /** Each level's store written with the copies at it (only a level whose copies changed is written and uploaded), its count, its sphere and its shadow. */

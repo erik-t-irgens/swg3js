@@ -227,7 +227,8 @@ function sides(copies: Copy[]): { onceOff: boolean; onceOn: boolean; oldOff: boo
   const stream = read('world/layoutStream.ts');
   const unplace = stream.slice(stream.indexOf('  unplace(template: string): boolean {'), stream.indexOf('  objectsNear('));
   ok(unplace.includes('this.unhost(placed);') && /g\.role = FURNITURE_ROLE\.plain;[\s\S]*this\.applyFurniture\(g\);/.test(unplace) && unplace.includes('p.host = undefined;'), 'a house taken up lets go of what stood in it: each mesh drawn as the old rule drew it, each thing no longer filed under it');
-  ok(stream.includes('splitCopies<PlacedObject, PlacedObject>(all)') && stream.includes('for (const g of this.furnitureSwaps) this.applyFurniture(g);'), "the streamer builds the switch's two sides and flips both");
+  // (A size at a time since map-maker wave 3's review, `sizeBuckets`: exactly `all` wherever no copy is a scaled row.)
+  ok(/for \(const sized of sizeBuckets\(all\)\)\s*for \(const \{ list: instanced, role, host \} of splitCopies<PlacedObject, PlacedObject>\(sized\)\)/.test(stream) && stream.includes('for (const g of this.furnitureSwaps) this.applyFurniture(g);'), "the streamer builds the switch's two sides and flips both");
   const render = read('world/portalRender.ts');
   ok(render.includes('markQuarantined(culprit);') && render.includes('if (show && isQuarantined(list[i])) show = false;') && render.includes('&& !isQuarantined(g.mesh);'), "a mesh hidden for failing to draw is marked, and a building's rooms and furniture, shown pass by pass, leave it hidden");
 }

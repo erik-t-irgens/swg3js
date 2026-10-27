@@ -4,7 +4,9 @@
 // against the real physics at its size -- its collider's vertices scaled, its footprint, its size tier and what it is in
 // the way of measured from its scaled box -- with a building with rooms standing at its own size and saying so, and a tree
 // at its largest axis and saying so; its flora clearing following its size where the rule set it and left where a hand
-// did; and the streamer's sites that take a scale pinned as text, each with no scale exactly as before.
+// did; and the streamer's sites that take a scale pinned as text, each with no scale exactly as before, the bulk's among
+// them (map-maker wave 3), with a scaled row folded into its tier's level group by behaviour: its copy's matrix, its level
+// picked over its largest axis and its collider.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -144,9 +146,76 @@ const note = (what: string) => console.log(`note ${what}`);
     [/const radius = modelReach\(o\.scale \? this\.scaledBoxOf\(o\) : def\?\.bounds\);/, 'what is in the way, from the scaled box'],
     [/const def = this\.scaledDef\(this\.defOf\(p\.model, p\.pack\), p\.scale\);/, 'a placement filed and hosted at its scaled box'],
   ];
+  // The bulk's sites (map-maker wave 3: a permanent row folded into its tier's bulk carries its scale there too).
+  pins.push(
+    [/tmpM\.compose\(tmpV\.set\(p\.x, p\.y, p\.z\), p\.q, p\.scale \?\? ONE\);\s*mesh\.setMatrixAt\(i, tmpM\);\s*if \(p\.folded\) foldRec\(p\)\.slots\.push\(\{ mesh, i \}\);/, "the bulk's instance matrix composes a folded row's scale, and keeps its slot"],
+    [/stampCaster\(mesh, scaledRadius\(model\.radius, instanced\), flora \|\| wearsCard\(prim\.material\), 0\);/, "the bulk's caster stamp at the size its biggest copy stands"],
+    [/const casterRadius = scaledRadius\(model\.radius, copies\);/, "a level group's casters the same"],
+    [/const open = all\.filter\(\(p\) => !p\.contained && isUniform\(p\.scale\)\);/, "the bulk's basin water only for a copy at a uniform scale"],
+    [/tmpM\.compose\(tmpV\.set\(p\.x, p\.y, p\.z\), p\.q, p\.scale \?\? ONE\);\s*for \(const fx of model\.def\.effects\) placeFx\(p, this\.effectFile\(model\.def, fx\.file\), scaleFree\(/, "the bulk's model effects stand where the scale puts them, at their own size"],
+    [/tmpM\.compose\(tmpV\.set\(p\.x, p\.y, p\.z\), p\.q, p\.scale \?\? ONE\);\s*for \(const fx of own\) placeFx\(p, fx\.file, scaleFree\(/, "and its template's effects"],
+    [/const matrix = new THREE\.Matrix4\(\)\.compose\(tmpV\.set\(p\.x, p\.y, p\.z\), p\.q, ONE\);\s*const b: Building = /, 'a building in the bulk stands at its own size (no row with rooms carries a scale)'],
+  );
   for (const [re, what] of pins) ok(re.test(src), `layoutStream: ${what}`);
+  ok(/function scaledRadius\([^)]*\): number \{[\s\S]{0,300}return any \? radius \* big : radius;\s*\}/.test(src), 'a scaled radius takes the largest axis of the copies, the radius itself (untouched) where none is scaled');
   ok(/function scaleFree\(m: THREE\.Matrix4, s: THREE\.Vector3 \| undefined\): THREE\.Matrix4 \{\s*if \(!s\) return m;/.test(src), 'scaleFree hands a matrix with no scale back as it is');
   ok(/private scaledDef\([^)]*\): PackModelDef \| undefined \{\s*if \(!def \|\| !scale/.test(src), 'and scaledDef hands back the entry itself where there is no scale');
+}
+
+{
+  // A folded scaled row by behaviour (map-maker wave 3): a tree with two of the client's levels stood at twice its size,
+  // filed before its tier loads, so it goes into the tier's level group -- its copy's matrix at its scale, its distance to
+  // each level taken over its largest axis, and its collider scaled.
+  const TREE = { id: 'tree', file: 'tree.glb', bounds: { min: [-1, 0, -1], max: [1, 10, 1] }, triangles: 24 };
+  const { loadedOf, boxGeo, THREE } = await import('./streamHarness.ts');
+  const tree = loadedOf(TREE, [{ geometry: boxGeo(2, 10, 2, 0), cell: -1 }]) as any;
+  tree.levels = [
+    { near: 0, far: 60, level: 0, primitives: [tree.primitives[0]] },
+    { near: 60, far: 1e9, level: 1, primitives: [{ geometry: boxGeo(2, 10, 2, 0), material: tree.primitives[0].material, cell: -1 }] },
+  ];
+  const h = await makeStreamer(undefined, { defs: [TREE], models: { tree } });
+  const st = (key: string, x: number, scale?: [number, number, number]) => h.stream.standPermanent({ key, model: 'tree', x, y: 0, z: 60, q: [0, 0, 0, 1], inside: false, solid: true, ...(scale ? { scale } : {}) } as never, h.s.pack);
+  st('place/plain-tree', 40);
+  st('place/big-tree', 60, [2, 2, 2]);
+  await h.settle({ x: 50, z: 60 }, 30);
+  const big = h.s.foldOf.get(h.s.placedByKey.get('place/big-tree'));
+  const plain = h.s.foldOf.get(h.s.placedByKey.get('place/plain-tree'));
+  // Each in a level group of its own size (`sizeBuckets`): a group casts by the rule at its biggest copy's size, and the
+  // trees at their own size are never judged by a row's scale.
+  ok(!!big?.level && !!plain?.level && big.level.group !== plain.level.group, 'both trees are folded into level groups, each of its own size');
+  ok(plain.level.group.meshes.every((x: THREE.InstancedMesh) => x.userData.casterRadius === tree.radius) && big.level.group.meshes.every((x: THREE.InstancedMesh) => x.userData.casterRadius === tree.radius * 2), "the plain tree's group casts at the tree's own radius, the big one's at twice it");
+  const m = big.level.group.matrixOf(big.level.i, new THREE.Matrix4());
+  const s = new THREE.Vector3();
+  m.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+  const sp = new THREE.Vector3();
+  plain.level.group.matrixOf(plain.level.i, new THREE.Matrix4()).decompose(new THREE.Vector3(), new THREE.Quaternion(), sp);
+  ok(Math.abs(s.x - 2) < 1e-6 && Math.abs(s.y - 2) < 1e-6 && Math.abs(sp.y - 1) < 1e-6, `the scaled copy's matrix in the level group is at its scale (${s.y.toFixed(3)}), the plain one's at its own`);
+  const g = big.level.group;
+  const gp = plain.level.group;
+  // Its level picked over its largest axis: 100 m off, the plain tree is past its first switch (60 m) and the big one not.
+  gp.sweep(40, 5, 160, 1, 1e9);
+  const lvPlain = gp.level[plain.level.i];
+  g.sweep(60, 10, 165, 1, 1e9);
+  const lvBig = g.level[big.level.i];
+  ok(lvPlain === 1 && lvBig === 0, `its level picked over its largest axis: at 100 m the plain tree draws its coarse level (${lvPlain}) and the big one still its finest (${lvBig})`);
+  // Its middle measured where its scale puts it (the box's middle 5 m up, twice that at twice the size): straight over the
+  // big tree, an eye just inside its switch measured from the scaled middle (60 m taken twice over its largest axis, and
+  // the hysteresis over that) and just past it measured from the unscaled one, five metres lower, keeps its finest level.
+  const { LOD_LEVEL_TUNE } = await import('../../../src/world/lodLevels.ts');
+  const sw = 2 * 60 * (1 + LOD_LEVEL_TUNE.hysteresis) - 2;
+  g.sweep(60, 0, 165, 1, 1e9);
+  g.sweep(60, 10 + sw, 60, 1, 1e9);
+  ok(g.level[big.level.i] === 0, `its middle is where its scale puts it: ${sw} m over its scaled middle it keeps its finest level, where 5 m further (from the middle unscaled) it would not`);
+  g.sweep(60, 10 + sw + 6, 60, 1, 1e9);
+  ok(g.level[big.level.i] === 1, 'and a little higher it takes its coarse level, so the line is where the scaled middle puts it');
+  // The group's sphere grown by the model's radius at its biggest copy's scale: it only decides when the whole group may be
+  // settled at once, which picks what each copy's own middle would (a copy's level is taken from its middle alone), so no
+  // level depends on it and it is held as text.
+  const lg = (await import('node:fs')).readFileSync(new URL('../../../src/world/levelGroup.ts', import.meta.url), 'utf8');
+  ok(/this\.sr = Math\.hypot\(x1 - x0, y1 - y0, z1 - z0\) \/ 2 \+ Math\.max\(0, radius\) \* most;/.test(lg) && /if \(big > most\) most = big;/.test(lg), "the group's sphere is grown by the radius at its biggest copy's scale (text: no level depends on it)");
+  const top = h.rayDown(60, 60, 40);
+  const topPlain = h.rayDown(40, 60, 40);
+  ok(top !== null && Math.abs(top - 20) < 1e-3 && topPlain !== null && Math.abs(topPlain - 10) < 1e-3, `its collider scaled: twenty metres high (${top?.toFixed(3)}), the plain one ten`);
 }
 
 console.log(`\n${checks} checks passed`);

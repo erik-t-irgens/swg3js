@@ -42,7 +42,7 @@ import { PASSABLE_NOTE, buildingNotes, editorRefusal, limitNotes, notesLine, pro
 import { editorDialsFor } from './editorDials.ts';
 import { ALL_ACTIONS, ctrlRule, editorMutes } from './editorKeys.ts';
 import { EditorSession, returnRefusal, type EntryState, type LeaveWay, type ReturnPoint } from './editorSession.ts';
-import { EDITOR_TUNE, LIBRARY_TUNE, TUNE_WATCH, liveTuned, tuneEditor } from './editorTune.ts';
+import { BRUSH_TUNE, EDITOR_TUNE, LIBRARY_TUNE, TUNE_WATCH, liveTuned, tuneEditor } from './editorTune.ts';
 import { FlyCam, stepSpeed } from './flyCam.ts';
 import { LIBRARY_SOURCES, LibraryKeep, ENTRY_FLAG, entryKey, entryName, fallbackEntries, libraryView, readLibraryIndex, searchLibrary, usedHereKeys, type LibraryEntry, type LibrarySource, type LibraryView } from './libraryModel.ts';
 import { attachPointer, endPointerFrame, pointerRecord } from './pointer.ts';
@@ -50,6 +50,8 @@ import { EditorEdits, type EditorBatch, type EditorFileState } from './editorEdi
 import type { RowChange } from './undo.ts';
 import { entryForRow } from './libraryModel.ts';
 import type { BatchEdit } from '../world/placementEdits.ts';
+import { EditorBrush, brushNearOf, type BrushNearThing } from './editorBrush.ts';
+import { brushRing, meantForWater, ringAsk, type RingGround } from './brush.ts';
 
 /** What the game hands the editor: its objects, and its own half of every rule the editor cannot reach itself. */
 export interface EditorHost {
@@ -112,6 +114,13 @@ export interface EditorHost {
   idsTaken(): Set<string>;
   /** What a standing row's stand set aside of it, in words (a scale on a building with rooms), or null. */
   stoodNote(id: string): string | null;
+  /**
+   * Fold now (DESIGN.md §2.8): every tier filed again behind a short loading screen, so the permanent rows drawn one by one
+   * fold into their tiers. Answers what it came to.
+   */
+  fold(): Promise<string>;
+  /** Whether the game is travelling or has no world (nothing folds by itself then). */
+  busy(): boolean;
 }
 
 /** One thing in hand: what a row writes, what it is drawn and judged by, and how it is turned. */
@@ -309,14 +318,88 @@ export class Editor {
       hotbar: () => me.keep.hotbar,
       setHotbar: (slot, key) => me.keep.setHotbar(slot, key),
       refreshWindow: () => me.window?.refreshEdits(),
+      brushArmed: () => me.brush.armed,
     });
     this.edits.destOf = () => this.session.dest;
+    // The scatter brush (the third wave's): its entries out of the library, what stands near its disc, the ground under it.
+    this.brush = new EditorBrush({
+      edits: this.edits,
+      source: async (key) => {
+        await me.loadLibrary();
+        const e = me.libView?.byKey.get(key);
+        if (!e) return `no library entry ${key}`;
+        const got = await me.sourceOf(e);
+        if (typeof got === 'string') return got;
+        // Another world's pack known to the streamer before a row of it stands, as the hand hands it over.
+        if (got.src.pack === 'world' && got.src.from) w.streamer?.useFromPack(got.pack);
+        // A building stands as the hand stands one: its doorstep on the ground at its own size, its patch's plants kept off.
+        const clear = got.building && got.bounds ? clearRadius(patchOfBounds(got.bounds)) : undefined;
+        return { key, id: got.src.thing ?? got.src.model ?? 'place', src: got.src, bounds: got.bounds, water: meantForWater(e.m || e.id), building: got.building, clear };
+      },
+      near: (cx, cz, reach, keys) => me.brushNear(cx, cz, reach, keys),
+      ground: (x, z) => (w.planet?.space ? Number.NaN : (w.terrain.nearHeightIfCached(x, z) ?? w.terrain.heightAt(x, z))),
+      water: (x, z) => w.terrain.waterHeightAt(x, z),
+      centre: () => w.placeFrame,
+      frame: () => (w.planet?.space ? 'game' : 'raw'),
+      packId: () => host.packId(),
+      inSpace: () => !!w.planet?.space,
+      dest: () => this.session.dest,
+      cameraYaw: () => this.fly.yaw,
+      say: (words, ok) => me.say(words, ok),
+    });
+    // The ring's ground: the near ground already made, never a block made for it in a frame.
+    const ringAt = { x: 0.5, z: 0.5, y: 0.5 };
+    this.ringGround = {
+      at: ringAt,
+      sample: () => {
+        ringAt.y = w.terrain.nearHeightIfCached(ringAt.x, ringAt.z) ?? Number.NaN;
+      },
+    };
     // A console line or a slider that moves the flight's speed or the sky's reach moves what is flown now.
     TUNE_WATCH.moved = (partial) => this.tuned(partial);
   }
 
   /** The editing: the selection, the hand on it, the gizmo, the snaps, copy and paste, undo and redo. */
   readonly edits: EditorEdits;
+  /** The scatter brush. */
+  readonly brush: EditorBrush;
+  /** The brush ring's ground and its ask, kept records. */
+  private readonly ringGround: RingGround;
+  private readonly ringAsk = ringAsk();
+  /** The brush's buttons this frame, read in the key block (Fly's) or off the pointer (Point's). */
+  private brushPaint = false;
+  private brushErase = false;
+  /** Ctrl held this frame (the key block's word): Point's brush buttons read as up too. */
+  private ctrlHeld = false;
+  /** When something last happened (a key, a button, an edit, a stroke, a flight), seconds: what the automatic fold waits out. */
+  private activeAt = 0;
+  /** A Fold now under way. */
+  private folding = false;
+
+  /**
+   * What stands near the brush's disc (`EditorBrush`'s port): this world's rows standing within `reach`, each with its id,
+   * file, row, box and whether it is one of the brush's own entries; and the placed objects whose boxes reach the disc,
+   * which only space it and keep it off them. A stamp's work, never a frame's.
+   */
+  private brushNear(cx: number, cz: number, reach: number, keys: ReadonlySet<string>): BrushNearThing[] {
+    const h = this.host;
+    const s = h.world.streamer;
+    // The rules are `brushNearOf`'s, which a node test runs; this hands it the world.
+    return brushNearOf<PlacedObject>(
+      {
+        view: this.libView,
+        here: h.packId(),
+        rows: h.standingRows(),
+        placedOfRow: (id) => s?.placedOf(placementKey(id)) ?? null,
+        forEachPlacedIn: (rect, visit) => s?.forEachPlacedIn(rect, visit),
+        boxOf: (o) => (s ? s.boxOf(o) : null),
+      },
+      cx,
+      cz,
+      reach,
+      keys,
+    );
+  }
 
   /**
    * A tune moved (`tuneEditor`): the numbers the editor keeps live beside it taken again where it named them -- the
@@ -402,7 +485,8 @@ export class Editor {
     h.player.setEditorFlight(this.fly);
     h.player.pos.copy(this.eye);
     h.world.cameraRoomRule = floorUnder;
-    if (!this.detach) this.detach = attachPointer(h.canvas, this.pointer, EDITOR_TUNE.pick);
+    // The window too, for a button let go over the editor's own window or off the canvas (`notePointerLost`).
+    if (!this.detach) this.detach = attachPointer(h.canvas, this.pointer, EDITOR_TUNE.pick, window);
     this.hookPage();
     if (!this.window) this.window = new EditorWindow(h.ui, this.windowHost());
     if (!this.bar) this.bar = new EditorBar(h.ui);
@@ -451,6 +535,8 @@ export class Editor {
 
   private leaveBody(ret: ReturnPoint, way: LeaveWay): void {
     this.giveUpHand();
+    this.brush.disarm();
+    this.marks.ringOn = false;
     this.edits.cancel(false);
     this.host.world.cameraRoomRule = null;
     this.window?.hide();
@@ -463,6 +549,9 @@ export class Editor {
 
   /** The world went with the editor on (a travel, the select screen): off with it, the body stood by whatever moved it. */
   worldGone(): void {
+    // The brush is let go first (a stroke under way ends unrecorded with its world's history, below).
+    this.brush.disarm();
+    this.marks.ringOn = false;
     // Its selection, its history and anything under way go with the world, on or off.
     this.edits.worldGone();
     if (!this.session.on) return;
@@ -496,11 +585,16 @@ export class Editor {
       // A hold or a drag made before Ctrl pauses (`idle`: no mouse, no button edge) and keeps the camera still.
       this.edits.idle();
       a.look = !this.session.point && input.locked && !this.edits.takesMouse;
+      // A brush stroke ends: its buttons read as up while Ctrl is held (Point's too, `ctrlHeld`).
+      this.brushPaint = false;
+      this.brushErase = false;
+      this.ctrlHeld = true;
       // The editor's own chords (Ctrl+D, C, X, Z, Shift+Z), read as raw keys; every action muted for the frame.
       if (!oldHand && !(this.window?.library.typing ?? false)) this.edits.chords();
       input.mute(ctrlRule(ctrl));
       return;
     }
+    this.ctrlHeld = false;
     if (input.pressedAction('editorPoint')) this.setPoint(!this.session.point);
     if (input.pressedAction('editorHold')) {
       this.session.hold = !this.session.hold;
@@ -524,6 +618,8 @@ export class Editor {
       }
       // A click in Fly is the attack's button, read here and muted below; in Point the pointer layer has it.
       if (!this.session.point && input.pressedAction('attack') && this.hand) this.pendingClick = true;
+      // B: the brush armed with the library's chosen entries (or what is in hand), or let go.
+      if (input.pressedAction('editorBrush')) void this.toggleBrush();
       // The editing keys (the hand on the selection, the gizmo's buttons, the nudges, the snaps, the hotbar, the eyedropper,
       // game view and the key sheet), read before the mutes take what they borrow; the frame's seconds in its kept clock.
       this.edits.clock.dt = dt;
@@ -554,8 +650,78 @@ export class Editor {
     a.slow = input.held('freeLook');
     // A hold, a drag of the gizmo or an orbit has the mouse: the camera holds still.
     a.look = !this.session.point && input.locked && !this.edits.takesMouse;
+    // The brush's buttons in Fly, read before the mutes take them: the attack's paints, the other attack's erases.
+    this.brushPaint = this.brush.armed && !oldHand && !this.session.point && input.held('attack');
+    this.brushErase = this.brush.armed && !oldHand && !this.session.point && input.held('altAttack');
     input.mute(editorMutes(oldHand));
     if (!oldHand) input.mute(TAKEN);
+  }
+
+  /**
+   * B: the brush armed with the library's chosen entries (or, with none chosen, the thing in hand), or let go. Armed, the
+   * hand is given up, an edit under way given up and nothing is picked: its buttons are its own. Answers what was said.
+   */
+  async toggleBrush(): Promise<string> {
+    if (this.brush.armed) {
+      this.brush.disarm();
+      this.say('the brush let go', true);
+      return 'the brush let go';
+    }
+    const said = await this.brush.arm(this.hand?.key ?? null);
+    if (this.brush.armed) {
+      this.giveUpHand();
+      this.edits.cancel(false);
+      this.edits.sel.clear();
+      this.window?.refreshEdits();
+      this.window?.library.render();
+    }
+    return said;
+  }
+
+  /**
+   * Fold now (DESIGN.md §2.8): anything under way given up, then the game's short loading screen (`EditorHost.fold`). The
+   * automatic fold calls the same. Answers what it came to.
+   */
+  async foldNow(): Promise<string> {
+    if (this.folding) return 'a fold is under way';
+    this.folding = true;
+    try {
+      this.edits.cancel(false);
+      const said = await this.host.fold();
+      this.autoFoldAt = this.host.world.streamer?.unfoldedCount ?? 0;
+      this.say(said, /^folded/.test(said));
+      return said;
+    } finally {
+      this.folding = false;
+      this.activeAt = performance.now() / 1000;
+    }
+  }
+
+  /** How many rows were left drawn one by one by the last fold: the automatic fold tries again only once that has moved. */
+  private autoFoldAt = -1;
+  /** The eye's look last frame, to tell a look round from a still frame. Fractions from the start. */
+  private lastYaw = 0.5;
+  private lastPitch = 0.5;
+
+  /**
+   * Whether anything happened this frame -- a key or a button down, the eye moving or looking round, an edit, a write, a
+   * stroke, a thing in hand, a fold -- and, with `EDITOR_TUNE.autoFold` on (it starts off), a fold once `autoFoldIdle`
+   * seconds have passed with none while more than `foldHint` rows stand drawn one by one, and again only once that count
+   * has moved since the last fold (a fold leaves the rows of tiers not yet loaded as they were). Nothing is made.
+   */
+  private noteActivity(now: number): void {
+    const ed = this.edits;
+    const looked = this.fly.yaw !== this.lastYaw || this.fly.pitch !== this.lastPitch;
+    this.lastYaw = this.fly.yaw;
+    this.lastPitch = this.fly.pitch;
+    if (looked || this.host.input.keysDown > 0 || this.pointer.buttons !== 0 || this.fly.moving > 0.05 || ed.busy || ed.writing || ed.stroking || this.hand || this.brush.mode || this.folding) {
+      this.activeAt = now;
+      return;
+    }
+    if (!EDITOR_TUNE.autoFold || now - this.activeAt < EDITOR_TUNE.autoFoldIdle || this.host.busy()) return;
+    const n = this.host.world.streamer?.unfoldedCount ?? 0;
+    if (n <= EDITOR_TUNE.foldHint || n === this.autoFoldAt) return;
+    void this.foldNow();
   }
 
   /** Tab, or the lock lost: Point frees the cursor, Fly takes the mouse again. */
@@ -585,6 +751,11 @@ export class Editor {
       this.giveUpHand();
       return true;
     }
+    if (this.brush.armed) {
+      this.brush.disarm();
+      this.say('the brush let go', true);
+      return true;
+    }
     // A hold or a drag under way: given up, the rows put back where their files have them, nothing written.
     if (this.edits.cancel()) return true;
     if (this.edits.sel.size) {
@@ -609,7 +780,8 @@ export class Editor {
    */
   canvasClick(): void {
     if (!this.session.on || !this.session.point) return;
-    if (this.hand || !this.pointer.clicked) return;
+    // With the brush armed a click paints: it never takes the mouse back to Fly.
+    if (this.hand || this.brush.armed || !this.pointer.clicked) return;
     if (this.aim.hover || this.edits.handleHot || !this.edits.clickGoesToFly()) return;
     this.pointer.clicked = false;
     this.setPoint(false);
@@ -666,8 +838,23 @@ export class Editor {
     const kind = this.aim.step(ask, EDITOR_TUNE.aim, EDITOR_TUNE.hover);
     this.aimKind = kind;
     const hit = this.aim.hit;
-    // The ghost where it would stand.
     const hand = this.hand;
+    // The brush: Fly's buttons were read in the key block; Point's are the pointer's over the canvas (left 1, right 4).
+    const brush = this.brush;
+    if (brush.armed) {
+      const ba = brush.ask;
+      const pb = this.session.point && this.pointer.over && !hand && !this.ctrlHeld ? this.pointer.buttons : 0;
+      ba.paint = this.session.point ? (pb & 1) !== 0 : this.brushPaint;
+      ba.erase = this.session.point ? (pb & 4) !== 0 : this.brushErase;
+      ba.cx = hit.x;
+      ba.cz = hit.z;
+      ba.valid = kind !== 'sky';
+      ba.dt = dt;
+      brush.frame();
+    }
+    // What happened this frame, for the automatic fold's quiet (`EDITOR_TUNE.autoFoldIdle`).
+    this.noteActivity(now);
+    // The ghost where it would stand.
     let inRoom = false;
     if (hand) {
       const stream = h.world.streamer;
@@ -728,6 +915,19 @@ export class Editor {
     sv.fy = this.tmp.y;
     sv.fz = this.tmp.z;
     sv.focal = hh / (2 * Math.tan((cam.fov * Math.PI) / 360));
+    // The brush's ring on the ground round the aim, armed and over something (game view hides it with the rest).
+    if (brush.armed && kind !== 'sky') {
+      const ra = this.ringAsk;
+      ra.cx = hit.x;
+      ra.cy = hit.y;
+      ra.cz = hit.z;
+      ra.radius = BRUSH_TUNE.radius;
+      ra.w = w;
+      ra.h = hh;
+      brushRing(ra, this.ringGround, vp, m.ring, m.ringVis);
+      m.ringOn = true;
+      m.ringErase = brush.mode === 'erase';
+    } else m.ringOn = false;
     this.edits.clock.now = now;
     this.edits.frame(m);
     this.moveEyeForEdits();
@@ -806,8 +1006,9 @@ export class Editor {
       q.set(g.q[0], g.q[1], g.q[2], g.q[3]);
       yaw = 2 * Math.atan2(q.y, q.w);
     } else q.setFromAxisAngle(UP, yaw);
-    // What was in hand before goes back first (a row picked up stands again).
+    // What was in hand before goes back first (a row picked up stands again), and the brush is let go: its buttons are the hand's now.
     this.giveUpHand();
+    if (this.brush.armed) this.brush.disarm();
     this.takeGen = gen;
     const bounds = got.bounds;
     const sc = base && !got.building ? scaleOfRow(base.row) : ([1, 1, 1] as [number, number, number]);
@@ -1129,18 +1330,28 @@ export class Editor {
     const fr = first ? this.host.rowFor(first) : null;
     v.sel = fr ? `${ed.sel.size} picked: ${fr.label} (${fr.row.id}, ${destinationFile(fr.layer, this.host.packId())}, ${fr.row.x.toFixed(2)} ${fr.row.y.toFixed(2)} ${fr.row.z.toFixed(2)}${fr.row.scale !== undefined ? `, scale ${JSON.stringify(fr.row.scale)}` : ''})${ed.writing ? ' · writing' : ''}` : ed.writing ? 'writing' : '';
     v.files = filesLine(ed, this.host.packId(), s.dest) + ` · snap ${ed.snapOn ? `${ed.grid} m · ${ed.angle}°` : 'off'} · ${ed.localAxes ? 'local' : 'world'} axes`;
+    // Rows drawn one by one past the hint: what they cost, and the way to fold them (DESIGN.md §2.8).
+    const stream = this.host.world.streamer;
+    const unf = stream?.unfoldedCount ?? 0;
+    if (this.folding) v.files += ' · folding…';
+    else if (unf > EDITOR_TUNE.foldHint) v.files += ` · ${unf} rows drawn one by one (about ${(stream?.unfoldedMs ?? 0).toFixed(1)} ms a frame): Fold now on the Tools tab${EDITOR_TUNE.autoFold ? ', or wait' : ''}`;
     v.keys = ed.keySheet ? keySheet(input) : '';
     v.mode = s.point ? 'POINT' : 'FLY';
     v.speed = `${this.fly.speed < 10 ? this.fly.speed.toFixed(1) : Math.round(this.fly.speed)} m/s${s.hold ? ' · held' : ''}`;
     const hs = this.hand?.scale;
-    v.hand = this.hand ? `in hand: ${this.hand.name}${hs && (hs.x !== 1 || hs.y !== 1 || hs.z !== 1) ? ` (scale ${hs.x === hs.y && hs.y === hs.z ? hs.x : `${hs.x} ${hs.y} ${hs.z}`})` : ''}${this.ghost.shown || !this.hand.bounds ? '' : ' (preparing)'}` : 'nothing in hand';
+    const br = this.brush;
+    v.hand = this.hand
+      ? `in hand: ${this.hand.name}${hs && (hs.x !== 1 || hs.y !== 1 || hs.z !== 1) ? ` (scale ${hs.x === hs.y && hs.y === hs.z ? hs.x : `${hs.x} ${hs.y} ${hs.z}`})` : ''}${this.ghost.shown || !this.hand.bounds ? '' : ' (preparing)'}`
+      : br.armed
+        ? `brush: ${br.set.size} entr${br.set.size === 1 ? 'y' : 'ies'} · ${BRUSH_TUNE.radius} m · ${BRUSH_TUNE.density} a 100 m²${br.mode ? ` · ${br.mode === 'paint' ? 'painting' : 'erasing'}` : ' · LMB paints, RMB erases, B lets go'}`
+        : 'nothing in hand';
     v.dest = `→ ${destinationFile(s.dest, this.host.packId())}`;
     v.room = roomWords(this.host.world.cameraRoom);
     v.notes = this.hand ? notesLine(this.notes) : '';
     v.said = this.said;
     v.saidOk = this.saidOk;
     const k = (a: Parameters<Input['pressedAction']>[0]) => input.bindings[a][0] ?? '';
-    v.hint = `WASD fly · ${k('editorUp')}/${k('editorDown')} up/down · Shift fast · Alt slow · wheel speed · ${k('editorPoint')} cursor · ${k('editorSearch')} find · click pick/put down · ${k('placeTurn')}/${k('placeLift')}/${k('editorScale')} held turn/raise/scale · ${k('takeProp')} pick up · ${k('putAway')} delete · ${k('placeLayer')} file · ${k('editorKeys')} keys · F2 leave`;
+    v.hint = `WASD fly · ${k('editorUp')}/${k('editorDown')} up/down · Shift fast · Alt slow · wheel speed · ${k('editorPoint')} cursor · ${k('editorSearch')} find · click pick/put down · ${k('placeTurn')}/${k('placeLift')}/${k('editorScale')} held turn/raise/scale · ${k('takeProp')} pick up · ${k('putAway')} delete · ${k('placeLayer')} file · ${k('editorBrush')} brush · ${k('editorKeys')} keys · F2 leave`;
     bar.show(v);
   }
 
@@ -1214,6 +1425,18 @@ export class Editor {
       held: () => this.hand?.key ?? '',
       status: () => this.libraryStatus(),
       usedHere: () => (this.libView ? usedHereKeys(this.libView, h.fileRows(), h.packId()) : []),
+      // Shift+click: the brush's entries (armed, it works them out again with the change).
+      brushToggle: (key: string) => {
+        const on = this.brush.toggle(key);
+        if (this.brush.armed) {
+          this.brush.disarm();
+          if (this.brush.set.size) void this.brush.arm(null);
+          else this.say('the brush let go: nothing left to paint with', true);
+        }
+        this.window?.refreshEdits();
+        return on;
+      },
+      brushed: (key: string) => this.brush.has(key),
       here: () => h.here(h.player.pos, 60),
       goTo: (id: string) => this.say(this.goTo(id), true),
       pickUp: (id: string) => void this.pickUp(id),
@@ -1239,6 +1462,18 @@ export class Editor {
         hold: this.session.hold,
         files: this.edits.fileStates.filter((f) => f.state !== 'none').map((f) => `${f.path.replace(/^public\//, '')}: ${STATE_WORDS[f.state]}`),
         branch: this.edits.branch ?? '',
+        fold: (() => {
+          const r = h.world.streamer?.unfoldedReport();
+          return { rows: r?.rows ?? 0, ms: r?.estMs ?? 0, folded: r?.folded ?? 0, folding: this.folding, auto: EDITOR_TUNE.autoFold, hint: EDITOR_TUNE.foldHint };
+        })(),
+        brush: {
+          armed: this.brush.armed,
+          entries: [...this.brush.set].map(([key, weight]) => {
+            const e = this.libView?.byKey.get(key);
+            return { key, name: e ? entryName(e) : key, weight };
+          }),
+          switches: BRUSH_SWITCHES.map(([key, words]) => ({ key, words, on: BRUSH_TUNE[key] })),
+        },
       }),
       setTool: (t: Record<string, unknown>) => this.setTool(t),
       refreshStatus: () => void this.edits.refreshStatus(),
@@ -1255,6 +1490,29 @@ export class Editor {
     if (typeof t.local === 'boolean') ed.localAxes = t.local;
     if (typeof t.gameView === 'boolean') ed.gameView = t.gameView;
     if (typeof t.hold === 'boolean') this.session.hold = t.hold;
+    // The third wave's: Fold now and the automatic fold, the brush armed, its entries' weights and its switches.
+    if (t.fold === true) void this.foldNow().then(() => this.window?.refreshEdits());
+    if (typeof t.autoFold === 'boolean') EDITOR_TUNE.autoFold = t.autoFold;
+    if (t.brushArm === true && !this.brush.armed) void this.toggleBrush().then(() => this.window?.refreshEdits());
+    if (t.brushArm === false && this.brush.armed) {
+      this.brush.disarm();
+      this.say('the brush let go', true);
+    }
+    if (Array.isArray(t.brushWeight) && typeof t.brushWeight[0] === 'string') this.brush.setWeight(t.brushWeight[0], Number(t.brushWeight[1]));
+    if (typeof t.brushRemove === 'string') {
+      this.brush.set.delete(t.brushRemove);
+      // Armed, the brush works its entries out again without the one let go (or is let go with none left).
+      if (this.brush.armed) {
+        this.brush.disarm();
+        if (this.brush.set.size) void this.brush.arm(null);
+      }
+      this.window?.library.render();
+    }
+    const sw = t.brushSwitch;
+    if (Array.isArray(sw) && typeof sw[1] === 'boolean') {
+      const k = BRUSH_SWITCHES.find(([key]) => key === sw[0]);
+      if (k) BRUSH_TUNE[k[0]] = sw[1];
+    }
   }
 
   /** The first picked row as the Selected tab shows it, or null. */
@@ -1388,6 +1646,9 @@ export class Editor {
         if (Object.keys(fields).length) said.push(await ed.setField(fields));
       }
       if (o.status === true) said.push(await ed.refreshStatus());
+      // The third wave's: Fold now, and the brush.
+      if (o.fold === true) said.push(await this.foldNow());
+      if (o.brush && typeof o.brush === 'object') said.push(...(await this.brushDebug(o.brush as Record<string, unknown>)));
     }
     const p = h.player.pos;
     const c = h.world.placeFrame;
@@ -1415,9 +1676,61 @@ export class Editor {
       said: this.said,
       lastWrite: this.edits.lastWrite ?? this.lastWrite,
       edits: this.edits.report(),
+      unfolded: h.world.streamer?.unfoldedReport() ?? null,
+      autoFold: { on: EDITOR_TUNE.autoFold, idle: EDITOR_TUNE.autoFoldIdle, hint: EDITOR_TUNE.foldHint, quietFor: round(performance.now() / 1000 - this.activeAt), folding: this.folding },
+      brush: this.brush.report(),
       bar: { writes: this.bar?.writes ?? 0 },
       ...(said.length ? { answered: said } : {}),
     };
+  }
+
+  /**
+   * `editor({ brush })`: its numbers (named on it, or under `tune`: every one of `BRUSH_TUNE`), the entries it paints with (`entries`, library
+   * keys, replacing the chosen set; `weights`, key to weight), arming (`arm`, true or false) and a whole stroke at a point of
+   * the file's own frame (`stroke: { at: [x, z], mode, stamps, seed }`), one undo entry. Answers what was said.
+   */
+  private async brushDebug(b: Record<string, unknown>): Promise<string[]> {
+    const said: string[] = [];
+    const br = this.brush;
+    if (b.tune !== undefined) said.push(...tuneEditor({ brush: b.tune }));
+    // Its numbers and switches named straight on it as well (`editor({ brush: { radius: 8, density: 2 } })`).
+    const direct: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(b)) if (Object.prototype.hasOwnProperty.call(BRUSH_TUNE, k)) direct[k] = v;
+    if (Object.keys(direct).length) said.push(...tuneEditor({ brush: direct }));
+    if (Array.isArray(b.entries)) {
+      await this.loadLibrary();
+      br.set.clear();
+      for (const k of b.entries) {
+        if (typeof k !== 'string') continue;
+        if (!this.libView?.byKey.has(k)) said.push(`no library entry ${k}`);
+        else br.set.set(k, 1);
+      }
+      if (br.armed) br.disarm();
+      this.window?.library.render();
+    }
+    if (b.weights && typeof b.weights === 'object') for (const [k, v] of Object.entries(b.weights as Record<string, unknown>)) br.setWeight(k, Number(v));
+    if (b.arm === true && !br.armed) {
+      said.push(await br.arm(this.hand?.key ?? null));
+      if (br.armed) this.giveUpHand();
+    }
+    if (b.arm === false && br.armed) {
+      br.disarm();
+      said.push('the brush let go');
+    }
+    const st = b.stroke as Record<string, unknown> | undefined;
+    if (st && typeof st === 'object') {
+      const at = Array.isArray(st.at) && st.at.length === 2 ? [Number(st.at[0]), Number(st.at[1])] : null;
+      const w = this.host.world;
+      const c = w.placeFrame;
+      const space = !!w.planet?.space;
+      // The stroke's middle given in the file's own frame (a `/loc` line on a planet), or at the aim.
+      const cx = at ? (space || !c ? at[0] : rawToGameX(c.x, at[0])) : this.aim.hit.x;
+      const cz = at ? (space || !c ? at[1] : rawToGameZ(c.z, at[1])) : this.aim.hit.z;
+      const mode = st.mode === 'erase' ? 'erase' : 'paint';
+      const stamps = typeof st.stamps === 'number' ? Math.max(1, Math.min(200, Math.floor(st.stamps))) : 1;
+      said.push(await br.strokeAt(cx, cz, mode, stamps, typeof st.seed === 'number' ? st.seed >>> 0 : undefined));
+    }
+    return said;
   }
 
   /** `__debug.library(o)`. */
@@ -1494,9 +1807,22 @@ function keySheet(input: Input): string {
     `${k('editorGridDown')} ${k('editorGridUp')} grid (Shift: angle) · ${k('editorSnap')} snapping on and off`,
     `Ctrl+D duplicate · Ctrl+C copy · Ctrl+X cut · Ctrl+V paste at the aim (Shift: turned to you) · Ctrl+Z undo · Ctrl+Shift+Z redo`,
     `${k('putAway')} delete · ${k('takeProp')} pick up into the hand · MMB another of that · 1-9 hotbar (Shift+1-9 set) · ${k('placeLayer')} file`,
+    `${k('editorBrush')} brush armed and let go (Shift+click entries in the library first) · LMB held paints · RMB held erases · Tools tab: Fold now`,
     `${k('editorGameView')} game view · ${k('editorKeys')} this sheet · ${k('editorBody')} body here · ${k('editorHold')} hold the world · Esc give up / clear · F2 leave`,
   ].join('\n');
 }
+
+/**
+ * The brush's switches, as the Tools tab shows them (the sliders take its numbers; a switch's line would be a boolean,
+ * which the debug menu's dials do not carry): each a key of `BRUSH_TUNE` and its words.
+ */
+const BRUSH_SWITCHES: readonly (readonly ['randomYaw' | 'align' | 'heightOn' | 'keepOffWater' | 'keepOffStanding', string])[] = [
+  ['randomYaw', 'Random turn'],
+  ['align', 'Lean to the ground'],
+  ['heightOn', 'Height filter'],
+  ['keepOffWater', 'Off the water'],
+  ['keepOffStanding', 'Off what stands'],
+];
 
 /** What the editor's key block mutes after reading them in its own sense: the old hand must not read them too. */
 const TAKEN = ['takeProp', 'putAway', 'placeLayer', 'noclipFaster', 'noclipSlower'] as const;
@@ -1528,6 +1854,7 @@ function lowestOf(b: { min: number[]; max: number[] }, q: THREE.Quaternion, tmp:
 function round(v: number): number {
   return Math.round(v * 1000) / 1000;
 }
+
 
 /** The flight's speed held to the tune's least and most. */
 function clampSpeed(v: number): number {

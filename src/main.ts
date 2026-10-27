@@ -975,6 +975,11 @@ const VOL_HATCH_OFF = ((): boolean => {
     return false;
   }
 })();
+/**
+ * How long the world editor's Fold now waits behind its screen for the tiers round the eye to be built again, ms: a bound
+ * of ours, the arrival's own settle being 30 s; what is not in by then streams in as any tier does, hidden until built.
+ */
+const EDITOR_FOLD_WAIT_MS = 20000;
 /** What the notice says while the master turned on in play builds what it needs (`reconcileVolumetrics`). */
 const VOL_WARM_NOTICE = 'Volumetrics on: preparing shaders';
 /** How long a loading screen waits for the kick-up's pictures (`World.airPictures`), ms; one landing after is handed over then. Ours. */
@@ -5299,7 +5304,9 @@ class App {
        * comparison, `{ nullTrunk: true }` gives a tall tree the client walked through the guess's slim trunk
        * after all, the guess's own numbers move too (`treeRatio`, `trunkShare`, `trunkMin`, `trunkMax`,
        * `rockShare`, `rockMin`), and `collision: true` puts the shipped rule back; every one rebuilds the
-       * colliders of the chunks standing at once. `near`'s list says which shape each collider is.
+       * colliders of the chunks standing at once. `{ placed: 'extent' }` makes the world's own **placed** trees solid
+       * at the client's shapes too, to compare (`'mesh'`, every triangle, is how they always were and stands).
+       * `near`'s list says which shape each collider is.
        */
       flora: (opts?: { near?: number; rule?: 'model' | 'snapshot'; pad?: number; cap?: number; reach?: ReachOption; collision?: true | Partial<typeof FLORA_COLLISION> }) => {
         if (opts?.rule) FLORA_CLEAR.rule = opts.rule;
@@ -5328,6 +5335,11 @@ class App {
           }
           FLORA_COLLISION.trunkMax = Math.max(FLORA_COLLISION.trunkMax, FLORA_COLLISION.trunkMin);
           this.world.refreshFloraColliders();
+          // The world's own placed trees, by their every triangle (`'mesh'`, as they always were) or the client's shapes.
+          if ((c.placed === 'mesh' || c.placed === 'extent') && c.placed !== FLORA_COLLISION.placed) {
+            FLORA_COLLISION.placed = c.placed;
+            this.world.refreshPlacedFlora();
+          }
         }
         const status = this.world.floraStatus;
         const out: Record<string, unknown> = { ...(status ?? {}), clear: { ...FLORA_CLEAR }, reach: this.world.floraReachReport(), collision: { tune: { ...FLORA_COLLISION }, ...this.world.floraCollisionReport() } };
@@ -24510,6 +24522,17 @@ class App {
    */
   private async standDressing(pack: string, gen = this.world.generation): Promise<void> {
     if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    // The regions this world's rows fall in were held from loading at the arrival (`World.holdDressing`), so rows filed
+    // before their tier is built fold into it (DESIGN.md §2.8): let go once every row is filed, whatever comes of it.
+    try {
+      await this.standDressingHeld(pack, gen);
+    } finally {
+      this.world.releaseDressingHold(gen);
+    }
+  }
+
+  /** `standDressing`'s own work, with the regions held round it. */
+  private async standDressingHeld(pack: string, gen: number): Promise<void> {
     const run = { pack, run: ++this.dressingRuns };
     this.dressingRun = run;
     this.dressingBuilt = Promise.resolve();
@@ -27641,6 +27664,8 @@ class App {
           standingRows: () => (this.permanent.worldIn === this.editWorld() ? [...this.permanent.standing].map((s) => ({ id: s.row.id, row: s.row, layer: s.layer, x: s.x, y: s.y, z: s.z })) : []),
           idsTaken: () => new Set([...(this.permanent.fileOf('story')?.rows ?? []), ...(this.permanent.fileOf('world')?.rows ?? [])].map((r) => r.id)),
           stoodNote: (id) => this.permanent.rowOf(placementKey(id))?.note ?? null,
+          fold: () => this.editorFold(),
+          busy: () => this.traveling || !this.inWorld,
         });
         this.editor = ed;
         return ed;
@@ -27688,6 +27713,57 @@ class App {
       p.reset(at);
       after(ret.cell);
     } else void this.standAtHome(at, null, 'leaving the world editor', 'so the body stands on the ground under it').then((onFloor) => after(onFloor ? ret.cell : 0));
+  }
+
+  /**
+   * The world editor's **Fold now** (DESIGN.md §2.8), behind a short loading screen of the course curtain's shape: the
+   * screen shown opaque, every tier filed again under the rule in force (`refilePlaced` with `force`), so the permanent
+   * rows drawn one by one fold into their tiers as those are built again round the eye, the world waited for (bounded),
+   * the sweep behind the screen, and the screen hidden at once. Answers what it came to.
+   */
+  private async editorFold(): Promise<string> {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    // Only with the editor on, whose camera's room is worked out again every frame and whose return point keeps the body's
+    // room by number: `refilePlaced` takes the player to be outdoors, and with the editor off nothing here would put a body
+    // standing in a building back in its room (`placedReload`'s own way, which the console's fold has no need of).
+    if (!this.editor?.on) return 'Fold now is the world editor\'s: F2 first';
+    if (!this.inWorld || this.traveling) return 'not now: enter the world first, and not mid-crossing';
+    const ls = this.world.streamer;
+    if (!ls) return 'this world stands nothing to fold';
+    const before = ls.unfoldedReport();
+    if (!before.rows) return 'nothing to fold: every permanent row is drawn by its tier';
+    this.traveling = true;
+    this.curtainOnly = true;
+    this.map.hide();
+    const held = this.input.captured;
+    this.input.captured = false;
+    this.loadingScreen.show(this.world.planet, 'folding the placed rows', `${before.rows} rows into their tiers`);
+    let compiled = 0;
+    const t0 = performance.now();
+    try {
+      // The screen painted before the world's tiers are dropped under it.
+      await new Promise((r) => setTimeout(r, 250));
+      this.world.refilePlaced(ls.filing, { force: true });
+      const at = this.player.worldPos;
+      ls.update(at, this.world.cameraRoom.building);
+      while (!this.world.settled(at) && performance.now() - t0 < EDITOR_FOLD_WAIT_MS) {
+        const { total, stage } = this.world.progress(at);
+        this.loadingScreen.setProgress(0.04 + total * 0.8);
+        this.loadingScreen.setWhat(`loading ${stage}`);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      this.loadingScreen.setWhat('compiling shaders');
+      compiled = await this.world.compileAllAsync(() => { });
+      await this.world.flushPrograms();
+      this.sampleShaders('loading');
+    } finally {
+      await this.loadingScreen.hide({ quick: LOADING_TUNE.quickHide });
+      this.traveling = false;
+      this.curtainOnly = false;
+      this.input.captured = held;
+    }
+    const after = ls.unfoldedReport();
+    return `folded: ${before.rows - after.rows} of ${before.rows} rows into their tiers (${after.rows} still one by one), ${compiled} programs built behind the screen, ${Math.round(performance.now() - t0)} ms`;
   }
 
   /** The rows of this world's two files as the permanent layer last read them (the library's Used here), none for another world's. */

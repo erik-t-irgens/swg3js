@@ -63,6 +63,13 @@ export const FLORA_COLLISION = {
   /** A guessed rock: this share of the box's radius, never under this. */
   rockShare: 0.8,
   rockMin: 0.3,
+  /**
+   * The world's own **placed** trees (the snapshot's, which its pack files as flora): `'mesh'`, every triangle of the model
+   * solid, canopy and all, as they always have been; `'extent'`, the client's own shapes as a permanent row's and a
+   * planting's (`rowFloraParts`). Changing the world's own placed trees is not the world editor's pass, so `'mesh'` stands
+   * (DESIGN.md §2.8) and this is the knob to compare.
+   */
+  placed: 'mesh' as 'mesh' | 'extent',
 };
 
 /** The defaults, for `__debug.flora({ collision: true })`. */

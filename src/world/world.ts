@@ -56,7 +56,7 @@ import { TERRAIN_GROUND_TUNE } from '../swg/terrain/generator.ts';
 import type { GroundRules } from './demShader';
 import { LayoutStreamer, nearTierRange, type Building, type CellState, type FloorUnder, type PlacedObject, type RoomAnswer, type WaterSurfaceHandle } from './layoutStream';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchMiddle, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
-import { DRESSING_TUNE, type DressingStand, type StandAnswer } from './permanent.ts';
+import { DRESSING_TUNE, type DressingKeep, type DressingStand, type StandAnswer } from './permanent.ts';
 import { PLACEMENT_KEY_PREFIX } from '../story/placements.ts';
 import { rawToGameX, rawToGameZ } from '../story/waypoints.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
@@ -1926,7 +1926,7 @@ export class World {
    * waited on for at most `DRESSING_TUNE.floraWaitMs`, and the small file it comes from has nearly always
    * landed long before the pack.
    */
-  async loadPack(spawn: THREE.Vector3, opts: { keepOff?: Promise<{ raw: { x: number; z: number; r: number }[]; game: { x: number; z: number; r: number }[] } | null> } = {}): Promise<THREE.Vector3 | null> {
+  async loadPack(spawn: THREE.Vector3, opts: { keepOff?: Promise<DressingKeep | null> } = {}): Promise<THREE.Vector3 | null> {
     const token = this.loadToken;
     const planet = this.planet;
     this.packStatus = 'loading';
@@ -2142,6 +2142,22 @@ export class World {
       // the sweep there builds their programs (step 6): the loading screen's `settle` asks again for where
       // the player really stands.
       this.warmPlaced(spawn);
+      // The ground the permanent placements stand on kept clear of plants before the first chunk is built,
+      // so a building in a wood stands in a clearing on the first visit as the game's own do; and the regions the rows
+      // fall in held until the rows are filed (DESIGN.md §2.8), as soon as their places are known and before every other
+      // wait of the arrival (a space zone's effects and nebulae are real fetches, and the frame loop updates the streamer
+      // throughout: a tier one of them let begin is let go by the hold and built again with the rows).
+      if (opts.keepOff) {
+        const stream = this.layoutStream;
+        const circles = await Promise.race([opts.keepOff.catch(() => null), new Promise<null>((r) => setTimeout(() => r(null), DRESSING_TUNE.floraWaitMs))]);
+        if (token !== this.loadToken) return null;
+        if (circles && stream === this.layoutStream) {
+          const c = layout.center;
+          for (const k of circles.raw) stream.keepFloraOff(rawToGameX(c.x, k.x), rawToGameZ(c.z, k.z), k.r);
+          for (const k of circles.game) stream.keepFloraOff(k.x, k.z, k.r);
+          this.holdDressing(stream, circles.hold, c);
+        }
+      }
       // A space zone's hyperspace effects are made ready now (their textured batches hidden in the scene, their
       // textures uploaded), so settle() compiles them behind the loading screen and no jump builds a program on a
       // live frame. Not `solid`: the jump places them without it (placeZoneEffect). `spaceData` was set by
@@ -2161,18 +2177,6 @@ export class World {
       // kilometres tall under every asteroid.
       if (!this.terrain.swg && !planet.space) {
         for (const p of this.layoutStream.objects) if (p.radius >= 2 && !p.contained) this.terrain.addAnchor({ x: p.x, z: p.z, y: p.y, r: p.radius });
-      }
-      // The ground the permanent placements stand on kept clear of plants before the first chunk is built,
-      // so a building in a wood stands in a clearing on the first visit as the game's own do.
-      if (opts.keepOff) {
-        const stream = this.layoutStream;
-        const circles = await Promise.race([opts.keepOff.catch(() => null), new Promise<null>((r) => setTimeout(() => r(null), DRESSING_TUNE.floraWaitMs))]);
-        if (token !== this.loadToken) return null;
-        if (circles && stream === this.layoutStream) {
-          const c = layout.center;
-          for (const k of circles.raw) stream.keepFloraOff(rawToGameX(c.x, k.x), rawToGameZ(c.z, k.z), k.r);
-          for (const k of circles.game) stream.keepFloraOff(k.x, k.z, k.r);
-        }
       }
     }
     // The Force's own beams: a small pool built into the scene here, hidden, so the warm-up
@@ -2224,7 +2228,7 @@ export class World {
    * the real-elevation ground to its feet. Its centre (0, 0) is `placeFrame`, which keeps every raw coordinate the world
    * already prints (`/loc` and the minimap mirror about (0, 0) there).
    */
-  private async standInStreamer(id: string, keepOff: Promise<{ raw: { x: number; z: number; r: number }[]; game: { x: number; z: number; r: number }[] } | null> | undefined, token: number): Promise<void> {
+  private async standInStreamer(id: string, keepOff: Promise<DressingKeep | null> | undefined, token: number): Promise<void> {
     const base = `${import.meta.env.BASE_URL}assets-private/${id}/`;
     const stand = AssetPack.from({ planet: id, categories: {} }, base);
     const layout: Layout = { planet: id, center: { x: 0, z: 0 }, radius: 0, objects: [] };
@@ -2246,6 +2250,38 @@ export class World {
     if (token !== this.loadToken || !circles || stream !== this.layoutStream) return;
     for (const k of circles.raw) stream.keepFloraOff(rawToGameX(0, k.x), rawToGameZ(0, k.z), k.r);
     for (const k of circles.game) stream.keepFloraOff(k.x, k.z, k.r);
+    this.holdDressing(stream, circles.hold, { x: 0, z: 0 });
+  }
+
+  /**
+   * The regions a world's permanent rows fall in held from loading until the rows are filed (`releaseDressingHold`, which
+   * the arrival's `standDressing` calls in a `finally`), and after `DRESSING_TUNE.standWaitMs` at the latest whatever
+   * becomes of it: rows filed before their tier is built fold into it (DESIGN.md §2.8), where filed into a tier already
+   * standing each would be drawn on meshes of its own. Raw points are carried about `centre`; a world with no rows holds
+   * nothing. Kept for the streamer it was asked for, so a hold let go late never reaches the next world's.
+   */
+  private holdDressing(stream: LayoutStreamer, hold: DressingKeep['hold'], centre: { x: number; z: number }): void {
+    if (!hold || (!hold.raw.length && !hold.game.length)) return;
+    const points = [...hold.raw.map((p) => ({ x: rawToGameX(centre.x, p.x), z: rawToGameZ(centre.z, p.z) })), ...hold.game];
+    if (!stream.holdRegions(points)) return;
+    this.dressingHeld = stream;
+    setTimeout(() => {
+      if (this.dressingHeld === stream) this.releaseDressingHold();
+    }, DRESSING_TUNE.standWaitMs);
+  }
+
+  /** The streamer whose regions the dressing holds now, or null. */
+  private dressingHeld: LayoutStreamer | null = null;
+
+  /**
+   * Let the dressing's held regions load (the rows are filed, or the arrival's stand gave up): `gen` is the world the
+   * caller filed for, so a run for a world since left lets nothing of the next one go.
+   */
+  releaseDressingHold(gen = this.loadGeneration): void {
+    if (gen !== this.loadGeneration) return;
+    const stream = this.dressingHeld;
+    this.dressingHeld = null;
+    if (stream && stream === this.layoutStream) stream.releaseRegions();
   }
 
   /** The centre a world with no pack of its own places rows about ((0, 0)), or null; cleared with the world. */
@@ -6502,14 +6538,20 @@ export class World {
    * File this world's placed objects again by another rule (`LayoutStreamer.refile`): every tier dropped and
    * the next update loading by the new one. The room the player stood in went with its building, so the
    * player is taken to be outdoors until the caller puts them back (`enterCellAt`); the game calls this only
-   * behind a loading screen. Answers whether anything changed.
+   * behind a loading screen. Answers whether anything changed. `force` files again under the rule in force: the world
+   * editor's Fold now, whose permanent rows drawn one by one fold into their tiers as those are built again.
    */
-  refilePlaced(rule: 'model' | 'snapshot'): boolean {
+  refilePlaced(rule: 'model' | 'snapshot', opts: { force?: boolean } = {}): boolean {
     const ls = this.layoutStream;
-    if (!ls || !ls.refile(rule)) return false;
+    if (!ls || !ls.refile(rule, !!opts.force)) return false;
     this.cellState = null;
     this.prevPlayerPos.x = Number.NaN;
     return true;
+  }
+
+  /** The placed trees' colliders made again by `FLORA_COLLISION.placed` (`LayoutStreamer.refreshPlacedFlora`); how many were let go. */
+  refreshPlacedFlora(): number {
+    return this.layoutStream?.refreshPlacedFlora() ?? 0;
   }
 
   /** The material scan's switch (the frame report's `scanNew`), and what it has done, for the console. */

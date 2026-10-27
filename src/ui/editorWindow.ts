@@ -4,7 +4,8 @@
 // clear, guard, solid, state, name and note, its size and its height over the ground), each field written through as an
 // action -- its place, turn and scale for the first alone, what it is for every picked row alike; **Here**, the permanent rows standing round the camera with their file, a way to fly to each, to pick one up,
 // to take it out of its file, and a box a row to pick it (Shift-click a box picks a run); **Tools**, snapping, the axes,
-// game view, holding the world, git's word on the files and the editor's dials; and **History**, every action of this
+// game view, holding the world, git's word on the files, from the third wave the fold (Fold now, the automatic fold's
+// switch) and the brush (armed, its entries and their weights, its switches), and the editor's dials; and **History**, every action of this
 // world's session, a click going back or forward to any of them.
 //
 // It is not a panel: it stays out of `anyPanelOpen`, so the world goes on simulating under it and the camera flies, and
@@ -121,8 +122,25 @@ export interface EditorWindowHost extends LibraryHost {
   /** The history: its actions' words, and how many are done; a click goes to any. */
   history(): { at: number; actions: string[] };
   historyTo(n: number): void;
-  /** The tools: snapping, the axes, game view, the world held, git's word. */
-  tools(): { snapOn: boolean; grid: number; angle: number; gridSteps: number[]; angleSteps: number[]; local: boolean; gameView: boolean; hold: boolean; files: string[]; branch: string };
+  /**
+   * The tools: snapping, the axes, game view, the world held, git's word; from the third wave the fold (how many rows stand
+   * drawn one by one and what that costs, a fold under way, the automatic fold's switch) and the brush (armed, its entries
+   * with their weights, its switches).
+   */
+  tools(): {
+    snapOn: boolean;
+    grid: number;
+    angle: number;
+    gridSteps: number[];
+    angleSteps: number[];
+    local: boolean;
+    gameView: boolean;
+    hold: boolean;
+    files: string[];
+    branch: string;
+    fold?: { rows: number; ms: number; folded: number; folding: boolean; auto: boolean; hint: number };
+    brush?: { armed: boolean; entries: { key: string; name: string; weight: number }[]; switches: { key: string; words: string; on: boolean }[] };
+  };
   setTool(t: Record<string, unknown>): void;
   refreshStatus(): void;
   /** The editor's numbers of feel, as sliders. */
@@ -450,6 +468,54 @@ export class EditorWindow {
     row(...t.angleSteps.map((a) => toggle(`${a}°`, t.angle === a, { angle: a })));
     h('VIEW');
     row(toggle(t.local ? 'Local axes' : 'World axes', t.local, { local: !t.local }), toggle('Game view', t.gameView, { gameView: !t.gameView }), toggle('Hold the world', t.hold, { hold: !t.hold }));
+    // Folding (the third wave's): the rows drawn one by one, and the short loading screen that folds them.
+    if (t.fold) {
+      const f = t.fold;
+      h('FOLDING');
+      this.note(el, f.folding ? 'folding…' : `${f.rows} row${f.rows === 1 ? '' : 's'} drawn one by one (about ${f.ms.toFixed(1)} ms a frame by the measured rate) · ${f.folded} folded into their tiers`);
+      row(toggle('Fold now', false, { fold: true }), toggle(f.auto ? 'Automatic fold on' : 'Automatic fold off', f.auto, { autoFold: !f.auto }));
+      this.note(el, `Every arrival folds the rows by itself; Fold now does it here behind a short loading screen.${f.auto ? ` The automatic fold waits for a quiet moment with more than ${f.hint} drawn one by one.` : ''}`);
+    }
+    // The brush (the third wave's): armed or not, its entries (Shift+click them in the library) with their weights, its switches.
+    if (t.brush) {
+      const b = t.brush;
+      h('THE BRUSH');
+      row(toggle(b.armed ? 'Armed (B)' : 'Arm (B)', b.armed, { brushArm: !b.armed }));
+      if (!b.entries.length) this.note(el, 'no entries: Shift+click things in the library (or arm it with a thing in hand)');
+      for (const e of b.entries) {
+        const r = document.createElement('div');
+        r.className = 'ed-row';
+        const label = document.createElement('span');
+        label.className = 'ed-label';
+        label.textContent = e.name;
+        label.title = e.key;
+        const w = document.createElement('input');
+        w.type = 'number';
+        w.step = 'any';
+        w.min = '0';
+        w.value = String(e.weight);
+        w.title = 'its weight among the rest';
+        w.style.width = '56px';
+        w.addEventListener('change', () => {
+          const n = Number(w.value);
+          if (Number.isFinite(n) && n >= 0) this.host.setTool({ brushWeight: [e.key, n] });
+          w.blur();
+        });
+        w.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter' || ev.key === 'Escape') w.blur();
+        });
+        const out = this.button('Let go', 'tool');
+        out.addEventListener('click', () => {
+          this.host.setTool({ brushRemove: e.key });
+          out.blur();
+          this.drawTools();
+        });
+        r.append(label, w, out);
+        el.appendChild(r);
+      }
+      row(...b.switches.map((s) => toggle(s.words, s.on, { brushSwitch: [s.key, !s.on] })));
+      this.note(el, 'LMB held paints toward the density, counting what of its own stands; RMB held erases; a stroke is one undo. Its numbers are the sliders under The brush below.');
+    }
     h('FILES');
     const files = document.createElement('div');
     files.className = 'ed-note';

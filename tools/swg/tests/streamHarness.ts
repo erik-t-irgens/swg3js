@@ -141,9 +141,9 @@ export interface Harness {
  * A streamer over a world of `objects` (the rock by default) with the gallery's house and crate standing behind it;
  * `extra` adds models of its own to the world's pack, `flora` naming those it files as flora, and `effects` stands in
  * for the particle player the world hands the streamer (`place(file, matrix, contained)` and `remove(handle)`), so a test
- * can see what the streamer places and from which file.
+ * can see what the streamer places and from which file; `Streamer` builds another streamer class over the same packs.
  */
-export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, extra: { defs?: Def[]; models?: Record<string, ReturnType<typeof loadedOf>>; flora?: string[]; effects?: { place(file: string, m: THREE.Matrix4, contained: boolean): unknown; remove(h: unknown): void } } = {}): Promise<Harness> {
+export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, extra: { defs?: Def[]; models?: Record<string, ReturnType<typeof loadedOf>>; flora?: string[]; effects?: { place(file: string, m: THREE.Matrix4, contained: boolean): unknown; remove(h: unknown): void }; Streamer?: new (...args: any[]) => any } = {}): Promise<Harness> {
   const physics = await Physics.create();
   const scene = new THREE.Scene();
   const world = fakePack(
@@ -167,7 +167,9 @@ export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, 
     crate: loadedOf(CRATE, [{ geometry: boxGeo(1, 1, 1, 0), cell: -1 }]),
   });
   const layout = { planet: 'tatooine', center: { x: 0, z: 0 }, radius: 10000, objects };
-  const stream = new LayoutStreamer(scene, physics, world as never, layout as never, (extra.effects ?? null) as never, {});
+  // `Streamer`: another streamer class over the same packs (a day-one test's, loaded out of git).
+  const Ctor = (extra.Streamer ?? LayoutStreamer) as typeof LayoutStreamer;
+  const stream = new Ctor(scene, physics, world as never, layout as never, (extra.effects ?? null) as never, {});
   stream.useGuestPack(gallery as never);
   const s = stream as any;
   const at = new THREE.Vector3();
@@ -204,6 +206,8 @@ export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, 
         if (!mesh.isInstancedMesh) continue;
         for (let i = 0; i < mesh.count; i++) {
           mesh.getMatrixAt(i, m);
+          // A folded row hidden in place (map-maker wave 3, `hideInPlace`) holds its slot at no size: it draws nothing.
+          if (m.elements[0] === 0 && m.elements[5] === 0 && m.elements[10] === 0 && m.elements[1] === 0 && m.elements[6] === 0) continue;
           v.setFromMatrixPosition(m);
           if (Math.abs(v.x - x) < 0.01 && Math.abs(v.z - z) < 0.01) n++;
         }

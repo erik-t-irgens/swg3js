@@ -2,7 +2,8 @@
 // boxes -- the ghost's, in `ink` where a player would be let put it there and in `warn` where a player would be refused,
 // and the box of whatever the aim rests on, in `muted` -- and from the second wave each selected thing's box in `ink` (up
 // to `outline.most`, past which one box round them all), the gizmo's handles (X `bad`, Y `good`, Z `accent`, the one under
-// the cursor `hot`) and the rectangle a box selection draws. No WebGL, no program, no text and nothing made a frame: the
+// the cursor `hot`) and the rectangle a box selection draws, and from the third the brush's ring on the ground (`accent`,
+// `bad` while it erases). No WebGL, no program, no text and nothing made a frame: the
 // eight corners of a box are projected into a kept array and its twelve edges are lines on the overlay, in the eighteen
 // colours (`COL`). Game view (G) draws none of it.
 //
@@ -88,11 +89,22 @@ export interface MarksView {
   /** A box selection being drawn, its two corners on the screen. */
   rectOn: boolean;
   rect: Float64Array;
+  /**
+   * The scatter brush's ring (map-maker wave 3): `RING_STEPS` ground points round the aim on the screen (two a point),
+   * each drawn to the next where both are in front of the eye (`ringVis`), in `bad` while a stroke erases.
+   */
+  ringOn: boolean;
+  ringErase: boolean;
+  ring: Float64Array;
+  ringVis: Uint8Array;
 }
+
+/** How many points the brush's ring is drawn through (`brush.ts`'s `RING_STEPS`, said again so this file imports no rule). */
+export const RING_MARKS = 48;
 
 /** A view with nothing to draw. */
 export function marksView(): MarksView {
-  return { fly: true, w: 0, h: 0, aimOn: false, aimX: 0, aimY: 0, ghostOn: false, ghostWarn: false, ghost: new Float64Array(16), hoverOn: false, hover: new Float64Array(16), hidden: false, sel: [], selCount: 0, selAll: false, selUnion: new Float64Array(16), gizmo: null, rectOn: false, rect: new Float64Array(8) };
+  return { fly: true, w: 0, h: 0, aimOn: false, aimX: 0, aimY: 0, ghostOn: false, ghostWarn: false, ghost: new Float64Array(16), hoverOn: false, hover: new Float64Array(16), hidden: false, sel: [], selCount: 0, selAll: false, selUnion: new Float64Array(16), gizmo: null, rectOn: false, rect: new Float64Array(8), ringOn: false, ringErase: false, ring: new Float64Array(RING_MARKS * 2), ringVis: new Uint8Array(RING_MARKS) };
 }
 
 /** A selection box at a slot of the pool, made the first time the pool reaches that far (never in a steady frame). */
@@ -168,6 +180,16 @@ export function drawEditorMarks(o: MarksOverlay, v: MarksView): void {
   else for (let i = 0; i < v.selCount; i++) drawBox(o, v.sel[i], width, COL.ink, 0.9);
   if (v.gizmo) drawGizmo(o, v.gizmo, EDITOR_TUNE.gizmo.width);
   if (v.rectOn) o.poly(v.rect, 4, 1, COL.accent, 0.9, true, false);
+  if (v.ringOn) {
+    // The brush's ring, a segment between each pair of points both in front of the eye.
+    const c = v.ringErase ? COL.bad : COL.accent;
+    const pts = v.ring;
+    const vis = v.ringVis;
+    for (let i = 0; i < RING_MARKS; i++) {
+      const j = i + 1 === RING_MARKS ? 0 : i + 1;
+      if (vis[i] && vis[j]) o.line(pts[i * 2], pts[i * 2 + 1], pts[j * 2], pts[j * 2 + 1], width, c, 0.9);
+    }
+  }
   if (v.hoverOn) drawBox(o, v.hover, width, COL.muted, 0.8);
   if (v.ghostOn) drawBox(o, v.ghost, width, v.ghostWarn ? COL.warn : COL.ink, 0.9);
   if (v.aimOn) o.ring(v.aimX, v.aimY, 4, 1.5, v.ghostWarn ? COL.warn : COL.accent, 0.9);

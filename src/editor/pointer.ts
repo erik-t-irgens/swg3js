@@ -19,7 +19,7 @@ export interface PointerRecord {
   y: number;
   /** Whether the cursor is over the canvas at all. */
   over: boolean;
-  /** The buttons held, as `MouseEvent.buttons` (1 left, 2 right, 4 middle). */
+  /** The buttons held, as bit masks of the button (1 << button: 1 left, 2 middle, 4 right), not `MouseEvent.buttons`' order. */
   buttons: number;
   /** The buttons pressed and released this frame, as bit masks of the button (1 << button). */
   pressed: number;
@@ -85,6 +85,32 @@ export function notePointerUp(p: PointerRecord, button: number, x: number, y: nu
   if (button === 0) p.dragging = false;
 }
 
+/**
+ * What the page says is held now (`MouseEvent.buttons`: 1 left, 2 right, 4 middle), on every move over the canvas: a button
+ * the record still holds and the page does not was let go somewhere the canvas never heard of -- over the editor's own
+ * window, outside the page, or as one of two held together, which the page tells by a move and not a release -- and is let
+ * go here, said released and never a click. Nothing is added: a button pressed off the canvas is not the editor's. Without
+ * it a button let go over the window stayed held, and the brush painted again, with no button down, the moment the cursor
+ * came back over the canvas.
+ */
+export function notePointerButtons(p: PointerRecord, domButtons: number): void {
+  const now = (domButtons & 1 ? 1 : 0) | (domButtons & 4 ? 2 : 0) | (domButtons & 2 ? 4 : 0);
+  const gone = p.buttons & ~now;
+  if (!gone) return;
+  p.buttons &= ~gone;
+  p.released |= gone;
+  if (gone & 1) p.dragging = false;
+}
+
+/** A button let go anywhere on the page (its own `pointerup`, which the canvas's own listener has already taken if it was over it): let go, never a click. */
+export function notePointerLost(p: PointerRecord, button: number): void {
+  const bit = 1 << button;
+  if (!(p.buttons & bit)) return;
+  p.buttons &= ~bit;
+  p.released |= bit;
+  if (button === 0) p.dragging = false;
+}
+
 /** The wheel turned over the canvas, by one notch either way. */
 export function notePointerWheel(p: PointerRecord, deltaY: number): void {
   if (deltaY) p.wheel += Math.sign(deltaY);
@@ -110,9 +136,12 @@ type Handler = (e: Event) => void;
 /**
  * Listen for the canvas's pointer events into `p`, for as long as the editor lives (its first entry to its world's end):
  * a move, a press and a release, and the wheel, each writing the kept record and making nothing. `tune` is read at every
- * event, so the drag's distance moves live. Answers the way to stop listening.
+ * event, so the drag's distance moves live. `page` (the window) is listened to for its own releases, so a button let go
+ * over the editor's window or anywhere off the canvas is let go of here too (`notePointerLost`), and every move over the
+ * canvas reads what the page says is held (`notePointerButtons`), which catches a release outside the page. Answers the
+ * way to stop listening.
  */
-export function attachPointer(canvas: PointerTarget, p: PointerRecord, tune: { dragPx: number }): () => void {
+export function attachPointer(canvas: PointerTarget, p: PointerRecord, tune: { dragPx: number }, page?: Pick<PointerTarget, 'addEventListener' | 'removeEventListener'>): () => void {
   const at = (e: { clientX: number; clientY: number }, out: { x: number; y: number }) => {
     const r = canvas.getBoundingClientRect();
     out.x = e.clientX - r.left;
@@ -120,10 +149,12 @@ export function attachPointer(canvas: PointerTarget, p: PointerRecord, tune: { d
     return out;
   };
   const xy = { x: 0, y: 0 };
-  const move = (e: { clientX: number; clientY: number }) => {
+  const move = (e: { clientX: number; clientY: number; buttons?: number }) => {
     at(e, xy);
+    if (typeof e.buttons === 'number') notePointerButtons(p, e.buttons);
     notePointerMove(p, xy.x, xy.y, tune.dragPx);
   };
+  const lost = (e: { button: number }) => notePointerLost(p, e.button);
   const down = (e: { clientX: number; clientY: number; button: number }) => {
     at(e, xy);
     notePointerDown(p, e.button, xy.x, xy.y);
@@ -141,11 +172,13 @@ export function attachPointer(canvas: PointerTarget, p: PointerRecord, tune: { d
   canvas.addEventListener('pointerup', up as unknown as Handler);
   canvas.addEventListener('pointerleave', leave as unknown as Handler);
   canvas.addEventListener('wheel', wheel as unknown as Handler, { passive: true });
+  page?.addEventListener('pointerup', lost as unknown as Handler);
   return () => {
     canvas.removeEventListener('pointermove', move as unknown as Handler);
     canvas.removeEventListener('pointerdown', down as unknown as Handler);
     canvas.removeEventListener('pointerup', up as unknown as Handler);
     canvas.removeEventListener('pointerleave', leave as unknown as Handler);
     canvas.removeEventListener('wheel', wheel as unknown as Handler);
+    page?.removeEventListener('pointerup', lost as unknown as Handler);
   };
 }

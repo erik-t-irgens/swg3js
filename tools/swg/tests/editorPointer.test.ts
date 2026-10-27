@@ -68,6 +68,53 @@ const drag = EDITOR_TUNE.pick.dragPx;
 }
 
 {
+  // A button let go off the canvas (over the editor's window, outside the page): the canvas never hears its release, and
+  // read off the record alone the brush painted again, with no button down, the moment the cursor came back over it.
+  type Fn = (e: unknown) => void;
+  const on = new Map<string, Fn>();
+  const page = new Map<string, Fn>();
+  const canvas = {
+    getBoundingClientRect: () => ({ left: 0, top: 0 }),
+    addEventListener: (type: string, fn: Fn) => void on.set(type, fn),
+    removeEventListener: (type: string) => void on.delete(type),
+  };
+  const win = { addEventListener: (type: string, fn: Fn) => void page.set(type, fn), removeEventListener: (type: string) => void page.delete(type) };
+  const p = pointerRecord();
+  const stop = attachPointer(canvas as never, p, EDITOR_TUNE.pick, win as never);
+  ok(page.has('pointerup'), "the page is listened to for its own releases");
+  // The left button pressed on the canvas, held over the window, let go there.
+  on.get('pointerdown')!({ clientX: 100, clientY: 100, button: 0 });
+  on.get('pointerleave')!({});
+  page.get('pointerup')!({ button: 0 });
+  ok(p.buttons === 0 && (p.released & 1) === 1 && !p.clicked, 'let go over the window, the button is up and said released, never a click');
+  endPointerFrame(p);
+  on.get('pointermove')!({ clientX: 110, clientY: 110, buttons: 0 });
+  ok(p.over && p.buttons === 0, 'and back over the canvas nothing is held');
+  // The right button pressed, the page let go of outside it (no release anywhere): the first move back reads the page's word.
+  on.get('pointerdown')!({ clientX: 100, clientY: 100, button: 2 });
+  ok(p.buttons === 4, 'the right button held (the record keeps 1 << button)');
+  on.get('pointerleave')!({});
+  on.get('pointermove')!({ clientX: 120, clientY: 120, buttons: 0 });
+  ok(p.buttons === 0 && (p.released & 4) === 4, 'let go outside the page, the first move back over the canvas lets it go');
+  endPointerFrame(p);
+  // A button still held as the cursor comes back stays held, by the page's own order (2 right, 4 middle).
+  on.get('pointerdown')!({ clientX: 100, clientY: 100, button: 2 });
+  on.get('pointerdown')!({ clientX: 100, clientY: 100, button: 1 });
+  on.get('pointermove')!({ clientX: 101, clientY: 100, buttons: 2 | 4 });
+  ok(p.buttons === (4 | 2), 'a button really held stays held, read in the page\'s own order');
+  on.get('pointermove')!({ clientX: 102, clientY: 100, buttons: 4 });
+  ok(p.buttons === 2 && (p.released & 4) === 4, 'and one of two let go together is let go by the move the page tells it with');
+  // A release the canvas did hear is not let go twice by the page's own.
+  endPointerFrame(p);
+  on.get('pointerup')!({ clientX: 102, clientY: 100, button: 1 });
+  const once = p.released;
+  page.get('pointerup')!({ button: 1 });
+  ok(once === 2 && p.released === 2 && p.buttons === 0, "the page's release of a button the canvas already let go of changes nothing");
+  stop();
+  ok(page.size === 0, 'and the page is let go of with the canvas');
+}
+
+{
   // Nothing of the editor sets `captured` (`freeMouse` would): text, over every file of it.
   const here = dirname(fileURLToPath(import.meta.url));
   const root = join(here, '..', '..', '..');
