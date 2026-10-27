@@ -3,7 +3,7 @@ import * as THREE from 'three';
 // Heights are sampled on the main thread from cached pole grids; grids are produced
 // ahead of time by a worker so streaming never stalls on generation.
 
-import { TERRAIN_GROUND_TUNE, type EnvironmentFamily, type Layer, type ShaderGroup } from '../swg/terrain/generator.ts';
+import { TERRAIN_GROUND_TUNE, type EnvironmentFamily, type Layer, type ShaderGroup, type TerrainGenerator } from '../swg/terrain/generator.ts';
 import { layAsk, type HeightEdits } from '../swg/terrain/heightEdits.ts';
 import { PAINT_TILE, paintTileNumber, paintTileOf, type GroundPaint } from '../swg/terrain/groundPaint.ts';
 import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, rampNames, readColorRampFile, readColorReference, TerrainSampler, UPPER_PAD, waterTables, type ColorRamp, type ColorReference, type GroundProbe, type PoleBlock, type RadialPole, type TerrainTemplate } from '../swg/terrain/trn.ts';
@@ -67,6 +67,8 @@ export interface TerrainReply {
   seasonal?: Uint8Array;
   /** The colours before the paint's (Map-maker II), only where the paint has colours over the grid. */
   colorsUnpainted?: Uint8Array;
+  /** The poles a road or a river reached (Map-maker II's fourth wave). */
+  roads?: Uint8Array;
   info?: unknown;
   message?: string;
 }
@@ -135,7 +137,7 @@ export class SwgTerrain {
   /** Where the ground's mesh stands against the 64 m buckets so its vertices fall on the poles (`groundTiles.ts`). */
   readonly groundShift: GroundShift;
 
-  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number, colorReference: ColorReference | null = null, heights: HeightEdits | null = null, paint: GroundPaint | null = null, tableOnly = false, paintResolve: ((group: ShaderGroup) => void) | null = null, lend: ((group: ShaderGroup, tileWidth: number) => void) | null = null) {
+  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number, colorReference: ColorReference | null = null, heights: HeightEdits | null = null, paint: GroundPaint | null = null, tableOnly = false, paintResolve: ((group: ShaderGroup, gen: TerrainGenerator) => void) | null = null, lend: ((group: ShaderGroup, tileWidth: number) => void) | null = null) {
     this.colorReference = colorReference;
     this.groundShift = groundShift(centerX, centerZ);
     this.template = parseTerrainTemplate(new Uint8Array(trn));
@@ -167,7 +169,7 @@ export class SwgTerrain {
     if (lend) lend(this.template.generator.shaderGroup, this.template.tileWidthInMeters);
     // The paint's palette resolved against this terrain's own families (a building's layer file may have added some), before
     // the worker is handed it below: both threads lay the same ids.
-    if (paint && paintResolve) paintResolve(this.template.generator.shaderGroup);
+    if (paint && paintResolve) paintResolve(this.template.generator.shaderGroup, this.template.generator);
     for (const w of waterTables(this.template.generator)) {
       const points = w.points.map((pt) => ({ x: this.toGameX(pt.x), z: this.toGameZ(pt.y) }));
       let minX = Infinity;
@@ -220,7 +222,7 @@ export class SwgTerrain {
    * them through `fetchBytes` (pack-relative paths), and the colour ramps when the pack carries
    * them, then starts the worker.
    */
-  static async create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number, fetchBytes: (file: string) => Promise<ArrayBuffer | null>, opts: { heights?: HeightEdits | null; paint?: GroundPaint | null; paintResolve?: (group: ShaderGroup) => void; tableOnly?: boolean; lend?: (group: ShaderGroup, tileWidth: number) => void } = {}): Promise<SwgTerrain> {
+  static async create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number, fetchBytes: (file: string) => Promise<ArrayBuffer | null>, opts: { heights?: HeightEdits | null; paint?: GroundPaint | null; paintResolve?: (group: ShaderGroup, gen: TerrainGenerator) => void; tableOnly?: boolean; lend?: (group: ShaderGroup, tileWidth: number) => void } = {}): Promise<SwgTerrain> {
     const probe = parseTerrainTemplate(new Uint8Array(trn));
     const bitmaps: { familyId: number; bytes: ArrayBuffer }[] = [];
     // A table read for its families alone fetches no bitmap: nothing generates a grid over it.
@@ -287,21 +289,25 @@ export class SwgTerrain {
    * and every 512 m tile named marked with it. Nothing goes where there is no worker: the main thread's sampler holds the
    * very object the editor paints.
    */
-  postPaint(famKeys: Iterable<number> | null, colKeys: Iterable<number> | null, reset: boolean): number {
+  postPaint(famKeys: Iterable<number> | null, colKeys: Iterable<number> | null, reset: boolean, floKeys: Iterable<number> | null = null): number {
     const rev = ++this.paintRev;
     const p = this.sampler.paint;
+    // Each key list walked once here and once into the message: made a list, so a generator handed in is not spent here.
+    const fl = floKeys ? [...floKeys] : null;
     if (reset) {
       for (const k of this.tileRev.keys()) this.tileRev.set(k, rev);
-      if (p) for (const m of [p.fam, p.col]) for (const k of m.keys()) this.tileRev.set(k, rev);
+      if (p) for (const m of [p.fam, p.col, p.flo]) for (const k of m.keys()) this.tileRev.set(k, rev);
     } else {
       for (const k of famKeys ?? []) this.tileRev.set(k, rev);
       for (const k of colKeys ?? []) this.tileRev.set(k, rev);
+      for (const k of fl ?? []) this.tileRev.set(k, rev);
     }
     if (this.worker) {
       const group = this.template.generator.shaderGroup;
       // The lent families with every post (Map-maker II's third wave): a family lent in play reaches the worker's group before
       // any grid is asked for again with it.
-      this.worker.postMessage(group.lent.size ? { type: 'paint', rev, paint: p ? p.message(famKeys, colKeys, reset) : null, lent: group.lentList() } : { type: 'paint', rev, paint: p ? p.message(famKeys, colKeys, reset) : null });
+      const paint = p ? p.message(famKeys, colKeys, reset, fl) : null;
+      this.worker.postMessage(group.lent.size ? { type: 'paint', rev, paint, lent: group.lentList() } : { type: 'paint', rev, paint });
       this.paintWork.posted++;
     }
     return rev;
@@ -371,7 +377,7 @@ export class SwgTerrain {
     const p = this.sampler.paint;
     if (!p) return 0;
     let asked = 0;
-    for (const m of [p.fam, p.col]) {
+    for (const m of [p.fam, p.col, p.flo]) {
       for (const key of m.keys()) {
         const { tx, tz } = paintTileOf(key);
         asked += this.repaint(tx * PAINT_TILE, tz * PAINT_TILE, (tx + 1) * PAINT_TILE, (tz + 1) * PAINT_TILE);
@@ -387,12 +393,12 @@ export class SwgTerrain {
    * out is in no tile the paint still holds (an undo of a stroke that added the palette's entry, a file read again without
    * its palette). Answers how many grids were asked for.
    */
-  landPaint(paletteMoved: boolean, famKeys: Iterable<number>, colKeys: Iterable<number>, moved: { x0: number; z0: number; x1: number; z1: number } | null): number {
+  landPaint(paletteMoved: boolean, famKeys: Iterable<number>, colKeys: Iterable<number>, moved: { x0: number; z0: number; x1: number; z1: number } | null, floKeys: Iterable<number> | null = null): number {
     let asked = 0;
     if (paletteMoved) {
       this.postPaint(null, null, true);
       asked += this.repaintTiles();
-    } else this.postPaint(famKeys, colKeys, false);
+    } else this.postPaint(famKeys, colKeys, false, floKeys);
     if (moved) asked += this.repaint(moved.x0, moved.z0, moved.x1, moved.z1);
     return asked;
   }
@@ -841,6 +847,14 @@ export class SwgTerrain {
     return this.sampler.colorAt(this.toSwgX(gx), this.toSwgZ(gz));
   }
 
+  /**
+   * Whether a road's flat part or a river's bed reaches the pole under a game-space point (Map-maker II's fourth wave: the
+   * scatter brush keeps off it), from a cached block only: null when it is not generated.
+   */
+  roadIfCached(gx: number, gz: number): boolean | null {
+    return this.sampler.roadAt(this.toSwgX(gx), this.toSwgZ(gz));
+  }
+
   /** The child choice (a byte) at a game-space point, from a cached block only (null when it is not generated). */
   childIfCached(gx: number, gz: number): number | null {
     return this.sampler.childAt(this.toSwgX(gx), this.toSwgZ(gz));
@@ -958,6 +972,7 @@ export class SwgTerrain {
         const n = msg.heights.length;
         const block: PoleBlock = { heights: msg.heights, shaders: msg.shaders ?? new Int32Array(n), children: msg.children ?? new Uint8Array(n), colors: msg.colors ?? new Uint8Array(n * 3).fill(255), excluded: msg.excluded ?? new Uint8Array(n), floraCollidable: msg.floraCollidable ?? new Uint8Array(n * 2), floraNonCollidable: msg.floraNonCollidable ?? new Uint8Array(n * 2), radialNear: msg.radialNear ?? new Uint8Array(n * 2), radialFar: msg.radialFar ?? new Uint8Array(n * 2), environments: msg.environments ?? new Uint8Array(n), seasonal: msg.seasonal ?? new Uint8Array(n) };
         if (msg.colorsUnpainted) block.colorsUnpainted = msg.colorsUnpainted;
+        if (msg.roads) block.roads = msg.roads;
         p.resolve(block);
       }
     } else if (msg.type === 'error') {

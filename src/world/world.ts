@@ -44,9 +44,9 @@ import { FLORA_WARM, FloraPlanter, plantedShadow } from './flora.ts';
 import { clientPlantDistance, FLORA_TUNE, plantReachOf, PlantSweep } from './floraReach.ts';
 import { FLORA_BATCH, FloraField, type FloraChunkData } from './floraBatch.ts';
 import { CHUNK_TREES, FAR_CARDS_ON, FarCards, GRASS_CAST, GRASS_NO_SHADOW, GRASS_ON, GRASS_TUNE, GRASS_UNIFORMS, GrassField, grassDepthMaterial, grassMaterial, grassStandIn, loadRadialPack, setGrassPictures, writeGrassUniforms, type GrassHost, type GrassSetup } from './grass.ts';
-import { GRASS_SHADOW_TUNE, grassCastCascades, grassReach } from './grassMath.ts';
+import { GRASS_SHADOW_TUNE, grassCastCascades, grassReach, type FarSamples } from './grassMath.ts';
 import { SHADOW_CASTER_TUNE, floraBig } from './shadowCasters.ts';
-import type { RadialChild } from '../swg/terrain/flora.ts';
+import type { FloraGroup, RadialChild, RadialGroup } from '../swg/terrain/flora.ts';
 import { floraColliders } from './floraCollision.ts';
 import { eyeSpeed, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, rideLodBias, steppedBias, sweepDue } from './lodLevels.ts';
 import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.ts';
@@ -59,8 +59,9 @@ import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { TERRAIN_GROUND_TUNE, lentFamilyKey, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
-import { GroundPaint, PAINT_CELL, PAINT_TILE, paintTileNumber, weightedFamily, type PaintPaletteEntry } from '../swg/terrain/groundPaint.ts';
-import { PaintRows, cellsOfTile, colourCells, familyCells, paintTileOfId, type PaintLoaded, type PaintPaletteRow, type PaintRow, type PaintTileRow, type PaintWorldRow } from './editFiles/paintFile.ts';
+import { GroundPaint, PAINT_CELL, PAINT_TILE, paintTileNumber, paintTileOf, weightedFamily, type FloraRecipe, type PaintPaletteEntry } from '../swg/terrain/groundPaint.ts';
+import { PaintRows, cellsOfTile, copyRecipes, paintTileOfId, tileCells, type PaintLoaded, type PaintPaletteRow, type PaintRecipesRow, type PaintRow, type PaintTileRow, type PaintWorldRow } from './editFiles/paintFile.ts';
+import { PaintFloraSource, appearancesNamed, recipeClassesMoved, recipesLead } from './paintFlora.ts';
 import { Wash } from './demWash.ts';
 import type { GroundRules } from './demShader';
 import { LayoutStreamer, nearTierRange, type Building, type CellState, type FloorUnder, type PlacedObject, type RoomAnswer, type WaterSurfaceHandle } from './layoutStream';
@@ -403,6 +404,14 @@ interface Chunk {
   floraData: FloraChunkData | null;
   /** What grows on it as one group, the planet's flora or the procedural props: what a replant takes down and makes again (Map-maker II). */
   props: THREE.Group;
+  /**
+   * A real-elevation world's procedural props standing beside its flora paint's plantings in a chunk the paint's planter
+   * plants (Map-maker II's fourth wave): every one the paint's trees and plants do not own, kept out of `props` (which the
+   * region batches hide) and taken down and made again with it; null everywhere else. Its colliders are `colliders`' too,
+   * and kept apart so the trees' colliders can be worked out again without them going.
+   */
+  extra: THREE.Group | null;
+  extraColliders: Collider[] | null;
   /** The chunk's middle in the world, on its ground: what the plant sweep measures from the eye. */
   mx: number;
   my: number;
@@ -1811,6 +1820,13 @@ export class World {
           else if (base) await this.loadBorrowedGround({ pack: base.pack, fallback: base.name, rules: [] }, patch.lift);
           if (this.terrain !== terrainAtLoad) return;
           this.installDemPaint();
+          // Its plants from its paint (Map-maker II's fourth wave): the lent pack's flora models the recipes name, its planter,
+          // its grass and far cards, all behind this screen before the ground is made. With no `flo:` row, none of it.
+          if (this.groundPaint && this.groundPaint.flo.size) {
+            const no = await this.ensureDemFlora();
+            if (no) console.warn(`flora paint: ${no}`);
+            if (this.terrain !== terrainAtLoad) return;
+          }
           // The height edits laid on before the raster's ground is made again, so it is built with them (Map-maker II).
           const terrain = this.terrain;
           const store = await this.heightsReady();
@@ -1819,7 +1835,14 @@ export class World {
             terrain.heights = store;
             this.heightsLaidAtArrival = true;
           }
-          this.remakeGround();
+          // Behind this screen its paint's far cards are made at once, with the ground (in play they wait their turn a few a
+          // frame, `stepFarCards`).
+          this.farCardsAtOnce = true;
+          try {
+            this.remakeGround();
+          } finally {
+            this.farCardsAtOnce = false;
+          }
           groundDone();
         } catch (err) {
           groundDone();
@@ -2143,7 +2166,7 @@ export class World {
           const paint = this.groundPaint;
           const coming = this.terrain;
           this.swgComingFor = coming;
-          const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file), { heights, paint, paintResolve: (group) => this.resolvePaint(group), lend: (group, tileWidth) => this.lendGround(group, tileWidth) }).finally(() => {
+          const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file), { heights, paint, paintResolve: (group, gen) => this.resolvePaint(group, gen), lend: (group, tileWidth) => this.lendGround(group, tileWidth) }).finally(() => {
             if (this.swgComingFor === coming) this.swgComingFor = null;
           });
           if (token !== this.loadToken) return null;
@@ -2587,6 +2610,12 @@ export class World {
     this.floraTemplate = null;
     // The next world measures from its own arrival: until then nothing is hidden by an eye from this one.
     this.plantSweep.reset();
+    // A real-elevation world's lent pack (Map-maker II's fourth wave): its flora models' materials were forgotten above with
+    // the planter's, and the pack that holds them is let go with the world (a pack whose models nobody loaded holds none).
+    this.demLentAsset?.dispose();
+    this.demLentAsset = null;
+    this.demFlora = null;
+    this.farCardsDue.clear();
     this.groundTextures?.dispose();
     this.groundTextures = null;
     this.groundPicturePack = null;
@@ -4465,6 +4494,8 @@ export class World {
       if (token !== this.loadToken) return;
       this.terrain.demLent = table;
       this.terrain.demLentPack = spec.pack;
+      // Kept for the flora paint's models (Map-maker II's fourth wave), read from it only where a recipe names them.
+      this.demLentAsset = pack;
       // Other worlds' families the paint names or the world row's `packs` lend (Map-maker II's third wave), beside the lent
       // pack's own: their tables read and lent the table's group before its pictures are put in the ground's array. A world
       // row naming no other pack, and a palette of the lent pack's own, read nothing here.
@@ -8943,7 +8974,9 @@ export class World {
   refreshFloraColliders(): void {
     for (const c of this.chunks.values()) {
       if (!c.floraData) continue;
-      c.colliders = floraColliders(c.floraData, []);
+      // A real-elevation world's procedural props standing beside its painted plantings keep theirs (the fourth wave).
+      const fresh = floraColliders(c.floraData, []);
+      c.colliders = c.extraColliders ? fresh.concat(c.extraColliders) : fresh;
       if (c.physics) {
         this.removeChunkPhysics(c);
         this.addChunkPhysics(c);
@@ -8965,7 +8998,10 @@ export class World {
       for (let i = 0; i < c.floraData.n; i++) if (c.floraData.collidable[i]) collidable++;
       out.plantings += collidable;
       let standing = 0;
-      for (const col of c.colliders) {
+      // The plantings' colliders alone: a real-elevation world's procedural props beside them (the fourth wave) come last.
+      const plantingsOnly = c.colliders.length - (c.extraColliders?.length ?? 0);
+      for (let i = 0; i < plantingsOnly; i++) {
+        const col = c.colliders[i];
         standing++;
         if (col.parts) {
           out.client++;
@@ -9598,6 +9634,8 @@ export class World {
     }
     this.farTiles.clear();
     this.farCards?.clear();
+    // Every far tile is made again below, its cards with it (queued or at once): none still waits from before.
+    this.farCardsDue.clear();
     this.changedN = 0;
     this.lastCx = Number.NaN;
     this.lastCz = Number.NaN;
@@ -10025,6 +10063,8 @@ export class World {
     perf.gauge(CNT.floraInstances, plants.shownInstances);
     perf.begin(SEC.streamFar);
     this.streamFar(playerPos, 1);
+    // A real-elevation world's far cards waiting to be made again from its paint (Map-maker II's fourth wave), a frame's share.
+    this.stepFarCards(camPos);
     perf.end(SEC.streamFar);
     // The grass round the eye and the far hills' tree cards: a chunk or a tile a frame, and nothing on a frame
     // that crosses no chunk (`grass.ts`).
@@ -11275,13 +11315,9 @@ export class World {
       const u = geometry.userData as { fullIndex?: ArrayLike<number>; n: number; ox: number; oz: number; step: number };
       if (u.fullIndex) this.farCuts.set(mesh, makeFarTileCut(u.fullIndex, u.n, u.ox, u.oz, u.step, CHUNK_SIZE, this.terrain.groundShift));
       this.cutWhole(mesh);
-      // Its tree cards, out of the same coarse samples (`grass.ts`): built once the eye is within their reach.
-      if (this.farCards && this.terrain.swg) {
-        const o = groundChunkOrigin(w.tx, w.tz, this.terrain.groundShift, FAR_TILE);
-        const grid = this.terrain.swg.farGrid(o.x, o.z, FAR_TILE, FAR_RES, false);
-        const step = FAR_TILE / FAR_RES;
-        if (grid) this.farCards.tileMade(w.tx, w.tz, o.x, o.z, { heights: grid.heights, colors: grid.colors, radialFar: grid.radialFar, n: FAR_RES + 3, step, gx0: o.x - step, gz0: o.z - step });
-      }
+      // Its tree cards, out of the same coarse samples (`grass.ts`): built once the eye is within their reach (a
+      // real-elevation world's from its paint, a few a frame, `farCardsAgain`).
+      this.farCardsAgain(w.tx, w.tz);
       made++;
     }
     if (wanted.length <= made) {
@@ -11311,8 +11347,9 @@ export class World {
     // Off only while the measuring switch `groundShadows` says so (`setShadowSwitches`), so a chunk made then is the same.
     mesh.castShadow = this.groundShadows === 'on';
     group.add(mesh);
-    const { group: propGroup, colliders, trees, plants, data: floraData } = this.chunkProps(cx, cz);
+    const { group: propGroup, colliders, trees, plants, data: floraData, extra, extraColliders } = this.chunkProps(cx, cz);
     group.add(propGroup);
+    if (extra) group.add(extra);
     // The chunk's sphere in the world, ground and plants together, so the world pass drawn from inside a
     // building can leave the chunk out when it misses the exits' view (`markNarrowRoot`).
     const sphere = chunkSphere(group);
@@ -11327,7 +11364,7 @@ export class World {
     this.chunkRoot.add(group);
     const mx = (cx + 0.5) * CHUNK_SIZE;
     const mz = (cz + 0.5) * CHUNK_SIZE;
-    const chunk: Chunk = { key, cx, cz, group, ground: mesh, colliders, heights, origin, physics: null, trees, plants, flora: this.flora ? propGroup : null, floraData, props: propGroup, mx, my: this.terrain.heightAt(mx, mz), mz };
+    const chunk: Chunk = { key, cx, cz, group, ground: mesh, colliders, heights, origin, physics: null, trees, plants, flora: floraData ? propGroup : null, floraData, props: propGroup, extra, extraColliders, mx, my: this.terrain.heightAt(mx, mz), mz };
     this.chunks.set(key, chunk);
     // Its plants shown or not from the moment it is made, by the eye the last sweep measured from, so a
     // chunk made far off never shows its plants for the quarter second until the next sweep (step 5).
@@ -11354,25 +11391,45 @@ export class World {
    * the procedural props, each kept off the world's exclusions and the streamer's circles over the chunk. One path a chunk
    * made and a chunk replanted both take (`createChunk`, `replantChunk`).
    */
-  private chunkProps(cx: number, cz: number): { group: THREE.Group; colliders: Collider[]; trees: THREE.Group | null; plants: THREE.Group | null; data: FloraChunkData | null } {
+  private chunkProps(cx: number, cz: number): { group: THREE.Group; colliders: Collider[]; trees: THREE.Group | null; plants: THREE.Group | null; data: FloraChunkData | null; extra: THREE.Group | null; extraColliders: Collider[] | null } {
     const exclude = this.layoutStream ? [...this.exclusions, ...this.layoutStream.exclusionsFor(cx, cz)] : this.exclusions;
     let trees: THREE.Group | null = null;
     let plants: THREE.Group | null = null;
     let group: THREE.Group;
     let colliders: Collider[];
     let data: FloraChunkData | null = null;
-    if (this.flora) {
+    let extra: THREE.Group | null = null;
+    let extraColliders: Collider[] | null = null;
+    // A real-elevation world's planter (Map-maker II's fourth wave) plants a chunk its paint's flora cells reach; every
+    // other chunk keeps the procedural props it always stood, so a world with no `flo:` row is exactly as before.
+    const df = this.demFlora;
+    const planted = this.flora && (!df || df.source.paintedIn(cx * CHUNK_SIZE, cz * CHUNK_SIZE, CHUNK_SIZE));
+    if (this.flora && planted) {
       const built = this.flora.buildForChunk(cx, cz, (x, z) => this.terrain.heightAt(x, z), exclude);
       group = built.group;
       colliders = built.colliders;
       trees = built.trees;
       plants = built.plants;
       data = built.data;
+      // And in such a chunk its procedural props stand where they always stood, but at a place the paint's trees and plants
+      // own (`ownsAt`): a dab of grass takes no rock away, and a forest painted over a corner leaves the rest of the chunk's.
+      if (df) {
+        const src = df.source;
+        const own = this.props.buildForChunk(cx, cz, this.terrain, exclude, (x, z) => src.ownsAt(x, z));
+        if (own.group.children.length) {
+          extra = own.group;
+          extraColliders = own.colliders;
+          colliders = colliders.concat(own.colliders);
+        }
+      }
     } else ({ group, colliders } = this.props.buildForChunk(cx, cz, this.terrain, exclude));
     group.traverse((o) => {
       if (o instanceof THREE.InstancedMesh) o.computeBoundingSphere();
     });
-    return { group, colliders, trees, plants, data };
+    extra?.traverse((o) => {
+      if (o instanceof THREE.InstancedMesh) o.computeBoundingSphere();
+    });
+    return { group, colliders, trees, plants, data, extra, extraColliders };
   }
 
   /**
@@ -11393,13 +11450,24 @@ export class World {
       if (o instanceof THREE.InstancedMesh) o.dispose();
       else if (o instanceof THREE.Mesh) o.geometry.dispose();
     });
+    // A real-elevation world's procedural props beside its painted plantings (the fourth wave), taken down with them.
+    if (c.extra) {
+      c.group.remove(c.extra);
+      c.extra.traverse((o) => {
+        if (o instanceof THREE.InstancedMesh) o.dispose();
+        else if (o instanceof THREE.Mesh) o.geometry.dispose();
+      });
+    }
     const built = this.chunkProps(c.cx, c.cz);
     c.group.add(built.group);
+    if (built.extra) c.group.add(built.extra);
+    c.extra = built.extra;
+    c.extraColliders = built.extraColliders;
     c.props = built.group;
     c.colliders = built.colliders;
     c.trees = built.trees;
     c.plants = built.plants;
-    c.flora = this.flora ? built.group : null;
+    c.flora = built.data ? built.group : null;
     c.floraData = built.data;
     if (FLORA_WARM.on) {
       const fresh = this.adoptMaterials(c.group);
@@ -11638,7 +11706,6 @@ export class World {
     const s = this.strokeRect;
     if (!(s.x0 <= s.x1)) return;
     // The far tiles under it, rebuilt in place from their far grids, and their tree cards made again.
-    const swg = this.terrain.swg;
     for (const [key, t] of this.farTiles) {
       const comma = key.indexOf(',');
       const tx = Number(key.slice(0, comma));
@@ -11648,12 +11715,7 @@ export class World {
       if (!rectMeetsChunk(o.x, o.z, FAR_TILE, s.x0, s.z0, s.x1, s.z1, FAR_TILE / FAR_RES)) continue;
       if (this.terrain.rewriteFarTile(tx, tz, FAR_TILE, FAR_RES, t.geometry)) this.groundWork.farTiles++;
       else this.groundWork.failed++;
-      if (this.farCards && swg) {
-        const grid = swg.farGrid(o.x, o.z, FAR_TILE, FAR_RES, false);
-        const step = FAR_TILE / FAR_RES;
-        this.farCards.tileGone(tx, tz);
-        if (grid) this.farCards.tileMade(tx, tz, o.x, o.z, { heights: grid.heights, colors: grid.colors, radialFar: grid.radialFar, n: FAR_RES + 3, step, gx0: o.x - step, gz0: o.z - step });
-      }
+      this.farCardsAgain(tx, tz);
     }
     // The one reader of the ground that does not heal by itself, and the two that heal slowly.
     this.air?.raster.forget(s.x0, s.z0, s.x1, s.z1);
@@ -11820,6 +11882,21 @@ export class World {
   /** The palette's entries and the world row as the file holds them now. */
   paintEntries: PaintPaletteEntry[] = [];
   paintWorld: PaintWorldRow = { id: 'world' };
+  /** The flora recipes as the file holds them now (Map-maker II's fourth wave; ahead of the file while the editor's is new). */
+  paintRecipes: FloraRecipe[] = [];
+  /** The flora recipes' classes this world could not resolve, in words (another world's flora, a family its table has not got). */
+  floraMissing: string[] = [];
+  /**
+   * Grids still to land from a flora stroke or a flora file landing, each replanted whatever `follow` says (a recipe paints
+   * the plants themselves, so the world's own plants not following the families is no reason to keep the old ones).
+   */
+  private floraReplantLeft = 0;
+  /**
+   * A real-elevation world's plants from its paint (Map-maker II's fourth wave, `paintFlora.ts`): the source its planter,
+   * grass and far cards read, the lent pack its models come from, and the appearances loaded. Null where the world has no
+   * `flo:` row (it plants what it always planted) and on every converted world.
+   */
+  demFlora: { source: PaintFloraSource; pack: string; loaded: Set<string>; models: Map<string, LoadedModel>; grass: boolean; chunks: number } | null = null;
   /** The paint file's rows by id as it holds them now (the editor's `was`), with about its bytes. */
   readonly paintRows = new PaintRows();
   /** What the last file read said, for the console. */
@@ -11832,7 +11909,7 @@ export class World {
    * Whether a stroke under way holds a tile (the editor's hand-over: `EditorPaint.holds`), or null with no editor: a write's
    * answer or a file read again never lays a tile over the cells a stroke is painting.
    */
-  paintHeldTile: ((key: number, layer: 'fam' | 'col') => boolean) | null = null;
+  paintHeldTile: ((key: number, layer: 'fam' | 'col' | 'flo') => boolean) | null = null;
   /** A paint stroke's preview under way: the rewrite spends the paint's budget (`GROUND_REWRITE_TUNE.paintMs`). */
   paintHeld = false;
   /**
@@ -11845,7 +11922,7 @@ export class World {
   /** The world row's alternate weights by family id (the tiler's and the forced alternates' one rule). */
   private paintWeighted: Map<number, ShaderFamily> | null = null;
   /** What the paint's landing did, for the console: blocks and far grids made again and landed, chunks it dirtied. */
-  readonly paintLandWork = { blocks: 0, far: 0, chunks: 0, previews: 0 };
+  readonly paintLandWork = { blocks: 0, far: 0, chunks: 0, previews: 0, floraChunks: 0 };
   /** The pack the ground's pictures come from (this world's own, or a real-elevation world's lent pack). */
   private groundPicturePack: AssetPack | null = null;
 
@@ -11902,6 +11979,11 @@ export class World {
     this.lending = null;
     this.paintEntries = [];
     this.paintWorld = { id: 'world' };
+    this.paintRecipes = [];
+    this.floraMissing = [];
+    this.floraReplantLeft = 0;
+    this.demFlora = null;
+    this.farCardsDue.clear();
     this.paintRows.takeAll([]);
     this.paintLaidAtArrival = false;
     this.paintMissing = [];
@@ -11950,6 +12032,7 @@ export class World {
   private takePaintFile(loaded: PaintLoaded | null): void {
     this.paintRows.takeAll(loaded?.rows ?? []);
     this.paintEntries = loaded ? loaded.entries.map((e) => ({ ...e })) : [];
+    this.paintRecipes = loaded ? copyRecipes(loaded.recipes ?? []) : [];
     this.paintFileInfo = loaded ? { rows: loaded.rows.length, bytes: loaded.bytes, cell: loaded.paint.cell, skipped: loaded.skipped, problem: loaded.problem, rev: loaded.rev } : { rows: 0, bytes: 0, cell: PAINT_CELL, skipped: [], problem: null, rev: null };
     if (loaded?.problem) console.warn(`paint: this world's paint file is not read: ${loaded.problem}`);
     for (const s of loaded?.skipped ?? []) console.warn(`paint: row ${s.id} is skipped: ${s.why}`);
@@ -12175,7 +12258,7 @@ export class World {
    * kept by family id for the tiler. An entry of another pack lays the family this world lent it under (the third wave), or
    * nothing where none was lent, said once.
    */
-  resolvePaint(group: ShaderGroup): void {
+  resolvePaint(group: ShaderGroup, gen?: { floraGroup: FloraGroup; radialGroup: RadialGroup }): void {
     const pack = this.paintPack();
     const byId = new Map<number, number[]>();
     const weighted = new Map<number, ShaderFamily>();
@@ -12198,6 +12281,13 @@ export class World {
     const missing = p.resolve(this.paintEntries, group, pack, byId, lend);
     if (missing.join() !== this.paintMissing.join() && missing.length) console.warn(`paint: ${missing.length} palette entr${missing.length === 1 ? 'y' : 'ies'} lay nothing here: ${missing.join('; ')}`);
     this.paintMissing = missing;
+    // The flora recipes (Map-maker II's fourth wave) against the flora tables of the very terrain the palette resolves
+    // against (`gen` while the converted terrain is still being made, its own once attached; a real-elevation world's lent
+    // table's), only this world's own families (or the lent pack's), each class that cannot be said once.
+    const g = gen ?? (this.terrain?.swg ?? this.terrain?.demLent)?.template.generator ?? null;
+    const fmissing = p.resolveRecipes(this.paintRecipes, g?.floraGroup ?? null, g?.radialGroup ?? null, pack);
+    if (fmissing.join() !== this.floraMissing.join() && fmissing.length) console.warn(`paint: ${fmissing.length} flora recipe class${fmissing.length === 1 ? '' : 'es'} paint nothing here: ${fmissing.join('; ')}`);
+    this.floraMissing = fmissing;
   }
 
   /**
@@ -12239,6 +12329,12 @@ export class World {
     if (this.terrain.demShader) {
       this.installDemPaint();
       if (this.chunks.size && !paint.empty) this.rebuildGround();
+      // Its plants from its flora rows (the fourth wave), for a file that landed after the arrival's bound: their models
+      // loaded and every tile the paint holds planted, as a landing plants them (the arrival stood none for a file not yet in).
+      if (paint.flo.size) {
+        const painted = this.paintedFloraRects();
+        this.demFloraLanded(painted, painted);
+      }
     }
   }
 
@@ -12396,16 +12492,25 @@ export class World {
    * replanted as it comes (`paintLanded`); on a real-elevation world, whose chunks read the paint themselves, the far tiles,
    * the grass and the air over the stroke redone as a sculpt stroke's end redoes them. `x0..z1` in the raw frame.
    */
-  paintRelease(x0: number, z0: number, x1: number, z1: number, famKeys: Iterable<number>, colKeys: Iterable<number>): void {
+  paintRelease(x0: number, z0: number, x1: number, z1: number, famKeys: Iterable<number>, colKeys: Iterable<number>, floKeys: Iterable<number> = []): void {
     this.paintHeld = false;
     const swg = this.terrain.swg;
+    const fl = [...floKeys];
     if (swg) {
-      swg.postPaint(famKeys, colKeys, false);
-      swg.repaint(x0, z0, x1, z1);
+      swg.postPaint(famKeys, colKeys, false, fl);
+      const asked = swg.repaint(x0, z0, x1, z1);
+      // A flora stroke (the fourth wave) replants the chunks under it as their grids land, whatever `follow` says.
+      if (fl.length) this.floraReplantLeft += asked;
       return;
     }
     const a = this.rawToGame(x0, z0);
     const b = this.rawToGame(x1, z1);
+    // A real-elevation world's plants are its paint's alone: the chunks under the stroke planted again at once, and its far
+    // cards only where a recipe does anything to them.
+    if (fl.length) {
+      const r = { x0: Math.min(a.x, b.x), z0: Math.min(a.z, b.z), x1: Math.max(a.x, b.x), z1: Math.max(a.z, b.z) };
+      this.demFloraLanded([r], this.groundPaint?.recipesTouch(3) ? [r] : []);
+    }
     const s = this.strokeRect;
     s.x0 = Math.min(s.x0, a.x, b.x);
     s.z0 = Math.min(s.z0, a.z, b.z);
@@ -12420,8 +12525,11 @@ export class World {
    * rewritten in place and its tree cards made again.
    */
   private paintLanded(kind: 'block' | 'far', gx0: number, gz0: number, gx1: number, gz1: number): void {
-    const settling = this.paintReplantLeft > 0;
-    if (settling) this.paintReplantLeft--;
+    // A flora stroke's grids (the fourth wave) are replanted as a `follow` change's are, whatever `follow` says.
+    const flora = this.floraReplantLeft > 0;
+    if (flora) this.floraReplantLeft--;
+    const settling = this.paintReplantLeft > 0 || flora;
+    if (this.paintReplantLeft > 0) this.paintReplantLeft--;
     if (kind === 'far') {
       const s = this.terrain.groundShift;
       const tx = Math.round((gx0 - s.x) / FAR_TILE);
@@ -12430,14 +12538,7 @@ export class World {
       if (!t) return;
       this.paintLandWork.far++;
       if (this.terrain.rewriteFarTile(tx, tz, FAR_TILE, FAR_RES, t.geometry)) this.groundWork.farTiles++;
-      const swg = this.terrain.swg;
-      if (this.farCards && swg) {
-        const o = groundChunkOrigin(tx, tz, s, FAR_TILE);
-        const grid = swg.farGrid(o.x, o.z, FAR_TILE, FAR_RES, false);
-        const step = FAR_TILE / FAR_RES;
-        this.farCards.tileGone(tx, tz);
-        if (grid) this.farCards.tileMade(tx, tz, o.x, o.z, { heights: grid.heights, colors: grid.colors, radialFar: grid.radialFar, n: FAR_RES + 3, step, gx0: o.x - step, gz0: o.z - step });
-      }
+      if (this.terrain.swg) this.farCardsAgain(tx, tz);
       return;
     }
     this.paintLandWork.blocks++;
@@ -12446,6 +12547,7 @@ export class World {
       if (!rectMeetsChunk(c.origin.x, c.origin.z, CHUNK_SIZE, gx0, gz0, gx1, gz1)) continue;
       this.groundDirty.add(c.key);
       if (follow) this.floraDirty.add(c.key);
+      if (flora) this.paintLandWork.floraChunks++;
       this.paintLandWork.chunks++;
     }
     this.floraFlush = this.floraDirty.size > 0;
@@ -12474,8 +12576,16 @@ export class World {
     this.paintRows.land(put, deleted);
     const fam = new Set<number>();
     const col = new Set<number>();
+    const flo = new Set<number>();
     const rect = { x0: Infinity, z0: Infinity, x1: -Infinity, z1: -Infinity };
+    // The rectangle of the flora tiles alone (the fourth wave), whose plants are planted again whatever `follow` says.
+    const floRect = { x0: Infinity, z0: Infinity, x1: -Infinity, z1: -Infinity };
     let paletteMoved = false;
+    let recipesMoved = false;
+    // The recipes and whether any did anything to the far cards before this landing (the fourth wave): what a moved recipe
+    // changed is worked out against them, so only the tiles and classes it moved are planted again.
+    const recipesBefore = this.paintRecipes;
+    const farBefore = this.groundPaint?.recipesTouch(3) ?? false;
     let worldRow: PaintWorldRow | null = null;
     let moved = 0;
     const tileMove = (id: string, cells: Uint8Array | null): void => {
@@ -12485,14 +12595,18 @@ export class World {
       if (key < 0 || this.paintHeldTile?.(key, t.layer)) return;
       const p = cells ? this.ensurePaint() : this.groundPaint;
       if (!p) return;
-      const now = (t.layer === 'fam' ? p.fam : p.col).get(key) ?? null;
+      const now = (t.layer === 'fam' ? p.fam : t.layer === 'col' ? p.col : p.flo).get(key) ?? null;
       if (sameCells(now, cells)) return;
       if (t.layer === 'fam') {
         p.setFamilyTile(t.tx, t.tz, cells);
         fam.add(key);
-      } else {
+      } else if (t.layer === 'col') {
         p.setColourTile(t.tx, t.tz, cells);
         col.add(key);
+      } else {
+        p.setFloraTile(t.tx, t.tz, cells);
+        flo.add(key);
+        this.unionPaintTile(floRect, t.tx, t.tz);
       }
       this.unionPaintTile(rect, t.tx, t.tz);
       moved++;
@@ -12503,6 +12617,9 @@ export class World {
           this.paintEntries = [];
           paletteMoved = true;
         }
+      } else if (id === 'recipes') {
+        // A file holding none is a prefix of any list: the recipes appended in memory ahead of it are kept (an undo of the
+        // first plants stroke takes its cells out with the row, and the recipes it named stay to be chosen and written again).
       } else if (id === 'world') worldRow = { id: 'world' };
       else tileMove(id, null);
     }
@@ -12513,12 +12630,20 @@ export class World {
           this.paintEntries = entries.map((e) => ({ ...e }));
           paletteMoved = true;
         }
+      } else if (r.id === 'recipes') {
+        // Taken only where it is not the list in memory or its start: recipes appended ahead of the file (one chosen while
+        // a stroke's answer was on its way) are kept, so the place the brush paints with never comes to name nothing.
+        const entries = (r as PaintRecipesRow).entries;
+        if (!recipesLead(entries, this.paintRecipes)) {
+          this.paintRecipes = copyRecipes(entries);
+          recipesMoved = true;
+        }
       } else if (r.id === 'world') worldRow = r as PaintWorldRow;
       else {
         const t = paintTileOfId(r.id);
         if (!t) continue;
         const count = cellsOfTile(this.groundPaint?.cell ?? this.paintFileInfo.cell);
-        const cells = t.layer === 'fam' ? familyCells((r as PaintTileRow).rle, count) : colourCells((r as PaintTileRow).rle, count);
+        const cells = tileCells(t.layer, (r as PaintTileRow).rle, count);
         if (typeof cells === 'string') {
           console.warn(`paint: ${r.id} is not laid: ${cells}`);
           continue;
@@ -12528,7 +12653,12 @@ export class World {
     }
     if (worldRow && JSON.stringify(worldRow) !== JSON.stringify(this.paintWorld)) this.applyPaintWorld(worldRow, true);
     const g = this.paintGroup();
-    if (paletteMoved && g) this.resolvePaint(g);
+    if ((paletteMoved || recipesMoved) && g) this.resolvePaint(g);
+    // A recipe moved changes what every flora tile lays, as an entry moved changes what every family tile lays: the whole
+    // paint handed on and every painted grid made again (the fourth wave). What the ground's own picture needs is the
+    // palette's alone.
+    const familiesMoved = paletteMoved;
+    if (recipesMoved) paletteMoved = true;
     const swg = this.terrain.swg;
     if (swg && this.groundPaint && (paletteMoved || moved)) {
       // The palette moved: the worker handed the whole paint and every tile the paint still holds made again. A tile taken
@@ -12542,10 +12672,24 @@ export class World {
         const r1 = this.gameToRaw(rect.x0, rect.z1);
         movedRaw = { x0: r0.x, z0: r0.z, x1: r1.x, z1: r1.z };
       }
-      swg.landPaint(paletteMoved, fam, col, movedRaw);
+      const asked = swg.landPaint(paletteMoved, fam, col, movedRaw, flo);
+      // The flora's grids replanted as they land whatever `follow` says (a recipe paints the plants themselves).
+      if (flo.size || recipesMoved) this.floraReplantLeft += asked;
     } else if ((moved || paletteMoved) && !swg && this.terrain.demShader) {
-      if (paletteMoved) this.rebuildGround();
-      else {
+      // A real-elevation world's plants are its paint's alone: the chunks under the flora tiles that moved planted again,
+      // their grass and (where a recipe did or does anything to them) their far cards; a recipe moved adds every tile the
+      // paint holds, for the classes it moved and no other (`recipeClassesMoved`), never the whole world.
+      if (flo.size || recipesMoved) {
+        const own = floRect.x0 <= floRect.x1 ? [grownRect(floRect, this.groundPaint?.cell ?? PAINT_CELL)] : [];
+        const by = recipesMoved ? recipeClassesMoved(recipesBefore, this.paintRecipes) : null;
+        const painted = by && (by.static || by.grass || by.far) ? this.paintedFloraRects() : [];
+        const farAny = farBefore || (this.groundPaint?.recipesTouch(3) ?? false);
+        this.demFloraLanded(by && (by.static || by.grass) ? own.concat(painted) : own, (farAny ? own : []).concat(by?.far ? painted : []));
+      }
+      if (familiesMoved) this.rebuildGround();
+      else if (moved === flo.size) {
+        // Flora tiles and recipes alone: nothing of the ground's own picture moved.
+      } else {
         for (const c of this.chunks.values()) if (rectMeetsChunk(c.origin.x, c.origin.z, CHUNK_SIZE, rect.x0, rect.z0, rect.x1, rect.z1)) this.groundDirty.add(c.key);
         const s = this.strokeRect;
         s.x0 = Math.min(s.x0, rect.x0);
@@ -12571,6 +12715,312 @@ export class World {
     if (!rows.some((r) => r.id === 'world') && !gone.includes('world') && Object.keys(this.paintWorld).length > 1) gone.push('world');
     return this.landPaint(rows, gone);
   }
+
+  // ---- Map-maker II's fourth wave: the plants -----------------------------------------------------------------------
+
+  /** The lent pack a real-elevation world's ground is borrowed from, kept for its flora models (`ensureDemFlora`). */
+  private demLentAsset: AssetPack | null = null;
+
+  /** A converted world's far tile's samples as its far cards read them: its far grid (made, never asked for here), or none. */
+  private farCardSamples(gx0: number, gz0: number): FarSamples | null {
+    const swg = this.terrain.swg;
+    if (!swg) return null;
+    const grid = swg.farGrid(gx0, gz0, FAR_TILE, FAR_RES, false);
+    const step = FAR_TILE / FAR_RES;
+    return grid ? { heights: grid.heights, colors: grid.colors, radialFar: grid.radialFar, n: FAR_RES + 3, step, gx0: gx0 - step, gz0: gz0 - step } : null;
+  }
+
+  /**
+   * A real-elevation world's far tiles whose tree cards wait to be made again from its paint, by number (`farCardKey`):
+   * worked out within the rewrite's milliseconds a frame, nearest the eye first (`stepFarCards`). A tile's samples are
+   * 1,225 points of the ground's height, its colour and the paint's far class, 0.2 to 0.8 ms; made for a whole far ring in
+   * one task (169 tiles, the second wave's rebuild or a recipe moved) they held a frame a tenth of a second and more.
+   */
+  private readonly farCardsDue = new Set<number>();
+  /** Whether a real-elevation world's far cards are made at once rather than queued: behind its arrival's screen. */
+  private farCardsAtOnce = false;
+
+  /**
+   * A far tile's tree cards made again (a far tile made, or the ground or the paint under it moved): a converted world's at
+   * once from its far grid, as they always were; a real-elevation world's from its paint, queued (`stepFarCards`), or at
+   * once behind its arrival's screen. Nothing where there are no far cards.
+   */
+  private farCardsAgain(tx: number, tz: number): void {
+    const fc = this.farCards;
+    if (!fc) return;
+    if (this.terrain.swg) {
+      const o = groundChunkOrigin(tx, tz, this.terrain.groundShift, FAR_TILE);
+      const samples = this.farCardSamples(o.x, o.z);
+      fc.tileGone(tx, tz);
+      if (samples) fc.tileMade(tx, tz, o.x, o.z, samples);
+      return;
+    }
+    if (!this.demFlora) return;
+    if (this.farCardsAtOnce) this.demFarCards(tx, tz);
+    else this.farCardsDue.add(farCardKey(tx, tz));
+  }
+
+  /**
+   * A real-elevation world's far tile's cards made from its paint: its old cards taken down, and new ones made only where
+   * the paint's flora tiles meet its samples (`PaintFloraSource.farReaches`): a tile the paint reaches nowhere carries no
+   * card, so its samples are never worked out.
+   */
+  private demFarCards(tx: number, tz: number): void {
+    const fc = this.farCards;
+    const df = this.demFlora;
+    if (!fc || !df) return;
+    const o = groundChunkOrigin(tx, tz, this.terrain.groundShift, FAR_TILE);
+    fc.tileGone(tx, tz);
+    if (!df.source.farReaches(o.x, o.z, FAR_TILE, FAR_RES)) return;
+    fc.tileMade(tx, tz, o.x, o.z, df.source.farSamples(o.x, o.z, FAR_TILE, FAR_RES));
+  }
+
+  /**
+   * A frame's share of a real-elevation world's far cards waiting (`farCardsDue`): within the rewrite's milliseconds
+   * (`GROUND_REWRITE_TUNE.frameMs`), at least one, nearest the eye first; a tile gone meanwhile struck off. Nothing on a
+   * frame with none waiting.
+   */
+  private stepFarCards(eye: THREE.Vector3): void {
+    if (!this.farCardsDue.size) return;
+    const t0 = performance.now();
+    let first = true;
+    while (this.farCardsDue.size && (first || performance.now() - t0 < GROUND_REWRITE_TUNE.frameMs)) {
+      first = false;
+      let best = -1;
+      let bestD = Infinity;
+      for (const k of this.farCardsDue) {
+        const dx = (farCardTx(k) + 0.5) * FAR_TILE - eye.x;
+        const dz = (farCardTz(k) + 0.5) * FAR_TILE - eye.z;
+        const d = dx * dx + dz * dz;
+        if (d < bestD) {
+          bestD = d;
+          best = k;
+        }
+      }
+      this.farCardsDue.delete(best);
+      const tx = farCardTx(best);
+      const tz = farCardTz(best);
+      if (this.farTiles.has(`${tx},${tz}`)) this.demFarCards(tx, tz);
+    }
+  }
+
+  /** The game-frame rectangles of every flora tile the paint holds, each grown by a cell (its bilinear reach past its edge). */
+  private paintedFloraRects(): { x0: number; z0: number; x1: number; z1: number }[] {
+    const p = this.groundPaint;
+    const out: { x0: number; z0: number; x1: number; z1: number }[] = [];
+    if (!p) return out;
+    for (const key of p.flo.keys()) {
+      const t = paintTileOf(key);
+      const r = { x0: Infinity, z0: Infinity, x1: -Infinity, z1: -Infinity };
+      this.unionPaintTile(r, t.tx, t.tz);
+      out.push(grownRect(r, p.cell));
+    }
+    return out;
+  }
+
+  /**
+   * Whether a road's flat part or a river's bed reaches the pole under a game point (the scatter brush keeps off it), from
+   * the cached ground only: null where nothing is cached, and false on a world with no converted terrain (no roads).
+   */
+  roadIfCached(gx: number, gz: number): boolean | null {
+    const swg = this.terrain?.swg;
+    return swg ? swg.roadIfCached(gx, gz) : false;
+  }
+
+  /** What the flora paint stands (Map-maker II's fourth wave), for the console: a real-elevation world's lent plants, the replants. */
+  floraReport(): Record<string, unknown> {
+    const df = this.demFlora;
+    return {
+      replantsWaiting: this.floraReplantLeft,
+      chunksReplanted: this.paintLandWork.floraChunks,
+      farCardsWaiting: this.farCardsDue.size,
+      planted: this.flora?.planted ?? 0,
+      missingModels: this.flora ? [...this.flora.missing].slice(0, 20) : [],
+      dem: df ? { pack: df.pack, modelsLoaded: df.models.size, appearancesAsked: df.loaded.size, grass: df.grass, chunksPlanted: df.chunks, answered: { ...df.source.counts }, ready: this.demFloraReady() } : null,
+    };
+  }
+
+  /**
+   * Whether the plants the paint's recipes name can be planted now with nothing to load (Map-maker II's fourth wave): always
+   * on a converted world (its own flora is loaded at its arrival); on a real-elevation world once its planter stands with
+   * every model the recipes' trees and plants add, and its grass where the lent pack has any.
+   */
+  demFloraReady(): boolean {
+    if (this.terrain?.swg || !this.planet?.dem) return true;
+    const df = this.demFlora;
+    const p = this.groundPaint;
+    const lent = this.terrain?.demLent;
+    if (!df || !this.flora || !lent) return false;
+    if (!df.grass && lent.template.generator.radialGroup.childCount) return false;
+    return !p || appearancesNamed(p, lent.template.generator.floraGroup).every((a) => df.loaded.has(a));
+  }
+
+  /**
+   * A real-elevation world's plants from its paint (Map-maker II's fourth wave): the source made (once a world), the lent
+   * pack's flora models every recipe's trees and plants add loaded (once each), the planter stood over the source with their
+   * stand-ins adopted (compiled by whatever sweep comes next: the arrival's loading screen, or the editor's curtain), and
+   * the lent pack's grass and far cards stood over the source where it has any. Null once ready, else why not, in words.
+   * Nothing at all on a converted world.
+   */
+  async ensureDemFlora(): Promise<string | null> {
+    const t = this.terrain;
+    if (t.swg || !this.planet?.dem) return null;
+    const lent = t.demLent;
+    const pack = t.demLentPack;
+    const asset = this.demLentAsset;
+    if (!lent || !pack || !asset) return "this real-elevation world's ground names no family yet: name a base family first";
+    const token = this.loadToken;
+    const gen = lent.template.generator;
+    let df = this.demFlora;
+    if (!df) {
+      const ground = { heightAt: (x: number, z: number) => this.terrain.heightAt(x, z), waterHeightAt: (x: number, z: number) => this.terrain.waterHeightAt(x, z), colourAt: (x: number, z: number, out: Uint8Array) => this.terrain.demColourAt(x, z, out) };
+      const source = new PaintFloraSource(() => this.groundPaint, { flora: lent.template.flora, floraGroup: gen.floraGroup, radialGroup: gen.radialGroup }, ground, this.planet.dem.size);
+      df = { source, pack, loaded: new Set(), models: new Map(), grass: false, chunks: 0 };
+      this.demFlora = df;
+    }
+    const paint = this.groundPaint;
+    const want = paint ? appearancesNamed(paint, gen.floraGroup).filter((a) => !df!.loaded.has(a)) : [];
+    if (want.length) {
+      const wanted = new Set(want);
+      const defs = asset.category('flora').filter((d) => d.appearance && wanted.has(d.appearance.replace(/\\/g, '/').toLowerCase()));
+      const models = await asset.models(defs.map((d) => d.id));
+      if (token !== this.loadToken || this.demFlora !== df) return 'the world went while its plants loaded';
+      defs.forEach((d, i) => {
+        const m = models[i];
+        if (m) df!.models.set(d.appearance!.replace(/\\/g, '/').toLowerCase(), m);
+      });
+      for (const a of want) df.loaded.add(a);
+    }
+    if (!this.flora) {
+      this.flora = new FloraPlanter(df.source, df.models);
+      this.floraTemplate = lent.template;
+      this.floraField?.dispose();
+      this.floraField = null;
+      if (!this.sceneOnly) {
+        this.floraField = new FloraField(this.chunkRoot, (mesh) => {
+          const fresh = this.adoptMaterials(mesh);
+          if (fresh.length) this.compileObjects(fresh);
+          if (mesh.boundingSphere) markNarrowRoot(mesh, mesh.boundingSphere);
+        });
+        this.floraField.shown = FLORA_BATCH.on;
+        this.floraField.cascadeFar = this.cascadeFar(1);
+      }
+      this.refreshFloraReach();
+    }
+    // Every model's stand-ins (those of the models loaded now among them), adopted for the next sweep to compile.
+    this.floraWarm = FLORA_WARM.on ? this.flora.standIns() : [];
+    for (const o of this.floraWarm) this.adoptMaterials(o);
+    if (!df.grass && gen.radialGroup.childCount) {
+      df.grass = true;
+      await this.loadDemGrass(asset, df.source, lent.template);
+    }
+    return null;
+  }
+
+  /**
+   * The lent pack's grass and far cards stood over a real-elevation world's paint (Map-maker II's fourth wave): its radial
+   * pictures (the `radial` pass's) handed to the session's one material, and the grass and the far cards told of the world,
+   * as a converted world's are (`loadGrass`), their source the paint's.
+   */
+  private async loadDemGrass(asset: AssetPack, src: PaintFloraSource, template: SwgTerrain['template']): Promise<void> {
+    const token = this.loadToken;
+    if (!GRASS_ON && !FAR_CARDS_ON) return;
+    const loaded = await loadRadialPack((f) => asset.bytes(f), World.anisotropy);
+    if (!loaded) return;
+    if (token !== this.loadToken) {
+      loaded.texture.dispose();
+      return;
+    }
+    this.grassPictures?.dispose();
+    const mat = (this.grassMat ??= grassMaterial());
+    const depth = (this.grassDepth ??= grassDepthMaterial());
+    this.grassPictures = loaded.texture;
+    setGrassPictures(loaded.texture);
+    if (this.renderer) this.renderer.initTexture(loaded.texture);
+    const keys = new Map<RadialChild, string>();
+    for (const f of template.generator.radialGroup.families.values()) for (const c of f.children) keys.set(c, shaderKey(c.shader));
+    const setup: GrassSetup = {
+      src,
+      world: { group: template.generator.radialGroup, shaders: loaded.file.shaders, keyOf: (c) => keys.get(c) ?? shaderKey(c.shader) },
+      file: loaded.file,
+      near: template.flora.radial,
+      far: template.flora.farRadial,
+      shift: this.terrain.groundShift,
+      reference: this.terrain.demWash?.reference ?? null,
+    };
+    if (!this.grass) {
+      this.grass = new GrassField(mat, this.grassHost, depth);
+      // A field made in play (the editor's curtain, the session's first grass) is told of the chunks standing already,
+      // which were made before it and told nobody: else it holds none and builds no tuft until the chunks are made again.
+      for (const c of this.chunks.values()) this.grass.chunkMade(c.cx, c.cz, c.group);
+    }
+    this.farCards ??= new FarCards(mat, this.grassHost, this.chunkRoot, FAR_TILE, FAR_TILE_DROP, depth);
+    if (GRASS_ON) this.grass.setWorld(setup);
+    if (FAR_CARDS_ON) this.farCards.setWorld(setup);
+    writeGrassUniforms(setup);
+    this.grassStand ??= grassStandIn(mat);
+    this.adoptMaterials(this.grassStand);
+    // The far tiles standing already (an in-play first flora stroke) take their cards: those the paint reaches, a few a
+    // frame (`farCardsAgain`).
+    for (const key of this.farTiles.keys()) {
+      const comma = key.indexOf(',');
+      this.farCardsAgain(Number(key.slice(0, comma)), Number(key.slice(comma + 1)));
+    }
+    console.info(`grass: ${this.demLentAsset ? this.terrain.demLentPack : ''}'s radial flora on this real-elevation world (${loaded.file.layers} pictures), from its paint`);
+  }
+
+  /**
+   * A real-elevation world's flora tiles landed (a stroke let go, a write's answer, a file read again; Map-maker II's fourth
+   * wave): with no planter yet, the models the recipes name are loaded first (where the world can lend them; a file landing
+   * in play stands what it can and says the rest waits for the next arrival), then the standing chunks under `rects` (game
+   * frame) planted again at once (a frame's share at a time, `stepGroundRewrite`), their grass marked stale, and the far
+   * tiles under `farRects` queued for their cards (`farCardsAgain`: a few a frame, only those the paint reaches worked out).
+   * Never every chunk and far tile in one task: a recipe moved names the tiles the paint holds, not the world.
+   */
+  demFloraLanded(rects: readonly GameRect[], farRects: readonly GameRect[]): void {
+    if (this.terrain.swg) return;
+    if (!rects.length && !farRects.length) return;
+    const run = (): void => {
+      for (const c of this.chunks.values()) {
+        if (!rects.some((r) => rectMeetsChunk(c.origin.x, c.origin.z, CHUNK_SIZE, r.x0, r.z0, r.x1, r.z1))) continue;
+        this.floraDirty.add(c.key);
+        if (this.demFlora) this.demFlora.chunks++;
+      }
+      this.floraFlush = this.floraDirty.size > 0;
+      for (const r of rects) this.grass?.circleChanged((r.x0 + r.x1) / 2, (r.z0 + r.z1) / 2, Math.hypot(r.x1 - r.x0, r.z1 - r.z0) / 2);
+      if (this.farCards && farRects.length) {
+        for (const key of this.farTiles.keys()) {
+          const comma = key.indexOf(',');
+          const tx = Number(key.slice(0, comma));
+          const tz = Number(key.slice(comma + 1));
+          const o = groundChunkOrigin(tx, tz, this.terrain.groundShift, FAR_TILE);
+          // By the tile's samples, a far step past each side.
+          if (!farRects.some((r) => rectMeetsChunk(o.x, o.z, FAR_TILE, r.x0, r.z0, r.x1, r.z1, FAR_TILE / FAR_RES))) continue;
+          this.farCardsAgain(tx, tz);
+        }
+      }
+      this.shadowHold.dirtyAll();
+    };
+    const df = this.demFlora;
+    const paint = this.groundPaint;
+    const lent = this.terrain.demLent;
+    // Every model the recipes name is in already (the editor loads them behind its curtain before a stroke): planted now.
+    const missing = paint && lent ? appearancesNamed(paint, lent.template.generator.floraGroup).filter((a) => !df?.loaded.has(a)) : [];
+    if (df && this.flora && !missing.length) {
+      run();
+      return;
+    }
+    if (!paint || !lent) return;
+    // Models a landing names that are not loaded: loaded now (a fetch, no program: what they build is compiled by the next
+    // sweep, so a file landing in play draws them only after the next screen or curtain, and says so).
+    void this.ensureDemFlora().then((no) => {
+      if (no) console.warn(`flora paint: ${no}`);
+      else {
+        run();
+        if (missing.length) console.info(`flora paint: ${missing.length} flora model${missing.length === 1 ? '' : 's'} a landing named were loaded in play: drawn by their stand-ins' programs, compiled at the next loading screen or curtain`);
+      }
+    });
+  }
 }
 
 /** The world row's weights as the tiler takes them, as text: each family's id and its alternates' weights. */
@@ -12585,6 +13035,25 @@ function sameCells(a: Uint8Array | null, b: Uint8Array | null): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
+}
+
+/** A rectangle of the game's frame. */
+type GameRect = { x0: number; z0: number; x1: number; z1: number };
+
+/** A rectangle grown by `m` metres every way (a copy). */
+function grownRect(r: GameRect, m: number): GameRect {
+  return { x0: Math.min(r.x0, r.x1) - m, z0: Math.min(r.z0, r.z1) - m, x1: Math.max(r.x0, r.x1) + m, z1: Math.max(r.z0, r.z1) + m };
+}
+
+/** A far tile's place as one number (a set's key with nothing made), and back. Far tiles stand within 32,768 of the origin either way. */
+function farCardKey(tx: number, tz: number): number {
+  return (tx + 32768) * 65536 + (tz + 32768);
+}
+function farCardTx(k: number): number {
+  return Math.floor(k / 65536) - 32768;
+}
+function farCardTz(k: number): number {
+  return (k % 65536) - 32768;
 }
 
 /** What a world's heights file came to: its store, how many bytes the file was, what it skipped, why it was not read, its revision. */

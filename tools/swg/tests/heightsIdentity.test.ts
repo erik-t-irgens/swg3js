@@ -48,6 +48,12 @@ function arraysOf(o: object): Map<string, AnyArr> {
 function sameArrays(a: object, b: object): boolean {
   const x = arraysOf(a);
   const y = arraysOf(b);
+  // The road byte (Map-maker II's fourth wave) is a new array beside the old ones, read by nothing that existed: a grid of
+  // code before it has none, and every array it has is held to the bit.
+  if (x.has('roads') !== y.has('roads')) {
+    x.delete('roads');
+    y.delete('roads');
+  }
   if (x.size !== y.size) return false;
   for (const [k, v] of x) if (!same(v, y.get(k))) return false;
   return true;

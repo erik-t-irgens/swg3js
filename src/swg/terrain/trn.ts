@@ -344,6 +344,8 @@ export interface HeightGrid {
   seasonal: Uint8Array;
   /** The colour map before the paint's colours (Map-maker II), only where the paint has colours over the grid. */
   colorsUnpainted?: Uint8Array;
+  /** One byte a pole where a road's flat part or a river's bed reached it (Map-maker II's fourth wave, `ChunkData.roadMap`). */
+  roads?: Uint8Array;
 }
 
 /**
@@ -403,6 +405,11 @@ export interface PoleBlock {
    * block: what a stroke's preview lays the paint over (`previewPaint`), so a colour already painted is never laid twice.
    */
   colorsUnpainted?: Uint8Array;
+  /**
+   * One byte a pole where a road's flat part or a river's bed reached it (Map-maker II's fourth wave): what the scatter
+   * brush keeps off (`roadAt`). Absent on a block a build before it sent.
+   */
+  roads?: Uint8Array;
 }
 
 export class TerrainSampler {
@@ -466,6 +473,7 @@ export class TerrainSampler {
     this.generator.generateChunk(d);
     const g: HeightGrid = { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, children: d.shaderChild, colors: d.colorMap, excluded: d.excludeMap, floraCollidable: d.floraCollidable, floraNonCollidable: d.floraNonCollidable, radialNear: d.radialNear, radialFar: d.radialFar, environments: d.environmentMap, seasonal: d.seasonalMap };
     if (d.colorUnpainted !== null) g.colorsUnpainted = d.colorUnpainted;
+    g.roads = d.roadMap;
     return g;
   }
 
@@ -580,6 +588,7 @@ export class TerrainSampler {
       const g = this.generate(s.x, s.z, this.numberOfPoles, this.poleStep);
       b = { heights: g.heights, shaders: g.shaders, children: g.children, colors: g.colors, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, radialNear: g.radialNear, radialFar: g.radialFar, environments: g.environments, seasonal: g.seasonal };
       if (g.colorsUnpainted) b.colorsUnpainted = g.colorsUnpainted;
+      if (g.roads) b.roads = g.roads;
       // The height edits laid over it as it enters the cache, its raw heights kept beside (Map-maker II).
       if (this.heights) this.layEntering(blockX, blockZ, b);
       this.blocks.set(`${blockX},${blockZ}`, b);
@@ -877,6 +886,16 @@ export class TerrainSampler {
     out.ny = 1 / len;
     out.nz = -dz / len;
     return true;
+  }
+
+  /**
+   * Whether a road's flat part or a river's bed reaches the pole a world point maps to (Map-maker II's fourth wave), from a
+   * cached block only: null when it is not generated (or was sent by a build before the byte).
+   */
+  roadAt(x: number, z: number): boolean | null {
+    const p = this.cachedPole(x, z);
+    const r = p?.block.roads;
+    return p && r ? r[p.index] !== 0 : null;
   }
 
   /** The child choice (a byte) at the pole a world point maps to, from a cached block only: null when it is not generated. */

@@ -1018,6 +1018,8 @@ interface EditorApi {
   sculptDebug(o?: Record<string, unknown>): Promise<unknown>;
   /** The paint brush (Map-maker II's second wave): `__debug.groundPaint`. */
   paintDebug(o?: Record<string, unknown>): Promise<unknown>;
+  /** The paint brush's plants layer (Map-maker II's fourth wave): `__debug.floraPaint`. */
+  floraPaintDebug(o?: Record<string, unknown>): Promise<unknown>;
 }
 
 /**
@@ -3991,6 +3993,18 @@ class App {
         if (!import.meta.env.DEV) return "the world editor is the dev server's alone";
         const ed = await this.loadEditor();
         return ed ? ed.paintDebug(opts) : 'the world editor would not load';
+      },
+      /**
+       * The paint brush's plants layer (Map-maker II's fourth wave): the flora recipes, the flora cells painted, the chunks
+       * replanted on the landings, and on a real-elevation world the lent plants loaded and what the paint's source answered.
+       * `{ tune: { radius: 20 } }`, `{ arm: true }` (or false), `{ recipe: n | { trees: 'clear', grass: { add: { pack, name },
+       * density } } }`, `{ at: [x, z] }` the four flora maps there, painted and the world's own, at a `/loc` place, `{ stroke: {
+       * recipe, erase, x, z, r, seconds } }` a stroke run exactly as held and written (one undo).
+       */
+      floraPaint: async (opts?: Record<string, unknown>) => {
+        if (!import.meta.env.DEV) return "the world editor is the dev server's alone";
+        const ed = await this.loadEditor();
+        return ed ? ed.floraPaintDebug(opts) : 'the world editor would not load';
       },
       placements: async (
         opts: {
@@ -27729,6 +27743,7 @@ class App {
           fold: () => this.editorFold(),
           busy: () => this.traveling || !this.inWorld,
           lendGround: (pack, name) => this.editorLend(pack, name),
+          floraReady: () => this.editorFloraReady(),
         });
         this.editor = ed;
         return ed;
@@ -27856,6 +27871,21 @@ class App {
     if (!this.editor?.on) return 'lending a family is the world editor\'s: F2 first';
     if (!this.inWorld || this.traveling) return 'not now: enter the world first, and not mid-crossing';
     const r = await this.editorCurtain("lending another world's ground", `${pack}'s ${name}`, () => this.world.lendInPlay(pack, name));
+    return r ? r.answer : "the editor is the dev server's";
+  }
+
+  /**
+   * A real-elevation world's plants made ready for its flora paint in play (Map-maker II's fourth wave, the editor's paint
+   * brush choosing a recipe whose plants are not loaded): behind the editor's short curtain, the lent pack's flora models the
+   * recipes name loaded, the planter, the grass and the far cards stood (`World.ensureDemFlora`), whatever that builds built
+   * behind the screen. Null once ready, else why not, in words. A converted world's plants are always ready. The dev server's alone.
+   */
+  private async editorFloraReady(): Promise<string | null> {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    if (this.world.demFloraReady()) return null;
+    if (!this.editor?.on) return "painting plants is the world editor's: F2 first";
+    if (!this.inWorld || this.traveling) return 'not now: enter the world first, and not mid-crossing';
+    const r = await this.editorCurtain('the plants of the paint', `${this.world.terrain.demLentPack ?? 'the lent pack'}'s flora`, () => this.world.ensureDemFlora());
     return r ? r.answer : "the editor is the dev server's";
   }
 

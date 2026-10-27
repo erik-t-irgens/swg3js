@@ -5,7 +5,9 @@
 //     "rows": [
 //       { "id": "col:3,-2", "rle": "0*812,ff8040c0*14,0*15558", "at": 0 },
 //       { "id": "fam:3,-2", "rle": "0*812,1*14,0*15558", "at": 0 },
+//       { "id": "flo:3,-2", "rle": "0*812,01ff*14,0*15558", "at": 0 },
 //       { "id": "palette", "entries": [ { "pack": "yavin4", "name": "<a family>" }, { "pack": "yavin4", "name": "<another>", "child": 2 } ], "at": 0 },
+//       { "id": "recipes", "entries": [ { "trees": "clear", "grass": { "add": { "pack": "yavin4", "name": "<a radial family>" }, "density": 0.6 } } ], "at": 0 },
 //       { "id": "world", "follow": true, "at": 0 }
 //     ] }
 //
@@ -13,21 +15,24 @@
 // one), tiles of 512 m by their place. **Everything is a row**, so the batch and the undo of every kind carry it: the
 // `world` row (the paint's settings: `follow`, the client's four anti-tiling layers per world, each family's alternate
 // weights, and on a real-elevation world its base family and the wash), the `palette` row (each entry a family by its pack
-// and name, so a name two worlds share never collides; an entry is only ever appended), and a row a layer a tile:
+// and name, so a name two worlds share never collides; an entry is only ever appended), the `recipes` row (the fourth
+// wave's: each entry a flora recipe, what it does to the trees, the plants, the grass and the far cards, by family pack and
+// name; an entry is only ever appended), and a row a layer a tile:
 //   - `fam:tx,tz`, one byte a cell, the palette's index (nought the world's own), run-length text `value*count`;
-//   - `col:tx,tz`, a cell's colour and how much of it, eight hex `rrggbbaa` (or `0`: the world's own colour).
+//   - `col:tx,tz`, a cell's colour and how much of it, eight hex `rrggbbaa` (or `0`: the world's own colour);
+//   - `flo:tx,tz`, a cell's recipe and how much of it, four hex `rraa` (or `0`: the world's own plants).
 // The cells run row by row along z, each row along x, and a row's runs come to exactly (512 / cell)² cells. A tile of
-// nothing is no tile (taken out instead), and the file goes with its last row, as every edit file does. The flora's `flo:`
-// rows and the `recipes` row are Map-maker II's fourth wave's.
+// nothing is no tile (taken out instead), and the file goes with its last row, as every edit file does.
 //
 // **Backstops, not live** (`PAINT_LIMITS`): every build agrees on what a committed file means, so a row past one is skipped
-// and named alike everywhere; a family cell naming an entry the palette has not got is skipped with its tile.
+// and named alike everywhere; a family cell naming an entry the palette has not got, and a flora cell naming a recipe the
+// recipes row has not got, are skipped with their tile.
 //
 // Pure: imports only the paint's constants, the wash's reader and the story's JSONC reader. Rule for this file (node runs it
 // with type stripping): every import with its `.ts` extension, no enum, no namespace, no constructor parameter properties.
 
 import { parseJsonc } from '../../story/jsonc.ts';
-import { GroundPaint, PAINT_CELL, PAINT_CELLS, PAINT_PALETTE_MOST, PAINT_TILE, type PaintPaletteEntry } from '../../swg/terrain/groundPaint.ts';
+import { FLORA_CLASSES, FLORA_RECIPES_MOST, GroundPaint, PAINT_CELL, PAINT_CELLS, PAINT_PALETTE_MOST, PAINT_TILE, type FloraClassSpec, type FloraRecipe, type PaintPaletteEntry } from '../../swg/terrain/groundPaint.ts';
 import { readWash, type WashSpec } from '../demWash.ts';
 
 export const PAINT_VERSION = 1;
@@ -36,6 +41,10 @@ export const PAINT_VERSION = 1;
 export const PAINT_LIMITS = {
   /** Palette entries: a family cell is one byte. */
   palette: PAINT_PALETTE_MOST,
+  /** Flora recipes (the fourth wave): a flora cell names one in a byte. */
+  recipes: FLORA_RECIPES_MOST,
+  /** The most an add's density may say: the client's own run to 1, and a recipe may ask past it. */
+  density: 16,
   /** Rows a file holds: a whole 32 km world painted in both layers is 8,192. */
   rows: 65536,
   /** A world row's family weights: families named, and alternates a family. */
@@ -75,6 +84,13 @@ export interface PaintPaletteRow {
   at?: number;
 }
 
+/** The flora recipes (the fourth wave): each what it does to the four classes of plants, by family pack and name. */
+export interface PaintRecipesRow {
+  id: 'recipes';
+  entries: FloraRecipe[];
+  at?: number;
+}
+
 /** A tile of one layer: its cells as run-length text. */
 export interface PaintTileRow {
   id: string;
@@ -82,7 +98,7 @@ export interface PaintTileRow {
   at?: number;
 }
 
-export type PaintRow = PaintWorldRow | PaintPaletteRow | PaintTileRow;
+export type PaintRow = PaintWorldRow | PaintPaletteRow | PaintRecipesRow | PaintTileRow;
 
 /** What reading a file gave: its cell, its rows, what was skipped and why, what this build does not read, why it was not read. */
 export interface PaintRead {
@@ -93,8 +109,7 @@ export interface PaintRead {
   problem: string | null;
 }
 
-const TILE_ID = /^(fam|col):(-?\d{1,4}),(-?\d{1,4})$/;
-const LATER_ID = /^(recipes$|flo:)/;
+const TILE_ID = /^(fam|col|flo):(-?\d{1,4}),(-?\d{1,4})$/;
 const PACK = /^[a-z0-9_]{1,40}$/;
 /**
  * A family's name as the generator's group holds it: any text but control characters, quotes and backslashes. The game's
@@ -111,17 +126,20 @@ const TILE_ORDER = ['id', 'rle', 'at'];
 
 /** Whether an id names a row of the paint file this build writes. */
 export function isPaintId(v: unknown): v is string {
-  return typeof v === 'string' && (v === 'world' || v === 'palette' || TILE_ID.test(v));
+  return typeof v === 'string' && (v === 'world' || v === 'palette' || v === 'recipes' || TILE_ID.test(v));
 }
 
+/** A paint tile's layer: families, colours, or (the fourth wave) flora. */
+export type PaintTileLayer = 'fam' | 'col' | 'flo';
+
 /** A tile row's layer and place from its id, or null. */
-export function paintTileOfId(id: string): { layer: 'fam' | 'col'; tx: number; tz: number } | null {
+export function paintTileOfId(id: string): { layer: PaintTileLayer; tx: number; tz: number } | null {
   const m = TILE_ID.exec(id);
-  return m ? { layer: m[1] as 'fam' | 'col', tx: Number(m[2]), tz: Number(m[3]) } : null;
+  return m ? { layer: m[1] as PaintTileLayer, tx: Number(m[2]), tz: Number(m[3]) } : null;
 }
 
 /** A tile row's id. */
-export function paintTileId(layer: 'fam' | 'col', tx: number, tz: number): string {
+export function paintTileId(layer: PaintTileLayer, tx: number, tz: number): string {
   return `${layer}:${tx},${tz}`;
 }
 
@@ -222,6 +240,70 @@ export function colourCells(rle: string, count: number): Uint8Array | string {
   return out;
 }
 
+/** A flora tile's cells as run-length text (four hex `rraa` a painted cell, its recipe and its amount; `0` an unpainted one). */
+export function floraRle(cells: Uint8Array): string {
+  const n = cells.length >> 1;
+  const out: string[] = [];
+  const word = (i: number): string => {
+    const r = cells[i * 2];
+    const a = cells[i * 2 + 1];
+    if (r === 0 || a === 0) return '0';
+    return ((r << 8) | a).toString(16).padStart(4, '0');
+  };
+  let i = 0;
+  while (i < n) {
+    const v = word(i);
+    let j = i + 1;
+    while (j < n && word(j) === v) j++;
+    out.push(j - i === 1 ? v : `${v}*${j - i}`);
+    i = j;
+  }
+  return out.join(',');
+}
+
+/** A flora tile's run-length text read into `count` cells, two bytes each, or why not. */
+export function floraCells(rle: string, count: number): Uint8Array | string {
+  const out = new Uint8Array(count * 2);
+  let at = 0;
+  let any = false;
+  for (const tok of rle.split(',')) {
+    const star = tok.indexOf('*');
+    const vs = star < 0 ? tok : tok.slice(0, star);
+    const ns = star < 0 ? '1' : tok.slice(star + 1);
+    if (!(vs === '0' || /^[0-9a-f]{4}$/.test(vs)) || !/^\d{1,6}$/.test(ns)) return 'its cells are not runs of rraa*count';
+    const c = Number(ns);
+    if (c < 1) return 'a run is empty';
+    if (at + c > count) return `its runs come to more than the ${count} cells a tile has`;
+    if (vs !== '0') {
+      const w = Number.parseInt(vs, 16);
+      const r = (w >> 8) & 255;
+      const a = w & 255;
+      if (r === 0 || a === 0) return 'a cell of no recipe or no amount is written 0';
+      for (let i = at; i < at + c; i++) {
+        out[i * 2] = r;
+        out[i * 2 + 1] = a;
+      }
+      any = true;
+    }
+    at += c;
+  }
+  if (at !== count) return `its runs come to ${at} cells, where a tile has ${count}`;
+  if (!any) return 'every cell is the world\'s own: a tile of nothing is no tile';
+  return out;
+}
+
+/** A tile's run-length text read by its layer into `count` cells, or why not. */
+export function tileCells(layer: PaintTileLayer, rle: string, count: number): Uint8Array | string {
+  return layer === 'fam' ? familyCells(rle, count) : layer === 'col' ? colourCells(rle, count) : floraCells(rle, count);
+}
+
+/** The highest recipe a flora tile's cells name (nought: none). */
+function mostRecipe(cells: Uint8Array): number {
+  let most = 0;
+  for (let i = 0; i < cells.length; i += 2) if (cells[i] > most) most = cells[i];
+  return most;
+}
+
 /** The cells a tile's run-length text comes to (its runs summed), or -1 where it does not read as runs. */
 function runCount(rle: string): number {
   let at = 0;
@@ -250,6 +332,62 @@ export function readPaintEntry(v: unknown): PaintPaletteEntry | string {
   }
   for (const k of Object.keys(o)) if (k !== 'pack' && k !== 'name' && k !== 'child') return `an entry carries ${k}, which this build does not read`;
   return e;
+}
+
+/** A flora family named in a recipe, `{ pack, name }`, or why not. */
+function readFloraName(v: unknown, what: string): { pack: string; name: string } | string {
+  const o = v as Record<string, unknown> | null;
+  if (!o || typeof o !== 'object' || Array.isArray(o) || typeof o.pack !== 'string' || !PACK.test(o.pack) || typeof o.name !== 'string' || !FAMILY.test(o.name) || Object.keys(o).some((k) => k !== 'pack' && k !== 'name')) return `${what} names a family as { pack, name }`;
+  return { pack: o.pack, name: o.name };
+}
+
+/** One class of a recipe read: keep, clear, `{ remove }`, `{ add, density? }` or `{ thin }`, or why not. */
+function readFloraClass(v: unknown, cls: string): FloraClassSpec | string {
+  if (v === 'keep' || v === 'clear') return v;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return `its ${cls} are keep, clear, { remove }, { add, density } or { thin }`;
+  const o = v as Record<string, unknown>;
+  const keys = Object.keys(o);
+  if ('thin' in o) {
+    if (keys.length !== 1 || typeof o.thin !== 'number' || !Number.isFinite(o.thin) || o.thin < 0 || o.thin > 1) return `its ${cls}' thin is the share kept, from 0 to 1`;
+    return { thin: o.thin };
+  }
+  if ('remove' in o) {
+    if (keys.length !== 1) return `its ${cls}' remove carries nothing beside the family`;
+    const f = readFloraName(o.remove, `its ${cls}' remove`);
+    return typeof f === 'string' ? f : { remove: f };
+  }
+  if ('add' in o) {
+    if (keys.some((k) => k !== 'add' && k !== 'density')) return `its ${cls}' add carries a family and a density`;
+    const f = readFloraName(o.add, `its ${cls}' add`);
+    if (typeof f === 'string') return f;
+    if (o.density === undefined) return { add: f };
+    if (typeof o.density !== 'number' || !Number.isFinite(o.density) || o.density < 0 || o.density > PAINT_LIMITS.density) return `its ${cls}' density is a number from 0 to ${PAINT_LIMITS.density}`;
+    return { add: f, density: o.density };
+  }
+  return `its ${cls} are keep, clear, { remove }, { add, density } or { thin }`;
+}
+
+/**
+ * A flora recipe read (an entry of the `recipes` row), or why not: the reader's own rule, which the editor asks before it
+ * puts a recipe in the list, so a recipe no file could hold is refused in words and never reaches a write.
+ */
+export function readFloraRecipe(v: unknown): FloraRecipe | string {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return 'a recipe is an object';
+  const o = v as Record<string, unknown>;
+  const r: FloraRecipe = {};
+  for (const k of Object.keys(o)) if (k !== 'roads' && !(FLORA_CLASSES as readonly string[]).includes(k)) return `a recipe carries ${k}, which this build does not read`;
+  for (const cls of FLORA_CLASSES) {
+    if (o[cls] === undefined) continue;
+    const s = readFloraClass(o[cls], cls);
+    // `keep` and `clear` are a class's words, never a refusal's.
+    if (typeof s === 'string' && s !== 'keep' && s !== 'clear') return s;
+    r[cls] = s;
+  }
+  if (o.roads !== undefined) {
+    if (typeof o.roads !== 'boolean') return 'its roads is true or false';
+    r.roads = o.roads;
+  }
+  return r;
 }
 
 /** The world row's fields read, or why not; fields this build does not read go into `unknown`. */
@@ -333,8 +471,7 @@ function readWorld(o: Record<string, unknown>, unknown: string[]): PaintWorldRow
 export function readPaintRow(v: unknown, unknown: string[] = [], count = 0): PaintRow | string {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return 'a row is an object';
   const o = v as Record<string, unknown>;
-  if (typeof o.id === 'string' && LATER_ID.test(o.id)) return "the flora's paint is Map-maker II's fourth wave's, which this build does not read";
-  if (!isPaintId(o.id)) return 'its id is world, palette, or a tile\'s ("fam:tx,tz", "col:tx,tz")';
+  if (!isPaintId(o.id)) return 'its id is world, palette, recipes, or a tile\'s ("fam:tx,tz", "col:tx,tz", "flo:tx,tz")';
   let at: number | undefined;
   if (o.at !== undefined) {
     if (typeof o.at !== 'number' || !Number.isFinite(o.at) || o.at < 0) return 'its at is a time in milliseconds';
@@ -360,6 +497,20 @@ export function readPaintRow(v: unknown, unknown: string[] = [], count = 0): Pai
     if (at !== undefined) row.at = at;
     return row;
   }
+  if (o.id === 'recipes') {
+    for (const k of Object.keys(o)) if (!PALETTE_FIELDS.has(k)) unknown.push(`recipes.${k}`);
+    if (!Array.isArray(o.entries)) return 'its entries are a list';
+    if (o.entries.length > PAINT_LIMITS.recipes) return `it holds more than the ${PAINT_LIMITS.recipes} recipes a cell's byte can name`;
+    const entries: FloraRecipe[] = [];
+    for (const e of o.entries) {
+      const r = readFloraRecipe(e);
+      if (typeof r === 'string') return r;
+      entries.push(r);
+    }
+    const row: PaintRecipesRow = { id: 'recipes', entries };
+    if (at !== undefined) row.at = at;
+    return row;
+  }
   for (const k of Object.keys(o)) if (!TILE_FIELDS.has(k)) unknown.push(`${o.id}.${k}`);
   if (typeof o.rle !== 'string' || !o.rle.length || o.rle.length > 400000) return 'its cells (rle) are run-length text';
   const t = paintTileOfId(o.id)!;
@@ -367,7 +518,7 @@ export function readPaintRow(v: unknown, unknown: string[] = [], count = 0): Pai
   const have = runCount(o.rle);
   const n = counts.find((c) => c === have);
   if (n === undefined) return have < 0 ? 'its cells are not runs of value*count' : `its runs come to ${have} cells, where a tile has ${counts.join(' or ')}`;
-  const cells = t.layer === 'fam' ? familyCells(o.rle, n) : colourCells(o.rle, n);
+  const cells = tileCells(t.layer, o.rle, n);
   if (typeof cells === 'string') return cells;
   const row: PaintTileRow = { id: o.id, rle: o.rle };
   if (at !== undefined) row.at = at;
@@ -382,13 +533,22 @@ export function readPaintRow(v: unknown, unknown: string[] = [], count = 0): Pai
 export function paintRowsWhole(rows: readonly PaintRow[]): string | null {
   let count = -1;
   let palette = 0;
+  let recipes = 0;
   for (const r of rows) if (r.id === 'palette') palette = (r as PaintPaletteRow).entries.length;
+  for (const r of rows) if (r.id === 'recipes') recipes = (r as PaintRecipesRow).entries.length;
   for (const r of rows) {
     const t = paintTileOfId(r.id);
     if (!t) continue;
     const have = runCount((r as PaintTileRow).rle);
     if (count < 0) count = have;
     else if (have !== count) return `its tiles would be of two cells (${r.id}'s runs come to ${have}, another's to ${count})`;
+    if (t.layer === 'flo') {
+      const cells = floraCells((r as PaintTileRow).rle, have);
+      if (typeof cells === 'string') return `${r.id}: ${cells}`;
+      const most = mostRecipe(cells);
+      if (most > recipes) return `${r.id} would name recipe ${most}, and the recipes would hold ${recipes}`;
+      continue;
+    }
     if (t.layer !== 'fam') continue;
     const cells = familyCells((r as PaintTileRow).rle, have);
     if (typeof cells === 'string') return `${r.id}: ${cells}`;
@@ -404,10 +564,10 @@ export function samePaintRow(a: PaintRow, b: PaintRow): boolean {
   return a.id === b.id && rowLine(a as unknown as Record<string, unknown>) === rowLine(b as unknown as Record<string, unknown>);
 }
 
-/** A row's fields in the writer's order, then whatever else it carries. */
+/** A row's fields in the writer's order, then whatever else it carries (the recipes row is shaped as the palette's). */
 function rowLine(r: Record<string, unknown>): string {
-  const order = r.id === 'world' ? WORLD_ORDER : r.id === 'palette' ? PALETTE_ORDER : TILE_ORDER;
-  const known = r.id === 'world' ? WORLD_FIELDS : r.id === 'palette' ? PALETTE_FIELDS : TILE_FIELDS;
+  const order = r.id === 'world' ? WORLD_ORDER : r.id === 'palette' || r.id === 'recipes' ? PALETTE_ORDER : TILE_ORDER;
+  const known = r.id === 'world' ? WORLD_FIELDS : r.id === 'palette' || r.id === 'recipes' ? PALETTE_FIELDS : TILE_FIELDS;
   const parts: string[] = [];
   for (const k of order) if (r[k] !== undefined) parts.push(`${JSON.stringify(k)}: ${JSON.stringify(r[k])}`);
   for (const k of Object.keys(r)) if (!known.has(k) && r[k] !== undefined) parts.push(`${JSON.stringify(k)}: ${JSON.stringify(r[k])}`);
@@ -417,7 +577,7 @@ function rowLine(r: Record<string, unknown>): string {
 /** A row's own fields, for the batch's write-back: the cleaned row, with whatever the row it replaces held that this build does not read. */
 export function paintWithExtras(row: PaintRow, was: Record<string, unknown> | null): Record<string, unknown> {
   const out: Record<string, unknown> = { ...row };
-  const known = row.id === 'world' ? WORLD_FIELDS : row.id === 'palette' ? PALETTE_FIELDS : TILE_FIELDS;
+  const known = row.id === 'world' ? WORLD_FIELDS : row.id === 'palette' || row.id === 'recipes' ? PALETTE_FIELDS : TILE_FIELDS;
   if (was) for (const k of Object.keys(was)) if (!known.has(k) && !(k in out)) out[k] = was[k];
   return out;
 }
@@ -496,8 +656,17 @@ export function readPaintFile(text: string, world: string, kindOfWorld: 'ground'
   // skipped (a palette is only ever appended to, so this is a file edited by hand).
   const palette = kept.find((k) => k.row.id === 'palette')?.row as PaintPaletteRow | undefined;
   const most = palette?.entries.length ?? 0;
+  // A flora cell names a recipe by its place, the same way (the fourth wave).
+  const recipes = (kept.find((k) => k.row.id === 'recipes')?.row as PaintRecipesRow | undefined)?.entries.length ?? 0;
   for (const k of kept) {
     const t = paintTileOfId(k.row.id);
+    if (t?.layer === 'flo') {
+      const past = mostRecipe(floraCells((k.row as PaintTileRow).rle, count) as Uint8Array);
+      if (past > recipes) {
+        out.skipped.push({ id: k.row.id, why: `a cell names recipe ${past}, and the recipes row holds ${recipes}` });
+        continue;
+      }
+    }
     if (t?.layer === 'fam') {
       const cells = familyCells((k.row as PaintTileRow).rle, count) as Uint8Array;
       let past = 0;
@@ -593,6 +762,8 @@ export class PaintRows {
 export interface PaintLoaded {
   paint: GroundPaint;
   entries: PaintPaletteEntry[];
+  /** The flora recipes (the fourth wave), as the file holds them. */
+  recipes: FloraRecipe[];
   world: PaintWorldRow;
   /** The file's rows as read, by id (their `at` too): what the editor's next write names as each row was. */
   rows: PaintRow[];
@@ -602,28 +773,32 @@ export interface PaintLoaded {
   rev: string | null;
 }
 
-/** A read file's rows made into a paint (its tiles' cells decoded) with its palette and world row beside. */
-export function paintOfRead(read: PaintRead): { paint: GroundPaint; entries: PaintPaletteEntry[]; world: PaintWorldRow } {
+/** A read file's rows made into a paint (its tiles' cells decoded) with its palette, its recipes and its world row beside. */
+export function paintOfRead(read: PaintRead): { paint: GroundPaint; entries: PaintPaletteEntry[]; recipes: FloraRecipe[]; world: PaintWorldRow } {
   const paint = new GroundPaint(read.cell);
   const count = cellsOfTile(read.cell);
   let entries: PaintPaletteEntry[] = [];
+  let recipes: FloraRecipe[] = [];
   let world: PaintWorldRow = { id: 'world' };
   for (const r of read.rows) {
     if (r.id === 'palette') entries = (r as PaintPaletteRow).entries.map((e) => ({ ...e }));
+    else if (r.id === 'recipes') recipes = copyRecipes((r as PaintRecipesRow).entries);
     else if (r.id === 'world') world = { ...(r as PaintWorldRow) };
     else {
       const t = paintTileOfId(r.id);
       if (!t) continue;
-      const rle = (r as PaintTileRow).rle;
-      if (t.layer === 'fam') {
-        const cells = familyCells(rle, count);
-        if (typeof cells !== 'string') paint.setFamilyTile(t.tx, t.tz, cells);
-      } else {
-        const cells = colourCells(rle, count);
-        if (typeof cells !== 'string') paint.setColourTile(t.tx, t.tz, cells);
-      }
+      const cells = tileCells(t.layer, (r as PaintTileRow).rle, count);
+      if (typeof cells === 'string') continue;
+      if (t.layer === 'fam') paint.setFamilyTile(t.tx, t.tz, cells);
+      else if (t.layer === 'col') paint.setColourTile(t.tx, t.tz, cells);
+      else paint.setFloraTile(t.tx, t.tz, cells);
     }
   }
   paint.follow = world.follow !== false;
-  return { paint, entries, world };
+  return { paint, entries, recipes, world };
+}
+
+/** Recipes copied whole (a recipe's specs are plain JSON). */
+export function copyRecipes(list: readonly FloraRecipe[]): FloraRecipe[] {
+  return JSON.parse(JSON.stringify(list)) as FloraRecipe[];
 }

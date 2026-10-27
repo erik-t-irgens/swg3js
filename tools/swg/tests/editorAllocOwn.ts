@@ -593,12 +593,18 @@ if (process.argv.includes('sculpt')) {
   process.exit(0);
 }
 // With `paint` (`paintAlloc.test.ts`, Map-maker II's second wave): the paint brush armed and hovering, no stroke under way -- the Tools list's frame handed to the tool
-// (`paintTool`'s step) and its two rings projected and drawn, the aim wandering, exactly as the sculpt brush's.
+// (`paintTool`'s step) and its two rings projected and drawn, the aim wandering, exactly as the sculpt brush's. With `plants`
+// as well (the fourth wave), on the plants layer: its own radius and tune, the recipe chosen.
 if (process.argv.includes('paint')) {
   const { brushRing, ringAsk } = await import('../../../src/editor/brush.ts');
   const { EditorPaint, paintTool } = await import('../../../src/editor/editorPaint.ts');
   const { toolFrame } = await import('../../../src/editor/tools.ts');
   const { GroundPaint } = await import('../../../src/swg/terrain/groundPaint.ts');
+  const { PAINT_TUNE, FLORA_PAINT_TUNE } = await import('../../../src/editor/editorTune.ts');
+  if (process.argv.includes('plants')) {
+    PAINT_TUNE.layer = 'plants';
+    FLORA_PAINT_TUNE.recipe = 1;
+  }
   const ra = ringAsk();
   const rgAt = { x: 0.5, z: 0.5, y: 0.5 };
   const rg = {
@@ -624,6 +630,12 @@ if (process.argv.includes('paint')) {
     toRaw: () => {},
     preview: () => {},
     release: () => {},
+    recipes: () => [{ trees: 'clear' }],
+    addRecipe: () => 1,
+    keepRecipes: () => {},
+    recipeMissing: () => null,
+    floraReady: async () => null,
+    floraIsReady: () => true,
     fileRow: () => null,
     fileSize: () => ({ rows: 0, bytes: 0 }),
     worldRow: () => ({ id: 'world' }),
@@ -701,7 +713,7 @@ if (process.argv.includes('paint')) {
   for (let i = 0; i < sm.ringVis.length; i++) shown += sm.ringVis[i];
   for (let i = 0; i < sm.ring2Vis.length; i++) shown2 += sm.ring2Vis[i];
   watch.disconnect();
-  console.log(JSON.stringify({ frames: FRAMES, made: bestP.made, scavenges: bestP.scavenges, ringShown: shown, ring2Shown: shown2, armed: paint.armed, stroke: paint.mode, tiles: ground.fam.size + ground.col.size }));
+  console.log(JSON.stringify({ frames: FRAMES, made: bestP.made, scavenges: bestP.scavenges, ringShown: shown, ring2Shown: shown2, armed: paint.armed, stroke: paint.mode, tiles: ground.fam.size + ground.col.size + ground.flo.size, layer: PAINT_TUNE.layer }));
   process.exit(0);
 }
 if (process.argv.includes('profile')) {

@@ -16,13 +16,13 @@
 // Rule for this file (node runs it with type stripping): every import with its `.ts` extension, no enum, no namespace, no
 // constructor parameter properties. The dev server's alone: reached only through the editor's own dynamic import.
 
-import { paintTileNumber, type GroundPaint, type PaintPaletteEntry } from '../swg/terrain/groundPaint.ts';
-import { colourRle, familyRle, paintTileId, readPaintEntry, type PaintPaletteRow, type PaintRow, type PaintTileRow, type PaintWorldRow } from '../world/editFiles/paintFile.ts';
+import { FLORA_CLASSES, paintTileNumber, type FloraRecipe, type GroundPaint, type PaintPaletteEntry } from '../swg/terrain/groundPaint.ts';
+import { colourRle, copyRecipes, familyRle, floraRle, paintTileId, readFloraRecipe, readPaintEntry, type PaintPaletteRow, type PaintRecipesRow, type PaintRow, type PaintTileRow, type PaintWorldRow } from '../world/editFiles/paintFile.ts';
 import type { EditorEdits, Stroke } from './editorEdit.ts';
 import type { RowChange } from './undo.ts';
 import type { ToolDef, ToolFrame } from './tools.ts';
 import { startClock, stampsDue, type BrushClock } from './brush.ts';
-import { PAINT_TUNE } from './editorTune.ts';
+import { FLORA_PAINT_TUNE, PAINT_TUNE } from './editorTune.ts';
 import { PaintStroke, paintStampAsk, type PaintLayer } from './groundBrush.ts';
 import { rawRect, type RawRect } from './sculpt.ts';
 import { readWash, type WashSpec } from '../world/demWash.ts';
@@ -69,7 +69,22 @@ export interface PaintHost {
   /** A stamp's raw rectangle previewed (`World.paintPreview`), the brush at (`fx`, `fz`), game frame. */
   preview(r: RawRect, fx: number, fz: number): void;
   /** A stroke's raw rectangle let go: the tiles it touched handed on and the ground under it made again (`World.paintRelease`). */
-  release(r: RawRect, famKeys: number[], colKeys: number[]): void;
+  release(r: RawRect, famKeys: number[], colKeys: number[], floKeys: number[]): void;
+  /** The flora recipes as the world holds them now (Map-maker II's fourth wave; ahead of the file while one is new). */
+  recipes(): FloraRecipe[];
+  /** The recipes with one appended (in memory, resolved at once); answers its place (from 1). */
+  addRecipe(r: FloraRecipe): number;
+  /** The recipes in memory cut back to their first `n` (a refused write's taken out again), resolved at once. */
+  keepRecipes(n: number): void;
+  /** Why the chosen recipes' plants cannot be painted now, in words, or null (every recipe's class resolved). */
+  recipeMissing(at: number): string | null;
+  /**
+   * The plants the recipes name made ready to plant (a real-elevation world's lent flora models, loaded behind the editor's
+   * short curtain the first time a recipe names them): null once ready, else why not. Null at once on a converted world.
+   */
+  floraReady(): Promise<string | null>;
+  /** Whether a recipe's plants are ready to plant now (no curtain needed): always on a converted world. */
+  floraIsReady(): boolean;
   /** The paint file's row by id as it holds it now, or null. */
   fileRow(id: string): PaintRow | null;
   /** The file's rows and about its bytes, for the bar's notes. */
@@ -106,6 +121,8 @@ export class EditorPaint {
   private writing: Promise<string> | null = null;
   /** The palette as the file held it when the stroke began (so the write names the palette row only when it grew). */
   private paletteAtBegin = '';
+  /** And the flora recipes (the fourth wave), the same way. */
+  private recipesAtBegin = '';
   /** The last stroke's words and counts, for the console and the bar. */
   last = { stamps: 0, tiles: 0, cells: 0, said: '' };
   private readonly ask = paintStampAsk();
@@ -119,9 +136,9 @@ export class EditorPaint {
   }
 
   /** Whether the stroke under way holds a tile (it has painted into it): the world's hand-over (`World.paintHeldTile`). */
-  holds(key: number, layer: 'fam' | 'col'): boolean {
+  holds(key: number, layer: 'fam' | 'col' | 'flo'): boolean {
     const s = this.stroke;
-    return !!s && (layer === 'fam' ? s.beforeFam.has(key) : s.beforeCol.has(key));
+    return !!s && (layer === 'fam' ? s.beforeFam.has(key) : layer === 'col' ? s.beforeCol.has(key) : s.beforeFlo.has(key));
   }
 
   /** Why the world refuses the tool, in words, or null. */
@@ -140,7 +157,9 @@ export class EditorPaint {
       return no;
     }
     this.armed = true;
-    const words = `the paint brush: ${PAINT_TUNE.layer} (LMB paints ${this.chosenWords()}, RMB erases, Shift+click or the middle button takes what is under it, C held with the wheel sizes it, U lets go)`;
+    // The plants layer takes nothing from under the brush (a recipe is built on the Tools tab), so its words leave the pick out.
+    const pick = PAINT_TUNE.layer === 'plants' ? '' : ', Shift+click or the middle button takes what is under it';
+    const words = `the paint brush: ${PAINT_TUNE.layer} (LMB paints ${this.chosenWords()}, RMB erases${pick}, C held with the wheel sizes it, U lets go)`;
     this.host.say(words, true);
     return words;
   }
@@ -162,6 +181,10 @@ export class EditorPaint {
   /** What a family stroke lays now, in words. */
   chosenWords(): string {
     if (PAINT_TUNE.layer === 'colour') return `the colour ${PAINT_TUNE.colour}`;
+    if (PAINT_TUNE.layer === 'plants') {
+      const r = this.host.recipes()[FLORA_PAINT_TUNE.recipe - 1];
+      return r ? `recipe ${FLORA_PAINT_TUNE.recipe} (${recipeWords(r)})` : 'no recipe yet (the Tools tab, or floraPaint({ recipe }))';
+    }
     const e = this.host.entries()[PAINT_TUNE.entry - 1];
     return e ? `${e.pack !== this.host.pack() ? `${e.pack}'s ` : ''}${e.name}${e.child !== undefined ? ` (alternate ${e.child})` : ''}` : 'no family yet (the Tools tab, or the middle button on the ground)';
   }
@@ -181,7 +204,7 @@ export class EditorPaint {
     }
     const s = this.stroke;
     if (!this.mode || !s || !f.valid) return;
-    const n = stampsDue(this.clock, f.dt, Math.max(0.01, PAINT_TUNE.rate));
+    const n = stampsDue(this.clock, f.dt, Math.max(0.01, this.layer === 'plants' ? FLORA_PAINT_TUNE.rate : PAINT_TUNE.rate));
     for (let i = 0; i < n; i++) this.stamp(f.x, f.z);
   }
 
@@ -190,6 +213,7 @@ export class EditorPaint {
    * palette entry of its own (appended where none names it) and chosen; on the colour layer its colour. Writes nothing.
    */
   pick(x: number, z: number): string {
+    if (PAINT_TUNE.layer === 'plants') return this.saySoft('the plants layer takes nothing from the ground: choose a recipe on the Tools tab');
     if (PAINT_TUNE.layer === 'colour') {
       const c = this.host.colourAt(x, z);
       if (c === null) return this.saySoft('nothing is built under the aim to take a colour from');
@@ -259,6 +283,55 @@ export class EditorPaint {
     return this.saySoft(`painting ${name}${child !== undefined ? ` (alternate ${child})` : ''}`);
   }
 
+  /**
+   * A flora recipe chosen to paint (Map-maker II's fourth wave): read by the file's own reader first (a recipe no file could
+   * hold is refused in words), found among the recipes or appended, refused where any of its classes cannot be painted here
+   * (another world's flora, a family the table has not got), its plants made ready (a real-elevation world's lent models
+   * loaded behind the editor's short curtain the first time), then chosen. Answers what was said.
+   */
+  async chooseRecipe(spec: unknown): Promise<string> {
+    const r = readFloraRecipe(spec);
+    if (typeof r === 'string') {
+      this.host.say(`that recipe cannot be painted: ${r}`, false);
+      return r;
+    }
+    const key = JSON.stringify(r);
+    const list = this.host.recipes();
+    let at = list.findIndex((e) => JSON.stringify(e) === key) + 1;
+    let added = false;
+    if (!at) {
+      if (list.length >= 255) return this.saySoft('the recipes hold 255, as many as a cell can name');
+      at = this.host.addRecipe(r);
+      added = true;
+    }
+    const no = this.host.recipeMissing(at);
+    if (no) {
+      // A recipe that paints nothing here is taken out again rather than left for the next write to carry.
+      if (added) this.host.keepRecipes(at - 1);
+      this.host.say(`that recipe cannot be painted here: ${no}`, false);
+      return no;
+    }
+    if (!this.host.floraIsReady()) {
+      if (this.mode) return this.saySoft('let the stroke go first');
+      const notReady = await this.host.floraReady();
+      if (notReady) {
+        this.host.say(`the recipe's plants are not ready: ${notReady}`, false);
+        return notReady;
+      }
+      // Asked again after the wait, as a family lent behind the curtain is: a landing meanwhile (another file read, a
+      // write's answer) may have moved the list, and the place found before it may now name another recipe or none.
+      const now = this.host.recipes();
+      at = now.findIndex((e) => JSON.stringify(e) === key) + 1;
+      if (!at) {
+        if (now.length >= 255) return this.saySoft('the recipes hold 255, as many as a cell can name');
+        at = this.host.addRecipe(r);
+      }
+    }
+    FLORA_PAINT_TUNE.recipe = at;
+    PAINT_TUNE.layer = 'plants';
+    return this.saySoft(`painting recipe ${at} (${recipeWords(r)})`);
+  }
+
   private saySoft(words: string): string {
     this.host.say(words, true);
     return words;
@@ -271,11 +344,26 @@ export class EditorPaint {
       this.host.say('choose a family to paint first: on the Tools tab, or the middle button on the ground', false);
       return;
     }
+    if (mode === 'paint' && this.layer === 'plants') {
+      const r = this.host.recipes()[FLORA_PAINT_TUNE.recipe - 1];
+      if (!r) {
+        this.host.say('choose a flora recipe to paint first: on the Tools tab, or floraPaint({ recipe })', false);
+        return;
+      }
+      // A real-elevation world's plants not loaded yet (a recipe chosen by a slider rather than the Tools tab): made ready
+      // behind the curtain first, never loaded in the middle of a stroke.
+      if (!this.host.floraIsReady()) {
+        void this.chooseRecipe(r);
+        return;
+      }
+    }
     this.mode = mode;
     startClock(this.clock);
     this.host.beginWork();
     const file = this.host.fileRow('palette') as PaintPaletteRow | null;
     this.paletteAtBegin = JSON.stringify(file?.entries ?? []);
+    const rec = this.host.fileRow('recipes') as PaintRecipesRow | null;
+    this.recipesAtBegin = JSON.stringify(rec?.entries ?? []);
     this.stroke = new PaintStroke(this.host.paint());
     this.editStroke = this.host.edits.beginStroke(`paint (${mode === 'erase' ? `erase ${this.layer}` : this.layer})`);
   }
@@ -310,10 +398,23 @@ export class EditorPaint {
     a.colourAmount = t.colourAmount;
     a.colourRate = t.colourRate;
     a.dt = 1 / Math.max(0.01, t.rate);
+    // The plants layer (the fourth wave) takes its own numbers: its disc, its feather, its recipe, how much and how fast.
+    if (this.layer === 'plants') {
+      const ft = FLORA_PAINT_TUNE;
+      a.radius = ft.radius;
+      a.hard = ft.hard;
+      a.falloff = ft.falloff;
+      a.strength = ft.strength;
+      a.recipe = ft.recipe;
+      a.floraAmount = ft.amount;
+      a.floraRate = ft.thicken;
+      a.dt = 1 / Math.max(0.01, ft.rate);
+    }
     a.erase = this.mode === 'erase';
     const r = s.stamp(a, this.out);
     this.host.noteStamp();
-    if (r.x0 <= r.x1) this.host.preview(r, x, z);
+    // The plants are not previewed while held (they are planted as the stroke lands), so a flora stamp lays no block over.
+    if (r.x0 <= r.x1 && this.layer !== 'plants') this.host.preview(r, x, z);
   }
 
   /** The stroke ended: its tiles handed to the ground's rebuild, then written in one batch, one undo entry. */
@@ -325,7 +426,7 @@ export class EditorPaint {
     this.mode = null;
     if (!s || !es) return Promise.resolve('');
     const touched = s.touched();
-    if (s.rect.x0 <= s.rect.x1) this.host.release(s.rect, s.famKeys(), s.colKeys());
+    if (s.rect.x0 <= s.rect.x1) this.host.release(s.rect, s.famKeys(), s.colKeys(), s.floKeys());
     const w = this.write(s, es, touched).finally(() => {
       if (this.writing === w) this.writing = null;
     });
@@ -346,7 +447,7 @@ export class EditorPaint {
         if (before) tiles++;
         continue;
       }
-      const rle = t.layer === 'fam' ? familyRle(t.after) : colourRle(t.after);
+      const rle = t.layer === 'fam' ? familyRle(t.after) : t.layer === 'col' ? colourRle(t.after) : floraRle(t.after);
       if (before && before.rle === rle) continue;
       const after: PaintTileRow = { id, rle };
       changes.push({ file: 'paint', id, before: before ? { ...before } : null, after });
@@ -362,6 +463,19 @@ export class EditorPaint {
       changes.unshift({ file: 'paint', id: 'palette', before: was, after: now });
       palette = was;
     }
+    // The flora recipes (the fourth wave), where this stroke's cells name one the file has not got yet.
+    let recipesWas: PaintRecipesRow | null = null;
+    let recipesWritten = false;
+    if (changes.some((c) => c.after && c.id.startsWith('flo:'))) {
+      const recipes = h.recipes();
+      if (JSON.stringify(recipes) !== this.recipesAtBegin) {
+        const before = h.fileRow('recipes') as PaintRecipesRow | null;
+        recipesWas = before ? { ...before, entries: copyRecipes(before.entries) } : null;
+        const now: PaintRecipesRow = { id: 'recipes', entries: copyRecipes(recipes) };
+        changes.unshift({ file: 'paint', id: 'recipes', before: recipesWas, after: now });
+        recipesWritten = true;
+      }
+    }
     this.last = { stamps: s.stamps, tiles, cells: 0, said: '' };
     if (!changes.length) {
       h.edits.endStroke(es);
@@ -374,7 +488,13 @@ export class EditorPaint {
       this.putBack(s);
       // A refused write that carried the palette takes the entries it would have added out of the palette in memory
       // again, back to what the file holds: kept there, every later family stroke would carry them and be refused too.
-      if (changes[0]?.id === 'palette') this.dropUnwritten((palette?.entries ?? []).length);
+      if (changes.some((c) => c.id === 'palette')) this.dropUnwritten((palette?.entries ?? []).length);
+      // And the recipes, the same way (the fourth wave).
+      if (recipesWritten) {
+        const keep = (recipesWas?.entries ?? []).length;
+        if (h.recipes().length > keep) h.keepRecipes(keep);
+        if (FLORA_PAINT_TUNE.recipe > keep) FLORA_PAINT_TUNE.recipe = Math.max(keep ? 1 : 0, keep);
+      }
     }
     this.last.said = no ? said || no : said;
     return this.last.said;
@@ -391,7 +511,7 @@ export class EditorPaint {
   /** Every tile the stroke touched put back as it stood, and the ground under them made again. */
   private putBack(s: PaintStroke): void {
     const r = s.putBack();
-    if (r.x0 <= r.x1) this.host.release(r, s.famKeys(), s.colKeys());
+    if (r.x0 <= r.x1) this.host.release(r, s.famKeys(), s.colKeys(), s.floKeys());
   }
 
   /**
@@ -404,17 +524,27 @@ export class EditorPaint {
     if (no) return no;
     if (this.writing) await this.writing;
     await this.end();
-    const was = PAINT_TUNE.radius;
+    const plants = layer === 'plants';
+    const was = plants ? FLORA_PAINT_TUNE.radius : PAINT_TUNE.radius;
     const wasLayer = PAINT_TUNE.layer;
-    if (r > 0) PAINT_TUNE.radius = r;
+    if (r > 0) {
+      if (plants) FLORA_PAINT_TUNE.radius = r;
+      else PAINT_TUNE.radius = r;
+    }
     PAINT_TUNE.layer = layer;
     try {
+      // A recipe's plants made ready before the stroke, never in it (a real-elevation world's lent models, behind the curtain).
+      if (plants && !erase && !this.host.floraIsReady()) {
+        const no = await this.host.floraReady();
+        if (no) return no;
+      }
       this.begin(erase ? 'erase' : 'paint');
-      if (!this.stroke) return 'nothing to paint with: choose a family (entry) first';
-      const n = Math.max(1, Math.round(seconds * Math.max(0.01, PAINT_TUNE.rate)));
+      if (!this.stroke) return plants ? 'nothing to paint with: choose a recipe first' : 'nothing to paint with: choose a family (entry) first';
+      const n = Math.max(1, Math.round(seconds * Math.max(0.01, plants ? FLORA_PAINT_TUNE.rate : PAINT_TUNE.rate)));
       for (let i = 0; i < n; i++) this.stamp(x, z);
     } finally {
-      PAINT_TUNE.radius = was;
+      if (plants) FLORA_PAINT_TUNE.radius = was;
+      else PAINT_TUNE.radius = was;
       PAINT_TUNE.layer = wasLayer;
     }
     return this.end();
@@ -428,13 +558,33 @@ export class EditorPaint {
     if (f.rows > t.rowsNote) notes.push(`the paint file holds ${f.rows} rows (past ${t.rowsNote}): it ships in every release`);
     if (f.bytes > t.bytesNote) notes.push(`the paint file is ${(f.bytes / 1048576).toFixed(1)} MB (past ${(t.bytesNote / 1048576).toFixed(0)} MB)`);
     const doing = this.mode ? ` · ${this.mode === 'erase' ? 'erasing' : 'painting'}` : ' · LMB paints, RMB erases, U lets go';
-    return `paint: ${t.layer} · ${this.chosenWords()} · ${Math.round(t.radius * 10) / 10} m · hard ${t.hard}${doing}${this.last.said && !this.mode ? ` · ${this.last.said}` : ''}${notes.length ? ` · ${notes.join(' · ')}` : ''}`;
+    // The plants layer's own disc and the note that the walk grid follows only a re-bake (W5); a painted family or flora
+    // shows its plants once the ground under the stroke is made again, as the stroke is let go.
+    const radius = t.layer === 'plants' ? FLORA_PAINT_TUNE.radius : t.radius;
+    const hard = t.layer === 'plants' ? FLORA_PAINT_TUNE.hard : t.hard;
+    const plants = t.layer === 'plants' ? ` · amount ${FLORA_PAINT_TUNE.amount}` : '';
+    return `paint: ${t.layer} · ${this.chosenWords()} · ${Math.round(radius * 10) / 10} m · hard ${hard}${plants}${doing}${this.last.said && !this.mode ? ` · ${this.last.said}` : ''}${notes.length ? ` · ${notes.join(' · ')}` : ''}`;
   }
 
   /** For the console. */
   report(): Record<string, unknown> {
-    return { armed: this.armed, layer: PAINT_TUNE.layer, entry: PAINT_TUNE.entry, chosen: this.chosenWords(), stroke: this.mode, writing: !!this.writing, last: { ...this.last } };
+    return { armed: this.armed, layer: PAINT_TUNE.layer, entry: PAINT_TUNE.entry, recipe: FLORA_PAINT_TUNE.recipe, chosen: this.chosenWords(), stroke: this.mode, writing: !!this.writing, last: { ...this.last } };
   }
+}
+
+/** A recipe in words, a class at a time (what it does to the trees, the plants, the grass and the far cards), for the bar and the Tools tab. */
+export function recipeWords(r: FloraRecipe): string {
+  const parts: string[] = [];
+  for (const c of FLORA_CLASSES) {
+    const s = r[c];
+    if (s === undefined || s === 'keep') continue;
+    if (s === 'clear') parts.push(`${c} cleared`);
+    else if ('thin' in s) parts.push(`${c} thinned to ${Math.round(s.thin * 100)}%`);
+    else if ('remove' in s) parts.push(`${c}: ${s.remove.name} taken off`);
+    else parts.push(`${c}: ${s.add.name} added${s.density !== undefined ? ` at ${s.density}` : ''}`);
+  }
+  if (r.roads) parts.push('on roads too');
+  return parts.length ? parts.join(', ') : 'keeps everything';
 }
 
 /** The paint brush as an entry of the Tools list, on U. */
@@ -450,9 +600,11 @@ export function paintTool(p: EditorPaint, middleAt: () => { x: number; z: number
       p.frame(f);
     },
     draw(d) {
-      d.radius = PAINT_TUNE.radius;
+      // The plants layer's own disc (the fourth wave), the families' and colours' otherwise.
+      const t = PAINT_TUNE.layer === 'plants' ? FLORA_PAINT_TUNE : PAINT_TUNE;
+      d.radius = t.radius;
       d.ring(0);
-      d.radius = PAINT_TUNE.radius * PAINT_TUNE.hard;
+      d.radius = t.radius * t.hard;
       if (d.radius > 0.25) d.ring(1);
       d.marks.ringErase = p.mode === 'erase';
     },
@@ -462,7 +614,7 @@ export function paintTool(p: EditorPaint, middleAt: () => { x: number; z: number
       if (m.valid) p.pick(m.x, m.z);
     },
     size(notches) {
-      const t = PAINT_TUNE;
+      const t = PAINT_TUNE.layer === 'plants' ? FLORA_PAINT_TUNE : PAINT_TUNE;
       t.radius = Math.min(t.radiusMax, Math.max(t.radiusMin, t.radius * Math.pow(t.radiusStep, notches)));
       return `paint brush ${Math.round(t.radius * 10) / 10} m`;
     },

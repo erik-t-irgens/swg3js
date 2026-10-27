@@ -15,8 +15,38 @@ import type { Collider, Exclusion } from './props';
 import { castsShadow } from './surfaces.ts';
 import { cardReceives } from './cardLight.ts';
 import { floraBig, floraCasts } from './shadowCasters.ts';
-import type { SwgTerrain } from './swgTerrain';
+import type { FloraGroup } from '../swg/terrain/flora.ts';
+import type { TerrainTemplate } from '../swg/terrain/trn.ts';
+import type { GroundPaint } from '../swg/terrain/groundPaint.ts';
 import { CHUNK_SIZE } from './terrain.ts';
+
+/**
+ * What the planter reads of its world (Map-maker II's fourth wave): the template's tilings and its width, the flora table,
+ * the frame between the game's and the terrain's, and the sampler's exclusions and flora maps. `SwgTerrain` answers it as it
+ * stands (a converted world plants by the very same code); a real-elevation world's planter reads a source of the paint
+ * alone (`paintFlora.ts`). `paint` is the ground's paint the world's generator lays (null where it lays none), which
+ * Mustafar's planter asks over its baked trees, the one world whose trees are not its generated map.
+ */
+export interface FloraSource {
+  readonly template: {
+    readonly flora: Pick<TerrainTemplate['flora'], 'collidable' | 'nonCollidable' | 'legacyMap' | 'collidableMap'>;
+    readonly mapWidthInMeters: number;
+    readonly generator: { readonly floraGroup: Pick<FloraGroup, 'createFlora'> };
+  };
+  toSwgX(gx: number): number;
+  toSwgZ(gz: number): number;
+  toGameX(x: number): number;
+  toGameZ(z: number): number;
+  readonly sampler: {
+    excludedAt(x: number, z: number): boolean;
+    floraAt(x: number, z: number, collidable: boolean): { family: number; choice: number };
+    roadAt?(x: number, z: number): boolean | null;
+  };
+  readonly paint?: GroundPaint | null;
+}
+
+/** One point's tree class as the flora paint leaves it over Mustafar's baked map, kept. */
+const BAKED_PAINTED = { family: 0, choice: 0 };
 
 /** Collidable flora tiles are 16 m in the engine regardless of the template's tile size. */
 const COLLIDABLE_TILE = 16;
@@ -46,13 +76,13 @@ const tmpS = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 
 export class FloraPlanter {
-  private readonly swg: SwgTerrain;
+  private readonly swg: FloraSource;
   private readonly models: Map<string, LoadedModel>;
   /** Appearances the pack has no model for, counted once each for diagnostics. */
   readonly missing = new Set<string>();
   planted = 0;
 
-  constructor(swg: SwgTerrain, models: Map<string, LoadedModel>) {
+  constructor(swg: FloraSource, models: Map<string, LoadedModel>) {
     this.swg = swg;
     this.models = models;
   }
@@ -155,6 +185,17 @@ export class FloraPlanter {
         if (baked) {
           family = baked.getValue(keyX, keyZ);
           choice = hashFloat(hashTuple(Math.floor(x), Math.floor(z)));
+          // A flora paint (Map-maker II's fourth wave) laid over the baked trees where a recipe reaches the point, by the very
+          // arithmetic the generator's maps take, or a tree paint would do nothing on the one world whose trees are baked.
+          const paint = this.swg.paint;
+          if (paint && paint.flo.size) {
+            const before = Math.floor(choice * 255);
+            const p = paint.floraPoint(0, x, z, family, before, this.swg.sampler.roadAt?.(x, z) === true, BAKED_PAINTED);
+            if (p.family !== family || p.choice !== before) {
+              family = p.family;
+              choice = p.choice / 255;
+            }
+          }
         } else {
           const f = this.swg.sampler.floraAt(x, z, true);
           family = f.family;

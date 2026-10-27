@@ -8,7 +8,8 @@
 //                                                           `lent` the families other worlds lent the main thread's group)
 //      { type: 'generate', id, startX, startZ, n, step }
 // Out: { type: 'ready', info } | { type: 'grid', id, rev, heights, shaders, children, colors, excluded,
-//      floraCollidable, floraNonCollidable, radialNear, radialFar, environments, seasonal, colorsUnpainted? } | { type: 'error', message }
+//      floraCollidable, floraNonCollidable, radialNear, radialFar, environments, seasonal, colorsUnpainted?, roads } | { type: 'error', message }
+//      (`roads`, Map-maker II's fourth wave: one byte a pole a road's flat part or a river's bed reached.)
 //
 // Every grid carries the paint's revision it was made at (`rev`), so the main thread can tell a grid asked for before a
 // stroke was let go and answered after it, and ask for it again rather than put it (DESIGN.md §2.5). The worker's paint is
@@ -119,6 +120,11 @@ export class TerrainWorkerCore {
         if (g.colorsUnpainted) {
           reply.message.colorsUnpainted = g.colorsUnpainted;
           reply.transfer.push(g.colorsUnpainted.buffer);
+        }
+        // The poles a road or a river reached (Map-maker II's fourth wave): what the scatter brush keeps off.
+        if (g.roads) {
+          reply.message.roads = g.roads;
+          reply.transfer.push(g.roads.buffer);
         }
         return reply;
       }

@@ -554,6 +554,12 @@ export interface ChunkData {
   /** Radial flora per pole, family id and child choice pairs as the static maps: near (grass, AFDN) and far (the far hills' tree cards, AFDF). */
   radialNear: Uint8Array;
   radialFar: Uint8Array;
+  /**
+   * One byte a pole, set where a road's flat part or a river's bed reaches it (`clearFlora`'s two sites), whatever
+   * `roadsClearFlora` says (Map-maker II's fourth wave): the flora paint skips such a pole unless its recipe says otherwise,
+   * and the scatter brush keeps off it. Read by nothing the client's generator reads.
+   */
+  roadMap: Uint8Array;
   normalMap: Float32Array;
   normalsDirty: boolean;
   /** Environment family id per pole (0 = none): which area's environment rows apply there. */
@@ -612,6 +618,7 @@ export function createChunkData(startX: number, startZ: number, numberOfPoles: n
     floraNonCollidable: new Uint8Array(n * 2),
     radialNear: new Uint8Array(n * 2),
     radialFar: new Uint8Array(n * 2),
+    roadMap: new Uint8Array(n),
     normalMap: new Float32Array(n * 3),
     normalsDirty: true,
     environmentMap: new Uint8Array(n),
@@ -2438,8 +2445,10 @@ export class AffectorRoad extends AffectorBoundaryPoly {
     const desired = result.height;
     if (dist >= 0 && dist <= width2 * (1 - this.featherDistance)) {
       d.heightMap[i] = this.hasFixedHeights ? this.rampedHeight(wx, wz, original) : desired;
-      // The road's flat part takes every plant off it, the radial ones included (the engine's own rule).
+      // The road's flat part takes every plant off it, the radial ones included (the engine's own rule); and it is marked
+      // a road's whatever that switch says (Map-maker II's fourth wave), so a flora paint and the scatter brush keep off it.
       if (TERRAIN_GROUND_TUNE.roadsClearFlora) clearFlora(d, i);
+      d.roadMap[i] = 1;
     } else {
       const t = dist / width2;
       d.heightMap[i] = this.hasFixedHeights ? this.rampedHeight(wx, wz, original) : lerp(desired, original, t);
@@ -2588,8 +2597,9 @@ export class AffectorRiver extends AffectorBoundaryPoly {
       d.heightMap[i] = desired;
       d.shaderMap[i] = this.bottomFamilyId;
       d.shaderChild[i] = childChoiceAt(wx, wz);
-      // The bed takes every plant off it, the radial ones included (the engine's own rule).
+      // The bed takes every plant off it, the radial ones included (the engine's own rule), and is marked as a road's is.
       if (TERRAIN_GROUND_TUNE.roadsClearFlora) clearFlora(d, i);
+      d.roadMap[i] = 1;
     } else if (dist <= subWidth) {
       const t = dist / subWidth;
       d.heightMap[i] = lerp(desired, original, t * t);
@@ -3210,6 +3220,7 @@ export class TerrainGenerator {
     d.floraNonCollidable.fill(0);
     d.radialNear.fill(0);
     d.radialFar.fill(0);
+    d.roadMap.fill(0);
     d.excludeMap.fill(0);
     d.environmentMap.fill(0);
     d.seasonalMap.fill(0);
@@ -3232,10 +3243,12 @@ export class TerrainGenerator {
       d.shaderDirty = false;
     }
     // Map-maker II's ground paint, laid once more whatever came before (with `follow` off, only here: every plant stays
-    // where the world's own families put it), then its colours over the colour affectors'.
+    // where the world's own families put it), then its colours over the colour affectors', then its flora recipes over the
+    // four flora maps (the fourth wave: after the last layer, so a road's clearing is seen and kept clear).
     if (p !== null) {
       p.layFamilies(d, false);
       p.layColours(d);
+      p.floraInto(d);
     }
   }
 

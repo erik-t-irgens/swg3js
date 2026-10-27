@@ -717,6 +717,27 @@ export class Terrain {
   }
 
   /**
+   * A real-elevation world's colour at one game point (Map-maker II's fourth wave: its grass and far cards are tinted by
+   * it), by the very rules `demColours` writes a grid's samples with: the wash's at the point's height above sea level and
+   * its slope (central differences a metre either side), white with no wash, the paint's colour laid over it. Into `out`.
+   */
+  demColourAt(gx: number, gz: number, out: Uint8Array): void {
+    out[0] = 255;
+    out[1] = 255;
+    out[2] = 255;
+    const wash = this.demWash;
+    const paint = this.demShader?.paint ?? null;
+    if (wash) {
+      const lift = this.dem?.lift ?? 0;
+      const dx = (this.heightAt(gx + 1, gz) - this.heightAt(gx - 1, gz)) / 2;
+      const dz = (this.heightAt(gx, gz + 1) - this.heightAt(gx, gz - 1)) / 2;
+      const slope = Math.atan(Math.sqrt(dx * dx + dz * dz)) * 57.29577951308232;
+      wash.colourAt(-gx, gz, this.heightAt(gx, gz) - lift, slope, out);
+    }
+    if (paint) paint.colourAtRaw(-gx, gz, out);
+  }
+
+  /**
    * A real-elevation world's samples' colours (Map-maker II): the wash's at each sample's height above sea level and its
    * slope (central differences over the grid's own heights, held at its edge), white with no wash, the paint's laid over
    * it. A pure function of the place, its height and its slope, as the chunks, the far tiles and a map made from them read it.

@@ -54,6 +54,8 @@ const EDITOR_WINDOW_CSS = `
 .ed-field input { flex: 1 1 auto; min-width: 0; font: inherit; font-size: 11px; color: var(--ink); background: var(--plate); border: 1px solid var(--rule); border-radius: 3px; padding: 2px 5px; }
 .ed-field input[type=checkbox] { flex: 0 0 auto; }
 .ed-field input[type=range] { padding: 0; }
+.ed-row select { flex: 1 1 auto; min-width: 0; font: inherit; font-size: 11px; color: var(--ink); background: var(--plate); border: 1px solid var(--rule); border-radius: 3px; padding: 2px 5px; }
+.ed-row select option { color: var(--ink); background: var(--plate); }
 .ed-field .ed-val { flex: 0 0 64px; font-size: 10px; color: var(--ink); text-align: right; }
 .ed-field .ed-ro { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ed-h { font-size: 10px; letter-spacing: 0.1em; color: var(--accent); margin-top: 6px; }
@@ -124,10 +126,25 @@ export interface SculptToolsView {
   note: string;
 }
 
+/**
+ * The paint brush's plants layer as the Tools tab shows it (Map-maker II's fourth wave): the recipes (a click chooses one),
+ * the recipe being built (what it does to each class, the family an add or a remove names among the class's own), and
+ * how the plants layer goes with the families' `follow`.
+ */
+export interface PlantsToolsView {
+  recipes: { at: number; words: string; chosen: boolean; paints: boolean }[];
+  /** The draft, a class at a time: its op, the family named, and the class's families to choose from. */
+  draft: { cls: string; label: string; op: string; family: string; families: string[] }[];
+  roads: boolean;
+  note: string;
+}
+
 /** The paint brush as the Tools tab shows it (Map-maker II's second wave). */
 export interface PaintToolsView {
   armed: boolean;
-  layer: 'family' | 'colour';
+  layer: 'family' | 'colour' | 'plants';
+  /** The plants layer (the fourth wave), or null where the world has no flora tables to paint from. */
+  plants: PlantsToolsView | null;
   /** The palette's entries: their place, name, the alternate each forces, a picture, whether chosen, whether it lays here. */
   entries: { at: number; name: string; child: number | null; picture: string | null; chosen: boolean; lays: boolean }[];
   /**
@@ -561,7 +578,44 @@ export class EditorWindow {
     if (t.paint) {
       const p = t.paint;
       h('PAINTING THE GROUND');
-      row(...(['family', 'colour'] as const).map((m) => toggle(m === 'family' ? 'Families' : 'Colour', p.layer === m, { paintLayer: m })));
+      row(...(['family', 'colour', 'plants'] as const).map((m) => toggle(m === 'family' ? 'Families' : m === 'colour' ? 'Colour' : 'Plants', p.layer === m, { paintLayer: m })));
+      // The plants layer (Map-maker II's fourth wave): the recipes, and one built a class at a time.
+      if (p.layer === 'plants' && p.plants) {
+        const pl = p.plants;
+        if (pl.recipes.length) {
+          this.note(el, 'The recipes (a click chooses what LMB paints):');
+          const r = row();
+          r.style.flexWrap = 'wrap';
+          for (const rc of pl.recipes) r.appendChild(toggle(`${rc.at}: ${rc.words}${rc.paints ? '' : ' (paints nothing here)'}`, rc.chosen, { floraRecipe: rc.at }));
+        } else this.note(el, 'No recipe yet: build one below and paint with it.');
+        this.note(el, 'A recipe, a class at a time:');
+        for (const d of pl.draft) {
+          const r = row();
+          r.style.flexWrap = 'wrap';
+          const label = document.createElement('span');
+          label.className = 'ed-label';
+          label.textContent = d.label;
+          r.appendChild(label);
+          for (const op of ['keep', 'clear', 'thin', 'add', 'remove']) r.appendChild(toggle(op[0].toUpperCase() + op.slice(1), d.op === op, { floraClass: [d.cls, op] }));
+          if (d.op === 'add' || d.op === 'remove') {
+            const sel = document.createElement('select');
+            for (const name of ['', ...d.families]) {
+              const o = document.createElement('option');
+              o.value = name;
+              o.textContent = name || '(a family)';
+              if (name === d.family) o.selected = true;
+              sel.appendChild(o);
+            }
+            sel.addEventListener('change', () => {
+              this.host.setTool({ floraFamily: [d.cls, sel.value] });
+              sel.blur();
+            });
+            r.appendChild(sel);
+          }
+        }
+        row(toggle(pl.roads ? 'Paints roads and rivers too' : 'Keeps off roads and rivers', pl.roads, { floraRoads: !pl.roads }), toggle('Paint with this recipe', false, { floraUse: true }));
+        if (pl.note) this.note(el, pl.note);
+      }
       const pic = (src: string | null, title: string, on: boolean, set: Record<string, unknown>) => {
         const b = this.button('', 'tool', on ? 'on' : '');
         b.title = title;

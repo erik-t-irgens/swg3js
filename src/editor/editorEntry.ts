@@ -46,13 +46,14 @@ import { BRUSH_TUNE, EDITOR_TUNE, LIBRARY_TUNE, SCULPT_TUNE, TUNE_WATCH, liveTun
 import { EditorSculpt, sculptTool, type SculptHost } from './editorSculpt.ts';
 import { SCULPT_FALLOFFS, SCULPT_MODES, type SculptMode } from './sculpt.ts';
 import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
-import { EditorPaint, hexOf, paintTool, washInto, type PaintHost } from './editorPaint.ts';
-import { PAINT_TUNE, tunePaint } from './editorTune.ts';
+import { EditorPaint, hexOf, paintTool, recipeWords, washInto, type PaintHost } from './editorPaint.ts';
+import { FLORA_PAINT_TUNE, PAINT_TUNE, tuneFloraPaint, tunePaint } from './editorTune.ts';
+import { FLORA_CLASSES, type FloraClass, type FloraClassSpec, type FloraRecipe } from '../swg/terrain/groundPaint.ts';
 import { WASH_DIALS } from './editorDials.ts';
 import { PAINT_LAYERS, type PaintLayer } from './groundBrush.ts';
 import { TINT_MODES, type PaintWorldRow } from '../world/editFiles/paintFile.ts';
 import { readWash, type WashSpec } from '../world/demWash.ts';
-import type { PaintToolsView } from '../ui/editorWindow.ts';
+import type { PaintToolsView, PlantsToolsView } from '../ui/editorWindow.ts';
 import { GROUND_DRAW_TUNE } from '../world/groundTiles.ts';
 import { lentFamilyKey } from '../swg/terrain/generator.ts';
 import { groundPacksOf, packOfFamily } from '../world/lentGround.ts';
@@ -142,6 +143,12 @@ export interface EditorHost {
    * null once lent, else why not, in words.
    */
   lendGround(pack: string, name: string): Promise<string | null>;
+  /**
+   * A real-elevation world's plants made ready for its flora paint (Map-maker II's fourth wave): the lent pack's flora models
+   * the recipes name loaded, the planter, the grass and the far cards stood, behind the editor's short curtain. Null once
+   * ready, else why not, in words.
+   */
+  floraReady(): Promise<string | null>;
 }
 
 /** One thing in hand: what a row writes, what it is drawn and judged by, and how it is turned. */
@@ -367,6 +374,8 @@ export class Editor {
       near: (cx, cz, reach, keys) => me.brushNear(cx, cz, reach, keys),
       ground: (x, z) => (w.planet?.space ? Number.NaN : (w.terrain.nearHeightIfCached(x, z) ?? w.terrain.heightAt(x, z))),
       water: (x, z) => w.terrain.waterHeightAt(x, z),
+      // The roads and rivers the generator marked (Map-maker II's fourth wave), from the cached ground: the brush keeps off them.
+      road: (x, z) => w.roadIfCached(x, z),
       centre: () => w.placeFrame,
       frame: () => (w.planet?.space ? 'game' : 'raw'),
       packId: () => host.packId(),
@@ -440,6 +449,63 @@ export class Editor {
   readonly paint: EditorPaint;
   /** The pack the paint palette's family list shows (Map-maker II's third wave): '' for this world's own. */
   private paintBrowse = '';
+  /**
+   * The flora recipe being built on the Tools tab (Map-maker II's fourth wave): a class at a time its op and the family an
+   * add or a remove names, and whether it paints roads too. Kept for the session.
+   */
+  private readonly recipeDraft: Record<FloraClass, { op: string; family: string }> & { roads: boolean } = {
+    trees: { op: 'keep', family: '' },
+    plants: { op: 'keep', family: '' },
+    grass: { op: 'keep', family: '' },
+    far: { op: 'keep', family: '' },
+    roads: false,
+  };
+
+  /** The draft as a recipe (an add or a remove with no family named keeps its class, and says so), the tune's density and thin share in it. */
+  private draftRecipe(): { recipe: FloraRecipe; unnamed: string[] } {
+    const pack = this.host.world.paintPack();
+    const r: FloraRecipe = {};
+    const unnamed: string[] = [];
+    for (const c of FLORA_CLASSES) {
+      const d = this.recipeDraft[c];
+      let s: FloraClassSpec | undefined;
+      if (d.op === 'clear') s = 'clear';
+      else if (d.op === 'thin') s = { thin: FLORA_PAINT_TUNE.thin };
+      else if (d.op === 'add' || d.op === 'remove') {
+        if (!d.family) unnamed.push(c);
+        else if (d.op === 'add') s = FLORA_PAINT_TUNE.density > 0 ? { add: { pack, name: d.family }, density: FLORA_PAINT_TUNE.density } : { add: { pack, name: d.family } };
+        else s = { remove: { pack, name: d.family } };
+      }
+      if (s) r[c] = s;
+    }
+    if (this.recipeDraft.roads) r.roads = true;
+    return { recipe: r, unnamed };
+  }
+
+  /** The world's flora tables a recipe names families in: the converted terrain's, or a real-elevation world's lent table's. */
+  private floraTables(): { flora: { families: ReadonlyMap<number, { name: string }> }; radial: { families: ReadonlyMap<number, { name: string }> } } | null {
+    const w = this.host.world;
+    const g = (w.terrain.swg ?? w.terrain.demLent)?.template.generator;
+    return g ? { flora: g.floraGroup, radial: g.radialGroup } : null;
+  }
+
+  /** The plants layer as the Tools tab shows it (Map-maker II's fourth wave), or null where the world has no flora tables. */
+  private plantsView(): PlantsToolsView | null {
+    const w = this.host.world;
+    const tables = this.floraTables();
+    if (!tables) return null;
+    const names = (m: ReadonlyMap<number, { name: string }>): string[] => [...new Set([...m.values()].map((f) => f.name))].sort((a, b) => a.localeCompare(b));
+    const trees = names(tables.flora.families);
+    const radial = names(tables.radial.families);
+    const labels: Record<FloraClass, string> = { trees: 'Trees', plants: 'Plants', grass: 'Grass', far: 'Far cards' };
+    const recipes = w.paintRecipes.map((r, i) => ({ at: i + 1, words: recipeWords(r), chosen: PAINT_TUNE.layer === 'plants' && FLORA_PAINT_TUNE.recipe === i + 1, paints: !w.floraMissing.some((s) => s.startsWith(`recipe ${i + 1} `)) }));
+    const draft = FLORA_CLASSES.map((c) => ({ cls: c, label: labels[c], op: this.recipeDraft[c].op, family: this.recipeDraft[c].family, families: c === 'trees' || c === 'plants' ? trees : radial }));
+    const notes: string[] = [];
+    notes.push(w.paintWorld.follow === false ? "The world's own plants keep their places under painted families; a recipe paints the plants themselves wherever it is laid." : "The world's own plants follow the painted families; a recipe is laid over them after, wherever it is laid.");
+    if (w.planet?.dem) notes.push(`On this real-elevation world every plant is the paint's: ${w.terrain.demLentPack ?? 'the lent pack'}'s trees, plants, grass and far cards, planted as that world plants them; a chunk with no flora cell keeps the props it always stood.`);
+    notes.push('Roads and rivers stay clear unless a recipe says so. The walk grid follows only a re-bake.');
+    return { recipes, draft, roads: this.recipeDraft.roads, note: notes.join(' ') };
+  }
   /** Other installed worlds' families as read for that list, by pack, or why not (a pack still being read is absent). */
   private readonly browsed = new Map<string, { name: string; pictures: (string | null)[] }[] | string>();
 
@@ -515,7 +581,28 @@ export class Editor {
         const b = w.rawToGame(r.x1, r.z1);
         w.paintPreview(Math.min(a.x, b.x), Math.min(a.z, b.z), Math.max(a.x, b.x), Math.max(a.z, b.z), fx, fz);
       },
-      release: (r, famKeys, colKeys) => w.paintRelease(r.x0, r.z0, r.x1, r.z1, famKeys, colKeys),
+      release: (r, famKeys, colKeys, floKeys) => w.paintRelease(r.x0, r.z0, r.x1, r.z1, famKeys, colKeys, floKeys),
+      // The flora recipes (Map-maker II's fourth wave), held as the palette is: in memory ahead of the file, resolved at once.
+      recipes: () => w.paintRecipes,
+      addRecipe: (r) => {
+        w.ensurePaint();
+        w.paintRecipes = [...w.paintRecipes, r];
+        const g = w.paintGroup();
+        if (g) w.resolvePaint(g);
+        return w.paintRecipes.length;
+      },
+      keepRecipes: (n) => {
+        if (w.paintRecipes.length <= n) return;
+        w.paintRecipes = w.paintRecipes.slice(0, n);
+        const g = w.paintGroup();
+        if (g) w.resolvePaint(g);
+      },
+      recipeMissing: (at) => {
+        const m = w.floraMissing.filter((s) => s.startsWith(`recipe ${at} `));
+        return m.length ? m.join('; ') : null;
+      },
+      floraReady: () => h.floraReady(),
+      floraIsReady: () => w.demFloraReady(),
       fileRow: (id) => w.paintRows.get(id) ?? null,
       fileSize: () => ({ rows: w.paintRows.size, bytes: w.paintRows.bytes }),
       worldRow: () => w.paintWorld,
@@ -1865,7 +1952,22 @@ export class Editor {
     }
     // The paint brush's (Map-maker II's second wave): its layer, an entry chosen, a family (and an alternate) added and chosen,
     // its colour, and the world row's switches, tint, weights, base and wash, each written into the file.
-    if (t.paintLayer === 'family' || t.paintLayer === 'colour') PAINT_TUNE.layer = t.paintLayer;
+    if (t.paintLayer === 'family' || t.paintLayer === 'colour' || t.paintLayer === 'plants') PAINT_TUNE.layer = t.paintLayer;
+    // The plants layer's recipe (Map-maker II's fourth wave): built a class at a time, chosen, or one of the recipes chosen.
+    const fc = t.floraClass;
+    if (Array.isArray(fc) && (FLORA_CLASSES as readonly unknown[]).includes(fc[0]) && ['keep', 'clear', 'thin', 'add', 'remove'].includes(fc[1] as string)) this.recipeDraft[fc[0] as FloraClass].op = fc[1] as string;
+    const ff = t.floraFamily;
+    if (Array.isArray(ff) && (FLORA_CLASSES as readonly unknown[]).includes(ff[0]) && typeof ff[1] === 'string') this.recipeDraft[ff[0] as FloraClass].family = ff[1];
+    if (typeof t.floraRoads === 'boolean') this.recipeDraft.roads = t.floraRoads;
+    if (t.floraUse === true) {
+      const d = this.draftRecipe();
+      if (d.unnamed.length) this.say(`name a family for the ${d.unnamed.join(' and ')} first`, false);
+      else void this.paint.chooseRecipe(d.recipe).then(() => this.window?.refreshEdits());
+    }
+    if (typeof t.floraRecipe === 'number') {
+      const r = this.host.world.paintRecipes[t.floraRecipe - 1];
+      if (r) void this.paint.chooseRecipe(r).then(() => this.window?.refreshEdits());
+    }
     if (typeof t.paintEntry === 'number' && t.paintEntry >= 1 && t.paintEntry <= this.host.world.paintEntries.length) {
       PAINT_TUNE.entry = t.paintEntry;
       PAINT_TUNE.layer = 'family';
@@ -1934,6 +2036,7 @@ export class Editor {
     return {
       armed: this.paint.armed,
       layer: PAINT_TUNE.layer,
+      plants: this.plantsView(),
       entries,
       families,
       packs,
@@ -1971,7 +2074,7 @@ export class Editor {
     let at: Record<string, unknown> | null = null;
     if (o && typeof o === 'object') {
       if (o.tune !== undefined) said.push(...tunePaint(o.tune, { rewrite: GROUND_REWRITE_TUNE, paint: GROUND_PAINT_TUNE }));
-      if (o.arm === 'family' || o.arm === 'colour') {
+      if (o.arm === 'family' || o.arm === 'colour' || o.arm === 'plants') {
         PAINT_TUNE.layer = o.arm;
         said.push(this.paint.armed ? `the paint brush: ${o.arm}` : await this.toggleTool('paint'));
       } else if (o.arm === false && this.paint.armed) said.push(await this.toggleTool('paint'));
@@ -2034,6 +2137,115 @@ export class Editor {
       ...(at ? { at } : {}),
       ...(said.length ? { answered: said } : {}),
     };
+  }
+
+  /**
+   * `__debug.floraPaint(o)` (Map-maker II's fourth wave): the recipes (and any class that paints nothing here), the flora
+   * cells painted, the chunks replanted on the landings, and on a real-elevation world the lent plants loaded and what the
+   * paint's source answered; `{ tune }` the plants layer's numbers; `{ arm: true }` (or false) the paint brush on its plants
+   * layer; `{ recipe: n | {...} }` a recipe chosen (one given whole is appended where none is the same); `{ at: [x, z] }` the
+   * four flora maps there, painted and the world's own; `{ stroke: { recipe, erase, x, z, r, seconds } }` a stroke run exactly
+   * as held and written -- a place given in the file's own frame (a `/loc` line on a planet), the aim where none is.
+   */
+  async floraPaintDebug(o?: Record<string, unknown>): Promise<unknown> {
+    const w = this.host.world;
+    const said: string[] = [];
+    const c = w.placeFrame;
+    const space = !!w.planet?.space;
+    const gameOf = (x: number, z: number): { x: number; z: number } => (space || !c ? { x, z } : { x: rawToGameX(c.x, x), z: rawToGameZ(c.z, z) });
+    let at: Record<string, unknown> | null = null;
+    if (o && typeof o === 'object') {
+      if (o.tune !== undefined) said.push(...tuneFloraPaint(o.tune));
+      if (o.arm === true) {
+        PAINT_TUNE.layer = 'plants';
+        said.push(this.paint.armed ? 'the paint brush: plants' : await this.toggleTool('paint'));
+      } else if (o.arm === false && this.paint.armed) said.push(await this.toggleTool('paint'));
+      if (typeof o.recipe === 'number') {
+        const r = w.paintRecipes[o.recipe - 1];
+        said.push(r ? await this.paint.chooseRecipe(r) : `recipe is a place from 1 to ${w.paintRecipes.length}, or a recipe`);
+      } else if (o.recipe !== undefined) said.push(await this.paint.chooseRecipe(o.recipe));
+      if (Array.isArray(o.at) && o.at.length === 2) at = this.floraAt(gameOf(Number(o.at[0]), Number(o.at[1])), [Number(o.at[0]), Number(o.at[1])]);
+      const st = o.stroke as Record<string, unknown> | undefined;
+      if (st && typeof st === 'object') {
+        if (typeof st.recipe === 'number') {
+          const r = w.paintRecipes[st.recipe - 1];
+          if (r) said.push(await this.paint.chooseRecipe(r));
+          else said.push(`recipe is a place from 1 to ${w.paintRecipes.length}`);
+        } else if (st.recipe !== undefined) said.push(await this.paint.chooseRecipe(st.recipe));
+        const g = typeof st.x === 'number' && typeof st.z === 'number' ? gameOf(st.x, st.z) : { x: this.aim.hit.x, z: this.aim.hit.z };
+        const r = typeof st.r === 'number' ? st.r : FLORA_PAINT_TUNE.radius;
+        const seconds = typeof st.seconds === 'number' ? Math.max(0, Math.min(60, st.seconds)) : 1;
+        said.push(await this.paint.strokeAt('plants', st.erase === true, g.x, g.z, r, seconds));
+      }
+    }
+    const p = w.groundPaint;
+    let cells = 0;
+    if (p) for (const t of p.flo.values()) for (let i = 1; i < t.length; i += 2) if (t[i]) cells++;
+    return {
+      recipes: w.paintRecipes.map((r, i) => `${i + 1}: ${recipeWords(r)}`),
+      missing: w.floraMissing,
+      cells: { painted: cells, tiles: p?.flo.size ?? 0, cell: p?.cell ?? w.paintFileInfo.cell },
+      follow: p ? p.follow : w.paintWorld.follow !== false,
+      stands: w.floraReport(),
+      armed: this.paint.armed && PAINT_TUNE.layer === 'plants',
+      paint: this.paint.report(),
+      tune: { ...FLORA_PAINT_TUNE },
+      ...(at ? { at } : {}),
+      ...(said.length ? { answered: said } : {}),
+    };
+  }
+
+  /**
+   * The four flora maps at a game point (the console's `at`): what the paint's cells say there, the maps as built (the cached
+   * block's pole, a converted world's), and the world's own (the block made again with the paint taken off); on a
+   * real-elevation world the paint's source's answer, its own world having none.
+   */
+  private floraAt(g: { x: number; z: number }, file: number[]): Record<string, unknown> {
+    const w = this.host.world;
+    const r = w.gameToRaw(g.x, g.z);
+    const out: Record<string, unknown> = { file, game: [round(g.x), round(g.z)] };
+    const swg = w.terrain.swg;
+    const tables = this.floraTables();
+    const nameOf = (cls: number, id: number): string => (id ? `${id} ${(cls < 2 ? tables?.flora : tables?.radial)?.families.get(id)?.name ?? '?'}` : '(none)');
+    const four = (b: { floraCollidable: Uint8Array; floraNonCollidable: Uint8Array; radialNear?: Uint8Array; radialFar?: Uint8Array }, i: number): Record<string, string> => ({
+      trees: nameOf(0, b.floraCollidable[i * 2]),
+      plants: nameOf(1, b.floraNonCollidable[i * 2]),
+      grass: nameOf(2, b.radialNear?.[i * 2] ?? 0),
+      far: nameOf(3, b.radialFar?.[i * 2] ?? 0),
+    });
+    if (swg) {
+      const s = swg.sampler;
+      const bx = Math.floor(r.x / s.blockWidth);
+      const bz = Math.floor(r.z / s.blockWidth);
+      const start = s.blockStart(bx, bz);
+      const n = s.numberOfPoles;
+      const px = Math.round((Math.floor(r.x / s.poleStep) * s.poleStep - start.x) / s.poleStep);
+      const pz = Math.round((Math.floor(r.z / s.poleStep) * s.poleStep - start.z) / s.poleStep);
+      const i = pz * n + px;
+      if (s.hasBlock(bx, bz)) {
+        const b = s.generateBlock(bx, bz);
+        out.built = four(b, i);
+        out.road = b.roads ? b.roads[i] !== 0 : null;
+      }
+      const held = s.paint;
+      s.paint = null;
+      try {
+        out.own = four(s.generate(start.x, start.z, n, s.poleStep), i);
+      } finally {
+        s.paint = held;
+      }
+    } else if (w.demFlora) {
+      const src = w.demFlora.source;
+      const pole = { family: 0, choice: 0, excluded: false, color: 0, height: 0, nx: 0, ny: 1, nz: 0 };
+      const t = src.floraAt(r.x, r.z, true).family;
+      const pl = src.floraAt(r.x, r.z, false).family;
+      src.radialPoleIfCached(g.x, g.z, false, pole);
+      const gr = pole.family;
+      src.radialPoleIfCached(g.x, g.z, true, pole);
+      out.built = { trees: nameOf(0, t), plants: nameOf(1, pl), grass: nameOf(2, gr), far: nameOf(3, pole.family) };
+      out.own = 'a real-elevation world plants nothing of its own';
+    }
+    return out;
   }
 
   /**
@@ -2478,12 +2690,13 @@ function keySheet(input: Input): string {
  * The brush's switches, as the Tools tab shows them (the sliders take its numbers; a switch's line would be a boolean,
  * which the debug menu's dials do not carry): each a key of `BRUSH_TUNE` and its words.
  */
-const BRUSH_SWITCHES: readonly (readonly ['randomYaw' | 'align' | 'heightOn' | 'keepOffWater' | 'keepOffStanding', string])[] = [
+const BRUSH_SWITCHES: readonly (readonly ['randomYaw' | 'align' | 'heightOn' | 'keepOffWater' | 'keepOffStanding' | 'keepOffRoads', string])[] = [
   ['randomYaw', 'Random turn'],
   ['align', 'Lean to the ground'],
   ['heightOn', 'Height filter'],
   ['keepOffWater', 'Off the water'],
   ['keepOffStanding', 'Off what stands'],
+  ['keepOffRoads', 'Off roads and rivers'],
 ];
 
 /** The sculpt brush's switches, as the Tools tab shows them: each a key of `SCULPT_TUNE` and its words. */

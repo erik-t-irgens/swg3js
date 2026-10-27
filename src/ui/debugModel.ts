@@ -66,7 +66,7 @@ export const DEBUG_GROUPS: readonly { title: string; helpers: readonly string[] 
   { title: 'Travel, homes and trade', helpers: ['shuttle', 'terminal', 'ride', 'rigHull', 'fittings', 'house', 'homes', 'deed', 'prop', 'placements', 'purse', 'trade'] },
   // The world editor (`src/editor/`, the dev server's alone), whose camera's and hand's numbers of feel are sliders
   // (`editorDials.ts`) once it has been loaded.
-  { title: 'World editor', helpers: ['editor', 'library', 'sculpt', 'groundPaint'] },
+  { title: 'World editor', helpers: ['editor', 'library', 'sculpt', 'groundPaint', 'floraPaint'] },
   { title: 'Story', helpers: ['story', 'quests', 'signal', 'storyHere', 'waypoints', 'minimap', 'talkTree', 'gestures', 'shots', 'reactions', 'docs', 'journal', 'file', 'standing', 'companion'] },
   { title: 'Progress', helpers: ['progress', 'stat', 'encounter'] },
   { title: 'Character and kit', helpers: ['appearance', 'creator', 'hair', 'dye', 'tint', 'recipe', 'morph', 'species', 'wardrobe', 'wear', 'remove', 'preview', 'closet', 'fpHead', 'headLook', 'grapple', 'mood', 'variant', 'anim', 'upper', 'split', 'steady', 'grip', 'items', 'give', 'use', 'destroy', 'backpack', 'startingKit', 'giveScreens', 'weapons', 'equip', 'heldFx', 'shine', 'select', 'burn', 'breath', 'heal', 'profile', 'gun', 'gunType'] },

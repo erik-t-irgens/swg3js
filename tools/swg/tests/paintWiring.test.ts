@@ -47,10 +47,12 @@ ok(/const p = d\.paint \?\? null;\s*if \(p !== null && p\.follow\) p\.unlayFamil
 const gen = body(generator, '  generateChunk(d: ChunkData): void {');
 ok(/if \(p !== null && d\.paintUnder\) d\.paintUnder\.count = 0;\s*for \(const l of this\.layers\) if \(!l\.pruned\) l\.affect\(amountMap, d\);/.test(gen), "a chunk's record of what the paint wrote over starts empty");
 ok(/if \(d\.familyLattice > 0 && d\.shaderDirty\) \{\s*if \(p !== null && p\.follow\) p\.unlayFamilies\(d\);\s*snapFamilies\(d\);\s*d\.shaderDirty = false;\s*\}/.test(gen), "the last snap: the paint taken off first");
-ok(/if \(p !== null\) \{\s*p\.layFamilies\(d, false\);\s*p\.layColours\(d\);\s*\}$/.test(gen), 'and the end lay: the families once more whatever came before, then the colours, the last thing the generator does');
+// Moved on purpose by Map-maker II's fourth wave: the flora recipes are laid after the colours, the last thing of all.
+ok(/if \(p !== null\) \{\s*p\.layFamilies\(d, false\);\s*p\.layColours\(d\);\s*p\.floraInto\(d\);\s*\}$/.test(gen), 'and the end lay: the families once more whatever came before, then the colours, then the flora recipes, the last thing the generator does');
 ok((generator.match(/snapFamilies\(d\);/g) ?? []).length === 2, 'the generator snaps at exactly those two sites');
 ok(/^import type \{ GroundPaint, PaintUnder \} from '\.\/groundPaint\.ts';$/m.test(generator) && !/^import \{[^}]*\} from '\.\/groundPaint\.ts'/m.test(generator), 'the generator names the paint by a type alone (no cycle at run time)');
-ok(/^import \{[^}]*\} from '\.\/generator\.ts';$/m.test(groundPaint) && (groundPaint.match(/^import /gm) ?? []).length === 1, 'and the paint imports the generator alone');
+// Moved on purpose by Map-maker II's fourth wave: the flora recipes' add test is the flora's own coordinate hash and generator.
+ok(/^import \{[^}]*\} from '\.\/generator\.ts';$/m.test(groundPaint) && /^import \{ FastRandomGenerator, hashFloat, hashTuple \} from '\.\/flora\.ts';$/m.test(groundPaint) && (groundPaint.match(/^import /gm) ?? []).length === 2, 'and the paint imports the generator and the flora\'s hash alone (both shipped; neither imports the paint)');
 ok(/'src\/swg\/terrain\/groundPaint\.ts'/.test(pack), "the release's source list carries it");
 
 // The worker.
@@ -59,7 +61,8 @@ ok(/if \(msg\.paint\) this\.takePaint\(msg\.paint, msg\.rev\);/.test(body(worker
 ok(/type: 'grid', id: msg\.id, rev: this\.rev,/.test(worker), 'every grid carries the revision it was made at');
 ok(/paint: paint && !paint\.empty \? paint\.message\(null, null, true\) : null,\s*rev: this\.paintRev,/.test(swg), "the terrain hands its worker the paint with its init");
 // (From Map-maker II's third wave every post carries the families other worlds lent the group, where any were.)
-ok(/this\.worker\.postMessage\(group\.lent\.size \? \{ type: 'paint', rev, paint: p \? p\.message\(famKeys, colKeys, reset\) : null, lent: group\.lentList\(\) \} : \{ type: 'paint', rev, paint: p \? p\.message\(famKeys, colKeys, reset\) : null \}\);/.test(swg), 'and every change of it as a `paint` message');
+// Moved on purpose by Map-maker II's fourth wave: the message carries the flora tiles named beside the families' and colours'.
+ok(/const paint = p \? p\.message\(famKeys, colKeys, reset, fl\) : null;\s*this\.worker\.postMessage\(group\.lent\.size \? \{ type: 'paint', rev, paint, lent: group\.lentList\(\) \} : \{ type: 'paint', rev, paint \}\);/.test(swg), 'and every change of it as a `paint` message, its flora tiles with it');
 ok(/if \(this\.staleGrid\(p, typeof msg\.rev === 'number' \? msg\.rev : 0\)\) \{/.test(swg), 'a grid older than its tiles is asked for again, never put');
 ok(/this\.sampler\.paint = paint;/.test(swg) && /d\.paint = this\.paint;/.test(trn), 'the main thread\'s sampler holds the very paint and hands it every chunk it makes');
 
@@ -72,7 +75,7 @@ ok(/const painted = p\.familyAtRaw\(-x, z\);\s*if \(painted !== 0\) return paint
 // The arrival.
 const load = body(world, '  async loadPack(spawn: THREE.Vector3');
 // (From Map-maker II's third wave the lending is planned between the two, and lent at the terrain's constructor: `foreignFamilies.test.ts`.)
-ok(/await this\.paintReady\(\);\s*if \(token !== this\.loadToken\) return null;\s*(\/\/[^\n]*\n\s*)*await this\.prepareLending\(pack, this\.paintPack\(\)\);\s*if \(token !== this\.loadToken\) return null;\s*const paint = this\.groundPaint;[\s\S]{0,200}SwgTerrain\.create\([^\n]*\{ heights, paint, paintResolve: \(group\) => this\.resolvePaint\(group\), lend: /.test(load), 'the paint file is awaited before the converted terrain is made and handed to it, its palette resolved as it is made');
+ok(/await this\.paintReady\(\);\s*if \(token !== this\.loadToken\) return null;\s*(\/\/[^\n]*\n\s*)*await this\.prepareLending\(pack, this\.paintPack\(\)\);\s*if \(token !== this\.loadToken\) return null;\s*const paint = this\.groundPaint;[\s\S]{0,200}SwgTerrain\.create\([^\n]*\{ heights, paint, paintResolve: \(group, gen\) => this\.resolvePaint\(group, gen\), lend: /.test(load), 'the paint file is awaited before the converted terrain is made and handed to it, its palette (and from the fourth wave its flora recipes, against the very generator) resolved as it is made');
 ok(/swg\.onRepainted = \(kind, x0, z0, x1, z1\) => this\.paintLanded\(kind, x0, z0, x1, z1\);/.test(load), 'grids made again for the paint are handed to the world as they land');
 ok(/await this\.paintReady\(\);\s*if \(this\.terrain !== terrainAtLoad\) return;[\s\S]{0,400}?const base = this\.paintWorld\.base \? \{ \.\.\.this\.paintWorld\.base \} : null;\s*this\.terrain\.demBase = base;/.test(world), "a raster's paint file is read before its ground is borrowed and made, its base taken there and only there");
 ok(/else if \(base\) await this\.loadBorrowedGround\(\{ pack: base\.pack, fallback: base\.name, rules: \[\] \}, patch\.lift\);/.test(world), "a world row's base borrows its pack as a ruled world's rules do");
@@ -92,7 +95,7 @@ ok(/tiler\.setWeights\(this\.paintWeighted\);/.test(body(world, '  applyPaintWei
 
 // The paint's landing.
 const land = body(world, '  landPaint(put: readonly PaintRow[], deleted: readonly string[]): number {');
-ok(/swg\.landPaint\(paletteMoved, fam, col, movedRaw\);/.test(land) && /if \(swg && this\.groundPaint && \(paletteMoved \|\| moved\)\) \{/.test(land), "a landing hands the terrain whether the palette moved, the tiles that moved and their rectangle (`SwgTerrain.landPaint`, which makes a tile taken out again even where the palette moved)");
+ok(/swg\.landPaint\(paletteMoved, fam, col, movedRaw, flo\);/.test(land) && /if \(swg && this\.groundPaint && \(paletteMoved \|\| moved\)\) \{/.test(land), "a landing hands the terrain whether the palette moved, the tiles that moved and their rectangle (`SwgTerrain.landPaint`, which makes a tile taken out again even where the palette moved)");
 ok(/return swg\.repaintTiles\(\);/.test(body(world, '  private repaintPainted(): number {')), "a change of `follow`, the weights or the palette makes again every tile the paint holds through the terrain's own walk");
 
 // A real-elevation world's lent pack and its arrival's base.

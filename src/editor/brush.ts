@@ -49,6 +49,8 @@ export interface BrushTune {
   keepOffWater: boolean;
   /** Never inside what stands (a placed object's box). */
   keepOffStanding: boolean;
+  /** Never on a road's flat part or a river's bed (Map-maker II's fourth wave: the generator's road byte). */
+  keepOffRoads: boolean;
   /** The share of its own rows in the disc an erase stamp takes. */
   eraseShare: number;
   /** Candidates tried a plant still wanted: how hard a stamp looks before it gives the rest up. */
@@ -113,6 +115,11 @@ export interface BrushGround {
   water(x: number, z: number): number;
   /** Whether the point stands inside what stands there (a placed object's box). */
   blocked(x: number, z: number): boolean;
+  /**
+   * Whether a road's flat part or a river's bed reaches the point (Map-maker II's fourth wave: the generator's road byte,
+   * from the cached ground); absent, or null for ground not cached, is no road.
+   */
+  road?(x: number, z: number): boolean | null;
 }
 
 /** One plant a paint stamp puts down: which entry, where (on the ground), its yaw, its scale and the ground's up there. */
@@ -212,6 +219,8 @@ export function paintStamp(tune: BrushTune, cx: number, cz: number, entries: rea
     const slope = (Math.acos(Math.min(1, ny)) * 180) / Math.PI;
     if (slope < slopeMin || slope > slopeMax) continue;
     if (tune.keepOffStanding && ground.blocked(x, z)) continue;
+    // Off a road or a river (the fourth wave), asked last so a candidate refused by anything else asks nothing.
+    if (tune.keepOffRoads && ground.road && ground.road(x, z) === true) continue;
     out.push({ entry: pick, x, y, z, yaw: tune.randomYaw ? yawU * Math.PI * 2 : cameraYaw, scale: sLo + scaleU * (sHi - sLo), nx: -fx / nl, ny, nz: -fz / nl });
   }
   return out;

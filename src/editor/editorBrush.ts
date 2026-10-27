@@ -102,6 +102,8 @@ export interface BrushHost {
   /** The ground and the water under a point. */
   ground(x: number, z: number): number;
   water(x: number, z: number): number;
+  /** Whether a road or a river reaches the point (the cached ground's road byte; null where nothing is cached); absent, none is. */
+  road?(x: number, z: number): boolean | null;
   centre(): { x: number; z: number } | null;
   frame(): 'raw' | 'game';
   packId(): string;
@@ -305,6 +307,7 @@ export class EditorBrush {
       ground: (x, z) => h.ground(x, z),
       water: (x, z) => h.water(x, z),
       blocked: (x, z) => blockedAt(near, x, z),
+      road: h.road ? (x, z) => h.road!(x, z) : undefined,
     };
     const plants = paintStamp(t, cx, cz, this.entries, near, ground, this.rand, h.cameraYaw());
     // What the disc held of its own and aimed at, said even when the stamp planted nothing (the disc full, or nothing fit).

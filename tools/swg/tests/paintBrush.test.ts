@@ -13,16 +13,21 @@
 //   - (Map-maker II's third wave) a family of another world is lent first where it is not, through the host, once, then put
 //     in the palette by its pack and name and chosen; a lending refused leaves the palette as it was, said; one lent already
 //     (the middle button on a cell it paints) is taken as that world's with no lending asked;
-//   - a space zone, the world of copies and a real-elevation world with no base family are refused in words.
+//   - a space zone, the world of copies and a real-elevation world with no base family are refused in words;
+//   - (the fourth wave's plants layer, through the same class) a held second paints the same flora cells at 30, 60 and 144
+//     frames a second and by the colour's law; a stroke whose recipe the file has not got writes the recipes row ahead of
+//     its tiles in its one batch; erasing keeps each cell's own recipe; where two recipes meet the other is faded out
+//     first and the chosen one grows from nought; a refused write takes the recipe it carried out of memory; a recipe
+//     that paints nothing here is taken back out; and one chosen while its plants are made ready is found again after.
 //
 // Run: node tools/swg/tests/paintBrush.test.ts
 import assert from 'node:assert/strict';
 import { EditorPaint, hexOf, paintTool, rgbOfHex, type PaintHost } from '../../../src/editor/editorPaint.ts';
 import { PaintStroke, paintStampAsk } from '../../../src/editor/groundBrush.ts';
 import { rawRect, stampWeight } from '../../../src/editor/sculpt.ts';
-import { PAINT_TUNE } from '../../../src/editor/editorTune.ts';
+import { FLORA_PAINT_TUNE, PAINT_TUNE } from '../../../src/editor/editorTune.ts';
 import { toolFrame } from '../../../src/editor/tools.ts';
-import { GroundPaint, paintTileNumber, type PaintPaletteEntry } from '../../../src/swg/terrain/groundPaint.ts';
+import { GroundPaint, paintTileNumber, type FloraRecipe, type PaintPaletteEntry } from '../../../src/swg/terrain/groundPaint.ts';
 import { familyRle, type PaintRow } from '../../../src/world/editFiles/paintFile.ts';
 import type { RowChange } from '../../../src/editor/undo.ts';
 
@@ -50,9 +55,15 @@ interface Harness {
   lentNow: Set<string>;
   lendAsked: string[];
   lendRefuse: string | null;
+  /** The fourth wave: the recipes in memory, a class that cannot be painted, whether the plants are ready, and a hook run while they are made ready. */
+  recipes: FloraRecipe[];
+  missing: Map<string, string>;
+  floraReadyNow: boolean;
+  floraAsked: number;
+  duringReady: (() => void) | null;
 }
 function harness(): Harness {
-  const h = { ground: new GroundPaint(), entries: [] as PaintPaletteEntry[], writes: [] as RowChange[][], labels: [] as string[], said: [] as string[], refuse: false, kind: 'ground' as 'ground' | 'space' | 'copies', notPaintable: null as string | null, rows: new Map<string, PaintRow>(), stamps: 0, lentNow: new Set(['other:grass']), lendAsked: [] as string[], lendRefuse: null as string | null } as Harness;
+  const h = { ground: new GroundPaint(), entries: [] as PaintPaletteEntry[], writes: [] as RowChange[][], labels: [] as string[], said: [] as string[], refuse: false, kind: 'ground' as 'ground' | 'space' | 'copies', notPaintable: null as string | null, rows: new Map<string, PaintRow>(), stamps: 0, lentNow: new Set(['other:grass']), lendAsked: [] as string[], lendRefuse: null as string | null, recipes: [] as FloraRecipe[], missing: new Map<string, string>(), floraReadyNow: true, floraAsked: 0, duringReady: null } as Harness;
   let label = '';
   const edits = {
     writing: false,
@@ -106,6 +117,24 @@ function harness(): Harness {
     },
     preview: () => {},
     release: () => {},
+    // The fourth wave's recipes, held as the world holds them (`editorEntry.ts`): in memory ahead of the file.
+    recipes: () => h.recipes,
+    addRecipe: (r) => {
+      h.recipes = [...h.recipes, r];
+      return h.recipes.length;
+    },
+    keepRecipes: (n) => {
+      if (h.recipes.length > n) h.recipes = h.recipes.slice(0, n);
+    },
+    recipeMissing: (at) => h.missing.get(JSON.stringify(h.recipes[at - 1])) ?? null,
+    floraIsReady: () => h.floraReadyNow,
+    floraReady: async () => {
+      h.floraAsked++;
+      await settle();
+      h.duringReady?.();
+      h.floraReadyNow = true;
+      return null;
+    },
     fileRow: (id) => h.rows.get(id) ?? null,
     fileSize: () => ({ rows: h.rows.size, bytes: 0 }),
     worldRow: () => ({ id: 'world' }),
@@ -117,13 +146,19 @@ function harness(): Harness {
 }
 
 const was = { ...PAINT_TUNE };
+const floraWas = { ...FLORA_PAINT_TUNE };
 try {
   // A held second at three frame rates.
-  const held = async (fps: number, layer: 'family' | 'colour', erase = false, base?: GroundPaint): Promise<Harness> => {
+  const held = async (fps: number, layer: 'family' | 'colour' | 'plants', erase = false, base?: GroundPaint): Promise<Harness> => {
     const h = harness();
     if (base) for (const [k, v] of base.fam) h.ground.fam.set(k, v.slice());
     if (base) for (const [k, v] of base.col) h.ground.col.set(k, v.slice());
+    if (base) for (const [k, v] of base.flo) h.ground.flo.set(k, v.slice());
+    if (base) h.ground.boundsAgain();
     h.entries.push({ pack: 'test', name: 'grass' });
+    // The plants layer paints recipe 1 (the fourth wave), in memory ahead of the file as a recipe chosen is.
+    h.recipes = [{ trees: 'clear' }];
+    FLORA_PAINT_TUNE.recipe = 1;
     const p = new EditorPaint(h.host);
     PAINT_TUNE.layer = layer;
     PAINT_TUNE.entry = 1;
@@ -147,13 +182,128 @@ try {
     return h;
   };
   Object.assign(PAINT_TUNE, { radius: 6, hard: 0.5, strength: 1, cellAt: 0.5, rate: 15, colour: '#c08040', colourAmount: 0.8, colourRate: 2 });
-  const tilesOf = (g: GroundPaint, layer: 'fam' | 'col') => JSON.stringify([...(layer === 'fam' ? g.fam : g.col)].map(([k, v]) => [k, Array.from(v)]));
-  for (const layer of ['family', 'colour'] as const) {
+  const tilesOf = (g: GroundPaint, layer: 'fam' | 'col' | 'flo') => JSON.stringify([...(layer === 'fam' ? g.fam : layer === 'col' ? g.col : g.flo)].map(([k, v]) => [k, Array.from(v)]));
+  Object.assign(FLORA_PAINT_TUNE, { radius: 6, hard: 0.5, falloff: 'easeInOut', strength: 1, amount: 0.8, thicken: 2, rate: 15 });
+  for (const layer of ['family', 'colour', 'plants'] as const) {
     const at = [30, 60, 144].map((fps) => held(fps, layer));
     const [a, b, c] = await Promise.all(at);
-    const k = layer === 'family' ? 'fam' : 'col';
+    const k = layer === 'family' ? 'fam' : layer === 'colour' ? 'col' : 'flo';
     ok(tilesOf(a.ground, k) === tilesOf(b.ground, k) && tilesOf(b.ground, k) === tilesOf(c.ground, k) && a.ground[k].size > 0, `a held second of ${layer} paints the same cells at 30, 60 and 144 frames a second, byte for byte`);
     ok(a.writes.length === 1 && a.labels.length === 1, `and is written once as the button is let go, one undo entry (${a.labels[0]})`);
+  }
+  {
+    // The plants layer (Map-maker II's fourth wave), through the real editing class.
+    const h = await held(60, 'plants');
+    const t = h.ground.flo.get(paintTileNumber(0, 0))!;
+    let peak = 0;
+    let other = 0;
+    for (let i = 0; i < t.length; i += 2) {
+      if (t[i + 1] > peak) peak = t[i + 1];
+      if (t[i + 1] !== 0 && t[i] !== 1) other++;
+    }
+    // Its own stamps, each 1 - e^-(thicken/rate) of the way to round(0.8 · 255) = 204 at the brush's core.
+    const want = Math.round(204 * (1 - Math.exp((-2 * h.stamps) / 15)));
+    ok(Math.abs(peak - want) <= 1 && other === 0, `a flora cell under a held second tends to the recipe at its amount by the colour's law: the core at ${peak} of 255 over ${h.stamps} stamps (1 - e^-2·n/15 of 204: ${want}), every painted cell naming recipe 1`);
+    const w = h.writes[0];
+    const rec = w.findIndex((c) => c.id === 'recipes');
+    const firstFlo = w.findIndex((c) => c.id.startsWith('flo:'));
+    const row = rec >= 0 ? (w[rec].after as unknown as { entries: FloraRecipe[] }) : null;
+    ok(rec >= 0 && firstFlo > rec && w[rec].before === null && JSON.stringify(row?.entries) === JSON.stringify([{ trees: 'clear' }]), `a plants stroke whose recipe the file has not got writes the recipes row ahead of its flora tiles in its one batch (${w.map((c) => c.id).join(', ')})`);
+    // The same stroke again, the recipe now in the file: no recipes row.
+    const p = new EditorPaint(h.host);
+    p.armed = true;
+    await p.strokeAt('plants', false, -20, 10, 6, 0.5);
+    ok(h.writes.length === 2 && !h.writes[1].some((c) => c.id === 'recipes') && h.writes[1].some((c) => c.id.startsWith('flo:')), 'a stroke of a recipe the file holds writes its tiles alone');
+  }
+  {
+    // Erasing keeps each cell's recipe and lowers its amount: cells of recipe 2 erased while recipe 1 is the one chosen.
+    const base = new GroundPaint();
+    const bt = base.floraTile(0, 0, true)!;
+    for (let cz = 0; cz < 8; cz++) for (let cx = 0; cx < 12; cx++) {
+      const o = (cz * base.n + cx) * 2;
+      bt[o] = 2;
+      bt[o + 1] = 200;
+    }
+    base.boundsAgain();
+    const h = harness();
+    for (const [k, v] of base.flo) h.ground.flo.set(k, v.slice());
+    h.ground.boundsAgain();
+    h.recipes = [{ trees: 'clear' }, { grass: 'clear' }];
+    h.rows.set('recipes', { id: 'recipes', entries: h.recipes } as unknown as PaintRow);
+    FLORA_PAINT_TUNE.recipe = 1;
+    const p = new EditorPaint(h.host);
+    p.armed = true;
+    await p.strokeAt('plants', true, -20, 10, 8, 0.3);
+    const after = h.ground.flo.get(paintTileNumber(0, 0))!;
+    let lowered = 0;
+    let recipeKept = true;
+    for (let i = 0; i < after.length; i += 2) {
+      if (bt[i + 1] === 0) continue;
+      if (after[i + 1] !== 0 && after[i] !== 2) recipeKept = false;
+      if (after[i + 1] > bt[i + 1]) recipeKept = false;
+      if (after[i + 1] < bt[i + 1]) lowered++;
+    }
+    ok(lowered > 0 && recipeKept, `erasing lowers the amount of the ${lowered} cells it reaches and keeps each one's own recipe (recipe 2 under a brush whose chosen recipe is 1)`);
+  }
+  {
+    // Where two recipes meet the feather holds: a cell of another recipe is faded out by the stamp's law first and takes the
+    // chosen recipe only once it has come to nought, then grows from nought.
+    const g = new GroundPaint();
+    const t0 = g.floraTile(0, 0, true)!;
+    t0[0] = 1;
+    t0[1] = 255;
+    g.boundsAgain();
+    const s = new PaintStroke(g);
+    const a = paintStampAsk();
+    Object.assign(a, { layer: 'plants', cx: 0, cz: 0, radius: 10, hard: 1, falloff: 'linear', strength: 0.05, recipe: 2, floraAmount: 1, floraRate: 2, dt: 1 / 15, erase: false });
+    s.stamp(a, rawRect());
+    const faint = [t0[0], t0[1]];
+    a.strength = 1;
+    s.stamp(a, rawRect());
+    const one = [t0[0], t0[1]];
+    for (let i = 0; i < 400; i++) s.stamp(a, rawRect());
+    const t1 = g.floraTile(0, 0, false)!;
+    ok(faint[0] === 1 && faint[1] === 253 && one[0] === 1 && one[1] < faint[1] && one[1] > 200 && t1[0] === 2 && t1[1] === 255, `a faint stamp of recipe 2 thins a cell of recipe 1 (255 to ${faint[1]}) and never swaps it, a full one thins it further (${one[1]}), and held long it takes recipe 2 and grows to its amount (${t1[1]})`);
+  }
+  {
+    // A refused write puts the tiles back and takes the recipe it would have added out of the recipes in memory again.
+    const h = harness();
+    h.refuse = true;
+    const p = new EditorPaint(h.host);
+    p.armed = true;
+    await p.chooseRecipe({ grass: 'clear' });
+    ok(h.recipes.length === 1 && FLORA_PAINT_TUNE.recipe === 1 && PAINT_TUNE.layer === 'plants', 'a recipe chosen enters the recipes in memory, ahead of the file, and is the one painted');
+    await p.strokeAt('plants', false, -20, 10, 8, 1);
+    ok(h.ground.flo.size === 0 && h.writes.length === 0 && h.recipes.length === 0 && FLORA_PAINT_TUNE.recipe === 0, 'a refused plants stroke puts its tiles back and takes the recipe it would have written out of memory again');
+    // A recipe that paints nothing here is taken back out as it is chosen.
+    const bad: FloraRecipe = { trees: { add: { pack: 'elsewhere', name: 'x' } } };
+    h.missing.set(JSON.stringify(bad), "another world's flora");
+    const no = await p.chooseRecipe(bad);
+    ok(h.recipes.length === 0 && /another world/.test(no), `a recipe whose class cannot be painted here is refused in words and taken back out (${no})`);
+  }
+  {
+    // The plants made ready behind the curtain: a landing meanwhile that moves the list does not leave the brush on a place
+    // that names another recipe or none (asked again after the wait, as a family lent behind the curtain is).
+    const h = harness();
+    const p = new EditorPaint(h.host);
+    p.armed = true;
+    const ra: FloraRecipe = { trees: 'clear' };
+    const rb: FloraRecipe = { grass: 'clear' };
+    const rx: FloraRecipe = { far: 'clear' };
+    h.recipes = [ra];
+    h.floraReadyNow = false;
+    h.duringReady = () => {
+      h.recipes = [ra];
+    };
+    await p.chooseRecipe(rb);
+    ok(h.floraAsked === 1 && h.recipes.length === 2 && JSON.stringify(h.recipes[FLORA_PAINT_TUNE.recipe - 1]) === JSON.stringify(rb), 'a recipe dropped from the list while its plants were made ready is appended again and chosen at its place');
+    h.floraReadyNow = false;
+    const rc: FloraRecipe = { plants: 'clear' };
+    h.duringReady = () => {
+      h.recipes = [rx, ...h.recipes];
+    };
+    await p.chooseRecipe(rc);
+    ok(JSON.stringify(h.recipes[FLORA_PAINT_TUNE.recipe - 1]) === JSON.stringify(rc), `and one whose place moved while they were made ready is chosen at its new place (${FLORA_PAINT_TUNE.recipe})`);
   }
   {
     const h = await held(60, 'family');
@@ -300,6 +450,7 @@ try {
   }
 } finally {
   Object.assign(PAINT_TUNE, was);
+  Object.assign(FLORA_PAINT_TUNE, floraWas);
 }
 
 console.log(`\npaintBrush: ${checks} checks passed`);

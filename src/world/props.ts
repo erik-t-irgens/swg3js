@@ -67,7 +67,11 @@ export class PropFactory {
     this.style = styleFor(planet.props.treeStyle);
   }
 
-  buildForChunk(cx: number, cz: number, terrain: Terrain, exclude: Exclusion[] = []): { group: THREE.Group; colliders: Collider[] } {
+  /**
+   * `skip` (Map-maker II's fourth wave) leaves out a place another planter owns (a real-elevation world's flora paint): the
+   * attempts are the same, so every place it does not leave out stands exactly where it stood without it.
+   */
+  buildForChunk(cx: number, cz: number, terrain: Terrain, exclude: Exclusion[] = [], skip?: (x: number, z: number) => boolean): { group: THREE.Group; colliders: Collider[] } {
     const group = new THREE.Group();
     const colliders: Collider[] = [];
     const seed = this.planet.seed;
@@ -85,6 +89,7 @@ export class PropFactory {
       const x = ox + hash2(kx, kz, seed + 1) * CHUNK_SIZE;
       const z = oz + hash2(kx, kz, seed + 2) * CHUNK_SIZE;
       if (exclude.some((e) => Math.hypot(x - e.x, z - e.z) < e.r)) continue;
+      if (skip && skip(x, z)) continue;
       const h = terrain.heightAt(x, z);
       if (h < terrain.waterLevel + 0.6) continue;
       const ny = terrain.normalAt(x, z, tmpN).y;

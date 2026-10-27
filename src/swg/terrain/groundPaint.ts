@@ -22,11 +22,24 @@
 // group lent this one (`ShaderGroup.lend`, a fresh id, in the palette's order on every thread), which the caller's `lend`
 // hands `resolve`; the paint itself only ever holds ids, so a grid laid on either thread is the same ground.
 //
-// Pure; imports only the generator, which names this file by a type alone (no cycle at run time). Rule for this file (node
-// runs it with type stripping): every import with its `.ts` extension, no enum, no namespace, no constructor parameter
-// properties. Shipped: the release carries it (`tools/launcher/pack.mjs`'s source list), and it imports nothing else.
+// **The plants** (Map-maker II's fourth wave, DESIGN.md §2.6): a third layer of cells, each a recipe's index and an amount,
+// laid after the last layer over the generator's four flora maps (`floraInto`). A recipe says, for each of the four classes
+// (the static flora's trees and plants, the radial flora's grass and far cards), keep, clear, remove one family, add a
+// family at a density by the client's own test (the pole's coordinate hash's first float against the amount times the
+// density, the next float the choice: painting the very family a world planted gives back its own planting), or thin
+// (keep a share, by a roll of its own). The amount is laid bilinearly onto the poles from the four cells round each, a
+// recipe at a time in its index's order, so a feathered edge is the engine's own feathered amount. A pole a road's flat
+// part or a river's bed reached (the generator's `roadMap`) is never painted unless the recipe says `roads`. The same
+// arithmetic answers one point (`floraPoint`): a real-elevation world's planter, whose world has no generator, and
+// Mustafar's, whose trees are its baked map.
+//
+// Pure; imports only the generator, which names this file by a type alone (no cycle at run time), and the flora's own
+// coordinate hash and generator. Rule for this file (node runs it with type stripping): every import with its `.ts`
+// extension, no enum, no namespace, no constructor parameter properties. Shipped: the release carries it
+// (`tools/launcher/pack.mjs`'s source list), and it imports nothing but shipped files.
 
 import { childChoiceAt, childIndexOf, replaceColour, type ChunkData, type ShaderFamily, type ShaderGroup } from './generator.ts';
+import { FastRandomGenerator, hashFloat, hashTuple } from './flora.ts';
 
 /** A paint tile's width, metres, on every world: 64 m blocks eight to a side. */
 export const PAINT_TILE = 512;
@@ -42,6 +55,43 @@ export interface PaintPaletteEntry {
   pack: string;
   name: string;
   child?: number;
+}
+
+/** The four classes a flora recipe paints, in the order its tables hold them: the static flora's two maps, then the radial flora's two. */
+export const FLORA_CLASSES = ['trees', 'plants', 'grass', 'far'] as const;
+export type FloraClass = (typeof FLORA_CLASSES)[number];
+/** What a recipe does to a class: its op byte in the resolved tables. */
+export const FLORA_OPS = { keep: 0, clear: 1, remove: 2, add: 3, thin: 4 } as const;
+/** The most recipes a file holds: a flora cell names one in a byte, nought none. */
+export const FLORA_RECIPES_MOST = 255;
+
+/** A flora family by the pack whose table holds it and its name there. */
+export interface FloraFamilyName {
+  pack: string;
+  name: string;
+}
+
+/** What a recipe does to one class: keep it (the default), clear it, take one family off, add one at a density, or thin it to a share. */
+export type FloraClassSpec = 'keep' | 'clear' | { remove: FloraFamilyName } | { add: FloraFamilyName; density?: number } | { thin: number };
+
+/** A flora recipe (an entry of the paint file's `recipes` row): a spec a class, and whether it paints a road's or a river's poles too. */
+export interface FloraRecipe {
+  trees?: FloraClassSpec;
+  plants?: FloraClassSpec;
+  grass?: FloraClassSpec;
+  far?: FloraClassSpec;
+  roads?: boolean;
+}
+
+/** A flora table as the recipes resolve against it: its families by id, each with its name and its own density. */
+export interface FloraFamilies {
+  readonly families: ReadonlyMap<number, { readonly name: string; readonly density: number }>;
+}
+
+/** One point's class as the recipes leave it (`floraPoint`): its family (nought none) and its choice byte. */
+export interface FloraPointOut {
+  family: number;
+  choice: number;
 }
 
 /** A paint tile's number, a map key with nothing made (the height edits' pattern); -1 past 4095 tiles either way. */
@@ -91,6 +141,12 @@ export interface GroundPaintMessage {
   /** Tiles put (`cells`) or taken out (null), by number. */
   fam: { key: number; cells: Uint8Array | null }[];
   col: { key: number; cells: Uint8Array | null }[];
+  /** The flora tiles put or taken out, and the recipes as resolved here (Map-maker II's fourth wave); absent on a message of before. */
+  flo?: { key: number; cells: Uint8Array | null }[];
+  recOp?: Uint8Array;
+  recFam?: Int32Array;
+  recNum?: Float64Array;
+  recRoads?: Uint8Array;
   /** Every tile let go first: the message carries the whole paint. */
   reset: boolean;
 }
@@ -106,6 +162,17 @@ export class GroundPaint {
   readonly fam = new Map<number, Uint8Array>();
   /** Colour tiles: four bytes a cell, red, green, blue and how much (nought: the world's own colour). */
   readonly col = new Map<number, Uint8Array>();
+  /** Flora tiles (the fourth wave): two bytes a cell, the recipe's index (nought: none) and how much of it (0 to 255). */
+  readonly flo = new Map<number, Uint8Array>();
+  /**
+   * The recipes resolved against the world's flora tables, four a recipe (trees, plants, grass, far cards): each class's op
+   * (`FLORA_OPS`), its family's id, its number (an add's density, a thin's kept share), and whether the recipe paints a
+   * road's poles. Index 0 is nobody's: a cell of recipe nought paints nothing.
+   */
+  readonly recOp = new Uint8Array((FLORA_RECIPES_MOST + 1) * 4);
+  readonly recFam = new Int32Array((FLORA_RECIPES_MOST + 1) * 4);
+  readonly recNum = new Float64Array((FLORA_RECIPES_MOST + 1) * 4);
+  readonly recRoads = new Uint8Array(FLORA_RECIPES_MOST + 1);
   /** Each palette index's family id in this world's group (nought: nothing laid, the world's own shows). */
   readonly familyOf = new Int32Array(PAINT_PALETTE_MOST + 1);
   /** The choice byte each palette index forces, or -1 for the pole's own (`childChoiceAt`). */
@@ -131,7 +198,29 @@ export class GroundPaint {
 
   /** Whether nothing is painted. */
   get empty(): boolean {
-    return this.fam.size === 0 && this.col.size === 0;
+    return this.fam.size === 0 && this.col.size === 0 && this.flo.size === 0;
+  }
+
+  /** A flora tile put (or taken out: null), by its place. */
+  setFloraTile(tx: number, tz: number, cells: Uint8Array | null): void {
+    const key = paintTileNumber(tx, tz);
+    if (key < 0) return;
+    if (cells) this.flo.set(key, cells);
+    else this.flo.delete(key);
+    this.boundsAgain();
+  }
+
+  /** A flora tile by its place, made empty where there is none (the brush's). */
+  floraTile(tx: number, tz: number, make: boolean): Uint8Array | null {
+    const key = paintTileNumber(tx, tz);
+    if (key < 0) return null;
+    let t = this.flo.get(key);
+    if (!t && make) {
+      t = new Uint8Array(this.n * this.n * 2);
+      this.flo.set(key, t);
+      this.boundsAgain();
+    }
+    return t ?? null;
   }
 
   /** A family tile put (or taken out: null), by its place. */
@@ -186,7 +275,7 @@ export class GroundPaint {
     let x1 = -Infinity;
     let z0 = Infinity;
     let z1 = -Infinity;
-    for (const m of [this.fam, this.col]) {
+    for (const m of [this.fam, this.col, this.flo]) {
       for (const key of m.keys()) {
         const tx = Math.floor(key / 8192) - 4096;
         const tz = (key % 8192) - 4096;
@@ -526,26 +615,301 @@ export class GroundPaint {
     if (colors) this.layColoursOn(sx, sz, n, step, colors);
   }
 
+  // ---- the plants (Map-maker II's fourth wave) ----------------------------------------------------------------------
+
   /**
-   * The message another thread's paint is fed by: the cell, `follow`, the palette as resolved here, and the tiles named
-   * (every tile with `reset`), each copied.
+   * The recipes resolved against the world's flora tables (`flora` the static flora's group, the trees' and the plants';
+   * `radial` the radial group, the grass's and the far cards'): each class's op, its family by name in the table of `pack`
+   * (this world's own; on a real-elevation world the pack its ground is lent from), an add's density (the family's own
+   * where the recipe names none) and a thin's share. A class naming a family of another pack, one its table has not got or
+   * one past a byte keeps the class as it is and is answered in words.
    */
-  message(famKeys: Iterable<number> | null, colKeys: Iterable<number> | null, reset: boolean): GroundPaintMessage {
+  resolveRecipes(entries: readonly FloraRecipe[], flora: FloraFamilies | null, radial: FloraFamilies | null, pack: string): string[] {
+    const missing: string[] = [];
+    this.recOp.fill(0);
+    this.recFam.fill(0);
+    this.recNum.fill(0);
+    this.recRoads.fill(0);
+    for (let i = 0; i < entries.length && i < FLORA_RECIPES_MOST; i++) {
+      const r = entries[i];
+      const at = i + 1;
+      this.recRoads[at] = r.roads === true ? 1 : 0;
+      for (let c = 0; c < 4; c++) {
+        const spec = r[FLORA_CLASSES[c]];
+        const k = at * 4 + c;
+        if (spec === undefined || spec === 'keep') continue;
+        if (spec === 'clear') {
+          this.recOp[k] = FLORA_OPS.clear;
+          continue;
+        }
+        if ('thin' in spec) {
+          this.recOp[k] = FLORA_OPS.thin;
+          this.recNum[k] = Math.min(1, Math.max(0, spec.thin));
+          continue;
+        }
+        const named = 'add' in spec ? spec.add : spec.remove;
+        const table = c < 2 ? flora : radial;
+        const id = familyIdOf(table, named, pack);
+        if (typeof id === 'string') {
+          missing.push(`recipe ${at} ${FLORA_CLASSES[c]}: ${named.pack}:${named.name} (${id})`);
+          continue;
+        }
+        this.recFam[k] = id;
+        if ('add' in spec) {
+          this.recOp[k] = FLORA_OPS.add;
+          const own = table!.families.get(id)!.density;
+          this.recNum[k] = spec.density !== undefined && Number.isFinite(spec.density) ? Math.max(0, spec.density) : own;
+        } else this.recOp[k] = FLORA_OPS.remove;
+      }
+    }
+    return missing;
+  }
+
+  /**
+   * The recipes laid over the four flora maps of a grid the generator ran, after its last layer: each pole takes the
+   * recipes of the four cells round it, each by the amount its cells' weights come to, in its index's order; a pole a
+   * road or a river marked (`roadMap`) only by a recipe that says `roads`. Nothing where no flora tile reaches the grid.
+   */
+  floraInto(d: ChunkData): void {
+    if (this.flo.size === 0) return;
+    const n = d.numberOfPoles;
+    const step = d.distanceBetweenPoles;
+    const sx = d.startX;
+    const sz = d.startZ;
+    const span = (n - 1) * step;
+    if (!this.floTouches(Math.min(sx, sx + span), Math.min(sz, sz + span), Math.max(sx, sx + span), Math.max(sz, sz + span))) return;
+    this.cellsBelow(sx, step, n, false);
+    this.cellsBelow(sz, step, n, true);
+    const cc = this.colCell;
+    const rc = this.rowCell;
+    const cf = this.colFrac;
+    const rf = this.rowFrac;
+    const roads = d.roadMap;
+    const maps = FLORA_MAPS;
+    maps[0] = d.floraCollidable;
+    maps[1] = d.floraNonCollidable;
+    maps[2] = d.radialNear;
+    maps[3] = d.radialFar;
+    for (let z = 0; z < n; z++) {
+      const cz = rc[z];
+      const fz = rf[z];
+      const wz = sz + z * step;
+      for (let x = 0; x < n; x++) {
+        const k = this.floraBetween(cc[x], cz, cf[x], fz);
+        if (k === 0) continue;
+        const i = z * n + x;
+        const road = roads !== undefined && roads[i] !== 0;
+        const wx = sx + x * step;
+        for (let j = 0; j < k; j++) {
+          const r = FLO_R[j];
+          if (road && this.recRoads[r] === 0) continue;
+          const a = FLO_A[j];
+          for (let c = 0; c < 4; c++) {
+            const op = this.recOp[r * 4 + c];
+            if (op !== 0) this.floraClass(op, r * 4 + c, a, wx, wz, c, maps[c]!, i * 2);
+          }
+        }
+      }
+    }
+    maps[0] = maps[1] = maps[2] = maps[3] = null;
+  }
+
+  /**
+   * The recipes laid over one point's class (a real-elevation world's planter, whose world runs no generator; Mustafar's
+   * trees, which come from its baked map): `family` and `choice` (a byte) as the world has them there, and whether a road
+   * reaches it, the recipes of the four cells round the point by their amounts, by the very arithmetic a grid's poles take.
+   * Answers into `out`.
+   */
+  floraPoint(c: number, x: number, z: number, family: number, choice: number, road: boolean, out: FloraPointOut): FloraPointOut {
+    const pair = FLORA_PAIR;
+    pair[0] = family;
+    pair[1] = choice;
+    if (this.flo.size !== 0 && c >= 0 && c < 4) {
+      const cell = this.cell;
+      const fx = x / cell;
+      const fz = z / cell;
+      const cx = Math.floor(fx);
+      const cz = Math.floor(fz);
+      const k = this.floraBetween(cx, cz, fx - cx, fz - cz);
+      for (let j = 0; j < k; j++) {
+        const r = FLO_R[j];
+        if (road && this.recRoads[r] === 0) continue;
+        const op = this.recOp[r * 4 + c];
+        if (op !== 0) this.floraClass(op, r * 4 + c, FLO_A[j], x, z, c, pair, 0);
+      }
+    }
+    out.family = pair[0];
+    out.choice = pair[1];
+    return out;
+  }
+
+  /** Whether any flora cell inside a rectangle of the terrain's frame is painted (an amount above nought). */
+  floraIn(x0: number, z0: number, x1: number, z1: number): boolean {
+    if (this.flo.size === 0) return false;
+    const cell = this.cell;
+    const n = this.n;
+    for (let cz = Math.floor(Math.min(z0, z1) / cell); cz <= Math.ceil(Math.max(z0, z1) / cell); cz++) {
+      const tz = Math.floor(cz / n);
+      for (let cx = Math.floor(Math.min(x0, x1) / cell); cx <= Math.ceil(Math.max(x0, x1) / cell); cx++) {
+        const tx = Math.floor(cx / n);
+        const t = this.tileAt(this.flo, tx, tz);
+        if (!t) continue;
+        const o = ((cz - tz * n) * n + (cx - tx * n)) * 2;
+        if (t[o] !== 0 && t[o + 1] !== 0) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Whether a recipe that does anything to the trees or the plants reaches a point of the terrain's frame (a cell round it
+   * painted with one, at a weight above nought): where a real-elevation world's planter owns the ground, so the procedural
+   * props it stood before the paint are left out there and kept everywhere else (`World.chunkProps`). Allocates nothing.
+   */
+  floraOwnsStatic(x: number, z: number): boolean {
+    if (this.flo.size === 0) return false;
+    const cell = this.cell;
+    const fx = x / cell;
+    const fz = z / cell;
+    const cx = Math.floor(fx);
+    const cz = Math.floor(fz);
+    const k = this.floraBetween(cx, cz, fx - cx, fz - cz);
+    for (let j = 0; j < k; j++) {
+      const r = FLO_R[j];
+      if (this.recOp[r * 4] !== 0 || this.recOp[r * 4 + 1] !== 0) return true;
+    }
+    return false;
+  }
+
+  /** Whether a rectangle of the terrain's frame meets a painted flora tile, a cell of margin round it (the public `floTouches`). */
+  floraTouches(x0: number, z0: number, x1: number, z1: number): boolean {
+    return this.flo.size !== 0 && this.floTouches(Math.min(x0, x1), Math.min(z0, z1), Math.max(x0, x1), Math.max(z0, z1));
+  }
+
+  /** Whether any resolved recipe does anything to a class (0 trees, 1 plants, 2 grass, 3 far cards). */
+  recipesTouch(c: number): boolean {
+    for (let r = 1; r <= FLORA_RECIPES_MOST; r++) if (this.recOp[r * 4 + c] !== 0) return true;
+    return false;
+  }
+
+  /** Whether a rectangle of the terrain's frame meets a painted flora tile, a cell of margin round it. */
+  private floTouches(x0: number, z0: number, x1: number, z1: number): boolean {
+    if (!this.touches(x0, z0, x1, z1)) return false;
+    const m = this.cell;
+    for (let tz = Math.floor((z0 - m) / PAINT_TILE); tz <= Math.floor((z1 + m) / PAINT_TILE); tz++) {
+      for (let tx = Math.floor((x0 - m) / PAINT_TILE); tx <= Math.floor((x1 + m) / PAINT_TILE); tx++) if (this.tileAt(this.flo, tx, tz)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The four flora cells round a place (`cx`, `cz` the lower corner, `fx`, `fz` the share toward the next) gathered into
+   * the kept lists, a recipe at a time: each distinct recipe and the amount its cells' bilinear weights come to (each cell's
+   * amount over 255), in the recipes' index order. Answers how many.
+   */
+  private floraBetween(cx: number, cz: number, fx: number, fz: number): number {
+    const n = this.n;
+    let k = 0;
+    for (let q = 0; q < 4; q++) {
+      const w = (q & 1 ? fx : 1 - fx) * (q & 2 ? fz : 1 - fz);
+      if (!(w > 0)) continue;
+      const x = cx + (q & 1);
+      const z = cz + (q >> 1);
+      const tx = Math.floor(x / n);
+      const tz = Math.floor(z / n);
+      const t = this.tileAt(this.flo, tx, tz);
+      if (!t) continue;
+      const o = ((z - tz * n) * n + (x - tx * n)) * 2;
+      const r = t[o];
+      const a = t[o + 1];
+      if (r === 0 || a === 0) continue;
+      let j = 0;
+      while (j < k && FLO_R[j] !== r) j++;
+      if (j === k) {
+        // Kept in the recipes' order as they come (at most four).
+        let at = k++;
+        while (at > 0 && FLO_R[at - 1] > r) {
+          FLO_R[at] = FLO_R[at - 1];
+          FLO_A[at] = FLO_A[at - 1];
+          at--;
+        }
+        FLO_R[at] = r;
+        FLO_A[at] = (w * a) / 255;
+      } else FLO_A[j] += (w * a) / 255;
+    }
+    return k;
+  }
+
+  /**
+   * One class of one recipe at one pole (a map's two bytes at `o`), at `amount`: a clear and a remove where the pole's own
+   * roll falls under the amount, an add by the client's own test (`AffectorFloraStatic`, `AffectorFloraDynamic`: the
+   * coordinate hash's first float against the amount times the density, the next float the choice), a thin where the roll
+   * falls under the amount times the share it takes away. The roll is the pole's coordinate hash salted by the class, so
+   * a feathered edge clears, removes and thins by a pattern of its own beside the adds'.
+   */
+  private floraClass(op: number, k: number, amount: number, wx: number, wz: number, c: number, map: Uint8Array, o: number): void {
+    if (op === FLORA_OPS.add) {
+      const rng = FLORA_RNG;
+      rng.setSeed(hashTuple(wx, wz));
+      if (rng.randomFloat() > amount * this.recNum[k]) return;
+      map[o] = this.recFam[k];
+      map[o + 1] = Math.floor(rng.randomFloat() * 255);
+      return;
+    }
+    if (map[o] === 0) return;
+    const roll = hashFloat((hashTuple(wx, wz) ^ FLORA_SALT[c]) >>> 0);
+    if (op === FLORA_OPS.clear) {
+      if (roll >= amount) return;
+    } else if (op === FLORA_OPS.remove) {
+      if (map[o] !== this.recFam[k] || roll >= amount) return;
+    } else if (op === FLORA_OPS.thin) {
+      if (roll >= amount * (1 - this.recNum[k])) return;
+    } else return;
+    map[o] = 0;
+    map[o + 1] = 0;
+  }
+
+  /**
+   * The message another thread's paint is fed by: the cell, `follow`, the palette and the recipes as resolved here, and the
+   * tiles named (every tile with `reset`), each copied. A paint with no flora sends none of the flora's fields.
+   */
+  message(famKeys: Iterable<number> | null, colKeys: Iterable<number> | null, reset: boolean, floKeys: Iterable<number> | null = null): GroundPaintMessage {
     const fam: { key: number; cells: Uint8Array | null }[] = [];
     const col: { key: number; cells: Uint8Array | null }[] = [];
     for (const key of reset ? this.fam.keys() : (famKeys ?? [])) fam.push({ key, cells: this.fam.get(key)?.slice() ?? null });
     for (const key of reset ? this.col.keys() : (colKeys ?? [])) col.push({ key, cells: this.col.get(key)?.slice() ?? null });
-    return { cell: this.cell, follow: this.follow, familyOf: this.familyOf.slice(), choiceOf: this.choiceOf.slice(), fam, col, reset };
+    const m: GroundPaintMessage = { cell: this.cell, follow: this.follow, familyOf: this.familyOf.slice(), choiceOf: this.choiceOf.slice(), fam, col, reset };
+    const flo: { key: number; cells: Uint8Array | null }[] = [];
+    for (const key of reset ? this.flo.keys() : (floKeys ?? [])) flo.push({ key, cells: this.flo.get(key)?.slice() ?? null });
+    if (flo.length || this.flo.size || this.recipesSet()) {
+      m.flo = flo;
+      m.recOp = this.recOp.slice();
+      m.recFam = this.recFam.slice();
+      m.recNum = this.recNum.slice();
+      m.recRoads = this.recRoads.slice();
+    }
+    return m;
   }
 
-  /** A message taken (`message`'s other half): the palette and `follow` as sent, the tiles put or taken out. */
+  /** Whether any recipe is resolved to do anything. */
+  private recipesSet(): boolean {
+    for (let i = 0; i < this.recOp.length; i++) if (this.recOp[i] !== 0) return true;
+    return false;
+  }
+
+  /** A message taken (`message`'s other half): the palette, the recipes and `follow` as sent, the tiles put or taken out. */
   take(m: GroundPaintMessage): void {
     this.follow = m.follow;
     this.familyOf.set(m.familyOf);
     this.choiceOf.set(m.choiceOf);
+    if (m.recOp && m.recOp.length === this.recOp.length) this.recOp.set(m.recOp);
+    if (m.recFam && m.recFam.length === this.recFam.length) this.recFam.set(m.recFam);
+    if (m.recNum && m.recNum.length === this.recNum.length) this.recNum.set(m.recNum);
+    if (m.recRoads && m.recRoads.length === this.recRoads.length) this.recRoads.set(m.recRoads);
     if (m.reset) {
       this.fam.clear();
       this.col.clear();
+      this.flo.clear();
     }
     const n = this.n;
     for (const t of m.fam) {
@@ -556,9 +920,36 @@ export class GroundPaint {
       if (t.cells && t.cells.length === n * n * 4) this.col.set(t.key, t.cells);
       else this.col.delete(t.key);
     }
+    for (const t of m.flo ?? []) {
+      if (t.cells && t.cells.length === n * n * 2) this.flo.set(t.key, t.cells);
+      else this.flo.delete(t.key);
+    }
     this.boundsAgain();
   }
 }
+
+/**
+ * A flora family's id in a table by its pack and name, or why not: a family of another pack than the one the world plants
+ * from (another world's trees are the scatter brush's), one the table has not got, or one past the flora maps' byte.
+ */
+export function familyIdOf(table: FloraFamilies | null, named: FloraFamilyName, pack: string): number | string {
+  if (named.pack !== pack) return `another world's flora: only ${pack}'s can be painted here, and the scatter brush places other worlds' trees`;
+  if (!table) return `${pack} has no flora table here`;
+  for (const [id, f] of table.families) if (f.name === named.name) return id > 0 && id < 256 ? id : `its id ${id} does not fit the flora maps' byte`;
+  return 'no family of that name';
+}
+
+/** The four maps a grid's flora lay writes into, kept (never held past a lay). */
+const FLORA_MAPS: (Uint8Array | null)[] = [null, null, null, null];
+/** The recipes a pole's four cells name and the amount each comes to, kept. */
+const FLO_R = new Int32Array(4);
+const FLO_A = new Float64Array(4);
+/** One point's class's two bytes, kept, for `floraPoint`. */
+const FLORA_PAIR = new Uint8Array(2);
+/** The add test's generator, kept and seeded a pole. */
+const FLORA_RNG = new FastRandomGenerator(1);
+/** A salt a class, so each class's clear, remove and thin roll by a pattern of its own. */
+const FLORA_SALT = new Int32Array([0x2545f491, 0x6a09e667 | 0, 0x3c6ef372, 0x510e527f]);
 
 /** One colour sample of the paint: its bytes and its amount. */
 interface PaintSample {

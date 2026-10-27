@@ -8,7 +8,7 @@
 
 import type { DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
-import { EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, PAINT_TUNE, PAINT_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, tuneEditor, tunePaint, tuneSculpt } from './editorTune.ts';
+import { EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, FLORA_PAINT_TUNE, FLORA_PAINT_TUNE_DEFAULTS, PAINT_TUNE, PAINT_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, tuneEditor, tuneFloraPaint, tunePaint, tuneSculpt } from './editorTune.ts';
 import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
 
 /**
@@ -159,6 +159,56 @@ export function paintDialSet(): DialSet {
   return { helper: 'groundPaint', groups: g, shipped };
 }
 
+/**
+ * The paint brush's plants layer's numbers of feel (Map-maker II's fourth wave, §2.16), as `[key, label, min, max, step,
+ * unit, note]`: one list both sets read, the editor's (through `editor({ tune: { floraPaint } })`) and `floraPaint`'s own
+ * (through `floraPaint({ tune })`, in the debug menu).
+ */
+const FLORA_PAINT_DIALS: [string, string, number, number, number, string, string][] = [
+  ['radius', 'Radius', 4, 200, 0.5, 'm', 'The disc (C held with the wheel steps it).'],
+  ['radiusStep', 'A notch steps it', 1.01, 2, 0.01, '×', 'One notch of the wheel with C held multiplies the radius by this.'],
+  ['radiusMin', 'Smallest', 0.5, 50, 0.5, 'm', 'The least the radius steps to.'],
+  ['radiusMax', 'Largest', 10, 500, 5, 'm', 'The most the radius steps to.'],
+  ['hard', 'Hard core', 0, 1, 0.01, '', 'The share of the radius at full strength before the feather begins.'],
+  ['strength', 'Strength', 0, 1, 0.01, '', 'How hard a stamp bites (a share of its weight).'],
+  ['amount', 'How much', 0, 1, 0.01, '', "How much of the chosen recipe a cell tends to: the amount the generator's flora takes (a feathered edge, less)."],
+  ['thicken', 'How fast it thickens', 0.1, 30, 0.1, '/s', 'How fast a held stroke thickens toward that (or an erasing one thins): a held second goes 1 - e^-this of the way.'],
+  ['rate', 'Rate', 1, 60, 1, '/s', 'Stamps a second while a button is held (the same plants at any frame rate).'],
+  ['density', 'A new add’s density', 0, 4, 0.01, '', "The density a recipe built on the Tools tab adds its family at (0: the family's own, the world's planting given back)."],
+  ['thin', 'A new thin keeps', 0, 1, 0.01, '', 'The share of the plants a recipe built on the Tools tab thins to.'],
+];
+
+/** The plants layer's group, its dials set through `set` and read off the flora paint tune. */
+function floraPaintGroup(prefix: string, set: (k: string, v: number) => string[]): DialGroup {
+  return {
+    title: 'The plants layer',
+    note: 'U arms the paint brush; the Plants layer on the Tools tab paints the chosen recipe (LMB thickens it, RMB thins it out); its recipes are built there. A recipe already written keeps the density and share it was made with.',
+    dials: FLORA_PAINT_DIALS.map(([k, label, min, max, step, unit, note]) => ({
+      kind: 'number' as const,
+      key: `tune.${prefix}${k}`,
+      label,
+      note,
+      min,
+      max,
+      step,
+      unit,
+      get: () => (FLORA_PAINT_TUNE as unknown as Record<string, number>)[k],
+      set: (v: number) => set(k, v),
+    })),
+  };
+}
+
+/** The `floraPaint` helper's own dials (the debug menu's, when `floraPaint` is picked): the plants layer's numbers of feel. */
+export function floraPaintDialSet(): DialSet {
+  const g = [floraPaintGroup('', (k, v) => tuneFloraPaint({ [k]: v }))];
+  const shipped = readDials(g);
+  for (const [k] of shipped) {
+    const v = (FLORA_PAINT_TUNE_DEFAULTS as unknown as Record<string, unknown>)[k.slice('tune.'.length)];
+    if (typeof v === 'number') shipped.set(k, v);
+  }
+  return { helper: 'floraPaint', groups: g, shipped };
+}
+
 /** A number of `EDITOR_TUNE` by its path, as a slider. */
 function dial(path: string, label: string, min: number, max: number, step: number, unit: string, note: string): NumberDial {
   const parts = path.split('.');
@@ -255,6 +305,7 @@ function groups(): DialGroup[] {
     },
     sculptGroup('sculpt.', (k, v) => tuneEditor({ sculpt: { [k]: v } })),
     paintGroup('paint.', (k, v) => tuneEditor({ paint: { [k]: v } })),
+    floraPaintGroup('floraPaint.', (k, v) => tuneEditor({ floraPaint: { [k]: v } })),
     {
       title: 'Folding',
       note: 'Rows written while their tier stands are drawn one by one until the next arrival or Fold now (Tools).',
@@ -291,5 +342,5 @@ export function editorDialSet(): DialSet {
 
 /** The debug menu's dials for `editor`, or null for another helper. */
 export function editorDialsFor(helper: string): DialSet | null {
-  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : helper === 'groundPaint' ? paintDialSet() : null;
+  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : helper === 'groundPaint' ? paintDialSet() : helper === 'floraPaint' ? floraPaintDialSet() : null;
 }

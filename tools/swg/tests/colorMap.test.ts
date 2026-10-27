@@ -203,7 +203,8 @@ const trnBytes = encode(form('PTAT', form('0015', chunk('DATA', header), tgen, f
   const n = s.numberOfPoles;
   const reply = core.handle({ type: 'generate', id: 7, startX: st.x, startZ: st.z, n, step: s.poleStep });
   const m = reply.message as Record<string, unknown> & { id: number };
-  const keys = ['heights', 'shaders', 'children', 'colors', 'excluded', 'floraCollidable', 'floraNonCollidable', 'radialNear', 'radialFar', 'environments', 'seasonal'];
+  // Moved on purpose by Map-maker II's fourth wave: the road byte (`roads`) comes back with every grid, transferred as the rest.
+  const keys = ['heights', 'shaders', 'children', 'colors', 'excluded', 'floraCollidable', 'floraNonCollidable', 'radialNear', 'radialFar', 'environments', 'seasonal', 'roads'];
   ok(m.type === 'grid' && m.id === 7 && keys.every((k) => ArrayBuffer.isView(m[k])), 'a grid comes back with its id and every map');
   const lengths = Object.fromEntries(keys.map((k) => [k, (m[k] as ArrayLike<number>).length]));
   ok(lengths.children === n * n && lengths.colors === n * n * 3 && lengths.heights === n * n, `the child choices are a byte a pole and the colours three (${JSON.stringify(lengths)})`);

@@ -7,7 +7,10 @@
 //   - **family**: a cell takes the palette entry (or, erasing, the world's own: nought) where the weight passes `cellAt` --
 //     a cell is one family or the other, never a share of one; a feathered edge is the client's masks between corners;
 //   - **colour**: a cell's colour is faded toward the chosen one and its amount toward `colourAmount` by
-//     `q = w (1 - exp(-colourRate dt))` a stamp, so a held second lays the same at any rate; erasing fades the amount out.
+//     `q = w (1 - exp(-colourRate dt))` a stamp, so a held second lays the same at any rate; erasing fades the amount out;
+//   - **plants** (the fourth wave): a cell takes the chosen flora recipe and its amount is faded toward `floraAmount` by the
+//     same law at `floraRate` (a held stroke thickens, an erasing one thins, the same at any rate); a cell of another recipe
+//     is faded out by that law first and takes the chosen one only once it has come to nought, so the feather holds there.
 // A stroke keeps every tile it touched as it stood before it (null for one it made), so the glue writes the tiles that
 // changed once, as the stroke ends, and a refused write puts every one back.
 //
@@ -17,8 +20,8 @@
 import { paintTileNumber, paintTileOf, type GroundPaint } from '../swg/terrain/groundPaint.ts';
 import { rawRect, stampWeight, type RawRect, type SculptFalloff } from './sculpt.ts';
 
-export type PaintLayer = 'family' | 'colour';
-export const PAINT_LAYERS: readonly PaintLayer[] = ['family', 'colour'];
+export type PaintLayer = 'family' | 'colour' | 'plants';
+export const PAINT_LAYERS: readonly PaintLayer[] = ['family', 'colour', 'plants'];
 
 /** What a stamp is asked: its layer, its middle in the raw frame, its numbers, its seconds, and what it lays. */
 export interface PaintStampAsk {
@@ -39,6 +42,10 @@ export interface PaintStampAsk {
   b: number;
   colourAmount: number;
   colourRate: number;
+  /** The recipe a plants stamp lays (1..255), how much of it a cell tends to (0 to 1), and how fast (a second): the fourth wave's. */
+  recipe: number;
+  floraAmount: number;
+  floraRate: number;
   dt: number;
   /** Erasing: the world's own family, a colour faded out. */
   erase: boolean;
@@ -46,12 +53,12 @@ export interface PaintStampAsk {
 
 /** A stamp's ask, made once (fractions from the start). */
 export function paintStampAsk(): PaintStampAsk {
-  return { layer: 'family', cx: 0.5, cz: 0.5, radius: 0.5, hard: 0.5, falloff: 'easeInOut', strength: 0.5, cellAt: 0.5, entry: 1, r: 255, g: 255, b: 255, colourAmount: 0.5, colourRate: 0.5, dt: 0.5, erase: false };
+  return { layer: 'family', cx: 0.5, cz: 0.5, radius: 0.5, hard: 0.5, falloff: 'easeInOut', strength: 0.5, cellAt: 0.5, entry: 1, r: 255, g: 255, b: 255, colourAmount: 0.5, colourRate: 0.5, recipe: 1, floraAmount: 0.5, floraRate: 0.5, dt: 0.5, erase: false };
 }
 
 /** A tile the stroke touched: its layer, place and number, and its cells before the stroke and now (null: no tile). */
 export interface PaintTouched {
-  layer: 'fam' | 'col';
+  layer: 'fam' | 'col' | 'flo';
   tx: number;
   tz: number;
   key: number;
@@ -75,6 +82,8 @@ export class PaintStroke {
   /** Each touched family and colour tile's cells before the stroke, by number (null for one the stroke made). */
   readonly beforeFam = new Map<number, Uint8Array | null>();
   readonly beforeCol = new Map<number, Uint8Array | null>();
+  /** And each touched flora tile's (the fourth wave). */
+  readonly beforeFlo = new Map<number, Uint8Array | null>();
   /** The raw rectangle every stamp changed, unioned. */
   readonly rect: RawRect = rawRect();
   stamps = 0;
@@ -102,8 +111,9 @@ export class PaintStroke {
     const c0z = Math.ceil((a.cz - r) / cell);
     const c1z = Math.floor((a.cz + r) / cell);
     const colour = a.layer === 'colour';
-    const q0 = colour ? 1 - Math.exp(-Math.max(0, a.colourRate) * Math.max(0, a.dt)) : 0;
-    const target = Math.round(Math.min(1, Math.max(0, a.colourAmount)) * 255);
+    const plants = a.layer === 'plants';
+    const q0 = colour ? 1 - Math.exp(-Math.max(0, a.colourRate) * Math.max(0, a.dt)) : plants ? 1 - Math.exp(-Math.max(0, a.floraRate) * Math.max(0, a.dt)) : 0;
+    const target = Math.round(Math.min(1, Math.max(0, plants ? a.floraAmount : a.colourAmount)) * 255);
     let changed = false;
     let mx0 = Infinity;
     let mx1 = -Infinity;
@@ -120,7 +130,35 @@ export class PaintStroke {
         const tx = Math.floor(cx / n);
         const i = cx - tx * n;
         const k = j * n + i;
-        if (!colour) {
+        if (plants) {
+          // A flora cell (the fourth wave): its amount faded toward the chosen recipe's target by the same law the colour's
+          // takes, a held second the same at any rate, its recipe the chosen one; erasing fades the amount out, and a cell
+          // of nought is no cell. A cell of another recipe is faded out first by that same law and only takes the chosen
+          // recipe once its amount has come to nought (then grows from nought), so a stroke's feather holds where two
+          // recipes meet: the faint edge of a disc thins the forest beside it a little, never swaps it whole.
+          const q = w * q0;
+          if (!(q > 0)) continue;
+          const have = p.floraTile(tx, tz, false);
+          const o = k * 2;
+          const r0 = have ? have[o] : 0;
+          if (a.erase && (r0 === 0 || !have || have[o + 1] === 0)) continue;
+          const other = !a.erase && r0 !== 0 && r0 !== a.recipe && !!have && have[o + 1] !== 0;
+          const f = this.floraFloats(paintTileNumber(tx, tz), have);
+          const fa = f[k];
+          f[k] = a.erase || other ? fa * (1 - q) : fa + (target - fa) * q;
+          let na = Math.round(f[k]);
+          if (na < 0) na = 0;
+          if (na > 255) na = 255;
+          // The other recipe gone: the cell is free, and the chosen one grows from nought at the next stamp.
+          if (other && na === 0) f[k] = 0;
+          const nr = na === 0 ? 0 : a.erase || other ? r0 : a.recipe;
+          if (have && have[o] === nr && have[o + 1] === na) continue;
+          if (!have && na === 0) continue;
+          const t = this.touch('flo', tx, tz, na !== 0);
+          if (!t) continue;
+          t[o] = nr;
+          t[o + 1] = na;
+        } else if (!colour) {
           if (w < a.cellAt) continue;
           const v = a.erase ? 0 : a.entry;
           const have = p.familyTile(tx, tz, false);
@@ -176,8 +214,8 @@ export class PaintStroke {
       }
     }
     if (!changed) return out;
-    // A family cell reaches the poles round its corner a half cell either way; a colour cell, laid bilinearly, a whole one.
-    const reach = colour ? cell : cell / 2;
+    // A family cell reaches the poles round its corner a half cell either way; a colour or flora cell, laid bilinearly, a whole one.
+    const reach = colour || plants ? cell : cell / 2;
     out.x0 = mx0 - reach;
     out.x1 = mx1 + reach;
     out.z0 = mz0 - reach;
@@ -204,17 +242,31 @@ export class PaintStroke {
     return f;
   }
 
+  /** The stroke's float copies of the flora tiles' amounts it reached (one a cell), by number. */
+  private readonly floF = new Map<number, Float64Array>();
+
+  /** A flora tile's amounts as floats, made from its bytes (or noughts) the first time the stroke reaches it. */
+  private floraFloats(key: number, have: Uint8Array | null): Float64Array {
+    let f = this.floF.get(key);
+    if (!f) {
+      f = new Float64Array(this.paint.n * this.paint.n);
+      if (have) for (let i = 0; i < f.length; i++) f[i] = have[i * 2 + 1];
+      this.floF.set(key, f);
+    }
+    return f;
+  }
+
   /** A tile made ready to write into: its before kept the first time the stroke touches it; made only where `make`. */
-  private touch(layer: 'fam' | 'col', tx: number, tz: number, make: boolean): Uint8Array | null {
+  private touch(layer: 'fam' | 'col' | 'flo', tx: number, tz: number, make: boolean): Uint8Array | null {
     const key = paintTileNumber(tx, tz);
     if (key < 0) return null;
     const p = this.paint;
-    const before = layer === 'fam' ? this.beforeFam : this.beforeCol;
-    const have = layer === 'fam' ? p.familyTile(tx, tz, false) : p.colourTile(tx, tz, false);
+    const before = layer === 'fam' ? this.beforeFam : layer === 'col' ? this.beforeCol : this.beforeFlo;
+    const have = layer === 'fam' ? p.familyTile(tx, tz, false) : layer === 'col' ? p.colourTile(tx, tz, false) : p.floraTile(tx, tz, false);
     if (!before.has(key)) before.set(key, have ? have.slice() : null);
     if (have) return have;
     if (!make) return null;
-    return layer === 'fam' ? p.familyTile(tx, tz, true) : p.colourTile(tx, tz, true);
+    return layer === 'fam' ? p.familyTile(tx, tz, true) : layer === 'col' ? p.colourTile(tx, tz, true) : p.floraTile(tx, tz, true);
   }
 
   /**
@@ -224,14 +276,16 @@ export class PaintStroke {
   touched(): PaintTouched[] {
     const out: PaintTouched[] = [];
     const p = this.paint;
-    for (const [layer, map] of [['fam', this.beforeFam], ['col', this.beforeCol]] as const) {
+    for (const [layer, map] of [['fam', this.beforeFam], ['col', this.beforeCol], ['flo', this.beforeFlo]] as const) {
       for (const [key, before] of map) {
         const { tx, tz } = paintTileOf(key);
         const colour = layer === 'col';
-        let now = colour ? p.colourTile(tx, tz, false) : p.familyTile(tx, tz, false);
+        let now = layer === 'col' ? p.colourTile(tx, tz, false) : layer === 'fam' ? p.familyTile(tx, tz, false) : p.floraTile(tx, tz, false);
+        // A flora cell of no amount holds no recipe either (the stamp writes both nought), so every byte nought is empty.
         if (now && emptyCells(now, colour)) {
-          if (colour) p.setColourTile(tx, tz, null);
-          else p.setFamilyTile(tx, tz, null);
+          if (layer === 'col') p.setColourTile(tx, tz, null);
+          else if (layer === 'fam') p.setFamilyTile(tx, tz, null);
+          else p.setFloraTile(tx, tz, null);
           now = null;
         }
         out.push({ layer, tx, tz, key, before, after: now ? now.slice() : null });
@@ -249,6 +303,10 @@ export class PaintStroke {
     return [...this.beforeCol.keys()];
   }
 
+  floKeys(): number[] {
+    return [...this.beforeFlo.keys()];
+  }
+
   /** Every tile the stroke touched put back as it stood before it; answers the raw rectangle they cover. */
   putBack(): RawRect {
     const p = this.paint;
@@ -259,6 +317,10 @@ export class PaintStroke {
     for (const [key, before] of this.beforeCol) {
       const { tx, tz } = paintTileOf(key);
       p.setColourTile(tx, tz, before ? before.slice() : null);
+    }
+    for (const [key, before] of this.beforeFlo) {
+      const { tx, tz } = paintTileOf(key);
+      p.setFloraTile(tx, tz, before ? before.slice() : null);
     }
     return this.rect;
   }

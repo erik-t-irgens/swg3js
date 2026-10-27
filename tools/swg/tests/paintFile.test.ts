@@ -5,7 +5,7 @@
 //     byte, of a colour of no amount, or a tile of nothing refused in words;
 //   - the reader: the header held (version, world, frame, cell, tile), a file of 8 m cells read and laid as 8 m cells,
 //     a bad row, a second row under one id, a row past the backstop and a family cell naming an entry the palette has not
-//     got skipped and named, the flora's rows refused in the fourth wave's words, a space zone keeping none;
+//     got skipped and named, the flora's rows read (the fourth wave's, its own suite floraPaint.test.ts, and the recipes and flora tiles below), a space zone keeping none;
 //   - the palette keyed by pack and name (a name two worlds share never collides) and the alternate it forces;
 //   - the world row's every field read and refused in words, the wash among them, a field this build does not read kept
 //     beside it and written back;
@@ -13,12 +13,13 @@
 //   - the writer: sorted, one line a row, its fields in one order, read back to the same rows; the cell taken from the
 //     tiles; the batch over the paint file: a palette and a tile put in one write, a tile of nothing refused, a write that
 //     would leave a cell naming an entry past the palette refused, a space zone's refused, `was` refusing a row changed
-//     since, and the file gone with its last row.
+//     since, and the file gone with its last row; a flora tile naming a recipe past the recipes row refused (and a
+//     recipes row cut back under one), the row and the tile taken together.
 //
 // Run: node tools/swg/tests/paintFile.test.ts
 import assert from 'node:assert/strict';
 import { applyPlacementOp, type PlacementCtx } from '../../../src/world/placementEdits.ts';
-import { cellsOfTile, colourCells, colourRle, familyCells, familyRle, isPaintId, PAINT_LIMITS, paintFileText, paintOfRead, PaintRows, paintTileId, paintTileOfId, paintWithExtras, readPaintEntry, readPaintFile, readPaintRow, samePaintRow, type PaintRow, type PaintTileRow } from '../../../src/world/editFiles/paintFile.ts';
+import { cellsOfTile, colourCells, colourRle, copyRecipes, familyCells, familyRle, floraCells, floraRle, isPaintId, PAINT_LIMITS, paintFileText, paintOfRead, PaintRows, paintTileId, paintTileOfId, paintWithExtras, readFloraRecipe, readPaintEntry, readPaintFile, readPaintRow, samePaintRow, tileCells, type PaintRow, type PaintTileRow } from '../../../src/world/editFiles/paintFile.ts';
 import { PAINT_PALETTE_MOST, paintTileNumber } from '../../../src/swg/terrain/groundPaint.ts';
 
 let checks = 0;
@@ -54,11 +55,12 @@ const sum = (rle: string) => rle.split(',').reduce((s, t) => s + (t.includes('*'
 // ---------------------------------------------------------------- ids, rows
 
 {
-  ok(isPaintId('world') && isPaintId('palette') && isPaintId('fam:3,-2') && isPaintId('col:-15,0') && !isPaintId('fam:3') && !isPaintId('flo:1,1') && !isPaintId('recipes') && !isPaintId('x-1'), 'a paint row is world, palette or a tile of a layer by its place');
+  // Moved on purpose by Map-maker II's fourth wave: the flora's tiles and the recipes row are rows this build writes now.
+  ok(isPaintId('world') && isPaintId('palette') && isPaintId('recipes') && isPaintId('fam:3,-2') && isPaintId('col:-15,0') && isPaintId('flo:1,1') && !isPaintId('fam:3') && !isPaintId('x-1'), 'a paint row is world, palette, recipes or a tile of a layer by its place');
   ok(paintTileId('fam', 3, -2) === 'fam:3,-2' && JSON.stringify(paintTileOfId('col:-4,7')) === '{"layer":"col","tx":-4,"tz":7}', 'a tile row\'s id names its layer and place, and reads back');
   const flo = readPaintRow({ id: 'flo:1,1', rle: '0*16384' });
   const rec = readPaintRow({ id: 'recipes', list: [] });
-  ok(typeof flo === 'string' && /fourth wave/.test(flo) && typeof rec === 'string' && /fourth wave/.test(rec), "the flora's rows and its recipes are refused in the fourth wave's words");
+  ok(typeof flo === 'string' && /nothing is no tile/.test(flo) && typeof rec === 'string' && /entries are a list/.test(rec), "a flora tile of nothing and a recipes row with no list are refused in words (the fourth wave reads both)");
   const pal = readPaintRow({ id: 'palette', entries: [{ pack: 'tatooine', name: 'sand_dune' }, { pack: 'naboo', name: 'sand_dune', child: 2 }] });
   ok(typeof pal === 'object' && (pal as { entries: unknown[] }).entries.length === 2, 'the palette keys a family by its pack and its name: two worlds\' families of one name are two entries');
   ok(typeof readPaintRow({ id: 'palette', entries: [{ pack: 'Tatooine', name: 'x' }] }) === 'string' && typeof readPaintRow({ id: 'palette', entries: [{ pack: 'tatooine', name: 'x', child: 300 }] }) === 'string' && typeof readPaintRow({ id: 'palette', entries: [{ pack: 'tatooine', name: 'x', glow: 1 }] }) === 'string', 'an entry with a pack not a pack id, an alternate past a byte or a field it does not read is refused');
@@ -150,6 +152,53 @@ const sum = (rle: string) => rle.split(',').reduce((s, t) => s + (t.includes('*'
   ok(held.size === 3 && held.get('world') && (held.get('world') as { follow?: boolean }).follow === true && held.bytes < bytes && held.bytes > 0, `the rows held land a write's answer by id, and the bytes follow (${bytes} to ${held.bytes})`);
 }
 
+// ---------------------------------------------------------------- the flora's rows (the fourth wave)
+
+{
+  // Every class's word and shape read as itself, keep and clear among them (the first cut read both as refusals).
+  const named = { pack: W, name: 'grass' };
+  const whole = { trees: 'keep', plants: 'clear', grass: { add: named, density: 0.5 }, far: { thin: 0.25 }, roads: true };
+  const r = readFloraRecipe(whole);
+  ok(typeof r === 'object' && JSON.stringify(r) === JSON.stringify(whole), 'a recipe reads every class as written: keep, clear, an add with its density, a thin, and roads');
+  ok(JSON.stringify(readFloraRecipe({ trees: 'clear', plants: 'clear', grass: 'clear', far: 'clear' })) === '{"trees":"clear","plants":"clear","grass":"clear","far":"clear"}' && JSON.stringify(readFloraRecipe({ trees: { remove: named } })) === JSON.stringify({ trees: { remove: named } }) && JSON.stringify(readFloraRecipe({})) === '{}', 'a recipe clearing all four, one removing a family and one of nothing read as themselves');
+  const bad: [unknown, RegExp][] = [
+    [{ shrubs: 'clear' }, /shrubs/],
+    [{ trees: 'burn' }, /keep, clear/],
+    [{ trees: { thin: 1.5 } }, /thin/],
+    [{ trees: { add: named, density: -1 } }, /density/],
+    [{ trees: { add: named, density: PAINT_LIMITS.density + 1 } }, /density/],
+    [{ trees: { add: { pack: W } } }, /pack, name/],
+    [{ trees: { remove: named, density: 1 } }, /remove/],
+    [{ roads: 'yes' }, /roads/],
+    ['clear', /object/],
+  ];
+  ok(bad.every(([v, re]) => {
+    const s = readFloraRecipe(v);
+    return typeof s === 'string' && re.test(s);
+  }), `a recipe of a class this build does not read, a word not a class's, a thin past one, a density out of range, a family not named whole, a remove carrying more, a roads not true or false, or not an object is refused in words (${bad.length} cases)`);
+  // A recipes row and a flora tile, written, read back to the byte, and made into a paint.
+  const flo = new Uint8Array(16384 * 2);
+  for (let i = 200; i < 900; i++) flo.set([1 + (i % 2), 40 + (i % 200)], i * 2);
+  const rle = floraRle(flo);
+  ok(sameBytes(floraCells(rle, 16384) as Uint8Array, flo) && sameBytes(tileCells('flo', rle, 16384) as Uint8Array, flo), 'a flora tile (recipe, amount a cell) reads back byte for byte');
+  ok(typeof floraCells('0100*16384', 16384) === 'string', "a cell naming a recipe at no amount is refused (a cell of nothing is nought)");
+  const recipes = [{ trees: 'clear' as const }, { grass: { add: named } }];
+  const text = paintFileText(W, [{ id: 'recipes', entries: recipes }, { id: 'flo:0,0', rle }]);
+  const read = readPaintFile(text, W, 'ground');
+  ok(!read.problem && read.rows.length === 2 && !read.skipped.length && paintFileText(W, read.rows as unknown as Record<string, unknown>[]) === text, 'a recipes row and a flora tile read back whole and write again to the byte');
+  const loaded = paintOfRead(read);
+  ok(JSON.stringify(loaded.recipes) === JSON.stringify(recipes) && sameBytes(loaded.paint.flo.get(paintTileNumber(0, 0))!, flo), 'made into a paint: its recipes and its flora tile, byte for byte');
+  const copy = copyRecipes(loaded.recipes);
+  (copy[1].grass as { add: { name: string } }).add.name = 'other';
+  ok((loaded.recipes[1].grass as { add: { name: string } }).add.name === 'grass', 'a copy of the recipes shares nothing with them');
+  // A flora cell naming a recipe the row has not got is skipped and named, as a family cell past the palette is.
+  const past = new Uint8Array(16384 * 2);
+  past.set([3, 255], 0);
+  const r3 = readPaintFile(paintFileText(W, [{ id: 'recipes', entries: recipes }, { id: 'flo:1,0', rle: floraRle(past) }]), W, 'ground');
+  ok(r3.skipped.some((s) => s.id === 'flo:1,0' && /recipe 3/.test(s.why)) && r3.rows.length === 1, 'a flora cell naming a recipe past the recipes row is skipped and named');
+  ok(PAINT_LIMITS.recipes === 255 && PAINT_LIMITS.density === 16, 'the backstops: 255 recipes (a cell\'s byte), an add of density 16 at the most');
+}
+
 // ---------------------------------------------------------------- the batch over the paint file
 
 {
@@ -181,6 +230,23 @@ const sum = (rle: string) => rle.split(',').reduce((s, t) => s + (t.includes('*'
   ok(changedSince.status === 409 && !changedSince.writes.length, 'an undo naming a tile as it no longer stands is refused, never written over it');
   const gone = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'paint', delete: 'fam:0,0', was: asRead as unknown as PaintRow }, { file: 'paint', delete: 'palette' }] }, now, ctx());
   ok(gone.status === 200 && gone.writes.length === 1 && gone.writes[0].text === null, 'the file goes with its last row');
+
+  // The flora's (the fourth wave's): a flora tile whose cells name a recipe past the recipes row is refused as the asker's,
+  // which is the refusal a dev server still running the third wave's endpoint never makes (and why it must be restarted).
+  const two = [{ trees: 'clear' }, { grass: 'clear' }];
+  const withRecipes = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'paint', put: { id: 'recipes', entries: two } }] }, base, ctx());
+  ok(withRecipes.status === 200 && /"id": "recipes"/.test(withRecipes.writes[0]?.text ?? ''), 'a recipes row of two is written');
+  const holdsTwo = { ...base, paint: withRecipes.writes[0].text! };
+  const three = new Uint8Array(16384 * 2);
+  three.set([3, 255], 0);
+  three.set([1, 200], 2);
+  const pastRecipes = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'paint', put: { id: 'flo:1,0', rle: floraRle(three) } }] }, holdsTwo, ctx());
+  ok(pastRecipes.status === 409 && /recipe 3/.test((pastRecipes.body as { why: string }).why) && !pastRecipes.writes.length, `a flora tile naming recipe 3 into a file holding two is refused as the asker's (409, "${(pastRecipes.body as { why: string }).why}"), and nothing is written`);
+  const together = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'paint', put: { id: 'recipes', entries: [...two, { plants: 'clear' }] } }, { file: 'paint', put: { id: 'flo:1,0', rle: floraRle(three) } }] }, holdsTwo, ctx());
+  const back = together.writes[0]?.text ? readPaintFile(together.writes[0].text, W, 'ground') : null;
+  ok(together.status === 200 && !!back && paintOfRead(back).recipes.length === 3 && back.rows.some((r) => r.id === 'flo:1,0') && !back.skipped.length, 'the recipes row grown to three and that tile put in one batch are taken together, and read back whole');
+  const oneLess = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'paint', put: { id: 'recipes', entries: two } }] }, { ...base, paint: together.writes[0].text! }, ctx());
+  ok(oneLess.status === 409 && /recipe 3/.test((oneLess.body as { why: string }).why) && !oneLess.writes.length, 'and a recipes row cut back under a cell that names its last recipe is refused the same way');
 }
 
 console.log(`\npaintFile: ${checks} checks passed`);

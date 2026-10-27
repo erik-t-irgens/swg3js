@@ -43,6 +43,11 @@ export const BRUSH_TUNE = {
   keepOffWater: true,
   /** Never inside what stands (a placed object's own box). */
   keepOffStanding: true,
+  /**
+   * Never on a road's flat part or a river's bed (Map-maker II's fourth wave: the generator's own road byte, the poles a road
+   * or a river clears its plants off), which draws nothing new, so every seed paints alike off the roads.
+   */
+  keepOffRoads: true,
   /** The share of its own rows in the disc an erase stroke's stamp takes: all of them. */
   eraseShare: 1,
   /** Candidates a stamp tries for each plant it still wants before it gives the rest up (ours: enough for a light wood). */
@@ -165,8 +170,8 @@ export const PAINT_TUNE = {
   cellAt: 0.5,
   /** Stamps a second while a button is held (the same paint at any frame rate). */
   rate: 15,
-  /** The layer LMB paints and RMB erases. */
-  layer: 'family' as 'family' | 'colour',
+  /** The layer LMB paints and RMB erases (the plants', the fourth wave's, with its own numbers in `FLORA_PAINT_TUNE`). */
+  layer: 'family' as 'family' | 'colour' | 'plants',
   /** The palette entry a family stroke lays (its place in the file's palette, from 1) and the colour a colour stroke lays. */
   entry: 0,
   colour: '#a08060',
@@ -188,7 +193,7 @@ export const PAINT_TUNE_DEFAULTS: typeof PAINT_TUNE = JSON.parse(JSON.stringify(
 /** The words each of the paint tune's names takes. */
 const PAINT_WORDS: Record<string, readonly string[]> = {
   falloff: ['linear', 'easeIn', 'easeOut', 'easeInOut'],
-  layer: ['family', 'colour'],
+  layer: ['family', 'colour', 'plants'],
 };
 
 /**
@@ -224,6 +229,64 @@ export function tunePaint(partial: unknown, into?: { rewrite?: { paintMs: number
   t.entry = Math.max(0, Math.min(255, Math.round(t.entry)));
   if (into?.rewrite) into.rewrite.paintMs = Math.max(0, t.previewMs);
   if (into?.paint) into.paint.rasterWaitMs = Math.max(0, t.rasterWaitMs);
+  return said;
+}
+
+/**
+ * The paint brush's plants layer's numbers (Map-maker II's fourth wave, DESIGN.md §2.6 and §2.16's starts), live through
+ * `__debug.floraPaint({ tune })` and its numbers of feel as sliders in the debug menu's `floraPaint` dials. Every one the
+ * owner's to judge by hand; none was chosen by measuring.
+ */
+export const FLORA_PAINT_TUNE = {
+  /** The disc's radius, metres (a clearing's or a grove's across), and a notch of C with the wheel's step between these. */
+  radius: 12,
+  radiusStep: 1.15,
+  radiusMin: 4,
+  radiusMax: 200,
+  /** The share of the radius at full strength before the feather begins, and the feather: the client's own. */
+  hard: 0.5,
+  falloff: 'easeInOut' as 'linear' | 'easeIn' | 'easeOut' | 'easeInOut',
+  /** How hard a stamp bites (a share of its weight). */
+  strength: 1,
+  /** How much of the chosen recipe a cell tends to (0 to 1): the amount the generator's flora takes, all of it to start. */
+  amount: 1,
+  /** How fast a held stroke thickens toward it (or an erasing one thins), a second: most of the way in about half a second. */
+  thicken: 4,
+  /** Stamps a second while a button is held (the same paint at any frame rate). */
+  rate: 10,
+  /** The recipe a stroke lays (its place in the file's recipes, from 1). */
+  recipe: 0,
+  /** A new add's density over its family's own (0: the family's own, the world's planting given back). */
+  density: 0,
+  /** The share a new thin keeps: half. */
+  thin: 0.5,
+};
+
+/** The flora paint tune's shipped values, for a reset. */
+export const FLORA_PAINT_TUNE_DEFAULTS: typeof FLORA_PAINT_TUNE = JSON.parse(JSON.stringify(FLORA_PAINT_TUNE));
+
+/** `__debug.floraPaint({ tune })`: the plants layer's numbers moved in memory, never saved, the falloff only from its list. Answers what was said. */
+export function tuneFloraPaint(partial: unknown): string[] {
+  const said: string[] = [];
+  if (!partial || typeof partial !== 'object' || Array.isArray(partial)) return ['floraPaint({ tune }) takes an object'];
+  const numbers: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(partial as Record<string, unknown>)) {
+    if (k === 'falloff') {
+      if (typeof v === 'string' && ['linear', 'easeIn', 'easeOut', 'easeInOut'].includes(v)) FLORA_PAINT_TUNE.falloff = v as typeof FLORA_PAINT_TUNE.falloff;
+      else said.push('falloff is one of linear, easeIn, easeOut, easeInOut');
+      continue;
+    }
+    numbers[k] = v;
+  }
+  said.push(...tuneInto(FLORA_PAINT_TUNE as unknown as Record<string, unknown>, numbers));
+  const t = FLORA_PAINT_TUNE;
+  if (t.radiusMin > t.radiusMax) t.radiusMin = t.radiusMax;
+  t.radius = Math.min(t.radiusMax, Math.max(t.radiusMin, t.radius));
+  t.hard = Math.min(1, Math.max(0, t.hard));
+  t.amount = Math.min(1, Math.max(0, t.amount));
+  t.thin = Math.min(1, Math.max(0, t.thin));
+  t.density = Math.max(0, t.density);
+  t.recipe = Math.max(0, Math.min(255, Math.round(t.recipe)));
   return said;
 }
 
@@ -357,6 +420,8 @@ export const EDITOR_TUNE = {
   sculpt: SCULPT_TUNE,
   /** The paint brush's numbers (`PAINT_TUNE`, the same object; its words move through `groundPaint({ tune })`). */
   paint: PAINT_TUNE,
+  /** The plants layer's numbers (`FLORA_PAINT_TUNE`, the same object; its falloff moves through `floraPaint({ tune })`). */
+  floraPaint: FLORA_PAINT_TUNE,
   window: {
     /** How wide the window opens, pixels, docked left: the library's grid of pictures and its sources down the side. */
     width: 560,
