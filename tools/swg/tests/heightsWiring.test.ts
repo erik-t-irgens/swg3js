@@ -35,7 +35,8 @@ const workerFile = read('src/swg/terrain/worker.ts');
 
 // The four application sites.
 ok(/if \(this\.heights\) this\.layEntering\(blockX, blockZ, b\);\s*this\.blocks\.set/.test(body(trn, '  generateBlock(blockX: number, blockZ: number): PoleBlock {')), 'a block generated on the main thread takes the edits as it enters the cache');
-ok(/if \(this\.heights\) this\.layEntering\(blockX, blockZ, block\);\s*this\.blocks\.set/.test(body(trn, '  putBlock(blockX: number, blockZ: number, block: PoleBlock): void {')), 'a block the worker made takes them as it lands');
+// (Map-maker II's second wave lets a preview's kept ground go between the two, which touches no height.)
+ok(/if \(this\.heights\) this\.layEntering\(blockX, blockZ, block\);\s*(\/\/[^\n]*\n\s*)*(if \(this\.previewBase\.size\) this\.previewBase\.delete\([^\n]+\);\s*)?this\.blocks\.set/.test(body(trn, '  putBlock(blockX: number, blockZ: number, block: PoleBlock): void {')), 'a block the worker made takes them as it lands');
 ok(/this\.farMeta\.set\(out, [^\n]+\);\s*if \(this\.sampler\.heights\) this\.layFar\(out\);\s*this\.farGrids\.set\(key, out\);/.test(swg), 'a far grid takes them as it enters its cache');
 const heightAt = body(terrain, '  heightAt(x: number, z: number): number {');
 ok(/const h = this\.groundRawAt\(x, z\);\s*if \(this\.heights === null \|\| this\.swg\) return h;\s*return this\.edited\(h, x, z\);/.test(heightAt), "a world with no converted terrain takes them at the end of heightAt, a converted world's being in its blocks");
@@ -52,11 +53,12 @@ for (const sig of ['  generate(', '  baseHeightAt(']) {
 
 // The file awaited right before the ground that takes it is made.
 const load = body(world, '  async loadPack(spawn: THREE.Vector3');
-ok(/const heights = await this\.heightsReady\(\);\s*if \(token !== this\.loadToken\) return null;\s*const coming = this\.terrain;\s*this\.swgComingFor = coming;\s*const swg = await SwgTerrain\.create\(trn, layers, layout\.center\.x, layout\.center\.z, \(file\) => pack\.bytes\(file\), \{ heights \}\)\.finally\(\(\) => \{\s*if \(this\.swgComingFor === coming\) this\.swgComingFor = null;\s*\}\);/.test(load), "the heights file is awaited right before SwgTerrain.create and handed to it, so the sampler holds it before any block is cached");
+// (From Map-maker II's second wave the paint file is awaited after it and handed in beside it, the same way.)
+ok(/const heights = await this\.heightsReady\(\);\s*if \(token !== this\.loadToken\) return null;\s*(\/\/[^\n]*\n\s*)*await this\.paintReady\(\);\s*if \(token !== this\.loadToken\) return null;\s*const paint = this\.groundPaint;\s*const coming = this\.terrain;\s*this\.swgComingFor = coming;\s*const swg = await SwgTerrain\.create\(trn, layers, layout\.center\.x, layout\.center\.z, \(file\) => pack\.bytes\(file\), \{ heights, paint, paintResolve: \(group\) => this\.resolvePaint\(group\) \}\)\.finally\(\(\) => \{\s*if \(this\.swgComingFor === coming\) this\.swgComingFor = null;\s*\}\);/.test(load), "the heights file is awaited right before SwgTerrain.create and handed to it, so the sampler holds it before any block is cached");
 // A file the bound gave up on that lands while the converted ground is made (inside `SwgTerrain.create`) is kept for it and
 // handed to its sampler as it is attached: laid on the terrain the converted ground replaces, it reached nothing for the
 // whole visit and every stroke wrote into a store the sampler never read (the fix round's finding).
-ok(/this\.terrain\.attachSwg\(swg\);\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*if \(this\.heightEdits && swg\.heights !== this\.heightEdits\) this\.installHeights\(this\.heightEdits, true\);/.test(load), 'a heights file kept while the converted ground was made is handed to its sampler as it is attached');
+ok(/this\.terrain\.attachSwg\(swg\);\s*(\/\/[^\n]*\n\s*)*(swg\.onRepainted = [^\n]+\n\s*)?(\/\/[^\n]*\n\s*)*if \(this\.heightEdits && swg\.heights !== this\.heightEdits\) this\.installHeights\(this\.heightEdits, true\);/.test(load), 'a heights file kept while the converted ground was made is handed to its sampler as it is attached');
 const install = body(world, '  installHeights(store: HeightEdits | null, late = false): void {');
 ok(/if \(swg\) \{\s*swg\.useHeights\(store\);\s*this\.terrain\.heights = null;\s*\} else if \(this\.swgComingFor === this\.terrain\) \{[\s\S]{0,400}?return;\s*\} else this\.terrain\.heights = store;/.test(install), "and installHeights keeps a store for a converted ground still being made, never laying it on the terrain that ground replaces");
 const loadBody = body(world, '  load(planet: PlanetDef, packId = packIdOf(planet)): void {');

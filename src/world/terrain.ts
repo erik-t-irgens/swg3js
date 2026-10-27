@@ -8,6 +8,8 @@ import { sampleFamily, type FamilyGrid } from '../audio/footsteps.ts';
 import { groundChunkOrigin, NO_SHIFT, tileCode, tileLayers, type GroundShift, type GroundTiler } from './groundTiles.ts';
 import type { HeightEdits } from '../swg/terrain/heightEdits.ts';
 import { copyGround } from './groundRewrite.ts';
+import { childChoiceAt } from '../swg/terrain/generator.ts';
+import type { Wash } from './demWash.ts';
 
 export const CHUNK_SIZE = 64;
 /** How far under its true height a far tile's ground is drawn, so the near chunks win where they overlap; what stands on it (the far tree cards) stands that much lower too. */
@@ -71,6 +73,29 @@ export function familyChunkNumber(cx: number, cz: number): number {
 
 const tmpA = new THREE.Color();
 const tmpB = new THREE.Color();
+/** One real-elevation sample's colour bytes as the wash and the paint write them (`demColours`), kept. */
+const DEM_PIXEL = new Uint8Array(3);
+
+/**
+ * The frame the tile program's bytes are worked out in: a converted terrain's own (`SwgTerrain`), or a real-elevation
+ * world's (Map-maker II), the raw frame about (0, 0) with the client's 4 m tiles.
+ */
+export interface TileFrame {
+  readonly tileWidth: number;
+  toSwgX(gx: number): number;
+  toSwgZ(gz: number): number;
+  toGameX(x: number): number;
+  toGameZ(z: number): number;
+}
+
+/** A real-elevation world's tile frame: game x is the raw frame's mirrored about (0, 0), tiles 4 m. */
+export const DEM_FRAME: TileFrame = {
+  tileWidth: 4,
+  toSwgX: (gx) => -gx,
+  toSwgZ: (gz) => gz,
+  toGameX: (x) => -x,
+  toGameZ: (z) => z,
+};
 /** One pole's family, choice and colour, written by `SwgTerrain.groundIfCached` for every sample a chunk reads. */
 const groundPole = { family: 0, choice: 0, color: 0xffffff };
 /** A tile's four corners, SW, SE, NW, NE: their families and their choices, refilled for each tile. */
@@ -222,6 +247,35 @@ export class Terrain {
   demShader: DemShader | null = null;
   /** The borrowed pack's families by name, kept so the rules can be reworked without reloading it. */
   demFamilies: ReadonlyMap<string, number> | null = null;
+  /**
+   * The lent pack's table (Map-maker II: read for its families alone, no worker), so the feet on a real-elevation world read
+   * the lent families' surfaces and the paint resolves against its group. Null on a converted world and an untextured one.
+   */
+  demLent: SwgTerrain | null = null;
+  /** The pack `demLent` was borrowed from: the pack every palette entry and weight is resolved against on this world. */
+  demLentPack: string | null = null;
+  /**
+   * The base family the world row named as this world arrived (Map-maker II): taken only then, since the ground was
+   * borrowed for it; a base written later waits for the next arrival.
+   */
+  demBase: { pack: string; name: string } | null = null;
+  /** A real-elevation world's colour wash of ours (Map-maker II, `demWash.ts`), its samples' colour where nothing is painted; null: white. */
+  demWash: Wash | null = null;
+
+  /**
+   * Whether the ground is drawn the client's way (the tile program): a converted world with its pack's tiler, or, from
+   * Map-maker II, a real-elevation world whose ground names families (rules, or a base family in its paint file) with the
+   * lent pack's tiler. Every drawing gate asks this.
+   */
+  get tiled(): boolean {
+    return this.tiler !== null && (this.swg !== null || this.demShader !== null);
+  }
+
+  /** The frame and tile width the tile program's bytes are worked out in: the converted terrain's, else a real-elevation world's raw frame about (0, 0). */
+  private get tileFrame(): TileFrame | null {
+    if (this.swg) return this.swg;
+    return this.demShader ? DEM_FRAME : null;
+  }
 
   /** Bound once: the rules call it a few times a sample and a fresh closure each time would show. */
   private readonly heightSampler = (x: number, z: number): number => this.heightAt(x, z);
@@ -505,11 +559,12 @@ export class Terrain {
    * converted terrain, or the family names none (Mustafar's do not).
    */
   surfaceAt(x: number, z: number): string | null {
-    const swg = this.swg;
-    if (!swg) return null;
+    // A real-elevation world's families are the lent pack's (Map-maker II): its table names their surfaces.
+    const table = this.swg ?? this.demLent;
+    if (!table) return null;
     const family = this.familyAt(x, z);
     if (!family) return null;
-    return swg.template.generator.shaderGroup.families.get(family)?.surface || null;
+    return table.template.generator.shaderGroup.families.get(family)?.surface || null;
   }
 
   /** How many chunks' families are held, for the console. */
@@ -558,7 +613,7 @@ export class Terrain {
    */
   private tiledAttributes(
     geo: THREE.BufferGeometry,
-    g: { ox: number; oz: number; n: number; step: number; w: number; skirt: number; gridCount: number; skirtSource: Int32Array; positions: Float32Array; normals: Float32Array; indices: number[]; fams: Int32Array; kids: Uint8Array; cols: Uint8Array; tiler: ChunkTiler; swg: SwgTerrain },
+    g: { ox: number; oz: number; n: number; step: number; w: number; skirt: number; gridCount: number; skirtSource: Int32Array; positions: Float32Array; normals: Float32Array; indices: number[]; fams: Int32Array; kids: Uint8Array; cols: Uint8Array; tiler: ChunkTiler; swg: TileFrame },
   ): void {
     const { ox, oz, n, step, w, gridCount, skirtSource, positions, normals, indices, fams, kids, cols, tiler, swg } = g;
     const tw = swg.tileWidth;
@@ -661,6 +716,43 @@ export class Terrain {
     if (g.skirt === 0) geo.userData = { fullIndex: identity.slice(), n, ox, oz, step };
   }
 
+  /**
+   * A real-elevation world's samples' colours (Map-maker II): the wash's at each sample's height above sea level and its
+   * slope (central differences over the grid's own heights, held at its edge), white with no wash, the paint's laid over
+   * it. A pure function of the place, its height and its slope, as the chunks, the far tiles and a map made from them read it.
+   */
+  private demColours(ox: number, oz: number, step: number, w: number, hs: Float32Array, cols: Uint8Array, rules: DemShader): void {
+    const wash = this.demWash;
+    const paint = rules.paint;
+    if (!wash && (!paint || paint.col.size === 0)) return;
+    const lift = this.dem?.lift ?? 0;
+    const px = DEM_PIXEL;
+    for (let j = 0; j < w; j++) {
+      for (let i = 0; i < w; i++) {
+        const k = j * w + i;
+        const x = ox + (i - 1) * step;
+        const z = oz + (j - 1) * step;
+        px[0] = 255;
+        px[1] = 255;
+        px[2] = 255;
+        if (wash) {
+          const il = i > 0 ? i - 1 : i;
+          const ir = i < w - 1 ? i + 1 : i;
+          const jd = j > 0 ? j - 1 : j;
+          const ju = j < w - 1 ? j + 1 : j;
+          const dx = (hs[j * w + ir] - hs[j * w + il]) / ((ir - il) * step || 1);
+          const dz = (hs[ju * w + i] - hs[jd * w + i]) / ((ju - jd) * step || 1);
+          const slope = Math.atan(Math.sqrt(dx * dx + dz * dz)) * 57.29577951308232;
+          wash.colourAt(-x, z, hs[k] - lift, slope, px);
+        }
+        if (paint) paint.colourAtRaw(-x, z, px);
+        cols[k * 3] = px[0];
+        cols[k * 3 + 1] = px[1];
+        cols[k * 3 + 2] = px[2];
+      }
+    }
+  }
+
   private buildGrid(ox: number, oz: number, size: number, n: number, opts: { skirt: number; yOffset?: number; wantHeights: boolean }, samples?: FarGrid): { geometry: THREE.BufferGeometry; heights: Float32Array | null; families: Int32Array | null; colours: Uint8Array | null } {
     const step = size / n;
     const yOff = opts.yOffset ?? 0;
@@ -669,7 +761,7 @@ export class Terrain {
     // Shader family per sample when the planet has real terrain: the ground texture painted there.
     let fams: Int32Array | null = null;
     // And, for the ground drawn the client's way, each sample's choice among its family's alternates and its colour.
-    const tiler = this.swg ? this.tiler : null;
+    const tiler = this.tiled ? this.tiler : null;
     let kids: Uint8Array | null = null;
     let cols: Uint8Array | null = null;
     if (samples && samples.heights.length === w * w) {
@@ -686,7 +778,7 @@ export class Terrain {
       // either one can name a family.
       const rules = this.demShader;
       if (swg || rules) fams = new Int32Array(w * w);
-      if (swg && tiler) {
+      if ((swg || rules) && tiler) {
         kids = new Uint8Array(w * w);
         cols = new Uint8Array(w * w * 3);
       }
@@ -702,6 +794,9 @@ export class Terrain {
             // the collider were built from, fractal detail and all.
             fams[k] = rules.familyAt(x, z, this.heightSampler);
             if (cols) cols.fill(255, k * 3, k * 3 + 3);
+            // Drawn the client's way (Map-maker II): the choice any affector would give the pole at its raw place, or the
+            // alternate a painted cell forces.
+            if (kids) kids[k] = rules.paint ? rules.paint.choiceAtRaw(-x, z) : childChoiceAt(-x, z);
             continue;
           }
           if (!swg) continue;
@@ -718,6 +813,9 @@ export class Terrain {
           }
         }
       }
+      // A real-elevation world drawn the client's way (Map-maker II): each sample's colour the wash's at its height and slope
+      // (white with none), the paint's laid over it, once every height is in.
+      if (rules && cols) this.demColours(ox, oz, step, w, hs, cols, rules);
     }
 
     let physHeights: Float32Array | null = null;
@@ -812,8 +910,9 @@ export class Terrain {
     }
 
     const geo = new THREE.BufferGeometry();
-    if (fams && tiler && kids && cols && swg) {
-      this.tiledAttributes(geo, { ox, oz, n, step, w, skirt: opts.skirt, gridCount, skirtSource, positions, normals, indices, fams, kids, cols, tiler, swg });
+    const frame = this.tileFrame;
+    if (fams && tiler && kids && cols && frame) {
+      this.tiledAttributes(geo, { ox, oz, n, step, w, skirt: opts.skirt, gridCount, skirtSource, positions, normals, indices, fams, kids, cols, tiler, swg: frame });
       return { geometry: geo, heights: physHeights, families: fams, colours: cols };
     }
     if (fams) {

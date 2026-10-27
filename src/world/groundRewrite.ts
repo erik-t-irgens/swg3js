@@ -28,6 +28,19 @@ export const GROUND_REWRITE_TUNE = {
   frameMs: 2,
   /** How many times a second a held stroke's dirty chunks have their plantings made again (and once more at its end). */
   floraHz: 4,
+  /**
+   * Milliseconds a frame a paint stroke's preview may spend rewriting the chunks it reached (Map-maker II's second wave,
+   * `PAINT_TUNE.previewMs`): a chunk is 0.6 to 0.9 ms from cached blocks, so one or two a frame.
+   */
+  paintMs: 1.5,
+};
+
+/**
+ * The paint's shipped numbers (ours; live through `groundPaint({ tune })`): how long a textured real-elevation world's
+ * loading screen waits for its raster before it lifts and lets the ground be made again in view (`demGroundPending`).
+ */
+export const GROUND_PAINT_TUNE = {
+  rasterWaitMs: 20000,
 };
 
 type Typed = Float32Array | Uint8Array | Uint16Array | Uint32Array | Int8Array | Int16Array | Int32Array;

@@ -11,6 +11,8 @@
 // (the Redwall Limestone is at 1400 m, not at "870 above whatever the lowest point turned out to
 // be"), and a rule set then survives re-cutting the same place at a different extent or lift.
 import type { DemPatch } from './demTerrain';
+// A type alone (the shipped paint, which the release carries beside this file).
+import type { GroundPaint } from '../swg/terrain/groundPaint.ts';
 
 /** One band of ground. The first rule that matches a point wins, so order them narrowest first. */
 export interface GroundRule {
@@ -93,10 +95,25 @@ export class DemShader {
   }
 
   /**
-   * The family at a world point. `heightAt` is the terrain's own, so this sees exactly the ground
-   * the mesh and the collider were built from, including the fractal detail added under the raster.
+   * The ground's paint (Map-maker II, `groundPaint.ts`), asked before any rule: a painted cell keeps its paint whatever the
+   * rules say of the ground under it. In the raw frame about (0, 0), a real-elevation world's (`x` mirrored). Null asks none.
+   */
+  paint: GroundPaint | null = null;
+  /** The world row's base family (Map-maker II), what no rule claims in place of the rules' own fallback; -1 for none. */
+  baseId = -1;
+
+  /**
+   * The family at a world point: the paint's where it painted one, else the first rule that matches, else the world row's
+   * base, else the rules' own fallback. `heightAt` is the terrain's own, so this sees exactly the ground the mesh and the
+   * collider were built from, including the fractal detail added under the raster.
    */
   familyAt(x: number, z: number, heightAt: (x: number, z: number) => number): number {
+    const p = this.paint;
+    if (p !== null) {
+      const painted = p.familyAtRaw(-x, z);
+      if (painted !== 0) return painted;
+    }
+    if (!this.spec.rules.length) return this.baseId >= 0 ? this.baseId : this.fallbackId;
     const h = heightAt(x, z);
     const e = this.step;
     const hl = heightAt(x - e, z);
@@ -124,7 +141,7 @@ export class DemShader {
       if (r.belowElevation !== undefined && elevation + wobble > r.belowElevation) continue;
       return id;
     }
-    return this.fallbackId;
+    return this.baseId >= 0 ? this.baseId : this.fallbackId;
   }
 }
 

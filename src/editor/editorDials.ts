@@ -8,8 +8,8 @@
 
 import type { DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
-import { EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, tuneEditor, tuneSculpt } from './editorTune.ts';
-import { GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
+import { EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, PAINT_TUNE, PAINT_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, tuneEditor, tunePaint, tuneSculpt } from './editorTune.ts';
+import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
 
 /**
  * The sculpt brush's numbers of feel (Map-maker II §2.16), as `[key, label, min, max, step, unit, note]`: one list both
@@ -65,6 +65,98 @@ export function sculptDialSet(): DialSet {
     if (typeof v === 'number') shipped.set(k, v);
   }
   return { helper: 'sculpt', groups: g, shipped };
+}
+
+/**
+ * The paint brush's numbers of feel (Map-maker II's second wave, §2.16), as `[key, label, min, max, step, unit, note]`: one
+ * list both sets read, the editor's (through `editor({ tune: { paint } })`) and `groundPaint`'s own (through
+ * `groundPaint({ tune })`, in the debug menu).
+ */
+const PAINT_DIALS: [string, string, number, number, number, string, string][] = [
+  ['radius', 'Radius', 2, 200, 0.5, 'm', 'The disc (C held with the wheel steps it).'],
+  ['radiusStep', 'A notch steps it', 1.01, 2, 0.01, '×', 'One notch of the wheel with C held multiplies the radius by this.'],
+  ['radiusMin', 'Smallest', 0.5, 50, 0.5, 'm', 'The least the radius steps to.'],
+  ['radiusMax', 'Largest', 10, 500, 5, 'm', 'The most the radius steps to.'],
+  ['hard', 'Hard core', 0, 1, 0.01, '', 'The share of the radius at full strength before the feather begins.'],
+  ['strength', 'Strength', 0, 1, 0.01, '', 'How hard a stamp bites: a family cell takes the paint where its weight passes the line below.'],
+  ['cellAt', 'A cell takes it past', 0.01, 1, 0.01, '', 'The weight past which a family cell is painted (a cell is one family or the other).'],
+  ['rate', 'Rate', 1, 60, 1, '/s', 'Stamps a second while a button is held (the same paint at any frame rate).'],
+  ['colourAmount', 'Colour: how much', 0, 1, 0.01, '', 'How much of the chosen colour a cell tends to.'],
+  ['colourRate', 'Colour: how fast', 0.1, 20, 0.1, '/s', 'How fast a held stroke lays it: a held second lays 1 - e^-this of the way.'],
+  ['previewMs', 'Preview a frame', 0.25, 16, 0.25, 'ms', "A stroke's preview may spend this much of a frame rewriting the ground it reached."],
+];
+
+/** The paint brush's group, its dials set through `set` and read off the paint tune. */
+function paintGroup(prefix: string, set: (k: string, v: number) => string[]): DialGroup {
+  return {
+    title: 'The paint brush',
+    note: 'U arms it; LMB held paints the chosen family (or colour), RMB held erases; Shift+click and the middle button pick what is under the aim. Its layer, palette and the world row are on the Tools tab.',
+    dials: PAINT_DIALS.map(([k, label, min, max, step, unit, note]) => ({
+      kind: 'number' as const,
+      key: `tune.${prefix}${k}`,
+      label,
+      note,
+      min,
+      max,
+      step,
+      unit,
+      get: () => (PAINT_TUNE as unknown as Record<string, number>)[k],
+      set: (v: number) => set(k, v),
+    })),
+  };
+}
+
+/**
+ * The colour wash's numbers as the debug menu shows them (a real-elevation world's, when its paint file's world row names
+ * one): every number of the wash the owner's, each written into the world row through `groundPaint({ wash })`'s own setter.
+ * The paint brush hands the menu its wash and its setter here (`editorPaint.ts`); null, there is no wash to dial.
+ */
+export const WASH_DIALS: { host: { wash(): { base: number[]; bands?: { above?: number; below?: number; slopeAbove?: number; slopeBelow?: number; colour: number[]; amount: number }[]; noise?: { scale: number; amount: number } } | null; set(partial: Record<string, unknown>): string[] } | null } = { host: null };
+
+/** The wash's groups, or none where no wash is named. */
+function washGroups(): DialGroup[] {
+  const h = WASH_DIALS.host;
+  const w = h?.wash();
+  if (!h || !w) return [];
+  const num = (key: string, label: string, min: number, max: number, step: number, unit: string, note: string, get: () => number, write: (v: number) => Record<string, unknown>): NumberDial => ({ kind: 'number', key: `wash.${key}`, label, note, min, max, step, unit, get, set: (v) => h.set(write(v)) });
+  const base: DialGroup = {
+    title: 'The wash',
+    note: "A colour map of ours made from the raster (no generator paints one): its base, the slow variation over it, and the bands below. Written into the world row as you move them.",
+    dials: [
+      num('baseR', 'Base red', 0, 255, 1, '', 'The base colour, red.', () => h.wash()?.base[0] ?? 0, (v) => ({ baseR: v })),
+      num('baseG', 'Base green', 0, 255, 1, '', 'The base colour, green.', () => h.wash()?.base[1] ?? 0, (v) => ({ baseG: v })),
+      num('baseB', 'Base blue', 0, 255, 1, '', 'The base colour, blue.', () => h.wash()?.base[2] ?? 0, (v) => ({ baseB: v })),
+      num('noiseScale', 'Variation size', 1, 5000, 1, 'm', 'Metres a feature of the slow variation.', () => h.wash()?.noise?.scale ?? 200, (v) => ({ noiseScale: v })),
+      num('noiseAmount', 'Variation strength', 0, 1, 0.01, '', 'How far it moves each channel, a share of a byte either way.', () => h.wash()?.noise?.amount ?? 0, (v) => ({ noiseAmount: v })),
+    ],
+  };
+  const bands: DialGroup[] = (w.bands ?? []).map((b, i) => ({
+    title: `Wash band ${i + 1}`,
+    note: 'Laid over the base where its height (metres above sea level) and slope hold, by the client\'s replace-with-amount.',
+    dials: [
+      num(`band${i}.above`, 'From height', -500, 9000, 5, 'm', 'Heights above sea level it starts at.', () => h.wash()?.bands?.[i]?.above ?? -500, (v) => ({ [`band${i}`]: { above: v } })),
+      num(`band${i}.below`, 'To height', -500, 9000, 5, 'm', 'And stops at.', () => h.wash()?.bands?.[i]?.below ?? 9000, (v) => ({ [`band${i}`]: { below: v } })),
+      num(`band${i}.slopeAbove`, 'From slope', 0, 90, 1, '°', 'Degrees of slope it starts at.', () => h.wash()?.bands?.[i]?.slopeAbove ?? 0, (v) => ({ [`band${i}`]: { slopeAbove: v } })),
+      num(`band${i}.slopeBelow`, 'To slope', 0, 90, 1, '°', 'And stops at.', () => h.wash()?.bands?.[i]?.slopeBelow ?? 90, (v) => ({ [`band${i}`]: { slopeBelow: v } })),
+      num(`band${i}.r`, 'Red', 0, 255, 1, '', 'Its colour, red.', () => h.wash()?.bands?.[i]?.colour[0] ?? 0, (v) => ({ [`band${i}`]: { r: v } })),
+      num(`band${i}.g`, 'Green', 0, 255, 1, '', 'Its colour, green.', () => h.wash()?.bands?.[i]?.colour[1] ?? 0, (v) => ({ [`band${i}`]: { g: v } })),
+      num(`band${i}.b`, 'Blue', 0, 255, 1, '', 'Its colour, blue.', () => h.wash()?.bands?.[i]?.colour[2] ?? 0, (v) => ({ [`band${i}`]: { b: v } })),
+      num(`band${i}.amount`, 'How much', 0, 1, 0.01, '', 'How much of its colour it lays.', () => h.wash()?.bands?.[i]?.amount ?? 0, (v) => ({ [`band${i}`]: { amount: v } })),
+    ],
+  }));
+  return [base, ...bands];
+}
+
+/** The `groundPaint` helper's own dials (the debug menu's, when `groundPaint` is picked): the brush's numbers of feel, and the wash's where one is named. */
+export function paintDialSet(): DialSet {
+  const g = [paintGroup('', (k, v) => tunePaint({ [k]: v }, { rewrite: GROUND_REWRITE_TUNE, paint: GROUND_PAINT_TUNE })), ...washGroups()];
+  const shipped = readDials(g);
+  for (const [k] of shipped) {
+    if (!k.startsWith('tune.')) continue;
+    const v = (PAINT_TUNE_DEFAULTS as unknown as Record<string, unknown>)[k.slice('tune.'.length)];
+    if (typeof v === 'number') shipped.set(k, v);
+  }
+  return { helper: 'groundPaint', groups: g, shipped };
 }
 
 /** A number of `EDITOR_TUNE` by its path, as a slider. */
@@ -162,6 +254,7 @@ function groups(): DialGroup[] {
       ],
     },
     sculptGroup('sculpt.', (k, v) => tuneEditor({ sculpt: { [k]: v } })),
+    paintGroup('paint.', (k, v) => tuneEditor({ paint: { [k]: v } })),
     {
       title: 'Folding',
       note: 'Rows written while their tier stands are drawn one by one until the next arrival or Fold now (Tools).',
@@ -198,5 +291,5 @@ export function editorDialSet(): DialSet {
 
 /** The debug menu's dials for `editor`, or null for another helper. */
 export function editorDialsFor(helper: string): DialSet | null {
-  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : null;
+  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : helper === 'groundPaint' ? paintDialSet() : null;
 }

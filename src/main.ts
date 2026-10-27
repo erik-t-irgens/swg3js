@@ -416,6 +416,8 @@ import { TrackList, type TrackListModel } from './ui/trackList.ts';
 import { World, type HeightsLoaded } from './world/world';
 import { editFilePath, type EditFileKind } from './story/placementPath.ts';
 import { deltasOf, readHeightsFile, storeOfRead, tileOfId, type HeightTileRow } from './world/editFiles/heightsFile.ts';
+import { paintOfRead, readPaintFile, type PaintLoaded, type PaintRow } from './world/editFiles/paintFile.ts';
+import { GROUND_PAINT_TUNE } from './world/groundRewrite.ts';
 import { inflateBase64 } from './world/editFiles/browserCodec.ts';
 import { MODEL_REFLECTIONS_AT_LOAD, PREVIEW_REFLECTIONS, REFLECTIONS, environmentIsStandIn, isRegisteredReflective, modelReflectiveCount, plainReflectiveCount, reflectiveCount, setEnvironmentStandIn, setModelReflections, setPlainReflections, setReflectionSource, type ReflectionSource } from './world/envmap';
 import { SPEC_TUNE, setSpecTune, specReport, specSelfTest, type SpecTune } from './world/specular.ts';
@@ -1018,6 +1020,8 @@ interface EditorApi {
   library(o?: Record<string, unknown>): Promise<unknown>;
   /** The sculpt brush (Map-maker II): `__debug.sculpt`. */
   sculptDebug(o?: Record<string, unknown>): Promise<unknown>;
+  /** The paint brush (Map-maker II's second wave): `__debug.groundPaint`. */
+  paintDebug(o?: Record<string, unknown>): Promise<unknown>;
 }
 
 /**
@@ -3979,6 +3983,19 @@ class App {
         const ed = await this.loadEditor();
         return ed ? ed.sculptDebug(opts) : 'the world editor would not load';
       },
+      /**
+       * The world editor's paint brush (Map-maker II's second wave, U; the dev server's alone): the palette, the cells painted
+       * by layer, the paint's revision and the grids asked for again, the preview's blocks, the world row in force.
+       * `{ tune: { radius: 12 } }`, `{ arm: 'family' | 'colour' }` (or `false`), `{ at: [x, z] }` the family, child and colour
+       * painted and the world's own beneath at a `/loc` place, `{ stroke: { layer, entry, x, z, r, seconds } }` a stroke run
+       * exactly as held and written (one undo), `{ world: { follow, alternates, tint, masks, opposite, clouds, weights, base,
+       * wash } }` the world row written.
+       */
+      groundPaint: async (opts?: Record<string, unknown>) => {
+        if (!import.meta.env.DEV) return "the world editor is the dev server's alone";
+        const ed = await this.loadEditor();
+        return ed ? ed.paintDebug(opts) : 'the world editor would not load';
+      },
       placements: async (
         opts: {
           reload?: boolean;
@@ -5572,8 +5589,9 @@ class App {
         if (!pack) return { error: `no pack '${packId}' is installed` };
         const trn = await pack.terrain();
         if (!trn) return { error: `pack '${packId}' carries no terrain` };
-        // No building layers and no attach: this is a material table, not a world.
-        const swg = await SwgTerrain.create(trn, [], 0, 0, (file) => pack.bytes(file));
+        // No building layers and no attach: this is a material table, not a world, and it starts no worker (Map-maker II:
+        // nothing stopped the one it used to start, at every call).
+        const swg = await SwgTerrain.create(trn, [], 0, 0, (file) => pack.bytes(file), { tableOnly: true });
         // A family names its alternates by shader name and weight; the files those resolve to are
         // TerrainTextures' business, so what is useful here is the id to paint with and the names.
         const out: { id: number; name: string; alternates: string[] }[] = [];
@@ -11995,6 +12013,8 @@ class App {
     // Each world's height edits (Map-maker II, `public/placements/heights/<world>.json`), fetched as its load begins and
     // laid over the ground before it is made (`World.askHeights`).
     this.world.heightsSource = (pack, kind) => this.fetchHeights(pack, kind);
+    // And its ground paint (Map-maker II's second wave, `public/placements/paint/<world>.json`), the same way.
+    this.world.paintSource = (pack, kind) => this.fetchPaint(pack, kind);
     // Where this world brings the player in and back (the arrival, a teleport's spot, and where a death comes round
     // with no cloning facility near): the overlay's people and herds who pick a fight keep clear of it.
     this.world.arrivalPoint = () => this.spawn;
@@ -17798,6 +17818,14 @@ class App {
     // sweep below builds their programs (step 6, `World.warmPlaced`); a world whose pack is not in yet starts
     // them itself when it is.
     this.world.warmPlaced(this.player.worldPos);
+    // A textured real-elevation world's ground made from its raster behind this screen (Map-maker II's second wave), bounded:
+    // otherwise it is made again in view as the raster lands, and the session's tile material built then. An untextured one
+    // answers as soon as its paint file has been read, and every other world has nothing to wait for.
+    const dem = this.world.demGroundPending;
+    if (dem) {
+      this.loadingScreen.setWhat('the ground');
+      await Promise.race([dem, new Promise((r) => setTimeout(r, Math.max(0, Math.min(GROUND_PAINT_TUNE.rasterWaitMs, timeoutMs - (performance.now() - t0)))))]);
+    }
     // The world position: aboard a hull's rooms `player.pos` is in the hull's frame, near its origin, not where the hull is.
     while (performance.now() - t0 < timeoutMs) {
       if (this.world.settled(this.player.worldPos)) break;
@@ -24705,11 +24733,13 @@ class App {
   /**
    * What the dev server's word about a kind of edit file does on the page (`placementWord`): the two row layers read again
    * and stood by difference (`reloadDressing`), the heights read again and laid over the ground by difference
-   * (`reloadHeights`). Null for a kind no layer reads yet.
+   * (`reloadHeights`), the paint read again and laid over the paint in force by difference (`reloadPaint`). Null for a kind
+   * no layer reads yet.
    */
   private editLayerOf(kind: string | undefined): ((pack: string, rev: string | undefined) => void) | null {
     if (kind === 'story' || kind === 'world') return (pack, rev) => void this.reloadDressing(pack, kind, rev);
     if (kind === 'heights') return (pack, rev) => void this.reloadHeights(pack, rev);
+    if (kind === 'paint') return (pack, rev) => void this.reloadPaint(pack, rev);
     return null;
   }
 
@@ -27870,7 +27900,62 @@ class App {
     }
     // The heights' landing is part of what was built (an undo's ground rewritten from the tiles it put back).
     if (hf) built = Promise.all([built, heightsLanded]).then(() => undefined);
+    // The paint it wrote (Map-maker II's second wave), laid over the paint in force by difference: the editor's own stroke,
+    // painted live, moves nothing; an undo's or a redo's tiles make their grids again.
+    const pf = files.paint;
+    if (pf && this.world.generation === gen && this.editWorld() === pack) this.world.landPaint(pf.put as PaintRow[], pf.deleted);
     return { ok: true, why: '', files, ms: reply.ms ?? 0, built };
+  }
+
+  /**
+   * A world's paint file (Map-maker II's second wave, `public/placements/paint/<world>.json`): read as the heights file is (a
+   * built game asks only for one its own list ships; the dev server answers from the disk), its tiles decoded into a paint
+   * (`paintOfRead`). Null for none; a space zone and the world of copies keep none.
+   */
+  private async fetchPaint(pack: string, kind: 'ground' | 'space' | 'copies'): Promise<PaintLoaded | null> {
+    const got = await this.readPaint(pack, kind);
+    return got === 'unread' ? null : got;
+  }
+
+  /** `fetchPaint` telling "no file" (null) apart from "it could not be read" (`'unread'`), as `readHeights` does. */
+  private async readPaint(pack: string, kind: 'ground' | 'space' | 'copies'): Promise<PaintLoaded | null | 'unread'> {
+    if (kind !== 'ground') return null;
+    const path = editFilePath('paint', pack);
+    let text: string;
+    try {
+      const res = await fetchPublic(path, { cache: 'no-store' }, import.meta.env.BASE_URL);
+      if (!res || res.status === 404) return null;
+      const type = res.headers.get('content-type') ?? '';
+      if (res.ok && type.includes('text/html')) return null;
+      if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return 'unread';
+      text = await res.text();
+    } catch {
+      return 'unread';
+    }
+    try {
+      if (import.meta.env.DEV) await this.noteReadRev(`paint/${pack}`, text);
+      const read = readPaintFile(text, pack, 'ground');
+      if (read.unknown.length) console.warn(`paint: public/${path}: fields this build does not read: ${read.unknown.join(', ')}`);
+      const made = paintOfRead(read);
+      return { ...made, rows: read.rows, bytes: text.length, skipped: read.skipped, problem: read.problem, rev: this.readRevs.get(`paint/${pack}`) ?? null };
+    } catch {
+      return 'unread';
+    }
+  }
+
+  /** The paint file read again (the dev server's word) and laid over the paint in force by difference (`World.replacePaint`). */
+  private async reloadPaint(pack: string, rev: string | undefined): Promise<void> {
+    const gen = this.world.generation;
+    const loaded = await this.readPaint(pack, this.world.planet.space ? 'space' : this.world.planet.instances ? 'copies' : 'ground');
+    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (loaded === 'unread') {
+      console.warn(`paint: public/${editFilePath('paint', pack)} changed and could not be read again: the ground is left as it stood`);
+      return;
+    }
+    const read = this.readRevs.get(`paint/${pack}`);
+    if (read !== undefined) this.placementRevs.set(`paint/${pack}`, read);
+    else if (typeof rev === 'string') this.placementRevs.set(`paint/${pack}`, rev);
+    this.world.replacePaint(loaded);
   }
 
   /**

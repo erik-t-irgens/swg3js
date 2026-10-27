@@ -17,7 +17,7 @@ import type { CSM } from 'three/examples/jsm/csm/CSM.js';
 import type { AssetPack } from './assetPack';
 import { injectWetness } from './wetness.ts';
 import { GGX_ANCHOR } from './specular.ts';
-import { childIndexOf, type ShaderGroup } from '../swg/terrain/generator.ts';
+import { childIndexOf, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
 import { COLOUR_MODES, cornerOrder, GROUND_DRAW_TUNE, maskCode, tilesFit, type GroundTiler } from './groundTiles.ts';
 import { CLOUD_GREY, CLOUD_METRES, CLOUD_PERIOD, LUMA, bumpNormal, cloudShade, cloudUv, composeTile, flatShine, srgbDecode, tintGamma, type MaskSample, type TintReference } from './groundMath.ts';
 import { lighterTone } from './volumetrics/airMath.ts';
@@ -1169,7 +1169,16 @@ export function tileLookups(planet: ReadonlyMap<number, string>, families: reado
 }
 
 /** The tiler a version-4 world's chunks are built by, with what the console reads off it and what a rebuild asks of it. */
-export type LiveTiler = GroundTiler & { refresh(): void; readonly census: Float64Array };
+export type LiveTiler = GroundTiler & {
+  refresh(): void;
+  readonly census: Float64Array;
+  /**
+   * A world's own alternate weights (Map-maker II: the paint file's world row's `weights`, by family id, each family with
+   * its children's weights moved): the child a choice byte picks is worked out over them. Null, the families' own weights.
+   * The choice byte is stored and the child is the tiler's to pick, so this is a rebuild and never a program.
+   */
+  setWeights(weighted: ReadonlyMap<number, ShaderFamily> | null): void;
+};
 
 /**
  * The tiler a version-4 world's chunks are built by: a family's rank (its place in the list, the other end
@@ -1180,6 +1189,7 @@ export function makeTiler(childLayers: ReadonlyMap<number, number[]>, priority: 
   let sign = GROUND_DRAW_TUNE.order === 'last' ? -1 : 1;
   let children = GROUND_DRAW_TUNE.children && !firstOnly;
   const corners: number[] = cornerOrder(GROUND_DRAW_TUNE.childCorner);
+  let weighted: ReadonlyMap<number, ShaderFamily> | null = null;
   return {
     census: new Float64Array(5),
     get corners() {
@@ -1189,8 +1199,11 @@ export function makeTiler(childLayers: ReadonlyMap<number, number[]>, priority: 
     layer: (family, choice) => {
       const list = childLayers.get(family);
       if (!list) return 0;
-      const k = children ? childIndexOf(group.families.get(family), choice) : 0;
+      const k = children ? childIndexOf((weighted !== null ? weighted.get(family) : undefined) ?? group.families.get(family), choice) : 0;
       return list[k] ?? list[0] ?? 0;
+    },
+    setWeights(w) {
+      weighted = w && w.size ? w : null;
     },
     refresh() {
       sign = GROUND_DRAW_TUNE.order === 'last' ? -1 : 1;

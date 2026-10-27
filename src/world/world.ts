@@ -51,13 +51,16 @@ import { floraColliders } from './floraCollision.ts';
 import { eyeSpeed, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, rideLodBias, steppedBias, sweepDue } from './lodLevels.ts';
 import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.ts';
 import { GROUND_NORMAL, GROUND_TILES_WANTED, groundSelfTest, groundTileUniforms, groundTilesMaterial, setGroundClock, TerrainTextures, writeGroundDraw, type GroundSelfTest } from './terrainTextures.ts';
-import { GROUND_DRAW_TUNE, groundChunkAt, groundChunkOrigin, type CornerName, type GroundColour, type GroundShine } from './groundTiles.ts';
+import { GROUND_DRAW_TUNE, groundChunkAt, groundChunkOrigin, worldRowSwitches, type CornerName, type DrawSwitchesKept, type GroundColour, type GroundShine } from './groundTiles.ts';
 import { AssetPack, lowerLevels, type Layout, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
-import { TERRAIN_GROUND_TUNE } from '../swg/terrain/generator.ts';
+import { TERRAIN_GROUND_TUNE, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
+import { GroundPaint, PAINT_CELL, PAINT_TILE, paintTileNumber, weightedFamily, type PaintPaletteEntry } from '../swg/terrain/groundPaint.ts';
+import { PaintRows, cellsOfTile, colourCells, familyCells, paintTileOfId, type PaintLoaded, type PaintPaletteRow, type PaintRow, type PaintTileRow, type PaintWorldRow } from './editFiles/paintFile.ts';
+import { Wash } from './demWash.ts';
 import type { GroundRules } from './demShader';
 import { LayoutStreamer, nearTierRange, type Building, type CellState, type FloorUnder, type PlacedObject, type RoomAnswer, type WaterSurfaceHandle } from './layoutStream';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchMiddle, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
@@ -1760,8 +1763,12 @@ export class World {
     // `remakeGround` (below), any other ground world's once its pack has said it has none. A file later than the bound is
     // laid over the ground as a stroke is.
     this.askHeights(packId);
+    // The world's ground paint (Map-maker II, `public/placements/paint/<world>.json`), the same way: asked for now and waited
+    // on (bounded) before the ground that takes it is made.
+    this.askPaint(packId);
     const demHeights = !!planet.dem && shippedAsk(`${planet.dem.url}/base16.raw`);
     this.heightsByDem = demHeights;
+    this.demGroundPending = null;
     // A planet whose ground is real-world elevation. The raster arrives after the world is already
     // standing, so the ground is remade once it lands rather than held up waiting for it.
     // A built game asks for the raster only where its own list ships it (`shippedAsk`): two of the four rasters stayed on
@@ -1771,8 +1778,23 @@ export class World {
       const d = planet.dem;
       this.terrain.demDetail = d.detail ?? 0;
       const terrainAtLoad = this.terrain;
+      // A textured real-elevation world (its rules, or a base family its paint file names) is waited for behind the loading
+      // screen (`demGroundPending`, bounded there): otherwise its ground is remade in view as the raster lands, and on a
+      // session that never drew a converted world the session's tile material would be built then. An untextured one is
+      // known so the moment its paint file has been read, and nothing is waited for.
+      let groundDone: () => void = () => {};
+      this.demGroundPending = new Promise<void>((resolve) => (groundDone = resolve));
       void import('./demTerrain').then(async ({ loadDemPatch }) => {
         try {
+          // The paint file first (Map-maker II): its world row may name the base family the ground is drawn with, and the
+          // wash the tint varies it by, and both decide what is borrowed before the ground is made.
+          await this.paintReady();
+          if (this.terrain !== terrainAtLoad) return;
+          // The base is taken here and only here: what is borrowed follows it, and a base written while the world stands
+          // waits for the next arrival (`applyPaintWorld`), so the palette never resolves against a pack not borrowed.
+          const base = this.paintWorld.base ? { ...this.paintWorld.base } : null;
+          this.terrain.demBase = base;
+          if (!planet.ground && !base) groundDone();
           const patch = await loadDemPatch(d.url, { size: d.size, lift: d.lift, feather: d.feather ?? 0 });
           this.terrain.dem = patch;
           // The colour bands run across minH..maxH, which the planet's own `terrain` block sized for
@@ -1783,6 +1805,11 @@ export class World {
           this.terrain.maxH = patch.maxHeight + patch.lift;
           this.terrain.floor = this.terrain.minH - 30;
           if (planet.ground) await this.loadBorrowedGround(planet.ground, patch.lift);
+          // A base family its paint file names (Map-maker II): its pack borrowed as the rules' is, the base for every sample
+          // no paint names, the tile program drawing it.
+          else if (base) await this.loadBorrowedGround({ pack: base.pack, fallback: base.name, rules: [] }, patch.lift);
+          if (this.terrain !== terrainAtLoad) return;
+          this.installDemPaint();
           // The height edits laid on before the raster's ground is made again, so it is built with them (Map-maker II).
           const terrain = this.terrain;
           const store = await this.heightsReady();
@@ -1792,7 +1819,9 @@ export class World {
             this.heightsLaidAtArrival = true;
           }
           this.remakeGround();
+          groundDone();
         } catch (err) {
+          groundDone();
           console.warn(`${planet.id}: its elevation did not load, so the ground is the planet's own noise`, err);
           // The heights file still read and laid on the noise ground in its place (the same raw frame about (0, 0)), as the
           // noise ground's own path lays it: left unread, its rows were never kept and every stroke over a tile the file holds
@@ -2101,17 +2130,27 @@ export class World {
           // The world's height edits, held by the sampler from its constructor, before any block is cached (Map-maker II).
           const heights = await this.heightsReady();
           if (token !== this.loadToken) return null;
+          // And its ground paint, the same way (Map-maker II's second wave): its palette resolved against the terrain's own
+          // families as the terrain is made, before the worker is handed it with its `init`.
+          await this.paintReady();
+          if (token !== this.loadToken) return null;
+          const paint = this.groundPaint;
           const coming = this.terrain;
           this.swgComingFor = coming;
-          const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file), { heights }).finally(() => {
+          const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file), { heights, paint, paintResolve: (group) => this.resolvePaint(group) }).finally(() => {
             if (this.swgComingFor === coming) this.swgComingFor = null;
           });
           if (token !== this.loadToken) return null;
           if (heights) this.heightsLaidAtArrival = true;
+          if (paint) this.paintLaidAtArrival = true;
           this.terrain.attachSwg(swg);
+          // Grids made again for a paint, as they land: the chunks over them rewritten and replanted, the far tiles remade.
+          swg.onRepainted = (kind, x0, z0, x1, z1) => this.paintLanded(kind, x0, z0, x1, z1);
           // A file the bound gave up on that landed while the ground was being made (kept for it by `installHeights`):
           // handed to its sampler now, every cached block laid again with it and whatever ground stands rebuilt.
           if (this.heightEdits && swg.heights !== this.heightEdits) this.installHeights(this.heightEdits, true);
+          // The same for a paint that landed meanwhile (`installPaint`).
+          if (this.groundPaint && swg.paint !== this.groundPaint) this.installPaint(this.groundPaint);
           await this.waterBodies.load(pack, planet.id);
           if (token !== this.loadToken) return null;
           this.applySwgWater(swg);
@@ -2464,6 +2503,15 @@ export class World {
     this.groundDirty.clear();
     this.floraDirty.clear();
     this.floraFlush = false;
+    // Its ground paint too, and the ground's own switches its row moved put back as they stood (Map-maker II's second wave).
+    this.groundPaint = null;
+    this.paintAsk = null;
+    this.paintHeld = false;
+    this.paintWeightsTiler = null;
+    this.paintWeightsKey = '';
+    this.paintReplantLeft = 0;
+    this.demGroundPending = null;
+    this.restorePaintSwitches();
     // Every bed, emitter and weather channel let go before the things they follow are disposed: the
     // particle effects go a few lines down, and a loop left on one would follow a point in a world
     // that has gone. The sky and the effects are wired again on the next planet's first frames.
@@ -2535,6 +2583,7 @@ export class World {
     this.plantSweep.reset();
     this.groundTextures?.dispose();
     this.groundTextures = null;
+    this.groundPicturePack = null;
     // The tiler held that world's layers; the session's tile material stays, holding stand-ins until the next. (No
     // terrain yet before the first world.)
     if (this.terrain) this.terrain.tiler = null;
@@ -4396,8 +4445,12 @@ export class World {
         console.warn(`ground: pack ${spec.pack} carries no terrain, so it has no families to lend`);
         return;
       }
-      const table = await SwgTerrain.create(trn, [], 0, 0, (file) => pack.bytes(file));
+      // Read for its families alone (Map-maker II): no worker started (nothing stopped the one it used to start) and no
+      // bitmap fetched, since nothing ever asks it for a grid.
+      const table = await SwgTerrain.create(trn, [], 0, 0, (file) => pack.bytes(file), { tableOnly: true });
       if (token !== this.loadToken) return;
+      this.terrain.demLent = table;
+      this.terrain.demLentPack = spec.pack;
       const byName = new Map<string, number>();
       let families = 0;
       for (const f of table.template.generator.shaderGroup.families.values()) {
@@ -4431,16 +4484,24 @@ export class World {
       const swg = lent ?? this.terrain.swg;
       const planet = new Map<number, string>();
       if (swg) for (const f of swg.template.generator.shaderGroup.families.values()) planet.set(f.id, f.name);
-      const ground = swg ? { shaderGroup: swg.template.generator.shaderGroup, reference: swg.colorReference, tileWidth: swg.tileWidth, renderer: this.renderer } : undefined;
+      // A lent table's tint is the wash's (Map-maker II): a real-elevation world has no colour map of its own, so the lent
+      // world's measured brightness means nothing there; with no wash its samples are white and the reference is none.
+      const reference = lent ? (this.terrain.demWash?.reference ?? null) : (swg?.colorReference ?? null);
+      const ground = swg ? { shaderGroup: swg.template.generator.shaderGroup, reference, tileWidth: swg.tileWidth, renderer: this.renderer } : undefined;
       const textures = await TerrainTextures.load(pack, World.anisotropy, planet, ground);
       if (!textures) return;
       this.groundTextures?.dispose();
       this.groundTextures = textures;
+      // The pack the ground's pictures are read from, for the paint brush's palette (Map-maker II: `<img>`, no WebGL).
+      this.groundPicturePack = pack;
       // Drawn the client's way: the session's one material takes this world's textures, and the chunks, built
       // after this, carry their tiles. Otherwise the material of before, the chunks built as they always were.
-      // `swg` may be a table lent for its families alone; the tiler needs the planet's own.
-      this.terrain.tiler = textures.tiles && this.terrain.swg ? textures.tiles.tiler : null;
+      // `swg` may be a table lent for its families alone: from Map-maker II a real-elevation world keeps its tiler too, and
+      // its ground (in the raw frame about (0, 0)) is drawn by the tile program like any other.
+      this.terrain.tiler = textures.tiles && (this.terrain.swg || lent) ? textures.tiles.tiler : null;
       if (textures.tiles && this.terrain.swg) textures.bindTiles(this.terrain.swg.centerX, this.terrain.swg.centerZ);
+      else if (textures.tiles && lent) textures.bindTiles(0, 0);
+      this.applyPaintWeights(false);
       const mat = this.groundMaterial as THREE.MeshStandardMaterial;
       this.csmMaterials.add(mat);
       // A chunk made before now carries no tiles and is made again before the world is shown (`load`), so only
@@ -4466,7 +4527,7 @@ export class World {
    */
   churnMaterial(): THREE.Material | null {
     if (this.planet?.space) return null;
-    if (this.groundTilesMat && this.groundTextures?.tiles && this.terrain.swg) return this.groundTilesMat;
+    if (this.groundTilesMat && this.groundTextures?.tiles && this.terrain.tiled) return this.groundTilesMat;
     return this.chunkMaterial;
   }
 
@@ -4480,8 +4541,9 @@ export class World {
     // threw away everything a DEM planet had done: ids painted correctly into the geometry, the
     // texture array loaded, and then the plain material handed back regardless.
     if (!this.groundTextures || !(this.terrain.swg || this.terrain.demShader)) return this.terrainMat;
-    // The client's own tiled ground needs the tiler, which needs real SWG terrain under it.
-    if (this.groundTextures.tiles && this.terrain.swg) {
+    // The client's own tiled ground needs the tiler: a converted world's, or (Map-maker II) a real-elevation world's lent
+    // pack's, whose ground names families (`Terrain.tiled`).
+    if (this.groundTextures.tiles && this.terrain.tiled) {
       const plain = (this.groundTilesMat ??= groundTilesMaterial(groundTileUniforms(), this.csm));
       // The volumetrics' chooser (the second wave): the air variant while the master, the field and a ground switch say
       // so; with the master off, always the plain one, today's material with today's key.
@@ -11586,7 +11648,8 @@ export class World {
   private stepGroundRewrite(eye: THREE.Vector3): void {
     if (!this.groundDirty.size && !this.floraDirty.size) return;
     const t0 = performance.now();
-    const budget = GROUND_REWRITE_TUNE.frameMs;
+    // A paint stroke's preview spends its own share (Map-maker II's second wave); everything else the sculpt's.
+    const budget = this.paintHeld ? GROUND_REWRITE_TUNE.paintMs : GROUND_REWRITE_TUNE.frameMs;
     const fx = Number.isFinite(this.rewriteFocus.x) ? this.rewriteFocus.x : eye.x;
     const fz = Number.isFinite(this.rewriteFocus.z) ? this.rewriteFocus.z : eye.z;
     let first = true;
@@ -11687,6 +11750,550 @@ export class World {
     if (n.moved) this.heightsChanged(rect.x0, rect.z0, rect.x1, rect.z1, true);
     return n.moved;
   }
+
+  // ---- Map-maker II: the ground's paint ----------------------------------------------------------------------------------
+
+  /**
+   * Where a world's paint file comes from: the page hands its fetch in (`App.fetchPaint`), which reads
+   * `public/placements/paint/<world>.json` into a paint. Null asks for none, and the ground is the client's to the bit.
+   */
+  paintSource: ((pack: string, kind: 'ground' | 'space' | 'copies') => Promise<PaintLoaded | null>) | null = null;
+  /** The ask this arrival made, its world's generation beside it, and whether it has been installed. */
+  private paintAsk: { gen: number; done: Promise<PaintLoaded | null>; installed: boolean; late: boolean } | null = null;
+  /** The world's ground paint in force, the very object the generator lays (the sampler's, a real-elevation world's rules'), or null. */
+  groundPaint: GroundPaint | null = null;
+  /** The palette's entries and the world row as the file holds them now. */
+  paintEntries: PaintPaletteEntry[] = [];
+  paintWorld: PaintWorldRow = { id: 'world' };
+  /** The paint file's rows by id as it holds them now (the editor's `was`), with about its bytes. */
+  readonly paintRows = new PaintRows();
+  /** What the last file read said, for the console. */
+  paintFileInfo: { rows: number; bytes: number; cell: number; skipped: { id: string; why: string }[]; problem: string | null; rev: string | null } = { rows: 0, bytes: 0, cell: PAINT_CELL, skipped: [], problem: null, rev: null };
+  /** Whether this world's paint was in place before its ground was first built (`groundPaint().laidAtArrival`). */
+  paintLaidAtArrival = false;
+  /** The palette's entries this world could not resolve, in words (another world's family is Map-maker II's third wave's). */
+  paintMissing: string[] = [];
+  /**
+   * Whether a stroke under way holds a tile (the editor's hand-over: `EditorPaint.holds`), or null with no editor: a write's
+   * answer or a file read again never lays a tile over the cells a stroke is painting.
+   */
+  paintHeldTile: ((key: number, layer: 'fam' | 'col') => boolean) | null = null;
+  /** A paint stroke's preview under way: the rewrite spends the paint's budget (`GROUND_REWRITE_TUNE.paintMs`). */
+  paintHeld = false;
+  /**
+   * A textured real-elevation world's ground being made from its raster (Map-maker II): the loading screen waits for it,
+   * bounded (`GROUND_PAINT_TUNE.rasterWaitMs`). Answered at once by an untextured one, null on every other world.
+   */
+  demGroundPending: Promise<void> | null = null;
+  /** Each ground switch this world's row moved, as it stood before the row moved it, put back when the world goes (`worldRowSwitches`). */
+  private readonly paintSwitchesKept: DrawSwitchesKept = {};
+  /** The world row's alternate weights by family id (the tiler's and the forced alternates' one rule). */
+  private paintWeighted: Map<number, ShaderFamily> | null = null;
+  /** What the paint's landing did, for the console: blocks and far grids made again and landed, chunks it dirtied. */
+  readonly paintLandWork = { blocks: 0, far: 0, chunks: 0, previews: 0 };
+  /** The pack the ground's pictures come from (this world's own, or a real-elevation world's lent pack). */
+  private groundPicturePack: AssetPack | null = null;
+
+  /**
+   * Each family's alternates' pictures by the family's name (lower case), as addresses the page can show as `<img>`: the
+   * paint brush's palette, which draws no WebGL. Empty before the ground's pictures are in.
+   */
+  paintPictures(): Map<string, (string | null)[]> {
+    const out = new Map<string, (string | null)[]>();
+    const pack = this.groundPicturePack;
+    const t = this.groundTextures;
+    if (!pack || !t) return out;
+    for (const f of t.families) {
+      const kids = f.children?.length ? f.children.map((c) => (c.file ? pack.url(c.file) : null)) : [f.file ? pack.url(f.file) : null];
+      out.set(f.name.toLowerCase(), kids);
+    }
+    return out;
+  }
+
+  /** The ask for this world's paint file, begun as its load begins (`load`). */
+  private askPaint(packId: string): void {
+    this.groundPaint = null;
+    this.paintEntries = [];
+    this.paintWorld = { id: 'world' };
+    this.paintRows.takeAll([]);
+    this.paintLaidAtArrival = false;
+    this.paintMissing = [];
+    this.paintWeighted = null;
+    this.paintHeld = false;
+    this.paintFileInfo = { rows: 0, bytes: 0, cell: PAINT_CELL, skipped: [], problem: null, rev: null };
+    const src = this.paintSource;
+    const planet = this.planet;
+    if (!src || this.sceneOnly) {
+      this.paintAsk = null;
+      return;
+    }
+    const kind = planet.instances ? 'copies' : planet.space ? 'space' : 'ground';
+    const ask = { gen: this.generation, done: src(packId, kind).catch(() => null), installed: false, late: false };
+    this.paintAsk = ask;
+    // A file later than the bound (`paintReady` gave up on it): installed when it lands, every grid it reaches made again.
+    void ask.done.then((loaded) => {
+      if (this.paintAsk !== ask || ask.installed || !ask.late || this.generation !== ask.gen) return;
+      ask.installed = true;
+      this.takePaintFile(loaded);
+      if (loaded && !loaded.paint.empty) this.installPaint(loaded.paint);
+    });
+  }
+
+  /**
+   * This world's paint file, waited on for at most `DRESSING_TUNE.floraWaitMs`: taken (its palette, its world row and its
+   * switches applied), or nothing for none or one still on its way, which is then installed late. Marks the ask installed.
+   */
+  private async paintReady(): Promise<PaintLoaded | null> {
+    const ask = this.paintAsk;
+    if (!ask || ask.installed) return null;
+    const loaded = await Promise.race([ask.done, new Promise<'late'>((r) => setTimeout(() => r('late'), DRESSING_TUNE.floraWaitMs))]);
+    if (loaded === 'late') {
+      ask.late = true;
+      return null;
+    }
+    if (this.paintAsk !== ask || ask.installed || this.generation !== ask.gen) return null;
+    ask.installed = true;
+    this.takePaintFile(loaded);
+    if (!loaded || loaded.paint.empty) return loaded;
+    this.groundPaint = loaded.paint;
+    return loaded;
+  }
+
+  /** A file read taken: its rows, its palette and its world row (the switches applied), what it said kept for the console. */
+  private takePaintFile(loaded: PaintLoaded | null): void {
+    this.paintRows.takeAll(loaded?.rows ?? []);
+    this.paintEntries = loaded ? loaded.entries.map((e) => ({ ...e })) : [];
+    this.paintFileInfo = loaded ? { rows: loaded.rows.length, bytes: loaded.bytes, cell: loaded.paint.cell, skipped: loaded.skipped, problem: loaded.problem, rev: loaded.rev } : { rows: 0, bytes: 0, cell: PAINT_CELL, skipped: [], problem: null, rev: null };
+    if (loaded?.problem) console.warn(`paint: this world's paint file is not read: ${loaded.problem}`);
+    for (const s of loaded?.skipped ?? []) console.warn(`paint: row ${s.id} is skipped: ${s.why}`);
+    this.applyPaintWorld(loaded?.world ?? { id: 'world' }, false);
+  }
+
+  /**
+   * The pack the palette's families are this world's in: a converted world's own, a real-elevation world's lent pack -- the
+   * one really borrowed (`demLentPack`), else the one its rules or its arrival's base will borrow. Never the world row's
+   * base as it stands now: a base written while the world stands is taken at the next arrival, and resolved against it
+   * meanwhile every entry of the borrowed pack would read as another world's and lay nothing.
+   */
+  paintPack(): string {
+    if (this.terrain?.swg || !this.planet?.dem) return this.packId;
+    return this.terrain?.demLentPack ?? this.planet.ground?.pack ?? this.terrain?.demBase?.pack ?? this.packId;
+  }
+
+  /** The family group the palette resolves against: the converted terrain's, a real-elevation world's lent table's, or null. */
+  paintGroup(): ShaderGroup | null {
+    return (this.terrain?.swg ?? this.terrain?.demLent)?.template.generator.shaderGroup ?? null;
+  }
+
+  /**
+   * The palette resolved against a family group (the terrain's own as it is made, `SwgTerrain.create`'s `paintResolve`;
+   * a lent table's): each entry's family id and the alternate it forces, worked out over the world row's weights, which are
+   * kept by family id for the tiler. An entry of another pack lays nothing (the third wave's) and is said once.
+   */
+  resolvePaint(group: ShaderGroup): void {
+    const pack = this.paintPack();
+    const byId = new Map<number, number[]>();
+    const weighted = new Map<number, ShaderFamily>();
+    for (const [k, w] of Object.entries(this.paintWorld.weights ?? {})) {
+      const colon = k.indexOf(':');
+      if (k.slice(0, colon) !== pack) continue;
+      const f = group.byName(k.slice(colon + 1));
+      if (!f) continue;
+      byId.set(f.id, w);
+      const wf = weightedFamily(f, w);
+      if (wf) weighted.set(f.id, wf);
+    }
+    this.paintWeighted = weighted;
+    const p = this.groundPaint;
+    if (!p) return;
+    const missing = p.resolve(this.paintEntries, group, pack, byId);
+    if (missing.join() !== this.paintMissing.join() && missing.length) console.warn(`paint: ${missing.length} palette entr${missing.length === 1 ? 'y' : 'ies'} lay nothing here: ${missing.join('; ')}`);
+    this.paintMissing = missing;
+  }
+
+  /**
+   * The world row's alternate weights handed to the tiler, and the ground built again where `rebuild` says so and they
+   * really moved since the tiler was last handed them (a paint put in with the same weights -- the brush's first stamp,
+   * the empty paint it makes -- rebuilds nothing: measured in the smoke, rebuilding there replanted every chunk standing).
+   */
+  applyPaintWeights(rebuild: boolean): void {
+    const tiler = this.terrain?.tiler as { setWeights?: (w: ReadonlyMap<number, ShaderFamily> | null) => void } | null;
+    if (!tiler?.setWeights) return;
+    const g = this.paintGroup();
+    if (g && !this.groundPaint) this.resolvePaint(g);
+    const key = weightsKey(this.paintWeighted);
+    const moved = tiler !== this.paintWeightsTiler || key !== this.paintWeightsKey;
+    this.paintWeightsTiler = tiler;
+    this.paintWeightsKey = key;
+    tiler.setWeights(this.paintWeighted);
+    if (rebuild && moved && this.chunks.size) this.rebuildGround();
+  }
+  /** The tiler last handed the weights, and what they were (`weightsKey`): a hand-over of the same moves nothing. */
+  private paintWeightsTiler: object | null = null;
+  private paintWeightsKey = '';
+
+  /**
+   * A paint put in as this world's (a file landed late, or made by the editor): handed to the converted ground's sampler and
+   * worker, every grid it reaches made again (none for a paint of nothing), or to a real-elevation world's rules, its ground
+   * built again; kept for the converted ground still being made, which takes it as it is attached.
+   */
+  installPaint(paint: GroundPaint): void {
+    this.groundPaint = paint;
+    const swg = this.terrain.swg;
+    if (swg) {
+      this.resolvePaint(swg.template.generator.shaderGroup);
+      swg.useGroundPaint(paint, !paint.empty);
+      this.applyPaintWeights(true);
+      return;
+    }
+    if (this.swgComingFor === this.terrain) return;
+    if (this.terrain.demShader) {
+      this.installDemPaint();
+      if (this.chunks.size && !paint.empty) this.rebuildGround();
+    }
+  }
+
+  /**
+   * A real-elevation world's rules handed the paint and the world row's base (the lent pack's family of that name), its
+   * palette resolved against the lent table and its tint bound to the wash's base. Called once the lent ground is borrowed.
+   */
+  private installDemPaint(): void {
+    const t = this.terrain;
+    const shader = t.demShader;
+    if (!shader) return;
+    const group = t.demLent?.template.generator.shaderGroup;
+    // The arrival's base, against the pack really borrowed: a base of another pack (a ruled world whose base names a pack
+    // its rules do not borrow) is the third wave's lending and lays nothing yet.
+    const base = t.demBase;
+    shader.baseId = base && group && base.pack === t.demLentPack ? (group.byName(base.name)?.id ?? -1) : -1;
+    shader.paint = this.groundPaint;
+    if (group) this.resolvePaint(group);
+    this.bindDemTint();
+    this.applyPaintWeights(false);
+  }
+
+  /** A real-elevation world's tint bound to its wash's base (no wash: none, a tint of one), a uniform written and no program. */
+  private bindDemTint(): void {
+    const tiles = this.groundTextures?.tiles;
+    if (!tiles || this.terrain.swg || !this.terrain.demShader) return;
+    tiles.reference = this.terrain.demWash?.reference ?? null;
+    this.groundTextures!.bindTiles(0, 0);
+  }
+
+  /**
+   * The world's paint, made empty and installed where it has none (the paint brush's first stamp): a paint of nothing makes
+   * no grid again and moves nothing.
+   */
+  ensurePaint(): GroundPaint {
+    if (this.groundPaint) return this.groundPaint;
+    const p = new GroundPaint(this.paintFileInfo.cell || PAINT_CELL);
+    p.follow = this.paintWorld.follow !== false;
+    this.installPaint(p);
+    return p;
+  }
+
+  /**
+   * The world row taken (an arrival's, before the ground is made; a landed write's or a file read again's, `live`): the
+   * ground's own switches it names written over the ones that stood before (each read only where the row sets it, so the
+   * code's defaults answer otherwise, and put back when the world goes), `follow`, the wash; live, whatever moved built
+   * again: the alternates' switch or the weights the ground, `follow` or forced alternates every painted grid, the wash
+   * the ground and the tint. The console's `__debug.ground` still wins live.
+   */
+  applyPaintWorld(row: PaintWorldRow, live: boolean): void {
+    const prev = this.paintWorld;
+    this.paintWorld = { ...row };
+    // Only the switches the row sets are written, what stood there first kept; one it stops setting is put back; nothing
+    // else is touched, so a world with no row writes nothing and a console switch the row does not name survives.
+    const sw = worldRowSwitches(GROUND_DRAW_TUNE, row, this.paintSwitchesKept, live ? prev : null);
+    const childrenMoved = sw.children;
+    if (sw.moved) writeGroundDraw(groundTileUniforms());
+    const follow = row.follow !== false;
+    const p = this.groundPaint;
+    const followMoved = !!p && p.follow !== follow;
+    if (p) p.follow = follow;
+    const washMoved = JSON.stringify(prev.wash ?? null) !== JSON.stringify(row.wash ?? null);
+    if (this.planet?.dem && (washMoved || !live)) this.terrain.demWash = row.wash ? new Wash(row.wash) : null;
+    if (!live) return;
+    const weightsMoved = JSON.stringify(prev.weights ?? null) !== JSON.stringify(row.weights ?? null);
+    const baseMoved = JSON.stringify(prev.base ?? null) !== JSON.stringify(row.base ?? null);
+    if (baseMoved) console.info('paint: the base family moved; it is taken at the next arrival on this world');
+    const g = this.paintGroup();
+    if (weightsMoved && g) this.resolvePaint(g);
+    const swg = this.terrain.swg;
+    if ((followMoved || weightsMoved) && swg && p && !p.empty) {
+      swg.postPaint(null, null, true);
+      // The plants replanted under every grid this asks again whichever way `follow` went: turned off, they go back to the
+      // world's own (a landing replants only where the plants follow the paint, `paintLanded`, so this is counted apart).
+      const before = this.paintLandWork.blocks + this.paintLandWork.far;
+      this.paintReplantLeft = Infinity;
+      const asked = this.repaintPainted();
+      this.paintReplantLeft = Math.max(0, asked - (this.paintLandWork.blocks + this.paintLandWork.far - before));
+    }
+    if (washMoved) this.bindDemTint();
+    if (childrenMoved || weightsMoved) {
+      (this.terrain.tiler as { refresh?: () => void } | null)?.refresh?.();
+      this.applyPaintWeights(false);
+      if (this.chunks.size) this.rebuildGround();
+    } else if (washMoved && !swg) this.rewriteAllGround();
+  }
+
+  /**
+   * Every standing chunk rewritten in place, a frame's share at a time, and every far tile at once (a real-elevation world's
+   * wash moved: its colours move everywhere, its shape nowhere): no chunk is taken down, so nothing stands bare meanwhile.
+   */
+  private rewriteAllGround(): void {
+    for (const c of this.chunks.values()) this.groundDirty.add(c.key);
+    const s = this.strokeRect;
+    for (const key of this.farTiles.keys()) {
+      const comma = key.indexOf(',');
+      const o = groundChunkOrigin(Number(key.slice(0, comma)), Number(key.slice(comma + 1)), this.terrain.groundShift, FAR_TILE);
+      s.x0 = Math.min(s.x0, o.x);
+      s.z0 = Math.min(s.z0, o.z);
+      s.x1 = Math.max(s.x1, o.x + FAR_TILE);
+      s.z1 = Math.max(s.z1, o.z + FAR_TILE);
+    }
+    this.endGroundStroke();
+  }
+
+  /** Every grid the paint's tiles reach made again (the world row's `follow` or weights moved, the palette moved); answers how many were asked for. */
+  private repaintPainted(): number {
+    const swg = this.terrain.swg;
+    if (!swg || !this.groundPaint) return 0;
+    return swg.repaintTiles();
+  }
+  /** Grids still to land from a `follow` (or weights) change, each replanted whichever way the plants now go. */
+  private paintReplantLeft = 0;
+
+  /** The ground's own switches put back as they stood before this world's row moved them (the world going). */
+  private restorePaintSwitches(): void {
+    const sw = worldRowSwitches(GROUND_DRAW_TUNE, null, this.paintSwitchesKept);
+    if (sw.moved) writeGroundDraw(groundTileUniforms());
+  }
+
+  /**
+   * A paint stroke's stamp under a game-frame rectangle (the editor's preview while its button is held): the paint laid in
+   * place over the cached blocks under it and every standing chunk it reaches rewritten from them nearest the brush first, a
+   * frame's share at a time (`stepGroundRewrite`, its tile bytes and its family grid with it), and the air's cells under it
+   * asked again. A real-elevation world's chunks read the paint themselves. The preview moves no plant.
+   */
+  paintPreview(gx0: number, gz0: number, gx1: number, gz1: number, fx: number, fz: number): void {
+    this.paintHeld = true;
+    const x0 = Math.min(gx0, gx1) - 2;
+    const x1 = Math.max(gx0, gx1) + 2;
+    const z0 = Math.min(gz0, gz1) - 2;
+    const z1 = Math.max(gz0, gz1) + 2;
+    const swg = this.terrain.swg;
+    if (swg) this.paintLandWork.previews += swg.previewPaint(x0, z0, x1, z1);
+    for (const c of this.chunks.values()) if (rectMeetsChunk(c.origin.x, c.origin.z, CHUNK_SIZE, x0, z0, x1, z1)) this.groundDirty.add(c.key);
+    if (Number.isFinite(fx) && Number.isFinite(fz)) {
+      this.rewriteFocus.x = fx;
+      this.rewriteFocus.z = fz;
+    }
+    if (!swg) {
+      const s = this.strokeRect;
+      s.x0 = Math.min(s.x0, x0);
+      s.z0 = Math.min(s.z0, z0);
+      s.x1 = Math.max(s.x1, x1);
+      s.z1 = Math.max(s.z1, z1);
+    }
+    this.air?.raster.forget(x0, z0, x1, z1);
+  }
+
+  /**
+   * A paint stroke let go (or put back): on a converted world the tiles it changed handed to the worker at a new revision and
+   * every cached block and far grid under it asked for again (`SwgTerrain.repaint`), each landing's chunks rewritten and
+   * replanted as it comes (`paintLanded`); on a real-elevation world, whose chunks read the paint themselves, the far tiles,
+   * the grass and the air over the stroke redone as a sculpt stroke's end redoes them. `x0..z1` in the raw frame.
+   */
+  paintRelease(x0: number, z0: number, x1: number, z1: number, famKeys: Iterable<number>, colKeys: Iterable<number>): void {
+    this.paintHeld = false;
+    const swg = this.terrain.swg;
+    if (swg) {
+      swg.postPaint(famKeys, colKeys, false);
+      swg.repaint(x0, z0, x1, z1);
+      return;
+    }
+    const a = this.rawToGame(x0, z0);
+    const b = this.rawToGame(x1, z1);
+    const s = this.strokeRect;
+    s.x0 = Math.min(s.x0, a.x, b.x);
+    s.z0 = Math.min(s.z0, a.z, b.z);
+    s.x1 = Math.max(s.x1, a.x, b.x);
+    s.z1 = Math.max(s.z1, a.z, b.z);
+    this.endGroundStroke();
+  }
+
+  /**
+   * A grid made again for the paint has landed (`SwgTerrain.onRepainted`): a block's standing chunks rewritten from it and,
+   * where the world's plants follow the paint (or the `follow` switch has just moved, either way), replanted; its air cells and grass asked again; or a far grid's far tile
+   * rewritten in place and its tree cards made again.
+   */
+  private paintLanded(kind: 'block' | 'far', gx0: number, gz0: number, gx1: number, gz1: number): void {
+    const settling = this.paintReplantLeft > 0;
+    if (settling) this.paintReplantLeft--;
+    if (kind === 'far') {
+      const s = this.terrain.groundShift;
+      const tx = Math.round((gx0 - s.x) / FAR_TILE);
+      const tz = Math.round((gz0 - s.z) / FAR_TILE);
+      const t = this.farTiles.get(`${tx},${tz}`);
+      if (!t) return;
+      this.paintLandWork.far++;
+      if (this.terrain.rewriteFarTile(tx, tz, FAR_TILE, FAR_RES, t.geometry)) this.groundWork.farTiles++;
+      const swg = this.terrain.swg;
+      if (this.farCards && swg) {
+        const o = groundChunkOrigin(tx, tz, s, FAR_TILE);
+        const grid = swg.farGrid(o.x, o.z, FAR_TILE, FAR_RES, false);
+        const step = FAR_TILE / FAR_RES;
+        this.farCards.tileGone(tx, tz);
+        if (grid) this.farCards.tileMade(tx, tz, o.x, o.z, { heights: grid.heights, colors: grid.colors, radialFar: grid.radialFar, n: FAR_RES + 3, step, gx0: o.x - step, gz0: o.z - step });
+      }
+      return;
+    }
+    this.paintLandWork.blocks++;
+    const follow = this.groundPaint?.follow !== false || settling;
+    for (const c of this.chunks.values()) {
+      if (!rectMeetsChunk(c.origin.x, c.origin.z, CHUNK_SIZE, gx0, gz0, gx1, gz1)) continue;
+      this.groundDirty.add(c.key);
+      if (follow) this.floraDirty.add(c.key);
+      this.paintLandWork.chunks++;
+    }
+    this.floraFlush = this.floraDirty.size > 0;
+    this.air?.raster.forget(gx0, gz0, gx1, gz1);
+    this.grass?.circleChanged((gx0 + gx1) / 2, (gz0 + gz1) / 2, Math.hypot(gx1 - gx0, gz1 - gz0) / 2);
+    this.shadowHold.dirtyAll();
+  }
+
+  /** A paint tile's game-frame rectangle unioned into a rectangle. */
+  private unionPaintTile(r: { x0: number; z0: number; x1: number; z1: number }, tx: number, tz: number): void {
+    const a = this.rawToGame(tx * PAINT_TILE, tz * PAINT_TILE);
+    const b = this.rawToGame((tx + 1) * PAINT_TILE, (tz + 1) * PAINT_TILE);
+    r.x0 = Math.min(r.x0, a.x, b.x);
+    r.x1 = Math.max(r.x1, a.x, b.x);
+    r.z0 = Math.min(r.z0, a.z, b.z);
+    r.z1 = Math.max(r.z1, a.z, b.z);
+  }
+
+  /**
+   * Rows of the paint file landed (a write's answer, a file read again): each tile's cells decoded and put in the paint in
+   * force where they differ from what it holds (the editor's own stroke, painted live, moves nothing), a tile let go for each
+   * id taken out, the palette and the world row taken, and every grid a moved tile reaches made again. A tile a stroke under
+   * way holds is left as it paints it (`paintHeldTile`). Answers how many tiles moved.
+   */
+  landPaint(put: readonly PaintRow[], deleted: readonly string[]): number {
+    this.paintRows.land(put, deleted);
+    const fam = new Set<number>();
+    const col = new Set<number>();
+    const rect = { x0: Infinity, z0: Infinity, x1: -Infinity, z1: -Infinity };
+    let paletteMoved = false;
+    let worldRow: PaintWorldRow | null = null;
+    let moved = 0;
+    const tileMove = (id: string, cells: Uint8Array | null): void => {
+      const t = paintTileOfId(id);
+      if (!t) return;
+      const key = paintTileNumber(t.tx, t.tz);
+      if (key < 0 || this.paintHeldTile?.(key, t.layer)) return;
+      const p = cells ? this.ensurePaint() : this.groundPaint;
+      if (!p) return;
+      const now = (t.layer === 'fam' ? p.fam : p.col).get(key) ?? null;
+      if (sameCells(now, cells)) return;
+      if (t.layer === 'fam') {
+        p.setFamilyTile(t.tx, t.tz, cells);
+        fam.add(key);
+      } else {
+        p.setColourTile(t.tx, t.tz, cells);
+        col.add(key);
+      }
+      this.unionPaintTile(rect, t.tx, t.tz);
+      moved++;
+    };
+    for (const id of deleted) {
+      if (id === 'palette') {
+        if (this.paintEntries.length) {
+          this.paintEntries = [];
+          paletteMoved = true;
+        }
+      } else if (id === 'world') worldRow = { id: 'world' };
+      else tileMove(id, null);
+    }
+    for (const r of put) {
+      if (r.id === 'palette') {
+        const entries = (r as PaintPaletteRow).entries;
+        if (JSON.stringify(entries) !== JSON.stringify(this.paintEntries)) {
+          this.paintEntries = entries.map((e) => ({ ...e }));
+          paletteMoved = true;
+        }
+      } else if (r.id === 'world') worldRow = r as PaintWorldRow;
+      else {
+        const t = paintTileOfId(r.id);
+        if (!t) continue;
+        const count = cellsOfTile(this.groundPaint?.cell ?? this.paintFileInfo.cell);
+        const cells = t.layer === 'fam' ? familyCells((r as PaintTileRow).rle, count) : colourCells((r as PaintTileRow).rle, count);
+        if (typeof cells === 'string') {
+          console.warn(`paint: ${r.id} is not laid: ${cells}`);
+          continue;
+        }
+        tileMove(r.id, cells);
+      }
+    }
+    if (worldRow && JSON.stringify(worldRow) !== JSON.stringify(this.paintWorld)) this.applyPaintWorld(worldRow, true);
+    const g = this.paintGroup();
+    if (paletteMoved && g) this.resolvePaint(g);
+    const swg = this.terrain.swg;
+    if (swg && this.groundPaint && (paletteMoved || moved)) {
+      // The palette moved: the worker handed the whole paint and every tile the paint still holds made again. A tile taken
+      // out in the same landing (an undo of a stroke that added the palette's entry, a file read again without its palette)
+      // is in no tile the paint holds, so the tiles that moved are made again as well (`SwgTerrain.landPaint`), or the ground
+      // under a tile taken out kept its old paint in every cached block, chunk, planting and far tile until those blocks fell
+      // out of the cache.
+      let movedRaw: { x0: number; z0: number; x1: number; z1: number } | null = null;
+      if (moved) {
+        const r0 = this.gameToRaw(rect.x1, rect.z0);
+        const r1 = this.gameToRaw(rect.x0, rect.z1);
+        movedRaw = { x0: r0.x, z0: r0.z, x1: r1.x, z1: r1.z };
+      }
+      swg.landPaint(paletteMoved, fam, col, movedRaw);
+    } else if ((moved || paletteMoved) && !swg && this.terrain.demShader) {
+      if (paletteMoved) this.rebuildGround();
+      else {
+        for (const c of this.chunks.values()) if (rectMeetsChunk(c.origin.x, c.origin.z, CHUNK_SIZE, rect.x0, rect.z0, rect.x1, rect.z1)) this.groundDirty.add(c.key);
+        const s = this.strokeRect;
+        s.x0 = Math.min(s.x0, rect.x0);
+        s.z0 = Math.min(s.z0, rect.z0);
+        s.x1 = Math.max(s.x1, rect.x1);
+        s.z1 = Math.max(s.z1, rect.z1);
+        this.endGroundStroke();
+      }
+    }
+    return moved;
+  }
+
+  /**
+   * The file read again whole (the dev server's word, the console's reload): laid over the paint in force by difference
+   * (`landPaint`: every row it holds put, every row it no longer holds taken out), only what moved made again.
+   */
+  replacePaint(loaded: PaintLoaded | null): number {
+    this.paintFileInfo = loaded ? { rows: loaded.rows.length, bytes: loaded.bytes, cell: loaded.paint.cell, skipped: loaded.skipped, problem: loaded.problem, rev: loaded.rev } : { ...this.paintFileInfo, rows: 0, bytes: 0, skipped: [], problem: null };
+    const rows = loaded?.rows ?? [];
+    const keep = new Set(rows.map((r) => r.id));
+    const gone: string[] = [];
+    for (const r of this.paintRows.values()) if (!keep.has(r.id)) gone.push(r.id);
+    if (!rows.some((r) => r.id === 'world') && !gone.includes('world') && Object.keys(this.paintWorld).length > 1) gone.push('world');
+    return this.landPaint(rows, gone);
+  }
+}
+
+/** The world row's weights as the tiler takes them, as text: each family's id and its alternates' weights. */
+function weightsKey(m: ReadonlyMap<number, ShaderFamily> | null): string {
+  if (!m || !m.size) return '';
+  return [...m].map(([id, f]) => `${id}:${f.children.map((c) => c.weight).join('/')}`).join(',');
+}
+
+/** Whether two tiles' cells are the same bytes (null for no tile). */
+function sameCells(a: Uint8Array | null, b: Uint8Array | null): boolean {
+  if (!a || !b) return a === b;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 /** What a world's heights file came to: its store, how many bytes the file was, what it skipped, why it was not read, its revision. */

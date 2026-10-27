@@ -143,6 +143,90 @@ export function tuneSculpt(partial: unknown, into?: { frameMs: number; floraHz: 
   return said;
 }
 
+/**
+ * The paint brush's numbers (Map-maker II's second wave, DESIGN.md §2.5 and §2.16's starts, `groundBrush.ts`), live through
+ * `__debug.groundPaint({ tune })` and its numbers of feel as sliders in the debug menu's `groundPaint` dials. Every one the
+ * owner's to judge by hand; none was chosen by measuring. `previewMs` is the ground's own rebuild's share for a paint
+ * stroke and `rasterWaitMs` a real-elevation world's loading screen's (`GROUND_REWRITE_TUNE.paintMs`,
+ * `GROUND_PAINT_TUNE.rasterWaitMs`, which ship): a line that moves them here moves those.
+ */
+export const PAINT_TUNE = {
+  /** The disc's radius, metres (two cells across either way at 4 m), and a notch of C with the wheel's step between these. */
+  radius: 8,
+  radiusStep: 1.15,
+  radiusMin: 2,
+  radiusMax: 200,
+  /** The share of the radius at full strength before the feather begins, and the feather: the client's own. */
+  hard: 0.5,
+  falloff: 'easeInOut' as 'linear' | 'easeIn' | 'easeOut' | 'easeInOut',
+  /** How hard a stamp bites (a share of its weight). */
+  strength: 1,
+  /** A family cell takes the paint where the stamp's weight passes this: a cell is one family or the other, never a share. */
+  cellAt: 0.5,
+  /** Stamps a second while a button is held (the same paint at any frame rate). */
+  rate: 15,
+  /** The layer LMB paints and RMB erases. */
+  layer: 'family' as 'family' | 'colour',
+  /** The palette entry a family stroke lays (its place in the file's palette, from 1) and the colour a colour stroke lays. */
+  entry: 0,
+  colour: '#a08060',
+  /** How much of the chosen colour a cell tends to, and how fast: a held second lays most of it. */
+  colourAmount: 1,
+  colourRate: 2,
+  /** The preview's share of a frame for the chunks it rewrites (`GROUND_REWRITE_TUNE.paintMs`). */
+  previewMs: 1.5,
+  /** How long a textured real-elevation world's loading screen waits for its raster (`GROUND_PAINT_TUNE.rasterWaitMs`). */
+  rasterWaitMs: 20000,
+  /** The file's soft lines (it ships in every release): the bar says when it is past them. */
+  rowsNote: 4000,
+  bytesNote: 8 * 1024 * 1024,
+};
+
+/** The paint tune's shipped values, for a reset. */
+export const PAINT_TUNE_DEFAULTS: typeof PAINT_TUNE = JSON.parse(JSON.stringify(PAINT_TUNE));
+
+/** The words each of the paint tune's names takes. */
+const PAINT_WORDS: Record<string, readonly string[]> = {
+  falloff: ['linear', 'easeIn', 'easeOut', 'easeInOut'],
+  layer: ['family', 'colour'],
+};
+
+/**
+ * `__debug.groundPaint({ tune })`: the paint brush's numbers moved in memory, never saved, its words taken only from their
+ * own lists, its colour only as `#rrggbb`, and `previewMs`/`rasterWaitMs` handed to the shipped ground's (`into`). Answers
+ * what was said.
+ */
+export function tunePaint(partial: unknown, into?: { rewrite?: { paintMs: number }; paint?: { rasterWaitMs: number } }): string[] {
+  const said: string[] = [];
+  if (!partial || typeof partial !== 'object' || Array.isArray(partial)) return ['groundPaint({ tune }) takes an object'];
+  const numbers: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(partial as Record<string, unknown>)) {
+    const words = PAINT_WORDS[k];
+    if (words) {
+      if (typeof v === 'string' && words.includes(v)) (PAINT_TUNE as Record<string, unknown>)[k] = v;
+      else said.push(`${k} is one of ${words.join(', ')}`);
+      continue;
+    }
+    if (k === 'colour') {
+      if (typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v)) PAINT_TUNE.colour = v.toLowerCase();
+      else said.push('colour is #rrggbb');
+      continue;
+    }
+    numbers[k] = v;
+  }
+  said.push(...tuneInto(PAINT_TUNE as unknown as Record<string, unknown>, numbers));
+  const t = PAINT_TUNE;
+  if (t.radiusMin > t.radiusMax) t.radiusMin = t.radiusMax;
+  t.radius = Math.min(t.radiusMax, Math.max(t.radiusMin, t.radius));
+  t.hard = Math.min(1, Math.max(0, t.hard));
+  t.cellAt = Math.min(1, Math.max(0.001, t.cellAt));
+  t.colourAmount = Math.min(1, Math.max(0, t.colourAmount));
+  t.entry = Math.max(0, Math.min(255, Math.round(t.entry)));
+  if (into?.rewrite) into.rewrite.paintMs = Math.max(0, t.previewMs);
+  if (into?.paint) into.paint.rasterWaitMs = Math.max(0, t.rasterWaitMs);
+  return said;
+}
+
 /** Every number of the editor, ours. */
 export const EDITOR_TUNE = {
   cam: {
@@ -271,6 +355,8 @@ export const EDITOR_TUNE = {
   brush: BRUSH_TUNE,
   /** The sculpt brush's numbers (`SCULPT_TUNE`, the same object; its words move through `sculpt({ tune })`). */
   sculpt: SCULPT_TUNE,
+  /** The paint brush's numbers (`PAINT_TUNE`, the same object; its words move through `groundPaint({ tune })`). */
+  paint: PAINT_TUNE,
   window: {
     /** How wide the window opens, pixels, docked left: the library's grid of pictures and its sources down the side. */
     width: 560,

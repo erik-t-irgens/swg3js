@@ -83,6 +83,83 @@ export type CornerName = 'sw' | 'se' | 'nw' | 'ne';
 /** The colour modes in the order the shader numbers them. */
 export const COLOUR_MODES: readonly GroundColour[] = ['off', 'client', 'normalised', 'channels'];
 
+/** The anti-tiling switches a paint file's world row may set (Map-maker II): each read only where the row sets it. */
+export interface DrawSwitchesRow {
+  alternates?: boolean;
+  tint?: string;
+  gainCap?: number;
+  masks?: boolean;
+  opposite?: 'max' | 'add';
+  clouds?: boolean | { on?: boolean; strength?: number };
+}
+
+/** What each switch a world row has moved stood at before it moved it, by switch: only the switches it moved. */
+export interface DrawSwitchesKept {
+  colour?: GroundColour;
+  gainCap?: number;
+  masks?: boolean;
+  opposite?: 'max' | 'add';
+  children?: boolean;
+  clouds?: { on: boolean; strength: number };
+}
+
+/**
+ * A world row's switches laid on the ground's own (`GROUND_DRAW_TUNE`), or let go with `null` (the world going): each
+ * switch the row sets written, what stood there first kept the first time it is moved; each switch it no longer sets put
+ * back as it was kept and forgotten; nothing else touched. So a world with no row, or a row that sets none of them, writes
+ * nothing, and a `__debug.ground` switch the row does not name survives an arrival, a row written live and a travel.
+ * With `prev` (a row written live over the row before it), a switch the two rows set alike is not written again either,
+ * so the console still wins live over a switch the write did not move. Answers whether any switch moved, and whether the
+ * alternates' switch did (the ground's rebuild). Not a frame's work.
+ */
+export function worldRowSwitches(t: typeof GROUND_DRAW_TUNE, row: DrawSwitchesRow | null, kept: DrawSwitchesKept, prev?: DrawSwitchesRow | null): { moved: boolean; children: boolean } {
+  let moved = false;
+  let children = false;
+  const alike = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  const set = <K extends 'colour' | 'gainCap' | 'masks' | 'opposite' | 'children'>(k: K, want: (typeof GROUND_DRAW_TUNE)[K] | undefined): void => {
+    if (prev && row) {
+      const field = k === 'colour' ? 'tint' : k === 'children' ? 'alternates' : k;
+      if (alike(prev[field as keyof DrawSwitchesRow], row[field as keyof DrawSwitchesRow])) return;
+    }
+    if (want !== undefined) {
+      if (!(k in kept)) (kept as Record<string, unknown>)[k] = t[k];
+    } else if (k in kept) {
+      want = (kept as Record<string, unknown>)[k] as (typeof GROUND_DRAW_TUNE)[K];
+      delete (kept as Record<string, unknown>)[k];
+    } else return;
+    if (t[k] === want) return;
+    t[k] = want as (typeof GROUND_DRAW_TUNE)[K];
+    moved = true;
+    if (k === 'children') children = true;
+  };
+  const tint = row?.tint;
+  set('colour', tint !== undefined && COLOUR_MODES.includes(tint as GroundColour) ? (tint as GroundColour) : undefined);
+  set('gainCap', row?.gainCap);
+  set('masks', row?.masks);
+  set('opposite', row?.opposite);
+  set('children', row?.alternates);
+  const c = row?.clouds;
+  if (prev && row && alike(prev.clouds, row.clouds)) {
+    // Set alike in both rows: left as the console may have moved it.
+  } else if (c !== undefined) {
+    if (!kept.clouds) kept.clouds = { ...t.clouds };
+    const on = typeof c === 'boolean' ? c : (c.on ?? kept.clouds.on);
+    const strength = typeof c === 'object' && c.strength !== undefined ? c.strength : kept.clouds.strength;
+    if (t.clouds.on !== on || t.clouds.strength !== strength) {
+      t.clouds = { on, strength };
+      moved = true;
+    }
+  } else if (kept.clouds) {
+    const was = kept.clouds;
+    delete kept.clouds;
+    if (t.clouds.on !== was.on || t.clouds.strength !== was.strength) {
+      t.clouds = { ...was };
+      moved = true;
+    }
+  }
+  return { moved, children };
+}
+
 /** Where a world's near ground stands against the 64 m buckets: a remainder each way, 0 or 1 on every retail world. */
 export interface GroundShift {
   readonly x: number;

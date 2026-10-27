@@ -120,6 +120,29 @@ export interface SculptToolsView {
   note: string;
 }
 
+/** The paint brush as the Tools tab shows it (Map-maker II's second wave). */
+export interface PaintToolsView {
+  armed: boolean;
+  layer: 'family' | 'colour';
+  /** The palette's entries: their place, name, the alternate each forces, a picture, whether chosen, whether it lays here. */
+  entries: { at: number; name: string; child: number | null; picture: string | null; chosen: boolean; lays: boolean }[];
+  /** The world's families to choose from, each with its alternates' pictures. */
+  families: { name: string; pictures: (string | null)[] }[];
+  colour: string;
+  /** The world row's switches: the plants following, the alternates, the border masks, the cloud shadows. */
+  switches: { key: string; words: string; on: boolean }[];
+  /** The colour map's tint mode in force and the modes; the opposite corners' rule. */
+  tint: string;
+  tints: string[];
+  opposite: string;
+  /** The chosen family's alternates' weights in this world (its own beside them), or null. */
+  weights: { key: string; name: string; values: number[]; own: number[] } | null;
+  /** A real-elevation world: its base family (`pack:name`, '' for none) and whether a wash is named. */
+  dem: { base: string; wash: boolean } | null;
+  file: string;
+  note: string;
+}
+
 /** What the window needs of the editor beside the library's own. */
 export interface EditorWindowHost extends LibraryHost {
   /** The rows standing round the camera, nearest first. */
@@ -160,6 +183,8 @@ export interface EditorWindowHost extends LibraryHost {
     brush?: { armed: boolean; entries: { key: string; name: string; weight: number }[]; switches: { key: string; words: string; on: boolean }[] };
     /** The sculpt brush (Map-maker II's first wave): its mode, flatten's target and its ways, its switches and its file. */
     sculpt?: SculptToolsView;
+    /** The paint brush (Map-maker II's second wave): its layer, its palette, the world's families, the world row. */
+    paint?: PaintToolsView;
   };
   setTool(t: Record<string, unknown>): void;
   refreshStatus(): void;
@@ -519,6 +544,102 @@ export class EditorWindow {
       this.note(el, s.file);
       if (s.note) this.note(el, s.note);
       this.note(el, 'K arms it: LMB held raises (or flattens, or smooths), RMB held lowers; C held with the wheel sizes it; Shift+click samples the height under it; a stroke is one undo. Its numbers are the sliders under The sculpt brush below.');
+    }
+    // The paint brush (Map-maker II's second wave): its layer, its palette as the ground's own pictures, the world's families
+    // with their alternates, its colour, and the world row's switches and weights (each written into the paint file).
+    if (t.paint) {
+      const p = t.paint;
+      h('PAINTING THE GROUND');
+      row(...(['family', 'colour'] as const).map((m) => toggle(m === 'family' ? 'Families' : 'Colour', p.layer === m, { paintLayer: m })));
+      const pic = (src: string | null, title: string, on: boolean, set: Record<string, unknown>) => {
+        const b = this.button('', 'tool', on ? 'on' : '');
+        b.title = title;
+        if (src) {
+          const img = document.createElement('img');
+          img.src = src;
+          img.width = 36;
+          img.height = 36;
+          img.alt = title;
+          img.loading = 'lazy';
+          b.appendChild(img);
+        } else b.textContent = title.slice(0, 10);
+        b.addEventListener('click', () => {
+          this.host.setTool(set);
+          b.blur();
+          this.drawTools();
+        });
+        return b;
+      };
+      if (p.entries.length) {
+        this.note(el, 'The palette (a click chooses what LMB paints):');
+        const r = row();
+        r.style.flexWrap = 'wrap';
+        for (const e of p.entries) r.appendChild(pic(e.picture, `${e.at}: ${e.name}${e.child !== null ? ` (alternate ${e.child})` : ''}${e.lays ? '' : ' (lays nothing here)'}`, e.chosen, { paintEntry: e.at }));
+      } else this.note(el, 'The palette is empty: choose a family below, or press the middle button on the ground.');
+      if (p.families.length) {
+        this.note(el, "The world's families (a click adds one to the palette and chooses it; a small picture forces that alternate):");
+        for (const f of p.families) {
+          const r = row();
+          r.style.flexWrap = 'wrap';
+          const label = document.createElement('span');
+          label.className = 'ed-label';
+          label.textContent = f.name;
+          r.appendChild(label);
+          r.appendChild(pic(f.pictures[0] ?? null, `${f.name}: the pole's own alternate`, false, { paintAdd: { name: f.name } }));
+          if (f.pictures.length > 1) f.pictures.forEach((src, i) => r.appendChild(pic(src, `${f.name}: alternate ${i}`, false, { paintAdd: { name: f.name, child: i } })));
+        }
+      }
+      const cf = document.createElement('label');
+      cf.className = 'ed-field';
+      const cs = document.createElement('span');
+      cs.textContent = 'Colour';
+      const ci = document.createElement('input');
+      ci.type = 'color';
+      ci.value = p.colour;
+      ci.addEventListener('change', () => {
+        this.host.setTool({ paintColour: ci.value });
+        ci.blur();
+      });
+      cf.append(cs, ci);
+      el.appendChild(cf);
+      h('THE WORLD ROW');
+      row(...p.switches.map((s) => toggle(s.words, s.on, { paintWorld: { [s.key]: !s.on } })));
+      row(...p.tints.map((m) => toggle(`Tint ${m}`, p.tint === m, { paintWorld: { tint: m } })));
+      row(...(['max', 'add'] as const).map((m) => toggle(`Opposite corners ${m}`, p.opposite === m, { paintWorld: { opposite: m } })));
+      if (p.weights) {
+        const wt = p.weights;
+        this.note(el, `${wt.name}'s alternates' weights in this world (its own: ${wt.own.join(', ')}):`);
+        const r = row();
+        wt.values.forEach((v, i) => {
+          const input = document.createElement('input');
+          input.type = 'number';
+          input.step = 'any';
+          input.min = '0';
+          input.value = String(v);
+          input.title = `alternate ${i}`;
+          input.style.width = '56px';
+          input.addEventListener('change', () => {
+            const list = [...wt.values];
+            const n = Number(input.value);
+            if (!Number.isFinite(n) || n < 0) return;
+            list[i] = n;
+            this.host.setTool({ paintWeight: [wt.key, list] });
+            input.blur();
+          });
+          input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === 'Escape') input.blur();
+          });
+          r.appendChild(input);
+        });
+      }
+      if (p.dem) {
+        this.note(el, `Base family: ${p.dem.base || 'none (the console names one: groundPaint({ world: { base: { pack, name } } }))'}.`);
+        row(toggle(p.dem.wash ? 'Take the wash away' : 'Name a wash', p.dem.wash, { paintWorld: { wash: p.dem.wash ? null : { base: [150, 130, 110] } } }));
+        if (p.dem.wash) this.note(el, "The wash's numbers are the sliders under The wash below.");
+      }
+      this.note(el, p.file);
+      if (p.note) this.note(el, p.note);
+      this.note(el, 'U arms it: LMB held paints, RMB held erases; Shift+click or the middle button takes what is under it; C held with the wheel sizes it; a stroke is one undo. Its numbers are the sliders under The paint brush below.');
     }
     h('SNAPPING');
     row(toggle(t.snapOn ? 'Snapping on' : 'Snapping off', t.snapOn, { snapOn: !t.snapOn }));

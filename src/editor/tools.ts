@@ -72,6 +72,8 @@ export interface ToolDef {
   draw(d: ToolDraw): void;
   /** Whether a button is its own while it is armed (the left and right are every brush's; the middle the eyedropper's). */
   owns(button: 'apply' | 'inverse' | 'middle'): boolean;
+  /** The middle button pressed while it is armed and owns it: what is under the aim taken into the tool (Map-maker II's paint). */
+  middle?(): void;
   /** C held with the wheel: its size stepped `notches` times (up larger). Answers what was said, or null for a tool with no size. */
   size?(notches: number): string | null;
   /** The bar's words for it while armed. */

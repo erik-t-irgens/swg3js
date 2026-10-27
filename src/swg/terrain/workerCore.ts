@@ -3,12 +3,18 @@
 // it), then a pole grid generated for every `generate`. Every map of a grid goes out with it and every
 // one is transferred, never copied, so the answer costs the main thread nothing to receive.
 //
-// In:  { type: 'init', trn, layers: [{ bytes, x, z, yaw }], bitmaps: [{ familyId, bytes }], ramps: [{ name, width, rgb }], roadsClearFlora, lifeDay }
+// In:  { type: 'init', trn, layers: [{ bytes, x, z, yaw }], bitmaps: [{ familyId, bytes }], ramps: [{ name, width, rgb }], roadsClearFlora, lifeDay, paint?, rev? }
+//      { type: 'paint', rev, paint }                       (Map-maker II: the ground's paint as it stands now, `groundPaint.ts`)
 //      { type: 'generate', id, startX, startZ, n, step }
-// Out: { type: 'ready', info } | { type: 'grid', id, heights, shaders, children, colors, excluded,
-//      floraCollidable, floraNonCollidable, radialNear, radialFar, environments, seasonal } | { type: 'error', message }
+// Out: { type: 'ready', info } | { type: 'grid', id, rev, heights, shaders, children, colors, excluded,
+//      floraCollidable, floraNonCollidable, radialNear, radialFar, environments, seasonal, colorsUnpainted? } | { type: 'error', message }
+//
+// Every grid carries the paint's revision it was made at (`rev`), so the main thread can tell a grid asked for before a
+// stroke was let go and answered after it, and ask for it again rather than put it (DESIGN.md §2.5). The worker's paint is
+// its own copy, posted and never shared: its module is a copy of its own.
 
 import { TERRAIN_GROUND_TUNE } from './generator.ts';
+import { GroundPaint, type GroundPaintMessage } from './groundPaint.ts';
 import { attachBitmap, attachRamp, parseLayerFile, parseTerrainTemplate, TerrainSampler } from './trn.ts';
 
 export interface TerrainInitMessage {
@@ -22,6 +28,16 @@ export interface TerrainInitMessage {
   roadsClearFlora?: boolean;
   /** The main thread's `TERRAIN_GROUND_TUNE.lifeDay`, read as the terrain is parsed; absent keeps the default (out of season). */
   lifeDay?: boolean;
+  /** The world's ground paint as the main thread holds it at the start (Map-maker II), and its revision; absent paints nothing. */
+  paint?: GroundPaintMessage | null;
+  rev?: number;
+}
+
+/** The ground's paint as it stands now (Map-maker II): what every grid made after it is painted with, at revision `rev`. */
+export interface TerrainPaintMessage {
+  type: 'paint';
+  rev: number;
+  paint: GroundPaintMessage | null;
 }
 
 export interface TerrainGenerateMessage {
@@ -40,8 +56,24 @@ export interface TerrainWorkerReply {
 
 export class TerrainWorkerCore {
   private sampler: TerrainSampler | null = null;
+  /** The paint's revision every grid made now is painted at (0: none ever). */
+  private rev = 0;
 
-  handle(msg: TerrainInitMessage | TerrainGenerateMessage): TerrainWorkerReply {
+  /** The paint taken (or let go: null), its revision with it. */
+  private takePaint(m: GroundPaintMessage | null | undefined, rev: number | undefined): void {
+    const s = this.sampler;
+    if (!s) return;
+    if (typeof rev === 'number' && Number.isFinite(rev)) this.rev = rev;
+    if (!m) {
+      s.paint = null;
+      return;
+    }
+    // A paint of another cell is a paint afresh; one of the same cell takes the message over what it holds.
+    if (!s.paint || s.paint.cell !== m.cell) s.paint = new GroundPaint(m.cell);
+    s.paint.take(m);
+  }
+
+  handle(msg: TerrainInitMessage | TerrainPaintMessage | TerrainGenerateMessage): TerrainWorkerReply {
     try {
       if (msg.type === 'init') {
         if (typeof msg.roadsClearFlora === 'boolean') TERRAIN_GROUND_TUNE.roadsClearFlora = msg.roadsClearFlora;
@@ -58,15 +90,28 @@ export class TerrainWorkerCore {
           this.sampler.addBuildingLayer(layer, l.x, l.z, l.yaw);
           applied++;
         }
+        if (msg.paint) this.takePaint(msg.paint, msg.rev);
         return { message: { type: 'ready', info: { name: template.name, layers: applied, ramps, items: template.generator.summary() } }, transfer: [] };
+      }
+      if (msg.type === 'paint') {
+        if (!this.sampler) throw new Error('terrain worker: paint before init');
+        this.takePaint(msg.paint, msg.rev);
+        return { message: { type: 'painted', rev: this.rev }, transfer: [] };
       }
       if (msg.type === 'generate') {
         if (!this.sampler) throw new Error('terrain worker: generate before init');
         const g = this.sampler.generate(msg.startX, msg.startZ, msg.n, msg.step);
-        return {
-          message: { type: 'grid', id: msg.id, heights: g.heights, shaders: g.shaders, children: g.children, colors: g.colors, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, radialNear: g.radialNear, radialFar: g.radialFar, environments: g.environments, seasonal: g.seasonal },
+        const reply: TerrainWorkerReply = {
+          message: { type: 'grid', id: msg.id, rev: this.rev, heights: g.heights, shaders: g.shaders, children: g.children, colors: g.colors, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, radialNear: g.radialNear, radialFar: g.radialFar, environments: g.environments, seasonal: g.seasonal },
           transfer: [g.heights.buffer, g.shaders.buffer, g.children.buffer, g.colors.buffer, g.excluded.buffer, g.floraCollidable.buffer, g.floraNonCollidable.buffer, g.radialNear.buffer, g.radialFar.buffer, g.environments.buffer, g.seasonal.buffer],
         };
+        // The colours before the paint's (Map-maker II), only where the paint has colours over the grid: a stroke's preview
+        // lays the paint over them (`TerrainSampler.previewPaint`).
+        if (g.colorsUnpainted) {
+          reply.message.colorsUnpainted = g.colorsUnpainted;
+          reply.transfer.push(g.colorsUnpainted.buffer);
+        }
+        return reply;
       }
       return { message: { type: 'error', message: `terrain worker: unknown message ${(msg as { type?: unknown }).type}` }, transfer: [] };
     } catch (err) {

@@ -10,6 +10,8 @@
 import { MultiFractal } from './fractal.ts';
 import { FastRandomGenerator, FloraGroup, RadialGroup, hashTuple } from './flora.ts';
 import { ChunkReader, chunkChild, formChild, isForm, nameOf, type IffChunk, type IffForm, type IffNode } from './iff.ts';
+// A type alone: the paint imports this module's values, so naming it by a type keeps the two from a cycle at run time.
+import type { GroundPaint, PaintUnder } from './groundPaint.ts';
 
 // ---------------------------------------------------------------------------
 // Small math helpers (Rectangle2d, Feather, Transform2d)
@@ -499,6 +501,20 @@ export interface ChunkData {
   environmentGroup: EnvironmentGroup;
   rampGroup: ColorRampGroup;
   radialGroup: RadialGroup;
+  /**
+   * Map-maker II's ground paint (`groundPaint.ts`), laid by the generator itself: its families after every snap (so every
+   * shader filter reads them) and once more at the end, its colours after the last layer. Null lays nothing, and the
+   * generator is the client's to the bit: two null checks.
+   */
+  paint: GroundPaint | null;
+  /** What the paint wrote over since the last snap, so the next snap reads the ground's own corners (the paint's own record). */
+  paintUnder: PaintUnder | null;
+  /**
+   * The colour map as the colour affectors left it, before the paint's colours were laid over it: kept only where the
+   * paint has colours over this grid (`GroundPaint.layColours`), so a stroke's preview lays the paint over the ground's own
+   * colours and never over colours already painted. Null otherwise.
+   */
+  colorUnpainted: Uint8Array | null;
 }
 
 /**
@@ -541,6 +557,9 @@ export function createChunkData(startX: number, startZ: number, numberOfPoles: n
     environmentGroup,
     rampGroup,
     radialGroup,
+    paint: null,
+    paintUnder: null,
+    colorUnpainted: null,
   };
 }
 
@@ -2006,14 +2025,29 @@ function paintColour(d: ChunkData, i: number, r: number, g: number, b: number, o
       nb = Math.trunc(f(f(amount * f(f(0.5 * b) + f(0.5 * ob))) + f(rest * ob)));
       break;
     default:
-      nr = Math.trunc(f(f(amount * r) + f(rest * or)));
-      ng = Math.trunc(f(f(amount * g) + f(rest * og)));
-      nb = Math.trunc(f(f(amount * b) + f(rest * ob)));
+      replaceColour(cm, k, r, g, b, amount);
+      nr = cm[k];
+      ng = cm[k + 1];
+      nb = cm[k + 2];
   }
   cm[k] = nr;
   cm[k + 1] = ng;
   cm[k + 2] = nb;
   if (d.colorTrace) d.colorTrace(by, i, packRgb(r, g, b), amount, packRgb(or, og, ob), packRgb(nr, ng, nb));
+}
+
+/**
+ * The engine's replace-with-amount (computeColor's replace, `paintColour`'s own default branch): three bytes at `k` of a
+ * colour map faded from what they hold toward (r, g, b) by `amountIn`, every step in single precision and each result
+ * truncated to a byte. Map-maker II's colour paint lays its cells by this very arithmetic.
+ */
+export function replaceColour(cm: Uint8Array, k: number, r: number, g: number, b: number, amountIn: number): void {
+  const f = Math.fround;
+  const amount = f(amountIn);
+  const rest = f(1 - amount);
+  cm[k] = Math.trunc(f(f(amount * r) + f(rest * cm[k])));
+  cm[k + 1] = Math.trunc(f(f(amount * g) + f(rest * cm[k + 1])));
+  cm[k + 2] = Math.trunc(f(f(amount * b) + f(rest * cm[k + 2])));
 }
 
 /** ACCN: one colour laid over the layer's area. */
@@ -2683,8 +2717,13 @@ export class Layer extends LayerItem {
       }
     }
     if (this.readsShaders && d.shaderDirty && d.familyLattice > 0) {
+      // A ground paint that the world's plants follow (Map-maker II) is taken off the corners first, so the snap lays the
+      // ground's own families on the pattern, and laid again after it, so this layer's filters read the paint.
+      const p = d.paint ?? null;
+      if (p !== null && p.follow) p.unlayFamilies(d);
       snapFamilies(d);
       d.shaderDirty = false;
+      if (p !== null && p.follow) p.layFamilies(d, true);
     }
     const onlyHasSubLayers = !this.hasActiveBoundaries && !this.hasActiveFilters && !this.hasActiveAffectors;
     const n = d.numberOfPoles;
@@ -3118,10 +3157,19 @@ export class TerrainGenerator {
     const amountMap = new Float32Array(n * n).fill(1);
     for (let i = this.layers.length - 1; i >= 0; i--) this.layers[i].prune(d.extent);
     d.traceDepth = 0;
+    const p = d.paint ?? null;
+    if (p !== null && d.paintUnder) d.paintUnder.count = 0;
     for (const l of this.layers) if (!l.pruned) l.affect(amountMap, d);
     if (d.familyLattice > 0 && d.shaderDirty) {
+      if (p !== null && p.follow) p.unlayFamilies(d);
       snapFamilies(d);
       d.shaderDirty = false;
+    }
+    // Map-maker II's ground paint, laid once more whatever came before (with `follow` off, only here: every plant stays
+    // where the world's own families put it), then its colours over the colour affectors'.
+    if (p !== null) {
+      p.layFamilies(d, false);
+      p.layColours(d);
     }
   }
 

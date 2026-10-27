@@ -592,6 +592,118 @@ if (process.argv.includes('sculpt')) {
   console.log(JSON.stringify({ frames: FRAMES, made: bestS.made, scavenges: bestS.scavenges, ringShown: shown, ring2Shown: shown2, armed: sculpt.armed, stroke: sculpt.mode, tiles: store.size }));
   process.exit(0);
 }
+// With `paint` (`paintAlloc.test.ts`, Map-maker II's second wave): the paint brush armed and hovering, no stroke under way -- the Tools list's frame handed to the tool
+// (`paintTool`'s step) and its two rings projected and drawn, the aim wandering, exactly as the sculpt brush's.
+if (process.argv.includes('paint')) {
+  const { brushRing, ringAsk } = await import('../../../src/editor/brush.ts');
+  const { EditorPaint, paintTool } = await import('../../../src/editor/editorPaint.ts');
+  const { toolFrame } = await import('../../../src/editor/tools.ts');
+  const { GroundPaint } = await import('../../../src/swg/terrain/groundPaint.ts');
+  const ra = ringAsk();
+  const rgAt = { x: 0.5, z: 0.5, y: 0.5 };
+  const rg = {
+    at: rgAt,
+    sample(): void {
+      rgAt.y = Math.sin(rgAt.x * 0.05) * 2 + Math.cos(rgAt.z * 0.07) * 2;
+    },
+  };
+  const sm = marksView();
+  const ground = new GroundPaint();
+  const paint = new EditorPaint({
+    edits: { writing: false } as never,
+    worldKind: () => 'ground',
+    notPaintable: () => null,
+    paint: () => ground,
+    entries: () => [],
+    addEntry: () => 1,
+    keepEntries: () => {},
+    pack: () => 'test',
+    families: () => [],
+    familyAt: () => null,
+    colourAt: () => null,
+    toRaw: () => {},
+    preview: () => {},
+    release: () => {},
+    fileRow: () => null,
+    fileSize: () => ({ rows: 0, bytes: 0 }),
+    worldRow: () => ({ id: 'world' }),
+    beginWork: () => {},
+    noteStamp: () => {},
+    say() {},
+  });
+  paint.armed = true;
+  const middle = { valid: false, x: 0.5, z: 0.5 };
+  const tool = paintTool(paint, () => middle);
+  const f = toolFrame();
+  const draw = {
+    marks: sm,
+    radius: 0.5,
+    ring(slot: 0 | 1): void {
+      ra.radius = this.radius;
+      if (slot === 0) {
+        brushRing(ra, rg, view.vp, sm.ring, sm.ringVis);
+        sm.ringOn = true;
+      } else {
+        brushRing(ra, rg, view.vp, sm.ring2, sm.ring2Vis);
+        sm.ring2On = true;
+      }
+    },
+  };
+  const st = new Float64Array(2);
+  const paintFrame = (): void => {
+    st[1]++;
+    st[0] = st[1] * 0.01;
+    f.apply = false;
+    f.inverse = false;
+    f.shift = false;
+    f.sampled = false;
+    f.x = Math.sin(st[0]) * 30;
+    f.y = 0.5;
+    f.z = -20 + Math.cos(st[0]) * 10;
+    f.valid = true;
+    f.dt = 1 / 60;
+    f.now = st[0];
+    tool.step(f);
+    ra.cx = f.x;
+    ra.cy = 0.5;
+    ra.cz = f.z;
+    ra.w = 1600;
+    ra.h = 900;
+    sm.ringOn = false;
+    sm.ring2On = false;
+    tool.draw(draw);
+    drawEditorMarks(overlay, sm);
+  };
+  const paintFrames = (n: number): void => {
+    for (let i = 0; i < n; i++) paintFrame();
+  };
+  try {
+    new Function('f', '%NeverOptimizeFunction(f)')(paintFrames);
+  } catch {
+    // Without the flag the loop is left to the compiler.
+  }
+  paintFrames(20_000);
+  let bestP = { made: Infinity, scavenges: Infinity };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    paintFrames(10_000);
+    gc({ type: 'minor' });
+    await settle();
+    scavenges = 0;
+    const before = young();
+    paintFrames(FRAMES);
+    const made = young() - before;
+    await settle();
+    if (scavenges < bestP.scavenges || (scavenges === bestP.scavenges && made < bestP.made)) bestP = { made, scavenges };
+    if (bestP.scavenges === 0 && bestP.made <= 0) break;
+  }
+  let shown = 0;
+  let shown2 = 0;
+  for (let i = 0; i < sm.ringVis.length; i++) shown += sm.ringVis[i];
+  for (let i = 0; i < sm.ring2Vis.length; i++) shown2 += sm.ring2Vis[i];
+  watch.disconnect();
+  console.log(JSON.stringify({ frames: FRAMES, made: bestP.made, scavenges: bestP.scavenges, ringShown: shown, ring2Shown: shown2, armed: paint.armed, stroke: paint.mode, tiles: ground.fam.size + ground.col.size }));
+  process.exit(0);
+}
 if (process.argv.includes('profile')) {
   // Where it is made, by the sampling heap profiler: `node --expose-gc tools/swg/tests/editorAllocOwn.ts profile`.
   const { Session } = await import('node:inspector/promises');

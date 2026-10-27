@@ -45,7 +45,15 @@ import { EditorSession, returnRefusal, type EntryState, type LeaveWay, type Retu
 import { BRUSH_TUNE, EDITOR_TUNE, LIBRARY_TUNE, SCULPT_TUNE, TUNE_WATCH, liveTuned, tuneEditor, tuneSculpt } from './editorTune.ts';
 import { EditorSculpt, sculptTool, type SculptHost } from './editorSculpt.ts';
 import { SCULPT_FALLOFFS, SCULPT_MODES, type SculptMode } from './sculpt.ts';
-import { GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
+import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
+import { EditorPaint, hexOf, paintTool, washInto, type PaintHost } from './editorPaint.ts';
+import { PAINT_TUNE, tunePaint } from './editorTune.ts';
+import { WASH_DIALS } from './editorDials.ts';
+import { PAINT_LAYERS, type PaintLayer } from './groundBrush.ts';
+import { TINT_MODES, type PaintWorldRow } from '../world/editFiles/paintFile.ts';
+import { readWash, type WashSpec } from '../world/demWash.ts';
+import type { PaintToolsView } from '../ui/editorWindow.ts';
+import { GROUND_DRAW_TUNE } from '../world/groundTiles.ts';
 import { deflateBase64 } from '../world/editFiles/browserCodec.ts';
 import { standingFoot } from '../world/layoutStream.ts';
 import { FlyCam, stepSpeed } from './flyCam.ts';
@@ -325,6 +333,13 @@ export class Editor {
       setHotbar: (slot, key) => me.keep.setHotbar(slot, key),
       refreshWindow: () => me.window?.refreshEdits(),
       toolArmed: () => me.tools.toolArmed(),
+      // The middle button an armed tool owns (the paint brush's pick of the family under the aim): the eyedropper's otherwise.
+      toolMiddle: () => {
+        const t = me.tools.armedTool;
+        if (!t || !t.owns('middle') || !t.middle) return false;
+        t.middle();
+        return true;
+      },
     });
     this.edits.destOf = () => this.session.dest;
     // The scatter brush (the third wave's): its entries out of the library, what stands near its disc, the ground under it.
@@ -371,6 +386,19 @@ export class Editor {
     w.heightsHeld = (tx, tz) => sculpt.holds(tx, tz);
     GROUND_REWRITE_TUNE.frameMs = SCULPT_TUNE.frameMs;
     GROUND_REWRITE_TUNE.floraHz = SCULPT_TUNE.floraHz;
+    // The paint brush (Map-maker II's second wave), on U: the world's ground families and colours, painted inside the
+    // generator so the world's own plants follow them. The middle button takes the family under the aim.
+    this.paint = new EditorPaint(this.paintHost());
+    this.tools.add(paintTool(this.paint, () => ({ x: me.aim.hit.x, z: me.aim.hit.z, valid: me.aimKind !== 'sky' })));
+    const paint = this.paint;
+    w.paintHeldTile = (key, layer) => paint.holds(key, layer);
+    GROUND_REWRITE_TUNE.paintMs = PAINT_TUNE.previewMs;
+    GROUND_PAINT_TUNE.rasterWaitMs = PAINT_TUNE.rasterWaitMs;
+    // The wash's numbers as the debug menu's sliders, each written into the world row (debounced) as it moves.
+    WASH_DIALS.host = {
+      wash: () => (w.paintWorld.wash ?? null) as ReturnType<NonNullable<typeof WASH_DIALS.host>['wash']>,
+      set: (partial) => this.washDial(partial),
+    };
     // A tool's rings, drawn from this frame's camera (`vp`, written before any tool draws) round the aim: the record's
     // radius at the ring's slot, into the marks' kept arrays. Nothing is made.
     const marks = this.marks;
@@ -401,6 +429,114 @@ export class Editor {
   readonly brush: EditorBrush;
   /** The sculpt brush (Map-maker II). */
   readonly sculpt: EditorSculpt;
+  /** The paint brush (Map-maker II's second wave). */
+  readonly paint: EditorPaint;
+
+  /** What the paint brush needs of the game: the world's paint and its rebuild, its families, the file's rows. */
+  private paintHost(): PaintHost {
+    const h = this.host;
+    const w = h.world;
+    const me = this;
+    const pole = { family: 0, choice: 0, color: 0 };
+    return {
+      get edits() {
+        return me.edits;
+      },
+      worldKind: () => h.worldKind(),
+      notPaintable: () => {
+        if (w.terrain.swg) return null;
+        if (w.terrain.demShader) return null;
+        if (w.planet?.dem) return "this real-elevation world's ground names no family yet: name a base family in its paint file (groundPaint({ world: { base: { pack: 'lok', name: '<family>' } } }), families('lok') lists them) and travel here again";
+        return "this world's ground has no families to paint";
+      },
+      paint: () => w.ensurePaint(),
+      entries: () => w.paintEntries,
+      addEntry: (e) => {
+        w.paintEntries = [...w.paintEntries, e];
+        const g = w.paintGroup();
+        if (g) w.resolvePaint(g);
+        return w.paintEntries.length;
+      },
+      keepEntries: (n) => {
+        if (w.paintEntries.length <= n) return;
+        w.paintEntries = w.paintEntries.slice(0, n);
+        const g = w.paintGroup();
+        if (g) w.resolvePaint(g);
+      },
+      pack: () => w.paintPack(),
+      families: () => [...(w.paintGroup()?.families.values() ?? [])].map((f) => ({ id: f.id, name: f.name, children: f.children })),
+      familyAt: (x, z) => {
+        const s = w.terrain.swg;
+        if (s) return s.groundIfCached(x, z, pole) ? { family: pole.family, choice: pole.choice } : null;
+        const f = w.terrain.familyAt(x, z);
+        return f ? { family: f, choice: 0 } : null;
+      },
+      colourAt: (x, z) => {
+        const s = w.terrain.swg;
+        if (s) return s.colorIfCached(x, z);
+        const c = w.terrain.colourIdAt(x, z);
+        return c < 0 ? null : c;
+      },
+      toRaw: (x, z, out) => {
+        const s = w.terrain.swg;
+        out.x = s ? s.toSwgX(x) : -x;
+        out.z = s ? s.toSwgZ(z) : z;
+      },
+      preview: (r, fx, fz) => {
+        const a = w.rawToGame(r.x0, r.z0);
+        const b = w.rawToGame(r.x1, r.z1);
+        w.paintPreview(Math.min(a.x, b.x), Math.min(a.z, b.z), Math.max(a.x, b.x), Math.max(a.z, b.z), fx, fz);
+      },
+      release: (r, famKeys, colKeys) => w.paintRelease(r.x0, r.z0, r.x1, r.z1, famKeys, colKeys),
+      fileRow: (id) => w.paintRows.get(id) ?? null,
+      fileSize: () => ({ rows: w.paintRows.size, bytes: w.paintRows.bytes }),
+      worldRow: () => w.paintWorld,
+      beginWork: () => w.beginGroundWork(),
+      noteStamp: () => w.noteStamp(),
+      say: (words, ok) => me.say(words, ok),
+    };
+  }
+
+  /**
+   * The paint file's world row written (the Tools tab's switches and weights, the console's `groundPaint({ world })`): one
+   * batch of the one row, one undo entry, the row taken by the world as the answer lands (`World.landPaint`). Fields given
+   * as undefined or null are taken out of the row (the code's own default answers for them again). Answers what was said.
+   */
+  async writePaintWorld(partial: Record<string, unknown>, label = 'the paint\'s world row'): Promise<string> {
+    const w = this.host.world;
+    const no = this.paint.refusal();
+    if (no && !(w.planet?.dem && ('base' in partial || 'packs' in partial || 'wash' in partial))) return no;
+    const row: Record<string, unknown> = { ...w.paintWorld, ...partial, id: 'world' };
+    for (const k of Object.keys(row)) if (row[k] === undefined || row[k] === null) delete row[k];
+    delete row.at;
+    const before = w.paintRows.get('world') ?? null;
+    const es = this.edits.beginStroke(label);
+    const err = await this.edits.strokeWrite(es, [{ file: 'paint', id: 'world', before: before ? { ...before } : null, after: row as unknown as PaintWorldRow }]);
+    const said = this.edits.endStroke(es);
+    this.window?.refreshEdits();
+    return err ? said || err : said;
+  }
+
+  /** The wash's dials (the debug menu's sliders): moved into the world row in memory at once, written a moment after the last move. */
+  private washTimer: ReturnType<typeof setTimeout> | null = null;
+  washDial(partial: Record<string, unknown>): string[] {
+    const w = this.host.world;
+    const was = w.paintWorld.wash;
+    if (!was) return ['no wash is named: groundPaint({ world: { wash: { base: [r, g, b] } } }) names one'];
+    const next = washInto(was, partial);
+    if (typeof next === 'string') return [next];
+    w.applyPaintWorld({ ...w.paintWorld, wash: next }, true);
+    if (this.washTimer) clearTimeout(this.washTimer);
+    // The write is this world's: a travel inside the wait drops it (`worldGone` clears the timer, and the generation is
+    // asked again as it fires), or the next world's file would be written a world row it never had.
+    const gen = w.generation;
+    this.washTimer = setTimeout(() => {
+      this.washTimer = null;
+      if (w.generation !== gen) return;
+      void this.writePaintWorld({ wash: w.paintWorld.wash }, 'the wash');
+    }, 600);
+    return [];
+  }
 
   /** What the sculpt brush needs of the game: the world's height edits and their rebuild, what stands, the file's rows. */
   private sculptHost(): SculptHost {
@@ -525,6 +661,9 @@ export class Editor {
     // The sculpt brush's two rebuild numbers are the ground's own (`GROUND_REWRITE_TUNE`), whichever helper moved them.
     GROUND_REWRITE_TUNE.frameMs = Math.max(0, SCULPT_TUNE.frameMs);
     GROUND_REWRITE_TUNE.floraHz = Math.max(0.01, SCULPT_TUNE.floraHz);
+    // And the paint brush's two (Map-maker II's second wave): its preview's share and a textured real-elevation world's wait.
+    GROUND_REWRITE_TUNE.paintMs = Math.max(0, PAINT_TUNE.previewMs);
+    GROUND_PAINT_TUNE.rasterWaitMs = Math.max(0, PAINT_TUNE.rasterWaitMs);
     const live = liveTuned(partial);
     if (live.speed) this.fly.speed = clampSpeed(EDITOR_TUNE.cam.speed);
     if (live.skyReach) this.skyReach = clampSky(EDITOR_TUNE.aim.skyReach);
@@ -672,7 +811,11 @@ export class Editor {
     // A sculpt stroke under way is dropped unwritten (its world's store went with the world), then whatever tool is armed
     // is let go (a stroke under way ends unrecorded with its world's history, below).
     this.sculpt.worldGone();
+    this.paint.worldGone();
     this.tools.disarmAll();
+    // The wash's write still waiting for its dials to rest goes with its world, never into the next world's file.
+    if (this.washTimer) clearTimeout(this.washTimer);
+    this.washTimer = null;
     this.marks.ringOn = false;
     this.marks.ring2On = false;
     // Its selection, its history and anything under way go with the world, on or off.
@@ -858,7 +1001,7 @@ export class Editor {
     const looked = this.fly.yaw !== this.lastYaw || this.fly.pitch !== this.lastPitch;
     this.lastYaw = this.fly.yaw;
     this.lastPitch = this.fly.pitch;
-    if (looked || this.host.input.keysDown > 0 || this.pointer.buttons !== 0 || this.fly.moving > 0.05 || ed.busy || ed.writing || ed.stroking || this.hand || this.brush.mode || this.sculpt.mode || this.folding) {
+    if (looked || this.host.input.keysDown > 0 || this.pointer.buttons !== 0 || this.fly.moving > 0.05 || ed.busy || ed.writing || ed.stroking || this.hand || this.brush.mode || this.sculpt.mode || this.paint.mode || this.folding) {
       this.activeAt = now;
       return;
     }
@@ -1506,7 +1649,7 @@ export class Editor {
     v.said = this.said;
     v.saidOk = this.saidOk;
     const k = (a: Parameters<Input['pressedAction']>[0]) => input.bindings[a][0] ?? '';
-    v.hint = `WASD fly · ${k('editorUp')}/${k('editorDown')} up/down · Shift fast · Alt slow · wheel speed · ${k('editorPoint')} cursor · ${k('editorSearch')} find · click pick/put down · ${k('placeTurn')}/${k('placeLift')}/${k('editorScale')} held turn/raise/scale · ${k('takeProp')} pick up · ${k('putAway')} delete · ${k('placeLayer')} file · ${k('editorBrush')} brush · ${k('editorSculpt')} sculpt · ${k('editorKeys')} keys · F2 leave`;
+    v.hint = `WASD fly · ${k('editorUp')}/${k('editorDown')} up/down · Shift fast · Alt slow · wheel speed · ${k('editorPoint')} cursor · ${k('editorSearch')} find · click pick/put down · ${k('placeTurn')}/${k('placeLift')}/${k('editorScale')} held turn/raise/scale · ${k('takeProp')} pick up · ${k('putAway')} delete · ${k('placeLayer')} file · ${k('editorBrush')} brush · ${k('editorSculpt')} sculpt · ${k('editorPaint')} paint · ${k('editorKeys')} keys · F2 leave`;
     bar.show(v);
   }
 
@@ -1631,6 +1774,7 @@ export class Editor {
           switches: BRUSH_SWITCHES.map(([key, words]) => ({ key, words, on: BRUSH_TUNE[key] })),
         },
         sculpt: this.sculptView(),
+        paint: this.paintView(),
       }),
       setTool: (t: Record<string, unknown>) => this.setTool(t),
       refreshStatus: () => void this.edits.refreshStatus(),
@@ -1688,6 +1832,198 @@ export class Editor {
       const no = tuneSculpt(st, GROUND_REWRITE_TUNE);
       if (no.length) this.say(no.join('; '), false);
     }
+    // The paint brush's (Map-maker II's second wave): its layer, an entry chosen, a family (and an alternate) added and chosen,
+    // its colour, and the world row's switches, tint, weights, base and wash, each written into the file.
+    if (t.paintLayer === 'family' || t.paintLayer === 'colour') PAINT_TUNE.layer = t.paintLayer;
+    if (typeof t.paintEntry === 'number' && t.paintEntry >= 1 && t.paintEntry <= this.host.world.paintEntries.length) {
+      PAINT_TUNE.entry = t.paintEntry;
+      PAINT_TUNE.layer = 'family';
+    }
+    const pa = t.paintAdd as { name?: unknown; child?: unknown } | undefined;
+    if (pa && typeof pa.name === 'string') this.paint.choose(pa.name, typeof pa.child === 'number' ? pa.child : undefined);
+    if (typeof t.paintColour === 'string' && /^#[0-9a-fA-F]{6}$/.test(t.paintColour)) {
+      PAINT_TUNE.colour = t.paintColour.toLowerCase();
+      PAINT_TUNE.layer = 'colour';
+    }
+    const pw = t.paintWorld;
+    if (pw && typeof pw === 'object' && !Array.isArray(pw)) void this.writePaintWorld(pw as Record<string, unknown>).then((s) => this.say(s, true));
+    // One family's alternates' weights from the Tools tab, laid over the row's others (the console's `world.weights` is the whole table).
+    const pwt = t.paintWeight;
+    if (Array.isArray(pwt) && typeof pwt[0] === 'string' && Array.isArray(pwt[1])) {
+      const weights = { ...(this.host.world.paintWorld.weights ?? {}), [pwt[0]]: (pwt[1] as unknown[]).map(Number) };
+      void this.writePaintWorld({ weights }, 'an alternate\'s weight').then((s) => this.say(s, true));
+    }
+  }
+
+  /** The paint brush as the Tools tab shows it: its layer, its palette with pictures, the world's families, the world row. */
+  private paintView(): PaintToolsView {
+    const w = this.host.world;
+    const pics = w.paintPictures();
+    const entries = w.paintEntries.map((e, i) => {
+      const kids = pics.get(e.name.toLowerCase()) ?? [];
+      return { at: i + 1, name: e.name, child: e.child ?? null, picture: kids[e.child ?? 0] ?? kids[0] ?? null, chosen: PAINT_TUNE.layer === 'family' && PAINT_TUNE.entry === i + 1, lays: (w.groundPaint?.familyOf[i + 1] ?? 0) !== 0 || !w.groundPaint };
+    });
+    const fams = [...(w.paintGroup()?.families.values() ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+    const families = fams.map((f) => ({ name: f.name, pictures: pics.get(f.name.toLowerCase()) ?? [] }));
+    const row = w.paintWorld;
+    const t = GROUND_DRAW_TUNE;
+    const chosen = w.paintEntries[PAINT_TUNE.entry - 1];
+    const fam = chosen ? fams.find((f) => f.name === chosen.name) : null;
+    const key = fam ? `${w.paintPack()}:${fam.name}` : '';
+    const weights = fam ? { key, name: fam.name, values: row.weights?.[key] ?? fam.children.map((c) => c.weight), own: fam.children.map((c) => c.weight) } : null;
+    const p = w.groundPaint;
+    const f = w.paintFileInfo;
+    const rows = w.paintRows.size;
+    const file = `public/placements/paint/${this.host.packId()}.json: ${rows} row${rows === 1 ? '' : 's'}${w.paintRows.bytes ? `, about ${(w.paintRows.bytes / 1024).toFixed(1)} KB` : ''}, ${p?.cell ?? f.cell} m cells${f.problem ? ` (not read: ${f.problem})` : ''}`;
+    const notes: string[] = [];
+    const no = this.paint.refusal();
+    if (no) notes.push(no);
+    if (w.paintMissing.length) notes.push(`laying nothing here: ${w.paintMissing.join('; ')}`);
+    return {
+      armed: this.paint.armed,
+      layer: PAINT_TUNE.layer,
+      entries,
+      families,
+      colour: PAINT_TUNE.colour,
+      switches: [
+        { key: 'follow', words: row.follow === false ? 'Plants keep their places' : 'Plants follow the paint', on: row.follow !== false },
+        { key: 'alternates', words: t.children ? 'Alternates on' : 'Alternates off (first picture only)', on: t.children },
+        { key: 'masks', words: t.masks ? 'Border masks on' : 'Border masks off', on: t.masks },
+        { key: 'clouds', words: t.clouds.on ? 'Cloud shadows on' : 'Cloud shadows off', on: t.clouds.on },
+      ],
+      tint: t.colour,
+      tints: [...TINT_MODES],
+      opposite: t.opposite,
+      weights,
+      dem: w.planet?.dem ? { base: row.base ? `${row.base.pack}:${row.base.name}` : '', wash: !!row.wash } : null,
+      file,
+      note: notes.join(' '),
+    };
+  }
+
+  /**
+   * `__debug.groundPaint(o)`: the palette, the cells painted by layer, the revision and the grids asked for again, the
+   * preview's blocks, the world row in force; `{ tune }`, `{ arm: 'family' | 'colour' }` (or `false`), `{ choose: name |
+   * { name, child } }`, `{ at: [x, z] }` the family, child and colour painted and the world's own beneath, `{ stroke: { layer,
+   * entry, erase, x, z, r, seconds } }` a stroke run exactly as held and written, `{ world: {...} }` the world row written,
+   * `{ wash: {...} }` the wash's dials -- a place given in the file's own frame (a `/loc` line on a planet), the aim where none is.
+   */
+  async paintDebug(o?: Record<string, unknown>): Promise<unknown> {
+    const w = this.host.world;
+    const said: string[] = [];
+    const c = w.placeFrame;
+    const space = !!w.planet?.space;
+    const gameOf = (x: number, z: number): { x: number; z: number } => (space || !c ? { x, z } : { x: rawToGameX(c.x, x), z: rawToGameZ(c.z, z) });
+    let at: Record<string, unknown> | null = null;
+    if (o && typeof o === 'object') {
+      if (o.tune !== undefined) said.push(...tunePaint(o.tune, { rewrite: GROUND_REWRITE_TUNE, paint: GROUND_PAINT_TUNE }));
+      if (o.arm === 'family' || o.arm === 'colour') {
+        PAINT_TUNE.layer = o.arm;
+        said.push(this.paint.armed ? `the paint brush: ${o.arm}` : await this.toggleTool('paint'));
+      } else if (o.arm === false && this.paint.armed) said.push(await this.toggleTool('paint'));
+      else if (o.arm !== undefined) said.push(`arm is one of ${PAINT_LAYERS.join(', ')}, or false`);
+      if (typeof o.choose === 'string') said.push(this.paint.choose(o.choose, undefined));
+      else if (o.choose && typeof o.choose === 'object') {
+        const ch = o.choose as { name?: unknown; child?: unknown };
+        if (typeof ch.name === 'string') said.push(this.paint.choose(ch.name, typeof ch.child === 'number' ? ch.child : undefined));
+      }
+      if (typeof o.entry === 'number') {
+        if (o.entry >= 1 && o.entry <= w.paintEntries.length) PAINT_TUNE.entry = o.entry;
+        else said.push(`entry is a palette place from 1 to ${w.paintEntries.length}`);
+      }
+      if (typeof o.colour === 'string') said.push(...tunePaint({ colour: o.colour }));
+      if (o.world && typeof o.world === 'object' && !Array.isArray(o.world)) said.push(await this.writePaintWorld(o.world as Record<string, unknown>));
+      if (o.wash && typeof o.wash === 'object' && !Array.isArray(o.wash)) said.push(...this.washDial(o.wash as Record<string, unknown>));
+      if (Array.isArray(o.at) && o.at.length === 2) at = this.paintAt(gameOf(Number(o.at[0]), Number(o.at[1])), [Number(o.at[0]), Number(o.at[1])]);
+      const st = o.stroke as Record<string, unknown> | undefined;
+      if (st && typeof st === 'object') {
+        const layer: PaintLayer = st.layer === 'colour' ? 'colour' : 'family';
+        if (typeof st.entry === 'number' && st.entry >= 1 && st.entry <= w.paintEntries.length) PAINT_TUNE.entry = st.entry;
+        if (typeof st.colour === 'string') tunePaint({ colour: st.colour });
+        const g = typeof st.x === 'number' && typeof st.z === 'number' ? gameOf(st.x, st.z) : { x: this.aim.hit.x, z: this.aim.hit.z };
+        const r = typeof st.r === 'number' ? st.r : PAINT_TUNE.radius;
+        const seconds = typeof st.seconds === 'number' ? Math.max(0, Math.min(60, st.seconds)) : 1;
+        said.push(await this.paint.strokeAt(layer, st.erase === true, g.x, g.z, r, seconds));
+      }
+    }
+    const p = w.groundPaint;
+    let fam = 0;
+    let col = 0;
+    if (p) {
+      for (const t of p.fam.values()) for (let i = 0; i < t.length; i++) if (t[i]) fam++;
+      for (const t of p.col.values()) for (let i = 3; i < t.length; i += 4) if (t[i]) col++;
+    }
+    const swg = w.terrain.swg;
+    return {
+      palette: w.paintEntries.map((e, i) => `${i + 1}: ${e.pack}:${e.name}${e.child !== undefined ? ` (alternate ${e.child})` : ''}${p && !p.familyOf[i + 1] ? ' (lays nothing here)' : ''}`),
+      cells: { family: fam, colour: col, cell: p?.cell ?? w.paintFileInfo.cell, tiles: { family: p?.fam.size ?? 0, colour: p?.col.size ?? 0 } },
+      follow: p ? p.follow : w.paintWorld.follow !== false,
+      worker: swg ? { ...swg.paintWork } : null,
+      previewBlocks: swg?.sampler.previewBlocks ?? 0,
+      landed: { ...w.paintLandWork },
+      dirty: w.groundDirtyCount,
+      world: w.paintWorld,
+      // Whether the ground is drawn by the tile program (a converted world's, or a real-elevation world whose row names a base), and its wash.
+      tiled: w.terrain.tiled,
+      wash: !!w.terrain.demWash,
+      file: { ...w.paintFileInfo, skipped: w.paintFileInfo.skipped.length, rowsNow: w.paintRows.size, bytesNow: w.paintRows.bytes },
+      laidAtArrival: w.paintLaidAtArrival,
+      missing: w.paintMissing,
+      armed: this.paint.armed,
+      paint: this.paint.report(),
+      tune: { ...PAINT_TUNE },
+      rebuild: { paintMs: GROUND_REWRITE_TUNE.paintMs, rasterWaitMs: GROUND_PAINT_TUNE.rasterWaitMs },
+      ...(at ? { at } : {}),
+      ...(said.length ? { answered: said } : {}),
+    };
+  }
+
+  /**
+   * What the paint says at a game point (the console's `at`): the entry, family and alternate painted there and its colour
+   * cell laid over white, the ground as built (family, choice, colour), and the world's own beneath (the generator run with
+   * the paint taken off, or a real-elevation world's rules asked with none).
+   */
+  private paintAt(g: { x: number; z: number }, file: number[]): Record<string, unknown> {
+    const w = this.host.world;
+    const r = w.gameToRaw(g.x, g.z);
+    const p = w.groundPaint;
+    const e = p ? p.entryAtRaw(r.x, r.z) : 0;
+    const entry = e ? w.paintEntries[e - 1] : null;
+    const px = new Uint8Array([255, 255, 255]);
+    const painted = p ? p.colourAtRaw(r.x, r.z, px) : false;
+    const group = w.paintGroup();
+    const name = (id: number) => `${id} ${group?.families.get(id)?.name ?? '(none)'}`;
+    const out: Record<string, unknown> = {
+      file,
+      game: [round(g.x), round(g.z)],
+      painted: entry ? { entry: e, family: `${entry.pack}:${entry.name}`, alternate: entry.child ?? 'the pole\'s own', choice: p!.choiceAtRaw(r.x, r.z) } : null,
+      colour: painted ? hexOf((px[0] << 16) | (px[1] << 8) | px[2]) : null,
+    };
+    const swg = w.terrain.swg;
+    if (swg) {
+      const pole = { family: 0, choice: 0, color: 0 };
+      if (swg.groundIfCached(g.x, g.z, pole)) out.built = { family: name(pole.family), choice: pole.choice, colour: hexOf(pole.color) };
+      const held = swg.sampler.paint;
+      swg.sampler.paint = null;
+      try {
+        const own = swg.probe(g.x, g.z);
+        out.own = { family: name(own.family), child: own.child, colour: hexOf(own.color) };
+      } finally {
+        swg.sampler.paint = held;
+      }
+    } else if (w.terrain.demShader) {
+      const s = w.terrain.demShader;
+      const held = s.paint;
+      s.paint = null;
+      try {
+        out.own = { family: name(s.familyAt(g.x, g.z, (x, z) => w.terrain.heightAt(x, z))) };
+      } finally {
+        s.paint = held;
+      }
+      const f = w.terrain.familyAt(g.x, g.z);
+      if (f) out.built = { family: name(f) };
+    }
+    return out;
   }
 
   /** The sculpt brush as the Tools tab shows it: its mode, flatten's ways, target and height, its falloff, its switches and its file. */
@@ -2074,6 +2410,7 @@ function keySheet(input: Input): string {
     `${k('putAway')} delete · ${k('takeProp')} pick up into the hand · MMB another of that · 1-9 hotbar (Shift+1-9 set) · ${k('placeLayer')} file`,
     `${k('editorBrush')} brush armed and let go (Shift+click entries in the library first) · LMB held paints · RMB held erases · Tools tab: Fold now`,
     `${k('editorSculpt')} sculpt brush armed and let go · LMB held raises (or flattens, smooths: Tools tab) · RMB held lowers · C held with the wheel sizes it · Shift+click samples the height`,
+    `${k('editorPaint')} paint brush armed and let go · LMB held paints the chosen family or colour (Tools tab) · RMB held erases · Shift+click or the middle button takes what is under it · C held with the wheel sizes it`,
     `${k('editorGameView')} game view · ${k('editorKeys')} this sheet · ${k('editorBody')} body here · ${k('editorHold')} hold the world · Esc give up / clear · F2 leave`,
   ].join('\n');
 }

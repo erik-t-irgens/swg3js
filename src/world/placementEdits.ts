@@ -28,7 +28,8 @@
 // **A batch writes any kind of edit file** (Map-maker II, DESIGN.md §2.2): each kind is a module of its reader, cleaner,
 // writer, id rule and likeness (`EditKind`), the two row layers kinds over the very functions above (so what a batch of
 // theirs answers is what it answered before the kinds, which a test holds against e6c2578's own rules), and every other
-// kind named by its wave: the heights from Map-maker II's first (`heightsKind`), the rest refused in their wave's words.
+// kind named by its wave: the heights from Map-maker II's first (`heightsKind`), the paint from its second (`paintKind`), the
+// rest refused in their wave's words.
 //
 // Here rather than beside the reader in `src/story/`, whose every file ships with the server in every release:
 // a release carries none of the editor. Pure: no fs, no DOM. Rule for this file (node runs it with type
@@ -36,6 +37,7 @@
 
 import { EDIT_FILE_KINDS, PLACEMENT_FIELDS, PLACEMENT_LIMITS, editFilePath, isPlacementId, mintPlacementId, placementsFileText, placementsPath, readPlacementRow, readPlacementsFile, readPlacementsFileRaw, rowHash, type EditFileKind, type PlacementLayer, type PlacementRead, type PlacementRow } from '../story/placements.ts';
 import { HEIGHTS_LIMITS, heightsFileText, isTileId, readHeightsFile, readTileRow, sameTile, tileWithExtras, type HeightTileRow } from './editFiles/heightsFile.ts';
+import { PAINT_LIMITS, isPaintId, paintFileText, paintRowsWhole, paintWithExtras, readPaintFile, readPaintRow, samePaintRow, type PaintRow } from './editFiles/paintFile.ts';
 
 /** Every number of the endpoint, all ours. Read where the dev server runs it, and not moved from the browser. */
 export const PLACEMENTS_ENDPOINT_TUNE = {
@@ -410,6 +412,11 @@ export interface EditKind<R extends EditRow = EditRow> {
   read(text: string, world: string, wk: 'ground' | 'space', ctx: PlacementCtx): { rows: R[]; skipped: { id: string; why: string }[]; problem: string | null };
   /** A fresh id for a put that names none, unique among `taken`: the row layers' own rule (`mintPlacementId`); a kind with none refuses an id-less put. */
   mint?(asked: Record<string, unknown>, taken: ReadonlySet<string>): string;
+  /**
+   * Why the file's rows as a batch would leave them do not hang together, in words, or null (the paint's: a family cell
+   * naming an entry past the palette, two cells in one file): refused as the asker's, before the read-back's own net.
+   */
+  whole?(rows: readonly R[]): string | null;
   /** The file it is kept in for a world, as the owner reads it. */
   file(world: string): string;
 }
@@ -425,7 +432,6 @@ export interface Held<R extends EditRow = PlacementRow> {
 export const NOT_YET: Partial<Record<EditFileKind, string>> = {
   removed: "the world editor's fifth wave's",
   people: "the world editor's fifth wave's",
-  paint: "Map-maker II's second wave's",
   water: "Map-maker II's fifth wave's",
   locations: "Map-maker II's eighth wave's",
   looks: "Map-maker II's thirteenth wave's",
@@ -502,10 +508,54 @@ function heightsFile(world: string): string {
 }
 
 /**
- * Every kind the batch writes now, by name: the two row layers, and from Map-maker II's first wave the heights. A kind
- * named in `EDIT_FILE_KINDS` and missing here is refused in its wave's words (`NOT_YET`).
+ * The paint (Map-maker II's second wave, `editFiles/paintFile.ts`): its world row, its palette and a row a layer a tile,
+ * each named by what it is (`world`, `palette`, `fam:tx,tz`, `col:tx,tz`), a tile of nothing refused (it is taken out
+ * instead), a ground world's alone. A tile's runs are held to some cell's count as it is cleaned, and the file read back
+ * whole holds every tile to its header's cell and every family cell to the palette, so a write that would leave a cell
+ * naming an entry the palette has not got is refused. No id is minted: a row is named by what it is.
  */
-export const EDIT_KINDS: Partial<Record<EditFileKind, EditKind<EditRow>>> = { story: ROW_KINDS.story as unknown as EditKind<EditRow>, world: ROW_KINDS.world as unknown as EditKind<EditRow>, heights: heightsKind as unknown as EditKind<EditRow> };
+export const paintKind: EditKind<PaintRow> = {
+  kind: 'paint',
+  group: null,
+  groundOnly: true,
+  most: PAINT_LIMITS.rows,
+  idOk: isPaintId,
+  idWords: 'its id is world, palette, or a tile\'s ("fam:tx,tz", "col:tx,tz")',
+  open(text, world, wk) {
+    if (text === null) return { rows: [], read: null, text: null };
+    const file = paintFile(world);
+    const raws: Record<string, unknown>[] = [];
+    const read = readPaintFile(text, world, wk, raws);
+    if (read.problem) return `${file} does not read (${read.problem}): mend it by hand first`;
+    if (read.skipped.length) return `${file} holds rows this build cannot read (${read.skipped.slice(0, 3).map((s) => `${s.id}: ${s.why}`).join('; ')}): mend them by hand first, or the editor would write over them`;
+    return { rows: read.rows.map((row, i) => ({ row, raw: raws[i] })), read, text };
+  },
+  clean(asked, id, stamp) {
+    const unknown: string[] = [];
+    const row = readPaintRow({ ...asked, id, at: stamp }, unknown);
+    if (typeof row === 'string') return row;
+    if (unknown.length) return `it carries fields this build does not write: ${unknown.join(', ')}`;
+    return row;
+  },
+  parse: (v) => readPaintRow(v),
+  same: samePaintRow,
+  extras: paintWithExtras,
+  text: (world, _frame, rows) => paintFileText(world, rows),
+  read: (text, world, wk) => readPaintFile(text, world, wk),
+  whole: paintRowsWhole,
+  file: paintFile,
+};
+
+/** The paint file for a world, as the owner reads it. */
+function paintFile(world: string): string {
+  return `public/${editFilePath('paint', world)}`;
+}
+
+/**
+ * Every kind the batch writes now, by name: the two row layers, from Map-maker II's first wave the heights and from its
+ * second the paint. A kind named in `EDIT_FILE_KINDS` and missing here is refused in its wave's words (`NOT_YET`).
+ */
+export const EDIT_KINDS: Partial<Record<EditFileKind, EditKind<EditRow>>> = { story: ROW_KINDS.story as unknown as EditKind<EditRow>, world: ROW_KINDS.world as unknown as EditKind<EditRow>, heights: heightsKind as unknown as EditKind<EditRow>, paint: paintKind as unknown as EditKind<EditRow> };
 
 /**
  * The world editor's one write (`{ op: 'batch', world, edits }`, DESIGN.md §2.11): every edit applied in order to every
@@ -660,6 +710,8 @@ export function applyPlacementBatch(o: Record<string, unknown>, current: Partial
     const h = held.get(l)!;
     const gn = gone.get(l)!;
     if (gn.size) h.rows = h.rows.filter((_, i) => !gn.has(i));
+    const unwhole = k.whole?.(h.rows.map((e) => e.row)) ?? null;
+    if (unwhole) return no(409, `${k.file(world)}: ${unwhole}`);
     const out = writeKindBack(k, h, l, world, frame, readKind, ctx);
     if (typeof out === 'string') return no(500, out);
     if (out.write) writes.push(out.write);

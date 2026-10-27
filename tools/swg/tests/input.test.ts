@@ -364,7 +364,9 @@ const KEY = 'swg3js.bindings';
 {
   store.clear();
   const holders = (code: string) => (Object.keys(DEFAULT_BINDINGS) as Action[]).filter((a) => DEFAULT_BINDINGS[a].includes(code));
-  ok(DEFAULT_BINDINGS.raceMode.join() === 'KeyU' && holders('KeyU').sort().join() === 'raceMode,wings', 'racing mode is on U, shared on purpose with the wings (a bike reads the one, a ship the other)');
+  // Map-maker II's second wave puts the world editor's paint brush on U too: a dev-server action, read only while the editor
+  // holds the keys (EDITOR_ACTIONS), so it never meets the ship's or the bike's.
+  ok(DEFAULT_BINDINGS.raceMode.join() === 'KeyU' && holders('KeyU').sort().join() === 'editorPaint,raceMode,wings', 'racing mode is on U, shared on purpose with the wings (a bike reads the one, a ship the other) and the editor\'s paint brush');
   const input = new Input(canvas);
   ok(input.bindings.raceMode.join() === 'KeyU' && input.bindings.wings.join() === 'KeyU', 'a fresh profile has both on U');
   input.assignKey('raceMode', ['KeyH'], 'KeyH');

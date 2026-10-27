@@ -7,6 +7,7 @@ import { PackedFixedPointMap, PackedIntegerMap } from './flora.ts';
 import { ChunkReader, chunkChild, formChild, isForm, parseIff, parseIffRoots, type IffForm } from './iff.ts';
 import { shaderKey } from './shaderKey.ts';
 import { layAsk, type HeightEdits } from './heightEdits.ts';
+import type { GroundPaint } from './groundPaint.ts';
 
 export { shaderKey, rampKey, type ColorRamp };
 
@@ -341,6 +342,8 @@ export interface HeightGrid {
   /** Environment family id at each pole (0 = none) and the same for seasonal areas. */
   environments: Uint8Array;
   seasonal: Uint8Array;
+  /** The colour map before the paint's colours (Map-maker II), only where the paint has colours over the grid. */
+  colorsUnpainted?: Uint8Array;
 }
 
 /**
@@ -395,6 +398,11 @@ export interface PoleBlock {
   environments: Uint8Array;
   /** The same for seasonal areas, so the place underneath is still known out of season. */
   seasonal: Uint8Array;
+  /**
+   * The colour map before the paint's colours were laid over it (Map-maker II), only where the paint has colours over the
+   * block: what a stroke's preview lays the paint over (`previewPaint`), so a colour already painted is never laid twice.
+   */
+  colorsUnpainted?: Uint8Array;
 }
 
 export class TerrainSampler {
@@ -427,6 +435,17 @@ export class TerrainSampler {
    */
   private readonly raws = new Map<number, Float32Array>();
   private readonly lay = layAsk();
+  /**
+   * The ground's paint (Map-maker II, `groundPaint.ts`), handed to every grid this sampler runs the generator over, so a
+   * block made here is the worker's block to the bit; null paints nothing, and every grid is the generator's.
+   */
+  paint: GroundPaint | null = null;
+  /**
+   * A paint stroke's preview (the editor's, while its button is held): each cached block it has laid over, as the block
+   * stood when the stroke first reached it, by number, so every stamp lays the paint over the same ground. Let go when the
+   * stroke's blocks are made again for it (`endPreview`), and with its block.
+   */
+  private readonly previewBase = new Map<number, { shaders: Int32Array; children: Uint8Array; colors: Uint8Array }>();
 
   constructor(template: TerrainTemplate, blockWidth = 64) {
     this.template = template;
@@ -445,13 +464,17 @@ export class TerrainSampler {
   generate(startX: number, startZ: number, n: number, step: number): HeightGrid {
     const d = this.chunkData(startX, startZ, n, step);
     this.generator.generateChunk(d);
-    return { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, children: d.shaderChild, colors: d.colorMap, excluded: d.excludeMap, floraCollidable: d.floraCollidable, floraNonCollidable: d.floraNonCollidable, radialNear: d.radialNear, radialFar: d.radialFar, environments: d.environmentMap, seasonal: d.seasonalMap };
+    const g: HeightGrid = { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, children: d.shaderChild, colors: d.colorMap, excluded: d.excludeMap, floraCollidable: d.floraCollidable, floraNonCollidable: d.floraNonCollidable, radialNear: d.radialNear, radialFar: d.radialFar, environments: d.environmentMap, seasonal: d.seasonalMap };
+    if (d.colorUnpainted !== null) g.colorsUnpainted = d.colorUnpainted;
+    return g;
   }
 
   /** A grid's maps made ready for this terrain's generator (its groups and its ramps), for a caller that runs the generator itself. */
   chunkData(startX: number, startZ: number, n: number, step: number): ChunkData {
     const g = this.generator;
-    return createChunkData(startX, startZ, n, step, g.fractalGroup, g.shaderGroup, g.bitmapGroup, g.floraGroup, g.environmentGroup, g.rampGroup, g.radialGroup);
+    const d = createChunkData(startX, startZ, n, step, g.fractalGroup, g.shaderGroup, g.bitmapGroup, g.floraGroup, g.environmentGroup, g.rampGroup, g.radialGroup);
+    if (this.paint !== null) d.paint = this.paint;
+    return d;
   }
 
   /**
@@ -556,6 +579,7 @@ export class TerrainSampler {
       const s = this.blockStart(blockX, blockZ);
       const g = this.generate(s.x, s.z, this.numberOfPoles, this.poleStep);
       b = { heights: g.heights, shaders: g.shaders, children: g.children, colors: g.colors, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, radialNear: g.radialNear, radialFar: g.radialFar, environments: g.environments, seasonal: g.seasonal };
+      if (g.colorsUnpainted) b.colorsUnpainted = g.colorsUnpainted;
       // The height edits laid over it as it enters the cache, its raw heights kept beside (Map-maker II).
       if (this.heights) this.layEntering(blockX, blockZ, b);
       this.blocks.set(`${blockX},${blockZ}`, b);
@@ -571,7 +595,87 @@ export class TerrainSampler {
     this.lastBlock = undefined;
     // A block the worker made enters the cache raw: the height edits in force are laid over it here, as they land.
     if (this.heights) this.layEntering(blockX, blockZ, block);
+    // A block made again (for a paint, Map-maker II) replaces the one cached, and a preview's ground for it goes with it.
+    if (this.previewBase.size) this.previewBase.delete(TerrainSampler.blockNumber(blockX, blockZ));
     this.blocks.set(`${blockX},${blockZ}`, block);
+  }
+
+  /**
+   * One cached block let go (Map-maker II: made again for a paint where no worker answers), its raw heights and its
+   * preview's ground with it; the next ask makes it afresh. Answers whether it was cached.
+   */
+  forgetBlock(blockX: number, blockZ: number): boolean {
+    this.lastBlock = undefined;
+    const n = TerrainSampler.blockNumber(blockX, blockZ);
+    if (n >= 0) {
+      this.raws.delete(n);
+      this.previewBase.delete(n);
+    }
+    return this.blocks.delete(`${blockX},${blockZ}`);
+  }
+
+  /** The cached blocks whose poles a rectangle of the raw frame reaches, as block places (a paint's blocks to make again). */
+  cachedBlocksIn(x0: number, z0: number, x1: number, z1: number): { bx: number; bz: number }[] {
+    const bw = this.blockWidth;
+    const step = this.poleStep;
+    const np = this.numberOfPoles;
+    const pad = ORIGIN_OFFSET * step;
+    const span = (np - 1) * step - pad;
+    const out: { bx: number; bz: number }[] = [];
+    for (let bz = Math.ceil((Math.min(z0, z1) - span) / bw); bz <= Math.floor((Math.max(z0, z1) + pad) / bw); bz++) {
+      for (let bx = Math.ceil((Math.min(x0, x1) - span) / bw); bx <= Math.floor((Math.max(x0, x1) + pad) / bw); bx++) if (this.blockAt(bx, bz)) out.push({ bx, bz });
+    }
+    return out;
+  }
+
+  /**
+   * A paint stroke's preview (the editor's, Map-maker II): the paint laid in place over every cached block a rectangle of
+   * the raw frame reaches, from the block as the stroke first found it (kept by number), so a painted cell shows at once
+   * and a stamp laid twice lays the same. A cell erased shows only once the blocks are made again (`endPreview`), since the
+   * ground's own family under a cell painted before is in no block. Answers how many blocks it laid. A stamp's work.
+   */
+  previewPaint(x0: number, z0: number, x1: number, z1: number): number {
+    const p = this.paint;
+    if (!p) return 0;
+    const step = this.poleStep;
+    const np = this.numberOfPoles;
+    let laid = 0;
+    for (const { bx, bz } of this.cachedBlocksIn(x0, z0, x1, z1)) {
+      const b = this.blockAt(bx, bz)!;
+      const n = TerrainSampler.blockNumber(bx, bz);
+      if (n < 0) continue;
+      let base = this.previewBase.get(n);
+      if (!base) {
+        // The colours as the colour affectors left them (`colorsUnpainted`, kept where the block was made under painted
+        // colours): the paint's colours are a replace with an amount, and laid again over colours it already painted they
+        // would lay twice and jump back as the stroke is let go. The families are laid whole, so painting over them is the same.
+        const colours = b.colorsUnpainted ?? b.colors ?? new Uint8Array(np * np * 3).fill(255);
+        base = { shaders: b.shaders.slice(), children: (b.children ?? new Uint8Array(np * np)).slice(), colors: colours.slice() };
+        this.previewBase.set(n, base);
+      }
+      b.shaders.set(base.shaders);
+      if (b.children) b.children.set(base.children);
+      if (b.colors) b.colors.set(base.colors);
+      const s = this.blockStart(bx, bz);
+      p.layGrid(s.x, s.z, np, step, b.shaders, b.children ?? new Uint8Array(np * np), b.colors ?? null);
+      laid++;
+    }
+    return laid;
+  }
+
+  /** A stroke's preview over: the ground it kept let go (the blocks themselves are made again for the stroke). */
+  endPreview(): void {
+    this.previewBase.clear();
+  }
+
+  /** Every cached block's key (`"bx,bz"`), a list made (a paint put in whole asks every one again). */
+  cachedBlockKeys(): string[] {
+    return [...this.blocks.keys()];
+  }
+
+  /** How many blocks a preview holds the ground of (the console's). */
+  get previewBlocks(): number {
+    return this.previewBase.size;
   }
 
   /** A block's number, a map key with nothing made (the chunks' own pattern); -1 past 4095 blocks either way. */
@@ -841,6 +945,7 @@ export class TerrainSampler {
         this.blocks.delete(key);
         // Its raw copy goes with it: a block generated again is copied afresh as it enters.
         if (this.raws.size) this.raws.delete(TerrainSampler.blockNumber(x, z));
+        if (this.previewBase.size) this.previewBase.delete(TerrainSampler.blockNumber(x, z));
       }
     }
   }
@@ -849,6 +954,7 @@ export class TerrainSampler {
     this.lastBlock = undefined;
     this.blocks.clear();
     this.raws.clear();
+    this.previewBase.clear();
   }
 
   /** Terrain height at a world point, from the tile fans exactly as the client's collision sees them. */
@@ -889,6 +995,7 @@ export class TerrainSampler {
     this.lastBlock = undefined;
     this.blocks.clear();
     this.raws.clear();
+    this.previewBase.clear();
   }
 
   get buildingLayers(): readonly Layer[] {

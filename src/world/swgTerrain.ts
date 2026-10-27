@@ -3,8 +3,9 @@ import * as THREE from 'three';
 // Heights are sampled on the main thread from cached pole grids; grids are produced
 // ahead of time by a worker so streaming never stalls on generation.
 
-import { TERRAIN_GROUND_TUNE, type EnvironmentFamily, type Layer } from '../swg/terrain/generator.ts';
+import { TERRAIN_GROUND_TUNE, type EnvironmentFamily, type Layer, type ShaderGroup } from '../swg/terrain/generator.ts';
 import { layAsk, type HeightEdits } from '../swg/terrain/heightEdits.ts';
+import { PAINT_TILE, paintTileNumber, paintTileOf, type GroundPaint } from '../swg/terrain/groundPaint.ts';
 import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, rampNames, readColorRampFile, readColorReference, TerrainSampler, UPPER_PAD, waterTables, type ColorRamp, type ColorReference, type GroundProbe, type PoleBlock, type RadialPole, type TerrainTemplate } from '../swg/terrain/trn.ts';
 import { groundChunkAt, groundShift, type GroundShift } from './groundTiles.ts';
 import { gameRibbon, terrainRibbons, type GameRibbon } from '../swg/terrain/ribbons.ts';
@@ -48,9 +49,36 @@ export interface FarGrid {
 /** Where the pack keeps the colour ramps the colour affectors read (the terrain command's to write, `colorRampFile`'s shape). */
 export const COLOR_RAMP_FILE = 'terrain/colorramps.json';
 
+/** What the terrain worker answers (`workerCore.ts`): its readiness, a grid with the paint's revision it was made at, a fault. */
+export interface TerrainReply {
+  type: string;
+  id?: number;
+  rev?: number;
+  heights?: Float32Array;
+  shaders?: Int32Array;
+  children?: Uint8Array;
+  colors?: Uint8Array;
+  excluded?: Uint8Array;
+  floraCollidable?: Uint8Array;
+  floraNonCollidable?: Uint8Array;
+  radialNear?: Uint8Array;
+  radialFar?: Uint8Array;
+  environments?: Uint8Array;
+  seasonal?: Uint8Array;
+  /** The colours before the paint's (Map-maker II), only where the paint has colours over the grid. */
+  colorsUnpainted?: Uint8Array;
+  info?: unknown;
+  message?: string;
+}
+
 interface Pending {
   key: string;
   resolve: (block: PoleBlock) => void;
+  /** The grid asked for, so a reply older than the paint over it is asked for again as it was (Map-maker II). */
+  startX: number;
+  startZ: number;
+  n: number;
+  step: number;
 }
 
 /** A lake, pool or lava flow in game coordinates, with the terrain's shader key, water type and shader size. */
@@ -107,7 +135,7 @@ export class SwgTerrain {
   /** Where the ground's mesh stands against the 64 m buckets so its vertices fall on the poles (`groundTiles.ts`). */
   readonly groundShift: GroundShift;
 
-  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number, colorReference: ColorReference | null = null, heights: HeightEdits | null = null) {
+  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number, colorReference: ColorReference | null = null, heights: HeightEdits | null = null, paint: GroundPaint | null = null, tableOnly = false, paintResolve: ((group: ShaderGroup) => void) | null = null) {
     this.colorReference = colorReference;
     this.groundShift = groundShift(centerX, centerZ);
     this.template = parseTerrainTemplate(new Uint8Array(trn));
@@ -124,12 +152,19 @@ export class SwgTerrain {
     // The world's height edits (Map-maker II), held from before any block is cached: every block and far grid takes them
     // as it enters a cache, and the generator and its worker never see them.
     this.sampler.heights = heights;
+    // The world's ground paint (Map-maker II), the same way: held from before any block is cached, and the worker's copy of
+    // it posted with its `init` below, so every grid either thread makes is painted alike.
+    this.sampler.paint = paint;
+    this.tableOnly = tableOnly;
     this.centerX = centerX;
     this.centerZ = centerZ;
     for (const l of layers) {
       const layer: Layer | null = parseLayerFile(new Uint8Array(l.bytes), this.template.generator);
       if (layer) this.sampler.addBuildingLayer(layer, l.x, l.z, l.yaw);
     }
+    // The paint's palette resolved against this terrain's own families (a building's layer file may have added some), before
+    // the worker is handed it below: both threads lay the same ids.
+    if (paint && paintResolve) paintResolve(this.template.generator.shaderGroup);
     for (const w of waterTables(this.template.generator)) {
       const points = w.points.map((pt) => ({ x: this.toGameX(pt.x), z: this.toGameZ(pt.y) }));
       let minX = Infinity;
@@ -147,7 +182,9 @@ export class SwgTerrain {
     // The terrain's ribbons (Mustafar's lava falls), in the game's frame: drawn only where a setting asks (`World`), and
     // never a water table, so nothing that asks the water here (the feet, the swim, the lava's harm) meets one.
     for (const r of terrainRibbons(this.template.generator)) this.ribbons.push(gameRibbon(r, (x) => this.toGameX(x), (z) => this.toGameZ(z)));
-    if (typeof Worker !== 'undefined') {
+    // A table read for its families alone (a real-elevation world's lent ground, the console's family list) starts no worker:
+    // nothing ever asks it for a grid, and nothing would stop one.
+    if (typeof Worker !== 'undefined' && !tableOnly) {
       try {
         this.worker = new Worker(new URL('../swg/terrain/worker.ts', import.meta.url), { type: 'module' });
         this.worker.onmessage = (e: MessageEvent) => this.onMessage(e.data);
@@ -161,6 +198,8 @@ export class SwgTerrain {
             ramps: sent,
             roadsClearFlora: TERRAIN_GROUND_TUNE.roadsClearFlora,
             lifeDay: TERRAIN_GROUND_TUNE.lifeDay,
+            paint: paint && !paint.empty ? paint.message(null, null, true) : null,
+            rev: this.paintRev,
           },
           sent.map((r) => r.rgb),
         );
@@ -176,10 +215,11 @@ export class SwgTerrain {
    * them through `fetchBytes` (pack-relative paths), and the colour ramps when the pack carries
    * them, then starts the worker.
    */
-  static async create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number, fetchBytes: (file: string) => Promise<ArrayBuffer | null>, opts: { heights?: HeightEdits | null } = {}): Promise<SwgTerrain> {
+  static async create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number, fetchBytes: (file: string) => Promise<ArrayBuffer | null>, opts: { heights?: HeightEdits | null; paint?: GroundPaint | null; paintResolve?: (group: ShaderGroup) => void; tableOnly?: boolean } = {}): Promise<SwgTerrain> {
     const probe = parseTerrainTemplate(new Uint8Array(trn));
     const bitmaps: { familyId: number; bytes: ArrayBuffer }[] = [];
-    for (const b of bitmapFiles(probe)) {
+    // A table read for its families alone fetches no bitmap: nothing generates a grid over it.
+    for (const b of opts.tableOnly ? [] : bitmapFiles(probe)) {
       const bytes = await fetchBytes(b.file);
       if (bytes) bitmaps.push({ familyId: b.familyId, bytes });
       else console.warn(`terrain: bitmap ${b.file} (${b.name}) missing; its filter passes everywhere`);
@@ -200,7 +240,247 @@ export class SwgTerrain {
         console.warn(`terrain: ${COLOR_RAMP_FILE} could not be read; the colour ramps do nothing`, err);
       }
     }
-    return new SwgTerrain(trn, layers, bitmaps, ramps, centerX, centerZ, reference, opts.heights ?? null);
+    return new SwgTerrain(trn, layers, bitmaps, ramps, centerX, centerZ, reference, opts.heights ?? null, opts.paint ?? null, !!opts.tableOnly, opts.paintResolve ?? null);
+  }
+
+  /** Whether this is a table read for its families alone (no worker, no bitmaps): `create`'s `tableOnly`. */
+  readonly tableOnly: boolean;
+
+  // ---- Map-maker II: the ground's paint -------------------------------------------------------------------------------
+
+  /** The ground's paint this terrain's grids are made with, or null. */
+  get paint(): GroundPaint | null {
+    return this.sampler.paint;
+  }
+
+  /**
+   * The paint's revision: stepped each time the paint is posted to the worker. Every grid the worker answers carries the
+   * revision it was made at, and each 512 m paint tile keeps the revision that last touched it (`tileRev`): a grid older
+   * than any tile it reaches is asked for again rather than put (a block asked for before a stroke was let go and answered
+   * after it, DESIGN.md §2.5).
+   */
+  private paintRev = 0;
+  private readonly tileRev = new Map<number, number>();
+  /** Told of every grid made again for a paint, once it is in the cache: a block's game-frame square, or a far grid's place. */
+  onRepainted: ((kind: 'block' | 'far', gx0: number, gz0: number, gx1: number, gz1: number) => void) | null = null;
+  /** What the paint's work came to (the console's): grids asked for again, replies older than their tiles asked for once more. */
+  readonly paintWork = { posted: 0, asked: 0, stale: 0, landed: 0, preview: 0 };
+
+  /**
+   * A paint put in (or let go: null), a file read late or read again whole: the sampler takes it, the worker is handed the
+   * whole of it, and every cached block and far grid is made again with it. Answers how many grids were asked for again.
+   */
+  useGroundPaint(paint: GroundPaint | null, repaint = true): number {
+    this.sampler.paint = paint;
+    this.postPaint(null, null, true);
+    // A paint of nothing (the editor's first stroke's empty one) paints no grid: none is asked for again.
+    return repaint ? this.repaintAll() : 0;
+  }
+
+  /**
+   * The paint as it stands handed to the worker (the tiles named, or the whole of it with `reset`), its revision stepped,
+   * and every 512 m tile named marked with it. Nothing goes where there is no worker: the main thread's sampler holds the
+   * very object the editor paints.
+   */
+  postPaint(famKeys: Iterable<number> | null, colKeys: Iterable<number> | null, reset: boolean): number {
+    const rev = ++this.paintRev;
+    const p = this.sampler.paint;
+    if (reset) {
+      for (const k of this.tileRev.keys()) this.tileRev.set(k, rev);
+      if (p) for (const m of [p.fam, p.col]) for (const k of m.keys()) this.tileRev.set(k, rev);
+    } else {
+      for (const k of famKeys ?? []) this.tileRev.set(k, rev);
+      for (const k of colKeys ?? []) this.tileRev.set(k, rev);
+    }
+    if (this.worker) {
+      this.worker.postMessage({ type: 'paint', rev, paint: p ? p.message(famKeys, colKeys, reset) : null });
+      this.paintWork.posted++;
+    }
+    return rev;
+  }
+
+  /**
+   * Every cached block and far grid a rectangle of the raw frame reaches asked for again with the paint in force (a stroke
+   * let go, a file landed, an undo): every 512 m tile it reaches marked at the newest revision first, so nothing older is
+   * ever put over it. Answers how many grids were asked for.
+   */
+  repaint(x0: number, z0: number, x1: number, z1: number): number {
+    const p = this.sampler.paint;
+    const m = (p?.cell ?? 8) + this.sampler.poleStep;
+    const lx = Math.min(x0, x1) - m;
+    const hx = Math.max(x0, x1) + m;
+    const lz = Math.min(z0, z1) - m;
+    const hz = Math.max(z0, z1) + m;
+    const rev = this.paintRev;
+    for (let tz = Math.floor(lz / PAINT_TILE); tz <= Math.floor(hz / PAINT_TILE); tz++) {
+      for (let tx = Math.floor(lx / PAINT_TILE); tx <= Math.floor(hx / PAINT_TILE); tx++) {
+        const k = paintTileNumber(tx, tz);
+        if (k >= 0) this.tileRev.set(k, rev);
+      }
+    }
+    let asked = 0;
+    for (const { bx, bz } of this.sampler.cachedBlocksIn(lx, lz, hx, hz)) {
+      this.regenBlock(bx, bz);
+      asked++;
+    }
+    // Over a list of the far grids made first: where no worker answers, a far grid is made again at once and filed anew
+    // under its key, at the map's end, and walked over the map itself the walk met it again for ever (a repaint before the
+    // worker said it was ready froze the page).
+    for (const key of [...this.farGrids.keys()]) {
+      const g = this.farGrids.get(key);
+      if (!g) continue;
+      const fm = this.farMeta.get(g);
+      if (!fm) continue;
+      const fx0 = Math.min(fm.x0, fm.x0 + (fm.n - 1) * fm.dx);
+      const fx1 = Math.max(fm.x0, fm.x0 + (fm.n - 1) * fm.dx);
+      const fz1 = fm.z0 + (fm.n - 1) * fm.step;
+      if (fx1 < lx || fx0 > hx || fz1 < lz || fm.z0 > hz) continue;
+      this.regenFar(key);
+      asked++;
+    }
+    this.sampler.endPreview();
+    return asked;
+  }
+
+  /**
+   * Every cached grid a tile the paint holds reaches asked for again (the palette moved, the world row's `follow` or
+   * weights moved). Answers how many grids were asked for.
+   */
+  repaintTiles(): number {
+    const p = this.sampler.paint;
+    if (!p) return 0;
+    let asked = 0;
+    for (const m of [p.fam, p.col]) {
+      for (const key of m.keys()) {
+        const { tx, tz } = paintTileOf(key);
+        asked += this.repaint(tx * PAINT_TILE, tz * PAINT_TILE, (tx + 1) * PAINT_TILE, (tz + 1) * PAINT_TILE);
+      }
+    }
+    return asked;
+  }
+
+  /**
+   * Rows of the paint file landed on this terrain's paint (`World.landPaint`, the tiles already put in or taken out): the
+   * worker handed the whole paint and every tile it holds made again where the palette moved, else the tiles that moved
+   * alone; and the raw rectangle of the tiles that moved (`moved`, null for none) made again either way, since a tile taken
+   * out is in no tile the paint still holds (an undo of a stroke that added the palette's entry, a file read again without
+   * its palette). Answers how many grids were asked for.
+   */
+  landPaint(paletteMoved: boolean, famKeys: Iterable<number>, colKeys: Iterable<number>, moved: { x0: number; z0: number; x1: number; z1: number } | null): number {
+    let asked = 0;
+    if (paletteMoved) {
+      this.postPaint(null, null, true);
+      asked += this.repaintTiles();
+    } else this.postPaint(famKeys, colKeys, false);
+    if (moved) asked += this.repaint(moved.x0, moved.z0, moved.x1, moved.z1);
+    return asked;
+  }
+
+  /** Every cached grid asked for again (a paint put in or let go whole). */
+  private repaintAll(): number {
+    let asked = 0;
+    for (const key of this.sampler.cachedBlockKeys()) {
+      const comma = key.indexOf(',');
+      this.regenBlock(Number(key.slice(0, comma)), Number(key.slice(comma + 1)));
+      asked++;
+    }
+    for (const key of [...this.farGrids.keys()]) {
+      this.regenFar(key);
+      asked++;
+    }
+    this.sampler.endPreview();
+    return asked;
+  }
+
+  /** The newest revision any paint tile a raw rectangle reaches was marked at (0: none). */
+  private revFor(x0: number, z0: number, x1: number, z1: number): number {
+    if (!this.tileRev.size) return 0;
+    const m = (this.sampler.paint?.cell ?? 8) + this.sampler.poleStep;
+    let most = 0;
+    for (let tz = Math.floor((Math.min(z0, z1) - m) / PAINT_TILE); tz <= Math.floor((Math.max(z0, z1) + m) / PAINT_TILE); tz++) {
+      for (let tx = Math.floor((Math.min(x0, x1) - m) / PAINT_TILE); tx <= Math.floor((Math.max(x0, x1) + m) / PAINT_TILE); tx++) {
+        const r = this.tileRev.get(paintTileNumber(tx, tz));
+        if (r !== undefined && r > most) most = r;
+      }
+    }
+    return most;
+  }
+
+  /** A cached block made again for the paint: asked of the worker (replacing the cached one as it lands), or here at once. */
+  private regenBlock(bx: number, bz: number): void {
+    const key = `p:${bx},${bz}`;
+    const notify = () => {
+      const s = this.sampler.blockStart(bx, bz);
+      const span = (this.sampler.numberOfPoles - 1) * this.sampler.poleStep;
+      const a = this.toGameX(s.x + span);
+      const b = this.toGameX(s.x);
+      this.onRepainted?.('block', Math.min(a, b), this.toGameZ(s.z), Math.max(a, b), this.toGameZ(s.z + span));
+    };
+    if (!this.worker || !this.workerReady) {
+      this.sampler.forgetBlock(bx, bz);
+      this.sampler.generateBlock(bx, bz);
+      this.syncGenerations++;
+      this.paintWork.landed++;
+      notify();
+      return;
+    }
+    if (this.requested.has(key)) return;
+    this.requested.add(key);
+    this.paintWork.asked++;
+    const s = this.sampler.blockStart(bx, bz);
+    this.request(key, s.x, s.z, this.sampler.numberOfPoles, this.sampler.poleStep, (block) => {
+      this.sampler.putBlock(bx, bz, block);
+      this.paintWork.landed++;
+      notify();
+    });
+  }
+
+  /** A cached far grid made again for the paint, replacing the cached one as it lands, and the world told. */
+  private regenFar(key: string): void {
+    const g = this.farGrids.get(key);
+    const fm = g ? this.farMeta.get(g) : undefined;
+    const place = this.farPlace.get(key);
+    if (!g || !fm || !place) return;
+    const { gx0, gz0, size, res } = place;
+    const notify = () => this.onRepainted?.('far', gx0, gz0, gx0 + size, gz0 + size);
+    const rkey = `pf:${key}`;
+    if (!this.worker || !this.workerReady) {
+      this.farGrids.delete(key);
+      this.farIndex.delete(gx0, gz0, size, res);
+      this.farGrid(gx0, gz0, size, res, true);
+      this.paintWork.landed++;
+      notify();
+      return;
+    }
+    if (this.requested.has(rkey)) return;
+    this.requested.add(rkey);
+    this.paintWork.asked++;
+    const step = size / res;
+    const n = res + 3;
+    const startX = this.toSwgX(gx0 + (res + 1) * step);
+    const startZ = this.toSwgZ(gz0 - step);
+    this.request(rkey, startX, startZ, n, step, (block) => {
+      // Only while the grid it replaces is still the one cached (a far tile let go meanwhile asks afresh when it is wanted).
+      if (!this.farGrids.has(key)) return;
+      this.finishFar(key, gx0, gz0, size, res, block);
+      this.paintWork.landed++;
+      notify();
+    });
+  }
+
+  /** Each far grid's place in the game's frame, by its key, so a grid can be asked for again as it was. */
+  private readonly farPlace = new Map<string, { gx0: number; gz0: number; size: number; res: number }>();
+
+  /**
+   * The paint laid in place over the cached blocks under a game-frame rectangle (the editor's preview while a stroke is
+   * held, `TerrainSampler.previewPaint`). Answers how many blocks it laid. A stamp's work.
+   */
+  previewPaint(gx0: number, gz0: number, gx1: number, gz1: number): number {
+    const x0 = this.toSwgX(Math.max(gx0, gx1));
+    const x1 = this.toSwgX(Math.min(gx0, gx1));
+    const n = this.sampler.previewPaint(x0, this.toSwgZ(Math.min(gz0, gz1)), x1, this.toSwgZ(Math.max(gz0, gz1)));
+    this.paintWork.preview += n;
+    return n;
   }
 
   /** The height edits laid over this ground, or null. */
@@ -451,42 +731,49 @@ export class SwgTerrain {
     const n = res + 3;
     const startX = this.toSwgX(gx0 + (res + 1) * step);
     const startZ = this.toSwgZ(gz0 - step);
-    const finish = (g: { heights: Float32Array; shaders: Int32Array; children: Uint8Array; colors: Uint8Array; radialFar?: Uint8Array }) => {
-      const out: FarGrid = { heights: new Float32Array(n * n), shaders: new Int32Array(n * n), children: new Uint8Array(n * n), colors: new Uint8Array(n * n * 3), radialFar: new Uint8Array(n * n * 2) };
-      const far = g.radialFar;
-      for (let j = 0; j < n; j++) {
-        for (let i = 0; i < n; i++) {
-          const to = j * n + i;
-          const from = j * n + (n - 1 - i);
-          out.heights[to] = g.heights[from];
-          out.shaders[to] = g.shaders[from] ?? 0;
-          out.children[to] = g.children[from] ?? 0;
-          out.colors[to * 3] = g.colors[from * 3] ?? 255;
-          out.colors[to * 3 + 1] = g.colors[from * 3 + 1] ?? 255;
-          out.colors[to * 3 + 2] = g.colors[from * 3 + 2] ?? 255;
-          if (far) {
-            out.radialFar[to * 2] = far[from * 2];
-            out.radialFar[to * 2 + 1] = far[from * 2 + 1];
-          }
-        }
-      }
-      // Its place in the raw frame (column i is raw x = startX + (n - 1 - i) step, row j raw z = startZ + j step), and the
-      // height edits laid over it as it enters the cache (Map-maker II): every 16 m sample stands on a pole.
-      this.farMeta.set(out, { x0: startX + (n - 1) * step, dx: -step, z0: startZ, step, n, raw: null });
-      if (this.sampler.heights) this.layFar(out);
-      this.farGrids.set(key, out);
-      this.farIndex.set(gx0, gz0, size, res, out);
-      return out;
-    };
     if (sync || !this.worker || !this.workerReady) {
       this.syncGenerations++;
-      return finish(this.sampler.generate(startX, startZ, n, step));
+      return this.finishFar(key, gx0, gz0, size, res, this.sampler.generate(startX, startZ, n, step));
     }
     if (!this.requested.has(key)) {
       this.requested.add(key);
-      this.request(key, startX, startZ, n, step, (block) => void finish(block));
+      this.request(key, startX, startZ, n, step, (block) => void this.finishFar(key, gx0, gz0, size, res, block));
     }
     return null;
+  }
+
+  /** A far grid's samples turned into the game's column order and filed (in place of any cached under its key). */
+  private finishFar(key: string, gx0: number, gz0: number, size: number, res: number, g: { heights: Float32Array; shaders: Int32Array; children: Uint8Array; colors: Uint8Array; radialFar?: Uint8Array }): FarGrid {
+    const step = size / res;
+    const n = res + 3;
+    const startX = this.toSwgX(gx0 + (res + 1) * step);
+    const startZ = this.toSwgZ(gz0 - step);
+    const out: FarGrid = { heights: new Float32Array(n * n), shaders: new Int32Array(n * n), children: new Uint8Array(n * n), colors: new Uint8Array(n * n * 3), radialFar: new Uint8Array(n * n * 2) };
+    const far = g.radialFar;
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const to = j * n + i;
+        const from = j * n + (n - 1 - i);
+        out.heights[to] = g.heights[from];
+        out.shaders[to] = g.shaders[from] ?? 0;
+        out.children[to] = g.children[from] ?? 0;
+        out.colors[to * 3] = g.colors[from * 3] ?? 255;
+        out.colors[to * 3 + 1] = g.colors[from * 3 + 1] ?? 255;
+        out.colors[to * 3 + 2] = g.colors[from * 3 + 2] ?? 255;
+        if (far) {
+          out.radialFar[to * 2] = far[from * 2];
+          out.radialFar[to * 2 + 1] = far[from * 2 + 1];
+        }
+      }
+    }
+    // Its place in the raw frame (column i is raw x = startX + (n - 1 - i) step, row j raw z = startZ + j step), and the
+    // height edits laid over it as it enters the cache (Map-maker II): every 16 m sample stands on a pole.
+    this.farMeta.set(out, { x0: startX + (n - 1) * step, dx: -step, z0: startZ, step, n, raw: null });
+    if (this.sampler.heights) this.layFar(out);
+    this.farGrids.set(key, out);
+    this.farIndex.set(gx0, gz0, size, res, out);
+    this.farPlace.set(key, { gx0, gz0, size, res });
+    return out;
   }
 
   /** Shader family painted at a game-space point (0 = none). */
@@ -588,7 +875,9 @@ export class SwgTerrain {
   }
 
   releaseFarGrid(gx0: number, gz0: number, size: number, res: number): void {
-    this.farGrids.delete(SwgTerrain.farKey(gx0, gz0, size, res));
+    const key = SwgTerrain.farKey(gx0, gz0, size, res);
+    this.farGrids.delete(key);
+    this.farPlace.delete(key);
     this.farIndex.delete(gx0, gz0, size, res);
   }
 
@@ -600,11 +889,35 @@ export class SwgTerrain {
 
   private request(key: string, startX: number, startZ: number, n: number, step: number, resolve: (block: PoleBlock) => void): void {
     const id = this.nextId++;
-    this.pending.set(id, { key, resolve });
+    this.pending.set(id, { key, resolve, startX, startZ, n, step });
     this.worker!.postMessage({ type: 'generate', id, startX, startZ, n, step });
   }
 
-  private onMessage(msg: { type: string; id?: number; heights?: Float32Array; shaders?: Int32Array; children?: Uint8Array; colors?: Uint8Array; excluded?: Uint8Array; floraCollidable?: Uint8Array; floraNonCollidable?: Uint8Array; radialNear?: Uint8Array; radialFar?: Uint8Array; environments?: Uint8Array; seasonal?: Uint8Array; info?: unknown; message?: string }): void {
+  /**
+   * Whether a grid the worker made at revision `rev` is older than the paint over it (Map-maker II): any 512 m paint tile it
+   * reaches marked at a newer revision. Nought tiles marked, nothing is ever older.
+   */
+  private staleGrid(p: Pending, rev: number): boolean {
+    if (!this.tileRev.size) return false;
+    const span = (p.n - 1) * p.step;
+    return rev < this.revFor(p.startX, p.startZ, p.startX + span, p.startZ + span);
+  }
+
+  /**
+   * A stand-in for the worker, for a node test (which has none): every message this terrain posts goes to it, and its
+   * replies come back through `handleReply`, exactly as the worker's do. Taken as ready.
+   */
+  useWorkerForTest(w: { postMessage(m: unknown): void; terminate(): void }): void {
+    this.worker = w as unknown as Worker;
+    this.workerReady = true;
+  }
+
+  /** A worker's reply handled as the worker's own `onmessage` hands it over. */
+  handleReply(msg: TerrainReply): void {
+    this.onMessage(msg);
+  }
+
+  private onMessage(msg: TerrainReply): void {
     if (msg.type === 'ready') {
       this.workerReady = true;
       console.info('terrain worker ready', msg.info);
@@ -612,9 +925,19 @@ export class SwgTerrain {
       const p = this.pending.get(msg.id);
       if (p) {
         this.pending.delete(msg.id);
+        // Made before the paint over it moved (Map-maker II): asked for again as it was, never put.
+        if (this.staleGrid(p, typeof msg.rev === 'number' ? msg.rev : 0)) {
+          this.paintWork.stale++;
+          const id = this.nextId++;
+          this.pending.set(id, p);
+          this.worker?.postMessage({ type: 'generate', id, startX: p.startX, startZ: p.startZ, n: p.n, step: p.step });
+          return;
+        }
         this.requested.delete(p.key);
         const n = msg.heights.length;
-        p.resolve({ heights: msg.heights, shaders: msg.shaders ?? new Int32Array(n), children: msg.children ?? new Uint8Array(n), colors: msg.colors ?? new Uint8Array(n * 3).fill(255), excluded: msg.excluded ?? new Uint8Array(n), floraCollidable: msg.floraCollidable ?? new Uint8Array(n * 2), floraNonCollidable: msg.floraNonCollidable ?? new Uint8Array(n * 2), radialNear: msg.radialNear ?? new Uint8Array(n * 2), radialFar: msg.radialFar ?? new Uint8Array(n * 2), environments: msg.environments ?? new Uint8Array(n), seasonal: msg.seasonal ?? new Uint8Array(n) });
+        const block: PoleBlock = { heights: msg.heights, shaders: msg.shaders ?? new Int32Array(n), children: msg.children ?? new Uint8Array(n), colors: msg.colors ?? new Uint8Array(n * 3).fill(255), excluded: msg.excluded ?? new Uint8Array(n), floraCollidable: msg.floraCollidable ?? new Uint8Array(n * 2), floraNonCollidable: msg.floraNonCollidable ?? new Uint8Array(n * 2), radialNear: msg.radialNear ?? new Uint8Array(n * 2), radialFar: msg.radialFar ?? new Uint8Array(n * 2), environments: msg.environments ?? new Uint8Array(n), seasonal: msg.seasonal ?? new Uint8Array(n) };
+        if (msg.colorsUnpainted) block.colorsUnpainted = msg.colorsUnpainted;
+        p.resolve(block);
       }
     } else if (msg.type === 'error') {
       console.warn('terrain worker:', msg.message);
@@ -627,8 +950,10 @@ export class SwgTerrain {
     this.pending.clear();
     this.requested.clear();
     this.farGrids.clear();
+    this.farPlace.clear();
     this.farIndex.clear();
     this.sampler.invalidateAll();
+    this.onRepainted = null;
   }
 }
 

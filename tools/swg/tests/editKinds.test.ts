@@ -82,7 +82,8 @@ if (old) {
 {
   const base = { story: null, world: null };
   const ctx = (): PlacementCtx => ({ worlds, now: 1, hash: glue.revisionOf, inflate });
-  const words: Record<string, RegExp> = { removed: /fifth wave/, people: /fifth wave/, paint: /second wave/, water: /fifth wave/, locations: /eighth wave/, looks: /thirteenth wave/ };
+  // The paint is the second wave's and is written from it (paintFile.test.ts holds its rows); the rest still wait for theirs.
+  const words: Record<string, RegExp> = { removed: /fifth wave/, people: /fifth wave/, water: /fifth wave/, locations: /eighth wave/, looks: /thirteenth wave/ };
   for (const [k, re] of Object.entries(words)) {
     const r = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: k, delete: 'x-1' }] }, base, ctx());
     ok(r.status === 400 && re.test((r.body as { why: string }).why) && /does not write yet/.test((r.body as { why: string }).why) && !r.writes.length, `the ${k} file is refused in its wave's words, never written`);

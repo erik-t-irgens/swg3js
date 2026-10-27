@@ -130,6 +130,11 @@ export interface EditEditor {
    * so no click picks, boxes or orbits meanwhile, and the selection takes no hold (C with the wheel sizes the tool).
    */
   toolArmed?(): boolean;
+  /**
+   * The middle button handed to an armed tool that owns it (Map-maker II's paint brush takes the family under the aim):
+   * answers whether one took it, and the eyedropper then takes nothing.
+   */
+  toolMiddle?(): boolean;
 }
 
 /**
@@ -482,7 +487,8 @@ export class EditorEdits {
       if (shift) this.setHotbar(i + 1);
       else void this.useHotbar(i + 1);
     }
-    if (this.middlePressed) void this.eyedropper();
+    // An armed tool that owns the middle button takes it (the paint brush's pick); otherwise it is the eyedropper's.
+    if (this.middlePressed && !(this.ed.toolMiddle?.() ?? false)) void this.eyedropper();
     if (this.ed.inHand() || this.writing || this.live) return;
     // One-shot steps on the selection.
     if (this.sel.size) {
