@@ -10,6 +10,9 @@
 //     one undo entry; a refused write puts every tile back and takes the palette's unwritten entries out again;
 //   - a family named with brackets is painted, and a name no file could hold is refused in words before the palette;
 //   - the middle button and Shift+click take the family under the aim into the palette and choose it, writing nothing;
+//   - (Map-maker II's third wave) a family of another world is lent first where it is not, through the host, once, then put
+//     in the palette by its pack and name and chosen; a lending refused leaves the palette as it was, said; one lent already
+//     (the middle button on a cell it paints) is taken as that world's with no lending asked;
 //   - a space zone, the world of copies and a real-elevation world with no base family are refused in words.
 //
 // Run: node tools/swg/tests/paintBrush.test.ts
@@ -43,9 +46,13 @@ interface Harness {
   notPaintable: string | null;
   rows: Map<string, PaintRow>;
   stamps: number;
+  /** Map-maker II's third wave: the families of other worlds lent now, the lendings asked, and a lending's refusal. */
+  lentNow: Set<string>;
+  lendAsked: string[];
+  lendRefuse: string | null;
 }
 function harness(): Harness {
-  const h = { ground: new GroundPaint(), entries: [] as PaintPaletteEntry[], writes: [] as RowChange[][], labels: [] as string[], said: [] as string[], refuse: false, kind: 'ground' as 'ground' | 'space' | 'copies', notPaintable: null as string | null, rows: new Map<string, PaintRow>(), stamps: 0 } as Harness;
+  const h = { ground: new GroundPaint(), entries: [] as PaintPaletteEntry[], writes: [] as RowChange[][], labels: [] as string[], said: [] as string[], refuse: false, kind: 'ground' as 'ground' | 'space' | 'copies', notPaintable: null as string | null, rows: new Map<string, PaintRow>(), stamps: 0, lentNow: new Set(['other:grass']), lendAsked: [] as string[], lendRefuse: null as string | null } as Harness;
   let label = '';
   const edits = {
     writing: false,
@@ -78,11 +85,20 @@ function harness(): Harness {
       h.entries.length = Math.min(h.entries.length, n);
     },
     pack: () => 'test',
+    // Map-maker II's third wave: a family another world lent this one (id 11, `other`'s grass) stands beside the world's own.
     families: () => [
-      { id: 7, name: 'grass', children: [{ name: 'a', weight: 1 }] },
-      { id: 9, name: 'rock', children: [{ name: 'a', weight: 1 }] },
+      { id: 7, name: 'grass', pack: 'test', children: [{ name: 'a', weight: 1 }] },
+      { id: 9, name: 'rock', pack: 'test', children: [{ name: 'a', weight: 1 }] },
+      { id: 11, name: 'grass', pack: 'other', children: [{ name: 'b', weight: 1 }] },
     ],
-    familyAt: (x) => (x > 100 ? { family: 9, choice: 3 } : { family: 7, choice: 1 }),
+    lent: (pack, name) => h.lentNow.has(`${pack}:${name}`),
+    lend: async (pack, name) => {
+      h.lendAsked.push(`${pack}:${name}`);
+      if (h.lendRefuse) return h.lendRefuse;
+      h.lentNow.add(`${pack}:${name}`);
+      return null;
+    },
+    familyAt: (x) => (x > 100 ? { family: 9, choice: 3 } : x < -100 ? { family: 11, choice: 2 } : { family: 7, choice: 1 }),
     colourAt: () => 0x804020,
     toRaw: (x, z, out) => {
       out.x = -x;
@@ -249,6 +265,27 @@ try {
     p.pick(0, 0);
     ok(PAINT_TUNE.colour === '#804020', `on the colour layer it takes the colour under the aim (${PAINT_TUNE.colour})`);
     ok(tool.owns('middle') && tool.owns('apply') && tool.owns('inverse'), 'while armed the brush owns both buttons and the middle one');
+  }
+  {
+    // Map-maker II's third wave: families of other worlds.
+    const h = harness();
+    const p = new EditorPaint(h.host);
+    p.armed = true;
+    PAINT_TUNE.layer = 'family';
+    h.lendRefuse = 'gone is not installed (no ground pictures)';
+    const no = await p.chooseFrom('gone', 'grass', undefined);
+    ok(no === h.lendRefuse && h.entries.length === 0 && h.lendAsked.join() === 'gone:grass' && h.said.some((s) => /not lent/.test(s)), `a family of another world the game cannot lend is refused in its words and never enters the palette (${no})`);
+    h.lendRefuse = null;
+    const said = await p.chooseFrom('naboo', 'grass', 1);
+    ok(h.lendAsked.join() === 'gone:grass,naboo:grass' && h.entries.length === 1 && h.entries[0].pack === 'naboo' && h.entries[0].name === 'grass' && h.entries[0].child === 1 && PAINT_TUNE.entry === 1 && /naboo/.test(said) && /naboo's grass/.test(p.chosenWords()), "one not lent yet is lent through the host first, then put in the palette by its pack and name (the alternate it forces with it) and chosen");
+    await p.chooseFrom('naboo', 'grass', 1);
+    ok(h.lendAsked.length === 2 && h.entries.length === 1 && PAINT_TUNE.entry === 1, 'chosen again it is lent nothing more and added nothing more');
+    await p.chooseFrom('test', 'rock', undefined);
+    ok(h.lendAsked.length === 2 && h.entries.length === 2 && h.entries[1].pack === 'test', "this world's own family is chosen as it always was, with no lending");
+    // The middle button on a cell another world's lent family paints takes that world's family, lent already: no lending asked.
+    p.pick(-150, 0);
+    await settle();
+    ok(h.lendAsked.length === 2 && h.entries.length === 3 && h.entries[2].pack === 'other' && h.entries[2].name === 'grass' && PAINT_TUNE.entry === 3, "the middle button on a cell another world's family paints takes it as that world's (lent already, nothing asked)");
   }
   {
     const h = harness();

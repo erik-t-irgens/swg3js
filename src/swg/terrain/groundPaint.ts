@@ -18,6 +18,10 @@
 // an 8 m staircase. So the paint is taken off before every snap (`unlayFamilies`: each pole put back as it was, where
 // nothing painted it again since) and laid after it: the final map is the ground's own snap with the paint over it.
 //
+// **Families of other worlds** (Map-maker II's third wave): a palette entry of another pack lays the family that world's
+// group lent this one (`ShaderGroup.lend`, a fresh id, in the palette's order on every thread), which the caller's `lend`
+// hands `resolve`; the paint itself only ever holds ids, so a grid laid on either thread is the same ground.
+//
 // Pure; imports only the generator, which names this file by a type alone (no cycle at run time). Rule for this file (node
 // runs it with type stripping): every import with its `.ts` extension, no enum, no namespace, no constructor parameter
 // properties. Shipped: the release carries it (`tools/launcher/pack.mjs`'s source list), and it imports nothing else.
@@ -208,21 +212,26 @@ export class GroundPaint {
   /**
    * The palette resolved to this world's families: each entry of `pack` (this world's own, or the pack a real-elevation
    * world lends from) by its name in `group`, the alternate it forces by `weights` (the world row's, keyed by family id)
-   * where it names one. An entry of another pack is another wave's (Map-maker II's third) and lays nothing. Answers the
-   * entries it could not resolve, in words.
+   * where it names one. An entry of another pack (Map-maker II's third wave) is the family `lend` answers for it -- its id
+   * in `group`, where that world's family was lent in -- or lays nothing, said in the words `lend` answers; with no `lend`
+   * it lays nothing. Answers the entries it could not resolve, in words.
    */
-  resolve(entries: readonly PaintPaletteEntry[], group: ShaderGroup, pack: string, weights?: ReadonlyMap<number, readonly number[]>): string[] {
+  resolve(entries: readonly PaintPaletteEntry[], group: ShaderGroup, pack: string, weights?: ReadonlyMap<number, readonly number[]>, lend?: (pack: string, name: string) => number | string): string[] {
     const missing: string[] = [];
     this.familyOf.fill(0);
     this.choiceOf.fill(-1);
     for (let i = 0; i < entries.length && i < PAINT_PALETTE_MOST; i++) {
       const e = entries[i];
       const at = i + 1;
+      let f: ShaderFamily | undefined;
       if (e.pack !== pack) {
-        missing.push(`${e.pack}:${e.name} (another world's family: Map-maker II's third wave)`);
-        continue;
-      }
-      const f = group.byName(e.name);
+        const id = lend ? lend(e.pack, e.name) : "another world's family, and none is lent here";
+        if (typeof id === 'string') {
+          missing.push(`${e.pack}:${e.name} (${id})`);
+          continue;
+        }
+        f = group.families.get(id);
+      } else f = group.byName(e.name);
       if (!f) {
         missing.push(`${e.pack}:${e.name} (no family of that name)`);
         continue;

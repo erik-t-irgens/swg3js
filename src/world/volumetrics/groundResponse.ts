@@ -23,6 +23,11 @@ export interface FamilyFacts {
   name: string;
   surface: string;
   children: readonly { name: string; weight: number }[];
+  /**
+   * A family another world lent this one (Map-maker II's third wave): the world it came from and its id there, which an
+   * override keyed by world and id is asked by (its id here is a fresh one). Absent for a world's own.
+   */
+  scope?: { world: string; id: number };
 }
 
 export type Decider = 'override' | 'surface' | 'surface+name' | 'name' | 'fallback';
@@ -134,11 +139,12 @@ export const LIVE_GROUND_OVERRIDES = new Map<string, GroundClass>();
 
 /** A family's class on a world (`world` the pack id), and what decided it. */
 export function classifyFamily(world: string, f: FamilyFacts): FamilyClass {
+  const at = f.scope ? `${f.scope.world}:${f.scope.id}` : `${world}:${f.id}`;
   if (LIVE_GROUND_OVERRIDES.size) {
-    const live = LIVE_GROUND_OVERRIDES.get(`${world}:${f.id}`) ?? LIVE_GROUND_OVERRIDES.get(f.name);
+    const live = LIVE_GROUND_OVERRIDES.get(at) ?? LIVE_GROUND_OVERRIDES.get(f.name);
     if (live) return { cls: live, by: 'override', why: 'set from the console this session' };
   }
-  const scoped = GROUND_OVERRIDES[`${world}:${f.id}`];
+  const scoped = GROUND_OVERRIDES[at];
   if (scoped) return { cls: scoped[0], by: 'override', why: scoped[1] };
   const named = Object.prototype.hasOwnProperty.call(GROUND_OVERRIDES, f.name) ? GROUND_OVERRIDES[f.name] : undefined;
   if (named) return { cls: named[0], by: 'override', why: named[1] };

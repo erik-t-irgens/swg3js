@@ -418,6 +418,7 @@ import { editFilePath, type EditFileKind } from './story/placementPath.ts';
 import { deltasOf, readHeightsFile, storeOfRead, tileOfId, type HeightTileRow } from './world/editFiles/heightsFile.ts';
 import { paintOfRead, readPaintFile, type PaintLoaded, type PaintRow } from './world/editFiles/paintFile.ts';
 import { GROUND_PAINT_TUNE } from './world/groundRewrite.ts';
+import { runCurtain, type CurtainResult } from './world/curtain.ts';
 import { inflateBase64 } from './world/editFiles/browserCodec.ts';
 import { MODEL_REFLECTIONS_AT_LOAD, PREVIEW_REFLECTIONS, REFLECTIONS, environmentIsStandIn, isRegisteredReflective, modelReflectiveCount, plainReflectiveCount, reflectiveCount, setEnvironmentStandIn, setModelReflections, setPlainReflections, setReflectionSource, type ReflectionSource } from './world/envmap';
 import { SPEC_TUNE, setSpecTune, specReport, specSelfTest, type SpecTune } from './world/specular.ts';
@@ -980,11 +981,6 @@ const VOL_HATCH_OFF = ((): boolean => {
     return false;
   }
 })();
-/**
- * How long the world editor's Fold now waits behind its screen for the tiers round the eye to be built again, ms: a bound
- * of ours, the arrival's own settle being 30 s; what is not in by then streams in as any tier does, hidden until built.
- */
-const EDITOR_FOLD_WAIT_MS = 20000;
 /** What the notice says while the master turned on in play builds what it needs (`reconcileVolumetrics`). */
 const VOL_WARM_NOTICE = 'Volumetrics on: preparing shaders';
 /** How long a loading screen waits for the kick-up's pictures (`World.airPictures`), ms; one landing after is handed over then. Ours. */
@@ -27732,6 +27728,7 @@ class App {
           stoodNote: (id) => this.permanent.rowOf(placementKey(id))?.note ?? null,
           fold: () => this.editorFold(),
           busy: () => this.traveling || !this.inWorld,
+          lendGround: (pack, name) => this.editorLend(pack, name),
         });
         this.editor = ed;
         return ed;
@@ -27782,10 +27779,52 @@ class App {
   }
 
   /**
-   * The world editor's **Fold now** (DESIGN.md §2.8), behind a short loading screen of the course curtain's shape: the
-   * screen shown opaque, every tier filed again under the rule in force (`refilePlaced` with `force`), so the permanent
-   * rows drawn one by one fold into their tiers as those are built again round the eye, the world waited for (bounded),
-   * the sweep behind the screen, and the screen hidden at once. Answers what it came to.
+   * The world editor's short curtain (DESIGN.md §2.9 item 9, factored out of Fold now by Map-maker II's third wave): a
+   * loading screen of the course curtain's shape over work that must not happen in view, in the one order `runCurtain`
+   * keeps -- the game held (travelling, the curtain alone, the map put away, the mouse let go) and the screen shown opaque,
+   * the screen's paint, the work, the world round the eye waited for (`CURTAIN_TUNE.settleMs`), the sweep behind the screen,
+   * the queue flushed, the screen hidden at once and the game let go whatever came of the work. A curtain is a moment and
+   * not a journey (`curtainOnly`). The dev server's alone.
+   */
+  private async editorCurtain<T>(what: string, detail: string, work: () => T | Promise<T>): Promise<CurtainResult<T> | null> {
+    if (!import.meta.env.DEV) return null;
+    let held = false;
+    return runCurtain(
+      {
+        hold: () => {
+          this.traveling = true;
+          this.curtainOnly = true;
+          this.map.hide();
+          held = this.input.captured;
+          this.input.captured = false;
+        },
+        release: () => {
+          this.traveling = false;
+          this.curtainOnly = false;
+          this.input.captured = held;
+        },
+        show: (w, d) => this.loadingScreen.show(this.world.planet, w, d),
+        setWhat: (words) => this.loadingScreen.setWhat(words),
+        setProgress: (p) => this.loadingScreen.setProgress(p),
+        hide: () => this.loadingScreen.hide({ quick: LOADING_TUNE.quickHide }),
+        settled: () => this.world.settled(this.player.worldPos),
+        progress: () => this.world.progress(this.player.worldPos),
+        compile: () => this.world.compileAllAsync(() => { }),
+        flush: () => this.world.flushPrograms(),
+        sample: () => this.sampleShaders('loading'),
+        now: () => performance.now(),
+        wait: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
+      },
+      what,
+      detail,
+      work,
+    );
+  }
+
+  /**
+   * The world editor's **Fold now** (DESIGN.md §2.8), behind the editor's short curtain (`editorCurtain`): every tier filed
+   * again under the rule in force (`refilePlaced` with `force`), so the permanent rows drawn one by one fold into their
+   * tiers as those are built again round the eye, the world waited for, the sweep behind the screen. Answers what it came to.
    */
   private async editorFold(): Promise<string> {
     if (!import.meta.env.DEV) return "the editor is the dev server's";
@@ -27798,38 +27837,26 @@ class App {
     if (!ls) return 'this world stands nothing to fold';
     const before = ls.unfoldedReport();
     if (!before.rows) return 'nothing to fold: every permanent row is drawn by its tier';
-    this.traveling = true;
-    this.curtainOnly = true;
-    this.map.hide();
-    const held = this.input.captured;
-    this.input.captured = false;
-    this.loadingScreen.show(this.world.planet, 'folding the placed rows', `${before.rows} rows into their tiers`);
-    let compiled = 0;
-    const t0 = performance.now();
-    try {
-      // The screen painted before the world's tiers are dropped under it.
-      await new Promise((r) => setTimeout(r, 250));
+    const r = await this.editorCurtain('folding the placed rows', `${before.rows} rows into their tiers`, () => {
       this.world.refilePlaced(ls.filing, { force: true });
-      const at = this.player.worldPos;
-      ls.update(at, this.world.cameraRoom.building);
-      while (!this.world.settled(at) && performance.now() - t0 < EDITOR_FOLD_WAIT_MS) {
-        const { total, stage } = this.world.progress(at);
-        this.loadingScreen.setProgress(0.04 + total * 0.8);
-        this.loadingScreen.setWhat(`loading ${stage}`);
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      this.loadingScreen.setWhat('compiling shaders');
-      compiled = await this.world.compileAllAsync(() => { });
-      await this.world.flushPrograms();
-      this.sampleShaders('loading');
-    } finally {
-      await this.loadingScreen.hide({ quick: LOADING_TUNE.quickHide });
-      this.traveling = false;
-      this.curtainOnly = false;
-      this.input.captured = held;
-    }
+      ls.update(this.player.worldPos, this.world.cameraRoom.building);
+    });
     const after = ls.unfoldedReport();
-    return `folded: ${before.rows - after.rows} of ${before.rows} rows into their tiers (${after.rows} still one by one), ${compiled} programs built behind the screen, ${Math.round(performance.now() - t0)} ms`;
+    return `folded: ${before.rows - after.rows} of ${before.rows} rows into their tiers (${after.rows} still one by one), ${r?.compiled ?? 0} programs built behind the screen, ${r?.ms ?? 0} ms`;
+  }
+
+  /**
+   * Another world's ground family lent this world in play (Map-maker II's third wave, the editor's paint brush choosing a
+   * family of another pack): behind the editor's short curtain, its pack's table read, the family lent the ground's group
+   * on both threads and its pictures put in the ground's one array (`World.lendInPlay`), whatever that builds built behind
+   * the screen. Null once lent, else why not, in words. The dev server's alone.
+   */
+  private async editorLend(pack: string, name: string): Promise<string | null> {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    if (!this.editor?.on) return 'lending a family is the world editor\'s: F2 first';
+    if (!this.inWorld || this.traveling) return 'not now: enter the world first, and not mid-crossing';
+    const r = await this.editorCurtain("lending another world's ground", `${pack}'s ${name}`, () => this.world.lendInPlay(pack, name));
+    return r ? r.answer : "the editor is the dev server's";
   }
 
   /** The rows of this world's two files as the permanent layer last read them (the library's Used here), none for another world's. */
@@ -31436,8 +31463,11 @@ class App {
       this.lastDt = dt;
       const input = this.input;
       const player = this.player;
-      // The world editor goes with its world (a travel, the select screen): off, the body stood by whatever moves it.
-      if (this.editor?.on && (this.traveling || !this.inWorld)) this.editor.worldGone();
+      // The world editor goes with its world (a travel, the select screen): off, the body stood by whatever moves it. A
+      // curtain is a moment and not a journey (`curtainOnly`: the editor's own, Fold now's and a family lent behind it, and
+      // a race's start): the world stays, and so do the editor, its selection and its history (Map-maker II's third wave
+      // found every curtain of the editor's own turning it off and dropping its history).
+      if (this.editor?.on && ((this.traveling && !this.curtainOnly) || !this.inWorld)) this.editor.worldGone();
       // A character standing in one of the captured places takes a path of its own: the world is
       // loaded and drawn and its sky runs, but nobody is playing, so none of the rest of this
       // frame -- the keys, the body, the fight, the streaming, the relay -- applies.

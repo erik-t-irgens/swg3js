@@ -22,6 +22,10 @@ import { LibraryUi, type LibraryHost } from './libraryUi.ts';
 const EDITOR_WINDOW_CSS = `
 .ed-panel { position: fixed; left: 12px; top: 64px; width: var(--ed-w, 560px); height: var(--ed-h, 78vh); max-height: calc(100vh - 80px); display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 4px; padding: 8px 10px 10px; color: var(--ink); font-size: 12px; box-sizing: border-box; }
 .ed-panel[hidden] { display: none; }
+/* While the minimap shows, the window docks under the display's top-left block rather than over the circle, at the very
+   place the help block stands by (hud.css: 12 and 212 on the HUD scale, the block's own sum), with a gap of 8; the minimap's
+   own layout is never touched, and a window moved or sized by hand stands where it was put. */
+#hud.minimap-on ~ .ed-panel { top: calc(20px + 212px * var(--hud-scale)); max-height: calc(100vh - 36px - 212px * var(--hud-scale)); }
 #ui > .ed-panel { pointer-events: auto; }
 #ui > .ed-panel.fly { pointer-events: none; opacity: 0.82; }
 .ed-panel.fly * { pointer-events: none; }
@@ -126,8 +130,15 @@ export interface PaintToolsView {
   layer: 'family' | 'colour';
   /** The palette's entries: their place, name, the alternate each forces, a picture, whether chosen, whether it lays here. */
   entries: { at: number; name: string; child: number | null; picture: string | null; chosen: boolean; lays: boolean }[];
-  /** The world's families to choose from, each with its alternates' pictures. */
-  families: { name: string; pictures: (string | null)[] }[];
+  /**
+   * The families to choose from, each with its alternates' pictures: this world's own, or (Map-maker II's third wave) the
+   * browsed pack's, each saying whether it is lent this world's ground already.
+   */
+  families: { pack: string; name: string; pictures: (string | null)[]; lent: boolean }[];
+  /** The installed worlds whose families the list can show (this world's first), the one it shows marked. */
+  packs: { id: string; words: string; on: boolean }[];
+  /** What the list says of the browsed pack (being read, why not, how lending goes), or ''. */
+  browseNote: string;
   colour: string;
   /** The world row's switches: the plants following, the alternates, the border masks, the cloud shadows. */
   switches: { key: string; words: string; on: boolean }[];
@@ -576,17 +587,23 @@ export class EditorWindow {
         r.style.flexWrap = 'wrap';
         for (const e of p.entries) r.appendChild(pic(e.picture, `${e.at}: ${e.name}${e.child !== null ? ` (alternate ${e.child})` : ''}${e.lays ? '' : ' (lays nothing here)'}`, e.chosen, { paintEntry: e.at }));
       } else this.note(el, 'The palette is empty: choose a family below, or press the middle button on the ground.');
+      // Every installed world's families (Map-maker II's third wave), a pack at a time: this world's own first.
+      this.note(el, 'Families of:');
+      const pr = row();
+      pr.style.flexWrap = 'wrap';
+      for (const k of p.packs) pr.appendChild(toggle(k.words, k.on, { paintBrowse: k.id }));
+      if (p.browseNote) this.note(el, p.browseNote);
       if (p.families.length) {
-        this.note(el, "The world's families (a click adds one to the palette and chooses it; a small picture forces that alternate):");
+        this.note(el, 'A click adds a family to the palette and chooses it; a small picture forces that alternate:');
         for (const f of p.families) {
           const r = row();
           r.style.flexWrap = 'wrap';
           const label = document.createElement('span');
           label.className = 'ed-label';
-          label.textContent = f.name;
+          label.textContent = f.lent ? f.name : `${f.name} (not lent yet)`;
           r.appendChild(label);
-          r.appendChild(pic(f.pictures[0] ?? null, `${f.name}: the pole's own alternate`, false, { paintAdd: { name: f.name } }));
-          if (f.pictures.length > 1) f.pictures.forEach((src, i) => r.appendChild(pic(src, `${f.name}: alternate ${i}`, false, { paintAdd: { name: f.name, child: i } })));
+          r.appendChild(pic(f.pictures[0] ?? null, `${f.name}: the pole's own alternate`, false, { paintAdd: { pack: f.pack, name: f.name } }));
+          if (f.pictures.length > 1) f.pictures.forEach((src, i) => r.appendChild(pic(src, `${f.name}: alternate ${i}`, false, { paintAdd: { pack: f.pack, name: f.name, child: i } })));
         }
       }
       const cf = document.createElement('label');

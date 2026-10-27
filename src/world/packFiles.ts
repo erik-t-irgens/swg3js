@@ -32,6 +32,8 @@ export interface FileAnswer {
   headers: { get(name: string): string | null };
   json(): Promise<unknown>;
   text(): Promise<string>;
+  /** The answer's bytes (`packBytes`): every real answer has it; a stand-in without it is read as its text. */
+  arrayBuffer?(): Promise<ArrayBuffer>;
 }
 
 /** What fetches: the page's own, unless a test hands another. */
@@ -153,6 +155,27 @@ async function getJson(url: string): Promise<unknown | null> {
       return null;
     }
     const data = await res.json();
+    note(url, 'ok');
+    return data;
+  } catch {
+    note(url, 'error');
+    return null;
+  }
+}
+
+/** A file's bytes, fetched; null for a miss (remembered), a page, or a failure. */
+async function getBytes(url: string): Promise<Uint8Array | null> {
+  try {
+    const res = await PACK_FILES.fetch(url);
+    if (res.status === 404) {
+      note(url, 'missing');
+      return null;
+    }
+    if (!res.ok || (res.headers.get('content-type') ?? '').includes('text/html')) {
+      note(url, 'page');
+      return null;
+    }
+    const data = res.arrayBuffer ? new Uint8Array(await res.arrayBuffer()) : new TextEncoder().encode(await res.text());
     note(url, 'ok');
     return data;
   } catch {
@@ -285,6 +308,34 @@ export async function packJson<T = unknown>(packId: string, file: string, base =
     return null;
   }
   return opts.shared ? sharedJson<T>(url) : (getJson(url) as Promise<T | null>);
+}
+
+/**
+ * One of a pack's own files as bytes (another world's `terrain.trn`, which lending reads for its family table), by the
+ * very rules `packJson` keeps: nothing for a packless world, a file the converter writes none of for its kind, a miss
+ * earlier this session, or a pack whose probe said it is not there; asked, the answer is in the session's record.
+ */
+export async function packBytes(packId: string, file: string, base = siteBase(), opts: { probe?: boolean } = {}): Promise<Uint8Array | null> {
+  const url = `${packDir(packId, base)}${file}`;
+  const world = worldOfPack(packId);
+  if (world && packless(world)) {
+    skip(url, 'the world declares no pack');
+    return null;
+  }
+  if (!packHolds(packId, file)) {
+    skip(url, 'the converter writes none for this kind of world');
+    return null;
+  }
+  if (misses.has(url)) {
+    skip(url, 'missing earlier this session');
+    return null;
+  }
+  const known = exists.get(`${packDir(packId, base)}manifest.json`);
+  if (known === false || (opts.probe !== false && known === undefined && !(await packExists(packId, base)))) {
+    skip(url, 'the pack is not there');
+    return null;
+  }
+  return getBytes(url);
 }
 
 /**

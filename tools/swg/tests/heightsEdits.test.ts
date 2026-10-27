@@ -38,8 +38,16 @@ interface Ground {
   store: HeightEdits;
   rows: HeightRows;
   sculpt: EditorSculpt | null;
-  /** Milliseconds the next landing's inflate takes (the browser's stream is a task or more). */
-  delay: number;
+  /**
+   * What the next landing's inflate waits on (the browser's stream is a task or more), or null for none: a promise the test
+   * resolves itself, so the race below is the same race on any machine and under any load (a 60 ms inflate against a 90 ms
+   * timer and six turns of the loop lost it whenever those six turns took longer than the inflate).
+   */
+  gate: Promise<void> | null;
+  /** How many inflates are waiting at the gate now: the landing has begun and has not laid anything. */
+  atGate: number;
+  /** The last landing begun, to be waited on. */
+  landing: Promise<number> | null;
   held: number;
   land(put: unknown[], deleted: string[]): Promise<number>;
 }
@@ -48,22 +56,38 @@ function ground(): Ground {
     store: new HeightEdits(),
     rows: new HeightRows(),
     sculpt: null,
-    delay: 0,
+    gate: null,
+    atGate: 0,
+    landing: null,
     held: 0,
-    async land(put, deleted) {
+    land(put, deleted) {
       // `World.landHeights`'s order: the rows at once, the tiles inflated, then laid by difference past what a stroke holds.
       g.rows.land(put as HeightTileRow[], deleted);
-      const wait = g.delay;
-      const decoded = await decodeLanded(put as HeightTileRow[], deleted, async (b) => {
-        if (wait) await new Promise((r) => setTimeout(r, wait));
-        return inflateTile(b);
-      }, deltasOf, tileOfId, () => {});
-      const n = layLanded(g.store, decoded, (tx, tz) => !!g.sculpt?.holds(tx, tz), () => {});
-      g.held += n.held;
-      return n.moved;
+      const gate = g.gate;
+      const landing = (async () => {
+        const decoded = await decodeLanded(put as HeightTileRow[], deleted, async (b) => {
+          if (gate) {
+            g.atGate++;
+            await gate;
+            g.atGate--;
+          }
+          return inflateTile(b);
+        }, deltasOf, tileOfId, () => {});
+        const n = layLanded(g.store, decoded, (tx, tz) => !!g.sculpt?.holds(tx, tz), () => {});
+        g.held += n.held;
+        return n.moved;
+      })();
+      g.landing = landing;
+      return landing;
     },
   };
   return g;
+}
+
+/** Turns of the loop until `cond` holds (each a timer's turn: no wall clock decides anything), at most `most`. */
+async function until(cond: () => boolean, most = 2000): Promise<boolean> {
+  for (let i = 0; i < most && !cond(); i++) await new Promise((r) => setTimeout(r, 0));
+  return cond();
 }
 function hostOver(h: ReturnType<typeof makeHarness>, g: Ground, centreX = 0): SculptHost {
   return {
@@ -169,24 +193,29 @@ try {
     f.dt = 1 / 30;
     f.x = 0;
     f.z = 0;
-    // Stroke A at the middle, its answer taking 60 ms to inflate.
-    g.delay = 60;
+    // Stroke A at the middle, its answer's inflate held at a gate the test opens.
+    let open: () => void = () => {};
+    g.gate = new Promise<void>((r) => (open = r));
     SCULPT_TUNE.radius = 30;
     f.apply = true;
     for (let i = 0; i < 20; i++) s.frame(f);
     f.apply = false;
     s.frame(f);
-    await h.settle();
+    // A's write has returned and its landing has begun (waiting at the gate), and has laid nothing yet.
+    const begun = await until(() => g.atGate > 0);
     const aMid = g.store.poleDelta(0, 0);
-    // Stroke B begins at once (A's write has returned, its landing has not), stamps at the middle too.
-    g.delay = 0;
+    // Stroke B begins now (A's write has returned, its landing has not), stamps at the middle too.
+    g.gate = null;
     f.apply = true;
     for (let i = 0; i < 5; i++) s.frame(f);
     const bMid = g.store.poleDelta(0, 0);
     // A's answer lands now, under B.
-    await new Promise((r) => setTimeout(r, 90));
+    const aLanding = g.landing;
+    open();
+    await aLanding;
     await h.settle();
     const midAfterLanding = g.store.poleDelta(0, 0);
+    ok(begun && aLanding !== null, "A's write returned and its landing began before B, held at the test's gate");
     // B goes on 40 m off at a small radius (never reaching the middle again), then is let go and written.
     SCULPT_TUNE.radius = 8;
     f.x = -40;

@@ -8,7 +8,8 @@
 // button is let go**: every tile it changed (and the palette, where an entry was added) in one batch, one undo entry, while
 // the worker makes the ground under it again with the plants the paint now decides. A write refused puts every tile back.
 // Two layers: the **family** layer paints the chosen palette entry (a family of this world's, or of a real-elevation
-// world's lent pack, with the alternate it forces), the **colour** layer washes the chosen colour over the client's own
+// world's lent pack, or from the third wave of any installed world's, lent this world's ground behind the editor's short
+// curtain the first time it is chosen, with the alternate it forces), the **colour** layer washes the chosen colour over the client's own
 // colour map. Shift+click and the middle button take what is under the aim: its family (into the palette, chosen) or its
 // colour. A space zone, the world of copies and a real-elevation world with no base family are refused in words.
 //
@@ -26,10 +27,11 @@ import { PaintStroke, paintStampAsk, type PaintLayer } from './groundBrush.ts';
 import { rawRect, type RawRect } from './sculpt.ts';
 import { readWash, type WashSpec } from '../world/demWash.ts';
 
-/** A family of the world's group, as the palette offers it. */
+/** A family of the world's group, as the palette offers it: the pack it is of (another world's, where it was lent this one). */
 export interface PaintFamily {
   id: number;
   name: string;
+  pack: string;
   children: { name: string; weight: number }[];
 }
 
@@ -50,8 +52,15 @@ export interface PaintHost {
   keepEntries(n: number): void;
   /** The pack whose families the palette's entries name here. */
   pack(): string;
-  /** The world's families (the group the palette resolves against). */
+  /** The world's families (the group the palette resolves against), those other worlds lent it among them. */
   families(): PaintFamily[];
+  /** Whether a family of another world is lent this world's ground now (its pictures in the array): the paint lays it. */
+  lent(pack: string, name: string): boolean;
+  /**
+   * A family of another world lent this world's ground in play, behind the editor's short curtain (Map-maker II's third
+   * wave): null once lent, else why not, in words.
+   */
+  lend(pack: string, name: string): Promise<string | null>;
   /** What the ground is painted with under a game point, from the built ground: its family id and choice byte, or null. */
   familyAt(x: number, z: number): { family: number; choice: number } | null;
   /** The colour map at a game point (0xRRGGBB), or null where nothing is built. */
@@ -154,7 +163,7 @@ export class EditorPaint {
   chosenWords(): string {
     if (PAINT_TUNE.layer === 'colour') return `the colour ${PAINT_TUNE.colour}`;
     const e = this.host.entries()[PAINT_TUNE.entry - 1];
-    return e ? `${e.name}${e.child !== undefined ? ` (alternate ${e.child})` : ''}` : 'no family yet (the Tools tab, or the middle button on the ground)';
+    return e ? `${e.pack !== this.host.pack() ? `${e.pack}'s ` : ''}${e.name}${e.child !== undefined ? ` (alternate ${e.child})` : ''}` : 'no family yet (the Tools tab, or the middle button on the ground)';
   }
 
   /**
@@ -190,7 +199,43 @@ export class EditorPaint {
     const g = this.host.familyAt(x, z);
     const fam = g ? this.host.families().find((f) => f.id === g.family) : null;
     if (!fam) return this.saySoft('no family under the aim to take');
+    // A family another world lent this one is taken as that world's (it is lent already: no curtain).
+    if (fam.pack !== this.host.pack()) {
+      void this.chooseFrom(fam.pack, fam.name, undefined);
+      return `taking ${fam.pack}'s ${fam.name}`;
+    }
     return this.choose(fam.name, undefined);
+  }
+
+  /**
+   * A family of any installed world chosen to paint (Map-maker II's third wave): this world's own as `choose` chooses it;
+   * another world's lent this world's ground first where it is not (behind the editor's short curtain, `PaintHost.lend`),
+   * then put in the palette by its pack and name and chosen. Refused in words where it cannot be lent. Answers what was said.
+   */
+  async chooseFrom(pack: string, name: string, child: number | undefined): Promise<string> {
+    if (pack === this.host.pack()) return this.choose(name, child);
+    const entry = readPaintEntry(child === undefined ? { pack, name } : { pack, name, child });
+    if (typeof entry === 'string') {
+      this.host.say(`${pack}:${name} cannot be painted: ${entry}`, false);
+      return entry;
+    }
+    const list = this.host.entries();
+    let at = list.findIndex((e) => e.pack === pack && e.name === name && e.child === child) + 1;
+    if (!at && list.length >= 255) return this.saySoft('the palette holds 255 entries, as many as a cell can name');
+    if (!this.host.lent(pack, name)) {
+      if (this.mode) return this.saySoft('let the stroke go first');
+      const no = await this.host.lend(pack, name);
+      if (no) {
+        this.host.say(`${pack}'s ${name} is not lent: ${no}`, false);
+        return no;
+      }
+    }
+    // Asked again after the wait: the curtain may have brought a palette landed meanwhile.
+    at = this.host.entries().findIndex((e) => e.pack === pack && e.name === name && e.child === child) + 1;
+    if (!at) at = this.host.addEntry(entry);
+    PAINT_TUNE.entry = at;
+    PAINT_TUNE.layer = 'family';
+    return this.saySoft(`painting ${pack}'s ${name}${child !== undefined ? ` (alternate ${child})` : ''}`);
   }
 
   /** A family chosen to paint (an alternate it forces, or none): its palette entry, appended where none names it. */

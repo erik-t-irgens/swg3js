@@ -3,8 +3,9 @@
 // it), then a pole grid generated for every `generate`. Every map of a grid goes out with it and every
 // one is transferred, never copied, so the answer costs the main thread nothing to receive.
 //
-// In:  { type: 'init', trn, layers: [{ bytes, x, z, yaw }], bitmaps: [{ familyId, bytes }], ramps: [{ name, width, rgb }], roadsClearFlora, lifeDay, paint?, rev? }
-//      { type: 'paint', rev, paint }                       (Map-maker II: the ground's paint as it stands now, `groundPaint.ts`)
+// In:  { type: 'init', trn, layers: [{ bytes, x, z, yaw }], bitmaps: [{ familyId, bytes }], ramps: [{ name, width, rgb }], roadsClearFlora, lifeDay, paint?, rev?, lent? }
+//      { type: 'paint', rev, paint, lent? }                (Map-maker II: the ground's paint as it stands now, `groundPaint.ts`;
+//                                                           `lent` the families other worlds lent the main thread's group)
 //      { type: 'generate', id, startX, startZ, n, step }
 // Out: { type: 'ready', info } | { type: 'grid', id, rev, heights, shaders, children, colors, excluded,
 //      floraCollidable, floraNonCollidable, radialNear, radialFar, environments, seasonal, colorsUnpainted? } | { type: 'error', message }
@@ -13,7 +14,7 @@
 // stroke was let go and answered after it, and ask for it again rather than put it (DESIGN.md §2.5). The worker's paint is
 // its own copy, posted and never shared: its module is a copy of its own.
 
-import { TERRAIN_GROUND_TUNE } from './generator.ts';
+import { TERRAIN_GROUND_TUNE, type LentFamily } from './generator.ts';
 import { GroundPaint, type GroundPaintMessage } from './groundPaint.ts';
 import { attachBitmap, attachRamp, parseLayerFile, parseTerrainTemplate, TerrainSampler } from './trn.ts';
 
@@ -31,6 +32,8 @@ export interface TerrainInitMessage {
   /** The world's ground paint as the main thread holds it at the start (Map-maker II), and its revision; absent paints nothing. */
   paint?: GroundPaintMessage | null;
   rev?: number;
+  /** The families other worlds lent the main thread's group (Map-maker II's third wave), each at its id there; absent lends none. */
+  lent?: LentFamily[];
 }
 
 /** The ground's paint as it stands now (Map-maker II): what every grid made after it is painted with, at revision `rev`. */
@@ -38,6 +41,8 @@ export interface TerrainPaintMessage {
   type: 'paint';
   rev: number;
   paint: GroundPaintMessage | null;
+  /** The main thread's lent families as they stand now (Map-maker II's third wave), so the worker's group gives each the same id. */
+  lent?: LentFamily[];
 }
 
 export interface TerrainGenerateMessage {
@@ -90,11 +95,15 @@ export class TerrainWorkerCore {
           this.sampler.addBuildingLayer(layer, l.x, l.z, l.yaw);
           applied++;
         }
+        // Other worlds' families lent the main thread's group (Map-maker II's third wave), after the building layers as the
+        // main thread lends them, each at the id it has there.
+        template.generator.shaderGroup.takeLent(msg.lent);
         if (msg.paint) this.takePaint(msg.paint, msg.rev);
         return { message: { type: 'ready', info: { name: template.name, layers: applied, ramps, items: template.generator.summary() } }, transfer: [] };
       }
       if (msg.type === 'paint') {
         if (!this.sampler) throw new Error('terrain worker: paint before init');
+        this.sampler.generator.shaderGroup.takeLent(msg.lent);
         this.takePaint(msg.paint, msg.rev);
         return { message: { type: 'painted', rev: this.rev }, transfer: [] };
       }

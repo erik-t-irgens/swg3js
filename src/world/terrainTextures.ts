@@ -17,7 +17,7 @@ import type { CSM } from 'three/examples/jsm/csm/CSM.js';
 import type { AssetPack } from './assetPack';
 import { injectWetness } from './wetness.ts';
 import { GGX_ANCHOR } from './specular.ts';
-import { childIndexOf, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
+import { childIndexOf, lentFamilyKey, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
 import { COLOUR_MODES, cornerOrder, GROUND_DRAW_TUNE, maskCode, tilesFit, type GroundTiler } from './groundTiles.ts';
 import { CLOUD_GREY, CLOUD_METRES, CLOUD_PERIOD, LUMA, bumpNormal, cloudShade, cloudUv, composeTile, flatShine, srgbDecode, tintGamma, type MaskSample, type TintReference } from './groundMath.ts';
 import { lighterTone } from './volumetrics/airMath.ts';
@@ -77,7 +77,7 @@ export interface ShaderFamilyDef {
 }
 
 /** The whole of terrain/shaders.json. */
-interface ShadersFile {
+export interface ShadersFile {
   version?: number;
   families: ShaderFamilyDef[];
   blend?: { quarter?: string | null; half?: string | null; threequarter?: string | null } | null;
@@ -646,6 +646,10 @@ export class TerrainTextures {
 
   private readonly layerIndex: Map<number, number>;
   private readonly averages = new Map<number, THREE.Color>();
+  /** Where a lent family's pictures are read from (Map-maker II's third wave): its own pack's address, by its def here. */
+  readonly pictureUrl = new Map<ShaderFamilyDef, (file: string) => string>();
+  /** The families other worlds lent this ground's arrays, the layers each took and what was left out, or null for none. */
+  lentReport: LentReport | null = null;
 
   private constructor(texture: THREE.DataArrayTexture, families: ShaderFamilyDef[], layers: Map<number, number>, planet: Map<number, string>, normals: THREE.DataArrayTexture | null = null) {
     this.texture = texture;
@@ -685,7 +689,7 @@ export class TerrainTextures {
    * unless `swg.ground.tiles` keeps the program of before or the terrain's tiles are not the 4 m ones the
    * program is built for (`tilesFit`); anything else exactly as it always was.
    */
-  static async load(pack: AssetPack, anisotropy: number, planet: Map<number, string>, ground?: { shaderGroup: ShaderGroup; reference: TintReference | null; tileWidth: number; renderer?: THREE.WebGLRenderer | null }): Promise<TerrainTextures | null> {
+  static async load(pack: AssetPack, anisotropy: number, planet: Map<number, string>, ground?: { shaderGroup: ShaderGroup; reference: TintReference | null; tileWidth: number; renderer?: THREE.WebGLRenderer | null }, lent: readonly LentPictures[] = []): Promise<TerrainTextures | null> {
     const bytes = await pack.bytes('terrain/shaders.json');
     if (!bytes) return null;
     let file: ShadersFile;
@@ -699,7 +703,7 @@ export class TerrainTextures {
     const tiled = (file.version ?? 0) >= 4 && !!blend?.quarter && !!blend.half && !!blend.threequarter && file.families.some((f) => f.children?.length);
     if (GROUND_TILES_WANTED && ground && tiled && !tilesFit(ground.tileWidth)) console.info(`terrain: this terrain's tiles are ${ground.tileWidth} m, not the 4 m the ground's tile program is built for; drawing it the way it was drawn before`);
     else if (GROUND_TILES_WANTED && ground && tiled) {
-      const tiled = await TerrainTextures.loadTiles(pack, anisotropy, planet, file, ground);
+      const tiled = await TerrainTextures.loadTiles(pack, anisotropy, planet, file, ground, lent);
       if (tiled) {
         tiled.empty = empty;
         return tiled;
@@ -797,17 +801,19 @@ export class TerrainTextures {
    * screen. Each picture is read at its own size: the masks and the cloud tile are not the colours' size on
    * every pack (the copies' world has 4 px colours and 256 px masks).
    */
-  private static async loadTiles(pack: AssetPack, anisotropy: number, planet: Map<number, string>, file: ShadersFile, ground: { shaderGroup: ShaderGroup; reference: TintReference | null; renderer?: THREE.WebGLRenderer | null }): Promise<TerrainTextures | null> {
+  private static async loadTiles(pack: AssetPack, anisotropy: number, planet: Map<number, string>, file: ShadersFile, ground: { shaderGroup: ShaderGroup; reference: TintReference | null; renderer?: THREE.WebGLRenderer | null }, lent: readonly LentPictures[] = []): Promise<TerrainTextures | null> {
     const firstOnly = GROUND_FIRST_CHILD_ONLY;
     const bumps = !groundBumpOff();
-    const families = file.families.filter((f) => f.children?.length);
-    const entries = tileEntries(families, firstOnly);
+    const plan = tilePlan(file.families, planet, lent, firstOnly);
+    const { families, entries, lentFams } = plan;
+    planet = plan.planet;
     if (!entries.length) return null;
+    const urlOf = tileUrlOf(plan, (f) => pack.url(f));
     const blend = file.blend!;
     const [colours, normalImgs, glossImgs, maskImgs, cloudImg] = await Promise.all([
-      Promise.all(entries.map((e) => decodeImage(pack.url(e.def.file!)))),
-      Promise.all(entries.map((e) => (bumps && e.def.normal ? decodeImage(pack.url(e.def.normal)) : Promise.resolve(null)))),
-      Promise.all(entries.map((e) => (bumps && e.def.specular ? decodeImage(pack.url(e.def.specular)) : Promise.resolve(null)))),
+      Promise.all(entries.map((e) => decodeImage(urlOf(e, e.def.file!)))),
+      Promise.all(entries.map((e) => (bumps && e.def.normal ? decodeImage(urlOf(e, e.def.normal)) : Promise.resolve(null)))),
+      Promise.all(entries.map((e) => (bumps && e.def.specular ? decodeImage(urlOf(e, e.def.specular)) : Promise.resolve(null)))),
       Promise.all([blend.quarter!, blend.half!, blend.threequarter!].map((m) => decodeImage(pack.url(m)))),
       file.clouds ? decodeImage(pack.url(file.clouds)) : Promise.resolve(null),
     ]);
@@ -871,11 +877,13 @@ export class TerrainTextures {
         clouds = t;
       }
       const out = new TerrainTextures(texture, families, arrays.firstLayer, planet, normals);
-      const { childLayers, priority } = tileLookups(planet, families, arrays.childLayersByName);
+      const { childLayers, priority, tiler, lentReport } = tilesOf(plan, arrays, ground.shaderGroup, firstOnly);
       const mip = 4 / 3;
       const per = size * size * 4;
       const bytes = { colour: Math.round(per * n * mip), bump: Math.round(per * n * mip), masks: Math.round(ms * ms * 3 * mip), clouds: cloudImg ? Math.round(cloudImg.width * cloudImg.width * 4 * mip) : 0 };
-      out.tiles = { masks, clouds, childLayers, priority, childCounts: arrays.childCounts, firstOnly, reference: ground.reference, bytes, tiler: makeTiler(childLayers, priority, ground.shaderGroup, firstOnly) };
+      out.tiles = { masks, clouds, childLayers, priority, childCounts: arrays.childCounts, firstOnly, reference: ground.reference, bytes, tiler };
+      if (lentFams) for (const [def, url] of lentFams.urls) out.pictureUrl.set(def, url);
+      out.lentReport = lentReport;
       // Uploaded now, behind the loading screen, rather than on the first frame that draws a chunk.
       const r = ground.renderer;
       if (r) for (const t of [texture, normals, masks, clouds]) if (t) r.initTexture(t);
@@ -968,6 +976,18 @@ export class TerrainTextures {
     const img = this.texture.image as { width: number; height: number; depth: number };
     const per = Math.round(img.width * img.height * 4 * img.depth * (4 / 3));
     const b = this.tiles?.bytes ?? { colour: per, bump: this.normals ? per : 0, masks: 0, clouds: 0 };
+    return { colour: mb(b.colour), bump: mb(b.bump), masks: mb(b.masks), clouds: mb(b.clouds), total: mb(b.colour + b.bump + b.masks + b.clouds) };
+  }
+
+  /**
+   * What the ground's pictures hold on this page's own heap, megabytes: three keeps a data texture's bytes after it uploads
+   * them (the colour array's are read again for the dust's colours, `toneColour`), so the arrays are held twice, once on the
+   * card with their mips and once here without (the masks and the cloud tile beside them).
+   */
+  get heapMegabytes(): { colour: number; bump: number; masks: number; clouds: number; total: number } {
+    const mb = (b: number) => Number((b / (1024 * 1024)).toFixed(1));
+    const len = (t: THREE.Texture | null | undefined): number => ((t?.image as { data?: ArrayBufferView } | undefined)?.data?.byteLength ?? 0);
+    const b = { colour: len(this.texture), bump: len(this.normals), masks: len(this.tiles?.masks), clouds: len(this.tiles?.clouds) };
     return { colour: mb(b.colour), bump: mb(b.bump), masks: mb(b.masks), clouds: mb(b.clouds), total: mb(b.colour + b.bump + b.masks + b.clouds) };
   }
 
@@ -1166,6 +1186,139 @@ export function tileLookups(planet: ReadonlyMap<number, string>, families: reado
     priority.set(id, p ?? 10000 + unlisted++);
   }
   return { childLayers, priority };
+}
+
+// ---------------------------------------------------------------- families of other worlds (Map-maker II's third wave)
+
+/**
+ * Another world's ground families lent to this world's (a palette entry of another pack, or a pack the paint file's world
+ * row names): the pack they come from, how its files are addressed, and each family as that pack's own
+ * `terrain/shaders.json` lists it, with the id it was lent under in this world's group (`ShaderGroup.lend`).
+ */
+export interface LentPictures {
+  pack: string;
+  url(file: string): string;
+  families: readonly { id: number; def: ShaderFamilyDef }[];
+}
+
+/**
+ * The most layers the ground's arrays hold: a tile names each of its layers by a byte (`aGroundLayers`), and WebGL2
+ * promises 256 layers of an array texture. A lent family that would take the arrays past it is left out whole.
+ */
+export const GROUND_LAYERS_MOST = 256;
+
+/**
+ * Where a lent family ranks at a border (ours): above every family of this world's own, in the order it was lent, and
+ * under a family a building's layer file added (`tileLookups`' 10000 on). A family painted over the ground is laid on it.
+ */
+export const LENT_PRIORITY = 1000;
+
+/** What `fitLent` answers: the lent families that fit, as the arrays name them, where each came from and is read from. */
+export interface LentFit {
+  /** The lent families as the arrays name them, in the order they fit. */
+  defs: ShaderFamilyDef[];
+  /** Each one's pack and its own name, in the same order. */
+  from: { pack: string; name: string }[];
+  urls: Map<ShaderFamilyDef, (file: string) => string>;
+  leftOut: string[];
+  /** The arrays' layers with them, this world's own and the lent. */
+  layers: number;
+}
+
+/** What the arrays hold of other worlds: each lent family's pack, name, id here and layers, and what did not fit. */
+export interface LentReport {
+  families: { pack: string; name: string; id: number; layers: number[] }[];
+  leftOut: string[];
+  /** The arrays' layers in all, this world's own and the lent. */
+  layers: number;
+}
+
+/**
+ * The lent families that fit the arrays beside this world's own (`GROUND_LAYERS_MOST`), as the arrays and the lookups
+ * name them: each its id in this world's group and the name `<pack>:<name>` (no family name has a colon, measured over
+ * every pack), so a lent family never shares a key with one of this world's, whatever its own name; and where each one's
+ * pictures are read from. A family whose layers would not fit is left out whole, and named.
+ */
+export function fitLent(own: readonly ShaderFamilyDef[], lent: readonly LentPictures[], firstOnly: boolean): LentFit {
+  let used = tileEntries(own, firstOnly).length;
+  const defs: ShaderFamilyDef[] = [];
+  const from: { pack: string; name: string }[] = [];
+  const urls = new Map<ShaderFamilyDef, (file: string) => string>();
+  const leftOut: string[] = [];
+  const seen = new Set<string>();
+  for (const l of lent) {
+    const url = (f: string): string => l.url(f);
+    for (const { id, def } of l.families) {
+      if (!def.children?.length) continue;
+      const name = lentFamilyKey(l.pack, def.name);
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const d: ShaderFamilyDef = { ...def, id, name, priority: LENT_PRIORITY + defs.length };
+      const n = tileEntries([d], firstOnly).length;
+      if (used + n > GROUND_LAYERS_MOST) {
+        leftOut.push(`${l.pack}:${def.name}`);
+        continue;
+      }
+      used += n;
+      defs.push(d);
+      from.push({ pack: l.pack, name: def.name });
+      urls.set(d, url);
+    }
+  }
+  return { defs, from, urls, leftOut, layers: used };
+}
+
+/** What a version-4 ground's arrays are planned from: the families and their entries, the planet's names, the lent that fit. */
+export interface TilePlan {
+  families: ShaderFamilyDef[];
+  entries: TileEntry[];
+  planet: Map<number, string>;
+  lentFams: LentFit | null;
+}
+
+/**
+ * The plan a version-4 ground's arrays are made by, before any picture is decoded (`TerrainTextures.load`'s first step,
+ * pure so a node test runs it): this world's families that have children, then (Map-maker II's third wave) the lent that
+ * fit after them (`fitLent`), their entries in that order, and the planet's names with every lent family named by its key.
+ * With nothing lent, this world's own list and the planet's names as handed in, the very arrays of before.
+ */
+export function tilePlan(all: readonly ShaderFamilyDef[], planet: Map<number, string>, lent: readonly LentPictures[], firstOnly: boolean): TilePlan {
+  const own = all.filter((f) => f.children?.length);
+  // Other worlds' families lent this world's ground, after its own and in the order they were lent, so every layer of this
+  // world's own is where it is with none lent.
+  const lentFams = lent.length ? fitLent(own, lent, firstOnly) : null;
+  const families = lentFams ? own.concat(lentFams.defs) : own;
+  // The group's lent families named by their key, as their pictures are filed (the world hands this world's own alone).
+  let names = planet;
+  if (lentFams) {
+    names = new Map(planet);
+    for (const d of lentFams.defs) names.set(d.id, d.name);
+  }
+  return { families, entries: tileEntries(families, firstOnly), planet: names, lentFams };
+}
+
+/**
+ * Where a planned entry's pictures are read from (`TerrainTextures.load`): a lent family's from its own pack (`fitLent`'s
+ * address), every other from this world's own pack (`ownUrl`).
+ */
+export function tileUrlOf(plan: TilePlan, ownUrl: (file: string) => string): (e: TileEntry, file: string) => string {
+  const urls = plan.lentFams?.urls;
+  return (e, file) => (urls?.get(e.family) ?? ownUrl)(file);
+}
+
+/** The lookups and the tiler a planned ground's arrays give (`TerrainTextures.load`'s last step), and what of other worlds they hold. */
+export function tilesOf(plan: TilePlan, arrays: TileArrays, group: ShaderGroup, firstOnly: boolean): { childLayers: Map<number, number[]>; priority: Map<number, number>; tiler: LiveTiler; lentReport: LentReport | null } {
+  const { childLayers, priority } = tileLookups(plan.planet, plan.families, arrays.childLayersByName);
+  return { childLayers, priority, tiler: makeTiler(childLayers, priority, group, firstOnly), lentReport: plan.lentFams ? lentReportOf(plan.lentFams, arrays.childLayersByName, arrays.depth) : null };
+}
+
+/** What `fitLent` put in the arrays, as the console reports it: each family's layers out of the arrays' own lookups. */
+function lentReportOf(fit: LentFit, byName: ReadonlyMap<string, number[]>, layers: number): LentReport {
+  return {
+    families: fit.defs.map((d, i) => ({ pack: fit.from[i].pack, name: fit.from[i].name, id: d.id, layers: [...new Set(byName.get(d.name) ?? [])] })),
+    leftOut: [...fit.leftOut],
+    layers,
+  };
 }
 
 /** The tiler a version-4 world's chunks are built by, with what the console reads off it and what a rebuild asks of it. */

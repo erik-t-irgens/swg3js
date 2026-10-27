@@ -220,18 +220,84 @@ export interface ShaderFamily {
   surface: string;
 }
 
+/** A family another world's group lent to this one (Map-maker II's third wave): its id here, the pack it came from, its id there, and the family as copied. */
+export interface LentFamily {
+  id: number;
+  pack: string;
+  from: number;
+  family: ShaderFamily;
+}
+
+/** A lent family's key: its pack and its name, the name in lower case as `byName` matches it. */
+export function lentFamilyKey(pack: string, name: string): string {
+  return `${pack}:${name.toLowerCase()}`;
+}
+
 export class ShaderGroup {
   readonly families = new Map<number, ShaderFamily>();
+  /**
+   * The families other worlds lent this group (Map-maker II's third wave: a painted family of another world), by id. A
+   * family's id means a family only in its own group, and a name means nothing across worlds (twenty of the fifty-three
+   * names two worlds share draw different pictures), so a lent family is copied in under a fresh id and kept by its pack
+   * and its name, never matched to a family of this group's by its name. Empty on every world painting only its own.
+   */
+  readonly lent = new Map<number, LentFamily>();
+  private readonly lentIds = new Map<string, number>();
 
   featherClamp(familyId: number): number {
     return this.families.get(familyId)?.featherClamp ?? 1;
   }
 
-  /** The family with this name (case-insensitive), or undefined. */
+  /** The family with this name (case-insensitive), or undefined: this world's own, never one lent from another. */
   byName(name: string): ShaderFamily | undefined {
     const key = name.toLowerCase();
-    for (const f of this.families.values()) if (f.name.toLowerCase() === key) return f;
+    for (const f of this.families.values()) if (f.name.toLowerCase() === key && !this.lent.has(f.id)) return f;
     return undefined;
+  }
+
+  /**
+   * Another world's family copied into this group (Map-maker II's third wave): under a fresh id the first time its pack
+   * and name are lent, the same id again after. Lent in the palette's order on every thread, so the ids agree.
+   */
+  lend(pack: string, like: ShaderFamily): number {
+    const key = lentFamilyKey(pack, like.name);
+    const had = this.lentIds.get(key);
+    if (had !== undefined) return had;
+    let id = 1;
+    for (const k of this.families.keys()) id = Math.max(id, k + 1);
+    const family = { ...like, id, children: like.children.map((c) => ({ ...c })) };
+    this.families.set(id, family);
+    this.lent.set(id, { id, pack, from: like.id, family });
+    this.lentIds.set(key, id);
+    return id;
+  }
+
+  /** The id a family of another world was lent under here, or -1 where it was not. */
+  lentId(pack: string, name: string): number {
+    return this.lentIds.get(lentFamilyKey(pack, name)) ?? -1;
+  }
+
+  /** Every lent family, copied, for another thread's group (`takeLent`). */
+  lentList(): LentFamily[] {
+    return [...this.lent.values()].map((l) => ({ id: l.id, pack: l.pack, from: l.from, family: { ...l.family, children: l.family.children.map((c) => ({ ...c })) } }));
+  }
+
+  /**
+   * Lent families taken from the thread that lent them (the terrain worker's `init` and `paint`): each set at its own id,
+   * so a family painted on either thread is the same family. One already lent here under its id is left as it is.
+   */
+  takeLent(list: readonly LentFamily[] | null | undefined): void {
+    for (const l of list ?? []) {
+      if (!l || !Number.isInteger(l.id) || l.id < 1 || !l.family) continue;
+      if (this.lent.get(l.id)?.pack === l.pack && this.lentId(l.pack, l.family.name) === l.id) continue;
+      // An id this group's own family holds is never written over (both threads' groups are one terrain's, so it cannot
+      // come, and a family of this world's is never another's).
+      if (this.families.has(l.id) && !this.lent.has(l.id)) continue;
+      const family = { ...l.family, id: l.id, children: l.family.children.map((c) => ({ ...c })) };
+      this.families.set(l.id, family);
+      this.lent.set(l.id, { id: l.id, pack: l.pack, from: l.from, family });
+      this.lentIds.set(lentFamilyKey(l.pack, l.family.name), l.id);
+    }
   }
 
   /** The id of the family with this name, adding a copy of `like` under a fresh id when it is new. */

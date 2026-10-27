@@ -58,7 +58,8 @@ ok(/if \(msg\.type === 'paint'\) \{[\s\S]*?this\.takePaint\(msg\.paint, msg\.rev
 ok(/if \(msg\.paint\) this\.takePaint\(msg\.paint, msg\.rev\);/.test(body(worker, '  handle(')), 'and the paint its init carries');
 ok(/type: 'grid', id: msg\.id, rev: this\.rev,/.test(worker), 'every grid carries the revision it was made at');
 ok(/paint: paint && !paint\.empty \? paint\.message\(null, null, true\) : null,\s*rev: this\.paintRev,/.test(swg), "the terrain hands its worker the paint with its init");
-ok(/this\.worker\.postMessage\(\{ type: 'paint', rev, paint: p \? p\.message\(famKeys, colKeys, reset\) : null \}\);/.test(swg), 'and every change of it as a `paint` message');
+// (From Map-maker II's third wave every post carries the families other worlds lent the group, where any were.)
+ok(/this\.worker\.postMessage\(group\.lent\.size \? \{ type: 'paint', rev, paint: p \? p\.message\(famKeys, colKeys, reset\) : null, lent: group\.lentList\(\) \} : \{ type: 'paint', rev, paint: p \? p\.message\(famKeys, colKeys, reset\) : null \}\);/.test(swg), 'and every change of it as a `paint` message');
 ok(/if \(this\.staleGrid\(p, typeof msg\.rev === 'number' \? msg\.rev : 0\)\) \{/.test(swg), 'a grid older than its tiles is asked for again, never put');
 ok(/this\.sampler\.paint = paint;/.test(swg) && /d\.paint = this\.paint;/.test(trn), 'the main thread\'s sampler holds the very paint and hands it every chunk it makes');
 
@@ -70,7 +71,8 @@ ok(/const painted = p\.familyAtRaw\(-x, z\);\s*if \(painted !== 0\) return paint
 
 // The arrival.
 const load = body(world, '  async loadPack(spawn: THREE.Vector3');
-ok(/await this\.paintReady\(\);\s*if \(token !== this\.loadToken\) return null;\s*const paint = this\.groundPaint;[\s\S]{0,200}SwgTerrain\.create\([^\n]*\{ heights, paint, paintResolve: \(group\) => this\.resolvePaint\(group\) \}/.test(load), 'the paint file is awaited before the converted terrain is made and handed to it, its palette resolved as it is made');
+// (From Map-maker II's third wave the lending is planned between the two, and lent at the terrain's constructor: `foreignFamilies.test.ts`.)
+ok(/await this\.paintReady\(\);\s*if \(token !== this\.loadToken\) return null;\s*(\/\/[^\n]*\n\s*)*await this\.prepareLending\(pack, this\.paintPack\(\)\);\s*if \(token !== this\.loadToken\) return null;\s*const paint = this\.groundPaint;[\s\S]{0,200}SwgTerrain\.create\([^\n]*\{ heights, paint, paintResolve: \(group\) => this\.resolvePaint\(group\), lend: /.test(load), 'the paint file is awaited before the converted terrain is made and handed to it, its palette resolved as it is made');
 ok(/swg\.onRepainted = \(kind, x0, z0, x1, z1\) => this\.paintLanded\(kind, x0, z0, x1, z1\);/.test(load), 'grids made again for the paint are handed to the world as they land');
 ok(/await this\.paintReady\(\);\s*if \(this\.terrain !== terrainAtLoad\) return;[\s\S]{0,400}?const base = this\.paintWorld\.base \? \{ \.\.\.this\.paintWorld\.base \} : null;\s*this\.terrain\.demBase = base;/.test(world), "a raster's paint file is read before its ground is borrowed and made, its base taken there and only there");
 ok(/else if \(base\) await this\.loadBorrowedGround\(\{ pack: base\.pack, fallback: base\.name, rules: \[\] \}, patch\.lift\);/.test(world), "a world row's base borrows its pack as a ruled world's rules do");
@@ -96,7 +98,9 @@ ok(/return swg\.repaintTiles\(\);/.test(body(world, '  private repaintPainted():
 // A real-elevation world's lent pack and its arrival's base.
 ok(/this\.terrain\.demLent = table;\s*this\.terrain\.demLentPack = spec\.pack;/.test(world), 'the pack a real-elevation world borrows is kept with its table');
 ok(/return this\.terrain\?\.demLentPack \?\? this\.planet\.ground\?\.pack \?\? this\.terrain\?\.demBase\?\.pack \?\? this\.packId;/.test(body(world, '  paintPack(): string {')), "the palette resolves against the pack really borrowed, never the world row's base as it stands now");
-ok(/const base = t\.demBase;\s*shader\.baseId = base && group && base\.pack === t\.demLentPack \?/.test(body(world, '  private installDemPaint(): void {')), "and the arrival's base is laid only where it is of the pack really borrowed");
+// Moved on purpose by the third wave: a base of another pack than the one borrowed is lent at the arrival and laid by the
+// id it was lent under (`baseFamilyId`, which foreignFamilies.test.ts runs); the arrival's base, never the row as it stands.
+ok(/shader\.baseId = baseFamilyId\(t\.demBase, t\.demLentPack, group, this\.lending\);/.test(body(world, '  private installDemPaint(): void {')), "and the arrival's base is the borrowed pack's own family, or another pack's lent at the arrival");
 
 // The colours before the paint's, carried from the worker to the preview.
 ok(/if \(g\.colorsUnpainted\) \{\s*reply\.message\.colorsUnpainted = g\.colorsUnpainted;\s*reply\.transfer\.push\(g\.colorsUnpainted\.buffer\);/.test(worker) && /if \(msg\.colorsUnpainted\) block\.colorsUnpainted = msg\.colorsUnpainted;/.test(swg), "a grid's colours before the paint's go from the worker into the block it lands as");

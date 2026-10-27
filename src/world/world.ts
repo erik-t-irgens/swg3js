@@ -50,14 +50,15 @@ import type { RadialChild } from '../swg/terrain/flora.ts';
 import { floraColliders } from './floraCollision.ts';
 import { eyeSpeed, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, rideLodBias, steppedBias, sweepDue } from './lodLevels.ts';
 import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.ts';
-import { GROUND_NORMAL, GROUND_TILES_WANTED, groundSelfTest, groundTileUniforms, groundTilesMaterial, setGroundClock, TerrainTextures, writeGroundDraw, type GroundSelfTest } from './terrainTextures.ts';
-import { GROUND_DRAW_TUNE, groundChunkAt, groundChunkOrigin, worldRowSwitches, type CornerName, type DrawSwitchesKept, type GroundColour, type GroundShine } from './groundTiles.ts';
+import { GROUND_FIRST_CHILD_ONLY, GROUND_NORMAL, GROUND_TILES_WANTED, groundSelfTest, groundTileUniforms, groundTilesMaterial, setGroundClock, TerrainTextures, writeGroundDraw, type GroundSelfTest, type ShadersFile } from './terrainTextures.ts';
+import { GROUND_DRAW_TUNE, groundChunkAt, groundChunkOrigin, tilesFit, worldRowSwitches, type CornerName, type DrawSwitchesKept, type GroundColour, type GroundShine } from './groundTiles.ts';
+import { PICTURES_NOT_LOADED, appendLending, arrivalAsks, baseFamilyId, familyOfKey, groundPacksOf, lendInto, lentAnswer, lentPackDir, lentPacksOf, lentPicturesOf, loadLentTable, notGroundPack, planLending, shadersTiled, undrawnLent, type LendPlan, type LentFetch, type LentTable } from './lentGround.ts';
 import { AssetPack, lowerLevels, type Layout, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
-import { TERRAIN_GROUND_TUNE, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
+import { TERRAIN_GROUND_TUNE, lentFamilyKey, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
 import { GroundPaint, PAINT_CELL, PAINT_TILE, paintTileNumber, weightedFamily, type PaintPaletteEntry } from '../swg/terrain/groundPaint.ts';
 import { PaintRows, cellsOfTile, colourCells, familyCells, paintTileOfId, type PaintLoaded, type PaintPaletteRow, type PaintRow, type PaintTileRow, type PaintWorldRow } from './editFiles/paintFile.ts';
 import { Wash } from './demWash.ts';
@@ -76,7 +77,7 @@ import { wildLife, type WildDeps } from './wildLife.ts';
 import { standingList } from './ngeOverlay.ts';
 import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, brigadeBodies, personDormant, rosterRows, ruinsOf, type RosterRow, type RuinsCircle } from './restuss.ts';
 import { releaseWorldStates, stateNow, standsIn, takeWorldStates } from './worldState.ts';
-import { shippedAsk } from './packFiles.ts';
+import { knownAbsent, packBytes, packJson, shippedAsk } from './packFiles.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { conversationPack } from './conversationPack.ts';
@@ -2134,10 +2135,15 @@ export class World {
           // families as the terrain is made, before the worker is handed it with its `init`.
           await this.paintReady();
           if (token !== this.loadToken) return null;
+          // Other worlds' families the paint names (Map-maker II's third wave): their tables read and what this world lends
+          // planned before the terrain is made, whose group lends them in that order before the worker is handed it. A
+          // palette of this world's own alone reads nothing here.
+          await this.prepareLending(pack, this.paintPack());
+          if (token !== this.loadToken) return null;
           const paint = this.groundPaint;
           const coming = this.terrain;
           this.swgComingFor = coming;
-          const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file), { heights, paint, paintResolve: (group) => this.resolvePaint(group) }).finally(() => {
+          const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file), { heights, paint, paintResolve: (group) => this.resolvePaint(group), lend: (group, tileWidth) => this.lendGround(group, tileWidth) }).finally(() => {
             if (this.swgComingFor === coming) this.swgComingFor = null;
           });
           if (token !== this.loadToken) return null;
@@ -4014,7 +4020,15 @@ export class World {
     const toneOnly = was.textures === textures && was.swg === swg;
     this.airTablesFor = { textures, swg, tone };
     const families: FamilyFacts[] = [];
-    if (swg) for (const f of swg.template.generator.shaderGroup.families.values()) families.push(f);
+    if (swg) {
+      const group = swg.template.generator.shaderGroup;
+      // A family another world lent this one (Map-maker II's third wave) is classed as its own world classes it, by its id
+      // there: an override written for that world's numbering (`GROUND_OVERRIDES`) never reaches a family of this world's.
+      for (const f of group.families.values()) {
+        const l = group.lent.get(f.id);
+        families.push(l ? { id: f.id, name: f.name, surface: f.surface, children: f.children, scope: { world: l.pack, id: l.from } } : f);
+      }
+    }
     else if (this.terrain?.demFamilies) for (const [name, id] of this.terrain.demFamilies) families.push({ id, name, surface: '', children: [] });
     let most = 0;
     for (const f of families) if (f.id > most) most = f.id;
@@ -4451,9 +4465,17 @@ export class World {
       if (token !== this.loadToken) return;
       this.terrain.demLent = table;
       this.terrain.demLentPack = spec.pack;
+      // Other worlds' families the paint names or the world row's `packs` lend (Map-maker II's third wave), beside the lent
+      // pack's own: their tables read and lent the table's group before its pictures are put in the ground's array. A world
+      // row naming no other pack, and a palette of the lent pack's own, read nothing here.
+      await this.prepareLending(pack, spec.pack);
+      if (token !== this.loadToken) return;
+      this.lendGround(table.template.generator.shaderGroup);
       const byName = new Map<string, number>();
       let families = 0;
       for (const f of table.template.generator.shaderGroup.families.values()) {
+        // The rules name the lent pack's own families; one lent from another world is the paint's alone.
+        if (table.template.generator.shaderGroup.lent.has(f.id)) continue;
         byName.set(f.name, f.id);
         // A lowercase alias too, so a rule need not match the pack's capitalisation.
         byName.set(f.name.toLowerCase(), f.id);
@@ -4478,18 +4500,51 @@ export class World {
     }
   }
 
-  private async loadGroundTextures(pack: AssetPack, lent?: SwgTerrain): Promise<void> {
+  /**
+   * The ground's arrays loaded (this world's pictures, and the lent families' beside them), then the lending settled
+   * (`settleLending`: a lent family whose pictures never reached the arrays lays nothing). With `relay` (an arrival on a
+   * converted world) the palette is resolved again and its grids made again where that moved what it lays; `lendInPlay`
+   * passes false and relays itself, and a real-elevation world's arrival resolves its palette after, in `installDemPaint`.
+   */
+  private async loadGroundTextures(pack: AssetPack, lent?: SwgTerrain, relay = true): Promise<void> {
+    const swg = lent ?? this.terrain.swg;
+    const group = swg?.template.generator.shaderGroup ?? null;
+    const lending = this.lending;
+    await this.loadGroundPictures(pack, lent);
+    const before = this.groundPaint ? this.groundPaint.familyOf.slice() : null;
+    const lost = this.settleLending(lending, group);
+    if (relay && lost.length && group && this.terrain.swg?.template.generator.shaderGroup === group) this.relayPaint(group, before);
+  }
+
+  private async loadGroundPictures(pack: AssetPack, lent?: SwgTerrain): Promise<void> {
     try {
       // `lent` is a pack read for its families alone, by a planet with no terrain of its own.
       const swg = lent ?? this.terrain.swg;
       const planet = new Map<number, string>();
-      if (swg) for (const f of swg.template.generator.shaderGroup.families.values()) planet.set(f.id, f.name);
+      const group = swg?.template.generator.shaderGroup ?? null;
+      // A family another world lent the group (Map-maker II's third wave) is left to the tile program's own load, which files
+      // it by its pack and its name with its pictures (`fitLent`): the program of before never meets one.
+      if (group) for (const f of group.families.values()) if (!group.lent.has(f.id)) planet.set(f.id, f.name);
       // A lent table's tint is the wash's (Map-maker II): a real-elevation world has no colour map of its own, so the lent
       // world's measured brightness means nothing there; with no wash its samples are white and the reference is none.
       const reference = lent ? (this.terrain.demWash?.reference ?? null) : (swg?.colorReference ?? null);
       const ground = swg ? { shaderGroup: swg.template.generator.shaderGroup, reference, tileWidth: swg.tileWidth, renderer: this.renderer } : undefined;
-      const textures = await TerrainTextures.load(pack, World.anisotropy, planet, ground);
+      // The lent families' pictures beside this world's own, in the order they were lent (none: the arrays of before).
+      const l = this.lending;
+      const lentPictures = l && !l.off && group ? lentPicturesOf(l.plan, l.tables, (p, n) => group.lentId(p, n)) : [];
+      const textures = await TerrainTextures.load(pack, World.anisotropy, planet, ground, lentPictures);
       if (!textures) return;
+      // The tile program's pictures would not load and the ground is drawn the way of before, which never meets a lent
+      // family: the families lent lay nothing from here on, and every painted grid is made again without them.
+      if (l && !l.off && !textures.tiles) {
+        l.off = "the ground's tile pictures would not load, and another world's family is drawn only by the tile program";
+        console.warn(`paint: ${l.off}: this world lends nothing`);
+        if (group) this.resolvePaint(group);
+        if (this.terrain.swg && this.groundPaint) {
+          this.terrain.swg.postPaint(null, null, true);
+          this.repaintPainted();
+        }
+      }
       this.groundTextures?.dispose();
       this.groundTextures = textures;
       // The pack the ground's pictures are read from, for the paint brush's palette (Map-maker II: `<img>`, no WebGL).
@@ -11771,7 +11826,7 @@ export class World {
   paintFileInfo: { rows: number; bytes: number; cell: number; skipped: { id: string; why: string }[]; problem: string | null; rev: string | null } = { rows: 0, bytes: 0, cell: PAINT_CELL, skipped: [], problem: null, rev: null };
   /** Whether this world's paint was in place before its ground was first built (`groundPaint().laidAtArrival`). */
   paintLaidAtArrival = false;
-  /** The palette's entries this world could not resolve, in words (another world's family is Map-maker II's third wave's). */
+  /** The palette's entries this world could not resolve, in words (another world's family not lent here among them). */
   paintMissing: string[] = [];
   /**
    * Whether a stroke under way holds a tile (the editor's hand-over: `EditorPaint.holds`), or null with no editor: a write's
@@ -11795,8 +11850,9 @@ export class World {
   private groundPicturePack: AssetPack | null = null;
 
   /**
-   * Each family's alternates' pictures by the family's name (lower case), as addresses the page can show as `<img>`: the
-   * paint brush's palette, which draws no WebGL. Empty before the ground's pictures are in.
+   * Each family's alternates' pictures by the family's name (lower case; a family another world lent, by its pack and name,
+   * `lentFamilyKey`), as addresses the page can show as `<img>`: the paint brush's palette, which draws no WebGL. Empty
+   * before the ground's pictures are in.
    */
   paintPictures(): Map<string, (string | null)[]> {
     const out = new Map<string, (string | null)[]>();
@@ -11804,15 +11860,46 @@ export class World {
     const t = this.groundTextures;
     if (!pack || !t) return out;
     for (const f of t.families) {
-      const kids = f.children?.length ? f.children.map((c) => (c.file ? pack.url(c.file) : null)) : [f.file ? pack.url(f.file) : null];
+      // A lent family's pictures are its own pack's (`TerrainTextures.pictureUrl`), and its name here is already its key.
+      const url = t.pictureUrl.get(f) ?? ((file: string) => pack.url(file));
+      const kids = f.children?.length ? f.children.map((c) => (c.file ? url(c.file) : null)) : [f.file ? url(f.file) : null];
       out.set(f.name.toLowerCase(), kids);
     }
     return out;
   }
 
+  /**
+   * Another installed world's ground families as its own `terrain/shaders.json` lists them (the editor's palette, browsing
+   * a pack to lend from): each family's name and its alternates' pictures as addresses for `<img>`, read once a session;
+   * why not, in words, where the pack has none.
+   */
+  async packFamilies(pack: string): Promise<{ name: string; pictures: (string | null)[] }[] | string> {
+    // A pack no ground world gives is asked for nothing (`loadLentTable`'s rule), and its files are read through
+    // `packFiles.ts` as lending reads them, so every ask is in `__debug.files()`.
+    if (!groundPacksOf().includes(pack)) return notGroundPack(pack);
+    let p = World.packFamilyLists.get(pack);
+    if (!p) {
+      const base = lentPackDir(import.meta.env.BASE_URL, pack);
+      p = World.lentFetch.json(pack, 'terrain/shaders.json').then((value) => {
+        const file = value as ShadersFile | null;
+        if (!file && World.lentFetch.absent(pack, 'terrain/shaders.json')) return `${pack} is not installed (no ground pictures)`;
+        if (!file || !Array.isArray(file.families)) {
+          World.packFamilyLists.delete(pack);
+          return `${pack}'s ground pictures did not load`;
+        }
+        if (!shadersTiled(file)) return `${pack}'s ground pictures are from before terrain shaders version 4`;
+        return file.families.filter((f) => f.children?.length).map((f) => ({ name: f.name, pictures: f.children!.map((c) => (c.file ? base + c.file : null)) }));
+      });
+      World.packFamilyLists.set(pack, p);
+    }
+    return p;
+  }
+  private static readonly packFamilyLists = new Map<string, Promise<{ name: string; pictures: (string | null)[] }[] | string>>();
+
   /** The ask for this world's paint file, begun as its load begins (`load`). */
   private askPaint(packId: string): void {
     this.groundPaint = null;
+    this.lending = null;
     this.paintEntries = [];
     this.paintWorld = { id: 'world' };
     this.paintRows.takeAll([]);
@@ -11885,19 +11972,216 @@ export class World {
     return (this.terrain?.swg ?? this.terrain?.demLent)?.template.generator.shaderGroup ?? null;
   }
 
+  // ---- Map-maker II's third wave: families of other worlds ---------------------------------------------------------------
+
+  /**
+   * What this world lends of other worlds' ground (`lentGround.ts`): the families planned at its arrival (and any lent in
+   * play, after them), the tables read, and why it lends none where it lends none (`off`: the ground is not drawn by the tile
+   * program). Null where nothing names another world: every array, id and grid is the second wave's to the bit.
+   */
+  private lending: { own: string; plan: LendPlan; tables: Map<string, LentTable | string>; off: string | null; said: string } | null = null;
+
+  /**
+   * How a lent world's two files are read: through `packFiles.ts` (`packJson`, `packBytes`), so a packless world's or a
+   * space zone's files are never asked, every ask is in `__debug.files()`, and a 404 is kept for the session (`knownAbsent`).
+   * No probe of the lent pack's manifest: nothing else of it is read, and the manifest runs to megabytes.
+   */
+  private static readonly lentFetch: LentFetch = {
+    json: (pack, file) => packJson(pack, file, import.meta.env.BASE_URL, { probe: false }),
+    bytes: (pack, file) => packBytes(pack, file, import.meta.env.BASE_URL, { probe: false }),
+    absent: (pack, file) => knownAbsent(pack, file, import.meta.env.BASE_URL),
+  };
+
+  /** This world's own ground pictures' list (`terrain/shaders.json`, the bytes the textures read after it), or null. */
+  private static async shadersOf(pack: AssetPack): Promise<ShadersFile | null> {
+    const bytes = await pack.bytes('terrain/shaders.json');
+    if (!bytes) return null;
+    try {
+      const f = JSON.parse(new TextDecoder().decode(bytes)) as ShadersFile;
+      return f && Array.isArray(f.families) ? f : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * What this world lends of other worlds (Map-maker II's third wave), worked out at its arrival before its terrain is made:
+   * the packs the palette and the world row name (`lentPacksOf`; none, and nothing is read), each one's table read once a
+   * session (`loadLentTable`), and the families that fit planned (`planLending`). Every family it cannot lend is said once
+   * on the console; its painted cells show the world's own. Only on the ground's tile program.
+   */
+  private async prepareLending(ownPack: AssetPack, own: string): Promise<void> {
+    this.lending = null;
+    // The palette's entries, a real-elevation world's base of another pack than the one borrowed (taken at this arrival,
+    // `demBase`), and the world row's packs lent whole.
+    const a = arrivalAsks(this.paintEntries, this.paintWorld.packs, this.planet?.dem ? this.terrain.demBase : null, own);
+    const packs = a.read;
+    if (!packs.length) return;
+    const ownFile = await World.shadersOf(ownPack);
+    const empty: LendPlan = { families: [], why: new Map(), own: 0, layers: 0 };
+    const tables = new Map<string, LentTable | string>();
+    let off: string | null = null;
+    if (!GROUND_TILES_WANTED) off = "the ground is drawn the way of before (swg.ground.tiles is '0'), and another world's family is drawn only on its tile program";
+    else if (!shadersTiled(ownFile)) off = `${own}'s ground pictures are from before terrain shaders version 4, and another world's family is drawn only on the tile program`;
+    if (off) {
+      this.lending = { own, plan: empty, tables, off, said: '' };
+      console.warn(`paint: ${off}: this world lends nothing`);
+      return;
+    }
+    for (const p of packs) tables.set(p, await loadLentTable(p, import.meta.env.BASE_URL, World.lentFetch));
+    const plan = planLending(ownFile!.families, a.asks, a.whole, own, tables, GROUND_FIRST_CHILD_ONLY);
+    const said = [...plan.why].map(([k, w]) => `${k} (${w})`).join('; ');
+    this.lending = { own, plan, tables, off: null, said };
+    console.info(`paint: this world lends ${plan.families.length} famil${plan.families.length === 1 ? 'y' : 'ies'} of ${packs.join(', ')} (${plan.layers - plan.own} picture layers beside its own ${plan.own})`);
+    if (said) console.warn(`paint: of other worlds, this world does not lend ${said}`);
+  }
+
+  /**
+   * The families this world lends lent a family group (the converted terrain's as it is made, `SwgTerrain.create`'s `lend`;
+   * a real-elevation world's lent table's), in the plan's order, so both threads give each the same id. A terrain whose
+   * tiles are not the tile program's 4 m (`tilesFit`) is drawn the way of before and lends nothing.
+   */
+  lendGround(group: ShaderGroup, tileWidth?: number): void {
+    const l = this.lending;
+    if (!l || l.off || !l.plan.families.length) return;
+    if (tileWidth !== undefined && !tilesFit(tileWidth)) {
+      l.off = `this terrain's tiles are ${tileWidth} m, not the 4 m the ground's tile program is built for, and another world's family is drawn only on it`;
+      console.warn(`paint: ${l.off}: this world lends nothing`);
+      return;
+    }
+    lendInto(group, l.plan);
+  }
+
+  /**
+   * Whether a family of another world is lent this world's ground now (its pictures in the array): the paint lays it, by
+   * the very answer the palette is resolved with (`lentAnswer`), so a family lent whose pictures never reached the arrays is
+   * not lent here.
+   */
+  lentHere(pack: string, name: string): boolean {
+    const g = this.paintGroup();
+    return !!g && typeof lentAnswer(this.lending, g.lentId(pack, name), lentFamilyKey(pack, name)) === 'number';
+  }
+
+  /**
+   * A family of another world lent in play (the world editor's, behind its short curtain: `App.editorLend`): its pack's
+   * table read, the family added after every one lent already (`appendLending`), lent the group on both threads, and the
+   * ground's arrays made again with its pictures beside the rest (`loadGroundTextures`: every layer of before where it was,
+   * so the chunks standing need not be built again; a texture swap, never a program). Then the palette resolved again, and
+   * any painted cell naming it made again. Null once lent, else why not, in words.
+   */
+  async lendInPlay(pack: string, name: string): Promise<string | null> {
+    const own = this.paintPack();
+    if (pack === own) return null;
+    const group = this.paintGroup();
+    const picturePack = this.groundPicturePack;
+    if (!group || !picturePack) return "this world's ground names no families yet";
+    if (!this.groundTextures?.tiles || !this.terrain.tiled) return "another world's family is drawn only on the ground's tile program, which this world is not drawn by";
+    if (this.lentHere(pack, name)) return null;
+    const l = (this.lending ??= { own, plan: { families: [], why: new Map(), own: 0, layers: 0 }, tables: new Map(), off: null, said: '' });
+    if (l.off) return l.off;
+    // Lent this visit and its pictures never reached the arrays: lent again only at the next arrival (lent again now, its
+    // layers would stand before those of every family lent after it, under the chunks standing).
+    const key = lentFamilyKey(pack, name);
+    const lost = group.lentId(pack, name) > 0 ? l.plan.why.get(key) : undefined;
+    if (lost !== undefined) return lost;
+    // A world lending nothing at its arrival counts its own layers now, from the list its arrays were made of.
+    if (!l.plan.layers) {
+      const ownFile = await World.shadersOf(picturePack);
+      const plan = planLending(ownFile?.families ?? [], [], [], own, l.tables, GROUND_FIRST_CHILD_ONLY);
+      l.plan.own = l.plan.layers = plan.own;
+    }
+    const table = l.tables.get(pack) ?? (await loadLentTable(pack, import.meta.env.BASE_URL, World.lentFetch));
+    l.tables.set(pack, table);
+    const no = appendLending(l.plan, table, pack, name, GROUND_FIRST_CHILD_ONLY);
+    if (no) return no;
+    lendInto(group, l.plan);
+    // The worker's group given the family at the same id before any grid is asked for with it.
+    this.terrain.swg?.postLent();
+    // What the palette lays before, so an entry it held already for the family (a file landed while it was not lent) is
+    // made again once it lays.
+    const before = this.groundPaint ? this.groundPaint.familyOf.slice() : null;
+    const layersBefore = this.groundTextures?.tiles?.childLayers ?? null;
+    // The arrays made again; a family whose pictures never reached them is marked there and lays nothing (`undrawnLent`).
+    await this.loadGroundTextures(picturePack, this.terrain.swg ? undefined : (this.terrain.demLent ?? undefined), false);
+    this.relayPaint(group, before);
+    // A picture that loaded before and not now (its family's layers gone) moves every layer after it: the chunks standing
+    // name layers by number, so they are built again (behind the curtain), never left drawing their neighbours' pictures.
+    const layersNow = this.groundTextures?.tiles?.childLayers ?? null;
+    if (layersBefore && layersNow && layersNow !== layersBefore && [...layersBefore].some(([id, list]) => (layersNow.get(id) ?? []).join() !== list.join())) this.rebuildGround();
+    // Lent, or why not after all (its pictures never reached the arrays, or the tile pictures would not load at all).
+    const a = lentAnswer(this.lending, group.lentId(pack, name), key);
+    return typeof a === 'number' ? null : a;
+  }
+
+  /**
+   * The palette resolved again (its lending's answer as it stands), and every grid it paints made again where what an entry
+   * lays moved since `before` (the palette's `familyOf` then): the converted ground's painted grids, a real-elevation
+   * world's ground.
+   */
+  private relayPaint(group: ShaderGroup, before: ArrayLike<number> | null): void {
+    this.resolvePaint(group);
+    const p = this.groundPaint;
+    if (!p || !before || !p.familyOf.some((v, i) => v !== before[i])) return;
+    const swg = this.terrain.swg;
+    if (swg) {
+      swg.postPaint(null, null, true);
+      this.repaintPainted();
+    } else this.rebuildGround();
+  }
+
+  /**
+   * After the ground's arrays were made (`loadGroundTextures`): every family lent whose pictures never reached them (a
+   * picture that did not decode, a load that failed and left the arrays of before) taken out of the lending, said, so the
+   * lending's answer lays nothing for it and its cells show the world's own (`undrawnLent`). Answers the keys taken out.
+   */
+  private settleLending(l: World['lending'], group: ShaderGroup | null): string[] {
+    if (!l || l.off || !group || !l.plan.families.length || this.lending !== l) return [];
+    const tiles = this.groundTextures?.tiles;
+    const lost = undrawnLent(l.plan, (p, n) => group.lentId(p, n), (id) => (tiles?.childLayers.get(id)?.length ?? 0) > 0);
+    if (lost.length) console.warn(`paint: of other worlds, ${lost.join(', ')} lay nothing here: ${PICTURES_NOT_LOADED}`);
+    return lost;
+  }
+
+  /** What this world lends of other worlds, for the console (`groundPaint({ packs })`). */
+  lendingReport(): Record<string, unknown> {
+    const l = this.lending;
+    const t = this.groundTextures;
+    const img = t?.texture.image as { width: number; depth: number } | undefined;
+    const lr = t?.lentReport ?? null;
+    const byPack = new Map<string, { families: string[]; layers: number }>();
+    for (const f of lr?.families ?? []) {
+      const e = byPack.get(f.pack) ?? { families: [], layers: 0 };
+      e.families.push(`${f.name} (id ${f.id}, layers ${f.layers.join(',')})`);
+      e.layers += f.layers.length;
+      byPack.set(f.pack, e);
+    }
+    return {
+      own: l?.own ?? this.paintPack(),
+      packs: Object.fromEntries(byPack),
+      named: { palette: lentPacksOf(this.paintEntries, [], this.paintPack()), worldRow: this.paintWorld.packs ?? [] },
+      off: l?.off ?? null,
+      notLent: l ? Object.fromEntries(l.plan.why) : {},
+      leftOutOfArrays: lr?.leftOut ?? [],
+      // On the card (with their mips), and on this page's own heap: three keeps a data texture's bytes after it uploads them,
+      // and the colour array's are read again for the dust's colours. A lend in play holds two sets on the heap until the
+      // old arrays are let go.
+      arrays: t ? { layers: img?.depth ?? 0, ownLayers: l?.plan.own ?? img?.depth ?? 0, lentLayers: lr ? lr.layers - (l?.plan.own ?? 0) : 0, px: img?.width ?? 0, most: 256, megabytes: t.gpuMegabytes, heapMegabytes: t.heapMegabytes } : null,
+    };
+  }
+
   /**
    * The palette resolved against a family group (the terrain's own as it is made, `SwgTerrain.create`'s `paintResolve`;
    * a lent table's): each entry's family id and the alternate it forces, worked out over the world row's weights, which are
-   * kept by family id for the tiler. An entry of another pack lays nothing (the third wave's) and is said once.
+   * kept by family id for the tiler. An entry of another pack lays the family this world lent it under (the third wave), or
+   * nothing where none was lent, said once.
    */
   resolvePaint(group: ShaderGroup): void {
     const pack = this.paintPack();
     const byId = new Map<number, number[]>();
     const weighted = new Map<number, ShaderFamily>();
     for (const [k, w] of Object.entries(this.paintWorld.weights ?? {})) {
-      const colon = k.indexOf(':');
-      if (k.slice(0, colon) !== pack) continue;
-      const f = group.byName(k.slice(colon + 1));
+      // A family of another world by the id this world lent it under (Map-maker II's third wave), this world's own by its name.
+      const f = familyOfKey(group, pack, k);
       if (!f) continue;
       byId.set(f.id, w);
       const wf = weightedFamily(f, w);
@@ -11906,7 +12190,12 @@ export class World {
     this.paintWeighted = weighted;
     const p = this.groundPaint;
     if (!p) return;
-    const missing = p.resolve(this.paintEntries, group, pack, byId);
+    // An entry of another world lays the family this world lent it under, or nothing, said in why: not lent at this arrival
+    // (a file landed in play naming one, drawn at the next arrival), not installed, past the arrays, its pictures never in
+    // them, or no tile program here (`lentAnswer`).
+    const l = this.lending;
+    const lend = (pk: string, nm: string): number | string => lentAnswer(l, group.lentId(pk, nm), lentFamilyKey(pk, nm));
+    const missing = p.resolve(this.paintEntries, group, pack, byId, lend);
     if (missing.join() !== this.paintMissing.join() && missing.length) console.warn(`paint: ${missing.length} palette entr${missing.length === 1 ? 'y' : 'ies'} lay nothing here: ${missing.join('; ')}`);
     this.paintMissing = missing;
   }
@@ -11962,10 +12251,10 @@ export class World {
     const shader = t.demShader;
     if (!shader) return;
     const group = t.demLent?.template.generator.shaderGroup;
-    // The arrival's base, against the pack really borrowed: a base of another pack (a ruled world whose base names a pack
-    // its rules do not borrow) is the third wave's lending and lays nothing yet.
-    const base = t.demBase;
-    shader.baseId = base && group && base.pack === t.demLentPack ? (group.byName(base.name)?.id ?? -1) : -1;
+    // The arrival's base, against the pack really borrowed; a base of another pack (a ruled world whose base names a pack its
+    // rules do not borrow) lent at the arrival (`arrivalAsks`) by the id it was lent under, while its pictures are in the
+    // arrays (`baseFamilyId`).
+    shader.baseId = baseFamilyId(t.demBase, t.demLentPack, group, this.lending);
     shader.paint = this.groundPaint;
     if (group) this.resolvePaint(group);
     this.bindDemTint();
@@ -12017,6 +12306,8 @@ export class World {
     const weightsMoved = JSON.stringify(prev.weights ?? null) !== JSON.stringify(row.weights ?? null);
     const baseMoved = JSON.stringify(prev.base ?? null) !== JSON.stringify(row.base ?? null);
     if (baseMoved) console.info('paint: the base family moved; it is taken at the next arrival on this world');
+    // The packs lent from (Map-maker II's third wave) are read behind the arrival's screen: a family chosen in the editor is lent at once.
+    if (JSON.stringify(prev.packs ?? null) !== JSON.stringify(row.packs ?? null)) console.info('paint: the packs this world lends from moved; they are lent at the next arrival on this world (a family chosen in the editor is lent at once, behind a short curtain)');
     const g = this.paintGroup();
     if (weightsMoved && g) this.resolvePaint(g);
     const swg = this.terrain.swg;

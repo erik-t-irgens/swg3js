@@ -54,6 +54,8 @@ import { TINT_MODES, type PaintWorldRow } from '../world/editFiles/paintFile.ts'
 import { readWash, type WashSpec } from '../world/demWash.ts';
 import type { PaintToolsView } from '../ui/editorWindow.ts';
 import { GROUND_DRAW_TUNE } from '../world/groundTiles.ts';
+import { lentFamilyKey } from '../swg/terrain/generator.ts';
+import { groundPacksOf, packOfFamily } from '../world/lentGround.ts';
 import { deflateBase64 } from '../world/editFiles/browserCodec.ts';
 import { standingFoot } from '../world/layoutStream.ts';
 import { FlyCam, stepSpeed } from './flyCam.ts';
@@ -135,6 +137,11 @@ export interface EditorHost {
   fold(): Promise<string>;
   /** Whether the game is travelling or has no world (nothing folds by itself then). */
   busy(): boolean;
+  /**
+   * Another world's ground family lent this world in play (Map-maker II's third wave), behind the editor's short curtain:
+   * null once lent, else why not, in words.
+   */
+  lendGround(pack: string, name: string): Promise<string | null>;
 }
 
 /** One thing in hand: what a row writes, what it is drawn and judged by, and how it is turned. */
@@ -431,6 +438,21 @@ export class Editor {
   readonly sculpt: EditorSculpt;
   /** The paint brush (Map-maker II's second wave). */
   readonly paint: EditorPaint;
+  /** The pack the paint palette's family list shows (Map-maker II's third wave): '' for this world's own. */
+  private paintBrowse = '';
+  /** Other installed worlds' families as read for that list, by pack, or why not (a pack still being read is absent). */
+  private readonly browsed = new Map<string, { name: string; pictures: (string | null)[] }[] | string>();
+
+  /** The palette's family list turned to a pack (this world's own, or another installed world's to lend from), read once. */
+  private browsePack(pack: string): void {
+    const w = this.host.world;
+    this.paintBrowse = pack === w.paintPack() ? '' : pack;
+    if (!this.paintBrowse || this.browsed.has(pack)) return;
+    void w.packFamilies(pack).then((r) => {
+      this.browsed.set(pack, r);
+      this.window?.refreshEdits();
+    });
+  }
 
   /** What the paint brush needs of the game: the world's paint and its rebuild, its families, the file's rows. */
   private paintHost(): PaintHost {
@@ -464,7 +486,13 @@ export class Editor {
         if (g) w.resolvePaint(g);
       },
       pack: () => w.paintPack(),
-      families: () => [...(w.paintGroup()?.families.values() ?? [])].map((f) => ({ id: f.id, name: f.name, children: f.children })),
+      families: () => {
+        const g = w.paintGroup();
+        const own = w.paintPack();
+        return [...(g?.families.values() ?? [])].map((f) => ({ id: f.id, name: f.name, pack: packOfFamily(g, f.id, own), children: f.children }));
+      },
+      lent: (pack, name) => w.lentHere(pack, name),
+      lend: (pack, name) => h.lendGround(pack, name),
       familyAt: (x, z) => {
         const s = w.terrain.swg;
         if (s) return s.groundIfCached(x, z, pole) ? { family: pole.family, choice: pole.choice } : null;
@@ -818,6 +846,9 @@ export class Editor {
     this.washTimer = null;
     this.marks.ringOn = false;
     this.marks.ring2On = false;
+    // The palette's family list turned back to the next world's own (`paintView` also reads a browsed pack that is the
+    // world's own as its own, for a travel made with the editor off, which reaches no `worldGone`).
+    this.paintBrowse = '';
     // Its selection, its history and anything under way go with the world, on or off.
     this.edits.worldGone();
     if (!this.session.on) return;
@@ -1839,8 +1870,15 @@ export class Editor {
       PAINT_TUNE.entry = t.paintEntry;
       PAINT_TUNE.layer = 'family';
     }
-    const pa = t.paintAdd as { name?: unknown; child?: unknown } | undefined;
-    if (pa && typeof pa.name === 'string') this.paint.choose(pa.name, typeof pa.child === 'number' ? pa.child : undefined);
+    const pa = t.paintAdd as { pack?: unknown; name?: unknown; child?: unknown } | undefined;
+    if (pa && typeof pa.name === 'string') {
+      const child = typeof pa.child === 'number' ? pa.child : undefined;
+      // A family of another world (Map-maker II's third wave) is lent behind the curtain first; the tab is drawn again after.
+      if (typeof pa.pack === 'string' && pa.pack !== this.host.world.paintPack()) void this.paint.chooseFrom(pa.pack, pa.name, child).then(() => this.window?.refreshEdits());
+      else this.paint.choose(pa.name, child);
+    }
+    // The pack the palette's family list shows (this world's own, or another installed world's to lend from).
+    if (typeof t.paintBrowse === 'string') this.browsePack(t.paintBrowse);
     if (typeof t.paintColour === 'string' && /^#[0-9a-fA-F]{6}$/.test(t.paintColour)) {
       PAINT_TUNE.colour = t.paintColour.toLowerCase();
       PAINT_TUNE.layer = 'colour';
@@ -1859,17 +1897,31 @@ export class Editor {
   private paintView(): PaintToolsView {
     const w = this.host.world;
     const pics = w.paintPictures();
+    const own = w.paintPack();
+    // A palette entry of another world is filed by its pack and name (`lentFamilyKey`), this world's own by its name.
+    const picsOf = (pack: string, name: string): (string | null)[] => pics.get(pack === own ? name.toLowerCase() : lentFamilyKey(pack, name)) ?? [];
     const entries = w.paintEntries.map((e, i) => {
-      const kids = pics.get(e.name.toLowerCase()) ?? [];
-      return { at: i + 1, name: e.name, child: e.child ?? null, picture: kids[e.child ?? 0] ?? kids[0] ?? null, chosen: PAINT_TUNE.layer === 'family' && PAINT_TUNE.entry === i + 1, lays: (w.groundPaint?.familyOf[i + 1] ?? 0) !== 0 || !w.groundPaint };
+      const kids = picsOf(e.pack, e.name);
+      return { at: i + 1, name: e.pack === own ? e.name : `${e.pack}'s ${e.name}`, child: e.child ?? null, picture: kids[e.child ?? 0] ?? kids[0] ?? null, chosen: PAINT_TUNE.layer === 'family' && PAINT_TUNE.entry === i + 1, lays: (w.groundPaint?.familyOf[i + 1] ?? 0) !== 0 || !w.groundPaint };
     });
-    const fams = [...(w.paintGroup()?.families.values() ?? [])].sort((a, b) => a.name.localeCompare(b.name));
-    const families = fams.map((f) => ({ name: f.name, pictures: pics.get(f.name.toLowerCase()) ?? [] }));
+    const group = w.paintGroup();
+    const fams = [...(group?.families.values() ?? [])].filter((f) => !group?.lent.has(f.id)).sort((a, b) => a.name.localeCompare(b.name));
+    // The family list: this world's own, or (Map-maker II's third wave) another installed world's to lend from, read once.
+    // A pack browsed on another world that is this world's own (a travel to it) is this world's own list.
+    const browse = this.paintBrowse === own ? '' : this.paintBrowse;
+    const read = browse ? this.browsed.get(browse) : undefined;
+    const families = browse
+      ? Array.isArray(read)
+        ? [...read].sort((a, b) => a.name.localeCompare(b.name)).map((f) => ({ pack: browse, name: f.name, pictures: f.pictures, lent: w.lentHere(browse, f.name) }))
+        : []
+      : fams.map((f) => ({ pack: own, name: f.name, pictures: pics.get(f.name.toLowerCase()) ?? [], lent: true }));
+    const packs = [{ id: own, words: `${own} (this world)`, on: !browse }, ...groundPacksOf().filter((p) => p !== own).map((p) => ({ id: p, words: p, on: browse === p }))];
+    const browseNote = !browse ? '' : read === undefined ? `reading ${browse}'s ground pictures...` : typeof read === 'string' ? read : `${browse}'s families: the first choice of one lends it this world's ground behind a short curtain (its pictures put in the ground's array), after which it paints at once; a lent one is marked.`;
     const row = w.paintWorld;
     const t = GROUND_DRAW_TUNE;
     const chosen = w.paintEntries[PAINT_TUNE.entry - 1];
-    const fam = chosen ? fams.find((f) => f.name === chosen.name) : null;
-    const key = fam ? `${w.paintPack()}:${fam.name}` : '';
+    const fam = chosen ? (chosen.pack === own ? fams.find((f) => f.name === chosen.name) : group?.families.get(group.lentId(chosen.pack, chosen.name))) ?? null : null;
+    const key = fam && chosen ? `${chosen.pack}:${fam.name}` : '';
     const weights = fam ? { key, name: fam.name, values: row.weights?.[key] ?? fam.children.map((c) => c.weight), own: fam.children.map((c) => c.weight) } : null;
     const p = w.groundPaint;
     const f = w.paintFileInfo;
@@ -1884,6 +1936,8 @@ export class Editor {
       layer: PAINT_TUNE.layer,
       entries,
       families,
+      packs,
+      browseNote,
       colour: PAINT_TUNE.colour,
       switches: [
         { key: 'follow', words: row.follow === false ? 'Plants keep their places' : 'Plants follow the paint', on: row.follow !== false },
@@ -1924,8 +1978,10 @@ export class Editor {
       else if (o.arm !== undefined) said.push(`arm is one of ${PAINT_LAYERS.join(', ')}, or false`);
       if (typeof o.choose === 'string') said.push(this.paint.choose(o.choose, undefined));
       else if (o.choose && typeof o.choose === 'object') {
-        const ch = o.choose as { name?: unknown; child?: unknown };
-        if (typeof ch.name === 'string') said.push(this.paint.choose(ch.name, typeof ch.child === 'number' ? ch.child : undefined));
+        const ch = o.choose as { pack?: unknown; name?: unknown; child?: unknown };
+        const child = typeof ch.child === 'number' ? ch.child : undefined;
+        // Another world's family (Map-maker II's third wave): lent behind the curtain first where it is not.
+        if (typeof ch.name === 'string') said.push(typeof ch.pack === 'string' ? await this.paint.chooseFrom(ch.pack, ch.name, child) : this.paint.choose(ch.name, child));
       }
       if (typeof o.entry === 'number') {
         if (o.entry >= 1 && o.entry <= w.paintEntries.length) PAINT_TUNE.entry = o.entry;
@@ -1973,6 +2029,8 @@ export class Editor {
       paint: this.paint.report(),
       tune: { ...PAINT_TUNE },
       rebuild: { paintMs: GROUND_REWRITE_TUNE.paintMs, rasterWaitMs: GROUND_PAINT_TUNE.rasterWaitMs },
+      // What this world lends of other worlds (Map-maker II's third wave): asked with `packs`.
+      ...(o && o.packs ? { lending: w.lendingReport() } : {}),
       ...(at ? { at } : {}),
       ...(said.length ? { answered: said } : {}),
     };
@@ -1992,7 +2050,8 @@ export class Editor {
     const px = new Uint8Array([255, 255, 255]);
     const painted = p ? p.colourAtRaw(r.x, r.z, px) : false;
     const group = w.paintGroup();
-    const name = (id: number) => `${id} ${group?.families.get(id)?.name ?? '(none)'}`;
+    // A family another world lent this one says its pack (Map-maker II's third wave).
+    const name = (id: number) => `${id} ${group?.lent.has(id) ? `${group.lent.get(id)!.pack}:` : ''}${group?.families.get(id)?.name ?? '(none)'}`;
     const out: Record<string, unknown> = {
       file,
       game: [round(g.x), round(g.z)],

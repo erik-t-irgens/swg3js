@@ -141,10 +141,14 @@ function method(text: string, signature: string): string {
   ok(/if \(this\.dying \|\| \(this\.traveling && !this\.curtainOnly\) \|\| !this\.inWorld\) this\.endComm\(\);/.test(main), "and so does the call's end");
   const reads = main.match(/[!=&|(]\s*this\.curtainOnly\b(?!\s*=[^=])/g) ?? [];
   const sets = main.match(/this\.curtainOnly = (true|false);/g) ?? [];
-  // The world editor's Fold now (map-maker wave 3) is a curtain of the same kind, a moment and not a journey: its own two sets.
-  const fold = method(main, '  private async editorFold(): Promise<string> {');
+  // The world editor's curtain (map-maker wave 3, Fold now's own until Map-maker II's third wave factored it out as
+  // `editorCurtain`, which Fold now and a family lent in play both go behind) is a curtain of the same kind, a moment and
+  // not a journey: its own two sets.
+  const fold = method(main, '  private async editorCurtain<T>(');
   const foldSets = fold.match(/this\.curtainOnly = (true|false);/g) ?? [];
-  ok(reads.length === 2 && sets.length === 4 && foldSets.length === 2, `and nothing else of the game reads it: two reads, the course curtain's two sets and the editor's Fold now's two (${reads.length}, ${sets.length} and ${foldSets.length})`);
+  // The third read (Map-maker II's third wave): the world editor is let go with its world on a journey, never at a curtain.
+  ok(/if \(this\.editor\?\.on && \(\(this\.traveling && !this\.curtainOnly\) \|\| !this\.inWorld\)\) this\.editor\.worldGone\(\);/.test(main), 'the world editor stays on through a curtain, its world going nowhere');
+  ok(reads.length === 3 && sets.length === 4 && foldSets.length === 2, `and nothing else of the game reads it: three reads (the story's leave, the call's end, the editor's), the course curtain's two sets and the editor's curtain's two (${reads.length}, ${sets.length} and ${foldSets.length})`);
 }
 
 // --- the sweep, the frame loop, the queue's own compiles -------------------------------------------------------------

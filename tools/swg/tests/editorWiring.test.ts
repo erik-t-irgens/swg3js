@@ -106,7 +106,8 @@ function after(src: string, marker: string, n = 2000): string {
   ok(frame > 0 && step > frame && step - frame < 400, "the editor's step runs straight after the frame's camera is placed");
   ok(/if \(this\.editor\?\.on\) \{\s*this\.editor\.placeCamera\(\);\s*return;/.test(after(main, '  private placeCamera(', 500)), 'the camera is placed from the eye while the editor is on');
   ok(/if \(import\.meta\.env\.DEV && input\.pressedAction\('editor'\)\) void this\.loadEditor\(\)\.then\(\(ed\) => ed\?\.toggle\(\)\);/.test(main), 'F2 loads the editor and turns it on and off, on the dev server alone');
-  ok(main.includes("if (this.editor?.on && (this.traveling || !this.inWorld)) this.editor.worldGone();"), 'the editor goes with its world');
+  // (Map-maker II's third wave: never at a curtain, which is a moment and not a journey -- `editorCurtain.test.ts`.)
+  ok(main.includes('if (this.editor?.on && ((this.traveling && !this.curtainOnly) || !this.inWorld)) this.editor.worldGone();'), 'the editor goes with its world');
 }
 
 {
@@ -167,9 +168,13 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/if \(!stream\.holdRegions\(points\)\) return;\s*this\.dressingHeld = stream;\s*setTimeout\(\(\) => \{\s*if \(this\.dressingHeld === stream\) this\.releaseDressingHold\(\);\s*\}, DRESSING_TUNE\.standWaitMs\);/.test(world), 'and lets them go after the stand\'s own wait at the latest');
   ok(/releaseDressingHold\(gen = this\.loadGeneration\): void \{\s*if \(gen !== this\.loadGeneration\) return;/.test(world), "a release for a world since left lets nothing of the next one go");
   ok(/fold: \(\) => this\.editorFold\(\),\s*busy: \(\) => this\.traveling \|\| !this\.inWorld,/.test(main), "the editor's Fold now is the game's curtain (`editorFold`), and it is told when the game is travelling");
+  // Map-maker II's third wave factored Fold now's screen out into the editor's curtain (`editorCurtain`, the order in
+  // `runCurtain`, which `editorCurtain.test.ts` drives): the refile is the curtain's work, shown first and hidden whatever
+  // comes of it, the sweep behind it.
   const fold = after(main, '  private async editorFold(): Promise<string> {', 2600);
-  ok(fold.indexOf('this.loadingScreen.show(') > 0 && fold.indexOf('this.loadingScreen.show(') < fold.indexOf('this.world.refilePlaced(ls.filing, { force: true });') && /\} finally \{\s*await this\.loadingScreen\.hide\(/.test(fold), 'Fold now files every tier again behind the screen (shown first, hidden whatever comes of it)');
-  ok(fold.includes('compiled = await this.world.compileAllAsync(') && fold.indexOf('compileAllAsync(') < fold.indexOf('} finally {'), 'and builds what it made behind the screen');
+  ok(/await this\.editorCurtain\('folding the placed rows', [^,]+, \(\) => \{\s*this\.world\.refilePlaced\(ls\.filing, \{ force: true \}\);/.test(fold), 'Fold now files every tier again behind the screen (the curtain\'s work: shown first, hidden whatever comes of it)');
+  const curtain = read('src/world/curtain.ts');
+  ok(/d\.show\(what, detail\);[\s\S]*const answer = await work\(\);[\s\S]*compiled = await d\.compile\(\);[\s\S]*\} finally \{\s*await d\.hide\(\);/.test(curtain), 'and builds what it made behind the screen');
   ok(/if \(\(c\.placed === 'mesh' \|\| c\.placed === 'extent'\) && c\.placed !== FLORA_COLLISION\.placed\) \{[\s\S]{0,120}this\.world\.refreshPlacedFlora\(\);/.test(main), "the console's placed-flora collision rule makes the placed trees' colliders again");
   const ed = read('src/editor/editorEntry.ts');
   const aftercam = after(ed, '  afterCamera(dt: number): void {', 6000);

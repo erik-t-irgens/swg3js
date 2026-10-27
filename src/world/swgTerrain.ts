@@ -135,7 +135,7 @@ export class SwgTerrain {
   /** Where the ground's mesh stands against the 64 m buckets so its vertices fall on the poles (`groundTiles.ts`). */
   readonly groundShift: GroundShift;
 
-  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number, colorReference: ColorReference | null = null, heights: HeightEdits | null = null, paint: GroundPaint | null = null, tableOnly = false, paintResolve: ((group: ShaderGroup) => void) | null = null) {
+  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number, colorReference: ColorReference | null = null, heights: HeightEdits | null = null, paint: GroundPaint | null = null, tableOnly = false, paintResolve: ((group: ShaderGroup) => void) | null = null, lend: ((group: ShaderGroup, tileWidth: number) => void) | null = null) {
     this.colorReference = colorReference;
     this.groundShift = groundShift(centerX, centerZ);
     this.template = parseTerrainTemplate(new Uint8Array(trn));
@@ -162,6 +162,9 @@ export class SwgTerrain {
       const layer: Layer | null = parseLayerFile(new Uint8Array(l.bytes), this.template.generator);
       if (layer) this.sampler.addBuildingLayer(layer, l.x, l.z, l.yaw);
     }
+    // Other worlds' families lent this terrain's group (Map-maker II's third wave), after the building layers, in the
+    // palette's order: the worker is handed them with its `init` below and gives each the same id.
+    if (lend) lend(this.template.generator.shaderGroup, this.template.tileWidthInMeters);
     // The paint's palette resolved against this terrain's own families (a building's layer file may have added some), before
     // the worker is handed it below: both threads lay the same ids.
     if (paint && paintResolve) paintResolve(this.template.generator.shaderGroup);
@@ -200,6 +203,8 @@ export class SwgTerrain {
             lifeDay: TERRAIN_GROUND_TUNE.lifeDay,
             paint: paint && !paint.empty ? paint.message(null, null, true) : null,
             rev: this.paintRev,
+            // Only where a family was lent, so every other world's `init` is the message it always was.
+            ...(this.template.generator.shaderGroup.lent.size ? { lent: this.template.generator.shaderGroup.lentList() } : {}),
           },
           sent.map((r) => r.rgb),
         );
@@ -215,7 +220,7 @@ export class SwgTerrain {
    * them through `fetchBytes` (pack-relative paths), and the colour ramps when the pack carries
    * them, then starts the worker.
    */
-  static async create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number, fetchBytes: (file: string) => Promise<ArrayBuffer | null>, opts: { heights?: HeightEdits | null; paint?: GroundPaint | null; paintResolve?: (group: ShaderGroup) => void; tableOnly?: boolean } = {}): Promise<SwgTerrain> {
+  static async create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number, fetchBytes: (file: string) => Promise<ArrayBuffer | null>, opts: { heights?: HeightEdits | null; paint?: GroundPaint | null; paintResolve?: (group: ShaderGroup) => void; tableOnly?: boolean; lend?: (group: ShaderGroup, tileWidth: number) => void } = {}): Promise<SwgTerrain> {
     const probe = parseTerrainTemplate(new Uint8Array(trn));
     const bitmaps: { familyId: number; bytes: ArrayBuffer }[] = [];
     // A table read for its families alone fetches no bitmap: nothing generates a grid over it.
@@ -240,7 +245,7 @@ export class SwgTerrain {
         console.warn(`terrain: ${COLOR_RAMP_FILE} could not be read; the colour ramps do nothing`, err);
       }
     }
-    return new SwgTerrain(trn, layers, bitmaps, ramps, centerX, centerZ, reference, opts.heights ?? null, opts.paint ?? null, !!opts.tableOnly, opts.paintResolve ?? null);
+    return new SwgTerrain(trn, layers, bitmaps, ramps, centerX, centerZ, reference, opts.heights ?? null, opts.paint ?? null, !!opts.tableOnly, opts.paintResolve ?? null, opts.lend ?? null);
   }
 
   /** Whether this is a table read for its families alone (no worker, no bitmaps): `create`'s `tableOnly`. */
@@ -293,10 +298,26 @@ export class SwgTerrain {
       for (const k of colKeys ?? []) this.tileRev.set(k, rev);
     }
     if (this.worker) {
-      this.worker.postMessage({ type: 'paint', rev, paint: p ? p.message(famKeys, colKeys, reset) : null });
+      const group = this.template.generator.shaderGroup;
+      // The lent families with every post (Map-maker II's third wave): a family lent in play reaches the worker's group before
+      // any grid is asked for again with it.
+      this.worker.postMessage(group.lent.size ? { type: 'paint', rev, paint: p ? p.message(famKeys, colKeys, reset) : null, lent: group.lentList() } : { type: 'paint', rev, paint: p ? p.message(famKeys, colKeys, reset) : null });
       this.paintWork.posted++;
     }
     return rev;
+  }
+
+  /**
+   * The lent families handed to the worker as they stand (Map-maker II's third wave: a family lent in play behind the
+   * editor's curtain), at the revision in force and with no tile named, so nothing it has made goes stale. Nothing goes
+   * where there is no worker or nothing is lent.
+   */
+  postLent(): void {
+    const group = this.template.generator.shaderGroup;
+    if (!this.worker || !group.lent.size) return;
+    const p = this.sampler.paint;
+    this.worker.postMessage({ type: 'paint', rev: this.paintRev, paint: p ? p.message([], [], false) : null, lent: group.lentList() });
+    this.paintWork.posted++;
   }
 
   /**
