@@ -163,7 +163,9 @@ export class PostFX {
     // The frame's own target: a stencil for the portals, a depth buffer the passes can read as a
     // texture, and half floats for light brighter than white. Not multisampled (R12); the edges
     // are smoothed at the end instead.
-    const depth = new THREE.DepthTexture(w, h, THREE.UnsignedInt248Type);
+    // Reversed depth spreads its precision evenly only in a floating-point buffer; in 24-bit fixed point
+    // it gains a little. Three keeps the stencil the portals need either way (DEPTH32F_STENCIL8).
+    const depth = new THREE.DepthTexture(w, h, this.renderer.capabilities.reversedDepthBuffer ? THREE.FloatType : THREE.UnsignedInt248Type);
     depth.format = THREE.DepthStencilFormat;
     this.sceneTarget = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 0, depthTexture: depth });
     this.sceneTarget.texture.name = 'fx.scene';

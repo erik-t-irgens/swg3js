@@ -14,6 +14,7 @@
 // judged by eye, and while it is 0 the pass never asks for the normals.
 //
 // What it draws comes from `RoomAir` (src/world/roomAir.ts) through the frame context's `room`.
+import { skyTest } from './glsl.ts';
 import * as THREE from 'three';
 import type { FxFrameContext } from './context';
 import type { FxProductId, FxSettings } from '../fxRegistry.ts';
@@ -182,7 +183,7 @@ const COMPOSITE_FRAG = /* glsl */ `
       haze = h00 * w.x + h10 * w.y + h01 * w.z + h11 * w.w;           // flat: plain bilinear, no depth fetches
     } else {
       float d = texelFetch(tDepth, ivec2(gl_FragCoord.xy), 0).r;
-      float z = d >= 1.0 ? uFar : fxViewZ(d, uNear, uFar);
+      float z = ${skyTest('d')} ? uFar : fxViewZ(d, uNear, uFar);
       vec4 ww = fxDepthWeights(tLinear, t00, t10, t01, t11, w, z);
       haze = h00 * ww.x + h10 * ww.y + h01 * ww.z + h11 * ww.w;
     }

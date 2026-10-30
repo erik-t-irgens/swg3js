@@ -14,13 +14,13 @@
 // the world's: its uniforms are copies, its light and targets its own, all let go of after; it builds a few programs
 // of its own (another light set), so it runs after `shaders().builtInPlay` is read, never before.
 import * as THREE from 'three';
-import { GRASS_FRAGMENT, GRASS_NO_SHADOW, GRASS_VERTEX, grassDepthMaterial, grassMaterial, tuftMesh } from './grass.ts';
+import { GRASS_FRAGMENT, GRASS_NO_SHADOW, GRASS_VERTEX, grassDepthMaterial, grassMaterial, tuftMesh, grassForDepthMode } from './grass.ts';
 import { SWAY_STIFF, tuftBuffers } from './grassMath.ts';
 import { grassShadeAt, type GrassCascades } from './grassShadowMath.ts';
 
 /** The probe: the grass's own two stages, the fragment's writing the shade it reads in every channel. */
 function probeOf(base: THREE.ShaderMaterial, own: Record<string, THREE.IUniform>): THREE.ShaderMaterial {
-  return new THREE.ShaderMaterial({ name: 'grass shadow probe', defines: { SWG_GRASS_PROBE: '' }, uniforms: ownUniforms(base, own), vertexShader: GRASS_VERTEX, fragmentShader: GRASS_FRAGMENT, depthTest: false, depthWrite: false });
+  return new THREE.ShaderMaterial({ name: 'grass shadow probe', defines: { SWG_GRASS_PROBE: '' }, uniforms: ownUniforms(base, own), vertexShader: GRASS_VERTEX, fragmentShader: grassForDepthMode(GRASS_FRAGMENT), depthTest: false, depthWrite: false });
 }
 
 /** A material's uniforms copied: every value by reference but the ones the test writes, which are its own. */
@@ -74,6 +74,13 @@ export interface GrassShadowSelfTest {
 }
 
 export function grassShadowSelfTest(renderer: THREE.WebGLRenderer): GrassShadowSelfTest {
+  // The stand-in maps (a LessEqual compare, cleared to known depths), the matrices and the mirror (grassShadowMath.ts)
+  // all model ordinary depth. Under reversed depth the grass's own text turns its bias and far test round
+  // (grass.ts, grassForDepthMode; reversedDepthOn.test.ts holds it), and this test would only report differences of
+  // its own making, so it does not run: load the page with ?norevz to run it.
+  if (renderer.capabilities.reversedDepthBuffer) {
+    return { ok: false, cases: [], real: { underBoxReceiving: NaN, underBoxNot: NaN, behindCasterCasting: NaN, behindCasterNot: NaN }, nan: false, note: 'not run: this test models ordinary depth and the page draws with reversed depth; load with ?norevz to run it' };
+  }
   const made: { dispose(): void }[] = [];
   const keepTarget = renderer.getRenderTarget();
   const keepClear = renderer.getClearColor(new THREE.Color());

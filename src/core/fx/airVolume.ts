@@ -20,6 +20,7 @@
 // wisps: one march material a wisps mode (`WISP_MODE` 0 off, 1 bands, 2 noise, 3 noise ×2), all four compiled while the
 // master is on and switched by the mode the field has in force (class M), since the Start's measurement found the one
 // program with the modes as uniform branches too dear on Direct3D 11 (`W3-notes.md`).
+import { pastFarTest } from './glsl.ts';
 import * as THREE from 'three';
 import type { FxProductId, FxSettings } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context.ts';
@@ -144,7 +145,7 @@ float sunShadow(vec3 pw, float viewZ) {
   vec4 sc = uShadowMatrix[i] * vec4(pw, 1.0);
   sc.xyz /= sc.w;
   sc.z += uShadowParams[i].x;
-  if (sc.x < 0.0 || sc.x > 1.0 || sc.y < 0.0 || sc.y > 1.0 || sc.z > 1.0) return 1.0;
+  if (sc.x < 0.0 || sc.x > 1.0 || sc.y < 0.0 || sc.y > 1.0 || ${pastFarTest('sc.z')}) return 1.0;
   float s = i == 0 ? textureLod(tShadow0, sc.xyz, 0.0) : (i == 1 ? textureLod(tShadow1, sc.xyz, 0.0) : textureLod(tShadow2, sc.xyz, 0.0));
   return mix(1.0, s, uShadowParams[i].z * keep);
 }

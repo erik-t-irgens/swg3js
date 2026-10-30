@@ -22,6 +22,7 @@
 // in that building's pass (`furnitureHost.ts`, `Building.furniture`), and no room of the building the
 // camera is in is drawn into the sun's shadows, which no room receives.
 
+import { REVERSED_DEPTH } from '../core/depthMode.ts';
 import * as THREE from 'three';
 import type { Building, CellState } from './layoutStream';
 import { isShadowOnly } from '../core/fxRegistry.ts';
@@ -96,6 +97,20 @@ if (SHADOW_STRAYS.keep) console.warn('shaders: ?shadowStrays=1 is set, so the sh
  * Actors are visible from inside and outside alike; what first person has put on the shadow-only
  * layer stays there, so nothing that prepares or marks the player brings the hidden head back into view.
  */
+/**
+ * The depth test that passes always, as the renderer will really set it. Under reversed depth (`?revz`) three maps every
+ * test through its `ReversedDepthFuncs`, and in three 0.185 that table turns Always into Never (and Equal into NotEqual)
+ * where only less and greater should swap: the doorway's depth reset, asked to write always, wrote never, and the rooms
+ * seen through a door from outside lost to any terrain standing in them. Asked of the GPU rather than assumed, so the
+ * day three mends its table this asks for Always again by itself. Ordinarily it is Always and nothing is probed.
+ */
+function alwaysDepthFunc(renderer: THREE.WebGLRenderer): THREE.DepthModes {
+  if (!renderer.capabilities?.reversedDepthBuffer) return THREE.AlwaysDepth;
+  const gl = renderer.getContext();
+  renderer.state.buffers.depth.setFunc(THREE.AlwaysDepth);
+  return gl.getParameter(gl.DEPTH_FUNC) === gl.ALWAYS ? THREE.AlwaysDepth : THREE.NeverDepth;
+}
+
 export function markActor(o: THREE.Object3D): void {
   o.traverse((x) => {
     if (!isShadowOnly(x.layers.mask)) x.layers.enable(ACTOR_LAYER);
@@ -378,14 +393,20 @@ export class PortalRenderer {
     this.portalMat.stencilZPass = THREE.ReplaceStencilOp;
     this.portalMat.stencilFail = THREE.KeepStencilOp;
     this.portalMat.stencilZFail = THREE.KeepStencilOp;
-    // Full-screen triangle at the far plane: resets depth inside the current stencil region.
+    // Full-screen triangle at the far plane: resets depth inside the current stencil region. The far plane is
+    // depth 1 ordinarily but 0 under reversed depth (`?revz`), where 1 is the NEAR plane: written at 1, this
+    // left every later surface failing its test, and the sky's colour showed where the world should be.
     this.resetMat = new THREE.ShaderMaterial({
-      vertexShader: 'void main() { gl_Position = vec4(position.xy, 1.0, 1.0); }',
-      fragmentShader: 'void main() { gl_FragColor = vec4(0.0); }',
+      // Under reversed depth the far plane is 0. Rather than stand the triangle exactly on the clip range's edge, it
+      // stands inside the range and its fragments write the far depth themselves, which no clipping touches -- a
+      // precaution only: what kept the rooms from covering terrain seen through a door was three's depth-test table
+      // (`alwaysDepthFunc` below). Ordinarily it is as it always was.
+      vertexShader: REVERSED_DEPTH ? 'void main() { gl_Position = vec4(position.xy, 0.5, 1.0); }' : 'void main() { gl_Position = vec4(position.xy, 1.0, 1.0); }',
+      fragmentShader: REVERSED_DEPTH ? 'void main() { gl_FragColor = vec4(0.0); gl_FragDepthEXT = 0.0; }' : 'void main() { gl_FragColor = vec4(0.0); }',
       colorWrite: false,
       depthTest: true,
       depthWrite: true,
-      depthFunc: THREE.AlwaysDepth,
+      depthFunc: alwaysDepthFunc(renderer),
     });
     this.resetMat.stencilWrite = true;
     this.resetMat.stencilFunc = THREE.EqualStencilFunc;
@@ -782,7 +803,7 @@ export class PortalRenderer {
       this.strays = 0;
       this.passLog.length = 0;
       projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-      frustum.setFromProjectionMatrix(projView);
+      frustum.setFromProjectionMatrix(projView, THREE.WebGLCoordinateSystem, camera.reversedDepth);
       // The frame an exit comes into view the shadows are drawn here, before the world pass, so nothing pops.
       if (skipWorld) {
         SHADOW_STRAYS.seen = 0;

@@ -44,6 +44,7 @@
 // count set to nought for one draw (the cascade is the shadow hooks' fourth argument; the third is the probe).
 //
 // `localStorage['swg.grass'] = '0'` turns the grass off at load, `swg.farCards = '0'` the far cards.
+import { REVERSED_DEPTH } from '../core/depthMode.ts';
 import * as THREE from 'three';
 import type { FloraTiling } from '../swg/terrain/trn.ts';
 import { RADIAL_JSON, RADIAL_RGBA, readRadialFile, type RadialFile } from '../swg/terrain/radialFile.ts';
@@ -309,6 +310,21 @@ float swgGrassShadow( const in vec3 swgL, const in float swgLd ) {
 `;
 
 /**
+ * Any program text carrying GRASS_SHADOW_PARS, as reversed depth (`?revz`) needs it, and unchanged otherwise.
+ * Reversed shadow maps put the light's near plane at 1 and its far at 0, and three subtracts the bias there
+ * instead of adding it (its shadowmap_pars_fragment): so the bias turns round, and past the far end is below 0,
+ * not above 1. Applied where a material is built, so every text above stays byte for byte as it was and its
+ * program keeps its key when `?revz` is off.
+ */
+export function grassForDepthMode(text: string): string {
+  if (!REVERSED_DEPTH) return text;
+  const bias = '\tswgS.z += uSwgGrassShadowBias[ swgI ];';
+  const past = '|| swgS.z > 1.0 ) return 1.0;';
+  if (!text.includes(bias) || !text.includes(past)) throw new Error('grass shadow: the lines reversed depth turns round have moved');
+  return text.replace(bias, '\tswgS.z -= uSwgGrassShadowBias[ swgI ];').replace(past, '|| swgS.z < 0.0 ) return 1.0;');
+}
+
+/**
  * The fragment stage: the picture cut at its reference, its mip scale, the sun's shadow (after the cut, so a fragment
  * thrown away reads none), the tint and the light in the client's bytes, carried back through the curve.
  * `SWG_GRASS_PROBE` writes the shade alone, ahead of the picture (the self-test's probe, `grassSelfTest.ts`).
@@ -498,7 +514,7 @@ export function grassMaterial(): THREE.ShaderMaterial {
       ...GRASS_UNIFORMS,
     },
     vertexShader: GRASS_VERTEX,
-    fragmentShader: GRASS_FRAGMENT,
+    fragmentShader: grassForDepthMode(GRASS_FRAGMENT),
     fog: true,
   });
   // Unlit and dry: out of the shadow cascades (which never take a ShaderMaterial anyway) and never wrapped by the weather.
@@ -1143,7 +1159,7 @@ export class GrassField {
     const reach = setup ? grassReach(setup.near, GRASS_TUNE) : 0;
     const eye = camera.position;
     camera.updateMatrixWorld();
-    const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse), THREE.WebGLCoordinateSystem, camera.reversedDepth);
     const p = new THREE.Vector3();
     let built = 0;
     let draws = 0;

@@ -1,3 +1,5 @@
+import { followCameraDepth } from './csmDepth.ts';
+import { REVERSED_DEPTH } from '../core/depthMode.ts';
 import * as THREE from 'three';
 import { packIdOf, type PlanetDef } from '../data/planets';
 import type { Physics, RAPIER } from '../core/physics';
@@ -2902,7 +2904,7 @@ export class World {
           // The depth buffer holds distance along the camera's forward axis, not from the camera.
           float depth = clamp(-(ray.z * t) * uDepthScale, 0.1, uMaxDepth);
           float viewZ = -depth;
-          gl_FragDepthEXT = (uProjZ.x * viewZ + uProjZ.y) / (uProjW.x * viewZ + uProjW.y) * 0.5 + 0.5;
+          gl_FragDepthEXT = (uProjZ.x * viewZ + uProjZ.y) / (uProjW.x * viewZ + uProjW.y)${REVERSED_DEPTH ? '' : ' * 0.5 + 0.5'};
           gl_FragColor = vec4(0.0);
         }
       `,
@@ -6092,6 +6094,8 @@ export class World {
     this.splitsApplied = shadowSplitsVersion();
     this.csm = new CSM({ camera, parent: this.scene, cascades: 3, maxFar: this.shadowDistance, mode: 'custom', customSplitsCallback: (amount: number, near: number, far: number, target: number[]) => splitBreaks(amount, near, far, SHADOW_SPLIT_TUNE, target), shadowMapSize: this.shadowMapSize, lightDirection: new THREE.Vector3(0.3, -1, 0.2).normalize(), lightIntensity: 2, lightMargin: LIGHT_MARGIN, lightNear: LIGHT_NEAR, lightFar: LIGHT_MARGIN + this.shadowDistance });
     this.csm.fade = true;
+    // Three's cascades lose the camera's frustum once it is reversed (csmDepth.ts): its depths follow the camera.
+    followCameraDepth(this.csm, camera);
     // The lights to the holds and the portal renderer, and nothing else done to them: their `autoUpdate` is three's
     // default until the first `decide`, and is written by `ShadowHold.decide` and `dirtyAll` alone from then on.
     this.shadowHold.bind(this.csm.lights);

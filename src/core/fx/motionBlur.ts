@@ -16,6 +16,7 @@
 //   5. gather: 12 taps along the neighbourhood's movement and the pixel's own, each weighted by which
 //      of the two is in front and how far each one's blur reaches.
 // Strength, the shutter and the longest radius apply to both sources alike, after the choice.
+import { REVERSED_DEPTH } from '../depthMode.ts';
 import * as THREE from 'three';
 import type { FxProductId, FxSettings } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context';
@@ -56,7 +57,7 @@ void main() {
   if ( obj.b > 0.5 ) {
     v = obj.rg;                 // a mover: camera and own motion already combined
   } else {
-    vec4 wp = uInvViewProj * vec4( vUv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0 );
+    vec4 wp = uInvViewProj * vec4( vUv * 2.0 - 1.0, ${REVERSED_DEPTH ? 'd' : 'd * 2.0 - 1.0'}, 1.0 );
     vec4 pr = uPrevProjView * vec4( wp.xyz / wp.w, 1.0 );
     v = pr.w > 1e-4 ? ( vUv - ( pr.xy / pr.w * 0.5 + 0.5 ) ) * smoothstep( uCut.x, uCut.y, z ) : vec2( 0.0 );
   }

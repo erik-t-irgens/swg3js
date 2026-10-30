@@ -385,7 +385,7 @@ export class HeatProduct implements FxProduct {
     const src = this.sources;
     // The one allocation on this path, and on purpose: a mesh per lava table, once per planet loaded.
     if (src.lavaVersion !== this.builtVersion) this.rebuildLava();
-    this.frustum.setFromProjectionMatrix(ctx.viewProj);
+    this.frustum.setFromProjectionMatrix(ctx.viewProj, THREE.WebGLCoordinateSystem, ctx.camera.reversedDepth);
     const c = ctx.cameraPos;
     const T = heatTuning;
     const lift = Math.max(0, T.lift);

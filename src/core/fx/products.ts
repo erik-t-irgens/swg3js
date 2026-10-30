@@ -6,6 +6,7 @@
 // They sample the scene's depth texture while drawing into a target of their own, which is the
 // only way a depth texture may be read: with the target it belongs to bound, the draw is thrown
 // away and nothing says so.
+import { skyTest } from './glsl.ts';
 import * as THREE from 'three';
 import type { FxProductId, FxSettings } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context';
@@ -60,7 +61,7 @@ export class LinearDepthHalf implements FxProduct {
           // the sample inside one corner of the two-by-two block and keeps it there, which is what
           // anything upsampling this back to full size has to be able to count on.
           float d = texture2D(tDepth, vUv + uFullTexel * 0.5).x;
-          gl_FragColor = vec4(d >= 1.0 ? uNearFar.y : fxViewZ(d, uNearFar.x, uNearFar.y), 0.0, 0.0, 1.0);
+          gl_FragColor = vec4(${skyTest('d')} ? uNearFar.y : fxViewZ(d, uNearFar.x, uNearFar.y), 0.0, 0.0, 1.0);
         }
       `,
       depthTest: false,

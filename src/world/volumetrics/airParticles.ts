@@ -17,6 +17,7 @@
 // the master's in-play warm; a detail dial resizes the targets and the meshes' instance counts (class T) and never
 // disposes a material. Nothing about a particle is read back to decide anything (rule 3); the console's counts are a
 // readback of their own.
+import { grassForDepthMode } from '../grass.ts';
 import * as THREE from 'three';
 import { AIR_VERTEX } from './airShaders.ts';
 import { KICK_DRAW_FRAGMENT, KICK_DRAW_VERTEX, KICK_FILL_FRAGMENT, KICK_UPDATE_FRAGMENT, RING_FRAGMENT, RING_VERTEX } from './airParticleShaders.ts';
@@ -291,7 +292,7 @@ export class KickPool {
     this.cutMaterial = new THREE.ShaderMaterial({
       name: 'air.kick.leaves',
       vertexShader: KICK_DRAW_VERTEX,
-      fragmentShader: KICK_DRAW_FRAGMENT,
+      fragmentShader: grassForDepthMode(KICK_DRAW_FRAGMENT),
       defines: { KICK_CUT: '' },
       uniforms: {
         ...THREE.UniformsUtils.clone(THREE.UniformsLib.fog),
@@ -335,7 +336,7 @@ export class KickPool {
         new THREE.ShaderMaterial({
           name: `air.kick.${['', 'puffs', 'spray', 'streaks'][k]}`,
           vertexShader: KICK_DRAW_VERTEX,
-          fragmentShader: KICK_DRAW_FRAGMENT,
+          fragmentShader: grassForDepthMode(KICK_DRAW_FRAGMENT),
           uniforms: {
             ...THREE.UniformsUtils.clone(THREE.UniformsLib.fog),
             ...shared,

@@ -17,6 +17,7 @@
 // a share of the light ignores the facing altogether, the normal is smoothed over a 5 by 5 kernel
 // that leaves out any tap across a silhouette, and some of the pixel's own brightness is kept in the
 // albedo so a texture's detail shows through.
+import { skyTest } from './glsl.ts';
 import * as THREE from 'three';
 import type { FxFrameContext } from './context';
 import { ShaderFxPass } from './pass.ts';
@@ -249,7 +250,7 @@ export function bladeGlowShader(): { uniforms: Record<string, THREE.IUniform>; v
         ivec2 size = textureSize(tDepth, 0);
         ivec2 px = ivec2(gl_FragCoord.xy);
         float depth = texelFetch(tDepth, px, 0).r;
-        if (depth >= 1.0) return vec3(0.0);                                  // sky, and anything that wrote no depth over it
+        if (${skyTest('depth')}) return vec3(0.0);                                  // sky, and anything that wrote no depth over it
         float z = fxViewZ(depth, uNear, uFar);
         if (z > uMaxViewZ) return vec3(0.0);
         vec3 P = fxViewPos(vUv, z, uTanHalfFov);

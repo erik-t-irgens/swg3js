@@ -1216,7 +1216,7 @@ export class MobileManager {
     const camera = ctx.camera;
     if (camera) {
       projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-      frustum.setFromProjectionMatrix(projView);
+      frustum.setFromProjectionMatrix(projView, THREE.WebGLCoordinateSystem, camera.reversedDepth);
       camera.getWorldPosition(this.camPos);
     } else this.camPos.copy(ctx.playerPos);
     // What a body's share of the screen's height is worked out from at this camera, once (aiming's zoom counts); with no
@@ -1736,7 +1736,7 @@ export class MobileManager {
   cullReport(camera: THREE.Camera | null, playerPos: THREE.Vector3): Record<string, unknown>[] {
     if (camera) {
       projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-      frustum.setFromProjectionMatrix(projView);
+      frustum.setFromProjectionMatrix(projView, THREE.WebGLCoordinateSystem, camera.reversedDepth);
       camera.getWorldPosition(this.camPos);
     }
     return this.live.map((m) => {

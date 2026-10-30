@@ -2,6 +2,7 @@
 // needs it, so two passes can never disagree about what a depth sample means.
 // The extension is on purpose: a node test that reaches this file (the specks' does, for fxViewZ)
 // resolves it as it stands, and an extensionless relative import would stop the suite dead.
+import { REVERSED_DEPTH } from '../depthMode.ts';
 import { GLSL_OCT_DECODE, GLSL_OCT_ENCODE } from '../glslOct.ts';
 
 /**
@@ -20,12 +21,29 @@ export const FX_FULLSCREEN_VERTEX = /* glsl */ `
  * fxViewZ: how far along the view axis a depth sample lies, in metres. The projection is the
  * ordinary perspective one, not reversed and not logarithmic.
  */
-export const FX_LINEARIZE = /* glsl */ `
+const FX_LINEARIZE_ORDINARY = /* glsl */ `
   float fxViewZ(float depth, float near, float far) {
     float ndcZ = depth * 2.0 - 1.0;
     return (2.0 * near * far) / (far + near - ndcZ * (far - near));
   }
 `;
+/** Under reversed depth (`?revz`): the near plane at 1, the far at 0, in a 0 to 1 clip range (three's makePerspective). */
+const FX_LINEARIZE_REVERSED = /* glsl */ `
+  float fxViewZ(float depth, float near, float far) {
+    return (near * far) / (near + depth * (far - near));
+  }
+`;
+/**
+ * Chosen when the page loads, not by an #ifdef: an #ifdef changes every including program's text even when it
+ * does nothing, and the clouds' and the grass's programs are held to their old text byte for byte
+ * (airClouds.test.ts, grassAir.test.ts). Off, this is exactly what it always was.
+ */
+export const FX_LINEARIZE = REVERSED_DEPTH ? FX_LINEARIZE_REVERSED : FX_LINEARIZE_ORDINARY;
+
+/** GLSL text that is true where nothing was drawn -- the sky: a cleared depth is 1 ordinarily, 0 reversed. */
+export const skyTest = (depth: string): string => (REVERSED_DEPTH ? `${depth} <= 0.0` : `${depth} >= 1.0`);
+/** GLSL text that is true past a shadow map's far end: above 1 ordinarily, below 0 reversed (the light's near is then 1). */
+export const pastFarTest = (z: string): string => (REVERSED_DEPTH ? `${z} < 0.0` : `${z} > 1.0`);
 
 /**
  * fxViewPos: where a pixel is in the camera's own space, from its screen place and its distance

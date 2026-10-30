@@ -3,6 +3,8 @@
 // keeps a shape V8 can read fast. A material made before it would carry a plain field of its own instead.
 import './world/stencilRef.ts';
 import * as THREE from 'three';
+import { reversedOpaqueSort, reversedTransparentSort } from './core/reversedSort.ts';
+import { REVERSED_DEPTH, projectedBehind } from './core/depthMode.ts';
 // The display's own rules, apart from the panels'. The stylesheet in index.html carries the named
 // colours on `:root`; this one carries what is drawn from them.
 import './ui/hud.css';
@@ -1792,7 +1794,18 @@ class App {
   private lastViewBuilding = false;
 
   constructor(private readonly physics: Physics) {
-    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true });
+    // Reversed depth (core/depthMode.ts, docs/REVERSED-DEPTH.md): the near plane at 1 and the far at 0, so depth keeps
+    // its precision all the way out instead of losing it with the square of the distance. With the camera's 0.05 m
+    // near plane a depth step was 2.7 m at 1.5 km, and a seabed that close under the water showed through it.
+    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true, reversedDepthBuffer: REVERSED_DEPTH });
+    if (this.renderer.capabilities.reversedDepthBuffer) {
+      // Three reverses its whole sorted lists under reversed depth, renderOrder and all (reversedSort.ts).
+      this.renderer.setOpaqueSort(reversedOpaqueSort as never);
+      this.renderer.setTransparentSort(reversedTransparentSort as never);
+    }
+    if (REVERSED_DEPTH !== this.renderer.capabilities.reversedDepthBuffer) {
+      console.error('reversed depth: the page chose it, but the renderer could not use it (no EXT_clip_control here); shaders chosen for it will draw wrong. Add ?norevz to the address.');
+    }
     // Which backend this context runs on, read once for the session and reported (`__debug.shaders()`, the loading
     // record): Direct3D 11 builds a program in about 400 ms, Vulkan in about 10, which is most of what a screen costs.
     try {
@@ -16384,7 +16397,7 @@ class App {
     inView: (b) => {
       const cam = this.cam.camera;
       this.companionMatrix.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
-      this.companionFrustum.setFromProjectionMatrix(this.companionMatrix);
+      this.companionFrustum.setFromProjectionMatrix(this.companionMatrix, THREE.WebGLCoordinateSystem, cam.reversedDepth);
       return this.companionFrustum.containsPoint(b.pos);
     },
     tell: (up) => {
@@ -20207,7 +20220,7 @@ class App {
     // The projection exactly as it comes: behind the camera it is mirrored, and the display mirrors
     // it back itself before clamping the arrow to the edge, so nothing is corrected here.
     tmp2.copy(t.pos).project(cam);
-    tv.behind = tmp2.z > 1;
+    tv.behind = projectedBehind(tmp2.z, cam);
     tv.x = (tmp2.x + 1) * 0.5 * w;
     tv.y = (1 - tmp2.y) * 0.5 * h;
     // How wide the hull projects: its own radius at its distance, through this frame's field of view.
@@ -31978,14 +31991,14 @@ class App {
         const p = this.flightShow.set(0, 0, 1).applyQuaternion(q).multiplyScalar(range).add(eye);
         const scale = range / Math.max(1e-3, cam.position.distanceTo(p));
         p.project(cam);
-        const centred = p.z > 1 || !Number.isFinite(p.x);
+        const centred = projectedBehind(p.z, cam) || !Number.isFinite(p.x);
         fv.ox = centred ? 0 : p.x * halfW;
         fv.oy = centred ? 0 : -p.y * half;
         const s = centred ? 1 : scale;
         fv.circle = circleRadius(tanHalf) * half * s;
         fv.ring = ringRadius(tanHalf) * half * s;
         hullRay(this.flightCursor, tanHalf, p).applyQuaternion(q).multiplyScalar(range).add(eye).project(cam);
-        if (centred || p.z > 1 || !Number.isFinite(p.x)) {
+        if (centred || projectedBehind(p.z, cam) || !Number.isFinite(p.x)) {
           fv.cx = this.flightCursor.x * half * s;
           fv.cy = this.flightCursor.y * half * s;
         } else {
