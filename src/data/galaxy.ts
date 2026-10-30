@@ -72,9 +72,10 @@ export const GALAXY_SYSTEMS: GalaxySystemDef[] = [
  * PLANETS entries that belong to no system on purpose: the development gallery is not a place in the
  * galaxy, and the instances zone is a box of copies reached only through each dungeon's own way in. The
  * worlds whose ground is real-world elevation (`PlanetDef.dem`) are the owner's own for the map maker and
- * have no system of their own yet.
+ * have no system of their own yet. The ground terrains the game never offered as worlds (`PlanetDef.extra`: the heroics'
+ * maps, an older or unreleased planet, the developers' tests) are reached only by the developer's travel.
  */
-export const GALAXY_LEFT_OUT: readonly string[] = ['gallery', 'dungeon1', 'canyon', 'seattle', 'monument', 'helens'];
+export const GALAXY_LEFT_OUT: readonly string[] = ['gallery', 'dungeon1', 'canyon', 'seattle', 'monument', 'helens', 'adventure2', 'adventure1'];
 
 /**
  * Invented: how the galaxy is laid out, in the map's own units (one unit is one metre to three, and

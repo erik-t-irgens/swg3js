@@ -64,6 +64,12 @@ export interface PlanetDef {
    */
   instances?: boolean;
   /**
+   * A ground terrain the archives hold that the game never offered as a world of its own (a heroic's map, an older or
+   * unreleased planet, a developer's test), converted for looking at: kept off the galaxy map (`GALAXY_LEFT_OUT`) and
+   * out of the creator's start list, and reached by `__debug.travel('<id>')` and the map's list of every world.
+   */
+  extra?: true;
+  /**
    * Where this world brings a player in and back when nothing else says -- a travel with no place of its own, a
    * character new to it, a death with no cloning facility near (`src/world/arrival.ts`): a raw place, an absolute
    * height and a heading in the game's frame, turned into the game's frame by the world's own places file. Only a
@@ -413,7 +419,7 @@ export const PLANETS: PlanetDef[] = [
     terrain: { base: 0, amplitude: 16, frequency: 0.0038, octaves: 4, ridged: 0.6, flatten: 1.1, detail: 1 },
     water: { level: .5, color: 0x2f6f8a, opacity: 0.8 },
     palette: { low: 0x6faa4f, mid: 0x5a9542, high: 0x9ab27a, slope: 0x7a6a50, shore: 0xd0c48a },
-    props: { treeDensity: 0.7, rockDensity: 0.25, treeStyle: 'round', canopy: 0x3f8a3a, trunk: 0x6a4a2a, rock: 0x8a8a80, treeScale: 1.1 },
+    props: { treeDensity: 0.7, rockDensity: 0.25, treeStyle: 'none', canopy: 0x3f8a3a, trunk: 0x6a4a2a, rock: 0x8a8a80, treeScale: 1.1 },
     creatures: { name: 'Bantha', count: 8, color: 0x6b5334, size: 2.3, speed: 2, hp: 260, aggressive: false, damage: 0 },
     borrowSky: 'corellia',
   },
@@ -466,6 +472,55 @@ PLANETS.push({
   props: { treeDensity: 0, rockDensity: 0, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x000000, treeScale: 1 },
   creatures: { name: 'Nothing', count: 0, color: 0x000000, size: 1, speed: 0, hp: 1, aggressive: false, damage: 0 },
 });
+
+/**
+ * The ground terrains the game never offered as worlds (`PlanetDef.extra`, the converter's `EXTRA_WORLDS`), each its own
+ * converted pack: the heroics' maps with their copies standing side by side and nobody in them, an older or unreleased
+ * planet, the developers' tests. Their sky, ground and weather are the pack's own; the numbers here are only what a world
+ * with no pack would draw, and each sun is an existing planet's, so the shared day's planet list gains none to keep apart.
+ */
+function extraWorld(o: Pick<PlanetDef, 'id' | 'name' | 'tagline' | 'description' | 'seed'> & { sunOf: string; palette: PlanetDef['palette']; zones?: PlanetZone[] }): PlanetDef {
+  const sun = PLANETS.find((p) => p.id === o.sunOf)!;
+  return {
+    id: o.id,
+    name: o.name,
+    tagline: o.tagline,
+    description: o.description,
+    seed: o.seed,
+    extra: true,
+    gravity: 20,
+    sky: { ...sun.sky },
+    fog: { ...sun.fog },
+    ...(sun.swgFogScale !== undefined ? { swgFogScale: sun.swgFogScale } : {}),
+    light: { ...sun.light },
+    terrain: { base: 0, amplitude: 0, frequency: 0.004, octaves: 1, ridged: 0, flatten: 1, detail: 0 },
+    palette: o.palette,
+    props: { treeDensity: 0, rockDensity: 0, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x8f8f8f, treeScale: 1 },
+    creatures: { name: 'Nothing', count: 0, color: 0x000000, size: 1, speed: 0, hp: 1, aggressive: false, damage: 0 },
+    ...(o.zones ? { zones: o.zones } : {}),
+  };
+}
+
+PLANETS.push(
+  extraWorld({
+    id: 'adventure2',
+    name: 'Hoth: Echo Base',
+    tagline: 'The Battle of Echo Base, nine times over',
+    description: 'The ice world of the heroic Battle of Echo Base: the Rebel base dug into the glacier and the snowfields round it. The game stood one copy per group; here all nine stand side by side, with nobody in them.',
+    seed: 1980,
+    sunOf: 'talus',
+    palette: { low: 0xdfe7ee, mid: 0xeef3f7, high: 0xffffff, slope: 0xa9b6c2, shore: 0xdfe7ee },
+  }),
+  extraWorld({
+    id: 'adventure1',
+    name: 'Heroic: Tusken army',
+    tagline: 'The heroic against the Tusken army, twelve times over',
+    description: 'The desert of the heroic against the Tusken army. The game stood one copy per group; here all twelve stand side by side, with nobody in them.',
+    seed: 1981,
+    sunOf: 'tatooine',
+    palette: { low: 0xd8b073, mid: 0xe7c78d, high: 0xf2dcaa, slope: 0xb48d56, shore: 0xe7c78d },
+  }),
+);
 
 /**
  * The space zones (the converter's `space` command, one pack each): the orbit of a planet, with
