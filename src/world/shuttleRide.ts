@@ -1823,7 +1823,7 @@ export class ShuttleRide {
     this.drive('sky', 0);
     const cam = this.host.camera();
     camAt.setFromMatrixPosition(cam.matrixWorld);
-    this.frustum.setFromProjectionMatrix(this.view.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse));
+    this.frustum.setFromProjectionMatrix(this.view.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse), THREE.WebGLCoordinateSystem, cam.reversedDepth);
     const seen = inSight(this.frustum, camAt, hull.pos, hull.radius, SHUTTLE_RIG_TUNE.seenFar, SHUTTLE_RIG_TUNE.releaseNear);
     this.unseen = seen ? 0 : this.unseen + dt;
     if (this.unseen >= RIDE_TUNE.vanishUnseen) this.finish('gone', '');

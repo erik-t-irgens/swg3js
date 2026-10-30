@@ -41,6 +41,7 @@
 //
 // Units are metres and seconds. Nothing in a step allocates: the scratch is at module scope, as the
 // rest of the combat code keeps its.
+import { REVERSED_DEPTH } from '../core/depthMode.ts';
 import * as THREE from 'three';
 import { sabers } from '../audio/saberSounds.ts';
 
@@ -434,7 +435,8 @@ class Sheet {
       depthWrite: false,
       polygonOffset: true,
       polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2,
+      // Three turns the factor round under reversed depth but not the units, which would then push the surface away instead of forward (WebGLState.setPolygonOffset): so the units turn round here.
+      polygonOffsetUnits: REVERSED_DEPTH ? 2 : -2,
       side: THREE.DoubleSide,
       toneMapped: false,
       blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,

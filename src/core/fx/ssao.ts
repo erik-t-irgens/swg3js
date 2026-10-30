@@ -19,6 +19,7 @@
 // sky and water (the water mask's coverage) are never darkened.
 //
 // Every number the shaders use comes from ssaoMath.ts, which a node test checks.
+import { skyTest, pastFarTest } from './glsl.ts';
 import * as THREE from 'three';
 import type { FxFrameContext } from './context';
 import type { PostFX } from '../postfx';
@@ -62,7 +63,7 @@ const AO_TEXELS = /* glsl */ `
   float aoZ(ivec2 t) {
   #ifdef AO_FULL
     float d = texelFetch(tDepth, t, 0).r;
-    return d >= 1.0 ? uFar : fxViewZ(d, uNear, uFar);
+    return ${skyTest('d')} ? uFar : fxViewZ(d, uNear, uFar);
   #else
     return texelFetch(tLinear, t, 0).r;
   #endif
@@ -201,7 +202,7 @@ export const SSAO_GTAO_FRAG = /* glsl */ `
     vec4 sc = uShadowMatrix[i] * vec4(pw + nw * uShadowParams[i].y, 1.0);
     sc.xyz /= sc.w;
     sc.z += uShadowParams[i].x;
-    if (sc.x < 0.0 || sc.x > 1.0 || sc.y < 0.0 || sc.y > 1.0 || sc.z > 1.0) return 1.0;
+    if (sc.x < 0.0 || sc.x > 1.0 || sc.y < 0.0 || sc.y > 1.0 || ${pastFarTest('sc.z')}) return 1.0;
     float s = i == 0 ? textureLod(tShadow0, sc.xyz, 0.0) : (i == 1 ? textureLod(tShadow1, sc.xyz, 0.0) : textureLod(tShadow2, sc.xyz, 0.0));
     return mix(1.0, s, uShadowParams[i].z * keep);
   }
@@ -393,7 +394,7 @@ export const SSAO_APPLY_FRAG = /* glsl */ `
     vec4 c = texture2D(tDiffuse, vUv);
     ivec2 p = ivec2(gl_FragCoord.xy);
     float d = texelFetch(tDepth, p, 0).r;
-    float z = d >= 1.0 ? uFar : fxViewZ(d, uNear, uFar);
+    float z = ${skyTest('d')} ? uFar : fxViewZ(d, uNear, uFar);
     float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, z);
     if (fade <= 0.0 || (uSplit > 0.0 && vUv.x > uSplit)) { gl_FragColor = uDebug == 1 ? vec4(1.0) : c; return; }
   #ifdef AO_FULL
@@ -434,7 +435,7 @@ export const SSAO_PROBE_FRAG = /* glsl */ `
   void main() {
     float d = texelFetch(tDepth, uPixel, 0).r;
     vec4 a = texelFetch(tAo, uAoTexel, 0);
-    gl_FragColor = vec4(d >= 1.0 ? -1.0 : fxViewZ(d, uNear, uFar), a.r, a.g, a.b);
+    gl_FragColor = vec4(${skyTest('d')} ? -1.0 : fxViewZ(d, uNear, uFar), a.r, a.g, a.b);
   }
 `;
 

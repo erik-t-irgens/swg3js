@@ -95,9 +95,10 @@ export function packHolds(packId: string, file: string): boolean {
     case 'nav.json':
     case 'clouds.json':
       return ground;
-    // The map picture (`maps`): a ground world's own, and the copies' world has none.
+    // The map picture (`maps`): a ground world's own, and the copies' world has none, nor does any terrain the game never
+    // offered as a world (`extra`: the archives hold no `ui_map_<id>` picture for one).
     case 'map.json':
-      return ground && !world.instances;
+      return ground && !world.instances && !world.extra;
     // The server's people and creatures (`spawns`): the worlds it populated, and its copies.
     case 'spawns.json':
       return SERVER_WORLDS.includes(world.id) || !!world.instances;

@@ -11,6 +11,7 @@
 //      luminance, so the flare never lifts a pixel into white or widens what is already white.
 //
 // Every number the shaders share with the CPU lives in flareMath.ts and is checked by a node test.
+import { REVERSED_DEPTH } from '../depthMode.ts';
 import * as THREE from 'three';
 import type { FxFrameContext } from './context';
 import type { FxDebugTexture, FxPass, FxWarmItem } from './pass';
@@ -256,7 +257,7 @@ const FLARE_OCCLUSION = /* glsl */ `
         float viewZ = skyDist * inversesqrt(1.0 + dot(slope, slope));
         float gap = uNearFar.x * (uNearFar.y - viewZ) / (viewZ * depthRange);
         float d = texelFetch(tDepth, ivec2(px), 0).r;
-        open += step(1.0 - d, gap);                             // 1 when 1 - d <= gap: at or beyond the sky
+        open += ${REVERSED_DEPTH ? 'step(d, gap)' : 'step(1.0 - d, gap)'};                             // 1 when 1 - d <= gap: at or beyond the sky (reversed: the sky's own depth is gap, and farther is smaller)
       }
       open /= float(TAPS);
       vec3 dir = uSourceDir[slot].xyz;

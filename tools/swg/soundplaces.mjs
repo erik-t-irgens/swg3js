@@ -220,7 +220,9 @@ export function roomsFor(rows, pobs) {
 function loadPlacements(vfs, planet, log = () => {}) {
   const wsPath = `snapshot/${planet}.ws`;
   const hasBuildouts = vfs.has(`datatables/buildout/areas_${planet}.iff`);
-  if (!vfs.has(wsPath) && !hasBuildouts) return null;
+  // A world the game lists that places nothing (cli.mjs `GROUND_ONLY_WORLDS`: its terrain alone) places no sound either,
+  // which its file says, so `status` stops asking; every world with a snapshot or buildout tables reads as it did.
+  if (!vfs.has(wsPath) && !hasBuildouts) return vfs.has(`terrain/${planet}.trn`) ? { snap: { version: 'none', templates: [], nodes: [] }, entries: [] } : null;
   const snap = vfs.has(wsPath) ? parseSnapshot(parseIff(vfs.read(wsPath))) : { version: 'none', templates: [], nodes: [] };
   const own = snap.nodes.slice();
   const buildouts = loadBuildouts(vfs, planet, { events: false });

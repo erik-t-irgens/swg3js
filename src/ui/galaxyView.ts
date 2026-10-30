@@ -8,6 +8,7 @@
 // when the routes arrive — and no texture or geometry is shared with the world's renderer, so the
 // view never disposes anything the game is using.
 
+import { projectedBehind } from '../core/depthMode.ts';
 import * as THREE from 'three';
 import { drawnSystems, GALAXY_TUNE, systemPlace, type GalaxySystemDef, type GalaxyRoute } from '../data/galaxy.ts';
 
@@ -389,7 +390,7 @@ export class GalaxyView {
     let bestD = GALAXY_VIEW_TUNE.pickPixels;
     for (const g of this.globes) {
       this.scratch.copy(g.at).project(this.camera);
-      if (this.scratch.z > 1) continue;
+      if (projectedBehind(this.scratch.z, this.camera)) continue;
       const d = Math.hypot((this.scratch.x * 0.5 + 0.5) * width - x, (-this.scratch.y * 0.5 + 0.5) * height - y);
       if (d < bestD) {
         bestD = d;

@@ -12,6 +12,7 @@
 //   - disposing a target disposes its depth texture, so a shared one is detached first;
 //   - a product never samples that depth texture: reading it while a target it is attached to is
 //     bound throws the draw away.
+import { REVERSED_DEPTH } from '../depthMode.ts';
 import * as THREE from 'three';
 import type { FxProductId, FxSettings } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context';
@@ -75,7 +76,8 @@ export function geometryMaterialDefaults(material: THREE.Material, sameSurfaceAs
   material.depthFunc = THREE.LessEqualDepth;
   material.polygonOffset = sameSurfaceAsScene;
   material.polygonOffsetFactor = -1;
-  material.polygonOffsetUnits = -2;
+  // Three turns the factor round under reversed depth but not the units, which would then push the surface away instead of forward (WebGLState.setPolygonOffset): so the units turn round here.
+  material.polygonOffsetUnits = REVERSED_DEPTH ? 2 : -2;
   material.blending = THREE.NoBlending;
 }
 

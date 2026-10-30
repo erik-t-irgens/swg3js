@@ -1293,7 +1293,7 @@ export class ShuttleRigs {
     const d = tmpJoint.distanceTo(tmpCam);
     // The view's frustum only when the distance alone does not decide it, and once an update.
     if (!this.frustumReady && d >= SHUTTLE_RIG_TUNE.releaseNear && d < SHUTTLE_RIG_TUNE.seenFar) {
-      viewFrustum.setFromProjectionMatrix(viewMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+      viewFrustum.setFromProjectionMatrix(viewMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse), THREE.WebGLCoordinateSystem, camera.reversedDepth);
       this.frustumReady = true;
     }
     return inSight(viewFrustum, tmpCam, tmpJoint, s.radius, SHUTTLE_RIG_TUNE.seenFar, SHUTTLE_RIG_TUNE.releaseNear);

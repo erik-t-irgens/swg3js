@@ -2557,7 +2557,8 @@ function loadPlanetObjects(vfs, planet) {
   // buildout tables and have none, so an empty snapshot is fine as long as buildouts exist.
   const wsPath = `snapshot/${planet}.ws`;
   const hasBuildouts = vfs.has(`datatables/buildout/areas_${planet}.iff`);
-  if (!vfs.has(wsPath) && !hasBuildouts) throw new Error(`no ${wsPath} and no datatables/buildout/areas_${planet}.iff in archives`);
+  // A world that places nothing (`GROUND_ONLY_WORLDS`) is read as an empty snapshot over its terrain.
+  if (!vfs.has(wsPath) && !hasBuildouts && !(GROUND_ONLY_WORLDS.has(planet) && vfs.has(`terrain/${planet}.trn`))) throw new Error(`no ${wsPath} and no datatables/buildout/areas_${planet}.iff in archives`);
   const snap = vfs.has(wsPath) ? parseSnapshot(parseIff(vfs.read(wsPath))) : { version: 'none', templates: [], nodes: [] };
   // --ws-add=<archive>@x1,z1,x2,z2 brings back objects an older publish's snapshot placed inside a
   // rectangle (a city the final client no longer carries, such as pre-battle Restuss).
@@ -2653,12 +2654,26 @@ function moodValues(variants, clips) {
 }
 
 /**
+ * The ground terrains the archives hold beyond the worlds the game always converted, each converted as a world of
+ * its own and kept off the galaxy map (src/data/planets.ts): Hoth's Echo Base heroic (`adventure2`) and the heroic
+ * Tusken army (`adventure1`), each placed by its buildout table as copies standing side by side; and the terrains with
+ * neither a snapshot nor a buildout table (`GROUND_ONLY_WORLDS`), converted as ground, sky, water and flora with no
+ * object on them.
+ */
+const EXTRA_WORLDS = ['adventure2', 'adventure1', 'kashyyyk', 'tuskan_raid_encounter', 'taanab'];
+/**
+ * The extra worlds that place nothing: a pack of them has a layout with no object in it, which `status` takes as done
+ * rather than as a snapshot stopped half way, and every command that reads placements reads none for them.
+ */
+const GROUND_ONLY_WORLDS = new Set(['kashyyyk', 'tuskan_raid_encounter', 'taanab']);
+
+/**
  * Planet ids the game can load a pack for (see src/data/planets.ts). `dungeon1` is the instances zone,
  * a box of the copies the server stood one of per group (the Corellian corvette, the heroic Star
  * Destroyer and the other heroics): converted as an ordinary zone, as the tree world's pob zone is, and
  * never on the travel or galaxy lists.
  */
-const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori', 'mustafar', 'kashyyyk_main', 'kashyyyk_hunting', 'kashyyyk_dead_forest', 'kashyyyk_rryatt_trail', 'kashyyyk_north_dungeons', 'kashyyyk_south_dungeons', 'kashyyyk_pob_dungeons', 'dungeon1'];
+const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori', 'mustafar', 'kashyyyk_main', 'kashyyyk_hunting', 'kashyyyk_dead_forest', 'kashyyyk_rryatt_trail', 'kashyyyk_north_dungeons', 'kashyyyk_south_dungeons', 'kashyyyk_pob_dungeons', 'dungeon1', ...EXTRA_WORLDS];
 
 /**
  * Report what the packs under <dir> hold (planets, creatures, player) and which command
@@ -2900,17 +2915,23 @@ function packStatus(dir) {
   const cardShaders = new Set();
   /** The worlds whose radial flora (grass and the far tree cards) has no pictures, or pictures from another terrain, each with why. */
   const wantRadial = [];
+  // A folder with some worlds converted asks for a missing one alone (a world added to the list since, Hoth among
+  // them), since `snapshot all` would convert every world again; a folder with none asks for them all in one run.
+  const anyPacked = GAME_PLANETS.some((p) => existsSync(join(dir, p, 'manifest.json')));
   for (const planet of GAME_PLANETS) {
     const packDir = join(dir, planet);
     const manifest = readJson(join(packDir, 'manifest.json'));
     if (!manifest) {
       console.log(`  ${planet}: no pack`);
-      need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet} has no pack`);
+      need(anyPacked ? `snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only` : `snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet} has no pack`);
       continue;
     }
     planets++;
     const layout = readJson(join(packDir, 'layout.json'));
     const objects = layout ? layout.objects.length : 0;
+    // Placed as the archives place it: some objects, or a world that places nothing (`GROUND_ONLY_WORLDS`) once its
+    // layout is written. For every world the game always had this is `objects` and nothing else.
+    const placed = objects > 0 || (!!layout && GROUND_ONLY_WORLDS.has(planet));
     const flora = Object.keys(manifest.categories?.flora ?? {}).length;
     const pois = readJson(join(packDir, 'pois.json'));
     const gates = readJson(join(packDir, 'gates.json'));
@@ -2997,7 +3018,7 @@ function packStatus(dir) {
     if (navCut.length) {
       console.log(`    at ${navGrid.slopeDegrees} degrees the largest walkable region does not reach within ${GOAL_SNAP} m of ${navCut.map((t) => `${t.name} (${t.rank1 === null ? 'over 400' : t.rank1} m)`).join(', ')}: a body sent to one is told it cannot get there and steers the whole way, as it did before there was a grid. Only the angle moves this -- re-bake with --slope=<higher> to see what it costs.`);
     }
-    if (!objects) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no objects`);
+    if (!placed) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no objects`);
     if (!terrain) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet} has no terrain`);
     // A pack written before the bump maps were read draws the ground perfectly flat below the
     // terrain's own step, and one written before the alternates draws one picture a family on a 4 m
@@ -3011,7 +3032,7 @@ function packStatus(dir) {
     // it is asked for again rather than counted as done. Drop --floors-graph-only to mend it.
     else if (withCells.length && graphOnly) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet}'s buildings were converted with --floors-graph-only: path graphs, no walkable meshes`);
     // Its own `if`, because it needs no archives at all and nothing above it can fill it.
-    if (terrain && objects && !navGrid) need(`navgrid ${planet} ${dir}`, `${planet} has no outdoor walkability grid: bodies outdoors steer straight at their goal`);
+    if (terrain && placed && !navGrid) need(`navgrid ${planet} ${dir}`, `${planet} has no outdoor walkability grid: bodies outdoors steer straight at their goal`);
     else if (navMoved) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid was baked around the centre ${navGrid.center.x},${navGrid.center.z} and the pack's is now ${layout.center.x},${layout.center.z}: every cell in it is that far from the ground it describes`);
     else if (navNoIndoor) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid has ${navGrid.stats.buildings} portal buildings and no footprints for any of them: a route may cut straight through one`);
     // The angle it was baked at, which is the grid's own stamp: one baked steeper than the bodies
@@ -3074,18 +3095,18 @@ function packStatus(dir) {
       surfaceNotes.unread += manifest.surfaceCounts.shineUnread ?? 0;
       surfaceNotes.second += manifest.surfaceCounts.normalSecondSet ?? 0;
     }
-    if (objects && (manifest.materialFormat ?? 1) < MATERIAL_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet}'s models were ${MATERIAL_WHY}`);
+    if (placed && (manifest.materialFormat ?? 1) < MATERIAL_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet}'s models were ${MATERIAL_WHY}`);
     // The client's own lower detail levels and each indoor object's room (step 7): a pack without them draws
     // every placed thing and plant at its finest at every distance, and finds a room's furniture by its boxes.
-    else if (objects && (manifest.lodFormat ?? 0) < LOD_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, (manifest.lodFormat ?? 0) < 1 ? `${planet}'s placed models and flora were converted before the client's own detail levels (every one drawn at its finest at any distance)` : `${planet}'s placed models and flora carry detail levels the game can never draw or that stand somewhere else than the model, and a few surfaces a detail map with no coordinates for it`);
+    else if (placed && (manifest.lodFormat ?? 0) < LOD_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, (manifest.lodFormat ?? 0) < 1 ? `${planet}'s placed models and flora were converted before the client's own detail levels (every one drawn at its finest at any distance)` : `${planet}'s placed models and flora carry detail levels the game can never draw or that stand somewhere else than the model, and a few surfaces a detail map with no coordinates for it`);
     // Categories an older command left that no snapshot writes (worldManifest.mjs): their models carry the stamp
     // the manifest says and were never converted at it. A snapshot takes them out.
-    else if (objects && strayCategories(manifest).length) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet}'s manifest still carries ${strayCategories(manifest).join(', ')}, which no snapshot writes any more: their models were never converted at the material format the manifest is stamped with`);
+    else if (placed && strayCategories(manifest).length) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet}'s manifest still carries ${strayCategories(manifest).join(', ')}, which no snapshot writes any more: their models were never converted at the material format the manifest is stamped with`);
     // Travel and the fittings both hang off the same blocks of the emulator's scripts (the Core3 reference),
     // and both must run after the world they join to. A world the scripts really say nothing about
     // writes no file at all, so "none" and "not run yet" cannot be told apart here and the ask is
     // made once rather than repeated at every planet -- which is what the two flags below are for.
-    if (objects && !travel) wantTravel = true;
+    if (placed && !travel) wantTravel = true;
     else if (travel && travel.version !== TRAVEL_PACK_VERSION) wantTravel = true;
     // The rigs live in one folder every world shares, so a world's file can be current while the
     // pieces it names have gone.
@@ -3096,14 +3117,14 @@ function packStatus(dir) {
     if (travel && keptStale(travel, null, 'travel')) travelMaterials.push(planet);
     // The fires, sprays, flames and glows the objects' client data hangs on them (`objeffects`),
     // keyed by template: wanted again whenever what the table was built from is newer than it.
-    if (objects && objEffectsStale(packDir, ['layout.json', 'fittings.json', 'travel.json'])) wantObjEffects = true;
+    if (placed && objEffectsStale(packDir, ['layout.json', 'fittings.json', 'travel.json'])) wantObjEffects = true;
     if (floraCollision.stale) wantFloraCollision.push(`${planet} (${floraCollision.why})`);
     if (terrain && radial.why) wantRadial.push(radial.why);
     // The leaf cards' class and their bled pictures come with the flora command alone; a world's flora from
     // before carries neither, and the game stands its cards on the names until it does.
     if (floraCardsCurrent(packDir, manifest.categories?.flora) === false) wantFloraCards.push(planet);
     if (manifest.cards && typeof manifest.cards === 'object') for (const k of Object.keys(manifest.cards)) cardShaders.add(k);
-    if (objects && !fittings) wantFittings = true;
+    if (placed && !fittings) wantFittings = true;
     else if (fittings && fittings.version !== FITTINGS_PACK_VERSION) wantFittings = true;
     // Both commands **append** their models to the manifest's layout category, and a later
     // `snapshot` writes that category outright -- so a reconversion of a world silently takes the
@@ -3780,6 +3801,8 @@ function snapshotPlanets(vfs) {
     const planet = basename(n, '.iff').replace(/^areas_/, '');
     if (vfs.has(`terrain/${planet}.trn`)) names.add(planet);
   }
+  // And the worlds that place nothing at all, by their terrain alone.
+  for (const planet of GROUND_ONLY_WORLDS) if (vfs.has(`terrain/${planet}.trn`)) names.add(planet);
   return [...names].sort();
 }
 
@@ -6648,7 +6671,7 @@ switch (cmd) {
       // Not every planet ships a world snapshot: the expansions place everything through buildout
       // tables, which is why the lava world and the tree world's zones were skipped here (and so
       // never got the places their packs' own snapshot runs had written).
-      if (!vfs.has(`snapshot/${planet}.ws`) && !vfs.has(`datatables/buildout/areas_${planet}.iff`)) {
+      if (!vfs.has(`snapshot/${planet}.ws`) && !vfs.has(`datatables/buildout/areas_${planet}.iff`) && !GROUND_ONLY_WORLDS.has(planet)) {
         console.warn(`no snapshot/${planet}.ws and no buildout table in archives`);
         continue;
       }

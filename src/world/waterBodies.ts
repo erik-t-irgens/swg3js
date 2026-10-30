@@ -421,7 +421,7 @@ export class WaterBodies {
   beginFrame(camera: THREE.PerspectiveCamera, underwater: boolean, fogDensity: number, wanted: boolean): boolean {
     this.visibility.poll();
     tmpM.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    frustum.setFromProjectionMatrix(tmpM);
+    frustum.setFromProjectionMatrix(tmpM, THREE.WebGLCoordinateSystem, camera.reversedDepth);
     const reach = fogDensity > 0 ? FOG_HIDDEN / fogDensity : Infinity;
     let any = false;
     for (const b of this.list) {

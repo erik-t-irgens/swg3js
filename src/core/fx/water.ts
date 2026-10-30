@@ -22,6 +22,7 @@
 // Whether the lit water leaves its term out is decided once, before the scene is drawn
 // (`WaterBodies.active`, from `PostFX.passWanted`), and this pass's `enabled` returns that same
 // decision, so the two never disagree about who adds it.
+import { skyTest } from './glsl.ts';
 import * as THREE from 'three';
 import { FX_WATER_NEEDS_FULL, FX_WATER_NEEDS_HALF, type FxProductId, type FxSettings } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context';
@@ -234,7 +235,7 @@ const TRACE_FRAGMENT = /* glsl */ `
     ivec2 p = clamp(ivec2(s), ivec2(0), ivec2(uTraceSize) - 1);
     #ifdef FULL_RES
       float d = texelFetch(tDepth, p, 0).r;
-      return d >= 1.0 ? uFar : fxViewZ(d, uNear, uFar);
+      return ${skyTest('d')} ? uFar : fxViewZ(d, uNear, uFar);
     #else
       return texelFetch(tLinear, p, 0).r;
     #endif
