@@ -13738,7 +13738,7 @@ class App {
 
   private projectToScreen(x: number, y: number, z: number, out: ScreenPoint): boolean {
     const v = this.feedbackPoint.set(x, y, z).project(this.cam.camera);
-    if (!(v.z <= 1) || !Number.isFinite(v.x)) return false;
+    if (projectedBehind(v.z, this.cam.camera) || !Number.isFinite(v.z) || !Number.isFinite(v.x)) return false;
     out.x = (v.x * 0.5 + 0.5) * window.innerWidth;
     out.y = (0.5 - v.y * 0.5) * window.innerHeight;
     return true;
@@ -32011,7 +32011,7 @@ class App {
         // The lead marker, in pixels from the middle of the window, and the hull's own numbers.
         if (this.shipLeadValid) {
           tmp2.copy(this.shipLead).project(cam);
-          fv.leadOn = tmp2.z <= 1 && Math.abs(tmp2.x) <= 1 && Math.abs(tmp2.y) <= 1;
+          fv.leadOn = !projectedBehind(tmp2.z, cam) && Math.abs(tmp2.x) <= 1 && Math.abs(tmp2.y) <= 1;
           fv.leadX = tmp2.x * halfW;
           fv.leadY = -tmp2.y * half;
         } else fv.leadOn = false;

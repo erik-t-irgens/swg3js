@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { ACTOR_LAYER } from './portalRender';
 import { surfaces } from './surfaces.ts';
+import { projectedBehind } from '../core/depthMode.ts';
 // Whether an emitter draws anything, which decides whether it is made at all. Pure and node-tested,
 // because an emitter wrongly refused there is indistinguishable from an effect that never played.
 import { FOUNTAIN_SPRAY_TUNE, emitterKept, isFountainSpray, type DrawableEmitter } from './particleDraw.ts';
@@ -1927,7 +1928,7 @@ export class ParticleEffects {
             if (e.def.localSpace) tmpV.applyMatrix4(e.world);
             if (e.frame) tmpV.applyMatrix4(e.frame);
             tmpV.project(cam);
-            (row.first as Record<string, unknown>).screen = tmpV.z < 1 ? `${Math.round((tmpV.x + 1) * 50)}%,${Math.round((1 - tmpV.y) * 50)}%` : 'behind camera';
+            (row.first as Record<string, unknown>).screen = !projectedBehind(tmpV.z, cam) ?`${Math.round((tmpV.x + 1) * 50)}%,${Math.round((1 - tmpV.y) * 50)}%` : 'behind camera';
           }
         }
         out.push(row);
