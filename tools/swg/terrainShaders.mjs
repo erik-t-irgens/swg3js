@@ -41,6 +41,41 @@ export const GROUND_MASKS = {
 };
 /** And the cloud shadow tile, which the client's ground environment draws through `shader/terrain_cloudtile.sht`. */
 export const GROUND_CLOUDS = { file: 'terrain/cloudtile.png', shader: 'shader/terrain_cloudtile.sht', texture: 'texture/cloudtile.dds' };
+
+/**
+ * Ours: the plain picture a ground family of an extra world is drawn in where the archives have not got its shader
+ * (`writeGroundTextures`' `standIn`): an earth grey with a soft mottle, so the ground reads as ground and its tiling
+ * as tiles, written once a pack.
+ */
+export const STAND_IN_GROUND = { file: 'terrain/shaders/stand_in.png', size: 256, rgb: [110, 106, 92], mottle: 18 };
+
+/** The stand-in picture's texels: its colour moved by a smooth value noise that tiles across the picture's edges. */
+export function standInRgba() {
+  const { size, rgb, mottle } = STAND_IN_GROUND;
+  const cells = 8;
+  const at = (i, j) => {
+    let h = (((i % cells) + cells) % cells) * 374761393 + (((j % cells) + cells) % cells) * 668265263;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+  };
+  const rgba = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const fx = (x * cells) / size;
+      const fy = (y * cells) / size;
+      const i = Math.floor(fx);
+      const j = Math.floor(fy);
+      const u = fx - i;
+      const v = fy - j;
+      const n = (at(i, j) * (1 - u) + at(i + 1, j) * u) * (1 - v) + (at(i, j + 1) * (1 - u) + at(i + 1, j + 1) * u) * v;
+      const d = (n - 0.5) * 2 * mottle;
+      const o = (y * size + x) * 4;
+      for (let c = 0; c < 3; c++) rgba[o + c] = Math.max(0, Math.min(255, Math.round(rgb[c] + d)));
+      rgba[o + 3] = 255;
+    }
+  }
+  return rgba;
+}
 /** The pack's colour ramp file (the game's `COLOR_RAMP_FILE`, in `colorRampFile`'s shape). */
 export const COLOR_RAMPS = 'terrain/colorramps.json';
 /** How far apart the whole-map sample the brightness reference is taken over stands, in metres. */
@@ -259,8 +294,21 @@ function writeGroundShader(vfs, path, stem, outDir, written, warn) {
  * `terrain/shaders/` that this run did not write are taken away, so the folder holds what the list names.
  * Returns what it wrote, counted. `late` is the late stamp the caller's mount gives (finalnames.mjs), written as it is.
  */
-export function writeGroundTextures(vfs, template, outDir, { log = console.error, warn = console.warn, late = null } = {}) {
+export function writeGroundTextures(vfs, template, outDir, { log = console.error, warn = console.warn, late = null, standIn = false } = {}) {
   const written = new Set();
+  // `standIn` (the converter's extra worlds alone, cli.mjs `EXTRA_WORLDS`): a child whose shader the archives have not
+  // got is drawn in a plain picture of ours (`STAND_IN_GROUND`) and says so (`standIn: true`), so a later conversion
+  // that finds the shader replaces it; every other world keeps a missing child with no picture, as it always did.
+  let standInFile = null;
+  const standInPicture = () => {
+    if (!standInFile) {
+      standInFile = STAND_IN_GROUND.file;
+      mkdirSync(dirname(join(outDir, standInFile)), { recursive: true });
+      writeFileSync(join(outDir, standInFile), encodePng(STAND_IN_GROUND.size, STAND_IN_GROUND.size, standInRgba()));
+      written.add(standInFile);
+    }
+    return standInFile;
+  };
   /** Per shader file, its pictures (or the reason it has none), so a shader two families name is written once. */
   const byShader = new Map();
   const stems = new Set();
@@ -280,9 +328,9 @@ export function writeGroundTextures(vfs, template, outDir, { log = console.error
       const child = { shader: c.name.replace(/\\/g, '/'), weight: c.weight, file: null, normal: null, specular: null, specularColor: null };
       const path = groundShaderPath(vfs, child.shader);
       if (!path) {
-        warn(`terrain shader missing: ${child.shader} (family ${fam.id} ${fam.name})`);
+        warn(`terrain shader missing: ${child.shader} (family ${fam.id} ${fam.name})${standIn ? '; drawn in the stand-in picture' : ''}`);
         counts.missing++;
-        return child;
+        return standIn ? { ...child, file: standInPicture(), standIn: true } : child;
       }
       let got = byShader.get(path);
       if (!got) {
@@ -296,7 +344,7 @@ export function writeGroundTextures(vfs, template, outDir, { log = console.error
       }
       if (got.failed) {
         counts.missing++;
-        return child;
+        return standIn ? { ...child, file: standInPicture(), standIn: true } : child;
       }
       counts.childTextures++;
       if (got.normal) counts.bumped++;
@@ -321,6 +369,7 @@ export function writeGroundTextures(vfs, template, outDir, { log = console.error
       normal: p ? p.normal : null,
       specular: p ? p.specular : null,
       specularColor: p ? p.specularColor : null,
+      ...(p?.standIn ? { standIn: true } : {}),
       children,
     });
   }

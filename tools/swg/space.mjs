@@ -27,6 +27,10 @@ export const SPACE_ZONES = {
   space_ord_mantell: null,
   space_light1: null,
   space_heavy1: null,
+  // The NGE's new-player flight in the Millennium Falcon (three copies of one zone), reached by the developer's travel.
+  space_npe_falcon: null,
+  space_npe_falcon_2: null,
+  space_npe_falcon_3: null,
 };
 
 /**

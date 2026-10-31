@@ -88,7 +88,9 @@ function packTiler(world: string, swg: SwgTerrain): ChunkTiler | null {
   if ((file.version ?? 0) < 4) return null;
   const families = file.families.filter((x) => x.children?.length);
   const entries = tileEntries(families, false);
-  const arrays = assembleTileArrays(families, entries, entries.map(() => true), 1, { colour: () => [0, 0, 0, 255], normal: () => null, gloss: () => null })!;
+  const arrays = assembleTileArrays(families, entries, entries.map(() => true), 1, { colour: () => [0, 0, 0, 255], normal: () => null, gloss: () => null });
+  // A terrain with no ground family at all (the `runtimerules` extra world) has no tiles to draw: none, as with no file.
+  if (!arrays) return null;
   const group = swg.template.generator.shaderGroup;
   const planetFamilies = new Map<number, string>([...group.families.values()].map((x) => [x.id, x.name]));
   const { childLayers, priority } = tileLookups(planetFamilies, families, arrays.childLayersByName);

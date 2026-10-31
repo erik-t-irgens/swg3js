@@ -139,7 +139,10 @@ export function radialStatus(planet, json, trnBytes, rgbaBytes) {
   if (!json) return { line: 'NO GRASS', why: `${planet}'s terrain names ${named} radial children (grass, flowers and the far hills' tree cards) and the pack has none of their pictures (${RADIAL_JSON})` };
   if (json.radialFormat !== RADIAL_FORMAT) return { line: 'GRASS OF ANOTHER FORMAT', why: `${planet}'s ${RADIAL_JSON} is format ${json.radialFormat ?? 'none'}, not ${RADIAL_FORMAT}` };
   if (json.trn?.sha1 !== sha1Of(trnBytes)) return { line: 'GRASS FROM ANOTHER TERRAIN', why: `${planet}'s grass pictures were written from a terrain file other than the one its pack carries now` };
-  if (json.layers !== json.placed) return { line: `grass ${json.layers}/${json.placed} pictures`, why: `${planet}'s grass has ${json.layers} of the ${json.placed} pictures its terrain places` };
+  // A shader the run recorded as missing (`missing`: not in the archives, or not decoded) is accounted for, since running
+  // again cannot find it; every world the game always had misses none, so for them this is `layers !== placed`.
+  const missed = Array.isArray(json.missing) ? json.missing.length : 0;
+  if (json.layers + missed !== json.placed) return { line: `grass ${json.layers}/${json.placed} pictures`, why: `${planet}'s grass has ${json.layers} of the ${json.placed} pictures its terrain places` };
   const want = json.layers * (json.size ?? RADIAL_SIZE) ** 2 * 4;
   if (rgbaBytes !== want) return { line: 'GRASS PICTURES CUT SHORT', why: `${planet}'s ${RADIAL_RGBA} holds ${rgbaBytes ?? 'no'} bytes where its list says ${want}` };
   return { line: `grass ${json.layers} pictures (${json.near ?? '?'} near, ${json.far ?? '?'} far)`, why: null };

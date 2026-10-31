@@ -112,7 +112,7 @@ const LOADED: [number, number][] = [
   [8, 3],
 ];
 
-const results: { world: string; offPole: number; fanWorst: number; fieldWorst: number; oldFieldWorst: number; relief: number; farOff: number; cutWrong: number; cutQuads: number; moved: boolean }[] = [];
+const results: { world: string; offPole: number; fanWorst: number; fieldWorst: number; oldFieldWorst: number; relief: number; farOff: number; cutWrong: number; cutQuads: number; moved: boolean; tile: number }[] = [];
 for (const world of worlds) {
   const terrain = await terrainOf(world);
   if (!terrain) continue;
@@ -215,14 +215,17 @@ for (const world of worlds) {
   if (kept !== u.n * u.n - cutQuads) cutWrong++;
   tile.dispose();
   ok(originsMatch, `${world}: every chunk's ground starts at groundChunkOrigin's corner, its least vertex`);
-  results.push({ world, offPole, fanWorst, fieldWorst, oldFieldWorst, relief: highest - lowest, farOff, cutWrong, cutQuads, moved: shift.x !== NO_SHIFT.x || shift.z !== NO_SHIFT.z });
+  results.push({ world, offPole, fanWorst, fieldWorst, oldFieldWorst, relief: highest - lowest, farOff, cutWrong, cutQuads, moved: shift.x !== NO_SHIFT.x || shift.z !== NO_SHIFT.z, tile: (swg as unknown as { tileWidth?: number }).tileWidth ?? 4 });
   swg.dispose();
 }
 
 if (results.length) {
   const off = results.filter((r) => r.offPole > 0);
   ok(off.length === 0, `on all ${results.length} worlds every vertex of every chunk's grid falls on a pole${off.length ? `: not on ${off.map((r) => `${r.world} (${r.offPole})`).join(', ')}` : ''}`);
-  const worstFan = results.reduce((a, r) => Math.max(a, r.fanWorst), 0);
+  // A terrain of tiles other than 4 m (the `godclient_test` developers' terrain's 8 m) is drawn on 2 m cells that are not
+  // its fans' (the ground keeps the program of before there, `tilesFit`): said, and held to nothing here.
+  for (const r of results) if (r.tile !== 4) console.log(`note ${r.world}: ${r.tile} m tiles, so its 2 m mesh is not its fan surface (${(r.fanWorst * 1000).toFixed(2)} mm off)`);
+  const worstFan = results.filter((r) => r.tile === 4).reduce((a, r) => Math.max(a, r.fanWorst), 0);
   ok(worstFan < 2e-3, `and the mesh is the client's fan surface: sampled inside every triangle, at most ${(worstFan * 1000).toFixed(2)} mm from the height the terrain's fan sampler gives`);
   const worstField = results.reduce((a, r) => Math.max(a, r.fieldWorst), 0);
   ok(worstField < 2e-3, `the physics heightfield chunkHeightfield makes meets a ray at every vertex at that vertex's height (worst ${(worstField * 1000).toFixed(2)} mm)`);

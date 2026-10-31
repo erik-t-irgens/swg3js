@@ -335,7 +335,11 @@ for (const name of named(['tatooine', 'naboo'], 'every pole on its nearest corne
   // 2.6 m) until the generator stopped running the top-level layers its file switches off (its `paths`):
   // every world is now held to the rounding. A world that cannot yet be is named here with its measure.
   const PFPM_ROUNDING = 0.02;
-  const PFPM_KNOWN: Record<string, { past: number; farPast: number; worst: number }> = {};
+  // `terrain_test` and `tuskan_raid_encounter`, two of the extra worlds (one terrain's layers in two files, by their
+  // counts): their baked heights disagree with what their own layers make at nearly every planted tile (measured 93 of
+  // 96, worst 87.4 m; 188 of 189, worst 268.1 m); whether the bake is older than the layers or the layers use something
+  // the generator does not do was not looked into. Every world the game always had is held to the rounding.
+  const PFPM_KNOWN: Record<string, { past: number; farPast: number; worst: number }> = { terrain_test: { past: 93, farPast: 93, worst: 87.5 }, tuskan_raid_encounter: { past: 188, farPast: 188, worst: 268.2 } };
   const pct = (a: number, b: number) => (b ? (100 * a) / b : 0);
   const tenth = (v: number) => Math.round(v * 10) / 10;
   for (const name of worlds) {

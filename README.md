@@ -905,6 +905,17 @@ The converter replaces `@SWG`, `@JKA` and `@CORE3` on its command line with thos
 npm run swg -- verify @SWG --retail-only                                        # 1. which archives are retail (sanity check)
 npm run swg -- planets @SWG --retail-only                                       # 2. which planets the archives hold
 npm run swg -- snapshot @SWG all assets-private --radius=all --retail-only       # 3. every planet: objects, terrain, ground textures, sky, flora, places (long: minutes per planet)
+npm run swg -- snapshot @SWG adventure2 assets-private/adventure2 --center=auto --radius=all --retail-only   #    one world on its own; `all` takes these too: the ground terrains the game never offered as
+                                                                                  #    worlds, kept off the galaxy map and reached by `__debug.travel('<id>')`: Hoth's Echo Base (adventure2)
+                                                                                  #    and the Tusken army (adventure1) heroics with their copies side by side and nobody in them, the early
+                                                                                  #    one-piece Kashyyyk (`kashyyyk`, the game's `kashyyyk_early`), tuskan_raid_encounter, taanab, and the
+                                                                                  #    developers' tests 09, 10, 11, simple, floratest, rivertest, terrain_test, watertabletest, creature_test,
+                                                                                  #    godclient_test, cinco_city_test_m5, endor_asommers, umbra, test_wearables, character_farm and
+                                                                                  #    runtimerules, Otoh Gunga's sea floor and the old tutorial's ground (`tutorial`, whose hall and the
+                                                                                  #    NGE's Tansarii Point Station stand as rows of `public/placements/world/tutorial.json`); a terrain with
+                                                                                  #    no sky of its own wears Corellia's, Endor's or Naboo's, and a ground shader the archives lack is drawn
+                                                                                  #    in a plain stand-in of ours; `status` asks for each one missing on its own, seconds and MB each
+                                                                                  #    (the NGE's Millennium Falcon flight, space_npe_falcon to _3, comes with `space all` below)
 npm run swg -- creatures @SWG assets-private --retail-only                      # 4. the creatures the planets spawn
 npm run swg -- player @SWG assets-private --retail-only --jka=@JKA             # 5. the player character, dressed, with its animations and Jedi Academy's saber, jump and parry clips (@JKA: its GameData or base folder); always with --jka once you have it, a run without it drops them
 npm run swg -- parts @SWG assets-private --retail-only                           # 6. the same character as parts (body, head, clothes on one skeleton), which the game prefers

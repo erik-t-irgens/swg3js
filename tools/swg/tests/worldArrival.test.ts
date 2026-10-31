@@ -43,7 +43,9 @@ const DOOR = { x: -2961.6, z: -4411.9 };
 // ------------------------------------------------------------------------------------------- which worlds
 {
   const named = PLANETS.filter((p) => p.arrival);
-  ok(named.every((p) => hasOwnArrival(p)) && named.map((p) => p.id).join(',') === 'mustafar', `only worlds of one zone and some ground name an arrival, and Mustafar is the one (${named.map((p) => p.id).join(', ')})`);
+  // Mustafar; the old tutorial, at its hall's door; and the `simple` test terrain, whose buildout stands bridge pieces
+  // on its layout centre (planets.ts).
+  ok(named.every((p) => hasOwnArrival(p)) && named.map((p) => p.id).join(',') === 'mustafar,tutorial,simple', `only worlds of one zone and some ground name an arrival: Mustafar, the old tutorial and the simple test terrain (${named.map((p) => p.id).join(', ')})`);
   const tatooine = PLANETS.find((p) => p.id === 'tatooine')!;
   ok(!hasOwnArrival(tatooine) && !hasOwnArrival({ arrival: mustafar.arrival, zones: [{}] }) && !hasOwnArrival({ arrival: mustafar.arrival, space: 'test_space' }), 'a world naming none, a zoned world and a space zone arrive as they always did');
 }

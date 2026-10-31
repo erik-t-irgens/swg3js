@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "world": "tutorial",
+  "frame": "raw",
+  "rows": [
+    { "id": "tutorial_newbie_hall", "kind": "building", "pack": "gallery", "model": "thm_newbie_hall", "x": 0, "y": 3.5, "z": 0, "q": [1,0,0,0], "template": "object/building/general/shared_newbie_hall.iff", "name": "The old tutorial's hall" },
+    { "id": "tutorial_npe_station", "kind": "building", "pack": "world", "model": "thm_spc_nebula_orion_station", "from": "dungeon1", "x": 1500, "y": 33, "z": 250, "q": [1,0,0,0], "template": "object/building/general/shared_npe_space_station.iff", "name": "Tansarii Point Station" }
+  ]
+}

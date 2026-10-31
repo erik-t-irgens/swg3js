@@ -34,7 +34,7 @@ import { findAll, parseIff } from '../iff.mjs';
 import { decodePng } from '../png.mjs';
 import { shaderTextures } from '../sht.mjs';
 import { decodeTga } from '../tga.mjs';
-import { COLOR_RAMPS, GROUND_CLOUDS, GROUND_MASKS, REFERENCE_STEP, TERRAIN_SHADERS_VERSION, alphaAsGrey, downscaleRgba, groundShaderPath, groundStatus, primaryChild, writeColorRamps, writeGroundTextures, writeTerrainBitmaps } from '../terrainShaders.mjs';
+import { COLOR_RAMPS, GROUND_CLOUDS, GROUND_MASKS, REFERENCE_STEP, STAND_IN_GROUND, TERRAIN_SHADERS_VERSION, alphaAsGrey, downscaleRgba, groundShaderPath, groundStatus, primaryChild, writeColorRamps, writeGroundTextures, writeTerrainBitmaps } from '../terrainShaders.mjs';
 import { mountForLate, mountRetail, PACKS, type Img, type Vfs } from './materialsHarness.ts';
 import { RandomGenerator } from '../../../src/swg/terrain/fractal.ts';
 import { rampFromArchives } from './terrainHarness.ts';
@@ -160,8 +160,10 @@ function checkGround(label: string, dir: string, vfs: Vfs, planet: TerrainTempla
       const main = path ? mainOf.get(path) : null;
       if (!main) {
         unresolved++;
-        if (c.file) tally.off.push(`${label} ${c.shader}: written although its shader or its texture is not in the archives`);
+        // An extra world draws such a child in the converter's stand-in picture, and says so (`standIn`).
+        if (c.file && !(c.standIn && c.file === STAND_IN_GROUND.file)) tally.off.push(`${label} ${c.shader}: written although its shader or its texture is not in the archives`);
       } else if (!c.file) tally.off.push(`${label} ${c.shader}: in the archives with its texture ${main} and not written`);
+      else if (c.standIn) tally.off.push(`${label} ${c.shader}: in the archives with its texture ${main} and drawn in the stand-in`);
     }
   }
 
@@ -259,7 +261,8 @@ function checkGround(label: string, dir: string, vfs: Vfs, planet: TerrainTempla
   // Nothing under terrain/shaders that the list does not name.
   const named = new Set<string>();
   for (const f of listed) for (const c of f.children) for (const k of ['file', 'normal', 'specular']) if (c[k]) named.add(c[k]);
-  const onDisk = readdirSync(join(dir, 'terrain/shaders')).map((f) => `terrain/shaders/${f}`);
+  // A terrain with no ground family at all (the `runtimerules` extra world) writes no picture and no folder for them.
+  const onDisk = existsSync(join(dir, 'terrain/shaders')) ? readdirSync(join(dir, 'terrain/shaders')).map((f) => `terrain/shaders/${f}`) : [];
   ok(onDisk.every((f) => named.has(f)) && [...named].every((f) => onDisk.includes(f)), `${label}: terrain/shaders holds exactly the ${named.size} pictures the list names`);
 
   // The ramps, each against its TGA's first row, and every one the terrain names that the archives hold.

@@ -479,7 +479,7 @@ PLANETS.push({
  * planet, the developers' tests. Their sky, ground and weather are the pack's own; the numbers here are only what a world
  * with no pack would draw, and each sun is an existing planet's, so the shared day's planet list gains none to keep apart.
  */
-function extraWorld(o: Pick<PlanetDef, 'id' | 'name' | 'tagline' | 'description' | 'seed'> & { sunOf: string; palette: PlanetDef['palette']; zones?: PlanetZone[] }): PlanetDef {
+function extraWorld(o: Pick<PlanetDef, 'id' | 'name' | 'tagline' | 'description' | 'seed'> & { sunOf: string; palette: PlanetDef['palette']; zones?: PlanetZone[]; arrival?: WorldArrival }): PlanetDef {
   const sun = PLANETS.find((p) => p.id === o.sunOf)!;
   return {
     id: o.id,
@@ -498,6 +498,7 @@ function extraWorld(o: Pick<PlanetDef, 'id' | 'name' | 'tagline' | 'description'
     props: { treeDensity: 0, rockDensity: 0, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x8f8f8f, treeScale: 1 },
     creatures: { name: 'Nothing', count: 0, color: 0x000000, size: 1, speed: 0, hp: 1, aggressive: false, damage: 0 },
     ...(o.zones ? { zones: o.zones } : {}),
+    ...(o.arrival ? { arrival: o.arrival } : {}),
   };
 }
 
@@ -520,6 +521,94 @@ PLANETS.push(
     sunOf: 'tatooine',
     palette: { low: 0xd8b073, mid: 0xe7c78d, high: 0xf2dcaa, slope: 0xb48d56, shore: 0xe7c78d },
   }),
+  // The archives' early Kashyyyk in one piece. Its pack is `kashyyyk`, the archives' own name for the terrain, which is
+  // Kashyyyk's own id, so it is a planet of one zone whose pack that is: a planet split into zones never loads its own id.
+  extraWorld({
+    id: 'kashyyyk_early',
+    name: 'Old Kashyyyk',
+    tagline: 'Kashyyyk in one piece, before it was split into zones',
+    description: 'An early terrain of the Wookiee world in one piece, from before the game split it into zones: its ground, sky and plants, with nothing built on it.',
+    seed: 2006,
+    sunOf: 'kashyyyk',
+    palette: { low: 0x3d6b33, mid: 0x4c7c3a, high: 0x6c8a52, slope: 0x5a4a3a, shore: 0x8a7a55 },
+    zones: [{ id: 'world', name: 'the one terrain', pack: 'kashyyyk' }],
+  }),
+  extraWorld({
+    id: 'tuskan_raid_encounter',
+    name: 'Tusken raid encounter',
+    tagline: 'The ground of an encounter with Tusken raiders',
+    description: 'The terrain of an encounter with Tusken raiders: its desert ground, sky and plants, with nothing standing on it.',
+    seed: 1982,
+    sunOf: 'tatooine',
+    palette: { low: 0xd8b073, mid: 0xe7c78d, high: 0xf2dcaa, slope: 0xb48d56, shore: 0xe7c78d },
+  }),
+  extraWorld({
+    id: 'taanab',
+    name: 'Taanab',
+    tagline: 'A planet the game never released',
+    description: 'The terrain of Taanab, a planet the game never released: its ground, sky and plants, with nothing built on it.',
+    seed: 1983,
+    sunOf: 'naboo',
+    palette: { low: 0x74a64b, mid: 0x4f8c3a, high: 0x9db76c, slope: 0x7c6a4e, shore: 0xd9c98f },
+  }),
+  extraWorld({
+    id: 'otoh_gunga',
+    name: 'Otoh Gunga',
+    tagline: 'The Gungans\' sea floor, with nothing of its own drawn',
+    description: 'The terrain of Otoh Gunga, the Gungans\' city under Naboo\'s lakes: 32 km of ground falling to a kilometre below the water. The archives hold none of its ground pictures, grass or sky, so it wears a plain stand-in ground of ours and Naboo\'s sky, and no city stands on it.',
+    seed: 1999 + 1,
+    sunOf: 'naboo',
+    palette: { low: 0x2e5a5a, mid: 0x3f6a62, high: 0x6f8a7a, slope: 0x4a5a52, shore: 0x8a8a6a },
+  }),
+  // The old newbie tutorial's terrain, where the server stood a hall for each new player in code: the hall, and the NGE's
+  // Tansarii Point Station, stand there as permanent placement rows of ours (`public/placements/world/tutorial.json`),
+  // with nobody in them and no quest, 1.5 km apart.
+  extraWorld({
+    id: 'tutorial',
+    name: 'The old tutorial',
+    tagline: 'The newbie hall, and Tansarii Point Station beside it',
+    description: 'The terrain the old tutorial stood its hall on, black as the space the tutorial was set in, with the hall standing at its middle and the NGE\'s Tansarii Point Station 1.5 km east: places to walk, with nobody in them and no quest.',
+    seed: 2003,
+    sunOf: 'corellia',
+    palette: { low: 0x6f6f6f, mid: 0x7f7f7f, high: 0x9f9f9f, slope: 0x5f5f5f, shore: 0x8f8f8f },
+    // Outside the hall's hangar door (its one doorway to the outside, a 115 m opening at the hangar's far end), facing
+    // in: the hall stands at the middle 3.5 m up, so the hangar's floor is the ground's (ours, measured in the smoke).
+    arrival: { raw: { x: 53, z: -428 }, y: 0.3, heading: 0 },
+  }),
+  // The developers' own test terrains, each converted as it stands; what each holds is what its terrain makes, and a
+  // terrain the archives hold no sky for wears another world's (the converter's `SKY_LENT`).
+  ...([
+    ['09', 'a 4 km map, ground from -5 to 100 m in two families, with a little flora', ''],
+    ['simple', 'flat ground in two families with eight bridge pieces its buildout table places', 'Corellia'],
+    ['floratest', 'a gentle 4 km map, ground from 3 to 7 m, planted to try the flora', 'Corellia'],
+    ['rivertest', 'a 4 km map, ground from -20 to 122 m in two families', 'Corellia'],
+    ['terrain_test', 'a 4 km map, ground from 0 to 100 m in four families, with flora', ''],
+    ['watertabletest', 'a 4 km map, ground from 0 to 50 m', 'Corellia'],
+    ['creature_test', 'a 4 km map of low hills, ground from 10 to 41 m', 'Corellia'],
+    ['godclient_test', 'an 8 km map, ground from -68 to 81 m in four families', 'Corellia'],
+    ['cinco_city_test_m5', 'a 16 km map, ground from -60 to 337 m in seventeen families, with flora', 'Corellia'],
+    ['endor_asommers', 'a 16 km map, ground from -50 to 389 m in sixteen families', 'Endor'],
+    ['umbra', 'a small 4 km map, ground from 0 to 25 m in one family', 'Corellia'],
+    ['10', 'flat 4 km ground in one family, with nothing growing or standing on it', 'Corellia'],
+    ['11', 'flat 4 km ground in one family, with a little flora', 'Corellia'],
+    ['test_wearables', 'flat 4 km ground in one family, with a little flora, where the clothes were tried', 'Corellia'],
+    ['character_farm', 'flat 16 km ground in one family with nothing on it, named for making characters in bulk', 'Corellia'],
+    ['runtimerules', 'the engine\'s own file of run-time terrain rules, 4 km of ground from 0 to 37 m with no ground family at all, drawn in the game\'s plain stand-in colours', 'Corellia'],
+  ] as const).map(([id, what, lent], i) =>
+    extraWorld({
+      id,
+      name: `Test: ${id}`,
+      tagline: "A developers' test terrain",
+      description: `One of the developers' own test terrains in the archives, converted as it stands: ${what}.${lent ? ` The archives hold no sky for it, so it wears ${lent}'s.` : ''}`,
+      seed: 7000 + i,
+      sunOf: 'corellia',
+      // `simple`'s buildout stands two of its bridge pieces on the flat ground at its layout centre, where an arrival
+      // looked for there stood the body inside one and dropped it through the ground onto the pieces 19 m below, which
+      // the table placed for some other ground: it arrives 57 m north of them on the open flat (ours), facing them.
+      ...(id === 'simple' ? { arrival: { raw: { x: 9, z: 30 }, y: 0.3, heading: Math.PI } } : {}),
+      palette: { low: 0x6f8a5a, mid: 0x7f8f6a, high: 0xa9b29a, slope: 0x6a6258, shore: 0xb8ad88 },
+    }),
+  ),
 );
 
 /**
@@ -606,6 +695,18 @@ const SYSTEMS: { id: string; system: string; name: string; tagline: string; desc
     seed: 5104,
     palette: { low: 0x14202e, mid: 0x3f6a86, high: 0x9fc6d8, slope: 0x14202e, shore: 0x3f6a86 },
   },
+  // The NGE's new-player flight aboard the Millennium Falcon: three copies of one zone the server sent new players to, a
+  // planet in the sky and nothing else of the client's in them (no station, field or jump point), reached by the
+  // developer's travel and kept off the galaxy map, with no quest.
+  ...[1, 2, 3].map((n) => ({
+    id: n === 1 ? 'space_npe_falcon' : `space_npe_falcon_${n}`,
+    system: n === 1 ? 'npe_falcon' : `npe_falcon_${n}`,
+    name: n === 1 ? 'The Falcon\'s flight' : `The Falcon's flight ${n}`,
+    tagline: 'The NGE\'s new-player flight aboard the Millennium Falcon',
+    description: 'The space the NGE flew a new player through aboard the Millennium Falcon: its sky and the planet in it, with nothing else of the game\'s and no quest. The game stood three copies of it.',
+    seed: 5105 + n,
+    palette: { low: 0x1a1426, mid: 0x4a3a6a, high: 0x9a8cc0, slope: 0x1a1426, shore: 0x4a3a6a },
+  })),
 ];
 for (const s of SYSTEMS) {
   PLANETS.push({

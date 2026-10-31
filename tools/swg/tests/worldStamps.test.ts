@@ -47,7 +47,8 @@ ok(glbsNamed(entry).join(',') === 'x.glb,lod/x_1.glb', 'every model an entry nam
 const cli = readFileSync(new URL('../cli.mjs', import.meta.url), 'utf8');
 const snap = cli.slice(cli.indexOf('async function snapshotPlanet'), cli.indexOf('function mobilesCodeStamp'));
 ok(/manifest\.categories = snapshotCategories\(manifest\.categories\);/.test(snap) && snap.indexOf('snapshotCategories(') < snap.indexOf('manifest.materialFormat = MATERIAL_FORMAT'), 'the snapshot cuts the manifest to its own categories before it stamps the format over it');
-ok(/else if \(objects && strayCategories\(manifest\)\.length\) need\(`snapshot <swg-dir> \$\{planet\}/.test(cli), 'status asks for the snapshot while a world\'s manifest carries a stray category');
+// `placed`: a world with objects, or one that places nothing by the archives' own word (`GROUND_ONLY_WORLDS`) once laid out.
+ok(/else if \(placed && strayCategories\(manifest\)\.length\) need\(`snapshot <swg-dir> \$\{planet\}/.test(cli), 'status asks for the snapshot while a world\'s manifest carries a stray category');
 
 // ---------------------------------------------------------------- 3. the packs
 

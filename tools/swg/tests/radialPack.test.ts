@@ -75,8 +75,11 @@ for (const name of worlds) {
   const file = readRadialFile(json);
   ok(!!file && json.radialFormat === RADIAL_FORMAT && file.size === RADIAL_SIZE, `${name}: the file reads at format ${RADIAL_FORMAT}, ${RADIAL_SIZE} square layers`);
   const placed = radialPlaced(parseTerrainTemplate(new Uint8Array(trn)).generator);
-  ok(json.placed === placed.length && file!.layers === placed.length && file!.shaders.size === placed.length, `${name}: ${file!.layers} layers for the ${placed.length} shaders its live radial affectors place`);
-  ok(placed.every((p) => { const e = file!.shaders.get(p.key); return !!e && e.near === p.near && e.far === p.far; }), `${name}: every placed shader has its layer, near and far as placed`);
+  // A shader the run recorded as missing from the archives (`missing`: some of the extra worlds' test terrains name grass
+  // the archives have not got) has no layer; every world the game always had misses none.
+  const missed = new Set<string>((Array.isArray(json.missing) ? json.missing : []).map((m: { key: string }) => m.key));
+  ok(json.placed === placed.length && file!.layers + missed.size === placed.length && file!.shaders.size === file!.layers, `${name}: ${file!.layers} layers${missed.size ? ` and ${missed.size} missing from the archives` : ''} for the ${placed.length} shaders its live radial affectors place`);
+  ok(placed.every((p) => { const e = file!.shaders.get(p.key); return missed.has(p.key) ? !e : !!e && e.near === p.near && e.far === p.far; }), `${name}: every placed shader has its layer, near and far as placed${missed.size ? ', but the missing' : ''}`);
   ok(rgba.length === file!.layers * RADIAL_SIZE * RADIAL_SIZE * 4, `${name}: the picture file is exactly ${file!.layers} layers (${rgba.length} bytes)`);
   ok(json.trn?.sha1 === sha1Of(trn), `${name}: written from the terrain file the pack carries`);
   ok(radialStatus(name, json, trn, rgba.length).why === null, `${name}: status asks nothing more of it`);
@@ -89,6 +92,10 @@ for (const name of worlds) {
     continue;
   }
   const pv = mount.vfs;
+  if (missed.size) {
+    const absent = [...missed].filter((key) => { const d = describeSurface(pv, `shader/${key}.sht`, new Map()); return !d.main || !pv.has(d.main); });
+    ok(absent.length === missed.size, `${name}: every shader it records as missing really has no picture in the archives (${absent.length} of ${missed.size})`);
+  }
   let same = 0;
   let refs = 0;
   const cache = new Map();

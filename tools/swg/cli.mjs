@@ -1433,7 +1433,8 @@ async function copyTerrain(vfs, planet, outDir) {
   // Each its own try, so the textures failing never costs the planet its colour ramps or the other way.
   if (planetTemplate) {
     try {
-      writeGroundTextures(vfs, planetTemplate, outDir, { late: lateStampOf(vfs, 'terrain') });
+      // An extra world draws a ground shader the archives have not got in the stand-in picture (terrainShaders.mjs).
+      writeGroundTextures(vfs, planetTemplate, outDir, { late: lateStampOf(vfs, 'terrain'), standIn: EXTRA_WORLDS.includes(planet) });
     } catch (err) {
       console.warn(`ground textures not converted: ${err.message}`);
     }
@@ -1454,7 +1455,7 @@ async function copyTerrain(vfs, planet, outDir) {
       console.warn(`water look not converted: ${err.message}`);
     }
   }
-  exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), late: lateStampOf(vfs, 'sky') });
+  exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), late: lateStampOf(vfs, 'sky'), lent: SKY_LENT[planet] ?? null });
   return 'terrain.trn';
 }
 
@@ -2658,14 +2659,28 @@ function moodValues(variants, clips) {
  * its own and kept off the galaxy map (src/data/planets.ts): Hoth's Echo Base heroic (`adventure2`) and the heroic
  * Tusken army (`adventure1`), each placed by its buildout table as copies standing side by side; and the terrains with
  * neither a snapshot nor a buildout table (`GROUND_ONLY_WORLDS`), converted as ground, sky, water and flora with no
- * object on them.
+ * object on them: the early single-world Kashyyyk (`kashyyyk`, which the game knows as `kashyyyk_early`), the Tusken raid
+ * encounter, Taanab, and the developers' own test terrains, `simple` among them with its buildout table.
+ *
+ * The owner's call (2026-10-31) is every map, with a stand-in of ours where the archives lack something rather than a
+ * refusal: `otoh_gunga` (its six ground shaders, ten grass shaders and environment are named and not in the archives),
+ * `10`, `11`, `test_wearables` and `character_farm` (flat ground of one family with nothing on it), `tutorial` (the old
+ * newbie tutorial's terrain, flat, whose hall the server stood in code and a placement row of ours stands) and
+ * `runtimerules` (the engine's file of run-time terrain rules, with no ground family at all).
  */
-const EXTRA_WORLDS = ['adventure2', 'adventure1', 'kashyyyk', 'tuskan_raid_encounter', 'taanab'];
+const EXTRA_WORLDS = ['adventure2', 'adventure1', 'kashyyyk', 'tuskan_raid_encounter', 'taanab', '09', 'simple', 'floratest', 'rivertest', 'terrain_test', 'watertabletest', 'creature_test', 'godclient_test', 'cinco_city_test_m5', 'endor_asommers', 'umbra', 'otoh_gunga', '10', '11', 'test_wearables', 'tutorial', 'character_farm', 'runtimerules'];
 /**
  * The extra worlds that place nothing: a pack of them has a layout with no object in it, which `status` takes as done
  * rather than as a snapshot stopped half way, and every command that reads placements reads none for them.
  */
-const GROUND_ONLY_WORLDS = new Set(['kashyyyk', 'tuskan_raid_encounter', 'taanab']);
+const GROUND_ONLY_WORLDS = new Set(['kashyyyk', 'tuskan_raid_encounter', 'taanab', '09', 'floratest', 'rivertest', 'terrain_test', 'watertabletest', 'creature_test', 'godclient_test', 'cinco_city_test_m5', 'endor_asommers', 'umbra', 'otoh_gunga', '10', '11', 'test_wearables', 'tutorial', 'character_farm', 'runtimerules']);
+/**
+ * The extra worlds the archives hold no environment for (no `terrain/environment/<id>.iff` and no
+ * `datatables/environment/<id>.iff`), each given the sky, sun and weather of the world named here (`exportSky`'s
+ * `lent`, said in its sky.json; which world lends is ours); without one the converter writes no sky and `status` asks
+ * for it for ever.
+ */
+const SKY_LENT = { simple: 'corellia', floratest: 'corellia', rivertest: 'corellia', watertabletest: 'corellia', creature_test: 'corellia', godclient_test: 'corellia', cinco_city_test_m5: 'corellia', endor_asommers: 'endor', umbra: 'corellia', otoh_gunga: 'naboo', 10: 'corellia', 11: 'corellia', test_wearables: 'corellia', character_farm: 'corellia', runtimerules: 'corellia' };
 
 /**
  * Planet ids the game can load a pack for (see src/data/planets.ts). `dungeon1` is the instances zone,
@@ -6918,7 +6933,7 @@ switch (cmd) {
     for (const [planet, outDir] of targets) {
       mkdirSync(outDir, { recursive: true });
       console.log(`${planet}:`);
-      exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), log: console.log, late: lateStampOf(vfs, 'sky') });
+      exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), log: console.log, late: lateStampOf(vfs, 'sky'), lent: SKY_LENT[planet] ?? null });
     }
     printEffectSummary();
     break;

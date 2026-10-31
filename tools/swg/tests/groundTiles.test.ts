@@ -21,6 +21,7 @@ import { cornerOrder, groundChunkAt, groundChunkOrigin, groundShift, maskCode, m
 import { maskWeight, type MaskSample } from '../../../src/world/groundMath.ts';
 import { decodePng } from '../png.mjs';
 import { loadWorld, PACKS, sampleBlocks } from './terrainHarness.ts';
+import { worldOfPack } from '../../../src/world/packFiles.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -93,8 +94,11 @@ function centres(): { name: string; x: number; z: number }[] {
     // Before the shift a vertex stood a metre off a pole on exactly these.
     const offBefore = list.filter((c) => mod(c.x, 2) !== 0 || mod(c.z, 2) !== 0);
     ok(moved.map((c) => c.name).join() === offBefore.map((c) => c.name).join(), `the shift moves exactly the worlds whose centre is odd in an axis (${moved.length} of ${list.length}: ${moved.map((c) => c.name).join(', ') || 'none'})`);
-    if (list.length === 19) ok(moved.length === 12, 'twelve of the nineteen, as the research found');
-    else note(`${list.length} worlds converted here, not nineteen: the count of twelve is not held`);
+    // The research's nineteen are the worlds the game always had; the extra worlds (`PlanetDef.extra`) are counted apart.
+    const studied = list.filter((c) => !worldOfPack(c.name)?.extra);
+    const movedStudied = moved.filter((c) => !worldOfPack(c.name)?.extra);
+    if (studied.length === 19) ok(movedStudied.length === 12, `twelve of the nineteen, as the research found (and ${moved.length - movedStudied.length} of the ${list.length - studied.length} extra worlds)`);
+    else note(`${studied.length} of the nineteen worlds converted here: the count of twelve is not held`);
   }
 }
 

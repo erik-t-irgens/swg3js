@@ -329,7 +329,9 @@ if (worlds.includes(OWN) && worlds.includes(LENT)) {
   const fit = fitLent(ownDefs, [{ pack: 'a', url: (f) => `/a/${f}`, families: [{ id: 7, def: mk('a1', 2) }, { id: 8, def: mk('a3', 9) }] }], false);
   ok(fit.defs.length === 1 && fit.defs[0].name === 'a:a1' && fit.defs[0].id === 7 && fit.leftOut.join() === 'a:a3' && fit.urls.get(fit.defs[0])!('x.png') === '/a/x.png', "the arrays hold a lent family by its key and its id here, read from its own pack, one past the layers left out whole");
   const packs = groundPacksOf();
-  ok(packs.includes('tatooine') && packs.includes('kashyyyk_main') && !packs.includes('kashyyyk') && !packs.some((p) => /space|dungeon1|gallery|monument|helensar/.test(p)), `a ground lends from every ground world's pack or zone, never a space zone, the copies, the gallery or a world with no pack (${packs.length}: ${packs.join(', ')})`);
+  // `kashyyyk` is the early one-piece Kashyyyk's pack (the world `kashyyyk_early`, an extra world of one zone), never
+  // Kashyyyk's own id: Kashyyyk lends its seven zones' packs, so the name stands once.
+  ok(packs.includes('tatooine') && packs.includes('kashyyyk_main') && packs.filter((p) => p === 'kashyyyk').length === 1 && !packs.some((p) => /space|dungeon1|gallery|monument|helensar/.test(p)), `a ground lends from every ground world's pack or zone, never a space zone, the copies, the gallery or a world with no pack (${packs.length}: ${packs.join(', ')})`);
   ok(typeof readLentTable('x', '/', new Uint8Array(4), { version: 3, families: [{ id: 1, name: 'n', children: [] }] }) === 'string' && typeof readLentTable('x', '/', null, null) === 'string', 'a pack from before terrain shaders version 4, or with no list, lends nothing, said');
   const facts = { id: 40, name: 'lent', surface: '', children: [] };
   ok(classifyFamily('tatooine', { ...facts, scope: { world: 'kashyyyk_main', id: 18 } }).by === 'override' && classifyFamily('tatooine', facts).by !== 'override', "the air classes a lent family by its own world and id (an override written for its numbering), never by this world's numbering");

@@ -255,6 +255,12 @@ const boxTri = (shader: string, min: number[], max: number[]) => ({ shader, prim
         for (const c of node.children ?? []) boxOf(json, c, box);
       };
       const empty = () => ({ min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] });
+      // A terrain that places nothing and grows nothing (the converter's GROUND_ONLY_WORLDS: a developers' test, the
+      // early tutorial's ground) has no model to carry a level: said, not failed.
+      if (!defs.length) {
+        console.log(`note ${planet}: no placed or flora model to hold to the rule`);
+        continue;
+      }
       for (const d of defs) {
         const file = join(dir, d.file);
         // A particle effect placed as a model is its own JSON, not a GLB.
@@ -284,7 +290,10 @@ const boxTri = (shader: string, min: number[], max: number[]) => ({ shader, prim
           if (Number.isFinite(fine.min[0]) && Number.isFinite(low.min[0]) && !levelInPlace(fine, low)) misplaced++;
         }
       }
-      ok(badRanges === 0 && badNodes === 0 && withLods > 0, `${planet}: ${withLods} of ${defs.length} models carry levels; every carried level that draws anything has its lod:<n> node and none that draws nothing has one, and every model's ranges start at the eye and are contiguous`);
+      // A world of a handful of models (the `simple` test terrain's two bridge pieces, whose appearances name no levels)
+      // may carry none; every world the game always had carries hundreds, so a converter dropping them still fails here.
+      if (!withLods) console.log(`note ${planet}: none of its ${defs.length} models carries a level`);
+      ok(badRanges === 0 && badNodes === 0 && (withLods > 0 || defs.length < 10), `${planet}: ${withLods} of ${defs.length} models carry levels; every carried level that draws anything has its lod:<n> node and none that draws nothing has one, and every model's ranges start at the eye and are contiguous`);
       ok(notRising === 0 && misplaced === 0, `${planet}: every carried level's switch is beyond the finer one's (none the pick could never draw), and every lower level stands where its finest does (${notRising}, ${misplaced} wrong)`);
       ok(bareDetail === 0 && files > 0, `${planet}: over ${files} model files, no primitive sits under a detail map with no second coordinate set for it (${bareDetail})`);
       const layout = JSON.parse(readFileSync(lf, 'utf8'));

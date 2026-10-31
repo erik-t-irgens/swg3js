@@ -42,6 +42,7 @@ import { cardLightsBegin, leafBias } from '../../../src/world/leafShadow.ts';
 import { applySpec } from '../../../src/world/specular.ts';
 import { applyWetness } from '../../../src/world/wetness.ts';
 import { glslVariant, redeclared } from './glslScan.ts';
+import { worldOfPack } from '../../../src/world/packFiles.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -138,7 +139,9 @@ const lumBytes = (p: number[]) => 0.2126 * lin(p[0]) + 0.7152 * lin(p[1]) + 0.07
   if (existsSync(PACKS)) {
     for (const pack of readdirSync(PACKS)) {
       const file = join(PACKS, pack, 'sky.json');
-      if (!existsSync(file) || pack === 'gallery') continue;
+      // The measured counts below are over the worlds the game always had; an extra world's sky (`PlanetDef.extra`: Hoth's
+      // Echo Base ramps, or a sky lent from one of those worlds) is not among them.
+      if (!existsSync(file) || pack === 'gallery' || worldOfPack(pack)?.extra) continue;
       let sky: { space?: unknown; blocks?: { name: string; weatherIndex?: number; ramp?: { rows: number; rgba: string } }[] };
       try {
         sky = JSON.parse(readFileSync(file, 'utf8'));

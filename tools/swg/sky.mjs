@@ -205,9 +205,10 @@ export function cameraEffectStrength(path) {
  * rows still name their effect but no file is written. `late` is the late stamp the caller's mount gives
  * (finalnames.mjs `lateStampOf`), written as it is.
  */
-export function exportSky(vfs, planet, outDir, { textureFor, particleFor = null, log = console.error, space = null, late = null }) {
-  const envPath = `terrain/environment/${planet}.iff`;
-  const tablePath = `datatables/environment/${planet}.iff`;
+export function exportSky(vfs, planet, outDir, { textureFor, particleFor = null, log = console.error, space = null, late = null, lent = null }) {
+  // `lent`: the world whose environment a terrain with none of its own wears (cli.mjs `SKY_LENT`), said in the file.
+  const envPath = `terrain/environment/${lent ?? planet}.iff`;
+  const tablePath = `datatables/environment/${lent ?? planet}.iff`;
   // A space zone's sky can stand on its terrain file alone (Kashyyyk's system has no environment file of its own).
   if (!vfs.has(envPath) && !vfs.has(tablePath) && !space) {
     log(`  sky: no ${envPath} or ${tablePath} in archives`);
@@ -313,7 +314,7 @@ export function exportSky(vfs, planet, outDir, { textureFor, particleFor = null,
     return { source, file, kind: cameraEffectKind(source), strength: cameraEffectStrength(source) };
   };
 
-  const sky = { planet, cycleSeconds: 86400, dayNightSplit: 0.7, sunElevationDegrees: 67.5, sun: null, supplementalSun: null, moon: null, supplementalMoon: null, celestials: [], stars: null, nightSky: null, timeLock: null, skybox: null, distant: [], space: null, weather: null, blocks: [] };
+  const sky = { planet, ...(lent ? { lent } : {}), cycleSeconds: 86400, dayNightSplit: 0.7, sunElevationDegrees: 67.5, sun: null, supplementalSun: null, moon: null, supplementalMoon: null, celestials: [], stars: null, nightSky: null, timeLock: null, skybox: null, distant: [], space: null, weather: null, blocks: [] };
   const celestial = (c) => (c ? { ...c, image: shaderImage(c.shader), glowImage: shaderImage(c.glowShader) } : null);
   if (vfs.has(envPath)) {
     const env = parseEnvironmentFile(parseIff(vfs.read(envPath)));

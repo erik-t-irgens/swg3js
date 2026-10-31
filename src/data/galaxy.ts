@@ -75,7 +75,10 @@ export const GALAXY_SYSTEMS: GalaxySystemDef[] = [
  * have no system of their own yet. The ground terrains the game never offered as worlds (`PlanetDef.extra`: the heroics'
  * maps, an older or unreleased planet, the developers' tests) are reached only by the developer's travel.
  */
-export const GALAXY_LEFT_OUT: readonly string[] = ['gallery', 'dungeon1', 'canyon', 'seattle', 'monument', 'helens', 'adventure2', 'adventure1'];
+export const GALAXY_LEFT_OUT: readonly string[] = ['gallery', 'dungeon1', 'canyon', 'seattle', 'monument', 'helens', 'adventure2', 'adventure1',
+  'kashyyyk_early', 'tuskan_raid_encounter', 'taanab', '09', 'simple', 'floratest', 'rivertest', 'terrain_test',
+  'watertabletest', 'creature_test', 'godclient_test', 'cinco_city_test_m5', 'endor_asommers', 'umbra', 'otoh_gunga', 'tutorial',
+  '10', '11', 'test_wearables', 'character_farm', 'runtimerules', 'space_npe_falcon', 'space_npe_falcon_2', 'space_npe_falcon_3'];
 
 /**
  * Invented: how the galaxy is laid out, in the map's own units (one unit is one metre to three, and

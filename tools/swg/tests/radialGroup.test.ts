@@ -153,6 +153,12 @@ for (const name of worlds) {
   const want = (late && STUDY_LATE[name]) || STUDY[name];
   const n = raws.filter((r) => r.tag === 'AFDN').length;
   const f = raws.filter((r) => r.tag === 'AFDF').length;
+  // A terrain the game never offered as a world (the converter's EXTRA_WORLDS: older and test terrains, some of version
+  // 0003) is held to reading to the byte alone, and to none of the research's counts, which are the nineteen worlds'.
+  if (!(name in STUDY)) {
+    ok(g.leftover === 0, `${name}: RGRP ${g.version >= 0 ? `version 000${g.version}` : 'absent'} reads to the byte (${g.leftover} bytes left; an extra world, held to no count)`);
+    continue;
+  }
   ok(g.leftover === 0 && (g.version === 4 || g.families.size === 0), `${name}: RGRP ${g.version >= 0 ? `version 000${g.version}` : 'absent'} reads to the byte (${g.leftover} bytes left)`);
   if (want) ok(g.families.size === want[0] && g.childCount === want[1] && n === want[2] && f === want[3], `${name}: ${g.families.size} families, ${g.childCount} children, ${n} AFDN and ${f} AFDF, the research's ${want.join(', ')}`);
   ok(raws.every((r) => r.version === '0002' && r.data === 20), `${name}: every radial affector is version 0002 with 20 bytes of data`);
@@ -165,7 +171,7 @@ for (const name of worlds) {
   far += f;
 }
 const dathLate = worlds.includes('dathomir') && lateOf('dathomir') ? 1 : 0;
-if (worlds.length === Object.keys(STUDY).length) ok(families === 168 && children === 602 && near === 855 + dathLate && far === 296 + dathLate, `over all nineteen worlds (${lateWorlds} converted with SOE's final names list): ${families} families, ${children} children, ${near} AFDN, ${far} AFDF (168, 602, ${855 + dathLate}, ${296 + dathLate})`);
+if (worlds.filter((w) => w in STUDY).length === Object.keys(STUDY).length) ok(families === 168 && children === 602 && near === 855 + dathLate && far === 296 + dathLate, `over all nineteen worlds (${lateWorlds} converted with SOE's final names list): ${families} families, ${children} children, ${near} AFDN, ${far} AFDF (168, 602, ${855 + dathLate}, ${296 + dathLate})`);
 else note(`${worlds.length} of the nineteen worlds converted: the totals are checked only over all of them`);
 
 console.log(`\n${passed} passed`);

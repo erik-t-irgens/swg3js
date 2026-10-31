@@ -64,14 +64,16 @@ export function packless(planet: Pick<PlanetDef, 'pack'> | null | undefined): bo
 
 let packWorlds: Map<string, PlanetDef> | null = null;
 
-/** The world a pack belongs to: the planet of that id, or the planet one of whose zones it is; null for a pack no world names. */
+/**
+ * The world a pack belongs to: the planet one of whose zones it is, else the planet of that id; null for a pack no world
+ * names. A zone's pack comes first because a planet split into zones never loads a pack named by its own id: the early
+ * single-world Kashyyyk's pack is `kashyyyk`, which is Kashyyyk's own id and never one of its zones' packs.
+ */
 export function worldOfPack(packId: string): PlanetDef | null {
   if (!packWorlds) {
     packWorlds = new Map();
-    for (const p of PLANETS) {
-      packWorlds.set(p.id, p);
-      for (const z of p.zones ?? []) if (!packWorlds.has(z.pack)) packWorlds.set(z.pack, p);
-    }
+    for (const p of PLANETS) for (const z of p.zones ?? []) if (!packWorlds.has(z.pack)) packWorlds.set(z.pack, p);
+    for (const p of PLANETS) if (!packWorlds.has(p.id)) packWorlds.set(p.id, p);
   }
   return packWorlds.get(packId) ?? null;
 }
@@ -102,9 +104,10 @@ export function packHolds(packId: string, file: string): boolean {
     // The server's people and creatures (`spawns`): the worlds it populated, and its copies.
     case 'spawns.json':
       return SERVER_WORLDS.includes(world.id) || !!world.instances;
-    // The gates walked between a planet's zones (`gates`): a planet split into zones, and nothing else.
+    // The gates walked between a planet's zones (`gates`): a planet split into zones, and nothing else (a planet of one
+    // zone, the early Kashyyyk, has nothing to walk between).
     case 'gates.json':
-      return !!world.zones?.length;
+      return (world.zones?.length ?? 0) > 1;
     default:
       return true;
   }

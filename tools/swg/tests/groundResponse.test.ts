@@ -12,6 +12,7 @@ import { GROUND_CLASS_NAMES, GROUND_RESPONSE_CLASSES } from '../../../src/world/
 import { CLASS_INDEX } from '../../../src/world/volumetrics/airSpawn.ts';
 import { parseTerrainTemplate } from '../../../src/swg/terrain/trn.ts';
 import { groundWorlds, PACKS } from './terrainHarness.ts';
+import { worldOfPack } from '../../../src/world/packFiles.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string): void => {
@@ -157,6 +158,12 @@ for (const w of worlds) {
     const c = classifyFamily(w, f);
     byDecider[c.by] = (byDecider[c.by] ?? 0) + 1;
     if (c.by === 'fallback') fallbacks.push(`${f.id} ${f.name}`);
+  }
+  // An extra world's test terrains name families by a designer's words (`Family_0`, `Endor_forest_bank_everg`) no rule
+  // was written for: their fallback is said, and every world the game always had is still held to none.
+  if (worldOfPack(w)?.extra && fallbacks.length) {
+    note(`${w}: an extra world, ${fallbacks.length} of its ${group.families.size} families fall back: ${fallbacks.join(', ')}`);
+    continue;
   }
   ok(fallbacks.length === 0, `${w}: every one of its ${group.families.size} families is decided by an override, a surface or a rule (${Object.entries(byDecider).map(([k, v]) => `${k} ${v}`).join(', ')})${fallbacks.length ? `; fell back: ${fallbacks.join('; ')}` : ''}`);
 }
