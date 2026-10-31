@@ -33,6 +33,7 @@ import {
 } from '../../../src/world/nav/doorway.ts';
 import { decide, BRAIN_TUNE, type BrainSelf, type BrainTarget } from '../../../src/world/mobiles/brain.ts';
 import { Physics, RAPIER } from '../../../src/core/physics.ts';
+import { AI_FIX } from '../../../src/world/aiLedger.ts';
 import type { Building, CellState } from '../../../src/world/layoutStream.ts';
 
 await Physics.create();
@@ -417,10 +418,21 @@ const toLocal = (b: Building, p: { x: number; z: number }): THREE.Vector3 => new
   ok(!across(0, inRoom, null, physics), 'a body on the street and somebody just inside, across the doorway: no wall between, the blow lands');
   ok(across(5, inRoom, null, physics), '... the same two a few metres along, either side of the wall itself: a wall between');
   ok(across(-5, inRoom, { building: place('other_house', drawHouse({}), 0, 0, 0), cell: 1 }, physics), '... and in two different buildings, the same');
-  ok(!across(5, null, null, physics), 'two things both out on the street are never apart, however much wall the line crosses: the rooms say no wall could be there and nothing is cast');
-  ok(!across(5, undefined, null, physics), '... nor is anything nobody follows, which is every pair there was before any of this');
-  ok(!across(5, inRoom, inRoom, physics), '... nor two in the same building');
+  // The AI handoff's step 1: rooms, not buildings, and the physics always has the last word. Two out on
+  // the street with a wall between them are apart, and so are two in one building with a wall between.
+  ok(across(5, null, null, physics), 'two things both out on the street with a wall between them are apart (step 1: the physics is asked of every pair)');
+  ok(!across(0, null, null, physics), '... and not where the line between them is open');
+  ok(!across(5, undefined, null, physics), '... and nothing nobody follows is ever apart, which is every pair there was before any of this');
+  ok(across(5, inRoom, inRoom, physics), '... two in one building with a wall between them are apart (step 1)');
   ok(across(0, inRoom, null, null), 'with no physics to ask, the rooms’ word stands alone: different places are apart');
+  ok(!across(0, null, null, null) && across(0, inRoom, { building: house, cell: 2 }, null) && !across(0, inRoom, { building: house, cell: 1 }, null), '... compared as rooms: both on open ground, or one room, are not; two rooms of one building are');
+  // Step 1 off (`AI_FIX.walls`) is the rule it replaced, to the line: the rooms' word on buildings, nothing cast for one place.
+  AI_FIX.walls = false;
+  try {
+    ok(!across(5, null, null, physics) && !across(5, inRoom, inRoom, physics) && across(5, inRoom, null, physics) && !across(0, inRoom, null, physics), 'with step 1 switched off, two on the street and two in one building are never apart, as before');
+  } finally {
+    AI_FIX.walls = true;
+  }
   const onStep: BrainTarget = { ...foe, x: 0, z: 0.6, apart: across(0, inRoom, null, physics) };
   const behindWall: BrainTarget = { ...foe, x: 5, z: 0.6, apart: across(5, inRoom, null, physics) };
   ok(decide({ ...self, x: 0, z: -0.6 }, [onStep]).state === 'attack', 'fed to the brain, a body strikes across the doorway');

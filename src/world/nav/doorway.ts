@@ -35,6 +35,7 @@ import type { NavAgent } from './navAgent.ts';
 import { worldNav } from './nav.ts';
 import { outdoorNav } from './outdoorNav.ts';
 import { doorCosts, isExit, throughPoint, type PortalDef, type RoomGraph } from './navRooms.ts';
+import { AI_FIX, acrossShell } from '../aiLedger.ts';
 
 /** Every invented number of the join, live through `__debug.nav({ door: { … } })`. */
 export interface DoorTune {
@@ -177,9 +178,12 @@ export function placeOfWalk(out: GoalPlace, state: string, onRound: boolean, rou
   return out;
 }
 
-/** The physics' own segment test (`Physics.segmentBlocked`): whether anything that stands still lies between two points. */
+/**
+ * The physics' own segment test (`Physics.segmentBlocked`): whether anything that stands still lies between two points,
+ * a shut door counted with `walls`, and everything tested with `full` (the two ends on different sides of a shell).
+ */
 export interface WallProbe {
-  segmentBlocked(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, inside: boolean): boolean;
+  segmentBlocked(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, inside: boolean, walls?: boolean, full?: boolean): boolean;
 }
 
 const wallFrom = { x: 0, y: 0, z: 0 };
@@ -189,16 +193,27 @@ const wallTo = { x: 0, y: 0, z: 0 };
  * Whether a wall stands between a body followed in `here` and something followed in `there`, so a
  * blow from one cannot land on the other and the body must go round to the door instead.
  *
- * Only ever asked of two things in **different places** -- one in a building and the other out, or
- * the two in different buildings -- since that is the only time the rooms say a wall could be there;
- * anything nobody follows (`there` undefined) and two things in one place are never apart, which is
- * every pair there was before any of this. And which place each is in is only half the answer: a
- * doorway is a place where two things in different places stand an arm's length apart with nothing
- * between them, and a creature on the step outside a cantina must be able to bite somebody standing
- * just inside it. So the last word is the physics', a line between the two middles against what stands
- * still (`probe`, the walls, never another body), with `inside` the body's own filter: indoors a
- * building's shells are left out, as every other indoor ray leaves them. With no probe it is the rooms'
- * word alone.
+ * **It compares rooms, not buildings, and the physics always has the last word** (the AI handoff's step
+ * 1). Until then it answered "no wall" without casting a ray whenever the two were in one building --
+ * even in two of its rooms with a wall between -- or both outside, so two fighters in neighbouring rooms
+ * fought each other through the plaster and a body in the street struck through a pillar. Which room each
+ * is in is still only half the answer: a doorway is a place where two things in different rooms stand an
+ * arm's length apart with nothing between them, and a creature on the step outside a cantina must be able
+ * to bite somebody standing just inside it. So the word is the physics', a line between the two middles
+ * against what stands still (`probe`, the walls, never another body), with `inside` the body's own filter:
+ * indoors a building's shells are left out, as every other indoor ray leaves them -- except when the two
+ * are on different sides of a shell (`acrossShell`: one in and one out, or two buildings), when the line
+ * crosses that shell and everything is tested (`full`), or a body just inside a door struck at one outside
+ * beside the jamb through the jamb itself.
+ *
+ * **A shut door is not a wall here**, deliberately and as before: a body within a blow's reach of a door
+ * is within the door's own radius and the door is opening for it (the line of fire, which asks
+ * `segmentBlocked` with `walls`, does see one). Anything nobody follows (`there` undefined) is never apart,
+ * as it never was. With no probe it is the rooms' word alone: apart exactly when the two are in different
+ * rooms.
+ *
+ * `AI_FIX.walls` off is the rule it replaced, to the line: two in one building, or both outside, never
+ * apart, and no ray cast for them.
  *
  * The line goes into two points kept here and is never made.
  */
@@ -215,15 +230,24 @@ export function wallBetween(
   bz: number,
 ): boolean {
   if (there === undefined) return false;
-  if ((here ? here.building : null) === (there ? there.building : null)) return false;
-  if (!probe) return true;
+  if (!AI_FIX.walls) {
+    if ((here ? here.building : null) === (there ? there.building : null)) return false;
+    if (!probe) return true;
+  } else if (!probe) return !sameRoom(here, there);
   wallFrom.x = ax;
   wallFrom.y = ay;
   wallFrom.z = az;
   wallTo.x = bx;
   wallTo.y = by;
   wallTo.z = bz;
-  return probe.segmentBlocked(wallFrom, wallTo, inside);
+  if (!AI_FIX.walls) return probe.segmentBlocked(wallFrom, wallTo, inside);
+  return probe.segmentBlocked(wallFrom, wallTo, inside, false, acrossShell(here, there));
+}
+
+/** Whether two places are the same room: the same building's same cell, or both on open ground. */
+export function sameRoom(here: CellState | null, there: CellState | null): boolean {
+  if (!here || !there) return here === there;
+  return here.building === there.building && here.cell === there.cell;
 }
 
 /**

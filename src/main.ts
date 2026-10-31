@@ -438,7 +438,7 @@ import { FOUNTAIN_SPRAY_TUNE } from './world/particleDraw.ts';
 import { SWOOSH_TUNE } from './world/swooshTrail.ts';
 import { worldNav } from './world/nav/nav.ts';
 import { outdoorNav } from './world/nav/outdoorNav.ts';
-import { doorwayNav, type DoorTune } from './world/nav/doorway.ts';
+import { doorwayNav, wallBetween, type DoorTune } from './world/nav/doorway.ts';
 import { DOORS_TUNE, type DoorsTune } from './world/doorMath.ts';
 import { PATROL_TUNE, type PatrolTune } from './world/patrols.ts';
 // The long walk: its numbers and its knob. The order itself is `NpcManager.send`; this file only
@@ -449,6 +449,8 @@ import { ERRAND_TUNE, tuneErrand, type ErrandTune } from './world/errand.ts';
 // own reach for a blocked shot. `__debug.cover()` is the only way any of it can be read from a tab
 // that draws no frames; the knob itself is also on `__debug.fighters({ cover: … })`.
 import { coverSearch, tuneCover } from './world/cover.ts';
+// The AI handoff's first three steps: the ledger that measures them and the switches that put each back (`aiLedger.ts`).
+import { ledgerReport, noteLanded, resetLedger, seesLine, shotHeightOf, tuneLedger, type AiFixes, type LedgerTune } from './world/aiLedger.ts';
 import { GROUND_SKILL } from './world/groundSkill.ts';
 import { GROUND_STEP } from './world/groundStep.ts';
 import { BRAIN_TUNE } from './world/mobiles/brain.ts';
@@ -2321,6 +2323,9 @@ class App {
     this.world.attachCamera(this.cam.camera, true, this.portals);
     if (!S.shadows) this.world.setShadowsEnabled(false);
     this.player = new Player(this.scene, physics);
+    // What shoots at the player aims at the middle of the capsule the player really wears, read off the player's own
+    // numbers and never copied (the AI handoff's step 2, `PlayerTarget.halfHeight`).
+    this.world.playerTarget.capsule = this.player;
     // The grapple's one-shot words go to the message line, and a loose prop is found for its mark and its dart's hook.
     this.player.grapple.say = (text) => this.messages.system(text);
     this.player.grapple.propAt = hookablePropAt;
@@ -9919,10 +9924,11 @@ class App {
           } else for (const n of live) if (n.pos.distanceToSquared(this.player.worldPos) < body.pos.distanceToSquared(this.player.worldPos)) body = n;
           const me = this.player.worldPos;
           // From your feet against the body, or from the body's feet against you. The threat is
-          // always the other one's **aim point**, which is where its shots really leave from.
+          // the other one's own height to shoot from (`shotHeightOf`): its aim point, and for you the
+          // height the cover search always read, which crouching does not lower.
           return probe === 'here'
-            ? npcs.coverProbe(me.x, me.y, me.z, body.pos.x, body.pos.y + body.halfHeight, body.pos.z, body.tier)
-            : npcs.coverProbe(body.pos.x, body.pos.y, body.pos.z, me.x, me.y + this.world.playerTarget.halfHeight, me.z, body.tier);
+            ? npcs.coverProbe(me.x, me.y, me.z, body.pos.x, body.pos.y + shotHeightOf(body), body.pos.z, body.tier)
+            : npcs.coverProbe(body.pos.x, body.pos.y, body.pos.z, me.x, me.y + shotHeightOf(this.world.playerTarget), me.z, body.tier);
         }
         return {
           search: coverSearch.status(),
@@ -9941,6 +9947,51 @@ class App {
           hole: { forSeconds: GROUND_STEP.hardFor, restSeconds: GROUND_STEP.hardRest },
           fighters: npcs.npcs.map((n, i) => ({ i, name: n.name, tier: n.tier, arm: n.arm, state: n.state, ...n.coverStatus() })),
         };
+      },
+      /**
+       * The AI handoff's ledger (`src/world/aiLedger.ts`): what the fighters and the people did in their
+       * fights since the counters were last cleared -- seconds fighting, of those brushing a wall, pushing
+       * into something and attacking through a wall; blows and bolts landed, and of those on a body the
+       * striker had no line to; shots fired; standoff places refused before they were picked -- and what
+       * the player was to the guns. `{ reset: true }` clears it; `{ fixes: { walls: false } }` (or
+       * `posture`, `route`) puts one of the three steps back to the code it replaced, which is how the same
+       * scene is measured before and after; `{ tune: { brush: 0.2 } }` moves the ruler.
+       *
+       * And three things for setting a scene up by hand: `{ probe: [ax, ay, az, bx, by, bz] }` says which
+       * room each point is in, whether the ledger's line between them is clear and whether `wallBetween`
+       * (asked as a body at the first point would ask it) finds a wall; `{ stand: [{ x, z, y, inside, arm,
+       * tier }] }` stands fighters at those points (in the room there with `inside`), as the NPC tab would;
+       * `{ clear: true }` takes every fighter down.
+       */
+      aiLedger: (opts?: {
+        reset?: boolean;
+        fixes?: Partial<AiFixes>;
+        tune?: Partial<LedgerTune>;
+        clear?: boolean;
+        stand?: { x: number; z: number; y?: number; inside?: boolean; arm?: 'saber' | 'melee' | 'gun'; tier?: number; heading?: number }[];
+        probe?: number[];
+      }) => {
+        tuneLedger(opts);
+        if (opts?.clear) this.world.npcs.removeAll();
+        if (opts?.reset) resetLedger(this.world.simTime);
+        const stood = (opts?.stand ?? []).map((s) => {
+          const n = this.world.npcs.spawnAt(s.x, s.z, undefined, { y: s.y, inside: s.inside, arm: s.arm, tier: s.tier, heading: s.heading });
+          return { name: n.name, tier: n.tier, room: n.cell ? n.cell.cell : null, at: n.pos.toArray().map((v) => Number(v.toFixed(2))) };
+        });
+        let probe: Record<string, unknown> | null = null;
+        const p = opts?.probe;
+        if (p && p.length >= 6) {
+          const here = this.world.buildingAt(new THREE.Vector3(p[0], p[1], p[2]));
+          const there = this.world.buildingAt(new THREE.Vector3(p[3], p[4], p[5]));
+          probe = {
+            here: here ? here.cell : null,
+            there: there ? there.cell : null,
+            sameBuilding: (here?.building ?? null) === (there?.building ?? null),
+            line: seesLine(this.physics, here, there, p[0], p[1], p[2], p[3], p[4], p[5]),
+            apart: wallBetween(this.physics, here, there, !!here, p[0], p[1], p[2], p[3], p[4], p[5]),
+          };
+        }
+        return { ...ledgerReport(this.world.simTime), coverRefused: coverSearch.status().ground, ...(stood.length ? { stood } : {}), ...(probe ? { probe } : {}) };
       },
       /** Blow up the vehicle ridden, piloted or stood in (its health to nothing), to see the rider thrown or the crew put out. */
       wreck: () => {
@@ -21393,6 +21444,8 @@ class App {
         if (player.mounted || player.noclip) return;
         // A follower's stray shot stops on you and takes nothing: it never turns on you.
         if (isFollowerSource(source)) return;
+        // Nor the AI handoff's ledger, which measures here whether whatever shot you had a line to you (`aiLedger.ts`).
+        if (!this.world.playerTarget.dead) noteLanded(source, this.world.playerTarget);
         // A bolt never reaches the record's own `damage`, so the fight it opens is told here: whatever shot
         // you is in it, and the shot's health goes to it through `onHarm` as a blow's does.
         if (source) this.encounters.struckBy(source);

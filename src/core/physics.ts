@@ -719,8 +719,16 @@ export class Physics {
    * (`stillOrWall`): a gunner's line of fire and a lamp's sight ask that way; the doorway test of who
    * can reach whom does not, since a body within a blow's reach of a door is within the door's own
    * radius and the door is opening for it. Makes no objects of its own.
+   *
+   * `full` is the AI handoff's step 1: the two ends are on different sides of an outer shell -- one in a
+   * building and the other out, or in two buildings -- so the line crosses a shell and an indoor caster
+   * must test everything, as an outdoor one always has (`acrossShell` in `src/world/aiLedger.ts` says
+   * when). The shells are trimeshes built with no inside (`TRIMESH_FLAGS` asks for no orientation), so a
+   * ray that starts within a wall's thickness meets the wall's far face where it crosses it, never at
+   * nought, and the segment needs no splitting at the doorway's plane. With `full` false this is the
+   * test it always was.
    */
-  segmentBlocked(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, inside: boolean, walls = false): boolean {
+  segmentBlocked(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, inside: boolean, walls = false, full = false): boolean {
     const dx = to.x - from.x;
     const dy = to.y - from.y;
     const dz = to.z - from.z;
@@ -733,7 +741,7 @@ export class Physics {
     r.dir.x = dx / len;
     r.dir.y = dy / len;
     r.dir.z = dz / len;
-    const filter = inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+    const filter = inside && !full ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
     return this.world.castRay(r, len, true, undefined, filter, undefined, undefined, walls ? this.stillOrWall : this.fixedOnly) !== null;
   }
 

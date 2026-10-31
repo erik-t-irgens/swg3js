@@ -18,6 +18,8 @@ import { coverDue, skillOfGroundTier, strafeShare, type GroundSkill } from '../g
 import { askFromSkill, coverSearch, type CoverAsk, type CoverDeps, type CoverKind } from '../cover.ts';
 import { EvadeClock, jumpLevelFor, type JumperKind } from '../evade.ts';
 import { firePatterns, postureTransitionNames, type Posture, type Stance } from '../fighterStance.ts';
+// The standoff's try order, the fighters' own (the AI handoff's step 3).
+import { StandoffTries } from '../groundMove.ts';
 import type { AnimPack } from './types';
 
 /** How near a spot counts as standing in it, metres: the mobiles' own arrival test (`Mobile.act`). */
@@ -137,6 +139,8 @@ export interface FightCounts {
   /** Spots taken, and slides started. */
   covers: number;
   slides: number;
+  /** Places on the standoff ring refused before they were picked (the AI handoff's step 3): once a refusal, not once a frame. */
+  refused: number;
 }
 
 export class GroundTactics {
@@ -173,15 +177,21 @@ export class GroundTactics {
    * rather than a move to somewhere, which turns the body and takes the gun with it.
    */
   leanOnly = false;
-  private strafeSide: number;
+  /**
+   * Which way round its slide goes (`tries.side`), and the standoff's try order with its count of refusals: the
+   * fighters' own (`StandoffTries`, `groundMove.ts`), so the two cannot come to pick differently.
+   */
+  private readonly tries: StandoffTries;
   private strafeAt = 0;
   private slideUntil = 0;
   /** Its evade and jump clocks, and how often it has rolled, hopped and jumped. */
   readonly evade = new EvadeClock();
-  readonly counts: FightCounts = { shots: 0, hits: 0, kneels: 0, prones: 0, crouches: 0, covers: 0, slides: 0 };
+  readonly counts: FightCounts = { shots: 0, hits: 0, kneels: 0, prones: 0, crouches: 0, covers: 0, slides: 0, refused: 0 };
+  /** A ledger row the refusals are counted on as well (the body's own, `aiLedger.ts`); null counts them here alone. */
+  ledger: { refused: number } | null = null;
 
   constructor(side = 1) {
-    this.strafeSide = side < 0 ? -1 : 1;
+    this.tries = new StandoffTries(side);
   }
 
   /**
@@ -311,8 +321,13 @@ export class GroundTactics {
    * `range` for the ring and the body's own `stride` for how far ahead the point is put. Writes `walkTo`
    * and `leanOnly` and answers whether it has anywhere to be. `shooting` is the brain saying shoot;
    * `lineChase` a chase with the shot clear, which is the only chase a ring may hold.
+   *
+   * `fits` is the AI handoff's step 3, as the fighters' is: with one, the slide's lean is laid on the point
+   * before the route is asked for it, and the point is checked before it is picked -- as chosen, the slide
+   * the other way, the ring with no slide -- so one through a wall is never walked into. Null is the rule
+   * it replaced, to the line.
    */
-  stepStandoff(now: number, x: number, z: number, tx: number, tz: number, gap: number, key: number, shooting: boolean, lineChase: boolean, range: number, stride: number, rand: () => number = Math.random): boolean {
+  stepStandoff(now: number, x: number, z: number, tx: number, tz: number, gap: number, key: number, shooting: boolean, lineChase: boolean, range: number, stride: number, rand: () => number = Math.random, fits: ((gx: number, gz: number) => boolean) | null = null): boolean {
     const skill = this.skill;
     if (!skill || !(gap > 1e-3) || !(range > 0)) return false;
     if (!shooting && !lineChase) return false;
@@ -334,23 +349,47 @@ export class GroundTactics {
       vz = 0;
     }
     // A duty cycle and not a state: a body that slid on every frame it shot would never kneel.
+    const tries = this.tries;
     if (now - this.strafeAt >= GROUND_STEP.flipEvery) {
       this.strafeAt = now;
-      if (rand() < 0.4) this.strafeSide = -this.strafeSide;
+      if (rand() < 0.4) tries.side = -tries.side;
       const slide = rand() < skill.strafe;
       this.slideUntil = slide ? now + GROUND_STEP.slideFor : now;
       if (slide && strafeShare(skill, true, gap) > 0) this.counts.slides++;
     }
-    const side = now < this.slideUntil ? strafeShare(skill, true, gap) * this.strafeSide : 0;
-    vx += -uz * side;
-    vz += ux * side;
-    const len = Math.hypot(vx, vz);
-    if (!(len > 1e-3)) return false;
+    const side = now < this.slideUntil ? strafeShare(skill, true, gap) * tries.side : 0;
+    if (!fits) {
+      vx += -uz * side;
+      vz += ux * side;
+      const len = Math.hypot(vx, vz);
+      if (!(len > 1e-3)) return false;
+      this.leanOnly = gap >= ring * GROUND_STEP.closeIn;
+      const step = Math.max(2, stride);
+      this.walkTo.x = x + (vx / len) * step;
+      this.walkTo.z = z + (vz / len) * step;
+      return true;
+    }
     this.leanOnly = gap >= ring * GROUND_STEP.closeIn;
-    const step = Math.max(2, stride);
-    this.walkTo.x = x + (vx / len) * step;
-    this.walkTo.z = z + (vz / len) * step;
-    return true;
+    // The fighters' own try order (`StandoffTries.pick`): the lean laid on the point before the route, then the point as
+    // chosen, the slide the other way (kept), the ring with no slide; a refusal counted once and not once a frame.
+    const a = tries.ask;
+    a.x = x;
+    a.z = z;
+    a.tx = tx;
+    a.tz = tz;
+    a.vx = vx;
+    a.vz = vz;
+    a.ux = ux;
+    a.uz = uz;
+    a.slide = side;
+    a.step = Math.max(2, stride);
+    a.lean = this.split && this.leanOnly ? this.slideLean : -1;
+    const ok = tries.pick(this.walkTo, fits);
+    if (tries.fresh) {
+      this.counts.refused++;
+      if (this.ledger) this.ledger.refused++;
+    }
+    return ok;
   }
 
   /** A fresh life, or a body taken over by another browser: nothing it was doing carries on. */
@@ -361,6 +400,7 @@ export class GroundTactics {
     this.hardRestAt = -Infinity;
     this.slideUntil = 0;
     this.leanOnly = false;
+    this.tries.refusing = false;
     this.evade.reset();
   }
 

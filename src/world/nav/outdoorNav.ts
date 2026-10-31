@@ -488,6 +488,49 @@ export class OutdoorNav {
     return g ? isOpen(g, cellOf(g, x, z)) : true;
   }
 
+  /**
+   * Whether a body `radius` from its middle to its rim could walk the straight leg from where it stands to a goal: the
+   * AI handoff's step 3, which checks a tactical goal (a place on a standoff ring) before a body picks it, so one that
+   * lies through a wall or a building is never chosen and walked into. It is `lineThick`, the string-pull's own test,
+   * with the body's own width (`legInset`). A body standing on a cell the grid refuses -- which a body near a wall really
+   * does, the grid being two metres and its margin wider than a body -- has no leg the grid can vouch for, so its goal
+   * need only be open ground: the route the body is then handed starts from the nearest open cell, as every route does.
+   * With no grid it answers yes, and the goal is taken as it always was.
+   */
+  legFits(x: number, z: number, goalX: number, goalZ: number, radius: number): boolean {
+    const g = this.grid;
+    if (!g) return true;
+    if (!isOpen(g, cellOf(g, x, z))) return isOpen(g, cellOf(g, goalX, goalZ));
+    return lineThick(g, x, z, goalX, goalZ, legInset(g.header, radius));
+  }
+
+  /**
+   * Whether a cover spot is somewhere a body could stand at all, as the grid sees it: never inside a building's own
+   * footprint, and never deep in something solid -- its own cell open, or one of the eight round it. The second half is
+   * deliberately loose, because a real cover spot stands half a metre off a crate's face and the bake blocks the whole
+   * two-metre cell the crate touches (`NpcManager`'s cover adapter says why `walkable` alone is false for practically
+   * every real spot). With no grid it answers yes.
+   */
+  standable(x: number, z: number): boolean {
+    const g = this.grid;
+    if (!g) return true;
+    const k = cellOf(g, x, z);
+    if (k < 0 || nibbleAt(g, k) === NAV_INDOOR) return false;
+    if (isOpen(g, k)) return true;
+    const h = g.header;
+    const i0 = k % h.nx;
+    const j0 = Math.floor(k / h.nx);
+    for (let dj = -1; dj <= 1; dj++) {
+      for (let di = -1; di <= 1; di++) {
+        const i = i0 + di;
+        const j = j0 + dj;
+        if (i < 0 || j < 0 || i >= h.nx || j >= h.nz) continue;
+        if (isOpen(g, j * h.nx + i)) return true;
+      }
+    }
+    return false;
+  }
+
   status(): OutdoorStatus {
     const h = this.grid?.header;
     return {

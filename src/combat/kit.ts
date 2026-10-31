@@ -88,6 +88,13 @@ export interface Living extends Hittable {
   readonly aggression: Aggression;
   /** How far its body reaches toward a point, across the ground (a long body is not a circle). */
   radiusToward(from: THREE.Vector3): number;
+  /**
+   * How high over its feet its own shots are taken to come from, for anything that judges cover against it
+   * (`shotHeightOf` in `src/world/aiLedger.ts`). Absent is its aim point (`halfHeight`), which every threat has always been
+   * taken to shoot from; the player and another player say one, since where they are aimed at goes down to the hip
+   * while they crouch, kneel or lie prone and their gun does not.
+   */
+  readonly shotHeight?: number;
   /** Whether it stands on something: a knock only throws what the ground can push back against. */
   grounded?: boolean;
   /** Shove it away along `dir` at `power` metres a second (a push, a repulse, a blast). */

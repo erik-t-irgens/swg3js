@@ -29,7 +29,7 @@
 import * as THREE from 'three';
 import type { Building, CellState } from '../layoutStream.ts';
 import { LIFT_CELL } from '../lifts.ts';
-import { NAV_TUNE, buildFloor, pathIn, type FloorSource, type NavFloor, type NavTune } from './navMesh.ts';
+import { NAV_TUNE, buildFloor, fitsAt, pathIn, type FloorSource, type NavFloor, type NavTune } from './navMesh.ts';
 import { buildRoomGraph, cellOfPoint, exitToward, nextDoor, throughPoint, type CellDef, type PortalDef, type RoomGraph } from './navRooms.ts';
 import type { NavAgent } from './navAgent.ts';
 
@@ -37,6 +37,11 @@ const local = new THREE.Vector3();
 const localGoal = new THREE.Vector3();
 const world = new THREE.Vector3();
 const doorAt = { x: 0, y: 0, z: 0 };
+/**
+ * How many points round a body `fits` tries besides its middle: four, not the corner check's eight, because a goal is
+ * checked on every frame a body holds a standoff indoors and a room's floor is walked once a point.
+ */
+const FIT_SAMPLES = 4;
 
 /** What one building's rooms are, once. Its floors are read one room at a time, as they are wanted. */
 export interface BuildingNav {
@@ -180,6 +185,23 @@ export class WorldNav {
    */
   floorFor(building: Building, cell: number): NavFloor | null {
     return this.floorOf(this.forBuilding(building), cell);
+  }
+
+  /**
+   * Whether a body of `radius` would stand wholly on the floor of the room it is in at a point (the
+   * world's frame, `y` its feet): the AI handoff's step 3, which checks a tactical goal before a body
+   * picks it, so a place on a standoff ring that lies through the room's wall, or in the next room, is
+   * never chosen and walked into. A room whose floor the pack has not got, a building out of a pack
+   * converted before the floors were read, and a lift shaft answer yes, since nothing here can say: the
+   * goal is then taken as it always was.
+   */
+  fits(cell: CellState, x: number, y: number, z: number, radius: number): boolean {
+    const nav = this.forBuilding(cell.building);
+    if (nav.converted === 0 || nav.rooms.shafts.has(cell.cell)) return true;
+    const floor = this.floorOf(nav, cell.cell);
+    if (!floor) return true;
+    local.set(x, y, z).applyMatrix4(cell.building.inverse);
+    return fitsAt(floor, local.x, local.y, local.z, radius, FIT_SAMPLES);
   }
 
   /**

@@ -73,6 +73,8 @@ import { Group, RAPIER, groups, type Physics } from '../core/physics.ts';
 import { nextLivingKey, type Aggression, type Hittable, type Living, type Side } from '../combat/kit.ts';
 import type { PeerView, PeerWatcher } from './remotePlayers.ts';
 import { newReckonState, type ReckonState } from './peerReckon.ts';
+// The AI handoff's step 2: a peer is aimed at the posture the state they send says, and its switch (`aiLedger.ts`).
+import { AI_FIX, OLD_PLAYER_MIDDLE, PLAYER_SHOT_FROM } from '../world/aiLedger.ts';
 
 /** The record a vehicle whose view hands none over reads: no motion, never written. */
 const NO_RECKON = newReckonState();
@@ -105,17 +107,19 @@ export interface PeerBlow {
  *
  * The capsule is the player's own (`src/player/player.ts`: a half height of 0.45 and a radius of
  * 0.35, standing 0.80 over the feet), so being shot at as a peer is being shot at on the same shape
- * you are shot at on your own screen. `hitHeight` is the player's own too -- it is exactly
- * `PlayerTarget.halfHeight` in `src/world/world.ts` -- so a peer's middle, the point a nameplate
- * hangs over and a burst is placed at, is where yours is. The test pins all three against their
- * sources so they cannot drift apart. Only `shipPad`, `on` and `fight` are ours outright.
+ * you are shot at on your own screen -- and so is the low one a peer crouching, kneeling or lying
+ * prone is wearing on their own screen (`lowHalf`, the player's `CROUCH_HALF_HEIGHT`), which the
+ * state they send says (`peerLow`). A peer's middle, the point everything aims at and a nameplate
+ * hangs over, is the middle of whichever capsule they wear, exactly as `PlayerTarget.halfHeight` is
+ * yours (the AI handoff's step 2). The test pins the numbers against their sources so they cannot
+ * drift apart. Only `shipPad`, `on` and `fight` are ours outright.
  */
 export const PEER_BODY_TUNE = {
   /** The figure's capsule, the player's own; INVENTED only in that it is held fixed for every species. */
   halfHeight: 0.45,
   radius: 0.35,
-  /** The middle of the figure over its feet: the player's own (`PlayerTarget.halfHeight`), not invented. */
-  hitHeight: 0.9,
+  /** The capsule's straight half crouched, kneeling or lying down: the player's own `CROUCH_HALF_HEIGHT`, not invented. */
+  lowHalf: 0.15,
   /** INVENTED: metres the box round a peer's hull is grown past the picture's own. 0 is the picture. */
   shipPad: 0,
   /** INVENTED: 0 takes every peer body down and makes none, for a baseline with them gone. */
@@ -134,6 +138,18 @@ const SHAPE_FLOOR = 0.01;
 /** Membership the peer bit, filter nothing: see the note at the head of this file. */
 const PEER_GROUPS = groups(Group.peer, 0);
 
+/**
+ * The rig states a player's own game draws while their capsule is the low one (`Player.setCrouchCollider`: crouched,
+ * kneeling or lying prone, on the ground). The state is what every hello and state already carries, so a peer's
+ * posture needs nothing new on the wire; an off-ground body is drawn in the air (`air`), whose capsule stands.
+ */
+const LOW_STATES: ReadonlySet<string> = new Set(['crouch', 'crouchWalk', 'crouchWalkBack', 'kneel', 'prone', 'proneMove', 'gunProneIdle', 'gunProneMove', 'gunProneReadyIdle', 'gunProneReadyMove', 'gunProneAimIdle', 'gunProneAimMove']);
+
+/** Whether the state a peer sent is one their own capsule is low in. */
+export function peerLow(state: string): boolean {
+  return LOW_STATES.has(state);
+}
+
 /** The figure of another player: something a bolt, a blade or a power can find, that hurts nobody here. */
 class PeerBody implements Living {
   readonly key = nextLivingKey();
@@ -144,7 +160,20 @@ class PeerBody implements Living {
   /** As the player's own is: the creatures pick on another player exactly as they pick on you. */
   readonly aggression: Aggression = 'aggressive';
   readonly pos = new THREE.Vector3();
-  readonly halfHeight = PEER_BODY_TUNE.hitHeight;
+  /** Low, as the state they last sent says (`peerLow`): crouched, kneeling or prone. */
+  low = false;
+  /** The straight half its capsule was last made or reshaped to, so a change of posture reshapes it once. */
+  shapeHalf = PEER_BODY_TUNE.halfHeight;
+  /**
+   * Where everything aims at them, over their feet: the middle of the capsule they are wearing (the AI handoff's step
+   * 2), standing or low, as `PlayerTarget.halfHeight` is yours. `AI_FIX.posture` off is the 0.9 it was.
+   */
+  get halfHeight(): number {
+    if (!AI_FIX.posture) return OLD_PLAYER_MIDDLE;
+    return PEER_BODY_TUNE.radius + (this.low ? PEER_BODY_TUNE.lowHalf : PEER_BODY_TUNE.halfHeight);
+  }
+  /** Where their shots are taken to come from by anything that judges cover against them: yours (`PLAYER_SHOT_FROM`). */
+  readonly shotHeight = PLAYER_SHOT_FROM;
   /** Down: their own browser said so. A blow is refused and the brains and the reticle pass over them. */
   dead = false;
   /** Their health as their own browser last said it; nothing here ever subtracts from it. */
@@ -515,9 +544,13 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
   private moveFigure(w: Physics, f: PeerBody, p: PeerView): void {
     const g = p.group;
     f.pos.copy(g.position);
+    // The capsule they are wearing on their own screen (the AI handoff's step 2): the low one while the state they sent
+    // says they crouch, kneel or lie prone, as the player's own is (`peerLow`); `AI_FIX.posture` off stands them.
+    f.low = !!p.low;
+    const half = AI_FIX.posture && f.low ? PEER_BODY_TUNE.lowHalf : PEER_BODY_TUNE.halfHeight;
     // The capsule stands along the figure's own up, not the world's: a peer aboard a banked hull or
     // adrift in space is not upright, and their whole turn is what the relay carries for them.
-    this.up.set(0, PEER_BODY_TUNE.radius + PEER_BODY_TUNE.halfHeight, 0).applyQuaternion(g.quaternion);
+    this.up.set(0, PEER_BODY_TUNE.radius + half, 0).applyQuaternion(g.quaternion);
     this.at.x = g.position.x + this.up.x;
     this.at.y = g.position.y + this.up.y;
     this.at.z = g.position.z + this.up.z;
@@ -529,8 +562,9 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
       f.body = w.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(this.at.x, this.at.y, this.at.z).setRotation(this.turn));
       // The floor is the knob's, not a guess: a capsule of zero comes back with a handle that is not
       // a handle. A shape changed by hand shows on the bodies made after it, never on the ones up.
-      f.collider = w.world.createCollider(RAPIER.ColliderDesc.capsule(Math.max(SHAPE_FLOOR, PEER_BODY_TUNE.halfHeight), Math.max(SHAPE_FLOOR, PEER_BODY_TUNE.radius)).setSensor(true), f.body);
+      f.collider = w.world.createCollider(RAPIER.ColliderDesc.capsule(Math.max(SHAPE_FLOOR, half), Math.max(SHAPE_FLOOR, PEER_BODY_TUNE.radius)).setSensor(true), f.body);
       f.collider.setCollisionGroups(PEER_GROUPS);
+      f.shapeHalf = half;
       w.markPeer(f.collider);
       this.byCollider.set(f.collider.handle, f);
       this.standingList.push(f);
@@ -538,6 +572,11 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
       // A scene query sees nothing the world has not stepped over yet: this body is found from the
       // next step, not this frame. Nothing here depends on it being found sooner.
       return;
+    }
+    // A change of posture reshapes the one capsule they have: a sensor's shape changed in place, nothing made.
+    if (f.shapeHalf !== half && f.collider) {
+      f.collider.setHalfHeight(Math.max(SHAPE_FLOOR, half));
+      f.shapeHalf = half;
     }
     f.body.setNextKinematicTranslation(this.at);
     f.body.setNextKinematicRotation(this.turn);
@@ -739,10 +778,10 @@ export function measureBox(obj: THREE.Object3D): PeerBox | null {
  */
 export function peerBodyKnob(opts?: Partial<typeof PEER_BODY_TUNE>): Record<string, unknown> {
   if (opts) {
-    for (const key of ['halfHeight', 'radius', 'hitHeight', 'shipPad', 'on', 'fight'] as const) {
+    for (const key of ['halfHeight', 'radius', 'lowHalf', 'shipPad', 'on', 'fight'] as const) {
       const v = opts[key];
       if (v === undefined || !Number.isFinite(v)) continue;
-      // A shape may not be zero (see SHAPE_FLOOR); everything else may.
+      // A shape may not be zero (see SHAPE_FLOOR); everything else may (a low half of nought is a ball, which is a shape).
       PEER_BODY_TUNE[key] = key === 'halfHeight' || key === 'radius' ? Math.max(SHAPE_FLOOR, v) : Math.max(0, v);
     }
   }

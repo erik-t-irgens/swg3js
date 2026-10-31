@@ -66,12 +66,15 @@ function peer(id: number, x: number, y: number, z: number, opts: { shown?: boole
   const half = Number(/const STAND_HALF_HEIGHT = ([\d.]+);/.exec(player)?.[1]);
   const radius = Number(/const CAPSULE_RADIUS = ([\d.]+);/.exec(player)?.[1]);
   ok(near(PEER_BODY_TUNE.halfHeight, half) && near(PEER_BODY_TUNE.radius, radius), `2: a peer is shot at on the shape you are shot at on (${half} and ${radius})`);
-  // The middle of the figure -- where a nameplate hangs and a blow's burst is placed -- is the
-  // player's own too. It is read out of the player's entry on the one list of the living, so the
-  // two cannot drift apart without this failing.
+  // The middle of the figure -- where everything aims, a nameplate hangs and a blow's burst is placed --
+  // is the middle of the capsule they wear, as the player's own is (the AI handoff's step 2): the player's
+  // entry on the one list of the living reads the player's own capsule (`colliderOffsetY`, which the crouch
+  // writes as radius plus the half it is wearing), and a peer's is the same arithmetic on the same numbers.
   const world = src('../../../src/world/world.ts');
-  const mine = /class PlayerTarget implements Living \{[\s\S]*?readonly halfHeight = ([\d.]+);/.exec(world)?.[1];
-  ok(mine !== undefined && near(PEER_BODY_TUNE.hitHeight, Number(mine)), `2: and their middle is where yours is (${mine})`);
+  const crouch = Number(/const CROUCH_HALF_HEIGHT = ([\d.]+);/.exec(player)?.[1]);
+  ok(near(PEER_BODY_TUNE.lowHalf, crouch), `2: and a peer crouching, kneeling or prone wears the player's own low capsule (${crouch})`);
+  ok(/class PlayerTarget implements Living \{[\s\S]*?get halfHeight\(\): number \{\s*return playerMiddle\(this\.capsule\);/.test(world), "2: the player's middle is read off the player's own capsule, never a copy");
+  ok(/this\.colliderOffsetY = CAPSULE_RADIUS \+ half;/.test(player) && /colliderOffsetY = CAPSULE_RADIUS \+ STAND_HALF_HEIGHT;/.test(player), "2: ... which the player's crouch writes as radius plus the half it wears");
   const reach = /class PlayerTarget implements Living \{[\s\S]*?radiusToward\(\): number \{\s*return ([\d.]+);/.exec(world)?.[1];
   ok(reach !== undefined && near(PEER_BODY_TUNE.radius, Number(reach)), `2: and a brain reaches for them at the same radius it reaches for you (${reach})`);
   // The blade colour a peer is drawn with before their own browser says: the game's own default,

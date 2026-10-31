@@ -27,6 +27,7 @@ import { GROUND_STEP, tuneGroundStep } from '../../../src/world/groundStep.ts';
 import { aimPointFor } from '../../../src/world/fighterStance.ts';
 import { askFromSkill, coverSearch, type CoverAsk, type CoverDeps } from '../../../src/world/cover.ts';
 import { skillOfGroundTier } from '../../../src/world/groundSkill.ts';
+import { LEGS, legsFor } from '../../../src/world/groundMove.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string): void => {
@@ -180,8 +181,16 @@ await Physics.create();
   ok(npcSrc.includes('this.wish.x = ax * step;') && npcSrc.includes('let ax = Math.sin(this.heading);'), 'and the ground it asks for still goes along its own nose, which is the movement model this game has always had — the nose is simply not the gun any more');
   ok(/private get split\(\)[\s\S]{0,200}this\.skill\.strafe > 0/.test(npcSrc), 'the split is the tier’s strafe share and not a flag of its own, so the two bottom rungs are the body the owner already knows');
   ok(npcSrc.includes('if (!this.split) wantFace = wantHead;'), 'and a body that has not earned it has one number on every frame, exactly as before');
-  ok(npcSrc.includes('if (this.leanOnly && Math.abs(off) <= Math.PI / 2 + 0.01) wantHead = wantFace + Math.sign(off) * lean;'), 'past what the legs could show, a **slide** is held to the lean and the gun stays where it is');
-  ok(/const lean = this\.leanOnly \? this\.slideLean : GROUND_STEP\.legMax;\s*\n\s*if \(Math\.abs\(off\) > lean\) \{[\s\S]{0,220}\n\s*else wantFace = wantHead;/.test(npcSrc), '... while anything else turns the body and takes the gun with it, because a body walking to a crate behind it has stopped aiming at you and there is no backpedal pose in this rig to draw one with');
+  // Which of the two gives way is one rule the people share (`legsFor`, `groundMove.ts`), run here and
+  // in `aiSteps.test.ts`; the fighter's own hand-over is the one line that hands it the slide, its tier's
+  // lean and whether the route chose the corner, and the two lines that read the answer back.
+  ok(/legsFor\(wantHead, wantFace, this\.leanOnly, this\.slideLean, routed\);\s*\n\s*wantHead = LEGS\.head;\s*\n\s*if \(LEGS\.gunOnFeet\) wantFace = wantHead;/.test(npcSrc), 'a fighter hands its slide, its tier’s lean and whether the route chose the corner to the rule the people share, and reads the feet and the gun back from it');
+  legsFor(1.0, 0, true, 0.35, false);
+  ok(LEGS.head === 0.35 && !LEGS.gunOnFeet, 'past what the legs could show, a **slide** the route walks straight is held to the lean and the gun stays where it is');
+  legsFor(2.0, 0, false, 0.35, false);
+  ok(LEGS.head === 2.0 && LEGS.gunOnFeet, '... while anything else past the legs’ ceiling turns the body and takes the gun with it, because a body walking to a crate behind it has stopped aiming at you and there is no backpedal pose in this rig to draw one with');
+  legsFor(0.6, 0, false, 0.35, false);
+  ok(LEGS.head === 0.6 && !LEGS.gunOnFeet, '... and within the ceiling a move goes where it wants with the gun where it was');
   // What that comes to rung by rung, since a table of shares is not a table of angles until
   // somebody does the arithmetic. It is the whole of why this matters: held to one ceiling, every
   // sliding rung circled at a right angle clamped back to sixty degrees, so tier 3 and tier 5 slid
@@ -243,7 +252,7 @@ await Physics.create();
   ok(npcSrc.includes('hit: (ax, ay, az, bx, by, bz) => this.physics.blockDistance(ax, ay, az, bx, by, bz)'), '... and so is whatever is in the way of a shot');
   ok(npcSrc.includes('sameGround: (ax, az, bx, bz) => outdoorNav.reachable(ax, az, bx, bz)'), 'whether a spot is even on this body’s own ground is the baked grid’s region ranks');
   ok(!/outdoorNav\.walkable\(/.test(npcSrc), '... and never `walkable`, whose blocked set is grown by a two-metre cell against a body two thirds of a metre wide and is false for practically every real spot, which is a trap worth a test of its own');
-  ok(npcSrc.includes('ask.ty = t.pos.y + t.halfHeight;'), 'a spot has to break the line to the threat’s own aim point, which is where its shots really come from');
+  ok(npcSrc.includes('ask.ty = t.pos.y + shotHeightOf(t);'), 'a spot has to break the line to the threat’s own height to shoot from: its aim point, or the player’s own, which crouching does not lower (`shotHeightOf`)');
   ok(npcSrc.includes('ask.indoors = !!this.cell;'), 'and indoors the search refuses itself');
 }
 

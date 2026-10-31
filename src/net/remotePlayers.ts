@@ -18,7 +18,7 @@ import { LOOK, unpackPitch } from '../player/lookAt.ts';
 import { weaponHolder, type WeaponCatalogue, type WeaponDef } from '../player/weapons';
 import type { FxMoverList } from '../core/fx/velocity';
 import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
-import { measureBox, peerBodies, type PeerBlow, type PeerBox } from './remoteBodies.ts';
+import { measureBox, peerBodies, peerLow, type PeerBlow, type PeerBox } from './remoteBodies.ts';
 import { hangHeld } from './peerHands.ts';
 import { glidePeerTurn, yawOf } from './peerTurn.ts';
 import { newPeerRope, readPeerRope, type PeerRope } from './peerRope.ts';
@@ -75,6 +75,11 @@ export interface PeerView {
   maxHp: number;
   /** Down: their own browser said they died, and the figure is playing the death clip. */
   down: boolean;
+  /**
+   * Low: the state they last sent is one their own capsule is low in -- crouched, kneeling or prone (`peerLow`) -- so
+   * their body here wears that capsule and is aimed at its middle (the AI handoff's step 2). Nothing new on the wire.
+   */
+  low: boolean;
   /** Their blade is lit, and the colour they lit it. */
   saber: boolean;
   saberColor: number;
@@ -425,7 +430,7 @@ export class RemotePlayers {
     this.scene.add(group);
     markActor(group);
     const rope = newPeerRope();
-    const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, shipTarget: new THREE.Vector3(), shipTargetQ: new THREE.Quaternion(), shipVel: new THREE.Vector3(), shipHeardAt: 0, shipReck: NO_RECKON, shipMount: false, shipDocked: false, hp: 100, maxHp: 100, down: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null, rope };
+    const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, shipTarget: new THREE.Vector3(), shipTargetQ: new THREE.Quaternion(), shipVel: new THREE.Vector3(), shipHeardAt: 0, shipReck: NO_RECKON, shipMount: false, shipDocked: false, hp: 100, maxHp: 100, down: false, low: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null, rope };
     const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, ride: { at: new THREE.Vector3(), q: new THREE.Quaternion(), yaw: 0, first: true }, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, saberColor: DEFAULT_PEER_SABER, thrown: null, rope, view };
     this.remotes.set(id, remote);
     // Told before the rig is fetched: what hangs on a peer decides for itself how much of them it
@@ -464,6 +469,7 @@ export class RemotePlayers {
     v.hp = r.hp;
     v.maxHp = r.maxHp;
     v.down = r.down;
+    v.low = peerLow(r.state);
     v.saber = r.saber && !r.down;
     v.saberColor = r.saberColor;
     // In `viewOf`, beside the other fields. `dockPos`/`dockQuat` are the module scratch this file

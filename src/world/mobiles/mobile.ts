@@ -77,8 +77,12 @@ import { POSTURE_TUNE, STANCE_TUNE, aimMode, bodyShare, capsuleTopFor, easeAngle
 import { GroundTactics, lowClipsFor, lowLoop, lowTransition, type LowClips } from './tactics.ts';
 import { EVADE_TUNE, JUMP_TUNE, ROLL_CLIPS, aimedAt, jumpAcross, jumpClipName, jumpHeight, jumpSpeed, ledgeJump, rollCommit, rollDirection, rollVector, type AimLine, type LedgeAsk, type RollDir } from '../evade.ts';
 import { tierOfLevel, willFire } from '../groundSkill.ts';
-import { GROUND_STEP } from '../groundStep.ts';
 import type { CoverDeps } from '../cover.ts';
+// The AI handoff's first three steps (`aiLedger.ts`): their switches, and the ledger every body in a fight is counted on.
+import { AI_FIX, AI_LEDGER, LEDGER_TUNE, acrossShell, clearPush, newPushWatch, noteFight, noteLanded, noteShot, seesLine, shotHeightOf, stepPush, wallNear, type LedgerRow } from '../aiLedger.ts';
+import { walkGoalFits } from '../nav/goalFits.ts';
+// Where the feet go and whether the gun goes with them: the fighters' own rule (the AI handoff's step 3).
+import { LEGS, legsFor } from '../groundMove.ts';
 // The spine is collected on the one walk the clone already takes, by the module's own `SPINE_BONE`
 // rule, which is why that rule is exported and no second walk is: one home for which bones fold.
 import { SPINE_BONE, foldSpine, type FoldRecord } from './spineFold.ts';
@@ -454,6 +458,28 @@ export class Mobile implements Living, NpcSubject {
   readonly navAgent = new NavAgent();
   /** Its walk between the street and a room, when what it is after is on the other side of a wall (`doorway.ts`). */
   readonly legs = new DoorLegs();
+  /** Its row of the AI handoff's ledger (`aiLedger.ts`): what every person and creature does in its fights, counted. */
+  readonly ledgerRow: LedgerRow = AI_LEDGER.people;
+  /**
+   * What its last thought found true of its fight, for the frames until the next: whether it is in one, whether a wall
+   * stands at its side (`wallNear`), and whether it is attacking something with a wall between them (`seesLine`).
+   */
+  private ledgerFighting = false;
+  private ledgerBrush = false;
+  private ledgerWall = false;
+  /**
+   * The ground it asked for and the ground it covered, over a window and not a frame (`stepPush`): it is a dynamic body,
+   * moved only on the physics' own whole sixtieths, so measured a frame at a time it would be "pushing" on every frame a
+   * fast screen draws between two steps.
+   */
+  private readonly ledgerPush = newPushWatch();
+  /**
+   * Whether the corner its feet are walking at this frame is the route's rather than its own goal (the AI handoff's
+   * step 3): a slide's lean is laid on its goal before the route and never on a corner the route bent it round.
+   */
+  private routedNow = false;
+  /** Step 3's check of a place on the standoff ring, kept: on the room's floor indoors, a walkable leg outdoors. */
+  private readonly standoffFits = (gx: number, gz: number): boolean => walkGoalFits(this.navCell, this.pos.x, this.pos.y, this.pos.z, gx, gz, this.plan.across);
   /**
    * The room it was stood in, and null for a body stood on open ground: where home is, which a body
    * walking home from a fight is sent to the door of, and which leash it keeps -- a creature from the
@@ -1312,7 +1338,8 @@ export class Mobile implements Living, NpcSubject {
       if (tac?.coverKind) tac.dropCover(this.now, false);
       return false;
     }
-    return tac.stepCover(this.now, deps, this.pos.x, this.pos.y, this.pos.z, target.key, target.pos.x, target.pos.y + target.halfHeight, target.pos.z, d.cover === true, this.inside);
+    // The threat's own height to shoot from (`shotHeightOf`): its aim point, or the player's, which crouching does not lower.
+    return tac.stepCover(this.now, deps, this.pos.x, this.pos.y, this.pos.z, target.key, target.pos.x, target.pos.y + shotHeightOf(target), target.pos.z, d.cover === true, this.inside);
   }
 
   /**
@@ -1332,12 +1359,12 @@ export class Mobile implements Living, NpcSubject {
       return travel;
     }
     const aim = Math.atan2(look.x - this.pos.x, look.z - this.pos.z);
-    const off = wrapAngle(travel - aim);
-    const lean = tac.leanOnly ? tac.slideLean : GROUND_STEP.legMax;
-    if (Math.abs(off) <= lean) return travel;
-    if (tac.leanOnly && Math.abs(off) <= Math.PI / 2 + 0.01) return aim + Math.sign(off) * lean;
-    this.gunOnFeet = true;
-    return travel;
+    // The fighters' own rule (`legsFor`, `groundMove.ts`). A slide's lean is laid on its goal before the route (the AI
+    // handoff's step 3): a slide whose corner the route chose is walked as the route says, the gun on what it fights up
+    // to what the legs can show (`legMax`), and past that it is a move, which takes the gun with it.
+    legsFor(travel, aim, tac.leanOnly, tac.slideLean, this.routedNow);
+    this.gunOnFeet = LEGS.gunOnFeet;
+    return LEGS.head;
   }
 
   /**
@@ -1635,6 +1662,8 @@ export class Mobile implements Living, NpcSubject {
     if (this.humanoid && pack && this.animator) {
       this.fitLow(pack);
       this.tactics ??= new GroundTactics(this.key % 2 === 0 ? 1 : -1);
+      // Its refused standoff places are counted on its own row of the AI handoff's ledger as well.
+      this.tactics.ledger = this.ledgerRow;
       this.applyFightTier();
     }
     this.state = 'idle';
@@ -2840,6 +2869,8 @@ export class Mobile implements Living, NpcSubject {
     // ring turned on itself and feuded for the rest of the fight. It is asked before the blow is
     // handed anywhere, so a blow that could never land is never put on the wire either.
     if (source && source.key !== this.key && source.side === this.side && !hostileSides(source, this)) return;
+    // Measured as it lands, by whoever struck it: whether they had a line to it (`aiLedger.ts`).
+    noteLanded(source, this);
     // Another browser thinks for it: the blow is asked of that browser and nothing is taken off
     // here. Its health comes back in the keeper's next batch, and if that blow finished it the word
     // that it is gone comes with it. Nothing here may ever subtract from something it does not keep,
@@ -3209,20 +3240,26 @@ export class Mobile implements Living, NpcSubject {
    * Whether a shot from here would reach a target's middle: a ray against what stands still and a shut
    * door (`Physics.stillOrWall`). A door's leaf stops the bolt, so a target behind one is no line: the
    * brain closes in rather than standing to shoot the door, and the door opens as the body comes up.
+   * Indoors the outer shells are left out, as every indoor ray leaves them, unless the target is on the
+   * other side of one (`acrossShell`: outside, or in another building), when the line crosses it and
+   * everything is tested (the AI handoff's step 1), as the fighters' own line is.
    */
-  private lineTo(t: Living): boolean {
+  private lineTo(ctx: MobileContext, t: Living): boolean {
     this.muzzlePoint(tmp);
     tmp2.set(t.pos.x, t.pos.y + t.halfHeight, t.pos.z).sub(tmp);
     const len = tmp2.length();
     if (len < 0.5) return true;
     tmp2.divideScalar(len);
     const ray = new RAPIER.Ray({ x: tmp.x, y: tmp.y, z: tmp.z }, { x: tmp2.x, y: tmp2.y, z: tmp2.z });
-    const hit = this.deps.physics.world.castRay(ray, len - 0.3, true, undefined, this.inside ? INSIDE : OUTSIDE, undefined, this.body, this.deps.physics.stillOrWall);
+    const full = AI_FIX.walls && this.inside && acrossShell(this.navCell, ctx.cellOf ? ctx.cellOf(t) : undefined);
+    const hit = this.deps.physics.world.castRay(ray, len - 0.3, true, undefined, this.inside && !full ? INSIDE : OUTSIDE, undefined, this.body, this.deps.physics.stillOrWall);
     return !hit;
   }
 
   private fire(t: Living, cameraDist: number): void {
     const from = this.muzzlePoint(new THREE.Vector3());
+    // On the ledger (`aiLedger.ts`): a shot, and at the player whether its muzzle had a line to where the player really is.
+    noteShot(this, t, from.x, from.y, from.z);
     const beast = this.entry.kind === 'creature' || this.entry.kind === 'special';
     const dir = tmp.set(t.pos.x, t.pos.y + t.halfHeight, t.pos.z).sub(from);
     if (dir.lengthSq() < 1e-6) return;
@@ -3726,7 +3763,7 @@ export class Mobile implements Living, NpcSubject {
       b.aggression = t.aggression;
       b.dead = t.dead;
       b.attackedMeAt = grudge ? grudge.at : -Infinity;
-      b.hasLine = isCurrent && this.rangedRange > 0 && !t.dead ? this.lineTo(t) : false;
+      b.hasLine = isCurrent && this.rangedRange > 0 && !t.dead ? this.lineTo(ctx, t) : false;
       if (isCurrent) line = b.hasLine;
       // Whether a wall stands between: asked only of what a blow could nearly reach, which is the one
       // rule that reads it, so a ray is cast for a handful of bodies at most and none at all for most.
@@ -3821,6 +3858,14 @@ export class Mobile implements Living, NpcSubject {
     this.lineSeen = d.targetKey !== null && d.targetKey === was ? line : false;
     // And whether to throw itself aside, or jump up to somebody on a ledge, once a thought.
     this.stepEvade(ctx);
+    // What the AI handoff's ledger reads of this thought, for the frames until the next (`aiLedger.ts`): whether it is in a
+    // fight, a wall at its side, and a wall between it and what it attacks. Eight short rays and one long one, and none for
+    // a body that is not fighting; measured by the ruler's own rule, whatever the switches say.
+    const ft = this.targetRef;
+    const fighting = !!ft && !ft.dead && (d.state === 'chase' || d.state === 'attack' || d.state === 'cover' || d.state === 'alert');
+    this.ledgerFighting = fighting;
+    this.ledgerBrush = fighting && wallNear(this.deps.physics, this.pos.x, this.pos.y, this.pos.z, this.plan.across + LEDGER_TUNE.brush, this.inside);
+    this.ledgerWall = fighting && !!ft && (d.state === 'attack' || d.state === 'cover') && !seesLine(this.deps.physics, this.navCell, ctx.cellOf ? ctx.cellOf(ft) : undefined, this.pos.x, this.pos.y + this.halfHeight, this.pos.z, ft.pos.x, ft.pos.y + ft.halfHeight, ft.pos.z);
     // Water it cannot swim in, just ahead: a wander turns elsewhere, a chase stops at the edge.
     this.waterAhead = false;
     if (!this.canSwim && !this.flyer && !this.inside && d.pace !== 'stand') {
@@ -4098,7 +4143,8 @@ export class Mobile implements Living, NpcSubject {
         const gap = Math.hypot(target.pos.x - this.pos.x, target.pos.z - this.pos.z);
         const shooting = d.attack === 'ranged' && (d.state === 'attack' || d.state === 'cover');
         const lineChase = (d.state === 'chase' || d.state === 'cover') && this.lineSeen;
-        if (tac.stepStandoff(this.now, this.pos.x, this.pos.z, target.pos.x, target.pos.z, gap, this.key, shooting, lineChase, this.rangedRange, this.speeds.walk * 1.5)) {
+        // Its place checked before it is picked (the AI handoff's step 3); `AI_FIX.route` off picks it unchecked, as before.
+        if (tac.stepStandoff(this.now, this.pos.x, this.pos.z, target.pos.x, target.pos.z, gap, this.key, shooting, lineChase, this.rangedRange, this.speeds.walk * 1.5, Math.random, AI_FIX.route ? this.standoffFits : null)) {
           moveTo = tac.walkTo;
           pace = pace === 'stand' ? 'walk' : pace;
           this.splitMove = true;
@@ -4139,6 +4185,12 @@ export class Mobile implements Living, NpcSubject {
     // with the goal in that same room, out of doors for a body the grid is not given to with its goal
     // on open ground, and for anything that flies, `corner` is null and every line below is the line
     // it always was.
+    //
+    // In every state, the attack state included, and that was already so here (the AI handoff's step 3
+    // is about the fighters' own exclusion, which a person never had). What step 3 brings a person is
+    // the order: a slide's lean is laid on its goal before the route (`stepStandoff`'s `fits`), so a
+    // corner the route hands back is walked as the route says (`routedNow`, read by `legsWant`).
+    this.routedNow = false;
     if (moveTo && pace !== 'stand' && !this.flyer && !this.driven) {
       // A move of its own is to a point of its own on open ground, not to the thing it is fighting.
       const fighting = !this.splitMove && !!target && !!d && (d.state === 'chase' || d.state === 'attack' || d.state === 'cover' || d.state === 'alert');
@@ -4149,6 +4201,7 @@ export class Mobile implements Living, NpcSubject {
       const place = fighting && target ? this.placeOf(ctx, target) : leader ? this.placeOf(ctx, leader) : this.placeOfGoal(d);
       const corner = doorwayNav.corner(this.navAgent, this.legs, this.navCell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, place, this.plan.across, this.now, this.walksGrid());
       if (corner) face = corner;
+      this.routedNow = AI_FIX.route && !!corner;
     }
     if (this.waterAhead && pace !== 'stand') pace = 'stand';
     // Perched, it stands still: held in the air until what it stands on is found, a step off it would
@@ -4225,7 +4278,27 @@ export class Mobile implements Living, NpcSubject {
     }
     if (!this.downPhase) this.animator?.loop(gait.clip ?? this.idleNow(), gait.timeScale);
     this.checkStuck(dt, moving ? this.speed : 0);
+    this.noteLedger(dt, moving ? this.speed : 0);
     this.fight(ctx, d);
+  }
+
+  /**
+   * Its fight this frame on the AI handoff's ledger (`aiLedger.ts`): what the last thought found, and over a window of
+   * `pushWindow` seconds the ground it covered against the ground it asked for -- under `pushShare` of it is a body
+   * leaning on something. A window and not a frame, because the physics moves it only on whole sixtieths of a second.
+   */
+  private noteLedger(dt: number, commanded: number): void {
+    if (!this.ledgerFighting) {
+      clearPush(this.ledgerPush);
+      return;
+    }
+    noteFight(this.ledgerRow, dt, this.ledgerBrush, false, this.ledgerWall);
+    const t = this.targetRef;
+    if (t && t.key === PLAYER_KEY && this.rangedRange > 0) {
+      AI_LEDGER.player.watched += dt;
+      if (this.lineSeen) AI_LEDGER.player.line += dt;
+    }
+    stepPush(this.ledgerPush, this.ledgerRow, dt, commanded, this.pos.x, this.pos.z);
   }
 
   /**

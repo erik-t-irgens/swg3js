@@ -51,6 +51,7 @@ import { neverShared, npcNow, sharesOnWire, sharesSeen } from '../../net/npcNet.
 // and the tables its tier, its posture, its roll and its jump are read from (`tactics.ts`, `evade.ts`).
 import type { CoverDeps } from '../cover.ts';
 import { outdoorNav } from '../nav/outdoorNav.ts';
+import { AI_FIX } from '../aiLedger.ts';
 import { EVADE_CLIPS, EVADE_TUNE, JUMP_TUNE, tuneEvade, tuneJump, type EvadeTune, type JumpTune } from '../evade.ts';
 import { GROUND_TIERS, TIER_LEVELS } from '../groundSkill.ts';
 import { POSTURE_TUNE, tunePosture, type Posture, type PostureTune } from '../fighterStance.ts';
@@ -1580,6 +1581,8 @@ export class MobileManager {
     hit: (ax, ay, az, bx, by, bz) => this.deps.physics.blockDistance(ax, ay, az, bx, by, bz),
     floor: (x, z, fromY, maxDrop) => this.deps.physics.topSurface(x, z, fromY, maxDrop, OUTSIDE_FILTER, staticOnly) ?? Number.NaN,
     sameGround: (ax, az, bx, bz) => outdoorNav.reachable(ax, az, bx, bz),
+    // The AI handoff's step 3, as the fighters' adapter asks it: a spot nowhere a body could stand is never picked.
+    standsOn: (x, z) => !AI_FIX.route || outdoorNav.standable(x, z),
   };
 
   /**

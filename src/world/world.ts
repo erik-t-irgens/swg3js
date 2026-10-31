@@ -73,6 +73,8 @@ import { PLACEMENT_KEY_PREFIX } from '../story/placements.ts';
 import { rawToGameX, rawToGameZ } from '../story/waypoints.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { cellOfLiving, doorwayNav } from './nav/doorway.ts';
+// The AI handoff's first three steps: their switches, and the ledger a landed blow is measured on (`aiLedger.ts`).
+import { LEDGER_WORLD, PLAYER_SHOT_FROM, noteLanded, playerMiddle } from './aiLedger.ts';
 import { Doors, type DoorView } from './doors.ts';
 import { InstanceLocks } from './instances.ts';
 import { gatherOpeners } from './doorMath.ts';
@@ -523,7 +525,32 @@ class PlayerTarget implements Living {
   readonly side: Side = 'player';
   readonly aggression: Aggression = 'aggressive';
   readonly pos = new THREE.Vector3();
-  readonly halfHeight = 0.9;
+  /**
+   * The player's own capsule, handed over once by the game (`main.ts`, the `Player` itself): its
+   * `colliderOffsetY` is the middle of the capsule the player is wearing this instant over the feet --
+   * the standing one, or the crouch shell that crouching, kneeling and lying prone all wear, as
+   * `Player.setCrouchCollider` writes it -- and it is read here, never copied.
+   */
+  capsule: { readonly colliderOffsetY: number } | null = null;
+  /**
+   * Where everything that shoots at the player aims, and measures a line to, over the feet: the middle
+   * of the capsule the player is really wearing (the AI handoff's step 2). It was a constant 0.9 m
+   * whatever the player was doing, so a body crouched or lying behind a crate or a table was aimed at
+   * as though it stood, and a crate that hid the crouched body's whole capsule hid nothing from a line
+   * drawn over it. The capsule is the hitbox, so the point is always inside what a bolt can strike:
+   * 0.8 standing, 0.5 crouched, kneeling or prone (one low shell serves all three, as the fighters'
+   * does: a prone body is aimed at the low shell's middle, never under it). `AI_FIX.posture` off, or no
+   * capsule handed over (a world with no player, a node test), is the 0.9 it was.
+   */
+  get halfHeight(): number {
+    return playerMiddle(this.capsule);
+  }
+  /**
+   * Where the player's own shots are taken to come from by anything that judges cover against them
+   * (`shotHeightOf`): the 0.9 the cover search always read, whatever the posture, since lowering where the
+   * player is aimed at (above) did not lower the player's gun to the hip.
+   */
+  readonly shotHeight = PLAYER_SHOT_FROM;
   /**
    * False while the player may be attacked; true while noclipping, aboard, dead or not
    * simulating. It starts true, so nothing can pick on a player at the origin before the loop
@@ -580,7 +607,9 @@ class PlayerTarget implements Living {
    * already passes, and it is handed straight to the callback, which is what turns the red flash into
    * an arc on the side the blow came from.
    */
-  damage(amount: number, from?: THREE.Vector3, _push?: number, _source?: Living | null): void {
+  damage(amount: number, from?: THREE.Vector3, _push?: number, source?: Living | null): void {
+    // Measured as it lands, by whoever struck: whether they had a line to the player (`aiLedger.ts`).
+    if (!this.dead) noteLanded(source, this);
     this.hurt(amount, from);
   }
   /**
@@ -1188,6 +1217,10 @@ export class World {
     };
     // First: nothing below reads it, but main configures it right after constructing the world.
     this.weather = new Weather(physics);
+    // The AI handoff's ledger measures a landed blow against this world's walls and rooms (`aiLedger.ts`).
+    LEDGER_WORLD.physics = physics;
+    LEDGER_WORLD.cellOf = this.livingCell;
+    LEDGER_WORLD.now = () => this.simTime;
     this.bolts = new Bolts(scene);
     this.shipFx = new ParticleEffects(scene, `${import.meta.env.BASE_URL}assets-private/ships/`);
     this.weaponFx = new ParticleEffects(scene, `${import.meta.env.BASE_URL}assets-private/weapons/`);

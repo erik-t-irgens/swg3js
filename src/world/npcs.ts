@@ -135,6 +135,12 @@ import { Strikers } from '../combat/strikers.ts';
 import { NPC_TUNE, mayFight, npcNow, type NpcBolt, type NpcEnd, type NpcLow, type NpcMark, type NpcRow, type NpcSubject } from '../net/npcNet.ts';
 import { rngFor, type SpawnRecord } from './spawnSeed.ts';
 import { roomJob as newRoomJob, type RoomJob } from './roomDefer.ts';
+// The AI handoff's first three steps (`aiLedger.ts`): their switches, and the ledger every body in a fight is counted on.
+import { AI_FIX, AI_LEDGER, LEDGER_TUNE, acrossShell, noteFight, noteLanded, noteShot, seesLine, shotHeightOf, wallNear, type LedgerRow } from './aiLedger.ts';
+// And step 3's check of a tactical goal before it is picked: on the walkable ground outdoors, on the room's floor indoors.
+import { walkGoalFits } from './nav/goalFits.ts';
+// Step 3's two rules the people share: the standoff's try order, and where the feet go and whether the gun goes with them.
+import { LEGS, StandoffTries, legsFor } from './groundMove.ts';
 
 /** What a fighter carries, and so how it fights. */
 export type Arm = 'saber' | 'melee' | 'gun';
@@ -652,8 +658,12 @@ export class Npc implements Living, ErrandBody, NpcSubject {
   private readonly scatter: AimScatter = { yaw: 0, pitch: 0 };
   /** Whether the last thought found a line to what it is after: the cover rule reads it. */
   private hasLine = false;
-  /** Which way it is sliding, when it last decided, and how long the slide it decided on runs. */
-  private strafeSide = Math.random() < 0.5 ? -1 : 1;
+  /**
+   * Which way it is sliding (`tries.side`), when it last decided, and how long the slide it decided on runs. The way round
+   * is kept by the standoff's own try order (`StandoffTries`, `groundMove.ts`), which the people share, since a pick that
+   * finds only the other way open flips it there.
+   */
+  private readonly tries = new StandoffTries(Math.random() < 0.5 ? -1 : 1);
   private strafeAt = 0;
   private slideUntil = 0;
   /** How much of its travel is a push off the allies standing on top of it, worked out at a thought. */
@@ -926,6 +936,15 @@ export class Npc implements Living, ErrandBody, NpcSubject {
    * door rather than stopping to swing at the wall.
    */
   private apart = false;
+  /** Its row of the AI handoff's ledger (`aiLedger.ts`): what every fighter does in its fights, counted. */
+  readonly ledgerRow: LedgerRow = AI_LEDGER.fighters;
+  /**
+   * What its last thought found true of its fight, for the frames until the next: whether it is in one, whether a wall
+   * stands at its side (`wallNear`), and whether it is attacking something with a wall between them (`seesLine`).
+   */
+  private ledgerFighting = false;
+  private ledgerBrush = false;
+  private ledgerWall = false;
   /** Where it stood when its room was last followed, and when (sim time). */
   readonly cellFrom = new THREE.Vector3();
   followAt = -Infinity;
@@ -1695,6 +1714,8 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     // to each other by `hostileSides`, so this lets a brawl between them stand and only stops the
     // blow that could never have been aimed here.
     if (source && source.key !== this.key && source.side === this.side && !hostileSides(source, this)) return;
+    // Measured as it lands, by whoever struck it: whether they had a line to it (`aiLedger.ts`).
+    noteLanded(source, this);
     // Another browser thinks for it: the blow is asked of that browser, with the bolt that struck it
     // when one did, and nothing is taken off here (`Mobile.damage` says why at length).
     const bolt = this.heldBoltAt === this.now ? this.heldBolt : null;
@@ -1851,8 +1872,11 @@ export class Npc implements Living, ErrandBody, NpcSubject {
   /**
    * Whether a shot from here would reach a target's middle: one ray against what stands still and
    * a shut door, cast at a thought and never at a frame. Inside a building it ignores the terrain
-   * and the outer shells, as everything else of a body indoors does. A shut door is no line: the bolt
-   * would stop on it, so the brain closes in instead of standing to shoot, and the door opens for it.
+   * and the outer shells, as everything else of a body indoors does -- **unless the target is on the
+   * other side of a shell** (`acrossShell`: it is outside, or in another building), when the line
+   * crosses that shell and everything is tested (the AI handoff's step 1): a body standing just inside
+   * a door used to shoot one outside beside it through the jamb. A shut door is no line: the bolt would
+   * stop on it, so the brain closes in instead of standing to shoot, and the door opens for it.
    */
   private lineTo(t: Living): boolean {
     this.muzzle(tmp);
@@ -1862,7 +1886,8 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     LINE_TO.x = t.pos.x;
     LINE_TO.y = t.pos.y + t.halfHeight;
     LINE_TO.z = t.pos.z;
-    return !this.physics.segmentBlocked(LINE_FROM, LINE_TO, !!this.cell, true);
+    const full = AI_FIX.walls && !!this.cell && acrossShell(this.cell, this.cellOf ? this.cellOf(t) : undefined);
+    return !this.physics.segmentBlocked(LINE_FROM, LINE_TO, !!this.cell, true, full);
   }
 
   /**
@@ -2069,6 +2094,21 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     this.stepSpacing(list);
     // And whether to throw itself aside, or jump up to somebody on a ledge, once a thought.
     this.stepEvade(aim, now, d);
+    this.noteThought(d);
+  }
+
+  /**
+   * What the ledger (`aiLedger.ts`) needs from a thought, for the frames until the next: whether it is in a fight at
+   * all, whether a wall stands at its side, and whether it is attacking something with a wall between them. Eight
+   * short rays and one long one for a body in a fight, none for one that is not; measured by the ruler's own rule,
+   * whatever the switches say.
+   */
+  private noteThought(d: Decision): void {
+    const t = this.target;
+    const fighting = !!t && !t.dead && (d.state === 'chase' || d.state === 'attack' || d.state === 'cover' || d.state === 'alert');
+    this.ledgerFighting = fighting;
+    this.ledgerBrush = fighting && wallNear(this.physics, this.pos.x, this.pos.y, this.pos.z, FIGHTER_BODY.radius + LEDGER_TUNE.brush, !!this.cell);
+    this.ledgerWall = fighting && !!t && (d.state === 'attack' || d.state === 'cover') && !seesLine(this.physics, this.cell, this.cellOf ? this.cellOf(t) : undefined, this.pos.x, this.pos.y + this.halfHeight, this.pos.z, t.pos.x, t.pos.y + t.halfHeight, t.pos.z);
   }
 
   /**
@@ -2222,9 +2262,16 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     pace = paceInPosture(pace, this.posture);
     // The way out of the room (src/world/nav/). Indoors, the building's own floors say which corner
     // to walk at next; only where it **walks** is taken from the path (`via`), so the arrival test
-    // further down still measures the real goal (`moveTo`). Never while it is attacking. Outdoors,
-    // and in a room the pack has no floor for with the goal in that same room, `corner` is null and
-    // every line below is the line it was.
+    // further down still measures the real goal (`moveTo`). Outdoors, and in a room the pack has no
+    // floor for with the goal in that same room, `corner` is null and every line below is the line it
+    // was.
+    //
+    // **In every state, the attack state included** (the AI handoff's step 3). It used to be asked
+    // only outside the attack state -- following corners once swung the gun away from what it was
+    // shooting, which the facing and travel split has since solved -- so the standoff ring's slide, a
+    // body backing out of somebody's face and the run to a cover spot all steered straight at their
+    // point, into whatever wall stood in the way. Every tier has it, tier 0 included: whether a wall is
+    // a wall is no skill. `AI_FIX.route` off asks only outside the attack state, as before.
     //
     // Before the split this wrote `face`, because facing and travel were one number and the only
     // way to walk at a corner was to point at it. It writes the travel point now, which is the same
@@ -2235,7 +2282,7 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     // door is given up on; and the floors' own corners are passed only within `NAV_TUNE.reach`, under
     // `arrive`, so a body that happened to stop between the two stood at a corner for good.
     let via: { x: number; z: number } | null = moveTo;
-    if (moveTo && pace !== 'stand' && d && d.state !== 'attack') {
+    if (moveTo && pace !== 'stand' && d && (AI_FIX.route || d.state !== 'attack')) {
       const goalY = t && (d.state === 'chase' || d.state === 'alert') ? t.pos.y : this.pos.y;
       // Indoors the building's own floors say which corner to walk at next; **outdoors the world's
       // baked walkability grid does**, which is the half that was written and then left unwired,
@@ -2286,13 +2333,20 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     // degrees at every tier that slid at all, so tier 3 and tier 5 circled at one speed in one
     // direction and only the duty cycle told them apart. Anything that is not a slide is held to the
     // ceiling as before, because that limit is the legs' and not the body's skill.
+    //
+    // **A slide's lean is laid on its goal before the route, never on the route after it** (the AI
+    // handoff's step 3): `stepStandoff` puts its point within the lean already, and a slide whose corner
+    // the route chose -- which indoors is every one, since a room's path always ends at its goal --
+    // is walked as the route says, keeping the gun on what it fights up to what the legs can show
+    // (`legMax`); past that it is a move, which takes the gun with it. Held to the tier's lean instead,
+    // the gun swung onto the feet whenever the bearing drifted a degree past it between two plans. The
+    // rule is the people's too (`legsFor`, `groundMove.ts`). `AI_FIX.route` off is the clamp as it was,
+    // laid on whatever the corner said.
+    const routed = via !== moveTo && AI_FIX.route;
     if (this.split && Number.isFinite(wantHead) && Number.isFinite(wantFace)) {
-      const off = wrapAngle(wantHead - wantFace);
-      const lean = this.leanOnly ? this.slideLean : GROUND_STEP.legMax;
-      if (Math.abs(off) > lean) {
-        if (this.leanOnly && Math.abs(off) <= Math.PI / 2 + 0.01) wantHead = wantFace + Math.sign(off) * lean;
-        else wantFace = wantHead;
-      }
+      legsFor(wantHead, wantFace, this.leanOnly, this.slideLean, routed);
+      wantHead = LEGS.head;
+      if (LEGS.gunOnFeet) wantFace = wantHead;
     }
     if (!this.split) wantFace = wantHead;
     let diff = 0;
@@ -2468,10 +2522,12 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     ask.x = this.pos.x;
     ask.y = this.pos.y;
     ask.z = this.pos.z;
-    // The point a shot would really come from: the threat's own aim point, which is what it shoots
-    // from and what a spot has to break the line to.
+    // The point a shot would really come from, which is what a spot has to break the line to: the
+    // threat's own aim point, except where it says a height of its own to shoot from (`shotHeightOf`) --
+    // the player and another player, whose aim point the AI handoff's step 2 lowered to their hip while
+    // they crouch, kneel or lie prone, and whose gun did not go down with it.
     ask.tx = t.pos.x;
-    ask.ty = t.pos.y + t.halfHeight;
+    ask.ty = t.pos.y + shotHeightOf(t);
     ask.tz = t.pos.z;
     ask.indoors = !!this.cell;
     askFromSkill(ask, skill);
@@ -2630,16 +2686,13 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     // shooting, and a walking body never goes down on one knee -- so a slide that never stopped
     // would have quietly taken the whole of the kneeling away. At each boundary it rolls its tier's
     // own share for whether to slide for a moment or to hold its ground and shoot.
+    const tries = this.tries;
     if (this.now - this.strafeAt >= GROUND_STEP.flipEvery) {
       this.strafeAt = this.now;
-      if (Math.random() < 0.4) this.strafeSide = -this.strafeSide;
+      if (Math.random() < 0.4) tries.side = -tries.side;
       this.slideUntil = Math.random() < skill.strafe ? this.now + GROUND_STEP.slideFor : this.now;
     }
-    const side = this.now < this.slideUntil ? strafeShare(skill, true, gap) * this.strafeSide : 0;
-    vx += -uz * side;
-    vz += ux * side;
-    const len = Math.hypot(vx, vz);
-    if (!(len > 1e-3)) return false;
+    const side = this.now < this.slideUntil ? strafeShare(skill, true, gap) * tries.side : 0;
     // Whether this is a slide or a move, which is what says which angle gives way when the two are
     // further apart than the legs can show. Anything but backing out of somebody's face is a slide:
     // closing on the ring is a few degrees off the line and holding it is a right angle off it, and
@@ -2650,10 +2703,39 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     // the arrival test, the corner lookup, the stuck check -- is written in terms of somewhere to
     // walk to, and a body that is handed a point is a body all of it still understands.
     const step = Math.max(2, this.paceSpeed('walk') * 1.5);
-    this.walkTo.x = this.pos.x + (vx / len) * step;
-    this.walkTo.z = this.pos.z + (vz / len) * step;
-    return true;
+    if (!AI_FIX.route) {
+      vx += -uz * side;
+      vz += ux * side;
+      const len = Math.hypot(vx, vz);
+      if (!(len > 1e-3)) return false;
+      this.walkTo.x = this.pos.x + (vx / len) * step;
+      this.walkTo.z = this.pos.z + (vz / len) * step;
+      return true;
+    }
+    // **Checked before it is picked** (the AI handoff's step 3), by the try order the people share
+    // (`StandoffTries.pick`, `groundMove.ts`): the slide's lean laid on the point before the route is
+    // asked for it, then the point as chosen, else the slide the other way (kept, so it does not flip
+    // back on the next frame), else the ring with no slide at all. One that fails all three is never
+    // walked into: the body holds its ground and shoots, and the refusal is counted once a refusal.
+    const a = tries.ask;
+    a.x = this.pos.x;
+    a.z = this.pos.z;
+    a.tx = t.pos.x;
+    a.tz = t.pos.z;
+    a.vx = vx;
+    a.vz = vz;
+    a.ux = ux;
+    a.uz = uz;
+    a.slide = side;
+    a.step = step;
+    a.lean = this.split && this.leanOnly ? this.slideLean : -1;
+    const ok = tries.pick(this.walkTo, this.standoffFits);
+    if (tries.fresh) this.ledgerRow.refused++;
+    return ok;
   }
+
+  /** Step 3's check of a place on the standoff ring, kept: on the room's floor indoors, a walkable leg outdoors (`walkGoalFits`). */
+  private readonly standoffFits = (gx: number, gz: number): boolean => walkGoalFits(this.cell, this.pos.x, this.pos.y, this.pos.z, gx, gz, this.radiusToward());
 
   /**
    * How fast the thing it is shooting at is really travelling, eased, so the tier's `lead` has
@@ -2720,6 +2802,8 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     // player's does, or it would fight the fire clip's own kick and wag the barrel.
     this.sinceShot = 0;
     this.muzzle(tmp2);
+    // On the ledger (`aiLedger.ts`): a shot, and at the player whether its muzzle had a line to where the player really is.
+    noteShot(this, t, tmp2.x, tmp2.y, tmp2.z);
     tmp.copy(t.pos).y += t.halfHeight * 0.9;
     // Where it will be rather than where it is, by the tier's own share of the lead. Nought is a
     // body that shoots at where you are standing and one is a body that shoots at where you will
@@ -3145,6 +3229,10 @@ export class Npc implements Living, ErrandBody, NpcSubject {
       // go and this says which walk that is. `__debug.send()` is the whole account.
       errand: this.errand ? (this.errand.done ? `${this.errand.verdict}` : `walking to ${this.errand.place ?? `${Math.round(this.errand.toX)}, ${Math.round(this.errand.toZ)}`}`) : null,
       inside: !!this.cell,
+      // Where it stands and in which room, and whether the last thought found a wall between it and its foe (`apart`).
+      at: [Number(this.pos.x.toFixed(2)), Number(this.pos.y.toFixed(2)), Number(this.pos.z.toFixed(2))],
+      room: this.cell ? this.cell.cell : null,
+      apart: this.apart,
       remembers: this.memory.size,
       stuck: this.stuck,
       // Which rung it fights on (0 is the flat body this game had before there was a ladder), how
@@ -3301,6 +3389,16 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     // Its lightsaber's move machine, once the carry is known and before the body is moved (`stepBlades`).
     this.stepBlades(sdt, effects, hittableAt);
     this.move(sdt, terrain);
+    // Its fight this frame, on the ledger (`aiLedger.ts`): what the last thought found, and whether the ground it asked
+    // for was given -- less than `pushShare` of it is a body leaning on something.
+    if (this.ledgerFighting) {
+      const asked = Math.hypot(this.wish.x, this.wish.z);
+      noteFight(this.ledgerRow, dt, this.ledgerBrush, asked > 1e-4 && this.moved < asked * LEDGER_TUNE.pushShare, this.ledgerWall);
+      if (t && t.key === PLAYER_KEY && this.arm === 'gun') {
+        AI_LEDGER.player.watched += dt;
+        if (this.hasLine) AI_LEDGER.player.line += dt;
+      }
+    }
     // Down from a jump of its own: landed the moment it stands on something again coming down, and let
     // go of all the same if it has not come down in a few seconds (held on a ledge's lip).
     if (this.jumping) {
@@ -4040,12 +4138,16 @@ export class NpcManager {
    * What it is **not** is `outdoorNav.walkable`: the bake grows its blocked set by a cell, which is
    * a two-metre margin against a body two thirds of a metre wide, and a cover spot stands half a
    * metre off a crate's face -- so that test is false for practically every real spot there is.
+   * `standsOn` is the looser question the AI handoff's step 3 asks before a spot is picked
+   * (`outdoorNav.standable`: not in a building's footprint, an open cell at or beside the spot), with
+   * `AI_FIX.route` off answering yes, as nothing asked before.
    */
   private readonly coverDeps: CoverDeps = {
     blockers: (x, z, reach, out, cap) => this.deps.blockers?.(x, z, reach, out as NearBlocker[], cap) ?? 0,
     hit: (ax, ay, az, bx, by, bz) => this.physics.blockDistance(ax, ay, az, bx, by, bz),
     floor: (x, z, fromY, maxDrop) => this.physics.topSurface(x, z, fromY, maxDrop, OUTSIDE_FILTER, staticOnly) ?? Number.NaN,
     sameGround: (ax, az, bx, bz) => outdoorNav.reachable(ax, az, bx, bz),
+    standsOn: (x, z) => !AI_FIX.route || outdoorNav.standable(x, z),
   };
 
   /** The tier every fighter stood from here takes. `__debug.fighters({ tier: 5 })` moves it and everyone out. */

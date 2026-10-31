@@ -540,8 +540,8 @@ ok(DOORS_PACK_VERSION === CONVERTER_VERSION, `the game reads the shape of doors.
   // The fighters and the mobiles ask that predicate (read off their sources, which node cannot load).
   const npcs = source('src/world/npcs.ts');
   ok(/computeColliderMovement\([^;]*this\.physics\.stillOrWall\)/.test(npcs), "the fighters' controller passes `Physics.stillOrWall`");
-  ok(/segmentBlocked\(LINE_FROM, LINE_TO, !!this\.cell, true\)/.test(npcs), "a fighter's line of fire counts a shut door");
-  ok(/private lineTo\(t: Living\)[\s\S]{0,900}?this\.deps\.physics\.stillOrWall/.test(source('src/world/mobiles/mobile.ts')), "a mobile's line of fire counts a shut door");
+  ok(/segmentBlocked\(LINE_FROM, LINE_TO, !!this\.cell, true, full\)/.test(npcs), "a fighter's line of fire counts a shut door");
+  ok(/private lineTo\(ctx: MobileContext, t: Living\)[\s\S]{0,1200}?this\.deps\.physics\.stillOrWall/.test(source('src/world/mobiles/mobile.ts')), "a mobile's line of fire counts a shut door");
 }
 {
   // A door's first step: somebody stands in the doorway as its building's rooms come up (a follower

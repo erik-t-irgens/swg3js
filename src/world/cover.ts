@@ -115,6 +115,12 @@ export interface CoverDeps {
    * world where the two rays above are the whole answer.
    */
   sameGround?(ax: number, az: number, bx: number, bz: number): boolean;
+  /**
+   * Whether a spot is somewhere a body could stand at all, as the baked grid sees it: not inside a building's own
+   * footprint, not deep in something solid (`OutdoorNav.standable`). The AI handoff's step 3, which checks a goal
+   * before a body picks it rather than after it has walked into it; optional, and with no grid it answers yes.
+   */
+  standsOn?(x: number, z: number): boolean;
 }
 
 /** What one search is asked. The caller keeps one of these and writes into it. */
@@ -297,6 +303,8 @@ export interface CoverStatus {
   none: number;
   /** Refused without a ray because the body was inside a building. */
   indoor: number;
+  /** Spots refused as nowhere a body could stand (`CoverDeps.standsOn`): inside a building's footprint, or in something solid. */
+  ground: number;
   /** Put off to the next step because this one had spent its budget. */
   deferred: number;
   /** Totals over the session: blockers the filler offered, candidate spots made, rays cast. */
@@ -344,6 +352,7 @@ export class CoverSearch {
   private hardCount = 0;
   private noneCount = 0;
   private indoorCount = 0;
+  private groundCount = 0;
   private deferredCount = 0;
   private blockerCount = 0;
   private candidateCount = 0;
@@ -570,6 +579,11 @@ export class CoverSearch {
     const face = b ? Math.max(0, b.gap - b.radius - tune.slack) : len;
     if (h < len - 1e-3 && h < face) return Number.NaN;
     if (deps.sameGround && !deps.sameGround(ask.x, ask.z, c.x, c.z)) return Number.NaN;
+    // A spot inside a building's footprint, or deep in something solid, is never picked (step 3): the next best is.
+    if (deps.standsOn && !deps.standsOn(c.x, c.z)) {
+      this.groundCount++;
+      return Number.NaN;
+    }
     return fy;
   }
 
@@ -589,6 +603,7 @@ export class CoverSearch {
       hard: this.hardCount,
       none: this.noneCount,
       indoor: this.indoorCount,
+      ground: this.groundCount,
       deferred: this.deferredCount,
       blockers: this.blockerCount,
       candidates: this.candidateCount,
@@ -616,6 +631,7 @@ export class CoverSearch {
     this.hardCount = 0;
     this.noneCount = 0;
     this.indoorCount = 0;
+    this.groundCount = 0;
     this.deferredCount = 0;
     this.blockerCount = 0;
     this.candidateCount = 0;
