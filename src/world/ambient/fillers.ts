@@ -24,6 +24,7 @@
 // `import type` or with their `.ts`, no enum, no namespace, no constructor parameter properties.
 import { fitsAt, heightIn, type NavFloor } from '../nav/navMesh.ts';
 import { roll } from '../spawnSeed.ts';
+import { isSeat } from '../rowSolid.ts';
 
 /** The kinds of building people of ours stand in. */
 export type FillKind = 'cantina' | 'starport' | 'hotel' | 'medical' | 'bank' | 'guild' | 'theater' | 'capitol' | 'association' | 'house';
@@ -120,11 +121,11 @@ export function buildingSeed(template: string, x: number, z: number): number {
   return h >>> 0;
 }
 
-/** Whether a placed object is something to sit on, by its template's own file name. */
-export function isSeat(template: string): boolean {
-  const name = template.slice(template.lastIndexOf('/') + 1).toLowerCase();
-  return /chair|stool|couch|sofa|bench|seat/.test(name) && !/table|lamp|pilot/.test(name);
-}
+/**
+ * Whether a placed object is something to sit on, by its template's own file name: one rule with the walk grid's bake,
+ * kept in `rowSolid.ts` (Map-maker II's fifth wave moved it there unchanged) and named here as it always was.
+ */
+export { isSeat };
 
 /**
  * The way a seat faces, as a heading (`atan2(x, z)`, a body's own convention): its local +Z turned by

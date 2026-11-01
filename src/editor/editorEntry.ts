@@ -49,7 +49,7 @@ import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.t
 import { EditorPaint, hexOf, paintTool, recipeWords, washInto, type PaintHost } from './editorPaint.ts';
 import { FLORA_PAINT_TUNE, PAINT_TUNE, tuneFloraPaint, tunePaint } from './editorTune.ts';
 import { FLORA_CLASSES, type FloraClass, type FloraClassSpec, type FloraRecipe } from '../swg/terrain/groundPaint.ts';
-import { WASH_DIALS } from './editorDials.ts';
+import { LAKE_LOOK_DIALS, WASH_DIALS } from './editorDials.ts';
 import { PAINT_LAYERS, type PaintLayer } from './groundBrush.ts';
 import { TINT_MODES, type PaintWorldRow } from '../world/editFiles/paintFile.ts';
 import { readWash, type WashSpec } from '../world/demWash.ts';
@@ -69,6 +69,11 @@ import type { BatchEdit } from '../world/placementEdits.ts';
 import { EditorBrush, brushNearOf, scatterTool, type BrushNearThing } from './editorBrush.ts';
 import { brushRing, meantForWater, ringAsk, type RingGround } from './brush.ts';
 import { ToolList, toolFrame, type ToolDef, type ToolDraw } from './tools.ts';
+import { EditorWater, waterTool, type WaterHost } from './editorWater.ts';
+import { WATER_CHOICES, WATER_TUNE, tuneWater } from './editorTune.ts';
+import { LAKE_TUNE } from '../world/ourWater.ts';
+import { outlineArea } from './lakeTrace.ts';
+import type { WaterToolsView, LakeView } from '../ui/editorWindow.ts';
 
 /** What the game hands the editor: its objects, and its own half of every rule the editor cannot reach itself. */
 export interface EditorHost {
@@ -149,6 +154,12 @@ export interface EditorHost {
    * ready, else why not, in words.
    */
   floraReady(): Promise<string | null>;
+  /**
+   * A lake of ours written behind the editor's short curtain (Map-maker II's fifth wave): the work (the write, whose answer
+   * stands the lake by difference behind the screen), then the effects' own warm-up (the lake's mask twins, which no sweep
+   * compiles), then the curtain's sweep. Answers what the work said, or why it could not run.
+   */
+  lakeCurtain(detail: string, work: () => Promise<string>): Promise<string>;
 }
 
 /** One thing in hand: what a row writes, what it is drawn and judged by, and how it is turned. */
@@ -176,6 +187,12 @@ interface Hand {
 
 const UP = new THREE.Vector3(0, 1, 0);
 const ONE = new THREE.Vector3(1, 1, 1);
+
+/** A lake of ours on the Here tab is listed under this prefix and its id, so its buttons reach the water tool. */
+const LAKE_ROW = 'lake:';
+function isLakeRow(id: string): boolean {
+  return id.startsWith(LAKE_ROW);
+}
 
 /** The editor, as the game sees it. */
 export class Editor {
@@ -410,6 +427,19 @@ export class Editor {
     w.paintHeldTile = (key, layer) => paint.holds(key, layer);
     GROUND_REWRITE_TUNE.paintMs = PAINT_TUNE.previewMs;
     GROUND_PAINT_TUNE.rasterWaitMs = PAINT_TUNE.rasterWaitMs;
+    // The water tool (Map-maker II's fifth wave), on Z: lakes of ours by clicks or traced at a level, picked, moved, raised
+    // and taken out, and falls between them; every change one write, stood by difference as its answer lands.
+    this.water = new EditorWater(this.waterHost());
+    this.tools.add(waterTool(this.water));
+    // The picked lake's look as the debug menu's sliders, each written into the water file a moment after it rests.
+    LAKE_LOOK_DIALS.host = {
+      look: () => {
+        const id = this.water.picked;
+        const l = id ? w.lakeLookOf(id) : null;
+        return id && l ? { id, opacity: l.opacity, ripple: l.ripple, drift: l.drift } : null;
+      },
+      set: (partial) => this.lakeLookDial(partial),
+    };
     // The wash's numbers as the debug menu's sliders, each written into the world row (debounced) as it moves.
     WASH_DIALS.host = {
       wash: () => (w.paintWorld.wash ?? null) as ReturnType<NonNullable<typeof WASH_DIALS.host>['wash']>,
@@ -447,6 +477,8 @@ export class Editor {
   readonly sculpt: EditorSculpt;
   /** The paint brush (Map-maker II's second wave). */
   readonly paint: EditorPaint;
+  /** The water tool (Map-maker II's fifth wave). */
+  readonly water: EditorWater;
   /** The pack the paint palette's family list shows (Map-maker II's third wave): '' for this world's own. */
   private paintBrowse = '';
   /**
@@ -653,6 +685,26 @@ export class Editor {
     return [];
   }
 
+  /** The picked lake's look sliders: the numbers gathered, written once they rest (a travel inside the wait drops them). */
+  private lakeLookTimer: ReturnType<typeof setTimeout> | null = null;
+  private lakeLookOwed: Record<string, number> = {};
+  lakeLookDial(partial: Record<string, number>): string[] {
+    const id = this.water.picked;
+    if (!id) return ['no lake is picked: pick one with the water tool (Z), a click on its ring'];
+    Object.assign(this.lakeLookOwed, partial);
+    if (this.lakeLookTimer) clearTimeout(this.lakeLookTimer);
+    const w = this.host.world;
+    const gen = w.generation;
+    this.lakeLookTimer = setTimeout(() => {
+      this.lakeLookTimer = null;
+      const look = this.lakeLookOwed;
+      this.lakeLookOwed = {};
+      if (w.generation !== gen || this.water.picked !== id) return;
+      void this.water.setLake(id, { look }).then(() => this.window?.refreshEdits());
+    }, 600);
+    return [];
+  }
+
   /** What the sculpt brush needs of the game: the world's height edits and their rebuild, what stands, the file's rows. */
   private sculptHost(): SculptHost {
     const h = this.host;
@@ -723,6 +775,52 @@ export class Editor {
       say: (words, ok) => me.say(words, ok),
     };
   }
+  /** What the water tool needs of the game: the world's lakes and its frames, its ground, its sea, the curtain, the props. */
+  private waterHost(): WaterHost {
+    const h = this.host;
+    const w = h.world;
+    const me = this;
+    return {
+      get edits() {
+        return me.edits;
+      },
+      worldKind: () => h.worldKind(),
+      rows: () => w.ourLakeRows,
+      toRaw: (x, z, out) => {
+        const s = w.terrain.swg;
+        out.x = s ? s.toSwgX(x) : -x;
+        out.z = s ? s.toSwgZ(z) : z;
+      },
+      toGame: (x, z, out) => {
+        const s = w.terrain.swg;
+        out.x = s ? s.toGameX(x) : -x;
+        out.z = s ? s.toGameZ(z) : z;
+      },
+      groundAt: (x, z) => w.terrain.nearHeightIfCached(x, z) ?? w.terrain.heightAt(x, z),
+      heightAt: (x, z) => w.terrain.heightAt(x, z),
+      seaLevel: () => w.terrain.waterLevel,
+      isLava: (shader) => w.lakeShaderIsLava(shader),
+      wantsCurtain: (lava) => w.lakeWantsCurtain(lava),
+      curtain: (detail, work) => h.lakeCurtain(detail, work),
+      fallSource: async (thing) => {
+        await h.props.load();
+        const def = h.props.find(thing);
+        const pack = h.props.pack;
+        if (!def || !pack) return `${thing} is not in the props catalogue`;
+        const b = pack.find(def.model)?.bounds;
+        if (!b) return `${thing}'s model has no box`;
+        return { src: { kind: 'prop', pack: 'props', thing: def.id, template: def.template }, bounds: b };
+      },
+      dest: () => this.session.dest,
+      centre: () => w.placeFrame,
+      frame: () => (w.planet?.space ? 'game' : 'raw'),
+      packId: () => h.packId(),
+      cameraYaw: () => this.fly.yaw,
+      underNotes: () => w.rowsUnderLakes(h.standingRows().map((s) => ({ id: s.id, x: s.x, y: s.y, z: s.z, rooms: s.row.kind === 'building' && (w.streamer?.placedHasRooms(placementKey(s.id)) ?? false) }))),
+      say: (words, ok) => me.say(words, ok),
+    };
+  }
+
   /** The Tools list (Map-maker II §2.3): one armed at a time, the scatter brush first. */
   readonly tools = new ToolList();
   /** What an armed tool is handed each frame and what it draws with, kept records. */
@@ -738,6 +836,9 @@ export class Editor {
   private toolShiftPress = false;
   /** Ctrl held this frame (the key block's word): Point's brush buttons read as up too. */
   private ctrlHeld = false;
+  /** Fly's mouse movement down the screen an armed tool took this frame with F held, and whether F is held (the key block's). */
+  private toolDY = 0.5;
+  private toolLift = false;
   /** When something last happened (a key, a button, an edit, a stroke, a flight), seconds: what the automatic fold waits out. */
   private activeAt = 0;
   /** A Fold now under way. */
@@ -927,10 +1028,14 @@ export class Editor {
     // is let go (a stroke under way ends unrecorded with its world's history, below).
     this.sculpt.worldGone();
     this.paint.worldGone();
+    this.water.worldGone();
     this.tools.disarmAll();
     // The wash's write still waiting for its dials to rest goes with its world, never into the next world's file.
     if (this.washTimer) clearTimeout(this.washTimer);
     this.washTimer = null;
+    if (this.lakeLookTimer) clearTimeout(this.lakeLookTimer);
+    this.lakeLookTimer = null;
+    this.lakeLookOwed = {};
     this.marks.ringOn = false;
     this.marks.ring2On = false;
     // The palette's family list turned back to the next world's own (`paintView` also reads a browsed pack that is the
@@ -973,6 +1078,8 @@ export class Editor {
       this.brushPaint = false;
       this.brushErase = false;
       this.toolShiftPress = false;
+      this.toolDY = 0;
+      this.toolLift = false;
       this.ctrlHeld = true;
       // The editor's own chords (Ctrl+D, C, X, Z, Shift+Z), read as raw keys; every action muted for the frame.
       if (!oldHand && !(this.window?.library.typing ?? false)) this.edits.chords();
@@ -999,7 +1106,8 @@ export class Editor {
       if (input.pressedAction('takeProp')) this.pickUpHovered();
       if (input.pressedAction('putAway')) {
         if (this.hand) this.giveUpHand();
-        else if (!this.edits.deleteKey()) this.deleteHovered();
+        // An armed tool takes Delete first (the water tool's picked lake), then the selection, then what is under the aim.
+        else if (!(this.tools.armedTool?.deleteKey?.() ?? false) && !this.edits.deleteKey()) this.deleteHovered();
       }
       // A click in Fly is the attack's button, read here and muted below; in Point the pointer layer has it.
       if (!this.session.point && input.pressedAction('attack') && this.hand) this.pendingClick = true;
@@ -1018,13 +1126,19 @@ export class Editor {
     const wheel = this.session.point ? this.pointer.wheel : input.wheel;
     if (this.session.point) input.wheel = 0;
     const armedTool = this.tools.armedTool;
+    // F held for an armed tool that takes the mouse with it (the water tool raising a picked lake): the camera holds still.
+    const liftHeld = !oldHand && input.held('placeLift');
+    const toolMouse = !oldHand && !!armedTool?.holdsMouse?.(liftHeld);
     if (wheel) {
       // With a hand key held on the selection the wheel steps its grid (the angle, the grid, the scale step); never while a
-      // tool is armed (the selection takes no hold then), when C held with the wheel sizes the tool that has a size.
+      // tool is armed (the selection takes no hold then), when C held with the wheel sizes the tool that has a size, and F
+      // held with it steps the tool's raise (the water tool's picked lake).
       if (this.edits.takesMouse && !armedTool) this.edits.wheelStep(-wheel);
       else if (armedTool?.size && input.held('editorScale')) {
         const said = armedTool.size(-wheel);
         if (said) this.say(said, true);
+      } else if (armedTool?.wheel && liftHeld && armedTool.wheel(-wheel, true) !== null) {
+        // Taken: the tool said so on its bar.
       } else if (this.hand && this.aimKind === 'sky') {
         const t = EDITOR_TUNE.aim;
         this.skyReach = Math.min(t.skyFar, Math.max(t.skyNear, this.skyReach * (1 - wheel * t.skyStep)));
@@ -1039,8 +1153,16 @@ export class Editor {
     a.fast = input.held('walk');
     // Alt is read before the mutes take it (the freeLook action is the editor's slow flight).
     a.slow = input.held('freeLook');
-    // A hold, a drag of the gizmo or an orbit has the mouse: the camera holds still.
-    a.look = !this.session.point && input.locked && !this.edits.takesMouse;
+    // A hold, a drag of the gizmo or an orbit has the mouse: the camera holds still. So does a tool raising with F held,
+    // which takes Fly's movement down the screen for itself (`toolDY`), spent here before the camera reads it.
+    this.toolDY = 0;
+    this.toolLift = liftHeld;
+    if (toolMouse && !this.session.point) {
+      this.toolDY = input.mouseDY;
+      input.mouseDX = 0;
+      input.mouseDY = 0;
+    }
+    a.look = !this.session.point && input.locked && !this.edits.takesMouse && !toolMouse;
     // An armed tool's buttons in Fly, read before the mutes take them: the attack's applies (paints, raises), the other
     // attack's the inverse (erases, lowers). Shift with a press of the left samples and writes nothing (the Shift rule).
     const toolOn = !!armedTool && !oldHand && !this.session.point;
@@ -1119,7 +1241,7 @@ export class Editor {
     const looked = this.fly.yaw !== this.lastYaw || this.fly.pitch !== this.lastPitch;
     this.lastYaw = this.fly.yaw;
     this.lastPitch = this.fly.pitch;
-    if (looked || this.host.input.keysDown > 0 || this.pointer.buttons !== 0 || this.fly.moving > 0.05 || ed.busy || ed.writing || ed.stroking || this.hand || this.brush.mode || this.sculpt.mode || this.paint.mode || this.folding) {
+    if (looked || this.host.input.keysDown > 0 || this.pointer.buttons !== 0 || this.fly.moving > 0.05 || ed.busy || ed.writing || ed.stroking || this.hand || this.brush.mode || this.sculpt.mode || this.paint.mode || this.water.busy || this.folding) {
       this.activeAt = now;
       return;
     }
@@ -1156,8 +1278,13 @@ export class Editor {
       this.giveUpHand();
       return true;
     }
-    // A tool armed (the scatter brush, the sculpt brush): let go, a stroke under way ended as its button let go would.
+    // A tool armed (the scatter brush, the sculpt brush): let go, a stroke under way ended as its button let go would; a tool
+    // with something of its own under way (the water tool's draft, its picked lake) gives that up first.
     const armed = this.tools.armedTool;
+    if (armed?.escape?.()) {
+      this.window?.refreshEdits();
+      return true;
+    }
     if (armed) {
       this.tools.disarmAll();
       this.say(`${armed.label} let go`, true);
@@ -1266,6 +1393,11 @@ export class Editor {
       f.valid = kind !== 'sky';
       f.dt = dt;
       f.now = now;
+      // The cursor on the screen (Point's pointer, Fly's middle), Fly's movement a tool took with F held, and F.
+      f.sx = point ? this.pointer.x : w / 2;
+      f.sy = point ? this.pointer.y : hh / 2;
+      f.dy = point ? 0 : this.toolDY;
+      f.lift = this.toolLift && !this.ctrlHeld;
       tool.step(f);
     }
     // What happened this frame, for the automatic fold's quiet (`EDITOR_TUNE.autoFoldIdle`).
@@ -1346,6 +1478,11 @@ export class Editor {
     }
     this.edits.clock.now = now;
     this.edits.frame(m);
+    // An armed tool's own marks every frame, after the editing's (the water tool's lakes, and its picked lake's square in
+    // place of the selection's gizmo), from this frame's view; none with no such tool armed.
+    m.lakesOn = false;
+    m.draftOn = false;
+    if (tool && tool.armed() && tool.overlay) tool.overlay(this.toolDraw, sv);
     this.moveEyeForEdits();
     endPointerFrame(this.pointer);
     // The bar, ten times a second: its words are strings.
@@ -1767,7 +1904,7 @@ export class Editor {
     v.said = this.said;
     v.saidOk = this.saidOk;
     const k = (a: Parameters<Input['pressedAction']>[0]) => input.bindings[a][0] ?? '';
-    v.hint = `WASD fly · ${k('editorUp')}/${k('editorDown')} up/down · Shift fast · Alt slow · wheel speed · ${k('editorPoint')} cursor · ${k('editorSearch')} find · click pick/put down · ${k('placeTurn')}/${k('placeLift')}/${k('editorScale')} held turn/raise/scale · ${k('takeProp')} pick up · ${k('putAway')} delete · ${k('placeLayer')} file · ${k('editorBrush')} brush · ${k('editorSculpt')} sculpt · ${k('editorPaint')} paint · ${k('editorKeys')} keys · F2 leave`;
+    v.hint = `WASD fly · ${k('editorUp')}/${k('editorDown')} up/down · Shift fast · Alt slow · wheel speed · ${k('editorPoint')} cursor · ${k('editorSearch')} find · click pick/put down · ${k('placeTurn')}/${k('placeLift')}/${k('editorScale')} held turn/raise/scale · ${k('takeProp')} pick up · ${k('putAway')} delete · ${k('placeLayer')} file · ${k('editorBrush')} brush · ${k('editorSculpt')} sculpt · ${k('editorPaint')} paint · ${k('editorWater')} water · ${k('editorKeys')} keys · F2 leave`;
     bar.show(v);
   }
 
@@ -1853,14 +1990,29 @@ export class Editor {
         return on;
       },
       brushed: (key: string) => this.brush.has(key),
-      here: () => h.here(h.player.pos, 60),
-      goTo: (id: string) => this.say(this.goTo(id), true),
-      pickUp: (id: string) => void this.pickUp(id),
-      remove: (id: string, layer: string) => void this.remove(id, layer === 'story' ? 'story' : 'world'),
-      isPicked: (id: string) => this.edits.sel.has(id),
+      // The lakes of ours first (a world has few), then the rows round the camera (Map-maker II's fifth wave).
+      here: () => [...this.lakeHereRows(), ...h.here(h.player.pos, 60)],
+      goTo: (id: string) => this.say(isLakeRow(id) ? this.goToLake(id.slice(LAKE_ROW.length)) : this.goTo(id), true),
+      pickUp: (id: string) => {
+        if (isLakeRow(id)) void this.pickLake(id.slice(LAKE_ROW.length));
+        else void this.pickUp(id);
+      },
+      remove: (id: string, layer: string) => {
+        if (isLakeRow(id)) void this.water.remove(id.slice(LAKE_ROW.length)).then(() => this.window?.refreshEdits());
+        else void this.remove(id, layer === 'story' ? 'story' : 'world');
+      },
+      isPicked: (id: string) => (isLakeRow(id) ? this.water.picked === id.slice(LAKE_ROW.length) : this.edits.sel.has(id)),
       pick: (ids: string[], mode: 'set' | 'add' | 'take') => {
-        this.edits.sel.pick(ids, mode);
+        const lakes = ids.filter(isLakeRow);
+        if (lakes.length) this.water.picked = mode === 'take' ? null : lakes[lakes.length - 1].slice(LAKE_ROW.length);
+        this.edits.sel.pick(ids.filter((i) => !isLakeRow(i)), mode);
         this.window?.refreshEdits();
+      },
+      lake: () => this.lakeView(),
+      setLake: (f: Record<string, unknown>) => {
+        const id = this.water.picked;
+        if (!id) return;
+        void this.water.setLake(id, f as { name?: string | null; shader?: string | null; look?: Record<string, unknown> }).then(() => this.window?.refreshEdits());
       },
       selected: () => this.selectedView(),
       setField: (f: Record<string, unknown>) => void this.edits.setField(f),
@@ -1893,6 +2045,7 @@ export class Editor {
         },
         sculpt: this.sculptView(),
         paint: this.paintView(),
+        water: this.waterView(),
       }),
       setTool: (t: Record<string, unknown>) => this.setTool(t),
       refreshStatus: () => void this.edits.refreshStatus(),
@@ -1934,6 +2087,23 @@ export class Editor {
       const k = BRUSH_SWITCHES.find(([key]) => key === sw[0]);
       if (k) BRUSH_TUNE[k[0]] = sw[1];
     }
+    // The water tool's (Map-maker II's fifth wave): what a click does, where a level comes from, a typed level, the draft
+    // closed or given up, the lake picked let go or taken out.
+    const wt: Record<string, unknown> = {};
+    if (typeof t.waterMode === 'string') wt.mode = t.waterMode;
+    if (typeof t.waterLevelFrom === 'string') wt.levelFrom = t.waterLevelFrom;
+    if (typeof t.waterHeight === 'number' && Number.isFinite(t.waterHeight)) {
+      wt.height = t.waterHeight;
+      wt.levelFrom = 'typed';
+    }
+    if (Object.keys(wt).length) {
+      const no = tuneWater(wt);
+      if (no.length) this.say(no.join('; '), false);
+    }
+    if (t.waterClose === true) void this.water.closeDraft().then(() => this.window?.refreshEdits());
+    if (t.waterGiveUp === true) this.water.escape();
+    if (t.waterPick === null) this.water.picked = null;
+    if (typeof t.waterRemove === 'string') void this.water.remove(t.waterRemove).then(() => this.window?.refreshEdits());
     // The sculpt brush's (Map-maker II's first wave): its mode, flatten's ways and target and height, its falloff, its switches.
     const st: Record<string, unknown> = {};
     if (typeof t.sculptMode === 'string') st.mode = t.sculptMode;
@@ -2307,7 +2477,7 @@ export class Editor {
     const bytes = w.heightRows.bytes;
     const file = `public/placements/heights/${this.host.packId()}.json: ${tiles} tile${tiles === 1 ? '' : 's'}${bytes ? `, about ${(bytes / 1024).toFixed(1)} KB` : ''}${f.problem ? ` (not read: ${f.problem})` : ''}`;
     const notes: string[] = [];
-    if (tiles) notes.push("The walk grid is the client's ground until the fifth wave: a body walking the sculpted ground follows the grid baked before it.");
+    if (tiles) notes.push('The walk grid follows the sculpted ground once navgrid is run again for this world (status asks for it): until then a body walks the grid baked before it.');
     if (this.sculpt.refusal()) notes.push(this.sculpt.refusal() as string);
     return {
       armed: this.sculpt.armed,
@@ -2377,6 +2547,237 @@ export class Editor {
       tune: { ...SCULPT_TUNE },
       rebuild: { ...GROUND_REWRITE_TUNE },
       ...(at ? { at } : {}),
+      ...(said.length ? { answered: said } : {}),
+    };
+  }
+
+  // ---- The water tool (Map-maker II's fifth wave). ----
+
+  /** The lakes of ours as the Here tab lists them (`lake:<id>`), nearest the camera first. */
+  private lakeHereRows(): HereRow[] {
+    const w = this.host.world;
+    const p = this.host.player.pos;
+    const at = { x: 0.5, z: 0.5 };
+    const rows = w.ourLakeRows.map((r) => {
+      let cx = 0;
+      let cz = 0;
+      for (const [x, z] of r.points) {
+        this.waterHostFrame(x, z, at);
+        cx += at.x;
+        cz += at.z;
+      }
+      cx /= Math.max(1, r.points.length);
+      cz /= Math.max(1, r.points.length);
+      const d = Math.hypot(cx - p.x, r.h - p.y, cz - p.z);
+      return { d, row: { id: `${LAKE_ROW}${r.id}`, layer: 'water', label: `${r.name ?? r.id} (a lake, ${r.h.toFixed(2)} m)`, away: `${Math.round(d)} m`, stood: true, bad: null } as HereRow };
+    });
+    rows.sort((a, b) => a.d - b.d);
+    return rows.map((x) => x.row);
+  }
+
+  /** A raw point of the water file in the game's frame (the world's own mirror about its centre, or about (0, 0)). */
+  private waterHostFrame(x: number, z: number, out: { x: number; z: number }): void {
+    const s = this.host.world.terrain.swg;
+    out.x = s ? s.toGameX(x) : -x;
+    out.z = s ? s.toGameZ(z) : z;
+  }
+
+  /** A lake's middle in the game's frame and its level, or null. */
+  private lakeMiddle(id: string): { x: number; y: number; z: number; r: number } | null {
+    const row = this.host.world.ourLakeRows.find((r) => r.id === id);
+    if (!row) return null;
+    const at = { x: 0.5, z: 0.5 };
+    let cx = 0;
+    let cz = 0;
+    let x0 = Infinity;
+    let x1 = -Infinity;
+    let z0 = Infinity;
+    let z1 = -Infinity;
+    for (const [x, z] of row.points) {
+      this.waterHostFrame(x, z, at);
+      cx += at.x;
+      cz += at.z;
+      x0 = Math.min(x0, at.x);
+      x1 = Math.max(x1, at.x);
+      z0 = Math.min(z0, at.z);
+      z1 = Math.max(z1, at.z);
+    }
+    const n = Math.max(1, row.points.length);
+    const across = Math.max(x1 - x0, z1 - z0);
+    return { x: cx / n, y: row.h, z: cz / n, r: Number.isFinite(across) ? across : 10 };
+  }
+
+  /** Go to a lake: the eye over its middle and back from it, looking down at it. Answers what was said. */
+  private goToLake(id: string): string {
+    const m = this.lakeMiddle(id);
+    if (!m) return `no lake ${id}`;
+    const back = Math.min(400, Math.max(20, m.r * 0.6));
+    this.host.player.pos.set(m.x, m.y + back * 0.6, m.z + back);
+    this.fly.lookAlong(0, -back * 0.6, -back);
+    this.fly.stop();
+    return `over the lake ${id}`;
+  }
+
+  /** A lake picked from the Here tab (or the console): the water tool armed if it is not, and the lake picked in it. */
+  private async pickLake(id: string): Promise<string> {
+    if (!this.host.world.ourLakeRows.some((r) => r.id === id)) return `no lake ${id}`;
+    if (!this.water.armed) await this.toggleTool('water');
+    this.water.picked = id;
+    this.window?.refreshEdits();
+    return `picked the lake ${id}`;
+  }
+
+  /** The lake picked as the Selected tab shows it, or null. */
+  private lakeView(): LakeView | null {
+    const id = this.water.picked;
+    if (!id) return null;
+    const w = this.host.world;
+    const row = w.ourLakeRows.find((r) => r.id === id);
+    if (!row) return null;
+    const at = { x: 0.5, z: 0.5 };
+    const pts = row.points.map(([x, z]) => {
+      this.waterHostFrame(x, z, at);
+      return [at.x, at.z] as [number, number];
+    });
+    const area = outlineArea(pts);
+    const notes: string[] = [];
+    if (w.lakeShaderIsLava(row.shader)) notes.push('Its shader is lava: it is drawn with the lava.');
+    const report = w.lakesReport() as { lakes: { id: string; drawn: boolean }[] };
+    if (!report.lakes.find((l) => l.id === id)?.drawn && !w.lakeShaderIsLava(row.shader)) notes.push('It is not drawn (its outline may cross itself).');
+    return {
+      id,
+      name: row.name ?? '',
+      h: row.h,
+      points: row.points.length,
+      area: area > 1e6 ? `${(area / 1e6).toFixed(3)} km²` : `${Math.round(area)} m²`,
+      shader: row.shader ?? '',
+      color: row.look?.color ?? '',
+      opacity: row.look?.opacity !== undefined ? String(row.look.opacity) : '',
+      ripple: row.look?.ripple !== undefined ? String(row.look.ripple) : '',
+      drift: row.look?.drift !== undefined ? String(row.look.drift) : '',
+      note: notes.join(' '),
+    };
+  }
+
+  /** The water tool as the Tools tab shows it. */
+  private waterView(): WaterToolsView {
+    const w = this.host.world;
+    const t = WATER_TUNE;
+    const info = w.waterFileInfo;
+    const n = w.ourLakeRows.length;
+    const file = `public/placements/water/${this.host.packId()}.json: ${n} lake${n === 1 ? '' : 's'}${info.bytes ? `, about ${(info.bytes / 1024).toFixed(1)} KB as last read` : ''}${info.problem ? ` (not read: ${info.problem})` : ''}`;
+    const notes: string[] = [];
+    const no = this.water.refusal();
+    if (no) notes.push(no);
+    if (n) notes.push('The walk grid follows the lakes once navgrid is run again for this world (status asks for it).');
+    if (this.water.last.said) notes.push(this.water.last.said);
+    return { armed: this.water.armed, mode: t.mode, levelFrom: t.levelFrom, height: t.height, draft: this.water.draft.length, fallTop: !!this.water.fallTop, picked: this.water.picked, lakes: n, file, note: notes.join(' ') };
+  }
+
+  /**
+   * `__debug.lakes(o)` (the dev server's half): the world's lakes (`World.lakesReport`) with what stands under them with no
+   * rooms, the tool's own state; `{ tune }` the tool's numbers and the lakes' own (`LAKE_TUNE`'s cell, floraUnder,
+   * roofDepth), `{ arm: 'clicks' | 'trace' | 'fall' }` (or false), `{ at: [x, z] }` the surface and its table, `{ trace: { x,
+   * z, h, reach, dry } }` a trace from a seed (written unless `dry`), `{ clicks: [[x, z], ...], h, name }` a lake written from
+   * points, `{ fall: { from: [x, y, z], to: [x, y, z], model, width } }` a fall written, `{ pick: id }`, `{ move: { id, dx, dz,
+   * dy } }`, `{ look: { id, color, opacity, ripple, drift, shader, name } }` and `{ remove: id }` -- every place in the file's
+   * own frame (a `/loc` line on a planet), the aim where none is given.
+   */
+  async lakesDebug(o?: Record<string, unknown>): Promise<unknown> {
+    const w = this.host.world;
+    const said: string[] = [];
+    const c = w.placeFrame;
+    const space = !!w.planet?.space;
+    const gameOf = (x: number, z: number): { x: number; z: number } => (space || !c ? { x, z } : { x: rawToGameX(c.x, x), z: rawToGameZ(c.z, z) });
+    const placeOf = (v: unknown): { x: number; z: number } | null => (Array.isArray(v) && v.length >= 2 && typeof v[0] === 'number' && typeof v[1] === 'number' ? gameOf(v[0], v[1]) : null);
+    let at: Record<string, unknown> | null = null;
+    let traced: Record<string, unknown> | null = null;
+    if (o && typeof o === 'object') {
+      if (o.tune && typeof o.tune === 'object') {
+        const tune: Record<string, unknown> = { ...(o.tune as Record<string, unknown>) };
+        for (const k of Object.keys(LAKE_TUNE) as (keyof typeof LAKE_TUNE)[]) {
+          if (!(k in tune)) continue;
+          const v = tune[k];
+          delete tune[k];
+          if (typeof v === typeof LAKE_TUNE[k]) (LAKE_TUNE as Record<string, unknown>)[k] = v;
+          else said.push(`${k} takes a ${typeof LAKE_TUNE[k]}`);
+        }
+        if (Object.keys(tune).length) said.push(...tuneWater(tune));
+      }
+      if (typeof o.arm === 'string') {
+        if (!(WATER_CHOICES.mode as readonly string[]).includes(o.arm)) said.push(`arm is one of ${WATER_CHOICES.mode.join(', ')}`);
+        else {
+          tuneWater({ mode: o.arm });
+          said.push(this.water.armed ? `the water tool: ${o.arm}` : await this.toggleTool('water'));
+        }
+      }
+      if (o.arm === false && this.water.armed) said.push(await this.toggleTool('water'));
+      const a = placeOf(o.at);
+      if (a) at = { ...w.lakeAt(a.x, a.z), game: [round(a.x), round(a.z)] };
+      const tr = o.trace as Record<string, unknown> | undefined;
+      if (tr && typeof tr === 'object') {
+        const g = typeof tr.x === 'number' && typeof tr.z === 'number' ? gameOf(tr.x, tr.z) : { x: this.aim.hit.x, z: this.aim.hit.z };
+        const reach = typeof tr.reach === 'number' && tr.reach > 0 ? tr.reach : undefined;
+        const h = typeof tr.h === 'number' ? tr.h : null;
+        if (tr.dry === true) {
+          const level = h ?? w.terrain.heightAt(g.x, g.z) + WATER_TUNE.traceRise;
+          const r = this.water.traced(g.x, g.z, level, reach);
+          traced = { level: round(level), points: r.points.length, area: Math.round(r.area), km2: round(r.area / 1e6), cells: r.cells, ms: r.ms, why: r.why };
+        } else said.push(await this.water.traceAt(g.x, g.z, h, reach));
+      }
+      if (Array.isArray(o.clicks)) {
+        const pts = (o.clicks as unknown[]).map(placeOf).filter((p): p is { x: number; z: number } => !!p).map((p) => [p.x, p.z] as [number, number]);
+        const h = typeof o.h === 'number' ? o.h : Math.min(...pts.map(([x, z]) => w.terrain.heightAt(x, z))) + WATER_TUNE.rise;
+        said.push(await this.water.writeLake(pts, h, 'a lake (console)', 'clicks', typeof o.name === 'string' ? o.name : undefined));
+      }
+      const fa = o.fall as Record<string, unknown> | undefined;
+      if (fa && typeof fa === 'object') {
+        const three = (v: unknown): { x: number; y: number; z: number } | null => {
+          if (!Array.isArray(v) || v.length !== 3 || !v.every((n) => typeof n === 'number')) return null;
+          const g = gameOf(v[0] as number, v[2] as number);
+          return { x: g.x, y: v[1] as number, z: g.z };
+        };
+        const from = three(fa.from);
+        const to = three(fa.to);
+        if (!from || !to) said.push('fall takes { from: [x, y, z], to: [x, y, z] } in the file\'s frame');
+        else {
+          if (typeof fa.model === 'string') tuneWater({ fallModel: fa.model });
+          if (typeof fa.width === 'number') tuneWater({ fallWidth: fa.width });
+          said.push(await this.water.writeFall(from, to));
+        }
+      }
+      if (typeof o.pick === 'string') said.push(await this.pickLake(o.pick));
+      if (o.pick === null) this.water.picked = null;
+      const mv = o.move as Record<string, unknown> | undefined;
+      if (mv && typeof mv === 'object' && typeof mv.id === 'string') {
+        // dx along the file's own x: the game's frame mirrors x on a planet.
+        const dxFile = typeof mv.dx === 'number' ? mv.dx : 0;
+        const dz = typeof mv.dz === 'number' ? mv.dz : 0;
+        const dy = typeof mv.dy === 'number' ? mv.dy : 0;
+        said.push(await this.water.moveLake(mv.id, space ? dxFile : -dxFile, dz, dy));
+      }
+      const lk = o.look as Record<string, unknown> | undefined;
+      // With no id, the lake picked (the line the look's sliders copy out names none).
+      if (lk && typeof lk === 'object' && typeof lk.id !== 'string' && this.water.picked) lk.id = this.water.picked;
+      if (lk && typeof lk === 'object' && typeof lk.id === 'string') {
+        const look: Record<string, unknown> = {};
+        for (const k of ['color', 'opacity', 'ripple', 'drift']) if (k in lk) look[k] = lk[k];
+        const fields: { name?: string | null; shader?: string | null; look?: Record<string, unknown> } = { look };
+        if ('name' in lk) fields.name = typeof lk.name === 'string' ? lk.name : null;
+        if ('shader' in lk) fields.shader = typeof lk.shader === 'string' ? lk.shader : null;
+        said.push(await this.water.setLake(lk.id, fields));
+      }
+      if (typeof o.remove === 'string') said.push(await this.water.remove(o.remove));
+    }
+    const h = this.host;
+    const under = w.rowsUnderLakes(h.standingRows().map((s) => ({ id: s.id, x: s.x, y: s.y, z: s.z, rooms: s.row.kind === 'building' && (w.streamer?.placedHasRooms(placementKey(s.id)) ?? false) })));
+    return {
+      ...w.lakesReport(),
+      under,
+      tool: this.water.report(),
+      toolTune: { ...WATER_TUNE },
+      ...(at ? { at } : {}),
+      ...(traced ? { traced } : {}),
       ...(said.length ? { answered: said } : {}),
     };
   }
@@ -2682,6 +3083,7 @@ function keySheet(input: Input): string {
     `${k('editorBrush')} brush armed and let go (Shift+click entries in the library first) · LMB held paints · RMB held erases · Tools tab: Fold now`,
     `${k('editorSculpt')} sculpt brush armed and let go · LMB held raises (or flattens, smooths: Tools tab) · RMB held lowers · C held with the wheel sizes it · Shift+click samples the height`,
     `${k('editorPaint')} paint brush armed and let go · LMB held paints the chosen family or colour (Tools tab) · RMB held erases · Shift+click or the middle button takes what is under it · C held with the wheel sizes it`,
+    `${k('editorWater')} water tool armed and let go · LMB a lake's point, a seed to trace, or a fall's ends (Tools tab) · RMB takes one back · a click on a lake's ring picks it: drag its square, ${k('placeLift')} held raises, ${k('putAway')} takes it out`,
     `${k('editorGameView')} game view · ${k('editorKeys')} this sheet · ${k('editorBody')} body here · ${k('editorHold')} hold the world · Esc give up / clear · F2 leave`,
   ].join('\n');
 }

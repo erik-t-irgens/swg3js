@@ -28,6 +28,7 @@
 
 import { mergeLayers, placementKey, radiusOfBounds, rowHash, scaleOf, syncPlan, toGame, type GamePlace, type PlacementEntry, type PlacementFrame, type PlacementLayer, type PlacementPack, type PlacementRead, type PlacementRow } from '../story/placements.ts';
 import { standsIn } from './worldState.ts';
+import { standsSolid } from './rowSolid.ts';
 
 /** Every number here is ours. Live through `__debug.placements({ tune })`. */
 export const DRESSING_TUNE = {
@@ -131,14 +132,9 @@ export function dressingStandOf(row: PlacementRow, g: GamePlace, key: string, th
   return { ...at, model: row.model, solid: standsSolid(row, false), ...(row.template ? { effectsOf: row.template } : {}), ...(row.from && row.pack === 'world' ? { from: row.from } : {}) };
 }
 
-/**
- * Whether a row stands solid: its own word where it says one, else solid -- except a props row whose thing is a
- * seat or a table (`furniture`, asked of the thing's template), which is passable (`dressingStandOf`'s rule, and
- * the one the editor's Solid shows and turns, so the two can never disagree).
- */
-export function standsSolid(row: Pick<PlacementRow, 'solid' | 'pack'>, furniture: boolean): boolean {
-  return row.solid ?? (row.pack === 'props' ? !furniture : true);
-}
+// Whether a row stands solid (`standsSolid`): one rule the walk grid's bake reads too, kept in `rowSolid.ts` (Map-maker II's
+// fifth wave moved it there unchanged) and named here as it always was.
+export { standsSolid };
 
 /** Metres round a stood row a player's own thing may not stand: its row's own, else the tune's on a story row, else none. Read live, so the tune moves it. */
 export function guardOf(s: StoodRow): number {

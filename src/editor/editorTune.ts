@@ -290,6 +290,113 @@ export function tuneFloraPaint(partial: unknown): string[] {
   return said;
 }
 
+/**
+ * The water tool's numbers (Map-maker II's fifth wave, DESIGN.md §2.7), live through `__debug.lakes({ tune })` and its
+ * numbers of feel as sliders in the debug menu's `lakes` dials. Every one the owner's to judge by hand; none was chosen by
+ * measuring. The lakes' own shipped numbers (the index's cell, the water a plant is taken under, the roofs' switch) are
+ * `LAKE_TUNE` in `src/world/ourWater.ts`, which the same helper moves.
+ */
+export const WATER_TUNE = {
+  /** What a click does: points of an outline, a trace from the click at a level, or a fall's two ends. */
+  mode: 'clicks' as 'clicks' | 'trace' | 'fall',
+  /**
+   * Where a lake's level is taken from: the lowest ground under its clicked points (so the water meets the shore there and
+   * the higher shore stands over it), its first point's ground, or a height typed (or sampled with Shift+click).
+   */
+  levelFrom: 'lowest' as 'lowest' | 'first' | 'typed',
+  /** The typed (or sampled) level, metres. */
+  height: 0,
+  /** Metres added over the level a click takes (lowest, first): a lake a little full or a little shy of its shore. */
+  rise: 0,
+  /**
+   * How far over the ground at its seed a trace floods, metres: a basin is flooded to the seed's ground and this much more.
+   * A metre, because a real-elevation world's own detail stands about a metre either way over its raster's flat water.
+   */
+  traceRise: 1,
+  /** The trace's samples, metres apart (the ground's own 2 m). */
+  traceStep: 2,
+  /** The farthest a trace floods from its seed either way, metres, before it is said to spill (memory grows as its square). */
+  traceReach: 3000,
+  /** How far an outline point may stand off the traced shore when simplified, metres (doubled until it fits). */
+  tolerance: 0.5,
+  /** The most points a traced outline keeps (the client's own run to about 50). */
+  mostPoints: 256,
+  /** A click this near an outline's first point closes it, metres. */
+  closeReach: 3,
+  /** A lake within this of the global sea's height is raised to it plus this, metres, or it reads as the sea and swells. */
+  seaNudge: 0.01,
+  /** Metres a notch of the wheel with F held raises or lowers a picked lake. */
+  raiseStep: 0.1,
+  /** Pixels within which a lake's handle is under the cursor. */
+  hitPx: 12,
+  /** The water shader a new lake wears ('' the world's own water, the planet's colours). */
+  shader: '',
+  /** The fall model, a props catalogue thing, scaled to the drop and the width. */
+  fallModel: 'waterfall_all_thin_forked',
+  /** A fall's width, metres: the design's 12 m, which is the thin forked fall's own width at scale 1 (12.3 m). */
+  fallWidth: 12,
+  /** Its depth as a share of its width's scale (its sprays come with the model at their own size). */
+  fallDepth: 1,
+  /** Degrees a fall is turned past facing from its top toward its bottom (its model's own front is the owner's to judge). */
+  fallTurn: 0,
+  /** The least drop a fall is written for, metres. */
+  fallMin: 1,
+  /**
+   * Where between its two ends a fall stands, a share from the top's place (0) to the bottom's (1). At the bottom: the model
+   * is a hanging sheet, and anywhere over a sloped face between the ends its lower part is inside the slope (at the run's
+   * middle on a 56-degree flank all but its top two metres were); the ground under the bottom is the fall's foot. Toward 0
+   * for a cliff that overhangs.
+   */
+  fallAlong: 1,
+};
+
+/** The water tool's shipped values, for a reset. */
+export const WATER_TUNE_DEFAULTS: typeof WATER_TUNE = JSON.parse(JSON.stringify(WATER_TUNE));
+
+/** The water tool's words that are choices, each from its list. */
+export const WATER_CHOICES = {
+  mode: ['clicks', 'trace', 'fall'],
+  levelFrom: ['lowest', 'first', 'typed'],
+};
+
+/**
+ * `__debug.lakes({ tune })`: the water tool's numbers moved in memory, never saved, its choices only from their lists, its
+ * shader and fall model only as names. Answers what was said.
+ */
+export function tuneWater(partial: unknown): string[] {
+  const said: string[] = [];
+  if (!partial || typeof partial !== 'object' || Array.isArray(partial)) return ['lakes({ tune }) takes an object'];
+  const numbers: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(partial as Record<string, unknown>)) {
+    if (k === 'mode' || k === 'levelFrom') {
+      const list = WATER_CHOICES[k] as readonly string[];
+      if (typeof v === 'string' && list.includes(v)) (WATER_TUNE as Record<string, unknown>)[k] = v;
+      else said.push(`${k} is one of ${list.join(', ')}`);
+      continue;
+    }
+    if (k === 'shader' || k === 'fallModel') {
+      if (typeof v === 'string' && /^[a-z0-9_.-]{0,80}$/i.test(v) && (k === 'shader' || v.length > 0)) (WATER_TUNE as Record<string, unknown>)[k] = v;
+      else said.push(`${k} is ${k === 'shader' ? "a water shader's key, or '' for the world's own" : 'a props catalogue thing'}`);
+      continue;
+    }
+    numbers[k] = v;
+  }
+  said.push(...tuneInto(WATER_TUNE as unknown as Record<string, unknown>, numbers));
+  const t = WATER_TUNE;
+  t.traceStep = Math.min(16, Math.max(0.25, t.traceStep));
+  t.traceReach = Math.min(12000, Math.max(16, t.traceReach));
+  t.tolerance = Math.max(0.01, t.tolerance);
+  t.mostPoints = Math.max(3, Math.min(4096, Math.round(t.mostPoints)));
+  t.closeReach = Math.max(0, t.closeReach);
+  t.seaNudge = Math.max(0, t.seaNudge);
+  t.fallWidth = Math.max(0.1, t.fallWidth);
+  t.fallDepth = Math.max(0.01, t.fallDepth);
+  t.fallMin = Math.max(0, t.fallMin);
+  t.fallAlong = Math.min(1, Math.max(0, t.fallAlong));
+  t.hitPx = Math.max(2, t.hitPx);
+  return said;
+}
+
 /** Every number of the editor, ours. */
 export const EDITOR_TUNE = {
   cam: {
@@ -422,6 +529,8 @@ export const EDITOR_TUNE = {
   paint: PAINT_TUNE,
   /** The plants layer's numbers (`FLORA_PAINT_TUNE`, the same object; its falloff moves through `floraPaint({ tune })`). */
   floraPaint: FLORA_PAINT_TUNE,
+  /** The water tool's numbers (`WATER_TUNE`, the same object; its choices and names move through `lakes({ tune })`). */
+  water: WATER_TUNE,
   window: {
     /** How wide the window opens, pixels, docked left: the library's grid of pictures and its sources down the side. */
     width: 560,

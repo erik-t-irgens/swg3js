@@ -38,6 +38,7 @@
 import { EDIT_FILE_KINDS, PLACEMENT_FIELDS, PLACEMENT_LIMITS, editFilePath, isPlacementId, mintPlacementId, placementsFileText, placementsPath, readPlacementRow, readPlacementsFile, readPlacementsFileRaw, rowHash, type EditFileKind, type PlacementLayer, type PlacementRead, type PlacementRow } from '../story/placements.ts';
 import { HEIGHTS_LIMITS, heightsFileText, isTileId, readHeightsFile, readTileRow, sameTile, tileWithExtras, type HeightTileRow } from './editFiles/heightsFile.ts';
 import { PAINT_LIMITS, isPaintId, paintFileText, paintRowsWhole, paintWithExtras, readPaintFile, readPaintRow, samePaintRow, type PaintRow } from './editFiles/paintFile.ts';
+import { WATER_LIMITS, isWaterId, mintWaterId, readWaterFile, readWaterRow, sameWaterRow, waterFileText, waterWithExtras, type WaterLakeRow } from './editFiles/waterFile.ts';
 
 /** Every number of the endpoint, all ours. Read where the dev server runs it, and not moved from the browser. */
 export const PLACEMENTS_ENDPOINT_TUNE = {
@@ -432,7 +433,6 @@ export interface Held<R extends EditRow = PlacementRow> {
 export const NOT_YET: Partial<Record<EditFileKind, string>> = {
   removed: "the world editor's fifth wave's",
   people: "the world editor's fifth wave's",
-  water: "Map-maker II's fifth wave's",
   locations: "Map-maker II's eighth wave's",
   looks: "Map-maker II's thirteenth wave's",
 };
@@ -552,10 +552,53 @@ function paintFile(world: string): string {
 }
 
 /**
- * Every kind the batch writes now, by name: the two row layers, from Map-maker II's first wave the heights and from its
- * second the paint. A kind named in `EDIT_FILE_KINDS` and missing here is refused in its wave's words (`NOT_YET`).
+ * The water (Map-maker II's fifth wave, `editFiles/waterFile.ts`): a lake a row, named by an id of its own (minted from its
+ * name where a put names none), its outline and height checked as the reader checks them, a ground world's alone (a
+ * real-elevation world's among them; a space zone's is refused).
  */
-export const EDIT_KINDS: Partial<Record<EditFileKind, EditKind<EditRow>>> = { story: ROW_KINDS.story as unknown as EditKind<EditRow>, world: ROW_KINDS.world as unknown as EditKind<EditRow>, heights: heightsKind as unknown as EditKind<EditRow>, paint: paintKind as unknown as EditKind<EditRow> };
+export const waterKind: EditKind<WaterLakeRow> = {
+  kind: 'water',
+  group: null,
+  groundOnly: true,
+  most: WATER_LIMITS.rows,
+  idOk: isWaterId,
+  idWords: 'its id is not a-z, 0-9, _ and - (64 at most, starting with a letter or a digit)',
+  open(text, world, wk) {
+    if (text === null) return { rows: [], read: null, text: null };
+    const file = waterFile(world);
+    const raws: Record<string, unknown>[] = [];
+    const read = readWaterFile(text, world, wk, raws);
+    if (read.problem) return `${file} does not read (${read.problem}): mend it by hand first`;
+    if (read.skipped.length) return `${file} holds rows this build cannot read (${read.skipped.slice(0, 3).map((s) => `${s.id}: ${s.why}`).join('; ')}): mend them by hand first, or the editor would write over them`;
+    return { rows: read.rows.map((row, i) => ({ row, raw: raws[i] })), read, text };
+  },
+  clean(asked, id, stamp) {
+    const unknown: string[] = [];
+    const row = readWaterRow({ ...asked, id, at: stamp }, unknown);
+    if (typeof row === 'string') return row;
+    if (unknown.length) return `it carries fields this build does not write: ${unknown.join(', ')}`;
+    return row;
+  },
+  parse: (v) => readWaterRow(v),
+  same: sameWaterRow,
+  extras: waterWithExtras,
+  text: (world, _frame, rows) => waterFileText(world, rows),
+  read: (text, world, wk) => readWaterFile(text, world, wk),
+  mint: (asked, taken) => mintWaterId(typeof asked.name === 'string' ? asked.name : 'lake', taken),
+  file: waterFile,
+};
+
+/** The water file for a world, as the owner reads it. */
+function waterFile(world: string): string {
+  return `public/${editFilePath('water', world)}`;
+}
+
+/**
+ * Every kind the batch writes now, by name: the two row layers, from Map-maker II's first wave the heights, from its
+ * second the paint and from its fifth the water. A kind named in `EDIT_FILE_KINDS` and missing here is refused in its
+ * wave's words (`NOT_YET`).
+ */
+export const EDIT_KINDS: Partial<Record<EditFileKind, EditKind<EditRow>>> = { story: ROW_KINDS.story as unknown as EditKind<EditRow>, world: ROW_KINDS.world as unknown as EditKind<EditRow>, heights: heightsKind as unknown as EditKind<EditRow>, paint: paintKind as unknown as EditKind<EditRow>, water: waterKind as unknown as EditKind<EditRow> };
 
 /**
  * The world editor's one write (`{ op: 'batch', world, edits }`, DESIGN.md §2.11): every edit applied in order to every

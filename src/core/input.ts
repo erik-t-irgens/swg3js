@@ -124,7 +124,9 @@ export type Action =
   // Map-maker II's sculpt brush (its first wave): K arms it, and disarms it.
   | 'editorSculpt'
   // Map-maker II's paint brush (its second wave): U arms it, and disarms it.
-  | 'editorPaint';
+  | 'editorPaint'
+  // Map-maker II's water tool (its fifth wave): Z arms it, and disarms it.
+  | 'editorWater';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -279,6 +281,9 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   editorSculpt: ['KeyK'],
   // U, the wings' and racing mode's (both muted while the editor is on): the paint brush armed and let go (Map-maker II).
   editorPaint: ['KeyU'],
+  // Z, the prone's and the roll's (both muted while the editor is on): the water tool armed and let go (Map-maker II's fifth
+  // wave). Ctrl+Z stays the editor's undo, a chord read only while Ctrl is held, when every action is muted.
+  editorWater: ['KeyZ'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 
@@ -323,6 +328,7 @@ export const DEV_ONLY_ACTIONS: ReadonlySet<Action> = new Set<Action>([
   'editorBrush',
   'editorSculpt',
   'editorPaint',
+  'editorWater',
 ]);
 
 /** The actions the Controls page lists: every one on the dev server, and in a release all but the dev server's own. */

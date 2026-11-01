@@ -22,6 +22,8 @@
 // type stripping): relative imports only as `import type` or with their `.ts`, no enum, no namespace, no
 // constructor parameter properties.
 
+import { isTableTemplate } from './rowSolid.ts';
+
 /** What a sitting row sits on. */
 export type SeatKind = 'chair' | 'table';
 
@@ -110,11 +112,11 @@ export function pickBy<T>(list: readonly T[], key: string): T {
   return list[(h >>> 0) % list.length];
 }
 
-/** Whether a placed object's template is a table to sit at: its own file name says so, and a lamp on one is not one. */
-export function isTableTemplate(template: string): boolean {
-  const name = template.slice(template.lastIndexOf('/') + 1).toLowerCase();
-  return /table|tbl/.test(name) && !/lamp|holo|terminal/.test(name);
-}
+/**
+ * Whether a placed object's template is a table to sit at: its own file name says so, and a lamp on one is not one. One
+ * rule with the walk grid's bake, kept in `rowSolid.ts` (Map-maker II's fifth wave moved it there unchanged).
+ */
+export { isTableTemplate };
 
 interface TableSpot {
   x: number;

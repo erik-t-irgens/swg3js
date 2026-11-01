@@ -104,6 +104,43 @@ export interface MarksView {
   ring2On: boolean;
   ring2: Float64Array;
   ring2Vis: Uint8Array;
+  /**
+   * The water tool's lakes (Map-maker II's fifth wave): every lake of ours' outline on the screen at its surface, the first
+   * `lakeSpans[0]` points of `lakePts` (two numbers a point) the first lake's and so on, each drawn point to point (closed)
+   * where both are in front of the eye (`lakeVis`), the picked one (`lakePicked`) in `ink` and the rest in `accent`, with a
+   * ring at each lake's handle (its middle at its surface, `lakeHandles`). The pools grow when a world's lakes first need
+   * more, never in a steady frame.
+   */
+  lakesOn: boolean;
+  lakeCount: number;
+  lakePicked: number;
+  lakeSpans: Int32Array;
+  lakePts: Float64Array;
+  lakeVis: Uint8Array;
+  lakeHandles: Float64Array;
+  lakeHandleVis: Uint8Array;
+  /** A draft under way (a lake's clicked points, a fall's top), an open line ending at the aim, in `warn`. */
+  draftOn: boolean;
+  draftCount: number;
+  draftPts: Float64Array;
+  draftVis: Uint8Array;
+}
+
+/** The lakes' pools grown to hold `lakes` lakes of `points` points in all (`MarksView.lakePts`), and a draft of `draft` points; nothing made when they do already. */
+export function lakePools(v: MarksView, lakes: number, points: number, draft: number): void {
+  if (v.lakeSpans.length < lakes) {
+    v.lakeSpans = new Int32Array(lakes * 2);
+    v.lakeHandles = new Float64Array(lakes * 4);
+    v.lakeHandleVis = new Uint8Array(lakes * 2);
+  }
+  if (v.lakeVis.length < points) {
+    v.lakePts = new Float64Array(points * 4);
+    v.lakeVis = new Uint8Array(points * 2);
+  }
+  if (v.draftVis.length < draft) {
+    v.draftPts = new Float64Array(draft * 4);
+    v.draftVis = new Uint8Array(draft * 2);
+  }
 }
 
 /** How many points the brush's ring is drawn through (`brush.ts`'s `RING_STEPS`, said again so this file imports no rule). */
@@ -111,7 +148,77 @@ export const RING_MARKS = 48;
 
 /** A view with nothing to draw. */
 export function marksView(): MarksView {
-  return { fly: true, w: 0, h: 0, aimOn: false, aimX: 0, aimY: 0, ghostOn: false, ghostWarn: false, ghost: new Float64Array(16), hoverOn: false, hover: new Float64Array(16), hidden: false, sel: [], selCount: 0, selAll: false, selUnion: new Float64Array(16), gizmo: null, rectOn: false, rect: new Float64Array(8), ringOn: false, ringErase: false, ring: new Float64Array(RING_MARKS * 2), ringVis: new Uint8Array(RING_MARKS), ring2On: false, ring2: new Float64Array(RING_MARKS * 2), ring2Vis: new Uint8Array(RING_MARKS) };
+  return {
+    fly: true,
+    w: 0,
+    h: 0,
+    aimOn: false,
+    aimX: 0,
+    aimY: 0,
+    ghostOn: false,
+    ghostWarn: false,
+    ghost: new Float64Array(16),
+    hoverOn: false,
+    hover: new Float64Array(16),
+    hidden: false,
+    sel: [],
+    selCount: 0,
+    selAll: false,
+    selUnion: new Float64Array(16),
+    gizmo: null,
+    rectOn: false,
+    rect: new Float64Array(8),
+    ringOn: false,
+    ringErase: false,
+    ring: new Float64Array(RING_MARKS * 2),
+    ringVis: new Uint8Array(RING_MARKS),
+    ring2On: false,
+    ring2: new Float64Array(RING_MARKS * 2),
+    ring2Vis: new Uint8Array(RING_MARKS),
+    lakesOn: false,
+    lakeCount: 0,
+    lakePicked: -1,
+    lakeSpans: new Int32Array(0),
+    lakePts: new Float64Array(0),
+    lakeVis: new Uint8Array(0),
+    lakeHandles: new Float64Array(0),
+    lakeHandleVis: new Uint8Array(0),
+    draftOn: false,
+    draftCount: 0,
+    draftPts: new Float64Array(0),
+    draftVis: new Uint8Array(0),
+  };
+}
+
+/**
+ * The water tool's lakes and its draft (`MarksView.lakes...`, `draft...`). Nothing is made: the line's width is read here,
+ * never handed in, since a number handed across a call the compiler leaves out is boxed (the gizmo's frame measured it).
+ */
+function drawLakes(o: MarksOverlay, v: MarksView): void {
+  if (!v.lakesOn && !v.draftOn) return;
+  const width = EDITOR_TUNE.outline.width;
+  if (v.lakesOn) {
+    let k = 0;
+    for (let l = 0; l < v.lakeCount; l++) {
+      const n = v.lakeSpans[l];
+      const c = l === v.lakePicked ? COL.ink : COL.accent;
+      const pts = v.lakePts;
+      const vis = v.lakeVis;
+      for (let i = 0; i < n; i++) {
+        const a = k + i;
+        const b = k + (i + 1 === n ? 0 : i + 1);
+        if (vis[a] && vis[b]) o.line(pts[a * 2], pts[a * 2 + 1], pts[b * 2], pts[b * 2 + 1], width, c, l === v.lakePicked ? 0.95 : 0.75);
+      }
+      if (v.lakeHandleVis[l]) o.ring(v.lakeHandles[l * 2], v.lakeHandles[l * 2 + 1], 6, width, c, 0.9);
+      k += n;
+    }
+  }
+  if (v.draftOn) {
+    const pts = v.draftPts;
+    const vis = v.draftVis;
+    for (let i = 0; i + 1 < v.draftCount; i++) if (vis[i] && vis[i + 1]) o.line(pts[i * 2], pts[i * 2 + 1], pts[i * 2 + 2], pts[i * 2 + 3], width, COL.warn, 0.9);
+    for (let i = 0; i < v.draftCount - 1; i++) if (vis[i]) o.ring(pts[i * 2], pts[i * 2 + 1], 3, width, COL.warn, 0.9);
+  }
 }
 
 /** A selection box at a slot of the pool, made the first time the pool reaches that far (never in a steady frame). */
@@ -206,6 +313,7 @@ export function drawEditorMarks(o: MarksOverlay, v: MarksView): void {
       }
     }
   }
+  drawLakes(o, v);
   if (v.hoverOn) drawBox(o, v.hover, width, COL.muted, 0.8);
   if (v.ghostOn) drawBox(o, v.ghost, width, v.ghostWarn ? COL.warn : COL.ink, 0.9);
   if (v.aimOn) o.ring(v.aimX, v.aimY, 4, 1.5, v.ghostWarn ? COL.warn : COL.accent, 0.9);

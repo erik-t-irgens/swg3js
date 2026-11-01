@@ -54,7 +54,10 @@
 import * as THREE from 'three';
 import type { FxPassId } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context';
-import { ShaderFxPass } from './pass';
+import { createFxQuad, FX_CAMERA, ShaderFxPass, type FxWarmItem } from './pass';
+import { createSharedDepthTarget, disposeSharedDepthTarget } from './geometry';
+import type { PostFX } from '../postfx';
+import { EXITS_STENCIL, UNDERWATER_REGION_FRAG, exitsDraws, exitsFragment, type ExitsAsk } from './underwaterExits';
 import { FX_FULLSCREEN_VERTEX, FX_HASH, FX_LINEARIZE } from './glsl';
 import {
   createUnderwaterLook,
@@ -189,6 +192,28 @@ const UNDERWATER = {
 };
 
 /**
+ * The exits variant's pure half (Map-maker II's fifth wave, `underwaterExits.ts`, which a node test runs): its frames
+ * (`exitsDraws`), its program's text (`exitsFragment` of today's), the region mask's program and the stencil it reads.
+ */
+export { EXITS_STENCIL, UNDERWATER_REGION_FRAG, exitsDraws, exitsFragment };
+
+/** What the pass needs from its chain for the exits variant, given by the installer: a region target sharing the scene's depth. */
+export interface UnderwaterHost {
+  /** A scene-size R8 target sharing the scene's depth-stencil texture; disposed with disposeSharedDepthTarget. */
+  createRegionTarget(): THREE.WebGLRenderTarget;
+  /** Free one without the scene's depth texture. */
+  disposeRegionTarget(rt: THREE.WebGLRenderTarget): void;
+}
+
+/** The host a chain gives the pass: a region target sharing its depth, as the ambient occlusion's (`ssaoHostFor`). */
+export function underwaterHostFor(postfx: PostFX): UnderwaterHost {
+  return {
+    createRegionTarget: () => createSharedDepthTarget(postfx, { format: THREE.RedFormat, type: THREE.UnsignedByteType, name: 'fx.underwater.region' }),
+    disposeRegionTarget: (rt) => disposeSharedDepthTarget(rt),
+  };
+}
+
+/**
  * The look under water. A scene pass: after the god rays, so scattered sunlight is graded by the
  * water it comes through like anything else, and before the depth of field, so the lens softens and
  * smears what the water has already done rather than the other way round.
@@ -202,8 +227,75 @@ export class UnderwaterPass extends ShaderFxPass {
   /** What the last frame drawn was given, for `__debug.underwater` only. */
   private readonly last = { depth: 0, opacity: 0, daylight: 1, light: 0, lightShare: 1, depthWasFinite: false, drewFrame: -1, aspect: 1 };
 
-  constructor() {
+  /**
+   * The exits variant (Map-maker II's fifth wave): its own material (`exitsFragment` of today's text), its region mask and
+   * the mask's target, made by the installer's host only on the first frame it draws (a target is no program; both
+   * materials are warmed with the pass's own behind every loading screen, `materials`). Null without a host.
+   */
+  private readonly host: UnderwaterHost | null;
+  private readonly exitsMaterial: THREE.ShaderMaterial | null;
+  private readonly exitsQuad: THREE.Mesh | null;
+  private readonly regionMaterial: THREE.ShaderMaterial;
+  private readonly regionQuad: THREE.Mesh;
+  private region: THREE.WebGLRenderTarget | null = null;
+  private readonly size = new THREE.Vector2(1, 1);
+  /** Whether this frame draws the exits variant rather than today's look (decided in `prepare`). */
+  private exitsNow = false;
+  private readonly exitsLook: UnderwaterLook = createUnderwaterLook();
+  private readonly exitsLast = { drewFrame: -1, depth: 0, opacity: 0 };
+  private readonly savedClear = new THREE.Color();
+
+  constructor(host: UnderwaterHost | null = null) {
     super(UNDERWATER);
+    this.host = host;
+    const text = exitsFragment(UNDERWATER.fragmentShader);
+    if (host && text) {
+      this.exitsMaterial = new THREE.ShaderMaterial({
+        uniforms: { ...THREE.UniformsUtils.clone(UNDERWATER.uniforms), tRegion: { value: null as THREE.Texture | null } },
+        vertexShader: UNDERWATER.vertexShader,
+        fragmentShader: text,
+        depthTest: false,
+        depthWrite: false,
+        blending: THREE.NoBlending,
+      });
+      this.exitsMaterial.name = 'fx.underwater.exits';
+      this.exitsQuad = createFxQuad(this.exitsMaterial);
+    } else {
+      this.exitsMaterial = null;
+      this.exitsQuad = null;
+    }
+    // The stencil read: tested Equal against the exits' value, never written; no depth test or write. A target sharing the
+    // scene's depth-stencil texture is bound for it, as the ambient occlusion's region is.
+    this.regionMaterial = new THREE.ShaderMaterial({ vertexShader: FX_FULLSCREEN_VERTEX, fragmentShader: UNDERWATER_REGION_FRAG, depthTest: false, depthWrite: false, blending: THREE.NoBlending });
+    this.regionMaterial.name = 'fx.underwater.region';
+    const rm = this.regionMaterial;
+    rm.stencilWrite = true;
+    rm.stencilFunc = THREE.EqualStencilFunc;
+    rm.stencilRef = EXITS_STENCIL;
+    rm.stencilFuncMask = 0xff;
+    rm.stencilWriteMask = 0x00;
+    rm.stencilFail = THREE.KeepStencilOp;
+    rm.stencilZFail = THREE.KeepStencilOp;
+    rm.stencilZPass = THREE.KeepStencilOp;
+    this.regionQuad = createFxQuad(rm);
+  }
+
+  /** The exits variant's ask, kept: written from the frame each time it is asked. */
+  private readonly exitsAsk: ExitsAsk = { cameraSubmerged: false, portalView: false, exitWater: false, on: false, built: false, strength: 0.5 };
+
+  /**
+   * Whether the exits variant draws on this frame (`exitsDraws`): the camera dry in a building with an exit under water, the
+   * switch on, the variant built, the colour strength above nought.
+   */
+  private exitsWanted(ctx: FxFrameContext): boolean {
+    const a = this.exitsAsk;
+    a.cameraSubmerged = ctx.cameraSubmerged;
+    a.portalView = !!ctx.portalView;
+    a.exitWater = ctx.exitWater;
+    a.on = UNDERWATER_TUNE.exits;
+    a.built = this.exitsMaterial !== null;
+    a.strength = ctx.settings.underwaterStrength;
+    return exitsDraws(a);
   }
 
   /**
@@ -216,7 +308,9 @@ export class UnderwaterPass extends ShaderFxPass {
    */
   enabled(ctx: FxFrameContext): boolean {
     if (ctx.settings.underwaterStrength <= 0 && ctx.settings.underwaterShimmerStrength <= 0) return false;
-    return ctx.cameraSubmerged;
+    // Under water today's look; dry in a building whose exit stands under water, the exits variant (Map-maker II's fifth
+    // wave), which needs the colour strength since it moves no picture.
+    return ctx.cameraSubmerged || this.exitsWanted(ctx);
   }
 
   /**
@@ -228,11 +322,17 @@ export class UnderwaterPass extends ShaderFxPass {
   reason(ctx: FxFrameContext): string | null {
     if (!ctx.settings.underwater) return null;
     if (ctx.settings.underwaterStrength <= 0 && ctx.settings.underwaterShimmerStrength <= 0) return 'the underwater strength and its shimmer are both zero';
-    if (!ctx.cameraSubmerged) return ctx.cameraUnderwater ? 'the camera is within reach of a crest but still above the surface' : 'the camera is not under water';
+    if (!ctx.cameraSubmerged && !this.exitsWanted(ctx)) return ctx.cameraUnderwater ? 'the camera is within reach of a crest but still above the surface' : 'the camera is not under water';
     return null;
   }
 
   prepare(ctx: FxFrameContext): void {
+    // The exits variant's frame (Map-maker II's fifth wave): its own material written, today's left alone.
+    this.exitsNow = this.exitsWanted(ctx);
+    if (this.exitsNow) {
+      this.prepareExits(ctx);
+      return;
+    }
     // The three facts the game hands over beside `cameraSubmerged` (src/core/fx/context.ts): the
     // depth, the body's own colour and that body's own opacity. All three are required fields, so
     // there is no optional reading here and a rename would fail the build rather than leaving the
@@ -284,6 +384,94 @@ export class UnderwaterPass extends ShaderFxPass {
     // The window's own shape, kept so `describe` can answer about the lattice in the width's terms
     // rather than in the tune's. `uTanHalfFov` is (tan(fov/2) x aspect, tan(fov/2)).
     this.last.aspect = ctx.tanHalfFov.x / Math.max(ctx.tanHalfFov.y, 1e-6);
+  }
+
+  /**
+   * The exits variant's frame: the very derivation today's look takes (`deriveUnderwater`), the exit's water's colour and
+   * opacity in place of the camera's, its depth under its surface as the camera's depth (so a ray out through it leaves the
+   * water at the surface overhead: the ceiling), and no shimmer (the room's own pixels stay where they are, and a wobble
+   * would read them into the water).
+   */
+  private prepareExits(ctx: FxFrameContext): void {
+    const m = this.exitsMaterial;
+    if (!m) return;
+    const c = ctx.exitColor;
+    this.body[0] = c.r;
+    this.body[1] = c.g;
+    this.body[2] = c.b;
+    const depth = Number.isFinite(ctx.exitDepth) ? Math.max(0, ctx.exitDepth) : UNDERWATER_FALLBACK.depth;
+    const opacity = Number.isFinite(ctx.exitOpacity) ? ctx.exitOpacity : UNDERWATER_FALLBACK.opacity;
+    const T = UNDERWATER_TUNE;
+    const light = lightOf(ctx.lights, T);
+    const look = deriveUnderwater(this.body, opacity, depth, light, ctx.settings.underwaterStrength, 0, T, this.exitsLook);
+    const u = m.uniforms;
+    u.tDepth.value = ctx.depth;
+    (u.uNearFar.value as THREE.Vector2).set(ctx.near, ctx.far);
+    (u.uTanHalfFov.value as THREE.Vector2).copy(ctx.tanHalfFov);
+    const e = ctx.view.elements;
+    (u.uUpView.value as THREE.Vector3).set(e[4], e[5], e[6]).normalize();
+    (u.uExtinction.value as THREE.Vector3).set(look.extinction[0], look.extinction[1], look.extinction[2]);
+    (u.uMurk.value as THREE.Vector3).set(look.murk[0], look.murk[1], look.murk[2]);
+    u.uVeil.value = look.veil;
+    (u.uCeiling.value as THREE.Vector2).set(depth, T.ceiling ? 1 : 0);
+    (u.uShimmer.value as THREE.Vector3).set(0, Math.max(0.1, T.shimmerCells), 0);
+    (u.uShimmerFade.value as THREE.Vector2).set(0, 0);
+    this.exitsLast.drewFrame = ctx.frame;
+    this.exitsLast.depth = depth;
+    this.exitsLast.opacity = opacity;
+  }
+
+  render(ctx: FxFrameContext, input: THREE.WebGLRenderTarget, output: THREE.WebGLRenderTarget | null): boolean {
+    if (!this.exitsNow || !this.exitsMaterial || !this.exitsQuad || !this.host) return super.render(ctx, input, output);
+    const r = ctx.renderer;
+    // The region: colour only, the depth and stencil as the portal renderer left them, only tested. Made the first frame it
+    // is wanted, at the scene's size (a target, never a program).
+    if (!this.region) {
+      this.region = this.host.createRegionTarget();
+      this.region.texture.minFilter = THREE.NearestFilter;
+      this.region.texture.magFilter = THREE.NearestFilter;
+      this.region.texture.generateMipmaps = false;
+      this.region.setSize(this.size.x, this.size.y);
+    }
+    r.setRenderTarget(this.region);
+    r.getClearColor(this.savedClear);
+    const alpha = r.getClearAlpha();
+    r.setClearColor(0x000000, 0);
+    r.clear(true, false, false);
+    r.setClearColor(this.savedClear, alpha);
+    r.render(this.regionQuad, FX_CAMERA);
+    const u = this.exitsMaterial.uniforms;
+    u.tDiffuse.value = input.texture;
+    u.tRegion.value = this.region.texture;
+    r.setRenderTarget(output);
+    r.render(this.exitsQuad, FX_CAMERA);
+    return true;
+  }
+
+  setSize(width: number, height: number): void {
+    this.size.set(Math.max(1, width), Math.max(1, height));
+    // The same call that resizes the scene target, whose depth this one shares.
+    this.region?.setSize(this.size.x, this.size.y);
+  }
+
+  materials(): FxWarmItem[] {
+    // Today's, and the exits variant's two, so a submerged exit's first frame compiles nothing.
+    const out: FxWarmItem[] = [{ material: this.material }];
+    if (this.exitsMaterial) out.push({ material: this.exitsMaterial }, { material: this.regionMaterial, where: 'target' });
+    return out;
+  }
+
+  dispose(): void {
+    super.dispose();
+    this.exitsMaterial?.dispose();
+    this.regionMaterial.dispose();
+    if (this.region && this.host) this.host.disposeRegionTarget(this.region);
+    this.region = null;
+  }
+
+  /** For `__debug.underwater().exits`: whether the exits variant is built, drew last and what it was given. */
+  describeExits(): object {
+    return { built: this.exitsMaterial !== null, switch: UNDERWATER_TUNE.exits, drewFrame: this.exitsLast.drewFrame, depth: this.exitsLast.depth, opacity: this.exitsLast.opacity, region: this.region ? `${this.region.width} x ${this.region.height}` : 'not made yet', veil: this.exitsLook.veil };
   }
 
   /** For `__debug.underwater`: what the last frame drawn was given and what it came to. Reads stored values only. */

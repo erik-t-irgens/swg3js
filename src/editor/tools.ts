@@ -16,6 +16,7 @@
 
 import type { Action } from '../core/input.ts';
 import type { MarksView } from '../ui/editorMarks.ts';
+import type { ScreenView } from './gizmo.ts';
 
 /**
  * What an armed tool is handed each frame, one kept record the editor writes (numbers ride a record, never a call the
@@ -35,11 +36,21 @@ export interface ToolFrame {
   valid: boolean;
   dt: number;
   now: number;
+  /**
+   * The cursor on the screen, CSS pixels (Point's pointer, Fly's middle of the screen), and the mouse's movement down the
+   * screen this frame for a tool that holds the mouse (`holdsMouse`): Fly's movement, spent so the camera holds still,
+   * or nought in Point, where a tool reads the cursor's own (Map-maker II's fifth wave, the water tool's raise).
+   */
+  sx: number;
+  sy: number;
+  dy: number;
+  /** F held (the placing hand's raise), read before the mutes. */
+  lift: boolean;
 }
 
 /** A frame's record, made once. */
 export function toolFrame(): ToolFrame {
-  return { apply: false, inverse: false, shift: false, sampled: false, x: 0.5, y: 0.5, z: 0.5, valid: false, dt: 0.016, now: 0.5 };
+  return { apply: false, inverse: false, shift: false, sampled: false, x: 0.5, y: 0.5, z: 0.5, valid: false, dt: 0.016, now: 0.5, sx: 0.5, sy: 0.5, dy: 0.5, lift: false };
 }
 
 /**
@@ -80,6 +91,19 @@ export interface ToolDef {
   barWords?(): string;
   /** What the console says of it. */
   report?(): Record<string, unknown>;
+  /**
+   * Marks drawn every frame it is armed, whatever the aim meets and after the editing's own (Map-maker II's fifth wave: the
+   * lakes' outlines and a picked lake's square), from this frame's view.
+   */
+  overlay?(d: ToolDraw, view: ScreenView): void;
+  /** Whether it takes the mouse this frame with F held (`lift`): the camera then holds still. */
+  holdsMouse?(lift: boolean): boolean;
+  /** The wheel with F held (`lift`): stepped `notches` times (up raises). Answers what was said, or null where it took nothing. */
+  wheel?(notches: number, lift: boolean): string | null;
+  /** Delete pressed while it is armed: answers whether it took the key (a picked lake taken out). */
+  deleteKey?(): boolean;
+  /** Escape while it is armed: answers whether it took the key (a draft given up, a picked lake let go) rather than letting the tool go. */
+  escape?(): boolean;
 }
 
 /** The list, one armed at a time. */

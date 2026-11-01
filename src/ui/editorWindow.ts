@@ -171,8 +171,43 @@ export interface PaintToolsView {
   note: string;
 }
 
+/** The water tool as the Tools tab shows it (Map-maker II's fifth wave). */
+export interface WaterToolsView {
+  armed: boolean;
+  mode: 'clicks' | 'trace' | 'fall';
+  levelFrom: 'lowest' | 'first' | 'typed';
+  height: number;
+  /** Points in the clicked outline under way, whether a fall's top is set, the lake picked. */
+  draft: number;
+  fallTop: boolean;
+  picked: string | null;
+  /** The world's lakes of ours and the file in words, and what the tool says of itself. */
+  lakes: number;
+  file: string;
+  note: string;
+}
+
+/** A lake of ours picked, as the Selected tab shows it (Map-maker II's fifth wave): its fields, and its look's own numbers ('' for its shader's). */
+export interface LakeView {
+  id: string;
+  name: string;
+  h: number;
+  points: number;
+  area: string;
+  shader: string;
+  color: string;
+  opacity: string;
+  ripple: string;
+  drift: string;
+  /** Lava, drawn, what stands under it, in words. */
+  note: string;
+}
+
 /** What the window needs of the editor beside the library's own. */
 export interface EditorWindowHost extends LibraryHost {
+  /** The lake of ours the water tool has picked, or null (Map-maker II's fifth wave); its fields written. */
+  lake?(): LakeView | null;
+  setLake?(fields: Record<string, unknown>): void;
   /** The rows standing round the camera, nearest first. */
   here(): HereRow[];
   goTo(id: string): void;
@@ -213,6 +248,8 @@ export interface EditorWindowHost extends LibraryHost {
     sculpt?: SculptToolsView;
     /** The paint brush (Map-maker II's second wave): its layer, its palette, the world's families, the world row. */
     paint?: PaintToolsView;
+    /** The water tool (Map-maker II's fifth wave): its mode, where a lake's level comes from, the draft and the lake picked. */
+    water?: WaterToolsView;
   };
   setTool(t: Record<string, unknown>): void;
   refreshStatus(): void;
@@ -456,6 +493,31 @@ export class EditorWindow {
   private drawSelected(): void {
     const el = this.els.selected;
     el.replaceChildren();
+    // A lake of ours the water tool has picked (Map-maker II's fifth wave): its name, its shader and its look's own numbers,
+    // each written as it is left; an empty look field takes that number back to its shader's (or the planet's) own.
+    const lake = this.host.lake?.() ?? null;
+    if (lake && this.host.setLake) {
+      const set = this.host.setLake.bind(this.host);
+      this.field(el, 'Lake', lake.id, null);
+      this.field(el, 'Its name', lake.name, (v) => set({ name: v.trim() || null }));
+      this.field(el, 'Level m', lake.h, null);
+      this.field(el, 'Points', `${lake.points} · ${lake.area}`, null);
+      this.field(el, 'Shader', lake.shader, (v) => set({ shader: v.trim() || null }));
+      const h3 = document.createElement('div');
+      h3.className = 'ed-h';
+      h3.textContent = "ITS LOOK (EMPTY: ITS SHADER'S OWN)";
+      el.appendChild(h3);
+      this.field(el, 'Colour #rrggbb', lake.color, (v) => set({ look: { color: v.trim() || null } }));
+      for (const [k, words] of [['opacity', 'Opacity 0-1'], ['ripple', 'Ripple 0-8'], ['drift', 'Drift 0-8']] as const) {
+        this.field(el, words, lake[k], (v) => {
+          const n = Number(v);
+          set({ look: { [k]: v.trim() === '' ? null : Number.isFinite(n) ? n : v } });
+        });
+      }
+      if (lake.note) this.note(el, lake.note);
+      this.note(el, 'Drag its square to move it, hold F with the mouse (or the wheel) to raise it, Delete takes it out; Escape lets it go.');
+      return;
+    }
     const s = this.host.selected();
     if (!s) {
       this.note(el, 'nothing picked: click a row of the files (Shift adds), draw a box in Point mode, or tick rows on the Here tab');
@@ -711,6 +773,38 @@ export class EditorWindow {
       this.note(el, p.file);
       if (p.note) this.note(el, p.note);
       this.note(el, 'U arms it: LMB held paints, RMB held erases; Shift+click or the middle button takes what is under it; C held with the wheel sizes it; a stroke is one undo. Its numbers are the sliders under The paint brush below.');
+    }
+    // The water tool (Map-maker II's fifth wave): what a click does, where a lake's level comes from, the draft and the lake picked.
+    if (t.water) {
+      const wt = t.water;
+      h('LAKES AND FALLS');
+      row(...(['clicks', 'trace', 'fall'] as const).map((m) => toggle(m === 'clicks' ? 'A lake by clicks' : m === 'trace' ? 'A lake traced' : 'A fall', wt.mode === m, { waterMode: m })));
+      if (wt.mode !== 'fall') {
+        row(...(['lowest', 'first', 'typed'] as const).map((m) => toggle(m === 'lowest' ? 'Level: the lowest ground' : m === 'first' ? "Level: the first point's" : 'Level: typed', wt.levelFrom === m, { waterLevelFrom: m })));
+        const f = document.createElement('label');
+        f.className = 'ed-field';
+        const sp = document.createElement('span');
+        sp.textContent = 'Level m';
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.step = 'any';
+        input.value = String(Math.round(wt.height * 1000) / 1000);
+        input.addEventListener('change', () => {
+          const n = Number(input.value);
+          if (input.value.trim() !== '' && Number.isFinite(n)) this.host.setTool({ waterHeight: n });
+        });
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === 'Escape') input.blur();
+        });
+        f.append(sp, input);
+        el.appendChild(f);
+      }
+      if (wt.draft >= 3) row(toggle(`Close the outline (${wt.draft} points)`, false, { waterClose: true }), toggle('Give it up', false, { waterGiveUp: true }));
+      else if (wt.draft || wt.fallTop) row(toggle('Give up the draft', false, { waterGiveUp: true }));
+      if (wt.picked) row(toggle(`Let ${wt.picked} go`, true, { waterPick: null }), toggle('Take it out', false, { waterRemove: wt.picked }));
+      this.note(el, wt.file);
+      if (wt.note) this.note(el, wt.note);
+      this.note(el, "Z arms it. A lake by clicks: LMB a point, a click near the first closes it, RMB takes one back. Traced: LMB a seed in its basin, flooded to the seed's ground and a little more (or the typed level). A fall: LMB its top, then its bottom. A click on a lake's ring picks it; its look is on the Selected tab. Each is one undo. Its numbers are the sliders under The water tool below.");
     }
     h('SNAPPING');
     row(toggle(t.snapOn ? 'Snapping on' : 'Snapping off', t.snapOn, { snapOn: !t.snapOn }));

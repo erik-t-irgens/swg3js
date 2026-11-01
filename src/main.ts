@@ -294,7 +294,7 @@ import { PermanentPanel, editSlots, type PermanentPanelModel, type PermanentRowV
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
 import { CLOUD_MARCH, type CloudsPass } from './core/fx/clouds';
 import { CLOUD_TUNE, cloudLook, loadCloudNoise, loadCloudPack, loadCloudVolumes, worthDrawing, type CloudPack } from './world/cloudLook.ts';
-import { tuneUnderwater, unknownUnderwaterKeys, type UnderwaterTune } from './core/fx/underwaterMath.ts';
+import { UNDERWATER_TUNE, tuneUnderwater, unknownUnderwaterKeys, type UnderwaterTune } from './core/fx/underwaterMath.ts';
 import type { UnderwaterPass } from './core/fx/underwater';
 import { FIGURE_SPHERE, followDepth, measureLocalSphere, type FxMoverList, type LocalSphere, type VelocityProduct } from './core/fx/velocity';
 import { MOTION_TUNING, MOVER_LIMITS } from './core/fx/velocityMath.ts';
@@ -423,6 +423,8 @@ import { World, type HeightsLoaded } from './world/world';
 import { editFilePath, type EditFileKind } from './story/placementPath.ts';
 import { deltasOf, readHeightsFile, storeOfRead, tileOfId, type HeightTileRow } from './world/editFiles/heightsFile.ts';
 import { paintOfRead, readPaintFile, type PaintLoaded, type PaintRow } from './world/editFiles/paintFile.ts';
+import { readWaterFile, type WaterLakeRow, type WaterLoaded } from './world/editFiles/waterFile.ts';
+import { LAKE_TUNE } from './world/ourWater.ts';
 import { GROUND_PAINT_TUNE } from './world/groundRewrite.ts';
 import { runCurtain, type CurtainResult } from './world/curtain.ts';
 import { inflateBase64 } from './world/editFiles/browserCodec.ts';
@@ -486,6 +488,7 @@ import { FLORA_COLLISION, FLORA_COLLISION_DEFAULTS } from './world/floraCollisio
 import type { LavaSinkTune } from './player/lavaSinkMath.ts';
 import { configureWaterSim, pokeWaterSim, rippleCarrySet, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
 import { setWaterSurface, WATER_SURFACE_BAND, WATER_SURFACE_HIDE } from './world/water';
+import type { WaterLook } from './world/waterLook.ts';
 import type { WaterSurfaceTune } from './world/waterSurfaceMath.ts';
 import { RANGE } from './world/gallery';
 import { DECAL_TUNE, castsShadow, isDecal, surfaces } from './world/surfaces';
@@ -1041,6 +1044,8 @@ interface EditorApi {
   paintDebug(o?: Record<string, unknown>): Promise<unknown>;
   /** The paint brush's plants layer (Map-maker II's fourth wave): `__debug.floraPaint`. */
   floraPaintDebug(o?: Record<string, unknown>): Promise<unknown>;
+  /** The water tool and the lakes of ours (Map-maker II's fifth wave): `__debug.lakes`. */
+  lakesDebug(o?: Record<string, unknown>): Promise<unknown>;
 }
 
 /**
@@ -1512,8 +1517,13 @@ class App {
   /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
   private readonly litSources: LitSources = { world: null!, effects: null!, torch: null };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, vignetteKick: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, cameraSubmerged: false, underwaterDepth: 0, underwaterColor: new THREE.Color(0x2e7fbb), underwaterOpacity: 0.75, underwaterReach: 0, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, weather: null };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, vignetteKick: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, cameraSubmerged: false, underwaterDepth: 0, underwaterColor: new THREE.Color(0x2e7fbb), underwaterOpacity: 0.75, underwaterReach: 0, exitWater: false, exitDepth: 0, exitColor: new THREE.Color(0x2e7fbb), exitOpacity: 0.75, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, weather: null };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
+  /**
+   * The frame's word to the underwater pass's exits variant (`World.exitWaterOf`, Map-maker II's fifth wave), kept: `look`
+   * is the water's look its colour was last set from, so a frame under the same water sets nothing.
+   */
+  private readonly exitWater: { under: boolean; depth: number; color: THREE.Color; opacity: number; look: WaterLook | null } = { under: false, depth: 0.5, color: new THREE.Color(0x2e7fbb), opacity: 0.75, look: null };
   /**
    * Each world's measured sky, kept for the session once it has been fetched (a few hundred bytes,
    * and a travel usually returns to a world already measured). A key with a null value is one whose
@@ -4154,6 +4164,38 @@ class App {
         const ed = await this.loadEditor();
         return ed ? ed.floraPaintDebug(opts) : 'the world editor would not load';
       },
+      /**
+       * The lakes of ours (Map-maker II's fifth wave): the water file as read, each lake (its level, points, shader, whether
+       * lava, whether drawn, its index), the bodies, the submerged roofs the depth window reads, the planter's rule, what the
+       * landings did, and what stands under a lake with no rooms; `{ at: [x, z] }` the surface and its table at a `/loc`
+       * place; `{ tune: { floraUnder, roofDepth, cell } }`. On the dev server the water tool's own too: `{ arm: 'clicks' |
+       * 'trace' | 'fall' }`, `{ trace: { x, z, h, reach, dry } }`, `{ clicks: [[x, z], ...], h }`, `{ fall: { from: [x, y, z],
+       * to: [x, y, z], model, width } }`, `{ pick }`, `{ move: { id, dx, dz, dy } }`, `{ look: { id, color, opacity, ripple,
+       * drift } }`, `{ remove }` and its own numbers in `{ tune }`.
+       */
+      lakes: async (opts?: Record<string, unknown>) => {
+        if (import.meta.env.DEV) {
+          const ed = await this.loadEditor();
+          if (ed) return ed.lakesDebug(opts);
+        }
+        const o = opts ?? {};
+        const said: string[] = [];
+        if (o.tune && typeof o.tune === 'object') {
+          for (const [k, v] of Object.entries(o.tune as Record<string, unknown>)) {
+            if (k in LAKE_TUNE && typeof v === typeof (LAKE_TUNE as Record<string, unknown>)[k]) (LAKE_TUNE as Record<string, unknown>)[k] = v;
+            else said.push(`${k} is none of the lakes' own numbers (cell, floraUnder, roofDepth)`);
+          }
+        }
+        const c = this.world.placeFrame;
+        const space = !!this.world.planet?.space;
+        let at: Record<string, unknown> | null = null;
+        if (Array.isArray(o.at) && typeof o.at[0] === 'number' && typeof o.at[1] === 'number') {
+          const gx = space || !c ? o.at[0] : rawToGameX(c.x, o.at[0]);
+          const gz = space || !c ? o.at[1] : rawToGameZ(c.z, o.at[1]);
+          at = { ...this.world.lakeAt(gx, gz), game: [Math.round(gx * 100) / 100, Math.round(gz * 100) / 100] };
+        }
+        return { ...this.world.lakesReport(), ...(at ? { at } : {}), ...(said.length ? { answered: said } : {}) };
+      },
       placements: async (
         opts: {
           reload?: boolean;
@@ -6584,7 +6626,8 @@ class App {
        * why it did not draw, with console tuning (`sight`, `tint`, `minLength`, `bodyMurk`,
        * `bodyMurkRef`, `murkLight`, `lightRef`, `nightFloor`, `lightCeil`, `lightDepth`,
        * `deepFloor`, `veilMax`, `veilDepth`, `surfaceEase`, `ceiling`, `shimmerUv`, `shimmerCells`,
-       * `shimmerRate`, `shimmerReach`, `shimmerSurface`, `shimmerDeep`) — every key of
+       * `shimmerRate`, `shimmerReach`, `shimmerSurface`, `shimmerDeep`, and `exits`, the switch of the exits variant of
+       * Map-maker II's fifth wave, whose state the reply's `exits` says) — every key of
        * `UNDERWATER_TUNE` and nothing else, since `tuneUnderwater` silently drops a name that is not
        * one of its own rather than saying so. Reads stored values only. There was no under water in
        * the game, so every one of these numbers is ours.
@@ -6614,6 +6657,9 @@ class App {
           tuning: { ...T },
           under: { under: water.under, depth: water.depth, opacity: water.opacity },
           look: pass ? pass.describe() : null,
+          // The exits variant (Map-maker II's fifth wave): whether an exit of the building the camera stands in is under water
+          // this frame, how deep, and whether the variant drew (`UNDERWATER_TUNE.exits` the switch).
+          exits: { word: { under: this.exitWater.under, depth: this.exitWater.depth, opacity: this.exitWater.opacity, color: `#${this.exitWater.color.getHexString()}` }, pass: pass ? pass.describeExits() : null },
           why: !pass || !row ? 'the look under water is not installed on this chain' : row.drewLastFrame ? null : (row.why ?? null),
         };
       },
@@ -12364,6 +12410,8 @@ class App {
     this.world.heightsSource = (pack, kind) => this.fetchHeights(pack, kind);
     // And its ground paint (Map-maker II's second wave, `public/placements/paint/<world>.json`), the same way.
     this.world.paintSource = (pack, kind) => this.fetchPaint(pack, kind);
+    // And its lakes of ours (Map-maker II's fifth wave, `public/placements/water/<world>.json`), the same way.
+    this.world.waterSource = (pack, kind) => this.fetchWater(pack, kind);
     // Where this world brings the player in and back (the arrival, a teleport's spot, and where a death comes round
     // with no cloning facility near): the overlay's people and herds who pick a fight keep clear of it.
     this.world.arrivalPoint = () => this.spawn;
@@ -23129,6 +23177,16 @@ class App {
       // And how far a crest can lift that surface here: the flat height the CPU knows is not where
       // the sea is drawn, and the specks keep this much clear of the line so none is ever in the air.
       f.underwaterReach = water.reach;
+      // The frame's word to the underwater pass's exits variant (Map-maker II's fifth wave): the camera dry in a building one
+      // of whose exits stands under water, how deep and that water's look. Asked only from inside a building and only while
+      // the camera is not under water itself (the pass's own look then), so every other frame asks nothing.
+      const ew = this.exitWater;
+      if (view !== null && !water.submerged && UNDERWATER_TUNE.exits) this.world.exitWaterOf(view, ew);
+      else ew.under = false;
+      f.exitWater = ew.under;
+      f.exitDepth = ew.depth;
+      f.exitColor = ew.color;
+      f.exitOpacity = ew.opacity;
       // The room this frame is drawn from inside (RoomAir ran above, before the scene): the light shafts' input.
       f.room = this.roomAir.frame;
       // The far side of what the camera follows: nothing nearer smears with the camera.
@@ -25274,6 +25332,7 @@ class App {
     if (kind === 'story' || kind === 'world') return (pack, rev) => void this.reloadDressing(pack, kind, rev);
     if (kind === 'heights') return (pack, rev) => void this.reloadHeights(pack, rev);
     if (kind === 'paint') return (pack, rev) => void this.reloadPaint(pack, rev);
+    if (kind === 'water') return (pack, rev) => void this.reloadWater(pack, rev);
     return null;
   }
 
@@ -28314,6 +28373,7 @@ class App {
           busy: () => this.traveling || !this.inWorld,
           lendGround: (pack, name) => this.editorLend(pack, name),
           floraReady: () => this.editorFloraReady(),
+          lakeCurtain: (detail, work) => this.editorLakeCurtain(detail, work),
         });
         this.editor = ed;
         return ed;
@@ -28459,8 +28519,26 @@ class App {
     return r ? r.answer : "the editor is the dev server's";
   }
 
+  /**
+   * A lake of ours written behind the editor's short curtain (Map-maker II's fifth wave: the first lake of a session whose
+   * worlds so far drew no water, or a lava lake): the write, whose answer stands the lake by difference while the screen is
+   * up (`World.landWater`), then the effects' own warm-up, which compiles the lake's mask twins (no sweep reaches them), then
+   * the curtain's own sweep. Answers what the write said, or why it could not run. The dev server's alone.
+   */
+  private async editorLakeCurtain(detail: string, work: () => Promise<string>): Promise<string> {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    if (!this.editor?.on) return "a lake is the world editor's: F2 first";
+    if (!this.inWorld || this.traveling) return 'not now: enter the world first, and not mid-crossing';
+    const r = await this.editorCurtain('a lake of ours', detail, async () => {
+      const said = await work();
+      if (this.postfx) await this.postfx.warmUp();
+      return said;
+    });
+    return r ? r.answer : "the editor is the dev server's";
+  }
+
   /** The rows of this world's two files as the permanent layer last read them (the library's Used here), none for another world's. */
-  private editorFileRows(): readonly { pack: string; thing?: string; model?: string; template?: string; from?: string }[] {
+  private editorFileRows():readonly { pack: string; thing?: string; model?: string; template?: string; from?: string }[] {
     if (this.permanent.worldIn !== this.editWorld()) return [];
     return [...(this.permanent.fileOf('world')?.rows ?? []), ...(this.permanent.fileOf('story')?.rows ?? [])];
   }
@@ -28531,7 +28609,86 @@ class App {
     // painted live, moves nothing; an undo's or a redo's tiles make their grids again.
     const pf = files.paint;
     if (pf && this.world.generation === gen && this.editWorld() === pack) this.world.landPaint(pf.put as PaintRow[], pf.deleted);
+    // The lakes it wrote (Map-maker II's fifth wave), stood by difference: each lake that moved taken out and stood again,
+    // behind the editor's curtain where the lava is made again (`landWaterRows`: an undo or a redo of a lava lake).
+    const wf = files.water;
+    if (wf && this.world.generation === gen && this.editWorld() === pack) {
+      await this.landWaterRows(wf.put as WaterLakeRow[], wf.deleted);
+      this.world.noteWaterWritten(wf.rev, wf.rows);
+    }
     return { ok: true, why: '', files, ms: reply.ms ?? 0, built };
+  }
+
+  /**
+   * Rows of this world's water file landed (`World.landWater`, Map-maker II's fifth wave). A landing that makes the lava
+   * again (`World.waterLandingTouchesLava`: a lava lake put, moved or taken out, by the tool, an undo, a redo or the file
+   * read again) never does it on a live frame: with no screen up it lands behind the editor's short curtain, and under one
+   * already (the tool's own write opens one for a lava lake) it lands there; either way the lava's making is waited for
+   * (`World.lavaLanding`) before the curtain's sweep builds what it made. Every other landing is the world's by difference
+   * at once. Its callers are the dev server's alone (an editor's batch, the dev server's word).
+   */
+  private async landWaterRows(put: WaterLakeRow[], deleted: string[]): Promise<void> {
+    const lava = this.world.waterLandingTouchesLava(put, deleted);
+    if (lava && !this.traveling) {
+      const r = await this.editorCurtain('a lava lake of ours', 'the lava made again', async () => {
+        this.world.landWater(put, deleted);
+        await this.world.lavaLanding;
+      });
+      if (r) return;
+    }
+    this.world.landWater(put, deleted);
+    if (lava) await this.world.lavaLanding;
+  }
+
+  /**
+   * A world's water file (Map-maker II's fifth wave, `public/placements/water/<world>.json`): read as the heights file is (a
+   * built game asks only for one its own list ships; the dev server answers from the disk). Null for none; a space zone and
+   * the world of copies keep none.
+   */
+  private async fetchWater(pack: string, kind: 'ground' | 'space' | 'copies'): Promise<WaterLoaded | null> {
+    const got = await this.readWater(pack, kind);
+    return got === 'unread' ? null : got;
+  }
+
+  /** `fetchWater` telling "no file" (null) apart from "it could not be read" (`'unread'`), as `readHeights` does. */
+  private async readWater(pack: string, kind: 'ground' | 'space' | 'copies'): Promise<WaterLoaded | null | 'unread'> {
+    if (kind !== 'ground') return null;
+    const path = editFilePath('water', pack);
+    let text: string;
+    try {
+      const res = await fetchPublic(path, { cache: 'no-store' }, import.meta.env.BASE_URL);
+      if (!res || res.status === 404) return null;
+      const type = res.headers.get('content-type') ?? '';
+      if (res.ok && type.includes('text/html')) return null;
+      if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return 'unread';
+      text = await res.text();
+    } catch {
+      return 'unread';
+    }
+    try {
+      if (import.meta.env.DEV) await this.noteReadRev(`water/${pack}`, text);
+      const read = readWaterFile(text, pack, 'ground');
+      if (read.unknown.length) console.warn(`water: public/${path}: fields this build does not read: ${read.unknown.join(', ')}`);
+      return { rows: read.rows, bytes: text.length, skipped: read.skipped, problem: read.problem, rev: this.readRevs.get(`water/${pack}`) ?? null };
+    } catch {
+      return 'unread';
+    }
+  }
+
+  /** The water file read again (the dev server's word) and its lakes stood by difference (`World.replaceWater`). */
+  private async reloadWater(pack: string, rev: string | undefined): Promise<void> {
+    const gen = this.world.generation;
+    const loaded = await this.readWater(pack, this.world.planet.space ? 'space' : this.world.planet.instances ? 'copies' : 'ground');
+    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (loaded === 'unread') {
+      console.warn(`water: public/${editFilePath('water', pack)} changed and could not be read again: the lakes are left as they stood`);
+      return;
+    }
+    const read = this.readRevs.get(`water/${pack}`);
+    if (read !== undefined) this.placementRevs.set(`water/${pack}`, read);
+    else if (typeof rev === 'string') this.placementRevs.set(`water/${pack}`, rev);
+    const d = this.world.waterDiffOf(loaded);
+    await this.landWaterRows(d.put, d.deleted);
   }
 
   /**

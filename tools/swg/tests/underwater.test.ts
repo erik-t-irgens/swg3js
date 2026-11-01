@@ -675,7 +675,9 @@ ok(smoothstep(2, 4, 1) === 0 && smoothstep(2, 4, 5) === 1 && near(smoothstep(2, 
   ok(!has('interface UnderwaterFrameFacts'), 'and it keeps no optional copy of the context\'s shape, which would have hidden such a rename');
   ok(has('lightOf(ctx.lights, T)'), "the murk is lit by the frame's own light record, which is what the owner's \"it should become shadowier\" needed: a level of its own could only ever be one level");
   ok(!/deriveUnderwater\([^)]*ctx\.daylight/.test(src), "and the day's own 0 to 1 is no longer what drives it, so a shaded cove at noon is not lit as a cove at noon");
-  ok(has('return ctx.cameraSubmerged;'), 'it draws from cameraSubmerged, the strict fact, and not from cameraUnderwater, which is still true while the eye is plainly in the air');
+  // Widened in Map-maker II's fifth wave on purpose: the pass also draws its exits variant on frames of its own (the camera
+  // dry in a building with an exit under water: underwaterExits.test.ts), still never from cameraUnderwater.
+  ok(has('return ctx.cameraSubmerged || this.exitsWanted(ctx);') && !/return ctx\.cameraUnderwater( \|\||;)/.test(src), 'it draws from cameraSubmerged, the strict fact, and not from cameraUnderwater, which is still true while the eye is plainly in the air (and its exits variant on frames of its own)');
   ok(has('if (!ctx.settings.underwater) return null;'), "and `reason` answers about its own switch first, so postfx's own \"its setting is off\" is not hidden behind \"the camera is not under water\" on every dry frame");
 }
 
@@ -708,8 +710,9 @@ ok(smoothstep(2, 4, 1) === 0 && smoothstep(2, 4, 5) === 1 && near(smoothstep(2, 
 
 {
   const install = readFileSync(new URL('../../../src/core/fx/install.ts', import.meta.url), 'utf8');
-  ok(install.includes("import { UnderwaterPass } from './underwater'"), 'installEffects imports the pass');
-  ok(install.includes('postfx.registerPass(new UnderwaterPass())'), 'and registers it on every chain it builds, or the whole look would be dead code that type-checks and tests and never draws');
+  // From Map-maker II's fifth wave the pass is handed its host (its exits variant's region target sharing the scene's depth).
+  ok(install.includes("import { UnderwaterPass, underwaterHostFor } from './underwater'"), 'installEffects imports the pass');
+  ok(install.includes('postfx.registerPass(new UnderwaterPass(underwaterHostFor(postfx)))'), 'and registers it on every chain it builds, or the whole look would be dead code that type-checks and tests and never draws');
 }
 
 // --- the console knob, last, because it writes the live tuning ---

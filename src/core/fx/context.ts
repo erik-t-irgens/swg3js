@@ -102,6 +102,17 @@ export interface FxFrameInput {
    * of the line.
    */
   underwaterReach: number;
+  /**
+   * The camera stands dry in a building with rooms one of whose exits stands under water (a lake of ours or a client table;
+   * never lava: `World.exitWaterOf`, Map-maker II's fifth wave): the underwater pass's exits variant grades the world seen
+   * through the exits. False on every frame the camera is not in such a building.
+   */
+  exitWater: boolean;
+  /** Metres the deepest such exit stands under its surface (0 with none): the ceiling a ray out through it leaves the water at. */
+  exitDepth: number;
+  /** That water's colour (the world's kept record, never a new object) and its own opacity. */
+  exitColor: THREE.Color;
+  exitOpacity: number;
   /** The lit blades this frame, world space: the game's kept list, refilled in drawFrame. */
   blades: FxBladeList;
   /** The frame's lights, both passes' sets (src/core/fx/lights.ts): the game's kept record, refilled in drawFrame after the scene is drawn. */
@@ -207,6 +218,13 @@ export interface FxFrameContext {
   underwaterOpacity: number;
   /** How far a crest can lift that surface here, metres (`UnderwaterInfo.reach`): 0 where there is no water. */
   underwaterReach: number;
+  /** The camera stands dry in a building one of whose exits stands under water (`World.exitWaterOf`): the exits variant's word. */
+  exitWater: boolean;
+  /** Metres the deepest such exit stands under its surface. */
+  exitDepth: number;
+  /** That water's colour, this context's own kept Color, copied each frame, and its opacity. */
+  readonly exitColor: THREE.Color;
+  exitOpacity: number;
   /** The room this frame is drawn from inside (`RoomAir.frame`), or null. */
   room: RoomAirFrame | null;
   /** The weather now; zeros when it is off (a kept record). */
@@ -285,6 +303,10 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     underwaterColor: new THREE.Color(0x2e7fbb),
     underwaterOpacity: 0.75,
     underwaterReach: 0,
+    exitWater: false,
+    exitDepth: 0,
+    exitColor: new THREE.Color(0x2e7fbb),
+    exitOpacity: 0.75,
     room: null,
     weather: { overcast: 0, rain: 0, snow: 0, dust: 0, wetness: 0 },
     debugViewPass: null,
@@ -371,6 +393,11 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   ctx.underwaterColor.copy(input.underwaterColor);
   ctx.underwaterOpacity = input.underwaterOpacity;
   ctx.underwaterReach = input.underwaterReach;
+  // A caller from before the exits' word (a node test's own input) hands none of it: no exit is under water.
+  ctx.exitWater = input.exitWater === true;
+  ctx.exitDepth = Number.isFinite(input.exitDepth) ? input.exitDepth : 0;
+  if (input.exitColor) ctx.exitColor.copy(input.exitColor);
+  ctx.exitOpacity = Number.isFinite(input.exitOpacity) ? input.exitOpacity : 0.75;
   ctx.room = input.room;
   const w = input.weather;
   ctx.weather.overcast = w ? w.overcast : 0;

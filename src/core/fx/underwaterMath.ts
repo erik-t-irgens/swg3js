@@ -139,6 +139,13 @@ export interface UnderwaterTune {
   shimmerSurface: number;
   /** The share of the shimmer left far under the surface, where the ripples' own light no longer reaches. */
   shimmerDeep: number;
+  /**
+   * The exits variant (Map-maker II's fifth wave, `underwater.ts`): from a dry room of a building one of whose exits stands
+   * under water (a lake of ours or a client table), the world seen through the exits is graded as water is, by the same
+   * numbers, the camera's depth taken as the exit's own depth under its surface. A switch, to compare: off, the world through
+   * a submerged doorway is drawn as clear air, as it always was.
+   */
+  exits: boolean;
 }
 
 /**
@@ -167,6 +174,7 @@ export const UNDERWATER_TUNE: UnderwaterTune = {
   shimmerReach: 0,
   shimmerSurface: 10,
   shimmerDeep: 0.35,
+  exits: true,
 };
 
 /**

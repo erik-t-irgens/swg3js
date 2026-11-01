@@ -25,6 +25,9 @@ import { WIND_STATE, writeWindDay } from './wind.ts';
 import { refreshWaterDepth, resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { HeightEdits, HEIGHT_TILE } from '../swg/terrain/heightEdits.ts';
 import type { HeightTileRow } from './editFiles/heightsFile.ts';
+import type { WaterLakeRow, WaterLoaded } from './editFiles/waterFile.ts';
+import { LAKE_TUNE, RoofList, keptTables, lakeTable, landingTouchesLava, lookOver, planLakeLanding, tableCovers, underLakes, type LakeTable } from './ourWater.ts';
+import { exitApertures, type ExitAperture } from './roomAirMath.ts';
 import { decodeLanded, HeightRows, layLanded, layWhole, type HeldTiles } from './editFiles/heightsLand.ts';
 import { GROUND_REWRITE_TUNE, rectMeetsChunk } from './groundRewrite.ts';
 import { plantingColliders } from './chunkPhysics.ts';
@@ -100,6 +103,7 @@ import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import { roomOverhead } from './nav/navMesh.ts';
 import type { SunInfo } from '../core/postfx';
 import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
+import { exitsUnderWater, type ExitWaterAsk, type ExitWaterFound } from '../core/fx/underwaterExits.ts';
 import { isShadowCast, isShadowOnly } from '../core/fxRegistry.ts';
 import { ProgramQueue, materialsUnder, pendingPrograms, resolveLinks, type OwnJob } from '../core/programQueue.ts';
 import { LINK_TUNE, LinkFlight, linkMode, type ReadyProgram } from '../core/linkMode.ts';
@@ -1827,6 +1831,9 @@ export class World {
     // The world's ground paint (Map-maker II, `public/placements/paint/<world>.json`), the same way: asked for now and waited
     // on (bounded) before the ground that takes it is made.
     this.askPaint(packId);
+    // And its lakes of ours (Map-maker II's fifth wave, `public/placements/water/<world>.json`): waited on (bounded) before the
+    // water is drawn, appended after the client's tables on a converted world and made bodies on a real-elevation one.
+    this.askWater(packId);
     const demHeights = !!planet.dem && shippedAsk(`${planet.dem.url}/base16.raw`);
     this.heightsByDem = demHeights;
     this.demGroundPending = null;
@@ -2099,6 +2106,19 @@ export class World {
         if (token !== this.loadToken) return null;
         if (store) this.installHeights(store);
       }
+      // Its lakes of ours (Map-maker II's fifth wave): the terrain's own list, which `waterHeightAt` and `waterTableAt` ask
+      // where there is no converted terrain, and a body each, made behind this screen so its sweep builds them. With no
+      // file, none, and the world is today's. Only on a world with no pack at all (`pack: false`), as the permanent rows
+      // above: a converted world whose pack is missing writes its lakes about its own layout's centre, and stood about
+      // (0, 0) they would land kilometres off.
+      if (!planet.space && planet.pack === false) {
+        const lakes = await this.waterReady();
+        if (token !== this.loadToken) return null;
+        if (lakes) {
+          this.applyOurTables(lakes);
+          for (const t of this.terrain.lakes) this.addLakeBody(t);
+        }
+      }
       this.packStatus = planet.borrowSky ? 'sky only' : 'no pack';
       this.packProgress = 1;
       return null;
@@ -2238,6 +2258,12 @@ export class World {
           if (this.groundPaint && swg.paint !== this.groundPaint) this.installPaint(this.groundPaint);
           await this.waterBodies.load(pack, planet.id);
           if (token !== this.loadToken) return null;
+          // The world's lakes of ours (Map-maker II's fifth wave, `public/placements/water/<world>.json`): appended after the
+          // client's tables before they are drawn, so every water reader and the drawing loop below take them as client
+          // lakes. With no file nothing is appended and the tables, their order and every answer are today's.
+          const lakes = await this.waterReady();
+          if (token !== this.loadToken) return null;
+          if (lakes) this.applyOurTables(lakes);
           this.applySwgWater(swg);
           await this.loadLava(pack, swg); // never rejects; drops its own work if another load began meanwhile
           if (token !== this.loadToken) return null;
@@ -2630,6 +2656,13 @@ export class World {
     this.paintReplantLeft = 0;
     this.demGroundPending = null;
     this.restorePaintSwitches();
+    // Its lakes of ours (Map-maker II's fifth wave): their bodies go with every lake body below (`localWater`), their roofs and
+    // their rows here, so nothing of this world's answers the next one's water.
+    this.waterAsk = null;
+    this.ourLakeRows = [];
+    this.ourTables = [];
+    this.ourLakeBodies.clear();
+    this.roofs.clear();
     // Every bed, emitter and weather channel let go before the things they follow are disposed: the
     // particle effects go a few lines down, and a loop left on one would follow a point in a world
     // that has gone. The sky and the effects are wired again on the next planet's first frames.
@@ -4862,6 +4895,8 @@ export class World {
     });
     const families = swg.template.generator.floraGroup.families.size;
     this.flora = new FloraPlanter(swg, byAppearance);
+    // Plants under a lake of ours are left out (Map-maker II's fifth wave); with none the planting is today's.
+    this.flora.underOurWater = this.underOurWaterRule();
     this.floraTemplate = swg.template;
     // The plantings drawn per region at the client's own levels (step 7): every batch mesh adopted before it is
     // drawn (its materials are the plants' own, adopted with the stand-ins below) and offered to the exit
@@ -5673,6 +5708,7 @@ export class World {
       m.geometry.dispose();
     }
     this.localWater.length = 0;
+    this.ourLakeBodies.clear();
     const shaders = new Set<string>();
     let lava = 0;
     for (const w of swg.waterTables) {
@@ -5694,12 +5730,15 @@ export class World {
       const mesh = new THREE.Mesh(g);
       mesh.receiveShadow = true;
       mesh.name = `water:${w.name}`;
-      // Lakes are triangulated outlines with no interior vertices, so they ripple but do not swell.
-      const body = bodies.add(mesh, false, bodies.lookFor(w.shader || null, planet), 'lake');
+      // Lakes are triangulated outlines with no interior vertices, so they ripple but do not swell. A lake of ours
+      // (Map-maker II's fifth wave) wears its look of its own over its shader's; every client table's look is today's.
+      const look = w.ours ? lookOver(bodies.lookFor(w.shader || null, planet), w.ours.look) : bodies.lookFor(w.shader || null, planet);
+      const body = bodies.add(mesh, false, look, 'lake');
       this.waterMaterials.push(body.lit);
       if (w.shader) shaders.add(w.shader);
       this.localWater.push(mesh);
       this.scene.add(mesh);
+      if (w.ours) this.ourLakeBodies.set(w.ours.id, { mesh, body, table: w });
     }
     bodies.lavaTables = lava;
     // What this planet's water does to what stands in it, out of the pack's own `harm` block (the
@@ -7941,6 +7980,9 @@ export class World {
       onProgress(Math.min(objects.length, i + SWEEP_BATCH), objects.length, (r.info.programs?.length ?? 0) - before);
     });
     if (people.length) noteWarmed(this.programsOf);
+    // A lake's lit program built for the frames' own target (Map-maker II's fifth wave): a lake of ours put on in play from
+    // now on finds its programs built (`lakeWantsCurtain`).
+    if (opts.target === undefined) this.noteLakePrograms();
     if (airCovered) this.airBuilt(target);
     if (liquidCovered) this.liquidBuilt(liquidCovered);
     if (grassCovered) this.grassBuilt();
@@ -10299,7 +10341,10 @@ export class World {
       stepWaterSim(this.renderer, cx, cz, Number.isNaN(basin) ? this.terrain.waterHeightAt(cx, cz) : basin, dt, this.camera.position.y);
     }
     this.emitDust(dt);
-    if (this.waterMaterials.length) updateWaterDepth(playerPos.x, playerPos.z, (x, z) => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES));
+    if (this.waterMaterials.length) updateWaterDepth(playerPos.x, playerPos.z, this.depthHeightAt);
+    // The submerged roofs the depth window reads (Map-maker II's fifth wave), made again a few times a second while this world
+    // has a lake of ours; nothing at all with none.
+    if (this.ourLakeRows.length) this.stepRoofs(dt);
     if (this.water) {
       const cell = WATER_NEAR / WATER_SEGMENTS;
       this.water.position.x = Math.round(playerPos.x / cell) * cell;
@@ -10997,10 +11042,11 @@ export class World {
    * water shader on the planet.
    */
   cameraUnderwaterAt(p: THREE.Vector3, out: UnderwaterInfo): UnderwaterInfo {
-    const swg = this.terrain.swg;
     const dry = !this.planet || !!this.planet.space || this.inside;
     const surface = dry ? -Infinity : this.terrain.waterHeightAt(p.x, p.z);
-    const table = dry || !swg ? null : swg.waterTableAt(p.x, p.z);
+    // Through the terrain's own answer (`Terrain.waterTableAt`): the converted terrain's to the bit, and on a world with none
+    // a lake of ours (Map-maker II's fifth wave), which reading `swg` alone named nothing on.
+    const table = dry ? null : this.terrain.waterTableAt(p.x, p.z);
     const seaDrawn = !dry && !!this.water?.visible;
     const onSea = onSeaSurface(surface, this.terrain.waterLevel, seaDrawn);
     // Is what stands over the point lava? Whichever table the surface belongs to is the one asked:
@@ -11021,7 +11067,9 @@ export class World {
     // the drawn surface can stand from the flat one.
     out.reach = out.under ? ask.reach : 0;
     if (out.under) {
-      const look = this.waterLookAt(coveringWaterShader(table, lava, surface, this.globalWaterShader));
+      // A lake of ours that is the surface here wears its own look (its numbers over its shader's); every other is today's.
+      const own = table && table.ours && !lava && table.height === surface ? this.ourLakeLook(table) : null;
+      const look = own ?? this.waterLookAt(coveringWaterShader(table, lava, surface, this.globalWaterShader));
       if (out.look !== look) {
         out.look = look;
         out.color.set(look.color);
@@ -11096,7 +11144,8 @@ export class World {
     // Nothing here is a flow: the cheapest possible answer, and the one every other planet takes.
     if (!swg || (!this.lavaTables.size && !this.globalWaterIsLava)) return -Infinity;
     const level = terrain.waterLevel;
-    const table = swg.waterTableAt(x, z);
+    // Through the terrain's own answer (`Terrain.waterTableAt`, the converted terrain's to the bit: Map-maker II's fifth wave).
+    const table = terrain.waterTableAt(x, z);
     if (table && table.height > level) return this.lavaTables.has(table) ? table.height - y : -Infinity;
     return this.globalWaterIsLava && Number.isFinite(level) ? level - y : -Infinity;
   }
@@ -11901,7 +11950,7 @@ export class World {
     }
     // The one reader of the ground that does not heal by itself, and the two that heal slowly.
     this.air?.raster.forget(s.x0, s.z0, s.x1, s.z1);
-    if (this.waterMaterials.length) refreshWaterDepth(s.x0, s.z0, s.x1, s.z1, (x, z) => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES));
+    if (this.waterMaterials.length) refreshWaterDepth(s.x0, s.z0, s.x1, s.z1, this.depthHeightAt);
     this.grass?.circleChanged((s.x0 + s.x1) / 2, (s.z0 + s.z1) / 2, Math.hypot(s.x1 - s.x0, s.z1 - s.z0) / 2);
     this.shadowHold.dirtyAll();
     this.resetStrokeRect();
@@ -13075,6 +13124,7 @@ export class World {
     }
     if (!this.flora) {
       this.flora = new FloraPlanter(df.source, df.models);
+      this.flora.underOurWater = this.underOurWaterRule();
       this.floraTemplate = lent.template;
       this.floraField?.dispose();
       this.floraField = null;
@@ -13202,6 +13252,473 @@ export class World {
         if (missing.length) console.info(`flora paint: ${missing.length} flora model${missing.length === 1 ? '' : 's'} a landing named were loaded in play: drawn by their stand-ins' programs, compiled at the next loading screen or curtain`);
       }
     });
+  }
+
+  // ---- Map-maker II: lakes of ours (its fifth wave) ---------------------------------------------------------------------
+
+  /**
+   * Where a world's water file comes from: the page hands its fetch in (`App.fetchWater`), which reads
+   * `public/placements/water/<world>.json`. Null asks for none (a test's world, the select screen's), and the world's water
+   * is the client's to the bit.
+   */
+  waterSource: ((pack: string, kind: 'ground' | 'space' | 'copies') => Promise<WaterLoaded | null>) | null = null;
+  /** The ask this arrival made, its world's generation beside it, and whether it has been installed. */
+  private waterAsk: { gen: number; done: Promise<WaterLoaded | null>; installed: boolean; late: boolean } | null = null;
+  /** The water file's lakes in force, sorted by id (the file's own order), as read and as every landing left them. */
+  ourLakeRows: WaterLakeRow[] = [];
+  /** What the last file read said, for the console. */
+  waterFileInfo: { lakes: number; bytes: number; skipped: { id: string; why: string }[]; problem: string | null; rev: string | null } = { lakes: 0, bytes: 0, skipped: [], problem: null, rev: null };
+  /** Whether this world's lakes were in place before its water was first drawn (`lakes().laidAtArrival`). */
+  waterLaidAtArrival = false;
+  /** Each lake of ours drawn, by its id: its mesh, its body and its table. A lava lake is drawn with the lava and has none. */
+  private readonly ourLakeBodies = new Map<string, { mesh: THREE.Mesh; body: WaterBody; table: SwgWaterTable }>();
+  /** Each lake of ours' own look (its numbers over its shader's), kept so the camera's look over one allocates nothing. */
+  private readonly ourLakeLooks = new WeakMap<SwgWaterTable, WaterLook>();
+  /** The submerged roofs the depth window reads (`ourWater.ts`), and the clock that makes them again while there are lakes. */
+  readonly roofs = new RoofList();
+  private roofClock = 0;
+  /** What lakes of ours did this session, for the console: landings, bodies added and taken out, lava rebuilt, chunks replanted. */
+  readonly lakeWork = { landed: 0, added: 0, removed: 0, lava: 0, replanted: 0, roofs: 0 };
+  /**
+   * Whether this session has built a lake's lit and mask programs behind a screen (a world with a client lake or a basin, or
+   * a lake of ours stood behind a screen or the editor's curtain): a lake of ours put on in play where they have not been
+   * built goes behind the editor's curtain (`lakeWantsCurtain`), or its first draw would build them on a live frame.
+   */
+  private static lakeProgramsBuilt = false;
+  /** The ground the water's depth window reads (`updateWaterDepth`): the cached ground, raised to a submerged roof's top. Kept, so a frame makes nothing. */
+  private readonly depthHeightAt = (x: number, z: number): number | null => {
+    const h = this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES);
+    if (h === null || !this.roofs.count || !LAKE_TUNE.roofDepth) return h;
+    return this.roofs.topAt(x, z, h);
+  };
+
+  /** The ask for this world's water file, begun as its load begins (`load`). */
+  private askWater(packId: string): void {
+    this.ourLakeRows = [];
+    this.ourTables = [];
+    this.waterLaidAtArrival = false;
+    this.ourLakeBodies.clear();
+    this.roofs.clear();
+    this.waterFileInfo = { lakes: 0, bytes: 0, skipped: [], problem: null, rev: null };
+    const src = this.waterSource;
+    const planet = this.planet;
+    if (!src || this.sceneOnly) {
+      this.waterAsk = null;
+      return;
+    }
+    const kind = planet.instances ? 'copies' : planet.space ? 'space' : 'ground';
+    const ask = { gen: this.generation, done: src(packId, kind).catch(() => null), installed: false, late: false };
+    this.waterAsk = ask;
+    // A file later than the bound (`waterReady` gave up on it): its lakes stood when it lands, by difference, as a landing's are.
+    void ask.done.then((loaded) => {
+      if (this.waterAsk !== ask || ask.installed || !ask.late || this.generation !== ask.gen) return;
+      ask.installed = true;
+      this.replaceWater(loaded);
+    });
+  }
+
+  /**
+   * This world's water file, waited on for at most `DRESSING_TUNE.floraWaitMs`: its lakes, or null for none or one still on its
+   * way, which is then stood late. Marks the ask installed, so it is laid once.
+   */
+  private async waterReady(): Promise<WaterLakeRow[] | null> {
+    const ask = this.waterAsk;
+    if (!ask || ask.installed) return null;
+    const loaded = await Promise.race([ask.done, new Promise<'late'>((r) => setTimeout(() => r('late'), DRESSING_TUNE.floraWaitMs))]);
+    if (loaded === 'late') {
+      ask.late = true;
+      return null;
+    }
+    if (this.waterAsk !== ask || ask.installed || this.generation !== ask.gen) return null;
+    ask.installed = true;
+    this.takeWaterFile(loaded);
+    if (!loaded || !loaded.rows.length) return null;
+    this.waterLaidAtArrival = true;
+    return this.ourLakeRows;
+  }
+
+  /** What a file read said, kept for the console, and its lakes in force (sorted by id). */
+  private takeWaterFile(loaded: WaterLoaded | null): void {
+    this.ourLakeRows = loaded ? [...loaded.rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) : [];
+    this.waterFileInfo = loaded ? { lakes: loaded.rows.length, bytes: loaded.bytes, skipped: loaded.skipped, problem: loaded.problem, rev: loaded.rev } : { lakes: 0, bytes: 0, skipped: [], problem: null, rev: null };
+    if (loaded?.problem) console.warn(`water: this world's water file is not read: ${loaded.problem}`);
+    for (const s of loaded?.skipped ?? []) console.warn(`water: lake ${s.id} is skipped: ${s.why}`);
+  }
+
+  /** Whether a lake's shader is lava here, by the pack's own reading (`isLavaWater`, the shader's name where there is no entry). */
+  private lakeIsLava(shader: string): boolean {
+    return !!shader && isLavaWater(shader, 0, this.waterBodies.data?.shaders[shader]);
+  }
+
+  /**
+   * The lakes of ours as tables of this world's game frame (`ourWater.ts`'s `lakeTable`): about the layout's centre on a
+   * converted world, about (0, 0) on one with none. A lava lake on a world with no converted terrain is left out and said
+   * (the lava is drawn by the converted ground's own path this pass).
+   */
+  private ourTablesOf(rows: readonly WaterLakeRow[], moved: ReadonlySet<string> | null): SwgWaterTable[] {
+    const swg = this.terrain.swg;
+    // A world with no converted terrain stands lakes of ours about (0, 0) only where it has no pack at all (the
+    // real-elevation worlds, `pack: false`): a converted world whose pack is missing or failed to load writes its rows about
+    // its own layout's centre, and stood about (0, 0) they would land kilometres off, as its permanent rows would.
+    if (!swg && this.planet?.pack !== false) {
+      if (rows.length) console.warn(`water: ${rows.length} lake${rows.length === 1 ? '' : 's'} of ours left out: this converted world's pack is not here, and its lakes are written about its own layout's centre`);
+      return [];
+    }
+    const toX = swg ? (x: number) => swg.toGameX(x) : (x: number) => -x;
+    const toZ = swg ? (z: number) => swg.toGameZ(z) : (z: number) => z;
+    // An unmoved lake keeps its very table (`keptTables`), so the lava's set and the looks, which know a table by itself,
+    // keep knowing it across another lake's landing.
+    return keptTables(this.ourTables as SwgWaterTable[], rows, moved, (row) => {
+      const t = lakeTable(row, toX, toZ, (s) => this.lakeIsLava(s));
+      if (!swg && t.waterType === 1) {
+        console.warn(`water: lake ${row.id} is lava, which only a converted world draws this pass: left out here`);
+        return null;
+      }
+      return t;
+    });
+  }
+
+  /**
+   * The lakes of ours in force put where the water's readers take them: after the client's tables on a converted world
+   * (`SwgTerrain.setOurWater`), the terrain's own list on a world with none; and the planter told which plantings stand under
+   * them. A landing names the lakes that moved (`moved`), and every other keeps its table. Answers the tables.
+   */
+  private applyOurTables(rows: readonly WaterLakeRow[], moved: ReadonlySet<string> | null = null): SwgWaterTable[] {
+    const tables = this.ourTablesOf(rows, moved);
+    const swg = this.terrain.swg;
+    if (swg) swg.setOurWater(tables);
+    else {
+      this.terrain.lakes.length = 0;
+      for (const t of tables) this.terrain.lakes.push(t as LakeTable);
+    }
+    this.ourTables = tables as LakeTable[];
+    if (this.flora) this.flora.underOurWater = this.underOurWaterRule();
+    this.forgetCameraWater();
+    return tables;
+  }
+
+  /** The lakes of ours in force as the water's readers hold them (the converted terrain's tail, or the terrain's own list), kept. */
+  private ourTables: LakeTable[] = [];
+
+  /** The planter's predicate (`FloraPlanter.underOurWater`): under a lake of ours, or null with none at all (the planting today's). */
+  private underOurWaterRule(): ((x: number, z: number, ground: number) => boolean) | null {
+    const tables = this.ourTables;
+    if (!tables.length) return null;
+    return (x, z, ground) => underLakes(tables, x, z, ground);
+  }
+
+  /** A lake of ours' own look (its numbers over its shader's, or the planet's), made once a table. */
+  private ourLakeLook(table: SwgWaterTable): WaterLook {
+    let look = this.ourLakeLooks.get(table);
+    if (!look) {
+      look = lookOver(this.waterBodies.lookFor(table.shader || null, this.planet), table.ours?.look);
+      this.ourLakeLooks.set(table, look);
+    }
+    return look;
+  }
+
+  /**
+   * One lake of ours made a body of the water system, as `applySwgWater` makes a client lake's: its outline triangulated at its
+   * height, drawn with its own look. Behind a screen (an arrival, the editor's curtain) it stands at once and the sweep after
+   * builds it; in play it is adopted and made ready through the queue, hidden until then, and shown once ready if it is still
+   * the lake that stands. A lava lake is drawn with the lava (`loadLava`) and gets no body.
+   */
+  private addLakeBody(table: SwgWaterTable): void {
+    const row = table.ours;
+    if (!row || !this.renderer) return;
+    if (table.waterType === 1 || this.lakeIsLava(table.shader)) return;
+    const pts = table.points.map((p) => new THREE.Vector2(p.x, p.z));
+    const tris = THREE.ShapeUtils.triangulateShape(pts, []);
+    if (!tris.length) {
+      console.warn(`water: lake ${row.id}'s outline does not triangulate (it crosses itself?): not drawn`);
+      return;
+    }
+    const g = new THREE.BufferGeometry();
+    const pos: number[] = [];
+    for (const p of pts) pos.push(p.x, table.height, p.y);
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(tris.flat());
+    g.computeVertexNormals();
+    const mesh = new THREE.Mesh(g);
+    mesh.receiveShadow = true;
+    mesh.name = `water:${table.name}`;
+    const body = this.waterBodies.add(mesh, false, this.ourLakeLook(table), 'lake');
+    this.waterMaterials.push(body.lit);
+    this.localWater.push(mesh);
+    this.ourLakeBodies.set(row.id, { mesh, body, table });
+    const live = !this.behindScreen;
+    if (live) mesh.visible = false;
+    this.scene.add(mesh);
+    this.lakeWork.added++;
+    // Its current variant where the volumetrics master is on: made now and worn only once a warm has built it (in play it
+    // waits in `liquidUnbuilt`; behind a screen the sweep after builds it).
+    if (this.air && VOL_TUNE.on) this.makeLiquidVariants();
+    if (!live) return;
+    const gen = this.generation;
+    void this.compileReady([mesh], `water: the lake ${row.id}`).then(() => {
+      if (this.generation === gen && this.ourLakeBodies.get(row.id)?.mesh === mesh) mesh.visible = true;
+    });
+  }
+
+  /** A lake of ours' body taken out: out of the scene, its materials out of the world's sets before the body disposes them. */
+  private dropLakeBody(id: string): void {
+    const e = this.ourLakeBodies.get(id);
+    if (!e) return;
+    this.ourLakeBodies.delete(id);
+    this.scene.remove(e.mesh);
+    const k = this.localWater.indexOf(e.mesh);
+    if (k >= 0) this.localWater.splice(k, 1);
+    const i = this.waterMaterials.indexOf(e.body.lit);
+    if (i >= 0) this.waterMaterials.splice(i, 1);
+    this.forgetMaterials([e.body.lit]);
+    this.waterBodies.remove(e.mesh);
+    e.mesh.geometry.dispose();
+    this.lakeWork.removed++;
+  }
+
+  /**
+   * Whether a lake of ours put on in play must go behind the editor's curtain: a lava lake (its look is the lava's, made with
+   * the lava again), or any lake while this session has built no lake's programs (a session whose worlds so far draw no
+   * water). Every other lake is a body made ready through the queue, its programs found, not built.
+   */
+  lakeWantsCurtain(lava: boolean): boolean {
+    return lava || !World.lakeProgramsBuilt;
+  }
+
+  /** Whether a lake's shader is lava on this world (the editor's question before it writes one). */
+  lakeShaderIsLava(shader: string | null): boolean {
+    return !!shader && this.lakeIsLava(shader);
+  }
+
+  /**
+   * Whether a landing of these rows would make the lava again (`landWater`): a lake put whose shader is lava here, or a lake
+   * put or taken out that stands as lava now. Only where the lava is made at all (a converted world's ground draws it).
+   * The app asks it before it lands a write it did not open behind the editor's curtain (an undo, a redo, the file read
+   * again), so a lava change is made behind one and never on a live frame.
+   */
+  waterLandingTouchesLava(put: readonly WaterLakeRow[], deleted: readonly string[]): boolean {
+    if (!this.terrain.swg) return false;
+    return landingTouchesLava(this.ourTables, put, deleted, (s) => this.lakeIsLava(s));
+  }
+
+  /** The lava a landing is making again (`landWater`), or a settled promise: a curtain waits for it before its sweep. */
+  lavaLanding: Promise<void> = Promise.resolve();
+
+  /**
+   * Rows of the water file landed (a write's answer, a file read again): the lakes in force made again from them, every lake
+   * that moved taken out and stood again by difference (never `applySwgWater` again, which removes every lake body and pushes
+   * fresh materials without taking the old ones off), lava rebuilt where a lava lake moved, and the plantings, the grass, the
+   * air's cells and the depth window under every lake that moved made again. Answers how many lakes moved.
+   */
+  landWater(put: readonly WaterLakeRow[], deleted: readonly string[]): number {
+    const plan = planLakeLanding(this.ourLakeRows, put, deleted);
+    const moved = plan.moved;
+    if (!moved.size) return 0;
+    const oldTables: SwgWaterTable[] = [...this.ourTables];
+    this.ourLakeRows = plan.rows;
+    const tables = this.applyOurTables(this.ourLakeRows, moved);
+    this.lakeWork.landed++;
+    let lava = false;
+    for (const t of [...oldTables, ...tables]) if (t.ours && moved.has(t.ours.id) && t.waterType === 1) lava = true;
+    for (const id of moved) this.dropLakeBody(id);
+    for (const t of tables) if (t.ours && moved.has(t.ours.id)) this.addLakeBody(t);
+    // A lava lake moved: the lava made again with every lava table it now holds, kept as `lavaLanding` so the editor's
+    // curtain the app opens for it (`waterLandingTouchesLava`) waits for it before its sweep. A late file landing in play
+    // rebuilds it there, and says so.
+    const swg = this.terrain.swg;
+    if (lava && swg && this.pack) {
+      this.lakeWork.lava++;
+      if (!this.behindScreen) console.info('water: a lava lake of ours landed in play: the lava is made again here, its programs built on its first draw');
+      this.lavaLanding = this.loadLava(this.pack, swg);
+    }
+    // What stands under every lake that moved, old place and new.
+    const rect = { x0: Infinity, z0: Infinity, x1: -Infinity, z1: -Infinity };
+    for (const t of [...oldTables, ...tables]) {
+      if (!t.ours || !moved.has(t.ours.id)) continue;
+      rect.x0 = Math.min(rect.x0, t.minX);
+      rect.z0 = Math.min(rect.z0, t.minZ);
+      rect.x1 = Math.max(rect.x1, t.maxX);
+      rect.z1 = Math.max(rect.z1, t.maxZ);
+    }
+    if (rect.x0 <= rect.x1) this.waterChanged(rect.x0, rect.z0, rect.x1, rect.z1);
+    this.refreshRoofs();
+    return moved.size;
+  }
+
+  /**
+   * A write of the editor's own answered for this world's water file: its revision and how many lakes it holds now, kept for
+   * the console and the Tools tab (the bytes stay as last read, which a write's answer does not say).
+   */
+  noteWaterWritten(rev: string, rows: number): void {
+    this.waterFileInfo = { ...this.waterFileInfo, lakes: rows, rev, ...(rows ? {} : { bytes: 0 }) };
+  }
+
+  /** The world's water file read again (a late file, the dev server's word) and its lakes stood by difference (`landWater`). */
+  replaceWater(loaded: WaterLoaded | null): number {
+    const d = this.waterDiffOf(loaded);
+    return this.landWater(d.put, d.deleted);
+  }
+
+  /**
+   * What a water file read again comes to against the lakes in force: the rows that are new or changed (`put`) and the ids
+   * gone (`deleted`), for `landWater`; what the read said kept for the console.
+   */
+  waterDiffOf(loaded: WaterLoaded | null): { put: WaterLakeRow[]; deleted: string[] } {
+    const was = new Map(this.ourLakeRows.map((r) => [r.id, r]));
+    const now = loaded?.rows ?? [];
+    this.waterFileInfo = loaded ? { lakes: now.length, bytes: loaded.bytes, skipped: loaded.skipped, problem: loaded.problem, rev: loaded.rev } : { lakes: 0, bytes: 0, skipped: [], problem: null, rev: null };
+    const put: WaterLakeRow[] = [];
+    const ids = new Set<string>();
+    for (const r of now) {
+      ids.add(r.id);
+      const w = was.get(r.id);
+      if (!w || JSON.stringify(w) !== JSON.stringify(r)) put.push(r);
+    }
+    return { put, deleted: [...was.keys()].filter((id) => !ids.has(id)) };
+  }
+
+  /**
+   * The ground under a game-frame rectangle met a lake that moved: its chunks' plantings made again (a frame's share at a
+   * time, `stepGroundRewrite`), its grass made stale, its air cells and the water's depth window asked again.
+   */
+  private waterChanged(x0: number, z0: number, x1: number, z1: number): void {
+    for (const c of this.chunks.values()) {
+      if (!rectMeetsChunk(c.origin.x, c.origin.z, CHUNK_SIZE, x0, z0, x1, z1)) continue;
+      this.floraDirty.add(c.key);
+      this.lakeWork.replanted++;
+    }
+    this.floraFlush = this.floraDirty.size > 0;
+    this.grass?.circleChanged((x0 + x1) / 2, (z0 + z1) / 2, Math.hypot(x1 - x0, z1 - z0) / 2);
+    this.air?.raster.forget(x0, z0, x1, z1);
+    if (this.waterMaterials.length) refreshWaterDepth(x0, z0, x1, z1, this.depthHeightAt);
+    this.forgetCameraWater();
+  }
+
+  /** The roofs made again a few times a second (`LAKE_TUNE`'s clock is the roofs' own, 1 s, ours: a building stands in a tier's time). */
+  private stepRoofs(dt: number): void {
+    this.roofClock += dt;
+    if (this.roofClock < 1) return;
+    this.roofClock = 0;
+    this.refreshRoofs();
+  }
+
+  /**
+   * Every building with rooms standing now whose box stands under a lake of ours: its turned box and its top kept for the
+   * depth window (`RoofList`). A building whose top stands at or over the surface is no roof under water.
+   */
+  refreshRoofs(): void {
+    this.roofs.clear();
+    const ls = this.layoutStream;
+    if (!ls || !this.ourLakeRows.length) return;
+    const tables = this.ourTables;
+    if (!tables.length) return;
+    for (const b of ls.buildings) {
+      const box = b.model.def?.bounds;
+      if (!box || box.min.length < 3 || box.max.length < 3) continue;
+      const e = b.matrix.elements;
+      let surface = -Infinity;
+      for (const t of tables) if (t.height > surface && tableCovers(t, e[12], e[14])) surface = t.height;
+      // Its box turned with it about up, kept where its top stands under that surface (`RoofList.addBuilding`).
+      this.roofs.addBuilding(e, box, surface);
+    }
+    this.lakeWork.roofs = this.roofs.count;
+  }
+
+  /** What exits are under water from inside a building, cached by model (`roomAirMath.ts`'s apertures). */
+  private readonly exitsOfModel = new WeakMap<object, ExitAperture[]>();
+  /** The exits' ask of the water (`exitsUnderWater`), kept: the point and the surface ride its fields. */
+  private readonly exitAsk: ExitWaterAsk = {
+    x: 0.5,
+    y: 0.5,
+    z: 0.5,
+    h: 0.5,
+    surface: () => {
+      const a = this.exitAsk;
+      a.h = this.terrain.waterHeightAt(a.x, a.z);
+    },
+    lava: () => this.lavaAt(this.exitAsk.x, this.exitAsk.y, this.exitAsk.z) > -Infinity,
+  };
+  /** What the exits' ask found, kept. */
+  private readonly exitFound: ExitWaterFound = { under: false, depth: 0.5, x: 0.5, z: 0.5, surface: 0.5 };
+  /**
+   * Whether the camera stands in a building one of whose exits stands under water (a lake of ours or a client table; never
+   * lava): the frame's word to the underwater pass's exits variant (`UNDERWATER_TUNE.exits`), with the deepest such exit's
+   * depth under its surface (`exitsUnderWater`, pure) and that water's look written into `out` -- its colour set only when
+   * the look is another than the one `out` last took, as the camera's own record is (`cameraUnderwaterAt`), since a colour
+   * set from its string parses it again. Allocates nothing once a model's exits are known and its look taken.
+   */
+  exitWaterOf(view: Building | null, out: { under: boolean; depth: number; color: THREE.Color; opacity: number; look: WaterLook | null }): boolean {
+    out.under = false;
+    out.depth = 0;
+    if (!view || !this.planet || this.planet.space) return false;
+    const def = view.model.def as unknown as Parameters<typeof exitApertures>[0];
+    let exits = this.exitsOfModel.get(view.model);
+    if (!exits) {
+      exits = def ? exitApertures(def) : [];
+      this.exitsOfModel.set(view.model, exits);
+    }
+    const found = this.exitFound;
+    if (!exitsUnderWater(exits, view.matrix.elements, this.exitAsk, found)) return false;
+    out.under = true;
+    out.depth = found.depth;
+    const table = this.terrain.waterTableAt(found.x, found.z);
+    const own = table && table.ours && table.height === found.surface ? this.ourLakeLook(table) : null;
+    const look = own ?? this.waterLookAt(coveringWaterShader(table, false, found.surface, this.globalWaterShader));
+    if (out.look !== look) {
+      out.look = look;
+      out.color.set(look.color);
+      out.opacity = look.opacity;
+    }
+    return true;
+  }
+
+  /** A lake of ours' look in force (its own numbers over its shader's or the planet's), for the editor's sliders, or null. */
+  lakeLookOf(id: string): WaterLook | null {
+    for (const t of this.ourTables) if (t.ours?.id === id) return this.ourLakeLook(t as SwgWaterTable);
+    return null;
+  }
+
+  /** The lakes in words for the console (`__debug.lakes()`). */
+  lakesReport(): Record<string, unknown> {
+    const tables = this.ourTables;
+    return {
+      file: { ...this.waterFileInfo },
+      laidAtArrival: this.waterLaidAtArrival,
+      lakes: this.ourLakeRows.map((r) => {
+        const t = tables.find((x) => x.ours?.id === r.id);
+        const c = t?.cells;
+        return { id: r.id, name: r.name ?? null, h: r.h, points: r.points.length, shader: r.shader, lava: t ? t.waterType === 1 : null, drawn: this.ourLakeBodies.has(r.id), index: c ? { cell: c.size, nx: c.nx, nz: c.nz, edgeCells: c.state.reduce((n, s) => n + (s === 2 ? 1 : 0), 0) } : null };
+      }),
+      bodies: this.ourLakeBodies.size,
+      roofs: this.roofs.list.slice(0, this.roofs.count).map((r) => ({ x: Math.round(r.x * 10) / 10, z: Math.round(r.z * 10) / 10, top: Math.round(r.top * 100) / 100 })),
+      lakeProgramsBuilt: World.lakeProgramsBuilt,
+      planter: this.flora ? (this.flora.underOurWater ? 'leaves out what stands under a lake of ours' : 'no lake of ours: the planting is the world\'s own') : 'no planter',
+      work: { ...this.lakeWork },
+      tune: { ...LAKE_TUNE },
+    };
+  }
+
+  /** The surface over a point and the table it is (`lakes({ at })`): a lake of ours named by its id. */
+  lakeAt(x: number, z: number): { surface: number; ground: number; table: string | null; ours: string | null } {
+    const t = this.terrain.waterTableAt(x, z);
+    return { surface: this.terrain.waterHeightAt(x, z), ground: this.terrain.heightAt(x, z), table: t ? t.name : null, ours: t?.ours?.id ?? null };
+  }
+
+  /** The things standing under a lake of ours that are not buildings with rooms (a structure of props is under water inside). */
+  rowsUnderLakes(rows: readonly { id: string; x: number; y: number; z: number; rooms: boolean }[]): string[] {
+    const out: string[] = [];
+    for (const r of rows) {
+      if (r.rooms) continue;
+      const s = this.terrain.waterHeightAt(r.x, r.z);
+      const t = this.terrain.waterTableAt(r.x, r.z);
+      if (t?.ours && s > r.y) out.push(r.id);
+    }
+    return out;
+  }
+
+  /** A sweep for the frames' own target has built a lake's lit program (any lake body, a basin's among them): noted for the session. */
+  private noteLakePrograms(): void {
+    if (!World.lakeProgramsBuilt && this.waterBodies.bodies.some((b) => b.role === 'lake')) World.lakeProgramsBuilt = true;
   }
 }
 

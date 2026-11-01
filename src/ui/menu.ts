@@ -155,6 +155,7 @@ const ACTION_LABELS: Record<Action, string> = {
   editorBrush: import.meta.env.DEV ? 'World editor: the scatter brush armed and let go (dev server only)' : '',
   editorSculpt: import.meta.env.DEV ? 'World editor: the sculpt brush armed and let go (dev server only)' : '',
   editorPaint: import.meta.env.DEV ? 'World editor: the paint brush armed and let go (dev server only)' : '',
+  editorWater: import.meta.env.DEV ? 'World editor: the water tool armed and let go: lakes and falls (dev server only)' : '',
 };
 
 /**

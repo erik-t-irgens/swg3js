@@ -10,6 +10,8 @@ import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, p
 import { groundChunkAt, groundShift, type GroundShift } from './groundTiles.ts';
 import { gameRibbon, terrainRibbons, type GameRibbon } from '../swg/terrain/ribbons.ts';
 import { FarGridIndex } from './farGridIndex.ts';
+import { inLakeCells, type LakeCells } from './ourWater.ts';
+import type { WaterLakeRow } from './editFiles/waterFile.ts';
 
 export interface BuildingLayerSource {
   bytes: ArrayBuffer;
@@ -99,6 +101,13 @@ export interface SwgWaterTable {
   maxX: number;
   minZ: number;
   maxZ: number;
+  /**
+   * A lake of ours' coarse index (Map-maker II's fifth wave, `ourWater.ts`), which `waterAt` and `waterTableAt` ask in
+   * place of the full test and which answers exactly as it does; null on every client table, whose path is today's.
+   */
+  cells?: LakeCells | null;
+  /** The water file's row a lake of ours was made from; absent on a client table. */
+  ours?: WaterLakeRow;
 }
 
 /**
@@ -608,7 +617,8 @@ export class SwgTerrain {
   waterAt(gx: number, gz: number): number {
     let h = this.waterLevel;
     for (const w of this.waterTables) {
-      if (w.height > h && gx >= w.minX && gx <= w.maxX && gz >= w.minZ && gz <= w.maxZ && pointInPolygon(gx, gz, w.points)) h = w.height;
+      // A lake of ours asks its index (Map-maker II's fifth wave), which answers exactly as the full test; a client table has none.
+      if (w.height > h && gx >= w.minX && gx <= w.maxX && gz >= w.minZ && gz <= w.maxZ && (w.cells ? inLakeCells(w.cells, w.points, gx, gz) : pointInPolygon(gx, gz, w.points))) h = w.height;
     }
     return h;
   }
@@ -619,9 +629,29 @@ export class SwgTerrain {
     for (const w of this.waterTables) {
       if (best && w.height <= best.height) continue;
       if (gx < w.minX || gx > w.maxX || gz < w.minZ || gz > w.maxZ) continue;
-      if (pointInPolygon(gx, gz, w.points)) best = w;
+      if (w.cells ? inLakeCells(w.cells, w.points, gx, gz) : pointInPolygon(gx, gz, w.points)) best = w;
     }
     return best;
+  }
+
+  /** How many of `waterTables` are the client's own: every one after them is a lake of ours (`setOurWater`). */
+  private clientTables = -1;
+
+  /**
+   * The lakes of ours this terrain answers for (Map-maker II's fifth wave, `ourWater.ts`): put after the client's own
+   * tables, in the file's order, every lake of ours before them taken out. With none the list is the client's as it was
+   * read, the array and its order and every answer today's. Answers how many it holds.
+   */
+  setOurWater(tables: readonly SwgWaterTable[]): number {
+    if (this.clientTables < 0) this.clientTables = this.waterTables.length;
+    this.waterTables.length = this.clientTables;
+    for (const t of tables) this.waterTables.push(t);
+    return tables.length;
+  }
+
+  /** The lakes of ours among `waterTables`, in order. */
+  ourWater(): SwgWaterTable[] {
+    return this.clientTables < 0 ? [] : this.waterTables.slice(this.clientTables);
   }
 
   toSwgX(gx: number): number {

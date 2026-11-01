@@ -8,8 +8,12 @@
 
 import type { DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
-import { EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, FLORA_PAINT_TUNE, FLORA_PAINT_TUNE_DEFAULTS, PAINT_TUNE, PAINT_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, tuneEditor, tuneFloraPaint, tunePaint, tuneSculpt } from './editorTune.ts';
+import { EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, FLORA_PAINT_TUNE, FLORA_PAINT_TUNE_DEFAULTS, PAINT_TUNE, PAINT_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, WATER_TUNE, WATER_TUNE_DEFAULTS, tuneEditor, tuneFloraPaint, tunePaint, tuneSculpt, tuneWater } from './editorTune.ts';
 import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
+import { LAKE_TUNE } from '../world/ourWater.ts';
+
+/** The lakes' own shipped numbers, as this module first saw them (before any console line moved them). */
+const LAKE_TUNE_SHIPPED = { ...LAKE_TUNE };
 
 /**
  * The sculpt brush's numbers of feel (Map-maker II §2.16), as `[key, label, min, max, step, unit, note]`: one list both
@@ -209,6 +213,107 @@ export function floraPaintDialSet(): DialSet {
   return { helper: 'floraPaint', groups: g, shipped };
 }
 
+/**
+ * The water tool's numbers of feel (Map-maker II's fifth wave), as `[key, label, min, max, step, unit, note]`: one list both
+ * sets read, the editor's (through `editor({ tune: { water } })`) and `lakes`' own (through `lakes({ tune })`).
+ */
+const WATER_DIALS: [string, string, number, number, number, string, string][] = [
+  ['rise', 'A clicked lake stands', -5, 5, 0.05, 'm', "Over the ground its level is taken from (the lowest under its points, or the first's): a lake a little full or a little shy."],
+  ['traceRise', 'A trace floods', 0, 20, 0.05, 'm', "Over the ground at its seed: a basin is flooded to the seed's ground and this much more."],
+  ['traceStep', 'Trace step', 0.5, 16, 0.5, 'm', 'Metres between the samples a trace floods (the ground’s own 2 m).'],
+  ['traceReach', 'Trace reaches', 50, 12000, 50, 'm', 'The farthest a trace floods from its seed before it says the level spills.'],
+  ['tolerance', 'Outline within', 0.05, 20, 0.05, 'm', 'How far a traced outline may stand off the shore it walked (doubled until it fits the most points).'],
+  ['mostPoints', 'Outline at most', 3, 1024, 1, 'pts', 'The most points a traced outline keeps.'],
+  ['closeReach', 'Closes within', 0, 50, 0.5, 'm', 'A click this near an outline’s first point closes it.'],
+  ['seaNudge', 'Off the sea by', 0, 1, 0.005, 'm', "A lake this near the sea's own height is raised to it plus this, or it reads as the sea and swells."],
+  ['raiseStep', 'A notch raises', 0.01, 5, 0.01, 'm', 'A notch of the wheel with F held raises a picked lake by this.'],
+  ['hitPx', 'Ring reach', 3, 40, 1, 'px', "How near the cursor must be to a lake's ring to pick it."],
+  ['fallWidth', 'A fall is wide', 0.5, 100, 0.5, 'm', 'How wide a fall is written.'],
+  ['fallDepth', 'And deep', 0.05, 5, 0.05, '×', "Its depth as a share of its width's scale."],
+  ['fallTurn', 'Turned past its way', -180, 180, 1, '°', 'Degrees a fall is turned past facing from its top toward its bottom.'],
+  ['fallAlong', 'Stands toward its foot', 0, 1, 0.05, '', "Where between its ends a fall stands: 0 at the top's place, 1 at the bottom's (a sheet over a slope is inside it)."],
+  ['fallMin', 'Least drop', 0, 50, 0.5, 'm', 'A fall is written for a drop of at least this.'],
+];
+
+/** The water tool's group, its dials set through `set` and read off the water tune. */
+function waterGroup(prefix: string, set: (k: string, v: number) => string[]): DialGroup {
+  return {
+    title: 'The water tool',
+    note: 'Z arms it; its mode (clicks, a trace, a fall) and where a lake’s level comes from are on the Tools tab; a picked lake’s look is on the Selected tab and below.',
+    dials: WATER_DIALS.map(([k, label, min, max, step, unit, note]) => ({
+      kind: 'number' as const,
+      key: `tune.${prefix}${k}`,
+      label,
+      note,
+      min,
+      max,
+      step,
+      unit,
+      get: () => (WATER_TUNE as unknown as Record<string, number>)[k],
+      set: (v: number) => set(k, v),
+    })),
+  };
+}
+
+/**
+ * The picked lake's look as sliders (the `lakes` set's last group): its opacity, ripple and drift in force, each written into
+ * the water file a moment after the slider rests (one write, one undo). The editor hands its picked lake's look and the
+ * setter here; null, or nothing picked, and there is no group.
+ */
+export const LAKE_LOOK_DIALS: { host: { look(): { id: string; opacity: number; ripple: number; drift: number } | null; set(partial: Record<string, number>): string[] } | null } = { host: null };
+
+function lakeLookGroups(): DialGroup[] {
+  const h = LAKE_LOOK_DIALS.host;
+  const now = h?.look();
+  if (!h || !now) return [];
+  const num = (k: 'opacity' | 'ripple' | 'drift', label: string, max: number, note: string): NumberDial => ({ kind: 'number', key: `look.${k}`, label, note, min: 0, max, step: 0.01, unit: '', get: () => h.look()?.[k] ?? 0, set: (v) => h.set({ [k]: v }) });
+  return [
+    {
+      title: `The picked lake: ${now.id}`,
+      note: "Its look over its shader's (or the planet's) own, written into the water file as a slider rests. Its colour is the Selected tab's.",
+      dials: [num('opacity', 'Opacity', 1, 'How much of the bed it hides.'), num('ripple', 'Ripple', 8, "How steep the fine ripples' slopes are, over its shader's."), num('drift', 'Drift', 8, 'How fast the fine ripples drift, over its shader’s.')],
+    },
+  ];
+}
+
+/**
+ * The `lakes` helper's own dials (the debug menu's, when `lakes` is picked): the water tool's numbers of feel, the water a
+ * plant is taken under (`LAKE_TUNE.floraUnder`, the world's own), and the picked lake's look where one is picked.
+ */
+export function lakesDialSet(): DialSet {
+  const under: DialGroup = {
+    title: 'What the lakes take',
+    dials: [
+      {
+        kind: 'number',
+        key: 'tune.floraUnder',
+        label: 'Plants taken under',
+        note: 'A planting stands no more under a lake of ours than this much water over the ground (the grass asks the water itself). From the next replant.',
+        min: 0,
+        max: 5,
+        step: 0.05,
+        unit: 'm',
+        get: () => LAKE_TUNE.floraUnder,
+        set: (v) => {
+          LAKE_TUNE.floraUnder = Math.max(0, v);
+          return [];
+        },
+      },
+    ],
+  };
+  const lakeDefaults = LAKE_TUNE_SHIPPED;
+  const g = [waterGroup('', (k, v) => tuneWater({ [k]: v })), under, ...lakeLookGroups()];
+  const shipped = readDials(g);
+  for (const [k] of shipped) {
+    if (k === 'tune.floraUnder') shipped.set(k, lakeDefaults.floraUnder);
+    else if (k.startsWith('tune.')) {
+      const v = (WATER_TUNE_DEFAULTS as unknown as Record<string, unknown>)[k.slice('tune.'.length)];
+      if (typeof v === 'number') shipped.set(k, v);
+    }
+  }
+  return { helper: 'lakes', groups: g, shipped };
+}
+
 /** A number of `EDITOR_TUNE` by its path, as a slider. */
 function dial(path: string, label: string, min: number, max: number, step: number, unit: string, note: string): NumberDial {
   const parts = path.split('.');
@@ -306,6 +411,7 @@ function groups(): DialGroup[] {
     sculptGroup('sculpt.', (k, v) => tuneEditor({ sculpt: { [k]: v } })),
     paintGroup('paint.', (k, v) => tuneEditor({ paint: { [k]: v } })),
     floraPaintGroup('floraPaint.', (k, v) => tuneEditor({ floraPaint: { [k]: v } })),
+    waterGroup('water.', (k, v) => tuneEditor({ water: { [k]: v } })),
     {
       title: 'Folding',
       note: 'Rows written while their tier stands are drawn one by one until the next arrival or Fold now (Tools).',
@@ -342,5 +448,5 @@ export function editorDialSet(): DialSet {
 
 /** The debug menu's dials for `editor`, or null for another helper. */
 export function editorDialsFor(helper: string): DialSet | null {
-  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : helper === 'groundPaint' ? paintDialSet() : helper === 'floraPaint' ? floraPaintDialSet() : null;
+  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : helper === 'groundPaint' ? paintDialSet() : helper === 'floraPaint' ? floraPaintDialSet() : helper === 'lakes' ? lakesDialSet() : null;
 }

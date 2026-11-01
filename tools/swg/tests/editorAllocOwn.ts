@@ -592,6 +592,186 @@ if (process.argv.includes('sculpt')) {
   console.log(JSON.stringify({ frames: FRAMES, made: bestS.made, scavenges: bestS.scavenges, ringShown: shown, ring2Shown: shown2, armed: sculpt.armed, stroke: sculpt.mode, tiles: store.size }));
   process.exit(0);
 }
+// With `water` (`waterLive.test.ts`, Map-maker II's fifth wave): the water tool armed over three lakes of forty points, one
+// picked -- the Tools list's frame handed to the tool (`waterTool`'s step), its overlay from the view (the picked lake's
+// gizmo laid out and picked, every outline and ring projected into the marks' kept arrays) and every mark drawn -- measured
+// three ways: the aim wandering with nothing held; F held with the mouse moving (the raise carried on, `liftDelta`'s rate);
+// and the picked lake's square grabbed and dragged. Nothing is let go inside a window (a let-go writes).
+if (process.argv.includes('water')) {
+  const { EditorWater, waterTool } = await import('../../../src/editor/editorWater.ts');
+  const { tuneWater, WATER_TUNE_DEFAULTS } = await import('../../../src/editor/editorTune.ts');
+  const { toolFrame } = await import('../../../src/editor/tools.ts');
+  type Row = import('../../../src/world/editFiles/waterFile.ts').WaterLakeRow;
+  const lakes: Row[] = [];
+  for (let l = 0; l < 3; l++) {
+    const pts: [number, number][] = [];
+    for (let i = 0; i < 40; i++) {
+      const a = (i / 40) * Math.PI * 2;
+      pts.push([-(Math.cos(a) * 20 + l * 50 - 50), Math.sin(a) * 20 - 40]);
+    }
+    lakes.push({ id: `l${l}`, kind: 'lake', h: 1, points: pts, shader: null });
+  }
+  const wm = marksView();
+  tuneWater({ ...WATER_TUNE_DEFAULTS, mode: 'clicks' });
+  const water = new EditorWater({
+    // A write's stand-in: a let-go between windows writes, and nothing it writes moves the lakes.
+    edits: { beginStroke: (label: string) => ({ label }), strokeWrite: async () => null, endStroke: () => '' } as never,
+    worldKind: () => 'ground',
+    rows: () => lakes,
+    toRaw: (x, z, out) => {
+      out.x = -x;
+      out.z = z;
+    },
+    toGame: (x, z, out) => {
+      out.x = -x;
+      out.z = z;
+    },
+    groundAt: () => 0.5,
+    heightAt: () => 0.5,
+    seaLevel: () => -Infinity,
+    isLava: () => false,
+    wantsCurtain: () => false,
+    curtain: async (_d, w) => w(),
+    fallSource: async () => 'none',
+    dest: () => 'world',
+    centre: () => ({ x: 0, z: 0 }),
+    frame: () => 'raw',
+    packId: () => 'test',
+    cameraYaw: () => 0,
+    underNotes: () => [],
+    say() {},
+  });
+  await water.arm();
+  water.picked = 'l1';
+  const tool = waterTool(water);
+  const f = toolFrame();
+  const draw = { marks: wm, radius: 0.5, ring(): void {} };
+  // What each window holds (0 nothing, 1 F with the mouse moving, 2 the square dragged), its cursor's middle and the step.
+  const st = new Float64Array(5);
+  const waterFrame = (): void => {
+    st[1]++;
+    st[0] = st[1] * 0.01;
+    const held = st[2];
+    f.apply = held === 2 || held === 3;
+    f.inverse = false;
+    f.shift = false;
+    f.sampled = false;
+    f.x = Math.sin(st[0]) * 30;
+    f.y = 0.5;
+    f.z = -40 + Math.cos(st[0]) * 10;
+    f.valid = true;
+    f.dt = 1 / 60;
+    f.now = st[0];
+    f.sx = st[3] + Math.sin(st[0] * 3) * 6;
+    f.sy = st[4] + Math.sin(st[0] * 2) * 4;
+    f.dy = held === 1 ? Math.sin(st[0] * 5) * 3 : 0;
+    f.lift = held === 1;
+    tool.step(f);
+    tool.overlay!(draw as never, view);
+    drawEditorMarks(overlay, wm);
+  };
+  const waterFrames = (n: number): void => {
+    for (let i = 0; i < n; i++) waterFrame();
+  };
+  // Four times the other modes' window: a frame here is cheap, and the reading's own few kilobytes (the heap's statistics,
+  // read at each end) are then a smaller share of the line every mode is held to (a twentieth of a byte a frame).
+  const WATER_FRAMES = 4 * FRAMES;
+  try {
+    new Function('f', '%NeverOptimizeFunction(f)')(waterFrames);
+  } catch {
+    // Without the flag the loop is left to the compiler.
+  }
+  const measure = async (): Promise<{ made: number; scavenges: number }> => {
+    waterFrames(20_000);
+    let best = { made: Infinity, scavenges: Infinity };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      waterFrames(10_000);
+      gc({ type: 'minor' });
+      await settle();
+      scavenges = 0;
+      const before = young();
+      waterFrames(WATER_FRAMES);
+      const made = young() - before;
+      await settle();
+      if (scavenges < best.scavenges || (scavenges === best.scavenges && made < best.made)) best = { made, scavenges };
+      if (best.scavenges === 0 && best.made <= 0) break;
+    }
+    return best;
+  };
+  // The aim over the picked lake's middle on the screen, nothing held.
+  st[2] = 0;
+  st[3] = 800;
+  st[4] = 450;
+  waterFrame();
+  const L = (water as unknown as { layout: { on: boolean; square: Float64Array } }).layout;
+  const steady = await measure();
+  const shownLakes = wm.lakeCount;
+  // F held, the mouse moving: the raise carried on.
+  st[2] = 1;
+  const raise = await measure();
+  const raising = (water.report() as { raising: number }).raising !== 0;
+  // F let go (a write, outside every window), then the square grabbed at its middle and dragged.
+  st[2] = 0;
+  waterFrame();
+  await settle();
+  // A frame laid out after the let-go (the let-go's own frame laid the square out still raised).
+  waterFrame();
+  st[3] = (L.square[0] + L.square[2] + L.square[4] + L.square[6]) / 4;
+  st[4] = (L.square[1] + L.square[3] + L.square[5] + L.square[7]) / 4;
+  st[2] = 2;
+  // The press frame's cursor on the square's middle itself (its step at nought, so its wander is nought).
+  const saveStep = st[1];
+  st[1] = -1;
+  waterFrame();
+  st[1] = saveStep;
+  const dragging = (water.report() as { dragging: boolean }).dragging;
+  const hot = (L as unknown as { hot: number }).hot;
+  const drag = await measure();
+  // The drag let go (a write, outside every window), the lake let go, and three clicks of an outline (each a press and a
+  // let-go, away from every lake's ring): a draft under way, drawn with the aim, nothing held.
+  st[2] = 0;
+  waterFrame();
+  await settle();
+  water.picked = null;
+  st[3] = 800;
+  st[4] = 450;
+  for (let k = 0; k < 3; k++) {
+    st[2] = 3;
+    waterFrame();
+    st[2] = 0;
+    waterFrame();
+  }
+  const draftPoints = (water.report() as { draft: number }).draft;
+  if (process.argv.includes('profile')) {
+    // Where the draft's frame makes anything, by the sampling heap profiler: `node --expose-gc --allow-natives-syntax
+    // tools/swg/tests/editorAllocOwn.ts water profile`.
+    waterFrames(20_000);
+    const { Session } = await import('node:inspector/promises');
+    const session = new Session();
+    session.connect();
+    await session.post('HeapProfiler.startSampling', { samplingInterval: 32, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
+    waterFrames(50_000);
+    interface SampleNode {
+      callFrame: { functionName: string; url: string; lineNumber: number };
+      selfSize: number;
+      children: SampleNode[];
+    }
+    const { profile } = (await session.post('HeapProfiler.stopSampling')) as unknown as { profile: { head: SampleNode } };
+    const sites = new Map<string, number>();
+    const walk = (n: SampleNode, path: string) => {
+      const here = `${n.callFrame.functionName || '(anon)'} ${n.callFrame.url.split('/').pop()}:${n.callFrame.lineNumber + 1}`;
+      if (n.selfSize > 0) sites.set(`${here}  <-  ${path}`, (sites.get(`${here}  <-  ${path}`) ?? 0) + n.selfSize);
+      for (const c of n.children) walk(c, here);
+    };
+    walk(profile.head, '');
+    for (const [key, n] of [...sites.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15)) console.log(`${(n / 50_000).toFixed(2)} B/frame  ${key}`);
+    process.exit(0);
+  }
+  const draft = await measure();
+  watch.disconnect();
+  console.log(JSON.stringify({ frames: WATER_FRAMES, made: steady.made, scavenges: steady.scavenges, raiseMade: raise.made, raiseScavenges: raise.scavenges, dragMade: drag.made, dragScavenges: drag.scavenges, draftMade: draft.made, draftScavenges: draft.scavenges, lakes: shownLakes, raising, dragging, hot, draftPoints, draftDrawn: wm.draftCount, gizmo: L.on }));
+  process.exit(0);
+}
 // With `paint` (`paintAlloc.test.ts`, Map-maker II's second wave): the paint brush armed and hovering, no stroke under way -- the Tools list's frame handed to the tool
 // (`paintTool`'s step) and its two rings projected and drawn, the aim wandering, exactly as the sculpt brush's. With `plants`
 // as well (the fourth wave), on the plants layer: its own radius and tune, the recipe chosen.

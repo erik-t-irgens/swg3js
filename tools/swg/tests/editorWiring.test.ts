@@ -55,10 +55,12 @@ function after(src: string, marker: string, n = 2000): string {
 {
   // The editor's own hand-overs, in its entry (which node cannot load: it hangs on the page's three and the interface).
   const ed = read('src/editor/editorEntry.ts');
-  const keys = after(ed, '  keys(dt: number, oldHand: boolean): void {', 6000);
+  // 7,500 characters since Map-maker II's fifth wave, whose water tool reads F and the wheel with it in the block.
+  const keys = after(ed, '  keys(dt: number, oldHand: boolean): void {', 7500);
   // Widened in the second wave on purpose: while Ctrl is held the block reads the editor's own chords (raw keys, never an
-  // action) before it mutes every action, and still reads nothing else.
-  ok(/if \(ctrl\) \{[\s\S]{0,700}this\.edits\.chords\(\);\s*input\.mute\(ctrlRule\(ctrl\)\);\s*return;\s*\}/.test(keys), 'while Ctrl is held the key block reads only the editor\'s chords and mutes every action (`ctrlRule`), reading nothing more');
+  // action) before it mutes every action, and still reads nothing else. Widened again in Map-maker II's fifth wave, whose
+  // block clears the water tool's raise (the mouse it took, F) along with the brushes' buttons.
+  ok(/if \(ctrl\) \{[\s\S]{0,900}this\.edits\.chords\(\);\s*input\.mute\(ctrlRule\(ctrl\)\);\s*return;\s*\}/.test(keys), 'while Ctrl is held the key block reads only the editor\'s chords and mutes every action (`ctrlRule`), reading nothing more');
   // And a hold or a drag made before Ctrl pauses: `idle` takes the frame's mouse and button edges from it, and the camera
   // holds still while it has the mouse (the editing class's own test drives `idle`; this is the hand-over).
   ok(/if \(ctrl\) \{[\s\S]{0,200}this\.edits\.idle\(\);\s*a\.look = !this\.session\.point && input\.locked && !this\.edits\.takesMouse;/.test(keys), 'while Ctrl is held the editing is told the frame is idle before the look is decided');
@@ -133,7 +135,9 @@ function after(src: string, marker: string, n = 2000): string {
   ok(main.includes("import.meta.hot.on('placements:changed', (d: PlacementWord) => this.placementWord(d));"), "the dev server's word goes through `placementWord`, which drops a revision already landed");
   const ed = read('src/editor/editorEntry.ts');
   ok(/batch: \(edits\) => host\.batch\(edits\),\s*status: \(\) => host\.status\(\),/.test(ed), "the entry hands the hand on the selection the host's batch and status");
-  ok(/this\.edits\.clock\.now = now;\s*this\.edits\.frame\(m\);\s*this\.moveEyeForEdits\(\);\s*endPointerFrame\(this\.pointer\);/.test(ed), "the selection's frame (the gizmo, the hold, the drag, the clicks, the marks) runs after the camera, its moment in the kept clock, and before the pointer's frame is spent");
+  // Map-maker II's fifth wave puts an armed tool's own marks (the water tool's lakes and its picked lake's square) between
+  // the editing's frame and the eye's move, from the same frame's view, so they draw over the editing's own gizmo.
+  ok(/this\.edits\.clock\.now = now;\s*this\.edits\.frame\(m\);[\s\S]{0,500}if \(tool && tool\.armed\(\) && tool\.overlay\) tool\.overlay\(this\.toolDraw, sv\);\s*this\.moveEyeForEdits\(\);\s*endPointerFrame\(this\.pointer\);/.test(ed), "the selection's frame (the gizmo, the hold, the drag, the clicks, the marks) runs after the camera, its moment in the kept clock, then an armed tool's own marks, and before the pointer's frame is spent");
   ok(/this\.edits\.clock\.dt = dt;\s*this\.edits\.keys\(this\.window\?\.library\.typing \?\? false\);\s*\}/.test(ed), "the editing keys are read in the key block, the frame's seconds in the kept clock, before the mutes take what they borrow");
   // This round's hand-overs (the fixer's), which the editing class's own test makes for itself.
   const click = after(ed, '  canvasClick(): void {', 600);
@@ -145,7 +149,8 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/if \(this\.editorOut\.size\) this\.dropEditorCopies\(\[\.\.\.this\.editorOut\]\);/.test(read('src/world/layoutStream.ts')), "and a streamer's dispose takes away every copy it handed out and nobody took back");
   ok(/this\.ghostM\.compose\(this\.ghostPos, hand\.q, hand\.scale\);\s*this\.ghost\.place\(this\.ghostM, inRoom\);/.test(ed) && /if \(!hand\.building && hand\.sBounds\) this\.ghostPos\.y -= lowestOf\(hand\.sBounds, hand\.q, this\.tmp\);/.test(ed), "a row picked up into the hand is drawn and stood at its own scale (its lowest point at that size), as it is written back");
   ok(/if \(this\.edits\.takesMouse && !armedTool\) this\.edits\.wheelStep\(-wheel\);/.test(ed), 'the wheel steps the grid while a hand key is held on the selection, and never while a tool is armed (Map-maker II §2.3)');
-  ok(/else if \(!this\.edits\.deleteKey\(\)\) this\.deleteHovered\(\);/.test(ed), 'Delete takes the selection out, and the row under the aim when nothing is picked');
+  // From Map-maker II's fifth wave an armed tool takes Delete first (the water tool's picked lake).
+  ok(/else if \(!\(this\.tools\.armedTool\?\.deleteKey\?\.\(\) \?\? false\) && !this\.edits\.deleteKey\(\)\) this\.deleteHovered\(\);/.test(ed), 'Delete takes an armed tool\'s own first, then the selection out, and the row under the aim when nothing is picked');
   ok(/document\.addEventListener\('paste', \(e\) => \{\s*if \(!this\.session\.on \|\| typingIn\(e\.target\)\) return;\s*const text = e\.clipboardData\?\.getData\('text\/plain'\) \?\? null;/.test(ed), "a paste reads the document's own paste event, never the clipboard API (a prompt on localhost)");
   ok(/if \(this\.session\.on && e\.ctrlKey && e\.code === 'KeyD' && !typingIn\(e\.target\)\) e\.preventDefault\(\);/.test(ed), "Ctrl+D is kept from the browser's bookmark while the editor is on");
   ok(/this\.hoverM\.compose\(this\.tmp\.set\(hov\.x, hov\.y, hov\.z\), hov\.q, hov\.scale \?\? ONE\);/.test(ed), "the hover's box is drawn at the row's scale");
@@ -182,7 +187,9 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/const tool = this\.tools\.armedTool;\s*if \(tool\) \{[\s\S]{0,1600}tool\.step\(f\);\s*\}\s*\/\/[^\n]*\n\s*this\.noteActivity\(now\);/.test(aftercam), "the armed tool's frame runs from the aim just cast, before the quiet the automatic fold waits for is noted");
   ok(aftercam.indexOf('tool.draw(this.toolDraw);') > 0 && aftercam.indexOf('tool.draw(this.toolDraw);') < aftercam.indexOf('this.edits.frame(m);') && /brushRing\(ringAsk, ringGround, vp\.elements, marks\.ring, marks\.ringVis\);/.test(ed), "the armed tool's rings are projected from this frame's camera (`brushRing`)");
   ok(/this\.giveUpHand\(\);\s*this\.tools\.disarmAll\(\);\s*this\.takeGen = gen;/.test(ed), 'taking a thing in hand lets the armed tool go');
-  ok(/const armed = this\.tools\.armedTool;\s*if \(armed\) \{\s*this\.tools\.disarmAll\(\);\s*this\.say\(`\$\{armed\.label\} let go`, true\);/.test(after(ed, '  escape(): boolean {', 1200)), 'Escape lets the armed tool go before it clears the selection');
+  // From Map-maker II's fifth wave a tool with something of its own under way (the water tool's draft, its picked lake) is
+  // asked first and gives that up rather than being let go.
+  ok(/const armed = this\.tools\.armedTool;\s*if \(armed\?\.escape\?\.\(\)\) \{\s*this\.window\?\.refreshEdits\(\);\s*return true;\s*\}\s*if \(armed\) \{\s*this\.tools\.disarmAll\(\);\s*this\.say\(`\$\{armed\.label\} let go`, true\);/.test(after(ed, '  escape(): boolean {', 1600)), 'Escape asks the armed tool first, then lets it go, before it clears the selection');
   ok(/worldGone\(\): void \{[\s\S]{0,400}this\.tools\.disarmAll\(\);/.test(ed) && /private leaveBody\([^)]*\): void \{\s*this\.giveUpHand\(\);\s*this\.tools\.disarmAll\(\);/.test(ed), 'the armed tool goes with the world and with the editor');
   ok(/toolArmed: \(\) => me\.tools\.toolArmed\(\),/.test(ed), "the editing is told a tool is armed (no click picks, boxes or orbits meanwhile)");
   ok(/for \(const t of this\.tools\.list\) if \(t\.action && input\.pressedAction\(t\.action\)\) void this\.toggleTool\(t\.id\);/.test(ed) && /this\.tools\.add\(scatterTool\(this\.brush,/.test(ed), "B arms the brush and lets it go (the list's first entry, on its own action)");

@@ -215,7 +215,7 @@ import { detailLevels, exteriorAppearance, resolveParts } from './appearance.mjs
 import { LOD_FORMAT, lodMeshesFor as lodMeshesForDeps } from './lodlevels.mjs';
 import { decodeDds } from './dds.mjs';
 import { FLOOR_PACK_VERSION, floorBlock, floorSize, parseFloor } from './flr.mjs';
-import { GOAL_SNAP, NAV_BAKE_RULES, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, walkThroughTemplates, writeNavGrid } from './navgrid.mjs';
+import { GOAL_SNAP, NAV_BAKE_RULES, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, gridEditsOf, walkThroughTemplates, writeNavGrid } from './navgrid.mjs';
 import { buildGlb, glbAlphaMode, glbSpecStamped } from './glb.mjs';
 import { dump, find, isForm, parseIff, readCString } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
@@ -3136,7 +3136,7 @@ function packStatus(dir) {
     // A grid that names a layout other than the pack's is baked again; one that names none is asked only beside a
     // world converted with SOE's final files, so an install the names list cannot serve is never asked for its grids.
     // `navgrid --skip-existing` asks the very same function, so a resumed bake keeps nothing this asks for.
-    const navStale = gridLayoutStale(navGrid, packDir, manifest, statusWalkThrough);
+    const navStale = gridLayoutStale(navGrid, packDir, manifest, statusWalkThrough, gridEditsOf(planet, undefined, packDir));
     if (navStale) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid ${navStale}`);
     // Its own `if`: exportWater always writes the file, so its existence is the whole test.
     if (terrain && !water) need(`water <swg-dir> all ${dir} --retail-only`, `${planet} has no water.json`);
@@ -9327,7 +9327,8 @@ switch (cmd) {
         } catch {
           manifest = null;
         }
-        const stale = there ? gridLayoutStale(there, outDir, manifest, walkThrough) : null;
+        // The world's committed edit files (navgrid.mjs `gridEditsOf`), which the key folds in as status asks it.
+        const stale = there ? gridLayoutStale(there, outDir, manifest, walkThrough, gridEditsOf(planet, undefined, outDir)) : null;
         if (there && there.version === NAV_GRID_VERSION && there.nx && Number(there.slopeDegrees) === Number(want) && rules >= NAV_BAKE_RULES && !stale) {
           console.log(`${planet}: nav.json is there already, version ${there.version} at ${there.slopeDegrees} degrees`);
           continue;
@@ -9346,8 +9347,12 @@ switch (cmd) {
       try {
         // What it is baked from, taken before the bake reads it, so `status` can ask again when either moves: the layout,
         // its terrain and the shared walk-through file's rows that reach the world, the very set the bake leaves out.
-        const layoutKey = layoutKeyOf(outDir, walkThrough);
-        const grid = await buildNavGrid(outDir, { cell, slope, walkThrough, log: (line) => console.log(line) });
+        // And the world's committed edit files (Map-maker II's fifth wave: its heights, its water and its world and story
+        // placements, `gridEditsOf`), read once and handed to both, so the key names the very files the bake read.
+        // With the pack's folder, so the key also names any solid row's model this install does not hold yet (`absent`).
+        const edits = gridEditsOf(planet, undefined, outDir);
+        const layoutKey = layoutKeyOf(outDir, walkThrough, edits);
+        const grid = await buildNavGrid(outDir, { cell, slope, walkThrough, edits, log: (line) => console.log(line) });
         if (layoutKey) grid.header.layoutKey = layoutKey;
         const out = writeNavGrid(outDir, grid);
         const stats = out.stats;

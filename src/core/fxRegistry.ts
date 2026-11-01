@@ -366,6 +366,31 @@ export const FX_PASSES: readonly FxPassDef[] = [
 ];
 
 /**
+ * A pass's second material, drawn in its place on frames it says (Map-maker II's fifth wave began the list): its pass, its
+ * name, the materials it adds to the pass's warm-up, what decides its frames, its switch and why it is a variant rather than
+ * a pass of its own. Its pass's own row (its stage, toggles and budget) governs it; it asks for no product.
+ */
+export interface FxPassVariantDef {
+  pass: FxPassId;
+  id: string;
+  materials: readonly string[];
+  frames: string;
+  tune: string;
+  why: string;
+}
+
+export const FX_PASS_VARIANTS: readonly FxPassVariantDef[] = [
+  {
+    pass: 'underwater',
+    id: 'exits',
+    materials: ['fx.underwater.exits', 'fx.underwater.region'],
+    frames: 'the camera dry in a building with rooms one of whose exits stands under water, a lake of ours or a client table (`FxFrameContext.exitWater`)',
+    tune: 'UNDERWATER_TUNE.exits',
+    why: 'Looking out of a dry room through a doorway under water: the world seen through the exits (the portal stencil\'s 2, read into a region mask as the ambient occlusion reads its rooms) graded by the underwater look\'s own arithmetic, the exit\'s depth under its surface taken as the camera\'s. A second material and not a pass, so today\'s look keeps its text and its key and the chain its order.',
+  },
+];
+
+/**
  * What the water reflections read each frame, by trace resolution: the half-resolution trace marches
  * the half-resolution depth, the full one the scene's own. The row's `needs` is exactly their union,
  * and the mask carries the surface normals, so neither asks for `normalsHalf`.

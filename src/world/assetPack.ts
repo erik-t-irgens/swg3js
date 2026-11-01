@@ -3,7 +3,7 @@ import { isReflective, registerReflective } from './envmap.ts';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { surfaces } from './surfaces.ts';
 import { drawnLevels } from './lodLevels.ts';
-import { mergeFloraCollision, type FloraCollision } from './floraCollision.ts';
+import { mergeFloraCollision, modelExtentOf, type FloraCollision } from './floraCollision.ts';
 import { DOORS_PACK_VERSION, type DoorsFile } from './doorMath.ts';
 import { CARD_LIGHT_TUNE } from './cardLight.ts';
 import { prepareCardModel, registerPackCards, registerSharedCards } from './cardRule.ts';
@@ -587,6 +587,11 @@ export class AssetPack {
         prepareSwayModel(scenes, `${this.baseUrl}${def.id}`, def.id, { flora, building: !!def.cells?.length });
         const levels = modelLevels(def, gltf.scenes ?? [], primitives);
         const { min, max } = def.bounds;
+        // The corners taken as an extent, never by which is called min (the BOX lesson: a pack converted
+        // before the box chunk was read properly carries them swapped, which read as a negative radius --
+        // and this radius files a placed thing's tier, sizes a building's room range and decides a shadow).
+        // One function the walk grid's bake reads too (`modelExtentOf`), so a guessed trunk stands alike in both.
+        const extent = modelExtentOf(def.bounds);
         const interiorBoxes = (def.cells ?? [])
           .filter((c) => c.index > 0)
           .map((c) => new THREE.Box3(new THREE.Vector3(...(c.bounds.min as [number, number, number])), new THREE.Vector3(...(c.bounds.max as [number, number, number]))));
@@ -614,11 +619,8 @@ export class AssetPack {
           def,
           scene: gltf.scene,
           primitives,
-          // The corners taken as an extent, never by which is called min (the BOX lesson: a pack converted
-          // before the box chunk was read properly carries them swapped, which read as a negative radius --
-          // and this radius files a placed thing's tier, sizes a building's room range and decides a shadow).
-          radius: Math.max(Math.abs(max[0] - min[0]), Math.abs(max[2] - min[2])) / 2,
-          height: max[1] - Math.min(0, min[1]),
+          radius: extent.radius,
+          height: extent.height,
           interiorBoxes,
           bounds: new THREE.Box3(new THREE.Vector3(min[0], min[1], min[2]), new THREE.Vector3(max[0], max[1], max[2])),
           portals,

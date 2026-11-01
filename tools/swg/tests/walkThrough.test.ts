@@ -403,9 +403,10 @@ const walkedRows = [...fileRows.rows].filter(([, s]) => s === false).map(([t]) =
   pin(nav, /if \(walkThrough\.has\(o\.template\)\) \{\s*walkedThrough\+\+;\s*continue;\s*\}/, "the bake leaves out every copy of a template the file walks through");
   pin(nav, /export function readGlbTriangles\(file, skip = isFallingWaterShader\)/, 'and every falling-water piece');
   pin(cli, /const walkThrough = walkThroughTemplates\(\);\s*let built = 0;/, 'the navgrid command reads the file once');
-  pin(cli, /gridLayoutStale\(there, outDir, manifest, walkThrough\)/, 'its resumed run asks the same key status asks');
-  pin(cli, /const layoutKey = layoutKeyOf\(outDir, walkThrough\);\s*const grid = await buildNavGrid\(outDir, \{ cell, slope, walkThrough,/, 'and it keys and bakes over the one set it read');
-  pin(cli, /const navStale = gridLayoutStale\(navGrid, packDir, manifest, statusWalkThrough\);/, '`status` asks for a grid again when what the file reaches of a world moves');
+  // Moved on purpose by Map-maker II's fifth wave: the key and the bake take the world's committed edit files beside the set.
+  pin(cli, /gridLayoutStale\(there, outDir, manifest, walkThrough, gridEditsOf\(planet, undefined, outDir\)\)/, 'its resumed run asks the same key status asks');
+  pin(cli, /const edits = gridEditsOf\(planet, undefined, outDir\);\s*const layoutKey = layoutKeyOf\(outDir, walkThrough, edits\);\s*const grid = await buildNavGrid\(outDir, \{ cell, slope, walkThrough, edits,/, 'and it keys and bakes over the one set it read');
+  pin(cli, /const navStale = gridLayoutStale\(navGrid, packDir, manifest, statusWalkThrough, gridEditsOf\(planet, undefined, packDir\)\);/, '`status` asks for a grid again when what the file reaches of a world moves');
   pin(pack, /'src\/world\/walkThrough\.ts'\]/, "the launcher's release carries the reader the bake imports");
 }
 

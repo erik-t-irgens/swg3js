@@ -3,7 +3,8 @@ import type { PlanetDef } from '../data/planets';
 import { FBM, hash2 } from './noise.ts';
 import type { DemPatch } from './demTerrain';
 import type { DemShader } from './demShader';
-import type { FarGrid, SwgTerrain } from './swgTerrain';
+import type { FarGrid, SwgTerrain, SwgWaterTable } from './swgTerrain';
+import { surfaceOf, tableOf, type LakeTable } from './ourWater.ts';
 import { sampleFamily, type FamilyGrid } from '../audio/footsteps.ts';
 import { groundChunkOrigin, NO_SHIFT, tileCode, tileLayers, type GroundShift, type GroundTiler } from './groundTiles.ts';
 import type { HeightEdits } from '../swg/terrain/heightEdits.ts';
@@ -158,7 +159,27 @@ export class Terrain {
 
   /** Water surface at a point: lakes and pools count as well as the global water level. */
   waterHeightAt(x: number, z: number): number {
-    return this.swg ? this.swg.waterAt(x, z) : this.waterLevel;
+    if (this.swg) return this.swg.waterAt(x, z);
+    // A world with no converted terrain asks its own lakes of ours (Map-maker II's fifth wave), the higher winning; none,
+    // and the answer is the planet's own level, as it always was.
+    return this.lakes.length ? surfaceOf(this.lakes, x, z, this.waterLevel) : this.waterLevel;
+  }
+
+  /**
+   * The lakes of ours on a world with no converted terrain (a real-elevation world: Map-maker II's fifth wave), in the
+   * game's frame, each a client lake's table (`ourWater.ts`). On a converted world they are the converted terrain's own
+   * tables (`SwgTerrain.setOurWater`) and this stays empty.
+   */
+  readonly lakes: LakeTable[] = [];
+
+  /**
+   * The highest table covering a point, the converted terrain's (`SwgTerrain.waterTableAt`, to the bit) or, on a world with
+   * none, a lake of ours (`lakes`); null where only the global sea or nothing stands over it. What the camera's look and the
+   * lava's column ask, so a lake of ours on a real-elevation world is named as a client lake is.
+   */
+  waterTableAt(x: number, z: number): SwgWaterTable | null {
+    if (this.swg) return this.swg.waterTableAt(x, z);
+    return this.lakes.length ? tableOf(this.lakes, x, z) : null;
   }
 
   detachSwg(): void {

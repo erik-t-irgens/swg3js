@@ -15,7 +15,7 @@ import type { HeatSources } from '../../world/heatSources';
 import { LensFlarePass } from './lensFlare';
 import { LightShaftsPass } from './lightShafts';
 import { CloudsPass } from './clouds';
-import { UnderwaterPass } from './underwater';
+import { UnderwaterPass, underwaterHostFor } from './underwater';
 import { DepthOfFieldPass } from './dof';
 import { DofGlowProduct, type DofGlowCollector } from './dofGlow';
 import { VelocityProduct, type FxMoverList } from './velocity';
@@ -84,7 +84,8 @@ export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
   // under a surface, how deep, and which body's colour and opacity from the frame context, and asks
   // for no product. It draws on no frame the camera is dry. Where it sits in the chain is the
   // registry's (FX_PASSES), not this line's.
-  postfx.registerPass(new UnderwaterPass());
+  // With its host, so its exits variant (Map-maker II's fifth wave) can make its region mask sharing the scene's depth.
+  postfx.registerPass(new UnderwaterPass(underwaterHostFor(postfx)));
   // The specks drifting in that water, when the game hands over a way to make them. They are drawn
   // after the lens rather than here, which is the registry's business and not this line's.
   if (deps.specks) postfx.registerPass(deps.specks());

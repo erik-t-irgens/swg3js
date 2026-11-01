@@ -539,7 +539,7 @@ export function verifyFinalNames(dir, list, { openTre }) {
  * grid is asked for again exactly when the layout or the terrain under it moved, and never for a world converted
  * again to the same answer. Null where the pack has no layout.
  */
-export function layoutKeyOf(packDir, walkThrough = null) {
+export function layoutKeyOf(packDir, walkThrough = null, edits = null) {
   let text;
   try {
     text = readFileSync(join(packDir, 'layout.json'), 'utf8');
@@ -568,6 +568,17 @@ export function layoutKeyOf(packDir, walkThrough = null) {
     const reached = [...new Set(placed.filter((o) => !o.contained && walkThrough.has(o.template)).map((o) => o.template))].sort();
     if (reached.length) h.update('\n \nwalk through\n').update(reached.join('\n'));
   }
+  // And the world's committed edit files the bake reads (Map-maker II's fifth wave, navgrid.mjs `gridEditsOf`: its heights,
+  // its water and its world and story placements), each one's text with its line endings folded, so a grid is asked for
+  // again when any of them moves; a world with none keys exactly as it did before them.
+  for (const kind of ['heights', 'water', 'world', 'story']) {
+    const text = edits?.texts?.[kind];
+    if (typeof text === 'string') h.update(`\n \nedit ${kind}\n`).update(text.replace(/\r\n/g, '\n'));
+  }
+  // And what of those files' solid rows this install's packs do not hold (navgrid.mjs `gridEditsOf`'s `absent`: a model,
+  // or a flora pack's collision shapes), which the bake stood nothing for: a grid baked before the gallery, the props or
+  // another world was converted is asked for again once they are. With every one there, the key is the files' alone.
+  if (Array.isArray(edits?.absent) && edits.absent.length) h.update('\n \nabsent\n').update(edits.absent.join('\n'));
   return h.digest('hex').slice(0, 12);
 }
 
@@ -578,9 +589,11 @@ export function layoutKeyOf(packDir, walkThrough = null) {
  * world converted without them is left alone, so an install the list cannot serve is never asked for its grids.
  * `status` asks it and `navgrid --skip-existing` asks it, so a resumed bake never keeps a grid `status` then asks for.
  */
-export function gridLayoutStale(grid, packDir, manifest, walkThrough = null) {
+export function gridLayoutStale(grid, packDir, manifest, walkThrough = null, edits = null) {
   if (!grid) return null;
-  if (grid.layoutKey) return grid.layoutKey !== layoutKeyOf(packDir, walkThrough) ? 'was baked from another layout or terrain, or another walk-through file, than the pack has now' : null;
+  if (grid.layoutKey) return grid.layoutKey !== layoutKeyOf(packDir, walkThrough, edits) ? 'was baked from another layout or terrain, another walk-through file, or other committed edit files (heights, water, placements) than the pack has now' : null;
+  // A grid with no key of a world that now has committed edit files cannot have read them.
+  if (['heights', 'water', 'world', 'story'].some((k) => typeof edits?.texts?.[k] === 'string')) return 'was baked before the world had its committed edit files (heights, water, placements)';
   return manifest?.late?.state === 'applied' ? "was baked before the world was converted with SOE's final files" : null;
 }
 

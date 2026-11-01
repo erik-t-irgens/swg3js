@@ -84,6 +84,11 @@ export class FloraPlanter {
   /** Appearances the pack has no model for, counted once each for diagnostics. */
   readonly missing = new Set<string>();
   planted = 0;
+  /**
+   * Whether a planting at a point of the game's frame (and the ground under it) stands under a lake of ours (Map-maker II's
+   * fifth wave, `ourWater.ts` `underLakes`): the world's, null with no lake of ours at all, so the planting is today's.
+   */
+  underOurWater: ((x: number, z: number, ground: number) => boolean) | null = null;
 
   constructor(swg: FloraSource, models: Map<string, LoadedModel>) {
     this.swg = swg;
@@ -268,7 +273,10 @@ export class FloraPlanter {
     plants.name = 'plants';
     group.add(trees, plants);
     const colliders: Collider[] = [];
-    const kept = placements.filter((p) => exclusions.every((e) => Math.hypot(e.x - p.x, e.z - p.z) > e.r));
+    // A planting under a lake of ours is left out (Map-maker II's fifth wave, `underOurWater`): null with no lake at all, so
+    // the planting is today's by identity.
+    const under = this.underOurWater;
+    const kept = placements.filter((p) => exclusions.every((e) => Math.hypot(e.x - p.x, e.z - p.z) > e.r) && !(under && under(p.x, p.z, heightAt(p.x, p.z))));
     // Every planting's place and matrix, once: the chunk's own meshes and the region batches (step 7,
     // `floraBatch.ts`) are both written from it.
     const data = plantingData(kept, heightAt, waterAt);
