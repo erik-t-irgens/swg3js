@@ -65,7 +65,9 @@
 // tables by the game's own rule (`ourWater.ts`), and the solid rows of the world and story placements rasterised as a
 // placed object is. With none of them the bake is the one before to the byte, and the grid's key (`layoutKeyOf`) folds in
 // the files' text, so `status` asks for `navgrid <world>` again when any of them moves (the owner's answer of 2026-10-26:
-// reconvert, never a patch at run time).
+// reconvert, never a patch at run time). From the sixth wave the water file's rivers are water to it as a lake is, and so
+// are the terrain's own wet rivers (`gridSoeRivers`, the very rows the game draws), whose stamp the key folds in
+// (`soeRiverStamp`), so the two test worlds that have them are asked for again and no other world is.
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { basename, join, dirname } from 'node:path';
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
@@ -78,8 +80,10 @@ import {
 } from '../../src/world/nav/gridRules.ts';
 import { HeightEdits } from '../../src/swg/terrain/heightEdits.ts';
 import { deltasOf, readHeightsFile, tileOfId } from '../../src/world/editFiles/heightsFile.ts';
-import { readWaterFile } from '../../src/world/editFiles/waterFile.ts';
-import { lakeTable, surfaceOf } from '../../src/world/ourWater.ts';
+import { isLakeRow, isRiverRow, readWaterFile, readWaterRow } from '../../src/world/editFiles/waterFile.ts';
+import { lakeTable, RIVER_TUNE, riversSurface, riverTable, surfaceOf } from '../../src/world/ourWater.ts';
+import { soeRiverRows } from '../../src/swg/terrain/ribbons.ts';
+import { parseTerrainTemplate } from '../../src/swg/terrain/trn.ts';
 import { readPlacementsFile, scaleOf } from '../../src/story/placements.ts';
 import { isSeat, isTableTemplate, standsSolid } from '../../src/world/rowSolid.ts';
 import { FLORA_COLLISION, mergeFloraCollision, modelExtentOf, rowFloraParts } from '../../src/world/floraShapes.ts';
@@ -116,6 +120,12 @@ export function gridEditsOf(world, folder = placementsFolder(), packDir = null) 
     texts[kind] = text;
   }
   const edits = { world, texts };
+  // The terrain's own wet rivers the bake makes water (Map-maker II's sixth wave), as a stamp the key folds in: a world whose
+  // terrain has none carries none, and keys exactly as it did.
+  if (packDir) {
+    const stamp = soeRiverStamp(packDir);
+    if (stamp) edits.soeRivers = stamp;
+  }
   if (packDir && (typeof texts.world === 'string' || typeof texts.story === 'string')) {
     const packs = installPacks(packDir);
     const absent = new Set();
@@ -234,8 +244,8 @@ export function gridHeights(edits, log = () => {}) {
   return store.size ? store : null;
 }
 
-/** The water file's lakes, read as the game reads them (`readWaterFile`); none where there is no file. */
-export function gridLakes(edits, log = () => {}) {
+/** The water file's rows, read as the game reads them (`readWaterFile`); none where there is no file. */
+function gridWaterRows(edits, log) {
   const text = edits?.texts?.water;
   if (typeof text !== 'string') return [];
   const read = readWaterFile(text, edits.world, 'ground');
@@ -243,8 +253,58 @@ export function gridLakes(edits, log = () => {}) {
     log(`  water file not read: ${read.problem}`);
     return [];
   }
-  for (const s of read.skipped) log(`  lake ${s.id} skipped: ${s.why}`);
+  for (const s of read.skipped) log(`  water row ${s.id} skipped: ${s.why}`);
   return read.rows;
+}
+
+/** The water file's lakes, read as the game reads them (`readWaterFile`); none where there is no file. */
+export function gridLakes(edits, log = () => {}) {
+  return gridWaterRows(edits, log).filter(isLakeRow);
+}
+
+/** The water file's rivers (Map-maker II's sixth wave), read as the game reads them; none where there is no file. */
+export function gridRivers(edits, log = () => {}) {
+  return gridWaterRows(edits, () => {}).filter(isRiverRow);
+}
+
+/**
+ * The terrain's own wet rivers as the game reads them (`soeRiverRows`, each through the water file's own reader, merged at
+ * the game's `RIVER_TUNE.spacingMin`): what the bake makes water beside the client's tables, so the grid and the drawn
+ * world agree. None on a terrain with none.
+ */
+export function gridSoeRivers(generator, log = () => {}) {
+  const got = soeRiverRows(generator, RIVER_TUNE.spacingMin);
+  for (const s of got.skipped) log(`  the terrain's river ${s.name} left out: ${s.why}`);
+  const out = [];
+  for (const raw of got.rows) {
+    const row = readWaterRow(raw);
+    if (typeof row === 'string' || row.kind !== 'river') log(`  the terrain's river ${String(raw.name)} does not read: ${typeof row === 'string' ? row : 'not a river'}`);
+    else out.push(row);
+  }
+  return out;
+}
+
+/**
+ * Which way the bake makes the terrain's own wet rivers water (Map-maker II's sixth wave), as the words the grid's key folds
+ * in (`layoutKeyOf`): `v1:<how many>` over a pack whose terrain holds one that runs, '' over every other (a terrain that
+ * names no river affector at all is not parsed). A grid baked before rivers were water is then asked for again on exactly
+ * the worlds that have them.
+ */
+export function soeRiverStamp(packDir) {
+  try {
+    let terrain = 'terrain.trn';
+    try {
+      terrain = JSON.parse(readFileSync(join(packDir, 'layout.json'), 'utf8')).terrain ?? terrain;
+    } catch {
+      // A layout that will not parse keys its usual terrain.
+    }
+    const bytes = readFileSync(join(packDir, terrain));
+    if (bytes.indexOf('ARIV') < 0) return '';
+    const n = gridSoeRivers(parseTerrainTemplate(new Uint8Array(bytes)).generator).length;
+    return n ? `v1:${n}` : '';
+  } catch {
+    return '';
+  }
 }
 
 /** The world and story placement rows of a world that stand solid (`standsSolid`, a props row's thing's template asked by `thingTemplate`). */
@@ -625,6 +685,7 @@ export async function buildNavGrid(dir, opts = {}) {
 
   // ---- water ----------------------------------------------------------------------------------
   let waterCells = 0;
+  let soeRiverCount = 0;
   {
     const tables = trn.waterTables(template.generator).map((w) => {
       let mnx = Infinity, mxx = -Infinity, mnz = Infinity, mxz = -Infinity;
@@ -640,7 +701,17 @@ export async function buildNavGrid(dir, opts = {}) {
     const lakeRows = gridLakes(edits, log);
     const ours = lakeRows.map((row) => lakeTable(row, (x) => cx - x, (z) => z - cz));
     editStats.lakes = ours.length;
-    waterCells = markWater(nx, nz, cellCenterX, cellCenterZ, cx, cz, global, tables, heightAt, flags, ours.length ? (gx, gz) => surfaceOf(ours, gx, gz) : null);
+    // The rivers (Map-maker II's sixth wave): the terrain's own wet rivers, then the water file's, made tables by the game's
+    // own rule (`riverTable`, which keeps a steep reach water under the game's default `'effects'`), the higher surface
+    // winning; none, and the test is the lakes' alone. `opts.soeRivers` false leaves the terrain's own out (a comparison).
+    const soe = opts.soeRivers === false ? [] : gridSoeRivers(template.generator, log);
+    const rivers = [...soe.map((row) => riverTable(row, (x) => cx - x, (z) => z - cz, row.id)), ...gridRivers(edits, log).map((row) => riverTable(row, (x) => cx - x, (z) => z - cz))];
+    // Counted only where there are any, so a world with none writes the header it always wrote.
+    if (rivers.length > soe.length) editStats.rivers = rivers.length - soe.length;
+    if (soe.length) soeRiverCount = soe.length;
+    if (rivers.length) log(`  rivers: ${soe.length} of the terrain's own and ${rivers.length - soe.length} of ours made water`);
+    const surface = !ours.length && !rivers.length ? null : !rivers.length ? (gx, gz) => surfaceOf(ours, gx, gz) : (gx, gz) => riversSurface(rivers, gx, gz, ours.length ? surfaceOf(ours, gx, gz) : -Infinity);
+    waterCells = markWater(nx, nz, cellCenterX, cellCenterZ, cx, cz, global, tables, heightAt, flags, surface);
   }
 
   // ---- the placed objects ----------------------------------------------------------------------
@@ -931,6 +1002,8 @@ export async function buildNavGrid(dir, opts = {}) {
       // What the world's committed edit files brought (Map-maker II's fifth wave): only where it has one, so a grid of a
       // world with none is written as it always was.
       ...(anyGridEdits(edits) ? { edits: { ...editStats } } : {}),
+      // The terrain's own wet rivers made water (the sixth wave): only where there are any.
+      ...(soeRiverCount ? { soeRivers: soeRiverCount } : {}),
       heightCheck: Number(worstHeight.toFixed(4)),
       seconds: Number(seconds.toFixed(1)),
     },

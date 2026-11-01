@@ -10,10 +10,12 @@ import type { DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
 import { EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, FLORA_PAINT_TUNE, FLORA_PAINT_TUNE_DEFAULTS, PAINT_TUNE, PAINT_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, WATER_TUNE, WATER_TUNE_DEFAULTS, tuneEditor, tuneFloraPaint, tunePaint, tuneSculpt, tuneWater } from './editorTune.ts';
 import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
-import { LAKE_TUNE } from '../world/ourWater.ts';
+import { LAKE_TUNE, RIVER_TUNE, tuneRiverTune } from '../world/ourWater.ts';
 
 /** The lakes' own shipped numbers, as this module first saw them (before any console line moved them). */
 const LAKE_TUNE_SHIPPED = { ...LAKE_TUNE };
+/** The rivers' own, the same way (the sixth wave). */
+const RIVER_TUNE_SHIPPED = { ...RIVER_TUNE };
 
 /**
  * The sculpt brush's numbers of feel (Map-maker II §2.16), as `[key, label, min, max, step, unit, note]`: one list both
@@ -314,6 +316,77 @@ export function lakesDialSet(): DialSet {
   return { helper: 'lakes', groups: g, shipped };
 }
 
+/**
+ * The `rivers` helper's own dials (Map-maker II's sixth wave; the debug menu's, when `rivers` is picked): the width, velocity
+ * and rise of a river being drawn (the water tool's), and the rivers' own numbers of feel (`RIVER_TUNE`: the slope past which
+ * a reach is a fall, the detail's flow, and the fall effects' spacing, drop and most), each set through `rivers({ tune })`'s
+ * own setter, so a moved slope limit makes every river again and the line the menu copies keeps it.
+ */
+export function riversDialSet(): DialSet {
+  const tool: DialGroup = {
+    title: 'A river drawn',
+    note: 'Z arms the water tool; its river mode is on the Tools tab. A picked river’s own width and velocity are the Selected tab’s.',
+    dials: (
+      [
+        ['riverWidth', 'Width', 0.5, 200, 0.5, 'm', 'How wide a river is written.'],
+        ['riverVelocity', 'Velocity', 0, 20, 0.05, 'm/s', 'How fast it runs from its first point to its last (its detail drifts at it, the moving air’s liquid pulls toward it).'],
+        ['riverRise', 'Over its ground', -5, 10, 0.05, 'm', 'Each point’s surface over the ground clicked (the bed is the sculpt brush’s).'],
+      ] as const
+    ).map(([k, label, min, max, step, unit, note]) => ({
+      kind: 'number' as const,
+      key: `tune.${k}`,
+      label,
+      note,
+      min,
+      max,
+      step,
+      unit,
+      get: () => (WATER_TUNE as unknown as Record<string, number>)[k],
+      set: (v: number) => tuneWater({ [k]: v }),
+    })),
+  };
+  const own: DialGroup = {
+    title: 'What a river does',
+    note: 'Every river on the world, the terrain’s own and ours. A moved slope limit or effect number makes every river again (no program is built).',
+    dials: (
+      [
+        ['slopeMax', 'A fall past', 0, 60, 0.5, '°', 'A reach between two points steeper than this is a fall: its effects stand there (or it is no water, by Steep on the Tools tab). A river’s own limit wins.'],
+        ['flow', 'Detail flows at', 0, 4, 0.05, '×', 'Every river’s velocity times this, as its detail drifts downstream.'],
+        ['effectEvery', 'Bank sprays every', 1, 100, 0.5, 'm', 'Along a steep reach, a spray at each bank this far apart.'],
+        ['bigDrop', 'Big fall from', 0, 200, 1, 'm', 'A steep reach dropping this much stands the 200 m fall’s spray and mist at its foot.'],
+        ['effectsMost', 'Effects at most', 0, 200, 1, '', 'The most fall effects one river stands.'],
+        ['effectScale', 'Effects scaled', 0.1, 4, 0.05, '×', 'Every fall effect’s placement times this, over what its drop gives it (how wide its particles start and how fast they leave).'],
+        ['smallRef', 'Small fall made for', 1, 100, 0.5, 'm', 'The drop the small fall’s spray and mist are drawn at their own scale for: a reach dropping twice this stands them at twice it.'],
+        ['bigRef', 'Big fall made for', 10, 500, 5, 'm', 'The drop the 200 m fall’s spray and mist are drawn at their own scale for.'],
+        ['scaleLeast', 'Scale at least', 0.05, 2, 0.05, '×', 'No fall effect stands smaller than this, however short its drop.'],
+        ['scaleMost', 'Scale at most', 0.5, 10, 0.1, '×', 'No fall effect stands larger than this, however long its drop.'],
+      ] as const
+    ).map(([k, label, min, max, step, unit, note]) => ({
+      kind: 'number' as const,
+      key: `tune.${k}`,
+      label,
+      note,
+      min,
+      max,
+      step,
+      unit,
+      get: () => (RIVER_TUNE as unknown as Record<string, number>)[k],
+      set: (v: number) => (RIVER_DIALS.host ? RIVER_DIALS.host.tune({ [k]: v }) : tuneRiverTune({ [k]: v }, () => {})),
+    })),
+  };
+  const g = [tool, own];
+  const shipped = readDials(g);
+  for (const [k] of shipped) {
+    const key = k.slice('tune.'.length);
+    const v = key in RIVER_TUNE_SHIPPED ? (RIVER_TUNE_SHIPPED as unknown as Record<string, unknown>)[key] : (WATER_TUNE_DEFAULTS as unknown as Record<string, unknown>)[key];
+    if (typeof v === 'number') shipped.set(k, v);
+  }
+  return { helper: 'rivers', groups: g, shipped };
+}
+
+/** Who makes the rivers again when a dial moves one (the editor hands its own `rivers({ tune })` here); none, the tune alone moves. */
+export const RIVER_DIALS: { host: { tune(partial: Record<string, number>): string[] } | null } = { host: null };
+
 /** A number of `EDITOR_TUNE` by its path, as a slider. */
 function dial(path: string, label: string, min: number, max: number, step: number, unit: string, note: string): NumberDial {
   const parts = path.split('.');
@@ -448,5 +521,5 @@ export function editorDialSet(): DialSet {
 
 /** The debug menu's dials for `editor`, or null for another helper. */
 export function editorDialsFor(helper: string): DialSet | null {
-  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : helper === 'groundPaint' ? paintDialSet() : helper === 'floraPaint' ? floraPaintDialSet() : helper === 'lakes' ? lakesDialSet() : null;
+  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : helper === 'groundPaint' ? paintDialSet() : helper === 'floraPaint' ? floraPaintDialSet() : helper === 'lakes' ? lakesDialSet() : helper === 'rivers' ? riversDialSet() : null;
 }

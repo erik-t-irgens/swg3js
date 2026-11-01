@@ -247,9 +247,13 @@ export class WaterBodies {
     return waterLookFor(shader, this.data, planet?.water ?? null);
   }
 
-  /** Make the lit and mask materials for a mesh, assign the lit one, add the twins, and keep the mesh as a body. */
-  add(mesh: THREE.Mesh, waves: boolean, look: WaterLook, role: WaterRole): WaterBody {
-    const lit = createWaterMaterial(look, waves);
+  /**
+   * Make the lit and mask materials for a mesh, assign the lit one, add the twins, and keep the mesh as a body. `wind` is a
+   * river reach's own wind object (Map-maker II's sixth wave), which its mask twins and its current variant share; absent,
+   * the weather's.
+   */
+  add(mesh: THREE.Mesh, waves: boolean, look: WaterLook, role: WaterRole, wind?: { value: THREE.Vector2 }): WaterBody {
+    const lit = createWaterMaterial(look, waves, wind ? { wind } : {});
     mesh.material = lit;
     if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
     const bounds = new THREE.Box3().copy(mesh.geometry.boundingBox!);

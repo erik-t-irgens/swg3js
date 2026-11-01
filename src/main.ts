@@ -423,8 +423,8 @@ import { World, type HeightsLoaded } from './world/world';
 import { editFilePath, type EditFileKind } from './story/placementPath.ts';
 import { deltasOf, readHeightsFile, storeOfRead, tileOfId, type HeightTileRow } from './world/editFiles/heightsFile.ts';
 import { paintOfRead, readPaintFile, type PaintLoaded, type PaintRow } from './world/editFiles/paintFile.ts';
-import { readWaterFile, type WaterLakeRow, type WaterLoaded } from './world/editFiles/waterFile.ts';
-import { LAKE_TUNE } from './world/ourWater.ts';
+import { readWaterFile, type WaterLoaded, type WaterRow } from './world/editFiles/waterFile.ts';
+import { LAKE_TUNE, tuneRiverTune } from './world/ourWater.ts';
 import { GROUND_PAINT_TUNE } from './world/groundRewrite.ts';
 import { runCurtain, type CurtainResult } from './world/curtain.ts';
 import { inflateBase64 } from './world/editFiles/browserCodec.ts';
@@ -1046,6 +1046,8 @@ interface EditorApi {
   floraPaintDebug(o?: Record<string, unknown>): Promise<unknown>;
   /** The water tool and the lakes of ours (Map-maker II's fifth wave): `__debug.lakes`. */
   lakesDebug(o?: Record<string, unknown>): Promise<unknown>;
+  /** The rivers, the terrain's own and ours, and the water tool's river mode (Map-maker II's sixth wave): `__debug.rivers`. */
+  riversDebug(o?: Record<string, unknown>): Promise<unknown>;
 }
 
 /**
@@ -4195,6 +4197,34 @@ class App {
           at = { ...this.world.lakeAt(gx, gz), game: [Math.round(gx * 100) / 100, Math.round(gz * 100) / 100] };
         }
         return { ...this.world.lakesReport(), ...(at ? { at } : {}), ...(said.length ? { answered: said } : {}) };
+      },
+      /**
+       * The rivers (Map-maker II's sixth wave): the terrain's own wet rivers and the water file's, each river's reaches (their
+       * runs and winds), its steep stretches (past its slope limit), its bodies, its fall effects and its index; what the
+       * landings and retunes did; `{ at: [x, z] }` the surface, the river and its run at a `/loc` place; `{ tune: { slopeMax,
+       * steep, flow, effectEvery, bigDrop, effectsMost, effectScale, smallRef, bigRef, scaleLeast, scaleMost, bucket,
+       * spacingMin } }` (a shape change makes every river's table again and stands again only the bodies whose water moved,
+       * an effects number stands the fall effects again, a `flow` rewrites each reach's wind). On the dev server the water tool's river mode too: `{ arm: true }`, `{ write: {
+       * points, width, velocity, name } }`, `{ pick }`, `{ move: { id, dx, dz, dy } }`, `{ set: { id, width, velocity,
+       * fallFrom, ... } }`, `{ remove }` and the tool's own river numbers in `{ tune }`.
+       */
+      rivers: async (opts?: Record<string, unknown>) => {
+        if (import.meta.env.DEV) {
+          const ed = await this.loadEditor();
+          if (ed) return ed.riversDebug(opts);
+        }
+        const o = opts ?? {};
+        const said: string[] = [];
+        if (o.tune && typeof o.tune === 'object') said.push(...tuneRiverTune(o.tune as Record<string, unknown>, (what) => said.push(this.world.retuneRivers(what))));
+        const c = this.world.placeFrame;
+        const space = !!this.world.planet?.space;
+        let at: Record<string, unknown> | null = null;
+        if (Array.isArray(o.at) && typeof o.at[0] === 'number' && typeof o.at[1] === 'number') {
+          const gx = space || !c ? o.at[0] : rawToGameX(c.x, o.at[0]);
+          const gz = space || !c ? o.at[1] : rawToGameZ(c.z, o.at[1]);
+          at = { ...this.world.riverAt(gx, gz), game: [Math.round(gx * 100) / 100, Math.round(gz * 100) / 100] };
+        }
+        return { ...this.world.riversReport(), ...(at ? { at } : {}), ...(said.length ? { answered: said } : {}) };
       },
       placements: async (
         opts: {
@@ -28613,7 +28643,7 @@ class App {
     // behind the editor's curtain where the lava is made again (`landWaterRows`: an undo or a redo of a lava lake).
     const wf = files.water;
     if (wf && this.world.generation === gen && this.editWorld() === pack) {
-      await this.landWaterRows(wf.put as WaterLakeRow[], wf.deleted);
+      await this.landWaterRows(wf.put as WaterRow[], wf.deleted);
       this.world.noteWaterWritten(wf.rev, wf.rows);
     }
     return { ok: true, why: '', files, ms: reply.ms ?? 0, built };
@@ -28627,7 +28657,7 @@ class App {
    * (`World.lavaLanding`) before the curtain's sweep builds what it made. Every other landing is the world's by difference
    * at once. Its callers are the dev server's alone (an editor's batch, the dev server's word).
    */
-  private async landWaterRows(put: WaterLakeRow[], deleted: string[]): Promise<void> {
+  private async landWaterRows(put: WaterRow[], deleted: string[]): Promise<void> {
     const lava = this.world.waterLandingTouchesLava(put, deleted);
     if (lava && !this.traveling) {
       const r = await this.editorCurtain('a lava lake of ours', 'the lava made again', async () => {

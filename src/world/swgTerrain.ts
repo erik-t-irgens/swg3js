@@ -10,8 +10,8 @@ import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, p
 import { groundChunkAt, groundShift, type GroundShift } from './groundTiles.ts';
 import { gameRibbon, terrainRibbons, type GameRibbon } from '../swg/terrain/ribbons.ts';
 import { FarGridIndex } from './farGridIndex.ts';
-import { inLakeCells, type LakeCells } from './ourWater.ts';
-import type { WaterLakeRow } from './editFiles/waterFile.ts';
+import { inLakeCells, riversSurface, riverTableAt, type LakeCells, type RiverTable } from './ourWater.ts';
+import type { WaterLakeRow, WaterRiverRow } from './editFiles/waterFile.ts';
 
 export interface BuildingLayerSource {
   bytes: ArrayBuffer;
@@ -106,8 +106,13 @@ export interface SwgWaterTable {
    * place of the full test and which answers exactly as it does; null on every client table, whose path is today's.
    */
   cells?: LakeCells | null;
-  /** The water file's row a lake of ours was made from; absent on a client table. */
-  ours?: WaterLakeRow;
+  /** The water file's row a lake (or, on a river's record, a river) of ours was made from; absent on a client table. */
+  ours?: WaterLakeRow | WaterRiverRow;
+  /**
+   * A river's strip (Map-maker II's sixth wave): set only on a river's record, which `waterTableAt` answers with its
+   * `height` written as its surface at the point asked; never on a table of `waterTables`.
+   */
+  river?: RiverTable['river'];
 }
 
 /**
@@ -620,6 +625,8 @@ export class SwgTerrain {
       // A lake of ours asks its index (Map-maker II's fifth wave), which answers exactly as the full test; a client table has none.
       if (w.height > h && gx >= w.minX && gx <= w.maxX && gz >= w.minZ && gz <= w.maxZ && (w.cells ? inLakeCells(w.cells, w.points, gx, gz) : pointInPolygon(gx, gz, w.points))) h = w.height;
     }
+    // The rivers after them (Map-maker II's sixth wave), the higher winning; none, and the answer is the lakes' to the bit.
+    if (this.rivers !== null) h = riversSurface(this.rivers, gx, gz, h);
     return h;
   }
 
@@ -631,7 +638,21 @@ export class SwgTerrain {
       if (gx < w.minX || gx > w.maxX || gz < w.minZ || gz > w.maxZ) continue;
       if (w.cells ? inLakeCells(w.cells, w.points, gx, gz) : pointInPolygon(gx, gz, w.points)) best = w;
     }
+    // A river standing higher than every table over the point, its record carrying its surface there (the earliest on a tie).
+    if (this.rivers !== null) return riverTableAt(this.rivers, gx, gz, best) as SwgWaterTable | null;
     return best;
+  }
+
+  /**
+   * The rivers this terrain answers for (Map-maker II's sixth wave, `ourWater.ts`'s `riverTable`): the terrain's own wet
+   * rivers and the water file's, in that order; null with none, so `waterAt` and `waterTableAt` are the lakes' alone.
+   */
+  rivers: RiverTable[] | null = null;
+
+  /** The rivers put in force (none for an empty list). Answers how many. */
+  setRivers(list: readonly RiverTable[]): number {
+    this.rivers = list.length ? [...list] : null;
+    return list.length;
   }
 
   /** How many of `waterTables` are the client's own: every one after them is a lake of ours (`setOurWater`). */

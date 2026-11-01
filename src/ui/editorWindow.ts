@@ -174,15 +174,20 @@ export interface PaintToolsView {
 /** The water tool as the Tools tab shows it (Map-maker II's fifth wave). */
 export interface WaterToolsView {
   armed: boolean;
-  mode: 'clicks' | 'trace' | 'fall';
+  mode: 'clicks' | 'trace' | 'fall' | 'river';
   levelFrom: 'lowest' | 'first' | 'typed';
   height: number;
-  /** Points in the clicked outline under way, whether a fall's top is set, the lake picked. */
+  /** Where a river's points stand (the sixth wave): each on its ground, or never higher than the one before. */
+  riverHeights: 'ground' | 'level';
+  /** What a river's reach past its slope limit is (`RIVER_TUNE.steep`). */
+  steep: 'effects' | 'fall' | 'refuse';
+  /** Points in the clicked outline (or river) under way, whether a fall's top is set, the lake or river picked. */
   draft: number;
   fallTop: boolean;
   picked: string | null;
-  /** The world's lakes of ours and the file in words, and what the tool says of itself. */
+  /** The world's lakes and rivers of ours and the file in words, and what the tool says of itself. */
   lakes: number;
+  rivers: number;
   file: string;
   note: string;
 }
@@ -201,6 +206,8 @@ export interface LakeView {
   drift: string;
   /** Lava, drawn, what stands under it, in words. */
   note: string;
+  /** A river's own fields (the sixth wave), absent on a lake: its width, velocity and slope limit ('' for the tune's), its length and its steep reaches in words. */
+  river?: { width: string; velocity: string; fallFrom: string; length: string; steep: string };
 }
 
 /** What the window needs of the editor beside the library's own. */
@@ -498,10 +505,27 @@ export class EditorWindow {
     const lake = this.host.lake?.() ?? null;
     if (lake && this.host.setLake) {
       const set = this.host.setLake.bind(this.host);
-      this.field(el, 'Lake', lake.id, null);
+      const r = lake.river;
+      this.field(el, r ? 'River' : 'Lake', lake.id, null);
       this.field(el, 'Its name', lake.name, (v) => set({ name: v.trim() || null }));
-      this.field(el, 'Level m', lake.h, null);
-      this.field(el, 'Points', `${lake.points} · ${lake.area}`, null);
+      if (r) {
+        // A river (the sixth wave): its width, velocity and slope limit written as each is left ('' takes the limit back to the tune's).
+        this.field(el, 'Middle m', lake.h, null);
+        this.field(el, 'Points', `${lake.points} · ${r.length}`, null);
+        const num = (label: string, value: string, key: 'width' | 'velocity' | 'fallFrom'): void =>
+          this.field(el, label, value, (v) => {
+            const n = Number(v);
+            if (key === 'fallFrom' && v.trim() === '') set({ fallFrom: null });
+            else if (v.trim() !== '' && Number.isFinite(n)) set({ [key]: n });
+          });
+        num('Width m', r.width, 'width');
+        num('Velocity m/s', r.velocity, 'velocity');
+        num('A fall past °', r.fallFrom, 'fallFrom');
+        if (r.steep) this.note(el, r.steep);
+      } else {
+        this.field(el, 'Level m', lake.h, null);
+        this.field(el, 'Points', `${lake.points} · ${lake.area}`, null);
+      }
       this.field(el, 'Shader', lake.shader, (v) => set({ shader: v.trim() || null }));
       const h3 = document.createElement('div');
       h3.className = 'ed-h';
@@ -777,9 +801,15 @@ export class EditorWindow {
     // The water tool (Map-maker II's fifth wave): what a click does, where a lake's level comes from, the draft and the lake picked.
     if (t.water) {
       const wt = t.water;
-      h('LAKES AND FALLS');
-      row(...(['clicks', 'trace', 'fall'] as const).map((m) => toggle(m === 'clicks' ? 'A lake by clicks' : m === 'trace' ? 'A lake traced' : 'A fall', wt.mode === m, { waterMode: m })));
-      if (wt.mode !== 'fall') {
+      h('LAKES, FALLS AND RIVERS');
+      row(...(['clicks', 'trace', 'fall', 'river'] as const).map((m) => toggle(m === 'clicks' ? 'A lake by clicks' : m === 'trace' ? 'A lake traced' : m === 'fall' ? 'A fall' : 'A river', wt.mode === m, { waterMode: m })));
+      if (wt.mode === 'river') {
+        // The sixth wave's: where a river's points stand, and what a reach past the slope limit becomes (the owner's switch).
+        row(...(['level', 'ground'] as const).map((m) => toggle(m === 'level' ? 'Never runs uphill' : 'Each point on its ground', wt.riverHeights === m, { waterRiverHeights: m })));
+        row(...(['effects', 'fall', 'refuse'] as const).map((m) => toggle(m === 'effects' ? 'Steep: fall effects' : m === 'fall' ? 'Steep: a fall row' : 'Steep: not water', wt.steep === m, { riverSteep: m })));
+        if (wt.draft >= 2) row(toggle(`Write the river (${wt.draft} points)`, false, { waterRiverFinish: true }), toggle('Give it up', false, { waterGiveUp: true }));
+        else if (wt.draft) row(toggle('Give up the draft', false, { waterGiveUp: true }));
+      } else if (wt.mode !== 'fall') {
         row(...(['lowest', 'first', 'typed'] as const).map((m) => toggle(m === 'lowest' ? 'Level: the lowest ground' : m === 'first' ? "Level: the first point's" : 'Level: typed', wt.levelFrom === m, { waterLevelFrom: m })));
         const f = document.createElement('label');
         f.className = 'ed-field';
@@ -799,12 +829,14 @@ export class EditorWindow {
         f.append(sp, input);
         el.appendChild(f);
       }
-      if (wt.draft >= 3) row(toggle(`Close the outline (${wt.draft} points)`, false, { waterClose: true }), toggle('Give it up', false, { waterGiveUp: true }));
-      else if (wt.draft || wt.fallTop) row(toggle('Give up the draft', false, { waterGiveUp: true }));
+      if (wt.mode !== 'river') {
+        if (wt.draft >= 3) row(toggle(`Close the outline (${wt.draft} points)`, false, { waterClose: true }), toggle('Give it up', false, { waterGiveUp: true }));
+        else if (wt.draft || wt.fallTop) row(toggle('Give up the draft', false, { waterGiveUp: true }));
+      }
       if (wt.picked) row(toggle(`Let ${wt.picked} go`, true, { waterPick: null }), toggle('Take it out', false, { waterRemove: wt.picked }));
       this.note(el, wt.file);
       if (wt.note) this.note(el, wt.note);
-      this.note(el, "Z arms it. A lake by clicks: LMB a point, a click near the first closes it, RMB takes one back. Traced: LMB a seed in its basin, flooded to the seed's ground and a little more (or the typed level). A fall: LMB its top, then its bottom. A click on a lake's ring picks it; its look is on the Selected tab. Each is one undo. Its numbers are the sliders under The water tool below.");
+      this.note(el, "Z arms it. A lake by clicks: LMB a point, a click near the first closes it, RMB takes one back. Traced: LMB a seed in its basin, flooded to the seed's ground and a little more (or the typed level). A fall: LMB its top, then its bottom. A river: LMB its points from its source down, a click near the last writes it, RMB takes one back. A click on a lake's or a river's ring picks it; its look (and a river's width and velocity) is on the Selected tab. Each is one undo. Its numbers are the sliders under The water tool below, and the rivers' own under rivers in the debug menu.");
     }
     h('SNAPPING');
     row(toggle(t.snapOn ? 'Snapping on' : 'Snapping off', t.snapOn, { snapOn: !t.snapOn }));

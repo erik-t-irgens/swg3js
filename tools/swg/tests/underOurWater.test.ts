@@ -124,7 +124,7 @@ else if (worlds) ok(planted > 0 && dropped > 0, `${planted} plantings over ${wor
   ok(/this\.flora = new FloraPlanter\(swg, byAppearance\);\s*\/\/[^\n]*\n\s*this\.flora\.underOurWater = this\.underOurWaterRule\(\);/.test(world), 'the converted world\'s planter is handed the rule as it is made');
   ok(/this\.flora = new FloraPlanter\(df\.source, df\.models\);\s*this\.flora\.underOurWater = this\.underOurWaterRule\(\);/.test(world), "and a real-elevation world's");
   ok(/if \(this\.flora\) this\.flora\.underOurWater = this\.underOurWaterRule\(\);/.test(world), 'and every landing of lakes hands it again');
-  ok(/if \(!tables\.length\) return null;\s*return \(x, z, ground\) => underLakes\(tables, x, z, ground\);/.test(world), 'which is null with no lake of ours at all');
+  ok(/if \(!tables\.length && !rivers\.length\) return null;\s*if \(!rivers\.length\) return \(x, z, ground\) => underLakes\(tables, x, z, ground\);/.test(world), 'which is null with no lake of ours and no river at all (the sixth wave adds the rivers), and the lakes alone with no river');
   const flora = readFileSync(join(REPO, 'src/world/flora.ts'), 'utf8');
   ok(/!\(under && under\(p\.x, p\.z, heightAt\(p\.x, p\.z\)\)\)/.test(flora), 'the planter asks it of each candidate with the ground under it');
 }

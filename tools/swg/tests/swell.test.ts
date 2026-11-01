@@ -315,7 +315,8 @@ const inWorld = (needle: string) => worldSrc.includes(needle);
   ok(inWater('const amplitude = wavelength * THREE.MathUtils.lerp(0.005, 0.0095, t) * (0.7 + rnd() * 0.6);'), 'and amplitudes from half a per cent of the wavelength to just under one');
   ok(inWater('s = (s * 1664525 + 1013904223) >>> 0;') && inWater('return s / 4294967296;'), 'drawn from that one linear congruential generator');
   ok(inWater('const { windAngle = 0.9, seed = 7, reflective = true } = opts;'), 'seeded 7 at a wind of 0.9 rad');
-  ok(bodiesSrc.includes('createWaterMaterial(look, waves)'), 'and every body in the world takes those defaults, so there is one sea state to report on');
+  // (A river's reach hands a wind object of its own, Map-maker II's sixth wave, and nothing else: no angle, no seed.)
+  ok(bodiesSrc.includes('createWaterMaterial(look, waves, wind ? { wind } : {})') && !/createWaterMaterial\([^)]*(windAngle|seed)/.test(bodiesSrc), 'and every body in the world takes those defaults, so there is one sea state to report on');
   ok(inWater('uWaveHeight: { value: waves ? 1 : 0 },'), "a body's wave height is 1 or 0, so a lake is flat and the mirror's early out is the lake's whole cost");
   ok(inWater('for (const w of waves) sum += w.w;') && inWater('return sum * height;'), "`waveReach` sums the amplitudes times the wave height, which is `swellReach`'s twin");
 

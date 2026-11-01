@@ -33,7 +33,7 @@ import { inflateRawSync, deflateRawSync } from 'node:zlib';
 import { pathToFileURL } from 'node:url';
 import { oldTexts, REPO } from './oldModules.ts';
 import * as THREE from 'three';
-import { GRID_EDIT_KINDS, NAV_FLAGS, SLOPE_CLIMB_DEGREES, SWIM_DEPTH, anyGridEdits, buildNavGrid, gridEditsOf, readGlbTriangles, walkThroughTemplates } from '../navgrid.mjs';
+import { GRID_EDIT_KINDS, NAV_FLAGS, SLOPE_CLIMB_DEGREES, SWIM_DEPTH, anyGridEdits, buildNavGrid, gridEditsOf, readGlbTriangles, soeRiverStamp, walkThroughTemplates } from '../navgrid.mjs';
 import { gridLayoutStale, layoutKeyOf } from '../finalnames.mjs';
 import { deltaBytes, heightsFileText, tileIdOf } from '../../../src/world/editFiles/heightsFile.ts';
 import { waterFileText } from '../../../src/world/editFiles/waterFile.ts';
@@ -180,11 +180,12 @@ const walkable = (v: number): boolean => v >= 1 && v <= 14;
       const lacking = gridEditsOf('watertabletest', folder, dir);
       ok(lacking.absent?.join() === 'gallery/no_such_house_w5', `a row naming a model this install lacks is named (${lacking.absent?.join()})`);
       const keyLacking = layoutKeyOf(dir, wt, lacking);
-      ok(keyLacking !== layoutKeyOf(dir, wt, { world: 'watertabletest', texts: lacking.texts }), 'and folds into the key, so the grid baked while it is lacking is asked for again once it is there');
+      // (The pack folder also hands its terrain's rivers' stamp, the sixth wave's, which watertabletest's terrain has.)
+      ok(keyLacking !== layoutKeyOf(dir, wt, { world: 'watertabletest', texts: lacking.texts, soeRivers: lacking.soeRivers }), 'and folds into the key, so the grid baked while it is lacking is asked for again once it is there');
       if (existsSync(join(PACKS, 'gallery', 'manifest.json'))) {
         write(rows('ply_corl_house_sm_s01_fp1'));
         const held = gridEditsOf('watertabletest', folder, dir);
-        ok(held.absent?.length === 0 && layoutKeyOf(dir, wt, held) === layoutKeyOf(dir, wt, { world: 'watertabletest', texts: held.texts }), 'a row whose model the install holds names nothing, and keys as the files alone');
+        ok(held.absent?.length === 0 && layoutKeyOf(dir, wt, held) === layoutKeyOf(dir, wt, { world: 'watertabletest', texts: held.texts, soeRivers: held.soeRivers }), 'a row whose model the install holds names nothing, and keys as the files alone');
       }
       write(rows('anything', 'no_such_world_w5'));
       ok(gridEditsOf('watertabletest', folder, dir).absent?.join() === 'no_such_world_w5/anything', "a row out of a world this install has not converted is named under that world");
@@ -228,33 +229,44 @@ try {
       const dir = join(PACKS, w);
       if (!existsSync(join(dir, 'nav.json'))) continue;
       const a = await old.buildNavGrid(dir, { walkThrough: wt });
-      const b = await buildNavGrid(dir, { walkThrough: wt, edits: PLAIN });
-      ok(planes(a).equals(planes(b)), `${w}: today's bake with no edit files is 49e5960's to the byte (${planes(b).length} bytes)`);
+      // From the sixth wave the terrain's own wet rivers are water to the bake (rivertest's and watertabletest's), so the
+      // comparison with the bake before them leaves them out (`soeRivers: false`); riverGrid.test holds what they add.
+      const b = await buildNavGrid(dir, { walkThrough: wt, edits: PLAIN, soeRivers: false });
+      ok(planes(a).equals(planes(b)), `${w}: today's bake with no edit files (and the terrain's own rivers left out) is 49e5960's to the byte (${planes(b).length} bytes)`);
       const disk = inflateRawSync(readFileSync(join(dir, 'nav.bin')));
-      if (planes(b).equals(disk)) ok(true, `${w}: and is the grid on disk`);
+      // A world whose terrain has rivers is on disk as baked with them (the sixth wave's conversion; riverGrid.test holds it).
+      const rivers = soeRiverStamp(dir) !== '';
+      const full = rivers ? await buildNavGrid(dir, { walkThrough: wt, edits: PLAIN }) : b;
+      if (planes(full).equals(disk)) ok(true, `${w}: and ${rivers ? "with its terrain's own rivers " : ''}is the grid on disk`);
       else note(`${w}: the grid on disk was baked from something else (a converter run since?)`);
       compared++;
     }
     if (!compared) note('no small converted world: the day-one bake is not compared');
-    // Every grid on disk: the key with no edit files is 49e5960's key.
+    // Every grid on disk: the key with no edit files is 49e5960's key. The edits as the converter's own run reads them (with
+    // the pack's folder, so a terrain with rivers carries its stamp, the sixth wave's): such a world keys anew by design,
+    // and is held to the key of its own grid on disk rather than to 49e5960's.
     let keys = 0;
     let stale = 0;
     const editWorlds: string[] = [];
+    const riverWorlds: string[] = [];
     for (const name of existsSync(PACKS) ? readdirSync(PACKS) : []) {
       const dir = join(PACKS, name);
       if (!existsSync(join(dir, 'nav.json')) || !existsSync(join(dir, 'layout.json'))) continue;
-      const edits = gridEditsOf(name);
+      const edits = gridEditsOf(name, undefined, dir) as ReturnType<typeof gridEditsOf> & { soeRivers?: string };
       if (anyGridEdits(edits)) {
         editWorlds.push(name);
         ok(layoutKeyOf(dir, wt, edits) !== layoutKeyOf(dir, wt, PLAIN), `${name} has committed edit files: its key folds them in`);
         continue;
       }
       const head = JSON.parse(readFileSync(join(dir, 'nav.json'), 'utf8')) as { layoutKey?: string };
-      assert.equal(layoutKeyOf(dir, wt, edits), old.layoutKeyOf(dir, wt), `${name}: the key with no edit files is 49e5960's`);
+      if (edits.soeRivers) {
+        riverWorlds.push(name);
+        assert.notEqual(layoutKeyOf(dir, wt, edits), old.layoutKeyOf(dir, wt), `${name}: its terrain's own rivers fold their stamp into its key`);
+      } else assert.equal(layoutKeyOf(dir, wt, edits), old.layoutKeyOf(dir, wt), `${name}: the key with no edit files is 49e5960's`);
       if (head.layoutKey && head.layoutKey !== layoutKeyOf(dir, wt, edits)) stale++;
       keys++;
     }
-    ok(keys > 0 || !existsSync(PACKS), `every grid on disk of a world with no edit files keys as 49e5960 keyed it (${keys} grids${stale ? `, ${stale} stale for their own reasons` : ''})`);
+    ok(keys > 0 || !existsSync(PACKS), `every grid on disk of a world with no edit files keys as 49e5960 keyed it, the terrain's own rivers' stamp aside (${keys} grids${riverWorlds.length ? `, ${riverWorlds.join(' and ')} with the stamp` : ''}${stale ? `, ${stale} stale for their own reasons` : ''})`);
     if (editWorlds.length) note(`worlds with committed edit files, whose grids status asks for again: ${editWorlds.join(', ')}`);
   }
 } finally {

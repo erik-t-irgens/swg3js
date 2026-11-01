@@ -22,11 +22,11 @@ import { CARD_LIGHT_TUNE, cardReceives, setCardRoomPass, updateCardLight } from 
 import { SWAY_TUNE, batchedDepthCombo, disposeStandIn, hangSwayDepth, plainDepthCombos, setSwayEye, setSwayRoomPass, skinnedDepthCombos, stepSway, swayDepthCombos, swayDepthStandIns, swayWrap } from './floraSway.ts';
 import { chooseWindTrees, windTreesChosen, windTreesEverUsed } from './windTrees.ts';
 import { WIND_STATE, writeWindDay } from './wind.ts';
-import { refreshWaterDepth, resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
+import { refreshWaterDepth, resetWaterDepth, riverWindUnit, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { HeightEdits, HEIGHT_TILE } from '../swg/terrain/heightEdits.ts';
 import type { HeightTileRow } from './editFiles/heightsFile.ts';
-import type { WaterLakeRow, WaterLoaded } from './editFiles/waterFile.ts';
-import { LAKE_TUNE, RoofList, keptTables, lakeTable, landingTouchesLava, lookOver, planLakeLanding, tableCovers, underLakes, type LakeTable } from './ourWater.ts';
+import { isLakeRow, isRiverRow, readWaterRow, type WaterLakeRow, type WaterLoaded, type WaterRiverRow, type WaterRow } from './editFiles/waterFile.ts';
+import { LAKE_TUNE, RIVER_TUNE, RiverEffectsKeeper, RoofList, feedRiverFlow, keptTables, lakeTable, landingTouchesLava, lookOver, planLakeLanding, reachWind, riverLandingPlan, riverRetunePlan, riverScan, riverTable, tableCovers, underLakes, underRivers, type LakeTable, type RiverFlow, type RiverFxHost, type RiverHit, type RiverReach, type RiverRetune, type RiverTable } from './ourWater.ts';
 import { exitApertures, type ExitAperture } from './roomAirMath.ts';
 import { decodeLanded, HeightRows, layLanded, layWhole, type HeldTiles } from './editFiles/heightsLand.ts';
 import { GROUND_REWRITE_TUNE, rectMeetsChunk } from './groundRewrite.ts';
@@ -164,7 +164,7 @@ import { GRASS_AIR_U, grassAirTwin, grassWaitsForScreen, grassWearsAir, newGrass
 import { newShuttleJets, type ShuttleJets } from './volumetrics/airEngines.ts';
 import { cloudsFeed, cloudsFeedMade } from './volumetrics/airCloudsFeed.ts';
 import { newNearRides, type NearRides } from '../net/nearRides.ts';
-import { ribbonAt, ribbonTriangles, type GameRibbon, type RibbonPoint } from '../swg/terrain/ribbons.ts';
+import { ribbonAt, ribbonTriangles, soeRiverRows, type GameRibbon, type RibbonPoint } from '../swg/terrain/ribbons.ts';
 import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../vehicles/garage';
 import { fitKey, type ResolvedFit } from '../vehicles/shipFit';
 import { inTurn } from '../vehicles/shipMounts';
@@ -841,6 +841,8 @@ export class World {
   private readonly doorSpace: SoundSpace = { building: -1, cell: -1 };
   /** Particle effects from the pack (campfires, smoke, sparks), placed by the streamer. */
   private particles: ParticleEffects | null = null;
+  /** The folder `particles` resolves its files against (the world's pack, or a packless world's stand-in): what a guest pack's effect is named from. */
+  private particlesRoot = '';
   private camera: THREE.PerspectiveCamera | null = null;
   /** The building cell the player is in, or null outside. */
   cellState: CellState | null = null;
@@ -1014,6 +1016,12 @@ export class World {
   private ribbonsShown = false;
   private ribbonsBusy = false;
   private readonly ribbonHit: RibbonPoint = { h: 0, fx: 0, fz: 0, type: 0 };
+  /**
+   * The rivers in force as the water's readers hold them (Map-maker II's sixth wave): the terrain's own wet rivers, then the
+   * water file's (`applyRivers`); empty with none, which every reader below asks first. And the air's kept answer of one.
+   */
+  private riverTables: RiverTable[] = [];
+  private readonly riverFlowHit: RiverFlow = { h: 0.5, fx: 0.5, fz: 0.5 };
   /** What the ribbons' drawing came to, for the console (`__debug.water()`). */
   readonly ribbonStatus = { ribbons: 0, quads: 0, shown: false, looks: [] as string[], why: null as string | null };
   /** Per table (shared with the heat haze) and merged. */
@@ -1107,6 +1115,9 @@ export class World {
       out.h = !lava && water > h ? water : h;
       out.family = family;
       out.medium = lava ? 3 : water > h ? 2 : 1;
+      // A river (Map-maker II's sixth wave, the terrain's own or ours) whose surface is the water here: its run at its
+      // velocity, which the liquid's tile is pulled toward as a lava ribbon's is (`feedRiverFlow`). No river, nothing read.
+      if (this.riverTables.length) feedRiverFlow(this.riverTables, x, z, water, out, this.riverFlowHit);
       // The terrain's ribbons while they are drawn (the fifth wave): lava over the ground there, flowing down the ribbon's
       // run at its own velocity, which the liquid's tile is pulled toward. Lava keeps the ground, as a flow's does.
       if (this.ribbonsShown && out.medium !== 3 && ribbonAt(this.ribbons, x, z, this.ribbonHit) && this.ribbonHit.type === 1 && this.ribbonHit.h > h - 0.5) {
@@ -2115,8 +2126,15 @@ export class World {
         const lakes = await this.waterReady();
         if (token !== this.loadToken) return null;
         if (lakes) {
-          this.applyOurTables(lakes);
+          this.applyOurTables(this.ourLakeRows);
           for (const t of this.terrain.lakes) this.addLakeBody(t);
+          // Its rivers of ours (the sixth wave), the terrain's own list, a body a reach and their fall effects, behind this screen.
+          if (this.ourRiverRows.length) {
+            this.applyRivers(null);
+            this.standRivers();
+            await this.syncRiverEffects(token);
+            if (token !== this.loadToken) return null;
+          }
         }
       }
       this.packStatus = planet.borrowSky ? 'sky only' : 'no pack';
@@ -2263,8 +2281,13 @@ export class World {
           // lakes. With no file nothing is appended and the tables, their order and every answer are today's.
           const lakes = await this.waterReady();
           if (token !== this.loadToken) return null;
-          if (lakes) this.applyOurTables(lakes);
+          if (lakes) this.applyOurTables(this.ourLakeRows);
+          // The rivers (Map-maker II's sixth wave): the terrain's own wet rivers read as rows of the water file's shape, and
+          // the file's, in force before the water is drawn and stood as bodies after it. With neither, nothing is set.
+          this.soeRiverRows = this.readSoeRivers(swg);
+          this.applyRivers(null);
           this.applySwgWater(swg);
+          this.standRivers();
           await this.loadLava(pack, swg); // never rejects; drops its own work if another load began meanwhile
           if (token !== this.loadToken) return null;
           this.packProgress = 0.55;
@@ -2323,6 +2346,7 @@ export class World {
       this.layoutStream?.dispose();
       this.particles?.dispose();
       this.particles = new ParticleEffects(this.scene, pack.url(''));
+      this.particlesRoot = pack.root;
       this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
       // The gallery is one long walk of exhibits with nothing else to draw: everything loads from anywhere on it.
       // What stands in a state this world did not arrive in (Restuss's other state) lies dormant (`worldState.ts`).
@@ -2377,6 +2401,12 @@ export class World {
         // effects): built into the scene here, so the warm-up compiles every one of their
         // materials behind the loading screen and nothing of theirs is ever made on a live frame.
         await this.loadNebulae(pack);
+        if (token !== this.loadToken) return null;
+      }
+      // The rivers' steep stretches' fall effects (Map-maker II's sixth wave), made ready and stood now that the particles
+      // exist, behind the screen; a world with no river stands none.
+      if (this.riverTables.length) {
+        await this.syncRiverEffects(token);
         if (token !== this.loadToken) return null;
       }
       // Placed objects pull the procedural ground up to their feet, so buildings stand on it;
@@ -2468,6 +2498,7 @@ export class World {
     this.layoutStream?.dispose();
     this.particles?.dispose();
     this.particles = new ParticleEffects(this.scene, stand.url(''));
+    this.particlesRoot = stand.root;
     this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
     this.layoutStream = new LayoutStreamer(this.scene, this.physics, stand, layout, this.particles, { reach: this.streamReach(), hugeColliders: false, stands: standsIn });
     if (SHADER_PACING) this.layoutStream.prepare = (objects) => this.prepareStreamed(objects);
@@ -2773,6 +2804,14 @@ export class World {
       m.geometry.dispose();
     }
     this.localWater.length = 0;
+    // The rivers go with their world (their bodies were among the local water above; their effects go with the particles,
+    // and a sync of them still waiting is overtaken, so it stands nothing).
+    this.riverBodies.clear();
+    this.riverFx.forget();
+    this.riverTables = [];
+    this.soeRiverRows = [];
+    this.soeRiverTables = [];
+    this.ourRiverTables = [];
     this.dropLava();
     // The terrain's ribbons go with the world they were read from (a world with no lava never reads any, and the switch
     // turned on there must build nothing of the last world's), and the liquids' chooser starts afresh: what was worn,
@@ -13264,8 +13303,22 @@ export class World {
   waterSource: ((pack: string, kind: 'ground' | 'space' | 'copies') => Promise<WaterLoaded | null>) | null = null;
   /** The ask this arrival made, its world's generation beside it, and whether it has been installed. */
   private waterAsk: { gen: number; done: Promise<WaterLoaded | null>; installed: boolean; late: boolean } | null = null;
-  /** The water file's lakes in force, sorted by id (the file's own order), as read and as every landing left them. */
+  /** The water file's rows in force, lakes and rivers, sorted by id (the file's own order), as read and as every landing left them. */
+  ourWaterRows: WaterRow[] = [];
+  /** Its lakes alone, and its rivers alone (the sixth wave), in the same order: a list made again only when its kind moved. */
   ourLakeRows: WaterLakeRow[] = [];
+  ourRiverRows: WaterRiverRow[] = [];
+  /** The terrain's own wet rivers made rows of the water file's shape (`soeRiverRows`, read by the file's own reader) at the arrival. */
+  private soeRiverRows: WaterRiverRow[] = [];
+  /** Their tables and ours (`riverTable`), the terrain's own first: `riverTables` is the two joined. */
+  private soeRiverTables: RiverTable[] = [];
+  private ourRiverTables: RiverTable[] = [];
+  /** Each river drawn, by its table's name: a body a reach, each with its own wind object. */
+  private readonly riverBodies = new Map<string, { table: RiverTable; parts: { mesh: THREE.Mesh; body: WaterBody; wind: { value: THREE.Vector2 }; reach: RiverReach }[] }>();
+  /** The fall effects each river's steep stretches stand (`riverEffects`), by its table's name, and the one way they are stood again. */
+  private readonly riverFx = new RiverEffectsKeeper<EffectHandle>();
+  /** What rivers did this session, for the console: landings, bodies added and taken out, effects stood, retunes. */
+  readonly riverWork = { landed: 0, added: 0, removed: 0, effects: 0, retuned: 0, effectFiles: 0, missingEffects: 0 };
   /** What the last file read said, for the console. */
   waterFileInfo: { lakes: number; bytes: number; skipped: { id: string; why: string }[]; problem: string | null; rev: string | null } = { lakes: 0, bytes: 0, skipped: [], problem: null, rev: null };
   /** Whether this world's lakes were in place before its water was first drawn (`lakes().laidAtArrival`). */
@@ -13294,7 +13347,9 @@ export class World {
 
   /** The ask for this world's water file, begun as its load begins (`load`). */
   private askWater(packId: string): void {
+    this.ourWaterRows = [];
     this.ourLakeRows = [];
+    this.ourRiverRows = [];
     this.ourTables = [];
     this.waterLaidAtArrival = false;
     this.ourLakeBodies.clear();
@@ -13318,10 +13373,11 @@ export class World {
   }
 
   /**
-   * This world's water file, waited on for at most `DRESSING_TUNE.floraWaitMs`: its lakes, or null for none or one still on its
-   * way, which is then stood late. Marks the ask installed, so it is laid once.
+   * This world's water file, waited on for at most `DRESSING_TUNE.floraWaitMs`: its rows (lakes and rivers, which the caller
+   * reads off `ourLakeRows` and `ourRiverRows`), or null for none or one still on its way, which is then stood late. Marks
+   * the ask installed, so it is laid once.
    */
-  private async waterReady(): Promise<WaterLakeRow[] | null> {
+  private async waterReady(): Promise<WaterRow[] | null> {
     const ask = this.waterAsk;
     if (!ask || ask.installed) return null;
     const loaded = await Promise.race([ask.done, new Promise<'late'>((r) => setTimeout(() => r('late'), DRESSING_TUNE.floraWaitMs))]);
@@ -13334,12 +13390,19 @@ export class World {
     this.takeWaterFile(loaded);
     if (!loaded || !loaded.rows.length) return null;
     this.waterLaidAtArrival = true;
-    return this.ourLakeRows;
+    return this.ourWaterRows;
   }
 
-  /** What a file read said, kept for the console, and its lakes in force (sorted by id). */
+  /** The rows in force put in place, sorted by id, and each kind's own list made again where `kinds` says it moved. */
+  private setWaterRows(rows: WaterRow[], kinds: { lakes: boolean; rivers: boolean } = { lakes: true, rivers: true }): void {
+    this.ourWaterRows = rows;
+    if (kinds.lakes) this.ourLakeRows = rows.filter(isLakeRow);
+    if (kinds.rivers) this.ourRiverRows = rows.filter(isRiverRow);
+  }
+
+  /** What a file read said, kept for the console, and its lakes and rivers in force (sorted by id). */
   private takeWaterFile(loaded: WaterLoaded | null): void {
-    this.ourLakeRows = loaded ? [...loaded.rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) : [];
+    this.setWaterRows(loaded ? [...loaded.rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) : []);
     this.waterFileInfo = loaded ? { lakes: loaded.rows.length, bytes: loaded.bytes, skipped: loaded.skipped, problem: loaded.problem, rev: loaded.rev } : { lakes: 0, bytes: 0, skipped: [], problem: null, rev: null };
     if (loaded?.problem) console.warn(`water: this world's water file is not read: ${loaded.problem}`);
     for (const s of loaded?.skipped ?? []) console.warn(`water: lake ${s.id} is skipped: ${s.why}`);
@@ -13400,11 +13463,16 @@ export class World {
   /** The lakes of ours in force as the water's readers hold them (the converted terrain's tail, or the terrain's own list), kept. */
   private ourTables: LakeTable[] = [];
 
-  /** The planter's predicate (`FloraPlanter.underOurWater`): under a lake of ours, or null with none at all (the planting today's). */
+  /**
+   * The planter's predicate (`FloraPlanter.underOurWater`): under a lake of ours or a river (the sixth wave: the terrain's
+   * own and ours, as under a lake, `LAKE_TUNE.floraUnder`), or null with neither (the planting today's).
+   */
   private underOurWaterRule(): ((x: number, z: number, ground: number) => boolean) | null {
     const tables = this.ourTables;
-    if (!tables.length) return null;
-    return (x, z, ground) => underLakes(tables, x, z, ground);
+    const rivers = this.riverTables;
+    if (!tables.length && !rivers.length) return null;
+    if (!rivers.length) return (x, z, ground) => underLakes(tables, x, z, ground);
+    return (x, z, ground) => (tables.length > 0 && underLakes(tables, x, z, ground)) || underRivers(rivers, x, z, ground);
   }
 
   /** A lake of ours' own look (its numbers over its shader's, or the planet's), made once a table. */
@@ -13496,7 +13564,7 @@ export class World {
    * The app asks it before it lands a write it did not open behind the editor's curtain (an undo, a redo, the file read
    * again), so a lava change is made behind one and never on a live frame.
    */
-  waterLandingTouchesLava(put: readonly WaterLakeRow[], deleted: readonly string[]): boolean {
+  waterLandingTouchesLava(put: readonly WaterRow[], deleted: readonly string[]): boolean {
     if (!this.terrain.swg) return false;
     return landingTouchesLava(this.ourTables, put, deleted, (s) => this.lakeIsLava(s));
   }
@@ -13510,12 +13578,27 @@ export class World {
    * fresh materials without taking the old ones off), lava rebuilt where a lava lake moved, and the plantings, the grass, the
    * air's cells and the depth window under every lake that moved made again. Answers how many lakes moved.
    */
-  landWater(put: readonly WaterLakeRow[], deleted: readonly string[]): number {
-    const plan = planLakeLanding(this.ourLakeRows, put, deleted);
+  landWater(put: readonly WaterRow[], deleted: readonly string[]): number {
+    const plan = planLakeLanding(this.ourWaterRows, put, deleted);
     const moved = plan.moved;
     if (!moved.size) return 0;
+    // Which kinds moved (an id that was or is now a lake, or a river): each kind's landing runs only for its own.
+    const kindOf = new Map<string, string>();
+    for (const r of this.ourWaterRows) kindOf.set(r.id, r.kind);
+    const now = new Map<string, string>();
+    for (const r of plan.rows) now.set(r.id, r.kind);
+    let lakes = false;
+    let rivers = false;
+    for (const id of moved) {
+      for (const k of [kindOf.get(id), now.get(id)]) {
+        if (k === 'lake') lakes = true;
+        else if (k === 'river') rivers = true;
+      }
+    }
+    this.setWaterRows(plan.rows, { lakes, rivers });
+    if (rivers) this.landRivers(moved);
+    if (!lakes) return moved.size;
     const oldTables: SwgWaterTable[] = [...this.ourTables];
-    this.ourLakeRows = plan.rows;
     const tables = this.applyOurTables(this.ourLakeRows, moved);
     this.lakeWork.landed++;
     let lava = false;
@@ -13563,11 +13646,11 @@ export class World {
    * What a water file read again comes to against the lakes in force: the rows that are new or changed (`put`) and the ids
    * gone (`deleted`), for `landWater`; what the read said kept for the console.
    */
-  waterDiffOf(loaded: WaterLoaded | null): { put: WaterLakeRow[]; deleted: string[] } {
-    const was = new Map(this.ourLakeRows.map((r) => [r.id, r]));
+  waterDiffOf(loaded: WaterLoaded | null): { put: WaterRow[]; deleted: string[] } {
+    const was = new Map(this.ourWaterRows.map((r) => [r.id, r]));
     const now = loaded?.rows ?? [];
     this.waterFileInfo = loaded ? { lakes: now.length, bytes: loaded.bytes, skipped: loaded.skipped, problem: loaded.problem, rev: loaded.rev } : { lakes: 0, bytes: 0, skipped: [], problem: null, rev: null };
-    const put: WaterLakeRow[] = [];
+    const put: WaterRow[] = [];
     const ids = new Set<string>();
     for (const r of now) {
       ids.add(r.id);
@@ -13719,6 +13802,332 @@ export class World {
   /** A sweep for the frames' own target has built a lake's lit program (any lake body, a basin's among them): noted for the session. */
   private noteLakePrograms(): void {
     if (!World.lakeProgramsBuilt && this.waterBodies.bodies.some((b) => b.role === 'lake')) World.lakeProgramsBuilt = true;
+  }
+
+  // ---- Map-maker II: rivers (its sixth wave) ----------------------------------------------------------------------------
+
+  /**
+   * The terrain's own wet rivers (`soeRiverRows`: every river affector with a local water table that runs), each handed to
+   * the water file's own reader, so a river of the game's and one of ours are one shape read one way; a row the reader
+   * refuses, and a river the walk leaves out, said once. None on every retail world (Lok's lava river is switched off).
+   */
+  private readSoeRivers(swg: SwgTerrain): WaterRiverRow[] {
+    const got = soeRiverRows(swg.template.generator, RIVER_TUNE.spacingMin);
+    const out: WaterRiverRow[] = [];
+    for (const s of got.skipped) console.info(`rivers: the terrain's ${s.name} is left out: ${s.why}`);
+    for (const raw of got.rows) {
+      const row = readWaterRow(raw);
+      if (typeof row === 'string' || row.kind !== 'river') console.warn(`rivers: the terrain's ${String(raw.name)} does not read as a river: ${typeof row === 'string' ? row : 'not a river'}`);
+      else out.push(row);
+    }
+    if (out.length) console.info(`rivers: ${out.length} of the terrain's own wet river${out.length === 1 ? '' : 's'} drawn as water (${out.map((r) => r.name ?? r.id).join(', ')})`);
+    return out;
+  }
+
+  /**
+   * The rivers in force made tables of the game's frame (`riverTable`) and put where the water's readers take them: the
+   * converted terrain's (`SwgTerrain.setRivers`), or on a world with no converted terrain its own list (only where it has no
+   * pack at all, as its lakes). The terrain's own first, kept unless `all` asks for them again (a retune); ours kept by row
+   * unless they `moved` (`keptTables`). The planter told which plantings stand under them. Answers the tables.
+   */
+  private applyRivers(moved: ReadonlySet<string> | null, all = false): RiverTable[] {
+    const swg = this.terrain.swg;
+    if (!swg && this.planet?.pack !== false) {
+      if (this.ourRiverRows.length) console.warn(`water: ${this.ourRiverRows.length} river${this.ourRiverRows.length === 1 ? '' : 's'} of ours left out: this converted world's pack is not here, and its rivers are written about its own layout's centre`);
+      this.soeRiverTables = [];
+      this.ourRiverTables = [];
+    } else {
+      const toX = swg ? (x: number) => swg.toGameX(x) : (x: number) => -x;
+      const toZ = swg ? (z: number) => swg.toGameZ(z) : (z: number) => z;
+      if (all || this.soeRiverTables.length !== this.soeRiverRows.length) this.soeRiverTables = this.soeRiverRows.map((row) => riverTable(row, toX, toZ, row.id));
+      this.ourRiverTables = keptTables(all ? [] : this.ourRiverTables, this.ourRiverRows, moved, (row) => riverTable(row, toX, toZ));
+    }
+    const list = [...this.soeRiverTables, ...this.ourRiverTables];
+    if (swg) swg.setRivers(list);
+    else {
+      this.terrain.rivers.length = 0;
+      for (const t of list) this.terrain.rivers.push(t);
+    }
+    this.riverTables = list;
+    if (this.flora) this.flora.underOurWater = this.underOurWaterRule();
+    this.forgetCameraWater();
+    return list;
+  }
+
+  /** Every river in force stood as bodies (an arrival's, behind its screen; after `applySwgWater`, which clears the local water). */
+  private standRivers(): void {
+    for (const t of this.riverTables) if (!this.riverBodies.has(t.name)) this.addRiverBodies(t);
+  }
+
+  /**
+   * One river made bodies of the water system: a body a reach (a straight run of its water quads), its quads its geometry
+   * (the client's own split), drawn with the lake's material under the lake's key and its own look, each with a wind object
+   * of its own holding its run times its velocity in the detail's units (`reachWind`), so its detail runs downstream and no
+   * program is built. Behind a screen it stands at once and the sweep after builds it; in play each body is adopted and made
+   * ready through the queue, hidden until then, as a lake of ours is (`addLakeBody`).
+   */
+  private addRiverBodies(t: RiverTable): void {
+    if (!this.renderer) return;
+    const s = t.river;
+    const look = this.ourLakeLook(t as unknown as SwgWaterTable);
+    const unit = riverWindUnit(look.drift > 0.01 ? look.drift : 0.01);
+    const parts: { mesh: THREE.Mesh; body: WaterBody; wind: { value: THREE.Vector2 }; reach: RiverReach }[] = [];
+    const live = !this.behindScreen;
+    for (const reach of s.reaches) {
+      const n = reach.last - reach.first + 1;
+      const pos = new Float32Array(n * 12);
+      const index: number[] = [];
+      for (let k = 0; k < n; k++) {
+        const o = (reach.first + k) * 12;
+        for (let c = 0; c < 12; c++) pos[k * 12 + c] = s.quads[o + c];
+        const v = k * 4;
+        index.push(v, v + 1, v + 2, v, v + 2, v + 3);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      g.setIndex(index);
+      g.computeVertexNormals();
+      const mesh = new THREE.Mesh(g);
+      mesh.receiveShadow = true;
+      mesh.name = `water:${t.name}:${reach.first}`;
+      const wind = { value: new THREE.Vector2() };
+      reachWind(reach, s.velocity, unit, RIVER_TUNE.flow, wind.value);
+      const body = this.waterBodies.add(mesh, false, look, 'lake', wind);
+      this.waterMaterials.push(body.lit);
+      this.localWater.push(mesh);
+      if (live) mesh.visible = false;
+      this.scene.add(mesh);
+      parts.push({ mesh, body, wind, reach });
+    }
+    this.riverBodies.set(t.name, { table: t, parts });
+    this.riverWork.added += parts.length;
+    // Their current variants where the volumetrics master is on: worn only once a warm has built them (`liquidUnbuilt`).
+    if (this.air && VOL_TUNE.on) this.makeLiquidVariants();
+    if (!live || !parts.length) return;
+    const gen = this.generation;
+    const meshes = parts.map((p) => p.mesh);
+    void this.compileReady(meshes, `water: the river ${t.name}`).then(() => {
+      if (this.generation !== gen || this.riverBodies.get(t.name)?.parts !== parts) return;
+      for (const m of meshes) m.visible = true;
+    });
+  }
+
+  /** A river's bodies taken out: out of the scene, their materials out of the world's sets before each body disposes them. */
+  private dropRiverBodies(name: string): void {
+    const e = this.riverBodies.get(name);
+    if (!e) return;
+    this.riverBodies.delete(name);
+    for (const p of e.parts) {
+      this.scene.remove(p.mesh);
+      const k = this.localWater.indexOf(p.mesh);
+      if (k >= 0) this.localWater.splice(k, 1);
+      const i = this.waterMaterials.indexOf(p.body.lit);
+      if (i >= 0) this.waterMaterials.splice(i, 1);
+      this.forgetMaterials([p.body.lit]);
+      this.waterBodies.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      this.riverWork.removed++;
+    }
+  }
+
+  /** The props pack's own fall effects, by the kind a steep stretch stands (`riverEffects`), as the props command wrote them. */
+  private static readonly RIVER_FX: Record<'spray' | 'mist' | 'sprayBig' | 'mistBig', string> = {
+    spray: 'particles/fx_pt_waterfall_spray_small.json',
+    mist: 'particles/fx_pt_waterfall_mist_small.json',
+    sprayBig: 'particles/fx_pt_waterfall_spray.json',
+    mistBig: 'particles/fx_pt_waterfall_mist.json',
+  };
+
+  /**
+   * Every river's fall effects stood again (`riverEffects`: the game's own fall sprays and mists along each steep stretch
+   * that stays water and at its foot): the last ones taken away, each file made ready once (its textures uploaded: the
+   * particles' one program is the session's), placed as standing effects scaled by their stretch's drop. The files are the props pack's
+   * (`particles/fx_pt_waterfall_*`, every world reaching them as a guest pack's are reached, named from the world's own
+   * folder), never a copy; an install with no props pack stands none and says so. Behind a screen at an arrival; in play
+   * after a landing or a retune. Every sync goes through the one keeper (`RiverEffectsKeeper`), so a sync begun while
+   * another waits on a file overtakes it and the one overtaken stands nothing: two that overlap never leave a set standing
+   * that nothing can take away.
+   */
+  private async syncRiverEffects(token: number): Promise<void> {
+    const fx = this.particles;
+    const root = relativeRoot(this.particlesRoot, `${import.meta.env.BASE_URL}assets-private/props/`);
+    const m = new THREE.Matrix4();
+    const turn = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0);
+    const at = new THREE.Vector3();
+    const size = new THREE.Vector3(1, 1, 1);
+    const host: RiverFxHost<EffectHandle> | null = fx
+      ? {
+          prepare: (file) => fx.prepare(root + file, this.renderer),
+          place: (file, e) => {
+            turn.setFromAxisAngle(up, e.yaw);
+            // Scaled by its stretch's drop (`effectScaleOf`): the emitter's frame, so where its particles start and how fast they leave.
+            m.compose(at.set(e.x, e.y, e.z), turn, size.setScalar(e.scale));
+            return fx.place(root + file, m, false);
+          },
+          remove: (h) => fx.remove(h),
+          still: () => token === this.loadToken && this.particles === fx,
+        }
+      : null;
+    const stood = await this.riverFx.sync(this.riverTables, World.RIVER_FX, host);
+    if (!stood) return;
+    if (stood.missing.length) console.warn(`rivers: the props pack's fall effects (${stood.missing.join(', ')}) did not load: no fall effects stand on this world's steep reaches (npm run swg -- props @SWG assets-private --retail-only)`);
+    this.riverWork.effectFiles = stood.files;
+    this.riverWork.missingEffects = stood.missing.length;
+    this.riverWork.effects += stood.placed;
+  }
+
+  /**
+   * Rows of the water file's rivers landed (a write's answer, a file read again; `landWater`): the rivers in force made
+   * again, every one that moved taken out and stood again by difference (`riverLandingPlan`: as it stood, and as it stands
+   * now, so a river taken out or undone loses its bodies), its effects stood again, and the plantings, the grass, the air's
+   * cells and the depth window under every river that moved (old place and new) made again.
+   */
+  private landRivers(moved: ReadonlySet<string>): void {
+    const before = [...this.ourRiverTables];
+    const tables = this.applyRivers(moved);
+    this.riverWork.landed++;
+    const plan = riverLandingPlan(before, tables, moved);
+    for (const n of plan.drop) this.dropRiverBodies(n);
+    for (const t of plan.add) this.addRiverBodies(t);
+    this.riversChanged(plan.touched);
+    void this.syncRiverEffects(this.loadToken);
+  }
+
+  /** What stands under the rivers named, by their boxes (old place and new): replanted, the grass, the air and the depth window asked again. */
+  private riversChanged(list: readonly RiverTable[]): void {
+    const rect = { x0: Infinity, z0: Infinity, x1: -Infinity, z1: -Infinity };
+    for (const t of list) {
+      // A river of no water quads (all of it a fall cut out) has an empty box: its quads' own reach the ground still.
+      const q = t.river.quadBounds;
+      for (let i = 0; i < q.length; i += 4) {
+        rect.x0 = Math.min(rect.x0, q[i]);
+        rect.x1 = Math.max(rect.x1, q[i + 1]);
+        rect.z0 = Math.min(rect.z0, q[i + 2]);
+        rect.z1 = Math.max(rect.z1, q[i + 3]);
+      }
+    }
+    if (rect.x0 <= rect.x1) this.waterChanged(rect.x0, rect.z0, rect.x1, rect.z1);
+  }
+
+  /**
+   * `RIVER_TUNE` moved (`__debug.rivers({ tune })`, `tuneRiverTune`'s `retune`): `'flow'` rewrites every reach's wind in place
+   * (a uniform, nothing made); `'effects'` stands the fall effects again and keeps every table and body; `'shape'` (the slope
+   * limit, what a steep reach is, the index's cell) makes every river's table again and, by `riverRetunePlan`, keeps the
+   * bodies of every river whose water did not move (handed its new table, so a slope slider dragged under `'effects'` hides,
+   * replants and remakes nothing), takes out and stands again only those whose water moved (made ready through the queue in
+   * play, their programs found, not built), makes again only what stands under those, and stands the effects again.
+   * Answers what it did.
+   */
+  retuneRivers(what: RiverRetune): string {
+    if (what === 'flow') {
+      for (const e of this.riverBodies.values()) {
+        const look = this.ourLakeLook(e.table as unknown as SwgWaterTable);
+        const unit = riverWindUnit(look.drift > 0.01 ? look.drift : 0.01);
+        for (const p of e.parts) reachWind(p.reach, e.table.river.velocity, unit, RIVER_TUNE.flow, p.wind.value);
+      }
+      return `every reach's wind written again (${[...this.riverBodies.values()].reduce((n, e) => n + e.parts.length, 0)} bodies)`;
+    }
+    if (!this.riverTables.length && !this.soeRiverRows.length && !this.ourRiverRows.length) return 'no river on this world';
+    if (what === 'effects') {
+      this.riverWork.retuned++;
+      void this.syncRiverEffects(this.loadToken);
+      return `every river's fall effects stood again (${this.riverTables.length} river${this.riverTables.length === 1 ? '' : 's'}, no body made again)`;
+    }
+    const before = [...this.riverTables];
+    const after = this.applyRivers(null, true);
+    const plan = riverRetunePlan(before, after);
+    for (const n of plan.drop) this.dropRiverBodies(n);
+    for (const k of plan.keep) this.handRiverBodies(k.from, k.to);
+    for (const t of plan.add) this.addRiverBodies(t);
+    this.riversChanged(plan.touched);
+    this.riverWork.retuned++;
+    void this.syncRiverEffects(this.loadToken);
+    return `${after.length} river${after.length === 1 ? '' : 's'} made again (${plan.add.length} with ${plan.add.length === 1 ? 'its' : 'their'} water moved, stood again; ${plan.keep.length} kept as ${plan.keep.length === 1 ? 'it stands' : 'they stand'})`;
+  }
+
+  /**
+   * A river's bodies handed its new table where its water did not move (`riverRetunePlan`'s `keep`): the same quads and
+   * reaches, so its geometry and its winds stand; each part takes its new table's reach, and the entry its table, so a
+   * later flow or report reads the table in force.
+   */
+  private handRiverBodies(from: RiverTable, to: RiverTable): void {
+    const e = this.riverBodies.get(from.name);
+    if (!e) return;
+    e.table = to;
+    for (const p of e.parts) {
+      const r = to.river.reaches.find((re) => re.first === p.reach.first && re.last === p.reach.last);
+      if (r) p.reach = r;
+    }
+  }
+
+  /** The rivers in words for the console (`__debug.rivers()`): every river, its reaches with their runs, its stretches, its bodies and index. */
+  riversReport(): Record<string, unknown> {
+    const unitOf = (t: RiverTable): number => riverWindUnit(Math.max(0.01, this.ourLakeLook(t as unknown as SwgWaterTable).drift));
+    return {
+      rivers: this.riverTables.map((t) => {
+        const s = t.river;
+        const e = this.riverBodies.get(t.name);
+        return {
+          name: t.name,
+          of: t.soe ? 'the terrain' : 'ours',
+          id: t.ours?.id ?? t.soe ?? null,
+          label: t.ours?.name ?? (t.soe ? this.soeRiverRows.find((r) => r.id === t.soe)?.name ?? null : null),
+          points: s.spine.length / 3,
+          width: s.width,
+          velocity: s.velocity,
+          shader: t.shader || null,
+          quads: s.slopes.length,
+          water: s.water.reduce((n, w) => n + w, 0),
+          limit: s.limit,
+          steep: s.steep,
+          steepest: Math.round(s.slopes.reduce((m, v) => (v > m ? v : m), 0) * 100) / 100,
+          reaches: s.reaches.map((r) => ({ first: r.first, last: r.last, slope: Math.round(r.slope * 100) / 100, run: [Math.round(r.runX * s.velocity * RIVER_TUNE.flow * 1000) / 1000, Math.round(r.runZ * s.velocity * RIVER_TUNE.flow * 1000) / 1000], wind: (() => { const w = { x: 0, y: 0 }; reachWind(r, s.velocity, unitOf(t), RIVER_TUNE.flow, w); return [Math.round(w.x * 100) / 100, Math.round(w.y * 100) / 100]; })() })),
+          stretches: s.stretches.map((st) => ({ first: st.first, last: st.last, drop: Math.round(st.drop * 100) / 100, length: Math.round(st.length * 10) / 10, slope: Math.round(st.slope * 100) / 100, foot: [Math.round(st.foot.x * 10) / 10, Math.round(st.foot.y * 100) / 100, Math.round(st.foot.z * 10) / 10] })),
+          bodies: e?.parts.length ?? 0,
+          shown: e ? e.parts.every((p) => p.mesh.visible) : false,
+          effects: this.riverFx.byRiver.get(t.name)?.length ?? 0,
+          index: { cell: Math.round(s.size * 100) / 100, nx: s.nx, nz: s.nz, entries: s.list.length },
+        };
+      }),
+      work: { ...this.riverWork },
+      tune: { ...RIVER_TUNE },
+    };
+  }
+
+  /** The surface over a point and which river is the water there (`rivers({ at })`): its reach, its quad's slope and its run. */
+  riverAt(x: number, z: number): Record<string, unknown> {
+    const surface = this.terrain.waterHeightAt(x, z);
+    const t = this.terrain.waterTableAt(x, z);
+    const list = this.terrain.riverList();
+    const hit: RiverHit = { h: 0, table: -1, quad: -1 };
+    const found = list.length > 0 && riverScan(list, x, z, -Infinity, hit);
+    const r = found ? list[hit.table] : null;
+    // The river is the water here only where its surface is the surface (a lake or the sea higher wins).
+    const isRiver = !!r && hit.h === surface;
+    const s = r?.river;
+    return {
+      surface,
+      ground: this.terrain.heightAt(x, z),
+      river: isRiver ? r!.name : null,
+      under: found && !isRiver ? r!.name : null,
+      run: isRiver && s ? [Math.round(s.runs[hit.quad * 2] * s.velocity * 1000) / 1000, Math.round(s.runs[hit.quad * 2 + 1] * s.velocity * 1000) / 1000] : null,
+      reach: isRiver && s ? s.reaches.findIndex((re) => hit.quad >= re.first && hit.quad <= re.last) : -1,
+      quad: isRiver ? hit.quad : -1,
+      slope: isRiver && s ? Math.round(s.slopes[hit.quad] * 100) / 100 : null,
+      table: t ? t.name : null,
+    };
+  }
+
+  /** The rivers' own looks in force for the editor (a river of ours by id), or null. */
+  riverLookOf(id: string): WaterLook | null {
+    for (const t of this.ourRiverTables) if (t.ours?.id === id) return this.ourLakeLook(t as unknown as SwgWaterTable);
+    return null;
+  }
+
+  /** The rivers in force as tables (the editor's marks, the console). */
+  get rivers(): readonly RiverTable[] {
+    return this.riverTables;
   }
 }
 

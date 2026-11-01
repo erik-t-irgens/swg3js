@@ -49,7 +49,7 @@ import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.t
 import { EditorPaint, hexOf, paintTool, recipeWords, washInto, type PaintHost } from './editorPaint.ts';
 import { FLORA_PAINT_TUNE, PAINT_TUNE, tuneFloraPaint, tunePaint } from './editorTune.ts';
 import { FLORA_CLASSES, type FloraClass, type FloraClassSpec, type FloraRecipe } from '../swg/terrain/groundPaint.ts';
-import { LAKE_LOOK_DIALS, WASH_DIALS } from './editorDials.ts';
+import { LAKE_LOOK_DIALS, RIVER_DIALS, WASH_DIALS } from './editorDials.ts';
 import { PAINT_LAYERS, type PaintLayer } from './groundBrush.ts';
 import { TINT_MODES, type PaintWorldRow } from '../world/editFiles/paintFile.ts';
 import { readWash, type WashSpec } from '../world/demWash.ts';
@@ -71,7 +71,8 @@ import { brushRing, meantForWater, ringAsk, type RingGround } from './brush.ts';
 import { ToolList, toolFrame, type ToolDef, type ToolDraw } from './tools.ts';
 import { EditorWater, waterTool, type WaterHost } from './editorWater.ts';
 import { WATER_CHOICES, WATER_TUNE, tuneWater } from './editorTune.ts';
-import { LAKE_TUNE } from '../world/ourWater.ts';
+import { LAKE_TUNE, RIVER_STEEP, RIVER_TUNE, tuneRiverTune } from '../world/ourWater.ts';
+import type { WaterRiverRow } from '../world/editFiles/waterFile.ts';
 import { outlineArea } from './lakeTrace.ts';
 import type { WaterToolsView, LakeView } from '../ui/editorWindow.ts';
 
@@ -435,11 +436,13 @@ export class Editor {
     LAKE_LOOK_DIALS.host = {
       look: () => {
         const id = this.water.picked;
-        const l = id ? w.lakeLookOf(id) : null;
+        const l = id ? (w.lakeLookOf(id) ?? w.riverLookOf(id)) : null;
         return id && l ? { id, opacity: l.opacity, ripple: l.ripple, drift: l.drift } : null;
       },
       set: (partial) => this.lakeLookDial(partial),
     };
+    // The rivers' own numbers as the debug menu's sliders (the sixth wave): a moved slope limit makes every river again.
+    RIVER_DIALS.host = { tune: (partial) => this.tuneRivers(partial) };
     // The wash's numbers as the debug menu's sliders, each written into the world row (debounced) as it moves.
     WASH_DIALS.host = {
       wash: () => (w.paintWorld.wash ?? null) as ReturnType<NonNullable<typeof WASH_DIALS.host>['wash']>,
@@ -786,6 +789,7 @@ export class Editor {
       },
       worldKind: () => h.worldKind(),
       rows: () => w.ourLakeRows,
+      rivers: () => w.ourRiverRows,
       toRaw: (x, z, out) => {
         const s = w.terrain.swg;
         out.x = s ? s.toSwgX(x) : -x;
@@ -2012,7 +2016,7 @@ export class Editor {
       setLake: (f: Record<string, unknown>) => {
         const id = this.water.picked;
         if (!id) return;
-        void this.water.setLake(id, f as { name?: string | null; shader?: string | null; look?: Record<string, unknown> }).then(() => this.window?.refreshEdits());
+        void this.water.setLake(id, f as { name?: string | null; shader?: string | null; look?: Record<string, unknown>; width?: number; velocity?: number; fallFrom?: number | null }).then(() => this.window?.refreshEdits());
       },
       selected: () => this.selectedView(),
       setField: (f: Record<string, unknown>) => void this.edits.setField(f),
@@ -2092,6 +2096,14 @@ export class Editor {
     const wt: Record<string, unknown> = {};
     if (typeof t.waterMode === 'string') wt.mode = t.waterMode;
     if (typeof t.waterLevelFrom === 'string') wt.levelFrom = t.waterLevelFrom;
+    // The sixth wave's: where a river's points stand, what a steep reach becomes (`RIVER_TUNE.steep`, which makes every
+    // river again), and the river under way written.
+    if (typeof t.waterRiverHeights === 'string') wt.riverHeights = t.waterRiverHeights;
+    if (typeof t.riverSteep === 'string' && (RIVER_STEEP as readonly string[]).includes(t.riverSteep) && t.riverSteep !== RIVER_TUNE.steep) {
+      RIVER_TUNE.steep = t.riverSteep as typeof RIVER_TUNE.steep;
+      this.say(`a river's reach past ${RIVER_TUNE.slopeMax}° is now ${RIVER_TUNE.steep === 'effects' ? "water with the game's fall effects" : RIVER_TUNE.steep === 'fall' ? 'a fall (not water; the tool writes a fall row with a river)' : 'not water ("a fall goes here")'}: ${this.host.world.retuneRivers('shape')}`, true);
+    }
+    if (t.waterRiverFinish === true) void this.water.finishRiver().then(() => this.window?.refreshEdits());
     if (typeof t.waterHeight === 'number' && Number.isFinite(t.waterHeight)) {
       wt.height = t.waterHeight;
       wt.levelFrom = 'typed';
@@ -2553,23 +2565,14 @@ export class Editor {
 
   // ---- The water tool (Map-maker II's fifth wave). ----
 
-  /** The lakes of ours as the Here tab lists them (`lake:<id>`), nearest the camera first. */
+  /** The lakes and rivers of ours as the Here tab lists them (`lake:<id>`, either kind), nearest the camera first. */
   private lakeHereRows(): HereRow[] {
-    const w = this.host.world;
     const p = this.host.player.pos;
-    const at = { x: 0.5, z: 0.5 };
-    const rows = w.ourLakeRows.map((r) => {
-      let cx = 0;
-      let cz = 0;
-      for (const [x, z] of r.points) {
-        this.waterHostFrame(x, z, at);
-        cx += at.x;
-        cz += at.z;
-      }
-      cx /= Math.max(1, r.points.length);
-      cz /= Math.max(1, r.points.length);
-      const d = Math.hypot(cx - p.x, r.h - p.y, cz - p.z);
-      return { d, row: { id: `${LAKE_ROW}${r.id}`, layer: 'water', label: `${r.name ?? r.id} (a lake, ${r.h.toFixed(2)} m)`, away: `${Math.round(d)} m`, stood: true, bad: null } as HereRow };
+    const rows = this.host.world.ourWaterRows.map((r) => {
+      const m = this.lakeMiddle(r.id)!;
+      const d = Math.hypot(m.x - p.x, m.y - p.y, m.z - p.z);
+      const what = r.kind === 'river' ? `a river, ${r.points.length} points, ${r.width} m wide` : `a lake, ${r.h.toFixed(2)} m`;
+      return { d, row: { id: `${LAKE_ROW}${r.id}`, layer: 'water', label: `${r.name ?? r.id} (${what})`, away: `${Math.round(d)} m`, stood: true, bad: null } as HereRow };
     });
     rows.sort((a, b) => a.d - b.d);
     return rows.map((x) => x.row);
@@ -2582,9 +2585,9 @@ export class Editor {
     out.z = s ? s.toGameZ(z) : z;
   }
 
-  /** A lake's middle in the game's frame and its level, or null. */
+  /** A lake's middle in the game's frame and its level (a river's: its spine's middle point and its height there), or null. */
   private lakeMiddle(id: string): { x: number; y: number; z: number; r: number } | null {
-    const row = this.host.world.ourLakeRows.find((r) => r.id === id);
+    const row = this.host.world.ourWaterRows.find((r) => r.id === id);
     if (!row) return null;
     const at = { x: 0.5, z: 0.5 };
     let cx = 0;
@@ -2593,8 +2596,8 @@ export class Editor {
     let x1 = -Infinity;
     let z0 = Infinity;
     let z1 = -Infinity;
-    for (const [x, z] of row.points) {
-      this.waterHostFrame(x, z, at);
+    for (const p of row.points) {
+      this.waterHostFrame(p[0], p[1], at);
       cx += at.x;
       cz += at.z;
       x0 = Math.min(x0, at.x);
@@ -2604,34 +2607,74 @@ export class Editor {
     }
     const n = Math.max(1, row.points.length);
     const across = Math.max(x1 - x0, z1 - z0);
-    return { x: cx / n, y: row.h, z: cz / n, r: Number.isFinite(across) ? across : 10 };
+    const r = Number.isFinite(across) ? across : 10;
+    if (row.kind === 'river') {
+      const m = row.points[Math.floor((row.points.length - 1) / 2)];
+      this.waterHostFrame(m[0], m[1], at);
+      return { x: at.x, y: m[2], z: at.z, r };
+    }
+    return { x: cx / n, y: row.h, z: cz / n, r };
   }
 
   /** Go to a lake: the eye over its middle and back from it, looking down at it. Answers what was said. */
   private goToLake(id: string): string {
     const m = this.lakeMiddle(id);
-    if (!m) return `no lake ${id}`;
+    if (!m) return `no lake or river ${id}`;
     const back = Math.min(400, Math.max(20, m.r * 0.6));
     this.host.player.pos.set(m.x, m.y + back * 0.6, m.z + back);
     this.fly.lookAlong(0, -back * 0.6, -back);
     this.fly.stop();
-    return `over the lake ${id}`;
+    return `over the ${this.host.world.ourRiverRows.some((r) => r.id === id) ? 'river' : 'lake'} ${id}`;
   }
 
   /** A lake picked from the Here tab (or the console): the water tool armed if it is not, and the lake picked in it. */
   private async pickLake(id: string): Promise<string> {
-    if (!this.host.world.ourLakeRows.some((r) => r.id === id)) return `no lake ${id}`;
+    const row = this.host.world.ourWaterRows.find((r) => r.id === id);
+    if (!row) return `no lake or river ${id}`;
     if (!this.water.armed) await this.toggleTool('water');
     this.water.picked = id;
     this.window?.refreshEdits();
-    return `picked the lake ${id}`;
+    return `picked the ${row.kind} ${id}`;
   }
 
-  /** The lake picked as the Selected tab shows it, or null. */
+  /** The river picked as the Selected tab shows it (the sixth wave): its fields, its length and its steep reaches. */
+  private riverView(row: WaterRiverRow): LakeView {
+    const w = this.host.world;
+    const t = w.rivers.find((r) => r.ours?.id === row.id) ?? null;
+    let length = 0;
+    const at = { x: 0.5, z: 0.5 };
+    const at2 = { x: 0.5, z: 0.5 };
+    for (let i = 1; i < row.points.length; i++) {
+      this.waterHostFrame(row.points[i - 1][0], row.points[i - 1][1], at);
+      this.waterHostFrame(row.points[i][0], row.points[i][1], at2);
+      length += Math.hypot(at2.x - at.x, at2.z - at.z);
+    }
+    const s = t?.river;
+    const steep = s && s.stretches.length ? `Past ${s.limit}° in ${s.stretches.length} place${s.stretches.length === 1 ? '' : 's'} (the steepest ${Math.max(...s.stretches.map((x) => x.slope)).toFixed(1)}°): ${s.steep === 'effects' ? "water, with the game's fall effects there" : s.steep === 'fall' ? 'not water: a fall row is written there as a river is written' : 'not water: a fall goes here'}.` : '';
+    const m = this.lakeMiddle(row.id);
+    return {
+      id: row.id,
+      name: row.name ?? '',
+      h: m ? Math.round(m.y * 1000) / 1000 : 0,
+      points: row.points.length,
+      area: '',
+      shader: row.shader ?? '',
+      color: row.look?.color ?? '',
+      opacity: row.look?.opacity !== undefined ? String(row.look.opacity) : '',
+      ripple: row.look?.ripple !== undefined ? String(row.look.ripple) : '',
+      drift: row.look?.drift !== undefined ? String(row.look.drift) : '',
+      note: t ? `${s?.reaches.length ?? 0} reach${s?.reaches.length === 1 ? '' : 'es'} drawn.` : 'It is not drawn (this world keeps no river here).',
+      river: { width: String(row.width), velocity: String(row.velocity), fallFrom: row.fallFrom !== undefined ? String(row.fallFrom) : '', length: `${Math.round(length)} m`, steep },
+    };
+  }
+
+  /** The lake (or river) picked as the Selected tab shows it, or null. */
   private lakeView(): LakeView | null {
     const id = this.water.picked;
     if (!id) return null;
     const w = this.host.world;
+    const river = w.ourRiverRows.find((r) => r.id === id);
+    if (river) return this.riverView(river);
     const row = w.ourLakeRows.find((r) => r.id === id);
     if (!row) return null;
     const at = { x: 0.5, z: 0.5 };
@@ -2665,13 +2708,16 @@ export class Editor {
     const t = WATER_TUNE;
     const info = w.waterFileInfo;
     const n = w.ourLakeRows.length;
-    const file = `public/placements/water/${this.host.packId()}.json: ${n} lake${n === 1 ? '' : 's'}${info.bytes ? `, about ${(info.bytes / 1024).toFixed(1)} KB as last read` : ''}${info.problem ? ` (not read: ${info.problem})` : ''}`;
+    const nr = w.ourRiverRows.length;
+    const file = `public/placements/water/${this.host.packId()}.json: ${n} lake${n === 1 ? '' : 's'}${nr ? `, ${nr} river${nr === 1 ? '' : 's'}` : ''}${info.bytes ? `, about ${(info.bytes / 1024).toFixed(1)} KB as last read` : ''}${info.problem ? ` (not read: ${info.problem})` : ''}`;
     const notes: string[] = [];
     const no = this.water.refusal();
     if (no) notes.push(no);
-    if (n) notes.push('The walk grid follows the lakes once navgrid is run again for this world (status asks for it).');
+    if (n || nr) notes.push(`The walk grid follows the ${nr ? (n ? 'lakes and rivers' : 'rivers') : 'lakes'} once navgrid is run again for this world (status asks for it).`);
+    const soe = w.rivers.filter((r) => r.soe).length;
+    if (soe) notes.push(`This world's terrain has ${soe} wet river${soe === 1 ? '' : 's'} of its own, drawn as water (not the file's: the tool does not edit them).`);
     if (this.water.last.said) notes.push(this.water.last.said);
-    return { armed: this.water.armed, mode: t.mode, levelFrom: t.levelFrom, height: t.height, draft: this.water.draft.length, fallTop: !!this.water.fallTop, picked: this.water.picked, lakes: n, file, note: notes.join(' ') };
+    return { armed: this.water.armed, mode: t.mode, levelFrom: t.levelFrom, height: t.height, riverHeights: t.riverHeights, steep: RIVER_TUNE.steep, draft: this.water.draft.length, fallTop: !!this.water.fallTop, picked: this.water.picked, lakes: n, rivers: nr, file, note: notes.join(' ') };
   }
 
   /**
@@ -2780,6 +2826,92 @@ export class Editor {
       ...(traced ? { traced } : {}),
       ...(said.length ? { answered: said } : {}),
     };
+  }
+
+  /**
+   * `__debug.rivers(o)` (the dev server's half, Map-maker II's sixth wave): the world's rivers (`World.riversReport`: the
+   * terrain's own and ours, each reach's run and wind, its steep stretches, its bodies, effects and index) and the tool's
+   * river numbers; `{ tune }` moves `RIVER_TUNE` (its shape -- `slopeMax`, `steep`, `bucket`, `spacingMin` -- makes every river
+   * again; `flow` rewrites every reach's wind) and the tool's own (`riverWidth`, `riverVelocity`, `riverRise`, `riverHeights`),
+   * `{ arm: true }` the water tool in its river mode (false lets it go), `{ at: [x, z] }` the surface, the river and its run
+   * there, `{ write: { points: [[x, z], ...] or [[x, z, h], ...], width, velocity, name } }` a river written (each point on
+   * its ground by the tool's rule, or at `h` as given), `{ pick }`, `{ move: { id, dx, dz, dy } }`, `{ set: { id, width,
+   * velocity, fallFrom, name, shader, color, opacity, ripple, drift } }` and `{ remove }` -- every place in the file's own
+   * frame (a `/loc` line on a planet).
+   */
+  async riversDebug(o?: Record<string, unknown>): Promise<unknown> {
+    const w = this.host.world;
+    const said: string[] = [];
+    const c = w.placeFrame;
+    const space = !!w.planet?.space;
+    const gameOf = (x: number, z: number): { x: number; z: number } => (space || !c ? { x, z } : { x: rawToGameX(c.x, x), z: rawToGameZ(c.z, z) });
+    let at: Record<string, unknown> | null = null;
+    if (o && typeof o === 'object') {
+      if (o.tune && typeof o.tune === 'object') said.push(...this.tuneRivers(o.tune as Record<string, unknown>));
+      if (o.arm === true) {
+        tuneWater({ mode: 'river' });
+        said.push(this.water.armed ? 'the water tool: river' : await this.toggleTool('water'));
+      }
+      if (o.arm === false && this.water.armed) said.push(await this.toggleTool('water'));
+      if (Array.isArray(o.at) && typeof o.at[0] === 'number' && typeof o.at[1] === 'number') {
+        const g = gameOf(o.at[0], o.at[1]);
+        at = { ...w.riverAt(g.x, g.z), game: [round(g.x), round(g.z)] };
+      }
+      const wr = o.write as Record<string, unknown> | undefined;
+      if (wr && typeof wr === 'object' && Array.isArray(wr.points)) {
+        const raw = (wr.points as unknown[]).filter((p): p is number[] => Array.isArray(p) && p.length >= 2 && p.every((n) => typeof n === 'number'));
+        const given = raw.length > 0 && raw.every((p) => p.length >= 3);
+        const pts = raw.map((p) => {
+          const g = gameOf(p[0], p[1]);
+          return [g.x, g.z, given ? p[2] : w.terrain.heightAt(g.x, g.z)] as [number, number, number];
+        });
+        const before = { width: WATER_TUNE.riverWidth, velocity: WATER_TUNE.riverVelocity };
+        if (typeof wr.width === 'number') tuneWater({ riverWidth: wr.width });
+        if (typeof wr.velocity === 'number') tuneWater({ riverVelocity: wr.velocity });
+        said.push(await this.water.writeRiver(pts, 'a river (console)', typeof wr.name === 'string' ? wr.name : undefined, given));
+        tuneWater({ riverWidth: before.width, riverVelocity: before.velocity });
+      }
+      if (typeof o.pick === 'string') said.push(await this.pickLake(o.pick));
+      const mv = o.move as Record<string, unknown> | undefined;
+      if (mv && typeof mv === 'object' && typeof mv.id === 'string') {
+        // dx along the file's own x: the game's frame mirrors x on a planet.
+        const dxFile = typeof mv.dx === 'number' ? mv.dx : 0;
+        said.push(await this.water.moveLake(mv.id, space ? dxFile : -dxFile, typeof mv.dz === 'number' ? mv.dz : 0, typeof mv.dy === 'number' ? mv.dy : 0));
+      }
+      const st = o.set as Record<string, unknown> | undefined;
+      if (st && typeof st === 'object' && !(typeof st.id === 'string') && this.water.picked) st.id = this.water.picked;
+      if (st && typeof st === 'object' && typeof st.id === 'string') {
+        const fields: { name?: string | null; shader?: string | null; look?: Record<string, unknown>; width?: number; velocity?: number; fallFrom?: number | null } = {};
+        if ('name' in st) fields.name = typeof st.name === 'string' ? st.name : null;
+        if ('shader' in st) fields.shader = typeof st.shader === 'string' ? st.shader : null;
+        if (typeof st.width === 'number') fields.width = st.width;
+        if (typeof st.velocity === 'number') fields.velocity = st.velocity;
+        if ('fallFrom' in st) fields.fallFrom = typeof st.fallFrom === 'number' ? st.fallFrom : null;
+        const look: Record<string, unknown> = {};
+        for (const k of ['color', 'opacity', 'ripple', 'drift']) if (k in st) look[k] = st[k];
+        if (Object.keys(look).length) fields.look = look;
+        said.push(await this.water.setLake(st.id, fields));
+      }
+      if (typeof o.remove === 'string') said.push(await this.water.remove(o.remove));
+    }
+    return {
+      ...w.riversReport(),
+      tool: this.water.report(),
+      toolTune: { riverWidth: WATER_TUNE.riverWidth, riverVelocity: WATER_TUNE.riverVelocity, riverRise: WATER_TUNE.riverRise, riverHeights: WATER_TUNE.riverHeights },
+      ...(at ? { at } : {}),
+      ...(said.length ? { answered: said } : {}),
+    };
+  }
+
+  /** `rivers({ tune })`: the rivers' own numbers (`RIVER_TUNE`, a shape change making every river again) and the tool's river numbers. */
+  tuneRivers(tune: Record<string, unknown>): string[] {
+    // The retune is called inside `tuneRiverTune`, before it answers: what it says goes into a list made first.
+    const said: string[] = [];
+    said.push(...tuneRiverTune(tune, (what) => said.push(this.host.world.retuneRivers(what))));
+    const tool: Record<string, unknown> = {};
+    for (const k of ['riverWidth', 'riverVelocity', 'riverRise', 'riverHeights']) if (k in tune) tool[k] = tune[k];
+    if (Object.keys(tool).length) said.push(...tuneWater(tool));
+    return said;
   }
 
   /** The first picked row as the Selected tab shows it, or null. */

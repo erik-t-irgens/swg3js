@@ -611,6 +611,13 @@ if (process.argv.includes('water')) {
     }
     lakes.push({ id: `l${l}`, kind: 'lake', h: 1, points: pts, shader: null });
   }
+  // And two rivers (the sixth wave), whose banks are drawn with a height a point (`ys`): the frame's other path.
+  const rivers: import('../../../src/world/editFiles/waterFile.ts').WaterRiverRow[] = [];
+  for (let r = 0; r < 2; r++) {
+    const pts: [number, number, number][] = [];
+    for (let i = 0; i < 12; i++) pts.push([-(i * 6 - 30), 10 + r * 30 + Math.sin(i) * 3, 2 - i * 0.3]);
+    rivers.push({ id: `r${r}`, kind: 'river', points: pts, width: 8, velocity: 1, shader: null });
+  }
   const wm = marksView();
   tuneWater({ ...WATER_TUNE_DEFAULTS, mode: 'clicks' });
   const water = new EditorWater({
@@ -618,6 +625,7 @@ if (process.argv.includes('water')) {
     edits: { beginStroke: (label: string) => ({ label }), strokeWrite: async () => null, endStroke: () => '' } as never,
     worldKind: () => 'ground',
     rows: () => lakes,
+    rivers: () => rivers,
     toRaw: (x, z, out) => {
       out.x = -x;
       out.z = z;

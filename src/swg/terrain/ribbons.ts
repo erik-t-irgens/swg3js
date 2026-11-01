@@ -14,8 +14,11 @@
 //   away from the second, at the first point's height: the pool the fall pours out of. None for a cap width of nought.
 //
 // Pure: no three. The world turns these into meshes (`World.buildRibbons`) and the air asks them what liquid is over a
-// point (`ribbonAt`).
-import { Layer, AffectorRibbon, type RibbonData, type TerrainGenerator } from './generator.ts';
+// point (`ribbonAt`). Rivers of ours and the terrain's own wet rivers (Map-maker II's sixth wave, `soeRiverRows`) are
+// built by the same quads (`ribbonQuads`) and asked by the same arithmetic (`inTriangle`, `planeHeight`), in `ourWater.ts`.
+// The walk grid's bake reads them through that file, so the release carries this one (`tools/launcher/pack.mjs`).
+import { Layer, AffectorRibbon, AffectorRiver, type RibbonData, type TerrainGenerator } from './generator.ts';
+import { shaderKey } from './shaderKey.ts';
 
 /** A ribbon of the terrain in its own (SWG) frame, with its quads and its cap built. */
 export interface TerrainRibbon extends RibbonData {
@@ -158,6 +161,73 @@ export function terrainRibbons(generator: TerrainGenerator): TerrainRibbon[] {
 }
 
 /**
+ * A spine's points with every one nearer than `spacing` (metres across the ground) to the point kept before it merged away
+ * (Map-maker II's sixth wave: a river's points are written no closer than `RIVER_TUNE.spacingMin`), the last point always
+ * kept where it stands -- a last point too near the one before takes that one's place -- so a spine still ends where it
+ * was drawn. A spine shorter than `spacing` keeps its two ends. Pure; a new list.
+ */
+export function mergeClosePoints<P extends readonly number[]>(points: readonly P[], spacing: number): P[] {
+  const out: P[] = [];
+  const n = points.length;
+  for (let i = 0; i < n; i++) {
+    const p = points[i];
+    const last = out[out.length - 1];
+    if (!last) {
+      out.push(p);
+      continue;
+    }
+    const dx = p[0] - last[0];
+    const dz = p[1] - last[1];
+    if (Math.sqrt(dx * dx + dz * dz) >= spacing) out.push(p);
+    else if (i === n - 1) {
+      if (out.length > 1) out[out.length - 1] = p;
+      else out.push(p);
+    }
+  }
+  return out;
+}
+
+/**
+ * The terrain's own wet rivers as rows of the water file's river shape (Map-maker II's sixth wave, the owner's amendment of
+ * 2026-10-31): every river affector with a local water table that runs -- active, in an active layer whose every layer
+ * above is active, as `terrainRibbons` collects the ribbons -- its spine the file's own height samples (`HeightData`: a
+ * sample every 8 m along each segment on the test worlds), each at its sample's height less the table's depth, so the
+ * water is sloped along the samples; its width the table's own, its velocity and its shader the affector's. In the
+ * terrain's own frame, which is the water file's raw frame. The world and the walk grid's bake hand each row to the water
+ * file's own reader (`readWaterRow`), so the game's rivers and ours are one shape read one way. Points nearer than
+ * `spacing` are merged (`mergeClosePoints`: a segment's last sample is the next one's first); a river of lava (water type
+ * 1, which this pass does not draw), one with no height samples, and one of fewer than two points are left out and named.
+ */
+export function soeRiverRows(generator: TerrainGenerator, spacing: number): { rows: Record<string, unknown>[]; skipped: { name: string; why: string }[] } {
+  const rows: Record<string, unknown>[] = [];
+  const skipped: { name: string; why: string }[] = [];
+  const walk = (layers: readonly Layer[]): void => {
+    for (const l of layers) {
+      if (!l.active) continue;
+      for (const a of l.affectors) {
+        if (!a.active || !(a instanceof AffectorRiver) || !a.hasLocalWaterTable) continue;
+        const name = l.name || a.name;
+        if (a.waterType !== 0) {
+          skipped.push({ name, why: 'a river of lava, which this pass does not draw' });
+          continue;
+        }
+        const samples: [number, number, number][] = [];
+        for (const seg of a.heightData.segments) for (const p of seg) samples.push([p.x, p.z, p.y - a.localWaterTableDepth]);
+        const points = mergeClosePoints(samples, spacing);
+        if (points.length < 2) {
+          skipped.push({ name, why: samples.length ? 'fewer than two height samples' : 'no height samples (the client laid no water without them)' });
+          continue;
+        }
+        rows.push({ id: `soe-${rows.length + 1}`, kind: 'river', name, points, width: a.localWaterTableWidth, velocity: a.velocity, shader: shaderKey(a.localWaterTableShaderTemplateName) || null });
+      }
+      walk(l.layers);
+    }
+  };
+  walk(generator.layers);
+  return { rows, skipped };
+}
+
+/**
  * A ribbon in the game's frame: its corners and runs carried by `toX` and `toZ` (the game's X is the client's mirrored),
  * its bounds, and its surface's flow -- along its run, downstream from its first point to its last, at its velocity
  * read as metres a second (an inference: 1 on every retail ribbon, where a water shader's repeat of 64 m would make
@@ -245,7 +315,7 @@ export function gameRibbon(r: TerrainRibbon, toX: (x: number) => number, toZ: (z
 }
 
 /** Whether (x, z) is in the triangle (a, b, c) of the XZ plane, edges included. */
-function inTriangle(x: number, z: number, ax: number, az: number, bx: number, bz: number, cx: number, cz: number): boolean {
+export function inTriangle(x: number, z: number, ax: number, az: number, bx: number, bz: number, cx: number, cz: number): boolean {
   const d1 = (x - bx) * (az - bz) - (ax - bx) * (z - bz);
   const d2 = (x - cx) * (bz - cz) - (bx - cx) * (z - cz);
   const d3 = (x - ax) * (cz - az) - (cx - ax) * (z - az);
@@ -255,7 +325,7 @@ function inTriangle(x: number, z: number, ax: number, az: number, bx: number, bz
 }
 
 /** The height over (x, z) of the plane through three corners, or NaN where it stands on edge. */
-function planeHeight(x: number, z: number, ax: number, ay: number, az: number, bx: number, by: number, bz: number, cx: number, cy: number, cz: number): number {
+export function planeHeight(x: number, z: number, ax: number, ay: number, az: number, bx: number, by: number, bz: number, cx: number, cy: number, cz: number): number {
   const ux = bx - ax;
   const uy = by - ay;
   const uz = bz - az;

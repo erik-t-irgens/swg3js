@@ -11,8 +11,14 @@
 // frame on a converted world, `gx = cx - x`, `gz = z - cz`; raw about (0, 0) on a real-elevation world), drawn with the
 // look of the world's own water shader `shader` names (a key as the terrain names one, `wter_spec`) or, with none, the
 // planet's own water; `look` moves any of its four numbers of its own over that (the basins' shape). A lake of ours is to
-// the game exactly a client lake (`ourWater.ts`). The sixth wave's rivers (`kind: "river"`) are read as a later wave's and
-// set aside, so a file a later build wrote keeps them and this one stands its lakes.
+// the game exactly a client lake (`ourWater.ts`).
+//
+// Or one river (the sixth wave): `{ "id", "kind": "river", "points": [[x, z, h], ...], "width", "velocity", "shader",
+// "look", "fallFrom" }`, a spine of at least two points in the same raw frame each carrying the surface's own height there,
+// the strip's width in metres, how fast it runs from its first point to its last in metres a second, and the angle past
+// which a reach between two points is a fall rather than water (absent: `RIVER_TUNE.slopeMax`). The terrain's own wet
+// rivers (`AffectorRiver` with a local water table) are made rows of this very shape and read by this very reader
+// (`soeRiverRows`), so SOE's test rivers and ours are one thing to the game.
 //
 // **Backstops, not live** (`WATER_LIMITS`): every build agrees on what a committed file means, so a row past one is skipped
 // and named by every build alike; the editor's own soft lines are notes on its bar.
@@ -37,6 +43,13 @@ export const WATER_LIMITS = {
   height: 20000,
   /** The longest a name or a note may be. */
   words: 200,
+  /** A river's width, metres (at least `widthLeast`). */
+  width: 2000,
+  widthLeast: 0.25,
+  /** How fast a river may run, metres a second either way. */
+  velocity: 100,
+  /** The largest slope limit a river may name, degrees. */
+  fallFrom: 89,
 };
 
 /** A lake's look of its own, each number moving the look its shader (or the planet) gives it; absent, that look's. */
@@ -67,9 +80,32 @@ export interface WaterLakeRow {
   at?: number;
 }
 
+/** One river of the file (the sixth wave), as read and cleaned. */
+export interface WaterRiverRow {
+  id: string;
+  kind: 'river';
+  name?: string;
+  note?: string;
+  /** The spine in the world's raw frame, `[x, z, h]` a point (h the surface's height there), 2 to `WATER_LIMITS.points` of them. */
+  points: [number, number, number][];
+  /** The strip's width, metres. */
+  width: number;
+  /** How fast it runs from its first point to its last, metres a second (its detail drifts at it, the moving air's liquid pulls toward it). */
+  velocity: number;
+  /** The world's own water shader whose look it wears, or null for the planet's own water. */
+  shader: string | null;
+  look?: WaterLookRow;
+  /** Degrees past which a reach between two points is a fall rather than water; absent, `RIVER_TUNE.slopeMax`. */
+  fallFrom?: number;
+  at?: number;
+}
+
+/** A row of the water file: a lake or a river. */
+export type WaterRow = WaterLakeRow | WaterRiverRow;
+
 /** What reading a file gave. */
 export interface WaterRead {
-  rows: WaterLakeRow[];
+  rows: WaterRow[];
   skipped: { id: string; why: string }[];
   unknown: string[];
   problem: string | null;
@@ -80,8 +116,26 @@ const HEX = /^#[0-9a-f]{6}$/i;
 /** A shader key as the terrain writes one (`shaderKey`): a name of letters, digits, `_`, `-` and `.`. */
 const SHADER = /^[a-z0-9_.-]{1,80}$/i;
 const FIELDS = new Set(['id', 'kind', 'name', 'note', 'h', 'points', 'shader', 'look', 'at']);
-const ORDER: (keyof WaterLakeRow)[] = ['id', 'kind', 'name', 'note', 'h', 'shader', 'look', 'points', 'at'];
+/** A river's fields (the sixth wave). */
+const RIVER_FIELDS = new Set(['id', 'kind', 'name', 'note', 'points', 'width', 'velocity', 'shader', 'look', 'fallFrom', 'at']);
+/** The order a row's fields are written in: a lake's are the fields it always had in the order it always had them. */
+const ORDER: string[] = ['id', 'kind', 'name', 'note', 'h', 'width', 'velocity', 'fallFrom', 'shader', 'look', 'points', 'at'];
 const LOOK_FIELDS = new Set(['color', 'opacity', 'ripple', 'drift']);
+
+/** The fields a row of this kind carries (a river's, else a lake's). */
+function fieldsOf(kind: unknown): ReadonlySet<string> {
+  return kind === 'river' ? RIVER_FIELDS : FIELDS;
+}
+
+/** Whether a row read is a river. */
+export function isRiverRow(r: WaterRow): r is WaterRiverRow {
+  return r.kind === 'river';
+}
+
+/** Whether a row read is a lake. */
+export function isLakeRow(r: WaterRow): r is WaterLakeRow {
+  return r.kind === 'lake';
+}
 
 /** Whether an id names a lake. */
 export function isWaterId(v: unknown): v is string {
@@ -121,17 +175,72 @@ export function readWaterLook(v: unknown): WaterLookRow | string {
   return out;
 }
 
+/** A shader, a look, a name, a note and a moment, read onto a row as either kind reads them; why not, or null. */
+function readCommon(o: Record<string, unknown>, row: { shader: string | null; name?: string; note?: string; look?: WaterLookRow; at?: number }): string | null {
+  if (o.shader !== undefined && o.shader !== null) {
+    if (typeof o.shader !== 'string' || !SHADER.test(o.shader)) return 'its shader is a water shader\'s key (letters, digits, _, - and .) or null';
+    row.shader = o.shader;
+  }
+  for (const k of ['name', 'note'] as const) {
+    const w = o[k];
+    if (w === undefined) continue;
+    if (typeof w !== 'string' || w.length > WATER_LIMITS.words || /[\u0000-\u001f]/.test(w)) return `its ${k} is words, ${WATER_LIMITS.words} at most`;
+    row[k] = w;
+  }
+  if (o.look !== undefined) {
+    const look = readWaterLook(o.look);
+    if (typeof look === 'string') return look;
+    if (Object.keys(look).length) row.look = look;
+  }
+  if (o.at !== undefined) {
+    if (typeof o.at !== 'number' || !Number.isFinite(o.at) || o.at < 0) return 'its at is a time in milliseconds';
+    row.at = o.at;
+  }
+  return null;
+}
+
 /**
- * One row cleaned, or why it is refused: an id, `kind` a lake (a river is a later wave's), a surface height and an outline
- * of 3 to `WATER_LIMITS.points` finite points within the reach, a shader key or null, a look, a name and a note of words,
- * a moment. Fields this build does not read go into `unknown`.
+ * A river cleaned (the sixth wave), or why it is refused: a spine of 2 to `WATER_LIMITS.points` finite points `[x, z, h]`
+ * within the reach and the height, a width and a velocity within the limits, a slope limit within them, and what a lake
+ * carries besides (a shader key or null, a look, a name, a note, a moment). Fields this build does not read go into `unknown`.
  */
-export function readWaterRow(v: unknown, unknown: string[] = []): WaterLakeRow | string {
+function readRiverRow(o: Record<string, unknown> & { id: string }, unknown: string[]): WaterRiverRow | string {
+  for (const k of Object.keys(o)) if (!RIVER_FIELDS.has(k)) unknown.push(`${o.id}.${k}`);
+  if (!Array.isArray(o.points)) return 'its points are a list of [x, z, h]';
+  if (o.points.length < 2) return 'a river has two points at least';
+  if (o.points.length > WATER_LIMITS.points) return `a river has ${WATER_LIMITS.points} points at most`;
+  const points: [number, number, number][] = [];
+  for (const p of o.points) {
+    if (!Array.isArray(p) || p.length !== 3) return "a river's point is [x, z, h]";
+    const [x, z, h] = p as unknown[];
+    if (typeof x !== 'number' || typeof z !== 'number' || typeof h !== 'number' || !Number.isFinite(x) || !Number.isFinite(z) || !Number.isFinite(h)) return "a river's point is three numbers of metres";
+    if (Math.abs(x) > WATER_LIMITS.reach || Math.abs(z) > WATER_LIMITS.reach) return `a point stands within ${WATER_LIMITS.reach} m either way`;
+    if (Math.abs(h) > WATER_LIMITS.height) return `a point's height is within ${WATER_LIMITS.height} m either way`;
+    points.push([x, z, h]);
+  }
+  if (typeof o.width !== 'number' || !Number.isFinite(o.width) || o.width < WATER_LIMITS.widthLeast || o.width > WATER_LIMITS.width) return `its width is a number of metres from ${WATER_LIMITS.widthLeast} to ${WATER_LIMITS.width}`;
+  if (typeof o.velocity !== 'number' || !Number.isFinite(o.velocity) || Math.abs(o.velocity) > WATER_LIMITS.velocity) return `its velocity is a number of metres a second within ${WATER_LIMITS.velocity} either way`;
+  const row: WaterRiverRow = { id: o.id, kind: 'river', points, width: o.width, velocity: o.velocity, shader: null };
+  if (o.fallFrom !== undefined) {
+    if (typeof o.fallFrom !== 'number' || !Number.isFinite(o.fallFrom) || o.fallFrom < 0 || o.fallFrom > WATER_LIMITS.fallFrom) return `its fallFrom is degrees from 0 to ${WATER_LIMITS.fallFrom}`;
+    row.fallFrom = o.fallFrom;
+  }
+  const why = readCommon(o, row);
+  if (why) return why;
+  return row;
+}
+
+/**
+ * One row cleaned, or why it is refused: an id, `kind` a lake or a river (`readRiverRow`), a lake's surface height and an
+ * outline of 3 to `WATER_LIMITS.points` finite points within the reach, a shader key or null, a look, a name and a note of
+ * words, a moment. Fields this build does not read go into `unknown`.
+ */
+export function readWaterRow(v: unknown, unknown: string[] = []): WaterRow | string {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return 'a lake is an object';
   const o = v as Record<string, unknown>;
   if (!isWaterId(o.id)) return 'its id is not a-z, 0-9, _ and - (64 at most, starting with a letter or a digit)';
-  if (o.kind === 'river') return "a river is Map-maker II's sixth wave's, which this build does not read";
-  if (o.kind !== 'lake') return 'its kind is lake';
+  if (o.kind === 'river') return readRiverRow(o as Record<string, unknown> & { id: string }, unknown);
+  if (o.kind !== 'lake') return 'its kind is lake or river';
   for (const k of Object.keys(o)) if (!FIELDS.has(k)) unknown.push(`${o.id}.${k}`);
   if (typeof o.h !== 'number' || !Number.isFinite(o.h) || Math.abs(o.h) > WATER_LIMITS.height) return `its height (h) is a number of metres within ${WATER_LIMITS.height} either way`;
   if (!Array.isArray(o.points)) return 'its points are a list of [x, z]';
@@ -177,8 +286,15 @@ function sameLook(a: WaterLookRow | undefined, b: WaterLookRow | undefined): boo
   return a.color === b.color && a.opacity === b.opacity && a.ripple === b.ripple && a.drift === b.drift;
 }
 
-/** Two lakes that read the same: every field, its points to the bit and its moment. */
-export function sameWaterRow(a: WaterLakeRow, b: WaterLakeRow): boolean {
+/** Two rows that read the same: every field, their points to the bit and their moment (a lake's and a river's alike). */
+export function sameWaterRow(a: WaterRow, b: WaterRow): boolean {
+  if (a.kind === 'river' || b.kind === 'river') {
+    if (a.kind !== 'river' || b.kind !== 'river') return false;
+    if (a.id !== b.id || a.width !== b.width || a.velocity !== b.velocity || a.fallFrom !== b.fallFrom || a.shader !== b.shader || a.name !== b.name || a.note !== b.note || a.at !== b.at) return false;
+    if (!sameLook(a.look, b.look) || a.points.length !== b.points.length) return false;
+    for (let i = 0; i < a.points.length; i++) if (a.points[i][0] !== b.points[i][0] || a.points[i][1] !== b.points[i][1] || a.points[i][2] !== b.points[i][2]) return false;
+    return true;
+  }
   if (a.id !== b.id || a.kind !== b.kind || a.h !== b.h || a.shader !== b.shader || a.name !== b.name || a.note !== b.note || a.at !== b.at) return false;
   if (!sameLook(a.look, b.look) || a.points.length !== b.points.length) return false;
   for (let i = 0; i < a.points.length; i++) if (a.points[i][0] !== b.points[i][0] || a.points[i][1] !== b.points[i][1]) return false;
@@ -189,7 +305,7 @@ export function sameWaterRow(a: WaterLakeRow, b: WaterLakeRow): boolean {
  * Read a world's water file. A file whose header is not this world's, or not the shape this build writes (its version, its
  * frame), is refused whole, since every lake in it would stand in the wrong place; a ground world alone keeps one (a space
  * zone's: "space maps are a later pass"). A bad row, a row past the backstop and a second row under one id are skipped
- * and named (a river among them, a later wave's).
+ * and named. Its rows are lakes and rivers, in the file's order.
  */
 export function readWaterFile(text: string, world: string, kindOfWorld: 'ground' | 'space', raws?: Record<string, unknown>[]): WaterRead {
   const out: WaterRead = { rows: [], skipped: [], unknown: [], problem: null };
@@ -257,13 +373,15 @@ export function waterFileText(world: string, rows: readonly Record<string, unkno
   const sorted = [...rows].sort((a, b) => (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
   const lines = sorted.map((r) => {
     const parts: string[] = [];
+    // A row's own kind's fields in the one order (a lake's are the order it always had), then whatever else it carried.
+    const known = fieldsOf(r.kind);
     for (const k of ORDER) {
       const v = r[k];
-      if (v === undefined) continue;
+      if (v === undefined || !known.has(k)) continue;
       parts.push(`${JSON.stringify(k)}: ${JSON.stringify(v)}`);
     }
     for (const k of Object.keys(r)) {
-      if (FIELDS.has(k) || r[k] === undefined) continue;
+      if (known.has(k) || r[k] === undefined) continue;
       parts.push(`${JSON.stringify(k)}: ${JSON.stringify(r[k])}`);
     }
     return `    { ${parts.join(', ')} }`;
@@ -272,16 +390,17 @@ export function waterFileText(world: string, rows: readonly Record<string, unkno
   return `{\n  "version": ${WATER_VERSION},\n  "world": ${JSON.stringify(world)},\n  "frame": "raw",\n  "rows": ${body}\n}\n`;
 }
 
-/** A lake row's own fields, for the batch's write-back: the cleaned row, with whatever the row it replaces held that this build does not read. */
-export function waterWithExtras(row: WaterLakeRow, was: Record<string, unknown> | null): Record<string, unknown> {
+/** A row's own fields, for the batch's write-back: the cleaned row, with whatever the row it replaces held that this build does not read. */
+export function waterWithExtras(row: WaterRow, was: Record<string, unknown> | null): Record<string, unknown> {
   const out: Record<string, unknown> = { ...row };
-  if (was) for (const k of Object.keys(was)) if (!FIELDS.has(k) && !(k in out)) out[k] = was[k];
+  const known = fieldsOf(row.kind);
+  if (was) for (const k of Object.keys(was)) if (!known.has(k) && !(k in out)) out[k] = was[k];
   return out;
 }
 
-/** What a page or the bake read of a world's water file: its lakes, its bytes, what it skipped and why it was not read. */
+/** What a page or the bake read of a world's water file: its lakes and rivers, its bytes, what it skipped and why it was not read. */
 export interface WaterLoaded {
-  rows: WaterLakeRow[];
+  rows: WaterRow[];
   bytes: number;
   skipped: { id: string; why: string }[];
   problem: string | null;

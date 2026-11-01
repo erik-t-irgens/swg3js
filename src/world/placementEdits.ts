@@ -38,7 +38,7 @@
 import { EDIT_FILE_KINDS, PLACEMENT_FIELDS, PLACEMENT_LIMITS, editFilePath, isPlacementId, mintPlacementId, placementsFileText, placementsPath, readPlacementRow, readPlacementsFile, readPlacementsFileRaw, rowHash, type EditFileKind, type PlacementLayer, type PlacementRead, type PlacementRow } from '../story/placements.ts';
 import { HEIGHTS_LIMITS, heightsFileText, isTileId, readHeightsFile, readTileRow, sameTile, tileWithExtras, type HeightTileRow } from './editFiles/heightsFile.ts';
 import { PAINT_LIMITS, isPaintId, paintFileText, paintRowsWhole, paintWithExtras, readPaintFile, readPaintRow, samePaintRow, type PaintRow } from './editFiles/paintFile.ts';
-import { WATER_LIMITS, isWaterId, mintWaterId, readWaterFile, readWaterRow, sameWaterRow, waterFileText, waterWithExtras, type WaterLakeRow } from './editFiles/waterFile.ts';
+import { WATER_LIMITS, isWaterId, mintWaterId, readWaterFile, readWaterRow, sameWaterRow, waterFileText, waterWithExtras, type WaterRow } from './editFiles/waterFile.ts';
 
 /** Every number of the endpoint, all ours. Read where the dev server runs it, and not moved from the browser. */
 export const PLACEMENTS_ENDPOINT_TUNE = {
@@ -552,11 +552,11 @@ function paintFile(world: string): string {
 }
 
 /**
- * The water (Map-maker II's fifth wave, `editFiles/waterFile.ts`): a lake a row, named by an id of its own (minted from its
- * name where a put names none), its outline and height checked as the reader checks them, a ground world's alone (a
- * real-elevation world's among them; a space zone's is refused).
+ * The water (Map-maker II's fifth wave, `editFiles/waterFile.ts`): a lake or (the sixth wave) a river a row, named by an id
+ * of its own (minted from its name where a put names none), its outline and height or its spine, width and velocity checked
+ * as the reader checks them, a ground world's alone (a real-elevation world's among them; a space zone's is refused).
  */
-export const waterKind: EditKind<WaterLakeRow> = {
+export const waterKind: EditKind<WaterRow> = {
   kind: 'water',
   group: null,
   groundOnly: true,
@@ -584,7 +584,7 @@ export const waterKind: EditKind<WaterLakeRow> = {
   extras: waterWithExtras,
   text: (world, _frame, rows) => waterFileText(world, rows),
   read: (text, world, wk) => readWaterFile(text, world, wk),
-  mint: (asked, taken) => mintWaterId(typeof asked.name === 'string' ? asked.name : 'lake', taken),
+  mint: (asked, taken) => mintWaterId(typeof asked.name === 'string' ? asked.name : asked.kind === 'river' ? 'river' : 'lake', taken),
   file: waterFile,
 };
 

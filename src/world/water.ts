@@ -107,6 +107,16 @@ export function setWaterSurface(patch: Partial<WaterSurfaceTune> | undefined): W
 const DETAIL_FLOW = 0.06;
 /** Cycles per second of the flow's two-phase crossfade: the tile is never carried further than half a cycle. */
 const DETAIL_CYCLE = 0.09;
+
+/**
+ * The metres a second a flow of one carries a body's detail at, for a look's drift (`detailSlope`: the tile is carried
+ * `flow · uDrift · DETAIL_FLOW` metres a cycle of a crossfade that runs `DETAIL_CYCLE` cycles a second). A river's reach
+ * divides its velocity by it to write its own `uWind` (Map-maker II's sixth wave, `reachWind`), the volumetrics' current
+ * variant does the same sum in its shader (`waterCurrentGlsl`).
+ */
+export function riverWindUnit(drift: number): number {
+  return drift * DETAIL_FLOW * DETAIL_CYCLE;
+}
 /** Metres of depth the shore turns the wind aside over; deeper than this the flow is the free wind. */
 const FLOW_SHORE_BAND = 12;
 
@@ -579,9 +589,11 @@ const MASK_OUTPUT_GLSL = /* glsl */ `
  * A water material drawn with one body's look. `waves` enables the vertex swell (only for finely
  * divided meshes); lakes with no interior vertices pass false and still ripple, foam and react.
  * `reflective: false` leaves the environment out altogether (the lava tables, until the heat
- * design draws them itself).
+ * design draws them itself). `wind` hands a body a wind object of its own in place of the
+ * weather's shared one (a river's reach, Map-maker II's sixth wave: its run times its velocity in
+ * the detail's units): a uniform object, so the program and its key are a lake's.
  */
-export function createWaterMaterial(look: WaterLook, waves: boolean, opts: { windAngle?: number; seed?: number; reflective?: boolean } = {}): WaterMaterial {
+export function createWaterMaterial(look: WaterLook, waves: boolean, opts: { windAngle?: number; seed?: number; reflective?: boolean; wind?: { value: THREE.Vector2 } } = {}): WaterMaterial {
   const { windAngle = 0.9, seed = 7, reflective = true } = opts;
   const mat = new THREE.MeshPhysicalMaterial({
     color: look.color,
@@ -607,7 +619,7 @@ export function createWaterMaterial(look: WaterLook, waves: boolean, opts: { win
     uWaveHeight: { value: waves ? 1 : 0 },
     uRipple: { value: look.ripple },
     uDrift: { value: look.drift },
-    uWind: WATER_WIND,
+    uWind: opts.wind ?? WATER_WIND,
     uWaterEnvSpecular: WATER_ENV_SPECULAR,
     uFxFogDensity: WATER_FX_FOG,
     uFxTraced: WATER_FX_TRACED,

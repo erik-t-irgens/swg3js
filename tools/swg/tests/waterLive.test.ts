@@ -93,6 +93,7 @@ function standIn(opts: { flatBuilt: boolean; sea: number; ground: (x: number, z:
     edits: edits as never,
     worldKind: () => 'ground',
     rows: () => s.rows,
+    rivers: () => [],
     toRaw: (x, z, out) => {
       out.x = CX - x;
       out.z = CZ + z;
@@ -365,7 +366,7 @@ tuneWater({ ...WATER_TUNE_DEFAULTS, mode: 'clicks', levelFrom: 'lowest' } as nev
     const a = all[i];
     const line = 0.05 * a.frames;
     const per = (v: number) => (Math.max(0, v) / a.frames).toFixed(3);
-    ok(a.lakes === 3 && a.raising && a.dragging && a.hot === 3 && a.draftPoints === 3 && a.draftDrawn === 4, `process ${i + 1} of 12: each window was what it says (three lakes drawn, the raise carried, the square grabbed and dragged, three points and the aim in the draft)`);
+    ok(a.lakes === 5 && a.raising && a.dragging && a.hot === 3 && a.draftPoints === 3 && a.draftDrawn === 4, `process ${i + 1} of 12: each window was what it says (three lakes and two rivers' banks drawn, the raise carried, the square grabbed and dragged, three points and the aim in the draft)`);
     ok(a.scavenges === 0 && a.made < line && a.raiseScavenges === 0 && a.raiseMade < line && a.dragScavenges === 0 && a.dragMade < line && a.draftScavenges === 0 && a.draftMade < line, `process ${i + 1} of 12: the armed water tool's frame makes ${per(a.made)} bytes a frame steady, ${per(a.raiseMade)} raising, ${per(a.dragMade)} dragging and ${per(a.draftMade)} with an outline under way, over ${a.frames} frames each with no collection`);
   }
 }

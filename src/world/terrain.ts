@@ -4,13 +4,16 @@ import { FBM, hash2 } from './noise.ts';
 import type { DemPatch } from './demTerrain';
 import type { DemShader } from './demShader';
 import type { FarGrid, SwgTerrain, SwgWaterTable } from './swgTerrain';
-import { surfaceOf, tableOf, type LakeTable } from './ourWater.ts';
+import { riverFlowAt, riversSurface, riverTableAt, surfaceOf, tableOf, type LakeTable, type RiverFlow, type RiverTable } from './ourWater.ts';
 import { sampleFamily, type FamilyGrid } from '../audio/footsteps.ts';
 import { groundChunkOrigin, NO_SHIFT, tileCode, tileLayers, type GroundShift, type GroundTiler } from './groundTiles.ts';
 import type { HeightEdits } from '../swg/terrain/heightEdits.ts';
 import { copyGround } from './groundRewrite.ts';
 import { childChoiceAt } from '../swg/terrain/generator.ts';
 import type { Wash } from './demWash.ts';
+
+/** No rivers, kept (what `riverList` answers on a converted world that holds none). */
+const NO_RIVERS: readonly RiverTable[] = [];
 
 export const CHUNK_SIZE = 64;
 /** How far under its true height a far tile's ground is drawn, so the near chunks win where they overlap; what stands on it (the far tree cards) stands that much lower too. */
@@ -162,7 +165,27 @@ export class Terrain {
     if (this.swg) return this.swg.waterAt(x, z);
     // A world with no converted terrain asks its own lakes of ours (Map-maker II's fifth wave), the higher winning; none,
     // and the answer is the planet's own level, as it always was.
-    return this.lakes.length ? surfaceOf(this.lakes, x, z, this.waterLevel) : this.waterLevel;
+    const h = this.lakes.length ? surfaceOf(this.lakes, x, z, this.waterLevel) : this.waterLevel;
+    // And its rivers after them (the sixth wave); none, and the answer is the lakes'.
+    return this.rivers.length ? riversSurface(this.rivers, x, z, h) : h;
+  }
+
+  /**
+   * The rivers of ours on a world with no converted terrain (Map-maker II's sixth wave), in the game's frame
+   * (`ourWater.ts`'s `riverTable`). On a converted world they are the converted terrain's (`SwgTerrain.setRivers`) and this
+   * stays empty.
+   */
+  readonly rivers: RiverTable[] = [];
+
+  /** The rivers this world's water readers take: the converted terrain's, or the world's own list. */
+  riverList(): readonly RiverTable[] {
+    return this.swg ? (this.swg.rivers ?? NO_RIVERS) : this.rivers;
+  }
+
+  /** The highest river over a point, its surface and its flow (metres a second) written into `out`; false with none (the liquid's feed). */
+  riverFlowAt(x: number, z: number, out: RiverFlow): boolean {
+    const list = this.riverList();
+    return list.length > 0 && riverFlowAt(list, x, z, out);
   }
 
   /**
@@ -179,7 +202,9 @@ export class Terrain {
    */
   waterTableAt(x: number, z: number): SwgWaterTable | null {
     if (this.swg) return this.swg.waterTableAt(x, z);
-    return this.lakes.length ? tableOf(this.lakes, x, z) : null;
+    const best = this.lakes.length ? tableOf(this.lakes, x, z) : null;
+    // A river standing higher (the sixth wave), its record carrying its surface at the point; none, the lakes' answer.
+    return this.rivers.length ? (riverTableAt(this.rivers, x, z, best) as SwgWaterTable | null) : best;
   }
 
   detachSwg(): void {

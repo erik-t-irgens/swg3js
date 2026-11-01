@@ -579,6 +579,9 @@ export function layoutKeyOf(packDir, walkThrough = null, edits = null) {
   // or a flora pack's collision shapes), which the bake stood nothing for: a grid baked before the gallery, the props or
   // another world was converted is asked for again once they are. With every one there, the key is the files' alone.
   if (Array.isArray(edits?.absent) && edits.absent.length) h.update('\n \nabsent\n').update(edits.absent.join('\n'));
+  // And the terrain's own wet rivers the bake makes water (Map-maker II's sixth wave, navgrid.mjs `soeRiverStamp`): a grid
+  // baked before they were water is asked for again on the worlds that have them, and every other world keys as before.
+  if (typeof edits?.soeRivers === 'string' && edits.soeRivers) h.update('\n \nsoe rivers\n').update(edits.soeRivers);
   return h.digest('hex').slice(0, 12);
 }
 
@@ -594,6 +597,7 @@ export function gridLayoutStale(grid, packDir, manifest, walkThrough = null, edi
   if (grid.layoutKey) return grid.layoutKey !== layoutKeyOf(packDir, walkThrough, edits) ? 'was baked from another layout or terrain, another walk-through file, or other committed edit files (heights, water, placements) than the pack has now' : null;
   // A grid with no key of a world that now has committed edit files cannot have read them.
   if (['heights', 'water', 'world', 'story'].some((k) => typeof edits?.texts?.[k] === 'string')) return 'was baked before the world had its committed edit files (heights, water, placements)';
+  if (typeof edits?.soeRivers === 'string' && edits.soeRivers) return "was baked before the terrain's own rivers were water";
   return manifest?.late?.state === 'applied' ? "was baked before the world was converted with SOE's final files" : null;
 }
 

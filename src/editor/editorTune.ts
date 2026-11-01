@@ -297,8 +297,8 @@ export function tuneFloraPaint(partial: unknown): string[] {
  * `LAKE_TUNE` in `src/world/ourWater.ts`, which the same helper moves.
  */
 export const WATER_TUNE = {
-  /** What a click does: points of an outline, a trace from the click at a level, or a fall's two ends. */
-  mode: 'clicks' as 'clicks' | 'trace' | 'fall',
+  /** What a click does: points of an outline, a trace from the click at a level, a fall's two ends, or (the sixth wave) a river's points. */
+  mode: 'clicks' as 'clicks' | 'trace' | 'fall' | 'river',
   /**
    * Where a lake's level is taken from: the lowest ground under its clicked points (so the water meets the shore there and
    * the higher shore stands over it), its first point's ground, or a height typed (or sampled with Shift+click).
@@ -348,6 +348,21 @@ export const WATER_TUNE = {
    * for a cliff that overhangs.
    */
   fallAlong: 1,
+  /**
+   * A river drawn (Map-maker II's sixth wave): its width, metres (the design's example row's 8: a stream a body wades
+   * across in a few strides), and how fast it runs from its first point to its last, metres a second (1: a gentle stream;
+   * its detail drifts at it and the moving air's liquid pulls toward it). Both the owner's, and a picked river's own are the
+   * Selected tab's.
+   */
+  riverWidth: 8,
+  riverVelocity: 1,
+  /**
+   * Where a river's points stand: each at its own ground (`'ground'`), or each no higher than the one before it (`'level'`:
+   * a reach is held level where the ground under it rises, so the water never runs uphill). `riverRise` over that ground,
+   * metres: half a metre of water at a clicked point, the bed the owner sculpts under it.
+   */
+  riverHeights: 'level' as 'ground' | 'level',
+  riverRise: 0.5,
 };
 
 /** The water tool's shipped values, for a reset. */
@@ -355,8 +370,9 @@ export const WATER_TUNE_DEFAULTS: typeof WATER_TUNE = JSON.parse(JSON.stringify(
 
 /** The water tool's words that are choices, each from its list. */
 export const WATER_CHOICES = {
-  mode: ['clicks', 'trace', 'fall'],
+  mode: ['clicks', 'trace', 'fall', 'river'],
   levelFrom: ['lowest', 'first', 'typed'],
+  riverHeights: ['ground', 'level'],
 };
 
 /**
@@ -368,7 +384,7 @@ export function tuneWater(partial: unknown): string[] {
   if (!partial || typeof partial !== 'object' || Array.isArray(partial)) return ['lakes({ tune }) takes an object'];
   const numbers: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(partial as Record<string, unknown>)) {
-    if (k === 'mode' || k === 'levelFrom') {
+    if (k === 'mode' || k === 'levelFrom' || k === 'riverHeights') {
       const list = WATER_CHOICES[k] as readonly string[];
       if (typeof v === 'string' && list.includes(v)) (WATER_TUNE as Record<string, unknown>)[k] = v;
       else said.push(`${k} is one of ${list.join(', ')}`);
@@ -394,6 +410,9 @@ export function tuneWater(partial: unknown): string[] {
   t.fallMin = Math.max(0, t.fallMin);
   t.fallAlong = Math.min(1, Math.max(0, t.fallAlong));
   t.hitPx = Math.max(2, t.hitPx);
+  // The water file's own limits on a river (`WATER_LIMITS`): a width from a quarter metre to 2 km, a velocity within 100 m/s.
+  t.riverWidth = Math.min(2000, Math.max(0.25, t.riverWidth));
+  t.riverVelocity = Math.min(100, Math.max(-100, t.riverVelocity));
   return said;
 }
 
