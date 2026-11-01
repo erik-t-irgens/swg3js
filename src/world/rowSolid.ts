@@ -22,8 +22,11 @@ export function isTableTemplate(template: string): boolean {
 /**
  * Whether a row stands solid: its own word where it says one, else solid -- except a props row whose thing is a
  * seat or a table (`furniture`, asked of the thing's template), which is passable (`dressingStandOf`'s rule, and
- * the one the editor's Solid shows and turns, so the two can never disagree).
+ * the one the editor's Solid shows and turns, so the two can never disagree). A mark (Map-maker II's seventh wave: an
+ * effect or a sound with no model) stands nothing and is never solid, whatever it says: counted solid, the walk grid's bake
+ * looked for its model and named `<world>/undefined` as missing.
  */
-export function standsSolid(row: { solid?: boolean; pack: string }, furniture: boolean): boolean {
+export function standsSolid(row: { solid?: boolean; pack?: string; kind?: string }, furniture: boolean): boolean {
+  if (row.kind === 'mark') return false;
   return row.solid ?? (row.pack === 'props' ? !furniture : true);
 }

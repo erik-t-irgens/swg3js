@@ -66,7 +66,9 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/if \(ctrl\) \{[\s\S]{0,200}this\.edits\.idle\(\);\s*a\.look = !this\.session\.point && input\.locked && !this\.edits\.takesMouse;/.test(keys), 'while Ctrl is held the editing is told the frame is idle before the look is decided');
   ok(/input\.mute\(editorMutes\(oldHand\)\);\s*if \(!oldHand\) input\.mute\(TAKEN\);\s*\}/.test(keys), "and otherwise ends by muting what it borrows (`editorMutes`, the attack left for the old tabs' hand while it holds something) and the hand keys it took");
   ok(/prepare: \(meshes\) => host\.world\.prepareLikeStreamed\(meshes\),/.test(ed), "the ghost is prepared the streamer's own way, so a never-stood thing builds its programs off the frame");
-  const take = after(ed, '  async take(e: LibraryEntry', 3000);
+  // 4,000 characters since Map-maker II's seventh wave, whose take first hands an effect or a sound to its own hand and an
+  // entry chosen while the look picker is armed to the picker.
+  const take = after(ed, '  async take(e: LibraryEntry', 4000);
   const reg = take.indexOf('if (got.src.pack === \'world\' && got.src.from) stream.useFromPack(got.pack);');
   ok(reg > 0 && reg < take.indexOf('stream.modelFor(') && take.indexOf('stream.modelFor(') < take.indexOf('stream.ghostMeshesOf('), "another world's pack is handed to the streamer before its model is loaded or its ghost asks whether it is flora");
   ok(ed.includes('TUNE_WATCH.moved = (partial) => this.tuned(partial);') && /if \(live\.speed\) this\.fly\.speed = clampSpeed\(EDITOR_TUNE\.cam\.speed\);\s*if \(live\.skyReach\) this\.skyReach = clampSky\(EDITOR_TUNE\.aim\.skyReach\);/.test(ed), "a moved tune reaches the flight's speed and the sky's reach in flight");
@@ -137,12 +139,20 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/batch: \(edits\) => host\.batch\(edits\),\s*status: \(\) => host\.status\(\),/.test(ed), "the entry hands the hand on the selection the host's batch and status");
   // Map-maker II's fifth wave puts an armed tool's own marks (the water tool's lakes and its picked lake's square) between
   // the editing's frame and the eye's move, from the same frame's view, so they draw over the editing's own gizmo.
-  ok(/this\.edits\.clock\.now = now;\s*this\.edits\.frame\(m\);[\s\S]{0,500}if \(tool && tool\.armed\(\) && tool\.overlay\) tool\.overlay\(this\.toolDraw, sv\);\s*this\.moveEyeForEdits\(\);\s*endPointerFrame\(this\.pointer\);/.test(ed), "the selection's frame (the gizmo, the hold, the drag, the clicks, the marks) runs after the camera, its moment in the kept clock, then an armed tool's own marks, and before the pointer's frame is spent");
-  ok(/this\.edits\.clock\.dt = dt;\s*this\.edits\.keys\(this\.window\?\.library\.typing \?\? false\);\s*\}/.test(ed), "the editing keys are read in the key block, the frame's seconds in the kept clock, before the mutes take what they borrow");
+  // Map-maker II's seventh wave lays the attachments' handles out just before the editing's frame (whose click reads the
+  // handle under the cursor) and picks a hung attachment by its handle on the frame's own click just after it.
+  ok(/this\.edits\.clock\.now = now;[\s\S]{0,400}this\.looks\.frame\(sv, [^;]*, m\);\s*this\.edits\.frame\(m\);\s*\/\/[^\n]*\n\s*if \(this\.edits\.clickedNow\) \{\s*if \(this\.looks\.hoveredAttachment\(\)\) this\.looks\.click\(\);[\s\S]{0,900}if \(tool && tool\.armed\(\) && tool\.overlay\) tool\.overlay\(this\.toolDraw, sv\);\s*this\.moveEyeForEdits\(\);\s*endPointerFrame\(this\.pointer\);/.test(ed), "the selection's frame (the gizmo, the hold, the drag, the clicks, the marks) runs after the camera, its moment in the kept clock, the handles laid out just before it and a hung attachment picked on its click just after, then an armed tool's own marks, and before the pointer's frame is spent");
+  // From the seventh wave a picked attachment's hand is read straight after them, with nothing in hand, no text field and no tool.
+  // And the press that gave the look picker its surface in Fly quiets the editing until it is let go, so its release,
+  // frames later, picks nothing (the fixer's round of the seventh wave).
+  ok(/this\.edits\.clock\.dt = dt;\s*this\.edits\.keys\(this\.window\?\.library\.typing \?\? false\);\s*(\/\/[^\n]*\n\s*)+if \(this\.lookRelease\) \{\s*this\.edits\.idle\(\);\s*if \(this\.session\.point \|\| !input\.held\('attack'\)\) this\.lookRelease = false;\s*\}\s*\/\/[^\n]*\n\s*if \(!this\.hand && !\(this\.window\?\.library\.typing \?\? false\) && !this\.tools\.armedTool\) this\.looks\.keys\(\);\s*\}/.test(ed), "the editing keys are read in the key block, the frame's seconds in the kept clock, a look picker's press quieting them until it is let go, then a picked attachment's, before the mutes take what they borrow");
+  ok(/if \(!this\.session\.point && input\.pressedAction\('attack'\) && !this\.hand && this\.looks\.picking\) this\.lookClick = this\.lookRelease = true;/.test(ed), "a look picker's click in Fly is taken on its press, and its release is owed the quiet");
   // This round's hand-overs (the fixer's), which the editing class's own test makes for itself.
   const click = after(ed, '  canvasClick(): void {', 600);
   // Widened in the third wave on purpose: with the brush armed a click paints and never goes to Fly.
-  ok(/if \(this\.hand \|\| this\.tools\.toolArmed\(\) \|\| !this\.pointer\.clicked\) return;\s*if \(this\.aim\.hover \|\| this\.edits\.handleHot \|\| !this\.edits\.clickGoesToFly\(\)\) return;\s*this\.pointer\.clicked = false;\s*this\.setPoint\(false\);/.test(click), "a plain click on empty ground in Point goes to Fly by the click alone (`clickGoesToFly`: nothing picked), never by whether a frame has seen the press, nor while a tool is armed (Map-maker II: the list, not the brush alone)");
+  // Widened in Map-maker II's seventh wave: a click on an attachment's handle, with the look picker armed or an attachment
+  // picked never goes to Fly either.
+  ok(/if \(this\.hand \|\| this\.tools\.toolArmed\(\) \|\| !this\.pointer\.clicked\) return;\s*if \(this\.aim\.hover \|\| this\.edits\.handleHot \|\| this\.looks\.hover >= 0 \|\| this\.looks\.picking \|\| this\.looks\.attachSel \|\| !this\.edits\.clickGoesToFly\(\)\) return;\s*this\.pointer\.clicked = false;\s*this\.setPoint\(false\);/.test(click), "a plain click on empty ground in Point goes to Fly by the click alone (`clickGoesToFly`: nothing picked), never by whether a frame has seen the press, nor while a tool is armed (Map-maker II: the list, not the brush alone)");
   ok(/if \(live\.snap\) \{\s*const s = EDITOR_TUNE\.snap;\s*this\.edits\.snapOn = s\.on;\s*if \(s\.grid > 0\) this\.edits\.grid = s\.grid;\s*if \(s\.angle > 0\) this\.edits\.angle = s\.angle;\s*\}/.test(ed), "a moved snap tune (the console's or a slider's) reaches the snapping live");
   ok(/roomAt: \(x, y, z\) => \{\s*const s = w\.streamer;\s*if \(!s\) return false;\s*roomAsk\.set\(x, y, z\);\s*s\.cameraRoomAt\(roomAsk, roomAnswer, floorUnder\);\s*return !!roomAnswer\.building;\s*\},/.test(ed), "a row's room where it moves to is asked by the very rule a thing put down is written by (`cameraRoomAt` with `floorUnder`)");
   ok(/dropCopies: \(c\) => dropCopiesAnyway\(w\.streamer, c\),/.test(ed) && /function dropCopiesAnyway\([\s\S]{0,200}?\): void \{\s*if \(stream\) stream\.dropEditorCopies\(copies\);\s*for \(const c of copies\) \{\s*if \(!c\.parent\) continue;\s*c\.removeFromParent\(\);\s*c\.dispose\(\);/.test(ed), "the editor's copies are taken away with or without a streamer standing (a write's release can come after a travel unloaded it)");
@@ -150,7 +160,8 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/this\.ghostM\.compose\(this\.ghostPos, hand\.q, hand\.scale\);\s*this\.ghost\.place\(this\.ghostM, inRoom\);/.test(ed) && /if \(!hand\.building && hand\.sBounds\) this\.ghostPos\.y -= lowestOf\(hand\.sBounds, hand\.q, this\.tmp\);/.test(ed), "a row picked up into the hand is drawn and stood at its own scale (its lowest point at that size), as it is written back");
   ok(/if \(this\.edits\.takesMouse && !armedTool\) this\.edits\.wheelStep\(-wheel\);/.test(ed), 'the wheel steps the grid while a hand key is held on the selection, and never while a tool is armed (Map-maker II §2.3)');
   // From Map-maker II's fifth wave an armed tool takes Delete first (the water tool's picked lake).
-  ok(/else if \(!\(this\.tools\.armedTool\?\.deleteKey\?\.\(\) \?\? false\) && !this\.edits\.deleteKey\(\)\) this\.deleteHovered\(\);/.test(ed), 'Delete takes an armed tool\'s own first, then the selection out, and the row under the aim when nothing is picked');
+  // And from the seventh wave an attachment picked by its handle, before the selection.
+  ok(/else if \(!\(this\.tools\.armedTool\?\.deleteKey\?\.\(\) \?\? false\) && !this\.looks\.deleteKey\(\) && !this\.edits\.deleteKey\(\)\) this\.deleteHovered\(\);/.test(ed), 'Delete takes an armed tool\'s own first, then an attachment picked by its handle off, then the selection out, and the row under the aim when nothing is picked');
   ok(/document\.addEventListener\('paste', \(e\) => \{\s*if \(!this\.session\.on \|\| typingIn\(e\.target\)\) return;\s*const text = e\.clipboardData\?\.getData\('text\/plain'\) \?\? null;/.test(ed), "a paste reads the document's own paste event, never the clipboard API (a prompt on localhost)");
   ok(/if \(this\.session\.on && e\.ctrlKey && e\.code === 'KeyD' && !typingIn\(e\.target\)\) e\.preventDefault\(\);/.test(ed), "Ctrl+D is kept from the browser's bookmark while the editor is on");
   ok(/this\.hoverM\.compose\(this\.tmp\.set\(hov\.x, hov\.y, hov\.z\), hov\.q, hov\.scale \?\? ONE\);/.test(ed), "the hover's box is drawn at the row's scale");
@@ -182,7 +193,9 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/d\.show\(what, detail\);[\s\S]*const answer = await work\(\);[\s\S]*compiled = await d\.compile\(\);[\s\S]*\} finally \{\s*await d\.hide\(\);/.test(curtain), 'and builds what it made behind the screen');
   ok(/if \(\(c\.placed === 'mesh' \|\| c\.placed === 'extent'\) && c\.placed !== FLORA_COLLISION\.placed\) \{[\s\S]{0,120}this\.world\.refreshPlacedFlora\(\);/.test(main), "the console's placed-flora collision rule makes the placed trees' colliders again");
   const ed = read('src/editor/editorEntry.ts');
-  const aftercam = after(ed, '  afterCamera(dt: number): void {', 6000);
+  // 8,000 characters since Map-maker II's seventh wave, whose frame shows the effect in hand, resolves the look picker's
+  // click and lays the attachments' handles out.
+  const aftercam = after(ed, '  afterCamera(dt: number): void {', 8000);
   // Map-maker II's groundwork: the brush is the Tools list's first entry, and the list's frame, ring and lettings-go are its.
   ok(/const tool = this\.tools\.armedTool;\s*if \(tool\) \{[\s\S]{0,1600}tool\.step\(f\);\s*\}\s*\/\/[^\n]*\n\s*this\.noteActivity\(now\);/.test(aftercam), "the armed tool's frame runs from the aim just cast, before the quiet the automatic fold waits for is noted");
   ok(aftercam.indexOf('tool.draw(this.toolDraw);') > 0 && aftercam.indexOf('tool.draw(this.toolDraw);') < aftercam.indexOf('this.edits.frame(m);') && /brushRing\(ringAsk, ringGround, vp\.elements, marks\.ring, marks\.ringVis\);/.test(ed), "the armed tool's rings are projected from this frame's camera (`brushRing`)");
@@ -200,6 +213,28 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/const reload = this\.editLayerOf\(kind\);\s*if \(!reload\) return;/.test(word), "a placement word is routed by its kind, and a kind no layer reads is dropped");
   const layer = after(main, '  private editLayerOf(kind: string | undefined)', 600);
   ok(/kind === 'story' \|\| kind === 'world'\) return \(pack, rev\) => void this\.reloadDressing\(pack, kind, rev\);/.test(layer) && /kind === 'heights'\) return \(pack, rev\) => void this\.reloadHeights\(pack, rev\);/.test(layer) && /return null;/.test(layer), 'the row layers read again into the permanent layer, the heights into the ground');
+}
+
+{
+  // Map-maker II's seventh wave's hand-overs (looks and attachments), which every behaviour test of the holder, the copies
+  // and the looks' rules makes for itself.
+  const ed = read('src/editor/editorEntry.ts');
+  ok(/follow: \(key, m\) => w\.rowAttach\.follow\(key, m\),\s*unfollow: \(key\) => w\.rowAttach\.restore\(key\),/.test(ed), "what hangs on a row follows an edit under way and is put back as it ends (the world's holder)");
+  ok(/markAt: \(key, out\) => \{\s*const m = w\.rowAttach\.rowMatrixOf\(key\);/.test(ed), "a picked mark's pivot is where the holder carries it");
+  ok(/private hoveredId\(\): string \| null \{\s*const mark = this\.looks\.hoveredMark\(\);\s*if \(mark\) return mark;\s*\/\/[^\n]*\n\s*if \(this\.looks\.hoveredAttachment\(\)\) return null;/.test(ed), "a mark's handle under the cursor is what a click picks, and a hung attachment's handle picks no row behind it");
+  ok(/if \(!base && isAttachEntry\(e\)\) return this\.takeAttachment\(e\);\s*if \(!base && this\.looks\.picking\) \{/.test(ed), "an effect or a sound goes to its own hand, and an entry chosen while the look picker is armed to the picker");
+  ok(/curtain: \(detail, work\) => \(host\.curtain \? host\.curtain\(detail, work\) : work\(\)\),/.test(ed), "the looks' borrowed material goes behind the host's curtain");
+  ok(/if \(typeof change\.like === 'string'\) return this\.host\.curtain\(/.test(read('src/editor/editorLooks.ts')), 'and a borrowed material is written behind it');
+  ok(/if \(hand\?\.attach\) this\.host\.world\.rowAttach\.previewClear\(\);\s*if \(hand\?\.lookOwner\) this\.host\.world\.streamer\?\.releaseLook\(hand\.lookOwner\);/.test(ed), "giving up the hand takes the effect shown at the aim away and lets the ghost's look copies go");
+  ok(/const leftOwner = hand\.lookOwner && left\.length \? \{\} : null;\s*if \(leftOwner && hand\.lookOwner\) h\.world\.streamer\?\.shareLook\(hand\.lookOwner, leftOwner\);/.test(ed) && /this\.ghost\.dropLeft\(left\);\s*if \(leftOwner\) leftStream\?\.releaseLook\(leftOwner\);/.test(ed), "what the ghost leaves behind holds its look's copies until the row it put down is built");
+  ok(/curtain: \(detail, work\) => this\.editorLookCurtain\(detail, work\),\s*pickerPalettes: \(\) => this\.pickerPalettes\(\),/.test(main), "the game hands the editor its short curtain and the dye picker's palettes");
+  ok(/attach: \(key, row, g\) => this\.world\.rowAttach\.stand\(key, row, g\),\s*detach: \(key\) => this\.world\.rowAttach\.drop\(key\),/.test(main), "the permanent layer's attachments are the world's holder's");
+  ok(/this\.rowAttach\.update\(camPos, dt\);\s*if \(this\.particles && this\.camera\) this\.particles\.update\(/.test(world), "the holder looks before the particles step");
+  ok((world.match(/this\.layoutStream\.looks = this\.rowLooks;/g) ?? []).length === 2, "every streamer the world makes wears the rows' looks");
+  ok(/this\.rowAttach\.clear\(\);\s*this\.layoutStream\?\.dispose\(\);\s*this\.layoutStream = null;\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*this\.courseWarmed = \{ ls: null, ids: new Set\(\) \};\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*this\.rowLooks\.clear\(\);/.test(world), "an unload lets the attachments go while the particles stand, and the looks' copies after the streamer let go of its tiers");
+  // The fixer's round: a mark is no story object, so the Here list's snippet refuses one as an object (an area round it is fine).
+  const snippet = after(main, '  private async copySnippet(', 1200);
+  ok(/if \(what === 'object' && had\.row\.kind === 'mark'\) \{\s*this\.messages\.system\(`[^`]*no story object[^`]*`\);\s*return;\s*\}/.test(snippet), "a mark's story-object snippet is refused in words, never copied");
 }
 
 console.log(`\n${checks} checks passed`);

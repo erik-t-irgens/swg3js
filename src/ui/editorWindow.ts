@@ -18,10 +18,13 @@ import { EDITOR_TUNE } from '../editor/editorTune.ts';
 import type { DialSet, NumberDial } from './dials.ts';
 import { draggable } from './drag.ts';
 import { LibraryUi, type LibraryHost } from './libraryUi.ts';
+import { DyePicker, hexOf, rawFromHex, type PickerRow, type PickerSource } from './dyePicker.ts';
+import { isRawColour, rawRgb } from '../player/texrender.ts';
 
 const EDITOR_WINDOW_CSS = `
 .ed-panel { position: fixed; left: 12px; top: 64px; width: var(--ed-w, 560px); height: var(--ed-h, 78vh); max-height: calc(100vh - 80px); display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 4px; padding: 8px 10px 10px; color: var(--ink); font-size: 12px; box-sizing: border-box; }
 .ed-panel[hidden] { display: none; }
+.ed-swatch { width: 24px; height: 24px; flex: none; border: 1px solid var(--panel-border); border-radius: 2px; }
 /* While the minimap shows, the window docks under the display's top-left block rather than over the circle, at the very
    place the help block stands by (hud.css: 12 and 212 on the HUD scale, the block's own sum), with a gap of 8; the minimap's
    own layout is never touched, and a window moved or sized by hand stands where it was put. */
@@ -108,7 +111,23 @@ export interface SelectedView {
   size: string;
   height: string;
   note2: string;
+  /** Map-maker II's seventh wave: whether it is a mark (attachments and no model). */
+  mark?: boolean;
+  /**
+   * Its model's materials, each name once, with the look each wears in words, its tint (`#rrggbb` or ''), a little picture of
+   * it and why a look would not go on it ('' for nothing); null where its model is not loaded or it is a mark.
+   */
+  materials?: { name: string; look: string; tint: string; picture: HTMLCanvasElement | null }[] | null;
+  /** The look picker armed, in words ('' for not). */
+  picking?: string;
+  /** A library entry's materials offered while the picker is armed: a click on one takes its picture or material. */
+  offered?: { entry: string; materials: { name: string; ref: string; map: boolean }[] } | null;
+  /** Its attachments: each one's kind and what it names, its place in its model's frame, an effect's size, whether picked. */
+  attachments?: { i: number; words: string; at: string; size: string; picked: boolean }[];
 }
+
+/** A colour's look: the tint picker's palettes (the wardrobe's garments and the creator's table), read once. */
+export type LookPickerSource = PickerSource;
 
 /** The sculpt brush as the Tools tab shows it (Map-maker II's first wave). */
 export interface SculptToolsView {
@@ -257,11 +276,22 @@ export interface EditorWindowHost extends LibraryHost {
     paint?: PaintToolsView;
     /** The water tool (Map-maker II's fifth wave): its mode, where a lake's level comes from, the draft and the lake picked. */
     water?: WaterToolsView;
+    /** The seventh wave's effects and sounds: whether one put down hangs on the row the aim meets (else it stands a mark). */
+    attach?: { onto: boolean };
   };
   setTool(t: Record<string, unknown>): void;
   refreshStatus(): void;
   /** The editor's numbers of feel, as sliders. */
   dialSet(): DialSet;
+  /**
+   * The seventh wave's looks on the picked rows: a material's tint set (`#rrggbb`, '' takes it off), the picker armed to
+   * take a picture or a material from what is clicked next, one offered material chosen, or a material's look cleared.
+   */
+  look?(act: 'tint' | 'texture' | 'material' | 'clear' | 'choose', of: string, value?: string): void;
+  /** The tint picker's palettes, read once (null: none to offer). */
+  lookPalettes?(): Promise<LookPickerSource | null>;
+  /** One attachment of the first picked row picked by its handle, moved (`x y z` in its model's frame), sized or taken off. */
+  attachment?(act: 'pick' | 'at' | 'size' | 'remove', i: number, value?: string): void;
 }
 
 type Tab = 'library' | 'selected' | 'here' | 'tools' | 'history';
@@ -573,24 +603,184 @@ export class EditorWindow {
         if (n !== null) this.host.setPlace({ yaw: s.yaw, pitch: s.pitch, roll: s.roll, [k]: n });
       }, 'number');
     }
-    this.field(el, 'Scale', s.scale, (v) => {
-      const parts = v.split(/[\s,]+/).filter(Boolean).map(Number);
-      if (parts.length === 1 && parts[0] > 0) this.host.setPlace({ scale: parts[0] });
-      else if (parts.length === 3 && parts.every((p) => p > 0)) this.host.setPlace({ scale: parts });
-    });
+    // A mark (the seventh wave) is no thing: no size, no flora clearing, no guard and never solid (its effects are sized on
+    // their own handles).
+    if (!s.mark) {
+      this.field(el, 'Scale', s.scale, (v) => {
+        const parts = v.split(/[\s,]+/).filter(Boolean).map(Number);
+        if (parts.length === 1 && parts[0] > 0) this.host.setPlace({ scale: parts[0] });
+        else if (parts.length === 3 && parts.every((p) => p > 0)) this.host.setPlace({ scale: parts });
+      });
+    }
     const h2 = document.createElement('div');
     h2.className = 'ed-h';
     h2.textContent = 'WHAT IT IS';
     el.appendChild(h2);
-    this.field(el, 'Flora clear m', s.clear, (v) => this.host.setField({ clear: v.trim() === '' ? null : num(v) }), 'number');
-    this.field(el, 'Guard m', s.guard, (v) => this.host.setField({ guard: v.trim() === '' ? null : num(v) }), 'number');
-    this.field(el, 'Solid', s.solid, (v) => this.host.setField({ solid: v === 'true' }), 'check');
+    if (!s.mark) {
+      this.field(el, 'Flora clear m', s.clear, (v) => this.host.setField({ clear: v.trim() === '' ? null : num(v) }), 'number');
+      this.field(el, 'Guard m', s.guard, (v) => this.host.setField({ guard: v.trim() === '' ? null : num(v) }), 'number');
+      this.field(el, 'Solid', s.solid, (v) => this.host.setField({ solid: v === 'true' }), 'check');
+    }
     this.field(el, 'State', s.state, (v) => this.host.setField({ state: v.trim() || null }));
     this.field(el, 'Its name', s.name, (v) => this.host.setField({ name: v.trim() || null }));
     this.field(el, 'Note', s.note, (v) => this.host.setField({ note: v.trim() || null }));
     this.field(el, 'Size', s.size, null);
     this.field(el, 'Over the ground', s.height, null);
     if (s.note2) this.field(el, 'Set aside', s.note2, null);
+    this.drawLooks(el, s);
+    this.drawAttachments(el, s);
+  }
+
+  /** The material whose tint picker is open (drawn again with the tab), '' for none. */
+  private tintOpen = '';
+  private tintPicker: DyePicker | null = null;
+  private lookSource: Promise<LookPickerSource | null> | null = null;
+
+  /**
+   * The seventh wave's looks on the Selected tab: the first picked row's materials, each with a little picture, its look in
+   * words and its buttons (Tint opens the dye picker under it, Picture from… and Material from… arm the picker, Clear takes
+   * its look off), every one written on every picked row; and while the picker is armed, a library entry's materials offered.
+   */
+  private drawLooks(el: HTMLElement, s: SelectedView): void {
+    const look = this.host.look?.bind(this.host);
+    if (!look) return;
+    this.tintPicker?.close();
+    this.tintPicker = null;
+    if (s.mark) {
+      this.note(el, 'A mark: an effect or a sound of its own, with no model. Click its handle to pick it; it moves with the gizmo, R and F held, and the arrows.');
+      return;
+    }
+    const h = document.createElement('div');
+    h.className = 'ed-h';
+    h.textContent = 'ITS LOOK (EVERY PICKED ROW)';
+    el.appendChild(h);
+    if (s.picking) this.note(el, s.picking);
+    if (s.offered) {
+      this.note(el, `${s.offered.entry}'s materials: a click takes one`);
+      const r = document.createElement('div');
+      r.className = 'ed-row';
+      r.style.flexWrap = 'wrap';
+      for (const m of s.offered.materials) {
+        const b = this.button(m.name + (m.map ? '' : ' (no picture)'), 'tool');
+        b.title = m.ref;
+        b.addEventListener('click', () => {
+          b.blur();
+          look('choose', '', m.ref);
+        });
+        r.appendChild(b);
+      }
+      el.appendChild(r);
+    }
+    if (!s.materials) {
+      this.note(el, 'its model is not loaded yet: aim at it, or come nearer');
+      return;
+    }
+    const lines: { name: string; row: HTMLElement; tint: string }[] = [];
+    for (const m of [{ name: '*', look: '', tint: '', picture: null as HTMLCanvasElement | null }, ...s.materials]) {
+      const r = document.createElement('div');
+      r.className = 'ed-row';
+      r.style.flexWrap = 'wrap';
+      if (m.picture) {
+        m.picture.className = 'ed-swatch';
+        r.appendChild(m.picture);
+      }
+      const label = document.createElement('span');
+      label.className = 'ed-label';
+      label.textContent = m.name === '*' ? 'every material' : m.name;
+      label.title = m.name;
+      r.appendChild(label);
+      if (m.look) {
+        const meta = document.createElement('span');
+        meta.className = 'ed-meta';
+        meta.textContent = m.look;
+        r.appendChild(meta);
+      }
+      const act = (words: string, a: 'tint' | 'texture' | 'material' | 'clear') => {
+        const b = this.button(words, 'tool', a === 'tint' && this.tintOpen === m.name ? 'on' : '');
+        b.addEventListener('click', () => {
+          b.blur();
+          if (a === 'tint') {
+            this.tintOpen = this.tintOpen === m.name ? '' : m.name;
+            this.drawSelected();
+          } else look(a, m.name);
+        });
+        return b;
+      };
+      r.append(act('Tint', 'tint'), act('Picture from…', 'texture'), act('Material from…', 'material'), act('Clear', 'clear'));
+      el.appendChild(r);
+      lines.push({ name: m.name, row: r, tint: m.tint });
+    }
+    const open = lines.find((l) => l.name === this.tintOpen);
+    if (open) void this.openTint(open.row, open.name, open.tint);
+    else this.tintOpen = '';
+  }
+
+  /** The dye picker under a material's row: its colours from the wardrobe and the creator, a pick written as the material's tint. */
+  private async openTint(after: HTMLElement, of: string, tint: string): Promise<void> {
+    const look = this.host.look?.bind(this.host);
+    if (!look || !this.host.lookPalettes) return;
+    this.lookSource ??= this.host.lookPalettes().catch(() => null);
+    const source = await this.lookSource;
+    if (!source || this.tintOpen !== of || !after.isConnected) return;
+    let now = rawFromHex(tint) ?? 0;
+    const row: PickerRow = {
+      label: of,
+      kind: 'dye',
+      colors: [],
+      layout: { creation: 0, columns: 8, more: 0, moreColumns: 8 },
+      defaultValue: 0,
+      current: () => now,
+      pick: (v) => {
+        now = v;
+        look('tint', of, isRawColour(v) ? hexOf(rawRgb(v)) : '');
+      },
+    };
+    const p = new DyePicker(row, source);
+    p.onClose = () => {
+      this.tintOpen = '';
+      p.close();
+      this.tintPicker = null;
+    };
+    this.tintPicker?.close();
+    this.tintPicker = p;
+    p.mount(after);
+  }
+
+  /** The seventh wave's attachments on the Selected tab: each one's kind, its place and size as fields, Pick and Remove. */
+  private drawAttachments(el: HTMLElement, s: SelectedView): void {
+    const at = this.host.attachment?.bind(this.host);
+    if (!at || !s.attachments) return;
+    const h = document.createElement('div');
+    h.className = 'ed-h';
+    h.textContent = 'WHAT HANGS ON IT';
+    el.appendChild(h);
+    if (!s.attachments.length) {
+      this.note(el, 'nothing: take an effect or a sound from the library and click on it');
+      return;
+    }
+    for (const a of s.attachments) {
+      const r = document.createElement('div');
+      r.className = `ed-row${a.picked ? ' on' : ''}`;
+      const label = document.createElement('span');
+      label.className = 'ed-label';
+      label.textContent = `${a.i + 1}: ${a.words}`;
+      label.title = a.words;
+      r.appendChild(label);
+      const pick = this.button('Pick', 'tool', a.picked ? 'on' : '');
+      pick.addEventListener('click', () => {
+        pick.blur();
+        at('pick', a.i);
+      });
+      const rem = this.button('Remove', 'del', 'ed-del');
+      rem.addEventListener('click', () => {
+        rem.blur();
+        at('remove', a.i);
+      });
+      r.append(pick, rem);
+      el.appendChild(r);
+      this.field(el, `${a.i + 1}: at x y z`, a.at, (v) => at('at', a.i, v));
+      if (a.size) this.field(el, `${a.i + 1}: size`, a.size, (v) => at('size', a.i, v), 'number');
+    }
   }
 
   // ---- Tools. ----
@@ -626,6 +816,12 @@ export class EditorWindow {
       h('TOOLS');
       row(...t.list.map((x) => toggle(`${x.label[0].toUpperCase()}${x.label.slice(1)}${x.key ? ` (${x.key})` : ''}${x.armed ? ': armed' : ''}`, x.armed, { tool: x.id })));
       this.note(el, 'One tool is armed at a time: its buttons are its own, the selection takes no hold meanwhile, and Escape lets it go.');
+    }
+    // The seventh wave's effects and sounds out of the library: hung on the row the aim meets, or stood as marks.
+    if (t.attach) {
+      h('EFFECTS AND SOUNDS');
+      row(toggle(t.attach.onto ? 'Hang it on the row it lands on' : 'Stand it as a mark', t.attach.onto, { attachOnto: !t.attach.onto }));
+      this.note(el, "Take an effect or a sound from the library's Effects and Sounds groups and click: it hangs on the row of the files the aim meets (with this on), else stands as a mark of its own. A handle marks each one; click it, then R, F or C held with the mouse turns, raises or sizes it, the arrows nudge it and Delete takes it off.");
     }
     // The sculpt brush (Map-maker II's first wave): its mode, flatten's target and ways, its falloff and its switches.
     if (t.sculpt) {

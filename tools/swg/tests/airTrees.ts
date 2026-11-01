@@ -22,16 +22,16 @@ export function showOld(path: string): string {
 }
 
 /**
- * Write every file under `src/` at the commit before the pass into a fresh temporary folder, and answer the folder that
- * holds its `src`. Throws when git cannot answer.
+ * Write every file under `src/` at the commit before the pass (or `commit`, a later wave's own start) into a fresh
+ * temporary folder, and answer the folder that holds its `src`. Throws when git cannot answer.
  */
-export function extractOldSrc(): string {
+export function extractOldSrc(commit = PRE_PASS): string {
   const root = mkdtempSync(join(tmpdir(), 'swg3js-airoff-'));
-  const names = execFileSync('git', ['-C', REPO, 'ls-tree', '-r', '--name-only', PRE_PASS, 'src'], { encoding: 'utf8', maxBuffer: 1 << 26 })
+  const names = execFileSync('git', ['-C', REPO, 'ls-tree', '-r', '--name-only', commit, 'src'], { encoding: 'utf8', maxBuffer: 1 << 26 })
     .split(/\r?\n/)
     .filter((n) => n.length > 0);
-  if (!names.length) throw new Error(`git listed no files under src at ${PRE_PASS}`);
-  const batch = execFileSync('git', ['-C', REPO, 'cat-file', '--batch'], { input: names.map((n) => `${PRE_PASS}:${n}`).join('\n') + '\n', maxBuffer: 1 << 30 });
+  if (!names.length) throw new Error(`git listed no files under src at ${commit}`);
+  const batch = execFileSync('git', ['-C', REPO, 'cat-file', '--batch'], { input: names.map((n) => `${commit}:${n}`).join('\n') + '\n', maxBuffer: 1 << 30 });
   // Each answer is "<sha> <type> <size>\n<size bytes>\n".
   let at = 0;
   for (const name of names) {

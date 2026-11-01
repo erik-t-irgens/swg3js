@@ -25,7 +25,8 @@ import type { World } from '../world/world.ts';
 import type { PropCatalogue } from '../world/propCatalogue.ts';
 import type { AssetPack } from '../world/assetPack.ts';
 import type { PlacedObject, RoomAnswer } from '../world/layoutStream.ts';
-import { ACTOR_LAYER } from '../world/portalRender.ts';
+import { ACTOR_LAYER, INTERIOR_LAYER } from '../world/portalRender.ts';
+import { packIdOfRoot } from '../world/layoutStream.ts';
 import { EditorGhost, type GhostDeps } from '../world/placeGhost.ts';
 import { patchOfBounds, clearRadius, type Patch } from '../world/housePlace.ts';
 import { destinationFile, rowFromEditor, type EditorSource } from '../world/permanentEdit.ts';
@@ -42,7 +43,7 @@ import { PASSABLE_NOTE, buildingNotes, editorRefusal, limitNotes, notesLine, pro
 import { editorDialsFor } from './editorDials.ts';
 import { ALL_ACTIONS, ctrlRule, editorMutes } from './editorKeys.ts';
 import { EditorSession, returnRefusal, type EntryState, type LeaveWay, type ReturnPoint } from './editorSession.ts';
-import { BRUSH_TUNE, EDITOR_TUNE, LIBRARY_TUNE, SCULPT_TUNE, TUNE_WATCH, liveTuned, tuneEditor, tuneSculpt } from './editorTune.ts';
+import { BRUSH_TUNE, EDITOR_TUNE, LIBRARY_TUNE, SCULPT_TUNE, TUNE_WATCH, liveTuned, registerExtraTune, tuneEditor, tuneSculpt } from './editorTune.ts';
 import { EditorSculpt, sculptTool, type SculptHost } from './editorSculpt.ts';
 import { SCULPT_FALLOFFS, SCULPT_MODES, type SculptMode } from './sculpt.ts';
 import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
@@ -75,6 +76,12 @@ import { LAKE_TUNE, RIVER_STEEP, RIVER_TUNE, tuneRiverTune } from '../world/ourW
 import type { WaterRiverRow } from '../world/editFiles/waterFile.ts';
 import { outlineArea } from './lakeTrace.ts';
 import type { WaterToolsView, LakeView } from '../ui/editorWindow.ts';
+import { EditorLooks } from './editorLooks.ts';
+import { attachAtHit, markRow, withAttachment } from './lookPick.ts';
+import { ATTACH_TUNE, rowMatrix, type RowAttachments } from '../world/rowAttach.ts';
+import { LOOK_TUNE } from '../world/rowMaterials.ts';
+import { attachOfEntry, isAttachEntry } from './libraryModel.ts';
+import { parseDonor, readAttachments, readLooks, type RowAttach } from '../story/placements.ts';
 
 /** What the game hands the editor: its objects, and its own half of every rule the editor cannot reach itself. */
 export interface EditorHost {
@@ -96,7 +103,7 @@ export interface EditorHost {
   /** Whether the body keeps its height at a place, nothing under it to stand on or fall to (a space zone, the drawn water). */
   keepsHeight(x: number, y: number, z: number): boolean;
   /** The rows of this world's two files as they stand on disk (`Used here`): what each writes. */
-  fileRows(): readonly { pack: string; thing?: string; model?: string; template?: string; from?: string }[];
+  fileRows(): readonly { pack?: string; thing?: string; model?: string; template?: string; from?: string }[];
   /** How many rows a layer's file of this world holds now. */
   fileCount(layer: PlacementLayer): number;
   /** Words on the message line. */
@@ -161,6 +168,14 @@ export interface EditorHost {
    * compiles), then the curtain's sweep. Answers what the work said, or why it could not run.
    */
   lakeCurtain(detail: string, work: () => Promise<string>): Promise<string>;
+  /**
+   * A write behind the editor's short curtain (Map-maker II's seventh wave: a borrowed material, which may need a program of
+   * its own): the work, whose answer stands the row by difference behind the screen, then the curtain's sweep. Answers what
+   * the work said.
+   */
+  curtain?(detail: string, work: () => Promise<string>): Promise<string>;
+  /** The dye picker's palettes (the seventh wave's tint): the wardrobe's garment palettes and the creator's table. */
+  pickerPalettes?(): Promise<{ wardrobe: Record<string, number[][]> | null; table: unknown }>;
 }
 
 /** One thing in hand: what a row writes, what it is drawn and judged by, and how it is turned. */
@@ -184,6 +199,13 @@ interface Hand {
   /** A row picked up and being moved: written back under its own id. */
   base: PlacementRow | null;
   liftedLayer: PlacementLayer | null;
+  /**
+   * An effect or a sound out of the library (Map-maker II's seventh wave): hung where the aim meets a row of the files (with
+   * "attach to what it lands on" on), else stood as a mark. No model and no ghost; an effect shown at the aim (`ATTACH_TUNE.preview`).
+   */
+  attach?: RowAttach;
+  /** The owner a picked-up row's looks are held under while its ghost wears them (let go with the ghost and what it left behind). */
+  lookOwner?: object;
 }
 
 const UP = new THREE.Vector3(0, 1, 0);
@@ -223,6 +245,12 @@ export class Editor {
   /** How long the last write took, milliseconds, the endpoint's answer timed (NaN before the first): the file's size note says it. */
   private writeMs = Number.NaN;
   private pendingClick = false;
+  /** The look picker's click (Fly's attack, read in the key block), resolved after the camera. */
+  private lookClick = false;
+  /** That press still held: the editing hears no click off its release (`edits.idle()` until the button is up). */
+  private lookRelease = false;
+  /** The cursor handed to the handles' frame in a kept record (fractions from the start: a number never crosses the call). */
+  private readonly lookCur = { x: 0.5, y: 0.5 };
   private aimKind = 'sky';
   private libView: LibraryView | null = null;
   private libState: 'none' | 'loading' | 'index' | 'fallback' = 'none';
@@ -372,8 +400,41 @@ export class Editor {
         t.middle();
         return true;
       },
+      // What hangs on a row (the seventh wave) carried with an edit under way and put back as it ends; a mark's place.
+      follow: (key, m) => w.rowAttach.follow(key, m),
+      unfollow: (key) => w.rowAttach.restore(key),
+      markAt: (key, out) => {
+        const m = w.rowAttach.rowMatrixOf(key);
+        if (!m) return false;
+        out.x = m.elements[12];
+        out.y = m.elements[13];
+        out.z = m.elements[14];
+        return true;
+      },
     });
     this.edits.destOf = () => this.session.dest;
+    // The looks and attachments (Map-maker II's seventh wave).
+    this.looks = new EditorLooks({
+      input: host.input,
+      point: () => me.point,
+      pointer: () => me.pointer,
+      rowFor: (id) => host.rowFor(id),
+      picked: () => me.edits.sel.ids,
+      pickOnly: (id) => {
+        if (id) me.edits.sel.pick([id], 'set');
+        else me.edits.sel.clear();
+        me.window?.refreshEdits();
+      },
+      putRows: (label, changes) => me.edits.putRows(label, changes),
+      say: (words, ok) => me.say(words, ok),
+      stream: () => w.streamer,
+      attachments: () => w.rowAttach as unknown as RowAttachments<unknown>,
+      frame: () => (w.planet?.space ? 'game' : 'raw'),
+      centre: () => w.placeFrame,
+      curtain: (detail, work) => (host.curtain ? host.curtain(detail, work) : work()),
+      grid: () => me.edits.grid,
+      refresh: () => me.window?.refreshEdits(),
+    });
     // The scatter brush (the third wave's): its entries out of the library, what stands near its disc, the ground under it.
     this.brush = new EditorBrush({
       edits: this.edits,
@@ -381,6 +442,8 @@ export class Editor {
         await me.loadLibrary();
         const e = me.libView?.byKey.get(key);
         if (!e) return `no library entry ${key}`;
+        // An effect or a sound (the seventh wave) has no model to plant: it is hung with the hand.
+        if (isAttachEntry(e)) return `${entryName(e)} is an effect or a sound: take it in hand and click to hang it (the brush plants things with a model)`;
         const got = await me.sourceOf(e);
         if (typeof got === 'string') return got;
         // Another world's pack known to the streamer before a row of it stands, as the hand hands it over.
@@ -470,10 +533,20 @@ export class Editor {
     };
     // A console line or a slider that moves the flight's speed or the sky's reach moves what is flown now.
     TUNE_WATCH.moved = (partial) => this.tuned(partial);
+    // The looks' and the attachments' numbers (the world's own objects) reached by the editor's tune and sliders.
+    registerExtraTune('look', LOOK_TUNE as unknown as Record<string, unknown>);
+    registerExtraTune('attach', ATTACH_TUNE as unknown as Record<string, unknown>);
   }
 
   /** The editing: the selection, the hand on it, the gizmo, the snaps, copy and paste, undo and redo. */
   readonly edits: EditorEdits;
+  /** The looks and attachments (Map-maker II's seventh wave): a row's materials, its effects and sounds, the marks. */
+  readonly looks: EditorLooks;
+  /**
+   * Whether an effect or a sound put down hangs on the row the aim meets (a row of the files with a model) or stands as a
+   * mark of its own: on, the Tools tab's switch and `editor({ attachOnto })`.
+   */
+  attachOnto = true;
   /** The scatter brush. */
   readonly brush: EditorBrush;
   /** The sculpt brush (Map-maker II). */
@@ -893,6 +966,16 @@ export class Editor {
       if (s.grid > 0) this.edits.grid = s.grid;
       if (s.angle > 0) this.edits.angle = s.angle;
     }
+    // The seventh wave's: a tint's strength moved is every tinted copy's colour worked out again (a uniform: nothing compiles),
+    // the strength held to [0, 1]; the effect in hand shown again at a moved preview size.
+    const o = partial && typeof partial === 'object' ? (partial as Record<string, unknown>) : null;
+    const lk = o?.look && typeof o.look === 'object' ? (o.look as Record<string, unknown>) : null;
+    if (lk && 'tintStrength' in lk) {
+      LOOK_TUNE.tintStrength = Math.max(0, Math.min(1, LOOK_TUNE.tintStrength));
+      this.host.world.rowLooks.retint();
+    }
+    const at = o?.attach && typeof o.attach === 'object' ? (o.attach as Record<string, unknown>) : null;
+    if (at && 'preview' in at && this.hand?.attach?.fx) this.host.world.rowAttach.previewSet(this.hand.attach.fx, ATTACH_TUNE.preview);
   }
 
   // ---- What the game reads. ----
@@ -1017,6 +1100,8 @@ export class Editor {
     this.marks.ringOn = false;
     this.marks.ring2On = false;
     this.edits.cancel(false);
+    this.looks.letGo();
+    this.marks.handlesOn = false;
     this.host.world.cameraRoomRule = null;
     this.window?.hide();
     this.bar?.hide();
@@ -1045,8 +1130,11 @@ export class Editor {
     // The palette's family list turned back to the next world's own (`paintView` also reads a browsed pack that is the
     // world's own as its own, for a travel made with the editor off, which reaches no `worldGone`).
     this.paintBrowse = '';
-    // Its selection, its history and anything under way go with the world, on or off.
+    // Its selection, its history and anything under way go with the world, on or off; so do the looks' picker and the
+    // attachment picked by its handle (the seventh wave).
     this.edits.worldGone();
+    this.looks.letGo();
+    this.marks.handlesOn = false;
     if (!this.session.on) return;
     this.hand = null;
     this.takeGen++;
@@ -1111,10 +1199,12 @@ export class Editor {
       if (input.pressedAction('putAway')) {
         if (this.hand) this.giveUpHand();
         // An armed tool takes Delete first (the water tool's picked lake), then the selection, then what is under the aim.
-        else if (!(this.tools.armedTool?.deleteKey?.() ?? false) && !this.edits.deleteKey()) this.deleteHovered();
+        else if (!(this.tools.armedTool?.deleteKey?.() ?? false) && !this.looks.deleteKey() && !this.edits.deleteKey()) this.deleteHovered();
       }
       // A click in Fly is the attack's button, read here and muted below; in Point the pointer layer has it.
       if (!this.session.point && input.pressedAction('attack') && this.hand) this.pendingClick = true;
+      // The look picker's click in Fly (the seventh wave): the surface under the crosshair gives its look.
+      if (!this.session.point && input.pressedAction('attack') && !this.hand && this.looks.picking) this.lookClick = this.lookRelease = true;
       // A tool's key arms it (any other let go first) or lets it go: B the scatter brush, with the library's chosen entries
       // (or what is in hand), K the sculpt brush (Map-maker II's first wave).
       for (const t of this.tools.list) if (t.action && input.pressedAction(t.action)) void this.toggleTool(t.id);
@@ -1122,6 +1212,14 @@ export class Editor {
       // game view and the key sheet), read before the mutes take what they borrow; the frame's seconds in its kept clock.
       this.edits.clock.dt = dt;
       this.edits.keys(this.window?.library.typing ?? false);
+      // The press that gave the look picker its surface in Fly is no click on the selection when it is let go, frames later
+      // (the press is resolved as it comes; the editing reads a click off the release): quiet until the button is up.
+      if (this.lookRelease) {
+        this.edits.idle();
+        if (this.session.point || !input.held('attack')) this.lookRelease = false;
+      }
+      // A picked attachment's hand (the seventh wave): R, F and C held with the mouse, the nudges. Nothing with rows picked.
+      if (!this.hand && !(this.window?.library.typing ?? false) && !this.tools.armedTool) this.looks.keys();
     }
     // The speed: = and -, and the wheel in Fly (in Point the game drains it and the editor reads its own over the canvas).
     let notches = 0;
@@ -1166,7 +1264,7 @@ export class Editor {
       input.mouseDX = 0;
       input.mouseDY = 0;
     }
-    a.look = !this.session.point && input.locked && !this.edits.takesMouse && !toolMouse;
+    a.look = !this.session.point && input.locked && !this.edits.takesMouse && !this.looks.takesMouse && !toolMouse;
     // An armed tool's buttons in Fly, read before the mutes take them: the attack's applies (paints, raises), the other
     // attack's the inverse (erases, lowers). Shift with a press of the left samples and writes nothing (the Shift rule).
     const toolOn = !!armedTool && !oldHand && !this.session.point;
@@ -1297,6 +1395,11 @@ export class Editor {
     }
     // A hold or a drag under way: given up, the rows put back where their files have them, nothing written.
     if (this.edits.cancel()) return true;
+    // The look picker armed, or an attachment picked by its handle (the seventh wave): let go.
+    if (this.looks.letGo()) {
+      this.window?.refreshEdits();
+      return true;
+    }
     if (this.edits.sel.size) {
       this.edits.sel.clear();
       this.window?.refreshEdits();
@@ -1321,7 +1424,7 @@ export class Editor {
     if (!this.session.on || !this.session.point) return;
     // With a tool armed a click is the tool's: it never takes the mouse back to Fly.
     if (this.hand || this.tools.toolArmed() || !this.pointer.clicked) return;
-    if (this.aim.hover || this.edits.handleHot || !this.edits.clickGoesToFly()) return;
+    if (this.aim.hover || this.edits.handleHot || this.looks.hover >= 0 || this.looks.picking || this.looks.attachSel || !this.edits.clickGoesToFly()) return;
     this.pointer.clicked = false;
     this.setPoint(false);
   }
@@ -1408,7 +1511,12 @@ export class Editor {
     this.noteActivity(now);
     // The ghost where it would stand.
     let inRoom = false;
-    if (hand) {
+    if (hand?.attach) {
+      // An effect or a sound in hand (the seventh wave): no ghost and no notes; an effect shown where the aim meets the world.
+      this.ghostPos.set(hit.x, hit.y + ATTACH_TUNE.lift, hit.z);
+      this.ghostM.makeTranslation(this.ghostPos.x, this.ghostPos.y, this.ghostPos.z);
+      h.world.rowAttach.previewMove(this.ghostM);
+    } else if (hand) {
       const stream = h.world.streamer;
       if (stream) {
         this.tmp.set(hit.x, hit.y, hit.z);
@@ -1429,6 +1537,15 @@ export class Editor {
     const click = this.pendingClick || (this.session.point && this.pointer.clicked);
     this.pendingClick = false;
     if (click && hand) void this.place();
+    // The look picker's click (the seventh wave): the surface under the aim gives the picked rows its picture or material, and
+    // the editing hears no click this frame (it would pick the row clicked on).
+    const lookClick = !hand && !!this.looks.picking && (this.lookClick || (this.session.point && this.pointer.clicked && this.pointer.over));
+    this.lookClick = false;
+    if (lookClick) {
+      this.edits.idle();
+      if (this.session.point) this.pointer.clicked = false;
+      void this.looks.pickFrom(this.surfaceAt(this.eye, this.dir, kind === 'sky' ? this.skyReach : this.aim.answer.t + 1));
+    }
     // The marks.
     this.vp.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
     const vp = this.vp.elements;
@@ -1481,7 +1598,21 @@ export class Editor {
       tool.draw(this.toolDraw);
     }
     this.edits.clock.now = now;
+    // The attachments' handles (the seventh wave) laid out from this frame's view first, so the editing's click below reads
+    // the handle under the cursor now (a mark's picks the mark; a hung attachment's picks no row).
+    const lc = this.lookCur;
+    lc.x = this.session.point ? this.pointer.x : w / 2;
+    lc.y = this.session.point ? this.pointer.y : hh / 2;
+    this.looks.frame(sv, lc, m);
     this.edits.frame(m);
+    // A click on a hung attachment's handle picks it; a click anywhere else lets a picked one go.
+    if (this.edits.clickedNow) {
+      if (this.looks.hoveredAttachment()) this.looks.click();
+      else if (this.looks.attachSel) {
+        this.looks.attachSel = null;
+        this.window?.refreshEdits();
+      }
+    }
     // An armed tool's own marks every frame, after the editing's (the water tool's lakes, and its picked lake's square in
     // place of the selection's gizmo), from this frame's view; none with no such tool armed.
     m.lakesOn = false;
@@ -1539,6 +1670,16 @@ export class Editor {
 
   /** A library entry taken in hand: its pack in, its model loaded, its ghost built and prepared. Answers why not. */
   async take(e: LibraryEntry, base: { row: PlacementRow; layer: PlacementLayer } | null = null): Promise<string | null> {
+    // An effect or a sound (the seventh wave) goes in hand with no model; with the look picker armed, a model's entry offers
+    // its materials to choose from on the Selected tab and nothing goes in hand.
+    if (!base && isAttachEntry(e)) return this.takeAttachment(e);
+    if (!base && this.looks.picking) {
+      const got = await this.sourceOf(e);
+      if (typeof got === 'string') return this.refuse(got);
+      const said = await this.looks.offerEntry(entryName(e), got.pack, packIdOfRoot(got.pack.root), got.model);
+      if (said) this.say(said, true);
+      return null;
+    }
     const gen = ++this.takeGen;
     const h = this.host;
     const stream = h.world.streamer;
@@ -1585,9 +1726,53 @@ export class Editor {
       liftedLayer: base?.layer ?? null,
     };
     if (base) this.session.dest = base.layer;
-    this.ghost.set(this.hand.key, stream.ghostMeshesOf(model));
+    // A row picked up wears its looks in hand (the seventh wave): its donors loaded, its copies held for the hand's own owner.
+    const look = base ? stream.lookOf(base.row.mats) : undefined;
+    let owner: object | undefined;
+    if (look) {
+      await stream.loadLook(look);
+      if (gen !== this.takeGen || !this.session.on || h.world.streamer !== stream || !this.hand) return null;
+      owner = {};
+      this.hand.lookOwner = owner;
+    }
+    this.ghost.set(this.hand.key, stream.ghostMeshesOf(model, look, owner));
     this.notesAt = -Infinity;
     this.say(`in hand: ${this.hand.name}`, true);
+    return null;
+  }
+
+  /**
+   * An effect or a sound out of the library taken in hand (the seventh wave): no model and no ghost. A click hangs it on the
+   * row of the files the aim meets (with "attach to what it lands on" on) or stands it as a mark of its own; an effect is
+   * shown at the aim at `ATTACH_TUNE.preview` of its size.
+   */
+  private takeAttachment(e: LibraryEntry): string | null {
+    const a = attachOfEntry(e);
+    if (!a) return this.refuse(`${entryName(e)} is no effect or sound`);
+    this.giveUpHand();
+    this.tools.disarmAll();
+    const attach: RowAttach = 'fx' in a ? { fx: a.fx } : { snd: a.snd };
+    if (attach.fx && ATTACH_TUNE.size !== 1) attach.size = ATTACH_TUNE.size;
+    this.hand = {
+      key: entryKey(e),
+      name: entryName(e),
+      src: { kind: 'prop', pack: 'props' },
+      bounds: null,
+      patch: null,
+      building: false,
+      passable: true,
+      q: new THREE.Quaternion(),
+      yaw: this.fly.yaw,
+      scale: new THREE.Vector3(1, 1, 1),
+      sBounds: null,
+      base: null,
+      liftedLayer: null,
+      attach,
+    };
+    if (attach.fx) this.host.world.rowAttach.previewSet(attach.fx, ATTACH_TUNE.preview);
+    this.notes.length = 0;
+    this.warn = false;
+    this.say(`in hand: ${this.hand.name}: a click ${this.attachOnto ? 'hangs it on the row the aim meets, else stands it as a mark' : 'stands it as a mark'}`, true);
     return null;
   }
 
@@ -1624,6 +1809,9 @@ export class Editor {
     this.ghost.clear();
     this.notes.length = 0;
     this.warn = false;
+    // The effect shown at the aim, and the copies the ghost of a row picked up wore (the seventh wave), let go.
+    if (hand?.attach) this.host.world.rowAttach.previewClear();
+    if (hand?.lookOwner) this.host.world.streamer?.releaseLook(hand.lookOwner);
     if (hand?.base) this.host.restore(hand.base.id);
   }
 
@@ -1680,6 +1868,7 @@ export class Editor {
     const kind = this.editWorld();
     const refusal = editorRefusal(kind, hand.building);
     if (refusal) return this.refuse(refusal);
+    if (hand.attach) return this.placeAttachment(hand, hand.attach, at);
     const frame = h.world.placeFrame;
     if (at) {
       if (typeof at.yaw === 'number') {
@@ -1713,6 +1902,10 @@ export class Editor {
     const dest = this.session.dest;
     const lifted = hand.base && hand.liftedLayer ? { id: hand.base.id, layer: hand.liftedLayer } : null;
     const left = this.ghost.leaveBehind();
+    // What the ghost left behind wears its looks' copies until the row it put down is built: held for an owner of its own.
+    const leftOwner = hand.lookOwner && left.length ? {} : null;
+    if (leftOwner && hand.lookOwner) h.world.streamer?.shareLook(hand.lookOwner, leftOwner);
+    const leftStream = h.world.streamer;
     this.writing = true;
     let reply;
     const asked = performance.now();
@@ -1722,10 +1915,11 @@ export class Editor {
       this.writing = false;
     }
     this.writeMs = performance.now() - asked;
-    void reply.built.then(
-      () => this.ghost.dropLeft(left),
-      () => this.ghost.dropLeft(left),
-    );
+    const dropLeft = (): void => {
+      this.ghost.dropLeft(left);
+      if (leftOwner) leftStream?.releaseLook(leftOwner);
+    };
+    void reply.built.then(dropLeft, dropLeft);
     // An older endpoint's refusal says to restart the dev server (it runs the code it first loaded until it does).
     if (!reply.ok) return this.refuse(refusalWords(reply.why));
     this.lastWrite = `${destinationFile(dest, h.packId())}: ${reply.id}`;
@@ -1748,13 +1942,106 @@ export class Editor {
       hand.base = null;
       this.hand = null;
       this.ghost.clear();
+      if (hand.lookOwner) h.world.streamer?.releaseLook(hand.lookOwner);
     }
     this.window?.refreshHere();
     return `put down ${reply.id}`;
   }
 
-  /** The permanent row the aim rests on, by id, or null. */
+  /**
+   * An effect or a sound in hand put down (the seventh wave): hung on the row of the files under the aim (a mark under the
+   * cursor first, then the row the aim rests on) where "attach to what it lands on" is on, at the hit in that row's own
+   * model frame, one write of the row put again; else stood as a mark of its own where the aim meets the world, one write
+   * of a new row. Either is one undo entry; the hand keeps it for the next click.
+   */
+  private async placeAttachment(hand: Hand, a: RowAttach, at?: { x: number; y: number; z: number }): Promise<string> {
+    const h = this.host;
+    const w = h.world;
+    const space = !!w.planet?.space;
+    const frame = space ? 'game' : 'raw';
+    const hit = at ?? this.aim.hit;
+    if (!at && this.aimKind === 'sky') return this.refuse('aim at something to hang it on, or at the ground for a mark');
+    // The row under the aim: one whose attachment's handle the cursor rests on first (a second effect on a row already
+    // carrying one lands on the handle of the first), else the row the aim rests on.
+    const id = this.attachOnto && !at ? (this.looks.hovered()?.id ?? this.hoveredId()) : null;
+    const onto = id ? h.rowFor(id) : null;
+    let said: string;
+    if (onto) {
+      const g = placementToGame(onto.row, w.placeFrame, frame);
+      rowMatrix(onto.row, g, this.attachBase);
+      const hung: RowAttach = { ...a };
+      const p = attachAtHit(this.attachBase, hit, ATTACH_TUNE.lift);
+      if (p[0] || p[1] || p[2]) hung.at = p;
+      const next = withAttachment(onto.row, hung);
+      if (typeof next === 'string') return this.refuse(next);
+      said = await this.edits.putRows(a.fx ? 'hang an effect' : 'hang a sound', [{ file: onto.layer, id: onto.row.id, before: onto.row, after: next }]);
+      if (/ written$/.test(said)) this.say((said = `${hand.name} hung on ${onto.label}`), true);
+    } else {
+      const stream = w.streamer;
+      let inside = false;
+      this.tmp.set(hit.x, hit.y + ATTACH_TUNE.lift, hit.z);
+      if (stream) {
+        stream.cameraRoomAt(this.tmp, this.hitRoom, floorUnder);
+        inside = !!this.hitRoom.building;
+      }
+      const ground = space || inside ? null : w.terrain.heightAt(this.tmp.x, this.tmp.z);
+      const row = markRow([a], this.tmp, w.placeFrame, frame, inside, Number.isFinite(ground ?? Number.NaN) ? ground : null);
+      const [mid] = this.edits.mintIds(['mark']);
+      const dest = this.session.dest;
+      said = await this.edits.putRows('stand a mark', [{ file: dest, id: mid, before: null, after: { ...row, id: mid } as PlacementRow }]);
+      if (/ written$/.test(said)) this.say((said = `${hand.name} stood as mark ${mid}`), true);
+    }
+    if (hand.key) this.keep.noteUsed(hand.key);
+    this.window?.refreshHere();
+    return said;
+  }
+  /** A row's matrix, read for a hang (kept: a click's work, never a frame's). */
+  private readonly attachBase = new THREE.Matrix4();
+  private raycaster: THREE.Raycaster | null = null;
+
+  /**
+   * The material of the nearest drawn surface along a ray within `far` (the look picker's click: a click's work, never a
+   * frame's): the world's pass, a building's rooms and the actors, each piece only where it and everything above it is shown
+   * and its material is drawn (the window openings' invisible walls are not surfaces). Null for none.
+   */
+  private surfaceAt(eye: THREE.Vector3, dir: THREE.Vector3, far: number): THREE.Material | null {
+    const rc = (this.raycaster ??= new THREE.Raycaster());
+    rc.set(eye, dir);
+    rc.near = 0;
+    rc.far = Number.isFinite(far) && far > 0 ? far : 1000;
+    rc.camera = this.host.cam.camera;
+    rc.layers.set(0);
+    rc.layers.enable(INTERIOR_LAYER);
+    rc.layers.enable(ACTOR_LAYER);
+    // Meshes shown now alone (a sprite, a point cloud and a line are no surface, and a sprite cannot be cast against without
+    // the camera); a click's work, never a frame's.
+    const meshes: THREE.Object3D[] = [];
+    this.host.world.scene.traverseVisible((o) => {
+      if ((o as THREE.Mesh).isMesh) meshes.push(o);
+    });
+    let hits: THREE.Intersection[] = [];
+    try {
+      hits = rc.intersectObjects(meshes, false);
+    } catch (err) {
+      console.warn('the look picker could not cast into the scene', err);
+      return null;
+    }
+    for (const hit of hits) {
+      const mesh = hit.object as THREE.Mesh;
+      const raw = mesh.material;
+      const mat = Array.isArray(raw) ? raw[hit.face?.materialIndex ?? 0] : raw;
+      if (!mat || mat.userData?.invisible || !mat.visible) continue;
+      return mat;
+    }
+    return null;
+  }
+
+  /** The permanent row the aim rests on, by id, or null; a mark whose handle the cursor rests on first (the seventh wave). */
   private hoveredId(): string | null {
+    const mark = this.looks.hoveredMark();
+    if (mark) return mark;
+    // A handle of an attachment hung on a row: the click picks that attachment, never the row behind it.
+    if (this.looks.hoveredAttachment()) return null;
     const o = this.aim.hover;
     if (!o || !o.template.startsWith(PLACEMENT_KEY_PREFIX)) return null;
     return o.template.slice(PLACEMENT_KEY_PREFIX.length);
@@ -1773,6 +2060,8 @@ export class Editor {
   /** A row by id into the hand. Answers why not. */
   async pickUp(id: string): Promise<string | null> {
     const h = this.host;
+    // A mark has no model to hold (the seventh wave): it is picked by its handle and moved with the gizmo, the hold or the nudges.
+    if (h.rowFor(id)?.row.kind === 'mark') return this.refuse(`${id} is a mark: click its handle and move it with the gizmo, R and F held or the arrows`);
     const lifted = h.lift(id);
     if (!lifted) return this.refuse(`${id} is not standing`);
     const r = lifted.row;
@@ -1897,11 +2186,20 @@ export class Editor {
     v.speed = `${this.fly.speed < 10 ? this.fly.speed.toFixed(1) : Math.round(this.fly.speed)} m/s${s.hold ? ' · held' : ''}`;
     const hs = this.hand?.scale;
     const tool = this.tools.armedTool;
-    v.hand = this.hand
-      ? `in hand: ${this.hand.name}${hs && (hs.x !== 1 || hs.y !== 1 || hs.z !== 1) ? ` (scale ${hs.x === hs.y && hs.y === hs.z ? hs.x : `${hs.x} ${hs.y} ${hs.z}`})` : ''}${this.ghost.shown || !this.hand.bounds ? '' : ' (preparing)'}`
-      : tool
-        ? (tool.barWords?.() ?? tool.label)
-        : 'nothing in hand';
+    const onto = this.hand?.attach && this.attachOnto ? (this.looks.hovered()?.id ?? this.hoveredId()) : null;
+    const ontoLabel = onto ? this.host.rowFor(onto)?.label : null;
+    const looks = this.looks;
+    v.hand = this.hand?.attach
+      ? `in hand: ${this.hand.name}: ${ontoLabel ? `hangs on ${ontoLabel}` : 'stands a mark where it lands'}`
+      : this.hand
+        ? `in hand: ${this.hand.name}${hs && (hs.x !== 1 || hs.y !== 1 || hs.z !== 1) ? ` (scale ${hs.x === hs.y && hs.y === hs.z ? hs.x : `${hs.x} ${hs.y} ${hs.z}`})` : ''}${this.ghost.shown || !this.hand.bounds ? '' : ' (preparing)'}`
+        : tool
+          ? (tool.barWords?.() ?? tool.label)
+          : looks.picking
+            ? `taking a ${looks.picking.take === 'texture' ? 'picture' : 'material'} for ${looks.picking.of}: click a surface or choose a library entry (Escape lets go)`
+            : looks.attachSel
+              ? `attachment ${looks.attachSel.i + 1} of ${this.host.rowFor(looks.attachSel.id)?.label ?? looks.attachSel.id}: ${capOf(input.bindings.placeTurn[0])}/${capOf(input.bindings.placeLift[0])}/${capOf(input.bindings.editorScale[0])} held turn/raise/size · arrows nudge · ${capOf(input.bindings.putAway[0])} takes it off`
+              : 'nothing in hand';
     v.dest = `→ ${destinationFile(s.dest, this.host.packId())}`;
     v.room = roomWords(this.host.world.cameraRoom);
     v.notes = this.hand ? notesLine(this.notes) : '';
@@ -2050,11 +2348,72 @@ export class Editor {
         sculpt: this.sculptView(),
         paint: this.paintView(),
         water: this.waterView(),
+        attach: { onto: this.attachOnto },
       }),
       setTool: (t: Record<string, unknown>) => this.setTool(t),
       refreshStatus: () => void this.edits.refreshStatus(),
       dialSet: () => editorDialsFor('editor') as DialSet,
+      // The seventh wave's looks and attachments on the Selected tab.
+      look: (act: 'tint' | 'texture' | 'material' | 'clear' | 'choose', of: string, value?: string) => void this.lookAct(act, of, value),
+      lookPalettes: () => this.lookPalettes(),
+      attachment: (act: 'pick' | 'at' | 'size' | 'remove', i: number, value?: string) => void this.attachmentAct(act, i, value),
     };
+  }
+
+  /** A look act from the Selected tab (every picked row): a tint set or taken off, the picker armed, an offered material chosen, a look cleared. */
+  private async lookAct(act: 'tint' | 'texture' | 'material' | 'clear' | 'choose', of: string, value?: string): Promise<void> {
+    const l = this.looks;
+    let said = '';
+    if (act === 'tint') said = await l.setLook(of, { tint: value ? value : null }, value ? 'tint' : 'take a tint off');
+    else if (act === 'clear') said = await l.setLook(of, { tint: null, map: null, like: null }, 'clear a look');
+    else if (act === 'texture' || act === 'material') said = l.armPick(of, act);
+    else if (act === 'choose' && value) said = await l.choose(value);
+    if (said) this.say(said, !/refus|not|first|cannot|would/.test(said));
+    this.window?.refreshEdits();
+  }
+
+  /** The tint picker's palettes, read once a session: the wardrobe's garment palettes and the creator's table. */
+  private lookPaletteRead: Promise<import('../ui/editorWindow.ts').LookPickerSource | null> | null = null;
+  private lookPalettes(): Promise<import('../ui/editorWindow.ts').LookPickerSource | null> {
+    const read = this.host.pickerPalettes;
+    if (!read) return Promise.resolve(null);
+    this.lookPaletteRead ??= (async () => {
+      const { garmentPalettes, creatorPalettes, allGarmentColours } = await import('../ui/dyePicker.ts');
+      const { wardrobe, table } = await read();
+      const garments = garmentPalettes(wardrobe);
+      const creator = creatorPalettes(table as Parameters<typeof creatorPalettes>[0], wardrobe);
+      return { garments, creator, eyes: [], all: wardrobe ? allGarmentColours(garments, wardrobe) : [] };
+    })().catch(() => null);
+    return this.lookPaletteRead;
+  }
+
+  /** An attachment act from the Selected tab, on the first picked row: picked, moved to a place, sized, or taken off. */
+  private async attachmentAct(act: 'pick' | 'at' | 'size' | 'remove', i: number, value?: string): Promise<void> {
+    const id = this.edits.sel.first ?? this.looks.attachSel?.id ?? null;
+    if (!id) return;
+    const l = this.looks;
+    let said = '';
+    if (act === 'pick') {
+      l.pickAttachment(id, i);
+      this.edits.sel.clear();
+      said = `attachment ${i + 1} picked: R, F or C held with the mouse turns, raises or sizes it; the arrows nudge it; Delete takes it off`;
+    } else if (act === 'remove') said = await l.removeAttachment(id, i);
+    else {
+      const a = this.host.rowFor(id)?.row.attach?.[i];
+      if (!a) return;
+      if (act === 'at') {
+        const p = (value ?? '').split(/[\s,]+/).filter(Boolean).map(Number);
+        if (p.length !== 3 || !p.every(Number.isFinite)) return void this.say('a place is three numbers: x y z in its model\'s frame', false);
+        const was = a.at ?? [0, 0, 0];
+        said = await l.moveAttachment(id, i, { dx: p[0] - was[0], dy: p[1] - was[1], dz: p[2] - was[2] }, 'place an attachment');
+      } else {
+        const n = Number(value);
+        if (!(n > 0)) return void this.say('a size is a number above nought', false);
+        said = await l.moveAttachment(id, i, { size: n / (a.size ?? 1) }, 'size an attachment');
+      }
+    }
+    if (said) this.say(said, !/refus|not|first|cannot/.test(said));
+    this.window?.refreshEdits();
   }
 
   /** A tool set from the window or the console: snapping, the grid, the angle, the axes, game view, the world held. */
@@ -2090,6 +2449,11 @@ export class Editor {
     if (Array.isArray(sw) && typeof sw[1] === 'boolean') {
       const k = BRUSH_SWITCHES.find(([key]) => key === sw[0]);
       if (k) BRUSH_TUNE[k[0]] = sw[1];
+    }
+    // The seventh wave's: whether an effect or a sound put down hangs on the row the aim meets.
+    if (typeof t.attachOnto === 'boolean') {
+      this.attachOnto = t.attachOnto;
+      this.say(t.attachOnto ? 'an effect or a sound put down hangs on the row the aim meets (else stands a mark)' : 'an effect or a sound put down stands as a mark of its own', true);
     }
     // The water tool's (Map-maker II's fifth wave): what a click does, where a level comes from, a typed level, the draft
     // closed or given up, the lake picked let go or taken out.
@@ -2917,7 +3281,8 @@ export class Editor {
   /** The first picked row as the Selected tab shows it, or null. */
   private selectedView(): SelectedView | null {
     const ed = this.edits;
-    const first = ed.sel.first;
+    // With an attachment picked by its handle (and no row), its row is shown.
+    const first = ed.sel.first ?? this.looks.attachSel?.id ?? null;
     const r = first ? this.host.rowFor(first) : null;
     if (!r) return null;
     const h = this.host;
@@ -2953,7 +3318,61 @@ export class Editor {
       size,
       height: Number.isFinite(ground) ? `${(r.row.y - ground).toFixed(2)} m` : r.row.inside ? 'in a room' : '—',
       note2: stood ?? '',
+      // The seventh wave: a mark, its model's materials with their looks, the picker, what is offered, its attachments.
+      mark: r.row.kind === 'mark',
+      materials: this.materialsView(first as string),
+      picking: this.looks.picking ? `click a surface (or choose a library entry) to take its ${this.looks.picking.take === 'texture' ? 'picture' : 'material'} for ${this.looks.picking.of === '*' ? 'every material' : this.looks.picking.of}; Escape lets go` : '',
+      offered: this.looks.choice,
+      attachments: (r.row.attach ?? []).map((a, i) => ({
+        i,
+        words: a.fx ? `effect ${a.fx}` : `sound ${a.snd}`,
+        at: (a.at ?? [0, 0, 0]).join(' '),
+        size: a.fx ? String(a.size ?? 1) : '',
+        picked: this.looks.attachSel?.id === r.row.id && this.looks.attachSel.i === i,
+      })),
     };
+  }
+
+  /** A row's model's materials for the Selected tab, each with its look in words, its tint and a little picture; null with none loaded. */
+  private materialsView(id: string): SelectedView['materials'] {
+    const got = this.looks.materialsOf(id);
+    if (!got) return null;
+    return got.items.map((m) => {
+      const l = got.mats.find((x) => x.of === m.name) ?? null;
+      return { name: m.name, look: EditorLooks.lookWords(l), tint: l?.tint ?? '', picture: this.swatchOf(m.material) };
+    });
+  }
+
+  /** A material's little picture (its colour picture drawn small, or its colour), made once a material. */
+  private readonly swatches = new WeakMap<THREE.Material, HTMLCanvasElement>();
+  private swatchOf(m: THREE.Material): HTMLCanvasElement | null {
+    const had = this.swatches.get(m);
+    if (had) return had;
+    if (typeof document === 'undefined') return null;
+    const c = document.createElement('canvas');
+    c.width = 32;
+    c.height = 32;
+    const g = c.getContext('2d');
+    if (!g) return null;
+    const s = m as THREE.MeshStandardMaterial;
+    const img = s.map?.image as CanvasImageSource | undefined;
+    let drawn = false;
+    if (img) {
+      try {
+        g.drawImage(img, 0, 0, 32, 32);
+        drawn = true;
+      } catch {
+        drawn = false;
+      }
+    }
+    if (!drawn) {
+      const col = s.color ?? new THREE.Color(1, 1, 1);
+      g.fillStyle = `#${col.getHexString()}`;
+      g.fillRect(0, 0, 32, 32);
+    }
+    c.title = m.name;
+    this.swatches.set(m, c);
+    return c;
   }
 
   // ---- The console. ----
@@ -3039,11 +3458,30 @@ export class Editor {
         const fields: Record<string, unknown> = {};
         for (const [k, v] of Object.entries(s)) {
           if (['x', 'y', 'z', 'yaw', 'pitch', 'roll', 'scale'].includes(k)) place[k] = v;
-          else fields[k] = v;
+          else if (k !== 'mats' && k !== 'attach') fields[k] = v;
         }
         if (Object.keys(place).length) said.push(await ed.setPlace(place));
         if (Object.keys(fields).length) said.push(await ed.setField(fields));
+        // The seventh wave's: the picked rows' looks and attachments replaced whole, read by the reader's own rule first.
+        if (s.mats !== undefined) {
+          const mats = s.mats === null ? null : readLooks(s.mats);
+          if (mats === null && s.mats !== null) said.push('mats is a list of { of, tint, map, like } the reader would not take');
+          else said.push(await this.looks.setAllLooks(mats ?? null));
+        }
+        if (s.attach !== undefined) {
+          const list = s.attach === null ? null : readAttachments(s.attach);
+          if (list === null && s.attach !== null) said.push('attach is a list of { fx | snd, at, q, size } the reader would not take');
+          else said.push(await this.looks.setAllAttachments(list ?? null));
+        }
       }
+      // The seventh wave's looks: `look: { of, tint }`, `{ of, take: 'texture' | 'material', from }` (or with no `from`, the
+      // picker armed), `{ of, clear: true }`, `{ choose: ref }` (an offered material).
+      if (o.look && typeof o.look === 'object' && !Array.isArray(o.look)) said.push(await this.lookDebug(o.look as Record<string, unknown>));
+      // An effect or a sound stood as a mark (`mark: { fx | snd, at, size }`, `at` the game's frame, else the aim).
+      if (o.mark && typeof o.mark === 'object') said.push(await this.markDebug(o.mark as Record<string, unknown>));
+      // One attachment of a row (`attachment: { id, i, pick, move: [dx, dy, dz], turn (degrees), size (a factor), remove }`).
+      if (o.attachment && typeof o.attachment === 'object') said.push(await this.attachmentDebug(o.attachment as Record<string, unknown>));
+      if (typeof o.attachOnto === 'boolean') this.setTool({ attachOnto: o.attachOnto });
       if (o.status === true) said.push(await ed.refreshStatus());
       // The third wave's: Fold now, and the brush.
       if (o.fold === true) said.push(await this.foldNow());
@@ -3079,13 +3517,81 @@ export class Editor {
       lastWrite: this.edits.lastWrite ?? this.lastWrite,
       edits: this.edits.report(),
       unfolded: h.world.streamer?.unfoldedReport() ?? null,
+      // How many permanent rows stand folded into their tiers (the seventh wave's smoke reads it across an attachment's move).
+      folded: h.world.streamer?.unfoldedReport().folded ?? 0,
       autoFold: { on: EDITOR_TUNE.autoFold, idle: EDITOR_TUNE.autoFoldIdle, hint: EDITOR_TUNE.foldHint, quietFor: round(performance.now() / 1000 - this.activeAt), folding: this.folding },
       brush: this.brush.report(),
       // The Tools list (Map-maker II's groundwork): every tool, its key as bound now and which is armed.
       tools: this.tools.report((a) => capOf(this.host.input.bindings[a][0])),
       bar: { writes: this.bar?.writes ?? 0 },
+      // The seventh wave's: the picker, the attachment picked, the copies the looks made, what hangs on the rows.
+      looks: {
+        ...this.looks.report(),
+        // The first picked row's materials by name (what a look's `of` names) with the look each wears, or null with none loaded.
+        materials: (() => {
+          const id = this.edits.sel.first ?? this.looks.attachSel?.id;
+          const got = id ? this.looks.materialsOf(id) : null;
+          return got ? got.items.map((m) => ({ name: m.name, picture: m.map, look: EditorLooks.lookWords(got.mats.find((x) => x.of === m.name) ?? null) })) : null;
+        })(),
+        copies: h.world.rowLooks.report(),
+        tintStrength: LOOK_TUNE.tintStrength,
+      },
+      attachments: { ...h.world.rowAttach.report(), onto: this.attachOnto },
       ...(said.length ? { answered: said } : {}),
     };
+  }
+
+  /** `editor({ look })`: a material's look on every picked row, by the console. Answers what was said. */
+  private async lookDebug(l: Record<string, unknown>): Promise<string> {
+    const looks = this.looks;
+    if (typeof l.choose === 'string') return looks.choose(l.choose);
+    const of = typeof l.of === 'string' ? l.of : '*';
+    if (l.clear === true) return looks.setLook(of, { clear: true }, 'clear a look');
+    if (l.tint !== undefined) {
+      if (l.tint !== null && (typeof l.tint !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(l.tint))) return 'a tint is #rrggbb, or null to take it off';
+      return looks.setLook(of, { tint: l.tint as string | null }, 'tint');
+    }
+    if (l.take === 'texture' || l.take === 'material') {
+      if (typeof l.from === 'string') {
+        if (!parseDonor(l.from)) return 'from names <pack>:<model>/<material>';
+        return looks.setLook(of, l.take === 'texture' ? { map: l.from } : { like: l.from }, l.take === 'texture' ? 'borrow a picture' : 'borrow a material');
+      }
+      return looks.armPick(of, l.take);
+    }
+    if (l.take === null) return looks.setLook(of, { map: null, like: null }, 'take a borrowed look off');
+    return 'look: { of, tint } | { of, take: "texture" | "material", from } | { of, clear: true } | { choose }';
+  }
+
+  /** `editor({ mark })`: an effect or a sound stood as a mark at a point of the game's frame (or the aim). */
+  private async markDebug(m: Record<string, unknown>): Promise<string> {
+    const raw = typeof m.fx === 'string' ? { fx: m.fx, ...(typeof m.size === 'number' ? { size: m.size } : {}) } : typeof m.snd === 'string' ? { snd: m.snd } : null;
+    const list = raw ? readAttachments([raw]) : null;
+    if (!list || !list.length) return 'mark: { fx: "<pack>:<file>.json" | snd: "<template>.snd", at: [x, y, z], size }';
+    const at = Array.isArray(m.at) && m.at.length === 3 ? { x: Number(m.at[0]), y: Number(m.at[1]), z: Number(m.at[2]) } : undefined;
+    const kind = this.editWorld();
+    const refusal = editorRefusal(kind, false);
+    if (refusal) return refusal;
+    return this.placeAttachment({ name: list[0].fx ?? list[0].snd ?? 'mark', key: '' } as Hand, list[0], at ?? { x: this.aim.hit.x, y: this.aim.hit.y, z: this.aim.hit.z });
+  }
+
+  /** `editor({ attachment })`: one attachment of a row picked, moved, turned, sized or taken off by the console. */
+  private async attachmentDebug(a: Record<string, unknown>): Promise<string> {
+    const id = typeof a.id === 'string' ? a.id : (this.edits.sel.first ?? this.looks.attachSel?.id ?? '');
+    const i = typeof a.i === 'number' ? Math.max(0, Math.floor(a.i)) : 0;
+    const row = this.host.rowFor(id);
+    if (!row?.row.attach?.[i]) return `${id || 'nothing picked'} has no attachment ${i + 1}`;
+    const looks = this.looks;
+    if (a.remove === true) return looks.removeAttachment(id, i);
+    if (a.pick === true) {
+      looks.pickAttachment(id, i);
+      this.edits.sel.clear();
+      this.window?.refreshEdits();
+      return `attachment ${i + 1} of ${row.label} picked`;
+    }
+    const mv = Array.isArray(a.move) && a.move.length === 3 ? a.move.map(Number) : [0, 0, 0];
+    const turn = typeof a.turn === 'number' ? (a.turn * Math.PI) / 180 : 0;
+    const size = typeof a.size === 'number' && a.size > 0 ? a.size : 1;
+    return looks.moveAttachment(id, i, { dx: mv[0] || 0, dy: mv[1] || 0, dz: mv[2] || 0, turn, size }, 'move an attachment');
   }
 
   /**

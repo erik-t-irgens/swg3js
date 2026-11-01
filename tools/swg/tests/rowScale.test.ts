@@ -149,7 +149,9 @@ const note = (what: string) => console.log(`note ${what}`);
   // The bulk's sites (map-maker wave 3: a permanent row folded into its tier's bulk carries its scale there too).
   pins.push(
     [/tmpM\.compose\(tmpV\.set\(p\.x, p\.y, p\.z\), p\.q, p\.scale \?\? ONE\);\s*mesh\.setMatrixAt\(i, tmpM\);\s*if \(p\.folded\) foldRec\(p\)\.slots\.push\(\{ mesh, i \}\);/, "the bulk's instance matrix composes a folded row's scale, and keeps its slot"],
-    [/stampCaster\(mesh, scaledRadius\(model\.radius, instanced\), flora \|\| wearsCard\(prim\.material\), 0\);/, "the bulk's caster stamp at the size its biggest copy stands"],
+    // From Map-maker II's seventh wave the card test reads the material the group wears (its look's copy, the piece's own
+    // where it wears none, which is every group of a tier with no look).
+    [/stampCaster\(mesh, scaledRadius\(model\.radius, instanced\), flora \|\| wearsCard\(worn\), 0\);/, "the bulk's caster stamp at the size its biggest copy stands"],
     [/const casterRadius = scaledRadius\(model\.radius, copies\);/, "a level group's casters the same"],
     [/const open = all\.filter\(\(p\) => !p\.contained && isUniform\(p\.scale\)\);/, "the bulk's basin water only for a copy at a uniform scale"],
     [/tmpM\.compose\(tmpV\.set\(p\.x, p\.y, p\.z\), p\.q, p\.scale \?\? ONE\);\s*for \(const fx of model\.def\.effects\) placeFx\(p, this\.effectFile\(model\.def, fx\.file\), scaleFree\(/, "the bulk's model effects stand where the scale puts them, at their own size"],

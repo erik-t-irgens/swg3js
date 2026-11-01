@@ -35,7 +35,7 @@
 // a release carries none of the editor. Pure: no fs, no DOM. Rule for this file (node runs it with type
 // stripping): every import with its `.ts` extension, no enum, no namespace, no constructor parameter properties.
 
-import { EDIT_FILE_KINDS, PLACEMENT_FIELDS, PLACEMENT_LIMITS, editFilePath, isPlacementId, mintPlacementId, placementsFileText, placementsPath, readPlacementRow, readPlacementsFile, readPlacementsFileRaw, rowHash, type EditFileKind, type PlacementLayer, type PlacementRead, type PlacementRow } from '../story/placements.ts';
+import { EDIT_FILE_KINDS, PLACEMENT_FIELDS, PLACEMENT_LIMITS, attachHash, editFilePath, isPlacementId, mintPlacementId, placementsFileText, placementsPath, readPlacementRow, readPlacementsFile, readPlacementsFileRaw, rowHash, type EditFileKind, type PlacementLayer, type PlacementRead, type PlacementRow } from '../story/placements.ts';
 import { HEIGHTS_LIMITS, heightsFileText, isTileId, readHeightsFile, readTileRow, sameTile, tileWithExtras, type HeightTileRow } from './editFiles/heightsFile.ts';
 import { PAINT_LIMITS, isPaintId, paintFileText, paintRowsWhole, paintWithExtras, readPaintFile, readPaintRow, samePaintRow, type PaintRow } from './editFiles/paintFile.ts';
 import { WATER_LIMITS, isWaterId, mintWaterId, readWaterFile, readWaterRow, sameWaterRow, waterFileText, waterWithExtras, type WaterRow } from './editFiles/waterFile.ts';
@@ -233,9 +233,14 @@ function withExtras(row: PlacementRow, was: Record<string, unknown> | null): Rec
   return out;
 }
 
-/** Two rows that stand and read the same: everything that stands, and the words. */
+/** What a row put with no id is named from: its thing, else its model, else a mark's word (the seventh wave), else `place`. */
+function mintBase(r: Record<string, unknown>): string {
+  return typeof r.thing === 'string' ? r.thing : typeof r.model === 'string' ? r.model : r.kind === 'mark' ? 'mark' : 'place';
+}
+
+/** Two rows that stand and read the same: everything that stands, what hangs on them (not in the stand's hash), and the words. */
 function sameRow(a: PlacementRow, b: PlacementRow): boolean {
-  return a.id === b.id && rowHash(a) === rowHash(b) && a.ground === b.ground && a.name === b.name && a.note === b.note && a.at === b.at;
+  return a.id === b.id && rowHash(a) === rowHash(b) && attachHash(a) === attachHash(b) && a.ground === b.ground && a.name === b.name && a.note === b.note && a.at === b.at;
 }
 
 function no(status: number, why: string): PlacementAnswer {
@@ -291,7 +296,7 @@ export function applyPlacementOp(op: unknown, current: Partial<Record<EditFileKi
     let rid = r.id;
     if (rid === undefined || rid === null || rid === '') {
       const taken = new Set([...held.story.rows, ...held.world.rows].map((e) => e.row.id));
-      rid = mintPlacementId(typeof r.thing === 'string' ? r.thing : typeof r.model === 'string' ? r.model : 'place', taken);
+      rid = mintPlacementId(mintBase(r), taken);
     }
     if (!isPlacementId(rid)) return no(400, 'its id is not a-z, 0-9, _ and - (64 at most, starting with a letter or a digit)');
     const row = cleanRow(r, rid, ctx.now);
@@ -456,7 +461,7 @@ function rowKind(layer: PlacementLayer): EditKind<PlacementRow> {
     extras: withExtras,
     text: (world, frame, rows) => placementsFileText(world, frame, rows as unknown as PlacementRow[]),
     read: (text, world, wk) => readPlacementsFile(text, world, wk),
-    mint: (asked, taken) => mintPlacementId(typeof asked.thing === 'string' ? asked.thing : typeof asked.model === 'string' ? asked.model : 'place', taken),
+    mint: (asked, taken) => mintPlacementId(mintBase(asked), taken),
     file: (world) => editFile(layer, world),
   };
 }

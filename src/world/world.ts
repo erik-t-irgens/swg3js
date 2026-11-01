@@ -43,7 +43,9 @@ import { FALLBACK_LAVA_STYLE, groupLava, lavaStyleFor, type LavaStyle } from './
 import { applyLavaHarm, LAVA_HARM, lavaHarmReport, lavaTickDamage, newLavaHold, resetLavaHarm, resetLavaHold, stepLavaHold, tuneLavaHarm, type LavaHarmTune } from './lavaHarmMath.ts';
 import { burnReport, clearBurn, newPlayerBurn, takeBurn, tunePlayerBurn, type PlayerBurn, type PlayerBurnTune } from '../combat/burnMath.ts';
 import type { HeatSources, LavaHeatTable } from './heatSources';
-import { DOME_CUBE, DomeCapture, REFLECTIONS, joinModelReflections, setEnvironment } from './envmap';
+import { DOME_CUBE, DomeCapture, REFLECTIONS, isRegisteredReflective, joinModelReflections, registerReflective, setEnvironment } from './envmap';
+import { RowMaterials } from './rowMaterials.ts';
+import { RowAttachments, attachFileOf } from './rowAttach.ts';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FLORA_WARM, FloraPlanter, plantedShadow } from './flora.ts';
 import { clientPlantDistance, FLORA_TUNE, plantReachOf, PlantSweep } from './floraReach.ts';
@@ -2343,6 +2345,7 @@ export class World {
     // things nobody can look at, and take the load from seconds to a minute. Everything above this
     // -- the terrain, the sky, the flora, the ground textures -- runs exactly as it always does.
     if (layout && !this.sceneOnly) {
+      this.rowAttach.clear();
       this.layoutStream?.dispose();
       this.particles?.dispose();
       this.particles = new ParticleEffects(this.scene, pack.url(''));
@@ -2359,6 +2362,8 @@ export class World {
       if (SHADER_PACING) this.layoutStream.prepare = (objects) => this.prepareStreamed(objects);
       // Each tier's still placed casters batched for the shadow pass once its meshes are shown (`shadowBatches.ts`).
       this.layoutStream.shadowBatches = this.shadowBatches;
+      // The permanent rows' looks, worn in the session's copies (Map-maker II's seventh wave).
+      this.layoutStream.looks = this.rowLooks;
       // A fountain's or a pool's water is drawn by the water system (the owner's call): reflecting,
       // rippling and ringed by rain like a lake, and never swelling.
       this.layoutStream.waterSurface = (geometry, matrix, name) => this.basinWaterBody(geometry, matrix, name);
@@ -2495,6 +2500,7 @@ export class World {
     const base = `${import.meta.env.BASE_URL}assets-private/${id}/`;
     const stand = AssetPack.from({ planet: id, categories: {} }, base);
     const layout: Layout = { planet: id, center: { x: 0, z: 0 }, radius: 0, objects: [] };
+    this.rowAttach.clear();
     this.layoutStream?.dispose();
     this.particles?.dispose();
     this.particles = new ParticleEffects(this.scene, stand.url(''));
@@ -2503,6 +2509,7 @@ export class World {
     this.layoutStream = new LayoutStreamer(this.scene, this.physics, stand, layout, this.particles, { reach: this.streamReach(), hugeColliders: false, stands: standsIn });
     if (SHADER_PACING) this.layoutStream.prepare = (objects) => this.prepareStreamed(objects);
     this.layoutStream.shadowBatches = this.shadowBatches;
+    this.layoutStream.looks = this.rowLooks;
     this.layoutStream.waterSurface = (geometry, matrix, name) => this.basinWaterBody(geometry, matrix, name);
     this.layoutStream.doorHost = this.doors;
     this.layoutStream.onFloraCircle = (e) => this.grass?.circleChanged(e.x, e.z, e.r);
@@ -2731,11 +2738,16 @@ export class World {
     this.sceneAdds.clear();
     for (const o of this.structures) this.scene.remove(o);
     this.structures.length = 0;
+    // What hangs on the permanent rows goes first, while the particles it placed out of still stand (the seventh wave).
+    this.rowAttach.clear();
     this.layoutStream?.dispose();
     this.layoutStream = null;
     // The race courses' warm memo goes with the streamer it was kept for: held, it kept the world left behind's whole
     // region list and its pack's parsed layout reachable until the next race start's need test asked again.
     this.courseWarmed = { ls: null, ids: new Set() };
+    // And the rows' looks after the streamer has let go of every copy its tiers held: what is left (an editor's hand) is
+    // forgotten by the world's sets and then disposed, never a texture.
+    this.rowLooks.clear();
     // The doors came down with their buildings' rooms just above; the door models go with the world they
     // were prepared in, their materials out of the portal set and the cascades first.
     this.forgetMaterials(this.doors.materials());
@@ -10321,6 +10333,8 @@ export class World {
     perf.end(SEC.levels);
     this.gaugeDetail();
     perf.begin(SEC.particles);
+    // What hangs on the permanent rows, looked at a few times a second (the seventh wave): nothing between looks.
+    this.rowAttach.update(camPos, dt);
     if (this.particles && this.camera) this.particles.update(dt, this.camera, this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null);
     if (this.camera) {
       const fog = this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null;
@@ -13317,6 +13331,38 @@ export class World {
   private readonly riverBodies = new Map<string, { table: RiverTable; parts: { mesh: THREE.Mesh; body: WaterBody; wind: { value: THREE.Vector2 }; reach: RiverReach }[] }>();
   /** The fall effects each river's steep stretches stand (`riverEffects`), by its table's name, and the one way they are stood again. */
   private readonly riverFx = new RiverEffectsKeeper<EffectHandle>();
+  /**
+   * The permanent rows' looks (Map-maker II's seventh wave, `rowMaterials.ts`): the copies of their models' materials, one a
+   * source and look, shared, counted, kept as spares for the world once no row wears them (a tier coming back builds no
+   * program), and every one forgotten and disposed at the world's going. A copy of a material the sky's reflection registry
+   * holds joins it with its source's own strength. The session's.
+   */
+  readonly rowLooks = new RowMaterials({
+    forget: (materials) => this.forgetMaterials(materials),
+    onCopy: (copy, source) => {
+      if (isRegisteredReflective(source)) registerReflective(copy as THREE.MeshStandardMaterial, source as THREE.MeshStandardMaterial);
+    },
+  });
+  /**
+   * What hangs on the permanent rows (the seventh wave, `rowAttach.ts`): their effects, placed out of this world's particles
+   * within reach of the eye, and their sounds, joined to the world's emitters. A file named `<pack>:<file>` is read out of that
+   * pack's folder from this world's own (`relativeRoot`), never copied.
+   */
+  readonly rowAttach = new RowAttachments<EffectHandle>({
+    fileOf: (ref) => attachFileOf(ref, this.particlesRoot, import.meta.env.BASE_URL),
+    prepare: (file) => (this.particles ? this.particles.prepare(file, this.renderer) : Promise.resolve(false)),
+    place: (file, m, contained, size) => this.particles?.place(file, m, contained, false, null, false, { size }) ?? null,
+    move: (h, m) => this.particles?.move(h, m),
+    resize: (h, size) => this.particles?.resize(h, size),
+    remove: (h) => this.particles?.remove(h),
+    sound: (owner, template, x, y, z, inside) => {
+      this.ambience?.sources.prepare([template]);
+      this.ambience?.sources.attach(owner, template, x, y, z, inside);
+    },
+    soundMove: (owner, x, y, z) => this.ambience?.sources.moveAttached(owner, x, y, z),
+    soundOff: (owner) => this.ambience?.sources.detach(owner),
+    fullOf: (template) => (this.audio?.bank.template(template) as { full?: number } | null)?.full ?? 0,
+  });
   /** What rivers did this session, for the console: landings, bodies added and taken out, effects stood, retunes. */
   readonly riverWork = { landed: 0, added: 0, removed: 0, effects: 0, retuned: 0, effectFiles: 0, missingEffects: 0 };
   /** What the last file read said, for the console. */

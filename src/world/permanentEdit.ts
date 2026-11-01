@@ -201,6 +201,9 @@ function keepOf(base: PlacementRow | null | undefined): Partial<PlacementRow> {
   if (base.state !== undefined) out.state = base.state;
   // And its size, which the world editor sets: picked up and put down again it stands as big as it stood.
   if (base.scale !== undefined) out.scale = base.scale;
+  // And its looks and what hangs on it (the seventh wave): picked up and put down again it wears what it wore.
+  if (base.mats !== undefined) out.mats = base.mats;
+  if (base.attach !== undefined) out.attach = base.attach;
   return out;
 }
 

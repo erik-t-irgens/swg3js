@@ -597,6 +597,130 @@ if (process.argv.includes('sculpt')) {
 // gizmo laid out and picked, every outline and ring projected into the marks' kept arrays) and every mark drawn -- measured
 // three ways: the aim wandering with nothing held; F held with the mouse moving (the raise carried on, `liftDelta`'s rate);
 // and the picked lake's square grabbed and dragged. Nothing is let go inside a window (a let-go writes).
+// With `looks` (`looksAlloc.test.ts`, Map-maker II's seventh wave): the attachments' holder looking at its rows between
+// looks, the handles laid out and the one under the cursor found (`EditorLooks.frame`), the marks drawn; then an attachment
+// picked and R held with the mouse moving, its turn carried live by the holder (`attachMovedFrame`, `followItem`).
+if (process.argv.includes('looks')) {
+  const { RowAttachments } = await import('../../../src/world/rowAttach.ts');
+  const { EditorLooks } = await import('../../../src/editor/editorLooks.ts');
+  type Row = import('../../../src/story/placements.ts').PlacementRow;
+  // A holder whose effects are kept handles of nothing: the measure is of what the holder and the looks do.
+  const holder = new RowAttachments<{ n: number }>({
+    fileOf: (ref) => ref,
+    prepare: async () => true,
+    place: () => ({ n: 1 }),
+    move: () => {},
+    resize: () => {},
+    remove: () => {},
+    sound: () => {},
+    soundMove: () => {},
+    soundOff: () => {},
+    fullOf: () => 4,
+  });
+  const rows: Row[] = [];
+  for (let i = 0; i < 6; i++) {
+    const row: Row = { id: `r${i}`, kind: i % 3 === 0 ? 'mark' : 'prop', ...(i % 3 === 0 ? {} : { pack: 'props', thing: 'crate' }), x: i * 4 - 10, y: 1, z: -20, q: [1, 0, 0, 0], attach: [{ fx: 'props:particles/fire.json', at: [0, 1, 0] }, { snd: 'sound/test.snd' }] } as Row;
+    rows.push(row);
+    holder.stand(`place/${row.id}`, row, { x: row.x, y: row.y, z: row.z, q: [0, 0, 0, 1] });
+  }
+  const eye = { x: 0.5, y: 8.5, z: 0.5 };
+  holder.update(eye, 1);
+  await settle();
+  holder.update(eye, 1);
+  const lm = marksView();
+  // The keys stood in: R held while `turning`, the mouse's movement written each frame.
+  const st = new Float64Array(4);
+  const input = {
+    mouseDX: 0.5,
+    mouseDY: 0.5,
+    // R held while `st[2]` is 1, C held while it is 2 (the size carried in place, `resize`).
+    held: (a: string) => (a === 'placeTurn' && st[2] === 1) || (a === 'editorScale' && st[2] === 2),
+    pressedAction: () => false,
+  };
+  const ptr = { x: 800.5, y: 450.5, over: true };
+  const none: string[] = [];
+  const looks = new EditorLooks({
+    input: input as never,
+    point: () => false,
+    pointer: () => ptr,
+    rowFor: (id) => {
+      const row = rows.find((r) => r.id === id);
+      return row ? { row, layer: 'world', label: id } : null;
+    },
+    picked: () => none,
+    pickOnly: () => {},
+    putRows: async () => 'written',
+    say: () => {},
+    stream: () => null,
+    attachments: () => holder as never,
+    frame: () => 'game',
+    centre: () => null,
+    curtain: async (_d, w) => w(),
+    grid: () => 0.25,
+    refresh: () => {},
+  });
+  const lcur = { x: 0.5, y: 0.5 };
+  // Four times the other modes' window, as the water's: the reading's own few kilobytes a smaller share of the line.
+  const LOOKS_FRAMES = 4 * FRAMES;
+  const looksFrame = (): void => {
+    st[1]++;
+    st[0] = st[1] * 0.01;
+    input.mouseDX = Math.sin(st[0] * 3) * 4;
+    input.mouseDY = Math.cos(st[0] * 2) * 3;
+    holder.update(eye, 1 / 60);
+    looks.keys();
+    lcur.x = 800 + Math.sin(st[0]) * 200;
+    lcur.y = 450 + Math.cos(st[0]) * 120;
+    looks.frame(view, lcur, lm);
+    drawEditorMarks(overlay, lm);
+  };
+  const looksFrames = (n: number): void => {
+    for (let i = 0; i < n; i++) looksFrame();
+  };
+  try {
+    new Function('f', '%NeverOptimizeFunction(f)')(looksFrames);
+  } catch {
+    // Without the flag the loop is left to the compiler.
+  }
+  const measure = async (): Promise<{ made: number; scavenges: number }> => {
+    looksFrames(20_000);
+    let best = { made: Infinity, scavenges: Infinity };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      looksFrames(10_000);
+      gc({ type: 'minor' });
+      await settle();
+      scavenges = 0;
+      const before = young();
+      looksFrames(LOOKS_FRAMES);
+      const made = young() - before;
+      await settle();
+      if (scavenges < best.scavenges || (scavenges === best.scavenges && made < best.made)) best = { made, scavenges };
+      if (best.scavenges === 0 && best.made <= 0) break;
+    }
+    return best;
+  };
+  const steady = await measure();
+  const shown = lm.handleCount;
+  // An attachment picked by its handle and R held: the turn carried live, nothing written until it is let go.
+  looks.pickAttachment('r1', 0);
+  st[2] = 1;
+  looksFrame();
+  const holding = looks.takesMouse;
+  const hold = await measure();
+  // R let go (its one write is the stand-in's), then C held: the size moved nearly every frame, the standing effect sized
+  // where it plays (`resize`), never placed again.
+  st[2] = 0;
+  looksFrame();
+  await settle();
+  looks.pickAttachment('r1', 0);
+  st[2] = 2;
+  looksFrame();
+  const sizing = looks.takesMouse;
+  const size = await measure();
+  watch.disconnect();
+  console.log(JSON.stringify({ frames: LOOKS_FRAMES, made: steady.made, scavenges: steady.scavenges, holdMade: hold.made, holdScavenges: hold.scavenges, sizeMade: size.made, sizeScavenges: size.scavenges, sizing, handles: shown, placed: holder.placed, holding }));
+  process.exit(0);
+}
 if (process.argv.includes('water')) {
   const { EditorWater, waterTool } = await import('../../../src/editor/editorWater.ts');
   const { tuneWater, WATER_TUNE_DEFAULTS } = await import('../../../src/editor/editorTune.ts');

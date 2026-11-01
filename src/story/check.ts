@@ -112,6 +112,11 @@ export interface PlacementRef {
    * building (refused there as a house is).
    */
   never?: string | null;
+  /**
+   * Why it is no story object though the game stands it, in words, or nothing: a mark (Map-maker II's seventh wave) carries
+   * effects and sounds alone, which the world's streamer never files, so `place/<id>` finds nothing there.
+   */
+  notObject?: string | null;
   /** The one world state it stands in (`restuss=ruins`), where it stands in one only. */
   state?: string | null;
 }
@@ -911,6 +916,10 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
       const row = standingRef(refs);
       if (row.never) {
         errors.push({ level: 'error', file: o.src.file, line: lineAt(o.src.lines, '/template'), message: `${o.template} names a row the game never stands (${row.file}:${row.line}): ${row.never}`, rule: 1 });
+        continue;
+      }
+      if (row.notObject) {
+        errors.push({ level: 'error', file: o.src.file, line: lineAt(o.src.lines, '/template'), message: `${o.template} names a row the game never finds as a thing (${row.file}:${row.line}): ${row.notObject}`, rule: 1 });
         continue;
       }
       // Strictly under the reach, as the game finds (`nearestPlaced` keeps only what is nearer than it).

@@ -22,6 +22,10 @@
 //   buildings  every gallery house and interior by its template (`pack: 'gallery'`, its `model` and `template`)
 //   world      every template a ground world places that neither the props nor the gallery has (`pack: 'world'`, `from`)
 //   flora      every model a ground world plants (`pack: 'world'`, `from`), trees, small plants and rocks
+//   effects    every converted particle effect, once a name, out of the pack that holds it (the props pack's first): what a
+//              row's attachment names as `<pack>:<file>` (Map-maker II's seventh wave); no picture (initials)
+//   sounds     every endless, placed loop of the sound bank (`sounds/sounds.json`) that is no music: what an attachment
+//              names by its template, with its full-volume radius (`r`) for the editor's ring
 // The weapons and vehicles of the gallery are not offered (skinned models as static rows are untested).
 //
 // Node 22, no dependencies.
@@ -337,6 +341,17 @@ export function buildLibrary({ root, log = () => {}, now = Date.now(), tune = LI
     log(`library: ${world}, ${placed} placed templates and ${planted} planted models`);
   }
 
+  // The effects and the sounds an attachment names (Map-maker II's seventh wave): read, never drawn.
+  const fx = libraryEffects(root);
+  for (const e of fx) entries.push(e);
+  log(`library: effects, ${fx.length} by name over ${new Set(fx.map((e) => e.p)).size} packs`);
+  const sounds = librarySounds(root);
+  if (sounds) {
+    note('sounds', 'sounds/sounds.json');
+    for (const e of sounds) entries.push(e);
+    log(`library: sounds, ${sounds.length} placed loops`);
+  } else log('library: no sound bank, so none of its loops');
+
   // The pictures: each model once, kept where it is newer than its GLB.
   let drawn = 0;
   let kept = 0;
@@ -409,6 +424,76 @@ export function libraryWorlds(root) {
     : [];
 }
 
+/** An effect's group by the words of its name: what kind of thing it makes, as the window groups them. Ours. */
+const FX_GROUPS = [
+  ['fire', /fire|flame|torch|brazier|burn|ember|candle|lava/],
+  ['light', /light|glow|lamp|beacon|blink|lantern/],
+  ['smoke', /smoke|steam|fog|mist|dust|cloud|vapo|haze|ash/],
+  ['water', /water|fountain|fall|splash|drip|bubble|spray|rain|wave/],
+  ['sparks', /spark|electric|lightning|beam|laser|energy|shock|plasma/],
+  ['blasts', /explo|blast|burst|impact|hit|debris/],
+];
+
+/**
+ * Every converted particle effect, once a name (`particles/<name>.json` under any pack folder), as library entries: out of the
+ * props pack where it has the file (every world reaches the props pack as a guest's files are reached), else the first pack
+ * holding it in sorted order; grouped by its name's words and flagged a loop where it plays for ever. A file that does not
+ * read is left out.
+ */
+export function libraryEffects(root) {
+  if (!existsSync(root)) return [];
+  const where = new Map();
+  const packs = readdirSync(root, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && existsSync(join(root, d.name, 'particles')))
+    .map((d) => d.name)
+    .sort((a, b) => (a === 'props' ? -1 : b === 'props' ? 1 : a < b ? -1 : a > b ? 1 : 0));
+  for (const pack of packs) {
+    for (const f of readdirSync(join(root, pack, 'particles'))) {
+      if (!f.endsWith('.json') || where.has(f)) continue;
+      where.set(f, pack);
+    }
+  }
+  const out = [];
+  for (const [f, pack] of [...where].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    const def = readJson(join(root, pack, 'particles', f));
+    if (!def || typeof def !== 'object') continue;
+    const stem = f.replace(/\.json$/, '');
+    const words = stem.replace(/^fx_pt_|^pt_|^fx_/, '').replace(/_/g, ' ').trim() || stem;
+    const g = FX_GROUPS.find(([, re]) => re.test(stem))?.[0] ?? 'other';
+    const forever = (t) => Array.isArray(t?.loopCount) && t.loopCount[0] < 0;
+    const loop = forever(def.timing) || (def.groups ?? []).some((gr) => forever(gr.timing) || (gr.emitters ?? []).some((e) => forever(e.timing)));
+    out.push({ s: 'effects', p: pack, id: stem, m: `particles/${f}`, n: words, g, t: null, sz: [0, 0, 0], tri: 0, pic: null, f: LIBRARY_FLAG.particle | (loop ? LIBRARY_FLAG.loop : 0) });
+  }
+  return out;
+}
+
+/** The sound bank's categories no attachment names: the music, the players' music, the stings and the spoken lines. */
+const NOT_PLACED = new Set(['music', 'playerMusic', 'musicSting', 'voiceOver']);
+
+/**
+ * Every endless loop of the sound bank (`sounds/sounds.json`) placed in the world (a 3D template) that is no music, as library
+ * entries: an attachment's `snd` is the template's key (`m`), its group the bank's category, its full-volume radius `r`.
+ * Null where there is no bank.
+ */
+export function librarySounds(root) {
+  const bank = readJson(join(root, 'sounds', 'sounds.json'));
+  if (!bank?.templates) return null;
+  const cats = bank.categories ?? {};
+  const out = [];
+  const seen = new Set();
+  for (const key of Object.keys(bank.templates).sort()) {
+    const t = bank.templates[key];
+    const cat = cats[String(t.category)] ?? 'other';
+    if (t.dim !== 3 || NOT_PLACED.has(cat)) continue;
+    if (!Array.isArray(t.loops) || !(t.loops[0] < 0 || t.loops[1] < 0)) continue;
+    let id = key.replace(/^sound\//, '').replace(/\.snd$/, '').replace(/[/]/g, '_');
+    while (seen.has(id)) id = `${id}_`;
+    seen.add(id);
+    out.push({ s: 'sounds', p: 'sounds', id, m: key, n: id.replace(/_/g, ' '), g: cat, t: null, sz: [0, 0, 0], tri: 0, pic: null, f: LIBRARY_FLAG.loop, r: typeof t.full === 'number' ? t.full : 0 });
+  }
+  return out;
+}
+
 /**
  * What `status` says of the library (listed, never asked): missing, of another format, older than a pack it read, or
  * missing a world converted since (a world folder the library would read that its index never did: comparing only the
@@ -423,6 +508,9 @@ export function libraryStatus(root) {
   if (older.length) return { line: `library: older than ${older.slice(0, 4).join(', ')}${older.length > 4 ? ', ...' : ''}: npm run swg -- library ${root}`, stale: true };
   const unread = libraryWorlds(root).filter((w) => !Object.prototype.hasOwnProperty.call(index.packs ?? {}, w));
   if (unread.length) return { line: `library: has nothing of ${unread.slice(0, 4).join(', ')}${unread.length > 4 ? `, and ${unread.length - 4} more` : ''}, converted since: npm run swg -- library ${root}`, stale: true };
+  // The effects an attachment names (Map-maker II's seventh wave): an index made before them has none, where a pack has some.
+  const effectsHere = existsSync(root) && readdirSync(root, { withFileTypes: true }).some((d) => d.isDirectory() && existsSync(join(root, d.name, 'particles')));
+  if (effectsHere && !(index.entries ?? []).some((e) => e.s === 'effects')) return { line: `library: has no effects or sounds for the world editor's attachments (made before them): npm run swg -- library ${root}`, stale: true };
   const bySource = {};
   let pictures = 0;
   for (const e of index.entries ?? []) {

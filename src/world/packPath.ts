@@ -13,3 +13,9 @@ export function relativeRoot(from: string, to: string): string {
   while (i < a.length && i < b.length && a[i] === b[i]) i++;
   return '../'.repeat(a.length - i) + b.slice(i).map((part) => `${part}/`).join('');
 }
+
+/** A pack's id from its folder (`/assets-private/tatooine/` is `tatooine`): the id a look's donor and an attachment's file name it by. */
+export function packIdOfRoot(root: string): string {
+  const parts = root.replace(/\/+$/, '').split('/');
+  return parts[parts.length - 1] ?? '';
+}

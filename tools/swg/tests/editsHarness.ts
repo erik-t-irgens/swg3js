@@ -46,6 +46,12 @@ export interface HarnessOpts {
    * tiles put and the ids taken out, the promise what the write built waits on. None by default.
    */
   onHeights?: (put: unknown[], deleted: string[]) => Promise<unknown>;
+  /**
+   * The attachments' hand-overs (Map-maker II's seventh wave): `follow`, `unfollow` and `markAt`, as the game hands the
+   * editing its holder's (`rowAttach.follow`, `restore`, `rowMatrixOf`), recorded into `Harness.follows`; a mark's place is
+   * where its file row stands. Absent by default, as an editor with no holder.
+   */
+  attachments?: boolean;
 }
 
 /** The stand-in input: actions held and pressed, raw keys down, the mouse's movement. */
@@ -76,6 +82,8 @@ export interface Harness {
   marks: MarksView;
   host: EditEditor & { point: boolean; look: { x: number; y: number; z: number } };
   batches: BatchEdit[][];
+  /** With `attachments`: each `follow <key> <x> <y> <z>` (the matrix's place, to the millimetre) and `unfollow <key>` asked, in order. */
+  follows: string[];
   /** One frame as the editor runs it: the key block (or, with Ctrl, `idle`), the frame after the camera, the presses spent. */
   step(opts?: { ctrl?: boolean; now?: number }): void;
   /** Every write and timer the editing set going, settled. */
@@ -114,6 +122,8 @@ export function makeHarness(opts: HarnessOpts = {}): Harness {
     for (const l of ['story', 'world'] as const)
       for (const r of rowsOf(l).values()) {
         if (placementKey(r.id) !== key) continue;
+        // A mark is filed by no streamer (the attachments' holder stands what it carries): nothing placed, as in the game.
+        if (r.kind === 'mark') return null;
         const g = toGame(r, centre, frame);
         const s = r.scale === undefined ? null : Array.isArray(r.scale) ? new THREE.Vector3(r.scale[0], r.scale[1], r.scale[2]) : new THREE.Vector3(r.scale, r.scale, r.scale);
         // One object a key, written in place, as the streamer keeps one placed object a row.
@@ -152,6 +162,26 @@ export function makeHarness(opts: HarnessOpts = {}): Harness {
   const pointer: EditEditor['pointer'] = { x: 800, y: 450, over: true, buttons: 0, pressed: 0, released: 0, dragging: false, clicked: false, downX: 0, downY: 0 };
   const said: string[] = [];
   const batches: BatchEdit[][] = [];
+  const follows: string[] = [];
+  const mm = (v: number) => Math.round(v * 1000) / 1000;
+  const attachHands = opts.attachments
+    ? {
+        follow: (key: string, m: THREE.Matrix4) => follows.push(`follow ${key} ${mm(m.elements[12])} ${mm(m.elements[13])} ${mm(m.elements[14])}`),
+        unfollow: (key: string) => follows.push(`unfollow ${key}`),
+        markAt: (key: string, out: { x: number; y: number; z: number }) => {
+          for (const l of ['story', 'world'] as const)
+            for (const r of rowsOf(l).values()) {
+              if (placementKey(r.id) !== key || r.kind !== 'mark') continue;
+              const g = toGame(r, centre, frame);
+              out.x = g.x;
+              out.y = g.y;
+              out.z = g.z;
+              return true;
+            }
+          return false;
+        },
+      }
+    : {};
   const look = { x: 0, y: 0, z: -1 };
   const host = {
     input: input as unknown as EditEditor['input'],
@@ -232,6 +262,7 @@ export function makeHarness(opts: HarnessOpts = {}): Harness {
     setHotbar() {},
     refreshWindow() {},
     ...(opts.toolArmed || opts.brushArmed ? { toolArmed: opts.toolArmed ?? opts.brushArmed } : {}),
+    ...attachHands,
   };
   EDITOR_TUNE.statusDebounceMs = 0;
   const e = new EditorEdits(host as unknown as EditEditor);
@@ -255,6 +286,7 @@ export function makeHarness(opts: HarnessOpts = {}): Harness {
     marks,
     host: host as unknown as Harness['host'],
     batches,
+    follows,
     step(o = {}) {
       now = o.now ?? now + 1 / 60;
       e.clock.dt = 1 / 60;

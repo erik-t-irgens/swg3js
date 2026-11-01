@@ -12,6 +12,7 @@ import { ghostVerdict } from '../../../src/world/placeGhost.ts';
 import { patchOfBounds } from '../../../src/world/housePlace.ts';
 import { propVerdict } from '../../../src/world/propPlace.ts';
 import { OLDER_ENDPOINT, PASSABLE_NOTE, TILTED_NOTE, buildingNotes, editorRefusal, limitNotes, notesLine, olderEndpoint, propNotes, refusalWords } from '../../../src/editor/devVerdict.ts';
+import { readPlacementRow } from '../../../src/story/placements.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -131,6 +132,10 @@ for (const [spot, place, deps] of props) {
   ok(olderEndpoint(old) && refusalWords(old).endsWith(OLDER_ENDPOINT), `an older endpoint's refusal of a new field says to restart it (“${refusalWords(old)}”)`);
   ok(olderEndpoint('public/placements/world/x.json holds 2000 rows, as many as a file may') && olderEndpoint('that row is refused: clear is a number of metres from 0 to 64'), 'and so do its old row cap and its old 64 m circle');
   ok(!olderEndpoint('public/placements/world/x.json holds 100000 rows, as many as a file may') && refusalWords('that id is in the story file') === 'that id is in the story file', "and today's own refusals say only themselves");
+  // An endpoint from before the seventh wave meeting a mark: its old reader refuses the put, and a file already holding a
+  // mark is refused whole by its `openLayer` (the words of a70487c's reader and endpoint, as they stand).
+  ok(olderEndpoint('its kind is neither prop nor building') && olderEndpoint('public/placements/world/tatooine.json holds rows this build cannot read (mark-1: its kind is neither prop nor building): mend them by hand first, or the editor would write over them'), "an endpoint from before marks, refusing a mark put or a file holding one, says to restart it");
+  ok(!olderEndpoint(String(readPlacementRow({ id: 'x-1', kind: 'tree', pack: 'props', thing: 'crate', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] }))) && !olderEndpoint('public/placements/world/tatooine.json holds rows this build cannot read (crate-1: its thing is not a-z, 0-9, _ and -): mend them by hand first, or the editor would write over them'), "and today's reader refusing a kind, or a row mended badly by hand, says only itself");
 }
 
 {

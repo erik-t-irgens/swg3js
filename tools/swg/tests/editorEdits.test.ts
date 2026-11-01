@@ -365,6 +365,55 @@ const sameTurn = (a: THREE.Quaternion, b: THREE.Quaternion) => Math.abs(Math.abs
 }
 
 {
+  // What hangs on a row follows the hand (Map-maker II's seventh wave): a hold carries it with the row's live matrix every
+  // frame, and it is put back (`unfollow`) when the edit is given up and when a write lands; a picked mark's pivot is where
+  // the holder stands it (`markAt`), since no streamer files a mark; and a mark takes no size or thing's fields.
+  const markRow = (id: string, x: number, z: number): PlacementRow => ({ id, kind: 'mark', x, y: 2, z, q: [1, 0, 0, 0], at: 1_700_000_000_000, attach: [{ fx: 'props:particles/fire.json' }] }) as PlacementRow;
+  const h = makeHarness({ rows: [propRow('crate', 0, 0), markRow('m1', -30, 4)], attachments: true });
+  h.e.snapOn = false;
+  h.e.sel.pick(['crate'], 'set');
+  h.input.heldActs.add('placeLift');
+  for (let i = 0; i < 3; i++) {
+    h.input.mouseDY = -20;
+    h.step();
+  }
+  const carried = h.follows.filter((f) => f.startsWith('follow place/crate'));
+  const ys = carried.map((f) => Number(f.split(' ')[3]));
+  ok(carried.length >= 2 && ys[ys.length - 1] > ys[0] && h.follows.every((f) => !f.startsWith('unfollow')), `a hold under way carries what hangs on the row with its live matrix every frame (${carried.join('; ')})`);
+  h.e.cancel(false);
+  h.input.heldActs.delete('placeLift');
+  ok(h.follows[h.follows.length - 1] === 'unfollow place/crate', 'given up, what hangs on it is put back where the row stands');
+  h.follows.length = 0;
+  await h.e.step('move', -2, 0, 0);
+  await h.settle();
+  const fi = h.follows.findIndex((f) => f.startsWith('follow place/crate'));
+  ok(fi >= 0 && h.follows.indexOf('unfollow place/crate') > fi && h.follows[fi] === 'follow place/crate -2 0 0', `a step carries it to the row's new place, and it is put back to be stood anew once the write has landed (${h.follows.join('; ')})`);
+  // A picked mark: its pivot is where the holder stands it.
+  h.e.sel.pick(['m1'], 'set');
+  const pv = { x: 0, y: 0, z: 0 };
+  const had = (h.e as unknown as { selectionPivot(out: { x: number; y: number; z: number }): boolean }).selectionPivot(pv);
+  ok(had && pv.x === 30 && pv.y === 2 && pv.z === 4, `a picked mark's pivot is its place in the game's frame, which no streamer files (${pv.x}, ${pv.y}, ${pv.z})`);
+  h.follows.length = 0;
+  await h.e.step('move', 0, 0, 3);
+  await h.settle();
+  ok(h.rowOf('m1')!.z === 7 && h.follows.some((f) => f === 'follow place/m1 30 2 7'), `a mark moves by the editing's own hand, carrying what it carries (${h.follows.join('; ')})`);
+  // C on a mark: nothing scaled, nothing refused, and said; its size and its thing's fields are none of its.
+  h.said.length = 0;
+  const scaled = await h.e.stepHold('scale', 2);
+  ok(h.rowOf('m1')!.scale === undefined && !/refused|older endpoint/.test(scaled) && h.said.some((w) => /a mark takes no size/.test(w)), `a scale held on a mark writes none (the endpoint would refuse the whole batch) and says why ("${scaled}"; ${h.said.join(' | ')})`);
+  h.e.sel.pick(['m1', 'crate'], 'set');
+  const both = await h.e.stepHold('scale', 2);
+  ok(h.rowOf('crate')!.scale === 2 && h.rowOf('m1')!.scale === undefined && !/refused/.test(both), `picked with a crate, the crate is scaled and the mark carried at its own size ("${both}")`);
+  ok(/takes no size/.test(await h.e.setPlace({ scale: 2 })), 'the Selected tab\'s scale on a mark is refused in words before anything is written');
+  h.e.sel.pick(['m1'], 'set');
+  const solid = await h.e.setField({ solid: true });
+  ok(h.rowOf('m1')!.solid === undefined && /a mark takes no solidity/.test(solid), `a mark's solidity is passed over in words, nothing written (${solid})`);
+  h.e.sel.pick(['m1', 'crate'], 'set');
+  const named = await h.e.setField({ guard: 3, name: 'TEST: smoke' });
+  ok(h.rowOf('crate')!.guard === 3 && h.rowOf('m1')!.guard === undefined && h.rowOf('m1')!.name === 'TEST: smoke' && !/refused/.test(named), `with a crate picked too, the crate takes the guard and the mark its name alone (${named})`);
+}
+
+{
   // A delete across a file's last row takes the file away, and the undo makes it again byte for byte.
   const h = makeHarness({ rows: [propRow('w', 0, 0)], story: [propRow('stool_1', 5, 5)] });
   const story = h.files.story;

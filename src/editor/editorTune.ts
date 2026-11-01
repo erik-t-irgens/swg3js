@@ -619,9 +619,37 @@ export function tuneInto(target: Record<string, unknown>, partial: unknown, path
  */
 export const TUNE_WATCH: { moved: ((partial: unknown) => void) | null } = { moved: null };
 
+/**
+ * Tunes of the world's own that the editor's console and sliders reach too, by name (Map-maker II's seventh wave: `look`, the
+ * looks' `LOOK_TUNE`, and `attach`, the attachments' `ATTACH_TUNE`), registered by the editor as it is made, so this file
+ * stays pure: `editor({ tune: { look: { tintStrength } } })` moves the very object the world reads.
+ */
+export const EDITOR_EXTRA_TUNES: Record<string, Record<string, unknown>> = Object.create(null);
+/** Each registered tune's shipped values, copied as it was registered (the sliders' reset). */
+export const EDITOR_EXTRA_DEFAULTS: Record<string, Record<string, unknown>> = Object.create(null);
+
+/** A tune of the world's own registered under a name (once; again with the same object, nothing). */
+export function registerExtraTune(name: string, tune: Record<string, unknown>): void {
+  if (EDITOR_EXTRA_TUNES[name] === tune) return;
+  EDITOR_EXTRA_TUNES[name] = tune;
+  EDITOR_EXTRA_DEFAULTS[name] = JSON.parse(JSON.stringify(tune));
+}
+
 /** `__debug.editor({ tune })`: the editor's numbers moved in memory, never saved, and the editor told. Answers what was said. */
 export function tuneEditor(partial: unknown): string[] {
-  const said = tuneInto(EDITOR_TUNE as unknown as Record<string, unknown>, partial);
+  let rest = partial;
+  const said: string[] = [];
+  if (partial && typeof partial === 'object' && !Array.isArray(partial)) {
+    const own: Record<string, unknown> = { ...(partial as Record<string, unknown>) };
+    for (const k of Object.keys(EDITOR_EXTRA_TUNES)) {
+      if (!Object.prototype.hasOwnProperty.call(own, k)) continue;
+      said.push(...tuneInto(EDITOR_EXTRA_TUNES[k], own[k], k));
+      delete own[k];
+    }
+    rest = own;
+  }
+  if (rest && typeof rest === 'object' && Object.keys(rest as object).length) said.push(...tuneInto(EDITOR_TUNE as unknown as Record<string, unknown>, rest));
+  else if (!rest || typeof rest !== 'object') said.push(...tuneInto(EDITOR_TUNE as unknown as Record<string, unknown>, rest));
   TUNE_WATCH.moved?.(partial);
   return said;
 }

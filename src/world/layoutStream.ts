@@ -3,7 +3,7 @@
 // far away, small props up close), and exact trimesh collision follows the player.
 
 import * as THREE from 'three';
-import { relativeRoot } from './packPath.ts';
+import { packIdOfRoot, relativeRoot } from './packPath.ts';
 import { cleanTrimesh, Group, groups, RAPIER as R, TRIMESH_FLAGS, type Physics } from '../core/physics.ts';
 import { splitTrimesh } from './trimeshPieces.ts';
 import type { AssetPack, Layout, LoadedModel, PackEffect, PackModelDef } from './assetPack';
@@ -28,7 +28,8 @@ import type { ShadowBatches, TierBatch } from './shadowBatches.ts';
 import { LOD_LEVEL_TUNE, sweepDue } from './lodLevels.ts';
 import type { BuildingDoors, DoorsFile } from './doorMath.ts';
 import type { DressingStand, StandAnswer } from './permanent.ts';
-import { PLACEMENT_KEY_PREFIX, radiusOfBounds } from '../story/placements.ts';
+import { PLACEMENT_KEY_PREFIX, lookSignature, parseDonor, radiusOfBounds, type RowLook } from '../story/placements.ts';
+import type { DonorOf, DonorPiece } from './rowMaterials.ts';
 import { FLORA_COLLISION, rowFloraParts, trunkRadius } from './floraCollision.ts';
 import { fileByState, standsIn } from './worldState.ts';
 import { isFallingWaterShader, solidRuleOf } from './walkThrough.ts';
@@ -297,7 +298,37 @@ export interface PlacedObject {
    * as it always was.
    */
   folded?: true;
+  /**
+   * A permanent row's looks (the world editor's seventh wave, `PlacementRow.mats`) and their signature: it is drawn in the
+   * looks' copies of its model's materials (`StreamLooks`), folded with the copies of its model wearing the same look (the
+   * bulk groups by model and signature), on meshes of its own otherwise. Absent on everything else.
+   */
+  look?: RowLookSet;
 }
+
+/** A row's looks as the streamer carries them: the list, and its signature (`lookSignature`), which a tier's bulk groups by. */
+export interface RowLookSet {
+  mats: readonly RowLook[];
+  sig: string;
+}
+
+/**
+ * What wears a row's looks (the world's `RowMaterials`, `rowMaterials.ts`): the material a piece is drawn in for a look, held
+ * for an owner (the placed object, the editor's hand), and every copy an owner held let go of. Null wears nothing: every
+ * piece is drawn in its own material, as before the looks.
+ */
+export interface StreamLooks {
+  wear(owner: object, source: THREE.Material, mats: readonly RowLook[], geometry: THREE.BufferGeometry, donorOf: DonorOf): THREE.Material;
+  release(owner: object): void;
+  /** Every copy one owner holds held for another too (the world editor's ghost and what it leaves behind). */
+  share?(from: object, to: object): void;
+  /** A copy's source (the material itself where it is none): what a borrowed piece is named by. */
+  sourceOf(m: THREE.Material): THREE.Material;
+}
+
+// A pack's id, as the converter names its folder (`<base>assets-private/<id>/`): what a look's donor names a pack by. Kept
+// in `packPath.ts` beside the re-rooting, so the attachments' holder reaches it from node; said again here for its importers.
+export { packIdOfRoot };
 
 /**
  * One object put into a world that is already streaming, in the **world's** own frame.
@@ -349,6 +380,8 @@ export interface RuntimePlacement {
   scale?: THREE.Vector3;
   /** A permanent row: it may fold into its tier's bulk (`PlacedObject.folded`). Only `standPermanent` passes it. */
   fold?: true;
+  /** A permanent row's looks (`PlacedObject.look`); absent for its model's own materials. */
+  look?: RowLookSet;
 }
 
 /** A box `min`..`max` (either corner may come first) at a scale along its own axes: the corners scaled, which way round kept. */
@@ -606,6 +639,38 @@ function sizeBuckets<T extends { scale?: { x: number; y: number; z: number } }>(
   }
   const out: T[][] = plain.length ? [plain] : [];
   for (const k of [...by.keys()].sort((a, b) => a - b)) out.push(by.get(k)!);
+  return out;
+}
+
+/**
+ * One model's copies split by the look they wear (the world editor's seventh wave), a group a signature: the very list handed
+ * in, as its one group with no look, where no copy wears one (every snapshot object, and every row with its model's own
+ * materials), so a tier with no looked row is grouped exactly as before; else the copies with no look first (in their order)
+ * and a group for each signature after, in the order first met. Size and host splitting run inside each group as they ran
+ * over the model's copies.
+ */
+function lookGroups(list: PlacedObject[]): { look: RowLookSet | undefined; list: PlacedObject[] }[] {
+  let any = false;
+  for (const p of list) {
+    if (p.look) {
+      any = true;
+      break;
+    }
+  }
+  if (!any) return [{ look: undefined, list }];
+  const plain: PlacedObject[] = [];
+  const by = new Map<string, { look: RowLookSet; list: PlacedObject[] }>();
+  for (const p of list) {
+    if (!p.look) {
+      plain.push(p);
+      continue;
+    }
+    const g = by.get(p.look.sig);
+    if (g) g.list.push(p);
+    else by.set(p.look.sig, { look: p.look, list: [p] });
+  }
+  const out: { look: RowLookSet | undefined; list: PlacedObject[] }[] = plain.length ? [{ look: undefined, list: plain }] : [];
+  for (const g of by.values()) out.push(g);
   return out;
 }
 
@@ -1007,6 +1072,117 @@ export class LayoutStreamer {
   }
   private packTagCount = 0;
 
+  /**
+   * What wears a permanent row's looks (the world's `RowMaterials`, the seventh wave), or null: every piece is drawn in its
+   * own material, exactly as before the looks.
+   */
+  looks: StreamLooks | null = null;
+
+  /**
+   * The packs a look's donor may name (`<pack>:<model>/<material>`) by id, that stand behind the world for no row of their
+   * own (a props texture borrowed by a world model where no props row stands): looked in only for a donor, never for a bare
+   * id. The world's own, its guests and its other worlds' packs answer by their own ids (`packById`).
+   */
+  private readonly donorPacks = new Map<string, AssetPack>();
+
+  /** Know a pack a look's donor may name. Again with the same pack, nothing. */
+  useDonorPack(pack: AssetPack | null): void {
+    if (pack) this.donorPacks.set(packIdOfRoot(pack.root), pack);
+  }
+
+  /** A pack by the id its folder has (`packIdOfRoot`): the world's own, a donor's, a guest's or another world's; null for none known. */
+  packById(id: string): AssetPack | null {
+    if (packIdOfRoot(this.pack.root) === id) return this.pack;
+    const d = this.donorPacks.get(id);
+    if (d) return d;
+    for (const g of this.guests) if (packIdOfRoot(g.root) === id) return g;
+    for (const g of this.fromPacks) if (packIdOfRoot(g.root) === id) return g;
+    return null;
+  }
+
+  /**
+   * A look's donor material by its name, out of a model already loaded: its exterior piece of that material's name first, any
+   * piece after; skinned where its geometry is. Null where the pack is not known, the model not loaded or it has no such
+   * material. Made once with the streamer, so a look never makes a closure.
+   */
+  readonly donorOf: DonorOf = (ref: string): DonorPiece | null => {
+    const d = parseDonor(ref);
+    const pack = d ? this.packById(d.pack) : null;
+    const model = d && pack ? pack.loaded(d.model) : null;
+    if (!d || !model) return null;
+    let hit: (typeof model.primitives)[number] | null = null;
+    for (const prim of model.primitives) {
+      if ((prim.material as THREE.Material).name !== d.material) continue;
+      if (!hit || (hit.cell > 0 && prim.cell <= 0)) hit = prim;
+    }
+    if (!hit) return null;
+    return { material: hit.material as THREE.Material, geometry: hit.geometry, skinned: !!hit.geometry.getAttribute('skinIndex') };
+  };
+
+  /** The donors a look names, each by its pack and model: what must be loaded before a row wearing it is drawn. */
+  private donorsOf(look: RowLookSet | undefined): { key: string; pack: AssetPack | null; id: string }[] {
+    const out: { key: string; pack: AssetPack | null; id: string }[] = [];
+    if (!look) return out;
+    for (const m of look.mats) {
+      const d = parseDonor(m.map ?? m.like);
+      if (!d) continue;
+      const key = `donor|${d.pack}|${d.model}`;
+      const pack = this.packById(d.pack);
+      // A pack that has no such model is no donor's: the look is refused for it, never another pack's model of that id loaded.
+      if (!out.some((o) => o.key === key)) out.push({ key, pack: pack && pack.find(d.model) ? pack : null, id: d.model });
+    }
+    return out;
+  }
+
+  /** A look's donors loaded (each failure noted and left out: the look is then refused for it and the row wears its own). */
+  private async loadDonors(look: RowLookSet | undefined): Promise<void> {
+    for (const d of this.donorsOf(look)) {
+      if (!d.pack) continue;
+      try {
+        await d.pack.model(d.id);
+      } catch (err) {
+        this.noteFailed(d.id, err);
+      }
+    }
+  }
+
+  /**
+   * The material one piece of a look group is drawn in, held for every copy of the group (each its owner): the copy where the
+   * look applies and is not refused, the piece's own otherwise. With no looks, or no look, the piece's own.
+   */
+  private wearAll(copies: readonly PlacedObject[], material: THREE.Material, geometry: THREE.BufferGeometry, look: RowLookSet | undefined): THREE.Material {
+    const looks = this.looks;
+    if (!look || !looks) return material;
+    let worn = material;
+    for (const p of copies) worn = looks.wear(p, material, look.mats, geometry, this.donorOf);
+    return worn;
+  }
+
+  /** Each loaded model's materials, by the material: what the world editor's look picker names a piece it points at by. */
+  private readonly modelOfMaterial = new WeakMap<THREE.Material, LoadedModel>();
+
+  /** A model's materials noted (`modelOfMaterial`), once a model. */
+  private noteMaterials(model: LoadedModel): void {
+    const first = model.primitives[0]?.material as THREE.Material | undefined;
+    if (!first || this.modelOfMaterial.has(first)) return;
+    for (const prim of model.primitives) this.modelOfMaterial.set(prim.material as THREE.Material, model);
+  }
+
+  /**
+   * What a look names a drawn piece's material by (`<pack>:<model>/<material>`), or null for a material of no model this
+   * streamer drew: a copy is named by its source, and a model by the pack that loaded it.
+   */
+  donorRefOf(material: THREE.Material): string | null {
+    const source = this.looks?.sourceOf(material) ?? material;
+    const model = this.modelOfMaterial.get(source);
+    if (!model) return null;
+    const def = model.def;
+    let pack: AssetPack | null = null;
+    if (this.pack.loaded(def.id) === model) pack = this.pack;
+    for (const g of [...this.guests, ...this.fromPacks, ...this.donorPacks.values()]) if (!pack && g.loaded(def.id) === model) pack = g;
+    return pack ? `${packIdOfRoot(pack.root)}:${def.id}/${source.name}` : null;
+  }
+
   private defOf(id: string, pack?: AssetPack): PackModelDef | undefined {
     if (pack) {
       const there = pack.find(id);
@@ -1389,6 +1565,7 @@ export class LayoutStreamer {
       ...(p.pack ? { pack: p.pack } : {}),
       ...(p.scale ? { scale: p.scale } : {}),
       ...(p.fold ? { folded: true as const } : {}),
+      ...(p.look ? { look: p.look } : {}),
     };
     this.objects.push(placed);
     this.placedByKey.set(p.template, placed);
@@ -1455,7 +1632,7 @@ export class LayoutStreamer {
       // A thing in the doorway stands partly outside and keeps no host, so filing it again would change nothing.
       if (a.host < 0 || this.hostObjects[a.host] !== building || a.flags & HOST_FLAG.doorway) continue;
       this.unplace(p.template);
-      void this.place({ model: p.model, template: p.template, x: p.x, y: p.y, z: p.z, q: p.q, radius: p.radius, inside: true, solid: p.solid, ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}), ...(p.pack ? { pack: p.pack } : {}), ...(p.scale ? { scale: p.scale } : {}), ...(p.folded ? { fold: true as const } : {}) });
+      void this.place({ model: p.model, template: p.template, x: p.x, y: p.y, z: p.z, q: p.q, radius: p.radius, inside: true, solid: p.solid, ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}), ...(p.pack ? { pack: p.pack } : {}), ...(p.scale ? { scale: p.scale } : {}), ...(p.folded ? { fold: true as const } : {}), ...(p.look ? { look: p.look } : {}) });
     }
   }
 
@@ -2250,6 +2427,31 @@ export class LayoutStreamer {
     return this.modelOf(id, pack);
   }
 
+  /** A placed object's model as loaded (out of its own pack first), or null while it is not. */
+  loadedModelOf(o: PlacedObject): LoadedModel | null {
+    return this.loadedOf(o.model, o.pack);
+  }
+
+  /** A look as the streamer carries one (its list and signature), for the world editor's hand; undefined for none. */
+  lookOf(mats: readonly RowLook[] | undefined): RowLookSet | undefined {
+    return mats && mats.length ? { mats, sig: lookSignature(mats) } : undefined;
+  }
+
+  /** A look's donors loaded (the world editor's hand wears it as the row will). */
+  loadLook(look: RowLookSet | undefined): Promise<void> {
+    return this.loadDonors(look);
+  }
+
+  /** The looks' copies an owner held let go of (the world editor's hand, its ghost and what it left behind). */
+  releaseLook(owner: object): void {
+    this.looks?.release(owner);
+  }
+
+  /** Every copy one owner holds held for another too (the editor's ghost leaving its copies behind). */
+  shareLook(from: object, to: object): void {
+    this.looks?.share?.(from, to);
+  }
+
   /**
    * The world editor's ghost of a loaded model: an instanced mesh of one per primitive, on the model's own geometry and
    * materials, built as a placement made in play is (`addToTier`), so it builds no program the world would not: a
@@ -2258,16 +2460,19 @@ export class LayoutStreamer {
    * prepares them through `prepare`, writes their one matrix every frame (so they are never culled by a stale sphere)
    * and shows them. A basin's water piece is drawn as the model draws it, never as a water body.
    */
-  ghostMeshesOf(model: LoadedModel): THREE.InstancedMesh[] {
+  ghostMeshesOf(model: LoadedModel, look?: RowLookSet, owner?: object): THREE.InstancedMesh[] {
     const out: THREE.InstancedMesh[] = [];
     const flora = this.packFlora(model);
     const rooms = model.interiorBoxes.length > 0 && model.portals.length > 0;
+    this.noteMaterials(model);
     for (const prim of model.primitives) {
       if (rooms && prim.cell > 0) continue;
-      const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
-      stampCaster(mesh, model.radius, flora || wearsCard(prim.material), 0);
+      // A row picked up wears its looks in hand (the seventh wave), held for the hand's `owner` until it lets them go.
+      const worn = look && owner && this.looks ? this.looks.wear(owner, prim.material, look.mats, prim.geometry, this.donorOf) : prim.material;
+      const mesh = new THREE.InstancedMesh(prim.geometry, worn, 1);
+      stampCaster(mesh, model.radius, flora || wearsCard(worn), 0);
       mesh.castShadow = stampedCasts(mesh);
-      if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
+      if (drawsAfterWater(worn)) mesh.renderOrder = 3;
       mesh.receiveShadow = true;
       mesh.frustumCulled = false;
       mesh.visible = false;
@@ -2344,6 +2549,8 @@ export class LayoutStreamer {
       // A permanent row folds into its tier's bulk where its tier is built with its model in (DESIGN.md §2.8): the one
       // caller that asks, so every other placement's path is as it was.
       fold: true,
+      // Its looks (the seventh wave), where it has any: drawn in their copies, folded with the copies wearing the same.
+      ...(row.mats && row.mats.length ? { look: { mats: row.mats, sig: lookSignature(row.mats) } } : {}),
     });
     return { bounds, built, ...(sized.note ? { note: sized.note } : {}) };
   }
@@ -3055,6 +3262,9 @@ export class LayoutStreamer {
         if (o.pack && !o.folded) continue;
         const key = this.modelKey(o);
         if (!wanted.has(key)) wanted.set(key, { id: o.model, pack: o.pack });
+        // A folded row's look's donors too (the seventh wave), under keys of their own (`donor|<pack>|<model>`), so the split
+        // below sends it to the bulk only with every donor in: none for a row with no look, so `wanted` is as it was.
+        if (o.look && o.folded) for (const d of this.donorsOf(o.look)) if (d.pack && !wanted.has(d.key)) wanted.set(d.key, { id: d.id, pack: d.pack });
       }
       const models = new Map<string, LoadedModel>();
       for (const [key, w] of wanted) {
@@ -3086,7 +3296,10 @@ export class LayoutStreamer {
       // tier was loading whose model nothing else here uses is not in `models`, and the bulk would draw and collide nothing
       // of it. That one takes the runtime path as any placement does. A folded row taken down is hidden in place
       // (`hideInPlace`), which is what keeps the bug above from coming back.
-      const runtimePlaced = objects.filter((o) => this.placedByKey.get(o.template) === o && !(o.folded && models.has(this.modelKey(o))));
+      // A looked row folds only with every donor its look names in as well (the seventh wave): a donor still loading sends it
+      // the runtime path, whose own build waits for its donors. A donor no pack here holds, or one that would not load, can
+      // never come: the look is refused for it (in words) and the row folds in its own materials.
+      const runtimePlaced = objects.filter((o) => this.placedByKey.get(o.template) === o && !(o.folded && models.has(this.modelKey(o)) && (!o.look || this.donorsOf(o.look).every((d) => !d.pack || models.has(d.key) || this.failed.has(d.id)))));
       const runtimeSet = runtimePlaced.length ? new Set(runtimePlaced) : null;
       const bulk = runtimeSet ? objects.filter((o) => !runtimeSet.has(o)) : objects;
       const loaded = this.instance(bulk, models);
@@ -3190,15 +3403,23 @@ export class LayoutStreamer {
         if (p.folded) foldRec(p).building = b;
         return b;
       });
+      // What its pieces are drawn in, and what names a piece by its model (the world editor's look picker).
+      this.noteMaterials(model);
+      // The copies a look apart (the seventh wave, `lookGroups`): the very list as one group where none wears a look, so a
+      // tier with no looked row is built exactly as before; a group's pieces drawn in its look's copies (`wearAll`).
+      const builtOf = isBuilding ? new Set<PlacedObject>(list.filter((_, i) => !!built[i])) : null;
+      for (const grp of lookGroups(list)) {
+      const glist = grp.list;
+      const look = grp.look;
       // Step 7: a model whose pack carries the client's lower detail levels has its copies out in the open
       // drawn by a level group, every exterior piece at every level; its copies in a building's rooms keep
       // the finest, drawn with their rooms. A model holding a basin's water is left as it was: the water
       // system takes that piece copy by copy, which a level's shared store cannot follow.
-      const levelled = this.levelled(model) ? list.filter((p) => !p.contained) : null;
+      const levelled = this.levelled(model) ? glist.filter((p) => !p.contained) : null;
       if (levelled && levelled.length) {
         // A group a size (`sizeBuckets`): one, of exactly these copies, wherever none is a scaled row.
         for (const copies of sizeBuckets(levelled)) {
-          const g = this.levelGroup(model, copies, meshes);
+          const g = this.levelGroup(model, copies, meshes, look);
           levels.push(g);
           for (let i = 0; i < copies.length; i++) if (copies[i].folded) foldRec(copies[i]).level = { group: g, i };
         }
@@ -3208,7 +3429,7 @@ export class LayoutStreamer {
         // so each placed building gets its own meshes; a building without portal data draws normally.
         // Those meshes are made only once the player is near (see buildInterior).
         const perBuilding = prim.cell > 0 && model.portals.length > 0;
-        let all = perBuilding ? list.filter((_, i) => !built[i]) : list;
+        let all = perBuilding ? (builtOf ? glist.filter((p) => !builtOf.has(p)) : glist) : glist;
         // The exterior's outdoor copies are the level group's.
         if (levelled && levelled.length && prim.cell <= 0) all = all.filter((p) => p.contained);
         if (!all.length) continue;
@@ -3247,7 +3468,9 @@ export class LayoutStreamer {
         // And a mesh a size (`sizeBuckets`): exactly `all` wherever none is a scaled row.
         for (const sized of sizeBuckets(all))
         for (const { list: instanced, role, host } of splitCopies<PlacedObject, PlacedObject>(sized)) {
-        const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, instanced.length);
+        // Its look's copy where its group wears one (held for each of its copies), the piece's own material otherwise.
+        const worn = this.wearAll(instanced, prim.material, prim.geometry, look);
+        const mesh = new THREE.InstancedMesh(prim.geometry, worn, instanced.length);
         instanced.forEach((p, i) => {
           // At its scale where it has one (a folded permanent row's), and its slot kept so it can be hidden in place.
           tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, p.scale ?? ONE);
@@ -3257,11 +3480,11 @@ export class LayoutStreamer {
         // Objects placed inside buildings draw in every pass, like actors, so they show with the room.
         if (instanced[0].contained) mesh.layers.enable(ACTOR_LAYER);
         // Cast by the rule at the size its biggest copy stands (a folded row stood larger; the model's own otherwise).
-        stampCaster(mesh, scaledRadius(model.radius, instanced), flora || wearsCard(prim.material), 0);
+        stampCaster(mesh, scaledRadius(model.radius, instanced), flora || wearsCard(worn), 0);
         mesh.castShadow = stampedCasts(mesh);
         // A translucent fall or screen draws after the terrain water, which follows the player and
         // so always sorts nearer than this mesh's centre of all its placements.
-        if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
+        if (drawsAfterWater(worn)) mesh.renderOrder = 3;
         mesh.receiveShadow = true;
         mesh.instanceMatrix.needsUpdate = true;
         mesh.computeBoundingSphere();
@@ -3274,6 +3497,7 @@ export class LayoutStreamer {
         meshes.push(mesh);
         if (role >= 0) furniture.push({ g: this.furnitureGroup(mesh, instanced, role, role === FURNITURE_ROLE.room, host), host });
         }
+      }
       }
     }
     this.loadedModels += byModel.size;
@@ -3372,7 +3596,7 @@ export class LayoutStreamer {
    * which the group keeps to what it draws. Swept at once from the last eye, so a tier loading far off does
    * not draw its finest level for a frame.
    */
-  private levelGroup(model: LoadedModel, copies: PlacedObject[], meshes: THREE.Object3D[]): LevelGroup {
+  private levelGroup(model: LoadedModel, copies: PlacedObject[], meshes: THREE.Object3D[], look?: RowLookSet): LevelGroup {
     // Measured from what the levels draw: a portal building's levels are its shell cell's, and the whole
     // model's box takes in every room, which under a cave or a bunker runs a hundred metres and more below
     // the door -- measured from that middle, a cave mouth was at its lowest level with the player at it.
@@ -3390,10 +3614,12 @@ export class LayoutStreamer {
       centre,
       radius,
       (prim, n, level) => {
-        const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, n);
-        stampCaster(mesh, casterRadius, flora || wearsCard(prim.material), level);
+        // Its look's copy where its group wears one (the seventh wave), held for each of its copies; its own otherwise.
+        const worn = this.wearAll(copies, prim.material, prim.geometry, look);
+        const mesh = new THREE.InstancedMesh(prim.geometry, worn, n);
+        stampCaster(mesh, casterRadius, flora || wearsCard(worn), level);
         mesh.castShadow = stampedCasts(mesh);
-        if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
+        if (drawsAfterWater(worn)) mesh.renderOrder = 3;
         mesh.receiveShadow = true;
         mesh.name = `level:${model.def.id}`;
         if (this.prepare) mesh.visible = false;
@@ -3570,12 +3796,15 @@ export class LayoutStreamer {
     let model: LoadedModel;
     try {
       model = await this.modelOf(p.model, p.pack);
+      // Its look's donors too (the seventh wave), before anything of it is made: none for a row with no look.
+      if (p.look) await this.loadDonors(p.look);
     } catch (err) {
       this.noteFailed(p.model, err);
       return null;
     }
     // Taken away again, or its whole tier unloaded, while the model loaded.
     if (this.disposed || this.runtime.get(p) !== rec) return null;
+    this.noteMaterials(model);
     // At its scale, where it has one (a permanent row the world editor sized); `ONE` otherwise, exactly as before.
     const scale = p.scale ?? ONE;
     tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, scale);
@@ -3610,13 +3839,15 @@ export class LayoutStreamer {
         rec.meshes.push(h.mesh);
         continue;
       }
-      const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
+      // Its look's copy where it wears one (the seventh wave, held for it), the piece's own material otherwise.
+      const worn = p.look && this.looks ? this.looks.wear(p, prim.material, p.look.mats, prim.geometry, this.donorOf) : prim.material;
+      const mesh = new THREE.InstancedMesh(prim.geometry, worn, 1);
       mesh.setMatrixAt(0, tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, scale));
       // A house or a prop put down in play by the same rule as a tier's copies, the page's slider included: at the size
       // it stands, its largest axis (1 with no scale).
-      stampCaster(mesh, p.scale ? model.radius * largestAxis(p.scale) : model.radius, this.packFlora(model) || wearsCard(prim.material), 0);
+      stampCaster(mesh, p.scale ? model.radius * largestAxis(p.scale) : model.radius, this.packFlora(model) || wearsCard(worn), 0);
       mesh.castShadow = stampedCasts(mesh);
-      if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
+      if (drawsAfterWater(worn)) mesh.renderOrder = 3;
       // A thing standing in a room is drawn with the room, which is the actor layer -- the same line
       // the bulk path has. Without it an indoor placement is stencilled out of the room's own pass
       // and can only be seen through a doorway from outside, which is worse than not drawing it.
@@ -3676,11 +3907,14 @@ export class LayoutStreamer {
       const rec = this.runtime.get(p);
       this.runtime.delete(p);
       this.removeColliders(p);
-      // A row folded into its tier's bulk is hidden where it stands, its slot still held (`hideInPlace`).
+      // A row folded into its tier's bulk is hidden where it stands, its slot still held (`hideInPlace`): its look's copies
+      // with it, since its slot is still drawn in them, let go of with its tier.
       if (!rec) {
         this.hideInPlace(p, true);
         continue;
       }
+      // Its own meshes go, and with them what of its look's copies it held (the seventh wave).
+      if (p.look) this.looks?.release(p);
       this.forgetUnfolded(p, rec);
       tiers.add(rec.tier);
       if (rec.building) {
@@ -3734,6 +3968,8 @@ export class LayoutStreamer {
       this.hideInPlace(p, true);
       return;
     }
+    // Its own meshes go, and with them what of its look's copies it held (the seventh wave).
+    if (p.look) this.looks?.release(p);
     this.forgetUnfolded(p, rec);
     if (rec.building) {
       this.dropInterior(rec.building);
@@ -3939,11 +4175,20 @@ export class LayoutStreamer {
       // Anything placed in play that rode this tier goes with it, and its record with it, or a
       // later removal would take its meshes out twice and count its instance off twice.
       const rec = this.runtime.get(o);
-      if (rec) this.forgetUnfolded(o, rec);
+      if (rec) {
+        this.forgetUnfolded(o, rec);
+        if (o.look) this.looks?.release(o);
+      }
       this.runtime.delete(o);
     }
-    // What the bulk made of the rows folded into it goes with it (the slots of rows taken down meanwhile among them).
-    if (t.folds) for (const o of t.folds.keys()) this.foldOf.delete(o);
+    // What the bulk made of the rows folded into it goes with it (the slots of rows taken down meanwhile among them), and
+    // what of their looks' copies they held (the seventh wave): a row taken down whole held its slot's to here.
+    if (t.folds) {
+      for (const o of t.folds.keys()) {
+        this.foldOf.delete(o);
+        if (o.look) this.looks?.release(o);
+      }
+    }
     // A huge object whose pieces were still being built stops being built.
     if (this.hugeQueue.length) {
       let keep = 0;

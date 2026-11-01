@@ -145,7 +145,10 @@ export function olderEndpoint(why: string): boolean {
   // The second wave's too: an endpoint from before the batch and status ops names the four ops it knows. And Map-maker II's:
   // an endpoint from before its kinds names the four kinds it knew, and one from before a kind's wave refuses it in that
   // wave's words ("does not write yet"), which the editor, sending only the kinds its own wave writes, never meets otherwise.
-  return /fields this build does not write|holds 2000 rows, as many as a file may|(clear|guard) is a number of metres from 0 to 64\b|an ask is a put, a delete, a move or a rename$|'s file is story, world, removed or people$|which this endpoint does not write yet/.test(why);
+  // And its seventh wave's: an endpoint from before marks refuses one put in its old reader's words ("neither prop nor
+  // building", where today's reader says "neither prop, building nor mark"), and a file already holding one whole in its
+  // `openLayer` words, which carry the same reason.
+  return /fields this build does not write|holds 2000 rows, as many as a file may|(clear|guard) is a number of metres from 0 to 64\b|an ask is a put, a delete, a move or a rename$|'s file is story, world, removed or people$|which this endpoint does not write yet|its kind is neither prop nor building\b/.test(why);
 }
 
 /** A write's refusal, with the restart words where an older endpoint gave it. */

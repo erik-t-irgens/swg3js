@@ -4,7 +4,8 @@
 // storage that may refuse (a private window), the session's own copy answering then; and Used here names the entries
 // this world's files already stand, most used first.
 import assert from 'node:assert/strict';
-import { ENTRY_FLAG, LIBRARY_VERSION, LibraryKeep, entryKey, fallbackEntries, groupsOf, haystackOf, libraryView, packsOf, pageOf, readLibraryIndex, searchLibrary, usedHereKeys, type LibraryEntry } from '../../../src/editor/libraryModel.ts';
+import { ENTRY_FLAG, LIBRARY_VERSION, LibraryKeep, attachOfEntry, entryKey, fallbackEntries, groupsOf, haystackOf, isAttachEntry, libraryView, packsOf, pageOf, readLibraryIndex, searchLibrary, usedHereKeys, type LibraryEntry } from '../../../src/editor/libraryModel.ts';
+import { readAttachments } from '../../../src/story/placements.ts';
 import { LIBRARY_TUNE } from '../../../src/editor/editorTune.ts';
 
 let checks = 0;
@@ -33,6 +34,16 @@ const ok = (cond: boolean, what: string) => {
   ok(keys.includes('flora:testworld:test_tree'), 'and its flora');
   ok(readLibraryIndex({ version: LIBRARY_VERSION + 1, entries: [] }) === null, 'an index of another shape is read as none');
   ok(readLibraryIndex({ version: LIBRARY_VERSION, made: 'x', packs: {}, entries: [{ s: 'props', p: 'props', id: 'a', m: 'b' }, { s: 'nonsense', p: 'x', id: 'c', m: 'd' }] })!.entries.length === 1, 'an entry of a source this build has not got is passed over');
+  // The attachments' sources (Map-maker II's seventh wave): read with a sound's radius, and named as a row's attachment
+  // names them, which the file's reader takes back as it is.
+  const read = readLibraryIndex({ version: LIBRARY_VERSION, made: 'x', packs: {}, entries: [{ s: 'effects', p: 'props', id: 'pt_fire', m: 'particles/pt_fire.json', f: ENTRY_FLAG.particle | ENTRY_FLAG.loop }, { s: 'sounds', p: 'sounds', id: 'amb_hum', m: 'sound/amb_hum.snd', f: ENTRY_FLAG.loop, r: 6 }, { s: 'props', p: 'props', id: 'a', m: 'b', r: 3 }] })!;
+  const [fx, snd, prop] = read.entries;
+  ok(read.entries.length === 3 && snd.r === 6 && fx.r === undefined, "the index's effects and sounds are read, a sound's full-volume radius with it");
+  ok(isAttachEntry(fx) && isAttachEntry(snd) && !isAttachEntry(prop), 'an effect and a sound are attachments, a thing with a model is not');
+  const a1 = attachOfEntry(fx);
+  const a2 = attachOfEntry(snd);
+  ok(JSON.stringify(a1) === '{"fx":"props:particles/pt_fire.json"}' && JSON.stringify(a2) === '{"snd":"sound/amb_hum.snd"}' && attachOfEntry(prop) === null, 'an effect names its pack and its file, a sound its template');
+  ok(JSON.stringify(readAttachments([a1, a2])) === JSON.stringify([a1, a2]), "and both read back as the file's reader takes an attachment");
 }
 
 {

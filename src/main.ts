@@ -286,7 +286,7 @@ import { PROP_TUNE, NO_TURN, liftTo as propLiftTo, propSpot, propVerdict, pushBy
 import { letGoOf, placedProps, propsKey, type LetGo, type PlacedDeps, type PlacedProp } from './world/propsPlaced.ts';
 import { HOUSING_TUNE, LocalHomes, MOVE_SAYS, atDoorDoes, atDoorOf, awayText, backHouseText, houseName, inHandHouseText, isLocalHome, localMoveOf, moveDropped, movedHouseText, myBuildings, pickedHouseText, placeLocalHome, type HomeStore, type HouseMove, type LocalHome, type LocalHomeDeps, type LocalHomeLanding, type MyBuilding } from './world/myBuildings.ts';
 import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, propStandOf, standsSolid, type StandAnswer, type StoodRow, type WorldKind } from './world/permanent.ts';
-import { PLACEMENT_LAYERS, fromGame, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
+import { PLACEMENT_LAYERS, fromGame, parseDonor, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
 import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, driftText, forceText, groundMoved, homeStaysText, inHandText, keptText, nextDestination, nextStateChoice, notYoursText, pickedUpText, removedText, rowFromHouse, rowFromProp, savedText, stateChoiceText, takeOutText, yawOfTurn, type BuildingSource, type Destination as KeptIn, type HandSource, type HomeSource } from './world/permanentEdit.ts';
 import { EDITOR_HEADER, EDITOR_HEADER_VALUE, PLACEMENTS_ENDPOINT_TUNE, type BatchEdit, type PlacementBatchOk, type PlacementBatchReply, type PlacementReply, type PlacementReplyOk } from './world/placementEdits.ts';
 import { EditChip } from './ui/editChip.ts';
@@ -25104,6 +25104,9 @@ class App {
     packReady: (pack, from) => (pack === 'props' ? !!this.props.pack : pack === 'gallery' ? !!this.dressingGallery : !!this.world.placeFrame && (!from || !!this.world.guestWorldNow(from))),
     generation: () => this.world.generation,
     label: (row) => this.dressingLabel(row),
+    // What hangs on a row (Map-maker II's seventh wave): a mark's whole stand, and beside a model row's own, by the world's holder.
+    attach: (key, row, g) => this.world.rowAttach.stand(key, row, g),
+    detach: (key) => this.world.rowAttach.drop(key),
   });
   /** The run of `standDressing` in force, and how many there have been: the record is the run's token. */
   private dressingRun = { pack: '', run: 0 };
@@ -25165,10 +25168,17 @@ class App {
 
   /** The packs a world's rows stand out of, in hand before any is stood: the gallery's, the props pack and what its client data hangs on things. */
   private async dressingPacks(rows: readonly PlacementRow[]): Promise<void> {
-    if (rows.some((r) => r.pack === 'gallery')) this.dressingGallery = await this.world.housesPack();
+    // The packs a row's looks borrow from (Map-maker II's seventh wave, `<pack>:<model>/<material>`), handed to the streamer
+    // as donors' packs once in hand: a props or gallery donor where no row of that pack stands, another world's light.
+    const donors = new Set<string>();
+    for (const r of rows) for (const m of r.mats ?? []) {
+      const d = parseDonor(m.map ?? m.like);
+      if (d) donors.add(d.pack);
+    }
+    if (rows.some((r) => r.pack === 'gallery') || donors.has('gallery')) this.dressingGallery = await this.world.housesPack();
     // Each other world a world row names (`from`), light: its manifest and its trees' shapes, never its layout.
     for (const id of new Set(rows.filter((r) => r.pack === 'world' && r.from).map((r) => r.from as string))) await this.world.guestWorld(id);
-    if (rows.some((r) => r.pack === 'props')) {
+    if (rows.some((r) => r.pack === 'props') || donors.has('props')) {
       try {
         await this.props.load();
       } catch {
@@ -25176,6 +25186,13 @@ class App {
       }
       const pk = this.props.pack;
       if (pk) await pk.loadObjectEffects();
+    }
+    const stream = this.world.streamer;
+    if (!donors.size || !stream) return;
+    for (const id of donors) {
+      if (id === 'props') stream.useDonorPack(this.props.pack);
+      else if (id === 'gallery') stream.useDonorPack(this.dressingGallery);
+      else if (id !== packIdOf(this.world.planet, this.zone)) stream.useDonorPack(await this.world.guestWorld(id));
     }
   }
 
@@ -28404,6 +28421,8 @@ class App {
           lendGround: (pack, name) => this.editorLend(pack, name),
           floraReady: () => this.editorFloraReady(),
           lakeCurtain: (detail, work) => this.editorLakeCurtain(detail, work),
+          curtain: (detail, work) => this.editorLookCurtain(detail, work),
+          pickerPalettes: () => this.pickerPalettes(),
         });
         this.editor = ed;
         return ed;
@@ -28567,8 +28586,21 @@ class App {
     return r ? r.answer : "the editor is the dev server's";
   }
 
+  /**
+   * A row's borrowed material written behind the editor's short curtain (Map-maker II's seventh wave): a donor's material
+   * cloned onto a row may need a program no material of the world built, so the write, whose answer stands the row by
+   * difference behind the screen (the world waits for what it builds), then the curtain's sweep. Answers what the write said.
+   */
+  private async editorLookCurtain(detail: string, work: () => Promise<string>): Promise<string> {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    if (!this.editor?.on) return "a borrowed material is the world editor's: F2 first";
+    if (!this.inWorld || this.traveling) return 'not now: enter the world first, and not mid-crossing';
+    const r = await this.editorCurtain('a borrowed material', detail, work);
+    return r ? r.answer : "the editor is the dev server's";
+  }
+
   /** The rows of this world's two files as the permanent layer last read them (the library's Used here), none for another world's. */
-  private editorFileRows():readonly { pack: string; thing?: string; model?: string; template?: string; from?: string }[] {
+  private editorFileRows():readonly { pack?: string; thing?: string; model?: string; template?: string; from?: string }[] {
     if (this.permanent.worldIn !== this.editWorld()) return [];
     return [...(this.permanent.fileOf('world')?.rows ?? []), ...(this.permanent.fileOf('story')?.rows ?? [])];
   }
@@ -28873,6 +28905,11 @@ class App {
     const s = this.permanent.rowOf(placementKey(id));
     const had = s ? { row: s.row } : this.editRowOf(id);
     if (!had) return;
+    // A mark carries effects and sounds alone: nothing a story's `place/<id>` can find (an area round it is still a place).
+    if (what === 'object' && had.row.kind === 'mark') {
+      this.messages.system(`${id} is a mark: it carries effects and sounds alone and is no story object (an area round it still copies)`);
+      return;
+    }
     const label = (s?.label ?? this.dressingLabel(had.row)).toUpperCase();
     const pack = this.editWorld();
     const text = what === 'object' ? storyObjectSnippet(had.row, pack, label) : storyAreaSnippet(had.row, pack, Math.max(6, Math.ceil((s?.radius ?? 2) + 4)), label);

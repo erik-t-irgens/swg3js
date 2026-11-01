@@ -79,6 +79,32 @@ function glbOf(b: { positions: Float32Array; indices: Uint32Array }): Buffer {
     writeFileSync(join(root, 'testworld', 'tree.glb'), glbOf(box(1, 8, 1, 0)));
     writeFileSync(join(root, 'testworld', 'manifest.json'), JSON.stringify({ planet: 'testworld', categories: { layout: [{ id: 'test_rock', file: 'rock.glb', bounds, triangles: 12 }, { id: 'chair_m', file: 'chair.glb', bounds, triangles: 12 }], flora: [{ id: 'test_tree', file: 'tree.glb', bounds: { min: [-3, 0, -3], max: [3, 8, 3] }, triangles: 12, familyName: 'TEST family' }] } }));
     writeFileSync(join(root, 'testworld', 'layout.json'), JSON.stringify({ planet: 'testworld', center: { x: 0, z: 0 }, radius: 100, objects: [{ template: 'object/static/test/shared_test_rock.iff', model: 'test_rock', x: 0, y: 0, z: 0, q: [1, 0, 0, 0], radius: 3 }, { template: 'object/static/test/shared_test_bench.iff', model: 'chair_m', x: 5, y: 0, z: 0, q: [1, 0, 0, 0], radius: 1 }] }));
+    // The attachments' sources (Map-maker II's seventh wave): effects in two packs (one name in both, which the props pack
+    // gives), one playing for ever and one not, and a sound bank whose one placed, endless loop that is no music is offered.
+    const forever = { loopCount: [-1, -1] };
+    const once = { loopCount: [1, 1] };
+    mkdirSync(join(root, 'props', 'particles'), { recursive: true });
+    mkdirSync(join(root, 'testworld', 'particles'), { recursive: true });
+    writeFileSync(join(root, 'props', 'particles', 'pt_lamp_glow.json'), JSON.stringify({ timing: once, groups: [{ timing: once, emitters: [{ timing: forever }] }] }));
+    writeFileSync(join(root, 'testworld', 'particles', 'pt_lamp_glow.json'), JSON.stringify({ timing: once, groups: [] }));
+    writeFileSync(join(root, 'testworld', 'particles', 'fx_pt_fire_brazier.json'), JSON.stringify({ timing: forever, groups: [] }));
+    writeFileSync(join(root, 'testworld', 'particles', 'pt_smoke_puff.json'), JSON.stringify({ timing: once, groups: [{ timing: once, emitters: [{ timing: once }] }] }));
+    writeFileSync(join(root, 'testworld', 'particles', 'pt_broken.json'), '{ not json');
+    mkdirSync(join(root, 'sounds'), { recursive: true });
+    writeFileSync(
+      join(root, 'sounds', 'sounds.json'),
+      JSON.stringify({
+        categories: { '1': 'ambient', '2': 'music', '3': 'voiceOver' },
+        templates: {
+          'sound/amb_hum.snd': { dim: 3, category: 1, loops: [-1, -1], full: 6 },
+          'sound/amb_drone.snd': { dim: 3, category: 1, loops: [1, -1] },
+          'sound/amb_once.snd': { dim: 3, category: 1, loops: [1, 1], full: 4 },
+          'sound/ui_click.snd': { dim: 2, category: 1, loops: [-1, -1] },
+          'sound/music_theme.snd': { dim: 3, category: 2, loops: [-1, -1], full: 20 },
+          'sound/vo_line.snd': { dim: 3, category: 3, loops: [-1, -1] },
+        },
+      }),
+    );
 
     const before = libraryStatus(root);
     ok(before.stale && /library: none/.test(before.line) && before.line.includes('npm run swg -- library'), `status says the index is missing, with the command (“${before.line}”)`);
@@ -93,8 +119,23 @@ function glbOf(b: { positions: Float32Array; indices: Uint32Array }): Buffer {
     const bench = by('world', 'test_bench');
     ok(!!bench && bench.pic === 'props/icons/chair_m.png' && !existsSync(join(root, 'library', 'icons', 'testworld', 'chair_m.png')), 'a model the props pack pictures is reused, never drawn again');
     ok((by('flora', 'test_tree').f & 8) !== 0 && by('flora', 'test_tree').g === 'trees', 'a planting past the 1.2 m line is a tree');
+    // The effects: once a name, the props pack's where it has one, grouped by their names, a loop flagged; one that does not read left out.
+    const fx = index.entries.filter((e: { s: string }) => e.s === 'effects') as { p: string; id: string; m: string; n: string; g: string; f: number; pic: string | null }[];
+    const fxOf = (id: string) => fx.find((e) => e.id === id);
+    ok(fx.length === 3 && !fxOf('pt_broken'), `every effect that reads, once a name (${fx.map((e) => `${e.p}:${e.id}`).join(', ')})`);
+    ok(fxOf('pt_lamp_glow')?.p === 'props' && fxOf('pt_lamp_glow')?.m === 'particles/pt_lamp_glow.json' && fxOf('fx_pt_fire_brazier')?.p === 'testworld', "a name both packs hold is the props pack's (every world reaches it), the rest their own pack's");
+    ok(fxOf('pt_lamp_glow')?.g === 'light' && fxOf('fx_pt_fire_brazier')?.g === 'fire' && fxOf('pt_smoke_puff')?.g === 'smoke' && fxOf('fx_pt_fire_brazier')?.n === 'fire brazier', 'grouped by the words of their names, and named in words');
+    ok((fxOf('pt_lamp_glow')!.f & 128) !== 0 && (fxOf('fx_pt_fire_brazier')!.f & 128) !== 0 && (fxOf('pt_smoke_puff')!.f & 128) === 0 && fx.every((e) => (e.f & 16) !== 0 && e.pic === null), 'one playing for ever (its own, a group\'s or an emitter\'s timing) is flagged a loop, and none has a picture');
+    // The sounds: placed (three-dimensional), endless, and no music, voice-over or player's music; the radius kept.
+    const snd = index.entries.filter((e: { s: string }) => e.s === 'sounds') as { p: string; id: string; m: string; g: string; f: number; r?: number }[];
+    ok(snd.length === 2 && snd.some((e) => e.m === 'sound/amb_hum.snd' && e.id === 'amb_hum' && e.g === 'ambient' && e.r === 6 && (e.f & 128) !== 0 && e.p === 'sounds') && snd.some((e) => e.m === 'sound/amb_drone.snd' && e.r === 0), `of the bank, only the placed, endless loops that are no music or spoken line, each with its full-volume radius (${snd.map((e) => `${e.m} ${e.r}`).join(', ')})`);
     const now = libraryStatus(root);
-    ok(!now.stale && /4 entries|entries/.test(now.line), `then status says it is current (“${now.line}”)`);
+    ok(!now.stale && /4 entries|entries/.test(now.line) && /effects 3/.test(now.line) && /sounds 2/.test(now.line), `then status says it is current (“${now.line}”)`);
+    // An index made before the effects (its packs holding some) is asked for again in words.
+    const noFx = { ...index, entries: index.entries.filter((e: { s: string }) => e.s !== 'effects' && e.s !== 'sounds') };
+    writeFileSync(join(root, 'library', 'library.json'), JSON.stringify(noFx));
+    const before7 = libraryStatus(root);
+    ok(before7.stale && /has no effects or sounds/.test(before7.line) && before7.line.includes('npm run swg -- library'), `an index with no effects, where a pack has some, is listed again (“${before7.line}”)`);
     const r2 = buildLibrary({ root });
     ok(r2.drawn === 0 && r2.kept === r.drawn, `a second run draws nothing it already has (${r2.kept} kept)`);
     const later = new Date(Date.now() + 60_000);

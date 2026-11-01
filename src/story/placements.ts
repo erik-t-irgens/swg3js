@@ -36,12 +36,44 @@ export type PlacementPack = 'props' | 'gallery' | 'world';
 /** The frame a file's places are written in: raw on a planet, the game's own in a space zone. */
 export type PlacementFrame = 'raw' | 'game';
 
+/**
+ * One look of a row's materials (Map-maker II's seventh wave, the world editor's): the materials it applies to by their name in
+ * the model (`of`, or `*` for all), and a tint (`#rrggbb`, the colour multiplied), a picture borrowed from another model's
+ * material (`map`, `<pack>:<model>/<material>`, onto a material that already has a picture on the same channel), or a
+ * material borrowed whole (`like`, the same form). A tint and a map may stand together; a borrowed material stands alone.
+ */
+export interface RowLook {
+  of: string;
+  tint?: string;
+  map?: string;
+  like?: string;
+}
+
+/**
+ * One thing hung on a row (the seventh wave): a particle effect of any converted pack (`fx`, `<pack>:<file>`) with its place
+ * (`at`, metres) and turn (`q`, `[w, x, y, z]`) in the model's own frame as the game draws it and its size (a factor of the
+ * effect's own), or a sound of the bank (`snd`, its template's key) at a place. Absent `at`, `q` and `size` are the origin,
+ * no turn and 1, and are written so.
+ */
+export interface RowAttach {
+  fx?: string;
+  snd?: string;
+  at?: [number, number, number];
+  q?: [number, number, number, number];
+  size?: number;
+}
+
 /** One permanent placement, as the file holds it (once read and cleaned). */
 export interface PlacementRow {
   /** `^[a-z0-9][a-z0-9_-]{0,63}$`, unique in its world across both layers; filed under `place/<id>`. */
   id: string;
-  kind: 'prop' | 'building';
-  pack: PlacementPack;
+  /**
+   * A prop, a building, or (the seventh wave) a mark: a row with no model that carries attachments alone, stood by the
+   * attachments' holder and never filed in the streamer.
+   */
+  kind: 'prop' | 'building' | 'mark';
+  /** Where its model is found; absent on a mark, which has none. */
+  pack?: PlacementPack;
   /** The props catalogue's id (`pack: 'props'`). */
   thing?: string;
   /** The model's id in the gallery or this world's pack (`pack: 'gallery'` or `'world'`). */
@@ -98,6 +130,16 @@ export interface PlacementRow {
    * row takes its largest axis: the stand decides both, with a note, since only it knows the model.
    */
   scale?: number | [number, number, number];
+  /**
+   * Its looks (the seventh wave, `RowLook`): absent, the model's own materials. Part of how it stands, so in `rowHash`. One of
+   * the wrong shape is kept out of the row as a field this build does not read, with its note, and the row stands in its own.
+   */
+  mats?: RowLook[];
+  /**
+   * What hangs on it (the seventh wave, `RowAttach`): effects and sounds. **Not** in `rowHash`: the attachments' holder stands
+   * them apart from the streamer, so moving one never takes the row down and stands it again (`attachHash` says it moved).
+   */
+  attach?: RowAttach[];
   name?: string;
   note?: string;
   /** When it was written, milliseconds since the epoch. */
@@ -146,6 +188,16 @@ export const PLACEMENT_LIMITS = {
   /** The least and the most a scale may be along any axis (a thousandth to a thousand: the editor's notes stand at 0.05 and 20). */
   scaleMin: 0.001,
   scaleMax: 1000,
+  /** The most looks and attachments a row may carry (the seventh wave). */
+  looks: 64,
+  attachments: 64,
+  /** How far from its row's origin an attachment may stand, metres, and the least and most its size may be. */
+  attachReach: 1000,
+  sizeMin: 0.01,
+  sizeMax: 100,
+  /** The longest name of a material a look names, and of an effect's file or a sound's template an attachment names. */
+  material: 120,
+  attachFile: 200,
 };
 
 /** The prefix every permanent row is filed under in the streamer. */
@@ -157,7 +209,15 @@ const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const NAME_ID = /^[A-Za-z0-9_.-]{1,96}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 /** The fields a row may carry; the reserved ones are read and set aside. */
-const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'scale', 'name', 'note', 'at']);
+const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'scale', 'mats', 'attach', 'name', 'note', 'at']);
+/** A tint, as a look writes it. */
+const TINT = /^#[0-9a-fA-F]{6}$/;
+/** A material a look borrows from: `<pack>:<model>/<material>`, the material's own name after the first slash. */
+const DONOR = /^([a-z0-9_]{1,40}):([A-Za-z0-9_.-]{1,96})\/(.+)$/;
+/** An effect an attachment names: `<pack>:<file>`, a converted particle effect's description under that pack. */
+const FX_FILE = /^[a-z0-9_]{1,40}:[A-Za-z0-9_\/.-]+\.json$/;
+/** A sound an attachment names: a template of the bank, by its key. */
+const SND_KEY = /^[A-Za-z0-9_\/.-]+\.snd$/;
 /** A world state's tag: its key and its value, each lower-case words. */
 const STATE = /^[a-z0-9_]+=[a-z0-9_]+$/;
 /** An object template, as a row names one. */
@@ -217,6 +277,100 @@ export function writtenScale(s: readonly [number, number, number]): number | [nu
   return [s[0], s[1], s[2]];
 }
 
+/** A borrowed material's name taken apart (`<pack>:<model>/<material>`), or null for one of no shape a look takes. */
+export function parseDonor(ref: unknown): { pack: string; model: string; material: string } | null {
+  if (typeof ref !== 'string') return null;
+  const m = DONOR.exec(ref);
+  if (!m || m[3].length > PLACEMENT_LIMITS.material || CONTROL.test(m[3])) return null;
+  return { pack: m[1], model: m[2], material: m[3] };
+}
+
+/**
+ * A row's looks as it keeps them (`RowLook`), or null for a list of no shape a row takes: a list of at most `looks`, each
+ * naming the materials it applies to (`of`, a name in the model or `*`) once in the list, with a tint, a borrowed picture or
+ * both, or a borrowed material alone. An empty list is no look at all (`undefined`), and written so.
+ */
+export function readLooks(v: unknown): RowLook[] | null | undefined {
+  if (!Array.isArray(v) || v.length > PLACEMENT_LIMITS.looks) return null;
+  if (!v.length) return undefined;
+  const out: RowLook[] = [];
+  const seen = new Set<string>();
+  for (const e of v) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return null;
+    const o = e as Record<string, unknown>;
+    for (const k of Object.keys(o)) if (k !== 'of' && k !== 'tint' && k !== 'map' && k !== 'like') return null;
+    if (typeof o.of !== 'string' || !o.of.length || o.of.length > PLACEMENT_LIMITS.material || CONTROL.test(o.of) || seen.has(o.of)) return null;
+    seen.add(o.of);
+    const look: RowLook = { of: o.of };
+    if (o.like !== undefined) {
+      if (o.tint !== undefined || o.map !== undefined || !parseDonor(o.like)) return null;
+      look.like = o.like as string;
+    } else {
+      if (o.tint === undefined && o.map === undefined) return null;
+      if (o.tint !== undefined) {
+        if (typeof o.tint !== 'string' || !TINT.test(o.tint)) return null;
+        look.tint = o.tint;
+      }
+      if (o.map !== undefined) {
+        if (!parseDonor(o.map)) return null;
+        look.map = o.map as string;
+      }
+    }
+    out.push(look);
+  }
+  return out;
+}
+
+/**
+ * A row's attachments as it keeps them (`RowAttach`), or null for a list of no shape a row takes: at most `attachments`,
+ * each exactly one of an effect (`fx`, with an optional place, turn and size) or a sound (`snd`, with an optional place),
+ * within the backstops. The origin, no turn and a size of 1 are written absent, so one place has one spelling; a turn is
+ * renormalised as a row's is. An empty list is none at all (`undefined`).
+ */
+export function readAttachments(v: unknown): RowAttach[] | null | undefined {
+  const L = PLACEMENT_LIMITS;
+  if (!Array.isArray(v) || v.length > L.attachments) return null;
+  if (!v.length) return undefined;
+  const out: RowAttach[] = [];
+  for (const e of v) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return null;
+    const o = e as Record<string, unknown>;
+    const fx = o.fx !== undefined;
+    const snd = o.snd !== undefined;
+    if (fx === snd) return null;
+    for (const k of Object.keys(o)) if (k !== 'fx' && k !== 'snd' && k !== 'at' && (!fx || (k !== 'q' && k !== 'size'))) return null;
+    const a: RowAttach = {};
+    if (fx) {
+      if (typeof o.fx !== 'string' || o.fx.length > L.attachFile || !FX_FILE.test(o.fx) || o.fx.includes('..')) return null;
+      a.fx = o.fx;
+    } else {
+      if (typeof o.snd !== 'string' || o.snd.length > L.attachFile || !SND_KEY.test(o.snd) || o.snd.includes('..')) return null;
+      a.snd = o.snd;
+    }
+    if (o.at !== undefined) {
+      const at = o.at;
+      if (!Array.isArray(at) || at.length !== 3 || at.some((c) => num(c) === undefined || Math.abs(c as number) > L.attachReach)) return null;
+      if (at[0] !== 0 || at[1] !== 0 || at[2] !== 0) a.at = [at[0] as number, at[1] as number, at[2] as number];
+    }
+    if (o.q !== undefined) {
+      const q = o.q;
+      if (!Array.isArray(q) || q.length !== 4 || q.some((c) => num(c) === undefined)) return null;
+      const len = Math.hypot(q[0] as number, q[1] as number, q[2] as number, q[3] as number);
+      if (!(Math.abs(len - 1) <= L.unit)) return null;
+      const n = Math.abs(len - 1) > 1e-12 ? len : 1;
+      const t: [number, number, number, number] = [(q[0] as number) / n, (q[1] as number) / n, (q[2] as number) / n, (q[3] as number) / n];
+      if (!(t[0] === 1 && t[1] === 0 && t[2] === 0 && t[3] === 0)) a.q = t;
+    }
+    if (o.size !== undefined) {
+      const s = num(o.size);
+      if (s === undefined || s < L.sizeMin || s > L.sizeMax) return null;
+      if (s !== 1) a.size = s;
+    }
+    out.push(a);
+  }
+  return out;
+}
+
 /**
  * One row cleaned, or why it is refused. The turn is renormalised when it is within the limit of a unit
  * turn, and refused past it, since a turn that far off is a typing mistake rather than rounding.
@@ -227,18 +381,31 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
   if (!isPlacementId(o.id)) return 'its id is not a-z, 0-9, _ and - (64 at most, starting with a letter or a digit)';
   const id = o.id;
   for (const k of Object.keys(o)) if (!FIELDS.has(k) && !RESERVED.has(k)) unknown.push(`${id}.${k}`);
-  if (o.kind !== 'prop' && o.kind !== 'building') return 'its kind is neither prop nor building';
-  if (o.pack !== 'props' && o.pack !== 'gallery' && o.pack !== 'world') return 'its pack is not props, gallery or world';
-  if (o.kind === 'building' && o.pack === 'props') return 'a building comes out of the gallery or the world\'s own pack, not the props';
-  const row: PlacementRow = { id, kind: o.kind, pack: o.pack, x: 0, y: 0, z: 0, q: [1, 0, 0, 0] };
-  if (o.pack === 'props') {
+  if (o.kind !== 'prop' && o.kind !== 'building' && o.kind !== 'mark') return 'its kind is neither prop, building nor mark';
+  // A mark (the seventh wave) is a row with no model, carrying attachments alone: it names no pack, thing, model or deed.
+  const mark = o.kind === 'mark';
+  if (mark) {
+    if (o.pack !== undefined || o.thing !== undefined || o.model !== undefined || o.deed !== undefined) return 'a mark names no pack, thing, model or deed';
+  } else {
+    if (o.pack !== 'props' && o.pack !== 'gallery' && o.pack !== 'world') return 'its pack is not props, gallery or world';
+    if (o.kind === 'building' && o.pack === 'props') return 'a building comes out of the gallery or the world\'s own pack, not the props';
+  }
+  const row: PlacementRow = mark ? { id, kind: 'mark', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] } : { id, kind: o.kind as 'prop' | 'building', pack: o.pack as PlacementPack, x: 0, y: 0, z: 0, q: [1, 0, 0, 0] };
+  if (mark) {
+    // What a mark carries is its whole: none, or none that reads, and it is no row at all.
+    const a = readAttachments(o.attach);
+    if (!a) return 'a mark carries attachments (one effect or sound at least), and its own did not read';
+    row.attach = a;
+    // The fields of a thing with a model mean nothing on a mark: kept out as fields this build does not read, with their note.
+    for (const k of ['solid', 'clear', 'guard', 'template', 'from', 'scale', 'mats'] as const) if (o[k] !== undefined) unknown.push(`${id}.${k}`);
+  } else if (o.pack === 'props') {
     if (typeof o.thing !== 'string' || !NAME_ID.test(o.thing)) return 'a props row names its thing (the props catalogue\'s id)';
     row.thing = o.thing;
   } else {
     if (typeof o.model !== 'string' || !NAME_ID.test(o.model)) return 'it names no model';
     row.model = o.model;
   }
-  if (o.deed !== undefined) {
+  if (!mark && o.deed !== undefined) {
     if (typeof o.deed !== 'string' || !NAME_ID.test(o.deed)) return 'its deed is not an id';
     row.deed = o.deed;
   }
@@ -261,12 +428,12 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
   const n = Math.abs(len - 1) > 1e-12 ? len : 1;
   row.q = [(q[0] as number) / n, (q[1] as number) / n, (q[2] as number) / n, (q[3] as number) / n];
   for (const flag of ['solid', 'inside'] as const) {
-    if (o[flag] === undefined) continue;
+    if (o[flag] === undefined || (mark && flag === 'solid')) continue;
     if (typeof o[flag] !== 'boolean') return `${flag} is true or false`;
     row[flag] = o[flag] as boolean;
   }
   for (const circle of ['clear', 'guard'] as const) {
-    if (o[circle] === undefined) continue;
+    if (o[circle] === undefined || mark) continue;
     const r = num(o[circle]);
     if (r === undefined || r < 0 || r > L.circle) return `${circle} is a number of metres from 0 to ${L.circle}`;
     row[circle] = r;
@@ -285,20 +452,32 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
   // The template and the world a model comes from, read the way `state` is: one of the wrong shape, or on a pack it
   // says nothing of (a props row's thing has its own template; only a world row names another world), is kept out of
   // the row as a field this build does not read, with its note, and the row stands as it did without it.
-  if (o.template !== undefined) {
+  if (o.template !== undefined && !mark) {
     if (o.pack !== 'props' && typeof o.template === 'string' && o.template.length <= L.template && TEMPLATE.test(o.template)) row.template = o.template;
     else unknown.push(`${id}.template`);
   }
-  if (o.from !== undefined) {
+  if (o.from !== undefined && !mark) {
     if (o.pack === 'world' && typeof o.from === 'string' && WORLD_ID.test(o.from)) row.from = o.from;
     else unknown.push(`${id}.from`);
   }
   // A scale, read the way `state` is: one of no shape a row takes is kept out of it with its note, and the row stands at
   // its own size; one along every axis 1 is no scale at all, and written absent.
-  if (o.scale !== undefined) {
+  if (o.scale !== undefined && !mark) {
     const s = readScale(o.scale);
     if (s === null) unknown.push(`${id}.scale`);
     else if (s !== 1) row.scale = s;
+  }
+  // Its looks and what hangs on it (the seventh wave), read the way `state` is: a list of no shape a row takes is kept out
+  // of it with its note, and the row stands in its own materials, or with nothing hung on it; an empty list is none.
+  if (o.mats !== undefined && !mark) {
+    const m = readLooks(o.mats);
+    if (m === null) unknown.push(`${id}.mats`);
+    else if (m) row.mats = m;
+  }
+  if (o.attach !== undefined && !mark) {
+    const a = readAttachments(o.attach);
+    if (a === null) unknown.push(`${id}.attach`);
+    else if (a) row.attach = a;
   }
   if (o.name !== undefined) {
     if (typeof o.name !== 'string' || o.name.length > L.name || CONTROL.test(o.name)) return `its name is words of ${L.name} characters at most`;
@@ -473,7 +652,23 @@ export function rowHash(row: PlacementRow): string {
     ...(row.template !== undefined ? ['template', row.template] : []),
     ...(row.from !== undefined ? ['from', row.from] : []),
     ...(row.scale !== undefined ? ['scale', row.scale] : []),
+    // Its looks (the seventh wave): what it is drawn in is how it stands. Its attachments are not, so they are not here.
+    ...(row.mats !== undefined ? ['mats', row.mats] : []),
   ]);
+}
+
+/**
+ * What hangs on a row, as one string (the seventh wave): '' for nothing. Beside `rowHash` and never in it, so an effect moved
+ * on a folded tree is stood again by the attachments' holder alone and the tree is never taken down (a row whose stand hash
+ * moves is taken down and stood again, and a folded row taken down stands on meshes of its own until the next fold).
+ */
+export function attachHash(row: Pick<PlacementRow, 'attach'>): string {
+  return row.attach === undefined ? '' : JSON.stringify(row.attach);
+}
+
+/** A look's list as one string: what two rows wearing the same look share their copies by. */
+export function lookSignature(mats: readonly RowLook[]): string {
+  return JSON.stringify(mats);
 }
 
 /**
@@ -535,7 +730,7 @@ export function mintPlacementId(base: string, taken: ReadonlySet<string>): strin
 }
 
 /** The field order a row is written in, so one row is always one line spelled the same way. */
-const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'scale', 'name', 'note', 'at'];
+const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'scale', 'mats', 'attach', 'name', 'note', 'at'];
 /** Every field a row of this build reads, in the order it is written. */
 export const PLACEMENT_FIELDS: readonly string[] = ORDER;
 const ORDERED = new Set<string>(ORDER);

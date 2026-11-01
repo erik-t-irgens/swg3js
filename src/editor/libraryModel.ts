@@ -18,12 +18,27 @@ import { LIBRARY_TUNE } from './editorTune.ts';
 /** The index's shape this reads; the pass's `LIBRARY_FORMAT`, held equal by a node test. */
 export const LIBRARY_VERSION = 1;
 
-/** The sources, in the order the window lists them. */
-export const LIBRARY_SOURCES = ['props', 'buildings', 'world', 'flora'] as const;
+/**
+ * The sources, in the order the window lists them. Effects and Sounds (Map-maker II's seventh wave) are what a row's
+ * attachments name: taken in hand, one is hung on the row the aim rests on, or stood as a mark where nothing is.
+ */
+export const LIBRARY_SOURCES = ['props', 'buildings', 'world', 'flora', 'effects', 'sounds'] as const;
 export type LibrarySource = (typeof LIBRARY_SOURCES)[number];
 
 /** A source in words. */
-export const SOURCE_WORDS: Record<LibrarySource, string> = { props: 'Props', buildings: 'Buildings', world: 'World models', flora: 'Flora' };
+export const SOURCE_WORDS: Record<LibrarySource, string> = { props: 'Props', buildings: 'Buildings', world: 'World models', flora: 'Flora', effects: 'Effects', sounds: 'Sounds' };
+
+/** Whether an entry is an attachment's (an effect or a sound) rather than a thing with a model. */
+export function isAttachEntry(e: Pick<LibraryEntry, 's'>): boolean {
+  return e.s === 'effects' || e.s === 'sounds';
+}
+
+/** What an attachment of an entry names: an effect's `<pack>:<file>`, a sound's template. Null for a thing with a model. */
+export function attachOfEntry(e: LibraryEntry): { fx: string } | { snd: string } | null {
+  if (e.s === 'effects') return { fx: `${e.p}:${e.m}` };
+  if (e.s === 'sounds') return { snd: e.m };
+  return null;
+}
 
 /** An entry's flags, the pass's own (`LIBRARY_FLAG`). */
 export const ENTRY_FLAG = { building: 1, walkIn: 2, flora: 4, tree: 8, particle: 16, standing: 32, solid3d: 64, loop: 128 };
@@ -52,6 +67,8 @@ export interface LibraryEntry {
   pic: string | null;
   /** `ENTRY_FLAG` bits. */
   f: number;
+  /** A sound's full-volume radius, metres (the Sounds source's), for the editor's ring; absent on everything else. */
+  r?: number;
 }
 
 /** The index, as read. */
@@ -70,7 +87,7 @@ export function readLibraryIndex(v: unknown): LibraryIndex | null {
   for (const e of o.entries as unknown[]) {
     const r = e as Partial<LibraryEntry>;
     if (!r || typeof r.id !== 'string' || typeof r.m !== 'string' || typeof r.p !== 'string' || !(LIBRARY_SOURCES as readonly string[]).includes(r.s as string)) continue;
-    entries.push({ s: r.s as LibrarySource, p: r.p, id: r.id, m: r.m, n: typeof r.n === 'string' ? r.n : null, g: typeof r.g === 'string' ? r.g : 'other', t: typeof r.t === 'string' ? r.t : null, sz: Array.isArray(r.sz) ? r.sz : [0, 0, 0], tri: typeof r.tri === 'number' ? r.tri : 0, pic: typeof r.pic === 'string' ? r.pic : null, f: typeof r.f === 'number' ? r.f : 0 });
+    entries.push({ s: r.s as LibrarySource, p: r.p, id: r.id, m: r.m, n: typeof r.n === 'string' ? r.n : null, g: typeof r.g === 'string' ? r.g : 'other', t: typeof r.t === 'string' ? r.t : null, sz: Array.isArray(r.sz) ? r.sz : [0, 0, 0], tri: typeof r.tri === 'number' ? r.tri : 0, pic: typeof r.pic === 'string' ? r.pic : null, f: typeof r.f === 'number' ? r.f : 0, ...(typeof r.r === 'number' ? { r: r.r } : {}) });
   }
   return { version: LIBRARY_VERSION, made: typeof o.made === 'string' ? o.made : '', packs: (o.packs as LibraryIndex['packs']) ?? {}, entries };
 }
@@ -193,9 +210,9 @@ export function packsOf(list: readonly LibraryEntry[], source: LibrarySource): s
   return [...s].sort();
 }
 
-/** What a row of a world's files writes, as `Used here` reads it: its pack and what it names there. */
+/** What a row of a world's files writes, as `Used here` reads it: its pack and what it names there (a mark has no pack, and names nothing). */
 export interface UsedRow {
-  pack: string;
+  pack?: string;
   thing?: string;
   model?: string;
   template?: string;
@@ -228,7 +245,7 @@ export function usedHereKeys(v: LibraryView, rows: readonly UsedRow[], here: str
       note(r.thing ? v.byKey.get(`props:${r.thing}`) : undefined);
       continue;
     }
-    if (!r.model) continue;
+    if (!r.model || !r.pack) continue;
     const pack = r.pack === 'gallery' ? 'gallery' : (r.from ?? here);
     const list = byModel.get(`${pack}|${r.model}`);
     if (!list) continue;
@@ -246,7 +263,7 @@ export function usedHereKeys(v: LibraryView, rows: readonly UsedRow[], here: str
  */
 export function entryForRow(v: LibraryView, r: UsedRow, here: string): LibraryEntry | null {
   if (r.pack === 'props') return r.thing ? (v.byKey.get(`props:${r.thing}`) ?? null) : null;
-  if (!r.model) return null;
+  if (!r.model || !r.pack) return null;
   const pack = r.pack === 'gallery' ? 'gallery' : (r.from ?? here);
   const kind = r.pack === 'gallery' ? 'buildings' : 'world';
   const list = v.entries.filter((e) => e.s !== 'props' && (e.s === 'buildings' ? 'gallery' : e.p) === pack && e.m === r.model);

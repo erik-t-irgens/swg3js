@@ -193,6 +193,14 @@ export interface EffectHandle {
    * voice must never start behind its back.
    */
   readonly sound?: boolean;
+  /**
+   * Multiplies the effect's own scale wherever its description's scale is read (where its particles start, how fast they
+   * leave, how much they weigh, how big their quads and models are): an effect hung on a row by the world editor (the seventh
+   * wave's attachments), sized by hand and by the row's own size. The handle's matrix stays scale-free, since a scale there
+   * is half applied. Absent is 1, and `s * 1` is `s`: every other effect is as it was. Written again only through
+   * `ParticleEffects.resize`, which sizes the effect's emitters in place.
+   */
+  size?: number;
 }
 
 /**
@@ -607,6 +615,11 @@ class EmitterState {
   readonly solid: boolean;
   /** Part of a fountain's own water, whose quads are drawn at `FOUNTAIN_SPRAY_TUNE.alpha` of their alpha. */
   readonly spray: boolean;
+  /**
+   * The effect's own scale times its handle's size (`EffectHandle.size`): what every read of the description's scale reads.
+   * Written again by `ParticleEffects.resize` (the world editor sizing an attachment by hand), never in a frame of play.
+   */
+  scale: number;
 
   constructor(
     readonly def: EmitterDef,
@@ -614,6 +627,9 @@ class EmitterState {
     readonly handle: EffectHandle,
     private readonly host: AttachmentHost | null = null,
   ) {
+    // A fraction first: a field that starts whole boxes every fraction written into it after (a resize's).
+    this.scale = 0.5;
+    this.scale = effect.scale * (handle.size ?? 1);
     this.solid = !!handle.solid && def.particle.type === 'quad' && !def.particle.quad?.texture.shader && def.visible;
     this.spray = isFountainSpray(handle.file);
     this.attachments = host ? (def.particle.attachments ?? []).filter((a) => !!a.file).slice(0, 31) : [];
@@ -677,7 +693,7 @@ class EmitterState {
   /** The emitter's world transform for this moment: placement, then the description's translation and rotation curves. */
   updateTransform(agePercent: number): void {
     const d = this.def;
-    const s = this.effect.scale;
+    const s = this.scale;
     // The client yaws, then pitches, then rolls (turns), then moves in parent space.
     tmpE.set(wave(d.rotationX, agePercent, 0) * TWO_PI, wave(d.rotationY, agePercent, 0) * TWO_PI, wave(d.rotationZ, agePercent, 0) * TWO_PI, 'YXZ');
     tmpQ.setFromEuler(tmpE);
@@ -701,7 +717,7 @@ class EmitterState {
 
   spawn(count: number, dtSpread: number, heightAt: HeightAt, kill: ParticleKill | null): void {
     const d = this.def;
-    const s = this.effect.scale;
+    const s = this.scale;
     const agePercent = d.oneShot ? 0 : this.agePercent;
     const shapeSize = wave(d.shapeSize, agePercent, rand()) * s;
     const distance = wave(d.distance, agePercent, rand()) * s;
@@ -950,7 +966,7 @@ class EmitterState {
       const rate = wave(d.rate, agePercent, rand());
       if (d.generation === 'rate') this.newParticles += dt * this.lodPercent * rate * scale;
       else if (rate > 0) {
-        this.newParticles += Math.sqrt(this.accumulatedDistance / (rate * rate * this.effect.scale)) * this.lodPercent * scale;
+        this.newParticles += Math.sqrt(this.accumulatedDistance / (rate * rate * this.scale)) * this.lodPercent * scale;
         this.accumulatedDistance = 0;
       }
     }
@@ -1271,8 +1287,8 @@ export class ParticleEffects {
    * matrixWorld, kept by reference) `matrix` is in that frame, and the effect simulates there and is
    * carried into the world as it is drawn: something played aboard stays in the room while the ship flies.
    */
-  place(file: string, matrix: THREE.Matrix4, contained: boolean, transient = false, frame: THREE.Matrix4 | null = null, solid = false, options: { sound?: boolean; reach?: number } = {}): EffectHandle {
-    return this.start({ file, matrix: matrix.clone(), contained, transient, frame, rateScale: 1, depth: 0, solid, sound: options.sound, ...(options.reach && options.reach > 0 ? { reach: options.reach } : {}) });
+  place(file: string, matrix: THREE.Matrix4, contained: boolean, transient = false, frame: THREE.Matrix4 | null = null, solid = false, options: { sound?: boolean; reach?: number; size?: number } = {}): EffectHandle {
+    return this.start({ file, matrix: matrix.clone(), contained, transient, frame, rateScale: 1, depth: 0, solid, sound: options.sound, ...(options.reach && options.reach > 0 ? { reach: options.reach } : {}), ...(options.size && options.size > 0 && options.size !== 1 ? { size: options.size } : {}) });
   }
 
   /** Load a handle's effect and play it once loaded, unless it was removed meanwhile. */
@@ -1367,6 +1383,20 @@ export class ParticleEffects {
     this.instances.get(handle)?.position.setFromMatrixPosition(matrix);
     const s = this.swooshes.get(handle);
     if (s) s.trail.idle = 0;
+  }
+
+  /**
+   * A placed effect sized again in place (the world editor's C held on an attachment): its handle's size and each of its
+   * emitters' scale written, so its live particles are drawn at the new size from the next build and it goes on playing
+   * where it was. Nothing is placed again and nothing is made: placed again at every step of the hold, the effect started
+   * over from no particles each frame and the size being dialled never showed. One still loading takes the size as it loads.
+   */
+  resize(handle: EffectHandle, size: number): void {
+    handle.size = size;
+    const inst = this.instances.get(handle);
+    if (!inst) return;
+    const em = inst.emitters;
+    for (let i = 0; i < em.length; i++) em[i].scale = em[i].effect.scale * size;
   }
 
   remove(handle: EffectHandle): void {
@@ -1713,7 +1743,7 @@ export class ParticleEffects {
       const d = e.def;
       const m = d.particle.mesh!;
       const t = p.age / p.life;
-      const s = wave(m.scale, t, p.r1) * e.effect.scale;
+      const s = wave(m.scale, t, p.r1) * e.scale;
       // The game's rotation curves are turns, as the quads' are, and its X is mirrored: the same
       // convention `updateTransform` applies to an emitter's own placement.
       meshQ.setFromEuler(meshE.set(wave(m.rotation[0], t, p.r2) * TWO_PI, -wave(m.rotation[1], t, p.r2) * TWO_PI, -wave(m.rotation[2], t, p.r2) * TWO_PI));
@@ -1760,7 +1790,7 @@ export class ParticleEffects {
       const d = e.def;
       const quad = d.particle.quad!;
       const t = p.age / p.life;
-      const s = e.effect.scale;
+      const s = e.scale;
       const length = wave(quad.length, t, p.r1) * s;
       const width = quad.linked ? length : wave(quad.width, t, p.r2) * s;
       let alpha = wave(d.particle.alpha, t, p.r0);
@@ -1916,13 +1946,13 @@ export class ParticleEffects {
         const p = e.particles[0];
         let carried = 0;
         for (const q of e.particles) carried += q.children?.length ?? 0;
-        const row: Record<string, unknown> = { effect: inst.handle.file.replace(/^particles\/|\.json$/g, ''), emitter: e.def.name, d: Math.round(d), texture: tex?.file ?? null, blend: tex?.blend ?? null, textureLoaded: !tex ? 'none' : img?.width ? `${img.width}x${img.height}` : this.textureErrors.has(tex.file!) ? 'FAILED' : 'pending', playing: inst.active, lod: Math.round(e.lodPercent * 100) / 100, particles: e.particles.length, max: e.def.maxParticles, rate: Math.round(waveMax(e.def.rate) * 10) / 10, life: Math.round(e.maxLife * 10) / 10, scale: e.effect.scale, emitterLife: e.def.emitterLife.join('..'), orientation: e.def.orientation, attachments: e.attachments.length, carried };
+        const row: Record<string, unknown> = { effect: inst.handle.file.replace(/^particles\/|\.json$/g, ''), emitter: e.def.name, d: Math.round(d), texture: tex?.file ?? null, blend: tex?.blend ?? null, textureLoaded: !tex ? 'none' : img?.width ? `${img.width}x${img.height}` : this.textureErrors.has(tex.file!) ? 'FAILED' : 'pending', playing: inst.active, lod: Math.round(e.lodPercent * 100) / 100, particles: e.particles.length, max: e.def.maxParticles, rate: Math.round(waveMax(e.def.rate) * 10) / 10, life: Math.round(e.maxLife * 10) / 10, scale: e.scale, emitterLife: e.def.emitterLife.join('..'), orientation: e.def.orientation, attachments: e.attachments.length, carried };
         if (p && tex) {
           const t = p.age / p.life;
           const quad = e.def.particle.quad!;
-          const length = wave(quad.length, t, p.r1) * e.effect.scale;
+          const length = wave(quad.length, t, p.r1) * e.scale;
           rampColor(e.def.particle.color, e.def.particle.color.sample === 1 ? p.r3 : t, tmpColor);
-          row.first = { x: Math.round(p.pos.x * 10) / 10, y: Math.round(p.pos.y * 10) / 10, z: Math.round(p.pos.z * 10) / 10, age: Math.round(t * 100) / 100, halfLength: Math.round(length * 100) / 100, halfWidth: Math.round((quad.linked ? length : wave(quad.width, t, p.r2) * e.effect.scale) * 100) / 100, alpha: Math.round(wave(e.def.particle.alpha, t, p.r0) * 100) / 100, color: tmpColor.getHexString() };
+          row.first = { x: Math.round(p.pos.x * 10) / 10, y: Math.round(p.pos.y * 10) / 10, z: Math.round(p.pos.z * 10) / 10, age: Math.round(t * 100) / 100, halfLength: Math.round(length * 100) / 100, halfWidth: Math.round((quad.linked ? length : wave(quad.width, t, p.r2) * e.scale) * 100) / 100, alpha: Math.round(wave(e.def.particle.alpha, t, p.r0) * 100) / 100, color: tmpColor.getHexString() };
           if (cam) {
             tmpV.copy(p.pos);
             if (e.def.localSpace) tmpV.applyMatrix4(e.world);

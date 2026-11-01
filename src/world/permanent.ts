@@ -26,7 +26,7 @@
 // Pure: no three, no rapier, no DOM. Rule for this file (node runs it with type stripping for the tests):
 // every import with its `.ts` extension, no enum, no namespace, no constructor parameter properties.
 
-import { mergeLayers, placementKey, radiusOfBounds, rowHash, scaleOf, syncPlan, toGame, type GamePlace, type PlacementEntry, type PlacementFrame, type PlacementLayer, type PlacementPack, type PlacementRead, type PlacementRow } from '../story/placements.ts';
+import { attachHash, mergeLayers, placementKey, radiusOfBounds, rowHash, scaleOf, syncPlan, toGame, type GamePlace, type PlacementEntry, type PlacementFrame, type PlacementLayer, type PlacementPack, type PlacementRead, type PlacementRow, type RowLook } from '../story/placements.ts';
 import { standsIn } from './worldState.ts';
 import { standsSolid } from './rowSolid.ts';
 
@@ -96,6 +96,8 @@ export interface DressingStand {
   from?: string;
   /** Its scale along its own axes (`PlacementRow.scale`), absent for none: what the streamer sets aside it decides and says. */
   scale?: readonly [number, number, number];
+  /** Its looks (`PlacementRow.mats`, the seventh wave), absent for its model's own materials. */
+  mats?: readonly RowLook[];
 }
 
 /**
@@ -118,8 +120,10 @@ export function propStandOf(def: { model: string; template: string | null } | nu
 }
 
 export function dressingStandOf(row: PlacementRow, g: GamePlace, key: string, thingOf: (thing: string) => { model: string; template: string } | null, furniture: (template: string) => boolean): DressingStand | null {
-  // A row's scale rides along only where it has one, so a row with none stands exactly as it always did.
-  const at = { key, x: g.x, y: g.y, z: g.z, q: g.q, inside: !!row.inside, ...(row.clear && row.clear > 0 ? { clear: row.clear } : {}), ...(row.scale !== undefined ? { scale: scaleOf(row) } : {}) };
+  // A mark has no model to stand (the attachments' holder stands what it carries).
+  if (row.kind === 'mark') return null;
+  // A row's scale rides along only where it has one, so a row with none stands exactly as it always did; its looks the same.
+  const at = { key, x: g.x, y: g.y, z: g.z, q: g.q, inside: !!row.inside, ...(row.clear && row.clear > 0 ? { clear: row.clear } : {}), ...(row.scale !== undefined ? { scale: scaleOf(row) } : {}), ...(row.mats !== undefined ? { mats: row.mats } : {}) };
   if (row.pack === 'props') {
     const def = row.thing ? thingOf(row.thing) : null;
     if (!def) return null;
@@ -143,6 +147,9 @@ export function guardOf(s: StoodRow): number {
 
 /** Whether a stood row can have a guard at all, whatever the tune says: what the frame's kept list holds. */
 function mayGuard(s: StoodRow): boolean {
+  // A mark (the seventh wave) stands nothing that can be in a player's way: guarding its point, a story layer's smoke or
+  // sound refused every prop put down within the guard's reach of nothing.
+  if (s.row.kind === 'mark') return false;
   return s.row.guard !== undefined ? s.row.guard > 0 : s.layer === 'story';
 }
 
@@ -225,6 +232,14 @@ export interface PermanentDeps {
   generation(): number;
   /** What a row is called in words; its id when absent. */
   label?(row: PlacementRow): string;
+  /**
+   * What hangs on a row stood (the seventh wave's attachments' holder, `rowAttach.ts`): a mark's whole stand, and beside a
+   * model row's own stand. Asked only of a row carrying attachments, or a mark; its place is in the game's frame (`q` read
+   * at once, as `stand`'s). Absent, nothing is hung on anything.
+   */
+  attach?(key: string, row: PlacementRow, game: GamePlace): void;
+  /** What hangs on a row taken away: asked only of a row whose attachments were handed over. */
+  detach?(key: string): void;
 }
 
 /**
@@ -237,6 +252,11 @@ export interface StoodRow {
   row: PlacementRow;
   layer: PlacementLayer;
   hash: string;
+  /**
+   * What hangs on it as stood (`attachHash`, '' for nothing), handed to `deps.attach` beside its own stand: a row whose stand
+   * hash is the same and whose attachments moved has them stood again alone (the seventh wave), never the row itself.
+   */
+  ahash: string;
   /** Where it stands in the game's frame: its origin, which for a house is its doorstep. */
   x: number;
   y: number;
@@ -296,6 +316,8 @@ export function keepOffOf(story: PlacementRead | null, world: PlacementRead | nu
   if (kind === 'copies') return out;
   for (const { row } of mergeLayers(story?.rows ?? [], world?.rows ?? []).rows) {
     if (kind === 'space' && row.kind === 'building') continue;
+    // A mark is filed in no tier (the attachments' holder stands what it carries), so it holds no region, and keeps no flora off.
+    if (row.kind === 'mark') continue;
     if (!row.state || standsIn(row.state)) (kind === 'space' ? out.hold.game : out.hold.raw).push({ x: row.x, z: row.z });
     if (!row.clear || !(row.clear > 0)) continue;
     (kind === 'space' ? out.game : out.raw).push({ x: row.x, z: row.z, r: row.clear });
@@ -408,7 +430,9 @@ export class PermanentLayer {
     if (!this.current()) return null;
     const s = this.stood.get(key);
     if (!s) return null;
-    this.deps.unstand(key);
+    // What hangs on it goes with it into the hand; a mark has nothing in the streamer to take down.
+    if (s.ahash || s.row.kind === 'mark') this.deps.detach?.(key);
+    if (s.row.kind !== 'mark') this.deps.unstand(key);
     this.stood.delete(key);
     this.lifted.add(key);
     this.skips.set(key, { id: s.row.id, layer: s.layer, kind: s.row.kind, why: 'inHand' });
@@ -447,7 +471,7 @@ export class PermanentLayer {
       const key = placementKey(e.row.id);
       // A row of a world state this world does not stand in (Restuss's rubble in the living city) is filed nowhere and
       // never taken out of its file; a state changes only at an arrival, so nothing is filed or unfiled mid-world.
-      const why: SkipReason | null = this.lifted.has(key) ? 'inHand' : this.kind === 'copies' ? 'copies' : this.kind === 'space' && e.row.kind === 'building' ? 'space' : e.row.state && !standsIn(e.row.state) ? 'otherState' : !this.deps.packReady(e.row.pack, e.row.from) ? 'noPack' : null;
+      const why = this.skipOf(key, e.row);
       if (why) this.skips.set(key, { id: e.row.id, layer: e.layer, kind: e.row.kind, why });
       else want.push(e);
     }
@@ -473,17 +497,49 @@ export class PermanentLayer {
       s.row = e.row;
       s.layer = e.layer;
       s.label = this.deps.label?.(e.row) ?? e.row.id;
+      // Only what hangs on it moved: stood again alone, the row left standing (folded where it was folded).
+      this.reattach(s);
     }
     this.guarded = [...this.stood.values()].filter(mayGuard);
     return builds;
+  }
+
+  /** Why a row does not stand now, or null: in hand, the copies' world, a building in space, another state, its pack not in (a mark has none). */
+  private skipOf(key: string, row: PlacementRow): SkipReason | null {
+    return this.lifted.has(key) ? 'inHand' : this.kind === 'copies' ? 'copies' : this.kind === 'space' && row.kind === 'building' ? 'space' : row.state && !standsIn(row.state) ? 'otherState' : row.kind !== 'mark' && !this.deps.packReady(row.pack as PlacementPack, row.from) ? 'noPack' : null;
+  }
+
+  /**
+   * A row standing unchanged whose attachments are not what was handed over (the seventh wave): taken away and handed over
+   * again by the holder alone (`attachHash`), so an effect nudged on a folded tree never takes the tree down. Nothing at all
+   * for a row whose attachments are as they were.
+   */
+  private reattach(s: StoodRow): void {
+    const ah = attachHash(s.row);
+    if (ah === s.ahash) return;
+    if (s.ahash || s.row.kind === 'mark') this.deps.detach?.(s.key);
+    s.ahash = ah;
+    if (ah) this.deps.attach?.(s.key, s.row, toGame(s.row, this.centre, this.frame, this.place));
   }
 
   /** Keys taken down, props before the buildings they may stand in, in one call where the world takes one (`unstandMany`). */
   private takeDown(down: string[]): void {
     if (!down.length) return;
     down.sort((a, b) => (this.stood.get(a)?.row.kind === 'building' ? 1 : 0) - (this.stood.get(b)?.row.kind === 'building' ? 1 : 0));
-    if (this.deps.unstandMany) this.deps.unstandMany(down);
-    else for (const key of down) this.deps.unstand(key);
+    // What hangs on each goes first (the seventh wave), and a mark, which the streamer never filed, is taken down by that alone:
+    // with no mark and no attachment among them the list handed over is the very one handed over before.
+    let marks = 0;
+    for (const key of down) {
+      const s = this.stood.get(key);
+      if (!s) continue;
+      if (s.row.kind === 'mark') marks++;
+      if (s.ahash || s.row.kind === 'mark') this.deps.detach?.(key);
+    }
+    const filed = marks ? down.filter((key) => this.stood.get(key)?.row.kind !== 'mark') : down;
+    if (filed.length) {
+      if (this.deps.unstandMany) this.deps.unstandMany(filed);
+      else for (const key of filed) this.deps.unstand(key);
+    }
     for (const key of down) this.stood.delete(key);
   }
 
@@ -495,15 +551,20 @@ export class PermanentLayer {
       const key = placementKey(e.row.id);
       stoodNow.add(key);
       const g = toGame(e.row, this.centre, this.frame, this.place);
-      const answer = this.deps.stand(e.row, g, key);
+      // A mark (the seventh wave) has no model: the streamer files nothing for it, and the holder stands what it carries.
+      const mark = e.row.kind === 'mark';
+      const answer: StandAnswer | null = mark ? { bounds: null } : this.deps.stand(e.row, g, key);
       if (answer === null) {
         this.skips.set(key, { id: e.row.id, layer: e.layer, kind: e.row.kind, why: 'noModel' });
         continue;
       }
       if (answer.built) builds.push(answer.built);
-      const s: StoodRow = { key, row: e.row, layer: e.layer, hash: rowHash(e.row), x: g.x, y: g.y, z: g.z, radius: radiusOfBounds(answer.bounds), ex: 1, ez: 0, u0: 0, u1: 0, v0: 0, v1: 0, label: this.deps.label?.(e.row) ?? e.row.id, ...(answer.note ? { note: answer.note } : {}) };
+      const ahash = attachHash(e.row);
+      const s: StoodRow = { key, row: e.row, layer: e.layer, hash: rowHash(e.row), ahash, x: g.x, y: g.y, z: g.z, radius: radiusOfBounds(answer.bounds), ex: 1, ez: 0, u0: 0, u1: 0, v0: 0, v1: 0, label: this.deps.label?.(e.row) ?? e.row.id, ...(answer.note ? { note: answer.note } : {}) };
       footprintOf(answer.bounds, g.q, s);
       this.stood.set(key, s);
+      // What hangs on it, beside its own stand (`g`'s turn is read at once, before the buffer is filled again).
+      if (ahash) this.deps.attach?.(key, e.row, g);
     }
     return stoodNow;
   }
@@ -567,7 +628,7 @@ export class PermanentLayer {
       const s = storyBy.get(id);
       if (w && s) this.skips.set(key, { id, layer: 'story', kind: s.kind, why: 'clash' });
       const e: PlacementEntry | null = w ? { row: w, layer: 'world' } : s ? { row: s, layer: 'story' } : null;
-      const why: SkipReason | null = !e ? null : this.lifted.has(key) ? 'inHand' : this.kind === 'copies' ? 'copies' : this.kind === 'space' && e.row.kind === 'building' ? 'space' : e.row.state && !standsIn(e.row.state) ? 'otherState' : !this.deps.packReady(e.row.pack, e.row.from) ? 'noPack' : null;
+      const why: SkipReason | null = !e ? null : this.skipOf(key, e.row);
       if (e && why) this.skips.set(key, { id, layer: e.layer, kind: e.row.kind, why });
       const was = this.stood.get(key);
       if (!e || why) {
@@ -582,6 +643,8 @@ export class PermanentLayer {
         was.row = e.row;
         was.layer = e.layer;
         was.label = this.deps.label?.(e.row) ?? e.row.id;
+        // Only what hangs on it moved (an effect nudged): the holder stands it again, and the row stands on as it was.
+        this.reattach(was);
       }
     }
     this.takeDown(down);

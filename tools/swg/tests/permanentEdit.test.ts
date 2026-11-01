@@ -6,7 +6,7 @@
 //
 // Run: node tools/swg/tests/permanentEdit.test.ts
 import assert from 'node:assert/strict';
-import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, destinationText, driftText, forceText, groundMoved, homeStaysText, inHandText, keptText, nextDestination, notYoursText, pickedUpText, rowFromHouse, rowFromProp, savedText, takeOutText, yawOfTurn, yawTurn, type Destination } from '../../../src/world/permanentEdit.ts';
+import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, destinationText, driftText, forceText, groundMoved, homeStaysText, inHandText, keptText, nextDestination, notYoursText, pickedUpText, rowFromEditor, rowFromHouse, rowFromProp, savedText, takeOutText, yawOfTurn, yawTurn, type Destination } from '../../../src/world/permanentEdit.ts';
 import { readPlacementRow, toGame, type PlacementRow } from '../../../src/story/placements.ts';
 import { dressingStandOf, standsSolid } from '../../../src/world/permanent.ts';
 
@@ -88,6 +88,26 @@ const cleaned = (draft: object, id = 'x'): PlacementRow => {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Its looks and what hangs on it (Map-maker II's seventh wave): a row picked up and put down again, by the props tab, the
+// world editor or the Housing tab, wears what it wore and carries what it carried, exactly, and reads back so.
+{
+  const centre = { x: 100, z: -50 };
+  const mats = [{ of: '*', tint: '#c04020' }, { of: 'glass', map: 'props:sign/face' }];
+  const attach = [{ fx: 'props:particles/smoke.json', at: [0, 1.5, 0] as [number, number, number], q: [0.6, 0, 0.8, 0] as [number, number, number, number], size: 2 }, { snd: 'sound/hum.snd', at: [0, 1, 0] as [number, number, number] }];
+  const want = JSON.stringify({ mats, attach });
+  const kept = (r: { mats?: unknown; attach?: unknown }) => JSON.stringify({ mats: r.mats, attach: r.attach });
+  const crate: PlacementRow = { id: 'crate-1', kind: 'prop', pack: 'props', thing: 'crate_s01', x: 0, y: 0, z: 0, q: [1, 0, 0, 0], mats, attach };
+  const prop = rowFromProp({ id: 'crate_s01' }, { x: 1, y: 2, z: 3 }, [0, 0, 0, 1], false, centre, 'raw', crate);
+  const ed = rowFromEditor({ kind: 'prop', pack: 'props', thing: 'crate_s01' }, { x: 1, y: 2, z: 3 }, [0, 0, 0, 1], false, centre, 'raw', { here: 'tatooine', base: crate });
+  const house: PlacementRow = { id: 'house-1', kind: 'building', pack: 'gallery', model: 'ply_tato_house_sm_s01_fp1', x: 0, y: 0, z: 0, q: [1, 0, 0, 0], mats: [{ of: 'wall', tint: '#808080' }], attach: [attach[0]] };
+  const resaved = rowFromHouse({ x: 1, y: 2, z: 3, yaw: 0.5, clear: 12 }, house.model!, null, centre, 'raw', house);
+  ok(kept(prop) === want && kept(cleaned(prop)) === want, `a prop picked up and put down again keeps its looks and attachments, and the reader keeps them (${kept(cleaned(prop))})`);
+  ok(kept(ed) === want && kept(cleaned(ed)) === want, 'and so does a row the world editor picks up and puts down');
+  ok(JSON.stringify(resaved.mats) === JSON.stringify(house.mats) && JSON.stringify(resaved.attach) === JSON.stringify(house.attach), 'and a building saved again from the Housing tab');
+  ok(!('mats' in rowFromProp({ id: 'crate_s01' }, { x: 1, y: 2, z: 3 }, [0, 0, 0, 1], false, centre, 'raw', { ...crate, mats: undefined, attach: undefined })) && !('attach' in rowFromProp({ id: 'crate_s01' }, { x: 1, y: 2, z: 3 }, [0, 0, 0, 1], false, centre, 'raw', { ...crate, mats: undefined, attach: undefined })), 'and a row that had none is given none');
+}
+
+// ---------------------------------------------------------------------------------------------
 // The ground it was judged on: written out in the open, measured against later, so a building raised or sunk
 // on purpose is not taken for one the ground moved under.
 {
@@ -141,6 +161,7 @@ const cleaned = (draft: object, id = 'x'): PlacementRow => {
   ok(standsSolid(props(), true) === false && standsSolid(props(), false) === true, 'a props row with no word of its own: a seat or a table passable, anything else solid');
   ok(standsSolid({ pack: 'gallery' }, false) === true && standsSolid({ pack: 'world' }, true) === true, 'a building solid whatever it is');
   ok(standsSolid(props(true), true) === true && standsSolid(props(false), false) === false && standsSolid({ pack: 'gallery', solid: false }, false) === false, "and the row's own word wins every time");
+  ok(standsSolid({ kind: 'mark' }, false) === false && standsSolid({ kind: 'mark', solid: true }, false) === false, 'a mark (an effect or a sound with no model) is never solid, whatever it says');
   const g = { x: 0, y: 0, z: 0, q: [0, 0, 0, 1] as [number, number, number, number] };
   const things = { chair: { model: 'm', template: 'object/tangible/furniture/all/shared_frn_all_chair_test.iff' }, crate: { model: 'm', template: 'object/tangible/container/shared_crate_test.iff' } };
   const furniture = (t: string) => t.includes('chair');

@@ -135,6 +135,17 @@ export interface EditEditor {
    * answers whether one took it, and the eyedropper then takes nothing.
    */
   toolMiddle?(): boolean;
+  /**
+   * What hangs on a row carried where an edit under way puts it (Map-maker II's seventh wave: `m` its place, turn and scale
+   * this frame), and put back where it was stood when the edit ends; the landing of what was written stands it anew.
+   */
+  follow?(key: string, m: THREE.Matrix4): void;
+  unfollow?(key: string): void;
+  /**
+   * Where a row the streamer never files stands (a mark: its attachments' holder carries it), into `out`; false for none.
+   * What the pivot of a picked mark is (Map-maker II's seventh wave).
+   */
+  markAt?(key: string, out: { x: number; y: number; z: number }): boolean;
 }
 
 /**
@@ -165,6 +176,11 @@ interface Live {
   now: HeldThing;
   /** A building with rooms: it takes no scale (the stand sets one aside). */
   rooms: boolean;
+  /**
+   * A mark (the seventh wave): it takes no scale either, since the reader keeps a mark's `scale` out as a field it does not
+   * write and the endpoint refuses the whole batch for it. Its effects take their size on their own handles.
+   */
+  mark: boolean;
   box: { min: number[]; max: number[] } | null;
   copies: THREE.InstancedMesh[];
 }
@@ -277,6 +293,8 @@ export class EditorEdits {
   private readonly axesView = { fx: 0, fz: 0, rx: 0, rz: 0 };
   private readonly look = { x: 0, y: 0, z: 0 };
   private readonly unionLo: [number, number, number] = [0, 0, 0];
+  /** A picked mark's place, read for the pivot (fractions from the start, so a fraction written in is never boxed). */
+  private readonly markPt = { x: 0.5, y: 0.5, z: 0.5 };
   private readonly unionHi: [number, number, number] = [0, 0, 0];
   private readonly unionEls = new Float64Array(16);
   private selKeys: string[] = [];
@@ -651,8 +669,10 @@ export class EditorEdits {
     }
     // A click with nothing in hand and nothing grabbed: the selection (Shift adds or takes away).
     const clicked = ed.point ? ed.pointer.clicked : this.leftReleased && !this.wasDrag;
+    this.clickedNow = false;
     if (clicked && !this.quiet && !armed && !ed.inHand() && !this.dragging && !this.live && gz.hot < 0) {
       const shift = ed.input.isDown('ShiftLeft') || ed.input.isDown('ShiftRight');
+      this.clickedNow = true;
       if (this.sel.click(ed.hoveredId(), shift)) ed.refreshWindow();
     }
     this.wasDrag = this.dragging;
@@ -675,6 +695,11 @@ export class EditorEdits {
     this.quiet = false;
   }
   private wasDrag = false;
+  /**
+   * Whether this frame's click went to the selection (nothing in hand, no handle grabbed, no tool armed): what the looks read
+   * after the frame to pick an attachment by its handle, or let a picked one go (Map-maker II's seventh wave).
+   */
+  clickedNow = false;
 
   /** The gizmo's axes back to the world's own. */
   private resetAxes(): void {
@@ -729,7 +754,23 @@ export class EditorEdits {
     let fz = 0;
     for (let i = 0; i < this.selKeys.length; i++) {
       const o = this.ed.placed(this.selKeys[i]);
-      if (!o) continue;
+      if (!o) {
+        // A mark (the seventh wave) is filed by nobody: its place is where its attachments' holder carries it.
+        const at = this.markPt;
+        if (!this.ed.markAt || !this.ed.markAt(this.selKeys[i], at)) continue;
+        if (n === 0) {
+          fx = at.x;
+          fy = at.y;
+          fz = at.z;
+        }
+        n++;
+        if (at.x < x0) x0 = at.x;
+        if (at.y < y0) y0 = at.y;
+        if (at.z < z0) z0 = at.z;
+        if (at.x > x1) x1 = at.x;
+        if (at.z > z1) z1 = at.z;
+        continue;
+      }
       if (n === 0) {
         fx = o.x;
         fy = o.y;
@@ -782,9 +823,18 @@ export class EditorEdits {
         const l = live.lives[i];
         b = l.box;
         if (!b) continue;
-        this.p.set(l.now.x, l.now.y, l.now.z);
-        this.q.set(l.now.turn.x, l.now.turn.y, l.now.turn.z, l.now.turn.w);
-        this.s.set(l.now.sx, l.now.sy, l.now.sz);
+        // Written by their components (and the turn copied from its record): handed to `set` as arguments, a held row's
+        // numbers were boxed whenever the method was compiled again without `set` built in (one process in about fifty).
+        const n = l.now;
+        const p = this.p;
+        p.x = n.x;
+        p.y = n.y;
+        p.z = n.z;
+        this.q.copy(n.turn);
+        const s = this.s;
+        s.x = n.sx;
+        s.y = n.sy;
+        s.z = n.sz;
       } else {
         const o = this.ed.placed(this.selKeys[i]);
         if (!o) continue;
@@ -833,13 +883,17 @@ export class EditorEdits {
       const g = toGame(r.row, centre, frame);
       const sc = scaleOf(r.row);
       const rooms = ed.hasRooms(key);
-      const base: HeldThing = { x: g.x, y: g.y, z: g.z, turn: { x: g.q[0], y: g.q[1], z: g.q[2], w: g.q[3] }, sx: rooms ? 1 : sc[0], sy: rooms ? 1 : sc[1], sz: rooms ? 1 : sc[2] };
+      const mark = r.row.kind === 'mark';
+      const fixed = rooms || mark;
+      const base: HeldThing = { x: g.x, y: g.y, z: g.z, turn: { x: g.q[0], y: g.q[1], z: g.q[2], w: g.q[3] }, sx: fixed ? 1 : sc[0], sy: fixed ? 1 : sc[1], sz: fixed ? 1 : sc[2] };
       const o = ed.placed(key);
       const copies = ed.copies(key);
       if (copies.length) ed.setHidden(key, true);
-      lives.push({ id, key, layer: r.layer, row: r.row, label: r.label, base, now: held(base), rooms, box: o ? ed.boxOf(o) : null, copies });
+      lives.push({ id, key, layer: r.layer, row: r.row, label: r.label, base, now: held(base), rooms, mark, box: o ? ed.boxOf(o) : null, copies });
     }
     if (!lives.length) return null;
+    // A size asked of marks alone moves nothing, and says why (a mark's effect is sized on its own handle).
+    if (label === 'scale' && lives.every((l) => l.mark)) ed.say('a mark takes no size: pick its effect by its handle and hold C to size the effect', false);
     const pv = { x: 0, y: 0, z: 0 };
     if (!this.selectionPivot(pv)) {
       pv.x = lives[0].base.x;
@@ -1015,7 +1069,7 @@ export class EditorEdits {
     n.turn.y = rw * q.y - rx * q.z + ry * q.w + rz * q.x;
     n.turn.z = rw * q.z + rx * q.y - ry * q.x + rz * q.w;
     n.turn.w = rw * q.w - rx * q.x - ry * q.y - rz * q.z;
-    if (l.rooms) {
+    if (l.rooms || l.mark) {
       n.sx = n.sy = n.sz = 1;
     } else {
       n.sx = b.sx * f;
@@ -1046,18 +1100,29 @@ export class EditorEdits {
   private placeLive(): void {
     const L = this.live;
     if (!L) return;
+    const follow = this.ed.follow;
     for (let i = 0; i < L.lives.length; i++) {
       const l = L.lives[i];
       this.placeOne(L, l);
-      if (!l.copies.length) continue;
-      this.p.set(l.now.x, l.now.y, l.now.z);
-      this.q.set(l.now.turn.x, l.now.turn.y, l.now.turn.z, l.now.turn.w);
-      this.s.set(l.now.sx, l.now.sy, l.now.sz);
+      // A mark has no copies, and what hangs on any row follows it (the seventh wave): the matrix is worked out for both.
+      if (!l.copies.length && !follow) continue;
+      // By components, as `drawSelection` writes them (a number handed to a call left out is boxed).
+      const n = l.now;
+      const p = this.p;
+      p.x = n.x;
+      p.y = n.y;
+      p.z = n.z;
+      this.q.copy(n.turn);
+      const s = this.s;
+      s.x = n.sx;
+      s.y = n.sy;
+      s.z = n.sz;
       this.m.compose(this.p, this.q, this.s);
       for (let k = 0; k < l.copies.length; k++) {
         l.copies[k].setMatrixAt(0, this.m);
         l.copies[k].instanceMatrix.needsUpdate = true;
       }
+      if (follow) this.ed.follow!(l.key, this.m);
     }
   }
 
@@ -1072,6 +1137,7 @@ export class EditorEdits {
     for (const l of L.lives) {
       this.ed.dropCopies(l.copies);
       this.ed.setHidden(l.key, false);
+      this.ed.unfollow?.(l.key);
     }
     if (say) this.ed.say(`${L.label} given up: nothing was written`, true);
     return true;
@@ -1117,6 +1183,7 @@ export class EditorEdits {
       for (const l of keep) {
         ed.dropCopies(l.copies);
         ed.setHidden(l.key, false);
+        ed.unfollow?.(l.key);
       }
       return 'nothing moved';
     }
@@ -1156,6 +1223,8 @@ export class EditorEdits {
       for (const l of copies) {
         ed.dropCopies(l.copies);
         ed.setHidden(l.key, false);
+        // What hangs on it back where its row now stands (stood anew by the landing, or where it was if refused).
+        ed.unfollow?.(l.key);
       }
     };
     if (this.writing) {
@@ -1379,7 +1448,7 @@ export class EditorEdits {
   /** The copies of an edit placed at each row's `now`, the edit no longer under way. */
   private placeLiveFrom(L: LiveEdit): void {
     for (const l of L.lives) {
-      if (!l.copies.length) continue;
+      if (!l.copies.length && !this.ed.follow) continue;
       this.p.set(l.now.x, l.now.y, l.now.z);
       this.q.set(l.now.turn.x, l.now.turn.y, l.now.turn.z, l.now.turn.w);
       this.s.set(l.now.sx, l.now.sy, l.now.sz);
@@ -1388,6 +1457,7 @@ export class EditorEdits {
         c.setMatrixAt(0, this.m);
         c.instanceMatrix.needsUpdate = true;
       }
+      this.ed.follow?.(l.key, this.m);
     }
   }
 
@@ -1458,10 +1528,11 @@ export class EditorEdits {
     const first = this.sel.first;
     const r = first ? this.ed.rowFor(first) : null;
     if (!r) return 'pick one first';
-    const rows = this.ed.standing().map((s) => ({ id: s.id, pack: s.row.pack, thing: s.row.thing, model: s.row.model, from: s.row.from, x: s.x, z: s.z }));
+    // A mark (the seventh wave) has no pack: marks are like each other.
+    const rows = this.ed.standing().map((s) => ({ id: s.id, pack: s.row.pack ?? '', thing: s.row.thing, model: s.row.model, from: s.row.from, x: s.x, z: s.z }));
     const at = this.ed.placed(placementKey(first as string));
     const reach = EDITOR_TUNE.likeReach;
-    const ids = likeThis(rows, { pack: r.row.pack, thing: r.row.thing, model: r.row.model, from: r.row.from }, reach > 0 && at ? { x: at.x, z: at.z } : null, reach);
+    const ids = likeThis(rows, { pack: r.row.pack ?? '', thing: r.row.thing, model: r.row.model, from: r.row.from }, reach > 0 && at ? { x: at.x, z: at.z } : null, reach);
     this.sel.pick(ids, 'set');
     this.ed.refreshWindow();
     return `${ids.length} like ${r.label} picked`;
@@ -1485,7 +1556,7 @@ export class EditorEdits {
     if (!this.sel.size || this.live || this.writing) return 'nothing picked, or an edit under way';
     const rows = this.sel.ids.map((id) => this.ed.rowFor(id)).filter((r): r is NonNullable<typeof r> => !!r);
     if (!rows.length) return 'nothing picked stands in the files';
-    const ids = this.mintIds(rows.map((r) => r.row.thing ?? r.row.model ?? 'place'));
+    const ids = this.mintIds(rows.map((r) => r.row.thing ?? r.row.model ?? (r.row.kind === 'mark' ? 'mark' : 'place')));
     const off = EDITOR_TUNE.dupOffset;
     const centre = this.ed.centre();
     const frame = this.ed.frame();
@@ -1565,7 +1636,7 @@ export class EditorEdits {
     let turn = 0;
     if (shift) turn = this.ed.fly.yaw;
     const placed = pasteAt(set, at, turn);
-    const ids = this.mintIds(placed.map((p) => p.row.thing ?? p.row.model ?? 'place'));
+    const ids = this.mintIds(placed.map((p) => p.row.thing ?? p.row.model ?? (p.row.kind === 'mark' ? 'mark' : 'place')));
     const centre = this.ed.centre();
     const frame = this.ed.frame();
     const dest = this.destOf();
@@ -1715,6 +1786,17 @@ export class EditorEdits {
     return why ?? `in hand: another ${r?.label ?? ''}`;
   }
 
+  /**
+   * Rows put again as one action (the seventh wave's looks, attachments and marks: each change's `after` the whole row as it
+   * is to read), one write and one undo entry. Nothing while an edit is under way or a write is out.
+   */
+  async putRows(label: string, changes: RowChange[]): Promise<string> {
+    this.sameWorld();
+    if (this.live || this.writing) return 'an edit is under way, or a write is still going';
+    if (!changes.length) return 'nothing to write';
+    return this.write({ label, changes });
+  }
+
   // ---- The inspector. ----
 
   /**
@@ -1725,12 +1807,22 @@ export class EditorEdits {
     this.sameWorld();
     if (!this.sel.size || this.live || this.writing) return 'pick one first';
     const changes: RowChange[] = [];
+    let marksPassed = 0;
     for (const id of this.sel.ids) {
       const r = this.ed.rowFor(id);
       if (!r) continue;
       const { at: _at, ...rest } = r.row;
       const after: PlacementRow = { ...rest } as PlacementRow;
+      // A mark (the seventh wave) is no thing: the reader keeps its solidity, flora clearing and guard out as fields it does
+      // not write, and the endpoint would refuse the whole batch for them. Passed over, and said.
+      const mark = r.row.kind === 'mark';
+      let touched = false;
       for (const [k, v] of Object.entries(fields)) {
+        if (mark && (k === 'solid' || k === 'clear' || k === 'guard')) {
+          marksPassed++;
+          continue;
+        }
+        touched = true;
         if (k === 'name' || k === 'note' || k === 'state') {
           if (v === '' || v === null) delete after[k];
           else if (typeof v === 'string') after[k] = v;
@@ -1742,10 +1834,21 @@ export class EditorEdits {
           else if (typeof v === 'number' && v >= 0) after[k] = v;
         }
       }
+      if (mark && !touched) continue;
       changes.push({ file: r.layer, id: r.row.id, before: r.row, after });
     }
-    if (!changes.length) return 'nothing picked stands in the files';
-    return this.write({ label: `set ${Object.keys(fields).join(', ')}`, changes });
+    const passed = marksPassed ? 'a mark takes no solidity, flora clearing or guard: it carries effects and sounds alone' : '';
+    if (!changes.length) {
+      if (passed) this.ed.say(passed, false);
+      return passed || 'nothing picked stands in the files';
+    }
+    const said = await this.write({ label: `set ${Object.keys(fields).join(', ')}`, changes });
+    if (passed && !this.lastWrite?.said) {
+      const words = `${said} (${passed})`;
+      this.ed.say(words, true);
+      return words;
+    }
+    return said;
   }
 
   /**
@@ -1778,6 +1881,7 @@ export class EditorEdits {
       else if (Array.isArray(p.scale) && p.scale.length === 3 && p.scale.every((v) => typeof v === 'number' && v > 0)) s = [p.scale[0], p.scale[1], p.scale[2]];
       else return 'a scale is a number above nought, or three';
       if (this.ed.hasRooms(key)) return `${r.label} is a building with rooms: it stands at its own size this pass`;
+      if (r.row.kind === 'mark') return `${r.label} is a mark: it takes no size (its effects do, each on its own handle)`;
       const held: [number, number, number] = [scaleHeld(s[0]), scaleHeld(s[1]), scaleHeld(s[2])];
       if (held.some((v, i) => v !== s[i])) notes.push(`held to the reader's ${PLACEMENT_LIMITS.scaleMin} to ${PLACEMENT_LIMITS.scaleMax}`);
       if (pastScaleNote(held[0], held[1], held[2])) notes.push(`past ${EDITOR_TUNE.scaleNote.low} or ${EDITOR_TUNE.scaleNote.high}`);

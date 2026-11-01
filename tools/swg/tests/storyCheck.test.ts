@@ -315,6 +315,11 @@ const warns = (r: ReturnType<typeof checkSet>, re: RegExp) => r.warnings.some((w
   const stated = run([obj('rubble', 'place/ruin-rubble', [501, 500])]);
   ok(stated.errors.length === 0 && stated.warnings.some((w) => w.rule === 1 && w.file === 'objects/rubble.jsonc' && /names a row that stands in restuss=ruins only \(public\/placements\/world\/tatooine\.json:6\)/.test(w.message)), `an object naming a row kept to one world state is clean but warned, naming the state and where the row is (${stated.warnings.map((w) => w.message).join('; ')})`);
   ok(!good.warnings.some((w) => /stands in .* only/.test(w.message)), 'and one naming a row of every state is not');
+  // A mark (Map-maker II's seventh wave) stands its effects and sounds and nothing the streamer files: no story object.
+  const marked = new Map([...placements, ['tatooine', new Map([...(placements.get('tatooine') ?? new Map()), ['plume', [{ ...ref([700, 700], 'world', null, 8), notObject: 'a mark carries effects and sounds alone and is no story object' }]]])]]);
+  const plume = run([obj('plume', 'place/plume', [700, 700])], { placements: marked });
+  ok(plume.errors.some((e) => e.rule === 1 && e.file === 'objects/plume.jsonc' && /never finds as a thing .*a mark carries effects and sounds alone/.test(e.message)), `an object naming a mark is refused, saying why, though the mark stands within reach (${plume.errors.map((e) => e.message).join('; ')})`);
+  ok(checkPlacements(marked).length === 1, 'and a mark is no clash of its own');
   const unchecked = run([obj('ghost', 'place/no-such-row', [0, 0]), obj('by-template', LOCKER_TEMPLATE, [3450, -4690])], {});
   ok(unchecked.errors.length === 0 && unchecked.warnings.length === 0 && unchecked.counts.placed === 1, 'with no placements handed in nothing of it is checked, and the object naming one is still counted');
   ok(TEMPLATE.test(placementKey('eisley-locker')) && TEMPLATE.test('place/a_b-9'), "a row's key passes the story's own template pattern, so nothing in the story had to change to name one");
@@ -374,6 +379,13 @@ const warns = (r: ReturnType<typeof checkSet>, re: RegExp) => r.warnings.some((w
     writeFileSync(join(stateDir, 'world', 'rori.json'), placementsFileText('rori', 'raw', [row('rubble', 5300, 5700, { state: 'restuss=ruins' }), row('crate', 5310, 5700)]));
     const statedRead = placementsOf(stateDir, { root }).placements.get('rori');
     ok(statedRead?.get('rubble')?.[0].state === 'restuss=ruins' && statedRead?.get('crate')?.[0].state === undefined, `a row's world state is read onto its ref (${JSON.stringify(statedRead?.get('rubble'))})`);
+    // A mark read from the files is said to be no story object on its ref, and is no row the game never stands.
+    const markDir = join(scratch, 'placements-marked');
+    mkdirSync(join(markDir, 'story'), { recursive: true });
+    writeFileSync(join(markDir, 'story', 'tatooine.json'), placementsFileText('tatooine', 'raw', [{ id: 'mark-1', kind: 'mark', x: 10, y: 5, z: 10, q: [1, 0, 0, 0], attach: [{ fx: 'props:particles/fire.json' }] } as PlacementRow, row('crate', 20, 20)]));
+    const markRead = placementsOf(markDir, { root });
+    const mk = markRead.placements.get('tatooine')?.get('mark-1')?.[0];
+    ok(/no story object/.test(mk?.notObject ?? '') && !mk?.never && !markRead.placements.get('tatooine')?.get('crate')?.[0].notObject && markRead.never === 0 && !markRead.notes.some((n) => /mark-1/.test(n)), `a mark's ref says it is no story object, and nothing more (${JSON.stringify(mk)}; ${markRead.notes.join(' | ')})`);
     ok(PLACEMENTS_DIR === join(ROOT, 'public', 'placements'), "with none named, it is this checkout's own public/placements, which the build ships");
     // The command line: an object naming a row, then the same with its near forty metres off.
     const story = join(scratch, 'story-private');

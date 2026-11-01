@@ -189,6 +189,9 @@ const walkable = (v: number): boolean => v >= 1 && v <= 14;
       }
       write(rows('anything', 'no_such_world_w5'));
       ok(gridEditsOf('watertabletest', folder, dir).absent?.join() === 'no_such_world_w5/anything', "a row out of a world this install has not converted is named under that world");
+      // A mark (Map-maker II's seventh wave: an effect or a sound with no model) stands nothing: no model is looked for, none named.
+      write(placementsFileText('watertabletest', 'raw', [{ id: 'mark-1', kind: 'mark', x: 0, y: 0, z: 0, q: [1, 0, 0, 0], attach: [{ fx: 'props:particles/fire.json' }] } as never]));
+      ok(gridEditsOf('watertabletest', folder, dir).absent?.length === 0, 'a mark in the files is no solid row, and names no model the install lacks');
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }

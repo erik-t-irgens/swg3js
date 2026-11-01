@@ -124,6 +124,20 @@ export interface MarksView {
   draftCount: number;
   draftPts: Float64Array;
   draftVis: Uint8Array;
+  /**
+   * The handles of what hangs on the rows (Map-maker II's seventh wave: Map-maker I's handles of invisible things, less the
+   * light's): a diamond for an effect, a small ring and a ring at its full-volume radius for a sound, each at its place on the
+   * screen (`handlePts`: x, y and the big ring's radius in pixels, three a handle) where it is in front of the eye
+   * (`handleVis`), `handleKind` 0 an effect and 1 a sound, `handleState` 0 plain (`accent`), 1 under the cursor (`hot`), 2
+   * picked (`ink`); `handlePx` its half size. The pools grow when they first need to, never in a steady frame.
+   */
+  handlesOn: boolean;
+  handleCount: number;
+  handlePx: number;
+  handlePts: Float64Array;
+  handleVis: Uint8Array;
+  handleKind: Uint8Array;
+  handleState: Uint8Array;
 }
 
 /** The lakes' pools grown to hold `lakes` lakes of `points` points in all (`MarksView.lakePts`), and a draft of `draft` points; nothing made when they do already. */
@@ -187,7 +201,42 @@ export function marksView(): MarksView {
     draftCount: 0,
     draftPts: new Float64Array(0),
     draftVis: new Uint8Array(0),
+    handlesOn: false,
+    handleCount: 0,
+    handlePx: 7,
+    handlePts: new Float64Array(0),
+    handleVis: new Uint8Array(0),
+    handleKind: new Uint8Array(0),
+    handleState: new Uint8Array(0),
   };
+}
+
+/**
+ * The handles of what hangs on the rows (`MarksView.handle...`): a diamond for an effect, a small ring and its full-volume
+ * ring (faint, from 4 px to the screen's width) for a sound. Nothing is made; the width is read here, never handed in.
+ */
+function drawHandles(o: MarksOverlay, v: MarksView): void {
+  if (!v.handlesOn) return;
+  const width = EDITOR_TUNE.outline.width;
+  const r = v.handlePx;
+  const pts = v.handlePts;
+  for (let i = 0; i < v.handleCount; i++) {
+    if (!v.handleVis[i]) continue;
+    const s = v.handleState[i];
+    const c = s === 2 ? COL.ink : s === 1 ? COL.hot : COL.accent;
+    const x = pts[i * 3];
+    const y = pts[i * 3 + 1];
+    if (v.handleKind[i] === 1) {
+      o.ring(x, y, r * 0.8, width, c, 0.95);
+      const big = pts[i * 3 + 2];
+      if (big > 4 && big < v.w) o.ring(x, y, big, width * 0.75, c, 0.35);
+    } else {
+      o.line(x, y - r, x + r, y, width, c, 0.95);
+      o.line(x + r, y, x, y + r, width, c, 0.95);
+      o.line(x, y + r, x - r, y, width, c, 0.95);
+      o.line(x - r, y, x, y - r, width, c, 0.95);
+    }
+  }
 }
 
 /**
@@ -314,6 +363,7 @@ export function drawEditorMarks(o: MarksOverlay, v: MarksView): void {
     }
   }
   drawLakes(o, v);
+  drawHandles(o, v);
   if (v.hoverOn) drawBox(o, v.hover, width, COL.muted, 0.8);
   if (v.ghostOn) drawBox(o, v.ghost, width, v.ghostWarn ? COL.warn : COL.ink, 0.9);
   if (v.aimOn) o.ring(v.aimX, v.aimY, 4, 1.5, v.ghostWarn ? COL.warn : COL.accent, 0.9);

@@ -8,7 +8,7 @@
 
 import type { DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
-import { EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, FLORA_PAINT_TUNE, FLORA_PAINT_TUNE_DEFAULTS, PAINT_TUNE, PAINT_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, WATER_TUNE, WATER_TUNE_DEFAULTS, tuneEditor, tuneFloraPaint, tunePaint, tuneSculpt, tuneWater } from './editorTune.ts';
+import { EDITOR_EXTRA_DEFAULTS, EDITOR_EXTRA_TUNES, EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, FLORA_PAINT_TUNE, FLORA_PAINT_TUNE_DEFAULTS, PAINT_TUNE, PAINT_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, WATER_TUNE, WATER_TUNE_DEFAULTS, tuneEditor, tuneFloraPaint, tunePaint, tuneSculpt, tuneWater } from './editorTune.ts';
 import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
 import { LAKE_TUNE, RIVER_TUNE, tuneRiverTune } from '../world/ourWater.ts';
 
@@ -415,6 +415,49 @@ function dial(path: string, label: string, min: number, max: number, step: numbe
   };
 }
 
+/**
+ * A number of a tune of the world's own the editor registered (`EDITOR_EXTRA_TUNES`: the seventh wave's `look` and
+ * `attach`), as a slider: read off the very object the world reads, moved through `tuneEditor`, its shipped value the one it
+ * had when registered.
+ */
+function extraDial(name: string, key: string, label: string, min: number, max: number, step: number, unit: string, note: string): NumberDial {
+  return {
+    kind: 'number',
+    key: `extra.${name}.${key}`,
+    label,
+    note,
+    min,
+    max,
+    step,
+    unit,
+    get: () => Number(EDITOR_EXTRA_TUNES[name]?.[key] ?? 0),
+    set: (v) => tuneEditor({ [name]: { [key]: v } }),
+  };
+}
+
+/** The looks' and attachments' numbers of feel (Map-maker II's seventh wave), once the editor has registered them. */
+function looksGroup(): DialGroup[] {
+  if (!EDITOR_EXTRA_TUNES.look || !EDITOR_EXTRA_TUNES.attach) return [];
+  return [
+    {
+      title: 'Looks and attachments',
+      note: "A row's tints, borrowed pictures and materials, and the effects and sounds hung on it (the Selected tab, and the library's Effects and Sounds).",
+      dials: [
+        extraDial('look', 'tintStrength', 'Tint strength', 0, 1, 0.01, '', 'How much of a tint a copy takes: 1 multiplies the colour by the tint as written, 0 leaves the model\'s own. Moves every tinted copy at once; nothing compiles.'),
+        extraDial('attach', 'size', 'A new effect\'s size', 0.05, 10, 0.05, '×', 'The size an effect taken from the library is hung at, of its own.'),
+        extraDial('attach', 'lift', 'Hung over the hit', -2, 5, 0.05, 'm', 'Metres over the point the aim met that a new effect or sound is hung (and a mark stands).'),
+        extraDial('attach', 'preview', 'Shown in hand at', 0, 5, 0.05, '×', 'The effect in hand shown at the aim at this size of its own; 0 shows none.'),
+        extraDial('attach', 'handlePx', 'Handle size', 2, 20, 0.5, 'px', 'Half the size of an attachment\'s handle on the screen.'),
+        extraDial('attach', 'pickPx', 'Handle reach', 3, 40, 1, 'px', 'How near the cursor must be to a handle to pick it.'),
+        extraDial('attach', 'turnPerPx', 'Turn a pixel', 0.001, 0.05, 0.001, 'rad', 'R held on a picked attachment: how far a pixel of the mouse turns it.'),
+        extraDial('attach', 'liftPerPx', 'Raise a pixel', 0.001, 0.1, 0.001, 'm', 'F held: how far a pixel of the mouse raises it.'),
+        extraDial('attach', 'sizePerPx', 'Size a pixel', 0.001, 0.05, 0.001, '', 'C held: the size multiplied by exp(this × pixels), mouse up larger.'),
+        extraDial('attach', 'reach', 'Effects stood within', 50, 2000, 10, 'm', 'How far from the eye a row\'s effects are stood (taken away a little past it).'),
+      ],
+    },
+  ];
+}
+
 function groups(): DialGroup[] {
   return [
     {
@@ -485,6 +528,7 @@ function groups(): DialGroup[] {
     paintGroup('paint.', (k, v) => tuneEditor({ paint: { [k]: v } })),
     floraPaintGroup('floraPaint.', (k, v) => tuneEditor({ floraPaint: { [k]: v } })),
     waterGroup('water.', (k, v) => tuneEditor({ water: { [k]: v } })),
+    ...looksGroup(),
     {
       title: 'Folding',
       note: 'Rows written while their tier stands are drawn one by one until the next arrival or Fold now (Tools).',
@@ -506,6 +550,11 @@ function groups(): DialGroup[] {
 
 /** The tune's shipped value at a dial's key. */
 function shippedValue(key: string, now: number | string): number | string {
+  if (key.startsWith('extra.')) {
+    const [, name, k] = key.split('.');
+    const v = EDITOR_EXTRA_DEFAULTS[name]?.[k];
+    return typeof v === 'number' ? v : now;
+  }
   const parts = key.split('.').slice(1);
   const v = parts.reduce<unknown>((o, k) => (o as Record<string, unknown>)?.[k], EDITOR_TUNE_DEFAULTS);
   return typeof v === 'number' ? v : now;
