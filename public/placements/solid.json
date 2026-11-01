@@ -1,0 +1,245 @@
+{
+ "version": 1,
+ "everywhere": {
+  "object/static/item/shared_item_hoth_cable_floor_04.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_tall05.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_ptch_kashyyyk_fern_s01.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_tall02.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_tall07.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl2_near_roots_a2.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_tall06.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_tall01.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_ptch_kashyyyk_fern_s03.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_tall04.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_ptch_kashyyyk_fern_s02.iff": {
+   "solid": false
+  },
+  "object/static/item/shared_item_hoth_cable_floor_01.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl2_far_tree_a2.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl2_far_tree_a1.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_tall09.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl1_far_treetop_a1.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_myyydril_cave_luilrus_mushroom_sml.iff": {
+   "solid": false
+  },
+  "object/static/item/shared_item_hoth_cable_floor_05.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_myyydril_cave_luilrus_mushroom_lrg.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_kash_kachiro_tall_plant.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl1_near_canopy_a4.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_kash_kachiro_low_plant.iff": {
+   "solid": false
+  },
+  "object/static/item/shared_item_hoth_cable_floor_03.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_tall08.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl1_near_canopy_a2.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl3_base_tree_a1.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_bush_yavin_blueleaf.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_cave_mushroom_brown_grp_s02.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl3_base_tree_a3.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl1_near_canopy_a3.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_flower_tato_funnel_sm.iff": {
+   "solid": false
+  },
+  "object/static/item/shared_item_hoth_cable_floor_02.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_small05.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl4_tree_trunk_a1.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_small04.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_tree_lok_mkpud.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl4_tree_trunk_a3.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl3_base_tree_a2.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_ptch_kashyyyk_fern_s04.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_small01.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_small08.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_cave_mushroom_brown_grp_s01.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_plant_tato_falotil.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl4_far_tree_canopy_a1.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl1_near_canopy_a1.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_flower_tato_funnel.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl1_far_treetop_a3.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl2_near_roots_a1.iff": {
+   "solid": false
+  },
+  "object/tangible/quest/shared_naboo_theed_xharnoh_plant.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_cave_mushroom_brown_s03.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_poi_kash_rryatt_lvl4_tree_trunk_a2.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_myyydril_cave_luilrus_mushroom_cluster.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_cave_mushroom_brown_s04.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_flower_tato_funnel_med.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_plant_tato_pika_tri.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_plant_tato_hubba.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_bush_talus_razorcoil.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_flower_iceflower.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_stump_dry_01.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_cave_mushroom_brown_grp_s03.iff": {
+   "solid": false
+  },
+  "object/tangible/quest/shared_blooming_sapflower.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_stump_dry_02.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_shrb_dath_glingi.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_plant_tato_pika.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_broken_dead.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_cave_mushroom_brown_s02.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_shrb_beach_root_cup_cluster.iff": {
+   "solid": false
+  },
+  "object/tangible/quest/shared_rotting_sapflower.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_cave_mushroom_brown_s01.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_bush_endor_rainbowbush.iff": {
+   "solid": false
+  },
+  "object/tangible/quest/shared_flora_plant_jawa_juice.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_shrb_beach_root_cup_small.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_cave_dead_grass_s01.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_plant_tato_falotil_bare.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_cave_weed_s02.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_cave_mushroom_blue_grp.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_cave_weed_s01.iff": {
+   "solid": false
+  },
+  "object/static/flora/shared_flora_flower_all_bauhin.iff": {
+   "solid": false
+  },
+  "object/tangible/quest/shared_rrwii_root.iff": {
+   "solid": false
+  },
+  "object/building/kashyyyk/shared_decd_wroshyr_tree_tall03.iff": {
+   "solid": false
+  }
+ }
+}

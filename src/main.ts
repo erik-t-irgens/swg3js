@@ -222,7 +222,11 @@ import { HOMES_MOVE_VERSION, homeKey, homes, routeHomeWord } from './net/homes.t
 import { NGE_OVERLAY_TUNE, ngeOverlay, serverHoldsFor, whereOf } from './world/ngeOverlay.ts';
 import { arrivalInGame, hasOwnArrival, portArrivesHome, type ArrivalPlace } from './world/arrival.ts';
 // A world's states (Restuss as the living launch city or its ruins), and Restuss's own rules and dials.
-import { WORLD_STATES, WORLD_STATE_TUNE, WORLD_STATE_WORDS, arrivalWait, cleanStates, fileInState, inState, localWorldState, serverWorldStates, setLocalWorldState, setServerStates, stateNews, standsIn, statesInForce, tuneWorldStateWait, waitForHail, worldStateOf, worldStateSource, worldStateStamp } from './world/worldState.ts';
+import { WORLD_STATES, WORLD_STATE_TUNE, WORLD_STATE_WORDS, arrivalWait, cleanStates, fileInState, inState, localWorldState, serverKeptIn, serverWorldStates, setLocalWorldState, setServerStates, stateLink, stateNews, standsIn, stateNow, statesInForce, tuneWorldStateWait, waitForHail, worldStateOf, worldStateSource, worldStateStamp } from './world/worldState.ts';
+// SOE's earlier objects (a world state of its own), the holidays' dressing (each a state this browser rules by its switch
+// and the date), and the owner's shared walk-through file with the waterfalls' falling water (the map fixes' wave 3).
+import { HOLIDAYS, HOLIDAY_SEASONS, holidayNews, holidayOn, installHolidays, settingWords, tuneSeason } from './world/holidays.ts';
+import { FALLING_WATER_SHADERS, SOLID_FILE, SOLID_TUNE, readSolidFile, setSolidRows, solidRows } from './world/walkThrough.ts';
 import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, fittingDormant, tuneRestuss, tuneRestussRoster } from './world/restuss.ts';
 import { worldDialsFor } from './world/restussDials.ts';
 import { PROPS_KEEPER_TUNE, SERVER_NOT_ANSWERING, arrivalCircles, arrivalHolds, arrivalKeeper, keeperNews, keeperOf, keeperState, keeperStateOf, keptDepsOf, keptKey, keptProps, keptRefusal, routePropWord, switchSets, type Keeper, type KeeperState, type KeptRow, type KeptSets } from './net/propsKept.ts';
@@ -1966,6 +1970,13 @@ class App {
     // How Restuss stands with no server's word on it: the world state's own setting is the one kept, and the page's
     // row shows it (`worldState.ts`).
     S.restuss = (localWorldState(RESTUSS_KEY) ?? WORLD_STATES[RESTUSS_KEY].default) as Settings['restuss'];
+    // And SOE's earlier objects the same way: the world state's own kept setting is the one the page's row shows.
+    S.soe = (localWorldState('soe') ?? WORLD_STATES.soe.default) as Settings['soe'];
+    // Each holiday's dressing a state this browser rules (`holidays.ts`): by its switch and today's date, Life Day's by the
+    // weather's own rule (which the ground's snow takes), asked at every arrival.
+    installHolidays((key) => this.holidayOnNow(key));
+    // The owner's shared walk-through file (`walkThrough.ts`), read once a session before the first world's colliders.
+    this.world.solidFileReady = this.loadSolidFile();
     // The weather's settings (the world made it; the HUD, made below, shows its note from the loop).
     this.world.weather.configure(S);
     // A hand torch: a spot light carried at the head (at the eye in first person), pointing at the
@@ -3562,6 +3573,104 @@ class App {
           wait: WORLD_STATE_TUNE.waitMs,
           ...(said.length ? { said } : {}),
           note: report ? '' : 'this world has no states: Restuss is on Rori, from a Rori snapshot converted with it',
+        };
+      },
+      /**
+       * SOE's earlier objects (`tools/swg/stateObjects.mjs`, a world state of its own, `soe`): what older publishes placed
+       * and the final world has not got, stood again where they last stood. With nothing it says how this world stands
+       * them (`here`, taken at this arrival), how an arrival would now (`next`) and where that comes from (the server's
+       * word, this browser's setting, the default), and what the layout carries of them: how many objects, how many stand,
+       * how many objects of every state together the streamer files dormant here (`dormantHere`), the layout's mark (the roots the converter left out for standing in or on today's world, in a room on today's
+       * furniture, or on a newer earlier one). `earlier('earlier')` or `earlier('final')` sets this browser's own (kept),
+       * or on a server that keeps it is the admin's word to it; taken at the next arrival on a world that has them, and
+       * `{ go: true }` is one where you stand. `{ nearest: n }` lists the n nearest to you, each with its `/loc`.
+       */
+      earlier: (arg?: string | { go?: boolean; nearest?: number }) => {
+        const said: string[] = [];
+        if (typeof arg === 'string') said.push(this.chooseWorldState('soe', arg));
+        else if (arg?.go) said.push(this.arriveAgainHere());
+        const p = this.player.worldPos;
+        const n = typeof arg === 'object' && arg && typeof arg.nearest === 'number' ? Math.max(0, Math.min(50, Math.round(arg.nearest))) : 0;
+        const report = this.world.stateKeyReport('soe', { x: p.x, z: p.z }, n);
+        return {
+          here: statesInForce().soe ?? null,
+          next: worldStateOf('soe'),
+          from: worldStateSource('soe'),
+          server: serverWorldStates()?.soe ?? null,
+          setting: localWorldState('soe'),
+          waited: this.worldStatesWaited,
+          ...(report ? { objects: { tagged: report.tagged, standing: report.standing, dormantHere: report.dormant }, mark: report.mark, ...(n ? { nearest: report.nearest } : {}) } : {}),
+          ...(said.length ? { said } : {}),
+          note: report ? '' : "this world carries none of SOE's earlier objects (none in its archives, or its snapshot was converted before them)",
+        };
+      },
+      /**
+       * The holidays' dressing (`src/world/holidays.ts`), each a state this browser rules by its switch and the date:
+       * the Galactic Moon Festival (`halloween`), Life Day (`lifeday`, the Life Day switch), Love Day (`loveday`) and
+       * Empire Day with Remembrance Day (`empireday`). With nothing it says each one's switch, its season and whether it
+       * is in it today, what an arrival would stand now, what the world here stands (taken at this arrival) and how many
+       * of this world's objects are its. `{ halloween: 1 }` (1 always, 0 never, -1 in season; `lifeday` sets the Life Day
+       * switch) moves a switch in memory, never saved, as the page's row would; `{ seasons: { halloween: { from: [10, 20],
+       * to: [11, 4] } } }` moves a season (ours); `{ go: true }` is an arrival where you stand. Never a server's word.
+       */
+      holidays: (o?: { go?: boolean; seasons?: Record<string, unknown> } & Record<string, unknown>) => {
+        const said: string[] = [];
+        for (const key of Object.keys(HOLIDAYS)) {
+          const v = o?.[key];
+          if (typeof v !== 'number' || ![-1, 0, 1].includes(v)) continue;
+          const setting = HOLIDAYS[key].setting;
+          (this.settings as unknown as Record<string, unknown>)[setting] = v;
+          this.applySetting(setting);
+          said.push(`${HOLIDAYS[key].name}: ${settingWords(v)} (this session; the page keeps its own)`);
+        }
+        for (const [key, season] of Object.entries(o?.seasons ?? {})) {
+          const got = tuneSeason(key, season);
+          if (got) said.push(`${HOLIDAYS[key]?.name ?? key}'s season ${got.from.join('/')} to ${got.to.join('/')}`);
+        }
+        if (said.length) this.menu.redrawGraphics();
+        if (o?.go) said.push(this.arriveAgainHere());
+        const now = new Date();
+        const out: Record<string, unknown> = {};
+        for (const key of Object.keys(HOLIDAYS)) {
+          const def = HOLIDAYS[key];
+          const report = this.world.stateKeyReport(key);
+          const season = key === 'lifeday' ? null : HOLIDAY_SEASONS[key];
+          out[key] = {
+            name: def.name,
+            setting: settingWords(this.settings[def.setting] as number),
+            season: season ? `${season.from.join('/')} to ${season.to.join('/')}` : 'the Life Day switch\'s own',
+            inSeasonToday: season ? holidayOn(-1, season, now.getMonth() + 1, now.getDate()) : this.world.weather.lifeDayToday(),
+            next: this.holidayOnNow(key) ? 'on' : 'off',
+            here: statesInForce()[key] ?? null,
+            ...(report ? { objects: { tagged: report.tagged, standing: report.standing, dormantHere: report.dormant }, areas: (report.block as { areas?: string[] } | null)?.areas ?? [] } : {}),
+          };
+        }
+        return { ...out, ...(said.length ? { said } : {}) };
+      },
+      /**
+       * What the client walked through that the placed models' triangles would make solid (`src/world/walkThrough.ts`):
+       * the owner's shared file (`public/placements/solid.json`, its `everywhere` scope) and a waterfall's falling water.
+       * With nothing it says how many templates the file makes walk-through, how many of this world's placed things that
+       * reaches, and the falling-water shaders. `{ use: false }` puts the rule before the file back for every collider made
+       * from then on (to compare; the colliders standing keep theirs until the streamer remakes them, as an arrival does).
+       * `{ template: '<template>' }` says that template's word.
+       */
+      solid: (o?: { use?: boolean; template?: string }) => {
+        if (o && typeof o.use === 'boolean') SOLID_TUNE.use = o.use;
+        const rows = solidRows();
+        const walk = [...rows].filter(([, s]) => s === false).map(([t]) => t);
+        const layout = this.world.pack?.layout;
+        const here = layout ? layout.objects.filter((x) => rows.get(x.template) === false) : [];
+        const byTemplate: Record<string, number> = {};
+        for (const x of here) byTemplate[x.template] = (byTemplate[x.template] ?? 0) + 1;
+        return {
+          use: SOLID_TUNE.use,
+          file: SOLID_FILE,
+          walkThrough: walk.length,
+          solidRows: rows.size - walk.length,
+          here: { placed: here.length, templates: Object.keys(byTemplate).length, byTemplate },
+          fallingWater: [...FALLING_WATER_SHADERS],
+          ...(o?.template ? { template: o.template, word: rows.has(o.template) ? (rows.get(o.template) ? 'solid' : 'walked through') : 'no row: the size rule' } : {}),
         };
       },
       /**
@@ -12882,6 +12991,16 @@ class App {
       case 'restuss':
         // Taken at the next arrival on Rori: this browser's own setting, or the admin's word on a server that keeps it.
         this.messages.system(this.chooseWorldState(RESTUSS_KEY, S.restuss));
+        break;
+      case 'soe':
+        // SOE's earlier objects, the same rule: taken at the next arrival on a world that has them.
+        this.messages.system(this.chooseWorldState('soe', S.soe));
+        break;
+      case 'halloween':
+      case 'loveday':
+      case 'empireday':
+        // A holiday's dressing, which this browser rules alone (`holidays.ts`): taken at the next arrival, as the snow is.
+        this.messages.system(this.holidayWord(key));
         break;
       case 'sensitivity':
         this.cam.sensitivity = S.sensitivity;
@@ -24553,7 +24672,9 @@ class App {
    */
   private async worldStatesHere(): Promise<void> {
     const saved = Net.savedUrl();
-    const plan = arrivalWait({ states: true, saved: !!saved, mode: this.net.session.debug().mode, wanted: this.net.wanted, toCome: this.relayAsked });
+    // Only a world with a state a server keeps (Restuss, SOE's earlier objects) waits on its word; a world whose only
+    // states are the holidays', which this browser rules alone, waits on nothing.
+    const plan = arrivalWait({ states: serverKeptIn(this.world.statesComing), saved: !!saved, mode: this.net.session.debug().mode, wanted: this.net.wanted, toCome: this.relayAsked });
     this.worldStatesWaited = plan;
     if (plan === 'peek') {
       const hail = await peekHail(saved, WORLD_STATE_TUNE.waitMs);
@@ -24587,15 +24708,68 @@ class App {
     if (server && typeof server[key] === 'string') {
       if (this.net.session.debug().admin) {
         if (!this.net.setWorldState(key, value)) return `the server is not answering: ${name} stays as it keeps it, ${said(server[key])}`;
-        return `asked the server to stand ${name} as ${said(value)}: everybody on it takes it at their next arrival on ${w?.world ?? 'that world'}`;
+        return `asked the server: ${name} ${stateLink(key)} ${said(value)} for everybody on it, taken at their next arrival on ${w?.world ?? 'that world'}`;
       }
-      if (key === RESTUSS_KEY) this.settings.restuss = server[key] as Settings['restuss'];
+      this.mirrorWorldState(key, server[key]);
       return `this server keeps ${name} as ${said(server[key])} for everybody: only its admin changes it`;
     }
     const before = worldStateOf(key);
     setLocalWorldState(key, value);
+    this.mirrorWorldState(key, value);
+    return stateNews(key, before, value, statesInForce()[key] ?? null) ?? `${name} ${stateLink(key)} ${said(value)}`;
+  }
+
+  /**
+   * What a holiday's switch moving says (`holidays.ts`): whether its dressing stands from the next arrival, which is when
+   * it is taken (a world that has it stays as it arrived until then).
+   */
+  private holidayWord(setting: string): string {
+    const key = Object.keys(HOLIDAYS).find((k) => HOLIDAYS[k].setting === setting) ?? setting;
+    return holidayNews(key, this.holidayOnNow(key));
+  }
+
+  /**
+   * Whether a holiday's dressing would stand at an arrival now: Life Day's by the weather's own rule (its switch, its
+   * season and a console hold, which the ground's snow takes too), every other by its switch and today's date.
+   */
+  private holidayOnNow(key: string): boolean {
+    if (key === 'lifeday') return this.world.weather.lifeDayToday();
+    const def = HOLIDAYS[key];
+    const now = new Date();
+    return !!def && holidayOn(this.settings[def.setting] as number, HOLIDAY_SEASONS[key], now.getMonth() + 1, now.getDate());
+  }
+
+  /**
+   * The owner's shared walk-through file (`public/placements/solid.json`, `walkThrough.ts`), read once a session: its rows
+   * are what every collider made from then on asks (`collidesByRule`). A file not shipped, not there or not read is no
+   * rows, said once on the console, and every placed thing is solid as it always was.
+   */
+  private async loadSolidFile(): Promise<void> {
+    try {
+      const res = await fetchPublic(SOLID_FILE, { cache: 'no-store' }, import.meta.env.BASE_URL);
+      if (!res) return;
+      const type = res.headers.get('content-type') ?? '';
+      if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return;
+      const read = readSolidFile(await res.text());
+      if (read.problem) console.warn(`walk through: ${SOLID_FILE} is not read: ${read.problem}`);
+      setSolidRows(read.rows);
+    } catch (err) {
+      console.warn(`walk through: ${SOLID_FILE} did not come`, err);
+    }
+  }
+
+  /** An arrival again on this world where you stand (a world state's console `{ go: true }`): what to say. */
+  private arriveAgainHere(): string {
+    const p = this.player;
+    if (p.mounted || p.piloting || p.aboard || p.eva || this.traveling) return 'an arrival where you stand wants you on foot and in no travel';
+    void this.travel(this.world.planet, this.zone, undefined, { at: p.worldPos.clone(), heading: p.heading, label: this.world.planet.name });
+    return `arriving again on ${this.world.planet.name} where you stand`;
+  }
+
+  /** A world state's row on the Gameplay page shown at the value an arrival would take (Restuss's, SOE's earlier objects'). */
+  private mirrorWorldState(key: string, value: string): void {
     if (key === RESTUSS_KEY) this.settings.restuss = value as Settings['restuss'];
-    return stateNews(key, before, value, statesInForce()[key] ?? null) ?? `${name} stands as ${said(value)}`;
+    else if (key === 'soe') this.settings.soe = value as Settings['soe'];
   }
 
   /**
@@ -24617,6 +24791,10 @@ class App {
     // The Gameplay page's row reads what an arrival would take, which the server's word now answers.
     if (why !== 'gone' && states && typeof states[RESTUSS_KEY] === 'string') this.settings.restuss = states[RESTUSS_KEY] as Settings['restuss'];
     else if (why === 'gone') this.settings.restuss = (localWorldState(RESTUSS_KEY) ?? WORLD_STATES[RESTUSS_KEY].default) as Settings['restuss'];
+    // And SOE's earlier objects' row the same way (a server from before them says nothing of it, and the row keeps this
+    // browser's own).
+    if (why !== 'gone' && states && typeof states.soe === 'string') this.mirrorWorldState('soe', states.soe);
+    else if (why === 'gone') this.mirrorWorldState('soe', localWorldState('soe') ?? WORLD_STATES.soe.default);
   }
 
   /** The frame's turn: who keeps them, asked every `everyMs`. */

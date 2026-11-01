@@ -20,7 +20,7 @@
 // do the same to these. Writing them this way means a pack whose centre moves needs no rerun here.
 // The file says which frame it is in, so a reader that does not know this one can leave the places
 // alone and say so rather than stand a town's crowds nine kilometres from the town.
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseIff } from './iff.mjs';
 import { parseDatatable } from './datatable.mjs';
@@ -29,6 +29,7 @@ import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
 import { parseClientDataSounds, roomRows } from './soundsources.mjs';
 import { RESTUSS_KEY, RESTUSS_STATES_VERSION, addToSnapshot, restussAddition } from './restuss.mjs';
+import { STATE_OBJECTS_VERSION, addStateObjects, droppedOf, hasStateObjects, stateObjectsFor } from './stateObjects.mjs';
 
 /** Bumped whenever a planet's sounds.json changes shape, so `status` can ask for a rerun. */
 export const PLACES_FORMAT = 1;
@@ -217,7 +218,7 @@ export function roomsFor(rows, pobs) {
  * mount with no launch copy of Rori's snapshot (no retail install is one) leaves the city out and says so, rather
  * than stopping every other planet's sounds with it.
  */
-function loadPlacements(vfs, planet, log = () => {}) {
+function loadPlacements(vfs, planet, log = () => {}, layout = null) {
   const wsPath = `snapshot/${planet}.ws`;
   const hasBuildouts = vfs.has(`datatables/buildout/areas_${planet}.iff`);
   // A world the game lists that places nothing (cli.mjs `GROUND_ONLY_WORLDS`: its terrain alone) places no sound either,
@@ -232,6 +233,9 @@ function loadPlacements(vfs, planet, log = () => {}) {
   } catch (err) {
     log(`  sounds: ${planet}: Restuss's launch city is left out (${err.message})`);
   }
+  // SOE's earlier objects and the holidays' rows after it, as the world's own layout left them (stateObjects.mjs), each
+  // node carrying its state: a layout from before them reads none, and its file then says so to `status`.
+  if (hasStateObjects(layout)) addStateObjects(snap, stateObjectsFor(vfs, planet), { dropped: droppedOf(layout) });
   return { snap, entries: flattenWithWorldTransforms(snap) };
 }
 
@@ -262,7 +266,13 @@ export function convertSoundPlaces(vfs, outDir, { planets = [], log = () => {}, 
       log(`  sounds: ${planet} has no pack yet, so its places are passed over`);
       continue;
     }
-    const placements = loadPlacements(vfs, planet, log);
+    let layout = null;
+    try {
+      layout = JSON.parse(readFileSync(join(outDir, planet, 'layout.json'), 'utf8'));
+    } catch {
+      layout = null;
+    }
+    const placements = loadPlacements(vfs, planet, log, layout);
     if (!placements) {
       log(`  sounds: ${planet} has no snapshot and no buildout tables`);
       continue;
@@ -283,7 +293,9 @@ export function convertSoundPlaces(vfs, outDir, { planets = [], log = () => {}, 
     // `late`: the late stamp the caller's mount gives (finalnames.mjs), written as it is. `states`: Restuss's launch
     // city was read in, its emitters tagged with the state they sound in, which `status` asks of Rori's.
     const states = placements.snap.restuss ? { states: { [RESTUSS_KEY]: RESTUSS_STATES_VERSION } } : {};
-    writeFileSync(file, JSON.stringify({ format: PLACES_FORMAT, planet, frame: 'snapshot', ...states, soundObjects, emitters, pobs, surfaces, rooms, ...(late ? { late } : {}) }));
+    // `stateObjects`: SOE's earlier objects and the holidays were read in (stateObjects.mjs), which `status` asks.
+    const added = placements.snap.stateObjects ? { stateObjects: STATE_OBJECTS_VERSION } : {};
+    writeFileSync(file, JSON.stringify({ format: PLACES_FORMAT, planet, frame: 'snapshot', ...states, ...added, soundObjects, emitters, pobs, surfaces, rooms, ...(late ? { late } : {}) }));
     const result = { planet, emitters: emitters.length, soundObjects, distinct, inside, pobs: names.size, pobsWithRow: withRow.length, rooms: Object.keys(rooms).length, surfaces: Object.keys(surfaces).length };
     results.push(result);
     log(`  sounds: ${planet}: ${emitters.length} placed emitters (${soundObjects} sound objects, ${distinct} distinct sounds, ${inside} inside a building), ${names.size} portal layouts (${withRow.length} with a room row), ${Object.keys(rooms).length} room rows, ${Object.keys(surfaces).length} templates with a surface of their own -> ${file}`);

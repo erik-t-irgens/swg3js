@@ -119,8 +119,8 @@
 //   { t: 'day', ms }                                       the admin changing how long a day is, for everybody: the day
 //                                                          is anchored where it stands so nobody's sun moves
 //   { t: 'worldStateSet', key, value }                       the admin standing a world in another state for everybody
-//                                                          (worldState.mjs: `restuss` living or ruins), taken by each
-//                                                          browser at its next arrival on that world
+//                                                          (worldState.mjs: `restuss` living or ruins, `soe` final or
+//                                                          earlier), taken by each browser at its next arrival on that world
 //   { t: 'items', do: list|get|add|drop|using|tint, rows?, kind?, what?, thing?, id?, worn?, held?, tint?, at? }
 //                                                          what this character owns (ledger.mjs). `list` is the
 //                                                          backpack handed up on a first claim; after that the
@@ -242,7 +242,7 @@
 //                                                          by; `race` is 1 on a server that carries the group's race word
 //                                                          (raceWire.mjs's RACE_VERSION), and a browser calls no race against
 //                                                          any other; `states` the world states this server keeps
-//                                                          ({ restuss: 'living' }, worldState.mjs), which every browser stands
+//                                                          ({ restuss: 'living', soe: 'final' }, worldState.mjs), which every browser stands
 //                                                          at its next arrival on that world, and a browser keeps its own
 //                                                          setting against any server whose hail carries none
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }

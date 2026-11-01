@@ -62,7 +62,7 @@ export const TUNING_HELPERS: readonly string[] = ['race', 'engines', 'track', 'n
  */
 export const DEBUG_GROUPS: readonly { title: string; helpers: readonly string[] }[] = [
   { title: 'Tuning', helpers: TUNING_HELPERS },
-  { title: 'Where and when', helpers: ['teleport', 'teleportSwg', 'swg', 'look', 'zoom', 'mouse', 'cell', 'near', 'find', 'player', 'scene', 'advance', 'advanceCost', 'breakFrames', 'map', 'mapGroup', 'galaxy', 'spaceMap', 'travel', 'arrival', 'gates', 'doorless', 'buildings', 'enter', 'interiors', 'doors', 'instances', 'corvette', 'restuss', 'gallery', 'late', 'oursEntries', 'show', 'character', 'capture', 'captureShip', 'goToShot', 'place', 'placeView', 'placeClock', 'cloning'] },
+  { title: 'Where and when', helpers: ['teleport', 'teleportSwg', 'swg', 'look', 'zoom', 'mouse', 'cell', 'near', 'find', 'player', 'scene', 'advance', 'advanceCost', 'breakFrames', 'map', 'mapGroup', 'galaxy', 'spaceMap', 'travel', 'arrival', 'gates', 'doorless', 'buildings', 'enter', 'interiors', 'doors', 'instances', 'corvette', 'restuss', 'earlier', 'holidays', 'solid', 'gallery', 'late', 'oursEntries', 'show', 'character', 'capture', 'captureShip', 'goToShot', 'place', 'placeView', 'placeClock', 'cloning'] },
   { title: 'Travel, homes and trade', helpers: ['shuttle', 'terminal', 'ride', 'rigHull', 'fittings', 'house', 'homes', 'deed', 'prop', 'placements', 'purse', 'trade'] },
   // The world editor (`src/editor/`, the dev server's alone), whose camera's and hand's numbers of feel are sliders
   // (`editorDials.ts`) once it has been loaded.

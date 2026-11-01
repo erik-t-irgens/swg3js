@@ -107,7 +107,7 @@ function methodOf(src: string, sig: string): string {
   const blockers = (h.s.blockList as { o: { model: string } }[]).map((b) => b.o.model);
   ok(!blockers.includes('scorch') && blockers.includes('slab'), 'and a thing that came to no collider is cover for nobody');
   const stream = read('src/world/layoutStream.ts');
-  ok(/\|\| isDecal\(prim\.material\)\) \{/.test(stream) && /\n\s+if \(isDecal\(prim\.material\)\) continue;/.test(stream), 'both collider paths, the plain one and the one for things kilometres wide, leave a decal out (text)');
+  ok(/\|\| isDecal\(prim\.material\)(?: \|\| fallingWater\(prim\.material\))?\) \{/.test(stream) && /\n\s+if \(isDecal\(prim\.material\)\) continue;/.test(stream), 'both collider paths, the plain one and the one for things kilometres wide, leave a decal out (text)');
 }
 
 // The doorway rule leaves out a thing far bigger than its building: the real hosting over a made-up house.

@@ -79,9 +79,9 @@ import { Doors, type DoorView } from './doors.ts';
 import { InstanceLocks } from './instances.ts';
 import { gatherOpeners } from './doorMath.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
-import { standingList } from './ngeOverlay.ts';
+import { laterRows, standingList } from './ngeOverlay.ts';
 import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, brigadeBodies, personDormant, rosterRows, ruinsOf, type RosterRow, type RuinsCircle } from './restuss.ts';
-import { releaseWorldStates, stateNow, standsIn, takeWorldStates } from './worldState.ts';
+import { releaseWorldStates, stateNow, standsIn, statesInForce, takeWorldStates } from './worldState.ts';
 import { knownAbsent, packBytes, packJson, shippedAsk } from './packFiles.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
@@ -668,6 +668,17 @@ export class World {
    * state and not this browser's. Settles at once with nothing to wait for. None, and nothing is waited on.
    */
   worldStatesReady: (() => Promise<void>) | null = null;
+  /**
+   * The states block of the world this arrival is for, set before its wait (`worldStatesReady`) and kept: what the game's
+   * wait asks whether any key is one a server keeps (`serverKeptIn`), since a world whose only states are the holidays'
+   * waits on no server's word.
+   */
+  statesComing: Readonly<Record<string, unknown>> | null = null;
+  /**
+   * Set by the game: the owner's shared walk-through file being read (`walkThrough.ts`), which an arrival waits on a moment
+   * before its streamer makes a collider. None, and nothing is waited on.
+   */
+  solidFileReady: Promise<void> | null = null;
   /**
    * Set by the game: where this world brings the player in and back, in the world's frame (the arrival, a
    * teleport's spot, and so where a death comes round on a world with no cloning facility). The NGE overlay keeps
@@ -2098,6 +2109,7 @@ export class World {
     // the world's, since the frames drawn during the wait hand the world's pack to whatever reads it (the placed
     // sounds are put down the frame `this.pack` is first seen, `readySound`), and each of those must read the states
     // this arrival takes and not the ones an arrival would have taken before the hail.
+    this.statesComing = pack.layout?.states ?? null;
     if (pack.layout?.states) {
       await this.worldStatesReady?.();
       // A travel in the wait: the pack is nobody's yet, so the unload never saw it and it is let go here.
@@ -2131,16 +2143,20 @@ export class World {
     // The NGE overlay's people last of all (`standingList` in `ngeOverlay.ts`), so every row before them
     // keeps its place in the list, and so its `stood:` name, in every browser; stood behind this same loading
     // screen with the rest.
-    const people = wildLife.peopleRows() as StandingRow[];
+    // The rows that join a room only because SOE's earlier objects or a holiday's buildings are read in come out of the
+    // world's own and go after the brigade (`laterRows`), so nobody else's `stood:` name moves with them; their own names
+    // are their keys (`stoodName`), since the brigade's length is this browser's.
+    const { own: people, later } = laterRows(wildLife.peopleRows() as StandingRow[]);
     const heralds = people.length ? conversationPack.standRows(this.packId) : [];
     // Restuss's First Brigade of ours, after the heralds and before the overlay, in the list whatever state the city
     // stands in (stood only in the ruins, by their tag), and Core3's town inside its circle skipped in the ruins: no
     // row's place, and so no `stood:` name, depends on the state (`restuss.ts`).
     const restuss = pack.layout?.states?.[RESTUSS_KEY];
-    const roster = restuss && people.length ? await this.restussRoster(pack) : [];
+    const brigade = restuss && people.length ? await this.restussRoster(pack) : [];
+    const roster = [...brigade, ...later];
     if (token !== this.loadToken) return null;
     const ruins: RuinsCircle | null = restuss?.centre && stateNow(RESTUSS_KEY) === 'ruins' ? { centre: restuss.centre, circle: RESTUSS_TUNE.circle } : null;
-    this.restussFile = restuss ? { centre: restuss.centre ?? null, roster: roster.length } : null;
+    this.restussFile = restuss ? { centre: restuss.centre ?? null, roster: brigade.length } : null;
     standingPeople.adopt(standingList(people, heralds, wildLife.overlayRows() as StandingRow[], roster as StandingRow[]), wildLife.peopleCreatures(), { ...wildLife.peopleExtras(), dormant: (r) => personDormant(r, standsIn, ruins) });
     this.packProgress = 0.12;
 
@@ -2259,6 +2275,13 @@ export class World {
       this.gallery?.dispose();
       this.gallery = new Gallery(this.scene, pack.url(''), layout.center, (x, z) => this.terrain.heightAt(x, z));
       void this.gallery.load();
+    }
+
+    // The owner's shared walk-through file (`walkThrough.ts`) in before the streamer makes its first collider: awaited a
+    // moment at most (four seconds, ours, as the heralds' file is), since a world with no file is the world as it was.
+    if (layout && this.solidFileReady) {
+      await Promise.race([this.solidFileReady, new Promise<void>((r) => setTimeout(r, 4000))]);
+      if (token !== this.loadToken) return null;
     }
 
     // Snapshot objects stream in around the player from here on (see LayoutStreamer).
@@ -10640,6 +10663,38 @@ export class World {
       dormant: this.layoutStream?.dormantCount ?? 0,
       people: standingPeople.dormantReport(),
       roster: this.restussFile?.roster ?? 0,
+    };
+  }
+
+  /**
+   * For the console: what this world's layout carries of one state key (`soe`, a holiday's: `tools/swg/stateObjects.mjs`),
+   * by its objects' tags -- how many carry it, how many of those stand now, in force or not -- its layout block and, for
+   * SOE's earlier objects, the layout's mark (how many roots the converter left out, and why), and the `nearest` objects
+   * of the key to a point of the world's frame, each with its raw place (`/loc`). Null where the layout has no such key.
+   */
+  stateKeyReport(key: string, near: { x: number; z: number } | null = null, nearest = 0): { tagged: number; standing: number; dormant: number | null; inForce: string | null; block: unknown; mark: unknown; nearest: { template: string; at: { x: number; z: number }; loc: { x: number; z: number }; metres: number; contained: boolean }[] } | null {
+    const layout = this.pack?.layout;
+    if (!layout?.states?.[key]) return null;
+    const mine = layout.objects.filter((o) => typeof o.state === 'string' && o.state.startsWith(`${key}=`));
+    const c = layout.center;
+    const list = near && nearest > 0
+      ? mine
+          .map((o) => {
+            const at = { x: -(o.x - c.x), z: o.z - c.z };
+            return { template: o.template, at, loc: { x: Math.round(o.x), z: Math.round(o.z) }, metres: Math.round(Math.hypot(at.x - near.x, at.z - near.z)), contained: !!o.contained };
+          })
+          .sort((a, b) => a.metres - b.metres)
+          .slice(0, nearest)
+      : [];
+    return {
+      tagged: mine.length,
+      standing: mine.filter((o) => standsIn(o.state)).length,
+      // What the streamer really files dormant for this world, every state's together: what is not standing anywhere.
+      dormant: this.layoutStream?.dormantCount ?? null,
+      inForce: statesInForce()[key] ?? null,
+      block: layout.states[key],
+      mark: key === 'soe' ? ((layout as { stateObjects?: { left?: unknown; earlier?: unknown; dropped?: unknown[] } }).stateObjects ?? null) : null,
+      nearest: list,
     };
   }
 

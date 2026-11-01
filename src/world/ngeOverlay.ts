@@ -212,6 +212,36 @@ export function standingList<T>(own: readonly T[], heralds: readonly T[], overla
   return overlay.length ? [...first, ...overlay] : first;
 }
 
+/**
+ * The world states whose rows stand after everybody else's: SOE's earlier objects and the holidays' (the converter's own
+ * `STATE_OBJECT_KEYS` in `tools/swg/stateObjects.mjs`, which `soeHolidays.test.ts` holds this list to, key for key).
+ */
+export const LATER_KEYS: ReadonlySet<string> = new Set(['soe', 'halloween', 'lifeday', 'loveday', 'empireday']);
+
+/** The added state a row's tag names (`soe` of `soe=earlier`), or '' for a row of none of them (Restuss's, or untagged). */
+export function laterKeyOf(state: string | null | undefined): string {
+  const key = typeof state === 'string' ? state.split('=')[0] : '';
+  return key && LATER_KEYS.has(key) ? key : '';
+}
+
+/**
+ * A world's own rows with the ones that join a room only because SOE's earlier objects or a holiday's buildings are read
+ * in (tagged with that state, the spawns run's `laterJoined`) taken out (`later`), in the order they came: the world puts
+ * them after its heralds and the people of ours (`ours`), so every row, herald and person of ours before them keeps its
+ * place in the list, and so its `stood:` name, whatever the converter made of the added states. The later rows
+ * themselves go by their own keys (`stoodName`), since the brigade and the heralds before them can come out a different
+ * length in two browsers.
+ */
+export function laterRows<T extends { state?: string | null }>(rows: readonly T[]): { own: T[]; later: T[] } {
+  const own: T[] = [];
+  const later: T[] = [];
+  for (const r of rows) {
+    if (laterKeyOf(r.state)) later.push(r);
+    else own.push(r);
+  }
+  return { own, later };
+}
+
 /** A fetch's answer read as JSON only where it is one: a missing file is a 404, or a page another server hands back. */
 async function jsonOf(res: Response): Promise<unknown> {
   if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;

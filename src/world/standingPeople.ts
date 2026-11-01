@@ -55,7 +55,7 @@ import { roll } from './spawnSeed.ts';
 import { SEATED_MOOD, moodOfRow } from './mobiles/moodIdle.ts';
 import { Patrol, walksRound } from './patrols.ts';
 import { seatOfMood, type SeatedRow } from './seatProps.ts';
-import { NGE_OVERLAY_TUNE, picksFights, rowKeptOff } from './ngeOverlay.ts';
+import { NGE_OVERLAY_TUNE, laterKeyOf, picksFights, rowKeptOff } from './ngeOverlay.ts';
 
 /**
  * One person, as the converter wrote them: x and z in the snapshot's frame, as every placed object
@@ -196,7 +196,10 @@ export interface PersonOverrides {
 export interface PersonSpawn {
   /** In a room, which changes how the ground is found. */
   inside: boolean;
-  /** Its place in the pack's list, which no other row has: the world's name for it but for a row of the overlay's (`stoodName`). */
+  /**
+   * Its place in the pack's list, which no other row has: the world's name for it but for a row of the overlay's or of an
+   * added state's (`stoodName`).
+   */
   index: number;
   /** The one number everything it rolls is drawn from: its key's, so it rolls the same whatever order the rows are in. */
   seed: number;
@@ -214,8 +217,9 @@ export interface PersonSpawn {
   /** The room of its building it stands in, where the data says: it seeds the body's cell. */
   room?: number;
   /**
-   * Its name in the world (`stood:<world>:<n>`, or `stood:<world>:<key>` for a row of SOE's own overlay: `stoodName`),
-   * the same in every browser: what it is shared under, and what a server holds its death by.
+   * Its name in the world (`stood:<world>:<n>`, `stood:<world>:<key>` for a row of SOE's own overlay, or
+   * `stood:<world>:<state>-<key>` for one that joins an earlier or a holiday's room: `stoodName`), the same in every
+   * browser: what it is shared under, and what a server holds its death by.
    */
   id: string;
   /** How long it stays down once it dies, in seconds: its row's own respawn, which a server holds its death for. */
@@ -261,6 +265,9 @@ export function seedOfRow(r: Pick<StandingRow, 'key'>, index: number): number {
 /** A key a row of SOE's own overlay may be named by: a plain id, never figures alone, which would read as a place in the list. */
 const OVERLAY_NAME_KEY = /^(?=.*[A-Za-z_-])[A-Za-z0-9_-]{1,24}$/;
 
+/** A key a row of an added state may be named by: a plain id (its name leads with the state's own key, so figures alone are fine). */
+const ADDED_NAME_KEY = /^[A-Za-z0-9_-]{1,24}$/;
+
 /**
  * A standing row's name in the world (`PersonSpawn.id`), the same in every browser: what a server shares the body
  * under and holds its death by. The world is in it because every world's rows are numbered from nought, and a death
@@ -273,10 +280,17 @@ const OVERLAY_NAME_KEY = /^(?=.*[A-Za-z_-])[A-Za-z0-9_-]{1,24}$/;
  * catalogue, or whose room its own archives do not hold, so by place in the list every one after it would name another
  * body on a machine whose catalogue joins it; by key a row's name is its own whatever else that machine dropped. A
  * key that is no plain id falls back to the place.
+ *
+ * A row that joins a room only because SOE's earlier objects or a holiday's buildings are read in (tagged with that
+ * state: `laterKeyOf` in `ngeOverlay.ts`) goes by its state and its own key (`stood:<world>:soe-<key>`): those rows stand
+ * after Restuss's brigade and the heralds, whose lengths hang on a catalogue or a file landing within a race and on the
+ * owner's knobs, so by place in the list two browsers could give two bodies one name.
  */
-export function stoodName(world: string, row: Pick<StandingRow, 'key' | 'src'> | undefined, i: number): string {
+export function stoodName(world: string, row: Pick<StandingRow, 'key' | 'src' | 'state'> | undefined, i: number): string {
   const k = row?.key;
   if (row?.src === 'nge' && typeof k === 'string' && OVERLAY_NAME_KEY.test(k)) return `stood:${world}:${k}`;
+  const added = laterKeyOf(row?.state);
+  if (added && typeof k === 'string' && ADDED_NAME_KEY.test(k)) return `stood:${world}:${added}-${k}`;
   return `stood:${world}:${i}`;
 }
 

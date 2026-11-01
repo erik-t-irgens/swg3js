@@ -58,6 +58,16 @@ export const GAMEPLAY: { title: string; knobs: readonly Knob[] }[] = [
         ],
         hint: "How Restuss on Rori stands: the launch city whole, with its people, its starport and its shuttleport, or its ruins with the First Brigade standing guard and the late camp's pads its only ports. The camp and the faction cantinas stand either way. It changes when you next arrive on Rori; on a server that keeps it, the server's admin decides it for everybody.",
       },
+      {
+        key: 'soe',
+        label: "SOE's earlier objects",
+        kind: 'choice',
+        choices: [
+          { value: 'final', label: 'As SOE left the worlds' },
+          { value: 'earlier', label: 'Stand them again' },
+        ],
+        hint: "What SOE's older publishes placed in the worlds and later took out -- city streets' signs and terminals, a Tatooine town's old buildings, furniture taken out of cantinas, camps and props in the wild -- stood again where they last stood, on every world that has them. One that a later publish built over is left out. It changes when you next arrive on a world; on a server that keeps it, the server's admin decides it for everybody.",
+      },
     ],
   },
 ];

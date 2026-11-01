@@ -97,6 +97,11 @@ function readWorld(planet: string): { objs: Placed[]; defs: Map<string, Def>; ce
   const defs = new Map<string, Def>();
   for (const list of Object.values(manifest.categories)) for (const d of list) if (d?.id) defs.set(d.id, d);
   const c = layout.center;
+  // The world as it stands by default: SOE's earlier objects and the holidays' dressing (a state of their own each,
+  // `tools/swg/stateObjects.mjs`) are appended after every other object, so the list up to the first of them is the
+  // world's own, every index in it unmoved; the research's figures are of that world.
+  const firstAdded = layout.objects.findIndex((o) => /^(soe|halloween|lifeday|loveday|empireday)=/.test(String((o as { state?: string }).state ?? '')));
+  if (firstAdded >= 0) layout.objects = layout.objects.slice(0, firstAdded);
   const hostIn = layout.objects.map((o) => ({ model: o.model, x: gameX(o.x, c.x), y: o.y, z: gameZ(o.z, c.z), q: { x: o.q[1], y: -o.q[2], z: -o.q[3], w: o.q[0] }, contained: !!o.contained }));
   const hosted = furnitureHosts(hostIn, (id) => defs.get(id));
   const drawn = new Map<string, boolean>();
@@ -239,7 +244,8 @@ for (const planet of ['tatooine', 'naboo', 'corellia']) {
   const layout = JSON.parse(readFileSync(join(dir, 'layout.json'), 'utf8')) as { objects: Obj[] };
   let oldRule = 0;
   let research = 0;
-  for (let i = 0; i < layout.objects.length; i++) {
+  // The world's own objects alone, as `readWorld` reads them (the added states' come after them).
+  for (let i = 0; i < objs.length; i++) {
     const o = layout.objects[i];
     if (!objs[i].drawn) continue;
     const dReg = boxDistance(town.x, town.z, regionCentre(regionIndex(o.x)), regionCentre(regionIndex(o.z)));

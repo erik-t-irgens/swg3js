@@ -252,10 +252,12 @@ interface LayoutObj {
   /** The snapshot's own building row and room (step 7), in a pack converted with them. */
   cell?: number;
   in?: number;
+  /** The world state it stands in (`<key>=<value>`), absent for one that stands in every state. */
+  state?: string;
 }
 
 /** A world read as the streamer reads it: mirrored in x and centred, each object's radius kept for its tier. */
-function world(planet: string): { objects: (HostObject & { radius: number })[]; defs: Map<string, HostDef>; center: { x: number; z: number }; exact: (HostObject & { radius: number })[] } | null {
+function world(planet: string): { objects: (HostObject & { radius: number })[]; defs: Map<string, HostDef>; center: { x: number; z: number }; exact: (HostObject & { radius: number })[]; added: (HostObject & { radius: number })[] } | null {
   const lu = new URL(`${planet}/layout.json`, root);
   const mu = new URL(`${planet}/manifest.json`, root);
   if (!existsSync(lu) || !existsSync(mu)) return null;
@@ -264,10 +266,15 @@ function world(planet: string): { objects: (HostObject & { radius: number })[]; 
   const defs = new Map<string, HostDef>();
   for (const list of Object.values(manifest.categories)) for (const d of list) defs.set(d.id, d);
   const c = layout.center;
-  const objects = layout.objects.map((o) => ({ model: o.model, x: -(o.x - c.x), y: o.y, z: o.z - c.z, q: { x: o.q[1], y: -o.q[2], z: -o.q[3], w: o.q[0] }, contained: !!o.contained, radius: o.radius }));
+  // The census is the world as it stands by default: SOE's earlier objects and the holidays' dressing (a state of their
+  // own each, `tools/swg/stateObjects.mjs`) stand nowhere then, so they are no one's furniture here and keep their places
+  // in the list (a host is a layout index); `added` holds them alone, for the check of their own below.
+  const isAdded = (o: LayoutObj) => /^(soe|halloween|lifeday|loveday|empireday)=/.test(String(o.state ?? ''));
+  const objects = layout.objects.map((o) => ({ model: o.model, x: -(o.x - c.x), y: o.y, z: o.z - c.z, q: { x: o.q[1], y: -o.q[2], z: -o.q[3], w: o.q[0] }, contained: !!o.contained && !isAdded(o), radius: o.radius }));
   // The same objects with the snapshot's own building and room where the pack carries them, as the streamer reads them.
-  const exact = layout.objects.map((o, i) => (o.contained && typeof o.in === 'number' && typeof o.cell === 'number' ? { ...objects[i], hostIndex: o.in, cell: o.cell } : objects[i]));
-  return { objects, defs, center: c, exact };
+  const exact = layout.objects.map((o, i) => (o.contained && !isAdded(o) && typeof o.in === 'number' && typeof o.cell === 'number' ? { ...objects[i], hostIndex: o.in, cell: o.cell } : objects[i]));
+  const added = layout.objects.map((o, i) => (o.contained && isAdded(o) ? (typeof o.in === 'number' && typeof o.cell === 'number' ? { ...objects[i], contained: true, hostIndex: o.in, cell: o.cell } : { ...objects[i], contained: true }) : objects[i]));
+  return { objects, defs, center: c, exact, added };
 }
 
 /**
@@ -415,6 +422,27 @@ for (const planet of ['tatooine', 'naboo']) {
     ok(byName.missOrigin === 0 && byName.missMiddle === 0 && byName.missCorner === 0 && byName.checked === ex.stats.hosted && wider > 0, `${planet}: and hosted so, every one of ${byName.checked} is still seen from every room whose box holds its origin, its middle or a corner of its turned box (${byName.corners} such rooms), so a thing reaching through a doorway or filed in the room next door never pops`);
     ok(ex.stats.noBox <= h.stats.noBox && ex.stats.hosted >= h.stats.hosted, `${planet}: and none that the rooms' boxes hosted is lost (${ex.stats.noBox} in no room, against ${h.stats.noBox} by the boxes)`);
     ok(both > 0 && agree / both > 0.99, `${planet}: where both answer, the boxes chose the snapshot's own building ${(100 * agree / both).toFixed(2)}% of the time`);
+  }
+  // SOE's earlier objects and the holidays' dressing in rooms, alone: every one hosted by the building and room the
+  // snapshot names (a thing taken out of a room of a building today's buildouts keep was once filed with no building at
+  // all, and stood about the world's origin), and none held by two.
+  const addedIn = w.added.filter((o, i) => o.contained && !w.objects[i].contained).length;
+  if (!addedIn) console.log(`skip  ${planet}: no earlier object or holiday's row stands in a room (converted before them)`);
+  else {
+    const ad = furnitureHosts(w.added, (id) => w.defs.get(id));
+    let named = 0;
+    let modelled = 0;
+    let hosted = 0;
+    w.added.forEach((o, i) => {
+      if (!o.contained || w.objects[i].contained) return;
+      if (typeof o.hostIndex === 'number') named++;
+      // A thing with no model of its own in the pack (a sound), or a particle effect, is hosted by none: hosting's own rule.
+      const def = w.defs.get(o.model) as (HostDef & { particle?: boolean }) | undefined;
+      if (!def || def.particle) return;
+      modelled++;
+      if (ad.host[i] >= 0) hosted++;
+    });
+    ok(named === addedIn && hosted === modelled && ad.stats.twoHosts === 0, `${planet}: every one of the ${addedIn} earlier or holiday things in a room names its building and room, and every one with a model is hosted there (${named} named, ${hosted} of ${modelled} hosted)`);
   }
   for (const town of TOWNS) {
     if (town.planet !== planet) continue;

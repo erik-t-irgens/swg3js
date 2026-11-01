@@ -72,8 +72,13 @@ function table(vfs, path) {
  * Every buildout object of a planet as snapshot-style nodes (id, containedBy, template,
  * cellIndex, q [w,x,y,z], pos, radius, portalLayoutCrc). Areas that need an event (Life Day
  * and the like) are skipped.
+ *
+ * `only: 'events'` reads the event areas and nothing else, numbering from `idBase` (the holidays' dressing,
+ * stateObjects.mjs, read in as a world state of its own after everything else): an area the table names
+ * `server_<rest>` with no table of that name reads the client's own `client_<rest>` beside it, which is where the
+ * archives keep the two Halloween towns' dressing (objects.md O2). The plain reading is as it always was, ids and all.
  */
-export function loadBuildouts(vfs, planet, { events = false } = {}) {
+export function loadBuildouts(vfs, planet, { events = false, only = null, idBase = 1 << 30 } = {}) {
   const stats = { areas: 0, objects: 0, eventAreas: 0, unknownTemplates: 0, missingTables: 0, eventList: [], areaList: [] };
   const nodes = [];
   const areasTable = table(vfs, `datatables/buildout/areas_${planet}.iff`);
@@ -82,15 +87,18 @@ export function loadBuildouts(vfs, planet, { events = false } = {}) {
   const crcTable = vfs.has(crcPath) ? parseCrcStringTable(parseIff(vfs.read(crcPath))) : new Map();
   const nameOf = templateNames(vfs, crcTable);
   stats.computedTemplates = 0;
-  let nextId = 1 << 30; // well clear of the snapshot's ids
+  let nextId = idBase; // well clear of the snapshot's ids
+  const eventsOnly = only === 'events';
   areasTable.rows.forEach((area, areaIndex) => {
     const name = area.area;
     if (!name) return;
-    const rows = table(vfs, `datatables/buildout/${planet}/${name}.iff`);
+    if (eventsOnly && !area.eventRequired) return;
+    let rows = table(vfs, `datatables/buildout/${planet}/${name}.iff`);
+    if (!rows && eventsOnly && name.startsWith('server_')) rows = table(vfs, `datatables/buildout/${planet}/client_${name.slice('server_'.length)}.iff`);
     if (area.eventRequired) {
       stats.eventAreas++;
       stats.eventList.push({ area: name, event: String(area.eventRequired), rows: rows ? rows.rows.length : 0 });
-      if (!events) return;
+      if (!events && !eventsOnly) return;
     }
     if (!rows) {
       stats.missingTables++;

@@ -60,6 +60,32 @@
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { deflateRawSync } from 'node:zlib';
+import { isFallingWaterShader, readSolidFile } from '../../src/world/walkThrough.ts';
+import { placementsFolder } from './placementsStatus.mjs';
+
+/**
+ * The owner's shared walk-through file as this install ships it (`solid.json` in the placements folder: a checkout's
+ * `public/placements`, a release's `dist/placements`, `placementsFolder`; src/world/walkThrough.ts): the templates
+ * whose every placed copy the game walks through, which the bake leaves out so the people and creatures walk through what
+ * the player walks through. An empty set where the file is missing or not read.
+ */
+export function walkThroughTemplates(file = solidFileOf()) {
+  let text;
+  try {
+    if (!file) return new Set();
+    text = readFileSync(file, 'utf8');
+  } catch {
+    return new Set();
+  }
+  const read = readSolidFile(text);
+  return new Set([...read.rows].filter(([, solid]) => solid === false).map(([t]) => t));
+}
+
+/** The shared walk-through file's path in this install's placements folder, or null with no folder. */
+export function solidFileOf(root) {
+  const dir = placementsFolder(root);
+  return dir ? join(dir, 'solid.json') : null;
+}
 
 /**
  * The shape of the files this writes; a pack that says anything else is passed over by the game.
@@ -556,9 +582,11 @@ function mulMatrix(a, b) {
 
 /**
  * One GLB's triangles in model space: `positions` nine floats a triangle, `cells` the portal cell
- * index each stands in (0 the exterior shell, -1 a plain model with no cells at all).
+ * index each stands in (0 the exterior shell, -1 a plain model with no cells at all). A primitive whose
+ * material `skip` names (by the material's name, its shader) is left out: a waterfall's falling water
+ * (`isFallingWaterShader`), which the game builds no collider for.
  */
-export function readGlbTriangles(file) {
+export function readGlbTriangles(file, skip = isFallingWaterShader) {
   const buf = readFileSync(file);
   if (buf.length < 12 || buf.readUInt32LE(0) !== 0x46546c67) throw new Error(`not a glb: ${file}`);
   let off = 12;
@@ -592,6 +620,7 @@ export function readGlbTriangles(file) {
     if (node.mesh !== undefined && bin) {
       for (const prim of json.meshes[node.mesh].primitives ?? []) {
         if (prim.mode !== undefined && prim.mode !== 4) continue;
+        if (skip && prim.material !== undefined && skip(json.materials?.[prim.material]?.name)) continue;
         const posIdx = prim.attributes?.POSITION;
         if (posIdx === undefined) continue;
         const pos = accessorOf(json, bin, posIdx);
@@ -1106,10 +1135,18 @@ export async function buildNavGrid(dir, opts = {}) {
   const defs = new Map();
   for (const list of Object.values(manifest.categories ?? {})) for (const e of list) defs.set(e.id, e);
   const byModel = new Map();
+  // What the owner made walk-through (`public/placements/solid.json`): the game builds no collider for any copy of these,
+  // so the grid blocks no cell for them either (`opts.walkThrough`, a set of templates, stands in for the file in a test).
+  const walkThrough = opts.walkThrough ?? walkThroughTemplates();
+  let walkedThrough = 0;
   // Every object whatever world state it stands in (`state`, Restuss's living city and its ruins: restuss.mjs): one
   // grid serves both, so a body in the ruins routes round where a house stood and never into a building in either.
   for (const o of layout.objects) {
     if (o.contained) continue;
+    if (walkThrough.has(o.template)) {
+      walkedThrough++;
+      continue;
+    }
     const list = byModel.get(o.model);
     if (list) list.push(o);
     else byModel.set(o.model, [o]);
@@ -1166,7 +1203,7 @@ export async function buildNavGrid(dir, opts = {}) {
         if (r.opened) openedBy.set(model, (openedBy.get(model) ?? 0) + r.opened);
       }
     }
-    log(`  ${placed} placed objects (${buildings} of them portal buildings, ${missing} without a model), ${triangles} triangles, in ${((Date.now() - t) / 1000).toFixed(1)} s`);
+    log(`  ${placed} placed objects (${buildings} of them portal buildings, ${missing} without a model), ${triangles} triangles, in ${((Date.now() - t) / 1000).toFixed(1)} s${walkedThrough ? `; ${walkedThrough} walked through by the shared file (solid.json)` : ''}`);
     if (openedBy.size) {
       const top = [...openedBy].sort((a, b) => b[1] - a[1]);
       const cells = top.reduce((n, [, c]) => n + c, 0);
@@ -1306,6 +1343,8 @@ export async function buildNavGrid(dir, opts = {}) {
       placed,
       buildings,
       missing,
+      // Placed copies the shared walk-through file left out (solid.json), blocking no cell.
+      walkedThrough,
       triangles,
       layers: layerCount,
       heightCheck: Number(worstHeight.toFixed(4)),

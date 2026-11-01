@@ -1,5 +1,6 @@
 // The world states a server keeps: one world standing as one thing or another for everybody on the server --
-// Restuss as the living launch city or as its ruins -- so every browser connected stands one Restuss.
+// Restuss as the living launch city or as its ruins, SOE's earlier objects standing or left out -- so every browser
+// connected stands one Restuss and one set of worlds.
 //
 // Each is a word of the admin's (`worldStateSet { key, value }`, refused unless the line is the admin's and the
 // value is one its key allows), kept in `world.json` and the log as a record of its own (`worldState`), handed to
@@ -15,6 +16,9 @@
 export const WORLD_STATES = {
   // Ruins by default, as every browser's own setting is [owner, 2026-10-19, the pass's design §10 Q1].
   restuss: { values: ['living', 'ruins'], default: 'ruins' },
+  // SOE's earlier objects on every world that has them, the final world by default [the map fixes design §5]. The
+  // holidays' dressing is each browser's own setting and never a server's word.
+  soe: { values: ['final', 'earlier'], default: 'final' },
 };
 
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);

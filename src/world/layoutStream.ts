@@ -31,6 +31,7 @@ import type { DressingStand, StandAnswer } from './permanent.ts';
 import { PLACEMENT_KEY_PREFIX, radiusOfBounds } from '../story/placements.ts';
 import { FLORA_COLLISION, rowFloraParts, trunkRadius } from './floraCollision.ts';
 import { fileByState, standsIn } from './worldState.ts';
+import { isFallingWaterShader, solidRuleOf } from './walkThrough.ts';
 
 /**
  * What stands the doors in a building's doorways when its rooms are built and takes them down with
@@ -97,10 +98,16 @@ function colliderFar(o: PlacedObject, px: number, pz: number, slack: number): bo
 }
 /**
  * Whether the collider sweep ever gives an object collision, whatever its distance: `solid` true always, false
- * never, and absent by its size (`COLLIDER_MIN_RADIUS`), which is every snapshot object's rule. One function,
- * because the sweep and the perch's question of what could ever be under a body (`floorAsk.collides`) must agree.
+ * never, and absent by the owner's shared walk-through file's row for its template (`solidRuleOf`, `walkThrough.ts`:
+ * the plants, roots, mushrooms and Echo Base's floor cables, walked through as the client walked through them), else
+ * by its size (`COLLIDER_MIN_RADIUS`), which is every other snapshot object's rule. One function, because the sweep and
+ * the perch's question of what could ever be under a body (`floorAsk.collides`) must agree.
  */
 export function collidesByRule(o: PlacedObject): boolean {
+  if (o.solid === undefined) {
+    const rule = solidRuleOf(o.effectsOf ?? o.template);
+    if (rule !== undefined) return rule;
+  }
   return o.solid === true || (o.solid !== false && o.radius >= COLLIDER_MIN_RADIUS);
 }
 
@@ -161,6 +168,12 @@ export const DOORLESS_ENTRY: ReadonlyMap<string, string> = new Map([['thm_spc_ne
 /** A template as a name to compare: lower case, forward slashes, and the client's `shared_` taken off its file's name. */
 export function sameTemplateName(t: string): string {
   return t.replace(/\\/g, '/').toLowerCase().replace(/\/shared_([^/]+)$/, '/$1');
+}
+
+/** Whether a primitive's material is a waterfall's falling water (`FALLING_WATER_SHADERS`, by the shader's name): no collider. */
+export function fallingWater(material: THREE.Material | THREE.Material[]): boolean {
+  if (Array.isArray(material)) return material.length > 0 && material.every((m) => isFallingWaterShader(m.name));
+  return isFallingWaterShader(material.name);
 }
 
 /** Whether a placed template is one of the world builder's markers (`TOOL_ONLY_TEMPLATES`). */
@@ -2892,8 +2905,8 @@ export class LayoutStreamer {
       const prim = model.primitives[job.prim];
       if (!job.pieces) {
         const posAttr = prim.geometry.getAttribute('position');
-        // A decal is never solid (`isDecal`): its client extent is nothing at all.
-        if (!posAttr || posAttr.count < 3 || posAttr.itemSize !== 3 || (posAttr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute || isDecal(prim.material)) {
+        // A decal is never solid (`isDecal`): its client extent is nothing at all; nor is falling water (`walkThrough.ts`).
+        if (!posAttr || posAttr.count < 3 || posAttr.itemSize !== 3 || (posAttr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute || isDecal(prim.material) || fallingWater(prim.material)) {
           job.prim++;
           continue;
         }
@@ -4017,6 +4030,9 @@ export class LayoutStreamer {
       // extent for every decal appearance is NULL. Made solid, the bombed house's 118 m scorch in Mos Eisley was a table
       // top 0.57 m over the street round it and its 33 m wall decal an invisible wall out through the house's back.
       if (isDecal(prim.material)) continue;
+      // Nor is a waterfall's falling water (the owner, 2026-10-31: "the waterfalls shouldn't be collidable"): its piece builds
+      // no collider and the rock or the basin it falls over stays solid; a model of nothing but falling water is solid nowhere.
+      if (fallingWater(prim.material)) continue;
       const idx = prim.geometry.getIndex();
       const indices = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
       // A scaled row's colliders take the scale baked into their vertices (the engine's trimesh has none of its own), on

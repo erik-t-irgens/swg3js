@@ -25,12 +25,25 @@ export const WORLD_STATES: Readonly<Record<string, { readonly values: readonly s
   // Ruins by default [owner, 2026-10-19, the design's §10 Q1: "Ruins"]: how SOE's live game ended; the living launch
   // city is the other state, a setting or the admin's word away.
   restuss: { values: ['living', 'ruins'], default: 'ruins' },
+  // SOE's earlier objects (`tools/swg/stateObjects.mjs`): what older publishes placed that the final world has not got,
+  // on every world that has them at once. The final world by default [the map fixes design §5, the owner's "a switch like
+  // restuss is good"]: the worlds as SOE left them, the earlier objects a setting or the admin's word away.
+  soe: { values: ['final', 'earlier'], default: 'final' },
 };
 
-/** What the message line calls a world state, the world it is on and each of its values. Ours. */
-export const WORLD_STATE_WORDS: Readonly<Record<string, { readonly name: string; readonly world: string; readonly values: Readonly<Record<string, string>> }>> = {
+/**
+ * What the message line calls a world state, the world it is on and each of its values, and the words between the
+ * name and the value (`link`, "stands as" unless said). Ours.
+ */
+export const WORLD_STATE_WORDS: Readonly<Record<string, { readonly name: string; readonly world: string; readonly link?: string; readonly values: Readonly<Record<string, string>> }>> = {
   restuss: { name: 'Restuss', world: 'Rori', values: { living: 'the living city', ruins: 'ruins' } },
+  soe: { name: "SOE's earlier objects", world: 'a world that has them', link: 'are', values: { final: 'left out, as SOE left the worlds', earlier: 'standing where older publishes placed them' } },
 };
+
+/** The words between a state's name and its value: "stands as", or its own. */
+export function stateLink(key: string): string {
+  return WORLD_STATE_WORDS[key]?.link ?? 'stands as';
+}
 
 /**
  * What the message line says when a key's state moves to `value` (the server's word, or this browser's setting),
@@ -42,7 +55,8 @@ export function stateNews(key: string, before: string | null, value: string, inF
   const w = WORLD_STATE_WORDS[key];
   if (!w) return null;
   const said = w.values[value] ?? value;
-  return inForce !== null ? `${w.name} stands as ${said} when you next arrive on ${w.world}: it stays as it is until then` : `${w.name} stands as ${said} when you next arrive on ${w.world}`;
+  const link = stateLink(key);
+  return inForce !== null ? `${w.name} ${link} ${said} when you next arrive on ${w.world}: it stays as it is until then` : `${w.name} ${link} ${said} when you next arrive on ${w.world}`;
 }
 
 /**
@@ -65,6 +79,31 @@ export interface LayoutStateBlock {
 
 const STORAGE = 'swg.world.';
 const TAG = /^([a-z0-9_]+)=([a-z0-9_]+)$/;
+
+/**
+ * A state this browser decides alone by a rule of its own, never a server's word: each holiday's dressing
+ * (`holidays.ts`), on or off by its switch and the date. Taken at an arrival exactly as a world state is.
+ */
+export interface RuledState {
+  readonly values: readonly string[];
+  readonly default: string;
+  /** What an arrival would take now. */
+  now: () => string;
+}
+
+/** The ruled states by key (`ruleWorldState`). */
+const ruled = new Map<string, RuledState>();
+
+/** A key decided by a rule of this browser's own (the holidays: `holidays.ts`), asked whenever an arrival takes it. */
+export function ruleWorldState(key: string, rule: RuledState): void {
+  ruled.set(key, rule);
+  stamp++;
+}
+
+/** Whether a key is one decided by a rule of this browser's own. */
+export function isRuled(key: string): boolean {
+  return ruled.has(key);
+}
 
 /** The server's word, while it has said one: what its hail carried, or its admin's word since. Null with none. */
 let serverStates: Record<string, string> | null = null;
@@ -176,18 +215,34 @@ export function onWorldStates(fn: (why: 'server' | 'setting' | 'arrival') => voi
 
 /**
  * An arrival's states taken: each key of the world's `states` block stands in what `worldStateOf` says now, for
- * the rest of the world, whatever is said meanwhile. A key this build does not know stands in its block's own
- * default. Every key of the world before is let go first.
+ * the rest of the world, whatever is said meanwhile; a ruled key (a holiday's) in what its rule says now. A key this
+ * build does not know stands in its block's own default. Every key of the world before is let go first.
  */
 export function takeWorldStates(block: Readonly<Record<string, LayoutStateBlock>> | null | undefined): void {
   inForce.clear();
   for (const key of Object.keys(block ?? {})) {
     const b = block![key];
     const known = Object.prototype.hasOwnProperty.call(WORLD_STATES, key);
-    const value = known ? worldStateOf(key) : typeof b?.default === 'string' ? b.default : '';
+    const rule = ruled.get(key);
+    const value = known ? worldStateOf(key) : rule ? ruledValue(rule) : typeof b?.default === 'string' ? b.default : '';
     if (value) inForce.set(key, value);
   }
   tell('arrival');
+}
+
+/** What a ruled key's rule says, held to its own values (its default for anything else, or a rule that throws). */
+function ruledValue(rule: RuledState): string {
+  try {
+    const v = rule.now();
+    return rule.values.includes(v) ? v : rule.default;
+  } catch {
+    return rule.default;
+  }
+}
+
+/** Whether a world's `states` block names any key a server keeps (`WORLD_STATES`): what an arrival waits on a hail for. */
+export function serverKeptIn(block: Readonly<Record<string, unknown>> | null | undefined): boolean {
+  return Object.keys(block ?? {}).some((k) => Object.prototype.hasOwnProperty.call(WORLD_STATES, k));
 }
 
 /** Let go of the states a world arrived with: between worlds, every key reads what `worldStateOf` says. */
@@ -201,7 +256,9 @@ export function releaseWorldStates(): void {
 export function stateNow(key: string): string | null {
   const here = inForce.get(key);
   if (here !== undefined) return here;
-  return Object.prototype.hasOwnProperty.call(WORLD_STATES, key) ? worldStateOf(key) : null;
+  if (Object.prototype.hasOwnProperty.call(WORLD_STATES, key)) return worldStateOf(key);
+  const rule = ruled.get(key);
+  return rule ? ruledValue(rule) : null;
 }
 
 /** The states in force for the world here, by key: empty for a world with none. */
@@ -318,6 +375,7 @@ export function forgetWorldStates(): void {
   serverStates = null;
   inForce.clear();
   sessionSetting.clear();
+  ruled.clear();
   listeners.length = 0;
   stamp++;
 }

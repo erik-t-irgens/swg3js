@@ -215,7 +215,7 @@ import { detailLevels, exteriorAppearance, resolveParts } from './appearance.mjs
 import { LOD_FORMAT, lodMeshesFor as lodMeshesForDeps } from './lodlevels.mjs';
 import { decodeDds } from './dds.mjs';
 import { FLOOR_PACK_VERSION, floorBlock, floorSize, parseFloor } from './flr.mjs';
-import { GOAL_SNAP, NAV_BAKE_RULES, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, writeNavGrid } from './navgrid.mjs';
+import { GOAL_SNAP, NAV_BAKE_RULES, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, walkThroughTemplates, writeNavGrid } from './navgrid.mjs';
 import { buildGlb, glbAlphaMode, glbSpecStamped } from './glb.mjs';
 import { dump, find, isForm, parseIff, readCString } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
@@ -327,6 +327,7 @@ import {
 } from './finalnames.mjs';
 import { buildFinalNames, finalNamesText } from './finalnamesBuild.mjs';
 import { RESTUSS_KEY, RESTUSS_STATES_VERSION, addToSnapshot, layoutObject, namePortsInStates, portTag, restussAddition, restussLast, restussSoundsStatus, restussStatus, statesBlock, tagServerObjects } from './restuss.mjs';
+import { EARLIER_KEY, OverlapJudge, STATE_OBJECTS_VERSION, STATE_OBJECT_KEYS, addStateObjects, boxOf, droppedOf, hasStateObjects, laterJoined, stateObjectBlocks, stateObjectsFor, stateObjectsMark, stateObjectsStatus } from './stateObjects.mjs';
 
 // A .env beside package.json names the folders once; @NAME anywhere in the arguments becomes that
 // variable's value (from .env or the environment), whichever shell is running.
@@ -2542,7 +2543,7 @@ async function terrainCheck(dir, limit, opts = {}) {
  * Cached per world, since the `fittings` command asks once per pack.
  */
 const cellIdCache = new Map();
-function cellIndexById(vfs, planet) {
+function cellIndexById(vfs, planet, layout = null) {
   const had = cellIdCache.get(planet);
   if (had) return had;
   const out = new Map();
@@ -2558,6 +2559,9 @@ function cellIndexById(vfs, planet) {
   // Restuss's launch city, whose rooms Core3's screenplays name by the launch snapshot's own cell ids (restuss.mjs):
   // a fitting stood in one belongs to the living city and carries its state.
   addToSnapshot(snap, restussAddition(vfs, planet, snap.nodes.slice()));
+  // SOE's earlier objects and the holidays' rows after it (stateObjects.mjs), as the world's layout left them, so a
+  // fitting in one of their rooms finds it and carries their state.
+  if (hasStateObjects(layout)) addStateObjects(snap, stateObjectsFor(vfs, planet), { dropped: droppedOf(layout) });
   const walk = (node, building) => {
     const t = snap.templates[node.templateIndex] ?? '';
     const isCell = /shared_cell\.iff$/.test(t);
@@ -2585,7 +2589,12 @@ function yawOfLayoutQuat(q) {
   return Math.atan2(2 * (x * z + w * y), 1 - 2 * (x * x + y * y));
 }
 
-function loadPlanetObjects(vfs, planet) {
+/**
+ * `stateObjects`: SOE's earlier objects and the holidays' dressing (stateObjects.mjs), appended after Restuss's city:
+ * `'all'` every one the archives give (the snapshot, which decides which stand), a world's layout to take them as its
+ * own mark left them (`pois`), or `'none'` (every diagnostic, which reads the world as the plain snapshot places it).
+ */
+function loadPlanetObjects(vfs, planet, { stateObjects = 'none' } = {}) {
   // The launch planets ship a world snapshot; the expansions' planets place everything through
   // buildout tables and have none, so an empty snapshot is fine as long as buildouts exist.
   const wsPath = `snapshot/${planet}.ws`;
@@ -2641,6 +2650,16 @@ function loadPlanetObjects(vfs, planet) {
     const server = tagServerObjects(snap, restuss.centre);
     const c = restuss.counts;
     console.error(`restuss: the launch city from ${restuss.archive} inside ${restuss.rect.join(',')}: ${c.top} top-level objects, ${c.all} with their children, ${c.buildings} buildings, ${c.ruins} with a ruin of their kind${c.offset ? `, ${c.offset} ids moved clear of today's` : ', every raw id kept'}; middle ${restuss.centre.x},${restuss.centre.z} (${restuss.centre.from === 'clientregion' ? "the client's own region" : 'the rectangle'})${server ? `; ${server} of Core3's objects in its circle belong to it` : ''}`);
+  }
+  // SOE's earlier objects and the holidays' dressing (stateObjects.mjs), after Restuss's city and everything else, so no
+  // index of today's world or the city's moves; the legacy `--events` run already stood the holidays all year above.
+  if (stateObjects !== 'none') {
+    const added = stateObjectsFor(vfs, planet);
+    addStateObjects(snap, added, { dropped: stateObjects === 'all' ? null : droppedOf(stateObjects), holidays: !flags.has('--events') });
+    const e = added.earlier;
+    if (e?.nodes.length) console.error(`earlier: ${e.nodes.length} of SOE's earlier objects from ${e.counts.copies} older copies (${e.counts.top} standing alone, ${e.counts.inside} in a room of today's world, ${e.counts.all} with what they hold)${e.counts.restuss ? `, ${e.counts.restuss} in Restuss's rectangle left to the city` : ''}${e.counts.offset ? `, ${e.counts.offset} ids moved clear of today's` : ', every raw id kept'}`);
+    const h = added.holidays;
+    if (h && Object.keys(h.counts).length) console.error(`holidays: ${Object.entries(h.counts).map(([k, n]) => `${k} ${n} rows (${h.areas[k].join(', ')})`).join('; ')}${h.unknown ? `; ${h.unknown} rows of an event no switch stands` : ''}`);
   }
   const entries = flattenWithWorldTransforms(snap);
   return { snap, entries, snapshotCount, buildout: buildout.stats, spawns, core3 };
@@ -2966,6 +2985,13 @@ function packStatus(dir) {
   }
   let wantFittings = false;
   let wantObjEffects = false;
+  /** The owner's shared walk-through file's templates, which a world's grid key folds in (navgrid.mjs, finalnames.mjs). */
+  const statusWalkThrough = walkThroughTemplates();
+  /**
+   * The worlds whose placed sounds were written before their earlier objects and holidays (stateObjects.mjs), each with
+   * why: one `sounds` run for one, one run over every planet for several, since the bank each run converts is one.
+   */
+  const stateSounds = [];
   /** The worlds whose trees and rocks still stand on guessed cylinders, each with why. */
   const wantFloraCollision = [];
   /** The worlds whose flora GLBs carry no leaf card class (`extras.swgCard`). */
@@ -3110,7 +3136,7 @@ function packStatus(dir) {
     // A grid that names a layout other than the pack's is baked again; one that names none is asked only beside a
     // world converted with SOE's final files, so an install the names list cannot serve is never asked for its grids.
     // `navgrid --skip-existing` asks the very same function, so a resumed bake keeps nothing this asks for.
-    const navStale = gridLayoutStale(navGrid, packDir, manifest);
+    const navStale = gridLayoutStale(navGrid, packDir, manifest, statusWalkThrough);
     if (navStale) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid ${navStale}`);
     // Its own `if`: exportWater always writes the file, so its existence is the whole test.
     if (terrain && !water) need(`water <swg-dir> all ${dir} --retail-only`, `${planet} has no water.json`);
@@ -3143,6 +3169,17 @@ function packStatus(dir) {
     // And its placed sounds, read from the archives with the city in them (soundplaces.mjs): an `if` of its own.
     const restussSounds = planet === 'rori' ? restussSoundsStatus(layout, readJson(join(packDir, 'sounds.json'))) : null;
     if (restussSounds) need(`sounds <swg-dir> ${dir} ${planet} --retail-only`, restussSounds.why);
+    // SOE's earlier objects and the holidays' dressing (stateObjects.mjs): the snapshot of a world that has them until its
+    // layout carries them, then every reader after it whose file was written before, together. A loop of its own.
+    const stateAsks = stateObjectsStatus(planet, layout, { pois, sounds: readJson(join(packDir, 'sounds.json')), travel, fittings, spawns: readJson(join(packDir, 'spawns.json')) });
+    for (const stateAsk of stateAsks) {
+      if (stateAsk.ask === 'snapshot') need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, stateAsk.why);
+      else if (stateAsk.ask === 'pois') need(`pois <swg-dir> ${planet} ${packDir} --retail-only`, stateAsk.why);
+      else if (stateAsk.ask === 'sounds') stateSounds.push([planet, stateAsk.why]);
+      else if (stateAsk.ask === 'travel') wantTravel = true;
+      else if (stateAsk.ask === 'fittings') wantFittings = true;
+      else if (stateAsk.ask === 'spawns') need(`spawns ${dir} --swg=<swg-dir> --retail-only`, stateAsk.why);
+    }
     // What the reading of the programs could not do on this world, summed below (a pack from before
     // format 6 carries no count). Tallied here, ahead of the snapshot's own chain of asks and never
     // inside it: an `if` of its own between the material format's ask and the `else if` after it would
@@ -3206,6 +3243,10 @@ function packStatus(dir) {
   if (wantTravel) need(`travel <swg-dir> ${dir} --retail-only`, 'no world has its travel terminals, ticket collectors or shuttles, or a world was converted again after they were written: a starport is a building with nothing in it');
   if (travelMaterials.length) need(`travel <swg-dir> ${dir} --retail-only`, `the travel terminals and shuttles on ${travelMaterials.slice(0, 4).join(', ')}${travelMaterials.length > 4 ? ', ...' : ''} were ${MATERIAL_WHY}`);
   if (wantObjEffects) need(`objeffects <swg-dir> ${dir} --retail-only`, "a world's braziers, fountains, torches and lamps have no fire, spray or glow: the effects their client data hangs on them are not written (objeffects.json), or were written before the world or its fittings");
+  // The placed sounds of worlds with earlier objects or holidays written before them (stateObjects.mjs): one run over every
+  // planet where more than one asks, which converts the bank once.
+  if (stateSounds.length === 1) need(`sounds <swg-dir> ${dir} ${stateSounds[0][0]} --retail-only`, stateSounds[0][1]);
+  else if (stateSounds.length) need(`sounds <swg-dir> ${dir} all --retail-only`, `${stateSounds.length} worlds' placed sounds were written before their earlier objects and holidays were read in (${stateSounds.slice(0, 4).map(([w]) => w).join(', ')}${stateSounds.length > 4 ? ', ...' : ''})`);
   // One run converts every world's flora again (about two minutes for the lot).
   if (wantFloraCards.length) need(`flora <swg-dir> all ${dir} --retail-only`, `the flora on ${wantFloraCards.length} world${wantFloraCards.length === 1 ? '' : 's'} was converted before the leaf cards said what the client drew them as (blended or cut out, and their emissive) and before their pictures had the colour under their clear texels bled from the leaf, so far crowns thin and darken and the game guesses each card's class from its name (${wantFloraCards.slice(0, 3).join(', ')}${wantFloraCards.length > 3 ? ', ...' : ''})`);
   // The table every world reads its leaf card shaders from, beside the packs: written by the same run, so it is
@@ -3999,8 +4040,9 @@ function writePois(vfs, planet, snap, entries, cx, cz, outDir) {
   }
   const pois = result ? result.places : [];
   const s = result ? result.stats : null;
-  // `states`: its ports were named once per world state (restuss.mjs), which `status` asks of Rori's.
-  const file = withLate({ planet, center: { x: cx, z: cz }, clientPlaces: s ? s.archive : 0, ...(s && s.frame.rows ? { frameCheck: s.frame } : {}), ...(snap.restuss ? { states: { [RESTUSS_KEY]: RESTUSS_STATES_VERSION } } : {}), pois }, vfs, 'pois');
+  // `states`: its ports were named once per world state (restuss.mjs), which `status` asks of Rori's; `stateObjects`: with
+  // SOE's earlier objects and the holidays read in (stateObjects.mjs), which `status` asks of every world that has them.
+  const file = withLate({ planet, center: { x: cx, z: cz }, clientPlaces: s ? s.archive : 0, ...(s && s.frame.rows ? { frameCheck: s.frame } : {}), ...(snap.stateObjects ? { stateObjects: STATE_OBJECTS_VERSION } : {}), ...(snap.restuss ? { states: { [RESTUSS_KEY]: RESTUSS_STATES_VERSION } } : {}), pois }, vfs, 'pois');
   writeFileSync(join(outDir, 'pois.json'), JSON.stringify(file));
   const counts = `${pois.length} (${pois.filter((p) => p.kind === 'place').length} the client's own named places, ${pois.filter((p) => p.kind === 'city' || p.kind === 'landmark' || p.kind === 'area').length} regions, ${pois.filter((p) => p.kind === 'starport' || p.kind === 'shuttleport').length} travel points)`;
   console.log(`points of interest: ${counts} -> ${join(outDir, 'pois.json')}`);
@@ -4025,7 +4067,8 @@ async function snapshotPlanet(vfs, planet, outDir) {
     const radius = options.radius === 'all' ? Infinity : Number(options.radius ?? 400);
     const max = Number(options.max ?? Infinity);
     const wsPath = `snapshot/${planet}.ws`;
-    const { snap, entries, snapshotCount, buildout, spawns, core3 } = loadPlanetObjects(vfs, planet);
+    // Every one of SOE's earlier objects and the holidays' rows the archives give: this run decides which stand.
+    const { snap, entries, snapshotCount, buildout, spawns, core3 } = loadPlanetObjects(vfs, planet, { stateObjects: 'all' });
     console.error(`${wsPath}: ${snapshotCount} top-level objects, ${entries.length} including contained and buildouts, ${snap.templates.length} templates`);
     if (spawns) {
       const st = spawns.stats;
@@ -4069,9 +4112,36 @@ async function snapshotPlanet(vfs, planet, outDir) {
       }
       return null;
     };
+    // Which of SOE's earlier objects stand (stateObjects.mjs): every object of today's world is handed to the judge as it
+    // is placed, and each earlier root asked as it comes, by its model's box; one left out takes what it holds with it.
+    const judge = new OverlapJudge();
+    const droppedIds = new Set();
+    const droppedRoots = [];
+    const leftOut = { today: 0, earlier: 0, inside: 0 };
+    let layersLeft = 0;
+    const addedKeyOf = (node) => {
+      const key = typeof node.state === 'string' ? node.state.split('=')[0] : '';
+      return STATE_OBJECT_KEYS.includes(key) ? key : '';
+    };
+    const buildingOf = (e) => {
+      const r = roomOf(e);
+      return r ? r.building : null;
+    };
     const pushObject = (e, obj) => {
       // The world state it stands in (`restuss=living`, `restuss=ruins`), where it stands in only one (restuss.mjs).
       if (e.node.state) obj.state = e.node.state;
+      const added = addedKeyOf(e.node);
+      const def = models.get(obj.model);
+      const box = def && !def.particle && !def.failed ? boxOf(def.bounds, e.world.q, e.world.pos) : null;
+      if (added === EARLIER_KEY && e.node.root) {
+        const why = judge.judge(box, e.node.root === 'inside' ? buildingOf(e) : null);
+        if (why) {
+          droppedIds.add(e.node.id);
+          droppedRoots.push(e.node.id);
+          leftOut[e.node.root === 'inside' ? 'inside' : why]++;
+          return;
+        }
+      } else if (!added) judge.placed(box, obj.contained ? buildingOf(e) : null);
       objectRow.set(e.node.id, objects.length);
       if (obj.contained) indoorRows.push([objects.length, e]);
       objects.push(obj);
@@ -4090,6 +4160,11 @@ async function snapshotPlanet(vfs, planet, outDir) {
     for (const e of inRegion) {
       const n = e.node;
       const template = snap.templates[n.templateIndex];
+      // Whatever an earlier root the judge left out held goes with it (stateObjects.mjs).
+      if (droppedIds.has(e.parentId)) {
+        droppedIds.add(n.id);
+        continue;
+      }
       const r = resolveTemplateMesh(vfs, template, cache);
       if (r.skip) {
         skip(r.skip, template);
@@ -4157,7 +4232,11 @@ async function snapshotPlanet(vfs, planet, outDir) {
         continue;
       }
       const obj = { template, model: id, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: n.radius, contained: e.parentId !== 0 };
-      if (!obj.contained) {
+      // An earlier object or a holiday's row stands on the final world's ground and lays none of its own (stateObjects.mjs):
+      // a layer is applied whatever state the world stands in, and would move the ground of the world as SOE left it.
+      if (!obj.contained && addedKeyOf(n)) {
+        if (resolveTemplateString(vfs, template, ['terrainModificationFileName'], layerCache)) layersLeft++;
+      } else if (!obj.contained) {
         const layer = copyTerrainLayer(vfs, template, outDir, layerCache);
         if (layer) obj.layer = layer;
       }
@@ -4179,10 +4258,26 @@ async function snapshotPlanet(vfs, planet, outDir) {
     }
     console.log(`rooms: ${indoorRows.length} objects inside buildings, ${roomsWritten} with their room from the cell that holds them, ${hostsWritten} with the building's own row`);
     const terrainFile = await copyTerrain(vfs, planet, outDir);
+    // SOE's earlier objects and the holidays' rows (stateObjects.mjs): each added state's block beside Restuss's, for an
+    // arrival to take, and the mark at the layout's end that says this run read them in and which earlier roots it left
+    // out, which every reader of the snapshot after it reads back.
+    const stateObjectsOfLayout = () => {
+      if (!snap.stateObjects) return {};
+      const added = stateObjectsFor(vfs, planet);
+      const addedStates = stateObjectBlocks(objects, added.holidays?.areas ?? {});
+      const standing = {};
+      for (const [key, block] of Object.entries(addedStates)) standing[key] = block.earlier ?? block.on;
+      const mark = stateObjectsMark({ earlier: added.earlier, holidays: added.holidays, dropped: droppedRoots, reasons: leftOut, standing });
+      const e = added.earlier;
+      if (e?.nodes.length) console.log(`earlier: ${standing[EARLIER_KEY] ?? 0} layout objects of SOE's earlier objects stand in the state of their own; ${droppedRoots.length} of ${e.nodes.length} roots left out (${leftOut.today} standing in or on today's world, ${leftOut.inside} in a room on today's furniture, ${leftOut.earlier} on a newer earlier one)`);
+      for (const [key, block] of Object.entries(addedStates)) if (key !== EARLIER_KEY) console.log(`holidays: ${key} ${block.on} layout objects (${block.areas.join(', ')})`);
+      if (layersLeft) console.log(`  ${layersLeft} of them name a terrain layer, left out: they stand on the final world's ground`);
+      return { addedStates, stateObjects: mark };
+    };
     // A world with states (Restuss) says so after its centre, which a reader takes from the head of the file as its
     // second key (`poisCentre.test.ts`).
     const states = snap.restuss ? statesBlock(snap.restuss, objects) : null;
-    const layout = layoutObject({ planet, center: { x: cx, z: cz }, states, radius: Number.isFinite(radius) ? radius : null, terrain: terrainFile, objects, skipped });
+    const layout = layoutObject({ planet, center: { x: cx, z: cz }, states, radius: Number.isFinite(radius) ? radius : null, terrain: terrainFile, objects, skipped, ...stateObjectsOfLayout() });
     if (states) console.log(`restuss: ${states[RESTUSS_KEY].living} objects stand in the living city and ${states[RESTUSS_KEY].ruins} ruins in its place`);
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
     const manifestPath = join(outDir, 'manifest.json');
@@ -4207,7 +4302,8 @@ async function snapshotPlanet(vfs, planet, outDir) {
     withLate(manifest, vfs, 'snapshot');
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}${flora.particles ? `, ${flora.particles} particle effects skipped` : ''}`);
-    writePois(vfs, planet, snap, entries, cx, cz, outDir);
+    // Its places from what stands: an earlier port the judge left out is no port of any state.
+    writePois(vfs, planet, snap, droppedIds.size ? entries.filter((e) => !droppedIds.has(e.node.id)) : entries, cx, cz, outDir);
     // The gates one world's zones are walked between, joined to the places beside them. It reads the
     // layout.json written a few lines above, so it needs nothing from the snapshot, and a world with
     // no gates in its layout writes no file and prints nothing at all.
@@ -6726,12 +6822,14 @@ switch (cmd) {
         console.warn(`no snapshot/${planet}.ws and no buildout table in archives`);
         continue;
       }
-      const { snap, entries } = loadPlanetObjects(vfs, planet);
       const layoutPath = join(outDir, 'layout.json');
+      const had = existsSync(layoutPath) ? JSON.parse(readFileSync(layoutPath, 'utf8')) : null;
+      // SOE's earlier objects and the holidays' rows as the world's own layout left them (stateObjects.mjs).
+      const { snap, entries } = loadPlanetObjects(vfs, planet, { stateObjects: hasStateObjects(had) ? had : 'none' });
       let cx;
       let cz;
       if (options.center && options.center !== 'auto') [cx, cz] = options.center.split(',').map(Number);
-      else if (existsSync(layoutPath)) ({ x: cx, z: cz } = JSON.parse(readFileSync(layoutPath, 'utf8')).center);
+      else if (had) ({ x: cx, z: cz } = had.center);
       else {
         const c = autoCenter(snap, entries);
         cx = Math.round(c.x);
@@ -7847,7 +7945,9 @@ switch (cmd) {
         // `materialFormat`: the terminals and the shuttles' pieces are models converted here, unstamped before 6.
         // `nge: 'none'`: the starports SOE's own table stands on Kashyyyk and Mustafar left out by choice (`--nge=none`), so
         // `status` does not ask for them again (`ngePortsUnstood`), as it does not ask `spawns` for the people.
-        JSON.stringify(withLate({ version: TRAVEL_PACK_VERSION, materialFormat: MATERIAL_FORMAT, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each starport and shuttleport building, joined to where this world's own snapshot places them" }, ...(ngeLeftOut ? { nge: 'none' } : {}), counts, rigs: used, rows }, vfs, 'travel'), null, 1),
+        // `stateObjects`: written from a layout with SOE's earlier objects and the holidays in it (stateObjects.mjs), which
+        // `status` asks of every world that has them.
+        JSON.stringify(withLate({ version: TRAVEL_PACK_VERSION, materialFormat: MATERIAL_FORMAT, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each starport and shuttleport building, joined to where this world's own snapshot places them" }, ...(hasStateObjects(layout) ? { stateObjects: STATE_OBJECTS_VERSION } : {}), ...(ngeLeftOut ? { nge: 'none' } : {}), counts, rigs: used, rows }, vfs, 'travel'), null, 1),
       );
       worlds++;
       things += rows.length;
@@ -8090,7 +8190,7 @@ switch (cmd) {
       const planet = layout.planet ?? dir.name;
       const props = c3.readServerProps(planet);
       if (props.length) {
-        const cells = cellIndexById(vfs, planet);
+        const cells = cellIndexById(vfs, planet, layout);
         for (const p of props) {
           const model = models.get(p.template)?.id ?? null;
           if (!model) {
@@ -8186,7 +8286,8 @@ switch (cmd) {
       writeFileSync(
         join(out, dir.name, 'fittings.json'),
         // `materialFormat` and `late`: the models it converts beside the rows stand for both, read back by `keptStale`.
-        JSON.stringify(withLate({ version: FITTINGS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each building that travel has no use for, joined to where this world's own snapshot places them" }, counts, rows, cloning }, vfs, 'fittings'), null, 1),
+        // `stateObjects`: joined with SOE's earlier objects and the holidays in the layout and the rooms (stateObjects.mjs).
+        JSON.stringify(withLate({ version: FITTINGS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each building that travel has no use for, joined to where this world's own snapshot places them" }, ...(hasStateObjects(layout) ? { stateObjects: STATE_OBJECTS_VERSION } : {}), counts, rows, cloning }, vfs, 'fittings'), null, 1),
       );
       worlds++;
       things += rows.length;
@@ -8731,8 +8832,17 @@ switch (cmd) {
     // Restuss's launch city is read in too (restuss.mjs), as every other reader of a world's snapshot reads it: its
     // rooms are the ones Core3's town rows indoors there name, by the launch snapshot's own cell ids. `restuss` is
     // the city's own cells, by which the rows that join a room only because of it are told apart; null elsewhere.
+    // And SOE's earlier objects and the holidays' rows after it (stateObjects.mjs), as the world's own layout left them:
+    // `later` is every room they bring with its state, by which the rows that join one are told apart and stood last.
+    const layoutAt = (world) => {
+      try {
+        return JSON.parse(readFileSync(join(pos[1], world, 'layout.json'), 'utf8'));
+      } catch {
+        return null;
+      }
+    };
     const roomsOf = (world) => {
-      const none = { rooms: new Map(), restuss: null };
+      const none = { rooms: new Map(), restuss: null, later: null, stated: false };
       if (!options.swg) return none;
       try {
         const ws = `snapshot/${world}.ws`;
@@ -8743,7 +8853,10 @@ switch (cmd) {
         mergeBuildouts(snap, bo);
         const added = restussAddition(spawnVfs, world, own, bo.nodes);
         addToSnapshot(snap, added);
-        return { rooms: sp.roomsOf(snap), restuss: added ? added.cells : null };
+        const layout = layoutAt(world);
+        const stated = hasStateObjects(layout);
+        if (stated) addStateObjects(snap, stateObjectsFor(spawnVfs, world), { dropped: droppedOf(layout) });
+        return { rooms: sp.roomsOf(snap), restuss: added ? added.cells : null, later: stated ? snap.stateObjects.cells : null, stated };
       } catch {
         /* a world whose snapshot will not read simply keeps its people indoors and unplaced */
         return none;
@@ -8930,11 +9043,11 @@ switch (cmd) {
         noWorld.push(world);
         continue;
       }
-      const { rooms, restuss } = roomsOf(world);
+      const { rooms, restuss, later: laterCells, stated } = roomsOf(world);
       const worldPools = pools.get(world) ?? new Map();
       const lost = { body: 0, room: 0 };
       let routesLost = 0;
-      const kept = [];
+      const packed = [];
       for (const s of statics.get(world) ?? []) {
         // The place and the facing both, through the room's own turn (`intoRoom` says why both); a
         // person in a room no snapshot or buildout holds is a spot in a room and nowhere on a planet.
@@ -8946,12 +9059,17 @@ switch (cmd) {
         if (got.row.routeLost) routesLost++;
         const takes = I.takerFaction(corvette.takers, world, got.row.who);
         if (takes) got.row.takes = takes;
-        kept.push({ row: got.row, cell: s.cell });
+        packed.push({ row: got.row, cell: s.cell });
       }
+      // The rows that find their room only because an earlier building or a holiday's is read in (stateObjects.mjs),
+      // taken out and tagged with its state, to stand after every other row, the heralds and the people of ours.
+      const { kept, later } = laterJoined(packed, laterCells);
       // The rows that find their room only because Restuss's launch city is read in, after every other row of the
       // world (`restussLast`), so no row's place in the list, and so no `stood:` name, moves; each tagged with the
       // living city its room is in, so it stands nowhere in the ruins.
       const rows = restussLast(kept, restuss);
+      rows.push(...later);
+      if (later.length) console.log(`spawns: ${world} — ${later.length} of Core3's people stand in rooms SOE's earlier objects or a holiday bring, after every other row`);
       const joinedLate = restuss ? kept.filter((e) => e.cell && restuss.has(e.cell)).length : 0;
       if (restuss) console.log(`spawns: ${world} — ${joinedLate} of Core3's people stand in the rooms of Restuss's launch city, after every other row`);
       lostBy.body += lost.body;
@@ -8988,6 +9106,9 @@ switch (cmd) {
             counts: { areas: r.spawn.length, noSpawn: r.noSpawn.length + lateSites.length, lateSites: lateSites.length, statics: rows.length, staticsDropped: dropped.get(world) ?? 0, noBody: lost.body, noRoom: lost.room },
             // Restuss's launch city was read in, and how many rows came to stand in its rooms (appended last).
             ...(restuss ? { restuss: { joined: joinedLate, version: RESTUSS_STATES_VERSION } } : {}),
+            // SOE's earlier objects and the holidays were read in as the layout left them, and how many rows joined their
+            // rooms (after Restuss's, last of all): `status` asks every world that has them.
+            ...(stated ? { stateObjects: STATE_OBJECTS_VERSION, laterJoined: later.length } : {}),
             areas: r.spawn,
             noSpawn: [...r.noSpawn, ...lateSites],
             statics: rows,
@@ -9173,6 +9294,8 @@ switch (cmd) {
     // own controller and every fighter climb 55, so the grid is cut to the body that can do least.
     // `SLOPE_CLIMB_DEGREES` in navgrid.mjs carries the whole of the owner's reasoning.
     const slope = options.slope ? Number(options.slope) : undefined;
+    // The owner's shared walk-through file (src/world/walkThrough.ts), read once: what every world's bake leaves out.
+    const walkThrough = walkThroughTemplates();
     let built = 0;
     for (const [planet, outDir] of targets) {
       if (!existsSync(join(outDir, 'layout.json'))) {
@@ -9204,7 +9327,7 @@ switch (cmd) {
         } catch {
           manifest = null;
         }
-        const stale = there ? gridLayoutStale(there, outDir, manifest) : null;
+        const stale = there ? gridLayoutStale(there, outDir, manifest, walkThrough) : null;
         if (there && there.version === NAV_GRID_VERSION && there.nx && Number(there.slopeDegrees) === Number(want) && rules >= NAV_BAKE_RULES && !stale) {
           console.log(`${planet}: nav.json is there already, version ${there.version} at ${there.slopeDegrees} degrees`);
           continue;
@@ -9221,9 +9344,10 @@ switch (cmd) {
         }
       }
       try {
-        // What it is baked from, taken before the bake reads it, so `status` can ask again when either moves.
-        const layoutKey = layoutKeyOf(outDir);
-        const grid = await buildNavGrid(outDir, { cell, slope, log: (line) => console.log(line) });
+        // What it is baked from, taken before the bake reads it, so `status` can ask again when either moves: the layout,
+        // its terrain and the shared walk-through file's rows that reach the world, the very set the bake leaves out.
+        const layoutKey = layoutKeyOf(outDir, walkThrough);
+        const grid = await buildNavGrid(outDir, { cell, slope, walkThrough, log: (line) => console.log(line) });
         if (layoutKey) grid.header.layoutKey = layoutKey;
         const out = writeNavGrid(outDir, grid);
         const stats = out.stats;

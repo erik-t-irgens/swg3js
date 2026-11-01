@@ -539,7 +539,7 @@ export function verifyFinalNames(dir, list, { openTre }) {
  * grid is asked for again exactly when the layout or the terrain under it moved, and never for a world converted
  * again to the same answer. Null where the pack has no layout.
  */
-export function layoutKeyOf(packDir) {
+export function layoutKeyOf(packDir, walkThrough = null) {
   let text;
   try {
     text = readFileSync(join(packDir, 'layout.json'), 'utf8');
@@ -548,8 +548,11 @@ export function layoutKeyOf(packDir) {
   }
   const h = createHash('sha1').update(text.replace(/\r\n/g, '\n'));
   let terrain = 'terrain.trn';
+  let placed = [];
   try {
-    terrain = JSON.parse(text).terrain ?? terrain;
+    const parsed = JSON.parse(text);
+    terrain = parsed.terrain ?? terrain;
+    placed = parsed.objects ?? [];
   } catch {
     // A layout that will not parse is still a layout to key; its terrain is the usual name.
   }
@@ -557,6 +560,13 @@ export function layoutKeyOf(packDir) {
     h.update('\n \n').update(readFileSync(join(packDir, terrain)));
   } catch {
     h.update('\n \nno terrain');
+  }
+  // And the owner's shared walk-through file's templates this world places (`walkThrough`, a set of templates the bake
+  // leaves out: navgrid.mjs `walkThroughTemplates`), so a grid is asked for again when a row that reaches the world moves;
+  // a world no row reaches keys exactly as it did before the file.
+  if (walkThrough?.size) {
+    const reached = [...new Set(placed.filter((o) => !o.contained && walkThrough.has(o.template)).map((o) => o.template))].sort();
+    if (reached.length) h.update('\n \nwalk through\n').update(reached.join('\n'));
   }
   return h.digest('hex').slice(0, 12);
 }
@@ -568,9 +578,9 @@ export function layoutKeyOf(packDir) {
  * world converted without them is left alone, so an install the list cannot serve is never asked for its grids.
  * `status` asks it and `navgrid --skip-existing` asks it, so a resumed bake never keeps a grid `status` then asks for.
  */
-export function gridLayoutStale(grid, packDir, manifest) {
+export function gridLayoutStale(grid, packDir, manifest, walkThrough = null) {
   if (!grid) return null;
-  if (grid.layoutKey) return grid.layoutKey !== layoutKeyOf(packDir) ? 'was baked from another layout or terrain than the pack has now' : null;
+  if (grid.layoutKey) return grid.layoutKey !== layoutKeyOf(packDir, walkThrough) ? 'was baked from another layout or terrain, or another walk-through file, than the pack has now' : null;
   return manifest?.late?.state === 'applied' ? "was baked before the world was converted with SOE's final files" : null;
 }
 

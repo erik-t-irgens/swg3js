@@ -322,10 +322,13 @@ export function statesBlock(restuss, objects) {
 
 /**
  * A world's `layout.json` object in its one key order: the world, its centre and, where it has any, its states
- * after the centre, which a reader takes from the head of the file as its second key (`poisCentre.test.ts`).
+ * after the centre, which a reader takes from the head of the file as its second key (`poisCentre.test.ts`). The added
+ * states' blocks (SOE's earlier objects and the holidays, stateObjects.mjs) join Restuss's there, after it, and their
+ * mark (`stateObjects`) goes last of all.
  */
-export function layoutObject({ planet, center, states = null, radius, terrain, objects, skipped }) {
-  return { planet, center, ...(states ? { states } : {}), radius, terrain, objects, skipped };
+export function layoutObject({ planet, center, states = null, radius, terrain, objects, skipped, addedStates = null, stateObjects = null }) {
+  const all = states || (addedStates && Object.keys(addedStates).length) ? { ...(states ?? {}), ...(addedStates ?? {}) } : null;
+  return { planet, center, ...(all ? { states: all } : {}), radius, terrain, objects, skipped, ...(stateObjects ? { stateObjects } : {}) };
 }
 
 /**

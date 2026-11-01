@@ -240,10 +240,10 @@ ok(snap.restuss && snap.restuss.centre.x === 5318, 'the snapshot carries what th
   pin(cli, /const state = portTag\(e\.node\.state, x, z, snap\.restuss\?\.centre\);/, "each port is tagged by its node's own state, or the ruins' where it stands in the city's circle");
   pin(cli, /const named = namePortsInStates\(found, \(list\) => namePorts\(list, travelPoints, seen\)\);\s*found\.forEach\(\(f, i\) => places\.push\(\{ name: named\.names\[i\], x: f\.x, z: f\.z, r: 0, kind: f\.kind, \.\.\.\(f\.state \? \{ state: f\.state \} : \{\}\) \}\)\);/, 'the ports are named once per state, and each row carries its state');
   pin(cli, /\.\.\.\(snap\.restuss \? \{ states: \{ \[RESTUSS_KEY\]: RESTUSS_STATES_VERSION \} \} : \{\}\), pois \}/, "Rori's places say they were named by state, which `status` asks");
-  pin(cli, /addToSnapshot\(snap, restussAddition\(vfs, planet, snap\.nodes\.slice\(\)\)\);\s*const walk = \(node, building\) => \{/, "the fittings' cell cache reads the city in, so a fitting in one of its rooms finds that room (cellIndexById)");
+  pin(cli, /addToSnapshot\(snap, restussAddition\(vfs, planet, snap\.nodes\.slice\(\)\)\);[\s\S]{0,400}?const walk = \(node, building\) => \{/, "the fittings' cell cache reads the city in, so a fitting in one of its rooms finds that room (cellIndexById)");
   pin(cli, /byaw: Math\.round\(yawOfLayoutQuat\(building\.q\) \* 1e4\) \/ 1e4,\s*\.\.\.\(building\.state \? \{ state: building\.state \} : \{\}\),/, "and carries its building's state");
   pin(cli, /bx: c\.bx, by: c\.by, bz: c\.bz, byaw: c\.byaw, \.\.\.\(c\.state \? \{ state: c\.state \} : \{\}\) \}\);/, 'onto every fitting row written from it');
-  pin(cli, /const added = restussAddition\(spawnVfs, world, own, bo\.nodes\);\s*addToSnapshot\(snap, added\);\s*return \{ rooms: sp\.roomsOf\(snap\), restuss: added \? added\.cells : null \};/, "the spawns run's rooms read the city in too, and know its own cells");
+  pin(cli, /const added = restussAddition\(spawnVfs, world, own, bo\.nodes\);\s*addToSnapshot\(snap, added\);[\s\S]{0,400}?return \{ rooms: sp\.roomsOf\(snap\), restuss: added \? added\.cells : null,/, "the spawns run's rooms read the city in too, and know its own cells");
   pin(cli, /const rows = restussLast\(kept, restuss\);/, 'and the rows that join only those rooms go last, tagged living');
   pin(cli, /\.\.\.\(restuss \? \{ restuss: \{ joined: joinedLate, version: RESTUSS_STATES_VERSION \} \} : \{\}\),/, 'which the spawns pack says, for `status`');
   pin(cli, /restussStatus\(layout, pois, readJson\(join\(packDir, 'spawns\.json'\)\)\)/, "`status` asks Rori's snapshot, places and people");
@@ -286,14 +286,16 @@ ok(snap.restuss && snap.restuss.centre.x === 5318, 'the snapshot carries what th
     const tagged = (travel?.rows ?? []).map((r, i) => (r.state ? i : -1)).filter((i) => i >= 0);
     ok(tagged.length > 0 && (travel?.rows ?? []).every((r) => !r.state || r.state === LIVING) && tagged[0] === (travel?.rows.length ?? 0) - tagged.length, `its travel rows of the launch city carry the living state and come last in the file (${tagged.length} of ${travel?.rows.length})`);
     const fittings = read('fittings.json') as { rows: { state?: string }[] } | null;
-    ok((fittings?.rows ?? []).some((r) => r.state === LIVING) && (fittings?.rows ?? []).every((r) => !r.state || r.state === LIVING), 'its fittings in the launch city carry the living state');
+    // Rows of SOE's earlier objects and the holidays (stateObjects.mjs) carry states of their own and are set aside here.
+    const ownRows = <T extends { state?: string }>(rows: T[]): T[] => rows.filter((r) => !r.state || r.state.startsWith('restuss='));
+    ok(ownRows(fittings?.rows ?? []).some((r) => r.state === LIVING) && ownRows(fittings?.rows ?? []).every((r) => !r.state || r.state === LIVING), 'its fittings in the launch city carry the living state');
     const spawns = read('spawns.json') as { restuss?: { joined: number; version: number }; statics: { state?: string }[] } | null;
-    const statics = spawns?.statics ?? [];
+    const statics = ownRows(spawns?.statics ?? []);
     const joined = statics.filter((r) => r.state === LIVING).length;
     ok(!!spawns?.restuss && spawns.restuss.joined > 0 && joined === spawns.restuss.joined && statics.slice(statics.length - joined).every((r) => r.state === LIVING), `its people who join the city's rooms (${spawns?.restuss?.joined}) are tagged living and stand after every other row`);
     const sounds = read('sounds.json') as { states?: Record<string, number>; emitters: { state?: string }[] } | null;
     if (!sounds?.states) note("Rori's placed sounds were written without the city (npm run swg -- sounds @SWG assets-private rori --retail-only): not checked");
-    else ok(sounds.emitters.some((e) => e.state === LIVING) && sounds.emitters.every((e) => !e.state || e.state === LIVING), `its placed sounds of the launch city carry the living state (${sounds.emitters.filter((e) => e.state === LIVING).length} of ${sounds.emitters.length})`);
+    else ok(sounds.emitters.some((e) => e.state === LIVING) && ownRows(sounds.emitters).every((e) => !e.state || e.state === LIVING), `its placed sounds of the launch city carry the living state (${sounds.emitters.filter((e) => e.state === LIVING).length} of ${sounds.emitters.length})`);
   }
 }
 

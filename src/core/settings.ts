@@ -93,6 +93,14 @@ export interface Settings extends FxSettings {
   weatherKind: number;
   /** Life Day's areas: -1 in season (15 December to 5 January), 1 always, 0 never. */
   lifeDay: number;
+  /**
+   * The holidays' dressing (`src/world/holidays.ts`), each -1 in its season, 1 always, 0 never, taken at the next arrival
+   * whether the weather is on or not: the Galactic Moon Festival's (Halloween: 20 October to 4 November), Love Day's (7 to
+   * 21 February) and Empire Day's with Remembrance Day's (1 to 21 May). Life Day's dressing follows `lifeDay`.
+   */
+  halloween: number;
+  loveday: number;
+  empireday: number;
   // Sound. One slider for everything and one per layer, so a bed can be turned down without
   // losing the footsteps; the switches are the things a player may simply not want.
   /** Everything, 0 to 1. */
@@ -183,6 +191,12 @@ export interface Settings extends FxSettings {
    * a server that keeps one stands it for everybody.
    */
   restuss: 'living' | 'ruins';
+  /**
+   * Whether SOE's earlier objects stand when you next arrive on a world that has them, with no server's word on it
+   * (`src/world/worldState.ts`'s `soe`): the worlds as SOE left them, or with what older publishes placed. Kept as the
+   * world state's own setting (`swg.world.soe`), which this mirrors, as `restuss` is.
+   */
+  soe: 'final' | 'earlier';
   /**
    * A Force push, pull or repulse knocks a body when its wave reaches it (dodgeable), rather than at the press
    * (`src/combat/forceWaveTune.ts`). Gameplay: it reads no graphics setting.
@@ -366,6 +380,10 @@ export const DEFAULT_SETTINGS: Settings = {
   weatherForce: -1,
   weatherKind: 0,
   lifeDay: -1,
+  // Each in its season, as Life Day is [the owner, 2026-10-31: "a switch like the snow for life day"].
+  halloween: -1,
+  loveday: -1,
+  empireday: -1,
   soundMaster: 0.8,
   soundAmbience: 1,
   soundEffects: 1,
@@ -421,6 +439,8 @@ export const DEFAULT_SETTINGS: Settings = {
   difficulty: 1,
   // The owner's (2026-10-19, the pass's design §10 Q1): Restuss stands as its ruins, how SOE's live game ended.
   restuss: 'ruins',
+  // The map fixes design §5: the worlds as SOE left them, the earlier objects a switch away.
+  soe: 'final',
   // The owner's (2026-10-24, the volumetrics design's Q16: "Let's make it both"): a Force power's knock travels with its
   // wave, at the air's own pace; the switch off puts back the instant knock to compare.
   forceKnockTravels: true,
