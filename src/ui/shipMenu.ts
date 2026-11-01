@@ -21,6 +21,12 @@ export interface ShipStatus {
   spaceName: string | null;
   /** The planet under this orbit, in space. */
   planetName: string | null;
+  /**
+   * Where a station lands a ship on the planet below, in space: the emulator's own list, named by the world's places and
+   * nearest its arrival first. Empty with none (no planet below, a pack from before the list): the ship lands at the
+   * world's own arrival.
+   */
+  landings?: readonly string[];
   /** The system's own name, in space ("Kessel System", "Deep Space"): what the status line says where there is no planet below. */
   zoneName?: string | null;
   /**
@@ -72,7 +78,8 @@ export interface ShipCruise {
 export interface ShipSource {
   status(): ShipStatus | null;
   goToSpace(): void;
-  land(): void;
+  /** Land on the planet below: at the landing place of that index in `ShipStatus.landings`, or the world's own arrival. */
+  land(at?: number): void;
   eject(): void;
   /** The hyperspace row: opens the System Map, or cancels a countdown. */
   hyperspace?(): void;
@@ -95,6 +102,9 @@ export class ShipMenu {
   private readonly title: HTMLElement;
   private readonly status: HTMLElement;
   private readonly rows: Record<Row, { button: HTMLButtonElement; why: HTMLElement }>;
+  /** Where to land, when the planet below has landing places; the names it holds now, so it is written only when they change. */
+  private readonly landing: HTMLSelectElement;
+  private landingNames = '';
 
   constructor(parent: HTMLElement, private readonly source: ShipSource, private readonly keyLabel: () => string) {
     this.root = document.createElement('div');
@@ -110,7 +120,7 @@ export class ShipMenu {
         <div class="ship-body">
           <p class="ship-status"></p>
           <div class="ship-action"><button data-do="space">Go to space</button><span class="why"></span></div>
-          <div class="ship-action"><button data-do="land">Land</button><span class="why"></span></div>
+          <div class="ship-action"><button data-do="land">Land</button><select class="ship-landing hidden" aria-label="Where to land"></select><span class="why"></span></div>
           <div class="ship-action"><button data-do="eject">Eject</button><span class="why"></span></div>
           <div class="ship-action"><button data-do="hyperspace">Hyperspace…</button><span class="why"></span></div>
           <div class="ship-action"><button data-do="dock">Dock</button><span class="why"></span></div>
@@ -129,7 +139,8 @@ export class ShipMenu {
     };
     this.rows = { space: row('space'), land: row('land'), eject: row('eject'), hyperspace: row('hyperspace'), dock: row('dock'), board: row('board'), aboard: row('aboard'), cruise: row('cruise') };
     this.rows.space.button.addEventListener('click', () => this.source.goToSpace());
-    this.rows.land.button.addEventListener('click', () => this.source.land());
+    this.landing = this.root.querySelector<HTMLSelectElement>('.ship-landing')!;
+    this.rows.land.button.addEventListener('click', () => this.source.land(this.landingNames ? Number(this.landing.value) : undefined));
     this.rows.eject.button.addEventListener('click', () => this.source.eject());
     // A press cancels a countdown, which changes the row at once rather than at the next half-second read.
     this.rows.hyperspace.button.addEventListener('click', () => {
@@ -165,6 +176,18 @@ export class ShipMenu {
     }
   }
 
+  /**
+   * The landing places offered beside the Land button, nearest the world's arrival first: written only when the list
+   * changes, so a choice made stays chosen while the menu reads itself again every half second; hidden with none.
+   */
+  private showLandings(names: readonly string[]): void {
+    const key = names.join('\u0000');
+    if (key === this.landingNames) return;
+    this.landingNames = key;
+    this.landing.replaceChildren(...names.map((n, i) => Object.assign(document.createElement('option'), { value: String(i), textContent: n })));
+    this.landing.classList.toggle('hidden', !names.length);
+  }
+
   /** The buttons that can be pressed now, and why the others cannot. */
   private update(): void {
     const s = this.source.status();
@@ -189,6 +212,7 @@ export class ShipMenu {
       this.status.textContent = 'Not in a ship.';
       set('space', 'Go to space', 'not in a ship');
       set('land', 'Land', 'not in a ship');
+      this.showLandings([]);
       set('eject', 'Eject', 'not in a ship');
       set('hyperspace', 'Hyperspace…', 'not in a ship');
       set('dock', 'Dock', 'not in a ship');
@@ -207,6 +231,7 @@ export class ShipMenu {
       s.inSpace ? 'already in space' : !s.spaceName ? 'this world has no orbit to go to' : (pilotOnly ?? (s.altitude !== null && s.altitude >= s.gateHeight && s.flying ? null : `climb above ${s.gateHeight} m over the ground first`)),
     );
     set('land', s.planetName ? `Land on ${s.planetName}` : 'Land', !s.inSpace ? 'only from space; on a planet the ship lands where it is flown' : (pilotOnly ?? (s.planetName ? null : 'no planet below')));
+    this.showLandings(s.inSpace ? (s.landings ?? []) : []);
     set(
       'eject',
       s.planetName ? (s.role === 'pilot' ? `Eject to ${s.planetName}, leaving the ship` : `Eject to ${s.planetName}`) : 'Eject',

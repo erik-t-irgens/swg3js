@@ -66,7 +66,7 @@ import { PaintRows, cellsOfTile, copyRecipes, paintTileOfId, tileCells, type Pai
 import { PaintFloraSource, appearancesNamed, recipeClassesMoved, recipesLead } from './paintFlora.ts';
 import { Wash } from './demWash.ts';
 import type { GroundRules } from './demShader';
-import { LayoutStreamer, nearTierRange, type Building, type CellState, type FloorUnder, type PlacedObject, type RoomAnswer, type WaterSurfaceHandle } from './layoutStream';
+import { LayoutStreamer, arrivalSlope, nearTierRange, openGroundAt, type Building, type CellState, type FloorUnder, type PlacedObject, type RoomAnswer, type WaterSurfaceHandle } from './layoutStream';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchMiddle, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { DRESSING_TUNE, type DressingKeep, type DressingStand, type StandAnswer } from './permanent.ts';
 import { PLACEMENT_KEY_PREFIX } from '../story/placements.ts';
@@ -94,6 +94,8 @@ import { worldNav } from './nav/nav.ts';
 import { MOBILE_CACHE } from './mobiles/assets.ts';
 import { DIFFICULTY } from './difficulty.ts';
 import { CLONING_TUNE, facilitiesNear, SPAWN_CELL_NAME, type FacilityChoice, type NamedPlace } from './cloning.ts';
+import { STANDING_TWICE, type CloningPoint } from './fittings.ts';
+import type { ArrivalPlace } from './arrival.ts';
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import { roomOverhead } from './nav/navMesh.ts';
 import type { SunInfo } from '../core/postfx';
@@ -177,6 +179,7 @@ import { clashes } from '../combat/clash.ts';
 
 const tmpQ = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
+const tmpN = new THREE.Vector3();
 
 /**
  * The rain's colour's kept record (the volumetrics' fourth wave, `rainColourIn`), every number field and element made a
@@ -1798,6 +1801,8 @@ export class World {
     // arrival would take now (`worldState.ts`).
     releaseWorldStates();
     this.restussFile = null;
+    this.propsStandingTwice = 0;
+    this.autoArrival = null;
     this.planet = planet;
     this.packId = packId;
     this.terrain?.detachSwg();
@@ -2046,7 +2051,7 @@ export class World {
    * waited on for at most `DRESSING_TUNE.floraWaitMs`, and the small file it comes from has nearly always
    * landed long before the pack.
    */
-  async loadPack(spawn: THREE.Vector3, opts: { keepOff?: Promise<DressingKeep | null> } = {}): Promise<THREE.Vector3 | null> {
+  async loadPack(spawn: THREE.Vector3, opts: { keepOff?: Promise<DressingKeep | null>; auto?: boolean } = {}): Promise<THREE.Vector3 | null> {
     const token = this.loadToken;
     const planet = this.planet;
     this.packStatus = 'loading';
@@ -2368,9 +2373,35 @@ export class World {
     this.packBase = `${scatter.length} scatter models, ${structures.length} structures${this.terrain.swg ? ', SWG terrain' : ''}`;
     this.packStatus = this.packBase;
     this.packProgress = 1;
-    if (!this.layoutStream) return this.terrain.swg ? new THREE.Vector3(spawn.x, this.terrain.heightAt(spawn.x, spawn.z), spawn.z) : null;
+    // An arrival with no place of its own was looked for on the stand-in ground, before the converted ground was attached
+    // above: it is judged again on the real one (the flattest dry spot near the centre), and that is where open ground is
+    // looked for. Anything else (a saved place, a world's own arrival) is left exactly where it was asked to stand.
+    const from = opts.auto && this.terrain.swg ? this.spawnPoint() : spawn;
+    if (!this.layoutStream) {
+      const at = this.terrain.swg ? new THREE.Vector3(from.x, this.terrain.heightAt(from.x, from.z), from.z) : null;
+      if (opts.auto) this.autoArrival = { standIn: spawn.clone(), ground: from.clone(), clear: null, steep: false, at: at?.clone() ?? null };
+      return at;
+    }
     this.layoutStream.update(spawn);
-    return this.layoutStream.clearSpawn(spawn, (x, z) => this.terrain.heightAt(x, z)) ?? new THREE.Vector3(spawn.x, this.terrain.heightAt(spawn.x, spawn.z), spawn.z);
+    // Open ground clear of every box; where no clear spot is gentle enough, the gentlest dry one clear of every box, however
+    // steep, before the flattest dry spot itself, which may stand inside its arrival building's box (`clearSpawn`'s `rank`).
+    const clear = this.layoutStream.clearSpawn(from, (x, z) => this.terrain.heightAt(x, z), (x, z) => this.openGround(x, z), (x, z) => arrivalSlope(this.terrain, x, z, tmpN));
+    const at = clear ?? new THREE.Vector3(from.x, this.terrain.heightAt(from.x, from.z), from.z);
+    if (opts.auto) this.autoArrival = { standIn: spawn.clone(), ground: from.clone(), clear: clear?.clone() ?? null, steep: !!clear && !this.openGround(clear.x, clear.z), at: at.clone() };
+    return at;
+  }
+
+  /**
+   * Where the last arrival with no place of its own was looked for and stood (`loadPack`'s `auto`), for the console
+   * (`__debug.arrival()`): the stand-in ground's flattest dry spot, the real ground's, the open spot found clear of every
+   * object's footprint (null where none was), whether that spot is steeper than `CLEAR_SPAWN.steepest` (no clear spot was
+   * gentle enough, so the gentlest was taken), and where the arrival was moved. In the game's frame.
+   */
+  autoArrival: { standIn: THREE.Vector3; ground: THREE.Vector3; clear: THREE.Vector3 | null; steep: boolean; at: THREE.Vector3 | null } | null = null;
+
+  /** Ground an arrival may be stood on: dry, as `spawnPoint` asks, and no steeper than `CLEAR_SPAWN.steepest` (`openGroundAt`). */
+  private openGround(x: number, z: number): boolean {
+    return openGroundAt(this.terrain, x, z, tmpN);
   }
 
   /**
@@ -6064,7 +6095,12 @@ export class World {
     if (thresholds) for (const m of this.lavaMaterials) refreshLavaFar(m);
   }
 
-  /** Find a comfortable spot near the origin: dry, gentle slope. */
+  /**
+   * Find a comfortable spot near the origin: dry, gentle slope. Asked twice for an arrival with no place of its own:
+   * at once, on the stand-in ground (where the world streams from), and again by `loadPack` once the converted ground is
+   * in, which is the answer the arrival is moved to (`autoArrival`). Dry is the water over each spot, a lake's as well as
+   * the world's sea.
+   */
   spawnPoint(): THREE.Vector3 {
     // A space zone has no ground to stand on: its arrival point is the zone's origin, in a ship.
     if (this.planet.space) return new THREE.Vector3(0, 0, 0);
@@ -6076,7 +6112,7 @@ export class World {
         const x = Math.sin(a) * r;
         const z = Math.cos(a) * r;
         const h = this.terrain.heightAt(x, z);
-        if (h < this.terrain.waterLevel + 1.5) continue;
+        if (h < this.terrain.waterHeightAt(x, z) + 1.5) continue;
         const ny = this.terrain.normalAt(x, z, n).y;
         const score = ny * 10 - r * 0.02;
         if (score > bestScore) {
@@ -6560,6 +6596,12 @@ export class World {
     this.mobiles?.remove(m);
   }
 
+  /** How many fittings were left out this world for standing where the layout already stands the same thing (`placeProp`). */
+  propsStandingTwice = 0;
+
+  /** The heading the last tube a facility stood the dead up in faces (`cloneRoomAt`), or null where it stood them by room. */
+  cloneHeading: number | null = null;
+
   /**
    * Stand a plain model somewhere, out of this world's own pack.
    *
@@ -6572,11 +6614,18 @@ export class World {
    * Filed under `key`, which is a name of its own, so a removal is one lookup and can never reach
    * something the snapshot placed.
    */
-  async placeProp(model: string, o: { key: string; at: { x: number; y: number; z: number }; yaw: number; turn?: readonly number[]; pack?: AssetPack | null; inside?: boolean; solid?: boolean; template?: string }): Promise<boolean> {
+  async placeProp(model: string, o: { key: string; at: { x: number; y: number; z: number }; yaw: number; turn?: readonly number[]; pack?: AssetPack | null; inside?: boolean; solid?: boolean; template?: string; unlessStanding?: boolean }): Promise<boolean> {
     const stream = this.layoutStream;
     const from = o.pack ?? this.pack;
     if (!stream || !from) return false;
     if (!from.find(model)) return false;
+    // A fitting the layout already stands (`unlessStanding`): the snapshot merged the server's outdoor screenplay props
+    // into the layout, and `fittings` writes the same calls again, so 61 of them stood twice over seven worlds (Tatooine's
+    // campfires, tents and crafting stations among them), a second model and a second collider in the very same place.
+    if (o.unlessStanding && o.template && stream.standsTemplateNear(o.template, o.at.x, o.at.y, o.at.z, STANDING_TWICE)) {
+      this.propsStandingTwice++;
+      return false;
+    }
     // A pack that is not this world's stands behind it for as long as the world is up, exactly as
     // the gallery does for a house: the streamer reloads a tier whenever the player walks away and
     // back, and a model it could not find the second time would simply stop being drawn.
@@ -8930,10 +8979,20 @@ export class World {
    * not something the client says -- and its way in otherwise. Null when that building's region has
    * not streamed in yet, which is the caller's cue to leave them on the ground where it stands.
    */
-  cloneRoomAt(x: number, z: number, template?: string): THREE.Vector3 | null {
+  cloneRoomAt(x: number, z: number, template?: string, tube: CloningPoint | null = null): THREE.Vector3 | null {
     if (!this.layoutStream) return null;
     const b = this.layoutStream.buildingPlacedAt(x, z, template);
     if (!b) return null;
+    // One of the facility's own tubes where the emulator gives it some (the world's `fittings.json` keeps Core3's
+    // `spawningPoints`; the caller picks one, `tubeFor`): in its own room, facing the way the server faced it.
+    const spot = tube ? this.layoutStream.tubeSpotIn(b, tube) : null;
+    if (spot) {
+      this.cellState = { building: b, cell: spot.cell };
+      this.prevPlayerPos.copy(spot.at);
+      this.cloneHeading = spot.heading;
+      return spot.at;
+    }
+    this.cloneHeading = null;
     const entry = this.layoutStream.namedEntryOf(b, SPAWN_CELL_NAME);
     if (!entry) return null;
     this.cellState = { building: b, cell: entry.cell };
@@ -9340,6 +9399,36 @@ export class World {
     this.cellState = { building: spot.building, cell: spot.cell };
     this.prevPlayerPos.copy(spot.at);
     return { at: spot.at, cell: spot.cell, object: spot.building.object ?? null };
+  }
+
+  /** The placed object standing at a point and what the streamer holds of it, for the console (`__debug.aimAt`), or null. */
+  placedAtPoint(x: number, y: number, z: number): { o: PlacedObject; about: ReturnType<LayoutStreamer['describePlaced']> } | null {
+    const o = this.layoutStream?.placedAtPoint(x, y, z) ?? null;
+    return o && this.layoutStream ? { o, about: this.layoutStream.describePlaced(o) } : null;
+  }
+
+  /** The building and room a room's own mesh belongs to, or null: the console's (`aimAt`). */
+  roomMeshOf(mesh: THREE.Object3D): ReturnType<LayoutStreamer['roomMeshOf']> {
+    return this.layoutStream?.roomMeshOf(mesh) ?? null;
+  }
+
+  /** The object template a collider was made for, or null (the ground, a body, a building's own shell): the console's. */
+  templateOfCollider(handle: number): string | null {
+    return this.layoutStream?.templateOfCollider(handle) ?? null;
+  }
+
+  /**
+   * Put the player in a world's room arrival (`WorldArrival.room`: Echo Base's Main Hangar, the old tutorial's first room)
+   * once its building is in: the spot `LayoutStreamer.roomArrivalSpot` finds and the room. Null while the building has not
+   * streamed in, and the world must have stepped since it did, since the floor is found by a ray.
+   */
+  standInArrivalRoom(home: ArrivalPlace): { at: THREE.Vector3; cell: number } | null {
+    if (!home.room || !this.layoutStream) return null;
+    const spot = this.layoutStream.roomArrivalSpot(home, home.room);
+    if (!spot) return null;
+    this.cellState = { building: spot.building, cell: spot.cell };
+    this.prevPlayerPos.copy(spot.at);
+    return { at: spot.at, cell: spot.cell };
   }
 
   /**
@@ -11442,7 +11531,8 @@ export class World {
     const df = this.demFlora;
     const planted = this.flora && (!df || df.source.paintedIn(cx * CHUNK_SIZE, cz * CHUNK_SIZE, CHUNK_SIZE));
     if (this.flora && planted) {
-      const built = this.flora.buildForChunk(cx, cz, (x, z) => this.terrain.heightAt(x, z), exclude);
+      // A floating family stands on the water over a lake bed (`plantingData`), the drawn water's own column with lava left out.
+      const built = this.flora.buildForChunk(cx, cz, (x, z) => this.terrain.heightAt(x, z), exclude, (x, z) => this.waterColumnAt(x, z));
       group = built.group;
       colliders = built.colliders;
       trees = built.trees;

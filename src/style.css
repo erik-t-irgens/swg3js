@@ -713,6 +713,7 @@ b { color: var(--accent); font-weight: 600; }
 .ship-action button:hover:not(:disabled) { border-color: var(--accent); background: color-mix(in srgb, var(--pool) 50%, transparent); }
 .ship-action button:disabled { opacity: 0.45; cursor: default; }
 .ship-action .why { flex: 1; font-size: 11px; color: var(--muted); line-height: 1.4; }
+.ship-action select { flex: 0 0 200px; padding: 8px 10px; font-size: 13px; background: color-mix(in srgb, var(--void) 45%, transparent); color: var(--text); border: 1px solid var(--panel-border); border-radius: 6px; }
 .ship-body .menu-hint { margin: 12px 0 0; }
 
 /* The System Map (from the ship menu's Hyperspace row): the systems, a system's points, stations and launch point, and the one picked. */

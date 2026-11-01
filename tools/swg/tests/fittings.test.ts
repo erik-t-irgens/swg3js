@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { fittingCounts, fittingModels, modelIdOf, readFittingBuildings, readServerProps } from '../fittings.mjs';
 import { kindOfChild, placeChildren } from '../travel.mjs';
 import { childInWorld } from '../../../src/world/travelTerminal.ts';
+import { fittingsReadable } from '../../../src/world/fittings.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -111,7 +112,8 @@ function note(what: string): void {
     const file = join('assets-private', planet, 'fittings.json');
     if (!existsSync(file)) continue;
     const pack = JSON.parse(readFileSync(file, 'utf8')) as { version: number; rows: { model: string; cell: number; x: number; y: number; z: number }[] };
-    assert.ok(pack.version === 1, `${planet}: the pack is the shape this build reads`);
+    // Version 2 (the map fixes) added each facility's cloning tubes beside the rows, which stand as they were.
+    assert.ok(fittingsReadable(pack.version), `${planet}: the pack is the shape this build reads`);
     const manifest = JSON.parse(readFileSync(join('assets-private', planet, 'manifest.json'), 'utf8')) as { categories?: { layout?: { id: string }[] } };
     const have = new Set((manifest.categories?.layout ?? []).map((d) => d.id));
     for (const r of pack.rows) {

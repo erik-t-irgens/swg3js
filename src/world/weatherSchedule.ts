@@ -30,7 +30,13 @@ export const SNAP_WAIT_SECONDS = 3;
 export const LIFE_DAY_FROM = [11, 15] as const;
 export const LIFE_DAY_TO = [0, 5] as const;
 
-/** Relative weights of weather levels 0.. per planet. Invented: the server held them. Keys are pack ids; a key matches a pack id equal to it or starting with it and an underscore. */
+/**
+ * Relative weights of weather levels 0.. per planet. Ours: which level was in force was the server's, and the client's
+ * archives hold none of it. The emulator's own numbers are to be had (Core3's `managers/weather_manager.lua`: a
+ * `weatherStability` of 50 to 90 per world, which it turns into chances of each level, and a duration of an hour before a
+ * new level is chosen), and nothing here reads them: these weights are the game's own choice and stay so until somebody
+ * decides otherwise. Keys are pack ids; a key matches a pack id equal to it or starting with it and an underscore.
+ */
 export const CLIMATES: Readonly<Record<string, readonly number[]>> = {
   tatooine: [60, 20, 12, 6, 2],
   lok: [55, 20, 13, 8, 4],

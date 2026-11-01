@@ -14,6 +14,7 @@
 // Space's point positions, Deep Space's fields and its Star Destroyer): such points carry
 // `source: 'invented'`, such scenery `invented: true` (the converter's INVENTED_* tables in space.mjs).
 
+import { rawToGameX, rawToGameZ } from '../story/waypoints.ts';
 import { knownAbsent, packJson } from '../world/packFiles.ts';
 
 export type Vec3 = [number, number, number];
@@ -95,6 +96,18 @@ export interface SpaceArrival {
   kind: 'launch' | 'point';
   planet?: string;
   point?: string;
+  /** A launch point the emulator gives (`core3`), carried out of the station it lies on (`station`); absent on the origin. */
+  from?: string;
+  station?: string;
+}
+
+/** Where a station's people landed a ship on a world (the emulator's `travelPoints`): named by the world's own places, raw frame. */
+export interface SpaceLanding {
+  key: string;
+  name: string;
+  x: number;
+  y: number;
+  z: number;
 }
 
 export interface SpaceHyperspace {
@@ -276,6 +289,10 @@ export interface SpacePack {
   arrival: SpaceArrival | null;
   /** Null on an older pack: nothing to jump to. */
   hyperspace: SpaceHyperspace | null;
+  /** Where each world that launches into this zone brings its ships out (CLIENT frame, as `arrival`): empty on an older pack. */
+  launches?: SpaceArrival[];
+  /** Where a station lands a ship on each such world, nearest that world's own arrival first, by world: empty on an older pack. */
+  landings?: Record<string, SpaceLanding[]>;
   // The six below are version 3. They are optional so that a `SpacePack` written out by hand
   // anywhere else (a test's fixture) does not have to carry them, but `normalise` always fills them,
   // so a pack that came through `loadSpacePack` has every one.
@@ -321,6 +338,8 @@ function normalise(zone: string, raw: Partial<SpacePack> & { stations?: Partial<
     scenery: raw.scenery ?? [],
     planets: raw.planets ?? [],
     arrival: raw.arrival ?? null,
+    launches: Array.isArray(raw.launches) ? raw.launches : [],
+    landings: raw.landings && typeof raw.landings === 'object' ? raw.landings : {},
     hyperspace: raw.hyperspace?.points ? raw.hyperspace : null,
     nebulae: Array.isArray(raw.nebulae) ? raw.nebulae : [],
     nebulaLook: raw.nebulaLook ?? null,
@@ -438,6 +457,30 @@ export function landmarksOf(pack: SpacePack): { at: Vec3; radius: number }[] {
 export function arrivalAt(pack: SpacePack | null): Vec3 | null {
   const a = pack?.arrival;
   return a ? game(a.x, a.y, a.z) : null;
+}
+
+/**
+ * Where a ship climbing out of `planet`'s sky comes out in this zone, in the GAME frame: that world's launch point
+ * (`launches`, the emulator's, fitted and carried clear of its station by the converter), else the zone's own arrival
+ * when the zone is that world's orbit, else null (an older pack, or a world the zone holds no launch for).
+ */
+export function launchAt(pack: SpacePack | null, planet: string): Vec3 | null {
+  const l = pack?.launches?.find((a) => a.planet === planet);
+  if (l) return game(l.x, l.y, l.z);
+  return pack && pack.planet === planet ? arrivalAt(pack) : null;
+}
+
+/** Where a station lands a ship on `planet` (raw frame, the converter's order: nearest that world's own arrival first); empty with none. */
+export function landingsOf(pack: SpacePack | null, planet: string): readonly SpaceLanding[] {
+  return pack?.landings?.[planet] ?? [];
+}
+
+/**
+ * A landing place (raw frame, `SpaceLanding`) in its world's GAME frame, about that world's layout centre (its places
+ * file's `center`): the waypoints' own carry (`rawToGameX`, `rawToGameZ`), the height as the emulator gives it.
+ */
+export function landingInGame(place: { x: number; y: number; z: number }, centre: { x: number; z: number }): Vec3 {
+  return [rawToGameX(centre.x, place.x), place.y, rawToGameZ(centre.z, place.z)];
 }
 
 export interface HyperspaceSystem {

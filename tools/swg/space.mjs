@@ -561,11 +561,13 @@ export function placeScenery(point, spec, radius) {
 }
 
 /**
- * The zone's arrival: an orbit's is the origin, where a ship climbing out of the planet's sky comes out
- * (kind 'launch'); any other system's is its first point (kind 'point'), else the origin.
+ * The zone's arrival: an orbit's is its planet's launch point where the emulator gives one (`launchArrival`, kind
+ * 'launch'), else the origin, where a ship climbing out of the planet's sky came out before; any other system's is its
+ * first point (kind 'point'), else the origin.
  */
-export function arrivalOf(zone, planet, points) {
+export function arrivalOf(zone, planet, points, launch = null) {
   void zone;
+  if (planet && launch) return launch;
   if (planet) return { x: 0, y: 0, z: 0, kind: 'launch', planet };
   const p = points?.[0];
   if (p) return { x: p.x, y: p.y, z: p.z, kind: 'point', point: p.id };
@@ -574,6 +576,90 @@ export function arrivalOf(zone, planet, points) {
 
 /** How far short of a station's centre a jump to it stops: its radius and this much more. */
 export const STATION_STANDOFF = 400;
+
+/**
+ * How near its zone's nearest station a launch point of the emulator's must lie, read as it stands, for its frame to be
+ * believed, metres. Measured over the eleven points (`readLaunchPoints`): each lies 23 to 91 m from its station as read,
+ * and 1.4 to 13.8 km from it with x mirrored, so the three numbers are the stations' own frame. Ours.
+ */
+export const LAUNCH_FIT_MOST = 500;
+
+/**
+ * Where a ship launched from `planet` comes out in this zone (the emulator's `jtlLaunchPoint`, client frame, as
+ * `readLaunchPoints` keeps it), fitted first against the zone's stations: its distance to the nearest station read as
+ * it stands and with x mirrored (`fit`), and believed only where it lies within `LAUNCH_FIT_MOST` as it stands and
+ * nearer so than mirrored; null otherwise. The emulator's point is its station's own place (it then scattered a ship
+ * up to 750 m about it), so it is carried out of the station along its own offset from the station's middle to the
+ * station's radius and `STATION_STANDOFF` more, the very standoff a jump to the station stops at (straight along +Z
+ * where it sits on the middle): a ship arriving on the point itself would be inside the station.
+ */
+export function launchArrival(launch, stations, planet) {
+  if (!launch || !Array.isArray(launch.at)) return null;
+  const [x, y, z] = launch.at;
+  let near = null;
+  let asIs = Infinity;
+  let mirrored = Infinity;
+  for (const s of stations ?? []) {
+    const d = Math.hypot(s.x - x, s.y - y, s.z - z);
+    const m = Math.hypot(s.x + x, s.y - y, s.z - z);
+    if (d < asIs) {
+      asIs = d;
+      near = s;
+    }
+    mirrored = Math.min(mirrored, m);
+  }
+  if (!near || !(asIs <= LAUNCH_FIT_MOST) || !(asIs < mirrored)) return null;
+  const off = (Number(near.radius) || 0) + STATION_STANDOFF;
+  let dx = x - near.x;
+  let dy = y - near.y;
+  let dz = z - near.z;
+  const len = Math.hypot(dx, dy, dz);
+  if (len < 1e-3) {
+    dx = 0;
+    dy = 0;
+    dz = 1;
+  } else {
+    dx /= len;
+    dy /= len;
+    dz /= len;
+  }
+  const r = (n) => Math.round(n * 10) / 10;
+  const out = len >= off ? [x, y, z] : [near.x + dx * off, near.y + dy * off, near.z + dz * off];
+  return { x: r(out[0]), y: r(out[1]), z: r(out[2]), kind: 'launch', planet, from: 'core3', station: near.name, fit: { asIs: Math.round(asIs), mirrored: Math.round(mirrored) } };
+}
+
+/**
+ * Where a station's people landed a ship on each world that launches into this zone (the emulator's `travelPoints`, as
+ * `readLandingPoints` keeps them: a key, the world and a raw place), by world: each named for the nearest of that
+ * world's own named places reaching it (a city, a port, a landmark; `pois`, raw frame), else for the emulator's key in
+ * words, and listed nearest the world's own layout centre first, which is its arrival's starport. Ours, the names' and
+ * the order's rule.
+ */
+export function landingsFor(rows, worlds, poisOf) {
+  const out = {};
+  for (const world of worlds) {
+    const pois = poisOf(world);
+    const list = [];
+    for (const r of rows ?? []) {
+      if (r.world !== world) continue;
+      let name = null;
+      let best = Infinity;
+      for (const p of pois?.pois ?? []) {
+        if (!p?.name) continue;
+        const d = Math.hypot(p.x - r.x, p.z - r.z);
+        const reach = p.r > 0 ? Math.max(p.r, 150) : 400;
+        if (d > reach || d >= best) continue;
+        best = d;
+        name = p.name;
+      }
+      list.push({ key: r.key, name: name ?? r.key.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' '), x: r.x, y: r.y, z: r.z });
+    }
+    const c = pois?.center ?? { x: 0, z: 0 };
+    list.sort((a, b) => Math.hypot(a.x - c.x, a.z - c.z) - Math.hypot(b.x - c.x, b.z - c.z));
+    if (list.length) out[world] = list;
+  }
+  return out;
+}
 
 /**
  * Where a ship jumping to a station from the zone's arrival stops (the runtime's arrivalPose rule, in
@@ -955,6 +1041,8 @@ export function spaceZoneStatus(zone, pack, objects) {
   if ((pack.materialFormat ?? 1) < MATERIAL_FORMAT) return { line: `${zone}: ${counts}, models converted before the material format ${MATERIAL_FORMAT}`, stale: true };
   // A body with no `radius` at all (null is an appearance that names none) was sized from the halo's scale.
   if ((pack.planets ?? []).some((p) => p && p.radius === undefined)) return { line: `${zone}: ${counts}, planets converted before their sizes were read`, stale: true };
+  // An orbit converted before its worlds' launch points and the stations' landing places (`launches`, `landings`).
+  if (SPACE_ZONES[zone] && !Array.isArray(pack.launches)) return { line: `${zone}: ${counts}, converted before the launch points and the landing places`, stale: true };
   const points = pack.hyperspace.points;
   const by = (source) => points.filter((p) => p.source === source).length;
   const notes = [by('invented') && `${by('invented')} invented`, by('borrowed') && `${by('borrowed')} borrowed`].filter(Boolean);

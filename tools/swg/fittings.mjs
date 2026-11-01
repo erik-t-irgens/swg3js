@@ -29,8 +29,8 @@ import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { kindOfChild, readBuildingChildren } from './travel.mjs';
 
-/** The pack this command writes. */
-export const FITTINGS_PACK_VERSION = 1;
+/** The pack this command writes (2: each cloning facility's tubes and the old tutorial's things). */
+export const FITTINGS_PACK_VERSION = 2;
 
 /**
  * Every building template that carries fittings, and what each carries.

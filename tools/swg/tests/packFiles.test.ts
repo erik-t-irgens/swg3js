@@ -206,7 +206,7 @@ try {
     const travel = methodOf(main, '  private async loadTravel(');
     const fittings = methodOf(main, '  private async loadFittings(');
     ok(/await packJson<\{ version\?: number; rows\?: TravelRow\[\]; rigs\?: Record<string, TravelRig> \}>\(pack, 'travel\.json', import\.meta\.env\.BASE_URL\);/.test(travel) && !/fetch\(/.test(travel), "an arrival's travel rows are read through the rule (`loadTravel`)");
-    ok(/await packJson<\{ version\?: number; rows\?: FittingRow\[\] \}>\(pack, 'fittings\.json', import\.meta\.env\.BASE_URL\);/.test(fittings) && !/fetch\(/.test(fittings), "and its fittings (`loadFittings`)");
+    ok(/await packJson<\{ version\?: number; rows\?: FittingRow\[\]; cloning\?: Record<string, CloningPoint\[\]> \}>\(pack, 'fittings\.json', import\.meta\.env\.BASE_URL\);/.test(fittings) && !/fetch\(/.test(fittings), "and its fittings (`loadFittings`)");
   }
 
   // ---- the three readers of a world's `sounds.json` make one request ----

@@ -27,12 +27,43 @@ export interface ArrivalPlace {
   readonly y: number;
   readonly z: number;
   readonly heading: number | null;
+  /** A room to stand in once its building is in (`WorldArrival.room`), else absent: the place itself is where to stand. */
+  readonly room?: WorldArrival['room'];
 }
 
 /** The arrival in the game's frame, from the layout centre the world's places file carries. */
 export function arrivalInGame(a: WorldArrival, centre: { readonly x: number; readonly z: number }): ArrivalPlace {
-  return { x: -(a.raw.x - centre.x), y: a.y, z: a.raw.z - centre.z, heading: typeof a.heading === 'number' && Number.isFinite(a.heading) ? a.heading : null };
+  return { x: -(a.raw.x - centre.x), y: a.y, z: a.raw.z - centre.z, heading: typeof a.heading === 'number' && Number.isFinite(a.heading) ? a.heading : null, ...(a.room ? { room: a.room } : {}) };
 }
+
+/**
+ * Which building a room arrival stands in, of those standing (`template` theirs, or the template a permanent row of ours
+ * stands as): the one of the arrival's template nearest its place, within `reach` metres. Pure, so the node test asks it.
+ */
+export function arrivalBuilding<T extends { readonly x: number; readonly z: number; readonly template: string; readonly object?: { readonly effectsOf?: string } | null }>(
+  buildings: Iterable<T>,
+  place: { readonly x: number; readonly z: number },
+  template: string,
+  reach = ARRIVAL_ROOM_REACH,
+): T | null {
+  let best: T | null = null;
+  let bestD = reach;
+  for (const b of buildings) {
+    if (b.template !== template && b.object?.effectsOf !== template) continue;
+    const d = Math.hypot(b.x - place.x, b.z - place.z);
+    if (d > bestD) continue;
+    bestD = d;
+    best = b;
+  }
+  return best;
+}
+
+/**
+ * How far from a room arrival's own place its building may stand and still be the one meant, metres: a room's middle
+ * stands within its building's own reach of the building's origin (Echo Base's Main Hangar is 600 m from the base's own),
+ * and the next copy of a heroic stands kilometres off. Ours.
+ */
+export const ARRIVAL_ROOM_REACH = 1500;
 
 /**
  * Whether a world brings a player in at its own arrival: one that names it, has ground (no space zone) and no zones

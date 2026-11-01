@@ -26,13 +26,22 @@ export interface FurnitureTune {
   /** How near an exit's polygon an object's sphere may come before it counts as standing in the doorway, metres. Ours. */
   doorwayPad: number;
   /**
+   * How far an object's sphere may reach past its building's own box and still be taken for a thing standing in a
+   * doorway, metres. Past it, the thing is not partly outside: it is far bigger than its room, and it is drawn with
+   * its building's rooms like any other furniture, which is how the client drew everything in a cell (through that
+   * cell's portals). Measured over every converted pack: of the 69 contained meshes the doorway rule takes, 67 reach
+   * nought past their building's box and two reach 21.9 and 79.7 m, the bombed house's two scorches in Mos Eisley
+   * (the 118 m one drawn across the street and through the floors of the Association Hall next door). Ours.
+   */
+  pastBox: number;
+  /**
    * Take the building the snapshot names (step 7: a pack whose layout carries each indoor object's `in` and
    * `cell`) over the rooms' boxes, and add the room it names to the rooms the boxes find. Read when a world is read.
    */
   exactRooms: boolean;
 }
 
-export const FURNITURE_TUNE: FurnitureTune = { perBuilding: true, boxPad: 0.5, doorwayPad: 0.3, exactRooms: true };
+export const FURNITURE_TUNE: FurnitureTune = { perBuilding: true, boxPad: 0.5, doorwayPad: 0.3, pastBox: 2, exactRooms: true };
 
 /**
  * Whether furniture is drawn per building now: the switch, under the portal cull's own (`mode: 'all'`
@@ -220,6 +229,8 @@ interface HostBuilding {
   boxes: Float64Array;
   /** The exits' triangles, nine numbers each. */
   exitTris: Float64Array;
+  /** The building's own box in its frame (min x, y, z, max x, y, z): its model's, else every room's together. */
+  shell: Float64Array;
 }
 
 const GRID = 64;
@@ -288,7 +299,16 @@ export class FurnitureIndex {
         tris.push(a[0], a[1], a[2], b[0], b[1], b[2], cc[0], cc[1], cc[2]);
       }
     }
-    const hb: HostBuilding = { index, inv, rooms: Int32Array.from(rooms), boxes: Float64Array.from(boxes), exitTris: Float64Array.from(tris) };
+    // Its own box, the model's (corners taken as extents), else its rooms' together.
+    const shell = Float64Array.from([lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]]);
+    const b = d.bounds;
+    if (b && b.min.length >= 3 && b.max.length >= 3) {
+      for (let a = 0; a < 3; a++) {
+        shell[a] = Math.min(b.min[a], b.max[a]);
+        shell[a + 3] = Math.max(b.min[a], b.max[a]);
+      }
+    }
+    const hb: HostBuilding = { index, inv, rooms: Int32Array.from(rooms), boxes: Float64Array.from(boxes), exitTris: Float64Array.from(tris), shell };
     // Its rooms' footprint on the ground, in the world, padded, onto the grid.
     const pad = this.tune.boxPad + 1;
     let x0 = Infinity;
@@ -455,7 +475,11 @@ export class FurnitureIndex {
       if (!holdsOrigin && dx * dx + dy * dy + dz * dz > radius * radius) continue;
       addRoom(best.rooms[r]);
     }
-    // Standing in a doorway: its sphere, grown by the pad, reaches one of the exits' triangles.
+    // Standing in a doorway: its sphere, grown by the pad, reaches one of the exits' triangles -- unless it reaches far
+    // past the building itself (`pastBox`), which is no thing in a doorway but a thing bigger than its room.
+    const sh = best.shell;
+    const past = Math.max(sx + radius - sh[3], sh[0] - (sx - radius), sy + radius - sh[4], sh[1] - (sy - radius), sz + radius - sh[5], sh[2] - (sz - radius));
+    if (past > this.tune.pastBox) return;
     const reach = radius + this.tune.doorwayPad;
     const t = best.exitTris;
     for (let i = 0; i < t.length; i += 9) {

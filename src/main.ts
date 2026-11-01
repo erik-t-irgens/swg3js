@@ -30,7 +30,7 @@ import { setViewShake, ThirdPersonCamera, viewShakeAmount } from './core/camera.
 import { markActor, passesSeeing, PortalRenderer, SHADOW_STRAYS } from './world/portalRender.ts';
 import { cullOn, NARROW_STATS, PORTAL_CULL, type PortalCullTune, type VisBuilding } from './world/portalVis.ts';
 import { ROUTE_KIND, ROUTE_KIND_NAMES, ROUTE_TUNE } from './world/portalCull.ts';
-import { FURNITURE_TUNE, type FurnitureTune } from './world/furnitureHost.ts';
+import { FURNITURE_TUNE, isFurniture, type FurnitureTune } from './world/furnitureHost.ts';
 import { SKELETON_FRAME, SKELETON_TUNE } from './core/skeletonOnce.ts';
 import { LOW_CULL } from './world/bodyCull.ts';
 import { LOD_TUNE } from './world/mobiles/lod.ts';
@@ -199,7 +199,7 @@ import { distanceWords, Hud, hudBindingsChanged, keyLabel, Roster, ROSTER_TUNE }
 import { BIG_SHIP_TURN, bigShipTurnShare, HOVER_TUNE, specFor, vehicleOfCollider, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
 import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
-import { fxPassDef, isFxSettingKey, type FxPassId } from './core/fxRegistry.ts';
+import { FX_LAYERS, fxPassDef, isFxSettingKey, isShadowCast, isShadowOnly, type FxPassId } from './core/fxRegistry.ts';
 import { installEffects } from './core/fx/install';
 import { addPointLight, createFxLights, setSpotLight } from './core/fx/lights';
 import { createCloudLayers, createSkyLights, flareLook, tuneFlareLook } from './core/fx/lensFlare';
@@ -249,7 +249,7 @@ import { RIG_PATH_TUNE, onPad, vehicleFromJoint } from './world/rigPath.ts';
 import { discDirection, farPadsOf, padOfPort, padRefOf, planHop, planRoute, portOfThing, shuttleClockName, skipOffer, tripSeconds, zonePlace, type FarPads, type PadRef, type RideRoute, type SpacePlan } from './world/rideRoute.ts';
 import { RIDE_PILOT } from './world/shuttleCourse.ts';
 import { RIDE_TUNE, ShuttleRide, downReachOf, heldHeading, holdRoomHeading, rideFraming, stepFraming, type RideHost } from './world/shuttleRide.ts';
-import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type Fitting, type FittingRow } from './world/fittings.ts';
+import { cloningPointsOf, fittingsReadable, fittingTally, fittingsOf, tubeFor, type CloningPoint, type Fitting, type FittingRow } from './world/fittings.ts';
 import { INSTANCES, INSTANCE_TUNE, aboardOf, besideTaker, copiesOf, copyIndex, corvetteFor, entrancesOf, fallbackBack, instanceOf, instanceOfTemplate, instanceUse, packOfInstance, readWayBack, roomWords, tuneInstances, type InstanceDef, type InstanceUse, type WayBack } from './world/instances.ts';
 import { ParticleEffects, type EffectHandle } from './world/particles.ts';
 // How wet the world is, and which of our own injections a material is wearing: two numbers the
@@ -268,7 +268,7 @@ interface TravelWait {
   inside: boolean;
 }
 import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTripsFrom, shipTripsNote, type ShipTerminalState } from './world/shipTerminal.ts';
-import type { Building, PlacedObject } from './world/layoutStream';
+import { CLEAR_SPAWN, type Building, type PlacedObject } from './world/layoutStream';
 import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
 import { allDeeds, deedById, deedLine, deedOfModel, deedsLate, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
 import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftTo as houseLiftTo, turnTo, wheelReach, type GhostDeps, type GhostState } from './world/placeGhost.ts';
@@ -341,8 +341,8 @@ import { TIER_LADDER_TUNE, ladderLine, tuneTierLadder } from './space/tierLadder
 import { END_OF_WAR_TUNE, HULL_NPC_TUNE, NPC_SIDES, endOfWarRows, hullNameOf, hullWords, npcShipRoute, tuneEndOfWar, tuneHullNpc } from './space/hullNpc.ts';
 import { targetable, type CombatStatus } from './space/shipCombat';
 import type { ShipSpawner } from './ui/npcUi';
-import { HyperspaceCatalogue, arrivalAt, forgetSpacePacks, landmarksOf, loadSpacePack, type Destination } from './space/spaceData';
-import { JUMP_COUNTDOWN, TUNNEL_TIMES, arrivalPose, exitEnd, jumpChaseBack, lookRotation, sceneOf, toGame, transitAt, tunnelCameraFar, tunnelSize } from './space/hyperspaceMath';
+import { HyperspaceCatalogue, arrivalAt, forgetSpacePacks, landingInGame, landingsOf, landmarksOf, launchAt, loadSpacePack, type Destination, type SpacePack } from './space/spaceData';
+import { JUMP_COUNTDOWN, TUNNEL_TIMES, arrivalPose, exitEnd, jumpChaseBack, launchForward, lookRotation, sceneOf, toGame, transitAt, tunnelCameraFar, tunnelSize } from './space/hyperspaceMath';
 import { LiftMenu } from './ui/liftMenu';
 import { stopLabel, type LiftStop } from './world/lifts';
 import { draggable, windowsDebug } from './ui/drag.ts';
@@ -483,7 +483,7 @@ import { configureWaterSim, pokeWaterSim, rippleCarrySet, waterSimDebug, WATER_S
 import { setWaterSurface, WATER_SURFACE_BAND, WATER_SURFACE_HIDE } from './world/water';
 import type { WaterSurfaceTune } from './world/waterSurfaceMath.ts';
 import { RANGE } from './world/gallery';
-import { castsShadow, surfaces } from './world/surfaces';
+import { DECAL_TUNE, castsShadow, isDecal, surfaces } from './world/surfaces';
 import { backendLine, backendOf, readbackNote, checkDriver, compilerVerdict, driverCheck, forgetCompilerMeasurement, groupPrograms, loadingLine, machineAside, programMs, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type Backend, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
 import { PACE_TUNE, tuneProgramPace } from './core/programPace.ts';
 import { LINK_STATE, LINK_TUNE, LINK_WAITS, LinkCheck, linkMode, linkWhy, tuneLinks, watchLinkWaits, type LinkModeName } from './core/linkMode.ts';
@@ -642,7 +642,7 @@ interface CullDebugOptions {
   mode?: 'all' | 'rooms';
   /** Any of `PORTAL_CULL`'s numbers and switches, live. */
   tune?: Partial<PortalCullTune>;
-  /** `FURNITURE_TUNE`: `perBuilding` live; the two pads when the next world is read. */
+  /** `FURNITURE_TUNE`: `perBuilding` live; the two pads and `pastBox` when the next world is read. */
   furniture?: Partial<FurnitureTune>;
   /** `ROUTE_TUNE`: `lightEvery` and `outdoorReach` live; `maxRooms` is read when the renderer is made. */
   routes?: Partial<typeof ROUTE_TUNE>;
@@ -2581,7 +2581,7 @@ class App {
       {
         status: () => this.shipStatus(),
         goToSpace: () => void this.goToSpace(),
-        land: () => void this.landShip(),
+        land: (at?: number) => void this.landShip(at),
         eject: () => void this.eject(),
         hyperspace: () => this.hyperspaceButton(),
         dock: () => this.dockButton(),
@@ -4513,6 +4513,8 @@ class App {
         return {
           rows: this.fittingRowsFor === here ? this.fittingRows.length : 0,
           standing: this.fittingsStood.keys.length,
+          // Left out for standing where the layout already stands the very same thing (a screenplay prop the snapshot merged).
+          standingTwice: this.world.propsStandingTwice,
           ...fittingTally(things),
           nearest: near.slice(0, 5).map((n) => ({ model: n.f.model, away: Math.round(n.d), cell: n.f.cell })),
           note: this.fittingRows.length ? '' : "no fittings.json for this world: npm run swg -- fittings '@SWG' assets-private --retail-only (with your emulator checkout), then reload",
@@ -6985,6 +6987,110 @@ class App {
         }
         return { ...s, under };
       },
+      /**
+       * The decals (`DECAL_TUNE`, `surfaces.ts`: the scorches, graffiti and marks drawn blended over what they lie on): how
+       * many decal materials stand in the scene and the tune. With numbers it moves the polygon offset (`factor`, `units`:
+       * how far over what it lies on a decal is drawn) and the floor of its cut (`alphaFloor`, held above nought, since
+       * nought would take the cut out of the program) on every decal standing and every one loaded after, live and with
+       * nothing built: none of the three is in a program's key.
+       */
+      decals: (tune?: { factor?: number; units?: number; alphaFloor?: number }) => {
+        if (tune) {
+          for (const k of ['factor', 'units', 'alphaFloor'] as const) {
+            const v = tune[k];
+            if (typeof v === 'number' && Number.isFinite(v)) DECAL_TUNE[k] = k === 'alphaFloor' ? Math.min(1, Math.max(1e-4, v)) : v;
+          }
+        }
+        const mats = new Set<THREE.Material>();
+        this.scene.traverse((o) => {
+          const m = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+          if (m) for (const x of Array.isArray(m) ? m : [m]) if (isDecal(x)) mats.add(x);
+        });
+        if (tune) {
+          for (const m of mats) {
+            m.alphaTest = DECAL_TUNE.alphaFloor;
+            m.polygonOffsetFactor = DECAL_TUNE.factor;
+            m.polygonOffsetUnits = REVERSED_DEPTH ? -DECAL_TUNE.units : DECAL_TUNE.units;
+          }
+        }
+        return { tune: { ...DECAL_TUNE }, materials: mats.size };
+      },
+      /**
+       * What is under the crosshair, named: the drawn things the line from the middle of the screen passes through, nearest
+       * first (the player's own figure left out), each with the material it is drawn with (its shader, and whether it is a
+       * decal, blended, cut out, writing depth or a pane nobody sees) and, for a placed object, what the layout says it is --
+       * its model and template, its row in `layout.json`, whether it stands in a building's room and which building holds it,
+       * whether it counts as standing in a doorway, and how many colliders it has this instant -- or, for a building's own
+       * room, the building and the room; and the first collider the physics meets along the same line, by its template (what
+       * a bolt or a body would stop on). `far` (400) is how far it looks, `all` keeps twelve hits rather than four. Places in
+       * the game's frame and the raw one (`loc`, as `/loc` says). The answer to "why does this exist".
+       */
+      aimAt: (opts: { far?: number; all?: boolean } = {}) => {
+        const far = opts.far ?? 400;
+        const ray = new THREE.Raycaster();
+        ray.layers.enableAll();
+        ray.far = far;
+        ray.setFromCamera(new THREE.Vector2(0, 0), this.cam.camera);
+        const shown = (o: THREE.Object3D) => {
+          for (let x: THREE.Object3D | null = o; x; x = x.parent) if (!x.visible) return false;
+          return true;
+        };
+        const mine = (o: THREE.Object3D) => {
+          for (let x: THREE.Object3D | null = o; x; x = x.parent) if (x === this.player.group) return true;
+          return false;
+        };
+        // What no view pass draws is not what the eye sees there: the shadow maps' own casters, the head first person hides,
+        // the heat haze's sources.
+        const drawn = (o: THREE.Object3D) => {
+          const m = o.layers.mask;
+          return !isShadowOnly(m) && !isShadowCast(m) && m !== 1 << FX_LAYERS.heat;
+        };
+        // A building's rooms and what stands in them are shown only inside the portal renderer's own passes and are hidden
+        // again between frames, when this runs: they count by what they are, never by `visible` (the bombed house's decals
+        // are furniture of its room).
+        const roomPiece = (o: THREE.Object3D) => isFurniture(o) || this.world.roomMeshOf(o) !== null;
+        const hits = ray.intersectObjects(this.scene.children, true).filter((h) => !(h.object as THREE.Sprite).isSprite && (shown(h.object) || roomPiece(h.object)) && !mine(h.object) && drawn(h.object));
+        const c = this.world.layoutCenter;
+        const loc = (v: THREE.Vector3) => (c ? [Math.round(gameToRawX(c.x, v.x) * 10) / 10, Math.round(v.y * 10) / 10, Math.round(gameToRawZ(c.z, v.z) * 10) / 10] : null);
+        const m4 = new THREE.Matrix4();
+        const at = new THREE.Vector3();
+        const under = hits.slice(0, opts.all ? 12 : 4).map((h) => {
+          const o = h.object as THREE.Mesh;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          const mat = (mats[h.face?.materialIndex ?? 0] ?? mats[0]) as THREE.Material | undefined;
+          let placed: ReturnType<World['placedAtPoint']> = null;
+          if ((o as THREE.InstancedMesh).isInstancedMesh && h.instanceId !== undefined) {
+            (o as THREE.InstancedMesh).getMatrixAt(h.instanceId, m4);
+            at.setFromMatrixPosition(m4.premultiply(o.matrixWorld));
+            placed = this.world.placedAtPoint(at.x, at.y, at.z);
+          }
+          // A building's rooms are meshes of their own, which no instance places: named by the building and the room.
+          const room = placed ? null : this.world.roomMeshOf(o);
+          return {
+            metres: Math.round(h.distance * 10) / 10,
+            game: h.point.toArray().map((n) => Math.round(n * 100) / 100),
+            loc: loc(h.point),
+            shader: mat?.name || mat?.type || null,
+            decal: mat?.userData.decal === true,
+            blended: !!mat?.transparent,
+            cut: mat?.alphaTest ?? 0,
+            depthWrite: mat?.depthWrite ?? true,
+            invisible: mat?.userData.invisible === true,
+            casts: o.castShadow,
+            ...(placed
+              ? { model: placed.o.model, template: placed.o.effectsOf ?? placed.o.template, row: placed.about.layoutIndex, contained: placed.o.contained, host: placed.about.host, doorway: placed.about.doorway, colliders: placed.about.colliders, solidByRule: placed.about.solidByRule, placedAt: loc(at) }
+              : room
+                ? { building: room.template, model: room.model, room: room.cell, roomName: room.cellName, placedAt: loc(at.set(room.x, 0, room.z)) }
+                : { mesh: o.name || o.type }),
+          };
+        });
+        // The first collider along the same line, whatever its group: what a bolt or a body meets there.
+        const d = ray.ray.direction;
+        const o0 = ray.ray.origin;
+        const out = { toi: 0, nx: 0, ny: 0, nz: 0, handle: -1 };
+        const solid = this.physics.aimHit(o0.x, o0.y, o0.z, d.x, d.y, d.z, far, !!this.world.inside, out) ? { metres: Math.round(out.toi * 10) / 10, template: this.world.templateOfCollider(out.handle), at: loc(new THREE.Vector3(o0.x + d.x * out.toi, o0.y + d.y * out.toi, o0.z + d.z * out.toi)) } : null;
+        return { under, solid, note: under.length ? '' : 'nothing drawn under the crosshair within reach (a placed copy far off may be a lower level: try __debug.near(80))' };
+      },
       /** The colour grade now: what the sky gave, the planet's look, the terms and parameters, how far it still lags the sky, and the room weight. `grade({ compare: 0.5 })` splits the screen (ungraded on the left), `grade({ look: { gloom: 0.3 } })` tries a look live and logs the line for the table, `grade({ look: {} })` shows the planet with none and `grade({ look: null })` puts it back; `freeze`, `params` and `room` force the rest. */
       grade: (
         opts: {
@@ -7299,14 +7405,14 @@ class App {
         this.handleMount();
         return p.piloting ? `at the controls of the ${p.piloting.spec.id}` : 'could not take the controls';
       },
-      /** The ship menu from the console: `ship()` or `ship('status')` reports what it would show; `ship('space')`, `ship('land')`, `ship('eject')` press its buttons; `ship('open')` opens it. */
-      ship: (action: 'status' | 'open' | 'space' | 'land' | 'eject' = 'status') => {
+      /** The ship menu from the console: `ship()` or `ship('status')` reports what it would show (`landings`, the places a station lands a ship on the world below, in the list's order); `ship('space')`, `ship('land')`, `ship('eject')` press its buttons, `ship('land', 1)` with the second landing place picked; `ship('open')` opens it. */
+      ship: (action: 'status' | 'open' | 'space' | 'land' | 'eject' = 'status', at?: number) => {
         if (action === 'open') {
           this.toggleShipMenu();
           return this.shipMenu.open ? 'open' : 'not in a ship';
         }
         if (action === 'space') void this.goToSpace();
-        else if (action === 'land') void this.landShip();
+        else if (action === 'land') void this.landShip(at);
         else if (action === 'eject') void this.eject();
         const s = this.shipStatus();
         const p = this.player;
@@ -7329,10 +7435,38 @@ class App {
        * `{ heading }` turns the way a body faces there, in radians in the game's frame, from the next arrival (in
        * memory); `{ go: true }` stands the player there now, facing it, as an arrival would: at once where its floor is
        * built here, else under a loading screen with the world moved there first, as a death far from it comes round.
+       * On a world that names none it says where the last arrival with no place of its own was looked for and stood
+       * (`auto`), and `{ clear: { reach, step, pad, steepest } }` moves how open ground is looked for (`CLEAR_SPAWN`, all
+       * ours: metres, metres, metres and degrees), from the next such arrival, in memory.
        */
-      arrival: async (opts?: { heading?: number; go?: boolean; planet?: string }) => {
+      arrival: async (opts?: { heading?: number; go?: boolean; planet?: string; clear?: Partial<typeof CLEAR_SPAWN> }) => {
+        if (opts?.clear) {
+          for (const k of ['reach', 'step', 'pad', 'steepest'] as const) {
+            const v = opts.clear[k];
+            if (typeof v === 'number' && Number.isFinite(v) && v >= 0) CLEAR_SPAWN[k] = k === 'step' ? Math.max(0.5, v) : v;
+          }
+        }
         const planet = opts?.planet ? planetById(opts.planet) : this.world.planet;
-        if (!planet?.arrival) return { planet: planet?.id ?? null, arrival: null, note: 'this world names no arrival of its own: it arrives at the flattest dry spot near its layout centre' };
+        if (!planet?.arrival) {
+          // Where this world's last arrival with no place of its own was looked for and stood (`World.autoArrival`): the
+          // stand-in ground's flattest dry spot, the real ground's, and the open spot clear of every object's footprint.
+          const auto = planet === this.world.planet ? this.world.autoArrival : null;
+          const c = this.world.layoutCenter;
+          const both = (v: THREE.Vector3 | null) => (v ? { game: v.toArray().map((n) => Math.round(n * 10) / 10), raw: c ? [Math.round(gameToRawX(c.x, v.x) * 10) / 10, Math.round(v.y * 10) / 10, Math.round(gameToRawZ(c.z, v.z) * 10) / 10] : null } : null);
+          return {
+            planet: planet?.id ?? null,
+            arrival: null,
+            ...(auto ? { auto: { standIn: both(auto.standIn), ground: both(auto.ground), clear: both(auto.clear), steep: auto.steep, at: both(auto.at) } } : {}),
+            clearTune: { ...CLEAR_SPAWN },
+            note: auto
+              ? auto.clear
+                ? auto.steep
+                  ? `no ground clear of every building is as gentle as ${CLEAR_SPAWN.steepest} degrees near the layout centre: arrives at the gentlest dry spot clear of them`
+                  : 'arrives at open ground clear of every building, near the flattest dry spot by the layout centre'
+                : 'no dry ground clear of every building was found near the layout centre: arrives at its flattest dry spot'
+              : 'this world names no arrival of its own: it arrives at the flattest dry spot near its layout centre, moved to open ground once the world is in',
+          };
+        }
         if (opts?.heading !== undefined) {
           if (typeof opts.heading !== 'number' || !Number.isFinite(opts.heading)) return { refused: 'heading: radians in the game\'s frame' };
           planet.arrival.heading = opts.heading;
@@ -7342,9 +7476,15 @@ class App {
         let note = '';
         if (opts?.go && here && home) {
           const at = new THREE.Vector3(home.x, home.y, home.z);
-          this.spawn.copy(at);
+          // A room arrival's place is a point in the room's air and never the spawn: its floor spot is, once it is stood in.
+          if (!home.room) this.spawn.copy(at);
           if (this.traveling) note = 'a crossing is under way: go stands you there once it is over';
-          else if (this.floorUnder(at)) {
+          else if (home.room) {
+            // A room arrival (Echo Base's Main Hangar, the old tutorial's hall) is stood in its room as an arrival stands it
+            // (`standInHomeRoom`, which keeps the floor spot as the spawn), at once where its building is in, else under a
+            // loading screen with the world moved there first (`standAtHome`, which stands it in the room in the same way).
+            if (!this.standInHomeRoom(home, true) && !(await this.standAtHome(at, home, 'arriving', 'so you stand on the ground under it'))) note = 'its room did not come in, so you stand on the ground under it';
+          } else if (this.floorUnder(at)) {
             // Its floor is built here: stood on it at once.
             this.player.reset(at);
             if (home.heading !== null) {
@@ -17367,11 +17507,12 @@ class App {
     // where arriving compiles the whole scene, the held models included.
     await this.equipment.restoreHeld();
     this.loadingScreen.setProgress(0.04);
-    // A character kept in a dungeon copy is in a room, which can lie below the ground: not lifted onto it.
-    this.arriveIndoors = !!planet.instances;
     // The world's own arrival (Mustafar's landing deck), worked out from its places file before the world is in: where
     // a character new to it stands, and where a death on it comes round.
     const home = await this.homeOf(planet, c.zone);
+    // A character kept in a dungeon copy is in a room, which can lie below the ground: not lifted onto it; nor one new to a
+    // world whose arrival is a room (Echo Base's hangar, the old tutorial's hall), stood in it below once the world is in.
+    this.arriveIndoors = !!planet.instances || (!c.pos && !!home?.room);
     this.arrive(planet, c.zone, c.pos ? new THREE.Vector3(c.pos[0], c.pos[1], c.pos[2]) : undefined, home);
     if (c.heading !== undefined) {
       this.player.heading = c.heading;
@@ -17386,6 +17527,8 @@ class App {
     // with the ground's height (`ShuttleRide.keepPlace`), and at Theed Starport that ground is under the
     // royal hangar's deck: back at a port's own place, it is stood in as an arrival there is.
     if (c.pos && !planet.space && (await this.atPortPlace())) this.standInPort();
+    // A character new to a world whose arrival is a room stands in it now that its building is in.
+    if (!c.pos && home?.room) this.standInHomeRoom(home);
     // A character kept inside a dungeon copy comes back in it, its way out the one this browser kept.
     this.wayBack = this.keptWayBack();
     if (planet.instances) await this.enterCopy(null, null, true);
@@ -18474,6 +18617,7 @@ class App {
       .catch(() => { });
     this.spawn = home ? new THREE.Vector3(home.x, home.y, home.z) : this.world.spawnPoint();
     this.arrivalHome = home;
+    this.arrivalRoom = null;
     const stand = at ?? this.spawn;
     this.player.reset(stand);
     this.world.warmUp(stand);
@@ -18531,7 +18675,8 @@ class App {
       for (const c of this.trackCircles(t, dressingKind)) (dressingKind === 'space' ? k.game : k.raw).push(c);
       return k;
     });
-    const packIn = this.world.loadPack(stand, { keepOff }).then((clearSpawn) => {
+    // An arrival with no place of its own is judged again on the real ground once it is in (`loadPack`'s `auto`).
+    const packIn = this.world.loadPack(stand, { keepOff, auto: !at && !home }).then((clearSpawn) => {
       // The hello with this world went out before the pack did: anything the server has already
       // said is built here was refused for having nowhere to go, and this is where it is tried
       // again. A world with nothing built on it does nothing at all.
@@ -18598,6 +18743,43 @@ class App {
   private arriveIndoors = false;
   /** The world's own arrival this world was arrived at with (`homeOf`), or null: the spawn a ship coming down leaves be. */
   private arrivalHome: ArrivalPlace | null = null;
+  /** The room a world's room arrival stood the player in (`standInHomeRoom`), the spawn's own: a death comes round in it. */
+  private arrivalRoom: { at: THREE.Vector3; cell: number } | null = null;
+
+  /**
+   * A world's room arrival (`WorldArrival.room`: Echo Base's Main Hangar, the old tutorial's first room), stood in once the
+   * world is in and its building with it: the player on the room's floor, in the room, facing the arrival's way, and that
+   * spot kept as the spawn and the world's own arrival, so a death comes round there (`respawn`, `standAtHome`). Said in
+   * words, and the player left at the arrival's own place, should the building not have come in (`quiet`: by a caller
+   * that moves the world there next and says what came of it itself).
+   */
+  private standInHomeRoom(home: ArrivalPlace, quiet = false): boolean {
+    this.physics.stepOnce();
+    const got = this.world.standInArrivalRoom(home);
+    if (!got) {
+      if (!quiet) this.messages.system(`the room ${this.world.planet.name} brings you in has not come in yet, so you stand where it would be`);
+      return false;
+    }
+    const p = this.player;
+    p.reset(got.at);
+    if (home.heading !== null) {
+      p.heading = home.heading;
+      this.cam.yaw = home.heading + Math.PI;
+    }
+    this.physics.stepOnce();
+    this.spawn.copy(got.at);
+    this.arrivalRoom = { at: got.at.clone(), cell: got.cell };
+    this.arrivalHome = { x: got.at.x, y: got.at.y, z: got.at.z, heading: home.heading, room: home.room };
+    return true;
+  }
+
+  /** Back in the room a world's room arrival stood the player in, after a reset to the spawn there (a reset leaves every room). */
+  private reenterArrivalRoom(at: THREE.Vector3): void {
+    const room = this.arrivalRoom;
+    if (!room || at.distanceToSquared(room.at) > 1) return;
+    this.world.enterCellAt(at, room.cell);
+    this.physics.stepOnce();
+  }
 
   /**
    * Go to another world. With `ship`, arrive flying it: the ship carried up into space, or down
@@ -18680,8 +18862,10 @@ class App {
     // Where this player stands now, for a way back out of a dungeon copy that this travel reaches without
     // one of its own (following the group into it): put back where they set out from.
     const leftFrom: WayBack = { kind: '', planet: this.world.planet.id, ...(this.zone ? { zone: this.zone } : {}), at: [p.worldPos.x, p.worldPos.y, p.worldPos.z], heading: p.heading, ...(this.world.inside ? { indoors: true } : {}) };
-    // A room's arrival is left where the travel stands it, and not lifted to the ground (`arrive`).
-    this.arriveIndoors = !!(opts?.into || opts?.indoors || planet.instances);
+    // A room's arrival is left where the travel stands it, and not lifted to the ground (`arrive`); so is a world's own room
+    // arrival when nothing else says where to come out (stood in its room below, once the world is in).
+    const homeRoom = !!home?.room && !crossing && !besideAt && !opts?.at && !opts?.into && !planet.instances;
+    this.arriveIndoors = !!(opts?.into || opts?.indoors || planet.instances || homeRoom);
     // A jump's arrival, the group's, a spot of the caller's, or the zone's (above) is where the world streams from, not the zone's spawn.
     this.arrive(planet, zoneId, crossing?.arrival?.pos ?? besideAt ?? opts?.at ?? (spaceArrival ? new THREE.Vector3(spaceArrival[0], spaceArrival[1], spaceArrival[2]) : undefined), home);
     // Into a dungeon copy: the copy the group's id picks, and the world streamed round it from here on.
@@ -18726,6 +18910,7 @@ class App {
     // stood on again now that the world is in, in its room where it is one.
     if (opts?.into) await this.enterCopy(opts.into, copy, !!besideAt);
     else if (planet.instances) await this.enterCopy(null, null, true, opts?.back ?? leftFrom);
+    else if (homeRoom && home && !arrived) this.standInHomeRoom(home);
     else if (opts?.at && !besideAt && !arrived) {
       this.physics.stepOnce();
       const at = opts.at.clone();
@@ -18821,11 +19006,15 @@ class App {
       else console.warn(`travel: the ${def.id} arrived with no fight to carry its damage onto`);
     }
     // Turned to the arrival's facing before anyone is put in it, so the rooms and the seat follow the hull's final frame.
-    // Where it comes out is where a death comes round, but on a world with an arrival of its own (Mustafar's deck)
-    // that stays the spawn: a ship come down out of space is put in the air over the world.
+    // Where it comes out is where a death comes round, but only where it comes out at its own height (`height` nought:
+    // up into space at a launch point, a way back out of a copy at the ship's own place). A ship coming down out of space
+    // comes out `height` over its landing place, in the air: there the spawn stays the world's own, on the ground, as it
+    // was before a landing place could be picked, or a Respawn, or a reload during the descent (`savePlace` keeps the
+    // spawn while a ship flies), stood the character on foot 700 m up to fall. On a world with an arrival of its own
+    // (Mustafar's deck) the spawn is never moved here either.
     if (arrival) {
       v.teleport(at, arrival.quaternion, 0);
-      if (!this.arrivalHome) this.spawn.copy(at);
+      if (!this.arrivalHome && height === 0) this.spawn.copy(at);
     }
     const room = v.interior;
     if (room && (crew || room.pilotSpot)) {
@@ -18876,7 +19065,22 @@ class App {
     if (!ship || ship.destroyed || !zone || this.traveling || this.spaceGate !== 'up') return;
     if (this.refuseWhileDocked()) return;
     this.closePanels();
-    await this.travel(zone, undefined, { def: ship.def!, speed: Math.max(60, ship.speed), height: 0, crew: this.crewRecord(), condition: this.conditionRecord(ship) });
+    // Out at this world's own launch point in the zone (the emulator's, carried clear of its station: `launchAt`), facing
+    // away from its station (`launchForward`); a pack from before the points brings it out at the zone's arrival.
+    const pack = await loadSpacePack(import.meta.env.BASE_URL, packIdOf(zone)).catch(() => null);
+    const launch = launchAt(pack, this.world.planet.id);
+    const arrival = launch && pack ? this.launchPose(pack, launch) : undefined;
+    await this.travel(zone, undefined, { def: ship.def!, speed: Math.max(60, ship.speed), height: 0, crew: this.crewRecord(), condition: this.conditionRecord(ship), ...(arrival ? { arrival } : {}) });
+  }
+
+  /**
+   * A ship come up out of a planet's sky at its launch point in a zone (GAME frame): there, facing away from the nearest
+   * landmark (`launchForward`), since it comes out at its own climbing speed about 400 m off its station's skin.
+   */
+  private launchPose(pack: SpacePack, at: readonly [number, number, number] | number[]): { pos: THREE.Vector3; quaternion: THREE.Quaternion } {
+    const pos = new THREE.Vector3(at[0], at[1], at[2]);
+    const q = lookRotation(launchForward([pos.x, pos.y, pos.z], landmarksOf(pack)));
+    return { pos, quaternion: new THREE.Quaternion(q[0], q[1], q[2], q[3]) };
   }
 
   /**
@@ -18946,14 +19150,24 @@ class App {
     await this.travel(planet, zoneId);
   }
 
-  /** The ship menu's way down: the flown ship leaves orbit for the planet below, with everyone aboard. A system with no planet below has no way down. */
-  private async landShip(): Promise<void> {
+  /**
+   * The ship menu's way down: the flown ship leaves orbit for the planet below, with everyone aboard. A system with no
+   * planet below has no way down. `at` picks one of the places a station landed a ship on that world (the emulator's own
+   * list, `landingsOf`, which the menu offers named and nearest the world's arrival first): the ship comes down over it,
+   * the place turned into the game's frame from that world's places file before anybody travels. With none picked, or a
+   * pack converted before the list, it comes down over the world's own arrival as it always did.
+   */
+  private async landShip(at?: number): Promise<void> {
     const ship = this.pilotedShip();
     const below = planetBelow(this.world.planet);
     if (!ship || ship.destroyed || !below || this.traveling) return;
     if (this.refuseWhileDocked()) return;
     this.closePanels();
-    await this.travel(below, undefined, { def: ship.def!, speed: 90, height: SPACE_ARRIVAL_HEIGHT, crew: this.crewRecord(), condition: this.conditionRecord(ship) });
+    const place = at !== undefined ? landingsOf(this.world.spaceData, below.id)[at] : undefined;
+    const centre = place ? await this.poisFileOf(packIdOf(below)).then((f) => f.center, () => null) : null;
+    const arrival = place && centre ? { pos: new THREE.Vector3(...landingInGame(place, centre)), quaternion: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI) } : undefined;
+    if (place && !arrival) this.messages.system(`${below.name}'s places are not here, so the ship comes down over its own arrival`);
+    await this.travel(below, undefined, { def: ship.def!, speed: 90, height: SPACE_ARRIVAL_HEIGHT, crew: this.crewRecord(), condition: this.conditionRecord(ship), ...(arrival ? { arrival } : {}) });
   }
 
   /** The ship menu's way off: whoever is in a ship in space goes down to the planet on foot, the ship left behind. */
@@ -23975,6 +24189,8 @@ class App {
   private fittingRowsFor = '';
   /** Whether `fittingRows` is the whole answer for `fittingRowsFor`: its file read, or known to be none. */
   private fittingRowsIn = false;
+  /** That world's cloning facilities' tubes by template (`fittings.json`'s `cloning`): empty for a pack from before them. */
+  private cloningPoints: Record<string, readonly CloningPoint[]> = {};
   /**
    * What `standFittings` stood, for which world, and which run stood it. The record is the run's token, as the
    * seats' is (`standSeats`): a run that a later one replaced stops at its next await and takes down whatever
@@ -23999,14 +24215,17 @@ class App {
     }
     this.fittingRowsFor = pack;
     this.fittingRows = [];
+    this.cloningPoints = {};
     this.fittingRowsIn = false;
     try {
       // Asked only of a world whose pack is there (`packJson`).
-      const data = await packJson<{ version?: number; rows?: FittingRow[] }>(pack, 'fittings.json', import.meta.env.BASE_URL);
+      const data = await packJson<{ version?: number; rows?: FittingRow[]; cloning?: Record<string, CloningPoint[]> }>(pack, 'fittings.json', import.meta.env.BASE_URL);
       if (!data) return;
-      if (!Array.isArray(data.rows) || data.version !== FITTINGS_PACK_VERSION) return;
+      if (!Array.isArray(data.rows) || !fittingsReadable(data.version)) return;
       if (this.fittingRowsFor !== pack) return;
       this.fittingRows = data.rows;
+      // Each facility's tubes by its template (version 2): where the dead stand up in it (`respawnAt`).
+      this.cloningPoints = cloningPointsOf(data);
       this.fittingRowsIn = true;
       void this.standFittings(pack);
     } catch {
@@ -24055,7 +24274,8 @@ class App {
       const key = `fitting:${pack}:${run.run}:${i}`;
       // Solid whatever its size: a terminal or a panel is under the sweep's own floor for small
       // props and is exactly the thing the owner asked to be able to walk into rather than through.
-      const stood = await this.world.placeProp(f.model, { key, at: { x: f.x, y: f.y, z: f.z }, yaw: f.yaw, inside: f.cell > 0, solid: true, template: f.template });
+      // Not where the layout already stands the very same thing (`unlessStanding`): a screenplay prop the snapshot merged.
+      const stood = await this.world.placeProp(f.model, { key, at: { x: f.x, y: f.y, z: f.z }, yaw: f.yaw, inside: f.cell > 0, solid: true, template: f.template, unlessStanding: true });
       if (!stood) continue;
       if (!current()) {
         // Replaced while this one was being stood: it is under a key no other run uses, so this finds it and
@@ -25523,8 +25743,16 @@ class App {
       await this.settle();
       // A ray finds nothing until the world has stepped: the floor inside is read after this one.
       this.physics.stepOnce();
-      const inside = this.world.cloneRoomAt(f.x, f.z, f.template);
-      if (inside) p.reset(inside);
+      // In one of its own tubes where the emulator gives it some, the one this character's id picks (`tubeFor`).
+      const tube = this.fittingRowsFor === packIdOf(this.world.planet, this.zone) ? tubeFor(this.cloningPoints, f.template, this.current?.id ?? '') : null;
+      const inside = this.world.cloneRoomAt(f.x, f.z, f.template, tube);
+      if (inside) {
+        p.reset(inside);
+        if (this.world.cloneHeading !== null) {
+          p.heading = this.world.cloneHeading;
+          this.cam.yaw = this.world.cloneHeading + Math.PI;
+        }
+      }
       else {
         // The real ground is in by now even when the building is not, so stand them on it rather than
         // on the height the stand-in terrain guessed while the pack was still loading. This is the
@@ -25592,6 +25820,8 @@ class App {
     this.deathChoices = [];
     this.player.endRagdoll();
     this.player.reset(this.spawn);
+    // And in a world's own arrival room (Echo Base's hangar, the old tutorial's hall), as in a copy's below.
+    this.reenterArrivalRoom(this.spawn);
     // Come round in a dungeon copy's arrival room, where `enterCopy` put the spawn: stood in that room again
     // here, because a reset is a move further than a walk, which the streamer takes for a teleport out of
     // every room (`followThrough`). Left out of it, the copy's crew go (`World.inCopy`), its way out goes, and
@@ -25670,11 +25900,16 @@ class App {
       await this.settle();
       // A ray finds nothing until the world has stepped: the floor is read after this one.
       this.physics.stepOnce();
-      onFloor = this.floorUnder(at);
-      if (onFloor) p.reset(at);
-      else {
+      // A room arrival (Echo Base's hangar, the old tutorial's hall) is stood in its room, on its floor, as an arrival stands
+      // it (`standInHomeRoom`): its place may be a point in the room's air, which no floor lies within a step of.
+      onFloor = home?.room ? this.standInHomeRoom(home, true) : this.floorUnder(at);
+      if (!onFloor) {
         p.reset(new THREE.Vector3(at.x, this.world.terrain.heightAt(at.x, at.z) + 0.3, at.z));
         this.messages.system(`the floor ${planet.name} brings you in on has not come in yet, ${words}`);
+      } else if (!home?.room) {
+        // On the floor at the place itself (a room arrival was stood in its room by `standInHomeRoom` already).
+        p.reset(at);
+        this.reenterArrivalRoom(at);
       }
       if (home && home.heading !== null) {
         p.heading = home.heading;
@@ -28567,6 +28802,8 @@ class App {
       spaceName: spaceZoneOf(this.world.planet)?.name ?? null,
       // A system that is no planet's orbit (Kessel, Ord Mantell, Deep Space) has no planet below and is named for itself.
       planetName: inSpace ? (planetBelow(this.world.planet)?.name ?? null) : null,
+      // Where a station lands a ship on the planet below (the emulator's own list, named by the world's places).
+      landings: inSpace ? landingsOf(this.world.spaceData, planetBelow(this.world.planet)?.id ?? '').map((l) => l.name) : [],
       zoneName: inSpace ? (this.world.spaceData?.title && this.world.spaceData.title !== this.world.planet.id ? this.world.spaceData.title : this.world.planet.name) : null,
       jump: {
         // A ship at a dock or on a lane cannot jump: it is not the pilot's to fly until it is clear.

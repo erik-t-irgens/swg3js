@@ -13,6 +13,7 @@ import * as THREE from 'three';
 import type { GLTF, GLTFLoader, GLTFLoaderPlugin, GLTFParser } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { frac, makeClock, stepClock, type FlipClock, type FlipMode } from './surfaceClock.ts';
 import { skinnedPlugin } from '../core/skinnedLoad.ts';
+import { REVERSED_DEPTH } from '../core/depthMode.ts';
 
 /** The converter's `extras.swg` on a material (tools/swg/glb.mjs). */
 export interface SwgSurface {
@@ -517,13 +518,81 @@ export function isBasinWater(m: THREE.Material): boolean {
   return BASIN_WATER_SHADERS.has(m.name);
 }
 
-/** Whether a mesh with these materials should cast: false when any carries `userData.noShadow`, or is blended water. */
+/**
+ * Whether a mesh with these materials should cast: false when any carries `userData.noShadow`, is blended water, or is
+ * a pane nobody sees (`userData.invisible`, the `e_invisible_collidable` shader: a collider only). Three's shadow pass
+ * reads no opacity, so an invisible pane cast its whole shape: 94 primitives over 48 placed models did (109 with their
+ * lower levels), the bombed house in Mos Eisley's among them.
+ */
 export function castsShadow(material: THREE.Material | THREE.Material[]): boolean {
   if (Array.isArray(material)) {
-    for (const m of material) if (m.userData.noShadow || isBlendedWater(m)) return false;
+    for (const m of material) if (m.userData.noShadow || m.userData.invisible || isBlendedWater(m)) return false;
     return true;
   }
-  return !material.userData.noShadow && !isBlendedWater(material);
+  return !material.userData.noShadow && !material.userData.invisible && !isBlendedWater(material);
+}
+
+// ---- Decals ----
+
+/**
+ * A decal's shader, by its name: every `shader/decal_*` (the scorches, the graffiti, the meatlump marks, the Death Watch
+ * smears) and the three `shader/moon_decal_*`. Measured over every GLB the packs hold: 34 shaders, 57 materials over
+ * eight packs (Hoth's heroic, the props, Tatooine, Dathomir, Lok, Naboo, Talus and Rori), and every one of them is
+ * `effect/a_alpha.eft` in the archives -- blended (SrcAlpha, InvSrcAlpha), alpha tested at a reference of nought, no
+ * depth write -- where the converter wrote each a cut-out at a half. Nothing else in the packs is named so: the
+ * `*_decal_*` metal and kiosk shaders (`ksk_metl_decal_asb14`, `sd_metal_decal2_cd8`) are opaque surfaces with a sign
+ * painted on, and the Arbor's ivy (`ivy_decal_arbor`) is a true cut-out.
+ */
+const DECAL_SHADER = /^shader\/(?:moon_)?decal_/i;
+
+/** Whether a converted material is a decal (`DECAL_SHADER`). */
+export function isDecalShader(name: string): boolean {
+  return DECAL_SHADER.test(name);
+}
+
+/**
+ * How a decal is drawn over what it lies on. The polygon offset is ours: the client drew its decals a few centimetres
+ * clear of the surface and with no depth write, and the offset is what keeps a decal laid flush from fighting the floor
+ * under it. The same numbers the marks use (`marks.ts`); the floor of the alpha test is the client's reference of nought
+ * taken as "anything above nought", one level of an eight-bit alpha.
+ */
+export const DECAL_TUNE = { factor: -2, units: -2, alphaFloor: 1 / 255 };
+
+/**
+ * A decal drawn the client's way: blended at its own alpha, writing no depth, cut only where it is wholly clear, held over
+ * what it lies on by a polygon offset, and casting no shadow (`noShadow`, which `castsShadow` reads). Every field it sets
+ * that is in three's program key (`transparent`, the alpha test) is set here, in the loader's `afterRoot`, before the
+ * model is ever compiled, as the emissive and scrolling surfaces are. Three turns the offset's factor round under
+ * reversed depth but not its units, so the units are turned here as the marks turn theirs.
+ */
+export function applyDecal(m: THREE.Material): void {
+  m.transparent = true;
+  m.depthWrite = false;
+  m.alphaTest = DECAL_TUNE.alphaFloor;
+  m.polygonOffset = true;
+  m.polygonOffsetFactor = DECAL_TUNE.factor;
+  m.polygonOffsetUnits = REVERSED_DEPTH ? -DECAL_TUNE.units : DECAL_TUNE.units;
+  m.userData.decal = true;
+  m.userData.noShadow = true;
+  m.needsUpdate = true;
+}
+
+/** Whether a material was made a decal (`applyDecal`): what the collider sweep leaves out. */
+export function isDecal(m: THREE.Material | THREE.Material[]): boolean {
+  if (Array.isArray(m)) return m.some((x) => x.userData.decal === true);
+  return m.userData.decal === true;
+}
+
+/** Every decal material of a loaded model made one, each once (GLTFLoader's vertex-colour copies included). */
+function markDecals(result: GLTF): void {
+  const roots = result.scenes?.length ? result.scenes : [result.scene];
+  for (const root of roots) {
+    root.traverse((o) => {
+      const material = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+      if (!material) return;
+      for (const m of Array.isArray(material) ? material : [material]) if (!m.userData.decal && isDecalShader(m.name)) applyDecal(m);
+    });
+  }
 }
 
 /** Whether a placed mesh with this material is a translucent converted surface that must draw after the water. */
@@ -602,6 +671,8 @@ class SwgSurfacesPlugin implements GLTFLoaderPlugin {
   }
 
   afterRoot(result: GLTF): Promise<void> | null {
+    // A decal wherever one is worn (a placed scorch, a prop's graffiti), whether or not its model carries anything animated.
+    markDecals(result);
     const json = this.parser.json as { materials?: { extras?: { swg?: unknown } }[] };
     if (!json.materials?.some((d) => d?.extras?.swg)) return null;
     return this.apply(result, json);

@@ -5,9 +5,11 @@
 // children of a building and the props the screenplays put down (`fittings`, and the outdoor half in
 // `snapshot`), what a deed makes and what it costs (`deeds`), where the world's creatures and people
 // stood (`spawns`), each mobile's health and damage (`mobiles`), what the server called each travel
-// point, which names a town's second and third shuttleport apart (`pois`), and what its people said, as the
+// point, which names a town's second and third shuttleport apart (`pois`), what its people said, as the
 // structure of its conversations and nothing more (`conversations`, and the relay, which plays the adopted
-// ones from it). They used to open the owner's own
+// ones from it), where a world's ships came out in space and where a station landed them (`space`), the tubes
+// a cloning facility stood its dead up in (`fittings`), and the old tutorial's people and things by the rooms
+// of its hall (`spawns`, `fittings`). They used to open the owner's own
 // Core3 checkout for them, which meant nobody else could have any of it: the launcher has no such
 // folder, and a player was never going to be asked to install an emulator to get a travel terminal.
 //
@@ -67,6 +69,13 @@ export const CORE3_READERS = {
   // and who speaks which: two files, so `readCreatures`' own stays exactly as it was.
   readConversations: { file: 'conversations.json', read: (dir) => C3.readConversations(dir) },
   readConversationSpeakers: { file: 'conversation-speakers.json', read: (dir) => C3.readConversationSpeakers(dir) },
+  // The map fixes: where a world's ships come out in space (`space`), where a station lands them (`space`), the tubes a
+  // facility stands the dead up in (`fittings`), and the old tutorial's people and things by the hall's rooms (`spawns`,
+  // `fittings`).
+  readLaunchPoints: { file: 'launch-points.json', read: (dir) => C3.readLaunchPoints(dir) },
+  readLandingPoints: { file: 'landing-points.json', read: (dir) => C3.readLandingPoints(dir) },
+  readCloningPoints: { file: 'cloning-points.json', read: (dir) => C3.readCloningPoints(dir) },
+  readTutorial: { file: 'tutorial.json', read: (dir) => C3.readTutorial(dir) },
 };
 
 // ---------------------------------------------------------------------------------------------

@@ -16,8 +16,59 @@
 
 import { childInWorld } from './travelTerminal.ts';
 
-/** The pack this file reads. */
-export const FITTINGS_PACK_VERSION = 1;
+/**
+ * The pack this file reads: 2 adds each cloning facility's tubes (`cloning`) and the old tutorial's things, beside rows of
+ * the very shape 1 wrote, so a pack of either is read (`fittingsReadable`).
+ */
+export const FITTINGS_PACK_VERSION = 2;
+
+/** Whether a `fittings.json` of this version is read: this one, and the one before, whose rows are the same. */
+export function fittingsReadable(version: unknown): boolean {
+  return version === FITTINGS_PACK_VERSION || version === 1;
+}
+
+/**
+ * One of a cloning facility's tubes, as the converter keeps it from Core3's `spawningPoints`: the room (its index in the
+ * building), the place in the building's own frame (the client's, x across, y up, z along) and a heading about the upright
+ * in that frame (radians, a body facing `(sin, cos)` there).
+ */
+export interface CloningPoint {
+  cell: number;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+}
+
+/**
+ * Which of a facility's tubes a character stands up in: one picked by a hash of the character's own id (ours: the
+ * emulator drew one at random each time), so the same character comes round in the same tube and two characters are
+ * spread over the room. Null with none.
+ */
+export function cloningPointOf(points: readonly CloningPoint[] | undefined, who: string): CloningPoint | null {
+  if (!points?.length) return null;
+  let h = 2166136261;
+  for (let i = 0; i < who.length; i++) h = Math.imul(h ^ who.charCodeAt(i), 16777619) >>> 0;
+  return points[h % points.length];
+}
+
+/** A world's cloning facilities' tubes by template, as its `fittings.json` keeps them (`cloning`, version 2): none for a pack from before. */
+export function cloningPointsOf(data: { cloning?: unknown } | null | undefined): Record<string, readonly CloningPoint[]> {
+  const c = data?.cloning;
+  return c && typeof c === 'object' && !Array.isArray(c) ? (c as Record<string, readonly CloningPoint[]>) : {};
+}
+
+/** The tube a character comes round in at the facility of a template (`cloningPointOf` over that facility's tubes), or null. */
+export function tubeFor(points: Readonly<Record<string, readonly CloningPoint[]>>, template: string | undefined, who: string): CloningPoint | null {
+  return template ? cloningPointOf(points[template], who) : null;
+}
+
+/**
+ * How near a thing of the same template the world's own layout must stand for a fitting to be taken for it, metres, height
+ * counting (`World.placeProp`'s `unlessStanding`, `LayoutStreamer.standsTemplateNear`): the design's half metre, and every
+ * one of the 61 doubles the map audit found stands within it, at the very same spot.
+ */
+export const STANDING_TWICE = 0.5;
 
 /** One fitting, as a world's pack carries it. */
 export interface FittingRow {

@@ -1375,3 +1375,138 @@ export function readConversationSpeakers(scripts) {
   }
   return new Map([...out].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)));
 }
+
+// ---------------------------------------------------------------------------------------------
+// The map fixes' readers: where a planet launches into space and the station lands, where a facility stands the dead
+// up, and where the old tutorial stood its people.
+
+/**
+ * Where each world's ships come out in space (`managers/planet/planet_manager.lua`, `jtlLaunchPoint` under each world's
+ * own table): the space zone and three numbers, by the world's name. The emulator reads them as `x, z, y` with `z` the
+ * height (`PlanetManagerImplementation::loadJTLData`), so they are kept here as the client's own `x, y, z` -- the first,
+ * then the height, then the third -- the frame the station tables are in; `space` measures them against the zone's own
+ * station before it believes them (each lies 0 to 80 m from its station as read). Rori launches into Naboo's zone and
+ * Talus into Corellia's, as the server sent them.
+ */
+export function readLaunchPoints(scripts) {
+  const file = join(scripts, 'managers', 'planet', 'planet_manager.lua');
+  const out = new Map();
+  if (!existsSync(file)) return out;
+  const { values } = readLua(readFileSync(file, 'utf8'));
+  for (const [world, v] of values) {
+    const p = v && typeof v === 'object' && !Array.isArray(v) ? v.jtlLaunchPoint : null;
+    if (!Array.isArray(p) || typeof p[0] !== 'string' || !p.slice(1, 4).every((n) => typeof n === 'number')) continue;
+    out.set(world, { zone: p[0], at: [p[1], p[2], p[3]] });
+  }
+  return new Map([...out].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)));
+}
+
+/**
+ * Where a space station's people landed a ship (`screenplays/space/spacestations/spacestation.lua`, its
+ * `travelPoints`): the world and the place, by the screenplay's own key (`coronet`, `kor_vella`), in the order the
+ * file writes them. A row's numbers are the ground, the height and the ground (the emulator's `x, z, y`), kept as the
+ * client's raw `x, y, z`; the key is the emulator's own word for the place and no client string.
+ */
+export function readLandingPoints(scripts) {
+  const file = join(scripts, 'screenplays', 'space', 'spacestations', 'spacestation.lua');
+  const out = [];
+  if (!existsSync(file)) return out;
+  const { values } = readLua(readFileSync(file, 'utf8'));
+  for (const [, v] of values) {
+    const points = v && typeof v === 'object' && !Array.isArray(v) ? v.travelPoints : null;
+    if (!points || typeof points !== 'object' || Array.isArray(points)) continue;
+    for (const [key, p] of Object.entries(points)) {
+      if (!Array.isArray(p) || typeof p[0] !== 'string' || !p.slice(1, 4).every((n) => typeof n === 'number')) continue;
+      out.push({ key, world: p[0], x: p[1], y: p[2], z: p[3] });
+    }
+  }
+  return out;
+}
+
+/**
+ * Where each cloning facility stands the dead up (`object/building/**`, a template's `spawningPoints`): its tubes, each
+ * a room (`cellid`), a place and a turn, by the building's template under both its spellings (the server's and the
+ * client's `shared_`), as the building children are keyed (`readBuildingChildren`). A point is written `x, z, y` with `z`
+ * the height and its turn `ow, ox, oy, oz` with `oy` about the upright, so it is kept as the client's own `x, y, z` in the
+ * building's frame and a heading about the upright (`2 atan2(oy, ow)`).
+ */
+export function readCloningPoints(scripts) {
+  const out = new Map();
+  for (const file of luaFiles(join(scripts, 'object', 'building'))) {
+    let parsed;
+    try {
+      parsed = readLua(readFileSync(file, 'utf8'));
+    } catch {
+      continue;
+    }
+    const rel = file.replace(/\\/g, '/').split('/bin/scripts/')[1];
+    if (!rel) continue;
+    for (const [, v] of parsed.values) {
+      if (!v || typeof v !== 'object' || Array.isArray(v) || !Array.isArray(v.spawningPoints)) continue;
+      const points = [];
+      for (const p of v.spawningPoints) {
+        if (!p || typeof p !== 'object') continue;
+        const x = Number(p.x);
+        const y = Number(p.z);
+        const z = Number(p.y);
+        const cell = Number(p.cellid);
+        if (![x, y, z, cell].every(Number.isFinite)) continue;
+        const ow = Number(p.ow ?? 1);
+        const oy = Number(p.oy ?? 0);
+        const yaw = Number.isFinite(ow) && Number.isFinite(oy) ? 2 * Math.atan2(oy, ow) : 0;
+        points.push({ cell: Math.round(cell), x, y, z, yaw: Math.round(yaw * 1e4) / 1e4 });
+      }
+      if (!points.length) continue;
+      const server = rel.replace(/\.lua$/, '.iff');
+      out.set(server, points);
+      out.set(server.replace(/\/([^/]+)$/, '/shared_$1'), points);
+    }
+  }
+  return new Map([...out].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)));
+}
+
+const TUTORIAL_NUM = String.raw`[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?`;
+const TUTORIAL_CELL = /getNamedCell\(\s*"([^"]+)"\s*\)/;
+const TUTORIAL_MOBILE = new RegExp(String.raw`spawnMobile\(\s*"tutorial"\s*,\s*("([^"]+)"|[^,]+)\s*,\s*(${TUTORIAL_NUM})\s*,\s*(${TUTORIAL_NUM})\s*,\s*(${TUTORIAL_NUM})\s*,\s*(${TUTORIAL_NUM})\s*,\s*(${TUTORIAL_NUM})\s*,\s*cellID\s*\)`);
+const TUTORIAL_OBJECT = new RegExp(String.raw`spawnSceneObject\(\s*"tutorial"\s*,\s*"([^"]+)"\s*,\s*(${TUTORIAL_NUM})\s*,\s*(${TUTORIAL_NUM})\s*,\s*(${TUTORIAL_NUM})\s*,\s*cellID\s*,\s*(${TUTORIAL_NUM})\s*,\s*(${TUTORIAL_NUM})\s*,\s*(${TUTORIAL_NUM})\s*,\s*(${TUTORIAL_NUM})\s*\)`);
+
+/**
+ * The old tutorial's people and things (`screenplays/tutorial/tutorial.lua`), by the room of the hall each stands in.
+ * The screenplay builds the hall for each new player and stands them in its rooms by name (`getNamedCell("r3")` and
+ * the calls after it), so a place here is in the hall's own frame with the room's name beside it: the reader the rest
+ * of the screenplays go through (`scanServerSpawns`) took the `cellID` for nought and kept the places as the world's,
+ * and never read the things at all. `spawnMobile`'s numbers are the respawn, `x, z, y` (z the height) and a heading in
+ * degrees; `spawnSceneObject`'s `x, z, y` and a turn `ow, ox, oy, oz` (oy about the upright). A body the code chooses as
+ * it runs (the trainer, `self:getPlayerTrainer`) is counted and not kept. Read line by line, which the file allows: every
+ * call it makes is on one line.
+ */
+export function readTutorial(scripts) {
+  const file = join(scripts, 'screenplays', 'tutorial', 'tutorial.lua');
+  const out = { mobiles: [], objects: [], chosen: 0 };
+  if (!existsSync(file)) return out;
+  let room = null;
+  for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
+    const cell = TUTORIAL_CELL.exec(line);
+    if (cell) {
+      room = cell[1];
+      continue;
+    }
+    if (!room) continue;
+    const m = TUTORIAL_MOBILE.exec(line);
+    if (m) {
+      if (!m[2]) {
+        out.chosen++;
+        continue;
+      }
+      out.mobiles.push({ room, name: m[2], respawn: Number(m[3]), x: Number(m[4]), y: Number(m[5]), z: Number(m[6]), heading: headingRadians(Number(m[7])) });
+      continue;
+    }
+    const o = TUTORIAL_OBJECT.exec(line);
+    if (o) {
+      const ow = Number(o[5]);
+      const oy = Number(o[7]);
+      out.objects.push({ room, template: o[1], x: Number(o[2]), y: Number(o[3]), z: Number(o[4]), yaw: Math.round(2 * Math.atan2(oy, ow) * 1e4) / 1e4 });
+    }
+  }
+  return out;
+}

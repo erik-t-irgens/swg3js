@@ -11,7 +11,10 @@
 // a facility with no named place near it is offered under a plain word instead.
 //
 // Which list a world's own server offered, and in what order, was the server's and did not ship, so
-// every number below is ours and says so.
+// every number below is ours and says so. Where in a facility the dead stood up is the emulator's,
+// though: Core3's building templates give each facility its tubes (`spawningPoints`: a room, a place
+// and a turn), which the converter keeps (`fittings.json`'s `cloning`), and a facility that has them
+// stands the dead in one of them (`cloningPointOf`); the room named `spawn` is for one that has none.
 
 /** A placed object as the streamer holds it: enough to find a facility and measure it. */
 export interface PlacedLike {

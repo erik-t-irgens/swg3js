@@ -300,12 +300,7 @@ export function buildLibrary({ root, log = () => {}, now = Date.now(), tune = LI
   } else log('library: no gallery, so none of its buildings');
 
   // Every ground world: what it places that neither the props nor the gallery has, by template, and what it plants.
-  const worlds = existsSync(root)
-    ? readdirSync(root, { withFileTypes: true })
-        .filter((d) => d.isDirectory() && !NOT_A_WORLD.has(d.name) && !d.name.startsWith('space_') && existsSync(join(root, d.name, 'layout.json')) && existsSync(join(root, d.name, 'manifest.json')))
-        .map((d) => d.name)
-        .sort()
-    : [];
+  const worlds = libraryWorlds(root);
   for (const world of worlds) {
     const man = readJson(join(root, world, 'manifest.json'));
     const layout = readJson(join(root, world, 'layout.json'));
@@ -402,8 +397,23 @@ export function buildLibrary({ root, log = () => {}, now = Date.now(), tune = LI
 }
 
 /**
- * What `status` says of the library (listed, never asked): missing, of another format, or older than a pack it read, each
- * with the command; else how many entries and pictures it holds. `stale` true for any of the first three.
+ * The ground worlds the library reads (`buildLibrary`): every folder under the packs with both a layout and a manifest,
+ * but the shared packs (`NOT_A_WORLD`) and the space zones. One function, because `libraryStatus` asks of the very same list.
+ */
+export function libraryWorlds(root) {
+  return existsSync(root)
+    ? readdirSync(root, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && !NOT_A_WORLD.has(d.name) && !d.name.startsWith('space_') && existsSync(join(root, d.name, 'layout.json')) && existsSync(join(root, d.name, 'manifest.json')))
+        .map((d) => d.name)
+        .sort()
+    : [];
+}
+
+/**
+ * What `status` says of the library (listed, never asked): missing, of another format, older than a pack it read, or
+ * missing a world converted since (a world folder the library would read that its index never did: comparing only the
+ * packs already in the index, a newly converted world never made it stale), each with the command; else how many entries
+ * and pictures it holds. `stale` true for any of the first four.
  */
 export function libraryStatus(root) {
   const index = readJson(join(root, 'library', 'library.json'));
@@ -411,6 +421,8 @@ export function libraryStatus(root) {
   if (index.version !== LIBRARY_FORMAT) return { line: `library: of another format (${index.version}): npm run swg -- library ${root}`, stale: true };
   const older = Object.entries(index.packs ?? {}).filter(([, p]) => mtimeOf(join(root, p.manifest)) > (p.mtime ?? 0) + 1).map(([k]) => k);
   if (older.length) return { line: `library: older than ${older.slice(0, 4).join(', ')}${older.length > 4 ? ', ...' : ''}: npm run swg -- library ${root}`, stale: true };
+  const unread = libraryWorlds(root).filter((w) => !Object.prototype.hasOwnProperty.call(index.packs ?? {}, w));
+  if (unread.length) return { line: `library: has nothing of ${unread.slice(0, 4).join(', ')}${unread.length > 4 ? `, and ${unread.length - 4} more` : ''}, converted since: npm run swg -- library ${root}`, stale: true };
   const bySource = {};
   let pictures = 0;
   for (const e of index.entries ?? []) {

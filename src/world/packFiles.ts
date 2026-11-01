@@ -57,6 +57,13 @@ const GALLERY = 'gallery';
  */
 export const SERVER_WORLDS: readonly string[] = ['corellia', 'dantooine', 'dathomir', 'endor', 'lok', 'naboo', 'rori', 'talus', 'tatooine', 'yavin4'];
 
+/**
+ * The worlds whose people the server stood only in the rooms of a building, by the room's name: the old tutorial, whose
+ * hall's crew the `spawns` command writes into its `spawns.json` (`tools/swg/tutorial.mjs`). `packFiles.test.ts` holds it
+ * to the converter's.
+ */
+export const ROOM_CREW_WORLDS: readonly string[] = ['tutorial'];
+
 /** Whether a world declares no pack of its own (`PlanetDef.pack`): nothing under `assets-private/<id>/` is asked for it. */
 export function packless(planet: Pick<PlanetDef, 'pack'> | null | undefined): boolean {
   return planet?.pack === false;
@@ -101,9 +108,9 @@ export function packHolds(packId: string, file: string): boolean {
     // offered as a world (`extra`: the archives hold no `ui_map_<id>` picture for one).
     case 'map.json':
       return ground && !world.instances && !world.extra;
-    // The server's people and creatures (`spawns`): the worlds it populated, and its copies.
+    // The server's people and creatures (`spawns`): the worlds it populated, its copies, and the old tutorial's hall.
     case 'spawns.json':
-      return SERVER_WORLDS.includes(world.id) || !!world.instances;
+      return SERVER_WORLDS.includes(world.id) || ROOM_CREW_WORLDS.includes(world.id) || !!world.instances;
     // The gates walked between a planet's zones (`gates`): a planet split into zones, and nothing else (a planet of one
     // zone, the early Kashyyyk, has nothing to walk between).
     case 'gates.json':

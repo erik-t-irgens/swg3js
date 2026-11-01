@@ -12,6 +12,13 @@ export interface WorldArrival {
   readonly y: number;
   /** Radians in the game's frame, a body facing `(sin, cos)`; absent, the way an arrival always faced. */
   heading?: number;
+  /**
+   * A room to arrive in (`src/world/arrival.ts`): the building of this template standing nearest the raw place, its room
+   * of this name in the client's own portal layout, and a place in the building's own frame (the client's: x across, y up,
+   * z along) to stand at in it, absent for the room's own floor under its middle. The raw place and height are then only
+   * where the world streams round until the building is in.
+   */
+  readonly room?: { readonly template: string; readonly cell: string; readonly at?: readonly [number, number, number] };
 }
 
 /** One terrain of a planet the game split into separate zones (Kashyyyk), each its own converted pack. */
@@ -331,13 +338,15 @@ export const PLANETS: PlanetDef[] = [
     zones: [
       { id: 'main', name: 'Kachirho', pack: 'kashyyyk_main' },
       { id: 'hunting', name: 'Etyyy, the Hunting Grounds', pack: 'kashyyyk_hunting' },
-      { id: 'dead_forest', name: 'Dead Forest', pack: 'kashyyyk_dead_forest' },
+      // The client's own name for the dead forest (`planet_n`), which is what its gate in Kachirho reads.
+      { id: 'dead_forest', name: 'Kkowir Forest', pack: 'kashyyyk_dead_forest' },
       { id: 'rryatt_trail', name: 'Rryatt Trail', pack: 'kashyyyk_rryatt_trail' },
-      // Named for what each holds, in the game's own words: the north zone is twelve Trandoshan slave
-      // camps (the client's "Blackscale Processing Camp"), and the pob zone the Myyydril caverns' copies
-      // beside the Avatar Platform's; they were the other way round, a cave's name on a zone of camps.
-      { id: 'north_dungeons', name: 'Blackscale Processing Camp', pack: 'kashyyyk_north_dungeons' },
-      { id: 'south_dungeons', name: 'Kkowir Forest', pack: 'kashyyyk_south_dungeons' },
+      // Named for what each holds, in the game's own words (`zone_n`'s areas): the north zone is twelve Trandoshan
+      // slave camps (the client's "Blackscale Processing Camp") and the four copies of the Arena, the south zone the
+      // copies of Hracca and of Bocctyyy, and the pob zone the Myyydril caverns' copies beside the Avatar Platform's.
+      // The south zone was called the dead forest's own name, and the dead forest was not.
+      { id: 'north_dungeons', name: 'Blackscale Processing Camp and the Arena', pack: 'kashyyyk_north_dungeons' },
+      { id: 'south_dungeons', name: 'Hracca and Bocctyyy', pack: 'kashyyyk_south_dungeons' },
       { id: 'pob_dungeons', name: 'Myyydril Caverns and the Avatar Platform', pack: 'kashyyyk_pob_dungeons' },
     ],
   },
@@ -511,6 +520,11 @@ PLANETS.push(
     seed: 1980,
     sunOf: 'talus',
     palette: { low: 0xdfe7ee, mid: 0xeef3f7, high: 0xffffff, slope: 0xa9b6c2, shore: 0xdfe7ee },
+    // In the Main Hangar (`r15`, its name in the base's own portal layout) of the copy of the base nearest the layout's
+    // centre, where its heroic began: the room is found when the base is in and stood on its own floor. The raw place is
+    // that room's middle in that copy (the base at raw -5006.8, 0.1, the room's box in the model's frame), measured, so
+    // the world streams round it; arriving at the layout's centre stood the player 753 m off it in the snow.
+    arrival: { raw: { x: -5247.6, z: 546.0 }, y: 105.9, room: { template: 'object/building/heroic/shared_echo_base.iff', cell: 'r15' } },
   }),
   extraWorld({
     id: 'adventure1',
@@ -571,9 +585,10 @@ PLANETS.push(
     seed: 2003,
     sunOf: 'corellia',
     palette: { low: 0x6f6f6f, mid: 0x7f7f7f, high: 0x9f9f9f, slope: 0x5f5f5f, shore: 0x8f8f8f },
-    // Outside the hall's hangar door (its one doorway to the outside, a 115 m opening at the hangar's far end), facing
-    // in: the hall stands at the middle 3.5 m up, so the hangar's floor is the ground's (ours, measured in the smoke).
-    arrival: { raw: { x: 53, z: -428 }, y: 0.3, heading: 0 },
+    // Where the emulator put a new player: in the hall's first room (`r1`) at (0, 0, -3) in the hall's own frame (Core3's
+    // `PlayerManagerImplementation`), which for the hall's row at raw (0, 3.5, 0), unturned, is raw (0, -3) on its floor at
+    // 3.5. The room is entered when the hall is in. It used to be outside the hangar door, 428 m off.
+    arrival: { raw: { x: 0, z: -3 }, y: 3.8, heading: 0, room: { template: 'object/building/general/shared_newbie_hall.iff', cell: 'r1', at: [0, 0, -3] } },
   }),
   // The developers' own test terrains, each converted as it stands; what each holds is what its terrain makes, and a
   // terrain the archives hold no sky for wears another world's (the converter's `SKY_LENT`).

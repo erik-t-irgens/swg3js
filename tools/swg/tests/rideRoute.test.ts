@@ -700,7 +700,7 @@ const spaceTicket = (from: string, to: string): Ticket => ({ id: `${from}>${to}`
 
 {
   // Where the worlds are reached in their zones, from the game's own packs: Talus and Rori beside their
-  // stations in their neighbour's orbit, a flight of 8370 and 6886 metres from its launch point, both short
+  // stations in their neighbour's orbit, a flight of 12201 and 11952 metres from its launch point, both short
   // of a jump; a world's own orbit reached at its launch point; and a world's own disc in its orbit's sky.
   const packs = join(process.cwd(), 'assets-private');
   const zones = PLANETS.filter((p) => p.space && existsSync(join(packs, p.id, 'space.json')));
@@ -717,7 +717,9 @@ const spaceTicket = (from: string, to: string): Ticket => ({ id: `${from}>${to}`
         return { id: z.id, name: z.name, title: z.name, pack, destinations: destinationsOf(pack, below) };
       }),
     );
-    for (const [world, zone, want] of [['talus', 'space_corellia', 8370], ['rori', 'space_naboo', 6886]] as const) {
+    // From the zone's arrival, which since the map fixes is the orbit's own world's launch point beside its station (the
+    // emulator's), where it was the zone's origin: Talus 8370 m and Rori 6886 m from there.
+    for (const [world, zone, want] of [['talus', 'space_corellia', 12201], ['rori', 'space_naboo', 11952]] as const) {
       const pack = cat.pack(zone);
       if (!pack) {
         note(`${zone} is not converted, so where ${world} is reached in it is not measured: npm run swg -- space @SWG all assets-private --retail-only`);

@@ -13,7 +13,7 @@ import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender.ts';
 import { INTERIOR_LEAD, PORTAL_RANGE, interiorBuildRange, interiorBuildRangeMax, isQuarantined, markNarrowRoot } from './portalVis.ts';
 import { FURNITURE_ROLE, FURNITURE_TUNE, FurnitureIndex, HOST_FLAG, furnitureDraw, furnitureHosts, furnitureOn, markFurniture, splitCopies, type FurnitureDraw, type FurnitureGroup, type HostAnswer } from './furnitureHost.ts';
 import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles.ts';
-import { castsShadow, drawsAfterWater, isBasinWater } from './surfaces.ts';
+import { castsShadow, drawsAfterWater, isBasinWater, isDecal } from './surfaces.ts';
 import { placedCasts } from './shadowCasters.ts';
 import { marks } from './marks.ts';
 import { floraClearRadius, modelReach } from './floraClear.ts';
@@ -21,6 +21,7 @@ import { boxDistance, floorAt, footprintOf, gameX, gameZ, hostRadiusOf, hostReac
 // Which room a name picks is a rule of its own, with a node test over it; this file calls it rather
 // than keeping a second copy.
 import { namedCellIndex } from './cloning.ts';
+import { arrivalBuilding } from './arrival.ts';
 import { buildingWithRoomIn } from './roomOf.ts';
 import { LevelGroup } from './levelGroup.ts';
 import type { ShadowBatches, TierBatch } from './shadowBatches.ts';
@@ -101,6 +102,70 @@ function colliderFar(o: PlacedObject, px: number, pz: number, slack: number): bo
  */
 export function collidesByRule(o: PlacedObject): boolean {
   return o.solid === true || (o.solid !== false && o.radius >= COLLIDER_MIN_RADIUS);
+}
+
+/**
+ * The world builder's own markers, which the client drew only in its tools: the three no-flora rings
+ * (`object/static/structure/nobuild/shared_noflora_5`, `_10` and `_15`, whose templates set `onlyVisibleInTools`
+ * and stand on `godclient_cylinder_10m` to `_30m`, a 2 m tall ring). Measured over every converted layout, of the
+ * 4,586 templates placed these three are the only ones that set the flag, 109 copies over nine worlds (Corellia 43).
+ * Drawn and solid by the size rule (their snapshot radius is 128), they stood in the country as rings and walls;
+ * kept, they keep the plants off their circle and are nothing else. Named exactly, as the basin waters are, because
+ * the layout carries no template parameter: a converter that read the flag would have to be run again.
+ */
+export const TOOL_ONLY_TEMPLATES: ReadonlySet<string> = new Set([
+  'object/static/structure/nobuild/shared_noflora_5.iff',
+  'object/static/structure/nobuild/shared_noflora_10.iff',
+  'object/static/structure/nobuild/shared_noflora_15.iff',
+]);
+
+/**
+ * How an arrival with no place of its own is moved to open ground once the world is in (`clearSpawn`): rings `step`
+ * apart out to `reach` metres round the flattest dry spot, each spot kept `pad` metres clear of every object's own
+ * footprint and on ground no steeper than `steepest` degrees (`openGroundAt`). The first three are the search's
+ * as it always was; the slope is ours, gentle ground a body stands on rather than slides down. All ours.
+ */
+export const CLEAR_SPAWN = { reach: 120, step: 4, pad: 1.5, steepest: 30 };
+
+/** The ground an arrival is judged on: the world's terrain, or a test's stand-in. */
+export interface ArrivalGround {
+  heightAt(x: number, z: number): number;
+  waterHeightAt(x: number, z: number): number;
+  normalAt(x: number, z: number, out: THREE.Vector3): { y: number };
+}
+
+/**
+ * How steep the ground an arrival might stand on is, as one less the upright share of its normal (nought flat, one a
+ * wall), and Infinity under the drawn water or within a metre and a half over it, as `spawnPoint` keeps its flattest
+ * spot dry. What `clearSpawn` ranks spots clear of every box by when none of them is gentle enough (`openGroundAt`).
+ */
+export function arrivalSlope(ground: ArrivalGround, x: number, z: number, out: THREE.Vector3): number {
+  if (ground.heightAt(x, z) < ground.waterHeightAt(x, z) + 1.5) return Infinity;
+  return 1 - ground.normalAt(x, z, out).y;
+}
+
+/** Ground an arrival may be stood on: dry (`arrivalSlope`) and no steeper than `CLEAR_SPAWN.steepest` degrees. */
+export function openGroundAt(ground: ArrivalGround, x: number, z: number, out: THREE.Vector3): boolean {
+  return arrivalSlope(ground, x, z, out) <= 1 - Math.cos((CLEAR_SPAWN.steepest * Math.PI) / 180);
+}
+
+/**
+ * A doorless building's way in by the name of the room in the client's own portal layout, for a building whose first
+ * opening to the outside (what `entryOf` takes otherwise) is not where anybody was brought in, by model id. Tansarii
+ * Point Station (`thm_spc_nebula_orion_station`, the NGE's new-player station) has six openings to the outside and the
+ * client marks every one impassable from inside, so it is entered by "E enter" alone; its first opening is hangar bay 1
+ * (cell 6), and the new player's way in was the other hangar, `hangarbay2` (cell 8), its own room's name.
+ */
+export const DOORLESS_ENTRY: ReadonlyMap<string, string> = new Map([['thm_spc_nebula_orion_station', 'hangarbay2']]);
+
+/** A template as a name to compare: lower case, forward slashes, and the client's `shared_` taken off its file's name. */
+export function sameTemplateName(t: string): string {
+  return t.replace(/\\/g, '/').toLowerCase().replace(/\/shared_([^/]+)$/, '/$1');
+}
+
+/** Whether a placed template is one of the world builder's markers (`TOOL_ONLY_TEMPLATES`). */
+export function isToolOnly(template: string): boolean {
+  return TOOL_ONLY_TEMPLATES.has(template);
 }
 
 /**
@@ -193,6 +258,8 @@ export interface PlacedObject {
   roomsHi?: number;
   /** `HOST_FLAG` bits. */
   hostFlags?: number;
+  /** Its row in the world's layout (`layout.json`'s `objects`), for the console to name it by; absent on anything put down in play. */
+  row?: number;
   /** The snapshot's own word on where it stands (step 7): its building's index in the layout's objects, and its room. */
   hostIndex?: number;
   cell?: number;
@@ -713,6 +780,8 @@ export class LayoutStreamer {
   private readonly dormant: PlacedObject[] = [];
   /** How many of the objects standing stand in one world state only: a field initialiser, as `dormant`. */
   private statedStanding = 0;
+  /** How many of the layout's objects are the world builder's markers, kept for their flora circle alone (`isToolOnly`). */
+  toolOnly = 0;
   /**
    * What each object placed in play brought with it, so taking it out again is exact.
    *
@@ -1070,11 +1139,13 @@ export class LayoutStreamer {
       // before (step 6). Both answers are kept for the console's counts.
       const sizeTier = modelTier(o.radius, def?.bounds, !!def?.particle);
       const snapTier = snapshotTier(o.radius);
-      const p: PlacedObject = { model: o.model, template: o.template, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius, contained: !!o.contained, tier: this.filing === 'snapshot' ? snapTier : sizeTier, sizeTier, snapTier, footprint: 0 };
+      const p: PlacedObject = { model: o.model, template: o.template, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius, contained: !!o.contained, tier: this.filing === 'snapshot' ? snapTier : sizeTier, sizeTier, snapTier, footprint: 0, row: li };
+      // The world builder's own markers: their flora circle is all they are (`isToolOnly`).
+      const tool = isToolOnly(o.template);
       if (filed.placedAt[li] < 0) {
         // Of a state this world does not stand in: kept for the placing rules and out of the flora, filed nowhere else.
-        if (!p.contained) p.footprint = def?.particle ? 0 : footprintOf(def?.bounds, tiltSin(p.q.x, p.q.z));
-        this.dormant.push(p);
+        if (!p.contained && !tool) p.footprint = def?.particle ? 0 : footprintOf(def?.bounds, tiltSin(p.q.x, p.q.z));
+        if (!tool) this.dormant.push(p);
         if (!p.contained) {
           const clear = floraClearRadius(o.radius, def?.bounds ?? null);
           if (clear > 0) this.addExclusion({ x: gx, z: gz, r: clear });
@@ -1088,7 +1159,18 @@ export class LayoutStreamer {
         p.cell = o.cell;
       }
       if (o.state) this.statedStanding++;
+      // In the list, so every index the layout's own `in` names past it still lands on its building; and nowhere else:
+      // filed in no region, so no tier draws it, the collider sweep never reaches it and nothing asks it what is in the
+      // way. Only the plants are kept off its circle, which is what it was put down for.
       this.objects.push(p);
+      if (tool) {
+        this.toolOnly++;
+        if (!p.contained) {
+          const clear = floraClearRadius(o.radius, def?.bounds ?? null);
+          if (clear > 0) this.addExclusion({ x: gx, z: gz, r: clear });
+        }
+        continue;
+      }
       const region = this.regionFor(gx, gz);
       region.objects[p.tier].push(p);
       this.noteFootprint(region, p, def ?? null);
@@ -1498,6 +1580,102 @@ export class LayoutStreamer {
       g.twinned = false;
       this.applyFurniture(g);
     }
+  }
+
+  /**
+   * The placed object standing at a point, within `within` metres on all three axes, nearest first, or null: what a drawn
+   * copy is, read off the place its instance matrix puts it (`__debug.aimAt`). A copy is drawn at exactly its object's
+   * place, so a few centimetres find it; the console's, never a frame's.
+   */
+  placedAtPoint(x: number, y: number, z: number, within = 0.05): PlacedObject | null {
+    const rx0 = Math.floor((x - within) / REGION);
+    const rx1 = Math.floor((x + within) / REGION);
+    const rz0 = Math.floor((z - within) / REGION);
+    const rz1 = Math.floor((z + within) / REGION);
+    let best: PlacedObject | null = null;
+    let bestD = within * within;
+    for (let rz = rz0; rz <= rz1; rz++) {
+      for (let rx = rx0; rx <= rx1; rx++) {
+        const region = this.regions.get(`${rx},${rz}`);
+        if (!region) continue;
+        for (const list of region.objects) {
+          for (const o of list) {
+            const d = (o.x - x) ** 2 + (o.y - y) ** 2 + (o.z - z) ** 2;
+            if (d > bestD) continue;
+            bestD = d;
+            best = o;
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  /** Where the console finds what a placed object is to the streamer (`__debug.aimAt`): its colliders now, and its host. */
+  describePlaced(o: PlacedObject): { colliders: number; solidByRule: boolean; host: string | null; doorway: boolean; rooms: string; layoutIndex: number } {
+    const flags = o.hostFlags ?? 0;
+    return {
+      colliders: this.colliders.get(o)?.length ?? 0,
+      solidByRule: collidesByRule(o),
+      host: o.host ? o.host.model : null,
+      doorway: (flags & HOST_FLAG.doorway) !== 0,
+      rooms: o.host ? `${(o.roomsLo ?? 0).toString(2)}|${(o.roomsHi ?? 0).toString(2)}` : '',
+      layoutIndex: o.row ?? -1,
+    };
+  }
+
+  /**
+   * Whether the layout already stands a thing of this template within `within` metres of a point (the three axes), in
+   * this world's state: what a fitting asks before it is stood (`World.placeProp`'s `unlessStanding`). A template is
+   * compared as a name, a server's spelling (no `shared_`) the same as the client's: the screenplay props the snapshot
+   * merges into the layout are written again by `fittings` under the server's spelling. Walks only the regions the
+   * point's little box touches; asked once a fitting, never on a frame.
+   */
+  /**
+   * The building whose rooms a mesh is one of, and the room (`interior` and its `interiorCell`), or null: what the console's
+   * `aimAt` names for a mesh no instance places, since a building's rooms are meshes of their own. Walks every standing
+   * building; asked by hand, never on a frame.
+   */
+  roomMeshOf(mesh: THREE.Object3D): { template: string; model: string; cell: number; cellName: string | null; x: number; z: number } | null {
+    for (const b of this.buildings) {
+      const i = b.interior.indexOf(mesh as THREE.Mesh);
+      if (i < 0) continue;
+      const cell = b.interiorCell?.[i] ?? -1;
+      const name = b.model.def.cells?.find((c) => c.index === cell)?.name ?? null;
+      return { template: b.template, model: b.model.def.id, cell, cellName: name, x: b.x, z: b.z };
+    }
+    return null;
+  }
+
+  /**
+   * Whether the world's own layout stands a thing of this template within `within` metres of a point (height counting),
+   * a template's two spellings taken as one (`sameTemplateName`): what a fitting the snapshot already merged asks before
+   * it is stood a second time (`World.placeProp`'s `unlessStanding`). Only the layout's own objects answer (those with a
+   * `row`): a thing put down in play is no reason to skip one, and among such things is the very fitting another run of
+   * the fittings has filed and not yet finished standing, which, skipped here and then taken down by its own run once it
+   * found itself replaced, left that fitting standing nowhere.
+   */
+  standsTemplateNear(template: string, x: number, y: number, z: number, within: number): boolean {
+    const want = sameTemplateName(template);
+    const rx0 = Math.floor((x - within) / REGION);
+    const rx1 = Math.floor((x + within) / REGION);
+    const rz0 = Math.floor((z - within) / REGION);
+    const rz1 = Math.floor((z + within) / REGION);
+    const w2 = within * within;
+    for (let rz = rz0; rz <= rz1; rz++) {
+      for (let rx = rx0; rx <= rx1; rx++) {
+        const region = this.regions.get(`${rx},${rz}`);
+        if (!region) continue;
+        for (const list of region.objects) {
+          for (const o of list) {
+            if (o.row === undefined) continue;
+            if ((o.x - x) ** 2 + (o.y - y) ** 2 + (o.z - z) ** 2 > w2) continue;
+            if (sameTemplateName(o.template) === want) return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 
   /**
@@ -2201,19 +2379,90 @@ export class LayoutStreamer {
     for (const e of list) if (!this.releasedCircles.has(e) && !out.includes(e)) out.push(e);
   }
 
-  /** Open ground near a point that no object's footprint covers, or null. */
-  clearSpawn(spawn: THREE.Vector3, heightAt: (x: number, z: number) => number): THREE.Vector3 | null {
-    const blockers = this.objects.filter((p) => !p.contained && p.radius >= 1 && Math.hypot(p.x - spawn.x, p.z - spawn.z) < 200);
-    const clear = (x: number, z: number) => blockers.every((p) => Math.hypot(p.x - x, p.z - z) > p.radius + 1.5);
-    for (let r = 0; r < 120; r += 4) {
+  /**
+   * Open ground near a point that no object's footprint covers and that `standable` takes (dry and not too steep, the
+   * world's own test), or null.
+   *
+   * What covers a spot is each object's own model box as it stands, turned with it and grown by `pad` (`boxesOver`), never
+   * the snapshot's `radius`: that is a load distance of 50 to 7,033 m, and read as a size it covered the whole search on every
+   * populated world, so no clear spot was ever found and every arrival with no place of its own stood at its arrival
+   * building's own origin. Nor the circle round that box (`PlacedObject.footprint`, the farthest corner from the origin): a
+   * starport's is 115 m round its middle, past the search's whole reach, so the four busiest worlds still found nothing
+   * (measured: Tatooine, Naboo, Corellia and Talus; the box puts Bestine's arrival just outside its starport). A particle
+   * effect and a thing with no box are in nobody's way.
+   *
+   * With `rank` and no spot both clear and `standable`, the clear spot `rank` puts lowest (a finite rank only): the gentlest
+   * dry ground clear of every box (`arrivalSlope`), however steep, before none. Left at the flattest dry spot instead, an
+   * arrival stood inside its arrival building's box (Kashyyyk's Kachirho, under its starport's deck), which is what this
+   * search is for; a box-clear spot steeper than `steepest` is still outside every building.
+   */
+  clearSpawn(spawn: THREE.Vector3, heightAt: (x: number, z: number) => number, standable?: (x: number, z: number) => boolean, rank?: (x: number, z: number) => number): THREE.Vector3 | null {
+    const reach = CLEAR_SPAWN.reach;
+    const pad = CLEAR_SPAWN.pad;
+    const blockers = this.boxesOver(spawn.x, spawn.z, reach, pad);
+    const clear = (x: number, z: number) => {
+      for (const b of blockers) {
+        const dx = x - b.x;
+        const dz = z - b.z;
+        // Into the object's own frame (its turn about the upright, which is every placed thing's but a handful).
+        const lx = dx * b.cos - dz * b.sin;
+        const lz = dx * b.sin + dz * b.cos;
+        if (lx >= b.x0 && lx <= b.x1 && lz >= b.z0 && lz <= b.z1) return false;
+      }
+      return true;
+    };
+    let bestRank = Infinity;
+    let bestX = 0;
+    let bestZ = 0;
+    for (let r = 0; r < reach; r += CLEAR_SPAWN.step) {
       for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) {
         const x = spawn.x + Math.sin(a) * r;
         const z = spawn.z + Math.cos(a) * r;
-        if (clear(x, z)) return new THREE.Vector3(x, heightAt(x, z), z);
+        if (clear(x, z)) {
+          if (!standable || standable(x, z)) return new THREE.Vector3(x, heightAt(x, z), z);
+          if (rank) {
+            const k = rank(x, z);
+            if (k < bestRank) {
+              bestRank = k;
+              bestX = x;
+              bestZ = z;
+            }
+          }
+        }
         if (r === 0) break;
       }
     }
-    return null;
+    return bestRank < Infinity ? new THREE.Vector3(bestX, heightAt(bestX, bestZ), bestZ) : null;
+  }
+
+  /**
+   * The ground boxes of every outdoor object whose box can reach within `reach` of a point: each one's place, the cosine
+   * and sine of its turn about the upright (from its turned x axis, so a tilted thing is read by its heading), and its own
+   * model box in its frame, corners taken as extents and grown by `pad` (its scale where a row carries one). What
+   * `clearSpawn` tests a spot against; asked once an arrival, never on a frame.
+   */
+  private boxesOver(x: number, z: number, reach: number, pad: number): { x: number; z: number; cos: number; sin: number; x0: number; x1: number; z0: number; z1: number }[] {
+    const out: { x: number; z: number; cos: number; sin: number; x0: number; x1: number; z0: number; z1: number }[] = [];
+    const ax = new THREE.Vector3();
+    for (const p of this.objects) {
+      if (p.contained || !(p.footprint > 0)) continue;
+      if (Math.hypot(p.x - x, p.z - z) >= reach + p.footprint + pad) continue;
+      const b = this.scaledBoxOf(p);
+      if (!b) continue;
+      ax.set(1, 0, 0).applyQuaternion(p.q);
+      const yaw = Math.atan2(-ax.z, ax.x);
+      out.push({
+        x: p.x,
+        z: p.z,
+        cos: Math.cos(yaw),
+        sin: Math.sin(yaw),
+        x0: Math.min(b.min[0], b.max[0]) - pad,
+        x1: Math.max(b.min[0], b.max[0]) + pad,
+        z0: Math.min(b.min[2], b.max[2]) - pad,
+        z1: Math.max(b.min[2], b.max[2]) + pad,
+      });
+    }
+    return out;
   }
 
   /** Load what is in range, drop what is not, keep collision around the player. */
@@ -2516,6 +2765,9 @@ export class LayoutStreamer {
       }
     }
     for (const p of this.objects) {
+      // The world builder's markers are in the list only so the layout's own indices past them still land on their buildings
+      // (the constructor files them in no region): filed here, Fold now and the filing switch drew them and made them solid.
+      if (isToolOnly(p.template)) continue;
       p.tier = rule === 'snapshot' ? p.snapTier : p.sizeTier;
       const region = this.regionFor(p.x, p.z);
       region.objects[p.tier].push(p);
@@ -2640,7 +2892,8 @@ export class LayoutStreamer {
       const prim = model.primitives[job.prim];
       if (!job.pieces) {
         const posAttr = prim.geometry.getAttribute('position');
-        if (!posAttr || posAttr.count < 3 || posAttr.itemSize !== 3 || (posAttr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) {
+        // A decal is never solid (`isDecal`): its client extent is nothing at all.
+        if (!posAttr || posAttr.count < 3 || posAttr.itemSize !== 3 || (posAttr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute || isDecal(prim.material)) {
           job.prim++;
           continue;
         }
@@ -3760,6 +4013,10 @@ export class LayoutStreamer {
       // is a collider here, so the fountains' surfaces were paving you stood on, and nothing you do on
       // paving ripples. Left out, you step into the basin and wade as you would anywhere.
       if (this.waterSurface && !o.contained && prim.cell <= 0 && isBasinWater(prim.material)) continue;
+      // A decal is a picture laid on what is under it and never a thing to walk on or into: the client's collision
+      // extent for every decal appearance is NULL. Made solid, the bombed house's 118 m scorch in Mos Eisley was a table
+      // top 0.57 m over the street round it and its 33 m wall decal an invisible wall out through the house's back.
+      if (isDecal(prim.material)) continue;
       const idx = prim.geometry.getIndex();
       const indices = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
       // A scaled row's colliders take the scale baked into their vertices (the engine's trimesh has none of its own), on
@@ -3806,7 +4063,8 @@ export class LayoutStreamer {
     this.colliders.set(o, cols);
     // Invisible to a query until the world has stepped: `builtAt` counts nothing solid until then.
     this.collidersMadeAt = this.physics.steps;
-    this.noteBlocker(o);
+    // A thing that came to no collider at all (a decal, every triangle degenerate) is cover for nobody.
+    if (cols.length) this.noteBlocker(o);
   }
 
   /**
@@ -4170,6 +4428,10 @@ export class LayoutStreamer {
     this.buildInterior(b);
     const cells = (b.model.def.cells ?? []).filter((c) => c.index > 0);
     if (!cells.length) return null;
+    // A building whose first opening to the outside is not where anybody was brought in names its way in by room.
+    const named = DOORLESS_ENTRY.get(b.model.def.id);
+    const index0 = named ? namedCellIndex(cells, named) : 0;
+    if (index0 > 0) return this.standIn(b, cells.find((c) => c.index === index0)!);
     const doorway = b.model.portals.find((p) => p.links.some((l) => l.from === 0 || l.to === 0));
     const link = doorway?.links.find((l) => l.from === 0 || l.to === 0);
     const index = link ? (link.from === 0 ? link.to : link.from) : cells[0].index;
@@ -4189,6 +4451,52 @@ export class LayoutStreamer {
     const index = namedCellIndex(cells, name);
     const cell = index > 0 ? cells.find((c) => c.index === index) : undefined;
     return cell ? this.standIn(b, cell) : this.entryOf(b);
+  }
+
+  /**
+   * A place given in a building's own frame as the client and the emulator write it (`local`: x across, y up, z along,
+   * unmirrored; `yaw` a heading about the upright in that frame), carried into the world through the building's own
+   * matrix: the model's frame is the client's with x mirrored, as every converted model's is, so the point goes in as
+   * `(-x, y, z)`, the arithmetic `childInWorld` does for a building's children. Its height is the floor's under it within
+   * a metre either way where one is built (a cloning tube's spot, the tutorial hall's first room), else the place's own.
+   * Answers the standing spot and the heading in the world's frame (a body facing `(sin, cos)`).
+   */
+  spotIn(b: Building, local: { x: number; y: number; z: number }, yaw = 0): { at: THREE.Vector3; heading: number } {
+    this.buildInterior(b);
+    localA.set(-local.x, local.y, local.z).applyMatrix4(b.matrix);
+    const floors = this.physics.floorsAt(localA.x, localA.z, localA.y + 1, localA.y - 1);
+    const y = floors.length ? floors[0] + 0.15 : localA.y + 0.15;
+    // The facing the same way: mirrored across, then turned by the building alone (no translation).
+    localB.set(-Math.sin(yaw), 0, Math.cos(yaw)).transformDirection(b.matrix);
+    return { at: new THREE.Vector3(localA.x, y, localA.z), heading: Math.atan2(localB.x, localB.z) };
+  }
+
+  /**
+   * One of a cloning facility's tubes as the dead stand up in it (`CloningPoint`, the emulator's `spawningPoints`, in the
+   * building's own frame): its spot and heading in the world (`spotIn`) and its room, or null where the building has no
+   * room of that index, which leaves the facility's own room or way in to stand them in (`World.cloneRoomAt`).
+   */
+  tubeSpotIn(b: Building, tube: { cell: number; x: number; y: number; z: number; yaw: number }): { at: THREE.Vector3; heading: number; cell: number } | null {
+    if (!(b.model.def.cells ?? []).some((c) => c.index === tube.cell)) return null;
+    const spot = this.spotIn(b, tube, tube.yaw);
+    return { at: spot.at, heading: spot.heading, cell: tube.cell };
+  }
+
+  /**
+   * Where a world's room arrival stands (`WorldArrival.room`): in the building of its template nearest its place
+   * (`arrivalBuilding`), its room of that name in the client's portal layout, at the arrival's place in the building's
+   * frame where it gives one and on the room's own floor under its middle otherwise. Null while that building has not
+   * streamed in, or when it has no room of that name.
+   */
+  roomArrivalSpot(place: { x: number; z: number }, room: { template: string; cell: string; at?: readonly [number, number, number] }): { at: THREE.Vector3; cell: number; building: Building } | null {
+    const b = arrivalBuilding(this.buildings, place, room.template);
+    if (!b) return null;
+    const cells = b.model.def.cells ?? [];
+    const cell = namedCellIndex(cells, room.cell);
+    if (!cell) return null;
+    if (room.at) return { at: this.spotIn(b, { x: room.at[0], y: room.at[1], z: room.at[2] }).at, cell, building: b };
+    this.buildInterior(b);
+    return { at: this.standIn(b, cells.find((c) => c.index === cell)!).at, cell, building: b };
   }
 
   /** A spot on the floor of one of a building's rooms, in the world. */

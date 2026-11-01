@@ -292,6 +292,18 @@ export function arrivalPose(
 }
 
 /**
+ * Which way a ship climbing out of a planet's sky faces where it comes out in the zone (`at`, game frame, its world's
+ * launch point): away from what a jump's arrival there would face (`arrivalPose`: the nearest landmark more than 100 m
+ * off, else the zone's origin), as a shuttle's crossing up faces (`zonePlace`). A launch point stands about 400 m off its
+ * station's skin (the converter's `launchArrival`), so a ship that came out facing the station at its own climbing speed,
+ * out of a loading screen, met it within a few seconds.
+ */
+export function launchForward(at: Vec3, landmarks: { at: Vec3; radius: number }[]): Vec3 {
+  const f = arrivalPose({ kind: 'point', at, radius: 0 }, landmarks, null, 40, FALLBACK_SCENE).forward;
+  return [-f[0], -f[1], -f[2]];
+}
+
+/**
  * The turn that points a ship's nose (+Z) along `forward`, with no roll: yaw = atan2(fx, fz),
  * pitch = -asin(fy), q = qYaw * qPitch, as [x, y, z, w].
  */

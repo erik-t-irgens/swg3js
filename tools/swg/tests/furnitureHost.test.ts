@@ -277,8 +277,9 @@ function world(planet: string): { objects: (HostObject & { radius: number })[]; 
  * census has 41 at Mos Eisley), and `doorway` standing in a door to the world, give or take one.
  */
 const TOWNS: { planet: string; name: string; x: number; z: number; objects: number; buildings: number; hostedMin: number; noBoxMax: number; doorway: number }[] = [
-  // Mos Eisley's doorway count was 4 until the player house at its edge was drawn with its rooms (see WORLDS).
-  { planet: 'tatooine', name: 'Mos Eisley', x: 3618.98, z: -4801.09, objects: 725, buildings: 22, hostedMin: 680, noBoxMax: 41, doorway: 6 },
+  // Mos Eisley's doorway count was 4 until the player house at its edge was drawn with its rooms (see WORLDS), and 4
+  // again once the bombed house's two big decals stopped counting as things in its doorway (`pastBox`).
+  { planet: 'tatooine', name: 'Mos Eisley', x: 3618.98, z: -4801.09, objects: 725, buildings: 22, hostedMin: 680, noBoxMax: 41, doorway: 4 },
   { planet: 'tatooine', name: 'Bestine', x: -1376.15, z: -3576.23, objects: 1112, buildings: 26, hostedMin: 1105, noBoxMax: 3, doorway: 1 },
   { planet: 'naboo', name: 'Theed', x: -4795.27, z: 4238.79, objects: 120, buildings: 12, hostedMin: 117, noBoxMax: 0, doorway: 0 },
 ];
@@ -286,10 +287,12 @@ const TOWNS: { planet: string; name: string; x: number; z: number; objects: numb
  * What hosting answers over each whole world, as measured: in no room box, and in a doorway to the world.
  * Tatooine's were 53 and 9 until the small player house that names both an appearance and its rooms was
  * drawn as its rooms (the building rule in `resolveTemplateMesh`): the 40 things the snapshot puts in it
- * had no room box to be in, and now 35 more are hosted and two more stand in its doorways.
+ * had no room box to be in, and now 35 more are hosted and two more stand in its doorways. Its doorways' 11 became 9
+ * when a thing reaching far past its own building stopped counting as one in a doorway (the map fixes, `pastBox`): the
+ * two are the bombed house's 118 m and 33 m decals, and no other thing on any world moved.
  */
 const WORLDS: Record<string, { noBox: number; noBoxSlack: number; doorway: number }> = {
-  tatooine: { noBox: 18, noBoxSlack: 3, doorway: 11 },
+  tatooine: { noBox: 18, noBoxSlack: 3, doorway: 9 },
   naboo: { noBox: 4, noBoxSlack: 2, doorway: 3 },
 };
 /**
@@ -297,7 +300,7 @@ const WORLDS: Record<string, { noBox: number; noBoxSlack: number; doorway: numbe
  * measured on SOE complete's pilot conversion: Tatooine's late buildout leaves 22 things in no room box.
  */
 const WORLDS_LATE: Record<string, { noBox: number; noBoxSlack: number; doorway: number }> = {
-  tatooine: { noBox: 22, noBoxSlack: 3, doorway: 11 },
+  tatooine: { noBox: 22, noBoxSlack: 3, doorway: 9 },
 };
 const lateWorld = (planet: string): boolean => {
   try {

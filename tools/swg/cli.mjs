@@ -263,7 +263,7 @@ import { createRequire } from 'node:module';
 
 /** Named places per planet (see regions/build.mjs). */
 const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
-import { frameCheck, mergePlaceLists, namePorts, placeKey, portKindOf, portLabel, portsWithoutRow, readClientPlaces, title } from './places.mjs';
+import { autoCenter, frameCheck, mergePlaceLists, namePorts, placeKey, portKindOf, portLabel, portsWithoutRow, readClientPlaces, title } from './places.mjs';
 import { isZoneGate, writeZoneGates } from './gates.mjs';
 import { COLOR_RAMPS, downscaleRgba, groundStatus, writeColorRamps, writeGroundTextures, writeTerrainBitmaps } from './terrainShaders.mjs';
 import { radialStatusOf } from './radial.mjs';
@@ -310,8 +310,11 @@ const DEED_PACK_VERSION = 1;
 //    sounds, flames and shake, and when its clips mark each), and Theed's transport stands square in
 //    its hangar by our own correction of the emulator's turn.
 const TRAVEL_PACK_VERSION = 4;
-/** The shape of a world's fittings.json: the other things the server stood on its buildings. */
-const FITTINGS_PACK_VERSION = 1;
+/**
+ * The shape of a world's fittings.json: the other things the server stood on its buildings. 2: each cloning facility's
+ * tubes (`cloning`, Core3's `spawningPoints`) and the old tutorial's things in its hall's rooms.
+ */
+const FITTINGS_PACK_VERSION = 2;
 // The ground's textures and what goes with them are terrainShaders.mjs's (TERRAIN_SHADERS_VERSION there).
 /** The shape of music/music.json. A pack written by an older run is asked for again. */
 const MUSIC_PACK_VERSION = 1;
@@ -3739,6 +3742,10 @@ function packStatus(dir) {
       const zone = existsSync(join(dir, 'dungeon1', 'manifest.json'));
       const why = instanceSpawnsWhy(zone, readQuiet(join(dir, 'dungeon1', 'spawns.json')), takers, (w) => (existsSync(join(dir, w, 'spawns.json')) ? (readQuiet(join(dir, w, 'spawns.json'))?.statics ?? []) : null));
       if (why) need(`spawns ${dir} --swg=<swg-dir> --retail-only`, why);
+      // The old tutorial's people in its hall's rooms (`tutorial.mjs`), once the tutorial and the gallery's hall are converted.
+      if (existsSync(join(dir, 'tutorial', 'manifest.json')) && existsSync(join(dir, 'gallery', 'manifest.json')) && !existsSync(join(dir, 'tutorial', 'spawns.json'))) {
+        need(`spawns ${dir} --swg=<swg-dir> --retail-only`, "the old tutorial's people are not in its hall's rooms (tutorial/spawns.json)");
+      }
     }
     // What the game's own people say (`conversations`): the server's conversations they speak, the client's
     // reaction lines they greet in and the client's string tables both are in. Asked for once there are
@@ -3821,30 +3828,7 @@ function snapshotPlanets(vfs) {
   return [...names].sort();
 }
 
-/**
- * Where to centre a planet when no centre is given: its starport (or shuttleport) if it has
- * one, else the middle of the 256 m square holding the most objects, which is a city.
- */
-function autoCenter(snap, entries) {
-  for (const want of ['starport', 'shuttleport']) {
-    const hit = entries.find((e) => e.world && e.parentId === 0 && snap.templates[e.node.templateIndex].includes(want));
-    if (hit) return { x: hit.world.pos[0], z: hit.world.pos[2], why: `${want} ${snap.templates[hit.node.templateIndex].split('/').pop()}` };
-  }
-  const cells = new Map();
-  for (const e of entries) {
-    if (!e.world || e.parentId !== 0) continue;
-    const key = `${Math.floor(e.world.pos[0] / 256)},${Math.floor(e.world.pos[2] / 256)}`;
-    const c = cells.get(key) ?? { n: 0, x: 0, z: 0 };
-    c.n++;
-    c.x += e.world.pos[0];
-    c.z += e.world.pos[2];
-    cells.set(key, c);
-  }
-  let best = null;
-  for (const c of cells.values()) if (!best || c.n > best.n) best = c;
-  if (!best) return { x: 0, z: 0, why: 'empty snapshot' };
-  return { x: best.x / best.n, z: best.z / best.n, why: `busiest square, ${best.n} objects` };
-}
+// Where to centre a planet when no centre is given is `autoCenter` in places.mjs: its port building, else its busiest square.
 
 /**
  * Points of interest for the in-game map, in SWG coordinates: the client's own named places
@@ -6992,8 +6976,12 @@ switch (cmd) {
     const {
       stationTemplate, parseSpacePlanets, parsePlanetAppearance, spaceBody, parseSpaceEnvironment, scatterField, parseHyperspaceScene, warpTimings, cleanText, cleanZoneTitle, stationStrings,
       INVENTED_FIELDS, INVENTED_SCENERY, hyperspacePoints, placeScenery, arrivalOf, stationApproachEnd, checkPointFrame, nearestObject,
-      dockEffects, fieldShapes, laneNodes, ZONE_MAP_ICONS, zoneIconPaths,
+      dockEffects, fieldShapes, laneNodes, ZONE_MAP_ICONS, zoneIconPaths, launchArrival, landingsFor,
     } = await import('./space.mjs');
+    // The emulator's launch and landing points (`core3ref`), read once for every zone; none with `--core3=none`.
+    const c3space = core3SourceFor(options);
+    const launchPoints = c3space && !c3space.missing ? c3space.readLaunchPoints() : new Map();
+    const landingRows = c3space && !c3space.missing ? c3space.readLandingPoints() : [];
     const { LIGHTNING_IMAGE, NEBULA_SHADERS, lightningFilesOf, nebulaLook, nebulaSummary, nebulaTableFor, parseLightning, parseNebulaTable } = await import('./nebula.mjs');
     const { parseClientEffect } = await import('./shipdata.mjs');
     const zones = pos[2] === 'all' ? Object.keys(SPACE_ZONES).filter((z) => vfs.has(`terrain/${z}.trn`)) : [pos[2]];
@@ -7146,7 +7134,23 @@ switch (cmd) {
         return e.file ?? null;
       };
       const effects = { enter: warpFile(hsScene?.enter.particle), exit: warpFile(hsScene?.exit.particle), timing };
-      const arrival = arrivalOf(zone, SPACE_ZONES[zone] ?? null, points);
+      // Where each world that launches into this zone brings its ships out (the emulator's `jtlLaunchPoint`, fitted against
+      // the zone's stations first: `launchArrival`), and where a station lands them on each (its `travelPoints`, named by
+      // the world's own places: `landingsFor`). The zone's own planet's launch is its arrival.
+      const launches = [];
+      for (const [world, l] of launchPoints) {
+        if (l.zone !== zone) continue;
+        const at = launchArrival(l, stations, world);
+        console.log(`  launch from ${world}: the emulator's point ${l.at.join(', ')}${at ? ` lies ${at.fit.asIs} m from ${at.station} (${at.fit.mirrored} m with x mirrored), so ships come out at ${at.x}, ${at.y}, ${at.z}` : ' fits no station of this zone and is left out'}`);
+        if (at) launches.push(at);
+      }
+      const ownPlanet = SPACE_ZONES[zone] ?? null;
+      const landings = landingsFor(landingRows, launches.map((l) => l.planet), (world) => {
+        const f = join(pos[3], world, 'pois.json');
+        return existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : null;
+      });
+      for (const [world, list] of Object.entries(landings)) console.log(`  landings on ${world}: ${list.map((l) => l.name).join(', ')}`);
+      const arrival = arrivalOf(zone, ownPlanet, points, launches.find((l) => l.planet === ownPlanet) ?? null);
       // Clearances: how far each point, the arrival and each station's approach end are from anything placed.
       const clear = (label, at, except = null) => {
         const { object, clearance } = nearestObject(at, objects, except);
@@ -7240,7 +7244,7 @@ switch (cmd) {
         frameCheck,
       };
       // `materialFormat`: the zone's models (stations, asteroids) are converted here, and carried no stamp.
-      writeFileSync(join(outDir, 'space.json'), JSON.stringify(withLate({ version: SPACE_PACK_VERSION, materialFormat: MATERIAL_FORMAT, zone, planet: SPACE_ZONES[zone] ?? null, title, stations, scenery, planets, arrival, hyperspace, nebulae, nebulaLook: look, lightning, fields, lanes, dockEffects: dockFx }, vfs, 'space'), null, 2));
+      writeFileSync(join(outDir, 'space.json'), JSON.stringify(withLate({ version: SPACE_PACK_VERSION, materialFormat: MATERIAL_FORMAT, zone, planet: SPACE_ZONES[zone] ?? null, title, stations, scenery, planets, arrival, launches, landings, hyperspace, nebulae, nebulaLook: look, lightning, fields, lanes, dockEffects: dockFx }, vfs, 'space'), null, 2));
       const zoneModels = [...models.values()].filter((m) => !m.failed);
       writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: zone, categories: { layout: zoneModels } }, null, 2));
       writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: zone, center: { x: 0, z: 0 }, radius: null, objects, skipped: [] }));
@@ -7967,6 +7971,13 @@ switch (cmd) {
     // (`instances.mjs`): its lift terminals, keypads, escape pod consoles, computers and crates.
     const corvette = c3.readCorvette();
     for (const s of corvette.statics ?? []) templates.add(s.template);
+    // The fourth: the old tutorial's things (terminals, a drum, debris), in its hall's rooms by name (`tutorial.mjs`).
+    const tutorial = c3.readTutorial();
+    for (const o of tutorial.objects ?? []) templates.add(o.template);
+    // And where each cloning facility stands the dead up (its tubes, Core3's `spawningPoints`), kept per world for the
+    // facilities that world places.
+    const cloningPoints = c3.readCloningPoints();
+    const TU = await import('./tutorial.mjs');
     const I = await import('./instances.mjs');
     const paramCache = new Map();
     const { models, missing } = F.fittingModels(templates, (shared) => (vfs.has(shared) ? resolveTemplateString(vfs, shared, ['appearanceFilename'], paramCache) : null));
@@ -8032,6 +8043,27 @@ switch (cmd) {
           console.log(`  ${dir.name}: the corvette's ${corvette.statics?.length ?? 0} fittings over ${copies.length} copies come to ${got.rows.length}${got.lost ? `, ${got.lost} with no room or no model` : ''}`);
         }
       }
+      // The old tutorial's things, in the rooms of the hall this game stands there (`TUTORIAL_HALL`), whose room numbers
+      // are the gallery's model of it.
+      if (planet === 'tutorial') {
+        const galleryFile = join(out, 'gallery', 'manifest.json');
+        const gallery = existsSync(galleryFile) ? JSON.parse(readFileSync(galleryFile, 'utf8')) : null;
+        const hall = gallery ? Object.values(gallery.categories ?? {}).flat().find((d) => d?.id === TU.TUTORIAL_HALL.model) : null;
+        if (hall?.cells) {
+          const got = TU.tutorialFittingRows(tutorial, hall.cells, (t) => models.get(t)?.id ?? null);
+          all.push(...got.rows);
+          lost += got.lost;
+          console.log(`  ${dir.name}: the old tutorial's ${tutorial.objects?.length ?? 0} things come to ${got.rows.length} in the hall's rooms${got.lost ? `, ${got.lost} with no room or no model` : ''}`);
+        } else console.log(`  ${dir.name}: no gallery model of the hall (${TU.TUTORIAL_HALL.model}), so none of the old tutorial's things`);
+      }
+      // Each cloning facility this world places, with the tubes the emulator stood the dead up in: by the template the
+      // layout writes, which is what the death card names a facility by.
+      const cloning = {};
+      for (const o of layout.objects ?? []) {
+        if (o.contained || cloning[o.template]) continue;
+        const points = cloningPoints.get(o.template);
+        if (points) cloning[o.template] = points;
+      }
       // A fitting this game cannot draw is left out of the pack rather than written as a place with
       // nothing in it: unlike a travel terminal, which is a thing you press whether or not it shows,
       // a fitting is only ever something to look at and walk into.
@@ -8069,10 +8101,12 @@ switch (cmd) {
       writeFileSync(
         join(out, dir.name, 'fittings.json'),
         // `materialFormat` and `late`: the models it converts beside the rows stand for both, read back by `keptStale`.
-        JSON.stringify(withLate({ version: FITTINGS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each building that travel has no use for, joined to where this world's own snapshot places them" }, counts, rows }, vfs, 'fittings'), null, 1),
+        JSON.stringify(withLate({ version: FITTINGS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each building that travel has no use for, joined to where this world's own snapshot places them" }, counts, rows, cloning }, vfs, 'fittings'), null, 1),
       );
       worlds++;
       things += rows.length;
+      const tubes = Object.keys(cloning).length;
+      if (tubes) console.log(`  ${dir.name}: ${tubes} kinds of cloning facility with the emulator's own tubes`);
       // Written even for a world whose buildings carry nothing, for the same reason travel's is:
       // without the file, "none here" and "never run" read the same and status asks for ever.
       if (rows.length) console.log(`  ${dir.name}: ${counts.things} fittings (${counts.indoors} in a room) of ${counts.models} kinds over ${counts.buildings} kinds of building`);
@@ -8950,6 +8984,44 @@ switch (cmd) {
         ),
       );
       console.log(`spawns: dungeon1 — ${rows.length - ours} of the corvette's people over its copies, ${ours} of our crew on the Star Destroyer's${lost.body ? `, ${lost.body} with no body` : ''}${lost.room + crewLost ? `, ${lost.room + crewLost} in no room` : ''}${corvetteDef ? '' : '; NO CORVETTE MODEL in the pack'}${sdDef ? '' : '; NO STAR DESTROYER MODEL in the pack'}${floors ? '' : '; no floors.json, so no crew of ours'}`);
+      people += rows.length;
+      worlds++;
+    }
+    // The old tutorial (`tutorial.mjs`): no spawn area and no snapshot, only the people the screenplay stood in the rooms
+    // of its hall by name, which stand in the rooms of the hall this game puts there, through the gallery's model of it.
+    const tutorialDir = join(pos[1], 'tutorial');
+    const galleryFile = join(pos[1], 'gallery', 'manifest.json');
+    if (existsSync(join(tutorialDir, 'manifest.json')) && existsSync(galleryFile)) {
+      const TU = await import('./tutorial.mjs');
+      const gallery = JSON.parse(readFileSync(galleryFile, 'utf8'));
+      const hall = Object.values(gallery.categories ?? {}).flat().find((d) => d?.id === TU.TUTORIAL_HALL.model);
+      const tutorial = src.readTutorial();
+      const crew = TU.tutorialCrew(tutorial, hall?.cells ?? []);
+      const rows = [];
+      const lost = { body: 0, room: crew.noRoom };
+      for (const raw of crew.rows) {
+        const got = sp.packRow(raw, { joined, rooms: crew.rooms, pools: new Map() });
+        if (got.lost) lost[got.lost]++;
+        else rows.push(got.row);
+      }
+      writeFileSync(
+        join(tutorialDir, 'spawns.json'),
+        JSON.stringify(
+          {
+            format: sp.SPAWNS_FORMAT,
+            planet: 'tutorial',
+            source: { statics: 'core3', hall: 'ours' },
+            counts: { areas: 0, noSpawn: 0, statics: rows.length, chosen: tutorial.chosen ?? 0, noBody: lost.body, noRoom: lost.room },
+            areas: [],
+            noSpawn: [],
+            statics: rows,
+            pools: {},
+          },
+          null,
+          1,
+        ),
+      );
+      console.log(`spawns: tutorial — ${rows.length} of the old tutorial's ${tutorial.mobiles?.length ?? 0} people in its hall's rooms${lost.body ? `, ${lost.body} with no body` : ''}${lost.room ? `, ${lost.room} in no room` : ''}${hall ? '' : '; NO HALL MODEL in the gallery'}`);
       people += rows.length;
       worlds++;
     }

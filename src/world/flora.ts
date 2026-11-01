@@ -31,7 +31,8 @@ export interface FloraSource {
   readonly template: {
     readonly flora: Pick<TerrainTemplate['flora'], 'collidable' | 'nonCollidable' | 'legacyMap' | 'collidableMap'>;
     readonly mapWidthInMeters: number;
-    readonly generator: { readonly floraGroup: Pick<FloraGroup, 'createFlora'> };
+    // Its families where the planter can read them, for which of them float (`FloraFamily.floats`); absent, none does.
+    readonly generator: { readonly floraGroup: Pick<FloraGroup, 'createFlora'> & { readonly families?: ReadonlyMap<number, { readonly floats: boolean }> } };
   };
   toSwgX(gx: number): number;
   toSwgZ(gz: number): number;
@@ -67,6 +68,8 @@ interface Placement {
   yaw: number;
   scale: number;
   collidable: boolean;
+  /** Its family floats (`FloraFamily.floats`): stood on the water over the ground, where there is any. */
+  floats: boolean;
 }
 
 const tmpM = new THREE.Matrix4();
@@ -208,7 +211,7 @@ export class FloraPlanter {
         const scale = child.shouldScale ? child.minScale + random.randomReal() * (child.maxScale - child.minScale) : 1;
         const model = this.modelFor(child);
         if (!model) continue;
-        out.push({ child, model, x: gx, z: gz, yaw, scale, collidable: true });
+        out.push({ child, model, x: gx, z: gz, yaw, scale, collidable: true, floats: group.families?.get(child.familyId)?.floats === true });
       }
     }
   }
@@ -243,7 +246,7 @@ export class FloraPlanter {
         const scale = child.shouldScale ? child.minScale + rng.randomFloat() * (child.maxScale - child.minScale) : 1;
         const model = this.modelFor(child);
         if (!model) continue;
-        out.push({ child, model, x: gx, z: gz, yaw: x + z, scale, collidable: false });
+        out.push({ child, model, x: gx, z: gz, yaw: x + z, scale, collidable: false, floats: group.families?.get(child.familyId)?.floats === true });
       }
     }
   }
@@ -254,7 +257,7 @@ export class FloraPlanter {
    * as the client drew them (step 5, `floraReach.ts`) and leave the trees alone. A model planted both ways
    * in one chunk is two meshes, one under each.
    */
-  buildForChunk(cx: number, cz: number, heightAt: (x: number, z: number) => number, exclusions: Exclusion[]): { group: THREE.Group; trees: THREE.Group; plants: THREE.Group; colliders: Collider[]; data: FloraChunkData } {
+  buildForChunk(cx: number, cz: number, heightAt: (x: number, z: number) => number, exclusions: Exclusion[], waterAt?: (x: number, z: number) => number): { group: THREE.Group; trees: THREE.Group; plants: THREE.Group; colliders: Collider[]; data: FloraChunkData } {
     const placements: Placement[] = [];
     this.collidable(cx, cz, placements);
     this.nonCollidable(cx, cz, placements);
@@ -268,7 +271,7 @@ export class FloraPlanter {
     const kept = placements.filter((p) => exclusions.every((e) => Math.hypot(e.x - p.x, e.z - p.z) > e.r));
     // Every planting's place and matrix, once: the chunk's own meshes and the region batches (step 7,
     // `floraBatch.ts`) are both written from it.
-    const data = plantingData(kept, heightAt);
+    const data = plantingData(kept, heightAt, waterAt);
     const index = new Map<Placement, number>();
     kept.forEach((p, i) => index.set(p, i));
     const byTree = new Map<LoadedModel, Placement[]>();
@@ -336,13 +339,22 @@ function allPrimitives(model: LoadedModel): Primitive[] {
   return out;
 }
 
-/** Every planting's place (on the ground), scale and world matrix, as the chunk's meshes and the region batches both draw it. */
-function plantingData(kept: readonly Placement[], heightAt: (x: number, z: number) => number): FloraChunkData {
+/**
+ * Every planting's place (on the ground), scale and world matrix, as the chunk's meshes and the region batches both draw it.
+ * A floating family's planting over water stands on the water's surface (`waterAt`, the drawn water over the column, lava
+ * left out), as the client floated it: read only off the ground, every lily pad lay on the lake bed (Naboo's 94% of them,
+ * a median 0.96 m down; every one of Rori's and of Kashyyyk's hunting grounds'). Over dry ground it stands on the ground.
+ */
+function plantingData(kept: readonly Placement[], heightAt: (x: number, z: number) => number, waterAt?: (x: number, z: number) => number): FloraChunkData {
   const n = kept.length;
   const data: FloraChunkData = { n, models: new Array<LoadedModel>(n), mats: new Float32Array(n * 16), x: new Float32Array(n), y: new Float32Array(n), z: new Float32Array(n), scale: new Float32Array(n), collidable: new Uint8Array(n) };
   for (let i = 0; i < n; i++) {
     const p = kept[i];
-    const y = heightAt(p.x, p.z);
+    let y = heightAt(p.x, p.z);
+    if (p.floats && waterAt) {
+      const w = waterAt(p.x, p.z);
+      if (w > y) y = w;
+    }
     // Mirrored world: a yaw about Y turns the other way.
     tmpQ.setFromAxisAngle(UP, -p.yaw);
     tmpM.compose(tmpP.set(p.x, y, p.z), tmpQ, tmpS.setScalar(p.scale));

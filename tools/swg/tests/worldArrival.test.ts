@@ -43,9 +43,9 @@ const DOOR = { x: -2961.6, z: -4411.9 };
 // ------------------------------------------------------------------------------------------- which worlds
 {
   const named = PLANETS.filter((p) => p.arrival);
-  // Mustafar; the old tutorial, at its hall's door; and the `simple` test terrain, whose buildout stands bridge pieces
-  // on its layout centre (planets.ts).
-  ok(named.every((p) => hasOwnArrival(p)) && named.map((p) => p.id).join(',') === 'mustafar,tutorial,simple', `only worlds of one zone and some ground name an arrival: Mustafar, the old tutorial and the simple test terrain (${named.map((p) => p.id).join(', ')})`);
+  // Mustafar; Echo Base's heroic, in its Main Hangar (the map fixes); the old tutorial, in its hall's first room; and the
+  // `simple` test terrain, whose buildout stands bridge pieces on its layout centre (planets.ts).
+  ok(named.every((p) => hasOwnArrival(p)) && named.map((p) => p.id).join(',') === 'mustafar,adventure2,tutorial,simple', `only worlds of one zone and some ground name an arrival: Mustafar, Echo Base, the old tutorial and the simple test terrain (${named.map((p) => p.id).join(', ')})`);
   const tatooine = PLANETS.find((p) => p.id === 'tatooine')!;
   ok(!hasOwnArrival(tatooine) && !hasOwnArrival({ arrival: mustafar.arrival, zones: [{}] }) && !hasOwnArrival({ arrival: mustafar.arrival, space: 'test_space' }), 'a world naming none, a zoned world and a space zone arrive as they always did');
 }
@@ -92,18 +92,18 @@ const DOOR = { x: -2961.6, z: -4411.9 };
 // The game's own hand-overs, which nothing above makes: read as text, since the app does not load under node.
 {
   const main = text('src/main.ts');
-  ok(/const home = await this\.homeOf\(planet, c\.zone\);\s*this\.arrive\(planet, c\.zone, [^\n]*, home\);/.test(main), "a character played is arrived with its world's own arrival, worked out before the world is in");
+  ok(/const home = await this\.homeOf\(planet, c\.zone\);[\s\S]{0,400}?this\.arriveIndoors = [^\n]*;\s*this\.arrive\(planet, c\.zone, [^\n]*, home\);/.test(main), "a character played is arrived with its world's own arrival, worked out before the world is in");
   ok(/const home = planet\.space \? null : await this\.homeOf\(planet, zoneId\);/.test(main) && /this\.arrive\(planet, zoneId, [^\n]*, home\);/.test(main), 'and so is a travel, a galaxy shuttle to a world with no port among them included');
   ok(/this\.spawn = home \? new THREE\.Vector3\(home\.x, home\.y, home\.z\) : this\.world\.spawnPoint\(\);/.test(main), 'the arrival is the spawn a death comes round at, in place of the flattest spot near the layout centre');
   ok(/if \(clearSpawn && !at && !home && /.test(main), 'and an arrival there is never moved to open ground near it, which is the valley floor about 125 m below the deck');
-  ok(/if \(!this\.arrivalHome\) this\.spawn\.copy\(at\);/.test(main), 'a ship come down out of space leaves the spawn on the deck');
+  ok(/if \(!this\.arrivalHome && height === 0\) this\.spawn\.copy\(at\);/.test(main), 'a ship come down out of space leaves the spawn on the deck (and on any world on the ground, never where the ship came out in the air)');
   ok(/private respawn\(\): void \{[\s\S]{0,600}this\.player\.reset\(this\.spawn\);/.test(main), 'and a death comes round at the spawn');
   ok(/if \(home && !at && home\.heading !== null\) \{\s*this\.player\.heading = home\.heading;/.test(main), 'facing the heading the world names, where nothing else says where the player stands');
   // From far off the deck's collision is gone (the streamer keeps a building's only near the player), so a death there
   // must move the world first, as a facility's respawn does, or the player is stood in the air 125 m over the valley.
   ok(/private respawn\(\): void \{[\s\S]{0,300}?if \(this\.spawnNeedsWorld\(\)\) \{\s*void this\.respawnHome\(\);\s*return;\s*\}\s*this\.death\.classList\.remove/.test(main), 'a death far from the deck, with no floor under the spawn, comes round by the slow way');
   ok(/private spawnNeedsWorld\(\): boolean \{[\s\S]{0,400}return !this\.floorUnder\(s\);/.test(main) && /private floorUnder\(at: THREE\.Vector3\): boolean \{\s*return this\.physics\.groundDistance\(at\.x, at\.y \+ 0\.5, at\.z, 2, this\.player\.body\) !== null;/.test(main), 'which it takes exactly when the spawn is the arrival and nothing solid is under it now');
-  ok(/private async standAtHome\([\s\S]{0,700}this\.loadingScreen\.show\([\s\S]{0,400}this\.world\.jumpTo\(at\);[\s\S]{0,200}await this\.settle\(\);[\s\S]{0,200}onFloor = this\.floorUnder\(at\);/.test(main), 'the slow way: a loading screen, the world moved to the deck and waited for, and the floor read before the player is stood on it');
+  ok(/private async standAtHome\([\s\S]{0,700}this\.loadingScreen\.show\([\s\S]{0,400}this\.world\.jumpTo\(at\);[\s\S]{0,200}await this\.settle\(\);[\s\S]{0,500}onFloor = home\?\.room \? this\.standInHomeRoom\(home, true\) : this\.floorUnder\(at\);/.test(main), 'the slow way: a loading screen, the world moved to the deck and waited for, and the floor read (or a room arrival stood in its room) before the player is stood on it');
   ok(/else if \(this\.floorUnder\(at\)\) \{[\s\S]{0,400}\} else if \(!\(await this\.standAtHome\(at, home,/.test(main), "and the console's go takes it too when the floor is not built where it is asked from");
   ok(/this\.world\.arrivalPoint = \(\) => this\.spawn;/.test(main), "so the NGE overlay's people who pick a fight keep clear of the deck, not of the old spot");
 }

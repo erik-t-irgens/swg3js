@@ -284,6 +284,33 @@ export function portKindOf(template) {
 }
 
 /**
+ * Where to centre a planet when no centre is given: its starport (or shuttleport) if it has one, else the middle of the
+ * 256 m square holding the most objects, which is a city. A port is a port building (`portKindOf`), never any template
+ * whose name says so: by the name alone the Tusken army heroic's centre was a starport *sign*, the mistake the ports list
+ * once made in Mos Entha. `snap` is the snapshot (its `templates`), `entries` its flattened objects with their world places.
+ */
+export function autoCenter(snap, entries) {
+  for (const want of ['starport', 'shuttleport']) {
+    const hit = entries.find((e) => e.world && e.parentId === 0 && portKindOf(snap.templates[e.node.templateIndex]) === want);
+    if (hit) return { x: hit.world.pos[0], z: hit.world.pos[2], why: `${want} ${snap.templates[hit.node.templateIndex].split('/').pop()}` };
+  }
+  const cells = new Map();
+  for (const e of entries) {
+    if (!e.world || e.parentId !== 0) continue;
+    const key = `${Math.floor(e.world.pos[0] / 256)},${Math.floor(e.world.pos[2] / 256)}`;
+    const c = cells.get(key) ?? { n: 0, x: 0, z: 0 };
+    c.n++;
+    c.x += e.world.pos[0];
+    c.z += e.world.pos[2];
+    cells.set(key, c);
+  }
+  let best = null;
+  for (const c of cells.values()) if (!best || c.n > best.n) best = c;
+  if (!best) return { x: 0, z: 0, why: 'empty snapshot' };
+  return { x: best.x / best.n, z: best.z / best.n, why: `busiest square, ${best.n} objects` };
+}
+
+/**
  * How near one of the server's own travel points must be to a port building to lend it its name,
  * metres. Measured over the sixteen port buildings that share their label with another on the ten
  * worlds the emulator covers: each one's own point is 20 to 24 m from its origin (the spot its shuttle
