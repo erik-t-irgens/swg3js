@@ -220,7 +220,7 @@ import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { destinationFor, loadGalaxyFile, planetOfRouteId, routeFactsOf, systemOf, systemOfPack, systemsOfWorlds } from './data/galaxy';
 import { HOMES_MOVE_VERSION, homeKey, homes, routeHomeWord } from './net/homes.ts';
 import { NGE_OVERLAY_TUNE, ngeOverlay, serverHoldsFor, whereOf } from './world/ngeOverlay.ts';
-import { arrivalInGame, hasOwnArrival, type ArrivalPlace } from './world/arrival.ts';
+import { arrivalInGame, hasOwnArrival, portArrivesHome, type ArrivalPlace } from './world/arrival.ts';
 // A world's states (Restuss as the living launch city or its ruins), and Restuss's own rules and dials.
 import { WORLD_STATES, WORLD_STATE_TUNE, WORLD_STATE_WORDS, arrivalWait, cleanStates, fileInState, inState, localWorldState, serverWorldStates, setLocalWorldState, setServerStates, stateNews, standsIn, statesInForce, tuneWorldStateWait, waitForHail, worldStateOf, worldStateSource, worldStateStamp } from './world/worldState.ts';
 import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, fittingDormant, tuneRestuss, tuneRestussRoster } from './world/restuss.ts';
@@ -457,6 +457,7 @@ import { BRAIN_TUNE } from './world/mobiles/brain.ts';
 import { tuneAfloat } from './world/afloat.ts';
 import type { FacilityChoice, NamedPlace } from './world/cloning.ts';
 import { GATE_TUNE, ZoneGates, gateAction, gateSaid, tuneGates, zoneOfPack } from './world/zoneGates.ts';
+import { WAYS_TUNE, areaAt, cloneFor, copyStart, copyStartAt, dungeonWords, gateLanding, liftAt as wayLiftAt, liftLevelWords, moveWords, ngeWays, toGame as wayToGame, toRaw, tuneWays, wayAt, wayFloorAt, type Landing, type V3, type WayHere, type WaysGuide } from './world/ngeWays.ts';
 import { AudioSystem, type ListenerPose } from './audio/audio.ts';
 import { OUTSIDE, type SoundSpace } from './audio/distance.ts';
 import type { AmbienceTune } from './audio/ambience.ts';
@@ -769,6 +770,12 @@ interface TravelOpts {
   ground?: boolean;
   /** And the spot is a port's own place: stood in that port's building's way in where its rooms are over it (`standInPort`). */
   port?: boolean;
+  /**
+   * The spot is a place of SOE's data with a height of its own (a gate's landing, a copy's start, a clone droid's,
+   * `ngeWays.ts`): stood at that height over a floor that stands well above the ground, on the real terrain otherwise
+   * (`wayFloorAt`), and kept as the spawn, before the group is told where this came out and the place is saved.
+   */
+  wayFloor?: boolean;
   /** What the loading screen says is being travelled to. */
   label?: string;
   /**
@@ -785,6 +792,12 @@ interface TravelOpts {
 const SPACE_LEG_BUILT = true;
 /** Milliseconds a loading screen waits at most for a world's shuttles to be stood and made ready behind it (ours). */
 const TRAVEL_STAND_WAIT = 10000;
+/**
+ * Metres over the terrain past which a ticket collector out of doors stands on a deck and is stood at its row's own
+ * height (Mensix's landing deck); ours. The emulator's collectors stand at their buildings' own height, which is the
+ * ground the building was laid on, and keep the ground lookup they always had.
+ */
+const COLLECTOR_DECK = 1;
 const tmp2 = new THREE.Vector3();
 /**
  * Whether a way back out of a dungeon copy leads into a world of copies (`PlanetDef.instances`), which is
@@ -2397,7 +2410,13 @@ class App {
     this.waypointHud.attach(this.overlay);
     // A race run's gates, and a track's while it is laid or edited, go on it too.
     this.raceHud.attach(this.overlay);
-    this.minimap = new Minimap(this.ui.querySelector<HTMLElement>('#hud .top-left')!, this.ui.querySelector<HTMLElement>('#hud')!, (pack) => mapPictureNow(pack));
+    // In a zone of copies the picture is the copy the map's own point stands in (`mapCopyAt`); the point is worked out
+    // here from the kept place, so a frame that asks makes nothing.
+    this.minimap = new Minimap(this.ui.querySelector<HTMLElement>('#hud .top-left')!, this.ui.querySelector<HTMLElement>('#hud')!, (pack) => {
+      const c = this.world.layoutCenter;
+      const at = this.mapPlace();
+      return c ? mapPictureNow(pack, gameToRawX(c.x, at.x), gameToRawZ(c.z, at.z)) : mapPictureNow(pack);
+    });
     this.wireWaypoints();
     this.wireJournal();
     // The jobs followed stand under the group's roster and follow it as it grows and shrinks; their words
@@ -2867,10 +2886,12 @@ class App {
     // The lift menu: E in a shaft lists its levels; a pick, or a number key, rides there.
     this.liftMenu = new LiftMenu(this.ui);
     this.liftMenu.onClose = () => {
+      this.wayStops = null;
       this.liftMenu.hide();
       this.freeMouse(false);
     };
-    this.liftMenu.onPick = (i) => this.rideLift(i);
+    // A way of SOE's data opened it (a tree lift, a trail guide: `openWayMenu`), or a shaft.
+    this.liftMenu.onPick = (i) => (this.wayStops ? this.rideWay(i) : this.rideLift(i));
     // The shuttle menu: E at a starport or a shuttleport lists where it goes and what the game charged.
     this.shuttleMenu = new ShuttleMenu(this.ui);
     this.shuttleMenu.onClose = () => {
@@ -10234,6 +10255,8 @@ class App {
        * few: a world with eight is one the card cannot show whole, and the row numbers here are the
        * ones this call itself takes.
        */
+      /** SOE's own ways about Kashyyyk and Mustafar where the player stands (`ngeWays.ts`): see the README's Debugging section. */
+      ways: (o: { go?: string; n?: number; use?: boolean; copy?: string; clone?: boolean; tune?: Partial<typeof WAYS_TUNE> } = {}) => this.debugWays(o),
       cloning: (row?: number) => {
         const rows = this.world.planet?.space ? [] : this.world.cloningFacilities(this.player.worldPos, this.placesHere(), 0);
         if (row !== undefined) {
@@ -12221,6 +12244,9 @@ class App {
     // the reference beside it: its index asked for once a session (one miss for packs converted before it), and
     // whether a server holds the world answered for an arrival only while it is set to stand where none does.
     void ngeOverlay.fetchIndex(import.meta.env.BASE_URL);
+    // And the ways about Kashyyyk and Mustafar beside it (`ngeWays.ts`): where a gate lands, the copies, the tree lifts,
+    // the trail's guides and the clone droids. One request a session, which misses for packs converted before them.
+    void ngeWays.fetch(import.meta.env.BASE_URL);
     this.world.serverHoldsWorld = () => this.serverHoldsHere();
     // An arrival on a world with states (Restuss) waits a moment for a saved server's hail first (`worldStatesHere`).
     this.world.worldStatesReady = () => this.worldStatesHere();
@@ -14083,8 +14109,10 @@ class App {
     // read them rather than ask for them again on every frame it is written.
     if (!p.mounted) {
       const lift = this.liftHere();
-      s.lift = !!lift;
-      this.promptLiftStops = lift ? lift.stops.length : 0;
+      // A tree lift's door of SOE's data takes the key first, as the key takes it (`handleElevator`).
+      const tree = this.treeLiftHere();
+      s.lift = !!lift || !!tree;
+      this.promptLiftStops = tree ? tree.levels.length : lift ? lift.stops.length : 0;
       if (!lift && !room) {
         // One call, not two: the long line asked twice on one line, once to test and once to read.
         const lifts = this.world.elevatorsNear(p.pos, MOUNT_RANGE);
@@ -18704,6 +18732,12 @@ class App {
       // What this character has to spend: asked for on arriving, so the shuttle panel has a number
       // to show rather than a blank the first time it is opened.
       purse.ask();
+      // A character put back in a copy of a grid zone of SOE's data (the Rryatt Trail, a slave camp, Hracca, Bocctyyy, the
+      // arena) was brought in at that copy's start, and comes back there (`respawn`), so that is its spawn, and what the
+      // overlay's arrival clear keeps its hostiles off: the zone's own spawn can stand in another group's copy. Its height
+      // here is the data's held over the ground; a death there is stood on the start's floor by the ways' own rule.
+      const gridStart = at && placesFor === packIdOf(this.world.planet, this.zone) ? this.gridCopyStart(at) : null;
+      if (gridStart) this.spawn.copy(gridStart);
       const p = this.player;
       // Nor lifted to the ground when the arrival is a room's (a dungeon copy, a way back out to a ladder
       // in a hideout under the street): a room can lie below the ground, and the travel stands them in it.
@@ -18924,10 +18958,12 @@ class App {
       }
       if (opts.indoors) this.world.enterCellAt(opts.at);
       this.physics.stepOnce();
+      // A place of SOE's data (`ngeWays.ts`): on its floor where it stands well over the ground, else on the terrain.
+      if (opts.wayFloor) this.standOnWay(at, 'arrive');
       // And kept as the spawn, and a port's place stood in its building's way in (Theed's hangar), before the
       // group is told where this came out and the place is saved below: done after, the group's word and the saved
       // place were the world's own spawn (the followers came out at Bestine, 5 km from Mos Eisley).
-      if (opts.ground) {
+      if (opts.ground || opts.wayFloor) {
         this.spawn.copy(p.pos);
         if (opts.port && this.standInPort()) this.spawn.copy(p.pos);
       }
@@ -19447,6 +19483,25 @@ class App {
     if (this.traveling) return;
     // Out of any dungeon copy the player was in: a teleport is no way back out of one, and leaves it behind.
     this.instanceHere = null;
+    // A port's place on a world whose own arrival is where that port lands people (Mustafar: the Mensix facility's row
+    // stands at the building's origin, over the valley floor 125 m under the landing deck): that arrival, at its own
+    // height, as a travel there with no place of its own comes out, and on this same world stood there as a death is
+    // (`standAtHome`), whose floor may not be built yet.
+    if (portArrivesHome(planet, poi.kind)) {
+      if (planet.id !== this.world.planet.id) {
+        await this.travel(planet, zoneId, undefined, { label: poi.name });
+        return;
+      }
+      const home = this.arrivalHome;
+      if (home) {
+        const at = new THREE.Vector3(home.x, home.y, home.z);
+        await this.standAtHome(at, home, `on ${planet.name}`, 'so you stand on the ground under it');
+        this.spawn.copy(at);
+        this.savePlace(true);
+        this.input.requestLock();
+        return;
+      }
+    }
     if (planet.id !== this.world.planet.id || (planet.zones?.length && zoneId && zoneId !== this.zone)) {
       // One screen, at the place: the place is worked out in the game's frame from the far world's own
       // `pois.json` centre before anybody travels (`placeFromPois`, this method's own arithmetic below), and the
@@ -23489,7 +23544,12 @@ class App {
       // Indoors with the floor's own height, which is the only way Theed's -- the one collector that
       // stands in a room, in the hangar at 13.9 m -- was ever going to stand: without it the manager
       // looked for a floor from the terrain up and answered, every second, that there was none.
-      const droid = this.world.standMobile(w.model, w.inside ? { x: w.x, y: w.y, z: w.z, heading: w.yaw } : { x: w.x, z: w.z, heading: w.yaw }, w.inside, w.key, true);
+      // Out of doors on a deck well over the ground (Mensix's: SOE's own starports table stands its collector on the
+      // mining facility's landing deck, 125 m over the valley), with the row's own height, which the manager holds
+      // the body at until the deck is solid under it (`perchSpawn`): stood with no height it was put on the valley
+      // floor under the deck. Every other collector out of doors keeps the manager's own ground lookup, as it had.
+      const deck = !w.inside && w.y - this.world.terrain.heightAt(w.x, w.z) > COLLECTOR_DECK;
+      const droid = this.world.standMobile(w.model, w.inside || deck ? { x: w.x, y: w.y, z: w.z, heading: w.yaw } : { x: w.x, z: w.z, heading: w.yaw }, w.inside, w.key, true);
       if (droid) this.travelStood.droids.push({ droid, row: w });
       else {
         this.travelRefused = this.world.mobileNote() ?? 'the ticket collector would not stand';
@@ -25671,10 +25731,31 @@ class App {
       row.addEventListener('click', () => void this.respawnAt(i));
       this.deathList.appendChild(row);
     }
-    this.deathList.hidden = rows.length === 0;
-    this.deathHint.hidden = rows.length === 0;
-    this.deathHint.textContent = rows.length ? 'come back at' : '';
-    if (!rows.length && this.world.planet && !this.world.planet.space) {
+    // A world with no facility whose zone SOE's clone mapping answers for (Kashyyyk's: `cloneFor`) offers its clone droid,
+    // in this copy, this zone, or the zone the table sends this one's dead to.
+    const droid = rows.length || this.world.planet?.space ? null : this.cloneDroidHere();
+    this.droidChoice = droid;
+    this.droidRow = null;
+    if (droid) {
+      const row = document.createElement('button');
+      row.className = 'death-place';
+      const where = document.createElement('span');
+      where.className = 'where';
+      const zone = zoneOfPack(droid.pack)?.zone.name;
+      where.textContent = droid.game ? 'the clone droid' : `the clone droid${zone ? `, ${zone}` : ''}`;
+      const far = document.createElement('span');
+      far.className = 'far';
+      far.textContent = droid.game ? distanceWords(droid.d) : 'another zone';
+      row.append(where, far);
+      row.addEventListener('click', () => void this.respawnAtDroid());
+      this.deathList.appendChild(row);
+      this.droidRow = row;
+    }
+    const offered = rows.length > 0 || !!droid;
+    this.deathList.hidden = !offered;
+    this.deathHint.hidden = !offered;
+    this.deathHint.textContent = offered ? 'come back at' : '';
+    if (!offered && this.world.planet && !this.world.planet.space) {
       this.messages.system(`nothing on ${this.world.planet.name} brings the dead back, so you come round where you started`);
     }
   }
@@ -25799,6 +25880,7 @@ class App {
     this.death.classList.remove('on');
     this.fade.classList.remove('on');
     this.deathChoices = [];
+    this.droidChoice = null;
     this.rideRescue = null;
     this.player.endRagdoll();
     this.dying = false;
@@ -25807,17 +25889,26 @@ class App {
   /**
    * Back at the spawn, whole; the ragdoll is taken away. A shuttle's passenger who died out in space is
    * then put down at the port their trip was going to (`rideRescue`), as a trip that could go no further
-   * sets them down, rather than left adrift where the zone's arrival is.
+   * sets them down, rather than left adrift where the zone's arrival is. In a copy of a grid zone of SOE's
+   * data, at that copy's own start instead (`respawnAtCopyStart`), unless `plain` (a way that could not move
+   * the player falling back on the spawn).
    */
-  private respawn(): void {
+  private respawn(plain = false): void {
     // At this world's own arrival with no floor under it here (Mustafar's deck, from a death far from it): the world
     // is moved there under a loading screen first, as at a facility, or the player is stood in the air (`respawnHome`).
     if (this.spawnNeedsWorld()) {
       void this.respawnHome();
       return;
     }
+    // A shuttle's rescue and a crossing already under way keep what they always did.
+    const start = plain || this.rideRescue || this.traveling ? null : this.copyStartHere();
+    if (start) {
+      void this.respawnAtCopyStart(start);
+      return;
+    }
     this.death.classList.remove('on');
     this.deathChoices = [];
+    this.droidChoice = null;
     this.player.endRagdoll();
     this.player.reset(this.spawn);
     // And in a world's own arrival room (Echo Base's hangar, the old tutorial's hall), as in a copy's below.
@@ -29829,8 +29920,15 @@ class App {
    */
   private handleElevator(): boolean {
     const p = this.player;
+    // A tree lift's door of SOE's data (Kachirho's, `ngeWays.ts`): its levels in the lift menu, as a shaft's are.
+    const tree = this.treeLiftHere();
+    if (tree) {
+      this.openTreeLift(tree);
+      return true;
+    }
     const lift = this.liftHere();
     if (lift) {
+      this.wayStops = null;
       this.liftNow = lift;
       this.closePanels();
       this.map.hide();
@@ -29928,8 +30026,474 @@ class App {
       return true;
     }
     this.messages.system(`through the gate to ${near.gate.label ?? dest.zone.name}`);
-    void this.travel(dest.planet, dest.zone.id);
+    // Where SOE's own data lands it (`ngeWays.ts`): a place in that zone, or the group's copy of a dungeon there. A gate
+    // the ways say nothing of, or a pack converted before them, lands where it always did, at the zone's own arrival.
+    const landing = this.gateLandingOf(near.gate.x, near.gate.y, near.gate.z);
+    if (landing) void this.goByWay(landing, near.gate.label ?? dest.zone.name);
+    else void this.travel(dest.planet, dest.zone.id);
     return true;
+  }
+
+  // ---- SOE's own ways about Kashyyyk and Mustafar (`src/world/ngeWays.ts`) ------------------------------------------
+  //
+  // Where each zone gate lands, the copy of a grid zone a group is sent to and where in it, the Kachirho tree lifts, the
+  // Rryatt Trail's guides, the way out of a copy whose own people send a group back, and the clone droid a death comes
+  // round at. All of it in the snapshot's frame, carried into the game's about the right world's layout centre: this
+  // world's own (`toRaw`), or the far world's from its places file before anybody travels (`toGame`), as a teleport does.
+  //
+  // No way keeps a way back: every copy's way out is the data's own exit, so a reload in a copy, a death there and a
+  // member following the group in all find it with nothing kept.
+
+  /** The pack the player stands in, and the point under them in the snapshot's frame. */
+  private rawHere(): { pack: string; at: [number, number, number] } | null {
+    const c = this.world.layoutCenter;
+    if (!c) return null;
+    const at = this.player.worldPos;
+    return { pack: packIdOf(this.world.planet, this.zone), at: toRaw(at.x, at.y, at.z, c) };
+  }
+
+  /** Where the gate at a point of this world's (the game's frame) lands, by SOE's data, or null. */
+  private gateLandingOf(x: number, y: number, z: number): Landing | null {
+    const c = this.world.layoutCenter;
+    if (!c) return null;
+    const raw = toRaw(x, y, z, c);
+    return gateLanding(ngeWays.now, packIdOf(this.world.planet, this.zone), raw[0], raw[2]);
+  }
+
+  /** Who a copy is chosen for: the group, else the character, as every dungeon's copies are (`copyIndex`). */
+  private copyId(): string {
+    return this.groupIdNow() || this.current?.id || 'nobody';
+  }
+
+  /**
+   * Along a way: to a place in a zone, or into the group's copy of a dungeon, under a loading screen. `label` is what the
+   * screen says. Never throws: a zone this build has no world for, or a dungeon whose copies are not known, says so.
+   */
+  private async goByWay(landing: Landing, label: string): Promise<boolean> {
+    if (this.traveling) return false;
+    if ('dungeon' in landing) {
+      const into = copyStart(ngeWays.now, landing.dungeon, this.copyId());
+      if (!into) {
+        this.messages.system(`there is no copy of ${label} to go into`);
+        return false;
+      }
+      return this.goToRaw(into.zone, into.at, label);
+    }
+    return this.goToRaw(landing.zone, landing.at, label);
+  }
+
+  /**
+   * To a place of SOE's data in a zone (its pack id), in the snapshot's frame: within this world, moved there; in another,
+   * travelled to with the place worked out in that world's frame from its places file first, one screen and not two. The
+   * place's height is the data's: stood there over a floor (`wayFloor`), on the ground otherwise. `how` is what the move
+   * is (`moveToWay`): an arrival (a gate, a copy, a clone droid: whole, and the spawn) unless it says it is a move within
+   * the zone. True once the player stands in that zone; false, and said, where nothing moved them.
+   */
+  private async goToRaw(pack: string, at: V3, label: string, how: 'arrive' | 'move' = 'arrive'): Promise<boolean> {
+    if (this.traveling) return false;
+    const dest = zoneOfPack(pack);
+    const planet = dest?.planet ?? PLANETS.find((p) => p.id === pack) ?? null;
+    if (!planet) {
+      this.messages.system(`${label} is in ${pack}, which this build has no world for`);
+      return false;
+    }
+    const zoneId = dest?.zone.id;
+    if (pack === packIdOf(this.world.planet, this.zone) && this.world.layoutCenter) {
+      const g = wayToGame(at, this.world.layoutCenter);
+      return this.moveToWay(new THREE.Vector3(g[0], g[1], g[2]), label, how);
+    }
+    if (!(await this.packConverted(pack))) {
+      this.messages.system(`${label} is in ${pack}, which is not converted here: npm run swg -- status assets-private says what to run`);
+      return false;
+    }
+    const centre = await this.poisFileOf(pack).then((f) => f.center, () => null);
+    if (!centre) await this.travel(planet, zoneId, undefined, { label });
+    else {
+      const g = wayToGame(at, centre);
+      await this.travel(planet, zoneId, undefined, { at: new THREE.Vector3(g[0], g[1], g[2]), label, wayFloor: true });
+    }
+    // A travel refused (another under way) or a world that would not load leaves the player where they were.
+    return packIdOf(this.world.planet, this.zone) === pack;
+  }
+
+  /**
+   * A place of SOE's data in this same world, stood on: at once where it is near (a tree lift's level), under a loading
+   * screen where it is far enough for the world to have to come in round it first (a trail guide's level, a copy's).
+   *
+   * `how` says what it is. An **arrival** (a gate's landing, a copy's start, a way out, a clone droid) stands the player
+   * up whole (`Player.reset`) and keeps the place as the spawn, as every arrival does. A **move** within the zone (a tree
+   * lift's level, a trail guide's step) is the shaft lift's own kind of step (`rideLift`): the player keeps their health,
+   * their fire and their breath (`Player.stand`), and the spawn and the overlay's arrival clear stay where they were, or
+   * a lift at hand was a full heal in the middle of a fight and every level's landing an arrival the hostiles kept off.
+   * True once the player stands there.
+   */
+  private async moveToWay(at: THREE.Vector3, label: string, how: 'arrive' | 'move'): Promise<boolean> {
+    const p = this.player;
+    if (this.traveling) return false;
+    p.grapple.letGo('lift');
+    if (p.mounted) p.dismount(p.pos.clone());
+    if (p.worldPos.distanceTo(at) < WAYS_TUNE.near) {
+      if (how === 'move') p.stand(at.clone());
+      else p.reset(at.clone());
+      p.vel.set(0, 0, 0);
+      this.physics.stepOnce();
+      this.standOnWay(at, how);
+      if (how === 'arrive') this.spawn.copy(p.pos);
+      return true;
+    }
+    this.traveling = true;
+    this.closePanels();
+    this.map.hide();
+    this.input.captured = false;
+    this.loadingScreen.show(this.world.planet, label, `on ${this.world.planet.name}`);
+    try {
+      await new Promise((r) => setTimeout(r, 250));
+      if (how === 'move') p.stand(at.clone());
+      else p.reset(at.clone());
+      this.world.jumpTo(at);
+      this.physics.stepOnce();
+      await this.settle();
+      this.physics.stepOnce();
+      this.standOnWay(at, how);
+      if (how === 'arrive') this.spawn.copy(p.pos);
+      this.savePlace(true);
+    } finally {
+      await this.loadingScreen.hide();
+      this.traveling = false;
+      this.input.requestLock();
+    }
+    return true;
+  }
+
+  /**
+   * Stand the player at a place of SOE's data whose height is its own (`wayFloorAt`): on the floor found straight down
+   * from a little over the data's height (a tree lift's deck or level, a walkway, the ground itself), or, with none
+   * found there, on the real terrain, 0.3 m over it as a teleport stands one. The ray passes the player's own body, the
+   * peers and the corpses (`groundDistance`). A move keeps what the player is (`Player.stand`), an arrival stands them
+   * up whole (`Player.reset`), as `moveToWay` says.
+   */
+  private standOnWay(at: THREE.Vector3, how: 'arrive' | 'move'): void {
+    const p = this.player;
+    const ground = this.world.terrain.heightAt(at.x, at.z);
+    const d = this.physics.groundDistance(at.x, at.y + WAYS_TUNE.lift, at.z, WAYS_TUNE.lift + WAYS_TUNE.drop, p.body);
+    const y = wayFloorAt(at.y, ground, d === null ? null : at.y + WAYS_TUNE.lift - d);
+    if (how === 'move') p.stand(new THREE.Vector3(at.x, y, at.z));
+    else p.reset(new THREE.Vector3(at.x, y, at.z));
+    p.vel.set(0, 0, 0);
+    this.physics.stepOnce();
+  }
+
+  /** The tree lift at the player's feet (a door of one within reach), on foot in the world. */
+  private treeLiftHere(): { levels: readonly V3[]; current: number } | null {
+    const p = this.player;
+    if (p.mounted || p.piloting || p.aboard || p.eva || p.noclip || this.traveling || this.dying) return null;
+    const here = this.rawHere();
+    return here ? wayLiftAt(ngeWays.now, here.pack, here.at[0], here.at[1], here.at[2]) : null;
+  }
+
+  /** The places the way menu was opened with (a tree lift's levels, a guide's moves), in the game's frame, and which is here. */
+  private wayStops: { label: string; at: THREE.Vector3; current: boolean }[] | null = null;
+
+  /** Open the lift menu on a way's stops (`rideWay` takes the pick). */
+  private openWayMenu(title: string, hint: string, stops: { label: string; at: THREE.Vector3; current: boolean }[]): void {
+    this.liftNow = null;
+    this.wayStops = stops;
+    this.closePanels();
+    this.map.hide();
+    this.liftMenu.show(title, stops.map((s) => ({ label: s.label, current: s.current })), hint);
+    this.freeMouse(true);
+  }
+
+  /** The tree lift's levels, lowest first, as the way menu offers them. */
+  private openTreeLift(lift: { levels: readonly V3[]; current: number }): void {
+    const c = this.world.layoutCenter;
+    if (!c) return;
+    const stops = lift.levels.map((l, i) => {
+      const g = wayToGame(l, c);
+      return { label: liftLevelWords(i), at: new THREE.Vector3(g[0], g[1], g[2]), current: i === lift.current };
+    });
+    this.openWayMenu('Tree lift', 'The levels of the tree this door reaches; the number keys pick as well.', stops);
+  }
+
+  /** A trail guide's moves, as the way menu offers them. */
+  private openGuide(guide: WaysGuide): void {
+    const c = this.world.layoutCenter;
+    if (!c) return;
+    const stops = guide.moves.map((m) => {
+      const g = wayToGame(m.to, c);
+      return { label: moveWords(m), at: new THREE.Vector3(g[0], g[1], g[2]), current: false };
+    });
+    this.openWayMenu('Trail guide', 'Where this guide will take you along the trail; the number keys pick as well.', stops);
+  }
+
+  /** A stop picked in the way menu: the player is stood there. */
+  private rideWay(index: number): void {
+    const stops = this.wayStops;
+    const stop = stops?.[index];
+    this.wayStops = null;
+    this.liftMenu.hide();
+    this.freeMouse(false);
+    if (!stop || stop.current) return;
+    const from = stops.find((s) => s.current)?.at.y;
+    // A step within the zone, as the shaft lift's is: the player keeps what they are, and the spawn stays where it was.
+    void this.moveToWay(stop.at.clone(), stop.label, 'move').then((moved) => {
+      // Which way the lift went: the level picked against the one it was called at.
+      if (!moved || from === undefined || Math.abs(stop.at.y - from) < vehicleSounds.tune.liftLevel) return;
+      const at = liftAt.copy(this.player.pos);
+      vehicleSounds.lift(stop.at.y > from, at.x, at.y, at.z, this.listenerPose.space);
+    });
+  }
+
+  /**
+   * What the use key does at a way of SOE's data where the player stands, out in a world (never in a building's copy, whose
+   * rule is `gatherInstance`'s): a trail guide's moves, a launcher's way into a copy, or a copy's way out where it was come
+   * into. Kept for the key (`handleInstance`) and the bar.
+   */
+  private wayHere: WayHere | null = null;
+
+  private gatherWay(): InstanceUse {
+    this.wayHere = null;
+    const here = this.rawHere();
+    const ways = ngeWays.now;
+    if (!here || !ways) return '';
+    const [x, y, z] = here.at;
+    // A way that leaves where the player stands (into a copy, out of one) stands aside as a zone gate does: for the gates'
+    // own calm after any blow struck or taken, and while somebody of theirs lies within reach to be got up (`handleRevive`
+    // takes the same key, after this).
+    const at = this.player.worldPos;
+    const leave = this.zoneGates.since(this.world.simTime) >= GATE_TUNE.calm && !this.companion.revivable(at.x, at.z);
+    const way = wayAt(ways, here.pack, x, y, z, leave);
+    this.wayHere = way;
+    return way ? way.kind : '';
+  }
+
+  /** E at a way of SOE's data (`wayHere`): a guide's menu, into a copy, or out of one. */
+  private useWay(): boolean {
+    const w = this.wayHere;
+    if (!w) return false;
+    if (w.kind === 'guide') {
+      this.openGuide(w.guide);
+      return true;
+    }
+    if (w.kind === 'in') {
+      const d = ngeWays.now?.dungeons[w.dungeon];
+      // Named by the zone its copies stand in, in the words the game uses for it (`planets.ts`).
+      const name = (d && zoneOfPack(d.zone)?.zone.name) || dungeonWords(w.dungeon);
+      this.messages.system(`to ${name}`);
+      if (d) void this.goByWay({ dungeon: w.dungeon }, name);
+      return true;
+    }
+    const back = zoneOfPack(w.exit.zone)?.zone.name || dungeonWords(w.exit.zone);
+    this.messages.system(`out, back to ${back}`);
+    void this.goToRaw(w.exit.zone, w.exit.at, back);
+    return true;
+  }
+
+  /**
+   * Where a death here comes round by SOE's clone mapping (`cloneFor`): the clone droid of this copy, of this zone, or of
+   * the zone the table sends the dead of this one to, in the game's frame where it is this world, and by pack and the
+   * snapshot's frame where it is another. Null where the ways say nothing.
+   */
+  private cloneDroidHere(): { pack: string; at: V3; game: THREE.Vector3 | null; d: number } | null {
+    const here = this.rawHere();
+    if (!here) return null;
+    const got = cloneFor(ngeWays.now, here.pack, here.at[0], here.at[2]);
+    if (!got) return null;
+    const c = this.world.layoutCenter;
+    const same = got.zone === here.pack && c;
+    const g = same ? wayToGame(got.at, c!) : null;
+    return { pack: got.zone, at: got.at, game: g ? new THREE.Vector3(g[0], g[1], g[2]) : null, d: g ? Math.hypot(g[0] - this.player.worldPos.x, g[2] - this.player.worldPos.z) : Infinity };
+  }
+
+  /** The clone droid the death card offers, kept from when it was offered. */
+  private droidChoice: { pack: string; at: V3; game: THREE.Vector3 | null; d: number } | null = null;
+
+  /**
+   * `__debug.ways`: SOE's own ways about where the player stands, in the snapshot's frame (`/loc`'s), and the copy and
+   * the clone droid of this spot. `go` stands the player at the n-th lift door, guide, launcher, gate, copy start or
+   * clone droid of this zone (`n`, nought first), on its floor; `use` does what E would at a way here; `copy` goes into
+   * the group's copy of a dungeon by its name; `clone` comes round at the clone droid a death here would, without dying.
+   */
+  private async debugWays(o: { go?: string; n?: number; use?: boolean; copy?: string; clone?: boolean; tune?: Partial<typeof WAYS_TUNE> }): Promise<unknown> {
+    if (o.tune) tuneWays(o.tune);
+    const ways = ngeWays.held;
+    if (!ways) return { error: 'no ways: assets-private/nge/ways.json is not there (npm run swg -- spawns assets-private --swg=<swg-dir> --retail-only writes it)' };
+    const here = this.rawHere();
+    const r1 = (v: readonly number[]) => v.map((n) => Math.round(n * 10) / 10);
+    if (o.copy) {
+      if (!ways.dungeons[o.copy]) return { error: `no dungeon ${o.copy}; these are: ${Object.keys(ways.dungeons).join(', ')}` };
+      await this.goByWay({ dungeon: o.copy }, dungeonWords(o.copy));
+    } else if (o.clone) {
+      this.droidChoice = this.cloneDroidHere();
+      if (!this.droidChoice) return { error: 'the clone mapping names no droid for this spot' };
+      await this.respawnAtDroid();
+    } else if (o.use) {
+      if (this.gatherInstance() && this.wayHere) this.useWay();
+      else {
+        const tree = this.treeLiftHere();
+        if (!tree) return { error: 'no way of SOE\'s data within reach here' };
+        this.openTreeLift(tree);
+      }
+    } else if (o.go && here) {
+      const z = ways.zones[here.pack];
+      const n = Math.max(0, Math.trunc(o.n ?? 0));
+      // A lift door is stood beside, a step toward its own level's landing: a door's own place is its frame over the
+      // shaft, and a body stood on it falls down the tree (it did, from the third level to the first).
+      const door = z?.lifts.flatMap((l) => l.doors.map((d) => ({ d, levels: l.levels })))[n];
+      let beside: V3 | undefined;
+      if (door) {
+        let lv = door.levels[0];
+        for (const l of door.levels) if (Math.abs(l[1] - door.d[1]) < Math.abs(lv[1] - door.d[1])) lv = l;
+        const dx = lv[0] - door.d[0];
+        const dz = lv[2] - door.d[2];
+        const k = Math.min(1, 2.5 / (Math.hypot(dx, dz) || 1));
+        beside = [door.d[0] + dx * k, door.d[1], door.d[2] + dz * k];
+      }
+      const pick: Record<string, V3 | undefined> = {
+        lift: beside,
+        guide: z?.guides[n]?.at,
+        launcher: z?.launchers[n]?.at,
+        gate: z?.gates[n]?.at,
+        droid: z?.clones[n]?.at,
+        start: Object.values(ways.dungeons).filter((d) => d.zone === here.pack).flatMap((d) => d.starts)[n],
+      };
+      const at = pick[o.go];
+      if (!at) return { error: `no ${o.go} ${n} in ${here.pack}` };
+      const c = this.world.layoutCenter!;
+      const g = wayToGame(at, c);
+      // The console's step, which keeps what the player is and leaves the spawn as it was, as a lift's does.
+      await this.moveToWay(new THREE.Vector3(g[0], g[1], g[2]), `${o.go} ${n}`, 'move');
+    }
+    const now = this.rawHere();
+    if (!now) return { error: 'no world' };
+    const z = ways.zones[now.pack];
+    const [x, y, zz] = now.at;
+    const tree = this.treeLiftHere();
+    this.gatherInstance();
+    const w = this.wayHere;
+    const droid = cloneFor(ways, now.pack, x, zz);
+    return {
+      on: WAYS_TUNE.on,
+      zone: now.pack,
+      loc: r1(now.at),
+      copy: areaAt(z, x, zz),
+      here: tree ? { lift: tree.levels.map((l, i) => `${liftLevelWords(i)} ${r1(l).join(',')}${i === tree.current ? ' (here)' : ''}`) } : w ? { [w.kind]: w.kind === 'guide' ? w.guide.moves.map((m) => `${moveWords(m)} ${r1(m.to).join(',')}`) : w.kind === 'in' ? w.dungeon : `${w.dungeon} -> ${w.exit.zone} ${r1(w.exit.at).join(',')}` } : null,
+      gate: (() => {
+        const gn = this.zoneGates.nearest(this.player.worldPos.x, this.player.worldPos.y, this.player.worldPos.z);
+        const land = gn ? this.gateLandingOf(gn.gate.x, gn.gate.y, gn.gate.z) : null;
+        const into = land && 'dungeon' in land ? copyStart(ways, land.dungeon, this.copyId()) : null;
+        return gn ? { to: gn.gate.to, away: Math.round(gn.d), lands: land ? ('dungeon' in land ? { copyOf: land.dungeon, start: into ? { zone: into.zone, copy: into.copy, at: r1(into.at) } : null } : { zone: land.zone, at: r1(land.at) }) : 'the zone\'s own arrival (the ways name no door here)' } : null;
+      })(),
+      clone: droid ? { zone: droid.zone, at: r1(droid.at) } : null,
+      zoneHas: z ? { gates: z.gates.length, liftDoors: z.lifts.reduce((s, l) => s + l.doors.length, 0), guides: z.guides.length, launchers: z.launchers.length, droids: z.clones.length, copies: z.areas.length } : null,
+      dungeons: Object.fromEntries(Object.entries(ways.dungeons).map(([k, d]) => [k, { zone: d.zone, copies: d.starts.length, walkOut: !!d.walkOut, groupsCopy: copyStart(ways, k, this.copyId())?.copy ?? null, exit: d.exit ? `${d.exit.zone} ${r1(d.exit.at).join(',')}` : null }])),
+      counts: ways.counts ?? null,
+      tune: { ...WAYS_TUNE },
+    };
+  }
+
+  /**
+   * Come round at the clone droid the card offered: in this world, stood there under a loading screen as at a facility; in
+   * another (the dead forest's dead go to Kachirho's), travelled to. The droid's place is the data's, stood on its floor.
+   *
+   * Whether its zone can be gone to at all is asked before the death is put away: a zone this build has no world for, or
+   * one not converted here (the arena's dead go to Kachirho's, which an install may not have), is said, the droid's row
+   * goes and the card stays up with its plain Respawn. And a move refused after that (a travel under way, a world that
+   * would not load) comes round as the plain Respawn does (`respawn(true)`), never leaving the body at nought where it fell
+   * with the spawn moved under it.
+   */
+  private async respawnAtDroid(): Promise<void> {
+    const droid = this.droidChoice;
+    if (!droid || this.traveling) return;
+    if (!(await this.wayReachable(droid.pack, 'the clone droid'))) {
+      if (this.droidChoice === droid) this.droidChoice = null;
+      if (this.droidRow) this.droidRow.hidden = true;
+      // The droid was the card's only place: the card is the plain one again.
+      if (!this.deathChoices.length) this.deathList.hidden = this.deathHint.hidden = true;
+      return;
+    }
+    // Answered meanwhile (the plain Respawn pressed while the zone was asked about): nothing more to do.
+    if (this.droidChoice !== droid || this.traveling) return;
+    this.endDeathForWay();
+    if (await this.goToRaw(droid.pack, droid.at, 'the clone droid')) {
+      this.savePlace(true);
+      this.freeMouse(false);
+      return;
+    }
+    this.respawn(true);
+  }
+
+  /** The droid's row on the death card while it is offered (`offerRespawn`), hidden should its zone be out of reach. */
+  private droidRow: HTMLElement | null = null;
+
+  /**
+   * Whether a zone a way of SOE's data names can be gone to from here: this one, or one this build has a world for that
+   * is converted here. Says why not.
+   */
+  private async wayReachable(pack: string, label: string): Promise<boolean> {
+    if (pack === packIdOf(this.world.planet, this.zone)) return true;
+    if (!zoneOfPack(pack) && !PLANETS.some((p) => p.id === pack)) {
+      this.messages.system(`${label} is in ${pack}, which this build has no world for`);
+      return false;
+    }
+    if (await this.packConverted(pack)) return true;
+    this.messages.system(`${label} is in ${pack}, which is not converted here: npm run swg -- status assets-private says what to run`);
+    return false;
+  }
+
+  /**
+   * The death put away for a way of SOE's data to stand the player up (a clone droid, a copy's start): the card and its
+   * choices, a shuttle trip, the corpse and whatever it lay in, as the plain Respawn puts them away; the move that follows
+   * stands the player up whole.
+   */
+  private endDeathForWay(): void {
+    this.ride?.abort('respawn', true);
+    this.rideRescue = null;
+    this.deathChoices = [];
+    this.droidChoice = null;
+    this.death.classList.remove('on');
+    this.player.endRagdoll();
+    this.stepOffForRespawn();
+    this.dying = false;
+    this.instanceHere = null;
+  }
+
+  /**
+   * The start of the copy of a grid zone of SOE's data the player stands in (the Rryatt Trail, a slave camp, Hracca,
+   * Bocctyyy, the arena: `copyStartAt`), or null anywhere else.
+   */
+  private copyStartHere(): { zone: string; at: V3 } | null {
+    const here = this.rawHere();
+    return here ? copyStartAt(ngeWays.now, here.pack, here.at[0], here.at[2]) : null;
+  }
+
+  /**
+   * The start of the copy of a grid zone of SOE's data a point of this world (the game's frame) stands in, in the game's
+   * frame at the data's height held over the ground, or null: a reloaded character's spawn (`arrive`).
+   */
+  private gridCopyStart(at: THREE.Vector3): THREE.Vector3 | null {
+    const c = this.world.layoutCenter;
+    if (!c) return null;
+    const raw = toRaw(at.x, at.y, at.z, c);
+    const got = copyStartAt(ngeWays.now, packIdOf(this.world.planet, this.zone), raw[0], raw[2]);
+    if (!got) return null;
+    const g = wayToGame(got.at, c);
+    return new THREE.Vector3(g[0], Math.max(g[1], this.world.terrain.heightAt(g[0], g[2]) + 0.3), g[2]);
+  }
+
+  /**
+   * The plain Respawn in a copy of a grid zone: that copy's own start, stood on its floor by the ways' own rule
+   * (`goToRaw`, an arrival), wherever the spawn was left -- a character reloaded in the copy kept the zone's own, which can
+   * stand in another group's copy, and its height there was never stood on. A move refused comes round as anywhere else.
+   */
+  private async respawnAtCopyStart(start: { zone: string; at: V3 }): Promise<void> {
+    this.endDeathForWay();
+    if (await this.goToRaw(start.zone, start.at, 'coming round')) {
+      this.savePlace(true);
+      this.freeMouse(false);
+      return;
+    }
+    this.respawn(true);
   }
 
   // ---- the dungeons' copies ------------------------------------------------------------------------
@@ -30278,6 +30842,7 @@ class App {
    */
   private gatherInstance(): InstanceUse {
     this.instanceThing = null;
+    this.wayHere = null;
     const p = this.player;
     if (p.mounted || p.piloting || p.aboard || p.eva || p.noclip || this.traveling || this.dying) return '';
     const at = p.worldPos;
@@ -30317,6 +30882,8 @@ class App {
     }
     const use = instanceUse({ live: true, keypad: !!keypad, pod: !!pod, wayOut, wayIn: !!wayIn });
     this.instanceThing = use === 'keypad' ? keypad : use === 'pod' ? pod : use === 'in' ? wayIn : null;
+    // Out in a world and at none of a building copy's: a way of SOE's data (a copy's way out, a trail guide, a launcher).
+    if (!use && !inCopy) return this.gatherWay();
     return use;
   }
 
@@ -30363,6 +30930,8 @@ class App {
    */
   private handleInstance(): boolean {
     const use = this.gatherInstance();
+    // A way of SOE's data where the player stands (`gatherWay`): its own use.
+    if (this.wayHere) return this.useWay();
     if (use === 'keypad') {
       const f = this.instanceThing as Fitting;
       const here = this.instanceHere;
@@ -32231,7 +32800,7 @@ class App {
         else if (S8.lift) prompt = `<b>E</b> lift: ${this.promptLiftStops} levels`;
         else if (S8.elevator) prompt = `<b>E</b> elevator ${S8.elevator}`;
         else if (S8.doorless) prompt = `<b>E</b> enter ${this.promptDoorless} (no way in on foot)`;
-        else if (S8.instance) prompt = S8.instance === 'keypad' ? '<b>E</b> use the keypad' : S8.instance === 'pod' ? '<b>E</b> the escape pod: off this ship' : S8.instance === 'out' ? `<b>E</b> back the way you came in` : '<b>E</b> go in';
+        else if (S8.instance) prompt = S8.instance === 'keypad' ? '<b>E</b> use the keypad' : S8.instance === 'pod' ? '<b>E</b> the escape pod: off this ship' : S8.instance === 'out' ? `<b>E</b> back the way you came in` : S8.instance === 'guide' ? '<b>E</b> the trail guide: along the trail' : '<b>E</b> go in';
         else if (S8.travel) prompt = `<b>E</b> ${this.promptTravel}`;
         else if (S8.use) prompt = `<b>E</b> use ${this.promptUse}`;
         else if (S8.revive) prompt = `hold <b>E</b> to get your companion up`;

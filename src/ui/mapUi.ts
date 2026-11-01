@@ -36,7 +36,7 @@ import { COL, colourHex, colourOf, type PaletteName } from '../core/palette.ts';
 import type { GalaxyMap, Poi } from './galaxyMap';
 import { distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_TEXT, LAYERS, mapFrame, mapFromGameX, mapFromGameZ, mapFromScreenX, mapFromScreenY, MapView, marksOf, ObjectList, Pool, poolWants, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, WAYPOINT_MAP_TUNE, WaypointList, waypointMapFeed, type GroupMark, type LayerId, type MapFrame, type MapMark, type MapPack, type ShipMark, type WaypointMark } from './spaceMapLayers.ts';
 import { WAYPOINT_COLOURS } from '../story/waypoints.ts';
-import { mapPicture } from './mapImages.ts';
+import { mapCopyAt, mapCopyPicture, mapPicture } from './mapImages.ts';
 import { isListTab, recallTab, rememberTab, tabShown, type MapTab } from './mapTabs.ts';
 
 /** Where the player is and what is round them, read fresh every time the map draws. */
@@ -252,6 +252,8 @@ export class MapUi {
    */
   private focus: { x: number; z: number } | null = null;
   private imageFor = '';
+  /** Which copy of a zone of copies the picture is (`mapCopyAt`), -1 for the world's own picture. */
+  private imageCopy = -1;
   /**
    * Whether the picture asked for `imageFor` has answered, with a picture or with none. A world with no
    * picture answers null and never sets `image`, so `image` alone cannot say the wait is over.
@@ -1032,9 +1034,9 @@ export class MapUi {
 
   // ---- The planet: the client's map, panned and zoomed. ----
 
-  /** The world's picture, from the one loader every map shares (`mapImages.ts`), decoded once per pack. */
-  private loadImage(packId: string): Promise<MapImage | null> {
-    return mapPicture(packId);
+  /** The world's picture, from the one loader every map shares (`mapImages.ts`), decoded once per pack; a copy's in a zone of copies. */
+  private loadImage(packId: string, copy = -1): Promise<MapImage | null> {
+    return copy >= 0 ? mapCopyPicture(packId, copy) : mapPicture(packId);
   }
 
   /**
@@ -1185,12 +1187,17 @@ export class MapUi {
       c.width = Math.round(w * dpr);
       c.height = Math.round(h * dpr);
     }
-    if (this.imageFor !== packId) {
+    // In a zone of copies the picture is the copy the player stands in, framed over that copy (`mapCopyAt`).
+    const me = this.source.player();
+    const mc = this.source.center();
+    const copy = mc ? mapCopyAt(packId, mapFromGameX(mc.x, me.x), mapFromGameZ(mc.z, me.z)) : -1;
+    if (this.imageFor !== packId || this.imageCopy !== copy) {
       this.imageFor = packId;
+      this.imageCopy = copy;
       this.image = null;
       this.imageDone = false;
-      void this.loadImage(packId).then((img) => {
-        if (this.imageFor === packId) {
+      void this.loadImage(packId, copy).then((img) => {
+        if (this.imageFor === packId && this.imageCopy === copy) {
           this.image = img;
           this.imageDone = true;
           this.fit();

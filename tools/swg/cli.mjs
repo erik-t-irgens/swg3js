@@ -263,7 +263,7 @@ import { createRequire } from 'node:module';
 
 /** Named places per planet (see regions/build.mjs). */
 const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
-import { autoCenter, frameCheck, mergePlaceLists, namePorts, placeKey, portKindOf, portLabel, portsWithoutRow, readClientPlaces, title } from './places.mjs';
+import { autoCenter, frameCheck, mergePlaceLists, namePorts, placeKey, portKindListed, portLabel, portsWithoutRow, readClientPlaces, title } from './places.mjs';
 import { isZoneGate, writeZoneGates } from './gates.mjs';
 import { COLOR_RAMPS, downscaleRgba, groundStatus, writeColorRamps, writeGroundTextures, writeTerrainBitmaps } from './terrainShaders.mjs';
 import { radialStatusOf } from './radial.mjs';
@@ -285,11 +285,12 @@ import { LEVELS_FILE, LEVELS_SOURCE, conRows, levelsStatus } from './conTable.mj
 import { instanceSpawnsWhy } from './instances.mjs';
 import { SPAWNS_FORMAT, spawnsStale } from './spawnpack.mjs';
 import { NGE_ZONES, ngeArg, ngeStatus, noneIndex, overlayTarget, sourceInside, stampOf } from './ngepack.mjs';
+import { ngePortsUnstood } from './ngeways.mjs';
 import { NGE_REF_DIR, readReferenceIndex } from './ngeref.mjs';
 import { gitPlace } from './nge.mjs';
 import { OBJECT_EFFECTS_VERSION, readClientChildren } from './clientfx.mjs';
 import { paintRecipeMaker } from './paintrecipes.mjs';
-import { mapFrameOf } from './mapframe.mjs';
+import { instanceFramesOf, mapFrameOf } from './mapframe.mjs';
 import { floraCollisionFile, floraCollisionStatus } from './extent.mjs';
 import { DOORS_PACK_VERSION, doorModelId, doorsStale, packDoorTable, pobDoorReader, readDoorStyles } from './doors.mjs';
 import { CORE3_WORLDS } from './core3.mjs';
@@ -476,6 +477,29 @@ function ngeContext({ out, vfs, groundOf, P }) {
 }
 
 /**
+ * The children of the starports SOE's own table stands on Kashyyyk and Mustafar (Kachirho's and Mensix's terminal,
+ * collector and transport), for `travel`, by the very function the reference is checked with (`buildNgeWays`): read from
+ * the reference beside the converter, from a live copy with --nge=<folder>, and none with --nge=none. Empty, and said,
+ * where there is no reference to read.
+ */
+async function ngePortChildren(T) {
+  if (NGE_WORD?.value === 'none') return new Map();
+  let reader = null;
+  if (NGE_WORD?.value) {
+    const from = resolve(NGE_WORD.value);
+    if (!sourceInside(from, REPO_DIR)) reader = (await import('./nge.mjs')).makeNgeReader(from);
+  } else reader = (await import('./ngeref.mjs')).ngeRefReader(NGE_REF_DIR);
+  if (!reader) {
+    console.log('travel: no NGE reference to read the Kashyyyk and Mustafar starports from, so they stand none');
+    return new Map();
+  }
+  const W = await import('./ngeways.mjs');
+  const { kindOf } = await import('./ngepack.mjs');
+  const ways = W.buildNgeWays({ reader, zones: W.WAY_ZONES, areasOf: (z) => reader.areas(z) ?? [], kindOf });
+  return W.waysPortChildren(ways.ports, T.kindOfChild, T.modelOfKind);
+}
+
+/**
  * The NGE half of `spawns`: SOE's own placements for Kashyyyk's seven zones and Mustafar, read off the reference
  * beside the converter (`ngeref.mjs`, by default) or a live copy (`--nge=<folder>`, `nge.mjs`), and turned into
  * packs the game already reads (`ngepack.mjs`), written under `<out>/nge/` alone: `index.json`,
@@ -494,8 +518,13 @@ async function spawnsNge({ out, outDir, reader, vfs, groundOf }) {
   mkdirSync(join(outDir, 'spawns'), { recursive: true });
   writeFileSync(join(outDir, 'spawns', 'manifest.json'), JSON.stringify(built.manifest, null, 1));
   for (const [zone, pack] of Object.entries(built.packs)) writeFileSync(join(outDir, 'spawns', `${zone}.json`), JSON.stringify(pack, null, 1));
+  // The ways about Kashyyyk and Mustafar (`ngeways.mjs`): the gates' landings, the copies, the lifts, the guides, the
+  // clone droids and the starports' rows, which the game reads (`src/world/ngeWays.ts`) and `travel` stands the ports from.
+  writeFileSync(join(outDir, 'ways.json'), JSON.stringify(built.ways));
   writeFileSync(join(outDir, 'index.json'), JSON.stringify(built.index, null, 1));
   const c = built.index.counts;
+  const wc = built.ways.counts;
+  console.log(`spawns: nge ways — ${wc.gates} gates, ${wc.lifts} lift${wc.lifts === 1 ? '' : 's'} of ${wc.liftDoors} doors, ${wc.guides} guides with ${wc.moves} moves, ${wc.launchers} launchers, ${wc.dungeons} dungeons over ${wc.copies} copies, ${wc.droids} clone droids, ${wc.ports} starports${wc.lost ? `, ${wc.lost} named nothing this game reaches` : ''} -> ${join(outDir, 'ways.json')}`);
   for (const [zone, z] of Object.entries(built.index.zones)) {
     const f = z.frame;
     console.log(`spawns: nge ${zone} — ${z.rows} people (${z.statics} standing in one place, ${z.corpses} corpses, ${z.crew} crew, ${z.spawners + z.patrols} from ${z.sites} spawners over ${z.copies} area copies), ${z.areas} wild areas${z.dropped ? ` (${z.dropped} no-spawn region holding them whole dropped)` : ''}; frame: objects median ${f.objects.median ?? '-'} m over ${f.objects.matched}, ground ${f.ground.reading} (${f.ground.asIs} m as written, ${f.ground.mirrored} m mirrored)${z.routeLost ? `; ${z.routeLost} routes with a point missing` : ''}${z.crewLost ? `; ${z.crewLost} crew rows in no room` : ''}${z.inCell ? `; ${z.inCell} spawners in a room, left out` : ''}`);
@@ -2693,6 +2722,9 @@ const SKY_LENT = { simple: 'corellia', floratest: 'corellia', rivertest: 'corell
  */
 const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori', 'mustafar', 'kashyyyk_main', 'kashyyyk_hunting', 'kashyyyk_dead_forest', 'kashyyyk_rryatt_trail', 'kashyyyk_north_dungeons', 'kashyyyk_south_dungeons', 'kashyyyk_pob_dungeons', 'dungeon1', ...EXTRA_WORLDS];
 
+/** The zones of copies a map picture is drawn over one copy of (`instanceFramesOf`), which `status` names since it reads no table. */
+const COPY_MAP_ZONES = ['kashyyyk_rryatt_trail', 'kashyyyk_north_dungeons', 'kashyyyk_south_dungeons'];
+
 /**
  * Report what the packs under <dir> hold (planets, creatures, player) and which command
  * would fill each gap, so a fresh checkout or a second machine knows what to run.
@@ -2923,6 +2955,15 @@ function packStatus(dir) {
   let wantTravel = false;
   /** The worlds whose travel terminals and shuttles are models older than the material format. */
   const travelMaterials = [];
+  // The starports SOE's own table stands the travel things of on Kashyyyk and Mustafar (the NGE ways): a world that places
+  // one with no row of its own in its travel.json was written before the ways were read, and is asked for again.
+  const ngePortBuildings = new Set();
+  try {
+    const t = JSON.parse(readFileSync(join(NGE_REF_DIR, 'tables.json'), 'utf8'));
+    for (const k of Object.keys(t.ports ?? {})) for (const s of [k, k.replace(/\/([^/]+)$/, '/shared_$1')]) ngePortBuildings.add(s);
+  } catch {
+    // No reference, or one from before the ways: nothing to ask about.
+  }
   let wantFittings = false;
   let wantObjEffects = false;
   /** The worlds whose trees and rocks still stand on guessed cylinders, each with why. */
@@ -3153,6 +3194,7 @@ function packStatus(dir) {
     // Only the models each command is answerable for: `rowsLost` in travel.mjs says why, and it is
     // the difference between this check and a `status` line that asks for travel for ever.
     if (travel && rowsLost(travel.rows, layoutIds, TRAVEL_OWN_MODELS)) wantTravel = true;
+    if (travel && layout && ngePortsUnstood(layout.objects, travel.rows, ngePortBuildings, travel.nge === 'none')) wantTravel = true;
     if (fittings && rowsLost(fittings.rows, layoutIds)) wantFittings = true;
   }
   // Counted, not asked for: a rerun cannot change either. A mask or a normal map on a coordinate set the
@@ -3646,6 +3688,15 @@ function packStatus(dir) {
     return m && m.image && !m.frame;
   });
   if (unframed.length) need(`maps <swg-dir> ${dir} --retail-only`, `${unframed.length} world map${unframed.length === 1 ? ' was' : 's were'} written before the map frame was read (${unframed.slice(0, 4).join(', ')}${unframed.length > 4 ? ', ...' : ''}): Kashyyyk's and Mustafar's pictures are drawn over the wrong ground and their places look shrunk toward the middle`);
+  // And a zone of copies whose picture is drawn over the whole terrain rather than over the copy the player stands in
+  // (`instanceFramesOf`, written by `maps` from the tables, which `status` does not read: so the three zones by name).
+  else {
+    const whole = COPY_MAP_ZONES.filter((p) => {
+      const m = readQuiet(join(dir, p, 'map.json'));
+      return m && m.image && m.frame === 'terrain' && !Array.isArray(m.instances);
+    });
+    if (whole.length) need(`maps <swg-dir> ${dir} --retail-only`, `the map of ${whole.join(', ')} draws one copy's picture over the whole ${whole.length === 1 ? 'zone' : 'zones'} rather than over the copy you stand in`);
+  }
   const mobiles = readQuiet(join(dir, 'mobiles/catalogue.json'));
   if (!mobiles) {
     console.log('  mobiles: none (the spawner has only the planet creatures)');
@@ -3875,7 +3926,8 @@ function pointsOfInterest(vfs, planet, snap, entries, { regions: wantRegions = t
   for (const e of entries) {
     if (!e.world || e.parentId !== 0) continue;
     const template = snap.templates[e.node.templateIndex];
-    const kind = portKindOf(template);
+    // A port for the places list, SOE's starports table's included (`portKindListed`; never a world's centre).
+    const kind = portKindListed(template);
     if (!kind) continue;
     const [x, , z] = e.world.pos;
     // One building placed twice (a snapshot and a buildout both carrying it) is one port.
@@ -7390,6 +7442,8 @@ switch (cmd) {
     const MAP_NAMES = { kashyyyk_north_dungeons: 'ui_map_kashyyyk_north_dungeons_slaver', kashyyyk_south_dungeons: 'ui_map_kashyyyk_south_dungeons_hracca' };
     const mapTable = (p) => (vfs.has(p) ? parseDatatable(parseIff(vfs.read(p))).rows : []);
     const adjustments = mapTable('datatables/planetary_map/map_adjustments.iff');
+    // The sizes the client gives the copies its zones of copies draw a picture over (`instanceFramesOf`).
+    const instanceAreas = mapTable('datatables/instance/instance_areas.iff');
     let done = 0;
     for (const planet of GAME_PLANETS) {
       const outDir = join(pos[2], planet);
@@ -7409,14 +7463,30 @@ switch (cmd) {
         }
       }
       const img = decodeDds(vfs.read(texture));
-      const frame = mapFrameOf({ planet, areas: mapTable(`datatables/buildout/areas_${planet}.iff`), adjustments, image: img, terrainWidth: width });
+      const areaRows = mapTable(`datatables/buildout/areas_${planet}.iff`);
+      const frame = mapFrameOf({ planet, areas: areaRows, adjustments, image: img, terrainWidth: width });
       writeFileSync(join(outDir, 'map.png'), encodePng(img.width, img.height, img.rgba));
       // `centre` is in the map's own frame, the snapshot's (X not mirrored), as the places are; a
       // map.json without it is one written before the frame was read, and the game draws it about
       // the origin, which is what it always did.
       const meta = { image: 'map.png', width: frame.width, centre: frame.centre, frame: frame.frame, texture };
       if (frame.frame === 'composite') Object.assign(meta, { composite: frame.composite, terrainWidth: width }, frame.height ? { height: frame.height } : {}, frame.offset ? { offset: frame.offset } : {});
+      // A zone of copies draws one copy's picture over the copy the player stands in (`instanceFramesOf`): each kind's
+      // picture written once, the zone's own picture being `map.png`, and every copy listed with the ground it covers.
+      const copies = instanceFramesOf({ planet, areas: areaRows, instanceAreas, hasPicture: (n) => vfs.has(`texture/${n}.dds`) });
+      if (copies.length) {
+        const files = new Map([[texture, 'map.png']]);
+        for (const c of copies) {
+          if (files.has(c.texture)) continue;
+          const name = `map_${c.area}.png`;
+          const pic = decodeDds(vfs.read(c.texture));
+          writeFileSync(join(outDir, name), encodePng(pic.width, pic.height, pic.rgba));
+          files.set(c.texture, name);
+        }
+        meta.instances = copies.map((c) => ({ area: c.area, box: c.box, width: c.width, centre: c.centre, image: files.get(c.texture), texture: c.texture }));
+      }
       writeFileSync(join(outDir, 'map.json'), JSON.stringify(meta, null, 2));
+      if (copies.length) console.log(`${planet}: ${copies.length} copies drawn with ${new Set(copies.map((c) => c.texture)).size} pictures, each over its own copy (${[...new Set(copies.map((c) => c.area))].join(', ')})`);
       const where = frame.frame === 'composite' ? `the composite ${frame.composite}, ${frame.width} m about ${frame.centre.x},${frame.centre.z}${frame.offset ? ` (moved ${frame.offset.x},${frame.offset.y} px by the map adjustments)` : ''}` : `the terrain's ${frame.width} m`;
       console.log(`${planet}: ${texture} ${img.width}x${img.height} over ${where} -> ${join(outDir, 'map.png')}${frame.others ? ` (other composites allowed a map, not drawn: ${frame.others.join(', ')})` : ''}`);
       done++;
@@ -7672,7 +7742,12 @@ switch (cmd) {
     const vfs = mount(pos[1]);
     const out = pos[2];
     const byTemplate = c3.readTravelBuildings();
-    console.log(`travel: ${byTemplate.size / 2} building templates carry travel children`);
+    // And the two starports Core3 stands nothing at, Kachirho's and Mensix's, from SOE's own starports table through the
+    // NGE ways (the owner's ruling of 2026-10-31): a building the emulator carries children for keeps its own.
+    const ngePorts = await ngePortChildren(T);
+    for (const [t, kids] of ngePorts) if (!byTemplate.has(t)) byTemplate.set(t, kids);
+    const ngeLeftOut = NGE_WORD?.value === 'none';
+    console.log(`travel: ${byTemplate.size / 2} building templates carry travel children${ngePorts.size ? ` (${ngePorts.size / 2} of them from SOE's starports table)` : ''}`);
     let worlds = 0;
     let things = 0;
     let drawn = 0;
@@ -7707,15 +7782,23 @@ switch (cmd) {
       } catch {
         continue;
       }
-      const rows = T.placeChildren(layout.objects ?? [], byTemplate);
-      const counts = T.travelCounts(rows);
-      // Whatever this world's rows really name, converted into its own pack and merged into its
-      // `layout` category, which is the one the streamer reads a model out of. A world that already
-      // has the model (one of them places a travel terminal of its own) keeps the entry it has.
       const manifestPath = join(out, dir.name, 'manifest.json');
       const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet: layout.planet ?? dir.name, categories: {} };
       manifest.categories ??= {};
       manifest.categories.layout ??= [];
+      // A child the starports table stands in a named room takes that room's index from the building's own cells here.
+      const { childCellsFor } = await import('./ngeways.mjs');
+      const kids = childCellsFor(byTemplate, (template) => {
+        const o = (layout.objects ?? []).find((x) => !x.contained && x.template === template);
+        if (!o) return null;
+        return manifest.categories.layout.find((d) => d.id === o.model)?.cells ?? [];
+      });
+      if (kids.lost) console.log(`  ${dir.name}: ${kids.lost} children of SOE's starports table name a room this world's building has not got, left out`);
+      const rows = T.placeChildren(layout.objects ?? [], kids.byTemplate);
+      const counts = T.travelCounts(rows);
+      // Whatever this world's rows really name, converted into its own pack and merged into its
+      // `layout` category, which is the one the streamer reads a model out of. A world that already
+      // has the model (one of them places a travel terminal of its own) keeps the entry it has.
       // A model this command wrote under a file from before the current material format (or with no file
       // to say) was converted then too, so it is converted again rather than kept because it is there; and one
       // written from another late world than this mount's the same (`keptStale`, finalnames.mjs).
@@ -7762,7 +7845,9 @@ switch (cmd) {
       writeFileSync(
         join(out, dir.name, 'travel.json'),
         // `materialFormat`: the terminals and the shuttles' pieces are models converted here, unstamped before 6.
-        JSON.stringify(withLate({ version: TRAVEL_PACK_VERSION, materialFormat: MATERIAL_FORMAT, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each starport and shuttleport building, joined to where this world's own snapshot places them" }, counts, rigs: used, rows }, vfs, 'travel'), null, 1),
+        // `nge: 'none'`: the starports SOE's own table stands on Kashyyyk and Mustafar left out by choice (`--nge=none`), so
+        // `status` does not ask for them again (`ngePortsUnstood`), as it does not ask `spawns` for the people.
+        JSON.stringify(withLate({ version: TRAVEL_PACK_VERSION, materialFormat: MATERIAL_FORMAT, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each starport and shuttleport building, joined to where this world's own snapshot places them" }, ...(ngeLeftOut ? { nge: 'none' } : {}), counts, rigs: used, rows }, vfs, 'travel'), null, 1),
       );
       worlds++;
       things += rows.length;

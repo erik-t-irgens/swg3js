@@ -379,7 +379,7 @@ function methodOf(src: string, sig: string): string {
   const standInHome = methodOf(main, '  private standInHomeRoom(');
   ok(/\n    const got = this\.world\.standInArrivalRoom\(home\);\n/.test(standInHome) && /\n    p\.reset\(got\.at\);\n/.test(standInHome) && /\n    this\.spawn\.copy\(got\.at\);\n/.test(standInHome), 'which asks the world for the room\'s spot, stands the player there and keeps it as the spawn (text)');
   ok(/const spot = this\.layoutStream\.roomArrivalSpot\(home, home\.room\);/.test(read('src/world/world.ts')), 'and the world asks the streamer\'s rule for it (text)');
-  ok(/this\.reenterArrivalRoom\(this\.spawn\);/.test(methodOf(main, '  private respawn(): void {')) && /onFloor = home\?\.room \? this\.standInHomeRoom\(home, true\) : this\.floorUnder\(at\);/.test(methodOf(main, '  private async standAtHome(')), 'and a death comes round in it again, a far one under a loading screen stood in the room (text)');
+  ok(/this\.reenterArrivalRoom\(this\.spawn\);/.test(methodOf(main, '  private respawn(plain = false): void {')) && /onFloor = home\?\.room \? this\.standInHomeRoom\(home, true\) : this\.floorUnder\(at\);/.test(methodOf(main, '  private async standAtHome(')), 'and a death comes round in it again, a far one under a loading screen stood in the room (text)');
   ok(/if \(!this\.standInHomeRoom\(home, true\) && !\(await this\.standAtHome\(at, home, 'arriving'/.test(main) && /if \(!home\.room\) this\.spawn\.copy\(at\);/.test(main), 'the console\'s go stands a room arrival in its room, never the spawn in the room\'s air (text)');
 }
 

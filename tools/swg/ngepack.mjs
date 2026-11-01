@@ -34,13 +34,16 @@ import { STATIC_TUNE, heightCheck, unitOf } from './core3.mjs';
 import { cellIndexByName, copiesIn } from './instances.mjs';
 import { gameOf, packRow, roomsOf, SPAWNS_FORMAT } from './spawnpack.mjs';
 import { flattenWithWorldTransforms } from './ws.mjs';
+import { WAY_ZONES, buildNgeWays } from './ngeways.mjs';
 
 /**
  * The overlay's own shape: bumped when a row, the manifest or the index changes meaning; `status` asks again below
  * it. 2: a row of a table that writes no objid is named by a hash of what it says rather than by the text itself
- * (`rowIds`), so its key moved, and the index says whether it came from the reference or a copy.
+ * (`rowIds`), so its key moved, and the index says whether it came from the reference or a copy. 3: the ways
+ * (`ngeways.mjs`, `ways.json` beside the index), and the people a row stands only through its template (the trail's
+ * level-three guides, the arena's inner guard, the pilot back out of Bocctyyy), whom the reader now reads.
  */
-export const NGE_FORMAT = 2;
+export const NGE_FORMAT = 3;
 
 /** Every name the overlay writes begins with this, so a merge can never overwrite or be read as one of Core3's. */
 export const NGE_PREFIX = 'nge:';
@@ -798,7 +801,7 @@ export function crewsOf(rows) {
  * area rows (null without the archives, and then the copy's shared table's, which agree); `catalogue` the mobiles
  * catalogue.
  */
-export function buildNgeOverlay({ reader, zones, packOf, groundOf, snapOf, clientAreas, catalogue, converted }) {
+export function buildNgeOverlay({ reader, zones, packOf, groundOf, snapOf, clientAreas, catalogue, converted, wayZones = WAY_ZONES }) {
   const local = reader.roots.kind !== 'reference';
   const creatures = reader.creatures();
   const isCreature = (n) => creatures.has(String(n ?? '').trim());
@@ -877,6 +880,10 @@ export function buildNgeOverlay({ reader, zones, packOf, groundOf, snapOf, clien
   const sum = (k) => Object.values(zoneIndex).reduce((s, z) => s + (z[k] ?? 0), 0);
   const counts = { rows: sum('rows'), statics: sum('statics'), corpses: sum('corpses'), crew: sum('crew'), spawners: sum('spawners'), patrols: sum('patrols'), sites: sum('sites'), areas: sum('areas'), creatures: Object.keys(creaturesOut).length, withGame, lairs: Object.keys(lairs).length, groups: Object.keys(groups).length, unresolved: unresolved.size + bodiless.length, gated: sum('gated'), dropped: sum('dropped'), routeLost: sum('routeLost'), crewLost: sum('crewLost'), noBody: sum('noBody'), noRoom: sum('noRoom'), inCell: sum('inCell'), crewTablesLeft: crewLeft };
   const manifest = { format: SPAWNS_FORMAT, local, source: 'nge', converted, counts, creatures: creaturesOut, lairs, groups, nests: {}, camps: {}, campModels: {}, dressGroups: {}, weaponGroups };
+  // The ways about these zones (`ngeways.mjs`), over the zones whose packs are here, from the same areas the people were.
+  const ways = buildNgeWays({ reader, zones: wayZones.filter((z) => zones.includes(z) && packs[z]), areasOf: (zone) => clientAreas?.(zone) ?? reader.areas(zone) ?? [], kindOf });
+  ways.converted = converted;
+  ways.local = local;
   const id = reader.identity();
   const index = {
     format: NGE_FORMAT,
@@ -893,8 +900,9 @@ export function buildNgeOverlay({ reader, zones, packOf, groundOf, snapOf, clien
     gated,
     unresolved: [...unresolved].sort(),
     bodiless,
+    ways: { file: 'ways.json', format: ways.format, ...ways.counts },
   };
-  return { index, manifest, packs };
+  return { index, manifest, packs, ways };
 }
 
 // --------------------------------------------------------------------------------------- the guards

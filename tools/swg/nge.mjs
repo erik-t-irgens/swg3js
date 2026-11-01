@@ -29,18 +29,36 @@ export function ngeRoots(dir) {
     const server = join(base, ...SERVER, 'datatables');
     if (!existsSync(join(server, 'buildout'))) return null;
     const shared = join(base, ...SHARED, 'datatables');
-    const mobiles = join(base, ...SERVER, 'object', 'mobile');
-    return { root, kind, server, shared: existsSync(shared) ? shared : null, mobiles: existsSync(mobiles) ? mobiles : null };
+    const objects = join(base, ...SERVER, 'object');
+    const mobiles = join(objects, 'mobile');
+    return { root, kind, server, shared: existsSync(shared) ? shared : null, mobiles: existsSync(mobiles) ? mobiles : null, objects: existsSync(objects) ? objects : null };
   };
   const found = under(join(root, 'dsrc'), 'checkout') ?? under(root, 'dsrc');
   if (found) return found;
   if (existsSync(join(root, 'buildout')) && existsSync(join(root, 'mob'))) {
     // A server datatables folder: its shared twin and its templates sit where the tree puts them, if they are there.
     const shared = resolve(root, '..', '..', '..', 'sys.shared', 'compiled', 'game', 'datatables');
-    const mobiles = resolve(root, '..', 'object', 'mobile');
-    return { root, kind: 'datatables', server: root, shared: existsSync(shared) ? shared : null, mobiles: existsSync(mobiles) ? mobiles : null };
+    const objects = resolve(root, '..', 'object');
+    const mobiles = join(objects, 'mobile');
+    return { root, kind: 'datatables', server: root, shared: existsSync(shared) ? shared : null, mobiles: existsSync(mobiles) ? mobiles : null, objects: existsSync(objects) ? objects : null };
   }
   return null;
+}
+
+/** The scripts that make a row a person standing in one place (`kindOf`'s own words): a row whose template carries one is filled from it. */
+const CELEBRITY = 'npc.celebrity.celebrity_spawner';
+
+/**
+ * A server template's own objvars and scripts out of its `.tpf` (`objvars = [ "name" = "value", ... ]`, `scripts = [ ... ]`),
+ * each objvar's value as the text it is. Data and never code: the two brackets, read as names and texts.
+ */
+export function templateOwn(text) {
+  const vars = new Map();
+  const ov = /objvars\s*=\s*\+?\[([^\]]*)\]/.exec(String(text));
+  if (ov) for (const p of ov[1].matchAll(/"([^"]+)"\s*=\s*"([^"]*)"/g)) vars.set(p[1], { type: '', value: p[2] });
+  const sc = /scripts\s*=\s*\+?\[([^\]]*)\]/.exec(String(text));
+  const scripts = sc ? [...sc[1].matchAll(/"([^"]+)"/g)].map((m) => m[1].trim()).filter(Boolean) : [];
+  return { vars, scripts };
 }
 
 /**
@@ -148,6 +166,16 @@ export function makeNgeReader(dir) {
   };
   let creatures = null;
   const sharedTemplates = new Map();
+  // A placed object's server template's own objvars and scripts (`templateOwn`), read once each, null where it has no `.tpf`.
+  const owns = new Map();
+  const templateOf = (template) => {
+    if (!roots.objects || !String(template).startsWith('object/')) return null;
+    if (owns.has(template)) return owns.get(template);
+    const abs = join(roots.objects, ...String(template).slice('object/'.length).replace(/\.iff$/i, '.tpf').split('/'));
+    const got = existsSync(abs) ? templateOwn(bytes(abs).toString('latin1')) : null;
+    owns.set(template, got);
+    return got;
+  };
   let dress = null;
   let stats = null;
   let weapons = null;
@@ -175,7 +203,20 @@ export function makeNgeReader(dir) {
       if (!t) return null;
       return t.rows.map((r) => {
         const template = String(r.server_template_crc ?? '').replace(/\\/g, '/');
-        return { objid: Number(r.objid) || 0, container: Number(r.container) || 0, cell_index: Number(r.cell_index) || 0, server_template_crc: template, px: r.px, py: r.py, pz: r.pz, qw: r.qw, qx: r.qx, qy: r.qy, qz: r.qz, scripts: parseScripts(r.scripts), objvars: parseObjvars(r.objvars), said: `${template}|${r.cell_index ?? ''}|${r.px}|${r.py}|${r.pz}|${r.qw}|${r.qx}|${r.qy}|${r.qz}|${r.scripts ?? ''}|${r.objvars ?? ''}` };
+        let scripts = parseScripts(r.scripts);
+        let objvars = parseObjvars(r.objvars);
+        // A row that writes neither objvars nor scripts of its own is its template's: a person standing in one place
+        // whose `.tpf` names who they are (the trail's level-three guides, the arena's inner guard, the pilot back out
+        // of Bocctyyy) stood nowhere until it was read, and they are the people the ways round them need. Only such a
+        // person: a building's own `.tpf` that names a crew is left as it always was.
+        if (!scripts.length && !objvars.size) {
+          const own = templateOf(template);
+          if (own?.scripts.includes(CELEBRITY)) {
+            scripts = own.scripts;
+            objvars = own.vars;
+          }
+        }
+        return { objid: Number(r.objid) || 0, container: Number(r.container) || 0, cell_index: Number(r.cell_index) || 0, server_template_crc: template, px: r.px, py: r.py, pz: r.pz, qw: r.qw, qx: r.qx, qy: r.qy, qz: r.qz, scripts, objvars, said: `${template}|${r.cell_index ?? ''}|${r.px}|${r.py}|${r.pz}|${r.qw}|${r.qx}|${r.qy}|${r.qz}|${r.scripts ?? ''}|${r.objvars ?? ''}` };
       });
     },
     /** The creatures a type table stands, flattened through any type table it names in turn, or null where it is none. */
@@ -275,6 +316,63 @@ export function makeNgeReader(dir) {
       const t = tab(server(...`${table}.tab`.split('/')));
       if (!t) return null;
       return t.rows.map((r) => ({ spawns: String(r.spawns ?? '').trim(), room: String(r.room ?? '').trim(), x: Number(r.loc_x) || 0, y: Number(r.loc_y) || 0, z: Number(r.loc_z) || 0, yaw: Number(r.yaw) || 0, mood: String(r.mood ?? '').trim(), respawn: Number(r.respawn_time) || 0 }));
+    },
+    /**
+     * The zone lines (`travel/zone_transition`): each line's name to where it goes, as the table writes it (`zone:x:y:z`,
+     * `instance:<name>:<zone>:<cell>:x:y:z` or `offset:x:y:z`). The table's own example rows name no destination and are
+     * left out with every other row that names none.
+     */
+    zoneLines() {
+      const out = new Map();
+      for (const r of tab(server('travel', 'zone_transition.tab'))?.rows ?? []) {
+        const name = String(r.zoneLine ?? '').trim();
+        const to = String(r.destination ?? '').trim();
+        if (name && to && to !== 'tatooine:0:0:0') out.set(name, to);
+      }
+      return out;
+    },
+    /** The dungeons a copy was stood of for each group (`dungeon/space_dungeon`), each row as the table writes it. */
+    spaceDungeons() {
+      return (tab(server('dungeon', 'space_dungeon.tab'))?.rows ?? []).filter((r) => String(r.dungeon ?? '').trim());
+    },
+    /** Where the dead of a zone and an area came back (`cloning/clone_mapping`), in the table's own order. */
+    cloneMapping() {
+      return (tab(server('cloning', 'clone_mapping.tab'))?.rows ?? []).map((r) => ({ scene: String(r.scene ?? '').trim(), area: String(r.area ?? '').trim(), cloneScene: String(r.clone_scene ?? '').trim(), cloneArea: String(r.clone_area ?? '').trim() })).filter((r) => r.scene && r.cloneScene);
+    },
+    /**
+     * The starports' own arrangements (`structure/municipal/starport`): each structure's template to its arrival and the
+     * children stood with it (a terminal, a collector, the transport), each child's place a delta in the world's own
+     * frame (`WORLD_DELTA`) or a place in a named room of the building, as the table writes them.
+     */
+    starports() {
+      const out = new Map();
+      let cur = null;
+      for (const r of tab(server('structure', 'municipal', 'starport.tab'))?.rows ?? []) {
+        const s = String(r.STRUCTURE ?? '').trim();
+        if (s) {
+          cur = { arrival: [Number(r.ARRIVAL_X) || 0, Number(r.ARRIVAL_Y) || 0, Number(r.ARRIVAL_Z) || 0], arrivalCell: String(r.ARRIVAL_CELL ?? '').trim(), shuttleport: Number(r.IS_SHUTTLEPORT) > 0, children: [] };
+          out.set(s.replace(/\\/g, '/'), cur);
+          continue;
+        }
+        const o = String(r.OBJECT ?? '').trim();
+        if (!cur || !o) continue;
+        cur.children.push({ template: o.replace(/\\/g, '/'), x: Number(r.X) || 0, y: Number(r.Y) || 0, z: Number(r.Z) || 0, cell: String(r.CELL ?? '').trim(), heading: Number(r.HEADING) || 0, terminal: Number(r.IS_TERMINAL) > 0, transport: Number(r.IS_TRANSPORT) > 0, pilot: Number(r.IS_PILOT) > 0 });
+      }
+      return out;
+    },
+    /**
+     * The zone lines a mobile's server template names among its objvars (`.tpf`: a trail guide's way on and its way back),
+     * as `[objvar, line]` pairs in the order the template writes them, a pair kept only where its value is a zone line's
+     * name (`isLine`). Data and never code: the one bracket of objvars, read as name and text pairs.
+     */
+    templateLines(template, isLine) {
+      if (!roots.mobiles) return [];
+      const rel = String(template ?? '').replace(/\\/g, '/').replace(/^object\/mobile\//, '').replace(/\.iff$/i, '');
+      const abs = join(roots.mobiles, `${rel}.tpf`);
+      if (!existsSync(abs)) return [];
+      const out = [];
+      for (const [k, v] of templateOwn(bytes(abs).toString('latin1')).vars) if (isLine(v.value)) out.push([k, v.value]);
+      return out;
     },
   };
 }

@@ -8,6 +8,9 @@ export interface LiftChoice {
   current: boolean;
 }
 
+/** What the menu says under a shaft's stops. */
+const LIFT_HINT = 'The levels this shaft reaches, by the rooms they open into; the number keys pick as well.';
+
 export class LiftMenu {
   readonly root: HTMLElement;
   onClose: () => void = () => {};
@@ -27,7 +30,7 @@ export class LiftMenu {
         </div>
         <div class="ship-body">
           <div class="lift-stops"></div>
-          <p class="menu-hint">The levels this shaft reaches, by the rooms they open into; the number keys pick as well.</p>
+          <p class="menu-hint">${LIFT_HINT}</p>
         </div>
       </div>`;
     parent.appendChild(this.root);
@@ -41,9 +44,11 @@ export class LiftMenu {
     return !this.root.classList.contains('hidden');
   }
 
-  show(title: string, choices: LiftChoice[]): void {
+  /** `hint` is the line under the stops: a shaft's own words unless a way of another kind (a tree lift, a trail guide) gives its own. */
+  show(title: string, choices: LiftChoice[], hint: string = LIFT_HINT): void {
     this.choices = choices;
     this.root.querySelector('.ship-title')!.textContent = title;
+    this.root.querySelector('.menu-hint')!.textContent = hint;
     const list = this.root.querySelector<HTMLElement>('.lift-stops')!;
     // Top floor first, the way a lift's panel reads.
     list.innerHTML = choices

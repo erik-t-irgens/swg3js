@@ -526,7 +526,7 @@ const zi = built.index.zones.test_zone;
   };
   const half = run(['spawns', out, '--core3=none', `--nge=${root}`]);
   ok(half.status === 0 && readFileSync(join(out, 'spawns', 'manifest.json'), 'utf8') === sentinel, `the NGE half leaves the Core3 half's fleet folder exactly as it found it${half.status ? `: ${half.stdout}${half.stderr}` : ''}`);
-  ok(files(out).join(',') === 'mobiles/catalogue.json,nge/index.json,nge/spawns/manifest.json,spawns/manifest.json', `and writes nothing but nge/index.json and nge/spawns/manifest.json, a pack of a zone no longer written gone (${files(out).join(', ')})`);
+  ok(files(out).join(',') === 'mobiles/catalogue.json,nge/index.json,nge/spawns/manifest.json,nge/ways.json,spawns/manifest.json', `and writes nothing but nge/index.json, nge/spawns/manifest.json and nge/ways.json (the ways about these zones, ngeways.mjs), a pack of a zone no longer written gone (${files(out).join(', ')})`);
   ok(JSON.parse(readFileSync(join(out, 'nge', 'index.json'), 'utf8')).local === true, 'and its index says it is local');
 
   // `status`: the overlay's line, and a run asked again by hand alone, never put in the to-do a launcher runs. Its

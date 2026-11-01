@@ -113,7 +113,7 @@ const PICTURE = { width: 1024, height: 1024 };
   ok(/mapFrame: meta\?\.frame \?\? mapFrame\(null\)/.test(main) && /return mapMeta\(pack\)/.test(main), 'the terminal is handed the frame its map.json gives, through the shared loader');
   ok(/return mapMeta\(packId\)/.test(galaxy), "and so are the galaxy map's thumbnails");
   const cli = src('tools/swg/cli.mjs');
-  ok(/mapFrameOf\(\{ planet, areas: mapTable\(`datatables\/buildout\/areas_\$\{planet\}\.iff`\), adjustments/.test(cli) && /map_adjustments\.iff/.test(cli), 'the maps command reads the areas table and the map adjustments');
+  ok(/const areaRows = mapTable\(`datatables\/buildout\/areas_\$\{planet\}\.iff`\);/.test(cli) && /mapFrameOf\(\{ planet, areas: areaRows, adjustments/.test(cli) && /map_adjustments\.iff/.test(cli), 'the maps command reads the areas table and the map adjustments');
   ok(/centre: frame\.centre, frame: frame\.frame/.test(cli), 'and writes the centre and the frame into map.json');
   ok(/const unframed = GAME_PLANETS\.filter/.test(cli) && /return m && m\.image && !m\.frame/.test(cli), 'status asks for the maps again while a map.json carries no frame');
 }

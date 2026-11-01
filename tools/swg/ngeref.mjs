@@ -18,6 +18,12 @@
 // What the reference cannot carry it records: the copy's placed objects are read only to measure that its rows are
 // in the snapshot's frame, so that measurement is made once here and written into the index (`frames`), and the
 // thousands of objects themselves are left behind.
+//
+// **The ways** (the owner's ruling of 2026-10-31, `ngeways.mjs`): each buildout row that is a way keeps what it is as
+// one (`w`, read off its objvars and the shape of its scripts' names, never the scripts) with its place and turn, every
+// area keeps its far corner, and the shared tables keep the zone lines those rows and the trail guides' templates name,
+// the dungeons, the clone mapping and the starports of the zones the ways are read on. The ways the overlay builds from
+// the reference are held to the ways it builds from the copy by the same check as the people (`comparable`).
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -25,9 +31,14 @@ import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { differs } from './core3ref.mjs';
 import { CREW_HOSTS, NGE_ZONES, crewsOf, kindOf, rowIds, templateStem } from './ngepack.mjs';
+import { WAY_ZONES, wayFields } from './ngeways.mjs';
 
-/** Bumped when the shape of the reference's files changes in a way its reader must know about. */
-export const NGE_REF_FORMAT = 1;
+/**
+ * Bumped when the shape of the reference's files changes in a way its reader must know about. 2: the ways about
+ * Kashyyyk and Mustafar (`ngeways.mjs`) -- the buildout rows that are a way, each area's far corner, and the zone lines,
+ * dungeons, clone mapping, starports and trail guides' lines those reach.
+ */
+export const NGE_REF_FORMAT = 2;
 
 /** Where the reference lives: in the checkout, and in every release beside the converter. */
 export const NGE_REF_DIR = fileURLToPath(new URL('./ngeref/', import.meta.url));
@@ -85,15 +96,19 @@ export function referenceRow(r, id) {
   const inCell = (Number(r.container) || 0) !== 0 || (Number(r.cell_index) || 0) !== 0;
   const stem = templateStem(r.server_template_crc);
   const crew = HOSTS.has(stem) || r.objvars.has('spawn_table');
-  if (kind === 'other' && !crew) return null;
+  // A way (`ngeways.mjs`): a door with a zone line, a dungeon's controller, a launcher, a gate, an exit, a starport. What
+  // it is as a way is kept (`w`), and its place and turn with it, never its scripts.
+  const way = inCell ? null : wayFields(r);
+  if (kind === 'other' && !crew && !way) return null;
   if (kind === 'waypoint' && inCell) return null;
   const k = LETTER[kind];
   // An objid is kept as a number only where a number holds it exactly; anything else stays the text it is.
   const out = { i: /^\d+$/.test(id) && Number.isSafeInteger(Number(id)) && String(Number(id)) === id ? Number(id) : id, k };
   if (inCell) out.c = 1;
-  if (kind === 'gated' || crew) out.t = stem;
-  if (!inCell && kind !== 'other' && kind !== 'gated') out.p = [num(r.px), num(r.py), num(r.pz)];
-  if (!inCell && (kind === 'static' || kind === 'corpse')) out.q = quat(r);
+  if (kind === 'gated' || crew || (kind === 'other' && way)) out.t = stem;
+  if (!inCell && ((kind !== 'other' && kind !== 'gated') || way)) out.p = [num(r.px), num(r.py), num(r.pz)];
+  if (!inCell && (kind === 'static' || kind === 'corpse' || way)) out.q = quat(r);
+  if (way) out.w = way;
   // The objvars its kind is read for, in `VARS`' order, null where the row has none: a number kept as one (`ov`
   // reads it with `Number`, and an empty cell as none), a patrol's points as a list (`patrolNames` splits them so),
   // and every other value as the text it is.
@@ -141,6 +156,8 @@ function rowOut(r) {
     said: '',
     id: String(r.i),
     kind: KIND[r.k],
+    // What it is as a way, as the copy's own row says it (`wayFields`), or none: never read again off scripts it has not got.
+    way: r.w ?? null,
   };
 }
 
@@ -151,7 +168,7 @@ function rowOut(r) {
  * zones name, and no other). It asks the copy for exactly what `buildNgeOverlay` can ask of it, so nothing it keeps
  * depends on which packs are converted on this machine.
  */
-export function extractNgeReference(reader, zones = NGE_ZONES) {
+export function extractNgeReference(reader, zones = NGE_ZONES, wayZones = WAY_ZONES) {
   const creatures = reader.creatures();
   const isCreature = (n) => creatures.has(String(n ?? '').trim());
   const wantCreature = new Set();
@@ -166,9 +183,12 @@ export function extractNgeReference(reader, zones = NGE_ZONES) {
   const crewTables = new Set();
   const zoneFiles = {};
   const counts = {};
+  // The ways' own (`ngeways.mjs`): every zone line a kept row or a creature's template names, and the starports' stems.
+  const wantLines = new Set();
+  const portStems = new Set();
   for (const zone of zones) {
     const areaRows = reader.areas(zone) ?? [];
-    const areas = areaRows.map((a) => ({ area: text(a.area), x1: text(a.x1), z1: text(a.z1), eventRequired: text(a.eventRequired) }));
+    const areas = areaRows.map((a) => ({ area: text(a.area), x1: text(a.x1), z1: text(a.z1), x2: text(a.x2), z2: text(a.z2), eventRequired: text(a.eventRequired) }));
     const buildouts = {};
     const raw = new Map();
     const kinds = {};
@@ -185,6 +205,8 @@ export function extractNgeReference(reader, zones = NGE_ZONES) {
         if (!kept) return;
         rows.push(kept);
         kinds[kept.k] = (kinds[kept.k] ?? 0) + 1;
+        if (kept.w?.line) wantLines.add(kept.w.line);
+        if (kept.w?.port) portStems.add(templateStem(r.server_template_crc));
         // Who it stands: the first objvar of a spawner and of a static (`VARS`).
         const who = kept.o?.[0];
         if ((kept.k === 'a' || kept.k === 'p') && typeof who === 'string') person(who);
@@ -284,10 +306,33 @@ export function extractNgeReference(reader, zones = NGE_ZONES) {
   }
   // A shared template the copy has no `.tpf` for is read as the plain rule's: nothing to keep.
   for (const k of Object.keys(shared)) if (shared[k] === null) delete shared[k];
-  const tables = { creatures: creaturesOut, types, shared, dress, stats, weapons, lairs, crews };
-  const sizes = { creatures: Object.keys(creaturesOut).length, types: Object.keys(types).length, shared: Object.keys(shared).length, dress: Object.keys(dress).length, stats: Object.keys(stats).length, weapons: Object.keys(weapons).length, lairs: Object.keys(lairs).length, crews: Object.keys(crews).length };
+  // The ways' tables (`buildNgeWays`): the zone lines a creature's template names (a trail guide's), and every line asked
+  // for; the dungeons, the clone mapping and the starports of the zones the ways are read on, and no other.
+  const allLines = reader.zoneLines();
+  const isLine = (n) => allLines.has(n);
+  const templateLines = {};
+  for (const name of [...wantCreature].sort()) {
+    const t = String(creatures.get(name)?.template ?? '').trim();
+    if (!t || Object.prototype.hasOwnProperty.call(templateLines, templateKey(t))) continue;
+    const pairs = reader.templateLines(t, isLine);
+    if (!pairs.length) continue;
+    templateLines[templateKey(t)] = pairs.map(([k, l]) => [k, l]);
+    for (const [, l] of pairs) wantLines.add(l);
+  }
+  const lines = {};
+  for (const n of [...wantLines].sort()) if (allLines.has(n)) lines[n] = allLines.get(n);
+  const wayList = wayZones.filter((z) => zones.includes(z));
+  const dungeons = reader.spaceDungeons().filter((d) => wayList.includes(text(d.planet).trim())).map((d) => DUNGEON_COLUMNS.map((c) => text(d[c])));
+  const clone = reader.cloneMapping().filter((r) => wayList.includes(r.scene)).map((r) => [r.scene, r.area, r.cloneScene, r.cloneArea]);
+  const ports = {};
+  for (const [t, s] of reader.starports()) if (portStems.has(templateStem(t))) ports[t] = { arrival: s.arrival, arrivalCell: s.arrivalCell, shuttleport: s.shuttleport, children: s.children.map((c) => ({ ...c })) };
+  const tables = { creatures: creaturesOut, types, shared, dress, stats, weapons, lairs, crews, lines, templateLines, dungeons, clone, ports };
+  const sizes = { creatures: Object.keys(creaturesOut).length, types: Object.keys(types).length, shared: Object.keys(shared).length, dress: Object.keys(dress).length, stats: Object.keys(stats).length, weapons: Object.keys(weapons).length, lairs: Object.keys(lairs).length, crews: Object.keys(crews).length, lines: Object.keys(lines).length, templateLines: Object.keys(templateLines).length, dungeons: dungeons.length, clone: clone.length, ports: Object.keys(ports).length };
   return { zones: zoneFiles, tables, counts: { zones: counts, tables: sizes } };
 }
+
+/** A dungeon's columns the ways read (`buildNgeWays`), in order. */
+const DUNGEON_COLUMNS = ['dungeon', 'planet', 'dungeon_area', 'start_loc_x', 'start_loc_y', 'start_loc_z', 'start_cell_name', 'exit_planet', 'exit_loc_x', 'exit_loc_y', 'exit_loc_z'];
 
 /**
  * A SHA-1 over each file's name and text, sixteen hex: the reference's identity, which `status` and the packs compare.
@@ -384,6 +429,12 @@ export function ngeRefReader(dir = NGE_REF_DIR) {
     },
     /** The frame check made when the reference was written, which the reference keeps in place of the objects it measured. */
     frameOf: (zone) => index.frames?.[zone] ?? null,
+    // The ways' tables (`buildNgeWays`), answered as the copy's reader answers them.
+    zoneLines: () => new Map(Object.entries(tables.lines ?? {})),
+    spaceDungeons: () => (tables.dungeons ?? []).map((r) => Object.fromEntries(DUNGEON_COLUMNS.map((col, i) => [col, r[i]]))),
+    cloneMapping: () => (tables.clone ?? []).map(([scene, area, cloneScene, cloneArea]) => ({ scene, area, cloneScene, cloneArea })),
+    starports: () => new Map(Object.entries(tables.ports ?? {}).map(([t, s]) => [t, { ...s, arrival: [...(s.arrival ?? [])], children: (s.children ?? []).map((c) => ({ ...c })) }])),
+    templateLines: (template, isLine) => (tables.templateLines?.[templateKey(template)] ?? []).filter(([, l]) => isLine(l)).map(([k, l]) => [k, l]),
   };
 }
 
@@ -393,7 +444,7 @@ export function comparable(built) {
     const { local: _l, converted: _c, note: _n, copy: _p, ...rest } = o ?? {};
     return rest;
   };
-  return { index: strip(built.index), manifest: strip(built.manifest), packs: Object.fromEntries(Object.entries(built.packs).map(([z, p]) => [z, strip(p)])) };
+  return { index: strip(built.index), manifest: strip(built.manifest), packs: Object.fromEntries(Object.entries(built.packs).map(([z, p]) => [z, strip(p)])), ways: built.ways ? strip(built.ways) : null };
 }
 
 /**
@@ -404,8 +455,8 @@ export function comparable(built) {
  * index; the files are written to a folder of their own first, read back through `ngeRefReader`, and built again;
  * only when every mode's two builds agree is anything written over the old reference.
  */
-export function writeNgeReference({ reader, fresh, build, modes = [false], zones = NGE_ZONES, outDir = NGE_REF_DIR, made = new Date().toISOString(), log = () => {} }) {
-  const extracted = extractNgeReference(reader, zones);
+export function writeNgeReference({ reader, fresh, build, modes = [false], zones = NGE_ZONES, wayZones = WAY_ZONES, outDir = NGE_REF_DIR, made = new Date().toISOString(), log = () => {} }) {
+  const extracted = extractNgeReference(reader, zones, wayZones);
   const first = build(reader, modes[0]);
   const frames = {};
   for (const [zone, z] of Object.entries(first.index.zones)) frames[zone] = z.frame?.objects ?? null;
@@ -416,7 +467,7 @@ export function writeNgeReference({ reader, fresh, build, modes = [false], zones
   const id = reader.identity();
   const index = {
     format: NGE_REF_FORMAT,
-    note: "SOE's own server data for Kashyyyk and Mustafar: which creature stands where, facing which way, how many, over which areas and in which rooms, as names, numbers and places only. Committed and shipped to every player by the owner's decision of 2026-10-19; no model, texture, sound, string, script or quest of the game's. Written by `npm run swg -- nge-reference <the copy>`, every answer compared with a fresh read of the copy before it was kept.",
+    note: "SOE's own server data for Kashyyyk and Mustafar: which creature stands where, facing which way, how many, over which areas and in which rooms, and (by the owner's ruling of 2026-10-31) the ways about them -- where each zone gate lands, the grid copies' starts and exits, the Kachirho tree lifts, the Rryatt Trail's level moves, the clone mapping's droids and the two starports' terminals -- as names, numbers and places only. Committed and shipped to every player by the owner's decision of 2026-10-19; no model, texture, sound, string, script or quest of the game's. Written by `npm run swg -- nge-reference <the copy>`, every answer compared with a fresh read of the copy before it was kept.",
     made,
     sha1,
     source: { kind: reader.roots.kind, files: id.files, sha1: id.sha1 },
@@ -443,7 +494,8 @@ export function writeNgeReference({ reader, fresh, build, modes = [false], zones
       const b = comparable(build(ref, mode));
       const d = differs(a, b);
       if (d) throw new Error(`the reference would stand ${mode ? 'with the archives' : 'without the archives'} otherwise than the copy does (${d}); nothing was written`);
-      log(`  ${mode ? 'with the archives' : 'without the archives'}: ${a.index.counts.rows} people, ${a.index.counts.areas} wild areas, ${a.index.counts.creatures} creatures, the same from the copy and from the reference`);
+      const w = a.ways?.counts;
+      log(`  ${mode ? 'with the archives' : 'without the archives'}: ${a.index.counts.rows} people, ${a.index.counts.areas} wild areas, ${a.index.counts.creatures} creatures${w ? `, ${w.gates} gates, ${w.liftDoors} lift doors, ${w.guides} guides with ${w.moves} moves, ${w.launchers} launchers, ${w.dungeons} dungeons over ${w.copies} copies, ${w.droids} clone droids, ${w.ports} starports` : ''}, the same from the copy and from the reference`);
     }
     mkdirSync(outDir, { recursive: true });
     for (const name of readdirSync(outDir)) if (name.endsWith('.json') && !Object.prototype.hasOwnProperty.call(files, name) && name !== 'index.json') rmSync(join(outDir, name));

@@ -304,8 +304,9 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
     const rigs = travel.rigs ?? {};
     // A world with states once per state, as the game reads it there (`padOfPort` finds a port by its name, which each
     // state holds once): a port of one state is asked in its own pass, and a port standing in every state is one port,
-    // asked at the first pass alone. So the seven below are the ruins' two camp pads and the five other dead ports, the
-    // very seven a pack before the states had, and the living city's own two must each have a pad.
+    // asked at the first pass alone. So the six below are the ruins' two camp pads and the four other dead ports (a pack
+    // before the states had seven, Kachirho's among them, which SOE's starports table now stands a transport at), and the
+    // living city's own two must each have a pad.
     const passes = statePasses(pois);
     for (const [n, pass] of passes.entries()) {
       pass.take();
@@ -335,9 +336,11 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
   }
   if (!answered) note('no converted world carries rigged shuttle pads, so the ports are not checked: npm run swg -- travel @SWG assets-private --retail-only');
   else {
-    ok(none.length === 7 && none.includes('naboo: Theed Starport'), `seven ports have no rigged shuttle in the open to land on, Theed Starport among them (${none.join('; ')})`);
+    // Six, where it was seven: Kachirho's starport has its transport now, stood from SOE's own starports table (the NGE
+    // ways, `tools/swg/ngeways.mjs`), and so has Mensix's, which had no port row at all before that table named it.
+    ok(none.length === 6 && none.includes('naboo: Theed Starport') && !none.some((n) => /Kachirho|Mensix/.test(n)), `six ports have no rigged shuttle in the open to land on, Theed Starport among them, and Kachirho's and Mensix's are not (${none.join('; ')})`);
     ok(answered > 40, `and every other one of ${answered + none.length} has its pad (${answered}, ${calm} of them flown to by a transport's calm landing)`);
-    ok(noneTransport.length === 6 && !noneTransport.includes('naboo: Theed Starport') && noneShuttle.length === 7 && noneShuttle.includes('naboo: Theed Starport'), `for a trip flown with a transport six have none, Theed Starport's hangar being its pad (${noneTransport.join('; ')}); for one flown with the plain shuttle still seven`);
+    ok(noneTransport.length === 5 && !noneTransport.includes('naboo: Theed Starport') && noneShuttle.length === 6 && noneShuttle.includes('naboo: Theed Starport'), `for a trip flown with a transport five have none, Theed Starport's hangar being its pad (${noneTransport.join('; ')}); for one flown with the plain shuttle still six`);
     if (stated) ok(living.length === 2 && living.every((l) => /: pad$/.test(l)), `and in Restuss's living state its own starport and shuttleport, the launch city's, each have their pad (${living.join('; ')})`);
     else note("no converted world carries Restuss's states, so its living city's ports are not checked: npm run swg -- convert assets-private --yes");
   }

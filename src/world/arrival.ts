@@ -66,6 +66,17 @@ export function arrivalBuilding<T extends { readonly x: number; readonly z: numb
 export const ARRIVAL_ROOM_REACH = 1500;
 
 /**
+ * Whether a port's own place on a world (`kind` a starport's or a shuttleport's) comes out at the world's own arrival:
+ * a world whose arrival says its port lands people there (`WorldArrival.port`, Mustafar's deck) and is a place, not a
+ * room. A port's row in the places list stands at its building's origin, which on Mustafar is the mining facility's,
+ * over the valley floor about 125 m under the landing deck: stood there on the ground, or in the facility's way in, a
+ * player never reached the deck its transport lands on. Pure, so the node test asks it.
+ */
+export function portArrivesHome(planet: { readonly arrival?: WorldArrival; readonly space?: string; readonly zones?: readonly unknown[] }, kind: string): boolean {
+  return (kind === 'starport' || kind === 'shuttleport') && hasOwnArrival(planet) && !!planet.arrival?.port && !planet.arrival.room;
+}
+
+/**
  * Whether a world brings a player in at its own arrival: one that names it, has ground (no space zone) and no zones
  * of its own (a zoned world's arrival would be one per zone, and none names one).
  */

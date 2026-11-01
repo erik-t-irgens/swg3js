@@ -1,12 +1,12 @@
 {
- "format": 1,
- "note": "SOE's own server data for Kashyyyk and Mustafar: which creature stands where, facing which way, how many, over which areas and in which rooms, as names, numbers and places only. Committed and shipped to every player by the owner's decision of 2026-10-19; no model, texture, sound, string, script or quest of the game's. Written by `npm run swg -- nge-reference <the copy>`, every answer compared with a fresh read of the copy before it was kept.",
- "made": "2026-10-20T04:48:11.294Z",
- "sha1": "1bd9cb1b4d5c3a48",
+ "format": 2,
+ "note": "SOE's own server data for Kashyyyk and Mustafar: which creature stands where, facing which way, how many, over which areas and in which rooms, and (by the owner's ruling of 2026-10-31) the ways about them -- where each zone gate lands, the grid copies' starts and exits, the Kachirho tree lifts, the Rryatt Trail's level moves, the clone mapping's droids and the two starports' terminals -- as names, numbers and places only. Committed and shipped to every player by the owner's decision of 2026-10-19; no model, texture, sound, string, script or quest of the game's. Written by `npm run swg -- nge-reference <the copy>`, every answer compared with a fresh read of the copy before it was kept.",
+ "made": "2026-11-01T00:35:08.094Z",
+ "sha1": "2ab7deae9fe4a528",
  "source": {
   "kind": "checkout",
-  "files": 1007,
-  "sha1": "59481e05819776ca"
+  "files": 1799,
+  "sha1": "83980fb2b247792b"
  },
  "zones": [
   "kashyyyk_main",
@@ -78,19 +78,19 @@
   },
   "kashyyyk_rryatt_trail": {
    "matched": 10116,
-   "unmatched": 156,
+   "unmatched": 144,
    "median": 0,
    "within": 10116
   },
   "kashyyyk_north_dungeons": {
    "matched": 4336,
-   "unmatched": 8,
+   "unmatched": 4,
    "median": 0,
    "within": 4336
   },
   "kashyyyk_south_dungeons": {
    "matched": 4476,
-   "unmatched": 36,
+   "unmatched": 24,
    "median": 0,
    "within": 4476
   },
@@ -112,14 +112,14 @@
    "kashyyyk_main": {
     "areas": 1,
     "tables": 1,
-    "rows": 449,
+    "rows": 466,
     "kinds": {
      "s": 50,
      "a": 240,
      "c": 5,
      "p": 27,
      "w": 126,
-     "o": 1
+     "o": 18
     },
     "regions": 3,
     "lists": 0
@@ -127,13 +127,14 @@
    "kashyyyk_hunting": {
     "areas": 1,
     "tables": 1,
-    "rows": 375,
+    "rows": 376,
     "kinds": {
      "a": 258,
      "p": 14,
      "w": 84,
      "g": 2,
-     "s": 17
+     "s": 17,
+     "o": 1
     },
     "regions": 1,
     "lists": 0
@@ -141,13 +142,13 @@
    "kashyyyk_dead_forest": {
     "areas": 1,
     "tables": 1,
-    "rows": 147,
+    "rows": 149,
     "kinds": {
      "a": 87,
      "p": 4,
      "w": 43,
      "s": 11,
-     "o": 1,
+     "o": 3,
      "g": 1
     },
     "regions": 1,
@@ -156,10 +157,11 @@
    "kashyyyk_rryatt_trail": {
     "areas": 24,
     "tables": 4,
-    "rows": 256,
+    "rows": 260,
     "kinds": {
      "a": 230,
-     "s": 13,
+     "s": 15,
+     "o": 2,
      "p": 2,
      "w": 10,
      "g": 1
@@ -170,12 +172,14 @@
    "kashyyyk_north_dungeons": {
     "areas": 16,
     "tables": 2,
-    "rows": 236,
+    "rows": 240,
     "kinds": {
      "g": 21,
      "a": 70,
      "p": 17,
-     "w": 128
+     "w": 128,
+     "o": 3,
+     "s": 1
     },
     "regions": 1,
     "lists": 0
@@ -183,10 +187,12 @@
    "kashyyyk_south_dungeons": {
     "areas": 24,
     "tables": 2,
-    "rows": 141,
+    "rows": 145,
     "kinds": {
+     "o": 3,
      "g": 86,
-     "a": 55
+     "a": 55,
+     "s": 1
     },
     "regions": 1,
     "lists": 0
@@ -204,10 +210,10 @@
    "mustafar": {
     "areas": 88,
     "tables": 12,
-    "rows": 346,
+    "rows": 349,
     "kinds": {
      "a": 178,
-     "o": 4,
+     "o": 7,
      "s": 7,
      "w": 125,
      "p": 13,
@@ -218,26 +224,31 @@
    }
   },
   "tables": {
-   "creatures": 496,
+   "creatures": 500,
    "types": 197,
-   "shared": 543,
+   "shared": 547,
    "dress": 63,
    "stats": 70,
    "weapons": 38,
    "lairs": 156,
-   "crews": 7
+   "crews": 7,
+   "lines": 31,
+   "templateLines": 9,
+   "dungeons": 4,
+   "clone": 15,
+   "ports": 2
   },
   "overlay": {
-   "rows": 17677,
-   "statics": 163,
+   "rows": 17705,
+   "statics": 191,
    "corpses": 24,
    "crew": 7524,
    "spawners": 9369,
    "patrols": 597,
    "sites": 3917,
    "areas": 34,
-   "creatures": 496,
-   "withGame": 496,
+   "creatures": 500,
+   "withGame": 500,
    "lairs": 156,
    "groups": 34,
    "unresolved": 0,

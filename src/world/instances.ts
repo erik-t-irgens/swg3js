@@ -344,8 +344,11 @@ export class InstanceLocks<K = unknown> {
 
 // ---- What E does here ----
 
-/** What the use key does in or at a dungeon, as the bar and the key both read it. */
-export type InstanceUse = '' | 'keypad' | 'pod' | 'in' | 'out';
+/**
+ * What the use key does in or at a dungeon, as the bar and the key both read it. `guide` is a way of SOE's own data
+ * about Kashyyyk's copies (`ngeWays.ts`): a trail guide, who takes the player along the trail.
+ */
+export type InstanceUse = '' | 'keypad' | 'pod' | 'in' | 'out' | 'guide';
 
 /** Where the player stands, flat, as the rule wants it. */
 export interface InstanceWhere {

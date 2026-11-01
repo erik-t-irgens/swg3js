@@ -352,7 +352,14 @@ else {
     }
   }
   ok(portsSeen > 0 && notPlanned.length === 0, `1: every port with a shuttle on the ${worlds.length} converted worlds is planned by the runner (${planned} of ${portsSeen})${notPlanned.length ? `: not ${notPlanned.join('; ')}` : ''}`);
-  ok(refused.length === 0, `... and every one of the ${destinations} arrivals drawn for them has somewhere to walk to${refused.length ? `: none at ${refused.join(', ')}` : ''}`);
+  // Mensix's pad is the mining facility's landing deck, about 125 m over the valley the walk grid covers (SOE's own
+  // starports table stands its transport there: the NGE ways), so an arrival stepping off it has no ground of the grid's
+  // to walk to and the runner stands none, its own rule. No town on Mustafar has a stationary list either, so the game
+  // never plans that port at all (`townDraw`); only this test's stand-in draw reaches it.
+  const deck = refused.filter((l) => /^mustafar Mensix /.test(l));
+  if (deck.length) console.log(`note ${deck.join(', ')}: a pad on a deck, whose arrivals the walk grid cannot send anywhere, and which no town list draws a traveller to in the game`);
+  const rest = refused.filter((l) => !deck.includes(l));
+  ok(rest.length === 0, `... and every one of the ${destinations} arrivals drawn for them has somewhere to walk to, but at a pad on a deck${rest.length ? `: none at ${rest.join(', ')}` : ''}`);
   ok(strictPorts > 0, `${strictPorts} ports judge an arrival's reach strictly, from open ground the arrival stands on; ${generalPorts} have no ranked ground near enough to judge from and keep the general rule (${general.join('; ') || 'none'})`);
   ok(offRegion.length === 0 && offOpen.length === 0, `2: where the strict rule is used, every goal is in the ranked region of the ground it is judged from, and on open ground${offRegion.length ? `: not ${offRegion.slice(0, 4).join('; ')}` : ''}${offOpen.length ? `; off open ground ${offOpen.slice(0, 4).join('; ')}` : ''}`);
   ok(towns > 0 && townsWithStep > 0, `... a cantina or a hotel is made for at the open ground outside its door, with its doorstep to walk on to (${townsWithStep} of the ${towns} goals at one)`);

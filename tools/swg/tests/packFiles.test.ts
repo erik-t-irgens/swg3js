@@ -202,7 +202,7 @@ try {
     const main = text('src/main.ts');
     const pads = methodOf(main, '  private padsOf(');
     ok(/const json = \(file: string\): Promise<unknown> => packJson\(pack, file, import\.meta\.env\.BASE_URL, \{ probe: false \}\);/.test(pads) && /json\('travel\.json'\), json\('pois\.json'\)/.test(pads), "and the game's pads (a ticket bought, a boarding) are read that way");
-    ok(/packJson<\{ image\?: string; width\?: number; centre\?: \{ x: number; z: number \} \}>\(packId, 'map\.json', base\(\), \{ probe: false \}\)/.test(text('src/ui/mapImages.ts')), "as the map picture's reader is");
+    ok(/packJson<\{ image\?: string; width\?: number; centre\?: \{ x: number; z: number \}(; instances\?: [^>]*)? \}>\(packId, 'map\.json', base\(\), \{ probe: false \}\)/.test(text('src/ui/mapImages.ts')), "as the map picture's reader is");
     const travel = methodOf(main, '  private async loadTravel(');
     const fittings = methodOf(main, '  private async loadFittings(');
     ok(/await packJson<\{ version\?: number; rows\?: TravelRow\[\]; rigs\?: Record<string, TravelRig> \}>\(pack, 'travel\.json', import\.meta\.env\.BASE_URL\);/.test(travel) && !/fetch\(/.test(travel), "an arrival's travel rows are read through the rule (`loadTravel`)");

@@ -25,6 +25,38 @@
 // Everything is in the map's own frame, which is the snapshot's (the client's world, X not mirrored):
 // the same frame the places in pois.json and the composite rectangle are already in.
 
+/**
+ * The pictures a zone of copies draws one of each of its copies with, and the ground each covers: a zone whose buildout
+ * areas are copies (`isolated`) that allow a map with no composite, more than one of them (the grid zones of Kashyyyk:
+ * the slave camps and the arenas, Hracca and Bocctyyy, the Rryatt Trail's four levels). A launch world's areas are tiles
+ * of one world, never isolated, and its one picture is the whole world's. The client keeps a picture per kind of copy
+ * (`ui_map_<zone>_<area>`, else the zone's own `ui_map_<zone>`; `hasPicture(name)` says which the archives hold), and
+ * this frames each over the area the player stands in, square over its larger side about its middle as a composite is
+ * (`mapFrameOf`), the size the client's own `instance/instance_areas.iff` gives for `<zone>__<area>` where it has a row
+ * (the trail's levels) and the area's own otherwise. Which of those the client framed over is INFERRED: its tables hold
+ * the sizes and the pictures and nothing that joins them. An area with no picture is left out (the arenas).
+ *  -> [{ area, box: [x1, z1, x2, z2], width, centre: { x, z }, texture }], one per copy, in the table's order.
+ */
+export function instanceFramesOf({ planet, areas = [], instanceAreas = [], hasPicture = () => false } = {}) {
+  const grid = areas.filter((r) => Number(r?.allowMap) === 1 && Number(r?.isolated) === 1 && !compositeOf(r) && r.area && !String(r.eventRequired ?? ''));
+  if (grid.length < 2) return [];
+  const out = [];
+  for (const r of grid) {
+    const name = String(r.area);
+    const texture = hasPicture(`ui_map_${planet}_${name}`) ? `texture/ui_map_${planet}_${name}.dds` : hasPicture(`ui_map_${planet}`) ? `texture/ui_map_${planet}.dds` : null;
+    if (!texture) continue;
+    const x1 = Math.min(Number(r.x1), Number(r.x2));
+    const z1 = Math.min(Number(r.z1), Number(r.z2));
+    const x2 = Math.max(Number(r.x1), Number(r.x2));
+    const z2 = Math.max(Number(r.z1), Number(r.z2));
+    const sized = instanceAreas.find((a) => String(a?.area ?? '').toLowerCase() === `${planet}__${name}`.toLowerCase());
+    const w = sized && Number(sized.x) > 0 ? Number(sized.x) : x2 - x1;
+    const h = sized && Number(sized.z) > 0 ? Number(sized.z) : z2 - z1;
+    out.push({ area: name, box: [x1, z1, x2, z2], width: Math.max(w, h), centre: { x: (x1 + x2) / 2, z: (z1 + z2) / 2 }, texture });
+  }
+  return out;
+}
+
 /** The four corners' columns, as the areas table names them. */
 const COMPOSITE = ['compositeX1', 'compositeZ1', 'compositeX2', 'compositeZ2'];
 

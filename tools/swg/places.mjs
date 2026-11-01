@@ -284,6 +284,23 @@ export function portKindOf(template) {
 }
 
 /**
+ * The buildings SOE's own starports table makes a port that `portKindOf` does not: Mustafar's Mensix Mining Facility,
+ * whose landing deck its transport lands on (the NGE ways, the owner's ruling of 2026-10-31; `travel` stands its terminal,
+ * collector and transport from that table). A port for the places list alone and never for a world's centre
+ * (`autoCenter` keeps `portKindOf`): Mustafar's centre is not its facility, and moved, every place on the world would move
+ * with it. The node test holds this list to the reference's own starports.
+ */
+export const TABLE_PORTS = new Map([
+  ['object/building/mustafar/structures/shared_must_new_mining_facility.iff', 'starport'],
+  ['object/building/mustafar/structures/must_new_mining_facility.iff', 'starport'],
+]);
+
+/** Which kind of port a placed object is for the places list: `portKindOf`, else SOE's starports table's (`TABLE_PORTS`). */
+export function portKindListed(template) {
+  return portKindOf(template) ?? TABLE_PORTS.get(String(template ?? '')) ?? null;
+}
+
+/**
  * Where to centre a planet when no centre is given: its starport (or shuttleport) if it has one, else the middle of the
  * 256 m square holding the most objects, which is a city. A port is a port building (`portKindOf`), never any template
  * whose name says so: by the name alone the Tusken army heroic's centre was a starport *sign*, the mistake the ports list
@@ -410,7 +427,7 @@ export function portsWithoutRow(objects, rows) {
   const out = [];
   for (const o of objects ?? []) {
     if (!o || o.contained) continue;
-    const kind = portKindOf(o.template);
+    const kind = portKindListed(o.template);
     if (!kind) continue;
     if (ports.some((r) => r.kind === kind && Math.hypot(r.x - o.x, r.z - o.z) <= PORT_ROW_M)) continue;
     out.push({ template: o.template, x: o.x, z: o.z, kind });

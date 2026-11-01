@@ -1642,7 +1642,8 @@ export class AmbientPeople {
    * `clearOut` -- measured over every converted world, a shuttleport's pad is blocked ground for fourteen
    * to seventeen metres round its middle, and ranked ground is found within that reach of the ramp at every
    * one but four, whose pads stand in blocked ground for tens of metres and which keep the general rule
-   * (`oursStreet.test.ts`). Null with no grid, `clearOut` off, or nothing found.
+   * (`oursStreet.test.ts`), and Mustafar's Mensix, whose pad is a landing deck over the valley. Null with no grid,
+   * `clearOut` off, or nothing found.
    */
   private originOf(pp: PortPlan, door: Door | null, deps: AmbientDeps): OpenOut | null {
     const out = clearOutNow();

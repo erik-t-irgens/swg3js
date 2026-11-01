@@ -19,6 +19,12 @@ export interface WorldArrival {
    * where the world streams round until the building is in.
    */
   readonly room?: { readonly template: string; readonly cell: string; readonly at?: readonly [number, number, number] };
+  /**
+   * The world's port lands people here (`portArrivesHome` in `src/world/arrival.ts`): a port's own place on this world
+   * (the map's teleport, the galaxy tab, a ticket put down on foot) comes out at this arrival, at its own height, rather
+   * than on the ground at the port building's origin.
+   */
+  readonly port?: boolean;
 }
 
 /** One terrain of a planet the game split into separate zones (Kashyyyk), each its own converted pack. */
@@ -308,8 +314,10 @@ export const PLANETS: PlanetDef[] = [
     seed: 2005,
     // The Mensix Mining Facility's landing deck, where the game brought visitors in: the deck's own middle (cell 0's
     // floor, 230.06 high) with a body's standing height on it, facing the door into the landing deck room; the
-    // heading is ours and the owner's to change (`__debug.arrival({ heading })`).
-    arrival: { raw: { x: -2478.1, z: 1620.0 }, y: 230.4, heading: -0.37 },
+    // heading is ours and the owner's to change (`__debug.arrival({ heading })`). It is the facility's starport's own
+    // landing too (SOE's starports table puts its arrivals 8 m from it, raw (-2470.5, 230.4, 1622.1)), so a port's place on
+    // Mustafar comes out here (`port`): the places list's row stands at the building's origin, over the valley floor.
+    arrival: { raw: { x: -2478.1, z: 1620.0 }, y: 230.4, heading: -0.37, port: true },
     gravity: 22,
     sky: { top: 0x3a1f1c, horizon: 0xc2522a, sunColor: 0xffb070, suns: 1, sunElevation: 0.55, sunAzimuth: 3.6 },
     fog: { color: 0x5a2a20, density: 0.0046 },
