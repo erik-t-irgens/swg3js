@@ -274,7 +274,7 @@ try {
     ok(askedFor(/pois\.json$/) === want.length && want.every((id) => asked.includes(`assets-private/${id}/pois.json`)), `the places are asked of the ${want.length} ground packs and of nothing else: no world that declares no pack, no space zone, not the gallery (${asked.length} asks in all)`);
     ok(!asked.some((p) => /manifest\.json$/.test(p)), 'without a probe of anybody\'s manifest at boot');
     const galaxy = text('src/ui/galaxyMap.ts');
-    ok(/packJson<\{ pois\?: Poi\[\] \}>\(planetId, 'pois\.json', import\.meta\.env\.BASE_URL, \{ probe: false \}\)/.test(galaxy) && !/fetch\(`\$\{import\.meta\.env\.BASE_URL\}assets-private\/\$\{planetId\}\/pois\.json`\)/.test(galaxy), "the galaxy's own reader of the places asks through the rule (`loadPoisRaw`)");
+    ok(/packJson<\{ pois\?: Poi\[\];[^>]*\}>\(planetId, 'pois\.json', import\.meta\.env\.BASE_URL, \{ probe: false \}\)/.test(galaxy) && !/fetch\(`\$\{import\.meta\.env\.BASE_URL\}assets-private\/\$\{planetId\}\/pois\.json`\)/.test(galaxy), "the galaxy's own reader of the places asks through the rule (`loadPoisRaw`)");
   }
 
   // ---- a missing space pack is asked once a session ----
@@ -349,7 +349,7 @@ try {
     const route = methodOf(main, '  private editLayerOf(');
     const heights = methodOf(main, '  private async readHeights(');
     ok(/this\.placementWord\(d\)/.test(handler) && /const reload = this\.editLayerOf\(kind\);/.test(word) && /reload\(here, d\.rev\);/.test(word) && /if \(kind === 'story' \|\| kind === 'world'\) return \(pack, rev\) => void this\.reloadDressing\(pack, kind, rev\);/.test(route) && /this\.fetchPlacements\(l, pack, frame\)/.test(reload) && /await fetchPublic\(placementsPath\(layer, pack\), \{ cache: 'no-store' \}, import\.meta\.env\.BASE_URL\);/.test(fetchBody), "the dev server's `placements:changed` reads the file again through `fetchPublic`, which with no list asks for it");
-    ok(/if \(kind === 'heights'\) return \(pack, rev\) => void this\.reloadHeights\(pack, rev\);/.test(route) && /await fetchPublic\(path, \{ cache: 'no-store' \}, import\.meta\.env\.BASE_URL\);/.test(heights) && /const path = editFilePath\('heights', pack\);/.test(heights), "and a world's heights file is read again the same way when the word names it");
+    ok(/if \(kind === 'heights'\) return \(pack, rev\) => \(this\.madeMapEdit\(\), void this\.reloadHeights\(pack, rev\)\);/.test(route) && /await fetchPublic\(path, \{ cache: 'no-store' \}, import\.meta\.env\.BASE_URL\);/.test(heights) && /const path = editFilePath\('heights', pack\);/.test(heights), "and a world's heights file is read again the same way when the word names it");
     ok(/await fetchPublic\(tracksPath\(world\), \{ cache: 'no-store' \}, import\.meta\.env\.BASE_URL\);/.test(methodOf(main, '  private async readTracks(')), "and a world's tracks are read the same way");
     ok(/import shippedPublic from 'virtual:shipped-public';\nsetShippedPublic\(shippedPublic\);/.test(main), 'the game hands the build\'s list over before anything asks');
     const vite = text('vite.config.ts');

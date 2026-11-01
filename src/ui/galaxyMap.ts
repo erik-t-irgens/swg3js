@@ -17,7 +17,10 @@ import { mapShareX, mapShareY, type MapFrame } from './spaceMapLayers.ts';
 import { mapMeta } from './mapImages.ts';
 import { poisCentreOf } from '../world/loadingTune.ts';
 import { inState } from '../world/worldState.ts';
-import { packJson } from '../world/packFiles.ts';
+import { fetchPublic, packJson } from '../world/packFiles.ts';
+import { editFilePath } from '../story/placementPath.ts';
+import { readLocationsFile, type LocationRow, type LocationShape } from '../world/editFiles/locationsFile.ts';
+import { landedLocations, mergeLocations, type GameNoBuild } from '../world/places.ts';
 
 /**
  * What a space zone with no pack says on its card and its panel: the command, and that the game sees it after a reload,
@@ -39,7 +42,43 @@ export interface Poi {
   desc?: string;
   /** The world state it stands in, where only one (Restuss's two sets of ports: `worldState.ts`). */
   state?: string;
+  /**
+   * A place of ours (Map-maker II's eighth wave: the world's locations file, merged in `loadPoisRaw`): its id there, its shape
+   * (the city line and the minimap's outline read it), whether its name is said walking in and whether players may build in
+   * it. Absent on every row of the pack's own.
+   */
+  ours?: true;
+  id?: string;
+  shape?: LocationShape;
+  say?: boolean;
+  build?: boolean;
 }
+
+/**
+ * One of the game's own services, as the `pois` command writes it into `pois.json` (`services`, Map-maker II's eighth wave):
+ * its kind (`cantina`, `bank`, `terminal_mission`...), the server's own category, and its place in the raw frame.
+ */
+export interface ServiceRow {
+  kind: string;
+  cat?: string;
+  sub?: string;
+  x: number;
+  z: number;
+  state?: string;
+}
+
+/** A world's places file as read: its pack's places and centre, ours merged in, its services and the game's no-build rows. */
+export interface PoisFile {
+  center: { x: number; z: number } | null;
+  pois: Poi[];
+  /** The game's own services (none on a pack converted before them). */
+  services: ServiceRow[];
+  /** The game's own no-build rows (none on a pack converted before them). */
+  noBuild: GameNoBuild[];
+  /** The world's locations file's rows, as they stand (every state's). */
+  locations: LocationRow[];
+}
+
 
 /** What the galaxy tab needs from the game to offer a jump into a system's orbit. */
 export interface GalaxyDeps {
@@ -102,8 +141,8 @@ export class GalaxyMap {
   readonly root: HTMLElement;
   private currentId = '';
   private currentZone: string | undefined;
-  /** Each pack's `pois.json` as read, its places and its own centre, fetched once a session (a failed read is empty). */
-  private readonly pois = new Map<string, Promise<{ center: { x: number; z: number } | null; pois: Poi[] }>>();
+  /** Each pack's `pois.json` as read with the world's places of ours merged in, its own centre, fetched once a session (a failed read is empty). */
+  private readonly pois = new Map<string, Promise<PoisFile>>();
   private readonly view: GalaxyView;
   private readonly viewHolder: HTMLElement;
   private readonly catchLayer: HTMLElement;
@@ -306,21 +345,103 @@ export class GalaxyMap {
     return this.loadPoisRaw(planetId).then((f) => ({ center: f.center, pois: inState(f.pois) }));
   }
 
-  /** The same file as it stands, every state's rows: what the game keeps and filters again as states change. */
-  loadPoisRaw(planetId: string): Promise<{ center: { x: number; z: number } | null; pois: Poi[] }> {
+  /**
+   * The same file as it stands, every state's rows: what the game keeps and filters again as states change. The world's own
+   * places of ours (its locations file, Map-maker II's eighth wave) are merged in after the pack's (`mergeLocations`), and the
+   * game's services and no-build rows ride beside them. A packless world's places are measured about (0, 0), its centre.
+   */
+  loadPoisRaw(planetId: string): Promise<PoisFile> {
     let p = this.pois.get(planetId);
     if (!p) {
-      // Asked only of a ground world with a pack of its own (`packHolds`): every boot used to ask for eighteen that
-      // cannot exist, the real-elevation worlds', the gallery's and every space zone's.
-      p = packJson<{ pois?: Poi[] }>(planetId, 'pois.json', import.meta.env.BASE_URL, { probe: false })
-        .then((data) => {
-          if (!data) return { center: null, pois: [] };
-          return { center: poisCentreOf(data), pois: Array.isArray(data.pois) ? data.pois : [] };
-        })
-        .catch(() => ({ center: null, pois: [] }));
+      const pack = this.loadPackPlaces(planetId);
+      const locs = this.locationsOf(planetId);
+      p = Promise.all([pack, locs]).then(([f, rows]) => this.mergedFile(planetId, f, rows));
       this.pois.set(planetId, p);
     }
     return p;
+  }
+
+  /** The pack's own places file alone, read once a session. */
+  private loadPackPlaces(planetId: string): Promise<{ center: { x: number; z: number } | null; pois: Poi[]; services: ServiceRow[]; noBuild: GameNoBuild[] }> {
+    let p = this.packPlaces.get(planetId);
+    if (!p) {
+      // Asked only of a ground world with a pack of its own (`packHolds`): every boot used to ask for eighteen that
+      // cannot exist, the real-elevation worlds', the gallery's and every space zone's.
+      p = packJson<{ pois?: Poi[]; services?: ServiceRow[]; noBuild?: GameNoBuild[] }>(planetId, 'pois.json', import.meta.env.BASE_URL, { probe: false })
+        .then((data) => {
+          if (!data) return { center: null, pois: [], services: [], noBuild: [] };
+          return { center: poisCentreOf(data), pois: Array.isArray(data.pois) ? data.pois : [], services: Array.isArray(data.services) ? data.services : [], noBuild: Array.isArray(data.noBuild) ? data.noBuild : [] };
+        })
+        .catch(() => ({ center: null, pois: [], services: [], noBuild: [] }));
+      this.packPlaces.set(planetId, p);
+    }
+    return p;
+  }
+
+  /** Each pack's own places file, read once a session; the merged file is made again from it when the places of ours change. */
+  private readonly packPlaces = new Map<string, Promise<{ center: { x: number; z: number } | null; pois: Poi[]; services: ServiceRow[]; noBuild: GameNoBuild[] }>>();
+
+  /** The merged file: the pack's places and ours, the packless centre (0, 0). */
+  private mergedFile(planetId: string, f: { center: { x: number; z: number } | null; pois: Poi[]; services: ServiceRow[]; noBuild: GameNoBuild[] }, rows: LocationRow[]): PoisFile {
+    const packless = PLANETS.some((p) => p.id === planetId && p.pack === false);
+    return { center: f.center ?? (packless ? { x: 0, z: 0 } : null), pois: mergeLocations(f.pois, rows), services: f.services, noBuild: f.noBuild, locations: rows };
+  }
+
+  /**
+   * A world's locations file (`public/placements/locations/<world>.json`), read as the other edit files are (a built game asks
+   * only for one its own list ships; the dev server answers from the disk): its rows, none where there is no file or it does
+   * not read (said on the console). A space zone's is in the game's frame and drawn nowhere this pass, so none is read.
+   */
+  private async locationsOf(planetId: string): Promise<LocationRow[]> {
+    const def = PLANETS.find((p) => p.id === planetId || p.zones?.some((z) => z.pack === planetId));
+    if (!def || def.space || def.instances) return [];
+    const path = editFilePath('locations', planetId);
+    try {
+      const res = await fetchPublic(path, { cache: 'no-store' }, import.meta.env.BASE_URL);
+      if (!res || !res.ok) return [];
+      const type = res.headers.get('content-type') ?? '';
+      if (!(type.includes('json') || type.includes('text/plain'))) return [];
+      const text = await res.text();
+      const read = readLocationsFile(text, planetId, 'ground');
+      this.locInfo.set(planetId, { bytes: text.length, problem: read.problem });
+      if (read.problem) console.warn(`places: public/${path} is not read (${read.problem})`);
+      if (read.skipped.length) console.warn(`places: public/${path}: ${read.skipped.map((s) => `${s.id}: ${s.why}`).join('; ')}`);
+      if (read.unknown.length) console.warn(`places: public/${path}: fields this build does not read: ${read.unknown.join(', ')}`);
+      return read.problem ? [] : read.rows;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Each world's locations file as last read: its size and why it was not read (the world editor's Tools tab says them). */
+  private readonly locInfo = new Map<string, { bytes: number | null; problem: string | null }>();
+  locationsFileInfo(planetId: string): { bytes: number | null; problem: string | null } {
+    return this.locInfo.get(planetId) ?? { bytes: null, problem: null };
+  }
+
+  /**
+   * The places of ours of a world laid again (the world editor's write, the dev server's word: rows put by id and ids taken
+   * out, `deleted`), the merged file made again from the pack's own as it was read, and its card's places drawn again. Answers
+   * the merged file. Nothing is fetched.
+   */
+  async landLocations(planetId: string, put: readonly LocationRow[], deleted: readonly string[]): Promise<PoisFile> {
+    const was = await this.loadPoisRaw(planetId);
+    const rows = landedLocations(was.locations, put, deleted);
+    const f = this.mergedFile(planetId, await this.loadPackPlaces(planetId), rows);
+    this.pois.set(planetId, Promise.resolve(f));
+    this.refreshCard(planetId);
+    return f;
+  }
+
+  /** A world's card's places drawn again from the merged file (a place of ours landed). */
+  private refreshCard(packId: string): void {
+    for (const p of PLANETS) {
+      if (p.id !== packId && !p.zones?.some((z) => z.pack === packId)) continue;
+      const holder = this.cards.querySelector<HTMLElement>(`.planet-card[data-id="${p.id}"] .pois`);
+      if (!holder) continue;
+      holder.textContent = '';
+      void this.fillPois(p, holder);
+    }
   }
 
   /**

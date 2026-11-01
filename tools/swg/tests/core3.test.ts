@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findCalls, parseLuaValue, readLua, LuaCall } from '../lua.mjs';
-import { flagWords, frameCheck, heightCheck, intoRoom, joinCatalogue, readConversations, readConversationSpeakers, readCorvette, readCreatures, readDressGroups, readLairs, readRegions, readSpawnGroups, readStatics, readWeaponGroups, settleStatics, staticsOfFile, CORE3_WORLDS, STATIC_TUNE } from '../core3.mjs';
+import { flagWords, frameCheck, heightCheck, intoRoom, joinCatalogue, readConversations, readConversationSpeakers, readCorvette, readCreatures, readDressGroups, readLairs, readMapCategories, readRegions, readSpawnGroups, readStatics, readWeaponGroups, settleStatics, staticsOfFile, CORE3_WORLDS, STATIC_TUNE } from '../core3.mjs';
 import { core3Source } from '../core3ref.mjs';
 
 let passed = 0;
@@ -383,8 +383,15 @@ type Row = { key: string; who: string | null; x: number; y: number; z: number; h
       '  {"ring", 100, 100, {RING, 50, 80}, SPAWNAREA + NOWORLDSPAWNAREA, {"g"}, 32},',
       '  {"keepout", 0, 0, {CIRCLE, 40}, NOSPAWNAREA},',
       '  {"@places:everywhere", 0, 0, {RECTANGLE, 0, 0}, WORLDSPAWNAREA + SPAWNAREA, {"world_group"}, 2048},',
+      '  {"town_nobuild", 300, -200, {CIRCLE, 120}, NOBUILDZONEAREA + NAMEDREGION},',
+      '  {"edge_nobuild", -500, -500, {RECTANGLE, -400, 500}, NOBUILDZONEAREA},',
+      '  {"hoop_nobuild", 700, 700, {RING, 20, 60}, NOBUILDZONEAREA + NOSPAWNAREA},',
       '}',
     ].join('\n'));
+    // The server's planetary map categories, on server templates beside the client's shared ones.
+    put('object/building/tatooine/cantina_test.lua', 'object_building_tatooine_cantina_test = object_building_tatooine_shared_cantina_test:new {\n  planetMapCategory = "cantina",\n}\n');
+    put('object/tangible/terminal/terminal_test_bank.lua', 'object_tangible_terminal_terminal_test_bank = x:new {\n  planetMapCategory = "terminal",\n  planetMapSubCategory = "terminal_bank",\n}\n');
+    put('object/tangible/furniture/chair_test.lua', 'object_tangible_furniture_chair_test = x:new {\n  gameObjectType = 8,\n}\n');
     const groups = readDressGroups(dir);
     ok(groups.get('crowd')?.length === 2, 'a dress group is read under the name it registers itself with');
     ok(readWeaponGroups(dir).get('sticks')?.[0] === 'object/weapon/melee/polearm/staff_x.iff', 'and so is a weapon group');
@@ -398,6 +405,17 @@ type Row = { key: string; who: string | null; x: number; y: number; z: number; h
     const reg = readRegions(dir).get('tatooine') as { spawn: { name: string; world?: boolean }[]; noSpawn: { name: string; world?: boolean }[] };
     ok(reg.spawn.find((a) => a.name === 'everywhere')?.world === true && !reg.spawn.find((a) => a.name === 'ring')?.world, 'the world-wide spawn area says it is one');
     ok(reg.noSpawn.find((a) => a.name === 'ring')?.world === true && !reg.noSpawn.find((a) => a.name === 'keepout')?.world, 'and a place that keeps out only the world-wide spawner is told apart from one that keeps out everything');
+    // The areas kept clear of players' building (Map-maker II's eighth wave): every row flagged NOBUILDZONEAREA, by its own
+    // shape, whatever else it is flagged, and no other.
+    const nb = (readRegions(dir).get('tatooine') as { noBuild: { name: string; shape: string; x: number; z: number; r?: number; x2?: number; z2?: number; inner?: number }[] }).noBuild;
+    ok(nb.length === 3 && nb.map((n) => n.name).join() === 'town_nobuild,edge_nobuild,hoop_nobuild', `the rows flagged NOBUILDZONEAREA are kept as no-build areas and no other (${nb.map((n) => n.name).join(', ')})`);
+    ok(nb[0].shape === 'circle' && nb[0].x === 300 && nb[0].z === -200 && nb[0].r === 120, 'a circle by its middle and radius (the row\'s y its z)');
+    ok(nb[1].shape === 'rect' && nb[1].x === -500 && nb[1].z === -500 && nb[1].x2 === -400 && nb[1].z2 === 500 && nb[2].shape === 'ring' && nb[2].inner === 20 && nb[2].r === 60, 'a rectangle by its corners and a ring by its two radii');
+    // The planetary map's categories, keyed by the client's shared template.
+    const cats = readMapCategories(dir) as Map<string, { cat: string; sub?: string }>;
+    ok(cats.size === 2 && cats.get('object/building/tatooine/shared_cantina_test.iff')?.cat === 'cantina' && cats.get('object/building/tatooine/shared_cantina_test.iff')?.sub === undefined, "a server template's planetMapCategory, keyed by the client's own shared template beside it");
+    ok(cats.get('object/tangible/terminal/shared_terminal_test_bank.iff')?.cat === 'terminal' && cats.get('object/tangible/terminal/shared_terminal_test_bank.iff')?.sub === 'terminal_bank', 'its subcategory beside it where it has one');
+    ok(!cats.has('object/tangible/furniture/shared_chair_test.iff'), 'and a template with no category is none');
 
     // The join through a dress group.
     const creatures = new Map<string, { who: string; template: string; templates: string[] }>([['commoner', { who: 'commoner', template: 'crowd', templates: ['crowd'] }]]);

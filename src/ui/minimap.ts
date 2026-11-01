@@ -34,6 +34,18 @@ import { COL, colourOf, type PaletteName } from '../core/palette.ts';
 import { CITY_TUNE } from '../story/cities.ts';
 import { HUD_SIZES, angleOf } from './hudMath.ts';
 import { mapShareX, mapShareY, type MapFrame, type WaypointList } from './spaceMapLayers.ts';
+import { SERVICE_TUNE, drawServiceMark, serviceColour, serviceLayerOf } from './serviceMarks.ts';
+import { PLACE_TUNE } from '../world/places.ts';
+import type { LocationShape } from '../world/editFiles/locationsFile.ts';
+
+/**
+ * What the minimap draws of a world's places (Map-maker II's eighth wave), in the map's own frame: the outline of each city
+ * of ours (its shape; `bad` where players may not build in it), and the game's own services the switches leave on.
+ */
+export interface MinimapPlaces {
+  outlines: { shape: LocationShape; bad: boolean }[];
+  services: { kind: string; x: number; z: number }[];
+}
 
 /**
  * The minimap's numbers. Every one is ours, and every one is live through `__debug.minimap({ tune })`.
@@ -327,6 +339,17 @@ export class Minimap {
     this.version++;
   }
 
+  /** The places changed (a world arrived, a place of ours landed, a services switch moved): drawn again with these, or none. */
+  setPlaces(p: MinimapPlaces | null): void {
+    this.places = p;
+    this.version++;
+  }
+
+  /** The places it draws (`setPlaces`), and how many of their marks the last drawing drew, for the console. */
+  private places: MinimapPlaces | null = null;
+  outlinesDrawn = 0;
+  servicesDrawn = 0;
+
   /** Forget the last drawing, so the next frame draws it (a new world, a tune moved). */
   redraw(): void {
     this.clock.reset();
@@ -488,6 +511,8 @@ export class Minimap {
     const sh = Math.min(ih, uy + reach) - sy;
     if (sw > 0 && sh > 0) c.drawImage(pic.image, sx, sy, sw, sh, (sx - ux) * pxPerImage, (sy - uy) * pxPerImage, sw * pxPerImage, sh * pxPerImage);
     c.restore();
+    // The places (Map-maker II's eighth wave): each city of ours's outline and the game's own services, inside the circle.
+    this.drawPlaces(c, v, k, turn, half, rim);
     // The rim.
     c.beginPath();
     c.arc(half, half, rim, 0, Math.PI * 2);
@@ -555,6 +580,62 @@ export class Minimap {
     c.stroke();
     c.fillStyle = colourOf(COL.ink);
     c.fill();
+    c.restore();
+  }
+
+  /**
+   * A city of ours's outline (in `accent`, or `bad` where players may not build in it) and the services the switches leave
+   * on, clipped to the circle: a point in the map's frame through `minimapPoint` with no rim, so an outline runs off the edge
+   * rather than bunching on it, and a service past the rim is left out rather than clamped. Each outline is a path of its own
+   * points (a rectangle's four corners, a circle as an arc).
+   */
+  private drawPlaces(c: CanvasRenderingContext2D, v: MinimapView, k: number, turn: number, half: number, rim: number): void {
+    this.outlinesDrawn = 0;
+    this.servicesDrawn = 0;
+    const pl = this.places;
+    if (!pl || (!pl.outlines.length && !pl.services.length)) return;
+    c.save();
+    c.beginPath();
+    c.arc(half, half, rim, 0, Math.PI * 2);
+    c.clip();
+    const pt = this.pt;
+    c.lineWidth = PLACE_TUNE.outlinePx * this.scale;
+    for (const o of pl.outlines) {
+      const s = o.shape;
+      c.beginPath();
+      if (s.kind === 'circle') {
+        minimapPoint(s.c[0] - v.x, s.c[1] - v.z, k, turn, Infinity, pt);
+        c.arc(half + pt.x, half + pt.y, s.r * k, 0, Math.PI * 2);
+      } else {
+        const n = s.kind === 'rect' ? 4 : s.pts.length;
+        for (let i = 0; i < n; i++) {
+          const px = s.kind === 'rect' ? (i === 0 || i === 3 ? s.min[0] : s.max[0]) : s.pts[i][0];
+          const pz = s.kind === 'rect' ? (i < 2 ? s.min[1] : s.max[1]) : s.pts[i][1];
+          minimapPoint(px - v.x, pz - v.z, k, turn, Infinity, pt);
+          if (i === 0) c.moveTo(half + pt.x, half + pt.y);
+          else c.lineTo(half + pt.x, half + pt.y);
+        }
+        c.closePath();
+      }
+      c.strokeStyle = colourOf(COL.void);
+      c.lineWidth = (PLACE_TUNE.outlinePx + 1.5) * this.scale;
+      c.stroke();
+      c.strokeStyle = colourOf(o.bad ? COL.bad : COL.accent);
+      c.lineWidth = PLACE_TUNE.outlinePx * this.scale;
+      c.stroke();
+      this.outlinesDrawn++;
+    }
+    if (SERVICE_TUNE.minimap && (SERVICE_TUNE.services || SERVICE_TUNE.terminals)) {
+      const shade = colourOf(COL.void);
+      const markHalf = SERVICE_TUNE.minimapPx * this.scale;
+      for (const s of pl.services) {
+        if (!SERVICE_TUNE[serviceLayerOf(s.kind)]) continue;
+        minimapPoint(s.x - v.x, s.z - v.z, k, turn, Infinity, pt);
+        if (pt.x * pt.x + pt.y * pt.y > rim * rim) continue;
+        drawServiceMark(c, s.kind, half + pt.x, half + pt.y, markHalf, colourOf(COL[serviceColour(s.kind)]), shade);
+        this.servicesDrawn++;
+      }
+    }
     c.restore();
   }
 

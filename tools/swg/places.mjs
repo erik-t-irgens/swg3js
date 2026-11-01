@@ -462,3 +462,65 @@ export function portLabel(x, z, places, label) {
   if (near) return { name: `${near.name} ${label}`, from: 'place' };
   return { name: `${label} (${x.toFixed(0)}, ${z.toFixed(0)})`, from: 'nowhere' };
 }
+
+// ---- The game's own services and no-build data (Map-maker II's eighth wave) ----
+//
+// Both are written into `pois.json` as lists of their own beside `pois` (`services`, `noBuild`), never into it: every reader
+// of the places list (the city line, the ports, the death card's facilities, the errands, the galaxy's chips) then reads
+// exactly what it read, in a build before this wave and after it.
+
+/**
+ * What a service is to the map, from the category the server's planetary map listed its template under (`readMapCategories`):
+ * its Core3 category (`cantina`, `bank`, `medicalcenter`, `guild`, `terminal`...), the subcategory's terminal kind, a cloning
+ * category on a thing that is not a building told apart as a Force shrine (the server files the shrines under cloning), and
+ * the ports left out (they are the place list's own rows already). Null for none.
+ */
+export function serviceKindOf(cat, sub, template) {
+  if (!cat || cat === 'starport' || cat === 'shuttleport') return null;
+  if (cat === 'terminal') return sub === 'terminal_bank' || sub === 'terminal_bazaar' || sub === 'terminal_mission' ? sub : 'terminal';
+  if (cat === 'cloningfacility') return /^object\/building\//.test(template) ? 'cloningfacility' : 'shrine';
+  return cat;
+}
+
+/**
+ * A world's services: every top-level thing (`objects`: `{ template, x, z, state? }`, the snapshot's raw frame) whose template
+ * the server's map listed (`categories`, a Map of shared template to `{ cat, sub? }`), `{ kind, cat, sub?, x, z, state? }`,
+ * the place to a centimetre; one building placed twice on one spot (a snapshot and a buildout both carrying it) is one.
+ */
+export function servicesOf(objects, categories) {
+  const out = [];
+  if (!categories) return out;
+  for (const o of objects) {
+    const c = categories.get(o.template);
+    if (!c) continue;
+    const kind = serviceKindOf(c.cat, c.sub, o.template);
+    if (!kind) continue;
+    const x = Math.round(o.x * 100) / 100;
+    const z = Math.round(o.z * 100) / 100;
+    if (out.some((s) => s.kind === kind && Math.abs(s.x - x) < 1 && Math.abs(s.z - z) < 1)) continue;
+    out.push({ kind, cat: c.cat, ...(c.sub ? { sub: c.sub } : {}), x, z, ...(o.state ? { state: o.state } : {}) });
+  }
+  return out;
+}
+
+/**
+ * The game's own no-build data for one world, in the raw frame: Core3's no-build areas (`regions`, its region rows flagged
+ * `NOBUILDZONEAREA`, each `{ name, shape, x, z, r?, x2?, z2?, inner? }` as `readRegions` keeps them) as `{ from: 'region',
+ * name, shape, ... }`, and the client's own no-build radius round every top-level thing whose template sets one
+ * (`radiusOf(template)`, the template chain's `noBuildRadius`, null or nought for none) as `{ from: 'radius', x, z, r, t }`.
+ */
+export function noBuildOf(objects, regions, radiusOf) {
+  const out = [];
+  const cm = (v) => Math.round(v * 100) / 100;
+  for (const r of regions ?? []) {
+    if (r.shape === 'rect') out.push({ from: 'region', name: r.name, shape: 'rect', x: cm(r.x), z: cm(r.z), x2: cm(r.x2), z2: cm(r.z2) });
+    else if (r.shape === 'ring') out.push({ from: 'region', name: r.name, shape: 'ring', x: cm(r.x), z: cm(r.z), r: cm(r.r), inner: cm(r.inner) });
+    else if (r.shape === 'circle') out.push({ from: 'region', name: r.name, shape: 'circle', x: cm(r.x), z: cm(r.z), r: cm(r.r) });
+  }
+  for (const o of objects) {
+    const r = radiusOf(o.template);
+    if (!(r > 0)) continue;
+    out.push({ from: 'radius', x: cm(o.x), z: cm(o.z), r: cm(r), t: o.template, ...(o.state ? { state: o.state } : {}) });
+  }
+  return out;
+}

@@ -36,6 +36,12 @@ export class LoadingScreen {
   private shownAt = 0;
   private hiding = false;
   /**
+   * The wall-clock moment the screen came up (Map-maker II's eighth wave): the loading line is drawn by it, so a line asked
+   * again as the destination becomes known (a travel's place, then the spawn worked out once the world is in) is drawn from
+   * the same moment and does not flicker between a place's lines.
+   */
+  lineMoment = 0;
+  /**
    * Told of every change the screen makes, with the page's own time: what the last trip's record is kept
    * from (`LoadingLog`, `__debug.loading()`). Nothing by default.
    */
@@ -88,8 +94,12 @@ export class LoadingScreen {
 
   /** Show the screen for a planet (or none: a starfield), with a title and what is being waited for. */
   show(planet: PlanetDef | null, title: string, what: string): void {
-    // A screen already up and covering stays covering; one coming up fades in from here.
-    if (!this.visible || this.hiding) this.shownAt = performance.now();
+    // A screen already up and covering stays covering; one coming up fades in from here, and draws its loading line by this
+    // moment however many times the line is asked again as the destination becomes known.
+    if (!this.visible || this.hiding) {
+      this.shownAt = performance.now();
+      this.lineMoment = Date.now();
+    }
     this.visible = true;
     this.hiding = false;
     this.target = 0;
@@ -120,6 +130,24 @@ export class LoadingScreen {
   }
 
   private planet: PlanetDef | null = null;
+
+  /**
+   * The line under the picture (Map-maker II's eighth wave: a place of ours's loading line, written once the destination's
+   * file is read), in place of the planet's description `show` wrote. Written only when it differs.
+   */
+  setBlurb(text: string): void {
+    if (this.blurb.textContent !== text) this.blurb.textContent = text;
+  }
+
+  /** The line under the picture as it stands, for the console. */
+  get blurbShown(): string {
+    return this.blurb.textContent ?? '';
+  }
+
+  /** Whether the screen is up for a planet (by its id): a line worked out for a trip since overtaken is not written. */
+  showingPlanet(id: string): boolean {
+    return this.visible && !this.hiding && this.planetId === id;
+  }
 
   /** What the wait is on now, under the title. */
   setWhat(what: string): void {

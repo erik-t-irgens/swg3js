@@ -119,6 +119,11 @@ export interface MarksView {
   lakeVis: Uint8Array;
   lakeHandles: Float64Array;
   lakeHandleVis: Uint8Array;
+  /**
+   * The places tool's (Map-maker II's eighth wave) outlines ride the lakes' pools: an outline marked here (1) is a place
+   * players may not build in, drawn in `bad` unless it is the picked one. The water tool writes nought.
+   */
+  lakeBad: Uint8Array;
   /** A draft under way (a lake's clicked points, a fall's top), an open line ending at the aim, in `warn`. */
   draftOn: boolean;
   draftCount: number;
@@ -146,6 +151,7 @@ export function lakePools(v: MarksView, lakes: number, points: number, draft: nu
     v.lakeSpans = new Int32Array(lakes * 2);
     v.lakeHandles = new Float64Array(lakes * 4);
     v.lakeHandleVis = new Uint8Array(lakes * 2);
+    v.lakeBad = new Uint8Array(lakes * 2);
   }
   if (v.lakeVis.length < points) {
     v.lakePts = new Float64Array(points * 4);
@@ -197,6 +203,7 @@ export function marksView(): MarksView {
     lakeVis: new Uint8Array(0),
     lakeHandles: new Float64Array(0),
     lakeHandleVis: new Uint8Array(0),
+    lakeBad: new Uint8Array(0),
     draftOn: false,
     draftCount: 0,
     draftPts: new Float64Array(0),
@@ -250,7 +257,7 @@ function drawLakes(o: MarksOverlay, v: MarksView): void {
     let k = 0;
     for (let l = 0; l < v.lakeCount; l++) {
       const n = v.lakeSpans[l];
-      const c = l === v.lakePicked ? COL.ink : COL.accent;
+      const c = l === v.lakePicked ? COL.ink : v.lakeBad[l] ? COL.bad : COL.accent;
       const pts = v.lakePts;
       const vis = v.lakeVis;
       for (let i = 0; i < n; i++) {

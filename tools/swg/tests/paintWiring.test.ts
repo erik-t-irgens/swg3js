@@ -114,7 +114,7 @@ ok(/this\.tools\.disarmAll\(\);\s*\/\/[^\n]*\n\s*if \(this\.washTimer\) clearTim
 
 // main.ts.
 ok(/this\.world\.paintSource = \(pack, kind\) => this\.fetchPaint\(pack, kind\);/.test(main), "the world is handed the paint file's source");
-ok(/if \(kind === 'paint'\) return \(pack, rev\) => void this\.reloadPaint\(pack, rev\);/.test(main), "the dev server's word about the paint file reads it again");
+ok(/if \(kind === 'paint'\) return \(pack, rev\) => \(this\.madeMapEdit\(\), void this\.reloadPaint\(pack, rev\)\);/.test(main), "the dev server's word about the paint file reads it again");
 ok(/this\.world\.landPaint\(pf\.put as PaintRow\[\], pf\.deleted\)/.test(main), "a batch's answer lands the paint's rows by difference");
 ok(/const dem = this\.world\.demGroundPending;/.test(main), "the loading screen waits for a textured raster's ground");
 

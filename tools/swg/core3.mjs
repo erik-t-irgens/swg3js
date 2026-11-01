@@ -211,6 +211,10 @@ export function readRegions(scripts) {
     const spawn = [];
     const noSpawn = [];
     const named = [];
+    // The areas the server kept players from building in (`NOBUILDZONEAREA`): its dungeons, points of interest, towns and
+    // each world's edge band. Read for the places' no-build verdict (Map-maker II's eighth wave, the `pois` command's
+    // `noBuild`); nothing else reads them.
+    const noBuild = [];
     for (const r of rows) {
       if (!Array.isArray(r) || typeof r[0] !== 'string' || typeof r[1] !== 'number' || typeof r[2] !== 'number') continue;
       const shape = shapeOf(r[1], r[2], r[3]);
@@ -224,13 +228,41 @@ export function readRegions(scripts) {
       // nothing at all may stand; one that keeps out everything is written as it always was.
       if (tier.includes('NOSPAWNAREA')) noSpawn.push(row);
       else if (tier.includes('NOWORLDSPAWNAREA')) noSpawn.push({ ...row, world: true });
+      if (tier.includes('NOBUILDZONEAREA')) noBuild.push(row);
       if (tier.includes('SPAWNAREA') && Array.isArray(r[5])) {
         const groups = r[5].filter((g) => typeof g === 'string');
         // The world-wide area, one a world, is its fallback: `world` says which it is.
         if (groups.length) spawn.push({ ...row, groups, cap: typeof r[6] === 'number' ? r[6] : 0, ...(tier.includes('WORLDSPAWNAREA') ? { world: true } : {}) });
       }
     }
-    out.set(world, { spawn, noSpawn, named });
+    out.set(world, { spawn, noSpawn, named, noBuild });
+  }
+  return out;
+}
+
+/**
+ * Every object template the server listed on its planetary map, by the client's own shared template (`object/.../shared_
+ * <name>.iff`) and the category the server gave it (`planetMapCategory`, `planetMapSubCategory` where it has one): the
+ * cantinas, banks, cloning facilities, medical centres, hotels, garages, capitols, guild halls, salons, theatres and taverns,
+ * the Force shrines (filed by the server under cloning), the bank, bazaar and mission terminals, and the ports. Names and
+ * categories only. The map's services layer (Map-maker II's eighth wave, the `pois` command's `services`) is this joined to a
+ * world's layout; one function reads it, so a later source of the same categories is a change of reader and not of the map.
+ *
+ * A server template is `object/<path>/<name>.lua` beside the client's `object/<path>/shared_<name>.iff`, its first
+ * `planetMapCategory = "<word>"` the category.
+ */
+export function readMapCategories(scripts) {
+  const root = join(scripts, 'object');
+  const out = new Map();
+  for (const file of luaFiles(root).sort()) {
+    const text = readFileSync(file, 'utf8');
+    const cat = text.match(/planetMapCategory\s*=\s*"(\w+)"/);
+    if (!cat) continue;
+    const sub = text.match(/planetMapSubCategory\s*=\s*"(\w+)"/);
+    const rel = file.slice(root.length + 1).replace(/\\/g, '/').replace(/\.lua$/, '');
+    const parts = rel.split('/');
+    parts[parts.length - 1] = `shared_${parts[parts.length - 1]}.iff`;
+    out.set(`object/${parts.join('/')}`, sub ? { cat: cat[1], sub: sub[1] } : { cat: cat[1] });
   }
   return out;
 }

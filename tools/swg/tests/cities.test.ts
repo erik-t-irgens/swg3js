@@ -127,4 +127,70 @@ const city = (name: string, x: number, z: number, r: number): CityRow => ({ name
   }
 }
 
+// ---------------------------------------------------------------------------------------------------
+// A place of ours (Map-maker II's eighth wave): said by its own `say`, whatever its kind and reach, and in by its own shape.
+{
+  const { inPlaceShape } = await import('../../../src/story/cities.ts');
+  const ring: CityRow = { name: 'Ring', x: 0, z: 0, r: 30, kind: 'place', say: true, shape: { kind: 'circle', c: [0, 0], r: 30 } };
+  const quiet: CityRow = { name: 'Quiet', x: 0, z: 0, r: 900, kind: 'city', say: false, shape: { kind: 'circle', c: [0, 0], r: 900 } };
+  ok(isCity(ring) && !isCity(quiet), "a place of ours is said by its own say: a 30 m place that says it is, a 900 m city that says it is not, isn't");
+  // An L-shaped outline: its middle (by its reach) is outside it, so only the shape can say where it is.
+  const ell: CityRow = { name: 'Ell', x: 50, z: 50, r: 71, kind: 'city', say: true, shape: { kind: 'poly', pts: [[0, 0], [100, 0], [100, 20], [20, 20], [20, 100], [0, 100]] } };
+  ok(cityAt([ell], 10, 90)?.name === 'Ell' && cityAt([ell], 90, 10)?.name === 'Ell', 'an outline holds a point in either of its arms');
+  ok(cityAt([ell], 60, 60) === null, 'and not one in its notch, though the notch is within its reach of its middle');
+  ok(inPlaceShape(ell.shape!, 60, 25, 6) && !inPlaceShape(ell.shape!, 60, 25, 4), 'grown, an outline takes a point within the margin of an edge, and no further');
+  const rect: CityRow = { name: 'Box', x: 0, z: 0, r: 70, kind: 'area', say: true, shape: { kind: 'rect', min: [-50, -20], max: [50, 20] } };
+  ok(cityAt([rect], 45, 15)?.name === 'Box' && cityAt([rect], 0, 30) === null, 'a rectangle by its sides');
+  const w = new CityWatch();
+  ok(w.step([ell], 10, 90, 0) === 'Ell', 'walking into an outline says its name');
+  ok(w.step([ell], 60, 23, 1) === null && w.here === 'Ell', 'a step into its notch, within the margin of its edge, is still in');
+  ok(w.step([ell], 60, 60, 1.5) === null && w.here === '', 'and deep in the notch is out, though within its reach of its middle');
+  ok(w.step([ell], 300, 300, 2) === null && w.here === '', 'and far out is out');
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Day one: a pack's own rows, which carry neither `say` nor `shape`, are read by today's watch exactly as by the one before
+// the wave (fc246b4's, out of git): every step of a walk through overlapping cities says the same and is in the same city.
+// The walk's trace (what each step said, where it was, which city holds it) hashes to the one recorded from fc246b4, which is
+// what holds where git cannot hand the old code over.
+{
+  const { createHash } = await import('node:crypto');
+  const sha = (t: string) => createHash('sha1').update(t).digest('hex').slice(0, 16);
+  const PRE_WAVE_WALK = '84df8bdbacefa0ed';
+  const { loadOld } = await import('./oldModules.ts');
+  const old = await loadOld<typeof import('../../../src/story/cities.ts')>(['src/story/cities.ts'], 'src/story/cities.ts', 'fc246b4');
+  const rows: CityRow[] = [city('A', 0, 0, 400), city('B', 500, 100, 300), city('C', -300, 700, 200), { name: 'L', x: 900, z: 900, r: 600, kind: 'landmark' }];
+  const now = new CityWatch();
+  const was = old ? new old.CityWatch() : null;
+  let s = 12345;
+  const rnd = () => ((s = (s * 1103515245 + 12345) >>> 0) / 2 ** 32);
+  let x = -800;
+  let z = -800;
+  let same = 0;
+  let diff = 0;
+  const traceNow: string[] = [];
+  const traceThen: string[] = [];
+  for (let i = 0; i < 20000; i++) {
+    x += (rnd() - 0.45) * 40;
+    z += (rnd() - 0.45) * 40;
+    if (x > 1600) x = -800;
+    if (z > 1600) z = -800;
+    const a = now.step(rows, x, z, i * 0.5);
+    traceNow.push(`${a ?? ''}|${now.here}|${cityAt(rows, x, z)?.name ?? ''}`);
+    if (old && was) {
+      const b = was.step(rows, x, z, i * 0.5);
+      traceThen.push(`${b ?? ''}|${was.here}|${old.cityAt(rows, x, z)?.name ?? ''}`);
+      if (a === b && now.here === was.here && cityAt(rows, x, z) === old.cityAt(rows, x, z)) same++;
+      else diff++;
+    }
+  }
+  const hashNow = sha(traceNow.join('\n'));
+  if (!old) ok(hashNow === PRE_WAVE_WALK, `git cannot hand fc246b4 over: a walk of 20000 steps through a pack's own cities hashes to the walk recorded from its watch (${hashNow})`);
+  else {
+    ok(diff === 0, `a walk of 20000 steps through a pack's own cities says and holds exactly what fc246b4's watch does (${same} steps alike)`);
+    const hashThen = sha(traceThen.join('\n'));
+    ok(hashThen === PRE_WAVE_WALK && hashNow === PRE_WAVE_WALK, `and fc246b4's walk is the one recorded here for a machine where git cannot hand it over (${hashThen})`);
+  }
+}
+
 console.log(`\n${checks} checks passed`);

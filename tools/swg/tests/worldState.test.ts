@@ -385,7 +385,7 @@ function arriveAs(value: 'living' | 'ruins'): void {
   pin(main, /const ruins = this\.world\.restussRuinsHere\(\);\s*for \(const \[i, f\] of all\.entries\(\)\) \{[\s\S]{0,200}?if \(fittingDormant\(f, standsIn, ruins\)\) continue;/, 'the fittings of the other state, and what the server stood in the streets in the ruins, are skipped when standing and never taken off their list');
   pin(main, /travelThingsOf\(inState\(this\.travelRows\), c\)/, "only the travel things of the state the world stands in stand");
   pin(main, /this\.placeRowsIn = \{ rows: this\.placeRows, stamp, list: inState\(this\.placeRows\) \}/, 'only the places and ports of that state are named');
-  pin(main, /void this\.poisRawOf\(placesFor\)/, 'read from the file whole, every state, and filtered as they are asked');
+  pin(main, /void this\.placesFileOf\(placesFor\)/, 'read from the file whole, every state, and filtered as they are asked');
   pin(main, /farPadsOf\(fileInState\(travel\), fileInState\(pois, 'pois'\)\)/, "another world's pads are those of the state it would stand in");
   pin(main, /private heardWorldStates\([\s\S]{0,400}?setServerStates\(states\);/, "the server's word, as the line hears it, is the world's");
   pin(main, /const hail = await peekHail\(saved, WORLD_STATE_TUNE\.waitMs\);[\s\S]{0,200}?if \(hail\) setServerStates\(cleanStates\(hail\.states\)\);/, "and so is what a session's first arrival reads off a look at the saved server's hail");

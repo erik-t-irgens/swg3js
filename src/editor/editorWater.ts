@@ -992,6 +992,7 @@ export class EditorWater {
       const ys = o.ys;
       if (isPicked) m.lakePicked = l;
       m.lakeSpans[l] = o.n;
+      m.lakeBad[l] = 0;
       for (let i = 0; i < o.n; i++) {
         const vis = projectPoint(o.pts[i * 2] + ox, ys !== null ? ys[i] + up : y, o.pts[i * 2 + 1] + oz, vp, w, h, this.pt);
         m.lakeVis[k + i] = vis ? 1 : 0;

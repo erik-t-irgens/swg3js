@@ -904,6 +904,173 @@ if (process.argv.includes('water')) {
   console.log(JSON.stringify({ frames: WATER_FRAMES, made: steady.made, scavenges: steady.scavenges, raiseMade: raise.made, raiseScavenges: raise.scavenges, dragMade: drag.made, dragScavenges: drag.scavenges, draftMade: draft.made, draftScavenges: draft.scavenges, lakes: shownLakes, raising, dragging, hot, draftPoints, draftDrawn: wm.draftCount, gizmo: L.on }));
   process.exit(0);
 }
+// With `places` (`placesAlloc.test.ts`, Map-maker II's eighth wave): the places tool armed with three places drawn (a circle,
+// a rectangle and an outline, one of them no-build) and one picked, the aim wandering -- the Tools list's frame handed to the
+// tool and its overlay (the outlines projected at their ground, the picked one's square laid out and picked, the rings) and
+// the marks drawn; then the picked place's square dragged; then an outline of three clicks under way, drawn with the aim; and
+// the places' index asked as a ghost asks every frame (`noBuildAt` and `placeAt` over a hundred zones).
+if (process.argv.includes('places')) {
+  const { EditorPlaces, placesTool } = await import('../../../src/editor/editorPlaces.ts');
+  const { tunePlacesTool, PLACES_TOOL_TUNE_DEFAULTS } = await import('../../../src/editor/editorTune.ts');
+  const { toolFrame } = await import('../../../src/editor/tools.ts');
+  const { PlaceIndex } = await import('../../../src/world/places.ts');
+  type Row = import('../../../src/world/editFiles/locationsFile.ts').LocationRow;
+  const rows: Row[] = [
+    { id: 'ring', kind: 'city', name: 'Ring', shape: { kind: 'circle', c: [-10, -40], r: 25 }, build: false },
+    { id: 'box', kind: 'area', shape: { kind: 'rect', min: [20, -60], max: [60, -20] } },
+    { id: 'ell', kind: 'zone', shape: { kind: 'poly', pts: [[-60, 0], [-20, 0], [-20, 10], [-50, 10], [-50, 40], [-60, 40]] } },
+  ];
+  const pm = marksView();
+  tunePlacesTool({ ...PLACES_TOOL_TUNE_DEFAULTS, mode: 'outline' });
+  const places = new EditorPlaces({
+    // A write's stand-in: a let-go between windows writes, and nothing it writes moves the places.
+    edits: { beginStroke: (label: string) => ({ label }), strokeWrite: async () => null, endStroke: () => '' } as never,
+    worldKind: () => 'ground',
+    rows: () => rows,
+    toRaw: (x, z, out) => {
+      out.x = -x;
+      out.z = z;
+    },
+    toGame: (x, z, out) => {
+      out.x = -x;
+      out.z = z;
+    },
+    groundAt: () => 0.5,
+    groundCached: (_x, _z, out) => {
+      out.y = 0.5;
+      return true;
+    },
+    say() {},
+  });
+  await places.arm();
+  places.picked = 'box';
+  const tool = placesTool(places);
+  const f = toolFrame();
+  const draw = { marks: pm, radius: 0.5, ring(): void {} };
+  const index = new PlaceIndex().build({ rows: [...rows, ...Array.from({ length: 100 }, (_, i) => ({ id: `z${i}`, kind: 'zone' as const, build: false, shape: { kind: 'circle' as const, c: [i * 30 - 1500, (i % 7) * 40] as [number, number], r: 12 } }))], centre: { x: 0, z: 0 } });
+  const NOINDEX = process.argv.includes('noindex');
+  const st = new Float64Array(6);
+  const placesFrame = (): void => {
+    st[1]++;
+    st[0] = st[1] * 0.01;
+    const held = st[2];
+    f.apply = held === 2 || held === 3;
+    f.inverse = false;
+    f.shift = false;
+    f.sampled = false;
+    f.x = Math.sin(st[0]) * 30;
+    f.y = 0.5;
+    f.z = -40 + Math.cos(st[0]) * 10;
+    f.valid = true;
+    f.dt = 1 / 60;
+    f.now = st[0];
+    f.sx = st[3] + Math.sin(st[0] * 3) * 6;
+    f.sy = st[4] + Math.sin(st[0] * 2) * 4;
+    f.dy = 0;
+    f.lift = false;
+    tool.step(f);
+    tool.overlay!(draw as never, view);
+    drawEditorMarks(overlay, pm);
+    // What a ghost asks every frame, through the index's own kept ask (a number handed across a call is boxed).
+    if (!NOINDEX) {
+      const q = index.ask;
+      q.x = f.x;
+      q.z = f.z;
+      q.r = 6;
+      if (index.noBuildAsked()) st[5]++;
+      q.r = 0;
+      if (index.placeAsked()) st[5]++;
+    }
+  };
+  const placesFrames = (n: number): void => {
+    for (let i = 0; i < n; i++) placesFrame();
+  };
+  const PLACES_FRAMES = 4 * FRAMES;
+  try {
+    new Function('f', '%NeverOptimizeFunction(f)')(placesFrames);
+  } catch {
+    // Without the flag the loop is left to the compiler.
+  }
+  const measure = async (): Promise<{ made: number; scavenges: number }> => {
+    placesFrames(20_000);
+    let best = { made: Infinity, scavenges: Infinity };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      placesFrames(10_000);
+      gc({ type: 'minor' });
+      await settle();
+      scavenges = 0;
+      const before = young();
+      placesFrames(PLACES_FRAMES);
+      const made = young() - before;
+      await settle();
+      if (scavenges < best.scavenges || (scavenges === best.scavenges && made < best.made)) best = { made, scavenges };
+      if (best.scavenges === 0 && best.made <= 0) break;
+    }
+    return best;
+  };
+  st[2] = 0;
+  st[3] = 800;
+  st[4] = 450;
+  placesFrame();
+  const L = (places as unknown as { layout: { on: boolean; square: Float64Array; hot: number } }).layout;
+  if (process.argv.includes('profile')) {
+    // Where the frame makes anything, by the sampling heap profiler: `node --expose-gc --allow-natives-syntax
+    // tools/swg/tests/editorAllocOwn.ts places profile`.
+    placesFrames(20_000);
+    const { Session } = await import('node:inspector/promises');
+    const session = new Session();
+    session.connect();
+    await session.post('HeapProfiler.startSampling', { samplingInterval: 32, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
+    placesFrames(50_000);
+    interface SampleNode {
+      callFrame: { functionName: string; url: string; lineNumber: number };
+      selfSize: number;
+      children: SampleNode[];
+    }
+    const { profile } = (await session.post('HeapProfiler.stopSampling')) as unknown as { profile: { head: SampleNode } };
+    const sites = new Map<string, number>();
+    const walk = (n: SampleNode, path: string) => {
+      const here = `${n.callFrame.functionName || '(anon)'} ${n.callFrame.url.split('/').pop()}:${n.callFrame.lineNumber + 1}`;
+      if (n.selfSize > 0) sites.set(`${here}  <-  ${path}`, (sites.get(`${here}  <-  ${path}`) ?? 0) + n.selfSize);
+      for (const c of n.children) walk(c, here);
+    };
+    walk(profile.head, '');
+    for (const [key, n] of [...sites.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15)) console.log(`${(n / 50_000).toFixed(2)} B/frame  ${key}`);
+    process.exit(0);
+  }
+  const steady = await measure();
+  const shown = pm.lakeCount;
+  const bad = pm.lakeBad[0];
+  // The square grabbed at its middle and dragged.
+  placesFrame();
+  st[3] = (L.square[0] + L.square[2] + L.square[4] + L.square[6]) / 4;
+  st[4] = (L.square[1] + L.square[3] + L.square[5] + L.square[7]) / 4;
+  st[2] = 2;
+  const saveStep = st[1];
+  st[1] = -1;
+  placesFrame();
+  st[1] = saveStep;
+  const dragging = (places.report() as { dragging: boolean }).dragging;
+  const drag = await measure();
+  // The drag let go (a write, outside every window), the place let go, and three clicks of an outline away from every ring.
+  st[2] = 0;
+  placesFrame();
+  await settle();
+  places.picked = null;
+  st[3] = 300;
+  st[4] = 200;
+  for (let k = 0; k < 3; k++) {
+    st[2] = 3;
+    placesFrame();
+    st[2] = 0;
+    placesFrame();
+  }
+  const draftPoints = places.draftN;
+  const draft = await measure();
+  watch.disconnect();
+  console.log(JSON.stringify({ frames: PLACES_FRAMES, made: steady.made, scavenges: steady.scavenges, dragMade: drag.made, dragScavenges: drag.scavenges, draftMade: draft.made, draftScavenges: draft.scavenges, places: shown, bad, dragging, draftPoints, draftDrawn: pm.draftCount, asked: st[5] > 0 }));
+  process.exit(0);
+}
 // With `paint` (`paintAlloc.test.ts`, Map-maker II's second wave): the paint brush armed and hovering, no stroke under way -- the Tools list's frame handed to the tool
 // (`paintTool`'s step) and its two rings projected and drawn, the aim wandering, exactly as the sculpt brush's. With `plants`
 // as well (the fourth wave), on the plants layer: its own radius and tune, the recipe chosen.

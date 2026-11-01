@@ -211,8 +211,8 @@ function after(src: string, marker: string, n = 2000): string {
   // heights to the ground's, a kind with no layer yet dropped.
   const word = after(main, '  private placementWord(d: PlacementWord): void {', 1800);
   ok(/const reload = this\.editLayerOf\(kind\);\s*if \(!reload\) return;/.test(word), "a placement word is routed by its kind, and a kind no layer reads is dropped");
-  const layer = after(main, '  private editLayerOf(kind: string | undefined)', 600);
-  ok(/kind === 'story' \|\| kind === 'world'\) return \(pack, rev\) => void this\.reloadDressing\(pack, kind, rev\);/.test(layer) && /kind === 'heights'\) return \(pack, rev\) => void this\.reloadHeights\(pack, rev\);/.test(layer) && /return null;/.test(layer), 'the row layers read again into the permanent layer, the heights into the ground');
+  const layer = after(main, '  private editLayerOf(kind: string | undefined)', 900);
+  ok(/kind === 'story' \|\| kind === 'world'\) return \(pack, rev\) => void this\.reloadDressing\(pack, kind, rev\);/.test(layer) && /kind === 'heights'\) return \(pack, rev\) => \(this\.madeMapEdit\(\), void this\.reloadHeights\(pack, rev\)\);/.test(layer) && /return null;/.test(layer), 'the row layers read again into the permanent layer, the heights into the ground');
 }
 
 {

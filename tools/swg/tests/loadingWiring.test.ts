@@ -88,15 +88,15 @@ function method(text: string, signature: string): string {
 
 {
   const teleport = method(main, '  private async teleport(');
-  const branch = teleport.slice(0, teleport.indexOf('const c = this.world.layoutCenter;'));
+  const branch = teleport.slice(0, teleport.indexOf('const c = this.world.placeFrame;'));
   ok(/await this\.travel\(planet, zoneId, undefined, \{ at: new THREE\.Vector3\(g\.x, 0, g\.z\), label: poi\.name, ground: true, port: isPortKind\(poi\.kind\) \}\);/.test(branch), "teleport's other-world branch travels once, to the place, with ground and port");
   ok(/planet\.space \? null : await this\.poisFileOf\(packIdOf\(planet, zoneId\)\)/.test(branch), 'from the far world\'s own pois.json centre, never for space');
   ok(/\n\s*this\.poisFileOf = \(id\) => galaxy\.loadPoisFile\(id\);/.test(main), "and the far world's file is read by the galaxy map's own reader (left as the stand-in, which knows no centre, every far trip would silently be two screens again)");
-  const net = /\n(\s*)if \((!?)centreAgrees\(this\.world\.layoutCenter, centre, LOADING_TUNE\.centreSlack\)\) return;/.exec(branch);
+  const net = /\n(\s*)if \((!?)centreAgrees\(this\.world\.placeFrame, centre, LOADING_TUNE\.centreSlack\)\) return;/.exec(branch);
   ok(!!net && net[2] === '', 'with the centre checked after it, the safety net: where the centres agree the trip is done, and only where they do not does the second screen run');
   ok(/if \(this\.world\.planet\.id !== planet\.id\) return;/.test(branch) && branch.indexOf('if (this.world.planet.id !== planet.id) return;') < (net?.index ?? 0), 'and a travel that never reached the world stands nobody');
   ok(!/loadingScreen\.show/.test(branch), 'the other-world branch shows no screen of its own');
-  const fallback = teleport.slice(teleport.indexOf('const c = this.world.layoutCenter;'));
+  const fallback = teleport.slice(teleport.indexOf('const c = this.world.placeFrame;'));
   ok(/this\.loadingScreen\.show\(planet, poi\.name, `on \$\{planet\.name\}`\);/.test(fallback) && /this\.world\.jumpTo\(pos\);/.test(fallback), 'the second phase stays as it was, the fallback for no centre, a centre that disagrees and the same world');
   const travel = method(main, '  private async travel(');
   const ground = travel.indexOf('if (opts.ground) at.y = this.world.terrain.heightAt(at.x, at.z) + 0.3;');

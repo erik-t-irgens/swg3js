@@ -18,8 +18,17 @@
 //   - The same city walked into again within `repeatGap` seconds of last being in it says nothing:
 //     out of the gate and back for something forgotten is not an arrival.
 //
-// Pure: no DOM and nothing imported. What it answers is a name to show, or null; showing it, fading it
-// and how often the page is written are the minimap's business.
+// **A place of ours** (Map-maker II's eighth wave: the world's locations file, merged into the places list) says its name
+// by its own `say` rather than its kind, whatever its reach, and is in by its own shape (a circle, a rectangle or an
+// outline) rather than a reach about its middle; out is past its shape by the same share of its reach. A pack's row carries
+// neither and reads exactly as it did.
+//
+// Pure: no DOM and nothing imported (the story's folder imports only its own, `storyImports.test.ts`: a place's shape is
+// written here by itself, the locations file's own `LocationShape` to the letter). What it answers is a name to show, or
+// null; showing it, fading it and how often the page is written are the minimap's business.
+
+/** A place of ours's shape, as the locations file writes it (the story's own `Shape`): a circle, a rectangle or an outline. */
+export type LocationShape = { kind: 'circle'; c: [number, number]; r: number } | { kind: 'rect'; min: [number, number]; max: [number, number] } | { kind: 'poly'; pts: [number, number][] };
 
 /** The city label's numbers. Every one is ours, and every one is live through `__debug.minimap({ city })`. */
 export const CITY_TUNE = {
@@ -46,23 +55,72 @@ export function tuneCities(o: Partial<typeof CITY_TUNE>): typeof CITY_TUNE {
   return CITY_TUNE;
 }
 
-/** A place as `pois.json` writes it; only these fields are read. */
+/** A place as `pois.json` writes it; only these fields are read. A place of ours carries `say` and `shape` too. */
 export interface CityRow {
   name: string;
   x: number;
   z: number;
   r: number;
   kind: string;
+  say?: boolean;
+  shape?: LocationShape;
 }
 
-/** Whether a row is a city you can be inside. */
+/** Whether a row is a city you can be inside: a place of ours by its own `say`, a pack's row by its kind and reach. */
 export function isCity(p: CityRow): boolean {
+  if (p.say !== undefined) return p.say && !!p.shape && Number.isFinite(p.x) && Number.isFinite(p.z);
   return p.kind === 'city' && Number.isFinite(p.r) && p.r >= CITY_TUNE.minR && Number.isFinite(p.x) && Number.isFinite(p.z);
 }
 
 /**
- * The city a point is inside, by the rows' own reaches: of those whose reach holds it, the one whose
- * middle is nearest. Null when none does. Allocates nothing.
+ * Whether a point is in a place of ours's shape, or within `grow` metres of it (the way out's margin). A circle by its
+ * radius, a rectangle by its sides, an outline by its crossings or an edge within `grow`. Allocates nothing.
+ */
+export function inPlaceShape(s: LocationShape, x: number, z: number, grow: number): boolean {
+  if (s.kind === 'circle') {
+    const dx = x - s.c[0];
+    const dz = z - s.c[1];
+    const R = s.r + grow;
+    return dx * dx + dz * dz <= R * R;
+  }
+  if (s.kind === 'rect') {
+    const dx = x < s.min[0] ? s.min[0] - x : x > s.max[0] ? x - s.max[0] : 0;
+    const dz = z < s.min[1] ? s.min[1] - z : z > s.max[1] ? z - s.max[1] : 0;
+    return dx * dx + dz * dz <= grow * grow;
+  }
+  const p = s.pts;
+  let inside = false;
+  for (let i = 0, j = p.length - 1; i < p.length; j = i++) {
+    const zi = p[i][1];
+    const zj = p[j][1];
+    if (zi > z !== zj > z && x < ((p[j][0] - p[i][0]) * (z - zi)) / (zj - zi) + p[i][0]) inside = !inside;
+  }
+  if (inside || !(grow > 0)) return inside;
+  const g2 = grow * grow;
+  for (let i = 0, j = p.length - 1; i < p.length; j = i++) {
+    const ax = p[j][0];
+    const az = p[j][1];
+    const ex = p[i][0] - ax;
+    const ez = p[i][1] - az;
+    const ll = ex * ex + ez * ez;
+    let t = ll > 0 ? ((x - ax) * ex + (z - az) * ez) / ll : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const dx = ax + ex * t - x;
+    const dz = az + ez * t - z;
+    if (dx * dx + dz * dz <= g2) return true;
+  }
+  return false;
+}
+
+/** Whether a point is in a city row, grown by `margin` (1 for the way in, the hysteresis's for the way out). Allocates nothing. */
+function inCity(p: CityRow, x: number, z: number, margin: number): boolean {
+  if (p.shape && p.say !== undefined) return inPlaceShape(p.shape, x, z, (margin - 1) * p.r);
+  return Math.hypot(p.x - x, p.z - z) <= p.r * margin;
+}
+
+/**
+ * The city a point is inside, by the rows' own reaches (a place of ours by its own shape): of those that hold it, the
+ * one whose middle is nearest. Null when none does. Allocates nothing.
  */
 export function cityAt(rows: readonly CityRow[], x: number, z: number): CityRow | null {
   let best: CityRow | null = null;
@@ -71,7 +129,7 @@ export function cityAt(rows: readonly CityRow[], x: number, z: number): CityRow 
     const p = rows[i];
     if (!isCity(p)) continue;
     const d = Math.hypot(p.x - x, p.z - z);
-    if (d > p.r || d >= bestD) continue;
+    if (d >= bestD || !inCity(p, x, z, 1)) continue;
     bestD = d;
     best = p;
   }
@@ -109,7 +167,7 @@ export class CityWatch {
     if (was) {
       // Still in until past the reach and its margin; while in, the clock of its last visit runs on.
       const dWas = Math.hypot(was.x - x, was.z - z);
-      if (dWas <= was.r * margin && rows.includes(was)) {
+      if (inCity(was, x, z, margin) && rows.includes(was)) {
         this.lastIn.set(was.name, now);
         // Unless another city's own reach holds you and its middle is nearer by the margin: walked from
         // one city into the next across where the two overlap, which is an arrival in the next.

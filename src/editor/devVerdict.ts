@@ -74,6 +74,12 @@ export function buildingNotes(patch: Patch, at: { x: number; z: number }, yaw: n
     out.blocker = blockerName(s.template);
     out.refuses = true;
   }
+  // A no-build zone (Map-maker II's eighth wave): the ghost's own ask, here in the editor's words, refusing nothing.
+  const zoned = deps.zone?.(mid.x, mid.z, clear) ?? null;
+  if (zoned) {
+    out.notes.push(zoned);
+    out.refuses = true;
+  }
   if (tilted) out.notes.push(TILTED_NOTE);
   return out;
 }
@@ -86,12 +92,17 @@ const PROP_SAID: PropVerdict = { ok: true, why: null, inside: 0, of: 0, clearanc
  * this world (...)"), buried, inside a wall. `propVerdict` answers the first and refuses; this answers every one.
  * `passable` adds the note for a seat or a table, which stands passable unless its row says solid.
  */
-export function propNotes(box: PropBox | null, at: { x: number; y: number; z: number }, q: PropTurn, deps: { floorAt(x: number, y: number, z: number): number | null; solidAt(x: number, y: number, z: number): boolean; reserved?: (x: number, z: number, r: number) => string | null }, passable: boolean, out: string[]): string[] {
+export function propNotes(box: PropBox | null, at: { x: number; y: number; z: number }, q: PropTurn, deps: { floorAt(x: number, y: number, z: number): number | null; solidAt(x: number, y: number, z: number): boolean; reserved?: (x: number, z: number, r: number) => string | null; zone?: (x: number, z: number, r: number) => string | null }, passable: boolean, out: string[]): string[] {
   out.length = 0;
+  const r = box ? Math.max(Math.abs(box.max[0] - box.min[0]), Math.abs(box.max[2] - box.min[2])) / 2 : 0;
   if (deps.reserved) {
-    const r = box ? Math.max(Math.abs(box.max[0] - box.min[0]), Math.abs(box.max[2] - box.min[2])) / 2 : 0;
     const taken = deps.reserved(at.x, at.z, r);
     if (taken !== null) out.push(`that is part of this world (${taken})`);
+  }
+  // A no-build zone (Map-maker II's eighth wave), in the editor's words, refusing nothing.
+  if (deps.zone) {
+    const zoned = deps.zone(at.x, at.z, r);
+    if (zoned !== null) out.push(zoned);
   }
   // The two rules of the thing itself, with the guard taken out so the first does not hide them.
   const v = propVerdict(box, at, q, { floorAt: deps.floorAt, solidAt: deps.solidAt }, PROP_TUNE, PROP_SAID);

@@ -416,6 +416,66 @@ export function tuneWater(partial: unknown): string[] {
   return said;
 }
 
+/**
+ * The places tool's numbers (Map-maker II's eighth wave, DESIGN.md §2.10), live through `__debug.locations({ tool })` and
+ * the Tools tab. Every one the owner's to judge by hand; none was chosen by measuring.
+ */
+export const PLACES_TOOL_TUNE = {
+  /** What a click draws: a circle at the aim, a rectangle by a drag, or an outline by clicks. */
+  mode: 'circle' as 'circle' | 'rect' | 'outline',
+  /** The kind a new place is written as (a city's name is said walking in and its outline is drawn on the minimap). */
+  kind: 'city' as 'city' | 'place' | 'landmark' | 'area' | 'zone',
+  /** A circle's radius, metres: a small town's (C with the wheel steps it, or a picked place's size). */
+  radius: 150,
+  /** How much a notch of C with the wheel grows (or shrinks) a radius or a picked place. */
+  sizeStep: 1.15,
+  /** A click this near an outline's first point closes it, screen pixels (the eye is often high over a town). */
+  closePx: 14,
+  /** Pixels within which a place's handle is under the cursor. */
+  hitPx: 12,
+  /** A rectangle's least side, metres (a drag shorter than this is taken as a slip and writes nothing). */
+  rectLeast: 2,
+  /** Points a circle is drawn with on the overlay. */
+  circlePoints: 48,
+  /** Seconds after the last notch of C with the wheel before a picked place's new size is written. */
+  sizeRest: 0.6,
+};
+
+/** The places tool's shipped values, for a reset. */
+export const PLACES_TOOL_TUNE_DEFAULTS: typeof PLACES_TOOL_TUNE = JSON.parse(JSON.stringify(PLACES_TOOL_TUNE));
+
+/** The places tool's words that are choices, each from its list. */
+export const PLACES_TOOL_CHOICES = {
+  mode: ['circle', 'rect', 'outline'],
+  kind: ['city', 'place', 'landmark', 'area', 'zone'],
+};
+
+/** `__debug.locations({ tool })`: the places tool's numbers moved in memory, never saved, its choices only from their lists. */
+export function tunePlacesTool(partial: unknown): string[] {
+  const said: string[] = [];
+  if (!partial || typeof partial !== 'object' || Array.isArray(partial)) return ['locations({ tool }) takes an object'];
+  const numbers: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(partial as Record<string, unknown>)) {
+    if (k === 'mode' || k === 'kind') {
+      const list = PLACES_TOOL_CHOICES[k] as readonly string[];
+      if (typeof v === 'string' && list.includes(v)) (PLACES_TOOL_TUNE as Record<string, unknown>)[k] = v;
+      else said.push(`${k} is one of ${list.join(', ')}`);
+      continue;
+    }
+    numbers[k] = v;
+  }
+  said.push(...tuneInto(PLACES_TOOL_TUNE as unknown as Record<string, unknown>, numbers));
+  const t = PLACES_TOOL_TUNE;
+  t.radius = Math.min(50000, Math.max(0.5, t.radius));
+  t.sizeStep = Math.min(4, Math.max(1.01, t.sizeStep));
+  t.closePx = Math.max(2, t.closePx);
+  t.hitPx = Math.max(2, t.hitPx);
+  t.rectLeast = Math.max(0.1, t.rectLeast);
+  t.circlePoints = Math.max(8, Math.min(256, Math.round(t.circlePoints)));
+  t.sizeRest = Math.max(0, t.sizeRest);
+  return said;
+}
+
 /** Every number of the editor, ours. */
 export const EDITOR_TUNE = {
   cam: {

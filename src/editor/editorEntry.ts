@@ -50,7 +50,8 @@ import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.t
 import { EditorPaint, hexOf, paintTool, recipeWords, washInto, type PaintHost } from './editorPaint.ts';
 import { FLORA_PAINT_TUNE, PAINT_TUNE, tuneFloraPaint, tunePaint } from './editorTune.ts';
 import { FLORA_CLASSES, type FloraClass, type FloraClassSpec, type FloraRecipe } from '../swg/terrain/groundPaint.ts';
-import { LAKE_LOOK_DIALS, RIVER_DIALS, WASH_DIALS } from './editorDials.ts';
+import { LAKE_LOOK_DIALS, RIVER_DIALS, WASH_DIALS, placesToolDials } from './editorDials.ts';
+import { LOCATION_DIALS } from '../world/locationsDials.ts';
 import { PAINT_LAYERS, type PaintLayer } from './groundBrush.ts';
 import { TINT_MODES, type PaintWorldRow } from '../world/editFiles/paintFile.ts';
 import { readWash, type WashSpec } from '../world/demWash.ts';
@@ -71,11 +72,13 @@ import { EditorBrush, brushNearOf, scatterTool, type BrushNearThing } from './ed
 import { brushRing, meantForWater, ringAsk, type RingGround } from './brush.ts';
 import { ToolList, toolFrame, type ToolDef, type ToolDraw } from './tools.ts';
 import { EditorWater, waterTool, type WaterHost } from './editorWater.ts';
-import { WATER_CHOICES, WATER_TUNE, tuneWater } from './editorTune.ts';
+import { WATER_CHOICES, WATER_TUNE, tuneWater, PLACES_TOOL_CHOICES, PLACES_TOOL_TUNE, tunePlacesTool } from './editorTune.ts';
+import { EditorPlaces, placeAreaSnippet, placesTool, type PlacesHost } from './editorPlaces.ts';
+import { buildable, drawnOnMap, saidOnEntry, shapeArea, shapeMiddle, type LocationRow, type LocationShape } from '../world/editFiles/locationsFile.ts';
 import { LAKE_TUNE, RIVER_STEEP, RIVER_TUNE, tuneRiverTune } from '../world/ourWater.ts';
 import type { WaterRiverRow } from '../world/editFiles/waterFile.ts';
 import { outlineArea } from './lakeTrace.ts';
-import type { WaterToolsView, LakeView } from '../ui/editorWindow.ts';
+import type { WaterToolsView, LakeView, PlaceView, PlacesToolsView } from '../ui/editorWindow.ts';
 import { EditorLooks } from './editorLooks.ts';
 import { attachAtHit, markRow, withAttachment } from './lookPick.ts';
 import { ATTACH_TUNE, rowMatrix, type RowAttachments } from '../world/rowAttach.ts';
@@ -176,6 +179,15 @@ export interface EditorHost {
   curtain?(detail: string, work: () => Promise<string>): Promise<string>;
   /** The dye picker's palettes (the seventh wave's tint): the wardrobe's garment palettes and the creator's table. */
   pickerPalettes?(): Promise<{ wardrobe: Record<string, number[][]> | null; table: unknown }>;
+  /**
+   * A no-build zone over a circle of `r` metres about a game point, in the editor's words ("inside <name>, where players may
+   * not build"), or null (Map-maker II's eighth wave): the places' own verdict, which a player's ghost refuses by.
+   */
+  zoneNote?(x: number, z: number, r: number): string | null;
+  /** This world's places of ours as the last landing left them, and its locations file as last read (Map-maker II's eighth wave). */
+  locations?(): { rows: readonly LocationRow[]; bytes: number | null; problem: string | null };
+  /** The same rows alone, one list until the next landing and a kept empty one before any: what a frame asks (nothing made). */
+  locationRows?(): readonly LocationRow[];
 }
 
 /** One thing in hand: what a row writes, what it is drawn and judged by, and how it is turned. */
@@ -215,6 +227,12 @@ const ONE = new THREE.Vector3(1, 1, 1);
 const LAKE_ROW = 'lake:';
 function isLakeRow(id: string): boolean {
   return id.startsWith(LAKE_ROW);
+}
+
+/** A place of ours on the Here tab (Map-maker II's eighth wave), so its buttons reach the places tool. */
+const PLACE_ROW = 'place:';
+function isPlaceRow(id: string): boolean {
+  return id.startsWith(PLACE_ROW);
 }
 
 /** The editor, as the game sees it. */
@@ -270,7 +288,7 @@ export class Editor {
   private readonly propAt = { x: 0, y: 0, z: 0 };
   private readonly propTurn = { x: 0, y: 0, z: 0, w: 1 };
   private readonly ghostDeps: GhostDeps;
-  private readonly propDeps: { floorAt(x: number, y: number, z: number): number | null; solidAt(x: number, y: number, z: number): boolean; reserved: (x: number, z: number, r: number) => string | null };
+  private readonly propDeps: { floorAt(x: number, y: number, z: number): number | null; solidAt(x: number, y: number, z: number): boolean; reserved: (x: number, z: number, r: number) => string | null; zone: (x: number, z: number, r: number) => string | null };
   private skyReach = EDITOR_TUNE.aim.skyReach;
   private readonly hoverM = new THREE.Matrix4();
   private readonly hoverEls = new Float64Array(16);
@@ -328,11 +346,14 @@ export class Editor {
       heightAt: (x, z) => w.terrain.heightAt(x, z),
       waterAt: (x, z) => w.terrain.waterHeightAt(x, z),
       standing: (x, z, reach) => w.standingNear(x, z, reach),
+      // A no-build zone (Map-maker II's eighth wave), in the editor's words: noted, never refused.
+      zone: (x, z, r) => host.zoneNote?.(x, z, r) ?? null,
     };
     this.propDeps = {
       floorAt: (x, y, z) => w.groundAt(x, y + 0.5, z, w.inside),
       solidAt: (x, y, z) => w.solidAt(x, y, z),
       reserved: (x, z, r) => host.guarded(x, z, r),
+      zone: (x, z, r) => host.zoneNote?.(x, z, r) ?? null,
     };
     // The editing (the second wave's): everything it reads and asks, over the editor and the game.
     const me = this;
@@ -495,6 +516,12 @@ export class Editor {
     // and taken out, and falls between them; every change one write, stood by difference as its answer lands.
     this.water = new EditorWater(this.waterHost());
     this.tools.add(waterTool(this.water));
+    // The places tool (Map-maker II's eighth wave), on P: cities, places and zones of ours drawn as circles, rectangles or
+    // outlines into the world's locations file; every change one write, landed by difference as its answer comes.
+    this.places = new EditorPlaces(this.placesHost());
+    this.tools.add(placesTool(this.places));
+    // Its numbers of feel as sliders in the debug menu's `locations` set, beside the places' own (`locationDialSet`).
+    LOCATION_DIALS.tool = placesToolDials();
     // The picked lake's look as the debug menu's sliders, each written into the water file a moment after it rests.
     LAKE_LOOK_DIALS.host = {
       look: () => {
@@ -555,6 +582,8 @@ export class Editor {
   readonly paint: EditorPaint;
   /** The water tool (Map-maker II's fifth wave). */
   readonly water: EditorWater;
+  /** The places tool (Map-maker II's eighth wave). */
+  readonly places: EditorPlaces;
   /** The pack the paint palette's family list shows (Map-maker II's third wave): '' for this world's own. */
   private paintBrowse = '';
   /**
@@ -898,6 +927,40 @@ export class Editor {
     };
   }
 
+  /** What the places tool needs of the game: the locations file's rows as last landed, the world's frames, its ground. */
+  private placesHost(): PlacesHost {
+    const h = this.host;
+    const w = h.world;
+    const me = this;
+    const none: readonly LocationRow[] = [];
+    return {
+      get edits() {
+        return me.edits;
+      },
+      worldKind: () => h.worldKind(),
+      rows: () => h.locationRows?.() ?? none,
+      // The file's raw frame about the world's place frame: the layout's centre, or (0, 0) on a world with no pack.
+      toRaw: (x, z, out) => {
+        const c = w.placeFrame;
+        out.x = (c?.x ?? 0) - x;
+        out.z = z + (c?.z ?? 0);
+      },
+      toGame: (x, z, out) => {
+        const c = w.placeFrame;
+        out.x = (c?.x ?? 0) - x;
+        out.z = z - (c?.z ?? 0);
+      },
+      groundAt: (x, z) => w.terrain.nearHeightIfCached(x, z) ?? w.terrain.heightAt(x, z),
+      groundCached: (x, z, out) => {
+        const g = w.terrain.nearHeightIfCached(x, z);
+        if (g === null || g === undefined) return false;
+        out.y = g;
+        return true;
+      },
+      say: (words, ok) => me.say(words, ok),
+    };
+  }
+
   /** The Tools list (Map-maker II §2.3): one armed at a time, the scatter brush first. */
   readonly tools = new ToolList();
   /** What an armed tool is handed each frame and what it draws with, kept records. */
@@ -1118,6 +1181,7 @@ export class Editor {
     this.sculpt.worldGone();
     this.paint.worldGone();
     this.water.worldGone();
+    this.places.worldGone();
     this.tools.disarmAll();
     // The wash's write still waiting for its dials to rest goes with its world, never into the next world's file.
     if (this.washTimer) clearTimeout(this.washTimer);
@@ -1343,7 +1407,7 @@ export class Editor {
     const looked = this.fly.yaw !== this.lastYaw || this.fly.pitch !== this.lastPitch;
     this.lastYaw = this.fly.yaw;
     this.lastPitch = this.fly.pitch;
-    if (looked || this.host.input.keysDown > 0 || this.pointer.buttons !== 0 || this.fly.moving > 0.05 || ed.busy || ed.writing || ed.stroking || this.hand || this.brush.mode || this.sculpt.mode || this.paint.mode || this.water.busy || this.folding) {
+    if (looked || this.host.input.keysDown > 0 || this.pointer.buttons !== 0 || this.fly.moving > 0.05 || ed.busy || ed.writing || ed.stroking || this.hand || this.brush.mode || this.sculpt.mode || this.paint.mode || this.water.busy || this.places.busy || this.folding) {
       this.activeAt = now;
       return;
     }
@@ -2206,7 +2270,7 @@ export class Editor {
     v.said = this.said;
     v.saidOk = this.saidOk;
     const k = (a: Parameters<Input['pressedAction']>[0]) => input.bindings[a][0] ?? '';
-    v.hint = `WASD fly · ${k('editorUp')}/${k('editorDown')} up/down · Shift fast · Alt slow · wheel speed · ${k('editorPoint')} cursor · ${k('editorSearch')} find · click pick/put down · ${k('placeTurn')}/${k('placeLift')}/${k('editorScale')} held turn/raise/scale · ${k('takeProp')} pick up · ${k('putAway')} delete · ${k('placeLayer')} file · ${k('editorBrush')} brush · ${k('editorSculpt')} sculpt · ${k('editorPaint')} paint · ${k('editorWater')} water · ${k('editorKeys')} keys · F2 leave`;
+    v.hint = `WASD fly · ${k('editorUp')}/${k('editorDown')} up/down · Shift fast · Alt slow · wheel speed · ${k('editorPoint')} cursor · ${k('editorSearch')} find · click pick/put down · ${k('placeTurn')}/${k('placeLift')}/${k('editorScale')} held turn/raise/scale · ${k('takeProp')} pick up · ${k('putAway')} delete · ${k('placeLayer')} file · ${k('editorBrush')} brush · ${k('editorSculpt')} sculpt · ${k('editorPaint')} paint · ${k('editorWater')} water · ${k('editorPlaces')} places · ${k('editorKeys')} keys · F2 leave`;
     bar.show(v);
   }
 
@@ -2293,22 +2357,35 @@ export class Editor {
       },
       brushed: (key: string) => this.brush.has(key),
       // The lakes of ours first (a world has few), then the rows round the camera (Map-maker II's fifth wave).
-      here: () => [...this.lakeHereRows(), ...h.here(h.player.pos, 60)],
-      goTo: (id: string) => this.say(isLakeRow(id) ? this.goToLake(id.slice(LAKE_ROW.length)) : this.goTo(id), true),
+      // The places of ours (Map-maker II's eighth wave), then the lakes of ours (a world has few), then the rows round the
+      // camera (Map-maker II's fifth wave).
+      here: () => [...this.placeHereRows(), ...this.lakeHereRows(), ...h.here(h.player.pos, 60)],
+      goTo: (id: string) => this.say(isPlaceRow(id) ? this.goToPlace(id.slice(PLACE_ROW.length)) : isLakeRow(id) ? this.goToLake(id.slice(LAKE_ROW.length)) : this.goTo(id), true),
       pickUp: (id: string) => {
-        if (isLakeRow(id)) void this.pickLake(id.slice(LAKE_ROW.length));
+        if (isPlaceRow(id)) void this.pickPlace(id.slice(PLACE_ROW.length));
+        else if (isLakeRow(id)) void this.pickLake(id.slice(LAKE_ROW.length));
         else void this.pickUp(id);
       },
       remove: (id: string, layer: string) => {
-        if (isLakeRow(id)) void this.water.remove(id.slice(LAKE_ROW.length)).then(() => this.window?.refreshEdits());
+        if (isPlaceRow(id)) void this.places.remove(id.slice(PLACE_ROW.length)).then(() => this.window?.refreshEdits());
+        else if (isLakeRow(id)) void this.water.remove(id.slice(LAKE_ROW.length)).then(() => this.window?.refreshEdits());
         else void this.remove(id, layer === 'story' ? 'story' : 'world');
       },
-      isPicked: (id: string) => (isLakeRow(id) ? this.water.picked === id.slice(LAKE_ROW.length) : this.edits.sel.has(id)),
+      isPicked: (id: string) => (isPlaceRow(id) ? this.places.picked === id.slice(PLACE_ROW.length) : isLakeRow(id) ? this.water.picked === id.slice(LAKE_ROW.length) : this.edits.sel.has(id)),
       pick: (ids: string[], mode: 'set' | 'add' | 'take') => {
         const lakes = ids.filter(isLakeRow);
         if (lakes.length) this.water.picked = mode === 'take' ? null : lakes[lakes.length - 1].slice(LAKE_ROW.length);
-        this.edits.sel.pick(ids.filter((i) => !isLakeRow(i)), mode);
+        const places = ids.filter(isPlaceRow);
+        if (places.length) this.places.picked = mode === 'take' ? null : places[places.length - 1].slice(PLACE_ROW.length);
+        this.edits.sel.pick(ids.filter((i) => !isLakeRow(i) && !isPlaceRow(i)), mode);
         this.window?.refreshEdits();
+      },
+      place: () => this.placeView(),
+      setPlaceRow: (f: Record<string, unknown>) => {
+        const id = this.places.picked;
+        if (!id) return;
+        if (f.copy === true) return void this.copyPlaceSnippet(id);
+        void this.places.setPlace(id, f as Parameters<EditorPlaces['setPlace']>[1]).then(() => this.window?.refreshEdits());
       },
       lake: () => this.lakeView(),
       setLake: (f: Record<string, unknown>) => {
@@ -2348,6 +2425,7 @@ export class Editor {
         sculpt: this.sculptView(),
         paint: this.paintView(),
         water: this.waterView(),
+        places: this.placesView(),
         attach: { onto: this.attachOnto },
       }),
       setTool: (t: Record<string, unknown>) => this.setTool(t),
@@ -2480,6 +2558,22 @@ export class Editor {
     if (t.waterGiveUp === true) this.water.escape();
     if (t.waterPick === null) this.water.picked = null;
     if (typeof t.waterRemove === 'string') void this.water.remove(t.waterRemove).then(() => this.window?.refreshEdits());
+    // The places tool's (Map-maker II's eighth wave): what a click draws, the kind a new place is written as, a circle's
+    // radius, the outline closed or given up, the place picked let go or taken out, and the world row's switch and lines.
+    const pt: Record<string, unknown> = {};
+    if (typeof t.placesMode === 'string') pt.mode = t.placesMode;
+    if (typeof t.placesKind === 'string') pt.kind = t.placesKind;
+    if (typeof t.placesRadius === 'number' && Number.isFinite(t.placesRadius)) pt.radius = t.placesRadius;
+    if (Object.keys(pt).length) {
+      const no = tunePlacesTool(pt);
+      if (no.length) this.say(no.join('; '), false);
+    }
+    if (t.placesClose === true) void this.places.closeDraft().then(() => this.window?.refreshEdits());
+    if (t.placesGiveUp === true) this.places.escape();
+    if (t.placesPick === null) this.places.picked = null;
+    if (typeof t.placesRemove === 'string') void this.places.remove(t.placesRemove).then(() => this.window?.refreshEdits());
+    if (typeof t.placesCities === 'boolean') void this.places.setWorld({ cities: t.placesCities }).then(() => this.window?.refreshEdits());
+    if (typeof t.placesWorldLoading === 'string') void this.places.setWorld({ loading: t.placesWorldLoading.split('\n') }).then(() => this.window?.refreshEdits());
     // The sculpt brush's (Map-maker II's first wave): its mode, flatten's ways and target and height, its falloff, its switches.
     const st: Record<string, unknown> = {};
     if (typeof t.sculptMode === 'string') st.mode = t.sculptMode;
@@ -3278,6 +3372,198 @@ export class Editor {
     return said;
   }
 
+  // ---- The places tool (Map-maker II's eighth wave). ----
+
+  /** This world's locations file's rows as last landed, and the file as last read (none without a host that keeps them). */
+  private locationRows(): readonly LocationRow[] {
+    return this.host.locationRows?.() ?? [];
+  }
+
+  /** A place's middle in the game's frame, its reach and the ground there (made once, never in a frame), or null. */
+  private placeMiddle(id: string): { x: number; y: number; z: number; r: number } | null {
+    const row = this.locationRows().find((r) => r.id === id);
+    if (!row?.shape) return null;
+    const m = shapeMiddle(row.shape);
+    const c = this.host.world.placeFrame;
+    const x = (c?.x ?? 0) - m.x;
+    const z = m.z - (c?.z ?? 0);
+    const t = this.host.world.terrain;
+    const g = t.nearHeightIfCached(x, z) ?? t.heightAt(x, z);
+    return { x, y: Number.isFinite(g) ? g : 0, z, r: m.r };
+  }
+
+  /** The places of ours as the Here tab lists them (`place:<id>`), nearest the camera first; the world row is the Tools tab's. */
+  private placeHereRows(): HereRow[] {
+    const p = this.host.player.pos;
+    const c = this.host.world.placeFrame;
+    const rows: { d: number; row: HereRow }[] = [];
+    for (const r of this.locationRows()) {
+      if (!r.shape) continue;
+      const m = shapeMiddle(r.shape);
+      const d = Math.hypot((c?.x ?? 0) - m.x - p.x, m.z - (c?.z ?? 0) - p.z);
+      const what = `${r.kind}${buildable(r) ? '' : ', no building'}${drawnOnMap(r) ? '' : ', not on the map'}${r.state ? `, ${r.state}` : ''}`;
+      rows.push({ d, row: { id: `${PLACE_ROW}${r.id}`, layer: 'locations', label: `${r.name ?? r.id} (${what})`, away: `${Math.round(d)} m`, stood: true, bad: null } });
+    }
+    rows.sort((a, b) => a.d - b.d);
+    return rows.map((x) => x.row);
+  }
+
+  /** Go to a place: the eye over its middle and back from it by its reach, looking down at it. Answers what was said. */
+  private goToPlace(id: string): string {
+    const m = this.placeMiddle(id);
+    if (!m) return `no place ${id}`;
+    const back = Math.min(1200, Math.max(30, m.r * 0.9));
+    this.host.player.pos.set(m.x, m.y + back * 0.7, m.z + back);
+    this.fly.lookAlong(0, -back * 0.7, -back);
+    this.fly.stop();
+    return `over ${this.locationRows().find((r) => r.id === id)?.name ?? id}`;
+  }
+
+  /** A place picked from the Here tab (or the console): the places tool armed if it is not, and the place picked in it. */
+  private async pickPlace(id: string): Promise<string> {
+    const row = this.locationRows().find((r) => r.id === id);
+    if (!row?.shape) return `no place ${id}`;
+    if (!this.places.armed) await this.toggleTool('places');
+    this.places.picked = id;
+    this.window?.refreshEdits();
+    return `picked ${row.name ?? id}`;
+  }
+
+  /** A place's story area snippet copied (to the clipboard where the page may, and to the console either way). */
+  private copyPlaceSnippet(id: string): string {
+    const row = this.locationRows().find((r) => r.id === id);
+    if (!row?.shape) return `no place ${id}`;
+    const text = placeAreaSnippet(row, this.host.packId());
+    console.log(text);
+    void navigator.clipboard?.writeText(text).catch(() => {});
+    this.say(`${row.name ?? id} as a story area copied (and on the console)`, true);
+    return text;
+  }
+
+  /** A shape in words, for the Selected tab. */
+  private shapeWords(s: LocationShape): string {
+    const area = shapeArea(s);
+    const a = area > 1e6 ? `${(area / 1e6).toFixed(2)} km²` : `${Math.round(area)} m²`;
+    if (s.kind === 'circle') return `a circle ${Math.round(s.r)} m round · ${a}`;
+    if (s.kind === 'rect') return `a rectangle ${Math.round(s.max[0] - s.min[0])} × ${Math.round(s.max[1] - s.min[1])} m · ${a}`;
+    return `an outline of ${s.pts.length} points · ${a}`;
+  }
+
+  /** The place picked as the Selected tab shows it, or null. */
+  private placeView(): PlaceView | null {
+    const id = this.places.picked;
+    if (!id) return null;
+    const row = this.locationRows().find((r) => r.id === id);
+    if (!row?.shape) return null;
+    const notes: string[] = [];
+    if (!buildable(row)) notes.push('Players may put no house or prop down in it (the editor notes it and refuses nothing).');
+    // Said and outlined only while drawn: a place on no map reaches neither the city line nor the minimap.
+    if (!drawnOnMap(row)) notes.push('It is not drawn on the maps, so its name is never said and no outline is drawn.');
+    else {
+      if (saidOnEntry(row)) notes.push('Its name is said on the minimap walking into it.');
+      if (row.kind === 'city') notes.push('Its outline is drawn on the minimap.');
+    }
+    return {
+      id,
+      name: row.name ?? '',
+      kind: row.kind,
+      shape: this.shapeWords(row.shape),
+      map: drawnOnMap(row),
+      say: saidOnEntry(row),
+      build: buildable(row),
+      own: { map: row.map !== undefined, say: row.say !== undefined, build: row.build !== undefined },
+      desc: row.desc ?? '',
+      note: row.note ?? '',
+      loading: (row.loading ?? []).join('\n'),
+      state: row.state ?? '',
+      snippet: placeAreaSnippet(row, this.host.packId()),
+      words: notes.join(' '),
+    };
+  }
+
+  /** The places tool as the Tools tab shows it. */
+  private placesView(): PlacesToolsView {
+    const t = PLACES_TOOL_TUNE;
+    const got = this.host.locations?.() ?? { rows: [], bytes: null, problem: null };
+    const places = got.rows.filter((r) => r.shape).length;
+    const world = got.rows.find((r) => r.id === 'world') ?? null;
+    const file = `public/placements/locations/${this.host.packId()}.json: ${places} place${places === 1 ? '' : 's'}${world ? ' and the world row' : ''}${got.bytes ? `, about ${(got.bytes / 1024).toFixed(1)} KB as last read` : ''}${got.problem ? ` (not read: ${got.problem})` : ''}`;
+    const notes: string[] = [];
+    const no = this.places.refusal();
+    if (no) notes.push(no);
+    if (this.places.last.said) notes.push(this.places.last.said);
+    return {
+      armed: this.places.armed,
+      mode: t.mode,
+      kind: t.kind,
+      radius: Math.round(t.radius * 100) / 100,
+      draft: this.places.draftN,
+      picked: this.places.picked,
+      cities: world?.cities === 'noBuild',
+      worldLoading: (world?.loading ?? []).join('\n'),
+      file,
+      note: notes.join(' '),
+    };
+  }
+
+  /**
+   * `__debug.locations(o)` (the dev server's half): the places tool's own state and the file as read; `{ tool }` its numbers
+   * (`PLACES_TOOL_TUNE`), `{ arm: 'circle' | 'rect' | 'outline' }` (or false), `{ write: { shape, kind, name, map, say, build,
+   * loading, desc, note } }` a place written (its shape in the file's own frame, as a story writes one), `{ pick }`, `{ move:
+   * { id, dx, dz } }` (the file's frame), `{ size: { id, by } }`, `{ set: { id, ...fields } }`, `{ remove }`, `{ cities:
+   * 'noBuild' | 'off' }` and `{ worldLoading: [lines] }` the world row, `{ snippet: id }` a place as a story area.
+   */
+  async locationsDebug(o?: Record<string, unknown>): Promise<unknown> {
+    const said: string[] = [];
+    let snippet: string | null = null;
+    if (o && typeof o === 'object') {
+      if (o.tool && typeof o.tool === 'object') said.push(...tunePlacesTool(o.tool));
+      if (typeof o.arm === 'string') {
+        if (!(PLACES_TOOL_CHOICES.mode as readonly string[]).includes(o.arm)) said.push(`arm is one of ${PLACES_TOOL_CHOICES.mode.join(', ')}`);
+        else {
+          tunePlacesTool({ mode: o.arm });
+          said.push(this.places.armed ? `the places tool: ${o.arm}` : await this.toggleTool('places'));
+        }
+      }
+      if (o.arm === false && this.places.armed) said.push(await this.toggleTool('places'));
+      const wr = o.write as Record<string, unknown> | undefined;
+      if (wr && typeof wr === 'object') {
+        const { shape, ...fields } = wr;
+        if (!shape || typeof shape !== 'object') said.push('write takes { shape: { kind: "circle", c: [x, z], r } (or a rect or a poly), kind, name, ... } in the file\'s frame');
+        else said.push(await this.places.writePlace(shape as LocationShape, fields as Partial<LocationRow>, 'a place (console)'));
+      }
+      if (typeof o.pick === 'string') said.push(await this.pickPlace(o.pick));
+      if (o.pick === null) this.places.picked = null;
+      const mv = o.move as Record<string, unknown> | undefined;
+      if (mv && typeof mv === 'object' && typeof mv.id === 'string') {
+        // dx along the file's own x: the game's frame mirrors it.
+        const dx = typeof mv.dx === 'number' ? mv.dx : 0;
+        const dz = typeof mv.dz === 'number' ? mv.dz : 0;
+        said.push(await this.places.movePlace(mv.id, -dx, dz));
+      }
+      const sz = o.size as Record<string, unknown> | undefined;
+      if (sz && typeof sz === 'object' && typeof sz.id === 'string' && typeof sz.by === 'number' && sz.by > 0) said.push(await this.places.scalePlace(sz.id, sz.by));
+      const st = o.set as Record<string, unknown> | undefined;
+      if (st && typeof st === 'object' && typeof st.id !== 'string' && this.places.picked) st.id = this.places.picked;
+      if (st && typeof st === 'object' && typeof st.id === 'string') {
+        const { id, ...fields } = st;
+        said.push(await this.places.setPlace(id as string, fields as Parameters<EditorPlaces['setPlace']>[1]));
+      }
+      if (typeof o.remove === 'string') said.push(await this.places.remove(o.remove));
+      if (o.cities === 'noBuild' || o.cities === 'off') said.push(await this.places.setWorld({ cities: o.cities === 'noBuild' }));
+      if (Array.isArray(o.worldLoading)) said.push(await this.places.setWorld({ loading: (o.worldLoading as unknown[]).filter((l): l is string => typeof l === 'string') }));
+      if (typeof o.snippet === 'string') snippet = this.copyPlaceSnippet(o.snippet);
+    }
+    const got = this.host.locations?.() ?? { rows: [], bytes: null, problem: null };
+    return {
+      tool: this.places.report(),
+      toolTune: { ...PLACES_TOOL_TUNE },
+      file: { rows: got.rows.length, bytes: got.bytes, problem: got.problem },
+      ...(snippet ? { snippet } : {}),
+      ...(said.length ? { answered: said } : {}),
+    };
+  }
+
   /** The first picked row as the Selected tab shows it, or null. */
   private selectedView(): SelectedView | null {
     const ed = this.edits;
@@ -3722,6 +4008,7 @@ function keySheet(input: Input): string {
     `${k('editorSculpt')} sculpt brush armed and let go · LMB held raises (or flattens, smooths: Tools tab) · RMB held lowers · C held with the wheel sizes it · Shift+click samples the height`,
     `${k('editorPaint')} paint brush armed and let go · LMB held paints the chosen family or colour (Tools tab) · RMB held erases · Shift+click or the middle button takes what is under it · C held with the wheel sizes it`,
     `${k('editorWater')} water tool armed and let go · LMB a lake's point, a seed to trace, or a fall's ends (Tools tab) · RMB takes one back · a click on a lake's ring picks it: drag its square, ${k('placeLift')} held raises, ${k('putAway')} takes it out`,
+    `${k('editorPlaces')} places tool armed and let go · LMB a circle (C held with the wheel sizes it), a rectangle's drag or an outline's point (Tools tab) · RMB takes one back · a click on a place's ring picks it: drag its square, C with the wheel sizes it, ${k('putAway')} takes it out`,
     `${k('editorGameView')} game view · ${k('editorKeys')} this sheet · ${k('editorBody')} body here · ${k('editorHold')} hold the world · Esc give up / clear · F2 leave`,
   ].join('\n');
 }

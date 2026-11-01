@@ -263,7 +263,7 @@ import { createRequire } from 'node:module';
 
 /** Named places per planet (see regions/build.mjs). */
 const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
-import { autoCenter, frameCheck, mergePlaceLists, namePorts, placeKey, portKindListed, portLabel, portsWithoutRow, readClientPlaces, title } from './places.mjs';
+import { autoCenter, frameCheck, mergePlaceLists, namePorts, noBuildOf, placeKey, portKindListed, portLabel, portsWithoutRow, readClientPlaces, servicesOf, title } from './places.mjs';
 import { isZoneGate, writeZoneGates } from './gates.mjs';
 import { COLOR_RAMPS, downscaleRgba, groundStatus, writeColorRamps, writeGroundTextures, writeTerrainBitmaps } from './terrainShaders.mjs';
 import { radialStatusOf } from './radial.mjs';
@@ -3156,6 +3156,9 @@ function packStatus(dir) {
       const lost = portsWithoutRow(layout.objects, pois.pois ?? []);
       need(`pois <swg-dir> all ${dir} --retail-only`, `${planet} has ${lost.length} port building${lost.length === 1 ? '' : 's'} with no row of ${lost.length === 1 ? 'its' : 'their'} own in its places (${lost.slice(0, 3).map((o) => `${o.template.split('/').pop()} at ${Math.round(o.x)},${Math.round(o.z)}`).join(', ')}${lost.length > 3 ? ', ...' : ''}), so their terminals name no port or the wrong one`);
     }
+    // The game's own services and no-build data (Map-maker II's eighth wave) beside the places: a file written before them
+    // has neither list, so the map shows no cantina and the no-build switch keeps players off only the cities.
+    else if (!Array.isArray(pois.services) || !Array.isArray(pois.noBuild)) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet}'s places were written before the game's own services and no-build areas were read`);
     // A world whose layout carries gates between its zones but no gates.json was converted before the
     // join was written: those gates stand there doing nothing and nothing else would say so.
     if (!gates && layout && layout.objects.some((o) => isZoneGate(o.template))) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet}'s zone gates have no destinations`);
@@ -4025,10 +4028,54 @@ function serverTravelPoints(planet) {
   return travelPointsRead.get(planet) ?? [];
 }
 
+/** Every world's Core3 map categories and no-build areas, read once a run; see `serverMapData`. */
+let mapDataRead = null;
+/** Why there are none, when there are none: no reference, `--core3=none`, a reference written before they were kept. */
+let mapDataWhy = '';
+
+/**
+ * The server's planetary map categories (`readMapCategories`) and every world's no-build areas (`readRegions`' `noBuild`), read
+ * from the Core3 reference like everything else the converter takes from it, or from `--core3=<dir>`. None is not an error: a
+ * world's places are then written with no services and none of Core3's no-build areas, and the run says why.
+ */
+function serverMapData() {
+  if (!mapDataRead) {
+    mapDataRead = { categories: null, regions: new Map() };
+    try {
+      const src = core3SourceFor(options);
+      if (!src) mapDataWhy = '--core3=none';
+      else if (src.missing) mapDataWhy = src.missing;
+      else {
+        mapDataRead.regions = src.readRegions();
+        mapDataRead.categories = src.readMapCategories();
+      }
+    } catch (err) {
+      mapDataWhy = err.message;
+    }
+  }
+  return mapDataRead;
+}
+
+/** A template's float parameter (the template's `noBuildRadius`): its value, or null. Named, since the parameter cache keys on it. */
+function noBuildFloat(buf) {
+  return buf && buf.length >= 6 && buf[0] === 1 ? buf.readFloatLE(2) : null;
+}
+
 /** Write <out>/pois.json for a planet; a broken table costs that table's places, never the snapshot. */
 function writePois(vfs, planet, snap, entries, cx, cz, outDir) {
   let result = null;
   const travelPoints = serverTravelPoints(planet);
+  // The game's own services and no-build data (Map-maker II's eighth wave): every top-level thing of the world as its layout
+  // left it, joined to the server's map categories, its template's own no-build radius, and Core3's no-build areas.
+  const mapData = serverMapData();
+  const topLevel = [];
+  for (const e of entries) {
+    if (!e.world || e.parentId !== 0) continue;
+    topLevel.push({ template: snap.templates[e.node.templateIndex], x: e.world.pos[0], z: e.world.pos[2], state: e.node.state });
+  }
+  const radiusCache = new Map();
+  const services = servicesOf(topLevel, mapData.categories);
+  const noBuild = noBuildOf(topLevel, mapData.regions.get(planet)?.noBuild ?? [], (t) => resolveTemplateParam(vfs, t, 'noBuildRadius', noBuildFloat, radiusCache));
   // Each step sheds one source, so one unreadable table never costs the others.
   for (const opts of [{}, { archive: false }, { regions: false }, { regions: false, archive: false }]) {
     try {
@@ -4042,10 +4089,14 @@ function writePois(vfs, planet, snap, entries, cx, cz, outDir) {
   const s = result ? result.stats : null;
   // `states`: its ports were named once per world state (restuss.mjs), which `status` asks of Rori's; `stateObjects`: with
   // SOE's earlier objects and the holidays read in (stateObjects.mjs), which `status` asks of every world that has them.
-  const file = withLate({ planet, center: { x: cx, z: cz }, clientPlaces: s ? s.archive : 0, ...(s && s.frame.rows ? { frameCheck: s.frame } : {}), ...(snap.stateObjects ? { stateObjects: STATE_OBJECTS_VERSION } : {}), ...(snap.restuss ? { states: { [RESTUSS_KEY]: RESTUSS_STATES_VERSION } } : {}), pois }, vfs, 'pois');
+  const file = withLate({ planet, center: { x: cx, z: cz }, clientPlaces: s ? s.archive : 0, ...(s && s.frame.rows ? { frameCheck: s.frame } : {}), ...(snap.stateObjects ? { stateObjects: STATE_OBJECTS_VERSION } : {}), ...(snap.restuss ? { states: { [RESTUSS_KEY]: RESTUSS_STATES_VERSION } } : {}), pois, services, noBuild }, vfs, 'pois');
   writeFileSync(join(outDir, 'pois.json'), JSON.stringify(file));
   const counts = `${pois.length} (${pois.filter((p) => p.kind === 'place').length} the client's own named places, ${pois.filter((p) => p.kind === 'city' || p.kind === 'landmark' || p.kind === 'area').length} regions, ${pois.filter((p) => p.kind === 'starport' || p.kind === 'shuttleport').length} travel points)`;
   console.log(`points of interest: ${counts} -> ${join(outDir, 'pois.json')}`);
+  const byKind = {};
+  for (const sv of services) byKind[sv.kind] = (byKind[sv.kind] ?? 0) + 1;
+  const regionRows = noBuild.filter((n) => n.from === 'region').length;
+  console.log(`  services: ${services.length}${services.length ? ` (${Object.entries(byKind).map(([k, n]) => `${k} ${n}`).join(', ')})` : ''}; no-build: ${regionRows} of Core3's areas, ${noBuild.length - regionRows} placed things' own radius${mapDataWhy ? ` (no Core3 map data: ${mapDataWhy})` : ''}`);
   if (s) {
     console.log(`  places: the client's table gave ${s.archive}${s.unnamed ? ` (${s.unnamed} whose Name column names the wrong table, named by its own key instead)` : ''}${s.missing ? ` (${s.missing} whose name string the table is missing, labelled from its key)` : ''}, ours gave ${s.ours}, ${s.clashed} names were in both (the client's won${s.ringsKept ? `, except ${s.ringsKept} where ours is a ring with a reach and keeps its row` : ''})${s.repeats ? `, ${s.repeats} names the client's table itself repeats elsewhere` : ''}${s.sameSpot ? `, ${s.sameSpot} repeated in the same spot and dropped` : ''}${s.namedAfterPlace ? `, ${s.namedAfterPlace} port(s) named after a place rather than a city` : ''}`);
     const p = s.ports;

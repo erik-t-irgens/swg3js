@@ -8,8 +8,9 @@
 // point, which names a town's second and third shuttleport apart (`pois`), what its people said, as the
 // structure of its conversations and nothing more (`conversations`, and the relay, which plays the adopted
 // ones from it), where a world's ships came out in space and where a station landed them (`space`), the tubes
-// a cloning facility stood its dead up in (`fittings`), and the old tutorial's people and things by the rooms
-// of its hall (`spawns`, `fittings`). They used to open the owner's own
+// a cloning facility stood its dead up in (`fittings`), the old tutorial's people and things by the rooms
+// of its hall (`spawns`, `fittings`), and the category each template stood under on the server's planetary map and
+// the areas it kept players from building in (`pois`). They used to open the owner's own
 // Core3 checkout for them, which meant nobody else could have any of it: the launcher has no such
 // folder, and a player was never going to be asked to install an emulator to get a travel terminal.
 //
@@ -76,6 +77,8 @@ export const CORE3_READERS = {
   readLandingPoints: { file: 'landing-points.json', read: (dir) => C3.readLandingPoints(dir) },
   readCloningPoints: { file: 'cloning-points.json', read: (dir) => C3.readCloningPoints(dir) },
   readTutorial: { file: 'tutorial.json', read: (dir) => C3.readTutorial(dir) },
+  // Map-maker II's eighth wave: the category the server's planetary map listed each template under (`pois`' services).
+  readMapCategories: { file: 'map-categories.json', read: (dir) => C3.readMapCategories(dir) },
 };
 
 // ---------------------------------------------------------------------------------------------

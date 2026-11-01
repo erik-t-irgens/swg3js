@@ -38,6 +38,8 @@ import { distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, G
 import { WAYPOINT_COLOURS } from '../story/waypoints.ts';
 import { mapCopyAt, mapCopyPicture, mapPicture } from './mapImages.ts';
 import { isListTab, recallTab, rememberTab, tabShown, type MapTab } from './mapTabs.ts';
+import { SERVICE_LAYERS, SERVICE_TUNE, drawServiceMark, serviceColour, serviceLabel, serviceLayerOf, type ServiceLayer } from './serviceMarks.ts';
+import type { ServiceRow } from './galaxyMap';
 
 /** Where the player is and what is round them, read fresh every time the map draws. */
 export interface MapSource {
@@ -84,6 +86,11 @@ export interface MapSource {
    * opens and whenever a tab is shown. Optional: with nothing here the tab is never offered.
    */
   groupTab?(): boolean;
+  /**
+   * The world's own services (Map-maker II's eighth wave: `pois.json`'s `services`, those standing in the world's state now),
+   * in the map's own frame. Optional: with nothing here, or a pack converted before them, none is drawn and no switch shown.
+   */
+  services?(packId: string): Promise<ServiceRow[]>;
 }
 
 interface MapImage {
@@ -261,6 +268,14 @@ export class MapUi {
   private imageDone = false;
   private pois: Poi[] = [];
   private poisFor = '';
+  /** The world's services (Map-maker II's eighth wave) and the pack they were asked for, and which of their two switches are on. */
+  private services: ServiceRow[] = [];
+  private servicesFor = '';
+  private readonly serviceBoxes = new Map<ServiceLayer, HTMLElement>();
+  /** Told when a services switch moves (the minimap draws the same switches). */
+  onServicesSwitched: (() => void) | null = null;
+  /** What the last planet frame drew of the services, for the console. */
+  readonly servicesDrawn = { services: 0, terminals: 0 };
   private frame = 0;
   private raf = 0;
   /** The 2D view: metres per screen pixel, and the map point (SWG metres) at the canvas centre. */
@@ -460,6 +475,20 @@ export class MapUi {
       this.layerBoxes.set(layer.id, label);
       // A layer the client never drew (the group) has no zone-map icon to ask a pack for.
       if (layer.icon) void this.loadIcon(layer.id, layer.icon);
+    }
+    // The game's own services on a planet (Map-maker II's eighth wave): two switches of their own, shown only while the world
+    // has any, each mark ours (`serviceMarks.ts`).
+    for (const layer of SERVICE_LAYERS) {
+      const label = document.createElement('label');
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = SERVICE_TUNE[layer.id];
+      box.addEventListener('change', () => this.setServiceLayer(layer.id, box.checked));
+      label.appendChild(box);
+      label.appendChild(document.createTextNode(layer.label));
+      label.hidden = true;
+      this.layerBar.appendChild(label);
+      this.serviceBoxes.set(layer.id, label);
     }
     this.followButton = document.createElement('button');
     this.followButton.className = 'follow on';
@@ -1028,6 +1057,14 @@ export class MapUi {
       if (box.hidden === on) box.hidden = !on;
       if (on) any = true;
     }
+    // The services' two switches, on a planet whose pack has any of that switch's kind.
+    for (const layer of SERVICE_LAYERS) {
+      const box = this.serviceBoxes.get(layer.id);
+      if (!box) continue;
+      const on = !space && this.services.some((s) => serviceLayerOf(s.kind) === layer.id);
+      if (box.hidden === on) box.hidden = !on;
+      if (on) any = true;
+    }
     if (this.followButton.hidden === space) this.followButton.hidden = !space;
     if (this.layerBar.hidden === any) this.layerBar.hidden = !any;
   }
@@ -1211,6 +1248,13 @@ export class MapUi {
         if (this.poisFor === packId) this.pois = p;
       });
     }
+    if (this.servicesFor !== packId) {
+      this.servicesFor = packId;
+      this.services = [];
+      void this.source.services?.(packId).then((s) => {
+        if (this.servicesFor === packId) this.services = s;
+      });
+    }
     if (!this.followed || !this.scale) this.fit();
     const ctx = this.ctx;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -1259,7 +1303,13 @@ export class MapUi {
       // that value, so moving them is a change to how the map looks and not this wave's to make.
       const colour = city ? colourOf(COL.accent) : travel ? colourOf(COL.component) : p.kind === 'place' ? colourOf(COL.ink) : p.kind === 'region' || p.kind === 'area' ? 'rgba(180,200,220,0.6)' : '#c8d8e8';
       const r = p.r / this.scale;
-      if (city || (r > 6 && p.r >= POI_RING_MIN)) {
+      // A place of ours drawn by its own shape (Map-maker II's eighth wave): a rectangle or an outline as itself.
+      if (p.shape && p.shape.kind !== 'circle') {
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = city ? 1.5 : 1;
+        this.shapePath2d(p.shape);
+        ctx.stroke();
+      } else if (city || (r > 6 && p.r >= POI_RING_MIN)) {
         ctx.strokeStyle = colour;
         ctx.lineWidth = city ? 1.5 : 1;
         ctx.beginPath();
@@ -1280,6 +1330,8 @@ export class MapUi {
         ctx.fillText(p.name, s.x + 6, s.y);
       }
     }
+    // The game's own services (Map-maker II's eighth wave), under every mark of yours and theirs.
+    this.drawServices2d(w, h);
     // Your waypoints, then the people you are grouped with, both under your own mark so yours is never
     // hidden by one of theirs.
     this.drawWaypoints2d(w, h);
@@ -1316,6 +1368,96 @@ export class MapUi {
       ctx.textAlign = 'left';
     }
     this.readout.textContent = `${name} · ${Math.round(m.x)}, ${Math.round(m.z)}${p.altitude !== null ? ` · ${Math.round(p.altitude)} m up` : ''} · ${(this.scale * 100).toFixed(0)} m per 100 px · drag, wheel, double-click to centre, click a place to go, right-click to mark`;
+  }
+
+  /** A place of ours's rectangle or outline as the canvas's path, in the map's own frame through the view. */
+  private shapePath2d(s: NonNullable<Poi['shape']>): void {
+    const ctx = this.ctx;
+    const w = this.canvas2d.clientWidth;
+    const h = this.canvas2d.clientHeight;
+    ctx.beginPath();
+    if (s.kind === 'rect') {
+      const x0 = screenFromMapX(s.min[0], this.look.x, this.scale, w);
+      const x1 = screenFromMapX(s.max[0], this.look.x, this.scale, w);
+      const y0 = screenFromMapY(s.min[1], this.look.z, this.scale, h);
+      const y1 = screenFromMapY(s.max[1], this.look.z, this.scale, h);
+      ctx.rect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
+      return;
+    }
+    if (s.kind !== 'poly') return;
+    for (let i = 0; i < s.pts.length; i++) {
+      const x = screenFromMapX(s.pts[i][0], this.look.x, this.scale, w);
+      const y = screenFromMapY(s.pts[i][1], this.look.z, this.scale, h);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  }
+
+  /** A services switch moved (the bar's box, or the console): the one table the minimap reads too (`SERVICE_TUNE`). */
+  setServiceLayer(layer: ServiceLayer, on: boolean): void {
+    SERVICE_TUNE[layer] = on;
+    this.syncServiceBoxes();
+    this.onServicesSwitched?.();
+  }
+
+  /** The bar's two boxes written from the table (a switch moved from the console). */
+  syncServiceBoxes(): void {
+    for (const l of SERVICE_LAYERS) {
+      const box = this.serviceBoxes.get(l.id)?.querySelector('input');
+      if (box && box.checked !== SERVICE_TUNE[l.id]) box.checked = SERVICE_TUNE[l.id];
+    }
+  }
+
+  /** A world's places or services changed (a place of ours landed): the next frame asks for them again. */
+  placesChanged(packId: string): void {
+    if (this.poisFor === packId) this.poisFor = '';
+    if (this.servicesFor === packId) this.servicesFor = '';
+  }
+
+  /** A world's picture was made (again) in the browser (`setMadePicture`): the next frame takes it, its view kept. */
+  pictureChanged(packId: string): void {
+    if (this.imageFor !== packId) return;
+    void mapPicture(packId).then((img) => {
+      if (this.imageFor === packId && this.imageCopy < 0) {
+        const fresh = !this.image;
+        this.image = img;
+        this.imageDone = true;
+        if (fresh) this.fit();
+      }
+    });
+  }
+
+  /**
+   * The game's own services on the planet's map: each a mark of ours at its place, the switches on, a building's name beside
+   * it once the map is close (`SERVICE_TUNE.labelScale`). Drawn straight onto the canvas, so a frame writes nothing to the page.
+   */
+  private drawServices2d(w: number, h: number): void {
+    this.servicesDrawn.services = 0;
+    this.servicesDrawn.terminals = 0;
+    if (!this.services.length || (!SERVICE_TUNE.services && !SERVICE_TUNE.terminals)) return;
+    const ctx = this.ctx;
+    const shade = colourOf(COL.void);
+    const half = SERVICE_TUNE.markPx;
+    const named = this.scale < SERVICE_TUNE.labelScale;
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    for (const s of this.services) {
+      const layer = serviceLayerOf(s.kind);
+      if (!SERVICE_TUNE[layer]) continue;
+      const sx = screenFromMapX(s.x, this.look.x, this.scale, w);
+      const sy = screenFromMapY(s.z, this.look.z, this.scale, h);
+      if (sx < -20 || sy < -20 || sx > w + 20 || sy > h + 20) continue;
+      const colour = colourOf(COL[serviceColour(s.kind)]);
+      drawServiceMark(ctx, s.kind, sx, sy, half, colour, shade);
+      this.servicesDrawn[layer]++;
+      if (named && layer === 'services') {
+        ctx.fillStyle = shade;
+        ctx.fillText(serviceLabel(s.kind), sx + half + 4, sy + 1);
+        ctx.fillStyle = colour;
+        ctx.fillText(serviceLabel(s.kind), sx + half + 3, sy);
+      }
+    }
   }
 
   /**

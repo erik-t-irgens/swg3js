@@ -164,6 +164,33 @@ export function mapPicture(packId: string): Promise<MapPicture | null> {
 }
 
 /**
+ * A picture made in the browser for a world with no converted map (Map-maker II's eighth wave: a real-elevation world's,
+ * `demMap.ts`), taken as that world's picture by every map: the map window, the minimap, the galaxy's thumbnail (its `url`,
+ * an object URL of the picture's own bytes). Made again, it replaces the last, whose URL is let go; the bitmap is left to
+ * the collector, since a map drawing it this frame may still hold it.
+ */
+const made = new Map<string, { pic: MapPicture; url: string; version: number }>();
+
+export function setMadePicture(packId: string, image: ImageBitmap, frame: MapFrame, url: string): number {
+  const old = made.get(packId);
+  const pic: MapPicture = { image, frame };
+  const version = (old?.version ?? 0) + 1;
+  made.set(packId, { pic, url, version });
+  ready.set(packId, pic);
+  pictures.set(packId, Promise.resolve(pic));
+  const meta: MapMeta = { url, frame };
+  metas.set(packId, Promise.resolve(meta));
+  metasReady.set(packId, meta);
+  if (old && old.url !== url && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(old.url);
+  return version;
+}
+
+/** A world's made picture and how many times it has been made, or null for none. */
+export function madePicture(packId: string): { pic: MapPicture; url: string; version: number } | null {
+  return made.get(packId) ?? null;
+}
+
+/**
  * A pack's picture if it has already arrived: the picture, null for a pack that has none, and undefined
  * while it is still on its way -- the first ask starts it. For a frame that must not wait on anything.
  *

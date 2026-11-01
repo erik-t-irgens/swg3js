@@ -60,6 +60,12 @@ export interface GhostDeps {
   waterAt(x: number, z: number): number;
   /** What the world already has standing within `reach` of a point. */
   standing(x: number, z: number, reach: number): { x: number; z: number; radius: number; template?: string }[];
+  /**
+   * Why nobody may build in a circle of `r` metres about (x, z), in words, or null (Map-maker II's eighth wave: a place of ours
+   * made no-build, or the game's own no-build data where its world row turns it on). Asked after `standing` with the patch's
+   * middle and its clear radius; absent, nothing is a zone.
+   */
+  zone?(x: number, z: number, r: number): string | null;
 }
 
 /** Where the ghost is and whether it may be put down there. */
@@ -158,6 +164,12 @@ export function ghostVerdict(patch: Patch, at: { x: number; z: number }, yaw: nu
   const mid = patchMiddle(patch, at, yaw, MIDDLE);
   if (standingIn(mid.x, mid.z, clear, deps)) {
     state.why = ALREADY_STANDING;
+    return state;
+  }
+  // A no-build zone, in its own words (the place's, or the game's own data's).
+  const zoned = deps.zone?.(mid.x, mid.z, clear) ?? null;
+  if (zoned !== null) {
+    state.why = zoned;
     return state;
   }
   state.ok = true;

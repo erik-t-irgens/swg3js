@@ -10,6 +10,7 @@
 import type { DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
 import { RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, tuneRestuss, tuneRestussRoster } from './restuss.ts';
+import { locationDialSet } from './locationsDials.ts';
 
 /** One number of the roster, set through `tuneRestussRoster`: what it holds the value to is said back where it differs. */
 function rosterDial(name: 'share' | 'ring' | 'spacing' | 'respawn' | 'least' | 'most', label: string, note: string, min: number, max: number, step: number, unit: string, get: () => number): NumberDial {
@@ -96,5 +97,5 @@ export const RESTUSS_DIALS: DialSet = { helper: 'restuss', groups: RESTUSS_GROUP
 
 /** The dials a world helper of `__debug` has, or null: what the debug menu asks as a helper is picked. */
 export function worldDialsFor(helper: string): DialSet | null {
-  return helper === 'restuss' ? RESTUSS_DIALS : null;
+  return helper === 'restuss' ? RESTUSS_DIALS : helper === 'locations' ? locationDialSet() : null;
 }

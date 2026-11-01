@@ -229,8 +229,48 @@ export interface LakeView {
   river?: { width: string; velocity: string; fallFrom: string; length: string; steep: string };
 }
 
+/**
+ * A place of ours picked, as the Selected tab shows it (Map-maker II's eighth wave): its words, its kind and shape, whether it
+ * is drawn, said and built in (and whether each is its own or its kind's), its loading lines (one a line) and its story area.
+ */
+export interface PlaceView {
+  id: string;
+  name: string;
+  kind: string;
+  shape: string;
+  map: boolean;
+  say: boolean;
+  build: boolean;
+  own: { map: boolean; say: boolean; build: boolean };
+  desc: string;
+  note: string;
+  loading: string;
+  state: string;
+  snippet: string;
+  words: string;
+}
+
+/** The places tool as the Tools tab shows it (Map-maker II's eighth wave). */
+export interface PlacesToolsView {
+  armed: boolean;
+  mode: 'circle' | 'rect' | 'outline';
+  kind: string;
+  radius: number;
+  /** Points in the outline under way, the place picked. */
+  draft: number;
+  picked: string | null;
+  /** The world row: the game's own cities kept clear of players' building, and its loading lines (one a line). */
+  cities: boolean;
+  worldLoading: string;
+  file: string;
+  note: string;
+}
+
 /** What the window needs of the editor beside the library's own. */
 export interface EditorWindowHost extends LibraryHost {
+  /** The place of ours the places tool has picked, or null (Map-maker II's eighth wave); its fields written (`copy` copies its story area). */
+  place?(): PlaceView | null;
+  setPlaceRow?(fields: Record<string, unknown>): void;
   /** The lake of ours the water tool has picked, or null (Map-maker II's fifth wave); its fields written. */
   lake?(): LakeView | null;
   setLake?(fields: Record<string, unknown>): void;
@@ -276,6 +316,8 @@ export interface EditorWindowHost extends LibraryHost {
     paint?: PaintToolsView;
     /** The water tool (Map-maker II's fifth wave): its mode, where a lake's level comes from, the draft and the lake picked. */
     water?: WaterToolsView;
+    /** The places tool (Map-maker II's eighth wave): what a click draws, the kind written, the world row's switch and lines. */
+    places?: PlacesToolsView;
     /** The seventh wave's effects and sounds: whether one put down hangs on the row the aim meets (else it stands a mark). */
     attach?: { onto: boolean };
   };
@@ -530,6 +572,80 @@ export class EditorWindow {
   private drawSelected(): void {
     const el = this.els.selected;
     el.replaceChildren();
+    // A place of ours the places tool has picked (Map-maker II's eighth wave): its words, kind and switches, its loading
+    // lines and its story area, each written as it is left (one undo each).
+    const place = this.host.place?.() ?? null;
+    if (place && this.host.setPlaceRow) {
+      const set = this.host.setPlaceRow.bind(this.host);
+      this.field(el, 'Place', place.id, null);
+      this.field(el, 'Its name', place.name, (v) => set({ name: v.trim() || null }));
+      const kf = document.createElement('label');
+      kf.className = 'ed-field';
+      const ks = document.createElement('span');
+      ks.textContent = 'Kind';
+      const sel = document.createElement('select');
+      for (const k of ['city', 'place', 'landmark', 'area', 'zone']) {
+        const o = document.createElement('option');
+        o.value = k;
+        o.textContent = k;
+        if (k === place.kind) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener('change', () => {
+        set({ kind: sel.value });
+        sel.blur();
+      });
+      kf.append(ks, sel);
+      el.appendChild(kf);
+      this.field(el, 'Shape', place.shape, null);
+      if (place.state) this.field(el, 'State', place.state, null);
+      const sw = (label: string, key: 'map' | 'say' | 'build', on: boolean, own: boolean): void => {
+        this.field(el, `${label}${own ? '' : " (its kind's)"}`, on, (v) => set({ [key]: v === 'true' }), 'check');
+        if (own) {
+          const b = this.button(`${label}: its kind's again`, 'place');
+          b.addEventListener('click', () => {
+            set({ [key]: null });
+            b.blur();
+          });
+          el.appendChild(b);
+        }
+      };
+      sw('Drawn on the maps', 'map', place.map, place.own.map);
+      sw('Name said walking in', 'say', place.say, place.own.say);
+      sw('Players may build', 'build', place.build, place.own.build);
+      this.field(el, 'Tooltip', place.desc, (v) => set({ desc: v.trim() || null }));
+      this.field(el, 'Note (never shown)', place.note, (v) => set({ note: v.trim() || null }));
+      const lf = document.createElement('label');
+      lf.className = 'ed-field';
+      const ls = document.createElement('span');
+      ls.textContent = 'Loading lines (one a line)';
+      const ta = document.createElement('textarea');
+      ta.rows = 3;
+      ta.value = place.loading;
+      ta.addEventListener('change', () => set({ loading: ta.value.split('\n') }));
+      ta.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') ta.blur();
+      });
+      lf.append(ls, ta);
+      el.appendChild(lf);
+      if (place.words) this.note(el, place.words);
+      const h3 = document.createElement('div');
+      h3.className = 'ed-h';
+      h3.textContent = 'AS A STORY AREA';
+      el.appendChild(h3);
+      const pre = document.createElement('pre');
+      pre.className = 'ed-note';
+      pre.textContent = place.snippet;
+      el.appendChild(pre);
+      const copy = this.button('Copy it', 'place');
+      copy.addEventListener('click', () => {
+        set({ copy: true });
+        copy.blur();
+      });
+      el.appendChild(copy);
+      this.note(el, 'Drag its square to move it, C held with the wheel sizes it, Delete takes it out; Escape lets it go.');
+      return;
+    }
     // A lake of ours the water tool has picked (Map-maker II's fifth wave): its name, its shader and its look's own numbers,
     // each written as it is left; an empty look field takes that number back to its shader's (or the planet's) own.
     const lake = this.host.lake?.() ?? null;
@@ -1033,6 +1149,55 @@ export class EditorWindow {
       this.note(el, wt.file);
       if (wt.note) this.note(el, wt.note);
       this.note(el, "Z arms it. A lake by clicks: LMB a point, a click near the first closes it, RMB takes one back. Traced: LMB a seed in its basin, flooded to the seed's ground and a little more (or the typed level). A fall: LMB its top, then its bottom. A river: LMB its points from its source down, a click near the last writes it, RMB takes one back. A click on a lake's or a river's ring picks it; its look (and a river's width and velocity) is on the Selected tab. Each is one undo. Its numbers are the sliders under The water tool below, and the rivers' own under rivers in the debug menu.");
+    }
+    // The places tool (Map-maker II's eighth wave): what a click draws, the kind written, a circle's radius, the draft and
+    // the place picked, and the world row (the game's own cities kept clear of players' building, its loading lines).
+    if (t.places) {
+      const pl = t.places;
+      h('PLACES ON THE MAP');
+      row(...(['circle', 'rect', 'outline'] as const).map((m) => toggle(m === 'circle' ? 'A circle' : m === 'rect' ? 'A rectangle' : 'An outline', pl.mode === m, { placesMode: m })));
+      row(...['city', 'place', 'landmark', 'area', 'zone'].map((k) => toggle(k[0].toUpperCase() + k.slice(1), pl.kind === k, { placesKind: k })));
+      if (pl.mode === 'circle') {
+        const f = document.createElement('label');
+        f.className = 'ed-field';
+        const sp = document.createElement('span');
+        sp.textContent = 'Radius m';
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.step = 'any';
+        input.value = String(pl.radius);
+        input.addEventListener('change', () => {
+          const n = Number(input.value);
+          if (input.value.trim() !== '' && Number.isFinite(n)) this.host.setTool({ placesRadius: n });
+        });
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === 'Escape') input.blur();
+        });
+        f.append(sp, input);
+        el.appendChild(f);
+      }
+      if (pl.draft >= 3) row(toggle(`Close the outline (${pl.draft} points)`, false, { placesClose: true }), toggle('Give it up', false, { placesGiveUp: true }));
+      else if (pl.draft) row(toggle('Give up the outline', false, { placesGiveUp: true }));
+      if (pl.picked) row(toggle(`Let ${pl.picked} go`, true, { placesPick: null }), toggle('Take it out', false, { placesRemove: pl.picked }));
+      h('THE WORLD ROW OF PLACES');
+      row(toggle(pl.cities ? "The game's own cities: no building" : "The game's own cities: players may build", pl.cities, { placesCities: !pl.cities }));
+      this.note(el, "Off by default: the game's own cities, its no-build areas and the client's no-build radii are open to players' houses and props. On, players are kept off them as the server kept them.");
+      const lf = document.createElement('label');
+      lf.className = 'ed-field';
+      const ls = document.createElement('span');
+      ls.textContent = 'Loading lines in no place';
+      const ta = document.createElement('textarea');
+      ta.rows = 3;
+      ta.value = pl.worldLoading;
+      ta.addEventListener('change', () => this.host.setTool({ placesWorldLoading: ta.value }));
+      ta.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') ta.blur();
+      });
+      lf.append(ls, ta);
+      el.appendChild(lf);
+      this.note(el, pl.file);
+      if (pl.note) this.note(el, pl.note);
+      this.note(el, "P arms it. A circle: LMB at its middle (C held with the wheel sizes the next one). A rectangle: LMB held from corner to corner. An outline: LMB a point, a click near the first closes it, RMB takes one back. A click on a place's ring picks it; its name, kind, switches and loading lines are on the Selected tab. Each change is one undo. A place players may not build in is drawn in red.");
     }
     h('SNAPPING');
     row(toggle(t.snapOn ? 'Snapping on' : 'Snapping off', t.snapOn, { snapOn: !t.snapOn }));

@@ -126,11 +126,15 @@ const SCENE_REACH = { objects: 0, terrain: 3, far: 6, waitMs: 40000 };
 import { loadPlayerRig } from './player/rig';
 import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
-import { GalaxyMap, type Poi } from './ui/galaxyMap';
+import { GalaxyMap, type Poi, type PoisFile } from './ui/galaxyMap';
+import { PLACE_TUNE, PlaceIndex, PlaceIndexKeeper, loadingLine as placeLoadingLine, minimapPlacesOf, tunePlaces, zoneWordsOf } from './world/places.ts';
+import { readLocationsFile, type LocationRow } from './world/editFiles/locationsFile.ts';
+import { DemMapMaker, MAP_PICTURE_TUNE, demMapSourceOf, remakeDue, tuneMapPicture } from './world/demMap.ts';
+import { SERVICE_TUNE, tuneServices } from './ui/serviceMarks.ts';
 import { MapUi } from './ui/mapUi';
 import { isMapTab, pressTabKey, type MapTab } from './ui/mapTabs.ts';
 import { groupMapFeed, mapFrame, waypointMapFeed, WaypointList, type MapFrame } from './ui/spaceMapLayers.ts';
-import { mapMeta, mapPictureNow } from './ui/mapImages.ts';
+import { madePicture, mapMeta, mapPictureNow, setMadePicture } from './ui/mapImages.ts';
 import { Minimap, MINIMAP_TUNE, tuneMinimap } from './ui/minimap.ts';
 import { WaypointHud, waypointWords } from './ui/waypointHud.ts';
 import { WaypointsUi, type WaypointRow, type WaypointsModel } from './ui/waypointsUi.ts';
@@ -229,6 +233,7 @@ import { HOLIDAYS, HOLIDAY_SEASONS, holidayNews, holidayOn, installHolidays, set
 import { FALLING_WATER_SHADERS, SOLID_FILE, SOLID_TUNE, readSolidFile, setSolidRows, solidRows } from './world/walkThrough.ts';
 import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, fittingDormant, tuneRestuss, tuneRestussRoster } from './world/restuss.ts';
 import { worldDialsFor } from './world/restussDials.ts';
+import { LOCATION_DIALS } from './world/locationsDials.ts';
 import { PROPS_KEEPER_TUNE, SERVER_NOT_ANSWERING, arrivalCircles, arrivalHolds, arrivalKeeper, keeperNews, keeperOf, keeperState, keeperStateOf, keptDepsOf, keptKey, keptProps, keptRefusal, routePropWord, switchSets, type Keeper, type KeeperState, type KeptRow, type KeptSets } from './net/propsKept.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
@@ -1048,6 +1053,8 @@ interface EditorApi {
   lakesDebug(o?: Record<string, unknown>): Promise<unknown>;
   /** The rivers, the terrain's own and ours, and the water tool's river mode (Map-maker II's sixth wave): `__debug.rivers`. */
   riversDebug(o?: Record<string, unknown>): Promise<unknown>;
+  /** The places tool (Map-maker II's eighth wave): __debug.locations's editing half. */
+  locationsDebug(o?: Record<string, unknown>): Promise<unknown>;
 }
 
 /**
@@ -1806,10 +1813,30 @@ class App {
   private placeNamesFor = '';
   /** The map's own place loader, captured from the galaxy tab so nothing here has to open the map. */
   private poisOf: (packId: string) => Promise<Poi[]> = async () => [];
-  /** The same loader's rows as the file holds them, every state's: what `placeNames` is read from. */
-  private poisRawOf: (packId: string) => Promise<Poi[]> = async () => [];
   /** The same loader's file whole, its centre beside its places (null where a pack's file has none or will not read). */
   private poisFileOf: (packId: string) => Promise<{ center: { x: number; z: number } | null; pois: Poi[] }> = async () => ({ center: null, pois: [] });
+  /**
+   * The same loader's whole merged file (Map-maker II's eighth wave): the pack's places with ours merged in, the game's
+   * services and no-build rows, and the locations file's own rows; and the places of ours of a world laid again by difference.
+   */
+  private placesFileOf: (packId: string) => Promise<PoisFile> = async () => ({ center: null, pois: [], services: [], noBuild: [], locations: [] });
+  private landPlacesOf: (packId: string, put: LocationRow[], deleted: string[]) => Promise<PoisFile | null> = async () => null;
+  /** A world's locations file as last read: its size and why it was not read (the world editor's Tools tab). */
+  private placesFileInfoOf: (packId: string) => { bytes: number | null; problem: string | null } = () => ({ bytes: null, problem: null });
+  /** No places of ours, kept: what a frame is handed before a world's file has landed (nothing made). */
+  private readonly noLocationRows: LocationRow[] = [];
+  /** This world's merged places file as it landed (null until it has), and the places' index built from it (`placesNow`). */
+  private placesFile: PoisFile | null = null;
+  /** The index and what it was built from: the file, the frame's centre and the world states, compared as they stand. */
+  private readonly placeKeeper = new PlaceIndexKeeper();
+  /** The world states' stamp the minimap's places were filtered at (`refreshPlacesShown`): a state taken since draws them again. */
+  private placesShownStamp = -1;
+  /** A real-elevation world's picture being made (`demMap.ts`), the world it is for, and when an edit last landed on it. */
+  private madeMap: DemMapMaker | null = null;
+  private madeMapFor = '';
+  private madeMapGen = -1;
+  private madeMapEdited = Number.NaN;
+  private madeMapStarted = 0;
   /** The facilities the death card is offering just now, in the order its rows stand. */
   private deathChoices: FacilityChoice[] = [];
   /** Animation mixers of models shown through the debug hook. */
@@ -3140,10 +3167,14 @@ class App {
     // The galaxy tab keeps a world's named places once it has read them; the death card reads the
     // same list through this rather than reaching into the map.
     this.poisOf = (id) => galaxy.loadPois(id);
-    this.poisRawOf = (id) => galaxy.loadPoisRaw(id).then((f) => f.pois);
     // And the same file whole, its centre with it: what a travel to a place on another world reads to stand the
     // place in the game's frame before that world loads (`teleport`, `placeFromPois`), one screen and not two.
     this.poisFileOf = (id) => galaxy.loadPoisFile(id);
+    // And the merged file whole, places of ours and the game's services and no-build rows with it (Map-maker II's eighth
+    // wave), and the places of ours laid again by difference when the world editor writes them or the dev server says so.
+    this.placesFileOf = (id) => galaxy.loadPoisRaw(id);
+    this.placesFileInfoOf = (id) => galaxy.locationsFileInfo(id);
+    this.landPlacesOf = (id, put, deleted) => galaxy.landLocations(id, put, deleted);
     // The shuttle fares: the game's own, out of the same file the galaxy map draws its routes from,
     // fetched once for the session. A pack with no file leaves them null and a port then moves you
     // about its own world for nothing rather than offering no ride at all.
@@ -3166,6 +3197,8 @@ class App {
       },
       center: () => this.world.layoutCenter,
       pois: (id) => galaxy.loadPois(id),
+      // The game's own services (Map-maker II's eighth wave), those standing in the world's state now.
+      services: (id) => galaxy.loadPoisRaw(id).then((f) => inState(f.services)),
       // The zone's placed things, read once per zone into the list the map owns: its stations and the
       // rest of what it shows are marks from the pack, so only the rocks are wanted here.
       objects: (out) => {
@@ -3224,6 +3257,21 @@ class App {
       groupTab: () => this.groupHeld(),
     });
     this.map.onClose = () => this.toggleMap();
+    // A services switch moved on the map window (Map-maker II's eighth wave): the minimap draws by the same switches.
+    this.map.onServicesSwitched = () => this.refreshPlacesShown();
+    // The places' no-build verdict (Map-maker II's eighth wave), where a house is put down in the world: only inside its
+    // `!given && !force` block, so a house a server holds is stood as before.
+    this.world.noBuildWords = (x, z, r) => this.noBuildHere(x, z, r, 'house');
+    // The places' dials (the debug menu's `locations`): a moved made-map dial makes the picture again, a mark's draws the maps again.
+    LOCATION_DIALS.host = {
+      remake: () => this.remakeMadeMap(),
+      redraw: () => {
+        // A services switch moved from the menu: the map window's own boxes say it too.
+        this.map.syncServiceBoxes();
+        this.refreshPlacesShown();
+        this.minimap.redraw();
+      },
+    };
     // The Waypoints tab's page, built before the map was (`wireWaypoints`): the map shows it, and it is
     // drawn from the book as it comes up. The group's page is handed over where the group is wired.
     this.map.adoptBody('waypoints', this.waypointsUi.root, this.waypointsUi.shownFrom(() => this.waypointsModel()));
@@ -4226,6 +4274,18 @@ class App {
         }
         return { ...this.world.riversReport(), ...(at ? { at } : {}), ...(said.length ? { answered: said } : {}) };
       },
+      /**
+       * The places of ours (Map-maker II's eighth wave): the world's locations rows and their kinds, its no-build zones (ours,
+       * and the game's own cities, no-build areas and radii under the world row's `cities: 'noBuild'`), which place holds the
+       * eye and what its loading line would be; the game's own services. `{ at: [x, z] }` a `/loc` place: which place holds it
+       * and why nobody may build there; `{ map: true }` a real-elevation world's made picture (its slices and milliseconds),
+       * `{ map: { tune } }` moves `MAP_PICTURE_TUNE` and makes it again, `{ map: { make: true } }` makes it now in one go (a
+       * driven tab); `{ tune }` moves `PLACE_TUNE`; `{ services: { services, terminals, minimap, markPx, ... } }` the
+       * services' layers and sizes. On the dev server the places tool's own too: `{ cities: 'noBuild' | 'off' }` writes the
+       * world row, `{ worldLoading }`, `{ arm }`, `{ write: { shape, kind, name, ... } }`, `{ pick }`, `{ move }`, `{ size }`,
+       * `{ set }`, `{ remove }`, `{ snippet }` and the tool's numbers in `{ tool }`.
+       */
+      locations: async (opts?: Record<string, unknown>) => this.locationsDebug(opts ?? {}),
       placements: async (
         opts: {
           reload?: boolean;
@@ -15767,6 +15827,9 @@ class App {
       v.range = Math.max(HUD_MINIMAP_RANGE.min, Math.min(HUD_MINIMAP_RANGE.max, S.hudMinimapRange));
       v.northUp = S.hudMinimapNorthUp;
     }
+    // The places it draws were filtered by the world's states: a state taken since (an arrival takes its states after its
+    // places file has landed, an admin's word) filters them again. A number compared; nothing made on a steady frame.
+    if (this.placesFile && worldStateStamp() !== this.placesShownStamp) this.refreshPlacesShown();
     // The clock the coordinates over the circle keep their rate on.
     v.now = performance.now() / 1000;
     this.minimap.update(v);
@@ -18833,17 +18896,28 @@ class App {
     this.world.day.paused = false;
     this.placeNames = [];
     this.placeNamesFor = placesFor;
+    this.placesFile = null;
+    this.minimap.setPlaces(null);
+    this.forgetMadeMap();
     // Every state's rows, filtered as they are read (`placeNames`): the states are taken behind the loading screen,
-    // after this has asked.
-    void this.poisRawOf(placesFor)
-      .then((list) => {
-        if (this.placeNamesFor === placesFor) this.placeNames = list;
+    // after this has asked. The whole merged file beside them (Map-maker II's eighth wave): the places of ours, the game's
+    // services and no-build rows, which the index, the minimap and the verdicts read.
+    void this.placesFileOf(placesFor)
+      .then((f) => {
+        if (this.placeNamesFor !== placesFor) return;
+        this.placeNames = f.pois;
+        this.placesFile = f;
+        this.refreshPlacesShown();
       })
       .catch(() => { });
     this.spawn = home ? new THREE.Vector3(home.x, home.y, home.z) : this.world.spawnPoint();
     this.arrivalHome = home;
     this.arrivalRoom = null;
     const stand = at ?? this.spawn;
+    // The loading screen's line for where this arrival stands (Map-maker II's eighth wave): the session's first world, a
+    // ticket's landing and a world's own arrival as much as a travel to a place. An arrival at its spawn asks again below,
+    // once the spawn is judged on the real ground.
+    this.showLoadingLine(planet, this.zone, stand);
     this.player.reset(stand);
     this.world.warmUp(stand);
     // The grapple's sounds asked for again behind this loading screen (the first frame the bank is in), so the first
@@ -18945,6 +19019,8 @@ class App {
       if (clearSpawn && !at && !home && p.pos.distanceTo(arrivalSpawn) < 4) {
         this.spawn.copy(clearSpawn);
         p.reset(clearSpawn.clone().setY(clearSpawn.y + 0.1));
+        // The spawn is known now: the loading line of the place it stands in, if the screen is still up for this world.
+        this.showLoadingLine(planet, this.zone, clearSpawn);
         return;
       }
       const ground = this.world.terrain.heightAt(p.pos.x, p.pos.z);
@@ -19057,6 +19133,8 @@ class App {
     // take up.
     if (!passenger) this.together.leaving(planet.id, zoneId ?? '', planet.space ? 'space' : 'ground');
     this.loadingScreen.show(planet, opts?.label ?? (zone ? `${planet.name}: ${zone.name}` : planet.name), passenger ? 'on the shuttle' : 'travelling');
+    // A place of ours's line where the destination is known, else the world row's (Map-maker II's eighth wave), written once its file is read.
+    this.showLoadingLine(planet, zoneId, opts?.at ?? null);
     await new Promise((r) => setTimeout(r, 400));
     // Taking the group's trip up: come out beside whoever led it rather than at this world's own
     // spawn. It waits here, under the loading screen and before anyone steps out of a ship, for the
@@ -19710,20 +19788,22 @@ class App {
       if (centre) {
         const g = placeFromPois(centre, poi);
         await this.travel(planet, zoneId, undefined, { at: new THREE.Vector3(g.x, 0, g.z), label: poi.name, ground: true, port: isPortKind(poi.kind) });
-        for (let i = 0; i < 100 && !this.world.layoutCenter; i++) await new Promise((r) => setTimeout(r, 100));
+        // The frame the places are written about (`placeFrame`): the layout's centre once the pack is in, or (0, 0) at once on a
+        // world with no pack (Map-maker II's places of ours on a real-elevation world), which a wait for a layout would never end.
+        for (let i = 0; i < 100 && !this.world.placeFrame; i++) await new Promise((r) => setTimeout(r, 100));
         // A travel that did not reach the world (another under way, a world that would not load) stands nobody.
         if (this.world.planet.id !== planet.id) return;
         // The safety net: a pack whose layout is centred elsewhere than its places file says (none converted
         // today, 19 of 19 agree) put the place wrong, and the old second phase stands the player right.
-        if (centreAgrees(this.world.layoutCenter, centre, LOADING_TUNE.centreSlack)) return;
+        if (centreAgrees(this.world.placeFrame, centre, LOADING_TUNE.centreSlack)) return;
         console.warn(`travel: ${packIdOf(planet, zoneId)}'s layout centre is not its places file's (${centre.x}, ${centre.z}); ${poi.name} is found again on a second screen`);
       } else {
         await this.travel(planet, zoneId);
         // The pack (and with it the snapshot's centre) loads after arrival; wait for it.
-        for (let i = 0; i < 100 && !this.world.layoutCenter; i++) await new Promise((r) => setTimeout(r, 100));
+        for (let i = 0; i < 100 && !this.world.placeFrame; i++) await new Promise((r) => setTimeout(r, 100));
       }
     }
-    const c = this.world.layoutCenter;
+    const c = this.world.placeFrame;
     if (!c) return;
     this.traveling = true;
     this.map.hide();
@@ -19733,6 +19813,7 @@ class App {
     // Snapshot space is mirrored in X and centred on the layout centre.
     const gx = -(poi.x - c.x);
     const gz = poi.z - c.z;
+    this.showLoadingLine(planet, zoneId, { x: gx, z: gz });
     const pos = new THREE.Vector3(gx, this.world.terrain.heightAt(gx, gz) + 0.3, gz);
     const p = this.player;
     if (p.mounted) this.handleMount();
@@ -23505,9 +23586,296 @@ class App {
    * placed object is. Built on the death and nowhere else, so it is no frame's cost.
    */
   private placesHere(): NamedPlace[] {
-    const c = this.world.layoutCenter;
+    // The frame the places are written about: the layout's centre, or (0, 0) on a world with no pack (Map-maker II's places
+    // of ours on a real-elevation world), where a layout centre never comes.
+    const c = this.world.placeFrame;
     if (!c || this.placeNamesFor !== packIdOf(this.world.planet, this.zone)) return [];
     return this.placeNames.map((p) => ({ name: p.name, x: -(p.x - c.x), z: p.z - c.z, r: p.r }));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // The places of ours (Map-maker II's eighth wave): the index, the no-build verdict, the minimap's outlines and services,
+  // the loading screen's line, landing a write by difference, and a real-elevation world's made map.
+
+  /**
+   * The places' index for this world (`places.ts`), built again only when the merged file, the frame's centre or a world state
+   * moved: compared as they stand, so a ghost asking every frame makes nothing. In the game's frame about `placeFrame` (the
+   * layout's centre, or (0, 0) on a world with no pack); empty until the file lands, and on a space zone.
+   */
+  private placesNow(): PlaceIndex {
+    return this.placeKeeper.now(this.placesFile, this.world.placeFrame, worldStateStamp(), !!this.world.planet?.space, standsIn);
+  }
+
+  /** Why nobody may build (`house`) or put a thing down (`prop`) in a circle of `r` metres about a game point, in words, or null. */
+  private noBuildHere(x: number, z: number, r: number, what: 'house' | 'prop' | 'editor'): string | null {
+    return this.placesNow().wordsAt(x, z, r, what);
+  }
+
+  /**
+   * What the minimap draws of this world's places (`minimapPlacesOf`): each city of ours drawn on the maps and standing in the
+   * world's state now, its outline `bad` where players may not build in it, and the game's own services standing now. Told
+   * on an arrival, a landing and a switch moved, and again by the minimap's own step whenever a world state is taken (an
+   * arrival takes its states behind the loading screen, after its places file has landed).
+   */
+  private refreshPlacesShown(): void {
+    const f = this.placesFile;
+    this.placesShownStamp = worldStateStamp();
+    if (!f) {
+      this.minimap.setPlaces(null);
+      return;
+    }
+    this.minimap.setPlaces(minimapPlacesOf(f, standsIn));
+    this.map.placesChanged(packIdOf(this.world.planet, this.zone));
+  }
+
+  /**
+   * Rows of this world's locations file landed (the world editor's write, the dev server's word), by difference: the merged
+   * file made again from the pack's own as read (`GalaxyMap.landLocations`), the city line's rows, the index, the minimap and
+   * the map window told. Nothing is fetched.
+   */
+  private async landLocationRows(pack: string, put: LocationRow[], deleted: string[]): Promise<void> {
+    const f = await this.landPlacesOf(pack, put, deleted);
+    if (!f || packIdOf(this.world.planet, this.zone) !== pack || this.placeNamesFor !== pack) return;
+    this.placeNames = f.pois;
+    this.placesFile = f;
+    this.cityWatch.reset();
+    this.refreshPlacesShown();
+  }
+
+  /** A world's locations file read again (the dev server's word) and its rows landed by difference against what stands. */
+  private async reloadLocations(pack: string, rev: string | undefined): Promise<void> {
+    const gen = this.world.generation;
+    const path = editFilePath('locations', pack);
+    let rows: LocationRow[] = [];
+    try {
+      const res = await fetchPublic(path, { cache: 'no-store' }, import.meta.env.BASE_URL);
+      if (res && res.ok && !(res.headers.get('content-type') ?? '').includes('text/html')) {
+        const text = await res.text();
+        if (import.meta.env.DEV) await this.noteReadRev(`locations/${pack}`, text);
+        const read = readLocationsFile(text, pack, 'ground');
+        if (read.problem) {
+          console.warn(`places: public/${path} changed and does not read (${read.problem}): the places are left as they stood`);
+          return;
+        }
+        rows = read.rows;
+      } else if (res && res.status !== 404 && !(res.headers.get('content-type') ?? '').includes('text/html')) {
+        console.warn(`places: public/${path} changed and could not be read again: the places are left as they stood`);
+        return;
+      }
+    } catch {
+      return;
+    }
+    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    const read = this.readRevs.get(`locations/${pack}`);
+    if (read !== undefined) this.placementRevs.set(`locations/${pack}`, read);
+    else if (typeof rev === 'string') this.placementRevs.set(`locations/${pack}`, rev);
+    const was = this.placesFile?.locations ?? [];
+    const ids = new Set(rows.map((r) => r.id));
+    await this.landLocationRows(pack, rows, was.filter((r) => !ids.has(r.id)).map((r) => r.id));
+  }
+
+  /**
+   * The loading screen's line for a destination (`places.ts`'s `loadingLine`): a place of ours's holding it, else the world
+   * row's, else the planet's own description, written once the destination's file is read (never awaited by the trip). `at`
+   * is the destination in that world's game frame, where it is known; `shown` the screen's own planet, so a line for a trip
+   * since overtaken is never written over the next one's. Asked as the destination becomes known: a travel's start (its
+   * place, if it names one), every arrival (`arrive`: the saved place, the world's own arrival, the spot the travel stands,
+   * or the spawn), and an arrival at its spawn again once the world is in and the spawn judged on the real ground. Every ask
+   * of one screen draws by the screen's own moment, so a place's line never flickers between its lines.
+   */
+  private showLoadingLine(planet: PlanetDef, zoneId: string | undefined, at: { x: number; z: number } | null): void {
+    if (planet.space || planet.instances) return;
+    const pack = packIdOf(planet, zoneId);
+    const moment = this.loadingScreen.lineMoment;
+    void this.placesFileOf(pack)
+      .then((f) => {
+        if (!f.locations.length || !this.loadingScreen.showingPlanet(planet.id)) return;
+        const c = f.center ?? (planet.pack === false ? { x: 0, z: 0 } : null);
+        const raw = at && c ? { x: c.x - at.x, z: at.z + c.z } : null;
+        this.loadingScreen.setBlurb(placeLoadingLine(inState(f.locations), raw, moment, planet.description));
+      })
+      .catch(() => {});
+  }
+
+  /** A real-elevation world's made picture let go (a world changed): the next world's is made for it. */
+  private forgetMadeMap(): void {
+    this.madeMap = null;
+    this.madeMapFor = '';
+    this.madeMapGen = -1;
+    this.madeMapEdited = Number.NaN;
+  }
+
+  /** An edit of this world's ground, paint or water landed: the made picture is made again a moment after (debounced). */
+  private madeMapEdit(): void {
+    if (this.madeMapFor) this.madeMapEdited = performance.now();
+  }
+
+  /**
+   * Once a frame the world is in: a real-elevation world whose raster is in (and the world not travelling) gets its picture
+   * made a few rows a frame (`DemMapMaker.step`, no frame past `MAP_PICTURE_TUNE.sliceMs`), handed to every map as that world's
+   * picture (`setMadePicture`) once done, and made again `debounceMs` after an edit lands. Nothing on any other world.
+   */
+  private stepMadeMap(): void {
+    const planet = this.world.planet;
+    if (!planet || planet.space || planet.instances || !planet.dem || this.traveling || !this.inWorld) return;
+    const terrain = this.world.terrain;
+    const dem = terrain.dem;
+    if (!dem) return;
+    const pack = packIdOf(planet, this.zone);
+    const gen = this.world.generation;
+    if (this.madeMapFor !== pack || this.madeMapGen !== gen) {
+      this.madeMapFor = pack;
+      this.madeMapGen = gen;
+      this.madeMap = null;
+      this.madeMapEdited = Number.NaN;
+      if (!madePicture(pack) || madePicture(pack)!.pic.frame.width !== dem.size) this.madeMapEdited = 0;
+    }
+    // Asked only while an edit is owed (nothing a steady frame of a made world reads makes anything).
+    if (!this.madeMap && Number.isFinite(this.madeMapEdited) && remakeDue(this.madeMapEdited, performance.now())) {
+      this.madeMapEdited = Number.NaN;
+      this.madeMap = this.makeDemMap(dem.size);
+      this.madeMapStarted = performance.now();
+    }
+    const m = this.madeMap;
+    if (!m || !m.step(MAP_PICTURE_TUNE.sliceMs)) return;
+    this.madeMap = null;
+    void this.finishMadeMap(pack, gen, m);
+  }
+
+  /**
+   * The made picture's source over this world (`demMapSourceOf`, which turns the world's answers into the picture's bytes):
+   * its ground, its family colour kept in one colour of its own, its colour map, its water and a lake's own look, at game
+   * points. Nothing made a pixel.
+   */
+  private makeDemMap(size: number): DemMapMaker {
+    const world = this.world;
+    const t = world.terrain;
+    const c = new THREE.Color();
+    return new DemMapMaker(
+      demMapSourceOf({
+        size,
+        heightAt: (gx, gz) => t.heightAt(gx, gz),
+        groundLinear: (gx, gz) => world.groundColorAt(gx, gz, c),
+        tiled: t.tiled,
+        colourMapAt: (gx, gz, out) => t.demColourAt(gx, gz, out),
+        waterAt: (gx, gz) => t.waterHeightAt(gx, gz),
+        waterLookAt: (gx, gz) => (t.waterTableAt(gx, gz) as { ours?: { look?: { color?: string } } } | null)?.ours?.look?.color,
+        planetWater: world.planet.water?.color ?? 0x2f6f8a,
+      }),
+    );
+  }
+
+  /** A made picture finished: put on a canvas, made a bitmap and an address, and handed to every map as the world's. */
+  private async finishMadeMap(pack: string, gen: number, m: DemMapMaker): Promise<void> {
+    const canvas = document.createElement('canvas');
+    canvas.width = m.px;
+    canvas.height = m.px;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.putImageData(new ImageData(m.data as Uint8ClampedArray<ArrayBuffer>, m.px, m.px), 0, 0);
+    const [bitmap, blob] = await Promise.all([createImageBitmap(canvas), new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/png'))]);
+    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    setMadePicture(pack, bitmap, { width: m.size, x: 0, z: 0 }, blob ? URL.createObjectURL(blob) : '');
+    this.madeMapLast = { px: m.px, slices: m.slices, frames: m.frames, worstMs: Math.round(m.worstMs * 100) / 100, totalMs: Math.round(m.totalMs * 10) / 10, wallMs: Math.round(performance.now() - this.madeMapStarted) };
+    this.map.pictureChanged(pack);
+    this.minimap.redraw();
+  }
+
+  /** What the last made picture came to, for the console. */
+  private madeMapLast: { px: number; slices: number; frames: number; worstMs: number; totalMs: number; wallMs: number } | null = null;
+
+  /** The made picture asked for again now (a dial moved): the one under way dropped, the next begun on the next frame. */
+  private remakeMadeMap(): void {
+    if (!this.madeMapFor) return;
+    this.madeMap = null;
+    this.madeMapEdited = 0;
+  }
+
+  /** `__debug.locations` (see the helper's own words). */
+  private async locationsDebug(o: Record<string, unknown>): Promise<unknown> {
+    const said: string[] = [];
+    let editing: unknown = null;
+    // The editing half: the places tool and the file's writes are the world editor's, the dev server's alone.
+    if (['arm', 'write', 'pick', 'move', 'size', 'set', 'remove', 'cities', 'worldLoading', 'snippet', 'tool'].some((k) => k in o)) {
+      if (!import.meta.env.DEV) said.push("writing places is the world editor's, the dev server's alone");
+      else {
+        const ed = await this.loadEditor();
+        editing = ed ? await ed.locationsDebug(o) : 'the world editor would not load';
+      }
+    }
+    if (o.tune && typeof o.tune === 'object') {
+      tunePlaces(o.tune as Partial<typeof PLACE_TUNE>);
+      this.minimap.redraw();
+    }
+    if (o.services && typeof o.services === 'object') {
+      tuneServices(o.services as Partial<typeof SERVICE_TUNE>);
+      this.map.syncServiceBoxes();
+      this.refreshPlacesShown();
+      this.minimap.redraw();
+    }
+    const mp = o.map as Record<string, unknown> | boolean | undefined;
+    if (mp && typeof mp === 'object') {
+      if (mp.tune && typeof mp.tune === 'object') {
+        tuneMapPicture(mp.tune as Partial<typeof MAP_PICTURE_TUNE>);
+        this.remakeMadeMap();
+        said.push(this.madeMapFor ? 'the made map is being made again' : 'this world makes no map (it has a converted one, or no raster)');
+      }
+      // Made in one go: a driven tab, which draws no frames.
+      if (mp.make === true) {
+        const planet = this.world.planet;
+        const dem = this.world.terrain.dem;
+        if (!planet?.dem || !dem) said.push('this world makes no map (it has a converted one, or no raster)');
+        else {
+          const pack = packIdOf(planet, this.zone);
+          const m = this.makeDemMap(dem.size);
+          this.madeMapStarted = performance.now();
+          while (!m.step(MAP_PICTURE_TUNE.sliceMs));
+          this.madeMap = null;
+          this.madeMapFor = pack;
+          this.madeMapGen = this.world.generation;
+          this.madeMapEdited = Number.NaN;
+          await this.finishMadeMap(pack, this.world.generation, m);
+          said.push(`made: ${m.slices} slices, the worst ${m.worstMs.toFixed(2)} ms`);
+        }
+      }
+    }
+    const f = this.placesFile;
+    const c = this.world.placeFrame;
+    const idx = this.placesNow();
+    const rows = f?.locations ?? [];
+    const kinds: Record<string, number> = {};
+    for (const r of rows) kinds[r.kind] = (kinds[r.kind] ?? 0) + 1;
+    const eye = this.player.pos;
+    const here = idx.placeAt(eye.x, eye.z);
+    const rawOf = (gx: number, gz: number) => (c ? [Math.round((c.x - gx) * 100) / 100, Math.round((gz + c.z) * 100) / 100] : null);
+    let at: Record<string, unknown> | null = null;
+    if (Array.isArray(o.at) && typeof o.at[0] === 'number' && typeof o.at[1] === 'number' && c) {
+      const gx = c.x - o.at[0];
+      const gz = o.at[1] - c.z;
+      const holds = idx.placeAt(gx, gz);
+      const zone = idx.noBuildAt(gx, gz, 0);
+      at = { place: holds ? { id: holds.id, name: holds.name ?? null, kind: holds.kind } : null, noBuild: zone ? { why: zone.why, name: zone.name, words: zoneWordsOf(zone, 'house') } : null, game: [Math.round(gx * 100) / 100, Math.round(gz * 100) / 100] };
+    }
+    const planet = this.world.planet;
+    const services: Record<string, number> = {};
+    for (const s of inState(f?.services ?? [])) services[s.kind] = (services[s.kind] ?? 0) + 1;
+    const made = planet?.dem ? madePicture(packIdOf(planet, this.zone)) : null;
+    return {
+      world: planet ? packIdOf(planet, this.zone) : null,
+      file: f ? { rows: rows.length, ...this.placesFileInfoOf(packIdOf(planet, this.zone)) } : null,
+      kinds,
+      worldRow: idx.world ? { cities: idx.world.cities ?? null, loading: idx.world.loading?.length ?? 0 } : null,
+      zones: { ...idx.counts, gameNoBuild: idx.gameNoBuild },
+      eye: { raw: rawOf(eye.x, eye.z), place: here ? { id: here.id, name: here.name ?? null, kind: here.kind } : null, line: planet && !planet.space ? placeLoadingLine(inState(rows), c ? { x: c.x - eye.x, z: eye.z + c.z } : null, Date.now(), planet.description) : null },
+      services: { shown: { services: SERVICE_TUNE.services, terminals: SERVICE_TUNE.terminals, minimap: SERVICE_TUNE.minimap }, kinds: services, noBuild: (f?.noBuild ?? []).length },
+      // What the maps drew of them on their last draws: the minimap's outlines and marks, the map window's marks by switch.
+      drawn: { minimap: { outlines: this.minimap.outlinesDrawn, services: this.minimap.servicesDrawn }, map: { ...this.map.servicesDrawn } },
+      map: planet?.dem ? { making: !!this.madeMap, rowsDone: this.madeMap ? this.madeMap.row : null, made: made ? { version: made.version, width: made.pic.frame.width, px: made.pic.image.width } : null, last: this.madeMapLast, tune: { ...MAP_PICTURE_TUNE } } : null,
+      tune: { ...PLACE_TUNE },
+      ...(at ? { at } : {}),
+      ...(editing ? { editor: editing } : {}),
+      ...(said.length ? { answered: said } : {}),
+    };
   }
 
   /**
@@ -23521,7 +23889,7 @@ class App {
   private portsCache: { key: string; ports: Port[] } = { key: '', ports: [] };
 
   private portsHere(): Port[] {
-    const c = this.world.layoutCenter;
+    const c = this.world.placeFrame;
     const pack = packIdOf(this.world.planet, this.zone);
     if (!c || this.placeNamesFor !== pack) return [];
     // The states' own stamp in the key: Restuss's two sets of ports are as many rows in either state.
@@ -25377,9 +25745,11 @@ class App {
    */
   private editLayerOf(kind: string | undefined): ((pack: string, rev: string | undefined) => void) | null {
     if (kind === 'story' || kind === 'world') return (pack, rev) => void this.reloadDressing(pack, kind, rev);
-    if (kind === 'heights') return (pack, rev) => void this.reloadHeights(pack, rev);
-    if (kind === 'paint') return (pack, rev) => void this.reloadPaint(pack, rev);
-    if (kind === 'water') return (pack, rev) => void this.reloadWater(pack, rev);
+    // A real-elevation world's made map is made again a moment after its ground, paint or water moves (Map-maker II's eighth wave).
+    if (kind === 'heights') return (pack, rev) => (this.madeMapEdit(), void this.reloadHeights(pack, rev));
+    if (kind === 'paint') return (pack, rev) => (this.madeMapEdit(), void this.reloadPaint(pack, rev));
+    if (kind === 'water') return (pack, rev) => (this.madeMapEdit(), void this.reloadWater(pack, rev));
+    if (kind === 'locations') return (pack, rev) => void this.reloadLocations(pack, rev);
     return null;
   }
 
@@ -26336,6 +26706,9 @@ class App {
     heightAt: (x, z) => this.world.terrain.heightAt(x, z),
     waterAt: (x, z) => this.world.terrain.waterHeightAt(x, z),
     standing: (x, z, reach) => this.world.standingNear(x, z, reach),
+    // A no-build zone in a player's own words (Map-maker II's eighth wave), never for a building the dev server's placement
+    // editor puts down for good: the owner dresses a town on purpose.
+    zone: (x, z, r) => (this.placing && this.placing.dest !== 'yours' ? null : this.noBuildHere(x, z, r, 'house')),
   };
   /** The ground for the grid's corners, made once for the same reason. */
   private readonly ghostHeight = (x: number, z: number): number => this.world.terrain.heightAt(x, z);
@@ -26790,6 +27163,8 @@ class App {
     // story dressed it. The name is the row's own, kept, so asking makes nothing. Not for a thing the dev
     // server's editor is putting down for good, where the owner dresses densely on purpose.
     reserved: (x: number, z: number, r: number) => (this.propPlacing && this.propPlacing.dest !== 'yours' ? null : (this.permanent.guardedAt(x, z, r)?.label ?? null)),
+    // A no-build zone in a player's own words (Map-maker II's eighth wave), beside the guard and for the same things.
+    zone: (x: number, z: number, r: number) => (this.propPlacing && this.propPlacing.dest !== 'yours' ? null : this.noBuildHere(x, z, r, 'prop')),
   };
 
   /**
@@ -28423,6 +28798,9 @@ class App {
           lakeCurtain: (detail, work) => this.editorLakeCurtain(detail, work),
           curtain: (detail, work) => this.editorLookCurtain(detail, work),
           pickerPalettes: () => this.pickerPalettes(),
+          zoneNote: (x, z, r) => this.noBuildHere(x, z, r, 'editor'),
+          locations: () => ({ rows: this.placesFile?.locations ?? [], ...this.placesFileInfoOf(this.editWorld()) }),
+          locationRows: () => this.placesFile?.locations ?? this.noLocationRows,
         });
         this.editor = ed;
         return ed;
@@ -28678,6 +29056,12 @@ class App {
       await this.landWaterRows(wf.put as WaterRow[], wf.deleted);
       this.world.noteWaterWritten(wf.rev, wf.rows);
     }
+    // A real-elevation world's made map, made again a moment after its ground, paint or water moved (Map-maker II's eighth wave).
+    if (hf || pf || wf) this.madeMapEdit();
+    // The places of ours it wrote (Map-maker II's eighth wave), landed by difference: the merged places file, the city line,
+    // the index the verdicts read, the minimap and the map window.
+    const lf = files.locations;
+    if (lf && this.world.generation === gen && this.editWorld() === pack) await this.landLocationRows(pack, lf.put as LocationRow[], lf.deleted);
     return { ok: true, why: '', files, ms: reply.ms ?? 0, built };
   }
 
@@ -33372,6 +33756,8 @@ class App {
       this.hud.update(dt, locX, locAt.y, locZ, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn, player.breath);
       // The minimap: drawn only when you have moved or turned enough to show, which a still frame has not.
       this.stepMinimap();
+      // A real-elevation world's map picture made a few rows a frame (Map-maker II's eighth wave), nothing on any other world.
+      this.stepMadeMap();
       // The tighter crosshair while a shot is aimed, and the plate over whatever it rests on. The
       // crosshair is cast from the camera, so the eye and the direction are read straight out of its
       // world matrix into two kept vectors: column 3 is where it stands, column 2 negated is where

@@ -8,7 +8,7 @@
 
 import type { DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
-import { EDITOR_EXTRA_DEFAULTS, EDITOR_EXTRA_TUNES, EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, FLORA_PAINT_TUNE, FLORA_PAINT_TUNE_DEFAULTS, PAINT_TUNE, PAINT_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, WATER_TUNE, WATER_TUNE_DEFAULTS, tuneEditor, tuneFloraPaint, tunePaint, tuneSculpt, tuneWater } from './editorTune.ts';
+import { EDITOR_EXTRA_DEFAULTS, EDITOR_EXTRA_TUNES, EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, FLORA_PAINT_TUNE, FLORA_PAINT_TUNE_DEFAULTS, PAINT_TUNE, PAINT_TUNE_DEFAULTS, PLACES_TOOL_CHOICES, PLACES_TOOL_TUNE, PLACES_TOOL_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, WATER_TUNE, WATER_TUNE_DEFAULTS, tuneEditor, tuneFloraPaint, tunePaint, tunePlacesTool, tuneSculpt, tuneWater } from './editorTune.ts';
 import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
 import { LAKE_TUNE, RIVER_TUNE, tuneRiverTune } from '../world/ourWater.ts';
 
@@ -566,6 +566,73 @@ export function editorDialSet(): DialSet {
   const shipped = readDials(g);
   for (const [k, v] of shipped) shipped.set(k, shippedValue(k, v));
   return { helper: 'editor', groups: g, shipped };
+}
+
+/**
+ * The places tool's numbers of feel (Map-maker II's eighth wave), as `[key, label, min, max, step, unit, note]`: each a
+ * slider in the debug menu's `locations` set (handed in through `LOCATION_DIALS.tool` as the editor loads), set through
+ * `__debug.locations({ tool })`'s own setter (`tunePlacesTool`), so the line the menu copies out is that helper's.
+ */
+const PLACES_DIALS: [string, string, number, number, number, string, string][] = [
+  ['radius', 'A new circle', 0.5, 5000, 0.5, 'm', "The radius a click draws a circle at (C held with the wheel steps it): a small town's."],
+  ['sizeStep', 'A notch steps it', 1.01, 4, 0.01, '×', 'One notch of C with the wheel grows (or shrinks) the next circle, or a picked place, by this.'],
+  ['sizeRest', 'Size written after', 0, 5, 0.05, 's', "Seconds after the last notch before a picked place's new size is written."],
+  ['rectLeast', 'A drag at least', 0.1, 50, 0.1, 'm', "A rectangle's least side: a drag shorter than this one way is a slip and writes nothing."],
+  ['closePx', 'Close within', 2, 60, 1, 'px', "A click this near an outline's first point, on the screen, closes it."],
+  ['hitPx', 'Handle reach', 2, 40, 1, 'px', "How near the cursor must be to a place's handle to pick it."],
+  ['circlePoints', 'A circle drawn with', 8, 256, 1, '', 'Points a circle is drawn with on the overlay.'],
+];
+
+/** The places tool's dials and their shipped values (its own defaults), for the `locations` set. */
+export function placesToolDials(): { groups(): DialGroup[]; shipped: ReadonlyMap<string, number | string> } {
+  const groups = (): DialGroup[] => [
+    {
+      title: 'The places tool (the world editor)',
+      note: 'P arms it: a click draws a circle, a drag a rectangle, clicks an outline. Its mode and kind are on the Tools tab too.',
+      dials: [
+        {
+          kind: 'choice',
+          key: 'tool.mode',
+          label: 'A click draws',
+          note: 'A circle at the aim, a rectangle by a drag, or an outline by clicks.',
+          choices: PLACES_TOOL_CHOICES.mode,
+          get: () => PLACES_TOOL_TUNE.mode,
+          set: (v) => tunePlacesTool({ mode: v }),
+        },
+        {
+          kind: 'choice',
+          key: 'tool.kind',
+          label: 'Written as',
+          note: "The kind a new place is written as (a city's name is said walking in and its outline is on the minimap; a zone is drawn on no map).",
+          choices: PLACES_TOOL_CHOICES.kind,
+          get: () => PLACES_TOOL_TUNE.kind,
+          set: (v) => tunePlacesTool({ kind: v }),
+        },
+        ...PLACES_DIALS.map(([k, label, min, max, step, unit, note]): NumberDial => ({
+          kind: 'number',
+          key: `tool.${k}`,
+          label,
+          note,
+          min,
+          max,
+          step,
+          unit,
+          get: () => (PLACES_TOOL_TUNE as unknown as Record<string, number>)[k],
+          set: (v) => {
+            const said = tunePlacesTool({ [k]: v });
+            const now = (PLACES_TOOL_TUNE as unknown as Record<string, number>)[k];
+            return now === v ? said : [...said, `held at ${now}`];
+          },
+        })),
+      ],
+    },
+  ];
+  const shipped = new Map<string, number | string>();
+  for (const g of groups()) for (const d of g.dials) {
+    const v = (PLACES_TOOL_TUNE_DEFAULTS as unknown as Record<string, number | string>)[d.key.slice('tool.'.length)];
+    if (typeof v === 'number' || typeof v === 'string') shipped.set(d.key, v);
+  }
+  return { groups, shipped };
 }
 
 /** The debug menu's dials for `editor`, or null for another helper. */

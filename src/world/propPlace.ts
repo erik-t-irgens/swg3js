@@ -85,6 +85,12 @@ export interface PropDeps {
    * nothing is guarded, which is a permanent layer's own editing.
    */
   reserved?(x: number, z: number, r: number): string | null;
+  /**
+   * Why players may not put a thing down in a circle of `r` metres about (x, z), in words, or null (Map-maker II's eighth
+   * wave: a place of ours made no-build, or the game's own no-build data where its world row turns it on). Asked beside
+   * `reserved`; absent, nothing is a zone, which is the dev server's own editing.
+   */
+  zone?(x: number, z: number, r: number): string | null;
 }
 
 /** Where a prop would stand and whether it may. */
@@ -233,8 +239,12 @@ export function propVerdict(box: PropBox | null, at: { x: number; y: number; z: 
   const points = propPoints(box, at, q, POINTS);
   // Part of the world first: whatever else is true of the spot, a thing of the world's own is under it, and
   // that is what the player needs to be told. The circle is the thing's own reach on the ground.
-  const taken = deps.reserved?.(at.x, at.z, box ? Math.max(Math.abs(box.max[0] - box.min[0]), Math.abs(box.max[2] - box.min[2])) / 2 : 0) ?? null;
+  const reach = box ? Math.max(Math.abs(box.max[0] - box.min[0]), Math.abs(box.max[2] - box.min[2])) / 2 : 0;
+  const taken = deps.reserved?.(at.x, at.z, reach) ?? null;
   if (taken !== null) return said(out, false, partOfWorld(taken), 0, points.length, 0);
+  // And a no-build zone (Map-maker II's eighth wave), in its own words: the place's, or the game's own data's.
+  const zoned = deps.zone?.(at.x, at.z, reach) ?? null;
+  if (zoned !== null) return said(out, false, zoned, 0, points.length, 0);
   let inside = 0;
   for (const p of points) if (deps.solidAt(p.x, p.y, p.z)) inside++;
   // How far the lowest point is above whatever is under it. Only the points the world can answer

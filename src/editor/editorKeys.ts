@@ -57,6 +57,8 @@ export const EDITOR_ACTIONS: readonly Action[] = [
   'editorPaint',
   // Its fifth: the water tool armed and let go.
   'editorWater',
+  // Its eighth: the places tool armed and let go.
+  'editorPlaces',
 ];
 
 /** The hotbar's nine keys, slot 1 first. */

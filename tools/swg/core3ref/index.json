@@ -69,7 +69,8 @@
   "readLaunchPoints": "launch-points.json",
   "readLandingPoints": "landing-points.json",
   "readCloningPoints": "cloning-points.json",
-  "readTutorial": "tutorial.json"
+  "readTutorial": "tutorial.json",
+  "readMapCategories": "map-categories.json"
  },
  "counts": {
   "readTravelBuildings": 24,
@@ -185,6 +186,7 @@
   "readLaunchPoints": 11,
   "readLandingPoints": 29,
   "readCloningPoints": 42,
-  "readTutorial": 34
+  "readTutorial": 34,
+  "readMapCategories": 134
  }
 }

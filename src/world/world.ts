@@ -4545,12 +4545,19 @@ export class World {
     if ((this.terrain.swg || this.terrain.demShader) && this.groundTextures) {
       const family = this.terrain.swg
         ? this.terrain.swg.shaderAt(x, z)
-        : this.terrain.demShader!.familyAt(x, z, (gx, gz) => this.terrain.heightAt(gx, gz));
+        : this.terrain.demShader!.familyAt(x, z, this.terrainHeightAt);
       const c = this.groundTextures.averageColor(family);
       if (c) return out.copy(c);
     }
     return this.terrain.groundColorAt(x, z, out);
   }
+
+  /**
+   * The ground's height at a point, as one function made once (`groundColorAt` hands it to a real-elevation world's family
+   * rules): an arrow made at every ask was a closure a call, and the made map asks a million times a picture. It reads the
+   * terrain standing now, so a world changing changes nothing about it.
+   */
+  private readonly terrainHeightAt = (gx: number, gz: number): number => this.terrain.heightAt(gx, gz);
 
   /** Lights, fog and clear colour straight from the sky's colour ramps for this moment. */
   private applySwgLighting(L: SkyLighting, playerPos: THREE.Vector3): void {
@@ -6572,9 +6579,11 @@ export class World {
     const given = opts.y !== undefined;
     if (!verdict.ok && !opts.force && !given) return { ...verdict, key, x: at.x, z: at.z, yaw, clear, why: verdict.why, building: null };
     // What the world already has standing there. A house put down in a town's street would look
-    // exactly like a bug, and the world's own objects are the only thing that knows where a town
-    // is: nothing in the archives marks a no-build zone, and the real server's were a table it
-    // kept rather than anything the client shipped.
+    // exactly like a bug, and the world's own objects are what know where a town is. The game's own
+    // no-build data is read too, but only under a world's switch (Map-maker II's eighth wave): the
+    // client's templates give 38 kinds of placed thing a no-build radius, and the server kept a table
+    // of no-build areas (Core3's region rows flagged `NOBUILDZONEAREA`), both in the pack's `pois.json`;
+    // with places of ours made no-build, they are the zone `noBuildWords` answers for, asked below.
     if (!given && !opts.force) {
       // Asked about round the patch's own middle, which is what `blockedBy` measures from, as the
       // ghost asks: asked round the doorstep, a thing within reach of the far side of a house whose
@@ -6589,6 +6598,10 @@ export class World {
       // ground test passes perfectly well on a lake bed.
       const wet = probes.find((p) => this.terrain.waterHeightAt(p.x, p.z) > this.terrain.heightAt(p.x, p.z));
       if (wet) return { ...verdict, ok: false, key, x: at.x, z: at.z, yaw, clear, why: 'that is under water', building: null };
+      // And not in a no-build zone (Map-maker II's eighth wave), asked here and never outside this block: a house given its
+      // height is one a server or this machine already holds, and is stood where it stands whatever a zone says now.
+      const zoned = this.noBuildWords?.(mid.x, mid.z, clear) ?? null;
+      if (zoned) return { ...verdict, ok: false, key, x: at.x, z: at.z, yaw, clear, why: zoned, building: null };
     }
     // Every test made and nothing built: what the relay path asks, since there the house goes up
     // when the server answers and a building put into the world here and taken out again a moment
@@ -6614,6 +6627,13 @@ export class World {
     });
     return { ok: true, why: verdict.ok ? null : `stood anyway: ${verdict.why}`, key, x: at.x, z: at.z, y, yaw, rise: verdict.rise, sink: verdict.sink, slope: verdict.slope, clear, building };
   }
+
+  /**
+   * Why nobody may build a house in a circle of `r` metres about a game point, in words, or null: the places' no-build verdict
+   * (Map-maker II's eighth wave, `places.ts`), handed in by the game; null asks nothing, which is every world with no place of
+   * ours made no-build and no switch for the game's own data.
+   */
+  noBuildWords: ((x: number, z: number, r: number) => string | null) | null = null;
 
   /** Take a building placed in play back out of the world, by what it was filed under. */
   unplaceBuilding(key: string): boolean {
