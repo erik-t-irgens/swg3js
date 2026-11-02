@@ -31,10 +31,12 @@ import { isQuarantined } from './portalVis.ts';
 import { castsShadow } from './surfaces.ts';
 import type { Building } from './layoutStream.ts';
 import { makeLeafBody, moveLeafBody, takeLeafBody } from './doorBody.ts';
+import { packJson } from './packFiles.ts';
 import {
   DOOR_EVENT,
   DOORS_PACK_VERSION,
   DOORS_TUNE,
+  doorStylesFor,
   doorWanted,
   isExitDoor,
   leafAt,
@@ -52,6 +54,17 @@ import {
 } from './doorMath.ts';
 
 export { DOORS_TUNE, OPENER } from './doorMath.ts';
+
+/**
+ * The door styles of the player's own gallery pack (`assets-private/gallery/doors.json`, 100 of the client's styles), or null
+ * where it has none: what a house of the owner's names its doors' styles by (Map-maker II's eleventh wave), since an import
+ * carries a style's name and never its numbers. Asked through the pack's own files' rules (`packJson`), so a gallery that
+ * answered missing is not asked again this session, and never its manifest, which nothing here needs.
+ */
+export async function galleryDoorStyles(base?: string): Promise<Record<string, DoorStyleRow> | null> {
+  const f = await packJson<DoorsFile>('gallery', 'doors.json', base, { probe: false });
+  return f && f.version === DOORS_PACK_VERSION && f.styles && typeof f.styles === 'object' ? f.styles : null;
+}
 
 /** One leaf of a door: its meshes, where it hangs shut, its slide when open, and its body. */
 interface Leaf {
@@ -151,6 +164,15 @@ export class Doors implements OpenerSink {
    * body, which is the game today. Asked only of a body already within the door's radius.
    */
   mayOpen: ((door: DoorView, who: number) => boolean) | null = null;
+  /**
+   * Asked for the styles a building's own doors table does not name (Map-maker II's eleventh wave: a house of the owner's
+   * names its styles and carries none of their numbers): the player's own gallery pack's (`galleryDoorStyles`, the world's
+   * hand-over). Null asks nothing, and such a door stands open as a door of no known style always has. Never asked for a
+   * converted pack's building, whose table names every style it uses.
+   */
+  moreStyles: (() => Promise<Record<string, DoorStyleRow> | null>) | null = null;
+  /** The table `moreStyles` gave, kept for the session once it is one (a gallery that answered missing is not asked again by the pack files' own rule). */
+  private moreLoad: Promise<Record<string, DoorStyleRow> | null> | null = null;
   /** What it has done, for the console. */
   readonly counts = { sounds: 0, refused: 0, built: 0, dropped: 0 };
   /**
@@ -293,8 +315,25 @@ export class Doors implements OpenerSink {
     rec.view.inner.length = 0;
   }
 
+  /** The styles `moreStyles` hands over, asked once for every building that wants them; a failed ask is asked again next time. */
+  private readonly more = (): Promise<Record<string, DoorStyleRow> | null> => {
+    const ask = this.moreStyles;
+    if (!ask) return Promise.resolve(null);
+    if (!this.moreLoad) {
+      const p = ask().catch(() => null);
+      this.moreLoad = p;
+      void p.then((s) => {
+        if (!s && this.moreLoad === p) this.moreLoad = null;
+      });
+    }
+    return this.moreLoad;
+  };
+
   /** The meshes and bodies of one building's doors, once their models are in, then their programs, then shown. */
-  private async make(rec: Built, rows: readonly DoorRow[], styles: Record<string, DoorStyleRow>): Promise<void> {
+  private async make(rec: Built, rows: readonly DoorRow[], own: Record<string, DoorStyleRow>): Promise<void> {
+    // The styles its own table names, or those and the player's own gallery's where a row names one its table has not got.
+    const styles = await doorStylesFor(rows, own, this.moreStyles ? this.more : null);
+    if (rec.gone) return;
     const pack = await this.models();
     if (!pack || rec.gone) return;
     const want = new Set<string>();

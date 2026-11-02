@@ -26,8 +26,9 @@
 // marked `unlit` beside the glTF unlit extension and `noShadow` on every blend, `swgCube` only where metallic, and
 // `swgNormalY: -1` wherever a normal map has no tangents under it (they are dropped, so everywhere): three's own reading of
 // a glTF normal map, which the world's own override would otherwise turn upside down. Tangents, shape keys, skins,
-// animations, cameras and lights are dropped and said. Draco, meshopt, KTX2 and GPU instancing are refused in words, as is
-// any room's name (a house with rooms is the next wave's) and a cell name beginning with a digit.
+// animations, cameras and lights are dropped and said (a house's lamps are read as its rooms' lights). Draco, meshopt,
+// KTX2 and GPU instancing are refused in words, as is a room's name that does not read as one and a cell name beginning
+// with a digit.
 //
 // **Names on Blender's objects** (a node's name, a `.001` Blender adds left out; a custom property `role`, `lod` or
 // `shape` on the object overrides each):
@@ -36,6 +37,10 @@
 //   <name>-nocol                drawn, never collided (`extras.swgNoCollide`)
 //   <name>_LOD1 .. _LOD3        a lower level, taking over at the record's distance
 //   collision-cyl, -box, -ball  a flora model's own shapes, into flora-collision.json (never drawn)
+//   cell:<n>:<name>, portal:<a>:<b>, floor:<n>, door:<style>, and point lights
+//                               a house's rooms (the eleventh wave, `importRooms.mjs`, which says what each means): the
+//                               GLB's level-0 nodes become `cell:<n>:<name>`, the manifest's entry carries `cells` and
+//                               `portals`, and the folder `floors.json` and `doors.json` beside its manifest
 //
 // **Committing** (§2.12): the repository is public and its history permanent. `--ship` is the owner's act of shipping: it
 // refuses an import whose pictures or materials are named like the client's (`texture/`, `shader/`, `.dds`, `.sht`) and one
@@ -48,6 +53,9 @@ import { basename, dirname, extname, join, resolve } from 'node:path';
 import { buildGlb, readGlb, shrinkRgba } from './sceneglb.mjs';
 import { decodePng, encodePng } from './png.mjs';
 import { LIBRARY_PASS, pictureOf } from './library.mjs';
+import { deriveRooms, namesRooms, roomName } from './importRooms.mjs';
+import { FLOOR_PACK_VERSION } from './flr.mjs';
+import { DOORS_PACK_VERSION } from './doors.mjs';
 
 /** The shape of `manifest.json` and `imports.json` this writes; the game reads the manifest as any pack's. */
 export const IMPORT_FORMAT = 1;
@@ -74,21 +82,38 @@ export const IMPORT_TUNE = {
   lods: [40, 120, 300],
   /** The client's highlight's power from a roughness of nought (`look: 'client'`); a roughness of one gives none. */
   specPowerMost: 128,
+  /**
+   * Metres a room's box grows by on every side, past its own pieces, floor and doorways (the eleventh wave): five
+   * centimetres, so a box laid exactly on a wall's face, rounded to the manifest's tenth of a millimetre, never leaves a
+   * point on that face outside it. Every reader of a room's box pads it again for its own purpose.
+   */
+  cellPad: 0.05,
+  /** Metres a doorway's corner may stand off its own plane before the doorway is refused as not flat: a slip of a vertex, never a bent polygon. */
+  portalFlat: 0.05,
+  /** Metres a `door:<style>` may stand from the nearest doorway and still be its door: its bottom middle, give or take a hand's breadth. */
+  doorReach: 1,
+  /** Metres a room's point light reaches where its file names no range (glTF's own reading of none is "for ever", which a room's light never is): a room's width and some. */
+  lightReach: 20,
+  /** Each room light's brightness times this: glTF's candela as three reads them, the owner's dial on how bright his lamps read beside the game's own rooms. */
+  lightScale: 1,
 };
 
 /** The flags that move `IMPORT_TUNE` for one run, by their key there. */
-export const IMPORT_FLAGS = { 'collision-budget': 'collisionBudget', 'tex-max': 'texMax', 'model-max': 'modelMax', 'ship-note': 'shipNote', 'glass-alpha': 'glassAlpha', lods: 'lods', 'spec-power': 'specPowerMost' };
+export const IMPORT_FLAGS = { 'collision-budget': 'collisionBudget', 'tex-max': 'texMax', 'model-max': 'modelMax', 'ship-note': 'shipNote', 'glass-alpha': 'glassAlpha', lods: 'lods', 'spec-power': 'specPowerMost', 'cell-pad': 'cellPad', 'portal-flat': 'portalFlat', 'door-reach': 'doorReach', 'light-reach': 'lightReach', 'light-scale': 'lightScale' };
+/** The flags nought is a good value of (a room's box grown by nothing); every other is above nought. */
+const ZERO_OK = new Set(['cellPad']);
 
 /** GitHub refuses a file past this many megabytes: the one hard wall, a fact of the host and no tune. */
 export const HARD_WALL_MB = 100;
 /** And warns past this many. */
 const WARN_MB = 50;
 
-/** The kinds a record may say: a prop, a building with no rooms (rooms are the next wave's), or a tree, a shrub, a rock. */
+/** The kinds a record may say: a prop, a building (with rooms, or with none), or a tree, a shrub, a rock. */
 export const IMPORT_KINDS = ['prop', 'building', 'flora'];
 /**
- * How a model collides: `auto` is `stand-in` where any `-colonly` piece is named, else `triangles`; `triangles` every drawn
- * triangle not `-nocol` and every `-colonly` piece; `stand-in` its `-colonly` pieces alone; `none` nothing at all.
+ * How a model collides: `auto` is `stand-in` where any `-colonly` piece is named, else `triangles` (in a house with rooms,
+ * room by room and the shell on its own, written `by room` where they differ); `triangles` every drawn triangle not
+ * `-nocol` and every `-colonly` piece; `stand-in` its `-colonly` pieces alone; `none` nothing at all.
  */
 export const COLLISION_RULES = ['auto', 'triangles', 'stand-in', 'none'];
 /** A model's look: three's own highlight as authored (`pbr`), or the client's (`client`) from its roughness. */
@@ -114,9 +139,6 @@ function donorReads(ref) {
 }
 /** What a name looks like when it is the client's own: its folders and its two file kinds. */
 const CLIENTISH = /(^|[\\/])(texture|shader)[\\/]|\.dds\b|\.sht\b/i;
-/** A room's names (the next wave's), and a cell whose name begins with a digit (refused whatever the wave). */
-const ROOM_NAME = /^(cell|portal|floor|door):/i;
-const DIGIT_CELL = /^cell:\d+:\d/i;
 
 /** The extensions this pass refuses outright, each with its words. */
 const REFUSED = {
@@ -376,12 +398,24 @@ export function nameRole(rawName, extras = null) {
   return { role, level, shape, base: name, badLevel };
 }
 
-/** Why a node's name refuses the whole import, or null: a room's names (the next wave's), a cell beginning with a digit. */
+/**
+ * A room's own fill light off its `cell:` object's custom property `ambient` (three numbers from 0 to 4, linear red, green
+ * and blue): the numbers, null for none, false for a property of another shape (said, and left out).
+ */
+function ambientOf(extras) {
+  const a = extras && typeof extras === 'object' ? extras.ambient : undefined;
+  if (a === undefined) return null;
+  return Array.isArray(a) && a.length === 3 && a.every((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 4) ? a.slice() : false;
+}
+
+/**
+ * Why a node's name refuses the whole import, or null: a name that begins as a room's (`cell:`, `portal:`, `floor:`,
+ * `door:`) and does not read as one, a cell whose own name begins with a digit among them (`roomName`, `importRooms.mjs`).
+ * A room's name that reads is a house's rooms (the eleventh wave), never a refusal.
+ */
 export function roomRefusal(name) {
-  const n = String(name ?? '');
-  if (DIGIT_CELL.test(n)) return `${n}: a cell whose own name begins with a digit cannot be read back (cell:17:4way would be read as cell 174): give it a name that begins with a letter`;
-  if (ROOM_NAME.test(n)) return `${n}: a house with rooms (cell:, portal:, floor:, door:) is the next wave's; take the room names off to import it as a model with no rooms`;
-  return null;
+  const r = roomName(name);
+  return r?.kind === 'bad' ? r.why : null;
 }
 
 /** Whether a name looks like the client's own (`texture/`, `shader/`, `.dds`, `.sht`): what `--ship` refuses. */
@@ -616,13 +650,42 @@ export function importModel(src, record, tune = IMPORT_TUNE, opts = {}) {
   let lights = 0;
   let cameras = 0;
   let badLevels = 0;
-  const walk = (ni, parent) => {
+  // A house's rooms, as the walk meets their names (`importRooms.mjs`): each piece carries the cell it stands under (-1 none).
+  const found = { cells: [], portals: [], floors: [], doors: [], lights: [] };
+  let doorMeshes = 0;
+  const walk = (ni, parent, cell) => {
     const n = json.nodes?.[ni];
     if (!n) return;
     const m = mul(parent, nodeMatrix(n));
-    if (n.extensions?.KHR_lights_punctual) lights++;
+    const room = roomName(n.name);
+    let c = cell;
+    if (room?.kind === 'cell') {
+      c = room.index;
+      found.cells.push({ index: room.index, name: room.name, ambient: ambientOf(n.extras) });
+    }
+    const lit = n.extensions?.KHR_lights_punctual;
+    if (lit) {
+      lights++;
+      found.lights.push({ light: json.extensions?.KHR_lights_punctual?.lights?.[lit.light] ?? null, m, cell: c, name: n.name ?? '' });
+    }
     if (n.camera !== undefined) cameras++;
-    if (n.mesh !== undefined) {
+    if (room?.kind === 'door') found.doors.push({ style: room.style, name: n.name ?? '', m });
+    if (room?.kind === 'portal' || room?.kind === 'floor') {
+      // A doorway's polygon and a room's floor are the rooms' data and never drawn or collided: baked into the house's frame
+      // as every piece is, and kept apart (their own counts, so a doorway with no normals says nothing of the model's).
+      const prims = [];
+      for (const prim of (n.mesh !== undefined ? json.meshes?.[n.mesh]?.primitives : null) ?? []) {
+        const baked = bakePrimitive(src, prim, m, noteCounts());
+        if (baked) prims.push({ pos: baked.pos, idx: baked.idx });
+      }
+      if (room.kind === 'portal') found.portals.push({ a: room.a, b: room.b, window: room.window, name: n.name ?? '', prims });
+      else found.floors.push({ cell: room.cell, name: n.name ?? '', prims });
+    } else if (room?.kind === 'door') {
+      // A door's object marks where the door stands; its leaf is the game's own style. A mesh on it (a placeholder box, as a
+      // hand naturally draws a door) is the marker's and is left out, said, or it would stand drawn and solid in the doorway
+      // the real leaf slides away from.
+      if (n.mesh !== undefined) doorMeshes++;
+    } else if (n.mesh !== undefined) {
       const mesh = json.meshes?.[n.mesh];
       const role = nameRole(n.name ?? mesh?.name, { ...(mesh?.extras ?? {}), ...(n.extras ?? {}) });
       if (role.badLevel !== null) badLevels++;
@@ -630,14 +693,18 @@ export function importModel(src, record, tune = IMPORT_TUNE, opts = {}) {
         const baked = bakePrimitive(src, prim, m, counts);
         if (!baked) continue;
         if (role.role === 'shape') shapes.push({ shape: role.shape, pos: baked.pos });
-        else pieces.push({ ...baked, role: role.role, level: role.level, node: n.name ?? '' });
+        else pieces.push({ ...baked, role: role.role, level: role.level, node: n.name ?? '', cell: c });
       }
     }
-    for (const c of n.children ?? []) walk(c, m);
+    for (const k of n.children ?? []) walk(k, m, c);
   };
-  for (const r of roots) walk(r, IDENTITY);
+  for (const r of roots) walk(r, IDENTITY, -1);
+  // A house with rooms: any room past the shell, a doorway, a floor or a door named. The shell named alone is a model with none.
+  const rooms = found.cells.some((x) => x.index >= 1) || found.portals.length > 0 || found.floors.length > 0 || found.doors.length > 0;
+  if (!rooms && found.cells.length) notes.push('only the shell is named (cell:0): imported as a model with no rooms');
+  if (doorMeshes) notes.push(`${doorMeshes} door:<style> object(s) carry a mesh: taken for the door's marker and left out, never drawn or solid (the door's leaf is the game's own style)`);
   if (badLevels) notes.push(`${badLevels} piece(s) named _LOD4 or past it: only three lower levels are read, so they were taken for the model's own`);
-  if (lights) notes.push(`${lights} light(s) left out: a placed thing adds no light to the world (a house's lamps are the next wave's)`);
+  if (lights && !rooms) notes.push(`${lights} light(s) left out: a placed thing adds no light to the world (a house's lamps light its rooms: name them cell:<n>:<name>)`);
   if (cameras) notes.push(`${cameras} camera(s) left out`);
   if (json.animations?.length) notes.push(`${json.animations.length} animation(s) left out: a placed thing does not move`);
   if (counts.skinned) notes.push(`${counts.skinned} skinned piece(s) stand at their bind pose`);
@@ -649,18 +716,44 @@ export function importModel(src, record, tune = IMPORT_TUNE, opts = {}) {
 
   // ---- how it collides ----
   const hasStandIn = pieces.some((p) => p.role === 'colonly' && p.level === 0);
-  const rule = flora ? 'shapes' : record.collision === 'auto' || record.collision === undefined ? (hasStandIn ? 'stand-in' : 'triangles') : record.collision;
+  const auto = record.collision === 'auto' || record.collision === undefined;
+  // A house's rooms (the eleventh wave) whose own pieces name a -colonly (a piece under no cell is the shell's): under `auto`
+  // each room and the shell take the stand-in rule on their own, so a stand-in named for the shell never takes the rooms'
+  // floors out from under someone indoors, who passes through the shell. `by room` where some do and some do not.
+  const standInCells = new Set();
+  if (rooms) for (const p of pieces) if (p.role === 'colonly' && p.level === 0) standInCells.add(p.cell >= 0 ? p.cell : 0);
+  const houseCells = new Set(pieces.filter((p) => p.level === 0).map((p) => (p.cell >= 0 ? p.cell : 0)));
+  const autoRule = !hasStandIn ? 'triangles' : !rooms || [...houseCells].every((c) => standInCells.has(c)) ? 'stand-in' : 'by room';
+  const rule = flora ? 'shapes' : auto ? autoRule : record.collision;
+  const standsIn = (p) => rule === 'stand-in' || (rule === 'by room' && standInCells.has(p.cell >= 0 ? p.cell : 0));
   if (flora && pieces.some((p) => p.role === 'colonly')) notes.push('a flora model collides by its collision-cyl, -box and -ball shapes: its -colonly pieces were left out');
   if (rule === 'none' && hasStandIn) notes.push('its collision is none: its -colonly pieces were left out');
   if (rule === 'stand-in' && !hasStandIn) notes.push('its collision is stand-in and it names no -colonly piece: nothing of it collides');
   const kept = pieces.filter((p) => {
     if (p.role !== 'colonly') return true;
     if (p.level > 0) return false;
-    return rule === 'triangles' || rule === 'stand-in';
+    return rule === 'triangles' || rule === 'stand-in' || rule === 'by room';
   });
-  // A drawn piece collides by the rule: never in `stand-in` or `none`, never on a lower level (only the model's own collide).
-  for (const p of kept) if (p.role === 'draw' && (rule === 'stand-in' || rule === 'none')) p.role = 'nocol';
+  // A drawn piece collides by the rule: never in `stand-in` or `none`, nor in a room of a house `by room` that names a
+  // stand-in, never on a lower level (only the model's own collide).
+  for (const p of kept) if (p.role === 'draw' && (rule === 'none' || standsIn(p))) p.role = 'nocol';
   if (!kept.some((p) => p.role !== 'colonly' && p.level === 0)) return { refuse: ['it has nothing drawn at its own level: every piece is a collider, a shape, a lower level, or lines'] };
+
+  // ---- a house's rooms (the eleventh wave) ----
+  let house = null;
+  if (rooms) {
+    if (kind !== 'building') return { refuse: [`it names rooms (cell:, portal:, floor:, door:), so it is a house with rooms: its record's kind is building, where it says ${kind}`] };
+    const bad = found.cells.filter((x) => x.ambient === false).length;
+    if (bad) notes.push(`${bad} room(s) with an ambient that is not three numbers from 0 to 4: their ambient left out`);
+    house = deriveRooms({ ...found, cells: found.cells.map((x) => ({ ...x, ambient: x.ambient || null })), pieces: kept.filter((p) => p.level === 0).map((p) => ({ pos: p.pos, cell: p.cell, solid: p.role !== 'nocol' })) }, tune);
+    if (house.refuse) return { refuse: house.refuse };
+    notes.push(...house.notes);
+    // Which rooms collide by a stand-in alone, said: such a stand-in is that room's whole floor and walls to someone indoors.
+    const byStandIn = house.cells.filter((c) => (rule === 'stand-in' || rule === 'by room') && standInCells.has(c.index));
+    if (byStandIn.length) notes.push(`${byStandIn.map((c) => (c.index === 0 ? 'the shell' : `room ${c.index} (${c.name})`)).join(', ')} collide${byStandIn.length === 1 ? 's' : ''} by ${byStandIn.length === 1 ? 'its' : 'their'} own -colonly stand-in${byStandIn.length === 1 ? '' : 's'} alone${rule === 'by room' ? ', the rest by their own triangles' : ''}: a room's stand-in must carry its floor and walls, since someone indoors passes through the shell`);
+    // A piece under no cell is the shell's, as the rooms were derived.
+    for (const p of kept) if (p.level === 0 && !(p.cell >= 0)) p.cell = 0;
+  }
 
   // ---- the materials ----
   const outMaterials = [];
@@ -893,9 +986,11 @@ export function importModel(src, record, tune = IMPORT_TUNE, opts = {}) {
       backs++;
     }
     if (mapBorrowers.has(mi) && !p.uv0) notes.push(`${p.node || 'a piece'}: its material borrows a picture and it has no coordinates (TEXCOORD_0) to lay one by`);
-    const sig = `${p.level}|${mi}|${p.uv0 ? 1 : 0}${p.uv1 ? 1 : 0}${p.col ? 1 : 0}`;
+    // A house's level-0 pieces are kept apart by their room as well: each room is a node of its own (`cell:<n>:<name>`).
+    const cell = house && p.level === 0 ? p.cell : -1;
+    const sig = house ? `${p.level}|${cell}|${mi}|${p.uv0 ? 1 : 0}${p.uv1 ? 1 : 0}${p.col ? 1 : 0}` : `${p.level}|${mi}|${p.uv0 ? 1 : 0}${p.uv1 ? 1 : 0}${p.col ? 1 : 0}`;
     let g = groups.get(sig);
-    if (!g) groups.set(sig, (g = { level: p.level, material: mi, list: [] }));
+    if (!g) groups.set(sig, (g = { level: p.level, material: mi, cell, list: [] }));
     g.list.push(p);
   }
   const lookWhy = looksRefusal(looks);
@@ -934,7 +1029,7 @@ export function importModel(src, record, tune = IMPORT_TUNE, opts = {}) {
   }
   if (!boxOk(box)) return { refuse: ['it has no vertices at its own level'] };
   if (rule === 'none') colTris = 0;
-  if (colTris > tune.collisionBudget) notes.push(`${colTris} triangles collide, past the budget of ${tune.collisionBudget} (each costs collider build as the player walks up): name a simple stand-in -colonly and it alone collides`);
+  if (colTris > tune.collisionBudget) notes.push(`${colTris} triangles collide, past the budget of ${tune.collisionBudget} (each costs collider build as the player walks up): name a simple stand-in -colonly and it alone collides${house ? ' (in a house, under each room and the shell: a stand-in collides for its own room alone, and must carry that room\'s floor)' : ''}`);
 
   // ---- the levels ----
   const levels = [...new Set([...groups.values()].map((g) => g.level))].filter((l) => levelTris.get(l)).sort((a, b) => a - b);
@@ -960,6 +1055,19 @@ export function importModel(src, record, tune = IMPORT_TUNE, opts = {}) {
     const list = [...groups.values()].filter((g) => g.level === level);
     if (!list.length) continue;
     if (level > 0 && !lods) continue;
+    if (level === 0 && house) {
+      // A house's own level: a node a room, named as the converter names a portal building's cells (`cell:<n>:<name>`),
+      // which `AssetPack` reads through `meshCellOf` and the walk grid's bake through its node names.
+      for (const c of house.cells) {
+        const own = list.filter((g) => g.cell === c.index);
+        if (!own.length) continue;
+        const name = `cell:${c.index}:${c.name}`;
+        meshes.push({ name, primitives: own.map((g) => w.primitive(g.list, g.material)) });
+        nodes.push({ name, mesh: meshes.length - 1 });
+        rootNodes.push(nodes.length - 1);
+      }
+      continue;
+    }
     const primitives = list.map((g) => w.primitive(g.list, g.material));
     meshes.push({ name: level === 0 ? `model:${id}` : `lod:${level}`, primitives });
     nodes.push({ name: level === 0 ? `model:${id}` : `lod:${level}`, mesh: meshes.length - 1 });
@@ -1009,7 +1117,9 @@ export function importModel(src, record, tune = IMPORT_TUNE, opts = {}) {
   // ---- the manifest's entry and the library's ----
   const file = `${id}.${hash8}.glb`;
   const bounds = { min: box.min.map(round4), max: box.max.map(round4) };
-  const def = { id, file, bounds, triangles: tris, ...(lods ? { lods } : {}), ...(flora ? { appearance: `imported/${id}` } : {}), ...(looks.length ? { looks } : {}) };
+  // A house's rooms ride on its entry as a converted portal building's do (`cells`, `portals`), last, so a model with none
+  // writes the entry it always wrote.
+  const def = { id, file, bounds, triangles: tris, ...(lods ? { lods } : {}), ...(flora ? { appearance: `imported/${id}` } : {}), ...(looks.length ? { looks } : {}), ...(house ? { cells: house.cells, portals: house.portals } : {}) };
   const building = kind === 'building';
   const picture = pictureOf(glb, building, LIBRARY_PASS, { factors: true });
   const pic = picture ? encodePng(picture.width, picture.height, picture.rgba) : null;
@@ -1030,8 +1140,10 @@ export function importModel(src, record, tune = IMPORT_TUNE, opts = {}) {
     ship: record.ship === true,
     ...(record.licence !== undefined ? { licence: record.licence } : {}),
     ...(record.credit !== undefined ? { credit: record.credit } : {}),
+    ...(house ? { rooms: house.rooms, doors: house.doors.length } : {}),
   };
-  return { id, glb, hash8, def, entry, flora, collision, cards, picture: pic, notes };
+  // A house's floors (by room) and doors (by style name) for the folder's `floors.json` and `doors.json`.
+  return { id, glb, hash8, def, entry, flora, collision, cards, picture: pic, notes, ...(house ? { floors: house.floors, doors: house.doors } : {}) };
 }
 
 /** A piece's sheet doubled: every triangle again on its own vertices, wound the other way, its normals turned round. */
@@ -1157,15 +1269,23 @@ function writeAtomic(file, data) {
   renameSync(tmp, file);
 }
 
-/** A folder's three JSON files as they stand, or fresh ones. */
+/**
+ * A folder's JSON files as they stand, or fresh ones: its manifest, the library's index, its flora's shapes, and its houses'
+ * floors and doors (the eleventh wave: `floors.json` in the converter's shape, `doors.json` with its rows by style name and
+ * no style's numbers, which are the player's own gallery pack's).
+ */
 function folderFiles(out) {
   const manifest = readJsonQuiet(join(out, 'manifest.json')) ?? {};
   const imports = readJsonQuiet(join(out, 'imports.json')) ?? {};
   const collision = readJsonQuiet(join(out, 'flora-collision.json')) ?? {};
+  const floors = readJsonQuiet(join(out, 'floors.json')) ?? {};
+  const doors = readJsonQuiet(join(out, 'doors.json')) ?? {};
   return {
     manifest: { planet: 'imported', format: IMPORT_FORMAT, categories: { layout: [...(manifest.categories?.layout ?? [])], flora: [...(manifest.categories?.flora ?? [])] }, cards: { ...(manifest.cards ?? {}) } },
     imports: { version: IMPORT_FORMAT, made: '', entries: [...(imports.entries ?? [])], ...(typeof imports.shipNote === 'number' ? { shipNote: imports.shipNote } : {}) },
     collision: { version: 1, appearances: { ...(collision.appearances ?? {}) } },
+    floors: { version: FLOOR_PACK_VERSION, mesh: true, models: { ...(floors.version === FLOOR_PACK_VERSION && floors.models ? floors.models : {}) } },
+    doors: { version: DOORS_PACK_VERSION, styles: {}, models: { ...(doors.version === DOORS_PACK_VERSION && doors.models ? doors.models : {}) } },
   };
 }
 
@@ -1177,6 +1297,8 @@ function dropFrom(out, files, id, keep = new Set()) {
   for (const k of Object.keys(m.cards)) if (k.startsWith(`${id}:`)) delete m.cards[k];
   files.imports.entries = files.imports.entries.filter((e) => e.id !== id);
   delete files.collision.appearances[`imported/${id}`];
+  delete files.floors.models[id];
+  delete files.doors.models[id];
   let swept = 0;
   const own = new RegExp(`^${id.replace(/[^a-z0-9_]/g, '')}\\.[0-9a-f]{8}\\.(glb|png)$`);
   for (const dir of [out, join(out, 'icons')]) {
@@ -1202,6 +1324,12 @@ function writeFiles(out, files, now) {
   writeAtomic(join(out, 'manifest.json'), JSON.stringify(files.manifest, null, 1));
   if (Object.keys(files.collision.appearances).length) writeAtomic(join(out, 'flora-collision.json'), JSON.stringify(files.collision));
   else rmSync(join(out, 'flora-collision.json'), { force: true });
+  // A house's floors and doors, written while any house in the folder has rooms and taken away with the last one, so a folder
+  // of no house is the folder it always was.
+  for (const [name, f] of [['floors.json', files.floors], ['doors.json', files.doors]]) {
+    if (Object.keys(f.models).length) writeAtomic(join(out, name), JSON.stringify(f));
+    else rmSync(join(out, name), { force: true });
+  }
   const bytes = folderBytes(out, 'imports.json');
   files.imports.bytes = bytes;
   const ship = files.imports.shipNote;
@@ -1230,6 +1358,10 @@ export function writeImport(out, made, now = Date.now(), opts = {}) {
   (made.flora ? files.manifest.categories.flora : files.manifest.categories.layout).push(made.def);
   Object.assign(files.manifest.cards, made.cards);
   if (made.collision) files.collision.appearances[`imported/${made.id}`] = made.collision;
+  // A house's floors and doors, written even when it has none (a house read and found to have no floor is not one nobody
+  // has looked at, as the converter's own floors say).
+  if (made.floors) files.floors.models[made.id] = made.floors;
+  if (made.doors) files.doors.models[made.id] = made.doors;
   files.imports.entries.push({ ...made.entry, at: now });
   const bytes = writeFiles(out, files, now);
   return { swept, bytes, notes: files.imports.notes };
@@ -1278,7 +1410,7 @@ export function tuneOf(options) {
       continue;
     }
     const n = Number(v);
-    if (!Number.isFinite(n) || n <= 0) return `--${flag} is a number above nought`;
+    if (ZERO_OK.has(key) ? !Number.isFinite(n) || n < 0 : !Number.isFinite(n) || n <= 0) return `--${flag} is a number ${ZERO_OK.has(key) ? 'of nought or more' : 'above nought'}`;
     t[key] = n;
   }
   return t;
@@ -1303,6 +1435,7 @@ export function runImport({ input, out, ship = false, drop = null, options = {},
   }
   if (ship) dest = folders.shipped;
   log(`import: into ${dest}; collision budget ${tune.collisionBudget} triangles, pictures to ${tune.texMax} px, a model noted past ${tune.modelMax} MB, the shipped folder past ${tune.shipNote} MB, glass at ${tune.glassAlpha}, lower levels at ${tune.lods.join(', ')} m (--collision-budget= --tex-max= --model-max= --ship-note= --glass-alpha= --lods= --spec-power=)`);
+  log(`import: a house's rooms padded ${tune.cellPad} m, a doorway flat to ${tune.portalFlat} m, a door within ${tune.doorReach} m of its doorway, a room's light reaching ${tune.lightReach} m where its file names none, its brightness times ${tune.lightScale} (--cell-pad= --portal-flat= --door-reach= --light-reach= --light-scale=)`);
   if (drop) {
     const had = dropImport(dest, drop, now);
     log(had ? `import: ${drop} taken out of ${dest}` : `import: ${dest} holds no ${drop}`);
@@ -1343,6 +1476,9 @@ export function runImport({ input, out, ship = false, drop = null, options = {},
       failed++;
       continue;
     }
+    // A source met for the first time that names rooms is a house: its fresh record says so (an existing record is the
+    // owner's word, and a house with rooms under another kind is refused in words).
+    if (rec.made && namesRooms(src.json)) rec.record.kind = 'building';
     let made;
     try {
       made = importModel(src, rec.record, tune, { ship });
@@ -1364,7 +1500,7 @@ export function runImport({ input, out, ship = false, drop = null, options = {},
     const shadow = !ship && existsSync(join(folders.shipped, 'manifest.json')) && (readJsonQuiet(join(folders.shipped, 'manifest.json'))?.categories?.layout ?? []).concat(readJsonQuiet(join(folders.shipped, 'manifest.json'))?.categories?.flora ?? []).some((d) => d.id === made.id);
     const w = writeImport(dest, made, now, ship ? { shipNote: tune.shipNote } : {});
     const e = made.entry;
-    log(`import: ${e.id} (${e.kind}) from ${e.source}: ${made.def.file}, ${e.tri} triangles drawn, ${e.colTri} collided (${e.collision}), ${(e.bytes / 1048576).toFixed(2)} MB${made.def.lods ? `, ${made.def.lods.length - 1} lower level${made.def.lods.length > 2 ? 's' : ''} taking over at ${made.def.lods.slice(1).map((l) => l.near).join(', ')} m` : ''}${e.pic ? ', a picture' : ', no picture (nothing drew)'}${w.swept ? `; ${w.swept} old file(s) swept` : ''}`);
+    log(`import: ${e.id} (${e.kind}) from ${e.source}: ${made.def.file}, ${e.tri} triangles drawn, ${e.colTri} collided (${e.collision}), ${(e.bytes / 1048576).toFixed(2)} MB${made.def.lods ? `, ${made.def.lods.length - 1} lower level${made.def.lods.length > 2 ? 's' : ''} taking over at ${made.def.lods.slice(1).map((l) => l.near).join(', ')} m` : ''}${e.rooms !== undefined ? `, ${e.rooms} room${e.rooms === 1 ? '' : 's'} and ${e.doors} door${e.doors === 1 ? '' : 's'}` : ''}${e.pic ? ', a picture' : ', no picture (nothing drew)'}${w.swept ? `; ${w.swept} old file(s) swept` : ''}`);
     for (const n of made.notes) log(`  - ${n}`);
     if (shadow) log(`  - ${made.id} is shipped too (public/imports): a row stands the shipped one first, so this private one shows nowhere until it is shipped or renamed`);
     for (const n of w.notes) log(`  - ${n}`);

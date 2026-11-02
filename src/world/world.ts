@@ -80,7 +80,8 @@ import { outdoorNav } from './nav/outdoorNav.ts';
 import { cellOfLiving, doorwayNav } from './nav/doorway.ts';
 // The AI handoff's first three steps: their switches, and the ledger a landed blow is measured on (`aiLedger.ts`).
 import { LEDGER_WORLD, PLAYER_SHOT_FROM, noteLanded, playerMiddle } from './aiLedger.ts';
-import { Doors, type DoorView } from './doors.ts';
+import { Doors, galleryDoorStyles, type DoorView } from './doors.ts';
+import { INTERIOR_LIGHT_CAP, roomLightPlan } from './roomLights.ts';
 import { InstanceLocks } from './instances.ts';
 import { gatherOpeners } from './doorMath.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
@@ -256,8 +257,8 @@ const SWG_FILL = 1.0;
 /** The client's fog densities read far thicker here than in the game; planets can override this. */
 const DEFAULT_SWG_FOG_SCALE = 0.08;
 /** Interior lights: how many point lights may be live at once, and how the client's colours map to three's intensities. */
-/** Point lights a room may have at once. Every one lengthens every interior shader (and on some drivers each costs a second of compile time), so no more than a room needs. */
-const INTERIOR_LIGHT_CAP = 8;
+// Point lights a room may have at once (`INTERIOR_LIGHT_CAP`, `roomLights.ts`, which works the room's lights out). Every one
+// lengthens every interior shader (and on some drivers each costs a second of compile time), so no more than a room needs.
 const INTERIOR_LIGHT_SCALE = 3;
 const INTERIOR_AMBIENT_SCALE = 1.2;
 const INTERIOR_AMBIENT_FLOOR = 0.18;
@@ -1309,6 +1310,9 @@ export class World {
     this.doors.prepareSounds = (ids) => this.audio?.prepare(ids);
     // The locks' seam, answered by the dungeon copies' locked rooms: yes to everybody anywhere else.
     this.doors.mayOpen = (door) => !this.instanceLocks.refuses(door.building.object, door.cells);
+    // A house of the owner's names its doors' styles and carries none of their numbers (Map-maker II's eleventh wave): they
+    // are the player's own gallery pack's, asked only for a style a building's own table has not got.
+    this.doors.moreStyles = () => galleryDoorStyles();
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points, this.dust.points);
     // What is added to the scene or the ground's root from here on is queued for the material scan (step 6).
     this.sceneAdds.watch(scene);
@@ -10308,56 +10312,35 @@ export class World {
     this.interiorParallel.intensity = 0;
     this.interiorAmbient.intensity = 0;
     if (!want) return;
-    const cells = want.building.model.def.cells ?? [];
-    const current = cells.find((c) => c.index === want.cell);
-    if (!current) return;
-    const order = [want.cell, ...(current.portals ?? []).map((p) => p.target).filter((t) => t > 0 && t !== want.cell)];
+    // Which lights, in what order, how bright and how far: the rule apart from the pool (`roomLights.ts`), which a node test
+    // runs on the very houses the world stands (Map-maker II's eleventh wave). Rooms are never pitch black: the ambient starts
+    // at a floor under the rooms' own fill.
+    const plan = roomLightPlan(want.building.model.def.cells ?? [], want.cell, INTERIOR_AMBIENT_FLOOR);
+    if (!plan) return;
     const matrix = want.building.matrix;
     const pos = new THREE.Vector3();
     const dir = new THREE.Vector3();
-    // Rooms are never pitch black: a floor under the cell's own ambient light.
-    const ambient = new THREE.Color(INTERIOR_AMBIENT_FLOOR, INTERIOR_AMBIENT_FLOOR, INTERIOR_AMBIENT_FLOOR);
-    let points = 0;
-    let parallel = false;
-    for (const index of order) {
-      const cell = cells.find((c) => c.index === index);
-      for (const l of cell?.lights ?? []) {
-        const color = new THREE.Color(l.color[0], l.color[1], l.color[2]);
-        if (l.type === 0) {
-          ambient.add(color);
-          continue;
-        }
-        pos.set(l.position[0], l.position[1], l.position[2]).applyMatrix4(matrix);
-        if (l.type === 1) {
-          if (parallel) continue;
-          parallel = true;
-          dir.set(l.direction[0], l.direction[1], l.direction[2]).transformDirection(matrix);
-          this.interiorParallel.color.copy(color);
-          this.interiorParallel.intensity = 1.2;
-          this.interiorParallel.position.copy(pos).addScaledVector(dir, -20);
-          this.interiorParallel.target.position.copy(pos);
-          continue;
-        }
-        if (points >= INTERIOR_LIGHT_CAP) continue;
-        // Direct3D falloff 1 / (c + l d + q d^2) matched at 3 m to three's I / d^2, cut where it fades below 5%.
-        const [c, li, q] = l.attenuation;
-        const at3 = 1 / Math.max(0.05, c + 3 * li + 9 * q);
-        let range = 40;
-        for (let d = 1; d <= 40; d++) {
-          if (1 / (c + li * d + q * d * d) < at3 * 0.05) {
-            range = d;
-            break;
-          }
-        }
-        this.fxLampCells[points] = index;
-        const light = this.interiorPoints[points++];
-        light.color.copy(color);
-        light.intensity = 9 * at3 * INTERIOR_LIGHT_SCALE;
-        light.distance = range;
-        light.position.copy(pos);
-      }
+    const p = plan.parallel;
+    if (p) {
+      pos.set(p.position[0], p.position[1], p.position[2]).applyMatrix4(matrix);
+      dir.set(p.direction[0], p.direction[1], p.direction[2]).transformDirection(matrix);
+      this.interiorParallel.color.setRGB(p.color[0], p.color[1], p.color[2]);
+      this.interiorParallel.intensity = 1.2;
+      this.interiorParallel.position.copy(pos).addScaledVector(dir, -20);
+      this.interiorParallel.target.position.copy(pos);
     }
-    this.interiorAmbient.color.copy(ambient);
+    for (let i = 0; i < plan.points.length; i++) {
+      const pt = plan.points[i];
+      const l = pt.light;
+      this.fxLampCells[i] = pt.cell;
+      const light = this.interiorPoints[i];
+      light.color.setRGB(l.color[0], l.color[1], l.color[2]);
+      // Direct3D falloff 1 / (c + l d + q d^2) matched at 3 m to three's I / d^2, cut where it fades below 5%.
+      light.intensity = 9 * pt.at3 * INTERIOR_LIGHT_SCALE;
+      light.distance = pt.range;
+      light.position.set(l.position[0], l.position[1], l.position[2]).applyMatrix4(matrix);
+    }
+    this.interiorAmbient.color.setRGB(plan.ambient[0], plan.ambient[1], plan.ambient[2]);
     this.interiorAmbient.intensity = INTERIOR_AMBIENT_SCALE;
   }
 

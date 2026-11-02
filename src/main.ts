@@ -452,6 +452,8 @@ import { worldNav } from './world/nav/nav.ts';
 import { outdoorNav } from './world/nav/outdoorNav.ts';
 import { doorwayNav, wallBetween, type DoorTune } from './world/nav/doorway.ts';
 import { DOORS_TUNE, type DoorsTune } from './world/doorMath.ts';
+import { galleryDoorStyles } from './world/doors.ts';
+import { roomsReport } from './world/importedRooms.ts';
 import { PATROL_TUNE, type PatrolTune } from './world/patrols.ts';
 // The long walk: its numbers and its knob. The order itself is `NpcManager.send`; this file only
 // has to turn a place name or a pair of coordinates into a point, because the world's own named
@@ -29285,13 +29287,26 @@ class App {
   /**
    * `__debug.imports()` (Map-maker II's tenth wave): the two folders and their models as the import command wrote them (each
    * one's size, triangles drawn and collided and its notes), and which permanent row stands out of which. `{ reload: true }`
-   * is the world editor's Reload imports (the dev server's alone, the editor on).
+   * is the world editor's Reload imports (the dev server's alone, the editor on); `{ rooms: '<model>' }` a house's rooms as
+   * the game reads them (the eleventh wave).
    */
   private async importsDebug(o: Record<string, unknown>): Promise<unknown> {
     if (o.reload) {
       if (!import.meta.env.DEV) return "Reload imports is the world editor's, the dev server's alone";
       const ed = await this.loadEditor();
       return ed ? ed.reloadImports() : 'the world editor would not load';
+    }
+    // A house of the owner's with rooms (the eleventh wave): its cells, doorways, lights, floors and doors as the game reads
+    // them, out of the folder that stands it (`roomsReport`), each door's style looked for where the doors look for it.
+    if (typeof o.rooms === 'string') {
+      const model = o.rooms;
+      const pack = this.world.importPackOf(model);
+      const def = pack?.find(model);
+      if (!pack || !def) return `no imported model ${model} in either folder now (Reload imports reads them again)`;
+      const report = roomsReport(def, pack.doors, await galleryDoorStyles());
+      if (!report) return `${model} is a model with no rooms`;
+      const standing = [...this.permanent.standing].filter((s) => s.row.pack === 'imported' && s.row.model === model).length;
+      return { ...report, folder: pack === this.world.importsNow?.shipped ? 'shipped' : 'private', standing };
     }
     const mbOf = (bytes: number) => Math.round((bytes / 1048576) * 100) / 100;
     const folder = async (dir: string, ask: boolean) => {

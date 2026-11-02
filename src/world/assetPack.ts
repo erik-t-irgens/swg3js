@@ -328,6 +328,27 @@ export function lowerLevels(m: LoadedModel): readonly ModelLevel[] {
 }
 const NO_LEVELS: readonly ModelLevel[] = [];
 
+/**
+ * A pack's `floors.json` laid onto its manifest's cells (`floor` and `graph` on each cell its block names), the converted
+ * packs' and an imports folder's alike; a file of another version, or of no models, lays nothing.
+ */
+export function mergeFloors(manifest: PackManifest, file: unknown): void {
+  const floors = file as { version?: number; models?: Record<string, Record<string, { floor?: CellFloor; graph?: CellGraph }>> } | null;
+  if (!floors || floors.version !== FLOOR_PACK_VERSION || !floors.models) return;
+  for (const list of Object.values(manifest.categories)) {
+    for (const def of list) {
+      const byCell = floors.models[def.id];
+      if (!byCell || !def.cells) continue;
+      for (const cell of def.cells) {
+        const block = byCell[String(cell.index)];
+        if (!block) continue;
+        if (block.floor) cell.floor = block.floor;
+        if (block.graph) cell.graph = block.graph;
+      }
+    }
+  }
+}
+
 /** The session's one read of the table of every world's leaf card shaders, by the site root it was read from. */
 const sharedCards = new Map<string, Promise<void>>();
 
@@ -466,7 +487,8 @@ export class AssetPack {
    *
    * `{ dir }` (Map-maker II's tenth wave) is a pack of the owner's own models, made by the import command (`imports/` or
    * `imports-private/` under the site's root, `World.importsPack`): read as any pack is, its manifest asked every time, its
-   * flora's shapes read beside it, and nothing else (it has no layout, no client data's effects and no rooms this wave).
+   * flora's shapes read beside it, and, where a model of it is a house with rooms (the eleventh wave), its floors and doors
+   * beside it as a converted pack's are, asked every time too; never a layout or the client data's effects.
    */
   static async load(planetId: string, base: string = import.meta.env.BASE_URL, opts: { layout?: boolean; dir?: string } = {}): Promise<AssetPack | null> {
     const baseUrl = opts.dir ? `${base}${opts.dir}` : `${base}assets-private/${planetId}/`;
@@ -493,6 +515,26 @@ export class AssetPack {
             /* no shapes: its flora stands on the guess */
           }
         }
+        // A house of the owner's with rooms (the eleventh wave): its rooms' floors and its doors (rows naming a style, whose
+        // numbers are the player's own gallery pack's: `Doors.moreStyles`), beside the manifest as a converted pack's are,
+        // asked every time since the import command rewrites them while a session runs. A folder of no house asks neither.
+        if (Object.values(manifest.categories).some((list) => list.some((d) => !!d.cells?.length))) {
+          try {
+            const fr = await fetch(`${baseUrl}floors.json`, { cache: 'no-store' });
+            if (fr.ok && (fr.headers.get('content-type') ?? '').includes('json')) mergeFloors(manifest, await fr.json());
+          } catch {
+            /* no floors: a body inside steers straight at its goal */
+          }
+          try {
+            const dr = await fetch(`${baseUrl}doors.json`, { cache: 'no-store' });
+            if (dr.ok && (dr.headers.get('content-type') ?? '').includes('json')) {
+              const doors = (await dr.json()) as DoorsFile;
+              if (doors.version === DOORS_PACK_VERSION && doors.models && doors.styles) pack.doors = doors;
+            }
+          } catch {
+            /* no doors: its doorways stand open */
+          }
+        }
         return pack;
       }
       if (opts.layout !== false) {
@@ -514,23 +556,7 @@ export class AssetPack {
       if (cells) {
         try {
           const fr = await fetch(`${baseUrl}floors.json`);
-          if (fr.ok && (fr.headers.get('content-type') ?? '').includes('json')) {
-            const floors = (await fr.json()) as { version?: number; models?: Record<string, Record<string, { floor?: CellFloor; graph?: CellGraph }>> };
-            if (floors.version === FLOOR_PACK_VERSION && floors.models) {
-              for (const list of Object.values(manifest.categories)) {
-                for (const def of list) {
-                  const byCell = floors.models[def.id];
-                  if (!byCell || !def.cells) continue;
-                  for (const cell of def.cells) {
-                    const block = byCell[String(cell.index)];
-                    if (!block) continue;
-                    if (block.floor) cell.floor = block.floor;
-                    if (block.graph) cell.graph = block.graph;
-                  }
-                }
-              }
-            }
-          }
+          if (fr.ok && (fr.headers.get('content-type') ?? '').includes('json')) mergeFloors(manifest, await fr.json());
         } catch {
           /* no floors in this pack: the game steers, as it always has */
         }
@@ -627,7 +653,9 @@ export class AssetPack {
         }
         gltf.scene.traverse((o) => {
           if (o instanceof THREE.Mesh && this.imported && !Array.isArray(o.material) && o.material.userData.swgColliderOnly === true) {
-            (colliderOnly ??= []).push({ geometry: o.geometry, material: o.material, cell: -1 });
+            // In the room it stands under (a house's, the eleventh wave: a room's stand-in is the room's, solid to someone
+            // indoors), and in none on a model with no rooms, -1 as it always was.
+            (colliderOnly ??= []).push({ geometry: o.geometry, material: o.material, cell: meshCellOf(o) });
             o.visible = false;
             return;
           }

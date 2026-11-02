@@ -273,11 +273,154 @@ export function testPlate(): RawGltf {
 
 export const TEST_PLATE_RECORD = { id: 'test_plate', name: 'TEST plate', group: 'TEST', kind: 'prop', collision: 'auto', look: 'pbr', ship: false };
 
-// Run as a script: the TEST hut and the TEST plate with their records, into the folder named.
+/** A flat quad in the order its corners are given (two triangles, 0-1-2 and 0-2-3), as a doorway or a floor is drawn in Blender. */
+export function quad(corners: number[][], material?: number): RawPrim {
+  return { positions: corners.flat(), normals: corners.flatMap(() => [0, 0, 1]), indices: [0, 1, 2, 0, 2, 3], ...(material !== undefined ? { material } : {}) };
+}
+
+/** The TEST house's rooms in the house's own frame: what its tests hold the import to. */
+export const TEST_HOUSE = {
+  /** The front doorway (outside to the hall) at z 0, and the inner one (the hall to the parlour) at z -5: 1.2 m wide, 0.1 to 2.2 m up. */
+  front: { z: 0, x: 0.6, y0: 0.1, y1: 2.2 },
+  inner: { z: -5, x: 0.6, y0: 0.1, y1: 2.2 },
+  /** Where the hall's own pieces end toward the street (its front wall's face): the front doorway stands 0.1 m past it. */
+  hallFront: -0.1,
+  /** A point in each room, a metre up. */
+  inHall: [0, 1, -2.5],
+  inParlour: [0, 1, -7.5],
+  /** The hall's lamp (under its cell, range 16) and the parlour's (under no cell, standing in its box, no range named). */
+  hallLamp: { at: [0, 2.6, -2.5], intensity: 10, range: 16, color: [1, 0.9, 0.7] },
+  parlourLamp: { at: [0, 2.6, -7.5], intensity: 8, color: [0.8, 0.85, 1] },
+  hallAmbient: [0.12, 0.12, 0.14],
+  doorStyle: 'cantina_door',
+};
+
+/**
+ * The TEST house: a shell 8 m by 10 m and 3.2 m to its roof (cell 0, with a real hole where its front doorway is) and two
+ * rooms inside it, each walled, floored and ceilinged by its own pieces: the hall (cell 1, behind the front doorway) and the
+ * parlour (cell 2, behind the hall through a doorway in their shared wall). Its doorways are `portal:0:1` and `portal:1:2`,
+ * its floors `floor:1` (in two halves meeting at an edge, one half drawn upside down, as a careless hand might) and `floor:2`,
+ * its front door `door:cantina_door`, a lamp under the hall with a range, a lamp under no cell standing in the parlour with
+ * none, and the hall an ambient of its own. Every part where a node puts it (the doorways and two of the floor halves drawn
+ * about their own origins and moved, two of them turned, into place), its origin on its doorstep's ground line, as Blender's
+ * exporter writes it.
+ */
+export function testHouse(): RawGltf {
+  const walls = 0;
+  const floor = 1;
+  const roof = 2;
+  // One box mesh a material, every piece a node of it at its own place and size (half sizes, Blender's default cube being 2 m).
+  const box = (name: string, mesh: number, c: number[], h: number[]) => ({ name, mesh, translation: c, scale: h });
+  // A wall across x from -w to w at depth z, 0.1 m thick, from y0 to y1, with a doorway 1.2 m wide and 2.2 m high in its
+  // middle where `door`: its left, right and over-the-door pieces.
+  const wall = (name: string, z: number, w: number, y0: number, y1: number, door: boolean) => {
+    const h = (y1 - y0) / 2;
+    if (!door) return [box(name, walls, [0, y0 + h, z], [w, h, 0.05])];
+    const side = (w - 0.6) / 2;
+    return [
+      box(`${name}L`, walls, [-(0.6 + side), y0 + h, z], [side, h, 0.05]),
+      box(`${name}R`, walls, [0.6 + side, y0 + h, z], [side, h, 0.05]),
+      box(`${name}Top`, walls, [0, 2.2 + (y1 - 2.2) / 2, z], [0.6, (y1 - 2.2) / 2, 0.05]),
+    ];
+  };
+  const room = (z0: number, z1: number, front: boolean, back: boolean, label: string) => {
+    const mid = (z0 + z1) / 2;
+    const half = (z0 - z1) / 2;
+    return [
+      box(`${label}Floor`, floor, [0, 0.05, mid], [3.8, 0.05, half]),
+      box(`${label}Ceiling`, roof, [0, 3.0, mid], [3.8, 0.05, half]),
+      box(`${label}WallL`, walls, [-3.8, 1.55, mid], [0.05, 1.45, half]),
+      box(`${label}WallR`, walls, [3.8, 1.55, mid], [0.05, 1.45, half]),
+      ...wall(`${label}Front`, z0, 3.8, 0.1, 3.0, front),
+      ...wall(`${label}Back`, z1, 3.8, 0.1, 3.0, back),
+    ];
+  };
+  const shellPieces = [
+    box('ShellFrontL', walls, [-2.3, 1.6, 0], [1.7, 1.6, 0.1]),
+    box('ShellFrontR', walls, [2.3, 1.6, 0], [1.7, 1.6, 0.1]),
+    box('ShellFrontTop', walls, [0, 2.7, 0], [0.6, 0.5, 0.1]),
+    box('ShellBack', walls, [0, 1.6, -10], [4, 1.6, 0.1]),
+    box('ShellLeft', walls, [-4, 1.6, -5], [0.1, 1.6, 5]),
+    box('ShellRight', walls, [4, 1.6, -5], [0.1, 1.6, 5]),
+    box('ShellRoof', roof, [0, 3.3, -5], [4.2, 0.1, 5.2]),
+  ];
+  const hallPieces = room(-0.15, -4.95, true, true, 'Hall');
+  const parlourPieces = room(-5.05, -9.85, true, false, 'Parlour');
+  const nodes: Record<string, unknown>[] = [];
+  const add = (n: Record<string, unknown>) => {
+    nodes.push(n);
+    return nodes.length - 1;
+  };
+  const kids = (list: Record<string, unknown>[]) => list.map(add);
+  const H = TEST_HOUSE;
+  const shell = add({ name: 'cell:0:shell' });
+  nodes[shell].children = kids(shellPieces);
+  const hall = add({ name: 'cell:1:hall', extras: { ambient: H.hallAmbient } });
+  nodes[hall].children = [...kids(hallPieces), add({ name: 'Lamp', translation: H.hallLamp.at, extensions: { KHR_lights_punctual: { light: 0 } } })];
+  const parlour = add({ name: 'cell:2:parlour' });
+  nodes[parlour].children = kids(parlourPieces);
+  // The doorways and the floors are placed as Blender writes an object moved into place: their corners about the object's
+  // own origin, the node's translation (and on two a turn) putting them where they stand, so the pass must bake the node.
+  // The front doorway stands about its own middle; the inner one is drawn lying flat (a plane in Blender's default pose),
+  // stood up by a quarter turn about X and moved back to its wall.
+  const F = H.front;
+  const I = H.inner;
+  const frontMid = (F.y0 + F.y1) / 2;
+  add({ name: 'portal:0:1', mesh: 3, translation: [0, frontMid, F.z] });
+  add({ name: 'portal:1:2', mesh: 4, translation: [0, 0, I.z], rotation: [Math.SQRT1_2, 0, 0, Math.SQRT1_2] });
+  add({ name: 'floor:1', mesh: 5 });
+  // The hall's second half drawn about its own middle and turned half round about up; the parlour's moved into place.
+  add({ name: 'floor:1.001', mesh: 6, translation: [0, 0.1, -3.7], rotation: yawQ(Math.PI) });
+  add({ name: 'floor:2', mesh: 7, translation: [0, 0.1, -7.45] });
+  add({ name: `door:${H.doorStyle}`, translation: [0, H.front.y0, H.front.z] });
+  add({ name: 'Lamp.001', translation: H.parlourLamp.at, extensions: { KHR_lights_punctual: { light: 1 } } });
+  const frontLocal = [
+    [-F.x, F.y0 - frontMid, 0],
+    [F.x, F.y0 - frontMid, 0],
+    [F.x, F.y1 - frontMid, 0],
+    [-F.x, F.y1 - frontMid, 0],
+  ];
+  // Lying flat in its own frame: a quarter turn about X takes (x, 0, z) to (x, -z, 0), so its z is minus its height.
+  const innerLocal = [
+    [-I.x, 0, -I.y0],
+    [I.x, 0, -I.y0],
+    [I.x, 0, -I.y1],
+    [-I.x, 0, -I.y1],
+  ];
+  return {
+    materials: [
+      { name: 'Walls', pbrMetallicRoughness: { baseColorFactor: [0.75, 0.68, 0.55, 1], metallicFactor: 0, roughnessFactor: 0.85 }, doubleSided: true },
+      { name: 'Floor', pbrMetallicRoughness: { baseColorFactor: [0.42, 0.3, 0.2, 1], metallicFactor: 0, roughnessFactor: 0.7 }, doubleSided: true },
+      { name: 'Roof', pbrMetallicRoughness: { baseColorFactor: [0.4, 0.25, 0.18, 1], metallicFactor: 0, roughnessFactor: 0.9 }, doubleSided: true },
+    ],
+    meshes: [
+      { name: 'Cube', primitives: [cube(walls)] },
+      { name: 'Cube.001', primitives: [cube(floor)] },
+      { name: 'Cube.002', primitives: [cube(roof)] },
+      { name: 'Doorway', primitives: [quad(frontLocal)] },
+      { name: 'Doorway.001', primitives: [quad(innerLocal)] },
+      // The hall's floor in two halves meeting at z -2.5; the second wound face down, as a careless hand might leave it.
+      // In the house's frame: A from z -0.1 to -2.5, B from -2.5 to -4.9 (about its middle at -3.7, turned half round, so its
+      // corners are the house's own with x and z turned over), the parlour's from -5.1 to -9.8 (about -7.45).
+      { name: 'HallFloorA', primitives: [quad([[-3.75, 0.1, -0.1], [3.75, 0.1, -0.1], [3.75, 0.1, -2.5], [-3.75, 0.1, -2.5]])] },
+      { name: 'HallFloorB', primitives: [quad([[3.75, 0, -1.2], [3.75, 0, 1.2], [-3.75, 0, 1.2], [-3.75, 0, -1.2]])] },
+      { name: 'ParlourFloor', primitives: [quad([[-3.75, 0, 2.35], [3.75, 0, 2.35], [3.75, 0, -2.35], [-3.75, 0, -2.35]])] },
+    ],
+    nodes,
+    scenes: [{ nodes: nodes.map((_, i) => i).filter((i) => !nodes.some((n) => ((n.children as number[] | undefined) ?? []).includes(i))) }],
+    extensionsUsed: ['KHR_lights_punctual'],
+    extensions: { KHR_lights_punctual: { lights: [{ type: 'point', color: H.hallLamp.color, intensity: H.hallLamp.intensity, range: H.hallLamp.range }, { type: 'point', color: H.parlourLamp.color, intensity: H.parlourLamp.intensity }] } },
+  };
+}
+
+/** The record the TEST house is imported with: a building, its rooms read off its names. */
+export const TEST_HOUSE_RECORD = { id: 'test_house', name: 'TEST house', group: 'TEST', kind: 'building', collision: 'auto', look: 'pbr', ship: false };
+
+// Run as a script: the TEST hut, the TEST plate and the TEST house with their records, into the folder named.
 if (process.argv[1] && /blenderGlb\.ts$/.test(process.argv[1].replace(/\\/g, '/'))) {
   const dir = process.argv[2];
   if (!dir) {
-    console.log('node tools/swg/tests/blenderGlb.ts <dir>: writes test_hut.glb and test_plate.glb with their records');
+    console.log('node tools/swg/tests/blenderGlb.ts <dir>: writes test_hut.glb, test_plate.glb and test_house.glb with their records');
     process.exit(1);
   }
   mkdirSync(dir, { recursive: true });
@@ -285,5 +428,7 @@ if (process.argv[1] && /blenderGlb\.ts$/.test(process.argv[1].replace(/\\/g, '/'
   writeFileSync(join(dir, 'test_hut.import.json'), `${JSON.stringify(TEST_HUT_RECORD, null, 2)}\n`);
   writeFileSync(join(dir, 'test_plate.glb'), writeRawGlb(testPlate()));
   writeFileSync(join(dir, 'test_plate.import.json'), `${JSON.stringify(TEST_PLATE_RECORD, null, 2)}\n`);
-  console.log(`wrote the TEST hut and the TEST plate into ${dir}`);
+  writeFileSync(join(dir, 'test_house.glb'), writeRawGlb(testHouse()));
+  writeFileSync(join(dir, 'test_house.import.json'), `${JSON.stringify(TEST_HOUSE_RECORD, null, 2)}\n`);
+  console.log(`wrote the TEST hut, the TEST plate and the TEST house into ${dir}`);
 }

@@ -138,6 +138,19 @@ export interface DoorMotion {
   idle: number;
 }
 
+/**
+ * The styles a building's doors stand by (Map-maker II's eleventh wave): its own table's (`own`) wherever that names every
+ * row's style, which is every converted pack, asking nothing; otherwise the styles `more` hands over (the player's own
+ * gallery pack's, `Doors.moreStyles`) with its own laid over them. A house of the owner's names its styles and carries none
+ * of their numbers, which are the client's; a row whose style neither knows stands no door, and its doorway stands open, as
+ * a pack with no doors table's does.
+ */
+export async function doorStylesFor(rows: readonly DoorRow[], own: Record<string, DoorStyleRow>, more: (() => Promise<Record<string, DoorStyleRow> | null>) | null): Promise<Record<string, DoorStyleRow>> {
+  if (!more || rows.every((r) => Object.prototype.hasOwnProperty.call(own, r.style))) return own;
+  const extra = await more();
+  return extra ? { ...extra, ...own } : own;
+}
+
 export function newDoorMotion(): DoorMotion {
   return { open: 0, from: 0, target: 0, t: 0, moving: false, idle: 0 };
 }

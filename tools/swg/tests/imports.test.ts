@@ -429,6 +429,9 @@ try {
   const pack = await AssetPack.load('imported', SITE, { dir: 'imports-private/' });
   ok(!!pack && pack.imported && !!pack.find('test_block'), 'the folder loads as a pack of its own, marked imported, its model found by id');
   ok(served.includes(`${SITE}imports-private/manifest.json`), 'its manifest asked from its own folder');
+  // A folder of no house with rooms asks for no rooms' floors or doors (the eleventh wave's files): a file known not to be
+  // there is never asked for, and this folder stands as it did at 441c2f6.
+  ok(!served.some((u) => /imports-private\/(floors|doors)\.json/.test(u)), `and neither floors.json nor doors.json, holding no house with rooms (${served.filter((u) => u.startsWith(SITE)).map((u) => u.slice(SITE.length)).join(', ')})`);
   const loaded = (await pack!.model('test_block')) as LoadedModel;
   ok(served.some((u) => u === `${SITE}imports-private/${made.def.file}`), `its GLB fetched by its content-hashed name (${made.def.file})`);
   let moved = 0;
@@ -594,7 +597,9 @@ try {
   ok(sourceRefusals({ extensionsRequired: ['EXT_something_new'] }).some((w: string) => /requires EXT_something_new/.test(w)), 'and an extension it does not know that the file requires');
   const d = importModel({ ...src, json: { ...src.json, nodes: [...src.json.nodes, { name: 'cell:17:4way', mesh: 0 }] } }, RECORD, IMPORT_TUNE);
   ok(!!d.refuse && d.refuse.some((w: string) => /begins with a digit/.test(w)), `a cell whose own name begins with a digit is refused in words ("${d.refuse?.[0]}")`);
-  ok(/next wave/.test(roomRefusal('portal:1:2') ?? '') && /next wave/.test(roomRefusal('cell:1:hall') ?? '') && roomRefusal('Cellar') === null, "a room's names are the next wave's, and a name merely beginning with the word is not one");
+  // A room's names that read are a house's rooms since the eleventh wave (`importRooms.test.ts`), and refuse nothing; one that
+  // begins as a room's and does not read as one is refused in words, and a name merely beginning with the word is not one.
+  ok(roomRefusal('portal:1:2') === null && roomRefusal('cell:1:hall') === null && /is not portal:<room>:<room>/.test(roomRefusal('portal:front') ?? '') && roomRefusal('Cellar') === null, "a room's names that read refuse nothing, one that does not read is refused in words, and a name merely beginning with the word is not one");
   const nothing = importModel({ ...src, json: { ...src.json, nodes: [{ name: 'Only-colonly', mesh: 0 }], scenes: [{ nodes: [0] }] } }, RECORD, IMPORT_TUNE);
   ok(!!nothing.refuse && /nothing drawn/.test(nothing.refuse[0]), 'a model with nothing drawn at its own level is refused');
 }
