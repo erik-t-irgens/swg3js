@@ -135,6 +135,25 @@ function noteFloraCard(name: string): void {
   if (!CARD_SHADERS.has(name)) CARD_SHADERS.set(name, { blend: classByName(name) === 'blend', emissive: [0, 0, 0], from: 'names' });
 }
 
+/**
+ * The card shaders of the owner's own imported models of these ids forgotten (Map-maker II's tenth wave), whether a pack's
+ * table or a name's guess put them here: an import's material is named `<id>:<name>`, and the editor's Reload imports lets
+ * their packs go and reads them again, where a model made again under its id may wear a leaf no longer (a leaf made opaque,
+ * a flora model made a prop), which a name kept from its last making would still rule a card. The next load of the pack
+ * names what it still wears. Answers how many were forgotten.
+ */
+export function forgetImportCards(ids: Iterable<string>): number {
+  const prefixes = [...ids].map((id) => `${id}:`);
+  if (!prefixes.length) return 0;
+  let n = 0;
+  for (const name of [...CARD_SHADERS.keys()]) {
+    if (!prefixes.some((p) => name.startsWith(p))) continue;
+    CARD_SHADERS.delete(name);
+    n++;
+  }
+  return n;
+}
+
 /** Every card shader forgotten: a test standing in for a fresh session (the game keeps them for its whole life). */
 export function forgetCardShaders(): void {
   CARD_SHADERS.clear();

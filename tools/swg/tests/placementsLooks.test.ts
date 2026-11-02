@@ -146,12 +146,13 @@ ok(parseDonor('props:sign') === null && parseDonor('Props:sign/x') === null && p
       else note(`git cannot hand ${PRE_WAVE} over here and ${world}'s file has changed since the wave: it is held to its own text only`);
       continue;
     }
-    // A mark is a kind that reader never knew, so it is held to what that reader could read: every row but the marks (the
-    // owner's own editing puts marks in these files, and his working copy is what is read here).
-    const known = read.rows.filter((r) => r.kind !== 'mark');
+    // A mark is a kind that reader never knew, and a row of one of the owner's own imported models (the tenth wave's
+    // `pack: 'imported'`) a pack it never knew, so it is held to what that reader could read: every row but those (the
+    // owner's own editing puts both in these files, and his working copy is what is read here).
+    const known = read.rows.filter((r) => r.kind !== 'mark' && r.pack !== 'imported');
     const oldRows = old.readPlacementsFile(text, world, 'ground').rows;
     const then = old.placementsFileText(world, 'raw', oldRows);
-    ok(known.length > 0 && placementsFileText(world, 'raw', known) === then && JSON.stringify(known) === JSON.stringify(oldRows), `${world}'s committed map edits (${known.length} rows that are not marks, ${read.rows.length - known.length} marks) read as ${PRE_WAVE} read them and are written back as it wrote them, byte for byte`);
+    ok(known.length > 0 && placementsFileText(world, 'raw', known) === then && JSON.stringify(known) === JSON.stringify(oldRows), `${world}'s committed map edits (${known.length} rows that are neither marks nor imports, ${read.rows.length - known.length} that are) read as ${PRE_WAVE} read them and are written back as it wrote them, byte for byte`);
     if (sha(text) === rec.text) ok(sha(then) === rec.back, `and that writing is the one recorded here for a machine where git cannot hand it over (${sha(text)} written back as ${sha(then)})`);
     else note(`${world}'s file has changed since the wave (${sha(text)}): the recorded writing is of the file it was`);
     // A file the writer itself wrote comes back exactly as it was (monument's is; the tutorial's was written by hand).

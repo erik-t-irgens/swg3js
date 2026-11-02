@@ -7,6 +7,7 @@ import { STORY_FILE, listStorySet } from './server/storySet.mjs';
 import { editFileOf } from './src/story/placementPath.ts';
 import { trackFileOf } from './src/race/trackPath.ts';
 import { shippedPublic } from './tools/dev/shippedPublic.mjs';
+import { servedFile } from './tools/dev/servedFile.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PRIVATE_DIR = path.resolve(ROOT, 'assets-private');
@@ -16,6 +17,10 @@ const STORY_DIR = path.resolve(ROOT, 'story-private');
 const PLACEMENTS_DIR = path.resolve(ROOT, 'public', 'placements');
 /** The worlds' race tracks (`src/race/trackFile.ts`): tracked files that ship with the build, one a world. */
 const TRACKS_DIR = path.resolve(ROOT, 'public', 'tracks');
+/** The owner's own imported models while they are work in progress (`npm run swg -- import`): git-ignored, served in dev alone. */
+const IMPORTS_DIR = path.resolve(ROOT, 'imports-private');
+/** The ones he has shipped (`--ship`): tracked public files every build carries. */
+const SHIPPED_IMPORTS_DIR = path.resolve(ROOT, 'public', 'imports');
 
 /** The list of the owner's story files, as `/story-private/index.json` hands it to the browser. */
 function storyIndex(): string {
@@ -79,6 +84,53 @@ function privateStory(): Plugin {
       const out = path.resolve(ROOT, 'dist/story-private');
       fs.cpSync(STORY_DIR, out, { recursive: true });
       fs.writeFileSync(path.join(out, 'index.json'), storyIndex());
+    },
+  };
+}
+
+/**
+ * Serves the git-ignored imports-private/ folder (the owner's own models the import command made, Map-maker II's tenth wave)
+ * at /imports-private/ in dev alone, as story-private/ is: every answer fresh from the disk (the command writes the folder
+ * while the dev server runs, and the editor's Reload imports reads it again), a file that is not there a 404. Never built:
+ * there is no copy into dist/, so no build and no release carries a model the owner has not shipped (`--ship` writes into
+ * public/imports/, which a build carries as any tracked public file).
+ */
+function privateImports(): Plugin {
+  return {
+    name: 'private-imports',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use('/imports-private', (req, res) => {
+        // Only a file inside the folder (`servedFile`: no `..`, encoded or not, reaches the rest of the disk).
+        const file = servedFile(IMPORTS_DIR, req.url);
+        res.setHeader('Cache-Control', 'no-store');
+        if (!file || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+          res.statusCode = 404;
+          res.setHeader('Content-Type', 'text/plain');
+          res.end('not found');
+          return;
+        }
+        res.setHeader('Content-Type', file.endsWith('.json') ? 'application/json' : file.endsWith('.glb') ? 'model/gltf-binary' : file.endsWith('.png') ? 'image/png' : 'application/octet-stream');
+        fs.createReadStream(file).pipe(res);
+      });
+      // And the shipped folder (public/imports/) answered from the disk too, as the placements' files are: Vite's own list of
+      // the public folder learns of a file `--ship` wrote while it runs only once its watcher has told it.
+      server.middlewares.use('/imports', (req, res, next) => {
+        if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+        const file = servedFile(SHIPPED_IMPORTS_DIR, req.url);
+        if (!file) return next();
+        res.setHeader('Cache-Control', 'no-store');
+        fs.readFile(file, (err, data) => {
+          if (err) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+            res.end('not found');
+            return;
+          }
+          res.setHeader('Content-Type', file.endsWith('.json') ? 'application/json; charset=utf-8' : file.endsWith('.glb') ? 'model/gltf-binary' : file.endsWith('.png') ? 'image/png' : 'application/octet-stream');
+          res.end(req.method === 'HEAD' ? undefined : data);
+        });
+      });
     },
   };
 }
@@ -326,7 +378,7 @@ function privateAssets(): Plugin {
 
 export default defineConfig({
   base: './',
-  plugins: [privateAssets(), privateStory(), placementFiles(), placementsEditor(), trackFiles(), tracksEditor(), shippedPublicList()],
+  plugins: [privateAssets(), privateStory(), privateImports(), placementFiles(), placementsEditor(), trackFiles(), tracksEditor(), shippedPublicList()],
   build: { target: 'es2022', sourcemap: false },
   // PORT lets a launcher assign the port; without it Vite picks its own default, so `npm run dev`
   // behaves exactly as before.

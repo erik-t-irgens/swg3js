@@ -5,7 +5,8 @@
 // screen's own fallback.
 //
 // An entry is what a row writes (`EditorSource`): a props thing, a gallery building, a model of a world's own pack (this
-// world's, or another's, named in `from`), or a planted model of any world.
+// world's, or another's, named in `from`), a planted model of any world, or (Map-maker II's tenth wave) one of the owner's
+// own imported models, read out of each imports folder's own `imports.json`.
 //
 // Recent and Favourites are per developer and never committed: kept in local storage inside a `try`, read through a
 // storage port that may throw (a private window, cleared site data), and answering the session's own copy when it does.
@@ -20,13 +21,59 @@ export const LIBRARY_VERSION = 1;
 
 /**
  * The sources, in the order the window lists them. Effects and Sounds (Map-maker II's seventh wave) are what a row's
- * attachments name: taken in hand, one is hung on the row the aim rests on, or stood as a mark where nothing is.
+ * attachments name: taken in hand, one is hung on the row the aim rests on, or stood as a mark where nothing is. Imported
+ * (its tenth wave) is the owner's own models, read from each imports folder's `imports.json` (`importEntries`) rather than
+ * the library pass's index.
  */
-export const LIBRARY_SOURCES = ['props', 'buildings', 'world', 'flora', 'effects', 'sounds'] as const;
+export const LIBRARY_SOURCES = ['props', 'buildings', 'world', 'flora', 'imported', 'effects', 'sounds'] as const;
 export type LibrarySource = (typeof LIBRARY_SOURCES)[number];
 
 /** A source in words. */
-export const SOURCE_WORDS: Record<LibrarySource, string> = { props: 'Props', buildings: 'Buildings', world: 'World models', flora: 'Flora', effects: 'Effects', sounds: 'Sounds' };
+export const SOURCE_WORDS: Record<LibrarySource, string> = { props: 'Props', buildings: 'Buildings', world: 'World models', flora: 'Flora', imported: 'Imported', effects: 'Effects', sounds: 'Sounds' };
+
+/** One model of an imports folder's `imports.json`, as the import command writes it (`tools/swg/imports.mjs`). */
+export interface ImportFileEntry {
+  id: string;
+  name?: string;
+  group?: string;
+  kind?: string;
+  pic?: string | null;
+  sz?: number[];
+  tri?: number;
+  notes?: string[];
+}
+
+/**
+ * The Imported source's entries out of one folder's `imports.json` (`folder` the folder under the site's root, `imports/`
+ * or `imports-private/`), skipping an id `taken` already holds (the shipped folder is read first, and a row stands the
+ * shipped model first, so a private one of the same id would never be what stands). Its picture is named from the site's
+ * root (`/imports-private/icons/...`), its pack the folder, its model its id. An entry of no shape is passed over.
+ */
+export function importEntries(file: unknown, folder: string, taken: Set<string> = new Set()): LibraryEntry[] {
+  const f = file as { entries?: unknown } | null;
+  if (!f || !Array.isArray(f.entries)) return [];
+  const out: LibraryEntry[] = [];
+  const dir = folder.replace(/\/+$/, '');
+  for (const raw of f.entries as ImportFileEntry[]) {
+    if (!raw || typeof raw.id !== 'string' || !/^[a-z0-9][a-z0-9_]{0,47}$/.test(raw.id) || taken.has(raw.id)) continue;
+    taken.add(raw.id);
+    const kind = raw.kind === 'building' || raw.kind === 'flora' ? raw.kind : 'prop';
+    out.push({
+      s: 'imported',
+      p: dir,
+      id: raw.id,
+      m: raw.id,
+      n: typeof raw.name === 'string' ? raw.name : null,
+      g: typeof raw.group === 'string' ? raw.group : 'mine',
+      t: null,
+      sz: Array.isArray(raw.sz) ? raw.sz : [0, 0, 0],
+      tri: typeof raw.tri === 'number' ? raw.tri : 0,
+      pic: typeof raw.pic === 'string' && /^icons\/[A-Za-z0-9_.-]+\.png$/.test(raw.pic) ? `/${dir}/${raw.pic}` : null,
+      f: kind === 'building' ? ENTRY_FLAG.building : kind === 'flora' ? ENTRY_FLAG.flora : 0,
+    });
+  }
+  return out;
+}
 
 /** Whether an entry is an attachment's (an effect or a sound) rather than a thing with a model. */
 export function isAttachEntry(e: Pick<LibraryEntry, 's'>): boolean {
@@ -245,6 +292,11 @@ export function usedHereKeys(v: LibraryView, rows: readonly UsedRow[], here: str
       note(r.thing ? v.byKey.get(`props:${r.thing}`) : undefined);
       continue;
     }
+    // An imported model's row (the tenth wave): its entry by its id, whichever folder the library read it from.
+    if (r.pack === 'imported') {
+      note(r.model ? v.byKey.get(`imported:${r.model}`) : undefined);
+      continue;
+    }
     if (!r.model || !r.pack) continue;
     const pack = r.pack === 'gallery' ? 'gallery' : (r.from ?? here);
     const list = byModel.get(`${pack}|${r.model}`);
@@ -263,6 +315,7 @@ export function usedHereKeys(v: LibraryView, rows: readonly UsedRow[], here: str
  */
 export function entryForRow(v: LibraryView, r: UsedRow, here: string): LibraryEntry | null {
   if (r.pack === 'props') return r.thing ? (v.byKey.get(`props:${r.thing}`) ?? null) : null;
+  if (r.pack === 'imported') return r.model ? (v.byKey.get(`imported:${r.model}`) ?? null) : null;
   if (!r.model || !r.pack) return null;
   const pack = r.pack === 'gallery' ? 'gallery' : (r.from ?? here);
   const kind = r.pack === 'gallery' ? 'buildings' : 'world';

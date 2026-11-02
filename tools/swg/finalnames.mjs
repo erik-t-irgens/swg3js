@@ -583,6 +583,9 @@ export function layoutKeyOf(packDir, walkThrough = null, edits = null) {
   // And the terrain's own wet rivers the bake makes water (Map-maker II's sixth wave, navgrid.mjs `soeRiverStamp`): a grid
   // baked before they were water is asked for again on the worlds that have them, and every other world keys as before.
   if (typeof edits?.soeRivers === 'string' && edits.soeRivers) h.update('\n \nsoe rivers\n').update(edits.soeRivers);
+  // And the made files the solid rows of the owner's own imported models stand on (Map-maker II's tenth wave, `gridEditsOf`'s
+  // `imports`, each named for its content), so a model made again is baked again; a world with none keys as before.
+  if (Array.isArray(edits?.imports) && edits.imports.length) h.update('\n \nimports\n').update(edits.imports.join('\n'));
   return h.digest('hex').slice(0, 12);
 }
 

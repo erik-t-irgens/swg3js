@@ -131,9 +131,11 @@ function localOf(n) {
  * A converted GLB's default scene as the rasteriser's meshes: every triangle mesh through its nodes' matrices, its base
  * colour picture (cut out where its material cuts, faint parts of a blended one left out) and its glow picture with its
  * factor; a portal building's rooms (cells past 0) left out, and an invisible or an additive surface left out as the item
- * pictures leave them.
+ * pictures leave them. With `factors` (an imported model's picture, Map-maker II's tenth wave) a surface with no picture is
+ * drawn in its own base colour factor rather than the converter's grey, since a home-made model is often coloured by its
+ * factors alone; the library's own pictures leave it off and are drawn exactly as before.
  */
-export function glbMeshes(buf) {
+export function glbMeshes(buf, { factors = false } = {}) {
   const g = readGlb(buf);
   const out = [];
   const cache = new Map();
@@ -151,6 +153,8 @@ export function glbMeshes(buf) {
         if (p.attributes?.POSITION === undefined) continue;
         const mat = p.material !== undefined ? g.json.materials?.[p.material] : null;
         if (mat?.extras?.swgInvisible || /invisible/i.test(mat?.name ?? '')) continue;
+        // An imported model's collider-only stand-in (Map-maker II's tenth wave) is never drawn, so it is no part of a picture.
+        if (mat?.extras?.swgColliderOnly) continue;
         if (mat?.extras?.swg?.blend === 'add') continue;
         const pos = accessor(g, p.attributes.POSITION);
         const nor = p.attributes.NORMAL !== undefined ? accessor(g, p.attributes.NORMAL) : null;
@@ -177,7 +181,9 @@ export function glbMeshes(buf) {
             N[i + 2] = m[2] * a + m[6] * b + m[10] * c;
           }
         }
-        out.push({ positions: P, normals: N, uvs: uv, indices: idx, texture, ...(texture ? {} : { color: [168, 168, 168] }), ...(emissive ? { emissive, emissiveFactor: mat?.emissiveFactor ?? [1, 1, 1] } : {}) });
+        const f = factors ? mat?.pbrMetallicRoughness?.baseColorFactor : null;
+        const flat = Array.isArray(f) && f.length >= 3 ? [0, 1, 2].map((k) => Math.round(Math.min(1, Math.max(0, Math.pow(f[k], 1 / 2.2))) * 255)) : [168, 168, 168];
+        out.push({ positions: P, normals: N, uvs: uv, indices: idx, texture, ...(texture ? {} : { color: flat }), ...(emissive ? { emissive, emissiveFactor: mat?.emissiveFactor ?? [1, 1, 1] } : {}) });
       }
     }
     for (const c of n.children ?? []) walk(c, m);
@@ -187,8 +193,8 @@ export function glbMeshes(buf) {
 }
 
 /** A model's picture drawn from its GLB, or null where nothing drew (`renderThumbnail`'s coverage). */
-export function pictureOf(buf, building, tune = LIBRARY_PASS) {
-  const meshes = glbMeshes(buf);
+export function pictureOf(buf, building, tune = LIBRARY_PASS, opts = {}) {
+  const meshes = glbMeshes(buf, opts);
   return renderThumbnail(meshes, { size: tune.size, view: 'wear', yawDeg: tune.yawDeg, pitchDeg: tune.pitchDeg, flipX: false, groundClip: building ? tune.groundClip : null });
 }
 

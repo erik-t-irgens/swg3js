@@ -17,7 +17,7 @@ import { PARTICLE_UNIFORMS, Weather, type WeatherViewContext, type WeatherWorldC
 import { WEATHER_UNIFORMS, WET_WRAP, wetWrap } from './wetness';
 import { detailWrap } from './detailMap.ts';
 import { specWrap } from './specular.ts';
-import { cardWrap, isCard, prepareCardModel, setCardRule } from './cardRule.ts';
+import { cardWrap, forgetImportCards, isCard, prepareCardModel, setCardRule } from './cardRule.ts';
 import { CARD_LIGHT_TUNE, cardReceives, setCardRoomPass, updateCardLight } from './cardLight.ts';
 import { SWAY_TUNE, batchedDepthCombo, disposeStandIn, hangSwayDepth, plainDepthCombos, setSwayEye, setSwayRoomPass, skinnedDepthCombos, stepSway, swayDepthCombos, swayDepthStandIns, swayWrap } from './floraSway.ts';
 import { chooseWindTrees, windTreesChosen, windTreesEverUsed } from './windTrees.ts';
@@ -60,7 +60,7 @@ import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.t
 import { GROUND_FIRST_CHILD_ONLY, GROUND_NORMAL, GROUND_TILES_WANTED, groundSelfTest, groundTileUniforms, groundTilesMaterial, setGroundClock, TerrainTextures, writeGroundDraw, type GroundSelfTest, type ShadersFile } from './terrainTextures.ts';
 import { GROUND_DRAW_TUNE, groundChunkAt, groundChunkOrigin, tilesFit, worldRowSwitches, type CornerName, type DrawSwitchesKept, type GroundColour, type GroundShine } from './groundTiles.ts';
 import { PICTURES_NOT_LOADED, appendLending, arrivalAsks, baseFamilyId, familyOfKey, groundPacksOf, lendInto, lentAnswer, lentPackDir, lentPacksOf, lentPicturesOf, loadLentTable, notGroundPack, planLending, shadersTiled, undrawnLent, type LendPlan, type LentFetch, type LentTable } from './lentGround.ts';
-import { AssetPack, lowerLevels, type Layout, type LoadedModel, type PackModelDef } from './assetPack';
+import { AssetPack, lowerLevels, normalYOf, type Layout, type LoadedModel, type PackModelDef } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
@@ -88,7 +88,7 @@ import { laterRows, standingList } from './ngeOverlay.ts';
 import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, brigadeBodies, personDormant, rosterRows, ruinsOf, type RosterRow, type RuinsCircle } from './restuss.ts';
 import { releaseWorldStates, stateNow, standsIn, statesInForce, takeWorldStates } from './worldState.ts';
 import { POST_CLEAR_TUNE, furnishLayout, type InteriorsFile } from './interiors.ts';
-import { knownAbsent, packBytes, packJson, shippedAsk } from './packFiles.ts';
+import { IMPORTS_PRIVATE, IMPORTS_SHIPPED, importPackFor, importsAsks, knownAbsent, packBytes, packJson, shippedAsk } from './packFiles.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { conversationPack } from './conversationPack.ts';
@@ -269,6 +269,12 @@ const RIPPLE_INTERVAL = 0.12;
  * enough that nothing is held for a world it has left.
  */
 const SIM_BODY_KEEP = 8;
+
+/** The owner's own imported models' two packs (`World.importsPack`): the shipped folder's and the private one's, each null for none. */
+export interface ImportPacks {
+  shipped: AssetPack | null;
+  private: AssetPack | null;
+}
 
 /**
  * One answer about one point and the water over it (`World.cameraUnderwaterAt`). The caller keeps
@@ -2904,6 +2910,8 @@ export class World {
     // The pack over the props folder this world's buildings' furniture stood out of (`interiors.ts`), through the same hand.
     this.releaseGuest(this.furniturePack);
     this.furniturePack = null;
+    // The owner's own imported models (Map-maker II's tenth wave), through the same hand; asked again by the next world's rows.
+    this.releaseImports();
     this.interiorsFile = null;
     this.interiorsReport = null;
     this.placeStandIn = null;
@@ -6558,6 +6566,66 @@ export class World {
   private readonly guestWorldsReady = new Map<string, AssetPack>();
 
   /**
+   * The owner's own imported models (Map-maker II's tenth wave): the shipped folder (`public/imports/`, asked only where the
+   * build's own list ships its manifest) and the private one (`imports-private/`, the dev server's alone, never asked by a
+   * build), each a pack of its own, loaded once a world and let go with it through `releaseGuest` (or by the editor's Reload
+   * imports, `releaseImports`). A row naming `pack: 'imported'` stands out of the shipped folder where it holds the model, else
+   * the private one (`importPackOf`), so shipping a model changes no row.
+   */
+  importsPack(): Promise<ImportPacks> {
+    if (!this.imports) {
+      const asked = (this.importsAsk = {});
+      const ask = importsAsks(import.meta.env.DEV);
+      const load = (dir: string, wanted: boolean): Promise<AssetPack | null> => (wanted ? AssetPack.load('imported', import.meta.env.BASE_URL, { dir }).catch(() => null) : Promise.resolve(null));
+      this.imports = Promise.all([load(IMPORTS_SHIPPED, ask.shipped), load(IMPORTS_PRIVATE, ask.private)]).then(([shipped, priv]) => {
+        // Landed after its world went, or after a reload let it go: nobody's now, let go at once.
+        if (this.importsAsk !== asked) {
+          this.releaseGuest(shipped);
+          this.releaseGuest(priv);
+          return { shipped: null, private: null };
+        }
+        this.importsReady = { shipped, private: priv };
+        return this.importsReady;
+      });
+    }
+    return this.imports;
+  }
+
+  /** The imports' two packs once landed, or null: what a synchronous stand reads (`importsPack` loads them). */
+  get importsNow(): ImportPacks | null {
+    return this.importsReady;
+  }
+
+  /** The imports pack a model id stands out of: the shipped folder's where it holds it, else the private one's; null for neither. */
+  importPackOf(model: string): AssetPack | null {
+    return importPackFor(this.importsReady, model);
+  }
+
+  /**
+   * The imports' packs let go (their materials out of the world's sets, then disposed) and forgotten by the streamer, so the
+   * next `importsPack` reads both folders again: the editor's Reload imports, after it has taken every imported row down and
+   * filed the tiers again (`refilePlaced`), so nothing standing still draws with what is let go.
+   */
+  releaseImports(): void {
+    this.importsAsk = null;
+    const r = this.importsReady;
+    this.imports = null;
+    this.importsReady = null;
+    for (const p of [r?.shipped, r?.private]) {
+      if (!p) continue;
+      // Its models' leaf cards forgotten by name, so a model made again under its id is ruled by what it wears now.
+      forgetImportCards(Object.values(p.manifest.categories).flatMap((list) => (Array.isArray(list) ? list.map((d) => d.id) : [])));
+      this.layoutStream?.forgetPack(p);
+      this.releaseGuest(p);
+    }
+  }
+
+  private imports: Promise<ImportPacks> | null = null;
+  private importsReady: ImportPacks | null = null;
+  /** The ask the imports' packs were loaded for (a fresh object a load): a load that lands for another is let go at once. */
+  private importsAsk: object | null = null;
+
+  /**
    * The furniture the client stood in this world's buildings' rooms, as its pack wrote it (`interiors.ts`), and what
    * standing it came to (`__debug.interiors()`): null for a world whose pack has no file.
    */
@@ -7135,6 +7203,8 @@ export class World {
           isNew = true;
           const std = m as THREE.MeshStandardMaterial;
           if (takesNormalScale(m)) std.normalScale.copy(this.normalScale);
+          // An imported model's normal map is read the glTF way, its green the other way up from the world's (`normalYOf`).
+          if (takesNormalScale(m)) std.normalScale.y *= normalYOf(m);
           // The only place an animated surface is joined: this material is in the scene now.
           if (m.userData.swgTrack || m.userData.swgScroll || m.userData.swgDetail) surfaces.adopt(m);
           // And a model's reflection (worn, held, flown, ridden, a creature's), where its shader has a cube: the
@@ -9861,6 +9931,8 @@ export class World {
         // The flat normal a person's material was given (`personKeys.ts`) has no slope for a scale to move.
         if (takesNormalScale(std)) {
           std.normalScale.set(x, y);
+          // An imported model's normal map, read the glTF way (`normalYOf`).
+          std.normalScale.y *= normalYOf(std);
           n++;
         }
       }

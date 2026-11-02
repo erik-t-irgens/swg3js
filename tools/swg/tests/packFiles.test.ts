@@ -46,10 +46,13 @@ const served = new Map<string, unknown>();
 /** Paths answered with the page itself and a 200, as `vite preview` answers a missing file. */
 const pages = new Set<string>();
 const asked: string[] = [];
+/** How each ask asked to be cached (`init.cache`), in the order asked: an imports folder's manifest is asked `no-store`. */
+const cacheAsked: (string | undefined)[] = [];
 const realFetch = globalThis.fetch;
-globalThis.fetch = (async (url: string | URL) => {
+globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
   const path = String(url).replace(/^\/+/, '');
   asked.push(path);
+  cacheAsked.push(init?.cache);
   if (served.has(path)) return new Response(JSON.stringify(served.get(path)), { status: 200, headers: { 'content-type': 'application/json' } });
   if (pages.has(path)) return new Response('<!doctype html><title>the page</title>', { status: 200, headers: { 'content-type': 'text/html' } });
   return new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } });
@@ -61,6 +64,7 @@ const fresh = (): void => {
   served.clear();
   pages.clear();
   asked.length = 0;
+  cacheAsked.length = 0;
 };
 const askedFor = (pattern: RegExp): number => asked.filter((p) => pattern.test(p)).length;
 /** The section of a source file from one line's start to the end of the method it opens. */
@@ -159,6 +163,28 @@ try {
     ok((await F.packExists('tatooine', '/')) && askedFor(/tatooine\/manifest\.json$/) === 1, 'and the probe answers from what it knows after that');
     ok((await F.manifestText('lok', '/')) === null && (await F.manifestText('lok', '/')) === null && askedFor(/lok\/manifest\.json$/) === 1, 'a missing pack is asked for once a session');
     ok((await F.packJson('lok', 'travel.json', '/')) === null && askedFor(/lok\/travel\.json$/) === 0, 'and none of its files is asked for at all');
+  }
+
+  // ---- an imports folder's manifest (Map-maker II's tenth wave): asked fresh every time, a miss never kept ----
+  {
+    fresh();
+    const imp = /^imports-private\/manifest\.json$/;
+    ok((await F.manifestText('imported', '/', 'imports-private/')) === null && askedFor(imp) === 1, "the private imports folder's manifest, missing when first asked (before the owner's first import), answers none");
+    served.set('imports-private/manifest.json', { planet: 'imported', categories: { layout: [], flora: [] } });
+    const found = await F.manifestText('imported', '/', 'imports-private/');
+    ok(found !== null && JSON.parse(found).planet === 'imported' && askedFor(imp) === 2, 'and asked again once the import command has made it, it is found: a miss of an imports folder is never kept');
+    await F.manifestText('imported', '/', 'imports-private/');
+    ok(askedFor(imp) === 3 && cacheAsked.every((c) => c === 'no-store') && F.filesReport().skipped.every((s) => !/imports-private/.test(s.url)), "found, it is asked again whenever asked (the editor's Reload imports), every time past the browser's cache");
+    ok((await F.manifestText('lok', '/')) === null && (await F.manifestText('lok', '/')) === null && askedFor(/lok\/manifest\.json$/) === 1 && cacheAsked[cacheAsked.length - 1] === undefined, "while a converted pack's miss is kept as ever, and asked as ever");
+    // Which folders a session asks for: the shipped one where the build's list ships the file (always on the dev server), the
+    // private one on the dev server alone, whatever the list says.
+    F.setShippedPublic(null);
+    ok(JSON.stringify(F.importsAsks(true)) === '{"shipped":true,"private":true}', 'on the dev server (no list) both imports folders are asked for');
+    F.setShippedPublic(['tracks/tatooine.json']);
+    ok(JSON.stringify(F.importsAsks(false)) === '{"shipped":false,"private":false}', 'a build that ships no imports asks for neither folder');
+    F.setShippedPublic(['imports/manifest.json', 'imports/imports.json', 'imports/hut.11111111.glb']);
+    ok(JSON.stringify(F.importsAsks(false)) === '{"shipped":true,"private":false}' && JSON.stringify(F.importsAsks(false, 'imports.json')) === '{"shipped":true,"private":false}', 'a build that ships some asks for the shipped folder, and never for the private one, which no build carries');
+    F.setShippedPublic(null);
   }
 
   // ---- a 404 is remembered for the session, and only a 404 ----
@@ -370,7 +396,8 @@ try {
     // raster are listed.
     const list = shippedPublic(rootPath);
     if (spawnSync('git', ['rev-parse', '--git-dir'], { cwd: rootPath, encoding: 'utf8' }).status === 0) {
-      ok(list.includes('tracks/tatooine.json') && list.includes('dem/monument/base16.raw') && list.every((p) => /^(tracks|placements|dem)\//.test(p)), `this checkout's list holds its committed track and raster, and nothing outside the three folders (${list.length})`);
+      // `imports` the fourth folder since Map-maker II's tenth wave (the owner's own shipped models).
+      ok(list.includes('tracks/tatooine.json') && list.includes('dem/monument/base16.raw') && list.every((p) => /^(tracks|placements|dem|imports)\//.test(p)), `this checkout's list holds its committed track and raster, and nothing outside the four folders (${list.length})`);
     } else console.log('note this checkout is not a git checkout: the list of the repository itself is not checked');
     // The rule, in a scratch repository of our own, so nothing of this one is touched: a file committed and there is
     // listed; a file on disk and not committed is not (a placements file, a raster); a file committed and since taken

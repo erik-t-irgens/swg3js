@@ -31,8 +31,12 @@ import { gameToRawX, gameToRawZ, rawToGameX, rawToGameZ } from './waypoints.ts';
 
 export { editFileOf, editFilePath, editFileWorld, placementFileOf, placementsPath, EDIT_FILE_KINDS, SHARED_EDIT_KINDS, type EditFileKind, type PlacementLayer } from './placementPath.ts';
 export const PLACEMENT_LAYERS: readonly PlacementLayer[] = ['story', 'world'];
-/** Which pack a row's model is found in: the props catalogue (by `thing`), the gallery's buildings, or this world's own. */
-export type PlacementPack = 'props' | 'gallery' | 'world';
+/**
+ * Which pack a row's model is found in: the props catalogue (by `thing`), the gallery's buildings, this world's own, or the
+ * owner's own imported models (Map-maker II's tenth wave: `public/imports/`, which every build ships, looked in first, then
+ * `imports-private/`, the dev server's alone). A build from before `imported` skips such a row and names it.
+ */
+export type PlacementPack = 'props' | 'gallery' | 'world' | 'imported';
 /** The frame a file's places are written in: raw on a planet, the game's own in a space zone. */
 export type PlacementFrame = 'raw' | 'game';
 
@@ -76,7 +80,7 @@ export interface PlacementRow {
   pack?: PlacementPack;
   /** The props catalogue's id (`pack: 'props'`). */
   thing?: string;
-  /** The model's id in the gallery or this world's pack (`pack: 'gallery'` or `'world'`). */
+  /** The model's id in the gallery, this world's pack or the imports (`pack: 'gallery'`, `'world'` or `'imported'`). */
   model?: string;
   /** A building's deed, for its name and its footprint when the editor takes it up again. */
   deed?: string;
@@ -330,6 +334,37 @@ export function readLooks(v: unknown): RowLook[] | null | undefined {
 }
 
 /**
+ * A row's looks laid over its model's own (an imported model's borrowed pictures and materials, Map-maker II's tenth wave,
+ * `PackModelDef.looks`, read by `readLooks` first): the row's own entries, then each of the model's for a material the row
+ * names on no entry of its own. A tint is laid on a borrowed picture and never takes its place (a look may carry both), the
+ * same for one material as for every material: where the row's entry for a material is a tint alone and the model borrows
+ * a picture for it, the two are one look, the row's tint on the model's picture (the editor's Tint on one material writes
+ * exactly such an entry, and taken whole it drew the white texel standing in the picture's slot); where the row's `*` is a
+ * tint alone, every borrowed picture with no tint of its own takes that tint too. A row's entry naming a picture or a
+ * material of its own is taken whole, and where its `*` does, the row's `*` stands for every material and the model's are
+ * left out. A borrowed material (`like`) takes no tint, so a row's tint for such a material is its own entry whole. The
+ * row's own list itself where the model has none (so every converted model's row reads exactly what it read), undefined
+ * where neither has any.
+ */
+export function withModelLooks(rowMats: readonly RowLook[] | undefined, modelLooks: readonly RowLook[] | null | undefined): RowLook[] | undefined {
+  if (!modelLooks || !modelLooks.length) return rowMats as RowLook[] | undefined;
+  const own = rowMats ?? [];
+  const named = new Set(own.map((m) => m.of));
+  const star = own.find((m) => m.of === '*');
+  if (star && (star.like || star.map)) return own.length ? (own as RowLook[]) : undefined;
+  const out: RowLook[] = own.map((o) => {
+    if (!o.tint || o.map || o.like) return o;
+    const m = modelLooks.find((l) => l.of === o.of);
+    return m?.map && !m.like ? { of: o.of, tint: o.tint, map: m.map } : o;
+  });
+  for (const m of modelLooks) {
+    if (named.has(m.of)) continue;
+    out.push(star?.tint && !m.like && !m.tint ? { ...m, tint: star.tint } : { ...m });
+  }
+  return out.length ? out : undefined;
+}
+
+/**
  * A row's attachments as it keeps them (`RowAttach`), or null for a list of no shape a row takes: at most `attachments`,
  * each exactly one of an effect (`fx`, with an optional place, turn and size) or a sound (`snd`, with an optional place),
  * within the backstops. The origin, no turn and a size of 1 are written absent, so one place has one spelling; a turn is
@@ -395,8 +430,8 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
   if (mark) {
     if (o.pack !== undefined || o.thing !== undefined || o.model !== undefined || o.deed !== undefined) return 'a mark names no pack, thing, model or deed';
   } else {
-    if (o.pack !== 'props' && o.pack !== 'gallery' && o.pack !== 'world') return 'its pack is not props, gallery or world';
-    if (o.kind === 'building' && o.pack === 'props') return 'a building comes out of the gallery or the world\'s own pack, not the props';
+    if (o.pack !== 'props' && o.pack !== 'gallery' && o.pack !== 'world' && o.pack !== 'imported') return 'its pack is not props, gallery, world or imported';
+    if (o.kind === 'building' && o.pack === 'props') return 'a building comes out of the gallery, the world\'s own pack or the imports, not the props';
   }
   const row: PlacementRow = mark ? { id, kind: 'mark', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] } : { id, kind: o.kind as 'prop' | 'building', pack: o.pack as PlacementPack, x: 0, y: 0, z: 0, q: [1, 0, 0, 0] };
   if (mark) {

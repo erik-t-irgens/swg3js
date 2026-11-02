@@ -68,8 +68,10 @@
 // reconvert, never a patch at run time). From the sixth wave the water file's rivers are water to it as a lake is, and so
 // are the terrain's own wet rivers (`gridSoeRivers`, the very rows the game draws), whose stamp the key folds in
 // (`soeRiverStamp`), so the two test worlds that have them are asked for again and no other world is.
+import { createHash } from 'node:crypto';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { basename, join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import { isFallingWaterShader, readSolidFile } from '../../src/world/walkThrough.ts';
 import { placementsFolder } from './placementsStatus.mjs';
@@ -127,13 +129,21 @@ export function gridEditsOf(world, folder = placementsFolder(), packDir = null) 
     if (stamp) edits.soeRivers = stamp;
   }
   if (packDir && (typeof texts.world === 'string' || typeof texts.story === 'string')) {
-    const packs = installPacks(packDir);
+    const packs = installPacks(packDir, null, folder);
     const absent = new Set();
+    const made = new Set();
     for (const { row } of gridSolidRows(edits, (thing) => packs.thingOf(thing)?.template ?? null)) {
       if (row.inside) continue;
-      for (const name of solidRowModel(row, packs).absent) absent.add(name);
+      const found = solidRowModel(row, packs);
+      for (const name of found.absent) absent.add(name);
+      // An imported model's file is named for its content (Map-maker II's tenth wave), so a model made again collides anew:
+      // the names its solid rows stand on go into the key, and a world with no such row keys exactly as it did. A flora
+      // model's shapes are in its folder's flora-collision.json and never in its GLB, so they go in beside its name, or a
+      // trunk moved in Blender and imported again would be baked on the shapes it had.
+      if (found.pack === 'imported' && found.file) made.add(importKeyOf(found));
     }
     edits.absent = [...absent].sort();
+    if (made.size) edits.imports = [...made].sort();
   }
   return edits;
 }
@@ -143,7 +153,7 @@ export function gridEditsOf(world, folder = placementsFolder(), packDir = null) 
  * the packs folder, the world's own name and manifest (its pack folder's), any pack's manifest, the props catalogue's
  * things, and a pack's flora collision shapes (flora-collision.json, null where it has none).
  */
-export function installPacks(packDir, worldManifest = null) {
+export function installPacks(packDir, worldManifest = null, placed = placementsFolder()) {
   const dir = dirname(packDir);
   const world = basename(packDir);
   const read = (file) => {
@@ -160,6 +170,11 @@ export function installPacks(packDir, worldManifest = null) {
     if (!manifests.has(pack)) manifests.set(pack, read(join(dir, pack, 'manifest.json')));
     return manifests.get(pack);
   };
+  // The owner's own imported models' two folders (Map-maker II's tenth wave), beside the placements this install ships
+  // (`placed`, the edits' own folder): the shipped one (`public/imports` in a checkout, `dist/imports` in a release) first,
+  // then a checkout's private one.
+  const importDirs = [...(placed ? [join(dirname(placed), 'imports')] : []), join(REPO_ROOT, 'imports-private')];
+  const imported = new Map();
   return {
     dir,
     world,
@@ -169,8 +184,27 @@ export function installPacks(packDir, worldManifest = null) {
       if (!collision.has(pack)) collision.set(pack, read(join(dir, pack, 'flora-collision.json')));
       return collision.get(pack);
     },
+    importDirs,
+    importManifestOf: (d) => {
+      if (!imported.has(d)) imported.set(d, read(join(d, 'manifest.json')));
+      return imported.get(d);
+    },
+    importCollisionOf: (d) => read(join(d, 'flora-collision.json')),
   };
 }
+
+/**
+ * What an imported row's model brings to the grid's key: its made file's name (named for its content), and for a flora model
+ * a hash of the shapes merged onto its def out of its folder's flora-collision.json, which its GLB does not carry.
+ */
+export function importKeyOf(found) {
+  const name = basename(found.file);
+  if (!found.flora || !found.def?.collision) return name;
+  return `${name}#${createHash('sha1').update(JSON.stringify(found.def.collision)).digest('hex').slice(0, 12)}`;
+}
+
+/** This checkout's own folder (where a private imports folder stands). */
+const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
 /**
  * Where a solid permanent row's model is in this install's packs, as the game stands it out of them (`permanent.ts`): a
@@ -181,6 +215,23 @@ export function installPacks(packDir, worldManifest = null) {
  * game reads for such a row -- for the grid's key.
  */
 export function solidRowModel(row, packs) {
+  // One of the owner's own imported models (Map-maker II's tenth wave): out of the shipped folder where it holds the model,
+  // else the private one, as the game stands it; a flora model's shapes merged onto its def from that folder.
+  if (row.pack === 'imported') {
+    for (const dir of packs.importDirs ?? []) {
+      const m = packs.importManifestOf?.(dir);
+      for (const [cat, list] of Object.entries(m?.categories ?? {})) {
+        const d = Array.isArray(list) ? list.find((e) => e.id === row.model) : null;
+        if (!d) continue;
+        const file = typeof d.file === 'string' && d.file.endsWith('.glb') ? join(dir, d.file) : null;
+        const there = !!file && existsSync(file);
+        const flora = cat === 'flora';
+        if (there && flora && !d.collision) mergeFloraCollision([d], packs.importCollisionOf?.(dir));
+        return { file: there ? file : null, def: d, flora, pack: 'imported', absent: there ? [] : [`imported/${row.model}`] };
+      }
+    }
+    return { file: null, def: null, flora: false, pack: 'imported', absent: [`imported/${row.model}`] };
+  }
   if (row.pack === 'props') {
     const p = packs.thingOf(row.thing);
     const file = p?.file ? join(packs.dir, 'props', p.file) : null;
@@ -490,6 +541,8 @@ export function readGlbTriangles(file, skip = isFallingWaterShader) {
       for (const prim of json.meshes[node.mesh].primitives ?? []) {
         if (prim.mode !== undefined && prim.mode !== 4) continue;
         if (skip && prim.material !== undefined && skip(json.materials?.[prim.material]?.name)) continue;
+        // An imported model's piece drawn and never collided (Map-maker II's tenth wave): no converted material carries it.
+        if (prim.material !== undefined && json.materials?.[prim.material]?.extras?.swgNoCollide === true) continue;
         const posIdx = prim.attributes?.POSITION;
         if (posIdx === undefined) continue;
         const pos = accessorOf(json, bin, posIdx);

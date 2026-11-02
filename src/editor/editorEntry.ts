@@ -21,7 +21,8 @@ import type { Input } from '../core/input.ts';
 import type { Physics } from '../core/physics.ts';
 import type { ThirdPersonCamera } from '../core/camera.ts';
 import type { Player } from '../player/player.ts';
-import type { World } from '../world/world.ts';
+import type { ImportPacks, World } from '../world/world.ts';
+import { IMPORTS_PRIVATE, IMPORTS_SHIPPED } from '../world/packFiles.ts';
 import type { PropCatalogue } from '../world/propCatalogue.ts';
 import type { AssetPack } from '../world/assetPack.ts';
 import type { PlacedObject, RoomAnswer } from '../world/layoutStream.ts';
@@ -62,7 +63,7 @@ import { groundPacksOf, packOfFamily } from '../world/lentGround.ts';
 import { deflateBase64 } from '../world/editFiles/browserCodec.ts';
 import { standingFoot } from '../world/layoutStream.ts';
 import { FlyCam, stepSpeed } from './flyCam.ts';
-import { LIBRARY_SOURCES, LibraryKeep, ENTRY_FLAG, entryKey, entryName, fallbackEntries, libraryView, readLibraryIndex, searchLibrary, usedHereKeys, type LibraryEntry, type LibrarySource, type LibraryView } from './libraryModel.ts';
+import { LIBRARY_SOURCES, LibraryKeep, ENTRY_FLAG, entryKey, entryName, fallbackEntries, importEntries, libraryView, readLibraryIndex, searchLibrary, usedHereKeys, type LibraryEntry, type LibrarySource, type LibraryView } from './libraryModel.ts';
 import { attachPointer, endPointerFrame, pointerRecord } from './pointer.ts';
 import { EditorEdits, type EditorBatch, type EditorFileState } from './editorEdit.ts';
 import type { RowChange } from './undo.ts';
@@ -84,7 +85,7 @@ import { attachAtHit, markRow, withAttachment } from './lookPick.ts';
 import { ATTACH_TUNE, rowMatrix, type RowAttachments } from '../world/rowAttach.ts';
 import { LOOK_TUNE } from '../world/rowMaterials.ts';
 import { attachOfEntry, isAttachEntry } from './libraryModel.ts';
-import { parseDonor, readAttachments, readLooks, type RowAttach } from '../story/placements.ts';
+import { parseDonor, readAttachments, readLooks, withModelLooks, type RowAttach } from '../story/placements.ts';
 import { pieceOfKey } from '../world/interiors.ts';
 
 /** What the game hands the editor: its objects, and its own half of every rule the editor cannot reach itself. */
@@ -202,6 +203,14 @@ export interface EditorHost {
    * there is hosted (`carriedRowIds`): what a building whose furniture is its own carries and takes with it. Asked of an edit.
    */
   hostedRows?(key: string): string[];
+  /**
+   * Map-maker II's tenth wave: the owner's own imported models read again behind the editor's short curtain (every imported
+   * row taken down, the tiers filed again, both folders' packs let go and loaded again, the rows stood again). Answers what it
+   * came to, in words.
+   */
+  reloadImports?(): Promise<string>;
+  /** The imports' two packs (`World.importsPack`): the shipped folder's and the private one's. */
+  importPacks?(): Promise<ImportPacks>;
 }
 
 /** One thing in hand: what a row writes, what it is drawn and judged by, and how it is turned. */
@@ -497,8 +506,8 @@ export class Editor {
         if (isAttachEntry(e)) return `${entryName(e)} is an effect or a sound: take it in hand and click to hang it (the brush plants things with a model)`;
         const got = await me.sourceOf(e);
         if (typeof got === 'string') return got;
-        // Another world's pack known to the streamer before a row of it stands, as the hand hands it over.
-        if (got.src.pack === 'world' && got.src.from) w.streamer?.useFromPack(got.pack);
+        // Another world's pack known to the streamer before a row of it stands, as the hand hands it over (an imports pack too).
+        if ((got.src.pack === 'world' && got.src.from) || got.src.pack === 'imported') w.streamer?.useFromPack(got.pack);
         // A building stands as the hand stands one: its doorstep on the ground at its own size, its patch's plants kept off.
         const clear = got.building && got.bounds ? clearRadius(patchOfBounds(got.bounds)) : undefined;
         return { key, id: got.src.thing ?? got.src.model ?? 'place', src: got.src, bounds: got.bounds, water: meantForWater(e.m || e.id), building: got.building, clear };
@@ -1782,8 +1791,9 @@ export class Editor {
     if (gen !== this.takeGen || !this.session.on) return null;
     if (typeof got === 'string') return this.refuse(got);
     // Another world's pack is handed to the streamer before anything of it is asked (the ghost asks whether the model is
-    // flora), as the row standing it would hand it over: its trees are trees from the first question on.
-    if (got.src.pack === 'world' && got.src.from) stream.useFromPack(got.pack);
+    // flora), as the row standing it would hand it over: its trees are trees from the first question on. An imports pack the
+    // same (Map-maker II's tenth wave).
+    if ((got.src.pack === 'world' && got.src.from) || got.src.pack === 'imported') stream.useFromPack(got.pack);
     let model;
     try {
       model = await stream.modelFor(got.model, got.pack);
@@ -1820,8 +1830,10 @@ export class Editor {
       liftedLayer: base?.layer ?? null,
     };
     if (base) this.session.dest = base.layer;
-    // A row picked up wears its looks in hand (the seventh wave): its donors loaded, its copies held for the hand's own owner.
-    const look = base ? stream.lookOf(base.row.mats) : undefined;
+    // A row picked up wears its looks in hand (the seventh wave): its donors loaded, its copies held for the hand's own owner;
+    // an imported model its own borrowed pictures under them (the tenth wave), as its row will stand.
+    const own = got.src.pack === 'imported' ? (readLooks(got.pack.find(got.model)?.looks) ?? undefined) : undefined;
+    const look = base || own ? stream.lookOf(own ? withModelLooks(base?.row.mats, own) : base?.row.mats) : undefined;
     let owner: object | undefined;
     if (look) {
       await stream.loadLook(look);
@@ -1885,6 +1897,16 @@ export class Editor {
       const def = pack?.find(e.m);
       if (!pack || !def) return `${e.m} is not in the gallery pack`;
       return { src: { kind: 'building', pack: 'gallery', model: e.m, template: e.t }, pack, model: e.m, bounds: def.bounds, building: true, passable: false };
+    }
+    // One of the owner's own imported models (Map-maker II's tenth wave): out of the folder a row stands it out of, the shipped
+    // one first. A building with no rooms is a building to the hand (its doorstep on the ground, its patch's notes).
+    if (e.s === 'imported') {
+      await (h.importPacks?.() ?? h.world.importsPack());
+      const pack = h.world.importPackOf(e.m);
+      const def = pack?.find(e.m);
+      if (!pack || !def) return `${e.m} is in neither imports folder: run npm run swg -- import, then Reload imports`;
+      const building = (e.f & ENTRY_FLAG.building) !== 0;
+      return { src: { kind: building ? 'building' : 'prop', pack: 'imported', model: e.m }, pack, model: e.m, bounds: def.bounds, building, passable: false };
     }
     const here = h.packId();
     const pack = e.p === here ? h.world.ownPack : await h.world.guestWorld(e.p);
@@ -2228,7 +2250,9 @@ export class Editor {
         ? { s: 'props', p: 'props', id: r.thing ?? '', m: '', n: lifted.label, g: '', t: null, sz: [0, 0, 0], tri: 0, pic: null, f: 0 }
         : r.pack === 'gallery'
           ? { s: 'buildings', p: 'gallery', id: r.model ?? '', m: r.model ?? '', n: lifted.label, g: '', t: r.template ?? null, sz: [0, 0, 0], tri: 0, pic: null, f: ENTRY_FLAG.building }
-          : { s: 'world', p: r.from ?? here, id: r.model ?? '', m: r.model ?? '', n: lifted.label, g: '', t: r.template ?? null, sz: [0, 0, 0], tri: 0, pic: null, f: 0 };
+          : r.pack === 'imported'
+            ? { s: 'imported', p: 'imported', id: r.model ?? '', m: r.model ?? '', n: lifted.label, g: '', t: null, sz: [0, 0, 0], tri: 0, pic: null, f: r.kind === 'building' ? ENTRY_FLAG.building : 0 }
+            : { s: 'world', p: r.from ?? here, id: r.model ?? '', m: r.model ?? '', n: lifted.label, g: '', t: r.template ?? null, sz: [0, 0, 0], tri: 0, pic: null, f: 0 };
     const why = await this.take(e, { row: r, layer: lifted.layer });
     if (why) h.restore(id);
     return why;
@@ -2390,7 +2414,7 @@ export class Editor {
         if (res.ok && type.includes('json')) {
           const idx = readLibraryIndex(await res.json());
           if (idx) {
-            this.libView = libraryView(idx.entries);
+            this.libView = libraryView([...idx.entries, ...(await this.importedEntries())]);
             this.libMade = idx.made;
             this.libState = 'index';
             this.window?.library.render();
@@ -2419,17 +2443,59 @@ export class Editor {
       gallery: gallery ? { sections: [{ id: 'houses', items: gallery.category('layout').filter((d) => (d.cells?.length ?? 0) > 1).map((d) => ({ model: d.id, label: d.id })) }] } : null,
       world: own ? { id: h.packId(), manifest: { categories: { layout: own.category('layout'), flora: own.category('flora') } } } : null,
     });
-    this.libView = libraryView(entries);
+    this.libView = libraryView([...entries, ...(await this.importedEntries())]);
     this.libState = 'fallback';
     this.window?.library.render();
+  }
+
+  /**
+   * The Imported source's entries (Map-maker II's tenth wave): each imports folder's own `imports.json`, the shipped folder's
+   * first, a private model of an id the shipped folder holds left out (a row stands the shipped one). None where neither
+   * folder has a file; every ask fresh, since the import command writes them while the dev server runs.
+   */
+  private async importedEntries(): Promise<LibraryEntry[]> {
+    const taken = new Set<string>();
+    const out: LibraryEntry[] = [];
+    for (const dir of [IMPORTS_SHIPPED, IMPORTS_PRIVATE]) {
+      try {
+        const res = await fetch(`${import.meta.env.BASE_URL}${dir}imports.json`, { cache: 'no-store' });
+        if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) continue;
+        out.push(...importEntries(await res.json(), dir, taken));
+      } catch {
+        /* no such folder: nothing of it */
+      }
+    }
+    this.importedCount = out.length;
+    return out;
+  }
+  /** How many imported models the library holds, for its line. */
+  private importedCount = 0;
+
+  /**
+   * **Reload imports** (Map-maker II's tenth wave; the Library's Imported source and `__debug.imports({ reload: true })`): the
+   * hand given up (its ghost may stand on an import's geometry), the game's own reload behind the curtain (`host.reloadImports`),
+   * then the library read again so the Imported source holds what the import command wrote since. Answers what it came to.
+   */
+  async reloadImports(): Promise<string> {
+    const h = this.host;
+    if (!h.reloadImports) return 'this game has no Reload imports';
+    if (!this.session.on) return "Reload imports is the world editor's: F2 first";
+    this.giveUpHand();
+    this.tools.disarmAll();
+    const said = await h.reloadImports();
+    this.libLoading = null;
+    await this.loadLibrary();
+    this.say(said, !/^not |would not|no Reload|F2 first/.test(said));
+    return said;
   }
 
   private libraryStatus(): string {
     const v = this.libView;
     if (this.libState === 'loading' || !v) return 'reading the library…';
     const pics = v.entries.reduce((n, e) => n + (e.pic ? 1 : 0), 0);
-    if (this.libState === 'fallback') return `${v.entries.length} entries, no index: npm run swg -- library assets-private (initials meanwhile)`;
-    return `${v.entries.length} entries, ${pics} with a picture`;
+    const imported = this.importedCount ? `, ${this.importedCount} of your own` : '';
+    if (this.libState === 'fallback') return `${v.entries.length} entries${imported}, no index: npm run swg -- library assets-private (initials meanwhile)`;
+    return `${v.entries.length} entries${imported}, ${pics} with a picture`;
   }
 
   private windowHost() {
@@ -2437,7 +2503,9 @@ export class Editor {
     return {
       view: () => this.libView,
       keep: this.keep,
-      pictureUrl: (pic: string) => `${import.meta.env.BASE_URL}assets-private/${pic}`,
+      // An imported model's picture is named from the site's root (`/imports-private/icons/...`); every other from the packs'.
+      pictureUrl: (pic: string) => (pic.startsWith('/') ? `${import.meta.env.BASE_URL}${pic.slice(1)}` : `${import.meta.env.BASE_URL}assets-private/${pic}`),
+      reloadImports: () => void this.reloadImports(),
       defaultPack: (source: LibrarySource) => {
         const planet = h.world.planet;
         if (source === 'flora' && !h.world.ownPack) return planet?.ground?.pack ?? planet?.borrowSky ?? h.packId();

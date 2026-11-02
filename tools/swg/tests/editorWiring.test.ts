@@ -67,10 +67,11 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/input\.mute\(editorMutes\(oldHand\)\);\s*if \(!oldHand\) input\.mute\(TAKEN\);\s*\}/.test(keys), "and otherwise ends by muting what it borrows (`editorMutes`, the attack left for the old tabs' hand while it holds something) and the hand keys it took");
   ok(/prepare: \(meshes\) => host\.world\.prepareLikeStreamed\(meshes\),/.test(ed), "the ghost is prepared the streamer's own way, so a never-stood thing builds its programs off the frame");
   // 4,000 characters since Map-maker II's seventh wave, whose take first hands an effect or a sound to its own hand and an
-  // entry chosen while the look picker is armed to the picker.
-  const take = after(ed, '  async take(e: LibraryEntry', 4000);
-  const reg = take.indexOf('if (got.src.pack === \'world\' && got.src.from) stream.useFromPack(got.pack);');
-  ok(reg > 0 && reg < take.indexOf('stream.modelFor(') && take.indexOf('stream.modelFor(') < take.indexOf('stream.ghostMeshesOf('), "another world's pack is handed to the streamer before its model is loaded or its ghost asks whether it is flora");
+  // entry chosen while the look picker is armed to the picker; 4,800 since its tenth, whose imported model's pack is handed
+  // over by the same line (widened on purpose) and whose ghost wears the model's own borrowed looks.
+  const take = after(ed, '  async take(e: LibraryEntry', 4800);
+  const reg = take.indexOf('if ((got.src.pack === \'world\' && got.src.from) || got.src.pack === \'imported\') stream.useFromPack(got.pack);');
+  ok(reg > 0 && reg < take.indexOf('stream.modelFor(') && take.indexOf('stream.modelFor(') < take.indexOf('stream.ghostMeshesOf('), "another world's pack (and an imports pack) is handed to the streamer before its model is loaded or its ghost asks whether it is flora");
   ok(ed.includes('TUNE_WATCH.moved = (partial) => this.tuned(partial);') && /if \(live\.speed\) this\.fly\.speed = clampSpeed\(EDITOR_TUNE\.cam\.speed\);\s*if \(live\.skyReach\) this\.skyReach = clampSky\(EDITOR_TUNE\.aim\.skyReach\);/.test(ed), "a moved tune reaches the flight's speed and the sky's reach in flight");
   const enter = after(ed, '  private enterBody(): void {', 1400);
   ok(enter.includes('this.fly.speed = clampSpeed(EDITOR_TUNE.cam.speed);') && enter.includes('this.skyReach = clampSky(EDITOR_TUNE.aim.skyReach);'), 'and both start every session at the tune');
@@ -122,7 +123,8 @@ function after(src: string, marker: string, n = 2000): string {
 }
 
 {
-  ok(main.includes("packReady: (pack, from) => (pack === 'props' ? !!this.props.pack : pack === 'gallery' ? !!this.dressingGallery : !!this.world.placeFrame && (!from || !!this.world.guestWorldNow(from))),"), "the permanent layer's packs read `placeFrame` (and a row's other world, light)");
+  // (Map-maker II's tenth wave put an imported model's row between the gallery's and the world's: ready once the imports' packs answer.)
+  ok(main.includes("packReady: (pack, from) => (pack === 'props' ? !!this.props.pack : pack === 'gallery' ? !!this.dressingGallery : pack === 'imported' ? !!this.world.importsNow : !!this.world.placeFrame && (!from || !!this.world.guestWorldNow(from))),"), "the permanent layer's packs read `placeFrame` (and a row's other world, light; an imported row the imports' packs)");
   ok(main.includes('const centre = this.world.placeFrame;\n    this.dressingGallery = null;\n    this.permanent.enter(pack, centre, kind, gen);'), "`standDressing` stands rows about `placeFrame`");
   ok(main.includes("if (!this.world.placeFrame) return 'this world has no layout to stand anything in';"), "`editRefusal` reads `placeFrame`");
   ok(/for \(const id of new Set\(rows\.filter\(\(r\) => r\.pack === 'world' && r\.from\)\.map\(\(r\) => r\.from as string\)\)\) await this\.world\.guestWorld\(id\);/.test(main), "`dressingPacks` loads each other world a row names, light");

@@ -15,8 +15,12 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** The folders under `public/` whose files are asked for by name, and so need a list. */
-export const SHIPPED_DIRS = ['tracks', 'placements', 'dem'];
+/**
+ * The folders under `public/` whose files are asked for by name, and so need a list. `imports` (Map-maker II's tenth wave)
+ * is the owner's own models he has shipped with `npm run swg -- import --ship`: a build asks for its manifest only where it
+ * carries one.
+ */
+export const SHIPPED_DIRS = ['tracks', 'placements', 'dem', 'imports'];
 
 /** Every file under a folder, as paths relative to `under` with forward slashes. */
 function walk(dir, prefix) {
@@ -45,6 +49,6 @@ export function shippedPublic(root) {
       .map((p) => p.slice('public/'.length))
       .sort();
   }
-  console.warn(`shipped public files: ${root} is not a git checkout, so every tracks, placements and raster file on disk is listed (${(r.stderr || '').trim()})`);
+  console.warn(`shipped public files: ${root} is not a git checkout, so every tracks, placements, raster and imports file on disk is listed (${(r.stderr || '').trim()})`);
   return SHIPPED_DIRS.flatMap((d) => walk(join(root, 'public', d), d)).sort();
 }

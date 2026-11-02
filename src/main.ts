@@ -292,7 +292,7 @@ import { letGoOf, placedProps, propsKey, type LetGo, type PlacedDeps, type Place
 import { HOUSING_TUNE, LocalHomes, MOVE_SAYS, atDoorDoes, atDoorOf, awayText, backHouseText, houseName, inHandHouseText, isLocalHome, localMoveOf, moveDropped, movedHouseText, myBuildings, pickedHouseText, placeLocalHome, type HomeStore, type HouseMove, type LocalHome, type LocalHomeDeps, type LocalHomeLanding, type MyBuilding } from './world/myBuildings.ts';
 import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, propStandOf, standsSolid, type StandAnswer, type StoodRow, type WorldKind } from './world/permanent.ts';
 import { POST_CLEAR_TUNE, carriedRowIds, pieceRow, pieceStand, piecesInGame, templateEntry, type CarryRow, type GamePiece, type InteriorTemplate, type InteriorsFile, type PieceRow } from './world/interiors.ts';
-import { PLACEMENT_KEY_PREFIX, PLACEMENT_LAYERS, fromGame, parseDonor, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
+import { PLACEMENT_KEY_PREFIX, PLACEMENT_LAYERS, fromGame, parseDonor, placementKey, placementsFileText, placementsPath, radiusOfBounds, readLooks, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
 import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, driftText, forceText, groundMoved, homeStaysText, inHandText, keptText, nextDestination, nextStateChoice, notYoursText, pickedUpText, removedText, rowFromHouse, rowFromProp, savedText, stateChoiceText, takeOutText, yawOfTurn, type BuildingSource, type Destination as KeptIn, type HandSource, type HomeSource } from './world/permanentEdit.ts';
 import { EDITOR_HEADER, EDITOR_HEADER_VALUE, PLACEMENTS_ENDPOINT_TUNE, type BatchEdit, type PlacementBatchOk, type PlacementBatchReply, type PlacementReply, type PlacementReplyOk } from './world/placementEdits.ts';
 import { EditChip } from './ui/editChip.ts';
@@ -507,7 +507,7 @@ import { SKINNED_LOAD, SKINNED_STATS } from './core/skinnedLoad.ts';
 import { PERSON_KEYS_LIVE, PERSON_KEYS_STATS, PERSON_KEYS_TUNE, PERSON_KEYS_WARM, PERSON_TEST_BOUND, forEachPersonMaterial, givenTo, outsideWhy, personShapes, pickTestLooks, pixelDiff, setGiven, setPersonKeysLive, shapeName, type PixelStats } from './world/personKeys.ts';
 import type { CharacterPreview } from './ui/characterPreview.ts';
 import { centreAgrees, LOADING_TUNE, LoadingLog, placeFromPois, programsForUp, raceCurtainNeed, tuneLoading } from './world/loadingTune.ts';
-import { fetchPublic, filesReport, forgetFiles, packJson, packless, setShippedPublic } from './world/packFiles.ts';
+import { IMPORTS_PRIVATE, IMPORTS_SHIPPED, fetchPublic, filesReport, forgetFiles, importsAsks, packJson, packless, setShippedPublic } from './world/packFiles.ts';
 // The public files this build ships, the tracked tracks, placements and real-elevation rasters (`vite.config.ts`):
 // null on the dev server, which asks for every such file and answers it from the disk as the editors need.
 import shippedPublic from 'virtual:shipped-public';
@@ -1056,6 +1056,8 @@ interface EditorApi {
   riversDebug(o?: Record<string, unknown>): Promise<unknown>;
   /** The places tool (Map-maker II's eighth wave): __debug.locations's editing half. */
   locationsDebug(o?: Record<string, unknown>): Promise<unknown>;
+  /** Reload imports (Map-maker II's tenth wave): the hand given up, the imports read again behind the curtain, the library's Imported source read again. */
+  reloadImports(): Promise<string>;
 }
 
 /**
@@ -4290,6 +4292,13 @@ class App {
        * `{ set }`, `{ remove }`, `{ snippet }` and the tool's numbers in `{ tool }`.
        */
       locations: async (opts?: Record<string, unknown>) => this.locationsDebug(opts ?? {}),
+      /**
+       * The owner's own imported models (Map-maker II's tenth wave): the two folders (`imports/`, shipped, and
+       * `imports-private/`, the dev server's alone), each one's models with their sizes, triangles drawn and collided and the
+       * import command's notes, and which permanent row stands out of which. `{ reload: true }` is the world editor's Reload
+       * imports, behind its curtain.
+       */
+      imports: async (opts?: Record<string, unknown>) => this.importsDebug(opts ?? {}),
       placements: async (
         opts: {
           reload?: boolean;
@@ -25586,7 +25595,8 @@ class App {
     },
     // A world row stands about `placeFrame` (the layout's centre, or (0, 0) on a world standing through a stand-in), and one
     // naming another world (`from`) once that world's pack is in, light (`World.guestWorld`).
-    packReady: (pack, from) => (pack === 'props' ? !!this.props.pack : pack === 'gallery' ? !!this.dressingGallery : !!this.world.placeFrame && (!from || !!this.world.guestWorldNow(from))),
+    // An imported model's row (Map-maker II's tenth wave) once the imports' two packs have answered (`World.importsPack`).
+    packReady: (pack, from) => (pack === 'props' ? !!this.props.pack : pack === 'gallery' ? !!this.dressingGallery : pack === 'imported' ? !!this.world.importsNow : !!this.world.placeFrame && (!from || !!this.world.guestWorldNow(from))),
     generation: () => this.world.generation,
     label: (row) => this.dressingLabel(row),
     // What hangs on a row (Map-maker II's seventh wave): a mark's whole stand, and beside a model row's own, by the world's holder.
@@ -25659,6 +25669,18 @@ class App {
     for (const r of rows) for (const m of r.mats ?? []) {
       const d = parseDonor(m.map ?? m.like);
       if (d) donors.add(d.pack);
+    }
+    // The owner's own imported models (Map-maker II's tenth wave): both folders' packs in hand, and the game's pictures each
+    // model's record borrows (its manifest's `looks`) among the donors, which every player's own install supplies.
+    if (rows.some((r) => r.pack === 'imported')) {
+      await this.world.importsPack();
+      for (const r of rows) {
+        if (r.pack !== 'imported' || !r.model) continue;
+        for (const m of readLooks(this.world.importPackOf(r.model)?.find(r.model)?.looks) ?? []) {
+          const d = parseDonor(m.map ?? m.like);
+          if (d) donors.add(d.pack);
+        }
+      }
     }
     if (rows.some((r) => r.pack === 'gallery') || donors.has('gallery')) this.dressingGallery = await this.world.housesPack();
     // Each other world a world row names (`from`), light: its manifest and its trees' shapes, never its layout.
@@ -25933,6 +25955,11 @@ class App {
     if (!s) return null;
     if (row.pack === 'props') return this.props.pack ? this.world.standPlacement(s, this.props.pack) : null;
     if (row.pack === 'gallery') return this.dressingGallery ? this.world.standPlacement(s, this.dressingGallery) : null;
+    // An imported model out of the folder that holds it, the shipped one first (Map-maker II's tenth wave).
+    if (row.pack === 'imported') {
+      const pack = this.world.importPackOf(s.model);
+      return pack ? this.world.standPlacement(s, pack) : null;
+    }
     // A row out of another world stands out of that world's pack alone, never this world's model of the same id.
     if (s.from) {
       const guest = this.world.guestWorldNow(s.from);
@@ -29104,6 +29131,9 @@ class App {
           ownFurniture: (id) => this.ownFurnitureRows(id),
           furnitureNote: (id) => this.furnitureNote(id),
           hostedRows: (key) => this.hostedRowIds(key),
+          // Map-maker II's tenth wave: the imports read again behind the curtain, and their two packs.
+          reloadImports: () => this.editorReloadImports(),
+          importPacks: () => this.world.importsPack(),
         });
         this.editor = ed;
         return ed;
@@ -29218,6 +29248,77 @@ class App {
     });
     const after = ls.unfoldedReport();
     return `folded: ${before.rows - after.rows} of ${before.rows} rows into their tiers (${after.rows} still one by one), ${r?.compiled ?? 0} programs built behind the screen, ${r?.ms ?? 0} ms`;
+  }
+
+  /**
+   * The world editor's **Reload imports** (Map-maker II's tenth wave), behind the editor's short curtain: every row of an
+   * imported model taken down, every tier filed again (`refilePlaced` with `force`, as Fold now does, so no folded copy still
+   * draws with what is let go), the imports' two packs let go and both folders read again (the file names carry their
+   * content's hash, so a model made again is fetched afresh), the pictures their records borrow in hand, the rows stood again
+   * and the world round the eye waited for, whatever that builds built behind the screen. Answers what it came to.
+   */
+  private async editorReloadImports(): Promise<string> {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    if (!this.editor?.on) return "Reload imports is the world editor's: F2 first";
+    if (!this.inWorld || this.traveling) return 'not now: enter the world first, and not mid-crossing';
+    const ls = this.world.streamer;
+    if (!ls) return 'this world stands nothing';
+    let down = 0;
+    let models = 0;
+    let stood = 0;
+    const imported = (r: PlacementRow) => r.pack === 'imported';
+    const r = await this.editorCurtain('reloading your own models', 'both imports folders read again', async () => {
+      down = this.permanent.takeDownWhere(imported);
+      this.world.refilePlaced(ls.filing, { force: true });
+      this.world.releaseImports();
+      const packs = await this.world.importsPack();
+      for (const p of [packs.shipped, packs.private]) if (p) models += (p.manifest.categories.layout?.length ?? 0) + (p.manifest.categories.flora?.length ?? 0);
+      await this.dressingPacks([...(this.permanent.fileOf('story')?.rows ?? []), ...(this.permanent.fileOf('world')?.rows ?? [])].filter(imported));
+      const builds = this.permanent.resync();
+      ls.update(this.player.worldPos, this.world.cameraRoom.building);
+      await this.dressingFiled(this.dressingWait(builds));
+      for (const s of this.permanent.standing) if (imported(s.row)) stood++;
+    });
+    return `imports reloaded: ${models} model${models === 1 ? '' : 's'} in the two folders, ${down} row${down === 1 ? '' : 's'} taken down and ${stood} stood again, ${r?.compiled ?? 0} programs built behind the screen, ${r?.ms ?? 0} ms`;
+  }
+
+  /**
+   * `__debug.imports()` (Map-maker II's tenth wave): the two folders and their models as the import command wrote them (each
+   * one's size, triangles drawn and collided and its notes), and which permanent row stands out of which. `{ reload: true }`
+   * is the world editor's Reload imports (the dev server's alone, the editor on).
+   */
+  private async importsDebug(o: Record<string, unknown>): Promise<unknown> {
+    if (o.reload) {
+      if (!import.meta.env.DEV) return "Reload imports is the world editor's, the dev server's alone";
+      const ed = await this.loadEditor();
+      return ed ? ed.reloadImports() : 'the world editor would not load';
+    }
+    const mbOf = (bytes: number) => Math.round((bytes / 1048576) * 100) / 100;
+    const folder = async (dir: string, ask: boolean) => {
+      if (!ask) return { asked: false };
+      try {
+        const res = await fetch(`${import.meta.env.BASE_URL}${dir}imports.json`, { cache: 'no-store' });
+        if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return { asked: true, models: [] };
+        const f = (await res.json()) as { made?: string; bytes?: number; shipNote?: number; notes?: string[]; entries?: { id: string; name?: string; kind?: string; tri?: number; colTri?: number; collision?: string; bytes?: number; notes?: string[]; ship?: boolean }[] };
+        const entries = f.entries ?? [];
+        // The folder's size as the command measured it (every file but its index), else its models' own; and the shipped
+        // folder's note past the size a run of --ship was told (`shipNote`, it rides in every release).
+        const bytes = typeof f.bytes === 'number' ? f.bytes : entries.reduce((n, e) => n + (e.bytes ?? 0), 0);
+        return { asked: true, made: f.made ?? null, mb: mbOf(bytes), ...(typeof f.shipNote === 'number' ? { shipNote: f.shipNote } : {}), notes: f.notes ?? [], models: entries.map((e) => ({ id: e.id, name: e.name, kind: e.kind, triangles: e.tri, collided: e.colTri, collision: e.collision, mb: mbOf(e.bytes ?? 0), notes: e.notes ?? [], ship: e.ship })) };
+      } catch {
+        return { asked: true, models: [] };
+      }
+    };
+    const asks = importsAsks(import.meta.env.DEV, 'imports.json');
+    const shipped = await folder(IMPORTS_SHIPPED, asks.shipped);
+    const priv = await folder(IMPORTS_PRIVATE, asks.private);
+    const packs = this.world.importsNow;
+    const rows = [...this.permanent.standing].filter((s) => s.row.pack === 'imported').map((s) => {
+      const p = this.world.importPackOf(s.row.model ?? '');
+      return { id: s.row.id, model: s.row.model, layer: s.layer, from: p ? (p === packs?.shipped ? 'shipped' : 'private') : null };
+    });
+    const skipped = this.permanent.report().rows.filter((r) => !r.stood && [...(this.permanent.fileOf('story')?.rows ?? []), ...(this.permanent.fileOf('world')?.rows ?? [])].some((x) => x.id === r.id && x.pack === 'imported')).map((r) => ({ id: r.id, why: r.why }));
+    return { folders: { shipped: { dir: IMPORTS_SHIPPED, ...shipped, loaded: !!packs?.shipped }, private: { dir: IMPORTS_PRIVATE, ...priv, loaded: !!packs?.private } }, rows, ...(skipped.length ? { notStood: skipped } : {}) };
   }
 
   /**

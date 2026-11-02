@@ -4,7 +4,8 @@
 // written behind the curtain, a tint without it; R held on a picked attachment with the mouse moving carries it live and,
 // let go, writes the very attachment `attachMoved` makes of the hold, once; C held sizes the standing effect in place; a
 // nudge writes the axis it names; and a mark's last attachment taken off takes the mark out of its file, where any other
-// row's leaves the row standing with none.
+// row's leaves the row standing with none. And (Map-maker II's tenth wave) one of the owner's own imported models lends no
+// look: clicked with the picker armed or chosen in the library, it is refused in words and nothing is written.
 //
 // Run: node tools/swg/tests/editorLooks.test.ts
 import assert from 'node:assert/strict';
@@ -73,6 +74,9 @@ const writes: { label: string; changes: RowChange[] }[] = [];
 const said: { words: string; ok: boolean }[] = [];
 const curtains: string[] = [];
 let picked: string[] = [];
+// A piece of one of the owner's own imported models (the tenth wave), which lends no look.
+const importedPiece = named('hut:Paint', true);
+let donorPacksUsed = 0;
 const stream = {
   placedOf: (key: string) => (rows.has(key.replace(/^place\//, '')) ? { model: 'lamp', pack: undefined } : null),
   modelFor: async () => ({ primitives: lampPrims }),
@@ -80,6 +84,9 @@ const stream = {
   lookOf: (mats: readonly RowLook[] | undefined) => (mats ? { mats, sig: '' } : undefined),
   loadLook: async () => {},
   donorOf: (ref: string) => (ref === 'props:sign/face' ? { material: face, geometry: geo, skinned: false } : null),
+  donorRefOf: (m: THREE.Material) => (m === face ? 'props:sign/face' : null),
+  donorIsImported: (m: THREE.Material) => m === importedPiece,
+  useDonorPack: () => void donorPacksUsed++,
 };
 const host: LooksHost = {
   input: input as never,
@@ -122,6 +129,23 @@ const looks = new EditorLooks(host);
   ok(writes.length === 2 && curtains.length === 0 && JSON.stringify(writes[1].changes[0].after?.mats) === '[{"of":"body","tint":"#c04020"}]', 'a tint likewise, written as the file spells it');
   await looks.setLook('glass', { like: 'props:sign/face' }, 'borrow a material');
   ok(writes.length === 3 && curtains.length === 1 && JSON.stringify(writes[2].changes[0].after?.mats) === '[{"of":"glass","like":"props:sign/face"}]', 'a borrowed material is written behind the editor\'s curtain (it may need a program of its own)');
+  picked = [];
+}
+
+// ---- One of the owner's own imported models lends no look (the tenth wave): refused in words whichever way it is offered. ----
+{
+  writes.length = 0;
+  said.length = 0;
+  picked = ['lamp-1'];
+  looks.armPick('glass', 'texture');
+  const clicked = await looks.pickFrom(importedPiece);
+  ok(writes.length === 0 && /imported models lends no picture or material/.test(clicked) && said.some((s) => !s.ok && s.words === clicked), `a surface of an imported model clicked with the picker armed is refused in words, nothing written ("${clicked}")`);
+  let asked = 0;
+  const importsPack = { imported: true, root: '/imports-private/', model: async () => void asked++ };
+  const offered = await looks.offerEntry('TEST hut', importsPack as never, 'imports-private', 'hut');
+  ok(writes.length === 0 && /imported models lends no picture or material/.test(offered) && asked === 0 && donorPacksUsed === 0, 'and so is an imported model chosen in the library, before its pack is lent or its model loaded');
+  await looks.pickFrom(face);
+  ok(writes.length === 1 && JSON.stringify(writes[0].changes[0].after?.mats) === '[{"of":"glass","map":"props:sign/face"}]', "and the picker, still armed, takes the game's own surface clicked after");
   picked = [];
 }
 

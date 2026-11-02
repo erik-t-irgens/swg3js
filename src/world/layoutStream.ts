@@ -28,7 +28,7 @@ import type { ShadowBatches, TierBatch } from './shadowBatches.ts';
 import { LOD_LEVEL_TUNE, sweepDue } from './lodLevels.ts';
 import type { BuildingDoors, DoorsFile } from './doorMath.ts';
 import type { DressingStand, StandAnswer } from './permanent.ts';
-import { PLACEMENT_KEY_PREFIX, lookSignature, parseDonor, radiusOfBounds, type RowLook } from '../story/placements.ts';
+import { PLACEMENT_KEY_PREFIX, lookSignature, parseDonor, radiusOfBounds, readLooks, withModelLooks, type RowLook } from '../story/placements.ts';
 import type { DonorOf, DonorPiece } from './rowMaterials.ts';
 import { FLORA_COLLISION, rowFloraParts, trunkRadius } from './floraCollision.ts';
 import { fileByState, standsIn } from './worldState.ts';
@@ -1065,6 +1065,20 @@ export class LayoutStreamer {
   }
 
   /**
+   * A pack standing behind the world forgotten (the world editor's Reload imports, Map-maker II's tenth wave, about to let
+   * an imports pack go): out of the guests, the other worlds' and the donors' lists, so nothing looks in it again. What
+   * stands out of it must have been taken down first; the world's own pack is never forgotten.
+   */
+  forgetPack(pack: AssetPack): void {
+    if (pack === this.pack) return;
+    const g = this.guests.indexOf(pack);
+    if (g >= 0) this.guests.splice(g, 1);
+    const f = this.fromPacks.indexOf(pack);
+    if (f >= 0) this.fromPacks.splice(f, 1);
+    for (const [id, p] of this.donorPacks) if (p === pack) this.donorPacks.delete(id);
+  }
+
+  /**
    * What a tier's model map files an object's model under (`buildTier`): its id, or for a row out of another world
    * (`pack`) that pack's own short name and the id, so the same id out of two packs is two models. Worked out at a tier's
    * build, never in a frame (a guest pack is named the first time it is met).
@@ -1181,6 +1195,19 @@ export class LayoutStreamer {
    * streamer drew: a copy is named by its source, and a model by the pack that loaded it.
    */
   donorRefOf(material: THREE.Material): string | null {
+    const d = this.donorOfMaterial(material);
+    // One of the owner's own imported models lends no look (Map-maker II's tenth wave): a look names its donor by a pack
+    // the world can find again at an arrival, and an imports folder is no such pack (`donorIsImported` says so in words).
+    return d && !d.pack.imported ? `${packIdOfRoot(d.pack.root)}:${d.def.id}/${d.source.name}` : null;
+  }
+
+  /** Whether a drawn piece is of one of the owner's own imported models, which lends no look (`donorRefOf`). */
+  donorIsImported(material: THREE.Material): boolean {
+    return !!this.donorOfMaterial(material)?.pack.imported;
+  }
+
+  /** The pack that loaded a drawn piece's model, the model's entry and the piece's source material, or null. */
+  private donorOfMaterial(material: THREE.Material): { pack: AssetPack; def: PackModelDef; source: THREE.Material } | null {
     const source = this.looks?.sourceOf(material) ?? material;
     const model = this.modelOfMaterial.get(source);
     if (!model) return null;
@@ -1188,7 +1215,7 @@ export class LayoutStreamer {
     let pack: AssetPack | null = null;
     if (this.pack.loaded(def.id) === model) pack = this.pack;
     for (const g of [...this.guests, ...this.fromPacks, ...this.donorPacks.values()]) if (!pack && g.loaded(def.id) === model) pack = g;
-    return pack ? `${packIdOfRoot(pack.root)}:${def.id}/${source.name}` : null;
+    return pack ? { pack, def, source } : null;
   }
 
   private defOf(id: string, pack?: AssetPack): PackModelDef | undefined {
@@ -2566,8 +2593,11 @@ export class LayoutStreamer {
     if (!def) return null;
     this.unplace(row.key);
     // A world row naming another world (`from`) stands out of that world's pack, looked up there first for this row
-    // alone (`useFromPack`), never stood behind the world for every bare id as the gallery and the props are.
-    const crossWorld = !!row.from && from !== this.pack;
+    // alone (`useFromPack`), never stood behind the world for every bare id as the gallery and the props are; and so does a
+    // row of an imported model (Map-maker II's tenth wave), out of the imports pack that holds it.
+    const crossWorld = (!!row.from || !!row.imported) && from !== this.pack;
+    // An imported model's own looks (its borrowed pictures) laid under the row's (`withModelLooks`); every other row's are its own.
+    const mats = row.imported ? withModelLooks(row.mats, readLooks(def.looks) ?? undefined) : row.mats;
     if (crossWorld) this.useFromPack(from);
     else if (from !== this.pack) this.useGuestPack(from);
     if (row.clear && row.clear > 0) this.keepFloraOff(row.x, row.z, row.clear);
@@ -2591,7 +2621,7 @@ export class LayoutStreamer {
       // caller that asks, so every other placement's path is as it was.
       fold: true,
       // Its looks (the seventh wave), where it has any: drawn in their copies, folded with the copies wearing the same.
-      ...(row.mats && row.mats.length ? { look: { mats: row.mats, sig: lookSignature(row.mats) } } : {}),
+      ...(mats && mats.length ? { look: { mats, sig: lookSignature(mats) } } : {}),
     });
     return { bounds, built, ...(sized.note ? { note: sized.note } : {}) };
   }
@@ -3146,15 +3176,22 @@ export class LayoutStreamer {
       const o = job.o;
       const model = this.loadedOf(o.model, o.pack);
       const cols = this.colliders.get(o);
-      if (!model || !cols || job.prim >= model.primitives.length) {
+      // An imported model's collider-only stand-in counted after its drawn pieces (Map-maker II's tenth wave; none on a converted one).
+      const total = model ? model.primitives.length + (model.colliderOnly?.length ?? 0) : 0;
+      if (!model || !cols || job.prim >= total) {
         queue.shift();
         continue;
       }
-      const prim = model.primitives[job.prim];
+      const prim = job.prim < model.primitives.length ? model.primitives[job.prim] : model.colliderOnly![job.prim - model.primitives.length];
       if (!job.pieces) {
         const posAttr = prim.geometry.getAttribute('position');
         // A decal is never solid (`isDecal`): its client extent is nothing at all; nor is falling water (`walkThrough.ts`).
         if (!posAttr || posAttr.count < 3 || posAttr.itemSize !== 3 || (posAttr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute || isDecal(prim.material) || fallingWater(prim.material)) {
+          job.prim++;
+          continue;
+        }
+        // Nor an imported piece drawn and never collided (`-nocol`, Map-maker II's tenth wave): no converted material carries it.
+        if (prim.material.userData.swgNoCollide === true) {
           job.prim++;
           continue;
         }
@@ -4305,9 +4342,13 @@ export class LayoutStreamer {
       this.noteBlocker(o);
       return;
     }
-    for (const prim of model.primitives) {
+    // An imported model's collider-only stand-in is built beside its drawn pieces (Map-maker II's tenth wave); every converted
+    // model has none, and walks exactly the list it always walked.
+    for (const prim of model.colliderOnly ? [...model.primitives, ...model.colliderOnly] : model.primitives) {
       const posAttr = prim.geometry.getAttribute('position');
       if (!posAttr || posAttr.count < 3) continue;
+      // An imported model's piece drawn and never collided (`-nocol`, `extras.swgNoCollide`): no converted material carries it.
+      if (prim.material.userData.swgNoCollide === true) continue;
       // A basin's water drawn by the water system is water and not a floor: every triangle of a model
       // is a collider here, so the fountains' surfaces were paving you stood on, and nothing you do on
       // paving ripples. Left out, you step into the basin and wade as you would anywhere.

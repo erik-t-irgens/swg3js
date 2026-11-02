@@ -6,6 +6,9 @@ assets-private
 # The owner's own story (quests, conversations, documents): read by the dev server, the relay and
 # `npm run story:check` from beside the checkout, and never committed or packed into a release.
 story-private
+# The owner's own imported models while they are his work in progress (`npm run swg -- import`): served by the dev
+# server alone and never built or committed; `--ship` puts one into public/imports/, which is.
+imports-private
 server/data
 .env
 *.tre

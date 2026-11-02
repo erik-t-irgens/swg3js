@@ -94,6 +94,12 @@ export interface DressingStand {
    * first, a light guest standing behind the world (`LayoutStreamer.standPermanent`). Absent, this world's own.
    */
   from?: string;
+  /**
+   * A row of the owner's own imported model (`pack: 'imported'`, Map-maker II's tenth wave): its model is looked up in the
+   * imports pack it is stood out of first, for this row alone, as a `from` row's is, so an import's id is never taken for a
+   * world model of the same id; and the model's own looks (its borrowed pictures) are laid under the row's.
+   */
+  imported?: true;
   /** Its scale along its own axes (`PlacementRow.scale`), absent for none: what the streamer sets aside it decides and says. */
   scale?: readonly [number, number, number];
   /** Its looks (`PlacementRow.mats`, the seventh wave), absent for its model's own materials. */
@@ -139,7 +145,7 @@ export function dressingStandOf(row: PlacementRow, g: GamePlace, key: string, th
   // A gallery or world row's template is what it really is, handed on as the thing's own is: what its client data
   // hangs on it (a world's brazier burns) and what `World.dataPlacedNear` counts a permanent chair as the world's own by.
   // And its `from`, the world its model comes from. A row naming neither stands exactly as it always did.
-  return { ...at, model: row.model, solid: standsSolid(row, false), ...(row.template ? { effectsOf: row.template } : {}), ...(row.from && row.pack === 'world' ? { from: row.from } : {}) };
+  return { ...at, model: row.model, solid: standsSolid(row, false), ...(row.template ? { effectsOf: row.template } : {}), ...(row.from && row.pack === 'world' ? { from: row.from } : {}), ...(row.pack === 'imported' ? { imported: true as const } : {}) };
 }
 
 // Whether a row stands solid (`standsSolid`): one rule the walk grid's bake reads too, kept in `rowSolid.ts` (Map-maker II's
@@ -460,6 +466,26 @@ export class PermanentLayer {
   land(key: string | null, story: PlacementRead | null, world: PlacementRead | null): Promise<unknown>[] {
     if (key) this.lifted.delete(key);
     return this.setLayers(story, world);
+  }
+
+  /**
+   * Every row standing that `which` names taken down (what hangs on each with it), and stood again by the next `resync`: the
+   * world editor's Reload imports (Map-maker II's tenth wave), which lets the imports' packs go between the two. Answers how
+   * many came down; nothing for a world that has gone.
+   */
+  takeDownWhere(which: (row: PlacementRow) => boolean): number {
+    if (!this.current()) return 0;
+    const down: string[] = [];
+    for (const [key, s] of this.stood) if (which(s.row)) down.push(key);
+    this.takeDown(down);
+    this.guarded = [...this.stood.values()].filter(mayGuard);
+    return down.length;
+  }
+
+  /** What stands brought to both layers as they read now (after `takeDownWhere`): what to wait on for what is stood to be built. */
+  resync(): Promise<unknown>[] {
+    if (!this.current()) return [];
+    return this.sync();
   }
 
   /** Whether a row is in the editor's hand. */

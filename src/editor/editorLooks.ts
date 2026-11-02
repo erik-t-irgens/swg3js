@@ -16,7 +16,7 @@ import type { AssetPack } from '../world/assetPack.ts';
 import { ATTACH_TUNE, type AttachHandles, type RowAttachments } from '../world/rowAttach.ts';
 import { lookRefusal } from '../world/rowMaterials.ts';
 import { lookSignature, placementKey, toGame, type PlacementLayer, type PlacementRow, type RowAttach, type RowLook } from '../story/placements.ts';
-import { attachMoved, attachMovedFrame, lookWith, materialList, withAttachmentAt, withLooks, type AttachChange, type LookChange, type MaterialItem } from './lookPick.ts';
+import { IMPORTED_LENDS_NO_LOOK, attachMoved, attachMovedFrame, lookWith, materialList, withAttachmentAt, withLooks, type AttachChange, type LookChange, type MaterialItem } from './lookPick.ts';
 import type { RowChange } from './undo.ts';
 import type { MarksView } from '../ui/editorMarks.ts';
 
@@ -181,6 +181,7 @@ export class EditorLooks {
     const p = this.picking;
     if (!p) return '';
     const s = this.host.stream();
+    if (material && s?.donorIsImported(material)) return this.refuse(IMPORTED_LENDS_NO_LOOK);
     const ref = material && s ? s.donorRefOf(material) : null;
     if (!ref) return this.refuse('nothing the world stands there to take a look from');
     this.picking = null;
@@ -191,6 +192,7 @@ export class EditorLooks {
   async offerEntry(entry: string, pack: AssetPack, packId: string, model: string): Promise<string> {
     const s = this.host.stream();
     if (!s || !this.picking) return '';
+    if (pack.imported) return this.refuse(IMPORTED_LENDS_NO_LOOK);
     s.useDonorPack(pack);
     let loaded;
     try {

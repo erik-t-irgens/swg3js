@@ -35,6 +35,13 @@ export function materialList(prims: readonly { material: THREE.Material | THREE.
   return out;
 }
 
+/**
+ * Why one of the owner's own imported models lends no picture or material to a look (Map-maker II's tenth wave): a look names
+ * its donor by a pack the world finds again at every arrival, and an imports folder is no such pack (the private one is the
+ * dev server's alone, so a look written on it would stand nowhere a player sees).
+ */
+export const IMPORTED_LENDS_NO_LOOK = "one of your own imported models lends no picture or material to a look: take it from one of the game's own models, or name the game's picture in that model's record (borrow)";
+
 /** What a look change asks of one material: a tint (null takes it off), a borrowed picture or material (null takes it off), or every look of it cleared. */
 export interface LookChange {
   tint?: string | null;

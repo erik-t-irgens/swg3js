@@ -136,6 +136,13 @@ for (const [spot, place, deps] of props) {
   // mark is refused whole by its `openLayer` (the words of a70487c's reader and endpoint, as they stand).
   ok(olderEndpoint('its kind is neither prop nor building') && olderEndpoint('public/placements/world/tatooine.json holds rows this build cannot read (mark-1: its kind is neither prop nor building): mend them by hand first, or the editor would write over them'), "an endpoint from before marks, refusing a mark put or a file holding one, says to restart it");
   ok(!olderEndpoint(String(readPlacementRow({ id: 'x-1', kind: 'tree', pack: 'props', thing: 'crate', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] }))) && !olderEndpoint('public/placements/world/tatooine.json holds rows this build cannot read (crate-1: its thing is not a-z, 0-9, _ and -): mend them by hand first, or the editor would write over them'), "and today's reader refusing a kind, or a row mended badly by hand, says only itself");
+  // An endpoint from before the tenth wave meeting a row of your own model (7bfc09e's reader's words), and today's reader
+  // refusing a pack it does not know, which says only itself.
+  ok(olderEndpoint('that row is refused: its pack is not props, gallery or world'), 'an endpoint from before the imports, refusing an imported row, says to restart it');
+  const madeUp = String(readPlacementRow({ id: 'x-1', kind: 'prop', pack: 'elsewhere', model: 'crate', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] }));
+  ok(!olderEndpoint(madeUp) && /imported/.test(madeUp), `and today's reader names the imports among the packs and says only itself (“${madeUp}”)`);
+  const hut = readPlacementRow({ id: 'x-1', kind: 'building', pack: 'imported', model: 'test_hut', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] });
+  ok(typeof hut === 'object' && hut.pack === 'imported' && hut.model === 'test_hut', 'and it reads a building out of the imports');
 }
 
 {

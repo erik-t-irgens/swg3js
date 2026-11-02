@@ -205,18 +205,53 @@ const probes = new Map<string, Promise<string | null>>();
 const packDir = (packId: string, base: string): string => `${base}assets-private/${packId}/`;
 
 /**
+ * The owner's own imported models' two folders under the site's root (Map-maker II's tenth wave, the `import` command's):
+ * the shipped one, which every build carries (`public/imports/`, asked for in a build only where its own list holds it), and
+ * the private one, git-ignored and served by the dev server alone (`imports-private/`, never asked for by a build).
+ */
+export const IMPORTS_SHIPPED = 'imports/';
+export const IMPORTS_PRIVATE = 'imports-private/';
+
+/**
+ * The imports pack a model id stands out of: the shipped folder's where it holds the model, else the private one's, else
+ * none. A row names `pack: 'imported'` and never a folder, so shipping a model (the same id in both) changes no row, and the
+ * shipped copy, which every player has, is the one stood.
+ */
+export function importPackFor<P extends { find(id: string): unknown }>(packs: { shipped: P | null; private: P | null } | null, model: string): P | null {
+  if (!packs) return null;
+  if (packs.shipped?.find(model)) return packs.shipped;
+  if (packs.private?.find(model)) return packs.private;
+  return null;
+}
+
+/**
+ * Which of the two imports folders a session asks for a file of (`file`, the manifest or the library's index): the shipped
+ * one wherever this build's own list ships that file (always on the dev server, whose list is none, `shippedAsk`), the
+ * private one on the dev server alone (`dev`, `import.meta.env.DEV`), since no build carries it and a player's launcher
+ * would only answer it missing.
+ */
+export function importsAsks(dev: boolean, file = 'manifest.json'): { shipped: boolean; private: boolean } {
+  return { shipped: shippedAsk(`${IMPORTS_SHIPPED}${file}`), private: dev };
+}
+
+/**
  * A pack's manifest as text, or null where it has none: `AssetPack.load`'s own ask, shared with whoever is waiting on
  * `packExists` for the same pack (each reader parses the text itself, so no two loads share an object). A pack whose
  * manifest answered missing this session is not asked again, and a packless world's never.
+ *
+ * `dir` (Map-maker II's tenth wave) is a folder of its own under the site's root rather than `assets-private/<id>/`: the
+ * owner's imported models (`imports/`, which a build ships, and `imports-private/`, the dev server's alone). Their manifest
+ * is asked every time and a miss is never kept, since the import command fills either folder while a session runs and the
+ * editor's Reload imports asks again.
  */
-export function manifestText(packId: string, base = siteBase()): Promise<string | null> {
-  const url = `${packDir(packId, base)}manifest.json`;
-  const world = worldOfPack(packId);
+export function manifestText(packId: string, base = siteBase(), dir?: string): Promise<string | null> {
+  const url = dir ? `${base}${dir}manifest.json` : `${packDir(packId, base)}manifest.json`;
+  const world = dir ? null : worldOfPack(packId);
   if (world && packless(world)) {
     skip(url, 'the world declares no pack');
     return Promise.resolve(null);
   }
-  if (exists.get(url) === false) {
+  if (!dir && exists.get(url) === false) {
     skip(url, 'missing earlier this session');
     return Promise.resolve(null);
   }
@@ -224,10 +259,13 @@ export function manifestText(packId: string, base = siteBase()): Promise<string 
   if (p) return p;
   p = (async () => {
     try {
-      const res = await PACK_FILES.fetch(url);
+      const res = await PACK_FILES.fetch(url, dir ? { cache: 'no-store' } : undefined);
       if (res.status === 404) {
-        exists.set(url, false);
-        note(url, 'missing');
+        // A folder of imports is asked again whenever it is asked: never a miss kept, never a file remembered missing.
+        if (!dir) {
+          exists.set(url, false);
+          note(url, 'missing');
+        } else publicAsked.set(url, { answer: 'missing', times: (publicAsked.get(url)?.times ?? 0) + 1 });
         return null;
       }
       if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) {
@@ -235,7 +273,7 @@ export function manifestText(packId: string, base = siteBase()): Promise<string 
         return null;
       }
       const text = await res.text();
-      exists.set(url, true);
+      if (!dir) exists.set(url, true);
       note(url, 'ok');
       return text;
     } catch {

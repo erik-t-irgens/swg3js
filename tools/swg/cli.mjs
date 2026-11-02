@@ -117,6 +117,14 @@
 //                                                                  can put down and a picture of every model that has none, drawn from the converted
 //                                                                  GLBs. It opens no archive and writes only under <out-dir>/library; status lists
 //                                                                  it and never asks for it
+//   node tools/swg/cli.mjs import <in> [<out>] [--ship] [--drop=<id>] [--collision-budget=10000] [--tex-max=2048] [--model-max=16] [--ship-note=200] [--glass-alpha=0.25] [--lods=40,120,300] [--spec-power=128]
+//                                                                  a model of your own (a Blender .glb, or a .gltf with its files; or a folder of
+//                                                                  them) made into the pack format the game reads: every node baked, materials made
+//                                                                  the game's, its record beside it (<stem>.import.json: id, kind, levels, collision,
+//                                                                  look, borrowed pictures, whether it may ship), into imports-private/ (git-ignored,
+//                                                                  the dev server's alone) or with --ship public/imports/ (every build carries it).
+//                                                                  It reads no archive; status lists it and never asks for it. tools/swg/README.md
+//                                                                  has the names Blender's objects take
 //   node tools/swg/cli.mjs clouds <out-dir> [--no-noise]           what each converted world's sky is really like, measured off the cloud sheets
 //                                                                  the client drew it with (<pack>/clouds.json: how much of the sky each weather
 //                                                                  row covers and how dark that cover is), and the two noise volumes the
@@ -245,6 +253,7 @@ import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
 import { SANDBOX_ZONE, buildSandbox, pickSkyZone, sandboxStatus } from './sandbox.mjs';
 import { buildLibrary, libraryStatus } from './library.mjs';
+import { importsStatus } from './imports.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
 import { borrowedHardpoint, engineRearPoint, gallerySatOptions, galleryPaintStatus, podSeatStatus, sebulbaStatus, skeletalModelEntry } from './gallery.mjs';
 import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from './saddles.mjs';
@@ -3770,6 +3779,8 @@ function packStatus(dir) {
   // The world editor's library (the dev server's alone): listed, with its command when it is missing or older than a pack
   // it read, and never asked for, since a player's launcher has no use for it.
   console.log(`  ${libraryStatus(dir).line}`);
+  // The owner's own models (Map-maker II's tenth wave), beside the checkout: listed, never asked for.
+  console.log(`  ${importsStatus(REPO_DIR).line}`);
   // The creation and selection places. Asked for rather than merely listed, because with none of
   // them those two screens fall back to a doll on a dark stage and nothing says why. A scene is
   // built from a planet pack, so one built before its world was last converted is stale: the models
@@ -9644,6 +9655,17 @@ switch (cmd) {
     const out = buildLibrary({ root: pos[1], log: (line) => console.log(line) });
     const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
     console.log(`library: ${out.index.entries.length} entries (${Object.entries(out.bySource).map(([k, v]) => `${k} ${v}`).join(', ')}); ${out.drawn} pictures drawn, ${out.kept} kept from the last run, ${out.none} models drew nothing, ${out.swept} old pictures swept; ${out.pictures} library pictures, ${mb(out.bytes)}, in ${(out.ms / 1000).toFixed(1)}s`);
+    break;
+  }
+  case 'import': {
+    // <in> [<out>] [--ship] [--drop=<id>]: a model of the owner's own made into the pack format the game reads (Map-maker
+    // II's tenth wave, `tools/swg/imports.mjs`). It opens no archive, so it takes no <swg-dir> and nothing about
+    // `--retail-only` applies; it writes only into the one folder it names (imports-private/ beside the checkout, or with
+    // --ship public/imports/), and beside a source with no record, that record.
+    const { runImport } = await import('./imports.mjs');
+    const drop = options.drop ?? null;
+    const code = runImport({ input: drop ? null : pos[1], out: drop ? pos[1] : pos[2], ship: flags.has('--ship'), drop, options, repo: REPO_DIR });
+    if (code) process.exit(code);
     break;
   }
   case 'scenes': {

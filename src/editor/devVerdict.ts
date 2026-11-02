@@ -158,8 +158,9 @@ export function olderEndpoint(why: string): boolean {
   // wave's words ("does not write yet"), which the editor, sending only the kinds its own wave writes, never meets otherwise.
   // And its seventh wave's: an endpoint from before marks refuses one put in its old reader's words ("neither prop nor
   // building", where today's reader says "neither prop, building nor mark"), and a file already holding one whole in its
-  // `openLayer` words, which carry the same reason.
-  return /fields this build does not write|holds 2000 rows, as many as a file may|(clear|guard) is a number of metres from 0 to 64\b|an ask is a put, a delete, a move or a rename$|'s file is story, world, removed or people$|which this endpoint does not write yet|its kind is neither prop nor building\b/.test(why);
+  // `openLayer` words, which carry the same reason. And its tenth wave's: an endpoint from before the imports refuses a row
+  // of one of your own models in its old reader's words ("not props, gallery or world", where today's adds "or imported").
+  return /fields this build does not write|holds 2000 rows, as many as a file may|(clear|guard) is a number of metres from 0 to 64\b|an ask is a put, a delete, a move or a rename$|'s file is story, world, removed or people$|which this endpoint does not write yet|its kind is neither prop nor building\b|its pack is not props, gallery or world\b/.test(why);
 }
 
 /** A write's refusal, with the restart words where an older endpoint gave it. */

@@ -106,6 +106,13 @@ export interface PackModelDef {
    * with one level and on every model of a pack converted before levels were carried.
    */
   lods?: PackLevel[];
+  /**
+   * An imported model's own looks (Map-maker II's tenth wave): the game's pictures and materials its record borrows, by its
+   * material's name (`<id>:<name>`), as a row's look names them (`RowLook`), worn wherever a row of it stands and laid under
+   * the row's own looks (`withModelLooks`). Never on a converted model; a committed import names the game's pictures here and
+   * never carries them, for each player's install to supply.
+   */
+  looks?: { of: string; tint?: string; map?: string; like?: string }[];
 }
 
 /** One carried detail level, as the manifest lists it. */
@@ -218,6 +225,12 @@ export interface LoadedModel {
    * Never part of `scene`, so whatever draws the model whole draws it exactly as before.
    */
   levels: ModelLevel[] | null;
+  /**
+   * An imported model's collider-only pieces (Map-maker II's tenth wave, `extras.swgColliderOnly`: a `-colonly` stand-in):
+   * never drawn, so kept out of `primitives`, which everything that draws reads, and built as colliders beside them
+   * (`LayoutStreamer.addColliders`). Absent on every converted model.
+   */
+  colliderOnly?: Primitive[];
 }
 
 export interface Portal {
@@ -230,6 +243,16 @@ export interface Portal {
   /** Cells joined by this portal ([from, to] pairs as the cells list them). */
   links: { from: number; to: number }[];
   passable: boolean;
+}
+
+/**
+ * The way up a material's normal map is read against the world's own convention (`World.normalScale`): -1 for an imported
+ * model's (Map-maker II's tenth wave, `extras.swgNormalY: -1`), whose glTF normal map has no tangents under it and is meant
+ * the way three's own loader reads one (`(1, -1)`), which the world's `(1, 1)` would turn upside down; 1 for every other,
+ * which is every converted model.
+ */
+export function normalYOf(m: THREE.Material): number {
+  return m.userData.swgNormalY === -1 ? -1 : 1;
 }
 
 /** The client's level number a node's glTF name carries (`lod:<n>`, read through `userData.name`, since GLTFLoader strips the colon), walking up to its scene; -1 for none. */
@@ -400,6 +423,8 @@ export class AssetPack {
 
   readonly manifest: PackManifest;
   private readonly baseUrl: string;
+  /** A folder of the owner's own imported models (`load`'s `dir`), not a converted pack: what the world lets go and reloads apart. */
+  imported = false;
 
   // Written out, not as parameter properties: node's type stripping runs this file in the leaf cards' wiring test.
   private constructor(manifest: PackManifest, baseUrl: string) {
@@ -438,11 +463,15 @@ export class AssetPack {
    * real-elevation world, `PlacementRow.from`): the manifest, the trees' collision shapes, the doors, the client data's
    * effects and, for a pack with cells, the floors, and never `layout.json`, which is 0.3 to 4 MB of a world's placed
    * objects nobody standing one model of it needs.
+   *
+   * `{ dir }` (Map-maker II's tenth wave) is a pack of the owner's own models, made by the import command (`imports/` or
+   * `imports-private/` under the site's root, `World.importsPack`): read as any pack is, its manifest asked every time, its
+   * flora's shapes read beside it, and nothing else (it has no layout, no client data's effects and no rooms this wave).
    */
-  static async load(planetId: string, base: string = import.meta.env.BASE_URL, opts: { layout?: boolean } = {}): Promise<AssetPack | null> {
-    const baseUrl = `${base}assets-private/${planetId}/`;
+  static async load(planetId: string, base: string = import.meta.env.BASE_URL, opts: { layout?: boolean; dir?: string } = {}): Promise<AssetPack | null> {
+    const baseUrl = opts.dir ? `${base}${opts.dir}` : `${base}assets-private/${planetId}/`;
     try {
-      const text = await manifestText(planetId, base);
+      const text = await manifestText(planetId, base, opts.dir);
       if (text === null) return null;
       const manifest = JSON.parse(text) as PackManifest;
       // The leaf card shaders, known before any of the pack's models load, so a placed object wearing one is ruled
@@ -452,6 +481,20 @@ export class AssetPack {
       await loadSharedCards(base);
       registerPackCards(manifest.cards);
       const pack = new AssetPack(manifest, baseUrl);
+      if (opts.dir) {
+        // An import's folder: its flora's own shapes, and the pack's one difference from a converted one (`imported`).
+        pack.imported = true;
+        pack.effectsLoad = Promise.resolve();
+        if (manifest.categories.flora?.length) {
+          try {
+            const cr = await fetch(`${baseUrl}flora-collision.json`, { cache: 'no-store' });
+            if (cr.ok && (cr.headers.get('content-type') ?? '').includes('json')) mergeFloraCollision(manifest.categories.flora, await cr.json());
+          } catch {
+            /* no shapes: its flora stands on the guess */
+          }
+        }
+        return pack;
+      }
       if (opts.layout !== false) {
         try {
           const lr = await fetch(`${baseUrl}layout.json`);
@@ -573,7 +616,21 @@ export class AssetPack {
       if (!def) return Promise.reject(new Error(`model ${id} is not in the ${this.manifest.planet} pack`));
       p = this.loader.loadAsync(this.baseUrl + def.file).then((gltf) => {
         const primitives: Primitive[] = [];
+        // An imported model's collider-only pieces and any light its file carried (Map-maker II's tenth wave): the import pass
+        // leaves no light, and a file put in the folder by hand is held to it here, since a light added to the scene by a path
+        // that adds a model's whole scene changes the light count and rebuilds every program.
+        let colliderOnly: Primitive[] | undefined;
+        if (this.imported) {
+          const lights: THREE.Object3D[] = [];
+          for (const s of gltf.scenes ?? [gltf.scene]) s.traverse((o) => void ((o as THREE.Light).isLight && lights.push(o)));
+          for (const l of lights) l.removeFromParent();
+        }
         gltf.scene.traverse((o) => {
+          if (o instanceof THREE.Mesh && this.imported && !Array.isArray(o.material) && o.material.userData.swgColliderOnly === true) {
+            (colliderOnly ??= []).push({ geometry: o.geometry, material: o.material, cell: -1 });
+            o.visible = false;
+            return;
+          }
           if (o instanceof THREE.Mesh) {
             o.castShadow = true;
             o.receiveShadow = true;
@@ -617,7 +674,10 @@ export class AssetPack {
         const scenes = [gltf.scene, ...(gltf.scenes ?? []).filter((s) => s !== gltf.scene)];
         const flora = this.isFlora(def);
         prepareCardModel(scenes, { flora }, CARD_LIGHT_TUNE.box);
-        prepareSwayModel(scenes, `${this.baseUrl}${def.id}`, def.id, { flora, building: !!def.cells?.length });
+        // An imported model is measured under its content-hashed file, never its id: the sway's table is kept for the session,
+        // and a model made again under its id (taller, another canopy) and read again by the editor's Reload imports would
+        // otherwise sway from the shape it had.
+        prepareSwayModel(scenes, `${this.baseUrl}${this.imported ? def.file : def.id}`, def.id, { flora, building: !!def.cells?.length });
         const levels = modelLevels(def, gltf.scenes ?? [], primitives);
         const { min, max } = def.bounds;
         // The corners taken as an extent, never by which is called min (the BOX lesson: a pack converted
@@ -658,6 +718,7 @@ export class AssetPack {
           bounds: new THREE.Box3(new THREE.Vector3(min[0], min[1], min[2]), new THREE.Vector3(max[0], max[1], max[2])),
           portals,
           levels,
+          ...(colliderOnly ? { colliderOnly } : {}),
         };
       });
       this.cache.set(id, p);
@@ -734,6 +795,10 @@ export class AssetPack {
             prim.geometry.dispose();
             prim.material.dispose();
           }
+        }
+        for (const prim of m.colliderOnly ?? []) {
+          prim.geometry.dispose();
+          prim.material.dispose();
         }
       }).catch(() => undefined);
     }

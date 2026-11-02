@@ -25,6 +25,8 @@ const LIBRARY_CSS = `
 .lib-top { display: flex; gap: 6px; align-items: center; }
 .lib-top input, .lib-top select { font: inherit; font-size: 12px; color: var(--ink); background: var(--void); border: 1px solid var(--rule); border-radius: 3px; padding: 4px 6px; }
 .lib-top input { flex: 1 1 auto; min-width: 0; }
+.lib-top .lib-reload { font: inherit; font-size: 11px; color: var(--ink); background: var(--panel); border: 1px solid var(--rule); border-radius: 3px; padding: 4px 7px; cursor: pointer; white-space: nowrap; }
+.lib-top .lib-reload:hover { border-color: var(--edge); }
 .lib-say { font-size: 10px; letter-spacing: 0.04em; color: var(--muted); min-height: 1.2em; }
 .lib-groups { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding-right: 4px; }
 .lib-group { border-top: 1px solid var(--rule); }
@@ -77,6 +79,11 @@ export interface LibraryHost {
    */
   brushToggle?(key: string): boolean;
   brushed?(key: string): boolean;
+  /**
+   * Reload imports (Map-maker II's tenth wave): the owner's own models read again from both folders behind the editor's
+   * curtain, offered on the Imported source as a button. Absent: no button.
+   */
+  reloadImports?(): void;
 }
 
 /** The three lists that are not sources. */
@@ -89,6 +96,8 @@ export class LibraryUi {
   private readonly groupsEl: HTMLElement;
   private readonly find: HTMLInputElement;
   private readonly packSel: HTMLSelectElement;
+  /** The Imported source's Reload imports (the tenth wave), shown on that source alone. */
+  private readonly reloadBtn: HTMLButtonElement;
   private readonly sayEl: HTMLElement;
   private readonly srcButtons = new Map<Tab, HTMLButtonElement>();
   private tab: Tab = 'props';
@@ -105,7 +114,7 @@ export class LibraryUi {
     this.host = host;
     const root = document.createElement('div');
     root.className = 'lib';
-    root.innerHTML = '<div class="lib-src"></div><div class="lib-main"><div class="lib-top"><input type="search" placeholder="find (/)" spellcheck="false"><select hidden></select></div><div class="lib-say"></div><div class="lib-groups"></div></div>';
+    root.innerHTML = '<div class="lib-src"></div><div class="lib-main"><div class="lib-top"><input type="search" placeholder="find (/)" spellcheck="false"><select hidden></select><button type="button" class="lib-reload" hidden>Reload imports</button></div><div class="lib-say"></div><div class="lib-groups"></div></div>';
     parent.appendChild(root);
     this.root = root;
     const src = root.querySelector<HTMLElement>('.lib-src')!;
@@ -123,6 +132,11 @@ export class LibraryUi {
     }
     this.find = root.querySelector<HTMLInputElement>('.lib-top input')!;
     this.packSel = root.querySelector<HTMLSelectElement>('.lib-top select')!;
+    this.reloadBtn = root.querySelector<HTMLButtonElement>('.lib-reload')!;
+    this.reloadBtn.addEventListener('click', () => {
+      this.reloadBtn.blur();
+      this.host.reloadImports?.();
+    });
     this.sayEl = root.querySelector<HTMLElement>('.lib-say')!;
     this.groupsEl = root.querySelector<HTMLElement>('.lib-groups')!;
     this.find.addEventListener('input', () => {
@@ -185,6 +199,7 @@ export class LibraryUi {
       if (!this.pack && packs.length) this.pack = packs[0];
       this.packSel.value = this.pack ?? '';
     } else this.packSel.hidden = true;
+    this.reloadBtn.hidden = t !== 'imported' || !this.host.reloadImports;
     const q = this.find.value;
     let list: LibraryEntry[];
     if (t === 'recent' || t === 'favourites' || t === 'used') {
