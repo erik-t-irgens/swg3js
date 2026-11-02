@@ -330,5 +330,10 @@ export default defineConfig({
   build: { target: 'es2022', sourcemap: false },
   // PORT lets a launcher assign the port; without it Vite picks its own default, so `npm run dev`
   // behaves exactly as before.
-  server: { host: true, port: Number(process.env.PORT) || undefined },
+  // `hmr: false` (the owner's call, 2026-11-01): an edit to the source no longer reloads the page and an edit to this file
+  // or `.env` no longer restarts the server, so a game being played on the dev server is not pulled out from under him
+  // while work goes on in the checkout. The watcher still runs, so the next reload by hand loads the code as it stands, and
+  // the socket stays up, so the placements', tracks' and story's words (`server.ws.send`) still reach the page.
+  // SWG3JS_DEV_RELOAD=1 puts Vite's own reloading and restarting back.
+  server: { host: true, port: Number(process.env.PORT) || undefined, hmr: process.env.SWG3JS_DEV_RELOAD === '1' ? undefined : false },
 });
