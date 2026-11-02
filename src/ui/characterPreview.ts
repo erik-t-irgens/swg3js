@@ -70,7 +70,9 @@ export class CharacterPreview {
     fill.position.set(-3, 1.2, 1.5);
     const rim = new THREE.DirectionalLight(0xffffff, 1.4);
     rim.position.set(-1, 2, -3.5);
-    this.scene.add(key, fill, rim, new THREE.HemisphereLight(0xbcd3e8, 0x35302a, 1.1));
+    const sky = new THREE.HemisphereLight(0xbcd3e8, 0x35302a, 1.1);
+    this.scene.add(key, fill, rim, sky);
+    this.lights = [key, fill, rim, sky].map((l) => ({ light: l, base: l.intensity }));
     this.bindDrag();
     // The panel sizes the canvas with CSS, and measuring it once races the layout. Watching it
     // keeps the drawing buffer the same shape as the box, whatever the window does afterwards.
@@ -91,6 +93,20 @@ export class CharacterPreview {
   }
 
   private readonly observer: ResizeObserver;
+
+  /** The doll's own lights, each with the strength it was made at: what `setLight` scales. */
+  private readonly lights: { light: THREE.Light; base: number }[];
+
+  /**
+   * Every one of the doll's own lights at `scale` times the strength it was made at (1, as every doll is lit): the world
+   * editor's dresser's knob (`DRESSER_TUNE.light`, Map-maker II's thirteenth wave). A strength is no part of a program's key,
+   * so nothing is built for it.
+   */
+  setLight(scale: number): void {
+    const s = Number.isFinite(scale) && scale >= 0 ? scale : 1;
+    for (const l of this.lights) l.light.intensity = l.base * s;
+    this.dirty = true;
+  }
 
   /** Where the camera looks, off the doll's middle: the right button drags it, to bring the face up close. */
   private readonly pan = new THREE.Vector3();
@@ -154,7 +170,7 @@ export class CharacterPreview {
    * Take a fresh copy of the character. Called whenever what it wears changes: the clone is a
    * snapshot, so anything put on after it was made would otherwise be missing from the doll.
    */
-  refresh(character: Character): void {
+  refresh(character: Pick<Character, 'group'>): void {
     this.dispose();
     // The clone rebinds its own skeleton, so posing the doll never moves the character in the world.
     const copy = cloneSkinned(character.group);
@@ -407,12 +423,12 @@ export class CharacterPreview {
    * Forget the framing, so the next `refresh` frames its model afresh at this turn. The select screen
    * calls it between characters: a doll framed once for the first figure cuts the head off a taller one.
    */
-  reframe(yaw = 0): void {
+  reframe(yaw = 0, pitch = 0.05): void {
     this.framed = false;
     this.userFramed = false;
     this.pan.set(0, 0, 0);
     this.yaw = yaw;
-    this.pitch = 0.05;
+    this.pitch = pitch;
   }
 
   /**

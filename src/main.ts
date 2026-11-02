@@ -436,6 +436,9 @@ import { rawOfGame } from './world/removalFrames.ts';
 import { deltasOf, readHeightsFile, storeOfRead, tileOfId, type HeightTileRow } from './world/editFiles/heightsFile.ts';
 import { paintOfRead, readPaintFile, type PaintLoaded, type PaintRow } from './world/editFiles/paintFile.ts';
 import { readWaterFile, type WaterLoaded, type WaterRow } from './world/editFiles/waterFile.ts';
+import type { OwnLookRow } from './world/editFiles/looksFile.ts';
+import { readOwnLooks, type MobileCatalogue } from './world/mobiles/catalogue.ts';
+import { looksMoved, wearersIn } from './world/mobiles/ownLooks.ts';
 import { LAKE_TUNE, tuneRiverTune } from './world/ourWater.ts';
 import { GROUND_PAINT_TUNE } from './world/groundRewrite.ts';
 import { runCurtain, type CurtainResult } from './world/curtain.ts';
@@ -1068,6 +1071,10 @@ interface EditorApi {
   reloadImports(): Promise<string>;
   /** The world's own thing the editor has picked (Map-maker II's twelfth wave), by its content key, or null. */
   worldPicked?(): string | null;
+  /** The dresser (Map-maker II's thirteenth wave): `__debug.ownLooks`'s editing half. */
+  ownLooksDebug(o?: Record<string, unknown>): Promise<unknown>;
+  /** The looks file landed (the editor's own write, an undo, the dev server's word): the library's Looks and the dresser's list again. */
+  looksLanded(): void;
 }
 
 /**
@@ -4340,6 +4347,14 @@ class App {
        * `{ set }`, `{ remove }`, `{ snippet }` and the tool's numbers in `{ tool }`.
        */
       locations: async (opts?: Record<string, unknown>) => this.locationsDebug(opts ?? {}),
+      /**
+       * The owner's own looks (Map-maker II's thirteenth wave, `public/placements/looks/all.json`, the dresser): with nothing,
+       * what the file held at the boot, each look of his in the catalogue (its id, name, species, the entry it was made from,
+       * its content hash and whether its packs are here), the looks left out and why, and who wears each on this world (the
+       * placed people) and in the story's cast. On the dev server, with the world editor on, the dresser's own keys (`{ open,
+       * new, start, save, remove, hand, wear, pages, name, note }`, `editorEntry.ownLooksDebug`); `{ tune }` its numbers of feel.
+       */
+      ownLooks: async (opts?: Record<string, unknown>) => this.ownLooksDebug(opts ?? {}),
       /**
        * The owner's own imported models (Map-maker II's tenth wave): the two folders (`imports/`, shipped, and
        * `imports-private/`, the dev server's alone), each one's models with their sizes, triangles drawn and collided and the
@@ -23950,6 +23965,38 @@ class App {
   }
 
   /** `__debug.locations` (see the helper's own words). */
+  /** `__debug.ownLooks` (Map-maker II's thirteenth wave): the report is every build's, the dresser's keys the dev server's. */
+  private async ownLooksDebug(o: Record<string, unknown>): Promise<unknown> {
+    let editing: unknown = null;
+    if (Object.keys(o).length) {
+      if (!import.meta.env.DEV) editing = "the dresser is the world editor's, the dev server's alone";
+      else {
+        const ed = await this.loadEditor();
+        editing = ed ? await ed.ownLooksDebug(o) : 'the world editor would not load';
+      }
+    }
+    const cat = this.world.mobileCatalogue;
+    const placed = this.world.placedPeopleRows;
+    const cast = this.jobs.view()?.cast ?? [];
+    const looks = (cat?.ownEntries() ?? []).map((e) => ({
+      id: e.own!.look,
+      body: e.id,
+      name: e.name,
+      species: e.species ?? null,
+      from: e.own!.from,
+      hash: e.own!.hash,
+      ready: cat!.ready(e).ok ? true : cat!.ready(e).why,
+      wornHere: placed.filter((r) => r.body === e.id).map((r) => r.id),
+      cast: cast.filter((c) => c.body === e.id).map((c) => c.id),
+    }));
+    return {
+      file: cat ? (cat.ownFile ?? 'none') : 'the catalogue has not landed',
+      looks,
+      skipped: cat?.ownSkipped ?? [],
+      ...(editing !== null ? { editing } : {}),
+    };
+  }
+
   private async locationsDebug(o: Record<string, unknown>): Promise<unknown> {
     const said: string[] = [];
     let editing: unknown = null;
@@ -25976,6 +26023,18 @@ class App {
       if (typeof d.rev === 'string' && this.placementRevs.get('solid/all') === d.rev) return;
       if (typeof d.rev === 'string' && this.takeOwnRev('solid/all', d.rev)) return;
       void this.reloadSolid(d.rev);
+      return;
+    }
+    // The looks file is every world's as well (Map-maker II's thirteenth wave; the batch's own word names the batch's world,
+    // the watcher's `all`): read again whatever world this is.
+    if (kind === 'looks') {
+      if (this.placementsInFlight > 0) {
+        this.heldWords.push(d);
+        return;
+      }
+      if (typeof d.rev === 'string' && this.placementRevs.get('looks/all') === d.rev) return;
+      if (typeof d.rev === 'string' && this.takeOwnRev('looks/all', d.rev)) return;
+      void this.reloadLooks(d.rev);
       return;
     }
     if (d?.world !== here) return;
@@ -29244,6 +29303,8 @@ class App {
           // Map-maker II's twelfth wave: the seats of ours near the camera, and one as its permanent row.
           seatsNear: (x, z, reach) => this.seatsNearHere(x, z, reach),
           seatRow: (key, mint) => this.seatRowOf(key, mint),
+          // Map-maker II's thirteenth wave: the bodies the story's cast stand as here, which a look may be worn by.
+          castBodies: () => (this.jobs.view()?.cast ?? []).map((c) => ({ id: c.id, body: c.body })),
         });
         this.editor = ed;
         return ed;
@@ -29559,6 +29620,12 @@ class App {
       this.placementRevs.set('solid/all', sf.rev);
       this.noteOwnRev('solid/all', sf.rev);
     }
+    // The looks file is every world's too (Map-maker II's thirteenth wave): kept under `all` beside the solid file's.
+    const kf = files.looks;
+    if (kf) {
+      this.placementRevs.set('looks/all', kf.rev);
+      this.noteOwnRev('looks/all', kf.rev);
+    }
     // The heights it wrote, laid over the ground by difference (the tiles put and taken out), whatever else it wrote.
     const hf = files.heights;
     let heightsLanded: Promise<number> = Promise.resolve(0);
@@ -29610,7 +29677,44 @@ class App {
       setSolidRows(now);
       this.solidMoved(before);
     }
+    // The looks it wrote (Map-maker II's thirteenth wave), laid over the catalogue's own rows by difference, whatever world
+    // this is: the looks every world shares, the people wearing one that moved stood again.
+    if (kf) await this.landOwnLooks((cat) => landRows(cat.ownRows, kf.put as unknown as OwnLookRow[], kf.deleted));
     return { ok: true, why: '', files, ms: reply.ms ?? 0, built };
+  }
+
+  /**
+   * The looks of the owner's own put in force (Map-maker II's thirteenth wave): the species index asked once (as the boot's
+   * first merge does), the catalogue's `own:` entries made again from the rows `rowsOf` lays over the ones in force
+   * (`MobileCatalogue.setOwnLooks`), and, where any look's body moved (`looksMoved`: added, taken out, its content or its
+   * stand-in changed; never its words alone), this world's placed people stood again (a person wearing a look stands under the
+   * look's own cache key, `lookCacheKey`, so a moved look is a fresh body) and the story's cast members wearing a moved look
+   * taken down for `stepCast` to stand again in it (`StoryStands.takeDown`; a companion's keeper keeps its body); the editor's
+   * library and the dresser told. An edit's work, the dev server's alone.
+   */
+  private async landOwnLooks(rowsOf: (cat: MobileCatalogue) => OwnLookRow[]): Promise<void> {
+    const cat = this.world.mobileCatalogue;
+    if (!cat) return;
+    await cat.knowSpecies();
+    const before = cat.ownBodies();
+    cat.setOwnLooks(rowsOf(cat));
+    const moved = looksMoved(before, cat.ownBodies());
+    if (moved.size && this.inWorld && !this.world.sceneOnly) {
+      this.world.landPeople(this.world.placedPeopleRows);
+      this.storyStands.takeDown(wearersIn(this.jobs.view()?.cast ?? NO_CAST, moved), (b) => this.world.unstandMobile(b as Mobile), this.world.generation);
+    }
+    this.editor?.looksLanded();
+  }
+
+  /** The looks file read again (the dev server's word) and put in force (`landOwnLooks`). */
+  private async reloadLooks(rev?: string): Promise<void> {
+    const read = await readOwnLooks(import.meta.env.BASE_URL);
+    if (read === 'unread') {
+      console.warn(`looks: public/${editFilePath('looks', 'all')} changed and could not be read again: the looks stand as they stood`);
+      return;
+    }
+    if (typeof rev === 'string') this.placementRevs.set('looks/all', rev);
+    await this.landOwnLooks(() => read?.rows ?? []);
   }
 
   /**

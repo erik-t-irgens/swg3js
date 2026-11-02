@@ -55,8 +55,9 @@ function after(src: string, marker: string, n = 2000): string {
 {
   // The editor's own hand-overs, in its entry (which node cannot load: it hangs on the page's three and the interface).
   const ed = read('src/editor/editorEntry.ts');
-  // 7,500 characters since Map-maker II's fifth wave, whose water tool reads F and the wheel with it in the block.
-  const keys = after(ed, '  keys(dt: number, oldHand: boolean): void {', 7500);
+  // 7,500 characters since Map-maker II's fifth wave, whose water tool reads F and the wheel with it in the block; 9,000 since
+  // its thirteenth's review round, whose block reads nothing under the dresser's own pages before anything else.
+  const keys = after(ed, '  keys(dt: number, oldHand: boolean): void {', 9000);
   // Widened in the second wave on purpose: while Ctrl is held the block reads the editor's own chords (raw keys, never an
   // action) before it mutes every action, and still reads nothing else. Widened again in Map-maker II's fifth wave, whose
   // block clears the water tool's raise (the mouse it took, F) along with the brushes' buttons.

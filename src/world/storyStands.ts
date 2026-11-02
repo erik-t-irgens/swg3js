@@ -205,6 +205,25 @@ export class StoryStands {
     this.stats.takenBack++;
   }
 
+  /**
+   * The named cast members taken down where they stand (Map-maker II's thirteenth wave: the look they wear moved under them),
+   * so the next `stepCast` stands each afresh in what the catalogue holds now; one stood in another world is struck off the
+   * books with nothing unstood. A body handed to the companion's keeper (`release`) is no longer on these books and is left
+   * alone. Answers how many were taken down.
+   */
+  takeDown(ids: ReadonlySet<string>, unstand: (b: CastBody) => void, gen: number): number {
+    let n = 0;
+    for (const [id, s] of [...this.stood]) {
+      if (!ids.has(id)) continue;
+      if (!s.body.removed && s.gen === gen) unstand(s.body);
+      this.stood.delete(id);
+      this.refusedAt.delete(id);
+      this.stats.castDown++;
+      n++;
+    }
+    return n;
+  }
+
   /** Every cast member taken down (another character), through `unstand` while the world they stood in is up. */
   clearCast(unstand: ((b: CastBody) => void) | null, gen?: number): void {
     for (const s of this.stood.values()) if (unstand && !s.body.removed && (gen === undefined || s.gen === gen)) unstand(s.body);

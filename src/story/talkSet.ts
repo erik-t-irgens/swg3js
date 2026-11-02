@@ -166,7 +166,11 @@ export interface CastDef {
 /** A node's or an answer's own name: plain, no dot, since `<node>.<reply>` is how an answer is named. */
 const NODE = /^[A-Za-z0-9_-]{1,48}$/;
 const REF_NAME = /^[A-Za-z0-9_.-]{1,96}$/;
-const CATALOGUE_ID = /^[A-Za-z0-9_./-]{1,160}$/;
+/**
+ * A cast member's body: a creature catalogue entry, or (Map-maker II's thirteenth wave) a look of the owner's own, which the
+ * catalogue carries as `own:<id>` (`public/placements/looks/all.json`): nothing in the story changes but the id it names.
+ */
+const CATALOGUE_ID = /^(?:own:[a-z0-9][a-z0-9_-]{0,63}|[A-Za-z0-9_./-]{1,160})$/;
 const WORD = /^[A-Za-z0-9_.:-]{1,64}$/;
 const STRINGS = /^@?[A-Za-z0-9_/.-]{1,120}$/;
 

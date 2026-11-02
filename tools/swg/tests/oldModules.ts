@@ -13,8 +13,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 export const PRE_PASS = 'e6c2578';
 export const REPO = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
 
-/** Each named file's text at a commit, LF, or null where git cannot give one. */
+/**
+ * Each named file's text at a commit, LF, or null where git cannot give one. `SWG3JS_NO_OLD=1` answers null whatever git
+ * holds: how a test's path for a checkout with no history (its recorded hashes alone) is run on purpose.
+ */
 export function oldTexts(files: readonly string[], commit = PRE_PASS): Map<string, string> | null {
+  if (process.env.SWG3JS_NO_OLD === '1') return null;
   const texts = new Map<string, string>();
   try {
     for (const f of files) texts.set(f, execFileSync('git', ['show', `${commit}:${f}`], { cwd: REPO, encoding: 'utf8', maxBuffer: 1 << 27, stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\r\n/g, '\n'));

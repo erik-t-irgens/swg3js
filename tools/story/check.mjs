@@ -8,7 +8,8 @@
 // With no folder named it checks the owner's own `story-private/` beside the checkout, when there is one,
 // and then the committed test set (`src/story/testSet/`). Worlds are checked against the game's own list
 // of planets, zones and space zones; kill targets and cast bodies against the creature catalogue in
-// `assets-private/` when this machine has one, and a conversation's gesture clips against the player's own
+// `assets-private/` when this machine has one (the owner's own looks in the placements folder's `looks/all.json`
+// among its bodies, as the game merges them), and a conversation's gesture clips against the player's own
 // body's clip list there (warnings only: both are the converted packs', not the story's).
 //
 // A story object may name a permanent placement (`"template": "place/<id>"`), and those rows are read from
@@ -33,6 +34,9 @@ import { readPeopleFile } from '../../src/story/placedPeople.ts';
 import { lineAt } from '../../src/story/jsonc.ts';
 import { OBJECT_FIND } from '../../src/story/set.ts';
 import { PLANETS, packIdOf } from '../../src/data/planets.ts';
+import { readLooksFile } from '../../src/world/editFiles/looksFile.ts';
+import { mergeOwnLooks } from '../../src/world/mobiles/ownLooks.ts';
+import { OWN_LOOKS_GROUP } from '../../src/world/mobiles/catalogueIndex.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 /** This checkout's own permanent placements: the folder that holds `story/` and `world/`. */
@@ -59,8 +63,13 @@ export function worldIds() {
   return [...worldKinds().keys()];
 }
 
-/** The creature catalogue's ids, groups, social groups and tags, or null when this machine has none. */
-export function catalogueOf(root = ROOT) {
+/**
+ * The creature catalogue's ids, groups, social groups and tags, or null when this machine has none. The owner's own looks
+ * (Map-maker II's thirteenth wave) are bodies of it too, as the game merges them at its boot (`mergeOwnLooks`): each row of
+ * this checkout's looks file (`<placements>/looks/all.json`, the one every build ships) whose `from` is a dressed entry here
+ * is `own:<id>`, so a cast member wearing one is checked as any body is and a mistyped look id is still warned of.
+ */
+export function catalogueOf(root = ROOT, placementsDir = PLACEMENTS_DIR) {
   const file = join(root, 'assets-private', 'mobiles', 'catalogue.json');
   if (!existsSync(file)) return null;
   try {
@@ -76,10 +85,26 @@ export function catalogueOf(root = ROOT) {
       if (typeof social === 'string') socials.add(social);
       for (const t of e.stats?.tags ?? []) if (typeof t === 'string') tags.add(t);
     }
+    for (const body of ownLookBodiesOf(c.entries ?? [], placementsDir)) {
+      ids.add(body);
+      groups.add(OWN_LOOKS_GROUP.key);
+    }
     return { ids, groups, socials, tags };
   } catch {
     return null;
   }
+}
+
+/** The bodies the owner's own looks stand as over a catalogue's entries (`own:<id>`), the game's own merge, or none without the file. */
+export function ownLookBodiesOf(entries, placementsDir = PLACEMENTS_DIR) {
+  let text;
+  try {
+    text = readFileSync(join(placementsDir, 'looks', 'all.json'), 'utf8');
+  } catch {
+    return [];
+  }
+  const m = mergeOwnLooks(entries, readLooksFile(text).rows);
+  return [...m.own.map((e) => e.id), ...m.standIns.keys()];
 }
 
 /**
@@ -395,7 +420,8 @@ if (main) {
       errors++;
       continue;
     }
-    errors += checkFolder(dir, { root, catalogue: catalogueOf(root), clips: clipsOf(root), placements: placed.placements, removals });
+    // The owner's own looks are bodies of the catalogue, read from the same placements folder (Map-maker II's thirteenth wave).
+    errors += checkFolder(dir, { root, catalogue: catalogueOf(root, placeArg ? resolve(placeArg.slice('--placements='.length)) : PLACEMENTS_DIR), clips: clipsOf(root), placements: placed.placements, removals });
   }
   process.exitCode = errors ? 1 : 0;
 }

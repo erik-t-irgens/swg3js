@@ -5,8 +5,9 @@
 // action -- its place, turn and scale for the first alone, what it is for every picked row alike; **Here**, the permanent rows standing round the camera with their file, a way to fly to each, to pick one up,
 // to take it out of its file, and a box a row to pick it (Shift-click a box picks a run); **Tools**, snapping, the axes,
 // game view, holding the world, git's word on the files, from the third wave the fold (Fold now, the automatic fold's
-// switch) and the brush (armed, its entries and their weights, its switches), and the editor's dials; and **History**, every action of this
-// world's session, a click going back or forward to any of them.
+// switch) and the brush (armed, its entries and their weights, its switches), and the editor's dials; **Looks** (Map-maker
+// II's thirteenth wave, where the editor hands one), the dresser's sections drawn by `src/ui/dresserUi.ts`; and **History**,
+// every action of this world's session, a click going back or forward to any of them.
 //
 // Laid out to be found (the owner's ask of 2026-11-02): the Tools tab shows the Tools list across its top and below it only
 // the armed tool's own sections, or with none armed the editing's own, with what every tool shares at its foot
@@ -120,7 +121,7 @@ const EDITOR_WINDOW_CSS = `
 .ed-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .ed-lib { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .ed-body > div[hidden] { display: none; }
-.ed-here, .ed-sel, .ed-tools, .ed-hist { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; min-height: 0; flex: 1 1 auto; }
+.ed-here, .ed-sel, .ed-tools, .ed-looks, .ed-hist { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; min-height: 0; flex: 1 1 auto; }
 .ed-note { font-size: 11px; color: var(--muted); padding: 4px 0; }
 .ed-row { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--rule); padding: 4px 0; }
 .ed-row.on { background: color-mix(in srgb, var(--accent) 12%, transparent); }
@@ -450,9 +451,22 @@ export interface EditorWindowHost extends LibraryHost {
   lookPalettes?(): Promise<LookPickerSource | null>;
   /** One attachment of the first picked row picked by its handle, moved (`x y z` in its model's frame), sized or taken off. */
   attachment?(act: 'pick' | 'at' | 'size' | 'remove', i: number, value?: string): void;
+  /**
+   * The Looks tab (Map-maker II's thirteenth wave, the dresser): its sections, each a heading and what it draws into its body
+   * (folded as every section is, `looks/<id>`), and the tab shown or left (its doll drawn only while it shows).
+   */
+  looksParts?(): EditorPart[];
+  looksShown?(on: boolean): void;
 }
 
-type Tab = 'library' | 'selected' | 'here' | 'tools' | 'history';
+/** A section another module draws into a tab of the window (the dresser's on the Looks tab): its id, heading and body. */
+export interface EditorPart {
+  id: string;
+  title: string;
+  draw(body: HTMLElement): void;
+}
+
+type Tab = 'library' | 'selected' | 'here' | 'tools' | 'looks' | 'history';
 
 /** The window. */
 export class EditorWindow {
@@ -481,20 +495,23 @@ export class EditorWindow {
     // own width and height whenever it is put back at its own size, and never these.
     root.style.setProperty('--ed-w', `${EDITOR_TUNE.window.width}px`);
     root.style.setProperty('--ed-h', `${Math.round(EDITOR_TUNE.window.heightShare * 100)}vh`);
-    root.innerHTML = '<div class="ed-head"><span class="ed-title">WORLD EDITOR</span><span class="ed-mode"></span></div><div class="ed-tabs"></div><div class="ed-body"><div class="ed-lib"></div><div class="ed-sel" hidden></div><div class="ed-here" hidden></div><div class="ed-tools" hidden></div><div class="ed-hist" hidden></div></div>';
+    root.innerHTML = '<div class="ed-head"><span class="ed-title">WORLD EDITOR</span><span class="ed-mode"></span></div><div class="ed-tabs"></div><div class="ed-body"><div class="ed-lib"></div><div class="ed-sel" hidden></div><div class="ed-here" hidden></div><div class="ed-tools" hidden></div><div class="ed-looks" hidden></div><div class="ed-hist" hidden></div></div>';
     parent.appendChild(root);
     this.root = root;
     this.modeEl = root.querySelector<HTMLElement>('.ed-mode')!;
     const q = (c: string) => root.querySelector<HTMLElement>(c)!;
-    this.els = { library: q('.ed-lib'), selected: q('.ed-sel'), here: q('.ed-here'), tools: q('.ed-tools'), history: q('.ed-hist') };
+    this.els = { library: q('.ed-lib'), selected: q('.ed-sel'), here: q('.ed-here'), tools: q('.ed-tools'), looks: q('.ed-looks'), history: q('.ed-hist') };
     const tabsEl = q('.ed-tabs');
-    for (const [t, words] of [
+    // The Looks tab (Map-maker II's thirteenth wave) only where the editor hands it one (the dresser).
+    const tabs: (readonly [Tab, string])[] = [
       ['library', 'Library'],
       ['selected', 'Selected'],
       ['here', 'Here'],
       ['tools', 'Tools'],
+      ...(host.looksParts ? [['looks', 'Looks'] as const] : []),
       ['history', 'History'],
-    ] as const) {
+    ];
+    for (const [t, words] of tabs) {
       const b = document.createElement('button');
       b.type = 'button';
       b.textContent = words;
@@ -514,12 +531,18 @@ export class EditorWindow {
 
   /** Shown with the editor, in the mode the mouse is in. */
   show(point: boolean): void {
-    if (this.root.hidden) this.root.hidden = false;
+    if (this.root.hidden) {
+      this.root.hidden = false;
+      if (this.tab === 'looks') this.host.looksShown?.(true);
+    }
     this.setPoint(point);
   }
 
   hide(): void {
-    if (!this.root.hidden) this.root.hidden = true;
+    if (!this.root.hidden) {
+      this.root.hidden = true;
+      if (this.tab === 'looks') this.host.looksShown?.(false);
+    }
   }
 
   /** Clickable in Point mode only. */
@@ -534,6 +557,9 @@ export class EditorWindow {
     // The tab left keeps where its scroll stood (a hidden tab loses its scroll), and the tab come back to stands there again.
     const away = t !== this.tab;
     if (away && !this.root.hidden) this.scrolls.set(this.tab, scrollMark(this.scrollerOf(this.tab)));
+    // The Looks tab's doll is drawn only while the tab shows.
+    if (away && this.tab === 'looks') this.host.looksShown?.(false);
+    if (away && t === 'looks' && !this.root.hidden) this.host.looksShown?.(true);
     this.tab = t;
     for (const [k, b] of this.tabs) b.classList.toggle('on', k === t);
     for (const k of Object.keys(this.els) as Tab[]) this.els[k].hidden = k !== t;
@@ -558,7 +584,7 @@ export class EditorWindow {
    * A section of a tab: its heading, which folds and unfolds it (kept in this browser, by tab and id), and its body, which
    * is answered for the section to draw into. Folded, its body is hidden and still drawn, so nothing in it stops acting.
    */
-  private section(el: HTMLElement, tab: 'selected' | 'here' | 'tools', id: string, title: string): HTMLElement {
+  private section(el: HTMLElement, tab: 'selected' | 'here' | 'tools' | 'looks', id: string, title: string): HTMLElement {
     const wrap = document.createElement('div');
     wrap.className = 'ed-sec';
     wrap.dataset.sec = id;
@@ -585,7 +611,7 @@ export class EditorWindow {
   }
 
   /** A part drawn as a section of a tab. */
-  private drawPart(el: HTMLElement, tab: 'selected' | 'here' | 'tools', p: Part): void {
+  private drawPart(el: HTMLElement, tab: 'selected' | 'here' | 'tools' | 'looks', p: Part): void {
     p.draw(this.section(el, tab, p.id, p.title));
   }
 
@@ -607,7 +633,30 @@ export class EditorWindow {
     if (this.tab === 'here') this.drawHere();
     else if (this.tab === 'selected') this.drawSelected();
     else if (this.tab === 'tools') this.drawTools();
+    else if (this.tab === 'looks') this.drawLooksTab();
     else if (this.tab === 'history') this.drawHistory();
+  }
+
+  /** The Looks tab drawn again (the dresser's figure changed, a look landed), where it shows. */
+  refreshLooks(): void {
+    if (!this.root.hidden && this.tab === 'looks') {
+      // A field being typed in is not drawn over under the hand.
+      const active = document.activeElement as HTMLElement | null;
+      if (active && this.els.looks.contains(active) && active.tagName === 'INPUT') return;
+      this.drawLooksTab();
+    }
+  }
+
+  /**
+   * The Looks tab (Map-maker II's thirteenth wave): the dresser's sections, each a heading that folds (`looks/<id>`, kept in
+   * this browser as every section is) and what the dresser draws into its body, the scroll kept across a redraw.
+   */
+  private drawLooksTab(): void {
+    const el = this.els.looks;
+    this.keepScroll(el, () => {
+      el.replaceChildren();
+      for (const p of this.host.looksParts?.() ?? []) this.drawPart(el, 'looks', p);
+    });
   }
 
   private note(el: HTMLElement, words: string): void {

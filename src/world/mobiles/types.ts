@@ -53,6 +53,12 @@ export interface MobileEntry {
    * listed in a group of its own and marked so.
    */
   ours?: boolean;
+  /**
+   * A look of the owner's own (Map-maker II's thirteenth wave, src/world/mobiles/ownLooks.ts): its id in the looks file, the
+   * eight hex its look is cached under (`look:own:<id>@<hash>`, so an edited look is never served from the cache), and the
+   * dressed entry whose size, move, stats, pack and flags it took. Absent on every entry the converter wrote.
+   */
+  own?: { look: string; hash: string; from: string };
   name: string;
   subtitle: string | null;
   description?: string;

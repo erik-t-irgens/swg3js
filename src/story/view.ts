@@ -535,7 +535,8 @@ export function viewHash(view: StoryView): string {
 export const VIEW_WIRE = { quests: 400, lines: 64, waypoints: 1000, watch: 2000, objects: 1000, polyPts: 256, who: 32, cast: 400, docs: 400, people: 2000, mute: 400 };
 
 const VIEW_CAST = /^[A-Za-z0-9_-]{1,24}:cast\/[A-Za-z0-9_.-]{1,96}$/;
-const VIEW_BODY = /^[A-Za-z0-9_./-]{1,160}$/;
+/** A cast member's body as the view carries it: a catalogue entry, or a look of the owner's own (`own:<id>`, Map-maker II's thirteenth wave). */
+const VIEW_BODY = /^(?:own:[a-z0-9][a-z0-9_-]{0,63}|[A-Za-z0-9_./-]{1,160})$/;
 const VIEW_MOOD = /^[A-Za-z0-9_.:-]{1,64}$/;
 
 function vCast(x: unknown): CastView | null {

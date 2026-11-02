@@ -98,6 +98,12 @@ import { wildLife } from '../world/wildLife.ts';
 import type { EditorSection } from '../ui/editorWindow.ts';
 import { parseDonor, readAttachments, readLooks, withModelLooks, type RowAttach } from '../story/placements.ts';
 import { pieceOfKey } from '../world/interiors.ts';
+// Map-maker II's thirteenth wave: the dresser, its rules and the Looks source of the library.
+import { DresserUi } from '../ui/dresserUi.ts';
+import { tuneDresser } from './dresser.ts';
+import { DRESSER_RETUNE } from './editorDials.ts';
+import { lookEntries, lookPictures } from './libraryModel.ts';
+import { isLookId, ownBodyOf } from '../world/editFiles/looksFile.ts';
 
 /** What the game hands the editor: its objects, and its own half of every rule the editor cannot reach itself. */
 export interface EditorHost {
@@ -229,6 +235,8 @@ export interface EditorHost {
    */
   seatsNear?(x: number, z: number, reach: number): { key: string; words: string }[];
   seatRow?(key: string, id: (base: string) => string): Record<string, unknown> | string;
+  /** Map-maker II's thirteenth wave: the story's cast members by the body each is stood as (who wears a look of the owner's own). */
+  castBodies?(): { id: string; body: string }[];
 }
 
 /** One thing in hand: what a row writes, what it is drawn and judged by, and how it is turned. */
@@ -630,6 +638,8 @@ export class Editor {
     // The looks' and the attachments' numbers (the world's own objects) reached by the editor's tune and sliders.
     registerExtraTune('look', LOOK_TUNE as unknown as Record<string, unknown>);
     registerExtraTune('attach', ATTACH_TUNE as unknown as Record<string, unknown>);
+    // The dresser's sliders (Map-maker II's thirteenth wave, the debug menu's `ownLooks`): its doll framed and lit again.
+    DRESSER_RETUNE.moved = () => this.dresserMade?.retune();
   }
 
   /** The editing: the selection, the hand on it, the gizmo, the snaps, copy and paste, undo and redo. */
@@ -655,6 +665,38 @@ export class Editor {
   readonly removals: EditorRemovals;
   /** The no-spawn zone tool (Map-maker II's twelfth wave). */
   readonly zones: EditorZones;
+  /** The dresser (Map-maker II's thirteenth wave): the Looks tab, made the first time it is asked for. */
+  private dresserMade: DresserUi | null = null;
+
+  /**
+   * The dresser, made the first time the Looks tab or the console asks for it: its figure, its doll and its two pages are
+   * its own, and every look it saves or takes out is one write and one undo entry through the editing (`putRows`, the
+   * `looks` kind), landed into the catalogue by the game.
+   */
+  dresser(): DresserUi {
+    if (!this.dresserMade) {
+      const h = this.host;
+      this.dresserMade = new DresserUi({
+        baseUrl: import.meta.env.BASE_URL,
+        ui: h.ui,
+        catalogue: () => h.world.mobileCatalogue,
+        putLook: (label, before, after) => {
+          const id = typeof after?.id === 'string' ? after.id : (before?.id ?? '');
+          return this.edits.putRows(label, [{ file: 'looks', id, before: before as RowChange['before'], after: after as RowChange['after'] }]);
+        },
+        people: () => h.world.placedPeopleRows.map((r) => ({ id: r.id, body: r.body, ...(r.name ? { name: r.name } : {}) })),
+        cast: () => h.castBodies?.() ?? [],
+        takePerson: (body, name) => {
+          this.giveUpHand();
+          if (this.tools.disarmAll()) this.window?.refreshEdits();
+          this.removals.takePerson(body, name);
+        },
+        say: (words, ok) => this.say(words, ok),
+        redraw: () => this.window?.refreshLooks(),
+      });
+    }
+    return this.dresserMade;
+  }
   /** Whether this session wrote anything the walk grid's bake reads (a hide, a switch on being solid): the bar says the grid is stale. */
   private gridStale = false;
   /** The pack the paint palette's family list shows (Map-maker II's third wave): '' for this world's own. */
@@ -1353,6 +1395,8 @@ export class Editor {
   private leaveBody(ret: ReturnPoint, way: LeaveWay): void {
     this.giveUpHand();
     this.tools.disarmAll();
+    // The dresser's pages put away with the editor (its figure kept for the next session, its doll stopped with the window).
+    this.dresserMade?.showPage(null);
     this.marks.ringOn = false;
     this.marks.ring2On = false;
     this.edits.cancel(false);
@@ -1386,6 +1430,8 @@ export class Editor {
     if (this.lakeLookTimer) clearTimeout(this.lakeLookTimer);
     this.lakeLookTimer = null;
     this.lakeLookOwed = {};
+    // The dresser's pages put away (its figure and its look are every world's, and kept).
+    this.dresserMade?.showPage(null);
     this.marks.ringOn = false;
     this.marks.ring2On = false;
     // The palette's family list turned back to the next world's own (`paintView` also reads a browsed pack that is the
@@ -1419,6 +1465,27 @@ export class Editor {
     if (!this.session.on) return;
     const input = this.host.input;
     const a = this.fly.ask;
+    // The dresser's own two pages (Map-maker II's thirteenth wave) stand over the screen and take its keys, as the player's own
+    // copies of those pages stop the game behind them: nothing of the editor's is read under them -- no flight, no hold, no
+    // nudge, no Delete of the picked rows, no chord, no tool -- and every action is muted for the rest of the frame. A key
+    // pressed with a page's cell or button in focus would otherwise reach the world behind it.
+    if (this.dresserMade?.pagesOpen()) {
+      a.fwd = 0;
+      a.side = 0;
+      a.up = 0;
+      a.fast = false;
+      a.slow = false;
+      a.look = false;
+      this.edits.idle();
+      this.brushPaint = false;
+      this.brushErase = false;
+      this.toolShiftPress = false;
+      this.toolDY = 0;
+      this.toolLift = false;
+      input.wheel = 0;
+      input.mute(ALL_ACTIONS);
+      return;
+    }
     const ctrl = input.isDown('ControlLeft') || input.isDown('ControlRight');
     if (ctrl) {
       a.fwd = 0;
@@ -1637,6 +1704,12 @@ export class Editor {
    */
   escape(): boolean {
     if (!this.session.on) return false;
+    // The dresser's own two pages (Map-maker II's thirteenth wave), first: they stand over everything else on the screen.
+    if (this.dresserMade?.pagesOpen()) {
+      this.dresserMade.showPage(null);
+      this.window?.refreshLooks();
+      return true;
+    }
     if (this.hand) {
       this.giveUpHand();
       return true;
@@ -1987,11 +2060,12 @@ export class Editor {
     // An effect or a sound (the seventh wave) goes in hand with no model; with the look picker armed, a model's entry offers
     // its materials to choose from on the Selected tab and nothing goes in hand.
     // A person of the People source (Map-maker II's twelfth wave): nothing in hand but the person, placed by the next click
-    // (a person has no materials to offer the look picker).
+    // (a person has no materials to offer the look picker). The body it stands as is the entry's `m`: a People entry's own
+    // id, a Looks entry's `own:<id>` (Map-maker II's thirteenth wave).
     if (!base && isPersonEntry(e)) {
       this.giveUpHand();
       this.tools.disarmAll();
-      this.removals.takePerson(e.id, entryName(e));
+      this.removals.takePerson(e.m, entryName(e));
       this.window?.refreshEdits();
       return null;
     }
@@ -2382,6 +2456,66 @@ export class Editor {
   }
 
   /**
+   * `__debug.ownLooks`'s editing half (Map-maker II's thirteenth wave, the dresser): `{ open: '<look id>' }` opens one of the
+   * owner's own looks in the dresser (the Looks tab shown), `{ new: '<species>' }` a bare new look, `{ start: '<entry>' }` a
+   * dressed catalogue entry's look copied, `{ save: true }` (or `'new'`) and `{ remove: '<id>' }` its writes, `{ hand: '<id>' }`
+   * a person of the owner's own in hand wearing it, `{ wear: { id, row } }` a look put on a placed person of this world's
+   * (one write), `{ pages: 'wardrobe' | 'appearance' | false }` the dresser's two pages, `{ name, note }` the look's words,
+   * `{ tune }` its numbers of feel. Answers the dresser's state and what was said.
+   */
+  async ownLooksDebug(o: Record<string, unknown> = {}): Promise<unknown> {
+    const said: string[] = [];
+    if (o.tune !== undefined) {
+      said.push(...tuneDresser(o.tune));
+      this.dresserMade?.retune();
+    }
+    const needsEditor = ['open', 'new', 'start', 'save', 'remove', 'hand', 'wear', 'pages', 'name', 'note'].some((k) => o[k] !== undefined);
+    if (needsEditor && !this.session.on) return { said: [...said, "the dresser is the world editor's: F2 first"] };
+    const d = this.dresser();
+    if (typeof o.name === 'string') d.record.name = o.name.trim().slice(0, 80);
+    if (typeof o.note === 'string') d.record.note = o.note.trim().slice(0, 400);
+    if (typeof o.new === 'string' || o.new === true) said.push(await d.newLook(typeof o.new === 'string' ? o.new : undefined));
+    if (typeof o.start === 'string') said.push(await d.startFrom(o.start));
+    if (typeof o.open === 'string') {
+      this.window?.setTab('looks');
+      said.push(await d.open(o.open));
+    }
+    if (o.pages === 'wardrobe' || o.pages === 'appearance' || o.pages === false) said.push(d.showPage(o.pages === false ? null : o.pages));
+    if (o.save === true || o.save === 'new') said.push(await d.save(o.save === 'new'));
+    if (typeof o.remove === 'string') said.push(await d.remove(o.remove));
+    if (typeof o.hand === 'string') said.push(d.hand(o.hand));
+    if (o.wear && typeof o.wear === 'object') said.push(await this.wearLook(o.wear as { id?: unknown; row?: unknown }));
+    if (said.length) this.window?.refreshLooks();
+    return { dresser: d.report(), ...(said.length ? { said } : {}) };
+  }
+
+  /**
+   * The owner's own looks landed in the catalogue (a write's answer, an undo's, the file read again): the library's People
+   * and Looks sources made again from the catalogue, and the Looks tab drawn again.
+   */
+  looksLanded(): void {
+    if (this.libView) {
+      this.composeLibrary();
+      this.window?.library.render();
+    }
+    this.window?.refreshLooks();
+  }
+
+  /** A look of the owner's own put on one of this world's placed people (`body: own:<id>`), one write and one undo entry. */
+  private async wearLook(w: { id?: unknown; row?: unknown }): Promise<string> {
+    const id = typeof w.id === 'string' ? w.id : '';
+    const rowId = typeof w.row === 'string' ? w.row : '';
+    if (!isLookId(id)) return 'a look is named by its id (wear: { id, row })';
+    const cat = this.host.world.mobileCatalogue;
+    if (!cat?.byId(ownBodyOf(id))) return `there is no look of yours called ${id} on this machine`;
+    const row = this.host.world.placedPeopleRows.find((r) => r.id === rowId);
+    if (!row) return `there is no placed person ${rowId} on this world (the Here tab lists them)`;
+    if (row.body === ownBodyOf(id)) return `${rowId} wears ${id} already`;
+    const after = { ...row, body: ownBodyOf(id) };
+    return this.edits.putRows(`${id} put on ${row.name ?? rowId}`, [{ file: 'people', id: row.id, before: row as unknown as RowChange['before'], after: after as unknown as RowChange['after'] }]);
+  }
+
+  /**
    * The sitters the seat snap reads, made again while a seat or a table is in hand only once the people's pass has run since
    * (`StandingPeople.last.pass`) or the world's frame is another; and the snap's kept ask, so a frame of it makes nothing.
    */
@@ -2664,7 +2798,11 @@ export class Editor {
         if (res.ok && type.includes('json')) {
           const idx = readLibraryIndex(await res.json());
           if (idx) {
-            this.libView = libraryView([...idx.entries, ...(await this.importedEntries()), ...peopleEntries(this.host.world.mobileCatalogue)]);
+            // The index's pictures of looks are matched to the looks as they stand (`lookPictures`); the People and Looks
+            // sources are made from the catalogue now, and again whenever a look lands (`composeLibrary`).
+            this.libLookPics = idx.entries.filter((e) => e.s === 'looks');
+            this.libBase = [...idx.entries.filter((e) => e.s !== 'looks'), ...(await this.importedEntries())];
+            this.composeLibrary();
             this.libMade = idx.made;
             this.libState = 'index';
             this.window?.library.render();
@@ -2693,9 +2831,26 @@ export class Editor {
       gallery: gallery ? { sections: [{ id: 'houses', items: gallery.category('layout').filter((d) => (d.cells?.length ?? 0) > 1).map((d) => ({ model: d.id, label: d.id })) }] } : null,
       world: own ? { id: h.packId(), manifest: { categories: { layout: own.category('layout'), flora: own.category('flora') } } } : null,
     });
-    this.libView = libraryView([...entries, ...(await this.importedEntries()), ...peopleEntries(h.world.mobileCatalogue)]);
+    this.libLookPics = [];
+    this.libBase = [...entries, ...(await this.importedEntries())];
+    this.composeLibrary();
     this.libState = 'fallback';
     this.window?.library.render();
+  }
+
+  /** The library's entries but the People and Looks sources (the index's, or the fallback's, and the imported). */
+  private libBase: LibraryEntry[] = [];
+  /** The index's pictures of looks (the library pass's `looks` entries), matched to the looks as they stand. */
+  private libLookPics: LibraryEntry[] = [];
+
+  /**
+   * The library made again with the People and Looks sources out of the catalogue as it stands (Map-maker II's thirteenth
+   * wave): a look saved, opened or taken out shows in both at once, with its picture where the pass drew it as it stands.
+   */
+  composeLibrary(): void {
+    const cat = this.host.world.mobileCatalogue;
+    const pics = lookPictures(this.libLookPics, cat);
+    this.libView = libraryView([...this.libBase, ...peopleEntries(cat, pics), ...lookEntries(cat, pics)]);
   }
 
   /**
@@ -2873,6 +3028,9 @@ export class Editor {
           this.window?.refreshEdits();
         })();
       },
+      // Map-maker II's thirteenth wave: the Looks tab is the dresser's, its doll drawn only while the tab shows.
+      looksParts: () => this.dresser().parts(),
+      looksShown: (on: boolean) => this.dresser().setShown(on),
     };
   }
 

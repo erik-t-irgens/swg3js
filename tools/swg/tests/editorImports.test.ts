@@ -20,8 +20,8 @@ const src = join(root, 'src');
 const files = (readdirSync(src, { recursive: true }) as string[]).filter((f) => f.endsWith('.ts')).map((f) => join(src, f));
 const rel = (p: string) => relative(root, p).split(sep).join('/');
 
-/** The editor's own interface files: they may import the editor, and nothing shipped may import them. */
-const EDITOR_UI = new Set(['src/ui/editorWindow.ts', 'src/ui/libraryUi.ts', 'src/ui/editorBar.ts', 'src/ui/editorMarks.ts']);
+/** The editor's own interface files: they may import the editor, and nothing shipped may import them (the dresser's tab, Map-maker II's thirteenth wave, among them). */
+const EDITOR_UI = new Set(['src/ui/editorWindow.ts', 'src/ui/libraryUi.ts', 'src/ui/editorBar.ts', 'src/ui/editorMarks.ts', 'src/ui/dresserUi.ts']);
 const isEditor = (r: string) => r.startsWith('src/editor/') || EDITOR_UI.has(r);
 
 /** Where a specifier points, as a path from the root, or null for a package. */

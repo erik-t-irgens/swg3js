@@ -341,6 +341,16 @@ export class Element0 extends EventTarget0 {
     const c = this.children;
     return c[c.length - 1] ?? null;
   }
+  /** The element after it, and before it, among its parent's. */
+  get nextElementSibling(): Element0 | null {
+    const s = this.parent?.children ?? [];
+    return s[s.indexOf(this) + 1] ?? null;
+  }
+  get previousElementSibling(): Element0 | null {
+    const s = this.parent?.children ?? [];
+    const i = s.indexOf(this);
+    return i > 0 ? s[i - 1] : null;
+  }
   get textContent(): string {
     return this.kids.map((k) => k.textContent).join('');
   }
@@ -402,6 +412,59 @@ export class Element0 extends EventTarget0 {
   }
   remove(): void {
     this.parent?.removeChild(this);
+  }
+  /** Put nodes first among its own (the pages' doll canvas, Map-maker II's thirteenth wave). */
+  prepend(...nodes: (Kid | string)[]): void {
+    const first = this.kids[0] ?? null;
+    for (const n of nodes) for (const k of this.adopt(n)) this.insertBefore(k, first);
+  }
+  /** Markup read in beside or inside it, at the four places a browser takes. */
+  insertAdjacentHTML(where: 'beforebegin' | 'afterbegin' | 'beforeend' | 'afterend', html: string): void {
+    const frag = new Element0(this.page, '#fragment', 11);
+    readMarkup(frag, html);
+    if (where === 'beforeend') this.append(frag);
+    else if (where === 'afterbegin') this.prepend(frag);
+    else if (where === 'beforebegin') this.before(frag);
+    else this.after(frag);
+  }
+  /** Nodes put just before it among its parent's. */
+  before(...nodes: (Kid | string)[]): void {
+    const p = this.parent;
+    if (!p) return;
+    for (const n of nodes) for (const k of this.adopt(n)) p.insertBefore(k, this);
+  }
+  /** Nodes put just after it among its parent's, in order. */
+  after(...nodes: (Kid | string)[]): void {
+    const p = this.parent;
+    if (!p) return;
+    let ref: Kid | null = p.kids[p.kids.indexOf(this) + 1] ?? null;
+    for (const n of nodes) for (const k of this.adopt(n)) {
+      p.insertBefore(k, ref);
+      ref = p.kids[p.kids.indexOf(k) + 1] ?? null;
+    }
+  }
+  /** It taken out and the nodes put where it stood. */
+  replaceWith(...nodes: (Kid | string)[]): void {
+    const p = this.parent;
+    if (!p) return;
+    this.after(...nodes);
+    this.remove();
+  }
+  /** A canvas draws nothing here: no context (the pages' strips skip their drawing on none). */
+  getContext(): null {
+    return null;
+  }
+  /** A `<select>`'s options. */
+  get options(): Element0[] {
+    return this.querySelectorAll('option');
+  }
+  /** A `<details>`'s open, as its attribute. */
+  get open(): boolean {
+    return this.attrs.has('open');
+  }
+  set open(v: boolean) {
+    if (v) this.setAttribute('open', '');
+    else this.removeAttribute('open');
   }
   contains(n: unknown): boolean {
     for (let at = n as Kid | null; at; at = at.parent) if (at === this) return true;

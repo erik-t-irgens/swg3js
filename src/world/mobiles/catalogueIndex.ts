@@ -240,8 +240,15 @@ function speciesLabel(species: string): string {
 /** The group the bodies of ours stand in, under the humanoid NPCs whatever kind their table makes them. */
 export const OURS_GROUP = { kind: 'npc', key: 'ours', label: 'Entries of ours: bodies no template names', note: "SOE's own art, stood by our table" } as const;
 
+/**
+ * The group the owner's own looks stand in (Map-maker II's thirteenth wave, `own:<id>`), under the dressed NPCs: a group of
+ * their own, apart from every species' groups and from the bodies of ours (`OURS_GROUP`, SOE's art stood by our table).
+ */
+export const OWN_LOOKS_GROUP = { kind: 'dressed', key: 'dressed/own', label: 'Dressed NPCs: looks of your own', note: 'dressed in the world editor' } as const;
+
 /** Where one entry sits in the tree: its category, its group's key, label and note. */
 export function placeOf(e: MobileEntry): { kind: string; key: string; label: string; note: string } {
+  if (e.own) return { ...OWN_LOOKS_GROUP };
   if (e.ours) return { ...OURS_GROUP };
   for (const flag of EXTRA_FLAGS) {
     if (e.flags?.includes(flag)) {

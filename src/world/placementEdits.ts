@@ -43,6 +43,7 @@ import { LOCATION_LIMITS, isLocationId, locationsFileText, locationsWithExtras, 
 import { REMOVAL_LIMITS, isRemovalId, mintZoneId, readRemovalRow, readRemovalsFile, removalWithExtras, removalsFileText, sameRemovalRow, type RemovalRow } from '../story/removals.ts';
 import { PEOPLE_LIMITS, isPersonId, mintPersonId, peopleFileText, personWithExtras, readPeopleFile, readPersonRow, samePersonRow, type PlacedPersonRow } from '../story/placedPeople.ts';
 import { isSolidFileId, readSolidFileRow, readSolidFileRows, solidFileText, type SolidFileRow } from './walkThrough.ts';
+import { LOOKS_LIMITS, isLookId, lookWithExtras, looksFileText, mintLookId, readLookRow, readLooksFile, sameLookRow, type OwnLookRow } from './editFiles/looksFile.ts';
 
 /** Every number of the endpoint, all ours. Read where the dev server runs it, and not moved from the browser. */
 export const PLACEMENTS_ENDPOINT_TUNE = {
@@ -438,10 +439,11 @@ export interface Held<R extends EditRow = PlacementRow> {
   text: string | null;
 }
 
-/** The words a kind of file of a later wave is refused in, by kind: the batch writes none of them yet. */
-export const NOT_YET: Partial<Record<EditFileKind, string>> = {
-  looks: "Map-maker II's thirteenth wave's",
-};
+/**
+ * The words a kind of file of a later wave is refused in, by kind: none since Map-maker II's thirteenth wave wrote its last
+ * (`looks`), and kept for whatever kind a later pass names before it writes it.
+ */
+export const NOT_YET: Partial<Record<EditFileKind, string>> = {};
 
 /** A placement row layer as a kind of edit file: the very reader, cleaner, writer and likeness the batch used before the kinds. */
 function rowKind(layer: PlacementLayer): EditKind<PlacementRow> {
@@ -772,9 +774,52 @@ function solidFile(): string {
 }
 
 /**
+ * The owner's own looks (Map-maker II's thirteenth wave, `editFiles/looksFile.ts`): one file every world shares
+ * (`looks/all.json`), a look a row, named by an id of its own (minted from its name, else its species, where a put names
+ * none), every world's alike -- a space zone and the world of copies among them, since a look is worn wherever a person
+ * stands. The endpoint reads no wardrobe, so a piece the species cannot wear is refused by the dresser's own save, not here.
+ */
+export const looksKind: EditKind<OwnLookRow> = {
+  kind: 'looks',
+  group: null,
+  groundOnly: false,
+  most: LOOKS_LIMITS.rows,
+  idOk: isLookId,
+  idWords: 'its id is not a-z, 0-9, _ and - (64 at most, starting with a letter or a digit)',
+  open(text) {
+    if (text === null) return { rows: [], read: null, text: null };
+    const raws: Record<string, unknown>[] = [];
+    const read = readLooksFile(text, raws);
+    if (read.problem) return `${looksFile()} does not read (${read.problem}): mend it by hand first`;
+    if (read.skipped.length) return `${looksFile()} holds rows this build cannot read (${read.skipped.slice(0, 3).map((s) => `${s.id}: ${s.why}`).join('; ')}): mend them by hand first, or the editor would write over them`;
+    return { rows: read.rows.map((row, i) => ({ row, raw: raws[i] })), read, text };
+  },
+  clean(asked, id, stamp) {
+    const unknown: string[] = [];
+    const row = readLookRow({ ...asked, id, at: stamp }, unknown);
+    if (typeof row === 'string') return row;
+    if (unknown.length) return `it carries fields this build does not write: ${unknown.join(', ')}`;
+    return row;
+  },
+  parse: (v) => readLookRow(v),
+  same: sameLookRow,
+  extras: lookWithExtras,
+  text: (_world, _frame, rows) => looksFileText(rows),
+  read: (text) => readLooksFile(text),
+  mint: (asked, taken) => mintLookId(typeof asked.name === 'string' && asked.name ? asked.name : typeof asked.species === 'string' ? asked.species : 'look', taken),
+  file: () => looksFile(),
+};
+
+/** The shared looks file, as the owner reads it. */
+function looksFile(): string {
+  return `public/${editFilePath('looks', 'all')}`;
+}
+
+/**
  * Every kind the batch writes now, by name: the two row layers, from Map-maker II's first wave the heights, from its
- * second the paint, from its fifth the water and from its eighth the places. A kind named in `EDIT_FILE_KINDS` and missing
- * here is refused in its wave's words (`NOT_YET`).
+ * second the paint, from its fifth the water, from its eighth the places, from its twelfth what is taken away, the people
+ * and the shared walk-through file, and from its thirteenth the looks. A kind named in `EDIT_FILE_KINDS` and missing here
+ * is refused in its wave's words (`NOT_YET`).
  */
 export const EDIT_KINDS: Partial<Record<EditFileKind, EditKind<EditRow>>> = {
   story: ROW_KINDS.story as unknown as EditKind<EditRow>,
@@ -786,10 +831,15 @@ export const EDIT_KINDS: Partial<Record<EditFileKind, EditKind<EditRow>>> = {
   removed: removedKind as unknown as EditKind<EditRow>,
   people: peopleKind as unknown as EditKind<EditRow>,
   solid: solidKind as unknown as EditKind<EditRow>,
+  looks: looksKind as unknown as EditKind<EditRow>,
 };
 
-/** The one kind the dungeons' world of copies takes (Map-maker I §2.9): a copy's crew member and its own objects taken away. */
-export const COPIES_KINDS: readonly EditFileKind[] = ['removed'];
+/**
+ * The kinds the dungeons' world of copies takes (Map-maker I §2.9): a copy's crew member and its own objects taken away, and
+ * (Map-maker II's thirteenth wave) the looks every world shares, which are no world's own and are saved wherever the editor
+ * stands.
+ */
+export const COPIES_KINDS: readonly EditFileKind[] = ['removed', 'looks'];
 
 /**
  * The world editor's one write (`{ op: 'batch', world, edits }`, DESIGN.md §2.11): every edit applied in order to every

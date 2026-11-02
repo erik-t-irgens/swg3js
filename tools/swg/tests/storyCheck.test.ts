@@ -20,6 +20,7 @@ import { checkPlacements, checkSet, issueLine, type CheckOptions } from '../../.
 import { placementKey, placementsFileText, type PlacementRow } from '../../../src/story/placements.ts';
 import { OBJECT_FIND, TEMPLATE, loadSet, type StorySet } from '../../../src/story/set.ts';
 import { isTestText, type TextRef } from '../../../src/story/text.ts';
+import { looksFileText } from '../../../src/world/editFiles/looksFile.ts';
 import { FILE_MAX, readStorySet } from '../../../server/storySet.mjs';
 import { PLACEMENTS_DIR, catalogueOf, checkFolder, defaultFolders, placedTemplatesOf, placementsOf, worldIds } from '../../story/check.mjs';
 
@@ -184,6 +185,32 @@ const warns = (r: ReturnType<typeof checkSet>, re: RegExp) => r.warnings.some((w
   const escapes = check('own', [quest('e', { start: ['a'], needs: 'call(nothing.registered)', steps: { a: { type: 'nothing', do: { done: ['call(also.nothing)', 'call(test.setFlag, x, 1)'] }, ends: 'done' } } })]);
   ok(escapes.counts.unresolved === 2 && escapes.warnings.filter((w) => w.rule === 14).length === 2, 'rule 14: every call that names no registered script is counted');
   ok(escapes.errors.length === 0, 'and is not an error: an importer\'s untranslated piece leaves a quest stuck, not a set broken');
+}
+
+// ---- the owner's own looks are bodies of the catalogue (Map-maker II's thirteenth wave) ---------------------------------
+// `npm run story:check` reads them as the game merges them at its boot: a look whose `from` is a dressed entry here is
+// `own:<id>`, so a cast member wearing one draws no warning and a mistyped look id still does.
+{
+  const root = mkdtempSync(join(tmpdir(), 'mm2-storylooks-'));
+  const places = join(root, 'placements');
+  try {
+    mkdirSync(join(root, 'assets-private', 'mobiles'), { recursive: true });
+    const dressed = { id: 'dressed_test_farmer', kind: 'dressed', folder: '', group: 'dressed/civilian', name: 'TEST farmer', subtitle: null, flags: [], gender: 'm', appearance: null, species: 'human_male', pack: 'pack_human_male', variant: null, custom: {}, morphs: {}, outfit: [], ready: true, outfitReady: true };
+    writeFileSync(join(root, 'assets-private', 'mobiles', 'catalogue.json'), JSON.stringify({ format: 1, entries: [dressed, { ...dressed, id: 'test_beast', kind: 'creature', species: null }], appearances: {}, packs: {} }));
+    mkdirSync(join(places, 'looks'), { recursive: true });
+    const row = (id: string, from: string, species = 'human_male') => ({ id, from, species, morphs: {}, custom: {}, outfit: [] });
+    writeFileSync(join(places, 'looks', 'all.json'), looksFileText([row('farmhand', 'dressed_test_farmer'), row('lost', 'no_such_entry'), row('beast', 'test_beast'), row('far', 'dressed_test_farmer', 'nobody_male')]));
+    const cat = catalogueOf(root, places)!;
+    ok(cat.ids.has('own:farmhand') && cat.ids.has('own:far') && !cat.ids.has('own:lost') && !cat.ids.has('own:beast') && cat.groups.has('dressed/own'), `a look whose from is a dressed entry here is a body of the catalogue, as the game merges it (${[...cat.ids].filter((i) => i.startsWith('own:')).join(', ')})`);
+    ok(!catalogueOf(root, join(root, 'nowhere'))!.ids.has('own:farmhand'), 'and with no looks file there are none');
+    const cast = (body: string) => ({ path: 'cast/farmhand.jsonc', text: JSON.stringify({ id: 'farmhand', name: 'TEST FARMHAND', body, world: 'tatooine', at: [3, 4], tree: 'talk/f' }) });
+    const tree = { path: 'talk/f.jsonc', text: JSON.stringify({ format: 1, id: 'f', entry: [{ to: 'a' }], nodes: { a: { say: ['TEST'], end: true } } }) };
+    const wearing = check('own', [], { catalogue: cat }, [cast('own:farmhand'), tree]);
+    const typo = check('own', [], { catalogue: cat }, [cast('own:farmhnad'), tree]);
+    ok(!wearing.warnings.some((w) => w.rule === 13) && typo.warnings.some((w) => w.rule === 13 && /own:farmhnad is not in the creature catalogue/.test(w.message)), 'a cast member wearing a look of the owner\'s own draws no warning, and a mistyped look id still does');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 // ---- rule 2 for steps waiting on others, and for circles of quests -------------------------------------------------

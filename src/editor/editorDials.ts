@@ -11,6 +11,7 @@ import { readDials } from '../ui/dials.ts';
 import { EDITOR_EXTRA_DEFAULTS, EDITOR_EXTRA_TUNES, EDITOR_TUNE, EDITOR_TUNE_DEFAULTS, FLORA_PAINT_TUNE, FLORA_PAINT_TUNE_DEFAULTS, PAINT_TUNE, PAINT_TUNE_DEFAULTS, PLACES_TOOL_CHOICES, PLACES_TOOL_TUNE, PLACES_TOOL_TUNE_DEFAULTS, SCULPT_TUNE, SCULPT_TUNE_DEFAULTS, WATER_TUNE, WATER_TUNE_DEFAULTS, tuneEditor, tuneFloraPaint, tunePaint, tunePlacesTool, tuneSculpt, tuneWater } from './editorTune.ts';
 import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
 import { LAKE_TUNE, RIVER_TUNE, tuneRiverTune } from '../world/ourWater.ts';
+import { DRESSER_TUNE, tuneDresser } from './dresser.ts';
 
 /** The lakes' own shipped numbers, as this module first saw them (before any console line moved them). */
 const LAKE_TUNE_SHIPPED = { ...LAKE_TUNE };
@@ -668,5 +669,54 @@ export function placesToolDials(): { groups(): DialGroup[]; shipped: ReadonlyMap
 
 /** The debug menu's dials for `editor`, or null for another helper. */
 export function editorDialsFor(helper: string): DialSet | null {
-  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : helper === 'groundPaint' ? paintDialSet() : helper === 'floraPaint' ? floraPaintDialSet() : helper === 'lakes' ? lakesDialSet() : helper === 'rivers' ? riversDialSet() : null;
+  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : helper === 'groundPaint' ? paintDialSet() : helper === 'floraPaint' ? floraPaintDialSet() : helper === 'lakes' ? lakesDialSet() : helper === 'rivers' ? riversDialSet() : helper === 'ownLooks' ? ownLooksDialSet() : null;
 }
+
+/** The dresser's numbers as they shipped: what a reset puts back. */
+const DRESSER_SHIPPED = { ...DRESSER_TUNE };
+
+/**
+ * The `ownLooks` helper's own dials (Map-maker II's thirteenth wave; the debug menu's, when `ownLooks` is picked): the
+ * dresser's doll's framing, light and size and how many entries a find offers, each set through `ownLooks({ tune })`'s own
+ * setter, so the doll is framed and lit again at once and the line the menu copies keeps it.
+ */
+export function ownLooksDialSet(): DialSet {
+  const doll: DialGroup = {
+    title: 'The dresser’s doll',
+    note: 'The Looks tab’s figure, in a preview of its own: a moved framing takes effect as the doll is framed again (now, and at every figure).',
+    dials: (
+      [
+        ['yaw', 'Turned', -3.14, 3.14, 0.01, 'rad', 'How far round from the front the doll is framed: a little round reads a coat’s depth and a sleeve.'],
+        ['pitch', 'Tilted', -0.5, 0.7, 0.01, 'rad', 'How far from above it is looked on.'],
+        ['light', 'Light', 0, 4, 0.05, '×', 'Its three lights and its sky at this share of their own strength.'],
+        ['dollHeight', 'Height on the tab', 120, 900, 10, 'px', 'How tall the doll stands on the Looks tab.'],
+        ['startHits', 'Start from offers', 1, 60, 1, '', 'How many dressed people a Start from find offers.'],
+      ] as const
+    ).map(([k, label, min, max, step, unit, note]) => ({
+      kind: 'number' as const,
+      key: `tune.${k}`,
+      label,
+      note,
+      min,
+      max,
+      step,
+      unit,
+      get: () => DRESSER_TUNE[k],
+      set: (v: number) => {
+        const said = tuneDresser({ [k]: v });
+        DRESSER_RETUNE.moved?.();
+        return said.length ? [] : [`${label} held where it was`];
+      },
+    })),
+  };
+  const groups = [doll];
+  const shipped = readDials(groups);
+  for (const [k] of shipped) {
+    const v = (DRESSER_SHIPPED as unknown as Record<string, unknown>)[k.slice('tune.'.length)];
+    if (typeof v === 'number') shipped.set(k, v);
+  }
+  return { helper: 'ownLooks', groups, shipped };
+}
+
+/** What a dial's move tells the dresser (its doll framed and lit again): set by the editor once the dresser is made. */
+export const DRESSER_RETUNE: { moved: (() => void) | null } = { moved: null };

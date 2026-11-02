@@ -12,6 +12,8 @@ import * as THREE from 'three';
 import { Character } from '../../player/character.ts';
 import type { MobileCatalogue } from './catalogue';
 import { shareLook, type LookHold } from './lookShare.ts';
+import { lookCacheKey } from './ownLooks.ts';
+import { dressLook } from './dressLook.ts';
 import type { MobileEntry } from './types';
 
 export interface BuiltLook {
@@ -23,9 +25,12 @@ export interface BuiltLook {
   source: string;
 }
 
-/** The key a look is cached under in the asset cache (never a file path, so it cannot collide with a model's). */
+/**
+ * The key a look is cached under in the asset cache (never a file path, so it cannot collide with a model's): a look of the
+ * owner's own (Map-maker II's thirteenth wave) carries its content's hash, so an edited one is never served from the cache.
+ */
 export function lookKey(entry: MobileEntry): string {
-  return `look:${entry.id}`;
+  return lookCacheKey(entry);
 }
 
 /** Whether an entry stands on a look (a parts body) rather than a plain model. */
@@ -61,35 +66,7 @@ export async function buildLook(baseUrl: string, entry: MobileEntry, cat: Mobile
   // A dressed body starts bare (its outfit is the catalogue's, not the species pack's default
   // clothes); an NPC's own parts model wears what it was converted wearing.
   const character = await Character.load(baseUrl, dressed ? (entry.species ?? 'human_male') : (entry.appearance ?? entry.id), dressed ? [] : undefined, { dir: folder, skipRig: true, share: hold ?? undefined });
-  for (const [name, v] of Object.entries(entry.morphs ?? {})) character.setMorph(name, v);
-  const missing: string[] = [];
-  const itemValues: Record<string, number> = {};
-  for (const o of entry.outfit ?? []) {
-    const dir = `${baseUrl}assets-private/${o.wardrobe.replace(/\/?$/, '/')}`;
-    let on = false;
-    try {
-      on = await character.wearItemFrom(dir, o.item, o.part);
-    } catch (err) {
-      console.warn(`mobiles: ${entry.id}: ${o.item} would not go on`, err);
-    }
-    if (!on) {
-      missing.push(o.item);
-      continue;
-    }
-    // Each piece's own colours are private to its meshes, which the recipes name as the part.
-    for (const [name, v] of Object.entries(o.values ?? {})) itemValues[`${o.part}|${name}`] = v;
-  }
-  const cz = character.customizer;
-  if (cz) {
-    // After every piece is on, so each recipe that reads a value is active. The template's colours
-    // are named without their path (`index_color_skin`): set as shared, they also reach every
-    // private copy of the same name on every mesh (the head's skin follows the body's), whether or
-    // not a shared one exists. A name nothing reads is kept and does nothing.
-    const custom = entry.custom ?? {};
-    if (Object.keys(custom).length) cz.setAll(custom);
-    if (Object.keys(itemValues).length) cz.setAll(itemValues);
-    await cz.settled();
-  }
+  const missing = await dressLook(character, entry, baseUrl);
   // Every piece onto the shared one, now that nothing about the look will change again.
   const sources = hold ? character.lookSources() : null;
   if (hold && sources) shareLook(hold, sources);

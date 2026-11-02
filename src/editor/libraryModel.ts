@@ -25,30 +25,71 @@ export const LIBRARY_VERSION = 1;
  * (its tenth wave) is the owner's own models, read from each imports folder's `imports.json` (`importEntries`) rather than
  * the library pass's index.
  */
-export const LIBRARY_SOURCES = ['props', 'buildings', 'world', 'flora', 'imported', 'effects', 'sounds', 'people'] as const;
+export const LIBRARY_SOURCES = ['props', 'buildings', 'world', 'flora', 'imported', 'effects', 'sounds', 'people', 'looks'] as const;
 export type LibrarySource = (typeof LIBRARY_SOURCES)[number];
 
 /** A source in words. */
-export const SOURCE_WORDS: Record<LibrarySource, string> = { props: 'Props', buildings: 'Buildings', world: 'World models', flora: 'Flora', imported: 'Imported', effects: 'Effects', sounds: 'Sounds', people: 'People' };
+export const SOURCE_WORDS: Record<LibrarySource, string> = { props: 'Props', buildings: 'Buildings', world: 'World models', flora: 'Flora', imported: 'Imported', effects: 'Effects', sounds: 'Sounds', people: 'People', looks: 'Looks' };
 
 /**
  * The People source (Map-maker II's twelfth wave, Map-maker I §2.10): the mobile catalogue's bodies by its own groups, with
- * initials (no picture: a dressed look baked offline is a conversion of its own, later). Taken in hand, a click places a
- * person of the owner's own at the aim (the people file, `public/placements/people/<world>.json`). Made in the page from the
- * catalogue the game already holds, never by the library pass. An entry of no shape is passed over.
+ * initials, and (its thirteenth wave) a look of the owner's own with the library pass's picture of it where `pictures` has
+ * one, by the body it is worn as (`own:<id>`). Taken in hand, a click places a person of the owner's own at the aim (the
+ * people file, `public/placements/people/<world>.json`). Made in the page from the catalogue the game already holds, never by
+ * the library pass. An entry of no shape is passed over.
  */
-export function peopleEntries(catalogue: { entries: readonly { id: string; name?: string; group?: string }[] } | null): LibraryEntry[] {
+export function peopleEntries(catalogue: { entries: readonly { id: string; name?: string; group?: string }[] } | null, pictures: ReadonlyMap<string, string> | null = null): LibraryEntry[] {
   const out: LibraryEntry[] = [];
   for (const e of catalogue?.entries ?? []) {
     if (!e || typeof e.id !== 'string' || !/^[A-Za-z0-9_.:-]{1,96}$/.test(e.id)) continue;
-    out.push({ s: 'people', p: 'mobiles', id: e.id, m: e.id, n: typeof e.name === 'string' && e.name ? e.name : null, g: typeof e.group === 'string' && e.group ? e.group : 'other', t: null, sz: [0, 0, 0], tri: 0, pic: null, f: 0 });
+    out.push({ s: 'people', p: 'mobiles', id: e.id, m: e.id, n: typeof e.name === 'string' && e.name ? e.name : null, g: typeof e.group === 'string' && e.group ? e.group : 'other', t: null, sz: [0, 0, 0], tri: 0, pic: pictures?.get(e.id) ?? null, f: 0 });
   }
   return out;
 }
 
-/** Whether an entry is a person (the People source's) rather than a thing with a model. */
+/** A look of the owner's own as the catalogue carries it (`src/world/mobiles/ownLooks.ts`): what the Looks source reads. */
+export interface LookEntrySource {
+  id: string;
+  name?: string;
+  species?: string | null;
+  own?: { look: string; hash: string };
+}
+
+/**
+ * Which library pictures are of a look as it stands now, by the body it is worn as (`own:<id>`): the library pass draws each
+ * look's picture under `library/icons/looks/<id>_<hash8>.png` (its content's hash, `lookHash`), so a picture of a look since
+ * edited names another hash and is no picture of it (initials until the pass runs again).
+ */
+export function lookPictures(index: readonly Pick<LibraryEntry, 's' | 'm' | 'pic'>[], catalogue: { entries: readonly LookEntrySource[] } | null): Map<string, string> {
+  const out = new Map<string, string>();
+  const drawn = new Map<string, string>();
+  for (const e of index) if (e.s === 'looks' && e.pic) drawn.set(e.m, e.pic);
+  for (const e of catalogue?.entries ?? []) {
+    if (!e.own) continue;
+    const pic = drawn.get(e.id);
+    if (pic && pic.endsWith(`_${e.own.hash}.png`)) out.set(e.id, pic);
+  }
+  return out;
+}
+
+/**
+ * The Looks source (Map-maker II's thirteenth wave): every look of the owner's own the catalogue holds now, grouped by its
+ * species, its picture where the library pass drew one of it as it stands (`lookPictures`). Taken in hand, it is a person of
+ * the owner's own wearing it, placed by the next click. Made in the page from the catalogue, so a look saved a moment ago is
+ * there at once.
+ */
+export function lookEntries(catalogue: { entries: readonly LookEntrySource[] } | null, pictures: ReadonlyMap<string, string> | null = null): LibraryEntry[] {
+  const out: LibraryEntry[] = [];
+  for (const e of catalogue?.entries ?? []) {
+    if (!e?.own) continue;
+    out.push({ s: 'looks', p: 'looks', id: e.own.look, m: e.id, n: typeof e.name === 'string' && e.name ? e.name : null, g: typeof e.species === 'string' && e.species ? e.species : 'other', t: null, sz: [0, 0, 0], tri: 0, pic: pictures?.get(e.id) ?? null, f: 0 });
+  }
+  return out;
+}
+
+/** Whether an entry is a person (the People source's, or a look of the Looks source's worn by one) rather than a thing with a model. */
 export function isPersonEntry(e: Pick<LibraryEntry, 's'>): boolean {
-  return e.s === 'people';
+  return e.s === 'people' || e.s === 'looks';
 }
 
 /** One model of an imports folder's `imports.json`, as the import command writes it (`tools/swg/imports.mjs`). */

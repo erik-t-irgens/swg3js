@@ -17,9 +17,14 @@
 // "— none —" under another name. A double-click on a piece already worn takes off that piece alone:
 // a group gathers several body slots (a ring and a cybernetic hand under Hands, a wrist bracelet under
 // a bracer), so taking the whole group off would take off pieces worn beside it.
+//
+// What it dresses is a host (`WardrobeFigure`, Map-maker II's thirteenth wave): the pieces worn, the wardrobe and the
+// species' own rules, read off a figure every time, and a pick put through `onWear`/`onRemove` where they are set. The
+// player's page hands it the player's character and the game's equipment; the world editor's dresser hands its own figure
+// and its own record, with its own two tabs (`tabs`). Nothing a pick does on the player's page changed for it.
 
 import type { Character, Wardrobe } from '../player/character';
-import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs.ts';
+import { INVENTORY_TABS, tabStrip, wireTabs, type TabDef } from './tabs.ts';
 import { CharacterPreview } from './characterPreview.ts';
 import type { PreviewEffects } from './previewDof';
 import { OTHER_GROUP, SLOT_GROUPS, isHairKey, slotGroupOf } from '../core/inventory.ts';
@@ -35,6 +40,14 @@ export const slotOf = slotGroupOf;
 
 /** What each slot's heading says it is for. */
 const SLOT_NOTE = 'a pick puts it on and takes off whatever held the slot';
+
+/**
+ * What the Clothes tab dresses (its host, Map-maker II's thirteenth wave): the pieces worn and the body (`status`), the
+ * wardrobe it dresses from and where its pictures are (`catalogue`, `wardrobeDir`), the species' own (`manifest`, its pack's
+ * pieces by `packPartOf`), a piece put on or taken off directly where the page has no `onWear`/`onRemove`, and the figure the
+ * doll is cloned from (`group`). The player's character is one; the world editor's dresser's figure is another.
+ */
+export type WardrobeFigure = Pick<Character, 'group' | 'manifest' | 'status' | 'catalogue' | 'wardrobeDir' | 'packPartOf' | 'remove' | 'wear' | 'wearItem'>;
 
 export class WardrobeUi {
   readonly root: HTMLElement;
@@ -53,7 +66,7 @@ export class WardrobeUi {
   static get dollEffects(): PreviewEffects {
     return CharacterPreview.effects;
   }
-  private character: Character | null = null;
+  private character: WardrobeFigure | null = null;
   private catalogue: Wardrobe | null = null;
   open = false;
   /** A click on another tab: the game swaps the panels. */
@@ -84,8 +97,10 @@ export class WardrobeUi {
   private lastFind = '';
   private findTimer = 0;
   /** The character and the set of parts the doll was last cloned from; see `syncDoll`. */
-  private dollFor: Character | null = null;
+  private dollFor: WardrobeFigure | null = null;
   private dollParts = '';
+  /** What a pick reports back: the game's own, or the dresser's (Map-maker II's thirteenth wave). */
+  private readonly onChange: () => void;
 
   /**
    * A close the player asked for -- the X button, or a click on the backdrop.
@@ -103,14 +118,19 @@ export class WardrobeUi {
     this.hide();
     this.onClose();
   }
-  constructor(parent: HTMLElement, private readonly onChange: () => void) {
+  /**
+   * `tabs` is the strip in the header: the inventory's on the player's page, and on the world editor's dresser its own two
+   * (the clothes and the appearance page it hosts).
+   */
+  constructor(parent: HTMLElement, onChange: () => void, tabs: TabDef[] = INVENTORY_TABS) {
+    this.onChange = onChange;
     this.root = document.createElement('div');
     this.root.id = 'wardrobe';
     this.root.className = 'overlay hidden';
     this.root.innerHTML = `
       <div class="wardrobe-panel wide give-panel">
         <div class="wardrobe-header">
-          ${tabStrip(INVENTORY_TABS, 'wardrobe')}
+          ${tabStrip(tabs, 'wardrobe')}
           <span class="count"></span>
           <input class="find" placeholder="find" spellcheck="false" />
           <label class="mixed-label" title="Pieces authored for the other gender's body share the skeleton, not the shape: some fit, some do not"><input type="checkbox" class="mixed" /> other gender's pieces too</label>
@@ -203,8 +223,8 @@ export class WardrobeUi {
     );
   }
 
-  /** Attach a character and build the lists from the catalogue it can reach. */
-  async attach(character: Character, baseUrl: string): Promise<void> {
+  /** Attach a character (the player's, or the dresser's figure) and build the lists from the catalogue it can reach. */
+  async attach(character: WardrobeFigure, baseUrl: string): Promise<void> {
     this.character = character;
     try {
       this.catalogue = await character.catalogue(baseUrl);

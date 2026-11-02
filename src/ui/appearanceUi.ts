@@ -18,9 +18,13 @@
 // ours every garment and creator palette there is, and for an eye colour every species' eyes. A worn piece's
 // colours stand in one section a piece, under the game's name for it, a row a variable however many of its
 // meshes read it (`itemSections`), and a pick writes every one of those meshes' keys.
+//
+// What it shapes and colours is a host (`AppearanceFigure`, Map-maker II's thirteenth wave): the species, the sliders, the
+// values and the pieces worn, read off a figure every time. The player's page hands it the player's character; the world
+// editor's dresser hands its own figure, with its own two tabs (`tabs`). Nothing a pick does on the player's page changed.
 import type { Character, SpeciesEntry, Wardrobe } from '../player/character.ts';
 import { loadCustomizeFile } from '../player/customizer.ts';
-import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs.ts';
+import { INVENTORY_TABS, tabStrip, wireTabs, type TabDef } from './tabs.ts';
 import { CharacterPreview } from './characterPreview.ts';
 import { distinctLabels, plainLabel } from './variableLabel.ts';
 import { CREATOR_TUNE, bareName, catalogueName, creatorTableNow, creatorView, gridGroupId, hairNone, itemSections, loadCreatorTable, ownSection, packColours, packSliders, pickWrites, swatchLayout, type CreatorSpecies, type CreatorState, type CreatorTable, type CreatorView, type ItemColour, type ItemSection, type PackColour, type ViewRow } from './creatorModel.ts';
@@ -30,6 +34,35 @@ import { groupHtml, GroupState } from './catalogue.ts';
 import { giveCellHtml } from './giveModel.ts';
 import { DyePicker, allGarmentColours, countText, creatorPalettes, drawStrip, eyePalettes, garmentPalettes, pickKind, type PickerRow, type PickerSource, type PickerTab, type PickKind } from './dyePicker.ts';
 import { isRawColour } from '../player/texrender.ts';
+
+/**
+ * What the appearance page shapes and colours (its host, Map-maker II's thirteenth wave): the species' pack (`manifest`), its
+ * sliders and height, its colour values and their recipes (`customizer`), the pieces worn and the hair, the wardrobe it reads
+ * the pieces' names and palettes from, and the figure the doll is cloned from (`group`). The player's character is one; the
+ * world editor's dresser's figure is another.
+ */
+export type AppearanceFigure = Pick<
+  Character,
+  | 'group'
+  | 'manifest'
+  | 'customizer'
+  | 'catalogue'
+  | 'wardrobeDir'
+  | 'speciesName'
+  | 'genderName'
+  | 'hairWorn'
+  | 'hairsWorn'
+  | 'wearHair'
+  | 'morphValues'
+  | 'setMorph'
+  | 'height'
+  | 'setHeight'
+  | 'variableValues'
+  | 'setVariable'
+  | 'canCustomize'
+  | 'wornMeshes'
+  | 'status'
+>;
 
 /** A row of the page that a strip, a scrub or the picker names by id: what a pick writes, and for a colour, what its picker shows. */
 interface PageRow {
@@ -48,7 +81,7 @@ export class AppearanceUi {
   get doll(): CharacterPreview {
     return this.preview;
   }
-  private character: Character | null = null;
+  private character: AppearanceFigure | null = null;
   open = false;
   /** A click on another tab: the game swaps the panels. */
   onTab: (id: string) => void = () => {};
@@ -56,6 +89,8 @@ export class AppearanceUi {
   onSpecies: (id: string) => void = () => {};
   private species: SpeciesEntry[] = [];
   private speciesId = '';
+  /** What a change reports back: the game's save of the player's look, or the dresser's (Map-maker II's thirteenth wave). */
+  private readonly onChange: () => void;
 
   /**
    * A close the player asked for -- the X button, or a click on the backdrop.
@@ -73,14 +108,19 @@ export class AppearanceUi {
     this.hide();
     this.onClose();
   }
-  constructor(parent: HTMLElement, private readonly onChange: () => void) {
+  /**
+   * `tabs` is the strip in the header: the inventory's on the player's page, and on the world editor's dresser its own two
+   * (the clothes and the appearance page it hosts).
+   */
+  constructor(parent: HTMLElement, onChange: () => void, tabs: TabDef[] = INVENTORY_TABS) {
+    this.onChange = onChange;
     this.root = document.createElement('div');
     this.root.id = 'appearance';
     this.root.className = 'overlay hidden';
     this.root.innerHTML = `
       <div class="wardrobe-panel wide">
         <div class="wardrobe-header">
-          ${tabStrip(INVENTORY_TABS, 'appearance')}
+          ${tabStrip(tabs, 'appearance')}
           <select class="species hidden" title="Species and gender"></select>
           <span class="count"></span>
           <button class="close">Close <b>I</b></button>
@@ -179,7 +219,7 @@ export class AppearanceUi {
   private wardrobePalettes: Record<string, number[][]> | null = null;
 
   /** Show a character: its sliders and colours, and the doll. */
-  attach(character: Character, baseUrl = ''): void {
+  attach(character: AppearanceFigure, baseUrl = ''): void {
     if (this.character !== character) {
       // Another character's styles and pictures are not this one's; the same one's stand until its catalogue answers again.
       this.hair = [];
@@ -628,12 +668,12 @@ export class AppearanceUi {
   }
 
   /** The table's row for a character's species, with the hair tab of ours where the game gave it none (the Sullustan's). */
-  private entryOf(c: Character, table: CreatorTable, hasHairObjects: boolean): CreatorSpecies | null | undefined {
+  private entryOf(c: AppearanceFigure, table: CreatorTable, hasHairObjects: boolean): CreatorSpecies | null | undefined {
     return withOursHair(table, table.species[c.manifest.id], c.speciesName, hasHairObjects);
   }
 
   /** What the view is worked out from: the character's sliders, live variables, body, worn hair. */
-  private stateOf(c: Character): CreatorState {
+  private stateOf(c: AppearanceFigure): CreatorState {
     const status = c.status();
     // A mesh with several materials loads as several meshes, the second onwards suffixed; the recipes name the first.
     const names = (list: string[]) => list.flatMap((n) => [n, n.replace(/_\d+$/, '')]);
@@ -775,7 +815,7 @@ export class AppearanceUi {
    * this character, each group with its row count, the rows that found nothing, what is hidden and why,
    * the followers and the links, and the last pick with every key it wrote.
    */
-  report(c: Character | null, table: CreatorTable | null | undefined): Record<string, unknown> {
+  report(c: AppearanceFigure | null, table: CreatorTable | null | undefined): Record<string, unknown> {
     const view = c && c === this.character && this.table === table ? this.view : c?.customizer && table ? creatorView(this.entryOf(c, table, !!table.species[c.manifest.id]?.hair?.length), this.stateOf(c)) : null;
     return {
       loaded: table === undefined ? 'not yet' : !!table,

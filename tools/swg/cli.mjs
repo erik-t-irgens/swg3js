@@ -3778,7 +3778,7 @@ function packStatus(dir) {
   console.log(`  ${sandboxLine.line}${sandboxLine.stale ? ` (sandbox <swg-dir> ${dir} --retail-only builds one)` : ''}`);
   // The world editor's library (the dev server's alone): listed, with its command when it is missing or older than a pack
   // it read, and never asked for, since a player's launcher has no use for it.
-  console.log(`  ${libraryStatus(dir).line}`);
+  console.log(`  ${libraryStatus(dir, placementsFolder()).line}`);
   // The owner's own models (Map-maker II's tenth wave), beside the checkout: listed, never asked for.
   console.log(`  ${importsStatus(REPO_DIR).line}`);
   // The creation and selection places. Asked for rather than merely listed, because with none of
@@ -9652,7 +9652,8 @@ switch (cmd) {
     // rasteriser. It opens no archive, so it takes no <swg-dir> and nothing about `--retail-only` applies; it writes only
     // under <out-dir>/library, and `status` lists it without ever asking for it.
     if (!pos[1]) usage();
-    const out = buildLibrary({ root: pos[1], log: (line) => console.log(line) });
+    // The owner's own looks (Map-maker II's thirteenth wave) are read from this checkout's placements folder.
+    const out = buildLibrary({ root: pos[1], log: (line) => console.log(line), placements: placementsFolder() });
     const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
     console.log(`library: ${out.index.entries.length} entries (${Object.entries(out.bySource).map(([k, v]) => `${k} ${v}`).join(', ')}); ${out.drawn} pictures drawn, ${out.kept} kept from the last run, ${out.none} models drew nothing, ${out.swept} old pictures swept; ${out.pictures} library pictures, ${mb(out.bytes)}, in ${(out.ms / 1000).toFixed(1)}s`);
     break;

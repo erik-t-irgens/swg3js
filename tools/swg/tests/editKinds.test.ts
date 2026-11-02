@@ -2,13 +2,13 @@
 // batch as it stood before the kinds. The day-one proof: e6c2578's `placementEdits.ts`, `placements.ts` and
 // `placementPath.ts` loaded out of git beside today's, both handed the same corpus of story and world batches -- puts,
 // deletes, `was` held and refused, `keepAt`, minted ids, rows moved between the files, a 5,000-edit batch over a file of
-// thousands -- and every answer's status, body and file texts equal. Then the kinds of later waves refused in their words,
+// thousands -- and every answer's status, body and file texts equal. Then every kind written (the thirteenth wave's looks the last),
 // a heights edit taken (the first wave's kind), and `statusFiles` naming every kind.
 //
 // Run: node tools/swg/tests/editKinds.test.ts
 import assert from 'node:assert/strict';
 import { inflateRawSync, deflateRawSync } from 'node:zlib';
-import { applyPlacementOp, statusFiles, type BatchEdit, type PlacementCtx } from '../../../src/world/placementEdits.ts';
+import { EDIT_KINDS, NOT_YET, applyPlacementOp, statusFiles, type BatchEdit, type PlacementCtx } from '../../../src/world/placementEdits.ts';
 import { placementsFileText, type PlacementRow } from '../../../src/story/placements.ts';
 import { EDIT_FILE_KINDS, editFilePath } from '../../../src/story/placementPath.ts';
 import { HEIGHT_TILE_DELTAS } from '../../../src/swg/terrain/heightEdits.ts';
@@ -78,18 +78,34 @@ if (old) {
   }
 }
 
-// The kinds of later waves refused in their words, never written.
+// Every kind is written now: the thirteenth wave took the last of them, the looks file (looksFile.test.ts holds its rows),
+// after the paint (the second wave's, paintFile.test.ts), the water (the fifth's), the places (the eighth's) and the removal
+// and people files (the twelfth's); none is refused as a later wave's.
 {
   const base = { story: null, world: null };
   const ctx = (): PlacementCtx => ({ worlds, now: 1, hash: glue.revisionOf, inflate });
-  // The paint is the second wave's and is written from it (paintFile.test.ts holds its rows), the water the fifth's
-  // (waterFile.test.ts), the places the eighth's (locationsFile.test.ts), the removal and people files the twelfth's
-  // (hides.test.ts, placedPeople.test.ts); the rest still wait for theirs.
-  const words: Record<string, RegExp> = { looks: /thirteenth wave/ };
-  for (const [k, re] of Object.entries(words)) {
-    const r = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: k, delete: 'x-1' }] }, base, ctx());
-    ok(r.status === 400 && re.test((r.body as { why: string }).why) && /does not write yet/.test((r.body as { why: string }).why) && !r.writes.length, `the ${k} file is refused in its wave's words, never written`);
-  }
+  ok(EDIT_FILE_KINDS.every((k) => !!EDIT_KINDS[k]) && Object.keys(NOT_YET).length === 0, 'every kind of edit file is written, none waiting for its wave');
+  const look = { id: 'farmer', from: 'dressed_fs_village_farmer', species: 'human_male', morphs: {}, custom: { index_color_skin: 3 }, outfit: [] };
+  const r = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'looks', put: look }] }, base, ctx());
+  ok(r.status === 200 && r.writes.length === 1 && r.writes[0].layer === 'looks' && /"id": "farmer"/.test(r.writes[0].text ?? ''), 'a look is written into the looks file, whatever world the batch names');
+  const inSpace = applyPlacementOp({ op: 'batch', world: 'space_tatooine', edits: [{ file: 'looks', put: look }] }, base, ctx());
+  ok(inSpace.status === 200 && inSpace.writes.length === 1, "and from a space zone too: the looks are every world's, never the ground's alone");
+  // A looks file holding a row this build cannot read is refused whole, so the editor never writes over a row mended by hand
+  // (the reader would drop it); a put carrying a field this build does not write is refused, never written half.
+  const written = r.writes[0].text as string;
+  const broken = written.replace('"rows": [', '"rows": [\n    { "id": "Not An Id", "from": "dressed_x", "species": "human_male" },');
+  ok(broken !== written && /Not An Id/.test(broken), 'a looks file with an unreadable row hand-made for the test');
+  const refusedWhole = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'looks', put: { ...look, id: 'farmer-2' } }] }, { ...base, looks: broken }, ctx());
+  ok(refusedWhole.status === 409 && /holds rows this build cannot read/.test((refusedWhole.body as { why: string }).why) && !refusedWhole.writes.length, `a batch on a looks file holding a row this build cannot read is refused and writes nothing (${refusedWhole.status})`);
+  const extra = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'looks', put: { ...look, id: 'farmer-3', colour: 'red' } }] }, { ...base, looks: written }, ctx());
+  ok(extra.status === 400 && /fields this build does not write: farmer-3\.colour/.test((extra.body as { why: string }).why) && !extra.writes.length, `a put carrying a field this build does not write is refused and writes nothing (${(extra.body as { why?: string }).why})`);
+  const pieceExtra = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'looks', put: { ...look, id: 'farmer-4', outfit: [{ part: 'jacket_m_l0', item: 'jacket', wardrobe: 'wardrobe/human_male', values: {}, glow: 1 }] } }] }, { ...base, looks: written }, ctx());
+  ok(pieceExtra.status === 400 && /farmer-4\.outfit\.0\.glow/.test((pieceExtra.body as { why: string }).why), "and so is one whose piece carries one");
+  const minted = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'looks', put: { from: 'dressed_fs_village_farmer', species: 'human_male', name: 'Old Farmer', outfit: [] } }] }, { ...base, looks: written }, ctx());
+  const mintedSpecies = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'looks', put: { from: 'dressed_fs_village_farmer', species: 'twilek_female', outfit: [] } }] }, { ...base, looks: written }, ctx());
+  ok(minted.status === 200 && /"id": "old-farmer-1"/.test(minted.writes[0]?.text ?? '') && mintedSpecies.status === 200 && /"id": "twilek-female-1"/.test(mintedSpecies.writes[0]?.text ?? ''), 'a look put with no id is named for its words, else its species');
+  const fine = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'looks', put: { ...look, id: 'farmer-5' } }] }, { ...base, looks: written }, ctx());
+  ok(fine.status === 200 && /"id": "farmer"/.test(fine.writes[0]?.text ?? '') && /"id": "farmer-5"/.test(fine.writes[0]?.text ?? ''), 'while a plain put over the file as written keeps every row it holds (the control)');
   // A heights tile (the first wave's): taken, its deltas checked through the inflate the glue hands in.
   const d = new Float32Array(HEIGHT_TILE_DELTAS);
   d[33] = 1.5;

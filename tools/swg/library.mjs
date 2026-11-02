@@ -26,6 +26,12 @@
 //              row's attachment names as `<pack>:<file>` (Map-maker II's seventh wave); no picture (initials)
 //   sounds     every endless, placed loop of the sound bank (`sounds/sounds.json`) that is no music: what an attachment
 //              names by its template, with its full-volume radius (`r`) for the editor's ring
+//   looks      every look of the owner's own (Map-maker II's thirteenth wave, the placements folder's `looks/all.json`, read
+//              only where the caller names that folder: the command does, the tests name their own): a picture drawn from
+//              its species pack's body parts and its outfit's pieces at their bind pose, in the pieces' own colours, under
+//              `library/icons/looks/<id>_<hash8>.png`, the look's content hash in the name, so a look edited since names
+//              another picture and the game shows its initials until the pass runs again (`m` is the body it is worn as,
+//              `own:<id>`; the game makes its Looks source from the catalogue and takes only the picture from here)
 // The weapons and vehicles of the gallery are not offered (skinned models as static rows are untested).
 //
 // Node 22, no dependencies.
@@ -35,6 +41,7 @@ import { dirname, join } from 'node:path';
 import { readGlb } from './sceneglb.mjs';
 import { decodePng, encodePng } from './png.mjs';
 import { renderThumbnail, thumbTexture } from './thumbnail.mjs';
+import { lookHash, readLooksFile } from '../../src/world/editFiles/looksFile.ts';
 
 /** The shape of `library/library.json` this writes; the game's `libraryModel.ts` reads it. */
 export const LIBRARY_FORMAT = 1;
@@ -249,9 +256,10 @@ function floraGroup(def, tune) {
 
 /**
  * The index and the pictures for everything under `root` (the converted packs' folder). `log` is told what each source
- * came to; `now` is the moment written into the index. Answers the index and what the run did.
+ * came to; `now` is the moment written into the index; `placements` the placements folder whose looks file is read (null
+ * reads none). Answers the index and what the run did.
  */
-export function buildLibrary({ root, log = () => {}, now = Date.now(), tune = LIBRARY_PASS } = {}) {
+export function buildLibrary({ root, log = () => {}, now = Date.now(), tune = LIBRARY_PASS, placements = null } = {}) {
   const started = Date.now();
   const outDir = join(root, 'library');
   const iconsDir = join(outDir, 'icons');
@@ -395,6 +403,15 @@ export function buildLibrary({ root, log = () => {}, now = Date.now(), tune = LI
     drawn++;
     pictured.add(rel);
   }
+  // The looks of the owner's own (Map-maker II's thirteenth wave): each drawn from several GLBs, under its own hash.
+  const looks = libraryLooks(root, placements, tune);
+  for (const e of looks.entries) entries.push(e);
+  for (const rel of looks.pictured) pictured.add(rel);
+  drawn += looks.drawn;
+  kept += looks.kept;
+  none += looks.none;
+  bytes += looks.bytes;
+  if (looks.read) log(`library: looks, ${looks.entries.length} of yours (${looks.drawn} drawn, ${looks.kept} kept, ${looks.none} drew nothing${looks.missing.length ? `; ${looks.missing.join('; ')}` : ''})`);
   // An entry whose model drew nothing has no picture, and the window shows its initials.
   for (const e of entries) if (e.pic && e.pic.startsWith('library/') && !pictured.has(e.pic)) e.pic = null;
   // Only the pictures this index names are left in the folder.
@@ -415,6 +432,108 @@ export function buildLibrary({ root, log = () => {}, now = Date.now(), tune = LI
   const bySource = {};
   for (const e of entries) bySource[e.s] = (bySource[e.s] ?? 0) + 1;
   return { index, bySource, drawn, kept, none, swept, reused: [...propIcon.keys()].length, pictures: pictured.size, bytes, ms: Date.now() - started };
+}
+
+/** The looks file of a placements folder, read as the game reads it (no rows for none, or one that does not read). */
+export function readLooksAt(placements) {
+  if (!placements) return null;
+  let text;
+  try {
+    text = readFileSync(join(placements, 'looks', 'all.json'), 'utf8');
+  } catch {
+    return null;
+  }
+  return readLooksFile(text);
+}
+
+/** A look's picture's place under the packs' folder: its id and its content's hash (`lookHash`, the game's own). */
+export function lookPicturePath(row) {
+  return `library/icons/looks/${row.id}_${lookHash(row)}.png`;
+}
+
+/**
+ * The GLBs a look is drawn from, as places under `root`: its species pack's body parts (every part the pack loads bare, the
+ * body's and every part under the clothes' layers: `partsToLoad`'s rule with nothing worn) and each outfit piece's own mesh
+ * out of the wardrobe folder it names. What is missing is named, never guessed at.
+ */
+export function lookFiles(root, row, cache = new Map()) {
+  const files = [];
+  const missing = [];
+  const json = (rel) => {
+    if (!cache.has(rel)) cache.set(rel, readJson(join(root, rel)));
+    return cache.get(rel);
+  };
+  const parts = json(`characters/${row.species}/parts.json`);
+  if (!parts?.parts) missing.push(`no species pack ${row.species}`);
+  else for (const p of parts.parts) if ((p.body === true || p.occlusionLayer <= 0) && typeof p.file === 'string' && !p.dir) files.push(`characters/${row.species}/${p.file}`);
+  for (const o of row.outfit ?? []) {
+    const w = json(`${o.wardrobe}/wardrobe.json`);
+    const item = (w?.items ?? []).find((it) => it.id === o.item);
+    const part = item?.parts?.find((p) => p.name === o.part);
+    if (!part?.file) {
+      missing.push(`${o.item} (${o.part}) not in ${o.wardrobe}`);
+      continue;
+    }
+    files.push(`${o.wardrobe}/${part.file}`);
+  }
+  return { files, missing };
+}
+
+/**
+ * Every look of the owner's own in the placements folder's looks file as library entries, each with its picture: kept where
+ * its file stands and is newer than every GLB it is drawn from, else drawn (`lookFiles`, the rasteriser's own `glbMeshes`
+ * and the props' view); one that draws nothing has none. `read` false where there is no folder or no file.
+ */
+export function libraryLooks(root, placements, tune = LIBRARY_PASS) {
+  const out = { read: false, entries: [], pictured: [], drawn: 0, kept: 0, none: 0, bytes: 0, missing: [] };
+  const file = readLooksAt(placements);
+  if (!file) return out;
+  out.read = true;
+  const cache = new Map();
+  for (const row of file.rows) {
+    const rel = lookPicturePath(row);
+    const png = join(root, rel);
+    const { files, missing } = lookFiles(root, row, cache);
+    for (const m of missing) out.missing.push(`${row.id}: ${m}`);
+    const entry = { s: 'looks', p: 'looks', id: row.id, m: `own:${row.id}`, n: row.name ?? null, g: row.species, t: null, sz: [0, 0, 0], tri: 0, pic: null, f: 0 };
+    out.entries.push(entry);
+    const newest = Math.max(0, ...files.map((f) => mtimeOf(join(root, f))));
+    if (existsSync(png) && mtimeOf(png) >= newest) {
+      entry.pic = rel;
+      out.pictured.push(rel);
+      out.kept++;
+      out.bytes += statSync(png).size;
+      continue;
+    }
+    const meshes = [];
+    let tri = 0;
+    for (const f of files) {
+      const abs = join(root, f);
+      if (!existsSync(abs)) continue;
+      try {
+        for (const m of glbMeshes(readFileSync(abs))) {
+          meshes.push(m);
+          tri += Math.floor(m.indices.length / 3);
+        }
+      } catch {
+        /* a GLB that does not read is left out of the picture */
+      }
+    }
+    entry.tri = tri;
+    const pic = meshes.length ? renderThumbnail(meshes, { size: tune.size, view: 'wear', yawDeg: tune.yawDeg, pitchDeg: tune.pitchDeg, flipX: false }) : null;
+    if (!pic) {
+      out.none++;
+      continue;
+    }
+    const buf = encodePng(pic.width, pic.height, pic.rgba);
+    mkdirSync(dirname(png), { recursive: true });
+    writeFileSync(png, buf);
+    entry.pic = rel;
+    out.pictured.push(rel);
+    out.drawn++;
+    out.bytes += buf.length;
+  }
+  return out;
 }
 
 /**
@@ -504,9 +623,10 @@ export function librarySounds(root) {
  * What `status` says of the library (listed, never asked): missing, of another format, older than a pack it read, or
  * missing a world converted since (a world folder the library would read that its index never did: comparing only the
  * packs already in the index, a newly converted world never made it stale), each with the command; else how many entries
- * and pictures it holds. `stale` true for any of the first four.
+ * and pictures it holds. `stale` true for any of the first four. With `placements` (the placements folder) the owner's own
+ * looks that have no picture of them as they stand are named on that last line (`looksUnpictured`), never asked for.
  */
-export function libraryStatus(root) {
+export function libraryStatus(root, placements = null) {
   const index = readJson(join(root, 'library', 'library.json'));
   if (!index) return { line: `library: none (npm run swg -- library ${root} builds the world editor's, on the dev server alone)`, stale: true };
   if (index.version !== LIBRARY_FORMAT) return { line: `library: of another format (${index.version}): npm run swg -- library ${root}`, stale: true };
@@ -523,5 +643,10 @@ export function libraryStatus(root) {
     bySource[e.s] = (bySource[e.s] ?? 0) + 1;
     if (e.pic) pictures++;
   }
-  return { line: `library: ${(index.entries ?? []).length} entries (${Object.entries(bySource).map(([k, v]) => `${k} ${v}`).join(', ')}), ${pictures} with a picture, for the world editor`, stale: false };
+  // The owner's own looks (Map-maker II's thirteenth wave): one with no picture of it as it stands is listed, never asked for.
+  const looks = readLooksAt(placements);
+  const drawnLooks = new Set((index.entries ?? []).filter((e) => e.s === 'looks' && e.pic).map((e) => e.pic));
+  const unpictured = (looks?.rows ?? []).filter((r) => !drawnLooks.has(lookPicturePath(r)) || !existsSync(join(root, lookPicturePath(r)))).map((r) => r.id);
+  const lookWords = unpictured.length ? `; ${unpictured.length} of your looks with no picture of it as it stands (${unpictured.slice(0, 4).join(', ')}${unpictured.length > 4 ? ', ...' : ''}): npm run swg -- library ${root}` : '';
+  return { line: `library: ${(index.entries ?? []).length} entries (${Object.entries(bySource).map(([k, v]) => `${k} ${v}`).join(', ')}), ${pictures} with a picture, for the world editor${lookWords}`, stale: false, looksUnpictured: unpictured };
 }
