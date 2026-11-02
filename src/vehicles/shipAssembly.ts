@@ -2,10 +2,11 @@
 // the hardpoint there, where it stands), and this hangs each one under the node it names, a wing
 // under a pivot group turned about its own Z, so whatever rides a wing (engines, guns, glows,
 // nested foils) follows it with nothing copied. Also the box a ship is framed on, how far its open
-// wings reach below it, and which muzzles are its guns. Plain three and ./wings.ts, no Rapier or
-// DOM, so the node tests can load it.
+// wings reach below it, which muzzles are its guns, and where a ship's own furniture stands. Plain
+// three, ./wings.ts and ../world/rowSolid.ts, no Rapier or DOM, so the node tests can load it.
 import * as THREE from 'three';
 import { WingSet, type Wing } from './wings.ts';
+import { isSeat, isTableTemplate } from '../world/rowSolid.ts';
 
 /** One thing a ship's manifest hangs on it (the converter's ships command writes these). */
 export interface AttachmentDef {
@@ -61,6 +62,37 @@ export function findHardpoint(model: THREE.Object3D, name: string): THREE.Object
     if (!found && hardpointName(o)?.toLowerCase() === want) found = o;
   });
   return found;
+}
+
+/** One piece of a ship's own furniture as its manifest entry writes it (the ships command, `hullFurniturePlace` in ilf.mjs). */
+export interface FurnitureDef {
+  /** Its model in the ships pack. */
+  file: string;
+  template?: string;
+  /** Its room's index in the hull model. */
+  cell: number;
+  /** Its place in the hull model's own frame (already mirrored in X as the GLB is), and its turn `[w, x, y, z]`. */
+  place: readonly number[];
+  turn: readonly number[];
+}
+
+/**
+ * A piece of a ship's own furniture stood on its node (`Garage.hangFurniture`): at its place in the hull model's frame and
+ * turned by its turn, which the manifest writes `[w, x, y, z]` and three takes as `(x, y, z, w)`.
+ */
+export function placeFurniture(node: THREE.Object3D, f: Pick<FurnitureDef, 'place' | 'turn'>): void {
+  node.position.set(f.place[0], f.place[1], f.place[2]);
+  node.quaternion.set(f.turn[1], f.turn[2], f.turn[3], f.turn[0]).normalize();
+}
+
+/**
+ * Whether a piece of a ship's own furniture is drawn and never solid in its rooms: a seat or a table, as everywhere else
+ * (`isSeat`, `isTableTemplate`), and a pilot's chair too, which the buildings' rule keeps solid, since it stands where
+ * whoever takes the controls stands.
+ */
+export function furniturePassable(f: Pick<FurnitureDef, 'file' | 'template'>): boolean {
+  const t = f.template ?? '';
+  return isSeat(t) || isTableTemplate(t) || /chair|seat|stool/i.test(f.file.replace(/^.*\//, ''));
 }
 
 /** Signs taking the client's yaw and roll into three's mirrored frame (the V-wing's yaw and the B-wing's roll are the only uses). */

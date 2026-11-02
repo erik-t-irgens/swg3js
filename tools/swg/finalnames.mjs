@@ -346,6 +346,7 @@ export const LATE_STAMPED = [
   { command: 'deeds', files: ['deeds.json'], ask: 'deeds <swg-dir> <out> --retail-only' },
   { command: 'spawns', files: ['spawns/manifest.json'], ask: 'spawns <out> --swg=<swg-dir> --retail-only' },
   { command: 'objeffects', files: ['<world>/objeffects.json', 'props/objeffects.json'], ask: 'objeffects <swg-dir> <out> --retail-only' },
+  { command: 'interiors', files: ['<world>/interiors.json', 'gallery/interiors.json'], ask: 'interiors <swg-dir> <out> --retail-only' },
   { command: 'doors', files: ['doors/manifest.json', '<world>/doors.json', 'gallery/doors.json'], ask: 'doors <swg-dir> <out> --retail-only' },
   { command: 'conversations', files: ['conversations/speakers.json'], ask: 'conversations <swg-dir> <out> --retail-only' },
 ];

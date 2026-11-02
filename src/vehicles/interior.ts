@@ -361,7 +361,9 @@ export class ShipInterior {
       if (cell <= 0) return;
       // The cell's own node, not the meshes under it (showing those again would show a window's invisible pane).
       if (ownCellIndex(o) >= 0 && ownCellIndex(o.parent) < 0) rooms.push(o);
-      if (m.isMesh) meshes.push(m);
+      // A seat of the ship's own furniture (the interior layout files' wave, `Garage.hangFurniture`) is drawn and never
+      // solid, as a seat is everywhere else: whoever stands at the controls beside it is never pushed off.
+      if (m.isMesh && !m.userData.passableFurniture) meshes.push(m);
     });
     if (!meshes.length) return null;
     const interior = new ShipInterior(vehicle, vehicle.group, vehicle.group, meshes, def, gravity, false);

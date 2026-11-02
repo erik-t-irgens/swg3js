@@ -298,7 +298,7 @@ try {
   pin(cli, /built = buildCustomization\(read, \{ ours \}\);/, 'the customization command hands the table to its builder');
   pin(cli, /const customOurs = oursStamp\(ours, counts\.ours, counts\.oursMissing\);\s*if \(customOurs\) file\.ours = customOurs;/, 'and stamps its key into customization.json');
   pin(cli, /const oursBuilt = P\.buildOursProps\(oursRows\(ours, 'props'\), \{ convert: \(row\) => fromResolved\(resolveAppearanceToMesh\(vfs, row\.appearance\)\), has: \(p\) => vfs\.has\(p\) \}\);/, 'the props command stands the rows of ours through the very path a template takes');
-  pin(cli, /\.\.\.\(whole \? \{ ours: oursStamp\(ours, oursBuilt\.props\.length, oursBuilt\.missing\) \?\? undefined \} : \{\}\)/, 'and stamps its key into the props manifest, from a whole run only');
+  pin(cli, /\.\.\.\(whole \? \{ ours: oursStamp\(ours, oursBuilt\.props\.length, oursBuilt\.missing\) \?\? undefined, interiorFormat: P\.PROPS_INTERIOR_FORMAT \} : \{\}\)/, 'and stamps its key into the props manifest, from a whole run only');
   pin(cli, /code: mobilesCodeStamp\(\),\s*core3Stats,\s*\/\/[^\n]*\n\s*ours: oursTable\(\),/, 'the mobiles command hands the table to its run');
   pin(mob, /if \(full && ours && !ours\.broken && ours\.key\) catalogue\.ours = \{ key: ours\.key, taken: plan\.ours\?\.taken \?\? 0, missing: plan\.ours\?\.missing \?\? 0 \};\s*io\.writeJsonAtomic\('mobiles\/catalogue\.json', catalogue, 0\);/, 'and the mobiles run stamps its key into the catalogue before it writes it, from a run not narrowed');
   const loop = cli.slice(cli.indexOf('function lateStatus('), cli.indexOf('function packStatus('));

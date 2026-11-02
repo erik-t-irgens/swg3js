@@ -192,6 +192,65 @@ export function placedSounds(vfs, snap, entries, { cache = new Map(), log = () =
 }
 
 /**
+ * The emitters a pack's buildings' interior layout files stand (`interiors.json`, the `interiors` pass's, `ilf.mjs`): every
+ * piece whose template's client data carries its own loop, the sound objects first among them (the Mos Eisley cantina's
+ * band and its crowd are pieces of its file, and no snapshot ever placed them), each in the snapshot's frame as `layout.json`
+ * writes an object's place -- its building's place and turn carrying the piece's place in the building's frame -- with the
+ * building's portal layout, the piece's room and the building's place, exactly as a snapshot emitter in a room is written.
+ * A piece the pass left out as standing twice is left out here too; a building of one world state gives its emitters that
+ * state. `layout` is the pack's own, whose rows the file's buildings name. `soundOf` and `pobOf` stand in for reading a
+ * template's own loop and its building's portal layout out of the archives (a test hands them in; the run reads `vfs`).
+ */
+export function interiorEmitters(vfs, interiors, layout, pobs, { cache = new Map(), ambientCache = new Map(), soundOf, pobOf } = {}) {
+  const out = [];
+  if (!interiors?.templates || !Array.isArray(interiors.buildings) || !layout?.objects) return out;
+  const clientData = (t) => resolveTemplateParam(vfs, t, 'clientDataFile', stringParam, cache);
+  const layoutFile = (t) => resolveTemplateParam(vfs, t, 'portalLayoutFilename', stringParam, cache);
+  const loopOf = soundOf ?? ((t) => ambientOf(vfs, clientData(t), ambientCache));
+  const portalOf = pobOf ?? ((t) => pobNameOf(layoutFile(t)));
+  for (const b of interiors.buildings) {
+    const o = layout.objects[b.row];
+    const t = interiors.templates[b.template];
+    if (!o || !t || o.template !== b.template) continue;
+    const skip = new Set(b.skip ?? []);
+    const pob = pobs[b.template] ?? portalOf(b.template);
+    const bp = [round(o.x), round(o.y), round(o.z)];
+    for (const piece of t.pieces ?? []) {
+      if (skip.has(piece[0])) continue;
+      const sound = loopOf(piece[1]);
+      if (!sound || !sound.endsWith('.snd')) continue;
+      const v = rotate(o.q, [piece[5], piece[6], piece[7]]);
+      const p = [round(o.x + v[0]), round(o.y + v[1]), round(o.z + v[2])];
+      if (!p.every(Number.isFinite)) continue;
+      const entry = { sound, template: piece[1], p };
+      // A piece standing only where the world's own copy of it does not (`interiors`' `states`) sounds there only.
+      const state = b.states?.[piece[0]] ?? b.state ?? o.state;
+      if (state) entry.state = state;
+      if (pob) entry.pob = pob;
+      if (piece[4] > 0) entry.cell = piece[4];
+      if (bp.every(Number.isFinite)) entry.bp = bp;
+      out.push(entry);
+    }
+  }
+  return out;
+}
+
+/** `[w, x, y, z]` turning `v`, as a layout writes a turn. */
+function rotate(q, v) {
+  const [w, x, y, z] = q;
+  const tx = 2 * (y * v[2] - z * v[1]);
+  const ty = 2 * (z * v[0] - x * v[2]);
+  const tz = 2 * (x * v[1] - y * v[0]);
+  return [v[0] + w * tx + (y * tz - z * ty), v[1] + w * ty + (z * tx - x * tz), v[2] + w * tz + (x * ty - y * tx)];
+}
+
+/** The order a planet's emitters are written in: the sound objects first, then by the sound's name and the place. */
+function emitterOrder(a, b) {
+  const rank = (e) => (e.template.startsWith(SOUND_OBJECT) ? 0 : 1);
+  return rank(a) - rank(b) || a.sound.localeCompare(b.sound) || a.p[0] - b.p[0] || a.p[2] - b.p[2];
+}
+
+/**
  * The room table's rows for the buildings named in `pobs`, keyed `<pob>|<cell>`. The table's own
  * `default` rows come too: a room with no row of its own falls back to its building's `default`
  * row and then to the table's, so the game needs no second file to find either.
@@ -278,6 +337,18 @@ export function convertSoundPlaces(vfs, outDir, { planets = [], log = () => {}, 
       continue;
     }
     const { emitters, pobs, surfaces } = placedSounds(vfs, placements.snap, placements.entries, { cache, log });
+    // The emitters its buildings' interior layout files stand (`interiors.json`), joined into the one list in its order.
+    let interiors = null;
+    try {
+      interiors = JSON.parse(readFileSync(join(outDir, planet, 'interiors.json'), 'utf8'));
+    } catch {
+      interiors = null;
+    }
+    const fromFiles = interiors?.templates ? interiorEmitters(vfs, interiors, layout, pobs, { cache }) : [];
+    if (fromFiles.length) {
+      emitters.push(...fromFiles);
+      emitters.sort(emitterOrder);
+    }
     const names = new Set(Object.values(pobs));
     const rooms = roomsFor(rows, names);
     const withRow = [...names].filter((p) => rows.some((r) => r.pob === p));
@@ -295,10 +366,12 @@ export function convertSoundPlaces(vfs, outDir, { planets = [], log = () => {}, 
     const states = placements.snap.restuss ? { states: { [RESTUSS_KEY]: RESTUSS_STATES_VERSION } } : {};
     // `stateObjects`: SOE's earlier objects and the holidays were read in (stateObjects.mjs), which `status` asks.
     const added = placements.snap.stateObjects ? { stateObjects: STATE_OBJECTS_VERSION } : {};
-    writeFileSync(file, JSON.stringify({ format: PLACES_FORMAT, planet, frame: 'snapshot', ...states, ...added, soundObjects, emitters, pobs, surfaces, rooms, ...(late ? { late } : {}) }));
-    const result = { planet, emitters: emitters.length, soundObjects, distinct, inside, pobs: names.size, pobsWithRow: withRow.length, rooms: Object.keys(rooms).length, surfaces: Object.keys(surfaces).length };
+    // `interiors`: the pack's interior layout file was read (its version), which `status` asks of a pack that has one.
+    const fromInteriors = interiors?.templates ? { interiors: interiors.version } : {};
+    writeFileSync(file, JSON.stringify({ format: PLACES_FORMAT, planet, frame: 'snapshot', ...states, ...added, ...fromInteriors, soundObjects, emitters, pobs, surfaces, rooms, ...(late ? { late } : {}) }));
+    const result = { planet, emitters: emitters.length, soundObjects, distinct, inside, pobs: names.size, pobsWithRow: withRow.length, rooms: Object.keys(rooms).length, surfaces: Object.keys(surfaces).length, interiors: fromFiles.length };
     results.push(result);
-    log(`  sounds: ${planet}: ${emitters.length} placed emitters (${soundObjects} sound objects, ${distinct} distinct sounds, ${inside} inside a building), ${names.size} portal layouts (${withRow.length} with a room row), ${Object.keys(rooms).length} room rows, ${Object.keys(surfaces).length} templates with a surface of their own -> ${file}`);
+    log(`  sounds: ${planet}: ${emitters.length} placed emitters (${soundObjects} sound objects, ${distinct} distinct sounds, ${inside} inside a building${fromFiles.length ? `, ${fromFiles.length} of the buildings' interior layout files` : ''}), ${names.size} portal layouts (${withRow.length} with a room row), ${Object.keys(rooms).length} room rows, ${Object.keys(surfaces).length} templates with a surface of their own -> ${file}`);
   }
   return results;
 }

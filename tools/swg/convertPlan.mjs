@@ -182,7 +182,9 @@ export const STEP_FACTS = {
   // The bank is 865 MB of samples copied as they are, which is why it is quick for its size; the
   // planets' places on top of it were measured with one pack in place and are the part of the
   // figure below that is reasoned rather than watched.
-  sounds: { order: 34, lock: 'sounds', needs: ['ships', 'species', 'parts', 'clips-apply', 'player', 'snapshot'], seconds: 120, bytes: 0.7 * GB, measured: 'the bank: 7.6 s, 425 MB, 865 MB written; with one planet\'s places: 5.4 s, 510 MB' },
+  // And the sound objects the buildings' interior layout files stand (the Mos Eisley cantina's band), out of each world's
+  // `interiors.json`, so it waits for that pass and stands after it.
+  sounds: { order: 43.6, lock: 'sounds', needs: ['ships', 'species', 'parts', 'clips-apply', 'player', 'snapshot', 'interiors'], seconds: 120, bytes: 0.7 * GB, measured: 'the bank: 7.6 s, 425 MB, 865 MB written; with one planet\'s places: 5.4 s, 510 MB' },
 
   // Every prop and every piece of furniture in the game as one pack of its own. It is the longest
   // single step here by a wide margin -- about three thousand models with a picture baked for each --
@@ -229,7 +231,12 @@ export const STEP_FACTS = {
   // by template, with the effects converted into each pack's particles. It reads every world's layout
   // and its fittings and travel rows and the props pack's list, so it waits for all four and holds
   // every pack and the props folder while it writes into them.
-  objeffects: { order: 43, lock: 'pack', locks: ['props'], needs: ['snapshot', 'props', 'fittings', 'travel'], seconds: 10, bytes: 0.45 * GB, measured: 'thirty-three packs, 598 effects over 439 templates: 3.1 s, 337 MB' },
+  // The furniture the client stood in its buildings' rooms by itself (`ilf.mjs`), as a table beside every pack with a layout.
+  // It joins each piece to the world's own model or the props catalogue's, so it waits for the props; it leaves out a piece
+  // standing where a fitting stands, so it waits for the fittings; it reads each world's layout and the gallery's, and
+  // converts the effects its files stand into the props folder, so it holds every pack and that folder.
+  interiors: { order: 42.5, lock: 'pack', locks: ['props'], needs: ['snapshot', 'props', 'fittings', 'gallery'], seconds: 30, bytes: 0.6 * GB, measured: 'fifty-nine packs, 298 files, 346,849 things in 924 buildings: 5.7 s, 462 MB' },
+  objeffects: { order: 43, lock: 'pack', locks: ['props'], needs: ['snapshot', 'props', 'fittings', 'travel', 'interiors'], seconds: 10, bytes: 0.45 * GB, measured: 'thirty-three packs, 598 effects over 439 templates: 3.1 s, 337 MB' },
   // The doors in the buildings' doorways: a table beside every world's and the gallery's manifest,
   // built from the portal models those manifests list and each one's own `.pob`, and the door models
   // once into a folder of their own. It reads what the snapshot and the gallery write, so it waits for

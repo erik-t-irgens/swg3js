@@ -540,6 +540,12 @@ export interface PeopleDeps {
    * draw two different people under one name. None, and every life draws again, as it always has.
    */
   seeding?(): boolean;
+  /**
+   * The interior layout files' wave: whether a post in a room stands inside a solid piece of its building's own furniture,
+   * and if so moved, in place, to the nearest clear spot of the same room's floor (answering true). Asked once a row, with
+   * its room built. None, and every post stands where the data put it, as it always did.
+   */
+  clearPost?(st: StandPlace): boolean | null;
 }
 
 /**
@@ -696,7 +702,12 @@ export class StandingPeople {
    * `offArrival` is how many rows that pass kept off the place a player comes in and back at, or put down there
    * (`rowKeptOff`: the NGE overlay's people who pick a fight on sight).
    */
-  readonly last = { rows: 0, up: 0, down: 0, indoors: 0, stood: 0, dropped: 0, swapped: 0, waiting: 0, refused: '', essential: 0, short: 0, shortBytes: 0, pass: 0, offArrival: 0 };
+  readonly last = { rows: 0, up: 0, down: 0, indoors: 0, stood: 0, dropped: 0, swapped: 0, waiting: 0, refused: '', essential: 0, short: 0, shortBytes: 0, pass: 0, offArrival: 0, cleared: 0 };
+  /**
+   * Which rows' posts were asked whether they stand inside a solid piece of furniture (`PeopleDeps.clearPost`): 1 asked.
+   * `last.cleared` counts, for the world's life, the posts that stood inside one and were moved clear.
+   */
+  private postAsked = new Uint8Array(0);
 
   get ready(): boolean {
     return this.rows.length > 0;
@@ -777,6 +788,8 @@ export class StandingPeople {
     this.last.essential = 0;
     this.last.short = 0;
     this.last.shortBytes = 0;
+    this.last.cleared = 0;
+    this.postAsked = new Uint8Array(0);
   }
 
   /** Every row carried into the world's frame, once: the mirror every placed object goes through, its route's points with it. */
@@ -799,6 +812,8 @@ export class StandingPeople {
   /** Where every row's body stands, once the rows are in the world's frame (`standPlaceOf`). */
   private placeStands(): void {
     this.stands = this.rows.map((r) => standPlaceOf(r));
+    // Made afresh, every post is asked again whether it stands inside a piece of furniture.
+    this.postAsked = new Uint8Array(this.rows.length);
   }
 
   /**
@@ -937,6 +952,31 @@ export class StandingPeople {
       if (inside && deps.cellReady?.(st.x, st.y, st.z) === false) {
         this.last.waiting++;
         continue;
+      }
+      // A post the data put inside a solid piece of its building's own furniture (the interior layout files' wave) stands at
+      // the nearest clear spot of the same room instead: asked once a row, the first time it is stood with its room built,
+      // and counted; never deleted, never carried into another room.
+      // Never a seated row (sat down by the server, or in a sitting mood): it sits on its chair at its table, which its spot is meant to touch.
+      if (inside && deps.clearPost && !this.postAsked[i] && !r.sit && !/sitting/i.test(r.mood ?? '')) {
+        // A patroller stood at the first point of its round (`standPlaceOf`): that point is what moves with it, so its round
+        // still starts where it stands (`patrolFor` asks exactly that) and comes back to the clear spot, never into the piece.
+        const first = r.route?.[0];
+        const atFirst = !!first && first.x === st.x && first.z === st.z;
+        // Null: a piece it may stand in has not loaded its model, so it is asked again on a later pass, and waits.
+        const moved = deps.clearPost(st);
+        if (moved === null) {
+          this.last.waiting++;
+          continue;
+        }
+        this.postAsked[i] = 1;
+        if (moved) {
+          this.last.cleared++;
+          if (atFirst && first) {
+            first.x = st.x;
+            first.y = st.y;
+            first.z = st.z;
+          }
+        }
       }
       let who = personFor(r, this.lives[i], plan);
       let entry = cat.byId(who.id);

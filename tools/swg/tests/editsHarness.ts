@@ -52,6 +52,11 @@ export interface HarnessOpts {
    * where its file row stands. Absent by default, as an editor with no holder.
    */
   attachments?: boolean;
+  /**
+   * The rows standing in a building's rooms by its key (the game's `hostedRows`, `carriedRowIds` over the streamer's rule),
+   * which a building whose furniture is its own carries (the interior layout files' wave). Absent by default.
+   */
+  hostedRows?: (key: string) => string[];
 }
 
 /** The stand-in input: actions held and pressed, raw keys down, the mouse's movement. */
@@ -263,6 +268,7 @@ export function makeHarness(opts: HarnessOpts = {}): Harness {
     refreshWindow() {},
     ...(opts.toolArmed || opts.brushArmed ? { toolArmed: opts.toolArmed ?? opts.brushArmed } : {}),
     ...attachHands,
+    ...(opts.hostedRows ? { hostedRows: opts.hostedRows } : {}),
   };
   EDITOR_TUNE.statusDebounceMs = 0;
   const e = new EditorEdits(host as unknown as EditEditor);

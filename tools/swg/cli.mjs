@@ -299,7 +299,8 @@ import { readTemplate, stringParam } from './objtemplate.mjs';
 import { statusJson } from './statusplan.mjs';
 // Only `status` needs these two here; the `travel` command itself loads the whole module when it runs.
 import { rowsLost, TRAVEL_OWN_MODELS } from './travel.mjs';
-import { PROPS_PACK_VERSION, PROPS_SKELETAL_FORMAT, propCounts as propCountsOf } from './props.mjs';
+import { PROPS_INTERIOR_FORMAT, PROPS_PACK_VERSION, PROPS_SKELETAL_FORMAT, propCounts as propCountsOf } from './props.mjs';
+import { INTERIORS_PACK_VERSION, readIlf } from './ilf.mjs';
 import { placementPackLines, placementRows, placementsFolder } from './placementsStatus.mjs';
 /** The shape of deeds.json. A pack written by an older run is asked for again rather than read. */
 const DEED_PACK_VERSION = 1;
@@ -534,6 +535,37 @@ async function spawnsNge({ out, outDir, reader, vfs, groundOf }) {
   if (c.crewTablesLeft) console.log(`spawns: nge — ${c.crewTablesLeft} room crews left out: their copies and rooms are found in the archives, so run with --swg=<swg-dir>`);
   if (missing.length) console.log(`spawns: nge — not converted yet, so left out: ${missing.join(', ')}`);
   if (built.index.unresolved.length || built.index.bodiless.length) console.log(`spawns: nge — unresolved: ${[...built.index.unresolved, ...built.index.bodiless].slice(0, 20).join(', ')}`);
+}
+
+/** Every template any of the client's interior layout files names (`ilf.mjs`): a file that will not read names none. */
+function ilfTemplatesOf(vfs) {
+  const out = new Set();
+  for (const f of vfs.list('interiorlayout/').filter((p) => p.toLowerCase().endsWith('.ilf'))) {
+    try {
+      for (const n of readIlf(vfs.read(f)).nodes) out.add(n.template);
+    } catch {
+      /* the interiors command lists a file that will not read */
+    }
+  }
+  return out;
+}
+
+/** A pack's `interiors.json` (the `interiors` pass's), or null for none or one of another shape. */
+function interiorsOf(packDir) {
+  try {
+    const j = JSON.parse(readFileSync(join(packDir, 'interiors.json'), 'utf8'));
+    return j && j.version === INTERIORS_PACK_VERSION && j.templates ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The templates a pack's buildings' interior layout files stand as things (not sound objects), for `objeffects`. */
+function interiorTemplatesOf(packDir) {
+  const out = new Set();
+  const f = interiorsOf(packDir);
+  for (const t of Object.values(f?.templates ?? {})) for (const p of t.pieces ?? []) if (p[3] !== 'snd') out.add(p[1]);
+  return out;
 }
 
 function mount(dir) {
@@ -2795,6 +2827,44 @@ function objEffectsStale(packDir, sources) {
   return null;
 }
 
+/**
+ * Why a pack's `interiors.json` wants writing again, or null: there is none, it is of another shape or will not read, or one
+ * of what it reads is newer than it (the pack's layout and manifest, its fittings, the props pack). A pack with a layout
+ * always gets one, even with no building naming a file, so "none here" and "never run" are told apart.
+ */
+function interiorsStale(packDir, dir) {
+  const file = join(packDir, 'interiors.json');
+  if (!existsSync(file)) return 'none';
+  let j = null;
+  try {
+    j = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return 'unreadable';
+  }
+  if (j?.version !== INTERIORS_PACK_VERSION) return 'older';
+  const at = statSync(file).mtimeMs;
+  // The gallery reads its own list (`gallery.json`) where a world reads its layout.
+  for (const f of [join(packDir, 'layout.json'), join(packDir, 'gallery.json'), join(packDir, 'manifest.json'), join(packDir, 'fittings.json'), join(dir, 'props', 'manifest.json')]) {
+    if (existsSync(f) && statSync(f).mtimeMs > at) return `older than ${relative(dir, f).replace(/\\/g, '/')}`;
+  }
+  return null;
+}
+
+/** Whether a world's placed sounds were written before its interiors (no mark, or older than the file) where the file stands a sound. */
+function soundsBeforeInteriors(packDir, sounds) {
+  const file = join(packDir, 'interiors.json');
+  if (!existsSync(file)) return false;
+  let j = null;
+  try {
+    j = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return false;
+  }
+  if (!Object.values(j?.templates ?? {}).some((t) => (t.pieces ?? []).length)) return false;
+  if (sounds.interiors !== j.version) return true;
+  return statSync(file).mtimeMs > statSync(join(packDir, 'sounds.json')).mtimeMs;
+}
+
 /** Why a pack whose models are older than the material format is asked for again: what the format last changed. */
 const MATERIAL_WHY = `converted before material format ${MATERIAL_FORMAT}: their normal maps decoded by the slot they sit in, their shine read from each shader's own program, and the highlight each draws`;
 
@@ -2985,6 +3055,10 @@ function packStatus(dir) {
   }
   let wantFittings = false;
   let wantObjEffects = false;
+  /** The worlds whose buildings' interior layout files are not written, or were written before what they read (each with why). */
+  const wantInteriors = [];
+  /** The worlds whose placed sounds were written before their interior layout files were (`interiors` in sounds.json). */
+  const interiorSounds = [];
   /** The owner's shared walk-through file's templates, which a world's grid key folds in (navgrid.mjs, finalnames.mjs). */
   const statusWalkThrough = walkThroughTemplates();
   /**
@@ -3216,7 +3290,15 @@ function packStatus(dir) {
     if (travel && keptStale(travel, null, 'travel')) travelMaterials.push(planet);
     // The fires, sprays, flames and glows the objects' client data hangs on them (`objeffects`),
     // keyed by template: wanted again whenever what the table was built from is newer than it.
-    if (placed && objEffectsStale(packDir, ['layout.json', 'fittings.json', 'travel.json'])) wantObjEffects = true;
+    if (placed && objEffectsStale(packDir, ['layout.json', 'fittings.json', 'travel.json', 'interiors.json'])) wantObjEffects = true;
+    // The furniture the client stood in its buildings' rooms (`interiors`, ilf.mjs): wanted again whenever what it was built
+    // from is newer than it -- the world, its fittings (a double left out), the props pack (a piece's model) -- or it is of
+    // another shape. Its own `if`, and its placed sounds after it: a pack whose sounds were written before its interiors (no
+    // `interiors` mark, or older than the file) has no band in a cantina.
+    const interiorsWhy = placed ? interiorsStale(packDir, dir) : null;
+    if (interiorsWhy) wantInteriors.push(`${planet} (${interiorsWhy})`);
+    const soundsFile = readJson(join(packDir, 'sounds.json'));
+    if (placed && !interiorsWhy && soundsFile && soundsBeforeInteriors(packDir, soundsFile)) interiorSounds.push(planet);
     if (floraCollision.stale) wantFloraCollision.push(`${planet} (${floraCollision.why})`);
     if (terrain && radial.why) wantRadial.push(radial.why);
     // The leaf cards' class and their bled pictures come with the flora command alone; a world's flora from
@@ -3245,7 +3327,12 @@ function packStatus(dir) {
   // to; `convert` reads the order from here, so naming them after the worlds is what keeps it right.
   if (wantTravel) need(`travel <swg-dir> ${dir} --retail-only`, 'no world has its travel terminals, ticket collectors or shuttles, or a world was converted again after they were written: a starport is a building with nothing in it');
   if (travelMaterials.length) need(`travel <swg-dir> ${dir} --retail-only`, `the travel terminals and shuttles on ${travelMaterials.slice(0, 4).join(', ')}${travelMaterials.length > 4 ? ', ...' : ''} were ${MATERIAL_WHY}`);
-  if (wantObjEffects) need(`objeffects <swg-dir> ${dir} --retail-only`, "a world's braziers, fountains, torches and lamps have no fire, spray or glow: the effects their client data hangs on them are not written (objeffects.json), or were written before the world or its fittings");
+  // The client's own furniture in its buildings' rooms (ilf.mjs): one run writes every pack's, after the props and the
+  // fittings it reads; and the placed sounds after it, since its cantinas' bands are sound objects in those files.
+  if (wantInteriors.length) need(`interiors <swg-dir> ${dir} --retail-only`, `the furniture the client stood in its buildings' rooms is not written, or was written before what it reads, on ${wantInteriors.length} world${wantInteriors.length === 1 ? '' : 's'} (${wantInteriors.slice(0, 3).join(', ')}${wantInteriors.length > 3 ? ', ...' : ''}): the cantinas, starports and guild halls stand empty`);
+  if (wantObjEffects) need(`objeffects <swg-dir> ${dir} --retail-only`, "a world's braziers, fountains, torches and lamps have no fire, spray or glow: the effects their client data hangs on them are not written (objeffects.json), or were written before the world, its fittings or its interiors");
+  if (interiorSounds.length === 1) need(`sounds <swg-dir> ${dir} ${interiorSounds[0]} --retail-only`, `${interiorSounds[0]}'s placed sounds were written before its buildings' interior layout files: no band plays in its cantinas`);
+  else if (interiorSounds.length) need(`sounds <swg-dir> ${dir} all --retail-only`, `${interiorSounds.length} worlds' placed sounds were written before their buildings' interior layout files (${interiorSounds.slice(0, 4).join(', ')}${interiorSounds.length > 4 ? ', ...' : ''}): no band plays in their cantinas`);
   // The placed sounds of worlds with earlier objects or holidays written before them (stateObjects.mjs): one run over every
   // planet where more than one asks, which converts the bank once.
   if (stateSounds.length === 1) need(`sounds <swg-dir> ${dir} ${stateSounds[0][0]} --retail-only`, stateSounds[0][1]);
@@ -3376,6 +3463,9 @@ function packStatus(dir) {
     else if ((propsPack.materialFormat ?? 1) < MATERIAL_FORMAT) need(`props <swg-dir> ${dir} --retail-only`, `the props' models were ${MATERIAL_WHY}`);
     // The skeletal props (props.mjs `PROPS_SKELETAL_FORMAT`): a pack without the mark left every skeletal template out.
     if ((propsPack.skeletalFormat ?? 0) < PROPS_SKELETAL_FORMAT) need(`props <swg-dir> ${dir} --retail-only`, 'the skeletal props (creature statues, armour lying about, beast trophies) were left out: converted before they could be stood still');
+    // The things the client's interior layout files stand outside the three roots (props.mjs `PROPS_INTERIOR_FORMAT`): its
+    // own `if`, since a pack without the mark leaves a building's furniture with no model for them.
+    if ((propsPack.interiorFormat ?? 0) < PROPS_INTERIOR_FORMAT) need(`props <swg-dir> ${dir} --retail-only`, "the things the client's interior layout files stand outside the props' own folders (Kashyyyk's cave columns, Endor's lake rails, armour on display) have no models: converted before the buildings' own furniture was read");
     if (objEffectsStale(join(dir, 'props'), ['manifest.json'])) need(`objeffects <swg-dir> ${dir} --retail-only`, 'a brazier or a fountain put down from the Props tab has no fire or spray (props/objeffects.json)');
   }
   // The only music in this game is the music players make, and it is the one pack that was reported
@@ -3563,6 +3653,10 @@ function packStatus(dir) {
     if (combat.stale) need(`ships <swg-dir> ${dir} --retail-only`, combat.why);
     // The NPC-only hulls and the End of War's ships (npcships.mjs `NPC_HULLS_FORMAT`): a pack without the mark has none.
     if ((ships.npcHulls ?? 0) < NPC_HULLS_FORMAT) need(`ships <swg-dir> ${dir} --retail-only`, 'the NPC types with no player hull (the gunboats, freighters, transports, pods) and the End of War ships have no hulls: converted before the NPC-only hulls');
+    // A hull whose interior layout file was read as an appearance (`interiorLayoutFileName` naming an `.ilf`): its rooms
+    // stood empty and its interior said it failed. Its own `if`.
+    const unfurnished = ships.ships.filter((sh) => sh.interior?.failed && /\.ilf$/i.test(String(sh.interior.pob ?? '')));
+    if (unfurnished.length) need(`ships <swg-dir> ${dir} --retail-only`, `${unfurnished.map((sh) => sh.id).join(', ')} read ${unfurnished.length === 1 ? 'its' : 'their'} interior layout file as an appearance: the rooms stand without the passenger chairs the client stood in them`);
     // The rooms' walkable floors, on the hulls that have rooms at all.
     const roomy = (ships.models ?? []).filter((m) => m.cells && m.cells.length);
     const shipFloors = readJson(join(dir, 'ships/floors.json'));
@@ -3579,6 +3673,10 @@ function packStatus(dir) {
   // The gallery was the development world and was never asked for, which left every launcher with an
   // empty Housing tab: the buildings a player puts down are the gallery's models, and the deeds below
   // are asked for only once it exists. So it is asked for like any other pack now (the owner's call).
+  // The gallery's own buildings' furniture (`interiors`), which a building of the gallery the world editor puts down
+  // stands by its template: an `if` of its own.
+  const galleryInteriors = gallery && existsSync(join(dir, 'gallery', 'gallery.json')) ? interiorsStale(join(dir, 'gallery'), dir) : null;
+  if (galleryInteriors) need(`interiors <swg-dir> ${dir} --retail-only`, `the gallery's buildings' furniture is not written, or was written before what it reads (${galleryInteriors}): a building of the gallery put down by the world editor stands empty`);
   if (!gallery) need(`gallery <swg-dir> ${dir} --retail-only`, 'no gallery pack: the Housing tab has no buildings to put down, since every house is one of its models');
   else if ((gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, `the gallery's models were ${MATERIAL_WHY}`);
   else if ((gallery.lodFormat ?? 0) < LOD_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, (gallery.lodFormat ?? 0) < 1 ? "the gallery's models were converted before the client's own detail levels" : "the gallery's models carry detail levels the game can never draw or that stand somewhere else than the model");
@@ -5936,11 +6034,52 @@ switch (cmd) {
       return { model: id, file: def.file, bounds: def.bounds, cells: def.cells ? def.cells.filter((c) => c.index > 0).length : 0, hardpoints: def.hardpoints ?? [] };
     };
     // The interior the template names, whether or not the archives hold it: a missing one is
-    // reported as such rather than passed over as if the ship had none.
+    // reported as such rather than passed over as if the ship had none. Only a portal layout (`.pob`) is a ship's rooms:
+    // an `interiorLayoutFileName` naming an `.ilf` is the furniture the client stood in rooms the hull itself carries
+    // (`furnitureOf`, below), and read as an appearance it failed as "Not in archives: appearance/interiorlayout/space/...".
     const interiorOf = (template) => {
       const pob = resolveTemplateString(vfs, template, ['interiorLayoutFileName', 'interiorLayoutFilename'], cache);
-      if (!pob) return null;
+      if (!pob || !/\.pob$/i.test(pob)) return null;
       return pob.replace(/\\/g, '/').replace(/^\//, '');
+    };
+    // The furniture the hull's interior layout file stands (`ilf.mjs`): each piece's model converted into this pack, hung by
+    // the game under the room (cell) it stands in, at its place and turn mirrored into the hull model's frame (X across, as
+    // the GLBs are). A piece with no static model (a particle, a sound, a skeletal thing) is left out and said.
+    const IL = await import('./ilf.mjs');
+    const furnitureOf = (template, r) => {
+      let name = null;
+      try {
+        name = IL.ilfPath(resolveTemplateString(vfs, template, ['interiorLayoutFileName', 'interiorLayoutFilename'], cache));
+      } catch {
+        name = null;
+      }
+      if (!name || !/\.ilf$/.test(name) || !vfs.has(name)) return null;
+      const hull = models.get(r.model);
+      const cells = new Map((hull?.cells ?? []).map((c) => [c.name, c.index]));
+      const out = [];
+      const left = [];
+      for (const n of IL.readIlf(vfs.read(name)).nodes) {
+        const cell = cells.get(n.cell);
+        if (cell === undefined || cell <= 0) {
+          left.push(`${n.template} (no room ${n.cell})`);
+          continue;
+        }
+        const m = resolveTemplateMesh(vfs, n.template, cache);
+        if (m.skip || m.particle || m.skeletal) {
+          left.push(`${n.template} (${m.skip ? 'no model' : m.particle ? 'an effect' : 'skeletal'})`);
+          continue;
+        }
+        const single = m.parts.length === 1 && !m.parts[0].transform && !m.effects?.length && !m.parts[0].hardpoints?.length;
+        const got = convertAppearance(single ? m.parts[0].mesh : m.appearance);
+        if (got.skip) {
+          left.push(`${n.template} (${got.skip})`);
+          continue;
+        }
+        // Into the GLB's frame: X mirrored, the turn's y and z with it ([w, x, y, z] -> [w, x, -y, -z]).
+        out.push({ file: got.file, template: n.template, cell, ...IL.hullFurniturePlace(n.m) });
+      }
+      if (left.length) console.log(`  ${template}: of its interior layout file ${name}, ${left.length} left out: ${left.slice(0, 4).join(', ')}${left.length > 4 ? ', ...' : ''}`);
+      return out;
     };
     const convertInterior = (template, pob) => {
       const id = `${familyOf(pob)}_interior`;
@@ -6379,7 +6518,7 @@ switch (cmd) {
     const templates = allTemplates.filter((t) => !match || match.test(t));
     // With the chassis table read, a player template with no chassis row is a placeholder and is left out (ships.mjs).
     const chassisOf = chassisRows.size ? (t) => chassisNameFor(t.replace(/^.*\/shared_/, '').replace(/\.iff$/, ''), (n) => chassisRows.has(n)) : undefined;
-    const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior, extrasOf, weaponOf, chassisOf }, { log: console.log, limit });
+    const { ships, skipped } = buildShips(templates, { convert, interiorOf, convertInterior, furnitureOf, extrasOf, weaponOf, chassisOf }, { log: console.log, limit });
     // The NPC-only hulls (npcships.mjs `npcOnlyHullPicks`): a hull for every appearance an NPC type flies that no player
     // hull shares, and for the End of War's ships that name no garage hull, converted as a player hull is but with no
     // rooms, marked `npc` so the garage never lists them, and given to the NPC types and the NPC tab. Not with --limit,
@@ -8098,7 +8237,9 @@ switch (cmd) {
             skeletal[info.baked.pose]++;
             skeletal.bytes += statSync(file).size;
             skeletal.ms += Date.now() - t0;
-            models.set(id, { id, file: `${id}.glb`, bounds: info.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] }, triangles: tris, icon, appearance: source, skeletal: info.baked.pose, ...(tris ? {} : { failed: 'no triangles' }) });
+            // `lift`: the metres it was raised to stand on its lowest point, which a piece of a building's interior layout
+            // file stood at the client's own place takes back off (`interiors`), since the client drew it where its file put it.
+            models.set(id, { id, file: `${id}.glb`, bounds: info.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] }, triangles: tris, icon, appearance: source, skeletal: info.baked.pose, lift: info.baked.lift, ...(tris ? {} : { failed: 'no triangles' }) });
           } else {
             const conv = convertOne(vfs, source, join(outDir, `${id}.glb`));
             const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
@@ -8157,13 +8298,20 @@ switch (cmd) {
     const oursBuilt = P.buildOursProps(oursRows(ours, 'props'), { convert: (row) => fromResolved(resolveAppearanceToMesh(vfs, row.appearance)), has: (p) => vfs.has(p) });
     props.push(...oursBuilt.props);
     skipped.push(...oursBuilt.skipped);
+    // The things the client's interior layout files stand that the three roots leave out (a building folder's statics, a
+    // worn piece on display, a crafting component on a shelf: `ilf.mjs`), each stood as a template's prop is and marked
+    // `interior`, so a building's furniture is the props pack's wherever its world's own pack does not carry the model.
     const whole = !Number.isFinite(limit);
-    const manifest = withLate({ version: P.PROPS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, skeletalFormat: P.PROPS_SKELETAL_FORMAT, skeletalPose, ...(whole ? { ours: oursStamp(ours, oursBuilt.props.length, oursBuilt.missing) ?? undefined } : {}), props, models: [...models.values()].filter((m) => !m.failed), skipped }, vfs, 'props');
+    const interiorBuilt = whole ? P.buildInteriorProps(ilfTemplatesOf(vfs), { convert, describe: (template, id) => describeItem(vfs, template, id, itemCaches), appearanceOf }) : { props: [], skipped: [], worn: 0 };
+    props.push(...interiorBuilt.props);
+    skipped.push(...interiorBuilt.skipped);
+    const manifest = withLate({ version: P.PROPS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, skeletalFormat: P.PROPS_SKELETAL_FORMAT, skeletalPose, ...(whole ? { ours: oursStamp(ours, oursBuilt.props.length, oursBuilt.missing) ?? undefined, interiorFormat: P.PROPS_INTERIOR_FORMAT } : {}), props, models: [...models.values()].filter((m) => !m.failed), skipped }, vfs, 'props');
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 1));
     const c = P.propCounts(manifest);
     console.log(`-> ${outDir}: ${c.props} props in ${c.models} models over ${c.groups} groups; ${c.named} named, ${c.iconed} with a picture, ${skipped.length} left out`);
     console.log(`   skeletal props: ${skeletal.idle + skeletal.bind} models stood still (${skeletal.idle} at their idle's first frame, ${skeletal.bind} at the bind pose), ${(skeletal.bytes / 1e6).toFixed(1)} MB in ${(skeletal.ms / 1000).toFixed(1)} s; ${c.skeletal} props wear them${poseKept === 'bind' ? '; every one at its bind pose, kept from the last run (--skeletal-pose=idle puts each one\'s own idle back)' : ''}`);
     console.log(`   entries of ours: ${oursBuilt.props.length} props${oursBuilt.missing ? `, ${oursBuilt.missing} left out: their appearance is not in this mount` : ''}${oursBuilt.skipped.length ? `, ${oursBuilt.skipped.length} would not convert` : ''}`);
+    if (whole) console.log(`   interiors: ${interiorBuilt.props.length} things the client's interior layout files stand that the roots leave out (${interiorBuilt.worn} worn pieces on display, stood still at their bind pose)${interiorBuilt.skipped.length ? `, ${interiorBuilt.skipped.length} left out (${[...new Set(interiorBuilt.skipped.map((s) => String(s.why).replace(/:.*$/, '')))].join('; ')})` : ''}`);
     break;
   }
 
@@ -8413,6 +8561,9 @@ switch (cmd) {
       const templates = new Set((layout.objects ?? []).map((o) => o.template).filter(Boolean));
       // What the fittings and travel stand on a world's buildings is placed in play from their own rows.
       for (const r of [...rowsOf(join(packDir, 'fittings.json')), ...rowsOf(join(packDir, 'travel.json'))]) if (r.template) templates.add(r.template);
+      // And what its buildings' interior layout files stand (`interiors`): every piece's own template, a lamp's glow on a
+      // table in a cantina as much as a brazier's fire in a street.
+      for (const t of interiorTemplatesOf(packDir)) templates.add(t);
       const { templates: n, effects } = writeTable(packDir, templates);
       packs++;
       if (n) console.log(`  ${dir.name}: ${effects} effects on ${n} kinds of object`);
@@ -8434,6 +8585,200 @@ switch (cmd) {
     const c = reader.counts;
     console.log(`objeffects: ${packs} packs; of ${c.templates} templates read, ${c.withClientData} name client data that hangs something and ${c.withEffects} hang an effect (${c.effects} in all)${c.missingHardpoint ? `; ${c.missingHardpoint} left out for a hardpoint their appearance has not got` : ''}${c.skeletal ? `; ${c.skeletal} on skeletal things, not placed` : ''}`);
     for (const m of reader.missing.slice(0, 5)) console.log(`  no hardpoint: ${m}`);
+    break;
+  }
+
+  case 'interiors': {
+    // <swg-dir> <out-dir>: the furniture and dressing the client stood in its buildings' rooms by itself, out of its
+    // interior layout files (`interiorlayout/*.ilf`, `tools/swg/ilf.mjs` says what each byte is and who stood them): for
+    // every pack with a layout (every world, the gallery, the copies' world), the pieces each building's template's file
+    // stands, keyed by that template, and which of the world's own buildings carry one, as `interiors.json` beside the
+    // manifest. Every file the archives hold is read to the byte on every run and any that will not is listed.
+    //
+    // A pass of its own, as `objeffects` and `doors` are: it converts no model of a world (a piece is the pack's own model,
+    // else the props catalogue's, which `props` converts for every template a file names), only the particle effects a file
+    // stands (into the props folder, which every world reads as it reads a prop's effects). So it runs after the worlds,
+    // the props, the gallery and the fittings (a piece standing where a fitting stands is left out as a double), and
+    // `objeffects` and `sounds` read what it writes.
+    if (!pos[2]) usage();
+    const IL = await import('./ilf.mjs');
+    const vfs = mount(pos[1]);
+    const out = pos[2];
+    const propsDir = join(out, 'props');
+    const propsFile = join(propsDir, 'manifest.json');
+    if (!existsSync(propsFile)) {
+      console.log("interiors: the props pack is not converted, so no piece outside a world's own pack has a model: run `props` first");
+      break;
+    }
+    let props;
+    try {
+      props = JSON.parse(readFileSync(propsFile, 'utf8'));
+    } catch (err) {
+      console.log(`interiors: the props manifest would not read (${err.message})`);
+      break;
+    }
+    const propByTemplate = new Map((props.props ?? []).filter((p) => p.template).map((p) => [p.template, p]));
+    const propModels = new Map((props.models ?? []).map((m) => [m.id, m]));
+    // Every file the archives hold, read to the byte (`readIlf` is strict); one that does not is listed and never guessed at.
+    const files = new Map();
+    const refused = [];
+    for (const f of vfs.list('interiorlayout/').filter((p) => p.toLowerCase().endsWith('.ilf'))) {
+      try {
+        files.set(f.toLowerCase(), IL.readIlf(vfs.read(f)).nodes);
+      } catch (err) {
+        refused.push(`${f}: ${err.message}`);
+      }
+    }
+    const nodesRead = [...files.values()].reduce((a, l) => a + l.length, 0);
+    console.log(`interiors: ${files.size} interior layout files read to the byte (${nodesRead} things)${refused.length ? `, ${refused.length} refused` : ''}`);
+    for (const r of refused) console.log(`  refused: ${r}`);
+    const paramCache = new Map();
+    const meshCache = new Map();
+    const fileOf = (template) => {
+      let v = null;
+      try {
+        v = resolveTemplateString(vfs, template, ['interiorLayoutFileName', 'interiorLayoutFilename'], paramCache);
+      } catch {
+        v = null;
+      }
+      const p = IL.ilfPath(v);
+      return p && /\.ilf$/.test(p) && files.has(p) ? p : null;
+    };
+    // What one template stands as, once for the run: a sound object (the sounds pass's), a particle effect (converted into
+    // the props folder), or a model, with the ids a world pack and the props catalogue would know it by.
+    const kindCache = new Map();
+    const kindOf = (template) => {
+      if (kindCache.has(template)) return kindCache.get(template);
+      let k;
+      if (/^object\/soundobject\//.test(template)) k = { kind: 'snd' };
+      else if (/^object\/cell\//.test(template)) k = { skip: 'a cell container' };
+      else {
+        const r = resolveTemplateMesh(vfs, template, meshCache);
+        if (r.skip) k = { skip: /template missing/.test(r.skip) ? 'its template is not in the archives' : /no appearanceFilename/.test(r.skip) ? 'its template names no appearance' : String(r.skip).replace(/ \(params: .*$/, '').slice(0, 80) };
+        else if (r.particle) {
+          const p = convertParticle(vfs, r.particle, propsDir);
+          k = p.failed ? { skip: `its effect would not convert: ${p.failed}` } : { kind: 'fx', id: p.id, def: { id: p.id, file: p.file, bounds: p.bounds ?? { min: [-0.5, 0, -0.5], max: [0.5, 1, 0.5] }, triangles: 0, particle: true } };
+        } else if (r.skeletal) k = { kind: 'model', own: familyOf(r.skeletal) };
+        else {
+          const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
+          k = { kind: 'model', own: familyOf(single ? r.parts[0].mesh : r.appearance) };
+        }
+      }
+      kindCache.set(template, k);
+      return k;
+    };
+    const total = { packs: 0, buildings: 0, templates: 0, pieces: 0, stood: 0, twice: 0, own: 0, props: 0, fx: 0, snd: 0 };
+    const leftOut = new Map();
+    const leave = (why, n = 1) => leftOut.set(why, (leftOut.get(why) ?? 0) + n);
+    // One template's file as a pack's table holds it: each piece its index in the file, its template, its model and where
+    // that model is (`own` this pack's, `props` the props folder's, `snd` a sound object's: no model), its room's index in
+    // the building `def`, and its place and turn in the building's frame. `defs` is this pack's; what the props folder
+    // supplies goes into `usedDefs` for the pack's guest.
+    // A skeletal model of the props pack (a helmet on its stand) is taken back off the lift it was set down by, so it stands
+    // where the file put it, never on the floor under it (`interiorPieces`).
+    const propOf = (template) => {
+      const prop = propByTemplate.get(template);
+      return (prop ? propModels.get(prop.model) : null) ?? null;
+    };
+    const piecesOf = (file, def, defs, usedDefs) => IL.interiorPieces(files.get(file) ?? [], def, defs, usedDefs, { kindOf, propOf, leave });
+    for (const dir of readdirSync(out, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      if (!dir.isDirectory()) continue;
+      const packDir = join(out, dir.name);
+      const layoutFile = join(packDir, 'layout.json');
+      const manifestFile = join(packDir, 'manifest.json');
+      // The gallery: its table is every building it carries whose template names a file (`gallery.json`'s items), for the
+      // world editor's rows standing one of them (`src/world/interiors.ts`), beside whatever its own layout stands.
+      const galleryFile = join(packDir, 'gallery.json');
+      const gallery = dir.name === 'gallery' && existsSync(galleryFile) && existsSync(manifestFile);
+      if (!gallery && (!existsSync(layoutFile) || !existsSync(manifestFile))) continue;
+      let layout;
+      let manifest;
+      try {
+        layout = existsSync(layoutFile) ? JSON.parse(readFileSync(layoutFile, 'utf8')) : { planet: 'gallery', objects: [] };
+        manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
+      } catch {
+        continue;
+      }
+      const defs = new Map();
+      for (const list of Object.values(manifest.categories ?? {})) for (const d of list) if (d?.id && !defs.has(d.id)) defs.set(d.id, d);
+      const templates = {};
+      const usedDefs = new Map();
+      let galleryKinds = 0;
+      if (gallery) {
+        let items = [];
+        try {
+          items = (JSON.parse(readFileSync(galleryFile, 'utf8')).sections ?? []).flatMap((s) => s.items ?? []);
+        } catch {
+          items = [];
+        }
+        for (const item of items) {
+          if (!item?.template || !item.model || templates[item.template]) continue;
+          const def = defs.get(item.model);
+          if (!def?.cells?.length) continue;
+          const file = fileOf(item.template);
+          if (!file) continue;
+          templates[item.template] = { file, model: item.model, pieces: piecesOf(file, def, defs, usedDefs) };
+          galleryKinds++;
+        }
+      }
+      const objects = layout.objects ?? [];
+      const buildings = IL.layoutBuildings(objects, fileOf);
+      const fittings = (() => {
+        try {
+          return JSON.parse(readFileSync(join(packDir, 'fittings.json'), 'utf8')).rows ?? [];
+        } catch {
+          return [];
+        }
+      })();
+      const contained = new Map();
+      for (const o of objects) if (o.contained && typeof o.in === 'number') (contained.get(o.in) ?? contained.set(o.in, []).get(o.in)).push(o);
+      const counts = { buildings: 0, pieces: 0, stood: 0, twice: 0, own: 0, props: 0, fx: 0, snd: 0 };
+      const rows = [];
+      for (const b of buildings) {
+        const o = objects[b.row];
+        if (!templates[b.template]) templates[b.template] = { file: b.file, model: o.model, pieces: piecesOf(b.file, defs.get(o.model), defs, usedDefs) };
+        const t = templates[b.template];
+        // Never twice: a piece standing where the world's own data stands the same thing, in this building's frame. Where
+        // that thing stands in one state only (SOE's earlier objects, Restuss), the piece stands in the other (`states`).
+        const { row: written, twice, states } = IL.buildingRow(b, o, t, contained.get(b.row), fittings, layout.states);
+        rows.push(written);
+        counts.buildings++;
+        counts.pieces += t.pieces.length;
+        counts.twice += twice.size;
+        counts.otherState = (counts.otherState ?? 0) + Object.keys(states).length;
+        for (let k = 0; k < t.pieces.length; k++) {
+          if (twice.has(k)) continue;
+          const p = t.pieces[k];
+          counts.stood++;
+          if (p[3] === 'snd') counts.snd++;
+          else if ((p[3] === 'own' ? defs.get(p[2]) : usedDefs.get(p[2]))?.particle) counts.fx++;
+          else if (p[3] === 'own') counts.own++;
+          else counts.props++;
+        }
+      }
+      writeFileSync(
+        join(packDir, 'interiors.json'),
+        JSON.stringify(withLate({ version: IL.INTERIORS_PACK_VERSION, planet: layout.planet ?? dir.name, counts, templates, buildings: rows, defs: [...usedDefs.values()] }, vfs, 'interiors')),
+      );
+      total.packs++;
+      total.buildings += counts.buildings;
+      total.templates += Object.keys(templates).length;
+      for (const k of ['pieces', 'stood', 'twice', 'own', 'props', 'fx', 'snd']) total[k] += counts[k];
+      total.otherState = (total.otherState ?? 0) + (counts.otherState ?? 0);
+      if (counts.buildings) console.log(`  ${dir.name}: ${counts.stood} things in ${counts.buildings} buildings (${Object.keys(templates).length} kinds): ${counts.own} of the pack's own models, ${counts.props} of the props', ${counts.fx} effects, ${counts.snd} sound objects; ${counts.twice} left out as standing twice${counts.otherState ? `, ${counts.otherState} standing only in the state where the world's own copy does not` : ''}`);
+      if (gallery) console.log(`  gallery: ${galleryKinds} of its buildings carry their furniture for the world editor's rows (${Object.values(templates).reduce((a, t) => a + t.pieces.length, 0)} things in its table)`);
+    }
+    // The files no template names: the client reached them by no route the archives keep (the misc caches list every file
+    // the client may load, but say nothing of a building), so they are left out and listed.
+    const named = new Set();
+    for (const t of vfs.list('object/').filter((f) => f.endsWith('.iff') && /\/shared_[^/]+$/.test(f))) {
+      const f = fileOf(t);
+      if (f) named.add(f);
+    }
+    const unnamed = [...files.keys()].filter((f) => !named.has(f)).sort();
+    console.log(`interiors: ${total.stood} things over ${total.buildings} buildings of ${total.templates} kinds in ${total.packs} packs (${total.own} the packs' own models, ${total.props} the props', ${total.fx} effects, ${total.snd} sound objects); ${total.twice} left out as standing twice, ${total.otherState ?? 0} standing only in the state where the world's own copy does not`);
+    for (const [why, n] of [...leftOut].sort((a, b) => b[1] - a[1])) console.log(`  left out: ${n} ${why}`);
+    if (unnamed.length) console.log(`  ${unnamed.length} files no template names, left out (the archives say of none which building it belongs to): ${unnamed.map((f) => f.replace(/^interiorlayout\//, '')).join(', ')}`);
     break;
   }
 

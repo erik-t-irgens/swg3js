@@ -98,6 +98,12 @@ export interface DressingStand {
   scale?: readonly [number, number, number];
   /** Its looks (`PlacementRow.mats`, the seventh wave), absent for its model's own materials. */
   mats?: readonly RowLook[];
+  /**
+   * The radius it is filed with, where not its model's own box's (`radiusOfBounds`): a building's template furniture (the
+   * interior layout files' wave) is filed at the snapshot's own least for a contained object, so the collider sweep's size
+   * rule makes it solid as the world's own furniture is (`FURNITURE_RADIUS`). Absent on every row.
+   */
+  radius?: number;
 }
 
 /**

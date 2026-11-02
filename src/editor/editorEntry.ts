@@ -85,6 +85,7 @@ import { ATTACH_TUNE, rowMatrix, type RowAttachments } from '../world/rowAttach.
 import { LOOK_TUNE } from '../world/rowMaterials.ts';
 import { attachOfEntry, isAttachEntry } from './libraryModel.ts';
 import { parseDonor, readAttachments, readLooks, type RowAttach } from '../story/placements.ts';
+import { pieceOfKey } from '../world/interiors.ts';
 
 /** What the game hands the editor: its objects, and its own half of every rule the editor cannot reach itself. */
 export interface EditorHost {
@@ -188,6 +189,19 @@ export interface EditorHost {
   locations?(): { rows: readonly LocationRow[]; bytes: number | null; problem: string | null };
   /** The same rows alone, one list until the next landing and a kept empty one before any: what a frame asks (nothing made). */
   locationRows?(): readonly LocationRow[];
+  /**
+   * The interior layout files' wave: a furnished building row's template furniture as rows of its own, in the file's frame
+   * and with no ids (each with the base its id is minted from and its piece's index in the file), and whether any would stand
+   * out of a model not yet loaded where its row stands it (the editor's curtain then); or why not, in words.
+   */
+  ownFurniture?(id: string): { rows: { base: string; index: number; row: Omit<PlacementRow, 'id'> }[]; fresh: boolean } | string;
+  /** How a building row's furniture stands here, in words: its file's and how many pieces, its own, or none ('' for no building). */
+  furnitureNote?(id: string): string;
+  /**
+   * The ids of the rows of a building's own file standing in its rooms, marks included, by the very rule a thing put down
+   * there is hosted (`carriedRowIds`): what a building whose furniture is its own carries and takes with it. Asked of an edit.
+   */
+  hostedRows?(key: string): string[];
 }
 
 /** One thing in hand: what a row writes, what it is drawn and judged by, and how it is turned. */
@@ -228,6 +242,19 @@ const LAKE_ROW = 'lake:';
 function isLakeRow(id: string): boolean {
   return id.startsWith(LAKE_ROW);
 }
+
+/**
+ * A piece of a furnished building's template furniture, by the id its streamer key carries (`<building id>.f<n>`, the
+ * interior layout files' wave): its building's row id and its index in the file, or null for an id that is no piece's (a
+ * row's id holds no `.`, so no row is ever read as one).
+ */
+function pieceOfId(id: string): { building: string; index: number } | null {
+  const p = pieceOfKey(placementKey(id));
+  return p && p.building.startsWith(PLACEMENT_KEY_PREFIX) ? { building: p.building.slice(PLACEMENT_KEY_PREFIX.length), index: p.index } : null;
+}
+
+/** What O and Delete say of a piece of a building's template furniture: it is the file's until made the building's own. */
+const PIECE_FIRST = "a piece of a building's own furniture out of the client's file: click it (or pick it on the Here tab) to make that building's furniture its own rows first";
 
 /** A place of ours on the Here tab (Map-maker II's eighth wave), so its buttons reach the places tool. */
 const PLACE_ROW = 'place:';
@@ -372,6 +399,9 @@ export class Editor {
       placed: (key) => w.streamer?.placedOf(key) ?? null,
       boxOf: (o) => w.streamer?.boxOf(o) ?? null,
       hasRooms: (key) => w.streamer?.placedHasRooms(key) ?? false,
+      // The rows standing in a building's rooms (the interior layout files' wave): a building whose furniture is its own carries them.
+      hostedRows: (key) => host.hostedRows?.(key) ?? [],
+      ownPiece: (id, shift) => me.ownPieceAsked(id, shift),
       copies: (key) => w.streamer?.editorCopies(key) ?? [],
       // Taken away whether or not a streamer stands now: a write's copies are let go once what it stood is built, which can
       // be after a travel has unloaded the world (and its streamer) whose packs they draw.
@@ -1955,7 +1985,9 @@ export class Editor {
     }
     const clear = hand.patch ? clearRadius(hand.patch) : undefined;
     const ground = space || inside ? null : h.world.terrain.heightAt(pos.x, pos.z);
-    const row = rowFromEditor(hand.src, pos, [hand.q.x, hand.q.y, hand.q.z, hand.q.w], inside, frame, space ? 'game' : 'raw', {
+    // A new building with the Tools tab's "Furnish the buildings I place" off is written empty (`furnish: false`).
+    const src = hand.building && !EDITOR_TUNE.furnish ? { ...hand.src, furnish: false as const } : hand.src;
+    const row = rowFromEditor(src, pos, [hand.q.x, hand.q.y, hand.q.z, hand.q.w], inside, frame, space ? 'game' : 'raw', {
       here: h.packId(),
       clear,
       ground,
@@ -2118,14 +2150,75 @@ export class Editor {
       this.say('nothing of the files under the aim to pick up', false);
       return;
     }
+    if (pieceOfId(id)) return void this.say(PIECE_FIRST, false);
     void this.pickUp(id);
+  }
+
+  /**
+   * Whether an id the selection was asked to take is a piece of a furnished building's template furniture (`<id>.f<n>`, the
+   * interior layout files' wave): if so the building's furniture is made its own (`ownPiece`) and the row the piece became
+   * picked once written, and the selection takes nothing now. What a click, the Here tab and the console's `select` ask.
+   */
+  ownPieceAsked(id: string, shift: boolean): boolean {
+    const p = pieceOfId(id);
+    if (!p) return false;
+    void this.ownPiece(p.building, p.index, shift ? 'add' : 'set').then(() => this.window?.refreshEdits());
+    return true;
+  }
+
+  /** A make-own under way: one at a time. */
+  private owning = false;
+
+  /**
+   * A furnished building row's template furniture made its own (the owner's words of 2026-11-01: "if I edit the furniture in
+   * one place it won't affect other copies or spawns of that same building"): one action writing every piece as an ordinary
+   * row of the building's file standing in its room, and the building's row `furnish: false`, so one undo puts the file's
+   * furniture back; behind the editor's curtain where a piece's row would stand out of a model not yet loaded. Then the row
+   * piece `index` became is picked (`mode`). Every other copy of the building, and every one put down after, keeps the
+   * file's furniture. Answers what was said.
+   */
+  async ownPiece(buildingId: string, index: number, mode: 'set' | 'add' = 'set'): Promise<string> {
+    const h = this.host;
+    if (this.owning || this.writing) return this.refuse('a write is still going');
+    const b = h.rowFor(buildingId);
+    if (!b || b.row.kind !== 'building') return this.refuse(`${buildingId} is no building of the files`);
+    // A piece of the props folder is written as the props catalogue's thing: the catalogue in hand first.
+    await h.props.load().catch(() => null);
+    const got = h.ownFurniture?.(buildingId);
+    if (!got) return this.refuse('this game cannot make a building\'s furniture its own');
+    if (typeof got === 'string') return this.refuse(got);
+    const ids = this.edits.mintIds(got.rows.map((r) => r.base));
+    const { at: _at, ...rest } = b.row;
+    const changes: RowChange[] = [
+      { file: b.layer, id: b.row.id, before: b.row, after: { ...rest, furnish: false } as PlacementRow },
+      ...got.rows.map((r, i): RowChange => ({ file: b.layer, id: ids[i], before: null, after: { ...r.row, id: ids[i] } as PlacementRow })),
+    ];
+    this.owning = true;
+    let said: string;
+    try {
+      const work = () => this.edits.putRows('make its furniture its own', changes);
+      said = got.fresh && h.curtain ? await h.curtain(`${b.label}'s furniture as rows of its own`, work) : await work();
+    } finally {
+      this.owning = false;
+    }
+    if (!/ written$/.test(said)) return this.refuse(said);
+    const i = got.rows.findIndex((r) => r.index === index);
+    if (i >= 0) this.edits.sel.pick([ids[i]], mode);
+    const words = `${b.label}'s furniture is its own now: ${got.rows.length} row${got.rows.length === 1 ? '' : 's'} in its rooms, which no other copy shares (one undo puts the file's furniture back)`;
+    this.say(words, true);
+    return words;
   }
 
   /** A row by id into the hand. Answers why not. */
   async pickUp(id: string): Promise<string | null> {
     const h = this.host;
+    if (pieceOfId(id)) return this.refuse(PIECE_FIRST);
     // A mark has no model to hold (the seventh wave): it is picked by its handle and moved with the gizmo, the hold or the nudges.
     if (h.rowFor(id)?.row.kind === 'mark') return this.refuse(`${id} is a mark: click its handle and move it with the gizmo, R and F held or the arrows`);
+    // A building whose furniture is its own rows (the interior layout files' wave): the hand holds one row, and its rows
+    // would be left standing where it stood with nothing round them. The gizmo, the holds and the arrows carry them.
+    const carried = this.edits.carries(id);
+    if (carried > 0) return this.refuse(`${id}'s furniture is ${carried} row${carried === 1 ? '' : 's'} of its own in its rooms, which the hand would leave behind: pick it and move it with the gizmo, R and F held or the arrows, which carry them`);
     const lifted = h.lift(id);
     if (!lifted) return this.refuse(`${id} is not standing`);
     const r = lifted.row;
@@ -2148,12 +2241,22 @@ export class Editor {
       this.say('nothing of the files under the aim to delete', false);
       return;
     }
+    if (pieceOfId(id)) return void this.say(PIECE_FIRST, false);
     const s = this.host.stood(id);
     if (!s) return;
     void this.remove(id, s.layer);
   }
 
   async remove(id: string, layer: PlacementLayer): Promise<string> {
+    if (pieceOfId(id)) return this.refuse(PIECE_FIRST);
+    // A building whose furniture is its own takes its rows out with it, one action and one undo, as the selection's Delete
+    // does (asking once past `askAbove`, a second press within three seconds): taken out alone it left them standing.
+    if (this.edits.carries(id) > 0) {
+      const said = await this.edits.deleteRows([id], false);
+      this.lastWrite = said;
+      this.window?.refreshHere();
+      return said;
+    }
     const before = this.host.rowFor(id);
     const said = await this.host.remove(layer, id);
     this.lastWrite = said;
@@ -2373,6 +2476,12 @@ export class Editor {
       },
       isPicked: (id: string) => (isPlaceRow(id) ? this.places.picked === id.slice(PLACE_ROW.length) : isLakeRow(id) ? this.water.picked === id.slice(LAKE_ROW.length) : this.edits.sel.has(id)),
       pick: (ids: string[], mode: 'set' | 'add' | 'take') => {
+        // A piece of a building's template furniture (the Here tab lists them): its building's furniture made its own first.
+        const piece = mode === 'take' ? undefined : ids.find((i) => pieceOfId(i));
+        if (piece) {
+          this.ownPieceAsked(piece, mode === 'add');
+          return;
+        }
         const lakes = ids.filter(isLakeRow);
         if (lakes.length) this.water.picked = mode === 'take' ? null : lakes[lakes.length - 1].slice(LAKE_ROW.length);
         const places = ids.filter(isPlaceRow);
@@ -2427,6 +2536,8 @@ export class Editor {
         water: this.waterView(),
         places: this.placesView(),
         attach: { onto: this.attachOnto },
+        // The interior layout files' wave: whether a building put down stands its template's furniture.
+        furnish: EDITOR_TUNE.furnish,
       }),
       setTool: (t: Record<string, unknown>) => this.setTool(t),
       refreshStatus: () => void this.edits.refreshStatus(),
@@ -2527,6 +2638,12 @@ export class Editor {
     if (Array.isArray(sw) && typeof sw[1] === 'boolean') {
       const k = BRUSH_SWITCHES.find(([key]) => key === sw[0]);
       if (k) BRUSH_TUNE[k[0]] = sw[1];
+    }
+    // The interior layout files' wave: whether a building put down from now on stands its template's furniture (live: what
+    // stands already keeps its own row's word, which the Selected tab's Furnished turns).
+    if (typeof t.furnish === 'boolean' && t.furnish !== EDITOR_TUNE.furnish) {
+      EDITOR_TUNE.furnish = t.furnish;
+      this.say(t.furnish ? 'a building put down stands its own furniture, as the client stood it' : 'a building put down from now on stands empty (furnish: false on its row)', true);
     }
     // The seventh wave's: whether an effect or a sound put down hangs on the row the aim meets.
     if (typeof t.attachOnto === 'boolean') {
@@ -3606,6 +3723,9 @@ export class Editor {
       note2: stood ?? '',
       // The seventh wave: a mark, its model's materials with their looks, the picker, what is offered, its attachments.
       mark: r.row.kind === 'mark',
+      // The interior layout files' wave: a building's furniture, its file's or none, and how it stands here.
+      furnished: r.row.kind === 'building' ? r.row.furnish !== false : null,
+      furniture: r.row.kind === 'building' ? (this.host.furnitureNote?.(r.row.id) ?? '') : '',
       materials: this.materialsView(first as string),
       picking: this.looks.picking ? `click a surface (or choose a library entry) to take its ${this.looks.picking.take === 'texture' ? 'picture' : 'material'} for ${this.looks.picking.of === '*' ? 'every material' : this.looks.picking.of}; Escape lets go` : '',
       offered: this.looks.choice,
@@ -3714,11 +3834,24 @@ export class Editor {
       if (o.select === 'none') ed.sel.clear();
       else if (o.select === 'like') said.push(ed.selectLike());
       else if (Array.isArray(o.select)) {
+        // A piece of a building's template furniture: its building's furniture made its own first, the row it becomes picked.
+        const piece = o.select.find((id): id is string => typeof id === 'string' && !!pieceOfId(id));
+        if (piece) {
+          this.ownPieceAsked(piece, false);
+          said.push(`making the furniture of ${pieceOfId(piece)?.building} its own (the row ${piece} becomes is picked once written)`);
+        }
         const ids = o.select.filter((id): id is string => typeof id === 'string' && !!h.rowFor(id));
         ed.sel.pick(ids, 'set');
         if (ids.length !== o.select.length) said.push(`${o.select.length - ids.length} of those ids are in neither file`);
       }
       if (o.select !== undefined) this.window?.refreshEdits();
+      // The interior layout files' wave: a piece of a building's template furniture (`<building id>.f<n>`) made its building's
+      // own and the row it became picked, waited for (the `select` route above does the same without waiting).
+      if (typeof o.own === 'string') {
+        const p = pieceOfId(o.own);
+        said.push(p ? await this.ownPiece(p.building, p.index) : `${o.own} is no piece of a building's template furniture (<building id>.f<n>)`);
+        this.window?.refreshEdits();
+      }
       if (o.snap && typeof o.snap === 'object') {
         const s = o.snap as Record<string, unknown>;
         this.setTool({ ...(typeof s.on === 'boolean' ? { snapOn: s.on } : {}), ...(typeof s.grid === 'number' ? { grid: s.grid } : {}), ...(typeof s.angle === 'number' ? { angle: s.angle } : {}) });
@@ -3809,6 +3942,8 @@ export class Editor {
       brush: this.brush.report(),
       // The Tools list (Map-maker II's groundwork): every tool, its key as bound now and which is armed.
       tools: this.tools.report((a) => capOf(this.host.input.bindings[a][0])),
+      // The interior layout files' wave: whether a building put down stands its template's furniture (the Tools tab's switch).
+      furnish: EDITOR_TUNE.furnish,
       bar: { writes: this.bar?.writes ?? 0 },
       // The seventh wave's: the picker, the attachment picked, the copies the looks made, what hangs on the rows.
       looks: {

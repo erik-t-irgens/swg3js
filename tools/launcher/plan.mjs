@@ -51,6 +51,7 @@ const WORDS = {
   deeds: 'Buildings a player can buy',
   travel: 'Travel terminals and shuttles',
   fittings: 'What stands inside buildings',
+  interiors: 'The buildings’ own furniture',
   spawns: 'Where the creatures and people stand',
   conversations: 'What the game’s people say',
   objeffects: 'Fires, fountains, torches and lamps',

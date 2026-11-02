@@ -170,6 +170,45 @@ export function buildOursProps(rows, deps) {
   return { props, skipped, missing };
 }
 
+/**
+ * The props of the client's interior layout files (`ilf.mjs`): a pack carries this number once the things those files stand
+ * that the three roots leave out are in it (`buildInteriorProps`), and each skeletal model carries the metres it was raised
+ * by (`lift`), which a piece stood at the file's own place takes back off. `status` asks for a pack without it, since a
+ * building's furniture then has no model for the pieces its world's own pack does not carry.
+ */
+export const PROPS_INTERIOR_FORMAT = 1;
+
+/**
+ * The things the interior layout files stand that `isProp` refuses (`templates`, every template any file names): a
+ * building folder's statics (Kashyyyk's cave columns, Endor's lake rails), the worn pieces stood on display (a skeletal
+ * appearance, stood still at its bind pose as the skeletal props are: a garment the client drew where its file put it, with
+ * nobody in it), a crafting component on a shelf. A sound object or a cell is never one; anything that does not resolve to a
+ * model is left out with why. Marked `interior`, in its own group by the two folders below `object/`, so the Props tab shows
+ * them beside the rest and nothing reads them as one of the catalogue's own.
+ */
+export function buildInteriorProps(templates, deps) {
+  const props = [];
+  const skipped = [];
+  let worn = 0;
+  for (const template of [...templates].sort()) {
+    if (isProp(template, deps.appearanceOf ?? null)) continue;
+    if (/^object\/(soundobject|cell)\//.test(template)) continue;
+    const r = deps.convert(template);
+    if (!r || r.skip) {
+      skipped.push({ template, why: r?.skip ?? 'failed' });
+      continue;
+    }
+    const id = propId(template);
+    const entry = { id, template, group: propGroup(template), model: r.model, file: r.file, bounds: r.bounds ?? null, size: propSize(r.bounds), interior: true };
+    const d = deps.describe?.(template, id);
+    if (d) Object.assign(entry, { name: d.name, description: d.description });
+    if (r.icon !== undefined) entry.icon = r.icon;
+    if (/\/wearables\/|\/armor\//.test(template)) worn++;
+    props.push(entry);
+  }
+  return { props, skipped, worn };
+}
+
 /** What `status` reads back. */
 export function propCounts(manifest) {
   const props = manifest?.props ?? [];

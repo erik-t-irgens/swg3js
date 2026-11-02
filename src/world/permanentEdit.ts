@@ -201,6 +201,8 @@ function keepOf(base: PlacementRow | null | undefined): Partial<PlacementRow> {
   if (base.state !== undefined) out.state = base.state;
   // And its size, which the world editor sets: picked up and put down again it stands as big as it stood.
   if (base.scale !== undefined) out.scale = base.scale;
+  // And a building's furniture left out (the interior layout files' wave): picked up and put down again it stands as empty.
+  if (base.furnish === false) out.furnish = false;
   // And its looks and what hangs on it (the seventh wave): picked up and put down again it wears what it wore.
   if (base.mats !== undefined) out.mats = base.mats;
   if (base.attach !== undefined) out.attach = base.attach;
@@ -296,6 +298,11 @@ export interface EditorSource {
   /** The ground world a world model comes from; null or this world's own pack id writes none. */
   from?: string | null;
   deed?: string | null;
+  /**
+   * A building put down with none of its template's furniture (the Tools tab's "Furnish the buildings I place" off, the
+   * interior layout files' wave): written as `furnish: false` on a building's new row. A row picked up keeps its own.
+   */
+  furnish?: false;
 }
 
 /** A number cut to `digits` decimals, as the editor writes a turn: a diff that reads, which the reader renormalises. */
@@ -337,6 +344,8 @@ export function rowFromEditor(
   if (src.pack === 'world' && src.from && src.from !== opts.here) row.from = src.from;
   if (inside) row.inside = true;
   if (opts.base?.clear === undefined && opts.clear !== undefined && opts.clear > 0) row.clear = Math.min(PLACEMENT_LIMITS.circle, Math.round(opts.clear * 10) / 10);
+  // A new building put down unfurnished (a row picked up keeps its own word, through `keepOf`).
+  if (src.kind === 'building' && src.furnish === false && !opts.base) row.furnish = false;
   return withGround(row, opts.ground);
 }
 

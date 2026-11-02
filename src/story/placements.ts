@@ -131,6 +131,14 @@ export interface PlacementRow {
    */
   scale?: number | [number, number, number];
   /**
+   * A building's furniture (the wave of the interior layout files, `src/world/interiors.ts`): absent, the furniture the
+   * client stood in its template's rooms, as the client stood it; `false`, none of it (an empty building, or one whose
+   * furniture the editor has written as rows of its own). Only `false` is a value a row keeps: `true` reads as absent, so
+   * one meaning has one spelling, and on anything but a building it is kept out as a field this build does not read. Part
+   * of how it stands, so in `rowHash`, and only where present.
+   */
+  furnish?: false;
+  /**
    * Its looks (the seventh wave, `RowLook`): absent, the model's own materials. Part of how it stands, so in `rowHash`. One of
    * the wrong shape is kept out of the row as a field this build does not read, with its note, and the row stands in its own.
    */
@@ -209,7 +217,7 @@ const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const NAME_ID = /^[A-Za-z0-9_.-]{1,96}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 /** The fields a row may carry; the reserved ones are read and set aside. */
-const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'scale', 'mats', 'attach', 'name', 'note', 'at']);
+const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'furnish', 'scale', 'mats', 'attach', 'name', 'note', 'at']);
 /** A tint, as a look writes it. */
 const TINT = /^#[0-9a-fA-F]{6}$/;
 /** A material a look borrows from: `<pack>:<model>/<material>`, the material's own name after the first slash. */
@@ -397,7 +405,7 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
     if (!a) return 'a mark carries attachments (one effect or sound at least), and its own did not read';
     row.attach = a;
     // The fields of a thing with a model mean nothing on a mark: kept out as fields this build does not read, with their note.
-    for (const k of ['solid', 'clear', 'guard', 'template', 'from', 'scale', 'mats'] as const) if (o[k] !== undefined) unknown.push(`${id}.${k}`);
+    for (const k of ['solid', 'clear', 'guard', 'template', 'from', 'scale', 'furnish', 'mats'] as const) if (o[k] !== undefined) unknown.push(`${id}.${k}`);
   } else if (o.pack === 'props') {
     if (typeof o.thing !== 'string' || !NAME_ID.test(o.thing)) return 'a props row names its thing (the props catalogue\'s id)';
     row.thing = o.thing;
@@ -466,6 +474,12 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
     const s = readScale(o.scale);
     if (s === null) unknown.push(`${id}.scale`);
     else if (s !== 1) row.scale = s;
+  }
+  // A building's furniture, read the way `state` is: `false` kept, `true` the meaning of absent and written so, anything
+  // else (or on anything but a building) kept out of the row as a field this build does not read, with its note.
+  if (o.furnish !== undefined && !mark) {
+    if (o.kind === 'building' && o.furnish === false) row.furnish = false;
+    else if (!(o.kind === 'building' && o.furnish === true)) unknown.push(`${id}.furnish`);
   }
   // Its looks and what hangs on it (the seventh wave), read the way `state` is: a list of no shape a row takes is kept out
   // of it with its note, and the row stands in its own materials, or with nothing hung on it; an empty list is none.
@@ -652,6 +666,8 @@ export function rowHash(row: PlacementRow): string {
     ...(row.template !== undefined ? ['template', row.template] : []),
     ...(row.from !== undefined ? ['from', row.from] : []),
     ...(row.scale !== undefined ? ['scale', row.scale] : []),
+    // A building's furniture left out (the interior layout files' wave): whether its template's furniture stands is how it stands.
+    ...(row.furnish === false ? ['furnish', false] : []),
     // Its looks (the seventh wave): what it is drawn in is how it stands. Its attachments are not, so they are not here.
     ...(row.mats !== undefined ? ['mats', row.mats] : []),
   ]);
@@ -730,7 +746,7 @@ export function mintPlacementId(base: string, taken: ReadonlySet<string>): strin
 }
 
 /** The field order a row is written in, so one row is always one line spelled the same way. */
-const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'scale', 'mats', 'attach', 'name', 'note', 'at'];
+const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'furnish', 'scale', 'mats', 'attach', 'name', 'note', 'at'];
 /** Every field a row of this build reads, in the order it is written. */
 export const PLACEMENT_FIELDS: readonly string[] = ORDER;
 const ORDERED = new Set<string>(ORDER);

@@ -341,7 +341,9 @@ export class EditorBrush {
       // Stood as the hand stands a thing: a prop or a tree by its box's lowest point on the ground at its scale and turn, a
       // building by its origin on it.
       const low = !s.building && s.bounds ? lowest(s.bounds, sc, q, this.tmp) : 0;
-      const row = rowFromEditor(s.src, { x: p.x, y: p.y - low, z: p.z }, [q.x, q.y, q.z, q.w], false, centre, frame, { here, ground: p.y, clear: s.building ? s.clear : undefined, mm: EDITOR_TUNE.write.mm, turnDigits: EDITOR_TUNE.write.turnDigits }) as PlacementRow;
+      // A building with the Tools tab's "Furnish the buildings I place" off is written empty, as the hand writes one.
+      const src = s.building && !EDITOR_TUNE.furnish ? { ...s.src, furnish: false as const } : s.src;
+      const row = rowFromEditor(src, { x: p.x, y: p.y - low, z: p.z }, [q.x, q.y, q.z, q.w], false, centre, frame, { here, ground: p.y, clear: s.building ? s.clear : undefined, mm: EDITOR_TUNE.write.mm, turnDigits: EDITOR_TUNE.write.turnDigits }) as PlacementRow;
       row.id = ids[i];
       const w = s.building ? undefined : writtenScale([sc, sc, sc]);
       if (w !== undefined) row.scale = w;

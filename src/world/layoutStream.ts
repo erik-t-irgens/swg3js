@@ -33,6 +33,9 @@ import type { DonorOf, DonorPiece } from './rowMaterials.ts';
 import { FLORA_COLLISION, rowFloraParts, trunkRadius } from './floraCollision.ts';
 import { fileByState, standsIn } from './worldState.ts';
 import { isFallingWaterShader, solidRuleOf } from './walkThrough.ts';
+import { POST_CLEAR_TUNE, clearSpotNear, insidePiece, type PieceBox } from './interiors.ts';
+import { isTableTemplate } from './rowSolid.ts';
+import { buildFloor, heightIn, locate, type FloorSource, type NavFloor } from './nav/navMesh.ts';
 
 /**
  * What stands the doors in a building's doorways when its rooms are built and takes them down with
@@ -304,6 +307,11 @@ export interface PlacedObject {
    * bulk groups by model and signature), on meshes of its own otherwise. Absent on everything else.
    */
   look?: RowLookSet;
+  /**
+   * A piece of a building's interior layout file (`interiors.ts`): its key, its building's and its index in the file, which
+   * names this one copy's piece and no other's (Map-maker II's removals by key). Absent on everything else.
+   */
+  ilf?: string;
 }
 
 /** A row's looks as the streamer carries them: the list, and its signature (`lookSignature`), which a tier's bulk groups by. */
@@ -1299,7 +1307,7 @@ export class LayoutStreamer {
   private readonly pack: AssetPack;
   private readonly effects: ParticleEffects | null;
 
-  constructor(scene: THREE.Scene, physics: Physics, pack: AssetPack, layout: Layout, effects: ParticleEffects | null = null, options: { reach?: number; hugeColliders?: boolean; stands?: (tag?: string) => boolean } = {}) {
+  constructor(scene: THREE.Scene, physics: Physics, pack: AssetPack, layout: Layout, effects: ParticleEffects | null = null, options: { reach?: number; hugeColliders?: boolean; stands?: (tag?: string) => boolean; guests?: readonly AssetPack[] } = {}) {
     this.scene = scene;
     this.physics = physics;
     this.pack = pack;
@@ -1314,6 +1322,15 @@ export class LayoutStreamer {
     // every entry and would be asked once for each of tens of thousands of objects.
     const defs = new Map<string, PackModelDef>();
     for (const list of Object.values(pack.manifest.categories)) for (const d of list) defs.set(d.id, d);
+    // Packs standing behind this world's own from the start (the props folder's models a building's interior layout file
+    // stands, `interiors.ts`): their entries after the world's, an id the world carries keeping the world's, as `defOf`
+    // looks. None handed over is the world as it always was.
+    if (options.guests) {
+      for (const g of options.guests) {
+        this.useGuestPack(g);
+        for (const list of Object.values(g.manifest.categories)) for (const d of list) if (!defs.has(d.id)) defs.set(d.id, d);
+      }
+    }
     // Which objects stand in the world's states as they were taken at this arrival (`worldState.ts`), and the index
     // each takes in `objects`: the layout's own `in` names a building by its place in the layout, which is not its
     // place here once what lies dormant before it is left out (`fileByState`).
@@ -1329,6 +1346,10 @@ export class LayoutStreamer {
       const sizeTier = modelTier(o.radius, def?.bounds, !!def?.particle);
       const snapTier = snapshotTier(o.radius);
       const p: PlacedObject = { model: o.model, template: o.template, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius, contained: !!o.contained, tier: this.filing === 'snapshot' ? snapTier : sizeTier, sizeTier, snapTier, footprint: 0, row: li };
+      // A piece of a building's interior layout file, appended after the layout's own (`interiors.ts`): its key.
+      if (o.ilf) p.ilf = o.ilf;
+      // Its own word on being solid, which only such a piece carries (a seat or a table is never: `furnishLayout`).
+      if (o.solid !== undefined) p.solid = o.solid;
       // The world builder's own markers: their flora circle is all they are (`isToolOnly`).
       const tool = isToolOnly(o.template);
       if (filed.placedAt[li] < 0) {
@@ -1733,6 +1754,25 @@ export class LayoutStreamer {
     let n = 0;
     for (const p of this.placedByKey.values()) if (p.host === house) n++;
     return n;
+  }
+
+  /** What `hostKeyAt` asks the index with, kept. */
+  private readonly hostAsk = { model: '', x: 0, y: 0, z: 0, q: { x: 0, y: 0, z: 0, w: 1 }, contained: true };
+
+  /**
+   * The key of the building whose rooms hold a point of the game's frame, by the very rule a thing put down there is
+   * hosted (`FurnitureIndex.assign` on its origin), or null. A point in one of its doorways is still that building's (a
+   * thing standing there is drawn in every pass, but stands in its rooms all the same), and a mark, which the streamer
+   * never files, is asked by its place alike: what a building whose furniture is its own carries when the world editor
+   * moves it or takes it out (the interior layout files' wave). Asked of an edit, never in a frame.
+   */
+  hostKeyAt(x: number, y: number, z: number): string | null {
+    const a = this.hostAsk;
+    a.x = x;
+    a.y = y;
+    a.z = z;
+    const got = this.furnitureIndex.assign(a, undefined, this.hostAnswer);
+    return got.host >= 0 ? (this.hostObjects[got.host]?.template ?? null) : null;
   }
 
   /**
@@ -2540,7 +2580,8 @@ export class LayoutStreamer {
       y: row.y,
       z: row.z,
       q: new THREE.Quaternion(row.q[0], row.q[1], row.q[2], row.q[3]),
-      radius: radiusOfBounds(bounds),
+      // A building's template furniture is filed at a radius of its own (`DressingStand.radius`); every row at its box's.
+      radius: row.radius ?? radiusOfBounds(bounds),
       inside: row.inside,
       ...(row.solid !== undefined ? { solid: row.solid } : {}),
       ...(row.effectsOf ? { effectsOf: row.effectsOf } : {}),
@@ -4518,6 +4559,95 @@ export class LayoutStreamer {
       }
     }
     return out.length;
+  }
+
+  /** What `clearPost` reads pieces into, kept. */
+  private readonly postNear: PlacedObject[] = [];
+  private readonly postRay = new THREE.Raycaster();
+  /** Each room floor `clearPost` has read, by its object, once (null for one that does not read). */
+  private readonly postFloors = new WeakMap<object, NavFloor | null>();
+
+  /**
+   * A post in a room the data put inside a solid piece of its building's interior layout file (`interiors.ts`), moved in
+   * place to the nearest clear spot of the same room's floor (`clearSpotNear`): true when it was moved, false when it stands
+   * clear (or in no room this can read, or with nowhere clear within reach), null when the answer must wait (a piece it
+   * may stand in has not loaded its model). A piece holds the post when the post is inside its box (`insidePiece`) **and**
+   * a straight line down from a head's height above the post meets the piece's own mesh before the feet: a box alone takes
+   * a bartender inside a ring of counter for a body inside the counter. A piece is one that is solid, or a table (passable so
+   * the people seated at it are never pushed off, but nobody stands inside one); a seat never holds anybody, and a seated row
+   * is never asked (`StandingPeople`). Asked once a row, never in a frame.
+   */
+  clearPost(st: { x: number; y: number; z: number; room?: number }, tune: typeof POST_CLEAR_TUNE = POST_CLEAR_TUNE): boolean | null {
+    const near = this.postNear;
+    this.containedNear(st.x, st.z, tune.reach + tune.widest, near);
+    const boxes: (PieceBox & { o: PlacedObject })[] = [];
+    for (const o of near) {
+      // A solid piece, or a table: passable so the people seated at it are never pushed off, but nobody stands inside one.
+      if (!o.ilf || (!collidesByRule(o) && !isTableTemplate(o.effectsOf ?? o.template))) continue;
+      const def = this.defOf(o.model, o.pack);
+      const b = def?.bounds;
+      if (!def || def.particle || !b || b.min.length < 3 || b.max.length < 3) continue;
+      boxes.push({ o, x: o.x, y: o.y, z: o.z, qx: o.q.x, qy: o.q.y, qz: o.q.z, qw: o.q.w, min: b.min, max: b.max });
+    }
+    near.length = 0;
+    let host: PlacedObject | null = null;
+    let inside = false;
+    for (const b of boxes) {
+      if (!insidePiece(b, st.x, st.y, st.z, 0, tune)) continue;
+      const model = this.loadedOf(b.o.model, b.o.pack);
+      // A model known not to load holds nobody; one still to come is waited for.
+      if (!model) {
+        if (this.failed.has(b.o.model)) continue;
+        return null;
+      }
+      if (!this.meshOver(model, b.o, st)) continue;
+      inside = true;
+      host = b.o.host ?? null;
+      break;
+    }
+    if (!inside || !host || st.room === undefined) return false;
+    let building: Building | null = null;
+    for (const bd of this.buildings) if (bd.object === host) building = bd;
+    const cell = building?.model.def.cells?.find((c) => c.index === st.room);
+    if (!building || !cell?.floor) return false;
+    let floor = this.postFloors.get(cell.floor);
+    if (floor === undefined) {
+      floor = buildFloor(cell.floor as FloorSource);
+      this.postFloors.set(cell.floor, floor);
+    }
+    if (!floor) return false;
+    const f = floor;
+    const bd = building;
+    const v = new THREE.Vector3();
+    const floorAt = (x: number, y: number, z: number): number | null => {
+      v.set(x, y, z).applyMatrix4(bd.inverse);
+      const t = locate(f, v.x, v.y, v.z, 1, 0);
+      if (t < 0) return null;
+      v.y = heightIn(f, t, v.x, v.z);
+      return v.applyMatrix4(bd.matrix).y;
+    };
+    const spot = clearSpotNear(st, boxes, floorAt, tune);
+    if (!spot) return false;
+    st.x = spot.x;
+    st.y = spot.y;
+    st.z = spot.z;
+    return true;
+  }
+
+  /** Whether a piece's own mesh stands over a post: the line from a head's height (1.7 m) down to its feet meets it. */
+  private meshOver(model: LoadedModel, o: PlacedObject, st: { x: number; y: number; z: number }): boolean {
+    const inv = new THREE.Matrix4().compose(new THREE.Vector3(o.x, o.y, o.z), o.q, o.scale ?? new THREE.Vector3(1, 1, 1)).invert();
+    const from = new THREE.Vector3(st.x, st.y + 1.7, st.z).applyMatrix4(inv);
+    const to = new THREE.Vector3(st.x, st.y + POST_CLEAR_TUNE.top, st.z).applyMatrix4(inv);
+    const dir = to.clone().sub(from);
+    const far = dir.length();
+    if (!(far > 0)) return false;
+    const ray = this.postRay;
+    ray.set(from, dir.normalize());
+    ray.near = 0;
+    ray.far = far;
+    model.scene.updateMatrixWorld(true);
+    return ray.intersectObject(model.scene, true).some((h) => (h.object as THREE.Mesh).isMesh);
   }
 
   /**

@@ -114,6 +114,12 @@ export interface SelectedView {
   /** Map-maker II's seventh wave: whether it is a mark (attachments and no model). */
   mark?: boolean;
   /**
+   * The interior layout files' wave: whether a building stands its template's furniture (null for anything but a building),
+   * and how its furniture stands here in words.
+   */
+  furnished?: boolean | null;
+  furniture?: string;
+  /**
    * Its model's materials, each name once, with the look each wears in words, its tint (`#rrggbb` or ''), a little picture of
    * it and why a look would not go on it ('' for nothing); null where its model is not loaded or it is a mark.
    */
@@ -320,6 +326,8 @@ export interface EditorWindowHost extends LibraryHost {
     places?: PlacesToolsView;
     /** The seventh wave's effects and sounds: whether one put down hangs on the row the aim meets (else it stands a mark). */
     attach?: { onto: boolean };
+    /** The interior layout files' wave: whether a building put down stands its template's furniture. */
+    furnish?: boolean;
   };
   setTool(t: Record<string, unknown>): void;
   refreshStatus(): void;
@@ -737,6 +745,9 @@ export class EditorWindow {
       this.field(el, 'Guard m', s.guard, (v) => this.host.setField({ guard: v.trim() === '' ? null : num(v) }), 'number');
       this.field(el, 'Solid', s.solid, (v) => this.host.setField({ solid: v === 'true' }), 'check');
     }
+    // The interior layout files' wave: a building stands its template's furniture, or none (`furnish: false`).
+    if (s.furnished !== undefined && s.furnished !== null) this.field(el, 'Furnished', s.furnished, (v) => this.host.setField({ furnish: v === 'true' }), 'check');
+    if (s.furniture) this.field(el, 'Its furniture', s.furniture, null);
     this.field(el, 'State', s.state, (v) => this.host.setField({ state: v.trim() || null }));
     this.field(el, 'Its name', s.name, (v) => this.host.setField({ name: v.trim() || null }));
     this.field(el, 'Note', s.note, (v) => this.host.setField({ note: v.trim() || null }));
@@ -932,6 +943,12 @@ export class EditorWindow {
       h('TOOLS');
       row(...t.list.map((x) => toggle(`${x.label[0].toUpperCase()}${x.label.slice(1)}${x.key ? ` (${x.key})` : ''}${x.armed ? ': armed' : ''}`, x.armed, { tool: x.id })));
       this.note(el, 'One tool is armed at a time: its buttons are its own, the selection takes no hold meanwhile, and Escape lets it go.');
+    }
+    // The interior layout files' wave: whether a building put down stands its template's furniture.
+    if (t.furnish !== undefined) {
+      h('BUILDINGS');
+      row(toggle('Furnish the buildings I place', t.furnish, { furnish: !t.furnish }));
+      this.note(el, "On, a building put down stands the furniture the client stood in its rooms. Off, its row is written empty (furnish: false). A building already standing keeps its own: the Selected tab's Furnished turns it, and picking one of its pieces makes that building's furniture its own rows, which no other copy shares.");
     }
     // The seventh wave's effects and sounds out of the library: hung on the row the aim meets, or stood as marks.
     if (t.attach) {

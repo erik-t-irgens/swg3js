@@ -600,6 +600,12 @@ export const EDITOR_TUNE = {
    */
   autoFold: false,
   autoFoldIdle: 3,
+  /**
+   * A building put down stands its template's furniture (the client's interior layout file, `src/world/interiors.ts`); off,
+   * a new building's row is written `furnish: false` and stands empty (the owner's words of 2026-11-01: "make it so I can
+   * choose to spawn without furnishings"). The Tools tab's "Furnish the buildings I place". On: what the client stood.
+   */
+  furnish: true,
   /** The scatter brush's numbers (`BRUSH_TUNE`, the same object). */
   brush: BRUSH_TUNE,
   /** The sculpt brush's numbers (`SCULPT_TUNE`, the same object; its words move through `sculpt({ tune })`). */

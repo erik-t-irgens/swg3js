@@ -145,7 +145,19 @@ export interface Harness {
  * for the particle player the world hands the streamer (`place(file, matrix, contained)` and `remove(handle)`), so a test
  * can see what the streamer places and from which file; `Streamer` builds another streamer class over the same packs.
  */
-export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, extra: { defs?: Def[]; models?: Record<string, ReturnType<typeof loadedOf>>; flora?: string[]; effects?: { place(file: string, m: THREE.Matrix4, contained: boolean): unknown; remove(h: unknown): void }; Streamer?: new (...args: any[]) => any; stands?: (tag?: string) => boolean } = {}): Promise<Harness> {
+export async function makeStreamer(
+  objects: SnapshotObject[] = DEFAULT_OBJECTS,
+  extra: {
+    defs?: Def[];
+    models?: Record<string, ReturnType<typeof loadedOf>>;
+    flora?: string[];
+    effects?: { place(file: string, m: THREE.Matrix4, contained: boolean): unknown; remove(h: unknown): void };
+    Streamer?: new (...args: any[]) => any;
+    stands?: (tag?: string) => boolean;
+    /** Packs standing behind the world's from the streamer's making (the interior layout files' furniture pack, `World`'s `guests`). */
+    guests?: { planet: string; defs: Def[]; models: Record<string, ReturnType<typeof loadedOf>> }[];
+  } = {},
+): Promise<Harness> {
   const physics = await Physics.create();
   const scene = new THREE.Scene();
   const world = fakePack(
@@ -172,7 +184,8 @@ export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, 
   // `Streamer`: another streamer class over the same packs (a day-one test's, loaded out of git).
   const Ctor = (extra.Streamer ?? LayoutStreamer) as typeof LayoutStreamer;
   // `stands`: which world states stand (`worldState.ts`), for a test of what lies dormant; every object's by default.
-  const stream = new Ctor(scene, physics, world as never, layout as never, (extra.effects ?? null) as never, extra.stands ? { stands: extra.stands } : {});
+  const guests = extra.guests ? extra.guests.map((g) => fakePack(g.planet, g.defs, g.models)) : null;
+  const stream = new Ctor(scene, physics, world as never, layout as never, (extra.effects ?? null) as never, { ...(extra.stands ? { stands: extra.stands } : {}), ...(guests ? { guests } : {}) });
   stream.useGuestPack(gallery as never);
   const s = stream as any;
   const at = new THREE.Vector3();

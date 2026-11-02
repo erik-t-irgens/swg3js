@@ -11,6 +11,7 @@ import { prepareSwayModel } from './floraSway.ts';
 import { manifestText } from './packFiles.ts';
 import type { LayoutStateBlock } from './worldState.ts';
 import { meshCellOf } from '../vehicles/cells.ts';
+import { interiorsReadable, type InteriorsFile } from './interiors.ts';
 
 export interface CellLight {
   type: number;
@@ -167,6 +168,17 @@ export interface LayoutObject {
    * city and its ruins (`tools/swg/restuss.mjs`). Absent, every state. Read through `standsIn` (`worldState.ts`).
    */
   state?: string;
+  /**
+   * A piece of a building's interior layout file (`interiors.ts`, appended after the layout's own objects): its key, its
+   * building's and its index in the file. Absent on every object of the layout itself.
+   */
+  ilf?: string;
+  /**
+   * Its own word on being solid, three ways as a placement's (`RuntimePlacement.solid`): only a piece of an interior layout
+   * file carries one (`false` for a seat or a table, which the seated person the data puts there would be pushed off).
+   * Absent on every object of the layout itself, which is solid by its size as it always was.
+   */
+  solid?: boolean;
 }
 
 export interface Layout {
@@ -344,6 +356,27 @@ export class AssetPack {
   doors: DoorsFile | null = null;
 
   private effectsLoad: Promise<void> | null = null;
+  private interiorsLoad: Promise<InteriorsFile | null> | null = null;
+
+  /**
+   * The furniture the client stood in this pack's buildings' rooms (`interiors.json`, the converter's `interiors` pass:
+   * `interiors.ts`), fetched once and answered at once after: null for a pack with no building with rooms (no file is ever
+   * asked of it), one converted before the pass, or a file of another shape, which stands what it always stood.
+   */
+  loadInteriors(): Promise<InteriorsFile | null> {
+    this.interiorsLoad ??= (async () => {
+      if (!Object.values(this.manifest.categories).some((list) => list.some((d) => !!d.cells?.length))) return null;
+      try {
+        const res = await fetch(`${this.baseUrl}interiors.json`);
+        if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
+        const file: unknown = await res.json();
+        return interiorsReadable(file) ? file : null;
+      } catch {
+        return null;
+      }
+    })();
+    return this.interiorsLoad;
+  }
 
   /**
    * Reads `objeffects.json`, once: every caller gets the one fetch, so a placement can wait on it for

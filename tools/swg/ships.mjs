@@ -111,9 +111,13 @@ export function buildShips(templates, deps, { log = () => {}, limit = Infinity }
     // What hangs on the hull and the cockpit frame, from the ship's client data and cockpit files.
     const extras = deps.extrasOf?.(template, r) ?? { attachments: [], thrusters: [], contrails: [], cockpit: null, notes: [] };
     const weapon = deps.weaponOf?.(id) ?? null;
+    // What the hull's interior layout file stands in its rooms (the YT-1300's passenger chairs: `ilf.mjs`), each a model of
+    // this pack under the room it stands in, at its place and turn in the hull model's frame; none for a ship whose template
+    // names no file. `furniture: []` says the file was read and stood nothing, which `status` tells from a ship read before.
+    const furniture = deps.furnitureOf?.(template, r) ?? null;
     // `chassis` (null when the ship has none) is on every ship whose parts were assembled as a tree
     // (shipparts.mjs): status tells a ship converted before by its absence.
-    ships.push({ id, label: id.replace(/_/g, ' '), template, class: shipClassOf(`${template} ${r.model}`), file: r.file, model: r.model, bounds: b, length: Number(length.toFixed(2)), interior, ...(extras.chassis !== undefined ? { chassis: extras.chassis, wingOpenSpeedFactor: extras.wingOpenSpeedFactor ?? 1 } : {}), attachments: extras.attachments, thrusters: extras.thrusters, contrails: extras.contrails, cockpit: extras.cockpit, weapon, ...(extras.fit ? { fit: extras.fit } : {}), ...(extras.damage ? { damage: extras.damage } : {}), ...(extras.destroyed ? { destroyed: extras.destroyed } : {}), ...(extras.notes.length ? { notes: extras.notes } : {}) });
+    ships.push({ id, label: id.replace(/_/g, ' '), template, class: shipClassOf(`${template} ${r.model}`), file: r.file, model: r.model, bounds: b, length: Number(length.toFixed(2)), interior, ...(furniture ? { furniture } : {}), ...(extras.chassis !== undefined ? { chassis: extras.chassis, wingOpenSpeedFactor: extras.wingOpenSpeedFactor ?? 1 } : {}), attachments: extras.attachments, thrusters: extras.thrusters, contrails: extras.contrails, cockpit: extras.cockpit, weapon, ...(extras.fit ? { fit: extras.fit } : {}), ...(extras.damage ? { damage: extras.damage } : {}), ...(extras.destroyed ? { destroyed: extras.destroyed } : {}), ...(extras.notes.length ? { notes: extras.notes } : {}) });
     const hung = extras.attachments.length ? `, ${hungSummary(extras.attachments)}` : '';
     // The slots, looks, droid socket and paint, once the converter reads the chassis tables for them.
     const fitted = extras.fit !== undefined ? `, ${fitSummary(extras.fit)}` : '';

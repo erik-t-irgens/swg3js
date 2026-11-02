@@ -132,7 +132,7 @@ function after(src: string, marker: string, n = 2000): string {
 {
   // The second wave's hand-overs, which every behaviour test of the selection, the batch and the landing makes for itself.
   ok(/batch: \(edits\) => this\.editorBatch\(edits\),\s*status: \(\) => this\.editorStatus\(\),\s*rowFor: \(id\) => this\.editorRowFor\(id\),/.test(main), "the editor's host writes a batch, asks git's word and reads a row through the game's own (editorBatch, editorStatus, editorRowFor)");
-  ok(/unstandMany: \(keys\) => \{\s*for \(const key of keys\) this\.standOutOf\(key\);\s*this\.world\.unplaceMany\(keys\);\s*\},/.test(main), "the permanent layer's removals go to the streamer at once (`unplaceMany`), everybody stood out of each first");
+  ok(/unstandMany: \(keys\) => \{\s*for \(const key of keys\) this\.standOutOf\(key\);\s*const pieces = this\.furnitureKeysOf\(keys\);\s*this\.world\.unplaceMany\(pieces\.length \? \[\.\.\.pieces, \.\.\.keys\] : keys\);\s*\},/.test(main), "the permanent layer's removals go to the streamer at once (`unplaceMany`), everybody stood out of each first");
   ok(/unplaceMany\(keys: readonly string\[\]\): number \{\s*return this\.layoutStream\?\.unplaceMany\(keys\) \?\? 0;/.test(world), "and the world hands them to its streamer's `unplaceMany`");
   ok(main.includes("import.meta.hot.on('placements:changed', (d: PlacementWord) => this.placementWord(d));"), "the dev server's word goes through `placementWord`, which drops a revision already landed");
   const ed = read('src/editor/editorEntry.ts');

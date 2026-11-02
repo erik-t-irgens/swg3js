@@ -277,7 +277,7 @@ interface TravelWait {
   inside: boolean;
 }
 import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTripsFrom, shipTripsNote, type ShipTerminalState } from './world/shipTerminal.ts';
-import { CLEAR_SPAWN, type Building, type PlacedObject } from './world/layoutStream';
+import { CLEAR_SPAWN, collidesByRule, type Building, type PlacedObject } from './world/layoutStream';
 import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
 import { allDeeds, deedById, deedLine, deedOfModel, deedsLate, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
 import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftTo as houseLiftTo, turnTo, wheelReach, type GhostDeps, type GhostState } from './world/placeGhost.ts';
@@ -291,7 +291,8 @@ import { PROP_TUNE, NO_TURN, liftTo as propLiftTo, propSpot, propVerdict, pushBy
 import { letGoOf, placedProps, propsKey, type LetGo, type PlacedDeps, type PlacedProp } from './world/propsPlaced.ts';
 import { HOUSING_TUNE, LocalHomes, MOVE_SAYS, atDoorDoes, atDoorOf, awayText, backHouseText, houseName, inHandHouseText, isLocalHome, localMoveOf, moveDropped, movedHouseText, myBuildings, pickedHouseText, placeLocalHome, type HomeStore, type HouseMove, type LocalHome, type LocalHomeDeps, type LocalHomeLanding, type MyBuilding } from './world/myBuildings.ts';
 import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, propStandOf, standsSolid, type StandAnswer, type StoodRow, type WorldKind } from './world/permanent.ts';
-import { PLACEMENT_LAYERS, fromGame, parseDonor, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
+import { POST_CLEAR_TUNE, carriedRowIds, pieceRow, pieceStand, piecesInGame, templateEntry, type CarryRow, type GamePiece, type InteriorTemplate, type InteriorsFile, type PieceRow } from './world/interiors.ts';
+import { PLACEMENT_KEY_PREFIX, PLACEMENT_LAYERS, fromGame, parseDonor, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
 import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, driftText, forceText, groundMoved, homeStaysText, inHandText, keptText, nextDestination, nextStateChoice, notYoursText, pickedUpText, removedText, rowFromHouse, rowFromProp, savedText, stateChoiceText, takeOutText, yawOfTurn, type BuildingSource, type Destination as KeptIn, type HandSource, type HomeSource } from './world/permanentEdit.ts';
 import { EDITOR_HEADER, EDITOR_HEADER_VALUE, PLACEMENTS_ENDPOINT_TUNE, type BatchEdit, type PlacementBatchOk, type PlacementBatchReply, type PlacementReply, type PlacementReplyOk } from './world/placementEdits.ts';
 import { EditChip } from './ui/editChip.ts';
@@ -6445,6 +6446,41 @@ class App {
       /** Building interiors: how many are built against how many every loaded building would hold. `force` builds them all to compare. */
       interiors: (force = false) => this.world.interiorStats(force),
       /**
+       * The client's own furniture in its buildings' rooms, out of its interior layout files (`src/world/interiors.ts`, the
+       * `interiors` pass): what this world stands of them (buildings, pieces, left out as standing twice, sound objects,
+       * a building whose row moved since), how many posts were moved clear of a solid piece, every permanent building
+       * standing its template's furniture, and each piece within `near` metres (12) with its key, template, model and
+       * whether it is solid. `{ tune }` moves `POST_CLEAR_TUNE` live (a post already stood keeps its spot).
+       */
+      ilf: (opts: { tune?: Partial<typeof POST_CLEAR_TUNE>; near?: number } = {}) => {
+        if (opts.tune) {
+          const t = POST_CLEAR_TUNE as unknown as Record<string, unknown>;
+          for (const [k, v] of Object.entries(opts.tune)) if (k in t && typeof v === typeof t[k]) t[k] = v;
+        }
+        const f = this.world.interiorsFile;
+        const at = this.player.worldPos;
+        const near: PlacedObject[] = [];
+        this.world.streamer?.containedNear(at.x, at.z, opts.near ?? 12, near);
+        const isPiece = (o: PlacedObject) => !!o.ilf || (o.template.startsWith(PLACEMENT_KEY_PREFIX) && /\.f\d+$/.test(o.template));
+        // A piece standing within half a metre of the same thing the world's own data stands there: what the pass leaves out
+        // (`doublesOf`), counted here over what stands, which should be none.
+        const same = (t: string) => t.replace(/\\/g, '/').toLowerCase().replace(/\/shared_([^/]+)$/, '/$1');
+        const own = near.filter((o) => !isPiece(o));
+        const twice = near.filter((p) => isPiece(p) && own.some((o) => same(o.effectsOf ?? o.template) === same(p.effectsOf ?? p.template) && Math.hypot(o.x - p.x, o.y - p.y, o.z - p.z) <= 0.5)).length;
+        const pieces = near
+          .filter(isPiece)
+          .map((o) => ({ key: o.ilf ?? o.template, template: o.effectsOf ?? o.template, model: o.model, solid: collidesByRule(o), at: [Math.round(o.x * 100) / 100, Math.round(o.y * 100) / 100, Math.round(o.z * 100) / 100], away: Math.round(Math.hypot(o.x - at.x, o.z - at.z) * 10) / 10 }))
+          .sort((a, b) => a.away - b.away);
+        return {
+          world: f ? { version: f.version, files: Object.keys(f.templates).length, buildings: f.buildings.length, counts: f.counts ?? null, stood: this.world.interiorsReport } : 'no interiors.json for this world (run `interiors`; status asks)',
+          postsMovedClear: standingPeople.last.cleared,
+          permanent: [...this.furnished].map(([key, b]) => ({ building: key, file: b.entry.file, pieces: b.keys.length })),
+          twiceNear: twice,
+          near: pieces,
+          tune: { ...POST_CLEAR_TUNE },
+        };
+      },
+      /**
        * The doors in the buildings' doorways (`src/world/doors.ts`): how many stand, are open and are
        * moving, what became of the door models, how many sounds they have played, and the door nearest
        * the player with its style, times, slide, trigger, sounds and how open it is. `{ tune }` moves
@@ -7344,7 +7380,7 @@ class App {
             invisible: mat?.userData.invisible === true,
             casts: o.castShadow,
             ...(placed
-              ? { model: placed.o.model, template: placed.o.effectsOf ?? placed.o.template, row: placed.about.layoutIndex, contained: placed.o.contained, host: placed.about.host, doorway: placed.about.doorway, colliders: placed.about.colliders, solidByRule: placed.about.solidByRule, placedAt: loc(at) }
+              ? { model: placed.o.model, template: placed.o.effectsOf ?? placed.o.template, row: placed.about.layoutIndex, contained: placed.o.contained, host: placed.about.host, doorway: placed.about.doorway, colliders: placed.about.colliders, solidByRule: placed.about.solidByRule, placedAt: loc(at), ...(placed.o.ilf ? { piece: placed.o.ilf } : {}) }
               : room
                 ? { building: room.template, model: room.model, room: room.cell, roomName: room.cellName, placedAt: loc(at.set(room.x, 0, room.z)) }
                 : { mesh: o.name || o.type }),
@@ -25460,12 +25496,16 @@ class App {
     stand: (row, g, key) => this.standDressingRow(row, g, key),
     unstand: (key) => {
       this.standOutOf(key);
+      // Its template's furniture first, as a sync takes props down before the buildings they stand in.
+      this.unfurnish(key);
       this.world.unplaceBuilding(key);
     },
-    // A sync's removals at once: everybody stood out of each first, then every list the streamer keeps walked once.
+    // A sync's removals at once: everybody stood out of each first, then every list the streamer keeps walked once (a
+    // building's template furniture before the buildings).
     unstandMany: (keys) => {
       for (const key of keys) this.standOutOf(key);
-      this.world.unplaceMany(keys);
+      const pieces = this.furnitureKeysOf(keys);
+      this.world.unplaceMany(pieces.length ? [...pieces, ...keys] : keys);
     },
     // A world row stands about `placeFrame` (the layout's centre, or (0, 0) on a world standing through a stand-in), and one
     // naming another world (`from`) once that world's pack is in, light (`World.guestWorld`).
@@ -25546,6 +25586,17 @@ class App {
     if (rows.some((r) => r.pack === 'gallery') || donors.has('gallery')) this.dressingGallery = await this.world.housesPack();
     // Each other world a world row names (`from`), light: its manifest and its trees' shapes, never its layout.
     for (const id of new Set(rows.filter((r) => r.pack === 'world' && r.from).map((r) => r.from as string))) await this.world.guestWorld(id);
+    // The interior layout tables a furnished building row reads its template's furniture from (the interior layout files'
+    // wave), each pack's once, and the client data's effects of the props folder the furniture pack stands its pieces out of.
+    let furnishing = false;
+    for (const r of rows) {
+      if (r.kind !== 'building' || r.furnish === false || r.deed || !r.template) continue;
+      const pack = this.interiorsPackOf(r);
+      if (!pack) continue;
+      if (!this.packInteriors.has(pack)) this.packInteriors.set(pack, await pack.loadInteriors());
+      if (this.packInteriors.get(pack)) furnishing = true;
+    }
+    if (furnishing) await this.world.furnitureDefs([]).loadObjectEffects();
     if (rows.some((r) => r.pack === 'props') || donors.has('props')) {
       try {
         await this.props.load();
@@ -25596,6 +25647,8 @@ class App {
     this.dressingBuilt = Promise.resolve();
     const planet = this.world.planet;
     const kind = this.worldKindOf(planet);
+    // What the last world's buildings stood of their template furniture went with its streamer.
+    this.furnished.clear();
     // The centre rows are written about: the layout's, or (0, 0) on a real-elevation world's stand-in (`placeFrame`).
     const centre = this.world.placeFrame;
     this.dressingGallery = null;
@@ -25792,6 +25845,13 @@ class App {
    * and what to wait on for it to be built, or null.
    */
   private standDressingRow(row: PlacementRow, g: GamePlace, key: string): StandAnswer | null {
+    const answer = this.standDressingModel(row, g, key);
+    // A building stands its template's furniture too (the interior layout files' wave), unless its row says none.
+    return row.kind === 'building' ? this.furnishDressing(row, g, key, answer) : answer;
+  }
+
+  /** A row's own model stood (`standDressingRow`'s first half). */
+  private standDressingModel(row: PlacementRow, g: GamePlace, key: string): StandAnswer | null {
     const s = dressingStandOf(row, g, key, (thing) => propStandOf(this.props.find(thing)), (template) => isSeat(template) || isTableTemplate(template));
     if (!s) return null;
     if (row.pack === 'props') return this.props.pack ? this.world.standPlacement(s, this.props.pack) : null;
@@ -25802,6 +25862,168 @@ class App {
       return guest ? this.world.standPlacement(s, guest) : null;
     }
     return this.world.standPlacement(s, null);
+  }
+
+  // ---- A permanent building's template furniture (the interior layout files' wave, `src/world/interiors.ts`). ----
+
+  /**
+   * Each permanent building standing its template's furniture, by its streamer key: the keys its pieces are filed under,
+   * the pieces in the game's frame, the file's entry and the pack the entry came from. Kept so a building taken down takes
+   * them, and so the editor can make them its own.
+   */
+  private readonly furnished = new Map<string, { keys: string[]; pieces: GamePiece[]; entry: InteriorTemplate; file: InteriorsFile; pack: AssetPack; row: PlacementRow }>();
+  /** Each pack's interior layout table, read before a sync stands anything (`dressingPacks`), null for a pack with none. */
+  private readonly packInteriors = new WeakMap<AssetPack, InteriorsFile | null>();
+
+  /** The pack a building row's template furniture is read from: the gallery's, its world's, or another world's (`from`). */
+  private interiorsPackOf(row: PlacementRow): AssetPack | null {
+    if (row.pack === 'gallery') return this.dressingGallery;
+    if (row.pack === 'world') return row.from ? this.world.guestWorldNow(row.from) : this.world.ownPack;
+    return null;
+  }
+
+  /**
+   * The furniture a building row stands: the pieces of its template's file (`templateEntry`, by the row's own template; a row
+   * with none, a deed's house and a row whose model is not its template's stand none), in the pack's table, at the row's
+   * place and turn. Null for none.
+   */
+  private furnitureOfRow(row: PlacementRow): { entry: InteriorTemplate; file: InteriorsFile; pack: AssetPack } | null {
+    if (row.kind !== 'building' || row.deed || !row.template || !row.model) return null;
+    const pack = this.interiorsPackOf(row);
+    const file = pack ? (this.packInteriors.get(pack) ?? null) : null;
+    const entry = templateEntry(file, row.template);
+    return pack && file && entry && entry.model === row.model ? { entry, file, pack } : null;
+  }
+
+  /**
+   * A building's template furniture stood beside it (`standDressingRow`): whatever it stood before taken down first, then,
+   * unless its row says `furnish: false`, every piece of its file through the world's own placement as `pieceStand` stands
+   * it (under a key of its own, in its rooms -- hosted by the building as it is filed, which was a moment ago -- solid as the
+   * world's own furniture is, its client data's effects by its own template); a piece of the building's own pack out of that
+   * pack, any other out of the world's furniture pack over the props folder. What a loading screen waits on is the
+   * building's and every piece's.
+   */
+  private furnishDressing(row: PlacementRow, g: GamePlace, key: string, answer: StandAnswer | null): StandAnswer | null {
+    this.unfurnish(key);
+    if (!answer || row.furnish === false) return answer;
+    const got = this.furnitureOfRow(row);
+    if (!got) return answer;
+    const fp = this.world.furnitureDefs(got.file.defs);
+    const pieces = piecesInGame(got.entry, g, g.q);
+    const keys: string[] = [];
+    const builds: Promise<unknown>[] = answer.built ? [answer.built] : [];
+    for (const p of pieces) {
+      const s = pieceStand(p, key, row);
+      const a = this.world.standPlacement(s, p.from === 'own' ? got.pack : fp);
+      if (!a) continue;
+      keys.push(s.key);
+      if (a.built) builds.push(a.built);
+    }
+    this.furnished.set(key, { keys, pieces, entry: got.entry, file: got.file, pack: got.pack, row });
+    return builds.length > 1 ? { ...answer, built: Promise.all(builds) } : answer;
+  }
+
+  /** The props catalogue's things by their templates, kept with the list they were read from (`propThingOf`, `pieceName`). */
+  private propsByTemplate: { all: readonly { id: string; template: string | null; name?: string | null }[]; map: Map<string, { id: string; name: string | null }> } | null = null;
+
+  /** The props catalogue's thing for a template, or null: what a piece of a building's furniture is written as when made its own. */
+  private propThingOf(template: string): { id: string; name: string | null } | null {
+    const all = this.props.all;
+    if (this.propsByTemplate?.all !== all) {
+      const map = new Map<string, { id: string; name: string | null }>();
+      for (const p of all) if (p.template && !map.has(p.template)) map.set(p.template, { id: p.id, name: p.name ?? null });
+      this.propsByTemplate = { all, map };
+    }
+    return this.propsByTemplate.map.get(template) ?? null;
+  }
+
+  /** A piece of a building's furniture in words: the props catalogue's name for it, else its template's file name. */
+  private pieceName(template: string): string {
+    return this.propThingOf(template)?.name ?? template.replace(/^.*\/(shared_)?/, '').replace(/\.iff$/, '');
+  }
+
+  /** A building's template furniture taken down (it is going, or standing again). */
+  private unfurnish(key: string): void {
+    const f = this.furnished.get(key);
+    if (!f) return;
+    this.furnished.delete(key);
+    if (f.keys.length) this.world.unplaceMany(f.keys);
+  }
+
+  /** The furniture keys of buildings going at once, forgotten as they are handed over (`unstandMany`). */
+  private furnitureKeysOf(keys: readonly string[]): string[] {
+    const out: string[] = [];
+    for (const k of keys) {
+      const f = this.furnished.get(k);
+      if (!f) continue;
+      this.furnished.delete(k);
+      for (const p of f.keys) out.push(p);
+    }
+    return out;
+  }
+
+  /**
+   * A furnished building row's template furniture as rows of its own (the editor's make-own, `EditorHost.ownFurniture`): each
+   * piece standing now a row in the building's own file, in its room (`inside`), at its place and turn in the file's frame --
+   * a props catalogue thing by the piece's template, a model of the building's own pack by its id and template (and the world
+   * it comes from), an effect a mark carrying it -- never solid where it is a seat or a table, as it stood. `fresh` where any
+   * row would stand out of a model its pack has not loaded (the props catalogue's own copy of a piece the furniture pack
+   * drew), which the editor writes behind its curtain. Or why not, in words.
+   */
+  private ownFurnitureRows(id: string): { rows: { base: string; index: number; row: Omit<PlacementRow, 'id'> }[]; fresh: boolean } | string {
+    const key = placementKey(id);
+    const f = this.furnished.get(key);
+    const had = this.editRowOf(id);
+    if (!had || had.row.kind !== 'building') return `${id} is no building of the files`;
+    if (had.row.furnish === false) return `${id}'s furniture is its own already (or it stands none)`;
+    if (!f || !f.keys.length) return `${id} stands no furniture of its template's here`;
+    // Each piece as a row of the building's own file, by the rule `pieceRow` holds (and a node test with it).
+    const ctx = {
+      centre: this.world.placeFrame,
+      frame: (this.world.planet.space ? 'game' : 'raw') as 'game' | 'raw',
+      here: this.editWorld(),
+      defOf: (model: string) => f.file.defs.find((d) => d.id === model) ?? null,
+      thingOf: (template: string) => this.propThingOf(template)?.id ?? null,
+    };
+    const rows: PieceRow[] = [];
+    let fresh = false;
+    for (const p of f.pieces) {
+      const got = pieceRow(p, had.row, ctx);
+      if (typeof got === 'string') return got;
+      rows.push(got);
+      // A thing of the props catalogue whose model its pack has not loaded is new to the session: the editor's curtain then.
+      const model = got.row.pack === 'props' && got.row.thing ? this.props.find(got.row.thing)?.model : undefined;
+      if (model && !this.props.pack?.loaded(model)) fresh = true;
+    }
+    return { rows, fresh };
+  }
+
+  /**
+   * The ids of the rows a building row whose furniture is its own carries (`carriedRowIds`, the editor's `hostedRows`): every
+   * row of its own file standing in its rooms, marks included, by the very rule a thing put down there is hosted. Empty for
+   * anything that is no permanent building standing here. Asked of an edit.
+   */
+  private hostedRowIds(key: string): string[] {
+    const b = this.permanent.rowOf(key);
+    const s = this.world.streamer;
+    if (!b || !s || b.row.kind !== 'building') return [];
+    const rows: CarryRow[] = [];
+    for (const r of this.permanent.standing) rows.push({ id: r.row.id, layer: r.layer, kind: r.row.kind ?? 'prop', inside: r.row.inside, x: r.x, y: r.y, z: r.z });
+    return carriedRowIds({ id: b.row.id, key, layer: b.layer }, rows, (x, y, z) => s.hostKeyAt(x, y, z));
+  }
+
+  /** How a building row's furniture stands here, in words (the Selected tab's "Its furniture"). */
+  private furnitureNote(id: string): string {
+    const had = this.editRowOf(id);
+    if (!had || had.row.kind !== 'building') return '';
+    if (had.row.deed) return "a player's deed: no furniture of the client's";
+    const f = this.furnished.get(placementKey(id));
+    if (had.row.furnish === false) {
+      const own = this.hostedRowIds(placementKey(id)).length;
+      return own ? `its own: ${own} row${own === 1 ? '' : 's'} in its rooms (they move and go with it)` : 'none (furnish: false)';
+    }
+    if (f) return `${f.keys.length} pieces of ${f.entry.file.replace(/^interiorlayout\//, '')} (click one to make them its own)`;
+    return had.row.template ? 'none: its template names no interior layout file here (or its pack was converted before the furniture)' : 'none: its row names no template';
   }
 
   /** What a permanent thing is called in words: the props catalogue's name for it, else the row's own, else a building's deed's, else its id. */
@@ -28801,6 +29023,10 @@ class App {
           zoneNote: (x, z, r) => this.noBuildHere(x, z, r, 'editor'),
           locations: () => ({ rows: this.placesFile?.locations ?? [], ...this.placesFileInfoOf(this.editWorld()) }),
           locationRows: () => this.placesFile?.locations ?? this.noLocationRows,
+          // The interior layout files' wave: a building's template furniture made its own, and how its furniture stands.
+          ownFurniture: (id) => this.ownFurnitureRows(id),
+          furnitureNote: (id) => this.furnitureNote(id),
+          hostedRows: (key) => this.hostedRowIds(key),
         });
         this.editor = ed;
         return ed;
@@ -29278,6 +29504,17 @@ class App {
       const g = s ?? placementToGame(row, this.world.placeFrame, r.frame);
       const d = Math.hypot(g.x - at.x, g.z - at.z);
       rows.push({ d, view: { id: x.id, layer: x.layer, label: s?.label ?? this.dressingLabel(row), away: awayText(d), stood: x.stood, bad: x.why === 'inHand' ? null : x.why } });
+    }
+    // The pieces of each furnished building's template furniture (the interior layout files' wave), under the id a click on
+    // one names (`<building id>.f<n>`): picked, the building's furniture is made its own first.
+    for (const [key, f] of this.furnished) {
+      const bid = key.slice(PLACEMENT_KEY_PREFIX.length);
+      const layer = this.permanent.rowOf(key)?.layer ?? 'world';
+      const of = this.permanent.rowOf(key)?.label ?? bid;
+      for (const p of f.pieces) {
+        const d = Math.hypot(p.x - at.x, p.z - at.z);
+        rows.push({ d, view: { id: `${bid}.f${p.index}`, layer, label: `${this.pieceName(p.template)} (${of}'s furniture)`, away: awayText(d), stood: true, bad: null } });
+      }
     }
     rows.sort((a, b) => a.d - b.d);
     return rows.slice(0, most).map((x) => x.view);

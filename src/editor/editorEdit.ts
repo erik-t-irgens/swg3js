@@ -146,6 +146,52 @@ export interface EditEditor {
    * What the pivot of a picked mark is (Map-maker II's seventh wave).
    */
   markAt?(key: string, out: { x: number; y: number; z: number }): boolean;
+  /**
+   * The ids of the rows of the building's own file standing in the rooms of the building filed under `key`, marks included,
+   * by the very rule a thing put down there is hosted (the game's `carriedRowIds`, the interior layout files' wave): a
+   * building whose furniture is its own (`furnish: false`) carries them however it moves and takes them however it goes
+   * (`ownFurniture`). Absent, or empty, carries nothing.
+   */
+  hostedRows?(key: string): string[];
+  /**
+   * A click on a piece of a furnished building's template furniture (an id `<building id>.f<n>`, which no row has): the
+   * editor makes that building's furniture its own rows first and then picks the row the piece became. Answers whether it
+   * took the click (an id that is no such piece is the selection's, as every id was).
+   */
+  ownPiece?(id: string, shift: boolean): boolean;
+}
+
+/**
+ * The ids an edit of `ids` takes in: each one, then the rows standing in the rooms of each building among them whose
+ * furniture is its own (`furnish: false`, `EditEditor.hostedRows`), each once and in the order met; and which building
+ * each such row stands in (`host`, by id), whether or not it was among `ids` itself, so it follows its building rigidly
+ * (`carryPose`). A building furnished from its template's file carries nothing (its furniture is the file's and stands with
+ * it wherever it goes); nor does anything else, so every edit of a row that is no such building takes exactly the ids it was
+ * handed. What every way of moving, copying or taking out a building row asks (the gizmo, the holds, the nudges, End, a
+ * scale, Ctrl+D, Ctrl+C and Ctrl+X, Delete on the selection, on the aim and on the Here tab).
+ */
+export function ownFurniture(ids: readonly string[], ed: Pick<EditEditor, 'rowFor' | 'hostedRows'>): { ids: string[]; host: Map<string, string> } {
+  const out = [...ids];
+  const host = new Map<string, string>();
+  if (!ed.hostedRows) return { ids: out, host };
+  const seen = new Set(ids);
+  for (const id of ids) {
+    const r = ed.rowFor(id);
+    if (!r || r.row.kind !== 'building' || r.row.furnish !== false) continue;
+    for (const h of ed.hostedRows(placementKey(id))) {
+      if (h === id || host.has(h) || !ed.rowFor(h)) continue;
+      host.set(h, id);
+      if (seen.has(h)) continue;
+      seen.add(h);
+      out.push(h);
+    }
+  }
+  return { ids: out, host };
+}
+
+/** The ids alone (`ownFurniture`). */
+export function withOwnFurniture(ids: readonly string[], ed: Pick<EditEditor, 'rowFor' | 'hostedRows'>): string[] {
+  return ownFurniture(ids, ed).ids;
 }
 
 /**
@@ -183,6 +229,59 @@ interface Live {
   mark: boolean;
   box: { min: number[]; max: number[] } | null;
   copies: THREE.InstancedMesh[];
+  /**
+   * The interior layout files' wave: the live of the building whose furniture is its own that this row stands in the
+   * rooms of (`ownFurniture`), or -1. Such a row follows its building rigidly (`carryPose`) whatever the edit does to the
+   * rest: moved, turned and dropped as the building is, never spread or resized by a scale (a building with rooms takes
+   * none), so its furniture never ends up in mid-air, under the floor or through the walls.
+   */
+  host: number;
+}
+
+/**
+ * Where a row carried by its building stands once the building has moved from `was` to `now` (each a place of the game's
+ * frame and a turn, three's order): its offset from the building's old place turned by the building's turn since, laid
+ * from the building's new place, and its own turn composed with that turn in the world's frame. Its scale is its own.
+ * Written into `out`; nothing is made, so a frame of a live edit pays nothing for it.
+ */
+export function carryPose(was: HeldThing, now: HeldThing, base: HeldThing, out: HeldThing): HeldThing {
+  // The building's turn since: r = now * conjugate(was).
+  const a = now.turn;
+  const b = was.turn;
+  const bx = -b.x;
+  const by = -b.y;
+  const bz = -b.z;
+  const bw = b.w;
+  const rw = a.w * bw - a.x * bx - a.y * by - a.z * bz;
+  const rx = a.w * bx + a.x * bw + a.y * bz - a.z * by;
+  const ry = a.w * by - a.x * bz + a.y * bw + a.z * bx;
+  const rz = a.w * bz + a.x * by - a.y * bx + a.z * bw;
+  // Its offset from the building, turned (v + 2w(r × v) + 2 r × (r × v)).
+  const ox = base.x - was.x;
+  const oy = base.y - was.y;
+  const oz = base.z - was.z;
+  const tx = 2 * (ry * oz - rz * oy);
+  const ty = 2 * (rz * ox - rx * oz);
+  const tz = 2 * (rx * oy - ry * ox);
+  const nx = ox + rw * tx + (ry * tz - rz * ty);
+  const ny = oy + rw * ty + (rz * tx - rx * tz);
+  const nz = oz + rw * tz + (rx * ty - ry * tx);
+  const q = base.turn;
+  const qx = rw * q.x + rx * q.w + ry * q.z - rz * q.y;
+  const qy = rw * q.y - rx * q.z + ry * q.w + rz * q.x;
+  const qz = rw * q.z + rx * q.y - ry * q.x + rz * q.w;
+  const qw = rw * q.w - rx * q.x - ry * q.y - rz * q.z;
+  out.x = now.x + nx;
+  out.y = now.y + ny;
+  out.z = now.z + nz;
+  out.turn.x = qx;
+  out.turn.y = qy;
+  out.turn.z = qz;
+  out.turn.w = qw;
+  out.sx = base.sx;
+  out.sy = base.sy;
+  out.sz = base.sz;
+  return out;
 }
 
 /** An edit under way: what it is called, its rows, its pivot, and its totals. */
@@ -673,7 +772,10 @@ export class EditorEdits {
     if (clicked && !this.quiet && !armed && !ed.inHand() && !this.dragging && !this.live && gz.hot < 0) {
       const shift = ed.input.isDown('ShiftLeft') || ed.input.isDown('ShiftRight');
       this.clickedNow = true;
-      if (this.sel.click(ed.hoveredId(), shift)) ed.refreshWindow();
+      // A piece of a building's template furniture is made that building's own first (the interior layout files' wave).
+      const hov = ed.hoveredId();
+      if (hov && ed.ownPiece?.(hov, shift)) ed.refreshWindow();
+      else if (this.sel.click(hov, shift)) ed.refreshWindow();
     }
     this.wasDrag = this.dragging;
     if (this.live) this.placeLive();
@@ -876,7 +978,11 @@ export class EditorEdits {
     const lives: Live[] = [];
     const centre = ed.centre();
     const frame = ed.frame();
-    for (const id of this.sel.ids) {
+    // A building whose furniture is its own carries its rows (the interior layout files' wave); the pivot stays the selection's.
+    // Its rows come after every row that is no such row, so each building is placed before what it carries (`placeLive`).
+    const own = ownFurniture(this.sel.ids, ed);
+    const order = [...own.ids.filter((id) => !own.host.has(id)), ...own.ids.filter((id) => own.host.has(id))];
+    for (const id of order) {
       const r = ed.rowFor(id);
       if (!r) continue;
       const key = placementKey(id);
@@ -889,9 +995,16 @@ export class EditorEdits {
       const o = ed.placed(key);
       const copies = ed.copies(key);
       if (copies.length) ed.setHidden(key, true);
-      lives.push({ id, key, layer: r.layer, row: r.row, label: r.label, base, now: held(base), rooms, mark, box: o ? ed.boxOf(o) : null, copies });
+      lives.push({ id, key, layer: r.layer, row: r.row, label: r.label, base, now: held(base), rooms, mark, box: o ? ed.boxOf(o) : null, copies, host: -1 });
     }
     if (!lives.length) return null;
+    if (own.host.size) {
+      const at = new Map(lives.map((l, i) => [l.id, i]));
+      for (const l of lives) {
+        const h = own.host.get(l.id);
+        l.host = h === undefined ? -1 : (at.get(h) ?? -1);
+      }
+    }
     // A size asked of marks alone moves nothing, and says why (a mark's effect is sized on its own handle).
     if (label === 'scale' && lives.every((l) => l.mark)) ed.say('a mark takes no size: pick its effect by its handle and hold C to size the effect', false);
     const pv = { x: 0, y: 0, z: 0 };
@@ -971,7 +1084,8 @@ export class EditorEdits {
     const depth = (L.pivot.x - v.ex) * v.fx + (L.pivot.y - v.ey) * v.fy + (L.pivot.z - v.ez) * v.fz;
     const within = depth > 0 && v.focal > 0 ? (EDITOR_TUNE.snap.neighbourPx * depth) / v.focal : 0;
     L.flush.x = L.flush.y = L.flush.z = 0;
-    if (!(within > 0) || L.lives.length !== 1) return;
+    // One row picked, whatever its building carries (the rows a building carries come after every other, `begin`).
+    if (!(within > 0) || !(L.lives.length === 1 || L.lives[1].host >= 0)) return;
     const l = L.lives[0];
     if (!l.box) return;
     this.placeOne(L, l);
@@ -1002,6 +1116,12 @@ export class EditorEdits {
 
   /** One live row's place now, from the edit's totals. */
   private placeOne(L: LiveEdit, l: Live): void {
+    // A row a building whose furniture is its own carries: wherever its building now goes, rigidly (placed before it).
+    if (l.host >= 0) {
+      const h = L.lives[l.host];
+      carryPose(h.base, h.now, l.base, l.now);
+      return;
+    }
     const pv = L.pivot;
     const probe = L.probe;
     const snap = this.snapOn;
@@ -1393,7 +1513,11 @@ export class EditorEdits {
     const hit: SurfaceHit = { y: 0, nx: 0, ny: 1, nz: 0 };
     const ground: SurfaceHit = { y: Number.NaN, nx: 0, ny: 1, nz: 0 };
     const under: SurfaceHit = { y: 0, nx: 0, ny: 1, nz: 0 };
+    // Where each started (a dropped row's base is replaced, never written into): what a carried row follows its building from.
+    const was = L.lives.map((l) => l.base);
     for (const l of L.lives) {
+      // A row a building whose furniture is its own carries is never dropped on its own: it goes as its building goes (below).
+      if (l.host >= 0) continue;
       const b = l.base;
       let lowest = 0;
       if (l.box) {
@@ -1416,6 +1540,11 @@ export class EditorEdits {
       l.base = held(l.base);
       l.base.y = y;
       if (lean) leanTo(l.base.turn, under.nx, under.ny, under.nz, EDITOR_TUNE.snap.normalMaxDeg, l.base.turn);
+    }
+    // What a building carries goes where its building went (raised, dropped or leaned), never cast down onto its old floor.
+    for (const l of L.lives) {
+      if (l.host < 0) continue;
+      l.base = carryPose(was[l.host], L.lives[l.host].base, l.base, held(l.base));
     }
     // The bases moved: what is written is each base as it now is (the edit's totals stay at nought).
     const before = L.lives.map((l) => l.row);
@@ -1554,7 +1683,10 @@ export class EditorEdits {
   /** Ctrl+D: the selection copied in place (offset `dupOffset`), the copies picked. */
   async duplicate(): Promise<string> {
     if (!this.sel.size || this.live || this.writing) return 'nothing picked, or an edit under way';
-    const rows = this.sel.ids.map((id) => this.ed.rowFor(id)).filter((r): r is NonNullable<typeof r> => !!r);
+    // A building whose furniture is its own is copied with its rows (the interior layout files' wave), or the copy, which
+    // says `furnish: false`, would stand empty; the copies of what was picked are picked, not the furniture's.
+    const picked = new Set(this.sel.ids);
+    const rows = withOwnFurniture(this.sel.ids, this.ed).map((id) => this.ed.rowFor(id)).filter((r): r is NonNullable<typeof r> => !!r);
     if (!rows.length) return 'nothing picked stands in the files';
     const ids = this.mintIds(rows.map((r) => r.row.thing ?? r.row.model ?? (r.row.kind === 'mark' ? 'mark' : 'place')));
     const off = EDITOR_TUNE.dupOffset;
@@ -1584,7 +1716,10 @@ export class EditorEdits {
     });
     const said = await this.write({ label: 'duplicate', changes });
     if (this.lastWrite && !this.lastWrite.said) {
-      this.sel.pick(ids, 'set');
+      this.sel.pick(
+        ids.filter((_, i) => picked.has(rows[i].row.id)),
+        'set',
+      );
       this.ed.refreshWindow();
     }
     return said;
@@ -1595,7 +1730,9 @@ export class EditorEdits {
     if (!this.sel.size) return 'nothing picked';
     const centre = this.ed.centre();
     const frame = this.ed.frame();
-    const placed = this.sel.ids
+    // A building whose furniture is its own is copied with its rows (the interior layout files' wave): a paste stands it
+    // furnished, and a cut takes out exactly what it copied (`deleteSelected` takes the same rows).
+    const placed = withOwnFurniture(this.sel.ids, this.ed)
       .map((id) => this.ed.rowFor(id))
       .filter((r): r is NonNullable<typeof r> => !!r)
       .map((r) => {
@@ -1664,7 +1801,27 @@ export class EditorEdits {
   /** Delete: the selection taken out of its files, asking once past `askAbove` (a second press within three seconds). */
   async deleteSelected(force: boolean, prefix = ''): Promise<string> {
     if (!this.sel.size || this.live || this.writing) return 'nothing picked, or an edit under way';
-    const rows = this.sel.ids.map((id) => this.ed.rowFor(id)).filter((r): r is NonNullable<typeof r> => !!r);
+    return this.deleteRows(this.sel.ids, force, prefix, true);
+  }
+
+  /**
+   * Whether a row is a building whose furniture is its own and carries rows (`ownFurniture`): what O refuses, and what the
+   * Delete on the aim and the Here tab's Delete take out with it through `deleteRows`.
+   */
+  carries(id: string): number {
+    return withOwnFurniture([id], this.ed).length - 1;
+  }
+
+  /**
+   * Rows taken out of their files as one action (the selection's Delete, and the Delete on the aim and the Here tab's of a
+   * building whose furniture is its own): each building whose furniture is its own takes its rows with it (one undo puts
+   * them all back), asking once past `askAbove` (a second press within three seconds) unless `force`. Written, the selection
+   * is emptied when it was what went (`picked`), else keeps what did not go.
+   */
+  async deleteRows(ids: readonly string[], force: boolean, prefix = '', picked = false): Promise<string> {
+    if (this.live || this.writing) return 'nothing picked, or an edit under way';
+    // A building whose furniture is its own takes its rows with it, in the same one action (one undo puts them all back).
+    const rows = withOwnFurniture(ids, this.ed).map((id) => this.ed.rowFor(id)).filter((r): r is NonNullable<typeof r> => !!r);
     if (!rows.length) return 'nothing picked stands in the files';
     const now = Date.now();
     if (!force && rows.length > EDITOR_TUNE.askAbove && !(now < this.askedDelete && this.askedCount === rows.length)) {
@@ -1679,7 +1836,11 @@ export class EditorEdits {
     const changes: RowChange[] = rows.map((r) => ({ file: r.layer, id: r.row.id, before: r.row, after: null }));
     const said = await this.write({ label: 'delete', changes });
     if (this.lastWrite?.said) for (const r of rows) this.ed.setHidden(placementKey(r.row.id), false);
-    else this.sel.clear();
+    else if (picked) this.sel.clear();
+    else {
+      const gone = new Set(rows.map((r) => r.row.id));
+      this.sel.keepOnly((id) => !gone.has(id));
+    }
     const words = prefix ? `${prefix}; ${said}` : said;
     this.ed.say(words, !this.lastWrite?.said);
     return words;
@@ -1803,11 +1964,13 @@ export class EditorEdits {
    * A row's own fields set on **every** picked row alike (the Selected tab, the console's `set`): its name, note, state,
    * solidity, flora clearing and guard, one action however many rows.
    */
-  async setField(fields: Partial<Record<'name' | 'note' | 'state' | 'solid' | 'clear' | 'guard', unknown>>): Promise<string> {
+  async setField(fields: Partial<Record<'name' | 'note' | 'state' | 'solid' | 'clear' | 'guard' | 'furnish', unknown>>): Promise<string> {
     this.sameWorld();
     if (!this.sel.size || this.live || this.writing) return 'pick one first';
     const changes: RowChange[] = [];
     let marksPassed = 0;
+    let notBuildings = 0;
+    let ownKept = 0;
     for (const id of this.sel.ids) {
       const r = this.ed.rowFor(id);
       if (!r) continue;
@@ -1822,6 +1985,23 @@ export class EditorEdits {
           marksPassed++;
           continue;
         }
+        // A building's furniture (the interior layout files' wave): only a building has any, and only `false` is kept.
+        if (k === 'furnish') {
+          if (r.row.kind !== 'building') {
+            notBuildings++;
+            continue;
+          }
+          // Its template's furniture back on a building whose rooms hold rows of its own (a make-own's) would stand every
+          // piece twice, the file's beside its own rows: refused in words, and the rows are the owner's to take out first.
+          if ((v === true || v === null) && r.row.furnish === false && this.carries(id) > 0) {
+            ownKept++;
+            continue;
+          }
+          touched = true;
+          if (v === false) after.furnish = false;
+          else if (v === true || v === null) delete after.furnish;
+          continue;
+        }
         touched = true;
         if (k === 'name' || k === 'note' || k === 'state') {
           if (v === '' || v === null) delete after[k];
@@ -1834,10 +2014,16 @@ export class EditorEdits {
           else if (typeof v === 'number' && v >= 0) after[k] = v;
         }
       }
-      if (mark && !touched) continue;
+      if (!touched) continue;
       changes.push({ file: r.layer, id: r.row.id, before: r.row, after });
     }
-    const passed = marksPassed ? 'a mark takes no solidity, flora clearing or guard: it carries effects and sounds alone' : '';
+    const passed = marksPassed
+      ? 'a mark takes no solidity, flora clearing or guard: it carries effects and sounds alone'
+      : ownKept
+        ? "its furniture is rows of its own in its rooms: the file's would stand beside them, every piece twice (undo the make-own, or take those rows out first)"
+        : notBuildings
+          ? 'only a building stands furniture of its own'
+          : '';
     if (!changes.length) {
       if (passed) this.ed.say(passed, false);
       return passed || 'nothing picked stands in the files';

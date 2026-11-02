@@ -16,7 +16,7 @@ import { COCKPIT_BODY_NUDGE, EYE_OVER_PELVIS, bodyLift, frameFileName, isEyeHard
 import { EngineTrail } from './trail';
 import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
 import { planSeat, hangSaddle, type SaddleDef, type SeatPlan } from './saddle';
-import { PART_LIMIT, applyPlace, findHardpoint, hangAttachments, hardpointName, partOf, underPivot, wingDrop, type AttachmentDef, type Assembly } from './shipAssembly';
+import { PART_LIMIT, applyPlace, findHardpoint, furniturePassable, hangAttachments, hardpointName, partOf, placeFurniture, underPivot, wingDrop, type AttachmentDef, type Assembly, type FurnitureDef } from './shipAssembly';
 import { WING_DROP_MIN, WING_TIP_ROOM, WingSet, type Wing } from './wings';
 import { armGuns, changedSlots, componentIndex, droidShown, droidSink, paintOnlyFit, partsOf, resolveFit, samePaint, type ComponentDef, type DroidDef, type FitDef, type FitPaint, type PlacedPart, type ResolvedFit, type ShipFit } from './shipFit.ts';
 import { collectMounts, countSpotHardpoints, dropWingsUnder, engineSpotsOf, fitTree, hangParts, onModel, rebindGlows, recordHung, refitSwap, splitPartChildren, stageRefit, type Mounts, type PendingPart, type ShipBuild, type SpareGlows, type StandIn, type SwapResult } from './shipMounts';
@@ -74,6 +74,11 @@ export interface VehicleDef {
   rig?: { name: string; rig: TravelRig; mood: string; hull: string } | null;
   /** A ship's interior, when it has one: the model, and what the manifest says of its cells and bounds. */
   interior?: { file: string; cells: number; def: import('./interior').InteriorDef } | null;
+  /**
+   * A ship's own furniture in its rooms (the interior layout files' wave), as its manifest entry writes it: each piece's model,
+   * its template, its room's index and its place and turn (`[w, x, y, z]`) in the hull's own frame. Absent for none.
+   */
+  furniture?: FurnitureDef[];
   /** What the manifest says of the hull model's own cells, when it is a portal building (rooms, their lights), and its portal polygons. */
   cells?: NonNullable<import('./interior').InteriorDef['cells']>;
   portals?: NonNullable<import('./interior').InteriorDef['portals']>;
@@ -264,7 +269,7 @@ export class Garage {
         type Attachment = NonNullable<VehicleDef['attachments']>[number];
         type Cockpit = NonNullable<VehicleDef['cockpit']>;
         type Portals = NonNullable<import('./interior').InteriorDef['portals']>;
-        const manifest = (await res.json()) as { late?: unknown; ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[]; weapon?: ShipWeapon | null; chassis?: string | null; wingOpenSpeedFactor?: number; fit?: FitDef | null; npc?: boolean }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells; portals?: Portals }[] };
+        const manifest = (await res.json()) as { late?: unknown; ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; furniture?: { file: string; template?: string; cell: number; place: number[]; turn: number[] }[]; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[]; weapon?: ShipWeapon | null; chassis?: string | null; wingOpenSpeedFactor?: number; fit?: FitDef | null; npc?: boolean }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells; portals?: Portals }[] };
         g.late.ships = manifest.late ?? null;
         const modelByFile = new Map((manifest.models ?? []).map((m) => [m.file, m]));
         for (const sh of manifest.ships) {
@@ -283,6 +288,8 @@ export class Garage {
             interior: sh.interior?.file ? { file: `assets-private/ships/${sh.interior.file}`, cells: sh.interior.cells ?? 0, def: { bounds: im?.bounds, cells: im?.cells, portals: im?.portals } } : null,
             cells: hull?.cells,
             portals: hull?.portals,
+            // Its own furniture in its rooms, where its manifest carries any (the interior layout files' wave).
+            ...(sh.furniture?.length ? { furniture: sh.furniture.map((f) => ({ ...f, file: `assets-private/ships/${f.file}` })) } : {}),
             attachments: (sh.attachments ?? []).map((a) => ({ ...a, file: `assets-private/ships/${a.file}` })),
             chassis: sh.chassis ?? null,
             wingOpenSpeedFactor: sh.wingOpenSpeedFactor ?? 1,
@@ -640,6 +647,46 @@ export class Garage {
 
   /** Each droid model's lowest and highest point in its own frame, posed as it stands in a socket (fitPart), by file. */
   private readonly droidSpans = new Map<string, [number, number]>();
+
+  /**
+   * A ship's own furniture (the interior layout files' wave: `furniture` on its manifest entry, which the ships command reads
+   * out of the client's interior layout file its template names): each piece loaded as a part is, stood at its place and
+   * turn in the hull's own frame and moved under its room's node (`attach`, so a room node standing anywhere carries it
+   * right), so it is shown and hidden with its room and is part of the rooms the hull carries. A seat or a table is marked
+   * passable (`passableFurniture`): drawn, never a collider of the rooms. Answers what could not be hung, in words.
+   */
+  private async hangFurniture(def: VehicleDef, model: THREE.Object3D): Promise<string[]> {
+    const list = def.furniture ?? [];
+    const rooms = new Map<number, THREE.Object3D>();
+    model.traverse((o) => {
+      const i = ownCellIndex(o);
+      if (i > 0 && !rooms.has(i)) rooms.set(i, o);
+    });
+    const load = this.partLoader(def);
+    const loaded = await Promise.all(list.map((f) => load(f.file).catch(() => null)));
+    model.updateMatrixWorld(true);
+    const left: string[] = [];
+    list.forEach((f, i) => {
+      const node = loaded[i];
+      const room = rooms.get(f.cell);
+      if (!node || !room) {
+        left.push(`furniture ${fileName(f.file)} (${node ? `no room ${f.cell}` : 'its model did not load'})`);
+        return;
+      }
+      placeFurniture(node, f);
+      node.userData.furniture = true;
+      // A seat or a table, and a pilot's chair too (which the buildings' rule keeps solid): never a collider of the rooms.
+      if (furniturePassable(f)) {
+        node.traverse((o) => {
+          if ((o as THREE.Mesh).isMesh) o.userData.passableFurniture = true;
+        });
+      }
+      model.add(node);
+      node.updateMatrixWorld(true);
+      room.attach(node);
+    });
+    return left;
+  }
 
   /** A part def's model, as hangAttachments loads one (a ship's stay dry). */
   private partLoader(def: VehicleDef): (file: string) => Promise<THREE.Object3D> {
@@ -1130,6 +1177,8 @@ export class Garage {
       }
       build.standIns = standIns;
     }
+    // The ship's own furniture in its rooms (the interior layout files' wave): each piece under its room's node.
+    if (def.furniture?.length) unresolved.push(...(await this.hangFurniture(def, model)));
     // Every part counted once, on the model itself: a part hung by name and each part on it once each, a part
     // merged into an identical one once (one node for its slots), a part still waiting for its carrier not at all.
     const hung = hungParts(model).length;

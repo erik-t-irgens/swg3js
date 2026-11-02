@@ -60,7 +60,7 @@ import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.t
 import { GROUND_FIRST_CHILD_ONLY, GROUND_NORMAL, GROUND_TILES_WANTED, groundSelfTest, groundTileUniforms, groundTilesMaterial, setGroundClock, TerrainTextures, writeGroundDraw, type GroundSelfTest, type ShadersFile } from './terrainTextures.ts';
 import { GROUND_DRAW_TUNE, groundChunkAt, groundChunkOrigin, tilesFit, worldRowSwitches, type CornerName, type DrawSwitchesKept, type GroundColour, type GroundShine } from './groundTiles.ts';
 import { PICTURES_NOT_LOADED, appendLending, arrivalAsks, baseFamilyId, familyOfKey, groundPacksOf, lendInto, lentAnswer, lentPackDir, lentPacksOf, lentPicturesOf, loadLentTable, notGroundPack, planLending, shadersTiled, undrawnLent, type LendPlan, type LentFetch, type LentTable } from './lentGround.ts';
-import { AssetPack, lowerLevels, type Layout, type LoadedModel } from './assetPack';
+import { AssetPack, lowerLevels, type Layout, type LoadedModel, type PackModelDef } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
@@ -87,6 +87,7 @@ import { wildLife, type WildDeps } from './wildLife.ts';
 import { laterRows, standingList } from './ngeOverlay.ts';
 import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, brigadeBodies, personDormant, rosterRows, ruinsOf, type RosterRow, type RuinsCircle } from './restuss.ts';
 import { releaseWorldStates, stateNow, standsIn, statesInForce, takeWorldStates } from './worldState.ts';
+import { POST_CLEAR_TUNE, furnishLayout, type InteriorsFile } from './interiors.ts';
 import { knownAbsent, packBytes, packJson, shippedAsk } from './packFiles.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
@@ -2344,6 +2345,30 @@ export class World {
     // that camera can see. Streaming a whole planet's worth beside them would build thousands of
     // things nobody can look at, and take the load from seconds to a minute. Everything above this
     // -- the terrain, the sky, the flora, the ground textures -- runs exactly as it always does.
+    // The furniture the client stood in this world's buildings' rooms (`interiors.ts`, the converter's `interiors` pass):
+    // read before the streamer is made, and appended after every object of the layout as contained objects naming their
+    // building's row and room, so it is filed, hosted, instanced, drawn with its rooms and collided as the snapshot's own
+    // furniture is and no index of the layout moves. A piece whose model is the props folder's stands out of a pack of its
+    // own over that folder, behind the world's (`furniturePack`). A pack with no file stands exactly what it stood.
+    let streamLayout = layout;
+    let furnitureGuests: AssetPack[] | undefined;
+    this.interiorsFile = null;
+    this.interiorsReport = null;
+    if (layout && !this.sceneOnly) {
+      const file = await pack.loadInteriors();
+      if (token !== this.loadToken) return null;
+      if (file) {
+        const made = furnishLayout(layout.objects, file);
+        this.interiorsFile = file;
+        this.interiorsReport = { buildings: file.buildings.length, pieces: made.objects.length, moved: made.moved, twice: made.twice, sounds: made.sounds };
+        if (made.objects.length) {
+          streamLayout = { ...layout, objects: [...layout.objects, ...made.objects] };
+          this.releaseGuest(this.furniturePack);
+          this.furniturePack = AssetPack.from({ planet: 'interiors', categories: { interiors: [...file.defs] } }, `${import.meta.env.BASE_URL}assets-private/props/`);
+          furnitureGuests = [this.furniturePack];
+        }
+      }
+    }
     if (layout && !this.sceneOnly) {
       this.rowAttach.clear();
       this.layoutStream?.dispose();
@@ -2353,7 +2378,7 @@ export class World {
       this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
       // The gallery is one long walk of exhibits with nothing else to draw: everything loads from anywhere on it.
       // What stands in a state this world did not arrive in (Restuss's other state) lies dormant (`worldState.ts`).
-      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.streamReach(), hugeColliders: !!planet.space, stands: standsIn });
+      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, streamLayout ?? layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.streamReach(), hugeColliders: !!planet.space, stands: standsIn, ...(furnitureGuests ? { guests: furnitureGuests } : {}) });
       // A tier is built hidden and shown once its programs exist, so no frame is ever the first to
       // draw a material nothing had built: that was thirteen programs and two frames of over a
       // second for a player who had not moved. `swg.shaderPace` = '0' in local storage leaves it
@@ -2867,6 +2892,11 @@ export class World {
     for (const g of this.guestWorldsReady.values()) this.releaseGuest(g);
     this.guestWorldsReady.clear();
     this.guestWorlds.clear();
+    // The pack over the props folder this world's buildings' furniture stood out of (`interiors.ts`), through the same hand.
+    this.releaseGuest(this.furniturePack);
+    this.furniturePack = null;
+    this.interiorsFile = null;
+    this.interiorsReport = null;
     this.placeStandIn = null;
     this.cameraRoomRule = null;
     surfaces.sweep();
@@ -6522,6 +6552,41 @@ export class World {
   private readonly guestWorlds = new Map<string, Promise<AssetPack | null>>();
   private readonly guestWorldsReady = new Map<string, AssetPack>();
 
+  /**
+   * The furniture the client stood in this world's buildings' rooms, as its pack wrote it (`interiors.ts`), and what
+   * standing it came to (`__debug.interiors()`): null for a world whose pack has no file.
+   */
+  interiorsFile: InteriorsFile | null = null;
+  interiorsReport: { buildings: number; pieces: number; moved: number; twice: number; sounds: number } | null = null;
+  /**
+   * The pack over the props folder a building's furniture stands out of where its world's own pack does not carry a
+   * piece's model (the props catalogue's models and the effects the files stand, as the file lists them): behind the
+   * world's own from the streamer's making, let go with the world through `releaseGuest`. A permanent building's furniture
+   * adds its own entries to it (`furnitureDefs`).
+   */
+  furniturePack: AssetPack | null = null;
+
+  /**
+   * The furniture pack, made over the props folder if this world has none yet, holding every entry of `defs` it did not
+   * hold (an entry is the props folder's, so one id is one model whichever file named it); behind the streamer as a guest.
+   */
+  furnitureDefs(defs: readonly PackModelDef[]): AssetPack {
+    let pack = this.furniturePack;
+    if (!pack) {
+      pack = AssetPack.from({ planet: 'interiors', categories: { interiors: [] } }, `${import.meta.env.BASE_URL}assets-private/props/`);
+      this.furniturePack = pack;
+    }
+    const list = (pack.manifest.categories.interiors ??= []);
+    const have = new Set(list.map((d) => d.id));
+    for (const d of defs) {
+      if (have.has(d.id)) continue;
+      have.add(d.id);
+      list.push(d);
+    }
+    this.layoutStream?.useGuestPack(pack);
+    return pack;
+  }
+
   /** This world's own pack, for the world editor's library: null on a packless world. */
   get ownPack(): AssetPack | null {
     return this.pack;
@@ -9504,6 +9569,8 @@ export class World {
         arrival: () => this.arrivalPoint?.() ?? null,
         // One of them the story killed for this character is never stood here again.
         gone: (key) => this.peopleGone?.(key) ?? false,
+        // A post inside a solid piece of its building's own furniture stands clear of it (the interior layout files' wave).
+        clearPost: (st) => (POST_CLEAR_TUNE.on && this.interiorsFile ? (this.layoutStream?.clearPost(st) ?? false) : false),
       };
     }
     return this.peopleDepsKept;
