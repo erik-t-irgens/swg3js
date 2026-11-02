@@ -30,7 +30,7 @@ import zlib from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { PLACEMENTS_ENDPOINT_TUNE, EDITOR_HEADER, applyPlacementOp, fileStateOf, refuseRequest, statusAsk, statusFiles } from '../../src/world/placementEdits.ts';
-import { EDIT_FILE_KINDS, editFileWorld } from '../../src/story/placementPath.ts';
+import { EDIT_FILE_KINDS, TOP_EDIT_FILES, editFileWorld } from '../../src/story/placementPath.ts';
 import { PLANETS, packIdOf } from '../../src/data/planets.ts';
 
 /**
@@ -114,6 +114,13 @@ export function worldKinds() {
  * `<dir>/<kind>`, and the file must be directly in it, named for the world (or `all`, for a kind every world shares).
  */
 export function fileFor(dir, layer, world) {
+  // A kind kept at the placements folder's own top (`solid.json`): exactly that file, directly in the folder.
+  const top = TOP_EDIT_FILES[layer];
+  if (top) {
+    const base = path.resolve(dir);
+    const file = path.resolve(dir, top);
+    return path.dirname(file) === base ? file : null;
+  }
   const folder = path.resolve(dir, layer);
   const file = path.resolve(dir, layer, `${editFileWorld(layer, world)}.json`);
   return file.startsWith(folder + path.sep) && path.dirname(file) === folder ? file : null;

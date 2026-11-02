@@ -52,6 +52,7 @@ import {
   respawnWait,
   spreadOf,
   standingAt,
+  touches as touchesZone,
   wanted,
   type CampModel,
   type CampPiece,
@@ -297,6 +298,14 @@ export class WildLife {
   /** The game the last step was given, kept (the world's own object) so a restand can take bodies down. */
   private deps: WildDeps | null = null;
   /**
+   * The world's removal file as the wildlife reads it (Map-maker II's twelfth wave): its no-spawn zones keeping `wild`, as
+   * areas concatenated onto the pack's `noSpawn` at the laying's call and never written into it (`retune` adopts the very
+   * pack again), and the sites taken away by key, left out of `openSites` after the laying so no other site moves. Both
+   * empty with no file, where every site is the one it always was.
+   */
+  private zones: SpawnArea[] = [];
+  private readonly removedSites = new Set<string>();
+  /**
    * For the console: what the last pass did and what is up now. `waiting` is how many sites the last
    * pass left for a later one because the ground under them was still being generated.
    */
@@ -404,8 +413,68 @@ export class WildLife {
     this.last.unwalkable = 0;
     this.version++;
     if (!this.pack || !this.manifest) return;
-    this.sites = gridSites(this.pack.planet, this.pack.areas, this.pack.noSpawn ?? [], this.manifest.groups);
+    // The owner's zones concatenated at the call (never written into the pack): with none, the very array the pack holds.
+    const noSpawn = this.pack.noSpawn ?? [];
+    this.sites = gridSites(this.pack.planet, this.pack.areas, this.zones.length ? [...noSpawn, ...this.zones] : noSpawn, this.manifest.groups);
     this.last.sites = this.sites.length;
+  }
+
+  /**
+   * The world's removal file in force for the wildlife (Map-maker II's twelfth wave): its zones keeping `wild` (areas in the
+   * pack's own frame, `src: 'zone'`) and the sites taken away by key. Set before `load` at an arrival, and live at a
+   * landing (`live`): the world laid out again with the new zones, and **every standing site whose key is no longer laid, or
+   * is taken away, put down** -- `wanted` never drops a key that is no longer a site, so a refused site's bodies would
+   * otherwise stand until the world unloads. An edit's cost (a laying is 8 to 30 ms), never a frame's. Answers how many
+   * standing sites it put down.
+   */
+  setRemovals(zones: readonly SpawnArea[], sites: ReadonlySet<string>, live = false): number {
+    this.zones = [...zones];
+    this.removedSites.clear();
+    for (const k of sites) this.removedSites.add(k);
+    this.version++;
+    if (!live || !this.pack || !this.manifest) return 0;
+    // Laid again over the very pack held (the NGE overlay's areas already in it, its people kept apart and untouched).
+    const noSpawn = this.pack.noSpawn ?? [];
+    this.sites = gridSites(this.pack.planet, this.pack.areas, this.zones.length ? [...noSpawn, ...this.zones] : noSpawn, this.manifest.groups);
+    this.last.sites = this.sites.length;
+    const keep = new Set(this.openSites().map((s) => s.key));
+    let down = 0;
+    const deps = this.deps;
+    for (const key of [...this.standing.keys()]) {
+      if (keep.has(key)) continue;
+      down++;
+      if (deps) this.put(key, deps);
+      else {
+        const rec = this.standing.get(key)!;
+        rec.nest?.dispose();
+        rec.camp?.dispose();
+        this.standing.delete(key);
+      }
+    }
+    this.lastAt.set(NaN, NaN, NaN);
+    this.since = WILD_TUNE.everySeconds;
+    return down;
+  }
+
+  /**
+   * For the console: each zone keeping `wild` and how many of the sites a laying without any zone lays it keeps off -- its
+   * middle inside, or a body of it within reach (the rim, `ZONE_TUNE.margin`) -- worked out on asking, never a frame's work.
+   */
+  zoneKeptOff(): { zone: string; keptOff: number }[] {
+    if (!this.pack || !this.manifest || !this.zones.length) return this.zones.map((z) => ({ zone: z.name, keptOff: 0 }));
+    const without = gridSites(this.pack.planet, this.pack.areas, this.pack.noSpawn ?? [], this.manifest.groups);
+    const laid = new Set(this.sites.map((s) => s.key));
+    return this.zones.map((z) => ({
+      zone: z.name,
+      keptOff: without.filter((s) => !laid.has(s.key) && (refused([z], s.x, s.z, true) || touchesZone(z, s.x, s.z, Math.max(0, s.size) / 2 + LAIR_TUNE.herdSpread))).length,
+    }));
+  }
+
+  /** The removed sites and zones in force, for the console. */
+  removalsReport(): { zones: number; removedSites: number; removedStanding: number } {
+    let removedStanding = 0;
+    for (const k of this.removedSites) if (this.sites.some((s) => s.key === k)) removedStanding++;
+    return { zones: this.zones.length, removedSites: this.removedSites.size, removedStanding };
   }
 
   /**
@@ -441,6 +510,9 @@ export class WildLife {
     this.version++;
     this.last.sites = 0;
     this.deps = null;
+    // The removal file is the world's: the next world sets its own before it loads.
+    this.zones = [];
+    this.removedSites.clear();
   }
 
   /**
@@ -505,9 +577,9 @@ export class WildLife {
 
   /** The sites a pass may stand: all of them, less any cleared while respawning was off and any with no walkable ground. */
   private openSites(): readonly LairSite[] {
-    if (!this.cleared.size && !this.unwalkable.size) return this.sites;
+    if (!this.cleared.size && !this.unwalkable.size && !this.removedSites.size) return this.sites;
     if (this.openAt !== this.version) {
-      this.open = this.sites.filter((s) => !this.cleared.has(s.key) && !this.unwalkable.has(s.key));
+      this.open = this.sites.filter((s) => !this.cleared.has(s.key) && !this.unwalkable.has(s.key) && !this.removedSites.has(s.key));
       this.openAt = this.version;
     }
     return this.open;

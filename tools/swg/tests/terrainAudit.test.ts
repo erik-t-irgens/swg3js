@@ -252,7 +252,8 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
   check(
     'the rule being measured is still the model reach the game now uses',
     // The model's entry is looked up by id once per object now (`defs`, the frame-time wave's step 6), not by `pack.find`.
-    /const def = defs\.get\(o\.model\);[\s\S]{0,1500}floraClearRadius\(o\.radius, def\?\.bounds \?\? null\)/.test(stream),
+    // 2,600 characters since Map-maker II's twelfth wave, which reads the owner's switch and the removal file's hide between.
+    /const def = defs\.get\(o\.model\);[\s\S]{0,2600}floraClearRadius\(o\.radius, def\?\.bounds \?\? null\)/.test(stream),
     'layoutStream.ts no longer excludes by the model reach: re-read the measurement with whatever replaced it',
   );
 }

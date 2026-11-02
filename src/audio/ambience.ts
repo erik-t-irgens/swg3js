@@ -387,22 +387,70 @@ export class Ambience {
       console.warn(`sound: ${this.packId}'s places are in an unknown frame (${pack.frame}); they are left out`);
       return;
     }
+    // Put down in the snapshot's frame: what a landing of the removal file may put back down (`setHidden`), and only then.
+    this.placedFramed = true;
     if ((pack.format ?? 0) > PLANET_SOUNDS_READ) console.info(`sound: ${this.packId}'s places are from a newer converter (format ${pack.format}); read as far as this game understands them`);
     for (const e of pack.emitters ?? []) {
       if (!e?.sound) continue;
       // One of a world state this world does not stand in (Restuss's launch city in its ruins) sounds nowhere: the
       // states were taken before the world's pack, and so this frame, was handed over (`World.loadPack`).
       if (e.state && !standsIn(e.state)) continue;
-      const x = -((e.p?.[0] ?? 0) - this.centerX);
-      const y = e.p?.[1] ?? 0;
-      const z = (e.p?.[2] ?? 0) - this.centerZ;
-      const inside = !!e.pob || (e.cell ?? 0) > 0;
+      // Nor one of a thing or a building the world's removal file took away (Map-maker II's twelfth wave), which the
+      // file was read in time to say (`hiddenAt`, set before the pack was the world's).
+      if (this.hiddenAt && this.hiddenAt(e)) continue;
       // The only false is the cap: a source the mixer would not start yet is kept and started when
       // the bank lands, and one whose template is missing is counted. Stopping the walk for either
       // of those would lose a town's crowds and its cantina bands to one sample, since the
       // converter writes the sound objects first and the humming props after.
-      if (!this.sources.addPlaced(e.sound, x, y, z, inside)) break;
+      if (!this.putDown(e)) break;
     }
+  }
+
+  /** One placed sound put down, carrying its definition, which a later hide takes it up by. False at the cap. */
+  private putDown(e: PlacedEmitterDef): boolean {
+    const x = -((e.p?.[0] ?? 0) - this.centerX);
+    const y = e.p?.[1] ?? 0;
+    const z = (e.p?.[2] ?? 0) - this.centerZ;
+    const inside = !!e.pob || (e.cell ?? 0) > 0;
+    if (!this.sources.addPlaced(e.sound, x, y, z, inside, e)) return false;
+    this.placedDefs.add(e);
+    return true;
+  }
+
+  /**
+   * Which placed sounds go with what the world's removal file hides (Map-maker II's twelfth wave): asked of each as they are
+   * put down, and set by the world before its pack is handed over. Null hides nothing.
+   */
+  hiddenAt: ((e: PlacedEmitterDef) => boolean) | null = null;
+  /** The placed sounds standing now, by their definitions. */
+  private readonly placedDefs = new Set<PlacedEmitterDef>();
+  /** Whether this pack's placed sounds were put down at all (a pack in a frame this game does not read puts none down). */
+  private placedFramed = false;
+
+  /**
+   * A landing of the removal file: every placed sound standing that `hidden` now takes away taken up (`dropPlaced`), and
+   * every one it no longer takes away put back down. Answers how many it moved. An edit's work, never a frame's.
+   */
+  setHidden(hidden: ((e: PlacedEmitterDef) => boolean) | null): number {
+    this.hiddenAt = hidden;
+    const pack = this.pack;
+    // Nothing to move before the pack's sounds were put down, or where `place` refused their frame: put back down here they
+    // would stand mirrored about a centre the file was not written in.
+    if (!pack || !this.placed || !this.placedFramed) return 0;
+    let moved = 0;
+    if (hidden) {
+      const gone = this.sources.dropPlaced((tag) => hidden(tag as PlacedEmitterDef));
+      for (const t of gone) this.placedDefs.delete(t as PlacedEmitterDef);
+      moved += gone.length;
+    }
+    for (const e of pack.emitters ?? []) {
+      if (!e?.sound || this.placedDefs.has(e)) continue;
+      if (e.state && !standsIn(e.state)) continue;
+      if (hidden && hidden(e)) continue;
+      if (!this.putDown(e)) break;
+      moved++;
+    }
+    return moved;
   }
 
   /**
@@ -544,6 +592,8 @@ export class Ambience {
     this.pack = null;
     this.hasFrame = false;
     this.placed = false;
+    this.placedFramed = false;
+    this.placedDefs.clear();
     this.centerX = this.centerZ = 0;
   }
 

@@ -60,6 +60,24 @@ export function projectPoint(x: number, y: number, z: number, vp: ArrayLike<numb
   return true;
 }
 
+/**
+ * `projectPoint` of the point a kept array holds at `i` (x, y, z at `i`, `i + 1`, `i + 2`): no number of the point crosses the
+ * call, since a double handed to a call the compiler leaves out is boxed (the zone tool's rectangle drag measured 240 bytes a
+ * frame through `projectPoint` once its draw had been compiled again without that call built in).
+ */
+export function projectAt(a: Float64Array, i: number, vp: ArrayLike<number>, w: number, h: number, out: Float64Array): boolean {
+  const x = a[i];
+  const y = a[i + 1];
+  const z = a[i + 2];
+  const cx = vp[0] * x + vp[4] * y + vp[8] * z + vp[12];
+  const cy = vp[1] * x + vp[5] * y + vp[9] * z + vp[13];
+  const cw = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+  if (!(cw > 1e-6)) return false;
+  out[0] = (cx / cw * 0.5 + 0.5) * w;
+  out[1] = (0.5 - cy / cw * 0.5) * h;
+  return true;
+}
+
 /** What the marks draw this frame, one kept record the editor writes. */
 export interface MarksView {
   /** Fly mode: a crosshair in the middle (Point mode has the cursor). */

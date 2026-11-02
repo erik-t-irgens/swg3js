@@ -586,6 +586,10 @@ export function layoutKeyOf(packDir, walkThrough = null, edits = null) {
   // And the made files the solid rows of the owner's own imported models stand on (Map-maker II's tenth wave, `gridEditsOf`'s
   // `imports`, each named for its content), so a model made again is baked again; a world with none keys as before.
   if (Array.isArray(edits?.imports) && edits.imports.length) h.update('\n \nimports\n').update(edits.imports.join('\n'));
+  // And the removal file's rows the bake reads (Map-maker II's twelfth wave, navgrid.mjs `removalGridWords`: an object hidden
+  // or switched, a template switched), so hiding a building or making a fern solid asks for the grid again; a file of people,
+  // sites and zones alone, and a world with none, keys exactly as it did.
+  if (typeof edits?.removedGrid === 'string' && edits.removedGrid) h.update('\n \nremoved\n').update(edits.removedGrid);
   return h.digest('hex').slice(0, 12);
 }
 
@@ -598,9 +602,10 @@ export function layoutKeyOf(packDir, walkThrough = null, edits = null) {
  */
 export function gridLayoutStale(grid, packDir, manifest, walkThrough = null, edits = null) {
   if (!grid) return null;
-  if (grid.layoutKey) return grid.layoutKey !== layoutKeyOf(packDir, walkThrough, edits) ? 'was baked from another layout or terrain, another walk-through file, or other committed edit files (heights, water, placements) than the pack has now' : null;
+  if (grid.layoutKey) return grid.layoutKey !== layoutKeyOf(packDir, walkThrough, edits) ? 'was baked from another layout or terrain, another walk-through file, or other committed edit files (heights, water, placements, removals) than the pack has now' : null;
   // A grid with no key of a world that now has committed edit files cannot have read them.
   if (['heights', 'water', 'world', 'story'].some((k) => typeof edits?.texts?.[k] === 'string')) return 'was baked before the world had its committed edit files (heights, water, placements)';
+  if (typeof edits?.removedGrid === 'string' && edits.removedGrid) return "was baked before the world's removal file took things away or switched what is walked through";
   if (typeof edits?.soeRivers === 'string' && edits.soeRivers) return "was baked before the terrain's own rivers were water";
   return manifest?.late?.state === 'applied' ? "was baked before the world was converted with SOE's final files" : null;
 }

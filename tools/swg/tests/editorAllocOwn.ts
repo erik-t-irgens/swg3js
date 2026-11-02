@@ -1195,6 +1195,180 @@ if (process.argv.includes('paint')) {
   console.log(JSON.stringify({ frames: FRAMES, made: bestP.made, scavenges: bestP.scavenges, ringShown: shown, ring2Shown: shown2, armed: paint.armed, stroke: paint.mode, tiles: ground.fam.size + ground.col.size + ground.flo.size, layer: PAINT_TUNE.layer }));
   process.exit(0);
 }
+// With `zones` (`zonesAlloc.test.ts`, Map-maker II's twelfth wave): the no-spawn zone tool armed with three zones drawn (a
+// circle, a rectangle and an outline) and one picked, the aim wandering -- the Tools list's frame handed to the tool and its
+// overlay, the marks drawn; then a rectangle dragged out; then an outline of three clicks under way, drawn with the aim; and,
+// beside each frame, the seat snap a chair in hand asks every frame over forty sitters (`seatSnapIn` and its kept ask).
+if (process.argv.includes('zones')) {
+  const { EditorZones, ZONE_TOOL_TUNE, zonesTool } = await import('../../../src/editor/editorZones.ts');
+  const { toolFrame } = await import('../../../src/editor/tools.ts');
+  const { SeatSnapAsk, seatSnapIn } = await import('../../../src/world/seatProps.ts');
+  type Row = import('../../../src/story/removals.ts').RemovalRow;
+  const rows: Row[] = [
+    { id: 'z:ring', shape: { kind: 'circle', c: [-10, -40], r: 25 } } as Row,
+    { id: 'z:box', shape: { kind: 'rect', min: [20, -60], max: [60, -20] } } as Row,
+    { id: 'z:ell', shape: { kind: 'poly', pts: [[-60, 0], [-20, 0], [-20, 10], [-50, 10], [-50, 40], [-60, 40]] } } as Row,
+  ];
+  const zm = marksView();
+  ZONE_TOOL_TUNE.mode = 'circle';
+  const zones = new EditorZones({
+    // A write's stand-in: a let-go between windows writes, and nothing it writes moves the zones.
+    edits: { putRows: async (label: string) => label } as never,
+    worldKind: () => 'ground',
+    rows: () => rows,
+    locations: () => [],
+    toRaw: (x, z, out) => {
+      out.x = -x;
+      out.z = z;
+    },
+    toGame: (x, z, out) => {
+      out.x = -x;
+      out.z = z;
+    },
+    groundAt: () => 0.5,
+    groundCached: (_x, _z, out) => {
+      out.y = 0.5;
+      return true;
+    },
+    keptOff: () => null,
+    goTo() {},
+    say() {},
+  });
+  await zones.arm();
+  zones.picked = 'z:box';
+  const tool = zonesTool(zones);
+  const f = toolFrame();
+  const draw = { marks: zm, radius: 0.5, ring(): void {} };
+  // Forty sitters, half in chairs and half at tables, about the aim's wander.
+  const sitters = Array.from({ length: 40 }, (_, i) => ({ key: `s${i}`, x: Math.cos(i) * 30, y: 0.5, z: -40 + Math.sin(i) * 12, heading: i * 0.3, inside: true, sits: (i % 2 ? 'chair' : 'table') as 'chair' | 'table' }));
+  const snap = new SeatSnapAsk();
+  const st = new Float64Array(6);
+  const zonesFrame = (): void => {
+    st[1]++;
+    st[0] = st[1] * 0.01;
+    const held = st[2];
+    f.apply = held === 2 || held === 3;
+    f.inverse = false;
+    f.shift = false;
+    f.sampled = false;
+    f.x = Math.sin(st[0]) * 30;
+    f.y = 0.5;
+    f.z = -40 + Math.cos(st[0]) * 10;
+    f.valid = true;
+    f.dt = 1 / 60;
+    f.now = st[0];
+    f.sx = st[3] + Math.sin(st[0] * 3) * 6;
+    f.sy = st[4] + Math.sin(st[0] * 2) * 4;
+    f.dy = 0;
+    f.lift = false;
+    tool.step(f);
+    tool.overlay!(draw as never, view);
+    drawEditorMarks(overlay, zm);
+    // A chair in hand over the same aim, as the editor's frame asks it (`EditorEntry`'s ghost).
+    snap.kind = st[1] % 2 ? 'seat' : 'table';
+    snap.x = f.x;
+    snap.z = f.z;
+    if (seatSnapIn(snap, sitters)) st[5]++;
+  };
+  const zonesFrames = (n: number): void => {
+    for (let i = 0; i < n; i++) zonesFrame();
+  };
+  const ZONES_FRAMES = 4 * FRAMES;
+  try {
+    new Function('f', '%NeverOptimizeFunction(f)')(zonesFrames);
+  } catch {
+    // Without the flag the loop is left to the compiler.
+  }
+  const measure = async (): Promise<{ made: number; scavenges: number }> => {
+    zonesFrames(20_000);
+    let best = { made: Infinity, scavenges: Infinity };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      zonesFrames(10_000);
+      gc({ type: 'minor' });
+      await settle();
+      scavenges = 0;
+      const before = young();
+      zonesFrames(ZONES_FRAMES);
+      const made = young() - before;
+      await settle();
+      if (scavenges < best.scavenges || (scavenges === best.scavenges && made < best.made)) best = { made, scavenges };
+      if (best.scavenges === 0 && best.made <= 0) break;
+    }
+    return best;
+  };
+  st[2] = 0;
+  st[3] = 800;
+  st[4] = 450;
+  zonesFrame();
+  if (process.argv.includes('afterSteady')) {
+    // Where a rectangle's drag makes anything once the steady frames have been compiled first, as the measure runs them
+    // (`node --expose-gc --allow-natives-syntax tools/swg/tests/editorAllocOwn.ts zones afterSteady profile`).
+    zones.picked = 'z:box';
+    ZONE_TOOL_TUNE.mode = 'circle';
+    st[2] = 0;
+    st[3] = 800;
+    st[4] = 450;
+    await measure();
+    zones.picked = null;
+    ZONE_TOOL_TUNE.mode = 'rect';
+    st[3] = 300;
+    st[4] = 200;
+    st[2] = 2;
+    zonesFrame();
+  }
+  if (process.argv.includes('profile')) {
+    zonesFrames(20_000);
+    const { Session } = await import('node:inspector/promises');
+    const session = new Session();
+    session.connect();
+    await session.post('HeapProfiler.startSampling', { samplingInterval: 32, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
+    zonesFrames(50_000);
+    interface SampleNode {
+      callFrame: { functionName: string; url: string; lineNumber: number };
+      selfSize: number;
+      children: SampleNode[];
+    }
+    const { profile } = (await session.post('HeapProfiler.stopSampling')) as unknown as { profile: { head: SampleNode } };
+    const sites = new Map<string, number>();
+    const walk = (n: SampleNode, path: string) => {
+      const here = `${n.callFrame.functionName || '(anon)'} ${n.callFrame.url.split('/').pop()}:${n.callFrame.lineNumber + 1}`;
+      if (n.selfSize > 0) sites.set(`${here}  <-  ${path}`, (sites.get(`${here}  <-  ${path}`) ?? 0) + n.selfSize);
+      for (const c of n.children) walk(c, here);
+    };
+    walk(profile.head, '');
+    for (const [key, n] of [...sites.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15)) console.log(`${(n / 50_000).toFixed(2)} B/frame  ${key}`);
+    process.exit(0);
+  }
+  const steady = await measure();
+  const shown = zm.lakeCount;
+  // A rectangle dragged out: the zone let go, the mode a rectangle, pressed away from every ring and held.
+  zones.picked = null;
+  ZONE_TOOL_TUNE.mode = 'rect';
+  st[3] = 300;
+  st[4] = 200;
+  st[2] = 2;
+  zonesFrame();
+  const rectOn = (zones as unknown as { rectOn: boolean }).rectOn;
+  const rect = await measure();
+  // Let go (a write, outside every window), then an outline of three clicks under way.
+  st[2] = 0;
+  zonesFrame();
+  await settle();
+  // The rectangle written is picked; let go, so the outline's first click is a point and not the click that lets go of it.
+  zones.picked = null;
+  ZONE_TOOL_TUNE.mode = 'outline';
+  for (let k = 0; k < 3; k++) {
+    st[2] = 3;
+    zonesFrame();
+    st[2] = 0;
+    zonesFrame();
+  }
+  const draftPoints = zones.draftN;
+  const draft = await measure();
+  watch.disconnect();
+  console.log(JSON.stringify({ frames: ZONES_FRAMES, made: steady.made, scavenges: steady.scavenges, rectMade: rect.made, rectScavenges: rect.scavenges, draftMade: draft.made, draftScavenges: draft.scavenges, zones: shown, rectOn, draftPoints, draftDrawn: zm.draftCount, snapped: st[5] > 0 }));
+  process.exit(0);
+}
 if (process.argv.includes('profile')) {
   // Where it is made, by the sampling heap profiler: `node --expose-gc tools/swg/tests/editorAllocOwn.ts profile`.
   const { Session } = await import('node:inspector/promises');

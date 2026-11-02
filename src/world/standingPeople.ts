@@ -110,7 +110,7 @@ export interface StandingRow {
    * Out of the NGE overlay of SOE's own placements (`ngeOverlay.ts`), stood after everybody else; or one of
    * ours stood by a rule of the game's (`'ours'`: the First Brigade in Restuss's ruins, `restuss.ts`).
    */
-  src?: 'nge' | 'ours';
+  src?: 'nge' | 'ours' | 'placed';
   /** The world state it stands in (`restuss=ruins`), where it stands in one only; absent, every state (`worldState.ts`). */
   state?: string;
   /**
@@ -125,12 +125,13 @@ export interface StandingRow {
   walks?: boolean;
 }
 
-/** Where a row came from, for the console: the NGE overlay, a herald, the people of ours, or Core3's own. */
-export type RowSource = 'core3' | 'herald' | 'nge' | 'ours';
+/** Where a row came from, for the console: the NGE overlay, a herald, the people of ours, the owner's placed people, or Core3's own. */
+export type RowSource = 'core3' | 'herald' | 'nge' | 'ours' | 'placed';
 
 /** A row's source (`RowSource`). */
 export function sourceOfRow(r: Pick<StandingRow, 'src' | 'from' | 'ours'>): RowSource {
   if (r.src === 'nge') return 'nge';
+  if (r.src === 'placed') return 'placed';
   if (r.from === 'herald') return 'herald';
   if (r.ours) return 'ours';
   return 'core3';
@@ -164,6 +165,30 @@ export interface PeopleExtras {
    * every row's place in it, and so its `stood:` name, is the same in every state.
    */
   dormant?: ((row: StandingRow) => boolean) | null;
+  /**
+   * Which rows the world's removal file takes away (Map-maker II's twelfth wave), asked of each as it is adopted and again
+   * at every `restrike`, in the snapshot's frame as the pack wrote it: 0 stands; 1 never stood (in a no-spawn zone, or in the
+   * rooms of a building taken away); 2 never stood and still counted as standing for the people of ours (`anyStanding`): a
+   * person taken away by key, whose building stays the data's, so removing a cantina's people never hands it to the fillers
+   * of ours. No row ever leaves the list, so no `stood:` name moves. None, and nothing is taken away.
+   */
+  removed?: ((row: StandingRow) => 0 | 1 | 2) | null;
+}
+
+/**
+ * The eleven hex a placed person's name carries (`stoodName`'s `p<11 hex>`): two FNV-1a passes over its id with two offset
+ * bases, the first's eight figures and the second's first three. The same id gives the same name in every browser; eleven
+ * figures keep `stood:` and the longest world's name (`kashyyyk_north_dungeons`) inside the 48 characters the server takes.
+ */
+export function placedHex(id: string): string {
+  let a = 0x811c9dc5;
+  let b = 0x050c5d1f;
+  for (let i = 0; i < id.length; i++) {
+    const c = id.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193);
+    b = Math.imul(b ^ c, 0x01000193);
+  }
+  return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0').slice(0, 3);
 }
 
 const TEMPERS: readonly Aggression[] = ['passive', 'skittish', 'defensive', 'aggressive'];
@@ -289,6 +314,9 @@ const ADDED_NAME_KEY = /^[A-Za-z0-9_-]{1,24}$/;
 export function stoodName(world: string, row: Pick<StandingRow, 'key' | 'src' | 'state'> | undefined, i: number): string {
   const k = row?.key;
   if (row?.src === 'nge' && typeof k === 'string' && OVERLAY_NAME_KEY.test(k)) return `stood:${world}:${k}`;
+  // The owner's placed people (Map-maker II's twelfth wave) go by their own ids, hashed to eleven hex (`placedHex`): his ids
+  // may run to 64 characters, and the wire takes 48 in all.
+  if (row?.src === 'placed' && typeof k === 'string' && k) return `stood:${world}:p${placedHex(k)}`;
   const added = laterKeyOf(row?.state);
   if (added && typeof k === 'string' && ADDED_NAME_KEY.test(k)) return `stood:${world}:${added}-${k}`;
   return `stood:${world}:${i}`;
@@ -658,8 +686,19 @@ export class StandingPeople {
    * person and body again (`personFor`). Walking away and back is not a life; the same body stands.
    */
   private lives = new Uint16Array(0);
-  /** Which rows lie dormant for this world (`PeopleExtras.dormant`): 1 never stood, decided once at `adopt`. */
+  /**
+   * Which rows lie dormant for this world: 0 stands; 1 never stood (`PeopleExtras.dormant`, decided once at `adopt`, or the
+   * removal file's 1); 2 never stood and still counted as standing for the people of ours (the removal file's person taken
+   * away by key). The removal file's part is decided again at every `restrike`.
+   */
   private dormant = new Uint8Array(0);
+  /** The world state's part alone (`PeopleExtras.dormant`), kept so a `restrike` works the removals out afresh over it. */
+  private stateDormant = new Uint8Array(0);
+  /**
+   * Each row as the pack handed it, in the snapshot's frame (never carried: the pass carries its own copies), which the
+   * removal file's predicate is asked of at every `restrike` long after the rows were carried into the world's frame.
+   */
+  private origin: StandingRow[] = [];
   /** The fleet's creatures and the rest of the pack a person is drawn from (`adopt`). */
   private creatures: Readonly<Record<string, PeopleCreature>> | null = null;
   private extras: PeopleExtras = {};
@@ -670,9 +709,17 @@ export class StandingPeople {
   private readonly holdsOf = (id: string): boolean => !!this.holdsVia?.holds?.(id);
   /** Whether the rows have been carried into the world's frame yet (see the head of this file). */
   private framed = false;
+  /** The centre they were carried about, kept for rows appended after (`replacePlaced`). */
+  private centreOf: { x: number; z: number } | null = null;
   /** Where each row's body stands, in the world's frame: made with the frame, and again when `routeReach` moves. */
   private stands: StandPlace[] = [];
   private readonly up = new Map<number, Stood>();
+  /**
+   * Bodies somebody else had (`keeps`: a follower) when the placed person they stand for was taken out of the people file
+   * (`replacePlaced`): no row names them any more, so no index of `up` may hold them, and each pass puts one down once
+   * nobody has it.
+   */
+  private readonly orphans: Stood[] = [];
   private since = 0;
   private readonly lastAt = new THREE.Vector3(NaN, NaN, NaN);
   /**
@@ -733,10 +780,13 @@ export class StandingPeople {
   adopt(rows: readonly StandingRow[] | null | undefined, creatures?: Readonly<Record<string, PeopleCreature>> | null, extras?: PeopleExtras | null): void {
     this.rows = [];
     this.up.clear();
+    this.orphans.length = 0;
     this.framed = false;
+    this.centreOf = null;
     this.stands = [];
     this.creatures = creatures ?? null;
     this.extras = extras ?? {};
+    this.origin = [];
     for (const r of rows ?? []) {
       // A row indoors whose room could not be resolved is a position in a cell and nowhere on a
       // planet: the converter leaves those out, and this refuses any that slip through.
@@ -745,11 +795,16 @@ export class StandingPeople {
       const row: StandingRow = { ...r };
       if (r.route) row.route = r.route.map((p) => ({ ...p }));
       this.rows.push(row);
+      this.origin.push(r);
     }
     // Asked of each row in the snapshot's frame, as the pack wrote it, before any pass carries it.
     this.dormant = new Uint8Array(this.rows.length);
+    this.stateDormant = new Uint8Array(this.rows.length);
     const dormant = this.extras.dormant;
-    if (dormant) for (let i = 0; i < this.rows.length; i++) if (dormant(this.rows[i])) this.dormant[i] = 1;
+    if (dormant) for (let i = 0; i < this.rows.length; i++) if (dormant(this.rows[i])) this.dormant[i] = this.stateDormant[i] = 1;
+    // And the world's removal file over the rest (Map-maker II's twelfth wave): nothing, with no file.
+    const removed = this.extras.removed;
+    if (removed) for (let i = 0; i < this.rows.length; i++) if (!this.dormant[i]) this.dormant[i] = removed(this.origin[i]);
     this.lives = new Uint16Array(this.rows.length);
     this.away = new Float64Array(this.rows.length);
     this.near.length = 0;
@@ -761,7 +816,9 @@ export class StandingPeople {
 
   clear(deps?: PeopleDeps): void {
     if (deps) for (const s of this.up.values()) if (s.body) deps.remove(s.body);
+    if (deps) for (const s of this.orphans) if (s.body) deps.remove(s.body);
     this.up.clear();
+    this.orphans.length = 0;
     this.last.up = 0;
     this.last.down = 0;
     this.last.indoors = 0;
@@ -773,12 +830,16 @@ export class StandingPeople {
   unload(): void {
     this.rows = [];
     this.framed = false;
+    this.centreOf = null;
     this.stands = [];
     this.up.clear();
+    this.orphans.length = 0;
     this.creatures = null;
     this.extras = {};
     this.lives = new Uint16Array(0);
     this.dormant = new Uint8Array(0);
+    this.stateDormant = new Uint8Array(0);
+    this.origin = [];
     this.away = new Float64Array(0);
     this.near.length = 0;
     this.last.rows = 0;
@@ -794,6 +855,7 @@ export class StandingPeople {
 
   /** Every row carried into the world's frame, once: the mirror every placed object goes through, its route's points with it. */
   private frame(centre: { x: number; z: number }): void {
+    this.centreOf = { x: centre.x, z: centre.z };
     for (const r of this.rows) {
       const w = intoWorld(r.x, r.z, centre);
       r.x = w.x;
@@ -870,13 +932,33 @@ export class StandingPeople {
         this.up.delete(i);
       }
     }
+    // A follower whose placed person was taken out of the people file (`replacePlaced`) goes once nobody has it any more.
+    if (this.orphans.length) {
+      let keep = 0;
+      for (const s of this.orphans) {
+        // A body killed or taken away meanwhile is the game's (its corpse keeps its death clip, as any row's does).
+        if (!s.body || s.body.removed || s.body.dead) continue;
+        if (deps.keeps?.(s.body)) this.orphans[keep++] = s;
+        else deps.remove(s.body);
+      }
+      this.orphans.length = keep;
+    }
 
     // Then who is too far off to keep, and who is near enough to stand.
     const near = this.near;
     near.length = 0;
     for (let i = 0; i < this.rows.length; i++) {
       // A row of the world's other state, or of Core3's town in Restuss's ruins, is never stood here.
-      if (this.dormant[i]) continue;
+      if (this.dormant[i]) {
+        // Nor one the removal file took away since (`restrike`): a body still standing for it is one a follower kept, and
+        // goes once nobody has it any more.
+        const was = this.up.get(i);
+        if (was && !(was.body && deps.keeps?.(was.body))) {
+          if (was.body) deps.remove(was.body);
+          this.up.delete(i);
+        }
+        continue;
+      }
       // Measured from where the body stands, which for a patroller is the first point of its walk.
       const st = this.stands[i];
       const away = Math.hypot(st.x - at.x, st.z - at.z);
@@ -1266,7 +1348,8 @@ export class StandingPeople {
   anyStanding(x: number, z: number, reach: number, inside: (st: StandPlace) => boolean): boolean {
     if (!this.framed) return false;
     for (let i = 0; i < this.stands.length; i++) {
-      if (this.dormant[i]) continue;
+      // A person taken away by key (2) still counts: their building stays the data's and is never handed to the fillers.
+      if (this.dormant[i] === 1) continue;
       const st = this.stands[i];
       if (Math.abs(st.x - x) > reach || Math.abs(st.z - z) > reach) continue;
       if (inside(st)) return true;
@@ -1421,8 +1504,8 @@ export class StandingPeople {
    * the heralds', the people of ours (the Star Destroyer's crew) and the NGE overlay's.
    */
   bySource(): { rows: Record<RowSource, number>; up: Record<RowSource, number> } {
-    const rows: Record<RowSource, number> = { core3: 0, herald: 0, nge: 0, ours: 0 };
-    const up: Record<RowSource, number> = { core3: 0, herald: 0, nge: 0, ours: 0 };
+    const rows: Record<RowSource, number> = { core3: 0, herald: 0, nge: 0, ours: 0, placed: 0 };
+    const up: Record<RowSource, number> = { core3: 0, herald: 0, nge: 0, ours: 0, placed: 0 };
     for (const r of this.rows) rows[sourceOfRow(r)]++;
     for (const s of this.up.values()) if (s.body) up[sourceOfRow(s.row)]++;
     return { rows, up };
@@ -1432,18 +1515,183 @@ export class StandingPeople {
    * For the console: how many rows lie dormant for this world, and of those how many are Core3's own (the rest of
    * another state, ours among them); and how many rows of a state this world stands in are ours (`src: 'ours'`).
    */
-  dormantReport(): { dormant: number; core3: number; stated: number; oursHere: number } {
+  dormantReport(): { dormant: number; core3: number; stated: number; oursHere: number; removed: number; zoned: number } {
     let dormant = 0;
     let core3 = 0;
     let oursHere = 0;
+    let removed = 0;
+    let zoned = 0;
     for (let i = 0; i < this.rows.length; i++) {
       const r = this.rows[i];
       if (this.dormant[i]) {
         dormant++;
         if (sourceOfRow(r) === 'core3') core3++;
+        // The removal file's part (Map-maker II's twelfth wave): a person by key, else a zone or a hidden building's rooms.
+        if (!this.stateDormant[i]) {
+          if (this.dormant[i] === 2) removed++;
+          else zoned++;
+        }
       } else if (r.state && r.src === 'ours') oursHere++;
     }
-    return { dormant, core3, stated: dormant - core3, oursHere };
+    return { dormant, core3, stated: dormant - core3, oursHere, removed, zoned };
+  }
+
+  /**
+   * The removal file's part worked out again over every row (Map-maker II's twelfth wave: a landing of the file, a zone put
+   * down or taken up in the editor), in the snapshot's frame as the pack wrote each row, over the world state's part as
+   * `adopt` decided it: every body standing for a row now dormant put down (never one somebody else has for now, `keeps`,
+   * which goes on with its row as a follower does), and a row no longer dormant stood by the next pass. **Never `adopt`**,
+   * which empties the standing without taking a body away: no row leaves the list and no `stood:` name moves. Answers how
+   * many bodies it put down.
+   */
+  restrike(removed: ((row: StandingRow) => 0 | 1 | 2) | null, deps?: PeopleDeps): number {
+    this.extras = { ...this.extras, removed };
+    let down = 0;
+    for (let i = 0; i < this.rows.length; i++) {
+      this.dormant[i] = this.stateDormant[i] ? 1 : removed ? removed(this.origin[i]) : 0;
+      if (!this.dormant[i]) continue;
+      const s = this.up.get(i);
+      if (!s) continue;
+      if (s.body && deps?.keeps?.(s.body)) continue;
+      if (s.body && deps) {
+        deps.remove(s.body);
+        down++;
+      }
+      this.up.delete(i);
+    }
+    // Looked at again on the next pass, whoever stands now.
+    this.lastAt.set(NaN, NaN, NaN);
+    if (deps) this.count(deps);
+    return down;
+  }
+
+  /**
+   * The owner's placed people taken again (a landing of the people file, Map-maker II's twelfth wave): they are the last
+   * rows of the list (`standingList`), so every row before them keeps its place and its name; their bodies standing are put
+   * down (never one somebody else has for now) and the new rows stood by the next pass. A world with no rows at all yet (his
+   * own, before anybody was placed) is adopted afresh with `world`. Answers how many bodies it put down.
+   */
+  replacePlaced(rows: readonly StandingRow[], deps: PeopleDeps | undefined, removed: ((row: StandingRow) => 0 | 1 | 2) | null, world: string): number {
+    if (!this.rows.length) {
+      if (rows.length) this.adopt(rows, this.creatures ?? {}, { ...this.extras, world: this.extras.world || world, removed });
+      return 0;
+    }
+    let first = this.rows.length;
+    while (first > 0 && this.rows[first - 1].src === 'placed') first--;
+    let down = 0;
+    // A body somebody else has (a follower) goes on with its person, by the person's key: the rows after `first` are made
+    // again in the file's own order, so the index it stood under may name another person now, or nobody.
+    const kept: Stood[] = [];
+    for (const [i, s] of [...this.up]) {
+      if (i < first) continue;
+      this.up.delete(i);
+      if (s.body && deps?.keeps?.(s.body)) {
+        kept.push(s);
+        continue;
+      }
+      if (s.body && deps) {
+        deps.remove(s.body);
+        down++;
+      }
+    }
+    this.rows.length = first;
+    this.origin.length = first;
+    for (const r of rows) {
+      const row: StandingRow = { ...r };
+      if (r.route) row.route = r.route.map((p) => ({ ...p }));
+      this.rows.push(row);
+      this.origin.push(r);
+    }
+    const n = this.rows.length;
+    const keep = (a: ArrayLike<number>, b: { set(x: ArrayLike<number>): void }): void => {
+      const k = Math.min(first, a.length);
+      const head: number[] = [];
+      for (let i = 0; i < k; i++) head.push(a[i]);
+      b.set(head);
+    };
+    const dormant = new Uint8Array(n);
+    keep(this.dormant, dormant);
+    this.dormant = dormant;
+    const stateDormant = new Uint8Array(n);
+    keep(this.stateDormant, stateDormant);
+    this.stateDormant = stateDormant;
+    const lives = new Uint16Array(n);
+    keep(this.lives, lives);
+    this.lives = lives;
+    const away = new Float64Array(n);
+    keep(this.away, away);
+    this.away = away;
+    const asked = new Uint8Array(n);
+    keep(this.postAsked, asked);
+    this.postAsked = asked;
+    this.extras = { ...this.extras, removed };
+    for (let i = first; i < n; i++) {
+      const r = this.rows[i];
+      if (this.extras.dormant?.(r)) this.dormant[i] = this.stateDormant[i] = 1;
+      else if (removed) this.dormant[i] = removed(this.origin[i]);
+    }
+    // The new rows carried into the world's frame as the rest already are, and their stand places made.
+    if (this.framed && this.centreOf) {
+      const centre = this.centreOf;
+      for (let i = first; i < n; i++) {
+        const r = this.rows[i];
+        const w = intoWorld(r.x, r.z, centre);
+        r.x = w.x;
+        r.z = w.z;
+        r.heading = -r.heading;
+        for (const p of r.route ?? []) {
+          const q = intoWorld(p.x, p.z, centre);
+          p.x = q.x;
+          p.z = q.z;
+        }
+      }
+      this.stands.length = first;
+      for (let i = first; i < n; i++) this.stands.push(standPlaceOf(this.rows[i]));
+    }
+    // Each kept body under its person's new index (still that person's: a step puts it down once nobody has it, if its row is
+    // dormant now), or, its person taken out of the file, an orphan a step puts down once nobody has it.
+    for (const s of kept) {
+      let j = -1;
+      if (s.row.key) for (let i = first; i < n; i++) if (this.rows[i].key === s.row.key && !this.up.has(i)) { j = i; break; }
+      if (j >= 0) this.up.set(j, { ...s, row: this.rows[j], stand: this.stands[j] ?? s.stand });
+      else this.orphans.push(s);
+    }
+    this.last.rows = n;
+    this.lastAt.set(NaN, NaN, NaN);
+    if (deps) this.count(deps);
+    return down;
+  }
+
+  /**
+   * The rows standing within `reach` across the ground of a point of the world's frame (the world editor's Here tab, Map-maker
+   * II's twelfth wave): each one's key, who it is, where it came from, whether the removal file takes it away (its code) and
+   * whether a body stands for it now. Empty before the rows are in the world's frame. Asked on a page's render, never a frame.
+   */
+  rowsNear(x: number, z: number, reach: number, most = 40): { key: string; who: string; src: RowSource; code: number; up: boolean; d: number }[] {
+    if (!this.framed) return [];
+    const out: { key: string; who: string; src: RowSource; code: number; up: boolean; d: number }[] = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      const r = this.rows[i];
+      if (!r.key || this.stateDormant[i]) continue;
+      const st = this.stands[i];
+      const d = Math.hypot(st.x - x, st.z - z);
+      if (d > reach) continue;
+      out.push({ key: r.key, who: r.who || r.id, src: sourceOfRow(r), code: this.dormant[i], up: !!this.up.get(i)?.body, d });
+    }
+    out.sort((a, b) => a.d - b.d);
+    return out.slice(0, most);
+  }
+
+  /** Each row's removal code as `restrike` or `adopt` left it, for the tests and the console (a copy). */
+  removalCodes(): Uint8Array {
+    const out = new Uint8Array(this.rows.length);
+    for (let i = 0; i < this.rows.length; i++) out[i] = this.stateDormant[i] ? 0 : this.dormant[i];
+    return out;
+  }
+
+  /** The rows as the pack handed them (the snapshot's frame), for the console and the editor's lists. */
+  originRows(): readonly StandingRow[] {
+    return this.origin;
   }
 
   /** A creature of the fleet's half by its name, or null. */
@@ -1528,7 +1776,7 @@ export class StandingPeople {
    * takes the player. Nothing until a pass has known the layout's centre, since before that a row is a
    * number in another frame.
    */
-  nearest(at: THREE.Vector3, n = 5): { who: string; where: string; x: number; y: number; z: number; heading: number; indoors: boolean; room: number | null; away: number; up: boolean }[] {
+  nearest(at: THREE.Vector3, n = 5): { who: string; where: string; x: number; y: number; z: number; heading: number; indoors: boolean; room: number | null; away: number; up: boolean; key?: string; removed?: number }[] {
     if (!this.framed) return [];
     return this.rows
       .map((r, i) => {
@@ -1544,6 +1792,9 @@ export class StandingPeople {
           room: st.inside ? (st.room ?? null) : null,
           away: Math.round(Math.hypot(st.x - at.x, st.z - at.z)),
           up: !!this.up.get(i)?.body,
+          // Its row's key (what the removal file takes it away by) and the removal file's word on it (Map-maker II's twelfth wave).
+          ...(r.key ? { key: r.key } : {}),
+          ...(this.dormant[i] && !this.stateDormant[i] ? { removed: this.dormant[i] } : {}),
         };
       })
       .sort((a, b) => a.away - b.away)

@@ -344,17 +344,33 @@ export function tuneWorldStateWait(ms: unknown): number {
  * `in`), or -1. **The layout's own indices are never handed on as they are**: a building's index in the layout is
  * not its index once what lies dormant before it is left out.
  */
-export function fileByState(objects: readonly { state?: string; contained?: boolean; in?: number }[], stands: (tag?: string) => boolean = standsIn): { placedAt: Int32Array; host: Int32Array; dormant: number } {
+export function fileByState(objects: readonly { state?: string; contained?: boolean; in?: number }[], stands: (tag?: string) => boolean = standsIn, hidden?: ((i: number) => boolean) | null): { placedAt: Int32Array; host: Int32Array; dormant: number; hidden: Uint8Array | null; hiddenCount: number } {
   const n = objects.length;
   const own = new Uint8Array(n);
   for (let i = 0; i < n; i++) own[i] = stands(objects[i].state) ? 1 : 0;
   const placedAt = new Int32Array(n).fill(-1);
   const host = new Int32Array(n).fill(-1);
+  // The third outcome (Map-maker II's twelfth wave): taken away by the world's removal file, neither filed nor dormant, and
+  // a thing in a room of a building taken away is taken away with it. None handed over, none, and every answer is as before.
+  const gone = hidden ? new Uint8Array(n) : null;
+  let hiddenCount = 0;
+  if (gone) {
+    for (let i = 0; i < n; i++) if (hidden!(i)) gone[i] = 1;
+    for (let i = 0; i < n; i++) {
+      const o = objects[i];
+      const h = o.contained && typeof o.in === 'number' && o.in >= 0 && o.in < n ? o.in : -1;
+      if (h >= 0 && gone[h]) gone[i] = 1;
+    }
+  }
   let next = 0;
   let dormant = 0;
   for (let i = 0; i < n; i++) {
     const o = objects[i];
     const h = o.contained && typeof o.in === 'number' && o.in >= 0 && o.in < n ? o.in : -1;
+    if (gone && gone[i]) {
+      hiddenCount++;
+      continue;
+    }
     // A thing in a room of a building that lies dormant lies dormant with it, whatever its own tag says.
     if (!own[i] || (h >= 0 && !own[h])) {
       dormant++;
@@ -367,7 +383,7 @@ export function fileByState(objects: readonly { state?: string; contained?: bool
     if (placedAt[i] < 0 || !o.contained || typeof o.in !== 'number' || o.in < 0 || o.in >= n) continue;
     host[i] = placedAt[o.in];
   }
-  return { placedAt, host, dormant };
+  return { placedAt, host, dormant, hidden: gone, hiddenCount };
 }
 
 /** Everything this module holds let go of: a node test's fresh start. */

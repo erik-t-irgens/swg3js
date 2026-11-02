@@ -142,8 +142,9 @@ function after(src: string, marker: string, n = 2000): string {
   // Map-maker II's fifth wave puts an armed tool's own marks (the water tool's lakes and its picked lake's square) between
   // the editing's frame and the eye's move, from the same frame's view, so they draw over the editing's own gizmo.
   // Map-maker II's seventh wave lays the attachments' handles out just before the editing's frame (whose click reads the
-  // handle under the cursor) and picks a hung attachment by its handle on the frame's own click just after it.
-  ok(/this\.edits\.clock\.now = now;[\s\S]{0,400}this\.looks\.frame\(sv, [^;]*, m\);\s*this\.edits\.frame\(m\);\s*\/\/[^\n]*\n\s*if \(this\.edits\.clickedNow\) \{\s*if \(this\.looks\.hoveredAttachment\(\)\) this\.looks\.click\(\);[\s\S]{0,900}if \(tool && tool\.armed\(\) && tool\.overlay\) tool\.overlay\(this\.toolDraw, sv\);\s*this\.moveEyeForEdits\(\);\s*endPointerFrame\(this\.pointer\);/.test(ed), "the selection's frame (the gizmo, the hold, the drag, the clicks, the marks) runs after the camera, its moment in the kept clock, the handles laid out just before it and a hung attachment picked on its click just after, then an armed tool's own marks, and before the pointer's frame is spent");
+  // handle under the cursor) and picks a hung attachment by its handle on the frame's own click just after it. Map-maker II's
+  // twelfth wave picks one of the world's own objects on that same click under the World's own filter, before the tools.
+  ok(/this\.edits\.clock\.now = now;[\s\S]{0,400}this\.looks\.frame\(sv, [^;]*, m\);\s*this\.edits\.frame\(m\);\s*\/\/[^\n]*\n\s*if \(this\.edits\.clickedNow\) \{\s*if \(this\.looks\.hoveredAttachment\(\)\) this\.looks\.click\(\);[\s\S]{0,1600}if \(tool && tool\.armed\(\) && tool\.overlay\) tool\.overlay\(this\.toolDraw, sv\);\s*this\.moveEyeForEdits\(\);\s*endPointerFrame\(this\.pointer\);/.test(ed), "the selection's frame (the gizmo, the hold, the drag, the clicks, the marks) runs after the camera, its moment in the kept clock, the handles laid out just before it and a hung attachment picked on its click just after, then an armed tool's own marks, and before the pointer's frame is spent");
   // From the seventh wave a picked attachment's hand is read straight after them, with nothing in hand, no text field and no tool.
   // And the press that gave the look picker its surface in Fly quiets the editing until it is let go, so its release,
   // frames later, picks nothing (the fixer's round of the seventh wave).
@@ -153,8 +154,8 @@ function after(src: string, marker: string, n = 2000): string {
   const click = after(ed, '  canvasClick(): void {', 600);
   // Widened in the third wave on purpose: with the brush armed a click paints and never goes to Fly.
   // Widened in Map-maker II's seventh wave: a click on an attachment's handle, with the look picker armed or an attachment
-  // picked never goes to Fly either.
-  ok(/if \(this\.hand \|\| this\.tools\.toolArmed\(\) \|\| !this\.pointer\.clicked\) return;\s*if \(this\.aim\.hover \|\| this\.edits\.handleHot \|\| this\.looks\.hover >= 0 \|\| this\.looks\.picking \|\| this\.looks\.attachSel \|\| !this\.edits\.clickGoesToFly\(\)\) return;\s*this\.pointer\.clicked = false;\s*this\.setPoint\(false\);/.test(click), "a plain click on empty ground in Point goes to Fly by the click alone (`clickGoesToFly`: nothing picked), never by whether a frame has seen the press, nor while a tool is armed (Map-maker II: the list, not the brush alone)");
+  // picked never goes to Fly either. Map-maker II's twelfth wave: nor while a person of the library's People is in hand.
+  ok(/if \(this\.hand \|\| this\.removals\.personHand \|\| this\.tools\.toolArmed\(\) \|\| !this\.pointer\.clicked\) return;\s*if \(this\.aim\.hover \|\| this\.edits\.handleHot \|\| this\.looks\.hover >= 0 \|\| this\.looks\.picking \|\| this\.looks\.attachSel \|\| !this\.edits\.clickGoesToFly\(\)\) return;\s*this\.pointer\.clicked = false;\s*this\.setPoint\(false\);/.test(click), "a plain click on empty ground in Point goes to Fly by the click alone (`clickGoesToFly`: nothing picked), never by whether a frame has seen the press, nor while a tool is armed (Map-maker II: the list, not the brush alone)");
   ok(/if \(live\.snap\) \{\s*const s = EDITOR_TUNE\.snap;\s*this\.edits\.snapOn = s\.on;\s*if \(s\.grid > 0\) this\.edits\.grid = s\.grid;\s*if \(s\.angle > 0\) this\.edits\.angle = s\.angle;\s*\}/.test(ed), "a moved snap tune (the console's or a slider's) reaches the snapping live");
   ok(/roomAt: \(x, y, z\) => \{\s*const s = w\.streamer;\s*if \(!s\) return false;\s*roomAsk\.set\(x, y, z\);\s*s\.cameraRoomAt\(roomAsk, roomAnswer, floorUnder\);\s*return !!roomAnswer\.building;\s*\},/.test(ed), "a row's room where it moves to is asked by the very rule a thing put down is written by (`cameraRoomAt` with `floorUnder`)");
   ok(/dropCopies: \(c\) => dropCopiesAnyway\(w\.streamer, c\),/.test(ed) && /function dropCopiesAnyway\([\s\S]{0,200}?\): void \{\s*if \(stream\) stream\.dropEditorCopies\(copies\);\s*for \(const c of copies\) \{\s*if \(!c\.parent\) continue;\s*c\.removeFromParent\(\);\s*c\.dispose\(\);/.test(ed), "the editor's copies are taken away with or without a streamer standing (a write's release can come after a travel unloaded it)");
@@ -196,8 +197,9 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/if \(\(c\.placed === 'mesh' \|\| c\.placed === 'extent'\) && c\.placed !== FLORA_COLLISION\.placed\) \{[\s\S]{0,120}this\.world\.refreshPlacedFlora\(\);/.test(main), "the console's placed-flora collision rule makes the placed trees' colliders again");
   const ed = read('src/editor/editorEntry.ts');
   // 8,000 characters since Map-maker II's seventh wave, whose frame shows the effect in hand, resolves the look picker's
-  // click and lays the attachments' handles out.
-  const aftercam = after(ed, '  afterCamera(dt: number): void {', 8000);
+  // click and lays the attachments' handles out; 10,000 since its twelfth, whose frame carries a person in hand and picks
+  // one of the world's own objects under the World's own filter.
+  const aftercam = after(ed, '  afterCamera(dt: number): void {', 10000);
   // Map-maker II's groundwork: the brush is the Tools list's first entry, and the list's frame, ring and lettings-go are its.
   ok(/const tool = this\.tools\.armedTool;\s*if \(tool\) \{[\s\S]{0,1600}tool\.step\(f\);\s*\}\s*\/\/[^\n]*\n\s*this\.noteActivity\(now\);/.test(aftercam), "the armed tool's frame runs from the aim just cast, before the quiet the automatic fold waits for is noted");
   ok(aftercam.indexOf('tool.draw(this.toolDraw);') > 0 && aftercam.indexOf('tool.draw(this.toolDraw);') < aftercam.indexOf('this.edits.frame(m);') && /brushRing\(ringAsk, ringGround, vp\.elements, marks\.ring, marks\.ringVis\);/.test(ed), "the armed tool's rings are projected from this frame's camera (`brushRing`)");
@@ -205,7 +207,8 @@ function after(src: string, marker: string, n = 2000): string {
   // From Map-maker II's fifth wave a tool with something of its own under way (the water tool's draft, its picked lake) is
   // asked first and gives that up rather than being let go.
   ok(/const armed = this\.tools\.armedTool;\s*if \(armed\?\.escape\?\.\(\)\) \{\s*this\.window\?\.refreshEdits\(\);\s*return true;\s*\}\s*if \(armed\) \{\s*this\.tools\.disarmAll\(\);\s*this\.say\(`\$\{armed\.label\} let go`, true\);/.test(after(ed, '  escape(): boolean {', 1600)), 'Escape asks the armed tool first, then lets it go, before it clears the selection');
-  ok(/worldGone\(\): void \{[\s\S]{0,400}this\.tools\.disarmAll\(\);/.test(ed) && /private leaveBody\([^)]*\): void \{\s*this\.giveUpHand\(\);\s*this\.tools\.disarmAll\(\);/.test(ed), 'the armed tool goes with the world and with the editor');
+  // 700 characters since Map-maker II's twelfth wave, whose removals and zones go with the world before the tools do.
+  ok(/worldGone\(\): void \{[\s\S]{0,700}this\.tools\.disarmAll\(\);/.test(ed) && /private leaveBody\([^)]*\): void \{\s*this\.giveUpHand\(\);\s*this\.tools\.disarmAll\(\);/.test(ed), 'the armed tool goes with the world and with the editor');
   ok(/toolArmed: \(\) => me\.tools\.toolArmed\(\),/.test(ed), "the editing is told a tool is armed (no click picks, boxes or orbits meanwhile)");
   ok(/for \(const t of this\.tools\.list\) if \(t\.action && input\.pressedAction\(t\.action\)\) void this\.toggleTool\(t\.id\);/.test(ed) && /this\.tools\.add\(scatterTool\(this\.brush,/.test(ed), "B arms the brush and lets it go (the list's first entry, on its own action)");
   ok(/this\.tools\.add\(sculptTool\(this\.sculpt\)\);/.test(ed), 'K arms the sculpt brush (the list, on its own action)');
@@ -213,7 +216,8 @@ function after(src: string, marker: string, n = 2000): string {
   // heights to the ground's, a kind with no layer yet dropped.
   const word = after(main, '  private placementWord(d: PlacementWord): void {', 1800);
   ok(/const reload = this\.editLayerOf\(kind\);\s*if \(!reload\) return;/.test(word), "a placement word is routed by its kind, and a kind no layer reads is dropped");
-  const layer = after(main, '  private editLayerOf(kind: string | undefined)', 900);
+  // 1,200 characters since Map-maker II's twelfth wave, whose removal and people files are kinds of their own.
+  const layer = after(main, '  private editLayerOf(kind: string | undefined)', 1200);
   ok(/kind === 'story' \|\| kind === 'world'\) return \(pack, rev\) => void this\.reloadDressing\(pack, kind, rev\);/.test(layer) && /kind === 'heights'\) return \(pack, rev\) => \(this\.madeMapEdit\(\), void this\.reloadHeights\(pack, rev\)\);/.test(layer) && /return null;/.test(layer), 'the row layers read again into the permanent layer, the heights into the ground');
 }
 

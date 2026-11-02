@@ -459,7 +459,9 @@ const T: PerchTune = { ...PERCH_TUNE };
   ok(/wanted: \(region, o\) => boxDistance\(this\.updateX, this\.updateZ, region\.cx, region\.cz\) <= this\.rangeOf\(region, o\.tier, this\.floorRoom\) && !colliderFar\(o, this\.updateX, this\.updateZ, 1\),/.test(stream), 'and what it calls wanted is the tier loading and the sweep reaching, both from where the player stood at the last update');
   ok(/this\.updateX = px;\s*this\.updateZ = pz;/.test(stream), 'which the update keeps');
   ok(/if \(def !== undefined\) p\.footprint = def\?\.particle \? 0 : footprintOf\(def\?\.bounds, tiltSin\(p\.q\.x, p\.q\.z\)\);/.test(stream), "an object's footprint is measured from its own model's box as it is turned where it stands");
-  ok((stream.match(/this\.noteFootprint\(region, (p|placed), def \?\? null\);/g) ?? []).length === 2 && (stream.match(/this\.noteFootprint\(region, p\);/g) ?? []).length === 1, "measured as the layout's objects and a thing placed in play are filed, and a filing again raises its region's reach with it");
+  // Two filings again since Map-maker II's twelfth wave: the refile, and an object the removal file took away at the arrival
+  // filed when the editor shows it again (`showArrivalHidden`).
+  ok((stream.match(/this\.noteFootprint\(region, (p|placed), def \?\? null\);/g) ?? []).length === 2 && (stream.match(/this\.noteFootprint\(region, p\);/g) ?? []).length === 2, "measured as the layout's objects and a thing placed in play are filed, and a filing again (the refile's, an unhidden object's) raises its region's reach with it");
   ok(/if \(!this\.disposed && cols\.length && !o\.contained && o\.footprint > 0\) this\.onFloorGone\?\.\(o\.x, o\.z, o\.footprint\);/.test(stream), 'a placed object losing its collision says so, but never while the streamer is being disposed of');
 }
 

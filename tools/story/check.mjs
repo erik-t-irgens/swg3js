@@ -28,6 +28,10 @@ import { readStorySet } from '../../server/storySet.mjs';
 import { loadSet } from '../../src/story/set.ts';
 import { checkPlacements, checkSet, issueLine } from '../../src/story/check.ts';
 import { placementFileOf, readPlacementsFile } from '../../src/story/placements.ts';
+import { compileRemovals, parseObjectKey, personOfRow, readRemovalsFile, removalKindOf } from '../../src/story/removals.ts';
+import { readPeopleFile } from '../../src/story/placedPeople.ts';
+import { lineAt } from '../../src/story/jsonc.ts';
+import { OBJECT_FIND } from '../../src/story/set.ts';
 import { PLANETS, packIdOf } from '../../src/data/planets.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -202,6 +206,128 @@ export function placementsOf(dir = PLACEMENTS_DIR, { root = ROOT, kinds = worldK
 const many = (n, one, more = `${one}s`) => `${n} ${n === 1 ? one : more}`;
 
 /**
+ * A world's layout objects as this machine's converted pack holds them (`assets-private/<world>/layout.json`), or null with
+ * no pack: what a removal row's content key is matched over, as the game matches it at an arrival.
+ */
+export function layoutObjectsOf(root, world) {
+  try {
+    const layout = JSON.parse(readFileSync(join(root, 'assets-private', world, 'layout.json'), 'utf8'));
+    return Array.isArray(layout.objects) ? layout.objects : null;
+  } catch {
+    return null;
+  }
+}
+
+/** An id the world editor mints for a placed person (`mintPersonId`: words joined by `-`, then `-<n>`). */
+const PLACED_SHAPE = /^[a-z0-9][a-z0-9_-]*-\d+$/;
+
+/**
+ * The removal and people files in a placements folder holding `removed/` and `people/` (Map-maker II's twelfth wave), read
+ * exactly as the game reads them (`readRemovalsFile`, `readPeopleFile`), by world: the objects each world's file hides (their
+ * template and place, out of each row's own key), the people it removes by key, and the ids of the owner's placed people.
+ * `notes` are what the files said of themselves (a row skipped, a file refused whole) and, where this machine has the world's
+ * layout (`layoutOf`), every hide that finds nothing there, as warnings to print; a piece of a building's own furniture is
+ * matched over the interiors' files, which a layout does not hold, and is not checked. A folder that is not there is none.
+ */
+export function removalsOf(dir = PLACEMENTS_DIR, { root = ROOT, kinds = worldKinds(), layoutOf = (world) => layoutObjectsOf(root, world) } = {}) {
+  const worlds = new Map();
+  const notes = [];
+  let files = 0;
+  let checked = 0;
+  const shownDir = (relative(ROOT, dir) && !relative(ROOT, dir).startsWith('..') ? relative(ROOT, dir) : dir).split(sep).join('/');
+  const entry = (w) => {
+    if (!worlds.has(w)) worlds.set(w, { hidden: [], people: new Set(), placed: new Set(), removedFile: null, peopleFile: null, missing: null });
+    return worlds.get(w);
+  };
+  for (const kind of ['removed', 'people']) {
+    let names = [];
+    try {
+      names = readdirSync(join(dir, kind)).sort();
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!/^[a-z0-9_]{1,40}\.json$/.test(name)) continue;
+      const world = name.slice(0, -'.json'.length);
+      const shown = `${shownDir}/${kind}/${name}`;
+      let text;
+      try {
+        text = readFileSync(join(dir, kind, name), 'utf8');
+      } catch (err) {
+        notes.push(`${shown}: warning: it cannot be read (${err.message})`);
+        continue;
+      }
+      files++;
+      const worldKind = kinds.get(world) ?? null;
+      if (!worldKind) notes.push(`${shown}: warning: ${world} is not a world this game has, so nothing reads it`);
+      const lines = text.split(/\r?\n/);
+      const lineOf = (id) => {
+        const at = lines.findIndex((l) => l.includes(`"id": ${JSON.stringify(id)}`) || l.includes(`"id":${JSON.stringify(id)}`));
+        return at >= 0 ? at + 1 : 1;
+      };
+      const read = kind === 'removed' ? readRemovalsFile(text, world, worldKind === 'space' ? 'space' : 'ground') : readPeopleFile(text, world, worldKind === 'space' ? 'space' : 'ground');
+      if (read.problem) {
+        notes.push(`${shown}: warning: the whole file is refused, so ${kind === 'removed' ? 'it takes nothing away' : 'none of its people stands'}: ${read.problem}`);
+        continue;
+      }
+      for (const s of read.skipped) notes.push(`${shown}:${s.id.startsWith('#') ? 1 : lineOf(s.id)}: warning: row ${s.id} is skipped: ${s.why}`);
+      const e = entry(world);
+      if (kind === 'people') {
+        e.peopleFile = shown;
+        for (const r of read.rows) e.placed.add(r.id);
+        continue;
+      }
+      e.removedFile = shown;
+      for (const r of read.rows) {
+        const k = removalKindOf(r.id);
+        if (k === 'object' && r.hide) {
+          const p = parseObjectKey(r.id);
+          if (p && p.piece === null) e.hidden.push({ id: r.id, template: p.template, x: p.x, z: p.z, line: lineOf(r.id) });
+        } else if (k === 'person') e.people.add(personOfRow(r.id));
+      }
+      // A hide that finds nothing hides nothing, and is named (never misapplied): over this machine's layout of the world.
+      const objects = layoutOf(world);
+      const own = read.rows.filter((r) => removalKindOf(r.id) === 'object' && parseObjectKey(r.id)?.piece === null);
+      if (objects && own.length) {
+        checked++;
+        e.missing = compileRemovals(own, objects).missing;
+        for (const id of e.missing) notes.push(`${shown}:${lineOf(id)}: warning: row ${id} finds nothing in ${world}'s layout on this machine, so it takes nothing away`);
+      }
+    }
+  }
+  return { worlds, notes, files, checked, dir: shownDir };
+}
+
+/**
+ * What a story set meets in the removal and people files (`removalsOf`), as warnings, never errors (Map-maker I §8): a story
+ * object whose template stands hidden within `OBJECT_FIND` of its `near` (the game then finds the nearest copy still
+ * standing, or nothing), a promoted row the removal file takes away on any world, and a promotion naming one of the owner's
+ * placed people (an id of the shape the editor mints) that no people file holds any more.
+ */
+export function removalIssues(set, removals) {
+  const out = [];
+  const warn = (src, path, message) => out.push({ level: 'warning', file: src.file, line: lineAt(src.lines, path), message });
+  for (const o of Object.values(set.objects ?? {})) {
+    if (o.template.startsWith('place/')) continue;
+    const e = removals.worlds.get(o.world);
+    if (!e) continue;
+    for (const h of e.hidden) {
+      if (h.template !== o.template) continue;
+      const d = Math.hypot(h.x - o.near[0], h.z - o.near[1]);
+      if (d >= OBJECT_FIND) continue;
+      warn(o.src, '/template', `${o.template} near [${o.near.join(', ')}] may be the one ${e.removedFile}:${h.line} hides (${Math.round(d * 10) / 10} m off): the game finds the nearest copy still standing within ${OBJECT_FIND} m, or nothing`);
+    }
+  }
+  for (const c of Object.values(set.cast ?? {})) {
+    if (!c.row) continue;
+    const key = c.row.slice('row:'.length);
+    for (const [world, e] of removals.worlds) if (e.people.has(key)) warn(c.src, '/row', `${c.row} is removed on ${world} (${e.removedFile}): the world stands nobody for this named person there`);
+    if (PLACED_SHAPE.test(key) && ![...removals.worlds.values()].some((e) => e.placed.has(key))) warn(c.src, '/row', `${c.row} reads as one of the owner's placed people, and no people file holds ${key} any more: nobody is stood for this named person`);
+  }
+  return out;
+}
+
+/**
  * The folders checked when none is named: the owner's `story-private/` beside the checkout when there is
  * one, then the committed test set.
  */
@@ -214,11 +340,13 @@ export function defaultFolders(root = ROOT) {
  * Check one folder; answers how many errors it has. Only the committed test set is read as the test set,
  * whatever any folder's own `story.jsonc` says (`test` is that folder, or what the caller says).
  */
-export function checkFolder(dir, { worlds = worldIds(), catalogue = catalogueOf(), clips = clipsOf(), placements = null, print = console.log, root = ROOT, test = resolve(dir) === resolve(join(root, 'src', 'story', 'testSet')) } = {}) {
+export function checkFolder(dir, { worlds = worldIds(), catalogue = catalogueOf(), clips = clipsOf(), placements = null, removals = null, print = console.log, root = ROOT, test = resolve(dir) === resolve(join(root, 'src', 'story', 'testSet')) } = {}) {
   const shown = (relative(root, dir) || dir).split(sep).join('/');
   const { files, refused } = readStorySet(dir);
   const load = loadSet(files, { test: test === true });
   const r = checkSet(load, { worlds, catalogue, clips, placements });
+  // What the removal and people files take away from under the story (Map-maker II's twelfth wave): warnings, never errors.
+  if (removals) r.warnings.push(...removalIssues(load.set, removals));
   for (const why of refused) print(`${shown}: error: ${why}`);
   for (const i of r.errors) print(issueLine(i, shown));
   for (const i of r.warnings) print(issueLine(i, shown));
@@ -257,13 +385,17 @@ if (main) {
       ? `${placed.dir}: ${many(placed.standing, 'permanent placement')} the game stands over ${many(placed.worlds, 'world')}, in ${many(placed.files, 'file')}${placed.never ? ` (and ${many(placed.never, 'row')} it never stands)` : ''}`
       : `${placed.dir}: no permanent placements, so an object naming one names nothing`,
   );
+  // The removal and people files beside them (Map-maker II's twelfth wave), read once for every folder.
+  const removals = removalsOf(placeArg ? resolve(placeArg.slice('--placements='.length)) : PLACEMENTS_DIR, { root });
+  for (const line of removals.notes) console.log(line);
+  if (removals.files) console.log(`${removals.dir}: ${many(removals.files, 'removal or people file')} read${removals.checked ? `, ${many(removals.checked, "world's hides")} matched over this machine's layouts` : ', no hide matched (no world they name is converted here)'}`);
   for (const dir of dirs) {
     if (!existsSync(dir)) {
       console.log(`${dir}: no such folder`);
       errors++;
       continue;
     }
-    errors += checkFolder(dir, { root, catalogue: catalogueOf(root), clips: clipsOf(root), placements: placed.placements });
+    errors += checkFolder(dir, { root, catalogue: catalogueOf(root), clips: clipsOf(root), placements: placed.placements, removals });
   }
   process.exitCode = errors ? 1 : 0;
 }

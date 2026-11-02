@@ -26,7 +26,30 @@ export function isTableTemplate(template: string): boolean {
  * effect or a sound with no model) stands nothing and is never solid, whatever it says: counted solid, the walk grid's bake
  * looked for its model and named `<world>/undefined` as missing.
  */
-export function standsSolid(row: { solid?: boolean; pack?: string; kind?: string }, furniture: boolean): boolean {
+export function standsSolid(row: { solid?: boolean; pack?: string; kind?: string; furniture?: string }, furniture: boolean): boolean {
   if (row.kind === 'mark') return false;
-  return row.solid ?? (row.pack === 'props' ? !furniture : true);
+  if (row.solid !== undefined) return row.solid;
+  // The row's own `furniture` word (Map-maker II's twelfth wave) decides here, never the caller: a row that says it is a
+  // seat or a table is passable whatever pack it comes out of, as a props seat is, and one that says `none` is solid as
+  // anything else is. So `furniture` is only ever the template's answer, and the game's stand, the walk grid's bake and the
+  // editor's Solid, which each ask it of a template, cannot part over a row that says. With no word, exactly as before.
+  const f = row.furniture;
+  if (f === 'seat' || f === 'table') return false;
+  if (f === 'none') return true;
+  return row.pack === 'props' ? !furniture : true;
+}
+
+/**
+ * Whether a row counts as a seat or a table for the people (Map-maker II's twelfth wave): its own `furniture` word where it
+ * says one (`none` is neither), else its template's name (`isSeat`, `isTableTemplate`), as the seats of ours always read one.
+ * `kind` asks after one of the two alone.
+ */
+export function furnitureOf(row: { furniture?: string } | null | undefined, template: string | null | undefined, kind?: 'seat' | 'table'): boolean {
+  const f = row?.furniture;
+  if (f === 'none') return false;
+  if (f === 'seat' || f === 'table') return kind ? f === kind : true;
+  if (!template) return false;
+  if (kind === 'seat') return isSeat(template);
+  if (kind === 'table') return isTableTemplate(template);
+  return isSeat(template) || isTableTemplate(template);
 }

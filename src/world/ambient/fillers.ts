@@ -24,7 +24,7 @@
 // `import type` or with their `.ts`, no enum, no namespace, no constructor parameter properties.
 import { fitsAt, heightIn, type NavFloor } from '../nav/navMesh.ts';
 import { roll } from '../spawnSeed.ts';
-import { isSeat } from '../rowSolid.ts';
+import { furnitureOf, isSeat } from '../rowSolid.ts';
 
 /** The kinds of building people of ours stand in. */
 export type FillKind = 'cantina' | 'starport' | 'hotel' | 'medical' | 'bank' | 'guild' | 'theater' | 'capitol' | 'association' | 'house';
@@ -215,6 +215,10 @@ export interface Furnishing {
   z: number;
   template: string;
   q: { x: number; y: number; z: number; w: number };
+  /** What a thing put down in play really is (a permanent row's own template, filed under `place/<id>`), Map-maker II's twelfth wave. */
+  effectsOf?: string;
+  /** A permanent row's own word on what it counts as for the people (`seat`, `table`, `none`); absent, its template's name. */
+  furniture?: 'seat' | 'table' | 'none';
 }
 
 /**
@@ -238,7 +242,10 @@ export function furnish(
     const cell = cellOf(o);
     if (cell <= 0) continue;
     avoid.push({ x: o.x, z: o.z });
-    if (shafts.has(cell) || !isSeat(o.template)) continue;
+    // A permanent row is read by what it really is (Map-maker II's twelfth wave): its own furniture word, else its template
+    // (`effectsOf`, where it is filed under `place/<id>`), so people of ours sit in chairs he put in an empty building.
+    const t = o.template.startsWith('place/') && o.effectsOf ? o.effectsOf : o.template;
+    if (shafts.has(cell) || !(o.furniture ? furnitureOf(o, null, 'seat') : isSeat(t))) continue;
     seats.push({ x: o.x, y: o.y, z: o.z, heading: seatHeading(o.q, turn), cell });
   }
 }

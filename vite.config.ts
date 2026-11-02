@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 import { STORY_FILE, listStorySet } from './server/storySet.mjs';
-import { editFileOf } from './src/story/placementPath.ts';
+import { editFileOf, editFileRel } from './src/story/placementPath.ts';
 import { trackFileOf } from './src/race/trackPath.ts';
 import { shippedPublic } from './tools/dev/shippedPublic.mjs';
 import { servedFile } from './tools/dev/servedFile.mjs';
@@ -170,7 +170,8 @@ function placementFiles(): Plugin {
         if (req.method !== 'GET' && req.method !== 'HEAD') return next();
         const word = editFileOf(decodeURIComponent((req.url ?? '/').split('?')[0]));
         if (!word) return next();
-        const file = path.resolve(PLACEMENTS_DIR, word.kind, `${word.world}.json`);
+        // A kind's file where it is kept: in its kind's folder, or at the folder's own top (`solid.json`, `editFileRel`).
+        const file = path.resolve(PLACEMENTS_DIR, editFileRel(word.kind, word.world));
         if (!file.startsWith(PLACEMENTS_DIR + path.sep)) return next();
         res.setHeader('Cache-Control', 'no-store');
         fs.readFile(file, (err, data) => {

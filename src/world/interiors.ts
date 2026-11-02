@@ -111,6 +111,11 @@ function mul(a: readonly number[], b: readonly number[]): [number, number, numbe
 export interface FurnitureObject extends LayoutObject {
   /** The piece's key: its building's (`InteriorBuilding.key`), a slash and its index in the file. */
   ilf: string;
+  /**
+   * Its building's index in the layout, on every piece (one in no room carries no `in`): what a removal of the building takes
+   * it away by (`compileRemovals`, Map-maker II's twelfth wave). Read by nothing else; the streamer never copies it.
+   */
+  ilfRow: number;
 }
 
 /** What `furnishLayout` came to: the objects to append, and what of the file it could not stand, by why. */
@@ -156,7 +161,7 @@ export function furnishLayout(objects: readonly LayoutObject[], file: InteriorsF
       const at = turn(o.q, [p[5], p[6], p[7]]);
       const q = mul(o.q, [p[8], p[9], p[10], p[11]]);
       const state = b.states?.[String(p[0])] ?? b.state ?? o.state;
-      const piece: FurnitureObject = { template: p[1], model: p[2], x: o.x + at[0], y: o.y + at[1], z: o.z + at[2], q, radius: FURNITURE_RADIUS, contained: p[4] > 0, ilf: `${b.key}/${p[0]}` };
+      const piece: FurnitureObject = { template: p[1], model: p[2], x: o.x + at[0], y: o.y + at[1], z: o.z + at[2], q, radius: FURNITURE_RADIUS, contained: p[4] > 0, ilf: `${b.key}/${p[0]}`, ilfRow: b.row };
       if (p[4] > 0) {
         piece.cell = p[4];
         piece.in = b.row;

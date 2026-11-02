@@ -294,6 +294,8 @@ interface WorldLoop {
   /** It has been in a room at least once, so it is no longer looking for its first answer. */
   found: boolean;
   tries: number;
+  /** What placed it (a placed sound's definition), for `dropPlaced`; absent on anything else. */
+  tag?: unknown;
 }
 
 /**
@@ -346,15 +348,38 @@ export class WorldEmitters {
    * is taken all the same and kept silent: `retry` starts it when the bank is in, and dropping the
    * rest of the pack over one such source would lose a town's crowds to one missing sample.
    */
-  addPlaced(sound: string, x: number, y: number, z: number, inside: boolean): boolean {
+  addPlaced(sound: string, x: number, y: number, z: number, inside: boolean, tag?: unknown): boolean {
     if (this.placed.length >= this.tune.cap) {
       this.counts.overCap++;
       return false;
     }
     const loop = this.make(sound, x, y, z, inside);
+    if (tag !== undefined) loop.tag = tag;
     this.placed.push(loop);
     this.counts.placed++;
     return true;
+  }
+
+  /**
+   * Every placed source whose tag `drop` answers for taken away (Map-maker II's twelfth wave: a building or a thing the
+   * removal file hides live, `Ambience.setHidden`): its voice let go and its record forgotten. Answers the tags it dropped.
+   */
+  dropPlaced(drop: (tag: unknown) => boolean): unknown[] {
+    const out: unknown[] = [];
+    let keep = 0;
+    for (const loop of this.placed) {
+      if (loop.tag !== undefined && drop(loop.tag)) {
+        this.drop(loop);
+        const p = this.pending.indexOf(loop);
+        if (p >= 0) this.pending.splice(p, 1);
+        out.push(loop.tag);
+        continue;
+      }
+      this.placed[keep++] = loop;
+    }
+    this.placed.length = keep;
+    if (this.cursor >= this.pending.length) this.cursor = 0;
+    return out;
   }
 
   /** A looping sound a particle effect's emitter names, which follows the effect while it plays. */

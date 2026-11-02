@@ -110,6 +110,8 @@ export interface DressingStand {
    * rule makes it solid as the world's own furniture is (`FURNITURE_RADIUS`). Absent on every row.
    */
   radius?: number;
+  /** What it counts as for the people (`PlacementRow.furniture`, the twelfth wave), absent for its template's own name. */
+  furniture?: 'seat' | 'table' | 'none';
 }
 
 /**
@@ -139,13 +141,16 @@ export function dressingStandOf(row: PlacementRow, g: GamePlace, key: string, th
   if (row.pack === 'props') {
     const def = row.thing ? thingOf(row.thing) : null;
     if (!def) return null;
-    return { ...at, model: def.model, solid: standsSolid(row, furniture(def.template)), effectsOf: def.template };
+    // A row's own furniture word over its thing's template (the twelfth wave) is `standsSolid`'s own to read, so the walk
+    // grid's bake and the editor's Solid, which hand it the template's answer too, stand the row alike.
+    return { ...at, model: def.model, solid: standsSolid(row, furniture(def.template)), effectsOf: def.template, ...(row.furniture !== undefined ? { furniture: row.furniture } : {}) };
   }
   if (!row.model) return null;
   // A gallery or world row's template is what it really is, handed on as the thing's own is: what its client data
   // hangs on it (a world's brazier burns) and what `World.dataPlacedNear` counts a permanent chair as the world's own by.
   // And its `from`, the world its model comes from. A row naming neither stands exactly as it always did.
-  return { ...at, model: row.model, solid: standsSolid(row, false), ...(row.template ? { effectsOf: row.template } : {}), ...(row.from && row.pack === 'world' ? { from: row.from } : {}), ...(row.pack === 'imported' ? { imported: true as const } : {}) };
+  // A row saying it is a seat or a table is passable (the twelfth wave, read by `standsSolid` itself); with no word, as before.
+  return { ...at, model: row.model, solid: standsSolid(row, false), ...(row.template ? { effectsOf: row.template } : {}), ...(row.from && row.pack === 'world' ? { from: row.from } : {}), ...(row.pack === 'imported' ? { imported: true as const } : {}), ...(row.furniture !== undefined ? { furniture: row.furniture } : {}) };
 }
 
 // Whether a row stands solid (`standsSolid`): one rule the walk grid's bake reads too, kept in `rowSolid.ts` (Map-maker II's

@@ -119,6 +119,8 @@ export interface SelectedView {
    */
   furnished?: boolean | null;
   furniture?: string;
+  /** Map-maker II's twelfth wave: what it counts as for the people (`seat`, `table`, `none`; '' for its template's name). */
+  counts?: string;
   /**
    * Its model's materials, each name once, with the look each wears in words, its tint (`#rrggbb` or ''), a little picture of
    * it and why a look would not go on it ('' for nothing); null where its model is not loaded or it is a mark.
@@ -277,8 +279,24 @@ export interface PlacesToolsView {
   note: string;
 }
 
+/**
+ * A section a tab draws of what the editor hands it (Map-maker II's twelfth wave: the world's own thing picked, the
+ * no-spawn zones, the people taken away and placed, the seats of ours): a heading, words, rows each of words and buttons,
+ * and fields written as they are left. Every button and field names an act the editor answers (`sectionAct`).
+ */
+export interface EditorSection {
+  title: string;
+  note?: string;
+  rows?: { words: string; title?: string; buttons: { label: string; act: string; danger?: boolean; off?: boolean }[] }[];
+  fields?: { label: string; value: string | number | boolean; act: string | null; kind?: 'text' | 'number' | 'check' }[];
+  buttons?: { label: string; act: string; danger?: boolean; off?: boolean }[];
+}
+
 /** What the window needs of the editor beside the library's own. */
 export interface EditorWindowHost extends LibraryHost {
+  /** The sections a tab draws beside its own (Map-maker II's twelfth wave), and what a button or a field of one does. */
+  sections?(tab: 'selected' | 'here' | 'tools'): EditorSection[];
+  sectionAct?(act: string, value?: string): void;
   /** The place of ours the places tool has picked, or null (Map-maker II's eighth wave); its fields written (`copy` copies its story area). */
   place?(): PlaceView | null;
   setPlaceRow?(fields: Record<string, unknown>): void;
@@ -467,6 +485,53 @@ export class EditorWindow {
     return b;
   }
 
+  /**
+   * The sections the editor hands a tab (Map-maker II's twelfth wave), drawn after the tab's own: each a heading, its words,
+   * its rows of words and buttons, its fields and its buttons, every one of them an act the editor answers.
+   */
+  private drawSections(el: HTMLElement, tab: 'selected' | 'here' | 'tools'): void {
+    const list = this.host.sections?.(tab) ?? [];
+    const act = this.host.sectionAct?.bind(this.host);
+    if (!list.length || !act) return;
+    const press = (label: string, a: string, danger?: boolean, off?: boolean): HTMLButtonElement => {
+      const b = this.button(label, 'section', danger ? 'ed-del' : '');
+      b.disabled = !!off;
+      b.addEventListener('click', () => {
+        b.blur();
+        act(a);
+      });
+      return b;
+    };
+    for (const s of list) {
+      const h = document.createElement('div');
+      h.className = 'ed-h';
+      h.textContent = s.title.toUpperCase();
+      el.appendChild(h);
+      if (s.note) this.note(el, s.note);
+      for (const f of s.fields ?? []) {
+        const a = f.act;
+        this.field(el, f.label, f.value, a ? (v) => act(a, v) : null, f.kind ?? 'text');
+      }
+      for (const r of s.rows ?? []) {
+        const row = document.createElement('div');
+        row.className = 'ed-row';
+        const label = document.createElement('span');
+        label.className = 'ed-label';
+        label.textContent = r.words;
+        if (r.title) label.title = r.title;
+        row.appendChild(label);
+        for (const b of r.buttons) row.appendChild(press(b.label, b.act, b.danger, b.off));
+        el.appendChild(row);
+      }
+      if (s.buttons?.length) {
+        const row = document.createElement('div');
+        row.className = 'ed-row';
+        for (const b of s.buttons) row.appendChild(press(b.label, b.act, b.danger, b.off));
+        el.appendChild(row);
+      }
+    }
+  }
+
   // ---- Here. ----
 
   private drawHere(): void {
@@ -475,6 +540,7 @@ export class EditorWindow {
     el.replaceChildren();
     if (!rows.length) {
       this.note(el, 'nothing stands for good round here');
+      this.drawSections(el, 'here');
       return;
     }
     rows.forEach((r, i) => {
@@ -505,6 +571,7 @@ export class EditorWindow {
       if (!r.stood) (row.querySelector('[data-act="take"]') as HTMLButtonElement).disabled = true;
       el.appendChild(row);
     });
+    this.drawSections(el, 'here');
   }
 
   private hereClicked(e: MouseEvent): void {
@@ -585,6 +652,8 @@ export class EditorWindow {
   private drawSelected(): void {
     const el = this.els.selected;
     el.replaceChildren();
+    // What the editor hands the tab first (Map-maker II's twelfth wave): the world's own thing picked, a zone picked.
+    this.drawSections(el, 'selected');
     // A place of ours the places tool has picked (Map-maker II's eighth wave): its words, kind and switches, its loading
     // lines and its story area, each written as it is left (one undo each).
     const place = this.host.place?.() ?? null;
@@ -794,6 +863,8 @@ export class EditorWindow {
     // The interior layout files' wave: a building stands its template's furniture, or none (`furnish: false`).
     if (s.furnished !== undefined && s.furnished !== null) this.field(el, 'Furnished', s.furnished, (v) => this.host.setField({ furnish: v === 'true' }), 'check');
     if (s.furniture) this.field(el, 'Its furniture', s.furniture, null);
+    // Map-maker II's twelfth wave: a seat (people of ours sit on it, a chair of ours stands nowhere on it), a table, or neither.
+    if (s.counts !== undefined) this.field(el, 'Counts as (seat, table, none; empty: its name)', s.counts, (v) => this.host.setField({ furniture: v.trim() || null }));
     this.field(el, 'State', s.state, (v) => this.host.setField({ state: v.trim() || null }));
     this.field(el, 'Its name', s.name, (v) => this.host.setField({ name: v.trim() || null }));
     this.field(el, 'Note', s.note, (v) => this.host.setField({ note: v.trim() || null }));
@@ -1346,6 +1417,8 @@ export class EditorWindow {
     });
     row(refresh);
     this.note(el, 'Rows reach players once their file is committed and merged to main; the editor never commits.');
+    // What the editor hands the tab of its own (Map-maker II's twelfth wave): the World's own filter, the no-spawn zones, the seats of ours.
+    this.drawSections(el, 'tools');
     // The editor's numbers of feel, as sliders: each set through `__debug.editor({ tune })`'s own setter.
     for (const g of this.host.dialSet().groups) {
       h(g.title.toUpperCase());

@@ -2,7 +2,8 @@
 // server's glue runs them over HTTP against real files: every edit across both files applied in order and nothing written
 // unless all of it holds; a given id kept and a missing one minted, unique across both files and the batch itself; `was`
 // refusing a row that changed since by its id; `keepAt` keeping a row's own moment; a row moved between the files in one
-// batch; the fifth wave's kinds of file and the copies' world refused in words; the caps; each file's revision twelve hex
+// batch; the removal and people files written as kinds of their own (Map-maker II's twelfth wave) and the copies' world
+// refused in words; the caps; each file's revision twelve hex
 // of the SHA-1 of the text written, told to the page with its kind once the answer has gone; a file of 20,000 rows taking
 // a batch of 5,000 edits; and the one-row ops answering as they did, with their revisions beside.
 import assert from 'node:assert/strict';
@@ -64,7 +65,9 @@ const rows = (text: string | null) => (text ? readPlacementsFile(text, W, 'groun
   ok(changed.status === 409 && /chair-1 has changed/.test((changed.body as { why: string }).why), 'a row whose was is not the row as it stands is refused by its id');
   ok(run([{ file: 'world', put: prop('chair-1', 7), was: null }], current).status === 409, 'and so is a put whose was says none must stand where one does');
   ok(run([{ file: 'world', put: { ...prop('chair-1', 7), at: undefined }, keepAt: true }], current).status === 400, 'keepAt asks for a row carrying its own at');
-  ok(run([{ file: 'removed', delete: 'x-1' }], current).status === 400 && /fifth wave/.test((run([{ file: 'people', delete: 'x-1' }], current).body as { why: string }).why), "the fifth wave's kinds of file are refused in words until it writes them");
+  // From Map-maker II's twelfth wave the batch writes the removal and people files (removalsBatch's own checks): an id that
+  // names no removal row is refused as one, and a row neither file holds by its file.
+  ok(run([{ file: 'removed', delete: 'x-1' }], current).status === 400 && /is not in public\/placements\/people\/tatooine\.json/.test((run([{ file: 'people', delete: 'x-1' }], current).body as { why: string }).why), 'the removal and people files are kinds the batch writes: an id no removal row can carry is refused, and a person neither file holds is not in its file');
   ok(run([{ file: 'world', put: prop('a-1', 1) }], current, 'dungeon1').status === 409, "nothing stands for good in the world of copies");
   ok(run([{ file: 'world', put: prop('a-1', 1) }], current, 'nowhere').status === 404 && run([], current).status === 400, 'a world there is not, and a batch of nothing, are refused');
   const space = applyPlacementOp({ op: 'batch', world: 'space_tatooine', edits: [{ file: 'world', put: { ...prop('rock-1', 100), y: 5 } }] }, { story: null, world: null }, ctx());

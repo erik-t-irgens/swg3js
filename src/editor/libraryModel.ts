@@ -25,11 +25,31 @@ export const LIBRARY_VERSION = 1;
  * (its tenth wave) is the owner's own models, read from each imports folder's `imports.json` (`importEntries`) rather than
  * the library pass's index.
  */
-export const LIBRARY_SOURCES = ['props', 'buildings', 'world', 'flora', 'imported', 'effects', 'sounds'] as const;
+export const LIBRARY_SOURCES = ['props', 'buildings', 'world', 'flora', 'imported', 'effects', 'sounds', 'people'] as const;
 export type LibrarySource = (typeof LIBRARY_SOURCES)[number];
 
 /** A source in words. */
-export const SOURCE_WORDS: Record<LibrarySource, string> = { props: 'Props', buildings: 'Buildings', world: 'World models', flora: 'Flora', imported: 'Imported', effects: 'Effects', sounds: 'Sounds' };
+export const SOURCE_WORDS: Record<LibrarySource, string> = { props: 'Props', buildings: 'Buildings', world: 'World models', flora: 'Flora', imported: 'Imported', effects: 'Effects', sounds: 'Sounds', people: 'People' };
+
+/**
+ * The People source (Map-maker II's twelfth wave, Map-maker I §2.10): the mobile catalogue's bodies by its own groups, with
+ * initials (no picture: a dressed look baked offline is a conversion of its own, later). Taken in hand, a click places a
+ * person of the owner's own at the aim (the people file, `public/placements/people/<world>.json`). Made in the page from the
+ * catalogue the game already holds, never by the library pass. An entry of no shape is passed over.
+ */
+export function peopleEntries(catalogue: { entries: readonly { id: string; name?: string; group?: string }[] } | null): LibraryEntry[] {
+  const out: LibraryEntry[] = [];
+  for (const e of catalogue?.entries ?? []) {
+    if (!e || typeof e.id !== 'string' || !/^[A-Za-z0-9_.:-]{1,96}$/.test(e.id)) continue;
+    out.push({ s: 'people', p: 'mobiles', id: e.id, m: e.id, n: typeof e.name === 'string' && e.name ? e.name : null, g: typeof e.group === 'string' && e.group ? e.group : 'other', t: null, sz: [0, 0, 0], tri: 0, pic: null, f: 0 });
+  }
+  return out;
+}
+
+/** Whether an entry is a person (the People source's) rather than a thing with a model. */
+export function isPersonEntry(e: Pick<LibraryEntry, 's'>): boolean {
+  return e.s === 'people';
+}
 
 /** One model of an imports folder's `imports.json`, as the import command writes it (`tools/swg/imports.mjs`). */
 export interface ImportFileEntry {

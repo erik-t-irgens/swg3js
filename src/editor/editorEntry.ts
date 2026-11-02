@@ -85,6 +85,17 @@ import { attachAtHit, markRow, withAttachment } from './lookPick.ts';
 import { ATTACH_TUNE, rowMatrix, type RowAttachments } from '../world/rowAttach.ts';
 import { LOOK_TUNE } from '../world/rowMaterials.ts';
 import { attachOfEntry, isAttachEntry } from './libraryModel.ts';
+// Map-maker II's twelfth wave: the world's own taken away, moved and switched; the people; the no-spawn zones.
+import { isPersonEntry, peopleEntries } from './libraryModel.ts';
+import { EditorRemovals, PLACED_PERSON_TUNE, type RemovalsHost } from './editorRemovals.ts';
+import { EditorZones, ZONE_TOOL_TUNE, zonesTool, type ZonesHost } from './editorZones.ts';
+import { solidRows } from '../world/walkThrough.ts';
+import { SEAT_TUNE, SeatSnapAsk, seatSnapIn, type SeatedRow } from '../world/seatProps.ts';
+import { headingRawOf, rawOfGame, rowOfLayoutThing } from '../world/removalFrames.ts';
+import { furnitureOf } from '../world/rowSolid.ts';
+import { standingPeople } from '../world/standingPeople.ts';
+import { wildLife } from '../world/wildLife.ts';
+import type { EditorSection } from '../ui/editorWindow.ts';
 import { parseDonor, readAttachments, readLooks, withModelLooks, type RowAttach } from '../story/placements.ts';
 import { pieceOfKey } from '../world/interiors.ts';
 
@@ -211,6 +222,13 @@ export interface EditorHost {
   reloadImports?(): Promise<string>;
   /** The imports' two packs (`World.importsPack`): the shipped folder's and the private one's. */
   importPacks?(): Promise<ImportPacks>;
+  /**
+   * Map-maker II's twelfth wave: the seats of ours standing near a point of the game's frame, and one as the permanent row that
+   * stands for it (a props row where the props catalogue has its model, else a row of this world's pack) at its exact place and
+   * turn, its solidity left absent and its furniture word written; `id` minted by the editor.
+   */
+  seatsNear?(x: number, z: number, reach: number): { key: string; words: string }[];
+  seatRow?(key: string, id: (base: string) => string): Record<string, unknown> | string;
 }
 
 /** One thing in hand: what a row writes, what it is drawn and judged by, and how it is turned. */
@@ -241,6 +259,8 @@ interface Hand {
   attach?: RowAttach;
   /** The owner a picked-up row's looks are held under while its ghost wears them (let go with the ghost and what it left behind). */
   lookOwner?: object;
+  /** A seat or a table (Map-maker II's twelfth wave): snapped to a sitter near the aim; null for anything else, absent until asked. */
+  seat?: 'seat' | 'table' | null;
 }
 
 const UP = new THREE.Vector3(0, 1, 0);
@@ -376,7 +396,8 @@ export class Editor {
         walk: (rect, visit) => w.streamer?.forEachPlacedIn(rect, visit),
       },
       (o) => w.streamer?.boxOf(o) ?? null,
-      (o) => o.template.startsWith(PLACEMENT_KEY_PREFIX),
+      // The rows of the files; and with the World's own filter on (Map-maker II's twelfth wave) the world's own objects too.
+      (o) => o.template.startsWith(PLACEMENT_KEY_PREFIX) || (this.removals?.worldFilter === true && o.row !== undefined),
     );
     this.ghostDeps = {
       heightAt: (x, z) => w.terrain.heightAt(x, z),
@@ -559,6 +580,13 @@ export class Editor {
     // outlines into the world's locations file; every change one write, landed by difference as its answer comes.
     this.places = new EditorPlaces(this.placesHost());
     this.tools.add(placesTool(this.places));
+    // Map-maker II's twelfth wave: the hand on what the world places (the World's own filter, hide, move, the walk-through
+    // switches, the people, the sites, the seats of ours) and the no-spawn zone tool (a Tools-list entry with no key of its own).
+    this.removals = new EditorRemovals(this.removalsHost());
+    this.zones = new EditorZones(this.zonesHost());
+    this.tools.add(zonesTool(this.zones));
+    registerExtraTune('person', PLACED_PERSON_TUNE as unknown as Record<string, unknown>);
+    registerExtraTune('zone', ZONE_TOOL_TUNE as unknown as Record<string, unknown>);
     // Its numbers of feel as sliders in the debug menu's `locations` set, beside the places' own (`locationDialSet`).
     LOCATION_DIALS.tool = placesToolDials();
     // The picked lake's look as the debug menu's sliders, each written into the water file a moment after it rests.
@@ -623,6 +651,12 @@ export class Editor {
   readonly water: EditorWater;
   /** The places tool (Map-maker II's eighth wave). */
   readonly places: EditorPlaces;
+  /** The hand on the world's own, its people and its sites (Map-maker II's twelfth wave). */
+  readonly removals: EditorRemovals;
+  /** The no-spawn zone tool (Map-maker II's twelfth wave). */
+  readonly zones: EditorZones;
+  /** Whether this session wrote anything the walk grid's bake reads (a hide, a switch on being solid): the bar says the grid is stale. */
+  private gridStale = false;
   /** The pack the paint palette's family list shows (Map-maker II's third wave): '' for this world's own. */
   private paintBrowse = '';
   /**
@@ -1000,6 +1034,126 @@ export class Editor {
     };
   }
 
+  /** What the hand on the world's own (Map-maker II's twelfth wave) asks of the editor and the game. */
+  private removalsHost(): RemovalsHost {
+    const h = this.host;
+    const w = h.world;
+    const me = this;
+    const reach = 60;
+    const toRaw = (x: number, z: number): { x: number; z: number } | null => rawOfGame(w.placeFrame, x, z);
+    return {
+      get edits() {
+        return me.edits;
+      },
+      worldKind: () => h.worldKind(),
+      world: () => h.packId(),
+      rows: () => w.removalRows,
+      people: () => w.placedPeopleRows,
+      solidRows: () => solidRows(),
+      keyOf: (o) => (o.row !== undefined ? w.objectKeyOf(o.row) : ''),
+      extentWords: (o) => w.streamer?.extentWords(o) ?? '',
+      ruleWords: (o) => w.streamer?.ruleWords(o) ?? '',
+      rowsFromObject: (o, ids) => me.rowsFromObject(o, ids),
+      peopleNear: () => {
+        const p = h.player.pos;
+        const removed = w.removals.people;
+        return standingPeople.rowsNear(p.x, p.z, reach).map((r) => ({ key: r.key, words: `${r.who} (${r.src}${r.up ? ', standing' : ''}) ${Math.round(r.d)} m`, removed: removed.has(r.key) || r.code !== 0 }));
+      },
+      sitesNear: () => {
+        const raw = toRaw(h.player.pos.x, h.player.pos.z);
+        if (!raw) return [];
+        const removed = w.removals.sites;
+        return wildLife.allSites
+          .map((s) => ({ s, d: Math.hypot(s.x - raw.x, s.z - raw.z) }))
+          .filter((x) => x.d <= 400 || removed.has(x.s.key))
+          .sort((a, b) => a.d - b.d)
+          .slice(0, 20)
+          .map(({ s, d }) => ({ key: s.key, words: `${s.lair} (${s.area}) ${Math.round(d)} m`, removed: removed.has(s.key) }));
+      },
+      hiddenNear: () => w.hiddenRowsNear(h.player.pos.x, h.player.pos.z, 400).slice(0, 30).map((x) => ({ id: x.id, words: `${x.template.split('/').pop()} ${Math.round(x.d)} m` })),
+      nullNear: () =>
+        (w.streamer?.nullExtentNear(h.player.pos.x, h.player.pos.z, reach) ?? []).map(({ o, d }) => ({ key: o.row !== undefined ? w.objectKeyOf(o.row) : o.template, template: o.effectsOf ?? o.template, words: `${(o.effectsOf ?? o.template).split('/').pop()} ${Math.round(d)} m` })),
+      nullTemplates: () => w.streamer?.nullExtentTemplates() ?? [],
+      seatsNear: () => h.seatsNear?.(h.player.pos.x, h.player.pos.z, reach) ?? [],
+      seatRow: (key) => h.seatRow?.(key, (base) => me.edits.mintIds([base])[0]) ?? 'the seats of ours are not stood here',
+      dest: () => me.session.dest,
+      aim: () => ({ x: me.aim.hit.x, y: me.aim.hit.y, z: me.aim.hit.z, valid: me.aimKind !== 'sky' }),
+      rawOf: (x, z) => toRaw(x, z),
+      roomAt: (x, y, z) => {
+        const s = w.streamer;
+        if (!s) return 0;
+        const ask = new THREE.Vector3(x, y, z);
+        const ans: RoomAnswer = { building: null, cell: 0, byBox: false };
+        s.cameraRoomAt(ask, ans, floorUnder);
+        return ans.building ? ans.cell : 0;
+      },
+      // The eye's facing as a heading of the raw frame: the game's `atan2(fx, fz)` turned through the mirror (x to -x).
+      headingRaw: () => headingRawOf(me.fly.yaw, !!w.planet?.space),
+      select: (ids) => {
+        me.edits.sel.pick(ids, 'set');
+        me.window?.refreshEdits();
+      },
+      gridNote: () => (me.gridStale ? `this world's walk grid is stale until it is baked again: npm run swg -- navgrid ${h.packId()} assets-private` : ''),
+      say: (words, ok) => {
+        if (ok && /hide|show|solid|walked through|move|by its rules|by the shared|by its size/.test(words)) me.gridStale = true;
+        me.say(words, ok);
+      },
+    };
+  }
+
+  /** What the zone tool asks of the editor and the game. */
+  private zonesHost(): ZonesHost {
+    const places = this.placesHost();
+    const h = this.host;
+    const me = this;
+    return {
+      get edits() {
+        return me.edits;
+      },
+      worldKind: () => h.worldKind(),
+      rows: () => h.world.removalRows,
+      locations: () => h.locationRows?.() ?? [],
+      toRaw: (x, z, out) => places.toRaw(x, z, out),
+      toGame: (x, z, out) => places.toGame(x, z, out),
+      groundAt: (x, z) => places.groundAt(x, z),
+      groundCached: (x, z, out) => places.groundCached(x, z, out),
+      keptOff: (id) => wildLife.zoneKeptOff().find((z) => z.zone === id)?.keptOff ?? null,
+      // As a place of ours is gone to (`goToPlace`): over its middle and back from it by its reach, looking down at it.
+      goTo: (x, z, reach) => {
+        const g = places.groundAt(x, z);
+        const y = Number.isFinite(g) ? g : 0;
+        const back = Math.min(1200, Math.max(30, reach * 0.9));
+        h.player.pos.set(x, y + back * 0.7, z + back);
+        me.fly.lookAlong(0, -back * 0.7, -back);
+        me.fly.stop();
+      },
+      say: (words, ok) => me.say(words, ok),
+    };
+  }
+
+  /**
+   * A world object as rows of the world's own file (Map-maker II's twelfth wave: Move and Copy as row): its model and template
+   * at its very place and turn in the file's raw frame, and with a building the things the snapshot stood in its rooms as rows
+   * inside it. A piece of a building's own furniture is refused (its building's furniture is made its own instead).
+   */
+  private rowsFromObject(o: PlacedObject, ids: (bases: readonly string[]) => string[]): { file: 'world'; rows: Record<string, unknown>[] } | string {
+    const w = this.host.world;
+    if (o.row === undefined) return "it is not one of the world's own objects";
+    if (o.ilf) return "a piece of a building's own furniture moves by making its building's furniture its own (pick it on the Here tab)";
+    const lo = w.layoutObjectAt(o.row);
+    if (!lo || !lo.model || !lo.q) return 'its row in the layout is not read';
+    const building = !lo.contained && (w.ownPack?.find(lo.model)?.cells?.length ?? 0) > 0;
+    const list = [o.row, ...(building ? w.layoutObjectsIn(o.row) : [])];
+    const made = ids(list.map((li) => (w.layoutObjectAt(li)?.model ?? 'thing').replace(/[^a-z0-9_-]/gi, '_').toLowerCase().slice(0, 40) || 'thing'));
+    const rows: Record<string, unknown>[] = [];
+    list.forEach((li, i) => {
+      const x = w.layoutObjectAt(li);
+      if (!x || !x.model || !x.q) return;
+      rows.push(rowOfLayoutThing({ model: x.model, template: x.template, x: x.x, y: x.y, z: x.z, q: x.q, contained: x.contained }, made[i], i === 0 && building));
+    });
+    return rows.length ? { file: 'world', rows } : 'nothing of it could be written as a row';
+  }
+
   /** The Tools list (Map-maker II §2.3): one armed at a time, the scatter brush first. */
   readonly tools = new ToolList();
   /** What an armed tool is handed each frame and what it draws with, kept records. */
@@ -1221,6 +1375,10 @@ export class Editor {
     this.paint.worldGone();
     this.water.worldGone();
     this.places.worldGone();
+    // Map-maker II's twelfth wave: nothing of the world's own picked, no person in hand, no zone picked or drawn.
+    this.removals.worldGone();
+    this.zones.worldGone();
+    this.gridStale = false;
     this.tools.disarmAll();
     // The wash's write still waiting for its dials to rest goes with its world, never into the next world's file.
     if (this.washTimer) clearTimeout(this.washTimer);
@@ -1483,6 +1641,13 @@ export class Editor {
       this.giveUpHand();
       return true;
     }
+    // A person in hand, or one of the world's own picked (Map-maker II's twelfth wave): given up, let go.
+    if (this.removals.personHand || this.removals.picked) {
+      this.removals.personHand = null;
+      this.removals.picked = null;
+      this.window?.refreshEdits();
+      return true;
+    }
     // A tool armed (the scatter brush, the sculpt brush): let go, a stroke under way ended as its button let go would; a tool
     // with something of its own under way (the water tool's draft, its picked lake) gives that up first.
     const armed = this.tools.armedTool;
@@ -1526,7 +1691,7 @@ export class Editor {
   canvasClick(): void {
     if (!this.session.on || !this.session.point) return;
     // With a tool armed a click is the tool's: it never takes the mouse back to Fly.
-    if (this.hand || this.tools.toolArmed() || !this.pointer.clicked) return;
+    if (this.hand || this.removals.personHand || this.tools.toolArmed() || !this.pointer.clicked) return;
     if (this.aim.hover || this.edits.handleHot || this.looks.hover >= 0 || this.looks.picking || this.looks.attachSel || !this.edits.clickGoesToFly()) return;
     this.pointer.clicked = false;
     this.setPoint(false);
@@ -1627,6 +1792,27 @@ export class Editor {
         inRoom = !!this.hitRoom.building;
       }
       this.ghostPos.set(hit.x, hit.y, hit.z);
+      // A seat or a table near a sitter (Map-maker II's twelfth wave): snapped to the sitter's spot and heading, or the table's
+      // spot before it, at the plan's own reaches, so the next plan of the seats finds it and stands none of ours beside it.
+      if (!hand.building && this.handSeat(hand)) {
+        // The sitters made again only when the people's pass ran since (who sits moves only then), never on a clock.
+        const pass = standingPeople.last.pass;
+        const frame = h.world.placeFrame;
+        if (pass !== this.sittersPass || frame !== this.sittersFrame) {
+          this.sittersPass = pass;
+          this.sittersFrame = frame;
+          this.sitters = standingPeople.seatedRows(frame);
+        }
+        const ask = this.snapAsk;
+        ask.kind = hand.seat!;
+        ask.x = hit.x;
+        ask.z = hit.z;
+        if (seatSnapIn(ask, this.sitters)) {
+          this.ghostPos.set(ask.ox, ask.oy, ask.oz);
+          hand.yaw = ask.heading;
+          hand.q.setFromAxisAngle(UP, ask.heading);
+        }
+      }
       if (!hand.building && hand.sBounds) this.ghostPos.y -= lowestOf(hand.sBounds, hand.q, this.tmp);
       this.ghostM.compose(this.ghostPos, hand.q, hand.scale);
       this.ghost.place(this.ghostM, inRoom);
@@ -1640,6 +1826,11 @@ export class Editor {
     const click = this.pendingClick || (this.session.point && this.pointer.clicked);
     this.pendingClick = false;
     if (click && hand) void this.place();
+    // A person of the People source in hand (Map-maker II's twelfth wave): a click places them where the aim meets the world.
+    else if (click && this.removals.personHand && kind !== 'sky') {
+      const ph = this.removals.personHand;
+      void this.removals.placePerson(ph.body, null, null, ph.name).then(() => this.window?.refreshEdits());
+    }
     // The look picker's click (the seventh wave): the surface under the aim gives the picked rows its picture or material, and
     // the editing hears no click this frame (it would pick the row clicked on).
     const lookClick = !hand && !!this.looks.picking && (this.lookClick || (this.session.point && this.pointer.clicked && this.pointer.over));
@@ -1699,6 +1890,16 @@ export class Editor {
       ra.w = w;
       ra.h = hh;
       tool.draw(this.toolDraw);
+    } else if (hand && !hand.building && hand.seat && kind !== 'sky') {
+      // A seat or a table in hand: the reach it snaps to a sitter within, drawn round the aim (the plan's own reach).
+      const ra = this.ringAsk;
+      ra.cx = hit.x;
+      ra.cy = hit.y;
+      ra.cz = hit.z;
+      ra.w = w;
+      ra.h = hh;
+      this.toolDraw.radius = hand.seat === 'seat' ? SEAT_TUNE.seatNear : SEAT_TUNE.tableNear;
+      this.toolDraw.ring(0);
     }
     this.edits.clock.now = now;
     // The attachments' handles (the seventh wave) laid out from this frame's view first, so the editing's click below reads
@@ -1713,6 +1914,16 @@ export class Editor {
       if (this.looks.hoveredAttachment()) this.looks.click();
       else if (this.looks.attachSel) {
         this.looks.attachSel = null;
+        this.window?.refreshEdits();
+      }
+      // With the World's own filter on (Map-maker II's twelfth wave), a click on one of the world's own objects picks it for
+      // the Selected tab's hide, move, copy and switches; a click on anything else lets it go.
+      if (this.removals.worldFilter && !hand) {
+        const hov = this.aim.hover;
+        if (hov && hov.row !== undefined && !hov.template.startsWith(PLACEMENT_KEY_PREFIX)) {
+          this.removals.pick(hov);
+          this.window?.setTab('selected');
+        } else if (this.removals.picked) this.removals.picked = null;
         this.window?.refreshEdits();
       }
     }
@@ -1775,6 +1986,15 @@ export class Editor {
   async take(e: LibraryEntry, base: { row: PlacementRow; layer: PlacementLayer } | null = null): Promise<string | null> {
     // An effect or a sound (the seventh wave) goes in hand with no model; with the look picker armed, a model's entry offers
     // its materials to choose from on the Selected tab and nothing goes in hand.
+    // A person of the People source (Map-maker II's twelfth wave): nothing in hand but the person, placed by the next click
+    // (a person has no materials to offer the look picker).
+    if (!base && isPersonEntry(e)) {
+      this.giveUpHand();
+      this.tools.disarmAll();
+      this.removals.takePerson(e.id, entryName(e));
+      this.window?.refreshEdits();
+      return null;
+    }
     if (!base && isAttachEntry(e)) return this.takeAttachment(e);
     if (!base && this.looks.picking) {
       const got = await this.sourceOf(e);
@@ -2154,6 +2374,30 @@ export class Editor {
     return null;
   }
 
+  /** The world's own thing picked with the World's own filter (Map-maker II's twelfth wave), by its content key, or null. */
+  worldPicked(): string | null {
+    return this.removals.pickedKey();
+  }
+
+  /**
+   * The sitters the seat snap reads, made again while a seat or a table is in hand only once the people's pass has run since
+   * (`StandingPeople.last.pass`) or the world's frame is another; and the snap's kept ask, so a frame of it makes nothing.
+   */
+  private sitters: SeatedRow[] = [];
+  private sittersPass = -1;
+  private sittersFrame: unknown = undefined;
+  private readonly snapAsk = new SeatSnapAsk();
+
+  /** Whether a thing in hand is a seat or a table (its row's furniture word, else its template's name), asked once a hand. */
+  private handSeat(hand: Hand): 'seat' | 'table' | null {
+    if (hand.seat !== undefined) return hand.seat;
+    const src = hand.src;
+    const template = src.template ?? (src.thing ? (this.host.props.find(src.thing)?.template ?? null) : null);
+    const word = hand.base?.furniture;
+    hand.seat = word === 'seat' || word === 'table' ? word : word === 'none' ? null : template && furnitureOf(null, template, 'seat') ? 'seat' : template && furnitureOf(null, template, 'table') ? 'table' : null;
+    return hand.seat;
+  }
+
   /** The permanent row the aim rests on, by id, or null; a mark whose handle the cursor rests on first (the seventh wave). */
   private hoveredId(): string | null {
     const mark = this.looks.hoveredMark();
@@ -2393,6 +2637,10 @@ export class Editor {
               : 'nothing in hand';
     v.dest = `→ ${destinationFile(s.dest, this.host.packId())}`;
     v.room = roomWords(this.host.world.cameraRoom);
+    // Map-maker II's twelfth wave (the owner's Q7: no run-time patch): a hide or a switch on being solid written this session
+    // reaches the people's and creatures' outdoor walk grid only once `navgrid` bakes it again.
+    if (this.gridStale) v.room += ' · walk grid stale until navgrid is baked again';
+    if (this.removals.personHand) v.room += ` · ${this.removals.personHand.name} in hand: click to place`;
     v.notes = this.hand ? notesLine(this.notes) : '';
     v.said = this.said;
     v.saidOk = this.saidOk;
@@ -2414,7 +2662,7 @@ export class Editor {
         if (res.ok && type.includes('json')) {
           const idx = readLibraryIndex(await res.json());
           if (idx) {
-            this.libView = libraryView([...idx.entries, ...(await this.importedEntries())]);
+            this.libView = libraryView([...idx.entries, ...(await this.importedEntries()), ...peopleEntries(this.host.world.mobileCatalogue)]);
             this.libMade = idx.made;
             this.libState = 'index';
             this.window?.library.render();
@@ -2443,7 +2691,7 @@ export class Editor {
       gallery: gallery ? { sections: [{ id: 'houses', items: gallery.category('layout').filter((d) => (d.cells?.length ?? 0) > 1).map((d) => ({ model: d.id, label: d.id })) }] } : null,
       world: own ? { id: h.packId(), manifest: { categories: { layout: own.category('layout'), flora: own.category('flora') } } } : null,
     });
-    this.libView = libraryView([...entries, ...(await this.importedEntries())]);
+    this.libView = libraryView([...entries, ...(await this.importedEntries()), ...peopleEntries(h.world.mobileCatalogue)]);
     this.libState = 'fallback';
     this.window?.library.render();
   }
@@ -2614,6 +2862,15 @@ export class Editor {
       look: (act: 'tint' | 'texture' | 'material' | 'clear' | 'choose', of: string, value?: string) => void this.lookAct(act, of, value),
       lookPalettes: () => this.lookPalettes(),
       attachment: (act: 'pick' | 'at' | 'size' | 'remove', i: number, value?: string) => void this.attachmentAct(act, i, value),
+      // Map-maker II's twelfth wave: the world's own, the people, the sites, the seats and the no-spawn zones, as sections.
+      sections: (tab: 'selected' | 'here' | 'tools'): EditorSection[] => [...this.zones.sections(tab), ...this.removals.sections(tab)],
+      sectionAct: (act: string, value?: string) => {
+        void (async () => {
+          if (act === 'zone:arm') await this.toggleTool('zones');
+          else if (!(await this.zones.act(act, value))) await this.removals.act(act, value);
+          this.window?.refreshEdits();
+        })();
+      },
     };
   }
 
@@ -3813,6 +4070,8 @@ export class Editor {
       // The interior layout files' wave: a building's furniture, its file's or none, and how it stands here.
       furnished: r.row.kind === 'building' ? r.row.furnish !== false : null,
       furniture: r.row.kind === 'building' ? (this.host.furnitureNote?.(r.row.id) ?? '') : '',
+      // What it counts as for the people (Map-maker II's twelfth wave): its own word, '' for its template's name.
+      ...(r.row.kind !== 'mark' ? { counts: r.row.furniture ?? '' } : {}),
       materials: this.materialsView(first as string),
       picking: this.looks.picking ? `click a surface (or choose a library entry) to take its ${this.looks.picking.take === 'texture' ? 'picture' : 'material'} for ${this.looks.picking.of === '*' ? 'every material' : this.looks.picking.of}; Escape lets go` : '',
       offered: this.looks.choice,
@@ -3910,6 +4169,48 @@ export class Editor {
         }
       }
       if (o.give === true) this.giveUpHand();
+      // Map-maker II's twelfth wave: the World's own filter; a person of the owner's own placed at the aim (or at `at`);
+      // a placed person as cast text; a seat of ours made permanent; the zone tool's own asks.
+      if (typeof o.world === 'boolean') {
+        this.removals.worldFilter = o.world;
+        if (!o.world) this.removals.picked = null;
+        said.push(`the World's own filter ${o.world ? 'on' : 'off'}`);
+      } else if (typeof o.world === 'string' && o.world.startsWith('o:')) {
+        // One of the world's own picked by its content key, as a click under the filter picks it.
+        const ob = h.world.objectByKey(o.world);
+        if (!ob) said.push(`${o.world} finds nothing standing here`);
+        else {
+          this.removals.worldFilter = true;
+          this.removals.pick(ob);
+          this.window?.setTab('selected');
+          said.push(this.removals.last);
+        }
+      }
+      // An action of the Selected tab on what is picked (`hide`, `hideGround`, `move`, `copy`, `solid:thing:0`, ...).
+      if (typeof o.removals === 'string') said.push(await this.removals.act(o.removals));
+      if (o.person && typeof o.person === 'object') {
+        const p = o.person as { body?: unknown; mood?: unknown; name?: unknown; at?: unknown };
+        if (typeof p.body !== 'string') said.push('a person names a body (a catalogue id)');
+        else {
+          const at = Array.isArray(p.at) && p.at.length === 3 ? { x: Number(p.at[0]), y: Number(p.at[1]), z: Number(p.at[2]) } : null;
+          said.push(await this.removals.placePerson(p.body, typeof p.mood === 'string' ? p.mood : null, at, typeof p.name === 'string' ? p.name : null));
+        }
+      }
+      if (o.cast !== undefined) said.push(this.removals.cast(typeof o.cast === 'string' ? o.cast : null));
+      if (o.seat === 'permanent' || (o.seat && typeof o.seat === 'object')) {
+        const want = typeof (o.seat as { key?: unknown }).key === 'string' ? ((o.seat as { key: string }).key) : null;
+        const seats = this.host.seatsNear?.(h.player.pos.x, h.player.pos.z, 60) ?? [];
+        const key = want ?? seats[0]?.key ?? null;
+        said.push(key ? await this.removals.makeSeatPermanent(key) : 'no seat of ours stands near the camera');
+      }
+      if (o.zone && typeof o.zone === 'object') {
+        const z = o.zone as { arm?: unknown; mode?: unknown; from?: unknown; circle?: unknown; keeps?: unknown };
+        if (z.arm === true && !this.zones.armed) said.push(await this.toggleTool('zones'));
+        if (z.mode === 'circle' || z.mode === 'rect' || z.mode === 'outline') ZONE_TOOL_TUNE.mode = z.mode;
+        if (Array.isArray(z.keeps)) ZONE_TOOL_TUNE.keeps = (z.keeps as string[]).filter((k): k is 'wild' | 'people' | 'ours' => k === 'wild' || k === 'people' || k === 'ours');
+        if (typeof z.from === 'string') said.push(await this.zones.fromPlace(z.from));
+        if (typeof z.circle === 'number' && this.aimKind !== 'sky') said.push(await this.zones.writeCircle(this.aim.hit.x, this.aim.hit.z, z.circle));
+      }
       if (o.place === true) said.push(await this.place());
       else if (o.place && typeof o.place === 'object') said.push(await this.place(o.place as { x: number; y: number; z: number; yaw?: number }));
       if (typeof o.remove === 'string') {
@@ -4031,6 +4332,10 @@ export class Editor {
       tools: this.tools.report((a) => capOf(this.host.input.bindings[a][0])),
       // The interior layout files' wave: whether a building put down stands its template's furniture (the Tools tab's switch).
       furnish: EDITOR_TUNE.furnish,
+      // Map-maker II's twelfth wave: the World's own filter, what of it is picked, a person in hand, the zone tool, the grid's word.
+      removals: this.removals.report(),
+      zones: this.zones.report(),
+      gridStale: this.gridStale,
       bar: { writes: this.bar?.writes ?? 0 },
       // The seventh wave's: the picker, the attachment picked, the copies the looks made, what hangs on the rows.
       looks: {

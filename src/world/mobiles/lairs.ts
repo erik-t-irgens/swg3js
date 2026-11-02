@@ -31,19 +31,24 @@
 // rule says (`standingAt`), and each of their bodies is drawn from the lair's list on its own.
 //
 // Pure: no three, no fetch, no clock. Rule for this file (node runs it with type stripping for the
-// tests): relative imports only as `import type`, no enum, no namespace, no constructor parameter
-// properties.
+// tests): a relative value import carries its `.ts` extension (the one is the zones' shape test), no enum,
+// no namespace, no constructor parameter properties.
+
+import { ZoneList, zoneTouches } from '../zoneShape.ts';
 
 /** One of the shapes an area can be, in the snapshot's own metres. */
 export interface SpawnArea {
   name: string;
-  shape: 'circle' | 'ring' | 'rect';
+  /** `poly` is a no-spawn zone's outline (Map-maker II's twelfth wave), answered by the places' own test (`zoneShape.ts`). */
+  shape: 'circle' | 'ring' | 'rect' | 'poly';
   x: number;
   z: number;
   r?: number;
   inner?: number;
   x2?: number;
   z2?: number;
+  /** A `poly` area's points, `[x, z]`, in the snapshot's frame. */
+  pts?: [number, number][];
   groups: string[];
   cap: number;
   /**
@@ -56,8 +61,47 @@ export interface SpawnArea {
   /**
    * `ours`: a no-spawn circle the converter laid over a site SOE's last publishes added to a world's buildout tables
    * (`lateSiteCircles` in tools/swg/spawnpack.mjs), kept apart only so the console can count what it keeps off.
+   * `zone`: one of the owner's no-spawn zones (the world's removal file, `noSpawnZones.ts`), concatenated onto the pack's
+   * `noSpawn` at the laying's call and never written into the pack; a site whose bodies would reach into one is refused as
+   * well as one whose middle stands in it (`ZONE_TUNE.margin`).
    */
-  src?: 'ours';
+  src?: 'ours' | 'zone';
+}
+
+/**
+ * How far from a no-spawn zone of the owner's a site keeps (Map-maker II §2.16, ours): `spread`, so no body of a site at a
+ * zone's rim stands inside it -- a site's bodies stand up to half its footprint and the herd's spread from its middle --
+ * or `middle`, the site's middle alone (the pack's own no-spawn areas' rule). Live through `__debug.removals({ tune })`.
+ */
+export const ZONE_TUNE: { margin: 'spread' | 'middle' } = { margin: 'spread' };
+
+/** Each zone area's own shape list, made the first time it is asked (an outline's test, and the rim's for any shape). */
+const zoneLists = new WeakMap<SpawnArea, ZoneList>();
+
+/** A zone area as the places' shape test reads it. */
+function zoneListOf(a: SpawnArea): ZoneList {
+  let list = zoneLists.get(a);
+  if (!list) {
+    list = new ZoneList();
+    if (a.shape === 'poly' && a.pts && a.pts.length >= 3) {
+      const xz = new Float64Array(a.pts.length * 2);
+      for (let i = 0; i < a.pts.length; i++) {
+        xz[i * 2] = a.pts[i][0];
+        xz[i * 2 + 1] = a.pts[i][1];
+      }
+      list.addPoly(xz, 0);
+    } else if (a.shape === 'rect') list.addRect(a.x, a.z, a.x2 ?? a.x, a.z2 ?? a.z, 0);
+    else if (a.shape === 'ring') list.addRing(a.x, a.z, a.inner ?? 0, a.r ?? 0, 0);
+    else list.addCircle(a.x, a.z, a.r ?? 0, 0);
+    zoneLists.set(a, list);
+  }
+  return list;
+}
+
+/** Whether a circle of `r` about a point touches an area (its middle inside, or within `r` of its edge). */
+export function touches(a: SpawnArea, x: number, z: number, r: number): boolean {
+  const list = zoneListOf(a);
+  return list.count > 0 && zoneTouches(list, 0, x, z, r);
 }
 
 /** One lair a group may put down, with the weight it is drawn at. */
@@ -215,6 +259,8 @@ export function cellSeed(world: string, i: number, j: number): number {
 
 /** Whether a point is inside an area's shape. The world-wide area's shape is a placeholder and is read by `areaAt`, not here. */
 export function inside(a: SpawnArea, x: number, z: number): boolean {
+  // An outline (a no-spawn zone's): the places' own crossing test, through the one `zoneAt` they share.
+  if (a.shape === 'poly') return touches(a, x, z, 0);
   if (a.shape === 'rect') {
     const x2 = a.x2 ?? a.x;
     const z2 = a.z2 ?? a.z;
@@ -228,6 +274,7 @@ export function inside(a: SpawnArea, x: number, z: number): boolean {
 
 /** How much ground an area covers, square metres: what decides which of two areas holding a point is the smaller. */
 export function areaSize(a: SpawnArea): number {
+  if (a.shape === 'poly') return zoneListOf(a).area[0] ?? 0;
   if (a.shape === 'rect') return Math.abs((a.x2 ?? a.x) - a.x) * Math.abs((a.z2 ?? a.z) - a.z);
   const outer = a.r ?? 0;
   const inner = a.shape === 'ring' ? (a.inner ?? 0) : 0;
@@ -342,6 +389,11 @@ export type GridTune = Pick<typeof LAIR_TUNE, 'cell' | 'fill' | 'gap' | 'levels'
  * order, which every browser walks the same way.
  */
 export function gridSites(world: string, areas: readonly SpawnArea[], noSpawn: readonly SpawnArea[], groups: Readonly<Record<string, GroupEntry[]>>, tune: GridTune = LAIR_TUNE, half = WORLD_HALF): LairSite[] {
+  // The owner's no-spawn zones among the places nothing may stand (Map-maker II's twelfth wave), for the rim test after the
+  // pick: none on a world with no removal file, where the laying is the one it always was.
+  let zones: SpawnArea[] | null = null;
+  for (const n of noSpawn) if (n.src === 'zone') (zones ??= []).push(n);
+  const herd = (tune as Partial<typeof LAIR_TUNE>).herdSpread ?? LAIR_TUNE.herdSpread;
   const pools = new Map<SpawnArea, GroupEntry[]>();
   let widest = 0;
   for (const a of areas) {
@@ -376,6 +428,19 @@ export function gridSites(world: string, areas: readonly SpawnArea[], noSpawn: r
       if (refused(noSpawn, x, z, !!area.world)) continue;
       const pick = weighted(pools.get(area)!, roll);
       if (!pick) continue;
+      // The rim (Map-maker II §2.13): a site whose bodies would stand inside a zone of the owner's is refused too, by a test
+      // that draws nothing from the cell's stream, so every site that survives keeps its seed, its lair and its levels.
+      if (zones && ZONE_TUNE.margin === 'spread') {
+        const rim = Math.max(0, pick.size) / 2 + herd;
+        let hit = false;
+        for (const zn of zones) {
+          if (touches(zn, x, z, rim)) {
+            hit = true;
+            break;
+          }
+        }
+        if (hit) continue;
+      }
       const level = levelOf(roll(), tune.levels);
       const lairLevel = lairLevelOf(pick, roll(), roll());
       const size = Math.max(0, pick.size);

@@ -108,6 +108,8 @@ function colliderFar(o: PlacedObject, px: number, pz: number, slack: number): bo
  * the perch's question of what could ever be under a body (`floorAsk.collides`) must agree.
  */
 export function collidesByRule(o: PlacedObject): boolean {
+  // The owner's switch on this one thing (Map-maker II's twelfth wave, its world's removal file): over every rule below.
+  if (o.solidOverride !== undefined) return o.solidOverride;
   if (o.solid === undefined) {
     const rule = solidRuleOf(o.effectsOf ?? o.template);
     if (rule !== undefined) return rule;
@@ -312,6 +314,14 @@ export interface PlacedObject {
    * names this one copy's piece and no other's (Map-maker II's removals by key). Absent on everything else.
    */
   ilf?: string;
+  /**
+   * The owner's switch on this one thing (Map-maker II's twelfth wave: its world's removal file's object row carrying
+   * `solid`): over its own word, its world's template row and the shared file alike (`collidesByRule`). Absent on everything
+   * no such row names, which is every object of every world with no file.
+   */
+  solidOverride?: boolean;
+  /** A permanent row's own word on what it counts as for the people (`PlacementRow.furniture`); absent, its template's name. */
+  furniture?: 'seat' | 'table' | 'none';
 }
 
 /** A row's looks as the streamer carries them: the list, and its signature (`lookSignature`), which a tier's bulk groups by. */
@@ -499,6 +509,13 @@ interface LoadedTier {
    * editor moves it is exact; null where none is folded (every tier of snapshot objects alone).
    */
   folds: Map<PlacedObject, FoldRec> | null;
+  /**
+   * What its bulk made for each copy that is no permanent row (its effects and basin water, with what places them again), so
+   * a live hide of the world's own object can make its record on demand (`foldRecOf`, Map-maker II's twelfth wave). Kept on
+   * the tier, never in a map keyed by the object: an object outlives every tier it is built into, so a map from it to its
+   * tier kept every tier the player had walked away from. Null where nothing was placed for such a copy.
+   */
+  made: Map<PlacedObject, { fx: FoldRec['fx']; waters: FoldRec['waters'] }> | null;
   /** Placements being built into it now (`addToTier` under way): `settled` waits for them within its range. */
   building: number;
   /** Its bulk's programs exist and its meshes are shown (or there was no `prepare`): what the editor's copies may be drawn on. */
@@ -866,6 +883,24 @@ export class LayoutStreamer {
   private readonly dormant: PlacedObject[] = [];
   /** How many of the objects standing stand in one world state only: a field initialiser, as `dormant`. */
   private statedStanding = 0;
+  /**
+   * The layout's objects its world's removal file takes away at this arrival (Map-maker II's twelfth wave, `fileByState`'s
+   * third outcome): neither filed nor dormant, keeping no flora circle and answering nothing (`objectsNear`), kept only so
+   * the world editor can stand one again. A field initialiser, as `dormant`: the constructor's loop fills it.
+   */
+  private readonly hiddenAtArrival: PlacedObject[] = [];
+  /** Each one of those standing in a room: its building's layout index, so it stands in its building again with it. */
+  private readonly hiddenIn = new Map<PlacedObject, number>();
+  /** Objects filed at this arrival and taken away since by a landing of the removal file (`hideObject`), until shown again. */
+  private readonly hiddenLive = new Set<PlacedObject>();
+  /**
+   * What the bulk build made for each copy that is no permanent row, so a live hide of the world's own object can make its
+   * record on demand (`foldRecOf`, Map-maker II's twelfth wave): each bulk instanced mesh's copies and each level group's,
+   * keyed by what the tier owns, so a tier unloaded takes its own with it. An object's effects and basin water are the
+   * tier's own (`LoadedTier.made`).
+   */
+  private readonly copiesOfMesh = new WeakMap<THREE.Object3D, readonly PlacedObject[]>();
+  private readonly copiesOfLevel = new WeakMap<LevelGroup, readonly PlacedObject[]>();
   /** How many of the layout's objects are the world builder's markers, kept for their flora circle alone (`isToolOnly`). */
   toolOnly = 0;
   /**
@@ -1334,7 +1369,23 @@ export class LayoutStreamer {
   private readonly pack: AssetPack;
   private readonly effects: ParticleEffects | null;
 
-  constructor(scene: THREE.Scene, physics: Physics, pack: AssetPack, layout: Layout, effects: ParticleEffects | null = null, options: { reach?: number; hugeColliders?: boolean; stands?: (tag?: string) => boolean; guests?: readonly AssetPack[] } = {}) {
+  constructor(
+    scene: THREE.Scene,
+    physics: Physics,
+    pack: AssetPack,
+    layout: Layout,
+    effects: ParticleEffects | null = null,
+    options: {
+      reach?: number;
+      hugeColliders?: boolean;
+      stands?: (tag?: string) => boolean;
+      guests?: readonly AssetPack[];
+      /** Which of the layout's objects (by index) the world's removal file takes away (Map-maker II's twelfth wave); none, none. */
+      hidden?: ((li: number) => boolean) | null;
+      /** The owner's switch on one thing (by layout index): solid or walked through over every rule; undefined for none. */
+      solidOf?: ((li: number) => boolean | undefined) | null;
+    } = {},
+  ) {
     this.scene = scene;
     this.physics = physics;
     this.pack = pack;
@@ -1361,7 +1412,8 @@ export class LayoutStreamer {
     // Which objects stand in the world's states as they were taken at this arrival (`worldState.ts`), and the index
     // each takes in `objects`: the layout's own `in` names a building by its place in the layout, which is not its
     // place here once what lies dormant before it is left out (`fileByState`).
-    const filed = fileByState(layout.objects, options.stands ?? standsIn);
+    const filed = fileByState(layout.objects, options.stands ?? standsIn, options.hidden ?? null);
+    const solidOf = options.solidOf ?? null;
     for (let li = 0; li < layout.objects.length; li++) {
       const o = layout.objects[li];
       // Snapshot space is mirrored in X and centred on the layout centre.
@@ -1377,8 +1429,24 @@ export class LayoutStreamer {
       if (o.ilf) p.ilf = o.ilf;
       // Its own word on being solid, which only such a piece carries (a seat or a table is never: `furnishLayout`).
       if (o.solid !== undefined) p.solid = o.solid;
+      // The owner's switch on this one thing (Map-maker II's twelfth wave): absent for every object no row names.
+      if (solidOf) {
+        const s = solidOf(li);
+        if (s !== undefined) p.solidOverride = s;
+      }
       // The world builder's own markers: their flora circle is all they are (`isToolOnly`).
       const tool = isToolOnly(o.template);
+      // Taken away by the world's removal file: filed nowhere, no flora circle (taking a building or a tree away is about
+      // the ground), never dormant, answering nothing; kept only so the world editor can stand it again.
+      if (filed.hidden?.[li]) {
+        if (!p.contained) p.footprint = def?.particle ? 0 : footprintOf(def?.bounds, tiltSin(p.q.x, p.q.z));
+        if (o.contained && typeof o.in === 'number' && typeof o.cell === 'number') {
+          this.hiddenIn.set(p, o.in);
+          p.cell = o.cell;
+        }
+        this.hiddenAtArrival.push(p);
+        continue;
+      }
       if (filed.placedAt[li] < 0) {
         // Of a state this world does not stand in: kept for the placing rules and out of the flora, filed nowhere else.
         if (!p.contained && !tool) p.footprint = def?.particle ? 0 : footprintOf(def?.bounds, tiltSin(p.q.x, p.q.z));
@@ -1950,8 +2018,8 @@ export class LayoutStreamer {
    * thousands of these and this is asked on a keypress, not on a frame. Objects inside a building
    * are left out, since the building around them is standing in the same place and says so itself.
    */
-  objectsNear(x: number, z: number, reach: number): { x: number; z: number; radius: number; template: string; model: string; effectsOf?: string }[] {
-    const out: { x: number; z: number; radius: number; template: string; model: string; effectsOf?: string }[] = [];
+  objectsNear(x: number, z: number, reach: number): { x: number; z: number; radius: number; template: string; model: string; effectsOf?: string; furniture?: 'seat' | 'table' | 'none' }[] {
+    const out: { x: number; z: number; radius: number; template: string; model: string; effectsOf?: string; furniture?: 'seat' | 'table' | 'none' }[] = [];
     const span = reach + Math.min(this.largestRadius, COLLIDER_RADIUS_CAP);
     const rx0 = Math.floor((x - span) / REGION);
     const rx1 = Math.floor((x + span) / REGION);
@@ -1973,7 +2041,7 @@ export class LayoutStreamer {
             if ((o.x - x) ** 2 + (o.z - z) ** 2 > want * want) continue;
             // What a thing put down in play really is rides beside the name it is filed under, so whoever
             // asks what kind of thing stands here (the seats of ours) can tell a permanent chair from a crate.
-            out.push({ x: o.x, z: o.z, radius, template: o.template, model: o.model, ...(o.effectsOf ? { effectsOf: o.effectsOf } : {}) });
+            out.push({ x: o.x, z: o.z, radius, template: o.template, model: o.model, ...(o.effectsOf ? { effectsOf: o.effectsOf } : {}), ...(o.furniture ? { furniture: o.furniture } : {}) });
           }
         }
       }
@@ -2489,6 +2557,256 @@ export class LayoutStreamer {
     return true;
   }
 
+  // ---- the world's own objects taken away and stood again live (Map-maker II's twelfth wave) -------------------------------
+
+  /**
+   * The record a live hide of the world's own object works through (`hideInPlace`), made on demand by a scan of its tier:
+   * each bulk mesh and level group holding a copy of it (`copiesOfMesh`, `copiesOfLevel`), its effects and basin water with
+   * what places them again (the tier's `made`), its building. Null where its tier is not built (nothing of it stands to hide). An
+   * edit's cost, never a frame's.
+   */
+  private foldRecOf(o: PlacedObject): FoldRec | null {
+    const have = this.foldOf.get(o);
+    if (have) return have;
+    const region = this.regions.get(`${regionIndex(o.x)},${regionIndex(o.z)}`);
+    const t = region?.tiers[o.tier];
+    if (!t || t === 'loading') return null;
+    const rec: FoldRec = { tier: t, slots: [], level: null, fx: [], waters: [], building: null, saved: null, hidden: 0 };
+    for (let k = 0; k < t.bulk && k < t.meshes.length; k++) {
+      const m = t.meshes[k] as THREE.InstancedMesh;
+      const copies = this.copiesOfMesh.get(m);
+      if (!copies) continue;
+      const i = copies.indexOf(o);
+      if (i >= 0) rec.slots.push({ mesh: m, i });
+    }
+    for (const g of t.levels) {
+      const i = this.copiesOfLevel.get(g)?.indexOf(o) ?? -1;
+      if (i >= 0) rec.level = { group: g, i };
+    }
+    const made = t.made?.get(o);
+    if (made) {
+      rec.fx = made.fx;
+      rec.waters = made.waters;
+    }
+    rec.building = t.buildings.find((b) => b.object === o) ?? null;
+    this.foldOf.set(o, rec);
+    if (!t.folds) t.folds = new Map();
+    t.folds.set(o, rec);
+    return rec;
+  }
+
+  /** The things standing in a building's rooms (filed under it by the snapshot's own word, or hosted in its room boxes). */
+  private containedIn(b: PlacedObject): PlacedObject[] {
+    const out: PlacedObject[] = [];
+    const at = this.objects.indexOf(b);
+    for (const p of this.objects) if (p !== b && p.contained && (p.host === b || (at >= 0 && p.hostIndex === at))) out.push(p);
+    return out;
+  }
+
+  /**
+   * One of the world's own objects taken away live (a landing of the removal file in the world editor): off its region's
+   * list, so nothing files, collides, answers or draws it again; hidden in place in its tier as it stands (`hideInPlace`
+   * through a record made on demand: its slots at no size, its level copy at nothing, its effects, water, building, rooms
+   * and doors taken away); its colliders gone; and with it everything standing in its rooms. Its flora circle stays until
+   * the next arrival, as `unplace` warns. Answers how many it took away.
+   */
+  hideObject(o: PlacedObject): number {
+    if (this.disposed || this.hiddenLive.has(o) || !this.objects.includes(o)) return 0;
+    let n = 0;
+    for (const p of [o, ...(o.contained ? [] : this.containedIn(o))]) {
+      if (this.hiddenLive.has(p)) continue;
+      this.hiddenLive.add(p);
+      n++;
+      const region = this.regions.get(`${regionIndex(p.x)},${regionIndex(p.z)}`);
+      if (region) {
+        const list = region.objects[p.tier];
+        const k = list.indexOf(p);
+        if (k >= 0) list.splice(k, 1);
+      }
+      this.removeColliders(p);
+      if (this.huge.has(p)) {
+        let keep = 0;
+        for (const job of this.hugeQueue) if (job.o !== p) this.hugeQueue[keep++] = job;
+        this.hugeQueue.length = keep;
+      }
+      const rec = this.foldRecOf(p);
+      if (rec) this.hideInPlace(p, true);
+    }
+    this.lastColliderX = Number.NaN;
+    this.lastInteriorX = Number.NaN;
+    return n;
+  }
+
+  /**
+   * One taken away live stood again (an undo, a removal row taken out): back on its region's list; shown in place where its
+   * tier still holds its record, and otherwise filed so it stands with its tier's next build. And what stood in its rooms.
+   * Answers how many it stood again.
+   */
+  showObject(o: PlacedObject): number {
+    if (this.disposed || !this.hiddenLive.has(o)) return 0;
+    let n = 0;
+    const with_ = [o, ...[...this.hiddenLive].filter((p) => p !== o && p.contained && (p.host === o || (p.hostIndex !== undefined && this.objects[p.hostIndex] === o)))];
+    for (const p of with_) {
+      if (!this.hiddenLive.delete(p)) continue;
+      n++;
+      const region = this.regionFor(p.x, p.z);
+      region.objects[p.tier].push(p);
+      if (!this.showInPlace(p)) {
+        // Its tier was built again meanwhile (it was filed nowhere then) or is not built: the tier is let go so the next pass
+        // builds it with this object back on its list (an edit's cost: its models are loaded and its programs built).
+        const t = region.tiers[p.tier];
+        if (t && t !== 'loading' && !this.foldOf.get(p)) this.unloadTier(region, p.tier);
+      }
+    }
+    this.lastColliderX = Number.NaN;
+    this.lastInteriorX = Number.NaN;
+    return n;
+  }
+
+  /**
+   * One the removal file took away at the arrival stood now (the world editor's unhide of a row it reads): filed as the
+   * constructor would have filed it, its region's tier let go so the next pass builds it in, and what stood in its rooms
+   * with it. Its flora circle is not given back until the next arrival. Answers how many it stood.
+   */
+  showArrivalHidden(li: number): number {
+    if (this.disposed) return 0;
+    const o = this.hiddenAtArrival.find((p) => p.row === li);
+    if (!o) return 0;
+    const inner = this.hiddenAtArrival.filter((p) => p !== o && this.hiddenIn.get(p) === li);
+    // A thing in a room taken away alone names its building by the layout's own index: found again here, where it stands.
+    const ownHost = o.contained && this.hiddenIn.has(o) ? this.objectByRow(this.hiddenIn.get(o)!) : null;
+    let n = 0;
+    for (const p of [o, ...inner]) {
+      const k = this.hiddenAtArrival.indexOf(p);
+      if (k < 0) continue;
+      this.hiddenAtArrival.splice(k, 1);
+      this.hiddenIn.delete(p);
+      this.objects.push(p);
+      // The snapshot's own word on its building, as an index into this list (the furniture hosting of the arrival is not
+      // made again: it stands in its room's pass by the old rule until the next arrival).
+      const host = p === o ? ownHost : o;
+      const hi = host ? this.objects.indexOf(host) : -1;
+      if (hi >= 0) p.hostIndex = hi;
+      const region = this.regionFor(p.x, p.z);
+      region.objects[p.tier].push(p);
+      this.noteFootprint(region, p);
+      const t = region.tiers[p.tier];
+      if (t && t !== 'loading') this.unloadTier(region, p.tier);
+      n++;
+    }
+    this.lastColliderX = Number.NaN;
+    this.lastInteriorX = Number.NaN;
+    return n;
+  }
+
+  /** Whether an object is taken away now (at the arrival or live). */
+  isHidden(o: PlacedObject): boolean {
+    return this.hiddenLive.has(o) || this.hiddenAtArrival.includes(o);
+  }
+
+  /** The layout's object by its index in the layout's own list (`PlacedObject.row`): filed, dormant or taken away; null for none. */
+  objectByRow(li: number): PlacedObject | null {
+    if (!this.byRow) {
+      const m = new Map<number, PlacedObject>();
+      for (const list of [this.objects, this.dormant, this.hiddenAtArrival]) for (const p of list) if (p.row !== undefined && !m.has(p.row)) m.set(p.row, p);
+      this.byRow = m;
+    }
+    // A row stood again since the map was made (`showArrivalHidden`) is the same object, in `objects` now.
+    return this.byRow.get(li) ?? null;
+  }
+  private byRow: Map<number, PlacedObject> | null = null;
+
+  /**
+   * The owner's switch on one thing set or taken off live (a landing of the removal file): its colliders let go so the sweep
+   * makes them again by the rule in force (`collidesByRule`), at once. Answers whether it moved.
+   */
+  setSolidOverride(o: PlacedObject, solid: boolean | undefined): boolean {
+    if (o.solidOverride === solid) return false;
+    if (solid === undefined) delete o.solidOverride;
+    else o.solidOverride = solid;
+    this.removeColliders(o);
+    this.lastColliderX = Number.NaN;
+    return true;
+  }
+
+  /**
+   * Every standing object of these templates let go of its colliders, so the sweep makes them again by the rules now in
+   * force (a world's template row or the shared file's moved). Answers how many were let go. An edit's cost.
+   */
+  refreshSolid(templates: ReadonlySet<string>): number {
+    if (!templates.size) return 0;
+    const going: PlacedObject[] = [];
+    for (const o of this.colliders.keys()) if (templates.has(o.effectsOf ?? o.template)) going.push(o);
+    for (const o of going) this.removeColliders(o);
+    this.lastColliderX = Number.NaN;
+    return going.length;
+  }
+
+  /** For the console and the editor: what the removal file took away, at the arrival and since. */
+  hiddenReport(): { atArrival: number; live: number } {
+    return { atArrival: this.hiddenAtArrival.length, live: this.hiddenLive.size };
+  }
+
+  /**
+   * A placed object's own client extent in words, as the packs carry it (the world editor's Selected tab, the owner's
+   * amendment of 2026-10-31): a flora model's, merged from its world's `flora-collision.json` (`NULL` for one the client
+   * walked through); every other model's is not converted, which it says.
+   */
+  extentWords(o: PlacedObject): string {
+    const def = this.defOf(o.model, o.pack) as (PackModelDef & { collision?: { kind: string; shapes: unknown[] } }) | undefined;
+    if (!def) return 'its model is not in the packs';
+    if (def.particle) return 'an effect: never solid';
+    const c = def.collision;
+    if (!c) return this.floraDefIs(def, o.pack) ? 'a flora model with no extent converted (the guess)' : "not converted (only the flora's extents are read)";
+    return c.shapes.length ? `${c.kind}: ${c.shapes.length} shape${c.shapes.length === 1 ? '' : 's'}` : 'NULL: the client walked through it';
+  }
+
+  /** What collides a placed object now and why, in words: the one rule every collider asks (`collidesByRule`). */
+  ruleWords(o: PlacedObject): string {
+    const solid = collidesByRule(o);
+    const why = o.solidOverride !== undefined ? "the owner's switch on it" : o.solid !== undefined ? 'its own word' : solidRuleOf(o.effectsOf ?? o.template) !== undefined ? "its template's row (this world's, else every world's)" : 'its size';
+    return `${solid ? 'solid' : 'walked through'}, by ${why}`;
+  }
+
+  /**
+   * The placed objects within `reach` of a point whose model's own client extent is NULL (the client walked through them), the
+   * nearest first, at most `most` (the world editor's Here tab). Asked on a page's render, never a frame.
+   */
+  nullExtentNear(x: number, z: number, reach: number, most = 30): { o: PlacedObject; d: number }[] {
+    const out: { o: PlacedObject; d: number }[] = [];
+    this.forEachPlacedIn({ x0: x - reach, z0: z - reach, x1: x + reach, z1: z + reach }, (o) => {
+      const def = this.defOf(o.model, o.pack) as (PackModelDef & { collision?: { shapes: unknown[] } }) | undefined;
+      if (!def?.collision || def.collision.shapes.length) return true;
+      const d = Math.hypot(o.x - x, o.z - z);
+      if (d <= reach) out.push({ o, d });
+      return true;
+    });
+    out.sort((a, b) => a.d - b.d);
+    return out.slice(0, most);
+  }
+
+  /**
+   * Every template of this world whose model's own client extent is NULL, with how many copies the layout stands of each, the
+   * most first (the world editor's Here tab, the owner's amendment of 2026-10-31: a world's whole list, not only what stands
+   * near). Worked out once and kept while the layout's filed list keeps its length (a placement in play adds to it): a page's
+   * cost the first time it is asked, never a frame's.
+   */
+  nullExtentTemplates(): readonly { template: string; count: number }[] {
+    if (this.nullTemplates && this.nullTemplatesFor === this.objects.length) return this.nullTemplates;
+    const counts = new Map<string, number>();
+    for (const o of this.objects) {
+      const def = this.defOf(o.model, o.pack) as (PackModelDef & { collision?: { shapes: unknown[] } }) | undefined;
+      if (!def?.collision || def.collision.shapes.length) continue;
+      const t = o.effectsOf ?? o.template;
+      counts.set(t, (counts.get(t) ?? 0) + 1);
+    }
+    this.nullTemplates = [...counts].map(([template, count]) => ({ template, count })).sort((a, b) => b.count - a.count || (a.template < b.template ? -1 : 1));
+    this.nullTemplatesFor = this.objects.length;
+    return this.nullTemplates;
+  }
+  private nullTemplates: { template: string; count: number }[] | null = null;
+  private nullTemplatesFor = -1;
+
   /** A model for the world editor's hand, loaded through whichever pack carries it, `pack` looked in first where given. */
   modelFor(id: string, pack?: AssetPack): Promise<LoadedModel> {
     return this.modelOf(id, pack);
@@ -2623,6 +2941,11 @@ export class LayoutStreamer {
       // Its looks (the seventh wave), where it has any: drawn in their copies, folded with the copies wearing the same.
       ...(mats && mats.length ? { look: { mats, sig: lookSignature(mats) } } : {}),
     });
+    // What it counts as for the people (Map-maker II's twelfth wave), where its row says: `World.dataPlacedNear` reads it.
+    if (row.furniture) {
+      const p = this.placedByKey.get(row.key);
+      if (p) p.furniture = row.furniture;
+    }
     return { bounds, built, ...(sized.note ? { note: sized.note } : {}) };
   }
 
@@ -2737,6 +3060,8 @@ export class LayoutStreamer {
     const ax = new THREE.Vector3();
     for (const p of this.objects) {
       if (p.contained || !(p.footprint > 0)) continue;
+      // Taken away live by the removal file (Map-maker II's twelfth wave): no box to stand clear of.
+      if (this.hiddenLive.size && this.hiddenLive.has(p)) continue;
       if (Math.hypot(p.x - x, p.z - z) >= reach + p.footprint + pad) continue;
       const b = this.scaledBoxOf(p);
       if (!b) continue;
@@ -3060,6 +3385,9 @@ export class LayoutStreamer {
       // (the constructor files them in no region): filed here, Fold now and the filing switch drew them and made them solid.
       if (isToolOnly(p.template)) continue;
       p.tier = rule === 'snapshot' ? p.snapTier : p.sizeTier;
+      // Taken away live by the removal file: filed nowhere again, as the constructor would not have filed it (its record of
+      // a hide in place goes with the tier it was made in, and nothing of it is built again).
+      if (this.hiddenLive.size && this.hiddenLive.has(p)) continue;
       const region = this.regionFor(p.x, p.z);
       region.objects[p.tier].push(p);
       this.noteFootprint(region, p);
@@ -3426,7 +3754,7 @@ export class LayoutStreamer {
     const levels: LevelGroup[] = [];
     const localFx = new THREE.Matrix4();
     // The tier made first, so a folded row's record names it; its counts are written at the end.
-    const loaded: LoadedTier = { meshes, buildings, objects, effects, waters, furniture, levels, instances: 0, bulk: 0, batch: null, folds: null, building: 0, ready: !this.prepare };
+    const loaded: LoadedTier = { meshes, buildings, objects, effects, waters, furniture, levels, instances: 0, bulk: 0, batch: null, folds: null, made: null, building: 0, ready: !this.prepare };
     // What the bulk makes of each permanent row folded into it (`FoldRec`), made the first time it is met: none at all for a
     // tier of snapshot objects alone.
     const folds = new Map<PlacedObject, FoldRec>();
@@ -3439,16 +3767,34 @@ export class LayoutStreamer {
       }
       return r;
     };
-    // An effect placed for a copy; a folded row's kept with what places it again (`showInPlace`).
+    // What was made for a copy that is no permanent row, kept on the tier for a live hide's record made on demand
+    // (`foldRecOf`), so it goes with the tier.
+    const madeOf = (p: PlacedObject): { fx: FoldRec['fx']; waters: FoldRec['waters'] } => {
+      if (!loaded.made) loaded.made = new Map();
+      let m = loaded.made.get(p);
+      if (!m) {
+        m = { fx: [], waters: [] };
+        loaded.made.set(p, m);
+      }
+      return m;
+    };
+    // An effect placed for a copy; a folded row's kept with what places it again (`showInPlace`), and any other copy's for
+    // the same (Map-maker II's twelfth wave: the world's own object hidden live).
     const placeFx = (p: PlacedObject, file: string, m: THREE.Matrix4, contained: boolean): void => {
       const h = this.effects!.place(file, m, contained);
       effects.push(h);
       if (p.folded) foldRec(p).fx.push({ file, m: m.clone(), contained, h });
+      else madeOf(p).fx.push({ file, m: m.clone(), contained, h });
     };
     if (this.effects) {
       for (const o of objects) {
         const def = this.defOf(o.model, o.pack);
-        if (def?.particle) effects.push(this.effects.place(this.effectFile(def, def.file), tmpM.compose(tmpV.set(o.x, o.y, o.z), o.q, ONE), o.contained));
+        if (!def?.particle) continue;
+        const file = this.effectFile(def, def.file);
+        tmpM.compose(tmpV.set(o.x, o.y, o.z), o.q, ONE);
+        const h = this.effects.place(file, tmpM, o.contained);
+        effects.push(h);
+        if (!o.folded) madeOf(o).fx.push({ file, m: tmpM.clone(), contained: o.contained, h });
       }
     }
     for (const [model, list] of byModel) {
@@ -3499,6 +3845,7 @@ export class LayoutStreamer {
         for (const copies of sizeBuckets(levelled)) {
           const g = this.levelGroup(model, copies, meshes, look);
           levels.push(g);
+          this.copiesOfLevel.set(g, copies);
           for (let i = 0; i < copies.length; i++) if (copies[i].folded) foldRec(copies[i]).level = { group: g, i };
         }
       }
@@ -3520,13 +3867,14 @@ export class LayoutStreamer {
           const open = all.filter((p) => !p.contained && isUniform(p.scale));
           const refused = this.basinWater(prim, open, model.def.id, waters);
           // The water each folded copy was given, in the order `basinWater` gave it (the copies it did not refuse).
-          if (open.some((p) => p.folded)) {
+          {
             const no = new Set(refused);
             let k = before;
             for (const p of open) {
               if (no.has(p)) continue;
               const h = waters[k++];
               if (p.folded) foldRec(p).waters.push({ geometry: prim.geometry, name: model.def.id, h });
+              else madeOf(p).waters.push({ geometry: prim.geometry, name: model.def.id, h });
             }
           }
           for (let i = before; i < waters.length; i++) meshes.push(waters[i].mesh);
@@ -3549,6 +3897,8 @@ export class LayoutStreamer {
         // Its look's copy where its group wears one (held for each of its copies), the piece's own material otherwise.
         const worn = this.wearAll(instanced, prim.material, prim.geometry, look);
         const mesh = new THREE.InstancedMesh(prim.geometry, worn, instanced.length);
+        // Its copies, for a live hide's record made on demand (`foldRecOf`).
+        this.copiesOfMesh.set(mesh, instanced);
         instanced.forEach((p, i) => {
           // At its scale where it has one (a folded permanent row's), and its slot kept so it can be hidden in place.
           tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, p.scale ?? ONE);
@@ -4784,6 +5134,7 @@ export class LayoutStreamer {
     const out: { kind: 'up' | 'down' | 'both'; d: number }[] = [];
     for (const o of this.objects) {
       if (!o.template.includes('terminal_elevator')) continue;
+      if (this.hiddenLive.size && this.hiddenLive.has(o)) continue;
       const d = Math.hypot(o.x - pos.x, o.z - pos.z);
       if (d > range || Math.abs(o.y - pos.y) > 3) continue;
       out.push({ kind: o.template.includes('_up') ? 'up' : o.template.includes('_down') ? 'down' : 'both', d });

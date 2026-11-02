@@ -156,6 +156,9 @@ export async function makeStreamer(
     stands?: (tag?: string) => boolean;
     /** Packs standing behind the world's from the streamer's making (the interior layout files' furniture pack, `World`'s `guests`). */
     guests?: { planet: string; defs: Def[]; models: Record<string, ReturnType<typeof loadedOf>> }[];
+    /** Which of the layout's objects the world's removal file takes away (Map-maker II's twelfth wave), and the owner's switch on one. */
+    hidden?: (li: number) => boolean;
+    solidOf?: (li: number) => boolean | undefined;
   } = {},
 ): Promise<Harness> {
   const physics = await Physics.create();
@@ -185,7 +188,7 @@ export async function makeStreamer(
   const Ctor = (extra.Streamer ?? LayoutStreamer) as typeof LayoutStreamer;
   // `stands`: which world states stand (`worldState.ts`), for a test of what lies dormant; every object's by default.
   const guests = extra.guests ? extra.guests.map((g) => fakePack(g.planet, g.defs, g.models)) : null;
-  const stream = new Ctor(scene, physics, world as never, layout as never, (extra.effects ?? null) as never, { ...(extra.stands ? { stands: extra.stands } : {}), ...(guests ? { guests } : {}) });
+  const stream = new Ctor(scene, physics, world as never, layout as never, (extra.effects ?? null) as never, { ...(extra.stands ? { stands: extra.stands } : {}), ...(guests ? { guests } : {}), ...(extra.hidden ? { hidden: extra.hidden } : {}), ...(extra.solidOf ? { solidOf: extra.solidOf } : {}) });
   stream.useGuestPack(gallery as never);
   const s = stream as any;
   const at = new THREE.Vector3();

@@ -215,7 +215,7 @@ import { standingPeople, PEOPLE_TUNE, type GcwSide } from './world/standingPeopl
 import { ambientPeople, OURS_TUNE, type AmbientPort } from './world/ambient/ambientPeople.ts';
 import { ROUTINE_TUNE } from './world/ambient/routines.ts';
 import { FILLER_TUNE, isSeat } from './world/ambient/fillers.ts';
-import { SEAT_TUNE, isTableTemplate, planSeats, seatPlanKey, seatTally, tuneSeats, type SeatPlan } from './world/seatProps.ts';
+import { SEAT_SNAP_TUNE, SEAT_TUNE, isTableTemplate, planSeats, seatPermanentRow, seatPlanKey, seatTally, tuneSeats, type SeatPlan } from './world/seatProps.ts';
 import type { AssetPack } from './world/assetPack.ts';
 import { DIFFICULTY, DIFFICULTY_RANGE, clampDifficulty, setDifficulty } from './world/difficulty.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
@@ -425,8 +425,14 @@ import { TRACK_TUNE, gateSizeFor, tuneTrack, type TrackTune } from './race/track
 import { TRACK_EDITOR_HEADER, TRACK_EDITOR_HEADER_VALUE, deleteGate, insertGate, moveGateTo, nudgeGate, resizeGate, roundPlace, trackEditFile, type TrackReply } from './race/trackEdits.ts';
 import { RaceHud, type RaceBlockView } from './ui/raceHud.ts';
 import { TrackList, type TrackListModel } from './ui/trackList.ts';
-import { World, type HeightsLoaded } from './world/world';
+import { World, type EditRowsLoaded, type HeightsLoaded } from './world/world';
 import { editFilePath, type EditFileKind } from './story/placementPath.ts';
+// Map-maker II's twelfth wave: what a world takes away and the owner's own people.
+import { HIDE_TUNE, landRows, readRemovalsFile, type RemovalRow } from './story/removals.ts';
+import { readPeopleFile, type PlacedPersonRow } from './story/placedPeople.ts';
+import { ZONE_TUNE } from './world/mobiles/lairs.ts';
+import { makeRemovalEdits } from './world/removalEdits.ts';
+import { rawOfGame } from './world/removalFrames.ts';
 import { deltasOf, readHeightsFile, storeOfRead, tileOfId, type HeightTileRow } from './world/editFiles/heightsFile.ts';
 import { paintOfRead, readPaintFile, type PaintLoaded, type PaintRow } from './world/editFiles/paintFile.ts';
 import { readWaterFile, type WaterLoaded, type WaterRow } from './world/editFiles/waterFile.ts';
@@ -1060,6 +1066,8 @@ interface EditorApi {
   locationsDebug(o?: Record<string, unknown>): Promise<unknown>;
   /** Reload imports (Map-maker II's tenth wave): the hand given up, the imports read again behind the curtain, the library's Imported source read again. */
   reloadImports(): Promise<string>;
+  /** The world's own thing the editor has picked (Map-maker II's twelfth wave), by its content key, or null. */
+  worldPicked?(): string | null;
 }
 
 /**
@@ -3742,6 +3750,44 @@ class App {
         };
       },
       /**
+       * What this world takes away, the owner's own people and the no-spawn zones (Map-maker II's twelfth wave,
+       * `public/placements/removed/<world>.json` and `people/<world>.json`). With nothing it says what the files hold and what
+       * came of them: the objects hidden (at the arrival and since), those whose key finds nothing, the switches on one thing
+       * and on this world's models, the people taken away and those zoned or in a hidden building's rooms, the sites, each
+       * zone with how many sites it keeps off (its `keptOff`), the placed people and the work the landings did. On the dev
+       * server it writes, each one write: `{ hide: '<object key>' | 'selected', ground: 'drop' }` (the world editor's picked
+       * world thing for `selected`), `{ unhide: '<key>' }`, `{ solid: { thing: '<key>' | 'selected', value } }` and
+       * `{ solid: { model: '<template>', value } }` and `{ solid: { everywhere: '<template>', value } }` (the owner's walk-through
+       * switch on one thing, this world's model, every world's: `value` true, false or null), `{ person: '<row key>' }` and `{ person, restore: true }`,
+       * `{ site: '<world>:<i>:<j>' }` and `{ site, restore: true }`, `{ zone: { x, z, r, keeps, name } }` (the game's frame;
+       * x and z default to where you stand), `{ zone: { min: [x, z], max: [x, z] } }`, `{ zone: { pts: [[x, z], ...] } }`,
+       * `{ zone: { from: '<location id>' } }` (a place of ours copied), `{ unzone: 'z:<id>' }`; and live `{ tune: { match,
+       * margin } }` (`HIDE_TUNE.match`, `ZONE_TUNE.margin` 'spread' or 'middle').
+       */
+      removals: (o?: { hide?: string; ground?: 'drop'; unhide?: string; solid?: { thing?: string; model?: string; everywhere?: string; value: boolean | null }; person?: string; site?: string; restore?: boolean; zone?: { x?: number; z?: number; r?: number; min?: [number, number]; max?: [number, number]; pts?: [number, number][]; from?: string; keeps?: string[]; name?: string }; unzone?: string; tune?: { match?: number; margin?: string } }) => {
+        const said: string[] = [];
+        if (o?.tune) {
+          if (typeof o.tune.match === 'number' && o.tune.match > 0 && o.tune.match <= 5) {
+            HIDE_TUNE.match = o.tune.match;
+            said.push(`a content key finds an object within ${HIDE_TUNE.match} m (from the next landing or arrival)`);
+          }
+          if (o.tune.margin === 'spread' || o.tune.margin === 'middle') {
+            ZONE_TUNE.margin = o.tune.margin;
+            said.push(`a zone keeps a site off by its ${o.tune.margin === 'spread' ? 'bodies (its middle grown by half its footprint and the herd spread)' : 'middle alone'} (from the next laying)`);
+          }
+        }
+        const edits = this.removalEditsOf((o ?? {}) as Record<string, unknown>, said);
+        const report = this.world.removalsReport();
+        if (edits.length) {
+          if (!import.meta.env.DEV) said.push("writing the files is the dev server's");
+          else
+            void this.editorBatch(edits).then((r) => {
+              console.info(r.ok ? `removals: written (${edits.length} edit${edits.length === 1 ? '' : 's'})` : `removals: not written: ${r.why}`);
+            });
+        }
+        return { ...report, ...(said.length ? { said } : {}) };
+      },
+      /**
        * Put a building on the ground in front of you, and walk into it.
        *
        * `__debug.house()` lists what there is to put down; `__debug.house(<one of those ids>)`
@@ -4805,8 +4851,12 @@ class App {
        * `{ again: true }` does; `{ tune: { on: false } }` takes them all away. `{ go: true }` puts you
        * beside the nearest, on its own floor when it is indoors.
        */
-      seats: (opts: { tune?: Record<string, unknown>; again?: boolean; go?: boolean } = {}) => {
+      seats: (opts: { tune?: Record<string, unknown>; again?: boolean; go?: boolean; snap?: boolean | 'on' | 'off' } = {}) => {
         const moved = opts.tune ? tuneSeats(opts.tune) : [];
+        // The world editor's snap of a seat or a table in hand to a sitter (Map-maker II's twelfth wave), a feel switch:
+        // true or false, or 'on' and 'off' as the debug menu's dial writes it.
+        if (typeof opts.snap === 'boolean') SEAT_SNAP_TUNE.on = opts.snap;
+        else if (opts.snap === 'on' || opts.snap === 'off') SEAT_SNAP_TUNE.on = opts.snap === 'on';
         const here = packIdOf(this.world.planet, this.zone);
         if (moved.length || opts.again) void this.standSeats(here, true);
         const plan = this.seatsStood.pack === here ? this.seatsStood.plan : null;
@@ -4831,6 +4881,7 @@ class App {
           nearest: near.slice(0, 6).map((n) => ({ kind: n.p.kind, model: n.p.model, away: Math.round(n.d), indoors: n.p.inside })),
           why: this.seatsStood.note || undefined,
           tune: { ...SEAT_TUNE },
+          snap: SEAT_SNAP_TUNE.on,
         };
       },
       /**
@@ -6423,9 +6474,11 @@ class App {
         const rx = new RegExp(match.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
         return this.world.placedObjects
           .filter((o) => !o.contained && (!match || rx.test(o.model) || rx.test(o.template)))
-          .map((o) => ({ model: o.model, template: o.template, away: Math.round(Math.hypot(o.x - at.x, o.z - at.z)), at: [Math.round(o.x), Math.round(o.y), Math.round(o.z)] }))
+          .map((o) => ({ o, model: o.model, template: o.template, away: Math.round(Math.hypot(o.x - at.x, o.z - at.z)), at: [Math.round(o.x), Math.round(o.y), Math.round(o.z)] }))
           .sort((a, b) => a.away - b.away)
-          .slice(0, limit);
+          .slice(0, limit)
+          // Its content key where it is one of the layout's own (Map-maker II's twelfth wave: what a removal row names it by).
+          .map(({ o, ...rest }) => ({ ...rest, ...(o.row !== undefined ? { key: this.world.objectKeyOf(o.row) } : {}) }));
       },
       /**
        * Go into a building: the nearest one with no name given, else the nearest whose model or
@@ -7394,7 +7447,7 @@ class App {
             invisible: mat?.userData.invisible === true,
             casts: o.castShadow,
             ...(placed
-              ? { model: placed.o.model, template: placed.o.effectsOf ?? placed.o.template, row: placed.about.layoutIndex, contained: placed.o.contained, host: placed.about.host, doorway: placed.about.doorway, colliders: placed.about.colliders, solidByRule: placed.about.solidByRule, placedAt: loc(at), ...(placed.o.ilf ? { piece: placed.o.ilf } : {}) }
+              ? { model: placed.o.model, template: placed.o.effectsOf ?? placed.o.template, row: placed.about.layoutIndex, ...(typeof placed.about.layoutIndex === 'number' && placed.about.layoutIndex >= 0 ? { key: this.world.objectKeyOf(placed.about.layoutIndex) } : {}), contained: placed.o.contained, host: placed.about.host, doorway: placed.about.doorway, colliders: placed.about.colliders, solidByRule: placed.about.solidByRule, placedAt: loc(at), ...(placed.o.ilf ? { piece: placed.o.ilf } : {}) }
               : room
                 ? { building: room.template, model: room.model, room: room.cell, roomName: room.cellName, placedAt: loc(at.set(room.x, 0, room.z)) }
                 : { mesh: o.name || o.type }),
@@ -12552,6 +12605,11 @@ class App {
     this.world.paintSource = (pack, kind) => this.fetchPaint(pack, kind);
     // And its lakes of ours (Map-maker II's fifth wave, `public/placements/water/<world>.json`), the same way.
     this.world.waterSource = (pack, kind) => this.fetchWater(pack, kind);
+    // And what it takes away and the owner's own people (Map-maker II's twelfth wave, `public/placements/removed/` and
+    // `people/`), the same way; a landing of the removal file stands the fittings and the travel things again over its hides.
+    this.world.removalsSource = (pack, kind) => this.fetchRemovals(pack, kind);
+    this.world.peopleSource = (pack, kind) => this.fetchPeople(pack, kind);
+    this.world.removalsLanded = () => this.removalsLandedHere();
     // Where this world brings the player in and back (the arrival, a teleport's spot, and where a death comes round
     // with no cloning facility near): the overlay's people and herds who pick a fight keep clear of it.
     this.world.arrivalPoint = () => this.spawn;
@@ -24268,10 +24326,15 @@ class App {
     const c = this.world.layoutCenter;
     const pack = packIdOf(this.world.planet, this.zone);
     if (!c) return [];
-    const key = `${pack}|${c.x},${c.z}|${this.travelRowsFor === pack ? this.travelRows.length : -1}|${worldStateStamp()}`;
+    const key = `${pack}|${c.x},${c.z}|${this.travelRowsFor === pack ? this.travelRows.length : -1}|${worldStateStamp()}|${this.world.removalStamp}`;
     // Only the rows of the state this world stands in (`inState`): Restuss's launch city's starport and shuttleport
     // in the living city. Its rows are the last in the file, so leaving them out moves no other thing's place.
-    if (this.travelCache.key !== key) this.travelCache = { key, things: this.travelRowsFor === pack ? travelThingsOf(inState(this.travelRows), c) : [] };
+    // And none of a building the world's removal file hides (Map-maker II's twelfth wave): a starport taken away takes its
+    // terminals, its collector and its shuttle with it, and the map still names the port.
+    if (this.travelCache.key !== key) {
+      const all = this.travelRowsFor === pack ? travelThingsOf(inState(this.travelRows), c) : [];
+      this.travelCache = { key, things: this.world.hidesAnything ? all.filter((t) => !this.world.hiddenBuildingAt(t.building, t.bx, t.bz)) : all };
+    }
     return this.travelCache.things;
   }
 
@@ -25030,6 +25093,8 @@ class App {
       if (!current()) return;
       if (only && (Math.abs(f.bx - only.x) > 1 || Math.abs(f.bz - only.z) > 1)) continue;
       if (fittingDormant(f, standsIn, ruins)) continue;
+      // A fitting of a building the world's removal file hides goes with it (Map-maker II's twelfth wave).
+      if (this.world.hidesAnything && this.world.hiddenBuildingAt(f.building, f.bx, f.bz)) continue;
       const key = `fitting:${pack}:${run.run}:${i}`;
       // Solid whatever its size: a terminal or a panel is under the sweep's own floor for small
       // props and is exactly the thing the owner asked to be able to walk into rather than through.
@@ -25093,7 +25158,7 @@ class App {
     const centre = this.world.layoutCenter;
     const plan = centre
       ? planSeats(standingPeople.seatedRows(centre), {
-        has: (kind, x, y, z, reach, level) => this.world.dataPlacedNear(kind === 'chair' ? isSeat : isTableTemplate, x, y, z, reach, level),
+        has: (kind, x, y, z, reach, level) => this.world.dataPlacedNear(kind === 'chair' ? isSeat : isTableTemplate, x, y, z, reach, level, kind === 'chair' ? 'seat' : 'table'),
         ground: (x, z) => this.world.terrain.heightAt(x, z),
       })
       : null;
@@ -25136,6 +25201,32 @@ class App {
       }
       run.keys.push(key);
     }
+  }
+
+  /** The seats of ours standing near a point of the game's frame (the world editor's Here tab, Map-maker II's twelfth wave). */
+  private seatsNearHere(x: number, z: number, reach: number): { key: string; words: string }[] {
+    const plan = this.seatsStood.plan;
+    if (!plan) return [];
+    return plan.props
+      .map((p) => ({ p, d: Math.hypot(p.x - x, p.z - z) }))
+      .filter((s) => s.d <= reach)
+      .sort((a, b) => a.d - b.d)
+      .slice(0, 20)
+      .map(({ p, d }) => ({ key: p.key, words: `${p.kind} ${p.model} ${Math.round(d)} m${p.inside ? ' (in a room)' : ''}` }));
+  }
+
+  /**
+   * A seat of ours as the permanent row that stands for it (Map-maker I §2.10 item 3): at its exact place and turn in the
+   * file's raw frame, a props row where the props catalogue holds its model (else a row of this world's own pack), its
+   * solidity left absent (passable) and its furniture word written, so the next plan finds the data's own there.
+   */
+  private seatRowOf(key: string, mint: (base: string) => string): Record<string, unknown> | string {
+    const p = this.seatsStood.plan?.props.find((s) => s.key === key);
+    if (!p) return `no seat of ours ${key} stands here`;
+    const c = this.world.placeFrame;
+    if (!c) return 'this world has no frame for its rows';
+    const thing = this.props.all.find((t) => t.model === p.model);
+    return seatPermanentRow(p, c, thing?.id ?? null, this.world.packHas(p.model), mint);
   }
 
   /** Everything `standSeats` stood, taken down where the world it was stood in is still here. */
@@ -25876,6 +25967,17 @@ class App {
     if (!this.inWorld || this.traveling || this.world.sceneOnly) return;
     const here = packIdOf(this.world.planet, this.zone);
     const kind = d?.kind ?? d?.layer;
+    // The shared walk-through file is every world's (its word names `all`): read again whatever world this is.
+    if (kind === 'solid') {
+      if (this.placementsInFlight > 0) {
+        this.heldWords.push(d);
+        return;
+      }
+      if (typeof d.rev === 'string' && this.placementRevs.get('solid/all') === d.rev) return;
+      if (typeof d.rev === 'string' && this.takeOwnRev('solid/all', d.rev)) return;
+      void this.reloadSolid(d.rev);
+      return;
+    }
     if (d?.world !== here) return;
     // Routed by kind to the layer that reads it on the page (Map-maker II §2.2: the two row layers to the permanent layer,
     // the heights to the ground's); a word for a kind with no layer yet (the later waves' files) is dropped.
@@ -25904,6 +26006,9 @@ class App {
     if (kind === 'paint') return (pack, rev) => (this.madeMapEdit(), void this.reloadPaint(pack, rev));
     if (kind === 'water') return (pack, rev) => (this.madeMapEdit(), void this.reloadWater(pack, rev));
     if (kind === 'locations') return (pack, rev) => void this.reloadLocations(pack, rev);
+    // Map-maker II's twelfth wave: what a world takes away, and the owner's own people.
+    if (kind === 'removed') return (pack, rev) => void this.reloadRemovals(pack, rev);
+    if (kind === 'people') return (pack, rev) => void this.reloadPeople(pack, rev);
     return null;
   }
 
@@ -29136,6 +29241,9 @@ class App {
           // Map-maker II's tenth wave: the imports read again behind the curtain, and their two packs.
           reloadImports: () => this.editorReloadImports(),
           importPacks: () => this.world.importsPack(),
+          // Map-maker II's twelfth wave: the seats of ours near the camera, and one as its permanent row.
+          seatsNear: (x, z, reach) => this.seatsNearHere(x, z, reach),
+          seatRow: (key, mint) => this.seatRowOf(key, mint),
         });
         this.editor = ed;
         return ed;
@@ -29445,6 +29553,12 @@ class App {
       if (f) this.placementRevs.set(`${k}/${pack}`, f.rev);
     }
     for (const k of kinds) if (files[k]) this.noteOwnRev(`${k}/${pack}`, files[k]!.rev);
+    // The shared walk-through file is every world's: its word names `all` (Map-maker II's twelfth wave), kept under that too.
+    const sf = files.solid;
+    if (sf) {
+      this.placementRevs.set('solid/all', sf.rev);
+      this.noteOwnRev('solid/all', sf.rev);
+    }
     // The heights it wrote, laid over the ground by difference (the tiles put and taken out), whatever else it wrote.
     const hf = files.heights;
     let heightsLanded: Promise<number> = Promise.resolve(0);
@@ -29481,6 +29595,21 @@ class App {
     // the index the verdicts read, the minimap and the map window.
     const lf = files.locations;
     if (lf && this.world.generation === gen && this.editWorld() === pack) await this.landLocationRows(pack, lf.put as LocationRow[], lf.deleted);
+    // What it takes away, the owner's own people and the shared walk-through file (Map-maker II's twelfth wave), each landed
+    // over the rows in force by difference: the rows put laid over them by id, the ids taken out dropped.
+    const xf = files.removed;
+    if (xf && this.world.generation === gen && this.editWorld() === pack) this.world.landRemovals(landRows(this.world.removalRows, xf.put as unknown as RemovalRow[], xf.deleted));
+    const qf = files.people;
+    if (qf && this.world.generation === gen && this.editWorld() === pack) this.world.landPeople(landRows(this.world.placedPeopleRows, qf.put as unknown as PlacedPersonRow[], qf.deleted));
+    // The shared walk-through file it wrote (`sf`, its revision kept above), laid over the rows in force.
+    if (sf) {
+      const before = new Map(solidRows());
+      const now = new Map(before);
+      for (const id of sf.deleted) now.delete(id);
+      for (const r of sf.put as unknown as { id: string; solid: boolean }[]) now.set(r.id, r.solid);
+      setSolidRows(now);
+      this.solidMoved(before);
+    }
     return { ok: true, why: '', files, ms: reply.ms ?? 0, built };
   }
 
@@ -29538,6 +29667,126 @@ class App {
     } catch {
       return 'unread';
     }
+  }
+
+  // ---- Map-maker II's twelfth wave: what a world takes away, the owner's own people, the shared walk-through file ------
+
+  /**
+   * A world's removal file (`public/placements/removed/<world>.json`) or people file (`people/<world>.json`): read as the water
+   * file is (a built game asks only for one its own list ships; the dev server answers from the disk). Null for none; a
+   * space zone keeps neither this pass, and the world of copies keeps removals (its crew, a copy's own objects) and no people.
+   */
+  private async fetchRemovals(pack: string, kind: 'ground' | 'space' | 'copies'): Promise<EditRowsLoaded<RemovalRow> | null> {
+    const got = await this.readEditRows('removed', pack, kind);
+    return got === 'unread' ? null : (got as EditRowsLoaded<RemovalRow> | null);
+  }
+
+  private async fetchPeople(pack: string, kind: 'ground' | 'space' | 'copies'): Promise<EditRowsLoaded<PlacedPersonRow> | null> {
+    if (kind !== 'ground') return null;
+    const got = await this.readEditRows('people', pack, kind);
+    return got === 'unread' ? null : (got as EditRowsLoaded<PlacedPersonRow> | null);
+  }
+
+  /** One of the two files read: null for none, `'unread'` for one that could not be read (as `readWater` tells them apart). */
+  private async readEditRows(kind: 'removed' | 'people', pack: string, world: 'ground' | 'space' | 'copies'): Promise<EditRowsLoaded<RemovalRow | PlacedPersonRow> | null | 'unread'> {
+    if (world === 'space') return null;
+    const path = editFilePath(kind, pack);
+    let text: string;
+    try {
+      const res = await fetchPublic(path, { cache: 'no-store' }, import.meta.env.BASE_URL);
+      if (!res || res.status === 404) return null;
+      const type = res.headers.get('content-type') ?? '';
+      if (res.ok && type.includes('text/html')) return null;
+      if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return 'unread';
+      text = await res.text();
+    } catch {
+      return 'unread';
+    }
+    try {
+      if (import.meta.env.DEV) await this.noteReadRev(`${kind}/${pack}`, text);
+      const read = kind === 'removed' ? readRemovalsFile(text, pack, 'ground') : readPeopleFile(text, pack, 'ground');
+      if (read.unknown.length) console.warn(`${kind}: public/${path}: fields this build does not read: ${read.unknown.join(', ')}`);
+      return { rows: read.rows, bytes: text.length, skipped: read.skipped, problem: read.problem, rev: this.readRevs.get(`${kind}/${pack}`) ?? null };
+    } catch {
+      return 'unread';
+    }
+  }
+
+  /** The removal file read again (the dev server's word) and laid on by difference (`World.landRemovals`). */
+  private async reloadRemovals(pack: string, rev: string | undefined): Promise<void> {
+    const gen = this.world.generation;
+    const loaded = await this.readEditRows('removed', pack, this.world.planet.space ? 'space' : this.world.planet.instances ? 'copies' : 'ground');
+    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (loaded === 'unread') {
+      console.warn(`removals: public/${editFilePath('removed', pack)} changed and could not be read again: what it takes away is left as it was`);
+      return;
+    }
+    const read = this.readRevs.get(`removed/${pack}`);
+    if (read !== undefined) this.placementRevs.set(`removed/${pack}`, read);
+    else if (typeof rev === 'string') this.placementRevs.set(`removed/${pack}`, rev);
+    this.world.landRemovals((loaded?.rows ?? []) as RemovalRow[], (loaded as EditRowsLoaded<RemovalRow> | null) ?? { rows: [], bytes: 0, skipped: [], problem: null, rev: null });
+  }
+
+  /** The people file read again (the dev server's word) and its people stood again (`World.landPeople`). */
+  private async reloadPeople(pack: string, rev: string | undefined): Promise<void> {
+    const gen = this.world.generation;
+    const loaded = await this.readEditRows('people', pack, this.world.planet.space ? 'space' : this.world.planet.instances ? 'copies' : 'ground');
+    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (loaded === 'unread') {
+      console.warn(`people: public/${editFilePath('people', pack)} changed and could not be read again: the people stand as they stood`);
+      return;
+    }
+    const read = this.readRevs.get(`people/${pack}`);
+    if (read !== undefined) this.placementRevs.set(`people/${pack}`, read);
+    else if (typeof rev === 'string') this.placementRevs.set(`people/${pack}`, rev);
+    this.world.landPeople((loaded?.rows ?? []) as PlacedPersonRow[], (loaded as EditRowsLoaded<PlacedPersonRow> | null) ?? { rows: [], bytes: 0, skipped: [], problem: null, rev: null });
+  }
+
+  /**
+   * The shared walk-through file read again (the dev server's word, the world editor's batch): its rows put in force, and
+   * every standing collider of a template whose row moved made again by the rules now in force (`refreshSolid`).
+   */
+  private async reloadSolid(rev?: string): Promise<void> {
+    const before = new Map(solidRows());
+    await this.loadSolidFile();
+    if (typeof rev === 'string') this.placementRevs.set('solid/all', rev);
+    this.solidMoved(before);
+  }
+
+  /** Every standing collider whose template's shared row moved from `before`, made again (an edit's work). */
+  private solidMoved(before: ReadonlyMap<string, boolean>): void {
+    const now = solidRows();
+    const moved = new Set<string>();
+    for (const [t, v] of now) if (before.get(t) !== v) moved.add(t);
+    for (const t of before.keys()) if (!now.has(t)) moved.add(t);
+    if (moved.size) this.world.streamer?.refreshSolid(moved);
+  }
+
+  /**
+   * What a landing of the removal file asks of the page: the travel things worked out again (their cache keys on
+   * `World.removalStamp`) and the fittings stood again over the new hides. An edit's work.
+   */
+  private removalsLandedHere(): void {
+    const pack = packIdOf(this.world.planet, this.zone);
+    if (this.fittingRowsFor === pack) void this.standFittings(pack);
+  }
+
+  /**
+   * The console's writes of the removal file (`__debug.removals`) as the batch's edits, each read by the file's own reader
+   * before it is sent, what each does said into `said`. None asks `was` (nothing in the editor's history is written by it).
+   */
+  private removalEditsOf(o: Record<string, unknown>, said: string[]): BatchEdit[] {
+    return makeRemovalEdits({
+      rows: this.world.removalRows,
+      picked: () => this.editor?.worldPicked?.() ?? null,
+      here: () => {
+        const p = this.player.worldPos;
+        return { x: p.x, z: p.z };
+      },
+      toRaw: (x, z) => rawOfGame(this.world.placeFrame, x, z),
+      location: (id) => (this.placesFile?.locations ?? []).find((r) => r.id === id) ?? null,
+      space: !!this.world.planet?.space,
+    }, o as Record<string, unknown>, said);
   }
 
   /** The water file read again (the dev server's word) and its lakes stood by difference (`World.replaceWater`). */

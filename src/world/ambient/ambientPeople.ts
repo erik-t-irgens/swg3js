@@ -188,6 +188,11 @@ export interface AmbientDeps {
   /** The data's own people: their places, their towns' lists and how many of the cap they hold. */
   people: StandingPeople;
   peopleDeps(): PeopleDeps;
+  /**
+   * Whether a point of the game's frame stands in one of the world's no-spawn zones keeping the people of ours (Map-maker II's
+   * twelfth wave, the removal file's `z:` rows): a port or a building there stands nobody of ours. None, and nothing is kept.
+   */
+  zoned?(x: number, z: number): boolean;
 }
 
 /** A place a traveller stands or walks to, in the world, and the room it is in. */
@@ -443,7 +448,7 @@ export class AmbientPeople {
   };
   private readonly yieldAdd = (r: OursRecord): number => this.yieldDeps?.frees?.(r.body) ?? 0;
   /** What has happened since the world loaded, for the console. */
-  readonly tally = { stood: 0, boarded: 0, missed: 0, arrived: 0, outwalked: 0, letGo: 0, left: 0, shed: 0, replanned: 0, heldInView: 0, recruited: 0, refused: '' };
+  readonly tally = { stood: 0, boarded: 0, missed: 0, arrived: 0, outwalked: 0, letGo: 0, left: 0, shed: 0, replanned: 0, heldInView: 0, recruited: 0, zoned: 0, refused: '' };
   /** Whether the console's trace is kept (`__debug.ours({ trace: true })`), and the accounts of those whose day is over, the latest last. */
   private tracing = false;
   private readonly traced: OursTrace[] = [];
@@ -543,6 +548,7 @@ export class AmbientPeople {
     this.tally.replanned = 0;
     this.tally.heldInView = 0;
     this.tally.recruited = 0;
+    this.tally.zoned = 0;
     this.tally.refused = '';
     this.traced.length = 0;
   }
@@ -581,6 +587,8 @@ export class AmbientPeople {
     const seconds = deps.seconds();
     // Everybody standing first: a place somebody left fills on this same pass.
     for (const r of this.records.values()) this.walkOne(r, now, seconds, at, deps);
+    // Then anybody of ours whose building or port a no-spawn zone now keeps (one put down live, Map-maker II's twelfth wave).
+    if (deps.zoned) this.shedZoned(deps);
     this.forgetOldRounds(seconds);
     this.scanBuildings(now, at, deps);
     // The cap on part-of-the-furniture people, after the data's own have taken their places.
@@ -636,6 +644,8 @@ export class AmbientPeople {
     for (const pp of this.ports) {
       const away = Math.hypot(pp.port.pad.x - at.x, pp.port.pad.z - at.z);
       if (away > OURS_TUNE.build) continue;
+      // A port in a no-spawn zone keeping ours stands no traveller (those already about finish on their own).
+      if (deps.zoned?.(pp.port.pad.x, pp.port.pad.z)) continue;
       if (!pp.ready && now - pp.triedAt >= 2) this.planPort(pp, now, deps);
       if (!pp.ready) continue;
       // The cantinas and hotels an arrival walks to stream in on their own time: looked for again while there
@@ -666,6 +676,8 @@ export class AmbientPeople {
     }
     for (const f of this.active) {
       if (!f.empty || !f.draw) continue;
+      // Nor does a building of the fillers' in one.
+      if (deps.zoned?.(f.building.x, f.building.z)) continue;
       const away = Math.max(0, Math.hypot(f.building.x - at.x, f.building.z - at.z) - f.building.radius);
       for (let i = 0; i < f.slots.length; i++) {
         if (f.bodies[i] || f.blocked[i]) continue;
@@ -1379,6 +1391,26 @@ export class AmbientPeople {
       r.fill.bodies[r.slot] = null;
       leaveSlot(r.fill.slots[r.slot], now, r.fill.seed, r.slot);
     } else if (letGo && r.plan) this.done.set(r.num, r.plan.round);
+  }
+
+  /**
+   * Everybody of ours whose building, or whose port, a no-spawn zone keeping ours now covers, put away (Map-maker II's twelfth
+   * wave): a zone put down live leaves nobody of ours standing in what it keeps, as it leaves none of the data's. A filler's
+   * place is left empty rather than left (its building stands nobody now); a traveller's day is over for its round.
+   */
+  private shedZoned(deps: AmbientDeps): void {
+    const zoned = deps.zoned;
+    if (!zoned) return;
+    // A Map walked while the walk deletes the entry it stands on visits every other entry once.
+    for (const r of this.records.values()) {
+      const at = r.fill ? r.fill.building : r.port ? r.port.port.pad : null;
+      if (!at || !zoned(at.x, at.z)) continue;
+      if (!r.body.removed) deps.remove(r.body);
+      this.drop(r);
+      if (r.fill) r.fill.bodies[r.slot] = null;
+      else if (r.plan) this.done.set(r.num, r.plan.round);
+      this.tally.zoned++;
+    }
   }
 
   /** The farthest of ours put away to leave the cap's places to the data's own people. */

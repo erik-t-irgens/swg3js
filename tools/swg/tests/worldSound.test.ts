@@ -363,6 +363,51 @@ const row = (over: Partial<RoomRow> = {}): RoomRow => ({ pob: 'default', cell: '
   ok(mixer.live.size === 10, 'and the moment the bank lands they all come in');
 }
 
+// ---- what the removal file hides takes its placed sounds with it (Map-maker II's twelfth wave) ----
+{
+  const ten = () => Array.from({ length: 6 }, (_, i) => ({ sound: `sound/h${i}.snd`, p: [i * 10, 0, 0] }));
+  const gone = (e: { sound?: string }) => e.sound === 'sound/h2.snd' || e.sound === 'sound/h4.snd';
+  const mixer = new FakeMixer();
+  const a = new Ambience(mixer, '/');
+  a.adopt({ emitters: ten() });
+  a.setFrame(0, 0);
+  ok(mixer.live.size === 6, 'six placed sounds stand');
+  const moved = a.setHidden(gone);
+  ok(moved === 2 && mixer.find('sound/h2.snd') === null && mixer.find('sound/h4.snd') === null && mixer.live.size === 4 && (a.status().sources as Record<string, number>).placed === 4, "a landing that hides two things takes their two loops up, voice and record");
+  ok(a.setHidden(gone) === 0 && mixer.live.size === 4, 'and landing the same again moves nothing');
+  ok(a.setHidden(null) === 2 && mixer.live.size === 6 && (a.status().sources as Record<string, number>).placed === 6, 'shown again, each is put back down once');
+  ok(a.setHidden(null) === 0 && (a.status().sources as Record<string, number>).placed === 6, 'and only once');
+}
+{
+  // Hidden before the arrival puts anything down: never put down at all.
+  const mixer = new FakeMixer();
+  const a = new Ambience(mixer, '/');
+  a.hiddenAt = (e) => e.sound === 'sound/h1.snd';
+  a.adopt({ emitters: [{ sound: 'sound/h0.snd', p: [0, 0, 0] }, { sound: 'sound/h1.snd', p: [10, 0, 0] }] });
+  a.setFrame(0, 0);
+  ok(mixer.live.size === 1 && mixer.find('sound/h1.snd') === null && (a.status().sources as Record<string, number>).placed === 1, 'a placed sound of a thing hidden at the arrival is never put down');
+}
+{
+  // A loop waiting for the bank is taken up too: it never starts once the bank lands.
+  const mixer = new FakeMixer();
+  mixer.bank.available = false;
+  const a = new Ambience(mixer, '/');
+  a.adopt({ emitters: [{ sound: 'sound/h0.snd', p: [0, 0, 0] }, { sound: 'sound/h1.snd', p: [10, 0, 0] }] });
+  a.setFrame(0, 0);
+  a.setHidden((e) => e.sound === 'sound/h1.snd');
+  mixer.bank.available = true;
+  a.sources.retry();
+  ok(mixer.live.size === 1 && mixer.find('sound/h1.snd') === null, 'a hidden loop still waiting for its sample is dropped from the waiting list, and never starts');
+}
+{
+  // A pack in a frame this game does not read puts nothing down, and a landing puts nothing back down either.
+  const mixer = new FakeMixer();
+  const a = new Ambience(mixer, '/');
+  a.adopt({ frame: 'game', emitters: [{ sound: 'sound/h0.snd', p: [0, 0, 0] }] } as never);
+  a.setFrame(0, 0);
+  ok(mixer.live.size === 0 && a.setHidden(null) === 0 && a.setHidden(() => false) === 0 && mixer.live.size === 0, "a pack whose places are in a frame this game does not read puts down nothing, at the arrival or at a landing");
+}
+
 // ---- a particle effect's own loop ----
 {
   const mixer = new FakeMixer();

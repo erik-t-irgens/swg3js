@@ -55,6 +55,116 @@ export const SEAT_TUNE = {
 
 export type SeatTune = typeof SEAT_TUNE;
 
+/**
+ * The world editor's snap of a seat or a table in hand to a sitter (Map-maker II's twelfth wave, Map-maker I §2.10 item 4):
+ * whether it snaps at all (ours, a feel switch). Its reaches are the plan's own (`SEAT_TUNE.seatNear`, `tableNear`, and a
+ * table's place `ahead` of its sitter), so a chair snapped onto a sitter is the chair the next plan finds there and none of
+ * ours stands beside it. Live through `__debug.seats({ snap })`.
+ */
+export const SEAT_SNAP_TUNE = { on: true };
+
+/**
+ * Where a seat (`seat`) or a table (`table`) in hand at a point of the world's frame snaps to: the nearest sitter in a chair
+ * within `seatNear` (its own spot and heading), or the table spot `ahead` of the nearest sitter at a table within `tableNear`
+ * of that spot (facing the sitter). Null where none is near, or with the snap off. Pure.
+ */
+export function seatSnap(kind: 'seat' | 'table', x: number, z: number, sitters: readonly SeatedRow[], tune: SeatTune = SEAT_TUNE, on: boolean = SEAT_SNAP_TUNE.on): { x: number; y: number; z: number; heading: number; key: string } | null {
+  const ask = new SeatSnapAsk();
+  ask.kind = kind;
+  ask.x = x;
+  ask.z = z;
+  return seatSnapIn(ask, sitters, tune, on) ? { x: ask.ox, y: ask.oy, z: ask.oz, heading: ask.heading, key: ask.key } : null;
+}
+
+/**
+ * What the snap is asked and answers, kept by its caller (the world editor asks every frame a seat or a table is in hand): a
+ * class whose number fields take their first values where they are declared, so writing them makes no number (a field that
+ * will hold a fraction starts as one).
+ */
+export class SeatSnapAsk {
+  kind: 'seat' | 'table' = 'seat';
+  x = 0.5;
+  z = 0.5;
+  ox = 0.5;
+  oy = 0.5;
+  oz = 0.5;
+  heading = 0.5;
+  key = '';
+}
+
+/**
+ * `seatSnap` over a kept record: its answer written into `ask` (`ox`, `oy`, `oz`, `heading`, `key`) and whether it snapped.
+ * Makes nothing: each length is a square root written out (`Math.hypot` hands back a fresh number), and the best is held
+ * by its index until the end.
+ */
+export function seatSnapIn(ask: SeatSnapAsk, sitters: readonly SeatedRow[], tune: SeatTune = SEAT_TUNE, on: boolean = SEAT_SNAP_TUNE.on): boolean {
+  if (!on) return false;
+  const seat = ask.kind === 'seat';
+  let best = -1;
+  let bestD = Infinity;
+  for (let i = 0; i < sitters.length; i++) {
+    const s = sitters[i];
+    if (seat) {
+      if (s.sits !== 'chair') continue;
+      const dx = s.x - ask.x;
+      const dz = s.z - ask.z;
+      const d = Math.sqrt(dx * dx + dz * dz);
+      if (d <= tune.seatNear && d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    } else {
+      if (s.sits !== 'table') continue;
+      const dx = s.x + Math.sin(s.heading) * tune.ahead - ask.x;
+      const dz = s.z + Math.cos(s.heading) * tune.ahead - ask.z;
+      const d = Math.sqrt(dx * dx + dz * dz);
+      if (d <= tune.tableNear && d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+  }
+  if (best < 0) return false;
+  const s = sitters[best];
+  if (seat) {
+    ask.ox = s.x;
+    ask.oz = s.z;
+    ask.heading = s.heading + tune.seatTurn;
+  } else {
+    ask.ox = s.x + Math.sin(s.heading) * tune.ahead;
+    ask.oz = s.z + Math.cos(s.heading) * tune.ahead;
+    ask.heading = s.heading + Math.PI;
+  }
+  ask.oy = s.y;
+  ask.key = s.key;
+  return true;
+}
+
+/**
+ * A seat of ours as the permanent row that stands for it (the world editor's Make permanent, Map-maker I §2.10 item 3): at
+ * its exact place and turn carried into the file's raw frame about the layout's centre `c` (the mirror every placed object
+ * goes through, undone), a props row where the props catalogue holds its model (`thing`, its id), else a row of this world's
+ * own pack (`own`), its solidity left absent (passable, as a seat is) and its furniture word written, so the next plan finds
+ * the data's own seat there and stands none of ours beside it. Why not, in words. Pure.
+ */
+export function seatPermanentRow(p: Pick<SeatProp, 'kind' | 'model' | 'x' | 'y' | 'z' | 'yaw' | 'inside'>, c: { x: number; z: number }, thing: string | null, own: boolean, mint: (base: string) => string): Record<string, unknown> | string {
+  if (!thing && !own) return `${p.model} is in neither the props catalogue nor this world's pack`;
+  const round = (v: number, k: number): number => Math.round(v * k) / k;
+  const half = p.yaw / 2;
+  return {
+    id: mint(p.model.replace(/[^a-z0-9_-]/gi, '_').toLowerCase()),
+    kind: 'prop',
+    ...(thing ? { pack: 'props', thing } : { pack: 'world', model: p.model }),
+    x: round(c.x - p.x, 1000),
+    y: round(p.y, 1000),
+    z: round(p.z + c.z, 1000),
+    // The game's turn about up carried through the mirror into the raw frame: [w, x, -y, -z] of the game's quaternion.
+    q: [round(Math.cos(half), 1e6), 0, round(-Math.sin(half), 1e6), 0],
+    ...(p.inside ? { inside: true } : {}),
+    furniture: p.kind === 'table' ? 'table' : 'seat',
+  };
+}
+
 /** The seat a mood sits on: a chair, a chair at a table, or none (sitting on the ground, standing). */
 export function seatOfMood(mood: string | null | undefined): SeatKind | null {
   if (!mood) return null;

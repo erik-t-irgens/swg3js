@@ -88,6 +88,7 @@ import { soeRiverRows } from '../../src/swg/terrain/ribbons.ts';
 import { parseTerrainTemplate } from '../../src/swg/terrain/trn.ts';
 import { readPlacementsFile, scaleOf } from '../../src/story/placements.ts';
 import { isSeat, isTableTemplate, standsSolid } from '../../src/world/rowSolid.ts';
+import { ObjectKeyIndex, compileRemovals, noRemovals, readRemovalsFile, removalKindOf } from '../../src/story/removals.ts';
 import { FLORA_COLLISION, mergeFloraCollision, modelExtentOf, rowFloraParts } from '../../src/world/floraShapes.ts';
 
 // The rules, named here as they always were (every caller and test that imports them from this file still does).
@@ -122,6 +123,20 @@ export function gridEditsOf(world, folder = placementsFolder(), packDir = null) 
     texts[kind] = text;
   }
   const edits = { world, texts };
+  // The world's removal file (Map-maker II's twelfth wave, `public/placements/removed/<world>.json`): its text for the bake,
+  // and beside it the words of its rows the grid reads -- an object hidden (and the ground its building's layer flattened
+  // dropped with it) or switched solid or walked through, a template switched -- which the key folds in. A person, a site or
+  // a no-spawn zone moves nothing in the grid, so a file of those alone keys as no file does.
+  try {
+    if (folder && /^[a-z0-9_]{1,40}$/.test(world)) {
+      const text = readFileSync(join(folder, 'removed', `${world}.json`), 'utf8');
+      edits.removed = text;
+      const words = removalGridWords(gridKeyedRemovalRows(gridRemovalRows(edits), packDir));
+      if (words) edits.removedGrid = words;
+    }
+  } catch {
+    // No removal file: nothing taken away, and nothing in the key.
+  }
   // The terrain's own wet rivers the bake makes water (Map-maker II's sixth wave), as a stamp the key folds in: a world whose
   // terrain has none carries none, and keys exactly as it did.
   if (packDir) {
@@ -253,6 +268,76 @@ export function solidRowModel(row, packs) {
   const absent = there ? [] : [`${pack}/${row.model}`];
   if (there && flora && !packs.collisionOf(pack)) absent.push(`${pack}/flora-collision.json`);
   return { file: there ? file : null, def, flora, pack, absent };
+}
+
+/**
+ * The removal file's rows the walk grid reads (Map-maker II's twelfth wave), read as the game reads them (`readRemovalsFile`,
+ * a world on the ground: a nav grid is never baked for a space zone): its object rows (a hide, a ground dropped, a thing's
+ * walk-through switch) and its template rows (every copy here). A person, a site and a zone are the people's and the
+ * wildlife's and move no cell. None where there is no file or it does not read.
+ */
+export function gridRemovalRows(edits, log = () => {}) {
+  const text = edits?.removed;
+  if (typeof text !== 'string') return [];
+  const read = readRemovalsFile(text, edits.world, 'ground');
+  if (read.problem) {
+    log(`  removal file not read: ${read.problem}`);
+    return [];
+  }
+  for (const s of read.skipped) log(`  removal row ${s.id} skipped: ${s.why}`);
+  return read.rows.filter((r) => {
+    const kind = removalKindOf(r.id);
+    return kind === 'object' || kind === 'template';
+  });
+}
+
+/**
+ * Of those rows, the ones that can move a cell of the bake, which alone the grid's key folds in: every template row, and an
+ * object row only where it finds one of the layout's own objects standing out in the open (`compileRemovals`' own match over
+ * the pack's `layout.json`), since the bake rasterises nothing in a room and never sees a piece of a building's own furniture
+ * (a `/n` key, appended only to the list the game streams). With no pack folder to read the layout from, every object row but
+ * a piece's is kept, which can only ask for a bake that changes nothing.
+ */
+export function gridKeyedRemovalRows(rows, packDir = null) {
+  if (!rows.length) return rows;
+  const isPiece = (id) => /\/\d+$/.test(id);
+  let objects = null;
+  if (packDir) {
+    try {
+      objects = JSON.parse(readFileSync(join(packDir, 'layout.json'), 'utf8')).objects ?? null;
+    } catch {
+      objects = null;
+    }
+  }
+  if (!objects) return rows.filter((r) => removalKindOf(r.id) !== 'object' || !isPiece(r.id));
+  const index = new ObjectKeyIndex(objects);
+  return rows.filter((r) => {
+    if (removalKindOf(r.id) !== 'object') return true;
+    if (isPiece(r.id)) return false;
+    const i = index.find(r.id);
+    return i >= 0 && !objects[i].contained;
+  });
+}
+
+/**
+ * The words of those rows the grid's key folds in (`layoutKeyOf`): one line a row, its id and what it switches, in the
+ * file's own order (sorted by id); '' for none, which keys as no file. Its `at` and `note` move nothing.
+ */
+export function removalGridWords(rows) {
+  return rows.map((r) => [r.id, r.hide ? 'hide' : '', r.ground ?? '', r.solid === undefined ? '' : r.solid ? 'solid' : 'through'].join('|')).join('\n');
+}
+
+/**
+ * The rows over the layout's own objects as the game matches them (`compileRemovals` over the very list the streamer files:
+ * a piece of a building's furniture is appended after the layout and is never the bake's, so every other index and twin is
+ * the game's): what is hidden, whose building's ground goes with it, and each thing's and template's switch.
+ */
+export function gridRemovals(edits, objects, log = () => {}) {
+  const rows = gridRemovalRows(edits, log);
+  if (!rows.length) return noRemovals();
+  const c = compileRemovals(rows, objects);
+  if (c.missing.length) log(`  removal file: ${c.missing.length} object rows find nothing in this layout (${c.missing.slice(0, 3).join(', ')}${c.missing.length > 3 ? ', ...' : ''})`);
+  return c;
 }
 
 /** Whether any edit file is there. */
@@ -630,7 +715,8 @@ export function townStanding(nibble, nx, nz, i0, j0, ringCells, lookCells) {
 export async function buildNavGrid(dir, opts = {}) {
   const log = opts.log ?? (() => {});
   const trn = await import('../../src/swg/terrain/trn.ts');
-  const layout = JSON.parse(readFileSync(join(dir, 'layout.json'), 'utf8'));
+  // `opts.layout` stands in for the pack's layout.json in a test (the same world with one object left out, or a layer laid).
+  const layout = opts.layout ?? JSON.parse(readFileSync(join(dir, 'layout.json'), 'utf8'));
   const manifest = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'));
   const trnPath = join(dir, layout.terrain ?? 'terrain.trn');
   if (!existsSync(trnPath)) throw new Error(`${trnPath} missing; run the snapshot (or terrain) command for this world first`);
@@ -640,11 +726,22 @@ export async function buildNavGrid(dir, opts = {}) {
     if (existsSync(f)) trn.attachBitmap(template, b.familyId, new Uint8Array(readFileSync(f)));
   }
   const sampler = new trn.TerrainSampler(template);
+  // The world's committed edit files (`gridEditsOf`; `opts.edits` stands in for them in a test), read once here, since the
+  // removal file (Map-maker II's twelfth wave) decides which buildings' layers flatten the ground below.
+  const edits = opts.edits !== undefined ? opts.edits : gridEditsOf(opts.world ?? basename(dir));
+  const removal = gridRemovals(edits, layout.objects, log);
   // The buildings' own terrain layers flatten the ground under them; without these a town stands on
-  // whatever the fractals made and every doorstep is a cliff.
+  // whatever the fractals made and every doorstep is a cliff. A building the removal file hides with `ground: 'drop'` takes
+  // its layer with it, as the game's arrival does (`World.loadPack`); a hide alone keeps it.
   let layerCount = 0;
-  for (const o of layout.objects) {
+  let layersDropped = 0;
+  for (let li = 0; li < layout.objects.length; li++) {
+    const o = layout.objects[li];
     if (!o.layer) continue;
+    if (removal.groundDrop.size && removal.groundDrop.has(li)) {
+      layersDropped++;
+      continue;
+    }
     const f = join(dir, o.layer);
     if (!existsSync(f)) continue;
     const L = trn.parseLayerFile(new Uint8Array(readFileSync(f)), template.generator);
@@ -717,8 +814,7 @@ export async function buildNavGrid(dir, opts = {}) {
   // `opts.edits` stands in for the files in a test (`gridEditsOf`'s shape); a world with none reads none and bakes as
   // it always did. The heights file's deltas are laid over the poles as the game lays them where a grid enters a cache
   // (`HeightEdits.layIn`, `fround(raw + d)` where a delta is not nought), after the check above, which holds the lattice
-  // to the generator's own raw ground.
-  const edits = opts.edits !== undefined ? opts.edits : gridEditsOf(opts.world ?? basename(dir));
+  // to the generator's own raw ground. (`edits` is read above, before the buildings' layers.)
   const editStats = { tiles: 0, lakes: 0, rows: 0, floraRows: 0, rowsMissing: 0, absent: [] };
   const heightEdits = gridHeights(edits, log);
   if (heightEdits) {
@@ -777,11 +873,29 @@ export async function buildNavGrid(dir, opts = {}) {
   // so the grid blocks no cell for them either (`opts.walkThrough`, a set of templates, stands in for the file in a test).
   const walkThrough = opts.walkThrough ?? walkThroughTemplates();
   let walkedThrough = 0;
+  // What the removal file does to them (Map-maker II's twelfth wave), counted only where it has rows the grid reads.
+  const removalStats = { hidden: 0, through: 0, solid: 0, layersDropped, missing: removal.missing.length };
+  const switches = removal.solid.size > 0 || removal.templates.size > 0;
   // Every object whatever world state it stands in (`state`, Restuss's living city and its ruins: restuss.mjs): one
   // grid serves both, so a body in the ruins routes round where a house stood and never into a building in either.
-  for (const o of layout.objects) {
+  for (let li = 0; li < layout.objects.length; li++) {
+    const o = layout.objects[li];
     if (o.contained) continue;
-    if (walkThrough.has(o.template)) {
+    // Hidden for everyone: no cell blocked, no room marked indoor (what stood in its rooms is contained and never here).
+    if (removal.hidden.size && removal.hidden.has(li)) {
+      removalStats.hidden++;
+      continue;
+    }
+    // The owner's switch on the thing, then on this world's copies of its template, then the shared file (`collidesByRule`'s
+    // order): the narrowest wins.
+    const says = switches ? (removal.solid.get(li) ?? removal.templates.get(o.template)) : undefined;
+    if (says === false) {
+      removalStats.through++;
+      continue;
+    }
+    if (says === true) {
+      if (walkThrough.has(o.template)) removalStats.solid++;
+    } else if (walkThrough.has(o.template)) {
       walkedThrough++;
       continue;
     }
@@ -842,6 +956,7 @@ export async function buildNavGrid(dir, opts = {}) {
       }
     }
     log(`  ${placed} placed objects (${buildings} of them portal buildings, ${missing} without a model), ${triangles} triangles, in ${((Date.now() - t) / 1000).toFixed(1)} s${walkedThrough ? `; ${walkedThrough} walked through by the shared file (solid.json)` : ''}`);
+    if (removalStats.hidden || removalStats.through || removalStats.solid || removalStats.layersDropped) log(`  removal file: ${removalStats.hidden} hidden, ${removalStats.through} walked through and ${removalStats.solid} made solid by its switches, ${removalStats.layersDropped} buildings' ground dropped`);
     if (openedBy.size) {
       const top = [...openedBy].sort((a, b) => b[1] - a[1]);
       const cells = top.reduce((n, [, c]) => n + c, 0);
@@ -1055,6 +1170,8 @@ export async function buildNavGrid(dir, opts = {}) {
       // What the world's committed edit files brought (Map-maker II's fifth wave): only where it has one, so a grid of a
       // world with none is written as it always was.
       ...(anyGridEdits(edits) ? { edits: { ...editStats } } : {}),
+      // What the removal file did (Map-maker II's twelfth wave): only where it has rows the grid reads.
+      ...(typeof edits?.removed === 'string' && (removal.hidden.size || removal.solid.size || removal.templates.size || removal.missing.length) ? { removed: { ...removalStats } } : {}),
       // The terrain's own wet rivers made water (the sixth wave): only where there are any.
       ...(soeRiverCount ? { soeRivers: soeRiverCount } : {}),
       heightCheck: Number(worstHeight.toFixed(4)),

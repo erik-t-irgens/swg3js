@@ -1964,7 +1964,7 @@ export class EditorEdits {
    * A row's own fields set on **every** picked row alike (the Selected tab, the console's `set`): its name, note, state,
    * solidity, flora clearing and guard, one action however many rows.
    */
-  async setField(fields: Partial<Record<'name' | 'note' | 'state' | 'solid' | 'clear' | 'guard' | 'furnish', unknown>>): Promise<string> {
+  async setField(fields: Partial<Record<'name' | 'note' | 'state' | 'solid' | 'clear' | 'guard' | 'furnish' | 'furniture', unknown>>): Promise<string> {
     this.sameWorld();
     if (!this.sel.size || this.live || this.writing) return 'pick one first';
     const changes: RowChange[] = [];
@@ -1981,7 +1981,7 @@ export class EditorEdits {
       const mark = r.row.kind === 'mark';
       let touched = false;
       for (const [k, v] of Object.entries(fields)) {
-        if (mark && (k === 'solid' || k === 'clear' || k === 'guard')) {
+        if (mark && (k === 'solid' || k === 'clear' || k === 'guard' || k === 'furniture')) {
           marksPassed++;
           continue;
         }
@@ -2012,6 +2012,10 @@ export class EditorEdits {
         } else if (k === 'clear' || k === 'guard') {
           if (v === null || v === '') delete after[k];
           else if (typeof v === 'number' && v >= 0) after[k] = v;
+        } else if (k === 'furniture') {
+          // What it counts as for the people (Map-maker II's twelfth wave): a seat, a table, neither, or its template's name.
+          if (v === 'seat' || v === 'table' || v === 'none') after.furniture = v;
+          else delete after.furniture;
         }
       }
       if (!touched) continue;

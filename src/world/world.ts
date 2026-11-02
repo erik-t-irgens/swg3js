@@ -76,6 +76,14 @@ import { blockedBy, blockerName, clearRadius, groundVerdict, patchMiddle, patchO
 import { DRESSING_TUNE, type DressingKeep, type DressingStand, type StandAnswer } from './permanent.ts';
 import { PLACEMENT_KEY_PREFIX } from '../story/placements.ts';
 import { rawToGameX, rawToGameZ } from '../story/waypoints.ts';
+// Map-maker II's twelfth wave: what a world takes away, the owner's own people, and the no-spawn zones.
+import { HIDE_TUNE, ObjectKeyIndex, compileRemovals, noRemovals, removalLandingPlan, type CompiledRemovals, type KeyedObject, type RemovalRow } from '../story/removals.ts';
+import { placedStandingRow, type PlacedPersonRow } from '../story/placedPeople.ts';
+import { ZoneSet, wildAreasOf, zonesOf } from './noSpawnZones.ts';
+import { HiddenPlaces, gameTo, type HiddenObject } from './hiddenPlaces.ts';
+import { setWorldSolidRows } from './walkThrough.ts';
+import { FILLER_TUNE } from './ambient/fillers.ts';
+import { furnitureOf } from './rowSolid.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { cellOfLiving, doorwayNav } from './nav/doorway.ts';
 // The AI handoff's first three steps: their switches, and the ledger a landed blow is measured on (`aiLedger.ts`).
@@ -1867,6 +1875,10 @@ export class World {
     // And its lakes of ours (Map-maker II's fifth wave, `public/placements/water/<world>.json`): waited on (bounded) before the
     // water is drawn, appended after the client's tables on a converted world and made bodies on a real-elevation one.
     this.askWater(packId);
+    // And what it takes away and the people the owner placed (Map-maker II's twelfth wave, `public/placements/removed/` and
+    // `people/`): asked now, waited on (bounded) before anything stands (`loadPack`), and stood late by difference.
+    this.askRemovals(packId);
+    this.askPeople(packId);
     const demHeights = !!planet.dem && shippedAsk(`${planet.dem.url}/base16.raw`);
     this.heightsByDem = demHeights;
     this.demGroundPending = null;
@@ -2132,6 +2144,17 @@ export class World {
       // its own layout's centre, and stood about (0, 0) they would land kilometres off, so it keeps standing nothing.
       if (planet.pack === false && !planet.space && !this.sceneOnly) await this.standInStreamer(planet.id, opts.keepOff, token);
       if (token !== this.loadToken) return null;
+      // The owner's own people on a world with no pack (Map-maker II's twelfth wave): adopted here, since this branch returns
+      // before the pack path's adopt, with the people's centre `placeFrame`'s (0, 0) (`peopleDeps`), or nobody he placed would
+      // ever stand on his own worlds. Its zones keep his placed people and nothing else (it has no wildlife).
+      if (planet.pack === false && !planet.space && !this.sceneOnly) {
+        await this.removalsReady();
+        await this.peopleReady();
+        if (token !== this.loadToken) return null;
+        this.compileRemovalsOver([], null);
+        const placed = this.placedStandingRows();
+        if (placed.length) standingPeople.adopt(standingList([], [], [], [], placed), {}, { world: planet.id, removed: this.personRemovedFn() });
+      }
       // A ground world with no converted terrain whose raster is not coming (the noise ground): its height edits laid on now,
       // through a stroke's rebuild over whatever ground already stands (a real-elevation world's raster installs its own).
       if (!this.heightsByDem && !planet.space) {
@@ -2163,6 +2186,18 @@ export class World {
       this.packProgress = 1;
       return null;
     }
+    // What this world takes away (Map-maker II's twelfth wave), in before anything stands: the streamer's constructor files
+    // nothing it hides (`fileByState`), the `.lay` loop below drops what a hide asks, the wildlife's laying and the people's
+    // adopt read it, and the placed sounds are put down once with no way back the frame `this.pack` is first seen, so the
+    // file is awaited (bounded) here, before the pack is the world's (and before its states' wait, which reads none of it).
+    // And the owner's own people beside it.
+    await this.removalsReady();
+    await this.peopleReady();
+    if (token !== this.loadToken) {
+      pack.dispose();
+      return null;
+    }
+    this.compileRemovalsOver(pack.layout?.objects ?? [], pack.layout?.center ?? null, pack);
     // The world's states (Restuss as the living launch city or as its ruins: `worldState.ts`), taken now and kept
     // for the rest of this world, after a saved server's hail where one is coming: everything below that stands
     // anything reads them, the streamer, the people and the roster of ours among them. Taken before the pack is
@@ -2191,6 +2226,9 @@ export class World {
     // The world's own wildlife: where the server's spawn areas are and what may stand in them. A
     // few hundred kilobytes a world beside the fleet's one manifest, and a world with no such pack
     // simply has the wildlife it always had.
+    // The removal file's no-spawn zones keeping the wildlife, and its sites taken away by key, set before the laying (a space
+    // zone's zones keep nothing this pass).
+    wildLife.setRemovals(planet.space ? [] : wildAreasOf(this.zoneSet.zones), this.removals.sites);
     await wildLife.load(this.packId, import.meta.env.BASE_URL, { serverHolds: this.serverHoldsWorld ?? undefined });
     if (token !== this.loadToken) return null;
     // The people who stand somewhere and stay there ride in the same pack the wildlife does, so the
@@ -2217,7 +2255,12 @@ export class World {
     if (token !== this.loadToken) return null;
     const ruins: RuinsCircle | null = restuss?.centre && stateNow(RESTUSS_KEY) === 'ruins' ? { centre: restuss.centre, circle: RESTUSS_TUNE.circle } : null;
     this.restussFile = restuss ? { centre: restuss.centre ?? null, roster: brigade.length } : null;
-    standingPeople.adopt(standingList(people, heralds, wildLife.overlayRows() as StandingRow[], roster as StandingRow[]), wildLife.peopleCreatures(), { ...wildLife.peopleExtras(), dormant: (r) => personDormant(r, standsIn, ruins) });
+    // The owner's own placed people last of all (Map-maker II's twelfth wave), each by its own key; and the removal file's
+    // people, zones and hidden buildings' rooms folded into a `removed` the people honour as they honour dormancy, so no row
+    // leaves the list and no `stood:` name moves. With no file, none, and the list and every name are as they were.
+    const placed = this.placedStandingRows();
+    const removed = this.personRemovedFn();
+    standingPeople.adopt(standingList(people, heralds, wildLife.overlayRows() as StandingRow[], roster as StandingRow[], placed), wildLife.peopleCreatures(), { ...wildLife.peopleExtras(), dormant: (r) => personDormant(r, standsIn, ruins), ...(removed ? { removed } : {}) });
     this.packProgress = 0.12;
 
     const scatter: ScatterItem[] = [];
@@ -2257,8 +2300,13 @@ export class World {
       if (token !== this.loadToken) return null;
       if (trn) {
         const layers: BuildingLayerSource[] = [];
-        for (const o of layout.objects) {
+        // A building the removal file hides with `ground: 'drop'` takes the ground its own terrain layer flattened with it
+        // (Map-maker II §2.13 item 6); a hide alone keeps it, since the baked heights were authored for it.
+        const dropped = this.removals.groundDrop;
+        for (let li = 0; li < layout.objects.length; li++) {
+          const o = layout.objects[li];
           if (!o.layer || o.contained) continue;
+          if (dropped.size && dropped.has(li)) continue;
           const bytes = await pack.bytes(o.layer);
           if (!bytes) continue;
           layers.push({ bytes, x: o.x, z: o.z, yaw: yawOf(o.q) });
@@ -2397,7 +2445,14 @@ export class World {
       this.particles.heightAt = (x, z) => this.terrain.heightAt(x, z);
       // The gallery is one long walk of exhibits with nothing else to draw: everything loads from anywhere on it.
       // What stands in a state this world did not arrive in (Restuss's other state) lies dormant (`worldState.ts`).
-      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, streamLayout ?? layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.streamReach(), hugeColliders: !!planet.space, stands: standsIn, ...(furnitureGuests ? { guests: furnitureGuests } : {}) });
+      // The removal file over the very list the streamer files (the layout and the client's own furniture appended), so a
+      // piece's own key finds its piece in one copy of its building and no other (Map-maker II's twelfth wave).
+      const streamed = streamLayout ?? layout;
+      if (streamed !== layout && this.removalRows.length) this.compileRemovalsOver(streamed.objects, layout.center, pack);
+      else this.removalObjects = streamed.objects;
+      const hides = this.removals.hidden;
+      const solids = this.removals.solid;
+      this.layoutStream = new LayoutStreamer(this.scene, this.physics, pack, streamLayout ?? layout, this.particles, { reach: planet.id === 'gallery' ? 4 : this.streamReach(), hugeColliders: !!planet.space, stands: standsIn, ...(furnitureGuests ? { guests: furnitureGuests } : {}), ...(hides.size ? { hidden: (li: number) => hides.has(li) } : {}), ...(solids.size ? { solidOf: (li: number) => solids.get(li) } : {}) });
       // A tier is built hidden and shown once its programs exist, so no frame is ever the first to
       // draw a material nothing had built: that was thirteen programs and two frames of over a
       // second for a player who had not moved. `swg.shaderPace` = '0' in local storage leaves it
@@ -6985,19 +7040,30 @@ export class World {
    * either way), out in the open anywhere over the point. What the seats of ours ask before standing a
    * chair or a table the data already has (`seatProps.ts`). Asked once a world, never in a frame.
    */
-  dataPlacedNear(test: (template: string) => boolean, x: number, y: number, z: number, reach: number, level: number): boolean {
+  dataPlacedNear(test: (template: string) => boolean, x: number, y: number, z: number, reach: number, level: number, kind?: 'seat' | 'table'): boolean {
     const stream = this.layoutStream;
     if (!stream) return false;
     const inside = this.furnitureScratch;
     stream.containedNear(x, z, reach, inside);
     for (const o of inside) {
+      if (Math.abs(o.y - y) > level) continue;
+      // A permanent row's own word on what it is (Map-maker II's twelfth wave) over its template's name, where `kind` says which.
+      if (o.furniture && kind && o.template.startsWith(PLACEMENT_KEY_PREFIX)) {
+        if (furnitureOf(o, null, kind)) return true;
+        continue;
+      }
       const t = World.dataTemplate(o.template, o.effectsOf);
-      if (t && Math.abs(o.y - y) <= level && test(t)) return true;
+      if (t && test(t)) return true;
     }
     inside.length = 0;
     for (const o of stream.objectsNear(x, z, reach)) {
+      if (Math.hypot(o.x - x, o.z - z) > reach) continue;
+      if (o.furniture && kind && o.template.startsWith(PLACEMENT_KEY_PREFIX)) {
+        if (furnitureOf(o, null, kind)) return true;
+        continue;
+      }
       const t = World.dataTemplate(o.template, o.effectsOf);
-      if (t && Math.hypot(o.x - x, o.z - z) <= reach && test(t)) return true;
+      if (t && test(t)) return true;
     }
     return false;
   }
@@ -9635,7 +9701,9 @@ export class World {
         short: (entry) => this.mobiles?.budgetShort(entry) ?? 0,
         freeStart: () => this.mobiles?.freeStart(),
         frees: (m) => this.mobiles?.frees(m) ?? 0,
-        centre: () => this.layoutCenter,
+        // The centre the rows are written about: the layout's on a converted world (as it always was), and `placeFrame`'s
+        // (0, 0) on a world with no pack, where the owner's placed people are the only rows (Map-maker II's twelfth wave).
+        centre: () => this.placeFrame,
         held: () => this.streamHold || this.livingHold || this.sceneOnly || !this.simulating,
         // A person in a room needs that room's floor to exist first. The streamer builds a
         // building's cells by distance, so asking for the ground there answers null until it has.
@@ -9841,6 +9909,8 @@ export class World {
         },
         people: standingPeople,
         peopleDeps: () => this.peopleDeps(),
+        // A port or a building in a no-spawn zone keeping the people of ours stands nobody of ours (Map-maker II's twelfth wave).
+        zoned: (x, z) => this.oursZoned(x, z),
       };
     }
     return this.ambientDepsKept;
@@ -13586,6 +13656,356 @@ export class World {
     return this.ourWaterRows;
   }
 
+  // ---- Map-maker II: what a world takes away, the owner's own people and the no-spawn zones (its twelfth wave) ----------
+
+  /**
+   * Where a world's removal file and people file come from: the page hands its fetches in (`App.fetchRemovals`,
+   * `App.fetchPeople`), which read `public/placements/removed/<world>.json` and `people/<world>.json`. Null asks for none (a
+   * test's world, the select screen's), and the world stands everything it always stood.
+   */
+  removalsSource: ((pack: string, kind: 'ground' | 'space' | 'copies') => Promise<EditRowsLoaded<RemovalRow> | null>) | null = null;
+  peopleSource: ((pack: string, kind: 'ground' | 'space' | 'copies') => Promise<EditRowsLoaded<PlacedPersonRow> | null>) | null = null;
+  private removalsAsk: { gen: number; done: Promise<EditRowsLoaded<RemovalRow> | null>; installed: boolean; late: boolean } | null = null;
+  private peopleAsk: { gen: number; done: Promise<EditRowsLoaded<PlacedPersonRow> | null>; installed: boolean; late: boolean } | null = null;
+  /** The removal file's rows in force, sorted by id (the file's own order), and the owner's placed people. */
+  removalRows: RemovalRow[] = [];
+  placedPeopleRows: PlacedPersonRow[] = [];
+  /** What the rows come to over the list the streamer files (`compileRemovals`): what each reader asks. */
+  removals: CompiledRemovals = noRemovals();
+  /** The list the rows were matched over (the layout, its own furniture appended), kept for a landing's match. */
+  private removalObjects: readonly KeyedObject[] = [];
+  /**
+   * The one key index over `removalObjects` (`keyIndex`): made again only when the list is another, so the editor's lists,
+   * which ask a key of tens of objects a render, and every landing's match share its templates and twins.
+   */
+  private keyIndexOver: readonly KeyedObject[] | null = null;
+  private keyIndexNow: ObjectKeyIndex | null = null;
+  private keyIndex(): ObjectKeyIndex {
+    if (!this.keyIndexNow || this.keyIndexOver !== this.removalObjects) {
+      this.keyIndexOver = this.removalObjects;
+      this.keyIndexNow = new ObjectKeyIndex(this.removalObjects);
+    }
+    return this.keyIndexNow;
+  }
+  /** The zones keeping the people and the people of ours, in the file's frame; and what is hidden, for the readers outside the streamer. */
+  private zoneSet = new ZoneSet([]);
+  private hiddenSet = new HiddenPlaces([]);
+  /** Moved by every landing of the removal file: the page's travel things and fittings are worked out again when it moves. */
+  removalStamp = 0;
+  /** Told after a landing has done its part (the page stands its fittings and travel things again over the new hides). */
+  removalsLanded: (() => void) | null = null;
+  /** What the files read said, for the console. */
+  removalsFileInfo: { rows: number; bytes: number; skipped: { id: string; why: string }[]; problem: string | null; rev: string | null } = { rows: 0, bytes: 0, skipped: [], problem: null, rev: null };
+  peopleFileInfo: { rows: number; bytes: number; skipped: { id: string; why: string }[]; problem: string | null; rev: string | null } = { rows: 0, bytes: 0, skipped: [], problem: null, rev: null };
+  /** What landings did this session, for the console. */
+  readonly removalWork = { landed: 0, hidden: 0, shown: 0, peopleDown: 0, sitesDown: 0, solidMoved: 0, emitters: 0, peopleLanded: 0 };
+
+  private kindOfWorld(): 'ground' | 'space' | 'copies' {
+    const planet = this.planet;
+    return planet.instances ? 'copies' : planet.space ? 'space' : 'ground';
+  }
+
+  /** The ask for this world's removal file, begun as its load begins (`load`). */
+  private askRemovals(packId: string): void {
+    this.removalRows = [];
+    this.removals = noRemovals();
+    this.removalObjects = [];
+    this.zoneSet = new ZoneSet([]);
+    this.hiddenSet = new HiddenPlaces([]);
+    setWorldSolidRows(new Map());
+    this.removalsFileInfo = { rows: 0, bytes: 0, skipped: [], problem: null, rev: null };
+    if (this.ambience) this.ambience.hiddenAt = null;
+    const src = this.removalsSource;
+    if (!src || this.sceneOnly) {
+      this.removalsAsk = null;
+      return;
+    }
+    const ask = { gen: this.generation, done: src(packId, this.kindOfWorld()).catch(() => null), installed: false, late: false };
+    this.removalsAsk = ask;
+    // A file later than the bound: laid on when it lands, by difference, as a landing is.
+    void ask.done.then((loaded) => {
+      if (this.removalsAsk !== ask || ask.installed || !ask.late || this.generation !== ask.gen) return;
+      ask.installed = true;
+      this.landRemovals(loaded?.rows ?? [], loaded);
+    });
+  }
+
+  /** The ask for this world's people file, begun as its load begins (`load`). */
+  private askPeople(packId: string): void {
+    this.placedPeopleRows = [];
+    this.peopleFileInfo = { rows: 0, bytes: 0, skipped: [], problem: null, rev: null };
+    const src = this.peopleSource;
+    if (!src || this.sceneOnly) {
+      this.peopleAsk = null;
+      return;
+    }
+    const ask = { gen: this.generation, done: src(packId, this.kindOfWorld()).catch(() => null), installed: false, late: false };
+    this.peopleAsk = ask;
+    void ask.done.then((loaded) => {
+      if (this.peopleAsk !== ask || ask.installed || !ask.late || this.generation !== ask.gen) return;
+      ask.installed = true;
+      this.landPeople(loaded?.rows ?? [], loaded);
+    });
+  }
+
+  /** This world's removal file, waited on for at most `DRESSING_TUNE.floraWaitMs` and taken; one still on its way is laid on late. */
+  private async removalsReady(): Promise<void> {
+    const ask = this.removalsAsk;
+    if (!ask || ask.installed) return;
+    const loaded = await Promise.race([ask.done, new Promise<'late'>((r) => setTimeout(() => r('late'), DRESSING_TUNE.floraWaitMs))]);
+    if (loaded === 'late') {
+      ask.late = true;
+      return;
+    }
+    if (this.removalsAsk !== ask || ask.installed || this.generation !== ask.gen) return;
+    ask.installed = true;
+    this.takeRemovalsFile(loaded);
+  }
+
+  /** This world's people file, the same way. */
+  private async peopleReady(): Promise<void> {
+    const ask = this.peopleAsk;
+    if (!ask || ask.installed) return;
+    const loaded = await Promise.race([ask.done, new Promise<'late'>((r) => setTimeout(() => r('late'), DRESSING_TUNE.floraWaitMs))]);
+    if (loaded === 'late') {
+      ask.late = true;
+      return;
+    }
+    if (this.peopleAsk !== ask || ask.installed || this.generation !== ask.gen) return;
+    ask.installed = true;
+    this.takePeopleFile(loaded);
+  }
+
+  private takeRemovalsFile(loaded: EditRowsLoaded<RemovalRow> | null): void {
+    this.removalRows = loaded ? [...loaded.rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) : [];
+    this.removalsFileInfo = loaded ? { rows: loaded.rows.length, bytes: loaded.bytes, skipped: loaded.skipped, problem: loaded.problem, rev: loaded.rev } : { rows: 0, bytes: 0, skipped: [], problem: null, rev: null };
+    if (loaded?.problem) console.warn(`removals: this world's removal file is not read: ${loaded.problem}`);
+    for (const s of loaded?.skipped ?? []) console.warn(`removals: row ${s.id} is skipped: ${s.why}`);
+  }
+
+  private takePeopleFile(loaded: EditRowsLoaded<PlacedPersonRow> | null): void {
+    this.placedPeopleRows = loaded ? [...loaded.rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) : [];
+    this.peopleFileInfo = loaded ? { rows: loaded.rows.length, bytes: loaded.bytes, skipped: loaded.skipped, problem: loaded.problem, rev: loaded.rev } : { rows: 0, bytes: 0, skipped: [], problem: null, rev: null };
+    if (loaded?.problem) console.warn(`people: this world's people file is not read: ${loaded.problem}`);
+    for (const s of loaded?.skipped ?? []) console.warn(`people: row ${s.id} is skipped: ${s.why}`);
+  }
+
+  /**
+   * The rows matched over a list of the world's objects (the layout's, its own furniture appended): what is hidden, what
+   * the owner switched, the zones and the hidden places the readers outside the streamer ask. `centre` and `pack` are the
+   * layout's (null on a world with no pack), the pack to read a hidden building's box from. An arrival's and a landing's
+   * work, never a frame's.
+   */
+  private compileRemovalsOver(objects: readonly KeyedObject[], centre: { x: number; z: number } | null, pack: AssetPack | null = this.pack): void {
+    this.removalObjects = objects;
+    const rows = this.removalRows;
+    this.removals = rows.length ? compileRemovals(rows, objects, HIDE_TUNE.match, this.keyIndex()) : noRemovals();
+    setWorldSolidRows(this.removals.templates);
+    // A space zone's zones keep nothing this pass (Map-maker II §2.13).
+    this.zoneSet = new ZoneSet(this.planet?.space ? [] : zonesOf(rows));
+    const hidden: HiddenObject[] = [];
+    for (const li of this.removals.hidden) {
+      const o = objects[li] as KeyedObject & { contained?: boolean; q?: readonly number[]; model?: string };
+      if (!o) continue;
+      // A piece of a building's own furniture is never a building whose rooms hold people, wherever it stands.
+      const def = !o.contained && !o.ilf && o.model && pack ? pack.find(o.model) : null;
+      hidden.push({ template: o.template, x: o.x, y: o.y, z: o.z, contained: !!o.contained, q: o.q ?? null, box: def?.bounds ?? null });
+    }
+    this.hiddenSet = new HiddenPlaces(hidden);
+    if (this.removals.missing.length) console.info(`removals: ${this.removals.missing.length} of this world's object rows find nothing here and take nothing away (${this.removals.missing.slice(0, 4).join(', ')}${this.removals.missing.length > 4 ? ', ...' : ''})`);
+    // The placed sounds of what is hidden are never put down (`Ambience.place`), and at a landing taken up (`setHidden`).
+    if (this.ambience) {
+      const set = this.hiddenSet;
+      const pred = set.empty ? null : (e: { template?: string; p?: readonly number[]; pob?: string; bp?: readonly number[] }) => set.emitterHidden(e, HIDE_TUNE.match);
+      this.ambience.hiddenAt = pred;
+    }
+    // The layout's centre is the frame the rows are in already (both raw); it is named so a caller says which world it means.
+    this.removalCentre = centre;
+  }
+
+  /** The centre the last match was made about (the layout's; null on a world with no pack), for the console. */
+  private removalCentre: { x: number; z: number } | null = null;
+
+  /** The owner's placed people as the standing people read rows (`placedStandingRow`), in the file's frame. */
+  private placedStandingRows(): StandingRow[] {
+    return this.placedPeopleRows.map((r) => placedStandingRow(r) as unknown as StandingRow);
+  }
+
+  /**
+   * What the removal file takes away of the people, as the people ask it of each row in the snapshot's frame: a person by
+   * key (2: still counted for the people of ours, whose building stays the data's), a row in a zone keeping `people` by the
+   * overlay's own rule, or one standing in a hidden building's rooms (1). Null with nothing of the kind, which leaves the
+   * people exactly as they were.
+   */
+  private personRemovedFn(): ((r: StandingRow) => 0 | 1 | 2) | null {
+    const people = this.removals.people;
+    const zones = this.zoneSet;
+    const hidden = this.hiddenSet;
+    if (!people.size && zones.empty && hidden.empty) return null;
+    return (r) => {
+      if (r.key && people.has(r.key)) return 2;
+      if (!zones.empty && zones.rowZone(r) >= 0) return 1;
+      if (!hidden.empty && hidden.personInside(r, FILLER_TUNE.dataGrow)) return 1;
+      return 0;
+    };
+  }
+
+  /** Whether a point of the game's frame stands in a zone keeping the people of ours (the ambient people's `zoned`). */
+  private oursZoned(gx: number, gz: number): boolean {
+    if (this.zoneSet.empty) return false;
+    const c = this.placeFrame;
+    if (!c) return false;
+    const raw = gameTo(gx, gz, c);
+    return this.zoneSet.oursZone(raw.x, raw.z) >= 0;
+  }
+
+  /**
+   * Whether a building the removal file hides stands at a place of the game's frame (a fitting's or a travel thing's own
+   * `building` and `bx`, `bz`): what the page drops their rows by. False with nothing hidden.
+   */
+  hiddenBuildingAt(template: string, gx: number, gz: number): boolean {
+    if (this.hiddenSet.empty) return false;
+    const c = this.layoutCenter;
+    if (!c) return false;
+    const raw = gameTo(gx, gz, c);
+    return this.hiddenSet.buildingAt(template, raw.x, raw.z);
+  }
+
+  /** Whether the removal file hides anything on this world (the page's fittings and travel things skip the test otherwise). */
+  get hidesAnything(): boolean {
+    return !this.hiddenSet.empty;
+  }
+
+  /**
+   * A landing of the removal file (the world editor's batch, the dev server's word, a file later than the arrival's bound):
+   * everything worked out again over the list the streamer files, and each reader moved by the difference -- each object
+   * newly hidden taken off its region and hidden in place (an object hidden at the arrival stood again by filing it and
+   * letting its tier be built again), each thing's switch and each template's set where it moved, the placed sounds,
+   * the people by `restrike`, the wildlife laid again and every standing site no longer laid put down, and the page told
+   * to stand its fittings and travel things again. The `.lay` ground a hide drops moves only at the next arrival. An edit's
+   * cost, never a frame's.
+   */
+  landRemovals(rows: readonly RemovalRow[], loaded: EditRowsLoaded<RemovalRow> | null = null): void {
+    if (loaded) this.takeRemovalsFile(loaded);
+    else this.removalRows = [...rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const before = this.removals;
+    this.compileRemovalsOver(this.removalObjects, this.layoutCenter);
+    const after = this.removals;
+    this.removalStamp++;
+    this.removalWork.landed++;
+    const stream = this.layoutStream;
+    if (stream) {
+      // By difference (`removalLandingPlan`, pure and tested): what is still hidden and every switch kept moves nothing.
+      const plan = removalLandingPlan(before, after);
+      for (const li of plan.show) {
+        const o = stream.objectByRow(li);
+        if (!o) continue;
+        const shown = stream.isHidden(o) ? stream.showObject(o) || stream.showArrivalHidden(li) : 0;
+        this.removalWork.shown += shown;
+      }
+      for (const li of plan.hide) {
+        const o = stream.objectByRow(li);
+        if (o) this.removalWork.hidden += stream.hideObject(o);
+      }
+      for (const li of plan.unswitch) {
+        const o = stream.objectByRow(li);
+        if (o && stream.setSolidOverride(o, undefined)) this.removalWork.solidMoved++;
+      }
+      for (const [li, v] of plan.switch) {
+        const o = stream.objectByRow(li);
+        if (o && stream.setSolidOverride(o, v)) this.removalWork.solidMoved++;
+      }
+      if (plan.templatesMoved.size) this.removalWork.solidMoved += stream.refreshSolid(plan.templatesMoved);
+    }
+    // The placed sounds of what is hidden taken up, and of what is shown again put back down.
+    if (this.ambience) this.removalWork.emitters += this.ambience.setHidden(this.ambience.hiddenAt);
+    // The people: no row leaves the list, newly dormant bodies put down, the rest stood by the next pass.
+    this.removalWork.peopleDown += standingPeople.restrike(this.personRemovedFn(), this.peopleDeps());
+    // The wildlife: laid again with the zones, and every standing site no longer laid put down.
+    if (!this.planet.space) this.removalWork.sitesDown += wildLife.setRemovals(wildAreasOf(this.zoneSet.zones), after.sites, true);
+    this.removalsLanded?.();
+  }
+
+  /**
+   * A landing of the people file: the owner's placed people taken again. A placed row goes by its own key, and the list is
+   * every other row's as it was with the placed rows after them, so the people are adopted again from the rows they hold
+   * with the new placed rows at the end; bodies of placed rows standing are put down and stood again by the next pass.
+   */
+  landPeople(rows: readonly PlacedPersonRow[], loaded: EditRowsLoaded<PlacedPersonRow> | null = null): void {
+    if (loaded) this.takePeopleFile(loaded);
+    else this.placedPeopleRows = [...rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    this.removalWork.peopleLanded++;
+    standingPeople.replacePlaced(this.placedStandingRows(), this.peopleDeps(), this.personRemovedFn(), this.planet?.id ?? '');
+  }
+
+  /** For the console (`__debug.removals()`): what the file says and what came of it. */
+  removalsReport(): Record<string, unknown> {
+    const r = this.removals;
+    const zones = this.zoneSet.zones;
+    // How many of the sites a laying with no zone lays each zone keeps off (its middle inside, or a body within reach).
+    const keptOff = new Map(wildLife.zoneKeptOff().map((k) => [k.zone, k.keptOff]));
+    return {
+      file: this.removalsFileInfo,
+      rows: this.removalRows.length,
+      objects: { hidden: r.hidden.size, groundDrop: r.groundDrop.size, solid: r.solid.size, missing: r.missing },
+      templates: Object.fromEntries(r.templates),
+      people: r.people.size,
+      sites: r.sites.size,
+      zones: zones.map((z) => ({ id: z.id, name: z.name, keeps: z.keeps, shape: z.shape.kind, keptOff: z.keeps.includes('wild') ? (keptOff.get(z.id) ?? 0) : null })),
+      streamer: this.layoutStream?.hiddenReport() ?? null,
+      peopleDormant: standingPeople.dormantReport(),
+      wild: wildLife.removalsReport(),
+      placed: { file: this.peopleFileInfo, rows: this.placedPeopleRows.length },
+      work: { ...this.removalWork },
+      stamp: this.removalStamp,
+    };
+  }
+
+  /** The removal file's object rows' ids and what each found (a layout index, -1 for none): for the editor's lists. */
+  removalFound(): ReadonlyMap<string, number> {
+    return this.removals.found;
+  }
+
+  /** One of the layout's objects standing now by its content key (the world editor's pick from the console), or null. */
+  objectByKey(key: string): PlacedObject | null {
+    const li = this.keyIndex().find(key);
+    return li >= 0 ? (this.layoutStream?.objectByRow(li) ?? null) : null;
+  }
+
+  /** The content key of one of the layout's objects (by its layout index), as a removal row names it; '' for none. */
+  objectKeyOf(li: number): string {
+    if (li < 0 || li >= this.removalObjects.length) return '';
+    return this.keyIndex().keyOf(li);
+  }
+
+  /** One of the layout's objects as the layout wrote it (its raw place, turn and building), by its index; null for none. */
+  layoutObjectAt(li: number): (KeyedObject & { model?: string; q?: number[]; contained?: boolean; in?: number; cell?: number }) | null {
+    const objects = this.removalObjects as readonly (KeyedObject & { model?: string; q?: number[]; contained?: boolean; in?: number; cell?: number })[];
+    return li >= 0 && li < objects.length ? objects[li] : null;
+  }
+
+  /** The indices of the layout's objects standing in a building's rooms (the snapshot's own word, `in`), for a moved building. */
+  layoutObjectsIn(li: number): number[] {
+    const out: number[] = [];
+    const objects = this.removalObjects as readonly (KeyedObject & { in?: number; contained?: boolean; ilf?: string })[];
+    for (let i = 0; i < objects.length; i++) if (objects[i].contained && objects[i].in === li && !objects[i].ilf) out.push(i);
+    return out;
+  }
+
+  /** The objects the removal file hides within `reach` of a point of the game's frame (the editor's Here tab): each row's id and its template. */
+  hiddenRowsNear(gx: number, gz: number, reach: number): { id: string; template: string; d: number }[] {
+    const c = this.layoutCenter;
+    if (!c) return [];
+    const out: { id: string; template: string; d: number }[] = [];
+    for (const [id, li] of this.removals.found) {
+      if (li < 0 || !this.removals.hidden.has(li)) continue;
+      const o = this.removalObjects[li];
+      const d = Math.hypot(c.x - o.x - gx, o.z - c.z - gz);
+      if (d <= reach) out.push({ id, template: o.template, d });
+    }
+    return out.sort((a, b) => a.d - b.d);
+  }
+
   /** The rows in force put in place, sorted by id, and each kind's own list made again where `kinds` says it moved. */
   private setWaterRows(rows: WaterRow[], kinds: { lakes: boolean; rivers: boolean } = { lakes: true, rivers: true }): void {
     this.ourWaterRows = rows;
@@ -14362,6 +14782,18 @@ export interface HeightsLoaded {
   store: HeightEdits;
   /** The file's rows as read (their deltas still packed). */
   rows: HeightTileRow[];
+  bytes: number;
+  skipped: { id: string; why: string }[];
+  problem: string | null;
+  rev: string | null;
+}
+
+/**
+ * What a world's removal file or people file came to (Map-maker II's twelfth wave): its rows as read and cleaned, how many
+ * bytes the file was, what it skipped, why it was not read, and its revision (twelve hex of the text's SHA-1).
+ */
+export interface EditRowsLoaded<T> {
+  rows: T[];
   bytes: number;
   skipped: { id: string; why: string }[];
   problem: string | null;

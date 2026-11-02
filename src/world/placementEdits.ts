@@ -40,6 +40,9 @@ import { HEIGHTS_LIMITS, heightsFileText, isTileId, readHeightsFile, readTileRow
 import { PAINT_LIMITS, isPaintId, paintFileText, paintRowsWhole, paintWithExtras, readPaintFile, readPaintRow, samePaintRow, type PaintRow } from './editFiles/paintFile.ts';
 import { WATER_LIMITS, isWaterId, mintWaterId, readWaterFile, readWaterRow, sameWaterRow, waterFileText, waterWithExtras, type WaterRow } from './editFiles/waterFile.ts';
 import { LOCATION_LIMITS, isLocationId, locationsFileText, locationsWithExtras, mintLocationId, readLocationRow, readLocationsFile, sameLocationRow, type LocationRow } from './editFiles/locationsFile.ts';
+import { REMOVAL_LIMITS, isRemovalId, mintZoneId, readRemovalRow, readRemovalsFile, removalWithExtras, removalsFileText, sameRemovalRow, type RemovalRow } from '../story/removals.ts';
+import { PEOPLE_LIMITS, isPersonId, mintPersonId, peopleFileText, personWithExtras, readPeopleFile, readPersonRow, samePersonRow, type PlacedPersonRow } from '../story/placedPeople.ts';
+import { isSolidFileId, readSolidFileRow, readSolidFileRows, solidFileText, type SolidFileRow } from './walkThrough.ts';
 
 /** Every number of the endpoint, all ours. Read where the dev server runs it, and not moved from the browser. */
 export const PLACEMENTS_ENDPOINT_TUNE = {
@@ -437,8 +440,6 @@ export interface Held<R extends EditRow = PlacementRow> {
 
 /** The words a kind of file of a later wave is refused in, by kind: the batch writes none of them yet. */
 export const NOT_YET: Partial<Record<EditFileKind, string>> = {
-  removed: "the world editor's fifth wave's",
-  people: "the world editor's fifth wave's",
   looks: "Map-maker II's thirteenth wave's",
 };
 
@@ -643,11 +644,152 @@ function locationsFile(world: string): string {
 }
 
 /**
+ * What a world takes away (Map-maker II's twelfth wave, `src/story/removals.ts`): a row named by what it takes away (an
+ * object by its content key, a template, a person by its key, a site by its key, a zone by an id of its own minted from its
+ * name where a put names none), checked as the reader checks it. Every world's, a space zone's (in the game's frame) and the
+ * world of copies' among them: a copy's crew member and a copy's own object are taken away there, where nothing else is
+ * written (Map-maker I §2.9).
+ */
+export const removedKind: EditKind<RemovalRow> = {
+  kind: 'removed',
+  group: null,
+  groundOnly: false,
+  most: REMOVAL_LIMITS.rows,
+  idOk: isRemovalId,
+  idWords: 'its id names what it takes away: o:<template>@x,y,z, t:<template>, p:<key>, s:<world>:<i>:<j> or z:<id>',
+  open(text, world, wk) {
+    if (text === null) return { rows: [], read: null, text: null };
+    const file = removedFile(world);
+    const raws: Record<string, unknown>[] = [];
+    const read = readRemovalsFile(text, world, wk, raws);
+    if (read.problem) return `${file} does not read (${read.problem}): mend it by hand first`;
+    if (read.skipped.length) return `${file} holds rows this build cannot read (${read.skipped.slice(0, 3).map((s) => `${s.id}: ${s.why}`).join('; ')}): mend them by hand first, or the editor would write over them`;
+    return { rows: read.rows.map((row, i) => ({ row, raw: raws[i] })), read, text };
+  },
+  clean(asked, id, stamp) {
+    const unknown: string[] = [];
+    const row = readRemovalRow({ ...asked, id, at: stamp }, unknown);
+    if (typeof row === 'string') return row;
+    if (unknown.length) return `it carries fields this build does not write: ${unknown.join(', ')}`;
+    return row;
+  },
+  parse: (v) => readRemovalRow(v),
+  same: sameRemovalRow,
+  extras: removalWithExtras,
+  text: (world, frame, rows) => removalsFileText(world, frame, rows),
+  read: (text, world, wk) => readRemovalsFile(text, world, wk),
+  // Only a zone is minted (from its name): every other row is named by what it takes away.
+  mint: (asked, taken) => mintZoneId(typeof asked.name === 'string' ? asked.name : 'zone', taken),
+  file: removedFile,
+};
+
+/** The removal file for a world, as the owner reads it. */
+function removedFile(world: string): string {
+  return `public/${editFilePath('removed', world)}`;
+}
+
+/**
+ * The owner's own people (Map-maker II's twelfth wave, `src/story/placedPeople.ts`): a row a person, named by an id of its
+ * own (minted from its name, else its body), every world's but the world of copies'.
+ */
+export const peopleKind: EditKind<PlacedPersonRow> = {
+  kind: 'people',
+  group: null,
+  groundOnly: false,
+  most: PEOPLE_LIMITS.rows,
+  idOk: isPersonId,
+  idWords: 'its id is not a-z, 0-9, _ and - (64 at most, starting with a letter or a digit)',
+  open(text, world, wk) {
+    if (text === null) return { rows: [], read: null, text: null };
+    const file = peopleFile(world);
+    const raws: Record<string, unknown>[] = [];
+    const read = readPeopleFile(text, world, wk, raws);
+    if (read.problem) return `${file} does not read (${read.problem}): mend it by hand first`;
+    if (read.skipped.length) return `${file} holds rows this build cannot read (${read.skipped.slice(0, 3).map((s) => `${s.id}: ${s.why}`).join('; ')}): mend them by hand first, or the editor would write over them`;
+    return { rows: read.rows.map((row, i) => ({ row, raw: raws[i] })), read, text };
+  },
+  clean(asked, id, stamp) {
+    const unknown: string[] = [];
+    const row = readPersonRow({ ...asked, id, at: stamp }, unknown);
+    if (typeof row === 'string') return row;
+    if (unknown.length) return `it carries fields this build does not write: ${unknown.join(', ')}`;
+    return row;
+  },
+  parse: (v) => readPersonRow(v),
+  same: samePersonRow,
+  extras: personWithExtras,
+  text: (world, frame, rows) => peopleFileText(world, frame, rows),
+  read: (text, world, wk) => readPeopleFile(text, world, wk),
+  mint: (asked, taken) => mintPersonId(typeof asked.name === 'string' ? asked.name : typeof asked.body === 'string' ? asked.body : 'person', taken),
+  file: peopleFile,
+};
+
+/** The people file for a world, as the owner reads it. */
+function peopleFile(world: string): string {
+  return `public/${editFilePath('people', world)}`;
+}
+
+/**
+ * The owner's shared walk-through file (`public/placements/solid.json`, the map fixes' third wave, `walkThrough.ts`), its
+ * editor over it from Map-maker II's twelfth wave: a template a row, keyed by the template itself, its word `solid`. One file
+ * every world reads, written in its own order (a new template after the rest), never stamped with a time (the owner's file
+ * carries none), so a put and its undo give the file back byte for byte. Never minted: a row is named by its template.
+ */
+export const solidKind: EditKind<SolidFileRow> = {
+  kind: 'solid',
+  group: null,
+  groundOnly: false,
+  most: 100000,
+  idOk: isSolidFileId,
+  idWords: 'its id is an object template (object/...iff)',
+  open(text) {
+    if (text === null) return { rows: [], read: null, text: null };
+    const raws: Record<string, unknown>[] = [];
+    const read = readSolidFileRows(text, raws);
+    if (read.problem) return `${solidFile()} does not read (${read.problem}): mend it by hand first`;
+    if (read.skipped.length) return `${solidFile()} holds rows this build cannot read (${read.skipped.slice(0, 3).map((s) => `${s.id}: ${s.why}`).join('; ')}): mend them by hand first, or the editor would write over them`;
+    return { rows: read.rows.map((row, i) => ({ row, raw: raws[i] })), read, text };
+  },
+  // Never stamped: the time handed is not written.
+  clean(asked, id) {
+    return readSolidFileRow({ ...asked, id });
+  },
+  parse: (v) => readSolidFileRow(v),
+  same: (a, b) => a.id === b.id && a.solid === b.solid,
+  extras: (row, was) => {
+    const out: Record<string, unknown> = { id: row.id, solid: row.solid };
+    if (was) for (const k of Object.keys(was)) if (!(k in out) && k !== 'at') out[k] = was[k];
+    return out;
+  },
+  text: (_world, _frame, rows) => solidFileText(rows),
+  read: (text) => readSolidFileRows(text),
+  file: () => solidFile(),
+};
+
+/** The shared walk-through file, as the owner reads it. */
+function solidFile(): string {
+  return `public/${editFilePath('solid', 'all')}`;
+}
+
+/**
  * Every kind the batch writes now, by name: the two row layers, from Map-maker II's first wave the heights, from its
  * second the paint, from its fifth the water and from its eighth the places. A kind named in `EDIT_FILE_KINDS` and missing
  * here is refused in its wave's words (`NOT_YET`).
  */
-export const EDIT_KINDS: Partial<Record<EditFileKind, EditKind<EditRow>>> = { story: ROW_KINDS.story as unknown as EditKind<EditRow>, world: ROW_KINDS.world as unknown as EditKind<EditRow>, heights: heightsKind as unknown as EditKind<EditRow>, paint: paintKind as unknown as EditKind<EditRow>, water: waterKind as unknown as EditKind<EditRow>, locations: locationsKind as unknown as EditKind<EditRow> };
+export const EDIT_KINDS: Partial<Record<EditFileKind, EditKind<EditRow>>> = {
+  story: ROW_KINDS.story as unknown as EditKind<EditRow>,
+  world: ROW_KINDS.world as unknown as EditKind<EditRow>,
+  heights: heightsKind as unknown as EditKind<EditRow>,
+  paint: paintKind as unknown as EditKind<EditRow>,
+  water: waterKind as unknown as EditKind<EditRow>,
+  locations: locationsKind as unknown as EditKind<EditRow>,
+  removed: removedKind as unknown as EditKind<EditRow>,
+  people: peopleKind as unknown as EditKind<EditRow>,
+  solid: solidKind as unknown as EditKind<EditRow>,
+};
+
+/** The one kind the dungeons' world of copies takes (Map-maker I §2.9): a copy's crew member and its own objects taken away. */
+export const COPIES_KINDS: readonly EditFileKind[] = ['removed'];
 
 /**
  * The world editor's one write (`{ op: 'batch', world, edits }`, DESIGN.md §2.11): every edit applied in order to every
@@ -669,7 +811,13 @@ export function applyPlacementBatch(o: Record<string, unknown>, current: Partial
   const edits = o.edits;
   if (!Array.isArray(edits) || !edits.length) return no(400, 'a batch carries a list of edits');
   if (edits.length > BATCH_MOST) return no(413, `a batch is ${BATCH_MOST} edits at most`);
-  if (wk === 'copies') return no(409, "nothing stands for good in the dungeons' world of copies");
+  // The world of copies takes what is taken away and nothing else (Map-maker II's twelfth wave): every other kind refused
+  // there, edit by edit, before any file is read, in the very words it always was.
+  if (wk === 'copies') {
+    for (const e of edits as (BatchEdit | null)[]) {
+      if (!e || typeof e !== 'object' || !COPIES_KINDS.includes(e.file)) return no(409, "nothing stands for good in the dungeons' world of copies");
+    }
+  }
   const readKind = wk === 'space' ? 'space' : 'ground';
   const frame = wk === 'space' ? 'game' : 'raw';
   // Each file a kind keeps, opened the first time an edit names it (the two row layers always, as before the kinds).

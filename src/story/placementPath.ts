@@ -29,17 +29,27 @@ export function placementFileOf(rel: string): { layer: PlacementLayer; world: st
  * (`removed`) and the people placed (`people`), Map-maker I's fifth wave carried into Map-maker II's twelfth; and
  * Map-maker II's own, every one named at once (its groundwork wave, so the dev server restarts for the kinds once): the
  * ground's heights (`heights`, its first wave), its paint (`paint`), its lakes and rivers (`water`), the places on the map
- * (`locations`) and the looks people wear (`looks`, one file every world shares, `all.json`: `editFileWorld`).
+ * (`locations`) and the looks people wear (`looks`, one file every world shares, `all.json`: `editFileWorld`). And from
+ * the twelfth wave the owner's shared walk-through file (`solid`): one file every world reads, kept at the placements
+ * folder's own top as the map fixes made it (`solid.json`, `editFileRel`).
  */
-export type EditFileKind = PlacementLayer | 'removed' | 'people' | 'heights' | 'paint' | 'water' | 'locations' | 'looks';
-export const EDIT_FILE_KINDS: readonly EditFileKind[] = ['story', 'world', 'removed', 'people', 'heights', 'paint', 'water', 'locations', 'looks'];
+export type EditFileKind = PlacementLayer | 'removed' | 'people' | 'heights' | 'paint' | 'water' | 'locations' | 'looks' | 'solid';
+export const EDIT_FILE_KINDS: readonly EditFileKind[] = ['story', 'world', 'removed', 'people', 'heights', 'paint', 'water', 'locations', 'looks', 'solid'];
 
 /** A kind every world shares one file of (its name segment is `all`), never a world's own. */
-export const SHARED_EDIT_KINDS: readonly EditFileKind[] = ['looks'];
+export const SHARED_EDIT_KINDS: readonly EditFileKind[] = ['looks', 'solid'];
+
+/** A kind whose one file stands at the placements folder's own top rather than in a folder of its kind (`solid.json`). */
+export const TOP_EDIT_FILES: Readonly<Partial<Record<EditFileKind, string>>> = { solid: 'solid.json' };
 
 /** The name segment a kind's file for a world carries: the world's own pack id, or `all` for a kind every world shares. */
 export function editFileWorld(kind: EditFileKind, world: string): string {
   return SHARED_EDIT_KINDS.includes(kind) ? 'all' : world;
+}
+
+/** A kind's file for a world, relative to the placements folder: `<kind>/<world>.json`, or the top file a kind keeps there. */
+export function editFileRel(kind: EditFileKind, world: string): string {
+  return TOP_EDIT_FILES[kind] ?? `${kind}/${editFileWorld(kind, world)}.json`;
 }
 
 /**
@@ -50,9 +60,14 @@ export function editFileWorld(kind: EditFileKind, world: string): string {
  */
 export function editFileOf(rel: string): { kind: EditFileKind; world: string } | null {
   const parts = rel.split(/[\\/]+/).filter((p) => p.length > 0);
+  // A kind's top file (`solid.json`): every world's at once.
+  if (parts.length === 1) {
+    for (const [kind, file] of Object.entries(TOP_EDIT_FILES)) if (parts[0] === file) return { kind: kind as EditFileKind, world: 'all' };
+    return null;
+  }
   if (parts.length !== 2 || parts.some((p) => p.startsWith('.'))) return null;
   const [kind, file] = parts;
-  if (!(EDIT_FILE_KINDS as readonly string[]).includes(kind)) return null;
+  if (!(EDIT_FILE_KINDS as readonly string[]).includes(kind) || TOP_EDIT_FILES[kind as EditFileKind]) return null;
   if (!file.endsWith('.json')) return null;
   const world = file.slice(0, -'.json'.length);
   if (!/^[a-z0-9_]{1,40}$/.test(world)) return null;
@@ -61,5 +76,5 @@ export function editFileOf(rel: string): { kind: EditFileKind; world: string } |
 
 /** The path a kind's file for a world is fetched from, under the build's own base (a kind every world shares: its one file). */
 export function editFilePath(kind: EditFileKind, world: string): string {
-  return `placements/${kind}/${editFileWorld(kind, world)}.json`;
+  return `placements/${editFileRel(kind, world)}`;
 }

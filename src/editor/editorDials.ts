@@ -458,6 +458,36 @@ function looksGroup(): DialGroup[] {
   ];
 }
 
+/** The zone tool's and a placed person's numbers of feel (Map-maker II's twelfth wave), once the editor has registered them. */
+function removalsGroups(): DialGroup[] {
+  if (!EDITOR_EXTRA_TUNES.zone || !EDITOR_EXTRA_TUNES.person) return [];
+  return [
+    {
+      title: 'The no-spawn zone tool',
+      note: 'Armed from the Tools tab (no key of its own): a click draws a circle, a drag a rectangle, clicks an outline; what a zone keeps away (wild, people, ours) is on the Tools tab.',
+      dials: [
+        extraDial('zone', 'radius', 'A new circle', 1, 2000, 1, 'm', "The radius a click draws a zone's circle at (C held with the wheel steps it): about a lair's camp and its herd."),
+        extraDial('zone', 'sizeStep', 'A notch steps it', 1.01, 4, 0.01, '×', 'One notch of C with the wheel grows (or shrinks) the next circle by this.'),
+        extraDial('zone', 'sizeRest', 'Size written after', 0, 5, 0.05, 's', "Seconds after the last notch before a picked zone's new size is written."),
+        extraDial('zone', 'rectLeast', 'A drag at least', 0.1, 50, 0.1, 'm', "A rectangle's least side: a drag shorter than this one way is a slip and writes nothing."),
+        extraDial('zone', 'closePx', 'Close within', 2, 60, 1, 'px', "A click this near an outline's first point, on the screen, closes it."),
+        extraDial('zone', 'hitPx', 'Handle reach', 2, 40, 1, 'px', "How near the cursor must be to a zone's handle to pick it."),
+        extraDial('zone', 'circlePoints', 'A circle drawn with', 8, 256, 1, '', 'Points a circle is drawn with on the overlay.'),
+      ],
+    },
+    {
+      title: 'A person put down',
+      note: "What a person put down from the library's People is written with (Selected changes one already there).",
+      dials: [
+        extraDial('person', 'still', 'Stands still', 0, 1, 1, '', '1: stands at the spot, its brain off, as a town\'s people do; 0: walks about its post.'),
+        extraDial('person', 'peaceful', 'Peaceful', 0, 1, 1, '', '1: may not be fought, part of the furniture; 0: its creature\'s own temper.'),
+        extraDial('person', 'respawn', 'Back after', 0, 3600, 5, 's', 'Seconds a killed one stays down; 0 stays down until the world is left.'),
+        extraDial('person', 'roam', 'Steps about', 0, 30, 0.5, 'm', 'How far round its spot it steps about (with Stands still at 0).'),
+      ],
+    },
+  ];
+}
+
 function groups(): DialGroup[] {
   return [
     {
@@ -529,6 +559,7 @@ function groups(): DialGroup[] {
     floraPaintGroup('floraPaint.', (k, v) => tuneEditor({ floraPaint: { [k]: v } })),
     waterGroup('water.', (k, v) => tuneEditor({ water: { [k]: v } })),
     ...looksGroup(),
+    ...removalsGroups(),
     {
       title: 'Folding',
       note: 'Rows written while their tier stands are drawn one by one until the next arrival or Fold now (Tools).',

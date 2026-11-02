@@ -207,9 +207,13 @@ export function mergeOverlay(pack: WildPack | null, manifest: WildManifest | nul
  * the NGE overlay's after all of them, so neither an overlay nor a state moves any name of anybody else's in any
  * browser. The overlay's own rows are named by their keys and not their places (`stoodName`).
  */
-export function standingList<T>(own: readonly T[], heralds: readonly T[], overlay: readonly T[], ours: readonly T[] = []): readonly T[] {
+export function standingList<T>(own: readonly T[], heralds: readonly T[], overlay: readonly T[], ours: readonly T[] = [], placed: readonly T[] = []): readonly T[] {
   const first = own.length ? [...own, ...heralds, ...ours] : own;
-  return overlay.length ? [...first, ...overlay] : first;
+  const withOverlay = overlay.length ? [...first, ...overlay] : first;
+  // The owner's own placed people (Map-maker II's twelfth wave, `public/placements/people/<world>.json`) after everybody else,
+  // and kept on a world with no Core3 rows (Kashyyyk, Mustafar, his own), where the heralds and ours go with `own`: each goes
+  // by its own key (`stoodName`'s `p<11 hex>`), so nothing before it moves and its place in the list names nobody.
+  return placed.length ? [...withOverlay, ...placed] : withOverlay;
 }
 
 /**
