@@ -109,7 +109,7 @@ const rows: LocationRow[] = [
   const packless = PLANETS.filter((p) => p.pack === false).map((p) => p.id);
   ok(packless.includes('monument') && packless.includes('helens'), `the real-elevation worlds declare no pack (${packless.join(', ')})`);
   const main = read('src/main.ts');
-  ok(/private placesNow\(\): PlaceIndex \{\s*return this\.placeKeeper\.now\(this\.placesFile, this\.world\.placeFrame, worldStateStamp\(\), !!this\.world\.planet\?\.space, standsIn\);\s*\}/.test(main), "the game's index is the keeper's, asked with the merged file, placeFrame, the world states' stamp, space and the states' own test");
+  ok(/private placesNow\(\): PlaceIndex \{(?:\s*\/\/[^\n]*)*\s*return this\.placeKeeper\.now\(placesFileFor\(this\.placesFile, this\.placeNamesFor, this\.world\.packId\), this\.world\.placeFrame, worldStateStamp\(\), !!this\.world\.planet\?\.space, standsIn\);\s*\}/.test(main), "the game's index is the keeper's, asked with the merged file (only while it is the world loaded now's), placeFrame, the world states' stamp, space and the states' own test");
   ok(/landLocations\(planetId: string, put: readonly LocationRow\[\], deleted: readonly string\[\]\): Promise<PoisFile> \{\s*const was = await this\.loadPoisRaw\(planetId\);\s*const rows = landedLocations\(was\.locations, put, deleted\);/.test(galaxy), "a write is landed by the places' own rule (landedLocations)");
   ok(/if \(!\(type\.includes\('json'\) \|\| type\.includes\('text\/plain'\)\)\) return \[\];/.test(galaxy), "and a locations file answered with the page (a missing public file on the dev server) is no file");
 }

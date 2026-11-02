@@ -41,10 +41,10 @@ import { CROWD_SWITCHES, CROWD_TUNE, listsMover, tuneCrowd, type CrowdTune } fro
 import { crowdDialsFor } from './world/mobiles/crowdDials.ts';
 import { shadowDialsFor } from './world/shadowDials.ts';
 import { AIR_DRAW, checkAirTargets, probeAirDraws, type AirDrawMode } from './world/volumetrics/airDraw.ts';
-import { AIR_TUNE, GROUND_CLASS_NAMES, tuneAir, tuneFogLooks, GROUND_FOG_LOOKS, type GroundClass } from './world/volumetrics/airTune.ts';
+import { AIR_TUNE, GROUND_CLASS_NAMES, tuneAir, tuneFogLooks, type GroundClass } from './world/volumetrics/airTune.ts';
 import { FORCE_WAVE, FORCE_WAVE_SPEED, setForceWave } from './combat/forceWaveTune.ts';
 import { airDialsFor } from './world/volumetrics/airDials.ts';
-import { setWindArm, WIND_FRAME, WIND_STATE } from './world/wind.ts';
+import { setPlaceWind, setWindArm, windWorldNow, WIND_FRAME, WIND_STATE } from './world/wind.ts';
 import { setWindNowSource, windDialsFor } from './world/windDials.ts';
 import { windDebug, type WindDebugContext, type WindDebugOptions } from './world/windDebug.ts';
 import { windTreesChosen, windTreesReport } from './world/windTrees.ts';
@@ -53,7 +53,7 @@ import { MEDIUM_BYTE } from './world/volumetrics/airRaster.ts';
 import { isVolKey, presetOf, VOL_APPLY_CLASS, VOL_KEYS, VOL_PRESET_LABELS, VOL_PRESET_NAMES, VOL_PRESETS, VOL_QUALITY_KEYS, VOL_RANGES, VOL_TUNE, volConsoleToSettings, volMemoryMB, volQualityFrom, type VolKey, type VolQualityKey } from './world/volumetrics/volSettings.ts';
 import { AirVolumePass } from './core/fx/airVolume.ts';
 import { AirCloudsPass, CLOUD_VIEWS } from './core/fx/airClouds.ts';
-import { cloudPicturesOf, cloudsFeed, cloudsFeedMade, type CloudPictures, type CloudsSky } from './world/volumetrics/airCloudsFeed.ts';
+import { WorldClouds, cloudPicturesOf, cloudsFeed, cloudsFeedMade, type CloudPictures, type CloudsSky } from './world/volumetrics/airCloudsFeed.ts';
 import { newNearRides } from './net/nearRides.ts';
 import { newShuttleJets } from './world/volumetrics/airEngines.ts';
 import { createFxQuad, FX_CAMERA } from './core/fx/pass.ts';
@@ -127,8 +127,8 @@ import { loadPlayerRig } from './player/rig';
 import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi, type PoisFile } from './ui/galaxyMap';
-import { PLACE_TUNE, PlaceIndex, PlaceIndexKeeper, loadingLine as placeLoadingLine, minimapPlacesOf, tunePlaces, zoneWordsOf } from './world/places.ts';
-import { readLocationsFile, type LocationRow } from './world/editFiles/locationsFile.ts';
+import { PLACE_TUNE, PlaceIndex, PlaceIndexKeeper, PlaceSky, loadingLine as placeLoadingLine, minimapPlacesOf, placesFileFor, tunePlaces, worldRowOf, zoneWordsOf } from './world/places.ts';
+import { readLocationsFile, type LocationGrade, type LocationRow } from './world/editFiles/locationsFile.ts';
 import { DemMapMaker, MAP_PICTURE_TUNE, demMapSourceOf, remakeDue, tuneMapPicture } from './world/demMap.ts';
 import { SERVICE_TUNE, tuneServices } from './ui/serviceMarks.ts';
 import { MapUi } from './ui/mapUi';
@@ -3263,6 +3263,9 @@ class App {
     // The places' no-build verdict (Map-maker II's eighth wave), where a house is put down in the world: only inside its
     // `!given && !force` block, so a house a server holds is stood as before.
     this.world.noBuildWords = (x, z, r) => this.noBuildHere(x, z, r, 'house');
+    // The sky per place (Map-maker II's ninth wave): the weather asks the places' index for a place's family and weather kind
+    // where it asks the area under the player (every half second, and at an arrival); an index with no sky answers nothing.
+    this.world.weather.places = { skyAt: (x, z, out) => this.placesNow().skyAt(x, z, out) };
     // The places' dials (the debug menu's `locations`): a moved made-map dial makes the picture again, a mark's draws the maps again.
     LOCATION_DIALS.host = {
       remake: () => this.remakeMadeMap(),
@@ -13405,7 +13408,7 @@ class App {
       if (o.fog.day !== undefined) h.day = o.fog.day === true;
       if (o.fog.level !== undefined) h.level = o.fog.level === null || !Number.isFinite(o.fog.level) ? null : Math.max(0, o.fog.level);
       if (o.fog.top !== undefined) h.top = o.fog.top === null || !Number.isFinite(o.fog.top) ? null : Math.max(0, o.fog.top);
-      if (h.day && !GROUND_FOG_LOOKS[this.world.packId ?? '']) notes.push(`${this.world.packId}: no fog row, so a fog morning is forced at the morning's 0.8 and a 4 m top`);
+      if (h.day && !this.world.fogReport().look) notes.push(`${this.world.packId}: no fog row (in the table or the world's own row), so a fog morning is forced at the morning's 0.8 and a 4 m top`);
       if (h.day) notes.push('a fog morning is forced on today\'s draw: the fog stands from midnight to first light and burns off over three hours (__debug.time to go there)');
     }
     if (o.smoke) {
@@ -18933,6 +18936,8 @@ class App {
     this.placeNames = [];
     this.placeNamesFor = placesFor;
     this.placesFile = null;
+    // The world row's own sky let go until this world's file lands (Map-maker II's ninth wave): the tables' meanwhile.
+    this.applyWorldSky(placesFor, null);
     this.minimap.setPlaces(null);
     this.forgetMadeMap();
     // Every state's rows, filtered as they are read (`placeNames`): the states are taken behind the loading screen,
@@ -22186,6 +22191,9 @@ class App {
     I.travel = WIND_FRAME.travel;
     I.space = !!this.world.planet?.space;
     I.inside = this.world.inside;
+    // The world row's multipliers on the decks (Map-maker II's ninth wave), where they are for this world: NaN where the row
+    // sets none, which the feed reads as the tune's own numbers.
+    I.takeWorld(this.worldClouds, this.world.packId);
     I.sky = sky as CloudsSky | null;
     // The pack the sky came from (its own, or the one it borrows), worked out when the sky changes; its picture table
     // fetched once for the session and read as null until it lands.
@@ -23287,6 +23295,10 @@ class App {
       f.dayIndex = this.world.day.colorIndex;
       f.lighting = this.world.swgSky?.lighting ?? null;
       f.planetId = this.world.planet?.id ?? '';
+      // The colour-grade look of the place of ours holding the player (Map-maker II's ninth wave), eased in by the grade
+      // over the planet's own: null on every world whose places name no sky, which is the planet's own look by identity.
+      f.placeGrade = this.placeGradeNow();
+      f.placeGradeTau = PLACE_TUNE.gradeTau;
       f.aiming = this.player.aiming;
       f.aimAmount = this.cam.aimAmount;
       // The grapple's daze while a slam staggers the player: the vignette darkens a little more for that half second,
@@ -23639,12 +23651,49 @@ class App {
    * layout's centre, or (0, 0) on a world with no pack); empty until the file lands, and on a space zone.
    */
   private placesNow(): PlaceIndex {
-    return this.placeKeeper.now(this.placesFile, this.world.placeFrame, worldStateStamp(), !!this.world.planet?.space, standsIn);
+    // Only while the file is the world loaded now's (`placesFileFor`): the creator's captured place loads a world with no
+    // arrival, and the last world's rows must not be read about its centre.
+    return this.placeKeeper.now(placesFileFor(this.placesFile, this.placeNamesFor, this.world.packId), this.world.placeFrame, worldStateStamp(), !!this.world.planet?.space, standsIn);
   }
 
   /** Why nobody may build (`house`) or put a thing down (`prop`) in a circle of `r` metres about a game point, in words, or null. */
   private noBuildHere(x: number, z: number, r: number, what: 'house' | 'prop' | 'editor'): string | null {
     return this.placesNow().wordsAt(x, z, r, what);
+  }
+
+  /**
+   * The world row's own sky (Map-maker II's ninth wave) handed to what reads it, each where the row sets it and the code's
+   * tables otherwise: its climate to the weather's schedule, its fog to the ground fog, its wind to the unified wind and its
+   * clouds to the clouds' feed (`worldClouds`). Every reader keys it by the pack, so one world's row reaches no other; told
+   * whenever the world's places are shown again (an arrival, a write landed, a world state taken), and let go (null) as a
+   * world is arrived at, until its file lands.
+   */
+  private applyWorldSky(pack: string, f: { locations: readonly LocationRow[] } | null): void {
+    const row = f ? worldRowOf(f.locations, standsIn) : null;
+    this.world.weather.setClimate(pack, row?.climate ?? null);
+    this.world.setWorldFog(pack, row?.fog ?? null);
+    setPlaceWind(pack, row?.wind ?? null);
+    this.worldClouds.set(pack, row?.clouds);
+  }
+  /** The world row's multipliers on the cloud decks and the pack they are for (NaN where it sets none): the clouds' feed reads them. */
+  private readonly worldClouds = new WorldClouds();
+
+  /** What the places say of the sky where the grade asks (a kept record, written whole at every ask). */
+  private readonly gradeSky = new PlaceSky();
+
+  /**
+   * The colour-grade look of the place of ours holding the player (Map-maker II's ninth wave: the smallest place whose row
+   * names one, else the world row's), or null: asked every frame through the index's kept record (no number crosses a call),
+   * and nothing at all on a world whose places name no sky.
+   */
+  private placeGradeNow(): LocationGrade | null {
+    const idx = this.placesNow();
+    if (!idx.hasSky) return null;
+    const p = this.player.worldPos;
+    const q = idx.ask;
+    q.x = p.x;
+    q.z = p.z;
+    return idx.skyAsked(this.gradeSky).grade;
   }
 
   /**
@@ -23656,6 +23705,10 @@ class App {
   private refreshPlacesShown(): void {
     const f = this.placesFile;
     this.placesShownStamp = worldStateStamp();
+    // The sky per place (Map-maker II's ninth wave): the world row's own tables to their readers, and the weather told the
+    // places moved (at once behind a loading screen, crossfaded otherwise).
+    this.applyWorldSky(packIdOf(this.world.planet, this.zone), f);
+    this.world.weather.placesMoved(this.traveling);
     if (!f) {
       this.minimap.setPlaces(null);
       return;
@@ -23832,7 +23885,7 @@ class App {
     const said: string[] = [];
     let editing: unknown = null;
     // The editing half: the places tool and the file's writes are the world editor's, the dev server's alone.
-    if (['arm', 'write', 'pick', 'move', 'size', 'set', 'remove', 'cities', 'worldLoading', 'snippet', 'tool'].some((k) => k in o)) {
+    if (['arm', 'write', 'pick', 'move', 'size', 'set', 'remove', 'cities', 'worldLoading', 'worldSky', 'snippet', 'tool'].some((k) => k in o)) {
       if (!import.meta.env.DEV) said.push("writing places is the world editor's, the dev server's alone");
       else {
         const ed = await this.loadEditor();
@@ -23896,6 +23949,29 @@ class App {
     const services: Record<string, number> = {};
     for (const s of inState(f?.services ?? [])) services[s.kind] = (services[s.kind] ?? 0) + 1;
     const made = planet?.dem ? madePicture(packIdOf(planet, this.zone)) : null;
+    // The sky per place (Map-maker II's ninth wave): what the places say where the player stands, what the weather draws,
+    // how far the grade has eased a place's look in, and the world row's tables in force.
+    let sky: Record<string, unknown> | null = null;
+    if (o.sky) {
+      const sk = idx.skyAt(eye.x, eye.z, new PlaceSky());
+      const ws = this.world.weather.state;
+      const gp = this.postfx && this.settings.colorGrade ? this.gradePass()?.report(this.postfx.ctx).place ?? null : null;
+      const fog = this.world.fogReport();
+      const wc = this.worldClouds;
+      const ownClouds = wc.pack === this.world.packId ? Object.fromEntries((['cover', 'height', 'depth', 'density'] as const).filter((k) => Number.isFinite(wc[k])).map((k) => [k, wc[k]])) : {};
+      sky = {
+        here: { family: sk.env, familyFrom: sk.envFrom, weather: sk.weather, weatherFrom: sk.weatherFrom, grade: sk.grade, gradeFrom: sk.gradeFrom },
+        drawn: { family: ws.family, place: ws.place, placeWeather: ws.placeWeather, placeKind: ws.placeKind, kind: ws.kind, level: Math.round(ws.level * 100) / 100 },
+        grade: gp ?? 'the colour grade is off (Effects or the grade off): no place look is eased in',
+        world: {
+          climate: this.world.weather.climateNow(),
+          fog: { look: fog.look, own: fog.own },
+          wind: windWorldNow(),
+          clouds: Object.keys(ownClouds).length ? ownClouds : null,
+        },
+        families: this.world.weather.familyNames(),
+      };
+    }
     return {
       world: planet ? packIdOf(planet, this.zone) : null,
       file: f ? { rows: rows.length, ...this.placesFileInfoOf(packIdOf(planet, this.zone)) } : null,
@@ -23909,6 +23985,7 @@ class App {
       map: planet?.dem ? { making: !!this.madeMap, rowsDone: this.madeMap ? this.madeMap.row : null, made: made ? { version: made.version, width: made.pic.frame.width, px: made.pic.image.width } : null, last: this.madeMapLast, tune: { ...MAP_PICTURE_TUNE } } : null,
       tune: { ...PLACE_TUNE },
       ...(at ? { at } : {}),
+      ...(sky ? { sky } : {}),
       ...(editing ? { editor: editing } : {}),
       ...(said.length ? { answered: said } : {}),
     };

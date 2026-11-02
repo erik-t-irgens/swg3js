@@ -8,6 +8,7 @@ import { UNSET_BLADES, type FxBladeList } from './bladeList.ts';
 import { createFxLights, type FxLights } from './lights.ts';
 import type { FxCloudLayer, FxSkyLight } from './lensFlare';
 import type { RoomAirFrame } from '../../world/roomAir';
+import type { GradeLook } from './gradeMath.ts';
 
 /** The sun as the world knows it: which way it lies (towards it), its colour, and how much daylight there is (0 at night, and in space). */
 export interface SunInfo {
@@ -42,6 +43,13 @@ export interface FxFrameInput {
   dayIndex: number;
   lighting: SkyLighting | null;
   planetId: string;
+  /**
+   * The colour-grade look of the place of ours holding the eye (Map-maker II's ninth wave: the smallest place whose
+   * locations row names one, else the world row's), laid over the planet's own and eased in over `placeGradeTau` seconds;
+   * absent or null with none. A reference to the row's own record, never a copy.
+   */
+  placeGrade?: GradeLook | null;
+  placeGradeTau?: number;
   aiming: boolean;
   /** How far the aimed camera has eased in, 0 to 1. */
   aimAmount: number;
@@ -187,6 +195,9 @@ export interface FxFrameContext {
   dayIndex: number;
   lighting: SkyLighting | null;
   planetId: string;
+  /** The place of ours's colour-grade look holding the eye, or null (the frame input's own record), and its ease's seconds. */
+  placeGrade: GradeLook | null;
+  placeGradeTau: number;
   aiming: boolean;
   aimAmount: number;
   /** Added to the vignette's strength this frame (the grapple's daze); nought by default. */
@@ -282,6 +293,8 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     dayIndex: 0,
     lighting: null,
     planetId: '',
+    placeGrade: null,
+    placeGradeTau: 0.5,
     aiming: false,
     aimAmount: 0,
     vignetteKick: 0,
@@ -375,6 +388,9 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   ctx.dayIndex = input.dayIndex;
   ctx.lighting = input.lighting;
   ctx.planetId = input.planetId;
+  // A caller from before the places' grade (a node test's own input) hands none: no place's look.
+  ctx.placeGrade = input.placeGrade ?? null;
+  ctx.placeGradeTau = input.placeGradeTau !== undefined ? input.placeGradeTau : 0;
   ctx.aiming = input.aiming;
   ctx.aimAmount = input.aimAmount;
   ctx.vignetteKick = input.vignetteKick;

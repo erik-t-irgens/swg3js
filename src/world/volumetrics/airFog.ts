@@ -13,7 +13,7 @@
 // patchily, so banks come in with gaps between them and pool in hollows by the drainage.
 //
 // Pure: no three, nothing of the page.
-import { AIR_TUNE, GROUND_FOG_LOOKS, type FogLook } from './airTune.ts';
+import { AIR_TUNE, FOG_LOOKS_STAMP, GROUND_FOG_LOOKS, type FogLook } from './airTune.ts';
 
 /** A fresh 32-bit hash of a world's id, a day's number and a salt (FNV-1a over the id, then the day mixed in), as 0..1. */
 export function fogHash(world: string, day: number, salt: number): number {
@@ -115,6 +115,81 @@ export function fogDayOf(world: string, day: number, out: FogDay, looks: Readonl
   out.evening = drawOf(world, day, 3, look.evening, look.eveningLo, look.eveningHi);
   out.eveningBefore = drawOf(world, day - 1, 3, look.evening, look.eveningLo, look.eveningHi);
   return out;
+}
+
+/**
+ * A world's own fog look (Map-maker II's ninth wave: its locations file's world row's `fog`), by the pack it is for, and
+ * the one-row table the day's draw takes it from (`fogDayOf`'s `looks`). Never written into the table itself.
+ */
+export interface WorldFog {
+  pack: string;
+  look: FogLook;
+  looks: Readonly<Record<string, FogLook>>;
+}
+
+/** A world row's fog look as the world keeps it, or null for none. */
+export function worldFogOf(pack: string, look: FogLook | null | undefined): WorldFog | null {
+  if (!look) return null;
+  const l: FogLook = { morning: look.morning, evening: look.evening, morningLo: look.morningLo, morningHi: look.morningHi, eveningLo: look.eveningLo, eveningHi: look.eveningHi, top: look.top };
+  const looks: Record<string, FogLook> = Object.create(null) as Record<string, FogLook>;
+  looks[pack] = l;
+  return { pack, look: l, looks };
+}
+
+/** The fog look a world reads: its world row's where that is for this pack, else the table's own row (by identity), or none. */
+export function fogLookIn(id: string, own: WorldFog | null): FogLook | undefined {
+  return own !== null && own.pack === id ? own.look : GROUND_FOG_LOOKS[id];
+}
+
+/** The table a world's day is drawn from: its world row's one row where that is for this pack, else undefined (the table). */
+export function fogLooksIn(id: string, own: WorldFog | null): Readonly<Record<string, FogLook>> | undefined {
+  return own !== null && own.pack === id ? own.looks : undefined;
+}
+
+/**
+ * The fog's day as a world keeps it (the third wave's draw, `World.writeFogHour`, with the ninth wave's world row): the day
+ * drawn, the day's number, world and table's looks it was drawn for, and the world's own look. The day is drawn again only
+ * when the day's number, the world or the table's looks (`FOG_LOOKS_STAMP`) moved, or the looks were tuned (`moved`) or the
+ * world's own look set (`setOwn`) since, so a world row's fog landing after the day was drawn is drawn from on that same day.
+ * Allocates nothing on a frame that draws nothing.
+ */
+export class FogDays {
+  /** The day drawn. */
+  readonly draw: FogDay = { morning: 0, evening: 0, eveningBefore: 0 };
+  /** The day's number and the world it was drawn for (NaN and '' before the first draw, and after `moved`). */
+  idx = Number.NaN;
+  world = '';
+  private looksSeen = -1;
+  /** The world's own fog look (its world row's `fog`), or null for the table's. */
+  own: WorldFog | null = null;
+
+  /** The looks were moved (the console's, a world's own look set): the day is drawn again at the next ask. */
+  moved(): void {
+    this.idx = Number.NaN;
+  }
+
+  /** A world row's fog look for `pack`, or null to let it go; the day drawn again at the next ask. */
+  setOwn(pack: string, look: FogLook | null): void {
+    this.own = worldFogOf(pack, look);
+    this.moved();
+  }
+
+  /** The look world `id` reads now: its own row's where that is for `id`, else the table's (by identity), or none. */
+  lookOf(id: string): FogLook | undefined {
+    return fogLookIn(id, this.own);
+  }
+
+  /** World `id`'s draw for the day `count` counts (`FogDayCount.day`), drawn again only where something moved. */
+  dayOf(id: string, count: { readonly day: number }): FogDay {
+    const idx = count.day;
+    if (idx !== this.idx || id !== this.world || FOG_LOOKS_STAMP.n !== this.looksSeen) {
+      fogDayOf(id, idx, this.draw, fogLooksIn(id, this.own));
+      this.idx = idx;
+      this.world = id;
+      this.looksSeen = FOG_LOOKS_STAMP.n;
+    }
+    return this.draw;
+  }
 }
 
 function drawOf(world: string, day: number, salt: number, chance: number, lo: number, hi: number): number {

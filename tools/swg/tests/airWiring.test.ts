@@ -86,7 +86,7 @@ ok(after(main, 'this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);', 'this.w
   ok(main.includes('this.engineFx.smokeSink = (x, y, z, radius, rate, colour) => this.world.air?.smoke(x, y, z, radius, rate, colour);') && src('vehicles/engineFx.ts').includes('sink(at.x, at.y, at.z, ENGINE_SMOKE_RADIUS, AIR_TUNE.smoke.burning * share,'), "a damaged engine's band smokes into the air beside its effect");
 }
 // The fog's hour, from the shared clock, never this machine's; the noise made in slices in play.
-ok(world.includes('count.time = day.time;\n    sharedClock.dayCountIn(day, count);\n    count.step();\n    const idx = count.day;') && after(world, 'inp.time = this.simTime;', 'this.writeFogHour(inp);', 2), "the fog's day is the drawn day counted against the shared clock, and the hour is worked out every frame into the field's input");
+ok(world.includes('count.time = day.time;\n    sharedClock.dayCountIn(day, count);\n    count.step();\n    const drawn = days.dayOf(id, count);') && after(world, 'inp.time = this.simTime;', 'this.writeFogHour(inp);', 2), "the fog's day is the drawn day counted against the shared clock, and the hour is worked out every frame into the field's input");
 // The air's ground over standing water is the water's surface (the third wave's smoke check found the fog on the lake bed
 // 40 m under it); lava keeps the ground, the lava world's whole sea being lava.
 ok(world.includes('const water = lava ? h : t.waterHeightAt(x, z);') && world.includes('out.h = !lava && water > h ? water : h;') && world.includes('out.medium = lava ? 3 : water > h ? 2 : 1;'), "the air's ground sampler stands the air on a lake's surface, never its bed, and keeps the ground under lava");

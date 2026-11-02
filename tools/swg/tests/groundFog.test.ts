@@ -193,8 +193,8 @@ for (const [w, look] of Object.entries(GROUND_FOG_LOOKS)) {
 // --- the hand-overs only the game makes ---
 {
   const world = src('world/world.ts');
-  ok(world.includes('count.time = day.time;\n    sharedClock.dayCountIn(day, count);\n    count.step();\n    const idx = count.day;'), "the day's number is the drawn day counted against the shared clock (`FogDayCount`), never the wall less the drawn time");
-  ok(world.includes('fh.morning = hold.day ? (look ? look.morningHi : 0.8) : this.fogDay.morning;') && world.includes('inp.fogLevel = hold.level !== null ? hold.level : look || hold.day ? fh.level : 0;'), "a world with no row gives the field no fog; the console's fog morning forces the day's draw");
+  ok(world.includes('count.time = day.time;\n    sharedClock.dayCountIn(day, count);\n    count.step();\n    const drawn = days.dayOf(id, count);'), "the day's number is the drawn day counted against the shared clock (`FogDayCount`), never the wall less the drawn time, and the day drawn from it (`FogDays.dayOf`)");
+  ok(world.includes('fh.morning = hold.day ? (look ? look.morningHi : 0.8) : drawn.morning;') && world.includes('inp.fogLevel = hold.level !== null ? hold.level : look || hold.day ? fh.level : 0;'), "a world with no row gives the field no fog; the console's fog morning forces the day's draw");
   const main = src('main.ts');
   ok(main.includes('if (o.fog.day !== undefined) h.day = o.fog.day === true;') && main.includes('fogHour: this.world.fogReport(),'), '`__debug.air({ fog: { day: true } })` forces a fog morning, and the answer says the day\'s draw');
   // The day's number steps at the drawn midnight and nowhere else, whatever the drawn time does against the wall clock.

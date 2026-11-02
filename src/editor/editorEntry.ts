@@ -73,7 +73,7 @@ import { brushRing, meantForWater, ringAsk, type RingGround } from './brush.ts';
 import { ToolList, toolFrame, type ToolDef, type ToolDraw } from './tools.ts';
 import { EditorWater, waterTool, type WaterHost } from './editorWater.ts';
 import { WATER_CHOICES, WATER_TUNE, tuneWater, PLACES_TOOL_CHOICES, PLACES_TOOL_TUNE, tunePlacesTool } from './editorTune.ts';
-import { EditorPlaces, placeAreaSnippet, placesTool, type PlacesHost } from './editorPlaces.ts';
+import { EditorPlaces, placeAreaSnippet, placesTool, skyOfRow, wholeSkyOf, type PlacesHost, type SkyFields } from './editorPlaces.ts';
 import { buildable, drawnOnMap, saidOnEntry, shapeArea, shapeMiddle, type LocationRow, type LocationShape } from '../world/editFiles/locationsFile.ts';
 import { LAKE_TUNE, RIVER_STEEP, RIVER_TUNE, tuneRiverTune } from '../world/ourWater.ts';
 import type { WaterRiverRow } from '../world/editFiles/waterFile.ts';
@@ -2691,6 +2691,12 @@ export class Editor {
     if (typeof t.placesRemove === 'string') void this.places.remove(t.placesRemove).then(() => this.window?.refreshEdits());
     if (typeof t.placesCities === 'boolean') void this.places.setWorld({ cities: t.placesCities }).then(() => this.window?.refreshEdits());
     if (typeof t.placesWorldLoading === 'string') void this.places.setWorld({ loading: t.placesWorldLoading.split('\n') }).then(() => this.window?.refreshEdits());
+    // The world row's own sky (the ninth wave), as one box of JSON standing for the whole of it.
+    if (typeof t.placesWorldSky === 'string') {
+      const sky = wholeSkyOf(t.placesWorldSky);
+      if (typeof sky === 'string') this.say(sky, false);
+      else void this.places.setWorld({ sky, skyWhole: true }).then(() => this.window?.refreshEdits());
+    }
     // The sculpt brush's (Map-maker II's first wave): its mode, flatten's ways and target and height, its falloff, its switches.
     const st: Record<string, unknown> = {};
     if (typeof t.sculptMode === 'string') st.mode = t.sculptMode;
@@ -3595,6 +3601,13 @@ export class Editor {
       state: row.state ?? '',
       snippet: placeAreaSnippet(row, this.host.packId()),
       words: notes.join(' '),
+      // Its sky (the ninth wave): its family among the sky in force's, its weather kind and its grade look's own fields.
+      sky: {
+        env: row.env ?? '',
+        weather: row.weather ?? '',
+        grade: { ...(row.grade ?? {}) },
+        families: this.host.world.weather.familyNames(),
+      },
     };
   }
 
@@ -3618,6 +3631,9 @@ export class Editor {
       picked: this.places.picked,
       cities: world?.cities === 'noBuild',
       worldLoading: (world?.loading ?? []).join('\n'),
+      // The world row's own sky as one box of JSON (the ninth wave), and the families its `env` may name.
+      worldSky: Object.keys(skyOfRow(world)).length ? JSON.stringify(skyOfRow(world)) : '',
+      families: this.host.world.weather.familyNames(),
       file,
       note: notes.join(' '),
     };
@@ -3627,8 +3643,9 @@ export class Editor {
    * `__debug.locations(o)` (the dev server's half): the places tool's own state and the file as read; `{ tool }` its numbers
    * (`PLACES_TOOL_TUNE`), `{ arm: 'circle' | 'rect' | 'outline' }` (or false), `{ write: { shape, kind, name, map, say, build,
    * loading, desc, note } }` a place written (its shape in the file's own frame, as a story writes one), `{ pick }`, `{ move:
-   * { id, dx, dz } }` (the file's frame), `{ size: { id, by } }`, `{ set: { id, ...fields } }`, `{ remove }`, `{ cities:
-   * 'noBuild' | 'off' }` and `{ worldLoading: [lines] }` the world row, `{ snippet: id }` a place as a story area.
+   * { id, dx, dz } }` (the file's frame), `{ size: { id, by } }`, `{ set: { id, ...fields } }` (the ninth wave's `env`,
+   * `weather` and `grade` among them), `{ remove }`, `{ cities: 'noBuild' | 'off' }`, `{ worldLoading: [lines] }` and `{ worldSky:
+   * { env, weather, grade, climate, fog, wind, clouds } }` the world row, `{ snippet: id }` a place as a story area.
    */
   async locationsDebug(o?: Record<string, unknown>): Promise<unknown> {
     const said: string[] = [];
@@ -3669,6 +3686,8 @@ export class Editor {
       if (typeof o.remove === 'string') said.push(await this.places.remove(o.remove));
       if (o.cities === 'noBuild' || o.cities === 'off') said.push(await this.places.setWorld({ cities: o.cities === 'noBuild' }));
       if (Array.isArray(o.worldLoading)) said.push(await this.places.setWorld({ loading: (o.worldLoading as unknown[]).filter((l): l is string => typeof l === 'string') }));
+      // The world row's own sky (the ninth wave), laid over what it has: each field null takes it away, a group's key null that key.
+      if (o.worldSky && typeof o.worldSky === 'object') said.push(await this.places.setWorld({ sky: o.worldSky as SkyFields }));
       if (typeof o.snippet === 'string') snippet = this.copyPlaceSnippet(o.snippet);
     }
     const got = this.host.locations?.() ?? { rows: [], bytes: null, problem: null };

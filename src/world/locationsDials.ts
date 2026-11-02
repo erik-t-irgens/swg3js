@@ -44,7 +44,7 @@ const map = (k: 'sunAz' | 'sunEl' | 'shade' | 'sliceRows' | 'sliceMs' | 'debounc
   tuneMapPicture({ [k]: v });
   LOCATION_DIALS.host?.remake();
 };
-const place = (k: 'outlinePx') => (v: number) => {
+const place = (k: 'outlinePx' | 'gradeTau') => (v: number) => {
   tunePlaces({ [k]: v });
   LOCATION_DIALS.host?.redraw();
 };
@@ -94,6 +94,13 @@ const GROUPS: DialGroup[] = [
       num('services.markPx', 'Mark on the map', 'Half a service’s mark on the map window, CSS pixels.', 2, 16, 0.5, 'px', () => SERVICE_TUNE.markPx, service('markPx')),
       num('services.minimapPx', 'Mark on the minimap', 'Half a service’s mark on the minimap, CSS pixels at scale 1.', 1, 12, 0.5, 'px', () => SERVICE_TUNE.minimapPx, service('minimapPx')),
       num('services.labelScale', 'Names closer than', 'The map window writes a building’s name beside its mark only closer than this many metres a pixel.', 0, 20, 0.25, 'm/px', () => SERVICE_TUNE.labelScale, service('labelScale')),
+    ],
+  },
+  {
+    title: 'The sky per place',
+    note: 'How a place of ours’s own colour-grade look comes in over the planet’s own as you walk into it and goes out as you leave (its family’s sky and weather crossfade over the weather’s own four seconds).',
+    dials: [
+      num('tune.gradeTau', 'A place’s look eases over', 'The time constant a place’s grade eases in and out by, seconds: in two, about six in seven of the way there after four. Nought takes it at once.', 0, 10, 0.1, 's', () => PLACE_TUNE.gradeTau, place('gradeTau')),
     ],
   },
 ];

@@ -18,12 +18,14 @@ import {
   tuneWind,
   windAtPoint,
   windBlendNow,
+  windEntryNow,
   windHeld,
   windObserver,
   windPattern,
   windReadouts,
   windTableState,
   windWorldId,
+  windWorldNow,
   windWorldOf,
   windWorldTable,
   worldKindsAt,
@@ -156,8 +158,9 @@ function report(ctx: WindDebugContext): Record<string, unknown> {
     if (pl) out.readouts = windReadouts(pl.x, pl.z);
   }
   if (id) {
-    const e = windWorldOf(id.planetId);
-    out.worldMultipliers = { floor: e.floor, gust: e.gust, cover: e.cover, size: e.size, wander: e.wander, devils: e.devils, atLevel: e.byLevel[Math.max(0, Math.min(4, Math.round(w.level)))] };
+    // The multipliers in force: a world row's own laid over the table's (Map-maker II's ninth wave), and which it set.
+    const e = windEntryNow() ?? windWorldOf(id.planetId);
+    out.worldMultipliers = { floor: e.floor, gust: e.gust, cover: e.cover, size: e.size, wander: e.wander, devils: e.devils, atLevel: e.byLevel[Math.max(0, Math.min(4, Math.round(w.level)))], own: windWorldNow()?.own ?? null };
   }
   if (table) {
     out.worldLevels = Array.from(table.speeds).map((s, l) => ({ level: l, speed: s, kinds: worldKindsAt(l) }));

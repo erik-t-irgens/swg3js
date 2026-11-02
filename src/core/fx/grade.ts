@@ -2,7 +2,9 @@
 // a vignette, a film grain and a dither on the display values at the very end.
 //
 // The grade is parametric, not a lookup table. Each frame the planet's hand-set mood
-// (`GRADE_LOOKS`) and the light of the moment (the sky's key, its ambient and the air) come to a
+// (`GRADE_LOOKS`, with a place of ours's own look eased in over it where the world editor's locations
+// file names one: Map-maker II's ninth wave, `PlaceGradeEase`, uniforms only, never another program)
+// and the light of the moment (the sky's key, its ambient and the air) come to a
 // white balance, a shadow and a highlight tint, a split amount, a saturation, a contrast and a
 // pivot, and the shader applies them to every pixel. Every tint keeps the pixel's own luminance
 // and the contrast leaves the deep shadows and the highlights alone, so the grade can move colour
@@ -32,6 +34,7 @@ import {
   lookFor,
   luma,
   normLuma,
+  PlaceGradeEase,
   setNeutralSource,
   smoothSource,
   sourceLag,
@@ -157,6 +160,8 @@ export interface GradeReport {
   path: 'sky ramp' | 'space zone' | 'neutral';
   look: GradeLook | null;
   lookOverride: boolean;
+  /** A place of ours's look (Map-maker II's ninth wave): how far it has eased in, the look it is easing toward and the look read now. */
+  place: { weight: number; live: boolean; target: GradeLook | null; eased: GradeLook | null };
   frozen: boolean;
   compare: number | null;
   /** How far the grade still lags the sky: 0 once it has caught up. */
@@ -245,6 +250,8 @@ export class ColorGradePass extends ShaderFxPass {
   private lighting: FxFrameContext['lighting'] = null;
   private look: GradeLook | undefined = undefined;
   private path: GradeReport['path'] = 'neutral';
+  /** A place of ours's look eased in over the planet's own (Map-maker II's ninth wave). */
+  private readonly placeEase = new PlaceGradeEase();
 
   constructor() {
     super(COLOR_GRADE);
@@ -263,6 +270,7 @@ export class ColorGradePass extends ShaderFxPass {
     if (planetChanged) {
       this.planetId = ctx.planetId;
       this.look = lookFor(ctx.planetId);
+      this.placeEase.reset();
     }
     // A new sky object (another planet, another zone, or the sky arriving after the loading
     // screen) is a cut: the grade snaps to it rather than gliding from the last world's.
@@ -270,7 +278,14 @@ export class ColorGradePass extends ShaderFxPass {
     this.lighting = ctx.lighting;
     const cut = ctx.cameraCut || planetChanged || skyChanged || ctx.frame !== this.lastFrame + 1;
     this.lastFrame = ctx.frame;
-    const look = this.lookOverride ?? this.look;
+    // The look of the place of ours holding the eye (Map-maker II's ninth wave) eased in over the planet's own, field by
+    // field; with none, the planet's own look itself. The console's look stands over both.
+    const ease = this.placeEase;
+    ease.dt = ctx.dt;
+    ease.tau = ctx.placeGradeTau;
+    ease.cut = cut;
+    const placed = ease.step(this.look, ctx.placeGrade);
+    const look = this.lookOverride ?? placed;
     const exposure = ctx.renderer.toneMappingExposure;
 
     if (!this.frozen) {
@@ -310,6 +325,12 @@ export class ColorGradePass extends ShaderFxPass {
       path: this.path,
       look: look ? { ...look } : null,
       lookOverride: this.lookOverride !== null,
+      place: {
+        weight: round3(this.placeEase.weight),
+        live: this.placeEase.live,
+        target: ctx.placeGrade ? { ...ctx.placeGrade } : null,
+        eased: this.placeEase.live ? { gloom: round3(this.placeEase.look.gloom), heat: round3(this.placeEase.look.heat), warmth: round3(this.placeEase.look.warmth), cool: round3(this.placeEase.look.cool), saturation: round3(this.placeEase.look.saturation), contrast: round3(this.placeEase.look.contrast), strength: round3(this.placeEase.look.strength) } : null,
+      },
       frozen: this.frozen,
       compare: this.compare,
       lag: Math.round(sourceLag(this.source, this.target) * 10000) / 10000,

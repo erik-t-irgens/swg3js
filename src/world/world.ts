@@ -159,8 +159,8 @@ import { fallShare, rainColourIn, sheetFactor, type RainLight } from './volumetr
 import { KICK_KIND } from './volumetrics/airSpawn.ts';
 import { groundAirMaterial, groundMaterialFor, groundWearsAir, makeAirGroundUniforms, swapGroundMaterial, type GroundChoice } from './volumetrics/airGround.ts';
 import { grainShedIn, newGrainShed, sheddingCount, stormSheetFactor } from './volumetrics/airMath.ts';
-import { AIR_TUNE, FOG_LOOKS_STAMP, GROUND_FOG_LOOKS } from './volumetrics/airTune.ts';
-import { FogDayCount, fogDayOf, fogHourIn, newFogHour, type FogDay } from './volumetrics/airFog.ts';
+import { AIR_TUNE, type FogLook } from './volumetrics/airTune.ts';
+import { FogDayCount, FogDays, fogHourIn, newFogHour, type FogDay } from './volumetrics/airFog.ts';
 import { VOL_TUNE } from './volumetrics/volSettings.ts';
 import { LIQUID_U, lavaCrustMaterial, lavaMaterialFor, lavaWearsCrust, liquidOff, waterWearsAir, type LiquidChoice } from './volumetrics/airLiquid.ts';
 import { GRASS_AIR_U, grassAirTwin, grassWaitsForScreen, grassWearsAir, newGrassChoice } from './volumetrics/airGrass.ts';
@@ -1084,20 +1084,29 @@ export class World {
    * morning forced on the day's draw.
    */
   readonly airFogHold = { level: null as number | null, top: null as number | null, day: false };
-  private readonly fogDay: FogDay = { morning: 0, evening: 0, eveningBefore: 0 };
   private readonly fogHour = newFogHour();
   /** The drawn day's number, counted against the shared clock (`FogDayCount`): stepped at the drawn midnight, never by the wall. */
   private readonly fogCount = new FogDayCount();
-  private fogDayIdx = Number.NaN;
-  private fogDayWorld = '';
-  private fogLooksSeen = -1;
+  /**
+   * The day drawn and what it was drawn for, with the world's own fog look (`FogDays`: Map-maker II's ninth wave, its
+   * locations file's world row's `fog`, read in place of the table's row for that pack, so a world the table has no row for
+   * fogs by it).
+   */
+  private readonly fogDays = new FogDays();
   /** The fog's looks were moved from the console: the day's draw is made again next frame. */
   fogLooksMoved(): void {
-    this.fogDayIdx = Number.NaN;
+    this.fogDays.moved();
+  }
+  /** A world's own fog look, or null to let it go: the day's draw made again next frame, on the same day. */
+  setWorldFog(pack: string, look: FogLook | null): void {
+    this.fogDays.setOwn(pack, look);
   }
   /** The fog's day and hour as they stand, for the console. */
-  fogReport(): { world: string; day: number; draw: FogDay; level: number; burn: number; top: number; hold: { level: number | null; top: number | null; day: boolean } } {
-    return { world: this.fogDayWorld, day: this.fogDayIdx, draw: { ...this.fogDay }, level: this.airInput.fogLevel, burn: this.airInput.fogBurn, top: this.airInput.fogTop, hold: { ...this.airFogHold } };
+  fogReport(): { world: string; day: number; draw: FogDay; level: number; burn: number; top: number; hold: { level: number | null; top: number | null; day: boolean }; look: FogLook | null; own: boolean } {
+    const id = this.packId ?? '';
+    const days = this.fogDays;
+    const look = days.lookOf(id);
+    return { world: days.world, day: days.idx, draw: { ...days.draw }, level: this.airInput.fogLevel, burn: this.airInput.fogBurn, top: this.airInput.fogTop, hold: { ...this.airFogHold }, look: look ? { ...look } : null, own: days.own !== null && days.own.pack === id };
   }
   /** The ground as the field asks it: the cached heights only (never `heightAt`), the chunks' families, the liquid. */
   private readonly airGround: GroundSampler = {
@@ -4313,25 +4322,21 @@ export class World {
    */
   private writeFogHour(inp: { fogLevel: number; fogBurn: number; fogTop: number }): void {
     const id = this.packId ?? '';
-    const look = GROUND_FOG_LOOKS[id];
+    // The world row's own look where its locations file names one (Map-maker II's ninth wave), else the table's row.
+    const days = this.fogDays;
+    const look = days.lookOf(id);
     const day = this.day;
     const count = this.fogCount;
     count.time = day.time;
     sharedClock.dayCountIn(day, count);
     count.step();
-    const idx = count.day;
-    if (idx !== this.fogDayIdx || id !== this.fogDayWorld || FOG_LOOKS_STAMP.n !== this.fogLooksSeen) {
-      fogDayOf(id, idx, this.fogDay);
-      this.fogDayIdx = idx;
-      this.fogDayWorld = id;
-      this.fogLooksSeen = FOG_LOOKS_STAMP.n;
-    }
+    const drawn = days.dayOf(id, count);
     const hold = this.airFogHold;
     const fh = this.fogHour;
     fh.time = day.time;
-    fh.morning = hold.day ? (look ? look.morningHi : 0.8) : this.fogDay.morning;
-    fh.evening = this.fogDay.evening;
-    fh.eveningBefore = hold.day ? fh.morning : this.fogDay.eveningBefore;
+    fh.morning = hold.day ? (look ? look.morningHi : 0.8) : drawn.morning;
+    fh.evening = drawn.evening;
+    fh.eveningBefore = hold.day ? fh.morning : drawn.eveningBefore;
     fh.lookTop = look ? look.top : 4;
     fogHourIn(fh);
     inp.fogLevel = hold.level !== null ? hold.level : look || hold.day ? fh.level : 0;

@@ -254,6 +254,8 @@ export interface PlaceView {
   state: string;
   snippet: string;
   words: string;
+  /** Its sky (the ninth wave): its family ('' the area's own), its weather kind ('' the area's own), its grade look's own fields, and the families the sky in force carries. */
+  sky?: { env: string; weather: string; grade: Record<string, number>; families: string[] };
 }
 
 /** The places tool as the Tools tab shows it (Map-maker II's eighth wave). */
@@ -268,6 +270,9 @@ export interface PlacesToolsView {
   /** The world row: the game's own cities kept clear of players' building, and its loading lines (one a line). */
   cities: boolean;
   worldLoading: string;
+  /** The world row's own sky as one object of JSON ('' for none) and the families of the sky in force (the ninth wave). */
+  worldSky?: string;
+  families?: string[];
   file: string;
   note: string;
 }
@@ -637,6 +642,47 @@ export class EditorWindow {
       lf.append(ls, ta);
       el.appendChild(lf);
       if (place.words) this.note(el, place.words);
+      // Its sky (Map-maker II's ninth wave): one of the families of the sky in force, a weather kind forced at the world's own
+      // level, and a colour-grade look's fields laid over the planet's own (each empty: the area's or the planet's own).
+      if (place.sky) {
+        const sk = place.sky;
+        const hs = document.createElement('div');
+        hs.className = 'ed-h';
+        hs.textContent = "ITS SKY (EMPTY: THE AREA'S OWN)";
+        el.appendChild(hs);
+        const choose = (label: string, value: string, choices: [string, string][], write: (v: string) => void): void => {
+          const f = document.createElement('label');
+          f.className = 'ed-field';
+          const sp = document.createElement('span');
+          sp.textContent = label;
+          const s = document.createElement('select');
+          for (const [v, words] of choices) {
+            const o = document.createElement('option');
+            o.value = v;
+            o.textContent = words;
+            if (v === value) o.selected = true;
+            s.appendChild(o);
+          }
+          s.addEventListener('change', () => {
+            write(s.value);
+            s.blur();
+          });
+          f.append(sp, s);
+          el.appendChild(f);
+        };
+        // The sky's families by their lower-case names (the weather matches a name case aside); a name it lacks is shown as such.
+        const envKey = sk.env.toLowerCase();
+        const known = sk.families.includes(envKey);
+        const families: [string, string][] = [['', "The area's own"], ...sk.families.map((n): [string, string] => [n, n])];
+        if (sk.env && !known) families.push([sk.env, `${sk.env} (not in this sky)`]);
+        choose('Its family', known ? envKey : sk.env, families, (v) => set({ env: v || null }));
+        choose('Its weather', sk.weather, [['', "The area's own"], ['rain', 'Rain'], ['dust', 'Dust storms'], ['snow', 'Snow']], (v) => set({ weather: v || null }));
+        for (const [k, range] of [['gloom', '0 to 1'], ['heat', '0 to 1'], ['warmth', '-1 to 1'], ['cool', '0 to 1'], ['saturation', '-0.5 to 0.5'], ['contrast', '-0.2 to 0.2'], ['strength', '0 to 4']] as const) {
+          const now = sk.grade[k];
+          this.field(el, `Grade ${k} (${range})`, now === undefined ? '' : String(now), (v) => set({ grade: { [k]: v.trim() === '' ? null : Number(v) } }));
+        }
+        this.note(el, "Its family's light, fog, clouds, weather effect, wind and beds crossfade in over four seconds as you walk in (the weather's level stays the world's). Its grade eases in over the planet's own (tune.gradeTau under locations in the debug menu).");
+      }
       const h3 = document.createElement('div');
       h3.className = 'ed-h';
       h3.textContent = 'AS A STORY AREA';
@@ -1212,6 +1258,24 @@ export class EditorWindow {
       });
       lf.append(ls, ta);
       el.appendChild(lf);
+      // The world row's own sky (Map-maker II's ninth wave), as one object of JSON standing for the whole of it.
+      if (pl.worldSky !== undefined) {
+        const sf = document.createElement('label');
+        sf.className = 'ed-field';
+        const ss = document.createElement('span');
+        ss.textContent = "The world's own sky (JSON)";
+        const sa = document.createElement('textarea');
+        sa.rows = 4;
+        sa.value = pl.worldSky;
+        sa.placeholder = '{ "climate": [50, 20, 15, 10, 5], "clouds": { "cover": 1.2 } }';
+        sa.addEventListener('change', () => this.host.setTool({ placesWorldSky: sa.value }));
+        sa.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') sa.blur();
+        });
+        sf.append(ss, sa);
+        el.appendChild(sf);
+        this.note(el, `Under every place's: env (a family: ${(pl.families ?? []).slice(0, 12).join(', ') || 'none in this sky'}${(pl.families ?? []).length > 12 ? ', …' : ''}), weather (rain, dust or snow), grade (gloom, heat, warmth, cool, saturation, contrast, strength). The world's own: climate (a weight a weather level), fog (morning, evening, morningLo, morningHi, eveningLo, eveningHi, top: all seven), wind (floor, gust, cover, size, wander, devils: each a multiplier) and clouds (cover, height, depth, density: each a multiplier on the decks). A field left out is the game's own.`);
+      }
       this.note(el, pl.file);
       if (pl.note) this.note(el, pl.note);
       this.note(el, "P arms it. A circle: LMB at its middle (C held with the wheel sizes the next one). A rectangle: LMB held from corner to corner. An outline: LMB a point, a click near the first closes it, RMB takes one back. A click on a place's ring picks it; its name, kind, switches and loading lines are on the Selected tab. Each change is one undo. A place players may not build in is drawn in red.");

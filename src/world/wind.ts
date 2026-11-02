@@ -266,6 +266,56 @@ export function windWorldOf(id: string): WorldEntry {
   return e;
 }
 
+/**
+ * A world's own multipliers (Map-maker II's ninth wave: its locations file's world row's `wind`), by the pack it is for, or
+ * null for none: each one it sets in place of the table's (`WIND_WORLDS`) for that pack, the rest the table's own and the
+ * levels' the table's by reference. Kept as one entry of its own, never written into the table.
+ */
+let placeWind: { pack: string; own: Partial<WorldMult> } | null = null;
+const placeEntry: WorldEntry = worldEntry();
+
+/** The entry the world's pattern multiplies by: the world row's laid over the table's where it is for this pack, else the table's own. */
+function entryFor(packId: string, planetId: string): WorldEntry {
+  const base = windWorldOf(planetId);
+  if (!placeWind || placeWind.pack !== packId) return base;
+  const own = placeWind.own;
+  const e = placeEntry;
+  e.floor = own.floor ?? base.floor;
+  e.gust = own.gust ?? base.gust;
+  e.cover = own.cover ?? base.cover;
+  e.size = own.size ?? base.size;
+  e.wander = own.wander ?? base.wander;
+  e.devils = own.devils ?? base.devils;
+  e.byLevel = base.byLevel;
+  return e;
+}
+
+/**
+ * A world row's wind (Map-maker II's ninth wave), or null to let it go: the pattern of the world attached takes it at once
+ * where it is for that pack (its multipliers are read every step, so nothing else is made again).
+ */
+export function setPlaceWind(pack: string, own: Partial<WorldMult> | null): void {
+  placeWind = own && Object.keys(own).length ? { pack, own: { ...own } } : null;
+  if (pattern && pending) pattern.worldMult = entryFor(pending.packId, pending.planetId);
+}
+
+/** The world's multipliers in force now, and whether a world row's stand in them (the console's). */
+export function windWorldNow(): { mult: WorldMult; own: Partial<WorldMult> | null } | null {
+  if (!pending) return null;
+  const e = entryFor(pending.packId, pending.planetId);
+  return { mult: { floor: e.floor, gust: e.gust, cover: e.cover, size: e.size, wander: e.wander, devils: e.devils }, own: placeWind && placeWind.pack === pending.packId ? { ...placeWind.own } : null };
+}
+
+/** The entry the world attached multiplies by now (the world row's laid over the table's), or null with no world attached. */
+export function windEntryNow(): WorldEntry | null {
+  return pending ? entryFor(pending.packId, pending.planetId) : null;
+}
+
+/** The world's pattern made again at the arm's next step (a world's own climate moved, which its memo of levels was made under). */
+export function resetWindPattern(): void {
+  pattern = null;
+}
+
 // ---------------------------------------------------------------------------------------------- the state
 
 /**
@@ -421,7 +471,7 @@ function tableOfWorld(): WorldWind | null {
 function makePattern(out: Float32Array): WindPattern | null {
   const w = tableOfWorld();
   if (!pending || !w) return null;
-  return new WindPattern(pending.seed, pending.weights, w, WIND_PROFILES, windWorldOf(pending.planetId), WIND_TUNE as unknown as WindMathTune, out, table);
+  return new WindPattern(pending.seed, pending.weights, w, WIND_PROFILES, entryFor(pending.packId, pending.planetId), WIND_TUNE as unknown as WindMathTune, out, table);
 }
 
 /** The arm's pattern, made the first time the arm steps. */
@@ -953,6 +1003,8 @@ export function tuneWind(o: Record<string, unknown>): { notes: string[] } {
   WIND_TUNE.gusts.lattice = Math.round(WIND_TUNE.gusts.lattice);
   WIND_TUNE.devils.inWindow = Math.round(WIND_TUNE.devils.inWindow);
   WIND_TUNE.devils.shoves = Math.round(WIND_TUNE.devils.shoves);
+  // A world row's multipliers stand over the table's where they are set (Map-maker II's ninth wave): laid again over the table as moved.
+  if (worlds && pattern && pending) pattern.worldMult = entryFor(pending.packId, pending.planetId);
   if (remake) {
     const g = WIND_TUNE.gusts;
     if (g.soft === table.soft && g.octave2 === table.octave2 && g.lattice === 64 && !tableJob) {

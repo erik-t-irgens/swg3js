@@ -6,12 +6,13 @@
 // removal, each exact; the world row's switch and lines (and a world row left saying nothing taken out); the size the wheel
 // asks written once the wheel rests; a ring picked by a click and a click away letting it go; the outlines drawn, a place
 // players may not build in marked bad and the world row never drawn; Escape's order; a space zone and the copies refused; a
-// place as a story area; and the editor's and the game's hand-overs, pinned as text.
+// place as a story area; a place's sky and the world row's (the ninth wave: each field, a group's member taken out alone, the
+// Tools tab's box standing for the whole of the world's sky); and the editor's and the game's hand-overs, pinned as text.
 //
 // Run: node tools/swg/tests/placesTool.test.ts
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { EditorPlaces, movedShape, placeAreaSnippet, placesTool, scaledShape, shapePoints, type PlacesHost } from '../../../src/editor/editorPlaces.ts';
+import { EditorPlaces, movedShape, placeAreaSnippet, placesTool, scaledShape, shapePoints, skyInto, skyOfRow, wholeSkyOf, type PlacesHost } from '../../../src/editor/editorPlaces.ts';
 import { PLACES_TOOL_TUNE, PLACES_TOOL_TUNE_DEFAULTS, tunePlacesTool } from '../../../src/editor/editorTune.ts';
 import { toolFrame } from '../../../src/editor/tools.ts';
 import { screenView } from '../../../src/editor/gizmo.ts';
@@ -257,6 +258,53 @@ tunePlacesTool({ ...PLACES_TOOL_TUNE_DEFAULTS });
 }
 
 {
+  // A place's sky and the world row's (Map-maker II's ninth wave): each field written as one write, a group's member set to
+  // null taken out alone, the world row's whole box standing for the whole of its sky, a world-only field refused on a place.
+  const s = standIn();
+  const p = new EditorPlaces(s.host);
+  await p.writePlace({ kind: 'circle', c: [900, -400], r: 120 }, { kind: 'place', name: 'Little Eisley' }, 'a circle (console)');
+  const id = s.rows.find((r) => r.name === 'Little Eisley')!.id;
+  const n0 = s.writes.length;
+  const labels: string[] = [];
+  const edits = s.host.edits as unknown as { beginStroke(label: string): unknown };
+  const begin = edits.beginStroke;
+  edits.beginStroke = (label: string) => {
+    labels.push(label);
+    return begin(label);
+  };
+  await p.setPlace(id, { env: ' moseisley ', weather: 'snow', grade: { warmth: 0.6, gloom: 0.2 } });
+  const said = labels[labels.length - 1] ?? '';
+  const r1 = s.rows.find((r) => r.id === id)!;
+  ok(s.writes.length === n0 + 1 && r1.env === 'moseisley' && r1.weather === 'snow' && r1.grade?.warmth === 0.6 && r1.grade?.gloom === 0.2 && /sky/.test(said), "a place's family (trimmed), weather and grade written in one write, said as its sky");
+  await p.setPlace(id, { grade: { gloom: null, heat: 0.3 } });
+  const r2 = s.rows.find((r) => r.id === id)!;
+  ok(r2.grade?.warmth === 0.6 && r2.grade?.heat === 0.3 && r2.grade?.gloom === undefined && r2.env === 'moseisley', "a grade's field set to null taken out alone, the rest and the family kept");
+  await p.setPlace(id, { env: '', weather: null, grade: null });
+  const r3 = s.rows.find((r) => r.id === id)!;
+  ok(r3.env === undefined && r3.weather === undefined && r3.grade === undefined && r3.name === 'Little Eisley', 'an empty family, a null weather and a null grade take each away');
+  const n1 = s.writes.length;
+  const no = await p.setPlace(id, { climate: [1, 2] });
+  ok(s.writes.length === n1 && /world row/.test(no), "a place given a world row's field is refused in words, nothing written");
+  await p.setWorld({ sky: { climate: [5, 1], fog: { morning: 0.5, evening: 0.1, morningLo: 0.3, morningHi: 0.8, eveningLo: 0.1, eveningHi: 0.3, top: 20 }, wind: { gust: 1.4 }, clouds: { cover: 1.3 } } });
+  const w1 = s.rows.find((r) => r.id === 'world')!;
+  ok(w1.climate?.join() === '5,1' && w1.fog?.top === 20 && w1.wind?.gust === 1.4 && w1.clouds?.cover === 1.3, "the world row's climate, fog, wind and clouds written");
+  await p.setWorld({ sky: { wind: { floor: 1.2 } } });
+  ok(s.rows.find((r) => r.id === 'world')!.wind?.gust === 1.4 && s.rows.find((r) => r.id === 'world')!.wind?.floor === 1.2 && s.rows.find((r) => r.id === 'world')!.climate?.join() === '5,1', "a group given in part laid over the row's own (the console's way)");
+  const whole = wholeSkyOf('{ "clouds": { "height": 0.8 } }');
+  ok(typeof whole !== 'string', 'the Tools tab\'s box reads as JSON');
+  await p.setWorld({ sky: whole as never, skyWhole: true });
+  const w2 = s.rows.find((r) => r.id === 'world')!;
+  ok(w2.clouds?.height === 0.8 && w2.clouds?.cover === undefined && w2.climate === undefined && w2.fog === undefined && w2.wind === undefined, "the box stands for the whole of the world's sky: what it leaves out taken away");
+  ok(JSON.stringify(skyOfRow(w2)) === '{"clouds":{"height":0.8}}' && JSON.stringify(skyOfRow(null)) === '{}', "and the box shows the row's sky fields as they stand");
+  await p.setWorld({ sky: {}, skyWhole: true });
+  ok(!s.rows.some((r) => r.id === 'world'), 'an empty box leaves the world row saying nothing, and it is taken out');
+  ok(typeof wholeSkyOf('{ "sun": 1 }') === 'string' && typeof wholeSkyOf('[1]') === 'string' && typeof wholeSkyOf('{') === 'string' && JSON.stringify(wholeSkyOf('  ')) === '{}', "the box refuses a field the sky has not got, a list and broken JSON in words, and reads blank as nothing");
+  const d: Record<string, unknown> = { id: 'x', kind: 'place', climate: [1] };
+  skyInto(d, { climate: [] });
+  ok(!('climate' in d), 'an empty climate takes the field away');
+}
+
+{
   // The pure helpers.
   const turn = (x: number, z: number, out: { x: number; z: number }) => {
     out.x = CX - x;
@@ -297,6 +345,9 @@ tunePlacesTool({ ...PLACES_TOOL_TUNE_DEFAULTS });
   ok(/this\.places\.worldGone\(\);/.test(ed) && /this\.places\.busy/.test(ed), 'the world going drops it, and a write or a held move keeps the automatic fold quiet');
   ok(/if \(!drawnOnMap\(row\)\) notes\.push\('It is not drawn on the maps, so its name is never said and no outline is drawn\.'\);\s*else \{\s*if \(saidOnEntry\(row\)\) notes\.push\([^)]*\);\s*if \(row\.kind === 'city'\) notes\.push\('Its outline is drawn on the minimap\.'\);\s*\}/.test(ed), "the Selected tab says a place on no map is neither said nor outlined, and says either only of a place drawn");
   ok(/LOCATION_DIALS\.tool = placesToolDials\(\);/.test(ed), "the tool's numbers of feel are handed to the debug menu's locations set as the editor loads");
+  ok(/if \(typeof t\.placesWorldSky === 'string'\) \{\s*const sky = wholeSkyOf\(t\.placesWorldSky\);\s*if \(typeof sky === 'string'\) this\.say\(sky, false\);\s*else void this\.places\.setWorld\(\{ sky, skyWhole: true \}\)/.test(ed), "the Tools tab's box is written whole (what it leaves out taken away), its refusal said");
+  ok(/if \(o\.worldSky && typeof o\.worldSky === 'object'\) said\.push\(await this\.places\.setWorld\(\{ sky: o\.worldSky as SkyFields \}\)\);/.test(ed), "the console's worldSky is laid over the row's own");
+  ok(/worldSky: Object\.keys\(skyOfRow\(world\)\)\.length \? JSON\.stringify\(skyOfRow\(world\)\) : '',/.test(ed), "the box shows the world row's sky fields as they stand");
   const main = read('src/main.ts');
   ok(/locationRows: \(\) => this\.placesFile\?\.locations \?\? this\.noLocationRows,/.test(main), 'the game hands the editor its landed rows, a kept empty list before any');
   ok(/if \(lf && this\.world\.generation === gen && this\.editWorld\(\) === pack\) await this\.landLocationRows\(pack, lf\.put as LocationRow\[\], lf\.deleted\);/.test(main), "the editor's write is landed by difference as its answer comes");

@@ -574,8 +574,11 @@ export class WindPattern {
   readonly world: WorldWind;
   readonly profiles: Readonly<Record<WindKind, WindProfile>>;
   readonly tune: WindMathTune;
-  /** The world's multipliers and its levels' (by reference: a dial reaches them). */
-  readonly worldMult: WorldEntry;
+  /**
+   * The world's multipliers and its levels' (by reference: a dial reaches them). Handed another entry when a world row's
+   * own wind is laid over the table's (Map-maker II's ninth wave: `setPlaceWind`); read at every step, so nothing else moves.
+   */
+  worldMult: WorldEntry;
   table: WindTable;
   /** The seven `vec4`, as floats, written in place: the uniform object's own array (`wind.ts` hands it in). */
   readonly packOut: Float32Array;

@@ -19,9 +19,16 @@
 // kind `world` and no shape, carries the world's own: its loading lines for a destination in no place, and `cities`
 // (`'noBuild'`: the game's own cities, Core3's no-build areas and the client's no-build radii keep players off too).
 //
-// **Fields kept and not read** (`env`, `weather`, `grade` on a place; `climate`, `fog`, `wind`, `clouds` on the world row:
-// the ninth wave's; `light`: the Light and shadow pass's) are left out of the row read and carried across every put by the
-// batch's extras, so a row the editor writes never loses them.
+// **The sky per place** (its ninth wave, DESIGN.md §2.11): any row may name `env` (one of the environment families of the
+// sky the world draws, by name: its light, fog, clouds, weather effect, wind and beds), `weather` (a forced kind, `rain`,
+// `dust` or `snow`, at the world's own level) and `grade` (a colour-grade look laid over the planet's own, eased in); the
+// world row alone carries `climate` (the weather levels' weights in place of the code's table), `fog` (a whole fog look in
+// place of the code's), `wind` (the unified wind's six multipliers, each where it is set) and `clouds` (multipliers on the
+// volumetrics' cloud decks' cover, height, depth and density, each where it is set). The world row's `env`, `weather` and
+// `grade` stand under every place's.
+//
+// **A field kept and not read** (`light`: the Light and shadow pass's) is left out of the row read and carried across
+// every put by the batch's extras, so a row the editor writes never loses it.
 //
 // **Backstops, not live** (`LOCATION_LIMITS`): every build agrees on what a committed file means, so a row past one is
 // skipped and named by every build alike.
@@ -54,6 +61,86 @@ export const LOCATION_LIMITS = {
 export type LocationKind = 'world' | 'city' | 'place' | 'landmark' | 'area' | 'zone';
 export const LOCATION_KINDS: readonly LocationKind[] = ['world', 'city', 'place', 'landmark', 'area', 'zone'];
 
+/** A forced weather kind a place may name (the weather's own `ForcedKind`, written out: this file imports nothing of the game's). */
+export type LocationWeather = 'rain' | 'dust' | 'snow';
+export const LOCATION_WEATHERS: readonly LocationWeather[] = ['rain', 'dust', 'snow'];
+
+/**
+ * A colour-grade look (`GradeLook`, `gradeMath.ts`, written out the same), each field the backstop it is held to: what
+ * the grade's own derivation would clamp anyway, so a file can name nothing the grade cannot take.
+ */
+export interface LocationGrade {
+  gloom?: number;
+  heat?: number;
+  warmth?: number;
+  cool?: number;
+  saturation?: number;
+  contrast?: number;
+  strength?: number;
+}
+export const GRADE_RANGES: Readonly<Record<keyof LocationGrade, readonly [number, number]>> = {
+  gloom: [0, 1],
+  heat: [0, 1],
+  warmth: [-1, 1],
+  cool: [0, 1],
+  saturation: [-0.5, 0.5],
+  contrast: [-0.2, 0.2],
+  strength: [0, 4],
+};
+export const GRADE_KEYS = Object.keys(GRADE_RANGES) as (keyof LocationGrade)[];
+
+/** A fog look (`FogLook`, `airTune.ts`, written out the same): all seven numbers, each held to its backstop. */
+export interface LocationFog {
+  morning: number;
+  evening: number;
+  morningLo: number;
+  morningHi: number;
+  eveningLo: number;
+  eveningHi: number;
+  top: number;
+}
+export const FOG_RANGES: Readonly<Record<keyof LocationFog, readonly [number, number]>> = {
+  morning: [0, 1],
+  evening: [0, 1],
+  morningLo: [0, 4],
+  morningHi: [0, 4],
+  eveningLo: [0, 4],
+  eveningHi: [0, 4],
+  top: [0, 100],
+};
+export const FOG_KEYS = Object.keys(FOG_RANGES) as (keyof LocationFog)[];
+
+/** The unified wind's world multipliers (`WIND_WORLDS`' six, `windMath.ts`'s `WORLD_KEYS`), each where it is set. */
+export interface LocationWind {
+  floor?: number;
+  gust?: number;
+  cover?: number;
+  size?: number;
+  wander?: number;
+  devils?: number;
+}
+/** The wind's own console's ends for a world multiplier (`tuneWind`'s `0..20`). */
+export const WIND_RANGE: readonly [number, number] = [0, 20];
+export const WIND_KEYS: readonly (keyof LocationWind)[] = ['floor', 'gust', 'cover', 'size', 'wander', 'devils'];
+
+/** Multipliers on the volumetrics' cloud decks (the feed's), each where it is set. */
+export interface LocationClouds {
+  cover?: number;
+  height?: number;
+  depth?: number;
+  density?: number;
+}
+export const CLOUD_RANGES: Readonly<Record<keyof LocationClouds, readonly [number, number]>> = {
+  cover: [0, 4],
+  height: [0.05, 20],
+  depth: [0.05, 20],
+  density: [0, 20],
+};
+export const CLOUD_KEYS = Object.keys(CLOUD_RANGES) as (keyof LocationClouds)[];
+
+/** The most weather levels a climate names (a world's schedule pads a shorter one with its last weight and cuts a longer). */
+export const CLIMATE_MOST = 8;
+
 /** The story's own shape (`set.ts`'s `Shape`), written as it writes one. */
 export type LocationShape = { kind: 'circle'; c: [number, number]; r: number } | { kind: 'rect'; min: [number, number]; max: [number, number] } | { kind: 'poly'; pts: [number, number][] };
 
@@ -73,6 +160,20 @@ export interface LocationRow {
   /** The world row only: `'noBuild'` keeps players off the game's own cities, no-build areas and no-build radii. */
   cities?: 'noBuild';
   state?: string;
+  /** An environment family of the sky the world draws, by name (the ninth wave). */
+  env?: string;
+  /** A forced weather kind at the world's own level. */
+  weather?: LocationWeather;
+  /** A colour-grade look laid over the planet's own. */
+  grade?: LocationGrade;
+  /** The world row only: the weather levels' weights, in place of the code's table. */
+  climate?: number[];
+  /** The world row only: the ground fog's look, in place of the code's. */
+  fog?: LocationFog;
+  /** The world row only: the unified wind's world multipliers, each where it is set. */
+  wind?: LocationWind;
+  /** The world row only: multipliers on the cloud decks, each where it is set. */
+  clouds?: LocationClouds;
   at?: number;
 }
 
@@ -87,11 +188,13 @@ export interface LocationsRead {
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const STATE = /^[a-z0-9_]+=[a-z0-9_]+$/;
 /** The fields this build reads; every other is kept on the file and carried across a put, never read. */
-const FIELDS = new Set(['id', 'kind', 'name', 'desc', 'note', 'shape', 'map', 'say', 'build', 'loading', 'cities', 'state', 'at']);
-/** The fields kept for a later wave (the ninth's sky, Light and shadow's `light`): carried, never refused as strange. */
-export const LOCATION_LATER_FIELDS: readonly string[] = ['env', 'weather', 'grade', 'climate', 'fog', 'wind', 'clouds', 'light'];
-/** The order a row's fields are written in: its words first, its shape last (the long part). */
-const ORDER: string[] = ['id', 'kind', 'name', 'desc', 'note', 'map', 'say', 'build', 'cities', 'state', 'loading', 'shape', 'at'];
+const FIELDS = new Set(['id', 'kind', 'name', 'desc', 'note', 'shape', 'map', 'say', 'build', 'loading', 'cities', 'state', 'env', 'weather', 'grade', 'climate', 'fog', 'wind', 'clouds', 'at']);
+/** The fields kept for a later pass (Light and shadow's `light`): carried, never refused as strange. */
+export const LOCATION_LATER_FIELDS: readonly string[] = ['light'];
+/** The order a row's fields are written in: its words first, its sky after its switches, its shape last (the long part). */
+const ORDER: string[] = ['id', 'kind', 'name', 'desc', 'note', 'map', 'say', 'build', 'cities', 'state', 'env', 'weather', 'grade', 'climate', 'fog', 'wind', 'clouds', 'loading', 'shape', 'at'];
+/** An environment family's name as a file may write it: words with no control characters, 64 at most. */
+const FAMILY = /^[^\u0000-\u001f]{1,64}$/;
 
 /** Whether an id names a row: the world's own, or a place's. */
 export function isLocationId(v: unknown): v is string {
@@ -164,6 +267,86 @@ function wordsOf(v: unknown, most: number, what: string): string | { bad: string
 }
 
 /**
+ * Named numbers read in a fixed order (each finite and within its backstop), or why not. `whole` asks for every key; an
+ * object naming none of them, or naming one it has not got, is refused.
+ */
+function numbersOf<K extends string>(v: unknown, keys: readonly K[], ranges: (k: K) => readonly [number, number], what: string, whole: boolean): Partial<Record<K, number>> | { bad: string } {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return { bad: `its ${what} is an object of ${keys.join(', ')}` };
+  const o = v as Record<string, unknown>;
+  for (const k of Object.keys(o)) if (!(keys as readonly string[]).includes(k)) return { bad: `its ${what} has no ${k} (${keys.join(', ')})` };
+  const out: Partial<Record<K, number>> = {};
+  let n = 0;
+  for (const k of keys) {
+    const x = o[k];
+    if (x === undefined) {
+      if (whole) return { bad: `its ${what} names all of ${keys.join(', ')}` };
+      continue;
+    }
+    const [lo, hi] = ranges(k);
+    if (typeof x !== 'number' || !Number.isFinite(x) || x < lo || x > hi) return { bad: `its ${what}'s ${k} is a number from ${lo} to ${hi}` };
+    out[k] = x;
+    n++;
+  }
+  if (!n) return { bad: `its ${what} names one of ${keys.join(', ')} at least` };
+  return out;
+}
+
+/**
+ * The sky's fields of a row (the ninth wave): `env`, `weather` and `grade` on any row, `climate`, `fog`, `wind` and
+ * `clouds` on the world row alone, each cleaned onto `row`. Null, or why the row is refused.
+ */
+function readSkyFields(o: Record<string, unknown>, kind: LocationKind, row: LocationRow): string | null {
+  if (o.env !== undefined) {
+    if (typeof o.env !== 'string' || !FAMILY.test(o.env.trim())) return "its env is an environment family's name (64 characters at most)";
+    row.env = o.env.trim();
+  }
+  if (o.weather !== undefined) {
+    if (typeof o.weather !== 'string' || !(LOCATION_WEATHERS as readonly string[]).includes(o.weather)) return `its weather is ${LOCATION_WEATHERS.join(', ')} or absent (the area's own)`;
+    row.weather = o.weather as LocationWeather;
+  }
+  if (o.grade !== undefined) {
+    const g = numbersOf(o.grade, GRADE_KEYS, (k) => GRADE_RANGES[k], 'grade', false);
+    if ('bad' in g) return g.bad as string;
+    row.grade = g as LocationGrade;
+  }
+  for (const k of ['climate', 'fog', 'wind', 'clouds'] as const) if (o[k] !== undefined && kind !== 'world') return `${k} is the world row's alone`;
+  if (o.climate !== undefined) {
+    const c = o.climate;
+    if (!Array.isArray(c) || c.length < 1 || c.length > CLIMATE_MOST) return `its climate is a list of 1 to ${CLIMATE_MOST} weights, one a weather level`;
+    let any = false;
+    for (const w of c) {
+      if (typeof w !== 'number' || !Number.isFinite(w) || w < 0 || w > 1e6) return "its climate's weights are numbers of nought or more";
+      if (w > 0) any = true;
+    }
+    if (!any) return 'its climate gives some level a weight above nought';
+    row.climate = [...(c as number[])];
+  }
+  if (o.fog !== undefined) {
+    const f = numbersOf(o.fog, FOG_KEYS, (k) => FOG_RANGES[k], 'fog', true);
+    if ('bad' in f) return f.bad as string;
+    row.fog = f as LocationFog;
+  }
+  if (o.wind !== undefined) {
+    const w = numbersOf(o.wind, WIND_KEYS, () => WIND_RANGE, 'wind', false);
+    if ('bad' in w) return w.bad as string;
+    row.wind = w as LocationWind;
+  }
+  if (o.clouds !== undefined) {
+    const c = numbersOf(o.clouds, CLOUD_KEYS, (k) => CLOUD_RANGES[k], 'clouds', false);
+    if ('bad' in c) return c.bad as string;
+    row.clouds = c as LocationClouds;
+  }
+  return null;
+}
+
+/** Two of a row's sky fields that read the same (each cleaned in a fixed order, so their text is the same). */
+function sameSky(a: LocationRow, b: LocationRow): boolean {
+  if (a.env !== b.env || a.weather !== b.weather) return false;
+  for (const k of ['grade', 'climate', 'fog', 'wind', 'clouds'] as const) if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) return false;
+  return true;
+}
+
+/**
  * One row cleaned, or why it is refused: an id, a kind, the world row with no shape and every other with one, its words,
  * its three switches as booleans, its loading lines, the world row's `cities`, a state tag and a moment. Fields this build
  * does not read go into `unknown` (the later waves' among them, which the batch carries across a put).
@@ -217,6 +400,8 @@ export function readLocationRow(v: unknown, unknown: string[] = []): LocationRow
     if (typeof o.state !== 'string' || !STATE.test(o.state)) return 'its state is a world state\'s tag, "key=value"';
     row.state = o.state;
   }
+  const sky = readSkyFields(o, kind, row);
+  if (sky) return sky;
   if (o.at !== undefined) {
     if (typeof o.at !== 'number' || !Number.isFinite(o.at) || o.at < 0) return 'its at is a time in milliseconds';
     row.at = o.at;
@@ -241,7 +426,7 @@ function sameShape(a: LocationShape | undefined, b: LocationShape | undefined): 
 /** Two rows that read the same: every field, the shape to the bit, the lines in order and the moment. */
 export function sameLocationRow(a: LocationRow, b: LocationRow): boolean {
   if (a.id !== b.id || a.kind !== b.kind || a.name !== b.name || a.desc !== b.desc || a.note !== b.note || a.map !== b.map || a.say !== b.say || a.build !== b.build || a.cities !== b.cities || a.state !== b.state || a.at !== b.at) return false;
-  if (!sameShape(a.shape, b.shape)) return false;
+  if (!sameShape(a.shape, b.shape) || !sameSky(a, b)) return false;
   const la = a.loading ?? [];
   const lb = b.loading ?? [];
   if (la.length !== lb.length) return false;

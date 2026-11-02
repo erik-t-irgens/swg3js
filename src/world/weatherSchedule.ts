@@ -78,14 +78,20 @@ export function rand3(a: number, b: number, c: number): number {
   return (h >>> 0) / 4294967296;
 }
 
-/** The planet's weights cut to `levels` (a shorter climate is padded with its last weight). */
-export function climateFor(packId: string, levels: number): number[] {
+/**
+ * The planet's weights cut to `levels` (a shorter climate is padded with its last weight). `own` is a world's own climate
+ * (Map-maker II's ninth wave: its locations file's world row), taken in place of the table's where it names one.
+ */
+export function climateFor(packId: string, levels: number, own?: readonly number[] | null): number[] {
   const id = packId.toLowerCase();
   let w: readonly number[] = DEFAULT_CLIMATE;
-  for (const key of Object.keys(CLIMATES)) {
-    if (id === key || id.startsWith(`${key}_`)) {
-      w = CLIMATES[key];
-      break;
+  if (own && own.length) w = own;
+  else {
+    for (const key of Object.keys(CLIMATES)) {
+      if (id === key || id.startsWith(`${key}_`)) {
+        w = CLIMATES[key];
+        break;
+      }
     }
   }
   const n = Math.max(1, Math.floor(levels));
@@ -223,10 +229,15 @@ export function blockShadow(weatherIndex: number, shadows: boolean): number {
   return weatherIndex === 0 || shadows ? 1 : 0;
 }
 
-/** A family's rows: block index per weather index (-1 where the table has no row). */
+/**
+ * A family's rows: block index per weather index (-1 where the table has no row). `kind` is a weather kind a place of ours
+ * forces over them (Map-maker II's ninth wave): such rows are a copy of the family's own under the same blocks, so the
+ * crossfade into and out of a place's weather is the family crossfade the weather already has.
+ */
 export interface FamilyRows {
   name: string;
   byLevel: Int16Array;
+  kind?: ForcedKind | null;
 }
 
 /** The block for a level: the row at that level, else the nearest lower row, else the lowest row there is; -1 for a family with none. */

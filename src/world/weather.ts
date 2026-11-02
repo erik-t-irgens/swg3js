@@ -49,7 +49,17 @@ import { OPEN_ROOF_GRID, OPEN_ROOF_MAP, WEATHER_UNIFORMS } from './wetness';
 import { WATER_WIND, WATER_WIND_FULL } from './water';
 import { FLORA_WIND } from './floraSway.ts';
 import { sharedClock, sharedNote } from './sharedClock.ts';
-import { WIND_FRAME, WIND_HOLD, WIND_STATE, WIND_TUNE, attachWind, detachWind, stepWind7, stepWindAloft } from './wind.ts';
+import { WIND_FRAME, WIND_HOLD, WIND_STATE, WIND_TUNE, attachWind, detachWind, resetWindPattern, stepWind7, stepWindAloft } from './wind.ts';
+import { PlaceSky } from './places.ts';
+
+/**
+ * What the places of ours say of the sky at a point (Map-maker II's ninth wave): the game hands its places' index
+ * (`PlaceIndex.skyAt`), which writes a place's family and weather kind (and its grade, which the colour grade reads on its
+ * own) into the weather's kept record.
+ */
+export interface PlaceSkySource {
+  skyAt(x: number, z: number, out: PlaceSky): unknown;
+}
 
 export interface WeatherSettings {
   weather: boolean;
@@ -119,6 +129,13 @@ export interface WeatherState {
   underwater: boolean;
   /** The ship whose box kills rain, with ' (first person)' when the CPU kill is on. */
   hull: string | null;
+  /**
+   * The place of ours whose sky is drawn (Map-maker II's ninth wave): the id of the row whose family is in force (`world`
+   * for the world row's), and of the row whose weather kind is forced, and that kind; null with none.
+   */
+  place: string | null;
+  placeWeather: string | null;
+  placeKind: ForcedKind | null;
 }
 
 export interface WeatherWorldContext {
@@ -261,6 +278,9 @@ const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 const ONE = new THREE.Vector3(1, 1, 1);
 
+/** The family id the state reports while a place of ours names the family (the console's held one is -1, a terrain's 0 up). */
+const PLACE_FAMILY = -2;
+
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const smoothstep = (a: number, b: number, x: number) => {
   const t = clamp01((x - a) / (b - a));
@@ -307,7 +327,24 @@ export class Weather {
     outside: 1,
     underwater: false,
     hull: null,
+    place: null,
+    placeWeather: null,
+    placeKind: null,
   };
+  /**
+   * What the places of ours say of the sky (Map-maker II's ninth wave), asked where the area under the player is asked: a
+   * place's family in place of the terrain's own (after the console's held family, which stays first), and a weather kind
+   * it forces over the rows. Null (the game hands none, or a world with no places) is the weather as it always was.
+   */
+  places: PlaceSkySource | null = null;
+  /** The places' answer, kept and written whole at every ask. */
+  private readonly placeOut = new PlaceSky();
+  /** A family's rows with a place's kind forced over them, kept by family and kind, so a place's rows are always one object. */
+  private readonly kindRows = new Map<FamilyRows, FamilyRows[]>();
+  /** A world's own climate (its locations file's world row) and the pack it is for; null: the table's. */
+  private climateOwn: { pack: string; weights: readonly number[] } | null = null;
+  /** Each half of a crossfade with a place's kind in it, worked out apart (`collectHalves`). Kept. */
+  private readonly halfMix = createMixOut();
   /**
    * Where a channel's own sound goes. The weather never plays anything itself: it says which sound
    * the channel's effect names and what share of the mix that channel has, and the mixer decides
@@ -500,7 +537,9 @@ export class Weather {
       this.firstRows ??= rows;
     });
     this.seed = seedOf(opts.packId);
-    this.weights = climateFor(opts.packId, this.levels);
+    // A world's own climate where its world row names one (Map-maker II's ninth wave), else the table's.
+    const own = this.climateOwn;
+    this.weights = own && own.pack === opts.packId ? climateFor(opts.packId, this.levels, own.weights) : climateFor(opts.packId, this.levels);
     // The unified wind's world (wave 7a): references kept; nothing of it is made until its arm first steps.
     attachWind(opts.packId, planet.id, this.seed, this.weights, this.levels, data.blocks);
     if (!data.weather) console.info('weather: sky.json has no camera effects; run: npm run swg -- sky @SWG all assets-private --retail-only');
@@ -567,6 +606,7 @@ export class Weather {
     this.failedFiles.clear();
     this.rowsByName.clear();
     this.firstRows = null;
+    this.kindRows.clear();
     this.current = this.previous = this.pendingRows = null;
     this.mixCount = 0;
     this.requested = new WeakSet<SkyBlock>();
@@ -617,6 +657,42 @@ export class Weather {
     if (f?.snap || familyChanged) this.forceSnap = true;
     if (familyChanged || lifeDayChanged) this.familyTimer = 0;
     this.updateHeldNote();
+  }
+
+  /**
+   * A world's own climate (Map-maker II's ninth wave: its locations file's world row), or null for the table's. Taken at the
+   * next arrival on that pack; on the pack attached now its weights are written in place (the schedule's and the unified
+   * wind's are one array) and the wind's pattern made again, since its memo of levels was the old climate's. The level
+   * walks to the new schedule's as any change of the schedule does.
+   */
+  setClimate(pack: string, weights: readonly number[] | null): void {
+    const was = this.climateOwn;
+    const same = was && weights ? was.pack === pack && was.weights.length === weights.length && was.weights.every((w, i) => w === weights[i]) : !was && !weights;
+    this.climateOwn = weights && weights.length ? { pack, weights: [...weights] } : null;
+    if (same || !this.sky || this.reason || this.packId !== pack) return;
+    const w = climateFor(pack, this.levels, this.climateOwn?.weights ?? null);
+    for (let i = 0; i < this.weights.length; i++) this.weights[i] = w[i];
+    this.scheduleTimer = 0;
+    resetWindPattern();
+  }
+
+  /**
+   * The places of ours moved (their file landed, a world state taken): the area under the player asked again at the next
+   * update, at once behind a loading screen (`snap`), else crossfaded as a boundary walked over is.
+   */
+  placesMoved(snap: boolean): void {
+    this.familyTimer = 0;
+    if (snap) this.snapPending = true;
+  }
+
+  /** The environment families of the sky in force, by name (the world editor's choice of a place's family). */
+  familyNames(): string[] {
+    return [...this.rowsByName.keys()].filter((n) => n);
+  }
+
+  /** The climate in force and whether the world's own row gave it (the console's). */
+  climateNow(): { weights: number[]; own: boolean } {
+    return { weights: [...this.weights], own: !!this.climateOwn && this.climateOwn.pack === this.packId };
   }
 
   /** Console: set wet values at once. */
@@ -742,13 +818,49 @@ export class Weather {
     return this.rowsByName.get('') ?? this.firstRows;
   }
 
-  /** The rows of the area at a point (a held family wins), or undefined when the terrain there is not generated yet. */
+  /**
+   * The rows of the area at a point (a held family wins, then a place of ours naming one, then the terrain's own), with a
+   * place's weather kind forced over them; undefined when the terrain there is not generated yet.
+   */
   private rowsAt(x: number, z: number, season: boolean, sync: boolean): FamilyRows | null | undefined {
+    const p = this.placeOut;
+    p.env = p.weather = p.envFrom = p.weatherFrom = null;
     if (this.forced?.family) {
       this.familyName = this.forced.family;
       this.familyId = -1;
       return this.rowsFor(this.forced.family);
     }
+    if (this.places) this.places.skyAt(x, z, p);
+    if (p.env) {
+      // A place's family, by name (a name the sky in force lacks is the table's own warning and fallback). Its own id, so
+      // the terrain's answer is looked up afresh once the place is left.
+      this.familyName = p.env;
+      this.familyId = PLACE_FAMILY;
+      return this.withKind(this.rowsFor(p.env), p.weather);
+    }
+    const rows = this.terrainRowsAt(x, z, season, sync);
+    return rows ? this.withKind(rows, p.weather) : rows;
+  }
+
+  /**
+   * A family's rows with a place's weather kind forced over them: the rows themselves with no kind (today's), else a copy
+   * under the same blocks kept by family and kind, so walking into and out of a place's weather is the family crossfade.
+   */
+  private withKind(rows: FamilyRows | null, kind: ForcedKind | null): FamilyRows | null {
+    if (!rows || !kind) return rows;
+    let kinds = this.kindRows.get(rows);
+    if (!kinds) {
+      kinds = [];
+      this.kindRows.set(rows, kinds);
+    }
+    for (let i = 0; i < kinds.length; i++) if (kinds[i].kind === kind) return kinds[i];
+    const k: FamilyRows = { name: rows.name, byLevel: rows.byLevel, kind };
+    kinds.push(k);
+    return k;
+  }
+
+  /** The terrain's own rows at a point (or the unnamed rows of a world with no converted terrain), or undefined when not generated. */
+  private terrainRowsAt(x: number, z: number, season: boolean, sync: boolean): FamilyRows | null | undefined {
     const swg = this.terrain?.swg;
     if (!swg) {
       this.familyName = '';
@@ -1046,7 +1158,8 @@ export class Weather {
     if (!rows || !sky) return 0;
     const i = rowFor(rows, level);
     if (i < 0) return 0;
-    const c = effectFor(sky.data.blocks[i], this.forcedKind(), level, sky.data.weather?.effects, this.choice);
+    // The console's or the setting's kind, else the kind a place of ours forces over these rows (Map-maker II's ninth wave).
+    const c = effectFor(sky.data.blocks[i], this.forcedKind() ?? rows.kind ?? null, level, sky.data.weather?.effects, this.choice);
     return c && c.kind === kind && !this.failedFiles.has(c.file) ? c.strength : 0;
   }
 
@@ -1060,33 +1173,118 @@ export class Weather {
     const forced = this.forcedKind();
     const level = Math.round(this.level);
     const effects = sky.data.weather?.effects;
-    let heaviest = 0;
-    for (let i = 0; i < this.mixCount; i++) {
-      const w = this.mixOut.weight[i];
-      const c = effectFor(this.mixList[i], forced, level, effects, this.choice);
-      if (!c || this.failedFiles.has(c.file)) continue;
-      const s = w * c.strength;
-      if (c.kind === 'rain') this.rain += s;
-      else if (c.kind === 'snow') this.snow += s;
-      else if (c.kind === 'dust') this.dust += s;
-      if (w > heaviest) {
-        heaviest = w;
-        this.kind = c.kind;
+    this.heaviest = 0;
+    const cur = this.current;
+    const prev = this.previous;
+    if (!forced && ((cur && cur.kind) || (prev && prev.kind))) this.collectHalves(level, effects);
+    else {
+      for (let i = 0; i < this.mixCount; i++) {
+        const c = effectFor(this.mixList[i], forced, level, effects, this.choice);
+        if (!c) continue;
+        this.wantW = this.mixOut.weight[i];
+        this.want(c);
       }
-      let k = 0;
-      while (k < this.wantCount && this.wantFile[k] !== c.file) k++;
-      if (k === this.wantCount) {
-        if (k >= this.wantWeight.length) continue;
-        this.wantFile[k] = c.file;
-        this.wantKind[k] = c.kind;
-        this.wantWeight[k] = 0;
-        this.wantCount++;
-      }
-      this.wantWeight[k] += w;
     }
     this.rain = clamp01(this.rain);
     this.snow = clamp01(this.snow);
     this.dust = clamp01(this.dust);
+  }
+  /** The heaviest weight `want` has met this frame (its kind is the frame's), and the weight `want` is handed in. Fractions from the start. */
+  private heaviest = 0.5;
+  private wantW = 0.5;
+
+  /**
+   * One block's effect at `wantW`: its strength into its kind's, the heaviest's kind kept, its file's share of the channels.
+   * The weight is a field and never an argument (a number handed to a call the compiler leaves out is one made a frame).
+   */
+  private want(c: EffectChoice): void {
+    const w = this.wantW;
+    if (this.failedFiles.has(c.file)) return;
+    const s = w * c.strength;
+    if (c.kind === 'rain') this.rain += s;
+    else if (c.kind === 'snow') this.snow += s;
+    else if (c.kind === 'dust') this.dust += s;
+    if (w > this.heaviest) {
+      this.heaviest = w;
+      this.kind = c.kind;
+    }
+    let k = 0;
+    while (k < this.wantCount && this.wantFile[k] !== c.file) k++;
+    if (k === this.wantCount) {
+      if (k >= this.wantWeight.length) return;
+      this.wantFile[k] = c.file;
+      this.wantKind[k] = c.kind;
+      this.wantWeight[k] = 0;
+      this.wantCount++;
+    }
+    this.wantWeight[k] += w;
+  }
+
+  /**
+   * What falls while a place's weather kind rides the rows (Map-maker II's ninth wave) and nothing forces a kind over it:
+   * each half of the family crossfade worked out apart, the family arriving at the fade's share and the one left at the
+   * rest, each through `effectFor` with its own kind, so a place's weather comes in and goes out over the crossfade the sky
+   * already makes rather than all at once. A half's blocks take `mixBlocks`' own weights for that half alone; a half with
+   * no row leaves the other the whole.
+   */
+  private collectHalves(level: number, effects: Readonly<Record<ForcedKind, readonly (string | null)[]>> | null | undefined): void {
+    const sky = this.sky!;
+    const blocks = sky.data.blocks;
+    const cur = this.current!;
+    const prev = this.previous;
+    const m = this.halfMix;
+    const nCur = this.halfOf(cur);
+    const fd = this.fade;
+    const f = !prev ? 1 : fd < 0 ? 0 : fd > 1 ? 1 : fd;
+    // The arriving half's share: the fade's, all of it with nothing left behind or nothing of its own to draw.
+    const shareCur = nCur === 0 ? 0 : prev ? f : 1;
+    for (let i = 0; i < nCur; i++) {
+      const c = effectFor(blocks[m.index[i]], cur.kind ?? null, level, effects, this.choice);
+      if (!c) continue;
+      this.wantW = shareCur * m.weight[i];
+      this.want(c);
+    }
+    if (!prev) return;
+    const nPrev = this.halfOf(prev);
+    const sharePrev = nCur === 0 ? 1 : 1 - f;
+    for (let i = 0; i < nPrev; i++) {
+      const c = effectFor(blocks[m.index[i]], prev.kind ?? null, level, effects, this.choice);
+      if (!c) continue;
+      this.wantW = sharePrev * m.weight[i];
+      this.want(c);
+    }
+  }
+
+  /**
+   * One family's blocks at the weather's level into `halfMix`, as `mixBlocks` lays a family with nothing left behind: the
+   * row at the level's floor and at its ceiling, by how far between them it is, equal rows merged, weights summing to one.
+   * Written out here, a frame's numbers kept off every call (a number handed to a call the compiler leaves out is one made).
+   */
+  private halfOf(rows: FamilyRows): number {
+    const m = this.halfMix;
+    const lv = this.level > 0 ? this.level : 0;
+    const lo = Math.floor(lv);
+    const t = lv - lo;
+    const a = rowFor(rows, lo | 0);
+    const b = rowFor(rows, Math.ceil(lv) | 0);
+    let n = 0;
+    if (a >= 0 && 1 - t > 1e-6) {
+      m.index[0] = a;
+      m.weight[0] = 1 - t;
+      n = 1;
+    }
+    if (b >= 0 && t > 1e-6) {
+      if (n === 1 && m.index[0] === b) m.weight[0] += t;
+      else {
+        m.index[n] = b;
+        m.weight[n] = t;
+        n++;
+      }
+    }
+    let total = 0;
+    for (let i = 0; i < n; i++) total += m.weight[i];
+    if (total > 0) for (let i = 0; i < n; i++) m.weight[i] /= total;
+    return n;
   }
 
   /** Phase 2, once per frame after the camera has moved and physics has stepped: where the effect plays, the hull, the roof grid, the particles. */
@@ -1306,6 +1504,9 @@ export class Weather {
     s.windSpeed = this.windSpeed;
     s.windMean = this.windMean;
     s.windVeer = this.windVeer;
+    s.place = this.placeOut.envFrom;
+    s.placeWeather = this.placeOut.weatherFrom;
+    s.placeKind = this.current?.kind ?? null;
     const f = this.fx;
     f.overcast = this.overcast;
     f.rain = this.rain;
@@ -1335,6 +1536,9 @@ export class Weather {
       scheduled: s.scheduled,
       nextChange: next === null ? 'not within four hours' : next < 60 ? `in ${Math.round(next)} s` : `in ${Math.round(next / 60)} min`,
       forced: s.forced,
+      // The place of ours whose sky is drawn (Map-maker II's ninth wave): the row naming the family, the row forcing a weather
+      // kind and that kind; null with none.
+      place: s.place || s.placeWeather ? { family: s.place, weather: s.placeWeather, kind: s.placeKind } : null,
       kind: s.kind,
       rain: r2(s.rain),
       snow: r2(s.snow),
@@ -1348,7 +1552,7 @@ export class Weather {
       underwater: s.underwater,
       hull: s.hull,
       mix: Array.from({ length: this.mixCount }, (_, i) => `${this.mixList[i].name} w${this.mixList[i].weatherIndex} ${this.mixOut.weight[i].toFixed(2)}`),
-      fading: this.previous ? { from: this.previous.name, fade: r2(this.fade) } : null,
+      fading: this.previous ? { from: this.previous.name, ...(this.previous.kind || this.current?.kind ? { kinds: [this.previous.kind ?? null, this.current?.kind ?? null] } : {}), fade: r2(this.fade) } : null,
       waitingFor: this.pendingRows?.name ?? null,
       shadows: r2(this.sky?.lighting.shadowScale ?? 1),
       channels: this.channels.map((c) => ({ file: c.file, kind: c.kind, rate: r2(c.handle.rateScale), particles: fx?.particlesOf(c.handle) ?? 0 })),

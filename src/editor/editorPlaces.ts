@@ -20,6 +20,11 @@
 // **The world row** (id `world`): its `cities` switch (the game's own cities, Core3's no-build areas and the client's no-build
 // radii kept clear of players' houses and props) and its loading lines, written from the Tools tab and the console.
 //
+// **The sky per place** (the ninth wave, DESIGN.md §2.11): a place's family (one of the sky in force's, by name), its forced
+// weather kind and its colour-grade look are the Selected tab's (`setPlace`'s `SkyFields`); the world row's own sky (the same
+// three under every place's, and its climate, fog, wind and clouds) is the Tools tab's box of JSON and the console's
+// `worldSky`. Each is one write and one undo, read by the file's own reader before it is sent.
+//
 // Rule for this file (node runs it with type stripping): every import with its `.ts` extension, no enum, no namespace, no
 // constructor parameter properties. The dev server's alone: reached only through the editor's own dynamic import.
 
@@ -136,6 +141,93 @@ export function scaledShape(s: LocationShape, f: number): LocationShape {
 export function placeAreaSnippet(row: LocationRow, world: string): string {
   const shape = row.shape ? JSON.stringify(row.shape).replace(/,/g, ', ').replace(/:/g, ': ') : '{}';
   return `{\n  "id": ${JSON.stringify(`${row.id}-area`.slice(0, 64))},\n  "world": ${JSON.stringify(world)},\n  "shape": ${shape},\n  "label": ${JSON.stringify(row.name ?? row.id)},\n}\n`;
+}
+
+/**
+ * A row's sky fields as the Selected tab, the Tools tab and the console write them (the ninth wave): `env` a family's name,
+ * `weather` a forced kind, `grade`, `wind` and `clouds` laid over the row's own key by key, `climate` and `fog` whole (the
+ * last four the world row's alone, which the file's reader says of a place). Null (or an empty name) takes a field away, and
+ * a key null takes that key away; a group left with nothing is taken away.
+ */
+export interface SkyFields {
+  env?: string | null;
+  weather?: string | null;
+  grade?: Record<string, number | null> | null;
+  climate?: number[] | null;
+  fog?: Record<string, number> | null;
+  wind?: Record<string, number | null> | null;
+  clouds?: Record<string, number | null> | null;
+}
+
+/** The sky fields' names, in the file's order. */
+export const SKY_FIELDS: readonly (keyof SkyFields)[] = ['env', 'weather', 'grade', 'climate', 'fog', 'wind', 'clouds'];
+
+/** A row's draft with sky fields laid on it (`SkyFields`' rules), in place. Pure: the reader checks what comes of it. */
+export function skyInto(draft: Record<string, unknown>, f: SkyFields): void {
+  if ('env' in f) {
+    const v = typeof f.env === 'string' ? f.env.trim() : '';
+    if (v) draft.env = v;
+    else delete draft.env;
+  }
+  if ('weather' in f) {
+    if (f.weather) draft.weather = f.weather;
+    else delete draft.weather;
+  }
+  for (const k of ['grade', 'wind', 'clouds'] as const) {
+    if (!(k in f)) continue;
+    const v = f[k];
+    if (v === null || v === undefined || typeof v !== 'object') {
+      if (v === null || v === undefined) delete draft[k];
+      else draft[k] = v;
+      continue;
+    }
+    const was = draft[k] && typeof draft[k] === 'object' && !Array.isArray(draft[k]) ? (draft[k] as Record<string, unknown>) : {};
+    const out: Record<string, unknown> = { ...was };
+    for (const [key, n] of Object.entries(v)) {
+      if (n === null) delete out[key];
+      else out[key] = n;
+    }
+    if (Object.keys(out).length) draft[k] = out;
+    else delete draft[k];
+  }
+  if ('climate' in f) {
+    if (Array.isArray(f.climate) && f.climate.length) draft.climate = [...f.climate];
+    else if (f.climate === null || (Array.isArray(f.climate) && !f.climate.length)) delete draft.climate;
+    else draft.climate = f.climate;
+  }
+  if ('fog' in f) {
+    if (f.fog && typeof f.fog === 'object') draft.fog = { ...f.fog };
+    else if (f.fog === null || f.fog === undefined) delete draft.fog;
+    else draft.fog = f.fog;
+  }
+}
+
+/**
+ * A row's sky fields as one object of JSON (the Tools tab's world row): the ones it sets, in the file's order. Pure.
+ */
+export function skyOfRow(row: LocationRow | null): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!row) return out;
+  for (const k of SKY_FIELDS) if (row[k] !== undefined) out[k] = row[k];
+  return out;
+}
+
+/**
+ * The world row's sky as the Tools tab's box writes it: one object of JSON standing for the whole of it (written with
+ * `setWorld`'s `skyWhole`, so a field it leaves out is taken away and a group it gives stands in place of the row's own).
+ * Empty text is none of it. The fields, or why the text does not read. Pure.
+ */
+export function wholeSkyOf(text: string): SkyFields | string {
+  if (!text.trim()) return {};
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch (e) {
+    return `the world's sky does not read as JSON (${(e as Error).message})`;
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return "the world's sky is one object: { env, weather, grade, climate, fog, wind, clouds }";
+  for (const k of Object.keys(v as Record<string, unknown>)) if (!(SKY_FIELDS as readonly string[]).includes(k)) return `the world's sky has no ${k} (${SKY_FIELDS.join(', ')})`;
+  return v as SkyFields;
 }
 
 /** The places tool. */
@@ -615,11 +707,12 @@ export class EditorPlaces {
    * A place's fields written (the Selected tab's, the console's): its name, kind, words, its three switches (null takes one
    * back to its kind's own), its loading lines (a list; empty takes them away), its state, or a new shape. Answers what was said.
    */
-  async setPlace(id: string, fields: { name?: string | null; kind?: string; desc?: string | null; note?: string | null; map?: boolean | null; say?: boolean | null; build?: boolean | null; loading?: string[] | null; state?: string | null; shape?: LocationShape }): Promise<string> {
+  async setPlace(id: string, fields: { name?: string | null; kind?: string; desc?: string | null; note?: string | null; map?: boolean | null; say?: boolean | null; build?: boolean | null; loading?: string[] | null; state?: string | null; shape?: LocationShape } & SkyFields): Promise<string> {
     const row = this.rowOf(id);
     if (!row) return this.said(`no place ${id} in this world's locations file`, false);
     const draft: Record<string, unknown> = { ...row };
     delete draft.at;
+    skyInto(draft, fields);
     for (const k of ['name', 'desc', 'note', 'state'] as const) {
       if (!(k in fields)) continue;
       const v = fields[k];
@@ -644,7 +737,8 @@ export class EditorPlaces {
     if (fields.shape) draft.shape = fields.shape;
     const after = readLocationRow(draft);
     if (typeof after === 'string') return this.said(`${row.name ?? id}: ${after}`, false);
-    return this.commit(`${row.name ?? id}'s fields`, [{ file: 'locations', id, before: row, after }]);
+    const skyOnly = Object.keys(fields).length > 0 && Object.keys(fields).every((k) => (SKY_FIELDS as readonly string[]).includes(k));
+    return this.commit(`${row.name ?? id}'s ${skyOnly ? 'sky' : 'fields'}`, [{ file: 'locations', id, before: row, after }]);
   }
 
   /**
@@ -652,7 +746,7 @@ export class EditorPlaces {
    * radii kept clear of players' building; false takes the switch off) and its loading lines. A world row with nothing left
    * is taken out. Answers what was said.
    */
-  async setWorld(fields: { cities?: boolean; loading?: string[] | null }): Promise<string> {
+  async setWorld(fields: { cities?: boolean; loading?: string[] | null; sky?: SkyFields; skyWhole?: boolean }): Promise<string> {
     const no = this.refusal();
     if (no) return this.said(no, false);
     const was = this.rowOf('world') ?? null;
@@ -665,6 +759,12 @@ export class EditorPlaces {
       if (lines.length) draft.loading = lines;
       else delete draft.loading;
     }
+    // The world's own sky (the ninth wave): its family, weather kind and grade under every place's, and its climate, fog,
+    // wind and clouds; given whole (the Tools tab's box), what it leaves out is taken away first.
+    if (fields.sky) {
+      if (fields.skyWhole) for (const k of SKY_FIELDS) delete draft[k];
+      skyInto(draft, fields.sky);
+    }
     const keeps = Object.keys(draft).some((k) => k !== 'id' && k !== 'kind');
     if (!keeps) {
       if (!was) return this.said('the world row says nothing yet: nothing written', true);
@@ -672,7 +772,7 @@ export class EditorPlaces {
     }
     const after = readLocationRow(draft);
     if (typeof after === 'string') return this.said(`the world row: ${after}`, false);
-    const what = fields.cities === true ? "the game's own cities kept clear of players' building" : fields.cities === false ? "the game's own cities open to players' building again" : "the world's loading lines";
+    const what = fields.cities === true ? "the game's own cities kept clear of players' building" : fields.cities === false ? "the game's own cities open to players' building again" : fields.sky ? "the world's own sky" : "the world's loading lines";
     return this.commit(what, [{ file: 'locations', id: 'world', before: was, after }]);
   }
 

@@ -343,6 +343,131 @@ export function createGradeTerms(): GradeTerms {
   return { keyLuma: 0, keyWarmth: 0, heat: 0, gloom: 0, sunny: 0, cool: 0, night: 0, ratio: 0 };
 }
 
+// --- a place's look (Map-maker II's ninth wave) ---
+
+/**
+ * A place of ours's look eased in over the planet's own and out again (the locations file's `grade`, the world row's under
+ * every place's), field by field: each of the seven fields eases toward the place's value where it sets one and the
+ * planet's otherwise, `look += (target − look) · k` with `k = 1 − exp(−dt / tau)`, so its pace is the same at any frame
+ * rate; a cut takes it at once. `weight` eases the same way toward 1 while a place's look holds the eye and toward nought
+ * with none, so a walk from one place's look into another's keeps it at one while the fields ease across.
+ *
+ * **With no place's look, the planet's own by identity**: nothing has been asked, or the weight has eased back under
+ * `PLACE_GRADE_DONE` with no place holding the eye, and `step` hands back the very look it was handed, which `deriveGrade`
+ * reads exactly as it always has.
+ */
+export const PLACE_GRADE_DONE = 1e-3;
+
+/** A look with every field a number: what `step` hands back while a place's look is in force. */
+export class EasedLook implements GradeLook {
+  gloom = 0.5;
+  heat = 0.5;
+  warmth = 0.5;
+  cool = 0.5;
+  saturation = 0.5;
+  contrast = 0.5;
+  strength = 0.5;
+}
+
+export class PlaceGradeEase {
+  /** The look eased, every field a number (fractions from the start, so a fraction written later is never boxed). */
+  readonly look = new EasedLook();
+  /** How far a place's look has come in, 0 to 1. */
+  weight = 0.5;
+  /** Whether a place's look is in force (the eased look is what the grade reads), or the planet's own by identity. */
+  live = false;
+  /**
+   * In, written before each `step` (no number is handed across the call on a frame): the frame's seconds, the ease's time
+   * constant (`PLACE_TUNE.gradeTau`) and whether the frame is a cut.
+   */
+  dt = 0.5;
+  tau = 0.5;
+  cut = false;
+
+  constructor() {
+    this.weight = 0;
+  }
+
+  /**
+   * What the look eases toward: each field the place's where it sets one, else the planet's (`deriveGrade`'s own defaults
+   * where it sets none either). Worked out again only when the place or the planet is another look (never on a frame that
+   * keeps them: an optional field read on a frame makes a number), into a kept record.
+   */
+  private readonly goal = new EasedLook();
+  private goalPlace: GradeLook | null = null;
+  private goalPlanet: GradeLook | undefined = undefined;
+  private goalSet = false;
+  private aim(planet: GradeLook | undefined, place: GradeLook | null): void {
+    const G = this.goal;
+    // Asked only as a place or the planet changes (a few times a walk): it makes a few numbers then, and nothing a frame.
+    G.gloom = place?.gloom ?? planet?.gloom ?? 0;
+    G.heat = place?.heat ?? planet?.heat ?? 0;
+    G.warmth = place?.warmth ?? planet?.warmth ?? 0;
+    G.cool = place?.cool ?? planet?.cool ?? 0;
+    G.saturation = place?.saturation ?? planet?.saturation ?? 0;
+    G.contrast = place?.contrast ?? planet?.contrast ?? 0;
+    G.strength = place?.strength ?? planet?.strength ?? 1;
+    this.goalPlace = place;
+    this.goalPlanet = planet;
+    this.goalSet = true;
+  }
+
+  /** The planet's own look for every field into the eased look: a fresh start. */
+  private seed(planet: GradeLook | undefined): void {
+    this.aim(planet, null);
+    const L = this.look;
+    const G = this.goal;
+    L.gloom = G.gloom;
+    L.heat = G.heat;
+    L.warmth = G.warmth;
+    L.cool = G.cool;
+    L.saturation = G.saturation;
+    L.contrast = G.contrast;
+    L.strength = G.strength;
+  }
+
+  /**
+   * One frame: the look the grade reads now, the planet's own (`planet`, by identity) while no place's look is or has been
+   * easing, else the kept eased look. `place` is the look of the place holding the eye (or the world row's), null with none.
+   */
+  step(planet: GradeLook | undefined, place: GradeLook | null): GradeLook | undefined {
+    if (!place && !this.live) return planet;
+    const tau = this.tau;
+    const dt = this.dt > 0 ? this.dt : 0;
+    const k = this.cut || !(tau > 0) ? 1 : 1 - Math.exp(-dt / tau);
+    if (!this.live) {
+      this.seed(planet);
+      this.live = true;
+      this.weight = 0;
+    }
+    if (!this.goalSet || place !== this.goalPlace || planet !== this.goalPlanet) this.aim(planet, place);
+    const L = this.look;
+    const G = this.goal;
+    L.gloom += (G.gloom - L.gloom) * k;
+    L.heat += (G.heat - L.heat) * k;
+    L.warmth += (G.warmth - L.warmth) * k;
+    L.cool += (G.cool - L.cool) * k;
+    L.saturation += (G.saturation - L.saturation) * k;
+    L.contrast += (G.contrast - L.contrast) * k;
+    L.strength += (G.strength - L.strength) * k;
+    this.weight += ((place ? 1 : 0) - this.weight) * k;
+    if (!place && this.weight < PLACE_GRADE_DONE) {
+      // Eased back out: the planet's own look again, by identity.
+      this.live = false;
+      this.weight = 0;
+      return planet;
+    }
+    return L;
+  }
+
+  /** Let go at once (a new world): the planet's own look by identity until a place's look holds the eye again. */
+  reset(): void {
+    this.live = false;
+    this.weight = 0;
+    this.goalSet = false;
+  }
+}
+
 // --- following the sky ---
 
 /** Ease the live source toward the sky's: `cur += (target - cur) * k` throughout. k = 1 snaps. */

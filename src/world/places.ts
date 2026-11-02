@@ -5,8 +5,9 @@
 // game's frame: the rows' raw points carried once through the world's own mirror about its centre (`gx = cx - x`,
 // `gz = z - cz`; about (0, 0) on a real-elevation world), so every ask after is two numbers and the typed arrays of
 // `zoneShape.ts`. It answers which place holds a point (`placeAt`: the smallest shape holding it, the world row under all,
-// which is what the city line, the loading screen and the ninth wave's sky ask) and whether players may build there
-// (`noBuildAt`).
+// which is what the city line and the loading screen ask), whether players may build there (`noBuildAt`), and what the
+// places say of the sky there (`skyAt`, the ninth wave: the smallest place naming each of `env`, `weather` and `grade`, else
+// the world row's, which the weather's rows and the colour grade ask).
 //
 // **The no-build verdict** is every place of ours with `build: false`, and, where the world row says `cities: 'noBuild'`
 // (the game's own no-build data, under the one switch: the owner's, off by default, a world at a time), the game's own
@@ -19,7 +20,7 @@
 // enum, no namespace, no constructor parameter properties.
 
 import { ZoneAsk, ZoneList, smallestAtAsk, zoneAtAsk } from './zoneShape.ts';
-import { buildable, drawnOnMap, saidOnEntry, shapeMiddle, type LocationRow, type LocationShape } from './editFiles/locationsFile.ts';
+import { buildable, drawnOnMap, saidOnEntry, shapeMiddle, type LocationGrade, type LocationRow, type LocationShape, type LocationWeather } from './editFiles/locationsFile.ts';
 import { blockerName } from './housePlace.ts';
 
 /** A row of a world's places list as the maps read one (the map window's `Poi`): the fields a place of ours carries. */
@@ -67,10 +68,17 @@ export function mergeLocations<P extends MapPlace>(pois: P[], rows: readonly Loc
 
 /** The places' numbers that are ours and not a file's. Live through `__debug.locations({ tune })`. */
 export const PLACE_TUNE = {
-  /** The width of a city's outline on the minimap, CSS pixels at scale 1 (the ninth wave's `gradeTau` joins it). */
+  /** The width of a city's outline on the minimap, CSS pixels at scale 1. */
   outlinePx: 1.5,
   /** The smallest a game city's reach must be to keep players off under `cities: 'noBuild'`, metres (the city line's own `minR`). */
   cityMinR: 50,
+  /**
+   * Seconds a place's colour-grade look takes to ease in and out over the planet's own, the time constant of its ease (the
+   * ninth wave) [ours, the owner's to judge]: two seconds, about half the sky's own four-second crossfade between two
+   * families, so a town's look has come in by the time its sky has, never as a cut. A camera cut (a travel, a teleport)
+   * takes it at once.
+   */
+  gradeTau: 2,
 };
 
 /** Move any of those, each held to something that makes sense; the answer is the table as it stands. */
@@ -191,10 +199,31 @@ function addShape(L: ZoneList, s: LocationShape, centre: { x: number; z: number 
   }
 }
 
+/**
+ * What the places say of the sky at a point (the ninth wave, `PlaceIndex.skyAsked`): a kept record, written whole by every
+ * ask. Each field is the smallest place holding the point that names it, else the world row's, else null, with the id of
+ * the row it came from (`world` for the world row's).
+ */
+export class PlaceSky {
+  env: string | null = null;
+  envFrom: string | null = null;
+  weather: LocationWeather | null = null;
+  weatherFrom: string | null = null;
+  grade: LocationGrade | null = null;
+  gradeFrom: string | null = null;
+}
+
 /** A world's places resolved, in the game's frame. */
 export class PlaceIndex {
   /** Every place of ours with a shape (its tag the row's index in `rows`). */
   readonly held = new ZoneList();
+  /**
+   * The places that name a sky field (the ninth wave): each a list of its own, so the smallest place holding a point that
+   * names a field answers it, and a smaller place naming none (a landmark in a town) leaves the town's in force.
+   */
+  readonly envHeld = new ZoneList();
+  readonly weatherHeld = new ZoneList();
+  readonly gradeHeld = new ZoneList();
   /** Every no-build zone (its tag the record's index in `records`). */
   readonly noBuild = new ZoneList();
   readonly records: NoBuildRecord[] = [];
@@ -209,6 +238,9 @@ export class PlaceIndex {
   /** Built again from scratch (a file landed, a state taken, the switch moved). */
   build(src: PlaceSources): this {
     this.held.clear();
+    this.envHeld.clear();
+    this.weatherHeld.clear();
+    this.gradeHeld.clear();
     this.noBuild.clear();
     this.records.length = 0;
     this.counts.ours = this.counts.city = this.counts.region = this.counts.radius = 0;
@@ -219,6 +251,9 @@ export class PlaceIndex {
     src.rows.forEach((r, i) => {
       if (!r.shape) return;
       addShape(this.held, r.shape, c, i);
+      if (r.env) addShape(this.envHeld, r.shape, c, i);
+      if (r.weather) addShape(this.weatherHeld, r.shape, c, i);
+      if (r.grade) addShape(this.gradeHeld, r.shape, c, i);
       if (!buildable(r)) {
         addShape(this.noBuild, r.shape, c, this.records.length);
         this.records.push({ why: 'ours', name: r.name ?? r.id });
@@ -278,6 +313,43 @@ export class PlaceIndex {
     if (this.held.count === 0) return null;
     const i = smallestAtAsk(this.held, this.ask);
     return i < 0 ? null : this.rows[this.held.tag[i]];
+  }
+
+  /**
+   * What the places say of the sky at the ask's point (the ninth wave), into `out`: each of `env`, `weather` and `grade`
+   * the smallest place holding the point that names it, else the world row's, else null. Allocates nothing.
+   */
+  skyAsked(out: PlaceSky): PlaceSky {
+    // `smallestAtAsk` asks at the point itself (it sets the ask's reach to nought), whatever a no-build ask left there.
+    const q = this.ask;
+    const w = this.world;
+    let i = this.envHeld.count === 0 ? -1 : smallestAtAsk(this.envHeld, q);
+    let r = i < 0 ? null : this.rows[this.envHeld.tag[i]];
+    out.env = r ? r.env! : (w?.env ?? null);
+    out.envFrom = r ? r.id : w?.env ? w.id : null;
+    i = this.weatherHeld.count === 0 ? -1 : smallestAtAsk(this.weatherHeld, q);
+    r = i < 0 ? null : this.rows[this.weatherHeld.tag[i]];
+    out.weather = r ? r.weather! : (w?.weather ?? null);
+    out.weatherFrom = r ? r.id : w?.weather ? w.id : null;
+    i = this.gradeHeld.count === 0 ? -1 : smallestAtAsk(this.gradeHeld, q);
+    r = i < 0 ? null : this.rows[this.gradeHeld.tag[i]];
+    out.grade = r ? r.grade! : (w?.grade ?? null);
+    out.gradeFrom = r ? r.id : w?.grade ? w.id : null;
+    return out;
+  }
+
+  /** What the places say of the sky at a game point, into `out`. */
+  skyAt(x: number, z: number, out: PlaceSky): PlaceSky {
+    const q = this.ask;
+    q.x = x;
+    q.z = z;
+    return this.skyAsked(out);
+  }
+
+  /** Whether any place, or the world row, names a sky field: nothing else of the sky is asked of an index without one. */
+  get hasSky(): boolean {
+    const w = this.world;
+    return this.envHeld.count > 0 || this.weatherHeld.count > 0 || this.gradeHeld.count > 0 || !!(w && (w.env || w.weather || w.grade));
   }
 
   /** The no-build zone a circle of `r` round a game point touches, or null. */
@@ -357,6 +429,26 @@ export class PlaceIndexKeeper {
     else this.index.build({ rows: file.locations.filter((r) => stands(r.state)), centre, pois: file.pois.filter((p) => stands(p.state)), noBuild: file.noBuild.filter((n) => stands(n.state)) });
     return this.index;
   }
+}
+
+/**
+ * The places file the game's index is built from (`App.placesNow`): the one held, but only while the world it was read for
+ * (`fileFor`, the pack an arrival read it for) is the world loaded now (`worldNow`, the world's own pack), else none. A world
+ * can be loaded without an arrival -- the creator's captured place (`showScene`) -- and every reader of the index (the
+ * weather's family and kind, the grade, the no-build verdicts) would otherwise read the last world's rows about the new
+ * world's centre. Allocates nothing.
+ */
+export function placesFileFor<T>(file: T | null, fileFor: string, worldNow: string): T | null {
+  return file !== null && fileFor === worldNow ? file : null;
+}
+
+/**
+ * The world row of a world's locations rows that stands in the world's state now (`stands`, `standsIn`), or null: what the
+ * world's own climate, fog, wind and clouds are read from (the ninth wave), which need no frame of the world's.
+ */
+export function worldRowOf(rows: readonly LocationRow[], stands: (state?: string | null) => boolean): LocationRow | null {
+  for (const r of rows) if (r.kind === 'world' && stands(r.state)) return r;
+  return null;
 }
 
 /**

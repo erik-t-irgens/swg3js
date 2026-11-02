@@ -2,10 +2,11 @@
 // place a row, read and written by every build alike. Held here: a place reads back as it was written (its words, its three
 // switches, its shape to the bit, its loading lines, its state); the world row is id `world` with no shape and the only row
 // that may carry `cities`; a bad row is skipped and named and a bad header refuses the file whole; the backstops
-// (`LOCATION_LIMITS`) hold; the text is one line a place, sorted, so a change to one is a change to one line; the later
-// waves' fields (a place's `env`, the world row's `climate`, `light`) are kept quietly and carried across a put by the batch;
-// and the batch writes it: a put minted from its name, `was` held, an undo putting the file back byte for byte, the last
-// place out taking the file.
+// (`LOCATION_LIMITS`) hold; the text is one line a place, sorted, so a change to one is a change to one line; the ninth
+// wave's sky fields (a place's `env`, `weather` and `grade`, the world row's `climate`, `fog`, `wind` and `clouds`) read
+// back as written and are refused in their words where they are wrong; Light and shadow's `light` is kept quietly and
+// carried across a put by the batch; and the batch writes it: a put minted from its name, `was` held, an undo putting the
+// file back byte for byte, the last place out taking the file.
 //
 // Run: node tools/swg/tests/locationsFile.test.ts
 import assert from 'node:assert/strict';
@@ -69,10 +70,10 @@ const town = (id: string, extra: Partial<LocationRow> = {}): LocationRow => ({ i
   ok(typeof bad({ ...town('x'), loading: Array.from({ length: LOCATION_LIMITS.lines + 1 }, () => 'a') }) === 'string' && typeof bad({ ...town('x'), loading: ['x'.repeat(LOCATION_LIMITS.lineWords + 1)] }) === 'string', `past ${LOCATION_LIMITS.lines} loading lines, or a line past ${LOCATION_LIMITS.lineWords}, is refused`);
   ok(typeof bad({ ...town('x'), map: 'yes' }) === 'string' && typeof bad({ ...town('x'), state: 'ruins' }) === 'string', 'a switch that is not true or false, a state that is not a tag, are refused');
   const unknown: string[] = [];
-  readLocationRow({ ...town('u'), env: 'mos_eisley', flavour: 'sweet' }, unknown);
-  ok(unknown.join() === 'u.env,u.flavour', 'a field this build does not read is named, never dropped silently');
-  const quietly = readLocationsFile(JSON.stringify({ version: 1, world: W, frame: 'raw', rows: [{ ...town('a'), env: 'x', grade: 'y' }, { id: 'world', kind: 'world', climate: {}, light: { sun: 1 } }, { ...town('b'), flavour: 1 }] }), W, 'ground');
-  ok(quietly.rows.length === 3 && quietly.unknown.join() === 'b.flavour', "the later waves' fields are kept quietly and anything else is said");
+  readLocationRow({ ...town('u'), light: { sun: 1 }, flavour: 'sweet' }, unknown);
+  ok(unknown.join() === 'u.light,u.flavour', 'a field this build does not read is named, never dropped silently');
+  const quietly = readLocationsFile(JSON.stringify({ version: 1, world: W, frame: 'raw', rows: [{ ...town('a'), light: { x: 1 } }, { id: 'world', kind: 'world', light: { sun: 1 } }, { ...town('b'), flavour: 1 }] }), W, 'ground');
+  ok(quietly.rows.length === 3 && quietly.unknown.join() === 'b.flavour', "Light and shadow's light is kept quietly and anything else is said");
   const mixed = readLocationsFile(JSON.stringify({ version: 1, world: W, frame: 'raw', rows: [town('a'), { id: 'b', kind: 'city' }, town('a'), { id: 'world', kind: 'world' }, { id: 'world', kind: 'world' }] }), W, 'ground');
   ok(mixed.rows.length === 2 && mixed.skipped.length === 3 && mixed.skipped.filter((s) => /second place/.test(s.why)).length === 2, 'a bad row, a second row under one id and a second world row are skipped and named, the rest read');
   const full = readLocationsFile(JSON.stringify({ version: 1, world: W, frame: 'raw', rows: Array.from({ length: LOCATION_LIMITS.rows + 2 }, (_, i) => town(`t${i}`)) }), W, 'ground');
@@ -111,17 +112,65 @@ const town = (id: string, extra: Partial<LocationRow> = {}): LocationRow => ({ i
   ok(copies.status === 409, "the dungeons' world of copies keeps none");
   const broken = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'locations', put: { id: 'x', kind: 'city', shape: { kind: 'circle', c: [0, 0], r: 0 } } }] }, {}, ctx(9000));
   ok(broken.status === 400 && /radius/.test((broken.body as { why: string }).why), 'a broken place is refused in its words');
-  const strange = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'locations', put: { ...town('x'), env: 'mos_eisley' } }] }, {}, ctx(9500));
+  const strange = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'locations', put: { ...town('x'), light: { sun: 1 } } }] }, {}, ctx(9500));
   ok(strange.status === 400 && /does not write/.test((strange.body as { why: string }).why), 'a field this build does not write is refused from the editor (only a file may carry one)');
-  // A `light` block (Light and shadow's) and a place's `env` (the ninth wave's) kept across a put: the editor writes the row
-  // clean, and the batch carries what the file's row held that this build does not read.
-  const held = locationsFileText(W, 'raw', [{ ...town('dune-town'), env: 'mos_eisley', at: 10 }, { id: 'world', kind: 'world', light: { sun: [1, 0.9, 0.8] }, loading: ['x'], at: 10 }] as never);
+  const sky = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'locations', put: { ...town('x'), env: 'moseisley', weather: 'dust', grade: { warmth: 0.4 } } }] }, {}, ctx(9600));
+  ok(sky.status === 200 && /"env": "moseisley", "weather": "dust", "grade": \{"warmth":0\.4\}/.test(sky.writes[0].text as string), "the ninth wave's sky fields are written by this build's batch");
+  // A `light` block (Light and shadow's) kept across a put: the editor writes the row clean, and the batch carries what the
+  // file's row held that this build does not read.
+  const held = locationsFileText(W, 'raw', [{ ...town('dune-town'), light: { lamp: 2 }, at: 10 }, { id: 'world', kind: 'world', light: { sun: [1, 0.9, 0.8] }, loading: ['x'], at: 10 }] as never);
   const base = readLocationsFile(held, W, 'ground');
   const was = base.rows.find((r) => r.id === 'world')!;
   const kept = applyPlacementOp({ op: 'batch', world: W, edits: [{ file: 'locations', put: { id: 'world', kind: 'world', loading: ['y'] }, was }, { file: 'locations', put: { ...town('dune-town'), build: false }, was: base.rows.find((r) => r.id === 'dune-town')! }] }, { locations: held }, ctx(11000));
   const keptText = kept.writes[0].text as string;
   ok(kept.status === 200 && /"loading": \["y"\], "at": 11000, "light": \{"sun":\[1,0\.9,0\.8\]\}/.test(keptText), "a light block on the world row is kept across a put that rewrote its loading lines");
-  ok(/"build": false, "shape": .*"at": 11000, "env": "mos_eisley"/.test(keptText), "and a place's env across a put that made it no-build");
+  ok(/"build": false, "shape": .*"at": 11000, "light": \{"lamp":2\}/.test(keptText), "and a place's light across a put that made it no-build");
+}
+
+{
+  // The sky per place (the ninth wave): read back as written, in the file's order, and refused in its words where it is wrong.
+  const place = town('dune-town', { env: 'moseisley', weather: 'snow', grade: { gloom: 0.3, warmth: -0.5, strength: 1.5 }, at: 3 });
+  const world: LocationRow = { id: 'world', kind: 'world', env: 'desert', grade: { heat: 0.2 }, climate: [40, 30, 20, 10, 5], fog: { morning: 0.6, evening: 0.3, morningLo: 0.4, morningHi: 0.9, eveningLo: 0.1, eveningHi: 0.3, top: 6 }, wind: { gust: 1.5, devils: 0 }, clouds: { cover: 1.25, height: 0.8, depth: 1.5, density: 2 } };
+  const text = locationsFileText(W, 'raw', [place, world] as never);
+  const read = readLocationsFile(text, W, 'ground');
+  ok(read.problem === null && read.rows.length === 2 && read.unknown.length === 0 && read.skipped.length === 0, 'a place with a sky and a world row with its own read back whole');
+  ok(sameLocationRow(read.rows.find((r) => r.id === 'dune-town')!, place) && sameLocationRow(read.rows.find((r) => r.id === 'world')!, world), 'each as written, every field');
+  ok(!sameLocationRow({ ...place, grade: { gloom: 0.31, warmth: -0.5, strength: 1.5 } }, place) && !sameLocationRow({ ...world, climate: [40, 30, 20, 10, 6] }, world) && !sameLocationRow({ ...place, weather: 'rain' }, place), 'a grade, a climate or a weather moved is another row');
+  ok(/"name": "Dune Town", "env": "moseisley", "weather": "snow", "grade": \{"gloom":0\.3,"warmth":-0\.5,"strength":1\.5\}, "shape"/.test(text) && /"kind": "world", "env": "desert", "grade": \{"heat":0\.2\}, "climate": \[40,30,20,10,5\], "fog": \{"morning":0\.6,/.test(text), 'the sky written after the switches and before the lines and the shape');
+  const r = readLocationRow({ ...town('x'), grade: { contrast: 0.1, gloom: 0.2 } });
+  ok(typeof r !== 'string' && JSON.stringify(r.grade) === '{"gloom":0.2,"contrast":0.1}', "a grade's fields cleaned in one fixed order, so its text is the same however it was handed");
+  const bad = (row: unknown) => readLocationRow(row);
+  ok(typeof bad({ ...town('x'), env: 'a\u0001b' }) === 'string' && typeof bad({ ...town('x'), env: '' }) === 'string' && typeof bad({ ...town('x'), env: 'x'.repeat(65) }) === 'string', "an env with a control character, empty or past 64 is refused");
+  ok(typeof bad({ ...town('x'), weather: 'hail' }) === 'string', 'a weather kind not rain, dust or snow is refused');
+  ok(typeof bad({ ...town('x'), grade: { murk: 1 } }) === 'string' && typeof bad({ ...town('x'), grade: { gloom: 1.5 } }) === 'string' && typeof bad({ ...town('x'), grade: {} }) === 'string' && typeof bad({ ...town('x'), grade: 'dark' }) === 'string', 'a grade naming a field it has not got, past its backstop, naming nothing or not an object is refused');
+  for (const k of ['climate', 'fog', 'wind', 'clouds'] as const) ok(/world row's alone/.test(String(bad({ ...town('x'), [k]: (world as unknown as Record<string, unknown>)[k] }))), `${k} on a place is refused: the world row's alone`);
+  ok(typeof bad({ id: 'world', kind: 'world', climate: [] }) === 'string' && typeof bad({ id: 'world', kind: 'world', climate: [0, 0] }) === 'string' && typeof bad({ id: 'world', kind: 'world', climate: [5, -1] }) === 'string' && typeof bad({ id: 'world', kind: 'world', climate: new Array(9).fill(1) }) === 'string', 'a climate empty, all nought, with a weight under nought or of more than eight levels is refused');
+  ok(/all of/.test(String(bad({ id: 'world', kind: 'world', fog: { morning: 0.5 } }))) && typeof bad({ id: 'world', kind: 'world', fog: { ...world.fog, morning: 1.5 } }) === 'string', 'a fog look is all seven numbers, each within its backstop');
+  ok(typeof bad({ id: 'world', kind: 'world', wind: { breeze: 2 } }) === 'string' && typeof bad({ id: 'world', kind: 'world', wind: { gust: 30 } }) === 'string', "a wind naming a multiplier it has not got, or past the wind's own ends, is refused");
+  ok(typeof bad({ id: 'world', kind: 'world', clouds: { height: 0 } }) === 'string' && typeof bad({ id: 'world', kind: 'world', clouds: { tint: 1 } }) === 'string', "a cloud deck's height of nought, or a multiplier it has not got, is refused");
+  // Every backstop's ends, as the design wrote them: each end taken, a hundredth past it refused.
+  const ENDS: [string, string, number, number][] = [
+    ['grade', 'gloom', 0, 1], ['grade', 'heat', 0, 1], ['grade', 'warmth', -1, 1], ['grade', 'cool', 0, 1], ['grade', 'saturation', -0.5, 0.5], ['grade', 'contrast', -0.2, 0.2], ['grade', 'strength', 0, 4],
+    ['wind', 'floor', 0, 20], ['wind', 'gust', 0, 20], ['wind', 'devils', 0, 20],
+    ['clouds', 'cover', 0, 4], ['clouds', 'height', 0.05, 20], ['clouds', 'depth', 0.05, 20], ['clouds', 'density', 0, 20],
+  ];
+  let held = 0;
+  const misses: string[] = [];
+  for (const [g, k, lo, hi] of ENDS) {
+    const row = (v: number) => (g === 'grade' ? { ...town('x'), grade: { [k]: v } } : { id: 'world', kind: 'world', [g]: { [k]: v } });
+    const fine = typeof bad(row(lo)) !== 'string' && typeof bad(row(hi)) !== 'string';
+    const past = typeof bad(row(lo - 0.01)) === 'string' && typeof bad(row(hi + 0.01)) === 'string';
+    if (fine && past) held++;
+    else misses.push(`${g}.${k}`);
+  }
+  for (const [k, lo, hi] of [['morning', 0, 1], ['evening', 0, 1], ['morningLo', 0, 4], ['morningHi', 0, 4], ['eveningLo', 0, 4], ['eveningHi', 0, 4], ['top', 0, 100]] as [string, number, number][]) {
+    const row = (v: number) => ({ id: 'world', kind: 'world', fog: { ...world.fog, [k]: v } });
+    if (typeof bad(row(lo)) !== 'string' && typeof bad(row(hi)) !== 'string' && typeof bad(row(lo - 0.01)) === 'string' && typeof bad(row(hi + 0.01)) === 'string') held++;
+    else misses.push(`fog.${k}`);
+  }
+  ok(misses.length === 0, `every grade, wind, cloud and fog number held to its backstop's ends (${held} of ${ENDS.length + 7}${misses.length ? `; not: ${misses.join(', ')}` : ''})`);
+  const w2 = readLocationRow({ id: 'world', kind: 'world', wind: { gust: 2 }, clouds: { cover: 0.5 } });
+  ok(typeof w2 !== 'string' && JSON.stringify(w2.wind) === '{"gust":2}' && JSON.stringify(w2.clouds) === '{"cover":0.5}', 'a wind or clouds of one multiplier keeps that one alone (the rest are the tables\' own)');
 }
 
 console.log(`locationsFile: ${checks} checks passed`);

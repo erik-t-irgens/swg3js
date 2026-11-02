@@ -163,8 +163,50 @@ export class CloudsFeedInput {
   groundAt: ((q: { readonly x: number; readonly z: number }) => number | null) | null = null;
   /** The console's: the low deck held on (true), off (false) or as the weather says (null). */
   lowForce: boolean | null = null;
+  /**
+   * A world's own multipliers on its decks (Map-maker II's ninth wave: its locations file's world row's `clouds`), each NaN
+   * where the row sets none: the decks' cover (the pictures' gain, the overcast's and the low deck's cover), height (the
+   * high slab's floor and the low deck's over its ground), depth (each deck's thickness) and density (the march's).
+   */
+  cloudCover = Number.NaN;
+  cloudHeight = Number.NaN;
+  cloudDepth = Number.NaN;
+  cloudDensity = Number.NaN;
   constructor() {
     this.dt = 0;
+  }
+  /**
+   * The world row's multipliers on the decks (Map-maker II's ninth wave) taken for the frame, where they are for the world
+   * loaded now (`packNow`), NaN otherwise, which the feed reads as the tune's own numbers. Allocates nothing.
+   */
+  takeWorld(wc: WorldClouds, packNow: string): void {
+    const own = wc.pack === packNow;
+    this.cloudCover = own ? wc.cover : Number.NaN;
+    this.cloudHeight = own ? wc.height : Number.NaN;
+    this.cloudDepth = own ? wc.depth : Number.NaN;
+    this.cloudDensity = own ? wc.density : Number.NaN;
+  }
+}
+
+/**
+ * A world's own multipliers on its decks as the game keeps them (Map-maker II's ninth wave: its locations file's world row's
+ * `clouds`, `App.worldClouds`) and the pack they are for, NaN where the row sets none. Written whole by `set` whenever the
+ * world's places are shown again; read each frame by `CloudsFeedInput.takeWorld`.
+ */
+export class WorldClouds {
+  pack = '';
+  cover = Number.NaN;
+  height = Number.NaN;
+  depth = Number.NaN;
+  density = Number.NaN;
+  /** A world row's clouds for `pack` (none: every multiplier NaN), each one it sets and NaN for the rest. */
+  set(pack: string, clouds: { readonly cover?: number; readonly height?: number; readonly depth?: number; readonly density?: number } | null | undefined): this {
+    this.pack = pack;
+    this.cover = clouds?.cover ?? Number.NaN;
+    this.height = clouds?.height ?? Number.NaN;
+    this.depth = clouds?.depth ?? Number.NaN;
+    this.density = clouds?.density ?? Number.NaN;
+    return this;
   }
 }
 
@@ -401,26 +443,65 @@ export class AirCloudsFeed {
    */
   calibrateCheck(dt: number): void {
     this.calDt = dt;
+    this.worldNumbers();
     this.calibrateNow();
   }
   /** The step `calibrateNow` counts the stillness by (a field, so no number is handed across a call in a frame). */
   private calDt = 0.5;
+
+  /**
+   * The decks' numbers in force (Map-maker II's ninth wave): `AIR_TUNE`'s own, each with a world row's multiplier laid on it
+   * where the row sets one (`input.cloud*`, NaN where it sets none, so a world with no row reads the very numbers the tune
+   * holds). Cover multiplies the pictures' gain, the overcast's cover and the low deck's wet cover (its fair cover is the
+   * lower deck's own, already covered); height the high slab's floor and the low deck's over its ground; depth each deck's
+   * thickness; density the march's. The curves are measured by the numbers in force, so a deck is cut as it is drawn.
+   */
+  private worldNumbers(): void {
+    const I = this.input;
+    const C = AIR_TUNE.clouds;
+    const LD = AIR_TUNE.lowDeck;
+    const k = I.cloudCover;
+    const h = I.cloudHeight;
+    const d = I.cloudDepth;
+    const rho = I.cloudDensity;
+    const hasK = k === k;
+    const hasH = h === h;
+    const hasD = d === d;
+    this.eGain = hasK ? C.gain * k : C.gain;
+    this.eOvercast = hasK ? C.overcastCover * k : C.overcastCover;
+    this.eLowCover = hasK ? LD.cover * k : LD.cover;
+    this.eBottom = hasH ? C.bottom * h : C.bottom;
+    this.eTop = hasH || hasD ? this.eBottom + (C.top - C.bottom) * (hasD ? d : 1) : C.top;
+    this.eLowFloor = hasH ? LD.floor * h : LD.floor;
+    this.eLowDepth = hasD ? LD.depth * d : LD.depth;
+    this.eDensity = rho === rho ? C.density * rho : C.density;
+  }
+  /** The decks' numbers in force this frame (`worldNumbers`), doubles from the start. */
+  private eGain = 0.5;
+  private eOvercast = 0.5;
+  private eLowCover = 0.5;
+  private eBottom = 0.5;
+  private eTop = 0.5;
+  private eLowFloor = 0.5;
+  private eLowDepth = 0.5;
+  private eDensity = 0.5;
+
   private calibrateNow(): void {
     const dt = this.calDt;
     if (!this.worker || !this.noiseFiles) return;
     const C = AIR_TUNE.clouds;
     const LD = AIR_TUNE.lowDeck;
     const n = this.calNow;
-    n[0] = C.density;
+    n[0] = this.eDensity;
     n[1] = C.detailBite;
     n[2] = C.erodeBite;
     n[3] = C.feather;
     n[4] = C.baseScale;
     n[5] = C.detailScale;
-    n[6] = C.bottom;
-    n[7] = C.top;
+    n[6] = this.eBottom;
+    n[7] = this.eTop;
     n[8] = LD.scale;
-    n[9] = LD.depth;
+    n[9] = this.eLowDepth;
     let same = true;
     for (let i = 0; i < 10; i++) if (!(n[i] === this.calAsked[i])) same = false;
     if (same) return;
@@ -430,12 +511,12 @@ export class AirCloudsFeed {
     const lowOnly = !(this.calAsked[0] === this.calAsked[0]);
     this.calAsked.set(n);
     const id = ++this.workerAsk;
-    const M = { steps: 64, density: C.density, detailBite: C.detailBite, erodeBite: C.erodeBite, feather: C.feather };
+    const M = { steps: 64, density: this.eDensity, detailBite: C.detailBite, erodeBite: C.erodeBite, feather: C.feather };
     const jobs: { which: 'high' | 'low'; march: Record<string, number>; decks: number }[] = [];
-    const manifestMarch = C.density === 0.055 && C.detailBite === 0.32 && C.erodeBite === 0.35 && C.feather === 0.22 && C.baseScale === 4200 && C.detailScale === 260 && C.bottom === 1500 && C.top === 2300;
+    const manifestMarch = this.eDensity === 0.055 && C.detailBite === 0.32 && C.erodeBite === 0.35 && C.feather === 0.22 && C.baseScale === 4200 && C.detailScale === 260 && this.eBottom === 1500 && this.eTop === 2300;
     if (!lowOnly || !manifestMarch) {
       if (!manifestMarch) {
-        jobs.push({ which: 'high', march: { ...M, bottom: C.bottom, top: C.top, baseScale: C.baseScale, detailScale: C.detailScale }, decks: 2 });
+        jobs.push({ which: 'high', march: { ...M, bottom: this.eBottom, top: this.eTop, baseScale: C.baseScale, detailScale: C.detailScale }, decks: 2 });
         this.askedHigh = id;
       } else if (this.calibration.high === 'worker' || this.askedHigh > 0) {
         // Back at the manifest's own march: its curve again, with no worker needed, and a high curve still on its way from
@@ -446,7 +527,7 @@ export class AirCloudsFeed {
         this.askedHigh = id;
       }
     }
-    jobs.push({ which: 'low', march: { ...M, steps: 32, bottom: 0, top: LD.depth > 1 ? LD.depth : 1, baseScale: C.baseScale * LD.scale, detailScale: C.detailScale * LD.scale }, decks: 1 });
+    jobs.push({ which: 'low', march: { ...M, steps: 32, bottom: 0, top: this.eLowDepth > 1 ? this.eLowDepth : 1, baseScale: C.baseScale * LD.scale, detailScale: C.detailScale * LD.scale }, decks: 1 });
     this.askedLow = id;
     const f = this.noiseFiles;
     this.worker.postMessage({ id, baseUrl: f.baseUrl, detailUrl: f.detailUrl, baseSize: f.baseSize, detailSize: f.detailSize, rays: 32, jobs });
@@ -490,6 +571,7 @@ export class AirCloudsFeed {
     WIND_STATE.decks = true;
     this.dtNow = I.dt > 0 && I.dt < 1 ? I.dt : 0;
     this.calDt = this.dtNow;
+    this.worldNumbers();
     this.calibrateNow();
     const sky = I.sky;
     if (!sky) {
@@ -675,7 +757,7 @@ export class AirCloudsFeed {
     wv.w = this.billowTop;
     this.weatherU.uSlabU.value.w = tx;
     const lk = this.weatherU.uLook.value;
-    lk.x = C.gain;
+    lk.x = this.eGain;
     lk.y = C.extent;
     lk.z = C.thin;
     lk.w = t.cloudsArt;
@@ -701,7 +783,7 @@ export class AirCloudsFeed {
     const ti = this.top.images;
     this.presBottom = (bi[0].texture ? bi[0].weight : 0) + (bi[1].texture ? bi[1].weight : 0);
     this.presTop = (ti[0].texture ? ti[0].weight : 0) + (ti[1].texture ? ti[1].weight : 0);
-    const oc = this.overcast * C.overcastCover;
+    const oc = this.overcast * this.eOvercast;
     this.ocNow = oc;
     const pb = 1 - (this.presBottom < 1 ? this.presBottom : 1);
     const pt = 1 - (this.presTop < 1 ? this.presTop : 1);
@@ -738,8 +820,8 @@ export class AirCloudsFeed {
     const LD = AIR_TUNE.lowDeck;
     const M = this.marchU;
     const hi = M.uHigh.value;
-    hi.x = C.bottom;
-    hi.y = C.top;
+    hi.x = this.eBottom;
+    hi.y = this.eTop;
     hi.z = t.cloudsSteps;
     hi.w = t.cloudsLight;
     const er = M.uErode.value;
@@ -748,7 +830,7 @@ export class AirCloudsFeed {
     er.z = C.layerDepth;
     er.w = C.layerErode;
     const de = M.uDens.value;
-    de.x = C.density;
+    de.x = this.eDensity;
     de.y = C.lightDensity;
     de.z = C.powder;
     de.w = C.feather;
@@ -802,8 +884,8 @@ export class AirCloudsFeed {
     holes.low.dx = this.dlx;
     holes.low.dz = this.dlz;
     holes.high.on = t.cloudsHoles && this.coverBottom + this.coverTop > C.minCoverage;
-    holes.high.bottom = C.bottom;
-    holes.high.top = C.top;
+    holes.high.bottom = this.eBottom;
+    holes.high.top = this.eTop;
     holes.high.dx = this.dhx;
     holes.high.dz = this.dhz;
     if (I.simulate) {
@@ -955,7 +1037,7 @@ export class AirCloudsFeed {
       const file = im.file;
       if (!file || !im.texture) continue;
       const p = this.numbersOf(file);
-      const g = (p ? p.coverage : 0.12) * C.gain;
+      const g = (p ? p.coverage : 0.12) * this.eGain;
       cv += im.weight * (g < 1 ? g : 1);
     }
     if (slot === 0) this.coverBottom = cv + this.poB * this.ocNow;
@@ -1052,7 +1134,7 @@ export class AirCloudsFeed {
     const LD = AIR_TUNE.lowDeck;
     const dt = this.dtNow;
     const force = I.lowForce;
-    const wet = this.overcast * LD.cover;
+    const wet = this.overcast * this.eLowCover;
     const fair = LD.fair * this.coverBottom;
     const wanted = force === true ? 1 : force === false ? 0 : wet > fair ? wet : fair;
     this.low = t.cloudsLow && !I.space ? (wanted < 1 ? wanted : 1) : 0;
@@ -1076,10 +1158,10 @@ export class AirCloudsFeed {
       const ease = LD.groundEase > 1e-3 ? LD.groundEase : 1e-3;
       this.ground += (this.groundTarget - this.ground) * (1 - Math.exp(-dt / ease));
     } else this.ground = I.camY - 2;
-    const floor = this.ground + LD.floor;
+    const floor = this.ground + this.eLowFloor;
     const ul = this.marchU.uLow.value;
     ul.x = floor;
-    ul.y = floor + (LD.depth > 1 ? LD.depth : 1);
+    ul.y = floor + (this.eLowDepth > 1 ? this.eLowDepth : 1);
     ul.z = this.low > 0 ? LD.steps : 0;
     ul.w = LD.reach;
     const cq = this.cutQuery;
@@ -1123,6 +1205,17 @@ export class AirCloudsFeed {
       },
       overcast: r2(this.overcast),
       low: { on: this.low > 0, cover: r2(this.low), floor: Math.round(this.marchU.uLow.value.x), top: Math.round(this.marchU.uLow.value.y), cut: r2(this.marchU.uLowP.value.x), ground: Math.round(this.ground) },
+      // The decks' numbers in force (Map-maker II's ninth wave): the tune's, with a world row's multipliers laid on where it sets them.
+      numbers: { bottom: Math.round(this.eBottom), top: Math.round(this.eTop), density: Math.round(this.eDensity * 10000) / 10000, gain: r2(this.eGain), overcastCover: r2(this.eOvercast), lowCover: r2(this.eLowCover), lowFloor: Math.round(this.eLowFloor), lowDepth: Math.round(this.eLowDepth) },
+      world: (() => {
+        const I = this.input;
+        const o: Record<string, number> = {};
+        if (I.cloudCover === I.cloudCover) o.cover = I.cloudCover;
+        if (I.cloudHeight === I.cloudHeight) o.height = I.cloudHeight;
+        if (I.cloudDepth === I.cloudDepth) o.depth = I.cloudDepth;
+        if (I.cloudDensity === I.cloudDensity) o.density = I.cloudDensity;
+        return Object.keys(o).length ? o : null;
+      })(),
       winds: { bottom: r2(Math.hypot(this.weatherU.uDeckU.value.x, this.weatherU.uDeckU.value.y)), top: r2(Math.hypot(this.weatherU.uDeckU.value.z, this.weatherU.uDeckU.value.w)), slab: r2(Math.hypot(this.weatherU.uSlabU.value.x, this.weatherU.uSlabU.value.y)), low: r2(Math.hypot(this.lowWindU.uLowU.value.x, this.lowWindU.uLowU.value.y)) },
       offsets: { high: [r2(this.dhx), r2(this.dhz)], low: [r2(this.dlx), r2(this.dlz)] },
       holes: { remembered: this.holes.remembered, waiting: this.holes.pendCount, stamped: this.holes.stamped, dropped: this.holes.dropped, live: [this.holes.live(0), this.holes.live(1)] },
