@@ -2029,8 +2029,10 @@ export class Editor {
       yaw = 2 * Math.atan2(q.y, q.w);
     } else q.setFromAxisAngle(UP, yaw);
     // What was in hand before goes back first (a row picked up stands again), and any tool is let go: its buttons are the hand's now.
+    // The Tools tab shows the armed tool's own sections, so a tool let go here (a hotbar key or the middle button takes a thing
+    // in hand with a tool armed) is drawn let go.
     this.giveUpHand();
-    this.tools.disarmAll();
+    if (this.tools.disarmAll()) this.window?.refreshEdits();
     this.takeGen = gen;
     const bounds = got.bounds;
     const sc = base && !got.building ? scaleOfRow(base.row) : ([1, 1, 1] as [number, number, number]);
@@ -2076,7 +2078,7 @@ export class Editor {
     const a = attachOfEntry(e);
     if (!a) return this.refuse(`${entryName(e)} is no effect or sound`);
     this.giveUpHand();
-    this.tools.disarmAll();
+    if (this.tools.disarmAll()) this.window?.refreshEdits();
     const attach: RowAttach = 'fx' in a ? { fx: a.fx } : { snd: a.snd };
     if (attach.fx && ATTACH_TUNE.size !== 1) attach.size = ATTACH_TUNE.size;
     this.hand = {
@@ -2729,7 +2731,7 @@ export class Editor {
     if (!h.reloadImports) return 'this game has no Reload imports';
     if (!this.session.on) return "Reload imports is the world editor's: F2 first";
     this.giveUpHand();
-    this.tools.disarmAll();
+    if (this.tools.disarmAll()) this.window?.refreshEdits();
     const said = await h.reloadImports();
     this.libLoading = null;
     await this.loadLibrary();
@@ -4295,7 +4297,10 @@ export class Editor {
       if (o.brush && typeof o.brush === 'object') said.push(...(await this.brushDebug(o.brush as Record<string, unknown>)));
       // Map-maker II's Tools list: a tool armed (or let go) by its id, as its key would; null lets whatever is armed go.
       if (typeof o.tool === 'string') said.push(await this.toggleTool(o.tool));
-      else if (o.tool === null && this.tools.disarmAll()) said.push('every tool let go');
+      else if (o.tool === null && this.tools.disarmAll()) {
+        said.push('every tool let go');
+        this.window?.refreshEdits();
+      }
     }
     const p = h.player.pos;
     const c = h.world.placeFrame;
@@ -4440,6 +4445,7 @@ export class Editor {
     if (b.arm === false && br.armed) {
       br.disarm();
       said.push('the brush let go');
+      this.window?.refreshEdits();
     }
     const st = b.stroke as Record<string, unknown> | undefined;
     if (st && typeof st === 'object') {

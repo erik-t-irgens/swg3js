@@ -203,7 +203,20 @@ function after(src: string, marker: string, n = 2000): string {
   // Map-maker II's groundwork: the brush is the Tools list's first entry, and the list's frame, ring and lettings-go are its.
   ok(/const tool = this\.tools\.armedTool;\s*if \(tool\) \{[\s\S]{0,1600}tool\.step\(f\);\s*\}\s*\/\/[^\n]*\n\s*this\.noteActivity\(now\);/.test(aftercam), "the armed tool's frame runs from the aim just cast, before the quiet the automatic fold waits for is noted");
   ok(aftercam.indexOf('tool.draw(this.toolDraw);') > 0 && aftercam.indexOf('tool.draw(this.toolDraw);') < aftercam.indexOf('this.edits.frame(m);') && /brushRing\(ringAsk, ringGround, vp\.elements, marks\.ring, marks\.ringVis\);/.test(ed), "the armed tool's rings are projected from this frame's camera (`brushRing`)");
-  ok(/this\.giveUpHand\(\);\s*this\.tools\.disarmAll\(\);\s*this\.takeGen = gen;/.test(ed), 'taking a thing in hand lets the armed tool go');
+  ok(/this\.giveUpHand\(\);\s*if \(this\.tools\.disarmAll\(\)\) this\.window\?\.refreshEdits\(\);\s*this\.takeGen = gen;/.test(ed), 'taking a thing in hand lets the armed tool go, and the window draws it let go');
+  {
+    // Wave UI: the Tools tab shows the armed tool's own sections alone, so every way a tool is let go while the window shows
+    // draws the window again (leaving the editor and the world going hide it); a let-go left undrawn kept the old tool's
+    // sections, and its button's "armed", on the tab.
+    const stale: string[] = [];
+    for (let i = ed.indexOf('this.tools.disarmAll()'); i >= 0; i = ed.indexOf('this.tools.disarmAll()', i + 1)) {
+      const heads = [...ed.slice(0, i).matchAll(/\n  (?:(?:private|public|async|static) )*([A-Za-z]\w*)\([^\n]*\)(?:: [^\n{]+)? \{\n/g)];
+      const method = heads[heads.length - 1]?.[1] ?? '?';
+      if (method === 'leaveBody' || method === 'worldGone') continue;
+      if (!ed.slice(i, i + 160).includes('this.window?.refreshEdits()')) stale.push(`${method} at ${ed.slice(0, i).split('\n').length}`);
+    }
+    ok(stale.length === 0, `every tool let go while the window shows is drawn let go${stale.length ? ` (not: ${stale.join(', ')})` : ''}`);
+  }
   // From Map-maker II's fifth wave a tool with something of its own under way (the water tool's draft, its picked lake) is
   // asked first and gives that up rather than being let go.
   ok(/const armed = this\.tools\.armedTool;\s*if \(armed\?\.escape\?\.\(\)\) \{\s*this\.window\?\.refreshEdits\(\);\s*return true;\s*\}\s*if \(armed\) \{\s*this\.tools\.disarmAll\(\);\s*this\.say\(`\$\{armed\.label\} let go`, true\);/.test(after(ed, '  escape(): boolean {', 1600)), 'Escape asks the armed tool first, then lets it go, before it clears the selection');

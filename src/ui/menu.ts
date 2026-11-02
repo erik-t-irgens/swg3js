@@ -1,13 +1,14 @@
 // The Escape menu: resume, switch character, and the settings pages (the keys, with a primary
 // and a secondary for every action, and the graphics, every knob the game has, applied live).
-import { DEFAULT_BINDINGS, controlsActions, type Action, type Input } from '../core/input';
-import { DEFAULT_SETTINGS, saveSettings, type Settings } from '../core/settings';
+import { DEFAULT_BINDINGS, controlsActions, type Action, type Input } from '../core/input.ts';
+import { DEFAULT_SETTINGS, saveSettings, type Settings } from '../core/settings.ts';
 import { FX_KNOBS, fxPassDef, fxProductDef } from '../core/fxRegistry.ts';
 import { INTERFACE, notifyBindingsChanged, onBindingsChanged, type Knob } from './hudPage.ts';
 import { keyLabel } from './hud.ts';
 import { GAMEPLAY } from './gameplayPage.ts';
 import { FLORA } from './floraPage.ts';
 import { VOLUMETRICS } from './volPage.ts';
+import { GraphicsLayout, graphicsMarkup, wireGraphics } from './graphicsPage.ts';
 import { multiplayerMarkup, type CharacterCopy } from './multiplayerPage.ts';
 import { resetWindows } from './drag.ts';
 import { compilerVerdict, verdictNote } from '../core/shaderWatch.ts';
@@ -333,7 +334,14 @@ export class Menu {
   /** The multiplayer page's source. */
   net: NetSource | null = null;
 
-  constructor(parent: HTMLElement, private readonly input: Input, private readonly settings: Settings) {
+  private readonly input: Input;
+  private readonly settings: Settings;
+  /** The Graphics page's sub-tab, find and folds (`graphicsPage.ts`), kept between its drawings. */
+  private readonly gfx = new GraphicsLayout();
+
+  constructor(parent: HTMLElement, input: Input, settings: Settings) {
+    this.input = input;
+    this.settings = settings;
     this.root = document.createElement('div');
     this.root.id = 'menu';
     this.root.className = 'overlay hidden';
@@ -413,11 +421,14 @@ export class Menu {
     const was = this.open;
     this.cancelCapture();
     this.root.classList.add('hidden');
+    // A find on the Graphics page lasts while the menu stands on it.
+    this.gfx.find = '';
     if (was) this.onUiSound('panelClose');
   }
 
   private showPage(page: Page): void {
     this.cancelCapture();
+    if (page !== 'graphics') this.gfx.find = '';
     this.page = page;
     for (const b of this.root.querySelectorAll<HTMLButtonElement>('.menu-nav button[data-page]')) b.classList.toggle('on', b.dataset.page === page);
     const body = this.root.querySelector<HTMLElement>('.menu-body')!;
@@ -584,8 +595,18 @@ export class Menu {
         .join('')}`;
       for (const sel of body.querySelectorAll<HTMLSelectElement>('select[data-slot]')) sel.addEventListener('change', () => src.set(Number(sel.dataset.slot), sel.value || null));
     } else {
-      body.innerHTML = `<h2>Graphics</h2>${GRAPHICS.map((g) => `<h3>${g.title}</h3>${this.knobRows(g.knobs)}`).join('')}<div class="menu-actions"><button class="reset-gfx">Reset graphics to defaults</button></div>`;
+      // Its sections under sub-tabs, the Volumetrics ones folding, and a find over every row (`graphicsPage.ts`); the rows
+      // are the page's own, so drawn again from the console it stands on the same sub-tab, find and folds. A find being
+      // typed keeps the keyboard across a redraw.
+      const typing = (document.activeElement as HTMLElement | null)?.classList?.contains('gfx-find') ?? false;
+      body.innerHTML = `<h2>Graphics</h2>${graphicsMarkup(GRAPHICS, (k) => this.knobRows(k), this.gfx)}<div class="menu-actions"><button class="reset-gfx">Reset graphics to defaults</button></div>`;
       this.wireKnobs(body);
+      wireGraphics(body, this.gfx, { scroller: body, sound: (a) => this.onUiSound(a) });
+      if (typing) {
+        const find = body.querySelector<HTMLInputElement>('.gfx-find');
+        find?.focus();
+        find?.setSelectionRange(find.value.length, find.value.length);
+      }
       body.querySelector('.reset-gfx')!.addEventListener('click', () => {
         for (const g of GRAPHICS) for (const k of g.knobs) this.setValue(k.key, DEFAULT_SETTINGS[k.key]);
         this.showPage('graphics');

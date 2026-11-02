@@ -8,6 +8,14 @@
 // switch) and the brush (armed, its entries and their weights, its switches), and the editor's dials; and **History**, every action of this
 // world's session, a click going back or forward to any of them.
 //
+// Laid out to be found (the owner's ask of 2026-11-02): the Tools tab shows the Tools list across its top and below it only
+// the armed tool's own sections, or with none armed the editing's own, with what every tool shares at its foot
+// (`TOOL_SECTIONS`, one line a section); every section's heading folds, on every tab, kept in this browser (`FoldStore`);
+// and a tab drawn again, or come back to, stands where its scroll stood (`scrollMark`). A folded section is drawn whole with
+// its body hidden, so its controls keep acting; a section whose tool is not armed is not drawn at all, and what its controls
+// do still reaches the editor from the console, since every act goes through the editor (`setTool`, `sectionAct`) and never
+// through what is drawn.
+//
 // It is not a panel: it stays out of `anyPanelOpen`, so the world goes on simulating under it and the camera flies, and
 // it is clickable only in Point mode (in Fly the pointer is locked and nothing on the page is reached). A button gives
 // the keyboard back to the page after a click, and a field gives it back when it is left, so WASD still flies; nothing in
@@ -19,7 +27,78 @@ import type { DialSet, NumberDial } from './dials.ts';
 import { draggable } from './drag.ts';
 import { LibraryUi, type LibraryHost } from './libraryUi.ts';
 import { DyePicker, hexOf, rawFromHex, type PickerRow, type PickerSource } from './dyePicker.ts';
+import { FoldStore, restoreScroll, scrollMark, type ScrollMark } from './folds.ts';
 import { isRawColour, rawRgb } from '../player/texrender.ts';
+
+/**
+ * Which tool each section of the Tools tab belongs to (the owner's to regroup: moving a section is one line). A tool's
+ * id from the Tools list (`brush`, `sculpt`, `paint`, `water`, `places`, `zones`) shows the section only while that tool is
+ * armed; `none` only while no tool is; `always` at the foot whatever is armed. A section is the tab's own (`furnish`,
+ * `sculpt`, ...), one the editor hands the tab (`sec:` and its title) or a group of the editor's sliders (`dials:` and its
+ * title). A section this table does not name stands at the foot, so nothing a later wave adds is ever lost from view.
+ */
+export const TOOL_SECTIONS: Readonly<Record<string, string>> = {
+  // With no tool armed: the editing's own settings and the placing switches.
+  furnish: 'none',
+  attach: 'none',
+  snapping: 'none',
+  view: 'none',
+  fold: 'none',
+  "sec:The world's own": 'none',
+  'dials:The hand': 'none',
+  'dials:The hand on what is picked': 'none',
+  'dials:Snapping': 'none',
+  'dials:Looks and attachments': 'none',
+  'dials:A person put down': 'none',
+  'dials:Folding': 'none',
+  // The scatter brush (B): its entries and switches, its sliders.
+  brush: 'brush',
+  'dials:The brush': 'brush',
+  // The sculpt brush (K).
+  sculpt: 'sculpt',
+  'dials:The sculpt brush': 'sculpt',
+  // The paint brush (U): its layers, palette and the families of every world, then the world row, then its sliders.
+  paint: 'paint',
+  paintWorld: 'paint',
+  'dials:The paint brush': 'paint',
+  'dials:The plants layer': 'paint',
+  // The water tool (Z).
+  water: 'water',
+  'dials:The water tool': 'water',
+  // The places tool (P) and the world row of places (its sliders are the debug menu's `locations`).
+  places: 'places',
+  placesWorld: 'places',
+  // The no-spawn zone tool (no key of its own).
+  'sec:No-spawn zones': 'zones',
+  'dials:The no-spawn zone tool': 'zones',
+  // At the foot whatever is armed: the files and git's word, the walk grid's, and the camera's and the window's sliders.
+  files: 'always',
+  'sec:The walk grid': 'always',
+  'dials:The free camera': 'always',
+  'dials:The world while you fly': 'always',
+  'dials:The window': 'always',
+};
+
+/**
+ * The sections that start folded, by tab and section (the owner's to change, one line each): the foot's sliders, which
+ * follow every tool, so the foot stays a few headings long until one is opened. Everything else starts open.
+ */
+export const EDITOR_FOLDED: readonly string[] = ['tools/dials:The free camera', 'tools/dials:The world while you fly', 'tools/dials:The window'];
+
+/** Where the editor's folds are kept in this browser. */
+export const EDITOR_FOLDS_KEY = 'swg.editor.folds';
+
+/** A section a tab draws: its id (`TOOL_SECTIONS`), its heading, and what it draws into its body. */
+interface Part {
+  id: string;
+  title: string;
+  draw(body: HTMLElement): void;
+}
+
+/** Which tool a Tools-tab section belongs to: `TOOL_SECTIONS`, else the foot. */
+export function toolSectionOwner(id: string): string {
+  return Object.prototype.hasOwnProperty.call(TOOL_SECTIONS, id) ? TOOL_SECTIONS[id] : 'always';
+}
 
 const EDITOR_WINDOW_CSS = `
 .ed-panel { position: fixed; left: 12px; top: 64px; width: var(--ed-w, 560px); height: var(--ed-h, 78vh); max-height: calc(100vh - 80px); display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 4px; padding: 8px 10px 10px; color: var(--ink); font-size: 12px; box-sizing: border-box; }
@@ -62,6 +141,12 @@ const EDITOR_WINDOW_CSS = `
 .ed-field .ed-val { flex: 0 0 64px; font-size: 10px; color: var(--ink); text-align: right; }
 .ed-field .ed-ro { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ed-h { font-size: 10px; letter-spacing: 0.1em; color: var(--accent); margin-top: 6px; }
+.ed-sec, .ed-sec-body { display: flex; flex-direction: column; gap: 4px; }
+.ed-sec-body[hidden] { display: none; }
+.ed-panel .ed-fold { cursor: pointer; user-select: none; }
+.ed-panel .ed-fold::before { content: '▾ '; color: var(--muted); }
+.ed-panel .ed-fold.folded::before { content: '▸ '; }
+.ed-panel .ed-fold:hover { color: var(--ink); }
 .ed-hist .ed-row { cursor: pointer; }
 .ed-hist .ed-row.undone { color: var(--muted); }
 `;
@@ -381,6 +466,10 @@ export class EditorWindow {
   private pointMode = false;
   /** Here's last box clicked, for a Shift-click run. */
   private lastHere = -1;
+  /** Which sections stand folded, on every tab, kept in this browser. */
+  private readonly folds = new FoldStore(EDITOR_FOLDS_KEY, EDITOR_FOLDED);
+  /** Where each tab's scroll stood when it was left, to stand there again when it comes back. */
+  private readonly scrolls = new Map<Tab, ScrollMark>();
 
   constructor(parent: HTMLElement, host: EditorWindowHost) {
     installStyle();
@@ -442,10 +531,62 @@ export class EditorWindow {
   }
 
   setTab(t: Tab | 'library' | 'here'): void {
+    // The tab left keeps where its scroll stood (a hidden tab loses its scroll), and the tab come back to stands there again.
+    const away = t !== this.tab;
+    if (away && !this.root.hidden) this.scrolls.set(this.tab, scrollMark(this.scrollerOf(this.tab)));
     this.tab = t;
     for (const [k, b] of this.tabs) b.classList.toggle('on', k === t);
     for (const k of Object.keys(this.els) as Tab[]) this.els[k].hidden = k !== t;
     this.drawTab();
+    const back = away ? this.scrolls.get(t) : undefined;
+    if (back) restoreScroll(this.scrollerOf(t), back);
+  }
+
+  /** What scrolls in a tab: the tab itself, or the library's own list of groups. */
+  private scrollerOf(t: Tab): HTMLElement {
+    return (t === 'library' ? this.els.library.querySelector<HTMLElement>('.lib-groups') : null) ?? this.els[t];
+  }
+
+  /** A tab drawn again where its scroll stood: the same section at the same place, where it still stands. */
+  private keepScroll(el: HTMLElement, draw: () => void): void {
+    const mark = scrollMark(el);
+    draw();
+    restoreScroll(el, mark);
+  }
+
+  /**
+   * A section of a tab: its heading, which folds and unfolds it (kept in this browser, by tab and id), and its body, which
+   * is answered for the section to draw into. Folded, its body is hidden and still drawn, so nothing in it stops acting.
+   */
+  private section(el: HTMLElement, tab: 'selected' | 'here' | 'tools', id: string, title: string): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'ed-sec';
+    wrap.dataset.sec = id;
+    const h = document.createElement('div');
+    h.className = 'ed-h ed-fold';
+    h.textContent = title;
+    const body = document.createElement('div');
+    body.className = 'ed-sec-body';
+    const key = `${tab}/${id}`;
+    const show = (folded: boolean) => {
+      body.hidden = folded;
+      h.classList.toggle('folded', folded);
+      h.title = folded ? 'click to unfold' : 'click to fold';
+    };
+    show(this.folds.folded(key));
+    h.addEventListener('click', () => {
+      const folded = !body.hidden;
+      this.folds.set(key, folded);
+      show(folded);
+    });
+    wrap.append(h, body);
+    el.appendChild(wrap);
+    return body;
+  }
+
+  /** A part drawn as a section of a tab. */
+  private drawPart(el: HTMLElement, tab: 'selected' | 'here' | 'tools', p: Part): void {
+    p.draw(this.section(el, tab, p.id, p.title));
   }
 
   /** The tab showing drawn again (a write landed, the selection changed, the camera moved far). */
@@ -490,9 +631,14 @@ export class EditorWindow {
    * its rows of words and buttons, its fields and its buttons, every one of them an act the editor answers.
    */
   private drawSections(el: HTMLElement, tab: 'selected' | 'here' | 'tools'): void {
+    for (const p of this.hostParts(tab)) this.drawPart(el, tab, p);
+  }
+
+  /** The sections the editor hands a tab, as parts (id `sec:` and the section's title), each folding like the tab's own. */
+  private hostParts(tab: 'selected' | 'here' | 'tools'): Part[] {
     const list = this.host.sections?.(tab) ?? [];
     const act = this.host.sectionAct?.bind(this.host);
-    if (!list.length || !act) return;
+    if (!list.length || !act) return [];
     const press = (label: string, a: string, danger?: boolean, off?: boolean): HTMLButtonElement => {
       const b = this.button(label, 'section', danger ? 'ed-del' : '');
       b.disabled = !!off;
@@ -502,41 +648,45 @@ export class EditorWindow {
       });
       return b;
     };
-    for (const s of list) {
-      const h = document.createElement('div');
-      h.className = 'ed-h';
-      h.textContent = s.title.toUpperCase();
-      el.appendChild(h);
-      if (s.note) this.note(el, s.note);
-      for (const f of s.fields ?? []) {
-        const a = f.act;
-        this.field(el, f.label, f.value, a ? (v) => act(a, v) : null, f.kind ?? 'text');
-      }
-      for (const r of s.rows ?? []) {
-        const row = document.createElement('div');
-        row.className = 'ed-row';
-        const label = document.createElement('span');
-        label.className = 'ed-label';
-        label.textContent = r.words;
-        if (r.title) label.title = r.title;
-        row.appendChild(label);
-        for (const b of r.buttons) row.appendChild(press(b.label, b.act, b.danger, b.off));
-        el.appendChild(row);
-      }
-      if (s.buttons?.length) {
-        const row = document.createElement('div');
-        row.className = 'ed-row';
-        for (const b of s.buttons) row.appendChild(press(b.label, b.act, b.danger, b.off));
-        el.appendChild(row);
-      }
-    }
+    return list.map((s) => ({
+      id: `sec:${s.title}`,
+      title: s.title.toUpperCase(),
+      draw: (el: HTMLElement) => {
+        if (s.note) this.note(el, s.note);
+        for (const f of s.fields ?? []) {
+          const a = f.act;
+          this.field(el, f.label, f.value, a ? (v) => act(a, v) : null, f.kind ?? 'text');
+        }
+        for (const r of s.rows ?? []) {
+          const row = document.createElement('div');
+          row.className = 'ed-row';
+          const label = document.createElement('span');
+          label.className = 'ed-label';
+          label.textContent = r.words;
+          if (r.title) label.title = r.title;
+          row.appendChild(label);
+          for (const b of r.buttons) row.appendChild(press(b.label, b.act, b.danger, b.off));
+          el.appendChild(row);
+        }
+        if (s.buttons?.length) {
+          const row = document.createElement('div');
+          row.className = 'ed-row';
+          for (const b of s.buttons) row.appendChild(press(b.label, b.act, b.danger, b.off));
+          el.appendChild(row);
+        }
+      },
+    }));
   }
 
   // ---- Here. ----
 
   private drawHere(): void {
-    const rows = this.host.here();
     const el = this.els.here;
+    this.keepScroll(el, () => this.drawHereNow(el));
+  }
+
+  private drawHereNow(el: HTMLElement): void {
+    const rows = this.host.here();
     el.replaceChildren();
     if (!rows.length) {
       this.note(el, 'nothing stands for good round here');
@@ -651,6 +801,10 @@ export class EditorWindow {
 
   private drawSelected(): void {
     const el = this.els.selected;
+    this.keepScroll(el, () => this.drawSelectedNow(el));
+  }
+
+  private drawSelectedNow(el: HTMLElement): void {
     el.replaceChildren();
     // What the editor hands the tab first (Map-maker II's twelfth wave): the world's own thing picked, a zone picked.
     this.drawSections(el, 'selected');
@@ -715,10 +869,7 @@ export class EditorWindow {
       // level, and a colour-grade look's fields laid over the planet's own (each empty: the area's or the planet's own).
       if (place.sky) {
         const sk = place.sky;
-        const hs = document.createElement('div');
-        hs.className = 'ed-h';
-        hs.textContent = "ITS SKY (EMPTY: THE AREA'S OWN)";
-        el.appendChild(hs);
+        const sky = this.section(el, 'selected', 'sky', "ITS SKY (EMPTY: THE AREA'S OWN)");
         const choose = (label: string, value: string, choices: [string, string][], write: (v: string) => void): void => {
           const f = document.createElement('label');
           f.className = 'ed-field';
@@ -737,7 +888,7 @@ export class EditorWindow {
             s.blur();
           });
           f.append(sp, s);
-          el.appendChild(f);
+          sky.appendChild(f);
         };
         // The sky's families by their lower-case names (the weather matches a name case aside); a name it lacks is shown as such.
         const envKey = sk.env.toLowerCase();
@@ -748,24 +899,21 @@ export class EditorWindow {
         choose('Its weather', sk.weather, [['', "The area's own"], ['rain', 'Rain'], ['dust', 'Dust storms'], ['snow', 'Snow']], (v) => set({ weather: v || null }));
         for (const [k, range] of [['gloom', '0 to 1'], ['heat', '0 to 1'], ['warmth', '-1 to 1'], ['cool', '0 to 1'], ['saturation', '-0.5 to 0.5'], ['contrast', '-0.2 to 0.2'], ['strength', '0 to 4']] as const) {
           const now = sk.grade[k];
-          this.field(el, `Grade ${k} (${range})`, now === undefined ? '' : String(now), (v) => set({ grade: { [k]: v.trim() === '' ? null : Number(v) } }));
+          this.field(sky, `Grade ${k} (${range})`, now === undefined ? '' : String(now), (v) => set({ grade: { [k]: v.trim() === '' ? null : Number(v) } }));
         }
-        this.note(el, "Its family's light, fog, clouds, weather effect, wind and beds crossfade in over four seconds as you walk in (the weather's level stays the world's). Its grade eases in over the planet's own (tune.gradeTau under locations in the debug menu).");
+        this.note(sky, "Its family's light, fog, clouds, weather effect, wind and beds crossfade in over four seconds as you walk in (the weather's level stays the world's). Its grade eases in over the planet's own (tune.gradeTau under locations in the debug menu).");
       }
-      const h3 = document.createElement('div');
-      h3.className = 'ed-h';
-      h3.textContent = 'AS A STORY AREA';
-      el.appendChild(h3);
+      const story = this.section(el, 'selected', 'story', 'AS A STORY AREA');
       const pre = document.createElement('pre');
       pre.className = 'ed-note';
       pre.textContent = place.snippet;
-      el.appendChild(pre);
+      story.appendChild(pre);
       const copy = this.button('Copy it', 'place');
       copy.addEventListener('click', () => {
         set({ copy: true });
         copy.blur();
       });
-      el.appendChild(copy);
+      story.appendChild(copy);
       this.note(el, 'Drag its square to move it, C held with the wheel sizes it, Delete takes it out; Escape lets it go.');
       return;
     }
@@ -796,13 +944,10 @@ export class EditorWindow {
         this.field(el, 'Points', `${lake.points} · ${lake.area}`, null);
       }
       this.field(el, 'Shader', lake.shader, (v) => set({ shader: v.trim() || null }));
-      const h3 = document.createElement('div');
-      h3.className = 'ed-h';
-      h3.textContent = "ITS LOOK (EMPTY: ITS SHADER'S OWN)";
-      el.appendChild(h3);
-      this.field(el, 'Colour #rrggbb', lake.color, (v) => set({ look: { color: v.trim() || null } }));
+      const look = this.section(el, 'selected', 'lakeLook', "ITS LOOK (EMPTY: ITS SHADER'S OWN)");
+      this.field(look, 'Colour #rrggbb', lake.color, (v) => set({ look: { color: v.trim() || null } }));
       for (const [k, words] of [['opacity', 'Opacity 0-1'], ['ripple', 'Ripple 0-8'], ['drift', 'Drift 0-8']] as const) {
-        this.field(el, words, lake[k], (v) => {
+        this.field(look, words, lake[k], (v) => {
           const n = Number(v);
           set({ look: { [k]: v.trim() === '' ? null : Number.isFinite(n) ? n : v } });
         });
@@ -826,18 +971,15 @@ export class EditorWindow {
     this.field(el, 'File', s.file, null);
     this.field(el, 'Model', s.model, null);
     if (s.template) this.field(el, 'Template', s.template, null);
-    const h = document.createElement('div');
-    h.className = 'ed-h';
-    h.textContent = 'WHERE (THE FILE\'S FRAME)';
-    el.appendChild(h);
+    const where = this.section(el, 'selected', 'where', 'WHERE (THE FILE\'S FRAME)');
     for (const k of ['x', 'y', 'z'] as const) {
-      this.field(el, k.toUpperCase(), s[k], (v) => {
+      this.field(where, k.toUpperCase(), s[k], (v) => {
         const n = num(v);
         if (n !== null) this.host.setPlace({ [k]: n });
       }, 'number');
     }
     for (const k of ['yaw', 'pitch', 'roll'] as const) {
-      this.field(el, `${k[0].toUpperCase()}${k.slice(1)} °`, Math.round(s[k] * 100) / 100, (v) => {
+      this.field(where, `${k[0].toUpperCase()}${k.slice(1)} °`, Math.round(s[k] * 100) / 100, (v) => {
         const n = num(v);
         if (n !== null) this.host.setPlace({ yaw: s.yaw, pitch: s.pitch, roll: s.roll, [k]: n });
       }, 'number');
@@ -845,32 +987,29 @@ export class EditorWindow {
     // A mark (the seventh wave) is no thing: no size, no flora clearing, no guard and never solid (its effects are sized on
     // their own handles).
     if (!s.mark) {
-      this.field(el, 'Scale', s.scale, (v) => {
+      this.field(where, 'Scale', s.scale, (v) => {
         const parts = v.split(/[\s,]+/).filter(Boolean).map(Number);
         if (parts.length === 1 && parts[0] > 0) this.host.setPlace({ scale: parts[0] });
         else if (parts.length === 3 && parts.every((p) => p > 0)) this.host.setPlace({ scale: parts });
       });
     }
-    const h2 = document.createElement('div');
-    h2.className = 'ed-h';
-    h2.textContent = 'WHAT IT IS';
-    el.appendChild(h2);
+    const what = this.section(el, 'selected', 'what', 'WHAT IT IS');
     if (!s.mark) {
-      this.field(el, 'Flora clear m', s.clear, (v) => this.host.setField({ clear: v.trim() === '' ? null : num(v) }), 'number');
-      this.field(el, 'Guard m', s.guard, (v) => this.host.setField({ guard: v.trim() === '' ? null : num(v) }), 'number');
-      this.field(el, 'Solid', s.solid, (v) => this.host.setField({ solid: v === 'true' }), 'check');
+      this.field(what, 'Flora clear m', s.clear, (v) => this.host.setField({ clear: v.trim() === '' ? null : num(v) }), 'number');
+      this.field(what, 'Guard m', s.guard, (v) => this.host.setField({ guard: v.trim() === '' ? null : num(v) }), 'number');
+      this.field(what, 'Solid', s.solid, (v) => this.host.setField({ solid: v === 'true' }), 'check');
     }
     // The interior layout files' wave: a building stands its template's furniture, or none (`furnish: false`).
-    if (s.furnished !== undefined && s.furnished !== null) this.field(el, 'Furnished', s.furnished, (v) => this.host.setField({ furnish: v === 'true' }), 'check');
-    if (s.furniture) this.field(el, 'Its furniture', s.furniture, null);
+    if (s.furnished !== undefined && s.furnished !== null) this.field(what, 'Furnished', s.furnished, (v) => this.host.setField({ furnish: v === 'true' }), 'check');
+    if (s.furniture) this.field(what, 'Its furniture', s.furniture, null);
     // Map-maker II's twelfth wave: a seat (people of ours sit on it, a chair of ours stands nowhere on it), a table, or neither.
-    if (s.counts !== undefined) this.field(el, 'Counts as (seat, table, none; empty: its name)', s.counts, (v) => this.host.setField({ furniture: v.trim() || null }));
-    this.field(el, 'State', s.state, (v) => this.host.setField({ state: v.trim() || null }));
-    this.field(el, 'Its name', s.name, (v) => this.host.setField({ name: v.trim() || null }));
-    this.field(el, 'Note', s.note, (v) => this.host.setField({ note: v.trim() || null }));
-    this.field(el, 'Size', s.size, null);
-    this.field(el, 'Over the ground', s.height, null);
-    if (s.note2) this.field(el, 'Set aside', s.note2, null);
+    if (s.counts !== undefined) this.field(what, 'Counts as (seat, table, none; empty: its name)', s.counts, (v) => this.host.setField({ furniture: v.trim() || null }));
+    this.field(what, 'State', s.state, (v) => this.host.setField({ state: v.trim() || null }));
+    this.field(what, 'Its name', s.name, (v) => this.host.setField({ name: v.trim() || null }));
+    this.field(what, 'Note', s.note, (v) => this.host.setField({ note: v.trim() || null }));
+    this.field(what, 'Size', s.size, null);
+    this.field(what, 'Over the ground', s.height, null);
+    if (s.note2) this.field(what, 'Set aside', s.note2, null);
     this.drawLooks(el, s);
     this.drawAttachments(el, s);
   }
@@ -885,19 +1024,16 @@ export class EditorWindow {
    * words and its buttons (Tint opens the dye picker under it, Picture from… and Material from… arm the picker, Clear takes
    * its look off), every one written on every picked row; and while the picker is armed, a library entry's materials offered.
    */
-  private drawLooks(el: HTMLElement, s: SelectedView): void {
+  private drawLooks(at: HTMLElement, s: SelectedView): void {
     const look = this.host.look?.bind(this.host);
     if (!look) return;
     this.tintPicker?.close();
     this.tintPicker = null;
     if (s.mark) {
-      this.note(el, 'A mark: an effect or a sound of its own, with no model. Click its handle to pick it; it moves with the gizmo, R and F held, and the arrows.');
+      this.note(at, 'A mark: an effect or a sound of its own, with no model. Click its handle to pick it; it moves with the gizmo, R and F held, and the arrows.');
       return;
     }
-    const h = document.createElement('div');
-    h.className = 'ed-h';
-    h.textContent = 'ITS LOOK (EVERY PICKED ROW)';
-    el.appendChild(h);
+    const el = this.section(at, 'selected', 'look', 'ITS LOOK (EVERY PICKED ROW)');
     if (s.picking) this.note(el, s.picking);
     if (s.offered) {
       this.note(el, `${s.offered.entry}'s materials: a click takes one`);
@@ -991,13 +1127,10 @@ export class EditorWindow {
   }
 
   /** The seventh wave's attachments on the Selected tab: each one's kind, its place and size as fields, Pick and Remove. */
-  private drawAttachments(el: HTMLElement, s: SelectedView): void {
+  private drawAttachments(tabEl: HTMLElement, s: SelectedView): void {
     const at = this.host.attachment?.bind(this.host);
     if (!at || !s.attachments) return;
-    const h = document.createElement('div');
-    h.className = 'ed-h';
-    h.textContent = 'WHAT HANGS ON IT';
-    el.appendChild(h);
+    const el = this.section(tabEl, 'selected', 'hangs', 'WHAT HANGS ON IT');
     if (!s.attachments.length) {
       this.note(el, 'nothing: take an effect or a sound from the library and click on it');
       return;
@@ -1029,21 +1162,26 @@ export class EditorWindow {
 
   // ---- Tools. ----
 
+  /**
+   * The Tools tab (the owner's ask of 2026-11-02): the Tools list across its top, a button a tool with its key and the armed
+   * one marked; below, only the armed tool's own sections, or with none armed the editing's own (snapping, the view, folding,
+   * the placing switches, the World's own filter); and at its foot what every tool shares (the files and git's word, the
+   * walk grid's, the camera's and the window's sliders). Which section stands where is `TOOL_SECTIONS`; every section is
+   * drawn in the order it always stood, and every heading folds.
+   */
   private drawTools(): void {
     const el = this.els.tools;
+    this.keepScroll(el, () => this.drawToolsNow(el));
+  }
+
+  private drawToolsNow(el: HTMLElement): void {
     el.replaceChildren();
     const t = this.host.tools();
-    const h = (words: string) => {
-      const d = document.createElement('div');
-      d.className = 'ed-h';
-      d.textContent = words;
-      el.appendChild(d);
-    };
-    const row = (...items: HTMLElement[]) => {
+    const row = (at: HTMLElement, ...items: HTMLElement[]) => {
       const r = document.createElement('div');
       r.className = 'ed-row';
       r.append(...items);
-      el.appendChild(r);
+      at.appendChild(r);
       return r;
     };
     const toggle = (words: string, on: boolean, set: Record<string, unknown>) => {
@@ -1055,99 +1193,84 @@ export class EditorWindow {
       });
       return b;
     };
-    // The Tools list (Map-maker II's groundwork): one armed at a time; a click arms one, any other let go first.
+    // The Tools list (Map-maker II's groundwork): one armed at a time; a click arms one, any other let go first, exactly as
+    // its key does. It stands at the top whatever is armed, and wraps where the window is narrow.
     if (t.list?.length) {
-      h('TOOLS');
-      row(...t.list.map((x) => toggle(`${x.label[0].toUpperCase()}${x.label.slice(1)}${x.key ? ` (${x.key})` : ''}${x.armed ? ': armed' : ''}`, x.armed, { tool: x.id })));
+      const d = document.createElement('div');
+      d.className = 'ed-h';
+      d.textContent = 'TOOLS';
+      el.appendChild(d);
+      row(el, ...t.list.map((x) => toggle(`${x.label[0].toUpperCase()}${x.label.slice(1)}${x.key ? ` (${x.key})` : ''}${x.armed ? ': armed' : ''}`, x.armed, { tool: x.id }))).style.flexWrap = 'wrap';
       this.note(el, 'One tool is armed at a time: its buttons are its own, the selection takes no hold meanwhile, and Escape lets it go.');
     }
+    const armed = t.list?.find((x) => x.armed)?.id ?? 'none';
+    if (armed !== 'none') this.note(el, "Below: this tool's own settings, and at the foot what every tool shares. Snapping, the view, folding and the placing switches show with no tool armed.");
+    const parts: Part[] = [];
     // The interior layout files' wave: whether a building put down stands its template's furniture.
     if (t.furnish !== undefined) {
-      h('BUILDINGS');
-      row(toggle('Furnish the buildings I place', t.furnish, { furnish: !t.furnish }));
-      this.note(el, "On, a building put down stands the furniture the client stood in its rooms. Off, its row is written empty (furnish: false). A building already standing keeps its own: the Selected tab's Furnished turns it, and picking one of its pieces makes that building's furniture its own rows, which no other copy shares.");
+      const furnish = t.furnish;
+      parts.push({
+        id: 'furnish',
+        title: 'BUILDINGS',
+        draw: (b) => {
+          row(b, toggle('Furnish the buildings I place', furnish, { furnish: !furnish }));
+          this.note(b, "On, a building put down stands the furniture the client stood in its rooms. Off, its row is written empty (furnish: false). A building already standing keeps its own: the Selected tab's Furnished turns it, and picking one of its pieces makes that building's furniture its own rows, which no other copy shares.");
+        },
+      });
     }
     // The seventh wave's effects and sounds out of the library: hung on the row the aim meets, or stood as marks.
     if (t.attach) {
-      h('EFFECTS AND SOUNDS');
-      row(toggle(t.attach.onto ? 'Hang it on the row it lands on' : 'Stand it as a mark', t.attach.onto, { attachOnto: !t.attach.onto }));
-      this.note(el, "Take an effect or a sound from the library's Effects and Sounds groups and click: it hangs on the row of the files the aim meets (with this on), else stands as a mark of its own. A handle marks each one; click it, then R, F or C held with the mouse turns, raises or sizes it, the arrows nudge it and Delete takes it off.");
+      const onto = t.attach.onto;
+      parts.push({
+        id: 'attach',
+        title: 'EFFECTS AND SOUNDS',
+        draw: (b) => {
+          row(b, toggle(onto ? 'Hang it on the row it lands on' : 'Stand it as a mark', onto, { attachOnto: !onto }));
+          this.note(b, "Take an effect or a sound from the library's Effects and Sounds groups and click: it hangs on the row of the files the aim meets (with this on), else stands as a mark of its own. A handle marks each one; click it, then R, F or C held with the mouse turns, raises or sizes it, the arrows nudge it and Delete takes it off.");
+        },
+      });
     }
     // The sculpt brush (Map-maker II's first wave): its mode, flatten's target and ways, its falloff and its switches.
     if (t.sculpt) {
       const s = t.sculpt;
-      h('SHAPING THE GROUND');
-      row(...(['raise', 'lower', 'flatten', 'smooth'] as const).map((m) => toggle(m[0].toUpperCase() + m.slice(1), s.mode === m, { sculptMode: m })));
-      if (s.mode === 'flatten') {
-        row(...(['both', 'raise', 'lower'] as const).map((m) => toggle(m === 'both' ? 'Both ways' : m === 'raise' ? 'Raise only' : 'Lower only', s.flatMode === m, { sculptFlat: m })));
-        row(...(['press', 'sampled', 'typed', 'stamp'] as const).map((m) => toggle(m === 'press' ? 'Height at the press' : m === 'sampled' ? 'Sampled (Shift+click)' : m === 'typed' ? 'Typed' : 'Every stamp', s.target === m, { sculptTarget: m })));
-        const f = document.createElement('label');
-        f.className = 'ed-field';
-        const sp = document.createElement('span');
-        sp.textContent = 'Height m';
-        const input = document.createElement('input');
-        input.type = 'number';
-        input.step = 'any';
-        input.value = String(Math.round(s.height * 1000) / 1000);
-        input.addEventListener('change', () => {
-          const n = Number(input.value);
-          if (input.value.trim() !== '' && Number.isFinite(n)) this.host.setTool({ sculptHeight: n });
-        });
-        input.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter' || e.key === 'Escape') input.blur();
-        });
-        f.append(sp, input);
-        el.appendChild(f);
-      }
-      row(...s.falloffs.map((name) => toggle(name, s.falloff === name, { sculptFalloff: name })));
-      row(...s.switches.map((x) => toggle(x.words, x.on, { sculptSwitch: [x.key, !x.on] })));
-      this.note(el, s.file);
-      if (s.note) this.note(el, s.note);
-      this.note(el, 'K arms it: LMB held raises (or flattens, or smooths), RMB held lowers; C held with the wheel sizes it; Shift+click samples the height under it; a stroke is one undo. Its numbers are the sliders under The sculpt brush below.');
+      parts.push({
+        id: 'sculpt',
+        title: 'SHAPING THE GROUND',
+        draw: (el) => {
+          row(el, ...(['raise', 'lower', 'flatten', 'smooth'] as const).map((m) => toggle(m[0].toUpperCase() + m.slice(1), s.mode === m, { sculptMode: m })));
+          if (s.mode === 'flatten') {
+            row(el, ...(['both', 'raise', 'lower'] as const).map((m) => toggle(m === 'both' ? 'Both ways' : m === 'raise' ? 'Raise only' : 'Lower only', s.flatMode === m, { sculptFlat: m })));
+            row(el, ...(['press', 'sampled', 'typed', 'stamp'] as const).map((m) => toggle(m === 'press' ? 'Height at the press' : m === 'sampled' ? 'Sampled (Shift+click)' : m === 'typed' ? 'Typed' : 'Every stamp', s.target === m, { sculptTarget: m })));
+            const f = document.createElement('label');
+            f.className = 'ed-field';
+            const sp = document.createElement('span');
+            sp.textContent = 'Height m';
+            const input = document.createElement('input');
+            input.type = 'number';
+            input.step = 'any';
+            input.value = String(Math.round(s.height * 1000) / 1000);
+            input.addEventListener('change', () => {
+              const n = Number(input.value);
+              if (input.value.trim() !== '' && Number.isFinite(n)) this.host.setTool({ sculptHeight: n });
+            });
+            input.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter' || e.key === 'Escape') input.blur();
+            });
+            f.append(sp, input);
+            el.appendChild(f);
+          }
+          row(el, ...s.falloffs.map((name) => toggle(name, s.falloff === name, { sculptFalloff: name })));
+          row(el, ...s.switches.map((x) => toggle(x.words, x.on, { sculptSwitch: [x.key, !x.on] })));
+          this.note(el, s.file);
+          if (s.note) this.note(el, s.note);
+          this.note(el, 'K arms it: LMB held raises (or flattens, or smooths), RMB held lowers; C held with the wheel sizes it; Shift+click samples the height under it; a stroke is one undo. Its numbers are the sliders under The sculpt brush below.');
+        },
+      });
     }
     // The paint brush (Map-maker II's second wave): its layer, its palette as the ground's own pictures, the world's families
     // with their alternates, its colour, and the world row's switches and weights (each written into the paint file).
     if (t.paint) {
       const p = t.paint;
-      h('PAINTING THE GROUND');
-      row(...(['family', 'colour', 'plants'] as const).map((m) => toggle(m === 'family' ? 'Families' : m === 'colour' ? 'Colour' : 'Plants', p.layer === m, { paintLayer: m })));
-      // The plants layer (Map-maker II's fourth wave): the recipes, and one built a class at a time.
-      if (p.layer === 'plants' && p.plants) {
-        const pl = p.plants;
-        if (pl.recipes.length) {
-          this.note(el, 'The recipes (a click chooses what LMB paints):');
-          const r = row();
-          r.style.flexWrap = 'wrap';
-          for (const rc of pl.recipes) r.appendChild(toggle(`${rc.at}: ${rc.words}${rc.paints ? '' : ' (paints nothing here)'}`, rc.chosen, { floraRecipe: rc.at }));
-        } else this.note(el, 'No recipe yet: build one below and paint with it.');
-        this.note(el, 'A recipe, a class at a time:');
-        for (const d of pl.draft) {
-          const r = row();
-          r.style.flexWrap = 'wrap';
-          const label = document.createElement('span');
-          label.className = 'ed-label';
-          label.textContent = d.label;
-          r.appendChild(label);
-          for (const op of ['keep', 'clear', 'thin', 'add', 'remove']) r.appendChild(toggle(op[0].toUpperCase() + op.slice(1), d.op === op, { floraClass: [d.cls, op] }));
-          if (d.op === 'add' || d.op === 'remove') {
-            const sel = document.createElement('select');
-            for (const name of ['', ...d.families]) {
-              const o = document.createElement('option');
-              o.value = name;
-              o.textContent = name || '(a family)';
-              if (name === d.family) o.selected = true;
-              sel.appendChild(o);
-            }
-            sel.addEventListener('change', () => {
-              this.host.setTool({ floraFamily: [d.cls, sel.value] });
-              sel.blur();
-            });
-            r.appendChild(sel);
-          }
-        }
-        row(toggle(pl.roads ? 'Paints roads and rivers too' : 'Keeps off roads and rivers', pl.roads, { floraRoads: !pl.roads }), toggle('Paint with this recipe', false, { floraUse: true }));
-        if (pl.note) this.note(el, pl.note);
-      }
       const pic = (src: string | null, title: string, on: boolean, set: Record<string, unknown>) => {
         const b = this.button('', 'tool', on ? 'on' : '');
         b.title = title;
@@ -1167,266 +1290,363 @@ export class EditorWindow {
         });
         return b;
       };
-      if (p.entries.length) {
-        this.note(el, 'The palette (a click chooses what LMB paints):');
-        const r = row();
-        r.style.flexWrap = 'wrap';
-        for (const e of p.entries) r.appendChild(pic(e.picture, `${e.at}: ${e.name}${e.child !== null ? ` (alternate ${e.child})` : ''}${e.lays ? '' : ' (lays nothing here)'}`, e.chosen, { paintEntry: e.at }));
-      } else this.note(el, 'The palette is empty: choose a family below, or press the middle button on the ground.');
-      // Every installed world's families (Map-maker II's third wave), a pack at a time: this world's own first.
-      this.note(el, 'Families of:');
-      const pr = row();
-      pr.style.flexWrap = 'wrap';
-      for (const k of p.packs) pr.appendChild(toggle(k.words, k.on, { paintBrowse: k.id }));
-      if (p.browseNote) this.note(el, p.browseNote);
-      if (p.families.length) {
-        this.note(el, 'A click adds a family to the palette and chooses it; a small picture forces that alternate:');
-        for (const f of p.families) {
-          const r = row();
-          r.style.flexWrap = 'wrap';
-          const label = document.createElement('span');
-          label.className = 'ed-label';
-          label.textContent = f.lent ? f.name : `${f.name} (not lent yet)`;
-          r.appendChild(label);
-          r.appendChild(pic(f.pictures[0] ?? null, `${f.name}: the pole's own alternate`, false, { paintAdd: { pack: f.pack, name: f.name } }));
-          if (f.pictures.length > 1) f.pictures.forEach((src, i) => r.appendChild(pic(src, `${f.name}: alternate ${i}`, false, { paintAdd: { pack: f.pack, name: f.name, child: i } })));
-        }
-      }
-      const cf = document.createElement('label');
-      cf.className = 'ed-field';
-      const cs = document.createElement('span');
-      cs.textContent = 'Colour';
-      const ci = document.createElement('input');
-      ci.type = 'color';
-      ci.value = p.colour;
-      ci.addEventListener('change', () => {
-        this.host.setTool({ paintColour: ci.value });
-        ci.blur();
+      parts.push({
+        id: 'paint',
+        title: 'PAINTING THE GROUND',
+        draw: (el) => {
+          row(el, ...(['family', 'colour', 'plants'] as const).map((m) => toggle(m === 'family' ? 'Families' : m === 'colour' ? 'Colour' : 'Plants', p.layer === m, { paintLayer: m })));
+          // The plants layer (Map-maker II's fourth wave): the recipes, and one built a class at a time.
+          if (p.layer === 'plants' && p.plants) {
+            const pl = p.plants;
+            if (pl.recipes.length) {
+              this.note(el, 'The recipes (a click chooses what LMB paints):');
+              const r = row(el);
+              r.style.flexWrap = 'wrap';
+              for (const rc of pl.recipes) r.appendChild(toggle(`${rc.at}: ${rc.words}${rc.paints ? '' : ' (paints nothing here)'}`, rc.chosen, { floraRecipe: rc.at }));
+            } else this.note(el, 'No recipe yet: build one below and paint with it.');
+            this.note(el, 'A recipe, a class at a time:');
+            for (const d of pl.draft) {
+              const r = row(el);
+              r.style.flexWrap = 'wrap';
+              const label = document.createElement('span');
+              label.className = 'ed-label';
+              label.textContent = d.label;
+              r.appendChild(label);
+              for (const op of ['keep', 'clear', 'thin', 'add', 'remove']) r.appendChild(toggle(op[0].toUpperCase() + op.slice(1), d.op === op, { floraClass: [d.cls, op] }));
+              if (d.op === 'add' || d.op === 'remove') {
+                const sel = document.createElement('select');
+                for (const name of ['', ...d.families]) {
+                  const o = document.createElement('option');
+                  o.value = name;
+                  o.textContent = name || '(a family)';
+                  if (name === d.family) o.selected = true;
+                  sel.appendChild(o);
+                }
+                sel.addEventListener('change', () => {
+                  this.host.setTool({ floraFamily: [d.cls, sel.value] });
+                  sel.blur();
+                });
+                r.appendChild(sel);
+              }
+            }
+            row(el, toggle(pl.roads ? 'Paints roads and rivers too' : 'Keeps off roads and rivers', pl.roads, { floraRoads: !pl.roads }), toggle('Paint with this recipe', false, { floraUse: true }));
+            if (pl.note) this.note(el, pl.note);
+          }
+          if (p.entries.length) {
+            this.note(el, 'The palette (a click chooses what LMB paints):');
+            const r = row(el);
+            r.style.flexWrap = 'wrap';
+            for (const e of p.entries) r.appendChild(pic(e.picture, `${e.at}: ${e.name}${e.child !== null ? ` (alternate ${e.child})` : ''}${e.lays ? '' : ' (lays nothing here)'}`, e.chosen, { paintEntry: e.at }));
+          } else this.note(el, 'The palette is empty: choose a family below, or press the middle button on the ground.');
+          // Every installed world's families (Map-maker II's third wave), a pack at a time: this world's own first.
+          this.note(el, 'Families of:');
+          const pr = row(el);
+          pr.style.flexWrap = 'wrap';
+          for (const k of p.packs) pr.appendChild(toggle(k.words, k.on, { paintBrowse: k.id }));
+          if (p.browseNote) this.note(el, p.browseNote);
+          if (p.families.length) {
+            this.note(el, 'A click adds a family to the palette and chooses it; a small picture forces that alternate:');
+            for (const f of p.families) {
+              const r = row(el);
+              r.style.flexWrap = 'wrap';
+              const label = document.createElement('span');
+              label.className = 'ed-label';
+              label.textContent = f.lent ? f.name : `${f.name} (not lent yet)`;
+              r.appendChild(label);
+              r.appendChild(pic(f.pictures[0] ?? null, `${f.name}: the pole's own alternate`, false, { paintAdd: { pack: f.pack, name: f.name } }));
+              if (f.pictures.length > 1) f.pictures.forEach((src, i) => r.appendChild(pic(src, `${f.name}: alternate ${i}`, false, { paintAdd: { pack: f.pack, name: f.name, child: i } })));
+            }
+          }
+          const cf = document.createElement('label');
+          cf.className = 'ed-field';
+          const cs = document.createElement('span');
+          cs.textContent = 'Colour';
+          const ci = document.createElement('input');
+          ci.type = 'color';
+          ci.value = p.colour;
+          ci.addEventListener('change', () => {
+            this.host.setTool({ paintColour: ci.value });
+            ci.blur();
+          });
+          cf.append(cs, ci);
+          el.appendChild(cf);
+        },
       });
-      cf.append(cs, ci);
-      el.appendChild(cf);
-      h('THE WORLD ROW');
-      row(...p.switches.map((s) => toggle(s.words, s.on, { paintWorld: { [s.key]: !s.on } })));
-      row(...p.tints.map((m) => toggle(`Tint ${m}`, p.tint === m, { paintWorld: { tint: m } })));
-      row(...(['max', 'add'] as const).map((m) => toggle(`Opposite corners ${m}`, p.opposite === m, { paintWorld: { opposite: m } })));
-      if (p.weights) {
-        const wt = p.weights;
-        this.note(el, `${wt.name}'s alternates' weights in this world (its own: ${wt.own.join(', ')}):`);
-        const r = row();
-        wt.values.forEach((v, i) => {
-          const input = document.createElement('input');
-          input.type = 'number';
-          input.step = 'any';
-          input.min = '0';
-          input.value = String(v);
-          input.title = `alternate ${i}`;
-          input.style.width = '56px';
-          input.addEventListener('change', () => {
-            const list = [...wt.values];
-            const n = Number(input.value);
-            if (!Number.isFinite(n) || n < 0) return;
-            list[i] = n;
-            this.host.setTool({ paintWeight: [wt.key, list] });
-            input.blur();
-          });
-          input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === 'Escape') input.blur();
-          });
-          r.appendChild(input);
-        });
-      }
-      if (p.dem) {
-        this.note(el, `Base family: ${p.dem.base || 'none (the console names one: groundPaint({ world: { base: { pack, name } } }))'}.`);
-        row(toggle(p.dem.wash ? 'Take the wash away' : 'Name a wash', p.dem.wash, { paintWorld: { wash: p.dem.wash ? null : { base: [150, 130, 110] } } }));
-        if (p.dem.wash) this.note(el, "The wash's numbers are the sliders under The wash below.");
-      }
-      this.note(el, p.file);
-      if (p.note) this.note(el, p.note);
-      this.note(el, 'U arms it: LMB held paints, RMB held erases; Shift+click or the middle button takes what is under it; C held with the wheel sizes it; a stroke is one undo. Its numbers are the sliders under The paint brush below.');
+      parts.push({
+        id: 'paintWorld',
+        title: 'THE WORLD ROW',
+        draw: (el) => {
+          row(el, ...p.switches.map((s) => toggle(s.words, s.on, { paintWorld: { [s.key]: !s.on } })));
+          row(el, ...p.tints.map((m) => toggle(`Tint ${m}`, p.tint === m, { paintWorld: { tint: m } })));
+          row(el, ...(['max', 'add'] as const).map((m) => toggle(`Opposite corners ${m}`, p.opposite === m, { paintWorld: { opposite: m } })));
+          if (p.weights) {
+            const wt = p.weights;
+            this.note(el, `${wt.name}'s alternates' weights in this world (its own: ${wt.own.join(', ')}):`);
+            const r = row(el);
+            wt.values.forEach((v, i) => {
+              const input = document.createElement('input');
+              input.type = 'number';
+              input.step = 'any';
+              input.min = '0';
+              input.value = String(v);
+              input.title = `alternate ${i}`;
+              input.style.width = '56px';
+              input.addEventListener('change', () => {
+                const list = [...wt.values];
+                const n = Number(input.value);
+                if (!Number.isFinite(n) || n < 0) return;
+                list[i] = n;
+                this.host.setTool({ paintWeight: [wt.key, list] });
+                input.blur();
+              });
+              input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === 'Escape') input.blur();
+              });
+              r.appendChild(input);
+            });
+          }
+          if (p.dem) {
+            this.note(el, `Base family: ${p.dem.base || 'none (the console names one: groundPaint({ world: { base: { pack, name } } }))'}.`);
+            row(el, toggle(p.dem.wash ? 'Take the wash away' : 'Name a wash', p.dem.wash, { paintWorld: { wash: p.dem.wash ? null : { base: [150, 130, 110] } } }));
+            if (p.dem.wash) this.note(el, "The wash's numbers are the sliders under The wash below.");
+          }
+          this.note(el, p.file);
+          if (p.note) this.note(el, p.note);
+          this.note(el, 'U arms it: LMB held paints, RMB held erases; Shift+click or the middle button takes what is under it; C held with the wheel sizes it; a stroke is one undo. Its numbers are the sliders under The paint brush below.');
+        },
+      });
     }
     // The water tool (Map-maker II's fifth wave): what a click does, where a lake's level comes from, the draft and the lake picked.
     if (t.water) {
       const wt = t.water;
-      h('LAKES, FALLS AND RIVERS');
-      row(...(['clicks', 'trace', 'fall', 'river'] as const).map((m) => toggle(m === 'clicks' ? 'A lake by clicks' : m === 'trace' ? 'A lake traced' : m === 'fall' ? 'A fall' : 'A river', wt.mode === m, { waterMode: m })));
-      if (wt.mode === 'river') {
-        // The sixth wave's: where a river's points stand, and what a reach past the slope limit becomes (the owner's switch).
-        row(...(['level', 'ground'] as const).map((m) => toggle(m === 'level' ? 'Never runs uphill' : 'Each point on its ground', wt.riverHeights === m, { waterRiverHeights: m })));
-        row(...(['effects', 'fall', 'refuse'] as const).map((m) => toggle(m === 'effects' ? 'Steep: fall effects' : m === 'fall' ? 'Steep: a fall row' : 'Steep: not water', wt.steep === m, { riverSteep: m })));
-        if (wt.draft >= 2) row(toggle(`Write the river (${wt.draft} points)`, false, { waterRiverFinish: true }), toggle('Give it up', false, { waterGiveUp: true }));
-        else if (wt.draft) row(toggle('Give up the draft', false, { waterGiveUp: true }));
-      } else if (wt.mode !== 'fall') {
-        row(...(['lowest', 'first', 'typed'] as const).map((m) => toggle(m === 'lowest' ? 'Level: the lowest ground' : m === 'first' ? "Level: the first point's" : 'Level: typed', wt.levelFrom === m, { waterLevelFrom: m })));
-        const f = document.createElement('label');
-        f.className = 'ed-field';
-        const sp = document.createElement('span');
-        sp.textContent = 'Level m';
-        const input = document.createElement('input');
-        input.type = 'number';
-        input.step = 'any';
-        input.value = String(Math.round(wt.height * 1000) / 1000);
-        input.addEventListener('change', () => {
-          const n = Number(input.value);
-          if (input.value.trim() !== '' && Number.isFinite(n)) this.host.setTool({ waterHeight: n });
-        });
-        input.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter' || e.key === 'Escape') input.blur();
-        });
-        f.append(sp, input);
-        el.appendChild(f);
-      }
-      if (wt.mode !== 'river') {
-        if (wt.draft >= 3) row(toggle(`Close the outline (${wt.draft} points)`, false, { waterClose: true }), toggle('Give it up', false, { waterGiveUp: true }));
-        else if (wt.draft || wt.fallTop) row(toggle('Give up the draft', false, { waterGiveUp: true }));
-      }
-      if (wt.picked) row(toggle(`Let ${wt.picked} go`, true, { waterPick: null }), toggle('Take it out', false, { waterRemove: wt.picked }));
-      this.note(el, wt.file);
-      if (wt.note) this.note(el, wt.note);
-      this.note(el, "Z arms it. A lake by clicks: LMB a point, a click near the first closes it, RMB takes one back. Traced: LMB a seed in its basin, flooded to the seed's ground and a little more (or the typed level). A fall: LMB its top, then its bottom. A river: LMB its points from its source down, a click near the last writes it, RMB takes one back. A click on a lake's or a river's ring picks it; its look (and a river's width and velocity) is on the Selected tab. Each is one undo. Its numbers are the sliders under The water tool below, and the rivers' own under rivers in the debug menu.");
+      parts.push({
+        id: 'water',
+        title: 'LAKES, FALLS AND RIVERS',
+        draw: (el) => {
+          row(el, ...(['clicks', 'trace', 'fall', 'river'] as const).map((m) => toggle(m === 'clicks' ? 'A lake by clicks' : m === 'trace' ? 'A lake traced' : m === 'fall' ? 'A fall' : 'A river', wt.mode === m, { waterMode: m })));
+          if (wt.mode === 'river') {
+            // The sixth wave's: where a river's points stand, and what a reach past the slope limit becomes (the owner's switch).
+            row(el, ...(['level', 'ground'] as const).map((m) => toggle(m === 'level' ? 'Never runs uphill' : 'Each point on its ground', wt.riverHeights === m, { waterRiverHeights: m })));
+            row(el, ...(['effects', 'fall', 'refuse'] as const).map((m) => toggle(m === 'effects' ? 'Steep: fall effects' : m === 'fall' ? 'Steep: a fall row' : 'Steep: not water', wt.steep === m, { riverSteep: m })));
+            if (wt.draft >= 2) row(el, toggle(`Write the river (${wt.draft} points)`, false, { waterRiverFinish: true }), toggle('Give it up', false, { waterGiveUp: true }));
+            else if (wt.draft) row(el, toggle('Give up the draft', false, { waterGiveUp: true }));
+          } else if (wt.mode !== 'fall') {
+            row(el, ...(['lowest', 'first', 'typed'] as const).map((m) => toggle(m === 'lowest' ? 'Level: the lowest ground' : m === 'first' ? "Level: the first point's" : 'Level: typed', wt.levelFrom === m, { waterLevelFrom: m })));
+            const f = document.createElement('label');
+            f.className = 'ed-field';
+            const sp = document.createElement('span');
+            sp.textContent = 'Level m';
+            const input = document.createElement('input');
+            input.type = 'number';
+            input.step = 'any';
+            input.value = String(Math.round(wt.height * 1000) / 1000);
+            input.addEventListener('change', () => {
+              const n = Number(input.value);
+              if (input.value.trim() !== '' && Number.isFinite(n)) this.host.setTool({ waterHeight: n });
+            });
+            input.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter' || e.key === 'Escape') input.blur();
+            });
+            f.append(sp, input);
+            el.appendChild(f);
+          }
+          if (wt.mode !== 'river') {
+            if (wt.draft >= 3) row(el, toggle(`Close the outline (${wt.draft} points)`, false, { waterClose: true }), toggle('Give it up', false, { waterGiveUp: true }));
+            else if (wt.draft || wt.fallTop) row(el, toggle('Give up the draft', false, { waterGiveUp: true }));
+          }
+          if (wt.picked) row(el, toggle(`Let ${wt.picked} go`, true, { waterPick: null }), toggle('Take it out', false, { waterRemove: wt.picked }));
+          this.note(el, wt.file);
+          if (wt.note) this.note(el, wt.note);
+          this.note(el, "Z arms it. A lake by clicks: LMB a point, a click near the first closes it, RMB takes one back. Traced: LMB a seed in its basin, flooded to the seed's ground and a little more (or the typed level). A fall: LMB its top, then its bottom. A river: LMB its points from its source down, a click near the last writes it, RMB takes one back. A click on a lake's or a river's ring picks it; its look (and a river's width and velocity) is on the Selected tab. Each is one undo. Its numbers are the sliders under The water tool below, and the rivers' own under rivers in the debug menu.");
+        },
+      });
     }
     // The places tool (Map-maker II's eighth wave): what a click draws, the kind written, a circle's radius, the draft and
     // the place picked, and the world row (the game's own cities kept clear of players' building, its loading lines).
     if (t.places) {
       const pl = t.places;
-      h('PLACES ON THE MAP');
-      row(...(['circle', 'rect', 'outline'] as const).map((m) => toggle(m === 'circle' ? 'A circle' : m === 'rect' ? 'A rectangle' : 'An outline', pl.mode === m, { placesMode: m })));
-      row(...['city', 'place', 'landmark', 'area', 'zone'].map((k) => toggle(k[0].toUpperCase() + k.slice(1), pl.kind === k, { placesKind: k })));
-      if (pl.mode === 'circle') {
-        const f = document.createElement('label');
-        f.className = 'ed-field';
-        const sp = document.createElement('span');
-        sp.textContent = 'Radius m';
-        const input = document.createElement('input');
-        input.type = 'number';
-        input.step = 'any';
-        input.value = String(pl.radius);
-        input.addEventListener('change', () => {
-          const n = Number(input.value);
-          if (input.value.trim() !== '' && Number.isFinite(n)) this.host.setTool({ placesRadius: n });
-        });
-        input.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter' || e.key === 'Escape') input.blur();
-        });
-        f.append(sp, input);
-        el.appendChild(f);
-      }
-      if (pl.draft >= 3) row(toggle(`Close the outline (${pl.draft} points)`, false, { placesClose: true }), toggle('Give it up', false, { placesGiveUp: true }));
-      else if (pl.draft) row(toggle('Give up the outline', false, { placesGiveUp: true }));
-      if (pl.picked) row(toggle(`Let ${pl.picked} go`, true, { placesPick: null }), toggle('Take it out', false, { placesRemove: pl.picked }));
-      h('THE WORLD ROW OF PLACES');
-      row(toggle(pl.cities ? "The game's own cities: no building" : "The game's own cities: players may build", pl.cities, { placesCities: !pl.cities }));
-      this.note(el, "Off by default: the game's own cities, its no-build areas and the client's no-build radii are open to players' houses and props. On, players are kept off them as the server kept them.");
-      const lf = document.createElement('label');
-      lf.className = 'ed-field';
-      const ls = document.createElement('span');
-      ls.textContent = 'Loading lines in no place';
-      const ta = document.createElement('textarea');
-      ta.rows = 3;
-      ta.value = pl.worldLoading;
-      ta.addEventListener('change', () => this.host.setTool({ placesWorldLoading: ta.value }));
-      ta.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') ta.blur();
+      parts.push({
+        id: 'places',
+        title: 'PLACES ON THE MAP',
+        draw: (el) => {
+          row(el, ...(['circle', 'rect', 'outline'] as const).map((m) => toggle(m === 'circle' ? 'A circle' : m === 'rect' ? 'A rectangle' : 'An outline', pl.mode === m, { placesMode: m })));
+          row(el, ...['city', 'place', 'landmark', 'area', 'zone'].map((k) => toggle(k[0].toUpperCase() + k.slice(1), pl.kind === k, { placesKind: k })));
+          if (pl.mode === 'circle') {
+            const f = document.createElement('label');
+            f.className = 'ed-field';
+            const sp = document.createElement('span');
+            sp.textContent = 'Radius m';
+            const input = document.createElement('input');
+            input.type = 'number';
+            input.step = 'any';
+            input.value = String(pl.radius);
+            input.addEventListener('change', () => {
+              const n = Number(input.value);
+              if (input.value.trim() !== '' && Number.isFinite(n)) this.host.setTool({ placesRadius: n });
+            });
+            input.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter' || e.key === 'Escape') input.blur();
+            });
+            f.append(sp, input);
+            el.appendChild(f);
+          }
+          if (pl.draft >= 3) row(el, toggle(`Close the outline (${pl.draft} points)`, false, { placesClose: true }), toggle('Give it up', false, { placesGiveUp: true }));
+          else if (pl.draft) row(el, toggle('Give up the outline', false, { placesGiveUp: true }));
+          if (pl.picked) row(el, toggle(`Let ${pl.picked} go`, true, { placesPick: null }), toggle('Take it out', false, { placesRemove: pl.picked }));
+        },
       });
-      lf.append(ls, ta);
-      el.appendChild(lf);
-      // The world row's own sky (Map-maker II's ninth wave), as one object of JSON standing for the whole of it.
-      if (pl.worldSky !== undefined) {
-        const sf = document.createElement('label');
-        sf.className = 'ed-field';
-        const ss = document.createElement('span');
-        ss.textContent = "The world's own sky (JSON)";
-        const sa = document.createElement('textarea');
-        sa.rows = 4;
-        sa.value = pl.worldSky;
-        sa.placeholder = '{ "climate": [50, 20, 15, 10, 5], "clouds": { "cover": 1.2 } }';
-        sa.addEventListener('change', () => this.host.setTool({ placesWorldSky: sa.value }));
-        sa.addEventListener('keydown', (e) => {
-          if (e.key === 'Escape') sa.blur();
-        });
-        sf.append(ss, sa);
-        el.appendChild(sf);
-        this.note(el, `Under every place's: env (a family: ${(pl.families ?? []).slice(0, 12).join(', ') || 'none in this sky'}${(pl.families ?? []).length > 12 ? ', …' : ''}), weather (rain, dust or snow), grade (gloom, heat, warmth, cool, saturation, contrast, strength). The world's own: climate (a weight a weather level), fog (morning, evening, morningLo, morningHi, eveningLo, eveningHi, top: all seven), wind (floor, gust, cover, size, wander, devils: each a multiplier) and clouds (cover, height, depth, density: each a multiplier on the decks). A field left out is the game's own.`);
-      }
-      this.note(el, pl.file);
-      if (pl.note) this.note(el, pl.note);
-      this.note(el, "P arms it. A circle: LMB at its middle (C held with the wheel sizes the next one). A rectangle: LMB held from corner to corner. An outline: LMB a point, a click near the first closes it, RMB takes one back. A click on a place's ring picks it; its name, kind, switches and loading lines are on the Selected tab. Each change is one undo. A place players may not build in is drawn in red.");
+      parts.push({
+        id: 'placesWorld',
+        title: 'THE WORLD ROW OF PLACES',
+        draw: (el) => {
+          row(el, toggle(pl.cities ? "The game's own cities: no building" : "The game's own cities: players may build", pl.cities, { placesCities: !pl.cities }));
+          this.note(el, "Off by default: the game's own cities, its no-build areas and the client's no-build radii are open to players' houses and props. On, players are kept off them as the server kept them.");
+          const lf = document.createElement('label');
+          lf.className = 'ed-field';
+          const ls = document.createElement('span');
+          ls.textContent = 'Loading lines in no place';
+          const ta = document.createElement('textarea');
+          ta.rows = 3;
+          ta.value = pl.worldLoading;
+          ta.addEventListener('change', () => this.host.setTool({ placesWorldLoading: ta.value }));
+          ta.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') ta.blur();
+          });
+          lf.append(ls, ta);
+          el.appendChild(lf);
+          // The world row's own sky (Map-maker II's ninth wave), as one object of JSON standing for the whole of it.
+          if (pl.worldSky !== undefined) {
+            const sf = document.createElement('label');
+            sf.className = 'ed-field';
+            const ss = document.createElement('span');
+            ss.textContent = "The world's own sky (JSON)";
+            const sa = document.createElement('textarea');
+            sa.rows = 4;
+            sa.value = pl.worldSky;
+            sa.placeholder = '{ "climate": [50, 20, 15, 10, 5], "clouds": { "cover": 1.2 } }';
+            sa.addEventListener('change', () => this.host.setTool({ placesWorldSky: sa.value }));
+            sa.addEventListener('keydown', (e) => {
+              if (e.key === 'Escape') sa.blur();
+            });
+            sf.append(ss, sa);
+            el.appendChild(sf);
+            this.note(el, `Under every place's: env (a family: ${(pl.families ?? []).slice(0, 12).join(', ') || 'none in this sky'}${(pl.families ?? []).length > 12 ? ', …' : ''}), weather (rain, dust or snow), grade (gloom, heat, warmth, cool, saturation, contrast, strength). The world's own: climate (a weight a weather level), fog (morning, evening, morningLo, morningHi, eveningLo, eveningHi, top: all seven), wind (floor, gust, cover, size, wander, devils: each a multiplier) and clouds (cover, height, depth, density: each a multiplier on the decks). A field left out is the game's own.`);
+          }
+          this.note(el, pl.file);
+          if (pl.note) this.note(el, pl.note);
+          this.note(el, "P arms it. A circle: LMB at its middle (C held with the wheel sizes the next one). A rectangle: LMB held from corner to corner. An outline: LMB a point, a click near the first closes it, RMB takes one back. A click on a place's ring picks it; its name, kind, switches and loading lines are on the Selected tab. Each change is one undo. A place players may not build in is drawn in red.");
+        },
+      });
     }
-    h('SNAPPING');
-    row(toggle(t.snapOn ? 'Snapping on' : 'Snapping off', t.snapOn, { snapOn: !t.snapOn }));
-    row(...t.gridSteps.map((g) => toggle(`${g} m`, t.grid === g, { grid: g })));
-    row(...t.angleSteps.map((a) => toggle(`${a}°`, t.angle === a, { angle: a })));
-    h('VIEW');
-    row(toggle(t.local ? 'Local axes' : 'World axes', t.local, { local: !t.local }), toggle('Game view', t.gameView, { gameView: !t.gameView }), toggle('Hold the world', t.hold, { hold: !t.hold }));
+    parts.push({
+      id: 'snapping',
+      title: 'SNAPPING',
+      draw: (el) => {
+        row(el, toggle(t.snapOn ? 'Snapping on' : 'Snapping off', t.snapOn, { snapOn: !t.snapOn }));
+        row(el, ...t.gridSteps.map((g) => toggle(`${g} m`, t.grid === g, { grid: g })));
+        row(el, ...t.angleSteps.map((a) => toggle(`${a}°`, t.angle === a, { angle: a })));
+      },
+    });
+    parts.push({
+      id: 'view',
+      title: 'VIEW',
+      draw: (el) => {
+        row(el, toggle(t.local ? 'Local axes' : 'World axes', t.local, { local: !t.local }), toggle('Game view', t.gameView, { gameView: !t.gameView }), toggle('Hold the world', t.hold, { hold: !t.hold }));
+      },
+    });
     // Folding (the third wave's): the rows drawn one by one, and the short loading screen that folds them.
     if (t.fold) {
       const f = t.fold;
-      h('FOLDING');
-      this.note(el, f.folding ? 'folding…' : `${f.rows} row${f.rows === 1 ? '' : 's'} drawn one by one (about ${f.ms.toFixed(1)} ms a frame by the measured rate) · ${f.folded} folded into their tiers`);
-      row(toggle('Fold now', false, { fold: true }), toggle(f.auto ? 'Automatic fold on' : 'Automatic fold off', f.auto, { autoFold: !f.auto }));
-      this.note(el, `Every arrival folds the rows by itself; Fold now does it here behind a short loading screen.${f.auto ? ` The automatic fold waits for a quiet moment with more than ${f.hint} drawn one by one.` : ''}`);
+      parts.push({
+        id: 'fold',
+        title: 'FOLDING',
+        draw: (el) => {
+          this.note(el, f.folding ? 'folding…' : `${f.rows} row${f.rows === 1 ? '' : 's'} drawn one by one (about ${f.ms.toFixed(1)} ms a frame by the measured rate) · ${f.folded} folded into their tiers`);
+          row(el, toggle('Fold now', false, { fold: true }), toggle(f.auto ? 'Automatic fold on' : 'Automatic fold off', f.auto, { autoFold: !f.auto }));
+          this.note(el, `Every arrival folds the rows by itself; Fold now does it here behind a short loading screen.${f.auto ? ` The automatic fold waits for a quiet moment with more than ${f.hint} drawn one by one.` : ''}`);
+        },
+      });
     }
     // The brush (the third wave's): armed or not, its entries (Shift+click them in the library) with their weights, its switches.
     if (t.brush) {
       const b = t.brush;
-      h('THE BRUSH');
-      row(toggle(b.armed ? 'Armed (B)' : 'Arm (B)', b.armed, { brushArm: !b.armed }));
-      if (!b.entries.length) this.note(el, 'no entries: Shift+click things in the library (or arm it with a thing in hand)');
-      for (const e of b.entries) {
-        const r = document.createElement('div');
-        r.className = 'ed-row';
-        const label = document.createElement('span');
-        label.className = 'ed-label';
-        label.textContent = e.name;
-        label.title = e.key;
-        const w = document.createElement('input');
-        w.type = 'number';
-        w.step = 'any';
-        w.min = '0';
-        w.value = String(e.weight);
-        w.title = 'its weight among the rest';
-        w.style.width = '56px';
-        w.addEventListener('change', () => {
-          const n = Number(w.value);
-          if (Number.isFinite(n) && n >= 0) this.host.setTool({ brushWeight: [e.key, n] });
-          w.blur();
-        });
-        w.addEventListener('keydown', (ev) => {
-          if (ev.key === 'Enter' || ev.key === 'Escape') w.blur();
-        });
-        const out = this.button('Let go', 'tool');
-        out.addEventListener('click', () => {
-          this.host.setTool({ brushRemove: e.key });
-          out.blur();
-          this.drawTools();
-        });
-        r.append(label, w, out);
-        el.appendChild(r);
-      }
-      row(...b.switches.map((s) => toggle(s.words, s.on, { brushSwitch: [s.key, !s.on] })));
-      this.note(el, 'LMB held paints toward the density, counting what of its own stands; RMB held erases; a stroke is one undo. Its numbers are the sliders under The brush below.');
+      parts.push({
+        id: 'brush',
+        title: 'THE BRUSH',
+        draw: (el) => {
+          row(el, toggle(b.armed ? 'Armed (B)' : 'Arm (B)', b.armed, { brushArm: !b.armed }));
+          if (!b.entries.length) this.note(el, 'no entries: Shift+click things in the library (or arm it with a thing in hand)');
+          for (const e of b.entries) {
+            const r = document.createElement('div');
+            r.className = 'ed-row';
+            const label = document.createElement('span');
+            label.className = 'ed-label';
+            label.textContent = e.name;
+            label.title = e.key;
+            const w = document.createElement('input');
+            w.type = 'number';
+            w.step = 'any';
+            w.min = '0';
+            w.value = String(e.weight);
+            w.title = 'its weight among the rest';
+            w.style.width = '56px';
+            w.addEventListener('change', () => {
+              const n = Number(w.value);
+              if (Number.isFinite(n) && n >= 0) this.host.setTool({ brushWeight: [e.key, n] });
+              w.blur();
+            });
+            w.addEventListener('keydown', (ev) => {
+              if (ev.key === 'Enter' || ev.key === 'Escape') w.blur();
+            });
+            const out = this.button('Let go', 'tool');
+            out.addEventListener('click', () => {
+              this.host.setTool({ brushRemove: e.key });
+              out.blur();
+              this.drawTools();
+            });
+            r.append(label, w, out);
+            el.appendChild(r);
+          }
+          row(el, ...b.switches.map((s) => toggle(s.words, s.on, { brushSwitch: [s.key, !s.on] })));
+          this.note(el, 'LMB held paints toward the density, counting what of its own stands; RMB held erases; a stroke is one undo. Its numbers are the sliders under The brush below.');
+        },
+      });
     }
-    h('FILES');
-    const files = document.createElement('div');
-    files.className = 'ed-note';
-    files.textContent = t.files.length ? `${t.branch ? `on ${t.branch}: ` : ''}${t.files.join(' · ')}` : 'not asked yet';
-    el.appendChild(files);
-    const refresh = this.button('Refresh', 'status');
-    refresh.addEventListener('click', () => {
-      this.host.refreshStatus();
-      refresh.blur();
+    parts.push({
+      id: 'files',
+      title: 'FILES',
+      draw: (el) => {
+        const files = document.createElement('div');
+        files.className = 'ed-note';
+        files.textContent = t.files.length ? `${t.branch ? `on ${t.branch}: ` : ''}${t.files.join(' · ')}` : 'not asked yet';
+        el.appendChild(files);
+        const refresh = this.button('Refresh', 'status');
+        refresh.addEventListener('click', () => {
+          this.host.refreshStatus();
+          refresh.blur();
+        });
+        row(el, refresh);
+        this.note(el, 'Rows reach players once their file is committed and merged to main; the editor never commits.');
+      },
     });
-    row(refresh);
-    this.note(el, 'Rows reach players once their file is committed and merged to main; the editor never commits.');
     // What the editor hands the tab of its own (Map-maker II's twelfth wave): the World's own filter, the no-spawn zones, the seats of ours.
-    this.drawSections(el, 'tools');
+    parts.push(...this.hostParts('tools'));
     // The editor's numbers of feel, as sliders: each set through `__debug.editor({ tune })`'s own setter.
     for (const g of this.host.dialSet().groups) {
-      h(g.title.toUpperCase());
-      for (const d of g.dials) {
-        if (d.kind !== 'number') continue;
-        el.appendChild(this.slider(d));
-      }
+      parts.push({
+        id: `dials:${g.title}`,
+        title: g.title.toUpperCase(),
+        draw: (el) => {
+          for (const d of g.dials) {
+            if (d.kind !== 'number') continue;
+            el.appendChild(this.slider(d));
+          }
+        },
+      });
     }
+    // The armed tool's own sections (or with none armed the editing's own), each where it always stood, then the foot.
+    for (const p of parts) if (toolSectionOwner(p.id) === armed) this.drawPart(el, 'tools', p);
+    for (const p of parts) if (toolSectionOwner(p.id) === 'always') this.drawPart(el, 'tools', p);
   }
 
   private slider(d: NumberDial): HTMLElement {
@@ -1457,6 +1677,10 @@ export class EditorWindow {
 
   private drawHistory(): void {
     const el = this.els.history;
+    this.keepScroll(el, () => this.drawHistoryNow(el));
+  }
+
+  private drawHistoryNow(el: HTMLElement): void {
     el.replaceChildren();
     const hst = this.host.history();
     if (!hst.actions.length) {

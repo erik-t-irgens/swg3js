@@ -781,6 +781,22 @@ b { color: var(--accent); font-weight: 600; }
 .knob-control .switch input:checked + span::before { transform: translateX(20px); background: var(--accent); }
 /* A knob whose switch is off: still usable, so a strength can be set before its toggle. */
 .knob.disabled { opacity: 0.45; }
+/* The Graphics page's sub-tabs, its find box and its folding sections (graphicsPage.ts): what is not shown carries
+   gfx-out, and a heading says its sub-tab only while a find shows every sub-tab's rows at once. */
+.gfx-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 6px; }
+.gfx-tabs { display: flex; flex-wrap: wrap; gap: 4px; flex: 1 1 auto; }
+.gfx-tabs button { padding: 5px 10px; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; background: transparent; color: var(--muted); border: 1px solid var(--panel-border); border-radius: 5px; cursor: pointer; }
+.gfx-tabs button:hover { color: var(--text); }
+.gfx-tabs button.on { color: var(--accent); background: color-mix(in srgb, var(--pool) 20%, transparent); }
+.gfx-find { flex: 0 1 200px; min-width: 120px; padding: 5px 8px; font-size: 12px; background: color-mix(in srgb, var(--void) 45%, transparent); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; }
+.gfx-find:focus { outline: none; border-color: var(--accent); }
+.menu-body .gfx-out { display: none; }
+.gfx-in { display: none; }
+.gfx-finding .gfx-in { display: inline; }
+.gfx-folds > h3 { cursor: pointer; user-select: none; }
+.gfx-folds > h3::before { content: '▾ '; }
+.gfx-folds.gfx-folded > h3::before { content: '▸ '; }
+.gfx-finding .gfx-folds > h3::before { content: ''; }
 /* Work going on in the background (the Effects switch compiling shaders): over the menu, under the loading screen. */
 .fx-notice { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 5; padding: 6px 14px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 6px; font-size: 12px; color: var(--text); pointer-events: none; }
 .fx-notice:empty { display: none; }
