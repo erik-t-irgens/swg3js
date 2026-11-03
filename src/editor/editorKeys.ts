@@ -61,6 +61,8 @@ export const EDITOR_ACTIONS: readonly Action[] = [
   'editorPlaces',
   // Its wave of the rooms' lights: the lights tool armed and let go.
   'editorLights',
+  // The race drawer's first wave: the Course tool armed and let go.
+  'editorCourse',
 ];
 
 /** The hotbar's nine keys, slot 1 first. */

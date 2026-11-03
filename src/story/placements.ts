@@ -30,7 +30,7 @@ import { lightSpecFields, readLightSpec, type LightSpec } from './lightSpec.ts';
 import type { PlacementLayer } from './placementPath.ts';
 import { gameToRawX, gameToRawZ, rawToGameX, rawToGameZ } from './waypoints.ts';
 
-export { editFileOf, editFilePath, editFileRel, editFileWorld, placementFileOf, placementsPath, EDIT_FILE_KINDS, SHARED_EDIT_KINDS, TOP_EDIT_FILES, type EditFileKind, type PlacementLayer } from './placementPath.ts';
+export { editFileOf, editFilePath, editFileRel, editFileWorld, placementFileOf, placementsPath, EDIT_FILE_KINDS, SHARED_EDIT_KINDS, TOP_EDIT_FILES, BATCH_FILE_KINDS, OUTSIDE_EDIT_FILES, isOutsideKind, outsideFilePath, type BatchFileKind, type EditFileKind, type OutsideFileKind, type PlacementLayer } from './placementPath.ts';
 export const PLACEMENT_LAYERS: readonly PlacementLayer[] = ['story', 'world'];
 /**
  * Which pack a row's model is found in: the props catalogue (by `thing`), the gallery's buildings, this world's own, or the

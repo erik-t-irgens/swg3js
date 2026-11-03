@@ -20,7 +20,10 @@
 // part way leaves the files before it written and the answer says so), and **status** (each of a world's placement
 // files and its track file as git sees it: untracked, saved and not committed, committed, or the same on main). Every
 // file written is told to the page with its revision, twelve hex of the SHA-1 of its text (`revisionOf`), after the
-// answer has gone, so the page drops the word about a file it has just landed. Git is only ever asked, read-only, and
+// answer has gone, so the page drops the word about a file it has just landed. A batch may also write a world's track file
+// (the race drawer's first wave: `public/tracks/<world>.json`, a kind kept outside the placements folder, `fileFor`), taken
+// away with its last track and its folder with it, never `public/` above (`pruneOf`), and its word names the kind `tracks`,
+// which the dev server hands the page as `tracks:changed`. Git is only ever asked, read-only, and
 // every call carries `--no-optional-locks` (`git`), so the editor never writes the index under the owner's own git:
 // committing is the owner's.
 
@@ -30,7 +33,7 @@ import zlib from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { PLACEMENTS_ENDPOINT_TUNE, EDITOR_HEADER, applyPlacementOp, fileStateOf, refuseRequest, statusAsk, statusFiles } from '../../src/world/placementEdits.ts';
-import { EDIT_FILE_KINDS, TOP_EDIT_FILES, editFileWorld } from '../../src/story/placementPath.ts';
+import { BATCH_FILE_KINDS, OUTSIDE_EDIT_FILES, TOP_EDIT_FILES, editFileWorld, isOutsideKind } from '../../src/story/placementPath.ts';
 import { PLANETS, packIdOf } from '../../src/data/planets.ts';
 
 /**
@@ -114,6 +117,14 @@ export function worldKinds() {
  * `<dir>/<kind>`, and the file must be directly in it, named for the world (or `all`, for a kind every world shares).
  */
 export function fileFor(dir, layer, world) {
+  // A kind kept outside the placements folder (the race drawer's tracks, `OUTSIDE_EDIT_FILES`): its own folder beside the
+  // placements folder under `public/`, the file directly in it and named for the world, held to that folder as every kind is
+  // held to its own.
+  if (isOutsideKind(layer)) {
+    const folder = path.resolve(dir, '..', OUTSIDE_EDIT_FILES[layer]);
+    const file = path.resolve(folder, `${world}.json`);
+    return file.startsWith(folder + path.sep) && path.dirname(file) === folder ? file : null;
+  }
   // A kind kept at the placements folder's own top (`solid.json`): exactly that file, directly in the folder.
   const top = TOP_EDIT_FILES[layer];
   if (top) {
@@ -126,16 +137,25 @@ export function fileFor(dir, layer, world) {
   return file.startsWith(folder + path.sep) && path.dirname(file) === folder ? file : null;
 }
 
-/** The kinds of file an ask reads: both row layers always, and every other kind a batch's edits name. */
+/** The kinds of file an ask reads: both row layers always, and every other kind a batch's edits name (the outside kinds among them). */
 export function kindsRead(op) {
   const out = ['story', 'world'];
   if (op && op.op === 'batch' && Array.isArray(op.edits)) {
     for (const e of op.edits) {
       const k = e && typeof e === 'object' ? e.file : null;
-      if (typeof k === 'string' && EDIT_FILE_KINDS.includes(k) && !out.includes(k)) out.push(k);
+      if (typeof k === 'string' && BATCH_FILE_KINDS.includes(k) && !out.includes(k)) out.push(k);
     }
   }
   return out;
+}
+
+/**
+ * How many folders above a file taken away go too once nothing is left in them: one for a kind kept outside the placements
+ * folder (its own folder, never `public/` above it: the tracks endpoint's own `prune`), two for every placements kind (its
+ * kind's folder and the placements folder).
+ */
+export function pruneOf(layer) {
+  return isOutsideKind(layer) ? 1 : 2;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -322,7 +342,7 @@ async function serve(req, res, { dir, root = path.resolve(dir, '..', '..'), noti
     for (const w of out.writes) {
       const file = files[w.layer];
       if (!file) throw new Error(`${w.layer} has no file for ${world}`);
-      await writeWhole(file, w.text, tune);
+      await writeWhole(file, w.text, tune, fs.promises, pruneOf(w.layer));
       written.push({ kind: w.layer, layer: w.layer, world, rev: w.text === null ? '' : revisionOf(w.text) });
     }
   } catch (err) {

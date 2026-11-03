@@ -16,12 +16,12 @@
 // Pure: no three, no DOM. Rule for this file (node runs it with type stripping): every import with its `.ts` extension,
 // no enum, no namespace, no constructor parameter properties.
 
-import type { EditFileKind } from '../story/placements.ts';
+import type { BatchFileKind } from '../story/placements.ts';
 import type { BatchEdit, EditRow } from '../world/placementEdits.ts';
 
 /** One row an action changed: the kind of file, its id, the row before (null: there was none) and after (null: there is none). */
 export interface RowChange {
-  file: EditFileKind;
+  file: BatchFileKind;
   id: string;
   before: EditRow | null;
   after: EditRow | null;
@@ -85,12 +85,12 @@ export function chunkEdits(edits: readonly BatchEdit[], most: number): BatchEdit
 }
 
 /** What a write answered for each kind of file: the rows put as stamped, by id. */
-export type Answered = Partial<Record<EditFileKind, ReadonlyMap<string, EditRow>>>;
+export type Answered = Partial<Record<BatchFileKind, ReadonlyMap<string, EditRow>>>;
 
 /** What one answer's files put, laid into `answered` by kind (each file's rows by id, a later batch's over an earlier's). Answers the kinds touched. */
-export function noteAnswered(answered: Partial<Record<EditFileKind, Map<string, EditRow>>>, files: Partial<Record<EditFileKind, { put: readonly EditRow[] } | undefined>>): EditFileKind[] {
-  const out: EditFileKind[] = [];
-  for (const kind of Object.keys(files) as EditFileKind[]) {
+export function noteAnswered(answered: Partial<Record<BatchFileKind, Map<string, EditRow>>>, files: Partial<Record<BatchFileKind, { put: readonly EditRow[] } | undefined>>): BatchFileKind[] {
+  const out: BatchFileKind[] = [];
+  for (const kind of Object.keys(files) as BatchFileKind[]) {
     const f = files[kind];
     if (!f) continue;
     out.push(kind);

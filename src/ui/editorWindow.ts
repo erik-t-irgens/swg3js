@@ -75,6 +75,9 @@ export const TOOL_SECTIONS: Readonly<Record<string, string>> = {
   // The lights tool (;): its scope, presets and switches, then its sliders (the pool's own are the debug menu's `roomLights`).
   'sec:Lights': 'lights',
   'dials:The lights tool': 'lights',
+  // The Course tool (', the race drawer's first wave): its modes, its draft, the new road's numbers and this world's tracks
+  // (its sliders are the debug menu's `course`).
+  'sec:Course': 'course',
   // At the foot whatever is armed: the files and git's word, the walk grid's, and the camera's and the window's sliders.
   files: 'always',
   'sec:The walk grid': 'always',

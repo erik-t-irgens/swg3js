@@ -74,6 +74,9 @@ import { brushRing, meantForWater, ringAsk, type RingGround } from './brush.ts';
 import { ToolList, toolFrame, type ToolDef, type ToolDraw } from './tools.ts';
 import { EditorWater, waterTool, type WaterHost } from './editorWater.ts';
 import { EditorLights, LIGHT_PRESETS, LIGHTS_TOOL_TUNE, lightsTool, presetOf, type LightsBuilding, type LightsHost } from './editorLights.ts';
+// The race drawer's first wave: the Course tool and the track file's tracks it edits.
+import { COURSE_MODES, EditorCourse, courseTool, type CourseHost, type CourseMode } from './editorCourse.ts';
+import type { TrackDef } from '../race/trackFile.ts';
 import type { LightRow } from '../world/editFiles/lightsFile.ts';
 import { WATER_CHOICES, WATER_TUNE, tuneWater, PLACES_TOOL_CHOICES, PLACES_TOOL_TUNE, tunePlacesTool } from './editorTune.ts';
 import { EditorPlaces, placeAreaSnippet, placesTool, skyOfRow, wholeSkyOf, type PlacesHost, type SkyFields } from './editorPlaces.ts';
@@ -239,6 +242,12 @@ export interface EditorHost {
   seatRow?(key: string, id: (base: string) => string): Record<string, unknown> | string;
   /** Map-maker II's thirteenth wave: the story's cast members by the body each is stood as (who wears a look of the owner's own). */
   castBodies?(): { id: string; body: string }[];
+  /**
+   * The race drawer's first wave: this world's track file as read now (its tracks; null while the race pass reads none, or
+   * for another world), and whether the race pass is on (with it off no track file is read, so the Course tool refuses).
+   */
+  tracks?(): readonly TrackDef[] | null;
+  raceOn?(): boolean;
 }
 
 /** One thing in hand: what a row writes, what it is drawn and judged by, and how it is turned. */
@@ -608,6 +617,11 @@ export class Editor {
     this.lights = new EditorLights(this.lightsHost());
     this.lights.rowOfKey = (key) => me.rowOfPlacedKey(key);
     this.tools.add(lightsTool(this.lights));
+    // The Course tool (the race drawer's first wave), on ': a race course drawn node by node on the ground and its gates,
+    // written into the world's track file through the batch (the `tracks` kind), every change one action. Nothing carves
+    // the ground yet (the second wave).
+    this.course = new EditorCourse(this.courseHost());
+    this.tools.add(courseTool(this.course));
     registerExtraTune('person', PLACED_PERSON_TUNE as unknown as Record<string, unknown>);
     registerExtraTune('zone', ZONE_TOOL_TUNE as unknown as Record<string, unknown>);
     registerExtraTune('lightsTool', LIGHTS_TOOL_TUNE as unknown as Record<string, unknown>);
@@ -683,6 +697,8 @@ export class Editor {
   readonly zones: EditorZones;
   /** The lights tool (Map-maker II's wave of the rooms' lights). */
   readonly lights: EditorLights;
+  /** The Course tool (the race drawer's first wave). */
+  readonly course: EditorCourse;
   /** The dresser (Map-maker II's thirteenth wave): the Looks tab, made the first time it is asked for. */
   private dresserMade: DresserUi | null = null;
 
@@ -1057,6 +1073,58 @@ export class Editor {
       cameraYaw: () => this.fly.yaw,
       underNotes: () => w.rowsUnderLakes(h.standingRows().map((s) => ({ id: s.id, x: s.x, y: s.y, z: s.z, rooms: s.row.kind === 'building' && (w.streamer?.placedHasRooms(placementKey(s.id)) ?? false) }))),
       say: (words, ok) => me.say(words, ok),
+    };
+  }
+
+  /**
+   * What the Course tool needs of the game (the race drawer's first wave): this world's tracks as read, the track file's raw
+   * frame about the layout's own centre (exactly `trackInGame`'s, so a course is drawn where a run tests its gates), the
+   * land under a raw point (the ground built, else the generator's; the sculpt's deltas laid in either) and the water.
+   */
+  private courseHost(): CourseHost {
+    const h = this.host;
+    const w = h.world;
+    const me = this;
+    const none: readonly TrackDef[] = [];
+    const g = { x: 0.5, z: 0.5 };
+    return {
+      get edits() {
+        return me.edits;
+      },
+      worldKind: () => h.worldKind(),
+      raceOn: () => h.raceOn?.() ?? false,
+      tracks: () => (h.tracks ? h.tracks() : none),
+      toRaw: (x, z, out) => {
+        const c = w.layoutCenter;
+        out.x = gameToRawX(c?.x ?? 0, x);
+        out.z = gameToRawZ(c?.z ?? 0, z);
+      },
+      toGame: (x, z, out) => {
+        const c = w.layoutCenter;
+        out.x = rawToGameX(c?.x ?? 0, x);
+        out.z = rawToGameZ(c?.z ?? 0, z);
+      },
+      centre: () => w.layoutCenter,
+      land: (x, z) => {
+        const c = w.layoutCenter;
+        g.x = rawToGameX(c?.x ?? 0, x);
+        g.z = rawToGameZ(c?.z ?? 0, z);
+        const y = w.terrain.nearHeightIfCached(g.x, g.z) ?? w.terrain.heightAt(g.x, g.z);
+        return Number.isFinite(y) ? y : Number.NaN;
+      },
+      landKnown: (x, z) => {
+        const c = w.layoutCenter;
+        const y = w.terrain.nearHeightIfCached(rawToGameX(c?.x ?? 0, x), rawToGameZ(c?.z ?? 0, z));
+        return y !== null && Number.isFinite(y) ? y : Number.NaN;
+      },
+      water: (x, z) => {
+        const c = w.layoutCenter;
+        return w.terrain.waterHeightAt(rawToGameX(c?.x ?? 0, x), rawToGameZ(c?.z ?? 0, z)) ?? -Infinity;
+      },
+      grid: () => me.edits.grid,
+      packId: () => h.packId(),
+      say: (words, ok) => me.say(words, ok),
+      refresh: () => me.window?.refreshEdits(),
     };
   }
 
@@ -1559,6 +1627,8 @@ export class Editor {
     this.removals.worldGone();
     this.zones.worldGone();
     this.lights.worldGone();
+    // The race drawer's first wave: no course picked, drawn or held.
+    this.course.worldGone();
     this.gridStale = false;
     this.tools.disarmAll();
     // The wash's write still waiting for its dials to rest goes with its world, never into the next world's file.
@@ -1677,6 +1747,10 @@ export class Editor {
       // A tool's key arms it (any other let go first) or lets it go: B the scatter brush, with the library's chosen entries
       // (or what is in hand), K the sculpt brush (Map-maker II's first wave).
       for (const t of this.tools.list) if (t.action && input.pressedAction(t.action)) void this.toggleTool(t.id);
+      // V with a tool armed is the tool's own first (the race drawer's: the Course tool's edge turned between a curve and a
+      // straight), before the editing reads its flush key; the selection takes no drag while a tool is armed in any case.
+      const vTool = this.tools.armedTool;
+      if (vTool?.toggle && input.pressedAction('editorNeighbour') && vTool.toggle()) this.window?.refreshEdits();
       // The editing keys (the hand on the selection, the gizmo's buttons, the nudges, the snaps, the hotbar, the eyedropper,
       // game view and the key sheet), read before the mutes take what they borrow; the frame's seconds in its kept clock.
       this.edits.clock.dt = dt;
@@ -2153,6 +2227,7 @@ export class Editor {
     // place of the selection's gizmo), from this frame's view; none with no such tool armed.
     m.lakesOn = false;
     m.draftOn = false;
+    m.courseOn = false;
     if (tool && tool.armed() && tool.overlay) tool.overlay(this.toolDraw, sv);
     this.moveEyeForEdits();
     endPointerFrame(this.pointer);
@@ -2657,6 +2732,40 @@ export class Editor {
       this.window?.library.render();
     }
     this.window?.refreshLooks();
+  }
+
+  /**
+   * The Course tool from the console (`__debug.course`, the race drawer's first wave): `{ arm: 'draw' | 'edit' | 'gates' }`
+   * arms it in a mode through the Tools list (any other tool let go; `false` lets it go), and everything else is the tool's own
+   * (`EditorCourse.debug`: `tune`, `pick`, `draw`, `shortcut`, `node`, `gates`, `gate`, `set`, `fromGates`, `remove`). The
+   * editor need not be on: an edit is a batch through the endpoint whether the camera flies or not. Answers what was said, the
+   * tool's report and this world's courses.
+   */
+  async courseDebug(o: Record<string, unknown> = {}): Promise<unknown> {
+    const said: string[] = [];
+    const c = this.course;
+    if (typeof o.arm === 'string' && (COURSE_MODES as readonly string[]).includes(o.arm)) {
+      if (!c.armed) said.push(await this.toggleTool('course'));
+      if (c.armed) said.push(c.setMode(o.arm as CourseMode));
+    } else if (o.arm === false && c.armed) said.push(await this.toggleTool('course'));
+    const { arm: _a, ...rest } = o;
+    const r = await c.debug(rest);
+    this.window?.refreshEdits();
+    return { said: [...said, ...r.said], tool: r.tool, courses: r.courses };
+  }
+
+  /**
+   * One track of this world's file written as one action of the editor's history (the Gates view's save and take-out while the
+   * editor is on, the race drawer's first wave): the whole row before and after through the batch. Answers '' or why not.
+   */
+  async putTrack(label: string, before: TrackDef | null, after: TrackDef | null): Promise<string> {
+    const id = after?.id ?? before?.id ?? '';
+    if (!id) return 'no track';
+    const es = this.edits.beginStroke(label);
+    const no = await this.edits.strokeWrite(es, [{ file: 'tracks', id, before, after }]);
+    this.edits.endStroke(es);
+    this.window?.refreshEdits();
+    return no;
   }
 
   /** The lights files landed (a write's answer, an undo's, the dev server's word): the lights tool's markers and tabs again. */
@@ -3231,11 +3340,13 @@ export class Editor {
       lookPalettes: () => this.lookPalettes(),
       attachment: (act: 'pick' | 'at' | 'size' | 'remove', i: number, value?: string) => void this.attachmentAct(act, i, value),
       // Map-maker II's twelfth wave: the world's own, the people, the sites, the seats and the no-spawn zones, as sections.
-      sections: (tab: 'selected' | 'here' | 'tools'): EditorSection[] => [...this.lightsSections(tab), ...this.zones.sections(tab), ...this.removals.sections(tab)],
+      sections: (tab: 'selected' | 'here' | 'tools'): EditorSection[] => [...this.lightsSections(tab), ...this.courseSections(tab), ...this.zones.sections(tab), ...this.removals.sections(tab)],
       sectionAct: (act: string, value?: string) => {
         void (async () => {
           // The lights tool's buttons and fields (Map-maker II's wave of the rooms' lights).
           if (act.startsWith('lights:')) this.lights.act(act, value);
+          // The Course tool's (the race drawer's first wave): its modes, its draft, its tracks and the picked course's fields.
+          else if (act.startsWith('course:')) await this.course.act(act, value);
           else if (act === 'zone:arm') await this.toggleTool('zones');
           else if (!(await this.zones.act(act, value))) await this.removals.act(act, value);
           this.window?.refreshEdits();
@@ -3255,6 +3366,17 @@ export class Editor {
     if (!this.lights.armed) return [];
     if (tab === 'tools') return this.lights.toolsSections();
     if (tab === 'selected') return this.lights.selectedSections();
+    return [];
+  }
+
+  /**
+   * The Course tool's sections (the race drawer's first wave), only while it is armed: on the Tools tab its modes, its draft,
+   * the new road's numbers and this world's tracks; on the Selected tab the picked course's, node's and gate's own fields.
+   */
+  private courseSections(tab: 'selected' | 'here' | 'tools'): EditorSection[] {
+    if (!this.course.armed) return [];
+    if (tab === 'tools') return this.course.toolsSections();
+    if (tab === 'selected') return this.course.selectedSections();
     return [];
   }
 
@@ -4924,6 +5046,7 @@ function keySheet(input: Input): string {
     `${k('editorPaint')} paint brush armed and let go · LMB held paints the chosen family or colour (Tools tab) · RMB held erases · Shift+click or the middle button takes what is under it · C held with the wheel sizes it`,
     `${k('editorWater')} water tool armed and let go · LMB a lake's point, a seed to trace, or a fall's ends (Tools tab) · RMB takes one back · a click on a lake's ring picks it: drag its square, ${k('placeLift')} held raises, ${k('putAway')} takes it out`,
     `${k('editorPlaces')} places tool armed and let go · LMB a circle (C held with the wheel sizes it), a rectangle's drag or an outline's point (Tools tab) · RMB takes one back · a click on a place's ring picks it: drag its square, C with the wheel sizes it, ${k('putAway')} takes it out`,
+    `${k('editorCourse')} Course tool armed and let go · Draw: LMB a node, near the first closes a circuit, near the last finishes a sprint, RMB takes one back, ${k('editorNeighbour')} a curve or a straight · Edit: drag a node's diamond, its grabbers widen and bank, ${k('placeLift')} held raises, ${k('placeTurn')} held banks, ${k('editorScale')} with the wheel its shoulder, a click on the road puts a node in, ${k('putAway')} takes it out · Gates: drag a gate's square, ${k('placeLift')} raises, ${k('placeTurn')} turns, ${k('editorScale')} with the wheel widens`,
     `${k('editorLights')} lights tool armed and let go · a click on a light picks it: drag its gizmo, ${k('placeLift')} held raises, ${k('placeTurn')} held turns, the arrows nudge, Ctrl+D duplicates, ${k('putAway')} takes it out (switches one of the game's own off) · a preset (Tools tab, the library's Lights) is put down by the next click`,
     `${k('editorGameView')} game view · ${k('editorKeys')} this sheet · ${k('editorBody')} body here · ${k('editorHold')} hold the world · Esc give up / clear · F2 leave`,
   ].join('\n');

@@ -162,8 +162,10 @@ export function olderEndpoint(why: string): boolean {
   // of one of your own models in its old reader's words ("not props, gallery or world", where today's adds "or imported").
   // And its twelfth wave's: an endpoint from before the shared walk-through file names the nine kinds it knew, ending in
   // "locations or looks", where today's ends "looks or solid". And the wave of the rooms' lights': one from before the lights
-  // files names the ten kinds it knew, ending in "looks or solid", where today's ends "lights or lightsAll".
-  return /fields this build does not write|holds 2000 rows, as many as a file may|(clear|guard) is a number of metres from 0 to 64\b|an ask is a put, a delete, a move or a rename$|'s file is story, world, removed or people$|'s file is story, world, removed, people, heights, paint, water, locations or looks$|'s file is story, world, removed, people, heights, paint, water, locations, looks or solid$|which this endpoint does not write yet|its kind is neither prop nor building\b|its pack is not props, gallery or world\b/.test(why);
+  // files names the ten kinds it knew, ending in "looks or solid", where today's ends "lights or lightsAll". And the race drawer's first
+  // wave's: one from before the tracks kind names the twelve kinds it knew, ending in "lights or lightsAll", where today's ends
+  // "lightsAll or tracks".
+  return /fields this build does not write|holds 2000 rows, as many as a file may|(clear|guard) is a number of metres from 0 to 64\b|an ask is a put, a delete, a move or a rename$|'s file is story, world, removed or people$|'s file is story, world, removed, people, heights, paint, water, locations or looks$|'s file is story, world, removed, people, heights, paint, water, locations, looks or solid$|'s file is story, world, removed, people, heights, paint, water, locations, looks, solid, lights or lightsAll$|which this endpoint does not write yet|its kind is neither prop nor building\b|its pack is not props, gallery or world\b/.test(why);
 }
 
 /** A write's refusal, with the restart words where an older endpoint gave it. */

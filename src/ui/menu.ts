@@ -159,6 +159,7 @@ const ACTION_LABELS: Record<Action, string> = {
   editorWater: import.meta.env.DEV ? 'World editor: the water tool armed and let go: lakes and falls (dev server only)' : '',
   editorPlaces: import.meta.env.DEV ? 'World editor: the places tool armed and let go: cities, places and no-build zones (dev server only)' : '',
   editorLights: import.meta.env.DEV ? "World editor: the lights tool armed and let go: the rooms' lights edited and put down (dev server only)" : '',
+  editorCourse: import.meta.env.DEV ? 'World editor: the Course tool armed and let go: a race course drawn and its gates (dev server only)' : '',
 };
 
 /**

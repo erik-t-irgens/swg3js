@@ -57,7 +57,8 @@ function after(src: string, marker: string, n = 2000): string {
   const ed = read('src/editor/editorEntry.ts');
   // 7,500 characters since Map-maker II's fifth wave, whose water tool reads F and the wheel with it in the block; 9,000 since
   // its thirteenth's review round, whose block reads nothing under the dresser's own pages before anything else.
-  const keys = after(ed, '  keys(dt: number, oldHand: boolean): void {', 9000);
+  // Widened in the race drawer's first wave: V handed to an armed tool before the editing's keys (`ToolDef.toggle`).
+  const keys = after(ed, '  keys(dt: number, oldHand: boolean): void {', 9600);
   // Widened in the second wave on purpose: while Ctrl is held the block reads the editor's own chords (raw keys, never an
   // action) before it mutes every action, and still reads nothing else. Widened again in Map-maker II's fifth wave, whose
   // block clears the water tool's raise (the mouse it took, F) along with the brushes' buttons.
@@ -231,8 +232,9 @@ function after(src: string, marker: string, n = 2000): string {
   // heights to the ground's, a kind with no layer yet dropped (2,400 since the shared lights file's word came before it).
   const word = after(main, '  private placementWord(d: PlacementWord): void {', 2400);
   ok(/const reload = this\.editLayerOf\(kind\);\s*if \(!reload\) return;/.test(word), "a placement word is routed by its kind, and a kind no layer reads is dropped");
-  // 1,200 characters since Map-maker II's twelfth wave, whose removal and people files are kinds of their own.
-  const layer = after(main, '  private editLayerOf(kind: string | undefined)', 1200);
+  // 1,200 characters since Map-maker II's twelfth wave, whose removal and people files are kinds of their own; 1,500 since
+  // the race drawer's first wave, whose track file's word is routed here too.
+  const layer = after(main, '  private editLayerOf(kind: string | undefined)', 1500);
   ok(/kind === 'story' \|\| kind === 'world'\) return \(pack, rev\) => void this\.reloadDressing\(pack, kind, rev\);/.test(layer) && /kind === 'heights'\) return \(pack, rev\) => \(this\.madeMapEdit\(\), void this\.reloadHeights\(pack, rev\)\);/.test(layer) && /return null;/.test(layer), 'the row layers read again into the permanent layer, the heights into the ground');
 }
 

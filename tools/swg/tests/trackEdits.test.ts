@@ -210,7 +210,8 @@ ok(!fs.existsSync(scratch), 'and the folder it worked in is gone');
   ok(/pathToFileURL\(path\.resolve\(ROOT, 'tools', 'dev', 'tracksEndpoint\.mjs'\)\)\.href/.test(editor) && /import\(\/\* @vite-ignore \*\/ glue\)/.test(editor) && !/import .* from '\.\/tools\/dev\/tracksEndpoint/.test(vite), 'and its glue is loaded at the first ask by a name the config works out, never a dependency of it');
   const files = vite.slice(vite.indexOf('function trackFiles(): Plugin {'), vite.indexOf('function tracksEditor(): Plugin {'));
   ok(/req\.method !== 'GET' && req\.method !== 'HEAD'/.test(files) && /fs\.readFile\(file/.test(files) && /application\/json/.test(files) && /statusCode = 404/.test(files), "the page's ask for a track file is answered from the disk as it stands, JSON, and a missing file a plain 404");
-  ok(/server\.ws\.send\('tracks:changed', word\)/.test(files) && /plugins: \[[^\]]*trackFiles\(\), tracksEditor\(\)/.test(vite), 'a file changing on disk is said to the page as tracks:changed, and both plugins are in');
+  // The race drawer's first wave: the word carries the file's revision, so the page drops the word about its own batch.
+  ok(/server\.ws\.send\('tracks:changed', \{ world: word\.world, rev: revisionOfFile\(abs\) \}\)/.test(files) && /plugins: \[[^\]]*trackFiles\(\), tracksEditor\(\)/.test(vite), 'a file changing on disk is said to the page as tracks:changed with its revision, and both plugins are in');
   const main = fs.readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
   const readAt = main.indexOf('private async readTracks(');
   const reader = main.slice(readAt, main.indexOf('\n  }\n', readAt));

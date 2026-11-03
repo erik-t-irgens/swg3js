@@ -119,6 +119,11 @@ export interface ToolDef {
   deleteKey?(): boolean;
   /** Escape while it is armed: answers whether it took the key (a draft given up, a picked lake let go) rather than letting the tool go. */
   escape?(): boolean;
+  /**
+   * V pressed while it is armed (the race drawer's first wave: the course's edge turned between a curve and a straight):
+   * answers whether it took the key, before the editing's own V (faces flush to a neighbour) is asked.
+   */
+  toggle?(): boolean;
 }
 
 /** The list, one armed at a time. */

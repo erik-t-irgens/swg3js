@@ -294,7 +294,7 @@ import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, propStandOf,
 import { POST_CLEAR_TUNE, carriedRowIds, pieceRow, pieceStand, piecesInGame, templateEntry, type CarryRow, type GamePiece, type InteriorTemplate, type InteriorsFile, type PieceRow } from './world/interiors.ts';
 import { PLACEMENT_KEY_PREFIX, PLACEMENT_LAYERS, fromGame, parseDonor, placementKey, placementsFileText, placementsPath, radiusOfBounds, readLooks, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
 import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, driftText, forceText, groundMoved, homeStaysText, inHandText, keptText, nextDestination, nextStateChoice, notYoursText, pickedUpText, removedText, rowFromHouse, rowFromProp, savedText, stateChoiceText, takeOutText, yawOfTurn, type BuildingSource, type Destination as KeptIn, type HandSource, type HomeSource } from './world/permanentEdit.ts';
-import { EDITOR_HEADER, EDITOR_HEADER_VALUE, PLACEMENTS_ENDPOINT_TUNE, type BatchEdit, type PlacementBatchOk, type PlacementBatchReply, type PlacementReply, type PlacementReplyOk } from './world/placementEdits.ts';
+import { EDITOR_HEADER, EDITOR_HEADER_VALUE, PLACEMENTS_ENDPOINT_TUNE, TRACKS_OLDER_ENDPOINT, olderTracksEndpoint, type BatchEdit, type PlacementBatchOk, type PlacementBatchReply, type PlacementReply, type PlacementReplyOk } from './world/placementEdits.ts';
 import { EditChip } from './ui/editChip.ts';
 import { PermanentPanel, editSlots, type PermanentPanelModel, type PermanentRowView } from './ui/permanentPanel.ts';
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
@@ -862,6 +862,8 @@ const boltFrom = new THREE.Vector3();
 const talkLook = new THREE.Vector3();
 /** No story people at all: what the cast is stood from while there is no view. */
 const NO_CAST: readonly CastView[] = [];
+/** No track at all: what the world editor's course tool reads while this world's track file holds none (the race drawer). */
+const NO_TRACK_DEFS: readonly TrackDef[] = [];
 /** A ship's shot: where it leaves and which way (bolts.fire and effects.flash copy what they are given). */
 const shotFrom = new THREE.Vector3();
 const shotDir = new THREE.Vector3();
@@ -1082,6 +1084,14 @@ interface EditorApi {
   lightsLanded(): void;
   /** The lights tool (Map-maker II's wave of the rooms' lights): `__debug.roomLights`'s editing half. */
   lightsDebug(o?: Record<string, unknown>): Promise<unknown>;
+  /** The course tool (the race drawer's first wave): `__debug.course`. */
+  courseDebug(o?: Record<string, unknown>): Promise<unknown>;
+  /**
+   * One track of this world's file written through the editor's batch as one action of its history (the Gates view's save and
+   * take-out while the editor is on, so an undo puts them back): the row before (null: a new track) and after (null: taken
+   * out). Answers '' or why not.
+   */
+  putTrack(label: string, before: TrackDef | null, after: TrackDef | null): Promise<string>;
 }
 
 /**
@@ -8625,6 +8635,22 @@ class App {
        */
       track: (opts: TrackConsoleOpts = {}) => this.trackConsole(opts),
       /**
+       * The world editor's course tool (the race drawer's first wave, the dev server's alone): `course()` reports the tool
+       * (armed, mode, the picked course, node and gate, the draft, the notes) and this world's courses (each track's paths,
+       * nodes, edges, lengths and gates, following or pinned); `course({ arm: 'draw' | 'edit' | 'gates' })` arms it in a
+       * mode; `course({ draw: { points: [[x, z], ...], closed, name } })` writes a new course through its points (game
+       * frame, the ground's heights); `course({ pick: 'id' })`; `course({ node: { track, path, i, x, z, y, w, b, sh, c,
+       * wall, insert, remove } })`; `course({ gates: { track, place: true } })`; `course({ gate: { track, i, follow, w,
+       * move: [x, y, z], yaw, remove } })`; `course({ set: { track, feather, crossing, margin, level, grass, wallOut,
+       * wallHigh, name, laps, for, clear } })`; `course({ fromGates: 'id' })`; `course({ remove: 'id' })`; `course({ tune
+       * })` moves `COURSE_TUNE`. Nothing carves the ground yet: that is the race drawer's second wave.
+       */
+      course: async (opts?: Record<string, unknown>) => {
+        if (!import.meta.env.DEV) return "the course tool is the world editor's (the dev server's)";
+        const ed = await this.loadEditor();
+        return ed ? ed.courseDebug(opts) : 'the world editor would not load';
+      },
+      /**
        * Racing together (src/net/raceNet.ts, src/race/raceGroup.ts): `raceTogether()` reports the race the group's
        * leader called (its track, start, members in grid order, this browser's slot and place in it, the standings),
        * `raceTogether({ start: 'test_dune_loop', in: 20 })` calls one (the leader's), `{ join: true }` joins the one
@@ -11151,12 +11177,10 @@ class App {
       // (`removed`, `people`) are passed over until it does.
       import.meta.hot.on('placements:changed', (d: PlacementWord) => this.placementWord(d));
       // A world's track file edited while the dev server runs (by hand, or the editor's own save): read again, and the
-      // corridors of the tracks it added or changed kept clear of the plants on the chunks built from now on.
-      import.meta.hot.on('tracks:changed', (d: { world?: string }) => {
-        if (!this.inWorld || this.traveling || this.world.sceneOnly) return;
-        const here = packIdOf(this.world.planet, this.zone);
-        if (d?.world === here) void this.reloadTracks(here);
-      });
+      // corridors of the tracks it added or changed kept clear of the plants on the chunks built from now on. Routed as a
+      // placements word of the kind `tracks` (the race drawer's first wave), so a revision this page's own batch landed
+      // (the world editor's course tool) is dropped rather than read back.
+      import.meta.hot.on('tracks:changed', (d: { world?: string; rev?: string }) => this.placementWord({ kind: 'tracks', layer: 'tracks', world: d?.world, rev: d?.rev }));
     }
     // The game's own people's words (src/world/conversationPack.ts): the server's conversations the heralds and
     // whoever else is adopted speak, folded once a session and joined to whatever story this browser holds; a
@@ -21167,6 +21191,17 @@ class App {
   }
 
   /**
+   * A point of the track file's frame carried into the game's (the race drawer): a drawn course's spine is in the file's
+   * frame, so `courseLegs` is handed this to lay its legs beside the grid and the gates `trackInGame` gave. The layout's own
+   * mirror about its centre on a planet; as it stands in a space zone (where no course is drawn).
+   */
+  private trackRawToGame(): (x: number, z: number) => { x: number; z: number } {
+    const c = this.world.layoutCenter ?? { x: 0, z: 0 };
+    if (this.trackFrame() === 'game') return (x, z) => ({ x, z });
+    return (x, z) => ({ x: rawToGameX(c.x, x), z: rawToGameZ(c.z, z) });
+  }
+
+  /**
    * A world's track file fetched and kept as this world's once it lands (a newer fetch wins). With the race pass off
    * (`RACE_TUNE.on`, or the load hatch `swg.race`) nothing is fetched, so no corridor keeps a plant off and a session
    * starts exactly as before the pass.
@@ -21217,13 +21252,23 @@ class App {
    * added or changed kept clear of plants on the chunks built from now on (a chunk already standing keeps its plants,
    * as with every exclusion), and the editor's list drawn again. A run under way keeps the track it started on.
    */
-  private async reloadTracks(world: string): Promise<string> {
+  private async reloadTracks(world: string, rev?: string): Promise<string> {
     // The race pass off reads no track and keeps no plant off a corridor (ground rule: off, the world is as it was).
     if (!RACE_TUNE.on) return 'the race pass is switched off, so no track is read: race({ on: true }), then track({ reload: true })';
     const before = this.tracksWorld === world ? (this.tracksRead?.tracks ?? []) : [];
     const read = await this.fetchTracks(world, this.worldKindOf(this.world.planet));
     if (packIdOf(this.world.planet, this.zone) !== world) return 'the world changed meanwhile';
+    if (typeof rev === 'string') this.placementRevs.set(`tracks/${world}`, rev);
     const now = read?.tracks ?? [];
+    return this.tracksMoved(before, now);
+  }
+
+  /**
+   * Tracks that moved, from `before` to `now` (a file read again, or the world editor's batch landed by difference): the
+   * corridors of the tracks added or changed kept clear of the plants on the chunks built from now on, and the editor's list
+   * drawn again. Answers what moved, in words.
+   */
+  private tracksMoved(before: readonly TrackDef[], now: readonly TrackDef[]): string {
     const sync = trackSync(before, now);
     const c = this.world.layoutCenter;
     const frame = this.trackFrame();
@@ -21305,7 +21350,7 @@ class App {
   private coursePoints(t: TrackDef, places: { grid: { x: number; z: number }; gates: readonly { x: number; z: number; w: number }[] }): { x: number; z: number }[] {
     const out: { x: number; z: number }[] = [{ x: places.grid.x, z: places.grid.z }];
     const step = Math.max(1, LOADING_TUNE.courseStep);
-    for (const l of courseLegs(t, places.grid, places.gates)) {
+    for (const l of courseLegs(t, places.grid, places.gates, this.trackRawToGame())) {
       const len = Math.hypot(l.bx - l.ax, l.bz - l.az);
       const n = Math.max(1, Math.ceil(len / step));
       for (let i = 0; i <= n; i++) out.push({ x: l.ax + ((l.bx - l.ax) * i) / n, z: l.az + ((l.bz - l.az) * i) / n });
@@ -21862,14 +21907,25 @@ class App {
     const file = trackEditFile(world);
     if (t.gates.length < 2) return `${t.id} has ${t.gates.length} gate${t.gates.length === 1 ? '' : 's'}, and a track has two at least`;
     if (!this.trackFilesSaved.has(file) && !this.trackArmed(`save:${file}`)) return `the first save to ${file} this session: track({ save: true }) again to write it`;
-    const reply = await this.postTracks({ op: 'put', world, track: t });
-    if (!reply.ok) return `not saved: ${reply.why}`;
+    // A drawn course the file holds now is kept (the race drawer): the track in hand may have been taken before the world
+    // editor's course tool last wrote it, and the Gates view edits gates, never the road.
+    const before = this.trackById(t.id);
+    const send: TrackDef = before?.course && JSON.stringify(before.course) !== JSON.stringify(t.course) ? { ...t, course: before.course } : t;
+    // With the world editor on, through its batch as one action of its history, so an undo puts the file back.
+    if (this.editor?.on) {
+      const no = await this.editor.putTrack(`${t.id} saved`, before, send);
+      if (no) return `not saved: ${olderTracksEndpoint(no) ? `${no} -- ${TRACKS_OLDER_ENDPOINT}` : no}`;
+    } else {
+      const reply = await this.postTracks({ op: 'put', world, track: send });
+      if (!reply.ok) return `not saved: ${reply.why}`;
+      if (packIdOf(this.world.planet, this.zone) === world) {
+        this.tracksRead = reply.read;
+        this.tracksWorld = world;
+      }
+    }
     this.trackFilesSaved.add(file);
     this.trackHeldUnsaved = false;
-    if (packIdOf(this.world.planet, this.zone) === world) {
-      this.tracksRead = reply.read;
-      this.tracksWorld = world;
-    }
+    if (send !== t) this.trackHeld = JSON.parse(JSON.stringify(send)) as TrackDef;
     this.trackListChanged();
     return `${t.id} saved in ${file}: commit it, or a local release pack refuses the tree`;
   }
@@ -21880,11 +21936,17 @@ class App {
     const world = packIdOf(this.world.planet, this.zone);
     if (!this.trackById(id)) return `no track called ${id} on this world`;
     if (!this.trackArmed(`remove:${world}/${id}`)) return `take ${id} out of ${trackEditFile(world)}? track({ remove: '${id}' }) again to do it`;
-    const reply = await this.postTracks({ op: 'delete', world, id });
-    if (!reply.ok) return `not taken out: ${reply.why}`;
-    if (packIdOf(this.world.planet, this.zone) === world) {
-      this.tracksRead = reply.read;
-      this.tracksWorld = world;
+    // With the world editor on, through its batch as one action of its history (the race drawer's first wave).
+    if (this.editor?.on) {
+      const no = await this.editor.putTrack(`${id} taken out`, this.trackById(id), null);
+      if (no) return `not taken out: ${olderTracksEndpoint(no) ? `${no} -- ${TRACKS_OLDER_ENDPOINT}` : no}`;
+    } else {
+      const reply = await this.postTracks({ op: 'delete', world, id });
+      if (!reply.ok) return `not taken out: ${reply.why}`;
+      if (packIdOf(this.world.planet, this.zone) === world) {
+        this.tracksRead = reply.read;
+        this.tracksWorld = world;
+      }
     }
     if (this.trackHeld?.id === id) this.trackHeldUnsaved = true;
     this.trackListChanged();
@@ -21943,7 +22005,7 @@ class App {
    */
   private trackCheck(t: TrackDef): { hits: { what: string; leg: string; off: number; at: [number, number] }[]; built: string; words: string } {
     const places = trackInGame(t, this.world.layoutCenter, this.trackFrame());
-    const legs = courseLegs(t, places.grid, places.gates);
+    const legs = courseLegs(t, places.grid, places.gates, this.trackRawToGame());
     const found = this.world.courseThings(legs);
     const hits = corridorHits(legs, found.things as CourseThing[]);
     const legName = (i: number) => (i === 0 ? 'grid to gate 0' : i <= t.gates.length - 1 ? `gate ${i - 1} to ${i}` : `gate ${t.gates.length - 1} to 0`);
@@ -26131,6 +26193,8 @@ class App {
     if (kind === 'people') return (pack, rev) => void this.reloadPeople(pack, rev);
     // Map-maker II's wave of the rooms' lights: this world's lights file.
     if (kind === 'lights') return (pack, rev) => void this.reloadLights(pack, rev);
+    // The race drawer's first wave: this world's track file (`tracks:changed`), read again whole as it always was.
+    if (kind === 'tracks') return (pack, rev) => void this.reloadTracks(pack, rev);
     return null;
   }
 
@@ -29368,6 +29432,10 @@ class App {
           seatRow: (key, mint) => this.seatRowOf(key, mint),
           // Map-maker II's thirteenth wave: the bodies the story's cast stand as here, which a look may be worn by.
           castBodies: () => (this.jobs.view()?.cast ?? []).map((c) => ({ id: c.id, body: c.body })),
+          // The race drawer's first wave: this world's track file as read (null while the race pass reads none, or for
+          // another world), and whether the race pass is on.
+          tracks: () => (RACE_TUNE.on && this.tracksWorld === this.editWorld() ? (this.tracksRead?.tracks ?? NO_TRACK_DEFS) : null),
+          raceOn: () => RACE_TUNE.on,
         });
         this.editor = ed;
         return ed;
@@ -29759,7 +29827,49 @@ class App {
       this.world.setRoomLightRows(worldRows, allRows);
       this.editor?.lightsLanded();
     }
+    // The race drawer's first wave: the track file it wrote (the course tool's edit, the Gates view's save while the editor
+    // is on, an undo's or a redo's), laid over the tracks read by difference; the corridors of the tracks it moved kept
+    // clear on the chunks built from now on, as a file read again keeps them.
+    const tkf = files.tracks;
+    if (tkf && this.world.generation === gen && this.editWorld() === pack) this.landTracks(pack, tkf.put as unknown as TrackDef[], tkf.deleted);
     return { ok: true, why: '', files, ms: reply.ms ?? 0, built };
+  }
+
+  /**
+   * Tracks of this world's file landed from a batch's answer (`editorBatch`): the rows put laid over the tracks read by id
+   * (a track the file holds keeps its place in the list, a new one goes at the end), the ids taken out dropped, and the
+   * file's fetch under way, if any, let go (it would land the text from before the write). Nothing with the race pass off,
+   * which reads no track.
+   */
+  private landTracks(world: string, put: readonly TrackDef[], deleted: readonly string[]): void {
+    if (!RACE_TUNE.on) return;
+    const before = this.tracksWorld === world ? (this.tracksRead?.tracks ?? []) : [];
+    const gone = new Set(deleted);
+    const byId = new Map(put.map((t) => [t.id, t] as const));
+    const now: TrackDef[] = [];
+    for (const t of before) {
+      if (gone.has(t.id)) continue;
+      now.push(byId.get(t.id) ?? t);
+      byId.delete(t.id);
+    }
+    for (const t of byId.values()) now.push(t);
+    const was = this.tracksRead;
+    const read: TrackRead = { tracks: now, skipped: was?.skipped ?? [], unknown: was?.unknown ?? [], problem: null };
+    this.tracksRead = read;
+    this.tracksWorld = world;
+    this.tracksFetch = { world, done: Promise.resolve(read) };
+    this.tracksMoved(before, now);
+    // A track the Gates view holds that the batch changed is the file's again (an undo of its save, the course tool's edit),
+    // unless it holds changes of its own; one the batch took out stays in hand, unsaved, as a take-out always left it.
+    const held = this.trackHeld;
+    if (held && gone.has(held.id)) this.trackHeldUnsaved = true;
+    else if (held && !this.trackHeldUnsaved) {
+      const t = put.find((x) => x.id === held.id);
+      if (t) {
+        this.trackHeld = JSON.parse(JSON.stringify(t)) as TrackDef;
+        this.refreshGateShapes();
+      }
+    }
   }
 
   /**

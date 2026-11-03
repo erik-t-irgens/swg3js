@@ -183,6 +183,48 @@ export interface MarksView {
   lightShapeVis: Uint8Array;
   lightRayN: number;
   lightRays: Float64Array;
+  /**
+   * The course tool's courses (the race drawer's first wave): `courseLineN` lines, the first `courseSpans[0]` points of
+   * `coursePts` (two numbers a point) the first line's and so on, each drawn point to point where both are in front of the
+   * eye (`courseVis`); a line's `courseStyle` says what it is -- 0 a course's spine, 1 the picked course's, 2 a road's edge, 3
+   * a shoulder's outer edge (dotted), 4 a node's width line, 5 a gate's window, 6 the picked gate's, 7 the gate under the
+   * cursor, 8 a gate seen while editing nodes (faint), 9 a draft under way -- and its 0x80 bit closes it (a gate's window).
+   * And the picked course's handles (`courseMarkN`, a place each, `courseMarkPts`): `courseMarkKind` 0 a node's diamond, 1 a
+   * grabber at a width line's end; `courseMarkState` 0 plain, 1 under the cursor, 2 picked. The pools grow when a world's
+   * courses first need them, never in a steady frame.
+   */
+  courseOn: boolean;
+  courseLineN: number;
+  courseSpans: Int32Array;
+  courseStyle: Uint8Array;
+  coursePts: Float64Array;
+  courseVis: Uint8Array;
+  courseMarkN: number;
+  courseMarkPts: Float64Array;
+  courseMarkVis: Uint8Array;
+  courseMarkKind: Uint8Array;
+  courseMarkState: Uint8Array;
+}
+
+/** The course tool's pools grown to hold `lines` lines of `points` points in all and `marks` handles; nothing made when they do already. */
+export function coursePools(v: MarksView, lines: number, points: number, marks: number): void {
+  if (v.courseSpans.length < lines) {
+    const cap = Math.max(lines, v.courseSpans.length * 2, 16);
+    v.courseSpans = new Int32Array(cap);
+    v.courseStyle = new Uint8Array(cap);
+  }
+  if (v.courseVis.length < points) {
+    const cap = Math.max(points, v.courseVis.length * 2, 256);
+    v.coursePts = new Float64Array(cap * 2);
+    v.courseVis = new Uint8Array(cap);
+  }
+  if (v.courseMarkKind.length < marks) {
+    const cap = Math.max(marks, v.courseMarkKind.length * 2, 32);
+    v.courseMarkPts = new Float64Array(cap * 2);
+    v.courseMarkVis = new Uint8Array(cap);
+    v.courseMarkKind = new Uint8Array(cap);
+    v.courseMarkState = new Uint8Array(cap);
+  }
 }
 
 /** The lights' marker pools grown to hold `n` markers; nothing made when they do already. */
@@ -278,7 +320,74 @@ export function marksView(): MarksView {
     lightShapeVis: new Uint8Array(RING_MARKS),
     lightRayN: 0,
     lightRays: new Float64Array(16),
+    courseOn: false,
+    courseLineN: 0,
+    courseSpans: new Int32Array(0),
+    courseStyle: new Uint8Array(0),
+    coursePts: new Float64Array(0),
+    courseVis: new Uint8Array(0),
+    courseMarkN: 0,
+    courseMarkPts: new Float64Array(0),
+    courseMarkVis: new Uint8Array(0),
+    courseMarkKind: new Uint8Array(0),
+    courseMarkState: new Uint8Array(0),
   };
+}
+
+/** A course line's colour and alpha by its style (`MarksView.courseStyle`, its 0x80 bit taken off). */
+function courseInk(style: number): number {
+  return style === 1 || style === 4 || style === 6 ? COL.ink : style === 7 ? COL.hot : style === 9 ? COL.warn : style === 5 || style === 8 ? COL.good : style === 2 ? COL.accent : COL.muted;
+}
+
+/**
+ * The course tool's courses (`MarksView.course...`): each line point to point (a shoulder's outer edge every other span, a
+ * gate's window closed), then the picked course's diamonds and grabbers. Nothing is made; the width is read here.
+ */
+function drawCourses(o: MarksOverlay, v: MarksView): void {
+  if (!v.courseOn) return;
+  const width = EDITOR_TUNE.outline.width;
+  const pts = v.coursePts;
+  const vis = v.courseVis;
+  let k = 0;
+  for (let l = 0; l < v.courseLineN; l++) {
+    const n = v.courseSpans[l];
+    const raw = v.courseStyle[l];
+    const style = raw & 0x7f;
+    const closed = (raw & 0x80) !== 0;
+    const c = courseInk(style);
+    const a = style === 0 || style === 8 ? 0.45 : style === 3 ? 0.55 : 0.9;
+    const w = style === 1 || style === 6 || style === 7 ? width * 1.25 : style === 3 || style === 8 ? width * 0.75 : width;
+    const last = closed ? n : n - 1;
+    for (let i = 0; i < last; i++) {
+      if (style === 3 && (i & 1)) continue;
+      const p = k + i;
+      const q = k + (i + 1 === n ? 0 : i + 1);
+      if (vis[p] && vis[q]) o.line(pts[p * 2], pts[p * 2 + 1], pts[q * 2], pts[q * 2 + 1], w, c, a);
+    }
+    if (style === 9) for (let i = 0; i < n - 1; i++) if (vis[k + i]) o.ring(pts[(k + i) * 2], pts[(k + i) * 2 + 1], 3, width, c, 0.9);
+    k += n;
+  }
+  const mp = v.courseMarkPts;
+  const r = 6;
+  for (let i = 0; i < v.courseMarkN; i++) {
+    if (!v.courseMarkVis[i]) continue;
+    const s = v.courseMarkState[i];
+    const c = s === 2 ? COL.ink : s === 1 ? COL.hot : COL.accent;
+    const x = mp[i * 2];
+    const y = mp[i * 2 + 1];
+    if (v.courseMarkKind[i] === 0) {
+      o.line(x, y - r, x + r, y, width, c, 0.95);
+      o.line(x + r, y, x, y + r, width, c, 0.95);
+      o.line(x, y + r, x - r, y, width, c, 0.95);
+      o.line(x - r, y, x, y - r, width, c, 0.95);
+    } else {
+      const g = r * 0.6;
+      o.line(x - g, y - g, x + g, y - g, width, c, 0.95);
+      o.line(x + g, y - g, x + g, y + g, width, c, 0.95);
+      o.line(x + g, y + g, x - g, y + g, width, c, 0.95);
+      o.line(x - g, y + g, x - g, y - g, width, c, 0.95);
+    }
+  }
 }
 
 /**
@@ -484,6 +593,7 @@ export function drawEditorMarks(o: MarksOverlay, v: MarksView): void {
     }
   }
   drawLakes(o, v);
+  drawCourses(o, v);
   drawHandles(o, v);
   drawLights(o, v);
   if (v.hoverOn) drawBox(o, v.hover, width, COL.muted, 0.8);

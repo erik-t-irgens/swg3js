@@ -27,7 +27,7 @@
 import * as THREE from 'three';
 import type { Input } from '../core/input.ts';
 import type { PlacedObject } from '../world/layoutStream.ts';
-import { PLACEMENT_LIMITS, scaleOf, toGame, mintPlacementId, placementKey, type EditFileKind, type PlacementLayer, type PlacementRow } from '../story/placements.ts';
+import { PLACEMENT_LIMITS, scaleOf, toGame, mintPlacementId, placementKey, type BatchFileKind, type EditFileKind, type PlacementLayer, type PlacementRow } from '../story/placements.ts';
 import { rowMoved, followClear } from '../world/permanentEdit.ts';
 import { clearRadius, patchOfBounds } from '../world/housePlace.ts';
 import { applyHoldManyIn, manyHoldAsk, manyHoldState, tumbleAxes, type HeldThing, type ManyHoldKind } from '../world/placeHold.ts';
@@ -55,7 +55,7 @@ export interface EditorBatchFile {
 export interface EditorBatch {
   ok: boolean;
   why: string;
-  files: Partial<Record<EditFileKind, EditorBatchFile>>;
+  files: Partial<Record<BatchFileKind, EditorBatchFile>>;
   ms: number;
   built: Promise<void>;
 }
@@ -1402,7 +1402,7 @@ export class EditorEdits {
     const chunks = chunkEdits(edits, EDITOR_TUNE.batchMost);
     this.writing = true;
     let ms = 0;
-    const answered: Partial<Record<EditFileKind, Map<string, EditRow>>> = {};
+    const answered: Partial<Record<BatchFileKind, Map<string, EditRow>>> = {};
     const files = new Set<string>();
     let built: Promise<void> = Promise.resolve();
     let refused = '';
@@ -1895,7 +1895,7 @@ export class EditorEdits {
     const plan = this.history.editsTo(to);
     const chunks = chunkEdits(plan.edits, EDITOR_TUNE.batchMost);
     this.writing = true;
-    const answered: Partial<Record<EditFileKind, Map<string, EditRow>>> = {};
+    const answered: Partial<Record<BatchFileKind, Map<string, EditRow>>> = {};
     let refused = '';
     let ms = 0;
     try {

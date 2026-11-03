@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "world": "monument",
+  "frame": "raw",
+  "rows": [
+    { "id": "city-1", "kind": "city", "name": "Mos Cresh", "build": false, "env": "global", "shape": {"kind":"circle","c":[-308.32,4557.34],"r":606.83}, "at": 1793669684533 }
+  ]
+}

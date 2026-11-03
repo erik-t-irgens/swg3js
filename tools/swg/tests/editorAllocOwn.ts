@@ -904,6 +904,185 @@ if (process.argv.includes('water')) {
   console.log(JSON.stringify({ frames: WATER_FRAMES, made: steady.made, scavenges: steady.scavenges, raiseMade: raise.made, raiseScavenges: raise.scavenges, dragMade: drag.made, dragScavenges: drag.scavenges, draftMade: draft.made, draftScavenges: draft.scavenges, lakes: shownLakes, raising, dragging, hot, draftPoints, draftDrawn: wm.draftCount, gizmo: L.on }));
   process.exit(0);
 }
+// With `course` (`courseAlloc.test.ts`, the race drawer's first wave): the Course tool armed over a 400-node circuit, its
+// frame (the Tools list's record handed to it, its overlay: the courses projected, the picked one's diamonds, width lines,
+// grabbers and gates laid out and hovered) and the marks drawn, in four windows: editing with the cursor on a node, a
+// node's diamond dragged, the gates mode hovering a gate, and a draft of three clicks drawn with the aim. A held edit's
+// course is made again at `previewHz` (a stamp's work, never a frame's), so the windows run with `live` 'release' and the
+// preview's tick is measured apart (`previewBytes`, what one made).
+if (process.argv.includes('course')) {
+  const { EditorCourse, courseTool } = await import('../../../src/editor/editorCourse.ts');
+  const { courseCtx, drawTrack } = await import('../../../src/editor/courseEdit.ts');
+  const { COURSE_TUNE } = await import('../../../src/race/courseTune.ts');
+  const { toolFrame } = await import('../../../src/editor/tools.ts');
+  // The camera at (0, 8, 0) looks down -Z: a circuit of 400 nodes about (0, -260) of the game's frame, 200 m round, on flat
+  // ground at nought (the file's raw frame is the game's mirrored in x about a centre at nought).
+  const pts: { x: number; z: number; y: number }[] = [];
+  for (let i = 0; i < 400; i++) {
+    const a = (i / 400) * Math.PI * 2;
+    pts.push({ x: -Math.sin(a) * 200, z: -260 + Math.cos(a) * 200, y: 0 });
+  }
+  const made = drawTrack('course_1', 'Course 1', pts, true, courseCtx(() => 0));
+  if (typeof made === 'string') throw new Error(made);
+  const tracks = [made];
+  const cm = marksView();
+  const course = new EditorCourse({
+    // A write's stand-in: a let-go between windows writes, and nothing it writes moves the course.
+    edits: { beginStroke: (label: string) => ({ label }), strokeWrite: async () => '', endStroke: () => '' } as never,
+    worldKind: () => 'ground',
+    raceOn: () => true,
+    tracks: () => tracks,
+    toRaw: (x, z, out) => {
+      out.x = -x;
+      out.z = z;
+    },
+    toGame: (x, z, out) => {
+      out.x = -x;
+      out.z = z;
+    },
+    centre: () => null,
+    land: () => 0,
+    landKnown: () => 0,
+    water: () => -Infinity,
+    grid: () => 1,
+    packId: () => 'test',
+    say() {},
+    refresh() {},
+  });
+  await course.arm();
+  course.pick('course_1');
+  course.setMode('edit');
+  COURSE_TUNE.live = 'release';
+  const tool = courseTool(course);
+  const f = toolFrame();
+  const draw = { marks: cm, radius: 0.5, ring(): void {} };
+  // What each window holds (0 nothing, 1 the left button: a drag, or a click of the draft), its cursor's middle and the step.
+  const st = new Float64Array(6);
+  const courseFrame = (): void => {
+    st[1]++;
+    st[0] = st[1] * 0.01;
+    f.apply = st[2] === 1;
+    f.inverse = false;
+    f.shift = false;
+    f.sampled = false;
+    f.x = Math.sin(st[0]) * 30 + st[5];
+    f.y = 0.5;
+    f.z = -40 + Math.cos(st[0]) * 10;
+    f.valid = true;
+    f.dt = 1 / 60;
+    f.now = st[0];
+    f.sx = st[3] + Math.sin(st[0] * 3) * 3;
+    f.sy = st[4] + Math.sin(st[0] * 2) * 2;
+    f.dy = 0;
+    f.lift = false;
+    f.turn = false;
+    f.dx = 0;
+    tool.step(f);
+    tool.overlay!(draw as never, view);
+    drawEditorMarks(overlay, cm);
+  };
+  const courseFrames = (n: number): void => {
+    for (let i = 0; i < n; i++) courseFrame();
+  };
+  const COURSE_FRAMES = 2 * FRAMES;
+  try {
+    new Function('f', '%NeverOptimizeFunction(f)')(courseFrames);
+  } catch {
+    // Without the flag the loop is left to the compiler.
+  }
+  const measure = async (): Promise<{ made: number; scavenges: number }> => {
+    courseFrames(20_000);
+    let best = { made: Infinity, scavenges: Infinity };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      courseFrames(10_000);
+      gc({ type: 'minor' });
+      await settle();
+      scavenges = 0;
+      const before = young();
+      courseFrames(COURSE_FRAMES);
+      const made = young() - before;
+      await settle();
+      if (scavenges < best.scavenges || (scavenges === best.scavenges && made < best.made)) best = { made, scavenges };
+      if (best.scavenges === 0 && best.made <= 0) break;
+    }
+    return best;
+  };
+  // The cursor on node 0's diamond (its place on the screen read off the marks a frame drew), nothing held.
+  st[3] = 800;
+  st[4] = 450;
+  courseFrame();
+  // The diamond of the node nearest the screen's middle (every node's diamond is the first of its three handles).
+  let pick = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < cm.courseMarkN; i += 3) {
+    if (!cm.courseMarkVis[i]) continue;
+    const d = Math.hypot(cm.courseMarkPts[i * 2] - 800, cm.courseMarkPts[i * 2 + 1] - 600);
+    if (d < bestD) {
+      bestD = d;
+      pick = i;
+    }
+  }
+  st[3] = cm.courseMarkPts[pick * 2];
+  st[4] = cm.courseMarkPts[pick * 2 + 1];
+  const steady = await measure();
+  const report = () => course.report() as { node: number; held: string; gate: number; draft: number; views: number };
+  const shown = { lines: cm.courseLineN, marks: cm.courseMarkN };
+  // The diamond grabbed (its press frame's cursor exactly on it) and dragged.
+  const saveStep = st[1];
+  st[1] = -1;
+  courseFrame();
+  st[2] = 1;
+  st[1] = -1;
+  courseFrame();
+  st[1] = saveStep;
+  const grabbed = report().held;
+  const drag = await measure();
+  // The preview's tick, measured apart: one course made for the drag as `previewHz` asks, in bytes.
+  COURSE_TUNE.live = 'drag';
+  gc({ type: 'minor' });
+  const pb = young();
+  // The first frame after the switch makes one (the preview's clock was never wound while it was off).
+  courseFrame();
+  const previewBytes = young() - pb;
+  COURSE_TUNE.live = 'release';
+  // Let go (a write, outside every window), then the gates mode, the cursor near gate 1's window.
+  st[2] = 0;
+  courseFrame();
+  await settle();
+  course.setMode('gates');
+  courseFrame();
+  let at = 0;
+  let found = -1;
+  for (let l = 0; l < cm.courseLineN; l++) {
+    if (cm.courseStyle[l] & 0x80) {
+      found++;
+      if (found === 1) break;
+    }
+    at += cm.courseSpans[l];
+  }
+  st[3] = (cm.coursePts[at * 2] + cm.coursePts[(at + 1) * 2]) / 2;
+  st[4] = (cm.coursePts[at * 2 + 1] + cm.coursePts[(at + 1) * 2 + 1]) / 2;
+  courseFrame();
+  const gatesHot = (course as unknown as { hotGate: number }).hotGate;
+  const gates = await measure();
+  // A draft of three clicks (each a press and a let-go), drawn with the aim, nothing held.
+  course.setMode('draw');
+  course.pick(null);
+  for (let kk = 0; kk < 3; kk++) {
+    // Off the road and 30 m apart (past the close and the finish's reach), then the aim back where it wanders.
+    st[5] = 100 + kk * 30;
+    st[2] = 1;
+    courseFrame();
+    st[2] = 0;
+    courseFrame();
+  }
+  st[5] = 0;
+  const draftPoints = report().draft;
+  const draft = await measure();
+  watch.disconnect();
+  console.log(JSON.stringify({ frames: COURSE_FRAMES, made: steady.made, scavenges: steady.scavenges, dragMade: drag.made, dragScavenges: drag.scavenges, gatesMade: gates.made, gatesScavenges: gates.scavenges, draftMade: draft.made, draftScavenges: draft.scavenges, nodes: made.course!.paths[0].nodes.length, gateCount: made.gates.length, lines: shown.lines, marks: shown.marks, grabbed, gatesHot, draftPoints, previewBytes }));
+  process.exit(0);
+}
 // With `places` (`placesAlloc.test.ts`, Map-maker II's eighth wave): the places tool armed with three places drawn (a circle,
 // a rectangle and an outline, one of them no-build) and one picked, the aim wandering -- the Tools list's frame handed to the
 // tool and its overlay (the outlines projected at their ground, the picked one's square laid out and picked, the rings) and

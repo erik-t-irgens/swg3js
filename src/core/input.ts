@@ -129,6 +129,8 @@ export type Action =
   | 'editorWater'
   // Map-maker II's places tool (its eighth wave): P arms it, and disarms it.
   | 'editorPlaces'
+  // The race drawer's Course tool (its first wave): ' arms it, and disarms it.
+  | 'editorCourse'
   // Map-maker II's lights tool (its wave of the rooms' lights): ; arms it, and disarms it.
   | 'editorLights';
 
@@ -292,6 +294,8 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   editorPlaces: ['KeyP'],
   // ;, no default of anybody's: the lights tool armed and let go (Map-maker II's wave of the rooms' lights).
   editorLights: ['Semicolon'],
+  // ', no default of anybody's: the Course tool armed and let go (the race drawer's first wave).
+  editorCourse: ['Quote'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 
@@ -338,6 +342,7 @@ export const DEV_ONLY_ACTIONS: ReadonlySet<Action> = new Set<Action>([
   'editorPaint',
   'editorWater',
   'editorPlaces',
+  'editorCourse',
   'editorLights',
 ]);
 

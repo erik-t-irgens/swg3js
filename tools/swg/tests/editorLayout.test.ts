@@ -55,6 +55,8 @@ const TOOLS = [
   { id: 'places', label: 'the places tool', key: 'P' },
   { id: 'zones', label: 'the no-spawn zone tool', key: '' },
   { id: 'lights', label: 'the lights tool', key: ';' },
+  // The race drawer's first wave.
+  { id: 'course', label: 'the Course tool', key: "'" },
 ];
 
 /** Two shapes of what the editor hands the window, so the rows a mode draws (flatten, plants, a river) are all reached. */
@@ -349,12 +351,12 @@ function reload(mode: string): Record<string, unknown> {
   ok(TOOLS.every((t) => owners.has(t.id)), 'and every tool of the list owns a section of its own');
   ok(toolSectionOwner('sec:A section a later wave adds') === 'always', 'a section the table does not name stands at the foot, never lost from view');
   // The tools the game itself lists, by their ids in their own files.
-  const ids = ['editorBrush', 'editorSculpt', 'editorPaint', 'editorWater', 'editorPlaces', 'editorZones', 'editorLights'].map((f) => /^\s+id: '(\w+)',$/m.exec(read(`src/editor/${f}.ts`))?.[1]);
+  const ids = ['editorBrush', 'editorSculpt', 'editorPaint', 'editorWater', 'editorPlaces', 'editorZones', 'editorLights', 'editorCourse'].map((f) => /^\s+id: '(\w+)',$/m.exec(read(`src/editor/${f}.ts`))?.[1]);
   ok(ids.join(',') === TOOLS.map((t) => t.id).join(','), `the tools the table names are the editor's own (${ids.join(', ')})`);
   // What the editor hands the Tools tab of its own, by the titles its own files give it: a line of the table naming a title
   // nothing hands the tab (a title renamed) would leave that section at the foot under every tool, with nothing to say so.
   const entry = read('src/editor/editorEntry.ts');
-  ok(/sections: \(tab: 'selected' \| 'here' \| 'tools'\): EditorSection\[\] => \[\.\.\.this\.lightsSections\(tab\), \.\.\.this\.zones\.sections\(tab\), \.\.\.this\.removals\.sections\(tab\)\],/.test(entry) && /if \(tab === 'tools'\) return this\.lights\.toolsSections\(\);/.test(entry), "the editor hands the window the lights tool's sections, the zones' and the removals' (the files read below)");
+  ok(/sections: \(tab: 'selected' \| 'here' \| 'tools'\): EditorSection\[\] => \[\.\.\.this\.lightsSections\(tab\), \.\.\.this\.courseSections\(tab\), \.\.\.this\.zones\.sections\(tab\), \.\.\.this\.removals\.sections\(tab\)\],/.test(entry) && /if \(tab === 'tools'\) return this\.lights\.toolsSections\(\);/.test(entry) && /if \(tab === 'tools'\) return this\.course\.toolsSections\(\);/.test(entry), "the editor hands the window the lights tool's sections, the Course tool's, the zones' and the removals' (the files read below)");
   const handed = new Set<string>();
   for (const f of ['src/editor/editorZones.ts', 'src/editor/editorRemovals.ts']) {
     const text = read(f);
@@ -362,9 +364,10 @@ function reload(mode: string): Record<string, unknown> {
     const end = text.indexOf('return out;', at);
     for (const m of text.slice(at, end).matchAll(/title: (?:'([^']*)'|"([^"]*)")/g)) handed.add(m[1] ?? m[2]);
   }
-  // The lights tool's (Map-maker II's wave of the rooms' lights): what its own `toolsSections` hands the tab.
-  {
-    const text = read('src/editor/editorLights.ts');
+  // The lights tool's (Map-maker II's wave of the rooms' lights) and the Course tool's (the race drawer's first wave): what
+  // each one's own `toolsSections` hands the tab.
+  for (const f of ['src/editor/editorLights.ts', 'src/editor/editorCourse.ts']) {
+    const text = read(f);
     const at = text.indexOf('  toolsSections(): EditorSection[] {');
     const end = text.indexOf('\n  }\n', at);
     for (const m of text.slice(at, end).matchAll(/title: (?:'([^']*)'|"([^"]*)")/g)) handed.add(m[1] ?? m[2]);

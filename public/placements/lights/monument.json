@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "world": "monument",
+  "frame": "raw",
+  "rows": [
+    { "id": "ceiling-lamp-1", "kind": "light", "scope": "copy", "copy": "place/mun_tato_starport_s01_u01-1", "model": "mun_tato_starport_s01_u01", "cell": 9, "room": "ticket2", "type": "spot", "color": [0.867,0.58,0.271], "brightness": 2, "reach": 25, "falloff": 1, "shadow": true, "flicker": {"shape":"candle","rate":4,"depth":0.4}, "pos": [37.29,8.71,64.07], "q": [0.9424518065844054,0.2902319404368659,0,-0.16598196593618855], "at": 1793671663271 },
+    { "id": "edit-arrivals1-1", "kind": "edit", "scope": "copy", "copy": "place/mun_tato_starport_s01_u01-1", "model": "mun_tato_starport_s01_u01", "cell": 7, "room": "arrivals1", "of": 1, "color": [1,1,1], "shadow": true, "at": 1793670808217 },
+    { "id": "edit-foyer4-1", "kind": "edit", "scope": "copy", "copy": "place/mun_tato_starport_s01_u01-1", "model": "mun_tato_starport_s01_u01", "cell": 4, "room": "foyer4", "of": 4, "shadow": true, "at": 1793670706751 },
+    { "id": "edit-foyer4-2", "kind": "edit", "scope": "copy", "copy": "place/mun_tato_starport_s01_u01-1", "model": "mun_tato_starport_s01_u01", "cell": 4, "room": "foyer4", "of": 5, "shadow": true, "at": 1793670713092 },
+    { "id": "edit-r2-1", "kind": "edit", "scope": "copy", "copy": "place/thm_tato_watto_junkshop-1", "model": "thm_tato_watto_junkshop", "cell": 2, "room": "r2", "of": 4, "scale": 0.4, "at": 1793668501521 },
+    { "id": "edit-ticket2-1", "kind": "edit", "scope": "copy", "copy": "place/mun_tato_starport_s01_u01-1", "model": "mun_tato_starport_s01_u01", "cell": 9, "room": "ticket2", "of": 4, "off": true, "shadow": true, "at": 1793671399046 },
+    { "id": "fill-arrivals1-1", "kind": "fill", "scope": "copy", "copy": "place/mun_tato_starport_s01_u01-1", "model": "mun_tato_starport_s01_u01", "cell": 7, "room": "arrivals1", "color": [0.965,0.792,0.843], "at": 1793670798160 },
+    { "id": "fill-arrivals2-1", "kind": "fill", "scope": "copy", "copy": "place/mun_tato_starport_s01_u01-1", "model": "mun_tato_starport_s01_u01", "cell": 13, "room": "arrivals2", "color": [0,0,0], "at": 1793670887335 },
+    { "id": "fill-arrivals3-1", "kind": "fill", "scope": "copy", "copy": "place/mun_tato_starport_s01_u01-1", "model": "mun_tato_starport_s01_u01", "cell": 16, "room": "arrivals3", "color": [1,1,1], "at": 1793670852101 },
+    { "id": "fill-departures1-1", "kind": "fill", "scope": "copy", "copy": "place/mun_tato_starport_s01_u01-1", "model": "mun_tato_starport_s01_u01", "cell": 12, "room": "departures1", "color": [0.557,0.525,0.58], "at": 1793670912926 },
+    { "id": "fill-departures2-1", "kind": "fill", "scope": "copy", "copy": "place/mun_tato_starport_s01_u01-1", "model": "mun_tato_starport_s01_u01", "cell": 14, "room": "departures2", "color": [0.522,0.529,0.545], "at": 1793670926988 },
+    { "id": "fill-foyer5-1", "kind": "fill", "scope": "copy", "copy": "place/mun_tato_starport_s01_u01-1", "model": "mun_tato_starport_s01_u01", "cell": 5, "room": "foyer5", "color": [0.592,0.588,0.518], "at": 1793670902674 },
+    { "id": "fill-r2-1", "kind": "fill", "scope": "copy", "copy": "place/thm_tato_watto_junkshop-1", "model": "thm_tato_watto_junkshop", "cell": 2, "room": "r2", "scale": 0, "at": 1793668489235 },
+    { "id": "room-sun-1", "kind": "light", "scope": "copy", "copy": "place/thm_tato_watto_junkshop-1", "model": "thm_tato_watto_junkshop", "cell": 1, "room": "r1", "type": "directional", "color": [1,0.95,0.85], "brightness": 1, "shadow": true, "pos": [4.42,1.57,11.61], "q": [0.779064960795115,0.006054999695294258,0,-0.6269139684518091], "at": 1793668582562 }
+  ]
+}

@@ -102,7 +102,7 @@ function sameTrack(a: TrackDef, b: TrackDef): boolean {
   return a.id === b.id && trackHash(a) === trackHash(b) && a.name === b.name && a.note === b.note && a.at === b.at;
 }
 
-const OWN = new Set(['id', 'name', 'note', 'kind', 'laps', 'for', 'clear', 'grid', 'gates', 'at']);
+const OWN = new Set(['id', 'name', 'note', 'kind', 'laps', 'for', 'clear', 'grid', 'gates', 'at', 'course']);
 
 /**
  * One ask against the world's file as it stands (`current`, its text or null for none): what to write and the answer.
@@ -138,7 +138,7 @@ export function applyTrackOp(op: unknown, current: string | null, ctx: TrackCtx)
     const asked = o.track;
     if (!asked || typeof asked !== 'object' || Array.isArray(asked)) return no(400, 'a put carries a track');
     const unknown: string[] = [];
-    const t = readTrack({ ...(asked as Record<string, unknown>), at: ctx.now }, unknown);
+    const t = readTrack({ ...(asked as Record<string, unknown>), at: ctx.now }, unknown, TRACK_LIMITS.gatesLeast, kind);
     if (typeof t === 'string') return no(400, `that track is refused: ${t}`);
     if (unknown.length) return no(400, `it carries fields this build does not write: ${unknown.join(', ')}`);
     const i = held.findIndex((e) => e.t.id === t.id);
@@ -219,11 +219,14 @@ export function deleteGate(t: TrackDef, i: number): TrackDef | string {
 const clampW = (w: number) => Math.min(TRACK_LIMITS.widthMost, Math.max(TRACK_LIMITS.widthLeast, Number.isFinite(w) ? w : TRACK_LIMITS.widthLeast));
 const clampH = (h: number) => Math.min(TRACK_LIMITS.heightMost, Math.max(TRACK_LIMITS.heightLeast, Number.isFinite(h) ? h : TRACK_LIMITS.heightLeast));
 
-/** Gate `i`'s window set (held to the reader's limits). */
+/**
+ * Gate `i`'s window set (held to the reader's limits). A gate that follows a drawn course keeps following it and, given a width,
+ * keeps that width as its own (`ow`: the race drawer, DESIGN.md §2.9); a gate with no anchor is as it always was.
+ */
 export function resizeGate(t: TrackDef, i: number, size: { w?: number; h?: number }): TrackDef | string {
   const bad = gateIndex(t, i);
   if (bad) return bad;
-  const gates = t.gates.map((g, k) => (k === i ? { ...g, w: size.w !== undefined ? clampW(size.w) : g.w, h: size.h !== undefined ? clampH(size.h) : g.h } : g));
+  const gates = t.gates.map((g, k) => (k === i ? { ...g, w: size.w !== undefined ? clampW(size.w) : g.w, h: size.h !== undefined ? clampH(size.h) : g.h, ...(g.path !== undefined && size.w !== undefined ? { ow: 1 as const } : {}) } : g));
   return checked({ ...t, gates });
 }
 

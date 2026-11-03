@@ -41,6 +41,8 @@ export interface HarnessOpts {
   brushArmed?: () => boolean;
   /** A heights file's text to start from (Map-maker II). */
   heights?: string | null;
+  /** A track file's text to start from (the race drawer's first wave: the batch's `tracks` kind). */
+  tracks?: string | null;
   /**
    * A write's heights answer landed as the game's page lands it (`App.editorBatch` handing it to `World.landHeights`): the
    * tiles put and the ids taken out, the promise what the write built waits on. None by default.
@@ -76,7 +78,7 @@ export interface StandInput {
 
 export interface Harness {
   e: EditorEdits;
-  files: { story: string | null; world: string | null; heights?: string | null };
+  files: { story: string | null; world: string | null; heights?: string | null; tracks?: string | null };
   rowsOf(l: PlacementLayer): Map<string, PlacementRow>;
   rowOf(id: string): PlacementRow | undefined;
   /** Where a row stands in the game's frame, its turn as three's quaternion and its scale. */
@@ -119,7 +121,7 @@ export function makeHarness(opts: HarnessOpts = {}): Harness {
   const kind = frame === 'game' ? 'space' : 'ground';
   let clock = 1_800_000_000_000;
   let mark = 1;
-  const files: Harness['files'] = { story: opts.story ? placementsFileText(world, frame, opts.story) : null, world: opts.rows ? placementsFileText(world, frame, opts.rows) : null, heights: opts.heights ?? null };
+  const files: Harness['files'] = { story: opts.story ? placementsFileText(world, frame, opts.story) : null, world: opts.rows ? placementsFileText(world, frame, opts.rows) : null, heights: opts.heights ?? null, tracks: opts.tracks ?? null };
   const rowsOf = (l: PlacementLayer): Map<string, PlacementRow> => new Map((files[l] ? readPlacementsFile(files[l]!, world, kind).rows : []).map((r) => [r.id, r]));
   const rowOf = (id: string): PlacementRow | undefined => rowsOf('world').get(id) ?? rowsOf('story').get(id);
   const placedCache = new Map<string, { x: number; y: number; z: number; q: THREE.Quaternion; scale: THREE.Vector3 | null; template: string }>();

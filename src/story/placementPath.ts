@@ -80,3 +80,27 @@ export function editFileOf(rel: string): { kind: EditFileKind; world: string } |
 export function editFilePath(kind: EditFileKind, world: string): string {
   return `placements/${editFileRel(kind, world)}`;
 }
+
+/**
+ * Kinds of file the world editor's batch writes that live outside the placements folder (the race drawer's first wave): a
+ * world's track file (`tracks`, `tracks/<world>.json` under the build, the very path `src/race/trackPath.ts` names), whose
+ * drawn course and gates are written through the batch so an edit of them is one undo entry. A table of its own, beside
+ * `EDIT_FILE_KINDS` and never in it: every reader rooted in `placements/` (the dev server's answer for a file, the watcher,
+ * the status op, the catalogue, the maps) reads exactly what it read, and a track word goes to the page as `tracks:changed`.
+ */
+export type OutsideFileKind = 'tracks';
+export const OUTSIDE_EDIT_FILES: Readonly<Record<OutsideFileKind, string>> = { tracks: 'tracks' };
+
+/** Every kind a batch may name: the placements folder's, then the ones outside it. */
+export type BatchFileKind = EditFileKind | OutsideFileKind;
+export const BATCH_FILE_KINDS: readonly BatchFileKind[] = [...EDIT_FILE_KINDS, ...(Object.keys(OUTSIDE_EDIT_FILES) as OutsideFileKind[])];
+
+/** Whether a kind is one kept outside the placements folder. */
+export function isOutsideKind(k: unknown): k is OutsideFileKind {
+  return typeof k === 'string' && Object.hasOwn(OUTSIDE_EDIT_FILES, k);
+}
+
+/** The path an outside kind's file for a world is fetched from, under the build's own base (and under `public/` in a checkout). */
+export function outsideFilePath(kind: OutsideFileKind, world: string): string {
+  return `${OUTSIDE_EDIT_FILES[kind]}/${world}.json`;
+}

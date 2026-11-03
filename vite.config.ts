@@ -229,7 +229,8 @@ function placementsEditor(): Plugin {
       const glue = pathToFileURL(path.resolve(ROOT, 'tools', 'dev', 'placementsEndpoint.mjs')).href;
       server.middlewares.use('/__dev/placements', (req, res) => {
         import(/* @vite-ignore */ glue)
-          .then((m: { handle: (req: unknown, res: unknown, opts: unknown) => Promise<void> }) => m.handle(req, res, { dir: PLACEMENTS_DIR, root: ROOT, notify: (word: { kind?: string; layer: string; world: string; rev?: string }) => server.ws.send('placements:changed', word) }))
+          // A word about a track file the batch wrote (the race drawer's) goes to the page as the tracks' own word, with its revision.
+          .then((m: { handle: (req: unknown, res: unknown, opts: unknown) => Promise<void> }) => m.handle(req, res, { dir: PLACEMENTS_DIR, root: ROOT, notify: (word: { kind?: string; layer: string; world: string; rev?: string }) => server.ws.send(word.kind === 'tracks' ? 'tracks:changed' : 'placements:changed', word) }))
           .catch((err: unknown) => {
             if (res.headersSent) return;
             res.statusCode = 500;
@@ -242,7 +243,7 @@ function placementsEditor(): Plugin {
 }
 
 /**
- * The tracks' files as the placements' are served (`placementFiles` above): `tracks:changed { world }` said to the page
+ * The tracks' files as the placements' are served (`placementFiles` above): `tracks:changed { world, rev }` said to the page
  * when a world's file changes, so a track edited by hand, or the editor's own write, is read again without a reload,
  * and the page's ask for a file answered from the disk as it stands, a file that is not there with a 404 (Vite's own
  * list of the public folder learns of a new file only once its watcher has told it).
@@ -282,7 +283,9 @@ function trackFiles(): Plugin {
           word.world,
           setTimeout(() => {
             timers.delete(word.world);
-            server.ws.send('tracks:changed', word);
+            // With the file's revision as it now stands, as the placements' word carries one: the page drops the word about
+            // a write of its own (the world editor's batch) rather than reading the file back after every edit.
+            server.ws.send('tracks:changed', { world: word.world, rev: revisionOfFile(abs) });
           }, 150),
         );
       };

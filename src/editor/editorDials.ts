@@ -12,6 +12,7 @@ import { EDITOR_EXTRA_DEFAULTS, EDITOR_EXTRA_TUNES, EDITOR_TUNE, EDITOR_TUNE_DEF
 import { GROUND_PAINT_TUNE, GROUND_REWRITE_TUNE } from '../world/groundRewrite.ts';
 import { LAKE_TUNE, RIVER_TUNE, tuneRiverTune } from '../world/ourWater.ts';
 import { DRESSER_TUNE, tuneDresser } from './dresser.ts';
+import { COURSE_TUNE, COURSE_TUNE_SHIPPED, courseChoices, courseRange, tuneCourse, type CourseTune } from '../race/courseTune.ts';
 
 /** The lakes' own shipped numbers, as this module first saw them (before any console line moved them). */
 const LAKE_TUNE_SHIPPED = { ...LAKE_TUNE };
@@ -690,7 +691,100 @@ export function placesToolDials(): { groups(): DialGroup[]; shipped: ReadonlyMap
 
 /** The debug menu's dials for `editor`, or null for another helper. */
 export function editorDialsFor(helper: string): DialSet | null {
-  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : helper === 'groundPaint' ? paintDialSet() : helper === 'floraPaint' ? floraPaintDialSet() : helper === 'lakes' ? lakesDialSet() : helper === 'rivers' ? riversDialSet() : helper === 'ownLooks' ? ownLooksDialSet() : null;
+  return helper === 'editor' ? editorDialSet() : helper === 'sculpt' ? sculptDialSet() : helper === 'groundPaint' ? paintDialSet() : helper === 'floraPaint' ? floraPaintDialSet() : helper === 'lakes' ? lakesDialSet() : helper === 'rivers' ? riversDialSet() : helper === 'ownLooks' ? ownLooksDialSet() : helper === 'course' ? courseDialSet() : null;
+}
+
+/**
+ * The race drawer's numbers of feel (`COURSE_TUNE`, §2.15), as `[key, label, step, unit, note]` in their groups: every one a
+ * slider of the `course` set, its range the tune's own (`courseRange`), set through `course({ tune })`'s own setter
+ * (`tuneCourse`), so the line the menu copies out keeps it. The two raced-as switches are the Tools tab's checks.
+ */
+const COURSE_DIAL_GROUPS: { title: string; note: string; dials: [keyof CourseTune, string, number, string, string][]; choices?: [keyof CourseTune, string, string][] }[] = [
+  {
+    title: 'A new road',
+    note: "What a node the tool puts down is written with (a node's own are the Selected tab's).",
+    dials: [
+      ['width', 'Width', 0.5, 'm', "A new node's full width: the pod gate's own 24, room for the pod box's 7 with room to drift."],
+      ['shoulder', 'Shoulder', 0.5, 'm', 'How far the road’s edge blends into the land.'],
+      ['bank', 'Bank', 0.5, '°', 'The driver’s right up; flat until banked by hand.'],
+      ['clear', 'Clear past the road', 0.5, 'm', "A new course's metres past the road's edge kept free of plants and life (from the second wave)."],
+    ],
+    choices: [['curve', 'A new edge', "A natural curve, or a straight (V turns the edge being drawn)."]],
+  },
+  {
+    title: "A new course's own numbers",
+    note: 'Written into a new course (a course’s own are the Selected tab’s): read by the carve, the race drawer’s second wave.',
+    dials: [
+      ['margin', 'Margin', 0.25, 'm', "The lower road's slot past its edge at a crossing."],
+      ['level', 'Level', 0.05, 'm', 'The band in which two passes are one road.'],
+      ['wallOut', 'Walls out', 0.05, 'm', "The walls' place past the road's edge."],
+      ['wallHigh', 'Walls high', 0.5, 'm', "The walls' height."],
+    ],
+    choices: [
+      ['feather', 'Falloff', "The client's road falloff over the shoulder."],
+      ['crossing', 'A crossing', "Walls where the upper road ends, or a slope."],
+      ['grass', 'Grass on the road', 'Cleared, or kept.'],
+    ],
+  },
+  {
+    title: 'Gates placed',
+    note: 'Place gates again (the Tools tab) lays them by these; a gate moved by hand stays where it is put.',
+    dials: [
+      ['gateEvery', 'A gate every', 5, 'm', 'Along the main line.'],
+      ['gateTurn', 'And at a turn past', 1, '°', 'The apex of every turn sharper than this…'],
+      ['gateTurnSpan', 'Over', 5, 'm', '…over this much road.'],
+      ['gateMin', 'Never nearer than', 1, 'm', 'Two gates along the road.'],
+      ['gateLift', 'Over the road', 0.1, 'm', "A gate's place over the road's surface: a hull's middle."],
+      ['gridBack', "A circuit's grid back", 1, 'm', 'Along the road before gate 0.'],
+      ['gridAhead', "A sprint's gate 0 ahead", 1, 'm', 'Along the road from its start.'],
+    ],
+  },
+  {
+    title: 'The handles',
+    note: "F held raises, R held banks (a gate: turns), C with the wheel steps a shoulder (a gate: its width); a grabber dragged widens and banks.",
+    dials: [
+      ['raiseRate', 'Raise', 0.05, 'm', 'Metres a hundred pixels of the mouse up raises a node or a gate.'],
+      ['bankRate', 'Bank and turn', 0.5, '°', 'Degrees a hundred pixels of the mouse banks a node (a grabber up or down too) or turns a gate.'],
+      ['shoulderStep', 'A notch of shoulder', 0.1, 'm', 'C with a notch of the wheel.'],
+      ['gateWidthStep', 'A notch of gate', 0.5, 'm', "C with a notch of the wheel on a picked gate's width."],
+      ['hitPx', 'Handle reach', 1, 'px', 'How near the cursor must be to a handle, a node or a gate’s outline to take it.'],
+      ['closeReach', 'Close within', 0.5, 'm', 'A click this near the first node closes a draft, near the last finishes it.'],
+      ['previewHz', 'Preview a second', 1, '/s', "How often a held edit's course is made again while held."],
+    ],
+    choices: [['live', 'While dragging', 'Shown as it is dragged, or only once let go.']],
+  },
+  {
+    title: 'What it draws and notes',
+    note: 'The marks, and the notes on the bar (notes never refuse).',
+    dials: [
+      ['drawReach', 'Drawn within', 50, 'm', 'How far off the eye a course is drawn at all.'],
+      ['drawNear', 'Every sample within', 10, 'm', 'Past it every fourth sample of its spine.'],
+      ['steepNote', 'A shoulder steeper than', 1, '°', 'Against the land, noted.'],
+      ['narrowRoom', 'Room past the widest box', 0.25, 'm', 'Either side, under which a road is noted narrow.'],
+    ],
+  },
+];
+
+/** The `course` helper's own dials (the race drawer's first wave; the debug menu's, when `course` is picked). */
+export function courseDialSet(): DialSet {
+  const t = COURSE_TUNE as unknown as Record<string, number | string | boolean>;
+  const groups: DialGroup[] = COURSE_DIAL_GROUPS.map((g) => ({
+    title: g.title,
+    note: g.note,
+    dials: [
+      ...g.dials.map(([k, label, step, unit, note]): NumberDial => {
+        const [min, max] = courseRange(k) ?? [0, 100];
+        return { kind: 'number', key: `tune.${k}`, label, note, min, max, step, unit, get: () => Number(t[k]), set: (v) => tuneCourse({ [k]: v }) };
+      }),
+      ...(g.choices ?? []).map(([k, label, note]) => ({ kind: 'choice' as const, key: `tune.${k}`, label, note, choices: courseChoices(k), get: () => String(t[k]), set: (v: string) => tuneCourse({ [k]: v }) })),
+    ],
+  }));
+  const shipped = new Map<string, number | string>();
+  for (const g of groups) for (const d of g.dials) {
+    const v = (COURSE_TUNE_SHIPPED as unknown as Record<string, unknown>)[d.key.slice('tune.'.length)];
+    if (typeof v === 'number' || typeof v === 'string') shipped.set(d.key, v);
+  }
+  return { helper: 'course', groups, shipped };
 }
 
 /** The dresser's numbers as they shipped: what a reset puts back. */
