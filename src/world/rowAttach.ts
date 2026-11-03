@@ -20,6 +20,7 @@
 
 import * as THREE from 'three';
 import { scaleOf, type GamePlace, type PlacementRow, type RowAttach } from '../story/placements.ts';
+import type { LightSpec } from '../story/lightSpec.ts';
 import { packIdOfRoot, relativeRoot } from './packPath.ts';
 
 /**
@@ -60,8 +61,12 @@ export interface AttachHost<H> {
   /** An effect placed; null where there is nothing to place it in (no world's particles), which the next look asks again. */
   place(file: string, m: THREE.Matrix4, contained: boolean, size: number): H | null;
   move(h: H, m: THREE.Matrix4): void;
-  /** A placed effect sized again where it plays (`ParticleEffects.resize`): nothing placed again, nothing made. */
-  resize(h: H, size: number): void;
+  /**
+   * A placed effect sized again where it plays (`ParticleEffects.resize`): nothing placed again, nothing made. The size comes
+   * in a record the holder keeps (`size.v`), since a number handed across a call the compiler leaves out is boxed, and C held
+   * hands a new one nearly every frame.
+   */
+  resize(h: H, size: { readonly v: number }): void;
   remove(h: H): void;
   /** A sound joined to the world's emitters under `owner`, moved, and let go of. */
   sound(owner: object, template: string, x: number, y: number, z: number, inside: boolean): void;
@@ -69,6 +74,20 @@ export interface AttachHost<H> {
   soundOff(owner: object): void;
   /** The radius within which a sound plays at full volume, metres (its template's), for the editor's ring; 0 for none known. */
   fullOf?(template: string): number;
+  /** A light hung on a row stood or taken away (Map-maker II's wave of the rooms' lights): the lit room planned again. */
+  lightsMoved?(): void;
+}
+
+/** A light hung on a row, as the room pool reads it (`lightList`): its key, its row's key and its index, where it stands, its light. */
+export interface AttachedLight {
+  /** `att:<row key>#<index>`: what the pool's slot and the flicker's seed name it by. */
+  key: string;
+  rowKey: string;
+  index: number;
+  /** Its world matrix, the holder's own (carried with its row while the editor moves it). */
+  world: THREE.Matrix4;
+  spec: LightSpec;
+  inside: boolean;
 }
 
 /** One attachment standing: what it is, its own frame in the model's, where it is in the world, and its effect or sound. */
@@ -157,7 +176,7 @@ export interface AttachHandles {
   count: number;
   /** x, y, z each, in the game's frame. */
   xyz: Float64Array;
-  /** 0 an effect, 1 a sound. */
+  /** 0 an effect, 1 a sound, 2 a light (Map-maker II's wave of the rooms' lights, drawn as an effect's diamond). */
   kind: Uint8Array;
   /** A sound's full-volume radius, metres (0 for an effect). */
   radius: Float32Array;
@@ -184,6 +203,9 @@ export class RowAttachments<H> {
   /** What the editor draws (`handles`), and whether it is to be written again. */
   readonly handles: AttachHandles = { count: 0, xyz: new Float64Array(48), kind: new Uint8Array(16), radius: new Float32Array(16), key: [], id: [], mark: new Uint8Array(16), item: new Int32Array(16) };
   private handlesStale = true;
+  /** The lights hung on rows (Map-maker II's wave of the rooms' lights), made again when one is stood or taken away. */
+  private lights: AttachedLight[] = [];
+  private lightsStale = false;
   /** How many effects stand placed now, and how many sounds are joined, for the console. */
   placed = 0;
   sounding = 0;
@@ -218,11 +240,14 @@ export class RowAttachments<H> {
         item.sounding = true;
         this.sounding++;
       }
+      // A light (Map-maker II's wave of the rooms' lights) is the room pool's: it is listed for it, and told it moved.
+      if (a.light) this.lightsStale = true;
       held.items.push(item);
     }
     this.byKey.set(key, held);
     this.list.push(held);
     this.handlesStale = true;
+    if (this.lightsStale) this.host.lightsMoved?.();
     // Looked at again at once, so a row stood beside the eye (the editor's own write) does not wait out the clock.
     this.clock = Infinity;
   }
@@ -240,6 +265,10 @@ export class RowAttachments<H> {
       this.list.length--;
     }
     this.handlesStale = true;
+    if (held.items.some((it) => it.a.light)) {
+      this.lightsStale = true;
+      this.host.lightsMoved?.();
+    }
   }
 
   private letGo(it: Item<H>): void {
@@ -270,6 +299,27 @@ export class RowAttachments<H> {
     this.ready.clear();
     this.gen++;
     this.handlesStale = true;
+    this.lights = [];
+    this.lightsStale = false;
+  }
+
+  /**
+   * The lights hung on rows standing now (Map-maker II's wave of the rooms' lights), made again only when one was stood or
+   * taken away since: what the room pool plans the lit room with. Each one's matrix is the holder's own, carried with its row.
+   */
+  lightList(): readonly AttachedLight[] {
+    if (!this.lightsStale) return this.lights;
+    this.lightsStale = false;
+    const out: AttachedLight[] = [];
+    for (const held of this.list) {
+      for (let i = 0; i < held.items.length; i++) {
+        const it = held.items[i];
+        if (!it.a.light) continue;
+        out.push({ key: `att:${held.key}#${i}`, rowKey: held.key, index: i, world: it.world, spec: it.a.light, inside: held.inside });
+      }
+    }
+    this.lights = out;
+    return out;
   }
 
   /**
@@ -357,9 +407,11 @@ export class RowAttachments<H> {
 
   /**
    * One attachment carried to a new frame of its own in the model's (the editor moving its handle): `local` its new frame,
-   * `size` its own size (times the row's largest axis as it stands). Nothing stood again; the write's landing stands it.
+   * `sized.v` its own size (times the row's largest axis as it stands), in the caller's kept record, since a number handed
+   * across a call the compiler leaves out is boxed (the looks' allocation measure caught it, 11.5 bytes a frame of C held in
+   * one process of about forty). Nothing stood again; the write's landing stands it.
    */
-  followItem(key: string, index: number, local: THREE.Matrix4, size: number): void {
+  followItem(key: string, index: number, local: THREE.Matrix4, sized: { readonly v: number }): void {
     const held = this.byKey.get(key);
     const it = held?.items[index];
     if (!held || !it) return;
@@ -368,10 +420,15 @@ export class RowAttachments<H> {
     this.moveItem(held, it);
     // A placed effect sized again where it plays (C held: a new size nearly every frame of the hold). Placed again instead,
     // it started over from no particles at every step, so the size being dialled never showed, and every step made one.
-    const want = size * held.most;
-    if (it.h !== null && want !== it.size) this.host.resize(it.h, want);
+    const want = sized.v * held.most;
+    if (it.h !== null && want !== it.size) {
+      this.sizeAsk.v = want;
+      this.host.resize(it.h, this.sizeAsk);
+    }
     it.size = want;
   }
+  /** The size handed to `resize`, kept (see `followItem`); a fraction from the start, so it never holds a small integer. */
+  private readonly sizeAsk = { v: 0.5 };
 
   /** Every item of a row moved to where its base and its own frame now put it. */
   private carry(held: Held<H>): void {
@@ -433,7 +490,7 @@ export class RowAttachments<H> {
         h.xyz[k * 3] = e[12];
         h.xyz[k * 3 + 1] = e[13];
         h.xyz[k * 3 + 2] = e[14];
-        h.kind[k] = it.a.snd ? 1 : 0;
+        h.kind[k] = it.a.snd ? 1 : it.a.light ? 2 : 0;
         h.radius[k] = it.a.snd ? (this.host.fullOf?.(it.a.snd) ?? 0) : 0;
         h.key[k] = held.key;
         h.id[k] = held.id;

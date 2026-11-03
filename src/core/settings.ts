@@ -21,6 +21,13 @@ export interface Settings extends FxSettings {
   shadowSoftness: number;
   /** Placed buildings and props this big (radius, metres) and up cast shadows, what players put down included. */
   shadowCasterRadius: number;
+  /**
+   * The rooms' lights (Map-maker II's wave of the rooms' lights): how many spot lamps the room pool can light beside its eight
+   * points, and how many of its lights of each kind can cast a shadow. Both build the pool's shape, which every room program is
+   * keyed on, so moving either builds every program again behind a short loading screen. Nought each: today's rooms.
+   */
+  roomLightSpots: number;
+  roomLightShadows: number;
   // The flora's own (wave 8): what of it is drawn, how far, and what casts and takes the sun's shadow. Scene
   // content, not an effect, and nothing here builds a shader program in play (`src/world/floraSettings.ts`).
   /** The terrain's own grass, flowers and small plants round you. */
@@ -342,6 +349,10 @@ export const DEFAULT_SETTINGS: Settings = {
   shadowDistance: 320,
   shadowSoftness: 1.4,
   shadowCasterRadius: 1.2,
+  // Nought, both (the wave of the rooms' lights): the pool's shape is today's, every room's program the one it always was; a
+  // spot added by the owner lights nothing and a shadow asked for is lit without one until these are moved.
+  roomLightSpots: 0,
+  roomLightShadows: 0,
   // The flora's: every default is what the game drew before the page had a Flora section, but the two the wave
   // added, and each says whose it is. Ours throughout unless it says otherwise.
   grass: true,

@@ -34,6 +34,16 @@ import { beginSkeletonFrame, endSkeletonFrame, installSkeletonOnce } from '../co
 import { setPortalRef, setSharedRef as shareEveryRef, shareRef, unshareRef } from './stencilRef.ts';
 import { PassScenes } from './passScenes.ts';
 
+/**
+ * What the rooms' pool hands the portal renderer (Map-maker II's wave of the rooms' lights, `RoomLightPool`): its casting slots,
+ * and the first `litN` of `litCasters`, the ones the last plan lit.
+ */
+export interface RoomShadowSource {
+  readonly casterList: readonly (THREE.PointLight | THREE.SpotLight)[];
+  readonly litCasters: readonly (THREE.PointLight | THREE.SpotLight)[];
+  readonly litN: number;
+}
+
 export { crossing } from './portalVis.ts';
 
 export const ACTOR_LAYER = 31;
@@ -211,6 +221,31 @@ export class PortalRenderer {
    * Written by the world; a record of its own, so a frame allocates nothing.
    */
   readonly hintedLights: { building: Building | null; dim: (on: boolean) => void } = { building: null, dim: () => {} };
+
+  /**
+   * The building whose rooms a casting slot of the rooms' pool lights now (Map-maker II's wave of the rooms' lights,
+   * `RoomLightPool.casting`): its rooms, and the bodies standing in them, are shown through the rooms' own shadow pass
+   * (`renderRoomShadows`), never the sun's, so they cast into the lamps' maps and into no cascade the street seen through a
+   * doorway reads. Null -- every session that builds no room shadow slot -- draws no such pass. Written by the world as it plans
+   * the lit room.
+   */
+  roomShadowBuilding: Building | null = null;
+
+  /**
+   * The rooms' pool's casting slots (the world's `RoomLightPool`): all of them, which every draw of the warm-up's stand-ins
+   * draws into (`drawShadowsOnly`, so a point slot's own depth programs, three's distance material's, are built behind the
+   * screen), and the ones the last plan lit, whose maps the rooms' own shadow pass draws. Null with no world.
+   */
+  roomShadows: RoomShadowSource | null = null;
+
+  /**
+   * Round the rooms' own shadow pass (the world's: the shadow batches take over their sources' casting for it and put it back),
+   * never the sun's holds, which that pass leaves as it found them. Null: nothing done round it.
+   */
+  roomShadowHooks: { before(): void; after(): void } | null = null;
+
+  /** The sun's cascades' `autoUpdate` and `needsUpdate`, kept while the rooms' shadow pass holds them out of its draw. */
+  private readonly sunKept = new Uint8Array(16);
 
   /**
    * Told as each building's rooms pass begins (true) and ends (false), for what a room's things must draw apart
@@ -454,9 +489,13 @@ export class PortalRenderer {
     if (!r.shadowMap.enabled) return;
     r.shadowMap.needsUpdate = true;
     // Every map asked for here, outside any hook: the stand-ins are drawn into every cascade and key their programs
-    // whatever the cascades' holds decided last (a held light's own `autoUpdate` is false).
+    // whatever the cascades' holds decided last (a held light's own `autoUpdate` is false). And into every casting slot of
+    // the rooms' pool (Map-maker II's wave of the rooms' lights), lit or not: a point slot casts through three's distance
+    // material, whose programs no cascade's draw builds, and its first draw in play would build them on a live frame.
     const lights = this.shadowLights;
     for (let i = 0; i < lights.length; i++) lights[i].shadow.needsUpdate = true;
+    const pool = this.roomShadows?.casterList;
+    if (pool) for (let i = 0; i < pool.length; i++) pool[i].shadow.needsUpdate = true;
     this.shadingShadows = true;
     const strays = this.strays;
     const hooks = this.shadowPassHooks;
@@ -745,6 +784,78 @@ export class PortalRenderer {
   }
 
   /**
+   * The rooms' pool's casting lamps' maps drawn (Map-maker II's wave of the rooms' lights): a shadow pass of their own, after the
+   * sun's or in place of it, whatever the sun's pass did -- it is skipped inside a building with no exit in view and in a storm
+   * that has put the sun's shadows out, neither of which says anything of a room lamp's. Each slot the last plan lit is drawn
+   * (its `needsUpdate`, three clearing it), and a slot whose map was never made is drawn once whether lit or not (a casting
+   * light's sampler with no map behind it throws the whole draw away). The lit building's rooms, its furniture and doors are
+   * shown and the bodies standing in its rooms routed in (`ROUTE_PASS.roomShadows`, which marks nothing drawn), and nothing of
+   * them is shown in the sun's pass, which the street seen through the exits reads. The sun's cascades are held out of this
+   * draw (their `autoUpdate` and `needsUpdate` kept and put back as they were), and the shadow batches take their sources'
+   * casting for it as they do for the sun's. Through the shadow pass's own scene and probe, so every depth program it asks for
+   * is keyed on the set the warm-up keyed it on. Nothing is made.
+   */
+  private renderRoomShadows(scene: THREE.Scene, routes: ActorRoutes | null): void {
+    const src = this.roomShadows;
+    const r = this.renderer;
+    if (!src || !r.shadowMap.enabled) return;
+    const all = src.casterList;
+    if (all.length === 0) return;
+    let any = false;
+    for (let i = 0; i < all.length; i++) {
+      const s = all[i].shadow;
+      if (s.map === null) {
+        s.needsUpdate = true;
+        any = true;
+      } else if (s.needsUpdate) any = true;
+    }
+    const b = this.roomShadowBuilding;
+    const lit = src.litCasters;
+    if (b) {
+      for (let i = 0; i < src.litN; i++) {
+        lit[i].shadow.needsUpdate = true;
+        any = true;
+      }
+    }
+    if (!any) return;
+    const sun = this.shadowLights;
+    const kept = this.sunKept;
+    const n = Math.min(sun.length, kept.length >> 1);
+    for (let i = 0; i < n; i++) {
+      const s = sun[i].shadow;
+      kept[i * 2] = s.autoUpdate ? 1 : 0;
+      kept[i * 2 + 1] = s.needsUpdate ? 1 : 0;
+      s.autoUpdate = false;
+      s.needsUpdate = false;
+    }
+    if (b) {
+      routes?.route(ROUTE_PASS.roomShadows, b, null);
+      this.showInterior(b, true);
+    }
+    const hooks = this.roomShadowHooks;
+    r.shadowMap.needsUpdate = true;
+    this.shadingShadows = true;
+    try {
+      hooks?.before();
+      this.pass('room shadows', this.passScenes.forShadows(scene), this.shadowProbe, PASS.shadows);
+    } finally {
+      this.shadingShadows = false;
+      // The frame's strays, this pass's with the sun's.
+      SHADOW_STRAYS.seen = this.strays;
+      try {
+        hooks?.after();
+      } finally {
+        for (let i = 0; i < n; i++) {
+          const s = sun[i].shadow;
+          s.autoUpdate = kept[i * 2] === 1;
+          s.needsUpdate = kept[i * 2 + 1] === 1;
+        }
+        if (b) this.showInterior(b, false);
+      }
+    }
+  }
+
+  /**
    * Walk the scene's matrices once a frame rather than once a pass. `renderer.render` begins by
    * recomposing every node of the scene it is given, and a frame here is up to eight calls that
    * take the whole scene (the shadows, the world, one interior per near building; three inside).
@@ -819,6 +930,9 @@ export class PortalRenderer {
         this.walkOnce(scene);
         this.renderShadows(scene, view);
       }
+      // The rooms' pool's casting lamps (Map-maker II's wave of the rooms' lights): a pass of their own, whatever the sun's did.
+      // Nothing at all in a session that builds no room shadow slot.
+      if (this.roomShadows && this.roomShadows.casterList.length) this.renderRoomShadows(scene, routes);
       r.state.buffers.stencil.setClear(1);
       r.clear(true, true, true);
       this.setRef(1);

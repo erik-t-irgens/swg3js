@@ -16,6 +16,15 @@ import * as THREE from 'three';
 export const FX_MAX_FLASH_LIGHTS = 4;
 /** The room lamps lit at once (`INTERIOR_LIGHT_CAP` in world.ts). */
 export const FX_MAX_ROOM_LIGHTS = 8;
+/**
+ * The pool's other slots lit at once (Map-maker II's wave of the rooms' lights: the casting points, the spots plain and
+ * casting, `ROOM_POOL_LIMITS` in roomLightPool.ts at their most), each as a point (`extra`, which the room air glows round), and
+ * the spots among them with their cones (`spots`, which the ambient occlusion takes as spots where the session built any).
+ */
+export const FX_MAX_ROOM_EXTRA = 8;
+export const FX_MAX_ROOM_SPOTS = 6;
+/** The casting points among them at their most (`ROOM_POOL_LIMITS.shadows`), which the ambient occlusion takes in arrays of their own. */
+export const FX_MAX_ROOM_CAST = 2;
 /** The sun's shadow cascades (the CSM the world builds). */
 export const FX_MAX_CASCADES = 3;
 
@@ -100,6 +109,14 @@ export interface FxRoomLights {
   /** FX_MAX_ROOM_LIGHTS kept entries; the first `pointCount` are lit, each with the cell it came from. */
   readonly points: FxPointLight[];
   pointCount: number;
+  /** FX_MAX_ROOM_EXTRA kept entries: the pool's other slots lit (casting points, spots), each as a point with its cell. */
+  readonly extra: FxPointLight[];
+  extraCount: number;
+  /** How many of `extra`'s first entries are points (the casting points), the rest being the spots taken as points. */
+  extraPoints: number;
+  /** FX_MAX_ROOM_SPOTS kept entries: the spots among them, with their cones. */
+  readonly spots: FxSpotLight[];
+  spotCount: number;
 }
 
 /** The frame's lights as the effects need them. One kept object in the game, refilled in drawFrame after the scene is drawn. */
@@ -158,6 +175,10 @@ export function createFxLights(): FxLights {
   }
   const points: FxPointLight[] = [];
   for (let i = 0; i < FX_MAX_ROOM_LIGHTS; i++) points.push(createPoint());
+  const extra: FxPointLight[] = [];
+  for (let i = 0; i < FX_MAX_ROOM_EXTRA; i++) extra.push(createPoint());
+  const spots: FxSpotLight[] = [];
+  for (let i = 0; i < FX_MAX_ROOM_SPOTS; i++) spots.push(createSpot());
   const flash: FxPointLight[] = [];
   for (let i = 0; i < FX_MAX_FLASH_LIGHTS; i++) flash.push(createPoint());
   return {
@@ -180,6 +201,11 @@ export function createFxLights(): FxLights {
       parallel: createDirectional(),
       points,
       pointCount: 0,
+      extra,
+      extraCount: 0,
+      extraPoints: 0,
+      spots,
+      spotCount: 0,
     },
     flash,
     flashCount: 0,
@@ -215,6 +241,17 @@ export function resetFxLights(out: FxLights): void {
   clearDirectional(rooms.parallel);
   for (let i = 0; i < rooms.points.length; i++) clearPoint(rooms.points[i]);
   rooms.pointCount = 0;
+  for (let i = 0; i < rooms.extra.length; i++) clearPoint(rooms.extra[i]);
+  rooms.extraCount = 0;
+  rooms.extraPoints = 0;
+  for (let i = 0; i < rooms.spots.length; i++) {
+    const s = rooms.spots[i];
+    clearPoint(s);
+    s.direction.copy(UP);
+    s.coneCos = 1;
+    s.penumbraCos = 1;
+  }
+  rooms.spotCount = 0;
   for (let i = 0; i < out.flash.length; i++) clearPoint(out.flash[i]);
   out.flashCount = 0;
 }

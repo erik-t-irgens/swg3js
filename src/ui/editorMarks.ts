@@ -161,6 +161,38 @@ export interface MarksView {
   handleVis: Uint8Array;
   handleKind: Uint8Array;
   handleState: Uint8Array;
+  /**
+   * The lights tool's markers (Map-maker II's wave of the rooms' lights): an icon of ours for every light of the room round the
+   * camera and every light outdoors near it, at its place on the screen (`lightPts`, two numbers a marker) where it is in front
+   * of the eye (`lightVis`): `lightType` 0 a round light (a disc and its rays), 1 a spot (a cone), 2 a directional (an arrow);
+   * `lightState` 0 one of the game's own (`muted`), 1 one added (`accent`), 2 under the cursor (`hot`), 3 picked (`ink`), 4 one
+   * that lights nothing now (`warn`: switched off, no slot built for it, or standing outdoors); `lightPx` its half size. And the
+   * picked light's reach: a ring (`lightShape`, closed, `lightShapeN` points) and, for a spot, the lines from its apex to the
+   * ring (`lightRays`, four numbers a line); a directional's way is one line. The pools grow when they first need to.
+   */
+  lightsOn: boolean;
+  lightCount: number;
+  lightPx: number;
+  lightPts: Float64Array;
+  lightVis: Uint8Array;
+  lightType: Uint8Array;
+  lightState: Uint8Array;
+  lightShapeOn: boolean;
+  lightShapeN: number;
+  lightShape: Float64Array;
+  lightShapeVis: Uint8Array;
+  lightRayN: number;
+  lightRays: Float64Array;
+}
+
+/** The lights' marker pools grown to hold `n` markers; nothing made when they do already. */
+export function lightPools(v: MarksView, n: number): void {
+  if (v.lightType.length >= n) return;
+  const cap = Math.max(n, v.lightType.length * 2, 16);
+  v.lightPts = new Float64Array(cap * 2);
+  v.lightVis = new Uint8Array(cap);
+  v.lightType = new Uint8Array(cap);
+  v.lightState = new Uint8Array(cap);
 }
 
 /** The lakes' pools grown to hold `lakes` lakes of `points` points in all (`MarksView.lakePts`), and a draft of `draft` points; nothing made when they do already. */
@@ -233,7 +265,71 @@ export function marksView(): MarksView {
     handleVis: new Uint8Array(0),
     handleKind: new Uint8Array(0),
     handleState: new Uint8Array(0),
+    lightsOn: false,
+    lightCount: 0,
+    lightPx: 8,
+    lightPts: new Float64Array(0),
+    lightVis: new Uint8Array(0),
+    lightType: new Uint8Array(0),
+    lightState: new Uint8Array(0),
+    lightShapeOn: false,
+    lightShapeN: 0,
+    lightShape: new Float64Array(RING_MARKS * 2),
+    lightShapeVis: new Uint8Array(RING_MARKS),
+    lightRayN: 0,
+    lightRays: new Float64Array(16),
   };
+}
+
+/**
+ * The lights tool's markers and the picked light's reach (`MarksView.light...`, Map-maker II's wave of the rooms' lights): a
+ * disc with four rays for a round light, a cone for a spot, an arrow for a directional, each in its state's colour. Nothing is
+ * made; the width is read here.
+ */
+function drawLights(o: MarksOverlay, v: MarksView): void {
+  if (!v.lightsOn) return;
+  const width = EDITOR_TUNE.outline.width;
+  if (v.lightShapeOn) {
+    const s = v.lightShape;
+    const vis = v.lightShapeVis;
+    const n = v.lightShapeN;
+    for (let i = 0; i < n; i++) {
+      const j = i + 1 === n ? 0 : i + 1;
+      if (vis[i] && vis[j]) o.line(s[i * 2], s[i * 2 + 1], s[j * 2], s[j * 2 + 1], width * 0.75, COL.ink, 0.45);
+    }
+    const r = v.lightRays;
+    for (let i = 0; i < v.lightRayN; i++) o.line(r[i * 4], r[i * 4 + 1], r[i * 4 + 2], r[i * 4 + 3], width * 0.75, COL.ink, 0.45);
+  }
+  const px = v.lightPx;
+  const pts = v.lightPts;
+  for (let i = 0; i < v.lightCount; i++) {
+    if (!v.lightVis[i]) continue;
+    const st = v.lightState[i];
+    const c = st === 3 ? COL.ink : st === 2 ? COL.hot : st === 4 ? COL.warn : st === 1 ? COL.accent : COL.muted;
+    const x = pts[i * 2];
+    const y = pts[i * 2 + 1];
+    const t = v.lightType[i];
+    if (t === 1) {
+      // A spot: a cone opening downward from its apex, closed by its mouth.
+      o.line(x, y - px, x - px, y + px, width, c, 0.95);
+      o.line(x, y - px, x + px, y + px, width, c, 0.95);
+      o.line(x - px, y + px, x + px, y + px, width, c, 0.95);
+    } else if (t === 2) {
+      // A directional: an arrow falling, its head two strokes.
+      o.line(x, y - px, x, y + px, width, c, 0.95);
+      o.line(x, y + px, x - px * 0.6, y + px * 0.35, width, c, 0.95);
+      o.line(x, y + px, x + px * 0.6, y + px * 0.35, width, c, 0.95);
+    } else {
+      // A round light: a disc and four short rays.
+      o.ring(x, y, px * 0.55, width, c, 0.95);
+      const a = px * 0.75;
+      const b = px * 1.25;
+      o.line(x - b, y, x - a, y, width, c, 0.95);
+      o.line(x + a, y, x + b, y, width, c, 0.95);
+      o.line(x, y - b, x, y - a, width, c, 0.95);
+      o.line(x, y + a, x, y + b, width, c, 0.95);
+    }
+  }
 }
 
 /**
@@ -389,6 +485,7 @@ export function drawEditorMarks(o: MarksOverlay, v: MarksView): void {
   }
   drawLakes(o, v);
   drawHandles(o, v);
+  drawLights(o, v);
   if (v.hoverOn) drawBox(o, v.hover, width, COL.muted, 0.8);
   if (v.ghostOn) drawBox(o, v.ghost, width, v.ghostWarn ? COL.warn : COL.ink, 0.9);
   if (v.aimOn) o.ring(v.aimX, v.aimY, 4, 1.5, v.ghostWarn ? COL.warn : COL.accent, 0.9);

@@ -73,6 +73,8 @@ import { EditorBrush, brushNearOf, scatterTool, type BrushNearThing } from './ed
 import { brushRing, meantForWater, ringAsk, type RingGround } from './brush.ts';
 import { ToolList, toolFrame, type ToolDef, type ToolDraw } from './tools.ts';
 import { EditorWater, waterTool, type WaterHost } from './editorWater.ts';
+import { EditorLights, LIGHT_PRESETS, LIGHTS_TOOL_TUNE, lightsTool, presetOf, type LightsBuilding, type LightsHost } from './editorLights.ts';
+import type { LightRow } from '../world/editFiles/lightsFile.ts';
 import { WATER_CHOICES, WATER_TUNE, tuneWater, PLACES_TOOL_CHOICES, PLACES_TOOL_TUNE, tunePlacesTool } from './editorTune.ts';
 import { EditorPlaces, placeAreaSnippet, placesTool, skyOfRow, wholeSkyOf, type PlacesHost, type SkyFields } from './editorPlaces.ts';
 import { buildable, drawnOnMap, saidOnEntry, shapeArea, shapeMiddle, type LocationRow, type LocationShape } from '../world/editFiles/locationsFile.ts';
@@ -86,7 +88,7 @@ import { ATTACH_TUNE, rowMatrix, type RowAttachments } from '../world/rowAttach.
 import { LOOK_TUNE } from '../world/rowMaterials.ts';
 import { attachOfEntry, isAttachEntry } from './libraryModel.ts';
 // Map-maker II's twelfth wave: the world's own taken away, moved and switched; the people; the no-spawn zones.
-import { isPersonEntry, peopleEntries } from './libraryModel.ts';
+import { isLightEntry, isPersonEntry, lightEntries, peopleEntries } from './libraryModel.ts';
 import { EditorRemovals, PLACED_PERSON_TUNE, type RemovalsHost } from './editorRemovals.ts';
 import { EditorZones, ZONE_TOOL_TUNE, zonesTool, type ZonesHost } from './editorZones.ts';
 import { solidRows } from '../world/walkThrough.ts';
@@ -489,6 +491,13 @@ export class Editor {
         t.middle();
         return true;
       },
+      // The nudges and Ctrl+D an armed tool claims (the lights tool's picked light): the selection's wait meanwhile.
+      toolKeys: () => {
+        const t = me.tools.armedTool;
+        if (!t || !t.claimsKeys?.() || !t.nudge || !t.duplicate) return null;
+        // The tool itself answers both (nothing made a frame).
+        return t as Required<Pick<ToolDef, 'nudge' | 'duplicate'>>;
+      },
       // What hangs on a row (the seventh wave) carried with an edit under way and put back as it ends; a mark's place.
       follow: (key, m) => w.rowAttach.follow(key, m),
       unfollow: (key) => w.rowAttach.restore(key),
@@ -533,6 +542,7 @@ export class Editor {
         if (!e) return `no library entry ${key}`;
         // An effect or a sound (the seventh wave) has no model to plant: it is hung with the hand.
         if (isAttachEntry(e)) return `${entryName(e)} is an effect or a sound: take it in hand and click to hang it (the brush plants things with a model)`;
+        if (isLightEntry(e)) return `${entryName(e)} is a light: take it in hand and the lights tool puts it down (the brush plants things with a model)`;
         const got = await me.sourceOf(e);
         if (typeof got === 'string') return got;
         // Another world's pack known to the streamer before a row of it stands, as the hand hands it over (an imports pack too).
@@ -593,8 +603,14 @@ export class Editor {
     this.removals = new EditorRemovals(this.removalsHost());
     this.zones = new EditorZones(this.zonesHost());
     this.tools.add(zonesTool(this.zones));
+    // The lights tool (Map-maker II's wave of the rooms' lights), on ;: the rooms' lights shown, picked, edited and put
+    // down, written into the lights files; every change one write, the lit room planned again as its answer lands.
+    this.lights = new EditorLights(this.lightsHost());
+    this.lights.rowOfKey = (key) => me.rowOfPlacedKey(key);
+    this.tools.add(lightsTool(this.lights));
     registerExtraTune('person', PLACED_PERSON_TUNE as unknown as Record<string, unknown>);
     registerExtraTune('zone', ZONE_TOOL_TUNE as unknown as Record<string, unknown>);
+    registerExtraTune('lightsTool', LIGHTS_TOOL_TUNE as unknown as Record<string, unknown>);
     // Its numbers of feel as sliders in the debug menu's `locations` set, beside the places' own (`locationDialSet`).
     LOCATION_DIALS.tool = placesToolDials();
     // The picked lake's look as the debug menu's sliders, each written into the water file a moment after it rests.
@@ -665,6 +681,8 @@ export class Editor {
   readonly removals: EditorRemovals;
   /** The no-spawn zone tool (Map-maker II's twelfth wave). */
   readonly zones: EditorZones;
+  /** The lights tool (Map-maker II's wave of the rooms' lights). */
+  readonly lights: EditorLights;
   /** The dresser (Map-maker II's thirteenth wave): the Looks tab, made the first time it is asked for. */
   private dresserMade: DresserUi | null = null;
 
@@ -1143,6 +1161,121 @@ export class Editor {
     };
   }
 
+  /**
+   * What the lights tool asks of the editor and the game (Map-maker II's wave of the rooms' lights): the lights files as last
+   * landed, the lit building and room (kept, made again only when the room changes), its frames, the pool's shape and plan,
+   * the hand's light into the pool, the lights hung on rows, the row of ours under the aim. Nothing made a frame.
+   */
+  private lightsHost(): LightsHost {
+    const h = this.host;
+    const w = h.world;
+    const me = this;
+    const places = this.placesHost();
+    const rowsRec: { world: readonly LightRow[]; all: readonly LightRow[] } = { world: [], all: [] };
+    let seenB: object | null = null;
+    let seenCell = -1;
+    let lit: LightsBuilding | null = null;
+    const ask = new THREE.Vector3();
+    const answer: RoomAnswer = { building: null, cell: 0, byBox: false };
+    const lookV = new THREE.Vector3();
+    const of = (b: NonNullable<RoomAnswer['building']>, cell: number): LightsBuilding => ({
+      ref: b,
+      model: b.model.def.id,
+      copy: w.copyKeyOf(b),
+      template: b.template,
+      cell,
+      matrix: b.matrix,
+      inverse: b.inverse,
+      cells: b.model.def.cells ?? [],
+      x: b.x,
+      z: b.z,
+      radius: b.radius,
+    });
+    return {
+      get edits() {
+        return me.edits;
+      },
+      worldKind: () => h.worldKind(),
+      rows: () => {
+        rowsRec.world = w.roomLightEdits.world;
+        rowsRec.all = w.roomLightEdits.all;
+        return rowsRec;
+      },
+      cameraBuilding: () => {
+        const l = w.roomLightsLit;
+        const b = l?.building ?? null;
+        const c = l?.cell ?? -1;
+        if (b !== seenB || c !== seenCell) {
+          seenB = b;
+          seenCell = c;
+          lit = b ? of(b, c) : null;
+        }
+        return lit;
+      },
+      roomAt: (x, y, z) => {
+        const s = w.streamer;
+        if (!s) return null;
+        ask.set(x, y, z);
+        s.cameraRoomAt(ask, answer, floorUnder);
+        // A point well over the floor (a lamp at the ceiling) is a room's by its box alone.
+        if (!answer.building || answer.cell <= 0) s.cameraRoomAt(ask, answer, () => true);
+        if (!answer.building || answer.cell <= 0) return null;
+        return { building: of(answer.building, answer.cell), cell: answer.cell };
+      },
+      // The lights file's frame: the raw frame about the world's place frame on a planet, the game's own in a space zone.
+      toRaw: (x, z, out) => {
+        if (w.planet?.space) {
+          out.x = x;
+          out.z = z;
+        } else places.toRaw(x, z, out);
+      },
+      toGame: (x, z, out) => {
+        if (w.planet?.space) {
+          out.x = x;
+          out.z = z;
+        } else places.toGame(x, z, out);
+      },
+      shape: () => w.roomPoolShape,
+      plan: () => w.roomPlan,
+      planVersion: () => w.roomPlanVersion,
+      // The record handed whole: six numbers across a call a frame of a hold would each be boxed wherever it is left out.
+      live: (l) => w.roomLightLive(l),
+      attached: () => w.rowAttach.lightList(),
+      rowUnderAim: () => {
+        const id = me.hoveredId();
+        const onto = id ? h.rowFor(id) : null;
+        if (!onto) return null;
+        const frame = w.planet?.space ? 'game' : 'raw';
+        const g = placementToGame(onto.row, w.placeFrame, frame);
+        const m = new THREE.Matrix4();
+        rowMatrix(onto.row, g, m);
+        return { id: onto.row.id, layer: onto.layer, row: onto.row as unknown as Record<string, unknown>, matrix: m };
+      },
+      look: (out) => {
+        me.fly.lookDir(lookV);
+        const l = Math.sqrt(lookV.x * lookV.x + lookV.z * lookV.z) || 1;
+        out.x = lookV.x / l;
+        out.z = lookV.z / l;
+      },
+      eye: (out) => {
+        const p = h.player.pos;
+        out.x = p.x;
+        out.y = p.y;
+        out.z = p.z;
+      },
+      grid: () => me.edits.grid,
+      say: (words, ok) => me.say(words, ok),
+      refresh: () => me.window?.refreshEdits(),
+    };
+  }
+
+  /** A row of the two placement files by its streamer key (`place/<id>`), or null. */
+  private rowOfPlacedKey(key: string): { id: string; layer: 'story' | 'world'; row: Record<string, unknown> } | null {
+    if (!key.startsWith(PLACEMENT_KEY_PREFIX)) return null;
+    const got = this.host.rowFor(key.slice(PLACEMENT_KEY_PREFIX.length));
+    return got ? { id: got.row.id, layer: got.layer, row: got.row as unknown as Record<string, unknown> } : null;
+  }
+
   /** What the zone tool asks of the editor and the game. */
   private zonesHost(): ZonesHost {
     const places = this.placesHost();
@@ -1214,6 +1347,9 @@ export class Editor {
   /** Fly's mouse movement down the screen an armed tool took this frame with F held, and whether F is held (the key block's). */
   private toolDY = 0.5;
   private toolLift = false;
+  /** Fly's mouse movement across the screen an armed tool took this frame with R held, and whether R is held (the lights tool's turn). */
+  private toolDX = 0.5;
+  private toolTurn = false;
   /** When something last happened (a key, a button, an edit, a stroke, a flight), seconds: what the automatic fold waits out. */
   private activeAt = 0;
   /** A Fold now under way. */
@@ -1422,6 +1558,7 @@ export class Editor {
     // Map-maker II's twelfth wave: nothing of the world's own picked, no person in hand, no zone picked or drawn.
     this.removals.worldGone();
     this.zones.worldGone();
+    this.lights.worldGone();
     this.gridStale = false;
     this.tools.disarmAll();
     // The wash's write still waiting for its dials to rest goes with its world, never into the next world's file.
@@ -1482,6 +1619,8 @@ export class Editor {
       this.toolShiftPress = false;
       this.toolDY = 0;
       this.toolLift = false;
+      this.toolDX = 0;
+      this.toolTurn = false;
       input.wheel = 0;
       input.mute(ALL_ACTIONS);
       return;
@@ -1500,6 +1639,8 @@ export class Editor {
       this.toolShiftPress = false;
       this.toolDY = 0;
       this.toolLift = false;
+      this.toolDX = 0;
+      this.toolTurn = false;
       this.ctrlHeld = true;
       // The editor's own chords (Ctrl+D, C, X, Z, Shift+Z), read as raw keys; every action muted for the frame.
       if (!oldHand && !(this.window?.library.typing ?? false)) this.edits.chords();
@@ -1558,7 +1699,9 @@ export class Editor {
     const armedTool = this.tools.armedTool;
     // F held for an armed tool that takes the mouse with it (the water tool raising a picked lake): the camera holds still.
     const liftHeld = !oldHand && input.held('placeLift');
-    const toolMouse = !oldHand && !!armedTool?.holdsMouse?.(liftHeld);
+    // R held for a tool that turns what it has picked with the mouse (the lights tool's picked light).
+    const turnHeld = !oldHand && input.held('placeTurn');
+    const toolMouse = !oldHand && !!armedTool?.holdsMouse?.(liftHeld, turnHeld);
     if (wheel) {
       // With a hand key held on the selection the wheel steps its grid (the angle, the grid, the scale step); never while a
       // tool is armed (the selection takes no hold then), when C held with the wheel sizes the tool that has a size, and F
@@ -1586,9 +1729,12 @@ export class Editor {
     // A hold, a drag of the gizmo or an orbit has the mouse: the camera holds still. So does a tool raising with F held,
     // which takes Fly's movement down the screen for itself (`toolDY`), spent here before the camera reads it.
     this.toolDY = 0;
+    this.toolDX = 0;
     this.toolLift = liftHeld;
+    this.toolTurn = turnHeld;
     if (toolMouse && !this.session.point) {
       this.toolDY = input.mouseDY;
+      this.toolDX = input.mouseDX;
       input.mouseDX = 0;
       input.mouseDY = 0;
     }
@@ -1846,6 +1992,9 @@ export class Editor {
       f.sy = point ? this.pointer.y : hh / 2;
       f.dy = point ? 0 : this.toolDY;
       f.lift = this.toolLift && !this.ctrlHeld;
+      // R held and Fly's movement across the screen a tool took with it (the lights tool's turn).
+      f.dx = point ? 0 : this.toolDX;
+      f.turn = this.toolTurn && !this.ctrlHeld;
       tool.step(f);
     }
     // What happened this frame, for the automatic fold's quiet (`EDITOR_TUNE.autoFoldIdle`).
@@ -2066,6 +2215,15 @@ export class Editor {
       this.giveUpHand();
       this.tools.disarmAll();
       this.removals.takePerson(e.m, entryName(e));
+      this.window?.refreshEdits();
+      return null;
+    }
+    // A light of the Lights source (Map-maker II's wave of the rooms' lights): nothing in hand, the lights tool armed with
+    // that preset, put down by the next click.
+    if (!base && isLightEntry(e)) {
+      this.giveUpHand();
+      if (!this.lights.armed) await this.toggleTool('lights');
+      this.lights.act(`lights:add:${e.id}`);
       this.window?.refreshEdits();
       return null;
     }
@@ -2501,6 +2659,59 @@ export class Editor {
     this.window?.refreshLooks();
   }
 
+  /** The lights files landed (a write's answer, an undo's, the dev server's word): the lights tool's markers and tabs again. */
+  lightsLanded(): void {
+    this.lights.stale();
+    if (this.lights.armed) this.window?.refreshEdits();
+  }
+
+  /**
+   * The lights tool from the console (`__debug.roomLights`'s editing half, Map-maker II's wave of the rooms' lights):
+   * `{ arm: true | false }`, `{ scope: 'copy' | 'world' | 'all' }`, `{ preset: id | null }` (what a click puts down),
+   * `{ hang: true | false }`, `{ put: id | { preset, at: [x, y, z] } }` a preset put down at the aim or a point of the game's
+   * frame, `{ pick: key }` (a light's key: `g:<cell>:<index>` for the game's own, a row's id, `att:...` for one hung on a row),
+   * `{ move: [dx, dy, dz], turn: degrees, tip: degrees }` the picked light moved (world metres) and turned, `{ set: { ...fields } }`
+   * its fields (`type`, `color`, `brightness`, `reach`, `falloff`, `cone`, `shadow`, `flicker`, `name`, `pos`, `scope`; for
+   * one of the game's own `off`, `scale`, `color`, `reach`, `shadow`), `{ fill: { scale, color } }` the room's fill (null takes
+   * one out), `{ dup: true }`, `{ remove: true }`. Every write one undo; answers what was said and the tool's report.
+   */
+  async lightsDebug(o: Record<string, unknown> = {}): Promise<unknown> {
+    const said: string[] = [];
+    const l = this.lights;
+    if (o.arm === true && !l.armed) said.push(await this.toggleTool('lights'));
+    if (o.arm === false && l.armed) said.push(await this.toggleTool('lights'));
+    if (o.scope === 'copy' || o.scope === 'world' || o.scope === 'all') l.act(`lights:scope:${o.scope}`);
+    if (typeof o.preset === 'string' || o.preset === null) {
+      if (o.preset && !presetOf(o.preset)) said.push(`no preset ${o.preset}: ${LIGHT_PRESETS.map((p) => p.id).join(', ')}`);
+      else l.act(`lights:add:${o.preset ?? ''}`);
+    }
+    if (typeof o.hang === 'boolean' && o.hang !== l.hang) l.act('lights:hang');
+    const put = o.put as string | { preset?: unknown; at?: unknown } | undefined;
+    if (put !== undefined) {
+      const id = typeof put === 'string' ? put : typeof put?.preset === 'string' ? put.preset : '';
+      const p = presetOf(id);
+      const at = typeof put === 'object' && Array.isArray(put.at) && put.at.length === 3 && put.at.every((n) => typeof n === 'number') ? (put.at as number[]) : null;
+      if (!p) said.push(`put names a preset: ${LIGHT_PRESETS.map((x) => x.id).join(', ')}`);
+      else if (!at && this.aimKind === 'sky') said.push('aim at something, or give at: [x, y, z]');
+      else said.push(await l.putDown(p, at ? at[0] : this.aim.hit.x, (at ? at[1] : this.aim.hit.y) - (at ? LIGHTS_TOOL_TUNE.lift : 0), at ? at[2] : this.aim.hit.z));
+    }
+    if (typeof o.pick === 'string') said.push(l.pickKey(o.pick) ? `picked ${o.pick}` : `no light ${o.pick} in view (the lit room's, the outdoor ones near, those hung on rows near)`);
+    if (o.pick === null) l.escape();
+    const mv = o.move;
+    const turn = typeof o.turn === 'number' ? (o.turn * Math.PI) / 180 : 0;
+    const tip = typeof o.tip === 'number' ? (o.tip * Math.PI) / 180 : 0;
+    if ((Array.isArray(mv) && mv.length === 3 && mv.every((n) => typeof n === 'number')) || turn || tip) {
+      const d = Array.isArray(mv) ? (mv as number[]) : [0, 0, 0];
+      await l.moveKey(d[0], d[1], d[2], turn, tip);
+      said.push(l.last);
+    }
+    if (o.set && typeof o.set === 'object') said.push(await l.setPicked(o.set as Record<string, unknown>));
+    if (o.fill && typeof o.fill === 'object') said.push(await l.setFill(o.fill as { scale?: number | null; color?: [number, number, number] | null }));
+    if (o.dup === true) said.push(await l.duplicateNow());
+    if (o.remove === true) said.push(await l.deleteNow());
+    return { ...(said.length ? { said } : {}), tool: l.report(), tune: { ...LIGHTS_TOOL_TUNE } };
+  }
+
   /** A look of the owner's own put on one of this world's placed people (`body: own:<id>`), one write and one undo entry. */
   private async wearLook(w: { id?: unknown; row?: unknown }): Promise<string> {
     const id = typeof w.id === 'string' ? w.id : '';
@@ -2850,7 +3061,7 @@ export class Editor {
   composeLibrary(): void {
     const cat = this.host.world.mobileCatalogue;
     const pics = lookPictures(this.libLookPics, cat);
-    this.libView = libraryView([...this.libBase, ...peopleEntries(cat, pics), ...lookEntries(cat, pics)]);
+    this.libView = libraryView([...this.libBase, ...peopleEntries(cat, pics), ...lookEntries(cat, pics), ...lightEntries(LIGHT_PRESETS)]);
   }
 
   /**
@@ -3020,10 +3231,12 @@ export class Editor {
       lookPalettes: () => this.lookPalettes(),
       attachment: (act: 'pick' | 'at' | 'size' | 'remove', i: number, value?: string) => void this.attachmentAct(act, i, value),
       // Map-maker II's twelfth wave: the world's own, the people, the sites, the seats and the no-spawn zones, as sections.
-      sections: (tab: 'selected' | 'here' | 'tools'): EditorSection[] => [...this.zones.sections(tab), ...this.removals.sections(tab)],
+      sections: (tab: 'selected' | 'here' | 'tools'): EditorSection[] => [...this.lightsSections(tab), ...this.zones.sections(tab), ...this.removals.sections(tab)],
       sectionAct: (act: string, value?: string) => {
         void (async () => {
-          if (act === 'zone:arm') await this.toggleTool('zones');
+          // The lights tool's buttons and fields (Map-maker II's wave of the rooms' lights).
+          if (act.startsWith('lights:')) this.lights.act(act, value);
+          else if (act === 'zone:arm') await this.toggleTool('zones');
           else if (!(await this.zones.act(act, value))) await this.removals.act(act, value);
           this.window?.refreshEdits();
         })();
@@ -3032,6 +3245,17 @@ export class Editor {
       looksParts: () => this.dresser().parts(),
       looksShown: (on: boolean) => this.dresser().setShown(on),
     };
+  }
+
+  /**
+   * The lights tool's sections (Map-maker II's wave of the rooms' lights), only while it is armed: on the Tools tab its scope,
+   * presets and switches; on the Selected tab the picked light's fields and the room's fill.
+   */
+  private lightsSections(tab: 'selected' | 'here' | 'tools'): EditorSection[] {
+    if (!this.lights.armed) return [];
+    if (tab === 'tools') return this.lights.toolsSections();
+    if (tab === 'selected') return this.lights.selectedSections();
+    return [];
   }
 
   /** A look act from the Selected tab (every picked row): a tint set or taken off, the picker armed, an offered material chosen, a look cleared. */
@@ -4237,7 +4461,7 @@ export class Editor {
       offered: this.looks.choice,
       attachments: (r.row.attach ?? []).map((a, i) => ({
         i,
-        words: a.fx ? `effect ${a.fx}` : `sound ${a.snd}`,
+        words: a.fx ? `effect ${a.fx}` : a.light ? `light (${a.light.type}; its fields are the lights tool's)` : `sound ${a.snd}`,
         at: (a.at ?? [0, 0, 0]).join(' '),
         size: a.fx ? String(a.size ?? 1) : '',
         picked: this.looks.attachSel?.id === r.row.id && this.looks.attachSel.i === i,
@@ -4700,6 +4924,7 @@ function keySheet(input: Input): string {
     `${k('editorPaint')} paint brush armed and let go · LMB held paints the chosen family or colour (Tools tab) · RMB held erases · Shift+click or the middle button takes what is under it · C held with the wheel sizes it`,
     `${k('editorWater')} water tool armed and let go · LMB a lake's point, a seed to trace, or a fall's ends (Tools tab) · RMB takes one back · a click on a lake's ring picks it: drag its square, ${k('placeLift')} held raises, ${k('putAway')} takes it out`,
     `${k('editorPlaces')} places tool armed and let go · LMB a circle (C held with the wheel sizes it), a rectangle's drag or an outline's point (Tools tab) · RMB takes one back · a click on a place's ring picks it: drag its square, C with the wheel sizes it, ${k('putAway')} takes it out`,
+    `${k('editorLights')} lights tool armed and let go · a click on a light picks it: drag its gizmo, ${k('placeLift')} held raises, ${k('placeTurn')} held turns, the arrows nudge, Ctrl+D duplicates, ${k('putAway')} takes it out (switches one of the game's own off) · a preset (Tools tab, the library's Lights) is put down by the next click`,
     `${k('editorGameView')} game view · ${k('editorKeys')} this sheet · ${k('editorBody')} body here · ${k('editorHold')} hold the world · Esc give up / clear · F2 leave`,
   ].join('\n');
 }

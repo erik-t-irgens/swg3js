@@ -44,6 +44,7 @@ import { REMOVAL_LIMITS, isRemovalId, mintZoneId, readRemovalRow, readRemovalsFi
 import { PEOPLE_LIMITS, isPersonId, mintPersonId, peopleFileText, personWithExtras, readPeopleFile, readPersonRow, samePersonRow, type PlacedPersonRow } from '../story/placedPeople.ts';
 import { isSolidFileId, readSolidFileRow, readSolidFileRows, solidFileText, type SolidFileRow } from './walkThrough.ts';
 import { LOOKS_LIMITS, isLookId, lookWithExtras, looksFileText, mintLookId, readLookRow, readLooksFile, sameLookRow, type OwnLookRow } from './editFiles/looksFile.ts';
+import { ALL_ID_PREFIX, LIGHTS_LIMITS, isLightId, lightWithExtras, lightsFileText, mintLightId, readLightRow, readLightsFile, sameLightRow, type LightRow } from './editFiles/lightsFile.ts';
 
 /** Every number of the endpoint, all ours. Read where the dev server runs it, and not moved from the browser. */
 export const PLACEMENTS_ENDPOINT_TUNE = {
@@ -816,6 +817,50 @@ function looksFile(): string {
 }
 
 /**
+ * The rooms' lights edited (Map-maker II's wave of the rooms' lights, `editFiles/lightsFile.ts`): a world's file (`lights`, one
+ * copy's and every copy on this world's rows, and lights standing outdoors) and the shared one (`lightsAll`, every copy
+ * everywhere's, `lights.json`), a row an edit, a fill or a light added, named by an id of its own (minted from its name, else
+ * its kind, where a put names none; the shared file's begin `all-`). Every world's, a space zone's (its outdoor rows in the
+ * game's frame) and the world of copies' among them: a dungeon's rooms are rooms.
+ */
+function lightsKindOf(kind: 'lights' | 'lightsAll'): EditKind<LightRow> {
+  const shared = kind === 'lightsAll';
+  const file = (world: string): string => `public/${editFilePath(kind, shared ? 'all' : world)}`;
+  return {
+    kind,
+    group: null,
+    groundOnly: false,
+    most: LIGHTS_LIMITS.rows,
+    idOk: (id: unknown): id is string => isLightId(id, shared),
+    idWords: shared ? `its id is ${ALL_ID_PREFIX} and then a-z, 0-9, _ and - (64 at most)` : `its id is not a-z, 0-9, _ and - (64 at most, starting with a letter or a digit, never ${ALL_ID_PREFIX})`,
+    open(text, world, wk) {
+      if (text === null) return { rows: [], read: null, text: null };
+      const raws: Record<string, unknown>[] = [];
+      const read = readLightsFile(text, shared ? null : world, wk, raws);
+      if (read.problem) return `${file(world)} does not read (${read.problem}): mend it by hand first`;
+      if (read.skipped.length) return `${file(world)} holds rows this build cannot read (${read.skipped.slice(0, 3).map((s) => `${s.id}: ${s.why}`).join('; ')}): mend them by hand first, or the editor would write over them`;
+      return { rows: read.rows.map((row, i) => ({ row, raw: raws[i] })), read, text };
+    },
+    clean(asked, id, stamp) {
+      const unknown: string[] = [];
+      const row = readLightRow({ ...asked, id, at: stamp }, shared, unknown);
+      if (typeof row === 'string') return row;
+      if (unknown.length) return `it carries fields this build does not write: ${unknown.join(', ')}`;
+      return row;
+    },
+    parse: (v) => readLightRow(v, shared),
+    same: sameLightRow,
+    extras: lightWithExtras,
+    text: (world, frame, rows) => lightsFileText(shared ? null : world, frame, rows),
+    read: (text, world, wk) => readLightsFile(text, shared ? null : world, wk),
+    mint: (asked, taken) => mintLightId(typeof asked.name === 'string' && asked.name ? asked.name : typeof asked.kind === 'string' ? asked.kind : 'light', taken, shared),
+    file,
+  };
+}
+export const lightsKind = lightsKindOf('lights');
+export const lightsAllKind = lightsKindOf('lightsAll');
+
+/**
  * Every kind the batch writes now, by name: the two row layers, from Map-maker II's first wave the heights, from its
  * second the paint, from its fifth the water, from its eighth the places, from its twelfth what is taken away, the people
  * and the shared walk-through file, and from its thirteenth the looks. A kind named in `EDIT_FILE_KINDS` and missing here
@@ -832,14 +877,16 @@ export const EDIT_KINDS: Partial<Record<EditFileKind, EditKind<EditRow>>> = {
   people: peopleKind as unknown as EditKind<EditRow>,
   solid: solidKind as unknown as EditKind<EditRow>,
   looks: looksKind as unknown as EditKind<EditRow>,
+  lights: lightsKind as unknown as EditKind<EditRow>,
+  lightsAll: lightsAllKind as unknown as EditKind<EditRow>,
 };
 
 /**
  * The kinds the dungeons' world of copies takes (Map-maker I §2.9): a copy's crew member and its own objects taken away, and
  * (Map-maker II's thirteenth wave) the looks every world shares, which are no world's own and are saved wherever the editor
- * stands.
+ * stands; and (the wave of the rooms' lights) the rooms' lights, a dungeon's rooms being rooms like any other's.
  */
-export const COPIES_KINDS: readonly EditFileKind[] = ['removed', 'looks'];
+export const COPIES_KINDS: readonly EditFileKind[] = ['removed', 'looks', 'lights', 'lightsAll'];
 
 /**
  * The world editor's one write (`{ op: 'batch', world, edits }`, DESIGN.md §2.11): every edit applied in order to every

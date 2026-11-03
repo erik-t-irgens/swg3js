@@ -46,8 +46,8 @@ const holder = new RowAttachments<H>({
   },
   move: (h, m) => h.m.copy(m),
   resize: (h, size) => {
-    h.size = size;
-    log.push(`resize ${h.file} ${size}`);
+    h.size = size.v;
+    log.push(`resize ${h.file} ${size.v}`);
   },
   remove: (h) => {
     h.gone = true;
@@ -137,14 +137,14 @@ const markB = { id: 'b', kind: 'mark', x: 0, y: 0, z: 0, q: [1, 0, 0, 0], inside
   holder.restore('place/a');
   ok(near(h.m.elements[12], 0) && near(s.x, 0), 'put back where it was stood when the edit ends');
   const local = new THREE.Matrix4().makeTranslation(0, 5, 0);
-  holder.followItem('place/a', 0, local, 2);
+  holder.followItem('place/a', 0, local, { v: 2 });
   ok(near(h.m.elements[13], 15) && !h.gone, "one attachment moved in its model's frame, nothing stood again (5 m up a model three times its height)");
   const placedBefore = placed.length;
-  holder.followItem('place/a', 0, local, 4);
+  holder.followItem('place/a', 0, local, { v: 4 });
   const again = live().find((x) => !x.contained)!;
   ok(!h.gone && again === h && h.size === 4 * 3 && placed.length === placedBefore && log[log.length - 1] === `resize ${h.file} 12`, "a size moved sizes the standing effect in place, nothing placed again (C held: it plays on at the size being dialled)");
   const steps = log.length;
-  holder.followItem('place/a', 0, local, 4);
+  holder.followItem('place/a', 0, local, { v: 4 });
   ok(!log.slice(steps).some((l) => l.startsWith('resize') || l.startsWith('place') || l.startsWith('remove')), 'and a step that leaves the size as it is asks nothing of the effect');
   const list = holder.handleList();
   ok(list.count === 3 && list.kind[1] === 1 && list.radius[1] === 12 && list.mark[2] === 1 && list.id[2] === 'b' && list.item[1] === 1, 'the handles: every attachment, a sound\'s kind and its full-volume radius, a mark\'s marked, its row\'s id and its index');

@@ -26,6 +26,7 @@
 // extension, no enum, no namespace, no constructor parameter properties.
 
 import { parseJsonc } from './jsonc.ts';
+import { lightSpecFields, readLightSpec, type LightSpec } from './lightSpec.ts';
 import type { PlacementLayer } from './placementPath.ts';
 import { gameToRawX, gameToRawZ, rawToGameX, rawToGameZ } from './waypoints.ts';
 
@@ -62,6 +63,12 @@ export interface RowLook {
 export interface RowAttach {
   fx?: string;
   snd?: string;
+  /**
+   * A light (Map-maker II's wave of the rooms' lights, `lightSpec.ts`), at its place and turn in the model's frame: the room
+   * pool lights it as a light added to the room its place stands in, so a lamp prop carries its own light and moves with it;
+   * outdoors it lights nothing until the Light and shadow pass's outdoor pool. No size.
+   */
+  light?: LightSpec;
   at?: [number, number, number];
   q?: [number, number, number, number];
   size?: number;
@@ -387,10 +394,19 @@ export function readAttachments(v: unknown): RowAttach[] | null | undefined {
     const o = e as Record<string, unknown>;
     const fx = o.fx !== undefined;
     const snd = o.snd !== undefined;
-    if (fx === snd) return null;
-    for (const k of Object.keys(o)) if (k !== 'fx' && k !== 'snd' && k !== 'at' && (!fx || (k !== 'q' && k !== 'size'))) return null;
+    // A light (Map-maker II's wave of the rooms' lights): one of the three, with its place and turn and no size.
+    const light = o.light !== undefined;
+    if ((fx ? 1 : 0) + (snd ? 1 : 0) + (light ? 1 : 0) !== 1) return null;
+    for (const k of Object.keys(o)) if (k !== 'fx' && k !== 'snd' && k !== 'light' && k !== 'at' && (!(fx || light) || (k !== 'q' && (light || k !== 'size')))) return null;
     const a: RowAttach = {};
-    if (fx) {
+    if (light) {
+      const l = o.light as Record<string, unknown> | null;
+      if (!l || typeof l !== 'object' || Array.isArray(l)) return null;
+      for (const k of Object.keys(l)) if (!['type', 'color', 'brightness', 'reach', 'falloff', 'cone', 'shadow', 'flicker'].includes(k)) return null;
+      const spec = readLightSpec(l);
+      if (typeof spec === 'string') return null;
+      a.light = lightSpecFields(spec) as unknown as LightSpec;
+    } else if (fx) {
       if (typeof o.fx !== 'string' || o.fx.length > L.attachFile || !FX_FILE.test(o.fx) || o.fx.includes('..')) return null;
       a.fx = o.fx;
     } else {

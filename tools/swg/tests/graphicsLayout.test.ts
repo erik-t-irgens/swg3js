@@ -194,7 +194,16 @@ else {
   const now: string[] = [];
   const n = build(today, now);
   const newTitles = titlesOf(n.body.querySelectorAll('.gfx-sec'));
-  const nc = controls(n.body, now);
+  const all = controls(n.body, now);
+  // The two settings the wave of the rooms' lights added to Shadows and distance (Room lamps, Room light shadows) are the
+  // page's since; every other control is held to the page before, in order, as it stood.
+  const ADDED = ['select:roomLightSpots', 'select:roomLightShadows'];
+  const reset = all.find((c) => c.id === 'button:reset-gfx');
+  ok(!!reset && / roomLightSpots=0 roomLightShadows=0 /.test(reset.act), "and the page's reset puts both back at nought, the pool as the world always had it");
+  // The reset's act, less the two it now writes as well, is the reset of before.
+  const nc = all.filter((c) => !ADDED.includes(c.id)).map((c) => (c.id === 'button:reset-gfx' ? { ...c, act: c.act.replace(' roomLightSpots=0 roomLightShadows=0', '') } : c));
+  const added = all.filter((c) => ADDED.includes(c.id));
+  ok(added.length === 2 && all.findIndex((c) => c.id === ADDED[0]) === all.findIndex((c) => c.id === 'input:shadowCasterRadius') + 1 && all.findIndex((c) => c.id === ADDED[1]) === all.findIndex((c) => c.id === ADDED[0]) + 1, `the rooms' two light settings stand in the shadows' section, after the smallest caster (${added.map((c) => c.id).join(', ')})`);
   ok(oldTitles.join('|') === newTitles.join('|'), `the page's sections are the ones it had, in the order it had them (${newTitles.length})`);
   const ids = nc.map((c) => c.id);
   ok(new Set(ids).size === ids.length, `every control stands on the page once, across every sub-tab (${ids.length})`);

@@ -46,8 +46,13 @@ export const ROUTE_KIND = { mobile: 0, fighter: 1, vehicle: 2, rig: 3 } as const
 export const ROUTE_KIND_NAMES = ['mobile', 'fighter', 'vehicle', 'rig'] as const;
 const NKIND = ROUTE_KIND_NAMES.length;
 
-/** Which pass is being routed. */
-export const ROUTE_PASS = { shadows: 0, world: 1, building: 2 } as const;
+/**
+ * Which pass is being routed. `roomShadows` is the rooms' pool's own shadow pass (Map-maker II's wave of the rooms' lights):
+ * what stands in the lit building's rooms, as a building's pass takes it, but a shadow pass, so nothing it shows counts as
+ * drawn for the effects (a body there whose rooms program is still being built casts all the same: its depth programs are
+ * the warm-up's, never its rooms program).
+ */
+export const ROUTE_PASS = { shadows: 0, world: 1, building: 2, roomShadows: 3 } as const;
 
 /** The routing's own numbers. Ours. */
 export const ROUTE_TUNE = {
@@ -120,7 +125,7 @@ export class ActorRoutes {
   active = false;
   /** How many records this frame. */
   n = 0;
-  readonly stats: RouteStats = { records: 0, byKind: new Int32Array(NKIND), unhideable: 0, doorway: 0, hidden: 0, hiddenByKind: new Int32Array(NKIND), undrawn: 0, shownShadows: 0, shownWorld: 0, shownRooms: 0, passes: new Int32Array(3), notReady: 0, deferredWide: 0, deferredLit: 0 };
+  readonly stats: RouteStats = { records: 0, byKind: new Int32Array(NKIND), unhideable: 0, doorway: 0, hidden: 0, hiddenByKind: new Int32Array(NKIND), undrawn: 0, shownShadows: 0, shownWorld: 0, shownRooms: 0, passes: new Int32Array(4), notReady: 0, deferredWide: 0, deferredLit: 0 };
   private vis: PortalVisibility | null = null;
   private cap = 0;
   private readonly k: number;
@@ -470,23 +475,27 @@ export class ActorRoutes {
 
   /**
    * Choose what one pass draws: `ROUTE_PASS.shadows` and `world` take what stands outdoors (the world pass
-   * from inside only what `frustum`, the one through the exits' rectangle, holds; null narrows nothing), and
-   * `building` what stands in one of `b`'s rooms. Everything the frame hid stays hidden, and nothing its
+   * from inside only what `frustum`, the one through the exits' rectangle, holds; null narrows nothing),
+   * `building` what stands in one of `b`'s rooms, and `roomShadows` the same for the rooms' pool's own shadow pass
+   * (counted as a shadow pass, so it marks nothing drawn). Everything the frame hid stays hidden, and nothing its
    * owner hid is shown.
    */
   route(pass: number, b: VisBuilding | null, frustum: THREE.Frustum | null): void {
     if (!this.active) return;
     const s = this.stats;
-    if (pass >= 0 && pass < 3) s.passes[pass]++;
+    if (pass >= 0 && pass < 4) s.passes[pass]++;
     const k = this.k;
     const sp = this.tmpSphere;
+    const inRooms = pass === ROUTE_PASS.building || pass === ROUTE_PASS.roomShadows;
+    const shadowOnly = pass === ROUTE_PASS.shadows || pass === ROUTE_PASS.roomShadows;
     for (let i = 0; i < this.n; i++) {
       const f = this.flag[i];
       if (f & (F_SKIP | F_HID)) continue;
       let show = false;
-      if (pass === ROUTE_PASS.building) {
-        // A body whose rooms program is still being built off the frame is never drawn in a building's pass.
-        if ((f & F_NOROOM) === 0) {
+      if (inRooms) {
+        // A body whose rooms program is still being built off the frame is never drawn in a building's pass (a shadow pass
+        // draws it through the warm-up's depth programs, never its rooms program).
+        if ((f & F_NOROOM) === 0 || pass === ROUTE_PASS.roomShadows) {
           const base = i * k;
           for (let j = 0; j < this.memN[i]; j++) {
             if (this.memB[base + j] === b) {
@@ -512,7 +521,7 @@ export class ActorRoutes {
       a.visible = show && this.savedA[i] === 1;
       if (bb !== null) bb.visible = show && this.savedB[i] === 1;
       if (!show) continue;
-      if (pass === ROUTE_PASS.shadows) s.shownShadows++;
+      if (shadowOnly) s.shownShadows++;
       else {
         this.flag[i] = f | F_DRAWN;
         if (pass === ROUTE_PASS.world) s.shownWorld++;

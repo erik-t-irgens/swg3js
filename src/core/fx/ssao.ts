@@ -27,7 +27,8 @@ import type { FxProductId, FxSettings } from '../fxRegistry.ts';
 import { createFxQuad, FX_CAMERA, type FxDebugTexture, type FxPass, type FxWarmItem } from './pass';
 import { createSharedDepthTarget, disposeSharedDepthTarget } from './geometry';
 import { FX_BILATERAL_UPSAMPLE, FX_FULLSCREEN_VERTEX, FX_IGN, FX_LINEARIZE, FX_LUMA, FX_VIEW_POS } from './glsl';
-import { FX_MAX_FLASH_LIGHTS, FX_MAX_ROOM_LIGHTS, type FxLights } from './lights';
+import { FX_MAX_FLASH_LIGHTS, FX_MAX_ROOM_CAST, FX_MAX_ROOM_LIGHTS, FX_MAX_ROOM_SPOTS, type FxLights } from './lights';
+import { fillRoomPoolUniforms, type RoomPoolUniforms } from './roomPoolUniforms.ts';
 import {
   decodeCeiling,
   SSAO_ALBEDO_CEILING,
@@ -311,6 +312,44 @@ export const SSAO_GTAO_FRAG = /* glsl */ `
     gl_FragColor = vec4(visibility, fraction, ceilingEnc, 1.0);
   }
 `;
+
+/** The most room spots the occlusion takes (the pool's spot slots at their most, `FX_MAX_ROOM_SPOTS`). */
+export const SSAO_MAX_ROOM_SPOTS = FX_MAX_ROOM_SPOTS;
+/** The most room casting points it takes (the pool's casting point slots at their most, `FX_MAX_ROOM_CAST`). */
+export const SSAO_MAX_ROOM_CAST = FX_MAX_ROOM_CAST;
+
+/**
+ * The GTAO fragment for a room pool with `roomSpots` spot slots and `roomCast` casting point slots (Map-maker II's wave of the
+ * rooms' lights): with neither, the very text above to the byte (its program the one it always was); with spots, the rooms'
+ * set takes each spot lit as a spot, its cone and falloff as the torch's; with casting points, each lit as a point in arrays of
+ * its own beside the eight lamps', so a lamp the owner chose to cast is never left out behind the flash pool and the plain
+ * lamps and its light taken for ambient and darkened. Built all or nothing: an anchor the text no longer has hands back the
+ * plain text, and the pool's other slots are taken as before the wave (the casting points where the points' arrays have room).
+ */
+export function ssaoGtaoFrag(roomSpots: number, roomCast = 0): string {
+  const n = Math.max(0, Math.min(SSAO_MAX_ROOM_SPOTS, Math.floor(roomSpots)));
+  const c = Math.max(0, Math.min(SSAO_MAX_ROOM_CAST, Math.floor(roomCast)));
+  if (n === 0 && c === 0) return SSAO_GTAO_FRAG;
+  const anchors = ['uniform int uRegion;', '  // The interior pass\'s lights: the cell\'s ambient, its parallel light and its lamps.', 'direct = uRoomParallel.w * max(dot(nw, uRoomParallel.xyz), 0.0) + pointsDirect(pw, nw, uFlashCount, uFlashCount + uRoomPointCount);'];
+  for (const a of anchors) if (SSAO_GTAO_FRAG.split(a).length !== 2) return SSAO_GTAO_FRAG;
+  let decl = '';
+  let fns = '';
+  let sum = '';
+  if (n > 0) {
+    decl += `\n  #define ROOM_SPOTS ${n}\n  uniform vec4 uRoomSpotPos[ROOM_SPOTS];\n  uniform vec4 uRoomSpotDir[ROOM_SPOTS];\n  uniform vec3 uRoomSpotCone[ROOM_SPOTS];\n  uniform int uRoomSpotCount;`;
+    fns += `  // The rooms' spot lamps (the wave of the rooms' lights), each as the torch is taken.\n  float roomSpotsDirect(vec3 pw, vec3 nw) {\n    float direct = 0.0;\n    for (int i = 0; i < ROOM_SPOTS; i++) {\n      if (i >= uRoomSpotCount) break;\n      vec3 l = uRoomSpotPos[i].xyz - pw;\n      float d = length(l);\n      vec3 ld = l / max(d, 1e-4);\n      float c = dot(nw, ld);\n      float cone = smoothstep(uRoomSpotCone[i].x, uRoomSpotCone[i].y, dot(ld, uRoomSpotDir[i].xyz));\n      if (c > 0.0 && cone > 0.0) direct += uRoomSpotDir[i].w * c * cone * lightFalloff(d, uRoomSpotPos[i].w, uRoomSpotCone[i].z);\n    }\n    return direct;\n  }\n`;
+    sum += ' + roomSpotsDirect(pw, nw)';
+  }
+  if (c > 0) {
+    decl += `\n  #define ROOM_CAST ${c}\n  uniform vec4 uRoomCastPos[ROOM_CAST];\n  uniform vec2 uRoomCastLum[ROOM_CAST];\n  uniform int uRoomCastCount;`;
+    fns += `  // The rooms' casting lamps (the wave of the rooms' lights): points as the lamps are, in arrays of their own.\n  float roomCastDirect(vec3 pw, vec3 nw) {\n    float direct = 0.0;\n    for (int i = 0; i < ROOM_CAST; i++) {\n      if (i >= uRoomCastCount) break;\n      vec3 l = uRoomCastPos[i].xyz - pw;\n      float d = length(l);\n      float c = dot(nw, l) / max(d, 1e-4);\n      if (c > 0.0) direct += uRoomCastLum[i].x * c * lightFalloff(d, uRoomCastPos[i].w, uRoomCastLum[i].y);\n    }\n    return direct;\n  }\n`;
+    sum += ' + roomCastDirect(pw, nw)';
+  }
+  return SSAO_GTAO_FRAG.replace(anchors[0], `${anchors[0]}${decl}`)
+    .replace(anchors[1], `${fns}${anchors[1]}`)
+    .replace(anchors[2], `${anchors[2].slice(0, -1)}${sum};`);
+}
+
 
 export const SSAO_BLUR_FRAG = /* glsl */ `
   uniform sampler2D tAo;
@@ -637,6 +676,15 @@ export class SsaoPass implements FxPass {
       uFlashCount: { value: 0 },
       uRoomPointCount: { value: 0 },
       uRegion: { value: 0 },
+      // The rooms' spot lamps (the wave of the rooms' lights): read only by the text a pool with spot slots builds.
+      uRoomSpotPos: { value: new Float32Array(4) },
+      uRoomSpotDir: { value: new Float32Array(4) },
+      uRoomSpotCone: { value: new Float32Array(3) },
+      uRoomSpotCount: { value: 0 },
+      // And its casting lamps: read only by the text a pool with casting point slots builds.
+      uRoomCastPos: { value: new Float32Array(4) },
+      uRoomCastLum: { value: new Float32Array(2) },
+      uRoomCastCount: { value: 0 },
     };
     this.bU = {
       tAo: { value: null },
@@ -731,6 +779,39 @@ export class SsaoPass implements FxPass {
       { name: 'multiplier', texture: this.aoA.texture, channels: 'r' },
       { name: 'region', texture: this.region.texture, channels: 'r' },
     ];
+  }
+
+  /** The room pool's spot slots and casting point slots the GTAO program takes (`ssaoGtaoFrag`); nought for both its program as it always was. */
+  roomSpots = 0;
+  roomCast = 0;
+
+  /**
+   * The rooms' pool's spot slots and casting point slots (Map-maker II's wave of the rooms' lights): both GTAO materials' text
+   * made for them and their program asked for again, which the next warm-up builds (the curtain that changed the pool runs
+   * one); the spots' and the casting points' uniforms sized to them. Nothing for counts it has.
+   */
+  setRoomLights(spots: number, cast = 0): void {
+    const want = Math.max(0, Math.min(SSAO_MAX_ROOM_SPOTS, Math.floor(spots)));
+    const wantCast = Math.max(0, Math.min(SSAO_MAX_ROOM_CAST, Math.floor(cast)));
+    if (want === this.roomSpots && wantCast === this.roomCast) return;
+    const text = ssaoGtaoFrag(want, wantCast);
+    // A text that lost an anchor is the plain one: its program takes neither, and the casting points go with the lamps.
+    const took = text !== SSAO_GTAO_FRAG;
+    this.roomSpots = took ? want : 0;
+    this.roomCast = took ? wantCast : 0;
+    for (const m of [this.halfQuads.gtao.material, this.fullQuads.gtao.material]) {
+      m.fragmentShader = text;
+      m.needsUpdate = true;
+    }
+    const k = Math.max(1, want);
+    this.gU.uRoomSpotPos.value = new Float32Array(k * 4);
+    this.gU.uRoomSpotDir.value = new Float32Array(k * 4);
+    this.gU.uRoomSpotCone.value = new Float32Array(k * 3);
+    this.gU.uRoomSpotCount.value = 0;
+    const c = Math.max(1, wantCast);
+    this.gU.uRoomCastPos.value = new Float32Array(c * 4);
+    this.gU.uRoomCastLum.value = new Float32Array(c * 2);
+    this.gU.uRoomCastCount.value = 0;
   }
 
   enabled(ctx: FxFrameContext): boolean {
@@ -838,9 +919,24 @@ export class SsaoPass implements FxPass {
         lum[n * 2] = p.luminance;
         lum[n * 2 + 1] = p.decay;
       }
+      // The pool's casting points (the wave of the rooms' lights) where the program has no arrays of their own for them (a
+      // text that lost an anchor): where there is room, points like the rest.
+      if (this.roomCast === 0) {
+        for (let i = 0; i < R.extraPoints && n < MAX_POINTS; i++, n++) {
+          const p = R.extra[i];
+          pos[n * 4] = p.position.x;
+          pos[n * 4 + 1] = p.position.y;
+          pos[n * 4 + 2] = p.position.z;
+          pos[n * 4 + 3] = p.distance;
+          lum[n * 2] = p.luminance;
+          lum[n * 2 + 1] = p.decay;
+        }
+      }
     }
     g.uFlashCount.value = flash;
     g.uRoomPointCount.value = n - flash;
+    // The rooms' spots and casting points (the wave of the rooms' lights), where the program takes any.
+    fillRoomPoolUniforms(g as unknown as RoomPoolUniforms, R, useRegion, this.roomSpots, this.roomCast);
     this.last.lightSets = !useRegion ? 'sky' : ctx.portalView ? 'rooms at 1' : 'rooms at 3';
 
     // 5. The blur.

@@ -158,6 +158,7 @@ const ACTION_LABELS: Record<Action, string> = {
   editorPaint: import.meta.env.DEV ? 'World editor: the paint brush armed and let go (dev server only)' : '',
   editorWater: import.meta.env.DEV ? 'World editor: the water tool armed and let go: lakes and falls (dev server only)' : '',
   editorPlaces: import.meta.env.DEV ? 'World editor: the places tool armed and let go: cities, places and no-build zones (dev server only)' : '',
+  editorLights: import.meta.env.DEV ? "World editor: the lights tool armed and let go: the rooms' lights edited and put down (dev server only)" : '',
 };
 
 /**
@@ -212,6 +213,8 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
       { key: 'shadowDistance', label: 'Shadow distance', hint: 'How far the sun\'s shadows reach. The shadows near you stay sharp at any distance; farther ones are softer, and longer costs a little more.', kind: 'range', min: 80, max: 800, step: 20, format: (v) => `${v} m` },
       { key: 'shadowSoftness', label: 'Shadow softness', hint: 'Blur in map texels: 1 crisp, 3 soft.', kind: 'range', min: 1, max: 3, step: 0.1, format: (v) => v.toFixed(1) },
       { key: 'shadowCasterRadius', label: 'Smallest shadow caster', hint: 'Placed buildings and props at least this big (radius, metres) cast, what players put down included; trees and plants follow the Flora switches. Larger leaves out the small props, saving a draw call per cascade each.', kind: 'range', min: 0.5, max: 8, step: 0.1, format: (v) => `${v.toFixed(1)} m` },
+      { key: 'roomLightSpots', label: 'Room lamps (spots)', hint: 'How many lamps with a cone a room can light beside its eight round lights: what the world editor puts down as a spot needs one. Every room shader is longer for each, and moving this builds them all again behind a short loading screen. 0 is the rooms as the game lit them.', kind: 'select', options: [{ value: 0, label: 'None' }, { value: 1, label: '1' }, { value: 2, label: '2' }, { value: 4, label: '4' }] },
+      { key: 'roomLightShadows', label: 'Room light shadows', hint: 'How many of a room\'s round lights and spots may cast a shadow, where the world editor asked one to (a room\'s sunlight never casts). A round light casting draws the room six times a frame, a spot once, so each is costly; moving this builds every room shader again behind a short loading screen. 0: none cast, the light lit all the same.', kind: 'select', options: [{ value: 0, label: 'None' }, { value: 1, label: '1' }, { value: 2, label: '2' }] },
     ],
   },
   {

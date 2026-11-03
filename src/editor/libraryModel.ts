@@ -25,11 +25,11 @@ export const LIBRARY_VERSION = 1;
  * (its tenth wave) is the owner's own models, read from each imports folder's `imports.json` (`importEntries`) rather than
  * the library pass's index.
  */
-export const LIBRARY_SOURCES = ['props', 'buildings', 'world', 'flora', 'imported', 'effects', 'sounds', 'people', 'looks'] as const;
+export const LIBRARY_SOURCES = ['props', 'buildings', 'world', 'flora', 'imported', 'effects', 'sounds', 'people', 'looks', 'lights'] as const;
 export type LibrarySource = (typeof LIBRARY_SOURCES)[number];
 
 /** A source in words. */
-export const SOURCE_WORDS: Record<LibrarySource, string> = { props: 'Props', buildings: 'Buildings', world: 'World models', flora: 'Flora', imported: 'Imported', effects: 'Effects', sounds: 'Sounds', people: 'People', looks: 'Looks' };
+export const SOURCE_WORDS: Record<LibrarySource, string> = { props: 'Props', buildings: 'Buildings', world: 'World models', flora: 'Flora', imported: 'Imported', effects: 'Effects', sounds: 'Sounds', people: 'People', looks: 'Looks', lights: 'Lights' };
 
 /**
  * The People source (Map-maker II's twelfth wave, Map-maker I §2.10): the mobile catalogue's bodies by its own groups, with
@@ -85,6 +85,20 @@ export function lookEntries(catalogue: { entries: readonly LookEntrySource[] } |
     out.push({ s: 'looks', p: 'looks', id: e.own.look, m: e.id, n: typeof e.name === 'string' && e.name ? e.name : null, g: typeof e.species === 'string' && e.species ? e.species : 'other', t: null, sz: [0, 0, 0], tri: 0, pic: pictures?.get(e.id) ?? null, f: 0 });
   }
   return out;
+}
+
+/**
+ * The Lights source (Map-maker II's wave of the rooms' lights): the lights tool's presets (`LIGHT_PRESETS` in
+ * `editorLights.ts`, handed in so this file stays pure), grouped by their type. Taken in hand, the lights tool is armed with
+ * that preset and the next click puts it down. Made in the page, never by the library pass.
+ */
+export function lightEntries(presets: readonly { id: string; name: string; spec: { type: string } }[]): LibraryEntry[] {
+  return presets.map((p) => ({ s: 'lights' as const, p: 'lights', id: p.id, m: p.id, n: p.name, g: p.spec.type, t: null, sz: [0, 0, 0], tri: 0, pic: null, f: 0 }));
+}
+
+/** Whether an entry is one of the lights tool's presets (the Lights source's). */
+export function isLightEntry(e: Pick<LibraryEntry, 's'>): boolean {
+  return e.s === 'lights';
 }
 
 /** Whether an entry is a person (the People source's, or a look of the Looks source's worn by one) rather than a thing with a model. */

@@ -130,12 +130,13 @@ export interface AttachChange {
  */
 export function attachMoved(a: RowAttach, c: AttachChange): RowAttach {
   const L = PLACEMENT_LIMITS;
-  const out: RowAttach = a.fx ? { fx: a.fx } : { snd: a.snd };
+  // A light (Map-maker II's wave of the rooms' lights) keeps its light and turns as an effect does; it has no size.
+  const out: RowAttach = a.fx ? { fx: a.fx } : a.light ? { light: a.light } : { snd: a.snd };
   const at = a.at ?? [0, 0, 0];
   const held = (v: number) => Math.max(-L.attachReach, Math.min(L.attachReach, mm(v)));
   const nat: [number, number, number] = [held(at[0] + (c.dx ?? 0)), held(at[1] + (c.dy ?? 0)), held(at[2] + (c.dz ?? 0))];
   if (nat[0] !== 0 || nat[1] !== 0 || nat[2] !== 0) out.at = nat;
-  if (a.fx) {
+  if (a.fx || a.light) {
     const q = a.q ?? [1, 0, 0, 0];
     let w = q[0];
     let x = q[1];
@@ -157,8 +158,10 @@ export function attachMoved(a: RowAttach, c: AttachChange): RowAttach {
     const n = Math.hypot(w, x, y, z) || 1;
     const t: [number, number, number, number] = [cut(w / n, 6), cut(x / n, 6), cut(y / n, 6), cut(z / n, 6)];
     if (!(t[0] === 1 && t[1] === 0 && t[2] === 0 && t[3] === 0)) out.q = t;
-    const s = Math.max(L.sizeMin, Math.min(L.sizeMax, cut((a.size ?? 1) * (c.size ?? 1), 4)));
-    if (s !== 1) out.size = s;
+    if (a.fx) {
+      const s = Math.max(L.sizeMin, Math.min(L.sizeMax, cut((a.size ?? 1) * (c.size ?? 1), 4)));
+      if (s !== 1) out.size = s;
+    }
   }
   return out;
 }
@@ -183,7 +186,7 @@ export function attachMovedFrame(a: RowAttach, c: AttachChange, out: THREE.Matri
   let x = q ? q[1] : 0;
   let y = q ? q[2] : 0;
   let z = q ? q[3] : 0;
-  const turn = a.fx ? (c.turn ?? 0) : 0;
+  const turn = a.fx || a.light ? (c.turn ?? 0) : 0;
   if (turn) {
     const rw = Math.cos(turn / 2);
     const ry = Math.sin(turn / 2);

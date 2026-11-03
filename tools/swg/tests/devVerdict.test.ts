@@ -144,11 +144,13 @@ for (const [spot, place, deps] of props) {
   // An endpoint from before the twelfth wave meeting the shared walk-through file's kind (cfa55f3's batch, as it stands, names
   // the nine kinds it knew), and today's refusing a kind it does not know, which names `solid` and says only itself.
   ok(olderEndpoint("edit 0's file is story, world, removed, people, heights, paint, water, locations or looks"), "an endpoint from before the walk-through file's kind, refusing it, says to restart it");
+  // One from before the lights files (Map-maker II's wave of the rooms' lights) names the ten kinds it knew, ending in solid.
+  ok(olderEndpoint("edit 0's file is story, world, removed, people, heights, paint, water, locations, looks or solid"), "an endpoint from before the lights files' kinds, refusing one, says to restart it");
   {
     const { applyPlacementOp } = await import('../../../src/world/placementEdits.ts');
     const today = applyPlacementOp({ op: 'batch', world: 'tatooine', edits: [{ file: 'nope' as never, put: { id: 'x' } }] }, { story: null, world: null }, { worlds: new Map([['tatooine', 'ground']]), now: 1, hash: (t: string) => t.length.toString(16) });
     const why = String((today.body as { why?: unknown }).why);
-    ok(today.status === 400 && /looks or solid/.test(why) && !olderEndpoint(why), `and today's refusal of a kind it does not know says only itself (“${why}”)`);
+    ok(today.status === 400 && /lights or lightsAll/.test(why) && !olderEndpoint(why), `and today's refusal of a kind it does not know says only itself (“${why}”)`);
   }
   const hut = readPlacementRow({ id: 'x-1', kind: 'building', pack: 'imported', model: 'test_hut', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] });
   ok(typeof hut === 'object' && hut.pack === 'imported' && hut.model === 'test_hut', 'and it reads a building out of the imports');

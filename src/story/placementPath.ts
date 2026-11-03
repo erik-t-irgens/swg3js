@@ -31,16 +31,18 @@ export function placementFileOf(rel: string): { layer: PlacementLayer; world: st
  * ground's heights (`heights`, its first wave), its paint (`paint`), its lakes and rivers (`water`), the places on the map
  * (`locations`) and the looks people wear (`looks`, one file every world shares, `all.json`: `editFileWorld`). And from
  * the twelfth wave the owner's shared walk-through file (`solid`): one file every world reads, kept at the placements
- * folder's own top as the map fixes made it (`solid.json`, `editFileRel`).
+ * folder's own top as the map fixes made it (`solid.json`, `editFileRel`). And from the wave of the rooms' lights a world's
+ * rooms' lights edited (`lights`, `lights/<world>.json`) and every copy everywhere's (`lightsAll`, one file every world
+ * shares, kept at the folder's top beside `solid.json`: `lights.json`).
  */
-export type EditFileKind = PlacementLayer | 'removed' | 'people' | 'heights' | 'paint' | 'water' | 'locations' | 'looks' | 'solid';
-export const EDIT_FILE_KINDS: readonly EditFileKind[] = ['story', 'world', 'removed', 'people', 'heights', 'paint', 'water', 'locations', 'looks', 'solid'];
+export type EditFileKind = PlacementLayer | 'removed' | 'people' | 'heights' | 'paint' | 'water' | 'locations' | 'looks' | 'solid' | 'lights' | 'lightsAll';
+export const EDIT_FILE_KINDS: readonly EditFileKind[] = ['story', 'world', 'removed', 'people', 'heights', 'paint', 'water', 'locations', 'looks', 'solid', 'lights', 'lightsAll'];
 
 /** A kind every world shares one file of (its name segment is `all`), never a world's own. */
-export const SHARED_EDIT_KINDS: readonly EditFileKind[] = ['looks', 'solid'];
+export const SHARED_EDIT_KINDS: readonly EditFileKind[] = ['looks', 'solid', 'lightsAll'];
 
-/** A kind whose one file stands at the placements folder's own top rather than in a folder of its kind (`solid.json`). */
-export const TOP_EDIT_FILES: Readonly<Partial<Record<EditFileKind, string>>> = { solid: 'solid.json' };
+/** A kind whose one file stands at the placements folder's own top rather than in a folder of its kind (`solid.json`, `lights.json`). */
+export const TOP_EDIT_FILES: Readonly<Partial<Record<EditFileKind, string>>> = { solid: 'solid.json', lightsAll: 'lights.json' };
 
 /** The name segment a kind's file for a world carries: the world's own pack id, or `all` for a kind every world shares. */
 export function editFileWorld(kind: EditFileKind, world: string): string {

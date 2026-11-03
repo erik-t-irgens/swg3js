@@ -71,13 +71,29 @@ const indexOf = (lines: string[], needle: string | RegExp): number => lines.find
   const cadence = read('src/world/shadowCadence.ts');
   const decide = body(cadence, /^ {2}decide\(lights/, 'decide');
   const dirty = body(cadence, /^ {2}dirtyAll\(\): void \{/, 'dirtyAll');
+  // The rooms' pool of lights (Map-maker II's wave of the rooms' lights) writes the `autoUpdate` of its own casting slots, false,
+  // as each is made and never again (their maps are drawn by the rooms' own shadow pass, by `needsUpdate`); and that pass holds
+  // the sun's cascades out of its draw by their `autoUpdate` and `needsUpdate` kept and put back in a `finally` -- a moment's
+  // hold, never a decision of the cascades' holds. Those lines are named here and nowhere else may write one.
+  const pool = read('src/world/roomLightPool.ts');
+  const poolOwn = (n: number): boolean => /^\s*l\.shadow\.autoUpdate = false;$/.test(pool[n - 1] ?? '');
+  const roomPass = body(portal, /^ {2}private renderRoomShadows\(scene/, 'renderRoomShadows');
+  const roomAt = portal.indexOf(roomPass[0]);
+  const held = roomPass.findIndex((l) => /^\s*s\.autoUpdate = false;$/.test(l));
+  const putBack = roomPass.findIndex((l) => /^\s*s\.autoUpdate = kept\[i \* 2\] === 1;$/.test(l));
+  const roomOwn = (n: number): boolean => n - 1 === roomAt + held || n - 1 === roomAt + putBack;
   const inside = (where: string): boolean => {
     const [file, n] = where.split(':');
+    if (file.endsWith('roomLightPool.ts')) return poolOwn(Number(n));
+    if (file.endsWith('portalRender.ts')) return roomOwn(Number(n));
     if (!file.endsWith('shadowCadence.ts')) return false;
     const line = cadence[Number(n) - 1];
     return decide.includes(line) || dirty.includes(line);
   };
-  ok(strays.length > 0 && strays.every(inside), `no light's autoUpdate is written anywhere under src/ but in ShadowHold.decide and dirtyAll (${strays.join(', ')})`);
+  ok(strays.length > 0 && strays.every(inside), `no light's autoUpdate is written anywhere under src/ but in ShadowHold.decide and dirtyAll, the rooms' pool on its own casting slots as each is made, and the rooms' own shadow pass's hold of the sun's (${strays.join(', ')})`);
+  ok(pool.filter((l) => /autoUpdate\s*=[^=]/.test(l)).length === 2 && !/csm|cascade/i.test(pool.filter((l) => /autoUpdate\s*=[^=]/.test(l)).join('\n')), "the rooms' pool writes autoUpdate on its two kinds of casting slot as they are made, false, and never a cascade's");
+  const fin = roomPass.findIndex((l, i) => i > held && l.includes('} finally {'));
+  ok(held > 0 && fin > held && putBack > fin && roomPass.some((l) => /^\s*s\.needsUpdate = kept\[i \* 2 \+ 1\] === 1;$/.test(l)), "the rooms' own shadow pass puts the sun's cascades' autoUpdate and needsUpdate back as it found them, in a finally");
   const attach = body(world, /^ {2}attachCamera\(camera/, 'attachCamera');
   ok(attach.some((l) => l.includes('this.shadowHold.bind(this.csm.lights)')) && attach.some((l) => l.includes('portals.shadowLights = this.csm.lights')), 'the CSM\'s lights are handed to the holds and to the portal renderer as they are made, and nothing else is done to them');
 }

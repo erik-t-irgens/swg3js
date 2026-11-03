@@ -128,7 +128,9 @@ export type Action =
   // Map-maker II's water tool (its fifth wave): Z arms it, and disarms it.
   | 'editorWater'
   // Map-maker II's places tool (its eighth wave): P arms it, and disarms it.
-  | 'editorPlaces';
+  | 'editorPlaces'
+  // Map-maker II's lights tool (its wave of the rooms' lights): ; arms it, and disarms it.
+  | 'editorLights';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -288,6 +290,8 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   editorWater: ['KeyZ'],
   // P, the ship menu's (muted while the editor is on): the places tool armed and let go (Map-maker II's eighth wave).
   editorPlaces: ['KeyP'],
+  // ;, no default of anybody's: the lights tool armed and let go (Map-maker II's wave of the rooms' lights).
+  editorLights: ['Semicolon'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 
@@ -334,6 +338,7 @@ export const DEV_ONLY_ACTIONS: ReadonlySet<Action> = new Set<Action>([
   'editorPaint',
   'editorWater',
   'editorPlaces',
+  'editorLights',
 ]);
 
 /** The actions the Controls page lists: every one on the dev server, and in a release all but the dev server's own. */

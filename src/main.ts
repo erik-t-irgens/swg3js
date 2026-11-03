@@ -429,6 +429,9 @@ import { World, type EditRowsLoaded, type HeightsLoaded } from './world/world';
 import { editFilePath, type EditFileKind } from './story/placementPath.ts';
 // Map-maker II's twelfth wave: what a world takes away and the owner's own people.
 import { HIDE_TUNE, landRows, readRemovalsFile, type RemovalRow } from './story/removals.ts';
+import { readLightsFile, type LightRow } from './world/editFiles/lightsFile.ts';
+import { roomPoolShape, sameShape, tuneRoomLights } from './world/roomLightPool.ts';
+import { roomLightDialsFor } from './world/roomLightDials.ts';
 import { readPeopleFile, type PlacedPersonRow } from './story/placedPeople.ts';
 import { ZONE_TUNE } from './world/mobiles/lairs.ts';
 import { makeRemovalEdits } from './world/removalEdits.ts';
@@ -1075,6 +1078,10 @@ interface EditorApi {
   ownLooksDebug(o?: Record<string, unknown>): Promise<unknown>;
   /** The looks file landed (the editor's own write, an undo, the dev server's word): the library's Looks and the dresser's list again. */
   looksLanded(): void;
+  /** The lights files landed (the editor's own write, an undo, the dev server's word): the lights tool's markers laid out again. */
+  lightsLanded(): void;
+  /** The lights tool (Map-maker II's wave of the rooms' lights): `__debug.roomLights`'s editing half. */
+  lightsDebug(o?: Record<string, unknown>): Promise<unknown>;
 }
 
 /**
@@ -4284,6 +4291,35 @@ class App {
        * to: [x, y, z], model, width } }`, `{ pick }`, `{ move: { id, dx, dz, dy } }`, `{ look: { id, color, opacity, ripple,
        * drift } }`, `{ remove }` and its own numbers in `{ tune }`.
        */
+      /**
+       * The rooms' lights (Map-maker II's wave of the rooms' lights): with nothing, the room lit (its model, cell, name and
+       * copy key), the pool's shape, every slot lit (what it holds, its cell, its intensity planned and now, whether it casts),
+       * the plan (the ambient, the parallel, the lamps by slot and what was left out and why), the rows naming a room no longer
+       * there, the files as read and the dials. `{ tune: { lightScale, ambientScale, ambientFloor, parallel, parallelBack,
+       * flicker: {...}, shadow: {...} } }` moves the dials (never saved); `{ pool: { spots, shadows } }` builds the pool again
+       * behind a curtain (the Graphics page's two settings, in memory). On the dev server every other key is the world editor's
+       * lights tool (`arm`, `scope`, `preset`, `hang`, `put`, `pick`, `move`, `turn`, `tip`, `set`, `fill`, `dup`, `remove`).
+       */
+      roomLights: async (opts?: Record<string, unknown>) => {
+        const o = opts ?? {};
+        const said: string[] = [];
+        if (o.tune !== undefined) said.push(...tuneRoomLights(o.tune, this.world.roomPool));
+        const pool = o.pool as { spots?: unknown; shadows?: unknown } | undefined;
+        if (pool && typeof pool === 'object') {
+          if (typeof pool.spots === 'number') this.settings.roomLightSpots = Math.max(0, Math.min(4, Math.round(pool.spots)));
+          if (typeof pool.shadows === 'number') this.settings.roomLightShadows = Math.max(0, Math.min(2, Math.round(pool.shadows)));
+          said.push(await this.applyRoomLightPool());
+          this.menu.redrawGraphics();
+        }
+        const { tune: _t, pool: _p, ...rest } = o;
+        let editor: unknown = undefined;
+        if (import.meta.env.DEV && Object.keys(rest).length) {
+          const ed = await this.loadEditor();
+          if (ed) editor = await ed.lightsDebug(rest);
+          else said.push('the lights tool is the world editor\'s (the dev server\'s)');
+        }
+        return { ...this.world.roomLightsReport(), ...(editor !== undefined ? { editor } : {}), ...(said.length ? { said } : {}) };
+      },
       lakes: async (opts?: Record<string, unknown>) => {
         if (import.meta.env.DEV) {
           const ed = await this.loadEditor();
@@ -12042,7 +12078,7 @@ class App {
       // picked, the NPC ship ladder's tiers 6 to 10 when `npcShips` is, how a far body is drawn when `crowd` is, and
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -12625,6 +12661,11 @@ class App {
     this.world.removalsSource = (pack, kind) => this.fetchRemovals(pack, kind);
     this.world.peopleSource = (pack, kind) => this.fetchPeople(pack, kind);
     this.world.removalsLanded = () => this.removalsLandedHere();
+    // And the rooms' lights edited (Map-maker II's wave of the rooms' lights, `public/placements/lights/<world>.json` and the
+    // shared `lights.json`), laid on whenever they land; the pool's shape from the Graphics page, set before any program is
+    // built (the first loading screen compiles with it).
+    this.world.lightsSource = (pack, kind) => this.fetchLights(pack, kind);
+    this.world.setRoomLightPool(roomPoolShape(this.settings.roomLightSpots, this.settings.roomLightShadows));
     // Where this world brings the player in and back (the arrival, a teleport's spot, and where a death comes round
     // with no cloning facility near): the overlay's people and herds who pick a fight keep clear of it.
     this.world.arrivalPoint = () => this.spawn;
@@ -13204,6 +13245,11 @@ class App {
       case 'shadowCasterRadius':
         // The casters' rule, and every placed copy standing worked out again by it (what was put down in play included).
         this.world.setShadows(undefined, S.shadowCasterRadius);
+        break;
+      case 'roomLightSpots':
+      case 'roomLightShadows':
+        // The rooms' pool's shape (Map-maker II's wave of the rooms' lights): built again behind a curtain, never on a live frame.
+        void this.applyRoomLightPool();
         break;
       case 'grass':
       case 'grassReach':
@@ -22759,7 +22805,7 @@ class App {
       untouched: st.unhideable,
       inTwoRooms: st.doorway,
       shown: { shadows: st.shownShadows, world: st.shownWorld, rooms: st.shownRooms },
-      passes: { shadows: st.passes[0], world: st.passes[1], rooms: st.passes[2] },
+      passes: { shadows: st.passes[0], world: st.passes[1], rooms: st.passes[2], roomShadows: st.passes[3] },
     };
     return {
       on: PORTAL_CULL.on,
@@ -23591,6 +23637,10 @@ class App {
     // compile (keyed on the empty light set of their own draws), never compiled synchronously on the frame that met
     // them nor by the world's own compile, which would key them on a pass's lights.
     fx.product<VelocityProduct>('velocity')?.setQueue((objects, label, urgent, own) => this.world.programJob(objects, label, urgent, own));
+    // The ambient occlusion takes the room pool's spots as spots and its casting points as points of their own where the
+    // session built any (Map-maker II's wave of the rooms' lights); with neither its program is the one it always was.
+    const shape = this.world.roomPoolShape;
+    fx.setRoomLights(shape.spots + shape.spotShadows, shape.pointShadows);
     return fx;
   }
 
@@ -26037,6 +26087,17 @@ class App {
       void this.reloadLooks(d.rev);
       return;
     }
+    // The shared lights file (Map-maker II's wave of the rooms' lights) is every world's as well: read again whatever world this is.
+    if (kind === 'lightsAll') {
+      if (this.placementsInFlight > 0) {
+        this.heldWords.push(d);
+        return;
+      }
+      if (typeof d.rev === 'string' && this.placementRevs.get('lightsAll/all') === d.rev) return;
+      if (typeof d.rev === 'string' && this.takeOwnRev('lightsAll/all', d.rev)) return;
+      void this.reloadLights(null, d.rev);
+      return;
+    }
     if (d?.world !== here) return;
     // Routed by kind to the layer that reads it on the page (Map-maker II §2.2: the two row layers to the permanent layer,
     // the heights to the ground's); a word for a kind with no layer yet (the later waves' files) is dropped.
@@ -26068,6 +26129,8 @@ class App {
     // Map-maker II's twelfth wave: what a world takes away, and the owner's own people.
     if (kind === 'removed') return (pack, rev) => void this.reloadRemovals(pack, rev);
     if (kind === 'people') return (pack, rev) => void this.reloadPeople(pack, rev);
+    // Map-maker II's wave of the rooms' lights: this world's lights file.
+    if (kind === 'lights') return (pack, rev) => void this.reloadLights(pack, rev);
     return null;
   }
 
@@ -29626,6 +29689,12 @@ class App {
       this.placementRevs.set('looks/all', kf.rev);
       this.noteOwnRev('looks/all', kf.rev);
     }
+    // The shared lights file is every world's too (Map-maker II's wave of the rooms' lights): kept under `all` as well.
+    const gf = files.lightsAll;
+    if (gf) {
+      this.placementRevs.set('lightsAll/all', gf.rev);
+      this.noteOwnRev('lightsAll/all', gf.rev);
+    }
     // The heights it wrote, laid over the ground by difference (the tiles put and taken out), whatever else it wrote.
     const hf = files.heights;
     let heightsLanded: Promise<number> = Promise.resolve(0);
@@ -29680,6 +29749,16 @@ class App {
     // The looks it wrote (Map-maker II's thirteenth wave), laid over the catalogue's own rows by difference, whatever world
     // this is: the looks every world shares, the people wearing one that moved stood again.
     if (kf) await this.landOwnLooks((cat) => landRows(cat.ownRows, kf.put as unknown as OwnLookRow[], kf.deleted));
+    // The rooms' lights it wrote (Map-maker II's wave of the rooms' lights): each file's rows laid over the rows in force by
+    // difference, the lit room planned again (uniforms and places only: nothing compiles).
+    const lgf = files.lights;
+    if ((lgf || gf) && this.world.generation === gen && this.editWorld() === pack) {
+      const e = this.world.roomLightEdits;
+      const worldRows = lgf ? landRows(e.world as LightRow[], lgf.put as unknown as LightRow[], lgf.deleted) : (e.world as LightRow[]);
+      const allRows = gf ? landRows(e.all as LightRow[], gf.put as unknown as LightRow[], gf.deleted) : (e.all as LightRow[]);
+      this.world.setRoomLightRows(worldRows, allRows);
+      this.editor?.lightsLanded();
+    }
     return { ok: true, why: '', files, ms: reply.ms ?? 0, built };
   }
 
@@ -29844,6 +29923,156 @@ class App {
     if (read !== undefined) this.placementRevs.set(`people/${pack}`, read);
     else if (typeof rev === 'string') this.placementRevs.set(`people/${pack}`, rev);
     this.world.landPeople((loaded?.rows ?? []) as PlacedPersonRow[], (loaded as EditRowsLoaded<PlacedPersonRow> | null) ?? { rows: [], bytes: 0, skipped: [], problem: null, rev: null });
+  }
+
+  // ---- Map-maker II's wave of the rooms' lights: the two lights files ----------------------------------------------------
+
+  /**
+   * One lights file read (`public/placements/lights/<world>.json`, or the shared `lights.json` for `pack` null), as the removal
+   * file is: null for none, `'unread'` for one that could not be read, else its rows and what it said in words.
+   */
+  private async readLightsRows(pack: string | null, kind: 'ground' | 'space'): Promise<{ rows: LightRow[]; words: string } | null | 'unread'> {
+    const fileKind = pack === null ? 'lightsAll' : 'lights';
+    const path = editFilePath(fileKind, pack ?? 'all');
+    let text: string;
+    try {
+      const res = await fetchPublic(path, { cache: 'no-store' }, import.meta.env.BASE_URL);
+      if (!res || res.status === 404) return null;
+      const type = res.headers.get('content-type') ?? '';
+      if (res.ok && type.includes('text/html')) return null;
+      if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return 'unread';
+      text = await res.text();
+    } catch {
+      return 'unread';
+    }
+    const key = `${fileKind}/${pack ?? 'all'}`;
+    if (import.meta.env.DEV) await this.noteReadRev(key, text);
+    const read = readLightsFile(text, pack, kind);
+    if (read.problem) {
+      console.warn(`lights: public/${path} is not read: ${read.problem}`);
+      return { rows: [], words: `not read: ${read.problem}` };
+    }
+    for (const s of read.skipped) console.warn(`lights: public/${path}: row ${s.id} is skipped: ${s.why}`);
+    if (read.unknown.length) console.warn(`lights: public/${path}: fields this build does not read: ${read.unknown.join(', ')}`);
+    return { rows: read.rows, words: `${read.rows.length} rows${read.skipped.length ? `, ${read.skipped.length} skipped` : ''}` };
+  }
+
+  /** This world's lights file and the shared one, as the world's ask has them (`World.askLights`). */
+  private async fetchLights(pack: string, kind: 'ground' | 'space' | 'copies'): Promise<{ world: LightRow[]; all: LightRow[]; info: { world: string; all: string } } | null> {
+    const k = kind === 'space' ? 'space' : 'ground';
+    // The world of copies keeps a file of its own too (its copies keyed by their own content keys, `copyKeyOf`).
+    const [w, a] = await Promise.all([this.readLightsRows(pack, k), this.readLightsRows(null, k)]);
+    const words = (r: typeof w): string => (r === null ? 'none' : r === 'unread' ? 'could not be read' : r.words);
+    return { world: w && w !== 'unread' ? w.rows : [], all: a && a !== 'unread' ? a.rows : [], info: { world: words(w), all: words(a) } };
+  }
+
+  /** A lights file read again (the dev server's word) and put in force beside the other as it stands (`World.setRoomLightRows`). */
+  private async reloadLights(pack: string | null, rev: string | undefined): Promise<void> {
+    const gen = this.world.generation;
+    const here = packIdOf(this.world.planet, this.zone);
+    const kind = this.world.planet.space ? 'space' : 'ground';
+    const got = await this.readLightsRows(pack, kind);
+    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== here) return;
+    if (got === 'unread') {
+      console.warn(`lights: a lights file changed and could not be read again: the rooms are lit as they were`);
+      return;
+    }
+    const key = pack === null ? 'lightsAll/all' : `lights/${pack}`;
+    const read = this.readRevs.get(key);
+    if (read !== undefined) this.placementRevs.set(key, read);
+    else if (typeof rev === 'string') this.placementRevs.set(key, rev);
+    const e = this.world.roomLightEdits;
+    const rows = got?.rows ?? [];
+    this.world.setRoomLightRows(pack === null ? e.world : rows, pack === null ? rows : e.all);
+    this.editor?.lightsLanded();
+  }
+
+  /**
+   * The rooms' pool's shape moved (the Graphics page's two settings, Map-maker II's wave of the rooms' lights): its lights
+   * added or taken away and every program built again **behind a curtain** (a loading screen over the game, the sweep under
+   * it), never on a live frame; with no world in (the select screen) at once, for the next arrival's screen to build with.
+   * While a screen is up for anything else (an arrival, a travel, another curtain) its sweep may have built its programs
+   * already, so the shape waits for it to lift and is then built behind a curtain of its own: set under a sweep that had
+   * run, every room program was rebuilt on the first frame after it.
+   */
+  private async applyRoomLightPool(): Promise<string> {
+    const shape = roomPoolShape(this.settings.roomLightSpots, this.settings.roomLightShadows);
+    if (sameShape(shape, this.world.roomPoolShape)) return 'the rooms\' lights are built that way already';
+    if (!this.inWorld) {
+      this.world.setRoomLightPool(shape);
+      this.postfx?.setRoomLights(shape.spots + shape.spotShadows, shape.pointShadows);
+      return 'the rooms\' lights take it at the next arrival';
+    }
+    if (this.traveling) {
+      // One wait at a time: the settings are read again when it ends, so the last move made meanwhile is the one built.
+      this.roomPoolWait ??= this.waitForScreen().then(() => {
+        this.roomPoolWait = null;
+        return this.applyRoomLightPool();
+      });
+      void this.roomPoolWait;
+      return 'the rooms\' lights are built again behind a screen of their own once the one up now lifts';
+    }
+    const words = `${shape.spots + shape.spotShadows} spot slots, ${shape.pointShadows + shape.spotShadows} casting`;
+    const r = await this.lightPoolCurtain(words, async () => {
+      this.world.setRoomLightPool(shape);
+      this.postfx?.setRoomLights(shape.spots + shape.spotShadows, shape.pointShadows);
+      await this.postfx?.warmUp();
+    });
+    const said = `the rooms' lights built again (${words}): ${r.compiled} programs built behind the screen, ${r.ms} ms`;
+    this.messages.note(said);
+    return said;
+  }
+
+  /** A shape of the rooms' pool waiting for the screen up now to lift (`applyRoomLightPool`), or null. */
+  private roomPoolWait: Promise<string> | null = null;
+
+  /** Resolved once no screen is up (`traveling` false) or the world has gone (`inWorld` false): a poll of a quarter second. */
+  private waitForScreen(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const look = (): void => {
+        if (!this.traveling || !this.inWorld) resolve();
+        else setTimeout(look, 250);
+      };
+      look();
+    });
+  }
+
+  /**
+   * The rooms' pool built again behind a curtain (`runCurtain`, the world editor's own shape, every build's: a player moves the
+   * setting too): the game held, the screen shown, the work, the world round the eye waited for, the sweep, the queue flushed.
+   */
+  private lightPoolCurtain(detail: string, work: () => Promise<void>): Promise<CurtainResult<void>> {
+    let held = false;
+    return runCurtain(
+      {
+        hold: () => {
+          this.traveling = true;
+          this.curtainOnly = true;
+          this.map.hide();
+          held = this.input.captured;
+          this.input.captured = false;
+        },
+        release: () => {
+          this.traveling = false;
+          this.curtainOnly = false;
+          this.input.captured = held;
+        },
+        show: (w, d) => this.loadingScreen.show(this.world.planet, w, d),
+        setWhat: (words) => this.loadingScreen.setWhat(words),
+        setProgress: (p) => this.loadingScreen.setProgress(p),
+        hide: () => this.loadingScreen.hide({ quick: LOADING_TUNE.quickHide }),
+        settled: () => this.world.settled(this.player.worldPos),
+        progress: () => this.world.progress(this.player.worldPos),
+        compile: () => this.world.compileAllAsync(() => { }),
+        flush: () => this.world.flushPrograms(),
+        sample: () => this.sampleShaders('loading'),
+        now: () => performance.now(),
+        wait: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
+      },
+      "the rooms' lights",
+      detail,
+      work,
+    );
   }
 
   /**

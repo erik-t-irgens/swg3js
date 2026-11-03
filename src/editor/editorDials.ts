@@ -489,6 +489,26 @@ function removalsGroups(): DialGroup[] {
   ];
 }
 
+/** The lights tool's numbers of feel (Map-maker II's wave of the rooms' lights), once the editor has registered them. */
+function lightsGroups(): DialGroup[] {
+  if (!EDITOR_EXTRA_TUNES.lightsTool) return [];
+  return [
+    {
+      title: 'The lights tool',
+      note: "; arms it: a click picks a light, a preset (Tools tab, the library's Lights) is put down by the next click. The pool's own numbers (how bright a lamp, the ambient, the flicker, the shadows) are the debug menu's `roomLights`.",
+      dials: [
+        extraDial('lightsTool', 'markerPx', 'Marker size', 3, 30, 0.5, 'px', "Half the size of a light's marker on the screen."),
+        extraDial('lightsTool', 'pickPx', 'Marker reach', 3, 40, 1, 'px', 'How near the cursor must be to a marker to pick it.'),
+        extraDial('lightsTool', 'near', 'Shown within', 10, 1000, 5, 'm', 'How far from the eye an outdoor light, or one hung on a row, is marked.'),
+        extraDial('lightsTool', 'gizmoPx', 'Gizmo size', 30, 240, 5, 'px', "How far a picked light's handles reach out on the screen."),
+        extraDial('lightsTool', 'hitPx', 'Handle reach', 3, 30, 1, 'px', 'How near the cursor must be to a handle to grab it.'),
+        extraDial('lightsTool', 'dupStep', 'Duplicate beside by', 0, 10, 0.25, 'm', "How far to the camera's right Ctrl+D puts a light's copy (0: the grid step)."),
+        extraDial('lightsTool', 'lift', 'Put down over the hit', 0, 3, 0.05, 'm', 'Metres over where the aim met the world that a light put down stands.'),
+      ],
+    },
+  ];
+}
+
 function groups(): DialGroup[] {
   return [
     {
@@ -561,6 +581,7 @@ function groups(): DialGroup[] {
     waterGroup('water.', (k, v) => tuneEditor({ water: { [k]: v } })),
     ...looksGroup(),
     ...removalsGroups(),
+    ...lightsGroups(),
     {
       title: 'Folding',
       note: 'Rows written while their tier stands are drawn one by one until the next arrival or Fold now (Tools).',

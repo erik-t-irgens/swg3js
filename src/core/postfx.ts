@@ -249,6 +249,15 @@ export class PostFX {
   }
 
   /**
+   * How many spot slots and casting point slots the rooms' pool has (Map-maker II's wave of the rooms' lights): the ambient
+   * occlusion's program takes them as spots and as points of their own, built again by the next warm-up (behind the curtain
+   * that changed the pool). Nought for both leaves its program the one it always was.
+   */
+  setRoomLights(spots: number, cast: number): void {
+    (this.byPassId.get('ssao') as { setRoomLights?: (spots: number, cast: number) => void } | undefined)?.setRoomLights?.(spots, cast);
+  }
+
+  /**
    * Whether a pass's setting (or console override) asks for it, before the frame: the question a
    * scene material must answer before it is drawn. False when the pass is not registered at all, so
    * an effect can skip the work it would only do for that pass. It never asks the pass's own

@@ -398,7 +398,7 @@ export class EditorLooks {
     if (!sel || !base) return;
     // Worked out as the write will read it, making nothing (a frame's work).
     attachMovedFrame(base, this.hold, this.local, this.sized);
-    this.host.attachments().followItem(this.attachSelKey, sel.i, this.local, this.sized.v);
+    this.host.attachments().followItem(this.attachSelKey, sel.i, this.local, this.sized);
   }
   private readonly sized = { v: 0.5 };
 
@@ -458,7 +458,7 @@ export class EditorLooks {
   /** What the console and the Selected tab say of a row's attachments: each one's kind, what it names, where and how big. */
   attachmentsOf(id: string): { i: number; words: string; at: string; size: string }[] {
     const r = this.host.rowFor(id);
-    return (r?.row.attach ?? []).map((a, i) => ({ i, words: a.fx ? `effect ${a.fx}` : `sound ${a.snd}`, at: (a.at ?? [0, 0, 0]).join(' '), size: a.fx ? String(a.size ?? 1) : '' }));
+    return (r?.row.attach ?? []).map((a, i) => ({ i, words: a.fx ? `effect ${a.fx}` : a.light ? `light (${a.light.type})` : `sound ${a.snd}`, at: (a.at ?? [0, 0, 0]).join(' '), size: a.fx ? String(a.size ?? 1) : '' }));
   }
 
   /** What the look on a material says in words: its tint, the picture or the material it borrows, or nothing. */

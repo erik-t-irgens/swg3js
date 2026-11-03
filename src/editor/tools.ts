@@ -46,11 +46,18 @@ export interface ToolFrame {
   dy: number;
   /** F held (the placing hand's raise), read before the mutes. */
   lift: boolean;
+  /**
+   * R held (the placing hand's turn) and the mouse's movement across the screen this frame for a tool that takes the mouse
+   * with it (Map-maker II's wave of the rooms' lights: a picked light turned). Absent on a tool's own record that never reads
+   * them; the editor's own record carries both from the start.
+   */
+  turn?: boolean;
+  dx?: number;
 }
 
 /** A frame's record, made once. */
 export function toolFrame(): ToolFrame {
-  return { apply: false, inverse: false, shift: false, sampled: false, x: 0.5, y: 0.5, z: 0.5, valid: false, dt: 0.016, now: 0.5, sx: 0.5, sy: 0.5, dy: 0.5, lift: false };
+  return { apply: false, inverse: false, shift: false, sampled: false, x: 0.5, y: 0.5, z: 0.5, valid: false, dt: 0.016, now: 0.5, sx: 0.5, sy: 0.5, dy: 0.5, lift: false, turn: false, dx: 0.5 };
 }
 
 /**
@@ -96,8 +103,16 @@ export interface ToolDef {
    * lakes' outlines and a picked lake's square), from this frame's view.
    */
   overlay?(d: ToolDraw, view: ScreenView): void;
-  /** Whether it takes the mouse this frame with F held (`lift`): the camera then holds still. */
-  holdsMouse?(lift: boolean): boolean;
+  /** Whether it takes the mouse this frame with F held (`lift`), or R (`turn`): the camera then holds still. */
+  holdsMouse?(lift: boolean, turn?: boolean): boolean;
+  /**
+   * Whether the arrows, Page Up and Page Down and Ctrl+D are its own this frame (Map-maker II's wave of the rooms' lights: a
+   * picked light nudged and duplicated), and the nudge itself: metres of the game's frame. The selection's own nudges and
+   * duplicate wait while it claims them.
+   */
+  claimsKeys?(): boolean;
+  nudge?(dx: number, dy: number, dz: number): void;
+  duplicate?(): void;
   /** The wheel with F held (`lift`): stepped `notches` times (up raises). Answers what was said, or null where it took nothing. */
   wheel?(notches: number, lift: boolean): string | null;
   /** Delete pressed while it is armed: answers whether it took the key (a picked lake taken out). */

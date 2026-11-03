@@ -31,7 +31,7 @@
 import { PLACES_TOOL_TUNE } from './editorTune.ts';
 import { LOCATION_LIMITS, buildable, mintLocationId, readLocationRow, readLocationShape, shapeMiddle, type LocationKind, type LocationRow, type LocationShape } from '../world/editFiles/locationsFile.ts';
 import { cursor, dragAt, gizmoDrag, gizmoLayout, grabAt, H, layoutGizmo, pickAt, ray3, rayAt, worldAxes, type ScreenView } from './gizmo.ts';
-import { lakePools, projectPoint } from '../ui/editorMarks.ts';
+import { lakePools, projectAt, projectPoint } from '../ui/editorMarks.ts';
 import type { EditorEdits } from './editorEdit.ts';
 import type { RowChange } from './undo.ts';
 import type { ToolDef, ToolDraw, ToolFrame } from './tools.ts';
@@ -266,6 +266,12 @@ export class EditorPlaces {
   private readonly ray = ray3();
   private readonly pivot = { x: 0.5, y: 0.5, z: 0.5 };
   private readonly pt = new Float64Array(2);
+  /**
+   * A point to project, kept, so no number of it crosses the call (`projectAt`): a double handed to `projectPoint` is boxed
+   * whenever the compiler leaves that call out, which an outline under way did in about one process in a hundred (6.5 bytes
+   * a frame, named by the sampling heap profiler in `draftMarks`).
+   */
+  private readonly pq = new Float64Array(3);
   private readonly at = { x: 0.5, z: 0.5 };
   private readonly ground = { y: 0.5 };
   private dq = new Float64Array(24);
@@ -834,15 +840,20 @@ export class EditorPlaces {
       if (isPicked) m.lakePicked = l;
       m.lakeSpans[l] = o.n;
       m.lakeBad[l] = o.bad ? 1 : 0;
+      const pq = this.pq;
       for (let i = 0; i < o.n; i++) {
-        const px = o.cx + (o.pts[i * 2] - o.cx) * s + ox;
-        const pz = o.cz + (o.pts[i * 2 + 1] - o.cz) * s + oz;
-        const vis = projectPoint(px, o.ys[i], pz, vp, w, h, this.pt);
+        pq[0] = o.cx + (o.pts[i * 2] - o.cx) * s + ox;
+        pq[1] = o.ys[i];
+        pq[2] = o.cz + (o.pts[i * 2 + 1] - o.cz) * s + oz;
+        const vis = projectAt(pq, 0, vp, w, h, this.pt);
         m.lakeVis[k + i] = vis ? 1 : 0;
         m.lakePts[(k + i) * 2] = this.pt[0];
         m.lakePts[(k + i) * 2 + 1] = this.pt[1];
       }
-      const hv = projectPoint(o.cx + ox, o.cy, o.cz + oz, vp, w, h, this.pt);
+      pq[0] = o.cx + ox;
+      pq[1] = o.cy;
+      pq[2] = o.cz + oz;
+      const hv = projectAt(pq, 0, vp, w, h, this.pt);
       m.lakeHandleVis[l] = hv ? 1 : 0;
       m.lakeHandles[l * 2] = this.pt[0];
       m.lakeHandles[l * 2 + 1] = this.pt[1];
@@ -899,7 +910,7 @@ export class EditorPlaces {
       }
     }
     for (let i = 0; i < n; i++) {
-      m.draftVis[i] = projectPoint(dq[i * 3], dq[i * 3 + 1], dq[i * 3 + 2], view.vp, view.w, view.h, this.pt) ? 1 : 0;
+      m.draftVis[i] = projectAt(dq, i * 3, view.vp, view.w, view.h, this.pt) ? 1 : 0;
       m.draftPts[i * 2] = this.pt[0];
       m.draftPts[i * 2 + 1] = this.pt[1];
     }

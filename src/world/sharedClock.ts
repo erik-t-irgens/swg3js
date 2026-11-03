@@ -297,6 +297,15 @@ export class SharedClock {
     return (this.now() - this.lagNow()) / 1000;
   }
 
+  /**
+   * `walkSeconds` written into a record (`out.t`), so no answer crosses the call (Map-maker II's wave of the rooms' lights: the
+   * world's one read of the clock a frame, `World.readWalk`, which the flickering lights and the cloud shadows share). The read
+   * itself still makes a number: V8's `Date.now` hands back a fresh one, 16 bytes a call whatever is done with it.
+   */
+  walkSecondsIn(out: { t: number }): void {
+    out.t = (this.now() - this.lagNow()) / 1000;
+  }
+
   /** What the weather's clock is still behind the day's by, now; zero almost always. */
   lagNow(): number {
     if (this.lagMs === 0) return 0;

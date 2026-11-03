@@ -285,7 +285,9 @@ try {
     ok(!!scaled.b && Math.abs(scaled.b.matrix.elements[0] - 1) < 1e-9 && Math.abs(scaled.b.matrix.elements[5] - 1) < 1e-9, 'a row of it with a scale stands at its true size: a house with rooms takes no scale');
     const text = (p: string) => readFileSync(new URL(`../../../${p}`, import.meta.url), 'utf8');
     ok(/this\.doors\.moreStyles = \(\) => galleryDoorStyles\(\);/.test(text('src/world/world.ts')), "the world hands its doors the player's own gallery's styles");
-    ok(/const plan = roomLightPlan\(want\.building\.model\.def\.cells \?\? \[\], want\.cell, INTERIOR_AMBIENT_FLOOR\);/.test(text('src/world/world.ts')), 'the world lights a room by the very plan this test reads');
+    // Since the wave of the rooms' lights the world plans by `planRoomLights`, the same rule with the lights files' edits laid
+    // on it: with none it answers the very plan this test reads, in every room of every converted building (roomLights.test).
+    ok(/const plan = planRoomLights\(cells, want\.cell, ROOM_LIGHT_TUNE\.ambientFloor, this\.roomPool\.shape, edits \?\? undefined\);/.test(text('src/world/world.ts')) && /const cells = b\.model\.def\.cells \?\? \[\];/.test(text('src/world/world.ts')), 'the world lights a room by the very plan this test reads (with no lights file, `planRoomLights` is `roomLightPlan`)');
     ok(/const styles = await doorStylesFor\(rows, own, this\.moreStyles \? this\.more : null\);/.test(text('src/world/doors.ts')), "the doors look a style up through `doorStylesFor`");
     ok(/const report = roomsReport\(def, pack\.doors, await galleryDoorStyles\(\)\);/.test(text('src/main.ts')), "the console's report reads the house as this test does");
     await scaled.h.settle(AT, 1);
@@ -317,7 +319,32 @@ try {
     // type in them; one written in should be kept out of these lines, or this reads it as the syntax error it is to script.
     const run = (body: string) => new Function(`function lines(want, THREE, self, INTERIOR_LIGHT_CAP, INTERIOR_LIGHT_SCALE, INTERIOR_AMBIENT_FLOOR, INTERIOR_AMBIENT_SCALE, roomLightPlan) {\n${body.replace(/\bthis\./g, 'self.')}\n}\nreturn lines;`)() as (...a: unknown[]) => void;
     const constant = (text: string, name: string) => Number(new RegExp(`const ${name} = ([\\d.]+);`).exec(text)?.[1]);
-    const nowBody = run(span(today, 'const plan = roomLightPlan(', END));
+    // Since the wave of the rooms' lights the world plans by `planRoomLights` and puts the plan on its pool
+    // (`RoomLightPool.apply`, its dials the numbers it held fixed). Today's lines are the world's own text, from the room
+    // chosen to the pool stepped, run as script over the very lights with the world's other parts answering as a world with
+    // no lights file and nothing hung on a row does (roomLights.test holds them to 0e2e226's own lines over every converted
+    // building as well).
+    const { planRoomLights, ROOM_LIGHT_TUNE } = await import('../../../src/world/roomLights.ts');
+    const { RoomLightPool } = await import('../../../src/world/roomLightPool.ts');
+    ok(/const plan = planRoomLights\(cells, want\.cell, ROOM_LIGHT_TUNE\.ambientFloor, this\.roomPool\.shape, edits \?\? undefined\);/.test(today) && /this\.roomPool\.apply\(plan, b\.matrix, this\.fxLampCells\);/.test(today), "the world's own lines are the wave's plan put on its pool");
+    const todayLines = new Function('state', 'self', 'planRoomLights', 'ROOM_LIGHT_TUNE', span(today, 'const want = state && state.cell > 0 ? { building: state.building, cell: state.cell } : null;', 'if (this.roomPool.needsStep) this.stepRoomLights();').replace(/\bthis\./g, 'self.')) as (state: unknown, self: unknown, plan: unknown, tune: unknown) => void;
+    const nowBody = ((want: { building: unknown; cell: number }, _three: unknown, p: { interiorPoints: THREE.PointLight[]; fxLampCells: number[]; interiorParallel: THREE.DirectionalLight; interiorAmbient: THREE.AmbientLight }) => {
+      const self = {
+        roomPool: new RoomLightPool(p.interiorPoints, p.interiorParallel, p.interiorAmbient),
+        fxLampCells: p.fxLampCells,
+        portals: null,
+        interiorLightsFor: null,
+        roomPlan: null,
+        roomPlanStaleRows: [],
+        roomPlanVersion: 0,
+        roomLightEdits: { empty: true },
+        attachedLightsIn: () => [],
+        copyKeyOf: () => null,
+        rowAttach: { matrixOf: () => null },
+        stepRoomLights: () => {},
+      };
+      todayLines(want, self, planRoomLights, ROOM_LIGHT_TUNE);
+    }) as unknown as (...a: unknown[]) => void;
     const { INTERIOR_LIGHT_CAP } = await import('../../../src/world/roomLights.ts');
     const pool = () => ({
       interiorPoints: Array.from({ length: INTERIOR_LIGHT_CAP }, () => new THREE.PointLight(0xffffff, 0, 1, 2)),
@@ -356,7 +383,7 @@ try {
     let lit = 0;
     let differ = '';
     const oldBody = before ? run(span(before, 'const cells = want.building.model.def.cells ?? [];', END)) : null;
-    const k = { cap: INTERIOR_LIGHT_CAP, scale: constant(today, 'INTERIOR_LIGHT_SCALE'), floor: constant(today, 'INTERIOR_AMBIENT_FLOOR'), ambient: constant(today, 'INTERIOR_AMBIENT_SCALE') };
+    const k = { cap: INTERIOR_LIGHT_CAP, scale: ROOM_LIGHT_TUNE.lightScale, floor: ROOM_LIGHT_TUNE.ambientFloor, ambient: ROOM_LIGHT_TUNE.ambientScale };
     for (const def of defs) {
       for (const c of def.cells ?? []) {
         if (c.index <= 0) continue;

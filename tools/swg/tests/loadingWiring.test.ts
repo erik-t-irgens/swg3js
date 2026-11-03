@@ -148,7 +148,11 @@ function method(text: string, signature: string): string {
   const foldSets = fold.match(/this\.curtainOnly = (true|false);/g) ?? [];
   // The third read (Map-maker II's third wave): the world editor is let go with its world on a journey, never at a curtain.
   ok(/if \(this\.editor\?\.on && \(\(this\.traveling && !this\.curtainOnly\) \|\| !this\.inWorld\)\) this\.editor\.worldGone\(\);/.test(main), 'the world editor stays on through a curtain, its world going nowhere');
-  ok(reads.length === 3 && sets.length === 4 && foldSets.length === 2, `and nothing else of the game reads it: three reads (the story's leave, the call's end, the editor's), the course curtain's two sets and the editor's curtain's two (${reads.length}, ${sets.length} and ${foldSets.length})`);
+  // The rooms' light pool's curtain (Map-maker II's wave of the rooms' lights: the Graphics page's Room lamps and Room light
+  // shadows built again behind one, in any build) is a curtain of the same kind as well: its own two sets.
+  const pool = method(main, '  private lightPoolCurtain(');
+  const poolSets = pool.match(/this\.curtainOnly = (true|false);/g) ?? [];
+  ok(reads.length === 3 && sets.length === 6 && foldSets.length === 2 && poolSets.length === 2, `and nothing else of the game reads it: three reads (the story's leave, the call's end, the editor's), the course curtain's two sets, the editor's curtain's two and the rooms' light pool's two (${reads.length}, ${sets.length}, ${foldSets.length} and ${poolSets.length})`);
 }
 
 // --- the sweep, the frame loop, the queue's own compiles -------------------------------------------------------------

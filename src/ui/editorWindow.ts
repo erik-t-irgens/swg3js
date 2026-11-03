@@ -72,6 +72,9 @@ export const TOOL_SECTIONS: Readonly<Record<string, string>> = {
   // The no-spawn zone tool (no key of its own).
   'sec:No-spawn zones': 'zones',
   'dials:The no-spawn zone tool': 'zones',
+  // The lights tool (;): its scope, presets and switches, then its sliders (the pool's own are the debug menu's `roomLights`).
+  'sec:Lights': 'lights',
+  'dials:The lights tool': 'lights',
   // At the foot whatever is armed: the files and git's word, the walk grid's, and the camera's and the window's sliders.
   files: 'always',
   'sec:The walk grid': 'always',
@@ -374,7 +377,8 @@ export interface EditorSection {
   title: string;
   note?: string;
   rows?: { words: string; title?: string; buttons: { label: string; act: string; danger?: boolean; off?: boolean }[] }[];
-  fields?: { label: string; value: string | number | boolean; act: string | null; kind?: 'text' | 'number' | 'check' }[];
+  /** `colour`: a `#rrggbb` field with the dye picker's swatches under it (Map-maker II's wave of the rooms' lights). */
+  fields?: { label: string; value: string | number | boolean; act: string | null; kind?: 'text' | 'number' | 'check' | 'colour' }[];
   buttons?: { label: string; act: string; danger?: boolean; off?: boolean }[];
 }
 
@@ -704,7 +708,8 @@ export class EditorWindow {
         if (s.note) this.note(el, s.note);
         for (const f of s.fields ?? []) {
           const a = f.act;
-          this.field(el, f.label, f.value, a ? (v) => act(a, v) : null, f.kind ?? 'text');
+          if (f.kind === 'colour' && a) this.colourField(el, `${s.title}/${f.label}`, f.label, String(f.value), (v) => act(a, v));
+          else this.field(el, f.label, f.value, a ? (v) => act(a, v) : null, f.kind === 'colour' ? 'text' : (f.kind ?? 'text'));
         }
         for (const r of s.rows ?? []) {
           const row = document.createElement('div');
@@ -1172,6 +1177,62 @@ export class EditorWindow {
     };
     this.tintPicker?.close();
     this.tintPicker = p;
+    p.mount(after);
+  }
+
+  /** The colour field whose swatches are open (its section and label), '' for none. */
+  private colourOpen = '';
+  private colourPicker: DyePicker | null = null;
+
+  /**
+   * A colour field of a section the editor hands a tab (Map-maker II's wave of the rooms' lights): `#rrggbb` typed, or
+   * Swatches opening the dye picker under it (the wardrobe's and the creator's colours, as a look's tint), a pick written as
+   * the hex. Empty writes nothing set (the field's own words say what that means).
+   */
+  private colourField(el: HTMLElement, key: string, label: string, value: string, write: (v: string) => void): void {
+    this.field(el, label, value, (v) => write(v.trim()), 'text');
+    const row = document.createElement('div');
+    row.className = 'ed-row';
+    const b = this.button(this.colourOpen === key ? 'Close swatches' : 'Swatches', 'tool', this.colourOpen === key ? 'on' : '');
+    b.addEventListener('click', () => {
+      b.blur();
+      this.colourOpen = this.colourOpen === key ? '' : key;
+      this.colourPicker?.close();
+      this.colourPicker = null;
+      if (this.colourOpen === key) void this.openColour(row, key, label, value, write);
+      b.textContent = this.colourOpen === key ? 'Close swatches' : 'Swatches';
+    });
+    row.appendChild(b);
+    el.appendChild(row);
+    if (this.colourOpen === key) void this.openColour(row, key, label, value, write);
+  }
+
+  private async openColour(after: HTMLElement, key: string, label: string, value: string, write: (v: string) => void): Promise<void> {
+    if (!this.host.lookPalettes) return;
+    this.lookSource ??= this.host.lookPalettes().catch(() => null);
+    const source = await this.lookSource;
+    if (!source || this.colourOpen !== key || !after.isConnected) return;
+    let now = rawFromHex(value) ?? 0;
+    const row: PickerRow = {
+      label,
+      kind: 'dye',
+      colors: [],
+      layout: { creation: 0, columns: 8, more: 0, moreColumns: 8 },
+      defaultValue: 0,
+      current: () => now,
+      pick: (v) => {
+        now = v;
+        if (isRawColour(v)) write(hexOf(rawRgb(v)));
+      },
+    };
+    const p = new DyePicker(row, source);
+    p.onClose = () => {
+      this.colourOpen = '';
+      p.close();
+      this.colourPicker = null;
+    };
+    this.colourPicker?.close();
+    this.colourPicker = p;
     p.mount(after);
   }
 

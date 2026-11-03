@@ -69,8 +69,9 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/prepare: \(meshes\) => host\.world\.prepareLikeStreamed\(meshes\),/.test(ed), "the ghost is prepared the streamer's own way, so a never-stood thing builds its programs off the frame");
   // 4,000 characters since Map-maker II's seventh wave, whose take first hands an effect or a sound to its own hand and an
   // entry chosen while the look picker is armed to the picker; 4,800 since its tenth, whose imported model's pack is handed
-  // over by the same line (widened on purpose) and whose ghost wears the model's own borrowed looks.
-  const take = after(ed, '  async take(e: LibraryEntry', 4800);
+  // over by the same line (widened on purpose) and whose ghost wears the model's own borrowed looks; 5,600 since the wave of the
+  // rooms' lights, whose Lights entry arms the lights tool in it.
+  const take = after(ed, '  async take(e: LibraryEntry', 5600);
   const reg = take.indexOf('if ((got.src.pack === \'world\' && got.src.from) || got.src.pack === \'imported\') stream.useFromPack(got.pack);');
   ok(reg > 0 && reg < take.indexOf('stream.modelFor(') && take.indexOf('stream.modelFor(') < take.indexOf('stream.ghostMeshesOf('), "another world's pack (and an imports pack) is handed to the streamer before its model is loaded or its ghost asks whether it is flora");
   ok(ed.includes('TUNE_WATCH.moved = (partial) => this.tuned(partial);') && /if \(live\.speed\) this\.fly\.speed = clampSpeed\(EDITOR_TUNE\.cam\.speed\);\s*if \(live\.skyReach\) this\.skyReach = clampSky\(EDITOR_TUNE\.aim\.skyReach\);/.test(ed), "a moved tune reaches the flight's speed and the sky's reach in flight");
@@ -227,8 +228,8 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/for \(const t of this\.tools\.list\) if \(t\.action && input\.pressedAction\(t\.action\)\) void this\.toggleTool\(t\.id\);/.test(ed) && /this\.tools\.add\(scatterTool\(this\.brush,/.test(ed), "B arms the brush and lets it go (the list's first entry, on its own action)");
   ok(/this\.tools\.add\(sculptTool\(this\.sculpt\)\);/.test(ed), 'K arms the sculpt brush (the list, on its own action)');
   // The page's word on an edit file is routed by its kind (Map-maker II §2.2): the row layers to the permanent layer, the
-  // heights to the ground's, a kind with no layer yet dropped.
-  const word = after(main, '  private placementWord(d: PlacementWord): void {', 1800);
+  // heights to the ground's, a kind with no layer yet dropped (2,400 since the shared lights file's word came before it).
+  const word = after(main, '  private placementWord(d: PlacementWord): void {', 2400);
   ok(/const reload = this\.editLayerOf\(kind\);\s*if \(!reload\) return;/.test(word), "a placement word is routed by its kind, and a kind no layer reads is dropped");
   // 1,200 characters since Map-maker II's twelfth wave, whose removal and people files are kinds of their own.
   const layer = after(main, '  private editLayerOf(kind: string | undefined)', 1200);

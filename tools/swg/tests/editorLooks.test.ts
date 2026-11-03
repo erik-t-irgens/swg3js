@@ -54,8 +54,8 @@ const holder = new RowAttachments<{ file: string; size: number }>({
   },
   move: () => {},
   resize: (h, size) => {
-    h.size = size;
-    asked.push(`resize ${size}`);
+    h.size = size.v;
+    asked.push(`resize ${size.v}`);
   },
   remove: () => asked.push('remove'),
   sound: () => {},

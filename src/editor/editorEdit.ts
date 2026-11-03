@@ -136,6 +136,11 @@ export interface EditEditor {
    */
   toolMiddle?(): boolean;
   /**
+   * An armed tool that claims the nudges and Ctrl+D this frame (Map-maker II's wave of the rooms' lights: a picked light), or
+   * null: its `nudge` takes the arrows and Page Up/Down a grid step, its `duplicate` Ctrl+D, and the selection's wait.
+   */
+  toolKeys?(): { nudge(dx: number, dy: number, dz: number): void; duplicate(): void } | null;
+  /**
    * What hangs on a row carried where an edit under way puts it (Map-maker II's seventh wave: `m` its place, turn and scale
    * this frame), and put back where it was stood when the edit ends; the landing of what was written stands it anew.
    */
@@ -476,7 +481,9 @@ export class EditorEdits {
     for (const code of CHORD_CODES) {
       if (!input.justPressed(code)) continue;
       const c = ctrlChord(code, shift);
-      if (c === 'dup') void this.duplicate();
+      const tool = c === 'dup' ? (this.ed.toolKeys?.() ?? null) : null;
+      if (tool) tool.duplicate();
+      else if (c === 'dup') void this.duplicate();
       else if (c === 'copy') void this.copy(false);
       else if (c === 'cut') void this.copy(true);
       else if (c === 'undo') void this.undo(1);
@@ -606,6 +613,20 @@ export class EditorEdits {
     }
     // An armed tool that owns the middle button takes it (the paint brush's pick); otherwise it is the eyedropper's.
     if (this.middlePressed && !(this.ed.toolMiddle?.() ?? false)) void this.eyedropper();
+    // An armed tool that claims the nudges (a picked light): the arrows and Page Up/Down are its own, a grid step, along the
+    // camera's look as the selection's are; the selection's wait.
+    const tool = this.ed.toolKeys?.() ?? null;
+    if (tool) {
+      const along = (input.pressedAction('editorNudgeFwd') ? 1 : 0) - (input.pressedAction('editorNudgeBack') ? 1 : 0);
+      const across = (input.pressedAction('editorNudgeRight') ? 1 : 0) - (input.pressedAction('editorNudgeLeft') ? 1 : 0);
+      const up = (input.pressedAction('editorNudgeUp') ? 1 : 0) - (input.pressedAction('editorNudgeDown') ? 1 : 0);
+      if (along || across) {
+        this.ed.fly.lookDir(this.look);
+        const a = nudgeAxis(this.look.x, this.look.z, along, across, EDITOR_TUNE.nudge.cameraRelative, { x: 0, z: 0 });
+        tool.nudge(a.x * this.grid, 0, a.z * this.grid);
+      } else if (up) tool.nudge(0, up * this.grid, 0);
+      return;
+    }
     if (this.ed.inHand() || this.writing || this.live) return;
     // One-shot steps on the selection.
     if (this.sel.size) {

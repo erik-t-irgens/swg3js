@@ -89,7 +89,10 @@ import { cellOfLiving, doorwayNav } from './nav/doorway.ts';
 // The AI handoff's first three steps: their switches, and the ledger a landed blow is measured on (`aiLedger.ts`).
 import { LEDGER_WORLD, PLAYER_SHOT_FROM, noteLanded, playerMiddle } from './aiLedger.ts';
 import { Doors, galleryDoorStyles, type DoorView } from './doors.ts';
-import { INTERIOR_LIGHT_CAP, roomLightPlan } from './roomLights.ts';
+import { DEFAULT_POOL, INTERIOR_LIGHT_CAP, ROOM_LIGHT_TUNE, planRoomLights, type PoolShape, type RoomLightsPlanned } from './roomLights.ts';
+import { LightClock, RoomLightPool, sameShape } from './roomLightPool.ts';
+import { NO_LIGHT_EDITS, RoomLightEdits, type AttachedRoomLight } from './roomLightEdits.ts';
+import type { LightRow } from './editFiles/lightsFile.ts';
 import { InstanceLocks } from './instances.ts';
 import { gatherOpeners } from './doorMath.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
@@ -125,7 +128,8 @@ import { PASS_STATES } from './passScenes.ts';
 import { PACE_TUNE, QueueWatch, framesFor } from '../core/programPace.ts';
 import { noteProgramTime, pacingHard, shaderBudget } from '../core/shaderWatch.ts';
 import { LOADING_TUNE, courseCounts, loadBounded, sweepYield } from './loadingTune.ts';
-import { addPointLight, cascadesUsable, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
+import { cascadesUsable, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
+import { fillRoomLightFx } from './roomLightFx.ts';
 import { ParticleEffects, type EffectHandle, type EffectSounds } from './particles';
 import { Ambience, type AmbienceContext, type BedRow, type RoomRow } from '../audio/ambience.ts';
 import { OUTSIDE, type SoundSpace } from '../audio/distance.ts';
@@ -264,12 +268,11 @@ const SWG_AMBIENT = 1.3;
 const SWG_FILL = 1.0;
 /** The client's fog densities read far thicker here than in the game; planets can override this. */
 const DEFAULT_SWG_FOG_SCALE = 0.08;
-/** Interior lights: how many point lights may be live at once, and how the client's colours map to three's intensities. */
-// Point lights a room may have at once (`INTERIOR_LIGHT_CAP`, `roomLights.ts`, which works the room's lights out). Every one
-// lengthens every interior shader (and on some drivers each costs a second of compile time), so no more than a room needs.
-const INTERIOR_LIGHT_SCALE = 3;
-const INTERIOR_AMBIENT_SCALE = 1.2;
-const INTERIOR_AMBIENT_FLOOR = 0.18;
+// Interior lights: how many point lights may be live at once (`INTERIOR_LIGHT_CAP`, `roomLights.ts`, which works the room's
+// lights out), and how the client's colours map to three's intensities -- the fixed numbers that stood here are live dials
+// now, at the numbers they always held (`ROOM_LIGHT_TUNE`, Map-maker II's wave of the rooms' lights). Every light lengthens
+// every interior shader (and on some drivers each costs a second of compile time), so no more than a room needs: the pool's
+// shape beyond the eight points is the Graphics page's two settings, nought to begin with (`RoomLightPool`).
 /** Seconds between ripple passes: dense enough that a swimmer's rings overlap into a wake. */
 const RIPPLE_INTERVAL = 0.12;
 /**
@@ -1215,6 +1218,31 @@ export class World {
   private readonly interiorParallel = new THREE.DirectionalLight(0xffffff, 0);
   private readonly interiorAmbient = new THREE.AmbientLight(0xffffff, 0);
   private interiorLightsFor: { building: Building; cell: number } | null = null;
+  /**
+   * The pool those lights are (Map-maker II's wave of the rooms' lights, `roomLightPool.ts`): its eight points, parallel and
+   * ambient are the ones above, its other slots the Graphics page's two settings', made only behind a screen or a curtain.
+   */
+  readonly roomPool: RoomLightPool;
+  /** The lights files in force (this world's and the shared one, `roomLightEdits.ts`), as the last landing left them. */
+  roomLightEdits: RoomLightEdits = NO_LIGHT_EDITS;
+  /** The plan the lit room was last lit by (the console's and the editor's), and what moved since (planned again at once). */
+  roomPlan: RoomLightsPlanned | null = null;
+  private roomPlanStale = false;
+  private roomTuneSeen = 0;
+  /** Bumped by every plan, so the editor's markers and the console know the lit lights moved. */
+  roomPlanVersion = 0;
+  /** The rows of the lit room that named a room no longer there, from the last plan. */
+  roomPlanStaleRows: readonly LightRow[] = [];
+  /**
+   * The walked shared clock's seconds, read at most once a frame (`readWalk`) for everything of the frame that reads it -- the
+   * rooms' flickering lights and the cloud shadows' drift (Map-maker II's wave of the rooms' lights): a clock read makes a
+   * number whatever is done with it (V8's `Date.now` and `performance.now` hand back a fresh one, 16 bytes a call, measured),
+   * so a flickering light reads the read the frame makes for the clouds rather than one of its own. A class record, so the
+   * number is held in place; a frame that reads neither reads no clock at all.
+   */
+  private readonly frameWalk = new LightClock();
+  private walkTick = 0;
+  private walkReadAt = -1;
   private portals: PortalRenderer | null = null;
   private readonly csmMaterials = new WeakSet<THREE.Material>();
   private csmScanAt = 0;
@@ -1336,6 +1364,8 @@ export class World {
     this.interiorParallel.layers.set(INTERIOR_LAYER);
     this.interiorAmbient.layers.set(INTERIOR_LAYER);
     scene.add(this.interiorParallel, this.interiorParallel.target, this.interiorAmbient);
+    // The pool over the very lights just made: today's shape, nothing more added to the scene until a setting asks.
+    this.roomPool = new RoomLightPool(this.interiorPoints, this.interiorParallel, this.interiorAmbient);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(4096, 4096);
     const sc = this.sun.shadow.camera;
@@ -1879,6 +1909,9 @@ export class World {
     // `people/`): asked now, waited on (bounded) before anything stands (`loadPack`), and stood late by difference.
     this.askRemovals(packId);
     this.askPeople(packId);
+    // And the rooms' lights edited (Map-maker II's wave of the rooms' lights): asked now and laid on whenever they land, the
+    // lit room planned again (never waited on: a room lit by the game's own rule until then is the room as it always was).
+    this.askLights(packId);
     const demHeights = !!planet.dem && shippedAsk(`${planet.dem.url}/base16.raw`);
     this.heightsByDem = demHeights;
     this.demGroundPending = null;
@@ -6360,6 +6393,9 @@ export class World {
     // A plant standing in a room wears the materials its model wears outdoors: each rooms pass puts the leaf cards on
     // the rooms' own light and holds the flora still (`setCardRoomPass`, `setSwayRoomPass`).
     portals.roomPass = roomPassLeaves;
+    // The rooms' pool's casting slots (Map-maker II's wave of the rooms' lights): their maps drawn by a shadow pass of their
+    // own with the lit building's rooms (`renderRoomShadows`), and every one of them drawn into by the warm-up's stand-ins.
+    portals.roomShadows = this.roomPool;
     // The world pass drawn from inside a building may leave out what these hold when it misses the
     // exits: the placed objects' instanced meshes hang off the scene, the ground's chunks and far tiles off its root.
     if (!portals.narrowParents.includes(this.scene)) portals.narrowParents.push(this.scene, this.chunkRoot);
@@ -6377,6 +6413,9 @@ export class World {
         }
       },
     };
+    // And round the rooms' own shadow pass (Map-maker II's wave of the rooms' lights): the batches alone, so a source a batch
+    // takes is drawn into a room lamp's map by the batch and never both; the sun's holds are told nothing (none of theirs drew).
+    portals.roomShadowHooks = { before: () => batches.around(), after: () => batches.restore() };
     // The sun, sky light and their shadows stay on the world layer: rooms are lit by their own
     // lights, as in the client, and never by sunlight through the walls.
     if (!shadows || this.csm) return;
@@ -9242,8 +9281,11 @@ export class World {
   /** The room lit for a shuttle landing in it while the player is in none (`hintRoomLight`), and where it was asked for. */
   private readonly lightHint: { x: number; y: number; z: number; cell: number; askedAt: number; state: CellState | null } = { x: 0, y: 0, z: 0, cell: 0, askedAt: -Infinity, state: null };
 
-  /** The rooms' pool's intensities while `dimRoomLights` holds them at nought: the lamps, then the parallel light and the ambient. */
-  private readonly roomLightsKept = new Float32Array(INTERIOR_LIGHT_CAP + 2);
+  /**
+   * The rooms' pool's intensities while `dimRoomLights` holds them at nought: the lamps, then the parallel light and the ambient,
+   * then (Map-maker II's wave of the rooms' lights) every other slot of the shape and the parallel's casting twin.
+   */
+  private readonly roomLightsKept = new Float32Array(INTERIOR_LIGHT_CAP + 2 + 16);
 
   /**
    * The rooms' one pool of lights dimmed to nought (`on`) for one pass, and put back as it was (`!on`): what
@@ -9263,12 +9305,36 @@ export class World {
       kept[INTERIOR_LIGHT_CAP + 1] = this.interiorAmbient.intensity;
       this.interiorParallel.intensity = 0;
       this.interiorAmbient.intensity = 0;
+      this.dimExtra(true);
       return;
     }
     for (let i = 0; i < n; i++) lamps[i].intensity = kept[i];
     this.interiorParallel.intensity = kept[INTERIOR_LIGHT_CAP];
     this.interiorAmbient.intensity = kept[INTERIOR_LIGHT_CAP + 1];
+    this.dimExtra(false);
   };
+
+  /** The pool's other slots dimmed and put back with the rest (`dimRoomLights`): by index into the kept intensities, nothing made. */
+  private dimExtra(on: boolean): void {
+    const pool = this.roomPool;
+    if (!pool.pointShadows.length && !pool.spots.length && !pool.spotShadows.length) return;
+    let k = INTERIOR_LIGHT_CAP + 2;
+    k = this.dimList(pool.pointShadows, k, on);
+    k = this.dimList(pool.spots, k, on);
+    this.dimList(pool.spotShadows, k, on);
+  }
+
+  private dimList(list: readonly THREE.Light[], from: number, on: boolean): number {
+    const kept = this.roomLightsKept;
+    let k = from;
+    for (let i = 0; i < list.length && k < kept.length; i++, k++) {
+      if (on) {
+        kept[k] = list[i].intensity;
+        list[i].intensity = 0;
+      } else list[i].intensity = kept[k];
+    }
+    return k;
+  }
 
   /** The room the rooms' lights are lit for now, for the console: the player's own, the hint's, or none. */
   get litRoom(): { model: string; cell: number; hinted: boolean } | null {
@@ -10374,44 +10440,207 @@ export class World {
     // door are drawn with it dimmed (`PortalRenderer.hintedLights`), as they were drawn with no hint.
     if (this.portals) this.portals.hintedLights.building = state !== null && state === hint ? state.building : null;
     const have = this.interiorLightsFor;
-    if ((state?.building ?? null) === (have?.building ?? null) && (state?.cell ?? -1) === (have?.cell ?? -1)) return;
+    // Planned again when the room changes, when an edit of the lights files lands or the tune moves (`roomPlanStale`,
+    // `ROOM_LIGHT_TUNE.version`): an event's work, never a frame's. A frame only flickers and moves what is lit (`step`).
+    const tuneMoved = ROOM_LIGHT_TUNE.version !== this.roomTuneSeen;
+    if (!tuneMoved && !this.roomPlanStale && (state?.building ?? null) === (have?.building ?? null) && (state?.cell ?? -1) === (have?.cell ?? -1)) {
+      // The clock asked only where something flickers or moves: a lit room with neither writes nothing and reads nothing.
+      if (have && this.roomPool.needsStep) this.stepRoomLights();
+      return;
+    }
+    this.roomTuneSeen = ROOM_LIGHT_TUNE.version;
+    this.roomPlanStale = false;
     const want = state && state.cell > 0 ? { building: state.building, cell: state.cell } : null;
     this.interiorLightsFor = want;
-    for (const l of this.interiorPoints) l.intensity = 0;
+    this.roomPlan = null;
+    this.roomPlanStaleRows = [];
+    this.roomPlanVersion++;
+    this.roomPool.clear();
     this.fxLampCells.fill(-1);
-    this.interiorParallel.intensity = 0;
-    this.interiorAmbient.intensity = 0;
+    if (this.portals) this.portals.roomShadowBuilding = null;
     if (!want) return;
     // Which lights, in what order, how bright and how far: the rule apart from the pool (`roomLights.ts`), which a node test
-    // runs on the very houses the world stands (Map-maker II's eleventh wave). Rooms are never pitch black: the ambient starts
-    // at a floor under the rooms' own fill.
-    const plan = roomLightPlan(want.building.model.def.cells ?? [], want.cell, INTERIOR_AMBIENT_FLOOR);
+    // runs on the very houses the world stands (Map-maker II's eleventh wave), with the owner's edits laid on it (the lights
+    // files, `roomLightEdits.ts`, and what hangs on the rows standing in its rooms). Rooms are never pitch black: the ambient
+    // starts at a floor under the rooms' own fill.
+    const b = want.building;
+    const cells = b.model.def.cells ?? [];
+    const attached = this.attachedLightsIn(b);
+    const edits = this.roomLightEdits.empty && !attached.length ? null : this.roomLightEdits.forRoom(this.copyKeyOf(b), b.model.def.id, cells, attached);
+    const plan = planRoomLights(cells, want.cell, ROOM_LIGHT_TUNE.ambientFloor, this.roomPool.shape, edits ?? undefined);
     if (!plan) return;
-    const matrix = want.building.matrix;
-    const pos = new THREE.Vector3();
-    const dir = new THREE.Vector3();
-    const p = plan.parallel;
-    if (p) {
-      pos.set(p.position[0], p.position[1], p.position[2]).applyMatrix4(matrix);
-      dir.set(p.direction[0], p.direction[1], p.direction[2]).transformDirection(matrix);
-      this.interiorParallel.color.setRGB(p.color[0], p.color[1], p.color[2]);
-      this.interiorParallel.intensity = 1.2;
-      this.interiorParallel.position.copy(pos).addScaledVector(dir, -20);
-      this.interiorParallel.target.position.copy(pos);
+    this.roomPlan = plan;
+    this.roomPlanStaleRows = edits?.stale ?? [];
+    this.roomPool.apply(plan, b.matrix, this.fxLampCells);
+    if (this.portals && this.roomPool.casting) this.portals.roomShadowBuilding = b;
+    // A light hung on a row follows its row's own matrix a frame (the editor's hand moving the row moves its light).
+    for (const a of attached) this.roomPool.follow(a.key, this.rowAttach.matrixOf(a.rowKey, a.index));
+    if (this.roomPool.needsStep) this.stepRoomLights();
+  }
+
+  /**
+   * A frame of the lit room's lights: the shared clock (the weather's own walked clock, so every browser flickers alike) written
+   * into the pool's record and the pool stepped. Nothing crosses a call as a number.
+   */
+  private stepRoomLights(): void {
+    this.readWalk();
+    this.roomPool.clock.t = this.frameWalk.t;
+    this.roomPool.step();
+  }
+
+  /** The walked shared clock read into `frameWalk`, at most once a frame (`update` counts the frames): see `frameWalk`. */
+  private readWalk(): void {
+    if (this.walkReadAt === this.walkTick) return;
+    this.walkReadAt = this.walkTick;
+    sharedClock.walkSecondsIn(this.frameWalk);
+  }
+
+  /**
+   * The copy key of a building the rooms' lights name a copy by (Map-maker II's wave of the rooms' lights): one of the world's
+   * own objects by its content key (the twelfth wave's), a permanent row of the owner's by its streamer key (`place/<id>`), or
+   * null for one with neither (a house put down in play), which takes the model's rows alone.
+   */
+  copyKeyOf(b: Building): string | null {
+    const o = b.object;
+    if (!o) return null;
+    if (o.template.startsWith('place/')) return o.template;
+    if (o.row === undefined) return null;
+    return this.objectKeyOf(o.row) || null;
+  }
+
+  /** The lights files put in force (an arrival's read, a landing): the lit room planned again at once. */
+  setRoomLightRows(world: readonly LightRow[], all: readonly LightRow[]): void {
+    this.roomLightEdits = new RoomLightEdits(world, all);
+    this.roomPlanStale = true;
+  }
+
+  /**
+   * Where a world's lights files come from (Map-maker II's wave of the rooms' lights): the page hands its fetch in
+   * (`App.fetchLights`), which reads `public/placements/lights/<world>.json` and `lights.json`. Null asks for none (a test's
+   * world, the select screen's), and every room is lit as it always was.
+   */
+  lightsSource: ((pack: string, kind: 'ground' | 'space' | 'copies') => Promise<{ world: LightRow[]; all: LightRow[]; info: { world: string; all: string } } | null>) | null = null;
+  /** What the files read said, for the console. */
+  lightsFileInfo: { world: string; all: string } = { world: 'none', all: 'none' };
+  private lightsAsk = 0;
+
+  /** The ask for this world's lights files, begun as its load begins (`load`): laid on whenever they land. */
+  private askLights(packId: string): void {
+    const ask = ++this.lightsAsk;
+    this.roomLightEdits = NO_LIGHT_EDITS;
+    this.roomPlanStale = true;
+    this.lightsFileInfo = { world: 'none', all: 'none' };
+    const src = this.lightsSource;
+    if (!src || this.sceneOnly) return;
+    const gen = this.generation;
+    void src(packId, this.kindOfWorld())
+      .catch(() => null)
+      .then((got) => {
+        if (ask !== this.lightsAsk || this.generation !== gen || !got) return;
+        this.lightsFileInfo = got.info;
+        if (got.world.length || got.all.length) this.setRoomLightRows(got.world, got.all);
+      });
+  }
+
+  /** The lit room planned again on the next frame (an attachment carrying a light stood or taken away). */
+  roomLightsMoved(): void {
+    this.roomPlanStale = true;
+  }
+
+  /** The building and room the rooms' lights are lit for now, or null (the world editor's lights tool reads it). */
+  get roomLightsLit(): { building: Building; cell: number } | null {
+    return this.interiorLightsFor;
+  }
+
+  /**
+   * The light the world editor's hand is moving, written into the pool where the hand has it (the lights tool's live record,
+   * handed whole: its key, its place and way in the lit building's frame; an empty key lets it go, and the pool puts it back
+   * where the plan stood it). Nothing is made, and no number crosses a call (`RoomLightPool.takeLive`).
+   */
+  roomLightLive(l: { readonly key: string; readonly x: number; readonly y: number; readonly z: number; readonly dx: number; readonly dy: number; readonly dz: number }): void {
+    // Let go: the plan's own place again, planned afresh (an event's work, as the hand lets go).
+    if (this.roomPool.takeLive(l)) this.roomPlanStale = true;
+  }
+
+  /**
+   * The rooms' lights as the console reads them (`__debug.roomLights()`): the room lit (its model, cell and name, its copy key),
+   * the pool's shape, every slot lit (its kind, what it holds, its cell, its intensity planned and now, whether it casts), the
+   * plan (the ambient, the parallel, the lamps by slot and what was left out and why), the rows of the lit copy that name a
+   * room no longer there, and the files as read.
+   */
+  roomLightsReport(): Record<string, unknown> {
+    const lit = this.interiorLightsFor;
+    const p = this.roomPlan;
+    const r3 = (v: number): number => Math.round(v * 1000) / 1000;
+    const cells = lit?.building.model.def.cells ?? [];
+    const lamp = (l: { key: string; cell: number; at3: number; range: number; shadow: boolean; asked: boolean; flicker: number }) => ({ key: l.key, cell: l.cell, at3: r3(l.at3), range: r3(l.range), ...(l.asked ? { shadow: l.shadow ? 'cast' : 'asked, none free' } : {}), ...(l.flicker ? { flicker: l.flicker } : {}) });
+    const e = this.roomLightEdits;
+    return {
+      room: lit ? { model: lit.building.model.def.id, cell: lit.cell, name: cells.find((c) => c.index === lit.cell)?.name ?? '', copy: this.copyKeyOf(lit.building), template: lit.building.template } : null,
+      shape: { ...this.roomPool.shape },
+      slots: this.roomPool.report(),
+      plan: p
+        ? {
+            ambient: p.ambient.map(r3),
+            parallel: p.parallel ? { key: p.parallel.key, cell: p.parallel.cell, scale: r3(p.parallel.scale), ...(p.parallel.asked ? { shadow: p.parallel.shadow ? 'cast' : 'asked, none free' } : {}) } : null,
+            points: p.points.map(lamp),
+            pointShadows: p.pointShadows.map(lamp),
+            spots: p.spots.map(lamp),
+            spotShadows: p.spotShadows.map(lamp),
+            left: { ...p.left },
+          }
+        : null,
+      stale: this.roomPlanStaleRows.map((r) => `${r.id}: names room ${r.cell} "${r.room}", which this building's cell ${r.cell} is not`),
+      files: { world: { said: this.lightsFileInfo.world, rows: e.world.length, outdoor: e.outdoor.length }, all: { said: this.lightsFileInfo.all, rows: e.all.length } },
+      tune: { ...ROOM_LIGHT_TUNE },
+    };
+  }
+
+  /**
+   * The pool's shape set (the Graphics page's two settings): its lights added to or taken from the scene. **Only behind a
+   * loading screen or a curtain**, whose sweep builds every program again (the caller's); answers whether it changed.
+   */
+  setRoomLightPool(shape: PoolShape): boolean {
+    const changed = this.roomPool.setShape(shape, this.scene, INTERIOR_LAYER);
+    if (changed) this.roomPlanStale = true;
+    return changed;
+  }
+
+  /** The pool's shape now. */
+  get roomPoolShape(): Readonly<PoolShape> {
+    return this.roomPool.shape;
+  }
+
+  /** Whether a shape is the default (nothing beyond the eight points: every program the base commit's). */
+  static defaultPool(shape: Readonly<PoolShape>): boolean {
+    return sameShape(shape, DEFAULT_POOL);
+  }
+
+  /**
+   * The lights hung on rows standing in a building's rooms (`attach`'s `light`, Map-maker II's wave of the rooms' lights),
+   * each in the room its place stands in by the streamer's own room rule, its place and turn in the building's frame. Asked
+   * when the lit room is planned, never a frame.
+   */
+  private attachedLightsIn(b: Building): (AttachedRoomLight & { rowKey: string; index: number })[] {
+    const out: (AttachedRoomLight & { rowKey: string; index: number })[] = [];
+    const ls = this.layoutStream;
+    if (!ls) return out;
+    const list = this.rowAttach.lightList();
+    if (!list.length) return out;
+    const ask = new THREE.Vector3();
+    const answer: RoomAnswer = { building: null, cell: 0, byBox: false };
+    const local = new THREE.Matrix4();
+    const p = new THREE.Vector3();
+    const q = new THREE.Quaternion();
+    const s = new THREE.Vector3();
+    for (const it of list) {
+      ask.setFromMatrixPosition(it.world);
+      ls.cameraRoomAt(ask, answer, () => true);
+      if (answer.building !== b || answer.cell <= 0) continue;
+      local.multiplyMatrices(b.inverse, it.world).decompose(p, q, s);
+      out.push({ key: it.key, cell: answer.cell, spec: it.spec, pos: [p.x, p.y, p.z], q: [q.w, q.x, q.y, q.z], where: it.rowKey, rowKey: it.rowKey, index: it.index });
     }
-    for (let i = 0; i < plan.points.length; i++) {
-      const pt = plan.points[i];
-      const l = pt.light;
-      this.fxLampCells[i] = pt.cell;
-      const light = this.interiorPoints[i];
-      light.color.setRGB(l.color[0], l.color[1], l.color[2]);
-      // Direct3D falloff 1 / (c + l d + q d^2) matched at 3 m to three's I / d^2, cut where it fades below 5%.
-      light.intensity = 9 * pt.at3 * INTERIOR_LIGHT_SCALE;
-      light.distance = pt.range;
-      light.position.set(l.position[0], l.position[1], l.position[2]).applyMatrix4(matrix);
-    }
-    this.interiorAmbient.color.setRGB(plan.ambient[0], plan.ambient[1], plan.ambient[2]);
-    this.interiorAmbient.intensity = INTERIOR_AMBIENT_SCALE;
+    return out;
   }
 
   private hideGroundUnder(b: Building): void {
@@ -10507,6 +10736,8 @@ export class World {
 
   /** `target` is whom the turrets shoot at, or null while nothing should be shot (noclip, riding). */
   update(dt: number, playerPos: THREE.Vector3, camPos: THREE.Vector3, fastTime: boolean, onAttack: (damage: number, from?: THREE.Vector3) => void, target: TurretTarget | null = null): void {
+    // A new frame: the walked shared clock is read again at its first reader (`readWalk`).
+    this.walkTick++;
     // The frame report's sections (`__debug.perf()`): each is a clock pair on a fixed id, nothing when timing is off.
     perf.begin(SEC.stream);
     // The plants shown only as near the eye as the client drew them, a few times a second (step 5); first,
@@ -10563,7 +10794,11 @@ export class World {
     perf.begin(SEC.sky);
     this.day.update(dt, fastTime);
     // The cloud shadows' drift, on the clock the weather reads, so everybody's clouds stand over the same ground.
-    if (this.groundTilesMat) setGroundClock(sharedClock.walkSeconds());
+    // The frame's one read of it, shared with the rooms' flickering lights (`readWalk`).
+    if (this.groundTilesMat) {
+      this.readWalk();
+      setGroundClock(this.frameWalk.t);
+    }
     if (this.swgSky) {
       // What the sky needs from the weather (the area, the level, the blend, the wind) comes first.
       this.weatherWorld.daylight = this.day.daylight;
@@ -11234,6 +11469,11 @@ export class World {
     if (this.interiorLightsFor) {
       e += lumOf(this.interiorAmbient.color) * this.interiorAmbient.intensity + lumOf(this.interiorParallel.color) * this.interiorParallel.intensity;
       for (const l of this.interiorPoints) if (l.intensity > 0) e += pointIrradiance(lumOf(l.color), l.intensity, l.position.distanceTo(p), reach, l.decay);
+      // The pool's other slots (Map-maker II's wave of the rooms' lights), a spot taken as a point: an estimate that errs high.
+      const pool = this.roomPool;
+      for (const l of pool.pointShadows) if (l.intensity > 0) e += pointIrradiance(lumOf(l.color), l.intensity, l.position.distanceTo(p), reach, l.decay);
+      for (const l of pool.spots) if (l.intensity > 0) e += pointIrradiance(lumOf(l.color), l.intensity, l.position.distanceTo(p), reach, l.decay);
+      for (const l of pool.spotShadows) if (l.intensity > 0) e += pointIrradiance(lumOf(l.color), l.intensity, l.position.distanceTo(p), reach, l.decay);
     }
     return e;
   }
@@ -11475,10 +11715,9 @@ export class World {
     rooms.lit = true;
     rooms.building = lit.building;
     rooms.cell = lit.cell;
-    rooms.ambient.copy(this.interiorAmbient.color).multiplyScalar(this.interiorAmbient.intensity);
-    rooms.ambientLuminance = luminanceOf(this.interiorAmbient.color, this.interiorAmbient.intensity);
-    setDirectional(rooms.parallel, this.interiorParallel);
-    for (let i = 0; i < this.interiorPoints.length; i++) rooms.pointCount = addPointLight(rooms.points, rooms.pointCount, this.interiorPoints[i], this.fxLampCells[i]);
+    // The pool's ambient, parallel and lamps (the very lights above), and its other slots lit (Map-maker II's wave of the rooms'
+    // lights: each as a point the room air glows round, the spots with their cones too): `roomLightFx.ts`, which a node test runs.
+    fillRoomLightFx(rooms, this.roomPool, this.fxLampCells);
   }
 
   /** The cell each pooled room lamp was lit from (-1 unlit), written by updateInteriorLights as it hands the lamps out; read by fillFxLights. */
@@ -13570,7 +13809,7 @@ export class World {
     prepare: (file) => (this.particles ? this.particles.prepare(file, this.renderer) : Promise.resolve(false)),
     place: (file, m, contained, size) => this.particles?.place(file, m, contained, false, null, false, { size }) ?? null,
     move: (h, m) => this.particles?.move(h, m),
-    resize: (h, size) => this.particles?.resize(h, size),
+    resize: (h, size) => this.particles?.resize(h, size.v),
     remove: (h) => this.particles?.remove(h),
     sound: (owner, template, x, y, z, inside) => {
       this.ambience?.sources.prepare([template]);
@@ -13579,6 +13818,8 @@ export class World {
     soundMove: (owner, x, y, z) => this.ambience?.sources.moveAttached(owner, x, y, z),
     soundOff: (owner) => this.ambience?.sources.detach(owner),
     fullOf: (template) => (this.audio?.bank.template(template) as { full?: number } | null)?.full ?? 0,
+    // A light hung on a row stood or taken away (Map-maker II's wave of the rooms' lights): the lit room planned again.
+    lightsMoved: () => this.roomLightsMoved(),
   });
   /** What rivers did this session, for the console: landings, bodies added and taken out, effects stood, retunes. */
   readonly riverWork = { landed: 0, added: 0, removed: 0, effects: 0, retuned: 0, effectFiles: 0, missingEffects: 0 };

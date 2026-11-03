@@ -218,6 +218,48 @@ const want = (shown: (keyof typeof R)[]) => seen([...shown, 'lit'].filter((k) =>
   ok(routes.stats.shownShadows === 3 && routes.stats.shownRooms === 5 && routes.stats.shownWorld === 5 && routes.stats.passes[0] === 1 && routes.stats.passes[2] === 1 && routes.stats.passes[1] === 2, 'the counts per pass say what each drew');
 }
 
+// ---- 2b. The rooms' own shadow pass (Map-maker II's wave of the rooms' lights): a building's rooms, as a shadow pass. ----
+{
+  lookFrom(0, 1.6, -4, 0, 1.6, 10);
+  // A frame with no pass at all: what is left undrawn when nothing is drawn.
+  vis.compute(camera, b, 1, [], 0, W, H);
+  routes.begin(vis, true);
+  collect();
+  routes.hideFrame();
+  routes.endPasses();
+  const none = routes.stats.undrawn;
+  routes.restoreFrame();
+  // The rooms' own shadow pass alone.
+  vis.compute(camera, b, 1, [], 0, W, H);
+  routes.begin(vis, true);
+  collect();
+  routes.hideFrame();
+  routes.route(ROUTE_PASS.roomShadows, b, null);
+  ok(vis0() === want(['front', 'blade', 'doorway', 'back', 'step']), `the rooms' own shadow pass shows what stands in the lit building's rooms, as its rooms pass would (${vis0()})`);
+  ok(routes.stats.passes[ROUTE_PASS.roomShadows] === 1 && routes.stats.shownShadows === 5 && routes.stats.shownRooms === 0, "counted as a shadow pass, never as a building's");
+  routes.endPasses();
+  ok(routes.stats.undrawn === none && none > 0, `and marks nothing drawn: a body it alone showed is left undrawn for the effects, as with no pass (${routes.stats.undrawn})`);
+  routes.restoreFrame();
+  // A body whose rooms pass is not built yet (stood outdoors in play, `roomReady` false): kept out of every building's
+  // pass, and still in the rooms' own shadow pass, a depth program being every body's already.
+  const r = new ActorRoutes();
+  const late = root();
+  const ready = root();
+  vis.compute(camera, b, 1, [], 0, W, H);
+  r.begin(vis, true);
+  place(r, 0, 1, -3, 0.5);
+  r.add(ROUTE_KIND.mobile, late, null, b, 1, false);
+  place(r, 0, 1, -2.5, 0.5);
+  r.add(ROUTE_KIND.mobile, ready, null, b, 1);
+  r.hideFrame();
+  r.route(ROUTE_PASS.building, b, null);
+  ok(!late.visible && ready.visible, "a body whose rooms pass is not built is kept out of the building's own pass");
+  r.route(ROUTE_PASS.roomShadows, b, null);
+  ok(late.visible && ready.visible, "and shown in the rooms' own shadow pass with every other body of the lit building's rooms");
+  r.endPasses();
+  r.restoreFrame();
+}
+
 // ---- 3. Inside the front room, facing away: nothing beyond the room is seen. ----
 {
   lookFrom(0, 1.6, -1, 0, 1.6, -10);

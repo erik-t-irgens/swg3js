@@ -847,8 +847,12 @@ export class RoomAir {
           return;
         }
         const boxes = this.boxesFor(building.model);
-        for (let i = 0; i < rooms.pointCount && n < MAX_LAMPS; i++) {
-          const p = rooms.points[i];
+        // The lamps, then the pool's other slots lit (Map-maker II's wave of the rooms' lights: the casting points and the
+        // spots, each glowed round as a point), keyed past the lamps' own so a slot's sight is its own.
+        const lampN = rooms.pointCount;
+        for (let j = 0; j < lampN + rooms.extraCount && n < MAX_LAMPS; j++) {
+          const i = j;
+          const p = j < lampN ? rooms.points[j] : rooms.extra[j - lampN];
           const c = this.lampCentre[n].copy(p.position).applyMatrix4(f.worldToRoom);
           const box = p.cell >= 0 ? boxes.get(p.cell) : undefined;
           this.lampHasBox[n] = box ? 1 : 0;

@@ -66,7 +66,7 @@ ok(/readonly rowLooks = new RowMaterials\(\{\s*forget: \(materials\) => this\.fo
 // ---- The attachments' host, as the world makes it: its file named by the pure rule, its effect placed and sized. ----
 ok(world.includes('fileOf: (ref) => attachFileOf(ref, this.particlesRoot, import.meta.env.BASE_URL),'), "the world names an attachment's effect file by `attachFileOf`, against its own particles' folder");
 ok(world.includes('place: (file, m, contained, size) => this.particles?.place(file, m, contained, false, null, false, { size }) ?? null,'), "and places it with the attachment's size, which the particles multiply into every emitter");
-ok(world.includes('resize: (h, size) => this.particles?.resize(h, size),'), 'and sizes one standing again in place (C held on its handle), never placing it again');
+ok(world.includes('resize: (h, size) => this.particles?.resize(h, size.v),'), "and sizes one standing again in place (C held on its handle), never placing it again, the size read out of the holder's kept record");
 {
   const root = '/assets-private/tatooine/';
   ok(attachFileOf('tatooine:particles/fire.json', root, '/') === 'particles/fire.json', "an effect of the world's own pack is read by its own path");
