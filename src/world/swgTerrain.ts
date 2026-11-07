@@ -5,6 +5,7 @@ import * as THREE from 'three';
 
 import { TERRAIN_GROUND_TUNE, type EnvironmentFamily, type Layer, type ShaderGroup, type TerrainGenerator } from '../swg/terrain/generator.ts';
 import { layAsk, type HeightEdits } from '../swg/terrain/heightEdits.ts';
+import { carveAsk, type CarveRect, type CourseCarve } from '../swg/terrain/courseCarve.ts';
 import { PAINT_TILE, paintTileNumber, paintTileOf, type GroundPaint } from '../swg/terrain/groundPaint.ts';
 import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, rampNames, readColorRampFile, readColorReference, TerrainSampler, UPPER_PAD, waterTables, type ColorRamp, type ColorReference, type GroundProbe, type PoleBlock, type RadialPole, type TerrainTemplate } from '../swg/terrain/trn.ts';
 import { groundChunkAt, groundShift, type GroundShift } from './groundTiles.ts';
@@ -151,7 +152,7 @@ export class SwgTerrain {
   /** Where the ground's mesh stands against the 64 m buckets so its vertices fall on the poles (`groundTiles.ts`). */
   readonly groundShift: GroundShift;
 
-  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number, colorReference: ColorReference | null = null, heights: HeightEdits | null = null, paint: GroundPaint | null = null, tableOnly = false, paintResolve: ((group: ShaderGroup, gen: TerrainGenerator) => void) | null = null, lend: ((group: ShaderGroup, tileWidth: number) => void) | null = null) {
+  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number, colorReference: ColorReference | null = null, heights: HeightEdits | null = null, paint: GroundPaint | null = null, tableOnly = false, paintResolve: ((group: ShaderGroup, gen: TerrainGenerator) => void) | null = null, lend: ((group: ShaderGroup, tileWidth: number) => void) | null = null, course: CourseCarve | null = null) {
     this.colorReference = colorReference;
     this.groundShift = groundShift(centerX, centerZ);
     this.template = parseTerrainTemplate(new Uint8Array(trn));
@@ -168,6 +169,9 @@ export class SwgTerrain {
     // The world's height edits (Map-maker II), held from before any block is cached: every block and far grid takes them
     // as it enters a cache, and the generator and its worker never see them.
     this.sampler.heights = heights;
+    // The world's drawn race courses (the race drawer's second wave), the same way: held from before any block is cached and
+    // carved under the edits as every block and far grid enters a cache; the worker never sees them.
+    this.sampler.course = course;
     // The world's ground paint (Map-maker II), the same way: held from before any block is cached, and the worker's copy of
     // it posted with its `init` below, so every grid either thread makes is painted alike.
     this.sampler.paint = paint;
@@ -236,7 +240,7 @@ export class SwgTerrain {
    * them through `fetchBytes` (pack-relative paths), and the colour ramps when the pack carries
    * them, then starts the worker.
    */
-  static async create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number, fetchBytes: (file: string) => Promise<ArrayBuffer | null>, opts: { heights?: HeightEdits | null; paint?: GroundPaint | null; paintResolve?: (group: ShaderGroup, gen: TerrainGenerator) => void; tableOnly?: boolean; lend?: (group: ShaderGroup, tileWidth: number) => void } = {}): Promise<SwgTerrain> {
+  static async create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number, fetchBytes: (file: string) => Promise<ArrayBuffer | null>, opts: { heights?: HeightEdits | null; paint?: GroundPaint | null; paintResolve?: (group: ShaderGroup, gen: TerrainGenerator) => void; tableOnly?: boolean; lend?: (group: ShaderGroup, tileWidth: number) => void; course?: CourseCarve | null } = {}): Promise<SwgTerrain> {
     const probe = parseTerrainTemplate(new Uint8Array(trn));
     const bitmaps: { familyId: number; bytes: ArrayBuffer }[] = [];
     // A table read for its families alone fetches no bitmap: nothing generates a grid over it.
@@ -261,7 +265,7 @@ export class SwgTerrain {
         console.warn(`terrain: ${COLOR_RAMP_FILE} could not be read; the colour ramps do nothing`, err);
       }
     }
-    return new SwgTerrain(trn, layers, bitmaps, ramps, centerX, centerZ, reference, opts.heights ?? null, opts.paint ?? null, !!opts.tableOnly, opts.paintResolve ?? null, opts.lend ?? null);
+    return new SwgTerrain(trn, layers, bitmaps, ramps, centerX, centerZ, reference, opts.heights ?? null, opts.paint ?? null, !!opts.tableOnly, opts.paintResolve ?? null, opts.lend ?? null, opts.course ?? null);
   }
 
   /** Whether this is a table read for its families alone (no worker, no bitmaps): `create`'s `tableOnly`. */
@@ -573,11 +577,46 @@ export class SwgTerrain {
     const m = this.farMeta.get(g);
     if (!m) return false;
     const h = this.sampler.heights;
+    const c = this.sampler.course;
     const span = (m.n - 1) * m.step;
     const fx0 = Math.min(m.x0, m.x0 + (m.n - 1) * m.dx);
+    const carving = !!c && !c.empty;
     if (!m.raw) {
-      if (!h || !h.touches(fx0, m.z0, fx0 + span, m.z0 + span)) return false;
+      if ((!h || !h.touches(fx0, m.z0, fx0 + span, m.z0 + span)) && (!carving || !c!.touches(fx0, m.z0, fx0 + span, m.z0 + span))) return false;
       m.raw = g.heights.slice();
+    }
+    if (carving) {
+      // The drawn courses carved from raw first, a sample within half a far step of a road taking its surface (a road
+      // narrower than the step would fall between two samples and read as a phantom rise to the race's look-ahead), then the
+      // edits over that in place.
+      const k = this.farCarve;
+      k.raw = m.raw;
+      k.out = g.heights;
+      k.x0 = m.x0;
+      k.dx = m.dx;
+      k.z0 = m.z0;
+      k.dz = m.step;
+      k.nx = m.n;
+      k.nz = m.n;
+      k.widen = m.step / 2;
+      c!.layIn(k);
+      k.raw = null;
+      k.out = null;
+      if (h) {
+        const a = this.farLay;
+        a.raw = g.heights;
+        a.out = g.heights;
+        a.x0 = m.x0;
+        a.dx = m.dx;
+        a.z0 = m.z0;
+        a.dz = m.step;
+        a.nx = m.n;
+        a.nz = m.n;
+        h.layIn(a);
+        a.raw = null;
+        a.out = null;
+      }
+      return true;
     }
     if (!h) {
       g.heights.set(m.raw);
@@ -601,6 +640,112 @@ export class SwgTerrain {
   /** Each far grid's place in the raw frame (its first column's x, the step along x in the game's column order, its first row's z, the step and the size) and, once an edit reached it, its raw heights. */
   private readonly farMeta = new WeakMap<FarGrid, { x0: number; dx: number; z0: number; step: number; n: number; raw: Float32Array | null }>();
   private readonly farLay = layAsk();
+  private readonly farCarve = carveAsk();
+
+  /** The drawn courses carved into this ground (the race drawer's second wave), or null. */
+  get course(): CourseCarve | null {
+    return this.sampler.course;
+  }
+
+  /**
+   * (A store put in after the ground was made, a file that landed late, is handed to the sampler by the world and every edge's
+   * rectangle queued through `courseLater` and laid a budget at a time, `World.attachCourse`: there is no whole re-lay of a
+   * course of its own.) Far grids a course's change waits to lay again (`courseLater`).
+   */
+  private readonly farWait = new Set<FarGrid>();
+
+  /** The cached blocks and far grids under a course's dirty rectangles (raw frame) put on the waiting lists. Answers how many wait. */
+  courseLater(rects: readonly CarveRect[], n: number): number {
+    const blocks = this.sampler.relayLater(rects, n);
+    for (const g of this.farGrids.values()) {
+      const m = this.farMeta.get(g);
+      if (!m) continue;
+      const fx0 = Math.min(m.x0, m.x0 + (m.n - 1) * m.dx);
+      const fx1 = Math.max(m.x0, m.x0 + (m.n - 1) * m.dx);
+      const fz1 = m.z0 + (m.n - 1) * m.step;
+      for (let k = 0; k < n; k++) {
+        const r = rects[k];
+        if (fx1 < r.x0 || fx0 > r.x1 || fz1 < r.z0 || m.z0 > r.z1) continue;
+        this.farWait.add(g);
+        break;
+      }
+    }
+    return blocks + this.farWait.size;
+  }
+
+  /**
+   * The land with no drawn course carved at a point of the game's frame (the race drawer's `World.landAt`): bilinear over the
+   * four 2 m poles round it from their raw copies (`rawPoleAt`) with `edits`' deltas laid on. A pole whose block is not cached
+   * is made (`heightAt`, an edit's rare cost), or with `cachedOnly` the answer is NaN: the Course tool's notes read only built
+   * ground, and a point within a pole of a cached block's far edge reads its next pole in the block beside, which may not be.
+   */
+  landAt(gx: number, gz: number, edits: HeightEdits | null, cachedOnly: boolean): number {
+    const x = this.toSwgX(gx);
+    const z = this.toSwgZ(gz);
+    const fx = x / 2;
+    const fz = z / 2;
+    const i = Math.floor(fx);
+    const j = Math.floor(fz);
+    const u = fx - i;
+    const v = fz - j;
+    const at = (px: number, pz: number): number => {
+      let r = this.sampler.rawPoleAt(px * 2, pz * 2);
+      if (r === null) {
+        if (cachedOnly) return Number.NaN;
+        this.heightAt(this.toGameX(px * 2), this.toGameZ(pz * 2));
+        r = this.sampler.rawPoleAt(px * 2, pz * 2);
+      }
+      return (r ?? Number.NaN) + (edits ? edits.poleDelta(px, pz) : 0);
+    };
+    return (at(i, j) * (1 - u) + at(i + 1, j) * u) * (1 - v) + (at(i, j + 1) * (1 - u) + at(i + 1, j + 1) * u) * v;
+  }
+
+  /** How many blocks and far grids wait to be laid again with a course's change (a record: the console's and the tests'). */
+  get courseWaiting(): { blocks: number; far: number } {
+    return { blocks: this.sampler.relayWaiting, far: this.farWait.size };
+  }
+
+  /**
+   * The same as one plain number (two sizes summed, small integers both): what the world's frame asks of every converted world,
+   * course or none (`World.stepCourseRelay`), where a record made a frame is made unless the compiler builds the getter in
+   * and escape analysis takes the record away, which a frame never counts on.
+   */
+  get courseWaitingCount(): number {
+    return this.sampler.relayWaiting + this.farWait.size;
+  }
+
+  /**
+   * A frame's share of a course's change: the waiting blocks laid again nearest the focus (game frame) within `budgetMs`, then
+   * one far grid at the least; `done` told each one's game-frame rectangle and kind, so the chunks and far tiles over it are
+   * rewritten. Answers how many it laid.
+   */
+  stepCourse(budgetMs: number, fgx: number, fgz: number, now: () => number, done: (far: boolean, gx0: number, gz0: number, gx1: number, gz1: number) => void): number {
+    if (!this.sampler.relayWaiting && !this.farWait.size) return 0;
+    const t0 = now();
+    const fx = Number.isFinite(fgx) ? this.toSwgX(fgx) : 0;
+    const fz = Number.isFinite(fgz) ? this.toSwgZ(fgz) : 0;
+    let laid = this.sampler.stepRelay(budgetMs, fx, fz, now, (x0, z0, x1, z1) => done(false, this.toGameX(x1), this.toGameZ(z0), this.toGameX(x0), this.toGameZ(z1)));
+    let first = true;
+    for (const g of this.farWait) {
+      if (!first && now() - t0 >= budgetMs) break;
+      first = false;
+      this.farWait.delete(g);
+      const m = this.farMeta.get(g);
+      if (!m || !this.farGridsHas(g)) continue;
+      this.layFar(g);
+      laid++;
+      const x0 = Math.min(m.x0, m.x0 + (m.n - 1) * m.dx);
+      const x1 = Math.max(m.x0, m.x0 + (m.n - 1) * m.dx);
+      done(true, this.toGameX(x1), this.toGameZ(m.z0), this.toGameX(x0), this.toGameZ(m.z0 + (m.n - 1) * m.step));
+    }
+    return laid;
+  }
+
+  /** Whether a far grid is still filed (one let go while it waited is passed over). */
+  private farGridsHas(g: FarGrid): boolean {
+    for (const v of this.farGrids.values()) if (v === g) return true;
+    return false;
+  }
 
   get waterLevel(): number {
     return this.template.useGlobalWaterTable ? this.template.globalWaterTableHeight : -Infinity;
@@ -847,7 +992,7 @@ export class SwgTerrain {
     // Its place in the raw frame (column i is raw x = startX + (n - 1 - i) step, row j raw z = startZ + j step), and the
     // height edits laid over it as it enters the cache (Map-maker II): every 16 m sample stands on a pole.
     this.farMeta.set(out, { x0: startX + (n - 1) * step, dx: -step, z0: startZ, step, n, raw: null });
-    if (this.sampler.heights) this.layFar(out);
+    if (this.sampler.heights || this.sampler.course) this.layFar(out);
     this.farGrids.set(key, out);
     this.farIndex.set(gx0, gz0, size, res, out);
     this.farPlace.set(key, { gx0, gz0, size, res });

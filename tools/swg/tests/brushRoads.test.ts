@@ -155,9 +155,10 @@ const strip = (_x: number, z: number) => Math.abs(z - 1) < 2.5;
 }
 
 {
-  // The game hands the brush the world's own road: cached ground only, in the game's frame.
+  // The game hands the brush the world's own road: cached ground only, in the game's frame (and, since the race drawer's
+  // second wave, a drawn course's road first, `courseRoadAt`).
   const read = (f: string) => readFileSync(join(REPO, f), 'utf8').replace(/\r\n/g, '\n');
-  ok(/road: \(x, z\) => w\.roadIfCached\(x, z\),/.test(read('src/editor/editorEntry.ts')) && /road: h\.road \? \(x, z\) => h\.road!\(x, z\) : undefined/.test(read('src/editor/editorBrush.ts')), "the editor's brush host asks the world's road (`roadIfCached`), and the brush's ground carries it");
+  ok(/road: \(x, z\) => \(w\.courseRoadAt\(x, z\) \? true : w\.roadIfCached\(x, z\)\),/.test(read('src/editor/editorEntry.ts')) && /road: h\.road \? \(x, z\) => h\.road!\(x, z\) : undefined/.test(read('src/editor/editorBrush.ts')), "the editor's brush host asks a drawn course's road, then the world's road (`roadIfCached`), and the brush's ground carries it");
   ok(/roadIfCached\(gx: number, gz: number\): boolean \| null \{\n\s*const swg = this\.terrain\?\.swg;\n\s*return swg \? swg\.roadIfCached\(gx, gz\) : false;/.test(read('src/world/world.ts')) && /roadIfCached\(gx: number, gz: number\): boolean \| null \{\n\s*return this\.sampler\.roadAt\(this\.toSwgX\(gx\), this\.toSwgZ\(gz\)\);/.test(read('src/world/swgTerrain.ts')), "which is the generator's byte read off the cached block under the point (none on a world with no generated ground)");
 }
 

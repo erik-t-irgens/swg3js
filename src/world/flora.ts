@@ -89,6 +89,12 @@ export class FloraPlanter {
    * fifth wave, `ourWater.ts` `underLakes`): the world's, null with no lake of ours at all, so the planting is today's.
    */
   underOurWater: ((x: number, z: number, ground: number) => boolean) | null = null;
+  /**
+   * Whether a planting at a point of the game's frame stands on a drawn race course's road or within its track's `clear` past
+   * it (the race drawer's second wave, `CourseCarve.roadAt`): the world's, null with no drawn course, so the planting is
+   * today's by identity.
+   */
+  onCourse: ((x: number, z: number) => boolean) | null = null;
 
   constructor(swg: FloraSource, models: Map<string, LoadedModel>) {
     this.swg = swg;
@@ -276,7 +282,9 @@ export class FloraPlanter {
     // A planting under a lake of ours is left out (Map-maker II's fifth wave, `underOurWater`): null with no lake at all, so
     // the planting is today's by identity.
     const under = this.underOurWater;
-    const kept = placements.filter((p) => exclusions.every((e) => Math.hypot(e.x - p.x, e.z - p.z) > e.r) && !(under && under(p.x, p.z, heightAt(p.x, p.z))));
+    // And one on a drawn course's road plus its `clear` (the race drawer): null with no course, the same identity.
+    const course = this.onCourse;
+    const kept = placements.filter((p) => exclusions.every((e) => Math.hypot(e.x - p.x, e.z - p.z) > e.r) && !(under && under(p.x, p.z, heightAt(p.x, p.z))) && !(course && course(p.x, p.z)));
     // Every planting's place and matrix, once: the chunk's own meshes and the region batches (step 7,
     // `floraBatch.ts`) are both written from it.
     const data = plantingData(kept, heightAt, waterAt);

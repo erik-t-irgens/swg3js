@@ -90,6 +90,8 @@ import { readPlacementsFile, scaleOf } from '../../src/story/placements.ts';
 import { isSeat, isTableTemplate, standsSolid } from '../../src/world/rowSolid.ts';
 import { ObjectKeyIndex, compileRemovals, noRemovals, readRemovalsFile, removalKindOf } from '../../src/story/removals.ts';
 import { FLORA_COLLISION, mergeFloraCollision, modelExtentOf, rowFloraParts } from '../../src/world/floraShapes.ts';
+import { readTrackFile } from '../../src/race/trackFile.ts';
+import { CARVE_VERSION, CourseCarve, carveAsk } from '../../src/swg/terrain/courseCarve.ts';
 
 // The rules, named here as they always were (every caller and test that imports them from this file still does).
 export {
@@ -142,6 +144,14 @@ export function gridEditsOf(world, folder = placementsFolder(), packDir = null) 
   if (packDir) {
     const stamp = soeRiverStamp(packDir);
     if (stamp) edits.soeRivers = stamp;
+  }
+  // The world's drawn race courses (the race drawer's second wave): the track file beside the placements folder
+  // (`tracksFolder`), kept only where a track of it has a drawn course, its stamp the key folds in (`courseStamp`). A file of
+  // gate-only tracks, and a world with none, keys and bakes exactly as it did.
+  const tracks = gridTrackText(world, folder);
+  if (tracks) {
+    edits.tracks = tracks.text;
+    edits.course = tracks.stamp;
   }
   if (packDir && (typeof texts.world === 'string' || typeof texts.story === 'string')) {
     const packs = installPacks(packDir, null, folder);
@@ -378,6 +388,67 @@ export function gridHeights(edits, log = () => {}) {
     store.set(t.tx, t.tz, d);
   }
   return store.size ? store : null;
+}
+
+/**
+ * The track files' folder beside a placements folder (a checkout's `public/tracks`, a release's `dist/tracks`, or beside the
+ * folder `SWG3JS_PLACEMENTS` names), or null where there is no placements folder: a test that hands its child an empty
+ * `SWG3JS_PLACEMENTS` reads no track file either, so the owner's own courses never reach a fixture's grid.
+ */
+export function tracksFolder(placed = placementsFolder()) {
+  return placed ? join(dirname(placed), 'tracks') : null;
+}
+
+/**
+ * A world's track file as the bake reads it (the race drawer's second wave): its text and the stamp of its drawn courses
+ * (`courseStamp`), or null where the world has no track file or no track of it has a drawn course.
+ */
+export function gridTrackText(world, placed = placementsFolder()) {
+  const dir = tracksFolder(placed);
+  if (!dir || !/^[a-z0-9_]{1,40}$/.test(world)) return null;
+  let text;
+  try {
+    text = readFileSync(join(dir, `${world}.json`), 'utf8');
+  } catch {
+    return null;
+  }
+  const read = readTrackFile(text, world, 'ground');
+  const stamp = courseStamp(read.tracks);
+  return stamp ? { text, stamp } : null;
+}
+
+/**
+ * What of a world's tracks the carve reads, as words the grid's key folds in (`layoutKeyOf`): the carve's version, and per
+ * track with a drawn course its id and kind, its course's falloff, crossing, margin and level, and every path's nodes (place,
+ * width, bank, shoulder, curve and join). Empty where no track has a course: such a world keys as it did before courses.
+ */
+export function courseStamp(tracks) {
+  const lines = [];
+  for (const t of [...tracks].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
+    const c = t.course;
+    if (!c) continue;
+    lines.push(`track ${t.id} ${t.kind} ${c.feather} ${c.crossing} ${c.margin} ${c.level}`);
+    for (const p of c.paths) {
+      lines.push(`path ${p.id}`);
+      for (const n of p.nodes) lines.push(`${n.x} ${n.y} ${n.z} ${n.w} ${n.b} ${n.sh} ${n.c} ${n.j ?? ''}`);
+    }
+  }
+  return lines.length ? `carve v${CARVE_VERSION}\n${lines.join('\n')}` : '';
+}
+
+/** The world's drawn courses as a carve store (`courseCarve.ts`), read as the game reads them; null where none is drawn. */
+export function gridCourses(edits, log = () => {}) {
+  const text = edits?.tracks;
+  if (typeof text !== 'string') return null;
+  const read = readTrackFile(text, edits.world, 'ground');
+  if (read.problem) {
+    log(`  track file not read: ${read.problem}`);
+    return null;
+  }
+  if (!read.tracks.some((t) => t.course)) return null;
+  const store = new CourseCarve();
+  store.set(read.tracks);
+  return store.empty ? null : store;
 }
 
 /** The water file's rows, read as the game reads them (`readWaterFile`); none where there is no file. */
@@ -816,6 +887,27 @@ export async function buildNavGrid(dir, opts = {}) {
   // (`HeightEdits.layIn`, `fround(raw + d)` where a delta is not nought), after the check above, which holds the lattice
   // to the generator's own raw ground. (`edits` is read above, before the buildings' layers.)
   const editStats = { tiles: 0, lakes: 0, rows: 0, floraRows: 0, rowsMissing: 0, absent: [] };
+  // The drawn courses carved, counted apart (only where there are any), so a world with none writes the header it always did.
+  let courseCount = 0;
+  // The world's drawn race courses (the race drawer's second wave) carved first, then the heights file's deltas over the
+  // carve, the game's own order (`out = fround(fround(carve(raw)) + d)`): every pole of the raw frame the bake's lattice
+  // holds, the very store and arithmetic the ground's blocks are laid by (`CourseCarve.layIn`).
+  const courses = gridCourses(edits, log);
+  if (courses) {
+    const ask = carveAsk();
+    ask.raw = heights;
+    ask.out = heights;
+    ask.x0 = cx - x0;
+    ask.dx = -pole;
+    ask.z0 = cz + z0;
+    ask.dz = pole;
+    ask.nx = pnx;
+    ask.nz = pnz;
+    ask.widen = 0;
+    courses.layIn(ask);
+    courseCount = courses.paths().length;
+    log(`  track file: ${courseCount} drawn course path${courseCount === 1 ? '' : 's'} carved into the ground`);
+  }
   const heightEdits = gridHeights(edits, log);
   if (heightEdits) {
     heightEdits.lay(heights, heights, cx - x0, -pole, cz + z0, pole, pnx, pnz);
@@ -1174,6 +1266,8 @@ export async function buildNavGrid(dir, opts = {}) {
       ...(typeof edits?.removed === 'string' && (removal.hidden.size || removal.solid.size || removal.templates.size || removal.missing.length) ? { removed: { ...removalStats } } : {}),
       // The terrain's own wet rivers made water (the sixth wave): only where there are any.
       ...(soeRiverCount ? { soeRivers: soeRiverCount } : {}),
+      // The drawn race courses carved (the race drawer's second wave): only where there are any.
+      ...(courseCount ? { courses: courseCount } : {}),
       heightCheck: Number(worstHeight.toFixed(4)),
       seconds: Number(seconds.toFixed(1)),
     },

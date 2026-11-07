@@ -33,13 +33,14 @@ const generator = read('src/swg/terrain/generator.ts');
 const worker = read('src/swg/terrain/workerCore.ts');
 const workerFile = read('src/swg/terrain/worker.ts');
 
-// The four application sites.
-ok(/if \(this\.heights\) this\.layEntering\(blockX, blockZ, b\);\s*this\.blocks\.set/.test(body(trn, '  generateBlock(blockX: number, blockZ: number): PoleBlock {')), 'a block generated on the main thread takes the edits as it enters the cache');
+// The four application sites. (From the race drawer's second wave each also lays a drawn course's carve under the edits,
+// `this.course` beside `this.heights`: `courseWiring.test.ts` and `courseApply.test.ts` hold that half.)
+ok(/if \(this\.heights \|\| this\.course\) this\.layEntering\(blockX, blockZ, b\);\s*this\.blocks\.set/.test(body(trn, '  generateBlock(blockX: number, blockZ: number): PoleBlock {')), 'a block generated on the main thread takes the edits as it enters the cache');
 // (Map-maker II's second wave lets a preview's kept ground go between the two, which touches no height.)
-ok(/if \(this\.heights\) this\.layEntering\(blockX, blockZ, block\);\s*(\/\/[^\n]*\n\s*)*(if \(this\.previewBase\.size\) this\.previewBase\.delete\([^\n]+\);\s*)?this\.blocks\.set/.test(body(trn, '  putBlock(blockX: number, blockZ: number, block: PoleBlock): void {')), 'a block the worker made takes them as it lands');
-ok(/this\.farMeta\.set\(out, [^\n]+\);\s*if \(this\.sampler\.heights\) this\.layFar\(out\);\s*this\.farGrids\.set\(key, out\);/.test(swg), 'a far grid takes them as it enters its cache');
+ok(/if \(this\.heights \|\| this\.course\) this\.layEntering\(blockX, blockZ, block\);\s*(\/\/[^\n]*\n\s*)*(if \(this\.previewBase\.size\) this\.previewBase\.delete\([^\n]+\);\s*)?this\.blocks\.set/.test(body(trn, '  putBlock(blockX: number, blockZ: number, block: PoleBlock): void {')), 'a block the worker made takes them as it lands');
+ok(/this\.farMeta\.set\(out, [^\n]+\);\s*if \(this\.sampler\.heights \|\| this\.sampler\.course\) this\.layFar\(out\);\s*this\.farGrids\.set\(key, out\);/.test(swg), 'a far grid takes them as it enters its cache');
 const heightAt = body(terrain, '  heightAt(x: number, z: number): number {');
-ok(/const h = this\.groundRawAt\(x, z\);\s*if \(this\.heights === null \|\| this\.swg\) return h;\s*return this\.edited\(h, x, z\);/.test(heightAt), "a world with no converted terrain takes them at the end of heightAt, a converted world's being in its blocks");
+ok(/let h = this\.groundRawAt\(x, z\);\s*if \(this\.swg\) return h;\s*if \(this\.courseGrid !== null\) h = this\.courseGrid\.carveAt\(h, -x, z\);\s*if \(this\.heights === null\) return h;\s*return this\.edited\(h, x, z\);/.test(heightAt), "a world with no converted terrain takes them at the end of heightAt (over the drawn courses' pole grid), a converted world's being in its blocks");
 ok(!/heights/.test(body(terrain, '  private groundBeneathDem(x: number, z: number): number {')), "never in groundBeneathDem (the feather's far end would count it twice)");
 
 // Nowhere else: not in the generator, its worker, `generate`, `generateChunk` or `baseHeightAt`.
@@ -55,7 +56,7 @@ for (const sig of ['  generate(', '  baseHeightAt(']) {
 const load = body(world, '  async loadPack(spawn: THREE.Vector3');
 // (From Map-maker II's second wave the paint file is awaited after it and handed in beside it, the same way; from its
 // third wave the lending planned after the paint file, and lent at the terrain's constructor, `lend`.)
-ok(/const heights = await this\.heightsReady\(\);\s*if \(token !== this\.loadToken\) return null;\s*(\/\/[^\n]*\n\s*)*await this\.paintReady\(\);\s*if \(token !== this\.loadToken\) return null;\s*(\/\/[^\n]*\n\s*)*await this\.prepareLending\(pack, this\.paintPack\(\)\);\s*if \(token !== this\.loadToken\) return null;\s*const paint = this\.groundPaint;\s*const coming = this\.terrain;\s*this\.swgComingFor = coming;\s*const swg = await SwgTerrain\.create\(trn, layers, layout\.center\.x, layout\.center\.z, \(file\) => pack\.bytes\(file\), \{ heights, paint, paintResolve: \(group, gen\) => this\.resolvePaint\(group, gen\), lend: \(group, tileWidth\) => this\.lendGround\(group, tileWidth\) \}\)\.finally\(\(\) => \{\s*if \(this\.swgComingFor === coming\) this\.swgComingFor = null;\s*\}\);/.test(load), "the heights file is awaited right before SwgTerrain.create and handed to it, so the sampler holds it before any block is cached");
+ok(/const heights = await this\.heightsReady\(\);\s*if \(token !== this\.loadToken\) return null;\s*(\/\/[^\n]*\n\s*)*await this\.paintReady\(\);\s*if \(token !== this\.loadToken\) return null;\s*(\/\/[^\n]*\n\s*)*await this\.prepareLending\(pack, this\.paintPack\(\)\);\s*if \(token !== this\.loadToken\) return null;\s*const paint = this\.groundPaint;\s*const coming = this\.terrain;\s*this\.swgComingFor = coming;\s*const course = this\.courseCarve;\s*const swg = await SwgTerrain\.create\(trn, layers, layout\.center\.x, layout\.center\.z, \(file\) => pack\.bytes\(file\), \{ heights, paint, paintResolve: \(group, gen\) => this\.resolvePaint\(group, gen\), lend: \(group, tileWidth\) => this\.lendGround\(group, tileWidth\), course \}\)\.finally\(\(\) => \{\s*if \(this\.swgComingFor === coming\) this\.swgComingFor = null;\s*\}\);/.test(load), "the heights file is awaited right before SwgTerrain.create and handed to it, so the sampler holds it before any block is cached");
 // A file the bound gave up on that lands while the converted ground is made (inside `SwgTerrain.create`) is kept for it and
 // handed to its sampler as it is attached: laid on the terrain the converted ground replaces, it reached nothing for the
 // whole visit and every stroke wrote into a store the sampler never read (the fix round's finding).
@@ -64,7 +65,8 @@ const install = body(world, '  installHeights(store: HeightEdits | null, late = 
 ok(/if \(swg\) \{\s*swg\.useHeights\(store\);\s*this\.terrain\.heights = null;\s*\} else if \(this\.swgComingFor === this\.terrain\) \{[\s\S]{0,400}?return;\s*\} else this\.terrain\.heights = store;/.test(install), "and installHeights keeps a store for a converted ground still being made, never laying it on the terrain that ground replaces");
 const loadBody = body(world, '  load(planet: PlanetDef, packId = packIdOf(planet)): void {');
 // Moved on purpose by Map-maker II's fourth wave's fix round: the remake sits in a `try` that makes the far cards at once behind the screen.
-ok(/const store = await this\.heightsReady\(\);[\s\S]{0,200}terrain\.heights = store;[\s\S]{0,400}this\.remakeGround\(\);/.test(loadBody), "on a real-elevation world, before the raster's remakeGround");
+// (And moved on purpose by the race drawer's second wave: the drawn courses' pole grid is made between the two.)
+ok(/const store = await this\.heightsReady\(\);[\s\S]{0,200}terrain\.heights = store;[\s\S]{0,700}this\.remakeGround\(\);/.test(loadBody), "on a real-elevation world, before the raster's remakeGround");
 // A raster that does not load: the file is still read and laid on the noise ground in its place (else its rows were never
 // kept and every stroke over a tile the file holds was refused).
 ok(/its elevation did not load[^\n]*\n[\s\S]{0,600}?this\.heightsByDem = false;\s*const store = await this\.heightsReady\(\);\s*if \(store && this\.terrain === terrainAtLoad\) this\.installHeights\(store\);/.test(loadBody), "a real-elevation world whose raster fails still reads its heights file and lays it on the noise ground");

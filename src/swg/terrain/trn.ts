@@ -8,6 +8,7 @@ import { ChunkReader, chunkChild, formChild, isForm, parseIff, parseIffRoots, ty
 import { shaderKey } from './shaderKey.ts';
 import { layAsk, type HeightEdits } from './heightEdits.ts';
 import type { GroundPaint } from './groundPaint.ts';
+import { carveAsk, type CarveRect, type CourseCarve } from './courseCarve.ts';
 
 export { shaderKey, rampKey, type ColorRamp };
 
@@ -443,6 +444,16 @@ export class TerrainSampler {
   private readonly raws = new Map<number, Float32Array>();
   private readonly lay = layAsk();
   /**
+   * The world's drawn race courses carved into the ground (the race drawer's second wave, `courseCarve.ts`), laid under the
+   * height edits wherever they are laid: every block as it enters the cache and every cached block a change reaches, from its
+   * raw heights, the carve first and the edits over it. Null carves nothing, and every block is what the heights alone make of
+   * it. Never read by `generate`, `generateChunk` or `baseHeightAt`: those stay raw.
+   */
+  course: CourseCarve | null = null;
+  private readonly carveLay = carveAsk();
+  /** Blocks a course's change waits to lay again (`relayLater`), by number, and their places. */
+  private readonly relayWait = new Map<number, number>();
+  /**
    * The ground's paint (Map-maker II, `groundPaint.ts`), handed to every grid this sampler runs the generator over, so a
    * block made here is the worker's block to the bit; null paints nothing, and every grid is the generator's.
    */
@@ -589,8 +600,9 @@ export class TerrainSampler {
       b = { heights: g.heights, shaders: g.shaders, children: g.children, colors: g.colors, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, radialNear: g.radialNear, radialFar: g.radialFar, environments: g.environments, seasonal: g.seasonal };
       if (g.colorsUnpainted) b.colorsUnpainted = g.colorsUnpainted;
       if (g.roads) b.roads = g.roads;
-      // The height edits laid over it as it enters the cache, its raw heights kept beside (Map-maker II).
-      if (this.heights) this.layEntering(blockX, blockZ, b);
+      // The height edits laid over it as it enters the cache, its raw heights kept beside (Map-maker II), the drawn courses
+      // carved under them (the race drawer).
+      if (this.heights || this.course) this.layEntering(blockX, blockZ, b);
       this.blocks.set(`${blockX},${blockZ}`, b);
     }
     return b;
@@ -602,8 +614,9 @@ export class TerrainSampler {
 
   putBlock(blockX: number, blockZ: number, block: PoleBlock): void {
     this.lastBlock = undefined;
-    // A block the worker made enters the cache raw: the height edits in force are laid over it here, as they land.
-    if (this.heights) this.layEntering(blockX, blockZ, block);
+    // A block the worker made enters the cache raw: the height edits in force are laid over it here, as they land, and the
+    // drawn courses carved under them.
+    if (this.heights || this.course) this.layEntering(blockX, blockZ, block);
     // A block made again (for a paint, Map-maker II) replaces the one cached, and a preview's ground for it goes with it.
     if (this.previewBase.size) this.previewBase.delete(TerrainSampler.blockNumber(blockX, blockZ));
     this.blocks.set(`${blockX},${blockZ}`, block);
@@ -701,11 +714,15 @@ export class TerrainSampler {
   private layEntering(bx: number, bz: number, b: PoleBlock): void {
     const n = TerrainSampler.blockNumber(bx, bz);
     const h = this.heights;
+    const c = this.course;
     const step = this.poleStep;
     const np = this.numberOfPoles;
     const x0 = bx * this.blockWidth - ORIGIN_OFFSET * step;
     const z0 = bz * this.blockWidth - ORIGIN_OFFSET * step;
-    if (n < 0 || !h || !h.touches(x0, z0, x0 + (np - 1) * step, z0 + (np - 1) * step)) {
+    const x1 = x0 + (np - 1) * step;
+    const z1 = z0 + (np - 1) * step;
+    // A copy where a tile or a road's reach touches the block (the race drawer: the carve too is laid from raw).
+    if (n < 0 || ((!h || !h.touches(x0, z0, x1, z1)) && (!c || !c.touches(x0, z0, x1, z1)))) {
       if (n >= 0) this.raws.delete(n);
       return;
     }
@@ -714,9 +731,44 @@ export class TerrainSampler {
     this.layOne(raw, b.heights, x0, z0);
   }
 
-  /** One block's heights laid from its raw copy (`HeightEdits.layIn`, every sample from raw). */
+  /**
+   * One block's heights laid from its raw copy (`HeightEdits.layIn`, every sample from raw): the drawn courses carved from raw
+   * first (`CourseCarve.layIn`), then the edits laid over that in place, so a pole is `fround(fround(carve(raw)) + d)`. With
+   * no course, the edits alone as ever.
+   */
   private layOne(raw: Float32Array, out: Float32Array, x0: number, z0: number): boolean {
     const h = this.heights;
+    const c = this.course;
+    if (c && !c.empty) {
+      const k = this.carveLay;
+      k.raw = raw;
+      k.out = out;
+      k.x0 = x0;
+      k.dx = this.poleStep;
+      k.z0 = z0;
+      k.dz = this.poleStep;
+      k.nx = this.numberOfPoles;
+      k.nz = this.numberOfPoles;
+      k.widen = 0;
+      let carved = c.layIn(k);
+      k.raw = null;
+      k.out = null;
+      if (h) {
+        const a = this.lay;
+        a.raw = out;
+        a.out = out;
+        a.x0 = x0;
+        a.dx = this.poleStep;
+        a.z0 = z0;
+        a.dz = this.poleStep;
+        a.nx = this.numberOfPoles;
+        a.nz = this.numberOfPoles;
+        if (h.layIn(a)) carved = true;
+        a.raw = null;
+        a.out = null;
+      }
+      return carved;
+    }
     if (!h) {
       out.set(raw);
       return false;
@@ -764,10 +816,7 @@ export class TerrainSampler {
         if (!raw) {
           // Nothing was ever laid over it (no tile touched it as it entered): its heights are the generator's, and a block no
           // tile touches now keeps no copy (an empty store laid over the cache copies nothing).
-          const h = this.heights;
-          const x0 = bx * bw - pad;
-          const z0 = bz * bw - pad;
-          if (!h || !h.touches(x0, z0, x0 + (np - 1) * step, z0 + (np - 1) * step)) continue;
+          if (!this.touchedAt(bx, bz)) continue;
           raw = b.heights.slice();
           this.raws.set(n, raw);
         }
@@ -776,6 +825,103 @@ export class TerrainSampler {
       }
     }
     return laid;
+  }
+
+  /** Whether a tile of the height edits or a road's reach touches a block's poles. */
+  private touchedAt(bx: number, bz: number): boolean {
+    const h = this.heights;
+    const c = this.course;
+    const step = this.poleStep;
+    const np = this.numberOfPoles;
+    const x0 = bx * this.blockWidth - ORIGIN_OFFSET * step;
+    const z0 = bz * this.blockWidth - ORIGIN_OFFSET * step;
+    const x1 = x0 + (np - 1) * step;
+    const z1 = z0 + (np - 1) * step;
+    return (!!h && h.touches(x0, z0, x1, z1)) || (!!c && c.touches(x0, z0, x1, z1));
+  }
+
+  /**
+   * The cached blocks under a course's dirty rectangles (raw frame) put on the waiting list, laid again a budget at a time
+   * (`stepRelay`) rather than all in one call: a dragged node's four edges can each be a kilometre, and an undo of a course moved
+   * whole all of it. Answers how many blocks wait.
+   */
+  relayLater(rects: readonly CarveRect[], n: number): number {
+    for (let k = 0; k < n; k++) {
+      const r = rects[k];
+      for (const { bx, bz } of this.cachedBlocksIn(r.x0, r.z0, r.x1, r.z1)) {
+        const b = TerrainSampler.blockNumber(bx, bz);
+        if (b >= 0) this.relayWait.set(b, b);
+      }
+    }
+    return this.relayWait.size;
+  }
+
+  /** How many blocks wait to be laid again. */
+  get relayWaiting(): number {
+    return this.relayWait.size;
+  }
+
+  /**
+   * The waiting blocks laid again from raw with the carve and the edits in force, nearest `(fx, fz)` (raw frame) first, until
+   * `budgetMs` of `now()` is spent (one at the least; all of them with Infinity); `done` told each block's raw rectangle (for
+   * the chunks over it). A block let go meanwhile is passed over. Answers how many it laid.
+   */
+  stepRelay(budgetMs: number, fx: number, fz: number, now: () => number, done?: (x0: number, z0: number, x1: number, z1: number) => void): number {
+    if (!this.relayWait.size) return 0;
+    const t0 = now();
+    const bw = this.blockWidth;
+    const step = this.poleStep;
+    const np = this.numberOfPoles;
+    const pad = ORIGIN_OFFSET * step;
+    let laid = 0;
+    while (this.relayWait.size) {
+      let best = -1;
+      let bd = Infinity;
+      for (const n of this.relayWait.keys()) {
+        const bx = Math.floor(n / 8192) - 4096;
+        const bz = (n % 8192) - 4096;
+        const dx = (bx + 0.5) * bw - fx;
+        const dz = (bz + 0.5) * bw - fz;
+        const d = dx * dx + dz * dz;
+        if (best < 0 || d < bd) {
+          bd = Number.isFinite(d) ? d : 0;
+          best = n;
+        }
+      }
+      this.relayWait.delete(best);
+      const bx = Math.floor(best / 8192) - 4096;
+      const bz = (best % 8192) - 4096;
+      const b = this.blockAt(bx, bz);
+      if (!b) continue;
+      let raw = this.raws.get(best);
+      if (!raw) {
+        if (!this.touchedAt(bx, bz)) continue;
+        raw = b.heights.slice();
+        this.raws.set(best, raw);
+      }
+      this.layOne(raw, b.heights, bx * bw - pad, bz * bw - pad);
+      laid++;
+      done?.(bx * bw - pad, bz * bw - pad, bx * bw - pad + (np - 1) * step, bz * bw - pad + (np - 1) * step);
+      if (now() - t0 >= budgetMs) break;
+    }
+    return laid;
+  }
+
+  /** The waiting list let go (the world went, or a course was put in whole and every block laid at once). */
+  dropRelay(): void {
+    this.relayWait.clear();
+  }
+
+  /**
+   * The carved raw height at a pole of the raw frame (the sculpt brush's base, the race drawer): the carve worked out from the
+   * block's raw copy, never taken back out of the laid heights (which hold `fround(fround(carve) + d)`, from which the carve
+   * does not come back to the bit). With no course it is `rawPoleAt` by `Object.is`. Null where the block is not cached.
+   */
+  basePoleAt(x: number, z: number): number | null {
+    const r = this.rawPoleAt(x, z);
+    const c = this.course;
+    if (r === null || !c || c.empty) return r;
+    return Math.fround(c.carveAt(r, x, z));
   }
 
   /** Every cached block laid again (a store put in after blocks were cached, or let go): `relay` over the whole cache. */
@@ -974,6 +1120,7 @@ export class TerrainSampler {
     this.blocks.clear();
     this.raws.clear();
     this.previewBase.clear();
+    this.relayWait.clear();
   }
 
   /** Terrain height at a world point, from the tile fans exactly as the client's collision sees them. */

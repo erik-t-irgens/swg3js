@@ -52,8 +52,8 @@ import { CARD_CURVE_PARS, CARD_LIGHT_UNIFORMS } from './cardLight.ts';
 import { SWAY_TUNE, SWAY_UNIFORMS } from './floraSway.ts';
 import { SSAO_CSM_FADE_MARGIN } from '../core/fx/ssaoMath.ts';
 import {
-  FAR_CARD_DEFAULTS, GRASS_DEFAULTS, GRASS_SHADOW_TUNE, GRASS_SWAY_DEFAULTS, TUFT_HIDDEN, TUFT_LIFT, candidateCapacity, farReach, grassReach, grassWindowFor, placeFarCards, placeGrass, placeStats, trimBuffers, tuftBuffers,
-  type FarCardTune, type FarSamples, type FloraCircle, type GrassSource, type GrassSway, type GrassTune, type GrassWorld, type PlaceStats, type TuftBuffers,
+  FAR_CARD_DEFAULTS, GRASS_DEFAULTS, GRASS_SHADOW_TUNE, GRASS_SWAY_DEFAULTS, TUFT_HIDDEN, TUFT_LIFT, candidateCapacity, farReach, grassReach, grassWindowFor, placeFarCards, placeGrass, placeStats, roadMask, trimBuffers, tuftBuffers,
+  type FarCardTune, type FarSamples, type FloraCircle, type GrassSource, type GrassSway, type GrassTune, type GrassWorld, type PlaceStats, type RoadMask, type TuftBuffers,
 } from './grassMath.ts';
 import { COLOUR_MODES, GROUND_DRAW_TUNE, groundChunkAt, groundChunkOrigin, type GroundShift } from './groundTiles.ts';
 import { SWAY_FUNCTIONS, SWAY_SHARED_PARS } from './swayMath.ts';
@@ -684,6 +684,11 @@ export interface GrassHost {
   chunkTrees(cx: number, cz: number): number;
   /** Which cascade a shadow camera is (0 for any other), for a casting chunk's own hooks. */
   cascadeOf(shadowCamera: THREE.Camera): number;
+  /**
+   * A drawn race course's road over a square of the game's frame (`x0`, `z0`, `size` metres), into `out` (the race drawer's
+   * second wave): its `on` false where no course reaches it. Absent: no course is ever asked, and the placing is today's.
+   */
+  roadMask?(x0: number, z0: number, size: number, out: RoadMask): void;
 }
 
 /** What `GrassHost.chunkTrees` answers: no chunk, a chunk with its trees shown, a chunk with its trees hidden. */
@@ -904,6 +909,8 @@ export class GrassField {
   private eyeCz = Number.NaN;
   private pending = false;
   private readonly circles: FloraCircle[] = [];
+  /** A drawn course's road over the chunk being built (the race drawer), kept. */
+  private readonly road: RoadMask = roadMask();
   private scratch: TuftBuffers | null = null;
   /** The material every chunk's mesh wears: the session's plain one, or its twin that leans in the moving air (`wear`). */
   material: THREE.ShaderMaterial;
@@ -1117,7 +1124,11 @@ export class GrassField {
     if (setup.shift.x && setup.shift.z) this.host.circlesFor(c.cx + 1, c.cz + 1, this.circles);
     const b = this.scratch!;
     b.count = 0;
-    placeGrass(setup.src, setup.world, setup.near, c.x0, c.z0, GRASS_CHUNK, this.circles, GRASS_TUNE, GRASS_SWAY, SWAY_TUNE, b, GRASS_STATS.place);
+    // A drawn course's road kept clear of grass (the race drawer): only where the world hands a mask over and one reaches the chunk.
+    const road = this.road;
+    road.on = false;
+    this.host.roadMask?.(c.x0, c.z0, GRASS_CHUNK, road);
+    placeGrass(setup.src, setup.world, setup.near, c.x0, c.z0, GRASS_CHUNK, this.circles, GRASS_TUNE, GRASS_SWAY, SWAY_TUNE, b, GRASS_STATS.place, road.on ? road : null);
     c.built = true;
     c.stale = false;
     c.count = b.count;
@@ -1248,6 +1259,8 @@ export class FarCards {
   readonly tileSize: number;
   readonly drop: number;
   private readonly circles: FloraCircle[] = [];
+  /** A drawn course's road over the tile being built (the race drawer), kept. */
+  private readonly road: RoadMask = roadMask();
   private readonly circlesAt = (gx: number, gz: number): readonly FloraCircle[] => {
     this.circles.length = 0;
     this.host.circlesFor(Math.floor(gx / GRASS_CHUNK), Math.floor(gz / GRASS_CHUNK), this.circles);
@@ -1403,7 +1416,10 @@ export class FarCards {
     const t0 = performance.now();
     const b = this.scratch!;
     b.count = 0;
-    placeFarCards(setup.src, setup.world, setup.far, t.ox, t.oz, this.tileSize, t.samples!, this.drop, this.circlesAt, FAR_CARD_TUNE, b, GRASS_STATS.farPlace);
+    const road = this.road;
+    road.on = false;
+    this.host.roadMask?.(t.ox, t.oz, this.tileSize, road);
+    placeFarCards(setup.src, setup.world, setup.far, t.ox, t.oz, this.tileSize, t.samples!, this.drop, this.circlesAt, FAR_CARD_TUNE, b, GRASS_STATS.farPlace, road.on ? road : null);
     t.built = true;
     if (b.count) {
       const trimmed = trimBuffers(b);

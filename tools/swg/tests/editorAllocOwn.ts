@@ -932,6 +932,10 @@ if (process.argv.includes('course')) {
   if (typeof made === 'string') throw new Error(made);
   const tracks = [made];
   const cm = marksView();
+  // The race drawer's second wave: the world carves a held edit's course at each preview tick (a store kept, as the world's).
+  const { CourseCarve } = await import('../../../src/swg/terrain/courseCarve.ts');
+  const carveStore = new CourseCarve();
+  carveStore.set(tracks);
   const course = new EditorCourse({
     // A write's stand-in: a let-go between windows writes, and nothing it writes moves the course.
     edits: { beginStroke: (label: string) => ({ label }), strokeWrite: async () => '', endStroke: () => '' } as never,
@@ -955,6 +959,9 @@ if (process.argv.includes('course')) {
     worldMark: () => 1,
     say() {},
     refresh() {},
+    carve: (list, _fx, _fz, preview) => {
+      carveStore.set(list, !preview);
+    },
   });
   await course.arm();
   course.pick('course_1');

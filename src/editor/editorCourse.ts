@@ -1,6 +1,8 @@
 // The world editor's Course tool (the race drawer's first wave, `A:\swg3js\racedrawer\DESIGN.md` §2.9, §2.11): a race
 // course drawn node by node on the ground, edited by its handles, and its gates placed and edited. The Tools list's entry on
-// the apostrophe (`courseTool`, `editorCourse`). Nothing carves the ground yet: that is the race drawer's second wave.
+// the apostrophe (`courseTool`, `editorCourse`). From the race drawer's second wave a course carves the ground under it
+// (`courseCarve.ts`): a held edit carves live (`preview`), a write carries our rows on the ground it moved and counts (or
+// clears) the sculpt's touch-ups it left, and Fit to land, Fit a bridge and Clear old touch-ups are acts of their own.
 //
 // **Its modes** (the Tools tab's buttons, `course({ arm })`):
 // - **draw**: LMB on the ground adds a node, a click near the first node closes and writes a circuit, a click near the last
@@ -30,8 +32,14 @@
 // Rule for this file (node runs it with type stripping): every import with its `.ts` extension, no enum, no namespace, no
 // constructor parameter properties. The dev server's alone: reached only through the editor's own dynamic import.
 
-import { courseSpines, readTrack, type CourseNode, type TrackDef } from '../race/trackFile.ts';
+import { courseSpines, readTrack, trackHash, type CourseNode, type TrackDef } from '../race/trackFile.ts';
 import { rightOf, spineAt, spinePoint, type Spine } from '../race/coursePath.ts';
+import { CourseCarve, deckAsk, type CarveSample } from '../swg/terrain/courseCarve.ts';
+import { HEIGHT_POLE, HEIGHT_TILE_POLES, type HeightEdits } from '../swg/terrain/heightEdits.ts';
+import { tileIdOf, type HeightTileRow } from '../world/editFiles/heightsFile.ts';
+import type { PlacementLayer, PlacementRow } from '../story/placements.ts';
+import { tileBytes } from './editorSculpt.ts';
+import { SCULPT_TUNE } from './editorTune.ts';
 import { bakeGate, gateCorners, GATE_STRIDE } from '../race/gates.ts';
 import { COURSE_TUNE, tuneCourse } from '../race/courseTune.ts';
 import { toGame } from '../story/placements.ts';
@@ -45,8 +53,10 @@ import type { ToolDef, ToolDraw, ToolFrame } from './tools.ts';
 import type { EditorSection } from '../ui/editorWindow.ts';
 import {
   addShortcut,
+  courseCrossings,
   courseCtx,
   courseFromGates,
+  fitToLand,
   courseNotes,
   deleteNode,
   drawTrack,
@@ -105,6 +115,72 @@ export interface CourseHost {
   say(words: string, ok: boolean): void;
   /** The window drawn again (a pick or a write moved what its sections show). */
   refresh(): void;
+  // ---- The race drawer's second wave: the carve. Each optional, so a host without them (the first wave's) carves nothing. ----
+  /**
+   * The world's drawn courses carved again from `tracks` (the file's, a held edit laid over), `preview` while a drag is held
+   * (live, a budget at a time) and false to put the file's back (a drag given up or refused); the focus a point of the game's
+   * frame (NaN: the eye).
+   */
+  carve?(tracks: readonly TrackDef[], fx: number, fz: number, preview: boolean): void;
+  /**
+   * The world's drawn courses as it last landed them (a landing's list, never a held drag's preview): what a drag given up,
+   * refused or let go with nothing to write is carved back to. Without it the file's tracks are, and nothing where the file
+   * is not read (the race switch off, a world still arriving): handed none, the world un-carves every course it holds.
+   */
+  carved?(): readonly TrackDef[];
+  /** The ground with nothing drawn carved and no edit laid (the generator's) at a point of the raw frame; NaN for none known. */
+  rawGround?(x: number, z: number): number;
+  /** Rows of ours standing now (what a course action carries), at their places in the game's frame. */
+  standing?(): CourseCarryRow[];
+  /** How far a standing row's own box's lowest point stands under its origin (negative under it), or null with no box. */
+  lowestOf?(id: string): number | null;
+  /** The world's height edits, or null (what a moved stretch's touch-ups are read from). */
+  heights?(): HeightEdits | null;
+  /** The heights file's row for a tile as the file holds it now, or null. */
+  heightRow?(id: string): HeightTileRow | null;
+  /** Bytes deflated (deflate-raw) and written as base64. */
+  deflate?(bytes: Uint8Array): Promise<string>;
+  /**
+   * What stands on a road, for the notes: every placed object's foot within a raw-frame rectangle that `on` says meets the
+   * road (asked at its middle and its reach, raw frame), counted by whose (`LayoutStreamer.forEachStandingFoot`); and whether
+   * a solid row stands over a point of the raw frame between two heights (a crossing's bridge), with its top's height there,
+   * or NaN.
+   */
+  feetIn?(x0: number, z0: number, x1: number, z1: number, on: (x: number, z: number, r: number) => boolean): { game: number; ours: number; players: number };
+  solidTopAt?(x: number, z: number, low: number, high: number): number;
+  /**
+   * What a course's road keeps away (§2.11's note): of the world's people, the posts whose stand, roam or round a store of the
+   * track alone keeps by its no-spawn zones, and of the wildlife, the sites a laying without this track's own zones lays that
+   * they keep off. A change's work (a laying, 30 to 40 ms measured on the converted worlds), which the tool asks once a road.
+   */
+  keptAway?(store: CourseCarve): { posts: number; sites: number };
+  /** A model of the library stood as a permanent row over a crossing (Fit a bridge): the thing in hand, else the brush's first entry. */
+  fitBridge?(ask: BridgeAsk): Promise<{ ok: boolean; words: string }>;
+}
+
+/** A row of ours standing, as a course action's carry reads it: its id, file and row, its place in the game's frame. */
+export interface CourseCarryRow {
+  id: string;
+  layer: PlacementLayer;
+  row: PlacementRow;
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** A bridge to fit over a crossing (the raw frame): its middle, the upper road's way and surface, the gap's span and the road's width. */
+export interface BridgeAsk {
+  x: number;
+  z: number;
+  /** The upper road's surface at the middle and at each end of the span, and its way (a unit vector of the raw frame). */
+  deck: number;
+  deckA: number;
+  deckB: number;
+  ux: number;
+  uz: number;
+  /** The gap's span along the upper road (the lower road and its margins, m) and the upper road's width there. */
+  span: number;
+  width: number;
 }
 
 /** What a held edit is. */
@@ -294,6 +370,15 @@ export class EditorCourse {
     this.views = [];
     this.viewsOf = null;
     this.viewsLive = null;
+    // The touch-ups the last action left were measured on the world that went: cleared on the next, they wrote that world's
+    // tile ids and poles into this one's heights file (the owner's own sculpt deltas zeroed, a tile deleted outright).
+    this.touchLeft = [];
+    this.touchWorld = Number.NaN;
+    this.carried.rows = 0;
+    this.carried.touchLeft = 0;
+    this.carried.touchTiles = 0;
+    this.carried.cleared = 0;
+    this.notes = [];
     this.seenWorld = this.host.worldMark();
     this.worldSeen = true;
   }
@@ -301,13 +386,26 @@ export class EditorCourse {
   /** The track file landed (the tool's own write, an undo, the dev server's word): the views made again at the next frame. */
   landed(): void {
     this.viewsOf = null;
+    // The touch-ups were measured against the course the action wrote: once the file holds another (an undo, a redo, the
+    // dev server's word), they may lie under the road again, so the notes stop naming them and the button goes off.
+    if (this.touchLeft.length) {
+      const nl = this.touchFor.indexOf('\n');
+      const id = this.touchFor.slice(0, nl);
+      const k = this.tracks().find((x) => x.id === id);
+      if (!k || `${id}\n${trackHash(k)}` !== this.touchFor) {
+        this.touchLeft = [];
+        this.touchFor = '';
+        this.carried.touchLeft = 0;
+        this.carried.touchTiles = 0;
+      }
+    }
     const t = this.track();
     if (this.picked && !t) {
       this.picked = null;
       this.pickedNode = -1;
       this.pickedGate = -1;
     }
-    if (t) this.notes = courseNotes(t, this.notesCtx());
+    if (t) this.notes = this.notesOf(t);
   }
 
   /**
@@ -317,6 +415,8 @@ export class EditorCourse {
    */
   private giveUpHeld(keepSize = false): void {
     this.held = 'none';
+    // A drag carved live and given up (Escape, a mode, a disarm, the world going): the file's courses carved back.
+    if (this.carvedLive && !keepSize) this.carveBack();
     this.live = null;
     this.raise = 0;
     this.bankBy = 0;
@@ -368,6 +468,8 @@ export class EditorCourse {
   ctx(): CourseCtx {
     const c = courseCtx((x, z) => this.host.land(x, z));
     c.water = (x, z) => this.host.water(x, z);
+    // Where the world carves (the race drawer's second wave), a gate under a crossing is held under its deck.
+    if (this.host.carve) c.decks = true;
     return c;
   }
 
@@ -376,6 +478,141 @@ export class EditorCourse {
     const c = courseCtx((x, z) => this.host.landKnown(x, z));
     c.water = (x, z) => this.host.water(x, z);
     return c;
+  }
+
+  /** The notes of a course: its shape's (the first wave's) and, where the world carves, what its carve does (the second wave's). */
+  notesOf(t: TrackDef): string[] {
+    const out = courseNotes(t, this.notesCtx());
+    if (this.host.carve) out.push(...this.carveNotes(t));
+    return out;
+  }
+
+  /**
+   * What a course's carve does, in words, never a refusal (§2.11): each crossing and its clearance (under `clearanceNote`
+   * said so), a crossing with no solid row over it (Fit a bridge), a bridge whose top stands off the deck past `deckLip`, a
+   * hairpin whose legs overlap at different heights (an underpass by the rule), what of the game's, ours and the players'
+   * stands on the road, and the touch-ups the last change left standing where the road was. A change's work.
+   */
+  private carveNotes(t: TrackDef): string[] {
+    const out: string[] = [];
+    if (!t.course) return out;
+    const tune = COURSE_TUNE;
+    for (const c of courseCrossings(t)) {
+      const at = `near (${Math.round(c.x)}, ${Math.round(c.z)})`;
+      if (c.hairpin) {
+        out.push(`the legs of ${c.upper}'s hairpin overlap ${c.clearance.toFixed(1)} m apart in height ${at}: the lower is carved through`);
+        continue;
+      }
+      out.push(`${c.upper} crosses over ${c.lower} ${at} with ${c.clearance.toFixed(1)} m of clearance${c.clearance < tune.clearanceNote ? ` (under ${tune.clearanceNote} m: a pod's box is 3 m tall)` : ''}`);
+      const top = this.host.solidTopAt ? this.host.solidTopAt(c.x, c.z, c.low + 0.5, c.deck + 5) : Number.NaN;
+      if (!Number.isFinite(top)) out.push(`no solid row stands over the crossing ${at}: the gap is a gap (Fit a bridge)`);
+      else if (Math.abs(top - c.deck) > tune.deckLip) out.push(`the bridge over the crossing ${at} stands ${(top - c.deck).toFixed(2)} m off the deck (more than ${tune.deckLip} m)`);
+      else {
+        // §2.11: off the deck "at either abutment" (a flat bridge over a road that climbs across the gap stands proud of it at
+        // one end, which the race box meets as a scrape), each end read a pole inside the gap against the road there.
+        for (const [x, z, road, which] of [[c.xA, c.zA, c.deckA, 'its first'], [c.xB, c.zB, c.deckB, 'its far']] as const) {
+          const end = this.host.solidTopAt!(x, z, c.low + 0.5, Math.max(road, c.deck) + 5);
+          if (Number.isFinite(end) && Math.abs(end - road) > tune.deckLip) out.push(`the bridge over the crossing ${at} stands ${(end - road).toFixed(2)} m off the deck at ${which} end (more than ${tune.deckLip} m)`);
+        }
+      }
+    }
+    const store = new CourseCarve();
+    store.set([t]);
+    const kept = this.keptAwayOf(t, store);
+    if (kept && kept.posts + kept.sites > 0) {
+      const parts: string[] = [];
+      if (kept.posts) parts.push(`${kept.posts} of the people's post${kept.posts === 1 ? '' : 's'}`);
+      if (kept.sites) parts.push(`${kept.sites} wild site${kept.sites === 1 ? '' : 's'}`);
+      out.push(`the road keeps ${parts.join(' and ')} away (no-spawn, never no-enter)`);
+    }
+    const meets = this.feetOn(t, store);
+    if (meets && meets.game + meets.ours + meets.players > 0) {
+      const parts: string[] = [];
+      if (meets.game) parts.push(`${meets.game} of the game's objects`);
+      if (meets.ours) parts.push(`${meets.ours} of ours`);
+      if (meets.players) parts.push(`${meets.players} of the players' things`);
+      out.push(`the road meets ${parts.join(', ')} (they stand where they stood: the carve keeps off nothing placed)`);
+    }
+    if (this.carried.touchLeft > 0) out.push(`${this.carried.touchLeft} pole${this.carried.touchLeft === 1 ? '' : 's'} of sculpt touch-ups left standing where the road was (${this.carried.touchTiles} tile${this.carried.touchTiles === 1 ? '' : 's'}): Clear old touch-ups`);
+    return out;
+  }
+
+  /**
+   * The last answer to what a course's road keeps away, kept by what it was asked of: the world (its mark), the answerer, the
+   * track and its road (its kind, its `clear` and its course's text). The answer is a laying of the world's wild sites, 30 to
+   * 40 ms measured on the converted worlds, and the notes are worked out at every landing and every pick (twice for one of the
+   * tool's own writes: as the write's answer comes back and as the next frame sees the tracks land), so asked afresh it cost
+   * every landing that much and every write twice that; kept, a landing that moves no road of this course (a gate, its name,
+   * another track, an undo of either) asks nothing again. Another course's road or the removal file moved meanwhile is
+   * read at this road's next change (a note, never a refusal).
+   */
+  private readonly kept = { mark: Number.NaN, fn: null as ((store: CourseCarve) => { posts: number; sites: number }) | null, id: '', road: '', posts: 0, sites: 0 };
+
+  /** What a course's road keeps away of the people's posts and the wild sites (the notes), asked of the world once a road (`kept`); null where the host cannot say. */
+  private keptAwayOf(t: TrackDef, store: CourseCarve): { posts: number; sites: number } | null {
+    const fn = this.host.keptAway;
+    if (!fn) return null;
+    const k = this.kept;
+    const mark = this.host.worldMark();
+    const road = JSON.stringify([t.kind, t.clear, t.course ?? null]);
+    if (k.fn === fn && k.mark === mark && k.id === t.id && k.road === road) return k;
+    const got = fn.call(this.host, store);
+    k.fn = fn;
+    k.mark = mark;
+    k.id = t.id;
+    k.road = road;
+    k.posts = got.posts;
+    k.sites = got.sites;
+    return k;
+  }
+
+  /**
+   * What of the game's, ours and the players' stands on a course's road (§2.11's note: the carve keeps off nothing placed):
+   * a store of the track alone, every foot in its box asked at its middle and at its reach's four sides. A change's work.
+   */
+  private feetOn(t: TrackDef, store: CourseCarve): { game: number; ours: number; players: number } | null {
+    if (!this.host.feetIn || !t.course) return null;
+    const box = store.extent();
+    if (!box) return null;
+    const on = (x: number, z: number, r: number): boolean =>
+      store.roadAt(x, z, 2) || (r > 0 && (store.roadAt(x + r, z, 2) || store.roadAt(x - r, z, 2) || store.roadAt(x, z + r, 2) || store.roadAt(x, z - r, 2)));
+    return this.host.feetIn(box.x0, box.z0, box.x1, box.z1, on);
+  }
+
+  /** Fit to land (§2.11): the picked path's nodes set to the land under them, and nodes put in where the land leaves the road's line. One action. */
+  async fitLand(id?: string): Promise<string> {
+    const t = id ? this.tracks().find((x) => x.id === id) ?? null : this.track();
+    if (!t || !t.course) return this.said('pick a course first', false);
+    return this.write(`${t.name} fitted to the land`, t, fitToLand(t, t.course.paths[Math.min(this.pickedPath, t.course.paths.length - 1)]?.id, this.ctx()));
+  }
+
+  /**
+   * Fit a bridge (§2.11): the thing in hand (else the scatter brush's first entry) stood as a permanent row over the picked
+   * course's crossing nearest the aim, through the editor's own put path (`CourseHost.fitBridge`): centred on it, turned along
+   * the upper road, scaled along its length to span the gap and its margins, its walkable top on the deck. The course untouched.
+   */
+  async fitBridge(id?: string): Promise<string> {
+    const t = id ? this.tracks().find((x) => x.id === id) ?? null : this.track();
+    if (!t || !t.course) return this.said('pick a course first', false);
+    if (!this.host.fitBridge) return this.said('the bridge is fitted by the world editor', false);
+    const cs = courseCrossings(t).filter((c) => !c.hairpin);
+    if (!cs.length) return this.said(`${t.name} crosses itself nowhere (raise one crossing's node over the other road)`, false);
+    let pick = cs[0];
+    if (this.f.valid) {
+      this.host.toRaw(this.f.x, this.f.z, this.at);
+      let best = Infinity;
+      for (const c of cs) {
+        const d = Math.hypot(c.x - this.at.x, c.z - this.at.z);
+        if (d < best) {
+          best = d;
+          pick = c;
+        }
+      }
+    }
+    const margin = t.course.margin;
+    const said = await this.host.fitBridge({ x: pick.x, z: pick.z, deck: pick.deck, deckA: pick.deckA, deckB: pick.deckB, ux: pick.ux, uz: pick.uz, span: pick.span + 2 * margin + 4, width: pick.width });
+    this.notes = this.notesOf(t);
+    return this.said(said.words, said.ok);
   }
 
   // ---- The keys and the frame. ----
@@ -709,20 +946,69 @@ export class EditorCourse {
     let e: CourseEdit | null = t && !(drag && this.stillAt(view)) ? this.heldEdit(t) : null;
     if (t && e && typeof e !== 'string' && JSON.stringify(e) === JSON.stringify(t)) e = null;
     this.giveUpHeld(true);
-    if (!t || !e) return;
+    // Nothing to write (let go where it was grabbed, an edit back at the file's numbers, the track gone) after a live carve: the
+    // file's courses carved back, or the ground, the plants and the drive stood on the last preview's course, which no file holds.
+    if (!t || !e) {
+      if (this.carvedLive) this.carveBack();
+      return;
+    }
     // Shown as it is let go until the write has landed (or been refused), so the course never blinks back to the file's.
     if (typeof e !== 'string') this.live = e;
     void this.write(label, t, e);
   }
 
-  /** A held edit's course shown while it is held, at `previewHz` (never with `live` 'release'). */
+  /**
+   * A held edit's course shown while it is held, at `previewHz` (never with `live` 'release'), and carved live (the race
+   * drawer's second wave): the world handed the file's tracks with the held one laid over, `preview` (its dirty edges laid
+   * again a budget at a time, nearest the cursor first). Every number the edit holds is the writer's rounding (`settle`), so
+   * the ground carved while dragging is the ground the write carves, and its landing lays nothing again. A tick's work.
+   */
   private preview(): void {
     if (COURSE_TUNE.live === 'release' || this.held === 'none') return;
     if (this.f.now - this.liveAt < 1 / Math.max(1, COURSE_TUNE.previewHz)) return;
     this.liveAt = this.f.now;
     const t = this.track();
     const e = t ? this.heldEdit(t) : null;
-    if (e && typeof e !== 'string') this.live = e;
+    if (e && typeof e !== 'string') {
+      this.live = e;
+      this.carveWith(e, true);
+    }
+  }
+
+  /** Whether a held edit's course was carved live and the file's has not been carved back since. */
+  private carvedLive = false;
+  /** The list a live carve is handed (the file's tracks with the held one laid over), kept and refilled. */
+  private readonly carveList: TrackDef[] = [];
+
+  /** The world carves the file's tracks with `t` laid over its own (or added), `preview` while held. */
+  private carveWith(t: TrackDef, preview: boolean): void {
+    const carve = this.host.carve;
+    if (!carve) return;
+    const list = this.carveList;
+    list.length = 0;
+    let put = false;
+    for (const k of this.tracks()) {
+      if (k.id === t.id) {
+        list.push(t);
+        put = true;
+      } else list.push(k);
+    }
+    if (!put) list.push(t);
+    carve.call(this.host, list, this.f.valid ? this.f.x : Number.NaN, this.f.valid ? this.f.z : Number.NaN, preview);
+    this.carvedLive = preview;
+  }
+
+  /**
+   * The world's own courses carved back over what a held edit carved (a drag given up, refused, or let go with nothing to
+   * write): its dirty edges laid again. The list the world last landed (`carved`, `World.courseTracks`), never the tool's
+   * reading of the file, which is none once the race switch goes off or the file is unread mid-drag: handed none, the world
+   * un-carved every course it holds and dropped their zones until the next arrival. A host that keeps no such list carves
+   * the file's back, and nothing where the file is not read.
+   */
+  private carveBack(): void {
+    this.carvedLive = false;
+    const back = this.host.carved ? this.host.carved() : this.host.tracks();
+    if (back) this.host.carve?.(back, Number.NaN, Number.NaN, false);
   }
 
   /**
@@ -789,7 +1075,9 @@ export class EditorCourse {
     if (this.sizeBy !== 0) {
       const why = this.sizeStale(t);
       if (why) this.dropSize(why);
-      else if (t && f.now - this.sizeAt > 0.4 && !this.writing && !this.host.edits.writing) {
+      // Never while an edit is held: a shoulder step resting while its node is still dragged waits for the drag's own write
+      // (written mid-drag, the preview blinked back to the file's course and the drag's let-go was refused as a write still going).
+      else if (t && f.now - this.sizeAt > 0.4 && this.held === 'none' && !this.writing && !this.host.edits.writing) {
         const by = this.sizeBy;
         this.sizeBy = 0;
         this.sizeTrack = null;
@@ -908,7 +1196,7 @@ export class EditorCourse {
         this.pickedNode = -1;
         this.pickedGate = -1;
         const t = this.track();
-        if (t) this.notes = courseNotes(t, this.notesCtx());
+        if (t) this.notes = this.notesOf(t);
         this.host.say(`picked ${t?.name ?? road.track} (${road.track})`, true);
         this.host.refresh();
       }
@@ -936,7 +1224,7 @@ export class EditorCourse {
     this.pickedPath = 0;
     this.pickedNode = -1;
     this.pickedGate = -1;
-    this.notes = courseNotes(t, this.notesCtx());
+    this.notes = this.notesOf(t);
     this.host.refresh();
     return `picked ${t.name} (${id})${t.course ? '' : ': it has no course (Draw its course from its gates on the Tools tab)'}`;
   }
@@ -1022,15 +1310,260 @@ export class EditorCourse {
     const no = after === null || typeof after === 'string' ? null : this.refusal() ?? this.busyWords();
     if (after === null || typeof after === 'string' || no) {
       this.live = null;
+      if (this.carvedLive) this.carveBack();
       if (after === null) return '';
       return this.said(typeof after === 'string' ? after : no!, false);
     }
     try {
-      return await this.change(label, { file: 'tracks', id: after.id, before, after });
+      // What the course's change carries with it (the race drawer's second wave): our rows standing on the ground it moved,
+      // and with `touchUps` 'clear' the sculpt's deltas a moved stretch left past `touchNote` written to nought, one batch.
+      // The tool's writing is held while it is worked out (a tile is deflated), so a write asked meanwhile is refused in words.
+      let release = (): void => {};
+      const hold = new Promise<string>((r) => (release = () => r('')));
+      this.writing = hold;
+      let extras: RowChange[] | string;
+      try {
+        extras = await this.courseExtras(before, after, COURSE_TUNE.touchUps === 'clear');
+      } finally {
+        if (this.writing === hold) this.writing = null;
+        release();
+      }
+      if (typeof extras === 'string') {
+        this.live = null;
+        if (this.carvedLive) this.carveBack();
+        return this.said(extras, false);
+      }
+      const said = await this.change(label, { file: 'tracks', id: after.id, before, after }, extras);
+      // Refused or failed: the course before the drag carved again over what the drag carved (a refused sculpt stroke's put-back).
+      if (!this.last.ok && this.carvedLive) this.carveBack();
+      return said;
     } finally {
       // The file's own course from here: landed, it is what was written; refused, what it was.
       this.live = null;
+      this.carvedLive = false;
     }
+  }
+
+  /** What a course action carried and left, for the bar and the console (`carry`, `touch`). */
+  readonly carried = { rows: 0, touchLeft: 0, touchTiles: 0, cleared: 0 };
+  /** The touch-ups the last action left standing (their tiles and poles), what Clear old touch-ups writes to nought. */
+  private touchLeft: { tx: number; tz: number; poles: number[] }[] = [];
+  /** The track the touch-ups were measured against, by id and hash: a landing that moves it (an undo, a redo, the dev server's word) lets them go. */
+  private touchFor = '';
+  /** The world they were measured on (the host's mark): cleared only there. */
+  private touchWorld = Number.NaN;
+
+  /**
+   * A course action's other rows (§2.7, §2.11): every row of ours set on the ground in the stretches it moved carried by the
+   * carve's change under its origin (the sculpt's own carry, on its switch, `SCULPT_TUNE.carry` and `carryNear`), never a row
+   * whose footprint meets a crossing's gap (a bridge and what stands under it); and the touch-ups a moved stretch leaves
+   * under its old reach where the new does not cover them, past `touchNote`: counted for the notes, and with `clear` written
+   * to nought in the heights file. A refusal in words where the rows come to more than one undo holds. An action's work.
+   */
+  private async courseExtras(before: TrackDef | null, after: TrackDef, clear: boolean): Promise<RowChange[] | string> {
+    this.carried.rows = 0;
+    this.carried.touchLeft = 0;
+    this.carried.touchTiles = 0;
+    this.carried.cleared = 0;
+    this.touchLeft = [];
+    this.touchFor = '';
+    const h = this.host;
+    if (!h.carve || (!before?.course && !after.course)) return [];
+    const file = this.tracks();
+    const listOf = (t: TrackDef | null): TrackDef[] => {
+      const out: TrackDef[] = [];
+      for (const k of file) if (k.id !== after.id) out.push(k);
+      if (t) out.push(t);
+      return out;
+    };
+    const sB = new CourseCarve();
+    sB.set(listOf(before));
+    const sA = new CourseCarve();
+    sA.set(listOf(after));
+    // The dirty rectangles (raw frame): the before's store made the after's.
+    const sD = new CourseCarve();
+    sD.set(listOf(before));
+    const n = sD.set(listOf(after));
+    if (!n) return [];
+    const rects = sD.rects.slice(0, n).map((r) => ({ ...r }));
+    const inRects = (x: number, z: number): boolean => rects.some((r) => x >= r.x0 && x <= r.x1 && z >= r.z0 && z <= r.z1);
+    const out: RowChange[] = [];
+    // Carry what stands on the ground the course moved.
+    const raw = h.rawGround;
+    if (SCULPT_TUNE.carry && h.standing && h.lowestOf && raw) {
+      const at = this.at;
+      for (const r of h.standing()) {
+        const row = r.row;
+        if (row.kind === 'building' || row.inside || typeof row.ground !== 'number') continue;
+        h.toRaw(r.x, r.z, at);
+        if (!inRects(at.x, at.z)) continue;
+        const low = h.lowestOf(r.id);
+        if (low === null) continue;
+        if (Math.abs(row.y + low - row.ground) > SCULPT_TUNE.carryNear) continue;
+        // Never a row over or under a crossing's gap: a bridge's piers stand on the lower road and pass `carryNear`.
+        if (this.deckAround(sB, at.x, at.z) || this.deckAround(sA, at.x, at.z)) continue;
+        const g = raw(at.x, at.z);
+        if (!Number.isFinite(g)) continue;
+        const dd = sA.carveAt(g, at.x, at.z) - sB.carveAt(g, at.x, at.z);
+        if (!(Math.abs(dd) >= 0.0005)) continue;
+        const moved = { ...row, y: Math.round((row.y + dd) * 1000) / 1000, ground: Math.round((row.ground + dd) * 1000) / 1000 };
+        delete (moved as { at?: number }).at;
+        out.push({ file: r.layer, id: r.id, before: row, after: moved });
+        this.carried.rows++;
+      }
+    }
+    // The touch-ups a moved stretch leaves standing.
+    const store = h.heights?.();
+    if (store && store.size) {
+      const sample: CarveSample = { T: 0.5, W: 0.5 };
+      const tune = COURSE_TUNE;
+      for (const tile of store.entries()) {
+        const x0 = tile.tx * HEIGHT_TILE_POLES * HEIGHT_POLE;
+        const z0 = tile.tz * HEIGHT_TILE_POLES * HEIGHT_POLE;
+        const x1 = x0 + HEIGHT_TILE_POLES * HEIGHT_POLE;
+        const z1 = z0 + HEIGHT_TILE_POLES * HEIGHT_POLE;
+        if (!rects.some((r) => r.x1 >= x0 && r.x0 <= x1 && r.z1 >= z0 && r.z0 <= z1)) continue;
+        const poles: number[] = [];
+        for (let k = 0; k < tile.d.length; k++) {
+          if (!(Math.abs(tile.d[k]) > tune.touchNote)) continue;
+          const x = x0 + (k % HEIGHT_TILE_POLES) * HEIGHT_POLE;
+          const z = z0 + Math.floor(k / HEIGHT_TILE_POLES) * HEIGHT_POLE;
+          if (!(sB.sampleAt(x, z, sample).W > 0)) continue;
+          if (sA.sampleAt(x, z, sample).W > 0) continue;
+          poles.push(k);
+        }
+        if (!poles.length) continue;
+        this.touchWorld = h.worldMark();
+        if (!this.touchFor) {
+          // Hashed as the file will read it back (through JSON and the reader), so the tool's own landing matches it.
+          const back = readTrack(JSON.parse(JSON.stringify(after)), [], 0);
+          this.touchFor = `${after.id}\n${trackHash(typeof back === 'string' ? after : back)}`;
+        }
+        this.touchLeft.push({ tx: tile.tx, tz: tile.tz, poles });
+        this.carried.touchLeft += poles.length;
+        this.carried.touchTiles++;
+      }
+      if (clear && this.touchLeft.length) {
+        const tiles = await this.clearedTiles(this.touchLeft);
+        if (typeof tiles === 'string') return tiles;
+        out.push(...tiles);
+        this.carried.cleared = this.carried.touchLeft;
+        this.touchLeft = [];
+      }
+    }
+    return out;
+  }
+
+  /** Whether a deck of either store stands at or beside a point of the raw frame (a row over or under a crossing's gap). */
+  private deckAround(s: CourseCarve, x: number, z: number): boolean {
+    const a = this.deckQ;
+    for (let k = 0; k < 5; k++) {
+      a.x = x + (k === 1 ? 4 : k === 2 ? -4 : 0);
+      a.z = z + (k === 3 ? 4 : k === 4 ? -4 : 0);
+      a.edge = -1;
+      s.deckOf(a);
+      if (a.out > -Infinity) return true;
+    }
+    return false;
+  }
+  private readonly deckQ = deckAsk();
+
+  /** The heights rows that write the named touch-ups to nought (each tile's other deltas kept), or why not. */
+  private async clearedTiles(left: readonly { tx: number; tz: number; poles: number[] }[]): Promise<RowChange[] | string> {
+    const h = this.host;
+    const store = h.heights?.();
+    if (!store || !h.heightRow || !h.deflate) return 'the touch-ups cannot be cleared here: no heights file is held';
+    const out: RowChange[] = [];
+    let bytes = 0;
+    for (const l of left) {
+      const d = store.tile(l.tx, l.tz);
+      if (!d) continue;
+      const next = new Float32Array(d);
+      for (const k of l.poles) next[k] = 0;
+      const id = tileIdOf(l.tx, l.tz);
+      const before = h.heightRow(id);
+      let any = false;
+      for (let k = 0; k < next.length; k++) if (next[k] !== 0) any = true;
+      if (!any) {
+        if (before) out.push({ file: 'heights', id, before: { ...before }, after: null });
+        continue;
+      }
+      const b64 = await h.deflate(tileBytes(next));
+      bytes += b64.length;
+      // The raw ground the tile was authored over is the same ground: its digest kept.
+      const row: HeightTileRow = { id, d: b64, on: before?.on ?? '' };
+      out.push({ file: 'heights', id, before: before ? { ...before } : null, after: { ...row } });
+    }
+    if (bytes > SCULPT_TUNE.undoBytes) return `clearing the touch-ups is ${bytes} bytes of tiles, past the ${SCULPT_TUNE.undoBytes} one undo may hold`;
+    return out;
+  }
+
+  /** Clear old touch-ups (§2.11): the deltas the last course action left past `touchNote` under its old reach written to nought, one action. */
+  async clearTouchUps(): Promise<string> {
+    // Measured on another world (one gone with the editor off, which only the next use finds): let go, never written here.
+    if (this.touchLeft.length && this.host.worldMark() !== this.touchWorld) {
+      this.touchLeft = [];
+      this.carried.touchLeft = 0;
+      this.carried.touchTiles = 0;
+      return this.said('the touch-ups were left on another world: nothing written', false);
+    }
+    if (!this.touchLeft.length) return this.said('no touch-up left standing by the last change of a course', true);
+    const no = this.refusal() ?? this.busyWords();
+    if (no) return this.said(no, false);
+    const tiles = await this.clearedTiles(this.touchLeft);
+    if (typeof tiles === 'string') return this.said(tiles, false);
+    // The tiles they stood in are gone (the sculpt stroke undone): nothing to clear, and nothing for the notes to name.
+    if (!tiles.length) {
+      this.dropTouchUps();
+      return this.said('no touch-up left to clear', true);
+    }
+    const n = this.touchLeft.reduce((s, l) => s + l.poles.length, 0);
+    const left = this.touchLeft;
+    const empty: typeof left = [];
+    this.touchLeft = empty;
+    let wrote = false;
+    const w = (async () => {
+      const edits = this.host.edits;
+      const es = edits.beginStroke('old touch-ups cleared');
+      // Ended whatever the write does: a stroke left open would hold every undo after it (`stroking`).
+      let refused = '';
+      let said = '';
+      try {
+        refused = await edits.strokeWrite(es, tiles);
+      } finally {
+        said = edits.endStroke(es);
+      }
+      wrote = !refused;
+      return refused ? said || refused : `${said} (${n} pole${n === 1 ? '' : 's'} of touch-ups written to nought)`;
+    })();
+    this.writing = w;
+    try {
+      const said = await w;
+      // Written: the notes stop naming them (they were counted until the next course change, a clear they had already had).
+      if (wrote) {
+        this.carried.touchLeft = 0;
+        this.carried.touchTiles = 0;
+        const t = this.track();
+        if (t) this.notes = this.notesOf(t);
+      }
+      return this.said(said, wrote);
+    } catch (e) {
+      return this.said(`clearing the touch-ups failed: ${e instanceof Error ? e.message : String(e)}`, false);
+    } finally {
+      // Refused or thrown: still left standing, still to clear (unless a course action measured a list of its own meanwhile).
+      if (!wrote && this.touchLeft === empty) this.touchLeft = left;
+      if (this.writing === w) this.writing = null;
+    }
+  }
+
+  /** The touch-ups let go: the list, its counts and the notes' line. */
+  private dropTouchUps(): void {
+    this.touchLeft = [];
+    this.touchFor = '';
+    this.carried.touchLeft = 0;
+    this.carried.touchTiles = 0;
+    const t = this.track();
+    if (t) this.notes = this.notesOf(t);
   }
 
   /** Why a write cannot go now: one of the tool's own or of the editor's (an undo, another tool's stroke) is out; null for none. */
@@ -1039,11 +1572,11 @@ export class EditorCourse {
   }
 
   /** One row written as one action of the history, the tool's writing held for its length; answers what was said. */
-  private async change(label: string, change: RowChange): Promise<string> {
+  private async change(label: string, change: RowChange, extras: readonly RowChange[] = []): Promise<string> {
     const w = (async () => {
       const edits = this.host.edits;
       const es = edits.beginStroke(label);
-      const no = await edits.strokeWrite(es, [change]);
+      const no = await edits.strokeWrite(es, extras.length ? [change, ...extras] : [change]);
       const said = edits.endStroke(es);
       if (no) {
         this.last.ok = false;
@@ -1057,7 +1590,7 @@ export class EditorCourse {
     try {
       const said = await w;
       const t = this.track();
-      if (t) this.notes = courseNotes(t, this.notesCtx());
+      if (t) this.notes = this.notesOf(t);
       this.viewsOf = null;
       return this.said(said, this.last.ok);
     } finally {
@@ -1474,11 +2007,19 @@ export class EditorCourse {
       { label: 'Give the draft up', act: 'course:giveUp', off: !this.draft.length },
       { label: 'Place gates again', act: 'course:gatesAgain', off: !t?.course },
       { label: 'Follow the road (the picked gate)', act: 'course:follow', off: !t || this.pickedGate < 0 },
+      ...(this.host.carve
+        ? [
+            { label: 'Fit to land (the picked path)', act: 'course:fitLand', off: !t?.course },
+            { label: 'Fit a bridge (the crossing nearest the aim)', act: 'course:bridge', off: !t?.course || !this.host.fitBridge },
+            { label: 'Clear old touch-ups', act: 'course:clearTouchUps', off: !this.touchLeft.length },
+          ]
+        : []),
     ];
+    const carves = this.host.carve ? 'A drawn course carves the ground under it as it is written' : 'This host carves nothing';
     return [
       {
         title: 'Course',
-        note: no ?? `${this.modeWords()}. Nothing carves the ground yet (the race drawer's second wave).${this.notes.length ? ` Notes: ${this.notes.join(' · ')}` : ''}`,
+        note: no ?? `${this.modeWords()}. ${carves}.${this.notes.length ? ` Notes: ${this.notes.join(' · ')}` : ''}`,
         fields: [
           { label: 'New road wide', value: COURSE_TUNE.width, act: 'course:tune:width', kind: 'number' },
           { label: 'Its shoulder', value: COURSE_TUNE.shoulder, act: 'course:tune:shoulder', kind: 'number' },
@@ -1585,6 +2126,9 @@ export class EditorCourse {
     }
     if (what === 'gatesAgain') return this.gatesAgain();
     if (what === 'follow') return this.follow();
+    if (what === 'fitLand') return this.fitLand();
+    if (what === 'bridge') return this.fitBridge();
+    if (what === 'clearTouchUps') return this.clearTouchUps();
     if (what === 'pick') return this.pick(arg ? arg : null);
     if (what === 'fromGates') return this.fromGates(arg);
     if (what === 'remove') return this.remove(arg);
@@ -1746,13 +2290,16 @@ export class EditorCourse {
       }
     }
     if (typeof o.fromGates === 'string') said.push(await this.fromGates(o.fromGates));
+    // The carve's acts (the race drawer's second wave): `fitLand` and `bridge` true (the picked course) or a track's id.
+    if (o.fitLand !== undefined) said.push(await this.fitLand(typeof o.fitLand === 'string' ? o.fitLand : undefined));
+    if (o.bridge !== undefined) said.push(await this.fitBridge(typeof o.bridge === 'string' ? o.bridge : undefined));
+    if (o.clearTouchUps === true) said.push(await this.clearTouchUps());
     if (typeof o.remove === 'string') said.push(await this.remove(o.remove));
     return { said: said.filter(Boolean), tool: this.report(), courses: this.coursesReport() };
   }
 
   /** This world's tracks with a course, as the console reports them: paths, nodes, lengths, joins, gates and notes. */
   coursesReport(): unknown[] {
-    const c = this.notesCtx();
     return this.tracks()
       .filter((t) => t.course)
       .map((t) => {
@@ -1767,7 +2314,8 @@ export class EditorCourse {
           paths: t.course!.paths.map((p, i) => ({ id: p.id, nodes: p.nodes.length, edges: spines[i].edges.length, m: Math.round(spines[i].length * 10) / 10, joins: p.nodes.filter((n) => n.j !== undefined).map((n) => n.j) })),
           gates: t.gates.map((g, i) => ({ i, follows: g.path !== undefined ? `${g.path} e${g.e} t${g.t}` : 'pinned', ow: !!g.ow, w: g.w, at: [g.x, g.y, g.z] })),
           grid: t.grid.path !== undefined ? `${t.grid.path} e${t.grid.e} t${t.grid.t}` : 'pinned',
-          notes: courseNotes(t, c),
+          crossings: courseCrossings(t).map((x) => ({ upper: x.upper, lower: x.lower, hairpin: x.hairpin, at: [Math.round(x.x), Math.round(x.z)], deck: +x.deck.toFixed(2), clearance: +x.clearance.toFixed(2), span: +x.span.toFixed(1) })),
+          notes: this.notesOf(t),
         };
       });
   }
@@ -1786,7 +2334,7 @@ export class EditorCourse {
 
   /** For the console. */
   report(): Record<string, unknown> {
-    return { armed: this.armed, mode: this.mode, picked: this.picked, path: this.pickedPath, node: this.pickedNode, gate: this.pickedGate, draft: this.draft.length, shortcutFrom: this.draftJoin, held: this.held, writing: !!this.writing, views: this.views.length, last: { ...this.last }, notes: [...this.notes] };
+    return { armed: this.armed, mode: this.mode, picked: this.picked, path: this.pickedPath, node: this.pickedNode, gate: this.pickedGate, draft: this.draft.length, shortcutFrom: this.draftJoin, held: this.held, writing: !!this.writing, views: this.views.length, last: { ...this.last }, notes: [...this.notes], carves: !!this.host.carve, carvedLive: this.carvedLive, carried: { ...this.carried } };
   }
 
   /** The tune moved from the console or a slider: the views drawn again (their reach, nothing else of a course). */

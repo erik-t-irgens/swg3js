@@ -470,6 +470,20 @@ export class WildLife {
     }));
   }
 
+  /**
+   * How many sites some zones keep off (`areas`, say a drawn course's road, the race drawer's note): of the sites a laying
+   * with every zone in force but these lays, those the areas refuse or reach the rim of, by `zoneKeptOff`'s own rule. A laying
+   * (8 to 30 ms), worked out on asking, never a frame's.
+   */
+  sitesKeptOffBy(areas: readonly SpawnArea[]): number {
+    if (!this.pack || !this.manifest || !areas.length) return 0;
+    const names = new Set(areas.map((a) => a.name));
+    const others = this.zones.filter((z) => !names.has(z.name));
+    const noSpawn = this.pack.noSpawn ?? [];
+    const without = gridSites(this.pack.planet, this.pack.areas, others.length ? [...noSpawn, ...others] : noSpawn, this.manifest.groups);
+    return without.filter((s) => refused(areas, s.x, s.z, true) || areas.some((z) => touchesZone(z, s.x, s.z, Math.max(0, s.size) / 2 + LAIR_TUNE.herdSpread))).length;
+  }
+
   /** The removed sites and zones in force, for the console. */
   removalsReport(): { zones: number; removedSites: number; removedStanding: number } {
     let removedStanding = 0;

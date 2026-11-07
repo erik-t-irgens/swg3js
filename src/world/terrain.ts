@@ -8,6 +8,7 @@ import { riverFlowAt, riversSurface, riverTableAt, surfaceOf, tableOf, type Lake
 import { sampleFamily, type FamilyGrid } from '../audio/footsteps.ts';
 import { groundChunkOrigin, NO_SHIFT, tileCode, tileLayers, type GroundShift, type GroundTiler } from './groundTiles.ts';
 import type { HeightEdits } from '../swg/terrain/heightEdits.ts';
+import type { CourseGrid } from '../swg/terrain/courseCarve.ts';
 import { copyGround } from './groundRewrite.ts';
 import { childChoiceAt } from '../swg/terrain/generator.ts';
 import type { Wash } from './demWash.ts';
@@ -346,10 +347,31 @@ export class Terrain {
     return d !== 0 ? h + d : h;
   }
 
+  /**
+   * The drawn race courses carved into a world with no converted terrain (the race drawer's second wave, `courseCarve.ts`'s
+   * `CourseGrid`): a pole grid of the road's surface and weight, read bilinear under the height edits (`heightAt`), never
+   * inside `groundBeneathDem`. A converted world's carve is its cached blocks' (`SwgTerrain`). Null carves nothing, and every
+   * height is what it was to the bit.
+   */
+  courseGrid: CourseGrid | null = null;
+
   heightAt(x: number, z: number): number {
-    const h = this.groundRawAt(x, z);
-    if (this.heights === null || this.swg) return h;
+    let h = this.groundRawAt(x, z);
+    if (this.swg) return h;
+    if (this.courseGrid !== null) h = this.courseGrid.carveAt(h, -x, z);
+    if (this.heights === null) return h;
     return this.edited(h, x, z);
+  }
+
+  /**
+   * The ground with the drawn courses carved and no height edit laid on (the race drawer): what the sculpt brush works a
+   * world with no converted terrain's deltas out over (`baseAt`), where `groundRawAt` stays the raw ground its tiles' digests
+   * name. With no course it is `groundRawAt` by `Object.is`.
+   */
+  groundBaseAt(x: number, z: number): number {
+    const h = this.groundRawAt(x, z);
+    if (this.swg || this.courseGrid === null) return h;
+    return this.courseGrid.carveAt(h, -x, z);
   }
 
   /**

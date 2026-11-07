@@ -35,6 +35,36 @@ export function zonesOf(rows: readonly RemovalRow[]): NoSpawnZone[] {
   return out;
 }
 
+/**
+ * The drawn race courses' roads plus their tracks' `clear`, as no-spawn zones keeping all three (the race drawer's second
+ * wave): each outline (`CourseCarve.outlines`, a piece of 32 m of spine, its left edge forward and its right edge back, in the
+ * file's raw frame, which is the course's own) a zone. Joined after the removal file's zones where the world builds them.
+ * **No-spawn, not no-enter**: a creature from outside may still chase somebody across the road. None with no course.
+ */
+export function courseZones(outlines: readonly { id: string; pts: [number, number][] }[]): NoSpawnZone[] {
+  return outlines.map((o) => ({ id: o.id, name: `the road of ${o.id.split(':')[1] ?? 'a course'}`, shape: { kind: 'poly' as const, pts: o.pts }, keeps: ['wild', 'people', 'ours'] as const }));
+}
+
+/**
+ * Whether two lists of the courses' zones (`courseZones`) are the same zones, outline for outline: the same ids, in the same
+ * order, every point the same to the bit. A landing whose roads did not move (a gate moved, a track renamed, a drag given up
+ * carved back) makes the very zones again, and laid again over them the world's life puts nothing down and lays the same
+ * sites, a laying of 30 to 40 ms for nothing (the race drawer's second wave).
+ */
+export function sameCourseZones(a: readonly NoSpawnZone[], b: readonly NoSpawnZone[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x.id !== y.id || x.shape.kind !== 'poly' || y.shape.kind !== 'poly') return false;
+    const p = x.shape.pts;
+    const q = y.shape.pts;
+    if (p.length !== q.length) return false;
+    for (let k = 0; k < p.length; k++) if (!Object.is(p[k][0], q[k][0]) || !Object.is(p[k][1], q[k][1])) return false;
+  }
+  return true;
+}
+
 /** A zone's shape added to a list under `tag`. */
 export function addZoneShape(list: ZoneList, s: ZoneShapeRow, tag: number): void {
   if (s.kind === 'circle') list.addCircle(s.c[0], s.c[1], s.r, tag);

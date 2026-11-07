@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { RaceDrive, type RaceGround } from '../../../src/vehicles/raceDrive.ts';
 import { newRaceView, newRaceViewOut, steerRaceView, frameRaceView, type RaceViewInput } from '../../../src/vehicles/raceView.ts';
 import { RACE_TUNE } from '../../../src/vehicles/raceTune.ts';
+import { COURSE_TUNE } from '../../../src/race/courseTune.ts';
 import { RaceRun } from '../../../src/race/raceRun.ts';
 import type { GameGate, TrackDef } from '../../../src/race/trackFile.ts';
 import type { DriveInput, Vehicle } from '../../../src/vehicles/vehicle.ts';
@@ -143,6 +144,87 @@ const physics = {
 } as unknown as Physics;
 
 const race = new RaceDrive('pod', { ground: reader });
+// With `deck` (the race drawer's second wave, `courseRide.test.ts`): drawn courses under the weave -- eleven roads along
+// the hull's way 40 m apart, 36 m wide, and a road across them 8 m higher every kilometre -- so the tracker is stepped every
+// plan and finds and keeps its pass, the deck is read under the hull and ahead (both `deck` modes in turn), and the hull's
+// ground is the stand-in's carved through a pole grid (`CourseGrid`, a real-elevation world's read: the Monument-shaped
+// path). The weave holds the hull to the roads' way (heading 0.5 and back), and it is put back at the start past 6 km.
+const DECK_MODE = process.argv.includes('deck');
+let resetAt = 50_000;
+let carvedGround: ((x: number, z: number) => number) | null = null;
+/** With `deck`: the pole grid's own read over the hull's way, a frame of 64 reads (`CourseGrid.carveIn`), measured apart. */
+let gridFrame: (() => void) | null = null;
+if (DECK_MODE) {
+  const { CourseCarve, CourseGrid, gridAsk } = await import('../../../src/swg/terrain/courseCarve.ts');
+  // The hull's way in the raw frame (raw x = -x): heading 0.5 runs along (-sin 0.5, cos 0.5); across it (cos 0.5, sin 0.5).
+  const ux = -Math.sin(0.5);
+  const uz = Math.cos(0.5);
+  const px = Math.cos(0.5);
+  const pz = Math.sin(0.5);
+  const nodeAt = (s: number, side: number, y: number, w: number) => ({ x: ux * s + px * side, y, z: uz * s + pz * side, w, b: 0, sh: 8, c: 'straight' as const });
+  const tracks = [];
+  for (let k = -5; k <= 5; k++) tracks.push({ id: `along_${k + 5}`, kind: 'sprint', clear: 6, course: { feather: 'easeInOut', crossing: 'wall', margin: 2, level: 1, grass: 'clear', paths: [{ id: 'main', nodes: [nodeAt(-500, k * 40, 2, 36), nodeAt(7000, k * 40, 2, 36)] }] } });
+  for (let s = 1000; s <= 6000; s += 1000) tracks.push({ id: `across_${s}`, kind: 'sprint', clear: 6, course: { feather: 'easeInOut', crossing: 'wall', margin: 2, level: 1, grass: 'clear', paths: [{ id: 'main', nodes: [nodeAt(s, -320, 10, 20), nodeAt(s, 320, 10, 20)] }] } });
+  const store = new CourseCarve();
+  store.set(tracks);
+  const grid = new CourseGrid(store);
+  grid.all();
+  grid.step(Infinity, 0, 0, () => 0);
+  // (`RACE_ALLOC_DECK_COURSE=0` leaves the drive no course, `RACE_ALLOC_DECK_GRID=0` the hull its plain ground: to compare.)
+  if (process.env.RACE_ALLOC_DECK_COURSE !== '0') (race as unknown as { deps: { course: unknown } }).deps.course = { carve: store, cx: 0, cz: 0 };
+  // The hull's ground: the stand-in's carved by the pole grid, as a world with no converted terrain reads it, laid once
+  // into a lattice of whole metres every 2 m over the hull's way and read there (the stand-in's own ground past it). Whole
+  // metres, as the stand-in's own are (the engine hands them back making nothing), and a reader as small as the stand-in's:
+  // what is measured is the drive's own code over carved ground, never the boxing of a world's reader's answer (the world's
+  // cost, as ever). A stand-in that read the pole grid itself was built into the step's parts and took the budget their own
+  // small calls are built in with, so they boxed what they handed over: the stand-in's fault, not the drive's. The pole
+  // grid's own read is measured apart (`gridFrame`).
+  if (process.env.RACE_ALLOC_DECK_GRID !== '0') {
+    const q = gridAsk();
+    const LX0 = -1000;
+    const LZ0 = -1000;
+    const LNX = 2700;
+    const LNZ = 4300;
+    const lat = new Int32Array(LNX * LNZ);
+    for (let j = 0; j < LNZ; j++) {
+      for (let i = 0; i < LNX; i++) {
+        const x = LX0 + i * 2;
+        const z = LZ0 + j * 2;
+        q.raw = ground(x, z);
+        q.x = -x;
+        q.z = z;
+        grid.carveIn(q);
+        lat[j * LNX + i] = Math.round(q.out) | 0;
+      }
+    }
+    carvedGround = (x: number, z: number): number => {
+      const i = ((x - LX0) * 0.5 + 0.5) | 0;
+      const j = ((z - LZ0) * 0.5 + 0.5) | 0;
+      if (i < 0 || i >= LNX || j < 0 || j >= LNZ) return ground(x, z);
+      return lat[j * LNX + i];
+    };
+    (race as unknown as { deps: { ground: RaceGround } }).deps.ground = { ...reader, near: carvedGround };
+    // The pole grid's read alone: 64 reads a frame over the roads and between them, each through the kept ask.
+    const gq = gridAsk();
+    const sum = new Float64Array(1);
+    let gk = 0;
+    gridFrame = (): void => {
+      for (let n = 0; n < 64; n++) {
+        gk = (gk + 1) & 0xfffff;
+        const s = (gk % 6500) + 0.37;
+        const side = ((gk * 7) % 440) - 220.25;
+        gq.raw = (gk & 7) + 0.5;
+        gq.x = ux * s + px * side;
+        gq.z = uz * s + pz * side;
+        grid.carveIn(gq);
+        sum[0] += gq.out;
+      }
+    };
+  }
+  resetAt = 6000;
+}
+/** The hull's ground the step is handed: the stand-in's, or (with `deck`) carved. A binding fixed once. */
+const stepGround: (x: number, z: number) => number = carvedGround ?? ground;
 race.setLevels('max', vehicle);
 // A run of a track watching the step (src/race/raceRun.ts, `DriveWatch`), as the game hangs one on a raced hull, its
 // clock moved on by the fixed steps as `stepRun` moves it. The weaving hull wanders a few kilometres about the start, so
@@ -167,16 +249,17 @@ const drive: DriveInput = { throttle: 1, steer: 0, heading: 0.5, boost: true, ho
 // list holds something that is not a number too, so the engine keeps each as made), as a game's frame hands its own on.
 const DTS: unknown[] = [1 / 144, 1 / 75, 1 / 40, 'not a number'];
 let k = 0;
-const counts = { planned: 0, nudged: 0 };
+const counts = { planned: 0, nudged: 0, tracked: 0 };
 /** The engines' damage, fires and repair in the run (`RACE_ALLOC_ENGINES=0` leaves them whole, to compare). */
 const ENGINES_AT_WORK = process.env.RACE_ALLOC_ENGINES !== '0';
 const HOLD = process.env.RACE_ALLOC_HOLD ?? '';
+const DECK_HOLD = process.env.RACE_ALLOC_DECK ?? '';
 /** Other players' rides drawn near, which nudge the turn (Racer wave 4a; `RACE_ALLOC_PEERS=0` leaves them out, to compare). */
 const PEERS = process.env.RACE_ALLOC_PEERS !== '0';
 function frame(): void {
   const dt = DTS[k++ % 3] as number;
-  // A gentle weave: the target off the nose and back.
-  drive.heading = race.heading + Math.sin(k / 400) * 0.2;
+  // A gentle weave: the target off the nose and back (with `deck`, about the roads' own way, heading 0.5).
+  drive.heading = (DECK_MODE ? 0.5 : race.heading) + Math.sin(k / 400) * 0.2;
   // Other players' rides drawn near, as the game fills the list from their pictures before the step: none for a stretch,
   // then a pair riding either side of the hull, in and out of the nudge's reach together, then one of them alone for a
   // moment, so the nudge's part runs, pushes, finds nobody within reach and is skipped. The pair stand mirrored through the
@@ -208,8 +291,12 @@ function frame(): void {
   // Both holds, a stretch of each in turn (RACE_ALLOC_HOLD=loose or firm keeps to one): the loose one's look behind
   // and its own sub-step, and the firm one's, each measured making nothing.
   RACE_TUNE.hold = HOLD === 'loose' || (HOLD !== 'firm' && (k & 16383) < 12000) ? 'loose' : 'firm';
-  race.step(vehicle, dt, drive, ground, null, null, physics);
+  // With `deck`, both deck modes a stretch each in turn.
+  // (`RACE_ALLOC_DECK=bridge` or `drawn` keeps to one.)
+  if (DECK_MODE) COURSE_TUNE.deck = DECK_HOLD === 'bridge' || (DECK_HOLD !== 'drawn' && (k & 8191) < 4096) ? 'bridge' : 'drawn';
+  race.step(vehicle, dt, drive, stepGround, null, null, physics);
   if (race.planned > 0) counts.planned++;
+  if (race.track.on) counts.tracked++;
   if (race.nudged !== 0) counts.nudged++;
   if (run) {
     run.advanceSteps(physics.stepsAhead(dt));
@@ -219,7 +306,7 @@ function frame(): void {
   physics.step(dt);
   // Back to the start now and then, so the run never leaves the numbers it began in (a teleport the drive starts afresh
   // from, and the run's watch is stood at, as a put-back stands it).
-  if (t.z > 50_000) {
+  if (t.z > resetAt) {
     t.z = 0;
     t.x = 0;
     if (run) run.standing(t.x, t.y, t.z);
@@ -314,12 +401,12 @@ if (process.argv[2] === 'method') {
   const byDrive = ['turnStep', 'thrustStep', 'boostStep', 'poseBank'];
   const byVehicle = ['odometer', 'hitTest', 'command', 'plan', 'pushStep', 'poseGround'];
   const dtTagged = DTS[1] as number;
-  const call = name === 'run' ? () => r.run.call(race, vehicle, dtTagged, drive, physics) : name === 'stepOnly' ? () => race.step(vehicle, dtTagged, drive, ground, null, null, physics) : name === 'stepsAhead' ? () => physics.stepsAhead(1 / 75) : byDrive.includes(name) ? () => r[name].call(race, drive) : byVehicle.includes(name) ? () => r[name].call(race, vehicle) : name === 'poseTurn' ? () => r.poseTurn.call(race) : () => r[name].call(race, vehicle, drive);
+  const call = name === 'run' ? () => r.run.call(race, vehicle, dtTagged, drive, physics) : name === 'stepOnly' ? () => race.step(vehicle, dtTagged, drive, stepGround, null, null, physics) : name === 'stepsAhead' ? () => physics.stepsAhead(1 / 75) : byDrive.includes(name) ? () => r[name].call(race, drive) : byVehicle.includes(name) ? () => r[name].call(race, vehicle) : name === 'poseTurn' ? () => r.poseTurn.call(race) : () => r[name].call(race, vehicle, drive);
   const m = await measure(call, FRAMES);
   console.log(name, (m.made / FRAMES).toFixed(2), 'B a call', m.scavenges, 'collections');
   process.exit(0);
 }
-if (process.argv[2] === 'profile') {
+if (process.argv[2] === 'profile' || (DECK_MODE && process.argv[3] === 'profile')) {
   // Where it is made, by the sampling heap profiler: `node --expose-gc tools/swg/tests/raceAllocOwn.ts profile [view]`.
   const { Session } = await import('node:inspector/promises');
   const session = new Session();
@@ -347,5 +434,6 @@ if (process.argv[2] === 'profile') {
 }
 const d = await measure(frame, FRAMES);
 const v = await measure(viewFrame, FRAMES);
+const g = gridFrame ? await measure(gridFrame, FRAMES) : null;
 watch.disconnect();
-console.log(JSON.stringify({ frames: FRAMES, made: d.made, scavenges: d.scavenges, planned: counts.planned, nudged: counts.nudged, view: { frames: FRAMES, made: v.made, scavenges: v.scavenges }, ...(run ? { watch: { crossed: run.seq, laps: run.lapTimes.length, phase: run.phase } } : {}) }));
+console.log(JSON.stringify({ frames: FRAMES, made: d.made, scavenges: d.scavenges, planned: counts.planned, nudged: counts.nudged, tracked: counts.tracked, deck: DECK_MODE, view: { frames: FRAMES, made: v.made, scavenges: v.scavenges }, ...(g ? { grid: { frames: FRAMES, reads: FRAMES * 64, made: g.made, scavenges: g.scavenges } } : {}), ...(run ? { watch: { crossed: run.seq, laps: run.lapTimes.length, phase: run.phase } } : {}) }));

@@ -83,6 +83,9 @@ import { RACE_GEN, RACE_TUNE, RACE_UPGRADES, baseFor } from './raceTune.ts';
 import { ENGINE_TUNE, damageAny, damagePart, hitSide, newEngineSet, overheat, sideBand, stepEngines, type EngineSet } from './drivetrain.ts';
 import { BODY_SPEED_CAP, type DriveInput, type Vehicle } from './vehicle.ts';
 import { LAVA_HARM } from '../world/lavaHarmMath.ts';
+import { CourseTracker, trackAsk } from '../race/courseTrack.ts';
+import { COURSE_TUNE } from '../race/courseTune.ts';
+import type { CourseCarve } from '../swg/terrain/courseCarve.ts';
 
 /**
  * Whether play is running: `stepVehicles` writes it every step from its own `simulate` (which `__debug.advance` passes
@@ -108,6 +111,11 @@ export interface RaceGround extends LineReader {
 /** What the garage hands a drive when it attaches it: the world's cached ground, or nothing (a test, a world with none). */
 export interface RaceDeps {
   ground: RaceGround | null;
+  /**
+   * The world's drawn courses (the race drawer's second wave), read live: the carve and the raw frame's centre (raw x =
+   * `cx - x`, z = `z + cz`). Absent, or `carve` null: the drive's path is today's.
+   */
+  course?: { carve: CourseCarve | null; cx: number; cz: number } | null;
 }
 
 export type RaceMode = 'traversal' | 'racing';
@@ -327,6 +335,24 @@ export class RaceDrive {
   private stepPhysics: Physics | null = null;
   private stepVehicle: Vehicle | null = null;
   private readonly deps: RaceDeps;
+
+  // --- the drawn courses (the race drawer's second wave) -------------------------------------------------------------
+  /** Which drawn road the hull is on (`courseTrack.ts`), stepped as each plan begins; never asked with no course. */
+  readonly tracker = new CourseTracker();
+  /** The tracker's kept ask and its answer (the tracked pass and the deck under the hull). */
+  readonly track = trackAsk();
+  /** Whether the far ray took a bridge read over the tracked pass's deck this plan (the console's). */
+  deckRay = false;
+  /**
+   * With `COURSE_TUNE.deck` 'drawn' and a tracked pass: the ground ahead (the walk's samples, the climbing judge's reads) is
+   * the higher of the world's and the tracked pass's deck there, where that deck stands within `deckBand` of the hull's own
+   * line (a hull hurled far over or under its road reads its own ground). Laid on after the world has answered, through the
+   * drive's own fields (`footDeck`), never by wrapping the world's reader: a reader answers a number, and a deck's height
+   * handed back across a call the compiler does not build in is a number made at every read.
+   */
+  private deckDrawn(): boolean {
+    return this.track.on && COURSE_TUNE.deck === 'drawn';
+  }
 
   constructor(kind: 'pod' | 'bike', deps: RaceDeps) {
     this.kind = kind;
@@ -1304,10 +1330,29 @@ export class RaceDrive {
   private footAt(): void {
     const x = this.qx;
     const z = this.qz;
-    const g = this.stepGround ? this.stepGround(x, z) : -Infinity;
+    let g = this.stepGround ? this.stepGround(x, z) : -Infinity;
+    // With the drawn deck and a tracked pass, its deck where it stands within the band of the hull's own line (the race drawer).
+    if (this.track.on && COURSE_TUNE.deck === 'drawn') {
+      this.footDeck();
+      if (this.qd > g) g = this.qd;
+    }
     const w = this.stepWater ? this.stepWater(x, z) : -Infinity;
     const top = g > w ? g : w;
     this.qg = Number.isFinite(top) ? top : -Infinity;
+  }
+  /** The drawn deck at `qx`, `qz` into `qd` (-Infinity for none or out of the band); left at -Infinity with no course. */
+  private qd = -Infinity;
+  private footDeck(): void {
+    this.qd = -Infinity;
+    const rc = this.deps.course;
+    const c = rc ? rc.carve : null;
+    if (!c) return;
+    const at = this.tracker.at;
+    at.x = rc!.cx - this.qx;
+    at.z = this.qz + rc!.cz;
+    this.tracker.deckHere(c, this.track);
+    const d = at.out;
+    if (d > -Infinity && Math.abs(d - this.track.line) <= COURSE_TUNE.deckBand) this.qd = d;
   }
 
   /** The ground at a point, read as `footAt` reads it: for the rare callers (a wall's slope, the console) that are not stepped. */
@@ -1367,18 +1412,49 @@ export class RaceDrive {
     const z = this.qz;
     const ax = -this.cosH * this.pHalfW;
     const az = this.sinH * this.pHalfW;
+    const deck = this.deckDrawn();
     let top = -Infinity;
     for (let i = 0; i < 3; i++) {
       const k = i - 1;
-      const g = r.near(x + ax * k, z + az * k);
+      const px = x + ax * k;
+      const pz = z + az * k;
+      const g = r.near(px, pz);
       if (g === null || !Number.isFinite(g)) {
         this.qa = Number.NaN;
+        this.qx = x;
+        this.qz = z;
         return;
       }
       if (g > top) top = g;
+      // The drawn deck there, within the band (the race drawer).
+      if (deck) {
+        this.qx = px;
+        this.qz = pz;
+        this.footDeck();
+        if (this.qd > top) top = this.qd;
+      }
     }
+    this.qx = x;
+    this.qz = z;
     const w = this.stepWater ? this.stepWater(x, z) : -Infinity;
     this.qa = w > top ? w : top;
+  }
+
+  /** The walk's samples (and the one past its end) raised to the tracked pass's drawn deck where it stands within the band. */
+  private deckWalk(): void {
+    const w = this.walk;
+    for (let i = 0; i < w.n; i++) {
+      this.qx = w.x[i];
+      this.qz = w.z[i];
+      this.footDeck();
+      if (this.qd > w.g[i]) w.g[i] = this.qd;
+    }
+    if (Number.isFinite(w.past)) {
+      this.qx = w.x0 + w.dx * w.pastD;
+      this.qz = w.z0 + w.dz * w.pastD;
+      this.footDeck();
+      if (this.qd > w.past) w.past = this.qd;
+    }
   }
 
   /** In a building's rooms the ground ahead is the room's own ray (the vehicle's reader there), and nothing is far. */
@@ -1533,6 +1609,8 @@ export class RaceDrive {
     this.pMiddleFrom = v.pos.y + (b.min[1] + b.max[1]) / 2;
     this.pRayReach = this.pMiddleFrom - this.pLow0 + 60;
     this.planTravelAt(this.pForward);
+    // Which drawn road the hull is on (the race drawer): stepped from where it was by continuity, never by height alone.
+    this.trackStep(v);
     this.pSign = this.h >= 0 ? 1 : -1;
     const fallTune = this.fallTune;
     fallTune.ride = h.ride;
@@ -1558,6 +1636,29 @@ export class RaceDrive {
     this.pLip = tune.lipShare * h.ride;
     this.pPhase = BAND;
     this.pStopAt = Infinity;
+  }
+
+  /**
+   * The tracker stepped at the plan's start (`courseTrack.ts`): the hull's place in the raw frame, its line (the ground its
+   * lowest point rides over), its travel there, and how far along a path it may have gone since the last plan. With no drawn
+   * course (or in a building's rooms) it is let go, and nothing else of the drive changes.
+   */
+  private trackStep(v: Vehicle): void {
+    const rc = this.deps.course;
+    const c = rc ? rc.carve : null;
+    const q = this.track;
+    this.deckRay = false;
+    if (!c || c.empty || v.inRoom) {
+      if (q.on) this.tracker.reset(q);
+      return;
+    }
+    q.x = rc!.cx - v.pos.x;
+    q.z = v.pos.z + rc!.cz;
+    q.line = this.pLow0 - this.handling.ride;
+    q.ux = -this.pUx;
+    q.uz = this.pUz;
+    q.jump = this.pTravel + this.pL + 20;
+    this.tracker.step(c, q);
   }
 
   /** The plan's speed and travel from the speed now, the bridge's span with them, and the sub-steps the travel is cut into. */
@@ -1592,6 +1693,8 @@ export class RaceDrive {
       walk.dz = this.pUz;
       walk.speed = this.pSpeed;
       walkLineOf(reader, this.ring, wt, walk, this.stepWater);
+      // The drawn deck laid on (the race drawer), before the far ray reads the samples.
+      if (this.deckDrawn() && !v.inRoom) this.deckWalk();
       this.farRay(v);
     }
     this.reach = walk.got;
@@ -1873,6 +1976,22 @@ export class RaceDrive {
     if (hit !== null && Math.abs(hit - w.g[k]) <= tune.rayAccept && hit > w.g[k]) {
       w.g[k] = hit;
       this.rayTaken = true;
+    } else if (hit !== null && hit > w.g[k] && this.track.on) {
+      // The crossing hint (the race drawer): where the sample lies over a deck of the tracked pass, a still top within
+      // `rayAccept` of that deck is the bridge ahead, read as a road is. A hull tracked on the lower road has no deck there.
+      const rc = this.deps.course;
+      const c = rc ? rc.carve : null;
+      if (!c) return;
+      const at = this.tracker.at;
+      at.x = rc!.cx - w.x[k];
+      at.z = w.z[k] + rc!.cz;
+      this.tracker.deckHere(c, this.track);
+      const d = at.out;
+      if (d > -Infinity && Math.abs(hit - d) <= tune.rayAccept) {
+        w.g[k] = hit;
+        this.rayTaken = true;
+        this.deckRay = true;
+      }
     }
   }
 
@@ -2108,6 +2227,9 @@ export class RaceDrive {
       airborne: this.airborne,
       lookAhead: { reach: r2(this.reach), farRayTaken: this.rayTaken, latticeReads: this.ring.reads },
       bridge: { span: r2(this.span), lift: r2(this.bridgeLift), on: RACE_TUNE.bridge },
+      // The race drawer's tracker and deck: the drawn road the hull is on, and the deck there (the bridge's height the far ray reads ahead).
+      track: this.track.on ? { track: this.track.track, path: this.track.path, edge: this.track.edge, sample: this.track.sample, along: r2(this.track.arc), kept: this.tracker.kept, found: this.tracker.found, lost: this.tracker.lost } : { on: false, kept: this.tracker.kept, found: this.tracker.found, lost: this.tracker.lost },
+      deck: { mode: COURSE_TUNE.deck, here: Number.isFinite(this.track.deck) ? r2(this.track.deck) : null, farRayTookBridge: this.deckRay },
       slope: { degrees: r2(this.slopeTheta / D2R), push: r2(this.p) },
       nudge: { on: RACE_TUNE.nudge, near: this.near.n, stick: r2(this.nudged), reach: RACE_TUNE.nudgeReach },
       lastHit: this.lastHit.kind ? { ...this.lastHit, loss: r2(this.lastHit.loss), drop: r2(this.lastHit.drop), stepsAgo: this.steps - this.lastHit.at } : null,

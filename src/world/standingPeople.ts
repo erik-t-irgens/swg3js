@@ -1537,6 +1537,20 @@ export class StandingPeople {
   }
 
   /**
+   * How many rows a set of zones keeps (`rowZone` at or over nought), of those the world state stands now: what a drawn
+   * course's road keeps away of the people, for the Course tool's notes (the race drawer). Asked of a change, never a frame.
+   */
+  rowsZonedBy(zones: { readonly empty: boolean; rowZone(r: StandingRow): number }): number {
+    if (zones.empty) return 0;
+    let n = 0;
+    for (let i = 0; i < this.rows.length; i++) {
+      if (this.stateDormant[i]) continue;
+      if (zones.rowZone(this.origin[i]) >= 0) n++;
+    }
+    return n;
+  }
+
+  /**
    * The removal file's part worked out again over every row (Map-maker II's twelfth wave: a landing of the file, a zone put
    * down or taken up in the editor), in the snapshot's frame as the pack wrote each row, over the world state's part as
    * `adopt` decided it: every body standing for a row now dormant put down (never one somebody else has for now, `keeps`,

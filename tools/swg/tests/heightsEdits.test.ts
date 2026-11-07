@@ -18,7 +18,8 @@ import { makeHarness, propRow } from './editsHarness.ts';
 import { EditorSculpt, type SculptHost } from '../../../src/editor/editorSculpt.ts';
 import { SCULPT_TUNE } from '../../../src/editor/editorTune.ts';
 import { toolFrame } from '../../../src/editor/tools.ts';
-import { HeightEdits } from '../../../src/swg/terrain/heightEdits.ts';
+import { HeightEdits, fnv1aHeights } from '../../../src/swg/terrain/heightEdits.ts';
+import { tileRaw } from '../../../src/editor/sculpt.ts';
 import { deltasOf, readHeightsFile, tileOfId, type HeightTileRow } from '../../../src/world/editFiles/heightsFile.ts';
 import { decodeLanded, HeightRows, layLanded } from '../../../src/world/editFiles/heightsLand.ts';
 import { inflateTile } from './editsHarness.ts';
@@ -254,6 +255,57 @@ try {
     await h.settle();
     const crate = h.rowOf('crate-2')!;
     ok(moved > 0.05 && Math.abs(crate.y - (RAW + moved)) < 0.0011 && Math.abs((crate.ground as number) - crate.y) < 0.001, `the crate on the stroke's flank is carried by the ground's move at its own raw place (${moved.toFixed(3)} m, written ${(crate.y - RAW).toFixed(3)} m)`);
+  }
+
+  // The race drawer's second wave (D21): the sculpt's base is the carve where a course is drawn (`baseAt`) and the raw ground
+  // where none is, and a tile's `on` is always the raw ground's digest. A host whose base is the raw ground less a 3 m cut
+  // inside a strip (a road's): a flatten to a typed height over the strip lands the drawn ground (base plus delta) on it, where
+  // worked over the raw ground it would land the cut's depth off; Shift+click reads the carved ground; every tile written
+  // carries the raw ground's digest, never the base's; and the stroke writes only heights (the course file untouched).
+  {
+    const CUT = 3;
+    const H = 20;
+    const baseAt = (px: number, pz: number): number => (Math.abs(px * 2) < 12 && Math.abs(pz * 2) < 40 ? RAW - CUT : RAW);
+    const g = ground();
+    const h = makeHarness({ onHeights: (p, d) => g.land(p, d) });
+    const host: SculptHost = { ...hostOver(h, g), baseAt };
+    const s = new EditorSculpt(host);
+    g.sculpt = s;
+    await s.arm();
+    SCULPT_TUNE.mode = 'flatten';
+    SCULPT_TUNE.flatMode = 'both';
+    SCULPT_TUNE.target = 'typed';
+    SCULPT_TUNE.height = H;
+    SCULPT_TUNE.radius = 20;
+    SCULPT_TUNE.strength = 1;
+    // Shift+click on the strip, before any stroke: the carved ground under the aim (the base less no delta yet).
+    const sampled = s.groundAt(0, 0);
+    SCULPT_TUNE.target = 'typed';
+    const f = toolFrame();
+    f.valid = true;
+    f.dt = 1 / 30;
+    f.x = 0;
+    f.z = 0;
+    f.apply = true;
+    for (let i = 0; i < 300; i++) s.frame(f);
+    f.apply = false;
+    s.frame(f);
+    await h.settle();
+    await h.settle();
+    const d = g.store.poleDelta(0, 0);
+    const drawn = Math.fround(Math.fround(baseAt(0, 0)) + d);
+    const overRaw = RAW + d;
+    ok(Object.is(sampled, RAW - CUT), `Shift+click over the road reads the carved ground (${sampled} m), never the raw ground under it`);
+    ok(Math.abs(drawn - H) < 0.05 && Math.abs(overRaw - H) > CUT - 0.1, `a flatten to ${H} m over the road lands the drawn ground on it (${drawn.toFixed(3)} m), where worked over the raw ground it would stand ${(overRaw - H).toFixed(2)} m off`);
+    const rows = h.files.heights ? readHeightsFile(h.files.heights, 'tatooine', 'ground').rows : [];
+    const digest = (tx: number, tz: number, at: (px: number, pz: number) => number) => fnv1aHeights(tileRaw(tx, tz, at));
+    const rawOf = () => RAW;
+    const onRaw = rows.length > 0 && rows.every((r) => {
+      const [tx, tz] = r.id.split(',').map(Number);
+      return r.on === digest(tx, tz, rawOf) && r.on !== digest(tx, tz, baseAt);
+    });
+    ok(onRaw, `every tile the stroke wrote (${rows.length}) carries the raw ground's digest as its \`on\`, never the base's`);
+    ok(h.batches.length >= 1 && h.batches.every((b) => b.every((e) => e.file === 'heights' || e.file === 'world')) && !h.batches.some((b) => b.some((e) => e.file === 'tracks')), 'and the stroke wrote heights alone, the course file untouched');
   }
 } finally {
   Object.assign(SCULPT_TUNE, was);

@@ -43,6 +43,12 @@ export interface SculptHost {
   store(): HeightEdits;
   /** The raw height at a pole of the raw frame (pole px at x = 2 px), the block made ready where it is not cached; NaN for none. */
   rawAt: RawAt;
+  /**
+   * The ground a stroke works over at a pole (the race drawer's second wave): the raw height with the drawn courses carved
+   * (`TerrainSampler.basePoleAt`, `Terrain.groundBaseAt`), so a flatten to H over a road lands on H. With no course the very
+   * number `rawAt` answers. Absent: `rawAt`. Each tile's `on` digest stays the raw ground's (`rawAt`).
+   */
+  baseAt?: RawAt;
   /** A point of the game's frame in the raw frame, and back, into a kept record. */
   toRaw(x: number, z: number, out: { x: number; z: number }): void;
   toGame(x: number, z: number, out: { x: number; z: number }): void;
@@ -212,7 +218,7 @@ export class EditorSculpt {
   /** The ground at a game-frame point as the stroke sees it now: raw plus the edits in force. */
   groundAt(x: number, z: number): number {
     this.host.toRaw(x, z, this.at);
-    const s = this.stroke ?? new SculptStroke(this.host.store(), this.host.rawAt);
+    const s = this.stroke ?? new SculptStroke(this.host.store(), this.host.baseAt ?? this.host.rawAt);
     return s.heightBetween(this.at.x, this.at.z);
   }
 
@@ -221,7 +227,9 @@ export class EditorSculpt {
     this.mode = mode;
     startClock(this.clock);
     this.host.beginWork();
-    this.stroke = new SculptStroke(this.host.store(), this.host.rawAt);
+    // The stroke works over the carved ground (the race drawer: a flatten lands on its height over a road); each tile's `on`
+    // digest below stays the raw ground's.
+    this.stroke = new SculptStroke(this.host.store(), this.host.baseAt ?? this.host.rawAt);
     this.editStroke = this.host.edits.beginStroke(`sculpt (${mode})`);
     // What stands is gathered afresh at the stroke's first stamp (it may have moved since the last), and its count begun.
     this.feetFresh = false;

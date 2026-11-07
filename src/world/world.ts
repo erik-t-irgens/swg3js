@@ -24,6 +24,8 @@ import { chooseWindTrees, windTreesChosen, windTreesEverUsed } from './windTrees
 import { WIND_STATE, writeWindDay } from './wind.ts';
 import { refreshWaterDepth, resetWaterDepth, riverWindUnit, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { HeightEdits, HEIGHT_TILE } from '../swg/terrain/heightEdits.ts';
+import { CourseCarve, CourseGrid, foldCourseRect, type CarveRect, type CarveTrack } from '../swg/terrain/courseCarve.ts';
+import { COURSE_TUNE } from '../race/courseTune.ts';
 import type { HeightTileRow } from './editFiles/heightsFile.ts';
 import { isLakeRow, isRiverRow, readWaterRow, type WaterLakeRow, type WaterLoaded, type WaterRiverRow, type WaterRow } from './editFiles/waterFile.ts';
 import { LAKE_TUNE, RIVER_TUNE, RiverEffectsKeeper, RoofList, feedRiverFlow, keptTables, lakeTable, landingTouchesLava, lookOver, planLakeLanding, reachWind, riverLandingPlan, riverRetunePlan, riverScan, riverTable, tableCovers, underLakes, underRivers, type LakeTable, type RiverFlow, type RiverFxHost, type RiverHit, type RiverReach, type RiverRetune, type RiverTable } from './ourWater.ts';
@@ -51,7 +53,7 @@ import { FLORA_WARM, FloraPlanter, plantedShadow } from './flora.ts';
 import { clientPlantDistance, FLORA_TUNE, plantReachOf, PlantSweep } from './floraReach.ts';
 import { FLORA_BATCH, FloraField, type FloraChunkData } from './floraBatch.ts';
 import { CHUNK_TREES, FAR_CARDS_ON, FarCards, GRASS_CAST, GRASS_NO_SHADOW, GRASS_ON, GRASS_TUNE, GRASS_UNIFORMS, GrassField, grassDepthMaterial, grassMaterial, grassStandIn, loadRadialPack, setGrassPictures, writeGrassUniforms, type GrassHost, type GrassSetup } from './grass.ts';
-import { GRASS_SHADOW_TUNE, grassCastCascades, grassReach, type FarSamples } from './grassMath.ts';
+import { GRASS_SHADOW_TUNE, fillRoadMask, grassCastCascades, grassReach, type FarSamples, type RoadMask } from './grassMath.ts';
 import { SHADOW_CASTER_TUNE, floraBig } from './shadowCasters.ts';
 import type { FloraGroup, RadialChild, RadialGroup } from '../swg/terrain/flora.ts';
 import { floraColliders } from './floraCollision.ts';
@@ -79,7 +81,7 @@ import { rawToGameX, rawToGameZ } from '../story/waypoints.ts';
 // Map-maker II's twelfth wave: what a world takes away, the owner's own people, and the no-spawn zones.
 import { HIDE_TUNE, ObjectKeyIndex, compileRemovals, noRemovals, removalLandingPlan, type CompiledRemovals, type KeyedObject, type RemovalRow } from '../story/removals.ts';
 import { placedStandingRow, type PlacedPersonRow } from '../story/placedPeople.ts';
-import { ZoneSet, wildAreasOf, zonesOf } from './noSpawnZones.ts';
+import { ZoneSet, courseZones, sameCourseZones, wildAreasOf, zonesOf, type NoSpawnZone } from './noSpawnZones.ts';
 import { HiddenPlaces, gameTo, type HiddenObject } from './hiddenPlaces.ts';
 import { setWorldSolidRows } from './walkThrough.ts';
 import { FILLER_TUNE } from './ambient/fillers.ts';
@@ -237,6 +239,9 @@ function roomPassLeaves(on: boolean): void {
   setSwayRoomPass(on);
 }
 /** How far out a space zone's planets hang, and the radius (metres) a planet of size 1 has there. */
+/** The clock a budgeted re-lay of a drawn course reads (the race drawer), kept so a frame hands no fresh function. */
+const nowMs = (): number => performance.now();
+
 const SPACE_REACH = 3;
 const SPACE_BODY_DISTANCE = 2600;
 const SPACE_BODY_SIZE = 240;
@@ -933,7 +938,13 @@ export class World {
     farZ: () => this.terrain.groundShift.z,
     water: (x, z) => this.terrain.waterHeightAt(x, z),
   };
-  private readonly raceDeps: RaceDeps = { ground: this.raceGround };
+  /**
+   * The drawn courses a race-driven hull tracks itself on (the race drawer's second wave, `courseTrack.ts`): the world's
+   * carve and the raw frame's centre (raw x = `cx - x`, z = `z + cz`), written as the world's courses are installed; `carve`
+   * null with no drawn course, which leaves the drive's path today's.
+   */
+  readonly raceCourse: { carve: CourseCarve | null; cx: number; cz: number } = { carve: null, cx: 0, cz: 0 };
+  private readonly raceDeps: RaceDeps = { ground: this.raceGround, course: this.raceCourse };
   /**
    * Nothing new stood or put away near the player while they race faster than `RACE_TUNE.livingAbove`: written every
    * step by the game (`holdsLiving`), read beside `streamHold` by the three streams of the living.
@@ -1899,6 +1910,9 @@ export class World {
     // `remakeGround` (below), any other ground world's once its pack has said it has none. A file later than the bound is
     // laid over the ground as a stroke is.
     this.askHeights(packId);
+    // The world's drawn race courses (the race drawer's second wave, `public/tracks/<world>.json`), the same way: asked now,
+    // whatever the race switch says (a course is ground), and waited on (bounded) before the ground that carves them is made.
+    this.askCourse(packId);
     // The world's ground paint (Map-maker II, `public/placements/paint/<world>.json`), the same way: asked for now and waited
     // on (bounded) before the ground that takes it is made.
     this.askPaint(packId);
@@ -1971,6 +1985,10 @@ export class World {
             terrain.heights = store;
             this.heightsLaidAtArrival = true;
           }
+          // Its drawn courses' pole grid, made whole before the ground is.
+          await this.courseReady();
+          if (this.terrain !== terrain) return;
+          this.attachCourseGrid(terrain);
           // Behind this screen its paint's far cards are made at once, with the ground (in play they wait their turn a few a
           // frame, `stepFarCards`).
           this.farCardsAtOnce = true;
@@ -1990,6 +2008,8 @@ export class World {
             this.heightsByDem = false;
             const store = await this.heightsReady();
             if (store && this.terrain === terrainAtLoad) this.installHeights(store);
+            await this.courseReady();
+            if (this.terrain === terrainAtLoad && this.courseCarve && !terrainAtLoad.courseGrid) this.installCourseLate();
           }
         }
       });
@@ -2183,6 +2203,8 @@ export class World {
       if (planet.pack === false && !planet.space && !this.sceneOnly) {
         await this.removalsReady();
         await this.peopleReady();
+        // Its drawn courses (the race drawer), taken before the zones are compiled, so their roads keep its placed people off.
+        await this.courseReady();
         if (token !== this.loadToken) return null;
         this.compileRemovalsOver([], null);
         const placed = this.placedStandingRows();
@@ -2194,6 +2216,10 @@ export class World {
         const store = await this.heightsReady();
         if (token !== this.loadToken) return null;
         if (store) this.installHeights(store);
+        // And its drawn courses (the race drawer), carved under them through the pole grid.
+        await this.courseReady();
+        if (token !== this.loadToken) return null;
+        if (this.courseCarve && !this.terrain.courseGrid) this.installCourseLate();
       }
       // Its lakes of ours (Map-maker II's fifth wave): the terrain's own list, which `waterHeightAt` and `waterTableAt` ask
       // where there is no converted terrain, and a body each, made behind this screen so its sweep builds them. With no
@@ -2226,6 +2252,9 @@ export class World {
     // And the owner's own people beside it.
     await this.removalsReady();
     await this.peopleReady();
+    // And its drawn race courses (the race drawer), taken before the zones are compiled (their roads keep the world's life
+    // off) and before the ground is made (`SwgTerrain.create`'s `course`).
+    await this.courseReady();
     if (token !== this.loadToken) {
       pack.dispose();
       return null;
@@ -2363,12 +2392,16 @@ export class World {
           const paint = this.groundPaint;
           const coming = this.terrain;
           this.swgComingFor = coming;
-          const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file), { heights, paint, paintResolve: (group, gen) => this.resolvePaint(group, gen), lend: (group, tileWidth) => this.lendGround(group, tileWidth) }).finally(() => {
+          const course = this.courseCarve;
+          const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file), { heights, paint, paintResolve: (group, gen) => this.resolvePaint(group, gen), lend: (group, tileWidth) => this.lendGround(group, tileWidth), course }).finally(() => {
             if (this.swgComingFor === coming) this.swgComingFor = null;
           });
+          // (`course`: the drawn race courses, the race drawer's, taken above by `courseReady` and held by the sampler from its
+          // constructor, so every block it caches is carved as it enters.)
           if (token !== this.loadToken) return null;
           if (heights) this.heightsLaidAtArrival = true;
           if (paint) this.paintLaidAtArrival = true;
+          if (course) this.courseLaidAtArrival = true;
           this.terrain.attachSwg(swg);
           // Grids made again for a paint, as they land: the chunks over them rewritten and replanted, the far tiles remade.
           swg.onRepainted = (kind, x0, z0, x1, z1) => this.paintLanded(kind, x0, z0, x1, z1);
@@ -2377,6 +2410,11 @@ export class World {
           if (this.heightEdits && swg.heights !== this.heightEdits) this.installHeights(this.heightEdits, true);
           // The same for a paint that landed meanwhile (`installPaint`).
           if (this.groundPaint && swg.paint !== this.groundPaint) this.installPaint(this.groundPaint);
+          // The race drawer: the raw frame's centre for the drive's tracker, and a course file the bound gave up on that landed
+          // while the ground was being made, handed to its sampler now and the ground standing laid again with it.
+          this.raceCourse.cx = swg.centerX;
+          this.raceCourse.cz = swg.centerZ;
+          if (this.courseCarve && swg.course !== this.courseCarve) this.installCourseLate();
           await this.waterBodies.load(pack, planet.id);
           if (token !== this.loadToken) return null;
           // The world's lakes of ours (Map-maker II's fifth wave, `public/placements/water/<world>.json`): appended after the
@@ -5090,6 +5128,8 @@ export class World {
     this.flora = new FloraPlanter(swg, byAppearance);
     // Plants under a lake of ours are left out (Map-maker II's fifth wave); with none the planting is today's.
     this.flora.underOurWater = this.underOurWaterRule();
+    // And on a drawn course's road plus its `clear` (the race drawer); with none the planting is today's.
+    this.flora.onCourse = this.courseRule();
     this.floraTemplate = swg.template;
     // The plantings drawn per region at the client's own levels (step 7): every batch mesh adopted before it is
     // drawn (its materials are the plants' own, adopted with the stand-ins below) and offered to the exit
@@ -5161,6 +5201,9 @@ export class World {
       if (lights) for (let i = 0; i < lights.length; i++) if (lights[i].shadow.camera === cam) return i;
       return 0;
     },
+    // A drawn race course's road on the square, where its course keeps its grass clear (the race drawer): its poles worked
+    // out once as the chunk or the tile is built. No course reaching it, nothing asked.
+    roadMask: (x0, z0, size, out) => this.courseRoadMask(x0, z0, size, out),
   };
 
   /**
@@ -10746,6 +10789,9 @@ export class World {
     this.stream(playerPos, STREAM_BUDGET);
     // A sculpt stroke's ground and plantings, a frame's share (Map-maker II): nothing on a frame with nothing dirty.
     this.stepGroundRewrite(camPos);
+    // A drawn course's change laid again, a frame's share (the race drawer): nothing on a frame with nothing waiting. What it
+    // lays this frame the rewrite above takes the next.
+    this.stepCourseRelay(camPos);
     perf.end(SEC.stream);
     const plants = this.plantSweep.stats;
     perf.gauge(CNT.floraShown, plants.shown);
@@ -12155,14 +12201,16 @@ export class World {
       // own (`ownsAt`): a dab of grass takes no rock away, and a forest painted over a corner leaves the rest of the chunk's.
       if (df) {
         const src = df.source;
-        const own = this.props.buildForChunk(cx, cz, this.terrain, exclude, (x, z) => src.ownsAt(x, z));
+        // And none on a drawn course's road plus its `clear` (the race drawer), composed with the paint's own.
+        const onRoad = this.courseSkip;
+        const own = this.props.buildForChunk(cx, cz, this.terrain, exclude, onRoad ? (x, z) => src.ownsAt(x, z) || onRoad(x, z) : (x, z) => src.ownsAt(x, z));
         if (own.group.children.length) {
           extra = own.group;
           extraColliders = own.colliders;
           colliders = colliders.concat(own.colliders);
         }
       }
-    } else ({ group, colliders } = this.props.buildForChunk(cx, cz, this.terrain, exclude));
+    } else ({ group, colliders } = this.props.buildForChunk(cx, cz, this.terrain, exclude, this.courseSkip ?? undefined));
     group.traverse((o) => {
       if (o instanceof THREE.InstancedMesh) o.computeBoundingSphere();
     });
@@ -12503,7 +12551,7 @@ export class World {
    * physics remade with them. Nothing at all on a frame with nothing dirty.
    */
   private stepGroundRewrite(eye: THREE.Vector3): void {
-    if (!this.groundDirty.size && !this.floraDirty.size) return;
+    if (!this.groundDirty.size && !this.floraDirty.size && !this.farDirty.size) return;
     const t0 = performance.now();
     // A paint stroke's preview spends its own share (Map-maker II's second wave); everything else the sculpt's.
     const budget = this.paintHeld ? GROUND_REWRITE_TUNE.paintMs : GROUND_REWRITE_TUNE.frameMs;
@@ -12517,6 +12565,8 @@ export class World {
       this.groundDirty.delete(c.key);
       if (this.terrain.rewriteChunk(c.cx, c.cz, c.ground.geometry, c.heights)) this.groundWork.chunks++;
       else this.groundWork.failed++;
+      // A drawn course's change counted apart for the console (`course()`'s `work.chunks`).
+      if (this.courseGroundKeys.delete(c.key)) this.courseWork.chunks++;
       c.my = this.terrain.heightAt(c.mx, c.mz);
       this.chunkSphereAgain(c);
       // Its heightfield made again from the very heights the mesh now stands on (Rapier 0.20 has no shape to set on a
@@ -12527,6 +12577,9 @@ export class World {
       }
       this.grass?.circleChanged(c.origin.x + CHUNK_SIZE / 2, c.origin.z + CHUNK_SIZE / 2, CHUNK_SIZE * 0.75);
     }
+    // The far tiles a drawn course's change laid their far grids again under (the race drawer), nearest the focus first, one a
+    // frame at the least, within the same budget; their tree cards made again a few a frame (`farCardsAgain`).
+    if (this.farDirty.size) this.stepFarDirty(fx, fz, t0, budget);
     const now = performance.now();
     const due = this.floraFlush || now - this.floraLastAt >= 1000 / Math.max(0.01, GROUND_REWRITE_TUNE.floraHz);
     if (due && this.floraDirty.size) {
@@ -12538,10 +12591,11 @@ export class World {
         this.floraDirty.delete(c.key);
         this.replantChunk(c);
         this.groundWork.replanted++;
+        if (this.courseFloraKeys.delete(c.key)) this.courseWork.replanted++;
         any = true;
       }
     }
-    if (!this.groundDirty.size && !this.floraDirty.size) {
+    if (!this.groundDirty.size && !this.floraDirty.size && !this.farDirty.size) {
       this.floraFlush = false;
       this.rewriteFocus.x = Number.NaN;
       this.rewriteFocus.z = Number.NaN;
@@ -12606,6 +12660,458 @@ export class World {
     if (n.held) console.warn(`heights: the file read again changed ${n.held} tile${n.held === 1 ? '' : 's'} a stroke under way is stamping into: the stroke's own write is what the file ends with there`);
     if (n.moved) this.heightsChanged(rect.x0, rect.z0, rect.x1, rect.z1, true);
     return n.moved;
+  }
+
+  // ---- The race drawer: drawn courses carved into the ground -----------------------------------------------------------
+
+  /**
+   * Where a world's drawn courses come from: the page hands its read of the track file in (`App.fetchCourses`), whatever the
+   * race switch says, since a course is ground. Null asks for none (a test's world, the select screen's), and the ground is
+   * the client's and the heights' to the bit.
+   */
+  courseSource: ((pack: string, kind: 'ground' | 'space' | 'copies') => Promise<readonly CarveTrack[] | null>) | null = null;
+  /** The ask this arrival made, its world's generation beside it, and whether it has been installed. */
+  private courseAsk: { gen: number; done: Promise<readonly CarveTrack[] | null>; installed: boolean; late: boolean } | null = null;
+  /** The world's drawn courses in force (`courseCarve.ts`), the very store the ground carves by, or null with none drawn. */
+  courseCarve: CourseCarve | null = null;
+  /** The tracks they were made from, as last landed (gate-only tracks among them, carved nothing). */
+  courseTracks: readonly CarveTrack[] = [];
+  /** Whether this world's courses were carved before its ground was first built. */
+  courseLaidAtArrival = false;
+  /** The roads as no-spawn zones (`noSpawnZones.ts`'s `courseZones`), joined after the removal file's own. */
+  private courseZoneList: NoSpawnZone[] = [];
+  /** The game-frame rectangles a change has laid again since it began, for its end's air, depth and grass; and whether its end is owed. */
+  private readonly courseRects: CarveRect[] = [];
+  private courseRectN = 0;
+  private courseEndOwed = false;
+  /** Where a change's re-lay works out from first: the editor's cursor, else the eye. */
+  private readonly courseFocus = { x: Number.NaN, z: Number.NaN };
+  /** The far tiles whose far grid a change laid again, waiting to be rewritten (`stepGroundRewrite`). */
+  private readonly farDirty = new Set<string>();
+  /** What the changes did, for the console (`course()`): `chunks` and `replanted` the chunks a change rewrote and replanted (counted apart from the sculpt's). */
+  readonly courseWork = { landings: 0, rects: 0, blocks: 0, farGrids: 0, farTiles: 0, chunks: 0, replanted: 0, ms: 0, ends: 0, peopleDown: 0, sitesDown: 0, lastRects: [] as CarveRect[] };
+  /** The chunks a change put on the rewrite's lists, so the console counts what a change rewrote and replanted (`stepGroundRewrite`). */
+  private readonly courseGroundKeys = new Set<string>();
+  private readonly courseFloraKeys = new Set<string>();
+  /** A grass mask's poles worked out (kept). */
+  private readonly courseRaw = { x: 0.5, z: 0.5 };
+
+  /** The ask for this world's drawn courses, begun as its load begins (`load`). */
+  private askCourse(packId: string): void {
+    this.courseCarve = null;
+    this.courseTracks = [];
+    this.courseLaidAtArrival = false;
+    this.courseZoneList = [];
+    this.courseRectN = 0;
+    this.courseEndOwed = false;
+    this.farDirty.clear();
+    // The console's counts are this world's (`course()`'s `work`).
+    const w = this.courseWork;
+    w.landings = w.rects = w.blocks = w.farGrids = w.farTiles = w.chunks = w.replanted = w.ms = w.ends = w.peopleDown = w.sitesDown = 0;
+    w.lastRects = [];
+    this.courseGroundKeys.clear();
+    this.courseFloraKeys.clear();
+    this.raceCourse.carve = null;
+    this.raceCourse.cx = 0;
+    this.raceCourse.cz = 0;
+    const src = this.courseSource;
+    const planet = this.planet;
+    if (!src || this.sceneOnly || planet.space || planet.instances) {
+      this.courseAsk = null;
+      return;
+    }
+    const ask = { gen: this.generation, done: src(packId, 'ground').catch(() => null), installed: false, late: false };
+    this.courseAsk = ask;
+    // A file later than the bound (`courseReady` gave up on it): landed when it lands, a budget at a time.
+    void ask.done.then((tracks) => {
+      if (this.courseAsk !== ask || ask.installed || !ask.late || this.generation !== ask.gen) return;
+      ask.installed = true;
+      this.landCourses(tracks ?? [], Number.NaN, Number.NaN, false);
+    });
+  }
+
+  /**
+   * This world's drawn courses, waited on for at most `DRESSING_TUNE.floraWaitMs` (the small file has nearly always landed
+   * long before the pack) and taken as the store the ground is made with; null for none, or one still on its way (landed
+   * late). Marks the ask installed, so it is taken once.
+   */
+  async courseReady(): Promise<CourseCarve | null> {
+    const ask = this.courseAsk;
+    if (!ask || ask.installed) return this.courseCarve;
+    const got = await Promise.race([ask.done, new Promise<'late'>((r) => setTimeout(() => r('late'), DRESSING_TUNE.floraWaitMs))]);
+    if (got === 'late') {
+      ask.late = true;
+      return null;
+    }
+    if (this.courseAsk !== ask || ask.installed || this.generation !== ask.gen) return this.courseCarve;
+    ask.installed = true;
+    this.courseTracks = got ?? [];
+    if (!this.courseTracks.some((t) => t.course)) return null;
+    const store = new CourseCarve();
+    store.set(this.courseTracks);
+    store.rectN = 0;
+    this.courseCarve = store;
+    this.raceCourse.carve = store;
+    this.courseZoneList = courseZones(store.outlines());
+    return store;
+  }
+
+  /** A world with no converted terrain: the pole grid made whole from the store before its ground is made (an arrival's work). */
+  private attachCourseGrid(terrain: Terrain): void {
+    const store = this.courseCarve;
+    if (!store) return;
+    const grid = new CourseGrid(store);
+    grid.all();
+    grid.step(Infinity, 0, 0, () => performance.now());
+    terrain.courseGrid = grid;
+    this.courseLaidAtArrival = true;
+    if (this.flora) this.flora.onCourse = this.courseRule();
+  }
+
+  /** A store taken after the ground was made (a file the bound gave up on, or one that landed while it was being made): laid whole, a budget at a time. */
+  private installCourseLate(): void {
+    const store = this.courseCarve;
+    if (!store) return;
+    this.attachCourse(store, true);
+    if (this.flora) this.flora.onCourse = this.courseRule();
+  }
+
+  /**
+   * The store handed to the ground that carves it (the converted terrain's sampler, else the pole grid), and, where it was
+   * not yet, every edge's rectangle queued to be laid again (`all`).
+   */
+  private attachCourse(store: CourseCarve, all: boolean): boolean {
+    const swg = this.terrain.swg;
+    // The converted ground is being made for this terrain (`loadPack`, inside `SwgTerrain.create`): kept for it, which takes
+    // it the line after it is attached. Laid on this terrain it would reach nothing (a converted world reads its blocks).
+    if (!swg && this.swgComingFor === this.terrain) return true;
+    if (swg) {
+      if (swg.course !== store) {
+        swg.sampler.course = store;
+        all = true;
+      }
+    } else if (!this.terrain.courseGrid || this.terrain.courseGrid.carve !== store) {
+      const grid = new CourseGrid(store);
+      grid.all();
+      this.terrain.courseGrid = grid;
+      all = true;
+    }
+    if (all) {
+      store.allRects();
+      this.queueCourseRects(store);
+    }
+    return all;
+  }
+
+  /**
+   * The store's dirty rectangles queued to be laid again (a budget at a time) and kept, in the game's frame, for the change's
+   * end. Kept folded (`foldCourseRect`): a held drag queues its edges' old and new rectangles at every preview tick, each
+   * tick's old the last tick's new, and the end walks every kept rectangle in one frame, so kept as they came a 30 s drag
+   * left the end thousands of near copies to walk (tens of milliseconds on letting go). A rectangle nearly the same as one
+   * kept grows that one instead; two far apart are never joined (§2.7's list, never a union).
+   */
+  private queueCourseRects(store: CourseCarve): void {
+    const n = store.rectN;
+    if (!n) return;
+    const swg = this.terrain.swg;
+    if (swg) swg.courseLater(store.rects, n);
+    else this.terrain.courseGrid?.later(store.rects, n);
+    this.courseWork.rects += n;
+    const last: CarveRect[] = [];
+    for (let k = 0; k < n; k++) {
+      const r = store.rects[k];
+      const a = this.rawToGame(r.x0, r.z0);
+      const b = this.rawToGame(r.x1, r.z1);
+      const q = this.courseRectIn;
+      q.x0 = Math.min(a.x, b.x);
+      q.x1 = Math.max(a.x, b.x);
+      q.z0 = Math.min(a.z, b.z);
+      q.z1 = Math.max(a.z, b.z);
+      this.courseRectN = foldCourseRect(this.courseRects, this.courseRectN, q);
+      if (last.length < 64) last.push({ ...q });
+    }
+    this.courseWork.lastRects = last;
+  }
+  /** One rectangle being queued (kept). */
+  private readonly courseRectIn: CarveRect = { x0: 0.5, z0: 0.5, x1: 0.5, z1: 0.5 };
+
+  /**
+   * The world's drawn courses changed (a batch's answer, the dev server's word, a file landed late, the editor's drag held
+   * live): the store made again from `tracks`, and the edges whose samples moved handed over as a **list** of rectangles,
+   * never their union, their cached blocks and far grids laid again a budget at a time nearest the focus (`stepCourseRelay`)
+   * and the chunks over each block rewritten and replanted as it is laid (`stepGroundRewrite`). `preview` (a drag held) keeps
+   * the buckets a change emptied and owes no end; a landing owes the end (the air, the depth and the grass per rectangle, the
+   * shadows, the plantings all made again) once nothing waits, and lands the roads as no-spawn zones again. Answers how many
+   * rectangles it queued.
+   */
+  landCourses(tracks: readonly CarveTrack[], fx: number, fz: number, preview: boolean): number {
+    let store = this.courseCarve;
+    // A held drag's list is the editor's own, laid over again at every tick: only a landing's is the world's tracks.
+    if (!preview) this.courseTracks = tracks;
+    if (!store && !tracks.some((t) => t.course)) return 0;
+    if (!store) {
+      store = new CourseCarve();
+      this.courseCarve = store;
+      this.raceCourse.carve = store;
+    }
+    store.set(tracks, !preview);
+    // Handed to the ground that carves it where it was not yet (every edge queued), else the change's own rectangles.
+    if (!this.attachCourse(store, false)) this.queueCourseRects(store);
+    const n = store.rectN;
+    this.courseWork.landings++;
+    if (Number.isFinite(fx) && Number.isFinite(fz)) {
+      this.courseFocus.x = fx;
+      this.courseFocus.z = fz;
+    }
+    if (this.flora) this.flora.onCourse = this.courseRule();
+    if (!preview) {
+      this.courseEndOwed = true;
+      this.landCourseZones();
+    }
+    return n;
+  }
+
+  /** The roads as no-spawn zones made again and landed through the removal file's own path (the people restruck, the wildlife laid again). */
+  private landCourseZones(): void {
+    const store = this.courseCarve;
+    const before = this.courseZoneList;
+    this.courseZoneList = store && !store.empty ? courseZones(store.outlines()) : [];
+    if (!before.length && !this.courseZoneList.length) return;
+    if (this.planet?.space) return;
+    // The roads' zones the very ones in force (a gate moved, a track renamed, a drag given up carved back): the people struck
+    // and the wild sites laid again over the same zones would put nothing down and lay the same sites, a laying of 30 to 40 ms
+    // for nothing. Kept as they were, so the set still holds these very zones; only while it does (a store taken at an
+    // arrival after the set was compiled sets the list alone, and is landed here whole once).
+    if (sameCourseZones(before, this.courseZoneList) && this.zoneSet.zones.includes(before[before.length - 1])) {
+      this.courseZoneList = before;
+      return;
+    }
+    this.zoneSet = new ZoneSet(this.courseZoneList.length ? [...zonesOf(this.removalRows), ...this.courseZoneList] : zonesOf(this.removalRows));
+    this.courseWork.peopleDown += standingPeople.restrike(this.personRemovedFn(), this.peopleDeps());
+    this.courseWork.sitesDown += wildLife.setRemovals(wildAreasOf(this.zoneSet.zones), this.removals.sites, true);
+  }
+
+  /** The drawn courses' zones, for the console. */
+  get courseZones(): readonly NoSpawnZone[] {
+    return this.courseZoneList;
+  }
+
+  /** What a block or far grid laid again moves: the chunks over it (their ground and plantings), or the far tiles over it. */
+  private readonly courseRelaid = (far: boolean, gx0: number, gz0: number, gx1: number, gz1: number): void => {
+    const x0 = Math.min(gx0, gx1) - 2;
+    const x1 = Math.max(gx0, gx1) + 2;
+    const z0 = Math.min(gz0, gz1) - 2;
+    const z1 = Math.max(gz0, gz1) + 2;
+    if (far) {
+      this.courseWork.farGrids++;
+      this.markCourseFar(x0, z0, x1, z1);
+      return;
+    }
+    this.courseWork.blocks++;
+    for (const c of this.chunks.values()) {
+      if (!rectMeetsChunk(c.origin.x, c.origin.z, CHUNK_SIZE, x0, z0, x1, z1)) continue;
+      this.groundDirty.add(c.key);
+      this.floraDirty.add(c.key);
+      this.courseGroundKeys.add(c.key);
+      this.courseFloraKeys.add(c.key);
+    }
+  };
+
+  /**
+   * The far tiles whose grid meets a rectangle of the game's frame (already grown by the 2 m margin) put on the rewrite's list:
+   * a converted world's far grid laid again, and a world with no converted terrain's pole-grid tile made again (its far tiles
+   * read `heightAt`, which reads the pole grid, so a standing tile kept the course of its build until it was rewritten).
+   */
+  private markCourseFar(x0: number, z0: number, x1: number, z1: number): void {
+    for (const key of this.farTiles.keys()) {
+      const comma = key.indexOf(',');
+      const tx = Number(key.slice(0, comma));
+      const tz = Number(key.slice(comma + 1));
+      const o = groundChunkOrigin(tx, tz, this.terrain.groundShift, FAR_TILE);
+      if (rectMeetsChunk(o.x, o.z, FAR_TILE, x0, z0, x1, z1, FAR_TILE / FAR_RES)) this.farDirty.add(key);
+    }
+  }
+
+  /**
+   * A frame's share of a drawn course's change: its waiting blocks and far grids laid again nearest the focus within
+   * `COURSE_TUNE.relayMs`, the chunks and far tiles over each put on the rewrite's lists; once nothing waits, a landing's end.
+   * Nothing at all on a frame with nothing waiting and no end owed.
+   */
+  private stepCourseRelay(eye: THREE.Vector3): void {
+    const swg = this.terrain.swg;
+    const grid = this.terrain.courseGrid;
+    // A plain number, read on every frame of every converted world course or none (`courseWaiting` makes a record).
+    const waiting = swg ? swg.courseWaitingCount > 0 : !!grid && grid.pending > 0;
+    if (!waiting && !this.courseEndOwed) return;
+    const t0 = performance.now();
+    const fx = Number.isFinite(this.courseFocus.x) ? this.courseFocus.x : eye.x;
+    const fz = Number.isFinite(this.courseFocus.z) ? this.courseFocus.z : eye.z;
+    if (waiting) {
+      if (swg) swg.stepCourse(COURSE_TUNE.relayMs, fx, fz, nowMs, this.courseRelaid);
+      else if (grid) {
+        const raw = this.gameToRaw(fx, fz);
+        grid.step(COURSE_TUNE.relayMs, raw.x, raw.z, nowMs, (x0, z0, x1, z1) => {
+          const a = this.rawToGame(x0, z0);
+          const b = this.rawToGame(x1, z1);
+          this.courseRelaid(false, a.x, a.z, b.x, b.z);
+          // The far tiles over the tile made again: they read the pole grid through `heightAt` (no far grid on this world).
+          this.markCourseFar(Math.min(a.x, b.x) - 2, Math.min(a.z, b.z) - 2, Math.max(a.x, b.x) + 2, Math.max(a.z, b.z) + 2);
+        });
+      }
+    }
+    this.courseWork.ms += performance.now() - t0;
+    const still = swg ? swg.courseWaitingCount > 0 : !!grid && grid.pending > 0;
+    if (!still && this.courseEndOwed) this.endCourseChange();
+  }
+
+  /** A change's end, once nothing of it waits: per rectangle the air, the water's depth and the grass; the shadows; every planting waiting made again now. */
+  private endCourseChange(): void {
+    this.courseEndOwed = false;
+    this.courseWork.ends++;
+    this.floraFlush = this.floraDirty.size > 0;
+    for (let k = 0; k < this.courseRectN; k++) {
+      const r = this.courseRects[k];
+      this.air?.raster.forget(r.x0, r.z0, r.x1, r.z1);
+      if (this.waterMaterials.length) refreshWaterDepth(r.x0, r.z0, r.x1, r.z1, this.depthHeightAt);
+      this.grass?.circleChanged((r.x0 + r.x1) / 2, (r.z0 + r.z1) / 2, Math.hypot(r.x1 - r.x0, r.z1 - r.z0) / 2);
+    }
+    this.courseRectN = 0;
+    this.courseFocus.x = Number.NaN;
+    this.courseFocus.z = Number.NaN;
+    this.shadowHold.dirtyAll();
+  }
+
+  /** The far tiles waiting after a course's change rewritten, nearest the focus first, one at the least, within the budget. */
+  private stepFarDirty(fx: number, fz: number, t0: number, budget: number): void {
+    let first = true;
+    while (this.farDirty.size && (first || performance.now() - t0 < budget)) {
+      first = false;
+      let best = '';
+      let bd = Infinity;
+      for (const key of this.farDirty) {
+        if (!this.farTiles.has(key)) {
+          this.farDirty.delete(key);
+          continue;
+        }
+        const comma = key.indexOf(',');
+        const o = groundChunkOrigin(Number(key.slice(0, comma)), Number(key.slice(comma + 1)), this.terrain.groundShift, FAR_TILE);
+        const dx = o.x + FAR_TILE / 2 - fx;
+        const dz = o.z + FAR_TILE / 2 - fz;
+        const d = dx * dx + dz * dz;
+        if (!best || d < bd) {
+          bd = d;
+          best = key;
+        }
+      }
+      if (!best) break;
+      this.farDirty.delete(best);
+      const t = this.farTiles.get(best)!;
+      const comma = best.indexOf(',');
+      const tx = Number(best.slice(0, comma));
+      const tz = Number(best.slice(comma + 1));
+      if (this.terrain.rewriteFarTile(tx, tz, FAR_TILE, FAR_RES, t.geometry)) this.courseWork.farTiles++;
+      this.farCardsAgain(tx, tz);
+    }
+  }
+
+  /** Whether a planting or a prop at a point of the game's frame stands on a drawn road plus its `clear`; null with no course (the planter's and the props' predicate). */
+  private courseRule(): ((x: number, z: number) => boolean) | null {
+    const s = this.courseCarve;
+    if (!s || s.empty) return null;
+    const c = this.raceCourse;
+    return (x, z) => s.roadAt(c.cx - x, z + c.cz, 0);
+  }
+
+  /**
+   * What a store of drawn courses (the Course tool's, of one track) keeps away by its roads as no-spawn zones: the people's
+   * posts and the wild sites (`StandingPeople.rowsZonedBy`, `WildLife.sitesKeptOffBy`), for the tool's notes. A change's work.
+   */
+  courseKeptAway(store: CourseCarve): { posts: number; sites: number } {
+    if (store.empty || this.planet?.space) return { posts: 0, sites: 0 };
+    const zones = courseZones(store.outlines());
+    return { posts: standingPeople.rowsZonedBy(new ZoneSet(zones)), sites: wildLife.sitesKeptOffBy(wildAreasOf(zones)) };
+  }
+
+  /** Whether a point of the game's frame stands on a drawn road plus its `clear` (the scatter brush keeps off it as off a road); false with no course. */
+  courseRoadAt(x: number, z: number): boolean {
+    const s = this.courseCarve;
+    if (!s || s.empty) return false;
+    const c = this.raceCourse;
+    return s.roadAt(c.cx - x, z + c.cz, 0);
+  }
+
+  /**
+   * The land under a point of the game's frame with no drawn course carved (the generator's ground and the sculpt's delta):
+   * what a new node takes and Fit to land fits to (the race drawer). Bilinear over the four poles round it from their raw
+   * copies on a converted world (the block made ready where it is not cached, an edit's rare cost); the raw ground and the
+   * edits on a world with none. `edits` false leaves the sculpt's delta out (the generator's ground alone: what a course
+   * action's carry measures the carve's change against). `cachedOnly` (the notes') answers NaN where a pole's block is not
+   * cached rather than making it (`SwgTerrain.landAt`).
+   */
+  landAt(gx: number, gz: number, edits = true, cachedOnly = false): number {
+    const swg = this.terrain.swg;
+    const h = edits ? this.heightEdits : null;
+    if (!swg) {
+      const r = this.terrain.groundRawAt(gx, gz);
+      return h ? r + h.bilinear(-gx, gz) : r;
+    }
+    return swg.landAt(gx, gz, h, cachedOnly);
+  }
+
+  /** The props' skip on a drawn road (`chunkProps`), the planter's own rule; null with no course. */
+  private get courseSkip(): ((x: number, z: number) => boolean) | null {
+    const s = this.courseCarve;
+    if (!s || s.empty) return null;
+    return this.courseRule();
+  }
+
+  /**
+   * A drawn course's road over a square of the game's frame into a grass mask (`GrassHost.roadMask`): its poles a
+   * `step` apart (2 m on a grass chunk, coarser on a far tile), set where a road whose course keeps its grass clear covers
+   * them; `on` false where no course reaches the square. A chunk's or a tile's build, never a frame's.
+   */
+  courseRoadMask(x0: number, z0: number, size: number, out: RoadMask): void {
+    fillRoadMask(this.courseCarve, this.raceCourse.cx, this.raceCourse.cz, x0, z0, size, out);
+  }
+
+  /** Where a drawn course carves at a game-frame point, for the console (`course({ at })`): the raw ground, the carve, the delta, the ground and what decided. */
+  courseAt(gx: number, gz: number): Record<string, unknown> {
+    const raw = this.gameToRaw(gx, gz);
+    const s = this.courseCarve;
+    const swg = this.terrain.swg;
+    const rawH = swg ? swg.sampler.rawPoleAt(Math.round(raw.x / 2) * 2, Math.round(raw.z / 2) * 2) : this.terrain.groundRawAt(gx, gz);
+    const base = swg ? swg.sampler.basePoleAt(Math.round(raw.x / 2) * 2, Math.round(raw.z / 2) * 2) : this.terrain.groundBaseAt(gx, gz);
+    const delta = this.heightEdits ? this.heightEdits.deltaAt(raw.x, raw.z) : 0;
+    const why = s ? s.explain(Math.round(raw.x / 2) * 2, Math.round(raw.z / 2) * 2) : null;
+    return {
+      at: { game: [gx, gz], raw: [raw.x, raw.z], pole: [Math.round(raw.x / 2) * 2, Math.round(raw.z / 2) * 2] },
+      raw: rawH,
+      carve: base,
+      delta,
+      ground: this.terrain.nearHeightIfCached(gx, gz),
+      passes: why?.passes ?? [],
+      target: why?.T ?? null,
+      weight: why?.W ?? 0,
+      rule: why?.rule ?? 'no course on this world',
+      deck: why && Number.isFinite(why.deck) ? why.deck : null,
+    };
+  }
+
+  /** What the store and the changes come to, for the console (`course()`). */
+  courseReport(): Record<string, unknown> {
+    const s = this.courseCarve;
+    const swg = this.terrain.swg;
+    const grid = this.terrain.courseGrid;
+    return {
+      store: s ? { paths: s.paths().map((p) => ({ ...p, length: Math.round(p.length * 10) / 10 })), buckets: s.bucketCount, version: s.version, empty: s.empty } : null,
+      laidAtArrival: this.courseLaidAtArrival,
+      waiting: swg ? swg.courseWaiting : grid ? { tiles: grid.pending } : null,
+      grid: grid ? { tiles: grid.size } : null,
+      farTilesWaiting: this.farDirty.size,
+      endOwed: this.courseEndOwed,
+      zones: this.courseZoneList.length,
+      work: { ...this.courseWork, ms: Math.round(this.courseWork.ms * 100) / 100, lastRects: this.courseWork.lastRects.slice(0, 8).map((r) => [Math.round(r.x0), Math.round(r.z0), Math.round(r.x1), Math.round(r.z1)]) },
+    };
   }
 
   // ---- Map-maker II: the ground's paint ----------------------------------------------------------------------------------
@@ -13634,6 +14140,7 @@ export class World {
     if (!this.flora) {
       this.flora = new FloraPlanter(df.source, df.models);
       this.flora.underOurWater = this.underOurWaterRule();
+      this.flora.onCourse = this.courseRule();
       this.floraTemplate = lent.template;
       this.floraField?.dispose();
       this.floraField = null;
@@ -14042,8 +14549,9 @@ export class World {
     const rows = this.removalRows;
     this.removals = rows.length ? compileRemovals(rows, objects, HIDE_TUNE.match, this.keyIndex()) : noRemovals();
     setWorldSolidRows(this.removals.templates);
-    // A space zone's zones keep nothing this pass (Map-maker II §2.13).
-    this.zoneSet = new ZoneSet(this.planet?.space ? [] : zonesOf(rows));
+    // A space zone's zones keep nothing this pass (Map-maker II §2.13). The drawn courses' roads joined after the file's own
+    // (the race drawer): none with no course, and the set is the file's alone.
+    this.zoneSet = new ZoneSet(this.planet?.space ? [] : this.courseZoneList.length ? [...zonesOf(rows), ...this.courseZoneList] : zonesOf(rows));
     const hidden: HiddenObject[] = [];
     for (const li of this.removals.hidden) {
       const o = objects[li] as KeyedObject & { contained?: boolean; q?: readonly number[]; model?: string };

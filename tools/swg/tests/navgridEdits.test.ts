@@ -42,6 +42,8 @@ import { isSeat, isTableTemplate } from '../../../src/world/rowSolid.ts';
 import { buildRoomGraph } from '../../../src/world/nav/navRooms.ts';
 import { DOOR_TUNE, exitsFrom } from '../../../src/world/nav/doorway.ts';
 import { rasterParts, type PartShape, type RasterBake } from '../../../src/world/nav/gridRules.ts';
+import { trackFileText, type TrackDef } from '../../../src/race/trackFile.ts';
+import { courseCtx, drawTrack } from '../../../src/editor/courseEdit.ts';
 
 let passed = 0;
 function ok(cond: unknown, msg: string): void {
@@ -56,6 +58,13 @@ function note(msg: string): void {
 const PACKS = join(REPO, 'assets-private');
 const PLAIN = { world: 'none', texts: { heights: null, water: null, world: null, story: null } };
 const wt = walkThroughTemplates();
+/**
+ * Whether a world's edits as the converter's own run reads them carry anything of the owner's: an edit file, or a drawn race
+ * course in its track file (the race drawer's second wave: `gridEditsOf` reads `public/tracks` beside the placements folder,
+ * which `anyGridEdits` leaves out since it gates the bake header's own stats). Read through `anyGridEdits` alone, a course
+ * the owner draws on a world with no edit file (Dantooine, the hand list's first step) failed the every-grid loop below.
+ */
+const hasOwnerEdits = (e: ReturnType<typeof gridEditsOf> & { course?: string }): boolean => anyGridEdits(e) || (typeof e.course === 'string' && e.course !== '');
 
 /** A grid's planes joined as nav.bin holds them (before the deflate). */
 function planes(g: { nibbles: Uint8Array; coarse: Uint8Array; edges: Uint8Array; clear: Uint8Array }): Buffer {
@@ -195,6 +204,24 @@ const walkable = (v: number): boolean => v >= 1 && v <= 14;
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }
+    // A drawn course in the track file beside a placements folder (the owner's first step on a world with no edit file)
+    // takes the every-grid loop's edit-files branch: the stamp is read, `anyGridEdits` stays false, and the key moves.
+    const root = mkdtempSync(join(tmpdir(), 'rd-w2-navedits-'));
+    try {
+      const placed = join(root, 'placements');
+      mkdirSync(placed);
+      mkdirSync(join(root, 'tracks'));
+      const t = drawTrack('road', 'Road', [{ x: -60, z: 0, y: 5 }, { x: 60, z: 0, y: 5 }], false, courseCtx(() => 5)) as TrackDef;
+      writeFileSync(join(root, 'tracks', 'watertabletest.json'), trackFileText('watertabletest', 'raw', [t]));
+      const drawn = gridEditsOf('watertabletest', placed, dir) as ReturnType<typeof gridEditsOf> & { course?: string };
+      ok(!anyGridEdits(drawn) && hasOwnerEdits(drawn) && layoutKeyOf(dir, wt, drawn) !== layoutKeyOf(dir, wt, gridEditsOf('watertabletest', null, dir)), "a drawn course alone (no edit file) counts as the owner's edits in the every-grid loop, and moves the key");
+      const gateOnly = { ...t } as TrackDef;
+      delete (gateOnly as { course?: unknown }).course;
+      writeFileSync(join(root, 'tracks', 'watertabletest.json'), trackFileText('watertabletest', 'raw', [gateOnly]));
+      ok(!hasOwnerEdits(gridEditsOf('watertabletest', placed, dir) as ReturnType<typeof gridEditsOf> & { course?: string }), 'and a file of gate-only tracks does not');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 }
 
@@ -255,8 +282,8 @@ try {
     for (const name of existsSync(PACKS) ? readdirSync(PACKS) : []) {
       const dir = join(PACKS, name);
       if (!existsSync(join(dir, 'nav.json')) || !existsSync(join(dir, 'layout.json'))) continue;
-      const edits = gridEditsOf(name, undefined, dir) as ReturnType<typeof gridEditsOf> & { soeRivers?: string };
-      if (anyGridEdits(edits)) {
+      const edits = gridEditsOf(name, undefined, dir) as ReturnType<typeof gridEditsOf> & { soeRivers?: string; course?: string };
+      if (hasOwnerEdits(edits)) {
         editWorlds.push(name);
         ok(layoutKeyOf(dir, wt, edits) !== layoutKeyOf(dir, wt, PLAIN), `${name} has committed edit files: its key folds them in`);
         continue;

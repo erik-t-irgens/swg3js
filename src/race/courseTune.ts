@@ -75,6 +75,12 @@ export const COURSE_TUNE = {
   live: 'drag' as 'drag' | 'release',
   /** How often a drag's course is made again while it is held, a second. */
   previewHz: 10,
+  /**
+   * A cost number, never feel (§2.15): how many milliseconds a frame lays a drawn course's change into the cached ground
+   * (`World.stepCourseRelay`), nearest the cursor first; the chunks over what it laid are then rewritten within the sculpt's own
+   * budget. Not a dial.
+   */
+  relayMs: 2,
 };
 
 export type CourseTune = typeof COURSE_TUNE;
@@ -118,6 +124,7 @@ const RANGES: Partial<Record<keyof CourseTune, [number, number]>> = {
   closeReach: [1, 100],
   deckBand: [0.5, 50],
   previewHz: [1, 60],
+  relayMs: [0.1, 100],
 };
 
 /** The choices each switch of the tune takes. */

@@ -289,6 +289,70 @@ export interface GrassSource {
   toGameZ(z: number): number;
 }
 
+/**
+ * A drawn race course's road on a square of the game's frame (the race drawer's second wave): one byte a pole of `step`
+ * metres from (`x0`, `z0`), `n` a side, set where the road whose course keeps its grass clear covers the pole. Worked out once
+ * a grass chunk or far tile is built (`GrassHost.roadMask`); a tuft or card reads its nearest pole. `on` false (no course
+ * reaches the square): nothing is asked, and the placing is today's.
+ */
+export interface RoadMask {
+  on: boolean;
+  x0: number;
+  z0: number;
+  step: number;
+  n: number;
+  bits: Uint8Array;
+}
+
+/** A mask, made once (its bytes grown as asked). */
+export function roadMask(): RoadMask {
+  return { on: false, x0: 0.5, z0: 0.5, step: 2, n: 0, bits: new Uint8Array(0) };
+}
+
+/** The drawn courses as a mask reads them (`courseCarve.ts`'s store, read structurally). */
+export interface RoadSource {
+  readonly empty: boolean;
+  touches(x0: number, z0: number, x1: number, z1: number): boolean;
+  roadAt(x: number, z: number, what: number): boolean;
+}
+
+/**
+ * A drawn course's road over a square of the game's frame into a mask (`World.courseRoadMask`, `GrassHost.roadMask`): its
+ * poles `step` apart (2 m on a grass chunk, coarser on a far tile), set where a road whose course keeps its grass clear
+ * covers them (`roadAt(.., 1)`); `on` false where no course reaches the square. `cx`, `cz` the layout's centre the raw frame
+ * is about (the game's x mirrored about it). A chunk's or a tile's build, never a frame's.
+ */
+export function fillRoadMask(s: RoadSource | null, cx: number, cz: number, x0: number, z0: number, size: number, out: RoadMask): void {
+  out.on = false;
+  if (!s || s.empty) return;
+  if (!s.touches(cx - x0 - size, z0 + cz, cx - x0, z0 + size + cz)) return;
+  const step = Math.max(2, size / 64);
+  const n = Math.floor(size / step) + 1;
+  if (out.bits.length < n * n) out.bits = new Uint8Array(n * n);
+  let any = false;
+  for (let k = 0; k < n; k++) {
+    for (let i = 0; i < n; i++) {
+      const on = s.roadAt(cx - (x0 + i * step), z0 + k * step + cz, 1);
+      out.bits[k * n + i] = on ? 1 : 0;
+      if (on) any = true;
+    }
+  }
+  out.x0 = x0;
+  out.z0 = z0;
+  out.step = step;
+  out.n = n;
+  out.on = any;
+}
+
+/** Whether a tuft or a card at a game-frame point stands on the masked road (its nearest pole's byte). */
+export function onRoadMask(m: RoadMask, gx: number, gz: number): boolean {
+  if (!m.on) return false;
+  const i = Math.round((gx - m.x0) / m.step);
+  const k = Math.round((gz - m.z0) / m.step);
+  if (i < 0 || k < 0 || i >= m.n || k >= m.n) return false;
+  return m.bits[k * m.n + i] !== 0;
+}
+
 /** A circle flora is kept off, the game's frame. */
 export interface FloraCircle {
   x: number;
@@ -414,7 +478,7 @@ export interface GrassWorld {
  * not cached is counted and dropped (the chunk is built only when its ground is, so none should be). Allocates
  * nothing. Answers how many it wrote.
  */
-export function placeGrass(src: GrassSource, world: GrassWorld, tiling: FloraTiling, x0: number, z0: number, sizeM: number, circles: readonly FloraCircle[], tune: GrassTune, sway: GrassSway, trees: Pick<SwayTune, 'periodBase' | 'periodPow' | 'wrap'>, out: TuftBuffers, stats: PlaceStats): number {
+export function placeGrass(src: GrassSource, world: GrassWorld, tiling: FloraTiling, x0: number, z0: number, sizeM: number, circles: readonly FloraCircle[], tune: GrassTune, sway: GrassSway, trees: Pick<SwayTune, 'periodBase' | 'periodPow' | 'wrap'>, out: TuftBuffers, stats: PlaceStats, road: RoadMask | null = null): number {
   const tile = tiling.tileSize;
   if (!(tile >= 0.25)) return 0;
   const j = jitterOf(tiling, tune.jitter, tune.jitterMin);
@@ -459,6 +523,11 @@ export function placeGrass(src: GrassSource, world: GrassWorld, tiling: FloraTil
         stats.circles++;
         continue;
       }
+      // A drawn course's road whose course keeps its grass clear (the race drawer), counted with the circles.
+      if (road !== null && road.on && onRoadMask(road, gx, gz)) {
+        stats.circles++;
+        continue;
+      }
       if (tune.water === 'drop' && src.waterAt(gx, gz) > pole.height && !MEANT_FOR_WATER.test(key)) {
         stats.water++;
         continue;
@@ -499,7 +568,7 @@ export interface FarSamples {
  * ground's), its height the samples' bilinear one less the far ground's own drop (`drop`, so it stands on the
  * ground drawn there), its tint the nearest sample's colour, its normal straight up. Allocates nothing.
  */
-export function placeFarCards(src: GrassSource, world: GrassWorld, tiling: FloraTiling, x0: number, z0: number, sizeM: number, grid: FarSamples, drop: number, circlesAt: (gx: number, gz: number) => readonly FloraCircle[], tune: FarCardTune, out: TuftBuffers, stats: PlaceStats): number {
+export function placeFarCards(src: GrassSource, world: GrassWorld, tiling: FloraTiling, x0: number, z0: number, sizeM: number, grid: FarSamples, drop: number, circlesAt: (gx: number, gz: number) => readonly FloraCircle[], tune: FarCardTune, out: TuftBuffers, stats: PlaceStats, road: RoadMask | null = null): number {
   const tile = tiling.tileSize;
   if (!(tile >= 1)) return 0;
   const j = jitterOf(tiling, null, tune.jitterMin);
@@ -539,6 +608,10 @@ export function placeFarCards(src: GrassSource, world: GrassWorld, tiling: Flora
         continue;
       }
       if (inCircle(circlesAt(gx, gz), gx, gz)) {
+        stats.circles++;
+        continue;
+      }
+      if (road !== null && road.on && onRoadMask(road, gx, gz)) {
         stats.circles++;
         continue;
       }

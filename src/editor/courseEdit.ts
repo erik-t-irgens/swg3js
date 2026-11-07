@@ -18,6 +18,7 @@
 
 import { COURSE_LIMITS, TRACK_LIMITS, courseSpines, readTrack, type CourseCurve, type CourseNode, type CourseWall, type RaceKind, type TrackCourse, type TrackDef, type TrackPlace } from '../race/trackFile.ts';
 import { buildSpine, edgeCrossesItself, foldingEdges, nearestOn, spineAt, spineNear, spinePoint, type Spine } from '../race/coursePath.ts';
+import { CourseCarve, deckAsk } from '../swg/terrain/courseCarve.ts';
 import { deleteMap, followCourse, followGate, gateRules, gatesAgain, insertMap, placeGates, remapAnchors, type DeckAt, type GateRules } from '../race/courseGates.ts';
 import { COURSE_TUNE, type CourseTune } from '../race/courseTune.ts';
 import { deleteGate, moveGateTo, nudgeGate, resizeGate } from '../race/trackEdits.ts';
@@ -35,6 +36,50 @@ export interface CourseCtx {
   /** The water's surface over a point of the file's frame (-Infinity for none): a node's road under it is noted. */
   water?: (x: number, z: number) => number;
   deckAt?: DeckAt;
+  /**
+   * The race drawer's second wave: the gates under a crossing held under its deck as the course itself carves it
+   * (`deckAtOf`, worked out from the very course being settled). Absent (a test's, the first wave's), no deck is asked.
+   */
+  decks?: boolean;
+}
+
+/**
+ * The deck rule's one store (and its records), kept for the session and refilled at every call: a held drag settles the
+ * course at `previewHz`, and a store made each call (with its spines built fresh and the same spines built again for the
+ * points) was about 2.4 MB a preview tick of a 400-node course, where refilled its spines are built into their own spare
+ * arrays and its buckets in place (`CourseCarve.set`).
+ */
+const deckStore = new CourseCarve();
+const deckP = spinePoint();
+const deckQ = deckAsk();
+
+/**
+ * Where a course's own carve stands a deck over a point of one of its paths (§2.6), or -Infinity: the gates' `DeckAt` from a
+ * store of the track alone (a figure eight's crossing is the course's own; a crossing with another track is that track's own
+ * business when it is placed), its spines the store's own, found by path id. **Good only until the next `deckAtOf`**, which
+ * refills the store: every caller (`settle`, `placeGatesAgain`, `followGate`, `gatesAgain`) asks it within the one call.
+ */
+export function deckAtOf(t: TrackDef): DeckAt | undefined {
+  if (!t.course) return undefined;
+  const store = deckStore;
+  store.set([t]);
+  if (store.empty) return undefined;
+  const held = store.spines();
+  return (path, e, share) => {
+    let sp: Spine | null = null;
+    for (let k = 0; k < held.length; k++) if (held[k].path === path) sp = held[k].spine;
+    if (!sp || !spineAt(sp, e, share, deckP)) return -Infinity;
+    deckQ.x = deckP.x;
+    deckQ.z = deckP.z;
+    deckQ.edge = -1;
+    store.deckOf(deckQ);
+    return deckQ.out;
+  };
+}
+
+/** The deck rule an edit settles with: the context's own, else the course's own carve where the context asks for decks. */
+function deckFor(ctx: CourseCtx, t: TrackDef): DeckAt | undefined {
+  return ctx.deckAt ?? (ctx.decks ? deckAtOf(t) : undefined);
 }
 
 /** A context of the tune's rules and no land (a test's, the console's with nothing under it). */
@@ -212,7 +257,7 @@ export function settle(t: TrackDef, ctx: CourseCtx, keep: { path: number; i: num
       }
     }
   }
-  const followed = followCourse(cur, ctx.rules, ctx.deckAt);
+  const followed = followCourse(cur, ctx.rules, deckFor(ctx, cur));
   return readTrack(followed, [], 0);
 }
 
@@ -288,7 +333,7 @@ export function drawTrack(id: string, name: string, points: readonly { x: number
   const t: TrackDef = { id, name, kind: closed ? 'circuit' : 'sprint', laps: closed ? 3 : 1, for: kindsOf(tune), clear: r2(tune.clear), grid: { x: nodes[0].x, y: nodes[0].y, z: nodes[0].z, q: [1, 0, 0, 0] }, gates: [], course: { ...courseNumbers(tune), paths: [{ id: 'main', nodes }] } };
   const s = settle(t, ctx);
   if (typeof s === 'string') return s;
-  const placed = placeGates(s, ctx.rules, ctx.deckAt);
+  const placed = placeGates(s, ctx.rules, deckFor(ctx, s));
   return readTrack({ ...s, grid: placed.grid, gates: placed.gates });
 }
 
@@ -473,14 +518,14 @@ export function gateDeleted(t: TrackDef, i: number): CourseEdit {
 
 /** Gate `i` anchored again to the road nearest it (Follow): its width the road's again. */
 export function gateFollowed(t: TrackDef, i: number, ctx: CourseCtx): CourseEdit {
-  const f = followGate(t, i, ctx.rules, ctx.deckAt);
+  const f = followGate(t, i, ctx.rules, deckFor(ctx, t));
   return typeof f === 'string' ? f : readTrack(f, [], 0);
 }
 
 /** Place gates again: every following gate placed again, the spacing's and the apexes' added where none stands within `gateMin`. */
 export function placeGatesAgain(t: TrackDef, ctx: CourseCtx): CourseEdit {
   if (!t.course) return `${t.id} has no course to place gates along`;
-  return readTrack(gatesAgain(t, ctx.rules, ctx.deckAt), [], 0);
+  return readTrack(gatesAgain(t, ctx.rules, deckFor(ctx, t)), [], 0);
 }
 
 /**
@@ -629,4 +674,332 @@ export function courseNotes(t: TrackDef, ctx: CourseCtx, tune: CourseTune = COUR
     }
   }
   return out;
+}
+
+/**
+ * Fit to land (§2.11, the race drawer's second wave): every node of a path set to the land under it, and, every `fitStep`
+ * metres along each edge where the land departs from the road's line by more than `fitTol`, a node put in at the worst such
+ * point at the land's height, so a course follows the dunes. Repeated until nothing departs past the tolerance or the path
+ * holds its most nodes. One edit, one action. The land is the generator's ground and the sculpt's delta (never a carve).
+ */
+export function fitToLand(t: TrackDef, path: string | undefined, ctx: CourseCtx, tune: CourseTune = COURSE_TUNE): CourseEdit {
+  const p = pathIndex(t, path);
+  if (p < 0) return t.course ? `no path called ${path}` : `${t.id} has no course`;
+  let cur = copy(t);
+  const ns = cur.course!.paths[p].nodes;
+  for (const n of ns) {
+    if (n.j !== undefined) continue;
+    const y = ctx.land(n.x, n.z);
+    if (!Number.isFinite(y)) return `the land under node (${n.x}, ${n.z}) is not known yet: fly nearer`;
+    n.y = y;
+  }
+  const P = spinePoint();
+  for (let round = 0; round < 64; round++) {
+    const nodes = cur.course!.paths[p].nodes;
+    if (nodes.length >= COURSE_LIMITS.nodes) break;
+    const sp = buildSpine(nodes, closedPath(cur, p));
+    let worst = 0;
+    let we = -1;
+    let wu = 0.5;
+    for (let e = 0; e < sp.edges.length; e++) {
+      const ed = sp.edges[e];
+      const steps = Math.floor(ed.len / Math.max(2, tune.fitStep));
+      for (let k = 1; k <= steps; k++) {
+        const u = (k * Math.max(2, tune.fitStep)) / ed.len;
+        if (u >= 0.98 || u <= 0.02) continue;
+        if (!spineAt(sp, e, u, P)) continue;
+        const land = ctx.land(P.x, P.z);
+        if (!Number.isFinite(land)) continue;
+        const off = Math.abs(land - P.y);
+        if (off > tune.fitTol && off > worst) {
+          worst = off;
+          we = e;
+          wu = u;
+        }
+      }
+    }
+    if (we < 0) break;
+    const put = putNode(cur, p, we, wu);
+    const nn = put.course!.paths[p].nodes[we + 1];
+    const y = ctx.land(nn.x, nn.z);
+    if (Number.isFinite(y)) nn.y = y;
+    cur = put;
+  }
+  return settle(cur, ctx);
+}
+
+/** How near parallel two legs of one path must lie over a lower slot to be a hairpin's (the cosine of 30 degrees; ours). */
+export const HAIRPIN_WAY = 0.866;
+/** How far inside the gap its ends are read (m, a pole; ours, a constant of the measure): never on the abutment's wall. */
+export const CROSSING_INSET = 2;
+
+/** One crossing of a course's carve: its middle on the upper road, the deck and the lower road there, and the gap's span. */
+export interface CourseCrossing {
+  /** The upper path's id and the lower's (one id for a hairpin whose legs overlap: an underpass by the rule). */
+  upper: string;
+  lower: string;
+  hairpin: boolean;
+  x: number;
+  z: number;
+  /**
+   * The upper road's surface at the gap's middle and near its two ends (a pole inside each, `CROSSING_INSET`; `A` the earlier
+   * along the upper path) with those two places of the raw frame, the lower road's under it, and the clearance between.
+   */
+  deck: number;
+  deckA: number;
+  deckB: number;
+  xA: number;
+  zA: number;
+  xB: number;
+  zB: number;
+  low: number;
+  clearance: number;
+  /** The upper road's way at the middle (a unit vector of the raw frame), the gap's span along it, and its width there. */
+  ux: number;
+  uz: number;
+  span: number;
+  width: number;
+}
+
+/**
+ * Where a course's own carve makes a crossing (§2.6): along each path, the runs of its samples where its road stands over a
+ * lower slot it crosses (the store's own rule, `over`), each a crossing with its gap's span, deck and clearance. Worked out
+ * from a store of the track alone; an edit's work, never a frame's.
+ */
+export function courseCrossings(t: TrackDef): CourseCrossing[] {
+  const out: CourseCrossing[] = [];
+  if (!t.course) return out;
+  const store = new CourseCarve();
+  store.set([t]);
+  if (store.empty) return out;
+  const spines = courseSpines(t);
+  const P = spinePoint();
+  for (let p = 0; p < spines.length; p++) {
+    const id = t.course.paths[p].id;
+    const sp = spines[p];
+    // A run of samples in a gap: its first and last place along the path and the lower pass's numbers (its way's right).
+    let run: { s0: number; s1: number; e0: number; t0: number; e1: number; t1: number; low: number; lower: string; rx: number; rz: number } | null = null;
+    /** The spine's point at a place along the path (its edge and share from the path's own starts), into `P`. */
+    const atArc = (s: number): void => {
+      let me = 0;
+      while (me + 1 < sp.edges.length && sp.start[me + 1] <= s) me++;
+      const mt = sp.edges[me].len > 0 ? (s - sp.start[me]) / sp.edges[me].len : 0;
+      spineAt(sp, me, Math.min(1, Math.max(0, mt)), P);
+    };
+    const close = (): void => {
+      if (!run) return;
+      const mid = (run.s0 + run.s1) / 2;
+      atArc(mid);
+      const midP = { x: P.x, z: P.z, y: P.y, tx: P.tx, tz: P.tz, hw: P.hw };
+      // Each end of the gap a little inside it (`CROSSING_INSET`, a pole), where a ray down meets the bridge and never the
+      // abutment's own wall the 2 m heightfield slopes between its last two poles.
+      const inset = Math.min(CROSSING_INSET, (run.s1 - run.s0) / 4);
+      atArc(run.s0 + inset);
+      const a = P.y;
+      const xA = P.x;
+      const zA = P.z;
+      atArc(run.s1 - inset);
+      const b = P.y;
+      const xB = P.x;
+      const zB = P.z;
+      // A hairpin is one path's legs lying along each other (their ways within `HAIRPIN_WAY` of parallel); one path crossing
+      // itself at an angle (a figure eight) is a crossing like any other.
+      const tl = Math.sqrt(midP.tx * midP.tx + midP.tz * midP.tz);
+      const along = tl > 0 ? Math.abs((midP.tx * -run.rz + midP.tz * run.rx) / tl) : 0;
+      const hairpin = run.lower === id && along >= HAIRPIN_WAY;
+      out.push({ upper: id, lower: run.lower, hairpin, x: midP.x, z: midP.z, deck: midP.y, deckA: a, deckB: b, xA, zA, xB, zB, low: run.low, clearance: midP.y - run.low, ux: midP.tx, uz: midP.tz, span: run.s1 - run.s0, width: midP.hw * 2 });
+      run = null;
+    };
+    for (let e = 0; e < sp.edges.length; e++) {
+      const ed = sp.edges[e];
+      for (let i = 0; i < ed.count; i++) {
+        const n = store.passesAt(ed.x[i], ed.z[i]);
+        let over = false;
+        let low = Infinity;
+        let lower = '';
+        for (let k = 0; k < n; k++) {
+          const q = store.passAt(k);
+          // This sample's own pass: of this path, through the sample, at its own height (where one path crosses itself the
+          // other leg's pass runs through the very same point, at the other leg's height).
+          if (CourseCarve.pathOf(q) === id && q.d < 1e-6 && Math.abs(q.y - ed.y[i]) < 1e-6 && q.over >= 0.5) over = true;
+        }
+        let lrx = 0;
+        let lrz = 0;
+        if (over) {
+          for (let k = 0; k < n; k++) {
+            const q = store.passAt(k);
+            if (q.join >= 0.5 && q.T < low) {
+              low = q.T;
+              lower = CourseCarve.pathOf(q);
+              lrx = q.rx;
+              lrz = q.rz;
+            }
+          }
+        }
+        const s = sp.start[e] + ed.s[i];
+        if (over && Number.isFinite(low)) {
+          const sh = ed.len > 0 ? ed.s[i] / ed.len : 0;
+          if (!run) run = { s0: s, s1: s, e0: e, t0: sh, e1: e, t1: sh, low, lower, rx: lrx, rz: lrz };
+          else {
+            run.s1 = s;
+            run.e1 = e;
+            run.t1 = sh;
+            if (low < run.low) run.low = low;
+          }
+        } else close();
+      }
+    }
+    close();
+  }
+  return out;
+}
+
+// ---- Fit a bridge (the race drawer's second wave, §2.11): pure, so a node test runs what the editor writes. ----
+
+/** A geometry as the bridge's fit reads it (three's `BufferGeometry` answers it): its positions and its index. */
+export interface BridgeGeometry {
+  getAttribute(name: 'position'): { count: number; getX(i: number): number; getY(i: number): number; getZ(i: number): number } | undefined;
+  index: { count: number; getX(i: number): number } | null;
+}
+
+/** What a bridge is fitted over: the crossing's middle (raw frame), the upper road's surface there and its way, the span. */
+export interface BridgeSpan {
+  x: number;
+  z: number;
+  deck: number;
+  ux: number;
+  uz: number;
+  span: number;
+  /** The upper road's surface near each end of the gap (`CourseCrossing.deckA`, `deckB`), where known. */
+  deckA?: number;
+  deckB?: number;
+}
+
+/** Where a bridge stands: its origin and turn in the game's frame, its scale, and what decided them. */
+export interface BridgeFit {
+  at: { x: number; y: number; z: number };
+  q: [number, number, number, number];
+  scale: [number, number, number];
+  /** The scale along its length, its length at its own size, its walkable top over its origin, and which axis is its length. */
+  s: number;
+  length: number;
+  top: number;
+  axis: 'x' | 'z';
+  /**
+   * How far the bridge's top at each end (its end rays, `walkableTops`) stands off the upper road near that end of the gap
+   * (`deckA` at its axis's minimum end, which the turn lays toward the path's earlier side, `deckB` at its other): positive
+   * proud of the road. NaN where an end has no top or no road was handed over. A flat bridge over a climbing road stands off
+   * it at one end, which the race box meets as a scrape: the words say so.
+   */
+  offA: number;
+  offB: number;
+}
+
+/** How far out along its length a bridge's end rays stand from its middle (a share of its length): inside its ends. Ours, a constant of the measure. */
+export const BRIDGE_END_SHARE = 0.45;
+
+/**
+ * A model's walkable top over its origin, measured by rays down onto its own triangles at its middle and at its two ends along
+ * its longer horizontal axis (§2.11), each the highest upward face (normal at least half up, either winding) a vertical line
+ * there meets: the median of the three, so a beam, a tower or a roof over one of them (read alone, a crossbeam over mid-span
+ * was taken for the deck) never decides it; of two the middle's, else the one; else its box's top. Rails stand at a bridge's
+ * sides, so the lines meet the deck.
+ */
+export function walkableTop(bounds: { min: number[]; max: number[] }, geos: readonly BridgeGeometry[]): number {
+  const t = walkableTops(bounds, geos);
+  const hits = [t.a, t.mid, t.b].filter((v) => Number.isFinite(v));
+  if (hits.length === 3) return hits.sort((p, q) => p - q)[1];
+  if (Number.isFinite(t.mid)) return t.mid;
+  if (hits.length) return hits[0];
+  return bounds.max[1];
+}
+
+/** A model's top along its middle line and its two end lines (`walkableTop`'s three rays), -Infinity where a line meets no upward face; `a` the end toward its axis's minimum. */
+export function walkableTops(bounds: { min: number[]; max: number[] }, geos: readonly BridgeGeometry[]): { mid: number; a: number; b: number } {
+  const cx = (bounds.min[0] + bounds.max[0]) / 2;
+  const cz = (bounds.min[2] + bounds.max[2]) / 2;
+  const lx = Math.abs(bounds.max[0] - bounds.min[0]);
+  const lz = Math.abs(bounds.max[2] - bounds.min[2]);
+  const ex = lx >= lz ? lx * BRIDGE_END_SHARE : 0;
+  const ez = lx >= lz ? 0 : lz * BRIDGE_END_SHARE;
+  return { mid: topAlong(geos, cx, cz), a: topAlong(geos, cx - ex, cz - ez), b: topAlong(geos, cx + ex, cz + ez) };
+}
+
+/** The highest upward face a vertical line through (`cx`, `cz`) of a model's own frame meets, or -Infinity. */
+function topAlong(geos: readonly BridgeGeometry[], cx: number, cz: number): number {
+  let best = -Infinity;
+  for (const g of geos) {
+    const p = g.getAttribute('position');
+    if (!p) continue;
+    const idx = g.index;
+    const n = idx ? idx.count : p.count;
+    for (let k = 0; k + 2 < n; k += 3) {
+      const a = idx ? idx.getX(k) : k;
+      const b = idx ? idx.getX(k + 1) : k + 1;
+      const c = idx ? idx.getX(k + 2) : k + 2;
+      const ax = p.getX(a), ay = p.getY(a), az = p.getZ(a);
+      const bx = p.getX(b), by = p.getY(b), bz = p.getZ(b);
+      const qx = p.getX(c), qy = p.getY(c), qz = p.getZ(c);
+      // The face's normal, either winding: its up share of its length.
+      const ux = bx - ax, uy = by - ay, uz = bz - az;
+      const vx = qx - ax, vy = qy - ay, vz = qz - az;
+      const nx = uy * vz - uz * vy;
+      const ny = uz * vx - ux * vz;
+      const nz = ux * vy - uy * vx;
+      const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (!(len > 0) || Math.abs(ny) / len < 0.5) continue;
+      // Barycentric in the plan.
+      const d = (bz - qz) * (ax - qx) + (qx - bx) * (az - qz);
+      if (Math.abs(d) < 1e-12) continue;
+      const l1 = ((bz - qz) * (cx - qx) + (qx - bx) * (cz - qz)) / d;
+      const l2 = ((qz - az) * (cx - qx) + (ax - qx) * (cz - qz)) / d;
+      const l3 = 1 - l1 - l2;
+      if (l1 < -1e-9 || l2 < -1e-9 || l3 < -1e-9) continue;
+      const y = l1 * ay + l2 * by + l3 * qy;
+      if (y > best) best = y;
+    }
+  }
+  return best;
+}
+
+/**
+ * A bridge fitted over a crossing: its longer horizontal axis turned along the upper road (the raw frame's way mirrored
+ * into the game's, x negated), scaled along it to the span (held to the placements' backstops), its box's middle on the
+ * crossing's middle and its walkable top on the deck. `centre` is the layout's centre the raw frame is written about.
+ */
+export function bridgeFit(bounds: { min: number[]; max: number[] }, geos: readonly BridgeGeometry[], ask: BridgeSpan, centre: { x: number; z: number } | null): BridgeFit {
+  const lx = Math.abs(bounds.max[0] - bounds.min[0]);
+  const lz = Math.abs(bounds.max[2] - bounds.min[2]);
+  const axis: 'x' | 'z' = lx >= lz ? 'x' : 'z';
+  const length = Math.max(1e-3, axis === 'x' ? lx : lz);
+  const s = Math.min(1000, Math.max(0.001, Math.round((ask.span / length) * 1000) / 1000));
+  const scale: [number, number, number] = axis === 'x' ? [s, 1, 1] : [1, 1, s];
+  // The road's way in the game's frame (x mirrored), and the yaw that lays the length axis along it: three's turn about up
+  // takes +X to (cos t, -sin t) and +Z to (sin t, cos t).
+  const gx = -ask.ux;
+  const gz = ask.uz;
+  const t = axis === 'x' ? Math.atan2(-gz, gx) : Math.atan2(gx, gz);
+  const q: [number, number, number, number] = [0, Math.sin(t / 2), 0, Math.cos(t / 2)];
+  const top = walkableTop(bounds, geos);
+  const ends = walkableTops(bounds, geos);
+  const offA = Number.isFinite(ends.a) && typeof ask.deckA === 'number' ? ask.deck - top + ends.a - ask.deckA : Number.NaN;
+  const offB = Number.isFinite(ends.b) && typeof ask.deckB === 'number' ? ask.deck - top + ends.b - ask.deckB : Number.NaN;
+  // The box's middle, scaled and turned, taken off the crossing's middle (game frame).
+  const mx = ((bounds.min[0] + bounds.max[0]) / 2) * scale[0];
+  const mz = ((bounds.min[2] + bounds.max[2]) / 2) * scale[2];
+  const c = Math.cos(t);
+  const sn = Math.sin(t);
+  const ox = mx * c + mz * sn;
+  const oz = -mx * sn + mz * c;
+  const cgx = (centre?.x ?? 0) - ask.x;
+  const cgz = ask.z - (centre?.z ?? 0);
+  return { at: { x: cgx - ox, y: ask.deck - top, z: cgz - oz }, q, scale, s, length, top, axis, offA, offB };
+}
+
+/** What a fitted bridge's ends come to, in words: '' where both stand within `lip` (`deckLip`) of the road or are not known. */
+export function bridgeEndWords(fit: BridgeFit, lip: number = COURSE_TUNE.deckLip): string {
+  let worst = 0;
+  for (const v of [fit.offA, fit.offB]) if (Number.isFinite(v) && Math.abs(v) > Math.abs(worst)) worst = v;
+  if (!(Math.abs(worst) > lip)) return '';
+  return `; it stands ${worst.toFixed(2)} m off the upper road at one end (more than ${lip} m: the road climbs across the gap, so tip it with Shift+R or flatten the upper road over the crossing)`;
 }

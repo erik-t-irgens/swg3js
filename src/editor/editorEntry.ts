@@ -31,7 +31,7 @@ import { packIdOfRoot } from '../world/layoutStream.ts';
 import { EditorGhost, type GhostDeps } from '../world/placeGhost.ts';
 import { patchOfBounds, clearRadius, type Patch } from '../world/housePlace.ts';
 import { destinationFile, rowFromEditor, type EditorSource } from '../world/permanentEdit.ts';
-import { PLACEMENT_KEY_PREFIX, placementKey, scaleOf as scaleOfRow, toGame as placementToGame, type PlacementLayer, type PlacementRow } from '../story/placements.ts';
+import { PLACEMENT_KEY_PREFIX, placementKey, scaleOf as scaleOfRow, toGame as placementToGame, writtenScale, type PlacementLayer, type PlacementRow } from '../story/placements.ts';
 import { gameToRawX, gameToRawZ, rawToGameX, rawToGameZ } from '../story/waypoints.ts';
 import type { DialSet } from '../ui/dials.ts';
 import type { HudCanvas } from '../ui/hudCanvas.ts';
@@ -75,7 +75,8 @@ import { ToolList, toolFrame, type ToolDef, type ToolDraw } from './tools.ts';
 import { EditorWater, waterTool, type WaterHost } from './editorWater.ts';
 import { EditorLights, LIGHT_PRESETS, LIGHTS_TOOL_TUNE, lightsTool, presetOf, type LightsBuilding, type LightsHost } from './editorLights.ts';
 // The race drawer's first wave: the Course tool and the track file's tracks it edits.
-import { COURSE_MODES, EditorCourse, courseTool, type CourseHost, type CourseMode } from './editorCourse.ts';
+import { COURSE_MODES, EditorCourse, courseTool, type BridgeAsk, type CourseHost, type CourseMode } from './editorCourse.ts';
+import { bridgeEndWords, bridgeFit } from './courseEdit.ts';
 import type { TrackDef } from '../race/trackFile.ts';
 import type { LightRow } from '../world/editFiles/lightsFile.ts';
 import { WATER_CHOICES, WATER_TUNE, tuneWater, PLACES_TOOL_CHOICES, PLACES_TOOL_TUNE, tunePlacesTool } from './editorTune.ts';
@@ -564,7 +565,8 @@ export class Editor {
       ground: (x, z) => (w.planet?.space ? Number.NaN : (w.terrain.nearHeightIfCached(x, z) ?? w.terrain.heightAt(x, z))),
       water: (x, z) => w.terrain.waterHeightAt(x, z),
       // The roads and rivers the generator marked (Map-maker II's fourth wave), from the cached ground: the brush keeps off them.
-      road: (x, z) => w.roadIfCached(x, z),
+      // The client's roads and rivers, and a drawn race course's road plus its `clear` (the race drawer), on the same switch.
+      road: (x, z) => (w.courseRoadAt(x, z) ? true : w.roadIfCached(x, z)),
       centre: () => w.placeFrame,
       frame: () => (w.planet?.space ? 'game' : 'raw'),
       packId: () => host.packId(),
@@ -987,6 +989,20 @@ export class Editor {
         }
         return r ?? Number.NaN;
       },
+      // The ground a stroke works over (the race drawer): the raw height with the drawn courses carved, worked out from raw
+      // (`basePoleAt`, `groundBaseAt`); with no course the number `rawAt` gives.
+      baseAt: (px, pz) => {
+        const x = px * 2;
+        const z = pz * 2;
+        const s = w.terrain.swg;
+        if (!s) return w.terrain.groundBaseAt(-x, z);
+        let r = s.sampler.basePoleAt(x, z);
+        if (r === null) {
+          s.heightAt(s.toGameX(x), s.toGameZ(z));
+          r = s.sampler.basePoleAt(x, z);
+        }
+        return r ?? Number.NaN;
+      },
       toRaw: (x, z, out) => {
         const s = w.terrain.swg;
         out.x = s ? s.toSwgX(x) : -x;
@@ -1079,7 +1095,10 @@ export class Editor {
   /**
    * What the Course tool needs of the game (the race drawer's first wave): this world's tracks as read, the track file's raw
    * frame about the layout's own centre (exactly `trackInGame`'s, so a course is drawn where a run tests its gates), the
-   * land under a raw point (the ground built, else the generator's; the sculpt's deltas laid in either) and the water.
+   * land under a raw point (the ground built, else the generator's; the sculpt's deltas laid in either) and the water. From
+   * the second wave, the carve: the world carves a held edit live and the file's courses back, the land a node takes is the
+   * ground with no course carved (`landAt`), and a course action carries our rows, counts the touch-ups it left, names what
+   * stands on its road and fits a bridge over a crossing.
    */
   private courseHost(): CourseHost {
     const h = this.host;
@@ -1087,6 +1106,12 @@ export class Editor {
     const me = this;
     const none: readonly TrackDef[] = [];
     const g = { x: 0.5, z: 0.5 };
+    const foot = standingFoot();
+    const tmp = new THREE.Vector3();
+    const q = new THREE.Quaternion();
+    const cast = { toi: 0.5, nx: 0.5, ny: 0.5, nz: 0.5, handle: -1 };
+    /** Whether a drawn course carves this world now: the land a node takes is then the ground with none carved. */
+    const carving = (): boolean => !!w.courseCarve && !w.courseCarve.empty;
     return {
       get edits() {
         return me.edits;
@@ -1109,13 +1134,19 @@ export class Editor {
         const c = w.layoutCenter;
         g.x = rawToGameX(c?.x ?? 0, x);
         g.z = rawToGameZ(c?.z ?? 0, z);
-        const y = w.terrain.nearHeightIfCached(g.x, g.z) ?? w.terrain.heightAt(g.x, g.z);
+        // With a course carved the built ground is the carve's: the land under it is worked out with none (§2.11).
+        const y = carving() ? w.landAt(g.x, g.z) : (w.terrain.nearHeightIfCached(g.x, g.z) ?? w.terrain.heightAt(g.x, g.z));
         return Number.isFinite(y) ? y : Number.NaN;
       },
       landKnown: (x, z) => {
         const c = w.layoutCenter;
-        const y = w.terrain.nearHeightIfCached(rawToGameX(c?.x ?? 0, x), rawToGameZ(c?.z ?? 0, z));
-        return y !== null && Number.isFinite(y) ? y : Number.NaN;
+        g.x = rawToGameX(c?.x ?? 0, x);
+        g.z = rawToGameZ(c?.z ?? 0, z);
+        const y = w.terrain.nearHeightIfCached(g.x, g.z);
+        if (y === null || !Number.isFinite(y)) return Number.NaN;
+        // Built here: the land with no course carved (the raw copies of the cached blocks, never a block made for a note: a
+        // point within a pole of its block's far edge reads the block beside, which `cachedOnly` answers NaN for).
+        return carving() ? w.landAt(g.x, g.z, true, true) : y;
       },
       water: (x, z) => {
         const c = w.layoutCenter;
@@ -1127,7 +1158,112 @@ export class Editor {
       worldMark: () => w.generation,
       say: (words, ok) => me.say(words, ok),
       refresh: () => me.window?.refreshEdits(),
+      // ---- The race drawer's second wave: the carve. ----
+      // The world's courses carved again from these tracks; a space zone and the copies carve nothing.
+      carve: (tracks, fx, fz, preview) => {
+        if (h.worldKind() !== 'ground') return;
+        w.landCourses(tracks, fx, fz, preview);
+      },
+      // What a drag given up is carved back to: the world's own courses as last landed, which a race switch turned off
+      // mid-drag (the tool's reading of the file then none) leaves standing.
+      carved: () => w.courseTracks as readonly TrackDef[],
+      rawGround: (x, z) => {
+        const c = w.layoutCenter;
+        const y = w.landAt(rawToGameX(c?.x ?? 0, x), rawToGameZ(c?.z ?? 0, z), false);
+        return Number.isFinite(y) ? y : Number.NaN;
+      },
+      standing: () => h.standingRows(),
+      lowestOf: (id) => {
+        const o = w.streamer?.placedOf(placementKey(id)) ?? null;
+        const b = o ? w.streamer?.boxOf(o) : null;
+        if (!o || !b) return null;
+        const s = o.scale;
+        const sb = s ? { min: [b.min[0] * s.x, b.min[1] * s.y, b.min[2] * s.z], max: [b.max[0] * s.x, b.max[1] * s.y, b.max[2] * s.z] } : b;
+        q.copy(o.q);
+        return lowestOf(sb, q, tmp);
+      },
+      heights: () => w.heightEdits,
+      heightRow: (id) => w.heightRows.get(id) ?? null,
+      deflate: (bytes) => deflateBase64(bytes),
+      // What stands on a road (the notes): every foot in the raw rectangle, asked at its middle and its reach in the raw frame.
+      feetIn: (x0, z0, x1, z1, on) => {
+        const out = { game: 0, ours: 0, players: 0 };
+        const s = w.streamer;
+        if (!s) return out;
+        const c = w.layoutCenter;
+        const cx = c?.x ?? 0;
+        const cz = c?.z ?? 0;
+        const ax = rawToGameX(cx, x0);
+        const bx = rawToGameX(cx, x1);
+        const az = rawToGameZ(cz, z0);
+        const bz = rawToGameZ(cz, z1);
+        s.forEachStandingFoot(Math.min(ax, bx), Math.min(az, bz), Math.max(ax, bx), Math.max(az, bz), foot, (f) => {
+          const r = f.kind === 'trunk' ? f.r : f.kind === 'box' ? Math.max(f.hx, f.hz) : 0;
+          if (on(gameToRawX(cx, f.x), gameToRawZ(cz, f.z), r)) {
+            if (f.owner === 'game') out.game++;
+            else if (f.owner === 'ours') out.ours++;
+            else out.players++;
+          }
+          return true;
+        });
+        return out;
+      },
+      // A solid row over a crossing: the aim's own cast straight down from `high`, its top within the span to `low`.
+      solidTopAt: (x, z, low, high) => {
+        const c = w.layoutCenter;
+        const gx = rawToGameX(c?.x ?? 0, x);
+        const gz = rawToGameZ(c?.z ?? 0, z);
+        if (!(high > low)) return Number.NaN;
+        if (!h.physics.aimHit(gx, high, gz, 0, -1, 0, high - low, false, cast)) return Number.NaN;
+        return high - cast.toi;
+      },
+      fitBridge: (ask) => me.fitBridge(ask),
+      // What a course's road keeps away of the people's posts and the wild sites (the notes).
+      keptAway: (store) => w.courseKeptAway(store),
     };
+  }
+
+  /**
+   * Fit a bridge (the race drawer's second wave, §2.11): the thing in hand, else the scatter brush's first chosen entry,
+   * stood as a permanent row over a crossing through the editor's own write (one action): centred on the crossing, turned
+   * so its longer horizontal axis runs along the upper road, scaled along that axis to `ask.span`, its walkable top (rays down
+   * onto its own triangles at its middle and its two ends, `walkableTop`) on the deck, and said where one of its ends stands
+   * off a road that climbs across the gap past `deckLip` (`bridgeEndWords`). Never a building (a
+   * building with rooms is stood at its own size). The course is not touched.
+   */
+  private async fitBridge(ask: BridgeAsk): Promise<{ ok: boolean; words: string }> {
+    const h = this.host;
+    const w = h.world;
+    const stream = w.streamer;
+    if (!stream) return { ok: false, words: 'this world stands nothing: it has no streamer' };
+    const key = this.hand && !this.hand.attach ? this.hand.key : ([...this.brush.set.keys()][0] ?? null);
+    if (!key) return { ok: false, words: 'a model to fit as the bridge: take one in hand, or Shift+click one in the library, first' };
+    await this.loadLibrary();
+    const e = this.libView?.byKey.get(key);
+    if (!e) return { ok: false, words: `no library entry ${key}` };
+    if (isAttachEntry(e) || isLightEntry(e)) return { ok: false, words: `${entryName(e)} has no model to stand as a bridge` };
+    const got = await this.sourceOf(e);
+    if (typeof got === 'string') return { ok: false, words: got };
+    if (got.building) return { ok: false, words: `${entryName(e)} is a building: a building is stood at its own size, so a bridge is a prop or a world model` };
+    if ((got.src.pack === 'world' && got.src.from) || got.src.pack === 'imported') stream.useFromPack(got.pack);
+    const b = got.bounds;
+    if (!b) return { ok: false, words: `${entryName(e)}'s model has no box` };
+    let model;
+    try {
+      model = await stream.modelFor(got.model, got.pack);
+    } catch (err) {
+      return { ok: false, words: `${entryName(e)} would not load: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    const fit = bridgeFit(b, model.primitives.map((p) => p.geometry), ask, w.layoutCenter);
+    const id = this.edits.mintIds([got.src.thing ?? got.src.model ?? 'bridge'])[0];
+    const row = rowFromEditor(got.src, fit.at, fit.q, false, w.placeFrame, 'raw', { here: h.packId(), ground: null, mm: EDITOR_TUNE.write.mm, turnDigits: EDITOR_TUNE.write.turnDigits }) as PlacementRow;
+    row.id = id;
+    const sc = writtenScale(fit.scale);
+    if (sc !== undefined) row.scale = sc;
+    const dest = this.session.dest;
+    const said = await this.edits.putRows(`a bridge over the crossing: ${id}`, [{ file: dest, id, before: null, after: row }]);
+    const ok = !!h.rowFor(id);
+    return { ok, words: ok ? `${said} (${entryName(e)} ${fit.length.toFixed(1)} m long, scaled ${fit.s.toFixed(3)} along it, its top ${fit.top.toFixed(2)} m over its origin)${bridgeEndWords(fit)}` : said };
   }
 
   /** What the places tool needs of the game: the locations file's rows as last landed, the world's frames, its ground. */

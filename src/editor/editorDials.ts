@@ -697,7 +697,8 @@ export function editorDialsFor(helper: string): DialSet | null {
 /**
  * The race drawer's numbers of feel (`COURSE_TUNE`, §2.15), as `[key, label, step, unit, note]` in their groups: every one a
  * slider of the `course` set, its range the tune's own (`courseRange`), set through `course({ tune })`'s own setter
- * (`tuneCourse`), so the line the menu copies out keeps it. The two raced-as switches are the Tools tab's checks.
+ * (`tuneCourse`), so the line the menu copies out keeps it. The two raced-as switches are the Tools tab's checks; `relayMs`
+ * is a cost number (§2.15), never a dial; `walls`, `steepFrom` and `wallProbe` join with the third wave, which reads them.
  */
 const COURSE_DIAL_GROUPS: { title: string; note: string; dials: [keyof CourseTune, string, number, string, string][]; choices?: [keyof CourseTune, string, string][] }[] = [
   {
@@ -761,6 +762,22 @@ const COURSE_DIAL_GROUPS: { title: string; note: string; dials: [keyof CourseTun
       ['drawNear', 'Every sample within', 10, 'm', 'Past it every fourth sample of its spine.'],
       ['steepNote', 'A shoulder steeper than', 1, '°', 'Against the land, noted.'],
       ['narrowRoom', 'Room past the widest box', 0.25, 'm', 'Either side, under which a road is noted narrow.'],
+      ['clearanceNote', 'A crossing lower than', 0.5, 'm', "Its clearance under this is noted (a pod's box is 3 m tall)."],
+      ['deckLip', 'A bridge off its deck by', 0.05, 'm', "A bridge's walkable top this far off the deck, at its middle or either end, is noted."],
+      ['touchNote', 'A touch-up past', 0.05, 'm', 'A sculpt delta a moved road leaves standing past this is counted (and cleared with Clear old touch-ups).'],
+    ],
+  },
+  {
+    title: 'The carve',
+    note: "The race drawer's second wave: what the drive rides at a crossing, Fit to land, and the touch-ups a moved road leaves (relayMs is a cost number, the console's alone).",
+    dials: [
+      ['deckBand', 'Deck within', 0.5, 'm', "With the drawn deck, the deck is ground under a hull only within this much of its own line."],
+      ['fitStep', 'Fit to land every', 1, 'm', 'How far apart Fit to land reads the land along an edge.'],
+      ['fitTol', 'Fit to land within', 0.05, 'm', 'How far the land may leave the road before Fit to land puts a node there.'],
+    ],
+    choices: [
+      ['deck', 'At a crossing the drive rides', "The bridge stood over it (a still collider), or the drawn upper road as ground with no bridge."],
+      ['touchUps', 'Touch-ups a moved road leaves', 'Kept (counted in the notes), or written to nought with the move.'],
     ],
   },
 ];
