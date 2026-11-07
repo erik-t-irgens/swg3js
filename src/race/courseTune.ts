@@ -70,7 +70,17 @@ export const COURSE_TUNE = {
   /** Switches: what the drive rides at a crossing (the bridge placed, or the drawn road), its band, who meets the walls, touch-ups when a course moves, and the ground while dragging. */
   deck: 'bridge' as 'bridge' | 'drawn',
   deckBand: 6,
-  walls: 'always' as 'always' | 'run' | 'off',
+  /**
+   * Who meets the race walls (the third wave, as the owner reshaped them): 'run', a race-driven hull in a run on the walls'
+   * track (the run hands them over and takes them back); 'racing', any race-driven hull, every track's walls on the world (to
+   * try a wall without a run); 'off', nobody. Nothing else is ever told.
+   */
+  walls: 'run' as 'run' | 'racing' | 'off',
+  /** A new wall's height over its feet (m) and lean (degrees), C with a notch of the wheel on its height (m), and an arc cut every this many metres. */
+  newWallHigh: 4,
+  newWallLean: 0,
+  wallHighStep: 0.5,
+  arcStep: 2,
   touchUps: 'keep' as 'keep' | 'clear',
   live: 'drag' as 'drag' | 'release',
   /** How often a drag's course is made again while it is held, a second. */
@@ -123,6 +133,10 @@ const RANGES: Partial<Record<keyof CourseTune, [number, number]>> = {
   hitPx: [4, 60],
   closeReach: [1, 100],
   deckBand: [0.5, 50],
+  newWallHigh: [0.5, 50],
+  newWallLean: [-60, 60],
+  wallHighStep: [0.05, 10],
+  arcStep: [0.25, 50],
   previewHz: [1, 60],
   relayMs: [0.1, 100],
 };
@@ -136,7 +150,7 @@ const CHOICES: Partial<Record<keyof CourseTune, readonly (string | boolean)[]>> 
   forPods: [true, false],
   forBikes: [true, false],
   deck: ['bridge', 'drawn'],
-  walls: ['always', 'run', 'off'],
+  walls: ['run', 'racing', 'off'],
   touchUps: ['keep', 'clear'],
   live: ['drag', 'release'],
 };

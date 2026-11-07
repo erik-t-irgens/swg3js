@@ -2873,7 +2873,7 @@ export class Editor {
   }
 
   /**
-   * The Course tool from the console (`__debug.course`, the race drawer's first wave): `{ arm: 'draw' | 'edit' | 'gates' }`
+   * The Course tool from the console (`__debug.course`, the race drawer's first wave): `{ arm: 'draw' | 'edit' | 'gates' | 'walls' }`
    * arms it in a mode through the Tools list (any other tool let go; `false` lets it go), and everything else is the tool's own
    * (`EditorCourse.debug`: `tune`, `pick`, `draw`, `shortcut`, `node`, `gates`, `gate`, `set`, `fromGates`, `remove`). The
    * editor need not be on: an edit is a batch through the endpoint whether the camera flies or not. Answers what was said, the

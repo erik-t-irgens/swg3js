@@ -1024,6 +1024,25 @@ if (process.argv.includes('course')) {
     }
     return best;
   };
+  // With `walls` too (`raceWallsTool.test.ts`, the race drawer's third wave): the Walls mode over the circuit with two walls
+  // in view (straight and arced, one leaning), the first picked, the cursor wandering over their handles and lines -- the
+  // walls' views made once, a frame only projecting them and finding the hover. Measured alone, and printed alone.
+  if (process.argv.includes('walls')) {
+    const wallPts = (z: number, arc: number) => Array.from({ length: 6 }, (_, k) => (k === 1 ? { x: -40 + 16 * k, y: 0, z: z - k, r: arc } : { x: -40 + 16 * k, y: 0, z: z - k }));
+    made.walls = [
+      { name: 'Wall 1', high: 4, lean: 0, points: wallPts(-45, 20) },
+      { name: 'Wall 2', high: 6, lean: 30, points: wallPts(-70, -25) },
+    ];
+    course.setMode('walls');
+    course.wallsMode.wall = 0;
+    st[3] = 800;
+    st[4] = 450;
+    courseFrame();
+    const w = await measure();
+    watch.disconnect();
+    console.log(JSON.stringify({ frames: COURSE_FRAMES, wallsMade: w.made, wallsScavenges: w.scavenges, lines: cm.courseLineN, marks: cm.courseMarkN, views: (course.wallsMode.report() as { views: number }).views }));
+    process.exit(0);
+  }
   // The cursor on node 0's diamond (its place on the screen read off the marks a frame drew), nothing held.
   st[3] = 800;
   st[4] = 450;

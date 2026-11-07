@@ -53,6 +53,7 @@ const RACE_GROUPS: DialGroup[] = [
       pod('fall', 'Fall (firm)', 20, 600, 10, 'm/s²', 'Firm hold only: how hard it is pulled down to its line.'),
       rule('lookAhead', 'Look ahead', 0, 1.5, 0.05, 's', 'How far ahead, in seconds of travel, it starts raising its line for a rise coming.'),
       rule('lookShare', 'Look ahead share', 0, 1, 0.05, '', 'How much of the way toward that rise the line is raised.'),
+      rule('aheadSteepCap', 'Look ahead ignores steeper than', 5, 90, 1, '°', 'Any rise or fall ahead steeper than this is left out of the walk of the line ahead, anywhere (90: off). The walk only: the bridge, the rise feed and the climbing judge still see it, so a face you are about to meet still lifts the hull for it. Your other idea beside the race walls.'),
       choice('bridge', 'Glide over pits', ['on', 'off'], 'On: a pit crossed quickly enough is glided over. Off: the ground is followed into every pit.'),
       rule('bridgeTime', 'Glide time', 0, 1.5, 0.05, 's', 'A pit crossed in less than this is glided over: longer glides over wider pits.'),
     ],

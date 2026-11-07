@@ -188,7 +188,8 @@ export interface MarksView {
    * `coursePts` (two numbers a point) the first line's and so on, each drawn point to point where both are in front of the
    * eye (`courseVis`); a line's `courseStyle` says what it is -- 0 a course's spine, 1 the picked course's, 2 a road's edge, 3
    * a shoulder's outer edge (dotted), 4 a node's width line, 5 a gate's window, 6 the picked gate's, 7 the gate under the
-   * cursor, 8 a gate seen while editing nodes (faint), 9 a draft under way -- and its 0x80 bit closes it (a gate's window).
+   * cursor, 8 a gate seen while editing nodes (faint), 9 a draft under way, 10 a race wall's foot, top or post, 11 the picked
+   * track's, 12 a wall being drawn, 13 the picked wall's -- and its 0x80 bit closes it (a gate's window).
    * And the picked course's handles (`courseMarkN`, a place each, `courseMarkPts`): `courseMarkKind` 0 a node's diamond, 1 a
    * grabber at a width line's end; `courseMarkState` 0 plain, 1 under the cursor, 2 picked. The pools grow when a world's
    * courses first need them, never in a steady frame.
@@ -336,7 +337,8 @@ export function marksView(): MarksView {
 
 /** A course line's colour and alpha by its style (`MarksView.courseStyle`, its 0x80 bit taken off). */
 function courseInk(style: number): number {
-  return style === 1 || style === 4 || style === 6 ? COL.ink : style === 7 ? COL.hot : style === 9 ? COL.warn : style === 5 || style === 8 ? COL.good : style === 2 ? COL.accent : COL.muted;
+  // 10 to 13 the race walls (the third wave): a wall's foot, top and posts; the picked track's; the wall being drawn; the picked wall.
+  return style === 1 || style === 4 || style === 6 || style === 13 ? COL.ink : style === 7 ? COL.hot : style === 9 || style === 12 || style === 11 ? COL.warn : style === 5 || style === 8 ? COL.good : style === 2 ? COL.accent : COL.muted;
 }
 
 /**
@@ -356,7 +358,7 @@ function drawCourses(o: MarksOverlay, v: MarksView): void {
     const closed = (raw & 0x80) !== 0;
     const c = courseInk(style);
     const a = style === 0 || style === 8 ? 0.45 : style === 3 ? 0.55 : 0.9;
-    const w = style === 1 || style === 6 || style === 7 ? width * 1.25 : style === 3 || style === 8 ? width * 0.75 : width;
+    const w = style === 1 || style === 6 || style === 7 || style === 13 ? width * 1.25 : style === 3 || style === 8 ? width * 0.75 : width;
     const last = closed ? n : n - 1;
     for (let i = 0; i < last; i++) {
       if (style === 3 && (i & 1)) continue;
@@ -364,7 +366,7 @@ function drawCourses(o: MarksOverlay, v: MarksView): void {
       const q = k + (i + 1 === n ? 0 : i + 1);
       if (vis[p] && vis[q]) o.line(pts[p * 2], pts[p * 2 + 1], pts[q * 2], pts[q * 2 + 1], w, c, a);
     }
-    if (style === 9) for (let i = 0; i < n - 1; i++) if (vis[k + i]) o.ring(pts[(k + i) * 2], pts[(k + i) * 2 + 1], 3, width, c, 0.9);
+    if (style === 9 || style === 12) for (let i = 0; i < n - 1; i++) if (vis[k + i]) o.ring(pts[(k + i) * 2], pts[(k + i) * 2 + 1], 3, width, c, 0.9);
     k += n;
   }
   const mp = v.courseMarkPts;

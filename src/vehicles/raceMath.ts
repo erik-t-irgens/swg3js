@@ -279,10 +279,49 @@ export interface SpeedParts {
  * The four sum to `v`. A backward speed is the curve's alone.
  */
 export function shareSpeed(v: number, p: number, B: number, h: Pick<RaceBase, 'V' | 'BT' | 't75' | 'reverseTop'>, thrustCap: number, boostHalf: number, out: SpeedParts): SpeedParts {
-  const A = thrustA(h.t75);
-  const reverseT = -thrustFor(-h.reverseTop, h.V, A);
+  const q = SQ;
+  q.v = v;
+  q.p = p;
+  q.B = B;
+  q.thrustCap = thrustCap;
+  q.boostHalf = boostHalf;
+  return shareSpeedOf(q, h, out);
+}
+
+/** What `shareSpeedOf` is asked, as one kept record (a race wall's touch shares the speed out every plan it grinds). */
+export interface ShareAsk {
+  v: number;
+  p: number;
+  B: number;
+  thrustCap: number;
+  boostHalf: number;
+}
+
+export function newShareAsk(): ShareAsk {
+  return { v: 0.5, p: 0.5, B: 0.5, thrustCap: 0.5, boostHalf: 0.5 };
+}
+
+const SQ = newShareAsk();
+
+/** `shareSpeed` through a record: the same arithmetic, the numbers read off `q`. */
+export function shareSpeedOf(q: ShareAsk, h: Pick<RaceBase, 'V' | 'BT' | 't75' | 'reverseTop'>, out: SpeedParts): SpeedParts {
+  const v = q.v;
+  const p = q.p;
+  const B = q.B;
+  const thrustCap = q.thrustCap;
+  const boostHalf = q.boostHalf;
+  // `thrustA`, `thrustFor`, `boostOf`, `boostFor` and `thrustCapOf` written out, each to the bit (the race walls' review):
+  // a race wall's touch asks this every plan a hull grinds along one, and a number handed to a call the compiler leaves
+  // out is a number made (measured: about four bytes a touch, all of them here).
+  const V = h.V;
+  const A = h.t75 / 3;
   if (v < 0) {
-    out.T = Math.max(-reverseT, thrustFor(Math.max(v, -h.reverseTop), h.V, A));
+    const rv = -h.reverseTop;
+    const tr = rv >= 0 ? (rv >= V ? Infinity : (A * rv) / (V - rv)) : -rv >= V ? -Infinity : -(A * -rv) / (V - -rv);
+    const reverseT = -tr;
+    const w = Math.max(v, -h.reverseTop);
+    const tw = w >= 0 ? (w >= V ? Infinity : (A * w) / (V - w)) : -w >= V ? -Infinity : -(A * -w) / (V - -w);
+    out.T = Math.max(-reverseT, tw);
     out.B = 0;
     out.p = 0;
     out.over = 0;
@@ -290,12 +329,14 @@ export function shareSpeed(v: number, p: number, B: number, h: Pick<RaceBase, 'V
   }
   const push = p > 0 ? Math.min(p, v) : p;
   let left = v - push;
-  const b = boostOf(B, h.BT, boostHalf);
+  const BT = h.BT;
+  const b = B > 0 ? (BT * B) / (B + boostHalf) : 0;
   const keep = Math.min(b, Math.max(0, left));
-  out.B = keep === b ? B : boostFor(keep, h.BT, boostHalf);
+  out.B = keep === b ? B : !(keep > 0) ? 0 : keep >= BT ? Infinity : (boostHalf * keep) / (BT - keep);
   left -= keep;
-  const r = Math.min(Math.max(0, left), thrustCap * h.V);
-  out.T = Math.min(thrustCapOf(A, thrustCap), thrustFor(r, h.V, A));
+  const r = Math.min(Math.max(0, left), thrustCap * V);
+  const tr = r >= 0 ? (r >= V ? Infinity : (A * r) / (V - r)) : -r >= V ? -Infinity : -(A * -r) / (V - -r);
+  out.T = Math.min((thrustCap / (1 - thrustCap)) * A, tr);
   out.over = Math.max(0, left - r);
   out.p = push;
   return out;

@@ -698,7 +698,8 @@ export function editorDialsFor(helper: string): DialSet | null {
  * The race drawer's numbers of feel (`COURSE_TUNE`, §2.15), as `[key, label, step, unit, note]` in their groups: every one a
  * slider of the `course` set, its range the tune's own (`courseRange`), set through `course({ tune })`'s own setter
  * (`tuneCourse`), so the line the menu copies out keeps it. The two raced-as switches are the Tools tab's checks; `relayMs`
- * is a cost number (§2.15), never a dial; `walls`, `steepFrom` and `wallProbe` join with the third wave, which reads them.
+ * is a cost number (§2.15), never a dial; `steepFrom` and `wallProbe` were the first draft of the third wave's walls, which the
+ * owner reshaped (walls drawn freely), and nothing reads them.
  */
 const COURSE_DIAL_GROUPS: { title: string; note: string; dials: [keyof CourseTune, string, number, string, string][]; choices?: [keyof CourseTune, string, string][] }[] = [
   {
@@ -718,8 +719,8 @@ const COURSE_DIAL_GROUPS: { title: string; note: string; dials: [keyof CourseTun
     dials: [
       ['margin', 'Margin', 0.25, 'm', "The lower road's slot past its edge at a crossing."],
       ['level', 'Level', 0.05, 'm', 'The band in which two passes are one road.'],
-      ['wallOut', 'Walls out', 0.05, 'm', "The walls' place past the road's edge."],
-      ['wallHigh', 'Walls high', 0.5, 'm', "The walls' height."],
+      ['wallOut', 'Walls out', 0.05, 'm', "A course's own number from the walls' first draft, kept in the file and read by nothing (race walls are drawn in the Walls mode)."],
+      ['wallHigh', 'Walls high', 0.5, 'm', "Likewise kept and read by nothing (a race wall's height is its own)."],
     ],
     choices: [
       ['feather', 'Falloff', "The client's road falloff over the shoulder."],
@@ -766,6 +767,17 @@ const COURSE_DIAL_GROUPS: { title: string; note: string; dials: [keyof CourseTun
       ['deckLip', 'A bridge off its deck by', 0.05, 'm', "A bridge's walkable top this far off the deck, at its middle or either end, is noted."],
       ['touchNote', 'A touch-up past', 0.05, 'm', 'A sculpt delta a moved road leaves standing past this is counted (and cleared with Clear old touch-ups).'],
     ],
+  },
+  {
+    title: 'Race walls',
+    note: "The third wave's: walls drawn freely in the Walls mode, met only by a hull in a run on their track ('run'), by any race-driven hull ('racing', to try one), or by nobody.",
+    dials: [
+      ['newWallHigh', 'A new wall high', 0.5, 'm', "A new wall's height over its feet (a wall's own is the Selected tab's)."],
+      ['newWallLean', 'Its lean', 1, '°', 'Degrees from upright, toward its right as drawn.'],
+      ['wallHighStep', 'A notch of height', 0.05, 'm', "C with a notch of the wheel on the picked wall's height."],
+      ['arcStep', 'An arc cut every', 0.25, 'm', 'How finely an arced edge is cut into straight pieces for the drive and the marks.'],
+    ],
+    choices: [['walls', 'Who meets the walls', "'run': a hull in a run on their track. 'racing': any race-driven hull, every track's walls. 'off': nobody."]],
   },
   {
     title: 'The carve',

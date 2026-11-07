@@ -223,6 +223,35 @@ if (DECK_MODE) {
   }
   resetAt = 6000;
 }
+// With `walls` (the race drawer's third wave, `raceWalls.test.ts`): race walls handed to the hull as a run hands them, a
+// corridor along its way with zigzag edges and arcs, 50 to 70 m either side, which the weave (held to heading nought) meets
+// every so often and scrapes along, its look-ahead clipped at them; and the owner's steep cap on for a stretch in turn.
+const WALLS_MODE = process.argv.includes('walls');
+const wallHits = { met: 0, last: -1, touch: 0, hard: 0 };
+if (WALLS_MODE) {
+  const { buildWallSet } = await import('../../../src/race/raceWalls.ts');
+  const walls = [];
+  for (const side of [-1, 1]) {
+    for (let w = 0; w < 26; w++) {
+      const points = [];
+      for (let j = 0; j < 10; j++) {
+        const z = -100 + w * 1800 + j * 200;
+        // (`RACE_ALLOC_WALLS_FAR=1` stands them 5 km off, so they are set and never met: the step with walls set alone.)
+        const x = side * (j & 1 ? 60 : 50) + (process.env.RACE_ALLOC_WALLS_FAR === '1' ? side * 5000 : 0);
+        // Every third edge an arc as gentle as its chord is long, bulging either way.
+        points.push(j % 3 === 1 && j < 9 ? { x, y: -5, z, r: (j & 2 ? 1 : -1) * 210 } : { x, y: -5, z });
+      }
+      walls.push({ name: `w${side}${w}`, high: 30, lean: (w % 3) * 10 - 10, points });
+    }
+  }
+  race.walls = buildWallSet([{ track: 'alloc', walls }], (x, z, out) => {
+    out.x = x;
+    out.z = z;
+  }, 2);
+}
+// (`RACE_ALLOC_WALLS_TOUCH=1` makes every meeting a touch, the drive's verdict saying nothing: the walls' own path alone,
+// held to the plain step's line, apart from a scrape's, which goes on through the drive's scoring.)
+if (WALLS_MODE && process.env.RACE_ALLOC_WALLS_TOUCH === '1') RACE_TUNE.hitLoss = 1e9;
 /** The hull's ground the step is handed: the stand-in's, or (with `deck`) carved. A binding fixed once. */
 const stepGround: (x: number, z: number) => number = carvedGround ?? ground;
 race.setLevels('max', vehicle);
@@ -259,7 +288,8 @@ const PEERS = process.env.RACE_ALLOC_PEERS !== '0';
 function frame(): void {
   const dt = DTS[k++ % 3] as number;
   // A gentle weave: the target off the nose and back (with `deck`, about the roads' own way, heading 0.5).
-  drive.heading = (DECK_MODE ? 0.5 : race.heading) + Math.sin(k / 400) * 0.2;
+  drive.heading = (DECK_MODE ? 0.5 : WALLS_MODE ? 0 : race.heading) + Math.sin(k / 400) * 0.2;
+  if (WALLS_MODE) RACE_TUNE.aheadSteepCap = (k & 8191) < 2048 ? 40 : 90;
   // Other players' rides drawn near, as the game fills the list from their pictures before the step: none for a stretch,
   // then a pair riding either side of the hull, in and out of the nudge's reach together, then one of them alone for a
   // moment, so the nudge's part runs, pushes, finds nobody within reach and is skipped. The pair stand mirrored through the
@@ -298,6 +328,13 @@ function frame(): void {
   if (race.planned > 0) counts.planned++;
   if (race.track.on) counts.tracked++;
   if (race.nudged !== 0) counts.nudged++;
+  if (race.lastWallAt !== wallHits.last) {
+    wallHits.last = race.lastWallAt;
+    wallHits.met++;
+    // A touch (the drive's verdict says nothing) apart from a scrape or a crash, which go on through the scoring.
+    if (race.lastWallKind === 'touch') wallHits.touch++;
+    else wallHits.hard++;
+  }
   if (run) {
     run.advanceSteps(physics.stepsAhead(dt));
     // The game reads the ring every frame; here every so often, which is no different to the step.
@@ -406,7 +443,7 @@ if (process.argv[2] === 'method') {
   console.log(name, (m.made / FRAMES).toFixed(2), 'B a call', m.scavenges, 'collections');
   process.exit(0);
 }
-if (process.argv[2] === 'profile' || (DECK_MODE && process.argv[3] === 'profile')) {
+if (process.argv[2] === 'profile' || ((DECK_MODE || WALLS_MODE) && process.argv[3] === 'profile')) {
   // Where it is made, by the sampling heap profiler: `node --expose-gc tools/swg/tests/raceAllocOwn.ts profile [view]`.
   const { Session } = await import('node:inspector/promises');
   const session = new Session();
@@ -436,4 +473,4 @@ const d = await measure(frame, FRAMES);
 const v = await measure(viewFrame, FRAMES);
 const g = gridFrame ? await measure(gridFrame, FRAMES) : null;
 watch.disconnect();
-console.log(JSON.stringify({ frames: FRAMES, made: d.made, scavenges: d.scavenges, planned: counts.planned, nudged: counts.nudged, tracked: counts.tracked, deck: DECK_MODE, view: { frames: FRAMES, made: v.made, scavenges: v.scavenges }, ...(g ? { grid: { frames: FRAMES, reads: FRAMES * 64, made: g.made, scavenges: g.scavenges } } : {}), ...(run ? { watch: { crossed: run.seq, laps: run.lapTimes.length, phase: run.phase } } : {}) }));
+console.log(JSON.stringify({ frames: FRAMES, made: d.made, scavenges: d.scavenges, planned: counts.planned, nudged: counts.nudged, tracked: counts.tracked, deck: DECK_MODE, walls: WALLS_MODE, wallsMet: wallHits.met, wallsTouched: wallHits.touch, wallsHard: wallHits.hard, view: { frames: FRAMES, made: v.made, scavenges: v.scavenges }, ...(g ? { grid: { frames: FRAMES, reads: FRAMES * 64, made: g.made, scavenges: g.scavenges } } : {}), ...(run ? { watch: { crossed: run.seq, laps: run.lapTimes.length, phase: run.phase } } : {}) }));

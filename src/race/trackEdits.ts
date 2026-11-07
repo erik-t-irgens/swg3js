@@ -102,7 +102,7 @@ function sameTrack(a: TrackDef, b: TrackDef): boolean {
   return a.id === b.id && trackHash(a) === trackHash(b) && a.name === b.name && a.note === b.note && a.at === b.at;
 }
 
-const OWN = new Set(['id', 'name', 'note', 'kind', 'laps', 'for', 'clear', 'grid', 'gates', 'at', 'course']);
+const OWN = new Set(['id', 'name', 'note', 'kind', 'laps', 'for', 'clear', 'grid', 'gates', 'at', 'course', 'walls']);
 
 /**
  * One ask against the world's file as it stands (`current`, its text or null for none): what to write and the answer.
@@ -184,10 +184,23 @@ export function applyTrackOp(op: unknown, current: string | null, ctx: TrackCtx)
  * the file's course as it is. Answers the track to write, or why not.
  */
 export function trackToSave(held: TrackDef, file: TrackDef | null): TrackDef | string {
-  if (!file?.course || JSON.stringify(file.course) === JSON.stringify(held.course)) return held;
+  // The walls are the file's always (the race drawer's third wave): the Gates view never edits them, and walls the Course
+  // tool drew or changed since the track was taken in hand must not be dropped or put back by a save of its gates.
+  const t = withFileWalls(held, file);
+  if (!file?.course || JSON.stringify(file.course) === JSON.stringify(held.course)) return t;
   const following = held.grid.path !== undefined || held.gates.some((g) => g.path !== undefined);
   if (following) return `${held.id}'s course was drawn again in the world editor since it was taken in hand, and its gates that follow the road would be written against the road as it was: take it in hand again (track({ edit: '${held.id}' })) and make the Gates view's changes again`;
-  return { ...held, course: file.course };
+  return { ...t, course: file.course };
+}
+
+/** The track in hand with the file's walls (none where the file has none), or the very track where they are the same. */
+function withFileWalls(held: TrackDef, file: TrackDef | null): TrackDef {
+  const walls = file?.walls;
+  if (JSON.stringify(walls) === JSON.stringify(held.walls)) return held;
+  const t: TrackDef = { ...held };
+  if (walls === undefined) delete t.walls;
+  else t.walls = walls;
+  return t;
 }
 
 /** A place rounded to the centimetre and its turn to five places: what the editor writes, so a file stays readable. */

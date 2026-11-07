@@ -28,6 +28,7 @@
 import { parseJsonc } from '../story/jsonc.ts';
 import { toGame, type GamePlace, type PlacementFrame } from '../story/placements.ts';
 import { buildSpine, spineLegs } from './coursePath.ts';
+import { readWalls, wallsText, type RaceWall } from './raceWalls.ts';
 
 export { trackFileOf, tracksPath } from './trackPath.ts';
 
@@ -174,6 +175,11 @@ export interface TrackDef {
   at?: number;
   /** Its drawn road, where one is drawn (the race drawer); on a track with a course, `clear` is metres past the road's edge. */
   course?: TrackCourse;
+  /**
+   * Its race walls, where any are drawn (the race drawer's third wave, `raceWalls.ts`): met only by a race-driven hull in a run
+   * on this track. Read, hashed and written only where present, so a track with none is what it always was.
+   */
+  walls?: RaceWall[];
 }
 
 /** What reading one file gave. */
@@ -191,7 +197,7 @@ const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 /** Names the language's own objects answer to: never a key in a record keyed by track. */
 const FORBIDDEN = new Set(['constructor', 'prototype']);
 const CONTROL = /[\u0000-\u001f\u007f]/;
-const TRACK_FIELDS = new Set(['id', 'name', 'note', 'kind', 'laps', 'for', 'clear', 'grid', 'gates', 'at', 'course']);
+const TRACK_FIELDS = new Set(['id', 'name', 'note', 'kind', 'laps', 'for', 'clear', 'grid', 'gates', 'at', 'course', 'walls']);
 const PLACE_FIELDS = new Set(['x', 'y', 'z', 'q', 'path', 'e', 't']);
 const GATE_FIELDS = new Set(['x', 'y', 'z', 'q', 'w', 'h', 'path', 'e', 't', 'ow']);
 const COURSE_FIELDS = new Set(['v', 'feather', 'crossing', 'margin', 'level', 'grass', 'wallOut', 'wallHigh', 'paths']);
@@ -206,6 +212,8 @@ export function isCoursePathId(id: unknown): id is string {
 
 /** The words a course in a space zone's file is refused in. */
 export const COURSE_IN_SPACE = 'a course is carved into ground: space is a later pass';
+/** The words a track's walls in a space zone's file are refused in. */
+export const WALLS_IN_SPACE = 'race walls stand on the ground: space is a later pass';
 
 /** A number held to a range, or undefined for one that is no number or out of it. */
 function within(v: unknown, lo: number, hi: number): number | undefined {
@@ -404,6 +412,14 @@ export function readTrack(v: unknown, unknown: string[] = [], least: number = TR
     if (typeof c === 'string') return c;
     course = c;
   }
+  // Its walls (from the race drawer's third wave), on the ground only, as a course is; an empty list is none.
+  let walls: RaceWall[] | undefined;
+  if (o.walls !== undefined) {
+    if (kindOfWorld === 'space') return WALLS_IN_SPACE;
+    const w = readWalls(o.walls, unknown, `${id}.walls`, L.reach, L.height);
+    if (typeof w === 'string') return w;
+    if (w.length) walls = w;
+  }
   const grid = readPlace(o.grid, 'grid', PLACE_FIELDS, unknown, `${id}.grid`);
   if (typeof grid === 'string') return grid;
   const gridAnchor = readAnchor(o.grid as Record<string, unknown>, 'its grid', course, o.kind);
@@ -448,6 +464,7 @@ export function readTrack(v: unknown, unknown: string[] = [], least: number = TR
     t.at = at;
   }
   if (course) t.course = course;
+  if (walls) t.walls = walls;
   return t;
 }
 
@@ -525,7 +542,7 @@ function readTracksOf(text: string, world: string, kindOfWorld: 'ground' | 'spac
 }
 
 const TRACK_ORDER: (keyof TrackDef)[] = ['id', 'name', 'note', 'kind', 'laps', 'for', 'clear', 'at'];
-const ORDERED = new Set<string>([...TRACK_ORDER, 'grid', 'gates', 'course']);
+const ORDERED = new Set<string>([...TRACK_ORDER, 'grid', 'gates', 'course', 'walls']);
 
 function placeText(p: TrackPlace | TrackGate, withSize: boolean): string {
   const parts = [`"x": ${JSON.stringify(p.x)}`, `"y": ${JSON.stringify(p.y)}`, `"z": ${JSON.stringify(p.z)}`, `"q": ${JSON.stringify(p.q)}`];
@@ -578,7 +595,9 @@ export function trackFileText(world: string, frame: PlacementFrame, tracks: read
     const gates = t.gates.map((g) => `        ${placeText(g, true)}`).join(',\n');
     // A drawn course after the gates as a block of its own (only where one is drawn: a track with none is written as before).
     const course = t.course !== undefined ? `,\n      "course": ${courseText(t.course)}` : '';
-    return `    {\n      ${head.join(', ')},\n      "grid": ${placeText(t.grid, false)},\n      "gates": [\n${gates}\n      ]${course}\n    }`;
+    // Its walls after the course, a point a line (only where any are drawn: a track with none is written as before).
+    const walls = t.walls !== undefined ? `,\n      "walls": ${wallsText(t.walls)}` : '';
+    return `    {\n      ${head.join(', ')},\n      "grid": ${placeText(t.grid, false)},\n      "gates": [\n${gates}\n      ]${course}${walls}\n    }`;
   });
   const body = blocks.length ? `[\n${blocks.join(',\n')}\n  ]` : '[]';
   return `{\n  "version": ${TRACK_VERSION},\n  "world": ${JSON.stringify(world)},\n  "frame": ${JSON.stringify(frame)},\n  "tracks": ${body}\n}\n`;
@@ -593,6 +612,8 @@ export function trackFileText(world: string, frame: PlacementFrame, tracks: read
 export function trackHash(t: TrackDef): string {
   const parts: unknown[] = [t.kind, t.laps, t.for, t.clear, t.grid, t.gates];
   if (t.course !== undefined) parts.push(t.course);
+  // Its walls likewise, behind a word of their own (so a track's walls never read as a course): a wall moved is a changed track.
+  if (t.walls !== undefined) parts.push('walls', t.walls);
   return JSON.stringify(parts);
 }
 

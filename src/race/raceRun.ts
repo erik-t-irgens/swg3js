@@ -21,6 +21,7 @@
 import { CROSS_BACKWARD, CROSS_FORWARD, GATE_STRIDE, bakeGate, crossGate, headingTo, newSegment } from './gates.ts';
 import { RACE_KINDS, type GameGate, type RaceKind, type TrackDef } from './trackFile.ts';
 import { TRACK_TUNE } from './trackTune.ts';
+import type { RaceWallSet } from './raceWalls.ts';
 
 export type RunPhase = 'countdown' | 'racing' | 'down' | 'finished' | 'ended';
 
@@ -136,6 +137,11 @@ export class RaceRun {
   readonly grid: { x: number; y: number; z: number; heading: number };
   /** How far over its body's place the hull's middle stands, which is the point the gates are tested with. */
   readonly midY: number;
+  /**
+   * The track's race walls in the game's frame (the race drawer's third wave), made by the game as the run starts, or null for
+   * none: what `handRun` hands its hull with the watch, at the start and at every put-back, and `letGoRun` takes back.
+   */
+  walls: RaceWallSet | null = null;
   phase: RunPhase = 'countdown';
   /** The run's own seconds: below nought counting down, nought at go. */
   clock = 0.5;
@@ -617,6 +623,27 @@ export const RUN_ACT = {
  * bike out of racing mode ends it; a put-back due is asked for while none is being spawned; and a run over is cleared
  * once its rider is off its hull. Allocates nothing.
  */
+/** What a run's hull holds of it: its watch and its walls (a race drive is one). */
+export interface RunHolder {
+  watch: RaceRun | { cross(v: never): void } | null;
+  walls: RaceWallSet | null;
+}
+
+/**
+ * A run handed to the hull it is raced on (the start, every put-back's fresh spawn): its watch on the hull's travel and the
+ * track's race walls (the race drawer's third wave), together, so a hull a run times is a hull that meets its walls.
+ */
+export function handRun(run: RaceRun, hull: RunHolder): void {
+  hull.watch = run;
+  hull.walls = run.walls;
+}
+
+/** A run let go of by its hull (a wreck, the finish, a run ended or cleared): its watch and its walls taken back together. */
+export function letGoRun(hull: RunHolder): void {
+  hull.watch = null;
+  hull.walls = null;
+}
+
 export function runStep(run: RaceRun, w: RunWorld): number {
   if (w.simulate) run.advanceSteps(w.steps);
   if (run.live) {

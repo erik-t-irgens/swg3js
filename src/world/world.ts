@@ -188,6 +188,7 @@ import { fitKey, type ResolvedFit } from '../vehicles/shipFit';
 import { inTurn } from '../vehicles/shipMounts';
 import { Vehicle, type VehicleKind, type VehicleSpec } from '../vehicles/vehicle';
 import type { RaceDeps, RaceGround } from '../vehicles/raceDrive.ts';
+import type { RaceWallSet } from '../race/raceWalls.ts';
 import { SHIP_ROOM } from '../vehicles/landing';
 import { Bolts } from '../combat/bolts';
 import { ShipInterior } from '../vehicles/interior';
@@ -944,7 +945,9 @@ export class World {
    * null with no drawn course, which leaves the drive's path today's.
    */
   readonly raceCourse: { carve: CourseCarve | null; cx: number; cz: number } = { carve: null, cx: 0, cz: 0 };
-  private readonly raceDeps: RaceDeps = { ground: this.raceGround, course: this.raceCourse };
+  /** Every track's race walls on the world (the third wave), written by the game while `COURSE_TUNE.walls` is 'racing', else null. */
+  readonly raceWalls: { all: RaceWallSet | null } = { all: null };
+  private readonly raceDeps: RaceDeps = { ground: this.raceGround, course: this.raceCourse, walls: this.raceWalls };
   /**
    * Nothing new stood or put away near the player while they race faster than `RACE_TUNE.livingAbove`: written every
    * step by the game (`holdsLiving`), read beside `streamHold` by the three streams of the living.

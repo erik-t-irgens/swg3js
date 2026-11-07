@@ -51,6 +51,9 @@ import type { EditorEdits } from './editorEdit.ts';
 import type { RowChange } from './undo.ts';
 import type { ToolDef, ToolDraw, ToolFrame } from './tools.ts';
 import type { EditorSection } from '../ui/editorWindow.ts';
+import { CourseWalls } from './editorWalls.ts';
+import { wallAdded, wallEdgeRadius, wallPointRemoved, wallPointSet, wallRemoved, wallSet } from './courseEdit.ts';
+import { WALL_LIMITS, type RaceWall } from '../race/raceWalls.ts';
 import {
   addShortcut,
   courseCrossings,
@@ -186,8 +189,8 @@ export interface BridgeAsk {
 /** What a held edit is. */
 type Held = 'none' | 'node' | 'width' | 'raise' | 'bank' | 'gate' | 'gateRaise' | 'gateTurn';
 
-export type CourseMode = 'draw' | 'edit' | 'gates';
-export const COURSE_MODES: readonly CourseMode[] = ['draw', 'edit', 'gates'];
+export type CourseMode = 'draw' | 'edit' | 'gates' | 'walls';
+export const COURSE_MODES: readonly CourseMode[] = ['draw', 'edit', 'gates', 'walls'];
 
 /** A course's places in the game's frame, worked out once a change: what a frame projects. */
 interface CourseView {
@@ -302,13 +305,30 @@ export class EditorCourse {
   last = { said: '', ok: true };
   notes: string[] = [];
 
+  /** The Walls mode (the race drawer's third wave, `editorWalls.ts`): race walls drawn freely onto the picked track. */
+  readonly wallsMode: CourseWalls;
+  /** The walls' drawing's counts carried on from the courses' (lines, points, handles). */
+  private readonly wallCounts = new Int32Array(3);
+
   constructor(host: CourseHost) {
     this.host = host;
+    this.wallsMode = new CourseWalls({
+      track: () => this.track(),
+      tracksNow: () => this.tracks(),
+      write: (label, before, after) => this.write(label, before, after),
+      busyNow: () => !!this.writing || !!this.host.edits.writing,
+      groundY: (x, z) => this.heightAt(x, z).y,
+      pickRoad: (gx, gz) => this.pickAt(gx, gz),
+      toRaw: (x, z, out) => this.host.toRaw(x, z, out),
+      toGame: (x, z, out) => this.host.toGame(x, z, out),
+      say: (w, ok) => this.host.say(w, ok),
+      refresh: () => this.host.refresh(),
+    });
   }
 
   /** Whether a write or a held edit is under way (the automatic fold's quiet). */
   get busy(): boolean {
-    return !!this.writing || this.held !== 'none';
+    return !!this.writing || this.held !== 'none' || this.wallsMode.busy;
   }
 
   /**
@@ -356,6 +376,7 @@ export class EditorCourse {
   disarm(): void {
     this.armed = false;
     this.giveUpHeld();
+    this.wallsMode.reset();
   }
 
   /** The world went: everything dropped, and the world now standing taken as the one the tool is of. */
@@ -434,11 +455,14 @@ export class EditorCourse {
       ? 'drawing (LMB a node, near the first closes a circuit, near the last finishes a sprint, RMB takes one back, V a curve or a straight)'
       : m === 'edit'
         ? "editing (drag a node's diamond, its width line's grabbers, F raises, R banks, C with the wheel its shoulder, a click on the road puts a node in)"
-        : 'gates (a click near one picks it: drag its square, F raises, R turns, C with the wheel widens, Delete takes it out)';
+        : m === 'gates'
+          ? 'gates (a click near one picks it: drag its square, F raises, R turns, C with the wheel widens, Delete takes it out)'
+          : "walls on the picked track (a click a point, near the last writes the wall, V straight or an arc; drag a point or an edge's middle, F raises a point, R leans, C with the wheel its height, Delete)";
   }
 
   /** A mode chosen (the Tools tab's buttons, the console's `arm`). */
   setMode(m: CourseMode): string {
+    if (this.mode === 'walls' && m !== 'walls') this.wallsMode.reset();
     this.mode = m;
     this.giveUpHeld();
     if (m !== 'draw') {
@@ -619,6 +643,7 @@ export class EditorCourse {
 
   /** Escape: a held edit given up, then a draft, then the pick; answers whether it took the key. */
   escape(): boolean {
+    if (this.mode === 'walls' && this.wallsMode.escape()) return true;
     if (this.held !== 'none') {
       this.giveUpHeld();
       this.host.say('the edit given up: nothing written', true);
@@ -647,6 +672,7 @@ export class EditorCourse {
   /** V: the edge being drawn, or the edge leaving the picked node, turned between a curve and a straight. Answers whether it took it. */
   toggle(): boolean {
     if (!this.armed) return false;
+    if (this.mode === 'walls') return this.wallsMode.toggle();
     if (this.mode === 'draw' && this.draft.length) {
       const last = this.draft[this.draft.length - 1];
       last.c = last.c === 'smooth' ? 'straight' : 'smooth';
@@ -690,6 +716,7 @@ export class EditorCourse {
   /** Whether it takes the mouse with F or R held: a picked node or gate is raised, banked or turned, and the camera holds still. */
   holdsMouse(lift: boolean, turn?: boolean): boolean {
     if (!this.armed || this.writing) return false;
+    if (this.mode === 'walls') return this.wallsMode.holdsMouse(lift, turn === true);
     const picked = (this.mode === 'edit' && this.pickedNode >= 0) || (this.mode === 'gates' && this.pickedGate >= 0);
     return picked && (lift || turn === true);
   }
@@ -701,6 +728,7 @@ export class EditorCourse {
    */
   size(notches: number): string | null {
     if (!this.armed) return null;
+    if (this.mode === 'walls') return this.wallsMode.size(notches, this.f.now);
     const t = this.track();
     if (!t) return null;
     const index = this.mode === 'edit' ? this.pickedNode : this.mode === 'gates' ? this.pickedGate : -1;
@@ -775,6 +803,7 @@ export class EditorCourse {
   /** Delete: the picked node or gate taken out (one write). Answers whether it took the key. */
   deleteKey(): boolean {
     if (!this.armed) return false;
+    if (this.mode === 'walls') return this.wallsMode.deleteKey();
     const t = this.track();
     if (!t) return false;
     if (this.mode === 'edit' && this.pickedNode >= 0) {
@@ -794,11 +823,15 @@ export class EditorCourse {
 
   /** Whether the arrows, Page Up and Page Down are its own this frame: a node or a gate picked. */
   claimsKeys(): boolean {
-    return this.armed && ((this.mode === 'edit' && this.pickedNode >= 0) || (this.mode === 'gates' && this.pickedGate >= 0));
+    return this.armed && ((this.mode === 'edit' && this.pickedNode >= 0) || (this.mode === 'gates' && this.pickedGate >= 0) || (this.mode === 'walls' && this.wallsMode.claimsKeys()));
   }
 
   /** A nudge of the picked node or gate by metres of the game's frame (one write). */
   nudge(dx: number, dy: number, dz: number): void {
+    if (this.mode === 'walls') {
+      this.wallsMode.nudge(dx, dy, dz);
+      return;
+    }
     const t = this.track();
     if (!t || this.writing) return;
     if (this.mode === 'edit' && this.pickedNode >= 0) {
@@ -1047,6 +1080,14 @@ export class EditorCourse {
     let dx = f.dx ?? 0;
     if (!dx && Number.isFinite(this.lastSx)) dx = f.sx - this.lastSx;
     this.lastSx = f.sx;
+    // The Walls mode (the third wave): its own presses, holds and wheel, then every course and wall drawn.
+    if (this.mode === 'walls') {
+      this.wallsMode.dx = dx;
+      this.wallsMode.dy = dy;
+      this.wallsMode.frame(f, view, this.cur, this.ray, press, release, pressInverse, liftUp, turnUp);
+      this.drawMarks(d, view);
+      return;
+    }
     const onPicked = (this.mode === 'edit' && this.pickedNode >= 0) || (this.mode === 'gates' && this.pickedGate >= 0);
     // F held on the picked node or gate: raised by the mouse, `raiseRate` metres a hundred pixels up; let go, written.
     if (t && f.lift && !this.writing && onPicked && (this.held === 'none' || this.held === 'raise' || this.held === 'gateRaise')) {
@@ -1799,7 +1840,11 @@ export class EditorCourse {
     // Five lines a path, the picked course's width lines and gates, and the draft.
     let lines = 0;
     for (let v = 0; v < views.length; v++) lines += views[v].paths.length * 5;
-    coursePools(m, lines + this.viewNodes + this.viewGates + 1, this.viewPoints * 5 + this.viewNodes * 2 + this.viewGates * 4 + this.draft.length + 2, this.viewNodes * 3);
+    // And the walls' in the Walls mode (their views made again only on a change).
+    const walls = this.mode === 'walls';
+    const wm = this.wallsMode;
+    if (walls) wm.need();
+    coursePools(m, lines + this.viewNodes + this.viewGates + 1 + (walls ? wm.lineNeed : 0), this.viewPoints * 5 + this.viewNodes * 2 + this.viewGates * 4 + this.draft.length + 2 + (walls ? wm.pointNeed : 0), this.viewNodes * 3 + (walls ? wm.markNeed : 0));
     const reach = COURSE_TUNE.drawReach;
     const near = COURSE_TUNE.drawNear;
     const ex = view.ex;
@@ -1939,6 +1984,16 @@ export class EditorCourse {
       m.courseStyle[L] = 9;
       L++;
     }
+    if (walls) {
+      const c = this.wallCounts;
+      c[0] = L;
+      c[1] = P;
+      c[2] = K;
+      wm.draw(m, view, this.cur, this.f, c);
+      L = c[0];
+      P = c[1];
+      K = c[2];
+    }
     m.courseLineN = L;
     m.courseMarkN = K;
     m.courseOn = L > 0 || K > 0;
@@ -2001,6 +2056,13 @@ export class EditorCourse {
       { label: 'Draw', act: 'course:mode:draw', off: this.mode === 'draw' },
       { label: 'Edit', act: 'course:mode:edit', off: this.mode === 'edit' },
       { label: 'Gates', act: 'course:mode:gates', off: this.mode === 'gates' },
+      { label: 'Walls', act: 'course:mode:walls', off: this.mode === 'walls' },
+      ...(this.mode === 'walls'
+        ? [
+            { label: 'Finish the wall', act: 'course:wall:finish', off: this.wallsMode.draft.length < 2 },
+            { label: this.wallsMode.nextArc ? 'The edge being drawn: an arc' : 'The edge being drawn: straight', act: 'course:wall:arc' },
+          ]
+        : []),
       { label: COURSE_TUNE.curve === 'smooth' ? 'Next edge: a curve' : 'Next edge: a straight', act: 'course:curve' },
       { label: 'Finish (a sprint)', act: 'course:finish', off: this.draft.length < 2 },
       { label: 'Close (a circuit)', act: 'course:close', off: this.draft.length < 3 || !!this.draftJoin },
@@ -2026,6 +2088,8 @@ export class EditorCourse {
           { label: 'Its bank (°)', value: COURSE_TUNE.bank, act: 'course:tune:bank', kind: 'number' },
           { label: 'Raced as a pod', value: COURSE_TUNE.forPods, act: 'course:tune:forPods', kind: 'check' },
           { label: 'Raced as a bike', value: COURSE_TUNE.forBikes, act: 'course:tune:forBikes', kind: 'check' },
+          { label: 'A new wall high', value: COURSE_TUNE.newWallHigh, act: 'course:tune:newWallHigh', kind: 'number' },
+          { label: 'Its lean (°)', value: COURSE_TUNE.newWallLean, act: 'course:tune:newWallLean', kind: 'number' },
         ],
         rows,
         buttons,
@@ -2082,6 +2146,40 @@ export class EditorCourse {
         ],
       });
     }
+    if (this.mode === 'walls') {
+      // The track's race walls, each with Pick, and the picked wall's own numbers, its picked point's and its picked edge's.
+      const wm = this.wallsMode;
+      const ws = t.walls ?? [];
+      const w = ws[wm.wall];
+      const p = w?.points[wm.point];
+      const e = w?.points[wm.edge];
+      out.push({
+        title: 'Race walls',
+        note: `${ws.length} wall${ws.length === 1 ? '' : 's'} on ${t.name}, met only by a hull in a run on it (\`COURSE_TUNE.walls\` 'run'); x and z in the file's frame`,
+        rows: ws.map((k, i) => ({ words: `${k.name} · ${k.points.length} points · ${k.high} m high · lean ${k.lean}°`, buttons: [{ label: i === wm.wall ? 'Picked' : 'Pick', act: `course:wall:pick:${i}`, off: i === wm.wall }] })),
+        fields: w
+          ? [
+              { label: 'Name', value: w.name, act: 'course:wall:name', kind: 'text' as const },
+              { label: 'High', value: w.high, act: 'course:wall:high', kind: 'number' as const },
+              { label: 'Lean (°)', value: w.lean, act: 'course:wall:lean', kind: 'number' as const },
+              ...(p
+                ? [
+                    { label: `Point ${wm.point} x`, value: p.x, act: 'course:wall:x', kind: 'number' as const },
+                    { label: 'z', value: p.z, act: 'course:wall:z', kind: 'number' as const },
+                    { label: 'Its foot', value: p.y, act: 'course:wall:y', kind: 'number' as const },
+                  ]
+                : []),
+              ...(e ? [{ label: `Edge ${wm.edge}'s radius (empty: straight)`, value: e.r ?? '', act: 'course:wall:r', kind: 'text' as const }] : []),
+            ]
+          : [],
+        buttons: w
+          ? [
+              ...(p ? [{ label: 'Take the point out', act: 'course:wall:removePoint', danger: true }] : []),
+              { label: 'Take the wall out', act: 'course:wall:remove', danger: true },
+            ]
+          : [],
+      });
+    }
     const g = this.mode === 'gates' && this.pickedGate >= 0 ? t.gates[this.pickedGate] : null;
     if (g) {
       out.push({
@@ -2136,7 +2234,13 @@ export class EditorCourse {
       if (arg === 'forPods' || arg === 'forBikes') return this.tune({ [arg]: value === 'true' }).join('; ');
       return fin ? this.tune({ [arg]: num }).join('; ') : `${arg} takes a number`;
     }
+    if (what === 'wall' && arg === 'finish') return this.wallsMode.finish();
+    if (what === 'wall' && arg === 'arc') {
+      this.wallsMode.nextArc = !this.wallsMode.nextArc;
+      return `the edge being drawn: ${this.wallsMode.nextArc ? 'an arc' : 'straight'}`;
+    }
     if (!t) return this.said('pick a course first', false);
+    if (what === 'wall') return this.wallAct(t, act.split(':').slice(2), value);
     if (what === 'set') {
       if (arg === 'name') return this.setField('track', { name: value ?? '' });
       if (arg === 'laps' || arg === 'clear') return fin ? this.setField('track', { [arg]: num }) : this.said(`${arg} takes a number`, false);
@@ -2175,6 +2279,98 @@ export class EditorCourse {
       return this.write(`gate ${i} moved`, t, gateMoved(t, i, place));
     }
     return this.said(`no such act: ${act}`, false);
+  }
+
+  /** A Walls act of the Selected tab (`course:wall:<what>[:<i>]`) on the picked wall, its picked point or its picked edge. */
+  private wallAct(t: TrackDef, parts: string[], value: string | undefined): Promise<string> | string {
+    const wm = this.wallsMode;
+    const what = parts[0];
+    const num = Number(value);
+    const fin = value !== undefined && value !== '' && Number.isFinite(num);
+    if (what === 'pick') {
+      const i = Number(parts[1]);
+      if (!t.walls?.[i]) return this.said(`no wall ${parts[1]}`, false);
+      wm.wall = i;
+      wm.point = -1;
+      wm.edge = -1;
+      this.host.refresh();
+      return `${t.walls[i].name} picked`;
+    }
+    const w = t.walls?.[wm.wall];
+    if (!w) return this.said('pick a wall first (a click on its line, or Pick)', false);
+    if (what === 'name') return this.write('a wall named', t, wallSet(t, wm.wall, { name: value ?? '' }));
+    if (what === 'high' || what === 'lean') return fin ? this.write(`a wall's ${what} set`, t, wallSet(t, wm.wall, { [what]: num })) : this.said(`${what} takes a number`, false);
+    if (what === 'remove') {
+      const i = wm.wall;
+      wm.wall = -1;
+      wm.point = -1;
+      wm.edge = -1;
+      return this.write(`${w.name} taken out`, t, wallRemoved(t, i));
+    }
+    if (what === 'r') {
+      if (wm.edge < 0) return this.said('pick an edge first (a click on its middle)', false);
+      if (value === undefined || value.trim() === '') return this.write('a wall edge straightened', t, wallEdgeRadius(t, wm.wall, wm.edge, undefined));
+      return fin ? this.write('a wall edge bent', t, wallEdgeRadius(t, wm.wall, wm.edge, num)) : this.said('a radius is a number of metres (negative bulges left), or empty for straight', false);
+    }
+    if (wm.point < 0) return this.said('pick a point first (a click on its diamond)', false);
+    if (what === 'removePoint') {
+      const j = wm.point;
+      const i = wm.wall;
+      wm.point = -1;
+      // A wall of the least points goes whole, and the next wall moves into its index: nothing stays picked.
+      if (w.points.length <= WALL_LIMITS.pointsLeast) {
+        wm.wall = -1;
+        wm.edge = -1;
+      }
+      return this.write(`${w.name}'s point ${j} taken out`, t, wallPointRemoved(t, i, j));
+    }
+    if (what === 'x' || what === 'y' || what === 'z') return fin ? this.write('a wall point set', t, wallPointSet(t, wm.wall, wm.point, { [what]: num })) : this.said(`${what} takes a number`, false);
+    return this.said(`no such act: course:wall:${parts.join(':')}`, false);
+  }
+
+  /**
+   * `course({ walls: { track, add | set | remove } })`: a wall drawn through points of the file's raw frame (`[x, z]` at the
+   * ground there, or `[x, z, y]`; a fourth number the signed radius of the edge leaving it), its numbers or a point set, or a
+   * wall or a point taken out. Answers what was said.
+   */
+  private async wallsDebug(o: Record<string, unknown>): Promise<string> {
+    const t = typeof o.track === 'string' ? this.tracks().find((k) => k.id === o.track) ?? null : this.track();
+    if (!t) return this.said('walls name their track (track: id), or one is picked', false);
+    const add = o.add && typeof o.add === 'object' && !Array.isArray(o.add) ? (o.add as Record<string, unknown>) : null;
+    if (add) {
+      if (!Array.isArray(add.points)) return this.said("a wall's points are [[x, z], ...] of the file's raw frame", false);
+      const points: RaceWall['points'] = [];
+      for (const p of add.points as unknown[]) {
+        if (!Array.isArray(p) || !Number.isFinite(p[0]) || !Number.isFinite(p[1])) return this.said('a point is [x, z], [x, z, y] or [x, z, y, r] (raw frame)', false);
+        const x = Number(p[0]);
+        const z = Number(p[1]);
+        const y = Number.isFinite(p[2]) ? Number(p[2]) : this.heightAt(x, z).y;
+        if (!Number.isFinite(y)) return this.said(`the ground under [${x}, ${z}] is not known yet: fly nearer (or give its foot as [x, z, y])`, false);
+        points.push(Number.isFinite(p[3]) && p[3] !== 0 ? { x, y, z, r: Number(p[3]) } : { x, y, z });
+      }
+      const n = t.walls?.length ?? 0;
+      const wall: RaceWall = { name: typeof add.name === 'string' ? add.name : `Wall ${n + 1}`, high: typeof add.high === 'number' ? add.high : COURSE_TUNE.newWallHigh, lean: typeof add.lean === 'number' ? add.lean : COURSE_TUNE.newWallLean, points };
+      return this.write(`${wall.name} drawn on ${t.name}`, t, wallAdded(t, wall));
+    }
+    const i = Number(o.i);
+    const w = t.walls?.[i];
+    if (!w) return this.said('a wall edit names a wall the track has (i: 0..)', false);
+    if (o.remove === true) return this.write(`${w.name} taken out`, t, wallRemoved(t, i));
+    const set = o.set && typeof o.set === 'object' && !Array.isArray(o.set) ? (o.set as Record<string, unknown>) : null;
+    if (!set) return this.said('a wall edit is add, set or remove', false);
+    const j = Number(set.point);
+    if (Number.isInteger(j)) {
+      if (set.remove === true) return this.write(`${w.name}'s point ${j} taken out`, t, wallPointRemoved(t, i, j));
+      if (set.r !== undefined) return this.write('a wall edge bent', t, wallEdgeRadius(t, i, j, typeof set.r === 'number' ? set.r : undefined));
+      const f: { x?: number; y?: number; z?: number } = {};
+      for (const k of ['x', 'y', 'z'] as const) if (typeof set[k] === 'number') f[k] = set[k] as number;
+      return this.write('a wall point set', t, wallPointSet(t, i, j, f));
+    }
+    const f: { name?: string; high?: number; lean?: number } = {};
+    if (typeof set.name === 'string') f.name = set.name;
+    if (typeof set.high === 'number') f.high = set.high;
+    if (typeof set.lean === 'number') f.lean = set.lean;
+    return this.write("a wall's numbers set", t, wallSet(t, i, f));
   }
 
   // ---- The console (`__debug.course`). ----
@@ -2294,6 +2490,9 @@ export class EditorCourse {
     if (o.fitLand !== undefined) said.push(await this.fitLand(typeof o.fitLand === 'string' ? o.fitLand : undefined));
     if (o.bridge !== undefined) said.push(await this.fitBridge(typeof o.bridge === 'string' ? o.bridge : undefined));
     if (o.clearTouchUps === true) said.push(await this.clearTouchUps());
+    // The race walls (the third wave).
+    const walls = rec(o.walls);
+    if (walls) said.push(await this.wallsDebug(walls));
     if (typeof o.remove === 'string') said.push(await this.remove(o.remove));
     return { said: said.filter(Boolean), tool: this.report(), courses: this.coursesReport() };
   }
@@ -2327,14 +2526,16 @@ export class EditorCourse {
     const t = this.track();
     const node = this.mode === 'edit' && t && this.pickedNode >= 0 ? this.nodeOf(t) : null;
     const held = this.held === 'raise' ? ` · raising ${this.raise >= 0 ? '+' : ''}${this.raise.toFixed(2)} m` : this.held === 'bank' ? ` · banking ${this.bankBy >= 0 ? '+' : ''}${this.bankBy.toFixed(1)}°` : this.held === 'gateTurn' ? ` · turning ${this.turnBy.toFixed(1)}°` : this.held === 'gateRaise' ? ` · raising the gate ${this.raise.toFixed(2)} m` : this.held !== 'none' ? ` · ${this.held} held` : '';
-    const what = this.mode === 'draw' ? `drawing ${this.draft.length ? `${this.draft.length} nodes, the next edge a ${this.draft[this.draft.length - 1].c === 'smooth' ? 'curve' : 'straight'}` : `(a ${COURSE_TUNE.curve === 'smooth' ? 'curve' : 'straight'} next)`}${this.draftJoin ? ` · a shortcut from ${this.draftJoin}` : ''}` : this.mode === 'edit' ? (node ? `node ${this.pickedNode}${this.pickedPath ? ` of ${t?.course?.paths[this.pickedPath]?.id}` : ''}: ${node.w} m wide, bank ${node.b}°, shoulder ${node.sh} m, ${node.y.toFixed(2)} m up, ${node.c}` : 'editing: click a diamond or a grabber, the road to put a node in') : this.pickedGate >= 0 && t?.gates[this.pickedGate] ? `gate ${this.pickedGate}${t.gates[this.pickedGate].path !== undefined ? ' (follows)' : ' (pinned)'}` : 'gates: click near one';
+    const wm = this.wallsMode;
+    const pw = t?.walls?.[wm.wall];
+    const what = this.mode === 'walls' ? (wm.draft.length ? `a wall of ${wm.draft.length} points, the next edge ${wm.nextArc ? 'an arc' : 'straight'}` : pw ? `${pw.name}: ${pw.points.length} points, ${pw.high} m high, lean ${pw.lean}°${wm.point >= 0 ? ` · point ${wm.point}` : wm.edge >= 0 ? ` · edge ${wm.edge}` : ''}` : `walls: ${t?.walls?.length ?? 0} on this track (click to draw one)`) : this.mode === 'draw' ? `drawing ${this.draft.length ? `${this.draft.length} nodes, the next edge a ${this.draft[this.draft.length - 1].c === 'smooth' ? 'curve' : 'straight'}` : `(a ${COURSE_TUNE.curve === 'smooth' ? 'curve' : 'straight'} next)`}${this.draftJoin ? ` · a shortcut from ${this.draftJoin}` : ''}` : this.mode === 'edit' ? (node ? `node ${this.pickedNode}${this.pickedPath ? ` of ${t?.course?.paths[this.pickedPath]?.id}` : ''}: ${node.w} m wide, bank ${node.b}°, shoulder ${node.sh} m, ${node.y.toFixed(2)} m up, ${node.c}` : 'editing: click a diamond or a grabber, the road to put a node in') : this.pickedGate >= 0 && t?.gates[this.pickedGate] ? `gate ${this.pickedGate}${t.gates[this.pickedGate].path !== undefined ? ' (follows)' : ' (pinned)'}` : 'gates: click near one';
     const notes = this.notes.length ? ` · ${this.notes.slice(0, 3).join(' · ')}${this.notes.length > 3 ? ` (+${this.notes.length - 3})` : ''}` : '';
     return `course: ${t ? `${t.name} · ` : ''}${what}${held}${this.writing ? ' · writing' : ''}${notes}${this.last.said && !this.writing ? ` · ${this.last.said}` : ''}`;
   }
 
   /** For the console. */
   report(): Record<string, unknown> {
-    return { armed: this.armed, mode: this.mode, picked: this.picked, path: this.pickedPath, node: this.pickedNode, gate: this.pickedGate, draft: this.draft.length, shortcutFrom: this.draftJoin, held: this.held, writing: !!this.writing, views: this.views.length, last: { ...this.last }, notes: [...this.notes], carves: !!this.host.carve, carvedLive: this.carvedLive, carried: { ...this.carried } };
+    return { armed: this.armed, mode: this.mode, picked: this.picked, path: this.pickedPath, node: this.pickedNode, gate: this.pickedGate, draft: this.draft.length, shortcutFrom: this.draftJoin, held: this.held, writing: !!this.writing, views: this.views.length, last: { ...this.last }, notes: [...this.notes], carves: !!this.host.carve, carvedLive: this.carvedLive, carried: { ...this.carried }, walls: this.wallsMode.report() };
   }
 
   /** The tune moved from the console or a slider: the views drawn again (their reach, nothing else of a course). */

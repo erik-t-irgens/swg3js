@@ -158,8 +158,27 @@ ok(parseDonor('props:sign') === null && parseDonor('Props:sign/x') === null && p
     ok(known.length > 0 && placementsFileText(world, 'raw', known) === then && JSON.stringify(known) === JSON.stringify(oldRows), `${world}'s committed map edits (${known.length} rows that are neither marks nor imports and carry nothing that reader never knew, ${read.rows.length - known.length} that do) read as ${PRE_WAVE} read them and are written back as it wrote them, byte for byte`);
     if (sha(text) === rec.text) ok(sha(then) === rec.back, `and that writing is the one recorded here for a machine where git cannot hand it over (${sha(text)} written back as ${sha(then)})`);
     else note(`${world}'s file has changed since the wave (${sha(text)}): the recorded writing is of the file it was`);
-    // A file the writer itself wrote comes back exactly as it was (monument's is; the tutorial's was written by hand).
-    if (world === 'monument') ok(again === text, "and monument's, which the writer wrote, reads and writes back to its own text");
+    // A file the writer itself wrote comes back exactly as it was (monument's is; the tutorial's was written by hand). The
+    // owner's own rows the writer never wrote are held apart and named, not failed: a row whose turn he wrote by hand or
+    // by a script of his, rounded off its unit length (his imported Gungan city's, six places), the reader normalises and
+    // the writer writes normalised, which is the reader's rule and no fault. Every other line comes back to the byte.
+    if (world === 'monument') {
+      const was = text.split('\n');
+      const now = again.split('\n');
+      const q = /"q": \[([^\]]*)\]/;
+      const theirs: string[] = [];
+      let other = was.length !== now.length ? 'its line count' : '';
+      for (let i = 0; i < was.length && !other; i++) {
+        if (was[i] === now[i]) continue;
+        const a = q.exec(was[i]);
+        const b = q.exec(now[i]);
+        const n = a ? a[1].split(',').reduce((s, v) => s + Number(v) * Number(v), 0) : 1;
+        if (a && b && Math.abs(n - 1) > 1e-9 && was[i].replace(q, b[0]) === now[i]) theirs.push(/"id": "([^"]+)"/.exec(was[i])?.[1] ?? `line ${i + 1}`);
+        else other = `line ${i + 1}`;
+      }
+      if (theirs.length) note(`monument: ${theirs.length} row${theirs.length === 1 ? '' : 's'} of the owner's own whose turn is off its unit length come back normalised, named apart (${theirs.slice(0, 3).join(', ')}${theirs.length > 3 ? ', ...' : ''})`);
+      ok(!other, `and monument's, which the writer wrote, reads and writes back to its own text${theirs.length ? `, but for ${theirs.length} rows of the owner's own turned by hand` : ''}${other ? ` -- ${other} differs` : ''}`);
+    }
   }
 }
 

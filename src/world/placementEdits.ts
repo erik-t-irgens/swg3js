@@ -871,7 +871,7 @@ function sameTrackRow(a: TrackDef, b: TrackDef): boolean {
 }
 
 /** A track's own fields, which a track written over one keeps nothing of; anything else the one it replaces held is kept. */
-const TRACK_OWN = new Set(['id', 'name', 'note', 'kind', 'laps', 'for', 'clear', 'grid', 'gates', 'at', 'course']);
+const TRACK_OWN = new Set(['id', 'name', 'note', 'kind', 'laps', 'for', 'clear', 'grid', 'gates', 'at', 'course', 'walls']);
 
 /** A cleaned track to write, carrying what the track it replaces held at its head that this build does not read. */
 function trackWithExtras(row: TrackDef, was: Record<string, unknown> | null): Record<string, unknown> {
@@ -882,13 +882,13 @@ function trackWithExtras(row: TrackDef, was: Record<string, unknown> | null): Re
 
 /**
  * Whether a field this build does not read is one it would drop on writing (§2.2 of the race drawer's design): any field of
- * a gate, of the grid or of a course, which the writer writes field by field, where a field at a track's head is kept on its
+ * a gate, of the grid, of a course or of a wall or its point (the third wave's), which the writer writes field by field, where a field at a track's head is kept on its
  * head line. Answers the first such field, as `<id>.<where>`, or null. The reader names a gate's field `<id>.gates[<i>].<field>`:
  * after the bracket a dot follows, and between `]` and `.` there is no word boundary, so the pattern ends in a dot (or the
  * name's end), never `\b`, which let every gate's field through and wrote it lossy.
  */
 export function droppedField(unknown: readonly string[]): string | null {
-  return unknown.find((u) => /^[^.]+\.(grid|gates\[\d+\]|course)(\.|$)/.test(u)) ?? null;
+  return unknown.find((u) => /^[^.]+\.(grid|gates\[\d+\]|course|walls\[\d+\])(\.|$)/.test(u)) ?? null;
 }
 
 /** The track file for a world, as the owner reads it. */

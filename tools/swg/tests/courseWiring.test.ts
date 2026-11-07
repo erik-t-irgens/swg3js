@@ -159,7 +159,8 @@ ok(/return \(x, z\) => \(\{ x: rawToGameX\(c\.x, x\), z: rawToGameZ\(c\.z, z\) \
   ok(/const onRoad = this\.courseSkip;/.test(world) && /this\.props\.buildForChunk\(cx, cz, this\.terrain, exclude, this\.courseSkip \?\? undefined\)/.test(world), "the props keep off a road on both of a chunk's paths");
   ok(/roadMask: \(x0, z0, size, out\) => this\.courseRoadMask\(x0, z0, size, out\),/.test(world) && /fillRoadMask\(this\.courseCarve, this\.raceCourse\.cx, this\.raceCourse\.cz, x0, z0, size, out\);/.test(world), "the grass is handed the roads' mask");
   ok(/this\.zoneSet = new ZoneSet\(this\.planet\?\.space \? \[\] : this\.courseZoneList\.length \? \[\.\.\.zonesOf\(rows\), \.\.\.this\.courseZoneList\] : zonesOf\(rows\)\);/.test(world) && /this\.courseZoneList = courseZones\(store\.outlines\(\)\);/.test(world), "the roads join the no-spawn zones after the removal file's own");
-  ok(/private readonly raceDeps: RaceDeps = \{ ground: this\.raceGround, course: this\.raceCourse \};/.test(world) && /this\.raceCourse\.carve = store;/.test(world), 'the race drive is handed the world\'s courses');
+  // (The third wave hands it the world's race walls beside the courses: `walls: this.raceWalls`.)
+  ok(/private readonly raceDeps: RaceDeps = \{ ground: this\.raceGround, course: this\.raceCourse, walls: this\.raceWalls \};/.test(world) && /this\.raceCourse\.carve = store;/.test(world), 'the race drive is handed the world\'s courses');
   ok(/if \(!preview\) this\.courseTracks = tracks;/.test(after(world, '  landCourses(tracks: readonly CarveTrack[], fx: number, fz: number, preview: boolean): number {', 600)), "a preview never becomes the world's tracks");
   ok(/this\.stepCourseRelay\(camPos\);/.test(world), 'a change is laid again a frame\'s share at a time');
   // The arrival's read: the page hands the world its read of the track file, never gated by the race switch (the race's own
@@ -210,10 +211,11 @@ ok(DEBUG_GROUPS.some((g) => g.helpers.includes('course')), 'the debug menu lists
 ok(/helper === 'course' \? courseDialSet\(\)/.test(read('src/editor/editorDials.ts')), "and its sliders are the `course` dial set");
 {
   // The second wave's numbers of feel join the sliders with the wave that reads them (W1's notes; §2.15's dial set):
-  // `relayMs` is a cost number and never a dial; the walls' three are the third wave's.
-  const dials = after(read('src/editor/editorDials.ts'), 'const COURSE_DIAL_GROUPS', 12000);
+  // `relayMs` is a cost number and never a dial; the third wave's walls joined with it (who meets them, a new wall's height
+  // and lean, the wheel's step, the arc's step), and the first draft's `steepFrom` and `wallProbe`, which nothing reads, did not.
+  const dials = after(read('src/editor/editorDials.ts'), 'const COURSE_DIAL_GROUPS', 14000);
   const has = (k: string) => new RegExp(`\\['${k}', `).test(dials);
-  ok(['deckBand', 'fitStep', 'fitTol', 'clearanceNote', 'deckLip', 'touchNote', 'deck', 'touchUps'].every(has) && !has('relayMs') && !has('walls') && !has('steepFrom') && !has('wallProbe'), "the carve's numbers are sliders of the `course` set (`deck`, `deckBand`, `touchUps`, the notes' and Fit to land's), `relayMs` none");
+  ok(['deckBand', 'fitStep', 'fitTol', 'clearanceNote', 'deckLip', 'touchNote', 'deck', 'touchUps', 'walls', 'newWallHigh', 'newWallLean', 'wallHighStep', 'arcStep'].every(has) && !has('relayMs') && !has('steepFrom') && !has('wallProbe'), "the carve's and the walls' numbers are sliders of the `course` set (`deck`, `deckBand`, `touchUps`, the notes' and Fit to land's, the walls' five), `relayMs` none");
 }
 ok(/\| `course\(/.test(read('README.md')), 'README has its row');
 

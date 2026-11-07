@@ -133,6 +133,13 @@ export const RACE_TUNE = {
   lookAhead: 0.5,
   lookShare: 0.5,
   feedAhead: 0.1,
+  /**
+   * The owner's other idea beside the race walls (the race drawer's third wave): any rise or fall of the walk ahead steeper
+   * than this (degrees) is left out of the look-ahead, anywhere, the walk held at the last height it kept. 90, off. The
+   * walk only (the review round): the bridge row, `feedAhead`'s footprint and the climbing judge still read a steep rise,
+   * since the loose hold's room to rise for a face it is about to meet is read there.
+   */
+  aheadSteepCap: 90,
   /** The one ray ahead: within the colliders' reach, cast from this far over the hull, and taken only this near the cached ground. */
   rayReach: 140,
   rayAccept: 3,
@@ -376,6 +383,7 @@ const RANGES: Partial<Record<keyof RaceTune, [number, number]>> = {
   boostGate: [0, 1],
   readyAt: [0, 100],
   lookShare: [0, 1],
+  aheadSteepCap: [5, 90],
   camLook: [0, 1],
   fpRoll: [0, 1],
   pullFrom: [0, 0.99],

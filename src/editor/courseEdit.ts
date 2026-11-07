@@ -27,6 +27,7 @@ import { turnHeading } from '../race/gates.ts';
 import { fromGame, toGame } from '../story/placements.ts';
 import { GROUP_TUNE } from '../net/groups.ts';
 import { RACE_BASE } from '../vehicles/raceTune.ts';
+import { WALL_LIMITS, arcRefusal, type RaceWall } from '../race/raceWalls.ts';
 
 /** What an edit is judged with: the gates' rules, the land under a point of the file's frame (NaN for none known), a deck. */
 export interface CourseCtx {
@@ -1002,4 +1003,135 @@ export function bridgeEndWords(fit: BridgeFit, lip: number = COURSE_TUNE.deckLip
   for (const v of [fit.offA, fit.offB]) if (Number.isFinite(v) && Math.abs(v) > Math.abs(worst)) worst = v;
   if (!(Math.abs(worst) > lip)) return '';
   return `; it stands ${worst.toFixed(2)} m off the upper road at one end (more than ${lip} m: the road climbs across the gap, so tip it with Shift+R or flatten the upper road over the crossing)`;
+}
+
+// ---- The race walls (the race drawer's third wave): each edit one track's whole row, settled as the file is written. ----
+
+/** A wall's numbers held to their limits and rounded as written, and an arc held to its least radius where a moved point outran it. */
+function settleWalls(walls: RaceWall[]): void {
+  const L = WALL_LIMITS;
+  for (const w of walls) {
+    w.high = r2(Math.min(L.highMost, Math.max(L.highLeast, w.high)));
+    w.lean = r2(Math.min(L.leanMost, Math.max(-L.leanMost, w.lean)));
+    for (const p of w.points) {
+      p.x = r2(p.x);
+      p.y = r2(p.y);
+      p.z = r2(p.z);
+    }
+    for (let j = 0; j < w.points.length; j++) {
+      const p = w.points[j];
+      if (p.r === undefined) continue;
+      const q = w.points[j + 1];
+      if (!q) {
+        delete p.r;
+        continue;
+      }
+      const half = Math.hypot(q.x - p.x, q.z - p.z) / 2;
+      // Up to the hundredth past half the chord, so the rounded radius is never under it.
+      const least = Math.ceil(half * 100) / 100;
+      const r = Math.sign(p.r) * Math.min(L.radiusMost, Math.max(least, Math.abs(p.r)));
+      p.r = r2(r);
+    }
+  }
+}
+
+/** A track with its walls changed by `edit` (on a copy), settled and read back as the reader cleans it, or why it would be refused. */
+function withWalls(t: TrackDef, edit: (walls: RaceWall[]) => string | null): CourseEdit {
+  const cur = copy(t);
+  const walls = cur.walls ?? [];
+  const no = edit(walls);
+  if (no) return no;
+  settleWalls(walls);
+  // No wall left is no walls at all, so the track is what it was before any was drawn.
+  if (walls.length) cur.walls = walls;
+  else delete cur.walls;
+  return readTrack(cur, [], 0);
+}
+
+/** A wall drawn onto a track (its points in the file's frame, each `r` the edge leaving it, or none). */
+export function wallAdded(t: TrackDef, wall: RaceWall): CourseEdit {
+  return withWalls(t, (ws) => {
+    if (ws.length >= WALL_LIMITS.walls) return `a track holds ${WALL_LIMITS.walls} walls at most`;
+    ws.push(JSON.parse(JSON.stringify(wall)) as RaceWall);
+    return null;
+  });
+}
+
+/** A wall's own numbers set: its name, height and lean. */
+export function wallSet(t: TrackDef, i: number, f: { name?: string; high?: number; lean?: number }): CourseEdit {
+  return withWalls(t, (ws) => {
+    const w = ws[i];
+    if (!w) return `no wall ${i}`;
+    if (f.name !== undefined) w.name = String(f.name);
+    if (f.high !== undefined) w.high = Number(f.high);
+    if (f.lean !== undefined) w.lean = Number(f.lean);
+    return null;
+  });
+}
+
+/** A wall taken out. */
+export function wallRemoved(t: TrackDef, i: number): CourseEdit {
+  return withWalls(t, (ws) => {
+    if (!ws[i]) return `no wall ${i}`;
+    ws.splice(i, 1);
+    return null;
+  });
+}
+
+/** A point of a wall moved (its place and its foot's height, any of them); an arc either side held to its least radius. */
+export function wallPointSet(t: TrackDef, i: number, j: number, p: { x?: number; y?: number; z?: number }): CourseEdit {
+  return withWalls(t, (ws) => {
+    const q = ws[i]?.points[j];
+    if (!q) return `no point ${j} on wall ${i}`;
+    if (p.x !== undefined) q.x = p.x;
+    if (p.y !== undefined) q.y = p.y;
+    if (p.z !== undefined) q.z = p.z;
+    return null;
+  });
+}
+
+/** A point put into a wall after point `j` (its place in the file's frame); the edge it splits leaves both halves straight. */
+export function wallPointAdded(t: TrackDef, i: number, j: number, p: { x: number; y: number; z: number }): CourseEdit {
+  return withWalls(t, (ws) => {
+    const w = ws[i];
+    if (!w || !w.points[j]) return `no point ${j} on wall ${i}`;
+    if (w.points.length >= WALL_LIMITS.points) return `a wall holds ${WALL_LIMITS.points} points at most`;
+    delete w.points[j].r;
+    w.points.splice(j + 1, 0, { x: p.x, y: p.y, z: p.z });
+    return null;
+  });
+}
+
+/** A point taken out of a wall: a wall left with one point goes with it. */
+export function wallPointRemoved(t: TrackDef, i: number, j: number): CourseEdit {
+  return withWalls(t, (ws) => {
+    const w = ws[i];
+    if (!w || !w.points[j]) return `no point ${j} on wall ${i}`;
+    if (w.points.length <= WALL_LIMITS.pointsLeast) {
+      ws.splice(i, 1);
+      return null;
+    }
+    // The edge before it keeps its curve only where it still has one to keep (the last point's has none).
+    w.points.splice(j, 1);
+    if (j === w.points.length && j > 0) delete w.points[j - 1].r;
+    return null;
+  });
+}
+
+/** An edge of a wall made an arc of signed radius `r` (bulging to its right as seen in the game for a positive one), or straight (undefined); a radius under half its chord is refused in words. */
+export function wallEdgeRadius(t: TrackDef, i: number, j: number, r: number | undefined): CourseEdit {
+  return withWalls(t, (ws) => {
+    const w = ws[i];
+    const p = w?.points[j];
+    const q = w?.points[j + 1];
+    if (!p || !q) return `no edge ${j} on wall ${i}`;
+    if (r === undefined || r === 0) {
+      delete p.r;
+      return null;
+    }
+    const c = Math.hypot(q.x - p.x, q.z - p.z);
+    if (!Number.isFinite(r) || Math.abs(r) < c / 2 - 1e-9) return `wall ${i}'s edge ${j}: ${arcRefusal(c)}`;
+    p.r = r;
+    return null;
+  });
 }

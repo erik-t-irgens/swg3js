@@ -417,7 +417,9 @@ import { RACE_BLOCK_MARGIN, easeFovOut, frameRaceView, newRaceView, newRaceViewO
 import type { RaceLevels } from './vehicles/raceMath.ts';
 import { RACE_KINDS, corridorCircles, corridorHits, courseLegs, isTrackId, landedTracks, lapLength, legName, readTrackFile, trackInGame, trackSync, tracksPath, type CourseThing, type RaceKind, type TrackDef, type TrackRead } from './race/trackFile.ts';
 import { GATE_STRIDE, bakeGate, gateCorners, headingTurn, turnHeading } from './race/gates.ts';
-import { RUN_ACT, RUN_EVENT, RaceRun, STAND_LIFT, bestOf, newRunWorld, putBackSpawn, raceBestKey, raceDelta, raceTime, runBestOf, runInput, runKindFor, runStep } from './race/raceRun.ts';
+import { RUN_ACT, RUN_EVENT, RaceRun, STAND_LIFT, bestOf, handRun, letGoRun, newRunWorld, putBackSpawn, raceBestKey, raceDelta, raceTime, runBestOf, runInput, runKindFor, runStep } from './race/raceRun.ts';
+import { buildWallSet, type RaceWallSet } from './race/raceWalls.ts';
+import { COURSE_TUNE } from './race/courseTune.ts';
 import { RACE_GROUP_TUNE, gridSlot, syncGroupCountdown, tuneRaceGroup } from './race/raceGroup.ts';
 import { RaceTogether, type GroupRace } from './net/raceNet.ts';
 import { RECKON_TUNE, placeMoment, tuneReckon, turnBack } from './net/peerReckon.ts';
@@ -20597,6 +20599,8 @@ class App {
     this.world.simulating = simulate;
     // And what every race-driven hull reads: while play stands still it is held where it is, at the speed it had.
     RACE_CLOCK.live = simulate;
+    // And the world's race walls a hull meets with `COURSE_TUNE.walls` 'racing' (the race drawer's third wave).
+    this.syncRaceWalls();
     // A hull removed with someone still in its rooms (the garage's clear, the console): out into the world first.
     // A hull somebody else flies is in no such list -- it is a picture with rooms hung under it, and the rooms
     // themselves call the walker out (peerHullGone) when that player's ship goes.
@@ -21235,6 +21239,44 @@ class App {
   }
 
   /**
+   * Tracks' race walls as one set in the game's frame (the race drawer's third wave, `raceWalls.ts`), carried as their courses
+   * are; null for none, or in a space zone, where no wall stands.
+   */
+  private raceWallsOf(tracks: readonly TrackDef[]): RaceWallSet | null {
+    if (this.trackFrame() !== 'raw') return null;
+    const c = this.world.layoutCenter ?? { x: 0, z: 0 };
+    return buildWallSet(tracks.map((t) => ({ track: t.id, walls: t.walls })), (x, z, out) => {
+      out.x = rawToGameX(c.x, x);
+      out.z = rawToGameZ(c.z, z);
+    }, COURSE_TUNE.arcStep);
+  }
+
+  /** The tracks and arc step the world's 'racing' walls were made from: made again only when either is another. */
+  private wallsFrom: readonly TrackDef[] | null = null;
+  private wallsStep = 0.5;
+
+  /**
+   * Every track's race walls on the world, handed to every race-driven hull through the world's deps while
+   * `COURSE_TUNE.walls` is 'racing' (to try a wall with no run), and none otherwise: a run's own walls are `handRun`'s. Made
+   * again only when the world's track list or the arc step is another; a frame otherwise compares and makes nothing.
+   */
+  private syncRaceWalls(): void {
+    const w = this.world.raceWalls;
+    if (COURSE_TUNE.walls !== 'racing') {
+      if (w.all !== null || this.wallsFrom !== null) {
+        w.all = null;
+        this.wallsFrom = null;
+      }
+      return;
+    }
+    const tracks = this.tracksRead?.tracks ?? null;
+    if (tracks === this.wallsFrom && this.wallsStep === COURSE_TUNE.arcStep && (tracks !== null || w.all === null)) return;
+    this.wallsFrom = tracks;
+    this.wallsStep = COURSE_TUNE.arcStep;
+    w.all = tracks ? this.raceWallsOf(tracks) : null;
+  }
+
+  /**
    * A world's track file fetched and kept as this world's once it lands (a newer fetch wins). With the race pass off
    * (`RACE_TUNE.on`, or the load hatch `swg.race`) nothing is fetched, so no corridor keeps a plant off and a session
    * starts exactly as before the pass; and the world is then not taken as read (`tracksWorld` stays empty), so the world
@@ -21601,7 +21643,9 @@ class App {
       run.sharedStart = group.race.at;
       syncGroupCountdown(run, sharedClock.now() - sharedClock.lagNow());
     }
-    race.watch = run;
+    // The track's race walls in the game's frame, handed to the hull with the watch (`handRun`; the race drawer's third wave).
+    run.walls = this.raceWallsOf([t]);
+    handRun(run, race);
     this.raceRun = run;
     this.runVehicle = v;
     this.runDef = def;
@@ -21644,7 +21688,7 @@ class App {
     const act = runStep(run, w);
     if (act === RUN_ACT.died) this.endRun('the rider died');
     else if (act === RUN_ACT.wrecked) {
-      if (v?.race) v.race.watch = null;
+      if (v?.race) letGoRun(v.race);
       this.runVehicle = null;
       this.messages.system(`crashed: back on a whole ${this.runDef?.label ?? 'vehicle'} at the last gate in ${TRACK_TUNE.putBack} s`);
     } else if (act === RUN_ACT.gone) this.endRun('your vehicle is gone');
@@ -21686,7 +21730,7 @@ class App {
         this.runNote = best ? 'a best time' : 'finished';
         this.keepRaceBest(run, run.circuit ? { total: e.time } : { lap: e.time, total: e.time, splits: run.bestSplits ?? undefined });
         if (Number.isFinite(run.sharedStart)) this.raceTogether.ranFinish(e.time);
-        if (this.runVehicle?.race) this.runVehicle.race.watch = null;
+        if (this.runVehicle?.race) letGoRun(this.runVehicle.race);
       } else if (e.kind === RUN_EVENT.wrongWay) {
         this.messages.system(`wrong way: gate ${e.gate} is the next`);
       }
@@ -21717,7 +21761,7 @@ class App {
     run.end(why);
     // A group race's member dropping out says so to the group.
     if (Number.isFinite(run.sharedStart)) this.raceTogether.ranOut(why);
-    if (this.runVehicle?.race) this.runVehicle.race.watch = null;
+    if (this.runVehicle?.race) letGoRun(this.runVehicle.race);
     if (this.runVehicle?.race) this.runVehicle.race.startBoost = 1;
     this.world.releaseVehicleMaterials(this.runKept);
     this.runNote = `run over: ${why}`;
@@ -21727,7 +21771,7 @@ class App {
   /** No run at all: the watch let go of, the block and the gates taken off the screen. */
   private clearRun(): void {
     if (this.runVehicle?.race) {
-      this.runVehicle.race.watch = null;
+      letGoRun(this.runVehicle.race);
       this.runVehicle.race.startBoost = 1;
     }
     this.world.releaseVehicleMaterials(this.runKept);
@@ -21777,7 +21821,7 @@ class App {
       this.player.mount(v);
       this.player.syncMount();
       this.aimRaceViewAt(at.heading);
-      if (v.race) v.race.watch = run;
+      if (v.race) handRun(run, v.race);
       this.runVehicle = v;
       run.backUp(v.pos.x, v.pos.y, v.pos.z);
       // The new hull is prepared and holds the programs the wreck's materials held: those can go now.
