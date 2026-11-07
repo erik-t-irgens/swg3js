@@ -249,7 +249,7 @@ try {
   json('props/manifest.json', { version: 1, materialFormat: 6, props: [], models: [], skipped: [], late: stamp, ours: current });
   json('ships/manifest.json', { ships: [], skipped: [], models: [], materialFormat: 6, late: stamp });
   const status = () => {
-    const run = spawnSync(process.execPath, [fileURLToPath(new URL('../cli.mjs', import.meta.url)), 'status', packs, '--json', `--swg=${install}`], { encoding: 'utf8', maxBuffer: 64 * 1048576, env: { ...process.env, SWG: '', SWG3JS_FINAL_NAMES: listFile, SWG3JS_OURS: miniFile } });
+    const run = spawnSync(process.execPath, [fileURLToPath(new URL('../cli.mjs', import.meta.url)), 'status', packs, '--json', `--swg=${install}`], { encoding: 'utf8', maxBuffer: 64 * 1048576, env: { ...process.env, SWG: '', SWG3JS_PLACEMENTS: '', SWG3JS_FINAL_NAMES: listFile, SWG3JS_OURS: miniFile } });
     if (!run.stdout.trim()) console.log(run.stderr);
     const out = JSON.parse(run.stdout) as { steps: { command: string; args: string[]; reasons: string[] }[] };
     const why = (command: string, phrase: string, arg?: (args: string[]) => boolean) => out.steps.filter((s) => s.command === command && (!arg || arg(s.args))).some((s) => s.reasons.some((r) => r.includes(phrase)));

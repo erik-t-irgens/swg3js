@@ -12,11 +12,14 @@
 // Run: node tools/swg/tests/courseFile.test.ts
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { COURSE_IN_SPACE, corridorCircles, courseLegs, lapLength, readTrack, readTrackFile, trackFileText, trackHash, trackSync, type TrackDef, type TrackRead } from '../../../src/race/trackFile.ts';
+import { COURSE_IN_SPACE, COURSE_LEG_STEP, corridorCircles, courseLegs, courseSpines, lapLength, legName, readTrack, readTrackFile, trackFileText, trackHash, trackSync, type TrackDef, type TrackRead } from '../../../src/race/trackFile.ts';
 import { trackDigest } from '../../../src/race/raceGroup.ts';
-import { courseCtx, drawTrack, moveNode, setTrack } from '../../../src/editor/courseEdit.ts';
+import { nearestOn, spineNear } from '../../../src/race/coursePath.ts';
+import { rawToGameX, rawToGameZ } from '../../../src/story/waypoints.ts';
+import { parseJsonc } from '../../../src/story/jsonc.ts';
+import { addShortcut, courseCtx, drawTrack, moveNode, setTrack } from '../../../src/editor/courseEdit.ts';
 import { loadOldMany, REPO } from './oldModules.ts';
 
 let checks = 0;
@@ -68,6 +71,36 @@ function trace(read: TrackRead, f: { trackHash: TF['trackHash']; trackFileText: 
   return JSON.stringify(out);
 }
 
+/**
+ * The ids of a file's tracks that carry this wave's own fields (a `course`, or a grid or gate following the road: `path`,
+ * `e`, `t`, `ow`), read off the file's own objects (a track the new reader refuses for a bad course is one of them too).
+ * afcf394's reader cannot read those fields (it names them unknown and drops them), so a track carrying them is held to
+ * this build's reader alone, and every other track of the file to afcf394's exactly. Parsed as the track reader parses
+ * (JSONC): a comment the owner wrote into his file by hand is a file the reader takes, and read as plain JSON it named no
+ * track at all, so his drawn course was held to afcf394's reader and failed the suite.
+ */
+function waveTracks(text: string): Set<string> {
+  const out = new Set<string>();
+  const doc = parseJsonc(text);
+  if (doc.error || !doc.value || typeof doc.value !== 'object') return out;
+  const tracks = (doc.value as { tracks?: unknown }).tracks;
+  if (!Array.isArray(tracks)) return out;
+  const anchored = (p: unknown, ow: boolean) => !!p && typeof p === 'object' && ['path', 'e', 't', ...(ow ? ['ow'] : [])].some((k) => k in (p as object));
+  for (const r of tracks) {
+    if (!r || typeof r !== 'object') continue;
+    const o = r as Record<string, unknown>;
+    if (typeof o.id !== 'string') continue;
+    if (o.course !== undefined || anchored(o.grid, false) || (Array.isArray(o.gates) && o.gates.some((g) => anchored(g, true)))) out.add(o.id);
+  }
+  return out;
+}
+
+/** A read with the tracks named by `ids` left out: their tracks, their skips and every field named under them. */
+function without(r: TrackRead, ids: Set<string>): TrackRead {
+  const mine = (s: string) => ids.has(s.slice(0, s.indexOf('.') < 0 ? s.length : s.indexOf('.')));
+  return { tracks: r.tracks.filter((t) => !ids.has(t.id)), skipped: r.skipped.filter((s) => !ids.has(s.id)), unknown: r.unknown.filter((u) => !mine(u)), problem: r.problem };
+}
+
 // ---- Day one: against the race drawer's start out of git. ----
 {
   const old = await loadOldMany(['src/race/trackFile.ts', 'src/race/trackPath.ts', 'src/race/raceGroup.ts'], ['src/race/trackFile.ts', 'src/race/raceGroup.ts'], PRE);
@@ -75,6 +108,27 @@ function trace(read: TrackRead, f: { trackHash: TF['trackHash']; trackFileText: 
   const fixtureNew = trace(readTrackFile(FIXTURE, 'naboo', 'ground'), NEW, trackDigest, 'naboo');
   // The fixture's trace as afcf394's own modules make it, recorded once from them.
   const FIXTURE_TRACE = '67307415a2f1737a';
+  // The fixture with a drawn course beside its plain tracks (a file the owner's first drawn course makes of his own): the
+  // plain tracks are held to afcf394 exactly, the drawn one named apart. Its trace with the drawn track left out is the
+  // fixture's own, whatever git answers.
+  const drawnBeside = (() => {
+    const flat0 = (x: number, z: number) => ({ x, z, y: 1 });
+    const d = drawTrack('gamma', 'Gamma', [flat0(0, 0), flat0(300, 10), flat0(500, 200), flat0(250, 400), flat0(-50, 220)], true, courseCtx(() => 0)) as TrackDef;
+    const doc = JSON.parse(FIXTURE) as { tracks: unknown[] };
+    doc.tracks.push(JSON.parse(JSON.stringify(d)));
+    return JSON.stringify(doc, null, 2);
+  })();
+  const mixedWave = waveTracks(drawnBeside);
+  const mixedNew = without(readTrackFile(drawnBeside, 'naboo', 'ground'), mixedWave);
+  ok(mixedWave.size === 1 && mixedWave.has('gamma') && waveTracks(FIXTURE).size === 0, "a drawn track is told apart from the plain ones by the file's own fields");
+  ok(trace(mixedNew, NEW, trackDigest, 'naboo') === fixtureNew, "with the drawn track left out, a file holding one besides the fixture's plain tracks traces exactly as the fixture alone");
+  // The same file with comments written into it by hand (the reader takes JSONC, and the batch writer drops them only at its
+  // next write): its drawn track still named apart, its plain tracks still the fixture's.
+  const commented = `// a line the owner wrote by hand\n${drawnBeside.replace('"tracks": [', '"tracks": [ /* and one within a line */')}`;
+  const commentedWave = waveTracks(commented);
+  const commentedNew = without(readTrackFile(commented, 'naboo', 'ground'), commentedWave);
+  ok(readTrackFile(commented, 'naboo', 'ground').tracks.length === 3 && commentedWave.size === 1 && commentedWave.has('gamma'), `a file with comments written in by hand, which the reader takes, still names its drawn track apart (${[...commentedWave].join(', ') || 'none named'})`);
+  ok(trace(commentedNew, NEW, trackDigest, 'naboo') === fixtureNew, 'and with it left out traces exactly as the fixture alone');
   if (old) {
     const [tf, rg] = old as unknown as [TF, RG];
     const OLD: Parameters<typeof trace>[1] = { trackHash: tf.trackHash, trackFileText: tf.trackFileText, courseLegs: tf.courseLegs, corridorCircles: tf.corridorCircles, lapLength: tf.lapLength };
@@ -82,19 +136,34 @@ function trace(read: TrackRead, f: { trackHash: TF['trackHash']; trackFileText: 
     ok(fixtureNew === fixtureOld, `the fixture reads, hashes, digests, gives its legs, circles and laps and writes exactly as ${PRE}'s modules (${fixtureNew.length} characters of trace)`);
     console.log(`note the fixture's trace hashes to ${sha(fixtureOld)}`);
     ok(sha(fixtureOld) === FIXTURE_TRACE, `${PRE}'s trace of the fixture is the one recorded (${sha(fixtureOld)})`);
+    const mixedOld = without(tf.readTrackFile(drawnBeside, 'naboo', 'ground'), mixedWave);
+    assert.deepStrictEqual(mixedNew, mixedOld, `the plain tracks of a file holding a drawn one read as ${PRE}'s reader reads them`);
+    ok(trace(mixedNew, NEW, trackDigest, 'naboo') === trace(mixedOld, OLD, rg.trackDigest, 'naboo'), `and trace exactly as ${PRE}'s, the drawn track named apart`);
+    const commentedOld = without(tf.readTrackFile(commented, 'naboo', 'ground'), commentedWave);
+    assert.deepStrictEqual(commentedNew, commentedOld, `the plain tracks of a file with comments and a drawn track read as ${PRE}'s reader reads them`);
+    ok(trace(commentedNew, NEW, trackDigest, 'naboo') === trace(commentedOld, OLD, rg.trackDigest, 'naboo'), `a file with comments written in by hand: its plain tracks trace exactly as ${PRE}'s, the drawn track named apart`);
+    // The owner's own files, whatever they hold: every plain track held to afcf394 exactly, every track he drew with this
+    // wave's tool named apart and held to this build's reader alone (afcf394 cannot read a course; never a reason to fail).
+    // A folder he has emptied (the endpoint takes it away with his last track) is said, never a failure.
     const dir = join(REPO, 'public', 'tracks');
-    let files = 0;
-    for (const f of readdirSync(dir).filter((n) => n.endsWith('.json'))) {
+    const names = existsSync(dir) ? readdirSync(dir).filter((n) => n.endsWith('.json')) : [];
+    if (!names.length) console.log(`note public/tracks/ holds no track file (${existsSync(dir) ? 'empty' : 'not there'}): only the fixtures are held to ${PRE}`);
+    for (const f of names) {
       const world = f.slice(0, -5);
       const text = readFileSync(join(dir, f), 'utf8');
-      const rNew = readTrackFile(text, world, 'ground');
-      const rOld = tf.readTrackFile(text, world, 'ground');
-      assert.deepStrictEqual(rNew, rOld, `${f} reads as ${PRE}'s reader reads it`);
-      ok(trace(rNew, NEW, trackDigest, world) === trace(rOld, OLD, rg.trackDigest, world), `public/tracks/${f}: ${rNew.tracks.length} tracks (${rNew.tracks.map((t) => t.id).join(', ')}) read, hash, digest, legs, circles, laps and text exactly as ${PRE}'s`);
-      ok(JSON.stringify(trackSync(rNew.tracks, rNew.tracks)) === JSON.stringify(tf.trackSync(rOld.tracks, rOld.tracks)) && JSON.stringify(trackSync([], rNew.tracks)) === JSON.stringify(tf.trackSync([], rOld.tracks)), `public/tracks/${f} syncs as ${PRE}'s`);
-      files++;
+      const wave = waveTracks(text);
+      const fullNew = readTrackFile(text, world, 'ground');
+      const rNew = without(fullNew, wave);
+      const rOld = without(tf.readTrackFile(text, world, 'ground'), wave);
+      assert.deepStrictEqual(rNew, rOld, `${f}'s plain tracks read as ${PRE}'s reader reads them`);
+      ok(trace(rNew, NEW, trackDigest, world) === trace(rOld, OLD, rg.trackDigest, world), `public/tracks/${f}: ${rNew.tracks.length} plain tracks (${rNew.tracks.map((t) => t.id).join(', ') || 'none'}) read, hash, digest, legs, circles, laps and text exactly as ${PRE}'s`);
+      ok(JSON.stringify(trackSync(rNew.tracks, rNew.tracks)) === JSON.stringify(tf.trackSync(rOld.tracks, rOld.tracks)) && JSON.stringify(trackSync([], rNew.tracks)) === JSON.stringify(tf.trackSync([], rOld.tracks)), `public/tracks/${f}'s plain tracks sync as ${PRE}'s`);
+      // Said, never asserted: the file is his, and a course he mended by hand into one this build refuses is his to see.
+      for (const id of wave) {
+        const whole = fullNew.tracks.some((t) => t.id === id) && !fullNew.skipped.some((s) => s.id === id) && !fullNew.unknown.some((u) => u.startsWith(`${id}.`));
+        console.log(`note public/tracks/${f}: ${id} carries a drawn course or following gates, which ${PRE}'s reader cannot read: left out of the comparison (${whole ? 'this build reads it whole' : 'this build does NOT read it whole'})`);
+      }
     }
-    ok(files >= 1, `every track file under public/tracks/ held (${files})`);
   } else {
     ok(sha(fixtureNew) === FIXTURE_TRACE, `git cannot hand ${PRE}'s modules over: the fixture's trace is held to the hash recorded from them (${sha(fixtureNew)})`);
   }
@@ -111,7 +180,10 @@ const t = drawn as TrackDef;
   const lines = text.split(/\r?\n/);
   const nodeLines = lines.filter((l) => /^\s+\{ "x": .*"c": "(smooth|straight)"/.test(l));
   ok(nodeLines.length === t.course!.paths[0].nodes.length, `the course is written one node a line (${nodeLines.length} lines)`);
-  ok(lines.some((l) => /^\s+"course": \{ "v": 1, "feather": "easeInOut", "crossing": "wall", "margin": 2, "level": 1, "grass": "clear", "wallOut": 0\.5, "wallHigh": 8,$/.test(l)), "the course's own numbers on one line after the gates");
+  // The course's own line built from the course's own numbers (never a feel dial's starting value, which the owner moves).
+  const c = t.course!;
+  const head = `"course": { "v": ${c.v}, "feather": ${JSON.stringify(c.feather)}, "crossing": ${JSON.stringify(c.crossing)}, "margin": ${c.margin}, "level": ${c.level}, "grass": ${JSON.stringify(c.grass)}, "wallOut": ${c.wallOut}, "wallHigh": ${c.wallHigh},`;
+  ok(lines.some((l) => l.trim() === head), "the course's own numbers on one line after the gates");
   const back = readTrackFile(text, 'naboo', 'ground');
   ok(!back.problem && !back.skipped.length && back.tracks.length === 1, 'the written course reads back with nothing refused');
   assert.deepStrictEqual(back.tracks[0], t);
@@ -125,6 +197,52 @@ const t = drawn as TrackDef;
   // Two nodes nearer than the edge's least merged as the course is written (the later of the pair goes).
   const close = drawTrack('close', 'Close', [flat(0, 0), flat(300, 10), flat(301.2, 10.5), flat(500, 200), flat(250, 400)], true, ctx) as TrackDef;
   ok(typeof close !== 'string' && close.course!.paths[0].nodes.length === 4, `two nodes 1.3 m apart are one as the course is written (${typeof close === 'string' ? close : close.course!.paths[0].nodes.length} nodes)`);
+}
+
+// ---- A drawn course's corridor and lap (what the game reads: `track({ check })` and the lap shown). ----
+{
+  const plain = { ...t, course: undefined };
+  const sp = courseSpines(t);
+  const legs = courseLegs(t, t.grid, t.gates);
+  const want = sp.reduce((n, s) => n + s.edges.reduce((m, ed) => m + Math.max(1, Math.ceil(ed.len / COURSE_LEG_STEP)), 0), 0);
+  const gateLegs = courseLegs(plain, t.grid, t.gates);
+  ok(legs.length === want && legs.length !== gateLegs.length, `a drawn course's legs follow its road, one every ${COURSE_LEG_STEP} m or less an edge (${legs.length}), never gate to gate (${gateLegs.length})`);
+  const near = spineNear();
+  let off = 0;
+  let longest = 0;
+  let halfOff = 0;
+  for (const l of legs) {
+    nearestOn(sp[l.path!], l.ax, l.az, near);
+    off = Math.max(off, near.d);
+    const hwA = near.hw;
+    nearestOn(sp[l.path!], l.bx, l.bz, near);
+    off = Math.max(off, near.d);
+    halfOff = Math.max(halfOff, Math.abs(l.half - (Math.max(hwA, near.hw) + t.clear)));
+    longest = Math.max(longest, Math.hypot(l.bx - l.ax, l.bz - l.az));
+  }
+  ok(off < 1e-6 && longest <= COURSE_LEG_STEP + 1e-9 && halfOff < 0.01, `every leg's ends on its road's spine (worst ${off.toExponential(1)} m), none longer than ${COURSE_LEG_STEP} m (${longest.toFixed(3)}), each as wide as the road there and the track's clear (worst ${halfOff.toFixed(4)} m off)`);
+  // Carried out of the file's frame (the game's `trackRawToGame`, a centre off the origin): every end, the width as it was.
+  const C = { x: 1234.5, z: -678.25 };
+  const place = (x: number, z: number) => ({ x: rawToGameX(C.x, x), z: rawToGameZ(C.z, z) });
+  const carried = courseLegs(t, t.grid, t.gates, place);
+  ok(carried.length === legs.length && carried.every((l, i) => l.ax === place(legs[i].ax, legs[i].az).x && l.az === place(legs[i].ax, legs[i].az).z && l.bx === place(legs[i].bx, legs[i].bz).x && l.bz === place(legs[i].bx, legs[i].bz).z && l.half === legs[i].half), "the legs handed a carry are carried at every end, their widths as they were");
+  ok(JSON.stringify(courseLegs(plain, t.grid, t.gates, place)) === JSON.stringify(gateLegs), 'a gate-only track takes no carry (its gates are already in the frame handed)');
+  // The lap: the main line's own arclength, never the gate-to-gate lines.
+  ok(lapLength(t, t.gates) === sp[0].length && lapLength(t, t.gates) !== lapLength(plain, t.gates), `a drawn circuit's lap is its main line's length (${sp[0].length.toFixed(2)} m), not the gates' (${lapLength(plain, t.gates).toFixed(2)} m)`);
+  // A sprint's lap is its open main line's; a shortcut's spine adds legs of its own and leaves the lap the main line's.
+  const flatS = (x: number, z: number) => ({ x, z, y: 1 });
+  const dash = drawTrack('dash', 'Dash', [flatS(0, 0), flatS(300, 40), flatS(700, -20), flatS(1000, 60)], false, ctx) as TrackDef;
+  ok(lapLength(dash, dash.gates) === courseSpines(dash)[0].length, "a drawn sprint's lap is its open main line's length");
+  const main = t.course!.paths[0].nodes;
+  const cut = addShortcut(t, [{ x: main[0].x, z: main[0].z, y: main[0].y }, flatS(250, 200), { x: main[2].x, z: main[2].z, y: main[2].y }], 'main', 'main', ctx) as TrackDef;
+  const cutLegs = courseLegs(cut, cut.grid, cut.gates);
+  ok(typeof cut !== 'string' && cutLegs.some((l) => l.path === 1) && lapLength(cut, cut.gates) === courseSpines(cut)[0].length, "a shortcut's road has legs of its own, and the lap is still the main line's");
+  // A leg named in words: along a drawn road by its path and how far along it, a gate-only track's by its gates.
+  const i = Math.floor(legs.length / 2);
+  ok(legName(t, legs[i], i) === `the road at ${Math.round(legs[i].s!)} m` && legs[i].s! > 0, `a drawn road's leg named by how far along it (${legName(t, legs[i], i)})`);
+  const j = cutLegs.findIndex((l) => l.path === 1);
+  ok(legName(cut, cutLegs[j], j) === `shortcut ${cut.course!.paths[1].id} at 0 m`, `a shortcut's leg by its path (${legName(cut, cutLegs[j], j)})`);
+  ok(legName(plain, gateLegs[0], 0) === 'grid to gate 0' && legName(plain, gateLegs[2], 2) === 'gate 1 to 2' && legName(plain, gateLegs[gateLegs.length - 1], gateLegs.length - 1) === `gate ${t.gates.length - 1} to 0`, "a gate-only track's legs by its gates, as ever");
 }
 
 // ---- The hash and the digest. ----
@@ -194,7 +312,10 @@ const t = drawn as TrackDef;
   ok(r === COURSE_IN_SPACE, `a course in a space zone's file is refused in its own words ("${r}")`);
   // A file: a bad course makes its track bad, and only that track.
   const two = trackFileText('naboo', 'raw', [t, { id: 'other', name: 'Other', kind: 'sprint', laps: 1, for: ['podracer'], clear: 0, grid: { x: 0, y: 0, z: 0, q: [1, 0, 0, 0] }, gates: [{ x: 1, y: 0, z: 1, q: [1, 0, 0, 0], w: 10, h: 10 }, { x: 100, y: 0, z: 1, q: [1, 0, 0, 0], w: 10, h: 10 }] }]);
-  const broken = two.replace('"w": 24, "b": 0', '"w": 2, "b": 0');
+  // A node broken by its own numbers (never a feel dial's starting value), and the break checked to have landed.
+  const n0 = t.course!.paths[0].nodes[0];
+  const broken = two.replace(`"w": ${n0.w}, "b": ${n0.b}`, `"w": 2, "b": ${n0.b}`);
+  ok(broken !== two, "the node to break is found by its own numbers");
   const rf = readTrackFile(broken, 'naboo', 'ground');
   ok(rf.tracks.length === 1 && rf.tracks[0].id === 'other' && rf.skipped.length === 1 && rf.skipped[0].id === 'eight', 'a bad course makes its whole track skipped and named, and no other');
 }

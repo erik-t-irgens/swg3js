@@ -1123,6 +1123,8 @@ export class Editor {
       },
       grid: () => me.edits.grid,
       packId: () => h.packId(),
+      // The editing's own mark of the world (the world's generation), so a draft kept across a world left with the editor off is given up.
+      worldMark: () => w.generation,
       say: (words, ok) => me.say(words, ok),
       refresh: () => me.window?.refreshEdits(),
     };
@@ -1891,7 +1893,7 @@ export class Editor {
     const looked = this.fly.yaw !== this.lastYaw || this.fly.pitch !== this.lastPitch;
     this.lastYaw = this.fly.yaw;
     this.lastPitch = this.fly.pitch;
-    if (looked || this.host.input.keysDown > 0 || this.pointer.buttons !== 0 || this.fly.moving > 0.05 || ed.busy || ed.writing || ed.stroking || this.hand || this.brush.mode || this.sculpt.mode || this.paint.mode || this.water.busy || this.places.busy || this.folding) {
+    if (looked || this.host.input.keysDown > 0 || this.pointer.buttons !== 0 || this.fly.moving > 0.05 || ed.busy || ed.writing || ed.stroking || this.hand || this.brush.mode || this.sculpt.mode || this.paint.mode || this.water.busy || this.places.busy || this.course.busy || this.folding) {
       this.activeAt = now;
       return;
     }

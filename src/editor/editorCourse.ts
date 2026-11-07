@@ -38,6 +38,7 @@ import { toGame } from '../story/placements.ts';
 import { olderTracksEndpoint, TRACKS_OLDER_ENDPOINT } from '../world/placementEdits.ts';
 import { coursePools, projectAt } from '../ui/editorMarks.ts';
 import { cursor, dragAt, gizmoDrag, gizmoLayout, grabAt, H, ray3, rayAt, type ScreenView } from './gizmo.ts';
+import { EDITOR_TUNE } from './editorTune.ts';
 import type { EditorEdits } from './editorEdit.ts';
 import type { RowChange } from './undo.ts';
 import type { ToolDef, ToolDraw, ToolFrame } from './tools.ts';
@@ -57,6 +58,7 @@ import {
   gateTurned,
   gateWidened,
   insertNode,
+  keepsNumbering,
   mintTrack,
   moveNode,
   onRoad,
@@ -95,6 +97,11 @@ export interface CourseHost {
   grid(): number;
   /** The world's file key. */
   packId(): string;
+  /**
+   * Which world the editor is in (the world's generation, `EditorEdits`' own mark): a draft, a pick and the views kept from
+   * another world are given up at the tool's next use, since a world left with the editor off sends the tool no `worldGone`.
+   */
+  worldMark(): number;
   say(words: string, ok: boolean): void;
   /** The window drawn again (a pick or a write moved what its sections show). */
   refresh(): void;
@@ -125,6 +132,8 @@ interface CourseView {
 }
 
 const NO_TRACKS: readonly TrackDef[] = [];
+/** How long an ask that waits for a second stands (ms): the Gates view's own window for a first save (`App.trackArmed`). */
+const ASK_AGAIN_MS = 15000;
 
 /** The Course tool. */
 export class EditorCourse {
@@ -158,12 +167,36 @@ export class EditorCourse {
   private turnBy = 0.5;
   private sizeBy = 0.5;
   private sizeAt = -Infinity;
+  /**
+   * What C with the wheel stepped: the track, the mode, the path and the node's or gate's index, and the track's row as it
+   * numbered them (`sizeBase`). The steps are written as the wheel rests only while the pick has named that index on every
+   * frame since and the course still numbers it as it did (`keepsNumbering`), so neither a node picked meanwhile nor one put
+   * in, taken out or placed again before it (an edit of the tool's, an undo, the dev server's word) takes another's steps.
+   */
+  private sizeTrack: string | null = null;
+  private sizeMode: CourseMode = 'edit';
+  private sizePath = 0;
+  private sizeIndex = -1;
+  private sizeBase: TrackDef | null = null;
+  /** Where the width grabber was grabbed on its level plane, in the file's (raw) frame: the width moves by the cursor's travel from it. */
+  private grab0x = 0.5;
+  private grab0z = 0.5;
+  /** Kept points of the game's frame (a grabbed point, a grabber and the same a metre up) for the screen, three numbers each. */
+  private readonly p3 = new Float64Array(6);
+  private readonly pt2 = new Float64Array(2);
+  /** Draw its course from its gates asked once: a second ask of the same track within `ASK_AGAIN_MS` writes it. */
+  private fromAsked: { id: string; until: number } | null = null;
+  /** The world this tool's draft, pick and views are of (the host's mark), and whether one has been seen. */
+  private seenWorld = 0;
+  private worldSeen = false;
   private writing: Promise<string> | null = null;
   private wasApply = false;
   private wasInverse = false;
   private wasLift = false;
   private wasTurn = false;
+  /** The cursor's last place on the screen: Point hands a tool no mouse movement, so F and R held read the cursor's travel. */
   private lastSy = Number.NaN;
+  private lastSx = Number.NaN;
   /** This frame's inputs, kept by `step` for `overlay`. */
   private readonly f: ToolFrame = { apply: false, inverse: false, shift: false, sampled: false, x: 0.5, y: 0.5, z: 0.5, valid: false, dt: 0.016, now: 0.5, sx: 0.5, sy: 0.5, dy: 0.5, lift: false, turn: false, dx: 0.5 };
   /** The courses' views, made again when the file's tracks or the held course are another list. */
@@ -202,18 +235,36 @@ export class EditorCourse {
     return !!this.writing || this.held !== 'none';
   }
 
-  /** Why the world refuses the tool, in words, or null. */
+  /**
+   * Why the world refuses the tool, in words, or null. The race pass switched on after an arrival read nothing at that
+   * arrival, so its file is read again by hand (`track({ reload: true })`) before anything is drawn over it.
+   */
   refusal(): string | null {
     const k = this.host.worldKind();
     if (k === 'space') return 'a course is carved into ground: space is a later pass';
     if (k === 'copies') return "no course is drawn in the dungeons' world of copies";
-    if (!this.host.raceOn()) return 'the race pass is switched off, so no track is read: race({ on: true }) first';
-    if (!this.host.tracks()) return "this world's track file is not read yet";
+    if (!this.host.raceOn()) return 'the race pass is switched off, so no track is read: race({ on: true }), then track({ reload: true })';
+    if (!this.host.tracks()) return "this world's track file is not read yet: track({ reload: true })";
     return null;
+  }
+
+  /**
+   * Whether the world is the one this tool's draft, pick and views are of. Another (left with the editor off, which sends the
+   * tool no `worldGone`) gives them up first, so a draft clicked on one world is never written into the next world's file.
+   */
+  private sameWorld(): boolean {
+    const m = this.host.worldMark();
+    if (this.worldSeen && m === this.seenWorld) return true;
+    const had = this.worldSeen;
+    this.worldSeen = true;
+    this.seenWorld = m;
+    if (had) this.worldGone();
+    return !had;
   }
 
   /** The apostrophe: armed, or refused in words. */
   async arm(): Promise<string> {
+    this.sameWorld();
     const no = this.refusal();
     if (no) {
       this.host.say(no, false);
@@ -231,7 +282,7 @@ export class EditorCourse {
     this.giveUpHeld();
   }
 
-  /** The world went: everything dropped. */
+  /** The world went: everything dropped, and the world now standing taken as the one the tool is of. */
   worldGone(): void {
     this.disarm();
     this.draft.length = 0;
@@ -239,9 +290,12 @@ export class EditorCourse {
     this.picked = null;
     this.pickedNode = -1;
     this.pickedGate = -1;
+    this.fromAsked = null;
     this.views = [];
     this.viewsOf = null;
     this.viewsLive = null;
+    this.seenWorld = this.host.worldMark();
+    this.worldSeen = true;
   }
 
   /** The track file landed (the tool's own write, an undo, the dev server's word): the views made again at the next frame. */
@@ -256,14 +310,22 @@ export class EditorCourse {
     if (t) this.notes = courseNotes(t, this.notesCtx());
   }
 
-  private giveUpHeld(): void {
+  /**
+   * A held edit given up, and with it the shoulder or width steps C with the wheel has not yet written, unless `keepSize`:
+   * a drag let go keeps them (they are written as the wheel rests, to what they were stepped on), where Escape, a mode, a
+   * disarm and a world going give them up too.
+   */
+  private giveUpHeld(keepSize = false): void {
     this.held = 'none';
     this.live = null;
     this.raise = 0;
     this.bankBy = 0;
     this.turnBy = 0;
+    if (keepSize) return;
     this.sizeBy = 0;
     this.sizeAt = -Infinity;
+    this.sizeTrack = null;
+    this.sizeBase = null;
   }
 
   private modeWords(): string {
@@ -395,22 +457,81 @@ export class EditorCourse {
     return picked && (lift || turn === true);
   }
 
-  /** C held with the wheel: the picked node's shoulder stepped, or the picked gate widened, written a moment after the wheel rests. */
+  /**
+   * C held with the wheel: the picked node's shoulder stepped, or the picked gate widened, written a moment after the wheel
+   * rests, to the node or gate the steps were taken on (`sizeStale`): steps taken on another, or on a course numbered again
+   * since, are given up and said, and these start their count again.
+   */
   size(notches: number): string | null {
     if (!this.armed) return null;
     const t = this.track();
     if (!t) return null;
-    if (this.mode === 'edit' && this.pickedNode >= 0) {
+    const index = this.mode === 'edit' ? this.pickedNode : this.mode === 'gates' ? this.pickedGate : -1;
+    if (index < 0 || (this.mode === 'gates' && !t.gates[index])) return null;
+    if (this.sizeBy !== 0) {
+      const why = this.sizeStale(t);
+      if (why) this.dropSize(why);
+    }
+    // A run of steps begun: the track's row as it numbers what they are taken on.
+    if (this.sizeBy === 0) this.sizeBase = t;
+    this.sizeTrack = t.id;
+    this.sizeMode = this.mode;
+    this.sizePath = this.pickedPath;
+    this.sizeIndex = index;
+    this.sizeAt = this.f.now;
+    if (this.mode === 'edit') {
       this.sizeBy += notches * COURSE_TUNE.shoulderStep;
-      this.sizeAt = this.f.now;
       const n = this.nodeOf(t);
       return n ? `shoulder ${Math.max(0, n.sh + this.sizeBy).toFixed(2)} m (written as the wheel rests)` : null;
     }
-    if (this.mode === 'gates' && this.pickedGate >= 0 && t.gates[this.pickedGate]) {
-      this.sizeBy += notches * COURSE_TUNE.gateWidthStep;
-      this.sizeAt = this.f.now;
-      return `gate ${this.pickedGate} ${(t.gates[this.pickedGate].w + this.sizeBy).toFixed(1)} m wide (written as the wheel rests)`;
+    this.sizeBy += notches * COURSE_TUNE.gateWidthStep;
+    return `gate ${index} ${(t.gates[index].w + this.sizeBy).toFixed(1)} m wide (written as the wheel rests)`;
+  }
+
+  /** The wheel's steps not yet written given up, said where there were any, with why (`sizeStale`'s answer). */
+  private dropSize(why: 'picked' | 'renumbered' | 'gone'): void {
+    if (this.sizeBy !== 0) {
+      const node = this.sizeMode === 'edit';
+      const thing = node ? 'node' : 'gate';
+      const because =
+        why === 'picked'
+          ? `the pick left that ${thing} before they were written`
+          : why === 'gone'
+            ? 'the course went before they were written'
+            : `the course's ${thing}s were numbered again before they were written (${node ? 'a node put in or taken out' : 'the gates placed again or one taken out'}, or an undo), so they would have gone to another ${thing}`;
+      this.host.say(`the wheel's ${node ? 'shoulder' : 'width'} steps given up: ${because}`, false);
     }
+    this.sizeBy = 0;
+    this.sizeAt = -Infinity;
+    this.sizeTrack = null;
+    this.sizeBase = null;
+  }
+
+  /** Whether the pick now is what the wheel's steps were taken on (its track, mode, path and node or gate). */
+  private sizeTarget(): boolean {
+    if (this.sizeTrack === null || this.sizeTrack !== this.picked || this.sizeMode !== this.mode) return false;
+    if (this.mode === 'edit') return this.sizePath === this.pickedPath && this.sizeIndex === this.pickedNode;
+    return this.mode === 'gates' && this.sizeIndex === this.pickedGate;
+  }
+
+  /**
+   * Why the wheel's steps waiting no longer name what they were taken on, or null where they still do: the pick moved off
+   * it (asked every frame while they wait, so a node taken out and another put in at its index never takes them), the track
+   * went, or the course was numbered again since they began (`keepsNumbering` against the row they were taken on: whatever
+   * landed, the tool's own insert, delete or Place gates again, an undo, the dev server's word). A course that still numbers
+   * it is kept as the new base, so a drag of the stepped node itself keeps them. Nothing is made.
+   */
+  private sizeStale(t: TrackDef | null): 'picked' | 'renumbered' | 'gone' | null {
+    if (!this.sizeTarget()) {
+      const tr = this.tracks();
+      for (let i = 0; i < tr.length; i++) if (tr[i].id === this.sizeTrack) return 'picked';
+      return 'gone';
+    }
+    if (!t) return 'gone';
+    const base = this.sizeBase;
+    if (t === base) return null;
+    if (!base || !keepsNumbering(base, t, this.sizeMode === 'edit' ? 'nodes' : 'gates', this.sizePath, this.sizeIndex)) return 'renumbered';
+    this.sizeBase = t;
     return null;
   }
 
@@ -487,13 +608,15 @@ export class EditorCourse {
     const c = this.ctx();
     const at = this.at;
     const h = this.held;
+    // F or R held with no travel of the mouse moves nothing and writes nothing: a gate raised or turned by nought would be
+    // pinned all the same (its anchor dropped by `nudgeGate`), so a tap is never an edit.
     if (h === 'raise' || h === 'bank') {
       const n = this.nodeOf(t);
-      if (!n) return null;
+      if (!n || (h === 'raise' ? this.raise === 0 : this.bankBy === 0)) return null;
       return setNode(t, this.pathId(t), this.pickedNode, h === 'raise' ? { y: n.y + this.raise } : { b: n.b + this.bankBy }, c);
     }
-    if (h === 'gateRaise') return t.gates[this.pickedGate] ? gateRaised(t, this.pickedGate, this.raise) : null;
-    if (h === 'gateTurn') return t.gates[this.pickedGate] ? gateTurned(t, this.pickedGate, -this.turnBy) : null;
+    if (h === 'gateRaise') return t.gates[this.pickedGate] && this.raise !== 0 ? gateRaised(t, this.pickedGate, this.raise) : null;
+    if (h === 'gateTurn') return t.gates[this.pickedGate] && this.turnBy !== 0 ? gateTurned(t, this.pickedGate, -this.turnBy) : null;
     if (h === 'node') {
       this.host.toRaw(this.drag.gx + this.drag.mx, this.drag.gz + this.drag.mz, at);
       // The grab's offset from the node, taken at the grab.
@@ -502,14 +625,16 @@ export class EditorCourse {
     if (h === 'width') {
       const n = this.nodeOf(t);
       if (!n) return null;
-      // The grabber's place on the level plane, against the node: the road's half width along its right.
+      // The grabber's travel on its own level plane (taken at the grabber's drawn height, so a banked node's grabber is
+      // grabbed where it is drawn) from where it was grabbed, along the road's right: the width moves by twice it, outward
+      // for either grabber, so the grabbed point stays under the cursor and a press that moves nothing changes nothing.
       this.host.toRaw(this.drag.gx + this.drag.mx, this.drag.gz + this.drag.mz, at);
       const rgt = this.nodeRight(courseSpines(t)[this.pickedPath], this.pickedNode, this.at2);
-      const across = Math.abs((at.x - n.x) * rgt.x + (at.z - n.z) * rgt.z);
-      // Across the width line on the screen (up from it), as far as the cursor has moved from the grab: the bank, the driver's
-      // right up for the right grabber moved up. Along the line it only widens.
+      const out = ((at.x - this.grab0x) * rgt.x + (at.z - this.grab0z) * rgt.z) * this.grabSide;
+      // Across the width line on the screen, as far as the cursor has moved from the grab, the way the grabbed end rises on
+      // the screen (`lineU`, turned at the grab): the bank, the grabbed end up. Along the line it only widens.
       const up = (this.cur.x - this.grabX) * this.lineUY - (this.cur.y - this.grabY) * this.lineUX;
-      return setNode(t, this.pathId(t), this.pickedNode, { w: across * 2, b: n.b + ((up * COURSE_TUNE.bankRate) / 100) * this.grabSide }, c);
+      return setNode(t, this.pathId(t), this.pickedNode, { w: n.w + 2 * out, b: n.b + ((up * COURSE_TUNE.bankRate) / 100) * this.grabSide }, c);
     }
     if (h === 'gate') {
       // A gate's square: its place moved over the ground (pinned).
@@ -521,12 +646,69 @@ export class EditorCourse {
     return null;
   }
 
-  /** A held edit let go: what it came to written, one action (nothing where it moved nothing). */
-  private letGo(label: string): void {
+  /**
+   * Whether a drag's grabbed point still stands under the cursor within the editor's click reach (`EDITOR_TUNE.pick.dragPx`):
+   * a press and release that moved nothing, which only picks. Measured where the grabbed point is drawn now, so it holds in
+   * Point (the cursor moved) and in Fly (the cursor stays in the middle and the camera turned) alike. Nothing is made.
+   */
+  private stillAt(view: ScreenView): boolean {
+    const p = this.p3;
+    p[0] = this.drag.gx;
+    p[1] = this.drag.oy;
+    p[2] = this.drag.gz;
+    if (!projectAt(p, 0, view.vp, view.w, view.h, this.pt2)) return false;
+    const dx = this.pt2[0] - this.cur.x;
+    const dy = this.pt2[1] - this.cur.y;
+    const r = EDITOR_TUNE.pick.dragPx;
+    return dx * dx + dy * dy <= r * r;
+  }
+
+  /**
+   * The width line's way on the screen as a grabber is grabbed (`lineU`, from its left grabber to its right), turned so that
+   * across it (`(uy, -ux)`, what the bank reads) is the way the grabbed end rises on the screen: the grabbed point and the
+   * same point a metre up, projected. Seen from the far side of the road the line runs right to left and its left-hand
+   * normal points down the screen, so a grabber dragged up banked the road the other way and ran from the cursor. Where the
+   * rise is under a pixel, the screen's up decides (the editor's camera never rolls). `k` is the node's place in `nodes`,
+   * `g` the grabbed grabber's. A press's work.
+   */
+  private lineAt(nodes: Float64Array, k: number, g: number, view: ScreenView): void {
+    projectAt(nodes, k + 3, view.vp, view.w, view.h, this.pt);
+    const lx = this.pt[0];
+    const ly = this.pt[1];
+    projectAt(nodes, k + 6, view.vp, view.w, view.h, this.pt);
+    let ux = this.pt[0] - lx;
+    let uy = this.pt[1] - ly;
+    const ul = Math.sqrt(ux * ux + uy * uy);
+    ux = ul > 0 ? ux / ul : 1;
+    uy = ul > 0 ? uy / ul : 0;
+    const p = this.p3;
+    p[0] = nodes[g];
+    p[1] = nodes[g + 1];
+    p[2] = nodes[g + 2];
+    p[3] = p[0];
+    p[4] = p[1] + 1;
+    p[5] = p[2];
+    let flip = ux < 0;
+    if (projectAt(p, 0, view.vp, view.w, view.h, this.pt) && projectAt(p, 3, view.vp, view.w, view.h, this.pt2)) {
+      const rx = this.pt2[0] - this.pt[0];
+      const ry = this.pt2[1] - this.pt[1];
+      if (rx * rx + ry * ry >= 1) flip = rx * uy - ry * ux < 0;
+    }
+    this.lineUX = flip ? -ux : ux;
+    this.lineUY = flip ? -uy : uy;
+  }
+
+  /**
+   * A held edit let go: what it came to written, one action (nothing where it moved nothing). A drag let go where it was
+   * grabbed is a click, which only picks: a gate dragged by nought would be written pinned (`moveGateTo` builds a gate with
+   * no anchor), so a click on a following gate to widen it would have pinned it first. The wheel's steps are kept.
+   */
+  private letGo(label: string, view: ScreenView): void {
     const t = this.track();
-    let e: CourseEdit | null = t ? this.heldEdit(t) : null;
+    const drag = this.held === 'node' || this.held === 'width' || this.held === 'gate';
+    let e: CourseEdit | null = t && !(drag && this.stillAt(view)) ? this.heldEdit(t) : null;
     if (t && e && typeof e !== 'string' && JSON.stringify(e) === JSON.stringify(t)) e = null;
-    this.giveUpHeld();
+    this.giveUpHeld(true);
     if (!t || !e) return;
     // Shown as it is let go until the write has landed (or been refused), so the course never blinks back to the file's.
     if (typeof e !== 'string') this.live = e;
@@ -572,11 +754,13 @@ export class EditorCourse {
     this.cur.y = f.sy;
     rayAt(view, this.cur, this.ray);
     const t = this.track();
-    // The mouse's movement this frame (Fly's, spent for the camera; Point's cursor's own).
+    // The mouse's movement this frame (Fly's, spent for the camera; Point's cursor's own, both ways, as the lights tool reads it).
     let dy = f.dy;
     if (!dy && Number.isFinite(this.lastSy)) dy = f.sy - this.lastSy;
     this.lastSy = f.sy;
-    const dx = f.dx ?? 0;
+    let dx = f.dx ?? 0;
+    if (!dx && Number.isFinite(this.lastSx)) dx = f.sx - this.lastSx;
+    this.lastSx = f.sx;
     const onPicked = (this.mode === 'edit' && this.pickedNode >= 0) || (this.mode === 'gates' && this.pickedGate >= 0);
     // F held on the picked node or gate: raised by the mouse, `raiseRate` metres a hundred pixels up; let go, written.
     if (t && f.lift && !this.writing && onPicked && (this.held === 'none' || this.held === 'raise' || this.held === 'gateRaise')) {
@@ -586,7 +770,7 @@ export class EditorCourse {
       }
       if (dy) this.raise -= (dy * COURSE_TUNE.raiseRate) / 100;
     }
-    if (liftUp && (this.held === 'raise' || this.held === 'gateRaise')) this.letGo(this.held === 'raise' ? 'a node raised' : `gate ${this.pickedGate} raised`);
+    if (liftUp && (this.held === 'raise' || this.held === 'gateRaise')) this.letGo(this.held === 'raise' ? 'a node raised' : `gate ${this.pickedGate} raised`, view);
     // R held: the picked node banked (the mouse right, the driver's right down), or the picked gate turned, `bankRate` degrees a hundred pixels.
     if (t && f.turn && !this.writing && onPicked && (this.held === 'none' || this.held === 'bank' || this.held === 'gateTurn')) {
       if (this.held === 'none') {
@@ -597,20 +781,29 @@ export class EditorCourse {
       if (this.held === 'bank') this.bankBy -= (dx * COURSE_TUNE.bankRate) / 100;
       else this.turnBy += (dx * COURSE_TUNE.bankRate) / 100;
     }
-    if (turnUp && (this.held === 'bank' || this.held === 'gateTurn')) this.letGo(this.held === 'bank' ? 'a node banked' : `gate ${this.pickedGate} turned`);
-    // C with the wheel rested: the shoulder or the gate's width written.
-    if (t && this.sizeBy !== 0 && f.now - this.sizeAt > 0.4 && !this.writing) {
-      const by = this.sizeBy;
-      this.sizeBy = 0;
-      if (this.mode === 'edit' && this.pickedNode >= 0) {
-        const n = this.nodeOf(t);
-        if (n) void this.write('a shoulder', t, setNode(t, this.pathId(t), this.pickedNode, { sh: n.sh + by }, this.ctx()));
-      } else if (this.mode === 'gates' && this.pickedGate >= 0 && t.gates[this.pickedGate]) void this.write(`gate ${this.pickedGate} widened`, t, gateWidened(t, this.pickedGate, t.gates[this.pickedGate].w + by));
+    if (turnUp && (this.held === 'bank' || this.held === 'gateTurn')) this.letGo(this.held === 'bank' ? 'a node banked' : `gate ${this.pickedGate} turned`, view);
+    // C with the wheel's steps waiting: given up, said, the frame the pick moves off what they were taken on or the course is
+    // numbered again under them (`sizeStale`: a node picked, put in, taken out or placed again meanwhile never takes another's
+    // steps). Rested, written to the node or gate they were taken on, once no write of the tool's or the editor's is out (an
+    // undo landing first is judged as it lands, never refused as busy).
+    if (this.sizeBy !== 0) {
+      const why = this.sizeStale(t);
+      if (why) this.dropSize(why);
+      else if (t && f.now - this.sizeAt > 0.4 && !this.writing && !this.host.edits.writing) {
+        const by = this.sizeBy;
+        this.sizeBy = 0;
+        this.sizeTrack = null;
+        this.sizeBase = null;
+        if (this.mode === 'edit') {
+          const n = this.nodeOf(t);
+          if (n) void this.write('a shoulder', t, setNode(t, this.pathId(t), this.pickedNode, { sh: n.sh + by }, this.ctx()));
+        } else if (t.gates[this.pickedGate]) void this.write(`gate ${this.pickedGate} widened`, t, gateWidened(t, this.pickedGate, t.gates[this.pickedGate].w + by));
+      }
     }
     // A drag carried on, or let go and written.
     if (this.held === 'node' || this.held === 'width' || this.held === 'gate') {
       if (f.apply) dragAt(this.drag, NO_LAYOUT, this.cur, this.ray);
-      else if (release) this.letGo(this.held === 'node' ? 'a node moved' : this.held === 'width' ? 'a road widened or banked' : `gate ${this.pickedGate} moved`);
+      else if (release) this.letGo(this.held === 'node' ? 'a node moved' : this.held === 'width' ? 'a road widened or banked' : `gate ${this.pickedGate} moved`, view);
     } else if (press && !this.writing) this.pressed(view);
     else if (pressInverse && this.mode === 'draw' && this.draft.length) {
       this.draft.length--;
@@ -634,7 +827,8 @@ export class EditorCourse {
       if (t && this.hotGate >= 0) {
         this.pickedGate = this.hotGate;
         const g = t.gates[this.pickedGate];
-        // Grabbed on its own height: its ground square is the window's foot, dragged over the level plane there.
+        // Grabbed at its own place's height (a hull's middle, which the run tests it at), dragged over the level plane there
+        // with the point grabbed kept under the cursor.
         const gg = toGame(g, this.host.centre(), 'raw');
         this.gridPivot.x = gg.x;
         this.gridPivot.y = gg.y;
@@ -661,9 +855,13 @@ export class EditorCourse {
         this.pickedNode = ref & 0xffff;
         const k = this.hotNode * 9;
         const n = this.nodeOf(t);
-        this.gridPivot.x = v.nodes[k];
-        this.gridPivot.y = v.nodes[k + 1];
-        this.gridPivot.z = v.nodes[k + 2];
+        // A diamond is grabbed on the level plane at its node; a grabber on the plane at its own drawn place, which on a
+        // banked node stands up or down by half the width's bank (grabbed on the node's plane, the ray through it met the
+        // plane metres off and a click on it changed the width).
+        const g = this.hotGrab === 0 ? k : this.hotGrab === 1 ? k + 6 : k + 3;
+        this.gridPivot.x = v.nodes[g];
+        this.gridPivot.y = v.nodes[g + 1];
+        this.gridPivot.z = v.nodes[g + 2];
         if (n && grabAt(this.drag, NO_LAYOUT, H.ground, view, this.gridPivot, this.cur, this.ray)) {
           this.host.toRaw(this.drag.gx, this.drag.gz, this.at);
           if (this.hotGrab === 0) {
@@ -674,16 +872,9 @@ export class EditorCourse {
             this.grabSide = this.hotGrab;
             this.grabX = this.cur.x;
             this.grabY = this.cur.y;
-            // The width line's way on the screen, from its left grabber to its right (the bank is the cursor across it).
-            projectAt(v.nodes, k + 3, view.vp, view.w, view.h, this.pt);
-            const lx = this.pt[0];
-            const ly = this.pt[1];
-            projectAt(v.nodes, k + 6, view.vp, view.w, view.h, this.pt);
-            const ux = this.pt[0] - lx;
-            const uy = this.pt[1] - ly;
-            const ul = Math.sqrt(ux * ux + uy * uy);
-            this.lineUX = ul > 0 ? ux / ul : 1;
-            this.lineUY = ul > 0 ? uy / ul : 0;
+            this.grab0x = this.at.x;
+            this.grab0z = this.at.z;
+            this.lineAt(v.nodes, k, g, view);
             this.held = 'width';
           }
         }
@@ -825,12 +1016,30 @@ export class EditorCourse {
    * is what the file says. Answers what was said.
    */
   async write(label: string, before: TrackDef | null, after: CourseEdit | null): Promise<string> {
-    if (after === null || typeof after === 'string' || this.writing) {
+    // Refused before a stroke is begun where the world refuses the tool (the console writes with it unarmed) or a write of
+    // the tool's or the editor's own is out: begun then, the stroke wrote nothing and said "0 rows written" as a success,
+    // and the reason was never said.
+    const no = after === null || typeof after === 'string' ? null : this.refusal() ?? this.busyWords();
+    if (after === null || typeof after === 'string' || no) {
       this.live = null;
       if (after === null) return '';
-      return this.said(typeof after === 'string' ? after : 'a write is under way', false);
+      return this.said(typeof after === 'string' ? after : no!, false);
     }
-    const change: RowChange = { file: 'tracks', id: after.id, before, after };
+    try {
+      return await this.change(label, { file: 'tracks', id: after.id, before, after });
+    } finally {
+      // The file's own course from here: landed, it is what was written; refused, what it was.
+      this.live = null;
+    }
+  }
+
+  /** Why a write cannot go now: one of the tool's own or of the editor's (an undo, another tool's stroke) is out; null for none. */
+  private busyWords(): string | null {
+    return this.writing || this.host.edits.writing ? 'a write is still going: try again once it has landed' : null;
+  }
+
+  /** One row written as one action of the history, the tool's writing held for its length; answers what was said. */
+  private async change(label: string, change: RowChange): Promise<string> {
     const w = (async () => {
       const edits = this.host.edits;
       const es = edits.beginStroke(label);
@@ -853,24 +1062,17 @@ export class EditorCourse {
       return this.said(said, this.last.ok);
     } finally {
       if (this.writing === w) this.writing = null;
-      // The file's own course from here: landed, it is what was written; refused, what it was.
-      this.live = null;
     }
   }
 
-  /** A track taken out of the file (one write). */
+  /** A track taken out of the file (one write, the tool's writing held for it as for any other). */
   async remove(id: string): Promise<string> {
     const t = this.tracks().find((x) => x.id === id);
     if (!t) return this.said(`no track called ${id}`, false);
+    const no = this.refusal() ?? this.busyWords();
+    if (no) return this.said(no, false);
     if (this.picked === id) this.pick(null);
-    if (this.writing) return this.said('a write is under way', false);
-    const change: RowChange = { file: 'tracks', id, before: t, after: null };
-    const edits = this.host.edits;
-    const es = edits.beginStroke(`${t.name} taken out`);
-    const no = await edits.strokeWrite(es, [change]);
-    const said = edits.endStroke(es);
-    this.viewsOf = null;
-    return this.said(no ? said || (olderTracksEndpoint(no) ? `${no} -- ${TRACKS_OLDER_ENDPOINT}` : no) : said, !no);
+    return this.change(`${t.name} taken out`, { file: 'tracks', id, before: t, after: null });
   }
 
   private said(words: string, ok: boolean): string {
@@ -896,15 +1098,25 @@ export class EditorCourse {
     return this.write(`gate ${this.pickedGate} follows the road again`, t, gateFollowed(t, this.pickedGate, this.ctx()));
   }
 
-  /** Draw its course from its gates (the picked track, or the one named), writing a course under them. */
+  /**
+   * Draw its course from its gates (the picked track, or the one named), writing a course under them: asked twice (§2.9:
+   * "the button says, before it writes, that the course carves that world's ground along the line for every player once
+   * committed; nothing happens to a track unasked"). The first ask writes nothing and says so; the same track asked again
+   * within `ASK_AGAIN_MS` writes it. The Tools tab's button, its act and `course({ fromGates })` all come here.
+   */
   async fromGates(id?: string): Promise<string> {
     const t = id ? this.tracks().find((x) => x.id === id) ?? null : this.track();
     if (!t) return this.said('pick a track first', false);
     const r = courseFromGates(t, this.ctx());
     if (typeof r === 'string') return this.said(r, false);
+    const now = performance.now();
+    if (!this.fromAsked || this.fromAsked.id !== t.id || now > this.fromAsked.until) {
+      this.fromAsked = { id: t.id, until: now + ASK_AGAIN_MS };
+      return this.said(`Draw ${t.name}'s course from its gates? It carves ${this.host.packId()}'s ground along that line for every player once its file is committed (from the race drawer's second wave): ask again to write it`, true);
+    }
+    this.fromAsked = null;
     const said = await this.write(`${t.name}'s course drawn from its gates`, t, r.track);
-    const warn = 'it carves the ground along that line for every player once committed (from the race drawer\'s second wave)';
-    return this.said(`${said}${r.notes.length ? ` · ${r.notes.join(' · ')}` : ''} · ${warn}`, this.last.ok);
+    return this.said(`${said}${r.notes.length ? ` · ${r.notes.join(' · ')}` : ''}`, this.last.ok);
   }
 
   /** A field of the picked node, the course or the track set from the Selected tab (one write). */
@@ -1354,6 +1566,7 @@ export class EditorCourse {
    * one action. Answers what was said.
    */
   async act(act: string, value?: string): Promise<string> {
+    this.sameWorld();
     const [, what, arg] = act.split(':');
     const num = Number(value);
     const fin = value !== undefined && value !== '' && Number.isFinite(num);
@@ -1429,6 +1642,7 @@ export class EditorCourse {
    * out. Answers what was said and the report.
    */
   async debug(o: Record<string, unknown>): Promise<{ said: string[]; tool: Record<string, unknown>; courses: unknown[] }> {
+    this.sameWorld();
     const said: string[] = [];
     const rec = (v: unknown): Record<string, unknown> | null => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
     const byId = (id: unknown): TrackDef | null => (typeof id === 'string' ? this.tracks().find((t) => t.id === id) ?? null : this.track());

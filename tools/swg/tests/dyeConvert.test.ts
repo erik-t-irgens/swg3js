@@ -47,7 +47,7 @@ type Item = { id: string; kind: string; parts: { name: string; file: string }[];
     const hair = { id: 'hair_x', kind: 'hair', parts: [{ name: 'hair_m_l0', file: 'hair_m_l0.glb' }], slots: [['hair']], name: 'hair', icon: 'icons/hair_x.png', colour: 'palette' };
     const write = (w: object) => writeFileSync(join(folder, 'wardrobe.json'), JSON.stringify({ species: 'human_male', gender: 'm', materialFormat: MATERIAL_FORMAT, ...w }));
     const reasons = (): string => {
-      const run = spawnSync(process.execPath, [cli, 'status', dir], { encoding: 'utf8', maxBuffer: 16 * 1048576, env: { ...process.env, SWG: '' } });
+      const run = spawnSync(process.execPath, [cli, 'status', dir], { encoding: 'utf8', maxBuffer: 16 * 1048576, env: { ...process.env, SWG: '', SWG3JS_PLACEMENTS: '' } });
       const out = run.stdout ?? '';
       const at = out.indexOf('swg -- wardrobe ');
       return at < 0 ? '' : out.slice(at, out.indexOf('\n', out.indexOf('\n', at) + 1));

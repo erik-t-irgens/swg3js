@@ -21,6 +21,10 @@ import { buildSpine, edgeCrossesItself, foldingEdges, nearestOn, spineAt, spineN
 import { deleteMap, followCourse, followGate, gateRules, gatesAgain, insertMap, placeGates, remapAnchors, type DeckAt, type GateRules } from '../race/courseGates.ts';
 import { COURSE_TUNE, type CourseTune } from '../race/courseTune.ts';
 import { deleteGate, moveGateTo, nudgeGate, resizeGate } from '../race/trackEdits.ts';
+import { gridSlot } from '../race/raceGroup.ts';
+import { turnHeading } from '../race/gates.ts';
+import { fromGame, toGame } from '../story/placements.ts';
+import { GROUP_TUNE } from '../net/groups.ts';
 import { RACE_BASE } from '../vehicles/raceTune.ts';
 
 /** What an edit is judged with: the gates' rules, the land under a point of the file's frame (NaN for none known), a deck. */
@@ -217,6 +221,50 @@ export function pathIndex(t: TrackDef, path?: string): number {
   if (!t.course) return -1;
   if (path === undefined) return 0;
   return t.course.paths.findIndex((p) => p.id === path);
+}
+
+/**
+ * Whether `now` numbers its nodes (`what` 'nodes') or its gates ('gates') as `base` did, so that an index taken on `base`
+ * names the same node or gate in `now`: what the Course tool asks before its wheel steps are written to the index they were
+ * taken on (`EditorCourse.size`), whatever landed meanwhile (an edit of the tool's, an undo, the dev server's word). Nodes:
+ * the same paths in the same order, as many nodes on each, and every node but `path`'s node `index` (the one the steps were
+ * taken on, which a drag moves) and a shortcut's joined ends (which stand where their road puts them) where it stood, so a
+ * node put in or taken out before it, or a merge and a split that leave the count as it was, number it again. Gates: as
+ * many, and every gate but `index` on the same anchor (a following gate's place moves with the road) or, pinned, in the
+ * same place. Read conservatively: a node put in remaps the following gates' anchors, so it numbers the gates again here
+ * although their order holds. A loop over the rows that makes nothing (a frame asks it while steps wait).
+ */
+export function keepsNumbering(base: TrackDef, now: TrackDef, what: 'nodes' | 'gates', path: number, index: number): boolean {
+  if (what === 'gates') {
+    const bg = base.gates;
+    const ng = now.gates;
+    if (bg.length !== ng.length) return false;
+    for (let i = 0; i < bg.length; i++) {
+      if (i === index) continue;
+      const a = bg[i];
+      const b = ng[i];
+      if (a.path !== undefined) {
+        if (b.path !== a.path || b.e !== a.e || b.t !== a.t) return false;
+      } else if (b.path !== undefined || b.x !== a.x || b.z !== a.z) return false;
+    }
+    return true;
+  }
+  const bc = base.course;
+  const nc = now.course;
+  if (!bc || !nc || bc.paths.length !== nc.paths.length) return false;
+  for (let p = 0; p < bc.paths.length; p++) {
+    const bp = bc.paths[p];
+    const np = nc.paths[p];
+    if (bp.id !== np.id || bp.nodes.length !== np.nodes.length) return false;
+    for (let i = 0; i < bp.nodes.length; i++) {
+      if (p === path && i === index) continue;
+      const a = bp.nodes[i];
+      const b = np.nodes[i];
+      if (a.j !== undefined || b.j !== undefined) continue;
+      if (a.x !== b.x || a.z !== b.z) return false;
+    }
+  }
+  return true;
 }
 
 function nodeRef(t: TrackDef, path: string | undefined, i: number): { p: number } | string {
@@ -496,14 +544,55 @@ export function widestBox(t: Pick<TrackDef, 'for'>): number {
 }
 
 /**
+ * The slots of a full group's race behind a track's grid that stand off its drawn main line (§2.9: "the tool notes when the
+ * slots' rows leave the road"), for each kind the track is raced as: every slot `gridSlot` stands a member at (as
+ * `App.standOnCourse` stands them, the grid carried into the game's frame and its heading `turnHeading`'s), carried back
+ * into the file's frame and measured against the road's half width at its nearest point, and on an open road (a sprint's)
+ * against its ends too: a slot whose nearest point is where the road begins and that stands behind it (or past where it
+ * ends) is off the road however near. A full group is the owner's eight (`GROUP_TUNE.max`), the worst case. Answers each
+ * kind's slots off the road, numbered from 1; none for a track with no course.
+ */
+export function gridSlotsOff(t: TrackDef, most: number = GROUP_TUNE.max): { kind: RaceKind; slots: number[] }[] {
+  const out: { kind: RaceKind; slots: number[] }[] = [];
+  if (!t.course) return out;
+  const sp = courseSpines(t)[0];
+  const g = toGame(t.grid, null, 'raw');
+  const grid = { x: g.x, y: g.y, z: g.z, heading: turnHeading(g.q) };
+  const near = spineNear();
+  const end = spinePoint();
+  const last = sp.edges.length - 1;
+  for (const kind of t.for) {
+    const slots: number[] = [];
+    for (let i = 0; i < most; i++) {
+      const s = gridSlot(grid, i, kind);
+      const raw = fromGame({ x: s.x, y: s.y, z: s.z, q: [0, 0, 0, 1] }, null, 'raw');
+      if (!nearestOn(sp, raw.x, raw.z, near)) continue;
+      let off = near.d > near.hw;
+      // An open road's ends: before its first node or past its last, along the road's own way there.
+      if (!off && !sp.closed && ((near.e === 0 && near.t <= 0) || (near.e === last && near.t >= 1))) {
+        const atEnd = near.e === last && near.t >= 1;
+        spineAt(sp, near.e, atEnd ? 1 : 0, end);
+        const along = (raw.x - end.x) * end.tx + (raw.z - end.z) * end.tz;
+        off = atEnd ? along > 0.5 : along < -0.5;
+      }
+      if (off) slots.push(i + 1);
+    }
+    if (slots.length) out.push({ kind, slots });
+  }
+  return out;
+}
+
+/**
  * The notes a course's shape gives (§2.11), as words, never a refusal: a turn whose inside edge folds over itself, a curve
  * that crosses itself, a road narrower than the widest box raced with room either side, a shoulder at a node steeper than
- * `steepNote` against the land, a node's road under water. (What the road meets and keeps away, a crossing's clearance and
- * the touch-ups a move leaves are the carve's, its second wave.)
+ * `steepNote` against the land, a node's road under water, and a full group's slots behind the grid that stand off the road
+ * (`gridSlotsOff`). (What the road meets and keeps away, a crossing's clearance and the touch-ups a move leaves are the
+ * carve's, its second wave.)
  */
 export function courseNotes(t: TrackDef, ctx: CourseCtx, tune: CourseTune = COURSE_TUNE): string[] {
   const out: string[] = [];
   if (!t.course) return out;
+  for (const o of gridSlotsOff(t)) out.push(`a full group's slot${o.slots.length === 1 ? '' : 's'} ${o.slots.join(', ')} (raced as ${o.kind === 'podracer' ? 'pods' : 'bikes'}) stand${o.slots.length === 1 ? 's' : ''} off the road behind the grid`);
   const spines = courseSpines(t);
   const box = widestBox(t);
   for (let p = 0; p < spines.length; p++) {

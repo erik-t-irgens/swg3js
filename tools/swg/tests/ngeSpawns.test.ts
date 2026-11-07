@@ -492,7 +492,7 @@ const zi = built.index.zones.test_zone;
   else console.log('note the temporary folder is inside a repository here, so a folder no repository holds is not tried');
   rmSync(other, { recursive: true, force: true });
   const cli = join(REPO, 'tools', 'swg', 'cli.mjs');
-  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args], { cwd: REPO, encoding: 'utf8', env: { ...process.env, SWG: '' } });
+  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args], { cwd: REPO, encoding: 'utf8', env: { ...process.env, SWG: '', SWG3JS_PLACEMENTS: '' } });
   const out = mkdtempSync(join(tmpdir(), 'test_nge_out_'));
   const at = run(['spawns', out, '--nge=@TEST_NGE']);
   ok(at.status === 1 && /never read from \.env/.test(at.stderr), 'the cli refuses an @ value before anything is read');

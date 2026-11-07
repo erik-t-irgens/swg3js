@@ -883,10 +883,12 @@ function trackWithExtras(row: TrackDef, was: Record<string, unknown> | null): Re
 /**
  * Whether a field this build does not read is one it would drop on writing (§2.2 of the race drawer's design): any field of
  * a gate, of the grid or of a course, which the writer writes field by field, where a field at a track's head is kept on its
- * head line. Answers the first such field, as `<id>.<where>`, or null.
+ * head line. Answers the first such field, as `<id>.<where>`, or null. The reader names a gate's field `<id>.gates[<i>].<field>`:
+ * after the bracket a dot follows, and between `]` and `.` there is no word boundary, so the pattern ends in a dot (or the
+ * name's end), never `\b`, which let every gate's field through and wrote it lossy.
  */
-function droppedField(unknown: readonly string[]): string | null {
-  return unknown.find((u) => /^[^.]+\.(grid|gates\[\d+\]|course)\b/.test(u)) ?? null;
+export function droppedField(unknown: readonly string[]): string | null {
+  return unknown.find((u) => /^[^.]+\.(grid|gates\[\d+\]|course)(\.|$)/.test(u)) ?? null;
 }
 
 /** The track file for a world, as the owner reads it. */

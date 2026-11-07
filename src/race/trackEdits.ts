@@ -175,6 +175,21 @@ export function applyTrackOp(op: unknown, current: string | null, ctx: TrackCtx)
 // Each answers a new track (the one handed over is never changed) or why not; every answer is a track the reader
 // takes, so an edit can never leave the file the editor saves unreadable. Places are in the file's frame.
 
+/**
+ * The track the Gates view's save writes (the race drawer's first wave): the track in hand, but with the drawn course the
+ * file holds now where the world editor's Course tool drew it again since the track was taken in hand (the Gates view edits
+ * gates, never the road). Refused, in words, where the track in hand still has a gate or its grid following the road: their
+ * edges, shares and places are the road's as it was, and laid on the road as it is (a node put in renumbers every later
+ * edge) the next edit of the course would place them hundreds of metres off. A track in hand with every gate pinned takes
+ * the file's course as it is. Answers the track to write, or why not.
+ */
+export function trackToSave(held: TrackDef, file: TrackDef | null): TrackDef | string {
+  if (!file?.course || JSON.stringify(file.course) === JSON.stringify(held.course)) return held;
+  const following = held.grid.path !== undefined || held.gates.some((g) => g.path !== undefined);
+  if (following) return `${held.id}'s course was drawn again in the world editor since it was taken in hand, and its gates that follow the road would be written against the road as it was: take it in hand again (track({ edit: '${held.id}' })) and make the Gates view's changes again`;
+  return { ...held, course: file.course };
+}
+
 /** A place rounded to the centimetre and its turn to five places: what the editor writes, so a file stays readable. */
 export function roundPlace<T extends TrackPlace>(p: T): T {
   const r2 = (n: number) => Math.round(n * 100) / 100;

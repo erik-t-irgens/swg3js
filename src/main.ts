@@ -415,14 +415,14 @@ import { EngineFx } from './vehicles/engineFx.ts';
 import { raceNote, raceRoute } from './vehicles/vehicleKinds.ts';
 import { RACE_BLOCK_MARGIN, easeFovOut, frameRaceView, newRaceView, newRaceViewOut, raceBlocked, raceEyeOf, raceTurnOf, releaseRaceView, steerRaceView, widenRaceView, type RaceViewInput } from './vehicles/raceView.ts';
 import type { RaceLevels } from './vehicles/raceMath.ts';
-import { RACE_KINDS, corridorCircles, corridorHits, courseLegs, isTrackId, lapLength, readTrackFile, trackInGame, trackSync, tracksPath, type CourseThing, type RaceKind, type TrackDef, type TrackRead } from './race/trackFile.ts';
+import { RACE_KINDS, corridorCircles, corridorHits, courseLegs, isTrackId, landedTracks, lapLength, legName, readTrackFile, trackInGame, trackSync, tracksPath, type CourseThing, type RaceKind, type TrackDef, type TrackRead } from './race/trackFile.ts';
 import { GATE_STRIDE, bakeGate, gateCorners, headingTurn, turnHeading } from './race/gates.ts';
 import { RUN_ACT, RUN_EVENT, RaceRun, STAND_LIFT, bestOf, newRunWorld, putBackSpawn, raceBestKey, raceDelta, raceTime, runBestOf, runInput, runKindFor, runStep } from './race/raceRun.ts';
 import { RACE_GROUP_TUNE, gridSlot, syncGroupCountdown, tuneRaceGroup } from './race/raceGroup.ts';
 import { RaceTogether, type GroupRace } from './net/raceNet.ts';
 import { RECKON_TUNE, placeMoment, tuneReckon, turnBack } from './net/peerReckon.ts';
 import { TRACK_TUNE, gateSizeFor, tuneTrack, type TrackTune } from './race/trackTune.ts';
-import { TRACK_EDITOR_HEADER, TRACK_EDITOR_HEADER_VALUE, deleteGate, insertGate, moveGateTo, nudgeGate, resizeGate, roundPlace, trackEditFile, type TrackReply } from './race/trackEdits.ts';
+import { deleteGate, insertGate, moveGateTo, nudgeGate, resizeGate, roundPlace, trackEditFile, trackToSave } from './race/trackEdits.ts';
 import { RaceHud, type RaceBlockView } from './ui/raceHud.ts';
 import { TrackList, type TrackListModel } from './ui/trackList.ts';
 import { World, type EditRowsLoaded, type HeightsLoaded } from './world/world';
@@ -8638,8 +8638,9 @@ class App {
        * The world editor's course tool (the race drawer's first wave, the dev server's alone): `course()` reports the tool
        * (armed, mode, the picked course, node and gate, the draft, the notes) and this world's courses (each track's paths,
        * nodes, edges, lengths and gates, following or pinned); `course({ arm: 'draw' | 'edit' | 'gates' })` arms it in a
-       * mode; `course({ draw: { points: [[x, z], ...], closed, name } })` writes a new course through its points (game
-       * frame, the ground's heights); `course({ pick: 'id' })`; `course({ node: { track, path, i, x, z, y, w, b, sh, c,
+       * mode; `course({ draw: { points: [[x, z], ...], closed, name } })` writes a new course through its points (the
+       * track file's raw frame, as `/loc` reads; each point's height the land under it unless given as `[x, z, y]`);
+       * `course({ shortcut: { track, points } })`; `course({ pick: 'id' })`; `course({ node: { track, path, i, x, z, y, w, b, sh, c,
        * wall, insert, remove } })`; `course({ gates: { track, place: true } })`; `course({ gate: { track, i, follow, w,
        * move: [x, y, z], yaw, remove } })`; `course({ set: { track, feather, crossing, margin, level, grass, wallOut,
        * wallHigh, name, laps, for, clear } })`; `course({ fromGates: 'id' })`; `course({ remove: 'id' })`; `course({ tune
@@ -21204,15 +21205,17 @@ class App {
   /**
    * A world's track file fetched and kept as this world's once it lands (a newer fetch wins). With the race pass off
    * (`RACE_TUNE.on`, or the load hatch `swg.race`) nothing is fetched, so no corridor keeps a plant off and a session
-   * starts exactly as before the pass.
+   * starts exactly as before the pass; and the world is then not taken as read (`tracksWorld` stays empty), so the world
+   * editor's Course tool, handed "not read" rather than an empty list, never writes over a file the page never held.
    */
   private fetchTracks(world: string, kind: WorldKind): Promise<TrackRead | null> {
-    const done = kind === 'copies' || !RACE_TUNE.on ? Promise.resolve(null) : this.readTracks(world, kind === 'space' ? 'space' : 'ground');
+    const skipped = kind === 'copies' || !RACE_TUNE.on;
+    const done = skipped ? Promise.resolve(null) : this.readTracks(world, kind === 'space' ? 'space' : 'ground');
     this.tracksFetch = { world, done };
     void done.then((read) => {
       if (this.tracksFetch?.done !== done) return;
       this.tracksRead = read;
-      this.tracksWorld = world;
+      this.tracksWorld = skipped ? '' : world;
       if (import.meta.env.DEV) this.trackListChanged();
     });
     return done;
@@ -21224,19 +21227,32 @@ class App {
    * itself and a 200, which is why the kind of answer is asked as well as whether there was one, as the placements' is.
    */
   private async readTracks(world: string, kind: 'ground' | 'space'): Promise<TrackRead | null> {
+    // The revision of the text read, kept on the dev server (`readRevs`) as every edit file's is: a word read the file again
+    // stands the text it really read, never the word's (`reloadTracks`). No file is the revision '' (the endpoint's and the
+    // watcher's own for a file that is not there); a read that failed leaves none, so the next word reads the file again.
+    const key = `tracks/${world}`;
     try {
       // Asked in a built game only where its own list ships the file, and always on the dev server (`fetchPublic`).
       const res = await fetchPublic(tracksPath(world), { cache: 'no-store' }, import.meta.env.BASE_URL);
       if (!res) return null;
       const type = res.headers.get('content-type') ?? '';
-      if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return null;
-      const read = readTrackFile(await res.text(), world, kind);
+      if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) {
+        if (import.meta.env.DEV) {
+          if (res.status === 404) this.readRevs.set(key, '');
+          else this.readRevs.delete(key);
+        }
+        return null;
+      }
+      const text = await res.text();
+      if (import.meta.env.DEV) await this.noteReadRev(key, text);
+      const read = readTrackFile(text, world, kind);
       const file = trackEditFile(world);
       if (read.problem) console.warn(`tracks: ${file} is not read: ${read.problem}`);
       for (const s of read.skipped) console.warn(`tracks: ${file}: ${s.id} is skipped: ${s.why}`);
       if (read.unknown.length) console.warn(`tracks: ${file}: fields this build does not read: ${read.unknown.join(', ')}`);
       return read;
     } catch {
+      if (import.meta.env.DEV) this.readRevs.delete(key);
       return null;
     }
   }
@@ -21258,7 +21274,14 @@ class App {
     const before = this.tracksWorld === world ? (this.tracksRead?.tracks ?? []) : [];
     const read = await this.fetchTracks(world, this.worldKindOf(this.world.planet));
     if (packIdOf(this.world.planet, this.zone) !== world) return 'the world changed meanwhile';
-    if (typeof rev === 'string') this.placementRevs.set(`tracks/${world}`, rev);
+    // The revision now stood is the text's own as it was read (`readRevs`, `readTracks`), never the word's: the file can have
+    // moved since the word was sent, and recorded against the word's a later word naming the text this page holds was read
+    // again, or one naming the file put back to the word's text dropped while the page held another. Where the page cannot
+    // hash (no `crypto.subtle`), the word's, as before.
+    const key = `tracks/${world}`;
+    const readRev = this.readRevs.get(key);
+    if (readRev !== undefined) this.placementRevs.set(key, readRev);
+    else if (typeof rev === 'string' && !globalThis.crypto?.subtle) this.placementRevs.set(key, rev);
     const now = read?.tracks ?? [];
     return this.tracksMoved(before, now);
   }
@@ -21769,16 +21792,27 @@ class App {
 
   // ---- the dev server's track editor ---------------------------------------------------------------------------------
 
-  /** One ask of the dev server's track editor, answered. */
-  private async postTracks(op: Record<string, unknown>): Promise<TrackReply> {
-    if (!import.meta.env.DEV) return { ok: false, why: "the editor is the dev server's" };
-    try {
-      const res = await fetch('/__dev/tracks', { method: 'POST', headers: { 'Content-Type': 'application/json', [TRACK_EDITOR_HEADER]: TRACK_EDITOR_HEADER_VALUE }, body: JSON.stringify(op), cache: 'no-store' });
-      const body = (await res.json().catch(() => null)) as TrackReply | null;
-      return body && typeof body === 'object' && typeof body.ok === 'boolean' ? body : { ok: false, why: `the dev server answered ${res.status}` };
-    } catch (err) {
-      return { ok: false, why: `the dev server's track editor did not answer: ${err instanceof Error ? err.message : String(err)}` };
+  /**
+   * One track of this world's file written (`after`) or taken out (`after` null) through the placements endpoint's batch, its
+   * `tracks` kind: the race drawer's one writer (§2.2). With the world editor on, as one action of its history (`putTrack`);
+   * with it off, the very same batch with no history (`editorBatch`, which lands it by difference and drops the dev server's
+   * word about it). The track endpoint (`POST /__dev/tracks`) stays answering for an older tab, and nothing of this page uses
+   * it: it had no refusal of a field this build would drop. Answers '' or why not, an endpoint from before the kind named so.
+   */
+  private async writeTrack(label: string, before: TrackDef | null, after: TrackDef | null): Promise<string> {
+    let no: string;
+    if (this.editor?.on) no = await this.editor.putTrack(label, before, after);
+    else {
+      const was = before ? ({ ...before } as unknown as Record<string, unknown>) : null;
+      let edit: BatchEdit;
+      if (after) {
+        // Stamped now by the endpoint, as the editor's own first write of a row is (`doEdits`).
+        const { at: _at, ...row } = after;
+        edit = { file: 'tracks', put: row as unknown as Record<string, unknown>, was };
+      } else edit = { file: 'tracks', delete: before?.id ?? '', was };
+      no = (await this.editorBatch([edit])).why;
     }
+    return no && olderTracksEndpoint(no) ? `${no} -- ${TRACKS_OLDER_ENDPOINT}` : no;
   }
 
   /** An ask that waits for a second: true when this is the second (within the placements' own window), false when it was armed now. */
@@ -21908,21 +21942,14 @@ class App {
     if (t.gates.length < 2) return `${t.id} has ${t.gates.length} gate${t.gates.length === 1 ? '' : 's'}, and a track has two at least`;
     if (!this.trackFilesSaved.has(file) && !this.trackArmed(`save:${file}`)) return `the first save to ${file} this session: track({ save: true }) again to write it`;
     // A drawn course the file holds now is kept (the race drawer): the track in hand may have been taken before the world
-    // editor's course tool last wrote it, and the Gates view edits gates, never the road.
+    // editor's course tool last wrote it, and the Gates view edits gates, never the road; refused where the track in hand
+    // still has gates following the road as it was (`trackToSave`).
     const before = this.trackById(t.id);
-    const send: TrackDef = before?.course && JSON.stringify(before.course) !== JSON.stringify(t.course) ? { ...t, course: before.course } : t;
-    // With the world editor on, through its batch as one action of its history, so an undo puts the file back.
-    if (this.editor?.on) {
-      const no = await this.editor.putTrack(`${t.id} saved`, before, send);
-      if (no) return `not saved: ${olderTracksEndpoint(no) ? `${no} -- ${TRACKS_OLDER_ENDPOINT}` : no}`;
-    } else {
-      const reply = await this.postTracks({ op: 'put', world, track: send });
-      if (!reply.ok) return `not saved: ${reply.why}`;
-      if (packIdOf(this.world.planet, this.zone) === world) {
-        this.tracksRead = reply.read;
-        this.tracksWorld = world;
-      }
-    }
+    const send = trackToSave(t, before);
+    if (typeof send === 'string') return `not saved: ${send}`;
+    // Through the batch, with the world editor on as one action of its history (an undo puts the file back), off as a batch alone.
+    const no = await this.writeTrack(`${t.id} saved`, before, send);
+    if (no) return `not saved: ${no}`;
     this.trackFilesSaved.add(file);
     this.trackHeldUnsaved = false;
     if (send !== t) this.trackHeld = JSON.parse(JSON.stringify(send)) as TrackDef;
@@ -21936,18 +21963,9 @@ class App {
     const world = packIdOf(this.world.planet, this.zone);
     if (!this.trackById(id)) return `no track called ${id} on this world`;
     if (!this.trackArmed(`remove:${world}/${id}`)) return `take ${id} out of ${trackEditFile(world)}? track({ remove: '${id}' }) again to do it`;
-    // With the world editor on, through its batch as one action of its history (the race drawer's first wave).
-    if (this.editor?.on) {
-      const no = await this.editor.putTrack(`${id} taken out`, this.trackById(id), null);
-      if (no) return `not taken out: ${olderTracksEndpoint(no) ? `${no} -- ${TRACKS_OLDER_ENDPOINT}` : no}`;
-    } else {
-      const reply = await this.postTracks({ op: 'delete', world, id });
-      if (!reply.ok) return `not taken out: ${reply.why}`;
-      if (packIdOf(this.world.planet, this.zone) === world) {
-        this.tracksRead = reply.read;
-        this.tracksWorld = world;
-      }
-    }
+    // Through the batch (the race drawer's first wave), with the world editor on as one action of its history.
+    const no = await this.writeTrack(`${id} taken out`, this.trackById(id), null);
+    if (no) return `not taken out: ${no}`;
     if (this.trackHeld?.id === id) this.trackHeldUnsaved = true;
     this.trackListChanged();
     return `${id} taken out of ${trackEditFile(world)}`;
@@ -22008,14 +22026,14 @@ class App {
     const legs = courseLegs(t, places.grid, places.gates, this.trackRawToGame());
     const found = this.world.courseThings(legs);
     const hits = corridorHits(legs, found.things as CourseThing[]);
-    const legName = (i: number) => (i === 0 ? 'grid to gate 0' : i <= t.gates.length - 1 ? `gate ${i - 1} to ${i}` : `gate ${t.gates.length - 1} to 0`);
     const raw = (x: number, z: number): [number, number] => {
       const p = fromGame({ x, y: 0, z, q: [0, 0, 0, 1] }, this.world.layoutCenter, this.trackFrame());
       return [Math.round(p.x * 10) / 10, Math.round(p.z * 10) / 10];
     };
     const share = found.points ? found.built / found.points : 0;
     return {
-      hits: hits.map((h) => ({ what: h.thing.what, leg: legName(h.leg), off: Math.round(h.off * 10) / 10, at: raw(h.thing.x, h.thing.z) })),
+      // A leg named by the gates either end, or along a drawn road by its path and how far along it (`legName`).
+      hits: hits.map((h) => ({ what: h.thing.what, leg: legName(t, legs[h.leg], h.leg), off: Math.round(h.off * 10) / 10, at: raw(h.thing.x, h.thing.z) })),
       built: `${Math.round(share * 100)}% of the course stands on ground chunks built now (trees are read only there)`,
       words: hits.length ? `${hits.length} thing${hits.length === 1 ? '' : 's'} in ${t.name}'s corridor` : `nothing in ${t.name}'s corridor`,
     };
@@ -29831,7 +29849,7 @@ class App {
     // is on, an undo's or a redo's), laid over the tracks read by difference; the corridors of the tracks it moved kept
     // clear on the chunks built from now on, as a file read again keeps them.
     const tkf = files.tracks;
-    if (tkf && this.world.generation === gen && this.editWorld() === pack) this.landTracks(pack, tkf.put as unknown as TrackDef[], tkf.deleted);
+    if (tkf && this.world.generation === gen && this.editWorld() === pack) this.landTracks(pack, tkf.put as unknown as TrackDef[], tkf.deleted, tkf.rows);
     return { ok: true, why: '', files, ms: reply.ms ?? 0, built };
   }
 
@@ -29839,20 +29857,19 @@ class App {
    * Tracks of this world's file landed from a batch's answer (`editorBatch`): the rows put laid over the tracks read by id
    * (a track the file holds keeps its place in the list, a new one goes at the end), the ids taken out dropped, and the
    * file's fetch under way, if any, let go (it would land the text from before the write). Nothing with the race pass off,
-   * which reads no track.
+   * which reads no track. Where the tracks it leaves are not as many as the file holds (`rows`, the batch's own count: this
+   * page never held the file whole, the race pass switched on after an arrival that read nothing), the file is read again
+   * rather than a list of what this batch put alone stood as if it were the file.
    */
-  private landTracks(world: string, put: readonly TrackDef[], deleted: readonly string[]): void {
+  private landTracks(world: string, put: readonly TrackDef[], deleted: readonly string[], rows: number): void {
     if (!RACE_TUNE.on) return;
     const before = this.tracksWorld === world ? (this.tracksRead?.tracks ?? []) : [];
-    const gone = new Set(deleted);
-    const byId = new Map(put.map((t) => [t.id, t] as const));
-    const now: TrackDef[] = [];
-    for (const t of before) {
-      if (gone.has(t.id)) continue;
-      now.push(byId.get(t.id) ?? t);
-      byId.delete(t.id);
+    const now = landedTracks(before, put, deleted);
+    if (now.length !== rows) {
+      void this.reloadTracks(world);
+      return;
     }
-    for (const t of byId.values()) now.push(t);
+    const gone = new Set(deleted);
     const was = this.tracksRead;
     const read: TrackRead = { tracks: now, skipped: was?.skipped ?? [], unknown: was?.unknown ?? [], problem: null };
     this.tracksRead = read;

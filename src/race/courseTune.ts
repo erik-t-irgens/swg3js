@@ -39,10 +39,12 @@ export const COURSE_TUNE = {
   /** A circuit's grid this far back along the road before gate 0 (m), and a sprint's gate 0 this far along from its start. */
   gridBack: 30,
   gridAhead: 20,
-  /** The handles' rates: metres of height, degrees of bank and metres of width for each hundred pixels of the mouse. */
+  /**
+   * The handles' rates: metres of height and degrees of bank (a gate's turn) for each hundred pixels of the mouse. A width
+   * has no rate: its grabber keeps the point grabbed under the cursor along the width line, as every drag of the editor does.
+   */
   raiseRate: 2,
   bankRate: 10,
-  widthRate: 8,
   /** A shoulder stepped this far by C with a notch of the wheel (m); a gate widened this far a notch (m). */
   shoulderStep: 1,
   gateWidthStep: 2,
@@ -99,7 +101,6 @@ const RANGES: Partial<Record<keyof CourseTune, [number, number]>> = {
   gridAhead: [0, 400],
   raiseRate: [0.05, 50],
   bankRate: [0.5, 90],
-  widthRate: [0.5, 80],
   shoulderStep: [0.1, 16],
   gateWidthStep: [0.5, 20],
   steepNote: [5, 89],

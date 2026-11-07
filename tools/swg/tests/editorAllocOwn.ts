@@ -223,8 +223,13 @@ function gizmoFrame(): void {
 }
 
 let scavenges = 0;
+/** Every collection of any kind (a major one empties the young generation too): what a measure across one must know. */
+let collections = 0;
 const watch = new PerformanceObserver((list) => {
-  for (const e of list.getEntries()) if ((e as unknown as { detail?: { kind?: number } }).detail?.kind === perfConstants.NODE_PERFORMANCE_GC_MINOR) scavenges++;
+  for (const e of list.getEntries()) {
+    collections++;
+    if ((e as unknown as { detail?: { kind?: number } }).detail?.kind === perfConstants.NODE_PERFORMANCE_GC_MINOR) scavenges++;
+  }
 });
 watch.observe({ entryTypes: ['gc'] });
 const young = (): number => v8.getHeapSpaceStatistics().find((s) => s.space_name === 'new_space')?.space_used_size ?? 0;
@@ -906,10 +911,11 @@ if (process.argv.includes('water')) {
 }
 // With `course` (`courseAlloc.test.ts`, the race drawer's first wave): the Course tool armed over a 400-node circuit, its
 // frame (the Tools list's record handed to it, its overlay: the courses projected, the picked one's diamonds, width lines,
-// grabbers and gates laid out and hovered) and the marks drawn, in four windows: editing with the cursor on a node, a
-// node's diamond dragged, the gates mode hovering a gate, and a draft of three clicks drawn with the aim. A held edit's
-// course is made again at `previewHz` (a stamp's work, never a frame's), so the windows run with `live` 'release' and the
-// preview's tick is measured apart (`previewBytes`, what one made).
+// grabbers and gates laid out and hovered) and the marks drawn, in five windows: editing with the cursor on a node, a
+// node's diamond dragged (with `live` 'release', and again with the default 'drag': the held course shown between the
+// preview's ticks, its clock held so no tick falls inside), the gates mode hovering a gate, and a draft of three clicks drawn
+// with the aim. A held edit's course is made again at `previewHz` (a stamp's work, never a frame's), measured apart
+// (`previewBytes`, what one made).
 if (process.argv.includes('course')) {
   const { EditorCourse, courseTool } = await import('../../../src/editor/editorCourse.ts');
   const { courseCtx, drawTrack } = await import('../../../src/editor/courseEdit.ts');
@@ -946,6 +952,7 @@ if (process.argv.includes('course')) {
     water: () => -Infinity,
     grid: () => 1,
     packId: () => 'test',
+    worldMark: () => 1,
     say() {},
     refresh() {},
   });
@@ -958,6 +965,9 @@ if (process.argv.includes('course')) {
   const draw = { marks: cm, radius: 0.5, ring(): void {} };
   // What each window holds (0 nothing, 1 the left button: a drag, or a click of the draft), its cursor's middle and the step.
   const st = new Float64Array(6);
+  // The preview's clock held still (a moment of its own, else -1): the default `live` 'drag' window runs with no tick inside it.
+  const frozen = new Float64Array(1);
+  frozen[0] = -1;
   const courseFrame = (): void => {
     st[1]++;
     st[0] = st[1] * 0.01;
@@ -970,7 +980,7 @@ if (process.argv.includes('course')) {
     f.z = -40 + Math.cos(st[0]) * 10;
     f.valid = true;
     f.dt = 1 / 60;
-    f.now = st[0];
+    f.now = frozen[0] >= 0 ? frozen[0] : st[0];
     f.sx = st[3] + Math.sin(st[0] * 3) * 3;
     f.sy = st[4] + Math.sin(st[0] * 2) * 2;
     f.dy = 0;
@@ -1037,13 +1047,34 @@ if (process.argv.includes('course')) {
   st[1] = saveStep;
   const grabbed = report().held;
   const drag = await measure();
-  // The preview's tick, measured apart: one course made for the drag as `previewHz` asks, in bytes.
+  // The preview's tick, measured apart: one course made for the drag as `previewHz` asks, in bytes. A tick measured across a
+  // collection reads short (the young generation's size falls at one), so a tick a collection fell inside is tried again, a
+  // tenth of a second of frames later so the preview's clock is due again, and -1 is said where every try had one.
+  let previewBytes = -1;
+  for (let attempt = 0; attempt < 6 && previewBytes < 0; attempt++) {
+    COURSE_TUNE.live = 'drag';
+    gc({ type: 'minor' });
+    await settle();
+    collections = 0;
+    const pb = young();
+    // The first frame after the switch makes one (the preview's clock was never wound while it was off).
+    courseFrame();
+    const made = young() - pb;
+    await settle();
+    if (collections === 0) previewBytes = made;
+    COURSE_TUNE.live = 'release';
+    courseFrames(15);
+  }
+  // The default, `live` 'drag': the frames a player really drags through between the preview's ticks (the held course shown,
+  // the views made from it, the preview's clock asked every frame). One tick taken, then the clock held at its moment so no
+  // tick falls inside the window: the tick is the stamp's work measured above, never the frame's.
   COURSE_TUNE.live = 'drag';
-  gc({ type: 'minor' });
-  const pb = young();
-  // The first frame after the switch makes one (the preview's clock was never wound while it was off).
   courseFrame();
-  const previewBytes = young() - pb;
+  frozen[0] = f.now;
+  const liveHeld = course.live;
+  const dragLive = await measure();
+  const liveKept = liveHeld !== null && course.live === liveHeld;
+  frozen[0] = -1;
   COURSE_TUNE.live = 'release';
   // Let go (a write, outside every window), then the gates mode, the cursor near gate 1's window.
   st[2] = 0;
@@ -1080,7 +1111,7 @@ if (process.argv.includes('course')) {
   const draftPoints = report().draft;
   const draft = await measure();
   watch.disconnect();
-  console.log(JSON.stringify({ frames: COURSE_FRAMES, made: steady.made, scavenges: steady.scavenges, dragMade: drag.made, dragScavenges: drag.scavenges, gatesMade: gates.made, gatesScavenges: gates.scavenges, draftMade: draft.made, draftScavenges: draft.scavenges, nodes: made.course!.paths[0].nodes.length, gateCount: made.gates.length, lines: shown.lines, marks: shown.marks, grabbed, gatesHot, draftPoints, previewBytes }));
+  console.log(JSON.stringify({ frames: COURSE_FRAMES, made: steady.made, scavenges: steady.scavenges, dragMade: drag.made, dragScavenges: drag.scavenges, dragLiveMade: dragLive.made, dragLiveScavenges: dragLive.scavenges, liveKept, gatesMade: gates.made, gatesScavenges: gates.scavenges, draftMade: draft.made, draftScavenges: draft.scavenges, nodes: made.course!.paths[0].nodes.length, gateCount: made.gates.length, lines: shown.lines, marks: shown.marks, grabbed, gatesHot, draftPoints, previewBytes }));
   process.exit(0);
 }
 // With `places` (`placesAlloc.test.ts`, Map-maker II's eighth wave): the places tool armed with three places drawn (a circle,

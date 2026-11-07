@@ -173,7 +173,7 @@ const measure = (m: Mod, root: string, pack: string): World | null => (m.measure
     writeFileSync(join(dir, 'clouds', 'noise_detail.rgba'), new Uint8Array(4));
     writeFileSync(join(dir, 'clouds', 'manifest.json'), JSON.stringify({ format: 2, source: 'invented', base: { size: 1, channels: 4, file: 'noise_base.rgba' }, detail: { size: 1, channels: 4, file: 'noise_detail.rgba' }, billow: { lo: 0.5, hi: 0.9 }, cover: [{ cut: 0.2, sky: 1 }, { cut: 0.9, sky: 0 }] }));
     const cli = fileURLToPath(new URL('../cli.mjs', import.meta.url));
-    const status = (): string => spawnSync(process.execPath, [cli, 'status', dir], { encoding: 'utf8', maxBuffer: 16 * 1048576, env: { ...process.env, SWG: '' } }).stdout ?? '';
+    const status = (): string => spawnSync(process.execPath, [cli, 'status', dir], { encoding: 'utf8', maxBuffer: 16 * 1048576, env: { ...process.env, SWG: '', SWG3JS_PLACEMENTS: '' } }).stdout ?? '';
     const before = status();
     ok(/swg -- clouds \S+ --no-noise/.test(before) && before.includes('no numbers for (tatooine)'), 'status asks for `clouds --no-noise` while a world\'s clouds.json lacks the pictures\' numbers');
     (newClouds.bakeClouds as (r: string, p: string[]) => unknown)(dir, ['tatooine']);

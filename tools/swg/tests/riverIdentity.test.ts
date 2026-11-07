@@ -179,11 +179,14 @@ try {
     if (!compared) note('no small converted world: the day-one bake is not compared');
     let keys = 0;
     const moved: string[] = [];
+    // With no edit files read (`null` for the folder, on both sides): what this compares is the rivers' stamp, and the
+    // owner's own edit files in this checkout, made live and read by code that has grown since (the race drawer's first wave
+    // met his new Tatooine map edits here), are no part of it.
     for (const name of existsSync(PACKS) ? readdirSync(PACKS) : []) {
       const dir = join(PACKS, name);
       if (!existsSync(join(dir, 'nav.json')) || !existsSync(join(dir, 'layout.json'))) continue;
-      const k0 = old.layoutKeyOf(dir, wt, old.gridEditsOf(name, undefined, dir));
-      const k1 = layoutKeyOf(dir, wt, gridEditsOf(name, undefined, dir));
+      const k0 = old.layoutKeyOf(dir, wt, old.gridEditsOf(name, null, dir));
+      const k1 = layoutKeyOf(dir, wt, gridEditsOf(name, null, dir));
       if (k0 !== k1) moved.push(name);
       keys++;
     }

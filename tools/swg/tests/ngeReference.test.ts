@@ -232,7 +232,7 @@ const buildFrom = (reader: ReturnType<typeof ngeRefReader>) => buildNgeOverlay({
 // exactly what the run with it writes.
 {
   const cli = join(REPO, 'tools', 'swg', 'cli.mjs');
-  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args], { cwd: REPO, encoding: 'utf8', env: { ...process.env, SWG: '' } });
+  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args], { cwd: REPO, encoding: 'utf8', env: { ...process.env, SWG: '', SWG3JS_PLACEMENTS: '' } });
   const setUp = (): string => {
     const out = mkdtempSync(join(tmpdir(), 'test_ngeref_out_'));
     mkdirSync(join(out, 'mobiles'), { recursive: true });

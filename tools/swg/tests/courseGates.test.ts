@@ -10,10 +10,10 @@
 import assert from 'node:assert/strict';
 import { readTrack, type TrackDef } from '../../../src/race/trackFile.ts';
 import { buildSpine, nearestOn, spineAt, spineNear, spinePoint } from '../../../src/race/coursePath.ts';
-import { alongOf, followCourse, gateAlongs, gateRules, placeGates, roadTurn, turnApexes, type GateRules } from '../../../src/race/courseGates.ts';
+import { alongOf, followCourse, followGate, gateAlongs, gateHeightFor, gateRules, placeGates, roadTurn, turnApexes, type GateRules } from '../../../src/race/courseGates.ts';
 import { bakeGate, GATE_STRIDE, gateCorners, turnHeading } from '../../../src/race/gates.ts';
 import { toGame } from '../../../src/story/placements.ts';
-import { courseCtx, deleteNode, drawTrack, gateMoved, gateWidened, insertNode, moveNode, placeGatesAgain, setNode } from '../../../src/editor/courseEdit.ts';
+import { courseCtx, courseNotes, deleteNode, drawTrack, gateMoved, gateWidened, gridSlotsOff, insertNode, moveNode, placeGatesAgain, setNode, widestBox } from '../../../src/editor/courseEdit.ts';
 import { COURSE_TUNE } from '../../../src/race/courseTune.ts';
 import { TRACK_TUNE } from '../../../src/race/trackTune.ts';
 
@@ -245,6 +245,64 @@ function circuit(): TrackDef {
   const placed = placeGates(t, rules, deckAt);
   const g = placed.gates.filter((x) => x.e === 0);
   ok(g.length > 0 && g.every((x) => x.y + (x.h * 7) / 8 <= 20 + 0.02), `a gate on a road under a deck is held so its window's top stands under it (${g.map((x) => x.h).join(', ')} m tall)`);
+}
+
+// ---- A track raced only as a bike: its gates the bike gate's height. ----
+{
+  const bikes = drawTrack('bikes', 'Bikes', [flat(0, 0), flat(400, 0), flat(500, 150), flat(400, 300), flat(0, 300), flat(-100, 150)], true, ctx, { ...COURSE_TUNE, forPods: false, forBikes: true }) as TrackDef;
+  ok(bikes.for.length === 1 && bikes.for[0] === 'speederbike' && bikes.gates.every((g) => g.h === TRACK_TUNE.bikeGateHeight), `a track raced only as a bike places gates the bike gate's height (${TRACK_TUNE.bikeGateHeight} m)`);
+  ok(gateHeightFor({ for: ['speederbike'] }, rules) === rules.bikeHeight && gateHeightFor({ for: ['speederbike', 'podracer'] }, rules) === rules.podHeight, "the pod gate's height wherever pods race it, the bike gate's where bikes alone do");
+}
+
+// ---- Follow: a pinned gate anchored again to its nearest road. ----
+{
+  const t = circuit();
+  const pinned = gateMoved(t, 2, { x: t.gates[2].x + 6, y: 40, z: t.gates[2].z - 4, q: [1, 0, 0, 0] }) as TrackDef;
+  const own = gateWidened(t, 1, 33) as TrackDef;
+  const f = followGate(pinned, 2, rules) as TrackDef;
+  const sp = buildSpine(f.course!.paths[0].nodes, true);
+  const g = f.gates[2];
+  const P = spinePoint();
+  spineAt(sp, g.e!, g.t!, P);
+  const near = spineNear();
+  nearestOn(sp, pinned.gates[2].x, pinned.gates[2].z, near);
+  ok(g.path === 'main' && g.ow === undefined && Math.abs(g.e! + g.t! - (near.e + near.t)) < 1e-5 && Math.hypot(g.x - P.x, g.z - P.z) < 0.01 && Math.abs(g.y - (P.y + rules.gateLift)) < 0.01, 'Follow anchors a pinned gate on its nearest point of the road, on the road at gateLift, its own width dropped');
+  const h = turnHeading(toGame(g, null, 'raw').q);
+  ok(Math.abs(Math.atan2(Math.sin(h - Math.atan2(-P.tx, P.tz)), Math.cos(h - Math.atan2(-P.tx, P.tz)))) < 1e-6, 'and faces along the road there');
+  const back = followGate(own, 1, rules) as TrackDef;
+  ok(back.gates[1].ow === undefined && back.gates[1].w === COURSE_TUNE.width, "a gate of its own width followed again takes the road's width again");
+  ok(typeof followGate({ ...t, course: undefined }, 0, rules) === 'string' && typeof followGate(t, 99, rules) === 'string', 'a track with no course, or a gate it has not got, is refused in words');
+}
+
+// ---- The notes a course's shape gives (`courseNotes`), each with a known answer. ----
+{
+  const ringOf = (r: number, n: number, w = COURSE_TUNE.width, at = { x: 0, z: 0 }) => Array.from({ length: n }, (_, i) => flat(at.x + r * Math.cos((i * 2 * Math.PI) / n), at.z + r * Math.sin((i * 2 * Math.PI) / n)));
+  const plain = drawTrack('plain', 'Plain', [{ ...flat(0, 0), c: 'straight' }, { ...flat(600, 0) }, { ...flat(700, 150), c: 'straight' }, { ...flat(600, 300), c: 'straight' }, { ...flat(0, 300) }, { ...flat(-100, 150), c: 'straight' }], true, ctx) as TrackDef;
+  const flatCtx = courseCtx(() => 0);
+  ok(courseNotes(plain, flatCtx).length === 0, `a plain circuit on flat land, its grid on a straight, gives no note (${courseNotes(plain, flatCtx).join(' · ') || 'none'})`);
+  // Too narrow: under the widest box raced with narrowRoom either side.
+  const narrow = setNode(plain, 'main', 2, { w: 8 }, ctx) as TrackDef;
+  const nn = courseNotes(narrow, flatCtx);
+  ok(nn.some((s) => /node 2's road is 8 m wide, under the widest box raced \(7 m\)/.test(s)) && widestBox(plain) === 7 && widestBox({ for: ['speederbike'] }) === 1, `a node narrower than the widest box and its room is noted (${nn.join(' · ')})`);
+  // Under the water: the host's level over a node.
+  const wet = courseNotes(plain, { ...flatCtx, water: (x: number) => (x > 550 ? 4 : -Infinity) });
+  ok(wet.filter((s) => /under the water/.test(s)).length === 3 && wet.some((s) => /node 1's road is 4\.0 m under the water/.test(s)), `nodes under the water noted with their depth (${wet.filter((s) => /water/.test(s)).join(' · ')})`);
+  // A steep shoulder: a node raised 40 m over flat land, both its shoulders.
+  const high = setNode(plain, 'main', 4, { y: 40 }, ctx) as TrackDef;
+  const hn = courseNotes(high, flatCtx);
+  ok(hn.some((s) => /node 4's right shoulder stands at \d+°/.test(s)) && hn.some((s) => /node 4's left shoulder stands at \d+°/.test(s)), `a node high over the land notes both its shoulders steep (${hn.filter((s) => /shoulder/.test(s)).join(' · ')})`);
+  ok(courseNotes(high, courseCtx(() => Number.NaN)).every((s) => !/shoulder/.test(s)), 'with no land known (no block built), no shoulder is judged');
+  // A turn too tight for its road: a ring of 25 m drawn 60 m wide, every edge's inside edge folding.
+  const tight = drawTrack('tight', 'Tight', ringOf(25, 6), true, ctx, { ...COURSE_TUNE, width: 60 }) as TrackDef;
+  const tn = courseNotes(tight, flatCtx);
+  ok(tn.filter((s) => /inside edge folds over itself/.test(s)).length === 6, `every edge of a turn too tight for its road is noted folding (${tn.filter((s) => /folds/.test(s)).length})`);
+  // A sprint: its grid at node 0, so a full group's rows behind the first stand before the road begins.
+  const dash = drawTrack('dash2', 'Dash', [flat(0, 0), flat(300, 0), flat(600, 0)], false, ctx) as TrackDef;
+  const off = gridSlotsOff(dash);
+  ok(off.length === 2 && off.every((o) => o.slots.join(',') === '3,4,5,6,7,8'), `a sprint's full group: slots 3 to 8 stand off the road behind its grid, pods and bikes alike (${off.map((o) => `${o.kind}: ${o.slots.join(',')}`).join('; ')})`);
+  ok(courseNotes(dash, flatCtx).some((s) => /slots 3, 4, 5, 6, 7, 8 \(raced as pods\) stand off the road behind the grid/.test(s)), 'and the notes say so');
+  // A circuit whose grid stands on a long straight with room behind it: every slot on the road.
+  ok(gridSlotsOff(plain).length === 0, "a circuit's grid on a straight with room behind it: a full group's slots all on the road");
 }
 
 // ---- gateAlongs: at least two on a short circuit. ----

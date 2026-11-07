@@ -252,6 +252,25 @@ ok('the guard a story row carries where it says none is a metre and a half', DRE
     writeFileSync(join(dir, 'world', 'tatooine.json'), placementsFileText('tatooine', 'raw', [house, { id: 'wall', kind: 'prop', pack: 'world', model: 'wall_s01', x: 1, y: 0, z: 1, q: [1, 0, 0, 0] }]));
     writeFileSync(join(dir, 'world', 'naboo.json'), placementsFileText('naboo', 'raw', [{ ...crate, id: 'theed-crate' }]));
     ok("a checkout's rows are its public folder's", placementsFolder(join(scratch, 'checkout')) === dir);
+    // The install's own folder named in the environment (a test running `status` or the bake over fixture packs hands its
+    // child one, so the owner's live edit files never reach it): an empty value names none, a folder that one, and a caller
+    // naming a root of its own is never moved by it.
+    {
+      const was = process.env.SWG3JS_PLACEMENTS;
+      try {
+        process.env.SWG3JS_PLACEMENTS = '';
+        const none = placementsFolder();
+        process.env.SWG3JS_PLACEMENTS = dir;
+        const named = placementsFolder();
+        const own = placementsFolder(join(scratch, 'emptied'));
+        process.env.SWG3JS_PLACEMENTS = join(scratch, 'nowhere');
+        const gone = placementsFolder();
+        ok('SWG3JS_PLACEMENTS names the install\'s own placements folder (empty: none), and a root named is its own', none === null && named === dir && own === null && gone === null);
+      } finally {
+        if (was === undefined) delete process.env.SWG3JS_PLACEMENTS;
+        else process.env.SWG3JS_PLACEMENTS = was;
+      }
+    }
     const rows = placementRows(dir);
     ok('every row of both layers is read, with its world and layer', rows.length === 5 && rows.filter((r) => r.world === 'tatooine').length === 4 && rows.some((r) => r.layer === 'world' && r.row.id === 'wall'));
     const lacking = placementPackLines(rows, packs, readJson);

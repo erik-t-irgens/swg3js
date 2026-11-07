@@ -26,7 +26,7 @@ type Step = { command: string; reasons: string[] };
 
 /** What `status --json` asks for on a folder, and whether it ran at all (a plan with steps, read from a clean exit). */
 function asked(dir: string): Step[] {
-  const run = spawnSync(process.execPath, [cli, 'status', dir, '--json'], { encoding: 'utf8', maxBuffer: 64 * 1048576, env: { ...process.env, SWG: '' } });
+  const run = spawnSync(process.execPath, [cli, 'status', dir, '--json'], { encoding: 'utf8', maxBuffer: 64 * 1048576, env: { ...process.env, SWG: '', SWG3JS_PLACEMENTS: '' } });
   let plan: { steps?: Step[] } = {};
   try {
     plan = JSON.parse(run.stdout);

@@ -143,10 +143,10 @@ function glbOf(b: { positions: Float32Array; indices: Uint32Array }): Buffer {
     const older = libraryStatus(root);
     ok(older.stale && older.line.includes('older than testworld'), `and lists it again once a pack it read is newer (“${older.line}”)`);
     // `status` lists the pass and never asks for it.
-    const out = execFileSync(process.execPath, [join(repo, 'tools', 'swg', 'cli.mjs'), 'status', root, '--json'], { cwd: repo, encoding: 'utf8', env: { ...process.env, SWG: '' }, maxBuffer: 64 << 20 });
+    const out = execFileSync(process.execPath, [join(repo, 'tools', 'swg', 'cli.mjs'), 'status', root, '--json'], { cwd: repo, encoding: 'utf8', env: { ...process.env, SWG: '', SWG3JS_PLACEMENTS: '' }, maxBuffer: 64 << 20 });
     const plan = JSON.parse(out) as { steps: { command: string }[] };
     ok(Array.isArray(plan.steps) && plan.steps.length > 0 && !plan.steps.some((s) => s.command === 'library'), `status never puts the pass among its asks (${plan.steps.length} steps, none of them library)`);
-    const text = execFileSync(process.execPath, [join(repo, 'tools', 'swg', 'cli.mjs'), 'status', root], { cwd: repo, encoding: 'utf8', env: { ...process.env, SWG: '' }, maxBuffer: 64 << 20 });
+    const text = execFileSync(process.execPath, [join(repo, 'tools', 'swg', 'cli.mjs'), 'status', root], { cwd: repo, encoding: 'utf8', env: { ...process.env, SWG: '', SWG3JS_PLACEMENTS: '' }, maxBuffer: 64 << 20 });
     ok(/library: older than testworld/.test(text), 'and lists it in its words');
   } finally {
     rmSync(root, { recursive: true, force: true });

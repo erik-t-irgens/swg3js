@@ -110,6 +110,23 @@ function pchipEnd(h0: number, h1: number, d0: number, d1: number): number {
   return m;
 }
 
+/**
+ * The working arrays a spine is worked out in (each node's tangent, each edge's arclength table, pieces and length, each
+ * node's slopes), kept for the module and grown by doubling, never handed out: `buildSpine` runs to its end with nothing in
+ * between that could build another, so one set serves every call, and a spine made again into its own arrays (`into`)
+ * makes no array once these and its edges are big enough. Made fresh each call, they were seven arrays and about 350 KB a
+ * rebuild of a 400-node path, the arclength table the most of it.
+ */
+let TX: Float64Array = new Float64Array(16);
+let TZ: Float64Array = new Float64Array(16);
+let PIECES: Int32Array = new Int32Array(16);
+let TABLE_AT: Int32Array = new Int32Array(17);
+let TABLE: Float64Array = new Float64Array(1024);
+let LENS: Float64Array = new Float64Array(16);
+let SLOPE: Float64Array = new Float64Array(64);
+const grownF = (a: Float64Array, n: number): Float64Array => (a.length >= n ? a : new Float64Array(Math.max(n, a.length * 2)));
+const grownI = (a: Int32Array, n: number): Int32Array => (a.length >= n ? a : new Int32Array(Math.max(n, a.length * 2)));
+
 /** An edge with arrays of room for `count` samples: the one handed in where it has the room, else a fresh one. */
 function edgeOf(was: SpineEdge | undefined, count: number): SpineEdge {
   if (was && was.x.length >= count) return was;
@@ -119,17 +136,19 @@ function edgeOf(was: SpineEdge | undefined, count: number): SpineEdge {
 
 /**
  * A path's spine. `closed`: the path wraps (a circuit's main line). `into`, where handed, is a spine whose edges' arrays are
- * reused while they hold enough (an edge that lengthens grows by doubling), so a spine made again many times a second makes
- * nothing once its arrays are big enough; the answer is `into` itself then. Nodes nearer than nothing apart are the reader's
- * to refuse (`COURSE_LIMITS.edgeLeast`); here an edge of no length is a point.
+ * reused while they hold enough (an edge that lengthens grows by doubling), and the working arrays are the module's own
+ * (`TX` and its kin), so a spine made again into its own arrays many times a second makes no array once all of them are big
+ * enough (the numbers it works out are another matter: run seldom, it runs unoptimised); the answer is `into` itself then.
+ * Nodes nearer than nothing apart are the reader's to refuse
+ * (`COURSE_LIMITS.edgeLeast`); here an edge of no length is a point.
  */
 export function buildSpine(nodes: readonly SpineNode[], closed: boolean, into?: Spine): Spine {
   const n = nodes.length;
   const cl = closed && n >= 3;
   const edges = n < 2 ? 0 : cl ? n : n - 1;
   // Each node's centripetal tangent, unscaled (the derivative over the knot parameter).
-  const tx = new Float64Array(n);
-  const tz = new Float64Array(n);
+  const tx = (TX = grownF(TX, n));
+  const tz = (TZ = grownF(TZ, n));
   for (let k = 0; k < n; k++) {
     const prev = cl || k > 0 ? (k - 1 + n) % n : -1;
     const next = cl || k < n - 1 ? (k + 1) % n : -1;
@@ -200,8 +219,9 @@ export function buildSpine(nodes: readonly SpineNode[], closed: boolean, into?: 
   }
   // Each edge's arclength table (its pieces as many as its control polygon's length asks, `ARC_PIECE` each, `ARC_TABLE` at
   // the least), and its length.
-  const pieces = new Int32Array(edges);
-  const tableAt = new Int32Array(edges + 1);
+  const pieces = (PIECES = grownI(PIECES, edges));
+  const tableAt = (TABLE_AT = grownI(TABLE_AT, edges + 1));
+  tableAt[0] = 0;
   for (let e = 0; e < edges; e++) {
     const A = nodes[e];
     const B = nodes[(e + 1) % n];
@@ -215,8 +235,8 @@ export function buildSpine(nodes: readonly SpineNode[], closed: boolean, into?: 
     pieces[e] = Math.max(ARC_TABLE, Math.ceil(poly / ARC_PIECE));
     tableAt[e + 1] = tableAt[e] + pieces[e] + 1;
   }
-  const table = new Float64Array(tableAt[edges]);
-  const lens = new Float64Array(edges);
+  const table = (TABLE = grownF(TABLE, tableAt[edges]));
+  const lens = (LENS = grownF(LENS, edges));
   for (let e = 0; e < edges; e++) {
     const a = e;
     const b = (e + 1) % n;
@@ -261,7 +281,7 @@ export function buildSpine(nodes: readonly SpineNode[], closed: boolean, into?: 
     lens[e] = acc;
   }
   // Each node's slope of the four road numbers over arclength.
-  const slope = new Float64Array(n * 4);
+  const slope = (SLOPE = grownF(SLOPE, n * 4));
   for (let k = 0; k < n; k++) {
     const inE = cl ? (k - 1 + n) % n : k - 1;
     const outE = k < edges ? k : -1;
@@ -495,13 +515,15 @@ export function nearestOn(sp: Spine, x: number, z: number, out: SpineNear): bool
   return out.e >= 0;
 }
 
-/** One leg of a spine's corridor: from one place to the next, and how far either side of the line it reaches. */
+/** One leg of a spine's corridor: from one place to the next, how far either side of the line it reaches, and where it starts along the path. */
 export interface SpineLeg {
   ax: number;
   az: number;
   bx: number;
   bz: number;
   half: number;
+  /** Its start's arclength from the path's node 0 (m): what names a leg in words (`track({ check })`). */
+  s: number;
 }
 
 /**
@@ -518,7 +540,7 @@ export function spineLegs(sp: Spine, clear: number, step: number): SpineLeg[] {
     spineAt(sp, e, 0, a);
     for (let i = 1; i <= n; i++) {
       spineAt(sp, e, i / n, b);
-      out.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z, half: Math.max(a.hw, b.hw) + clear });
+      out.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z, half: Math.max(a.hw, b.hw) + clear, s: sp.start[e] + ((i - 1) / n) * ed.len });
       a.x = b.x;
       a.z = b.z;
       a.hw = b.hw;

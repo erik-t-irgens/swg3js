@@ -612,6 +612,24 @@ export function trackSync(before: readonly TrackDef[], now: readonly TrackDef[])
   return { added, removed, changed };
 }
 
+/**
+ * The tracks a batch's answer leaves (the world editor's `tracks` kind landed by difference, `App.landTracks`): the tracks
+ * read before with every id `deleted` dropped and every track `put` laid over the one of its id where it stands, a track put
+ * that was not there going at the end in the order put; nothing else moves. Never sorted: the race's list keeps its order.
+ */
+export function landedTracks(before: readonly TrackDef[], put: readonly TrackDef[], deleted: readonly string[]): TrackDef[] {
+  const gone = new Set(deleted);
+  const byId = new Map(put.map((t) => [t.id, t] as const));
+  const now: TrackDef[] = [];
+  for (const t of before) {
+    if (gone.has(t.id)) continue;
+    now.push(byId.get(t.id) ?? t);
+    byId.delete(t.id);
+  }
+  for (const t of byId.values()) if (!gone.has(t.id)) now.push(t);
+  return now;
+}
+
 /** A gate's or the grid's place carried into the game's frame (the placements' own `toGame`), with its window. */
 export interface GameGate extends GamePlace {
   w: number;
@@ -634,6 +652,25 @@ export interface CourseLeg {
   bz: number;
   /** Metres either side of the line it is checked over: the track's `clear`, or half the narrower of its two gates. */
   half: number;
+  /**
+   * Along a drawn road only (§2.3): the index of the course's path it lies on and its start's arclength along that path (m),
+   * what names it in words (`legName`). Absent on a gate-to-gate leg, so a track with no course gives exactly the legs it gave.
+   */
+  path?: number;
+  s?: number;
+}
+
+/**
+ * A leg of a track's corridor named in words (`track({ check })`'s hits): along a drawn road by its path and how far along it
+ * ("the road at 312 m", "shortcut cut at 40 m"), since the legs there are pieces of the road every `COURSE_LEG_STEP` and not
+ * gate to gate; on a gate-only track by the gates either end, as ever.
+ */
+export function legName(t: Pick<TrackDef, 'gates'> & { course?: TrackCourse }, leg: CourseLeg | undefined, i: number): string {
+  if (leg && leg.path !== undefined && t.course) {
+    const along = `at ${Math.round(leg.s ?? 0)} m`;
+    return leg.path === 0 ? `the road ${along}` : `shortcut ${t.course.paths[leg.path]?.id ?? leg.path} ${along}`;
+  }
+  return i === 0 ? 'grid to gate 0' : i <= t.gates.length - 1 ? `gate ${i - 1} to ${i}` : `gate ${t.gates.length - 1} to 0`;
 }
 
 /** Each path of a track's drawn course as its sampled spine (`coursePath.ts`), the main line first; none for a track with no course. */
@@ -654,11 +691,12 @@ export const COURSE_LEG_STEP = 8;
 export function courseLegs(t: Pick<TrackDef, 'kind' | 'clear'> & { course?: TrackCourse }, grid: { x: number; z: number }, gates: readonly { x: number; z: number; w: number }[], place?: (x: number, z: number) => { x: number; z: number }): CourseLeg[] {
   const legs: CourseLeg[] = [];
   if (t.course) {
-    for (const s of courseSpines(t as Pick<TrackDef, 'kind' | 'course'>)) {
-      for (const l of spineLegs(s, t.clear, COURSE_LEG_STEP)) {
+    const spines = courseSpines(t as Pick<TrackDef, 'kind' | 'course'>);
+    for (let p = 0; p < spines.length; p++) {
+      for (const l of spineLegs(spines[p], t.clear, COURSE_LEG_STEP)) {
         const a = place ? place(l.ax, l.az) : { x: l.ax, z: l.az };
         const b = place ? place(l.bx, l.bz) : { x: l.bx, z: l.bz };
-        legs.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z, half: l.half });
+        legs.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z, half: l.half, path: p, s: l.s });
       }
     }
     return legs;

@@ -99,7 +99,7 @@ try {
   /** `status --json` on a packs folder, with an install named (or none), through the list hook. */
   const asked = (swg: string | null, folder = packs) => {
     const args = [cli, 'status', folder, '--json', ...(swg ? [`--swg=${swg}`] : [])];
-    const run = spawnSync(process.execPath, args, { encoding: 'utf8', maxBuffer: 64 * 1048576, env: { ...process.env, SWG: '', SWG3JS_FINAL_NAMES: listFile } });
+    const run = spawnSync(process.execPath, args, { encoding: 'utf8', maxBuffer: 64 * 1048576, env: { ...process.env, SWG: '', SWG3JS_PLACEMENTS: '', SWG3JS_FINAL_NAMES: listFile } });
     const out = JSON.parse(run.stdout) as { steps: Step[]; lines: string[] };
     return {
       line: out.lines.find((l) => l.includes("SOE's final files")) ?? '',
@@ -156,7 +156,7 @@ try {
 
   // `navgrid --skip-existing` keeps exactly what status does not ask for: the grid that names the layout it has now,
   // never one baked from another or one with no key beside a world converted with SOE's final files.
-  const resumed = spawnSync(process.execPath, [cli, 'navgrid', 'all', packs, '--skip-existing'], { encoding: 'utf8', maxBuffer: 64 * 1048576, env: { ...process.env, SWG: '' } }).stdout;
+  const resumed = spawnSync(process.execPath, [cli, 'navgrid', 'all', packs, '--skip-existing'], { encoding: 'utf8', maxBuffer: 64 * 1048576, env: { ...process.env, SWG: '', SWG3JS_PLACEMENTS: '' } }).stdout;
   ok(/corellia: nav\.json is there already/.test(resumed) && /naboo: nav\.json is there already/.test(resumed), 'a resumed bake keeps a grid that names the layout it has now, and one with no key over a world converted without the list');
   ok(/dantooine: re-baking: the nav\.json there was baked from another layout or terrain/.test(resumed) && /tatooine: re-baking: the nav\.json there was baked before the world was converted with SOE/.test(resumed), `and bakes again what status would ask for (${resumed.split('\n').filter((l) => /re-baking|there already/.test(l)).join(' | ')})`);
 

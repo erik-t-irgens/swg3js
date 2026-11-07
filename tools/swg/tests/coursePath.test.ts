@@ -160,11 +160,44 @@ function randomPath(n: number): SpineNode[] {
   ok(worstKink <= 0, `the grade has no kink at a node between unequal edges (worst excess ${worstKink.toExponential(2)})`);
 }
 
+// ---- `sameEdge` field by field: it says "the same" of a copy and "another" of a copy one sample or one number off. ----
+// (Its judgement is what every check below of edge independence and the dirty set stands on: one that called every two edges
+// the same, or left a field out, passed them all.)
+{
+  const sp = buildSpine(randomPath(6), false);
+  const ed = sp.edges[2];
+  const copyOf = (e: typeof ed): typeof ed => ({ ...e, x: e.x.slice(), z: e.z.slice(), s: e.s.slice(), y: e.y.slice(), hw: e.hw.slice(), tb: e.tb.slice(), sh: e.sh.slice() });
+  ok(sameEdge(ed, copyOf(ed)), 'an edge and a copy of its arrays are the same');
+  const fields = ['x', 'z', 's', 'y', 'hw', 'tb', 'sh'] as const;
+  const missed: string[] = [];
+  for (const f of fields)
+    for (const i of [1, ed.count - 1]) {
+      const c = copyOf(ed);
+      c[f][i] += 1e-9;
+      if (sameEdge(ed, c)) missed.push(`${f}[${i}]`);
+    }
+  for (const [f, v] of [['count', ed.count - 1], ['walls', ed.walls + 1], ['from', ed.from + 1], ['to', ed.to + 1]] as const) {
+    const c = { ...copyOf(ed), [f]: v };
+    if (sameEdge(ed, c)) missed.push(f);
+  }
+  ok(missed.length === 0, `one sample of any of ${fields.join(', ')} a billionth off, or its count, walls, from or to another, is another edge (${missed.join(', ') || 'none called the same'})`);
+}
+
 // ---- Edge independence and the dirty set. ----
 {
+  // An edge compared written out here, with no call to `sameEdge` (the thing under test).
+  const differ = (a: ReturnType<typeof buildSpine>['edges'][number] | undefined, b: ReturnType<typeof buildSpine>['edges'][number] | undefined): boolean => {
+    if (!a || !b) return true;
+    if (a.count !== b.count || a.walls !== b.walls || a.from !== b.from || a.to !== b.to) return true;
+    for (const f of ['x', 'z', 's', 'y', 'hw', 'tb', 'sh'] as const) for (let i = 0; i < a.count; i++) if (!Object.is(a[f][i], b[f][i])) return true;
+    return false;
+  };
   let outside = 0;
   let wider = 0;
   let tested = 0;
+  let notExact = 0;
+  let missedOwn = 0;
+  let reported = 0;
   for (let k = 0; k < 30; k++) {
     const closed = k % 2 === 0;
     const nodes = randomPath(14);
@@ -183,10 +216,26 @@ function randomPath(n: number): SpineNode[] {
       tested++;
       if (!sameEdge(was.edges[e], now.edges[e])) outside++;
     }
-    for (const e of dirtyEdges(was, now)) if (!allowed.has(e)) wider++;
+    const dirty = dirtyEdges(was, now);
+    reported += dirty.length;
+    for (const e of dirty) if (!allowed.has(e)) wider++;
+    // Exactly the edges that differ, by the comparison written out here.
+    const want: number[] = [];
+    for (let e = 0; e < Math.max(was.edges.length, now.edges.length); e++) if (differ(was.edges[e], now.edges[e])) want.push(e);
+    if (want.join(',') !== dirty.join(',')) notExact++;
+    // The two edges whose end node moved (every edge's first and last samples are its nodes' places exactly) are among them.
+    for (const e of [i - 1, i]) if (!dirty.includes(e)) missedOwn++;
   }
   ok(tested > 100 && outside === 0, `a node moved leaves every edge outside i - 3 to i + 2 the same to the bit (${tested} edges looked at)`);
-  ok(wider === 0, 'the dirty set worked out by comparing is never wider than i - 3 to i + 2');
+  ok(reported > 0 && wider === 0, `the dirty set worked out by comparing is never wider than i - 3 to i + 2 (${reported} dirty edges over thirty moves)`);
+  ok(notExact === 0, 'the dirty set is exactly the edges whose samples differ, by a comparison written out apart from `sameEdge`');
+  ok(missedOwn === 0, "and holds every time the two edges whose end node moved");
+  // Spines of another edge count: every edge one has that the other has not is dirty.
+  const base = randomPath(6);
+  const longer = buildSpine([...base, { ...base[5], x: base[5].x + 40, z: base[5].z + 30 }], false);
+  const shorter = buildSpine(base, false);
+  const dl = dirtyEdges(shorter, longer);
+  ok(dl.includes(5) && dl.includes(4) && !dl.includes(0), `a node added at an open path's end: its new edge and the last edge (its tangent moved) are dirty, the first is not (${dl.join(', ')})`);
 }
 
 // ---- A closed path wraps; its nodes rotated give the same edges to the bit. ----
@@ -207,9 +256,73 @@ function randomPath(n: number): SpineNode[] {
     }
   }
   ok(same, "a closed path's nodes rotated give every edge's samples to the bit");
+  // And the rotation check can fail: compared one edge out of step, the edges differ.
+  let offByOne = true;
+  {
+    const rot = [...nodes.slice(1), nodes[0]];
+    const sr = buildSpine(rot, true);
+    for (let e = 0; e < nodes.length; e++) {
+      const a = sp.edges[(e + 2) % nodes.length];
+      const b = sr.edges[e];
+      if (sameEdge(a, { ...b, from: a.from, to: a.to })) offByOne = false;
+    }
+  }
+  ok(offByOne, 'compared one edge out of step, no edge is the same (the rotation check can tell)');
   // An edge's samples reused: a spine made again into itself answers the same samples.
   const again = buildSpine(nodes, true, sp);
   ok(again === sp && dirtyEdges(buildSpine(nodes, true), again).length === 0, 'a spine made again into its own arrays is the same spine to the bit');
+}
+
+// ---- A spine made again into its own arrays makes no array (what the second wave's carve, re-carving at `previewHz`, stands on). ----
+{
+  // Every typed array the spine's module makes is counted while it works: the global constructors stood in for, as the
+  // module reads them at the call.
+  const RealF = globalThis.Float64Array;
+  const RealI = globalThis.Int32Array;
+  let made = 0;
+  const counting = <T extends object>(C: T): T =>
+    new Proxy(C, {
+      construct(target, args) {
+        made++;
+        return new (target as unknown as new (...a: unknown[]) => object)(...args);
+      },
+    });
+  const nodes: SpineNode[] = [];
+  for (let i = 0; i < 400; i++) {
+    const a = (i / 400) * Math.PI * 2;
+    nodes.push(node(Math.sin(a) * 200, Math.cos(a) * 200, { y: Math.sin(a * 3) * 4 }));
+  }
+  const sp = buildSpine(nodes, true);
+  // Warm: a first rebuild of each shape into it may grow what the module keeps, and an edge the move lengthens its own
+  // arrays (by doubling): "once its arrays are big enough".
+  const moved = nodes.map((n, j) => (j === 17 ? { ...n, x: n.x + 3 } : n));
+  buildSpine(nodes, true, sp);
+  buildSpine(moved, true, sp);
+  let counts: number[] = [];
+  try {
+    (globalThis as { Float64Array: unknown }).Float64Array = counting(RealF);
+    (globalThis as { Int32Array: unknown }).Int32Array = counting(RealI);
+    for (const ns of [nodes, moved, nodes]) {
+      made = 0;
+      buildSpine(ns, true, sp);
+      counts.push(made);
+    }
+  } finally {
+    (globalThis as { Float64Array: unknown }).Float64Array = RealF;
+    (globalThis as { Int32Array: unknown }).Int32Array = RealI;
+  }
+  ok(counts.every((c) => c === 0), `a 400-node spine made again into its own arrays, as it is and with a node moved, makes no typed array (${counts.join(', ')})`);
+  // And the counting itself counts: a fresh spine makes its edges' arrays.
+  try {
+    (globalThis as { Float64Array: unknown }).Float64Array = counting(RealF);
+    made = 0;
+    buildSpine(nodes.slice(0, 40), true);
+    counts = [made];
+  } finally {
+    (globalThis as { Float64Array: unknown }).Float64Array = RealF;
+  }
+  ok(counts[0] > 40, `a fresh spine is counted making its arrays (${counts[0]})`);
+  ok(dirtyEdges(buildSpine(moved, true), buildSpine(moved, true, sp)).length === 0, 'and the spine made again into its arrays is the one made fresh, to the bit');
 }
 
 // ---- The driver's right in the raw frame is gridSlot's right carried by fromGame. ----

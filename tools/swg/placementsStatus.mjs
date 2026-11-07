@@ -37,8 +37,15 @@ function isFolder(dir) {
 /**
  * The folder holding `story/` and `world/`, or null for none: in a checkout (it has a `public/`) its own
  * `public/placements` and nothing else, in a release the build's copy in `dist/placements`.
+ *
+ * `SWG3JS_PLACEMENTS` in the environment names another folder for this install's own (the default root alone; a
+ * caller naming a root asks about that root), and an empty value names none: a test that runs `status` or the walk
+ * grid's bake over fixture packs hands its child one, as it hands it `SWG: ''`, so the owner's own edit files in this
+ * checkout (a world's map edits made a minute ago, under a world's name a fixture shares) never reach what it measures.
  */
 export function placementsFolder(root = ROOT) {
+  const named = root === ROOT ? process.env.SWG3JS_PLACEMENTS : undefined;
+  if (named !== undefined) return named && isFolder(named) ? named : null;
   const dir = isFolder(join(root, 'public')) ? join(root, 'public', 'placements') : join(root, 'dist', 'placements');
   return isFolder(dir) ? dir : null;
 }

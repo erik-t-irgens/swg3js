@@ -17,9 +17,9 @@ import { isDeepStrictEqual } from 'node:util';
 import { makeHarness } from './editsHarness.ts';
 import { REPO } from './oldModules.ts';
 import { BATCH_FILE_KINDS, EDIT_FILE_KINDS, OUTSIDE_EDIT_FILES, editFileOf, isOutsideKind, outsideFilePath } from '../../../src/story/placementPath.ts';
-import { EDITOR_HEADER, EDITOR_HEADER_VALUE, TRACKS_OLDER_ENDPOINT, applyPlacementOp, batchKindOf, olderTracksEndpoint, tracksKind } from '../../../src/world/placementEdits.ts';
+import { EDITOR_HEADER, EDITOR_HEADER_VALUE, TRACKS_OLDER_ENDPOINT, applyPlacementOp, batchKindOf, droppedField, olderTracksEndpoint, tracksKind } from '../../../src/world/placementEdits.ts';
 import { olderEndpoint, refusalWords } from '../../../src/editor/devVerdict.ts';
-import { readTrackFile, trackFileText, type TrackDef } from '../../../src/race/trackFile.ts';
+import { landedTracks, readTrackFile, trackFileText, type TrackDef } from '../../../src/race/trackFile.ts';
 import { courseCtx, drawTrack } from '../../../src/editor/courseEdit.ts';
 
 let checks = 0;
@@ -51,9 +51,40 @@ const made = (id: string, cx: number) => {
   const text = trackFileText(WORLD, 'raw', [{ ...a, at: 1 }, { ...b, at: 2 }]);
   const opened = k.open(text, WORLD, 'ground');
   ok(typeof opened !== 'string' && opened.rows.length === 2 && opened.rows[0].row.id === 'alpha', 'a file of two tracks opens as two rows');
-  const later = text.replace('"wallHigh": 8,', '"wallHigh": 8, "rules": 1,');
+  // The course's own line found by its own numbers (never by a feel dial's starting value, which the owner moves).
+  const wh = `"wallHigh": ${a.course!.wallHigh},`;
+  const later = text.replace(wh, `${wh} "rules": 1,`);
+  ok(later !== text, "the course's own line is found by its own numbers");
   const droppy = k.open(later, WORLD, 'ground');
   ok(typeof droppy === 'string' && /would drop course\.rules: update first/.test(droppy), `a file whose course carries a field this build does not read is refused for writing, never written lossy (${droppy})`);
+  // A later pass's field on a gate, a node or the grid of a track the edit does not touch: each refused for writing the same
+  // way (the reader names a gate's `<id>.gates[<i>].<field>`, and no word boundary stands between `]` and `.`).
+  const withField = (mutate: (o: { tracks: Record<string, unknown>[] }) => void): string => {
+    const o = JSON.parse(text) as { tracks: Record<string, unknown>[] };
+    mutate(o);
+    return JSON.stringify(o, null, 2);
+  };
+  const gateField = withField((o) => {
+    (o.tracks[1].gates as Record<string, unknown>[])[0].need = 1;
+  });
+  const gateOpen = k.open(gateField, WORLD, 'ground');
+  ok(typeof gateOpen === 'string' && /would drop gates\[0\]\.need: update first/.test(gateOpen), `a file whose gate carries a field this build does not read is refused for writing (${gateOpen})`);
+  const nodeOpen = k.open(
+    withField((o) => {
+      const c = o.tracks[0].course as { paths: { nodes: Record<string, unknown>[] }[] };
+      c.paths[0].nodes[1].surface = 'sand';
+    }),
+    WORLD,
+    'ground',
+  );
+  ok(typeof nodeOpen === 'string' && /would drop course\.paths\[0\]\.nodes\[1\]\.surface: update first/.test(nodeOpen), `and one whose course node carries one (${nodeOpen})`);
+  const gridOpen = k.open(withField((o) => ((o.tracks[0].grid as Record<string, unknown>).side = 'left')), WORLD, 'ground');
+  ok(typeof gridOpen === 'string' && /would drop grid\.side: update first/.test(gridOpen), `and one whose grid carries one (${gridOpen})`);
+  const headOpen = k.open(withField((o) => (o.tracks[0].owner = 'him')), WORLD, 'ground');
+  ok(typeof headOpen !== 'string', "a field at a track's head is kept on its head line, never refused");
+  ok(droppedField(['a.gates[12].x2']) === 'a.gates[12].x2' && droppedField(['a.grid.side', 'b.course.paths[0].nodes[2].k']) === 'a.grid.side' && droppedField(['a.gridx', 'a.coursework', 'a.need']) === null, "what would be dropped is any field of a gate, the grid or the course, and no head field whose name merely begins like one");
+  const lossy = applyPlacementOp({ op: 'batch', world: WORLD, edits: [{ file: 'tracks', put: { ...a, name: 'Alpha again' } as unknown as Record<string, unknown> }] }, { tracks: gateField }, { worlds: new Map([[WORLD, 'ground']]), now: 9 });
+  ok(lossy.status === 409 && lossy.writes.length === 0 && /would drop gates\[0\]\.need/.test((lossy.body as { why: string }).why), `a batch putting another track over such a file is refused and writes nothing (${lossy.status})`);
   const broken = k.open(text.replace('"kind": "circuit"', '"kind": "lap"'), WORLD, 'ground');
   ok(typeof broken === 'string' && /cannot read/.test(broken), 'a file holding a track the reader refuses is refused, never written over');
   const cleaned = k.clean({ ...a } as unknown as Record<string, unknown>, 'alpha', 1234, {} as never, 'ground');
@@ -73,6 +104,21 @@ const made = (id: string, cx: number) => {
   ok(rt.tracks.length === 1 && isDeepStrictEqual(rt.tracks[0], { ...a, at: 5 }), 'and reads back the track written');
   const bad = applyPlacementOp({ op: 'batch', world: WORLD, edits: [{ file: 'nope', put: {} }] }, {}, { worlds: new Map([[WORLD, 'ground']]), now: 1 });
   ok(bad.status === 400 && /lightsAll or tracks$/.test((bad.body as { why: string }).why), "a kind the batch does not know is refused naming every kind, ending in today's tracks");
+}
+
+// ---------------------------------------------------------------- 1b. a batch's answer landed by difference (`landedTracks`)
+
+{
+  // The race's list as the page holds it, and a batch's answer over it: a track put replaces its own where it stands, a new
+  // one goes at the end in the order put, an id taken out goes, and nothing else moves (never sorted).
+  const tr = (id: string, name = id): TrackDef => ({ id, name, kind: 'sprint', laps: 1, for: ['podracer'], clear: 0, grid: { x: 0, y: 0, z: 0, q: [1, 0, 0, 0] }, gates: [] });
+  const before = [tr('zeta'), tr('alpha'), tr('mid')];
+  const ids = (l: TrackDef[]) => l.map((t) => `${t.id}${t.name !== t.id ? `:${t.name}` : ''}`).join(',');
+  ok(ids(landedTracks(before, [tr('alpha', 'Alpha 2')], [])) === 'zeta,alpha:Alpha 2,mid', 'a track put replaces its own where it stands');
+  ok(ids(landedTracks(before, [tr('new2'), tr('new1')], [])) === 'zeta,alpha,mid,new2,new1', 'new ones go at the end in the order put');
+  ok(ids(landedTracks(before, [], ['alpha'])) === 'zeta,mid', 'an id taken out goes (an undo of a course drawn, a take-out)');
+  ok(ids(landedTracks(before, [tr('mid', 'M')], ['zeta'])) === 'alpha,mid:M', 'a put and a take-out in one batch, each as itself');
+  ok(ids(landedTracks(before, [], [])) === 'zeta,alpha,mid' && landedTracks([], [tr('a')], []).length === 1, 'an empty answer leaves the list as it was');
 }
 
 // ---------------------------------------------------------------- 2. a drawn course through the real editing class
