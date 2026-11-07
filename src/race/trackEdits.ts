@@ -244,8 +244,9 @@ export function deleteGate(t: TrackDef, i: number): TrackDef | string {
   return checked({ ...t, gates: t.gates.filter((_, k) => k !== i) });
 }
 
-const clampW = (w: number) => Math.min(TRACK_LIMITS.widthMost, Math.max(TRACK_LIMITS.widthLeast, Number.isFinite(w) ? w : TRACK_LIMITS.widthLeast));
-const clampH = (h: number) => Math.min(TRACK_LIMITS.heightMost, Math.max(TRACK_LIMITS.heightLeast, Number.isFinite(h) ? h : TRACK_LIMITS.heightLeast));
+// A gate's own window (wave 3b): up to the gates' own limits, which reach past the road's own width.
+const clampW = (w: number) => Math.min(TRACK_LIMITS.gateWidthMost, Math.max(TRACK_LIMITS.widthLeast, Number.isFinite(w) ? w : TRACK_LIMITS.widthLeast));
+const clampH = (h: number) => Math.min(TRACK_LIMITS.gateHeightMost, Math.max(TRACK_LIMITS.heightLeast, Number.isFinite(h) ? h : TRACK_LIMITS.heightLeast));
 
 /**
  * Gate `i`'s window set (held to the reader's limits). A gate that follows a drawn course keeps following it and, given a width,

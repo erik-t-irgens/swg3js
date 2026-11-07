@@ -48,6 +48,23 @@ export const COURSE_TUNE = {
   /** A shoulder stepped this far by C with a notch of the wheel (m); a gate widened this far a notch (m). */
   shoulderStep: 1,
   gateWidthStep: 2,
+  /**
+   * A gate's step grows with its size (wave 3b, gates up to 2 km wide and 1 km tall): a notch is the larger of
+   * `gateWidthStep` and this share of the gate's width, so a 300 m gate steps 24 m and a 20 m one 2 m.
+   */
+  gateStepShare: 0.08,
+  /**
+   * The Ground mode's new shape (wave 3b): its kind, length along the road, width across, depth or height, edges' softness
+   * and a ramp's far side (nought a drop). A pit a pod notices: a hole 12 m long, 10 m wide and 2 m deep, eased over 3 m.
+   */
+  shapeKind: 'hole' as 'hole' | 'mound' | 'ramp' | 'trench',
+  shapeLength: 12,
+  shapeWidth: 10,
+  shapeHeight: 2,
+  shapeSoft: 3,
+  shapeBack: 0,
+  /** C with a notch of the wheel scales the picked shape's length and width by this share; F held raises its depth or height at `raiseRate`; R held turns it at `bankRate`. */
+  shapeStepShare: 0.1,
   /** The notes: a shoulder steeper than this (degrees), room past the widest box of the kinds raced (m), a crossing's clearance under this (m), a bridge's top this far off the deck (m), a touch-up left past this (m). */
   steepNote: 45,
   narrowRoom: 2,
@@ -119,6 +136,13 @@ const RANGES: Partial<Record<keyof CourseTune, [number, number]>> = {
   bankRate: [0.5, 90],
   shoulderStep: [0.1, 16],
   gateWidthStep: [0.5, 20],
+  gateStepShare: [0, 0.5],
+  shapeLength: [0.5, 2000],
+  shapeWidth: [0.5, 400],
+  shapeHeight: [0, 200],
+  shapeSoft: [0, 200],
+  shapeBack: [0, 400],
+  shapeStepShare: [0.01, 0.5],
   steepNote: [5, 89],
   narrowRoom: [0, 20],
   clearanceNote: [0, 50],
@@ -144,6 +168,7 @@ const RANGES: Partial<Record<keyof CourseTune, [number, number]>> = {
 /** The choices each switch of the tune takes. */
 const CHOICES: Partial<Record<keyof CourseTune, readonly (string | boolean)[]>> = {
   curve: ['smooth', 'straight'],
+  shapeKind: ['hole', 'mound', 'ramp', 'trench'],
   feather: ['linear', 'easeIn', 'easeOut', 'easeInOut'],
   crossing: ['wall', 'slope'],
   grass: ['clear', 'keep'],

@@ -106,10 +106,24 @@ export function alongOf(sp: Spine, e: number, t: number): number {
   return ed ? sp.start[e] + t * ed.len : 0;
 }
 
+/** The ground the land answers at a point of the file's frame (raw ground and the sculpt's delta), NaN where it is not known. */
+export type LandAt = (x: number, z: number) => number;
+
+/**
+ * The road's surface under a spine point (wave 3b's review round): the spine's own height where the road cuts the ground, and
+ * where it follows (`k` under 1) the ground the carve leaves there, the land eased toward the spine by how much it cuts, as the
+ * carve itself lays it. The spine's height to the bit where it cuts or the land is not known.
+ */
+export function surfaceOf(P: SpinePoint, land?: LandAt): number {
+  if (!(P.k < 1) || !land) return P.y;
+  const g = land(P.x, P.z);
+  return Number.isFinite(g) ? g + (P.y - g) * P.k : P.y;
+}
+
 /** A gate placed on a spine at an anchor: on the road there, `lift` over its surface, facing along it, rolled by its bank. */
-export function gateOnSpine(sp: Spine, path: string, e: number, t: number, size: { w: number | null; h: number; ow?: 1 }, lift: number, deck: number, P: SpinePoint = spinePoint()): TrackGate {
+export function gateOnSpine(sp: Spine, path: string, e: number, t: number, size: { w: number | null; h: number; ow?: 1 }, lift: number, deck: number, P: SpinePoint = spinePoint(), land?: LandAt): TrackGate {
   spineAt(sp, e, t, P);
-  const y = P.y + lift;
+  const y = surfaceOf(P, land) + lift;
   let h = size.h;
   // Under a deck the window's top stands under it (its top is seven eighths of its height over its place).
   if (Number.isFinite(deck) && deck > y) h = Math.max(TRACK_LIMITS.heightLeast, Math.min(h, ((deck - y) * 8) / 7));
@@ -125,9 +139,9 @@ export function gateOnSpine(sp: Spine, path: string, e: number, t: number, size:
 }
 
 /** The grid placed on a spine at an anchor: on the road's surface there, facing along it (no roll: a body stands upright). */
-export function gridOnSpine(sp: Spine, path: string, e: number, t: number, P: SpinePoint = spinePoint()): TrackPlace {
+export function gridOnSpine(sp: Spine, path: string, e: number, t: number, P: SpinePoint = spinePoint(), land?: LandAt): TrackPlace {
   spineAt(sp, e, t, P);
-  const g: TrackPlace = { x: r2(P.x), y: r2(P.y), z: r2(P.z), q: roadTurn(P.tx, P.tz, 0) };
+  const g: TrackPlace = { x: r2(P.x), y: r2(surfaceOf(P, land)), z: r2(P.z), q: roadTurn(P.tx, P.tz, 0) };
   g.path = path;
   g.e = e;
   g.t = roundShare(t);
@@ -234,7 +248,7 @@ export function gateAlongs(sp: Spine, sprint: boolean, rules: GateRules): number
  * A fresh set of gates and a grid for a track's drawn course, its main line's (§2.9): each anchored, so it follows the road.
  * `deckAt` (the second wave's) holds a gate under a deck. Answers them and the notes (a gate that cannot fit under a deck).
  */
-export function placeGates(t: TrackDef, rules: GateRules = gateRules(), deckAt?: DeckAt): { gates: TrackGate[]; grid: TrackPlace; notes: string[] } {
+export function placeGates(t: TrackDef, rules: GateRules = gateRules(), deckAt?: DeckAt, land?: LandAt): { gates: TrackGate[]; grid: TrackPlace; notes: string[] } {
   const notes: string[] = [];
   const sp = courseSpines(t)[0];
   const main = t.course!.paths[0].id;
@@ -245,12 +259,12 @@ export function placeGates(t: TrackDef, rules: GateRules = gateRules(), deckAt?:
   const gates = gateAlongs(sp, sprint, rules).map((s, i) => {
     locateAlong(sp, s, at);
     const deck = deckAt ? deckAt(main, at.e, at.t) : -Infinity;
-    const g = gateOnSpine(sp, main, at.e, at.t, { w: null, h }, rules.gateLift, deck, P);
+    const g = gateOnSpine(sp, main, at.e, at.t, { w: null, h }, rules.gateLift, deck, P, land);
     if (Number.isFinite(deck) && deck - g.y < (TRACK_LIMITS.heightLeast * 7) / 8) notes.push(`gate ${i} under the crossing has ${Math.max(0, deck - g.y).toFixed(1)} m of clearance`);
     return g;
   });
   locateAlong(sp, sprint ? 0 : -rules.gridBack, at);
-  const grid = gridOnSpine(sp, main, at.e, at.t, P);
+  const grid = gridOnSpine(sp, main, at.e, at.t, P, land);
   return { gates, grid, notes };
 }
 
@@ -259,7 +273,7 @@ export function placeGates(t: TrackDef, rules: GateRules = gateRules(), deckAt?:
  * width; its height held under a deck), the rest exactly as they are: what every edit of a course does in the same row, so a
  * following gate is never left off its road. An anchor on an edge a path no longer has is put at the end of its last.
  */
-export function followCourse(t: TrackDef, rules: GateRules = gateRules(), deckAt?: DeckAt): TrackDef {
+export function followCourse(t: TrackDef, rules: GateRules = gateRules(), deckAt?: DeckAt, land?: LandAt): TrackDef {
   if (!t.course) return t;
   const spines = courseSpines(t);
   const byId = new Map(t.course.paths.map((p, i) => [p.id, i]));
@@ -272,7 +286,7 @@ export function followCourse(t: TrackDef, rules: GateRules = gateRules(), deckAt
     const e = Math.min(g.e ?? 0, edges - 1);
     const share = (g.e ?? 0) > edges - 1 ? 1 : (g.t ?? 0);
     const deck = deckAt ? deckAt(g.path, e, share) : -Infinity;
-    return gateOnSpine(spines[p], g.path, e, share, { w: g.ow ? g.w : null, h: g.h, ow: g.ow }, rules.gateLift, deck, P);
+    return gateOnSpine(spines[p], g.path, e, share, { w: g.ow ? g.w : null, h: g.h, ow: g.ow }, rules.gateLift, deck, P, land);
   });
   let grid = t.grid;
   if (grid.path !== undefined) {
@@ -280,7 +294,7 @@ export function followCourse(t: TrackDef, rules: GateRules = gateRules(), deckAt
     if (p !== undefined) {
       const edges = pathEdges(t.course, p, t.kind);
       const e = Math.min(grid.e ?? 0, edges - 1);
-      grid = gridOnSpine(spines[p], grid.path, e, (grid.e ?? 0) > edges - 1 ? 1 : (grid.t ?? 0), P);
+      grid = gridOnSpine(spines[p], grid.path, e, (grid.e ?? 0) > edges - 1 ? 1 : (grid.t ?? 0), P, land);
     }
   }
   return { ...t, grid, gates };
@@ -290,15 +304,15 @@ export function followCourse(t: TrackDef, rules: GateRules = gateRules(), deckAt
  * Place gates again (§2.9): every following gate placed again, and the spacing's gates (and the apexes') added where none
  * stands within `gateMin` along the main line, each put in after the last gate before it along the road, so the order raced
  * stays the road's. A gate moved by hand (no anchor) is measured by where it stands nearest the road, and never moved.
+ * Where the start and the finish stand is the gates' own (wave 3b's review round: Start here and Finish here moved them): on a
+ * sprint no gate is added before gate 0's place or after the last gate's, and a circuit's order runs from gate 0's place.
  */
-export function gatesAgain(t: TrackDef, rules: GateRules = gateRules(), deckAt?: DeckAt): TrackDef {
+export function gatesAgain(t: TrackDef, rules: GateRules = gateRules(), deckAt?: DeckAt, land?: LandAt): TrackDef {
   if (!t.course) return t;
-  const followed = followCourse(t, rules, deckAt);
+  const followed = followCourse(t, rules, deckAt, land);
   const sp = courseSpines(followed)[0];
   const main = followed.course!.paths[0].id;
   const sprint = followed.kind === 'sprint';
-  const start = sprint ? Math.min(rules.gridAhead, sp.length / 2) : 0;
-  const ord = (s: number) => (sprint ? s : (s - start + sp.length) % sp.length);
   const near = spineNear();
   // Where each gate stands along the main line (one on another path, or far off the road, along nothing).
   const alongOfGate = (g: TrackGate): number => {
@@ -309,15 +323,22 @@ export function gatesAgain(t: TrackDef, rules: GateRules = gateRules(), deckAt?:
   };
   const gates = [...followed.gates];
   const along = gates.map(alongOfGate);
+  // The start's and the finish's own places along the main line, where gate 0 and the last gate stand on it.
+  const first = along.length ? along[0] : Number.NaN;
+  const last = along.length ? along[along.length - 1] : Number.NaN;
+  const start = Number.isFinite(first) ? first : sprint ? Math.min(rules.gridAhead, sp.length / 2) : 0;
+  const end = sprint && Number.isFinite(last) && last > start ? last : sp.length;
+  const ord = (s: number) => (sprint ? s : (s - start + sp.length) % sp.length);
   const at = { e: 0, t: 0 };
   const P = spinePoint();
   const h = gateHeightFor(followed, rules);
   for (const s of gateAlongs(sp, sprint, rules)) {
     if (gates.length >= TRACK_LIMITS.gates) break;
+    if (sprint && (s < start - 1e-6 || s > end + 1e-6)) continue;
     if (along.some((a) => Number.isFinite(a) && apart(sp, a, s) < rules.gateMin)) continue;
     locateAlong(sp, s, at);
     const deck = deckAt ? deckAt(main, at.e, at.t) : -Infinity;
-    const g = gateOnSpine(sp, main, at.e, at.t, { w: null, h }, rules.gateLift, deck, P);
+    const g = gateOnSpine(sp, main, at.e, at.t, { w: null, h }, rules.gateLift, deck, P, land);
     // After the last gate before it along the road (gate 0's place counts as the start).
     let after = -1;
     for (let i = 0; i < gates.length; i++) if (Number.isFinite(along[i]) && ord(along[i]) <= ord(s) && (after < 0 || ord(along[i]) >= ord(along[after]))) after = i;
@@ -369,18 +390,32 @@ export function deleteMap(k: number, n: number, closed: boolean, lens: readonly 
   };
 }
 
-/** Every gate's and the grid's anchor on path `path` carried through `map` (the shares rounded as written). */
+/**
+ * Every gate's and the grid's anchor on path `path` carried through `map` (the shares rounded as written), and the course's
+ * own ground shapes' anchors with them (wave 3b: a shape is anchored as a gate is), in a course object of its own.
+ */
 export function remapAnchors(t: TrackDef, path: string, map: AnchorMap): TrackDef {
   const move = <P extends TrackPlace>(g: P): P => {
     if (g.path !== path) return g;
     const m = map(g.e ?? 0, g.t ?? 0);
     return { ...g, e: m.e, t: roundShare(m.t) };
   };
-  return { ...t, grid: move(t.grid), gates: t.gates.map(move) };
+  const out: TrackDef = { ...t, grid: move(t.grid), gates: t.gates.map(move) };
+  if (t.course?.ground?.length) {
+    out.course = {
+      ...t.course,
+      ground: t.course.ground.map((s) => {
+        if (s.path !== path) return s;
+        const m = map(s.e, s.t);
+        return { ...s, e: m.e, t: roundShare(m.t) };
+      }),
+    };
+  }
+  return out;
 }
 
 /** Gate `i` anchored again to the road nearest it, on whichever path is nearest, its width the road's again (`ow` dropped). */
-export function followGate(t: TrackDef, i: number, rules: GateRules = gateRules(), deckAt?: DeckAt): TrackDef | string {
+export function followGate(t: TrackDef, i: number, rules: GateRules = gateRules(), deckAt?: DeckAt, land?: LandAt): TrackDef | string {
   if (!t.course) return `${t.id} has no course to follow`;
   const g = t.gates[i];
   if (!g) return `there is no gate ${i}: the gates are 0 to ${t.gates.length - 1}`;
@@ -402,6 +437,6 @@ export function followGate(t: TrackDef, i: number, rules: GateRules = gateRules(
   if (best < 0) return 'no road to follow';
   const path = t.course.paths[best].id;
   const deck = deckAt ? deckAt(path, be, bt) : -Infinity;
-  const ng = gateOnSpine(spines[best], path, be, bt, { w: null, h: g.h }, rules.gateLift, deck);
+  const ng = gateOnSpine(spines[best], path, be, bt, { w: null, h: g.h }, rules.gateLift, deck, undefined, land);
   return { ...t, gates: t.gates.map((x, k) => (k === i ? ng : x)) };
 }

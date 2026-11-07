@@ -1043,6 +1043,22 @@ if (process.argv.includes('course')) {
     console.log(JSON.stringify({ frames: COURSE_FRAMES, wallsMade: w.made, wallsScavenges: w.scavenges, lines: cm.courseLineN, marks: cm.courseMarkN, views: (course.wallsMode.report() as { views: number }).views }));
     process.exit(0);
   }
+  // With `ground` too (`courseGroundTool.test.ts`, the race drawer's wave 3b): the Ground mode over the circuit with four
+  // shapes in view (each kind, one turned), the first picked, the cursor wandering over their handles -- the outlines made
+  // once, a frame only projecting them and finding the hover. Measured alone, and printed alone.
+  if (process.argv.includes('ground')) {
+    const kinds = ['hole', 'mound', 'ramp', 'trench'] as const;
+    made.course!.ground = kinds.map((kind, k) => ({ kind, path: made.course!.paths[0].id, e: 5 + k * 6, t: 0.5, off: k - 1.5, turn: k === 2 ? 20 : 0, l: 12, w: 8, h: 2, soft: 2, ...(kind === 'ramp' ? { back: 6 } : {}) }));
+    course.setMode('ground');
+    course.groundMode.shape = 0;
+    st[3] = 800;
+    st[4] = 450;
+    courseFrame();
+    const g = await measure();
+    watch.disconnect();
+    console.log(JSON.stringify({ frames: COURSE_FRAMES, groundMade: g.made, groundScavenges: g.scavenges, lines: cm.courseLineN, marks: cm.courseMarkN, shapes: (course.groundMode.report() as { shapes: number }).shapes }));
+    process.exit(0);
+  }
   // The cursor on node 0's diamond (its place on the screen read off the marks a frame drew), nothing held.
   st[3] = 800;
   st[4] = 450;

@@ -22,6 +22,11 @@ import { footBound, footMeetsDisc, KeepGrid, rawRect, sameTileDeltas, SculptStro
 import type { EditorEdits, Stroke } from './editorEdit.ts';
 import type { RowChange } from './undo.ts';
 import type { ToolDef, ToolFrame } from './tools.ts';
+import { courseSpines, type TrackDef } from '../race/trackFile.ts';
+import { cellBytes, dropBrushCells, keepBrushCells, type BrushChunk } from '../race/courseGround.ts';
+import { COURSE_TUNE } from '../race/courseTune.ts';
+import { brushChanged, type CourseEdit } from './courseEdit.ts';
+import { nearestPath, TrackStroke } from './trackBrush.ts';
 
 /** A row of ours standing, as the carry asks for it: its id, file and row, and where its own box's lowest point stands under its origin. */
 export interface SculptRow {
@@ -70,6 +75,21 @@ export interface SculptHost {
   beginWork(): void;
   noteStamp(): void;
   say(words: string, ok: boolean): void;
+  /** What "This track" strokes need (the race drawer's wave 3b): absent, the switch strokes nothing. */
+  track?: TrackBrushHost;
+}
+
+/** What a "This track" stroke needs of the Course tool and the world (the race drawer's wave 3b). */
+export interface TrackBrushHost {
+  /** The course picked with the Course tool, as the file holds it, or null. */
+  track(): TrackDef | null;
+  /** The ground the world draws now at a point of the raw frame (NaN where none can be had). */
+  groundAt(x: number, z: number): number;
+  /** The world carves a preview of `t` laid over the file's courses (null: the file's own back); the brush at a raw point. */
+  preview(t: TrackDef | null, fx: number, fz: number): void;
+  /** One action written (the Course tool's own `write`), and whether the last was taken. */
+  write(label: string, before: TrackDef, after: CourseEdit): Promise<string>;
+  ok(): boolean;
 }
 
 /** The mode a button applies with the tool's mode chosen: the left the mode itself, the right raise's and lower's other (none for flatten and smooth). */
@@ -132,6 +152,16 @@ export class EditorSculpt {
   /** The host's two frames as kept functions, handed to the mask. */
   private readonly toGame: FrameTo;
   private readonly toRaw: FrameTo;
+  /**
+   * A "This track" stroke under way (the race drawer's wave 3b): its pure record over the picked course's road lattice, the
+   * track it began on, when it last carved a preview, and the preview's keys of the deltas (let go as the next takes over).
+   */
+  private trackStroke: TrackStroke | null = null;
+  private trackOn: TrackDef | null = null;
+  private trackPreviewAt = -Infinity;
+  private trackKeys: string[] = [];
+  private trackKeyN = 0;
+  private clockNow = 0;
 
   constructor(host: SculptHost) {
     this.host = host;
@@ -179,6 +209,10 @@ export class EditorSculpt {
   worldGone(): void {
     this.stroke = null;
     this.editStroke = null;
+    this.trackStroke = null;
+    this.trackOn = null;
+    for (const d of this.trackKeys) dropBrushCells(d);
+    this.trackKeys = [];
     this.mode = null;
     this.armed = false;
     this.feetFresh = false;
@@ -193,13 +227,14 @@ export class EditorSculpt {
    */
   frame(f: ToolFrame): void {
     if (!this.armed) return;
+    this.clockNow = f.now;
     if (f.sampled && f.valid) this.sample(f.x, f.z);
     const want = f.apply ? buttonMode(SCULPT_TUNE.mode, false) : f.inverse ? buttonMode(SCULPT_TUNE.mode, true) : null;
     if (want !== this.mode) {
       void this.end();
       if (want && f.valid && !this.writing) this.begin(want, f.x, f.z);
     }
-    const s = this.stroke;
+    const s = this.stroke ?? this.trackStroke;
     if (!this.mode || !s || !f.valid) return;
     const n = stampsDue(this.clock, f.dt, Math.max(0.01, SCULPT_TUNE.rate));
     for (let i = 0; i < n; i++) this.stamp(f.x, f.z);
@@ -226,6 +261,11 @@ export class EditorSculpt {
   private begin(mode: SculptMode, x: number, z: number): void {
     this.mode = mode;
     startClock(this.clock);
+    // "This track" (the race drawer's wave 3b): the stroke goes onto the picked course's own road, never the world's heights.
+    if (SCULPT_TUNE.thisTrack) {
+      this.beginTrack(mode, x, z);
+      return;
+    }
     this.host.beginWork();
     // The stroke works over the carved ground (the race drawer: a flatten lands on its height over a road); each tile's `on`
     // digest below stays the raw ground's.
@@ -240,10 +280,63 @@ export class EditorSculpt {
     this.height = t.target === 'typed' ? t.height : t.target === 'sampled' ? t.sampled : this.groundAt(x, z);
   }
 
+  /**
+   * A "This track" stroke begun on the course picked with the Course tool (refused in words, once a stroke, where none is
+   * picked or it has no course): on the path of it nearest the stroke's first stamp, over that path's brush lattice.
+   */
+  private beginTrack(mode: SculptMode, x: number, z: number): void {
+    const host = this.host.track;
+    const t = host?.track() ?? null;
+    if (!host || !t?.course) {
+      this.host.say('This track is on and no course is picked: pick one with the Course tool (\'), or switch This track off', false);
+      return;
+    }
+    this.host.toRaw(x, z, this.at);
+    const near = nearestPath(courseSpines(t), t.course.paths.map((p) => p.id), this.at.x, this.at.z);
+    if (!near) return;
+    const path = t.course.paths.find((p) => p.id === near.path)!;
+    const ts = new TrackStroke(near.path, near.spine, t.course.brush ?? [], (rx, rz) => host.groundAt(rx, rz), path.nodes, path.bl);
+    // A chunk the track names whose deltas were never read here is refused (the review round): stroked, it would start from
+    // noughts and be written over the stored one.
+    if (ts.missing.size) {
+      this.host.say(`${ts.missing.size} brush chunk${ts.missing.size === 1 ? '' : 's'} of ${t.name}'s ${near.path} could not be read: reload the page before stroking it`, false);
+      return;
+    }
+    this.trackOn = t;
+    this.trackStroke = ts;
+    this.trackPreviewAt = -Infinity;
+    const st = SCULPT_TUNE;
+    this.height = st.target === 'typed' ? st.height : st.target === 'sampled' ? st.sampled : this.groundAt(x, z);
+  }
+
+  /** The track stroke's chunks as they stand, as a preview of the track carved live (the deltas under keys of their own). */
+  private previewTrack(fx: number, fz: number): void {
+    const ts = this.trackStroke;
+    const t = this.trackOn;
+    const host = this.host.track;
+    if (!ts || !t?.course || !host) return;
+    const had = this.trackKeys;
+    this.trackKeys = [];
+    const keep = (t.course.brush ?? []).filter((b) => b.path !== ts.path || !ts.touched.has(b.k));
+    for (const [k, c] of ts.chunks()) {
+      if (!c) continue;
+      const d = `~live:${this.trackKeyN++}`;
+      keepBrushCells(d, c.cells);
+      this.trackKeys.push(d);
+      keep.push({ path: ts.path, k, a: c.a, n: c.n, d });
+    }
+    host.preview({ ...t, course: { ...t.course, brush: keep } }, fx, fz);
+    for (const d of had) dropBrushCells(d);
+  }
+
   /** One stamp at a game-frame point: laid into the store and the ground under it rebuilt. */
   private stamp(x: number, z: number): void {
     const s = this.stroke;
     const mode = this.mode;
+    if (this.trackStroke && mode) {
+      this.stampTrack(x, z, mode);
+      return;
+    }
     if (!s || !mode) return;
     const t = SCULPT_TUNE;
     const a = this.ask;
@@ -265,6 +358,31 @@ export class EditorSculpt {
     const r = s.stamp(a, keep, this.out);
     this.host.noteStamp();
     if (r.x0 <= r.x1) this.host.changed(r, false, x, z);
+  }
+
+  /** One "This track" stamp at a game-frame point: the picked course's cells moved, and a preview carved at the course tool's `previewHz`. */
+  private stampTrack(x: number, z: number, mode: SculptMode): void {
+    const ts = this.trackStroke!;
+    const t = SCULPT_TUNE;
+    const a = this.ask;
+    this.host.toRaw(x, z, this.at);
+    a.mode = mode;
+    a.cx = this.at.x;
+    a.cz = this.at.z;
+    a.radius = t.radius;
+    a.hard = t.hard;
+    a.falloff = t.falloff;
+    a.strength = t.strength;
+    a.speed = t.speed;
+    a.tau = t.tau;
+    a.smoothTau = t.smoothTau;
+    a.flatMode = t.flatMode;
+    a.height = t.target === 'stamp' ? this.groundAt(x, z) : this.height;
+    a.dt = 1 / Math.max(0.01, t.rate);
+    if (ts.stamp(a) > 0 && this.clockNow - this.trackPreviewAt >= 1 / Math.max(1, COURSE_TUNE.previewHz)) {
+      this.trackPreviewAt = this.clockNow;
+      this.previewTrack(x, z);
+    }
   }
 
   /**
@@ -354,6 +472,16 @@ export class EditorSculpt {
 
   /** The stroke ended: its end's rebuild, then every tile it changed (and the rows carry moves) written in one batch, one undo entry. */
   private end(): Promise<string> {
+    const ts = this.trackStroke;
+    if (ts) {
+      this.trackStroke = null;
+      this.mode = null;
+      const w = this.writeTrack(ts).finally(() => {
+        if (this.writing === w) this.writing = null;
+      });
+      this.writing = w;
+      return w;
+    }
     const s = this.stroke;
     const es = this.editStroke;
     this.stroke = null;
@@ -433,6 +561,47 @@ export class EditorSculpt {
     else if (reached) h.say(reached, !reach.players.length && t.keepOff);
     this.last.said = no ? said || no : withReach(said);
     return this.last.said;
+  }
+
+  /**
+   * A "This track" stroke written (the race drawer's wave 3b): each chunk it changed deflated and kept under its text, the
+   * track's brush changed in one write through the Course tool, one undo. Refused, the Course tool carves the file's courses
+   * back over the preview; a stroke that changed nothing carves them back here.
+   */
+  private async writeTrack(ts: TrackStroke): Promise<string> {
+    const host = this.host.track;
+    const keys = this.trackKeys;
+    this.trackKeys = [];
+    const start = this.trackOn;
+    this.trackOn = null;
+    try {
+      if (!host || !start) return '';
+      const chunks = new Map<number, BrushChunk | null>();
+      for (const [k, c] of ts.chunks()) {
+        if (!c) {
+          chunks.set(k, null);
+          continue;
+        }
+        const d = await this.host.deflate(cellBytes(c.cells));
+        keepBrushCells(d, c.cells);
+        chunks.set(k, { path: ts.path, k, a: c.a, n: c.n, d });
+      }
+      this.last = { stamps: ts.stamps, tiles: chunks.size, carried: 0, kept: 0, said: '', reached: { game: 0, ours: 0, players: [] } };
+      // The track as the file holds it now (an undo or the dev server's word may have landed meanwhile), else as begun on.
+      const now = host.track();
+      const before = now && now.id === start.id ? now : start;
+      if (!chunks.size) {
+        host.preview(null, Number.NaN, Number.NaN);
+        this.last.said = 'the stroke changed nothing on the track';
+        return this.last.said;
+      }
+      const said = await host.write(`a track stroke on ${before.name} (${ts.path})`, before, brushChanged(before, ts.path, chunks));
+      if (!host.ok()) host.preview(null, Number.NaN, Number.NaN);
+      this.last.said = said;
+      return said;
+    } finally {
+      for (const d of keys) dropBrushCells(d);
+    }
   }
 
   /** Every tile the stroke touched put back as it stood, and the ground rebuilt over them. */

@@ -84,6 +84,14 @@ const walkable = (v: number): boolean => v >= 1 && v <= 14;
     ['the falloff changed', (k) => (k.course!.feather = k.course!.feather === 'linear' ? 'easeIn' : 'linear'), true],
     ['the margin changed', (k) => (k.course!.margin = k.course!.margin + 1), true],
     ['the crossing changed', (k) => (k.course!.crossing = k.course!.crossing === 'wall' ? 'slope' : 'wall'), true],
+    // Wave 3b's review round: what wave 3b adds to the ground moves the key too.
+    ['a node made to follow the land', (k) => (k.course!.paths[0].nodes[1] = { ...k.course!.paths[0].nodes[1], cut: false }), true],
+    ['a hole put on the road', (k) => (k.course!.ground = [{ kind: 'hole', path: 'main', e: 1, t: 0.5, off: 0, turn: 0, l: 10, w: 8, h: 2, soft: 1 }]), true],
+    ['a brush chunk written', (k) => (k.course!.brush = [{ path: 'main', k: 2, a: -1, n: 3, d: 'AAAA' }]), true],
+    ['a node\'s brush lattice moved', (k) => {
+      k.course!.paths[0].nodes.forEach((n, i) => (n.bs = i * 200));
+      k.course!.paths[0].bl = 900;
+    }, true],
   ];
   for (const [what, edit, moves] of edits) {
     const k = copy();
@@ -287,6 +295,19 @@ const FIXTURE_KEYS = 'cb0cdbd8';
     const before = kOf(20, 8);
     const after = kOf(44, 8);
     ok(walkable(nibbleOf(courseOnly.nibbles, stepAt)) && !walkable(nibbleOf(both.nibbles, stepAt)) && walkable(nibbleOf(both.nibbles, before)) && walkable(nibbleOf(both.nibbles, after)), "a heights file's 4 m step across the road blocks the road at the step (the heights laid over the carve: laid under it, the road would be flat there) and leaves it walkable either side");
+    // Wave 3b's review round: the track's own brush strokes are baked too. A chunk raising the road 6 m from 32 m along (raw x
+    // -64) to 62 m (x -34) across its whole width: the bake inflates it (as the game does), so the road steps up 6 m within a
+    // cell at x -64 and is blocked there, where the course alone walks.
+    const cells = new Float32Array(16 * 9).fill(6);
+    const chunk = deflateRawSync(Buffer.from(cells.buffer)).toString('base64');
+    const stroked: TrackDef = JSON.parse(JSON.stringify(road));
+    stroked.course!.brush = [{ path: 'main', k: 1, a: -4, n: 9, d: chunk }];
+    const tracks2 = trackFileText(world, 'raw', [stroked]);
+    const stamp2 = courseStamp(readTrackFile(tracks2, world, 'ground').tracks);
+    ok(stamp2 !== courseStamp(readTrackFile(tracks, world, 'ground').tracks), 'a brush stroke on the road moves the courses\' stamp, so the key asks for a bake');
+    const brushed = await buildNavGrid(dir, { walkThrough: wt, edits: { ...PLAIN, world, tracks: tracks2, course: stamp2 } });
+    const rise = kOf(-65, 8);
+    ok(walkable(nibbleOf(courseOnly.nibbles, rise)) && !walkable(nibbleOf(brushed.nibbles, rise)), "and the bake reads the stroke: the road's 6 m rise at its start is blocked, where the course alone walks");
   }
 }
 

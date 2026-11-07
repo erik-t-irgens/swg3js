@@ -29,6 +29,7 @@ import { parseJsonc } from '../story/jsonc.ts';
 import { toGame, type GamePlace, type PlacementFrame } from '../story/placements.ts';
 import { buildSpine, spineLegs } from './coursePath.ts';
 import { readWalls, wallsText, type RaceWall } from './raceWalls.ts';
+import { chunkLine, readBrush, readGround, shapeLine, type BrushChunk, type GroundShape } from './courseGround.ts';
 
 export { trackFileOf, tracksPath } from './trackPath.ts';
 
@@ -51,6 +52,12 @@ export const TRACK_LIMITS = {
   widthMost: 80,
   heightLeast: 5,
   heightMost: 100,
+  /**
+   * A gate's own window at the most (the race drawer's wave 3b, the owner's "gates of any size"): wider and taller than a
+   * road's own width (`widthMost`, which a node's width keeps), so a gate may span a canyon or stand over a jump.
+   */
+  gateWidthMost: 2000,
+  gateHeightMost: 1000,
   /** The most `clear` may be, metres either side of the gate-to-gate line. */
   clearMost: 32,
   lapsMost: 99,
@@ -111,15 +118,28 @@ export interface CourseNode {
   b: number;
   sh: number;
   c: CourseCurve;
+  /**
+   * `false`: the road here follows the ground as it stands (wave 3b): the carve changes nothing at this node, easing between it
+   * and a cutting one by the spine's own smooth step. Written only when false, so every course of before reads as before.
+   */
+  cut?: false;
   /** The race walls on the edge leaving it (absent for none). */
   wall?: CourseWall;
   /** A shortcut's first or last node: the id of the path it joins, whose road it stands on. */
   j?: string;
+  /**
+   * The brush lattice's coordinate (m) at this node (wave 3b's review round, `courseGround.ts`): on every node of a path once its
+   * first "This track" stroke is written, strictly rising along the path, so a stroke stays with its stretch whatever is
+   * edited elsewhere. Absent on every node of a path never stroked.
+   */
+  bs?: number;
 }
 
 export interface CoursePath {
   /** `^[a-z0-9][a-z0-9_-]{0,31}$`, unique in its course. */
   id: string;
+  /** A closed path's brush lattice period (m), where its nodes carry `bs` (and only then). */
+  bl?: number;
   nodes: CourseNode[];
 }
 
@@ -134,6 +154,9 @@ export interface TrackCourse {
   wallOut: number;
   wallHigh: number;
   paths: CoursePath[];
+  /** Its own ground (wave 3b, `courseGround.ts`): shapes and brush chunks in the road's frame, each only where any is kept. */
+  ground?: GroundShape[];
+  brush?: BrushChunk[];
 }
 
 /** A place as the file holds it: `q` is `[w, x, y, z]` in the file's frame, as a placement row's. */
@@ -200,9 +223,11 @@ const CONTROL = /[\u0000-\u001f\u007f]/;
 const TRACK_FIELDS = new Set(['id', 'name', 'note', 'kind', 'laps', 'for', 'clear', 'grid', 'gates', 'at', 'course', 'walls']);
 const PLACE_FIELDS = new Set(['x', 'y', 'z', 'q', 'path', 'e', 't']);
 const GATE_FIELDS = new Set(['x', 'y', 'z', 'q', 'w', 'h', 'path', 'e', 't', 'ow']);
-const COURSE_FIELDS = new Set(['v', 'feather', 'crossing', 'margin', 'level', 'grass', 'wallOut', 'wallHigh', 'paths']);
-const PATH_FIELDS = new Set(['id', 'nodes']);
-const NODE_FIELDS = new Set(['x', 'y', 'z', 'w', 'b', 'sh', 'c', 'wall', 'j']);
+const COURSE_FIELDS = new Set(['v', 'feather', 'crossing', 'margin', 'level', 'grass', 'wallOut', 'wallHigh', 'paths', 'ground', 'brush']);
+const PATH_FIELDS = new Set(['id', 'bl', 'nodes']);
+const NODE_FIELDS = new Set(['x', 'y', 'z', 'w', 'b', 'sh', 'c', 'cut', 'wall', 'j', 'bs']);
+/** The most a brush lattice coordinate may be (m): every chunk a path may hold (`GROUND_LIMITS.k`) at 32 m. */
+const LATTICE_MOST = 2_000_000;
 const PATH_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 /** Whether an id is one a path of a course may carry. */
@@ -245,6 +270,11 @@ function readCourseNode(v: unknown, what: string, unknown: string[], prefix: str
   if (sh === undefined) return `${what}'s shoulder is 0 to ${C.shoulderMost} m`;
   if (o.c !== 'smooth' && o.c !== 'straight') return `${what}'s c (the edge leaving it) is smooth or straight`;
   const n: CourseNode = { x, y, z, w, b, sh, c: o.c };
+  // Whether the road cuts the ground here (wave 3b): `false` follows it; `true` is the default, kept absent.
+  if (o.cut !== undefined) {
+    if (o.cut !== false && o.cut !== true) return `${what}'s cut is true or false`;
+    if (o.cut === false) n.cut = false;
+  }
   if (o.wall !== undefined) {
     if (!COURSE_WALLS.includes(o.wall as CourseWall)) return `${what}'s wall is none, left, right or both`;
     if (o.wall !== 'none') n.wall = o.wall as CourseWall;
@@ -252,6 +282,11 @@ function readCourseNode(v: unknown, what: string, unknown: string[], prefix: str
   if (o.j !== undefined) {
     if (!isCoursePathId(o.j)) return `${what}'s j names no path`;
     n.j = o.j;
+  }
+  if (o.bs !== undefined) {
+    const bs = within(o.bs, 0, LATTICE_MOST);
+    if (bs === undefined) return `${what}'s bs is 0 to ${LATTICE_MOST} m`;
+    n.bs = bs;
   }
   return n;
 }
@@ -306,7 +341,18 @@ function readCourse(v: unknown, kind: TrackKind, unknown: string[], prefix: stri
       const d = Math.hypot(b.x - a.x, b.z - a.z);
       if (!(d >= C.edgeLeast) || d > C.edgeMost) return `path ${po.id}'s nodes ${i} and ${(i + 1) % nodes.length} stand ${d.toFixed(2)} m apart, and two consecutive nodes stand ${C.edgeLeast} to ${C.edgeMost} m apart`;
     }
-    paths.push({ id: po.id, nodes });
+    const path: CoursePath = { id: po.id, nodes };
+    // The brush lattice (wave 3b's review round): on every node or none, strictly rising; a closed path's period with it.
+    const marked = nodes.filter((n) => n.bs !== undefined).length;
+    if (marked && marked !== nodes.length) return `path ${po.id}'s nodes carry bs on all or none`;
+    for (let i = 1; marked && i < nodes.length; i++) if (!(nodes[i].bs! > nodes[i - 1].bs!)) return `path ${po.id}'s bs rises from node to node`;
+    if (po.bl !== undefined) {
+      if (!closed || !marked) return `path ${po.id}'s bl is a closed path's brush period, beside its nodes' bs`;
+      const bl = within(po.bl, 0, LATTICE_MOST);
+      if (bl === undefined || !(bl > nodes[nodes.length - 1].bs! - nodes[0].bs!)) return `path ${po.id}'s bl is more than its nodes' bs span and at most ${LATTICE_MOST} m`;
+      path.bl = bl;
+    } else if (closed && marked) return `path ${po.id}'s nodes carry bs, and a closed path's bl comes with them`;
+    paths.push(path);
   }
   for (let p = 0; p < paths.length; p++) {
     const ns = paths[p].nodes;
@@ -318,7 +364,23 @@ function readCourse(v: unknown, kind: TrackKind, unknown: string[], prefix: stri
       if (j === paths[p].id || !ids.has(j)) return `path ${paths[p].id}'s node ${i} joins ${j}, which is no other path of the course`;
     }
   }
-  return { v: C.version, feather: o.feather as CourseFeather, crossing: o.crossing, margin, level, grass: o.grass, wallOut, wallHigh, paths };
+  const course: TrackCourse = { v: C.version, feather: o.feather as CourseFeather, crossing: o.crossing, margin, level, grass: o.grass, wallOut, wallHigh, paths };
+  // Its own ground (wave 3b), after the paths it stands on; each only where any is kept, so a course with none builds the very
+  // object it built before.
+  if (o.ground !== undefined || o.brush !== undefined) {
+    const gp = { ids: paths.map((p) => p.id), edges: paths.map((_, p) => pathEdges(course, p, kind)) };
+    if (o.ground !== undefined) {
+      const g = readGround(o.ground, gp, unknown, `${prefix}.ground`);
+      if (typeof g === 'string') return g;
+      if (g.length) course.ground = g;
+    }
+    if (o.brush !== undefined) {
+      const b = readBrush(o.brush, gp, unknown, `${prefix}.brush`);
+      if (typeof b === 'string') return b;
+      if (b.length) course.brush = b;
+    }
+  }
+  return course;
 }
 
 /** How many edges a path of a course has: one a node on a closed path, one fewer on an open one. */
@@ -439,8 +501,8 @@ export function readTrack(v: unknown, unknown: string[] = [], least: number = TR
     const go = g as Record<string, unknown>;
     const w = num(go.w);
     const h = num(go.h);
-    if (w === undefined || w < L.widthLeast || w > L.widthMost) return `gate ${i}'s width is ${L.widthLeast} to ${L.widthMost} m`;
-    if (h === undefined || h < L.heightLeast || h > L.heightMost) return `gate ${i}'s height is ${L.heightLeast} to ${L.heightMost} m`;
+    if (w === undefined || w < L.widthLeast || w > L.gateWidthMost) return `gate ${i}'s width is ${L.widthLeast} to ${L.gateWidthMost} m`;
+    if (h === undefined || h < L.heightLeast || h > L.gateHeightMost) return `gate ${i}'s height is ${L.heightLeast} to ${L.gateHeightMost} m`;
     const gate: TrackGate = { ...place, w, h };
     const anchor = readAnchor(go, `gate ${i}`, course, o.kind);
     if (typeof anchor === 'string') return anchor;
@@ -555,7 +617,7 @@ function placeText(p: TrackPlace | TrackGate, withSize: boolean): string {
 
 /** The course's own numbers in their written order, then its paths. */
 const COURSE_ORDER: readonly (keyof TrackCourse)[] = ['v', 'feather', 'crossing', 'margin', 'level', 'grass', 'wallOut', 'wallHigh'];
-const NODE_ORDER: readonly (keyof CourseNode)[] = ['x', 'y', 'z', 'w', 'b', 'sh', 'c', 'wall', 'j'];
+const NODE_ORDER: readonly (keyof CourseNode)[] = ['x', 'y', 'z', 'w', 'b', 'sh', 'c', 'cut', 'wall', 'j', 'bs'];
 
 /**
  * A course as its block of the file (§2.2): its own numbers on one line, each path's header on a line of its own and one
@@ -566,9 +628,14 @@ function courseText(c: TrackCourse): string {
   const head = COURSE_ORDER.filter((k) => c[k] !== undefined).map((k) => `${JSON.stringify(k)}: ${JSON.stringify(c[k])}`);
   const paths = (c.paths ?? []).map((p) => {
     const nodes = (p.nodes ?? []).map((n) => `            { ${NODE_ORDER.filter((k) => n[k] !== undefined).map((k) => `${JSON.stringify(k)}: ${JSON.stringify(n[k])}`).join(', ')} }`).join(',\n');
-    return `          { "id": ${JSON.stringify(p.id)}, "nodes": [\n${nodes}\n          ] }`;
+    // A closed path's brush period only where present: a path carrying none writes exactly what it wrote before.
+    const bl = p.bl !== undefined ? `"bl": ${JSON.stringify(p.bl)}, ` : '';
+    return `          { "id": ${JSON.stringify(p.id)}, ${bl}"nodes": [\n${nodes}\n          ] }`;
   });
-  return `{ ${head.join(', ')},\n        "paths": [\n${paths.join(',\n')}\n        ] }`;
+  // Its own ground (wave 3b) after the paths, one shape and one brush chunk a line, each only where any is kept.
+  const ground = c.ground?.length ? `,\n        "ground": [\n${c.ground.map((s) => `          ${shapeLine(s)}`).join(',\n')}\n        ]` : '';
+  const brush = c.brush?.length ? `,\n        "brush": [\n${c.brush.map((b) => `          ${chunkLine(b)}`).join(',\n')}\n        ]` : '';
+  return `{ ${head.join(', ')},\n        "paths": [\n${paths.join(',\n')}\n        ]${ground}${brush} }`;
 }
 
 /**

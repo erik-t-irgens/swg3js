@@ -985,8 +985,11 @@ async function ringRig(o: Parameters<typeof rig>[0] = {}) {
     q.fr({});
     await idle(q.c, q.h);
     const w2 = q.trk().gates[2];
+    // A notch grows with the gate (wave 3b): the larger of the tune's step and its share of the width so far.
+    const s1 = Math.max(COURSE_TUNE.gateWidthStep, COURSE_TUNE.gateStepShare * g2.w);
+    const s2 = Math.max(COURSE_TUNE.gateWidthStep, COURSE_TUNE.gateStepShare * (g2.w + s1));
     ok(
-      same && q.n0() === before + 2 && w2.path === undefined && w2.y === g2.y && Math.abs(w2.w - (g2.w + 2 * COURSE_TUNE.gateWidthStep)) < 0.006 && !given(q.bad, /steps given up/),
+      same && q.n0() === before + 2 && w2.path === undefined && w2.y === g2.y && Math.abs(w2.w - (g2.w + s1 + s2)) < 0.006 && !given(q.bad, /steps given up/),
       `steps on a pinned gate 2, then the gates placed again adding none (every gate where it stood): the same pinned gate widened ${g2.w} to ${w2.w} m at its own height, two actions`,
     );
   }

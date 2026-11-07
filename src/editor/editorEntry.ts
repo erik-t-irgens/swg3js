@@ -1043,6 +1043,18 @@ export class Editor {
       beginWork: () => w.beginGroundWork(),
       noteStamp: () => w.noteStamp(),
       say: (words, ok) => me.say(words, ok),
+      // The race drawer's wave 3b: "This track" strokes onto the course picked with the Course tool (made after the brush).
+      track: {
+        track: () => me.course?.track() ?? null,
+        groundAt: (x, z) => {
+          const s = w.terrain.swg;
+          const y = w.terrain.heightAt(s ? s.toGameX(x) : -x, s ? s.toGameZ(z) : z);
+          return Number.isFinite(y) ? y : Number.NaN;
+        },
+        preview: (t, fx, fz) => me.course?.previewTrack(t, fx, fz),
+        write: (label, before, after) => me.course ? me.course.write(label, before, after) : Promise.resolve('the Course tool is not made'),
+        ok: () => me.course?.last.ok ?? false,
+      },
     };
   }
   /** What the water tool needs of the game: the world's lakes and its frames, its ground, its sea, the curtain, the props. */
@@ -5204,9 +5216,11 @@ const BRUSH_SWITCHES: readonly (readonly ['randomYaw' | 'align' | 'heightOn' | '
 ];
 
 /** The sculpt brush's switches, as the Tools tab shows them: each a key of `SCULPT_TUNE` and its words. */
-const SCULPT_SWITCHES: readonly (readonly ['keepOff' | 'carry', string])[] = [
+const SCULPT_SWITCHES: readonly (readonly ['keepOff' | 'carry' | 'thisTrack', string])[] = [
   ['keepOff', 'Off what stands'],
   ['carry', 'Carry what stands on it'],
+  // The race drawer's wave 3b: strokes into the course picked with the Course tool, moving with its road.
+  ['thisTrack', 'This track (the picked course)'],
 ];
 
 /** What the editor's key block mutes after reading them in its own sense: the old hand must not read them too. */

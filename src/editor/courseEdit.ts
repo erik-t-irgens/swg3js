@@ -16,10 +16,11 @@
 // enum, no namespace, no constructor parameter properties. The dev server's alone: reached only through the editor's own
 // dynamic import.
 
-import { COURSE_LIMITS, TRACK_LIMITS, courseSpines, readTrack, type CourseCurve, type CourseNode, type CourseWall, type RaceKind, type TrackCourse, type TrackDef, type TrackPlace } from '../race/trackFile.ts';
+import { COURSE_LIMITS, TRACK_LIMITS, courseSpines, readTrack, type CourseCurve, type CourseNode, type CourseWall, type RaceKind, type TrackCourse, type TrackDef, type TrackGate, type TrackPlace } from '../race/trackFile.ts';
 import { buildSpine, edgeCrossesItself, foldingEdges, nearestOn, spineAt, spineNear, spinePoint, type Spine } from '../race/coursePath.ts';
 import { CourseCarve, deckAsk } from '../swg/terrain/courseCarve.ts';
-import { deleteMap, followCourse, followGate, gateRules, gatesAgain, insertMap, placeGates, remapAnchors, type DeckAt, type GateRules } from '../race/courseGates.ts';
+import { alongOf, deleteMap, followCourse, followGate, gateRules, gatesAgain, gridOnSpine, insertMap, locateAlong, placeGates, remapAnchors, roadTurn, roundShare, type DeckAt, type GateRules } from '../race/courseGates.ts';
+import { BRUSH_CELL, BRUSH_CHUNK, GROUND_KINDS, GROUND_LIMITS, brushLattice, latticeRound, type BrushChunk, type GroundKind, type GroundShape } from '../race/courseGround.ts';
 import { COURSE_TUNE, type CourseTune } from '../race/courseTune.ts';
 import { deleteGate, moveGateTo, nudgeGate, resizeGate } from '../race/trackEdits.ts';
 import { gridSlot } from '../race/raceGroup.ts';
@@ -154,19 +155,60 @@ function lensOf(t: TrackDef, p: number): { lens: number[]; spine: Spine } {
   return { lens: spine.edges.map((e) => e.len), spine };
 }
 
-/** Node `i` of path `p` taken out of a track (anchors remapped), with nothing checked: the merge's and the delete's work. */
+/**
+ * Node `i` of path `p` taken out of a track (anchors remapped), with nothing checked: the merge's and the delete's work. An
+ * open path's end taken out takes the stretch it ended (wave 3b): the shapes standing on it go with it, and the brush chunks
+ * past the path's new length.
+ */
+/**
+ * A path's brush lattice written on its nodes (wave 3b's review round, `courseGround.ts`): where the path carries brush chunks
+ * and its nodes no `bs` yet, each node's lattice coordinate as it stands now (its arclength to the millimetre, the very one a
+ * stroke over it was made on) and a closed path's period, so whatever is edited after keeps every stroke with its stretch.
+ */
+function markLattice(t: TrackDef, p: number): void {
+  const c = t.course!;
+  const path = c.paths[p];
+  if (path.nodes[0]?.bs !== undefined || !c.brush?.some((b) => b.path === path.id)) return;
+  const closed = closedPath(t, p);
+  const sp = buildSpine(path.nodes, closed);
+  const lam = brushLattice(path.nodes, sp.start, sp.length, closed, undefined);
+  for (let i = 0; i < path.nodes.length; i++) path.nodes[i].bs = lam[i];
+  if (closed) path.bl = latticeRound(lam[path.nodes.length] - lam[0]);
+}
+
 function dropNode(t: TrackDef, p: number, i: number): TrackDef {
+  markLattice(t, p);
   const path = t.course!.paths[p];
   const n = path.nodes.length;
   const closed = closedPath(t, p);
   const { lens } = lensOf(t, p);
+  const c = t.course!;
+  if (!closed && (i === 0 || i === n - 1) && c.ground?.length) {
+    const lost = i === 0 ? 0 : n - 2;
+    const kept = c.ground.filter((s) => s.path !== path.id || s.e !== lost);
+    if (kept.length) c.ground = kept;
+    else delete c.ground;
+  }
   const out = remapAnchors(t, path.id, deleteMap(i, n, closed, lens));
   out.course!.paths[p].nodes.splice(i, 1);
+  // An open path's end taken out takes the brush chunks wholly past its new ends on the lattice (the nodes keep their `bs`, so
+  // every other stroke stays where it stood); a straddling chunk is kept, its cells past the end never read but within a cell.
+  if (!closed && (i === 0 || i === n - 1) && out.course!.brush?.length) {
+    const ns = out.course!.paths[p].nodes;
+    const sp = buildSpine(ns, false);
+    const lam = brushLattice(ns, sp.start, sp.length, false, undefined);
+    const lo = lam[0];
+    const hi = lam[ns.length - 1];
+    const kept = out.course!.brush.filter((b) => b.path !== path.id || ((b.k + 1) * BRUSH_CHUNK > lo && b.k * BRUSH_CHUNK < hi + BRUSH_CELL));
+    if (kept.length) out.course!.brush = kept;
+    else delete out.course!.brush;
+  }
   return out;
 }
 
 /** A node put into path `p` after node `e`, at `u` of edge `e`'s arclength, its road's numbers there (anchors remapped). */
 function putNode(t: TrackDef, p: number, e: number, u: number): TrackDef {
+  markLattice(t, p);
   const path = t.course!.paths[p];
   const closed = closedPath(t, p);
   const before = buildSpine(path.nodes, closed);
@@ -174,7 +216,18 @@ function putNode(t: TrackDef, p: number, e: number, u: number): TrackDef {
   spineAt(before, e, u, P);
   const from = path.nodes[e];
   const node: CourseNode = { x: r2(P.x), y: r2(P.y), z: r2(P.z), w: r2(P.hw * 2), b: r2((Math.atan(P.tb) * 180) / Math.PI), sh: r2(P.sh), c: from.c };
+  // Put in on a stretch that follows the ground (wave 3b), it follows too.
+  if (from.cut === false) node.cut = false;
   if (from.wall) node.wall = from.wall;
+  // Its brush lattice coordinate where it stands on its edge (the review round), so no cell of the path moves.
+  if (from.bs !== undefined) {
+    const lam = brushLattice(path.nodes, before.start, before.length, closed, path.bl);
+    const lo = lam[e];
+    const hi = lam[e + 1];
+    const v = lo + u * (hi - lo);
+    const r = latticeRound(v);
+    node.bs = r > lo && r < hi ? r : v;
+  }
   const nodes = [...path.nodes.slice(0, e + 1), node, ...path.nodes.slice(e + 1)];
   const after = buildSpine(nodes, closed);
   const oldLen = before.edges[e].len;
@@ -258,7 +311,7 @@ export function settle(t: TrackDef, ctx: CourseCtx, keep: { path: number; i: num
       }
     }
   }
-  const followed = followCourse(cur, ctx.rules, deckFor(ctx, cur));
+  const followed = followCourse(cur, ctx.rules, deckFor(ctx, cur), ctx.land);
   return readTrack(followed, [], 0);
 }
 
@@ -334,7 +387,7 @@ export function drawTrack(id: string, name: string, points: readonly { x: number
   const t: TrackDef = { id, name, kind: closed ? 'circuit' : 'sprint', laps: closed ? 3 : 1, for: kindsOf(tune), clear: r2(tune.clear), grid: { x: nodes[0].x, y: nodes[0].y, z: nodes[0].z, q: [1, 0, 0, 0] }, gates: [], course: { ...courseNumbers(tune), paths: [{ id: 'main', nodes }] } };
   const s = settle(t, ctx);
   if (typeof s === 'string') return s;
-  const placed = placeGates(s, ctx.rules, deckFor(ctx, s));
+  const placed = placeGates(s, ctx.rules, deckFor(ctx, s), ctx.land);
   return readTrack({ ...s, grid: placed.grid, gates: placed.gates });
 }
 
@@ -347,7 +400,11 @@ export function insertNode(t: TrackDef, path: string | undefined, e: number, u: 
   const edges = closedPath(t, p) ? n : n - 1;
   if (!Number.isInteger(e) || e < 0 || e >= edges) return `there is no edge ${e}`;
   const cu = Math.max(0.001, Math.min(0.999, u));
-  return settle(putNode(copy(t), p, e, cu), ctx, { path: p, i: e + 1 });
+  const put = putNode(copy(t), p, e, cu);
+  // Put in on a stretch that follows the ground, it stands on the land there (the review round), as a node made to follow does.
+  const made = put.course!.paths[p].nodes[e + 1];
+  if (made.cut === false) followLand(made, ctx);
+  return settle(put, ctx, { path: p, i: e + 1 });
 }
 
 /** Node `i` of a path taken out (refused below two, three on a closed path). */
@@ -368,7 +425,15 @@ export function moveNode(t: TrackDef, path: string | undefined, i: number, x: nu
   const n = c.course!.paths[r.p].nodes[i];
   n.x = x;
   n.z = z;
+  // A node that follows the ground (wave 3b) takes the land's height where it is put.
+  if (n.cut === false) followLand(n, ctx);
   return settle(c, ctx, { path: r.p, i });
+}
+
+/** A following node's height set to the land under it (the raw ground and the sculpt's delta), where the land is known. */
+function followLand(n: CourseNode, ctx: CourseCtx): void {
+  const y = ctx.land(n.x, n.z);
+  if (Number.isFinite(y)) n.y = Math.max(-TRACK_LIMITS.height, Math.min(TRACK_LIMITS.height, y));
 }
 
 /** What a node's fields may be set to (each held to its limit as it is written). */
@@ -381,6 +446,8 @@ export interface NodeFields {
   sh?: number;
   c?: CourseCurve;
   wall?: CourseWall | 'none';
+  /** Whether the road cuts the ground here (wave 3b): false follows it, its height then the land's. */
+  cut?: boolean;
 }
 
 /** Node `i`'s fields set (its place, height, width, bank, shoulder, curve, walls), each held to its limits. */
@@ -399,7 +466,220 @@ export function setNode(t: TrackDef, path: string | undefined, i: number, f: Nod
   if (f.c === 'smooth' || f.c === 'straight') n.c = f.c;
   if (f.wall === 'none') delete n.wall;
   else if (f.wall === 'left' || f.wall === 'right' || f.wall === 'both') n.wall = f.wall;
+  if (f.cut === true) delete n.cut;
+  else if (f.cut === false) {
+    n.cut = false;
+    if (!fin(f.y)) followLand(n, ctx);
+  }
   return settle(c, ctx, { path: r.p, i });
+}
+
+/**
+ * Nodes `from` to `to` of a path made to cut the ground or to follow it (wave 3b, "Cut the ground" and "Follow the land" over
+ * a picked range; on a closed path a range whose end is before its start wraps through node 0): one action.
+ */
+export function cutRange(t: TrackDef, path: string | undefined, from: number, to: number, cut: boolean, ctx: CourseCtx): CourseEdit {
+  const a = nodeRef(t, path, from);
+  if (typeof a === 'string') return a;
+  const b = nodeRef(t, path, to);
+  if (typeof b === 'string') return b;
+  const c = copy(t);
+  const ns = c.course!.paths[a.p].nodes;
+  const closed = closedPath(c, a.p);
+  const lo = closed ? from : Math.min(from, to);
+  const hi = closed ? to : Math.max(from, to);
+  const count = closed ? ((hi - lo + ns.length) % ns.length) + 1 : hi - lo + 1;
+  for (let k = 0; k < count; k++) {
+    const n = ns[(lo + k) % ns.length];
+    if (cut) delete n.cut;
+    else {
+      n.cut = false;
+      followLand(n, ctx);
+    }
+  }
+  return settle(c, ctx);
+}
+
+// ---- The start and the finish (wave 3b) ----
+
+/**
+ * The grid laid again behind gate 0 (wave 3b): on a drawn course `gridBack` (a circuit) or `gridAhead` (a sprint) back along
+ * the main line from where gate 0 stands on it (never before an open road begins), anchored; on a gate-only track as far back
+ * along the gate's own way, at the land's height there (else the gate's own less `gateLift`).
+ */
+function gridBehind(t: TrackDef, g: TrackGate, ctx: CourseCtx): TrackPlace {
+  const back = t.kind === 'circuit' ? ctx.rules.gridBack : ctx.rules.gridAhead;
+  if (t.course) {
+    const sp = courseSpines(t)[0];
+    const main = t.course.paths[0].id;
+    let s: number;
+    if (g.path === main) s = alongOf(sp, g.e ?? 0, g.t ?? 0);
+    else {
+      const near = spineNear();
+      s = nearestOn(sp, g.x, g.z, near) ? alongOf(sp, near.e, near.t) : 0;
+    }
+    s -= back;
+    if (!sp.closed) s = Math.max(0, s);
+    const at = { e: 0, t: 0 };
+    locateAlong(sp, s, at);
+    return gridOnSpine(sp, main, at.e, at.t, undefined, ctx.land);
+  }
+  const q = g.q;
+  // The gate's own way: its +Z turned (a gate faces along the road).
+  const fx = 2 * (q[1] * q[3] + q[0] * q[2]);
+  const fz = 1 - 2 * (q[1] * q[1] + q[2] * q[2]);
+  const fl = Math.sqrt(fx * fx + fz * fz) || 1;
+  const x = g.x - (fx / fl) * back;
+  const z = g.z - (fz / fl) * back;
+  const land = ctx.land(x, z);
+  return { x: r2(x), y: r2(Number.isFinite(land) ? land : g.y - ctx.rules.gateLift), z: r2(z), q: roadTurn(fx / fl, fz / fl, 0) };
+}
+
+/**
+ * Start here (wave 3b, the owner's "Delete any outside of start and finish, not between"): gate `i` made gate 0. On a circuit
+ * the gates are numbered again from it in their order round the course, nothing taken out; on a sprint the gates before it
+ * are taken out. Either way the grid is laid again behind it, a following gate's anchor kept as it is: one action.
+ */
+export function startHere(t: TrackDef, i: number, ctx: CourseCtx): CourseEdit {
+  if (!Number.isInteger(i) || !t.gates[i]) return `there is no gate ${i}: the gates are 0 to ${t.gates.length - 1}`;
+  if (i === 0) return 'gate 0 is the start already';
+  const sprint = t.kind === 'sprint';
+  const gates = sprint ? t.gates.slice(i) : [...t.gates.slice(i), ...t.gates.slice(0, i)];
+  if (gates.length < TRACK_LIMITS.gatesLeast) return `a track keeps ${TRACK_LIMITS.gatesLeast} gates at least: start a sprint before its last gate`;
+  const c = copy(t);
+  c.gates = gates.map((g) => ({ ...g, q: [...g.q] as TrackGate['q'] }));
+  c.grid = gridBehind(c, c.gates[0], ctx);
+  return readTrack(c, [], 0);
+}
+
+/** Finish here (wave 3b): a sprint's gates after gate `i` taken out, so it finishes there (a circuit finishes where it starts). One action. */
+export function finishHere(t: TrackDef, i: number): CourseEdit {
+  if (!Number.isInteger(i) || !t.gates[i]) return `there is no gate ${i}: the gates are 0 to ${t.gates.length - 1}`;
+  if (t.kind !== 'sprint') return 'a circuit finishes where it starts: Start here moves both';
+  if (i === t.gates.length - 1) return `gate ${i} is the finish already`;
+  if (i + 1 < TRACK_LIMITS.gatesLeast) return `a track keeps ${TRACK_LIMITS.gatesLeast} gates at least: finish a sprint after its first gate`;
+  const c = copy(t);
+  c.gates = c.gates.slice(0, i + 1);
+  return readTrack(c, [], 0);
+}
+
+// ---- The course's own ground (wave 3b) ----
+
+/** What a ground shape's fields may be set to (each held to its limit as it is written). */
+export interface ShapeFields {
+  kind?: GroundKind;
+  off?: number;
+  turn?: number;
+  l?: number;
+  w?: number;
+  h?: number;
+  soft?: number;
+  back?: number;
+  /** A new anchor: the path and the place along it (edge and share). */
+  path?: string;
+  e?: number;
+  t?: number;
+}
+
+/** A shape's numbers held to their limits and rounded as written (a share to the millionth, the rest to the hundredth). */
+function cleanShape(s: GroundShape): GroundShape {
+  const L = GROUND_LIMITS;
+  const held = (v: number, lo: number, hi: number) => r2(Math.max(lo, Math.min(hi, Number.isFinite(v) ? v : lo)));
+  const out: GroundShape = { kind: s.kind, path: s.path, e: s.e, t: roundShare(s.t), off: held(s.off, -L.off, L.off), turn: held(s.turn, -L.turn, L.turn), l: held(s.l, L.length[0], L.length[1]), w: held(s.w, L.width[0], L.width[1]), h: held(s.h, L.height[0], L.height[1]), soft: held(s.soft, L.soft[0], L.soft[1]) };
+  if (s.kind === 'ramp' && s.back !== undefined && s.back > 0) out.back = held(s.back, L.back[0], L.back[1]);
+  return out;
+}
+
+/**
+ * A new shape where a click of the file's frame lands on the picked track's road: on the path whose spine is nearest, its
+ * place along it (edge, share) and across it (`off`), turned square to the road, of the tune's kind and size.
+ */
+export function shapeAt(t: TrackDef, x: number, z: number, tune: CourseTune = COURSE_TUNE): GroundShape | string {
+  if (!t.course) return `${t.id} has no course to lay ground on`;
+  const spines = courseSpines(t);
+  const near = spineNear();
+  let best = -1;
+  let bd = Infinity;
+  let be = 0;
+  let bt = 0;
+  let bo = 0;
+  for (let p = 0; p < spines.length; p++) {
+    if (!nearestOn(spines[p], x, z, near) || near.d >= bd) continue;
+    bd = near.d;
+    best = p;
+    be = near.e;
+    bt = near.t;
+    bo = near.o;
+  }
+  if (best < 0) return 'no road to lay it on';
+  return cleanShape({ kind: tune.shapeKind, path: t.course.paths[best].id, e: be, t: bt, off: bo, turn: 0, l: tune.shapeLength, w: tune.shapeWidth, h: tune.shapeHeight, soft: tune.shapeSoft, back: tune.shapeKind === 'ramp' ? tune.shapeBack : undefined });
+}
+
+/** A shape added to a track's course. One action. */
+export function shapeAdded(t: TrackDef, s: GroundShape): CourseEdit {
+  if (!t.course) return `${t.id} has no course to lay ground on`;
+  if ((t.course.ground?.length ?? 0) >= GROUND_LIMITS.shapes) return `a course holds ${GROUND_LIMITS.shapes} shapes at most`;
+  const c = copy(t);
+  c.course!.ground = [...(c.course!.ground ?? []), cleanShape(s)];
+  return readTrack(c, [], 0);
+}
+
+/** Shape `i`'s fields set (its kind, place along and across, turn, size, depth or height, softness, a ramp's far side). One action. */
+export function shapeSet(t: TrackDef, i: number, f: ShapeFields): CourseEdit {
+  const s = t.course?.ground?.[i];
+  if (!s) return `there is no shape ${i}`;
+  const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  const n: GroundShape = { ...s };
+  if (f.kind && GROUND_KINDS.includes(f.kind)) n.kind = f.kind;
+  if (typeof f.path === 'string') n.path = f.path;
+  if (fin(f.e)) n.e = Math.round(f.e);
+  if (fin(f.t)) n.t = f.t;
+  for (const k of ['off', 'turn', 'l', 'w', 'h', 'soft', 'back'] as const) if (fin(f[k])) n[k] = f[k];
+  const c = copy(t);
+  c.course!.ground![i] = cleanShape(n);
+  return readTrack(c, [], 0);
+}
+
+/** Shape `i` taken out. One action. */
+export function shapeRemoved(t: TrackDef, i: number): CourseEdit {
+  if (!t.course?.ground?.[i]) return `there is no shape ${i}`;
+  const c = copy(t);
+  c.course!.ground!.splice(i, 1);
+  if (!c.course!.ground!.length) delete c.course!.ground;
+  return readTrack(c, [], 0);
+}
+
+/**
+ * A track's brush chunks of one path changed (the sculpt brush's "This track" stroke, written once as it ends): each chunk
+ * index given its new chunk, or null for none. One action.
+ */
+export function brushChanged(t: TrackDef, path: string, chunks: ReadonlyMap<number, BrushChunk | null>): CourseEdit {
+  if (!t.course) return `${t.id} has no course`;
+  const c = copy(t);
+  const kept = (c.course!.brush ?? []).filter((b) => b.path !== path || !chunks.has(b.k));
+  for (const b of chunks.values()) if (b) kept.push({ path: b.path, k: b.k, a: b.a, n: b.n, d: b.d });
+  kept.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : x.k - y.k));
+  if (kept.length) c.course!.brush = kept;
+  else delete c.course!.brush;
+  // The path's lattice written on its nodes with its first stroke (the review round): the very coordinates the stroke was made on.
+  const p = pathIndex(c, path);
+  if (p >= 0) markLattice(c, p);
+  return readTrack(c, [], 0);
+}
+
+/** What a change took of a course's own ground (a stretch or a path taken out), in words, or '' (said with the write). */
+export function groundTakenWords(before: TrackDef | null, after: TrackDef | null): string {
+  // Only where road was taken away (a node or a path fewer): a shape or a stroke taken out by hand says so itself.
+  const nodes = (t: TrackDef | null) => (t?.course?.paths ?? []).reduce((n, p) => n + p.nodes.length, 0);
+  if (!(nodes(after) < nodes(before))) return '';
+  const sb = before?.course?.ground?.length ?? 0;
+  const sa = after?.course?.ground?.length ?? 0;
+  const bb = before?.course?.brush?.length ?? 0;
+  const ba = after?.course?.brush?.length ?? 0;
+  const said: string[] = [];
+  if (sa < sb) said.push(`${sb - sa} shape${sb - sa === 1 ? '' : 's'}`);
+  if (ba < bb) said.push(`${bb - ba} brush chunk${bb - ba === 1 ? '' : 's'}`);
+  return said.length ? `the stretch taken out took ${said.join(' and ')} of its own ground with it` : '';
 }
 
 /** The edge leaving node `i` turned from a curve into a straight or back (V). */
@@ -445,6 +725,16 @@ export function deletePath(t: TrackDef, path: string, ctx: CourseCtx): CourseEdi
   c.course!.paths.splice(p, 1);
   // A path joined to the one taken out keeps its node where it stands, no longer joined.
   for (const q of c.course!.paths) for (const n of q.nodes) if (n.j === path) delete n.j;
+  // Its own ground goes with it (wave 3b).
+  const k = c.course!;
+  if (k.ground) {
+    k.ground = k.ground.filter((s) => s.path !== path);
+    if (!k.ground.length) delete k.ground;
+  }
+  if (k.brush) {
+    k.brush = k.brush.filter((b) => b.path !== path);
+    if (!k.brush.length) delete k.brush;
+  }
   return settle(c, ctx);
 }
 
@@ -512,6 +802,11 @@ export function gateWidened(t: TrackDef, i: number, w: number): CourseEdit {
   return resizeGate(t, i, { w });
 }
 
+/** Gate `i`'s window set by hand (wave 3b: up to `gateWidthMost` wide and `gateHeightMost` tall, past the road's own width). */
+export function gateSized(t: TrackDef, i: number, size: { w?: number; h?: number }): CourseEdit {
+  return resizeGate(t, i, size);
+}
+
 /** Gate `i` taken out (refused at `TRACK_LIMITS.gatesLeast`). */
 export function gateDeleted(t: TrackDef, i: number): CourseEdit {
   return deleteGate(t, i);
@@ -519,14 +814,14 @@ export function gateDeleted(t: TrackDef, i: number): CourseEdit {
 
 /** Gate `i` anchored again to the road nearest it (Follow): its width the road's again. */
 export function gateFollowed(t: TrackDef, i: number, ctx: CourseCtx): CourseEdit {
-  const f = followGate(t, i, ctx.rules, deckFor(ctx, t));
+  const f = followGate(t, i, ctx.rules, deckFor(ctx, t), ctx.land);
   return typeof f === 'string' ? f : readTrack(f, [], 0);
 }
 
 /** Place gates again: every following gate placed again, the spacing's and the apexes' added where none stands within `gateMin`. */
 export function placeGatesAgain(t: TrackDef, ctx: CourseCtx): CourseEdit {
   if (!t.course) return `${t.id} has no course to place gates along`;
-  return readTrack(gatesAgain(t, ctx.rules, deckFor(ctx, t)), [], 0);
+  return readTrack(gatesAgain(t, ctx.rules, deckFor(ctx, t), ctx.land), [], 0);
 }
 
 /**
@@ -674,6 +969,16 @@ export function courseNotes(t: TrackDef, ctx: CourseCtx, tune: CourseTune = COUR
       }
     }
   }
+  // A shape reaching past its road's shoulder (wave 3b's review round): laid only within the road and eased out across the
+  // shoulder as the cut is, so said rather than clipped.
+  const sb = spinePoint();
+  const byId = new Map(t.course.paths.map((p, i) => [p.id, i]));
+  (t.course.ground ?? []).forEach((s, i) => {
+    const p = byId.get(s.path);
+    if (p === undefined || !spineAt(spines[p], Math.min(s.e, spines[p].edges.length - 1), s.t, sb)) return;
+    const half = Math.max(s.w, s.l) / 2 + Math.abs(s.off);
+    if (half > sb.hw + sb.sh + 0.01) out.push(`ground shape ${i} reaches ${(half - sb.hw - sb.sh).toFixed(1)} m past its road's shoulder: laid only to it, easing out across it`);
+  });
   return out;
 }
 

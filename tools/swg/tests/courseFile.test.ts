@@ -90,7 +90,10 @@ function waveTracks(text: string): Set<string> {
     if (!r || typeof r !== 'object') continue;
     const o = r as Record<string, unknown>;
     if (typeof o.id !== 'string') continue;
-    if (o.course !== undefined || anchored(o.grid, false) || (Array.isArray(o.gates) && o.gates.some((g) => anchored(g, true)))) out.add(o.id);
+    // A gate past the road's own width or the old height (the race drawer's wave 3b: gates up to 2 km and 1 km), which the
+    // readers before it refuse, is this build's too.
+    const big = (g: unknown) => !!g && typeof g === 'object' && (Number((g as { w?: unknown }).w) > 80 || Number((g as { h?: unknown }).h) > 100);
+    if (o.course !== undefined || anchored(o.grid, false) || (Array.isArray(o.gates) && o.gates.some((g) => anchored(g, true) || big(g)))) out.add(o.id);
   }
   return out;
 }

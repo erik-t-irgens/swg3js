@@ -49,6 +49,8 @@ export interface SpineNode {
   sh: number;
   c: string;
   wall?: string;
+  /** `false`: the road follows the ground here (wave 3b); absent or true, it cuts. */
+  cut?: boolean;
 }
 
 /** One edge's samples, from the node it leaves to the next. Only the first `count` of each array are its own. */
@@ -71,6 +73,12 @@ export interface SpineEdge {
   hw: Float64Array;
   tb: Float64Array;
   sh: Float64Array;
+  /**
+   * How much the carve cuts at each sample (wave 3b): 1 at a cutting node, 0 at a following one, eased between them by the
+   * spine's own smooth step (the Hermite with slopes of nought, `t^2 (3 - 2t)`); exactly 1 along an edge between two cutting
+   * nodes, so a course that cuts everywhere is carved as before to the bit.
+   */
+  k: Float64Array;
 }
 
 /** A path's spine: whether it is closed, its edges in order, its length and where each edge starts along it. */
@@ -131,7 +139,7 @@ const grownI = (a: Int32Array, n: number): Int32Array => (a.length >= n ? a : ne
 function edgeOf(was: SpineEdge | undefined, count: number): SpineEdge {
   if (was && was.x.length >= count) return was;
   const cap = Math.max(count, was ? was.x.length * 2 : 0);
-  return { from: 0, to: 0, straight: false, walls: 0, count: 0, len: 0, x: new Float64Array(cap), z: new Float64Array(cap), s: new Float64Array(cap), y: new Float64Array(cap), hw: new Float64Array(cap), tb: new Float64Array(cap), sh: new Float64Array(cap) };
+  return { from: 0, to: 0, straight: false, walls: 0, count: 0, len: 0, x: new Float64Array(cap), z: new Float64Array(cap), s: new Float64Array(cap), y: new Float64Array(cap), hw: new Float64Array(cap), tb: new Float64Array(cap), sh: new Float64Array(cap), k: new Float64Array(cap) };
 }
 
 /**
@@ -339,6 +347,9 @@ export function buildSpine(nodes: readonly SpineNode[], closed: boolean, into?: 
     const o = tableAt[e];
     const PC = pieces[e];
     let piece = 0;
+    // How much each end cuts (wave 3b): a following node nought.
+    const kA = A.cut === false ? 0 : 1;
+    const kB = B.cut === false ? 0 : 1;
     for (let i = 0; i <= steps; i++) {
       const s = i === steps ? L : (L * i) / steps;
       // The table's piece this arclength falls in, walked forward (the samples rise), and the parameter inside it.
@@ -373,6 +384,8 @@ export function buildSpine(nodes: readonly SpineNode[], closed: boolean, into?: 
       const bank = h00 * A.b + h10 * L * slope[a * 4 + 2] + h01 * B.b + h11 * L * slope[b * 4 + 2];
       ed.tb[i] = Math.tan((bank * Math.PI) / 180);
       ed.sh[i] = h00 * A.sh + h10 * L * slope[a * 4 + 3] + h01 * B.sh + h11 * L * slope[b * 4 + 3];
+      // Exactly the end's own where both ends agree (1 between two cutting nodes, to the bit); else the smooth step between.
+      ed.k[i] = kA === kB ? kA : kA + (kB - kA) * h01;
     }
     out.start[e] = total;
     total += L;
@@ -386,7 +399,7 @@ export function buildSpine(nodes: readonly SpineNode[], closed: boolean, into?: 
 export function sameEdge(a: SpineEdge, b: SpineEdge): boolean {
   if (a.count !== b.count || a.walls !== b.walls || a.from !== b.from || a.to !== b.to) return false;
   for (let i = 0; i < a.count; i++) {
-    if (a.x[i] !== b.x[i] || a.z[i] !== b.z[i] || a.s[i] !== b.s[i] || a.y[i] !== b.y[i] || a.hw[i] !== b.hw[i] || a.tb[i] !== b.tb[i] || a.sh[i] !== b.sh[i]) return false;
+    if (a.x[i] !== b.x[i] || a.z[i] !== b.z[i] || a.s[i] !== b.s[i] || a.y[i] !== b.y[i] || a.hw[i] !== b.hw[i] || a.tb[i] !== b.tb[i] || a.sh[i] !== b.sh[i] || a.k[i] !== b.k[i]) return false;
   }
   return true;
 }
@@ -424,11 +437,13 @@ export interface SpinePoint {
   sh: number;
   tx: number;
   tz: number;
+  /** How much the road cuts the ground here (wave 3b): 1 cutting, 0 following, between eased by the spine's smooth step. */
+  k: number;
 }
 
 /** A point record, fractions from the start. */
 export function spinePoint(): SpinePoint {
-  return { x: 0.5, z: 0.5, y: 0.5, hw: 0.5, tb: 0.5, sh: 0.5, tx: 0.5, tz: 0.5 };
+  return { x: 0.5, z: 0.5, y: 0.5, hw: 0.5, tb: 0.5, sh: 0.5, tx: 0.5, tz: 0.5, k: 0.5 };
 }
 
 /**
@@ -452,6 +467,7 @@ export function spineAt(sp: Spine, e: number, t: number, out: SpinePoint): boole
   out.hw = ed.hw[i] + (ed.hw[i + 1] - ed.hw[i]) * f;
   out.tb = ed.tb[i] + (ed.tb[i + 1] - ed.tb[i]) * f;
   out.sh = ed.sh[i] + (ed.sh[i + 1] - ed.sh[i]) * f;
+  out.k = ed.k[i] === ed.k[i + 1] ? ed.k[i] : ed.k[i] + (ed.k[i + 1] - ed.k[i]) * f;
   const dx = ed.x[i + 1] - ed.x[i];
   const dz = ed.z[i + 1] - ed.z[i];
   const l = Math.sqrt(dx * dx + dz * dz);

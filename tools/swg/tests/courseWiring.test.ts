@@ -54,7 +54,14 @@ ok(/tracks: \(\) => \(RACE_TUNE\.on && this\.tracksWorld === this\.editWorld\(\)
 ok(/worldMark: \(\) => w\.generation,/.test(after(entry, '  private courseHost(): CourseHost {', 2600)), "the tool's world is the editing's own mark of it (the world's generation)");
 
 // The tracks kind landed by difference, and the word's revision dropped.
-ok(/const tkf = files\.tracks;\s*if \(tkf && this\.world\.generation === gen && this\.editWorld\(\) === pack\) this\.landTracks\(pack, tkf\.put as unknown as TrackDef\[\], tkf\.deleted, tkf\.rows\);/.test(main), "a batch's tracks are landed by difference into the race's tracks, with the file's own count of them");
+// (The race drawer's wave 3b put the brush's priming between the two: an undo's chunks inflated before anything carves them.)
+ok(/const tkf = files\.tracks;[\s\S]{0,300}if \(tkf\) await primeBrush\(tkf\.put as unknown as TrackDef\[\], inflateBase64\);\s*if \(tkf && this\.world\.generation === gen && this\.editWorld\(\) === pack\) this\.landTracks\(pack, tkf\.put as unknown as TrackDef\[\], tkf\.deleted, tkf\.rows\);/.test(main), "a batch's tracks are landed by difference into the race's tracks, with the file's own count of them, their brush chunks inflated first");
+// Wave 3b's review round: the world's track file read whole (every arrival, the dev server's word) inflates its brush chunks
+// between the read and its answer, naming them held, or every player's brush ground is laid as nothing.
+ok(/const read = readTrackFile\(text, world, kind\);[\s\S]{0,400}const primed = await primeBrush\(read\.tracks, inflateBase64, true\);\s*for \(const f of primed\.failed\) console\.warn\([^\n]*\);[\s\S]{0,400}return read;/.test(main), "a track file read whole inflates every brush chunk of it, as held, before the read is answered");
+// And the editor's This-track hand-over: the picked course, its land in the raw frame through the world's own carry, the
+// preview and the write through the Course tool.
+ok(/track: \{\s*track: \(\) => me\.course\?\.track\(\) \?\? null,\s*groundAt: \(x, z\) => \{\s*const s = w\.terrain\.swg;\s*const y = w\.terrain\.heightAt\(s \? s\.toGameX\(x\) : -x, s \? s\.toGameZ\(z\) : z\);\s*return Number\.isFinite\(y\) \? y : Number\.NaN;\s*\},\s*preview: \(t, fx, fz\) => me\.course\?\.previewTrack\(t, fx, fz\),\s*write: \(label, before, after\) => me\.course \? me\.course\.write\(label, before, after\) : Promise\.resolve\('the Course tool is not made'\),\s*ok: \(\) => me\.course\?\.last\.ok \?\? false,\s*\},/.test(entry), "the sculpt brush's This track is handed the picked course, its ground through the world's carry, and the Course tool's preview and write");
 {
   const land = after(main, '  private landTracks(world: string, put: readonly TrackDef[], deleted: readonly string[], rows: number): void {', 3200);
   ok(/const now = landedTracks\(before, put, deleted\);\s*if \(now\.length !== rows\) \{\s*void this\.reloadTracks\(world\);\s*return;\s*\}/.test(land), "the landing is `landedTracks`' answer, and a page that never held the file whole reads it again rather than standing a part of it");

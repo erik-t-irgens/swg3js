@@ -70,6 +70,7 @@ import {
   gateRaised,
   gateTurned,
   gateWidened,
+  gateSized,
   insertNode,
   keepsNumbering,
   mintTrack,
@@ -81,10 +82,21 @@ import {
   setNode,
   setTrack,
   toggleCurve,
+  startHere,
+  finishHere,
+  cutRange,
+  shapeAdded,
+  shapeAt,
+  shapeRemoved,
+  shapeSet,
+  groundTakenWords,
   type CourseCtx,
   type CourseEdit,
   type NodeFields,
+  type ShapeFields,
 } from './courseEdit.ts';
+import { CourseGround } from './editorGround.ts';
+import { GROUND_KINDS, type GroundKind } from '../race/courseGround.ts';
 
 /** What the Course tool needs of the editor and the game. */
 export interface CourseHost {
@@ -189,8 +201,8 @@ export interface BridgeAsk {
 /** What a held edit is. */
 type Held = 'none' | 'node' | 'width' | 'raise' | 'bank' | 'gate' | 'gateRaise' | 'gateTurn';
 
-export type CourseMode = 'draw' | 'edit' | 'gates' | 'walls';
-export const COURSE_MODES: readonly CourseMode[] = ['draw', 'edit', 'gates', 'walls'];
+export type CourseMode = 'draw' | 'edit' | 'gates' | 'walls' | 'ground';
+export const COURSE_MODES: readonly CourseMode[] = ['draw', 'edit', 'gates', 'walls', 'ground'];
 
 /** A course's places in the game's frame, worked out once a change: what a frame projects. */
 interface CourseView {
@@ -309,9 +321,38 @@ export class EditorCourse {
   readonly wallsMode: CourseWalls;
   /** The walls' drawing's counts carried on from the courses' (lines, points, handles). */
   private readonly wallCounts = new Int32Array(3);
+  /** The Ground mode (wave 3b, `editorGround.ts`): the picked track's own ground shapes. */
+  readonly groundMode: CourseGround;
+  /**
+   * The first node of a range "Follow the land" and "Cut the ground" act on (the picked node the other end), kept as what it was
+   * taken on (the review round: an index is not a thing): the track, the path, the node and the track's row then. Null for none.
+   */
+  private rangeMark: { track: string; path: string; node: number; row: TrackDef } | null = null;
+
+  /** The range's first node while the mark still names it (the same track and path picked, the nodes numbered as they were), else -1. */
+  get rangeFrom(): number {
+    const m = this.rangeMark;
+    if (!m) return -1;
+    const t = this.track();
+    if (!t || t.id !== m.track || this.pathId(t) !== m.path) return -1;
+    const p = pathIndex(t, m.path);
+    return p >= 0 && keepsNumbering(m.row, t, 'nodes', p, m.node) && m.node < (t.course?.paths[p]?.nodes.length ?? 0) ? m.node : -1;
+  }
 
   constructor(host: CourseHost) {
     this.host = host;
+    this.groundMode = new CourseGround({
+      track: () => this.track(),
+      tracksNow: () => this.tracks(),
+      write: (label, before, after) => this.write(label, before, after),
+      busyNow: () => !!this.writing || !!this.host.edits.writing,
+      groundY: (x, z) => this.heightAt(x, z).y,
+      pickRoad: (gx, gz) => this.pickAt(gx, gz),
+      toRaw: (x, z, out) => this.host.toRaw(x, z, out),
+      toGame: (x, z, out) => this.host.toGame(x, z, out),
+      say: (w, ok) => this.host.say(w, ok),
+      refresh: () => this.host.refresh(),
+    });
     this.wallsMode = new CourseWalls({
       track: () => this.track(),
       tracksNow: () => this.tracks(),
@@ -328,7 +369,7 @@ export class EditorCourse {
 
   /** Whether a write or a held edit is under way (the automatic fold's quiet). */
   get busy(): boolean {
-    return !!this.writing || this.held !== 'none' || this.wallsMode.busy;
+    return !!this.writing || this.held !== 'none' || this.wallsMode.busy || this.groundMode.busy;
   }
 
   /**
@@ -377,6 +418,7 @@ export class EditorCourse {
     this.armed = false;
     this.giveUpHeld();
     this.wallsMode.reset();
+    this.groundMode.reset();
   }
 
   /** The world went: everything dropped, and the world now standing taken as the one the tool is of. */
@@ -387,6 +429,7 @@ export class EditorCourse {
     this.picked = null;
     this.pickedNode = -1;
     this.pickedGate = -1;
+    this.rangeMark = null;
     this.fromAsked = null;
     this.views = [];
     this.viewsOf = null;
@@ -456,13 +499,16 @@ export class EditorCourse {
       : m === 'edit'
         ? "editing (drag a node's diamond, its width line's grabbers, F raises, R banks, C with the wheel its shoulder, a click on the road puts a node in)"
         : m === 'gates'
-          ? 'gates (a click near one picks it: drag its square, F raises, R turns, C with the wheel widens, Delete takes it out)'
-          : "walls on the picked track (a click a point, near the last writes the wall, V straight or an arc; drag a point or an edge's middle, F raises a point, R leans, C with the wheel its height, Delete)";
+          ? 'gates (a click near one picks it: drag its square, F raises, R turns, C with the wheel widens, Delete takes it out; Start here and Finish here on the Selected tab)'
+          : m === 'ground'
+            ? `the track's own ground (a click on its road puts down a ${COURSE_TUNE.shapeKind}; a click on a shape's handle picks it: drag it, F its depth or height, R turns, C with the wheel sizes, Delete takes it out)`
+            : "walls on the picked track (a click a point, near the last writes the wall, V straight or an arc; drag a point or an edge's middle, F raises a point, R leans, C with the wheel its height, Delete)";
   }
 
   /** A mode chosen (the Tools tab's buttons, the console's `arm`). */
   setMode(m: CourseMode): string {
     if (this.mode === 'walls' && m !== 'walls') this.wallsMode.reset();
+    if (this.mode === 'ground' && m !== 'ground') this.groundMode.reset();
     this.mode = m;
     this.giveUpHeld();
     if (m !== 'draw') {
@@ -644,6 +690,7 @@ export class EditorCourse {
   /** Escape: a held edit given up, then a draft, then the pick; answers whether it took the key. */
   escape(): boolean {
     if (this.mode === 'walls' && this.wallsMode.escape()) return true;
+    if (this.mode === 'ground' && this.groundMode.escape()) return true;
     if (this.held !== 'none') {
       this.giveUpHeld();
       this.host.say('the edit given up: nothing written', true);
@@ -717,6 +764,7 @@ export class EditorCourse {
   holdsMouse(lift: boolean, turn?: boolean): boolean {
     if (!this.armed || this.writing) return false;
     if (this.mode === 'walls') return this.wallsMode.holdsMouse(lift, turn === true);
+    if (this.mode === 'ground') return this.groundMode.holdsMouse(lift, turn === true);
     const picked = (this.mode === 'edit' && this.pickedNode >= 0) || (this.mode === 'gates' && this.pickedGate >= 0);
     return picked && (lift || turn === true);
   }
@@ -729,6 +777,7 @@ export class EditorCourse {
   size(notches: number): string | null {
     if (!this.armed) return null;
     if (this.mode === 'walls') return this.wallsMode.size(notches, this.f.now);
+    if (this.mode === 'ground') return this.groundMode.size(notches, this.f.now);
     const t = this.track();
     if (!t) return null;
     const index = this.mode === 'edit' ? this.pickedNode : this.mode === 'gates' ? this.pickedGate : -1;
@@ -749,7 +798,8 @@ export class EditorCourse {
       const n = this.nodeOf(t);
       return n ? `shoulder ${Math.max(0, n.sh + this.sizeBy).toFixed(2)} m (written as the wheel rests)` : null;
     }
-    this.sizeBy += notches * COURSE_TUNE.gateWidthStep;
+    // A gate's step grows with its size (wave 3b): the larger of the tune's step and its share of the width now.
+    this.sizeBy += notches * Math.max(COURSE_TUNE.gateWidthStep, COURSE_TUNE.gateStepShare * (t.gates[index].w + this.sizeBy));
     return `gate ${index} ${(t.gates[index].w + this.sizeBy).toFixed(1)} m wide (written as the wheel rests)`;
   }
 
@@ -804,6 +854,7 @@ export class EditorCourse {
   deleteKey(): boolean {
     if (!this.armed) return false;
     if (this.mode === 'walls') return this.wallsMode.deleteKey();
+    if (this.mode === 'ground') return this.groundMode.deleteKey();
     const t = this.track();
     if (!t) return false;
     if (this.mode === 'edit' && this.pickedNode >= 0) {
@@ -1038,6 +1089,31 @@ export class EditorCourse {
    * un-carved every course it holds and dropped their zones until the next arrival. A host that keeps no such list carves
    * the file's back, and nothing where the file is not read.
    */
+  /**
+   * A preview of a track carved live for another tool (the sculpt brush's "This track" stroke, wave 3b), or the world's own
+   * courses carved back (null). The Course tool's own write carves back a preview it refused, as after a drag.
+   */
+  previewTrack(t: TrackDef | null, fx: number, fz: number): void {
+    if (!t) {
+      if (this.carvedLive) this.carveBack();
+      return;
+    }
+    const carve = this.host.carve;
+    if (!carve) return;
+    const list = this.carveList;
+    list.length = 0;
+    let put = false;
+    for (const k of this.tracks()) {
+      if (k.id === t.id) {
+        list.push(t);
+        put = true;
+      } else list.push(k);
+    }
+    if (!put) list.push(t);
+    carve.call(this.host, list, fx, fz, true);
+    this.carvedLive = true;
+  }
+
   private carveBack(): void {
     this.carvedLive = false;
     const back = this.host.carved ? this.host.carved() : this.host.tracks();
@@ -1085,6 +1161,14 @@ export class EditorCourse {
       this.wallsMode.dx = dx;
       this.wallsMode.dy = dy;
       this.wallsMode.frame(f, view, this.cur, this.ray, press, release, pressInverse, liftUp, turnUp);
+      this.drawMarks(d, view);
+      return;
+    }
+    // The Ground mode (wave 3b): its own presses, holds and wheel, then every course and the picked track's shapes drawn.
+    if (this.mode === 'ground') {
+      this.groundMode.dx = dx;
+      this.groundMode.dy = dy;
+      this.groundMode.frame(f, view, this.cur, this.ray, press, release, liftUp, turnUp);
       this.drawMarks(d, view);
       return;
     }
@@ -1374,7 +1458,9 @@ export class EditorCourse {
         if (this.carvedLive) this.carveBack();
         return this.said(extras, false);
       }
-      const said = await this.change(label, { file: 'tracks', id: after.id, before, after }, extras);
+      // A stretch or a path taken out takes its own ground with it (wave 3b): said with the write.
+      const taken = groundTakenWords(before, after);
+      const said = await this.change(taken ? `${label} (${taken})` : label, { file: 'tracks', id: after.id, before, after }, extras);
       // Refused or failed: the course before the drag carved again over what the drag carved (a refused sculpt stroke's put-back).
       if (!this.last.ok && this.carvedLive) this.carveBack();
       return said;
@@ -1456,7 +1542,7 @@ export class EditorCourse {
     // The touch-ups a moved stretch leaves standing.
     const store = h.heights?.();
     if (store && store.size) {
-      const sample: CarveSample = { T: 0.5, W: 0.5 };
+      const sample: CarveSample = { T: 0.5, W: 0.5, D: 0.5 };
       const tune = COURSE_TUNE;
       for (const tile of store.entries()) {
         const x0 = tile.tx * HEIGHT_TILE_POLES * HEIGHT_POLE;
@@ -1844,7 +1930,11 @@ export class EditorCourse {
     const walls = this.mode === 'walls';
     const wm = this.wallsMode;
     if (walls) wm.need();
-    coursePools(m, lines + this.viewNodes + this.viewGates + 1 + (walls ? wm.lineNeed : 0), this.viewPoints * 5 + this.viewNodes * 2 + this.viewGates * 4 + this.draft.length + 2 + (walls ? wm.pointNeed : 0), this.viewNodes * 3 + (walls ? wm.markNeed : 0));
+    // And the picked track's own ground shapes in the Ground mode (wave 3b).
+    const ground = this.mode === 'ground';
+    const gm = this.groundMode;
+    if (ground) gm.need();
+    coursePools(m, lines + this.viewNodes + this.viewGates + 1 + (walls ? wm.lineNeed : 0) + (ground ? gm.lineNeed : 0), this.viewPoints * 5 + this.viewNodes * 2 + this.viewGates * 4 + this.draft.length + 2 + (walls ? wm.pointNeed : 0) + (ground ? gm.pointNeed : 0), this.viewNodes * 3 + (walls ? wm.markNeed : 0) + (ground ? gm.markNeed : 0));
     const reach = COURSE_TUNE.drawReach;
     const near = COURSE_TUNE.drawNear;
     const ex = view.ex;
@@ -1994,6 +2084,16 @@ export class EditorCourse {
       P = c[1];
       K = c[2];
     }
+    if (ground) {
+      const c = this.wallCounts;
+      c[0] = L;
+      c[1] = P;
+      c[2] = K;
+      gm.draw(m, view, this.cur, c);
+      L = c[0];
+      P = c[1];
+      K = c[2];
+    }
     m.courseLineN = L;
     m.courseMarkN = K;
     m.courseOn = L > 0 || K > 0;
@@ -2057,6 +2157,8 @@ export class EditorCourse {
       { label: 'Edit', act: 'course:mode:edit', off: this.mode === 'edit' },
       { label: 'Gates', act: 'course:mode:gates', off: this.mode === 'gates' },
       { label: 'Walls', act: 'course:mode:walls', off: this.mode === 'walls' },
+      { label: 'Ground', act: 'course:mode:ground', off: this.mode === 'ground' },
+      ...(this.mode === 'ground' ? [{ label: `A new shape: a ${COURSE_TUNE.shapeKind}`, act: 'course:shapeKind' }] : []),
       ...(this.mode === 'walls'
         ? [
             { label: 'Finish the wall', act: 'course:wall:finish', off: this.wallsMode.draft.length < 2 },
@@ -2090,6 +2192,15 @@ export class EditorCourse {
           { label: 'Raced as a bike', value: COURSE_TUNE.forBikes, act: 'course:tune:forBikes', kind: 'check' },
           { label: 'A new wall high', value: COURSE_TUNE.newWallHigh, act: 'course:tune:newWallHigh', kind: 'number' },
           { label: 'Its lean (°)', value: COURSE_TUNE.newWallLean, act: 'course:tune:newWallLean', kind: 'number' },
+          ...(this.mode === 'ground'
+            ? [
+                { label: 'A new shape long', value: COURSE_TUNE.shapeLength, act: 'course:tune:shapeLength', kind: 'number' as const },
+                { label: 'Wide', value: COURSE_TUNE.shapeWidth, act: 'course:tune:shapeWidth', kind: 'number' as const },
+                { label: 'Deep or high', value: COURSE_TUNE.shapeHeight, act: 'course:tune:shapeHeight', kind: 'number' as const },
+                { label: 'Soft edges', value: COURSE_TUNE.shapeSoft, act: 'course:tune:shapeSoft', kind: 'number' as const },
+                { label: "A ramp's far side (0 a drop)", value: COURSE_TUNE.shapeBack, act: 'course:tune:shapeBack', kind: 'number' as const },
+              ]
+            : []),
         ],
         rows,
         buttons,
@@ -2142,8 +2253,37 @@ export class EditorCourse {
         ],
         buttons: [
           { label: n.c === 'smooth' ? 'The edge leaving it: a curve' : 'The edge leaving it: a straight', act: 'course:node:curve' },
+          // Wave 3b: cut the ground here or follow it, and the same over a range from the node marked to this one.
+          { label: n.cut === false ? 'Here the road follows the land (cut instead)' : 'Here the road cuts the ground (follow instead)', act: 'course:node:cut' },
+          { label: this.rangeFrom >= 0 ? `A range from node ${this.rangeFrom} (mark this one instead)` : 'Mark this node as a range\'s start', act: 'course:node:mark' },
+          { label: `Follow the land (node ${this.rangeFrom >= 0 ? this.rangeFrom : this.pickedNode} to ${this.pickedNode})`, act: 'course:node:followRange' },
+          { label: `Cut the ground (node ${this.rangeFrom >= 0 ? this.rangeFrom : this.pickedNode} to ${this.pickedNode})`, act: 'course:node:cutRange' },
           { label: 'Take it out', act: 'course:node:remove', danger: true },
         ],
+      });
+    }
+    if (this.mode === 'ground') {
+      // The track's own ground shapes (wave 3b), each with Pick, and the picked shape's own numbers.
+      const gm = this.groundMode;
+      const shapes = c?.ground ?? [];
+      const s = shapes[gm.shape];
+      out.push({
+        title: 'Its own ground',
+        note: `${shapes.length} shape${shapes.length === 1 ? '' : 's'} and ${c?.brush?.length ?? 0} brush chunk${c?.brush?.length === 1 ? '' : 's'} on ${t.name}, laid in the carve in the road's own frame; the sculpt brush (K) with This track strokes onto it`,
+        rows: shapes.map((k, i) => ({ words: `${i}: a ${k.kind} on ${k.path}, ${k.l} by ${k.w} m, ${k.h} m ${k.kind === 'hole' || k.kind === 'trench' ? 'deep' : 'high'}`, buttons: [{ label: i === gm.shape ? 'Picked' : 'Pick', act: `course:shape:pick:${i}`, off: i === gm.shape }] })),
+        fields: s
+          ? [
+              { label: 'Kind', value: s.kind, act: 'course:shape:kind', kind: 'text' as const },
+              { label: 'Across (m, right +)', value: s.off, act: 'course:shape:off', kind: 'number' as const },
+              { label: 'Turn (°)', value: s.turn, act: 'course:shape:turn', kind: 'number' as const },
+              { label: 'Long', value: s.l, act: 'course:shape:l', kind: 'number' as const },
+              { label: 'Wide', value: s.w, act: 'course:shape:w', kind: 'number' as const },
+              { label: s.kind === 'hole' || s.kind === 'trench' ? 'Deep' : 'High', value: s.h, act: 'course:shape:h', kind: 'number' as const },
+              { label: 'Soft edges', value: s.soft, act: 'course:shape:soft', kind: 'number' as const },
+              ...(s.kind === 'ramp' ? [{ label: 'Far side (0 a drop)', value: s.back ?? 0, act: 'course:shape:back', kind: 'number' as const }] : []),
+            ]
+          : [],
+        buttons: s ? [{ label: 'Take it out', act: 'course:shape:remove', danger: true }] : [],
       });
     }
     if (this.mode === 'walls') {
@@ -2190,9 +2330,13 @@ export class EditorCourse {
           { label: 'y', value: g.y, act: 'course:gate:y', kind: 'number' },
           { label: 'z', value: g.z, act: 'course:gate:z', kind: 'number' },
           { label: 'Width', value: g.w, act: 'course:gate:w', kind: 'number' },
+          { label: 'Height', value: g.h, act: 'course:gate:h', kind: 'number' },
         ],
         buttons: [
           { label: 'Follow the road', act: 'course:follow', off: g.path !== undefined && !g.ow },
+          // Wave 3b: the start and the finish.
+          { label: 'Start here', act: 'course:gate:start', off: this.pickedGate === 0 },
+          ...(t.kind === 'sprint' ? [{ label: 'Finish here', act: 'course:gate:finish', off: this.pickedGate === t.gates.length - 1 }] : []),
           { label: 'Take it out', act: 'course:gate:remove', danger: true },
         ],
       });
@@ -2234,6 +2378,11 @@ export class EditorCourse {
       if (arg === 'forPods' || arg === 'forBikes') return this.tune({ [arg]: value === 'true' }).join('; ');
       return fin ? this.tune({ [arg]: num }).join('; ') : `${arg} takes a number`;
     }
+    if (what === 'shapeKind') {
+      const k = GROUND_KINDS[(GROUND_KINDS.indexOf(COURSE_TUNE.shapeKind) + 1) % GROUND_KINDS.length];
+      COURSE_TUNE.shapeKind = k;
+      return `a new shape: a ${k}`;
+    }
     if (what === 'wall' && arg === 'finish') return this.wallsMode.finish();
     if (what === 'wall' && arg === 'arc') {
       this.wallsMode.nextArc = !this.wallsMode.nextArc;
@@ -2255,12 +2404,39 @@ export class EditorCourse {
       if (arg === 'feather' || arg === 'crossing' || arg === 'grass') return this.setField('course', { [arg]: value });
       return fin ? this.setField('course', { [arg]: num }) : this.said(`${arg} takes a number`, false);
     }
+    if (what === 'shape') return this.shapeAct(t, act.split(':').slice(2), value);
     if (what === 'node') {
       if (arg === 'curve') return this.write('a curve or a straight', t, toggleCurve(t, this.pathId(t), this.pickedNode, this.ctx()));
       if (arg === 'remove') {
         const i = this.pickedNode;
         this.pickedNode = -1;
         return this.write(`node ${i} taken out`, t, deleteNode(t, this.pathId(t), i, this.ctx()));
+      }
+      // Wave 3b: cut or follow, here and over a range.
+      if (arg === 'cut') {
+        const n = this.nodeOf(t);
+        if (!n) return this.said('pick a node first', false);
+        return this.write(n.cut === false ? `node ${this.pickedNode} cuts the ground` : `node ${this.pickedNode} follows the land`, t, setNode(t, this.pathId(t), this.pickedNode, { cut: n.cut === false }, this.ctx()));
+      }
+      if (arg === 'mark') {
+        if (this.pickedNode < 0) return this.said('pick a node first', false);
+        this.rangeMark = { track: t.id, path: this.pathId(t), node: this.pickedNode, row: t };
+        this.host.refresh();
+        return `a range from node ${this.pickedNode}: pick its other end, then Follow the land or Cut the ground`;
+      }
+      if (arg === 'followRange' || arg === 'cutRange') {
+        if (this.pickedNode < 0) return this.said('pick a node first', false);
+        // A mark taken on another track or path, or before the nodes were numbered again, names nothing now: given up in words.
+        const from = this.rangeFrom;
+        if (this.rangeMark && from < 0) {
+          this.rangeMark = null;
+          this.host.refresh();
+          return this.said("the range's first node was marked on another track or path, or the nodes were numbered again since: mark it again", false);
+        }
+        const start = from >= 0 ? from : this.pickedNode;
+        const cut = arg === 'cutRange';
+        this.rangeMark = null;
+        return this.write(`nodes ${start} to ${this.pickedNode} ${cut ? 'cut the ground' : 'follow the land'}`, t, cutRange(t, this.pathId(t), start, this.pickedNode, cut, this.ctx()));
       }
       if (arg === 'wall') return this.setField('node', { wall: value });
       return fin ? this.setField('node', { [arg]: num }) : this.said(`${arg} takes a number`, false);
@@ -2273,12 +2449,47 @@ export class EditorCourse {
         this.pickedGate = -1;
         return this.write(`gate ${i} taken out`, t, gateDeleted(t, i));
       }
+      // Wave 3b: the start and the finish (the pick follows the gate it was on: gate 0 now, or the same index).
+      if (arg === 'start') {
+        const e = startHere(t, i, this.ctx());
+        if (typeof e !== 'string') this.pickedGate = 0;
+        return this.write(`gate ${i} is the start`, t, e);
+      }
+      if (arg === 'finish') return this.write(`gate ${i} is the finish`, t, finishHere(t, i));
       if (!fin) return this.said(`${arg} takes a number`, false);
       if (arg === 'w') return this.write(`gate ${i} widened`, t, gateWidened(t, i, num));
+      if (arg === 'h') return this.write(`gate ${i} heightened`, t, gateSized(t, i, { h: num }));
       const place = { x: arg === 'x' ? num : g.x, y: arg === 'y' ? num : g.y, z: arg === 'z' ? num : g.z, q: g.q };
       return this.write(`gate ${i} moved`, t, gateMoved(t, i, place));
     }
     return this.said(`no such act: ${act}`, false);
+  }
+
+  /** A Ground act of the Selected tab (`course:shape:<what>[:<i>]`) on the picked shape (wave 3b). */
+  private shapeAct(t: TrackDef, parts: string[], value: string | undefined): Promise<string> | string {
+    const gm = this.groundMode;
+    const what = parts[0];
+    if (what === 'pick') {
+      const i = Number(parts[1]);
+      if (!t.course?.ground?.[i]) return this.said(`no shape ${parts[1]}`, false);
+      gm.shape = i;
+      this.host.refresh();
+      return `shape ${i} picked`;
+    }
+    const i = gm.shape;
+    if (!t.course?.ground?.[i]) return this.said('pick a shape first (a click on its handle, or Pick)', false);
+    if (what === 'remove') {
+      gm.shape = -1;
+      return this.write(`shape ${i} taken out`, t, shapeRemoved(t, i));
+    }
+    if (what === 'kind') {
+      if (!GROUND_KINDS.includes(value as GroundKind)) return this.said(`a shape is ${GROUND_KINDS.join(', ')}`, false);
+      return this.write(`shape ${i} made a ${value}`, t, shapeSet(t, i, { kind: value as GroundKind }));
+    }
+    const num = Number(value);
+    if (value === undefined || value === '' || !Number.isFinite(num)) return this.said(`${what} takes a number`, false);
+    if (!['off', 'turn', 'l', 'w', 'h', 'soft', 'back'].includes(what)) return this.said(`no such act: course:shape:${what}`, false);
+    return this.write(`shape ${i} set`, t, shapeSet(t, i, { [what]: num } as ShapeFields));
   }
 
   /** A Walls act of the Selected tab (`course:wall:<what>[:<i>]`) on the picked wall, its picked point or its picked edge. */
@@ -2447,6 +2658,7 @@ export class EditorCourse {
         }
         if (node.c === 'smooth' || node.c === 'straight') f.c = node.c;
         if (node.wall === 'left' || node.wall === 'right' || node.wall === 'both' || node.wall === 'none') f.wall = node.wall;
+        if (typeof node.cut === 'boolean') f.cut = node.cut;
         said.push(await this.write('a node set', t, setNode(t, path, i, f, this.ctx())));
       }
     }
@@ -2465,11 +2677,32 @@ export class EditorCourse {
         said.push(await this.write(`gate ${i} moved`, t, gateMoved(t, i, { x, y, z, q: g.q })));
       } else if (typeof gate.yaw === 'number') said.push(await this.write(`gate ${i} turned`, t, gateTurned(t, i, gate.yaw)));
       else if (typeof gate.raise === 'number') said.push(await this.write(`gate ${i} raised`, t, gateRaised(t, i, gate.raise)));
-      else if (typeof gate.w === 'number') said.push(await this.write(`gate ${i} widened`, t, gateWidened(t, i, gate.w)));
-      else said.push('a gate edit is remove, follow, move: [x, y, z], yaw, raise or w');
+      else if (typeof gate.w === 'number' || typeof gate.h === 'number') said.push(await this.write(`gate ${i} sized`, t, gateSized(t, i, { w: typeof gate.w === 'number' ? gate.w : undefined, h: typeof gate.h === 'number' ? gate.h : undefined })));
+      else said.push('a gate edit is remove, follow, move: [x, y, z], yaw, raise, w or h');
     }
+    // Wave 3b: the start and the finish, a range cut or followed, and the track's own ground.
+    for (const which of ['start', 'finish'] as const) {
+      const sf = rec(o[which]);
+      if (!sf) continue;
+      const t = byId(sf.track);
+      const i = Number(sf.gate);
+      if (!t) said.push(`${which} names its track (track: id) and a gate (gate: i)`);
+      else said.push(await this.write(`gate ${i} is the ${which}`, t, which === 'start' ? startHere(t, i, this.ctx()) : finishHere(t, i)));
+    }
+    const range = rec(o.cut);
+    if (range) {
+      const t = byId(range.track);
+      if (!t) said.push('a cut names its track (track: id), or one is picked');
+      else said.push(await this.write('a range cut or followed', t, cutRange(t, typeof range.path === 'string' ? range.path : undefined, Number(range.from), Number(range.to), range.cut !== false, this.ctx())));
+    }
+    const ground = rec(o.ground);
+    if (ground) said.push(await this.groundDebug(ground, byId(ground.track)));
     const set = rec(o.set);
-    if (set) {
+    if (set && typeof set.node === 'number' && typeof set.cut === 'boolean') {
+      const t = byId(set.track);
+      if (!t) said.push('a set names its track (track: id), or one is picked');
+      else said.push(await this.write(`node ${set.node} ${set.cut ? 'cuts the ground' : 'follows the land'}`, t, setNode(t, typeof set.path === 'string' ? set.path : undefined, set.node, { cut: set.cut }, this.ctx())));
+    } else if (set) {
       const t = byId(set.track);
       if (!t) said.push('a set names its track (track: id), or one is picked');
       else {
@@ -2495,6 +2728,40 @@ export class EditorCourse {
     if (walls) said.push(await this.wallsDebug(walls));
     if (typeof o.remove === 'string') said.push(await this.remove(o.remove));
     return { said: said.filter(Boolean), tool: this.report(), courses: this.coursesReport() };
+  }
+
+  /**
+   * The console's ground (wave 3b): `add: { at: [x, z], kind?, l?, w?, h?, soft?, back?, off?, turn? }` (the file's raw frame,
+   * on the track's nearest road), or `i` with `set: {...}`, `remove: true` or `pick: true`. One write each.
+   */
+  private async groundDebug(g: Record<string, unknown>, t: TrackDef | null): Promise<string> {
+    if (!t) return 'ground names its track (track: id), or one is picked';
+    const add = g.add && typeof g.add === 'object' ? (g.add as Record<string, unknown>) : null;
+    const nums = (o: Record<string, unknown>): ShapeFields => {
+      const f: ShapeFields = {};
+      for (const k of ['off', 'turn', 'l', 'w', 'h', 'soft', 'back'] as const) if (typeof o[k] === 'number') f[k] = o[k] as number;
+      if (GROUND_KINDS.includes(o.kind as GroundKind)) f.kind = o.kind as GroundKind;
+      return f;
+    };
+    if (add) {
+      const at = add.at;
+      if (!Array.isArray(at) || !Number.isFinite(at[0]) || !Number.isFinite(at[1])) return 'add: { at: [x, z] } of the raw frame';
+      const s = shapeAt(t, Number(at[0]), Number(at[1]));
+      if (typeof s === 'string') return s;
+      const f = nums(add);
+      const made = shapeAdded(t, { ...s, ...f, back: f.back ?? s.back });
+      return this.write(`a ${f.kind ?? s.kind} put down`, t, made);
+    }
+    const i = Number(g.i);
+    if (!t.course?.ground?.[i]) return `there is no shape ${String(g.i)}`;
+    if (g.remove === true) return this.write(`shape ${i} taken out`, t, shapeRemoved(t, i));
+    if (g.pick === true) {
+      this.groundMode.shape = i;
+      return `shape ${i} picked`;
+    }
+    const set = g.set && typeof g.set === 'object' ? nums(g.set as Record<string, unknown>) : null;
+    if (set) return this.write(`shape ${i} set`, t, shapeSet(t, i, set));
+    return 'ground is add, or i with set, remove or pick';
   }
 
   /** This world's tracks with a course, as the console reports them: paths, nodes, lengths, joins, gates and notes. */
@@ -2535,7 +2802,7 @@ export class EditorCourse {
 
   /** For the console. */
   report(): Record<string, unknown> {
-    return { armed: this.armed, mode: this.mode, picked: this.picked, path: this.pickedPath, node: this.pickedNode, gate: this.pickedGate, draft: this.draft.length, shortcutFrom: this.draftJoin, held: this.held, writing: !!this.writing, views: this.views.length, last: { ...this.last }, notes: [...this.notes], carves: !!this.host.carve, carvedLive: this.carvedLive, carried: { ...this.carried }, walls: this.wallsMode.report() };
+    return { armed: this.armed, mode: this.mode, picked: this.picked, path: this.pickedPath, node: this.pickedNode, gate: this.pickedGate, draft: this.draft.length, shortcutFrom: this.draftJoin, held: this.held, writing: !!this.writing, views: this.views.length, last: { ...this.last }, notes: [...this.notes], carves: !!this.host.carve, carvedLive: this.carvedLive, carried: { ...this.carried }, walls: this.wallsMode.report(), ground: this.groundMode.report(), rangeFrom: this.rangeFrom };
   }
 
   /** The tune moved from the console or a slider: the views drawn again (their reach, nothing else of a course). */

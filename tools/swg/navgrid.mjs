@@ -91,6 +91,7 @@ import { isSeat, isTableTemplate, standsSolid } from '../../src/world/rowSolid.t
 import { ObjectKeyIndex, compileRemovals, noRemovals, readRemovalsFile, removalKindOf } from '../../src/story/removals.ts';
 import { FLORA_COLLISION, mergeFloraCollision, modelExtentOf, rowFloraParts } from '../../src/world/floraShapes.ts';
 import { readTrackFile } from '../../src/race/trackFile.ts';
+import { primeBrushNow } from '../../src/race/courseGround.ts';
 import { CARVE_VERSION, CourseCarve, carveAsk } from '../../src/swg/terrain/courseCarve.ts';
 
 // The rules, named here as they always were (every caller and test that imports them from this file still does).
@@ -429,9 +430,14 @@ export function courseStamp(tracks) {
     if (!c) continue;
     lines.push(`track ${t.id} ${t.kind} ${c.feather} ${c.crossing} ${c.margin} ${c.level}`);
     for (const p of c.paths) {
-      lines.push(`path ${p.id}`);
-      for (const n of p.nodes) lines.push(`${n.x} ${n.y} ${n.z} ${n.w} ${n.b} ${n.sh} ${n.c} ${n.j ?? ''}`);
+      // Wave 3b's fields (the review round), each only where present, so a course of before stamps as it did: a closed path's
+      // brush period, a node that follows the ground, a node's brush lattice coordinate.
+      lines.push(p.bl !== undefined ? `path ${p.id} bl ${p.bl}` : `path ${p.id}`);
+      for (const n of p.nodes) lines.push(`${n.x} ${n.y} ${n.z} ${n.w} ${n.b} ${n.sh} ${n.c} ${n.j ?? ''}${n.cut === false ? ' follow' : ''}${n.bs !== undefined ? ` bs ${n.bs}` : ''}`);
     }
+    // Its own ground (wave 3b): every shape, and every brush chunk by its place and a hash of its deltas.
+    for (const s of c.ground ?? []) lines.push(`ground ${JSON.stringify(s)}`);
+    for (const b of c.brush ?? []) lines.push(`brush ${b.path} ${b.k} ${b.a} ${b.n} ${createHash('sha1').update(b.d).digest('hex').slice(0, 16)}`);
   }
   return lines.length ? `carve v${CARVE_VERSION}\n${lines.join('\n')}` : '';
 }
@@ -446,6 +452,10 @@ export function gridCourses(edits, log = () => {}) {
     return null;
   }
   if (!read.tracks.some((t) => t.course)) return null;
+  // The brush strokes' deltas inflated before the store is set (wave 3b's review round), as the game does at an arrival: else
+  // every chunk is laid as nothing.
+  const primed = primeBrushNow(read.tracks, inflateTile);
+  for (const f of primed.failed) log(`  brush chunk not read: ${f}`);
   const store = new CourseCarve();
   store.set(read.tracks);
   return store.empty ? null : store;

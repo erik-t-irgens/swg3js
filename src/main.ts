@@ -448,6 +448,7 @@ import { LAKE_TUNE, tuneRiverTune } from './world/ourWater.ts';
 import { GROUND_PAINT_TUNE } from './world/groundRewrite.ts';
 import { runCurtain, type CurtainResult } from './world/curtain.ts';
 import { inflateBase64 } from './world/editFiles/browserCodec.ts';
+import { primeBrush } from './race/courseGround.ts';
 import { MODEL_REFLECTIONS_AT_LOAD, PREVIEW_REFLECTIONS, REFLECTIONS, environmentIsStandIn, isRegisteredReflective, modelReflectiveCount, plainReflectiveCount, reflectiveCount, setEnvironmentStandIn, setModelReflections, setPlainReflections, setReflectionSource, type ReflectionSource } from './world/envmap';
 import { SPEC_TUNE, setSpecTune, specReport, specSelfTest, type SpecTune } from './world/specular.ts';
 import { cardsReport, setCardTune, type CardTune } from './world/cardRule.ts';
@@ -21346,6 +21347,10 @@ class App {
       const read = readTrackFile(text, world, kind);
       const file = trackEditFile(world);
       if (read.problem) console.warn(`tracks: ${file} is not read: ${read.problem}`);
+      // A drawn course's own brush deltas (the race drawer's wave 3b) inflated once, here, so the carve reads them as it lays;
+      // a file with none inflates nothing. The world's file read whole names these tracks' chunks alone as held (never let go).
+      const primed = await primeBrush(read.tracks, inflateBase64, true);
+      for (const f of primed.failed) console.warn(`tracks: ${file}: a brush chunk is laid as nothing: ${f}`);
       for (const s of read.skipped) console.warn(`tracks: ${file}: ${s.id} is skipped: ${s.why}`);
       if (read.unknown.length) console.warn(`tracks: ${file}: fields this build does not read: ${read.unknown.join(', ')}`);
       return read;
@@ -29975,6 +29980,9 @@ class App {
     // is on, an undo's or a redo's), laid over the tracks read by difference; the corridors of the tracks it moved kept
     // clear on the chunks built from now on, as a file read again keeps them.
     const tkf = files.tracks;
+    // A course's own brush deltas inflated before anything carves them (the race drawer's wave 3b): an undo's or the dev
+    // server's chunks the page has not got; the editor's own write kept its own.
+    if (tkf) await primeBrush(tkf.put as unknown as TrackDef[], inflateBase64);
     if (tkf && this.world.generation === gen && this.editWorld() === pack) this.landTracks(pack, tkf.put as unknown as TrackDef[], tkf.deleted, tkf.rows);
     return { ok: true, why: '', files, ms: reply.ms ?? 0, built };
   }

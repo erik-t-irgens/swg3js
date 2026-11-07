@@ -96,9 +96,9 @@ function squareTrack(over: Partial<TrackDef> = {}): TrackDef {
     ['grid', { grid: { x: 0, y: 0, z: 0 } }],
     ['one gate', { gates: [good.gates[0]] }],
     ['a gate too narrow', { gates: [{ ...good.gates[0], w: TRACK_LIMITS.widthLeast - 0.01 }, good.gates[1]] }],
-    ['a gate too wide', { gates: [{ ...good.gates[0], w: TRACK_LIMITS.widthMost + 1 }, good.gates[1]] }],
+    ['a gate too wide', { gates: [{ ...good.gates[0], w: TRACK_LIMITS.gateWidthMost + 1 }, good.gates[1]] }],
     ['a gate too low', { gates: [{ ...good.gates[0], h: TRACK_LIMITS.heightLeast - 1 }, good.gates[1]] }],
-    ['a gate too tall', { gates: [{ ...good.gates[0], h: TRACK_LIMITS.heightMost + 1 }, good.gates[1]] }],
+    ['a gate too tall', { gates: [{ ...good.gates[0], h: TRACK_LIMITS.gateHeightMost + 1 }, good.gates[1]] }],
     ['a gate too far out across', { gates: [{ ...good.gates[0], x: TRACK_LIMITS.reach + 1 }, good.gates[1]] }],
     ['a grid too far out along', { grid: { ...good.grid, z: -(TRACK_LIMITS.reach + 1) } }],
     ['a gate too far up', { gates: [{ ...good.gates[0], y: TRACK_LIMITS.height + 1 }, good.gates[1]] }],
@@ -924,8 +924,11 @@ function driveRound(r: ReturnType<typeof runOf>, pts: { x: number; z: number }[]
     const read = readTrackFile(trackFileText('tatooine', 'raw', [e]), 'tatooine', 'ground');
     ok(read.problem === null && read.skipped.length === 0 && read.tracks.length === 1, `the editor's ${what} leaves a track the file reads`);
   }
-  const resized = resizeGate(t, 3, { w: 500, h: 1 }) as TrackDef;
-  ok(resized.gates[3].w === TRACK_LIMITS.widthMost && resized.gates[3].h === TRACK_LIMITS.heightLeast, "a size past the reader's limits is held to them");
+  // A gate's own window reaches past the road's width (the race drawer's wave 3b): held to the gates' own limits.
+  const resized = resizeGate(t, 3, { w: 5000, h: 1 }) as TrackDef;
+  ok(resized.gates[3].w === TRACK_LIMITS.gateWidthMost && resized.gates[3].h === TRACK_LIMITS.heightLeast, "a size past the reader's limits is held to them");
+  const wide = resizeGate(t, 3, { w: 500, h: 600 }) as TrackDef;
+  ok(wide.gates[3].w === 500 && wide.gates[3].h === 600 && readTrackFile(trackFileText('tatooine', 'raw', [wide]), 'tatooine', 'ground').tracks.length === 1, 'a gate 500 m wide and 600 m tall (past the road width) is kept and read back');
   ok(typeof deleteGate(deleteGate(deleteGate(t, 0) as TrackDef, 0) as TrackDef, 0) === 'string', `a track keeps ${TRACK_LIMITS.gatesLeast} gates`);
   ok(typeof moveGateTo(t, 9, here) === 'string', 'an edit of a gate that is not there is refused in words');
   // A nudge is the driver's: to the right, up, ahead and turned left, the same whichever frame the file is in.

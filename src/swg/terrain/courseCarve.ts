@@ -36,6 +36,7 @@
 
 import { feather } from './generator.ts';
 import { buildSpine, sameEdge, type Spine, type SpineEdge, type SpineNode } from '../../race/coursePath.ts';
+import { BRUSH_ALONG, BRUSH_CELL, BRUSH_CHUNK, KIND_CODE, SHAPE_STRIDE, brushCells, brushLattice, latticeEdge, type BrushChunk, type GroundShape } from '../../race/courseGround.ts';
 
 /** The carve's own version: the walk grid's key folds it in (a change of these constants changes bits). */
 export const CARVE_VERSION = 1;
@@ -81,6 +82,8 @@ const FEATHER_FN: Record<string, number> = { linear: 0, easeIn: 1, easeOut: 2, e
 /** A node as the carve reads it: the spine's numbers and a shortcut's join. */
 export interface CarveNode extends SpineNode {
   j?: string;
+  /** The brush lattice's coordinate here (wave 3b's review round, `courseGround.ts`). */
+  bs?: number;
 }
 /** A course as the carve reads it (a track's `course`, `trackFile.ts`, read structurally). */
 export interface CarveCourseDef {
@@ -89,7 +92,10 @@ export interface CarveCourseDef {
   margin: number;
   level: number;
   grass: string;
-  paths: readonly { id: string; nodes: readonly CarveNode[] }[];
+  paths: readonly { id: string; bl?: number; nodes: readonly CarveNode[] }[];
+  /** Its own ground (wave 3b, `courseGround.ts`), laid after the road's cut in the road's own frame. */
+  ground?: readonly GroundShape[];
+  brush?: readonly BrushChunk[];
 }
 /** A track as the carve reads it: its id, kind, `clear` and course (absent: a gate-only track, carved nothing). */
 export interface CarveTrack {
@@ -187,7 +193,33 @@ interface PathRec {
   edges: number;
   /** The node list it was last built from (a change handing the very same list moves nothing). */
   nodesRef: readonly CarveNode[];
+  /**
+   * Its own ground (wave 3b): its shapes packed `SHAPE_STRIDE` numbers each (their place along the path worked out from their
+   * anchors on this spine), its brush chunks by their index along, the text both were made from (a change compares it), and
+   * the stretches of the path they reach (pairs of arclengths), for a change's rectangles. None: `shapeN` 0 and `brush` null.
+   */
+  shapes: Float64Array;
+  shapeN: number;
+  brush: Map<number, BrushRec> | null;
+  /** The brush lattice at its nodes and its last edge's end (`brushLattice`), and the lattice's period on a closed path. */
+  lam: Float64Array;
+  lamP: number;
+  groundSig: string;
+  groundAt: number[];
+  /** Each stretch's key (a shape's text, a chunk's `k,a,n,d`), beside `groundAt`'s pairs: a change marks only the ones that moved. */
+  groundKeys: string[];
+  /** Brush chunks it names that were not inflated when it was built (laid as nothing until a later set finds them). */
+  missing: number;
 }
+
+/** One brush chunk as the carve keeps it: its first cell across, its count across and its deltas (16 along by `n`). */
+interface BrushRec {
+  a: number;
+  n: number;
+  cells: Float32Array;
+}
+
+const NO_SHAPES = new Float64Array(0);
 
 /** One pass past a pole: its path, the run's first and last segment, its nearest point and the road there. */
 export class CarvePass {
@@ -212,9 +244,12 @@ export class CarvePass {
   hw = 0.5;
   tb = 0.5;
   sh = 0.5;
-  /** Its surface and weight at the pole, whether its road and its slot cover the pole, and the rules' factors. */
+  /** How much it cuts at its nearest point (wave 3b: 1 cutting, 0 following the ground). */
+  k = 0.5;
+  /** Its surface and weight at the pole (`w` times how much it cuts; `w0` the road's own weight before that), whether its road and its slot cover the pole, and the rules' factors. */
   T = 0.5;
   w = 0.5;
+  w0 = 0.5;
   road = false;
   slot = false;
   over = 0.5;
@@ -224,12 +259,16 @@ export class CarvePass {
   gone = false;
   /** Its nearest point is past a joined end (no cap there): left out of the blend. */
   capped = false;
+  /** Its own ground's weight through the rules (wave 3b). */
+  ga = 0.5;
 }
 
 /** A pass's own surface and weight at a pole read back (`sampleAt`): the target, the weight, and the deck there where one stands. */
 export interface CarveSample {
   T: number;
   W: number;
+  /** The course's own ground laid over the carve there (wave 3b; nought with none). */
+  D: number;
 }
 
 /** What a tracker or the deck asks of the store at a point: kept, its numbers fields. */
@@ -273,6 +312,24 @@ export function bandShare(diff: number, level: number): number {
   return smooth(level / 2, level, diff);
 }
 
+/** One path's own ground as text (its shapes, then its chunks' keys and deltas, then its lattice): what a change compares. '' with none. */
+function groundSigOf(c: CarveCourseDef, path: { id: string; bl?: number; nodes: readonly CarveNode[] }): string {
+  let sig = '';
+  for (const s of c.ground ?? []) if (s.path === path.id) sig += JSON.stringify(s);
+  let brush = false;
+  for (const b of c.brush ?? []) {
+    if (b.path !== path.id) continue;
+    sig += `|${b.k},${b.a},${b.n},${b.d}`;
+    brush = true;
+  }
+  // The lattice the chunks lie on (the review round): a node's `bs` moved moves every cell after it.
+  if (brush && path.nodes[0]?.bs !== undefined) {
+    sig += `#${path.bl ?? ''}`;
+    for (const n of path.nodes) sig += `,${n.bs}`;
+  }
+  return sig;
+}
+
 /** The store. */
 export class CourseCarve {
   /** Moved by every change (`set`), so anything that keeps a laid copy can ask whether the store moved. */
@@ -303,9 +360,17 @@ export class CourseCarve {
   private qWiden = 0.5;
   /** 0 the carve's reach (road, shoulder, margin, widening), 1 the masks' (road plus clear). */
   private qMode = 0;
-  /** The blend's answer: the target surface and the weight. */
+  /** The blend's answer: the target surface and the weight; and the course's own ground laid over it (wave 3b). */
   outT = 0.5;
   outW = 0.5;
+  outD = 0.5;
+  /** Whether any path held carries ground of its own (wave 3b): with none the blend's ground is never asked, and every pole is as before. */
+  private groundAny = false;
+  /** Brush chunks named and not yet inflated where the store was last set (`primeBrush` comes first): laid as nothing. */
+  brushMissing = 0;
+  /** A pass's own ground worked out (`groundAt`) and a brush cell read (`cell`): fields and a register, so no number crosses a call. */
+  private gOut = 0.5;
+  private readonly gReg = new Float64Array(2);
   /** The dirty rectangles the last change made (raw frame), the first `rectN` of them. */
   readonly rects: CarveRect[] = [];
   rectN = 0;
@@ -359,23 +424,50 @@ export class CourseCarve {
         const joinEnd = p > 0 && typeof nodes[nodes.length - 1].j === 'string';
         const was = old.get(key);
         let rec: PathRec;
+        // Its own ground's text (wave 3b): '' with none, so a course with no ground compares and builds as before.
+        const sig = c.ground || c.brush ? groundSigOf(c, path) : '';
         if (was) {
           old.delete(key);
           const same = was.closed === closed && was.joinStart === joinStart && was.joinEnd === joinEnd && was.fn === fn && was.margin === c.margin && was.level === c.level && was.slope === (c.crossing === 'slope') && was.clear === clear && was.grassClear === (c.grass === 'clear');
-          // The very node list it was built from, with the same numbers: nothing to build or compare (a drag's other paths).
-          if (same && was.nodesRef === nodes) {
+          // The very node list it was built from, with the same numbers and the same ground (every chunk of it inflated): nothing
+          // to build or compare (a drag's other paths).
+          if (same && was.nodesRef === nodes && was.groundSig === sig && was.missing === 0) {
             recs.push(was);
             continue;
           }
           const into = was.spare ?? undefined;
           const now = buildSpine(nodes, closed, into);
           const most = Math.max(was.spine.edges.length, now.edges.length);
+          let moved = false;
           for (let e = 0; e < most; e++) {
             const a = was.spine.edges[e];
             const b = now.edges[e];
             if (same && a && b && sameEdge(a, b)) continue;
+            moved = true;
             if (a) this.addRect(a, Math.max(was.margin, was.clear));
             if (b) this.addRect(b, Math.max(c.margin, clear));
+          }
+          // Its ground's stretches before (on the spine as it was) and after: every one where the road under it moved, its lattice
+          // moved or a chunk of it was waiting to be inflated; else (the review round) only the stretches whose shape or chunk
+          // changed, so a stroke's preview or one shape edited marks what it touched and not the whole path.
+          if (was.groundSig !== sig || was.missing > 0 || (moved && (was.groundSig !== '' || sig !== ''))) {
+            const oldAt = was.groundAt;
+            const oldKeys = was.groundKeys;
+            const oldLam = was.lam;
+            const all = moved || was.missing > 0;
+            const keep = was.spine;
+            was.spine = now;
+            this.buildGround(was, c, path, sig);
+            was.spine = keep;
+            let lamMoved = oldLam.length !== was.lam.length;
+            for (let i = 0; !lamMoved && i < oldLam.length; i++) if (oldLam[i] !== was.lam[i]) lamMoved = true;
+            if (all || lamMoved) {
+              this.rangeRects(was.spine, oldAt, Math.max(was.margin, was.clear));
+              this.rangeRects(now, was.groundAt, Math.max(c.margin, clear));
+            } else {
+              this.changedRects(was.spine, oldAt, oldKeys, was.groundKeys, Math.max(was.margin, was.clear));
+              this.changedRects(now, was.groundAt, was.groundKeys, oldKeys, Math.max(c.margin, clear));
+            }
           }
           rec = was;
           rec.spare = was.spine;
@@ -391,8 +483,9 @@ export class CourseCarve {
           rec.grassClear = c.grass === 'clear';
         } else {
           const spine = buildSpine(nodes, closed);
-          rec = { track: t.id, pathId: path.id, closed, joinStart, joinEnd, fn, margin: c.margin, level: c.level, slope: c.crossing === 'slope', clear, grassClear: c.grass === 'clear', spine, spare: null, base: 0, edges: spine.edges.length, nodesRef: nodes };
+          rec = { track: t.id, pathId: path.id, closed, joinStart, joinEnd, fn, margin: c.margin, level: c.level, slope: c.crossing === 'slope', clear, grassClear: c.grass === 'clear', spine, spare: null, base: 0, edges: spine.edges.length, nodesRef: nodes, shapes: NO_SHAPES, shapeN: 0, brush: null, lam: NO_SHAPES, lamP: 0, groundSig: '', groundAt: [], groundKeys: [], missing: 0 };
           for (const e of spine.edges) this.addRect(e, Math.max(c.margin, clear));
+          if (sig !== '') this.buildGround(rec, c, path, sig);
         }
         rec.nodesRef = nodes;
         rec.edges = rec.spine.edges.length;
@@ -401,6 +494,14 @@ export class CourseCarve {
     }
     for (const r of old.values()) for (const e of r.spine.edges) this.addRect(e, Math.max(r.margin, r.clear));
     this.recs = recs;
+    let any = false;
+    let missing = 0;
+    for (const r of recs) {
+      if (r.shapeN > 0 || r.brush) any = true;
+      missing += r.missing;
+    }
+    this.groundAny = any;
+    this.brushMissing = missing;
     this.fill(prune);
     this.version++;
     this.lastCell = -1;
@@ -444,6 +545,115 @@ export class CourseCarve {
     r.x1 = x1 + g;
     r.z1 = z1 + g;
     this.rectN++;
+  }
+
+  /** Every edge of a spine a stretch of its own ground reaches (pairs of arclengths, a closed path's wrapping), pushed onto the dirty list. */
+  private rangeRects(sp: Spine, ranges: readonly number[], extra: number): void {
+    for (let r = 0; r + 1 < ranges.length; r += 2) this.rangeRect(sp, ranges[r], ranges[r + 1], extra);
+  }
+
+  /** Every edge of a spine one stretch (two arclengths, a closed path's wrapping) reaches, pushed onto the dirty list. */
+  private rangeRect(sp: Spine, lo: number, hi: number, extra: number): void {
+    const L = sp.length;
+    for (let e = 0; e < sp.edges.length; e++) {
+      const a = sp.start[e];
+      const b = a + sp.edges[e].len;
+      let hit = lo <= b && hi >= a;
+      if (!hit && sp.closed && L > 0) hit = (lo - L <= b && hi - L >= a) || (lo + L <= b && hi + L >= a);
+      if (hit) this.addRect(sp.edges[e], extra);
+    }
+  }
+
+  /**
+   * The stretches of `ranges` (keyed by `keys`, a pair each) that `other` holds fewer of (a shape or a chunk changed, added or
+   * taken out), pushed onto the dirty list: counted, so one of two like shapes taken out still marks its stretch.
+   */
+  private changedRects(sp: Spine, ranges: readonly number[], keys: readonly string[], other: readonly string[], extra: number): void {
+    const left = new Map<string, number>();
+    for (const k of other) left.set(k, (left.get(k) ?? 0) + 1);
+    for (let r = 0; r < keys.length && 2 * r + 1 < ranges.length; r++) {
+      const c = left.get(keys[r]) ?? 0;
+      if (c > 0) left.set(keys[r], c - 1);
+      else this.rangeRect(sp, ranges[2 * r], ranges[2 * r + 1], extra);
+    }
+  }
+
+  /**
+   * A path's own ground built from its course (wave 3b) on the spine it holds: each shape's place along the path worked out
+   * from its anchor (an anchor past the path's edges at the end of its last, as a gate's), packed; each brush chunk with its
+   * inflated deltas (one never inflated, or of the wrong size, counted and laid as nothing); and the stretches they reach.
+   */
+  private buildGround(rec: PathRec, c: CarveCourseDef, path: { id: string; bl?: number; nodes: readonly CarveNode[] }, sig: string): void {
+    const pathId = path.id;
+    const sp = rec.spine;
+    const E = sp.edges.length;
+    const at: number[] = [];
+    const keys: string[] = [];
+    let n = 0;
+    for (const s of c.ground ?? []) if (s.path === pathId) n++;
+    const S = SHAPE_STRIDE;
+    const arr = rec.shapes.length >= n * S ? rec.shapes : new Float64Array(n * S);
+    let j = 0;
+    for (const s of c.ground ?? []) {
+      if (s.path !== pathId) continue;
+      const e = Math.min(s.e, E - 1);
+      const share = s.e > E - 1 ? 1 : s.t;
+      const s0 = E > 0 && e >= 0 ? sp.start[e] + share * sp.edges[e].len : 0;
+      const th = (s.turn * Math.PI) / 180;
+      const hl = s.l / 2;
+      const hw = s.w / 2;
+      const back = s.back ?? 0;
+      const R = Math.sqrt((hl + back) * (hl + back) + hw * hw);
+      const o = j * S;
+      arr[o] = s0;
+      arr[o + 1] = s.off;
+      arr[o + 2] = Math.cos(th);
+      arr[o + 3] = Math.sin(th);
+      arr[o + 4] = hl;
+      arr[o + 5] = hw;
+      arr[o + 6] = s.h;
+      arr[o + 7] = s.soft;
+      arr[o + 8] = back;
+      arr[o + 9] = KIND_CODE[s.kind] ?? 0;
+      arr[o + 10] = R;
+      at.push(s0 - R, s0 + R);
+      keys.push(JSON.stringify(s));
+      j++;
+    }
+    rec.shapes = n ? arr : NO_SHAPES;
+    rec.shapeN = n;
+    let map: Map<number, BrushRec> | null = null;
+    let missing = 0;
+    // The brush lattice on this spine (the review round): from the nodes' own `bs`, else their arclengths.
+    const has = c.brush?.some((b) => b.path === pathId) ?? false;
+    const lam = has ? brushLattice(path.nodes, sp.start, sp.length, rec.closed, path.bl) : NO_SHAPES;
+    rec.lam = lam;
+    rec.lamP = has && rec.closed ? lam[E] - lam[0] : 0;
+    const where = { e: 0, t: 0 };
+    const arcOf = (v: number): number => {
+      const x = rec.closed ? v : Math.max(lam[0], Math.min(lam[E], v));
+      return latticeEdge(lam, E, rec.closed, x, where) ? sp.start[where.e] + where.t * sp.edges[where.e].len : 0;
+    };
+    for (const b of c.brush ?? []) {
+      if (b.path !== pathId) continue;
+      const cells = brushCells(b.d);
+      if (!cells || cells.length !== BRUSH_ALONG * b.n) {
+        missing++;
+        continue;
+      }
+      if (!map) map = new Map();
+      map.set(b.k, { a: b.a, n: b.n, cells });
+      const a0 = arcOf(b.k * BRUSH_CHUNK - BRUSH_CELL);
+      let a1 = arcOf((b.k + 1) * BRUSH_CHUNK);
+      if (rec.closed && a1 < a0) a1 += sp.length;
+      at.push(a0, a1);
+      keys.push(`${b.k},${b.a},${b.n},${b.d}`);
+    }
+    rec.brush = map;
+    rec.missing = missing;
+    rec.groundSig = sig;
+    rec.groundAt = at;
+    rec.groundKeys = keys;
   }
 
   /** The global edge table and every bucket filled again in place from the paths now held. */
@@ -662,6 +872,8 @@ export class CourseCarve {
           p.hw = hw;
           p.tb = ed.tb[i] + (ed.tb[i + 1] - ed.tb[i]) * f;
           p.sh = sh;
+          // 1 + (1 - 1) f is 1 exactly: a course that cuts everywhere is carved as before to the bit.
+          p.k = ed.k[i] + (ed.k[i + 1] - ed.k[i]) * f;
         }
       }
       // A run is cut where the next list entry does not carry it on (the check is the continuation test above).
@@ -719,6 +931,7 @@ export class CourseCarve {
     to.hw = from.hw;
     to.tb = from.tb;
     to.sh = from.sh;
+    to.k = from.k;
   }
 
   /** One pass's surface, weight, road and slot at the query (§2.5), the far widening counted as road. */
@@ -734,6 +947,11 @@ export class CourseCarve {
     if (p.road) p.w = 1;
     else if (p.sh > 0 && d < hw + p.sh) p.w = feather(rec.fn, 1 - (d - hw) / p.sh);
     else p.w = 0;
+    // The road's own weight before how much it cuts (wave 3b), what its own ground is faded by: never the far widening (the
+    // review round: a far tile lays the ground no wider than a near one).
+    p.w0 = widen > 0 && d > hw ? (p.sh > 0 && d < hw + p.sh ? feather(rec.fn, 1 - (d - hw) / p.sh) : 0) : p.w;
+    // Where the road follows the ground (wave 3b), it carves by how much it cuts there: nought at a following node.
+    if (p.k !== 1) p.w = p.w * p.k;
     p.over = 0;
     p.join = 0;
     p.drop = 0;
@@ -761,6 +979,7 @@ export class CourseCarve {
     if (n === 0) {
       this.outT = 0;
       this.outW = 0;
+      this.outD = 0;
       return;
     }
     if (n > 1) {
@@ -793,7 +1012,8 @@ export class CourseCarve {
           const diff = A.T - B.T;
           const lv = A.rec!.level > B.rec!.level ? A.rec!.level : B.rec!.level;
           if (!(diff > lv / 2) && !(lv <= 0 && diff > 0)) continue;
-          const s = bandShare(diff, lv) * (1 - A.over);
+          // A road following the ground (wave 3b) drops nothing by how much it follows (times 1 where it cuts: as before).
+          const s = bandShare(diff, lv) * (1 - A.over) * A.k;
           if (s > B.drop) B.drop = s;
         }
       }
@@ -810,13 +1030,14 @@ export class CourseCarve {
           const diff = A.T - B.T;
           const lv = A.rec!.level > B.rec!.level ? A.rec!.level : B.rec!.level;
           if (!(diff > lv / 2) && !(lv <= 0 && diff > 0)) continue;
-          const s = bandShare(diff, lv);
+          const s = bandShare(diff, lv) * B.k;
           if (s > A.drop) A.drop = s;
         }
       }
       for (let k = 0; k < n; k++) {
         const p = P[k];
-        const joined = p.w + (1 - p.w) * p.join;
+        // A lower road joined under a higher one carves its slot by how much it cuts (1 - w where it cuts: as before).
+        const joined = p.w + (p.k - p.w) * p.join;
         p.we = joined * (1 - p.over) * (1 - p.drop);
       }
     }
@@ -833,6 +1054,38 @@ export class CourseCarve {
       }
       ord[m + 1] = v;
     }
+    // The course's own ground (wave 3b), laid over the carve: each pass's shapes and brush cells at its place along and across
+    // its road, shared by where its carve wins (its road's own weight through the rules, before how much it cuts: a road that
+    // follows the ground still carries its holes), and faded by that same weight (the review round), so it eases out across
+    // the shoulder as the cut does and never stands as a cliff at the shoulder's edge; inside a lone road the weight is 1 and
+    // the ground its own to the bit. Never asked where no path carries any.
+    let D = 0;
+    if (this.groundAny) {
+      let gsum = 0;
+      let gonly = -1;
+      for (let k = 0; k < n; k++) {
+        const p = P[ord[k]];
+        const ga = (p.w0 + (1 - p.w0) * p.join) * (1 - p.over) * (1 - p.drop);
+        p.ga = ga;
+        if (!(ga > 0)) continue;
+        gsum += ga * ga * ga * ga;
+        gonly = gonly === -1 ? ord[k] : -2;
+      }
+      if (gsum > 0) {
+        for (let k = 0; k < n; k++) {
+          const p = P[ord[k]];
+          const rec = p.rec!;
+          if (rec.shapeN === 0 && rec.brush === null) continue;
+          const ga = p.ga;
+          if (!(ga > 0)) continue;
+          this.groundAt(p);
+          const g = this.gOut;
+          if (g === 0) continue;
+          D += gonly >= 0 ? (ga === 1 ? g : ga * g) : ((ga * ga * ga * ga) / gsum) * ga * g;
+        }
+      }
+    }
+    this.outD = D;
     let sum = 0;
     let sumT = 0;
     let W = 0;
@@ -875,6 +1128,115 @@ export class CourseCarve {
     return a.firstZ < b.firstZ;
   }
 
+  /**
+   * A pass's own ground at the query (wave 3b, into `gOut`): its shapes and its brush cells at its place along its path and
+   * across its road, `courseGround.ts`'s rules written out in line (no number crosses a call). Nothing made.
+   */
+  private groundAt(p: CarvePass): void {
+    const rec = p.rec!;
+    const e = this.gIdx[p.g];
+    const ed = rec.spine.edges[e];
+    const s = rec.spine.start[e] + ed.s[p.i] + (ed.s[p.i + 1] - ed.s[p.i]) * p.f;
+    const o = p.o;
+    const L = rec.spine.length;
+    let g = 0;
+    const A = rec.shapes;
+    for (let j = 0; j < rec.shapeN; j++) {
+      const q = j * SHAPE_STRIDE;
+      let a = s - A[q];
+      if (rec.closed && L > 0) a -= L * Math.round(a / L);
+      const R = A[q + 10];
+      if (a > R || a < -R) continue;
+      const c = o - A[q + 1];
+      if (c > R || c < -R) continue;
+      const u = a * A[q + 2] + c * A[q + 3];
+      const v = -a * A[q + 3] + c * A[q + 2];
+      const hl = A[q + 4];
+      const hw = A[q + 5];
+      const h = A[q + 6];
+      const soft = A[q + 7];
+      const kind = A[q + 9];
+      // Across: eased over `soft` inside the edge (`easedEdge`).
+      const xv = hw - (v < 0 ? -v : v);
+      if (!(xv > 0)) continue;
+      let across = 1;
+      if (soft > 0 && xv < soft) {
+        const t = xv / soft;
+        across = t * t * (3 - 2 * t);
+      }
+      if (kind === 2) {
+        // A ramp: rising along its length to its lip, then a drop or a slope `back` long.
+        const back = A[q + 8];
+        if (u < -hl) continue;
+        if (u <= hl) g += hl > 0 ? ((h * (u + hl)) / (2 * hl)) * across : 0;
+        else if (back > 0 && u < hl + back) g += h * (1 - (u - hl) / back) * across;
+      } else if (kind === 3) {
+        // A trench: a rounded channel, deepest along its middle.
+        const au = u < 0 ? -u : u;
+        if (au >= hl) continue;
+        const t = 1 - au / hl;
+        g -= h * (t * t * (3 - 2 * t)) * across;
+      } else {
+        const xu = hl - (u < 0 ? -u : u);
+        if (!(xu > 0)) continue;
+        let along = 1;
+        if (soft > 0 && xu < soft) {
+          const t = xu / soft;
+          along = t * t * (3 - 2 * t);
+        }
+        g += (kind === 0 ? -h : h) * along * across;
+      }
+    }
+    const map = rec.brush;
+    if (map) {
+      // The brush lattice (2 m along the lattice the nodes anchor, linear in each edge's own arclength; 2 m across from the
+      // spine), bilinear; a closed path's lattice taken round its period, its last partial span reaching back to cell 0.
+      const lam = rec.lam;
+      const m = ed.s[p.i] + (ed.s[p.i + 1] - ed.s[p.i]) * p.f;
+      let lat = lam[e] + (lam[e + 1] - lam[e]) * (ed.len > 0 ? m / ed.len : 0);
+      const LP = rec.lamP;
+      if (rec.closed && LP > 0) lat -= LP * Math.floor(lat / LP);
+      const fi = lat / BRUSH_CELL;
+      const I0 = Math.floor(fi);
+      let fu = fi - I0;
+      let I1 = I0 + 1;
+      if (rec.closed && LP > 0) {
+        const N = Math.ceil(LP / BRUSH_CELL);
+        if (I1 >= N) {
+          I1 = 0;
+          const span = LP - I0 * BRUSH_CELL;
+          fu = span > 0 ? (lat - I0 * BRUSH_CELL) / span : 0;
+        }
+      }
+      const fj = o / BRUSH_CELL;
+      const J0 = Math.floor(fj);
+      const fv = fj - J0;
+      const R = this.gReg;
+      this.cell(map, I0, J0);
+      const c00 = R[0];
+      this.cell(map, I1, J0);
+      const c10 = R[0];
+      this.cell(map, I0, J0 + 1);
+      const c01 = R[0];
+      this.cell(map, I1, J0 + 1);
+      const c11 = R[0];
+      if (c00 !== 0 || c10 !== 0 || c01 !== 0 || c11 !== 0) g += (c00 * (1 - fu) + c10 * fu) * (1 - fv) + (c01 * (1 - fu) + c11 * fu) * fv;
+    }
+    this.gOut = g;
+  }
+
+  /** A brush cell (along `I`, across `J`) of a path's chunks into `gReg[0]`: nought where no chunk holds it. */
+  private cell(map: Map<number, BrushRec>, I: number, J: number): void {
+    const k = Math.floor(I / BRUSH_ALONG);
+    const b = map.get(k);
+    if (!b) {
+      this.gReg[0] = 0;
+      return;
+    }
+    const j = J - b.a;
+    this.gReg[0] = j < 0 || j >= b.n ? 0 : b.cells[(I - k * BRUSH_ALONG) * b.n + j];
+  }
+
   /** The carve at a point of the raw frame over a raw height: `raw + (T - raw) W`, the surface itself at weight 1, raw at none. */
   carveAt(raw: number, x: number, z: number): number {
     this.qx = x;
@@ -884,9 +1246,10 @@ export class CourseCarve {
     if (this.scan() === 0) return raw;
     this.choose();
     const W = this.outW;
-    if (!(W > 0)) return raw;
-    if (W >= 1) return this.outT;
-    return raw + (this.outT - raw) * W;
+    // The course's own ground over the carve (wave 3b), only where any is laid: else as before to the bit.
+    const D = this.outD;
+    const h = !(W > 0) ? raw : W >= 1 ? this.outT : raw + (this.outT - raw) * W;
+    return D !== 0 ? h + D : h;
   }
 
   /** The target and weight at a point (`raw + (T - raw) W`), into `out`: what the pole grid keeps. */
@@ -898,11 +1261,13 @@ export class CourseCarve {
     if (this.scan() === 0) {
       out.T = 0;
       out.W = 0;
+      out.D = 0;
       return out;
     }
     this.choose();
     out.T = this.outT;
     out.W = this.outW;
+    out.D = this.outD;
     return out;
   }
 
@@ -931,9 +1296,16 @@ export class CourseCarve {
         }
         this.choose();
         const W = this.outW;
-        if (!(W > 0)) out[k] = raw[k];
-        else {
-          out[k] = W >= 1 ? this.outT : raw[k] + (this.outT - raw[k]) * W;
+        const D = this.outD;
+        if (!(W > 0)) {
+          // The course's own ground (wave 3b) where the carve takes nothing (a road that follows the ground): over raw.
+          if (D !== 0) {
+            out[k] = raw[k] + D;
+            moved = true;
+          } else out[k] = raw[k];
+        } else {
+          const h = W >= 1 ? this.outT : raw[k] + (this.outT - raw[k]) * W;
+          out[k] = D !== 0 ? h + D : h;
           moved = true;
         }
       }
@@ -1065,7 +1437,7 @@ export class CourseCarve {
    * What decided a point, in words and numbers, for the console (`course({ at })`): every pass with its surface, weight,
    * share and what the rules did to it, the target and the weight. Allocates (never a frame's).
    */
-  explain(x: number, z: number): { passes: Record<string, unknown>[]; T: number; W: number; rule: string; deck: number } {
+  explain(x: number, z: number): { passes: Record<string, unknown>[]; T: number; W: number; rule: string; deck: number; ground?: number } {
     this.qx = x;
     this.qz = z;
     this.qWiden = 0;
@@ -1082,15 +1454,16 @@ export class CourseCarve {
       const rec = p.rec!;
       if (p.over > 0) rule = 'lower road wins';
       else if (p.drop > 0 && rule === 'blend') rule = 'abutment';
-      passes.push({ track: rec.track, path: rec.pathId, edge: this.gIdx[p.g], offset: +p.o.toFixed(3), surface: +p.T.toFixed(3), weight: +p.w.toFixed(4), share: sum > 0 ? +((p.we ** 4) / sum).toFixed(4) : 0, road: p.road, slot: p.slot, over: +p.over.toFixed(3), joined: +p.join.toFixed(3), dropped: +p.drop.toFixed(3) });
+      passes.push({ track: rec.track, path: rec.pathId, edge: this.gIdx[p.g], offset: +p.o.toFixed(3), surface: +p.T.toFixed(3), weight: +p.w.toFixed(4), cuts: +p.k.toFixed(3), share: sum > 0 ? +((p.we ** 4) / sum).toFixed(4) : 0, road: p.road, slot: p.slot, over: +p.over.toFixed(3), joined: +p.join.toFixed(3), dropped: +p.drop.toFixed(3) });
     }
     const T = this.outT;
     const W = this.outW;
+    const D = this.outD;
     const a = deckAsk();
     a.x = x;
     a.z = z;
     this.deckOf(a);
-    return { passes, T, W, rule, deck: a.out };
+    return { passes, T, W, rule, deck: a.out, ground: D };
   }
 
   /**
@@ -1231,7 +1604,7 @@ export class CourseGrid {
   private readonly tiles = new Map<number, Float32Array>();
   /** Tiles waiting to be made again, by number, and their places. */
   private readonly waiting = new Map<number, number>();
-  private readonly sample: CarveSample = { T: 0.5, W: 0.5 };
+  private readonly sample: CarveSample = { T: 0.5, W: 0.5, D: 0.5 };
   private ext0 = Infinity;
   private ext1 = -Infinity;
   private ezt0 = Infinity;
@@ -1295,9 +1668,11 @@ export class CourseGrid {
       for (let i = 0; i < GRID_POLES; i++) {
         this.carve.sampleAt(x0 + i * GRID_POLE, z0 + j * GRID_POLE, s);
         const k = (j * GRID_POLES + i) * 2;
-        t[k] = s.W > 0 ? s.T * s.W : 0;
+        // The course's own ground (wave 3b) rides in `A`: a pole reads `raw (1 - W) + A`. Added only where any is laid.
+        const a = s.W > 0 ? s.T * s.W : 0;
+        t[k] = s.D !== 0 ? a + s.D : a;
         t[k + 1] = s.W;
-        if (s.W > 0) any = true;
+        if (s.W > 0 || s.D !== 0) any = true;
       }
     }
     if (!any) {
@@ -1405,8 +1780,9 @@ export class CourseGrid {
     this.pole(i, j);
     const a00 = this.aw[0];
     const w00 = this.aw[1];
+    // `A` alone where the road follows the ground and carries ground of its own (wave 3b: `W` nought, `A` the ground).
     if (u === 0 && v === 0) {
-      if (w00 > 0) q.out = raw * (1 - w00) + a00;
+      if (w00 > 0 || a00 !== 0) q.out = raw * (1 - w00) + a00;
       return;
     }
     this.pole(i + 1, j);
@@ -1418,7 +1794,7 @@ export class CourseGrid {
     this.pole(i + 1, j + 1);
     const a11 = this.aw[0];
     const w11 = this.aw[1];
-    if (w00 === 0 && w10 === 0 && w01 === 0 && w11 === 0) return;
+    if (w00 === 0 && w10 === 0 && w01 === 0 && w11 === 0 && a00 === 0 && a10 === 0 && a01 === 0 && a11 === 0) return;
     const W = (w00 * (1 - u) + w10 * u) * (1 - v) + (w01 * (1 - u) + w11 * u) * v;
     const A = (a00 * (1 - u) + a10 * u) * (1 - v) + (a01 * (1 - u) + a11 * u) * v;
     q.out = raw * (1 - W) + A;

@@ -98,6 +98,11 @@ export const SCULPT_TUNE = {
   /** Carry what stands on the ground (our props and the brush's trees) up and down with it, within this of their foot. */
   carry: true,
   carryNear: 0.25,
+  /**
+   * This track (the race drawer's wave 3b): a stroke goes into the course picked with the Course tool, as deltas on its own
+   * road's lattice that move with the road, never into the world's heights file. Off: K is the world's sculpt as before.
+   */
+  thisTrack: false,
   /** The rebuild's milliseconds a frame and its replants a second (`GROUND_REWRITE_TUNE`, the same numbers). */
   frameMs: 2,
   floraHz: 4,
