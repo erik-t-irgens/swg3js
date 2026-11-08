@@ -6,6 +6,7 @@ import { environmentBodies, pickSuns, starQuadTurn, sunDirection, type SunPick, 
 import type { FxCloudLayer, FxSkyLight } from '../core/fx/lensFlare';
 import { blockShadow, driftScroll, heaviestTwo, type ForcedKind, type WeatherKind } from './weatherSchedule';
 import { CARD_ROWS, readCardRows, type CardSkyRows, type RampRead } from './cardLight.ts';
+import { DOME_COLOUR_GLSL } from './domeColour.ts';
 
 // The planet's sky as the original client draws it (see tools/swg/sky.mjs for the export):
 // a gradient sky texture whose columns are the time of day and rows run from the horizon up
@@ -278,11 +279,7 @@ const DOME_FRAG = /* glsl */ `
     vec3 d = normalize(vDir);
     float up = clamp(d.y, 0.0, 0.999);
     // Two gradients at most, crossfaded as the weather or the area changes; none is the ramp's clear colour.
-    vec3 g1 = uHasGradient > 0.5 ? texture2D(uGradient, vec2(uTime, up)).rgb : uClear;
-    vec3 g2 = uHasGradient2 > 0.5 ? texture2D(uGradient2, vec2(uTime, up)).rgb : uClear;
-    vec3 col = mix(g1, g2, uGradientMix);
-    // Below the horizon the ground normally hides the dome; fade the last strip into the fog.
-    col = mix(uHorizonFog, col, smoothstep(-0.03, 0.0, d.y));
+    ${DOME_COLOUR_GLSL}
     gl_FragColor = vec4(col, 1.0);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
@@ -1485,8 +1482,8 @@ export class SwgSky {
    * very gradients, flags, mix, hour and clear colour the dome draws with, the design's decision 102): never copied, so
    * whatever the sky writes into them this frame the decks read.
    */
-  get domeUniforms(): Readonly<Record<'uGradient' | 'uGradient2' | 'uGradientMix' | 'uTime' | 'uHasGradient' | 'uHasGradient2' | 'uClear', THREE.IUniform>> {
-    return this.dome.material.uniforms as Record<'uGradient' | 'uGradient2' | 'uGradientMix' | 'uTime' | 'uHasGradient' | 'uHasGradient2' | 'uClear', THREE.IUniform>;
+  get domeUniforms(): Readonly<Record<'uGradient' | 'uGradient2' | 'uGradientMix' | 'uTime' | 'uHasGradient' | 'uHasGradient2' | 'uClear' | 'uHorizonFog', THREE.IUniform>> {
+    return this.dome.material.uniforms as Record<'uGradient' | 'uGradient2' | 'uGradientMix' | 'uTime' | 'uHasGradient' | 'uHasGradient2' | 'uClear' | 'uHorizonFog', THREE.IUniform>;
   }
 
   /**

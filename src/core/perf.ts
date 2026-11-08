@@ -40,6 +40,8 @@ const SECTION_DEFS = [
   { key: 'stream', parent: 'world' },
   { key: 'farRefresh', parent: 'stream' },
   { key: 'streamFar', parent: 'world' },
+  // The far ground's rings (the horizon pass): the selection over the camera's frustum, after the camera is placed.
+  { key: 'horizonSelect', parent: '' },
   { key: 'layout', parent: 'world' },
   // The detail levels' sweeps and the flora's region rebuilds (steps 7 and 8).
   { key: 'levels', parent: 'world' },
@@ -119,6 +121,8 @@ const COUNTER_DEFS = [
   { key: 'chunksMade', group: 'streaming', label: 'chunks made', kind: 'sum', scale: 1 },
   { key: 'chunksDropped', group: 'streaming', label: 'chunks dropped', kind: 'sum', scale: 1 },
   { key: 'farTiles', group: 'streaming', label: 'far tiles rebuilt', kind: 'sum', scale: 1 },
+  // The horizon pass: the far ground's patches the rings' selection kept this frame.
+  { key: 'horizonPatches', group: 'streaming', label: 'horizon patches', kind: 'mean', scale: 1 },
   { key: 'syncBlocks', group: 'streaming', label: 'sync blocks', kind: 'sum', scale: 1 },
   { key: 'programsPlay', group: 'streaming', label: 'programs in play', kind: 'sum', scale: 1 },
   // Of those, the programs the paced queue built in play for a dressed person (its job's label a look's): what

@@ -13,6 +13,15 @@ import { ChunkReader, chunkChild, formChild, isForm, nameOf, type IffChunk, type
 // A type alone: the paint imports this module's values, so naming it by a type keeps the two from a cycle at run time.
 import type { GroundPaint, PaintUnder } from './groundPaint.ts';
 
+/**
+ * The generator's revision, the number a far-ground bake is keyed on (the horizon pass, `tools/swg/horizon.mjs`): a build
+ * cannot hash its own source, so this number says which generator made a bake, and a bake made by another is refused in
+ * the browser and asked for again. `generatorRevision.test.ts` holds it honest: a change to the text of any module the
+ * bake's worker imports fails it until the recorded hash is moved, and a change to the generator's output fails it until
+ * this number moves too.
+ */
+export const GENERATOR_REVISION = 1;
+
 // ---------------------------------------------------------------------------
 // Small math helpers (Rectangle2d, Feather, Transform2d)
 // ---------------------------------------------------------------------------

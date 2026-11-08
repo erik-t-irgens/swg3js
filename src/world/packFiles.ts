@@ -121,6 +121,11 @@ export function packHolds(packId: string, file: string): boolean {
     // zone, the early Kashyyyk, has nothing to walk between).
     case 'gates.json':
       return (world.zones?.length ?? 0) > 1;
+    // The far ground's bake (`horizon`, by hand): a ground world with a terrain, and never the copies' world, whose ground
+    // is the client's empty punch-out. Asked only with the far ground's switch off 'tiles' (`World.loadHorizon`).
+    case 'terrain/horizon.json':
+    case 'terrain/horizon.bin':
+      return ground && !world.instances;
     default:
       return true;
   }

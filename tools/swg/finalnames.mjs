@@ -360,6 +360,7 @@ export const LATE_EXEMPT = {
   navgrid: 'reads no archive; asked again by the layout it baked (layoutKey)',
   scenes: 'reads no archive; asked again whenever a world converts again',
   clouds: 'reads no archive; follows the sky it measures',
+  horizon: "reads only the pack's own terrain file, by its SHA-1",
   'clips-save': 'reads no archive; follows the player pack',
   'clips-apply': 'reads no archive; follows the parts rig',
 };
@@ -638,6 +639,7 @@ export function ownerOf(rel, worlds, zones) {
     if (file === 'map.png' || file === 'map.json') return 'maps';
     if (file === 'clouds.json') return 'clouds';
     if (parts[1] === 'terrain' && /^radial\./.test(file)) return 'radial';
+    if (parts[1] === 'terrain' && /^horizon\./.test(file)) return 'horizon';
     if (parts[1] === 'terrain') return 'terrain';
     if (parts[1] === 'sky') return 'sky';
     if (parts[1] === 'water') return 'water';

@@ -276,6 +276,7 @@ import { autoCenter, frameCheck, mergePlaceLists, namePorts, noBuildOf, placeKey
 import { isZoneGate, writeZoneGates } from './gates.mjs';
 import { COLOR_RAMPS, downscaleRgba, groundStatus, writeColorRamps, writeGroundTextures, writeTerrainBitmaps } from './terrainShaders.mjs';
 import { radialStatusOf } from './radial.mjs';
+import { horizonStatusOf } from './horizon.mjs';
 import { snapshotCategories, strayCategories } from './worldManifest.mjs';
 import { exportSky } from './sky.mjs';
 import { exportWater, readWaterHarm, waterHarmLines, waterPackNeedsHarm } from './water.mjs';
@@ -3108,6 +3109,9 @@ function packStatus(dir) {
     const ground = groundStatus(planet, readJson(join(packDir, 'terrain/shaders.json')), readJson(join(packDir, COLOR_RAMPS)));
     // The grass and the far tree cards (the terrain's radial flora): their pictures, beside the terrain file (radial.mjs).
     const radial = radialStatusOf(planet, packDir);
+    // The far ground's bake (horizon.mjs): listed with the command that makes it, and never asked for until the rings
+    // ship on (the horizon design's §2.0 item 6); the world of copies draws no ground.
+    const horizon = planet === 'dungeon1' ? { line: null } : horizonStatusOf(planet, packDir);
     const layers = existsSync(join(packDir, 'terrain')) ? readdirSync(join(packDir, 'terrain')).filter((f) => f.endsWith('.lay')).length : 0;
     const sky = readJson(join(packDir, 'sky.json'));
     const water = readJson(join(packDir, 'water.json'));
@@ -3170,6 +3174,7 @@ function packStatus(dir) {
       terrain ? `terrain${layers ? ` + ${layers} building layers` : ''}` : 'NO TERRAIN',
       ground.line,
       radial.line,
+      horizon.line,
       sky ? `sky (${sky.blocks.length} blocks${sky.weather ? `, weather ${new Set(sky.blocks.map((b) => b.cameraEffect?.file).filter(Boolean)).size} effects` : ', NO WEATHER'})` : 'NO SKY',
       water ? `water (${Object.keys(water.shaders ?? {}).length} shaders, ${Object.values(water.shaders ?? {}).filter((s) => s.kind === 'lava').length} lava${waterPackNeedsHarm(water) ? ', NO WATER VALUES' : ''})` : terrain ? 'NO WATER LOOK' : null,
       withCells.length ? (floored ? `floors ${floored}/${withCells.length} buildings${graphOnly ? ', GRAPHS ONLY (no walkable meshes)' : ''}${floorless ? `, ${floorless} with none in the archives` : ''}` : 'NO FLOORS') : null,
@@ -7890,6 +7895,43 @@ switch (cmd) {
       missing += r.missing;
     }
     console.log(`radial: ${worlds} worlds, ${layers} pictures, ${(bytes / 1048576).toFixed(1)} MB${missing ? `, ${missing} shaders missing` : ''} in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    break;
+  }
+
+  case 'horizon': {
+    // <out-dir> [--only=tatooine,naboo] [--threads=N] [--margin=1024] [--far-margin=16384] [--fine-most=2305]: the far
+    // ground's bake (horizon.mjs) of every converted world the rings can draw, into terrain/horizon.json and
+    // terrain/horizon.bin beside its terrain file: its raw heights, families and colour means from the near ground's own
+    // 2 m poles. It reads only each pack's own files (no archive), lays nothing of the owner's, and writes those two
+    // files and nothing else. By hand until the rings ship on: `status` lists every bake and asks for none.
+    if (!pos[1]) usage();
+    const { bakeHorizon } = await import('./horizon.mjs');
+    const only = options.only ? new Set(options.only.split(',')) : null;
+    const num = (k) => (options[k] !== undefined ? Number(options[k]) : undefined);
+    const o = { threads: num('threads'), margin: num('margin'), farMargin: num('far-margin'), fineMost: num('fine-most') };
+    for (const k of Object.keys(o)) if (o[k] === undefined || !Number.isFinite(o[k])) delete o[k];
+    let baked = 0;
+    let mb = 0;
+    const t0 = performance.now();
+    for (const planet of GAME_PLANETS) {
+      if (only && !only.has(planet)) continue;
+      const dir = join(pos[1], planet);
+      if (!existsSync(join(dir, 'terrain.trn'))) continue;
+      if (planet === 'dungeon1') {
+        if (only) console.log(`${planet}: the world of copies draws no ground; not baked`);
+        continue;
+      }
+      process.stdout.write(`${planet}: `);
+      const r = await bakeHorizon(dir, planet, { ...o, progress: (n, of) => process.stdout.write(`\r${planet}: ${n}/${of} jobs   `) });
+      if (r.skipped) {
+        console.log(`\r${planet}: not baked (${r.skipped})`);
+        continue;
+      }
+      baked++;
+      mb += r.mb;
+      console.log(`\r${planet}: ${r.fine.nx} x ${r.fine.nz} at ${r.fine.step} m, coarse ${r.coarse.nx} x ${r.coarse.nz}, ${r.mb.toFixed(1)} MB in ${(r.wall / 1000).toFixed(1)} s on ${r.threads} threads (${(r.cpu / 1000).toFixed(0)} s of generator)${r.wideFamilies ? `, ${r.wideFamilies} samples of a family past a byte drawn as none` : ''}`);
+    }
+    console.log(`horizon: ${baked} worlds baked, ${mb.toFixed(1)} MB in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     break;
   }
 

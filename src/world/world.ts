@@ -68,6 +68,8 @@ import { AssetPack, lowerLevels, normalYOf, type Layout, type LoadedModel, type 
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
+import { HORIZON_TUNE, HoleGrid } from './horizon/horizonMath.ts';
+import { HorizonField, RingSession, copyDome } from './horizon/horizonField.ts';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { TERRAIN_GROUND_TUNE, lentFamilyKey, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
 import { GroundPaint, PAINT_CELL, PAINT_TILE, paintTileNumber, paintTileOf, weightedFamily, type FloraRecipe, type PaintPaletteEntry } from '../swg/terrain/groundPaint.ts';
@@ -810,6 +812,14 @@ export class World {
    * builds another. Made the first time a world's ground is drawn that way.
    */
   private groundTilesMat: THREE.MeshStandardMaterial | null = null;
+  /**
+   * The far ground's rings (the horizon pass, `src/world/horizon/`): the session's program, uniforms and two meshes, made
+   * the first time a world loads with the switch off `'tiles'` (`HORIZON_TUNE.ground`), never disposed; this world's bake;
+   * and the chunks standing, as a byte grid of its own (`HoleGrid`), the hole the rings leave for them.
+   */
+  private horizonSession: RingSession | null = null;
+  horizonField: HorizonField | null = null;
+  readonly horizonHole = new HoleGrid();
   /**
    * The tile ground's air variant (the volumetrics' second wave, `airGround.ts`): the session's too, never disposed, made
    * the first time a field exists to read, and worn in place of the plain one while the chooser says (`groundWearsAir`).
@@ -2451,12 +2461,22 @@ export class World {
           this.packProgress = 0.7;
           await this.loadGroundTextures(pack);
           if (token !== this.loadToken) return null;
+          // The far ground's bake (the horizon pass), only with its switch off `'tiles'`: with it at `'tiles'` nothing is
+          // fetched and no ring stands, today's far tiles alone. Begun after the tile arrays, which its albedo reads, and
+          // decoded in its worker while the grass and the sky load here; joined after them (`joinWaitMs` is what it adds).
+          const horizon = HORIZON_TUNE.ground !== 'tiles' ? this.loadHorizon(this.packId, spawn).catch((err) => console.warn('horizon: the bake did not load; the far tiles drawn', err)) : null;
           // The grass and the far hills' tree cards (the terrain's radial flora), once the ground they stand on is.
           await this.loadGrass(pack, swg);
           if (token !== this.loadToken) return null;
           this.packProgress = 0.85;
           await this.loadSky(pack, spawn);
           if (token !== this.loadToken) return null;
+          if (horizon) {
+            const tj = performance.now();
+            await horizon;
+            if (this.horizonField) this.horizonField.joinWaitMs = performance.now() - tj;
+            if (token !== this.loadToken) return null;
+          }
           this.packProgress = 0.92;
         } catch (err) {
           console.warn('terrain: failed to load the planet terrain, keeping procedural ground', err);
@@ -2902,6 +2922,9 @@ export class World {
       t.geometry.dispose();
     }
     this.farTiles.clear();
+    // The far ground's bake goes with its world; the rings' program and meshes are the session's.
+    this.dropHorizon();
+    this.horizonHole.clear();
     // The grass went with its chunks above; the far cards and the world's pictures go now.
     this.dropGrass();
     // Drawn again by default: only a world whose ground is the client's empty punch-out hides it.
@@ -11997,6 +12020,8 @@ export class World {
     this.changedCx[i] = cx;
     this.changedCz[i] = cz;
     this.changedIn[i] = loaded ? 1 : 0;
+    // The rings' hole (the horizon pass): the chunks standing, a byte a chunk, never a string key.
+    this.horizonHole.set(cx, cz, loaded);
     // A chunk made has had its trees shown or hidden by the sweep's eye already (`createChunk`'s `plantSweep.show`).
     this.changedTrees[i] = loaded ? this.grassHost.chunkTrees(cx, cz) : CHUNK_TREES.none;
   }
@@ -12133,8 +12158,145 @@ export class World {
     tile.geometry.setDrawRange(0, Infinity);
   }
 
+  /**
+   * The far ground's bake loaded for this world (the horizon pass's first wave): fetched only with the switch off
+   * `'tiles'` and only for a world the `horizon` command could write it for, decoded behind the loading screen, its
+   * textures uploaded there and handed to the session's ring program, whose two meshes hang under the chunks' root. A
+   * world with no bake, or a bake refused, draws its far tiles as today and `horizon()` says why.
+   */
+  async loadHorizon(packId: string, eye: THREE.Vector3): Promise<void> {
+    this.dropHorizon();
+    if (this.planet.space || this.planet.instances || !this.terrain.swg) return;
+    const swg = this.terrain.swg;
+    const field = new HorizonField(packId, { x: swg.centerX, z: swg.centerZ }, swg.groundShift);
+    this.horizonField = field;
+    const gt = this.groundTextures;
+    const tiles = gt?.tiles ?? null;
+    const colour = gt?.texture.image as { data: Uint8Array; width: number; depth: number } | undefined;
+    const masks = tiles?.masks.image as { data: Uint8Array; width: number } | undefined;
+    const ground = tiles && colour?.data && masks?.data && this.terrain.tiled ? { tiler: tiles.tiler, colour: colour.data, size: colour.width, depth: colour.depth, masks: masks.data, ms: masks.width, reference: tiles.reference } : null;
+    const session = (this.horizonSession ??= new RingSession(this.csm));
+    this.csmMaterials.add(session.material);
+    const ok = await field.load({ json: (f) => packJson(packId, f, undefined, { probe: false }), bytes: (f) => packBytes(packId, f, undefined, { probe: false }) }, ground, session, this.renderer, eye);
+    if (this.horizonField !== field) {
+      field.dispose(null);
+      return;
+    }
+    if (!ok) {
+      console.info(`horizon: the far tiles drawn (${'why' in field.state ? field.state.why : field.state.state})`);
+      return;
+    }
+    if (session.patch.parent !== this.chunkRoot) this.chunkRoot.add(session.patch, session.skirt);
+    this.applyHorizonGround();
+    const mb = field.megabytes();
+    console.info(`horizon: the far ground's bake for ${packId} (${field.header!.fine.step} m, ${mb.card.toFixed(1)} MB on the card), decoded in ${field.decodeWallMs.toFixed(0)} ms in its worker`);
+  }
+
+  /** The rings and this world's bake let go (a travel, the switch back at `'tiles'`): the session's program and meshes are kept. */
+  dropHorizon(): void {
+    const s = this.horizonSession;
+    this.horizonField?.dispose(s);
+    this.horizonField = null;
+    if (s && s.patch.parent) s.patch.parent.remove(s.patch, s.skirt);
+  }
+
+  /** Whether the rings stand and draw now. */
+  get horizonDrawn(): boolean {
+    return HORIZON_TUNE.ground !== 'tiles' && this.horizonField?.state.state === 'ready';
+  }
+
+  /**
+   * Which of the two far grounds is drawn (the switch, and in `'both'` the frame report's A/B): the rings' meshes and the
+   * far tiles shown or hidden; at `'rings'` with the bake ready, every far tile let go and none made again.
+   */
+  applyHorizonGround(): void {
+    const s = this.horizonSession;
+    const ready = this.horizonDrawn;
+    const rings = ready && (HORIZON_TUNE.ground === 'rings' || HORIZON_TUNE.drawn === 'rings');
+    if (s) s.patch.visible = s.skirt.visible = rings;
+    const tilesShown = !ready || (HORIZON_TUNE.ground === 'both' && HORIZON_TUNE.drawn === 'tiles');
+    for (const t of this.farTiles.values()) t.visible = tilesShown;
+    if (ready && HORIZON_TUNE.ground === 'rings' && this.farTiles.size) {
+      for (const [key, t] of this.farTiles) {
+        this.chunkRoot.remove(t);
+        t.geometry.dispose();
+        const [tx, tz] = key.split(',').map(Number);
+        this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
+        this.farCards?.tileGone(tx, tz);
+      }
+      this.farTiles.clear();
+    }
+    if (!ready || HORIZON_TUNE.ground !== 'rings') {
+      this.lastTx = Number.NaN;
+      this.lastTz = Number.NaN;
+    }
+  }
+
+  /** The chunks standing, as the rings' hole reads them: made again from the chunks whenever the radius or the count moved. */
+  private syncHorizonHole(): void {
+    const h = this.horizonHole;
+    if (h.resize(this.viewRadius) || h.count !== this.chunks.size) {
+      h.clear();
+      for (const c of this.chunks.values()) h.set(c.cx, c.cz, true);
+    }
+  }
+
+  /**
+   * A frame of the rings, after the camera is placed: the selection over the camera's frustum from the eye, the reach in
+   * force from the fog, the hole, and the sky's dome uniforms copied for the horizon fade. Nothing while the switch is at
+   * `'tiles'` or the bake is not ready.
+   */
+  updateHorizon(camera: THREE.PerspectiveCamera): void {
+    const field = this.horizonField;
+    const s = this.horizonSession;
+    if (!field || !s || !this.horizonDrawn || this.planet.space || !s.patch.visible) return;
+    perf.begin(SEC.horizonSelect);
+    this.syncHorizonHole();
+    if (this.swgSky) copyDome(s.uniforms, this.swgSky.domeUniforms);
+    const fog = this.scene.fog as THREE.FogExp2 | null;
+    const pcx = Number.isFinite(this.streamPcx) ? this.streamPcx : Math.floor(camera.position.x / CHUNK_SIZE);
+    const pcz = Number.isFinite(this.streamPcz) ? this.streamPcz : Math.floor(camera.position.z / CHUNK_SIZE);
+    // The fog's density into the field's kept record (a fraction handed across the call would be a number made).
+    field.rules.fogDensity = fog && (fog as THREE.FogExp2).isFogExp2 ? fog.density : 0;
+    field.update(s, camera, camera.position, this.viewRadius, pcx, pcz, this.horizonHole, camera.reversedDepth);
+    perf.count(CNT.horizonPatches, s.selector.patchCount);
+    perf.end(SEC.horizonSelect);
+  }
+
+  /** The sky's bodies, stars and skybox scaled to a radius (the measurement's, under reversed depth only; 3,500 m is today's). */
+  setSkyRadius(radius: number): void {
+    if (this.swgSky) this.swgSky.group.scale.setScalar(radius / 3500);
+  }
+
+  /** For the console (`__debug.horizon()`). */
+  horizonReport(opts?: { bench?: number }): Record<string, unknown> {
+    const f = this.horizonField;
+    const s = this.horizonSession;
+    const h = f?.header;
+    const sel = s?.selector;
+    const r = f?.rules;
+    // The console has asked: the selection is timed from here on (a clock read a frame is a number made, so not before).
+    if (f) f.timing = true;
+    return {
+      ground: HORIZON_TUNE.ground,
+      drawn: HORIZON_TUNE.ground === 'both' ? HORIZON_TUNE.drawn : HORIZON_TUNE.ground,
+      bake: f ? f.state : { state: 'none', why: HORIZON_TUNE.ground === 'tiles' ? "the switch is at 'tiles': nothing fetched" : 'no world with ground' },
+      note: f?.note ?? null,
+      made: h ? { how: h.source.made, at: h.source.at ?? null, generator: h.source.generator, fine: h.fine, coarse: { x0: h.coarse.x0, z0: h.coarse.z0, step: h.coarse.step, nx: h.coarse.nx, nz: h.coarse.nz }, step: h.fine.step } : null,
+      megabytes: f ? f.megabytes() : null,
+      decodeMs: f?.decodeMs ?? null,
+      loadMs: f ? { fetch: Math.round(f.fetchMs), decodeWall: Math.round(f.decodeWallMs), mainThread: Math.round(f.mainMs), arrivalJoinWait: Math.round(f.joinWaitMs) } : null,
+      reach: r ? { slider: r.reach, inForce: Math.round(r.inForce), fogReach: Number.isFinite(r.fogReach) ? Math.round(r.fogReach) : null, fogDensity: (this.scene.fog as THREE.FogExp2 | null)?.density ?? null, lod0: Math.round(r.lod0), levels: r.levels, skyRadius: r.skyRadius, far: r.far } : null,
+      selection: sel ? { patches: sel.patchCount, perLevel: Array.from(sel.perLevel), skirts: sel.skirtCount, triangles: sel.patchCount * 128 + sel.skirtCount * 32, overflow: sel.overflow, us: f ? Math.round(f.selectMean() * 10) / 10 : null, benchUs: f && s && opts?.bench ? Math.round(f.benchSelect(s, this.horizonHole, opts.bench) * 10) / 10 : null } : null,
+      hole: { chunks: this.horizonHole.count, leavesLeftOut: sel?.holeLeaves ?? 0 },
+      farTiles: this.farTiles.size,
+    };
+  }
+
   private streamFar(center: THREE.Vector3, budget: number): void {
     if (this.planet.space) return;
+    // The rings in place of the far tiles: none made and no far grid asked for (the far cards' far grids are W2's).
+    if (HORIZON_TUNE.ground === 'rings' && this.horizonDrawn) return;
     const ptx = Math.floor(center.x / FAR_TILE);
     const ptz = Math.floor(center.z / FAR_TILE);
     if (ptx === this.lastTx && ptz === this.lastTz && budget !== Infinity) return;
@@ -12157,6 +12319,8 @@ export class World {
       // its geometry's sphere is its sphere in the world, for the world pass from inside (`markNarrowRoot`).
       if (!geometry.boundingSphere) geometry.computeBoundingSphere();
       if (geometry.boundingSphere) markNarrowRoot(mesh, geometry.boundingSphere);
+      // With the rings drawn (`'both'`, the frame report's A/B), a far tile is built and hidden.
+      if (this.horizonDrawn) mesh.visible = HORIZON_TUNE.ground === 'both' && HORIZON_TUNE.drawn === 'tiles';
       this.chunkRoot.add(mesh);
       this.farTiles.set(`${w.tx},${w.tz}`, mesh);
       // Its cut, kept for its life: which quads the chunks cover and one index attribute of its own (commit 4a).

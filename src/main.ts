@@ -412,6 +412,8 @@ import { wireVehicleId } from './vehicles/podHybrid.ts';
 import { BIKE_SCALE, CEILING_MOST, RACE_BASE, RACE_TUNE, RACE_UPGRADES, readRaceHatch, tuneBase, tuneRace, tuneUpgrades, type RaceTune } from './vehicles/raceTune.ts';
 import { RACE_CLOCK, enginePartName, holdsLiving, raceFling, type RaceDrive, type RaceMode } from './vehicles/raceDrive.ts';
 import { vehicleDialsFor } from './vehicles/raceDials.ts';
+import { HORIZON_TUNE, HORIZON_VIEWS, reachRules, newReachRules, type HorizonGround } from './world/horizon/horizonMath.ts';
+import { HORIZON_WATCH, horizonDialsFor, tuneHorizon } from './world/horizon/horizonDials.ts';
 import { shipDialsFor } from './space/tierDials.ts';
 import { ENGINE_TUNE, damagePart, mendEngines, tuneEngines, type EngineTune } from './vehicles/drivetrain.ts';
 import { hardpointName } from './vehicles/shipAssembly.ts';
@@ -2265,6 +2267,18 @@ class App {
     });
     // Step 4, moving about without hitches: each commit apart.
     registerPerfSwitch('farTileLocal', { get: () => FAR_TILE_TUNE.local, set: (v) => this.world.setFarTileLocal(!!v), values: [false, true], note: "a chunk coming or going re-cuts the one far tile it lies in, in place, rather than every far tile from scratch" });
+    // The horizon pass's gate: with the switch at 'both', which of the two far grounds is drawn (both built, nothing compiled).
+    registerPerfSwitch('horizon', {
+      get: () => HORIZON_TUNE.drawn,
+      set: (v) => {
+        HORIZON_TUNE.drawn = v === 'tiles' ? 'tiles' : 'rings';
+        this.world.applyHorizonGround();
+      },
+      values: ['tiles', 'rings'],
+      note: "the far ground drawn as rings from the bake, or as far tiles (only with __debug.horizon({ ground: 'both' }))",
+    });
+    // A slider of the far ground's that the measurement follows (the reach, its margins) moves the far plane as the console does.
+    HORIZON_WATCH.moved = () => void this.applyHorizonMeasure();
     registerPerfSwitch('farProbeCached', { get: () => FAR_PROBE.cached, set: (v) => (FAR_PROBE.cached = !!v), values: [false, true], note: "a creature or person far from the player reads the ground the world holds, and never makes terrain on the spot" });
     registerPerfSwitch('floraWarm', { get: () => FLORA_WARM.on, set: (v) => (FLORA_WARM.on = !!v), values: [false, true], note: "every plant compiled behind the loading screen (from the next arrival) and a chunk's materials adopted as it is made" });
     // Step 5, the plants shown only as near as the client drew them.
@@ -5392,6 +5406,27 @@ class App {
        * session began (the terrain, the world's cache, or unknown), and the plants' warm-up. `{ local, probe,
        * floraWarm }` flips each switch as the frame report does.
        */
+      /**
+       * The far ground drawn as rings from the bake (the horizon pass's first wave, the gate): the switch (`ground`:
+       * 'tiles' today's far tiles, 'both' the rings drawn and the far tiles built and hidden for the frame report's A/B,
+       * 'rings' the rings and no far tile), the world's bake (made how, when, by which generator, its lattices, its MB on
+       * the card and on the CPU, or why it is not used), the reach, the reach in force and the fog's density, `lod0` in
+       * force, the last selection (patches by level, skirts, triangles, its microseconds) and the hole. `{ ground }` off
+       * 'tiles' loads the bake behind a short curtain (nothing built on a live frame); `{ reach }` metres; `{ measure }`
+       * moves the far plane and the sky's radius to the reach, under reversed depth only; `{ view }` 'shaded', 'lod',
+       * 'albedo', 'normals' or 'edge'; `{ tune }` any `HORIZON_TUNE` number. Await it when it changes `ground`.
+       */
+      horizon: async (o?: { ground?: HorizonGround; reach?: number; measure?: boolean; view?: (typeof HORIZON_VIEWS)[number]; tune?: Record<string, unknown>; bench?: number }) => {
+        const said: string[] = [];
+        if (o?.tune) said.push(...tuneHorizon(o.tune));
+        if (typeof o?.reach === 'number' && o.reach > 0) said.push(...tuneHorizon({ reach: o.reach }));
+        if (o?.view && (HORIZON_VIEWS as readonly string[]).includes(o.view)) HORIZON_TUNE.view = o.view;
+        if (o?.ground && o.ground !== HORIZON_TUNE.ground) said.push(await this.setHorizonGround(o.ground));
+        else if (HORIZON_TUNE.ground !== 'tiles') this.world.applyHorizonGround();
+        if (typeof o?.measure === 'boolean') HORIZON_TUNE.measure = o.measure;
+        said.push(this.applyHorizonMeasure());
+        return { ...this.world.horizonReport({ bench: o?.bench }), measure: { on: HORIZON_TUNE.measure, far: Math.round(this.cam.camera.far), reversed: this.cam.camera.reversedDepth }, said: said.filter(Boolean) };
+      },
       farTiles: (o?: { local?: boolean; probe?: boolean; floraWarm?: boolean }) => {
         if (typeof o?.local === 'boolean') this.world.setFarTileLocal(o.local);
         if (typeof o?.probe === 'boolean') FAR_PROBE.cached = o.probe;
@@ -12152,7 +12187,7 @@ class App {
       // picked, the NPC ship ladder's tiers 6 to 10 when `npcShips` is, how a far body is drawn when `crowd` is, and
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -13125,6 +13160,7 @@ class App {
     if (!this.world.day.paused) this.placeBar.follow(this.world.day.time * 24);
     this.effects.update(dt);
     this.world.updateWeatherView(dt);
+    this.world.updateHorizon(cam);
     // A shoot's frame lists no fast mover: nothing it draws flies.
     this.world.shadowMovers.begin();
     this.world.updateShadows(performance.now());
@@ -13244,6 +13280,7 @@ class App {
     this.minimap.standDown();
     // A race run, its block and its gates, and the track the dev server's editor had in hand, are the world's.
     this.leaveTracks('the select screen');
+    this.horizonMeasureOff();
     // A raced hull's smoke and fire stand in the session's ship effects, which outlive every world: taken away with it.
     this.engineFx.clear();
     this.world.leave();
@@ -19363,6 +19400,8 @@ class App {
     if (this.traveling) return null;
     // A conversation does not cross: whoever it was with stays with the world, as a follower does.
     this.endTalk(false);
+    // The far ground's measurement far plane and sky put back (the horizon pass): each world asks again.
+    this.horizonMeasureOff();
     this.hyperspace.abort('travel');
     this.ultraCruise.abort();
     // A shuttle trip stops before the world goes under it: its passenger put down and its hull away.
@@ -30462,6 +30501,101 @@ class App {
   }
 
   /**
+   * The far ground's switch moved (the horizon pass): off `'tiles'`, the world's bake loaded behind a short curtain of the
+   * rooms' pool's shape (the screen, the work, the sweep that builds the ring program, the queue flushed), so nothing is
+   * built on a live frame; back to `'tiles'`, the bake let go and the far tiles made again (their program the ground's);
+   * between `'both'` and `'rings'`, the far tiles shown, hidden or let go. Answers what it came to.
+   */
+  private async setHorizonGround(g: HorizonGround): Promise<string> {
+    const was = HORIZON_TUNE.ground;
+    HORIZON_TUNE.ground = g;
+    if (g === 'tiles') {
+      this.world.dropHorizon();
+      this.world.applyHorizonGround();
+      HORIZON_TUNE.measure = false;
+      return "the far tiles again: the bake let go";
+    }
+    if (was !== 'tiles' && this.world.horizonField) {
+      this.world.applyHorizonGround();
+      return `the switch at '${g}'`;
+    }
+    if (!this.inWorld || this.traveling) return "not now: enter the world first (the switch stands and the next arrival loads the bake)";
+    let held = false;
+    await runCurtain(
+      {
+        hold: () => {
+          this.traveling = true;
+          this.curtainOnly = true;
+          this.map.hide();
+          held = this.input.captured;
+          this.input.captured = false;
+        },
+        release: () => {
+          this.traveling = false;
+          this.curtainOnly = false;
+          this.input.captured = held;
+        },
+        show: (w, d) => this.loadingScreen.show(this.world.planet, w, d),
+        setWhat: (words) => this.loadingScreen.setWhat(words),
+        setProgress: (p) => this.loadingScreen.setProgress(p),
+        hide: () => this.loadingScreen.hide({ quick: LOADING_TUNE.quickHide }),
+        settled: () => this.world.settled(this.player.worldPos),
+        progress: () => this.world.progress(this.player.worldPos),
+        compile: () => this.world.compileAllAsync(() => { }),
+        flush: () => this.world.flushPrograms(),
+        sample: () => this.sampleShaders('loading'),
+        now: () => performance.now(),
+        wait: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
+      },
+      'the far ground',
+      "the world's bake",
+      () => this.world.loadHorizon(this.world.packId, this.player.worldPos),
+    );
+    const st = this.world.horizonField?.state;
+    return st?.state === 'ready' ? `the rings at '${g}'` : `the far tiles still: ${st && 'why' in st ? st.why : 'no bake'}`;
+  }
+
+  private readonly horizonRules = newReachRules();
+
+  /**
+   * The measurement's far plane and sky radius (`HORIZON_TUNE.measure`, the console's alone in W1): at the reach's own
+   * (`reachRules`: the sky past the reach, the far plane past the sky), under reversed depth only, through the one far
+   * plane writer that knows the jump's tunnel (`writeCameraFar`); off, or without reversed depth, today's 9,000 m and
+   * 3,500 m. Put back on every travel and at the select screen (`horizonMeasureOff`).
+   */
+  private applyHorizonMeasure(): string {
+    const cam = this.cam.camera;
+    const on = HORIZON_TUNE.measure && this.world.horizonDrawn && cam.reversedDepth;
+    this.horizonRules.fogDensity = 0;
+    const r = reachRules(HORIZON_TUNE, this.world.viewRadius, cam.reversedDepth, this.horizonRules);
+    this.writeCameraFar(on ? r.far : 9000);
+    this.world.setSkyRadius(on ? r.skyRadius : 3500);
+    if (HORIZON_TUNE.measure && !cam.reversedDepth) return 'measure needs reversed depth: the far plane stays at 9,000 m';
+    if (HORIZON_TUNE.measure && !this.world.horizonDrawn) return 'measure moves nothing while the rings are not drawn';
+    return on ? `far plane ${Math.round(r.far)} m, sky ${Math.round(r.skyRadius)} m` : '';
+  }
+
+  /** The measurement put back (a travel, the select screen). */
+  private horizonMeasureOff(): void {
+    if (!HORIZON_TUNE.measure) return;
+    HORIZON_TUNE.measure = false;
+    this.applyHorizonMeasure();
+  }
+
+  /** The camera's far plane written through the jump's tunnel: while a tunnel holds it, the kept value is what moves. */
+  private writeCameraFar(far: number): void {
+    if (this.jumpFarKept !== null) {
+      this.jumpFarKept = far;
+      return;
+    }
+    const cam = this.cam.camera;
+    if (cam.far === far) return;
+    cam.far = far;
+    cam.updateProjectionMatrix();
+    this.world.onCameraResized();
+  }
+
+  /**
    * The rooms' pool built again behind a curtain (`runCurtain`, the world editor's own shape, every build's: a player moves the
    * setting too): the game held, the screen shown, the work, the world round the eye waited for, the sweep, the queue flushed.
    */
@@ -34945,6 +35079,8 @@ class App {
       if (player.mounted?.riderHidden) player.group.visible = false;
       // After the physics step and the camera: the falling weather around this frame's camera.
       this.world.updateWeatherView(dt);
+      // The far ground's rings selected from this frame's camera (the horizon pass): nothing at the switch's 'tiles'.
+      this.world.updateHorizon(this.cam.camera);
       // The moving air (`src/world/volumetrics/`), right after the weather's view half and with this frame's camera: its
       // window, its sources and its step. Whether the camera is in a building's view is last frame's draw's word.
       perf.passBegin(PASS.air);

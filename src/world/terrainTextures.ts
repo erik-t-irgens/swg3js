@@ -314,6 +314,29 @@ export const GROUND_DECODE_GLSL = `vec3 groundDecode( const in vec3 c ) {
 	return mix( hi, lo, vec3( lessThanEqual( c, vec3( 0.04045 ) ) ) );
 }`;
 
+/**
+ * sRGB's encode and the client's cloud layer over a lit colour, the tile program's own functions (`groundMath.cloudShade`
+ * is their mirror), reading `vGroundUV`, `uGroundClouds` and `uGroundCloud`, which whoever interpolates them declares.
+ * Exported (the horizon pass) so the far ground's rings take the cloud shadows by these very lines, through the same
+ * uniform objects, and interpolated back into `TILE_FRAGMENT_PARS` at their place, so the tile program's text and key
+ * are what they were to the byte.
+ */
+export const GROUND_CLOUD_GLSL = `vec3 groundEncode( const in vec3 c ) {
+	vec3 lo = c * 12.92;
+	vec3 hi = 1.055 * pow( max( c, vec3( 1e-6 ) ), vec3( 1.0 / 2.4 ) ) - 0.055;
+	return mix( hi, lo, vec3( lessThanEqual( c, vec3( 0.0031308 ) ) ) );
+}
+// The client's cloud layer over a lit colour (groundMath.cloudShade): grey ${glslFloat(CLOUD_GREY)} in its gamma at the tile's
+// alpha squared, never brightening.
+vec3 groundCloudShade( const in vec3 lit ) {
+	vec2 uv = vGroundUV * ( 4.0 / ${glslFloat(CLOUD_METRES)} ) + uGroundCloud.z * ( 1.0 / ${glslFloat(CLOUD_PERIOD)} ) * vec2( 1.0, -1.0 );
+	float a = texture( uGroundClouds, uv ).r;
+	float k = clamp( a * a * uGroundCloud.y, 0.0, 1.0 );
+	vec3 g = groundEncode( clamp( lit, 0.0, 1.0 ) );
+	vec3 shaded = groundDecode( mix( g, vec3( ${glslFloat(CLOUD_GREY)} ), k ) );
+	return min( vec3( 1.0 ), shaded / max( groundDecode( g ), vec3( 1e-5 ) ) );
+}`;
+
 /** Vertex: the tile attributes and what is worked out from them, after `#include <common>`. */
 const TILE_VERTEX_PARS = /* glsl */ `
 // The ground drawn the client's way (src/world/terrainTextures.ts, groundTiles.ts): each triangle's tile.
@@ -406,21 +429,7 @@ float groundMask( const in float code, const in vec2 dx, const in vec2 dy ) {
 }
 // sRGB's own curve each way (groundMath.srgbDecode, srgbEncode); the decode runs on past one.
 ${GROUND_DECODE_GLSL}
-vec3 groundEncode( const in vec3 c ) {
-	vec3 lo = c * 12.92;
-	vec3 hi = 1.055 * pow( max( c, vec3( 1e-6 ) ), vec3( 1.0 / 2.4 ) ) - 0.055;
-	return mix( hi, lo, vec3( lessThanEqual( c, vec3( 0.0031308 ) ) ) );
-}
-// The client's cloud layer over a lit colour (groundMath.cloudShade): grey ${glslFloat(CLOUD_GREY)} in its gamma at the tile's
-// alpha squared, never brightening.
-vec3 groundCloudShade( const in vec3 lit ) {
-	vec2 uv = vGroundUV * ( 4.0 / ${glslFloat(CLOUD_METRES)} ) + uGroundCloud.z * ( 1.0 / ${glslFloat(CLOUD_PERIOD)} ) * vec2( 1.0, -1.0 );
-	float a = texture( uGroundClouds, uv ).r;
-	float k = clamp( a * a * uGroundCloud.y, 0.0, 1.0 );
-	vec3 g = groundEncode( clamp( lit, 0.0, 1.0 ) );
-	vec3 shaded = groundDecode( mix( g, vec3( ${glslFloat(CLOUD_GREY)} ), k ) );
-	return min( vec3( 1.0 ), shaded / max( groundDecode( g ), vec3( 1e-5 ) ) );
-}
+${GROUND_CLOUD_GLSL}
 `;
 
 /**

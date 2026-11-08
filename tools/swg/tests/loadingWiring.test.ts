@@ -152,7 +152,10 @@ function method(text: string, signature: string): string {
   // shadows built again behind one, in any build) is a curtain of the same kind as well: its own two sets.
   const pool = method(main, '  private lightPoolCurtain(');
   const poolSets = pool.match(/this\.curtainOnly = (true|false);/g) ?? [];
-  ok(reads.length === 3 && sets.length === 6 && foldSets.length === 2 && poolSets.length === 2, `and nothing else of the game reads it: three reads (the story's leave, the call's end, the editor's), the course curtain's two sets, the editor's curtain's two and the rooms' light pool's two (${reads.length}, ${sets.length}, ${foldSets.length} and ${poolSets.length})`);
+  // The far ground's curtain (the horizon pass's first wave: a bake loaded or let go in play behind one) is of the same kind too.
+  const far = method(main, '  private async setHorizonGround(');
+  const farSets = far.match(/this\.curtainOnly = (true|false);/g) ?? [];
+  ok(reads.length === 3 && sets.length === 8 && foldSets.length === 2 && poolSets.length === 2 && farSets.length === 2, `and nothing else of the game reads it: three reads (the story's leave, the call's end, the editor's), the course curtain's two sets, the editor's curtain's two, the rooms' light pool's two and the far ground's two (${reads.length}, ${sets.length}, ${foldSets.length}, ${poolSets.length} and ${farSets.length})`);
 }
 
 // --- the sweep, the frame loop, the queue's own compiles -------------------------------------------------------------

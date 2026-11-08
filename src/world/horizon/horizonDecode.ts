@@ -1,0 +1,661 @@
+// The browser's half of the far ground's bake made ready to draw (DESIGN.md §2.5, §2.13), worked in a worker of its own
+// (`horizonDecodeWorker.ts`) behind the loading screen: the sections inflated, the heights put back as float32, the
+// normals worked out of them, the leaves' min/max pyramid, the albedo composed per 4 m tile the way the tile program
+// draws it (every family at its pictures' mean, the masks averaged over sixteen places of the tile, then the colour
+// map's tint), and the detail window of each 4 m tile's own layer. Every function here is pure and node runs it.
+import { childChoiceAt } from '../../swg/terrain/generator.ts';
+import { composeTile, srgbDecode, srgbEncode, tintGamma, type MaskSample, type TintReference } from '../groundMath.ts';
+import { tileLayers, type GroundTiler } from '../groundTiles.ts';
+import { decodeHeights, sectionOf, type HorizonHeader, type HorizonSectionName, type Lattice } from './horizonFile.ts';
+import { LEAF, LEVELS_MOST, type MinMaxPyramid } from './horizonMath.ts';
+
+/** The albedo is stored at this share of itself, so a tint past one keeps its colour in eight bits (the shader takes it back). */
+export const ALBEDO_SCALE = 2;
+/** The detail window: 4 m texels, this many a side, addressed by the tile's place modulo the window. */
+export const DETAIL_SIZE = 1024;
+export const DETAIL_TILE = 4;
+
+/** A section inflated (zlib, which `DecompressionStream('deflate')` reads). */
+export async function inflate(bytes: Uint8Array): Promise<Uint8Array> {
+  const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/** Every section of a bake inflated, by name. */
+export async function inflateSections(header: HorizonHeader, bin: Uint8Array): Promise<Record<HorizonSectionName, Uint8Array>> {
+  const out = {} as Record<HorizonSectionName, Uint8Array>;
+  for (const s of header.sections) out[s.name] = await inflate(bin.subarray(s.offset, s.offset + s.length));
+  for (const s of header.sections) if (out[s.name].length !== sectionOf(header, s.name).size) throw new Error(`the ${s.name} section inflates to ${out[s.name].length} bytes, not ${s.size}`);
+  return out;
+}
+
+/** What the albedo's composition reads of the tile program: tables made from the world's tiler on the main thread. */
+export interface TileTables {
+  /** family * 256 + choice -> the array layer the tiler's `layer` gives. */
+  layerOf: Uint8Array;
+  /** family -> its rank at a border (`tiler.rank`). */
+  rankOf: Float64Array;
+  /** The corners asked for a choice, in order (`tiler.corners`). */
+  corners: number[];
+  /** Each layer's mean colour in linear light, three a layer. */
+  means: Float32Array;
+  /** The client's three masks, `ms` a side, one byte each, kind after kind (the tile arrays' own). */
+  masks: Uint8Array;
+  ms: number;
+  /** The tint (`GROUND_DRAW_TUNE.colour`'s index, `gainCap`, the world's reference) and the masks' two switches. */
+  tintMode: number;
+  gainCap: number;
+  reference: TintReference | null;
+  add: boolean;
+  painted: boolean;
+}
+
+/** A tiler over the tables: what `tileLayers` asks. */
+export function tableTiler(t: TileTables): GroundTiler {
+  return { rank: (f) => t.rankOf[f & 255], layer: (f, c) => t.layerOf[(f & 255) * 256 + (c & 255)], corners: t.corners };
+}
+
+/** The masks' bilinear sample, clamped at the edges, as the program's sampler is set. */
+export function maskSampler(masks: Uint8Array, ms: number): MaskSample {
+  const at = (k: number, x: number, y: number) => masks[k * ms * ms + Math.min(ms - 1, Math.max(0, y)) * ms + Math.min(ms - 1, Math.max(0, x))] / 255;
+  return (kind, u, v) => {
+    const fx = u * ms - 0.5;
+    const fy = v * ms - 0.5;
+    const x = Math.floor(fx);
+    const y = Math.floor(fy);
+    const ax = fx - x;
+    const ay = fy - y;
+    return (at(kind, x, y) * (1 - ax) + at(kind, x + 1, y) * ax) * (1 - ay) + (at(kind, x, y + 1) * (1 - ax) + at(kind, x + 1, y + 1) * ax) * ay;
+  };
+}
+
+/** The pattern's corner a 4 m pole takes its family from: the nearest, a tie going up (`snapFamilies`). */
+export function cornerOf(w: number): number {
+  return Math.floor(w / 8 + 0.5) * 8;
+}
+
+/** A 4 m pole's family off the bake's pattern corners (nought past them). */
+export function poleFamily(fam: Uint8Array, ground: Lattice, x: number, z: number): number {
+  const i = (cornerOf(x) - ground.x0) / 8;
+  const j = (cornerOf(z) - ground.z0) / 8;
+  if (i < 0 || j < 0 || i >= ground.nx || j >= ground.nz) return 0;
+  return fam[j * ground.nx + i];
+}
+
+const PLACES = 4;
+
+/**
+ * The tile with its south-west corner at raw (tx, tz): its four corners' families and choices (the place's own hash), its
+ * layers and codes by `tileLayers`, and its colour in linear light at every picture's mean, the masks averaged over a 4
+ * by 4 grid of places (`composeTile`): written into `out`. With `memo` (by the tile's signature) a tile of the same
+ * layers and codes is composed once a world; with `weights`, the layer with the greatest share at the tile's middle is
+ * answered (the detail window's).
+ */
+export class TileComposer {
+  private readonly fams = new Int32Array(4);
+  private readonly choices = new Int32Array(4);
+  readonly layers = new Uint8Array(4);
+  readonly codes = new Uint8Array(3);
+  private readonly tiler: GroundTiler;
+  private readonly sample: MaskSample;
+  // The memo by the tile's signature in two integers (the four layers' bytes, and the three codes plus one), in an
+  // open-addressed table of its own: a 47-bit double key in a `Map` hashed a heap number on every look-up.
+  private keyLo = new Int32Array(4096);
+  private keyHi = new Int32Array(4096);
+  private keyAt = new Int32Array(4096);
+  private memoRgb = new Float32Array(3 * 1024);
+  private memoN = 0;
+  private readonly acc = [0, 0, 0];
+  private readonly one = [0, 0, 0];
+  private readonly w = [0, 0, 0];
+  private readonly t: TileTables;
+  private readonly fam: Uint8Array;
+  private readonly ground: Lattice;
+  private readonly corner0: number;
+  constructor(t: TileTables, fam: Uint8Array, ground: Lattice) {
+    this.t = t;
+    this.fam = fam;
+    this.ground = ground;
+    this.tiler = tableTiler(t);
+    this.sample = maskSampler(t.masks, t.ms);
+    this.corner0 = t.corners.length ? t.corners[0] : 0;
+  }
+  get memoSize(): number {
+    return this.memoN;
+  }
+  /** The tile's layers and codes into `layers` and `codes`; answers how many layers it holds. */
+  layersAt(tx: number, tz: number): number {
+    const { fam, ground } = this;
+    this.fams[0] = poleFamily(fam, ground, tx, tz);
+    this.fams[1] = poleFamily(fam, ground, tx + 4, tz);
+    this.fams[2] = poleFamily(fam, ground, tx, tz + 4);
+    this.fams[3] = poleFamily(fam, ground, tx + 4, tz + 4);
+    this.choices[0] = childChoiceAt(tx, tz);
+    this.choices[1] = childChoiceAt(tx + 4, tz);
+    this.choices[2] = childChoiceAt(tx, tz + 4);
+    this.choices[3] = childChoiceAt(tx + 4, tz + 4);
+    return tileLayers(this.fams, this.choices, this.tiler, this.layers, this.codes);
+  }
+  /**
+   * A row of 4 m poles' families and choices (`P` of them from raw x0 eastward every 4 m, at raw z), each worked once:
+   * the albedo hands `layersFrom` two such rows, so a pole four tiles share is hashed once and not four times.
+   */
+  poleRow(x0: number, z: number, P: number, famOut: Int32Array, choiceOut: Int32Array): void {
+    const { fam, ground } = this;
+    for (let a = 0; a < P; a++) {
+      const x = x0 + a * DETAIL_TILE;
+      famOut[a] = poleFamily(fam, ground, x, z);
+      choiceOut[a] = childChoiceAt(x, z);
+    }
+  }
+  /** `layersAt` for the tile whose south-west pole is column `a` of `southF`/`southC` (its north poles in `northF`/`northC`). */
+  layersFrom(southF: Int32Array, southC: Int32Array, northF: Int32Array, northC: Int32Array, a: number): number {
+    const f = southF[a];
+    // A tile of one family is that family at the first asked corner's choice (`tileLayers`' own answer for it, written
+    // without its loops: most tiles are one family). Only `layers[0]` is written, which is all a count of one is read for.
+    if (southF[a + 1] === f && northF[a] === f && northF[a + 1] === f) {
+      const c0 = this.corner0;
+      const choice = c0 === 0 ? southC[a] : c0 === 1 ? southC[a + 1] : c0 === 2 ? northC[a] : northC[a + 1];
+      this.layers[0] = this.t.layerOf[(f & 255) * 256 + (choice & 255)];
+      return 1;
+    }
+    this.fams[0] = f;
+    this.fams[1] = southF[a + 1];
+    this.fams[2] = northF[a];
+    this.fams[3] = northF[a + 1];
+    this.choices[0] = southC[a];
+    this.choices[1] = southC[a + 1];
+    this.choices[2] = northC[a];
+    this.choices[3] = northC[a + 1];
+    return tileLayers(this.fams, this.choices, this.tiler, this.layers, this.codes);
+  }
+  /** The tile's colour (linear, every picture at its mean), memo or none. */
+  colourAt(tx: number, tz: number, out: number[], memo = true): number[] {
+    return this.colourOf(this.layersAt(tx, tz), out, memo);
+  }
+  /** The colour of the layers and codes standing now (`layersAt`'s or `layersFrom`'s), `count` of them. */
+  colourOf(count: number, out: number[], memo = true): number[] {
+    const means = this.t.means;
+    if (count === 1) {
+      const l = this.layers[0] * 3;
+      out[0] = means[l];
+      out[1] = means[l + 1];
+      out[2] = means[l + 2];
+      return out;
+    }
+    const L = this.layers;
+    const C = this.codes;
+    const lo = L[0] | (L[1] << 8) | (L[2] << 16) | (L[3] << 24);
+    const hi = C[0] + 32 * (C[1] + 32 * C[2]) + 1;
+    let slot = -1;
+    if (memo) {
+      const mask = this.keyHi.length - 1;
+      let h = (Math.imul(lo, 0x9e3779b1) ^ Math.imul(hi, 0x85ebca77)) & mask;
+      for (;;) {
+        const kh = this.keyHi[h];
+        if (kh === 0) break;
+        if (kh === hi && this.keyLo[h] === lo) {
+          const at = this.keyAt[h];
+          out[0] = this.memoRgb[at * 3];
+          out[1] = this.memoRgb[at * 3 + 1];
+          out[2] = this.memoRgb[at * 3 + 2];
+          return out;
+        }
+        h = (h + 1) & mask;
+      }
+      slot = h;
+    }
+    this.composeSlow(out);
+    if (memo) {
+      if (this.memoN * 3 >= this.memoRgb.length) {
+        const g = new Float32Array(this.memoRgb.length * 2);
+        g.set(this.memoRgb);
+        this.memoRgb = g;
+      }
+      this.keyLo[slot] = lo;
+      this.keyHi[slot] = hi;
+      this.keyAt[slot] = this.memoN;
+      this.memoRgb[this.memoN * 3] = out[0];
+      this.memoRgb[this.memoN * 3 + 1] = out[1];
+      this.memoRgb[this.memoN * 3 + 2] = out[2];
+      this.memoN++;
+      if (this.memoN * 2 > this.keyHi.length) this.growMemo();
+    }
+    return out;
+  }
+  /** The memo's table doubled, every signature put again. */
+  private growMemo(): void {
+    const lo = this.keyLo;
+    const hi = this.keyHi;
+    const at = this.keyAt;
+    const size = hi.length * 2;
+    this.keyLo = new Int32Array(size);
+    this.keyHi = new Int32Array(size);
+    this.keyAt = new Int32Array(size);
+    const mask = size - 1;
+    for (let k = 0; k < hi.length; k++) {
+      if (hi[k] === 0) continue;
+      let h = (Math.imul(lo[k], 0x9e3779b1) ^ Math.imul(hi[k], 0x85ebca77)) & mask;
+      while (this.keyHi[h] !== 0) h = (h + 1) & mask;
+      this.keyLo[h] = lo[k];
+      this.keyHi[h] = hi[k];
+      this.keyAt[h] = at[k];
+    }
+  }
+  /** The layers and codes standing now composed at the sixteen places, with no memo and no fast path. */
+  composeSlow(out: number[]): number[] {
+    const means = this.t.means;
+    const layer = (i: number, o: number[]) => {
+      const l = this.layers[i] * 3;
+      o[0] = means[l];
+      o[1] = means[l + 1];
+      o[2] = means[l + 2];
+    };
+    out[0] = out[1] = out[2] = 0;
+    for (let q = 0; q < PLACES; q++) {
+      for (let p = 0; p < PLACES; p++) {
+        composeTile(layer, this.codes, (p + 0.5) / PLACES, (q + 0.5) / PLACES, this.sample, this.t.add, this.t.painted, this.one);
+        out[0] += this.one[0];
+        out[1] += this.one[1];
+        out[2] += this.one[2];
+      }
+    }
+    const k = 1 / (PLACES * PLACES);
+    out[0] *= k;
+    out[1] *= k;
+    out[2] *= k;
+    return out;
+  }
+  /** The layer with the greatest share at the tile's middle (the detail window's). */
+  mainLayer(tx: number, tz: number): number {
+    const count = this.layersAt(tx, tz);
+    if (count === 1) return this.layers[0];
+    // `composeTile` writes the weights only as far as the first absent overlay: what lies past it is the last tile's.
+    this.w[0] = 0;
+    this.w[1] = 0;
+    this.w[2] = 0;
+    composeTile((_i, o) => {
+      o[0] = 0;
+    }, this.codes, 0.5, 0.5, this.sample, this.t.add, this.t.painted, this.acc, this.w);
+    let best = 0;
+    let share = (1 - this.w[0]) * (1 - this.w[1]) * (1 - this.w[2]);
+    const s1 = this.w[0] * (1 - this.w[1]) * (1 - this.w[2]);
+    const s2 = this.w[1] * (1 - this.w[2]);
+    const s3 = this.w[2];
+    if (s1 > share) {
+      best = 1;
+      share = s1;
+    }
+    if (s2 > share) {
+      best = 2;
+      share = s2;
+    }
+    if (s3 > share) best = 3;
+    return this.layers[best];
+  }
+}
+
+const tintOut: [number, number, number] = [0, 0, 0];
+const tintIn: [number, number, number] = [0, 0, 0];
+
+/** A cell's tint, as the tile program lays it: the colour map's bytes through `tintGamma`, then decoded to linear light. */
+export function cellTint(t: TileTables, r: number, g: number, b: number, out: number[]): number[] {
+  tintIn[0] = r / 255;
+  tintIn[1] = g / 255;
+  tintIn[2] = b / 255;
+  tintGamma(tintIn, t.tintMode, t.reference, t.gainCap, tintOut);
+  out[0] = srgbDecode(tintOut[0]);
+  out[1] = srgbDecode(tintOut[1]);
+  out[2] = srgbDecode(tintOut[2]);
+  return out;
+}
+
+/**
+ * The least linear value each sRGB byte is rounded from (`ENC_AT[b]`: the first x with round(srgbEncode(x) * 255) >= b),
+ * found by halving with `srgbEncode` itself, so `encByte` answers the very byte the formula rounds to by eight
+ * comparisons where the formula took a `Math.pow` (a quarter of the albedo's time, measured).
+ */
+const ENC_AT = (() => {
+  const at = new Float64Array(256);
+  for (let b = 1; b < 256; b++) {
+    let lo = 0;
+    let hi = 1;
+    for (let k = 0; k < 64; k++) {
+      const mid = (lo + hi) / 2;
+      if (Math.round(srgbEncode(mid) * 255) >= b) hi = mid;
+      else lo = mid;
+    }
+    at[b] = hi;
+  }
+  return at;
+})();
+/** The sRGB byte of a linear value in [0, 1] (clamped), as `Math.round(srgbEncode(x) * 255)`. */
+export function encByte(x: number): number {
+  let b = 0;
+  for (let s = 128; s > 0; s >>= 1) if (x >= ENC_AT[b + s]) b += s;
+  return b;
+}
+const enc = (v: number) => encByte(Math.min(1, Math.max(0, v / ALBEDO_SCALE)));
+
+/**
+ * The fine albedo: one texel a colour cell (centred on its pattern corner), the mean in linear light of the cell's own 4 m
+ * tiles each as the near ground draws it, times the cell's tint, stored sRGB at `ALBEDO_SCALE`'s share (RGBA, alpha
+ * nought). The 4 m poles' families and choices are worked once a pole, a row of them at a time (two rows kept, the
+ * north one of a row of tiles the south one of the next), from the place's hash; each cell's tiles are summed in the
+ * order the cell's own loop summed them (its rows south to north, each west to east), so the bytes are the same.
+ */
+export function composeAlbedo(t: TileTables, header: HorizonHeader, fam: Uint8Array, colour: Uint8Array, out = new Uint8Array(header.colour.nx * header.colour.nz * 4)): { rgba: Uint8Array; memo: number; ms: number } {
+  const t0 = performance.now();
+  const c = header.colour;
+  const comp = new TileComposer(t, fam, header.ground);
+  const tile = [0, 0, 0];
+  const tint = [0, 0, 0];
+  const per = c.step / DETAIL_TILE;
+  const k = 1 / (per * per);
+  // Pole column a stands at raw x xs + 4a, pole row b at zs + 4b; tile (a, b) has its south-west pole there.
+  const P = c.nx * per + 1;
+  const xs = c.x0 - c.step / 2;
+  const zs = c.z0 - c.step / 2;
+  let sF = new Int32Array(P);
+  let sC = new Int32Array(P);
+  let nF = new Int32Array(P);
+  let nC = new Int32Array(P);
+  const acc = new Float64Array(c.nx * 3);
+  let lastRgb = -1;
+  comp.poleRow(xs, zs, P, sF, sC);
+  for (let j = 0; j < c.nz; j++) {
+    acc.fill(0);
+    for (let q = 0; q < per; q++) {
+      const b = j * per + q;
+      comp.poleRow(xs, zs + (b + 1) * DETAIL_TILE, P, nF, nC);
+      for (let a = 0; a < P - 1; a++) {
+        comp.colourOf(comp.layersFrom(sF, sC, nF, nC, a), tile);
+        const o = ((a / per) | 0) * 3;
+        acc[o] += tile[0];
+        acc[o + 1] += tile[1];
+        acc[o + 2] += tile[2];
+      }
+      const f = sF;
+      sF = nF;
+      nF = f;
+      const ch = sC;
+      sC = nC;
+      nC = ch;
+    }
+    for (let i = 0; i < c.nx; i++) {
+      const o = (j * c.nx + i) * 3;
+      // The colour map is smooth: a cell with its west neighbour's three bytes takes its tint (a pure function of them).
+      const rgb = (colour[o] << 16) | (colour[o + 1] << 8) | colour[o + 2];
+      if (rgb !== lastRgb) {
+        cellTint(t, colour[o], colour[o + 1], colour[o + 2], tint);
+        lastRgb = rgb;
+      }
+      const d = (j * c.nx + i) * 4;
+      out[d] = enc(acc[i * 3] * k * tint[0]);
+      out[d + 1] = enc(acc[i * 3 + 1] * k * tint[1]);
+      out[d + 2] = enc(acc[i * 3 + 2] * k * tint[2]);
+      out[d + 3] = 0;
+    }
+  }
+  return { rgba: out, memo: comp.memoSize, ms: performance.now() - t0 };
+}
+
+/**
+ * The coarse albedo, a texel a 64 m sample: inside the fine extent the fine texels' mean round it (in linear light);
+ * past it the 64 m grid's own family (its layer at the place's choice) at its mean, times its own colour's tint.
+ */
+export function composeCoarseAlbedo(t: TileTables, header: HorizonHeader, fineRgba: Uint8Array, cf: Uint8Array, cc: Uint8Array): Uint8Array {
+  const co = header.coarse;
+  const c = header.colour;
+  const out = new Uint8Array(co.nx * co.nz * 4);
+  const tint = [0, 0, 0];
+  const lin = new Float32Array(256);
+  for (let v = 0; v < 256; v++) lin[v] = srgbDecode(v / 255) * ALBEDO_SCALE;
+  const half = co.step / 2;
+  for (let j = 0; j < co.nz; j++) {
+    const z = co.z0 + j * co.step;
+    for (let i = 0; i < co.nx; i++) {
+      const x = co.x0 + i * co.step;
+      const d = (j * co.nx + i) * 4;
+      const fi0 = Math.ceil((x - half - c.x0) / c.step);
+      const fi1 = Math.floor((x + half - c.x0) / c.step);
+      const fj0 = Math.ceil((z - half - c.z0) / c.step);
+      const fj1 = Math.floor((z + half - c.z0) / c.step);
+      if (fi0 >= 0 && fj0 >= 0 && fi1 < c.nx && fj1 < c.nz && fi1 >= fi0 && fj1 >= fj0) {
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let n = 0;
+        for (let fj = fj0; fj <= fj1; fj++) {
+          for (let fi = fi0; fi <= fi1; fi++) {
+            const s = (fj * c.nx + fi) * 4;
+            r += lin[fineRgba[s]];
+            g += lin[fineRgba[s + 1]];
+            b += lin[fineRgba[s + 2]];
+            n++;
+          }
+        }
+        out[d] = enc(r / n);
+        out[d + 1] = enc(g / n);
+        out[d + 2] = enc(b / n);
+        continue;
+      }
+      const f = cf[j * co.nx + i];
+      const l = t.layerOf[f * 256 + (childChoiceAt(x, z) & 255)] * 3;
+      cellTint(t, cc[(j * co.nx + i) * 3], cc[(j * co.nx + i) * 3 + 1], cc[(j * co.nx + i) * 3 + 2], tint);
+      out[d] = enc(t.means[l] * tint[0]);
+      out[d + 1] = enc(t.means[l + 1] * tint[1]);
+      out[d + 2] = enc(t.means[l + 2] * tint[2]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Normals of a heights lattice, central differences one step either side (one-sided at an edge), as RG8 biased by 128:
+ * the normal's x and z in the game's frame (raw x runs the other way, so the slope along it changes sign), y rebuilt.
+ */
+export function normalsOf(h: Float32Array, lat: Lattice): Uint8Array {
+  const { nx, nz, step } = lat;
+  const out = new Uint8Array(nx * nz * 2);
+  for (let j = 0; j < nz; j++) {
+    const ju = Math.min(nz - 1, j + 1);
+    const jd = Math.max(0, j - 1);
+    for (let i = 0; i < nx; i++) {
+      const ir = Math.min(nx - 1, i + 1);
+      const il = Math.max(0, i - 1);
+      const dxr = (h[j * nx + ir] - h[j * nx + il]) / ((ir - il) * step);
+      const dzr = (h[ju * nx + i] - h[jd * nx + i]) / ((ju - jd) * step);
+      // Game frame: d/dgx = -d/drx, d/dgz = d/drz; the normal is (-dh/dgx, 1, -dh/dgz) made unit.
+      const gx = dxr;
+      const gz = -dzr;
+      const len = Math.sqrt(gx * gx + 1 + gz * gz);
+      out[(j * nx + i) * 2] = Math.min(255, Math.max(0, Math.round((gx / len) * 127.5 + 127.5)));
+      out[(j * nx + i) * 2 + 1] = Math.min(255, Math.max(0, Math.round((gz / len) * 127.5 + 127.5)));
+    }
+  }
+  return out;
+}
+
+/**
+ * The leaves' min/max pyramid (§2.4) in the game's frame, base cells one leaf on the leaves' lattice (the ground's shift
+ * plus multiples of 64, aligned to the topmost level), covering the coarse extent: each cell the least and most of every
+ * fine sample within it and a step round it, and of every coarse sample round it where the fine extent does not hold the
+ * cell whole; NaN where neither stands.
+ */
+export function pyramidOf(header: HorizonHeader, fine: Float32Array, coarse: Float32Array, centre: { x: number; z: number }, shift: { x: number; z: number }): MinMaxPyramid {
+  const top = LEAF * (1 << LEVELS_MOST);
+  const co = header.coarse;
+  const gxMin = centre.x - (co.x0 + (co.nx - 1) * co.step);
+  const gxMax = centre.x - co.x0;
+  const gzMin = co.z0 - centre.z;
+  const gzMax = co.z0 + (co.nz - 1) * co.step - centre.z;
+  const x0 = shift.x + top * Math.floor((gxMin - shift.x) / top);
+  const z0 = shift.z + top * Math.floor((gzMin - shift.z) / top);
+  const span = Math.max(gxMax - x0, gzMax - z0);
+  const n = Math.ceil(span / top) * (1 << LEVELS_MOST);
+  const lo0 = new Float32Array(n * n).fill(Infinity);
+  const hi0 = new Float32Array(n * n).fill(-Infinity);
+  const covered = new Uint8Array(n * n);
+  const put = (lat: Lattice, h: Float32Array, reach: number, only: boolean) => {
+    for (let j = 0; j < lat.nz; j++) {
+      const gz = lat.z0 + j * lat.step - centre.z;
+      const cj0 = Math.max(0, Math.floor((gz - reach - z0) / LEAF));
+      const cj1 = Math.min(n - 1, Math.floor((gz + reach - z0) / LEAF));
+      for (let i = 0; i < lat.nx; i++) {
+        const gx = centre.x - (lat.x0 + i * lat.step);
+        const v = h[j * lat.nx + i];
+        const ci0 = Math.max(0, Math.floor((gx - reach - x0) / LEAF));
+        const ci1 = Math.min(n - 1, Math.floor((gx + reach - x0) / LEAF));
+        for (let cj = cj0; cj <= cj1; cj++) {
+          for (let ci = ci0; ci <= ci1; ci++) {
+            const k = cj * n + ci;
+            if (only && covered[k]) continue;
+            if (v < lo0[k]) lo0[k] = v;
+            if (v > hi0[k]) hi0[k] = v;
+          }
+        }
+      }
+    }
+  };
+  const f = header.fine;
+  put(f, fine, f.step, false);
+  // A cell the fine extent holds whole (with its step round it) takes the fine samples alone.
+  const fgx0 = centre.x - (f.x0 + (f.nx - 1) * f.step) + f.step;
+  const fgx1 = centre.x - f.x0 - f.step;
+  const fgz0 = f.z0 - centre.z + f.step;
+  const fgz1 = f.z0 + (f.nz - 1) * f.step - centre.z - f.step;
+  for (let cj = 0; cj < n; cj++) {
+    const z = z0 + cj * LEAF;
+    if (z < fgz0 || z + LEAF > fgz1) continue;
+    for (let ci = 0; ci < n; ci++) {
+      const x = x0 + ci * LEAF;
+      if (x >= fgx0 && x + LEAF <= fgx1) covered[cj * n + ci] = 1;
+    }
+  }
+  put(co, coarse, co.step, true);
+  const lo: Float32Array[] = [lo0];
+  const hi: Float32Array[] = [hi0];
+  for (let k = 0; k < n * n; k++) if (lo0[k] > hi0[k]) lo0[k] = hi0[k] = NaN;
+  let m = n;
+  for (let L = 1; L <= LEVELS_MOST; L++) {
+    const p = m >> 1;
+    const pl = new Float32Array(p * p);
+    const ph = new Float32Array(p * p);
+    const cl = lo[L - 1];
+    const chh = hi[L - 1];
+    for (let j = 0; j < p; j++) {
+      for (let i = 0; i < p; i++) {
+        let a = Infinity;
+        let b = -Infinity;
+        for (let q = 0; q < 4; q++) {
+          const k = (2 * j + (q >> 1)) * m + 2 * i + (q & 1);
+          const l = cl[k];
+          if (l === l) {
+            if (l < a) a = l;
+            if (chh[k] > b) b = chh[k];
+          }
+        }
+        pl[j * p + i] = a <= b ? a : NaN;
+        ph[j * p + i] = a <= b ? b : NaN;
+      }
+    }
+    lo.push(pl);
+    hi.push(ph);
+    m = p;
+  }
+  return { x0, z0, n, levels: LEVELS_MOST + 1, lo, hi };
+}
+
+/**
+ * The detail window (§2.5): each 4 m tile's own layer (the greatest share at its middle) for the 4,096 m square centred
+ * on raw (rx, rz), addressed by the tile's index modulo the window, so the program reads it as the camera's place moves.
+ */
+export function detailWindow(t: TileTables, header: HorizonHeader, fam: Uint8Array, rx: number, rz: number, out = new Uint8Array(DETAIL_SIZE * DETAIL_SIZE)): Uint8Array {
+  const comp = new TileComposer(t, fam, header.ground);
+  const half = (DETAIL_SIZE / 2) * DETAIL_TILE;
+  const tx0 = Math.floor((rx - half) / DETAIL_TILE);
+  const tz0 = Math.floor((rz - half) / DETAIL_TILE);
+  const mod = (v: number) => ((v % DETAIL_SIZE) + DETAIL_SIZE) % DETAIL_SIZE;
+  for (let q = 0; q < DETAIL_SIZE; q++) {
+    const tz = tz0 + q;
+    const row = mod(tz) * DETAIL_SIZE;
+    for (let p = 0; p < DETAIL_SIZE; p++) {
+      const tx = tx0 + p;
+      out[row + mod(tx)] = comp.mainLayer(tx * DETAIL_TILE, tz * DETAIL_TILE);
+    }
+  }
+  return out;
+}
+
+/** Each layer's mean colour in linear light, read off the colour array every `stride` texels each way (sRGB decoded). */
+export function layerMeans(colour: Uint8Array, size: number, depth: number, stride = 4): Float32Array {
+  const lin = new Float32Array(256);
+  for (let v = 0; v < 256; v++) lin[v] = srgbDecode(v / 255);
+  const out = new Float32Array(Math.max(256, depth) * 3);
+  const per = size * size * 4;
+  for (let l = 0; l < depth; l++) {
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let n = 0;
+    for (let y = 0; y < size; y += stride) {
+      for (let x = 0; x < size; x += stride) {
+        const k = l * per + (y * size + x) * 4;
+        r += lin[colour[k]];
+        g += lin[colour[k + 1]];
+        b += lin[colour[k + 2]];
+        n++;
+      }
+    }
+    out[l * 3] = r / n;
+    out[l * 3 + 1] = g / n;
+    out[l * 3 + 2] = b / n;
+  }
+  return out;
+}
+
+/** Everything the decode worker hands the field. */
+export interface DecodedBake {
+  fine: Float32Array;
+  coarse: Float32Array;
+  fineNormal: Uint8Array;
+  coarseNormal: Uint8Array;
+  albedo: Uint8Array;
+  coarseAlbedo: Uint8Array;
+  pyramid: MinMaxPyramid;
+  detail: Uint8Array;
+  ms: { inflate: number; heights: number; normals: number; albedo: number; pyramid: number; detail: number; memo: number };
+}
+
+/** The whole decode, in the worker's order. */
+export async function decodeBake(header: HorizonHeader, bin: Uint8Array, t: TileTables, centre: { x: number; z: number }, shift: { x: number; z: number }, eye: { rx: number; rz: number }): Promise<DecodedBake> {
+  const clock = () => performance.now();
+  let t0 = clock();
+  const s = await inflateSections(header, bin);
+  const ms = { inflate: clock() - t0, heights: 0, normals: 0, albedo: 0, pyramid: 0, detail: 0, memo: 0 };
+  t0 = clock();
+  const fine = decodeHeights(s.heights, header.fine.nx, header.fine.nz, header.fine.lo, header.fine.q);
+  const coarse = decodeHeights(s.coarseHeights, header.coarse.nx, header.coarse.nz, header.coarse.lo, header.coarse.q);
+  ms.heights = clock() - t0;
+  t0 = clock();
+  const fineNormal = normalsOf(fine, header.fine);
+  const coarseNormal = normalsOf(coarse, header.coarse);
+  ms.normals = clock() - t0;
+  const a = composeAlbedo(t, header, s.families, s.colour);
+  ms.albedo = a.ms;
+  ms.memo = a.memo;
+  t0 = clock();
+  const coarseAlbedo = composeCoarseAlbedo(t, header, a.rgba, s.coarseFamilies, s.coarseColour);
+  ms.albedo += clock() - t0;
+  t0 = clock();
+  const pyramid = pyramidOf(header, fine, coarse, centre, shift);
+  ms.pyramid = clock() - t0;
+  t0 = clock();
+  const detail = detailWindow(t, header, s.families, eye.rx, eye.rz);
+  ms.detail = clock() - t0;
+  return { fine, coarse, fineNormal, coarseNormal, albedo: a.rgba, coarseAlbedo, pyramid, detail, ms };
+}
+
+/** The families section kept for a later detail window (the worker keeps it; the field never holds it). */
+export { DETAIL_SIZE as HORIZON_DETAIL_SIZE };
