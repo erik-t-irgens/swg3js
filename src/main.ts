@@ -2050,6 +2050,8 @@ class App {
     // The far ground's switch from the Graphics page before any world, so the first arrival loads the bake when it is on.
     HORIZON_TUNE.ground = S.farRings ? 'rings' : 'tiles';
     this.applyReach();
+    // How far the rings draw the near ground's own look, before any world: the first bake's window is made at its size.
+    HORIZON_TUNE.detailReach = S.groundDetailDistance * 1000;
     // The spawner's cap and the creatures' animation range, kept by the world for every planet's manager.
     this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
     // How hard the world's own bodies are, before any of them is stood: each reads it as it stands.
@@ -5416,9 +5418,13 @@ class App {
        * force, the last selection (patches by level, skirts, triangles, its microseconds) and the hole. `{ ground }` off
        * 'tiles' loads the bake behind a short curtain (nothing built on a live frame); `{ reach }` metres; `{ measure }`
        * moves the far plane and the sky's radius to the reach, under reversed depth only; `{ view }` 'shaded', 'lod',
-       * 'albedo', 'normals' or 'edge'; `{ tune }` any `HORIZON_TUNE` number. Await it when it changes `ground`.
+       * 'albedo', 'normals', 'edge', 'detail' (the near ground's own look where it is drawn, the mean dimmed past it) or
+       * 'window' (its share red, the window's tiles green, their layers blue); `{ tune }` any `HORIZON_TUNE` number;
+       * `{ selfTest: true }` the layer means against the arrays' top mip and the ring program's samplers as the driver
+       * counts them. Await it when it changes `ground`.
        */
-      horizon: async (o?: { ground?: HorizonGround; reach?: number; measure?: boolean; view?: (typeof HORIZON_VIEWS)[number]; tune?: Record<string, unknown>; bench?: number; at?: [number, number] }) => {
+      horizon: async (o?: { ground?: HorizonGround; reach?: number; measure?: boolean; view?: (typeof HORIZON_VIEWS)[number]; tune?: Record<string, unknown>; bench?: number; at?: [number, number]; selfTest?: boolean }) => {
+        if (o?.selfTest) return this.world.horizonSelfTest();
         const said: string[] = [];
         if (o?.tune) said.push(...tuneHorizon(o.tune));
         if (typeof o?.reach === 'number' && o.reach > 0) said.push(...tuneHorizon({ reach: o.reach }));
@@ -13392,6 +13398,11 @@ class App {
         void this.setHorizonGround(S.farRings ? 'rings' : 'tiles').then((said) => {
           if (said) this.messages.note(said);
         });
+        break;
+      case 'groundDetailDistance':
+        // A number the rings read a frame: the composition window is made again at its new size in the decode worker and
+        // swapped in when it lands (a texture's size, never a program).
+        HORIZON_TUNE.detailReach = S.groundDetailDistance * 1000;
         break;
       case 'objectReach':
       case 'terrainRadius':

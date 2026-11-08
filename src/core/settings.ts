@@ -75,6 +75,11 @@ export interface Settings extends FxSettings {
   farRings: boolean;
   /** How far the rings reach, kilometres (the horizon pass's reach; the fog and reversed depth hold it shorter). */
   terrainDistance: number;
+  /**
+   * How far the rings draw the near ground's own look (its pictures, alternates, masks, tint, bump and gloss), kilometres;
+   * past it they fade into the bake's per-tile mean (the horizon pass's third wave).
+   */
+  groundDetailDistance: number;
   /** How many creatures and NPCs the spawner may have out at once (nothing the world itself stands is counted). */
   mobileCap: number;
   /** Metres past which a creature or NPC holds its pose until it comes nearer. */
@@ -386,6 +391,7 @@ export const DEFAULT_SETTINGS: Settings = {
   farRadius: 6,
   farRings: false,
   terrainDistance: 8,
+  groundDetailDistance: 2.5,
   mobileCap: 40,
   mobileAnimRange: 160,
   waterRipples: true,

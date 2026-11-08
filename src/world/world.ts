@@ -69,7 +69,7 @@ import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
 import { HORIZON_TUNE, HoleGrid, RingHole, ringCardSurface, ringHoleMoved } from './horizon/horizonMath.ts';
-import { HorizonField, RingSession, copyDome, type RegenAsk } from './horizon/horizonField.ts';
+import { HorizonField, RingSession, copyDome, tableKnobs, type RegenAsk } from './horizon/horizonField.ts';
 import { layerExtent, paintRegenAsks, seasonalExtents } from './horizon/horizonOverlay.ts';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { TERRAIN_GROUND_TUNE, lentFamilyKey, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
@@ -10237,6 +10237,8 @@ export class World {
    */
   groundDraw(o: { colour?: GroundColour; gainCap?: number; shine?: GroundShine; flat?: number; mirror?: boolean; masks?: boolean; opposite?: 'max' | 'add'; order?: 'first' | 'last'; children?: boolean; childCorner?: CornerName[]; clouds?: boolean | { on?: boolean; strength?: number }; view?: 'lit' | 'colour' | 'clouds' | 'bump' } = {}): Record<string, unknown> | null {
     const t = GROUND_DRAW_TUNE;
+    // The knobs the far ground's tables read, before this call moves any (a view, the shine or the clouds compose nothing again).
+    const tablesWere = tableKnobs();
     const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
     if (o.colour && ['off', 'client', 'normalised', 'channels'].includes(o.colour)) t.colour = o.colour;
     if (num(o.gainCap)) t.gainCap = o.gainCap;
@@ -10269,6 +10271,10 @@ export class World {
     const textures = this.groundTextures;
     const tiles = textures?.tiles ?? null;
     if (rebuild && tiles) this.rebuildGround();
+    // The far ground's albedo and composition window composed again under the knobs as they stand (the horizon's third wave),
+    // only when a knob its tables read moved: the near composition the rings draw reads these very uniforms already, the
+    // bake's mean past it does not.
+    if (tableKnobs() !== tablesWere) this.horizonField?.retune();
     if (!textures || !this.terrain.swg) return null;
     const census = tiles?.tiler.census;
     const cells = census ? census[1] + census[2] + census[3] + census[4] : 0;
@@ -12420,6 +12426,14 @@ export class World {
     if (this.swgSky) this.swgSky.group.scale.setScalar(radius / 3500);
   }
 
+  /** The far ground's self test for the console (`__debug.horizon({ selfTest: true })`): the layer means and the ring program's samplers. */
+  horizonSelfTest(): Record<string, unknown> {
+    const f = this.horizonField;
+    const s = this.horizonSession;
+    if (!f || !s || f.state.state !== 'ready' || !this.renderer) return { skipped: 'no bake drawn' };
+    return f.selfTest(this.renderer, s.ground, s.material);
+  }
+
   /** For the console (`__debug.horizon()`). */
   horizonReport(opts?: { bench?: number; at?: readonly [number, number] }): Record<string, unknown> {
     const f = this.horizonField;
@@ -12436,6 +12450,8 @@ export class World {
       note: f?.note ?? null,
       made: h ? { how: h.source.made, at: h.source.at ?? null, generator: h.source.generator, fine: h.fine, coarse: { x0: h.coarse.x0, z0: h.coarse.z0, step: h.coarse.step, nx: h.coarse.nx, nz: h.coarse.nz }, step: h.fine.step } : null,
       megabytes: f ? f.megabytes() : null,
+      // The third wave: the near ground's own look out to the ground detail distance, from the composition window round the eye.
+      detail: f ? { on: HORIZON_TUNE.detail, reach: HORIZON_TUNE.detailReach, fade: Math.round(HORIZON_TUNE.detailReach * HORIZON_TUNE.detailFadeShare), window: { ...f.place, metres: f.place.S * 4 }, work: { ...f.windowWork } } : null,
       decodeMs: f?.decodeMs ?? null,
       loadMs: f ? { fetch: Math.round(f.fetchMs), decodeWall: Math.round(f.decodeWallMs), mainThread: Math.round(f.mainMs), arrivalJoinWait: Math.round(f.joinWaitMs) } : null,
       reach: r ? { slider: r.reach, inForce: Math.round(r.inForce), fogReach: Number.isFinite(r.fogReach) ? Math.round(r.fogReach) : null, fogDensity: (this.scene.fog as THREE.FogExp2 | null)?.density ?? null, lod0: Math.round(r.lod0), levels: r.levels, skyRadius: r.skyRadius, far: r.far } : null,
@@ -14068,6 +14084,8 @@ export class World {
       this.applyPaintWeights(false);
       if (this.chunks.size) this.rebuildGround();
     } else if (washMoved && !swg) this.rewriteAllGround();
+    // The far ground composed again under the row's switches as they now stand (the horizon's third wave).
+    if (sw.moved || childrenMoved || weightsMoved) this.horizonField?.retune();
   }
 
   /**

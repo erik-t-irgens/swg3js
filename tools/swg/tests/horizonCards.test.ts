@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { HORIZON_RING_FUNCTIONS, HORIZON_RING_VERTEX, patchGeometry } from '../../../src/world/horizon/horizonRings.ts';
 import * as THREE from 'three';
 import { HORIZON_TUNE, LEAF, PATCH, RingHole, newReachRules, newRingSurface, reachRules, ringCardSurface, ringHoleMoved, ringSurfaceAt, type BakeGrid } from '../../../src/world/horizon/horizonMath.ts';
-import { HorizonField } from '../../../src/world/horizon/horizonField.ts';
+import { HorizonField, heightsAtlas } from '../../../src/world/horizon/horizonField.ts';
 import { CHUNK_TREES, FarCards, grassMaterial, type GrassHost } from '../../../src/world/grass.ts';
 import { FAR_CARD_DEFAULTS, candidateCapacity, farReach, placeFarCards, placeStats, tuftBuffers, type GrassSource, type GrassWorld } from '../../../src/world/grassMath.ts';
 import { readRadialFile } from '../../../src/swg/terrain/radialFile.ts';
@@ -63,12 +63,13 @@ const V = glslFunctions(vertexFn, ['ringVertexMain', 'outX', 'outY', 'outZ'], {
   vec3: (x: number, y: number, z: number) => ({ x, y, z }),
   length: (v: { x: number; y: number }) => Math.hypot(v.x, v.y),
   log2: Math.log2,
-  texelFetch: (t: { g: BakeGrid }, p: { x: number; y: number }) => ({ r: t.g.h[p.y * t.g.nx + p.x] }),
+  exp2: (x: number) => 2 ** x,
+  // The heights atlas as the field makes it (the fine's rows, then the coarse's), read by texelFetch as the card does.
+  texelFetch: (t: { w: number; h: Float32Array }, p: { x: number; y: number }) => ({ r: t.h[p.y * t.w + p.x] }),
   uHorizonFine: { x: fineV.x0, y: fineV.z0, z: 8, w: 0 },
-  uHorizonCoarse: { x: coarseV.x0, y: coarseV.z0, z: 64, w: 0 },
+  uHorizonCoarse: { x: coarseV.x0, y: coarseV.z0, z: 64, w: 3 },
   uHorizonSizes: { x: fineV.nx, y: fineV.nz, z: coarseV.nx, w: coarseV.nz },
-  uHorizonFineH: { g: fineV },
-  uHorizonCoarseH: { g: coarseV },
+  uHorizonHeights: { w: Math.max(fineV.nx, coarseV.nx), h: heightsAtlas(fineV.h, fineV.nx, fineV.nz, coarseV.h, coarseV.nx, coarseV.nz) },
   uHorizonEye: eye,
   uHorizonSquare: square,
   uHorizonMorph: morph,

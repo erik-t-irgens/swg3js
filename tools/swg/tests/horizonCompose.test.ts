@@ -2,7 +2,8 @@
 // one family its layer's mean outright, a tile of more looked up in the world's memo by its signature -- held to a slow
 // mirror that composes every tile at sixteen places through `composeTile` with the masks, no memo and no fast path, on
 // 2,000 random cells of a stand-in field (families in patches, so tiles of two to four families are common), within a
-// level of sRGB; and the detail window's texels against each tile's greatest share at its middle. The tables are a
+// level of sRGB; and (the third wave) the composition window's texels against the chunk builder's own rule over every tile,
+// its tint window against the colour cells, and a window moved by strips against one made whole. The tables are a
 // stand-in's (the packs' own pictures are PNGs node does not decode); the rule is the tile program's own (`tileLayers`).
 //
 // Run: node tools/swg/tests/horizonCompose.test.ts
@@ -11,7 +12,7 @@ import { deflateSync } from 'node:zlib';
 import { childChoiceAt } from '../../../src/swg/terrain/generator.ts';
 import { composeTile, srgbEncode } from '../../../src/world/groundMath.ts';
 import { tileLayers, type GroundTiler } from '../../../src/world/groundTiles.ts';
-import { ALBEDO_SCALE, DETAIL_SIZE, TileComposer, composeAlbedo, decodeBake, detailWindow, encByte, layerMeans, maskSampler, type TileTables } from '../../../src/world/horizon/horizonDecode.ts';
+import { ALBEDO_SCALE, TileComposer, composeAlbedo, decodeBake, encByte, freshRects, layerMeans, maskSampler, normalsOf, tintRect, unpackWindow, wholeWindow, windowPlace, windowRect, windowTiles, wrapPieces, type TileTables } from '../../../src/world/horizon/horizonDecode.ts';
 import { HORIZON_FORMAT, HORIZON_SECTIONS, encodeHeights, planBake, readHorizonHeader, sectionSize, type HorizonHeader } from '../../../src/world/horizon/horizonFile.ts';
 import { LEAF, bakeHeightAt } from '../../../src/world/horizon/horizonMath.ts';
 import { tileTablesOf } from '../../../src/world/horizon/horizonField.ts';
@@ -197,35 +198,90 @@ ok(fast.rgba.every((v, k) => k % 4 !== 3 || v === 0), 'the alpha is nought every
   ok(bad === 0 && comp.memoSize > 4096, `the memo's table grown to ${comp.memoSize} signatures answers each as composed`);
 }
 
-// The detail window: each tile's own layer, the greatest share at its middle.
-const win = detailWindow(t, header, fam, 0, 0);
-let wrong = 0;
-let tiles = 0;
-const winners = [0, 0, 0, 0];
-for (let tz = -600; tz < 600; tz += 4) for (let tx = -600; tx < 600; tx += 4) {
-  tiles++;
-  fams[0] = famFirst(tx, tz);
-  fams[1] = famFirst(tx + 4, tz);
-  fams[2] = famFirst(tx, tz + 4);
-  fams[3] = famFirst(tx + 4, tz + 4);
-  choices[0] = childChoiceAt(tx, tz);
-  choices[1] = childChoiceAt(tx + 4, tz);
-  choices[2] = childChoiceAt(tx, tz + 4);
-  choices[3] = childChoiceAt(tx + 4, tz + 4);
-  const count = tileLayers(fams, choices, tiler, layers, codes);
-  weights.fill(0);
-  composeTile((_i, o) => (o[0] = 0), codes, 0.5, 0.5, sample, false, true, one, weights);
-  const share = [(1 - weights[0]) * (1 - weights[1]) * (1 - weights[2]), weights[0] * (1 - weights[1]) * (1 - weights[2]), weights[1] * (1 - weights[2]), weights[2]];
-  let best = 0;
-  for (let k = 1; k < count; k++) if (share[k] > share[best]) best = k;
-  const m = (v: number) => ((v % DETAIL_SIZE) + DETAIL_SIZE) % DETAIL_SIZE;
-  winners[best]++;
-  if (win[m(tz / 4) * DETAIL_SIZE + m(tx / 4)] !== layers[best]) {
-    if (!wrong) console.log(`first wrong at ${tx},${tz}: window ${win[m(tz / 4) * DETAIL_SIZE + m(tx / 4)]}, want ${layers[best]} of ${[...layers.slice(0, count)]}, shares ${share.map((v) => v.toFixed(3))}, codes ${[...codes]}`);
-    wrong++;
+// ---------------------------------------------------------------- the composition window (the third wave)
+// Every tile's texel holds what the near ground's chunk builder writes for it: `tileLayers` over its four corner poles'
+// families (the pattern corner by the tie rule written out here) and choices (the place's hash), all four layers and the
+// three codes, and how many layers it holds; placed toroidally by its index.
+{
+  const place = windowPlace(-12, 30, 320, header.colour);
+  const w = wholeWindow(t, header, fam, colour, [], [], place);
+  let wrong = 0;
+  let tiles = 0;
+  const counts = [0, 0, 0, 0, 0];
+  const got = [0, 0, 0, 0];
+  const gotCodes = [0, 0, 0];
+  const S = place.S;
+  const m = (v: number) => ((v % S) + S) % S;
+  for (let b = 0; b < S; b++) {
+    for (let a = 0; a < S; a++) {
+      const ix = place.ox + a;
+      const iz = place.oz + b;
+      const tx = ix * 4;
+      const tz = iz * 4;
+      fams[0] = famFirst(tx, tz);
+      fams[1] = famFirst(tx + 4, tz);
+      fams[2] = famFirst(tx, tz + 4);
+      fams[3] = famFirst(tx + 4, tz + 4);
+      choices[0] = childChoiceAt(tx, tz);
+      choices[1] = childChoiceAt(tx + 4, tz);
+      choices[2] = childChoiceAt(tx, tz + 4);
+      choices[3] = childChoiceAt(tx + 4, tz + 4);
+      const count = tileLayers(fams, choices, tiler, layers, codes);
+      const n2 = unpackWindow(w.window, (m(iz) * S + m(ix)) * 4, got, gotCodes);
+      tiles++;
+      counts[count]++;
+      if (n2 !== count || got.some((v, k) => v !== layers[k]) || gotCodes.some((v, k) => v !== codes[k])) {
+        if (!wrong) console.log(`first wrong at ${tx},${tz}: window ${got}/${gotCodes}/${n2}, want ${[...layers]}/${[...codes]}/${count}`);
+        wrong++;
+      }
+    }
   }
+  ok(wrong === 0 && counts[2] > 0 && counts[3] > 0 && counts[4] > 0, `the composition window holds every tile's layers, codes and count as the chunk builder's own rule works them (${tiles} tiles; ${counts.slice(1).join(', ')} of one to four layers)`);
+  // The tint window: each colour cell's bytes at its toroidal texel, a cell past the lattice its nearest.
+  let tintWrong = 0;
+  const T = place.T;
+  const mt = (v: number) => ((v % T) + T) % T;
+  for (let b = 0; b < T; b++) {
+    for (let a = 0; a < T; a++) {
+      const ci = Math.min(n - 1, Math.max(0, place.ci0 + a));
+      const cj = Math.min(n - 1, Math.max(0, place.cj0 + b));
+      const o = (mt(place.cj0 + b) * T + mt(place.ci0 + a)) * 4;
+      for (let k = 0; k < 3; k++) if (w.tint[o + k] !== colour[(cj * n + ci) * 3 + k]) tintWrong++;
+      if (w.tint[o + 3] !== 255) tintWrong++;
+    }
+  }
+  ok(tintWrong === 0, `the tint window holds every colour cell's own bytes (${T * T} cells)`);
+  // Every place a bilinear inside the window reads has its two cells each way inside the tint window.
+  const c0 = (place.ox * 4 - header.colour.x0) / 8;
+  const c1 = ((place.ox + S) * 4 - header.colour.x0) / 8;
+  ok(Math.floor(c0) >= place.ci0 && Math.floor(c1 - 1e-9) + 1 < place.ci0 + T, `the tint window reaches every cell a bilinear inside the window reads (cells ${place.ci0}..${place.ci0 + T - 1} for ${c0}..${c1})`);
+  // Strips: a window moved by strips (the columns and rows gained, put where they wrap) is the window made whole at its new place.
+  let moved = 0;
+  let stripWrong = 0;
+  const cur = { place: { ...place }, win: w.window.slice(), tint: w.tint.slice() };
+  const comp = new TileComposer(t, fam, ground);
+  for (const [dx, dz] of [[7, 0], [0, -9], [40, 33], [-71, 12], [-5, -3], [400, 1], [0, 0], [-319, 319]]) {
+    const np = windowPlace((cur.place.ox + S / 2 + dx) * 4 + 1, (cur.place.oz + S / 2 + dz) * 4 + 2, S, header.colour);
+    for (const r of freshRects(cur.place.ox, cur.place.oz, np.ox, np.oz, S)) {
+      const data = windowRect(comp, r);
+      for (const p of wrapPieces(r, S)) for (let z = 0; z < p.h; z++) for (let x = 0; x < p.w; x++) for (let k = 0; k < 4; k++) cur.win[((p.dz + z) * S + p.dx + x) * 4 + k] = data[((p.sz + z) * r.w + p.sx + x) * 4 + k];
+    }
+    for (const r of freshRects(cur.place.ci0, cur.place.cj0, np.ci0, np.cj0, T)) {
+      const data = tintRect(colour, header.colour, [], r);
+      for (const p of wrapPieces(r, T)) for (let z = 0; z < p.h; z++) for (let x = 0; x < p.w; x++) for (let k = 0; k < 4; k++) cur.tint[((p.dz + z) * T + p.dx + x) * 4 + k] = data[((p.sz + z) * r.w + p.sx + x) * 4 + k];
+    }
+    cur.place = { ...np };
+    const whole = wholeWindow(t, header, fam, colour, [], [], np);
+    for (let k = 0; k < whole.window.length; k++) if (whole.window[k] !== cur.win[k]) stripWrong++;
+    for (let k = 0; k < whole.tint.length; k++) if (whole.tint[k] !== cur.tint[k]) stripWrong++;
+    moved++;
+  }
+  ok(stripWrong === 0, `a window moved by its strips is the window made whole where it now stands, byte for byte (${moved} moves, a step, a jump past the window, both ways and none)`);
+  ok(freshRects(0, 0, 0, 0, 64).length === 0 && freshRects(0, 0, 64, 0, 64).length === 1 && freshRects(0, 0, 3, -2, 64).reduce((a, r) => a + r.w * r.h, 0) === 64 * 64 - 61 * 62, 'the rectangles a move gains are none for none, the whole window past it, and exactly the tiles gained otherwise');
+  ok(wrapPieces({ x0: -3, z0: 62, w: 6, h: 5 }, 64).reduce((a, p) => a + p.w * p.h, 0) === 30 && wrapPieces({ x0: -3, z0: 62, w: 6, h: 5 }, 64).length === 4, 'a rectangle across both of a toroidal texture\'s seams lands in four pieces, every texel once');
+  // The window's side for the ground detail distance: the distance and its slack each way, whole multiples of 64 tiles.
+  ok(windowTiles(1200) === 896 && windowTiles(2500) === 1536 && windowTiles(5000) === 2816 && windowTiles(0) === 256, `the window's side for 1.2, 2.5 and 5 km is ${windowTiles(1200)}, ${windowTiles(2500)} and ${windowTiles(5000)} tiles`);
 }
-ok(wrong === 0 && winners[1] > 0 && winners[2] > 0 && winners[3] > 0, `the detail window holds each tile's layer of the greatest share at its middle (${tiles} tiles; the base and the three overlays win ${winners.join(', ')})`);
 
 // ---------------------------------------------------------------- the whole decode on a made bake
 // A small bake laid out by `planBake` about an odd centre (both of the ground's shifts one), its heights a known field that
@@ -359,7 +415,8 @@ ok(wrong === 0 && winners[1] > 0 && winners[2] > 0 && winners[3] > 0, `the detai
   // The normals against the known field's slope in the game's frame (game x runs against raw x), one step either side.
   const hg = (gx: number, gz: number) => hRaw(centre.x - gx, gz + centre.z);
   let worstN = 0;
-  for (const [lat, nm] of [[header.fine, d.fineNormal], [header.coarse, d.coarseNormal]] as const) {
+  // (The coarse lattice's are worked out in the ring's vertex stage by normalsOf's arithmetic, which horizonShaders holds to it.)
+  for (const [lat, nm] of [[header.fine, d.fineNormal], [header.coarse, normalsOf(d.coarse, header.coarse)]] as const) {
     for (let s = 0; s < 3000; s++) {
       const i = 1 + Math.floor(rnd() * (lat.nx - 2));
       const j = 1 + Math.floor(rnd() * (lat.nz - 2));

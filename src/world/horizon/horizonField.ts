@@ -13,7 +13,7 @@ import { COLOUR_MODES } from '../groundTiles.ts';
 import { groundTileUniforms, type GroundTileUniforms } from '../terrainTextures.ts';
 import type { CourseCarve } from '../../swg/terrain/courseCarve.ts';
 import type { HeightEdits } from '../../swg/terrain/heightEdits.ts';
-import { DETAIL_SIZE, DETAIL_TILE, layerMeans, normalsRect, pyramidRelay, type DecodedBake, type RgbaRegion, type TileTables } from './horizonDecode.ts';
+import { DETAIL_TILE, STRIP_TILES, clipRect, freshRects, layerMeans, normalsRect, poleTiles, pyramidRelay, windowPlace, windowTiles, wrapPieces, type DecodedBake, type IndexRect, type RgbaRegion, type TileTables, type WindowPlace } from './horizonDecode.ts';
 import { HORIZON_BIN, HORIZON_JSON, readHorizonHeader, type HorizonHeader } from './horizonFile.ts';
 import { HORIZON_TUNE, HORIZON_VIEWS, HoleGrid, LEAF, RingSelector, cameraFrustum, newReachRules, newRingSurface, reachRules, ringSurfaceAt, type MinMaxPyramid, type ReachRules, type RingAsk, type RingSurface } from './horizonMath.ts';
 import { HeightOverlay, REGEN_STEP, overridesOf, regenPlan, samplesIn, type RawRect, type SampleRect } from './horizonOverlay.ts';
@@ -74,8 +74,71 @@ export interface FieldGround {
   /** The colour array and the bump array as the tile program samples them (the detail band's taps). */
 }
 
-/** The tables the decode worker composes the albedo from, made from the world's tiler and arrays. */
-export function tileTablesOf(g: FieldGround): TileTables {
+/**
+ * Every how many texels each way a layer's mean is read off the tile arrays' own pixels: two (the third wave's self test
+ * found every fourth texel left one layer of Tatooine's three levels off the card's own top mip).
+ */
+export const MEANS_STRIDE = 2;
+
+/**
+ * How many levels of sRGB the card's own top mip may stand off a layer's exact mean: the card rounds each level of its
+ * sRGB chain to a byte, which leaves it three levels off on one of Tatooine's 38 layers (the third wave's measurement,
+ * both backends); every other layer stood within the design's two.
+ */
+export const MEANS_CARD_MOST = 3;
+
+/** A linear value as an sRGB byte (the self test's own: the card's top mip and the means compared as levels). */
+function srgbLevel(v: number): number {
+  return Math.round(255 * (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(Math.max(v, 0), 1 / 2.4) - 0.055));
+}
+
+/**
+ * The self test's verdict on the layer means, anchored to the card (the review round: held only against themselves, a
+ * fault inside `layerMeans` moved both and still passed): every layer's exact mean (every texel, `exact`) and the means
+ * the albedo is composed from (`means`, every other texel) each within `MEANS_CARD_MOST` levels of the card's own top mip
+ * (`card`, RGBA a layer). `overTwo` names the layers past the design's two, the card's rounding cases; `strideWorst` says
+ * what reading every other texel cost, for the record.
+ */
+export function meansVerdict(card: Float32Array, means: Float32Array, exact: Float32Array, depth: number): { within: boolean; worstLevels: number; worstLayer: number; exactWorst: number; strideWorst: number; overTwo: number[] } {
+  let worstLevels = 0;
+  let worstLayer = -1;
+  let exactWorst = 0;
+  let strideWorst = 0;
+  const overTwo: number[] = [];
+  for (let l = 0; l < depth; l++) {
+    let layerWorst = 0;
+    for (let c = 0; c < 3; c++) {
+      const k = srgbLevel(card[l * 4 + c]);
+      const m = srgbLevel(means[l * 3 + c]);
+      const e = srgbLevel(exact[l * 3 + c]);
+      layerWorst = Math.max(layerWorst, Math.abs(k - m));
+      exactWorst = Math.max(exactWorst, Math.abs(k - e));
+      strideWorst = Math.max(strideWorst, Math.abs(m - e));
+    }
+    if (layerWorst > worstLevels) {
+      worstLevels = layerWorst;
+      worstLayer = l;
+    }
+    if (layerWorst > 2) overTwo.push(l);
+  }
+  const within = depth > 0 && exactWorst <= MEANS_CARD_MOST && worstLevels <= MEANS_CARD_MOST;
+  return { within, worstLevels, worstLayer, exactWorst, strideWorst, overTwo };
+}
+
+/**
+ * The ground knobs the tile tables read (`tileTablesOf`: the tint's mode and gain cap, the opposite rule, the masks, and
+ * through the tiler the order, the children and their corner), as one key: a console's ground knob asks the far ground to
+ * compose again only when this moved (a view, the shine, the clouds or the way round move none of what it composes).
+ */
+export function tableKnobs(t: typeof GROUND_DRAW_TUNE = GROUND_DRAW_TUNE): string {
+  return `${t.colour}|${t.gainCap}|${t.opposite}|${t.masks}|${t.order}|${t.children}|${t.childCorner.join()}`;
+}
+
+/**
+ * The tables the decode worker composes the albedo from, made from the world's tiler and arrays; `means` handed in where
+ * they were worked out already (a retune: no knob moves the arrays' pixels, so the load's means stand).
+ */
+export function tileTablesOf(g: FieldGround, means: Float32Array = layerMeans(g.colour, g.size, g.depth, MEANS_STRIDE)): TileTables {
   const layerOf = new Uint8Array(256 * 256);
   const rankOf = new Float64Array(256);
   for (let f = 0; f < 256; f++) {
@@ -86,7 +149,7 @@ export function tileTablesOf(g: FieldGround): TileTables {
     layerOf,
     rankOf,
     corners: [...g.tiler.corners],
-    means: layerMeans(g.colour, g.size, g.depth),
+    means,
     masks: g.masks,
     ms: g.ms,
     tintMode: Math.max(0, COLOUR_MODES.indexOf(GROUND_DRAW_TUNE.colour)),
@@ -110,6 +173,46 @@ function dataTex(data: ArrayBufferView, w: number, h: number, format: THREE.Pixe
     t.generateMipmaps = false;
   }
   if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  t.needsUpdate = true;
+  return t;
+}
+
+/**
+ * The heights atlas the ring's vertex stage reads with `texelFetch` (the third wave's sampler budget): the fine lattice's
+ * rows from row nought, the coarse lattice's after them, each from column nought, so a fine rectangle put on the card later
+ * lands at its own indices (`heightsMoved`).
+ */
+export function heightsAtlas(fine: Float32Array, fnx: number, fnz: number, coarse: Float32Array, cnx: number, cnz: number): Float32Array {
+  const w = Math.max(fnx, cnx);
+  const out = new Float32Array(w * (fnz + cnz));
+  for (let j = 0; j < fnz; j++) out.set(fine.subarray(j * fnx, (j + 1) * fnx), j * w);
+  for (let j = 0; j < cnz; j++) out.set(coarse.subarray(j * cnx, (j + 1) * cnx), (fnz + j) * w);
+  return out;
+}
+
+/** A texture's own array let go once it is on the card (its size kept, for the uploads and the console). */
+function letGo(t: THREE.DataTexture): void {
+  t.image = { width: t.image.width, height: t.image.height, data: null } as never;
+}
+
+/** The composition window's texture: RGBA16UI, `S` a side, read by `texelFetch` alone. */
+function windowTex(data: Uint16Array, S: number): THREE.DataTexture {
+  const t = new THREE.DataTexture(data as never, S, S, THREE.RGBAIntegerFormat, THREE.UnsignedShortType);
+  t.internalFormat = 'RGBA16UI';
+  t.unpackAlignment = 1;
+  t.minFilter = t.magFilter = THREE.NearestFilter;
+  t.generateMipmaps = false;
+  t.needsUpdate = true;
+  return t;
+}
+
+/** The tint window's texture: the colour map's bytes as they stand (no colour space), filtered between cell centres, wrapping. */
+function tintTex(data: Uint8Array, T: number): THREE.DataTexture {
+  const t = new THREE.DataTexture(data as never, T, T, THREE.RGBAFormat, THREE.UnsignedByteType);
+  t.unpackAlignment = 1;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.minFilter = t.magFilter = THREE.LinearFilter;
+  t.generateMipmaps = false;
   t.needsUpdate = true;
   return t;
 }
@@ -161,6 +264,30 @@ export type FieldState = { state: 'none'; why: string } | { state: 'refused'; wh
  */
 export const DECODE_WAIT_MS = 60000;
 
+/** How many times a composition window ask that failed in the worker is asked again before the field gives it up [ours]. */
+export const WINDOW_RETRIES = 3;
+/** The kinds of window ask (`windowKind`). */
+const ASK_STRIP = 1;
+const ASK_WHOLE = 2;
+const ASK_RETUNE = 3;
+
+/** What the decode worker answers (`horizonDecodeWorker.ts`), every kind's fields optional. */
+interface WorkerAnswer {
+  type: string;
+  id?: number;
+  d?: DecodedBake;
+  message?: string;
+  place?: WindowPlace;
+  window?: Uint16Array;
+  tint?: Uint8Array;
+  tileRects?: IndexRect[];
+  cellRects?: IndexRect[];
+  tiles?: Uint16Array[];
+  cells?: Uint8Array[];
+  albedo?: Uint8Array;
+  coarseAlbedo?: Uint8Array;
+}
+
 /** The dome's uniforms the ring's horizon fade reads (`SwgSky.domeUniforms`). */
 export type DomeUniforms = Readonly<Record<'uGradient' | 'uGradient2' | 'uGradientMix' | 'uTime' | 'uHasGradient' | 'uHasGradient2' | 'uClear' | 'uHorizonFog', THREE.IUniform>>;
 
@@ -185,14 +312,26 @@ export class HorizonField {
   state: FieldState = { state: 'loading' };
   pyramid: MinMaxPyramid | null = null;
   readonly textures: THREE.DataTexture[] = [];
-  fine: THREE.DataTexture | null = null;
-  coarse: THREE.DataTexture | null = null;
-  private detailTex: THREE.DataTexture | null = null;
-  private means: THREE.DataTexture | null = null;
+  /** The heights atlas (the fine lattice's rows, then the coarse's), the fine normals, the two albedos. */
+  heights: THREE.DataTexture | null = null;
+  private fineN: THREE.DataTexture | null = null;
+  private albedo: THREE.DataTexture | null = null;
+  private coarseAlbedo: THREE.DataTexture | null = null;
+  /** The composition window and its tint window (the third wave), and where they stand on the card. */
+  private winTex: THREE.DataTexture | null = null;
+  private tintTex: THREE.DataTexture | null = null;
+  readonly place: WindowPlace = { ox: 0, oz: 0, S: 0, ci0: 0, cj0: 0, T: 0 };
+  /**
+   * A window asked of the worker and not yet answered (a strip, a whole one, a retune), by id: one at a time. The window
+   * asks take the even ids and the overlays the odd ones past the decode's 1 (the review round: counted from 3 and 10, a
+   * window's error past its seventh ask was read as an overlay's, and the window never asked again).
+   */
+  private windowAsked = 0;
+  private nextWindow = 2;
+  /** The window's counts for the console: strips made, wholes made, texels uploaded by strips, the last strip's worker time. */
+  readonly windowWork = { strips: 0, wholes: 0, retunes: 0, texels: 0, takeMs: 0, stripMs: 0 };
+  private session: RingSession | null = null;
   private worker: Worker | null = null;
-  /** The detail window's middle (raw x, raw z) and whether a new one is asked (a kept array: no object field takes a number). */
-  private readonly detailAt = new Float64Array([NaN, NaN]);
-  private detailAsked = false;
   /** Let go (`dispose`): a load still on its way stops at its next step and binds nothing. */
   disposed = false;
   /** The selection timed for the console (`horizon()` asks): off until asked, a clock read being a number made. */
@@ -226,13 +365,38 @@ export class HorizonField {
   private coarseH: Float32Array | null = null;
   private overlay: HeightOverlay | null = null;
   private renderer: THREE.WebGLRenderer | null = null;
+  /** The world's ground the tables are made from (its tiler is refreshed in place), for a retune. */
+  private ground: FieldGround | null = null;
+  /** The window made again whole at the next chance (a whole window that failed), and the tables made again (a ground knob moved). */
+  private windowStale = false;
+  private retuneWanted = false;
+  /** The kind of the window ask in flight (`ASK_STRIP`, `ASK_WHOLE`, `ASK_RETUNE`): what a failure of it asks for again. */
+  private windowKind = 0;
+  /** Window asks failed since one last landed: each asked again, up to `WINDOW_RETRIES`, then given up (a note) until a new cause. */
+  private windowFails = 0;
+  /**
+   * The window's tiles and the tint window's cells a regenerate made again (index space, unclipped), waiting for the next
+   * ask: a strip makes them again where the window holds them (a whole window or a retune makes everything). The first
+   * `regenSent` of them went with the ask in flight and are struck off when it lands; one that fails leaves them waiting.
+   */
+  private readonly regenTiles: IndexRect[] = [];
+  private readonly regenCells: IndexRect[] = [];
+  private regenSent = 0;
+  /** The layer means the load's tables read, kept: no knob moves the arrays' pixels, so a retune reuses them. */
+  private means: Float32Array | null = null;
+  /** Where the next window is asked to stand (kept: a frame that asks none makes nothing). */
+  private readonly nextPlace: WindowPlace = { ox: 0, oz: 0, S: 0, ci0: 0, cj0: 0, T: 0 };
+  /** The eye's raw place a frame, the distance last read and the window's side for it (fields: a frame hands no number across a call). */
+  private readonly eyeRaw = new Float64Array(2);
+  private reachSeen = 0.5;
+  private wantS = 0;
   /** What the ring's surface reads (the far cards', `ringSurfaceAt`): the lattices over the laid heights, the square and the drop. */
   readonly surface: RingSurface = newRingSurface();
   /** The overlays so far, for the console (W2). */
   readonly overlays = { tilesLaid: 0, layMs: 0, late: 0, regenAsked: 0, regenDone: 0, regenFailed: 0, cellsMade: 0, uploads: 0, landedInPlay: 0 };
   /** The worker's answers to the overlays by id. */
   private readonly overlayWait = new Map<number, (r: { fine: RgbaRegion; coarse: RgbaRegion } | null) => void>();
-  private nextOverlay = 10;
+  private nextOverlay = 3;
   constructor(world: string, centre: { x: number; z: number }, shift: GroundShift) {
     this.world = world;
     this.centre = centre;
@@ -270,8 +434,10 @@ export class HorizonField {
     this.fetchMs = performance.now() - t0;
     const tm = performance.now();
     const tables = tileTablesOf(ground);
+    this.means = tables.means;
     this.mainMs = performance.now() - tm;
     const td = performance.now();
+    this.ground = ground;
     const d = await this.decode(read.header, bin, tables, eye);
     this.decodeWallMs = performance.now() - td;
     if (!d || this.disposed) return false;
@@ -290,32 +456,21 @@ export class HorizonField {
     // The owner's heights and the drawn courses laid over the bake before anything is uploaded (§2.3: before the first ring
     // is drawn), each tile's normals and leaves made again from the laid heights.
     if (stores) this.layHeights(stores, d.fineNormal);
-    const fine = (this.fine = dataTex(d.fine, h.fine.nx, h.fine.nz, THREE.RedFormat, THREE.FloatType, false));
-    const coarse = (this.coarse = dataTex(d.coarse, h.coarse.nx, h.coarse.nz, THREE.RedFormat, THREE.FloatType, false));
-    const fn = dataTex(d.fineNormal, h.fine.nx, h.fine.nz, THREE.RGFormat, THREE.UnsignedByteType, true);
-    const cn = dataTex(d.coarseNormal, h.coarse.nx, h.coarse.nz, THREE.RGFormat, THREE.UnsignedByteType, true);
-    const al = dataTex(d.albedo, h.colour.nx, h.colour.nz, THREE.RGBAFormat, THREE.UnsignedByteType, true, true);
-    const cal = dataTex(d.coarseAlbedo, h.coarse.nx, h.coarse.nz, THREE.RGBAFormat, THREE.UnsignedByteType, true, true);
-    const detail = (this.detailTex = dataTex(d.detail, DETAIL_SIZE, DETAIL_SIZE, THREE.RedFormat, THREE.UnsignedByteType, false));
-    const mf = new Float32Array(256 * 4);
-    for (let l = 0; l < 256; l++) {
-      mf[l * 4] = tables.means[l * 3];
-      mf[l * 4 + 1] = tables.means[l * 3 + 1];
-      mf[l * 4 + 2] = tables.means[l * 3 + 2];
-      mf[l * 4 + 3] = 1;
-    }
-    const means = (this.means = dataTex(mf, 256, 1, THREE.RGBAFormat, THREE.FloatType, false));
-    this.textures.push(fine, coarse, fn, cn, al, cal, detail, means);
-    this.detailAt[0] = this.centre.x - eye.x;
-    this.detailAt[1] = eye.z + this.centre.z;
+    const heights = (this.heights = dataTex(heightsAtlas(d.fine, h.fine.nx, h.fine.nz, d.coarse, h.coarse.nx, h.coarse.nz), Math.max(h.fine.nx, h.coarse.nx), h.fine.nz + h.coarse.nz, THREE.RedFormat, THREE.FloatType, false));
+    const fn = (this.fineN = dataTex(d.fineNormal, h.fine.nx, h.fine.nz, THREE.RGFormat, THREE.UnsignedByteType, true));
+    const al = (this.albedo = dataTex(d.albedo, h.colour.nx, h.colour.nz, THREE.RGBAFormat, THREE.UnsignedByteType, true, true));
+    const cal = (this.coarseAlbedo = dataTex(d.coarseAlbedo, h.coarse.nx, h.coarse.nz, THREE.RGBAFormat, THREE.UnsignedByteType, true, true));
+    this.textures.push(heights, fn, al, cal);
     if (renderer) {
       for (const t of this.textures) renderer.initTexture(t);
-      // Let go on the main thread once on the card (the critique's minor 6): the normals and the albedo are the worker's
-      // to make again; the heights stay (Light and shadow's march reads them, §2.8).
-      for (const t of [fn, cn, al, cal]) t.image = { width: t.image.width, height: t.image.height, data: null } as never;
+      // Let go on the main thread once on the card (the critique's minor 6): the normals, the albedo and the windows are
+      // the worker's to make again; the heights' own arrays stay (Light and shadow's march reads them, §2.8), the atlas
+      // put on the card from them is let go too.
+      for (const t of this.textures) letGo(t);
     }
-    this.bind(session);
     this.renderer = renderer;
+    this.bind(session);
+    this.takeWindow(d.place, d.window, d.tint);
     this.mainMs += performance.now() - tu;
     this.state = { state: 'ready' };
     return true;
@@ -367,10 +522,11 @@ export class HorizonField {
       const w = i1 - i0 + 1;
       const hh = j1 - j0 + 1;
       const n = normalsRect(fine, L, i0, j0, i1, j1, new Uint8Array(w * hh * 2), i0, j0, w);
-      this.upload(this.textures[2], n, i0, j0, w, hh, THREE.RGFormat, THREE.UnsignedByteType);
+      if (this.fineN) this.upload(this.fineN, n, i0, j0, w, hh, THREE.RGFormat, THREE.UnsignedByteType);
       const hr = new Float32Array(w * hh);
       for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) hr[(j - j0) * w + (i - i0)] = fine[j * L.nx + i];
-      this.upload(this.textures[0], hr, i0, j0, w, hh, THREE.RedFormat, THREE.FloatType);
+      // The fine lattice's rows stand from the atlas's row nought, column nought: a rectangle lands at its own indices.
+      if (this.heights) this.upload(this.heights, hr, i0, j0, w, hh, THREE.RedFormat, THREE.FloatType);
     }
     if (this.pyramid) {
       const c = this.centre;
@@ -425,19 +581,20 @@ export class HorizonField {
       const ov = overridesOf(h.colour, p, g);
       const answer = await this.overlayAsk(ov.poles, ov.cells, p.i0, p.j0, p.i1, p.j1);
       if (this.disposed) return;
+      // The composition window's tiles the overlay's poles reach and the tint cells it made again, for the next strip (the
+      // review round: never the whole window again, which is a resize's or a retune's). Queued whether or not its albedo
+      // came back, since the worker keeps the overlay's poles and cells from the moment it reads them.
+      this.regenTiles.push(poleTiles(ov.poles));
+      this.regenCells.push({ x0: ov.cells.i0, z0: ov.cells.j0, w: ov.cells.w, h: ov.cells.h });
+      this.windowFails = 0;
       if (!answer) {
         this.overlays.regenFailed++;
         continue;
       }
-      this.upload(this.textures[4], answer.fine.rgba, answer.fine.i0, answer.fine.j0, answer.fine.w, answer.fine.h, THREE.RGBAFormat, THREE.UnsignedByteType, true);
-      this.upload(this.textures[5], answer.coarse.rgba, answer.coarse.i0, answer.coarse.j0, answer.coarse.w, answer.coarse.h, THREE.RGBAFormat, THREE.UnsignedByteType, true);
+      if (this.albedo) this.upload(this.albedo, answer.fine.rgba, answer.fine.i0, answer.fine.j0, answer.fine.w, answer.fine.h, THREE.RGBAFormat, THREE.UnsignedByteType, true);
+      if (this.coarseAlbedo) this.upload(this.coarseAlbedo, answer.coarse.rgba, answer.coarse.i0, answer.coarse.j0, answer.coarse.w, answer.coarse.h, THREE.RGBAFormat, THREE.UnsignedByteType, true);
       this.overlays.regenDone++;
       this.overlays.cellsMade += answer.fine.w * answer.fine.h;
-    }
-    // The detail window made again round where it stands, the painted tiles' own layers in it.
-    if (this.worker && asks.length) {
-      this.detailAsked = true;
-      this.worker.postMessage({ type: 'detail', id: 2, rx: this.detailAt[0], rz: this.detailAt[1] });
     }
   }
 
@@ -445,7 +602,8 @@ export class HorizonField {
   private overlayAsk(poles: unknown, cells: unknown, i0: number, j0: number, i1: number, j1: number): Promise<{ fine: RgbaRegion; coarse: RgbaRegion } | null> {
     const w = this.worker;
     if (!w) return Promise.resolve(null);
-    const id = this.nextOverlay++;
+    const id = this.nextOverlay;
+    this.nextOverlay += 2;
     return new Promise((resolve) => {
       this.overlayWait.set(id, resolve);
       w.postMessage({ type: 'overlay', id, poles, cells, i0, j0, i1, j1 });
@@ -536,8 +694,8 @@ export class HorizonField {
       w.onerror = (e: ErrorEvent) => {
         e.preventDefault?.();
         if (answered) {
-          // The worker gone after the decode: the rings stand, the detail window is no longer made again.
-          this.note = `the decode worker failed (${e.message || 'no word'}): the detail window stays as it is`;
+          // The worker gone after the decode: the rings stand, the composition window is no longer made again.
+          this.note = `the decode worker failed (${e.message || 'no word'}): the composition window stays as it is`;
           if (this.worker === w) this.worker = null;
           this.answerOverlays();
           return;
@@ -546,54 +704,301 @@ export class HorizonField {
       };
       w.onmessageerror = () => fail('the decode worker sent what does not read');
       w.onmessage = (e: MessageEvent) => {
-        const m = e.data as { type: string; id?: number; d?: DecodedBake; detail?: Uint8Array; message?: string; rx?: number; rz?: number };
+        const m = e.data as WorkerAnswer;
         if (m.type === 'decoded' && !answered) {
           answered = true;
           if (timer !== null) clearTimeout(timer);
           resolve(m.d!);
-        } else if (m.type === 'detail' && this.detailTex && m.detail) {
-          (this.detailTex.image as { data: Uint8Array }).data = m.detail;
-          this.detailTex.needsUpdate = true;
-          this.detailAsked = false;
+        } else if ((m.type === 'window' || m.type === 'strip' || m.type === 'retune') && m.id === this.windowAsked) {
+          this.windowAsked = 0;
+          if (!this.disposed) this.windowLanded(m);
         } else if (m.type === 'overlay' && m.id !== undefined) {
           const r = this.overlayWait.get(m.id);
           this.overlayWait.delete(m.id);
           r?.(m as unknown as { fine: RgbaRegion; coarse: RgbaRegion });
         } else if (m.type === 'error') {
-          // An overlay that did not compose keeps the albedo that stands (a note); so does a detail window.
-          if (m.id !== undefined && m.id >= 10) {
+          // An overlay that did not compose keeps the albedo that stands (a note); so does a detail window, which is asked again.
+          if (m.id !== undefined && m.id !== 0 && m.id === this.windowAsked) this.windowFailed(m.message ?? 'no word');
+          else if (m.id !== undefined && this.overlayWait.has(m.id)) {
             const r = this.overlayWait.get(m.id);
             this.overlayWait.delete(m.id);
             r?.(null);
             this.note = `an overlay's albedo was not made again (${m.message})`;
-          } else if (m.id === 2 || answered) this.note = `the detail window was not made again (${m.message})`;
-          else fail(`the bake did not decode (${m.message})`);
+          } else if (answered) {
+            this.note = `the composition window was not made again (${m.message})`;
+          } else fail(`the bake did not decode (${m.message})`);
         }
       };
-      w.postMessage({ type: 'decode', id: 1, header, bin: bin.buffer, tables, centre: this.centre, shift: { x: this.shift.x, z: this.shift.z }, eye: { rx: this.centre.x - eye.x, rz: eye.z + this.centre.z } }, [bin.buffer as ArrayBuffer]);
+      w.postMessage({ type: 'decode', id: 1, header, bin: bin.buffer, tables, centre: this.centre, shift: { x: this.shift.x, z: this.shift.z }, eye: { rx: this.centre.x - eye.x, rz: eye.z + this.centre.z }, S: windowTiles(HORIZON_TUNE.detailReach) }, [bin.buffer as ArrayBuffer]);
     });
   }
 
   /** The world's textures into the session's uniforms (a sampler's value: no program changes). */
   bind(s: RingSession): void {
     const h = this.header;
-    if (!h || !this.fine || !this.coarse) return;
+    if (!h || !this.heights || !this.fineN || !this.albedo || !this.coarseAlbedo) return;
+    this.session = s;
     const u = s.uniforms;
-    const [fine, coarse, fn, cn, al, cal, detail, means] = this.textures;
-    u.uHorizonFineH.value = fine;
-    u.uHorizonCoarseH.value = coarse;
-    u.uHorizonFineN.value = fn;
-    u.uHorizonCoarseN.value = cn;
-    u.uHorizonAlbedo.value = al;
-    u.uHorizonCoarseAlbedo.value = cal;
-    u.uHorizonDetail.value = detail;
-    u.uHorizonMeans.value = means;
+    u.uHorizonHeights.value = this.heights;
+    u.uHorizonFineN.value = this.fineN;
+    u.uHorizonAlbedo.value = this.albedo;
+    u.uHorizonCoarseAlbedo.value = this.coarseAlbedo;
+    this.bindWindow();
     u.uHorizonFine.value.set(h.fine.x0, h.fine.z0, h.fine.step, ringMipOffset(h.fine.step));
     u.uHorizonCoarse.value.set(h.coarse.x0, h.coarse.z0, h.coarse.step, ringMipOffset(h.coarse.step));
     u.uHorizonColour.value.set(h.colour.x0, h.colour.z0, h.colour.step, 0);
     u.uHorizonSizes.value.set(h.fine.nx, h.fine.nz, h.coarse.nx, h.coarse.nz);
     u.uHorizonColourN.value.set(h.colour.nx, h.colour.nz, 0, 0);
     u.uHorizonGrid.value.set(this.shift.x, this.shift.z, 0, 0);
+  }
+
+  // ---------------------------------------------------------------- the third wave: the composition window
+
+  /** The window's textures and where they stand into the session's uniforms (a sampler's value and two vectors: no program changes). */
+  private bindWindow(): void {
+    const s = this.session;
+    if (!s || !this.winTex || !this.tintTex) return;
+    const u = s.uniforms;
+    const p = this.place;
+    u.uHorizonWindow.value = this.winTex;
+    u.uHorizonTint.value = this.tintTex;
+    u.uHorizonWin.value.set(p.ox, p.oz, p.S, p.T);
+    u.uHorizonWinC.value.set(p.ci0, p.cj0, 0, 0);
+  }
+
+  /**
+   * A whole window put on the card where it stands (the decode's, a resize's, a remake's, a retune's): into the textures it
+   * has where their sizes hold, else into new ones (the old disposed once the new are bound), then bound.
+   */
+  private takeWindow(p: WindowPlace, window: Uint16Array, tint: Uint8Array): void {
+    const t0 = performance.now();
+    const old = [this.winTex, this.tintTex];
+    if (this.winTex && this.tintTex && this.place.S === p.S && this.place.T === p.T) {
+      this.winTex.image = { data: window, width: p.S, height: p.S } as never;
+      this.winTex.needsUpdate = true;
+      this.tintTex.image = { data: tint, width: p.T, height: p.T } as never;
+      this.tintTex.needsUpdate = true;
+      old.length = 0;
+    } else {
+      this.winTex = windowTex(window, p.S);
+      this.tintTex = tintTex(tint, p.T);
+    }
+    Object.assign(this.place, p);
+    const r = this.renderer;
+    if (r) {
+      r.initTexture(this.winTex!);
+      r.initTexture(this.tintTex!);
+      letGo(this.winTex!);
+      letGo(this.tintTex!);
+    }
+    this.bindWindow();
+    for (const t of old) t?.dispose();
+    this.windowWork.wholes++;
+    // The main thread's share of putting a whole window on the card (the console's; a whole window is a resize's or a retune's).
+    this.windowWork.takeMs = Math.round((performance.now() - t0) * 10) / 10;
+  }
+
+  /** A rectangle's data put on the card where it wraps round a toroidal texture (`wrapPieces`), its source read by region. */
+  private uploadPieces(dst: THREE.DataTexture, r: IndexRect, data: ArrayBufferView, size: number, format: THREE.PixelFormat, type: THREE.TextureDataType): void {
+    const ren = this.renderer;
+    if (!ren || !r.w || !r.h) return;
+    const src = new THREE.DataTexture(data as never, r.w, r.h, format, type);
+    src.unpackAlignment = 1;
+    const box = new THREE.Box2();
+    const at = new THREE.Vector2();
+    for (const p of wrapPieces(r, size)) {
+      box.min.set(p.sx, p.sz);
+      box.max.set(p.sx + p.w, p.sz + p.h);
+      at.set(p.dx, p.dz);
+      ren.copyTextureToTexture(src, dst, box, at);
+      this.windowWork.texels += p.w * p.h;
+    }
+    src.dispose();
+  }
+
+  /** What the worker answered a window ask with: a strip's rectangles put on the card, or a whole window, then where it now stands. */
+  private windowLanded(m: WorkerAnswer): void {
+    // What went with this ask is made: struck off what waits, and the failures counted afresh.
+    if (this.regenSent) {
+      this.regenTiles.splice(0, this.regenSent);
+      this.regenCells.splice(0, this.regenSent);
+      this.regenSent = 0;
+    }
+    this.windowFails = 0;
+    if (m.type === 'strip' && m.place && m.tileRects && m.cellRects && m.tiles && m.cells && this.winTex && this.tintTex && m.place.S === this.place.S) {
+      const t0 = performance.now();
+      m.tileRects.forEach((r, i) => this.uploadPieces(this.winTex!, r, m.tiles![i], m.place!.S, THREE.RGBAIntegerFormat, THREE.UnsignedShortType));
+      m.cellRects.forEach((r, i) => this.uploadPieces(this.tintTex!, r, m.cells![i], m.place!.T, THREE.RGBAFormat, THREE.UnsignedByteType));
+      Object.assign(this.place, m.place);
+      this.bindWindow();
+      this.windowWork.strips++;
+      this.windowWork.stripMs = Math.round((performance.now() - t0) * 100) / 100;
+      return;
+    }
+    if (m.type === 'retune' && m.albedo && m.coarseAlbedo && this.albedo && this.coarseAlbedo) {
+      // The albedos composed again whole under the ground's knobs as they stand: put on the card whole, mips made again.
+      for (const [t, data] of [[this.albedo, m.albedo], [this.coarseAlbedo, m.coarseAlbedo]] as const) {
+        t.image = { data, width: t.image.width, height: t.image.height } as never;
+        t.needsUpdate = true;
+        if (this.renderer) {
+          this.renderer.initTexture(t);
+          letGo(t);
+        }
+      }
+      this.windowWork.retunes++;
+    }
+    if ((m.type === 'window' || m.type === 'retune') && m.place && m.window && m.tint) this.takeWindow(m.place, m.window, m.tint);
+  }
+
+  /**
+   * The window asked of the worker, round the eye at the side the ground detail distance in force asks: a retune (the
+   * ground's knobs moved), a whole window (its side moved, or one that failed), or a strip of what the eye's move brought
+   * into it and what a regenerate made again where the window holds it. One ask at a time; a frame that asks nothing
+   * makes nothing.
+   */
+  private askWindow(): void {
+    const w = this.worker;
+    const h = this.header;
+    if (!w || !h || this.windowAsked || !this.place.S) return;
+    // The side the distance in force asks, worked out again only when the distance moved.
+    const reach = HORIZON_TUNE.detailReach;
+    if (reach !== this.reachSeen) {
+      this.reachSeen = reach;
+      this.wantS = windowTiles(reach);
+      // A new side is a new cause: an ask given up is asked again.
+      this.windowFails = 0;
+    }
+    if (this.windowFails > WINDOW_RETRIES) return;
+    const S = this.wantS;
+    const er = this.eyeRaw;
+    // Where the window would stand round the eye (windowPlace's own tiles, written out: a frame that asks nothing makes nothing).
+    const ox = Math.floor(er[0] / DETAIL_TILE) - S / 2;
+    const oz = Math.floor(er[1] / DETAIL_TILE) - S / 2;
+    if (!this.retuneWanted && !this.windowStale && !this.regenTiles.length && S === this.place.S && Math.abs(ox - this.place.ox) <= STRIP_TILES && Math.abs(oz - this.place.oz) <= STRIP_TILES) return;
+    const p = windowPlace(er[0], er[1], S, h.colour, this.nextPlace);
+    if (this.retuneWanted && this.ground) {
+      this.retuneWanted = false;
+      this.windowStale = false;
+      this.regenSent = this.regenTiles.length;
+      this.windowKind = ASK_RETUNE;
+      this.windowAsked = this.nextWindow;
+      this.nextWindow += 2;
+      // The load's means (the review round: no knob moves the arrays' pixels, so only the tiler's tables and the knobs are made again).
+      w.postMessage({ type: 'retune', id: this.windowAsked, tables: tileTablesOf(this.ground, this.means ?? undefined), place: { ...p } });
+      return;
+    }
+    if (S !== this.place.S || this.windowStale) {
+      this.windowStale = false;
+      this.regenSent = this.regenTiles.length;
+      this.windowKind = ASK_WHOLE;
+      this.windowAsked = this.nextWindow;
+      this.nextWindow += 2;
+      w.postMessage({ type: 'window', id: this.windowAsked, place: { ...p } });
+      return;
+    }
+    const tiles = freshRects(this.place.ox, this.place.oz, p.ox, p.oz, S);
+    const cells = freshRects(this.place.ci0, this.place.cj0, p.ci0, p.cj0, p.T);
+    // What a regenerate made again, where the window will hold it (the strip path: never the whole window again).
+    this.regenSent = this.regenTiles.length;
+    for (let i = 0; i < this.regenSent; i++) {
+      clipRect(this.regenTiles[i], p.ox, p.oz, S, tiles);
+      clipRect(this.regenCells[i], p.ci0, p.cj0, p.T, cells);
+    }
+    if (!tiles.length && !cells.length) {
+      // Nothing of it in the window and the eye not moved: struck off with nothing asked.
+      this.regenTiles.length = this.regenCells.length = this.regenSent = 0;
+      return;
+    }
+    this.windowKind = ASK_STRIP;
+    this.windowAsked = this.nextWindow;
+    this.nextWindow += 2;
+    w.postMessage({ type: 'strip', id: this.windowAsked, place: { ...p }, tiles, cells });
+  }
+
+  /**
+   * A window ask the worker could not make (its error naming the ask in flight): the window on the card stands (a note),
+   * and the ask is made again at the next chance -- a retune wanted again, a whole window marked stale, a strip's
+   * regenerated rectangles left waiting (its move asks itself again, the eye still past `STRIP_TILES`) -- up to
+   * `WINDOW_RETRIES` times in a row, then given up until a new cause (a retune, a regenerate, a new side).
+   */
+  private windowFailed(message: string): void {
+    this.windowAsked = 0;
+    this.regenSent = 0;
+    this.windowFails++;
+    const again = this.windowFails <= WINDOW_RETRIES;
+    if (again && this.windowKind === ASK_RETUNE) this.retuneWanted = true;
+    else if (again && this.windowKind === ASK_WHOLE) this.windowStale = true;
+    this.windowKind = 0;
+    this.note = again ? `the composition window was not made again (${message}): asked again (${this.windowFails} of ${WINDOW_RETRIES})` : `the composition window was not made again (${message}): given up after ${WINDOW_RETRIES} tries`;
+  }
+
+  /** The ground's knobs moved (the tint, the masks' switches, the alternates, the order, the corner): the albedo and the window composed again. */
+  retune(): void {
+    if (this.state.state !== 'ready') return;
+    this.retuneWanted = true;
+    this.windowFails = 0;
+  }
+
+  /**
+   * The console's self test (`horizon({ selfTest: true })`): each layer's mean the albedo is composed from (worked out on
+   * the CPU from the arrays' own pixels) against the arrays' own top mip as the card makes it, drawn into a float target a
+   * texel a layer, as sRGB bytes; and the ring program's active samplers as the driver counts them, against its units.
+   * Builds one small program of its own (a self test's, never the game's).
+   */
+  selfTest(renderer: THREE.WebGLRenderer, ground: GroundTileUniforms, material: THREE.Material): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    const g = this.ground;
+    const arr = ground.uGround.value as THREE.DataArrayTexture;
+    const img = arr.image as { width: number; depth: number };
+    if (g && img?.width && img.depth) {
+      const means = layerMeans(g.colour, g.size, g.depth, MEANS_STRIDE);
+      const depth = img.depth;
+      const top = Math.floor(Math.log2(img.width));
+      const target = new THREE.WebGLRenderTarget(depth, 1, { type: THREE.FloatType, format: THREE.RGBAFormat, depthBuffer: false });
+      const mat = new THREE.ShaderMaterial({
+        glslVersion: THREE.GLSL3,
+        uniforms: { uArr: { value: arr }, uTop: { value: top } },
+        vertexShader: 'void main() { gl_Position = vec4( position.xy * 2.0, 0.0, 1.0 ); }',
+        fragmentShader: 'precision highp sampler2DArray;\nuniform sampler2DArray uArr;\nuniform float uTop;\nout vec4 fc;\nvoid main() { fc = vec4( textureLod( uArr, vec3( 0.5, 0.5, floor( gl_FragCoord.x ) ), uTop ).rgb, 1.0 ); }',
+        depthTest: false,
+        depthWrite: false,
+      });
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
+      const scene = new THREE.Scene();
+      scene.add(quad);
+      const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      const was = renderer.getRenderTarget();
+      renderer.setRenderTarget(target);
+      renderer.render(scene, cam);
+      const px = new Float32Array(depth * 4);
+      renderer.readRenderTargetPixels(target, 0, 0, depth, 1, px);
+      renderer.setRenderTarget(was);
+      // The means the albedo is composed from (every other texel each way, `tileTablesOf`'s) and every texel's, each held to
+      // the card's own top mip (`meansVerdict`: the card rounds each level of its sRGB chain to a byte, three levels off the
+      // exact mean on one of Tatooine's layers, both backends), and to each other within a level.
+      const v = meansVerdict(px, means, layerMeans(g.colour, g.size, g.depth, 1), depth);
+      out.means = { layers: depth, topMip: top, worstLevels: v.worstLevels, worstLayer: v.worstLayer, within: v.within, everyTexelWorst: v.exactWorst, strideWorst: v.strideWorst, overTwo: v.overTwo };
+      target.dispose();
+      mat.dispose();
+      quad.geometry.dispose();
+    } else out.means = { skipped: 'no tile arrays held' };
+    // The ring program's active samplers as the driver counts them (three hands each one unit).
+    const gl = renderer.getContext() as WebGL2RenderingContext;
+    const prog = (renderer.properties.get(material) as { currentProgram?: { program: WebGLProgram } }).currentProgram?.program;
+    if (prog) {
+      const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS) as number;
+      const samplers: string[] = [];
+      let units = 0;
+      const kinds = new Set<number>([gl.SAMPLER_2D, gl.SAMPLER_2D_ARRAY, gl.SAMPLER_3D, gl.SAMPLER_CUBE, gl.SAMPLER_2D_SHADOW, gl.SAMPLER_2D_ARRAY_SHADOW, gl.SAMPLER_CUBE_SHADOW, gl.INT_SAMPLER_2D, gl.UNSIGNED_INT_SAMPLER_2D, gl.INT_SAMPLER_2D_ARRAY, gl.UNSIGNED_INT_SAMPLER_2D_ARRAY, gl.INT_SAMPLER_3D, gl.UNSIGNED_INT_SAMPLER_3D]);
+      for (let i = 0; i < n; i++) {
+        const a = gl.getActiveUniform(prog, i);
+        if (!a || !kinds.has(a.type)) continue;
+        samplers.push(a.size > 1 ? `${a.name}x${a.size}` : a.name);
+        units += a.size;
+      }
+      out.samplers = { units, most: gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS) as number, names: samplers };
+    } else out.samplers = { skipped: 'the ring program is not built yet (switch the rings on and look at the far ground once)' };
+    return out;
   }
 
   /**
@@ -646,7 +1051,7 @@ export class HorizonField {
     const ul = u.uHorizonLook.value;
     ul.x = t.fogCheap;
     ul.y = t.detailReach;
-    ul.z = t.detailFade;
+    ul.z = t.detailReach * Math.min(1, Math.max(0, t.detailFadeShare));
     ul.w = t.detail === 'tile' ? 1 : 0;
     const uf = u.uHorizonFade.value;
     uf.x = t.fade;
@@ -664,16 +1069,13 @@ export class HorizonField {
       s.selector.select(this.frustum, a, this.pyramid, hole);
     }
     s.upload();
-    // The detail window made again round the eye once it has moved a twelfth of the window off its middle (§2.5's strips are W3's).
-    const rx = this.centre.x - eye.x;
-    const rz = eye.z + this.centre.z;
-    const da = this.detailAt;
-    const off = Math.max(Math.abs(rx - da[0]), Math.abs(rz - da[1]));
-    if (this.worker && !this.detailAsked && off > (DETAIL_SIZE * DETAIL_TILE) / 12) {
-      this.detailAsked = true;
-      da[0] = rx;
-      da[1] = rz;
-      this.worker.postMessage({ type: 'detail', id: 2, rx, rz });
+    // The composition window kept round the eye: its strips once the eye is `STRIP_TILES` tiles off its middle or an overlay
+    // made poles again, whole when the distance's side moved, a retune when the ground's knobs moved (nothing asked, nothing made).
+    if (this.worker && !this.windowAsked) {
+      // The eye's raw place into a kept array (a number handed across a call the compiler leaves out is a number made).
+      this.eyeRaw[0] = this.centre.x - eye.x;
+      this.eyeRaw[1] = eye.z + this.centre.z;
+      this.askWindow();
     }
   }
 
@@ -693,17 +1095,22 @@ export class HorizonField {
     return ((performance.now() - t0) * 1000) / Math.max(1, n);
   }
 
-  /** MB on the card (the formats' arithmetic: heights 4 bytes, normals 2 with mips, albedo 4 with mips) and on the CPU. */
-  megabytes(): { card: number; cpu: number } {
+  /**
+   * MB on the card (the formats' arithmetic: the heights atlas 4 bytes, the fine normals 2 with mips, the albedos 4 with
+   * mips, the composition window 8 and its tint window 4) and on the CPU; `window` the two windows' share of the card.
+   */
+  megabytes(): { card: number; cpu: number; window: number } {
     const h = this.header;
-    if (!h) return { card: 0, cpu: 0 };
+    if (!h) return { card: 0, cpu: 0, window: 0 };
     const mip = 4 / 3;
     const f = h.fine.nx * h.fine.nz;
     const c = h.coarse.nx * h.coarse.nz;
     const col = h.colour.nx * h.colour.nz;
-    const card = f * 4 + c * 4 + (f + c) * 2 * mip + (col + c) * 4 * mip + DETAIL_SIZE * DETAIL_SIZE + 256 * 16;
+    const atlas = Math.max(h.fine.nx, h.coarse.nx) * (h.fine.nz + h.coarse.nz);
+    const win = this.place.S * this.place.S * 8 + this.place.T * this.place.T * 4;
+    const card = atlas * 4 + f * 2 * mip + (col + c) * 4 * mip + win;
     const pyr = this.pyramid ? this.pyramid.lo.reduce((n, a) => n + a.byteLength * 2, 0) : 0;
-    return { card: card / 1048576, cpu: (f * 4 + c * 4 + pyr) / 1048576 };
+    return { card: card / 1048576, cpu: (f * 4 + c * 4 + pyr) / 1048576, window: win / 1048576 };
   }
 
   /** Every overlay still awaited answered with nothing (the worker gone, the field let go), so no caller waits for good. */
@@ -724,9 +1131,14 @@ export class HorizonField {
       // The stand-ins put back (made once a session), so no freed texture stays bound.
       const fresh = (standIns ??= makeRingUniforms());
       const u = s.uniforms;
-      for (const k of ['uHorizonFineH', 'uHorizonCoarseH', 'uHorizonFineN', 'uHorizonCoarseN', 'uHorizonAlbedo', 'uHorizonCoarseAlbedo', 'uHorizonDetail', 'uHorizonMeans'] as const) u[k].value = fresh[k].value;
+      for (const k of ['uHorizonHeights', 'uHorizonFineN', 'uHorizonAlbedo', 'uHorizonCoarseAlbedo', 'uHorizonWindow', 'uHorizonTint'] as const) u[k].value = fresh[k].value;
+      u.uHorizonWin.value.copy(fresh.uHorizonWin.value);
     }
     for (const t of this.textures) t.dispose();
     this.textures.length = 0;
+    this.winTex?.dispose();
+    this.tintTex?.dispose();
+    this.winTex = this.tintTex = null;
+    this.session = null;
   }
 }

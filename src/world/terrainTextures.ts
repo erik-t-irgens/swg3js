@@ -337,6 +337,47 @@ vec3 groundCloudShade( const in vec3 lit ) {
 	return min( vec3( 1.0 ), shaded / max( groundDecode( g ), vec3( 1e-5 ) ) );
 }`;
 
+/**
+ * The client's masks between a tile's families, the tile program's own functions (`groundMath.maskWeight` is their
+ * mirror), reading `vGroundTile`, `uGroundMask` and `uGroundLook`, which whoever interpolates them declares (each sample
+ * takes the derivatives it is handed, never its own). Exported (the horizon pass's third wave) so the far ground's rings
+ * draw the near ground's own composition by these very lines, and interpolated back into `TILE_FRAGMENT_PARS` at their
+ * place, so the tile program's text and key are what they were to the byte.
+ */
+export const GROUND_MASK_GLSL = `// A tile place turned onto a mask's own frame a quarter turn at a time (groundTiles.turnTile), and a
+// derivative turned with it.
+vec2 groundTurn( const in vec2 st, const in int k ) {
+	if ( k == 1 ) return vec2( st.y, 1.0 - st.x );
+	if ( k == 2 ) return vec2( 1.0 - st.x, 1.0 - st.y );
+	if ( k == 3 ) return vec2( 1.0 - st.y, st.x );
+	return st;
+}
+vec2 groundTurnDir( const in vec2 d, const in int k ) {
+	if ( k == 1 ) return vec2( d.y, -d.x );
+	if ( k == 2 ) return -d;
+	if ( k == 3 ) return vec2( -d.y, d.x );
+	return d;
+}
+float groundMaskTap( const in float kind, const in int k, const in vec2 dx, const in vec2 dy ) {
+	return textureGrad( uGroundMask, vec3( groundTurn( vGroundTile, k ), kind ), groundTurnDir( dx, k ), groundTurnDir( dy, k ) ).r;
+}
+// An overlay's weight from its code (groundMath.maskWeight): one plus four times the kind plus the turn.
+float groundMask( const in float code, const in vec2 dx, const in vec2 dy ) {
+	int c = int( code + 0.5 ) - 1;
+	if ( c < 0 ) return 0.0;
+	int kind = c / 4;
+	int k = c - kind * 4;
+	float m;
+	if ( kind == 3 ) {
+		float a = groundMaskTap( 0.0, k, dx, dy );
+		float b = groundMaskTap( 0.0, k + 2, dx, dy );
+		m = uGroundLook.x > 0.5 ? min( a + b, 1.0 ) : max( a, b );
+	} else {
+		m = groundMaskTap( float( kind ), k, dx, dy );
+	}
+	return uGroundLook.y > 0.5 ? m : step( 0.5, m );
+}`;
+
 /** Vertex: the tile attributes and what is worked out from them, after `#include <common>`. */
 const TILE_VERTEX_PARS = /* glsl */ `
 // The ground drawn the client's way (src/world/terrainTextures.ts, groundTiles.ts): each triangle's tile.
@@ -394,39 +435,7 @@ vec4 gGroundBump = vec4( 0.5, 0.5, 1.0, 0.0 );
 vec3 gGroundAlbedo = vec3( 1.0 );
 float gGroundFlat = 0.0;
 vec3 gGroundNormalW = vec3( 0.0, 1.0, 0.0 );
-// A tile place turned onto a mask's own frame a quarter turn at a time (groundTiles.turnTile), and a
-// derivative turned with it.
-vec2 groundTurn( const in vec2 st, const in int k ) {
-	if ( k == 1 ) return vec2( st.y, 1.0 - st.x );
-	if ( k == 2 ) return vec2( 1.0 - st.x, 1.0 - st.y );
-	if ( k == 3 ) return vec2( 1.0 - st.y, st.x );
-	return st;
-}
-vec2 groundTurnDir( const in vec2 d, const in int k ) {
-	if ( k == 1 ) return vec2( d.y, -d.x );
-	if ( k == 2 ) return -d;
-	if ( k == 3 ) return vec2( -d.y, d.x );
-	return d;
-}
-float groundMaskTap( const in float kind, const in int k, const in vec2 dx, const in vec2 dy ) {
-	return textureGrad( uGroundMask, vec3( groundTurn( vGroundTile, k ), kind ), groundTurnDir( dx, k ), groundTurnDir( dy, k ) ).r;
-}
-// An overlay's weight from its code (groundMath.maskWeight): one plus four times the kind plus the turn.
-float groundMask( const in float code, const in vec2 dx, const in vec2 dy ) {
-	int c = int( code + 0.5 ) - 1;
-	if ( c < 0 ) return 0.0;
-	int kind = c / 4;
-	int k = c - kind * 4;
-	float m;
-	if ( kind == 3 ) {
-		float a = groundMaskTap( 0.0, k, dx, dy );
-		float b = groundMaskTap( 0.0, k + 2, dx, dy );
-		m = uGroundLook.x > 0.5 ? min( a + b, 1.0 ) : max( a, b );
-	} else {
-		m = groundMaskTap( float( kind ), k, dx, dy );
-	}
-	return uGroundLook.y > 0.5 ? m : step( 0.5, m );
-}
+${GROUND_MASK_GLSL}
 // sRGB's own curve each way (groundMath.srgbDecode, srgbEncode); the decode runs on past one.
 ${GROUND_DECODE_GLSL}
 ${GROUND_CLOUD_GLSL}
@@ -468,7 +477,7 @@ export const TILE_MAP = /* glsl */ `
 `;
 
 /** Fragment, after `#include <roughnessmap_fragment>` and before the weather's own: the gloss as a highlight, or kept for the flat shine. */
-const TILE_ROUGHNESS = /* glsl */ `
+export const TILE_ROUGHNESS = /* glsl */ `
 roughnessFactor = clamp( roughnessFactor - gGroundBump.a * uGroundShine.x, 0.08, 1.0 );
 gGroundFlat = gGroundBump.a * uGroundShine.y;
 `;
@@ -478,7 +487,7 @@ gGroundFlat = gGroundBump.a * uGroundShine.y;
  * to the ground's own lean, as the version-3 ground adds it. A slope toward the picture's right runs toward the
  * world's -x when the pictures are the client's way round, so its sign follows the frame's.
  */
-const TILE_NORMAL = /* glsl */ `
+export const TILE_NORMAL = /* glsl */ `
 {
 	vec3 gn = gGroundBump.xyz * 2.0 - 1.0;
 	vec2 gs = -gn.xy / max( gn.z, 0.2 ) * uGroundShine.z;

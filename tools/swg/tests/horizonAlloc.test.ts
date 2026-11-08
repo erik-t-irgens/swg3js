@@ -1,6 +1,7 @@
 // The far ground's selection a frame makes nothing (the horizon pass's first wave, DESIGN.md §3): `horizonAllocOwn.ts`, a
 // walk, a turn and a climb to 2 km with the fog's cap moving, run in twelve processes at once, each asserted under 0.05
-// bytes a frame with no collection.
+// bytes a frame with no collection; and (the third wave) the frame of a field keeping its composition window round the eye,
+// which works out where the window would stand and asks nothing.
 //
 // Run: node tools/swg/tests/horizonAlloc.test.ts
 import assert from 'node:assert/strict';
@@ -19,6 +20,7 @@ interface Answer {
   made: number;
   scavenges: number;
   patches: number;
+  window: { made: number; scavenges: number; asks: number };
 }
 const run = () =>
   new Promise<Answer>((resolve, reject) => {
@@ -45,5 +47,7 @@ const all = await Promise.all(Array.from({ length: 12 }, () => run()));
 for (let i = 0; i < all.length; i++) {
   const a = all[i];
   ok(a.patches > 100 && a.scavenges === 0 && a.made < 0.05 * a.frames, `process ${i + 1} of 12: a selection a frame (${a.patches.toFixed(0)} patches on average) makes ${Math.max(0, a.made)} bytes over ${a.frames} frames (${(Math.max(0, a.made) / a.frames).toFixed(3)} a frame)`);
+  const w = a.window;
+  ok(w.asks === 0 && w.scavenges === 0 && w.made < 0.05 * a.frames, `process ${i + 1} of 12: with the composition window kept round the eye, a frame that asks for none (${w.asks} asked) makes ${Math.max(0, w.made)} bytes over ${a.frames} frames (${(Math.max(0, w.made) / a.frames).toFixed(3)} a frame)`);
 }
 console.log(`\nhorizonAlloc: ${checks} checks passed`);

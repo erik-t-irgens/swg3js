@@ -42,10 +42,15 @@ export const HORIZON_TUNE = {
   renderOrder: 1,
   /** The console's measurement far plane and sky radius at the reach, under reversed depth only (W5 makes it the setting's). */
   measure: false,
-  /** The near band's grain: the tile's own picture's ratio to its mean, and its bump, from the hole to `detailReach`. */
+  /**
+   * The third wave: inside `detailReach` (metres from the eye, the Graphics page's Ground detail distance) the rings draw
+   * the near ground's own composition (the tile program's pictures, alternates, masks, tint, bump and gloss) from the
+   * composition window; it fades into the bake's per-tile mean over the last `detailFadeShare` of that distance, so no
+   * line shows where it ends. 'off' draws the mean everywhere.
+   */
   detail: 'tile' as 'tile' | 'off',
-  detailReach: 1200,
-  detailFade: 400,
+  detailReach: 2500,
+  detailFadeShare: 0.5,
   /** The horizon fade: the last `fade` share of the reach in force dissolves into `fadeTo` (§1b Q4: a switch of three). */
   fade: 0.15,
   fadeOn: true,
@@ -54,7 +59,7 @@ export const HORIZON_TUNE = {
   skyMargin: 1.1,
   farMargin: 1.7,
   /** What the program draws: the lit ground, or one of its parts for the console (a uniform). */
-  view: 'shaded' as 'shaded' | 'lod' | 'albedo' | 'normals' | 'edge',
+  view: 'shaded' as 'shaded' | 'lod' | 'albedo' | 'normals' | 'edge' | 'detail' | 'window',
   /**
    * W2: with the rings in place of the far tiles, far grids are still made this many 512 m tiles each way of the eye, for
    * the far tree cards' families and the race's look-ahead (§2.9; at least a kilometre, so a pod's half second is inside).
@@ -65,7 +70,7 @@ export const HORIZON_TUNE = {
 };
 export type HorizonTune = typeof HORIZON_TUNE;
 
-export const HORIZON_VIEWS = ['shaded', 'lod', 'albedo', 'normals', 'edge'] as const;
+export const HORIZON_VIEWS = ['shaded', 'lod', 'albedo', 'normals', 'edge', 'detail', 'window'] as const;
 
 /** The reach without reversed depth: today's slider top (ordinary depth's 24 bits were already living there). */
 export const REACH_NO_REVZ = 4900;

@@ -2,11 +2,20 @@
 // for each node the selection keeps (`horizonMath.ts`), by one program of the session for both, a `MeshStandardMaterial`
 // whose compile hook writes the ring's vertex stage -- the heights from the bake, the morph by each vertex's own place
 // (its distance's level and its edge's level, the lesser), the drop at the hole's edge, the reach's clamp, the vertex
-// normal -- and its shading: the albedo composed per 4 m tile, the near band's grain from the tile program's own
-// picture arrays through the detail window, the client's cloud shadows (the tile program's own lines), the weather's wet
-// look (`injectWetness`, 'object'), three's fog with a cheap path for what it has taken, and the horizon fade into the
-// sky's own colour (the dome's own lines). Every part behind a uniform at its starting value: the gate measures the
-// program at the cost it ships at.
+// normal -- and its shading: inside the ground detail distance the near ground's own composition (the tile program's
+// own text: `TILE_MAP`, `GROUND_MASK_GLSL`, `GROUND_TINT_GLSL`, `TILE_NORMAL`, `TILE_ROUGHNESS` and its flat shine, fed
+// from the composition window's tiles and the colour cells' tint, the third wave), fading over a long stretch into the
+// bake's albedo composed per 4 m tile at every picture's mean past it; the client's cloud shadows (the tile program's own
+// lines), the weather's wet look (`injectWetness`, 'ground', as the near ground's, its shelter open: no ring stands under
+// the roof grid), three's fog with a cheap path for what it has taken, and the horizon fade into the sky's own colour
+// (the dome's own lines). Every part behind a uniform at its starting value.
+//
+// SAMPLERS (the third wave): ANGLE on Direct3D 11 gives a program 16 texture units and three hands every active sampler
+// one, so the program holds 12 of its own beside three's own two kinds (its multiscatter highlight's `dfgLUT`, the
+// cascades' three shadow maps): sixteen, every one of them, with none to spare (`RING_SAMPLER_MOST`, counted over the
+// program's text by `horizonShaders.test.ts` and by the driver in `horizon({ selfTest })`): the heights are one atlas read by
+// `texelFetch`, the coarse normals are worked out from the coarse heights in the vertex stage, the near band's grain and
+// layer means gave way to the composition, and the weather's roof grid is never read (its shelter is open past it).
 //
 // Light and shadow's step 5 multiplies the sun's direct light here where the leaf cards capture the cascades' shadow
 // (`swgSunShadow`, the five sites `cardLightsBegin` rewrites): no sampler is reserved for it now. Its step 3 makes a depth
@@ -14,10 +23,17 @@
 import * as THREE from 'three';
 import type { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { DOME_COLOUR_GLSL } from '../domeColour.ts';
-import { GROUND_CLOUD_GLSL, GROUND_DECODE_GLSL, type GroundTileUniforms } from '../terrainTextures.ts';
+import { GGX_ANCHOR } from '../specular.ts';
+import { GROUND_CLOUD_GLSL, GROUND_DECODE_GLSL, GROUND_MASK_GLSL, GROUND_TINT_GLSL, TILE_FLAT_LINE, TILE_MAP, TILE_NORMAL, TILE_ROUGHNESS, type GroundTileUniforms } from '../terrainTextures.ts';
 import { injectWetness } from '../wetness.ts';
-import { ALBEDO_SCALE, DETAIL_SIZE, DETAIL_TILE } from './horizonDecode.ts';
+import { ALBEDO_SCALE } from './horizonDecode.ts';
 import { PATCH } from './horizonMath.ts';
+
+/**
+ * The most texture units the ring program may take, the cascades' shadow maps included: Direct3D 11's sixteen under ANGLE
+ * (`MAX_TEXTURE_IMAGE_UNITS`), which three hands out one an active sampler over the whole program.
+ */
+export const RING_SAMPLER_MOST = 16;
 
 /** The ring program's key: one text for every world. */
 export const HORIZON_RING_KEY = 'swg-horizon-ring';
@@ -42,15 +58,19 @@ export interface RingUniforms {
   uHorizonSizes: THREE.IUniform<THREE.Vector4>;
   /** x, y the colour's texels a side. */
   uHorizonColourN: THREE.IUniform<THREE.Vector4>;
-  uHorizonFineH: THREE.IUniform<THREE.Texture>;
-  uHorizonCoarseH: THREE.IUniform<THREE.Texture>;
+  /** The heights, one R32F atlas read by `texelFetch`: the fine lattice's rows from row nought, the coarse lattice's after them. */
+  uHorizonHeights: THREE.IUniform<THREE.Texture>;
   uHorizonFineN: THREE.IUniform<THREE.Texture>;
-  uHorizonCoarseN: THREE.IUniform<THREE.Texture>;
   uHorizonAlbedo: THREE.IUniform<THREE.Texture>;
   uHorizonCoarseAlbedo: THREE.IUniform<THREE.Texture>;
-  uHorizonDetail: THREE.IUniform<THREE.Texture>;
-  uHorizonMeans: THREE.IUniform<THREE.Texture>;
-  /** x the fog's cheap path, y the detail's reach, z its fade, w the detail on. */
+  /** The composition window (RGBA16UI, toroidal, a texel a 4 m tile: layers, mask codes, count) and the colour cells' tint (RGBA8, toroidal). */
+  uHorizonWindow: THREE.IUniform<THREE.Texture>;
+  uHorizonTint: THREE.IUniform<THREE.Texture>;
+  /** x, y the window's first tile, z its side in tiles, w the tint window's side in cells. */
+  uHorizonWin: THREE.IUniform<THREE.Vector4>;
+  /** x, y the tint window's first colour cell. */
+  uHorizonWinC: THREE.IUniform<THREE.Vector4>;
+  /** x the fog's cheap path, y where the near composition is gone (the ground detail distance), z the fade's length, w the composition on. */
   uHorizonLook: THREE.IUniform<THREE.Vector4>;
   /** x the fade's share, y on, z its colour (0 the sky, 1 the fog, 2 none), w what is drawn (`HORIZON_VIEWS`' index). */
   uHorizonFade: THREE.IUniform<THREE.Vector4>;
@@ -79,8 +99,10 @@ export function makeRingUniforms(): RingUniforms {
   const n = tex1(THREE.RGFormat, THREE.UnsignedByteType, new Uint8Array([128, 128]));
   const a = tex1(THREE.RGBAFormat, THREE.UnsignedByteType, new Uint8Array([128, 128, 128, 0]));
   a.colorSpace = THREE.SRGBColorSpace;
-  const d = tex1(THREE.RedFormat, THREE.UnsignedByteType, new Uint8Array([0]));
-  const m = tex1(THREE.RGBAFormat, THREE.FloatType, new Float32Array([0.5, 0.5, 0.5, 1]));
+  // A window of one tile holding nothing (count nought): every fragment reads the far albedo.
+  const w = tex1(THREE.RGBAIntegerFormat, THREE.UnsignedShortType, new Uint16Array(4));
+  w.internalFormat = 'RGBA16UI';
+  const tn = tex1(THREE.RGBAFormat, THREE.UnsignedByteType, new Uint8Array([255, 255, 255, 255]));
   return {
     uHorizonEye: { value: new THREE.Vector4(0, 0, 0, 1) },
     uHorizonSquare: { value: new THREE.Vector4() },
@@ -92,15 +114,15 @@ export function makeRingUniforms(): RingUniforms {
     uHorizonColour: { value: new THREE.Vector4(0, 0, 8, 0) },
     uHorizonSizes: { value: new THREE.Vector4(1, 1, 1, 1) },
     uHorizonColourN: { value: new THREE.Vector4(1, 1, 0, 0) },
-    uHorizonFineH: { value: h },
-    uHorizonCoarseH: { value: h },
+    uHorizonHeights: { value: h },
     uHorizonFineN: { value: n },
-    uHorizonCoarseN: { value: n },
     uHorizonAlbedo: { value: a },
     uHorizonCoarseAlbedo: { value: a },
-    uHorizonDetail: { value: d },
-    uHorizonMeans: { value: m },
-    uHorizonLook: { value: new THREE.Vector4(0.996, 1200, 400, 1) },
+    uHorizonWindow: { value: w },
+    uHorizonTint: { value: tn },
+    uHorizonWin: { value: new THREE.Vector4(0, 0, 1, 1) },
+    uHorizonWinC: { value: new THREE.Vector4() },
+    uHorizonLook: { value: new THREE.Vector4(0.996, 2500, 1250, 1) },
     uHorizonFade: { value: new THREE.Vector4(0.15, 1, 0, 0) },
     uGradient: { value: null },
     uGradient2: { value: null },
@@ -158,10 +180,11 @@ float ringReach( float dx, float dz, float reach ) {
 	float r = sqrt( dx * dx + dz * dz );
 	return r > reach ? reach / r : 1.0;
 }
-float bakeTap( sampler2D t, int i, int j ) {
-	return texelFetch( t, ivec2( i, j ), 0 ).r;
+float bakeTap( int i, int j ) {
+	return texelFetch( uHorizonHeights, ivec2( i, j ), 0 ).r;
 }
-float bakeLerp( sampler2D t, float fx, float fz, float nx, float nz ) {
+// A lattice's bilinear in the heights atlas: its rows from row0 (nought the fine's, the fine's count the coarse's).
+float bakeLerp( float fx, float fz, float nx, float nz, float row0 ) {
 	float cx = clamp( fx, 0.0, nx - 1.0 );
 	float cz = clamp( fz, 0.0, nz - 1.0 );
 	float ix = min( floor( cx ), nx - 2.0 );
@@ -169,16 +192,31 @@ float bakeLerp( sampler2D t, float fx, float fz, float nx, float nz ) {
 	float ax = cx - ix;
 	float az = cz - iz;
 	int i = int( ix );
-	int j = int( iz );
-	float h0 = mix( bakeTap( t, i, j ), bakeTap( t, i + 1, j ), ax );
-	float h1 = mix( bakeTap( t, i, j + 1 ), bakeTap( t, i + 1, j + 1 ), ax );
+	int j = int( iz + row0 );
+	float h0 = mix( bakeTap( i, j ), bakeTap( i + 1, j ), ax );
+	float h1 = mix( bakeTap( i, j + 1 ), bakeTap( i + 1, j + 1 ), ax );
 	return mix( h0, h1, az );
+}
+float bakeCoarse( float rx, float rz ) {
+	return bakeLerp( ( rx - uHorizonCoarse.x ) / uHorizonCoarse.z, ( rz - uHorizonCoarse.y ) / uHorizonCoarse.z, uHorizonSizes.z, uHorizonSizes.w, uHorizonSizes.y );
 }
 float bakeHeight( float rx, float rz ) {
 	float fx = ( rx - uHorizonFine.x ) / uHorizonFine.z;
 	float fz = ( rz - uHorizonFine.y ) / uHorizonFine.z;
-	if ( fx >= 0.0 && fz >= 0.0 && fx <= uHorizonSizes.x - 1.0 && fz <= uHorizonSizes.y - 1.0 ) return bakeLerp( uHorizonFineH, fx, fz, uHorizonSizes.x, uHorizonSizes.y );
-	return bakeLerp( uHorizonCoarseH, ( rx - uHorizonCoarse.x ) / uHorizonCoarse.z, ( rz - uHorizonCoarse.y ) / uHorizonCoarse.z, uHorizonSizes.z, uHorizonSizes.w );
+	if ( fx >= 0.0 && fz >= 0.0 && fx <= uHorizonSizes.x - 1.0 && fz <= uHorizonSizes.y - 1.0 ) return bakeLerp( fx, fz, uHorizonSizes.x, uHorizonSizes.y, 0.0 );
+	return bakeCoarse( rx, rz );
+}
+// The coarse lattice's slopes for a level-lod vertex (the third wave: its normals are worked out here, not read): central
+// differences one step either side, normalsOf's own arithmetic, the step widened to the level's spacing past the
+// lattice's own, so a far node's lean is smoothed as the normals' mips once smoothed it.
+float ringCoarseSpan( float lod ) {
+	return uHorizonCoarse.z * exp2( max( lod - uHorizonCoarse.w, 0.0 ) );
+}
+float ringCoarseDx( float rx, float rz, float s ) {
+	return ( bakeCoarse( rx + s, rz ) - bakeCoarse( rx - s, rz ) ) / ( 2.0 * s );
+}
+float ringCoarseDz( float rx, float rz, float s ) {
+	return ( bakeCoarse( rx, rz + s ) - bakeCoarse( rx, rz - s ) ) / ( 2.0 * s );
 }
 `;
 
@@ -197,32 +235,41 @@ uniform vec4 uHorizonLook;
 uniform vec4 uHorizonFade;
 uniform vec4 uGroundFrame;
 uniform sampler2D uHorizonFineN;
-uniform sampler2D uHorizonCoarseN;
 varying vec2 vRingRaw;
 varying vec3 vRingWorld;
 varying float vRingEdge;
 varying float vRingDist;
 flat varying float vRingLevel;
 varying vec2 vGroundUV;
-// The baked normal at a raw place (RG8 biased by 128: the game-frame x and z, the up rebuilt), for a node of level lod:
-// a level's vertices stand 8 m times two to the level apart, so each lattice is read at that level less its own step's
-// share of 8 m in mips (uHorizonFine.w, uHorizonCoarse.w: log2 of the step over 8, so a 16 m bake reads one mip less).
+`;
+
+/**
+ * The vertex's normal at a raw place for a node of level lod. Inside the fine extent the baked normal (RG8 biased by 128:
+ * the game-frame x and z, the up rebuilt), read at the level less the lattice's own step's share of 8 m in mips (a level's
+ * vertices stand 8 m times two to the level apart; `uHorizonFine.w` is log2 of the step over 8). Past it the coarse
+ * heights' own central differences, `normalsOf`'s arithmetic, one step either side at the node's spacing (the step times
+ * two to the level less `uHorizonCoarse.w`), which smooth as the coarse normals' mips did; the fragment takes the vertex's.
+ */
+export const RING_NORMAL_GLSL = /* glsl */ `
 vec3 ringNormalAt( vec2 raw, float lod ) {
 	vec2 f = ( raw - uHorizonFine.xy ) / uHorizonFine.z;
-	vec2 rg;
-	if ( f.x >= 0.0 && f.y >= 0.0 && f.x <= uHorizonSizes.x - 1.0 && f.y <= uHorizonSizes.y - 1.0 ) rg = textureLod( uHorizonFineN, ( f + 0.5 ) / uHorizonSizes.xy, max( lod - uHorizonFine.w, 0.0 ) ).rg;
-	else rg = textureLod( uHorizonCoarseN, ( ( raw - uHorizonCoarse.xy ) / uHorizonCoarse.z + 0.5 ) / uHorizonSizes.zw, max( lod - uHorizonCoarse.w, 0.0 ) ).rg;
-	vec2 n = ( rg * 255.0 - 127.5 ) / 127.5;
-	return normalize( vec3( n.x, sqrt( max( 1.0 - dot( n, n ), 0.0 ) ), n.y ) );
+	if ( f.x >= 0.0 && f.y >= 0.0 && f.x <= uHorizonSizes.x - 1.0 && f.y <= uHorizonSizes.y - 1.0 ) {
+		vec2 rg = textureLod( uHorizonFineN, ( f + 0.5 ) / uHorizonSizes.xy, max( lod - uHorizonFine.w, 0.0 ) ).rg;
+		vec2 n = ( rg * 255.0 - 127.5 ) / 127.5;
+		return normalize( vec3( n.x, sqrt( max( 1.0 - dot( n, n ), 0.0 ) ), n.y ) );
+	}
+	float s = ringCoarseSpan( lod );
+	// The game's frame: raw x runs the other way, so the slope along it is the normal's x as it stands, z's turned (normalsOf).
+	return normalize( vec3( ringCoarseDx( raw.x, raw.y, s ), 1.0, -ringCoarseDz( raw.x, raw.y, s ) ) );
 }
 `;
 
 const VERTEX_PARS = /* glsl */ `
 attribute vec4 aRing;
-uniform sampler2D uHorizonFineH;
-uniform sampler2D uHorizonCoarseH;
+uniform sampler2D uHorizonHeights;
 ${SHARED_PARS}
 ${HORIZON_RING_FUNCTIONS}
+${RING_NORMAL_GLSL}
 vec3 gRingPos;
 `;
 
@@ -279,28 +326,87 @@ const FRAGMENT_PARS = /* glsl */ `
 precision highp sampler2DArray;
 uniform sampler2D uHorizonAlbedo;
 uniform sampler2D uHorizonCoarseAlbedo;
-uniform sampler2D uHorizonDetail;
-uniform sampler2D uHorizonMeans;
+uniform highp usampler2D uHorizonWindow;
+uniform sampler2D uHorizonTint;
+uniform vec4 uHorizonWin;
+uniform vec4 uHorizonWinC;
 uniform sampler2DArray uGround;
 uniform sampler2DArray uGroundBump;
+uniform sampler2DArray uGroundMask;
 uniform sampler2D uGroundClouds;
 uniform vec4 uGroundCloud;
 uniform vec4 uGroundShine;
+uniform vec4 uGroundLook;
+uniform vec4 uGroundTint;
+uniform vec4 uGroundTintRef;
 uniform sampler2D uGradient;
 uniform sampler2D uGradient2;
 uniform vec4 uRingDome;
 uniform vec3 uClear;
 uniform vec3 uHorizonFog;
 ${SHARED_PARS}
+// What the tile program's own lines read, as the near ground's varyings and globals are named: a tile's layers, codes,
+// place and tint, filled from the composition window a fragment (ringWindowAt), and what its stages hand on.
+vec4 vGroundLayers = vec4( 0.0 );
+vec4 vGroundBlend = vec4( 0.0 );
+vec2 vGroundTile = vec2( 0.0 );
+vec3 vGroundTint = vec3( 1.0 );
+vec3 gGroundW = vec3( 0.0 );
+vec4 gGroundBump = vec4( 0.5, 0.5, 1.0, 0.0 );
+vec3 gGroundAlbedo = vec3( 1.0 );
+float gGroundFlat = 0.0;
+vec3 gGroundNormalW = vec3( 0.0, 1.0, 0.0 );
+${GROUND_TINT_GLSL}
+${GROUND_MASK_GLSL}
 ${GROUND_DECODE_GLSL}
 ${GROUND_CLOUD_GLSL}
 vec2 gRingDx = vec2( 0.0 );
 vec2 gRingDy = vec2( 0.0 );
 vec2 gUvDx = vec2( 0.0 );
 vec2 gUvDy = vec2( 0.0 );
-vec4 gRingBump = vec4( 0.5, 0.5, 1.0, 0.0 );
-float gRingBumpW = 0.0;
+vec2 gTileDx = vec2( 0.0 );
+vec2 gTileDy = vec2( 0.0 );
 vec3 gRingAlbedo = vec3( 1.0 );
+// The near composition's share at this fragment (nought past the ground detail distance or outside the window), and the window's tile count there.
+float gRingNear = 0.0;
+float gRingCount = 0.0;
+// The composition window at a raw place: false outside it (or where it holds nothing yet); else the tile's layers and
+// codes unpacked as the near ground's vertex carries them, its place in the tile (s along raw x, t along raw z), and the
+// colour cells' bilinear between their centres, through the tile program's own tint, as the near ground's vertex takes it.
+// Written by its components, so the node tests run its own text (horizonWindow.test.ts).
+bool ringWindowAt( vec2 raw ) {
+	float tx = floor( raw.x * 0.25 );
+	float tz = floor( raw.y * 0.25 );
+	float rx = tx - uHorizonWin.x;
+	float rz = tz - uHorizonWin.y;
+	if ( rx < 0.0 || rz < 0.0 || rx >= uHorizonWin.z || rz >= uHorizonWin.z ) return false;
+	float cx = ( raw.x - uHorizonColour.x ) / uHorizonColour.z;
+	float cz = ( raw.y - uHorizonColour.y ) / uHorizonColour.z;
+	float rcx = floor( cx ) - uHorizonWinC.x;
+	float rcz = floor( cz ) - uHorizonWinC.y;
+	if ( rcx < 0.0 || rcz < 0.0 || rcx + 1.0 >= uHorizonWin.w || rcz + 1.0 >= uHorizonWin.w ) return false;
+	uvec4 w = texelFetch( uHorizonWindow, ivec2( int( mod( tx, uHorizonWin.z ) ), int( mod( tz, uHorizonWin.z ) ) ), 0 );
+	if ( w.w == 0u ) return false;
+	vGroundLayers = vec4( float( w.x & 255u ), float( w.x >> 8u ), float( w.y & 255u ), float( w.y >> 8u ) );
+	vGroundBlend = vec4( float( w.z & 31u ), float( ( w.z >> 5u ) & 31u ), float( ( w.z >> 10u ) & 31u ), 0.0 );
+	vGroundTile = vec2( raw.x * 0.25 - tx, raw.y * 0.25 - tz );
+	vec3 tint = textureLod( uHorizonTint, vec2( ( mod( cx, uHorizonWin.w ) + 0.5 ) / uHorizonWin.w, ( mod( cz, uHorizonWin.w ) + 0.5 ) / uHorizonWin.w ), 0.0 ).rgb;
+	vGroundTint = groundTintOf( tint );
+	gRingCount = float( w.w );
+	return true;
+}
+// The ground's own lean at the fragment in the world's frame: the baked normal by its derivatives inside the fine extent
+// (the fine's mips, so a far ridge is lit by its own relief), the vertex's past it (the coarse heights' own differences).
+vec3 ringBaseNormal( vec2 raw, vec3 viewNormal ) {
+	vec2 f = ( raw - uHorizonFine.xy ) / uHorizonFine.z;
+	if ( f.x >= 0.0 && f.y >= 0.0 && f.x <= uHorizonSizes.x - 1.0 && f.y <= uHorizonSizes.y - 1.0 ) {
+		vec2 k = 1.0 / ( uHorizonFine.z * uHorizonSizes.xy );
+		vec2 rg = textureGrad( uHorizonFineN, ( f + 0.5 ) / uHorizonSizes.xy, gRingDx * k, gRingDy * k ).rg;
+		vec2 n = ( rg * 255.0 - 127.5 ) / 127.5;
+		return normalize( vec3( n.x, sqrt( max( 1.0 - dot( n, n ), 0.0 ) ), n.y ) );
+	}
+	return normalize( ( vec4( viewNormal, 0.0 ) * viewMatrix ).xyz );
+}
 // The sky's own colour in a direction (the dome's lines, its four numbers out of one vector), for the horizon fade.
 vec3 ringSky( vec3 d ) {
 	float up = clamp( d.y, 0.0, 0.999 );
@@ -335,21 +441,31 @@ vec3 ringAlbedoAt( vec2 raw ) {
 	vec2 kc = 1.0 / ( uHorizonCoarse.z * uHorizonSizes.zw );
 	return textureGrad( uHorizonCoarseAlbedo, ( c + 0.5 ) / uHorizonSizes.zw, gRingDx * kc, gRingDy * kc ).rgb * ${ALBEDO_SCALE.toFixed(1)};
 }
-// The baked normal at the fragment, by its derivatives (the fine's mips, so a far ridge is lit by its own relief).
-vec3 ringNormalFrag( vec2 raw ) {
-	vec2 f = ( raw - uHorizonFine.xy ) / uHorizonFine.z;
-	vec2 rg;
-	if ( f.x >= 0.0 && f.y >= 0.0 && f.x <= uHorizonSizes.x - 1.0 && f.y <= uHorizonSizes.y - 1.0 ) {
-		vec2 k = 1.0 / ( uHorizonFine.z * uHorizonSizes.xy );
-		rg = textureGrad( uHorizonFineN, ( f + 0.5 ) / uHorizonSizes.xy, gRingDx * k, gRingDy * k ).rg;
-	} else {
-		vec2 kc = 1.0 / ( uHorizonCoarse.z * uHorizonSizes.zw );
-		rg = textureGrad( uHorizonCoarseN, ( ( raw - uHorizonCoarse.xy ) / uHorizonCoarse.z + 0.5 ) / uHorizonSizes.zw, gRingDx * kc, gRingDy * kc ).rg;
-	}
-	vec2 n = ( rg * 255.0 - 127.5 ) / 127.5;
-	return normalize( vec3( n.x, sqrt( max( 1.0 - dot( n, n ), 0.0 ) ), n.y ) );
-}
 `;
+
+/**
+ * The tile program's own composition (`TILE_MAP`) as the ring runs it, or null when its text has moved from what this
+ * reads: its four derivatives are the ring's, taken once at the top of `main()` (the tile's place is worked out per
+ * fragment, so its own derivative would jump at every tile's edge; the ring's comes off the raw place, which never
+ * does), and its last line, the multiply into the surface's colour, is the ring's to make after the fade. Every swap
+ * found exactly once, or none made.
+ */
+export const TILE_MAP_SWAPS: readonly (readonly [string, string])[] = [
+  ['vec2 gDx = dFdx( vGroundUV );', 'vec2 gDx = gUvDx;'],
+  ['vec2 gDy = dFdy( vGroundUV );', 'vec2 gDy = gUvDy;'],
+  ['vec2 gTx = dFdx( vGroundTile );', 'vec2 gTx = gTileDx;'],
+  ['vec2 gTy = dFdy( vGroundTile );', 'vec2 gTy = gTileDy;'],
+  ['diffuseColor.rgb *= gGroundAlbedo;', '// (the ring multiplies the surface after the fade)'],
+];
+export function ringTileMap(src: string): string | null {
+  let s = src;
+  for (const [a, b] of TILE_MAP_SWAPS) {
+    if (s.split(a).length !== 2) return null;
+    s = s.replace(a, b);
+  }
+  return s;
+}
+const RING_TILE_MAP = ringTileMap(TILE_MAP);
 
 /** Fragment, at the top of main: the derivatives once (every branch after hands them on), then the fog's cheap path. */
 const FRAGMENT_TOP = /* glsl */ `
@@ -357,6 +473,8 @@ const FRAGMENT_TOP = /* glsl */ `
 	gRingDy = dFdy( vRingRaw );
 	gUvDx = dFdx( vGroundUV );
 	gUvDy = dFdy( vGroundUV );
+	gTileDx = gRingDx * 0.25;
+	gTileDy = gRingDy * 0.25;
 #ifdef FOG_EXP2
 	{
 		float gFog = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth );
@@ -369,38 +487,42 @@ const FRAGMENT_TOP = /* glsl */ `
 #endif
 `;
 
-/** Fragment, after `#include <map_fragment>`: the albedo and, in the near band, the tile's own picture's grain and bump. */
+/**
+ * Fragment, after `#include <map_fragment>`: the colour. Inside the ground detail distance and the window the near
+ * ground's own composition (the tile program's `TILE_MAP`, every family's picture in the alternate its corner chose, the
+ * client's masks between them, the colour map's tint), fading over the distance's last `uHorizonLook.z` into the bake's
+ * albedo, the per-tile mean the composition's own mips come to; its bump and gloss fade toward flat and matt with it.
+ * Past the distance the albedo alone, and no tap of the composition's.
+ */
 const FRAGMENT_MAP = /* glsl */ `
 {
-	gRingAlbedo = ringAlbedoAt( vRingRaw );
-	float gWd = uHorizonLook.w * ( 1.0 - smoothstep( uHorizonLook.y, uHorizonLook.y + uHorizonLook.z, vRingDist ) );
-	if ( gWd > 0.0 ) {
-		vec2 gT = mod( floor( vRingRaw / ${DETAIL_TILE.toFixed(1)} ), ${DETAIL_SIZE.toFixed(1)} );
-		float gLayer = floor( texelFetch( uHorizonDetail, ivec2( gT ), 0 ).r * 255.0 + 0.5 );
-		vec3 gMean = texelFetch( uHorizonMeans, ivec2( int( gLayer ), 0 ), 0 ).rgb;
-		vec3 gTap = textureGrad( uGround, vec3( vGroundUV, gLayer ), gUvDx, gUvDy ).rgb;
-		gRingAlbedo *= mix( vec3( 1.0 ), gTap / max( gMean, vec3( 1e-4 ) ), gWd );
-		gRingBump = textureGrad( uGroundBump, vec3( vGroundUV, gLayer ), gUvDx, gUvDy );
-		gRingBumpW = gWd;
+	float gWd = uHorizonLook.w * ( 1.0 - smoothstep( uHorizonLook.y - uHorizonLook.z, uHorizonLook.y, vRingDist ) );
+	bool gIn = gWd > 0.0 && ringWindowAt( vRingRaw );
+	if ( !gIn ) gWd = 0.0;
+	if ( gWd < 1.0 ) gRingAlbedo = ringAlbedoAt( vRingRaw );
+	if ( gIn ) {
+${RING_TILE_MAP ?? ''}
+		gRingAlbedo = gWd < 1.0 ? mix( gRingAlbedo, gGroundAlbedo, gWd ) : gGroundAlbedo;
+		gGroundBump = vec4( mix( vec3( 0.5, 0.5, 1.0 ), gGroundBump.xyz, gWd ), gGroundBump.a * gWd );
 	}
+	gRingNear = gWd;
 	diffuseColor.rgb *= gRingAlbedo;
 }
 `;
 
-/** Fragment, after `#include <normal_fragment_maps>`: the baked normal, the near band's bump slope added by the tile program's arithmetic. */
+/**
+ * Fragment, after `#include <normal_fragment_maps>` and before the weather's: the ground's own lean (the baked normal, or
+ * the vertex's past the fine extent), then, where the near composition is drawn, the tile program's own `TILE_NORMAL`,
+ * which adds its blended bump's slope as the near ground's does.
+ */
 const FRAGMENT_NORMAL = /* glsl */ `
-{
-	vec3 gN = ringNormalFrag( vRingRaw );
-	if ( gRingBumpW > 0.0 ) {
-		vec3 gn = gRingBump.xyz * 2.0 - 1.0;
-		vec2 gs = -gn.xy / max( gn.z, 0.2 ) * uGroundShine.z * gRingBumpW;
-		gs.x *= -uGroundFrame.z;
-		vec2 gg = vec2( -gN.x, -gN.z ) / max( gN.y, 0.2 );
-		gN = normalize( vec3( -( gg.x + gs.x ), 1.0, -( gg.y + gs.y ) ) );
-	}
-	normal = normalize( ( viewMatrix * vec4( gN, 0.0 ) ).xyz );
-}
+gGroundNormalW = ringBaseNormal( vRingRaw, normal );
+normal = normalize( ( viewMatrix * vec4( gGroundNormalW, 0.0 ) ).xyz );
+if ( gRingNear > 0.0 ) ${TILE_NORMAL.trim()}
 `;
+
+/** Fragment, after `#include <roughnessmap_fragment>` and before the weather's: the tile program's own gloss (nought past the distance). */
+const FRAGMENT_ROUGH = TILE_ROUGHNESS;
 
 const FRAGMENT_CLOUDS = /* glsl */ `
 if ( uGroundCloud.x > 0.5 ) outgoingLight *= groundCloudShade( outgoingLight );
@@ -428,46 +550,71 @@ const FRAGMENT_VIEW = /* glsl */ `
 if ( uHorizonFade.w > 0.5 ) {
 	if ( uHorizonFade.w < 1.5 ) gl_FragColor = vec4( fract( vRingLevel * 0.37 + 0.1 ), fract( vRingLevel * 0.61 + 0.5 ), fract( vRingLevel * 0.13 + 0.8 ), 1.0 );
 	else if ( uHorizonFade.w < 2.5 ) gl_FragColor = vec4( gRingAlbedo, 1.0 );
-	else if ( uHorizonFade.w < 3.5 ) gl_FragColor = vec4( ringNormalFrag( vRingRaw ) * 0.5 + 0.5, 1.0 );
-	else gl_FragColor = vec4( clamp( vRingEdge / 512.0, 0.0, 1.0 ), clamp( -vRingEdge / 64.0, 0.0, 1.0 ), 0.2, 1.0 );
+	else if ( uHorizonFade.w < 3.5 ) gl_FragColor = vec4( gGroundNormalW * 0.5 + 0.5, 1.0 );
+	else if ( uHorizonFade.w < 4.5 ) gl_FragColor = vec4( clamp( vRingEdge / 512.0, 0.0, 1.0 ), clamp( -vRingEdge / 64.0, 0.0, 1.0 ), 0.2, 1.0 );
+	else if ( uHorizonFade.w < 5.5 ) gl_FragColor = vec4( gRingNear > 0.0 ? gGroundAlbedo : gRingAlbedo * 0.35, 1.0 );
+	else gl_FragColor = vec4( gRingNear, gRingCount > 0.0 ? 1.0 : 0.0, gRingCount * 0.25, 1.0 );
 }
 `;
 
+/**
+ * The weather's shelter, which reads the roof grid round the camera: the call the ring program leaves out. No ring stands
+ * within the grid (the hole round the camera is a chunk at the least each way, the grid 36 m), where the shelter answers
+ * open and uncovered, which is what stands in its place: so the roof grid's sampler is never read and takes no unit.
+ */
+export const RING_SHELTER = ['vec2 wetShelter = weatherShelter(vWetPos, wetN);', 'vec2 wetShelter = vec2(0.0);'] as const;
+
 /** The program's own pieces, for the scan (`horizonShaders.test.ts`). */
-export const RING_TEXT = { VERTEX_PARS, HORIZON_RING_VERTEX, FRAGMENT_PARS, FRAGMENT_TOP, FRAGMENT_MAP, FRAGMENT_NORMAL, FRAGMENT_CLOUDS, FRAGMENT_FADE, FRAGMENT_VIEW };
+export const RING_TEXT = { VERTEX_PARS, HORIZON_RING_VERTEX, FRAGMENT_PARS, FRAGMENT_TOP, FRAGMENT_MAP, FRAGMENT_NORMAL, FRAGMENT_ROUGH, FRAGMENT_CLOUDS, FRAGMENT_FADE, FRAGMENT_VIEW };
 
 /** Every anchor the ring program writes at: all of them or nothing. */
 export const RING_ANCHORS = {
   vertex: ['#include <common>', '#include <beginnormal_vertex>', '#include <begin_vertex>'],
-  fragment: ['#include <common>', '#include <clipping_planes_fragment>', '#include <map_fragment>', '#include <normal_fragment_maps>', '#include <opaque_fragment>', '#include <fog_fragment>', '#include <dithering_fragment>'],
+  fragment: ['#include <common>', '#include <clipping_planes_fragment>', '#include <map_fragment>', '#include <roughnessmap_fragment>', '#include <normal_fragment_maps>', '#include <lights_physical_pars_fragment>', '#include <opaque_fragment>', '#include <fog_fragment>', '#include <dithering_fragment>'],
 };
 
 const after = (s: string, chunk: string, code: string) => s.replace(chunk, `${chunk}\n${code}`);
 
-/** The ring program into one shader; answers whether it went in (every anchor there, or nothing written). */
-export function injectRing(shader: { vertexShader: string; fragmentShader: string; uniforms: Record<string, unknown> }, u: RingUniforms, ground: GroundTileUniforms): boolean {
+/**
+ * The ring program into one shader; answers whether it went in: every anchor there, the tile program's composition read
+ * (`ringTileMap`) and three's highlight line found for the flat shine to follow (`GGX_ANCHOR`), or nothing written.
+ */
+export function injectRing(shader: { vertexShader: string; fragmentShader: string; uniforms: Record<string, unknown> }, u: RingUniforms, ground: GroundTileUniforms, chunk: string = THREE.ShaderChunk.lights_physical_pars_fragment): boolean {
   const vs = shader.vertexShader;
   const fs = shader.fragmentShader;
   if (RING_ANCHORS.vertex.some((a) => !vs.includes(a)) || RING_ANCHORS.fragment.some((a) => !fs.includes(a))) return false;
+  const ggx = chunk.indexOf(GGX_ANCHOR);
+  if (ggx < 0 || !RING_TILE_MAP) return false;
+  // The near ground's flat shine, the tile program's own line after three's highlight (`injectGroundTiles`'s).
+  const pars = `${chunk.slice(0, ggx + GGX_ANCHOR.length)}\n\t${TILE_FLAT_LINE}${chunk.slice(ggx + GGX_ANCHOR.length)}`;
   shader.vertexShader = after(vs, '#include <common>', VERTEX_PARS).replace('#include <beginnormal_vertex>', HORIZON_RING_VERTEX).replace('#include <begin_vertex>', 'vec3 transformed = gRingPos;');
   let f = after(fs, '#include <common>', FRAGMENT_PARS);
   f = after(f, '#include <clipping_planes_fragment>', FRAGMENT_TOP);
   f = after(f, '#include <map_fragment>', FRAGMENT_MAP);
+  f = f.replace('#include <lights_physical_pars_fragment>', pars);
   f = f.replace('#include <opaque_fragment>', `${FRAGMENT_CLOUDS}\n#include <opaque_fragment>`);
   f = after(f, '#include <fog_fragment>', FRAGMENT_FADE);
   f = after(f, '#include <dithering_fragment>', FRAGMENT_VIEW);
   shader.fragmentShader = f;
-  injectWetness(shader as never, 'object');
-  // The baked normal lands after the weather's stage at the same anchor, so the weather reads the ring's own lean.
-  shader.fragmentShader = shader.fragmentShader.replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>\n${FRAGMENT_NORMAL}`);
+  // The near ground's own weather (its darkening by the ground's facing, its gloss and snow; its puddles and their rings
+  // lie within 33 m of the camera, which no ring does), its shelter open (`RING_SHELTER`).
+  injectWetness(shader as never, 'ground');
+  shader.fragmentShader = shader.fragmentShader.replace(RING_SHELTER[0], RING_SHELTER[1]);
+  // The lean and the gloss land before the weather's at the same anchors (the tile program's order), so the weather has the last word.
+  shader.fragmentShader = after(after(shader.fragmentShader, '#include <normal_fragment_maps>', FRAGMENT_NORMAL), '#include <roughnessmap_fragment>', FRAGMENT_ROUGH);
   Object.assign(shader.uniforms, u);
-  // The tile program's own uniform objects, by reference: the mirror, the cloud tile, its clock and the bumps' strength move both.
+  // The tile program's own uniform objects, by reference: the pictures, masks, tint, mirror, cloud tile, its clock, the
+  // bumps' and gloss's strengths and the masks' two switches move both.
   shader.uniforms.uGroundFrame = ground.uGroundFrame;
   shader.uniforms.uGround = ground.uGround;
   shader.uniforms.uGroundBump = ground.uGroundBump;
+  shader.uniforms.uGroundMask = ground.uGroundMask;
   shader.uniforms.uGroundClouds = ground.uGroundClouds;
   shader.uniforms.uGroundCloud = ground.uGroundCloud;
   shader.uniforms.uGroundShine = ground.uGroundShine;
+  shader.uniforms.uGroundLook = ground.uGroundLook;
+  shader.uniforms.uGroundTint = ground.uGroundTint;
+  shader.uniforms.uGroundTintRef = ground.uGroundTintRef;
   return true;
 }
 

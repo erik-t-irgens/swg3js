@@ -109,9 +109,9 @@ const HORIZON_GROUPS: DialGroup[] = [
   {
     title: 'The look',
     dials: [
-      choice('detail', 'Near grain', "The tile's own picture's grain and bump from the hole to the detail's reach."),
-      num('detailReach', 'Grain reach', 0, 3000, 50, 'm', 'Where the near grain starts to fade.'),
-      num('detailFade', 'Grain fade', 0, 1000, 25, 'm', 'Over how far it fades out.'),
+      choice('detail', 'Near ground\'s own look', "Inside the ground detail distance the rings draw the near ground's own composition (its pictures, alternates, masks, tint, bump and gloss); off, the bake's per-tile mean everywhere."),
+      num('detailReach', 'Ground detail distance', 0, 6000, 50, 'm', "Where the near ground's own look is gone (the Graphics page's Ground detail distance, which a reload puts back). The window it reads is made again at a new size when this moves."),
+      num('detailFadeShare', 'Its fade', 0, 1, 0.05, '', "The share of the distance it fades over into the bake's per-tile mean, so no line shows where it ends."),
       choice('fadeTo', 'Horizon fades to', "The last stretch of the reach dissolves into the sky's colour behind it, the fog's, or nothing."),
       num('fade', 'Horizon fade share', 0, 0.5, 0.01, '', 'The share of the reach in force the fade runs over.'),
       num('fogCheap', 'Fog cheap path', 0.9, 1, 0.001, '', 'Past this fog factor a fragment is the fog\'s colour with no taps.'),

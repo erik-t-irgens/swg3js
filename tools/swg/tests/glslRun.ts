@@ -24,7 +24,8 @@ export const GLSL_SCALARS: Readonly<Record<string, (...a: number[]) => number>> 
 // An unsigned integer runs as a whole number (`uint(` a truncation, `1u` and `0x…u` their plain numbers): right for an
 // index or a count, never for a hash, whose multiplies and shifts wrap at 32 bits, so a hash is read by its shape
 // (`glslHash`, `glslW7Hash`) and handed in from `env`, its own text taken out of what is run.
-const TYPES = '(?:float|int|uint|bool|vec2|vec3|vec4)';
+// An integer vector declared runs as whatever the test's stand-in hands back (`texelFetch`'s `uvec4`, the horizon's window).
+const TYPES = '(?:float|int|uint|bool|vec2|vec3|vec4|uvec4|ivec2)';
 /** What a function may answer: a type, or nothing (a `void` one writes globals, which run as the script's own `let`s). */
 const RETURNS = '(?:void|float|int|uint|bool|vec2|vec3|vec4)';
 /** What a parameter may be: a type or a sampler, with a precision before it or not (stood in from `env` when run). */

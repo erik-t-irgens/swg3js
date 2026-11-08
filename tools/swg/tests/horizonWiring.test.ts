@@ -104,7 +104,15 @@ pin(m, "HORIZON_TUNE.ground = S.farRings ? 'rings' : 'tiles';\n    this.applyRea
 pin(m, "case 'farRings':\n        // The far ground's switch (the horizon pass): the rings stood or the tiles made again behind a short curtain.\n        void this.setHorizonGround(S.farRings ? 'rings' : 'tiles')", "main.ts: the page's switch moved in play goes through setHorizonGround");
 pin(m, "if (had && this.inWorld && !this.traveling) await this.groundCurtain('the far tiles', () => this.world.standFarGround(this.player.worldPos));", 'main.ts: back to the tiles, their builds a curtain\'s work');
 pin(m, "await this.groundCurtain(\"the world's bake\", async () => {\n      await this.world.loadHorizon(this.world.packId, this.player.worldPos);\n      this.world.standFarGround(this.player.worldPos);\n    });", "main.ts: to the rings, the bake's load and the rings' far grids and cards a curtain's work");
-pin(now('src/ui/menu.ts'), 'Not ready on Direct3D 11', "menu.ts: the rings' switch says it is not ready on Direct3D 11 (18 samplers past its 16, W3's to pack)");
+// The third wave packed the ring program to 15 samplers (`horizonShaders.test.ts` counts them): the switch says nothing of Direct3D 11.
+ok(!now('src/ui/menu.ts').includes('Direct3D 11 (Chrome'), "menu.ts: the rings' switch no longer says it is not ready on Direct3D 11");
+// W3's: the Graphics page's Ground detail distance, read before any world (the first bake's window is made at its size) and moved live.
+pin(m, "HORIZON_TUNE.detailReach = S.groundDetailDistance * 1000;\n    // The spawner's cap", "main.ts: the Ground detail distance read before any world");
+pin(m, "case 'groundDetailDistance':\n        // A number the rings read a frame: the composition window is made again at its new size in the decode worker and\n        // swapped in when it lands (a texture's size, never a program).\n        HORIZON_TUNE.detailReach = S.groundDetailDistance * 1000;", "main.ts: the Ground detail distance moved in play is the rings' distance at once");
+pin(w, "    const t = GROUND_DRAW_TUNE;\n    // The knobs the far ground's tables read, before this call moves any (a view, the shine or the clouds compose nothing again).\n    const tablesWere = tableKnobs();", "world.ts: groundDraw reads the tables' knobs before it moves any");
+pin(w, "    if (tableKnobs() !== tablesWere) this.horizonField?.retune();\n    if (!textures || !this.terrain.swg) return null;", "world.ts: a ground knob's move composes the far ground's albedo and window again, only when a knob the tables read moved (the review round)");
+ok(!/\n\s*this\.horizonField\?\.retune\(\);/.test(w), 'world.ts: no retune asked unconditionally');
+pin(w, 'if (sw.moved || childrenMoved || weightsMoved) this.horizonField?.retune();', "world.ts: so does the world row's switches moving");
 pin(m, "if (r.horizon !== this.horizonReachApplied) {\n      this.horizonReachApplied = r.horizon;\n      tuneHorizon({ reach: r.horizon });", "main.ts: the Terrain distance (or the console's hold) reaches the rings through tuneHorizon, only when it moved");
 pin(m, "if (key === 'farRadius' && this.settings.farRings) return { off:", "main.ts: the far tiles' radius greys while the rings stand in their place");
 

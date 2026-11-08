@@ -11,6 +11,7 @@ import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks
 import * as THREE from 'three';
 import { HORIZON_TUNE, HoleGrid, LEAF } from '../../../src/world/horizon/horizonMath.ts';
 import { HorizonField, RingSession, copyDome, type DomeUniforms } from '../../../src/world/horizon/horizonField.ts';
+import { windowPlace, windowTiles, type WindowPlace } from '../../../src/world/horizon/horizonDecode.ts';
 import { rolling, testCamera, testHole, testPyramid } from './horizonFixtures.ts';
 
 const shift = { x: 1, z: 0 };
@@ -47,6 +48,7 @@ const settle = async () => {
 };
 
 const st = new Float64Array(4);
+st[2] = 0.5;
 // The camera's poses over the walk, the turn and the climb (a walk over a 2 km square, so the detail window is asked for
 // again now and then), each a camera of its own with its matrices current, made before the window.
 const POSES = 512;
@@ -98,5 +100,62 @@ for (let attempt = 0; attempt < 3; attempt++) {
   if (scavenges < best.scavenges || (scavenges === best.scavenges && made < best.made)) best = { made, scavenges };
   if (best.scavenges === 0 && best.made <= 0) break;
 }
+// The third wave's composition window, kept round the eye: with the field holding a window that stands round where the
+// camera turns and climbs, every frame works out where the window would stand and asks nothing (the steady frame of a
+// player who has not walked 128 m), which must make nothing either. The stand-in worker takes an ask by putting the
+// window where it was asked, as a landing does.
+const S = windowTiles(HORIZON_TUNE.detailReach);
+const f = field as unknown as { header: unknown; place: WindowPlace; windowAsked: number; worker: unknown };
+f.header = { colour: { x0: 0, z0: 0, step: 8, nx: 4000, nz: 4000 } };
+const centreRaw = { rx: -cams[0].position.x, rz: cams[0].position.z };
+Object.assign(f.place, windowPlace(centreRaw.rx, centreRaw.rz, S, { x0: 0, z0: 0, step: 8, nx: 4000, nz: 4000 }));
+f.windowAsked = 0;
+let asks = 0;
+f.worker = {
+  postMessage(m: { place?: WindowPlace }) {
+    asks++;
+    if (m.place) Object.assign(f.place, m.place);
+    f.windowAsked = 0;
+  },
+  terminate() {},
+};
+const still: THREE.PerspectiveCamera[] = [];
+for (let p = 0; p < POSES; p++) {
+  const cam = testCamera();
+  const x = cams[0].position.x + Math.sin(p * 0.3) * 40;
+  const z = cams[0].position.z + Math.cos(p * 0.21) * 40;
+  cam.position.set(x, rolling(x, z) + 2 + (p % 64) * 30, z);
+  cam.rotation.set(-0.05 - (p % 3) * 0.2, p * 0.05, 0, 'YXZ');
+  cam.updateMatrixWorld();
+  still.push(cam);
+}
+function stillFrame(): void {
+  st[2] += 1;
+  const cam = still[(st[2] | 0) & (POSES - 1)];
+  copyDome(session.uniforms, dome);
+  field.update(session, cam, cam.position, 6, 0, 0, hole, true);
+}
+function stillFrames(n: number): void {
+  for (let i = 0; i < n; i++) stillFrame();
+}
+try {
+  new Function('f', '%NeverOptimizeFunction(f)')(stillFrames);
+} catch {
+  // Without the flag the loop is left to the compiler.
+}
+stillFrames(4000);
+let bestStill = { made: Infinity, scavenges: Infinity };
+for (let attempt = 0; attempt < 3; attempt++) {
+  stillFrames(1000);
+  (globalThis as unknown as { gc: (o?: { type: string }) => void }).gc({ type: 'minor' });
+  await settle();
+  scavenges = 0;
+  const before = young();
+  stillFrames(N);
+  const made = young() - before;
+  await settle();
+  if (scavenges < bestStill.scavenges || (scavenges === bestStill.scavenges && made < bestStill.made)) bestStill = { made, scavenges };
+  if (bestStill.scavenges === 0 && bestStill.made <= 0) break;
+}
 watch.disconnect();
-console.log(JSON.stringify({ frames: N, made: best.made, scavenges: best.scavenges, patches: st[1] / (st[0] || 1) }));
+console.log(JSON.stringify({ frames: N, made: best.made, scavenges: best.scavenges, patches: st[1] / (st[0] || 1), window: { made: bestStill.made, scavenges: bestStill.scavenges, asks } }));

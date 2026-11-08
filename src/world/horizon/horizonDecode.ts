@@ -2,7 +2,9 @@
 // (`horizonDecodeWorker.ts`) behind the loading screen: the sections inflated, the heights put back as float32, the
 // normals worked out of them, the leaves' min/max pyramid, the albedo composed per 4 m tile the way the tile program
 // draws it (every family at its pictures' mean, the masks averaged over sixteen places of the tile, then the colour
-// map's tint), and the detail window of each 4 m tile's own layer. Every function here is pure and node runs it.
+// map's tint), and the composition window: each 4 m tile's layers and mask codes as the near ground's chunk builder
+// works them out, and the colour cells' tint, round the eye, from which the ring draws the tile program's own
+// composition inside the ground detail distance (the third wave). Every function here is pure and node runs it.
 import { childChoiceAt } from '../../swg/terrain/generator.ts';
 import { composeTile, srgbDecode, srgbEncode, tintGamma, type MaskSample, type TintReference } from '../groundMath.ts';
 import { tileLayers, type GroundTiler } from '../groundTiles.ts';
@@ -11,9 +13,229 @@ import { LEAF, LEVELS_MOST, type MinMaxPyramid } from './horizonMath.ts';
 
 /** The albedo is stored at this share of itself, so a tint past one keeps its colour in eight bits (the shader takes it back). */
 export const ALBEDO_SCALE = 2;
-/** The detail window: 4 m texels, this many a side, addressed by the tile's place modulo the window. */
-export const DETAIL_SIZE = 1024;
+/** A tile of the composition window: 4 m, the near ground's own (each 2 m cell lies in one). */
 export const DETAIL_TILE = 4;
+
+// ---------------------------------------------------------------- the composition window (the third wave)
+
+/**
+ * How far past the ground detail distance the composition window reaches, metres: it is made again round the eye by
+ * strips once the eye has moved `STRIP_TILES` tiles off its middle, so this is what a strip still on its way may lag
+ * by before a pixel inside the distance reads a tile the window has not got (one that does reads the far albedo).
+ */
+export const WINDOW_SLACK = 512;
+/** The window's side in tiles is a multiple of this. */
+export const WINDOW_ROUND = 64;
+/** How far (tiles) the eye moves off the window's middle before a strip makes it again round the eye. */
+export const STRIP_TILES = 32;
+
+/** The window's side in 4 m tiles for a ground detail distance (metres): the distance and its slack each way, rounded up. */
+export function windowTiles(reach: number): number {
+  const r = Math.max(0, Number.isFinite(reach) ? reach : 0);
+  return Math.max(4 * WINDOW_ROUND, Math.ceil((2 * (r + WINDOW_SLACK)) / (DETAIL_TILE * WINDOW_ROUND)) * WINDOW_ROUND);
+}
+
+/** The tint window's side in colour cells for a window of `S` tiles on a colour lattice of `step` metres: every cell a bilinear inside it reads. */
+export function tintCells(S: number, step: number): number {
+  return Math.ceil((S * DETAIL_TILE) / step) + 2;
+}
+
+/** Where a window stands: its first tile (raw tile index, raw = 4 x index), its side, its tint window's first cell and side. */
+export interface WindowPlace {
+  ox: number;
+  oz: number;
+  S: number;
+  ci0: number;
+  cj0: number;
+  T: number;
+}
+
+/** The window of `S` tiles centred on raw (rx, rz), and its tint window on the colour lattice `colour`. */
+export function windowPlace(rx: number, rz: number, S: number, colour: Lattice, out: WindowPlace = { ox: 0, oz: 0, S: 0, ci0: 0, cj0: 0, T: 0 }): WindowPlace {
+  out.S = S;
+  out.ox = Math.floor(rx / DETAIL_TILE) - S / 2;
+  out.oz = Math.floor(rz / DETAIL_TILE) - S / 2;
+  out.T = tintCells(S, colour.step);
+  out.ci0 = Math.floor((out.ox * DETAIL_TILE - colour.x0) / colour.step);
+  out.cj0 = Math.floor((out.oz * DETAIL_TILE - colour.z0) / colour.step);
+  return out;
+}
+
+/** A rectangle of a window's index space (tiles or cells): `w` by `h` from (x0, z0). */
+export interface IndexRect {
+  x0: number;
+  z0: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * What of a window of side `S` from (nx, nz) the window from (ox, oz) did not hold: none when they are the same, the whole
+ * new window when they share nothing, else at most two rectangles (the columns the new one gained, whole, and the rows it
+ * gained over the columns both hold).
+ */
+export function freshRects(ox: number, oz: number, nx: number, nz: number, S: number): IndexRect[] {
+  const dx = nx - ox;
+  const dz = nz - oz;
+  if (dx === 0 && dz === 0) return [];
+  if (Math.abs(dx) >= S || Math.abs(dz) >= S) return [{ x0: nx, z0: nz, w: S, h: S }];
+  const out: IndexRect[] = [];
+  // The columns gained, every row of the new window.
+  if (dx > 0) out.push({ x0: ox + S, z0: nz, w: dx, h: S });
+  else if (dx < 0) out.push({ x0: nx, z0: nz, w: -dx, h: S });
+  // The rows gained, over the columns both windows hold.
+  const cx0 = Math.max(ox, nx);
+  const cx1 = Math.min(ox, nx) + S;
+  if (cx1 > cx0) {
+    if (dz > 0) out.push({ x0: cx0, z0: oz + S, w: cx1 - cx0, h: dz });
+    else if (dz < 0) out.push({ x0: cx0, z0: nz, w: cx1 - cx0, h: -dz });
+  }
+  return out;
+}
+
+/**
+ * What of a rectangle of index space lies inside the window of side `S` from (x0, z0), pushed onto `out` (nothing when
+ * they do not meet): a rectangle regenerated (the paint, a dropped building's ground) is made again in the window by the
+ * strip path, and only where the window holds it, since a tile past the window would land on another tile's texel.
+ */
+export function clipRect(r: IndexRect, x0: number, z0: number, S: number, out: IndexRect[]): void {
+  const a = Math.max(r.x0, x0);
+  const b = Math.max(r.z0, z0);
+  const c = Math.min(r.x0 + r.w, x0 + S);
+  const d = Math.min(r.z0 + r.h, z0 + S);
+  if (c > a && d > b) out.push({ x0: a, z0: b, w: c - a, h: d - b });
+}
+
+/**
+ * The window's tiles an overlay's poles reach: every tile one of the poles is a corner of (a pole at raw x is the corner of
+ * the tiles x/4 - 1 and x/4), so a strip over this rectangle makes every tile the overlay changed again, and nothing else.
+ */
+export function poleTiles(p: Pick<PoleOverride, 'x0' | 'z0' | 'n' | 'm'>): IndexRect {
+  const x0 = Math.floor(p.x0 / DETAIL_TILE) - 1;
+  const z0 = Math.floor(p.z0 / DETAIL_TILE) - 1;
+  const x1 = Math.ceil((p.x0 + (p.n - 1) * DETAIL_TILE) / DETAIL_TILE);
+  const z1 = Math.ceil((p.z0 + (p.m - 1) * DETAIL_TILE) / DETAIL_TILE);
+  return { x0, z0, w: x1 - x0 + 1, h: z1 - z0 + 1 };
+}
+
+/** A piece of a rectangle as it lands in a toroidal texture of side `S`: from (sx, sz) of the rectangle's own data, at texel (dx, dz). */
+export interface WrapPiece {
+  sx: number;
+  sz: number;
+  dx: number;
+  dz: number;
+  w: number;
+  h: number;
+}
+
+const modS = (v: number, S: number) => ((v % S) + S) % S;
+
+/** A rectangle of index space split where it wraps round a toroidal texture of side `S` (at most four pieces). */
+export function wrapPieces(r: IndexRect, S: number): WrapPiece[] {
+  const out: WrapPiece[] = [];
+  for (let z = r.z0; z < r.z0 + r.h; ) {
+    const dz = modS(z, S);
+    const h = Math.min(S - dz, r.z0 + r.h - z);
+    for (let x = r.x0; x < r.x0 + r.w; ) {
+      const dx = modS(x, S);
+      const w = Math.min(S - dx, r.x0 + r.w - x);
+      out.push({ sx: x - r.x0, sz: z - r.z0, dx, dz, w, h });
+      x += w;
+    }
+    z += h;
+  }
+  return out;
+}
+
+/**
+ * The composition window's texels over a rectangle of tiles (index space, raw = 4 x index), as the near ground's chunk
+ * builder works each tile out (`tileLayers` over its four corner poles' families and choices: the bake's pattern corner
+ * and the place's hash, or a pole the live generator made again): four layers (the unused ones the top layer again) and
+ * the overlays' three mask codes, packed as RGBA16UI: R the first two layers' bytes, G the last two, B the codes five bits
+ * each, A how many layers the tile holds. Written rectangle-ordered, or, with `S`, each tile at its toroidal texel.
+ */
+export function windowRect(comp: TileComposer, r: IndexRect, out = new Uint16Array(r.w * r.h * 4), S = 0): Uint16Array {
+  const P = r.w + 1;
+  let sF = new Int32Array(P);
+  let sC = new Int32Array(P);
+  let nF = new Int32Array(P);
+  let nC = new Int32Array(P);
+  const x0 = r.x0 * DETAIL_TILE;
+  comp.poleRow(x0, r.z0 * DETAIL_TILE, P, sF, sC);
+  const L = comp.layers;
+  const C = comp.codes;
+  for (let j = 0; j < r.h; j++) {
+    comp.poleRow(x0, (r.z0 + j + 1) * DETAIL_TILE, P, nF, nC);
+    const row = S ? modS(r.z0 + j, S) * S : j * r.w;
+    for (let i = 0; i < r.w; i++) {
+      const count = comp.layersFrom(sF, sC, nF, nC, i);
+      const o = (row + (S ? modS(r.x0 + i, S) : i)) * 4;
+      if (count === 1) {
+        // `layersFrom`'s one-family answer writes the first layer alone: `tileLayers` repeats it and writes no code.
+        const l = L[0];
+        out[o] = l | (l << 8);
+        out[o + 1] = l | (l << 8);
+        out[o + 2] = 0;
+      } else {
+        out[o] = L[0] | (L[1] << 8);
+        out[o + 1] = L[2] | (L[3] << 8);
+        out[o + 2] = C[0] | (C[1] << 5) | (C[2] << 10);
+      }
+      out[o + 3] = count;
+    }
+    const f = sF;
+    sF = nF;
+    nF = f;
+    const c = sC;
+    sC = nC;
+    nC = c;
+  }
+  return out;
+}
+
+/** A window texel unpacked: its four layers, three codes and count (the program's own unpacking, for the tests). */
+export function unpackWindow(w: Uint16Array, o: number, layers: number[], codes: number[]): number {
+  layers[0] = w[o] & 255;
+  layers[1] = w[o] >> 8;
+  layers[2] = w[o + 1] & 255;
+  layers[3] = w[o + 1] >> 8;
+  codes[0] = w[o + 2] & 31;
+  codes[1] = (w[o + 2] >> 5) & 31;
+  codes[2] = (w[o + 2] >> 10) & 31;
+  return w[o + 3];
+}
+
+/**
+ * The tint window's texels over a rectangle of colour cells (the colour lattice's own indices; a cell past the lattice
+ * reads its nearest): the colour map's bytes as the bake keeps them (a cell the live generator made again read before
+ * them), alpha 255, for the program's bilinear between cell centres. Rectangle-ordered, or with `T` toroidal.
+ */
+export function tintRect(colour: Uint8Array, lat: Lattice, cov: readonly ColourOverride[], r: IndexRect, out = new Uint8Array(r.w * r.h * 4), T = 0): Uint8Array {
+  const rgb = [0, 0, 0];
+  for (let j = 0; j < r.h; j++) {
+    const cj = Math.min(lat.nz - 1, Math.max(0, r.z0 + j));
+    const row = T ? modS(r.z0 + j, T) * T : j * r.w;
+    for (let i = 0; i < r.w; i++) {
+      const ci = Math.min(lat.nx - 1, Math.max(0, r.x0 + i));
+      cellRgbAt(colour, lat.nx, cov, ci, cj, rgb);
+      const o = (row + (T ? modS(r.x0 + i, T) : i)) * 4;
+      out[o] = rgb[0];
+      out[o + 1] = rgb[1];
+      out[o + 2] = rgb[2];
+      out[o + 3] = 255;
+    }
+  }
+  return out;
+}
+
+/** A whole window (both textures) made at a place, toroidally ordered: what the decode and a remake hand the field. */
+export function wholeWindow(t: TileTables, header: HorizonHeader, fam: Uint8Array, colour: Uint8Array, poles: readonly PoleOverride[], cells: readonly ColourOverride[], p: WindowPlace): { window: Uint16Array; tint: Uint8Array } {
+  const comp = new TileComposer(t, fam, header.ground);
+  comp.setOverrides(poles);
+  const window = windowRect(comp, { x0: p.ox, z0: p.oz, w: p.S, h: p.S }, new Uint16Array(p.S * p.S * 4), p.S);
+  const tint = tintRect(colour, header.colour, cells, { x0: p.ci0, z0: p.cj0, w: p.T, h: p.T }, new Uint8Array(p.T * p.T * 4), p.T);
+  return { window, tint };
+}
 
 /** A section inflated (zlib, which `DecompressionStream('deflate')` reads). */
 export async function inflate(bytes: Uint8Array): Promise<Uint8Array> {
@@ -111,8 +333,7 @@ export interface ColourOverride {
  * The tile with its south-west corner at raw (tx, tz): its four corners' families and choices (the place's own hash), its
  * layers and codes by `tileLayers`, and its colour in linear light at every picture's mean, the masks averaged over a 4
  * by 4 grid of places (`composeTile`): written into `out`. With `memo` (by the tile's signature) a tile of the same
- * layers and codes is composed once a world; with `weights`, the layer with the greatest share at the tile's middle is
- * answered (the detail window's).
+ * layers and codes is composed once a world. Its rows of poles (`poleRow`, `layersFrom`) are the composition window's too.
  */
 export class TileComposer {
   private readonly fams = new Int32Array(4);
@@ -128,9 +349,7 @@ export class TileComposer {
   private keyAt = new Int32Array(4096);
   private memoRgb = new Float32Array(3 * 1024);
   private memoN = 0;
-  private readonly acc = [0, 0, 0];
   private readonly one = [0, 0, 0];
-  private readonly w = [0, 0, 0];
   private readonly t: TileTables;
   private readonly fam: Uint8Array;
   private readonly ground: Lattice;
@@ -320,33 +539,6 @@ export class TileComposer {
     out[1] *= k;
     out[2] *= k;
     return out;
-  }
-  /** The layer with the greatest share at the tile's middle (the detail window's). */
-  mainLayer(tx: number, tz: number): number {
-    const count = this.layersAt(tx, tz);
-    if (count === 1) return this.layers[0];
-    // `composeTile` writes the weights only as far as the first absent overlay: what lies past it is the last tile's.
-    this.w[0] = 0;
-    this.w[1] = 0;
-    this.w[2] = 0;
-    composeTile((_i, o) => {
-      o[0] = 0;
-    }, this.codes, 0.5, 0.5, this.sample, this.t.add, this.t.painted, this.acc, this.w);
-    let best = 0;
-    let share = (1 - this.w[0]) * (1 - this.w[1]) * (1 - this.w[2]);
-    const s1 = this.w[0] * (1 - this.w[1]) * (1 - this.w[2]);
-    const s2 = this.w[1] * (1 - this.w[2]);
-    const s3 = this.w[2];
-    if (s1 > share) {
-      best = 1;
-      share = s1;
-    }
-    if (s2 > share) {
-      best = 2;
-      share = s2;
-    }
-    if (s3 > share) best = 3;
-    return this.layers[best];
   }
 }
 
@@ -907,28 +1099,6 @@ export function pyramidRelay(p: MinMaxPyramid, header: HorizonHeader, fine: Floa
   }
 }
 
-/**
- * The detail window (§2.5): each 4 m tile's own layer (the greatest share at its middle) for the 4,096 m square centred
- * on raw (rx, rz), addressed by the tile's index modulo the window, so the program reads it as the camera's place moves.
- */
-export function detailWindow(t: TileTables, header: HorizonHeader, fam: Uint8Array, rx: number, rz: number, out = new Uint8Array(DETAIL_SIZE * DETAIL_SIZE), poles: readonly PoleOverride[] = []): Uint8Array {
-  const comp = new TileComposer(t, fam, header.ground);
-  comp.setOverrides(poles);
-  const half = (DETAIL_SIZE / 2) * DETAIL_TILE;
-  const tx0 = Math.floor((rx - half) / DETAIL_TILE);
-  const tz0 = Math.floor((rz - half) / DETAIL_TILE);
-  const mod = (v: number) => ((v % DETAIL_SIZE) + DETAIL_SIZE) % DETAIL_SIZE;
-  for (let q = 0; q < DETAIL_SIZE; q++) {
-    const tz = tz0 + q;
-    const row = mod(tz) * DETAIL_SIZE;
-    for (let p = 0; p < DETAIL_SIZE; p++) {
-      const tx = tx0 + p;
-      out[row + mod(tx)] = comp.mainLayer(tx * DETAIL_TILE, tz * DETAIL_TILE);
-    }
-  }
-  return out;
-}
-
 /** Each layer's mean colour in linear light, read off the colour array every `stride` texels each way (sRGB decoded). */
 export function layerMeans(colour: Uint8Array, size: number, depth: number, stride = 4): Float32Array {
   const lin = new Float32Array(256);
@@ -961,16 +1131,18 @@ export interface DecodedBake {
   fine: Float32Array;
   coarse: Float32Array;
   fineNormal: Uint8Array;
-  coarseNormal: Uint8Array;
   albedo: Uint8Array;
   coarseAlbedo: Uint8Array;
   pyramid: MinMaxPyramid;
-  detail: Uint8Array;
+  /** The composition window and its tint window at `place`, toroidally ordered (the third wave's). */
+  window: Uint16Array;
+  tint: Uint8Array;
+  place: WindowPlace;
   ms: { inflate: number; heights: number; normals: number; albedo: number; pyramid: number; detail: number; memo: number };
 }
 
-/** The whole decode, in the worker's order. */
-export async function decodeBake(header: HorizonHeader, bin: Uint8Array, t: TileTables, centre: { x: number; z: number }, shift: { x: number; z: number }, eye: { rx: number; rz: number }): Promise<DecodedBake> {
+/** The whole decode, in the worker's order; the window made round the eye at side `S` tiles. */
+export async function decodeBake(header: HorizonHeader, bin: Uint8Array, t: TileTables, centre: { x: number; z: number }, shift: { x: number; z: number }, eye: { rx: number; rz: number }, S = windowTiles(2500)): Promise<DecodedBake> {
   const clock = () => performance.now();
   let t0 = clock();
   const s = await inflateSections(header, bin);
@@ -980,8 +1152,8 @@ export async function decodeBake(header: HorizonHeader, bin: Uint8Array, t: Tile
   const coarse = decodeHeights(s.coarseHeights, header.coarse.nx, header.coarse.nz, header.coarse.lo, header.coarse.q);
   ms.heights = clock() - t0;
   t0 = clock();
+  // The coarse lattice's normals are worked out in the ring's vertex stage from its heights (the third wave's sampler budget).
   const fineNormal = normalsOf(fine, header.fine);
-  const coarseNormal = normalsOf(coarse, header.coarse);
   ms.normals = clock() - t0;
   const a = composeAlbedo(t, header, s.families, s.colour);
   ms.albedo = a.ms;
@@ -993,10 +1165,8 @@ export async function decodeBake(header: HorizonHeader, bin: Uint8Array, t: Tile
   const pyramid = pyramidOf(header, fine, coarse, centre, shift);
   ms.pyramid = clock() - t0;
   t0 = clock();
-  const detail = detailWindow(t, header, s.families, eye.rx, eye.rz);
+  const place = windowPlace(eye.rx, eye.rz, S, header.colour);
+  const w = wholeWindow(t, header, s.families, s.colour, [], [], place);
   ms.detail = clock() - t0;
-  return { fine, coarse, fineNormal, coarseNormal, albedo: a.rgba, coarseAlbedo, pyramid, detail, ms };
+  return { fine, coarse, fineNormal, albedo: a.rgba, coarseAlbedo, pyramid, window: w.window, tint: w.tint, place, ms };
 }
-
-/** The families section kept for a later detail window (the worker keeps it; the field never holds it). */
-export { DETAIL_SIZE as HORIZON_DETAIL_SIZE };

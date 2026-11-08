@@ -9,8 +9,8 @@
 // Run: node tools/swg/tests/horizonField.test.ts
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { DETAIL_SIZE } from '../../../src/world/horizon/horizonDecode.ts';
-import { HorizonField, RingSession, copyDome, type FieldFetch, type FieldGround, type DomeUniforms } from '../../../src/world/horizon/horizonField.ts';
+import { HorizonField, MEANS_CARD_MOST, MEANS_STRIDE, RingSession, copyDome, meansVerdict, type FieldFetch, type FieldGround, type DomeUniforms } from '../../../src/world/horizon/horizonField.ts';
+import { layerMeans } from '../../../src/world/horizon/horizonDecode.ts';
 import { HORIZON_FORMAT, HORIZON_SECTIONS, planBake } from '../../../src/world/horizon/horizonFile.ts';
 import { HORIZON_TUNE, cameraFrustum } from '../../../src/world/horizon/horizonMath.ts';
 import { HORIZON_DIALS, HORIZON_WATCH, REACH_RANGE } from '../../../src/world/horizon/horizonDials.ts';
@@ -72,11 +72,12 @@ const decoded = (h: ReturnType<typeof header>) => ({
   fine: new Float32Array(h.fine.nx * h.fine.nz),
   coarse: new Float32Array(h.coarse.nx * h.coarse.nz),
   fineNormal: new Uint8Array(h.fine.nx * h.fine.nz * 2),
-  coarseNormal: new Uint8Array(h.coarse.nx * h.coarse.nz * 2),
   albedo: new Uint8Array(h.colour.nx * h.colour.nz * 4),
   coarseAlbedo: new Uint8Array(h.coarse.nx * h.coarse.nz * 4),
   pyramid: { x0: 0, z0: 0, n: 1, levels: 1, lo: [new Float32Array(1)], hi: [new Float32Array(1)] },
-  detail: new Uint8Array(DETAIL_SIZE * DETAIL_SIZE),
+  window: new Uint16Array(256 * 256 * 4),
+  tint: new Uint8Array(130 * 130 * 4),
+  place: { ox: 0, oz: 0, S: 256, ci0: 0, cj0: 0, T: 130 },
   ms: { inflate: 0, heights: 0, normals: 0, albedo: 0, pyramid: 0, detail: 0, memo: 0 },
 });
 const ground: FieldGround = {
@@ -89,7 +90,7 @@ const ground: FieldGround = {
   reference: null,
 };
 const session = new RingSession(null);
-const standIn = session.uniforms.uHorizonFineH.value;
+const standIn = session.uniforms.uHorizonHeights.value;
 const fetchOf = (h: ReturnType<typeof header>, hold?: Promise<void>): FieldFetch => ({
   json: async () => {
     if (hold) await hold;
@@ -116,26 +117,26 @@ const loadWith = async (m: Mode, h = header(), waitMs = 60000) => {
   ok(!c.done && c.f.state.state === 'refused' && /did not decode/.test((c.f.state as { why: string }).why), "one that says the bake did not decode, the same");
   const d = await loadWith('silent', header(), 60);
   ok(!d.done && d.f.state.state === 'refused' && /said nothing/.test((d.f.state as { why: string }).why) && d.ms < 2000 && last!.terminated, `one that says nothing is given up after its bound and let go (${d.ms.toFixed(0)} ms at a bound of 60)`);
-  ok(session.uniforms.uHorizonFineH.value === standIn, "and none of them binds anything: the session's stand-ins stand");
+  ok(session.uniforms.uHorizonHeights.value === standIn, "and none of them binds anything: the session's stand-ins stand");
 }
 
-// ---------------------------------------------------------------- once ready: a detail window's failure is a note
+// ---------------------------------------------------------------- once ready: a composition window's failure is a note
 {
   const r = await loadWith('decode');
-  ok(r.done && r.f.state.state === 'ready' && session.uniforms.uHorizonFineH.value !== standIn, 'a worker that decodes readies the rings and binds its textures');
+  ok(r.done && r.f.state.state === 'ready' && session.uniforms.uHorizonHeights.value !== standIn, 'a worker that decodes readies the rings and binds its textures');
   last!.onmessage?.({ data: { type: 'error', id: 2, message: 'out of memory' } });
-  ok(r.f.state.state === 'ready' && /detail window/.test(r.f.note ?? ''), `a detail window that fails afterwards leaves the rings ready, a note (${r.f.note})`);
+  ok(r.f.state.state === 'ready' && /composition window/.test(r.f.note ?? ''), `a composition window that fails afterwards leaves the rings ready, a note (${r.f.note})`);
   last!.onerror?.({ message: 'gone', preventDefault() {} });
   ok(r.f.state.state === 'ready' && /stays as it is/.test(r.f.note ?? ''), 'and the worker dying afterwards the same');
   r.f.dispose(session);
-  ok(session.uniforms.uHorizonFineH.value !== r.f.fine, "let go, the session's stand-ins go back");
+  ok(session.uniforms.uHorizonHeights.value !== r.f.heights, "let go, the session's stand-ins go back");
 }
 
 // ---------------------------------------------------------------- a load let go on its way
 {
   mode = 'decode';
   const before = made;
-  const shown = session.uniforms.uHorizonFineH.value;
+  const shown = session.uniforms.uHorizonHeights.value;
   let open!: () => void;
   const hold = new Promise<void>((r) => (open = r));
   const f = new HorizonField('test', centre, { x: 0, z: 0 });
@@ -144,7 +145,7 @@ const loadWith = async (m: Mode, h = header(), waitMs = 60000) => {
   open();
   const done = await p;
   await wait(20);
-  ok(!done && made === before && session.uniforms.uHorizonFineH.value === shown, 'a load let go while it fetches stops there: no worker made, nothing bound');
+  ok(!done && made === before && session.uniforms.uHorizonHeights.value === shown, 'a load let go while it fetches stops there: no worker made, nothing bound');
   // Let go while it decodes, the worker then answering anyway: answered at once, and the late answer binds nothing.
   const g = new HorizonField('test', centre, { x: 0, z: 0 });
   const t0 = performance.now();
@@ -154,7 +155,7 @@ const loadWith = async (m: Mode, h = header(), waitMs = 60000) => {
   g.dispose(session);
   const qd = await q;
   await wait(20);
-  ok(made === before + 1 && !qd && performance.now() - t0 < 1000 && session.uniforms.uHorizonFineH.value === shown && g.state.state !== 'ready','one let go while it decodes answers at once (whatever awaits it is not held) and binds nothing, its worker answering or not');
+  ok(made === before + 1 && !qd && performance.now() - t0 < 1000 && session.uniforms.uHorizonHeights.value === shown && g.state.state !== 'ready','one let go while it decodes answers at once (whatever awaits it is not held) and binds nothing, its worker answering or not');
 }
 
 // ---------------------------------------------------------------- the normals' mips by the bake's own steps
@@ -246,6 +247,62 @@ const loadWith = async (m: Mode, h = header(), waitMs = 60000) => {
   HORIZON_WATCH.moved = null;
   HORIZON_TUNE.reach = was;
   HORIZON_TUNE.fogCheap = 0.996;
+}
+
+// ---------------------------------------------------------------- the self test's means, anchored to the card
+// The self test's verdict (the third wave's review round: held only against `layerMeans` at another stride, a fault inside
+// `layerMeans` moved both and still read 'within'). Here the card's top mip is each layer's exact mean, worked out from
+// the bytes as the card does (each texel sRGB decoded, then averaged), and the means handed in stand where a fault puts them.
+{
+  const depth = 6;
+  const size = 8;
+  const bytes = new Uint8Array(size * size * 4 * depth);
+  // Each texel's pair along x and along y alike, so every other texel's mean is the exact one: what is held is the card.
+  for (let l = 0; l < depth; l++) for (let k = 0; k < size * size; k++) bytes.set([10 + 35 * l + ((k % 8) >> 1) * 18, 200 - 20 * l - (Math.floor(k / 8) >> 1) * 14, 40 + 25 * l, 255], (l * size * size + k) * 4);
+  const dec = (b: number) => (b / 255 <= 0.04045 ? b / 255 / 12.92 : ((b / 255 + 0.055) / 1.055) ** 2.4);
+  const card = new Float32Array(depth * 4);
+  for (let l = 0; l < depth; l++) for (let c = 0; c < 3; c++) {
+    let s = 0;
+    for (let k = 0; k < size * size; k++) s += dec(bytes[(l * size * size + k) * 4 + c]);
+    card[l * 4 + c] = s / (size * size);
+  }
+  const exact = layerMeans(bytes, size, depth, 1);
+  const every2 = layerMeans(bytes, size, depth, MEANS_STRIDE);
+  const good = meansVerdict(card, every2, exact, depth);
+  ok(good.within && good.exactWorst === 0 && good.worstLevels === 0, `the means as layerMeans works them out stand on the card's own (exact ${good.exactWorst}, every other texel ${good.worstLevels}, stride ${good.strideWorst})`);
+  // A layerMeans that averaged the bytes before decoding them: both strides off the card alike, which the old rule passed.
+  const naive = (stride: number) => {
+    const out = new Float32Array(256 * 3);
+    for (let l = 0; l < depth; l++) for (let c = 0; c < 3; c++) {
+      let s = 0;
+      let n = 0;
+      for (let y = 0; y < size; y += stride) for (let x = 0; x < size; x += stride) {
+        s += bytes[(l * size * size + y * size + x) * 4 + c];
+        n++;
+      }
+      out[l * 3 + c] = dec(s / n);
+    }
+    return out;
+  };
+  const bad = meansVerdict(card, naive(MEANS_STRIDE), naive(1), depth);
+  ok(!bad.within && bad.exactWorst > MEANS_CARD_MOST && bad.strideWorst <= 1, `means averaged before they are decoded fail, anchored to the card (${bad.exactWorst} levels off it, the two strides ${bad.strideWorst} apart, as the old rule read them)`);
+  // A wrong channel (a layer's red read as its green): off the card, both strides alike.
+  const swap = (m: Float32Array) => {
+    const out = m.slice();
+    for (let l = 0; l < depth; l++) [out[l * 3], out[l * 3 + 1]] = [m[l * 3 + 1], m[l * 3]];
+    return out;
+  };
+  ok(!meansVerdict(card, swap(every2), swap(exact), depth).within, 'so do means read off the wrong channel');
+  // The card's own rounding: a layer three levels off the exact mean passes, named; four does not.
+  const lift = (levels: number) => {
+    const k = card.slice();
+    const enc = (v: number) => (v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055);
+    k[2 * 4] = dec(Math.round(enc(card[2 * 4]) * 255) + levels);
+    return k;
+  };
+  const three = meansVerdict(lift(3), every2, exact, depth);
+  ok(three.within && three.overTwo.join() === '2', `a card three levels off one layer (its rounding) passes, the layer named (${three.overTwo.join()})`);
+  ok(!meansVerdict(lift(4), every2, exact, depth).within, 'four levels off does not');
 }
 
 console.log(`\nhorizonField: ${checks} checks passed`);
