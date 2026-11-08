@@ -10,6 +10,7 @@
 
 import * as THREE from 'three';
 import { PLANETS, packIdOf, planetBelow, type PlanetDef } from '../data/planets';
+import { editKeyOf, placesPackOf } from '../data/ourWorlds.ts';
 import { destinationFor, drawnSystems, GALAXY_TUNE, loadGalaxyFile, planetTextureOf, systemOf, systemRoutes, worldsOf, zoneFor, type GalaxySystemDef } from '../data/galaxy';
 import { loadSpacePack, type Destination, type HyperspaceCatalogue } from '../space/spaceData';
 import { GALAXY_VIEW_TUNE, GalaxyView } from './galaxyView';
@@ -214,6 +215,16 @@ export class GalaxyMap {
 
   // ---- The cards: the list this tab used to be, kept for reading and for the keyboard ----
 
+  /**
+   * The cards made again from the planet list as it stands (the race drawer's fourth wave): a world of yours made, changed or
+   * taken out in play, and its places read again under its key.
+   */
+  refreshWorlds(): void {
+    for (const p of PLANETS) if (p.ours) this.pois.delete(editKeyOf(p));
+    this.cards.replaceChildren();
+    this.buildCards();
+  }
+
   private buildCards(): void {
     for (const p of PLANETS) {
       // The instances zone is reached only through a dungeon's own way in, never travelled to.
@@ -269,11 +280,12 @@ export class GalaxyMap {
         holder.appendChild(head);
         const body = document.createElement('div');
         holder.appendChild(body);
-        await this.fillPackPois(p, body, zone.pack, zone.id, true);
+        // A world's places are kept under its edit key (`editKeyOf`): a copy of yours' are its own, never its source's.
+        await this.fillPackPois(p, body, editKeyOf(p, zone.id), zone.id, true);
       }
       return;
     }
-    await this.fillPackPois(p, holder, p.id, undefined, false);
+    await this.fillPackPois(p, holder, editKeyOf(p), undefined, false);
   }
 
   private async fillPackPois(p: PlanetDef, holder: HTMLElement, packId: string, zone: string | undefined, collapsedCities: boolean): Promise<void> {
@@ -353,7 +365,10 @@ export class GalaxyMap {
   loadPoisRaw(planetId: string): Promise<PoisFile> {
     let p = this.pois.get(planetId);
     if (!p) {
-      const pack = this.loadPackPlaces(planetId);
+      // A copy of yours' places are its own (its locations file, under its own id) over its source's centre alone: none of
+      // the source's places, services or no-build rows (`placesPackOf`); every other world reads exactly what it read.
+      const from = placesPackOf(planetId);
+      const pack = from.centreOnly ? this.loadPackPlaces(from.pack).then((f) => ({ center: f.center, pois: [], services: [], noBuild: [] })) : this.loadPackPlaces(planetId);
       const locs = this.locationsOf(planetId);
       p = Promise.all([pack, locs]).then(([f, rows]) => this.mergedFile(planetId, f, rows));
       this.pois.set(planetId, p);
@@ -427,7 +442,9 @@ export class GalaxyMap {
   async landLocations(planetId: string, put: readonly LocationRow[], deleted: readonly string[]): Promise<PoisFile> {
     const was = await this.loadPoisRaw(planetId);
     const rows = landedLocations(was.locations, put, deleted);
-    const f = this.mergedFile(planetId, await this.loadPackPlaces(planetId), rows);
+    const from = placesPackOf(planetId);
+    const own = await this.loadPackPlaces(from.pack);
+    const f = this.mergedFile(planetId, from.centreOnly ? { center: own.center, pois: [], services: [], noBuild: [] } : own, rows);
     this.pois.set(planetId, Promise.resolve(f));
     this.refreshCard(planetId);
     return f;

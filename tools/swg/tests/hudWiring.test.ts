@@ -215,7 +215,8 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   // consult the world left behind for the first frames after every arrival.
   {
     const arriveAt2 = main.indexOf('private arrive(');
-    const body = main.slice(arriveAt2, arriveAt2 + 1600);
+    // 2600 since the race drawer's fourth wave: a copy of yours' arrival forgets its source's travel and fittings first.
+    const body = main.slice(arriveAt2, arriveAt2 + 2600);
     ok(body.includes('this.zoneGates.use('), "a world's own gates are pointed at when the world loads");
     const gatherAt = main.indexOf('private gatherGate(');
     ok(gatherAt > 0 && !main.slice(gatherAt, gatherAt + 1600).includes('zoneGates.use('), 'and never from the prompt gather');

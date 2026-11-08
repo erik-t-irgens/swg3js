@@ -385,7 +385,7 @@ try {
     // build time can know: the index is asked at every boot, whatever the build carries.
     const story = methodOf(main, '  private async reloadStory(');
     ok(/ownSetFiles\(import\.meta\.env\.BASE_URL\)\.catch\(\(\) => null\),/.test(story) && !/shippedAsk/.test(story) && !/story-private/.test(plugin), "the player's own story's index is no part of the list and is asked for at every boot, since the launcher serves a folder named at run time there");
-    ok(/if \(planet\.dem && !shippedAsk\(`\$\{planet\.dem\.url\}\/base16\.raw`\)\)/.test(text('src/world/world.ts')), 'a real-elevation raster is asked for only where the build ships it');
+    ok(/if \(planet\.dem && !planet\.dem\.made && !shippedAsk\(`\$\{planet\.dem\.url\}\/base16\.raw`\)\)/.test(text('src/world/world.ts')), 'a real-elevation raster is asked for only where the build ships it (a ground made in the browser is none)');
   }
 
   // ---- the built list: the tracked files on disk, and nothing else ----

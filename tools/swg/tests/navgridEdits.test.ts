@@ -90,9 +90,9 @@ const walkable = (v: number): boolean => v >= 1 && v <= 14;
   ok(!/^\s*import\s/m.test(shapes) && /export \{[^}]*rowFloraParts[^}]*\} from '\.\/floraShapes\.ts';/.test(readFileSync(join(REPO, 'src/world/floraCollision.ts'), 'utf8')), 'floraShapes.ts imports nothing (the release ships it for the bake), and the game names it through floraCollision.ts as it always did');
   ok(/modelExtentOf\(def\.bounds\)/.test(readFileSync(join(REPO, 'src/world/assetPack.ts'), 'utf8')), "a loaded model's radius and height are `modelExtentOf`'s, the very ones the bake hands `rowFloraParts`");
   const cli = readFileSync(join(REPO, 'tools/swg/cli.mjs'), 'utf8');
-  ok(/const edits = gridEditsOf\(planet, undefined, outDir\);\s*const layoutKey = layoutKeyOf\(outDir, walkThrough, edits\);/.test(cli) && /buildNavGrid\(outDir, \{[^}]*edits[^}]*\}\)/.test(cli), 'navgrid reads the edit files once, with the pack folder (what of their rows the install lacks), and hands the same to the key and the bake');
+  ok(/const edits = gridEditsOf\(planet, undefined, packDir\);\s*const layoutKey = layoutKeyOf\(packDir, walkThrough, edits\);/.test(cli) && /buildNavGrid\(packDir, \{[^}]*edits[^}]*\}\)/.test(cli), 'navgrid reads the edit files once, with the pack folder (what of their rows the install lacks), and hands the same to the key and the bake');
   ok(/const navStale = gridLayoutStale\(navGrid, packDir, manifest, statusWalkThrough, gridEditsOf\(planet, undefined, packDir\)\);/.test(cli), 'and status asks the same key over them');
-  ok(/const stale = there \? gridLayoutStale\(there, outDir, manifest, walkThrough, gridEditsOf\(planet, undefined, outDir\)\) : null;/.test(cli), 'as navgrid --skip-existing does');
+  ok(/const stale = there \? gridLayoutStale\(there, packDir, manifest, walkThrough, gridEditsOf\(planet, undefined, packDir\)\) : null;/.test(cli), 'as navgrid --skip-existing does');
 }
 
 {

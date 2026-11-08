@@ -24,6 +24,7 @@
 // nothing that touches the page at load, no constructor parameter properties.
 
 import { PLANETS, type PlanetDef } from '../data/planets.ts';
+import { planetsVersion } from '../data/ourWorlds.ts';
 
 /** The little of a fetch's answer this file reads; a node test hands in a counting stand-in. */
 export interface FileAnswer {
@@ -70,6 +71,8 @@ export function packless(planet: Pick<PlanetDef, 'pack'> | null | undefined): bo
 }
 
 let packWorlds: Map<string, PlanetDef> | null = null;
+/** The planet list's version the map was made at (`planetsVersion`: a world of yours merged in or taken out moves it). */
+let packWorldsAt = -1;
 
 /**
  * The world a pack belongs to: the planet one of whose zones it is, else the planet of that id; null for a pack no world
@@ -77,9 +80,12 @@ let packWorlds: Map<string, PlanetDef> | null = null;
  * single-world Kashyyyk's pack is `kashyyyk`, which is Kashyyyk's own id and never one of its zones' packs.
  */
 export function worldOfPack(packId: string): PlanetDef | null {
-  if (!packWorlds) {
+  if (!packWorlds || packWorldsAt !== planetsVersion()) {
     packWorlds = new Map();
-    for (const p of PLANETS) for (const z of p.zones ?? []) if (!packWorlds.has(z.pack)) packWorlds.set(z.pack, p);
+    packWorldsAt = planetsVersion();
+    // A copy of yours names its source's pack as its one zone's (`ourWorlds.ts`) and is never that pack's world: the pack's
+    // own world answers for it, so a copy moves no answer about the game's packs.
+    for (const p of PLANETS) for (const z of p.zones ?? []) if (!p.ours && !packWorlds.has(z.pack)) packWorlds.set(z.pack, p);
     for (const p of PLANETS) if (!packWorlds.has(p.id)) packWorlds.set(p.id, p);
   }
   return packWorlds.get(packId) ?? null;

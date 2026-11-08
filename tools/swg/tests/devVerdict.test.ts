@@ -151,7 +151,7 @@ for (const [spot, place, deps] of props) {
     const today = applyPlacementOp({ op: 'batch', world: 'tatooine', edits: [{ file: 'nope' as never, put: { id: 'x' } }] }, { story: null, world: null }, { worlds: new Map([['tatooine', 'ground']]), now: 1, hash: (t: string) => t.length.toString(16) });
     const why = String((today.body as { why?: unknown }).why);
     // The race drawer's first wave: today's list ends in the tracks, and one ending in the lights is an endpoint from before them.
-    ok(today.status === 400 && /lightsAll or tracks$/.test(why) && !olderEndpoint(why), `and today's refusal of a kind it does not know says only itself (“${why}”)`);
+    ok(today.status === 400 && /lightsAll, worlds or tracks$/.test(why) && !olderEndpoint(why), `and today's refusal of a kind it does not know says only itself (“${why}”)`);
     ok(olderEndpoint("edit 0's file is story, world, removed, people, heights, paint, water, locations, looks, solid, lights or lightsAll"), "an endpoint from before the tracks kind, refusing one, says to restart it");
   }
   const hut = readPlacementRow({ id: 'x-1', kind: 'building', pack: 'imported', model: 'test_hut', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] });

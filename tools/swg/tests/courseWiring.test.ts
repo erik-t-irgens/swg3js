@@ -157,7 +157,7 @@ ok(/return \(x, z\) => \(\{ x: rawToGameX\(c\.x, x\), z: rawToGameZ\(c\.z, z\) \
 // landed into the world; the navgrid's bake and key; the release carrying the modules.
 {
   const world = read('src/world/world.ts');
-  ok(/\/\/ whatever the race switch says \(a course is ground\), and waited on \(bounded\) before the ground that carves them is made\.\s*this\.askCourse\(packId\);/.test(world), "a world's drawn courses are asked as its load begins, whatever the race switch says");
+  ok(/\/\/ whatever the race switch says \(a course is ground\), and waited on \(bounded\) before the ground that carves them is made\.\s*this\.askCourse\(this\.editKey\);/.test(world), "a world's drawn courses are asked as its load begins, whatever the race switch says");
   const conv = after(world, '    await this.removalsReady();\n    await this.peopleReady();\n    // And its drawn race courses', 4800);
   ok(/await this\.courseReady\(\);/.test(conv) && /const course = this\.courseCarve;\s*const swg = await SwgTerrain\.create\([^\n]*\{ heights, paint, [^\n]*course \}\)/.test(world), 'a converted world awaits its courses before `SwgTerrain.create`, which is handed the store');
   ok(/await this\.courseReady\(\);\s*if \(this\.terrain !== terrain\) return;\s*this\.attachCourseGrid\(terrain\);[\s\S]{0,300}this\.remakeGround\(\);/.test(world), "a real-elevation world's pole grid is made whole before its raster's ground is made again");

@@ -102,6 +102,33 @@ export function makeDemPatch(raw: ArrayBuffer, meta: DemMeta, where: { centreX?:
 }
 
 /**
+ * A ground of ours made in the browser in place of a raster (a world of yours, the race drawer's fourth wave): `flat`, every
+ * point of the square at `height`; `noise`, the planet's own noise over the whole square (`under()`), its bands sized from the
+ * noise's own numbers. Either way a real-elevation world's patch to every reader, so the ground borrowed, the paint, the
+ * plants, the sculpt and the carve all take it as they take a raster, and nothing new draws it.
+ */
+export function madeDemPatch(made: 'flat' | 'noise', size: number, height: number, terrain: { base: number; amplitude: number }): DemPatch {
+  const flat = made === 'flat';
+  const lo = flat ? height : terrain.base - terrain.amplitude;
+  const hi = flat ? height : terrain.base + terrain.amplitude;
+  return {
+    centreX: 0,
+    centreZ: 0,
+    size,
+    lift: 0,
+    feather: 0,
+    samples: 2,
+    minHeight: lo,
+    maxHeight: Math.max(hi, lo + 1),
+    heightAt(x: number, z: number, under: () => number): number | null {
+      const half = this.size / 2;
+      if (Math.abs(x - this.centreX) > half || Math.abs(z - this.centreZ) > half) return null;
+      return flat ? height : under();
+    },
+  };
+}
+
+/**
  * Load a patch from wherever the two files are served. `base16.raw` is preferred over `base.hmap`:
  * eight bits across real relief is a couple of metres a step, which the lighting draws as contour
  * terracing on every slope.

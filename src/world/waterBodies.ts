@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { AssetPack } from './assetPack';
 import type { PlanetDef } from '../data/planets';
+import { ourWaterLook } from '../data/ourWorlds.ts';
 import { currentEnvironment, onEnvironment } from './envmap';
 import { createWaterAirMaterial, createWaterMaskMaterial, createWaterMaterial, setWaterEnvSpecular, WATER_FX_FOG, WATER_FX_TRACED, waveReach, type WaterMaterial } from './water';
 import { readWaterPack, waterLookFor, type WaterLook, type WaterPackData } from './waterLook';
@@ -244,7 +245,9 @@ export class WaterBodies {
 
   /** The look of a body drawn with `shader` on this planet. */
   lookFor(shader: string | null, planet: PlanetDef | null): WaterLook {
-    return waterLookFor(shader, this.data, planet?.water ?? null);
+    // A world of yours' own water colour (the race drawer's fourth wave, `ourWaterLook`): the colour and opacity a copy's sea
+    // and lakes, the game's, are drawn in, and every lake of ours starts from (`lookOver`); a world of the game's names none.
+    return ourWaterLook(waterLookFor(shader, this.data, planet?.water ?? null), planet);
   }
 
   /**

@@ -115,9 +115,22 @@ export interface PlanetDef {
     /** Small high-frequency bumps in metres. */
     detail: number;
   };
+  /**
+   * A world of yours (the race drawer's fourth wave, `public/placements/worlds/all.json`, merged after the game's own by
+   * `src/data/ourWorlds.ts`): what it is, the world it copies, and the row it was made from, read by the sky's parts and
+   * the water's colour. Never on a world of the game's, so every one of them is what it was.
+   */
+  ours?: { kind: 'new' | 'copy'; of?: string; row: Readonly<Record<string, unknown>> };
   dem?: {
     /** Folder holding base16.raw and base.json. */
     url: string;
+    /**
+     * A ground of ours made in the browser in place of a raster (a world of yours): `flat` at `height`, or `noise`, the
+     * planet's own `terrain` numbers over the whole square. Absent for a raster.
+     */
+    made?: 'flat' | 'noise';
+    /** A flat made ground's height, absolute. */
+    height?: number;
     /** Metres a side. Match `--extent`; the whole map when it covers the whole map. */
     size: number;
     /** Added to every height, for sitting a real elevation near this planet's own ground level. */

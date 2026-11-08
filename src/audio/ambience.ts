@@ -325,7 +325,7 @@ export class Ambience {
    * that lands after the player has arrived simply adds its emitters then, and one that is not there
    * at all leaves the planet sounding from its sky rows alone.
    */
-  begin(packId: string): void {
+  begin(packId: string, placed = true): void {
     this.leave();
     this.packId = packId;
     this.packState = 'loading';
@@ -334,7 +334,8 @@ export class Ambience {
     // the world has a pack and the converter writes sound places for its kind (`packFiles.ts`).
     void packJson<PlanetSounds>(packId, 'sounds.json', this.baseUrl, { shared: true }).then((pack) => {
       if (token !== this.token) return;
-      this.adopt(pack);
+      // A copy of yours (the race drawer's fourth wave) keeps its buildings' rooms and surfaces and none of the placed sounds.
+      this.adopt(placed || !pack ? pack : { ...pack, emitters: [] });
     });
   }
 

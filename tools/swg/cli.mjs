@@ -223,7 +223,7 @@ import { detailLevels, exteriorAppearance, resolveParts } from './appearance.mjs
 import { LOD_FORMAT, lodMeshesFor as lodMeshesForDeps } from './lodlevels.mjs';
 import { decodeDds } from './dds.mjs';
 import { FLOOR_PACK_VERSION, floorBlock, floorSize, parseFloor } from './flr.mjs';
-import { GOAL_SNAP, NAV_BAKE_RULES, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, gridEditsOf, walkThroughTemplates, writeNavGrid } from './navgrid.mjs';
+import { GOAL_SNAP, NAV_BAKE_RULES, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, gridCopies, gridEditsOf, walkThroughTemplates, writeNavGrid } from './navgrid.mjs';
 import { buildGlb, glbAlphaMode, glbSpecStamped } from './glb.mjs';
 import { dump, find, isForm, parseIff, readCString } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
@@ -3327,6 +3327,20 @@ function packStatus(dir) {
     if (travel && rowsLost(travel.rows, layoutIds, TRAVEL_OWN_MODELS)) wantTravel = true;
     if (travel && layout && ngePortsUnstood(layout.objects, travel.rows, ngePortBuildings, travel.nge === 'none')) wantTravel = true;
     if (fittings && rowsLost(fittings.rows, layoutIds)) wantFittings = true;
+  }
+  // The copies of yours (the race drawer's fourth wave): each one's own walk grid, baked from its source's pack under its own
+  // key (`gridCopies`), asked for while it has none or one its source's layout or its own edit files have moved past. A
+  // source not converted here is the source's own line's to ask for.
+  for (const c of gridCopies(dir)) {
+    const srcManifest = readJson(join(c.packDir, 'manifest.json'));
+    if (!srcManifest || !existsSync(join(c.packDir, 'layout.json'))) continue;
+    const grid = readJson(join(c.outDir, 'nav.json'));
+    if (!grid) {
+      need(`navgrid ${c.id} ${dir}`, `${c.id} (a copy of ${c.pack}) has no walk grid of its own: bodies outdoors steer straight at their goal`);
+      continue;
+    }
+    const stale = gridLayoutStale(grid, c.packDir, srcManifest, statusWalkThrough, gridEditsOf(c.id, undefined, c.packDir));
+    if (stale) need(`navgrid ${c.id} ${dir}`, `${c.id}'s walk grid ${stale}`);
   }
   // Counted, not asked for: a rerun cannot change either. A mask or a normal map on a coordinate set the
   // models do not carry is drawn on the main's set, and a shader whose program could not be read keeps
@@ -9703,9 +9717,13 @@ switch (cmd) {
     // building terrain layers, the placements and the models' own triangles are all in the pack --
     // so it takes no <swg-dir> and nothing about `--retail-only` applies to it.
     if (!pos[2]) usage();
+    // A copy of yours (the race drawer's fourth wave) is baked from its source's pack under its own key into a folder of its
+    // own (`gridCopies`): its source's grid is never touched. Each target: the key, the pack read, the folder written.
+    const copies = gridCopies(pos[2]);
+    const copyOf = (id) => copies.find((c) => c.id === id) ?? null;
     const targets = pos[1] === 'all'
-      ? GAME_PLANETS.filter((p) => existsSync(join(pos[2], p, 'layout.json'))).map((p) => [p, join(pos[2], p)])
-      : [[pos[1], join(pos[2], pos[1])]];
+      ? [...GAME_PLANETS.filter((p) => existsSync(join(pos[2], p, 'layout.json'))).map((p) => [p, join(pos[2], p), join(pos[2], p)]), ...copies.filter((c) => existsSync(join(c.packDir, 'layout.json'))).map((c) => [c.id, c.packDir, c.outDir])]
+      : [copyOf(pos[1]) ? [pos[1], copyOf(pos[1]).packDir, copyOf(pos[1]).outDir] : [pos[1], join(pos[2], pos[1]), join(pos[2], pos[1])]];
     if (!targets.length) console.log(`no planet packs under ${pos[2]} yet; run snapshot first`);
     const cell = options.cell ? Number(options.cell) : undefined;
     // The angle the grid calls climbable. The default is 45, which is what a catalogue mobile --
@@ -9716,9 +9734,9 @@ switch (cmd) {
     // The owner's shared walk-through file (src/world/walkThrough.ts), read once: what every world's bake leaves out.
     const walkThrough = walkThroughTemplates();
     let built = 0;
-    for (const [planet, outDir] of targets) {
-      if (!existsSync(join(outDir, 'layout.json'))) {
-        console.log(`${planet}: no layout.json under ${outDir}; run snapshot first`);
+    for (const [planet, packDir, outDir] of targets) {
+      if (!existsSync(join(packDir, 'layout.json'))) {
+        console.log(`${planet}: no layout.json under ${packDir}; run snapshot first`);
         continue;
       }
       // `--skip-existing` resumes a run that stopped, so what it must skip is a world that is
@@ -9742,12 +9760,12 @@ switch (cmd) {
         // layout, or one with no key beside a world converted with SOE's final files, is not done.
         let manifest = null;
         try {
-          manifest = there && existsSync(join(outDir, 'manifest.json')) ? JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')) : null;
+          manifest = there && existsSync(join(packDir, 'manifest.json')) ? JSON.parse(readFileSync(join(packDir, 'manifest.json'), 'utf8')) : null;
         } catch {
           manifest = null;
         }
         // The world's committed edit files (navgrid.mjs `gridEditsOf`), which the key folds in as status asks it.
-        const stale = there ? gridLayoutStale(there, outDir, manifest, walkThrough, gridEditsOf(planet, undefined, outDir)) : null;
+        const stale = there ? gridLayoutStale(there, packDir, manifest, walkThrough, gridEditsOf(planet, undefined, packDir)) : null;
         if (there && there.version === NAV_GRID_VERSION && there.nx && Number(there.slopeDegrees) === Number(want) && rules >= NAV_BAKE_RULES && !stale) {
           console.log(`${planet}: nav.json is there already, version ${there.version} at ${there.slopeDegrees} degrees`);
           continue;
@@ -9769,10 +9787,11 @@ switch (cmd) {
         // And the world's committed edit files (Map-maker II's fifth wave: its heights, its water and its world and story
         // placements, `gridEditsOf`), read once and handed to both, so the key names the very files the bake read.
         // With the pack's folder, so the key also names any solid row's model this install does not hold yet (`absent`).
-        const edits = gridEditsOf(planet, undefined, outDir);
-        const layoutKey = layoutKeyOf(outDir, walkThrough, edits);
-        const grid = await buildNavGrid(outDir, { cell, slope, walkThrough, edits, log: (line) => console.log(line) });
+        const edits = gridEditsOf(planet, undefined, packDir);
+        const layoutKey = layoutKeyOf(packDir, walkThrough, edits);
+        const grid = await buildNavGrid(packDir, { cell, slope, walkThrough, edits, log: (line) => console.log(line) });
         if (layoutKey) grid.header.layoutKey = layoutKey;
+        if (outDir !== packDir) mkdirSync(outDir, { recursive: true });
         const out = writeNavGrid(outDir, grid);
         const stats = out.stats;
         console.log(`  blocked before the body's ${stats.margin} m margin: slope ${stats.slope}, objects ${stats.objects}, water ${stats.water}; after it ${stats.blocked} (${((100 * stats.blocked) / (out.nx * out.nz)).toFixed(2)}%), plus ${stats.indoor} cells inside ${stats.buildings} portal buildings, which the rooms' own pathing has, and ${stats.opened} cells over rooms under the ground left open`);

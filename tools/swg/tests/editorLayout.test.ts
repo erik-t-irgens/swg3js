@@ -356,7 +356,7 @@ function reload(mode: string): Record<string, unknown> {
   // What the editor hands the Tools tab of its own, by the titles its own files give it: a line of the table naming a title
   // nothing hands the tab (a title renamed) would leave that section at the foot under every tool, with nothing to say so.
   const entry = read('src/editor/editorEntry.ts');
-  ok(/sections: \(tab: 'selected' \| 'here' \| 'tools'\): EditorSection\[\] => \[\.\.\.this\.lightsSections\(tab\), \.\.\.this\.courseSections\(tab\), \.\.\.this\.zones\.sections\(tab\), \.\.\.this\.removals\.sections\(tab\)\],/.test(entry) && /if \(tab === 'tools'\) return this\.lights\.toolsSections\(\);/.test(entry) && /if \(tab === 'tools'\) return this\.course\.toolsSections\(\);/.test(entry), "the editor hands the window the lights tool's sections, the Course tool's, the zones' and the removals' (the files read below)");
+  ok(/sections: \(tab: 'selected' \| 'here' \| 'tools'\): EditorSection\[\] => \[\.\.\.this\.lightsSections\(tab\), \.\.\.this\.courseSections\(tab\), \.\.\.this\.zones\.sections\(tab\), \.\.\.this\.removals\.sections\(tab\), \.\.\.\(tab === 'tools' \? this\.worlds\.sections\(\) : \[\]\)\],/.test(entry) && /if \(tab === 'tools'\) return this\.lights\.toolsSections\(\);/.test(entry) && /if \(tab === 'tools'\) return this\.course\.toolsSections\(\);/.test(entry), "the editor hands the window the lights tool's sections, the Course tool's, the zones' and the removals' (the files read below)");
   const handed = new Set<string>();
   for (const f of ['src/editor/editorZones.ts', 'src/editor/editorRemovals.ts']) {
     const text = read(f);

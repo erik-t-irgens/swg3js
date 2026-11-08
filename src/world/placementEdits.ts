@@ -47,6 +47,7 @@ import { PEOPLE_LIMITS, isPersonId, mintPersonId, peopleFileText, personWithExtr
 import { isSolidFileId, readSolidFileRow, readSolidFileRows, solidFileText, type SolidFileRow } from './walkThrough.ts';
 import { LOOKS_LIMITS, isLookId, lookWithExtras, looksFileText, mintLookId, readLookRow, readLooksFile, sameLookRow, type OwnLookRow } from './editFiles/looksFile.ts';
 import { ALL_ID_PREFIX, LIGHTS_LIMITS, isLightId, lightWithExtras, lightsFileText, mintLightId, readLightRow, readLightsFile, sameLightRow, type LightRow } from './editFiles/lightsFile.ts';
+import { WORLDS_LIMITS, isWorldId, mintWorldId, readWorldRow, readWorldsFile, sameWorldRow, worldWithExtras, worldsFileText, type WorldRow } from './editFiles/worldsFile.ts';
 
 /** Every number of the endpoint, all ours. Read where the dev server runs it, and not moved from the browser. */
 export const PLACEMENTS_ENDPOINT_TUNE = {
@@ -865,6 +866,48 @@ function lightsKindOf(kind: 'lights' | 'lightsAll'): EditKind<LightRow> {
 export const lightsKind = lightsKindOf('lights');
 export const lightsAllKind = lightsKindOf('lightsAll');
 
+/**
+ * The worlds of yours (the race drawer's fourth wave, `editFiles/worldsFile.ts`): one file every world shares
+ * (`worlds/all.json`), a world a row, named `ours_<name>` (minted from its name where a put names none), written wherever the
+ * editor stands, as the looks are. A row's world is made by the page (`ourWorlds.ts`), which reads the game's own planets;
+ * the endpoint reads only the row's own rules.
+ */
+export const worldsKind: EditKind<WorldRow> = {
+  kind: 'worlds',
+  group: null,
+  groundOnly: false,
+  most: WORLDS_LIMITS.rows,
+  idOk: isWorldId,
+  idWords: 'its id is ours_ and then a-z, 0-9 and _ (40 at most)',
+  open(text) {
+    if (text === null) return { rows: [], read: null, text: null };
+    const raws: Record<string, unknown>[] = [];
+    const read = readWorldsFile(text, raws);
+    if (read.problem) return `${worldsFile()} does not read (${read.problem}): mend it by hand first`;
+    if (read.skipped.length) return `${worldsFile()} holds rows this build cannot read (${read.skipped.slice(0, 3).map((s) => `${s.id}: ${s.why}`).join('; ')}): mend them by hand first, or the editor would write over them`;
+    return { rows: read.rows.map((row, i) => ({ row, raw: raws[i] })), read, text };
+  },
+  clean(asked, id, stamp) {
+    const unknown: string[] = [];
+    const row = readWorldRow({ ...asked, id, at: stamp }, unknown);
+    if (typeof row === 'string') return row;
+    if (unknown.length) return `it carries fields this build does not write: ${unknown.join(', ')}`;
+    return row;
+  },
+  parse: (v) => readWorldRow(v),
+  same: sameWorldRow,
+  extras: worldWithExtras,
+  text: (_world, _frame, rows) => worldsFileText(rows),
+  read: (text) => readWorldsFile(text),
+  mint: (asked, taken) => mintWorldId(typeof asked.name === 'string' && asked.name ? asked.name : 'world', taken),
+  file: () => worldsFile(),
+};
+
+/** The shared worlds file, as the owner reads it. */
+function worldsFile(): string {
+  return `public/${editFilePath('worlds', 'all')}`;
+}
+
 /** Two tracks that race and read the same: the tracks endpoint's own likeness (`trackEdits.ts`). */
 function sameTrackRow(a: TrackDef, b: TrackDef): boolean {
   return a.id === b.id && trackHash(a) === trackHash(b) && a.name === b.name && a.note === b.note && a.at === b.at;
@@ -983,14 +1026,28 @@ export const EDIT_KINDS: Partial<Record<EditFileKind, EditKind<EditRow>>> = {
   looks: looksKind as unknown as EditKind<EditRow>,
   lights: lightsKind as unknown as EditKind<EditRow>,
   lightsAll: lightsAllKind as unknown as EditKind<EditRow>,
+  worlds: worldsKind as unknown as EditKind<EditRow>,
 };
 
 /**
  * The kinds the dungeons' world of copies takes (Map-maker I §2.9): a copy's crew member and its own objects taken away, and
  * (Map-maker II's thirteenth wave) the looks every world shares, which are no world's own and are saved wherever the editor
- * stands; and (the wave of the rooms' lights) the rooms' lights, a dungeon's rooms being rooms like any other's.
+ * stands; and (the wave of the rooms' lights) the rooms' lights, a dungeon's rooms being rooms like any other's; and (the race
+ * drawer's fourth wave) the worlds of yours, which are every world's as the looks are.
  */
-export const COPIES_KINDS: readonly EditFileKind[] = ['removed', 'looks', 'lights', 'lightsAll'];
+export const COPIES_KINDS: readonly EditFileKind[] = ['removed', 'looks', 'lights', 'lightsAll', 'worlds'];
+
+/**
+ * Whether a refusal is an endpoint's from before the worlds of yours (the race drawer's fourth wave), which a dev server not
+ * restarted keeps: it names the kinds it knew, ending in "lightsAll or tracks", where today's end in "lightsAll, worlds or
+ * tracks". What the New world window says of it: stop the dev server and start it again.
+ */
+export function olderWorldsEndpoint(why: string): boolean {
+  return /'s file is story, world, removed, people, heights, paint, water, locations, looks, solid, lights, lightsAll or tracks$/.test(why);
+}
+
+/** The words for it. */
+export const WORLDS_OLDER_ENDPOINT = 'the dev server is running an older endpoint, from before the worlds of yours: stop npm run dev and start it again (its own restart keeps the old one)';
 
 /**
  * The world editor's one write (`{ op: 'batch', world, edits }`, DESIGN.md §2.11): every edit applied in order to every

@@ -982,7 +982,7 @@ export class SwgSky {
   }
 
   /** Load the pack's sky, or null when it has none. */
-  static async load(pack: AssetPack): Promise<SwgSky | null> {
+  static async load(pack: AssetPack, mix?: (d: SkyData) => SkyData): Promise<SwgSky | null> {
     const bytes = await pack.bytes('sky.json');
     if (!bytes) return null;
     let data: SkyData;
@@ -991,6 +991,8 @@ export class SwgSky {
     } catch {
       return null;
     }
+    // A world of yours' sky in parts (`skyParts.ts`), laid over the data before anything of it is made or loaded.
+    if (mix) data = mix(data);
     const files = new Set<string>();
     const block = data.blocks.find((b) => b.weatherIndex === 0) ?? data.blocks[0];
     if (block?.gradientSky) files.add(block.gradientSky);

@@ -32,7 +32,7 @@ const inOrder = (text: string, parts: string[]): boolean => {
 };
 
 // ---- the world ------------------------------------------------------------------------------------------------------------------
-ok(/this\.askRemovals\(packId\);\s*this\.askPeople\(packId\);/.test(world), 'the world asks for both files as its load begins');
+ok(/this\.askRemovals\(this\.editKey\);\s*this\.askPeople\(this\.editKey\);/.test(world), 'the world asks for both files as its load begins');
 ok(inOrder(world, ['await this.removalsReady();', 'await this.peopleReady();', 'this.compileRemovalsOver(pack.layout?.objects ?? [], pack.layout?.center ?? null, pack);', 'this.pack = pack;']), "and waits for them, bounded, before the pack is the world's: the rows matched over its layout first");
 ok(inOrder(world, ['await this.removalsReady();', 'await this.peopleReady();', 'this.compileRemovalsOver([], null);', 'const placed = this.placedStandingRows();', "if (placed.length) standingPeople.adopt(standingList([], [], [], [], placed), {}, { world: planet.id, removed: this.personRemovedFn() });"]), "a world with no pack (his own) adopts his people with the zones that keep them");
 ok(/const dropped = this\.removals\.groundDrop;[\s\S]{0,300}if \(dropped\.size && dropped\.has\(li\)\) continue;/.test(world), "a hide that asks takes its building's `.lay` ground out of the terrain at the arrival");

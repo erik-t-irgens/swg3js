@@ -79,7 +79,7 @@ ok(/await this\.paintReady\(\);\s*if \(token !== this\.loadToken\) return null;\
 ok(/swg\.onRepainted = \(kind, x0, z0, x1, z1\) => this\.paintLanded\(kind, x0, z0, x1, z1\);/.test(load), 'grids made again for the paint are handed to the world as they land');
 ok(/await this\.paintReady\(\);\s*if \(this\.terrain !== terrainAtLoad\) return;[\s\S]{0,400}?const base = this\.paintWorld\.base \? \{ \.\.\.this\.paintWorld\.base \} : null;\s*this\.terrain\.demBase = base;/.test(world), "a raster's paint file is read before its ground is borrowed and made, its base taken there and only there");
 ok(/else if \(base\) await this\.loadBorrowedGround\(\{ pack: base\.pack, fallback: base\.name, rules: \[\] \}, patch\.lift\);/.test(world), "a world row's base borrows its pack as a ruled world's rules do");
-ok(/this\.askPaint\(packId\);/.test(world), "the file is asked for as the arrival begins");
+ok(/this\.askPaint\(this\.editKey\);/.test(world), "the file is asked for as the arrival begins");
 
 // The table-only lent table and the console's family list.
 ok(/const table = await SwgTerrain\.create\(trn, \[\], 0, 0, \(file\) => pack\.bytes\(file\), \{ tableOnly: true \}\);\s*if \(token !== this\.loadToken\) return;\s*this\.terrain\.demLent = table;/.test(world), 'the lent table is read for its families alone and kept for the feet');

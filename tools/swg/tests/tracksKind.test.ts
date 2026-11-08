@@ -103,7 +103,7 @@ const made = (id: string, cx: number) => {
   const rt = readTrackFile(k.text(WORLD, 'raw', [{ ...a, at: 5 }]), WORLD, 'ground');
   ok(rt.tracks.length === 1 && isDeepStrictEqual(rt.tracks[0], { ...a, at: 5 }), 'and reads back the track written');
   const bad = applyPlacementOp({ op: 'batch', world: WORLD, edits: [{ file: 'nope', put: {} }] }, {}, { worlds: new Map([[WORLD, 'ground']]), now: 1 });
-  ok(bad.status === 400 && /lightsAll or tracks$/.test((bad.body as { why: string }).why), "a kind the batch does not know is refused naming every kind, ending in today's tracks");
+  ok(bad.status === 400 && /lightsAll, worlds or tracks$/.test((bad.body as { why: string }).why), "a kind the batch does not know is refused naming every kind, ending in today's tracks");
 }
 
 // ---------------------------------------------------------------- 1b. a batch's answer landed by difference (`landedTracks`)
@@ -213,9 +213,10 @@ try {
 
 {
   const old = "edit 0's file is story, world, removed, people, heights, paint, water, locations, looks, solid, lights or lightsAll";
-  const today = "edit 0's file is story, world, removed, people, heights, paint, water, locations, looks, solid, lights, lightsAll or tracks";
-  ok(olderTracksEndpoint(old) && !olderTracksEndpoint(today), "an endpoint from before the tracks is told by its words, and today's is not");
-  ok(olderEndpoint(old) && !olderEndpoint(today) && refusalWords(old).includes('npm run dev'), "the editor's own reading says so too, with the restart's words");
+  const tracks = "edit 0's file is story, world, removed, people, heights, paint, water, locations, looks, solid, lights, lightsAll or tracks";
+  const today = "edit 0's file is story, world, removed, people, heights, paint, water, locations, looks, solid, lights, lightsAll, worlds or tracks";
+  ok(olderTracksEndpoint(old) && !olderTracksEndpoint(tracks) && !olderTracksEndpoint(today), "an endpoint from before the tracks is told by its words, and a later one is not");
+  ok(olderEndpoint(old) && olderEndpoint(tracks) && !olderEndpoint(today) && refusalWords(old).includes('npm run dev'), "the editor's own reading says so too, with the restart's words (an endpoint from before the worlds kind among them)");
   ok(TRACKS_OLDER_ENDPOINT.includes('stop npm run dev and start it again'), "and the tracks' own words say to stop and start the dev server");
 }
 

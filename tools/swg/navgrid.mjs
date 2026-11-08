@@ -91,6 +91,8 @@ import { isSeat, isTableTemplate, standsSolid } from '../../src/world/rowSolid.t
 import { ObjectKeyIndex, compileRemovals, noRemovals, readRemovalsFile, removalKindOf } from '../../src/story/removals.ts';
 import { FLORA_COLLISION, mergeFloraCollision, modelExtentOf, rowFloraParts } from '../../src/world/floraShapes.ts';
 import { readTrackFile } from '../../src/race/trackFile.ts';
+import { readWorldsFile } from '../../src/world/editFiles/worldsFile.ts';
+import { copySourcePack } from '../../src/data/ourWorlds.ts';
 import { primeBrushNow } from '../../src/race/courseGround.ts';
 import { CARVE_VERSION, CourseCarve, carveAsk } from '../../src/swg/terrain/courseCarve.ts';
 
@@ -100,6 +102,30 @@ export {
   OTHER_REGION, RANKS, SAMPLES_PER_CELL, SLOPE_CLIMB_DEGREES, SWIM_DEPTH, bakeRules, clearanceNibbles, edgesNear, growMargin, indoorFootprint, isBuildingDef, isFootprint,
   packGrid, placementFrame, rasterPlacement,
 };
+
+/**
+ * The copies of yours this install's worlds file holds (the race drawer's fourth wave, `public/placements/worlds/all.json`):
+ * each its own id (`id`, the key its edit files and its grid are kept under), the pack it reads (`pack`, its source's), that
+ * pack's folder (`packDir`, which the bake reads the terrain, layout and models from) and the folder its own grid is written
+ * to (`outDir`, `<dir>/<id>`). A copy's grid is baked from its source's pack and its own edit files, never written into the
+ * source's folder, so the source's grid is the source's. No worlds file, none.
+ */
+export function gridCopies(dir, placed = placementsFolder()) {
+  let text = null;
+  try {
+    if (placed) text = readFileSync(join(placed, 'worlds', 'all.json'), 'utf8');
+  } catch {
+    text = null;
+  }
+  if (!text) return [];
+  const out = [];
+  for (const r of readWorldsFile(text).rows) {
+    if (r.kind !== 'copy' || !r.of) continue;
+    const pack = copySourcePack(r.of);
+    if (pack) out.push({ id: r.id, pack, packDir: join(dir, pack), outDir: join(dir, r.id) });
+  }
+  return out;
+}
 
 /** The kinds of a world's committed edit file the bake reads, in the order their text is folded into the grid's key. */
 export const GRID_EDIT_KINDS = ['heights', 'water', 'world', 'story'];

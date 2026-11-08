@@ -230,7 +230,8 @@ function after(src: string, marker: string, n = 2000): string {
   ok(/this\.tools\.add\(sculptTool\(this\.sculpt\)\);/.test(ed), 'K arms the sculpt brush (the list, on its own action)');
   // The page's word on an edit file is routed by its kind (Map-maker II §2.2): the row layers to the permanent layer, the
   // heights to the ground's, a kind with no layer yet dropped (2,400 since the shared lights file's word came before it).
-  const word = after(main, '  private placementWord(d: PlacementWord): void {', 2400);
+  // 3200 since the race drawer's fourth wave: the worlds file's own branch stands before the routing.
+  const word = after(main, '  private placementWord(d: PlacementWord): void {', 3200);
   ok(/const reload = this\.editLayerOf\(kind\);\s*if \(!reload\) return;/.test(word), "a placement word is routed by its kind, and a kind no layer reads is dropped");
   // 1,200 characters since Map-maker II's twelfth wave, whose removal and people files are kinds of their own; 1,500 since
   // the race drawer's first wave, whose track file's word is routed here too.

@@ -74,7 +74,7 @@ ok(/its elevation did not load[^\n]*\n[\s\S]{0,600}?this\.heightsByDem = false;\
 // file later than the bound is laid over the ground as a stroke is (the smoke found the race: laid into a terrain the
 // converted ground then replaced, the edits reached nothing).
 ok(/if \(this\.heightsAsk !== ask \|\| ask\.installed \|\| !ask\.late \|\| this\.generation !== ask\.gen\) return;/.test(world) && /if \(loaded === 'late'\) \{\s*\/\/[^\n]*\n\s*ask\.late = true;\s*return null;\s*\}/.test(world), 'a heights file is laid late only once the bound has given up on it');
-ok(/this\.askHeights\(packId\);/.test(world) && /this\.world\.heightsSource = \(pack, kind\) => this\.fetchHeights\(pack, kind\);/.test(read('src/main.ts')), 'asked for as the load begins, through the page\'s own fetch');
+ok(/this\.askHeights\(this\.editKey\);/.test(world) && /this\.world\.heightsSource = \(pack, kind\) => this\.fetchHeights\(pack, kind\);/.test(read('src/main.ts')), 'asked for as the load begins, through the page\'s own fetch');
 
 // The rebuild's hand-overs.
 const replant = body(world, '  replantChunk(c: Chunk): void {');

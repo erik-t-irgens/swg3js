@@ -80,7 +80,7 @@ function method(text: string, signature: string): string {
 {
   const warm = method(world, '  warmUp(center: THREE.Vector3): void {');
   ok(!/standingPeople\.step\(/.test(warm) && !/ambientPeople\.step\(/.test(warm), 'the arrival\'s warm-up no longer calls standingPeople.step or ambientPeople.step (they ran before the rows were adopted)');
-  ok(/standOursNow\(at: THREE\.Vector3\): void \{\s*ambientPeople\.step\(0, this\.simTime, at, this\.ambientDeps\(\), true\);/.test(world), 'standOursNow is the people of ours forced');
+  ok(/standOursNow\(at: THREE\.Vector3\): void \{\s*(\/\/[^\n]*\n\s*)*if \(standsLife\(this\.planet\)\) ambientPeople\.step\(0, this\.simTime, at, this\.ambientDeps\(\), true\);/.test(world), 'standOursNow is the people of ours forced');
   ok(/standWildNow\(at: THREE\.Vector3\): number \{\s*wildLife\.step\(0, this\.simTime, at, this\.wildDeps\(\), true\);/.test(world), 'standWildNow is the wild pass forced');
 }
 

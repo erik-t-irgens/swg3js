@@ -76,6 +76,10 @@ import { SCAN_TUNE } from './world/sceneAdds.ts';
 import { FIGHT_ACTIONS, Input, type Action } from './core/input';
 import { Group as ColliderGroup, PHYSICS_RECOVERY, Physics, groups as colliderGroups, isEngineFault } from './core/physics';
 import { PLANETS, packIdOf, planetBelow, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
+import { OUR_WORLDS, editKeyOf, layWorldWeather, mergeOurWorlds, readWithin, standsLife, waysPackOf } from './data/ourWorlds.ts';
+import { readWorldsFile, type WorldRow } from './world/editFiles/worldsFile.ts';
+import { bodiesOf } from './world/skyParts.ts';
+import type { SkyData } from './world/sky';
 import { DEFAULT_SABER_COLOR, Player } from './player/player';
 import { MARK_WORLD, marks, type MarkPlace } from './world/marks.ts';
 import { collectBlades, lightAt, litCeiling, type LitSources } from './combat/bladeLights';
@@ -1089,6 +1093,8 @@ interface EditorApi {
   lightsDebug(o?: Record<string, unknown>): Promise<unknown>;
   /** The course tool (the race drawer's first wave): `__debug.course`. */
   courseDebug(o?: Record<string, unknown>): Promise<unknown>;
+  /** The worlds of yours' writes (the race drawer's fourth wave): a row made or changed, taken out, the form opened. */
+  worldsDebug(o?: Record<string, unknown>): Promise<unknown>;
   /**
    * One track of this world's file written through the editor's batch as one action of its history (the Gates view's save and
    * take-out while the editor is on, so an undo puts them back): the row before (null: a new track) and after (null: taken
@@ -3192,7 +3198,7 @@ class App {
       // The peers' weapons waiting for the rack go in their hands now (remotes is assigned later in the constructor).
       this.remotes?.refreshHeld();
     });
-    const galaxy = new GalaxyMap(
+    const galaxy = (this.galaxy = new GalaxyMap(
       this.ui,
       (p, zone) => void this.travel(p, zone),
       (p, poi, zone) => void this.teleport(p, poi, zone),
@@ -3203,7 +3209,7 @@ class App {
         why: (d) => this.hyperspace.why(d),
         onHyperspace: (d) => this.jumpFromGalaxy(d),
       },
-    );
+    ));
     // The galaxy tab keeps a world's named places once it has read them; the death card reads the
     // same list through this rather than reaching into the map.
     this.poisOf = (id) => galaxy.loadPois(id);
@@ -3236,9 +3242,10 @@ class App {
         return { x: at.x, y: at.y, z: at.z, heading: v ? v.heading : p.heading, altitude: flying ? at.y - this.world.terrain.heightAt(at.x, at.z) : null };
       },
       center: () => this.world.layoutCenter,
-      pois: (id) => galaxy.loadPois(id),
+      // The world here's places by its edit key (a copy of yours' own, never its source's: `editKeyOf`), any other by its pack.
+      pois: (id) => galaxy.loadPois(id === packIdOf(this.world.planet, this.zone) ? this.editKey() : id),
       // The game's own services (Map-maker II's eighth wave), those standing in the world's state now.
-      services: (id) => galaxy.loadPoisRaw(id).then((f) => inState(f.services)),
+      services: (id) => galaxy.loadPoisRaw(id === packIdOf(this.world.planet, this.zone) ? this.editKey() : id).then((f) => inState(f.services)),
       // The zone's placed things, read once per zone into the list the map owns: its stations and the
       // rest of what it shows are marks from the pack, so only the rocks are wanted here.
       objects: (out) => {
@@ -4428,7 +4435,7 @@ class App {
         } = {},
       ) => {
         if (opts.tune) Object.assign(DRESSING_TUNE, opts.tune);
-        const here = packIdOf(this.world.planet, this.zone);
+        const here = this.editKey();
         const editing = opts.layer !== undefined || opts.dest !== undefined || opts.confirm !== undefined || opts.put !== undefined || opts.remove !== undefined || opts.rename !== undefined || opts.take !== undefined || opts.edit !== undefined;
         if (editing && !import.meta.env.DEV) return { error: "the editor is the dev server's" };
         let said: string | null = null;
@@ -4921,7 +4928,7 @@ class App {
         // true or false, or 'on' and 'off' as the debug menu's dial writes it.
         if (typeof opts.snap === 'boolean') SEAT_SNAP_TUNE.on = opts.snap;
         else if (opts.snap === 'on' || opts.snap === 'off') SEAT_SNAP_TUNE.on = opts.snap === 'on';
-        const here = packIdOf(this.world.planet, this.zone);
+        const here = this.editKey();
         if (moved.length || opts.again) void this.standSeats(here, true);
         const plan = this.seatsStood.pack === here ? this.seatsStood.plan : null;
         const props = plan?.props ?? [];
@@ -7859,6 +7866,31 @@ class App {
       travel: (id: string) => {
         void this.travel(planetById(id));
         return `travelling to ${id}`;
+      },
+      /**
+       * The worlds of yours (the race drawer's fourth wave, `public/placements/worlds/all.json`): `worlds()` lists each with its
+       * kind, the world it copies, its edit key and its pack, what the last merge refused, and what the sky standing could not
+       * take of its parts. On the dev server, `{ make: row }` writes a row as one action (a new world or a copy: see the
+       * README's "Worlds of your own"), `{ remove: id }` takes one out, `{ open: 'new' | 'copy' | id }` opens the editor's form
+       * on the Tools tab, `{ set: { path: value } }` sets its fields as the window does, `{ save: true, go: true }` writes it and
+       * travels there; `{ go: id }` travels to one (as `travel(id)` does).
+       */
+      worlds: async (opts: Record<string, unknown> = {}) => {
+        if (typeof opts.go === 'string' && !opts.save) {
+          const p = PLANETS.find((x) => x.id === opts.go);
+          if (!p) return `no world ${opts.go}`;
+          void this.travel(p);
+          return `travelling to ${opts.go}`;
+        }
+        const list = () => PLANETS.filter((p) => p.ours).map((p) => ({ id: p.id, name: p.name, kind: p.ours!.kind, of: p.ours!.of ?? null, editKey: editKeyOf(p), pack: packIdOf(p), listed: !p.extra }));
+        const report = { worlds: list(), refused: OUR_WORLDS.refused, here: { id: this.world.planet.id, editKey: this.editKey(), pack: packIdOf(this.world.planet, this.zone), skySaid: this.world.skySaid } };
+        const writes = ['make', 'remove', 'open', 'set', 'save', 'arrival'].some((k) => opts[k] !== undefined);
+        if (!writes) return report;
+        if (!import.meta.env.DEV) return { ...report, said: ["the worlds' writes are the world editor's (the dev server's)"] };
+        const ed = await this.loadEditor();
+        if (!ed) return 'the world editor would not load';
+        const out = (await ed.worldsDebug(opts)) as Record<string, unknown>;
+        return { ...out, worlds: list() };
       },
       /**
        * A world's own arrival (`PlanetDef.arrival`, `src/world/arrival.ts`; Mustafar's landing deck is the one there
@@ -11747,7 +11779,7 @@ class App {
     rt.myId = () => this.net.id;
     rt.myName = () => this.current?.name ?? 'you';
     rt.members = () => (groups.roster ? groups.roster.members.map((m) => ({ id: m.me ? this.net.id : m.id, name: m.name, leader: m.leader })) : null);
-    rt.world = () => packIdOf(this.world.planet, this.zone);
+    rt.world = () => this.editKey();
     rt.track = (id) => this.trackById(id);
     rt.canRace = (t) => {
       const v = this.racedHullNow();
@@ -15732,14 +15764,14 @@ class App {
     const book = this.story.book;
     if (!book || !this.inWorld) return;
     const name = waypointName(near, metres, book.nextWp);
-    const out = this.story.addWaypoint({ name, world: packIdOf(this.world.planet, this.zone), f: 'raw', p: [x, z, null], on: true });
+    const out = this.story.addWaypoint({ name, world: this.editKey(), f: 'raw', p: [x, z, null], on: true });
     this.messages.system(out.ok ? `Waypoint set: ${name}` : `No waypoint: ${out.why}`);
   }
 
   /** Where the player stands, as a waypoint would keep it: the world, the frame, the place and the room. */
   private waypointHere(): { world: string; f: 'raw' | 'game'; p: [number, number, number | null]; room?: { cell: string; template?: string } } {
     const at = this.player.worldPos;
-    const world = packIdOf(this.world.planet, this.zone);
+    const world = this.editKey();
     if (this.world.planet.space) return { world, f: 'game', p: [at.x, at.z, at.y] };
     const raw = gameToRaw(at.x, at.z, this.world.layoutCenter);
     const s = this.world.cellState;
@@ -15791,7 +15823,7 @@ class App {
         const a = o.add;
         const space = !!this.world.planet?.space;
         const room = a.cell ? { cell: a.cell, ...(a.template ? { template: a.template } : {}) } : undefined;
-        results.push(this.story.addWaypoint({ name: a.name ?? o.name ?? `Waypoint ${this.story.book?.nextWp ?? 1}`, world: a.world ?? packIdOf(this.world.planet, this.zone), f: a.f ?? (space ? 'game' : 'raw'), p: [a.x, a.z, typeof a.y === 'number' ? a.y : null], colour, on: true, ...(room ? { room } : {}) }));
+        results.push(this.story.addWaypoint({ name: a.name ?? o.name ?? `Waypoint ${this.story.book?.nextWp ?? 1}`, world: a.world ?? this.editKey(), f: a.f ?? (space ? 'game' : 'raw'), p: [a.x, a.z, typeof a.y === 'number' ? a.y : null], colour, on: true, ...(room ? { room } : {}) }));
       }
     } else if (o.id) {
       if (o.colour !== undefined) results.push(this.story.recolourWaypoint(o.id, o.colour));
@@ -15882,7 +15914,7 @@ class App {
     if (m.planet !== planet || m.zone !== this.zone) {
       m.planet = planet;
       m.zone = this.zone;
-      m.pack = packIdOf(planet, this.zone);
+      m.pack = editKeyOf(planet, this.zone);
     }
     return m.pack;
   }
@@ -15940,7 +15972,7 @@ class App {
     const book = this.story.book;
     const planet = this.world.planet;
     if (book && planet) {
-      const here = packIdOf(planet, this.zone);
+      const here = editKeyOf(planet, this.zone);
       for (const w of book.waypoints) if (w.on && w.world === here && w.f === 'raw') list.add(w.id, this.waypointWords(w), w.colour, book.trackWp === w.id, w.p[0], 0, w.p[1]);
       // And the jobs' own, switched on.
       const view = this.jobs.view();
@@ -16130,7 +16162,7 @@ class App {
   private waypointsModel(): WaypointsModel {
     const book = this.story.book;
     const planet = this.world.planet;
-    const here = planet && this.inWorld ? packIdOf(planet, this.zone) : '';
+    const here = planet && this.inWorld ? editKeyOf(planet, this.zone) : '';
     const c = this.world.layoutCenter;
     const cx = c ? c.x : 0;
     const cz = c ? c.z : 0;
@@ -16187,7 +16219,7 @@ class App {
     const w = this.story.book?.waypoints.find((x) => x.id === id);
     const planet = this.world.planet;
     if (!w || !planet) return;
-    if (w.world !== packIdOf(planet, this.zone)) {
+    if (w.world !== editKeyOf(planet, this.zone)) {
       this.messages.system('That waypoint is on another world.');
       return;
     }
@@ -16870,7 +16902,7 @@ class App {
     const raw = gameToRaw(near.x, near.z, this.world.layoutCenter);
     const name = TRAINER_NAMES[near.who] ?? 'Trainer';
     const label = name.charAt(0).toUpperCase() + name.slice(1);
-    const out = this.story.addWaypoint({ name: label, world: packIdOf(this.world.planet, this.zone), f: 'raw', p: [raw.x, raw.z, null], on: true });
+    const out = this.story.addWaypoint({ name: label, world: this.editKey(), f: 'raw', p: [raw.x, raw.z, null], on: true });
     this.messages.system(out.ok ? `Waypoint set: ${label}` : `No waypoint: ${out.why}`);
   }
 
@@ -19033,7 +19065,7 @@ class App {
     // reader of a missing centre takes it, so its own arrival is read with nothing asked for (`packFiles.ts`).
     const centre = packless(planet)
       ? { x: 0, z: 0 }
-      : await this.poisFileOf(packIdOf(planet, zoneId)).then(
+      : await this.poisFileOf(editKeyOf(planet, zoneId)).then(
           (f) => f.center,
           () => null,
         );
@@ -19059,14 +19091,26 @@ class App {
     // away turns on whether the world really changed, and `Homes.enter` says why.
     homes.enter(`${planet.id}:${this.zone ?? ''}`);
     this.world.load(planet, packIdOf(planet, this.zone));
+    // A copy of yours (the race drawer's fourth wave): none of its source's kept travel and fitting rows answer for it, nor
+    // anything the world left behind stood or was still to stand (forgotten, never taken down: it went with that world), from
+    // this moment, before a loading screen's settle stands the collectors of the rows it finds (`standCollectorsNow`).
+    if (!standsLife(planet)) {
+      this.clearTravelStood(false);
+      this.clearFittingsStood(false);
+      this.travelRowsFor = '';
+      this.travelRows = [];
+      this.fittingRowsFor = '';
+      this.fittingRows = [];
+    }
     // This world's named places, off the same list the map reads and cached there: what the death
     // card calls each facility. Never awaited, and a world whose pack has no list simply has none.
-    const placesFor = packIdOf(planet, this.zone);
+    const placesFor = editKeyOf(planet, this.zone);
     // The gates this world's zones are walked between, pointed at the pack the world is loading and
     // not at whatever the prompt last gathered: a gate belongs to the world arriving, and asked for
     // from the gather it would be the world left behind's gates, mirrored about the world left
     // behind's centre, for as long as it took a frame to reach the on-foot branch.
-    this.zoneGates.use(import.meta.env.BASE_URL, placesFor);
+    // A copy of yours walks no gates (the race drawer's fourth wave): just terrain and buildings.
+    this.zoneGates.use(import.meta.env.BASE_URL, standsLife(planet) ? packIdOf(planet, this.zone) : planet.id);
     // The props a server keeps go as the houses do (`Homes.enter`), and what this machine keeps stands no more
     // either; then who keeps this player's own things here: the server when it keeps them, this machine when
     // there is none, or not known yet while an address is wanted and nothing has answered (`keeperOf`).
@@ -19166,7 +19210,7 @@ class App {
     // And what it stands for good (`src/world/permanent.ts`): both layers' files fetched beside the pack, so
     // the circles their rows keep the plants off are in before the ground is first built, and the rows filed
     // once the pack is in, which the loading screen and the seats wait on too.
-    const dressingPack = packIdOf(planet, this.zone);
+    const dressingPack = editKeyOf(planet, this.zone);
     const dressingKind = this.worldKindOf(planet);
     const dressingFiles = this.fetchDressing(dressingPack, dressingKind);
     // The world this arrival loaded (`load` moved the generation on above): a pack that comes in after a later
@@ -19198,13 +19242,16 @@ class App {
       homes.ready();
       // The travel terminals, the collectors and the shuttles of this world, and the fittings the
       // server stood on its other buildings.
-      standing = this.loadTravel(packIdOf(planet, this.zone)).catch(() => undefined);
-      void this.loadFittings(packIdOf(planet, this.zone));
+      // None of them on a copy of yours (the race drawer's fourth wave): just terrain and buildings.
+      if (standsLife(planet)) {
+        standing = this.loadTravel(packIdOf(planet, this.zone)).catch(() => undefined);
+        void this.loadFittings(packIdOf(planet, this.zone));
+      }
       // And whatever this player has put down here themselves, which is kept per world: by the server while
       // it keeps them, else by this machine (`enterPlaced` stands whichever keeps them now, and a change of
       // keeper from here on stands the other).
-      void this.enterPlaced(packIdOf(planet, this.zone));
-      if (packIdOf(this.world.planet, this.zone) === placesFor) {
+      void this.enterPlaced(editKeyOf(planet, this.zone));
+      if (this.editKey() === placesFor) {
         this.personalWorld = placesFor;
         if (this.homesKeeper === 'local') void this.standLocalHomes();
       }
@@ -19214,7 +19261,7 @@ class App {
       // And the chairs and tables of ours under the people the data sits down, once the dressing is filed
       // (bounded), since the seats are planned round what stands and a permanent chair is a chair.
       void this.dressingFiled(dressing).then(() => {
-        if (this.world.generation === dressingGen && packIdOf(this.world.planet, this.zone) === dressingPack) void this.standSeats(dressingPack);
+        if (this.world.generation === dressingGen && this.editKey() === dressingPack && standsLife(planet)) void this.standSeats(dressingPack);
       });
       // What this character has to spend: asked for on arriving, so the shuttle panel has a number
       // to show rather than a blank the first time it is opened.
@@ -19223,7 +19270,7 @@ class App {
       // arena) was brought in at that copy's start, and comes back there (`respawn`), so that is its spawn, and what the
       // overlay's arrival clear keeps its hostiles off: the zone's own spawn can stand in another group's copy. Its height
       // here is the data's held over the ground; a death there is stood on the start's floor by the ways' own rule.
-      const gridStart = at && placesFor === packIdOf(this.world.planet, this.zone) ? this.gridCopyStart(at) : null;
+      const gridStart = at && placesFor === this.editKey() ? this.gridCopyStart(at) : null;
       if (gridStart) this.spawn.copy(gridStart);
       const p = this.player;
       // Nor lifted to the ground when the arrival is a room's (a dungeon copy, a way back out to a ladder
@@ -19822,14 +19869,14 @@ class App {
     this.targetFx.select(null, false, null);
     // A race run and the world's tracks are the world's (a jump carries no pod, but the tracks are read again).
     this.leaveTracks('a jump to another system');
-    void this.fetchTracks(packIdOf(planet, this.zone), this.worldKindOf(planet));
+    void this.fetchTracks(editKeyOf(planet, this.zone), this.worldKindOf(planet));
     // And any raced hull's smoke and fire, which stand in the session's ship effects as the target's bracket does.
     this.engineFx.clear();
     this.world.loadCarrying(hull, planet, packIdOf(planet, this.zone));
     // What `arrive` does for a zone: the gates go with the world, even here, where every zone a jump
     // reaches is a system with none. A world swapped under the hull with the last one's gates still
     // pointed at would be the one place they could be wrong and never show.
-    this.zoneGates.use(import.meta.env.BASE_URL, packIdOf(planet, this.zone));
+    this.zoneGates.use(import.meta.env.BASE_URL, standsLife(planet) ? packIdOf(planet, this.zone) : planet.id);
     // And what `arrive` does for the waypoints: the window, if it is open through the jump, and the
     // marks' next gather are this system's from here.
     this.waypointsChanged();
@@ -19853,7 +19900,7 @@ class App {
     keptProps.enter(`${planet.id}:${this.zone ?? ''}`);
     placedProps.leave();
     this.personalWorld = '';
-    this.localHomes.enter(packIdOf(planet, this.zone), this.homeStore());
+    this.localHomes.enter(editKeyOf(planet, this.zone), this.homeStore());
     this.net.setHello(this.helloNow());
     await this.world.loadPack(pose.pos);
     // As on the walking arrival: the hello went out before the pack, so what the server has already
@@ -19863,7 +19910,7 @@ class App {
     // And what the walking arrival does after the pack: the props this player put down in this system (and
     // the store told which world it is, or a prop put down here would be kept under the last zone's name),
     // and what this system stands for good.
-    const pack = packIdOf(planet, this.zone);
+    const pack = editKeyOf(planet, this.zone);
     void this.enterPlaced(pack);
     this.personalWorld = pack;
     this.dressingBuilt = Promise.resolve();
@@ -21378,7 +21425,7 @@ class App {
       const kind = this.worldKindOf(this.world.planet);
       if (kind !== 'ground') return 'the race pass is switched off, so no track is read: race({ on: true }), then track({ reload: true })';
       const read = await this.readTracks(world, 'ground');
-      if (packIdOf(this.world.planet, this.zone) !== world) return 'the world changed meanwhile';
+      if (this.editKey() !== world) return 'the world changed meanwhile';
       if (read === 'unread') return this.tracksUnread(world);
       this.notedTrackRev(world, rev);
       const n = this.world.landCourses(read && !read.problem ? read.tracks : [], Number.NaN, Number.NaN, false);
@@ -21386,7 +21433,7 @@ class App {
     }
     const before = this.tracksWorld === world ? (this.tracksRead?.tracks ?? []) : [];
     const read = await this.fetchTracksRead(world, this.worldKindOf(this.world.planet));
-    if (packIdOf(this.world.planet, this.zone) !== world) return 'the world changed meanwhile';
+    if (this.editKey() !== world) return 'the world changed meanwhile';
     if (read === 'unread') return this.tracksUnread(world);
     // The drawn courses carved again with the file as it is now (a hand edit, the dev server's word).
     if (this.worldKindOf(this.world.planet) === 'ground') this.world.landCourses(read && !read.problem ? read.tracks : [], Number.NaN, Number.NaN, false);
@@ -21452,7 +21499,7 @@ class App {
 
   /** A track of this world's file by its id, or null. */
   private trackById(id: string): TrackDef | null {
-    if (this.tracksWorld !== packIdOf(this.world.planet, this.zone)) return null;
+    if (this.tracksWorld !== this.editKey()) return null;
     return this.tracksRead?.tracks.find((t) => t.id === id) ?? null;
   }
 
@@ -21614,7 +21661,7 @@ class App {
     if (!this.inWorld || this.traveling) return 'not now: enter the world first, and not mid-crossing';
     if (this.raceRun?.live) return `a run of ${this.raceRun.track.name} is under way: track({ stop: true }) first`;
     const t = this.trackById(id);
-    if (!t) return `no track called ${id} on this world (${trackEditFile(packIdOf(this.world.planet, this.zone))})`;
+    if (!t) return `no track called ${id} on this world (${trackEditFile(this.editKey())})`;
     const v = this.racedHullNow();
     if (typeof v === 'string') return v;
     // The kind the vehicle was spawned as, and whether this track is raced as it (`runKindFor`).
@@ -21626,7 +21673,7 @@ class App {
     const race = v.race!;
     // A bike starting a run is put in racing mode, and the message line says so (as U says it) once the curtain is up.
     const moded = race.modes && race.mode !== 'racing' && !race.setMode(v, 'racing');
-    const world = packIdOf(this.world.planet, this.zone);
+    const world = this.editKey();
     const places = trackInGame(t, this.world.layoutCenter, this.trackFrame());
     const heading = turnHeading(places.grid.q);
     const midY = this.hullMiddle(v);
@@ -21637,7 +21684,7 @@ class App {
     const points = this.coursePoints(t, places);
     const need = this.courseCurtain(v, at, points);
     await this.standOnCourse(v, at.x, at.y, at.z, heading, need.need === 'course' ? { label: group ? `${t.name}: a group race` : t.name, points, why: need.why } : null);
-    if (packIdOf(this.world.planet, this.zone) !== world || this.player.mounted !== v || v.disposed) return 'the run was not started: the world or the ride changed behind the curtain';
+    if (this.editKey() !== world || this.player.mounted !== v || v.disposed) return 'the run was not started: the world or the ride changed behind the curtain';
     if (group && this.raceTogether.race !== group.race) return 'the race changed behind the curtain';
     this.clearRun();
     const key = raceBestKey(world, t.id);
@@ -21970,7 +22017,7 @@ class App {
     if (!import.meta.env.DEV) return "the editor is the dev server's";
     if (!isTrackId(id)) return 'a track id is a-z, 0-9, _ and - (64 at most, starting with a letter or a digit)';
     if (this.raceRun?.live) return 'not during a run: track({ stop: true }) first';
-    if (this.trackById(id)) return `${id} is in ${trackEditFile(packIdOf(this.world.planet, this.zone))} already: track({ edit: '${id}' }) takes it in hand`;
+    if (this.trackById(id)) return `${id} is in ${trackEditFile(this.editKey())} already: track({ edit: '${id}' }) takes it in hand`;
     const v = this.racedHullNow();
     if (typeof v === 'string') return v;
     const kind = RACE_KINDS.includes(v.spec.kind as RaceKind) ? (v.spec.kind as RaceKind) : 'podracer';
@@ -22068,7 +22115,7 @@ class App {
     if (!import.meta.env.DEV) return "the editor is the dev server's";
     const t = this.trackHeld;
     if (!t) return 'no track in hand';
-    const world = packIdOf(this.world.planet, this.zone);
+    const world = this.editKey();
     const file = trackEditFile(world);
     if (t.gates.length < 2) return `${t.id} has ${t.gates.length} gate${t.gates.length === 1 ? '' : 's'}, and a track has two at least`;
     if (!this.trackFilesSaved.has(file) && !this.trackArmed(`save:${file}`)) return `the first save to ${file} this session: track({ save: true }) again to write it`;
@@ -22091,7 +22138,7 @@ class App {
   /** A track taken out of this world's file, asked twice. */
   private async trackRemove(id: string): Promise<string> {
     if (!import.meta.env.DEV) return "the editor is the dev server's";
-    const world = packIdOf(this.world.planet, this.zone);
+    const world = this.editKey();
     if (!this.trackById(id)) return `no track called ${id} on this world`;
     if (!this.trackArmed(`remove:${world}/${id}`)) return `take ${id} out of ${trackEditFile(world)}? track({ remove: '${id}' }) again to do it`;
     // Through the batch (the race drawer's first wave), with the world editor on as one action of its history.
@@ -22109,7 +22156,7 @@ class App {
 
   /** What the editor's list shows: this world's tracks and the track in hand with its gates. */
   private trackListModel(): TrackListModel {
-    const world = packIdOf(this.world.planet, this.zone);
+    const world = this.editKey();
     const read = this.tracksWorld === world ? this.tracksRead : null;
     const frame = this.trackFrame();
     const centre = this.world.layoutCenter;
@@ -22199,7 +22246,7 @@ class App {
   private async trackConsole(opts: TrackConsoleOpts = {}): Promise<Record<string, unknown> | string> {
     const words: string[] = [];
     if (opts.tune) words.push(...tuneTrack(opts.tune));
-    if (opts.reload) words.push(await this.reloadTracks(packIdOf(this.world.planet, this.zone)));
+    if (opts.reload) words.push(await this.reloadTracks(this.editKey()));
     if (typeof opts.begin === 'string') words.push(this.trackBegin(opts.begin));
     if (typeof opts.edit === 'string') words.push(this.trackEdit(opts.edit));
     if (opts.set) words.push(this.trackSet(opts.set));
@@ -22263,7 +22310,7 @@ class App {
         words.push(check.words);
       }
     }
-    const world = packIdOf(this.world.planet, this.zone);
+    const world = this.editKey();
     const read = this.tracksWorld === world ? this.tracksRead : null;
     const centre = this.world.layoutCenter;
     const frame = this.trackFrame();
@@ -23982,7 +24029,7 @@ class App {
     // The frame the places are written about: the layout's centre, or (0, 0) on a world with no pack (Map-maker II's places
     // of ours on a real-elevation world), where a layout centre never comes.
     const c = this.world.placeFrame;
-    if (!c || this.placeNamesFor !== packIdOf(this.world.planet, this.zone)) return [];
+    if (!c || this.placeNamesFor !== this.editKey()) return [];
     return this.placeNames.map((p) => ({ name: p.name, x: -(p.x - c.x), z: p.z - c.z, r: p.r }));
   }
 
@@ -23998,8 +24045,20 @@ class App {
   private placesNow(): PlaceIndex {
     // Only while the file is the world loaded now's (`placesFileFor`): the creator's captured place loads a world with no
     // arrival, and the last world's rows must not be read about its centre.
-    return this.placeKeeper.now(placesFileFor(this.placesFile, this.placeNamesFor, this.world.packId), this.world.placeFrame, worldStateStamp(), !!this.world.planet?.space, standsIn);
+    return this.placeKeeper.now(this.placesSky(placesFileFor(this.placesFile, this.placeNamesFor, this.world.editKey)), this.world.placeFrame, worldStateStamp(), !!this.world.planet?.space, standsIn);
   }
+
+  /**
+   * The places file as the sky reads it (the race drawer's fourth wave): a world of yours' own weather (its worlds row's climate
+   * and forced kind, `layWorldWeather`) laid under its locations file's world row, which wins; the very file for every world of
+   * the game's. Kept by the file it was laid from, so the index is made again only when the file is another.
+   */
+  private placesSky<F extends { locations: LocationRow[] } | null>(f: F): F {
+    if (!f || !this.world.planet?.ours) return f;
+    if (this.laidSky.from !== f) this.laidSky = { from: f, to: { ...f, locations: layWorldWeather(this.world.planet, f.locations) } };
+    return this.laidSky.to as F;
+  }
+  private laidSky: { from: unknown; to: unknown } = { from: null, to: null };
 
   /** Why nobody may build (`house`) or put a thing down (`prop`) in a circle of `r` metres about a game point, in words, or null. */
   private noBuildHere(x: number, z: number, r: number, what: 'house' | 'prop' | 'editor'): string | null {
@@ -24052,7 +24111,7 @@ class App {
     this.placesShownStamp = worldStateStamp();
     // The sky per place (Map-maker II's ninth wave): the world row's own tables to their readers, and the weather told the
     // places moved (at once behind a loading screen, crossfaded otherwise).
-    this.applyWorldSky(packIdOf(this.world.planet, this.zone), f);
+    this.applyWorldSky(packIdOf(this.world.planet, this.zone), this.placesSky(f));
     this.world.weather.placesMoved(this.traveling);
     if (!f) {
       this.minimap.setPlaces(null);
@@ -24069,7 +24128,7 @@ class App {
    */
   private async landLocationRows(pack: string, put: LocationRow[], deleted: string[]): Promise<void> {
     const f = await this.landPlacesOf(pack, put, deleted);
-    if (!f || packIdOf(this.world.planet, this.zone) !== pack || this.placeNamesFor !== pack) return;
+    if (!f || this.editKey() !== pack || this.placeNamesFor !== pack) return;
     this.placeNames = f.pois;
     this.placesFile = f;
     this.cityWatch.reset();
@@ -24099,7 +24158,7 @@ class App {
     } catch {
       return;
     }
-    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (this.world.generation !== gen || this.editKey() !== pack) return;
     const read = this.readRevs.get(`locations/${pack}`);
     if (read !== undefined) this.placementRevs.set(`locations/${pack}`, read);
     else if (typeof rev === 'string') this.placementRevs.set(`locations/${pack}`, rev);
@@ -24119,7 +24178,7 @@ class App {
    */
   private showLoadingLine(planet: PlanetDef, zoneId: string | undefined, at: { x: number; z: number } | null): void {
     if (planet.space || planet.instances) return;
-    const pack = packIdOf(planet, zoneId);
+    const pack = editKeyOf(planet, zoneId);
     const moment = this.loadingScreen.lineMoment;
     void this.placesFileOf(pack)
       .then((f) => {
@@ -24292,7 +24351,7 @@ class App {
         const dem = this.world.terrain.dem;
         if (!planet?.dem || !dem) said.push('this world makes no map (it has a converted one, or no raster)');
         else {
-          const pack = packIdOf(planet, this.zone);
+          const pack = editKeyOf(planet, this.zone);
           const m = this.makeDemMap(dem.size);
           this.madeMapStarted = performance.now();
           while (!m.step(MAP_PICTURE_TUNE.sliceMs));
@@ -24350,8 +24409,8 @@ class App {
       };
     }
     return {
-      world: planet ? packIdOf(planet, this.zone) : null,
-      file: f ? { rows: rows.length, ...this.placesFileInfoOf(packIdOf(planet, this.zone)) } : null,
+      world: planet ? editKeyOf(planet, this.zone) : null,
+      file: f ? { rows: rows.length, ...this.placesFileInfoOf(editKeyOf(planet, this.zone)) } : null,
       kinds,
       worldRow: idx.world ? { cities: idx.world.cities ?? null, loading: idx.world.loading?.length ?? 0 } : null,
       zones: { ...idx.counts, gameNoBuild: idx.gameNoBuild },
@@ -25490,7 +25549,7 @@ class App {
       } catch {
         /* no props pack: whatever this world's own pack carries is still stood */
       }
-      if (!current() || packIdOf(this.world.planet, this.zone) !== pack) return;
+      if (!current() || this.editKey() !== pack) return;
       guest = this.props.pack;
       if (!guest) run.note = this.props.note || 'no props pack, so the seats this world lacks the models for are left out';
     }
@@ -25574,7 +25633,7 @@ class App {
         /* no catalogue: the rows cannot be stood, but this world is still the world to put one in */
       }
     }
-    if (packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (this.editKey() !== pack) return;
     // This machine's rows are read always, and stood only while it keeps the player's things; the server's
     // stand while it keeps them, out of this world's own copy of the pack, minted from here on.
     const local = placedProps.enter(pack, this.placedStore(), this.placedDeps(), this.propsKeeper === 'local');
@@ -25865,7 +25924,7 @@ class App {
 
   /** The server's props, stood: the catalogue fetched first where a row needs it, and only in a world that is in. */
   private async standKeptProps(): Promise<void> {
-    const pack = packIdOf(this.world.planet, this.zone);
+    const pack = this.editKey();
     if (this.personalWorld !== pack) return;
     if (keptProps.rows.size && !this.props.loaded) {
       try {
@@ -25874,13 +25933,13 @@ class App {
         /* no catalogue: the rows wait */
       }
     }
-    if (this.propsKeeper !== 'server' || this.personalWorld !== pack || packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (this.propsKeeper !== 'server' || this.personalWorld !== pack || this.editKey() !== pack) return;
     keptProps.ready();
   }
 
   /** This machine's props, stood again: once the arrival has read them (`enterPlaced`), which stands them itself until then. */
   private async standLocalProps(): Promise<void> {
-    const pack = packIdOf(this.world.planet, this.zone);
+    const pack = this.editKey();
     if (placedProps.inWorld !== pack) return;
     if (placedProps.all.length && !this.props.loaded) {
       try {
@@ -25899,7 +25958,7 @@ class App {
    * overtaken by everything being taken down, a change of keeper or a new world puts its house straight back.
    */
   private async standLocalHomes(): Promise<void> {
-    const pack = packIdOf(this.world.planet, this.zone);
+    const pack = this.editKey();
     if (this.personalWorld !== pack || this.localHomes.world !== pack) return;
     const round = this.localHomes.beginStand();
     for (const row of [...this.localHomes.all]) {
@@ -26130,7 +26189,7 @@ class App {
    * rows still filed in its streamer.
    */
   private async standDressing(pack: string, gen = this.world.generation): Promise<void> {
-    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (this.world.generation !== gen || this.editKey() !== pack) return;
     // The regions this world's rows fall in were held from loading at the arrival (`World.holdDressing`), so rows filed
     // before their tier is built fold into it (DESIGN.md §2.8): let go once every row is filed, whatever comes of it.
     try {
@@ -26155,7 +26214,7 @@ class App {
     this.permanent.enter(pack, centre, kind, gen);
     // A world with no layout and no stand-in has no streamer to stand anything in.
     if (!centre) return;
-    const current = () => this.dressingRun === run && this.world.generation === gen && packIdOf(this.world.planet, this.zone) === pack;
+    const current = () => this.dressingRun === run && this.world.generation === gen && this.editKey() === pack;
     try {
       const files = await this.dressingFor(pack, kind);
       if (!current()) return;
@@ -26183,7 +26242,7 @@ class App {
     const run = { pack, run: ++this.dressingRuns };
     this.dressingReload = run;
     const gen = this.world.generation;
-    const current = () => this.dressingReload === run && this.world.generation === gen && packIdOf(this.world.planet, this.zone) === pack && this.permanent.worldId === pack && this.permanent.generation === gen;
+    const current = () => this.dressingReload === run && this.world.generation === gen && this.editKey() === pack && this.permanent.worldId === pack && this.permanent.generation === gen;
     const frame = this.world.planet.space ? 'space' : 'ground';
     const layers = layer ? [layer] : PLACEMENT_LAYERS;
     const reads = await Promise.all(layers.map((l) => this.fetchPlacements(l, pack, frame)));
@@ -26273,7 +26332,7 @@ class App {
    */
   private placementWord(d: PlacementWord): void {
     if (!this.inWorld || this.traveling || this.world.sceneOnly) return;
-    const here = packIdOf(this.world.planet, this.zone);
+    const here = this.editKey();
     const kind = d?.kind ?? d?.layer;
     // The shared walk-through file is every world's (its word names `all`): read again whatever world this is.
     if (kind === 'solid') {
@@ -26307,6 +26366,17 @@ class App {
       if (typeof d.rev === 'string' && this.placementRevs.get('lightsAll/all') === d.rev) return;
       if (typeof d.rev === 'string' && this.takeOwnRev('lightsAll/all', d.rev)) return;
       void this.reloadLights(null, d.rev);
+      return;
+    }
+    // The worlds file is every world's as well (the race drawer's fourth wave): read again whatever world this is.
+    if (kind === 'worlds') {
+      if (this.placementsInFlight > 0) {
+        this.heldWords.push(d);
+        return;
+      }
+      if (typeof d.rev === 'string' && this.placementRevs.get('worlds/all') === d.rev) return;
+      if (typeof d.rev === 'string' && this.takeOwnRev('worlds/all', d.rev)) return;
+      void this.reloadWorlds(d.rev);
       return;
     }
     if (d?.world !== here) return;
@@ -26587,7 +26657,7 @@ class App {
    * where no building is stood). Every number is the file's own frame, ready to save as it is.
    */
   private async exampleDressing(): Promise<{ file: string; text: string } | { error: string }> {
-    const here = packIdOf(this.world.planet, this.zone);
+    const here = this.editKey();
     const centre = this.world.layoutCenter;
     if (!centre) return { error: 'this world has no layout to stand anything in' };
     const frame = this.world.planet.space ? 'game' : 'raw';
@@ -28900,9 +28970,18 @@ class App {
   /** Every building the gallery has with rooms, for the Housing tab's panel, once asked for. */
   private editModels: { id: string; name: string }[] | null = null;
 
-  /** The world the editor writes for: the pack id, which names the files. */
+  /**
+   * The name this world's edit files, its story's places, its waypoints and the player's own things here are kept under (the
+   * race drawer's fourth wave, `editKeyOf`): the pack id for every world of the game's, a world of yours' own id. Everything
+   * that reads the pack keeps `packIdOf`.
+   */
+  private editKey(): string {
+    return editKeyOf(this.world.planet, this.zone);
+  }
+
+  /** The world the editor writes for: its edit key, which names the files. */
   private editWorld(): string {
-    return packIdOf(this.world.planet, this.zone);
+    return this.editKey();
   }
 
   /** What the placing bar says of the editor: where the thing in hand is kept, and a first click waiting for its second. */
@@ -29538,6 +29617,15 @@ class App {
           fileCount: (layer) => (this.permanent.worldIn === this.editWorld() ? (this.permanent.fileOf(layer)?.rows.length ?? 0) : 0),
           say: (words) => this.messages.system(words),
           packId: () => this.editWorld(),
+          ownPack: () => packIdOf(this.world.planet, this.zone),
+          // The worlds of yours (the race drawer's fourth wave).
+          worldRows: () => this.ourWorldRows,
+          zone: () => this.zone,
+          travelTo: (id: string) => {
+            const p = PLANETS.find((x) => x.id === id);
+            if (p) void this.travel(p);
+          },
+          skiesNote: () => this.skiesNote(),
           worldKind: () => this.worldKindOf(this.world.planet),
           put: (row, dest, lifted) => this.editorPut(row, dest, lifted),
           remove: (layer, id) => this.deletePermanent(layer, id),
@@ -29912,6 +30000,13 @@ class App {
       this.placementRevs.set('lightsAll/all', gf.rev);
       this.noteOwnRev('lightsAll/all', gf.rev);
     }
+    // The worlds file is every world's too (the race drawer's fourth wave): kept under `all`, and the planet list merged again.
+    const yf = files.worlds;
+    if (yf) {
+      this.placementRevs.set('worlds/all', yf.rev);
+      this.noteOwnRev('worlds/all', yf.rev);
+      this.landWorlds(landRows(this.ourWorldRows, yf.put as unknown as WorldRow[], yf.deleted));
+    }
     // The heights it wrote, laid over the ground by difference (the tiles put and taken out), whatever else it wrote.
     const hf = files.heights;
     let heightsLanded: Promise<number> = Promise.resolve(0);
@@ -30060,6 +30155,61 @@ class App {
   }
 
   /** The looks file read again (the dev server's word) and put in force (`landOwnLooks`). */
+  /** The worlds of yours as this page holds them (the race drawer's fourth wave): the boot's, then every landing's. */
+  private ourWorldRows: WorldRow[] = [...BOOT_WORLDS];
+  /** The galaxy tab, kept so a world of yours landed makes its cards again. */
+  private galaxy: GalaxyMap | null = null;
+
+  /**
+   * The worlds of yours landed (an editor's batch, the dev server's word): the planet list merged again and the map's cards
+   * made again. The world standing keeps the planet it arrived with, so a world of yours changed while you stand in it takes
+   * its new terrain, sky and water at its next arrival (`__debug.worlds({ go })` travels there again).
+   */
+  /** The worlds file's rows landed when the boot's read answered after its wait (`boot`, `readWithin`). */
+  landLateWorlds(rows: WorldRow[]): void {
+    this.landWorlds(rows);
+  }
+
+  private landWorlds(rows: WorldRow[]): void {
+    this.ourWorldRows = rows;
+    mergeOurWorlds(rows);
+    if (OUR_WORLDS.refused.length) console.warn(`worlds: ${OUR_WORLDS.refused.map((s) => `${s.id}: ${s.why}`).join('; ')}`);
+    this.galaxy?.refreshWorlds();
+  }
+
+  /** Every converted sky's bodies in words, read once a session the first time the New world window asks (`skiesNote`). */
+  private skiesWords: string | null = null;
+  private skiesNote(): string {
+    if (this.skiesWords !== null) return this.skiesWords;
+    this.skiesWords = 'Body pictures: reading every converted sky…';
+    void (async () => {
+      const packs = new Set<string>();
+      for (const p of PLANETS) {
+        if (p.ours || p.space || p.instances || p.pack === false) continue;
+        if (p.zones?.length) for (const z of p.zones) packs.add(z.pack);
+        else packs.add(p.id);
+      }
+      const parts: string[] = [];
+      for (const pack of packs) {
+        const d = await packJson<SkyData>(pack, 'sky.json', import.meta.env.BASE_URL, { probe: false }).catch(() => null);
+        if (d && Array.isArray(d.blocks)) parts.push(`${pack}: ${bodiesOf(pack, d).map((x) => x.pic.slice(pack.length + 1)).join(' ') || '(none)'}`);
+      }
+      this.skiesWords = parts.length ? `Sky packs and their body pictures (<pack>/<body>): ${parts.join('; ')}.` : 'No converted sky is installed.';
+    })();
+    return this.skiesWords;
+  }
+
+  /** The worlds file read again for the dev server's word (as the looks file is): its rows landed, or left as they stood. */
+  private async reloadWorlds(rev?: string): Promise<void> {
+    const rows = await readOurWorlds();
+    if (rows === null) {
+      console.warn(`worlds: public/${editFilePath('worlds', 'all')} changed and could not be read again: the worlds stand as they stood`);
+      return;
+    }
+    if (typeof rev === 'string') this.placementRevs.set('worlds/all', rev);
+    this.landWorlds(rows);
+  }
+
   private async reloadLooks(rev?: string): Promise<void> {
     const read = await readOwnLooks(import.meta.env.BASE_URL);
     if (read === 'unread') {
@@ -30173,7 +30323,7 @@ class App {
   private async reloadRemovals(pack: string, rev: string | undefined): Promise<void> {
     const gen = this.world.generation;
     const loaded = await this.readEditRows('removed', pack, this.world.planet.space ? 'space' : this.world.planet.instances ? 'copies' : 'ground');
-    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (this.world.generation !== gen || this.editKey() !== pack) return;
     if (loaded === 'unread') {
       console.warn(`removals: public/${editFilePath('removed', pack)} changed and could not be read again: what it takes away is left as it was`);
       return;
@@ -30188,7 +30338,7 @@ class App {
   private async reloadPeople(pack: string, rev: string | undefined): Promise<void> {
     const gen = this.world.generation;
     const loaded = await this.readEditRows('people', pack, this.world.planet.space ? 'space' : this.world.planet.instances ? 'copies' : 'ground');
-    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (this.world.generation !== gen || this.editKey() !== pack) return;
     if (loaded === 'unread') {
       console.warn(`people: public/${editFilePath('people', pack)} changed and could not be read again: the people stand as they stood`);
       return;
@@ -30243,10 +30393,10 @@ class App {
   /** A lights file read again (the dev server's word) and put in force beside the other as it stands (`World.setRoomLightRows`). */
   private async reloadLights(pack: string | null, rev: string | undefined): Promise<void> {
     const gen = this.world.generation;
-    const here = packIdOf(this.world.planet, this.zone);
+    const here = this.editKey();
     const kind = this.world.planet.space ? 'space' : 'ground';
     const got = await this.readLightsRows(pack, kind);
-    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== here) return;
+    if (this.world.generation !== gen || this.editKey() !== here) return;
     if (got === 'unread') {
       console.warn(`lights: a lights file changed and could not be read again: the rooms are lit as they were`);
       return;
@@ -30374,7 +30524,7 @@ class App {
    * `World.removalStamp`) and the fittings stood again over the new hides. An edit's work.
    */
   private removalsLandedHere(): void {
-    const pack = packIdOf(this.world.planet, this.zone);
+    const pack = this.editKey();
     if (this.fittingRowsFor === pack) void this.standFittings(pack);
   }
 
@@ -30400,7 +30550,7 @@ class App {
   private async reloadWater(pack: string, rev: string | undefined): Promise<void> {
     const gen = this.world.generation;
     const loaded = await this.readWater(pack, this.world.planet.space ? 'space' : this.world.planet.instances ? 'copies' : 'ground');
-    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (this.world.generation !== gen || this.editKey() !== pack) return;
     if (loaded === 'unread') {
       console.warn(`water: public/${editFilePath('water', pack)} changed and could not be read again: the lakes are left as they stood`);
       return;
@@ -30452,7 +30602,7 @@ class App {
   private async reloadPaint(pack: string, rev: string | undefined): Promise<void> {
     const gen = this.world.generation;
     const loaded = await this.readPaint(pack, this.world.planet.space ? 'space' : this.world.planet.instances ? 'copies' : 'ground');
-    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (this.world.generation !== gen || this.editKey() !== pack) return;
     if (loaded === 'unread') {
       console.warn(`paint: public/${editFilePath('paint', pack)} changed and could not be read again: the ground is left as it stood`);
       return;
@@ -30512,7 +30662,7 @@ class App {
   private async reloadHeights(pack: string, rev: string | undefined): Promise<void> {
     const gen = this.world.generation;
     const loaded = await this.readHeights(pack, this.world.planet.space ? 'space' : this.world.planet.instances ? 'copies' : 'ground');
-    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    if (this.world.generation !== gen || this.editKey() !== pack) return;
     // Not read (the fetch or the server failed): the ground left as it stands, since the file may well still hold its tiles,
     // and every stroke over one of them would be refused as a tile already there were they let go here.
     if (loaded === 'unread') {
@@ -32119,17 +32269,20 @@ class App {
   /** The pack the player stands in, and the point under them in the snapshot's frame. */
   private rawHere(): { pack: string; at: [number, number, number] } | null {
     const c = this.world.layoutCenter;
-    if (!c) return null;
+    // A copy of yours stands none of SOE's ways (`waysPackOf`): no gate, lift, guide, launcher or clone droid of its source.
+    const pack = waysPackOf(this.world.planet, this.zone);
+    if (!c || pack === null) return null;
     const at = this.player.worldPos;
-    return { pack: packIdOf(this.world.planet, this.zone), at: toRaw(at.x, at.y, at.z, c) };
+    return { pack, at: toRaw(at.x, at.y, at.z, c) };
   }
 
   /** Where the gate at a point of this world's (the game's frame) lands, by SOE's data, or null. */
   private gateLandingOf(x: number, y: number, z: number): Landing | null {
     const c = this.world.layoutCenter;
-    if (!c) return null;
+    const pack = waysPackOf(this.world.planet, this.zone);
+    if (!c || pack === null) return null;
     const raw = toRaw(x, y, z, c);
-    return gateLanding(ngeWays.now, packIdOf(this.world.planet, this.zone), raw[0], raw[2]);
+    return gateLanding(ngeWays.now, pack, raw[0], raw[2]);
   }
 
   /** Who a copy is chosen for: the group, else the character, as every dungeon's copies are (`copyIndex`). */
@@ -32437,7 +32590,7 @@ class App {
       await this.moveToWay(new THREE.Vector3(g[0], g[1], g[2]), `${o.go} ${n}`, 'move');
     }
     const now = this.rawHere();
-    if (!now) return { error: 'no world' };
+    if (!now) return { error: standsLife(this.world.planet) ? 'no world' : "a copy of yours stands none of SOE's ways" };
     const z = ways.zones[now.pack];
     const [x, y, zz] = now.at;
     const tree = this.treeLiftHere();
@@ -32545,9 +32698,10 @@ class App {
    */
   private gridCopyStart(at: THREE.Vector3): THREE.Vector3 | null {
     const c = this.world.layoutCenter;
-    if (!c) return null;
+    const pack = waysPackOf(this.world.planet, this.zone);
+    if (!c || pack === null) return null;
     const raw = toRaw(at.x, at.y, at.z, c);
-    const got = copyStartAt(ngeWays.now, packIdOf(this.world.planet, this.zone), raw[0], raw[2]);
+    const got = copyStartAt(ngeWays.now, pack, raw[0], raw[2]);
     if (!got) return null;
     const g = wayToGame(got.at, c);
     return new THREE.Vector3(g[0], Math.max(g[1], this.world.terrain.heightAt(g[0], g[2]) + 0.3), g[2]);
@@ -32948,7 +33102,8 @@ class App {
         wayOut = !!this.world.placedNear(exits, at, INSTANCE_TUNE.thingReach);
       }
     } else {
-      const pack = packIdOf(this.world.planet, this.zone);
+      // A copy of yours stands its source's buildings and none of their ways into a dungeon (`waysPackOf`: none, so no entrance).
+      const pack = waysPackOf(this.world.planet, this.zone) ?? '';
       if (this.entranceSet.pack !== pack) this.entranceSet = { pack, templates: new Set(entrancesOf(pack).map((e) => e.template)) };
       if (this.entranceSet.templates.size) wayIn = this.world.placedNear(this.entranceSet.templates, at, INSTANCE_TUNE.thingReach);
     }
@@ -33026,7 +33181,7 @@ class App {
     }
     if (use === 'in') {
       const thing = this.instanceThing as PlacedObject | null;
-      const e = thing ? entrancesOf(packIdOf(this.world.planet, this.zone)).find((x) => x.template === thing.template) : null;
+      const e = thing ? entrancesOf(waysPackOf(this.world.planet, this.zone) ?? '').find((x) => x.template === thing.template) : null;
       const def = e ? instanceOf(e.kind) : null;
       if (!def) return false;
       void this.goIntoCopy(def, { ...this.wayBackFromHere(), kind: def.kind });
@@ -35177,9 +35332,49 @@ class App {
   }
 }
 
+/**
+ * The worlds of yours (the race drawer's fourth wave, `public/placements/worlds/all.json`), read at boot and merged into the
+ * planet list after the game's own before anything reads it (`mergeOurWorlds`). A built game asks only for a file its own list
+ * ships, the dev server answers from the disk; no file, a file that does not read, or a read past a few seconds is no worlds,
+ * and the list is the game's to the object.
+ */
+async function readOurWorlds(): Promise<WorldRow[] | null> {
+  try {
+    const res = await fetchPublic(editFilePath('worlds', 'all'), { cache: 'no-store' }, import.meta.env.BASE_URL);
+    // No file: a build that does not ship it, a 404, or the page handed back for a public file the server has not got.
+    if (!res || res.status === 404) return [];
+    const type = res.headers.get('content-type') ?? '';
+    if (res.ok && type.includes('text/html')) return [];
+    if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return null;
+    const read = readWorldsFile(await res.text());
+    if (read.problem) console.warn(`worlds: public/${editFilePath('worlds', 'all')} does not read (${read.problem}): no world of yours stands`);
+    if (read.skipped.length) console.warn(`worlds: ${read.skipped.map((s) => `${s.id}: ${s.why}`).join('; ')}`);
+    return read.problem ? [] : read.rows;
+  } catch {
+    return null;
+  }
+}
+
+/** The worlds of yours the boot read (none with no file), which the App starts from. */
+let BOOT_WORLDS: WorldRow[] = [];
+
 async function boot(): Promise<void> {
-  const physics = await Physics.create();
-  new App(physics).run();
+  // The worlds file waits a few seconds at most; a read that answers after that is landed when it comes (`readWithin`), never
+  // thrown away, or the session would stand no world of yours and the editor mint ids against an empty list.
+  const [physics, worlds] = await Promise.all([Physics.create(), readWithin(readOurWorlds(), 4000)]);
+  if (worlds.value?.length) {
+    BOOT_WORLDS = worlds.value;
+    mergeOurWorlds(worlds.value);
+    if (OUR_WORLDS.refused.length) console.warn(`worlds: ${OUR_WORLDS.refused.map((s) => `${s.id}: ${s.why}`).join('; ')}`);
+  }
+  const app = new App(physics);
+  if (worlds.late) {
+    console.warn('worlds: the worlds file had not answered at boot; its worlds are landed when it does');
+    void worlds.late.then((rows) => {
+      if (rows?.length) app.landLateWorlds(rows);
+    });
+  }
+  app.run();
 }
 
 void boot();

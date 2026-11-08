@@ -33,8 +33,9 @@ import zlib from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { PLACEMENTS_ENDPOINT_TUNE, EDITOR_HEADER, applyPlacementOp, fileStateOf, refuseRequest, statusAsk, statusFiles } from '../../src/world/placementEdits.ts';
-import { BATCH_FILE_KINDS, OUTSIDE_EDIT_FILES, TOP_EDIT_FILES, editFileWorld, isOutsideKind } from '../../src/story/placementPath.ts';
+import { BATCH_FILE_KINDS, OUTSIDE_EDIT_FILES, TOP_EDIT_FILES, editFileRel, editFileWorld, isOutsideKind } from '../../src/story/placementPath.ts';
 import { PLANETS, packIdOf } from '../../src/data/planets.ts';
+import { readWorldsFile } from '../../src/world/editFiles/worldsFile.ts';
 
 /**
  * A row's deflated bytes (a tile of heights' deltas: deflate-raw, base64) inflated by node's own zlib, or null for bytes
@@ -101,13 +102,28 @@ export async function gitStates(cwd, paths) {
   return { branch, main, files };
 }
 
-/** Every world a file may be for, by pack id, with what kind it is: each planet, each of its zones, each space zone. */
-export function worldKinds() {
+/**
+ * Every world a file may be for, by pack id, with what kind it is: each planet, each of its zones, each space zone; and
+ * (the race drawer's fourth wave) each world of yours in the placements folder's worlds file as it stands (`dir`), a ground
+ * world under its own id, so its edit files are its own and never its source's. The game's planets are never the merged
+ * list here: this file reads `PLANETS` as the game ships it, and a world of yours is named by its row alone.
+ */
+export function worldKinds(dir = null) {
   const out = new Map();
   for (const p of PLANETS) {
+    if (p.ours) continue;
     const kind = p.instances ? 'copies' : p.space ? 'space' : 'ground';
     out.set(p.id, kind);
     for (const z of p.zones ?? []) out.set(packIdOf(p, z.id), kind);
+  }
+  if (dir) {
+    let text = null;
+    try {
+      text = fs.readFileSync(path.join(dir, editFileRel('worlds', 'all')), 'utf8');
+    } catch {
+      text = null;
+    }
+    if (text !== null) for (const r of readWorldsFile(text).rows) if (!out.has(r.id)) out.set(r.id, 'ground');
   }
   return out;
 }
@@ -286,7 +302,7 @@ export function handle(req, res, opts) {
   return run;
 }
 
-async function serve(req, res, { dir, root = path.resolve(dir, '..', '..'), notify = () => {}, tune = PLACEMENTS_ENDPOINT_TUNE, now = Date.now, worlds = worldKinds() }) {
+async function serve(req, res, { dir, root = path.resolve(dir, '..', '..'), notify = () => {}, tune = PLACEMENTS_ENDPOINT_TUNE, now = Date.now, worlds = worldKinds(dir) }) {
   const h = req.headers ?? {};
   const length = h['content-length'] !== undefined ? Number(h['content-length']) : null;
   const refused = refuseRequest(

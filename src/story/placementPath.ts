@@ -33,13 +33,14 @@ export function placementFileOf(rel: string): { layer: PlacementLayer; world: st
  * the twelfth wave the owner's shared walk-through file (`solid`): one file every world reads, kept at the placements
  * folder's own top as the map fixes made it (`solid.json`, `editFileRel`). And from the wave of the rooms' lights a world's
  * rooms' lights edited (`lights`, `lights/<world>.json`) and every copy everywhere's (`lightsAll`, one file every world
- * shares, kept at the folder's top beside `solid.json`: `lights.json`).
+ * shares, kept at the folder's top beside `solid.json`: `lights.json`). And from the race drawer's fourth wave the worlds of
+ * yours (`worlds`, one file every world shares, `worlds/all.json`), merged into the planet list at boot.
  */
-export type EditFileKind = PlacementLayer | 'removed' | 'people' | 'heights' | 'paint' | 'water' | 'locations' | 'looks' | 'solid' | 'lights' | 'lightsAll';
-export const EDIT_FILE_KINDS: readonly EditFileKind[] = ['story', 'world', 'removed', 'people', 'heights', 'paint', 'water', 'locations', 'looks', 'solid', 'lights', 'lightsAll'];
+export type EditFileKind = PlacementLayer | 'removed' | 'people' | 'heights' | 'paint' | 'water' | 'locations' | 'looks' | 'solid' | 'lights' | 'lightsAll' | 'worlds';
+export const EDIT_FILE_KINDS: readonly EditFileKind[] = ['story', 'world', 'removed', 'people', 'heights', 'paint', 'water', 'locations', 'looks', 'solid', 'lights', 'lightsAll', 'worlds'];
 
 /** A kind every world shares one file of (its name segment is `all`), never a world's own. */
-export const SHARED_EDIT_KINDS: readonly EditFileKind[] = ['looks', 'solid', 'lightsAll'];
+export const SHARED_EDIT_KINDS: readonly EditFileKind[] = ['looks', 'solid', 'lightsAll', 'worlds'];
 
 /** A kind whose one file stands at the placements folder's own top rather than in a folder of its kind (`solid.json`, `lights.json`). */
 export const TOP_EDIT_FILES: Readonly<Partial<Record<EditFileKind, string>>> = { solid: 'solid.json', lightsAll: 'lights.json' };

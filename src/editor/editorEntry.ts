@@ -98,6 +98,8 @@ import { EditorZones, ZONE_TOOL_TUNE, zonesTool, type ZonesHost } from './editor
 import { solidRows } from '../world/walkThrough.ts';
 import { SEAT_TUNE, SeatSnapAsk, seatSnapIn, type SeatedRow } from '../world/seatProps.ts';
 import { headingRawOf, rawOfGame, rowOfLayoutThing } from '../world/removalFrames.ts';
+import { EditorWorlds, arrivalHeadingOf } from './editorWorlds.ts';
+import type { WorldRow } from '../world/editFiles/worldsFile.ts';
 import { furnitureOf } from '../world/rowSolid.ts';
 import { standingPeople } from '../world/standingPeople.ts';
 import { wildLife } from '../world/wildLife.ts';
@@ -136,8 +138,15 @@ export interface EditorHost {
   fileCount(layer: PlacementLayer): number;
   /** Words on the message line. */
   say(words: string): void;
-  /** The world's file key (`packIdOf`). */
+  /** The world's file key (`editKeyOf`: the pack id, or a world of yours' own id), which names every edit file. */
   packId(): string;
+  /** The pack the world reads (`packIdOf`): a copy of yours' is its source's. What a library entry and a row's `from` name. */
+  ownPack(): string;
+  /** The worlds of yours as the page holds them, the zone standing, a travel there, and every converted sky's bodies in words (the race drawer's fourth wave). */
+  worldRows?(): readonly WorldRow[];
+  zone?(): string | undefined;
+  travelTo?(id: string): void;
+  skiesNote?(): string;
   /** What kind of world: a ground world, a space zone or the dungeons' copies. */
   worldKind(): 'ground' | 'space' | 'copies';
   /** A row written into a file and stood as every permanent row is; `lifted` names a row picked up and moved. */
@@ -480,14 +489,14 @@ export class Editor {
         return !!roomAnswer.building;
       },
       inSpace: () => !!w.planet?.space,
-      packId: () => host.packId(),
+      packId: () => host.ownPack(),
       worldMark: () => w.generation,
       hit: () => me.aim.hit,
       batch: (edits) => host.batch(edits),
       status: () => host.status(),
       say: (words, ok) => me.say(words, ok),
       take: (e) => me.take(e),
-      entryOfRow: (row) => (me.libView ? entryForRow(me.libView, row, host.packId()) : null),
+      entryOfRow: (row) => (me.libView ? entryForRow(me.libView, row, host.ownPack()) : null),
       entryByKey: (key) => me.libView?.byKey.get(key) ?? null,
       handKey: () => me.hand?.key ?? null,
       hotbar: () => me.keep.hotbar,
@@ -569,7 +578,7 @@ export class Editor {
       road: (x, z) => (w.courseRoadAt(x, z) ? true : w.roadIfCached(x, z)),
       centre: () => w.placeFrame,
       frame: () => (w.planet?.space ? 'game' : 'raw'),
-      packId: () => host.packId(),
+      packId: () => host.ownPack(),
       inSpace: () => !!w.planet?.space,
       dest: () => this.session.dest,
       cameraYaw: () => this.fly.yaw,
@@ -624,6 +633,23 @@ export class Editor {
     // the ground yet (the second wave).
     this.course = new EditorCourse(this.courseHost());
     this.tools.add(courseTool(this.course));
+    // The worlds of yours (the race drawer's fourth wave): a new world, a copy of the world standing, and every one to go to,
+    // edit or take out, as the Tools tab's sections; every write one row of the shared worlds file through the batch.
+    this.worlds = new EditorWorlds({
+      putRows: (label, changes) => this.edits.putRows(label, changes),
+      rows: () => this.host.worldRows?.() ?? [],
+      planet: () => this.host.world.planet,
+      zone: () => this.host.zone?.(),
+      here: () => {
+        const w = this.host.world;
+        const p = this.host.player.pos;
+        const raw = rawOfGame(w.placeFrame, p.x, p.z);
+        return raw ? { x: raw.x, z: raw.z, y: w.terrain.heightAt(p.x, p.z), heading: arrivalHeadingOf(this.fly.yaw) } : null;
+      },
+      travel: (id) => this.host.travelTo?.(id),
+      say: (words) => this.host.say(words),
+      skiesNote: () => this.host.skiesNote?.() ?? '',
+    });
     registerExtraTune('person', PLACED_PERSON_TUNE as unknown as Record<string, unknown>);
     registerExtraTune('zone', ZONE_TOOL_TUNE as unknown as Record<string, unknown>);
     registerExtraTune('lightsTool', LIGHTS_TOOL_TUNE as unknown as Record<string, unknown>);
@@ -701,6 +727,8 @@ export class Editor {
   readonly lights: EditorLights;
   /** The Course tool (the race drawer's first wave). */
   readonly course: EditorCourse;
+  /** The worlds of yours (the race drawer's fourth wave). */
+  readonly worlds: EditorWorlds;
   /** The dresser (Map-maker II's thirteenth wave): the Looks tab, made the first time it is asked for. */
   private dresserMade: DresserUi | null = null;
 
@@ -1097,7 +1125,7 @@ export class Editor {
       dest: () => this.session.dest,
       centre: () => w.placeFrame,
       frame: () => (w.planet?.space ? 'game' : 'raw'),
-      packId: () => h.packId(),
+      packId: () => h.ownPack(),
       cameraYaw: () => this.fly.yaw,
       underNotes: () => w.rowsUnderLakes(h.standingRows().map((s) => ({ id: s.id, x: s.x, y: s.y, z: s.z, rooms: s.row.kind === 'building' && (w.streamer?.placedHasRooms(placementKey(s.id)) ?? false) }))),
       say: (words, ok) => me.say(words, ok),
@@ -1268,7 +1296,7 @@ export class Editor {
     }
     const fit = bridgeFit(b, model.primitives.map((p) => p.geometry), ask, w.layoutCenter);
     const id = this.edits.mintIds([got.src.thing ?? got.src.model ?? 'bridge'])[0];
-    const row = rowFromEditor(got.src, fit.at, fit.q, false, w.placeFrame, 'raw', { here: h.packId(), ground: null, mm: EDITOR_TUNE.write.mm, turnDigits: EDITOR_TUNE.write.turnDigits }) as PlacementRow;
+    const row = rowFromEditor(got.src, fit.at, fit.q, false, w.placeFrame, 'raw', { here: h.ownPack(), ground: null, mm: EDITOR_TUNE.write.mm, turnDigits: EDITOR_TUNE.write.turnDigits }) as PlacementRow;
     row.id = id;
     const sc = writtenScale(fit.scale);
     if (sc !== undefined) row.scale = sc;
@@ -1585,7 +1613,7 @@ export class Editor {
     return brushNearOf<PlacedObject>(
       {
         view: this.libView,
-        here: h.packId(),
+        here: h.ownPack(),
         rows: h.standingRows(),
         placedOfRow: (id) => s?.placedOf(placementKey(id)) ?? null,
         forEachPlacedIn: (rect, visit) => s?.forEachPlacedIn(rect, visit),
@@ -2587,7 +2615,7 @@ export class Editor {
       const building = (e.f & ENTRY_FLAG.building) !== 0;
       return { src: { kind: building ? 'building' : 'prop', pack: 'imported', model: e.m }, pack, model: e.m, bounds: def.bounds, building, passable: false };
     }
-    const here = h.packId();
+    const here = h.ownPack();
     const pack = e.p === here ? h.world.ownPack : await h.world.guestWorld(e.p);
     if (!pack) return `${e.p}'s pack is not converted here`;
     const def = pack.find(e.m) ?? pack.floraDefOf(e.m);
@@ -2689,7 +2717,7 @@ export class Editor {
     // A new building with the Tools tab's "Furnish the buildings I place" off is written empty (`furnish: false`).
     const src = hand.building && !EDITOR_TUNE.furnish ? { ...hand.src, furnish: false as const } : hand.src;
     const row = rowFromEditor(src, pos, [hand.q.x, hand.q.y, hand.q.z, hand.q.w], inside, frame, space ? 'game' : 'raw', {
-      here: h.packId(),
+      here: h.ownPack(),
       clear,
       ground,
       base: hand.base,
@@ -2882,6 +2910,38 @@ export class Editor {
       this.window?.library.render();
     }
     this.window?.refreshLooks();
+  }
+
+  /**
+   * The worlds of yours from the console (`__debug.worlds`, the race drawer's fourth wave): `{ make: row }` writes a row (a new
+   * world or a copy, or the row it replaces by id) as one action, `{ remove: id }` takes one out, `{ open: 'new' | 'copy' | id }`
+   * opens the Tools tab's form, `{ set: { path: value } }` sets the open form's fields as the window does, `{ save: true, go? }`
+   * writes it. The editor need not be on: a write is a batch through the endpoint. Answers what was said and the draft.
+   */
+  async worldsDebug(o: Record<string, unknown> = {}): Promise<unknown> {
+    const w = this.worlds;
+    const said: string[] = [];
+    if (o.make && typeof o.make === 'object') {
+      const row = o.make as Record<string, unknown>;
+      const before = this.host.worldRows?.().find((r) => r.id === row.id) ?? null;
+      w.openDraft(row, !before);
+      said.push(await w.save());
+    }
+    if (typeof o.remove === 'string') said.push(await w.remove(o.remove));
+    if (typeof o.open === 'string') {
+      w.last = '';
+      await w.act(o.open === 'new' || o.open === 'copy' ? `worlds:${o.open}` : `worlds:edit:${o.open}`);
+      if (w.last) said.push(w.last);
+    }
+    if (o.set && typeof o.set === 'object') for (const [k, v] of Object.entries(o.set as Record<string, unknown>)) w.setField(k, String(v));
+    if (o.arrival) await w.act('worlds:arrival');
+    if (o.save) {
+      said.push(await w.save());
+      const id = w.draft?.id;
+      if (o.go && typeof id === 'string' && said[said.length - 1].startsWith('saved')) this.host.travelTo?.(id);
+    }
+    this.window?.refreshEdits();
+    return { said, draft: w.draft, rows: this.host.worldRows?.() ?? [] };
   }
 
   /**
@@ -3094,7 +3154,7 @@ export class Editor {
     const lifted = h.lift(id);
     if (!lifted) return this.refuse(`${id} is not standing`);
     const r = lifted.row;
-    const here = h.packId();
+    const here = h.ownPack();
     const e: LibraryEntry =
       r.pack === 'props'
         ? { s: 'props', p: 'props', id: r.thing ?? '', m: '', n: lifted.label, g: '', t: null, sz: [0, 0, 0], tri: 0, pic: null, f: 0 }
@@ -3299,7 +3359,7 @@ export class Editor {
     const entries = fallbackEntries({
       props: h.props.all.map((p) => ({ id: p.id, model: p.model, name: p.name ?? null, group: p.group, template: p.template, size: p.size, icon: p.icon ?? null })),
       gallery: gallery ? { sections: [{ id: 'houses', items: gallery.category('layout').filter((d) => (d.cells?.length ?? 0) > 1).map((d) => ({ model: d.id, label: d.id })) }] } : null,
-      world: own ? { id: h.packId(), manifest: { categories: { layout: own.category('layout'), flora: own.category('flora') } } } : null,
+      world: own ? { id: h.ownPack(), manifest: { categories: { layout: own.category('layout'), flora: own.category('flora') } } } : null,
     });
     this.libLookPics = [];
     this.libBase = [...entries, ...(await this.importedEntries())];
@@ -3383,13 +3443,13 @@ export class Editor {
       reloadImports: () => void this.reloadImports(),
       defaultPack: (source: LibrarySource) => {
         const planet = h.world.planet;
-        if (source === 'flora' && !h.world.ownPack) return planet?.ground?.pack ?? planet?.borrowSky ?? h.packId();
-        return h.packId();
+        if (source === 'flora' && !h.world.ownPack) return planet?.ground?.pack ?? planet?.borrowSky ?? h.ownPack();
+        return h.ownPack();
       },
       take: (e: LibraryEntry) => void this.take(e),
       held: () => this.hand?.key ?? '',
       status: () => this.libraryStatus(),
-      usedHere: () => (this.libView ? usedHereKeys(this.libView, h.fileRows(), h.packId()) : []),
+      usedHere: () => (this.libView ? usedHereKeys(this.libView, h.fileRows(), h.ownPack()) : []),
       // Shift+click: the brush's entries (armed, it works them out again with the change).
       brushToggle: (key: string) => {
         const on = this.brush.toggle(key);
@@ -3490,11 +3550,13 @@ export class Editor {
       lookPalettes: () => this.lookPalettes(),
       attachment: (act: 'pick' | 'at' | 'size' | 'remove', i: number, value?: string) => void this.attachmentAct(act, i, value),
       // Map-maker II's twelfth wave: the world's own, the people, the sites, the seats and the no-spawn zones, as sections.
-      sections: (tab: 'selected' | 'here' | 'tools'): EditorSection[] => [...this.lightsSections(tab), ...this.courseSections(tab), ...this.zones.sections(tab), ...this.removals.sections(tab)],
+      sections: (tab: 'selected' | 'here' | 'tools'): EditorSection[] => [...this.lightsSections(tab), ...this.courseSections(tab), ...this.zones.sections(tab), ...this.removals.sections(tab), ...(tab === 'tools' ? this.worlds.sections() : [])],
       sectionAct: (act: string, value?: string) => {
         void (async () => {
+          // The worlds of yours (the race drawer's fourth wave).
+          if (act.startsWith('worlds:')) await this.worlds.act(act, value);
           // The lights tool's buttons and fields (Map-maker II's wave of the rooms' lights).
-          if (act.startsWith('lights:')) this.lights.act(act, value);
+          else if (act.startsWith('lights:')) this.lights.act(act, value);
           // The Course tool's (the race drawer's first wave): its modes, its draft, its tracks and the picked course's fields.
           else if (act.startsWith('course:')) await this.course.act(act, value);
           else if (act === 'zone:arm') await this.toggleTool('zones');

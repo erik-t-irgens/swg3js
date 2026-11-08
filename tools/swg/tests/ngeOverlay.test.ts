@@ -426,7 +426,7 @@ function names(list: readonly StandingRow[], world: string): Map<string, string>
   ok(/this\.world\.serverHoldsWorld = \(\) => this\.serverHoldsHere\(\);/.test(main) && /serverHoldsFor\(this\.net\.session, this\.net\.wanted, this\.relayAsked, performance\.now\(\) - began\)/.test(main), "the game hands the world whether a server holds it, by the props keeper's own line and wait");
   ok(!/swg\.nge/.test(main) && !/localStorage[^\n]*NGE_OVERLAY_TUNE/.test(main) && /void ngeOverlay\.fetchIndex\(import\.meta\.env\.BASE_URL\);/.test(main), 'no stored switch keeps the overlay off in any browser, and the index is asked for once a session');
   ok(/this\.world\.arrivalPoint = \(\) => this\.spawn;/.test(main), 'the game hands the world where the player comes in and back: the spot a respawn comes round at');
-  ok(/await wildLife\.load\(this\.packId, import\.meta\.env\.BASE_URL, \{ serverHolds: this\.serverHoldsWorld \?\? undefined \}\);/.test(world), "the world's load asks it whether a server holds the world");
+  ok(/await wildLife\.load\(standsLife\(planet\) \? this\.packId : '', import\.meta\.env\.BASE_URL, \{ serverHolds: this\.serverHoldsWorld \?\? undefined \}\);/.test(world), "the world's load asks it whether a server holds the world");
   ok((world.match(/arrival: \(\) => this\.arrivalPoint\?\.\(\) \?\? null,/g) ?? []).length === 2, 'and hands that place to the standing people and to the wild world alike');
   ok(/for \(const r of \[\.\.\.\(wildLife\.peopleRows\(\) as StandingRow\[\]\), \.\.\.\(wildLife\.overlayRows\(\) as StandingRow\[\]\)\]\)/.test(world), "and the overlay's posts join the things a race track's corridor is checked against");
 }

@@ -2,6 +2,7 @@ import { followCameraDepth } from './csmDepth.ts';
 import { REVERSED_DEPTH } from '../core/depthMode.ts';
 import * as THREE from 'three';
 import { packIdOf, type PlanetDef } from '../data/planets';
+import { editKeyOfPack, standsLife, worldRowOfPlanet } from '../data/ourWorlds.ts';
 import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
 import { NpcManager, type NpcDeps } from './npcs';
@@ -12,7 +13,8 @@ import { MobileAssets } from './mobiles/assets';
 import { MobileCatalogue } from './mobiles/catalogue';
 import { scratchWanted } from './spawnSeed.ts';
 import { DayCycle } from './daycycle';
-import { SwgSky, type SkyLighting } from './sky';
+import { SwgSky, type SkyData, type SkyLighting } from './sky';
+import { mixSky, prefixFor, skyAsks, type SkySource } from './skyParts.ts';
 import { PARTICLE_UNIFORMS, Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
 import { WEATHER_UNIFORMS, WET_WRAP, wetWrap } from './wetness';
 import { detailWrap } from './detailMap.ts';
@@ -1890,6 +1892,11 @@ export class World {
 
   /** The pack directory this planet (or zone) loads from. */
   packId = '';
+  /**
+   * The name this world's edit files are kept under (the race drawer's fourth wave, `editKeyOf`): the pack id for every world
+   * of the game's, a world of yours' own id, so a copy's edits are its own and never its source's.
+   */
+  editKey = '';
 
   load(planet: PlanetDef, packId = packIdOf(planet)): void {
     this.unload();
@@ -1905,6 +1912,8 @@ export class World {
     this.autoArrival = null;
     this.planet = planet;
     this.packId = packId;
+    // The name this world's edit files are kept under (editKeyOf): its pack id, or a world of yours' own id.
+    this.editKey = editKeyOfPack(planet, packId);
     this.terrain?.detachSwg();
     this.terrain = new Terrain(planet);
     // The world's height edits (Map-maker II, `public/placements/heights/<world>.json`): asked for now, beside everything
@@ -1912,31 +1921,32 @@ export class World {
     // ground's sampler from its constructor (`loadPack`), a real-elevation world's terrain before its raster's
     // `remakeGround` (below), any other ground world's once its pack has said it has none. A file later than the bound is
     // laid over the ground as a stroke is.
-    this.askHeights(packId);
+    this.askHeights(this.editKey);
     // The world's drawn race courses (the race drawer's second wave, `public/tracks/<world>.json`), the same way: asked now,
     // whatever the race switch says (a course is ground), and waited on (bounded) before the ground that carves them is made.
-    this.askCourse(packId);
+    this.askCourse(this.editKey);
     // The world's ground paint (Map-maker II, `public/placements/paint/<world>.json`), the same way: asked for now and waited
     // on (bounded) before the ground that takes it is made.
-    this.askPaint(packId);
+    this.askPaint(this.editKey);
     // And its lakes of ours (Map-maker II's fifth wave, `public/placements/water/<world>.json`): waited on (bounded) before the
     // water is drawn, appended after the client's tables on a converted world and made bodies on a real-elevation one.
-    this.askWater(packId);
+    this.askWater(this.editKey);
     // And what it takes away and the people the owner placed (Map-maker II's twelfth wave, `public/placements/removed/` and
     // `people/`): asked now, waited on (bounded) before anything stands (`loadPack`), and stood late by difference.
-    this.askRemovals(packId);
-    this.askPeople(packId);
+    this.askRemovals(this.editKey);
+    this.askPeople(this.editKey);
     // And the rooms' lights edited (Map-maker II's wave of the rooms' lights): asked now and laid on whenever they land, the
     // lit room planned again (never waited on: a room lit by the game's own rule until then is the room as it always was).
-    this.askLights(packId);
-    const demHeights = !!planet.dem && shippedAsk(`${planet.dem.url}/base16.raw`);
+    this.askLights(this.editKey);
+    // A ground of ours made in the browser (a world of yours, `dem.made`) is no file and always there.
+    const demHeights = !!planet.dem && (!!planet.dem.made || shippedAsk(`${planet.dem.url}/base16.raw`));
     this.heightsByDem = demHeights;
     this.demGroundPending = null;
     // A planet whose ground is real-world elevation. The raster arrives after the world is already
     // standing, so the ground is remade once it lands rather than held up waiting for it.
     // A built game asks for the raster only where its own list ships it (`shippedAsk`): two of the four rasters stayed on
     // another machine and are not committed, and their worlds stand on the planet's own noise.
-    if (planet.dem && !shippedAsk(`${planet.dem.url}/base16.raw`)) console.info(`${planet.id}: its elevation raster is not in this build, so the ground is the planet's own noise`);
+    if (planet.dem && !planet.dem.made && !shippedAsk(`${planet.dem.url}/base16.raw`)) console.info(`${planet.id}: its elevation raster is not in this build, so the ground is the planet's own noise`);
     else if (planet.dem) {
       const d = planet.dem;
       this.terrain.demDetail = d.detail ?? 0;
@@ -1947,7 +1957,7 @@ export class World {
       // known so the moment its paint file has been read, and nothing is waited for.
       let groundDone: () => void = () => {};
       this.demGroundPending = new Promise<void>((resolve) => (groundDone = resolve));
-      void import('./demTerrain').then(async ({ loadDemPatch }) => {
+      void import('./demTerrain').then(async ({ loadDemPatch, madeDemPatch }) => {
         try {
           // The paint file first (Map-maker II): its world row may name the base family the ground is drawn with, and the
           // wash the tint varies it by, and both decide what is borrowed before the ground is made.
@@ -1958,7 +1968,7 @@ export class World {
           const base = this.paintWorld.base ? { ...this.paintWorld.base } : null;
           this.terrain.demBase = base;
           if (!planet.ground && !base) groundDone();
-          const patch = await loadDemPatch(d.url, { size: d.size, lift: d.lift, feather: d.feather ?? 0 });
+          const patch = d.made ? madeDemPatch(d.made, d.size, d.height ?? 0, planet.terrain) : await loadDemPatch(d.url, { size: d.size, lift: d.lift, feather: d.feather ?? 0 });
           this.terrain.dem = patch;
           // The colour bands run across minH..maxH, which the planet's own `terrain` block sized for
           // noise. Real elevation is a different order of relief, and left alone every slope above
@@ -2156,7 +2166,7 @@ export class World {
     // The planet's places (its sound objects, its own interior rows) start coming now. Nothing waits
     // on them: a pack that lands after the player has arrived simply adds its emitters then, and a
     // planet whose places have not been converted at all still sounds, from its sky's own rows.
-    this.ambience?.begin(packId);
+    this.ambience?.begin(packId, standsLife(planet));
     this.day.update(0, false);
     this.applyLighting();
   }
@@ -2185,7 +2195,7 @@ export class World {
         try {
           const lent = await AssetPack.load(planet.borrowSky);
           if (token !== this.loadToken) return null;
-          if (lent) await this.loadSky(lent, spawn);
+          if (lent) await this.loadSky(lent, spawn, planet.borrowSky);
           else console.warn(`sky: ${planet.id} asked to borrow ${planet.borrowSky}, which is not installed`);
         } catch (err) {
           console.warn(`sky: ${planet.id} could not borrow ${planet.borrowSky}`, err);
@@ -2286,7 +2296,7 @@ export class World {
     // covers it -- about 3.7 MB for a 16 km world, a tenth of a second to inflate -- and the token
     // is checked after, because a travel during that fetch must not leave the next world holding
     // the last one's ground.
-    await outdoorNav.load(this.packId);
+    await outdoorNav.load(this.editKey);
     if (token !== this.loadToken) return null;
     // The world's own wildlife: where the server's spawn areas are and what may stand in them. A
     // few hundred kilobytes a world beside the fleet's one manifest, and a world with no such pack
@@ -2294,7 +2304,7 @@ export class World {
     // The removal file's no-spawn zones keeping the wildlife, and its sites taken away by key, set before the laying (a space
     // zone's zones keep nothing this pass).
     wildLife.setRemovals(planet.space ? [] : wildAreasOf(this.zoneSet.zones), this.removals.sites);
-    await wildLife.load(this.packId, import.meta.env.BASE_URL, { serverHolds: this.serverHoldsWorld ?? undefined });
+    await wildLife.load(standsLife(planet) ? this.packId : '', import.meta.env.BASE_URL, { serverHolds: this.serverHoldsWorld ?? undefined });
     if (token !== this.loadToken) return null;
     // The people who stand somewhere and stay there ride in the same pack the wildlife does, so the
     // rows are taken from what that fetch already holds rather than fetched a second time. Beside them
@@ -3514,9 +3524,12 @@ export class World {
   }
 
   /** `spawn` is where the player arrives: the weather reads the area there, and its sky's textures load before the loading screen lifts. */
-  private async loadSky(pack: AssetPack, spawn: THREE.Vector3): Promise<void> {
+  private async loadSky(pack: AssetPack, spawn: THREE.Vector3, basePack = this.packId): Promise<void> {
     const token = this.loadToken;
-    const sky = await SwgSky.load(pack);
+    // A world of yours' sky in parts (the race drawer's fourth wave): the other skies its parts come from, read first.
+    const mix = await this.skyMixFor(basePack);
+    if (token !== this.loadToken) return;
+    const sky = await SwgSky.load(pack, mix ?? undefined);
     if (!sky) return;
     // Another world was loaded while the textures came: this sky is not wanted any more.
     if (token !== this.loadToken) {
@@ -3541,6 +3554,52 @@ export class World {
     if (token !== this.loadToken) return;
     console.info(`sky: ${sky.data.blocks.length} environment blocks, ${sky.hasGradient ? 'gradient sky' : sky.data.skybox ? 'skybox' : 'clear colour'}, ${sky.data.sun ? 'sun' : 'no sun'}, ${sky.data.moon ? 'moon' : 'no moon'}, ${sky.data.stars?.count ?? 0} stars, reflections from ${sky.environment.day ? 'the planet cube maps' : 'the sky'}`);
   }
+
+  /**
+   * What a world of yours lays over the sky it draws (`skyParts.ts`): its colours, its cloud layers and its suns and moons,
+   * each from any converted sky, read here behind the loading screen; null for a world of the game's and for one that names
+   * no part, which draws its sky exactly as before. What could not be taken is said once on the console (`skySaid`).
+   */
+  private async skyMixFor(basePack: string): Promise<((d: SkyData) => SkyData) | null> {
+    this.skySaid = [];
+    // Which skies are read, and for which part, is `skyAsks`'s (pure, and run by the tests); each pack is read once here.
+    const ask = skyAsks(worldRowOfPlanet(this.planet)?.sky, basePack);
+    if (!ask) return null;
+    const got = new Map<string, Promise<SkySource | null>>();
+    const read = (pack: string): Promise<SkySource | null> => {
+      let p = got.get(pack);
+      if (!p) {
+        p = packJson<SkyData>(pack, 'sky.json', import.meta.env.BASE_URL, { probe: false })
+          .catch(() => null)
+          .then((data) => {
+            if (data && Array.isArray(data.blocks)) return { data, prefix: prefixFor(basePack, pack) };
+            this.skySaid.push(`${pack} has no converted sky`);
+            return null;
+          });
+        got.set(pack, p);
+      }
+      return p;
+    };
+    const colours = ask.colours ? await read(ask.colours) : null;
+    const clouds = ask.clouds === 'none' ? 'none' : ask.clouds ? await read(ask.clouds) : null;
+    let bodies: Parameters<typeof mixSky>[1]['bodies'] = null;
+    if (ask.bodies) {
+      const skies = new Map<string, SkySource>();
+      for (const pack of ask.bodies.packs) {
+        const one = await read(pack);
+        if (one) skies.set(pack, one);
+      }
+      bodies = { suns: ask.bodies.suns, moons: ask.bodies.moons, skies };
+    }
+    return (d: SkyData) => {
+      const out = mixSky(d, { colours, clouds, bodies });
+      this.skySaid.push(...out.said);
+      if (this.skySaid.length) console.warn(`sky: ${this.planet.id}: ${this.skySaid.join('; ')}`);
+      return out.data;
+    };
+  }
+  /** What a world of yours' sky in parts could not take (`skyMixFor`), for `__debug.worlds()`. */
+  skySaid: string[] = [];
 
   private dropSky(): void {
     // The clouds' borrowed pictures let go before the sky that owns them is disposed (W4's rule for borrowed textures): a
@@ -9717,7 +9776,8 @@ export class World {
    * the data leaves empty), behind a loading screen as `standPeopleNow` stands the data's own.
    */
   standOursNow(at: THREE.Vector3): void {
-    ambientPeople.step(0, this.simTime, at, this.ambientDeps(), true);
+    // A copy of yours (the race drawer's fourth wave) stands nobody of ours: just terrain and buildings.
+    if (standsLife(this.planet)) ambientPeople.step(0, this.simTime, at, this.ambientDeps(), true);
   }
 
   /**
@@ -11001,7 +11061,7 @@ export class World {
     standingPeople.step(dt, this.simTime, playerPos, this.peopleDeps());
     // The people of ours after the data's own, since they take only the places the data's leave: the
     // travellers at the ports and the fillers in the buildings nobody else stands in.
-    ambientPeople.step(dt, this.simTime, playerPos, this.ambientDeps());
+    if (standsLife(this.planet)) ambientPeople.step(dt, this.simTime, playerPos, this.ambientDeps());
     perf.end(SEC.people);
     perf.begin(SEC.npcs);
     // `playerPos` is only read by a fighter under a long walk (`src/world/errand.ts`), which measures
