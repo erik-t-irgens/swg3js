@@ -55,6 +55,13 @@ export const HORIZON_TUNE = {
   farMargin: 1.7,
   /** What the program draws: the lit ground, or one of its parts for the console (a uniform). */
   view: 'shaded' as 'shaded' | 'lod' | 'albedo' | 'normals' | 'edge',
+  /**
+   * W2: with the rings in place of the far tiles, far grids are still made this many 512 m tiles each way of the eye, for
+   * the far tree cards' families and the race's look-ahead (§2.9; at least a kilometre, so a pod's half second is inside).
+   */
+  farGridRadius: 2,
+  /** W2: how long an arrival waits behind its screen for the overlays the terrain worker makes again (paint, a dropped building, Life Day), ms; the rest lands in play. */
+  regenWaitMs: 4000,
 };
 export type HorizonTune = typeof HORIZON_TUNE;
 
@@ -205,6 +212,110 @@ export function bakeHeightAt(fine: BakeGrid, coarse: BakeGrid, rx: number, rz: n
   const fz = (rz - fine.z0) / fine.step;
   if (fx >= 0 && fz >= 0 && fx <= fine.nx - 1 && fz <= fine.nz - 1) return bakeLerp(fine, fx, fz);
   return bakeLerp(coarse, (rx - coarse.x0) / coarse.step, (rz - coarse.z0) / coarse.step);
+}
+
+/**
+ * What `ringSurfaceAt` reads (a kept record the field fills): the two lattices, the raw frame's centre and the ground's
+ * shift, the hole's square in the game's frame (`uHorizonSquare`'s four numbers) and the drop's three.
+ */
+export interface RingSurface {
+  fine: BakeGrid | null;
+  coarse: BakeGrid | null;
+  cx: number;
+  cz: number;
+  sx: number;
+  sz: number;
+  sq0: number;
+  sq1: number;
+  sq2: number;
+  sq3: number;
+  drop: number;
+  fade: number;
+  everywhere: number;
+}
+
+export function newRingSurface(): RingSurface {
+  return { fine: null, coarse: null, cx: 0.5, cz: 0.5, sx: 0.5, sz: 0.5, sq0: 0.5, sq1: 0.5, sq2: 0.5, sq3: 0.5, drop: 0.5, fade: 0.5, everywhere: 0.5 };
+}
+
+/** One level-0 vertex as the vertex stage stands it unmorphed: the bake there less the drop at its edge distance. */
+function ringVertexHeight(s: RingSurface, vx: number, vz: number): number {
+  const h = bakeHeightAt(s.fine!, s.coarse!, s.cx - vx, vz + s.cz);
+  return h - ringDrop(ringEdgeDistance(vx, vz, s.sq0, s.sq1, s.sq2, s.sq3), s.drop, s.fade, s.everywhere);
+}
+
+/**
+ * The drawn ring's surface at a game-frame point (§2.9, the far cards' height): level 0's triangle under it, its three
+ * vertices each the vertex stage's own unmorphed height (`ringVertexHeight`), split as the patch is (the raw south-west to
+ * north-east diagonal, which in the game's frame is the quad's (x + 8, z) to (x, z + 8)), never the bilinear. NaN with no
+ * bake.
+ */
+export function ringSurfaceAt(s: RingSurface, gx: number, gz: number): number {
+  if (!s.fine || !s.coarse) return Number.NaN;
+  const q = LEAF / PATCH;
+  const i = Math.floor((gx - s.sx) / q);
+  const j = Math.floor((gz - s.sz) / q);
+  const x0 = s.sx + i * q;
+  const z0 = s.sz + j * q;
+  const u = (gx - x0) / q;
+  const v = (gz - z0) / q;
+  const h10 = ringVertexHeight(s, x0 + q, z0);
+  const h01 = ringVertexHeight(s, x0, z0 + q);
+  if (u + v <= 1) {
+    const h00 = ringVertexHeight(s, x0, z0);
+    return h00 + u * (h10 - h00) + v * (h01 - h00);
+  }
+  const h11 = ringVertexHeight(s, x0 + q, z0 + q);
+  return h11 + (1 - u) * (h01 - h11) + (1 - v) * (h10 - h11);
+}
+
+/**
+ * The rings' hole as the far cards stand on it (W2's review): the stream's chunk and view radius the selection squares the
+ * hole round, and the drop's three numbers, kept by the world and written by `ringHoleMoved` as the stream moves. NaN
+ * before the stream has run (a card then squares the hole round its own tile, as the first cut did).
+ */
+export class RingHole {
+  // A class, its fields doubles from the start: the stream writes it on every frame (an object literal's fields box).
+  pcx = Number.NaN;
+  pcz = Number.NaN;
+  r = Number.NaN;
+  drop = 0.5;
+  fade = 0.5;
+  everywhere = 0.5;
+}
+
+export function newRingHole(): RingHole {
+  return new RingHole();
+}
+
+/**
+ * The hole written for the stream's chunk and radius and the drop in force; answers whether any of it moved, which is when
+ * the far cards standing on the ring must be stood again (`FarCards.restand`): one chunk's step moves a card in the drop's
+ * band by `drop * 64 / dropFade` (0.63 m at the defaults), and a card over a chunk whose trees are hidden is lifted by the
+ * whole drop on the hole's edge. Numbers compared, nothing made.
+ */
+export function ringHoleMoved(h: RingHole, pcx: number, pcz: number, r: number, t: { drop: number; dropFade: number; dropAt: string }): boolean {
+  const everywhere = t.dropAt === 'everywhere' ? 1 : 0;
+  if (h.pcx === pcx && h.pcz === pcz && h.r === r && h.drop === t.drop && h.fade === t.dropFade && h.everywhere === everywhere) return false;
+  h.pcx = pcx;
+  h.pcz = pcz;
+  h.r = r;
+  h.drop = t.drop;
+  h.fade = t.dropFade;
+  h.everywhere = everywhere;
+  return true;
+}
+
+/**
+ * A far card's height on the ring (`FarSamples.surfaceAt`): the field's drawn surface round the hole as it stands when the
+ * card is placed or stood again, never as it stood when its tile's samples were taken (W2's review: the closure once held
+ * the hole of that moment, and a tile built later, or a card after the stream moved, stood up to the whole drop off the
+ * drawn ring). The hole read at each call; before the stream has run, squared round the tile's own chunk.
+ */
+export function ringCardSurface(field: { surfaceAt(gx: number, gz: number, pcx: number, pcz: number, viewRadius: number): number }, hole: RingHole, gx0: number, gz0: number, viewRadius: () => number): (gx: number, gz: number) => number {
+  const fx = Math.floor(gx0 / LEAF);
+  const fz = Math.floor(gz0 / LEAF);
+  return (gx, gz) => field.surfaceAt(gx, gz, hole.pcx === hole.pcx ? hole.pcx : fx, hole.pcz === hole.pcz ? hole.pcz : fz, hole.r === hole.r ? hole.r : viewRadius());
 }
 
 // ---------------------------------------------------------------- the hole: which chunks stand

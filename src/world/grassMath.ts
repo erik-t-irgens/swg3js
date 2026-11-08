@@ -560,6 +560,11 @@ export interface FarSamples {
   step: number;
   gx0: number;
   gz0: number;
+  /**
+   * With the rings in place of the far tiles (the horizon pass's second wave): the drawn ring's own surface at a game place
+   * (`horizonMath.ringSurfaceAt`, its drop in it), read in place of the samples' bilinear less `drop`.
+   */
+  surfaceAt?: (gx: number, gz: number) => number;
 }
 
 /**
@@ -623,7 +628,9 @@ export function placeFarCards(src: GrassSource, world: GrassWorld, tiling: Flora
       const u = cx - ia;
       const v = cz - ka;
       const h = grid.heights;
-      const ground = (h[ka * n + ia] * (1 - u) + h[ka * n + ia + 1] * u) * (1 - v) + (h[(ka + 1) * n + ia] * (1 - u) + h[(ka + 1) * n + ia + 1] * u) * v;
+      const surface = grid.surfaceAt;
+      // The ring's own surface, its drop in it (W2), else the samples' bilinear less the far tile's drop.
+      const ground = surface ? surface(gx, gz) : (h[ka * n + ia] * (1 - u) + h[ka * n + ia + 1] * u) * (1 - v) + (h[(ka + 1) * n + ia] * (1 - u) + h[(ka + 1) * n + ia + 1] * u) * v;
       if (tune.water === 'drop' && src.waterAt(gx, gz) > ground && !MEANT_FOR_WATER.test(key)) {
         stats.water++;
         continue;
@@ -635,7 +642,7 @@ export function placeFarCards(src: GrassSource, world: GrassWorld, tiling: Flora
       swayOut.omegaLaw = 0;
       const c = grid.colors;
       const color = (c[s * 3] << 16) | (c[s * 3 + 1] << 8) | c[s * 3 + 2];
-      writeTuft(out, gx, ground - drop, gz, r.yaw * Math.PI * 2, size.w, size.h, entry, TUFT_FAR | kindFlags(entry), color, child, 0, 1, 0);
+      writeTuft(out, gx, surface ? ground : ground - drop, gz, r.yaw * Math.PI * 2, size.w, size.h, entry, TUFT_FAR | kindFlags(entry), color, child, 0, 1, 0);
       stats.placed++;
     }
   }

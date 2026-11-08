@@ -85,6 +85,29 @@ export function poleFamily(fam: Uint8Array, ground: Lattice, x: number, z: numbe
 const PLACES = 4;
 
 /**
+ * A rectangle of 4 m poles made again by the live generator (W2's overlays: the paint, a dropped building's ground, Life
+ * Day): `n` by `m` poles from raw (x0, z0), every 4 m, each its family (0 past a byte, as the bake keeps it) and choice.
+ * Read in place of the bake's pattern corner and the place's hash wherever one holds a pole, the newest first.
+ */
+export interface PoleOverride {
+  x0: number;
+  z0: number;
+  n: number;
+  m: number;
+  fam: Uint8Array;
+  choice: Uint8Array;
+}
+
+/** A rectangle of colour cells made again (the colour lattice's own indices): `w` by `h` cells from (i0, j0), three bytes each. */
+export interface ColourOverride {
+  i0: number;
+  j0: number;
+  w: number;
+  h: number;
+  rgb: Uint8Array;
+}
+
+/**
  * The tile with its south-west corner at raw (tx, tz): its four corners' families and choices (the place's own hash), its
  * layers and codes by `tileLayers`, and its colour in linear light at every picture's mean, the masks averaged over a 4
  * by 4 grid of places (`composeTile`): written into `out`. With `memo` (by the tile's signature) a tile of the same
@@ -123,9 +146,37 @@ export class TileComposer {
   get memoSize(): number {
     return this.memoN;
   }
+  /** The poles made again (W2), read before the bake's own; none (the decode's) leaves every path as it was. */
+  private ov: readonly PoleOverride[] = [];
+  setOverrides(ov: readonly PoleOverride[]): void {
+    this.ov = ov;
+  }
+  /** One pole's family and choice into slot `k` of the two arrays: the newest override holding it, else the bake's corner and the hash. */
+  private pole(x: number, z: number, famOut: Int32Array, choiceOut: Int32Array, k: number): void {
+    const ov = this.ov;
+    for (let q = ov.length - 1; q >= 0; q--) {
+      const o = ov[q];
+      const a = (x - o.x0) / DETAIL_TILE;
+      const b = (z - o.z0) / DETAIL_TILE;
+      if (a >= 0 && b >= 0 && a < o.n && b < o.m && a === Math.floor(a) && b === Math.floor(b)) {
+        famOut[k] = o.fam[b * o.n + a];
+        choiceOut[k] = o.choice[b * o.n + a];
+        return;
+      }
+    }
+    famOut[k] = poleFamily(this.fam, this.ground, x, z);
+    choiceOut[k] = childChoiceAt(x, z);
+  }
   /** The tile's layers and codes into `layers` and `codes`; answers how many layers it holds. */
   layersAt(tx: number, tz: number): number {
     const { fam, ground } = this;
+    if (this.ov.length) {
+      this.pole(tx, tz, this.fams, this.choices, 0);
+      this.pole(tx + 4, tz, this.fams, this.choices, 1);
+      this.pole(tx, tz + 4, this.fams, this.choices, 2);
+      this.pole(tx + 4, tz + 4, this.fams, this.choices, 3);
+      return tileLayers(this.fams, this.choices, this.tiler, this.layers, this.codes);
+    }
     this.fams[0] = poleFamily(fam, ground, tx, tz);
     this.fams[1] = poleFamily(fam, ground, tx + 4, tz);
     this.fams[2] = poleFamily(fam, ground, tx, tz + 4);
@@ -142,6 +193,10 @@ export class TileComposer {
    */
   poleRow(x0: number, z: number, P: number, famOut: Int32Array, choiceOut: Int32Array): void {
     const { fam, ground } = this;
+    if (this.ov.length) {
+      for (let a = 0; a < P; a++) this.pole(x0 + a * DETAIL_TILE, z, famOut, choiceOut, a);
+      return;
+    }
     for (let a = 0; a < P; a++) {
       const x = x0 + a * DETAIL_TILE;
       famOut[a] = poleFamily(fam, ground, x, z);
@@ -451,17 +506,190 @@ export function composeCoarseAlbedo(t: TileTables, header: HorizonHeader, fineRg
   return out;
 }
 
+/** A rectangle of a texture's texels: `w` by `h` from (i0, j0), RGBA. */
+export interface RgbaRegion {
+  i0: number;
+  j0: number;
+  w: number;
+  h: number;
+  rgba: Uint8Array;
+}
+
+/** The colour bytes of cell (i, j): the newest colour override holding it, else the bake's section. */
+function cellRgbAt(colour: Uint8Array, nx: number, cov: readonly ColourOverride[], i: number, j: number, out: number[]): void {
+  for (let q = cov.length - 1; q >= 0; q--) {
+    const o = cov[q];
+    const a = i - o.i0;
+    const b = j - o.j0;
+    if (a >= 0 && b >= 0 && a < o.w && b < o.h) {
+      const s = (b * o.w + a) * 3;
+      out[0] = o.rgb[s];
+      out[1] = o.rgb[s + 1];
+      out[2] = o.rgb[s + 2];
+      return;
+    }
+  }
+  const s = (j * nx + i) * 3;
+  out[0] = colour[s];
+  out[1] = colour[s + 1];
+  out[2] = colour[s + 2];
+}
+
+/**
+ * The fine albedo over the colour cells [i0, i1] by [j0, j1] (clamped to the lattice), with the poles and colour cells
+ * made again laid over the bake's (W2): `composeAlbedo`'s own sums in its own order for every cell, so where nothing is
+ * laid over the bytes are the whole composition's (`horizonOverlay.test.ts` holds it).
+ */
+export function composeAlbedoRegion(t: TileTables, header: HorizonHeader, fam: Uint8Array, colour: Uint8Array, ov: readonly PoleOverride[], cov: readonly ColourOverride[], i0: number, j0: number, i1: number, j1: number): RgbaRegion {
+  const c = header.colour;
+  i0 = Math.max(0, i0);
+  j0 = Math.max(0, j0);
+  i1 = Math.min(c.nx - 1, i1);
+  j1 = Math.min(c.nz - 1, j1);
+  const w = Math.max(0, i1 - i0 + 1);
+  const h = Math.max(0, j1 - j0 + 1);
+  const out = new Uint8Array(w * h * 4);
+  if (!w || !h) return { i0, j0, w, h, rgba: out };
+  const comp = new TileComposer(t, fam, header.ground);
+  comp.setOverrides(ov);
+  const tile = [0, 0, 0];
+  const tint = [0, 0, 0];
+  const rgb = [0, 0, 0];
+  const per = c.step / DETAIL_TILE;
+  const k = 1 / (per * per);
+  const P = w * per + 1;
+  const xs = c.x0 - c.step / 2 + i0 * c.step;
+  const zs = c.z0 - c.step / 2 + j0 * c.step;
+  let sF = new Int32Array(P);
+  let sC = new Int32Array(P);
+  let nF = new Int32Array(P);
+  let nC = new Int32Array(P);
+  const acc = new Float64Array(w * 3);
+  comp.poleRow(xs, zs, P, sF, sC);
+  for (let jj = 0; jj < h; jj++) {
+    acc.fill(0);
+    for (let q = 0; q < per; q++) {
+      const b = jj * per + q;
+      comp.poleRow(xs, zs + (b + 1) * DETAIL_TILE, P, nF, nC);
+      for (let a = 0; a < P - 1; a++) {
+        comp.colourOf(comp.layersFrom(sF, sC, nF, nC, a), tile);
+        const o = ((a / per) | 0) * 3;
+        acc[o] += tile[0];
+        acc[o + 1] += tile[1];
+        acc[o + 2] += tile[2];
+      }
+      const f = sF;
+      sF = nF;
+      nF = f;
+      const ch = sC;
+      sC = nC;
+      nC = ch;
+    }
+    for (let ii = 0; ii < w; ii++) {
+      cellRgbAt(colour, c.nx, cov, i0 + ii, j0 + jj, rgb);
+      cellTint(t, rgb[0], rgb[1], rgb[2], tint);
+      const d = (jj * w + ii) * 4;
+      out[d] = enc(acc[ii * 3] * k * tint[0]);
+      out[d + 1] = enc(acc[ii * 3 + 1] * k * tint[1]);
+      out[d + 2] = enc(acc[ii * 3 + 2] * k * tint[2]);
+      out[d + 3] = 0;
+    }
+  }
+  return { i0, j0, w, h, rgba: out };
+}
+
+/** The coarse texels whose 64 m window meets the colour cells [i0, i1] by [j0, j1], and the colour cells those windows reach. */
+export function coarseReach(header: HorizonHeader, i0: number, j0: number, i1: number, j1: number): { ci0: number; cj0: number; ci1: number; cj1: number; fi0: number; fj0: number; fi1: number; fj1: number } {
+  const co = header.coarse;
+  const c = header.colour;
+  const half = co.step / 2;
+  // Texel ci's window holds cells ceil((x - half - c.x0) / step) to floor((x + half - c.x0) / step), x = co.x0 + ci step.
+  const ci0 = Math.max(0, Math.ceil((c.x0 + i0 * c.step - half - co.x0) / co.step));
+  const ci1 = Math.min(co.nx - 1, Math.floor((c.x0 + i1 * c.step + half - co.x0) / co.step));
+  const cj0 = Math.max(0, Math.ceil((c.z0 + j0 * c.step - half - co.z0) / co.step));
+  const cj1 = Math.min(co.nz - 1, Math.floor((c.z0 + j1 * c.step + half - co.z0) / co.step));
+  const fi0 = Math.max(0, Math.ceil((co.x0 + ci0 * co.step - half - c.x0) / c.step));
+  const fi1 = Math.min(c.nx - 1, Math.floor((co.x0 + ci1 * co.step + half - c.x0) / c.step));
+  const fj0 = Math.max(0, Math.ceil((co.z0 + cj0 * co.step - half - c.z0) / c.step));
+  const fj1 = Math.min(c.nz - 1, Math.floor((co.z0 + cj1 * co.step + half - c.z0) / c.step));
+  return { ci0, cj0, ci1, cj1, fi0, fj0, fi1, fj1 };
+}
+
+/**
+ * The coarse albedo's texels [ci0, ci1] by [cj0, cj1] from a fine region that holds every cell their windows reach
+ * inside the fine extent (`composeCoarseAlbedo`'s own per texel), past the extent the 64 m grid's own family and colour.
+ */
+export function coarseAlbedoRegion(t: TileTables, header: HorizonHeader, fine: RgbaRegion, cf: Uint8Array, cc: Uint8Array, ci0: number, cj0: number, ci1: number, cj1: number): RgbaRegion {
+  const co = header.coarse;
+  const c = header.colour;
+  const w = Math.max(0, ci1 - ci0 + 1);
+  const hh = Math.max(0, cj1 - cj0 + 1);
+  const out = new Uint8Array(w * hh * 4);
+  const tint = [0, 0, 0];
+  const lin = new Float32Array(256);
+  for (let v = 0; v < 256; v++) lin[v] = srgbDecode(v / 255) * ALBEDO_SCALE;
+  const half = co.step / 2;
+  for (let jj = 0; jj < hh; jj++) {
+    const j = cj0 + jj;
+    const z = co.z0 + j * co.step;
+    for (let ii = 0; ii < w; ii++) {
+      const i = ci0 + ii;
+      const x = co.x0 + i * co.step;
+      const d = (jj * w + ii) * 4;
+      const fi0 = Math.ceil((x - half - c.x0) / c.step);
+      const fi1 = Math.floor((x + half - c.x0) / c.step);
+      const fj0 = Math.ceil((z - half - c.z0) / c.step);
+      const fj1 = Math.floor((z + half - c.z0) / c.step);
+      if (fi0 >= 0 && fj0 >= 0 && fi1 < c.nx && fj1 < c.nz && fi1 >= fi0 && fj1 >= fj0) {
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let n = 0;
+        for (let fj = fj0; fj <= fj1; fj++) {
+          for (let fi = fi0; fi <= fi1; fi++) {
+            const s = ((fj - fine.j0) * fine.w + (fi - fine.i0)) * 4;
+            r += lin[fine.rgba[s]];
+            g += lin[fine.rgba[s + 1]];
+            b += lin[fine.rgba[s + 2]];
+            n++;
+          }
+        }
+        out[d] = enc(r / n);
+        out[d + 1] = enc(g / n);
+        out[d + 2] = enc(b / n);
+        continue;
+      }
+      const f = cf[j * co.nx + i];
+      const l = t.layerOf[f * 256 + (childChoiceAt(x, z) & 255)] * 3;
+      cellTint(t, cc[(j * co.nx + i) * 3], cc[(j * co.nx + i) * 3 + 1], cc[(j * co.nx + i) * 3 + 2], tint);
+      out[d] = enc(t.means[l] * tint[0]);
+      out[d + 1] = enc(t.means[l + 1] * tint[1]);
+      out[d + 2] = enc(t.means[l + 2] * tint[2]);
+    }
+  }
+  return { i0: ci0, j0: cj0, w, h: hh, rgba: out };
+}
+
 /**
  * Normals of a heights lattice, central differences one step either side (one-sided at an edge), as RG8 biased by 128:
  * the normal's x and z in the game's frame (raw x runs the other way, so the slope along it changes sign), y rebuilt.
  */
 export function normalsOf(h: Float32Array, lat: Lattice): Uint8Array {
+  const out = new Uint8Array(lat.nx * lat.nz * 2);
+  return normalsRect(h, lat, 0, 0, lat.nx - 1, lat.nz - 1, out);
+}
+
+/** `normalsOf` over the samples [i0, i1] by [j0, j1] alone (clamped), written into the whole lattice's `out` (W2's overlays). */
+export function normalsRect(h: Float32Array, lat: Lattice, i0: number, j0: number, i1: number, j1: number, out: Uint8Array, oi = 0, oj = 0, ow = lat.nx): Uint8Array {
   const { nx, nz, step } = lat;
-  const out = new Uint8Array(nx * nz * 2);
-  for (let j = 0; j < nz; j++) {
+  i0 = Math.max(0, i0);
+  j0 = Math.max(0, j0);
+  i1 = Math.min(nx - 1, i1);
+  j1 = Math.min(nz - 1, j1);
+  for (let j = j0; j <= j1; j++) {
     const ju = Math.min(nz - 1, j + 1);
     const jd = Math.max(0, j - 1);
-    for (let i = 0; i < nx; i++) {
+    for (let i = i0; i <= i1; i++) {
       const ir = Math.min(nx - 1, i + 1);
       const il = Math.max(0, i - 1);
       const dxr = (h[j * nx + ir] - h[j * nx + il]) / ((ir - il) * step);
@@ -470,8 +698,10 @@ export function normalsOf(h: Float32Array, lat: Lattice): Uint8Array {
       const gx = dxr;
       const gz = -dzr;
       const len = Math.sqrt(gx * gx + 1 + gz * gz);
-      out[(j * nx + i) * 2] = Math.min(255, Math.max(0, Math.round((gx / len) * 127.5 + 127.5)));
-      out[(j * nx + i) * 2 + 1] = Math.min(255, Math.max(0, Math.round((gz / len) * 127.5 + 127.5)));
+      // `out` is the whole lattice's (`oi`, `oj` nought, `ow` its width) or a region's own from (oi, oj), `ow` wide.
+      const o = ((j - oj) * ow + (i - oi)) * 2;
+      out[o] = Math.min(255, Math.max(0, Math.round((gx / len) * 127.5 + 127.5)));
+      out[o + 1] = Math.min(255, Math.max(0, Math.round((gz / len) * 127.5 + 127.5)));
     }
   }
   return out;
@@ -568,11 +798,122 @@ export function pyramidOf(header: HorizonHeader, fine: Float32Array, coarse: Flo
 }
 
 /**
+ * The pyramid made again over the leaves whose value fine samples in a game-frame rectangle reach (W2's overlays: a laid
+ * height moved them), every level above them with it: `pyramidOf`'s own rule cell by cell (each cell the least and most of
+ * every fine sample within it and a step round it, the coarse samples where the fine extent does not hold it whole), so
+ * the pyramid is what `pyramidOf` would make of the laid heights (`horizonOverlay.test.ts` holds it to the bit).
+ */
+export function pyramidRelay(p: MinMaxPyramid, header: HorizonHeader, fine: Float32Array, coarse: Float32Array, centre: { x: number; z: number }, gx0: number, gz0: number, gx1: number, gz1: number): void {
+  const f = header.fine;
+  const co = header.coarse;
+  const n = p.n;
+  const reach = f.step;
+  const ci0 = Math.max(0, Math.floor((gx0 - reach - p.x0) / LEAF));
+  const ci1 = Math.min(n - 1, Math.floor((gx1 + reach - p.x0) / LEAF));
+  const cj0 = Math.max(0, Math.floor((gz0 - reach - p.z0) / LEAF));
+  const cj1 = Math.min(n - 1, Math.floor((gz1 + reach - p.z0) / LEAF));
+  if (ci0 > ci1 || cj0 > cj1) return;
+  const lo0 = p.lo[0];
+  const hi0 = p.hi[0];
+  for (let cj = cj0; cj <= cj1; cj++) {
+    for (let ci = ci0; ci <= ci1; ci++) {
+      lo0[cj * n + ci] = Infinity;
+      hi0[cj * n + ci] = -Infinity;
+    }
+  }
+  // The cells' own game rectangle, and a sample's reach round it: every sample that can land in one of them.
+  const cx0 = p.x0 + ci0 * LEAF;
+  const cx1 = p.x0 + (ci1 + 1) * LEAF;
+  const cz0 = p.z0 + cj0 * LEAF;
+  const cz1 = p.z0 + (cj1 + 1) * LEAF;
+  const fgx0 = centre.x - (f.x0 + (f.nx - 1) * f.step) + f.step;
+  const fgx1 = centre.x - f.x0 - f.step;
+  const fgz0 = f.z0 - centre.z + f.step;
+  const fgz1 = f.z0 + (f.nz - 1) * f.step - centre.z - f.step;
+  const covered = (ci: number, cj: number): boolean => {
+    const z = p.z0 + cj * LEAF;
+    if (z < fgz0 || z + LEAF > fgz1) return false;
+    const x = p.x0 + ci * LEAF;
+    return x >= fgx0 && x + LEAF <= fgx1;
+  };
+  const put = (lat: Lattice, h: Float32Array, r: number, only: boolean) => {
+    // gx = centre.x - (x0 + i step) in [cx0 - r, cx1 + r]; gz = z0 + j step - centre.z in [cz0 - r, cz1 + r].
+    const i0 = Math.max(0, Math.floor((centre.x - cx1 - r - lat.x0) / lat.step) - 1);
+    const i1 = Math.min(lat.nx - 1, Math.ceil((centre.x - cx0 + r - lat.x0) / lat.step) + 1);
+    const j0 = Math.max(0, Math.floor((cz0 - r + centre.z - lat.z0) / lat.step) - 1);
+    const j1 = Math.min(lat.nz - 1, Math.ceil((cz1 + r + centre.z - lat.z0) / lat.step) + 1);
+    for (let j = j0; j <= j1; j++) {
+      const gz = lat.z0 + j * lat.step - centre.z;
+      const a0 = Math.max(cj0, Math.max(0, Math.floor((gz - r - p.z0) / LEAF)));
+      const a1 = Math.min(cj1, Math.min(n - 1, Math.floor((gz + r - p.z0) / LEAF)));
+      if (a0 > a1) continue;
+      for (let i = i0; i <= i1; i++) {
+        const gx = centre.x - (lat.x0 + i * lat.step);
+        const b0 = Math.max(ci0, Math.max(0, Math.floor((gx - r - p.x0) / LEAF)));
+        const b1 = Math.min(ci1, Math.min(n - 1, Math.floor((gx + r - p.x0) / LEAF)));
+        if (b0 > b1) continue;
+        const v = h[j * lat.nx + i];
+        for (let cj = a0; cj <= a1; cj++) {
+          for (let ci = b0; ci <= b1; ci++) {
+            if (only && covered(ci, cj)) continue;
+            const k = cj * n + ci;
+            if (v < lo0[k]) lo0[k] = v;
+            if (v > hi0[k]) hi0[k] = v;
+          }
+        }
+      }
+    }
+  };
+  put(f, fine, f.step, false);
+  put(co, coarse, co.step, true);
+  for (let cj = cj0; cj <= cj1; cj++) {
+    for (let ci = ci0; ci <= ci1; ci++) {
+      const k = cj * n + ci;
+      if (lo0[k] > hi0[k]) lo0[k] = hi0[k] = NaN;
+    }
+  }
+  let m = n;
+  let a0 = ci0;
+  let a1 = ci1;
+  let b0 = cj0;
+  let b1 = cj1;
+  for (let L = 1; L < p.levels; L++) {
+    const q = m >> 1;
+    a0 >>= 1;
+    a1 = Math.min(q - 1, a1 >> 1);
+    b0 >>= 1;
+    b1 = Math.min(q - 1, b1 >> 1);
+    const cl = p.lo[L - 1];
+    const ch = p.hi[L - 1];
+    const pl = p.lo[L];
+    const ph = p.hi[L];
+    for (let j = b0; j <= b1; j++) {
+      for (let i = a0; i <= a1; i++) {
+        let a = Infinity;
+        let b = -Infinity;
+        for (let s = 0; s < 4; s++) {
+          const k = (2 * j + (s >> 1)) * m + 2 * i + (s & 1);
+          const l = cl[k];
+          if (l === l) {
+            if (l < a) a = l;
+            if (ch[k] > b) b = ch[k];
+          }
+        }
+        pl[j * q + i] = a <= b ? a : NaN;
+        ph[j * q + i] = a <= b ? b : NaN;
+      }
+    }
+    m = q;
+  }
+}
+
+/**
  * The detail window (§2.5): each 4 m tile's own layer (the greatest share at its middle) for the 4,096 m square centred
  * on raw (rx, rz), addressed by the tile's index modulo the window, so the program reads it as the camera's place moves.
  */
-export function detailWindow(t: TileTables, header: HorizonHeader, fam: Uint8Array, rx: number, rz: number, out = new Uint8Array(DETAIL_SIZE * DETAIL_SIZE)): Uint8Array {
+export function detailWindow(t: TileTables, header: HorizonHeader, fam: Uint8Array, rx: number, rz: number, out = new Uint8Array(DETAIL_SIZE * DETAIL_SIZE), poles: readonly PoleOverride[] = []): Uint8Array {
   const comp = new TileComposer(t, fam, header.ground);
+  comp.setOverrides(poles);
   const half = (DETAIL_SIZE / 2) * DETAIL_TILE;
   const tx0 = Math.floor((rx - half) / DETAIL_TILE);
   const tz0 = Math.floor((rz - half) / DETAIL_TILE);

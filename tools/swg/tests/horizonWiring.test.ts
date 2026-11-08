@@ -33,7 +33,15 @@ ok(HORIZON_TUNE.ground === 'tiles', "the switch starts at 'tiles': nothing of th
 const pre = old('src/world/terrain.ts');
 if (!pre) console.log(`note git cannot show ${PRE_PASS} here: the day-one file checks are left out`);
 else {
-  for (const p of ['src/world/terrain.ts', 'src/world/swgTerrain.ts', 'src/swg/terrain/trn.ts', 'src/world/groundTiles.ts', 'src/world/groundMath.ts']) ok(now(p) === old(p), `${p} is ${PRE_PASS}'s to the byte (the far tiles, the far grids and heightIfCached as they were)`);
+  for (const p of ['src/world/terrain.ts', 'src/swg/terrain/trn.ts', 'src/world/groundTiles.ts', 'src/world/groundMath.ts']) ok(now(p) === old(p), `${p} is ${PRE_PASS}'s to the byte (the far tiles and the far grids as they were)`);
+  // The second wave's two additions to swgTerrain.ts (the bake's hook in heightIfCached, null with no field, and the live
+  // generator's grid for the overlays) taken back out by their own text: the rest PRE_PASS's to the byte.
+  const swgNow = now('src/world/swgTerrain.ts');
+  const hookAt = swgNow.indexOf("    // The far ground's bake, laid, while the rings stand");
+  const hookEnd = swgNow.indexOf('      if (b === b) return b;\n    }\n', hookAt) + '      if (b === b) return b;\n    }\n'.length;
+  const genAt = swgNow.indexOf("  /** The far ground's bake `heightIfCached` reads past the blocks");
+  const genEnd = swgNow.indexOf('    return new Promise((resolve) => this.request(`horizon:${this.nextId}`, startX, startZ, n, step, resolve));\n  }\n\n', genAt) + '    return new Promise((resolve) => this.request(`horizon:${this.nextId}`, startX, startZ, n, step, resolve));\n  }\n\n'.length;
+  ok(hookAt > 0 && genAt > hookAt && swgNow.slice(0, hookAt) + swgNow.slice(hookEnd, genAt) + swgNow.slice(genEnd) === old('src/world/swgTerrain.ts'), `src/world/swgTerrain.ts is ${PRE_PASS}'s to the byte but for the bake's hook (null with no field) and generatePoles`);
   const gen = now('src/swg/terrain/generator.ts');
   const start = gen.indexOf('\n/**\n * The generator\'s revision');
   const end = gen.indexOf('export const GENERATOR_REVISION = 1;\n') + 'export const GENERATOR_REVISION = 1;\n'.length;
@@ -53,7 +61,28 @@ pin(w, "await this.loadSky(pack, spawn);\n          if (token !== this.loadToken
 pin(w, 'if (this.swgSky) copyDome(s.uniforms, this.swgSky.domeUniforms);', "world.ts: the dome's uniforms copied through the field's own function (its numbers into one vector's fields)");
 pin(w, "field.rules.fogDensity = fog && (fog as THREE.FogExp2).isFogExp2 ? fog.density : 0;\n    field.update(s, camera, camera.position, this.viewRadius, pcx, pcz, this.horizonHole, camera.reversedDepth);", "world.ts: the fog's density into the field's kept record, never across the frame's call");
 pin(w, 'if (f) f.timing = true;', 'world.ts: the selection timed only once the console asks');
-pin(w, "if (HORIZON_TUNE.ground === 'rings' && this.horizonDrawn) return;", "world.ts: at 'rings' with the bake drawn, streamFar builds no far tile and asks for no far grid");
+pin(w, "if (HORIZON_TUNE.ground === 'rings' && this.horizonDrawn) {\n      this.streamRingCards(center, budget);\n      return;\n    }", "world.ts: at 'rings' with the bake drawn, streamFar builds no far tile, only the far grids and cards within farGridRadius (W2)");
+// W2's hand-overs.
+// W2's review: the terrain itself handed over, its stores read at each lay, never a copy taken before the bake's fetch.
+pin(w, 'const stores = swg;\n    const ok = await field.load(', "world.ts: the near ground's own stores (the terrain itself, read at each lay) laid over the bake as it loads, before anything is uploaded");
+ok(!/\{ heights: swg\.heights, course: swg\.course \}/.test(w), "world.ts: no copy of the stores is taken anywhere (a file landing while the bake loads, or before a lay made again, is laid)");
+pin(w, 'if (!f.relayLate(swg)) return;', 'world.ts: a late file laid from the terrain itself');
+pin(w, 'void f.regenerate(paintRegenAsks(paint), (x, z, n, step) => swg.generatePoles(x, z, n, step), swg);', 'world.ts: a paint file landed late asks what an arrival asks (paintRegenAsks), its heights from the terrain itself');
+pin(w, 'const done = field.regenerate(asks, (x, z, n, step) => swg.generatePoles(x, z, n, step), stores);\n    // A dropped building\'s or Life Day\'s heights moved under far cards that may already stand: stood again once laid.\n    if (asks.some((a) => a.heights)) void done.then(() => this.horizonField === field && this.farCards?.restand());\n    await Promise.race([done, new Promise<void>((r) => setTimeout(r, HORIZON_TUNE.regenWaitMs))]);', 'world.ts: what only the generator lays made again behind the screen, bounded by regenWaitMs, the far cards stood again once heights moved');
+pin(w, "if (paint && !paint.empty) asks.push(...paintRegenAsks(paint));", 'world.ts: every painted 512 m tile made again');
+pin(w, 'if (!dropped.has(li)) continue;', "world.ts: a building layer the removal file drops made again by its extent");
+pin(w, 'if (TERRAIN_GROUND_TUNE.lifeDay && !h.source.lifeDay) for (const e of seasonalExtents(swg.template.generator))', "world.ts: Life Day's layers made again in season");
+pin(w, "if (rect.x0 <= rect.x1) this.heightsChanged(rect.x0, rect.z0, rect.x1, rect.z1, true);\n    // A file landed late reaches the far ground's bake as it reached the near ground (W2): its whole layer laid again.\n    if (late) this.horizonLate();", 'world.ts: a heights file landed late laid over the bake whole');
+pin(w, "this.landCourses(tracks ?? [], Number.NaN, Number.NaN, false);\n      // A course file later than the bound reaches the far ground's bake too (W2), laid whole.\n      this.horizonLate();", 'world.ts: a course file later than the bound laid over the bake whole');
+pin(w, "if (this.flora) this.flora.onCourse = this.courseRule();\n    // And the far ground's bake, laid again whole with it (W2).\n    this.horizonLate();", 'world.ts: a course store taken late laid over the bake whole');
+pin(w, "this.applyPaintWeights(true);\n      // The far ground's bake: every painted tile made again from the live generator (W2), landing in play.\n      this.horizonPaintLate();", 'world.ts: a paint file landed late makes the painted tiles again');
+pin(w, 'if (this.terrain?.swg) this.terrain.swg.horizon = ready ? this.horizonField : null;', 'world.ts: heightIfCached reads the bake past the blocks only while it is drawn');
+pin(w, "if (f && HORIZON_TUNE.ground === 'rings' && this.horizonDrawn) samples.surfaceAt = ringCardSurface(f, this.ringHole, gx0, gz0, () => this.viewRadius);", "world.ts: a far card stands on the ring's own surface at 'rings', round the hole as it stands when placed (ringCardSurface)");
+pin(w, "if (ringHoleMoved(this.ringHole, pcx, pcz, this.viewRadius, HORIZON_TUNE) && this.ringCardTiles.size) this.farCards?.restand();\n    this.streamPcx = pcx;\n    this.streamPcz = pcz;\n    if (pcx === this.lastCx && pcz === this.lastCz && budget !== Infinity) return;", 'world.ts: the stream stands the ring cards again whenever the hole moves, before its early return (beside farProbe\'s pair, never between it)');
+pin(w, "if (this.ringCardTiles.has(`${tx},${tz}`)) {\n        this.paintLandWork.far++;\n        this.farCardsAgain(tx, tz);\n        return;\n      }\n      const t = this.farTiles.get(`${tx},${tz}`);", "world.ts: a paint landing's far grid kept for the rings' cards makes its cards again (no far tile at 'rings')");
+// The first unload runs before the first world has a terrain (a smoke found the plain `this.terrain.swg` there).
+pin(w, 'if (this.terrain?.swg) this.terrain.swg.horizon = null;\n    this.releaseRingCards();', 'world.ts: the bake let go takes its hook and its far grids with it, a terrain or none');
+pin(w, 'private releaseRingCards(): void {\n    if (!this.terrain) return;', 'world.ts: and lets its far grids go only where there is a terrain');
 pin(w, "if (this.horizonDrawn) mesh.visible = HORIZON_TUNE.ground === 'both' && HORIZON_TUNE.drawn === 'tiles';", "world.ts: at 'both' a far tile is built and hidden while the rings are drawn");
 pin(w, 'this.horizonHole.set(cx, cz, loaded);', 'world.ts: noteChunk writes the hole');
 pin(w, "this.dropHorizon();\n    this.horizonHole.clear();", "world.ts: the unload lets the bake go and empties the hole");
@@ -70,5 +99,13 @@ pin(m, "if (this.jumpFarKept !== null) {\n      this.jumpFarKept = far;\n      r
 pin(m, "const on = HORIZON_TUNE.measure && this.world.horizonDrawn && cam.reversedDepth;", 'main.ts: measure moves the far plane only under reversed depth');
 pin(m, 'HORIZON_WATCH.moved = () => void this.applyHorizonMeasure();', "main.ts: a slider the measurement follows moves the far plane as the console does");
 pin(m, "if (typeof o?.reach === 'number' && o.reach > 0) said.push(...tuneHorizon({ reach: o.reach }));", "main.ts: the console's reach goes through tuneHorizon, the slider's own path");
+// W2's: the Graphics page's switch and distance, and the curtain both ways.
+pin(m, "HORIZON_TUNE.ground = S.farRings ? 'rings' : 'tiles';\n    this.applyReach();", "main.ts: the page's switch read before any world, so the first arrival loads the bake when it is on");
+pin(m, "case 'farRings':\n        // The far ground's switch (the horizon pass): the rings stood or the tiles made again behind a short curtain.\n        void this.setHorizonGround(S.farRings ? 'rings' : 'tiles')", "main.ts: the page's switch moved in play goes through setHorizonGround");
+pin(m, "if (had && this.inWorld && !this.traveling) await this.groundCurtain('the far tiles', () => this.world.standFarGround(this.player.worldPos));", 'main.ts: back to the tiles, their builds a curtain\'s work');
+pin(m, "await this.groundCurtain(\"the world's bake\", async () => {\n      await this.world.loadHorizon(this.world.packId, this.player.worldPos);\n      this.world.standFarGround(this.player.worldPos);\n    });", "main.ts: to the rings, the bake's load and the rings' far grids and cards a curtain's work");
+pin(now('src/ui/menu.ts'), 'Not ready on Direct3D 11', "menu.ts: the rings' switch says it is not ready on Direct3D 11 (18 samplers past its 16, W3's to pack)");
+pin(m, "if (r.horizon !== this.horizonReachApplied) {\n      this.horizonReachApplied = r.horizon;\n      tuneHorizon({ reach: r.horizon });", "main.ts: the Terrain distance (or the console's hold) reaches the rings through tuneHorizon, only when it moved");
+pin(m, "if (key === 'farRadius' && this.settings.farRings) return { off:", "main.ts: the far tiles' radius greys while the rings stand in their place");
 
 console.log(`\nhorizonWiring: ${checks} checks passed`);

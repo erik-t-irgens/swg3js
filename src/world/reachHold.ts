@@ -14,11 +14,16 @@
 
 import { PLACED_TIERS } from './placedTiers.ts';
 
-/** One reach: placed objects as a multiple of the tiers' ranges, ground chunks and far tiles each way. */
+/**
+ * One reach: placed objects as a multiple of the tiers' ranges, ground chunks and far tiles each way, and how far the far
+ * ground's rings reach in metres (the horizon pass: the Terrain distance, which stands in place of the far tiles' radius
+ * while the rings do).
+ */
 export interface Reach {
   objects: number;
   terrain: number;
   far: number;
+  horizon: number;
 }
 
 /** What the console holds: an axis it has not asked for is null and follows the setting. */
@@ -26,13 +31,15 @@ export interface ReachHold {
   objects: number | null;
   terrain: number | null;
   far: number | null;
+  horizon: number | null;
 }
 
-/** The settings' three numbers, as they are named there. */
+/** The settings' numbers, as they are named there (the Terrain distance in kilometres). */
 export interface ReachSettings {
   objectReach: number;
   terrainRadius: number;
   farRadius: number;
+  terrainDistance: number;
 }
 
 /**
@@ -40,27 +47,27 @@ export interface ReachSettings {
  * reads that file and fails if the two disagree). Past them a reach is the console's and the answer
  * warns about what it costs.
  */
-export const MENU_REACH_TOP: Reach = { objects: 1.6, terrain: 9, far: 9 };
+export const MENU_REACH_TOP: Reach = { objects: 1.6, terrain: 9, far: 9, horizon: 16000 };
 
 /**
  * The least each axis may be, which is what keeps a typo from emptying the world rather than a limit
  * on how far it may reach (there is none). Ours: a twentieth of the tiers' ranges is still a street,
  * and one chunk and one far tile each way is the smallest ground the streaming still covers.
  */
-export const REACH_FLOOR: Reach = { objects: 0.05, terrain: 1, far: 1 };
+export const REACH_FLOOR: Reach = { objects: 0.05, terrain: 1, far: 1, horizon: 500 };
 
 export function emptyHold(): ReachHold {
-  return { objects: null, terrain: null, far: null };
+  return { objects: null, terrain: null, far: null, horizon: null };
 }
 
 /** Whether anything at all is held. */
 export function holding(h: ReachHold): boolean {
-  return h.objects !== null || h.terrain !== null || h.far !== null;
+  return h.objects !== null || h.terrain !== null || h.far !== null || h.horizon !== null;
 }
 
-/** The reach in force: each held axis, else the setting's. */
+/** The reach in force: each held axis, else the setting's (the Terrain distance's kilometres as metres). */
 export function reachInForce(h: ReachHold, s: ReachSettings): Reach {
-  return { objects: h.objects ?? s.objectReach, terrain: h.terrain ?? s.terrainRadius, far: h.far ?? s.farRadius };
+  return { objects: h.objects ?? s.objectReach, terrain: h.terrain ?? s.terrainRadius, far: h.far ?? s.farRadius, horizon: h.horizon ?? s.terrainDistance * 1000 };
 }
 
 /** What the console may pass for one axis: a number to hold, null to hand it back, anything else left alone. */
@@ -72,12 +79,13 @@ export type ReachAsk = number | null | undefined;
  * anything else -- an axis not named, a word, a NaN -- leaves it as it was. The answer is what was
  * refused, in words, which is empty when everything was taken.
  */
-export function askReach(h: ReachHold, ask: { objects?: ReachAsk; terrain?: ReachAsk; far?: ReachAsk; release?: boolean }): string[] {
+export function askReach(h: ReachHold, ask: { objects?: ReachAsk; terrain?: ReachAsk; far?: ReachAsk; horizon?: ReachAsk; release?: boolean }): string[] {
   const refused: string[] = [];
   if (ask.release) {
     h.objects = null;
     h.terrain = null;
     h.far = null;
+    h.horizon = null;
   }
   const one = (key: keyof Reach, v: unknown): void => {
     if (v === undefined) return;
@@ -90,13 +98,14 @@ export function askReach(h: ReachHold, ask: { objects?: ReachAsk; terrain?: Reac
       return;
     }
     const floor = REACH_FLOOR[key];
-    const n = key === 'objects' ? v : Math.round(v);
+    const n = key === 'objects' || key === 'horizon' ? v : Math.round(v);
     h[key] = Math.max(floor, n);
     if (n < floor) refused.push(`${key}: ${v} is under the least it may be, so it is ${floor}`);
   };
   one('objects', ask.objects);
   one('terrain', ask.terrain);
   one('far', ask.far);
+  one('horizon', ask.horizon);
   return refused;
 }
 
@@ -114,14 +123,15 @@ export function reachWarnings(r: Reach): string[] {
     out.push(`ground detail at ${r.terrain} chunks each way is ${chunks} chunks (${((chunks / (2 * MENU_REACH_TOP.terrain + 1) ** 2)).toFixed(1)} times the page's most), every one carrying its own plants; plants past their own reach are hidden still, and flora({ reach: false }) lifts that`);
   }
   if (r.far > MENU_REACH_TOP.far) out.push(`far ground at ${r.far} tiles each way reaches ${(r.far * 0.512).toFixed(1)} km; the camera's far plane is 9 km, so tiles past it are built and never seen`);
+  if (r.horizon > MENU_REACH_TOP.horizon) out.push(`the rings at ${(r.horizon / 1000).toFixed(1)} km reach past the page's ${MENU_REACH_TOP.horizon / 1000} km: more of the quadtree is selected and drawn every frame, and the bake's own extent stops them where it ends`);
   return out;
 }
 
 /** The sentence said when a slider moves an axis the console is holding; '' when it is not held. */
 export function heldAxisNote(h: ReachHold, key: keyof ReachSettings): string {
-  const axis: keyof Reach = key === 'objectReach' ? 'objects' : key === 'terrainRadius' ? 'terrain' : 'far';
+  const axis: keyof Reach = key === 'objectReach' ? 'objects' : key === 'terrainRadius' ? 'terrain' : key === 'farRadius' ? 'far' : 'horizon';
   const v = h[axis];
   if (v === null) return '';
-  const name = axis === 'objects' ? 'Object reach' : axis === 'terrain' ? 'Ground detail radius' : 'Far ground radius';
+  const name = axis === 'objects' ? 'Object reach' : axis === 'terrain' ? 'Ground detail radius' : axis === 'far' ? 'Far ground radius' : 'Terrain distance';
   return `${name} is held at ${v} from the console; __debug.reach({ release: true }) hands it back to this setting`;
 }

@@ -2047,6 +2047,8 @@ class App {
     this.world.setShadows(S.shadowDistance, S.shadowCasterRadius);
     // The flora's settings into their tunes before any world or camera, so the first world is planted, cast and drawn by them.
     this.applyFlora();
+    // The far ground's switch from the Graphics page before any world, so the first arrival loads the bake when it is on.
+    HORIZON_TUNE.ground = S.farRings ? 'rings' : 'tiles';
     this.applyReach();
     // The spawner's cap and the creatures' animation range, kept by the world for every planet's manager.
     this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
@@ -5416,7 +5418,7 @@ class App {
        * moves the far plane and the sky's radius to the reach, under reversed depth only; `{ view }` 'shaded', 'lod',
        * 'albedo', 'normals' or 'edge'; `{ tune }` any `HORIZON_TUNE` number. Await it when it changes `ground`.
        */
-      horizon: async (o?: { ground?: HorizonGround; reach?: number; measure?: boolean; view?: (typeof HORIZON_VIEWS)[number]; tune?: Record<string, unknown>; bench?: number }) => {
+      horizon: async (o?: { ground?: HorizonGround; reach?: number; measure?: boolean; view?: (typeof HORIZON_VIEWS)[number]; tune?: Record<string, unknown>; bench?: number; at?: [number, number] }) => {
         const said: string[] = [];
         if (o?.tune) said.push(...tuneHorizon(o.tune));
         if (typeof o?.reach === 'number' && o.reach > 0) said.push(...tuneHorizon({ reach: o.reach }));
@@ -5425,7 +5427,7 @@ class App {
         else if (HORIZON_TUNE.ground !== 'tiles') this.world.applyHorizonGround();
         if (typeof o?.measure === 'boolean') HORIZON_TUNE.measure = o.measure;
         said.push(this.applyHorizonMeasure());
-        return { ...this.world.horizonReport({ bench: o?.bench }), measure: { on: HORIZON_TUNE.measure, far: Math.round(this.cam.camera.far), reversed: this.cam.camera.reversedDepth }, said: said.filter(Boolean) };
+        return { ...this.world.horizonReport({ bench: o?.bench, at: o?.at }), measure: { on: HORIZON_TUNE.measure, far: Math.round(this.cam.camera.far), reversed: this.cam.camera.reversedDepth }, said: said.filter(Boolean) };
       },
       farTiles: (o?: { local?: boolean; probe?: boolean; floraWarm?: boolean }) => {
         if (typeof o?.local === 'boolean') this.world.setFarTileLocal(o.local);
@@ -5489,15 +5491,15 @@ class App {
        * ground chunks, the far tiles and the plants' own reach -- which fills over the next frames; ask
        * again to watch it grow.
        */
-      reach: (o?: { objects?: ReachAsk; terrain?: ReachAsk; far?: ReachAsk; release?: boolean }) => {
+      reach: (o?: { objects?: ReachAsk; terrain?: ReachAsk; far?: ReachAsk; horizon?: ReachAsk; release?: boolean }) => {
         const refused = o ? askReach(this.reachHold, o) : [];
         if (o) this.applyReach();
         const S = this.settings;
         const w = this.world;
         return {
           held: { ...this.reachHold },
-          settings: { objects: S.objectReach, terrain: S.terrainRadius, far: S.farRadius },
-          inForce: { objects: w.objectReach, terrain: w.viewRadius, far: w.farRadius },
+          settings: { objects: S.objectReach, terrain: S.terrainRadius, far: S.farRadius, horizon: S.terrainDistance * 1000 },
+          inForce: { objects: w.objectReach, terrain: w.viewRadius, far: w.farRadius, horizon: HORIZON_TUNE.reach },
           ...(w.sceneOnly ? { waiting: 'a captured place keeps the small reach it was built at; the hold takes over when it closes' } : {}),
           ...(refused.length ? { refused } : {}),
           warnings: reachWarnings(reachInForce(this.reachHold, S)),
@@ -13385,8 +13387,15 @@ class App {
         if (held) this.messages.note(held);
         break;
       }
+      case 'farRings':
+        // The far ground's switch (the horizon pass): the rings stood or the tiles made again behind a short curtain.
+        void this.setHorizonGround(S.farRings ? 'rings' : 'tiles').then((said) => {
+          if (said) this.messages.note(said);
+        });
+        break;
       case 'objectReach':
       case 'terrainRadius':
+      case 'terrainDistance':
       case 'farRadius': {
         // An axis the console holds (`__debug.reach`) stays where it was put, and says so rather than
         // leaving the slider looking as though it did nothing.
@@ -14262,6 +14271,8 @@ class App {
    * decal); and the ground's switches say so where this world's ground is not drawn the way the air's variant needs.
    */
   private volKnobState(key: string): { note?: string; off?: string } | null {
+    // The far tiles' radius while the rings stand in their place (the horizon pass): their reach is the Terrain distance.
+    if (key === 'farRadius' && this.settings.farRings) return { off: 'the rings stand in place of the far tiles: their reach is the Terrain distance' };
     if (key === 'volumetrics') {
       if (VOL_HATCH_OFF) return { off: "off at load: localStorage['swg.vol'] is '0'" };
       if (this.volWarming) return { note: 'preparing shaders' };
@@ -14550,7 +14561,14 @@ class App {
     if (this.world.sceneOnly) return;
     const r = reachInForce(this.reachHold, this.settings);
     this.world.setReach(r.objects, r.terrain, r.far);
+    // The rings' reach (the Terrain distance, or the console's hold: the horizon pass's second wave), written only when it
+    // moved, so a reach `horizon({ reach })` set stands until the setting or the hold moves again.
+    if (r.horizon !== this.horizonReachApplied) {
+      this.horizonReachApplied = r.horizon;
+      tuneHorizon({ reach: r.horizon });
+    }
   }
+  private horizonReachApplied = Number.NaN;
 
   /** The display's quiet line: the weather's and the day's, god mode's and a held reach's, joined only when one changes. */
   private heldNote(): string {
@@ -30510,9 +30528,12 @@ class App {
     const was = HORIZON_TUNE.ground;
     HORIZON_TUNE.ground = g;
     if (g === 'tiles') {
+      const had = !!this.world.horizonField;
       this.world.dropHorizon();
       this.world.applyHorizonGround();
       HORIZON_TUNE.measure = false;
+      // The far tiles built again behind the same short curtain (W2: a curtain's work, never a frame's).
+      if (had && this.inWorld && !this.traveling) await this.groundCurtain('the far tiles', () => this.world.standFarGround(this.player.worldPos));
       return "the far tiles again: the bake let go";
     }
     if (was !== 'tiles' && this.world.horizonField) {
@@ -30520,6 +30541,22 @@ class App {
       return `the switch at '${g}'`;
     }
     if (!this.inWorld || this.traveling) return "not now: enter the world first (the switch stands and the next arrival loads the bake)";
+    // The rings' far grids and tree cards stood inside the curtain too (W2's review: the switch let every far tile go with its
+    // grid and cards, and they came back a grid a frame after the screen lifted).
+    await this.groundCurtain("the world's bake", async () => {
+      await this.world.loadHorizon(this.world.packId, this.player.worldPos);
+      this.world.standFarGround(this.player.worldPos);
+    });
+    const st = this.world.horizonField?.state;
+    return st?.state === 'ready' ? `the rings at '${g}'` : `the far tiles still: ${st && 'why' in st ? st.why : 'no bake'}`;
+  }
+
+  /**
+   * The far ground's switch's short curtain (the rooms' pool's shape: the screen, the work, the sweep that builds what it
+   * needs, the queue flushed), so the ring program, the bake's decode and upload, or the far tiles' builds are never a
+   * frame's work.
+   */
+  private async groundCurtain(what: string, work: () => Promise<void> | void): Promise<void> {
     let held = false;
     await runCurtain(
       {
@@ -30548,11 +30585,11 @@ class App {
         wait: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
       },
       'the far ground',
-      "the world's bake",
-      () => this.world.loadHorizon(this.world.packId, this.player.worldPos),
+      what,
+      async () => {
+        await work();
+      },
     );
-    const st = this.world.horizonField?.state;
-    return st?.state === 'ready' ? `the rings at '${g}'` : `the far tiles still: ${st && 'why' in st ? st.why : 'no bake'}`;
   }
 
   private readonly horizonRules = newReachRules();

@@ -68,6 +68,13 @@ export interface Settings extends FxSettings {
   terrainRadius: number;
   /** Coarse far tiles each way. */
   farRadius: number;
+  /**
+   * The far ground drawn as rings from the world's bake to the Terrain distance (the horizon pass), or, off, as today's
+   * far tiles to the Far ground radius. Off until the pass's last wave turns it on.
+   */
+  farRings: boolean;
+  /** How far the rings reach, kilometres (the horizon pass's reach; the fog and reversed depth hold it shorter). */
+  terrainDistance: number;
   /** How many creatures and NPCs the spawner may have out at once (nothing the world itself stands is counted). */
   mobileCap: number;
   /** Metres past which a creature or NPC holds its pose until it comes nearer. */
@@ -377,6 +384,8 @@ export const DEFAULT_SETTINGS: Settings = {
   objectReach: 1,
   terrainRadius: 6,
   farRadius: 6,
+  farRings: false,
+  terrainDistance: 8,
   mobileCap: 40,
   mobileAnimRange: 160,
   waterRipples: true,

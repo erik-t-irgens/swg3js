@@ -147,8 +147,10 @@ ok(/return \(x, z\) => \(\{ x: rawToGameX\(c\.x, x\), z: rawToGameZ\(c\.z, z\) \
       const text = read(rel);
       if (/from '[^']*race\/course(Path|Gates|Tune|Track)\.ts'/.test(text) || /courseSpines\(/.test(text) || /from '[^']*courseCarve\.ts'/.test(text)) readers.push(rel);
     }
-  const want = ['src/swg/terrain/courseCarve.ts', 'src/swg/terrain/trn.ts', 'src/world/swgTerrain.ts', 'src/world/terrain.ts', 'src/world/world.ts'];
-  ok(readers.sort().join(',') === want.sort().join(','), `the modules of the terrain and the world that read a course are the carve's own five (${readers.join(', ')})`);
+  // And the far ground's (the horizon pass's second wave, its §2.11): the course laid over the bake by the carve's own
+  // `layIn`, from the store the near ground holds (`horizonOverlay.ts`), handed over by the field (`horizonField.ts`).
+  const want = ['src/swg/terrain/courseCarve.ts', 'src/swg/terrain/trn.ts', 'src/world/swgTerrain.ts', 'src/world/terrain.ts', 'src/world/world.ts', 'src/world/horizon/horizonField.ts', 'src/world/horizon/horizonOverlay.ts'];
+  ok(readers.sort().join(',') === want.sort().join(','), `the modules of the terrain and the world that read a course are the carve's own five and the far ground's two (${readers.join(', ')})`);
 }
 
 // The second wave's hand-overs only the game makes (every behaviour test builds its own world): the courses asked as the load

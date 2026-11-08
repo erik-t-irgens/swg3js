@@ -1371,6 +1371,33 @@ export class FarCards {
     }
   }
 
+  /**
+   * Every built card whose tile reads a surface it is drawn on (the rings', W2: `FarSamples.surfaceAt`) stood again on it:
+   * its height read anew and the attribute marked for upload where one moved by a millimetre or more. Asked when the rings'
+   * hole moves (the stream's chunk, the view radius, the drop's numbers) or their heights are laid again (W2's review: a
+   * card stood where the ring was drawn when its tile was built). A tile on the far grid's own bilinear has no surface and
+   * is never touched. Answers how many cards moved. An event's work (a chunk crossed), never a frame's.
+   */
+  restand(): number {
+    let moved = 0;
+    for (const t of this.tiles) {
+      const b = t.buffers;
+      const at = t.samples?.surfaceAt;
+      if (!b || !t.mesh || !at) continue;
+      let any = false;
+      for (let i = 0; i < b.count; i++) {
+        const a = i * 4;
+        const y = at(b.tuft[a], b.tuft[a + 2]);
+        if (!(Math.abs(y - b.tuft[a + 1]) >= 1e-3)) continue;
+        b.tuft[a + 1] = y;
+        any = true;
+        moved++;
+      }
+      if (any) (t.mesh.geometry.getAttribute('aSwgTuft') as THREE.InstancedBufferAttribute).needsUpdate = true;
+    }
+    return moved;
+  }
+
   update(eye: THREE.Vector3, budget = FAR_CARD_TUNE.perFrame): void {
     const setup = this.setup;
     if (!setup) return;

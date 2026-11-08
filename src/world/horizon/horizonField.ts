@@ -11,9 +11,12 @@ import { GROUND_DRAW_TUNE, type GroundShift } from '../groundTiles.ts';
 import type { TintReference } from '../groundMath.ts';
 import { COLOUR_MODES } from '../groundTiles.ts';
 import { groundTileUniforms, type GroundTileUniforms } from '../terrainTextures.ts';
-import { DETAIL_SIZE, DETAIL_TILE, layerMeans, type DecodedBake, type TileTables } from './horizonDecode.ts';
+import type { CourseCarve } from '../../swg/terrain/courseCarve.ts';
+import type { HeightEdits } from '../../swg/terrain/heightEdits.ts';
+import { DETAIL_SIZE, DETAIL_TILE, layerMeans, normalsRect, pyramidRelay, type DecodedBake, type RgbaRegion, type TileTables } from './horizonDecode.ts';
 import { HORIZON_BIN, HORIZON_JSON, readHorizonHeader, type HorizonHeader } from './horizonFile.ts';
-import { HORIZON_TUNE, HORIZON_VIEWS, HoleGrid, LEAF, RingSelector, cameraFrustum, newReachRules, reachRules, type MinMaxPyramid, type ReachRules, type RingAsk } from './horizonMath.ts';
+import { HORIZON_TUNE, HORIZON_VIEWS, HoleGrid, LEAF, RingSelector, cameraFrustum, newReachRules, newRingSurface, reachRules, ringSurfaceAt, type MinMaxPyramid, type ReachRules, type RingAsk, type RingSurface } from './horizonMath.ts';
+import { HeightOverlay, REGEN_STEP, overridesOf, regenPlan, samplesIn, type RawRect, type SampleRect } from './horizonOverlay.ts';
 import { makeRingUniforms, patchGeometry, ringMaterial, ringMesh, ringMipOffset, skirtGeometry, type RingUniforms } from './horizonRings.ts';
 import { keepUploadRange, type UploadRange } from '../uploadRange.ts';
 
@@ -111,10 +114,41 @@ function dataTex(data: ArrayBufferView, w: number, h: number, format: THREE.Pixe
   return t;
 }
 
+/** A lattice's bilinear at fractional sample (fx, fz), as `bakeLerp` works it (its clamps, the last cell's own corner), allocating nothing. */
+function lerpIn(h: Float32Array, nx: number, fx: number, fz: number, nz: number): number {
+  const cx = Math.min(Math.max(fx, 0), nx - 1);
+  const cz = Math.min(Math.max(fz, 0), nz - 1);
+  const ix = Math.min(Math.floor(cx), nx - 2);
+  const iz = Math.min(Math.floor(cz), nz - 2);
+  const ax = cx - ix;
+  const az = cz - iz;
+  const k = iz * nx + ix;
+  const h0 = h[k] * (1 - ax) + h[k + 1] * ax;
+  const h1 = h[k + nx] * (1 - ax) + h[k + nx + 1] * ax;
+  return h0 * (1 - az) + h1 * az;
+}
+
 /** The fetch the field uses: the pack's own files, through `packFiles.ts` (a 404 remembered for the session). */
 export interface FieldFetch {
   json(file: string): Promise<unknown | null>;
   bytes(file: string): Promise<Uint8Array | null>;
+}
+
+/**
+ * The overlays' stores the world hands the field: the ones its near ground lays (W2), read as each lay is made, never
+ * copied (the world hands the terrain itself, whose `heights` and `course` a late file replaces: W2's review).
+ */
+export interface OverlayStores {
+  readonly heights: HeightEdits | null;
+  readonly course: CourseCarve | null;
+}
+
+/** The live generator's square 2 m grid (`SwgTerrain.generatePoles`: the terrain worker's, with the paint laid), or null. */
+export type PoleGenerate = (startX: number, startZ: number, n: number, step: number) => Promise<{ heights: Float32Array; shaders: Int32Array; children: Uint8Array; colors: Uint8Array } | null>;
+
+/** A rectangle to make again and whether its heights moved too (a dropped building's ground does; the paint and Life Day do not). */
+export interface RegenAsk extends RawRect {
+  heights: boolean;
 }
 
 /** Why the far ground draws the far tiles, or null when it draws the rings: what `horizon()` says. */
@@ -187,6 +221,18 @@ export class HorizonField {
   readonly world: string;
   readonly centre: { x: number; z: number };
   readonly shift: GroundShift;
+  /** The fine and coarse heights as laid (the very arrays the height textures hold), and the overlays' raw copies (W2). */
+  private fineH: Float32Array | null = null;
+  private coarseH: Float32Array | null = null;
+  private overlay: HeightOverlay | null = null;
+  private renderer: THREE.WebGLRenderer | null = null;
+  /** What the ring's surface reads (the far cards', `ringSurfaceAt`): the lattices over the laid heights, the square and the drop. */
+  readonly surface: RingSurface = newRingSurface();
+  /** The overlays so far, for the console (W2). */
+  readonly overlays = { tilesLaid: 0, layMs: 0, late: 0, regenAsked: 0, regenDone: 0, regenFailed: 0, cellsMade: 0, uploads: 0, landedInPlay: 0 };
+  /** The worker's answers to the overlays by id. */
+  private readonly overlayWait = new Map<number, (r: { fine: RgbaRegion; coarse: RgbaRegion } | null) => void>();
+  private nextOverlay = 10;
   constructor(world: string, centre: { x: number; z: number }, shift: GroundShift) {
     this.world = world;
     this.centre = centre;
@@ -197,7 +243,7 @@ export class HorizonField {
    * The bake fetched, held to this build (refused in words otherwise), and decoded in the worker; its textures made and
    * handed to the session's uniforms. Answers whether the rings can be drawn.
    */
-  async load(fetch: FieldFetch, ground: FieldGround | null, session: RingSession, renderer: THREE.WebGLRenderer | null, eye: { x: number; z: number }): Promise<boolean> {
+  async load(fetch: FieldFetch, ground: FieldGround | null, session: RingSession, renderer: THREE.WebGLRenderer | null, eye: { x: number; z: number }, stores: OverlayStores | null = null): Promise<boolean> {
     const t0 = performance.now();
     if (!ground) {
       this.state = { state: 'refused', why: "the ground's tile arrays are not loaded (swg.ground.tiles '0', or terrain shaders older than version 4): the albedo reads them" };
@@ -233,6 +279,17 @@ export class HorizonField {
     this.decodeMs = d.ms;
     this.pyramid = d.pyramid;
     const h = read.header;
+    this.fineH = d.fine;
+    this.coarseH = d.coarse;
+    this.surface.fine = { x0: h.fine.x0, z0: h.fine.z0, step: h.fine.step, nx: h.fine.nx, nz: h.fine.nz, h: d.fine };
+    this.surface.coarse = { x0: h.coarse.x0, z0: h.coarse.z0, step: h.coarse.step, nx: h.coarse.nx, nz: h.coarse.nz, h: d.coarse };
+    this.surface.cx = this.centre.x;
+    this.surface.cz = this.centre.z;
+    this.surface.sx = this.shift.x;
+    this.surface.sz = this.shift.z;
+    // The owner's heights and the drawn courses laid over the bake before anything is uploaded (§2.3: before the first ring
+    // is drawn), each tile's normals and leaves made again from the laid heights.
+    if (stores) this.layHeights(stores, d.fineNormal);
     const fine = (this.fine = dataTex(d.fine, h.fine.nx, h.fine.nz, THREE.RedFormat, THREE.FloatType, false));
     const coarse = (this.coarse = dataTex(d.coarse, h.coarse.nx, h.coarse.nz, THREE.RedFormat, THREE.FloatType, false));
     const fn = dataTex(d.fineNormal, h.fine.nx, h.fine.nz, THREE.RGFormat, THREE.UnsignedByteType, true);
@@ -258,9 +315,179 @@ export class HorizonField {
       for (const t of [fn, cn, al, cal]) t.image = { width: t.image.width, height: t.image.height, data: null } as never;
     }
     this.bind(session);
+    this.renderer = renderer;
     this.mainMs += performance.now() - tu;
     this.state = { state: 'ready' };
     return true;
+  }
+
+  // ---------------------------------------------------------------- W2: the overlays (DESIGN.md §2.3)
+
+  /**
+   * The stores' heights laid over the fine samples from raw (`HeightOverlay`), every tile laid having its normals and the
+   * pyramid's leaves made again; before the textures exist (an arrival) into `normals`, the whole lattice's array, and after
+   * (a late file) each tile's rectangle uploaded. Answers how many tiles it laid.
+   */
+  layHeights(stores: OverlayStores, normals: Uint8Array | null = null): number {
+    const h = this.header;
+    const fine = this.fineH;
+    if (!h || !fine) return 0;
+    const t0 = performance.now();
+    this.overlay ??= new HeightOverlay(h.fine);
+    const rects = this.overlay.layAll(fine, stores.heights, stores.course);
+    for (const r of rects) this.heightsMoved(r, normals);
+    this.overlays.tilesLaid += rects.length;
+    this.overlays.layMs += performance.now() - t0;
+    return rects.length;
+  }
+
+  /** How many horizon tiles keep a raw copy (an overlay touches them). */
+  get rawTilesKept(): number {
+    return this.overlay?.kept ?? 0;
+  }
+
+  /** A late file (heights or a course landed after the arrival): the whole layer laid again, as at an arrival, and uploaded. */
+  relayLate(stores: OverlayStores): number {
+    if (this.state.state !== 'ready') return 0;
+    this.overlays.late++;
+    return this.layHeights(stores, null);
+  }
+
+  /** The samples of a rectangle moved: their normals (and a sample round them), the pyramid's leaves and, once on the card, the textures. */
+  private heightsMoved(r: SampleRect, normals: Uint8Array | null): void {
+    const h = this.header!;
+    const L = h.fine;
+    const fine = this.fineH!;
+    const i0 = Math.max(0, r.i0 - 1);
+    const j0 = Math.max(0, r.j0 - 1);
+    const i1 = Math.min(L.nx - 1, r.i1 + 1);
+    const j1 = Math.min(L.nz - 1, r.j1 + 1);
+    if (normals) normalsRect(fine, L, i0, j0, i1, j1, normals);
+    else if (this.renderer && this.textures.length) {
+      const w = i1 - i0 + 1;
+      const hh = j1 - j0 + 1;
+      const n = normalsRect(fine, L, i0, j0, i1, j1, new Uint8Array(w * hh * 2), i0, j0, w);
+      this.upload(this.textures[2], n, i0, j0, w, hh, THREE.RGFormat, THREE.UnsignedByteType);
+      const hr = new Float32Array(w * hh);
+      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) hr[(j - j0) * w + (i - i0)] = fine[j * L.nx + i];
+      this.upload(this.textures[0], hr, i0, j0, w, hh, THREE.RedFormat, THREE.FloatType);
+    }
+    if (this.pyramid) {
+      const c = this.centre;
+      pyramidRelay(this.pyramid, h, fine, this.coarseH!, c, c.x - (L.x0 + r.i1 * L.step), L.z0 + r.j0 * L.step - c.z, c.x - (L.x0 + r.i0 * L.step), L.z0 + r.j1 * L.step - c.z);
+    }
+  }
+
+  /** A rectangle of texels put on the card in place (`copyTextureToTexture` from a stand-in of the rectangle; mips made again). */
+  private upload(dst: THREE.DataTexture, data: ArrayBufferView, i0: number, j0: number, w: number, h: number, format: THREE.PixelFormat, type: THREE.TextureDataType, srgb = false): void {
+    const r = this.renderer;
+    if (!r || !w || !h || this.disposed) return;
+    const src = new THREE.DataTexture(data as never, w, h, format, type);
+    src.unpackAlignment = 1;
+    if (srgb) src.colorSpace = THREE.SRGBColorSpace;
+    r.copyTextureToTexture(src, dst, null, new THREE.Vector2(i0, j0));
+    src.dispose();
+    this.overlays.uploads++;
+  }
+
+  /**
+   * What only the generator lays exactly made again (§2.3: the paint, a dropped building's ground, Life Day's layer in
+   * season): each rectangle's 2 m grid asked of the live generator, its 4 m poles' families and choices and its cells'
+   * colour means handed to the decode worker, which composes their albedo and the coarse texels they reach again, put on the
+   * card as they come; a dropped building's heights made raw again there and the stores laid over them. Resolves once every
+   * rectangle is done (the arrival waits for it, bounded by `regenWaitMs`; what comes later lands in play).
+   */
+  async regenerate(asks: readonly RegenAsk[], gen: PoleGenerate, stores: OverlayStores | null): Promise<void> {
+    const h = this.header;
+    if (!h || this.state.state !== 'ready') return;
+    for (const a of asks) {
+      const p = regenPlan(h.colour, a);
+      if (!p) continue;
+      this.overlays.regenAsked++;
+      const g = await gen(p.startX, p.startZ, p.n, REGEN_STEP);
+      if (this.disposed) return;
+      if (!g) {
+        this.overlays.regenFailed++;
+        continue;
+      }
+      if (a.heights && this.overlay && this.fineH) {
+        const s = samplesIn(h.fine, a);
+        if (s) {
+          const L = h.fine;
+          this.overlay.setRaw(this.fineH, s, (i, j) => {
+            const x = (L.x0 + i * L.step - p.startX) / REGEN_STEP;
+            const z = (L.z0 + j * L.step - p.startZ) / REGEN_STEP;
+            return x === Math.floor(x) && z === Math.floor(z) && x >= 0 && z >= 0 && x < p.n && z < p.n ? g.heights[z * p.n + x] : Number.NaN;
+          });
+          this.layHeights(stores ?? { heights: null, course: null }, null);
+        }
+      }
+      const ov = overridesOf(h.colour, p, g);
+      const answer = await this.overlayAsk(ov.poles, ov.cells, p.i0, p.j0, p.i1, p.j1);
+      if (this.disposed) return;
+      if (!answer) {
+        this.overlays.regenFailed++;
+        continue;
+      }
+      this.upload(this.textures[4], answer.fine.rgba, answer.fine.i0, answer.fine.j0, answer.fine.w, answer.fine.h, THREE.RGBAFormat, THREE.UnsignedByteType, true);
+      this.upload(this.textures[5], answer.coarse.rgba, answer.coarse.i0, answer.coarse.j0, answer.coarse.w, answer.coarse.h, THREE.RGBAFormat, THREE.UnsignedByteType, true);
+      this.overlays.regenDone++;
+      this.overlays.cellsMade += answer.fine.w * answer.fine.h;
+    }
+    // The detail window made again round where it stands, the painted tiles' own layers in it.
+    if (this.worker && asks.length) {
+      this.detailAsked = true;
+      this.worker.postMessage({ type: 'detail', id: 2, rx: this.detailAt[0], rz: this.detailAt[1] });
+    }
+  }
+
+  /** One overlay handed to the worker and its albedo awaited (null with no worker, or one that failed or went). */
+  private overlayAsk(poles: unknown, cells: unknown, i0: number, j0: number, i1: number, j1: number): Promise<{ fine: RgbaRegion; coarse: RgbaRegion } | null> {
+    const w = this.worker;
+    if (!w) return Promise.resolve(null);
+    const id = this.nextOverlay++;
+    return new Promise((resolve) => {
+      this.overlayWait.set(id, resolve);
+      w.postMessage({ type: 'overlay', id, poles, cells, i0, j0, i1, j1 });
+    });
+  }
+
+  /**
+   * The bake's height at a raw place (`heightIfCached` past the blocks, §2.9): the fine lattice's bilinear inside its extent,
+   * the coarse past it, NaN past both (`bakeHeightAt`'s arithmetic, written out: a frame's readers ask it, and a closure a
+   * call is an object made). The heights as laid, never dropped.
+   */
+  heightRaw(rx: number, rz: number): number {
+    const h = this.header;
+    const f = this.fineH;
+    const c = this.coarseH;
+    if (!h || !f || !c) return Number.NaN;
+    const L = h.fine;
+    const fx = (rx - L.x0) / L.step;
+    const fz = (rz - L.z0) / L.step;
+    if (fx >= 0 && fz >= 0 && fx <= L.nx - 1 && fz <= L.nz - 1) return lerpIn(f, L.nx, fx, fz, L.nz);
+    const C = h.coarse;
+    const cx = (rx - C.x0) / C.step;
+    const cz = (rz - C.z0) / C.step;
+    if (cx >= 0 && cz >= 0 && cx <= C.nx - 1 && cz <= C.nz - 1) return lerpIn(c, C.nx, cx, cz, C.nz);
+    return Number.NaN;
+  }
+
+  /**
+   * The drawn ring's surface at a game place (the far cards', §2.9): the hole's square as the selection stands it round
+   * chunk (pcx, pcz) with `viewRadius` chunks, and the drop's numbers in force; NaN with no bake.
+   */
+  surfaceAt(gx: number, gz: number, pcx: number, pcz: number, viewRadius: number): number {
+    const s = this.surface;
+    const t = HORIZON_TUNE;
+    s.sq0 = (pcx - viewRadius - 1) * LEAF + this.shift.x;
+    s.sq1 = (pcz - viewRadius - 1) * LEAF + this.shift.z;
+    s.sq2 = (pcx + viewRadius + 2) * LEAF + this.shift.x;
+    s.sq3 = (pcz + viewRadius + 2) * LEAF + this.shift.z;
+    s.drop = t.drop;
+    s.fade = t.dropFade;
+    s.everywhere = t.dropAt === 'everywhere' ? 1 : 0;
+    return ringSurfaceAt(s, gx, gz);
   }
 
   /**
@@ -312,6 +539,7 @@ export class HorizonField {
           // The worker gone after the decode: the rings stand, the detail window is no longer made again.
           this.note = `the decode worker failed (${e.message || 'no word'}): the detail window stays as it is`;
           if (this.worker === w) this.worker = null;
+          this.answerOverlays();
           return;
         }
         fail(`the decode worker failed (${e.message || 'it did not load'})`);
@@ -327,9 +555,18 @@ export class HorizonField {
           (this.detailTex.image as { data: Uint8Array }).data = m.detail;
           this.detailTex.needsUpdate = true;
           this.detailAsked = false;
+        } else if (m.type === 'overlay' && m.id !== undefined) {
+          const r = this.overlayWait.get(m.id);
+          this.overlayWait.delete(m.id);
+          r?.(m as unknown as { fine: RgbaRegion; coarse: RgbaRegion });
         } else if (m.type === 'error') {
-          // A detail window that did not come keeps the one that stands (a note, never the state).
-          if (m.id === 2 || answered) this.note = `the detail window was not made again (${m.message})`;
+          // An overlay that did not compose keeps the albedo that stands (a note); so does a detail window.
+          if (m.id !== undefined && m.id >= 10) {
+            const r = this.overlayWait.get(m.id);
+            this.overlayWait.delete(m.id);
+            r?.(null);
+            this.note = `an overlay's albedo was not made again (${m.message})`;
+          } else if (m.id === 2 || answered) this.note = `the detail window was not made again (${m.message})`;
           else fail(`the bake did not decode (${m.message})`);
         }
       };
@@ -469,8 +706,16 @@ export class HorizonField {
     return { card: card / 1048576, cpu: (f * 4 + c * 4 + pyr) / 1048576 };
   }
 
+  /** Every overlay still awaited answered with nothing (the worker gone, the field let go), so no caller waits for good. */
+  private answerOverlays(): void {
+    const waits = [...this.overlayWait.values()];
+    this.overlayWait.clear();
+    for (const r of waits) r(null);
+  }
+
   dispose(s: RingSession | null): void {
     this.disposed = true;
+    this.answerOverlays();
     this.abortDecode?.();
     this.abortDecode = null;
     this.worker?.terminate();

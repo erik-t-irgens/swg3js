@@ -68,8 +68,9 @@ import { AssetPack, lowerLevels, normalYOf, type Layout, type LoadedModel, type 
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
-import { HORIZON_TUNE, HoleGrid } from './horizon/horizonMath.ts';
-import { HorizonField, RingSession, copyDome } from './horizon/horizonField.ts';
+import { HORIZON_TUNE, HoleGrid, RingHole, ringCardSurface, ringHoleMoved } from './horizon/horizonMath.ts';
+import { HorizonField, RingSession, copyDome, type RegenAsk } from './horizon/horizonField.ts';
+import { layerExtent, paintRegenAsks, seasonalExtents } from './horizon/horizonOverlay.ts';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { TERRAIN_GROUND_TUNE, lentFamilyKey, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
 import { GroundPaint, PAINT_CELL, PAINT_TILE, paintTileNumber, paintTileOf, weightedFamily, type FloraRecipe, type PaintPaletteEntry } from '../swg/terrain/groundPaint.ts';
@@ -11913,6 +11914,9 @@ export class World {
     if (this.planet.space) return;
     const pcx = Math.floor(center.x / CHUNK_SIZE);
     const pcz = Math.floor(center.z / CHUNK_SIZE);
+    // The far cards standing on the rings stood again when the hole they read moves (W2's review): a chunk's step, the view
+    // radius, the drop's numbers. Nothing at 'tiles' (no ring card stands) and nothing while the hole stands still.
+    if (ringHoleMoved(this.ringHole, pcx, pcz, this.viewRadius, HORIZON_TUNE) && this.ringCardTiles.size) this.farCards?.restand();
     this.streamPcx = pcx;
     this.streamPcz = pcz;
     if (pcx === this.lastCx && pcz === this.lastCz && budget !== Infinity) return;
@@ -12177,7 +12181,11 @@ export class World {
     const ground = tiles && colour?.data && masks?.data && this.terrain.tiled ? { tiler: tiles.tiler, colour: colour.data, size: colour.width, depth: colour.depth, masks: masks.data, ms: masks.width, reference: tiles.reference } : null;
     const session = (this.horizonSession ??= new RingSession(this.csm));
     this.csmMaterials.add(session.material);
-    const ok = await field.load({ json: (f) => packJson(packId, f, undefined, { probe: false }), bytes: (f) => packBytes(packId, f, undefined, { probe: false }) }, ground, session, this.renderer, eye);
+    // The owner's heights and the drawn courses the near ground lays, laid over the bake before anything is uploaded (W2):
+    // the terrain itself, whose `heights` and `course` are read as each lay is made (W2's review: a copy taken here missed a
+    // file landing while the bake loaded, and a lay made again later put that file's tiles back to raw).
+    const stores = swg;
+    const ok = await field.load({ json: (f) => packJson(packId, f, undefined, { probe: false }), bytes: (f) => packBytes(packId, f, undefined, { probe: false }) }, ground, session, this.renderer, eye, stores);
     if (this.horizonField !== field) {
       field.dispose(null);
       return;
@@ -12190,6 +12198,67 @@ export class World {
     this.applyHorizonGround();
     const mb = field.megabytes();
     console.info(`horizon: the far ground's bake for ${packId} (${field.header!.fine.step} m, ${mb.card.toFixed(1)} MB on the card), decoded in ${field.decodeWallMs.toFixed(0)} ms in its worker`);
+    // What only the generator lays exactly made again (§2.3): the paint, a dropped building's ground, Life Day's layer in
+    // season, waited for behind the screen within `regenWaitMs`; what comes later lands in play, a rectangle at a time.
+    const asks = await this.horizonRegenAsks(field, packId);
+    if (this.horizonField !== field || !asks.length) return;
+    const done = field.regenerate(asks, (x, z, n, step) => swg.generatePoles(x, z, n, step), stores);
+    // A dropped building's or Life Day's heights moved under far cards that may already stand: stood again once laid.
+    if (asks.some((a) => a.heights)) void done.then(() => this.horizonField === field && this.farCards?.restand());
+    await Promise.race([done, new Promise<void>((r) => setTimeout(r, HORIZON_TUNE.regenWaitMs))]);
+  }
+
+  /**
+   * The rectangles the field makes again from the live generator at an arrival (§2.3): every painted 512 m tile; every
+   * building layer the bake was made with that the removal file drops (`ground: 'drop'`), by its extent; and, in season,
+   * every layer that paints Life Day's area (the bake is made out of it).
+   */
+  private async horizonRegenAsks(field: HorizonField, packId: string): Promise<RegenAsk[]> {
+    const swg = this.terrain.swg;
+    const h = field.header;
+    if (!swg || !h) return [];
+    const asks: RegenAsk[] = [];
+    const paint = swg.paint;
+    if (paint && !paint.empty) asks.push(...paintRegenAsks(paint));
+    const dropped = this.removals.groundDrop;
+    if (dropped.size) {
+      for (const [li, file, x, z, yaw] of h.source.layers.list) {
+        if (!dropped.has(li)) continue;
+        const bytes = await packBytes(packId, file, undefined, { probe: false });
+        if (!bytes || this.horizonField !== field) continue;
+        const e = layerExtent(bytes, swg.template.generator, x, z, yaw);
+        if (e) asks.push({ ...e, heights: true });
+      }
+    }
+    if (TERRAIN_GROUND_TUNE.lifeDay && !h.source.lifeDay) for (const e of seasonalExtents(swg.template.generator)) asks.push({ ...e, heights: true });
+    return asks;
+  }
+
+  /**
+   * A file that landed after the arrival (heights, a course): the field's whole layer laid again as at an arrival (§2.3),
+   * so the seam never disagrees for a visit. Nothing with no bake drawn.
+   */
+  private horizonLate(): void {
+    const f = this.horizonField;
+    const swg = this.terrain.swg;
+    if (!f || !swg || f.state.state !== 'ready') return;
+    if (!f.relayLate(swg)) return;
+    // The far cards stand on the ring's surface: made again over it.
+    for (const key of this.ringCardTiles) {
+      const comma = key.indexOf(',');
+      this.farCardsAgain(Number(key.slice(0, comma)), Number(key.slice(comma + 1)));
+    }
+  }
+
+  /** A paint file that landed after the arrival: every painted tile made again in play. */
+  private horizonPaintLate(): void {
+    const f = this.horizonField;
+    const swg = this.terrain.swg;
+    if (!f || !swg || f.state.state !== 'ready') return;
+    const paint = swg.paint;
+    if (!paint || paint.empty) return;
+    // The very asks an arrival makes for the paint (`paintRegenAsks`), so a late file lands as an arrival lays it.
+    void f.regenerate(paintRegenAsks(paint), (x, z, n, step) => swg.generatePoles(x, z, n, step), swg);
   }
 
   /** The rings and this world's bake let go (a travel, the switch back at `'tiles'`): the session's program and meshes are kept. */
@@ -12198,6 +12267,85 @@ export class World {
     this.horizonField?.dispose(s);
     this.horizonField = null;
     if (s && s.patch.parent) s.patch.parent.remove(s.patch, s.skirt);
+    // (The first unload runs before the first world has a terrain.)
+    if (this.terrain?.swg) this.terrain.swg.horizon = null;
+    this.releaseRingCards();
+  }
+
+  /** The far tiles whose far grid and tree cards stand while the rings do (W2: within `farGridRadius` tiles), by key. */
+  private readonly ringCardTiles = new Set<string>();
+  /** The hole the ring cards stand round (`ringCardSurface` reads it, `stream` writes it and stands them again when it moves). */
+  private readonly ringHole = new RingHole();
+  private ringLastTx = Number.NaN;
+  private ringLastTz = Number.NaN;
+
+  /** The far ground stood round a place at once (the switch back at 'tiles' behind its curtain: the far tiles built there, never a frame's work). */
+  standFarGround(center: THREE.Vector3): void {
+    this.lastTx = Number.NaN;
+    this.lastTz = Number.NaN;
+    this.streamFar(center, Infinity);
+  }
+
+  /** Every far grid and far card the rings kept let go (the switch off 'rings', the bake let go). */
+  private releaseRingCards(): void {
+    if (!this.terrain) return;
+    for (const key of this.ringCardTiles) {
+      const comma = key.indexOf(',');
+      const tx = Number(key.slice(0, comma));
+      const tz = Number(key.slice(comma + 1));
+      this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
+      this.farCards?.tileGone(tx, tz);
+    }
+    this.ringCardTiles.clear();
+    this.ringLastTx = Number.NaN;
+    this.ringLastTz = Number.NaN;
+  }
+
+  /**
+   * With the rings in place of the far tiles (W2, §2.9): no far tile is made, but the far grids within `farGridRadius`
+   * tiles of the eye are (the far tree cards' families and heights, the race's look-ahead), and their cards made, standing
+   * on the ring's own surface (`farCardSamples`); a grid past the radius and one let go with its cards.
+   */
+  private streamRingCards(center: THREE.Vector3, budget: number): void {
+    const swg = this.terrain.swg;
+    if (!swg) return;
+    const ptx = Math.floor(center.x / FAR_TILE);
+    const ptz = Math.floor(center.z / FAR_TILE);
+    if (ptx === this.ringLastTx && ptz === this.ringLastTz && budget !== Infinity) return;
+    const R = HORIZON_TUNE.farGridRadius;
+    const wanted: { tx: number; tz: number; d: number }[] = [];
+    for (let dz = -R; dz <= R; dz++) for (let dx = -R; dx <= R; dx++) if (!this.ringCardTiles.has(`${ptx + dx},${ptz + dz}`)) wanted.push({ tx: ptx + dx, tz: ptz + dz, d: dx * dx + dz * dz });
+    wanted.sort((a, b) => a.d - b.d);
+    let made = 0;
+    let all = true;
+    for (const w of wanted) {
+      if (made >= budget) {
+        all = false;
+        break;
+      }
+      const o = groundChunkOrigin(w.tx, w.tz, this.terrain.groundShift, FAR_TILE);
+      if (!swg.farGrid(o.x, o.z, FAR_TILE, FAR_RES, budget === Infinity)) {
+        all = false;
+        continue;
+      }
+      this.ringCardTiles.add(`${w.tx},${w.tz}`);
+      this.farCardsAgain(w.tx, w.tz);
+      made++;
+    }
+    if (all) {
+      this.ringLastTx = ptx;
+      this.ringLastTz = ptz;
+    }
+    for (const key of this.ringCardTiles) {
+      const comma = key.indexOf(',');
+      const tx = Number(key.slice(0, comma));
+      const tz = Number(key.slice(comma + 1));
+      if (Math.max(Math.abs(tx - ptx), Math.abs(tz - ptz)) <= R + 1) continue;
+      this.ringCardTiles.delete(key);
+      this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
+      this.farCards?.tileGone(tx, tz);
+    }
+    if (budget === Infinity) this.farCards?.update(center, Infinity);
   }
 
   /** Whether the rings stand and draw now. */
@@ -12214,6 +12362,10 @@ export class World {
     const ready = this.horizonDrawn;
     const rings = ready && (HORIZON_TUNE.ground === 'rings' || HORIZON_TUNE.drawn === 'rings');
     if (s) s.patch.visible = s.skirt.visible = rings;
+    // `heightIfCached` past the blocks reads the bake while it is drawn (W2, §2.9), and nothing of it otherwise.
+    if (this.terrain?.swg) this.terrain.swg.horizon = ready ? this.horizonField : null;
+    // The rings' own far grids and cards stand only at 'rings'; the far tiles' own stand otherwise.
+    if (!ready || HORIZON_TUNE.ground !== 'rings') this.releaseRingCards();
     const tilesShown = !ready || (HORIZON_TUNE.ground === 'both' && HORIZON_TUNE.drawn === 'tiles');
     for (const t of this.farTiles.values()) t.visible = tilesShown;
     if (ready && HORIZON_TUNE.ground === 'rings' && this.farTiles.size) {
@@ -12269,7 +12421,7 @@ export class World {
   }
 
   /** For the console (`__debug.horizon()`). */
-  horizonReport(opts?: { bench?: number }): Record<string, unknown> {
+  horizonReport(opts?: { bench?: number; at?: readonly [number, number] }): Record<string, unknown> {
     const f = this.horizonField;
     const s = this.horizonSession;
     const h = f?.header;
@@ -12290,13 +12442,26 @@ export class World {
       selection: sel ? { patches: sel.patchCount, perLevel: Array.from(sel.perLevel), skirts: sel.skirtCount, triangles: sel.patchCount * 128 + sel.skirtCount * 32, overflow: sel.overflow, us: f ? Math.round(f.selectMean() * 10) / 10 : null, benchUs: f && s && opts?.bench ? Math.round(f.benchSelect(s, this.horizonHole, opts.bench) * 10) / 10 : null } : null,
       hole: { chunks: this.horizonHole.count, leavesLeftOut: sel?.holeLeaves ?? 0 },
       farTiles: this.farTiles.size,
+      // W2: what is laid over the bake (tiles laid, the late files, the rectangles made again from the generator and those
+      // still on their way, the albedo's cells made again, the texture rectangles put on the card) and the far grids the
+      // rings keep for the far cards and the race.
+      overlays: f ? { ...f.overlays, layMs: Math.round(f.overlays.layMs * 10) / 10, waiting: f.overlays.regenAsked - f.overlays.regenDone - f.overlays.regenFailed, rawTilesKept: f.rawTilesKept } : null,
+      farGrids: { kept: this.ringCardTiles.size, radius: HORIZON_TUNE.farGridRadius },
+      heightIfCached: this.terrain.swg?.horizon ? 'block, else the bake' : 'block, else a far grid',
+      // `{ at: [x, z] }` (the game's frame): what heightIfCached answers there, the bake laid, and the ring's drawn surface.
+      ...(opts?.at && f && this.terrain.swg
+        ? { at: { x: opts.at[0], z: opts.at[1], heightIfCached: this.terrain.heightIfCached(opts.at[0], opts.at[1], FAR_TILE, FAR_RES), bake: f.heightRaw(this.terrain.swg.toSwgX(opts.at[0]), this.terrain.swg.toSwgZ(opts.at[1])), ring: f.surfaceAt(opts.at[0], opts.at[1], Number.isFinite(this.streamPcx) ? this.streamPcx : 0, Number.isFinite(this.streamPcz) ? this.streamPcz : 0, this.viewRadius) } }
+        : {}),
     };
   }
 
   private streamFar(center: THREE.Vector3, budget: number): void {
     if (this.planet.space) return;
-    // The rings in place of the far tiles: none made and no far grid asked for (the far cards' far grids are W2's).
-    if (HORIZON_TUNE.ground === 'rings' && this.horizonDrawn) return;
+    // The rings in place of the far tiles: none made; the far grids and cards within `farGridRadius` alone (W2).
+    if (HORIZON_TUNE.ground === 'rings' && this.horizonDrawn) {
+      this.streamRingCards(center, budget);
+      return;
+    }
     const ptx = Math.floor(center.x / FAR_TILE);
     const ptz = Math.floor(center.z / FAR_TILE);
     if (ptx === this.lastTx && ptz === this.lastTz && budget !== Infinity) return;
@@ -12644,6 +12809,8 @@ export class World {
     } else this.terrain.heights = store;
     if (!late && !this.chunks.size) this.heightsLaidAtArrival = true;
     if (rect.x0 <= rect.x1) this.heightsChanged(rect.x0, rect.z0, rect.x1, rect.z1, true);
+    // A file landed late reaches the far ground's bake as it reached the near ground (W2): its whole layer laid again.
+    if (late) this.horizonLate();
   }
 
   /** A tile's game-frame rectangle unioned into a rectangle (the raw frame mirrored in x about the world's centre). */
@@ -12954,6 +13121,8 @@ export class World {
       if (this.courseAsk !== ask || ask.installed || !ask.late || this.generation !== ask.gen) return;
       ask.installed = true;
       this.landCourses(tracks ?? [], Number.NaN, Number.NaN, false);
+      // A course file later than the bound reaches the far ground's bake too (W2), laid whole.
+      this.horizonLate();
     });
   }
 
@@ -13001,6 +13170,8 @@ export class World {
     if (!store) return;
     this.attachCourse(store, true);
     if (this.flora) this.flora.onCourse = this.courseRule();
+    // And the far ground's bake, laid again whole with it (W2).
+    this.horizonLate();
   }
 
   /**
@@ -13796,6 +13967,8 @@ export class World {
       this.resolvePaint(swg.template.generator.shaderGroup);
       swg.useGroundPaint(paint, !paint.empty);
       this.applyPaintWeights(true);
+      // The far ground's bake: every painted tile made again from the live generator (W2), landing in play.
+      this.horizonPaintLate();
       return;
     }
     if (this.swgComingFor === this.terrain) return;
@@ -14007,6 +14180,13 @@ export class World {
       const s = this.terrain.groundShift;
       const tx = Math.round((gx0 - s.x) / FAR_TILE);
       const tz = Math.round((gz0 - s.z) / FAR_TILE);
+      // With the rings in place of the far tiles (W2) a far grid is kept for its tree cards alone and has no far tile: its
+      // cards made again over the grid just made with the paint (W2's review: they kept the old families for the visit).
+      if (this.ringCardTiles.has(`${tx},${tz}`)) {
+        this.paintLandWork.far++;
+        this.farCardsAgain(tx, tz);
+        return;
+      }
       const t = this.farTiles.get(`${tx},${tz}`);
       if (!t) return;
       this.paintLandWork.far++;
@@ -14200,7 +14380,14 @@ export class World {
     if (!swg) return null;
     const grid = swg.farGrid(gx0, gz0, FAR_TILE, FAR_RES, false);
     const step = FAR_TILE / FAR_RES;
-    return grid ? { heights: grid.heights, colors: grid.colors, radialFar: grid.radialFar, n: FAR_RES + 3, step, gx0: gx0 - step, gz0: gz0 - step } : null;
+    if (!grid) return null;
+    const samples: FarSamples = { heights: grid.heights, colors: grid.colors, radialFar: grid.radialFar, n: FAR_RES + 3, step, gx0: gx0 - step, gz0: gz0 - step };
+    // With the rings in place of the far tiles (W2, §2.9), a card stands on the ring's own surface (level 0's triangle less
+    // the drop), never the far grid's bilinear: round the hole as it stands when the card is placed or stood again
+    // (`ringCardSurface` reads `ringHole` at each call; `stream` stands the built cards again when the hole moves).
+    const f = this.horizonField;
+    if (f && HORIZON_TUNE.ground === 'rings' && this.horizonDrawn) samples.surfaceAt = ringCardSurface(f, this.ringHole, gx0, gz0, () => this.viewRadius);
+    return samples;
   }
 
   /**

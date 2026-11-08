@@ -50,6 +50,8 @@ export function tuneHorizon(o: Record<string, unknown>): string[] {
     if (typeof was === 'number') {
       if (typeof v !== 'number' || !Number.isFinite(v)) said.push(`${k} takes a number`);
       else if (k === 'reach') t[k] = Math.min(REACH_RANGE[1], Math.max(REACH_RANGE[0], v));
+      // Whole far tiles, at least one each way (the far cards' and the race's far grids).
+      else if (k === 'farGridRadius') t[k] = Math.max(1, Math.round(v));
       else t[k] = k === 'renderOrder' ? Math.round(v) : Math.max(k === 'drop' ? 0 : 1e-4, v);
     } else if (typeof was === 'boolean') {
       if (v === 'on' || v === 'off') t[k] = v === 'on';

@@ -846,6 +846,13 @@ export class SwgTerrain {
     const z = this.toSwgZ(gz);
     const bw = this.sampler.blockWidth;
     if (this.sampler.hasBlock(Math.floor(x / bw), Math.floor(z / bw))) return this.sampler.heightAt(x, z);
+    // The far ground's bake, laid, while the rings stand in place of the far tiles (the horizon pass's second wave, §2.9):
+    // what stands past the chunks is drawn from it, so it answers before a far grid. With none set, today's to the bit.
+    const hz = this.horizon;
+    if (hz !== null) {
+      const b = hz.heightRaw(x, z);
+      if (b === b) return b;
+    }
     // The far tiles stand where the near ground does (`groundChunkOrigin`), moved by the world's shift.
     const s = this.groundShift;
     const gx0 = groundChunkAt(gx, s.x, farSize) * farSize + s.x;
@@ -863,6 +870,22 @@ export class SwgTerrain {
     const v = fz - j;
     const h = grid.heights;
     return (h[j * n + i] * (1 - u) + h[j * n + i + 1] * u) * (1 - v) + (h[(j + 1) * n + i] * (1 - u) + h[(j + 1) * n + i + 1] * u) * v;
+  }
+
+  /** The far ground's bake `heightIfCached` reads past the blocks (the world sets it while the rings stand), or null. */
+  horizon: { heightRaw(x: number, z: number): number } | null = null;
+
+  /**
+   * A square grid of the live generator's poles (the paint laid, the season's layers as they run), from the terrain worker
+   * behind the near ground's own asks, or made here with no worker: the horizon's overlays make what only the generator lays
+   * again from it. Null never; a grid made stale by a paint is asked again by the worker's own rule.
+   */
+  generatePoles(startX: number, startZ: number, n: number, step: number): Promise<PoleBlock | null> {
+    if (!this.worker || !this.workerReady) {
+      this.syncGenerations++;
+      return Promise.resolve(this.sampler.generate(startX, startZ, n, step) as unknown as PoleBlock);
+    }
+    return new Promise((resolve) => this.request(`horizon:${this.nextId}`, startX, startZ, n, step, resolve));
   }
 
   /** `heightIfCached` without the far grid: the pole block's height where it is cached, else null. Never generates anything. */
