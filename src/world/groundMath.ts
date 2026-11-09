@@ -190,3 +190,55 @@ export function cloudShade(lit: number, alpha: number, strength: number): number
 export function flatShine(lightColour: number, gloss: number, strength: number): number {
   return (lightColour * gloss * strength) / Math.PI;
 }
+
+/**
+ * The steep faces' side pictures (the horizon pass's wave 3b, `groundTriSide`'s mirror): the sides' share of a face by its
+ * up component, nought at `flatUp` and above (the plain picture alone, the ground as it was), one at `steepUp` and below.
+ */
+export function triSide(up: number, flatUp: number, steepUp: number): number {
+  const t = Math.min(Math.max((up - steepUp) / (flatUp - steepUp), 0), 1);
+  return 1 - t * t * (3 - 2 * t);
+}
+
+/**
+ * The weights the steep faces' pictures are blended by (`groundTriSetup`'s): the plain picture's, the side along z's (a
+ * face looking along x) and the side along x's, from the face's normal in the world's frame; [1, 0, 0] under the slope.
+ */
+export function triWeights(nx: number, ny: number, nz: number, flatUp: number, steepUp: number, sharp: number, out: [number, number, number]): [number, number, number] {
+  out[0] = 1;
+  out[1] = 0;
+  out[2] = 0;
+  const l = Math.sqrt(nx * nx + ny * ny + nz * nz);
+  const side = triSide(Math.abs(ny / l), flatUp, steepUp);
+  if (side <= 0) return out;
+  const ax = Math.abs(nx / l) ** sharp;
+  const az = Math.abs(nz / l) ** sharp;
+  const s = ax + az;
+  if (s <= 1e-6) return out;
+  out[0] = 1 - side;
+  out[1] = (side * ax) / s;
+  out[2] = (side * az) / s;
+  return out;
+}
+
+/**
+ * The relief's offset (the horizon pass's wave 3b, `groundRelief`'s mirror for one layer): the picture's move, in picture
+ * units, toward an eye in direction (ex, ey, ez) (the world's frame, toward the eye) for a depth `k` metres and a height
+ * function of the picture place, four steps from where the plain picture stands.
+ */
+export function reliefOffset(u: number, v: number, ex: number, ey: number, ez: number, mirror: number, k: number, height: (u: number, v: number) => number, out: [number, number]): [number, number] {
+  const l = Math.sqrt(ex * ex + ey * ey + ez * ez);
+  const s = (0.25 * k) / Math.max(ey / l, 0.25);
+  const rx = ((-mirror * ex) / l) * s;
+  const rz = (ez / l) * s;
+  let ou = 0;
+  let ov = 0;
+  for (let i = 0; i < 4; i++) {
+    const h = height(u + ou, v + ov) - 0.5;
+    ou = rx * h;
+    ov = rz * h;
+  }
+  out[0] = ou;
+  out[1] = ov;
+  return out;
+}

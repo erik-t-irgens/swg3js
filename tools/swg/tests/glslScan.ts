@@ -282,6 +282,47 @@ export function undefinedCalls(glsl: string): string[] {
   return [...out].sort();
 }
 
+/** GLSL ES 3.00's own types, qualifiers and words a name never needs declaring for (beside `GLSL_CALLABLE`). */
+const GLSL_WORDS = new Set(
+  'const in out inout uniform varying attribute precision highp mediump lowp flat smooth void true false break continue discard else sampler2D sampler3D samplerCube sampler2DArray sampler2DShadow usampler2D isampler2D usampler2DArray gl_FragCoord gl_FragColor gl_Position gl_InstanceID gl_VertexID gl_FrontFacing struct return'.split(' '),
+);
+const GLSL_TYPE = /^(?:void|bool|int|uint|float|[biu]?vec[234]|mat[234](?:x[234])?|[iu]?sampler\w+|struct)$/;
+
+/**
+ * Every name the code reads that it never declares (comments and directives aside), less `known` (what the program round
+ * it declares: three's uniforms and varyings, a host's globals): a name declared after a type (a variable, a parameter, a
+ * function, every name of a comma list), a struct's member or a swizzle after a dot, and GLSL's own words are not reads.
+ * Conservative by design: a name declared anywhere in the text counts as declared everywhere in it. Wave 3b's lesson: a
+ * line naming `vNormal` in a flat-shaded program compiled in no browser and every node scan passed it.
+ */
+export function undeclaredNames(glsl: string, known: Iterable<string> = []): string[] {
+  const code = codeOf(glsl);
+  const declared = new Set<string>(known);
+  // A type, then a name: every declaration, parameter and function; and every further name of a comma list after one.
+  const decl = /\b([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*([,;=)[(])/g;
+  let m: RegExpExecArray | null;
+  while ((m = decl.exec(code))) {
+    if (!GLSL_TYPE.test(m[1])) continue;
+    declared.add(m[2]);
+    if (m[3] === ',') {
+      // `float a, b, c;` (never a parameter list, whose next word is a type)
+      const rest = code.slice(decl.lastIndex).match(/^([^;(){}]*);/);
+      if (rest) for (const w of rest[1].split(',')) {
+        const n = w.trim().match(/^([A-Za-z_]\w*)/)?.[1];
+        if (n && !GLSL_TYPE.test(n)) declared.add(n);
+      }
+    }
+  }
+  const out = new Set<string>();
+  const use = /(?<![\w.])([A-Za-z_]\w*)\b/g;
+  while ((m = use.exec(code))) {
+    const n = m[1];
+    if (declared.has(n) || GLSL_CALLABLE.has(n) || GLSL_WORDS.has(n) || GLSL_TYPE.test(n) || RESERVED.has(n)) continue;
+    out.add(n);
+  }
+  return [...out].sort();
+}
+
 /** Every uniform a GLSL text declares, by name (arrays by their name alone). */
 export function uniformNames(glsl: string): string[] {
   const out = new Set<string>();

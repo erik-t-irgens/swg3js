@@ -15,9 +15,10 @@ import type { CourseCarve } from '../../swg/terrain/courseCarve.ts';
 import type { HeightEdits } from '../../swg/terrain/heightEdits.ts';
 import { DETAIL_TILE, STRIP_TILES, clipRect, freshRects, layerMeans, normalsRect, poleTiles, pyramidRelay, windowPlace, windowTiles, wrapPieces, type DecodedBake, type IndexRect, type RgbaRegion, type TileTables, type WindowPlace } from './horizonDecode.ts';
 import { HORIZON_BIN, HORIZON_JSON, readHorizonHeader, type HorizonHeader } from './horizonFile.ts';
-import { HORIZON_TUNE, HORIZON_VIEWS, HoleGrid, LEAF, RingSelector, cameraFrustum, newReachRules, newRingSurface, reachRules, ringSurfaceAt, type MinMaxPyramid, type ReachRules, type RingAsk, type RingSurface } from './horizonMath.ts';
+import { HORIZON_TUNE, HORIZON_VIEWS, HoleGrid, LEAF, PATCH, RingSelector, bakeHeightAt, cameraFrustum, newReachRules, newRingSurface, reachRules, ringLevelOf, ringSurfaceAt, type MinMaxPyramid, type ReachRules, type RingAsk, type RingSurface } from './horizonMath.ts';
 import { HeightOverlay, REGEN_STEP, overridesOf, regenPlan, samplesIn, type RawRect, type SampleRect } from './horizonOverlay.ts';
 import { makeRingUniforms, patchGeometry, ringMaterial, ringMesh, ringMipOffset, skirtGeometry, type RingUniforms } from './horizonRings.ts';
+import { SHAPE_BLOCK, SHAPE_EMPTY, ShapeWindow, type ShapeSource } from './shapeWindow.ts';
 import { keepUploadRange, type UploadRange } from '../uploadRange.ts';
 
 let standIns: RingUniforms | null = null;
@@ -182,12 +183,24 @@ function dataTex(data: ArrayBufferView, w: number, h: number, format: THREE.Pixe
  * rows from row nought, the coarse lattice's after them, each from column nought, so a fine rectangle put on the card later
  * lands at its own indices (`heightsMoved`).
  */
-export function heightsAtlas(fine: Float32Array, fnx: number, fnz: number, coarse: Float32Array, cnx: number, cnz: number): Float32Array {
-  const w = Math.max(fnx, cnx);
-  const out = new Float32Array(w * (fnz + cnz));
+export function heightsAtlas(fine: Float32Array, fnx: number, fnz: number, coarse: Float32Array, cnx: number, cnz: number, shape = 0): Float32Array {
+  const L = atlasLayout(fnx, fnz, cnx, cnz, shape);
+  const w = L.w;
+  const out = new Float32Array(w * L.h);
   for (let j = 0; j < fnz; j++) out.set(fine.subarray(j * fnx, (j + 1) * fnx), j * w);
   for (let j = 0; j < cnz; j++) out.set(coarse.subarray(j * cnx, (j + 1) * cnx), (fnz + j) * w);
+  // The shape window's block (wave 3b), beside the coarse rows, empty until its blocks are made.
+  for (let j = 0; j < shape; j++) out.fill(SHAPE_EMPTY, (L.row + j) * w + L.col, (L.row + j) * w + L.col + shape);
   return out;
+}
+
+/**
+ * The heights atlas's size and where the shape window's block stands in it (wave 3b): beside the coarse rows (whose width
+ * leaves the room on every world of 16 km), the atlas grown to hold it where it does not; with no window, the atlas of before.
+ */
+export function atlasLayout(fnx: number, fnz: number, cnx: number, cnz: number, shape: number): { w: number; h: number; col: number; row: number } {
+  if (!shape) return { w: Math.max(fnx, cnx), h: fnz + cnz, col: 0, row: 0 };
+  return { w: Math.max(fnx, cnx + shape), h: fnz + Math.max(cnz, shape), col: cnx, row: fnz };
 }
 
 /** A texture's own array let go once it is on the card (its size kept, for the uploads and the console). */
@@ -263,6 +276,10 @@ export type FieldState = { state: 'none'; why: string } | { state: 'refused'; wh
  * second on the owner's machine; this is many times it.
  */
 export const DECODE_WAIT_MS = 60000;
+
+/** The shape window's blocks put on the card a frame at most (4 KB each), and past how many due the whole block goes at once [ours]. */
+export const SHAPE_UPLOADS_PER_FRAME = 24;
+export const SHAPE_WHOLE_PAST = 96;
 
 /** How many times a composition window ask that failed in the worker is asked again before the field gives it up [ours]. */
 export const WINDOW_RETRIES = 3;
@@ -351,7 +368,21 @@ export class HorizonField {
   /** How long the arrival waited at its join for the decode, after its other loads were done, ms (`World.loadPack`). */
   joinWaitMs = 0;
   readonly rules: ReachRules = newReachRules();
-  readonly ask: RingAsk = { ex: 0, ey: 0, ez: 0, reach: 0, lod0: 1400, levels: 1, morph: 0.3, edgeBand: 64, drop: 2.5, shiftX: 0, shiftZ: 0, cx0: 0, cz0: 0, cx1: 0, cz1: 0 };
+  readonly ask: RingAsk = { ex: 0, ey: 0, ez: 0, reach: 0, lod0: 1400, levels: 1, morph: 0.3, edgeBand: 64, drop: 2.5, shiftX: 0, shiftZ: 0, cx0: 0, cz0: 0, cx1: 0, cz1: 0, finest: 0, r1: 0.5, r2: 0.5, pad: 0.5 };
+  /**
+   * Wave 3b: the shape window's side in samples, set before `load` (nought: none, the atlas of before), the window, where
+   * its block stands in the atlas, and the kept stand-in each made block goes on the card through (never bound).
+   */
+  shapeSide = 0;
+  shapeStep = 2;
+  shape: ShapeWindow | null = null;
+  private shapeCol = 0;
+  private shapeRow = 0;
+  private shapeSrc: THREE.DataTexture | null = null;
+  private shapeWhole: THREE.DataTexture | null = null;
+  private readonly shapeAt = new THREE.Vector2();
+  /** For the console: blocks put on the card, and whole windows. */
+  readonly shapeWork = { blocks: 0, wholes: 0 };
   private readonly frustum = new THREE.Frustum();
   private readonly m = new THREE.Matrix4();
   /** The selection's microseconds, the last 64 frames (a rolling median for the console). */
@@ -456,7 +487,16 @@ export class HorizonField {
     // The owner's heights and the drawn courses laid over the bake before anything is uploaded (§2.3: before the first ring
     // is drawn), each tile's normals and leaves made again from the laid heights.
     if (stores) this.layHeights(stores, d.fineNormal);
-    const heights = (this.heights = dataTex(heightsAtlas(d.fine, h.fine.nx, h.fine.nz, d.coarse, h.coarse.nx, h.coarse.nz), Math.max(h.fine.nx, h.coarse.nx), h.fine.nz + h.coarse.nz, THREE.RedFormat, THREE.FloatType, false));
+    // The shape window's block beside the coarse rows (wave 3b), empty until its blocks are made in play.
+    const lay = atlasLayout(h.fine.nx, h.fine.nz, h.coarse.nx, h.coarse.nz, this.shapeSide);
+    if (this.shapeSide) {
+      this.shape = new ShapeWindow(this.shapeSide, this.shapeStep);
+      this.shapeCol = lay.col;
+      this.shapeRow = lay.row;
+      this.shapeSrc = new THREE.DataTexture(new Float32Array(SHAPE_BLOCK * SHAPE_BLOCK) as never, SHAPE_BLOCK, SHAPE_BLOCK, THREE.RedFormat, THREE.FloatType);
+      this.shapeSrc.unpackAlignment = 1;
+    }
+    const heights = (this.heights = dataTex(heightsAtlas(d.fine, h.fine.nx, h.fine.nz, d.coarse, h.coarse.nx, h.coarse.nz, this.shapeSide), lay.w, lay.h, THREE.RedFormat, THREE.FloatType, false));
     const fn = (this.fineN = dataTex(d.fineNormal, h.fine.nx, h.fine.nz, THREE.RGFormat, THREE.UnsignedByteType, true));
     const al = (this.albedo = dataTex(d.albedo, h.colour.nx, h.colour.nz, THREE.RGBAFormat, THREE.UnsignedByteType, true, true));
     const cal = (this.coarseAlbedo = dataTex(d.coarseAlbedo, h.coarse.nx, h.coarse.nz, THREE.RGBAFormat, THREE.UnsignedByteType, true, true));
@@ -505,6 +545,8 @@ export class HorizonField {
   relayLate(stores: OverlayStores): number {
     if (this.state.state !== 'ready') return 0;
     this.overlays.late++;
+    // The shape window's blocks taken again (wave 3b): the near ground's own are laid again under the late file.
+    this.shape?.forget();
     return this.layHeights(stores, null);
   }
 
@@ -645,7 +687,51 @@ export class HorizonField {
     s.drop = t.drop;
     s.fade = t.dropFade;
     s.everywhere = t.dropAt === 'everywhere' ? 1 : 0;
-    return ringSurfaceAt(s, gx, gz);
+    // Wave 3b (its review): the cards stand on what the ring draws there. Where the vertex stage reads the shape window
+    // (`uHorizonShape.w`), every vertex height is the window's mixed into the bake's by its share, and the lattice is the
+    // level `ringLevelOf` gives at the eye's distance (the last frame's eye, the bake's height for the rise, as the vertex
+    // stage asks it): the 2 m triangles under the 2 m range, the 4 m ones under the 4 m range, level 0's past them.
+    const sh = this.shape;
+    const r = this.rules;
+    s.shape = sh !== null && sh.placed && r.finest < 0 ? sh : null;
+    s.shapeFade = Math.max(1, t.shapeFade);
+    let q = LEAF / PATCH;
+    if (s.shape !== null && s.fine && s.coarse) {
+      const a = this.ask;
+      const dx = gx - a.ex;
+      const dy = bakeHeightAt(s.fine, s.coarse, this.centre.x - gx, gz + this.centre.z) - a.ey;
+      const dz = gz - a.ez;
+      const w = ringLevelOf(Math.sqrt(dx * dx + dy * dy + dz * dz), r.lod0, t.morph, r.r2, r.r1, r.finest, r.mf);
+      if (w < 0) q = (LEAF / PATCH) * Math.pow(2, Math.floor(w));
+    }
+    return ringSurfaceAt(s, gx, gz, q);
+  }
+
+  /** What the far cards' surface last read of the shape (`shapeMoved`): the finest level, its ranges, the fade, and whether the window was whole. */
+  private cardFinest = 0;
+  private cardR1 = 0.5;
+  private cardR2 = 0.5;
+  private cardFade = 0.5;
+  private cardWhole = 0;
+
+  /**
+   * Whether the far cards standing on the rings must be stood again for the shape (wave 3b's review, beside `ringHoleMoved`):
+   * the finer levels' ranges or the window's fade moved (the Terrain shape detail, its finest, the switch), or the window
+   * came whole (an arrival's or a teleport's fill, a move's new blocks, a late heights file), so a card stood on the bake
+   * before its blocks were made stands on them. Numbers compared, nothing made; a frame's.
+   */
+  shapeMoved(): boolean {
+    const r = this.rules;
+    const sh = this.shape;
+    const whole = sh !== null && sh.placed && sh.made === sh.blocks * sh.blocks ? 1 : 0;
+    const fade = HORIZON_TUNE.shapeFade;
+    const moved = r.finest !== this.cardFinest || r.r1 !== this.cardR1 || r.r2 !== this.cardR2 || fade !== this.cardFade || (whole === 1 && this.cardWhole === 0);
+    this.cardFinest = r.finest;
+    this.cardR1 = r.r1;
+    this.cardR2 = r.r2;
+    this.cardFade = fade;
+    this.cardWhole = whole;
+    return moved;
   }
 
   /**
@@ -1009,8 +1095,12 @@ export class HorizonField {
    */
   update(s: RingSession, camera: THREE.PerspectiveCamera, eye: THREE.Vector3, viewRadius: number, pcx: number, pcz: number, hole: HoleGrid, reversed: boolean): void {
     const t = HORIZON_TUNE;
-    const r = reachRules(t, viewRadius, reversed, this.rules);
+    const r = reachRules(t, viewRadius, reversed, this.rules, this.shape !== null);
     const a = this.ask;
+    a.finest = r.finest;
+    a.r1 = r.r1;
+    a.r2 = r.r2;
+    a.pad = r.finest < 0 ? t.shapePad : 0;
     a.ex = eye.x;
     a.ey = eye.y;
     a.ez = eye.z;
@@ -1058,6 +1148,15 @@ export class HorizonField {
     uf.y = t.fadeOn ? 1 : 0;
     uf.z = t.fadeTo === 'sky' ? 0 : t.fadeTo === 'fog' ? 1 : 2;
     uf.w = Math.max(0, HORIZON_VIEWS.indexOf(t.view));
+    // The rings' shape up close (wave 3b): the finer levels' ranges, and the shape window read where it stands.
+    const sh = this.shape;
+    const ush = u.uHorizonShape.value;
+    ush.x = r.r2 > 0 ? r.r2 : 1;
+    ush.y = r.r1 > 0 ? r.r1 : 1;
+    ush.z = r.finest;
+    ush.w = sh !== null && r.finest < 0 && sh.placed ? 1 : 0;
+    // The morph share the ranges were placed with (`shapeRanges` holds it to [0.01, 0.9]), never the tune's raw number.
+    u.uHorizonShapeAt.value.w = r.mf;
     s.patch.renderOrder = s.skirt.renderOrder = t.renderOrder;
     if (this.timing) {
       const t0 = performance.now();
@@ -1069,14 +1168,80 @@ export class HorizonField {
       s.selector.select(this.frustum, a, this.pyramid, hole);
     }
     s.upload();
+    // The eye's raw place into a kept array (a number handed across a call the compiler leaves out is a number made).
+    this.eyeRaw[0] = this.centre.x - eye.x;
+    this.eyeRaw[1] = eye.z + this.centre.z;
+    // The shape window kept round the eye (wave 3b) while the finer levels are drawn: its blocks made nearest first, put on
+    // the card as they come, the uniforms its place in the same frame as a move empties what moved.
+    if (sh !== null && r.finest < 0) this.stepShape(sh, u);
     // The composition window kept round the eye: its strips once the eye is `STRIP_TILES` tiles off its middle or an overlay
     // made poles again, whole when the distance's side moved, a retune when the ground's knobs moved (nothing asked, nothing made).
-    if (this.worker && !this.windowAsked) {
-      // The eye's raw place into a kept array (a number handed across a call the compiler leaves out is a number made).
-      this.eyeRaw[0] = this.centre.x - eye.x;
-      this.eyeRaw[1] = eye.z + this.centre.z;
-      this.askWindow();
+    if (this.worker && !this.windowAsked) this.askWindow();
+  }
+
+  /** The shape window a frame: stood round the eye, its due blocks put on the card (all at once after a far move), its uniforms written. */
+  private stepShape(sh: ShapeWindow, u: RingUniforms): void {
+    sh.eye[0] = this.eyeRaw[0];
+    sh.eye[1] = this.eyeRaw[1];
+    sh.stepEye();
+    const uw = u.uHorizonShapeWin.value;
+    uw.x = sh.gi0;
+    uw.y = sh.gj0;
+    uw.z = this.shapeCol;
+    uw.w = this.shapeRow;
+    const ua = u.uHorizonShapeAt.value;
+    ua.x = sh.step;
+    ua.y = sh.side;
+    // The edge fade the program divides by: never under one sample (nought would read 0/0 on the window's edge row).
+    ua.z = Math.max(1, HORIZON_TUNE.shapeFade);
+    const r = this.renderer;
+    const dst = this.heights;
+    if (!r || !dst || this.disposed) {
+      sh.whole = false;
+      sh.moved = false;
+      sh.dropDirty();
+      return;
     }
+    if (sh.whole || sh.dirty > SHAPE_WHOLE_PAST) {
+      // The whole block at once (a far move, the arrival's first fill): the window's array is laid out as the card's block is.
+      sh.whole = false;
+      sh.moved = false;
+      sh.dropDirty();
+      // The whole window's stand-in over the window's own array, made once a window (wave 3b's review: one made a whole
+      // upload was a texture made in a frame, at every far move).
+      let whole = this.shapeWhole;
+      if (whole === null || (whole.image.data as unknown) !== sh.heights) {
+        whole?.dispose();
+        whole = this.shapeWhole = new THREE.DataTexture(sh.heights as never, sh.side, sh.side, THREE.RedFormat, THREE.FloatType);
+        whole.unpackAlignment = 1;
+      }
+      this.shapeAt.set(this.shapeCol, this.shapeRow);
+      r.copyTextureToTexture(whole, dst, null, this.shapeAt);
+      this.shapeWork.wholes++;
+      return;
+    }
+    const src = this.shapeSrc!;
+    const data = src.image.data as unknown as Float32Array;
+    const B = sh.blocks;
+    const n = sh.side;
+    // A move's emptied slots all in its own frame (the uniform says where the window stands now); made blocks a few a frame.
+    const most = sh.moved ? B * B : SHAPE_UPLOADS_PER_FRAME;
+    sh.moved = false;
+    for (let k = 0; k < most; k++) {
+      const slot = sh.takeDirty();
+      if (slot < 0) break;
+      const c0 = (slot % B) * SHAPE_BLOCK;
+      const r0 = Math.floor(slot / B) * SHAPE_BLOCK;
+      for (let j = 0; j < SHAPE_BLOCK; j++) for (let i = 0; i < SHAPE_BLOCK; i++) data[j * SHAPE_BLOCK + i] = sh.heights[(r0 + j) * n + c0 + i];
+      this.shapeAt.set(this.shapeCol + c0, this.shapeRow + r0);
+      r.copyTextureToTexture(src, dst, null, this.shapeAt);
+      this.shapeWork.blocks++;
+    }
+  }
+
+  /** The shape window's source (the world's near ground), once the bake is in; nothing made without one. */
+  useShape(source: ShapeSource | null): void {
+    if (this.shape) this.shape.source = source;
   }
 
   /**
@@ -1106,7 +1271,8 @@ export class HorizonField {
     const f = h.fine.nx * h.fine.nz;
     const c = h.coarse.nx * h.coarse.nz;
     const col = h.colour.nx * h.colour.nz;
-    const atlas = Math.max(h.fine.nx, h.coarse.nx) * (h.fine.nz + h.coarse.nz);
+    const lay = atlasLayout(h.fine.nx, h.fine.nz, h.coarse.nx, h.coarse.nz, this.shapeSide);
+    const atlas = lay.w * lay.h;
     const win = this.place.S * this.place.S * 8 + this.place.T * this.place.T * 4;
     const card = atlas * 4 + f * 2 * mip + (col + c) * 4 * mip + win;
     const pyr = this.pyramid ? this.pyramid.lo.reduce((n, a) => n + a.byteLength * 2, 0) : 0;
@@ -1133,7 +1299,15 @@ export class HorizonField {
       const u = s.uniforms;
       for (const k of ['uHorizonHeights', 'uHorizonFineN', 'uHorizonAlbedo', 'uHorizonCoarseAlbedo', 'uHorizonWindow', 'uHorizonTint'] as const) u[k].value = fresh[k].value;
       u.uHorizonWin.value.copy(fresh.uHorizonWin.value);
+      // The shape window read no more (wave 3b): the stand-in atlas holds none of it.
+      u.uHorizonShape.value.w = 0;
     }
+    this.shape?.dispose();
+    this.shape = null;
+    this.shapeSrc?.dispose();
+    this.shapeSrc = null;
+    this.shapeWhole?.dispose();
+    this.shapeWhole = null;
     for (const t of this.textures) t.dispose();
     this.textures.length = 0;
     this.winTex?.dispose();

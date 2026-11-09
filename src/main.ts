@@ -2052,6 +2052,8 @@ class App {
     this.applyReach();
     // How far the rings draw the near ground's own look, before any world: the first bake's window is made at its size.
     HORIZON_TUNE.detailReach = S.groundDetailDistance * 1000;
+    // How far the rings keep the near ground's 2 m shape (wave 3b): a range the selection reads a frame.
+    HORIZON_TUNE.shapeReach = S.terrainShapeDetail * 1000;
     // The spawner's cap and the creatures' animation range, kept by the world for every planet's manager.
     this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
     // How hard the world's own bodies are, before any of them is stood: each reads it as it stands.
@@ -6124,6 +6126,8 @@ class App {
           childCorner?: ('sw' | 'se' | 'nw' | 'ne')[];
           clouds?: boolean | { on?: boolean; strength?: number };
           view?: 'lit' | 'colour' | 'clouds' | 'bump';
+          tri?: boolean | { on?: boolean; from?: number; to?: number; sharp?: number };
+          relief?: boolean | { on?: boolean; depth?: number; reach?: number; fade?: number };
         } = {},
       ) => {
         const swg = this.world.terrain.swg;
@@ -13403,6 +13407,10 @@ class App {
         // A number the rings read a frame: the composition window is made again at its new size in the decode worker and
         // swapped in when it lands (a texture's size, never a program).
         HORIZON_TUNE.detailReach = S.groundDetailDistance * 1000;
+        break;
+      case 'terrainShapeDetail':
+        // A range the selection and the ring's morph read a frame (wave 3b): nothing is built, the shape window is the world's.
+        HORIZON_TUNE.shapeReach = S.terrainShapeDetail * 1000;
         break;
       case 'objectReach':
       case 'terrainRadius':

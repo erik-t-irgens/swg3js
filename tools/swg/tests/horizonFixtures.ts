@@ -87,11 +87,16 @@ export function testAsk(a: RingAsk, eye: THREE.Vector3, fogDensity: number, radi
   a.cx1 = pcx + radius + 1;
   a.cz0 = pcz - radius - 1;
   a.cz1 = pcz + radius + 1;
+  // Wave 3b: the finer levels as the field asks them (a world with a shape window; `HORIZON_TUNE.shape` the switch).
+  a.finest = r.finest;
+  a.r1 = r.r1;
+  a.r2 = r.r2;
+  a.pad = r.finest < 0 ? HORIZON_TUNE.shapePad : 0;
   return a;
 }
 
 export function newAsk(): RingAsk {
-  return { ex: 0, ey: 0, ez: 0, reach: 0, lod0: 1400, levels: 1, morph: 0.3, edgeBand: 64, drop: 2.5, shiftX: 0, shiftZ: 0, cx0: 0, cz0: 0, cx1: 0, cz1: 0 };
+  return { ex: 0, ey: 0, ez: 0, reach: 0, lod0: 1400, levels: 1, morph: 0.3, edgeBand: 64, drop: 2.5, shiftX: 0, shiftZ: 0, cx0: 0, cz0: 0, cx1: 0, cz1: 0, finest: 0, r1: 0, r2: 0, pad: 0 };
 }
 
 /** A 60-degree camera at 16:9, placed and turned, its matrices made (reversed depth, as the game's). */

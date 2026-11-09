@@ -888,6 +888,11 @@ export class SwgTerrain {
     return new Promise((resolve) => this.request(`horizon:${this.nextId}`, startX, startZ, n, step, resolve));
   }
 
+  /** Whether the terrain worker is there and ready (the rings' shape window asks it only then: never the main thread). */
+  get workerUp(): boolean {
+    return !!this.worker && this.workerReady;
+  }
+
   /** `heightIfCached` without the far grid: the pole block's height where it is cached, else null. Never generates anything. */
   nearHeightIfCached(gx: number, gz: number): number | null {
     const x = this.toSwgX(gx);

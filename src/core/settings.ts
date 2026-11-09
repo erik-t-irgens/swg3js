@@ -80,6 +80,11 @@ export interface Settings extends FxSettings {
    * past it they fade into the bake's per-tile mean (the horizon pass's third wave).
    */
   groundDetailDistance: number;
+  /**
+   * How far the rings keep the near ground's own 2 m shape (the horizon pass's wave 3b), kilometres; past it they give way
+   * to 4 m and then 8 m, never coarser than they were without it. Nought is the rings' shape of before.
+   */
+  terrainShapeDetail: number;
   /** How many creatures and NPCs the spawner may have out at once (nothing the world itself stands is counted). */
   mobileCap: number;
   /** Metres past which a creature or NPC holds its pose until it comes nearer. */
@@ -392,6 +397,7 @@ export const DEFAULT_SETTINGS: Settings = {
   farRings: false,
   terrainDistance: 8,
   groundDetailDistance: 2.5,
+  terrainShapeDetail: 0.7,
   mobileCap: 40,
   mobileAnimRange: 160,
   waterRipples: true,

@@ -48,7 +48,7 @@ const morph = { x: 1e6, y: 0.3, z: 1e6, w: 0 };
 const drop = { x: 2.5, y: 256, z: 0, w: 16 };
 const vertexFn = `${HORIZON_RING_FUNCTIONS}
 vec3 gRingPos;
-vec2 vRingRaw; vec3 vRingWorld; float vRingEdge; float vRingDist; float vRingLevel; vec2 vGroundUV;
+vec2 vRingRaw; vec3 vRingWorld; float vRingEdge; float vRingDist; float vRingLevel; vec2 vGroundUV; float vRingShape; vec3 vRingShapeN; float vGroundY;
 void ringVertexMain( float px, float py, float pz, float ax, float ay, float az, float aw ) {
 ${HORIZON_RING_VERTEX.replace(/^#.*$/gm, '').replace(/position\.([xyz])/g, 'p$1').replace(/aRing\.([xyzw])/g, (_m, c: string) => `a${c}`)}
 }
@@ -76,7 +76,12 @@ const V = glslFunctions(vertexFn, ['ringVertexMain', 'outX', 'outY', 'outZ'], {
   uHorizonDrop: drop,
   uHorizonGrid: { x: shift.x, y: shift.z, z: 0, w: 0 },
   uGroundFrame: frame,
+  // The rings' shape up close off (wave 3b): the level-0 surface the far cards have stood on since W2.
+  uHorizonShape: { x: 1, y: 1, z: 0, w: 0 },
+  uHorizonShapeWin: { x: 0, y: 0, z: 0, w: 0 },
+  uHorizonShapeAt: { x: 2, y: 1, z: 16, w: 0.15 },
   ringNormalAt: () => ({ x: 0, y: 1, z: 0 }),
+  ringShapeNormal: (_r: unknown, _s: number, base: unknown) => base,
 });
 const surf = newRingSurface();
 Object.assign(surf, { fine: fineV, coarse: coarseV, cx: frame.x, cz: frame.y, sx: shift.x, sz: shift.z, sq0: square.x, sq1: square.y, sq2: square.z, sq3: square.w, drop: drop.x, fade: drop.y, everywhere: drop.z });

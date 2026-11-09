@@ -178,7 +178,16 @@ const store = new Map<string, string>();
 const THREE = (await import('three')) as typeof import('three');
 const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, fragmentShader: THREE.ShaderLib.physical.fragmentShader, uniforms: {} as Record<string, unknown>, defines: {} as Record<string, unknown> });
 {
+  // The horizon pass's wave 3b gave the tile program its steep faces' side pictures and its relief, both chosen at load
+  // (`swg.ground.tri`, `swg.ground.relief`): with both left out the program is the one before to the byte (groundDetail.test
+  // holds that against 993f258), so here they are left out and the volumetrics' own claim, that the master off adds
+  // nothing, is held against PRE_PASS as it always was.
+  store.set('swg.ground.tri', '0');
+  store.set('swg.ground.relief', '0');
   const [o, n] = await both('world/terrainTextures.ts');
+  store.delete('swg.ground.tri');
+  store.delete('swg.ground.relief');
+  ok(n.GROUND_TRI_WANTED === false && n.GROUND_RELIEF_WANTED === false, "today's tile program read with the horizon pass's two hatches set (its own test holds the text of before to the byte)");
   const tiles = (m: Mod) => {
     const s = physical();
     const done = (m.injectGroundTiles as (s: unknown, u: unknown) => boolean)(s, (m.makeGroundTileUniforms as () => unknown)());

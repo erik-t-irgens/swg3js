@@ -86,6 +86,9 @@ function picture(world: string, rel: string | null | undefined): Picture | null 
   const e2 = tileEntries([shiny], false);
   const arrays = assembleTileArrays([shiny], e2, [true, true], 1, { colour: (i) => [i, 2, 3, 255], normal: (i) => (i === 1 ? [10, 20, 30, 255] : null), gloss: () => [200, 7, 200, 255] })!;
   ok([...arrays.bump].join() === '128,128,255,0,10,20,30,200', "a child whose shader's specular colour is black takes no gloss whatever its picture holds, and the next its picture's red, its bump's direction beside it (flat where it has none)");
+  ok([...arrays.colour].join() === '0,2,3,7,1,2,3,7', "and both carry the relief's height (the gloss picture's green) in their colour's alpha whatever the shine (wave 3b)");
+  const none = assembleTileArrays([shiny], e2, [true, true], 1, { colour: (i) => [i, 2, 3, 255], normal: () => null, gloss: () => null })!;
+  ok([...none.colour].join() === '0,2,3,128,1,2,3,128', 'a child with no gloss picture is level (128): its relief moves nothing');
 }
 
 // ---------------------------------------------------------------- 2 to 4, over the packs
@@ -124,12 +127,20 @@ for (const world of WORLDS) {
   ok(arrays.depth === keptAt.length && arrays.colour.length === per * keptAt.length && arrays.bump.length === per * keptAt.length, `${world}: ${arrays.depth} layers, one for every child whose colour decoded (of ${entries.length} entries)`);
   ok(asked.colour.join() === keptAt.join(), 'and each kept colour asked for once, in order');
   let coloursSame = true;
+  let heightsSame = true;
   let bumpsSame = true;
   let glossSame = true;
   keptAt.forEach((i, layer) => {
     const at = layer * per;
     const c = colours[i]!.rgba;
-    for (let p = 0; p < per; p++) if (arrays.colour[at + p] !== c[p]) coloursSame = false;
+    const gh = glosses[i]?.rgba;
+    // The colour's rgb its picture's; its alpha the relief's height since the horizon pass's wave 3b (the gloss picture's
+    // green, level 128 with none), which nothing read before.
+    for (let p = 0; p < per; p++) {
+      if ((p & 3) === 3) {
+        if (arrays.colour[at + p] !== (gh ? gh[p - 2] : 128)) heightsSame = false;
+      } else if (arrays.colour[at + p] !== c[p]) coloursSame = false;
+    }
     const n = normals[i]?.rgba;
     const g = glosses[i]?.rgba;
     const takes = glossTaken(entries[i].def, entries[i].family);
@@ -142,7 +153,8 @@ for (const world of WORLDS) {
     }
     if (!takes && glossy) blackSeen++;
   });
-  ok(coloursSame, "every layer's colour is its child's picture, byte for byte");
+  ok(coloursSame, "every layer's colour is its child's picture, byte for byte (its rgb)");
+  ok(heightsSame, "and its alpha the relief's height: its gloss picture's green (where the terrain pass keeps the bump's height), level where it has none");
   ok(bumpsSame, "its bump's direction is its child's bump picture's, and flat (128 128 255) where it has none");
   ok(glossSame, "its alpha is its child's gloss picture's red, and nought where it has none or its shader's specular colour is black");
   // Each family's children's layers.

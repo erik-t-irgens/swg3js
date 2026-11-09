@@ -274,9 +274,11 @@ if (worlds.includes(OWN) && worlds.includes(LENT)) {
   let pictured = otherLayers.length === other.children!.length;
   for (const [k, layer] of otherLayers.entries()) {
     const p = picture(LENT, other.children![k].file);
-    if (!p || p.width !== size || !a1.colour.subarray(layer * per, (layer + 1) * per).every((v, i) => v === p.rgba[i])) pictured = false;
+    // The colour's rgb is the picture's byte for byte; its alpha has carried the relief's height since the horizon pass's
+    // wave 3b (the gloss picture's green, 128 where there is none, as here: `gloss` answers null).
+    if (!p || p.width !== size || !a1.colour.subarray(layer * per, (layer + 1) * per).every((v, i) => v === ((i & 3) === 3 ? 128 : p.rgba[i]))) pictured = false;
   }
-  ok(pictured && otherLayers.every((l) => l >= ownCount), `${LENT}'s ${other.name} (id ${otherId}) draws its ${otherLayers.length} children from layers after the world's own, each its own pack's picture byte for byte`);
+  ok(pictured && otherLayers.every((l) => l >= ownCount), `${LENT}'s ${other.name} (id ${otherId}) draws its ${otherLayers.length} children from layers after the world's own, each its own pack's picture byte for byte in its colour (its alpha the relief's height)`);
   ok([...t0.childLayers].every(([id, l]) => (t1.childLayers.get(id) ?? []).join() === l.join()) && [...t0.priority].every(([id, r]) => t1.priority.get(id) === r) && (t1.priority.get(otherId) ?? 0) >= LENT_PRIORITY, "the world's own families keep their layers and their rank, and a lent one ranks above them (laid on the ground)");
   // A tile whose four corners hold the lent family samples its pictures, by the alternate each choice picks.
   const layers = new Uint8Array(4);
@@ -294,7 +296,7 @@ if (worlds.includes(OWN) && worlds.includes(LENT)) {
     const ol = t1.childLayers.get(mine.id) ?? [];
     const p = picture(LENT, shared.children![0].file);
     const differ = kidsOf(shared) !== kidsOf(ownByName.get(shared.name.toLowerCase())!);
-    ok(sid !== mine.id && sl.length > 0 && sl.every((l) => !ol.includes(l)) && !!p && a1.colour.subarray(sl[0] * per, sl[0] * per + per).every((v, i) => v === p.rgba[i]), `a name both worlds have (${shared.name}${differ ? ', drawing other pictures on each' : ''}): the lent one is a family of its own (id ${sid}, ${OWN}'s ${mine.id}) drawing ${LENT}'s pictures, never ${OWN}'s`);
+    ok(sid !== mine.id && sl.length > 0 && sl.every((l) => !ol.includes(l)) && !!p && a1.colour.subarray(sl[0] * per, sl[0] * per + per).every((v, i) => v === ((i & 3) === 3 ? 128 : p.rgba[i])), `a name both worlds have (${shared.name}${differ ? ', drawing other pictures on each' : ''}): the lent one is a family of its own (id ${sid}, ${OWN}'s ${mine.id}) drawing ${LENT}'s pictures, never ${OWN}'s`);
   }
   ok(t1.lentReport !== null && t1.lentReport.families.every((f) => f.pack === LENT) && t1.lentReport.layers === a1.depth && t0.lentReport === null, 'what the arrays hold of other worlds is reported (and nothing with none lent)');
 } else note(`${OWN} and ${LENT} are not both converted under ${PACKS}: two packs' pictures in one array are held on the plan alone`);

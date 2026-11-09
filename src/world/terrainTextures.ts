@@ -223,6 +223,13 @@ export interface GroundTileUniforms {
   uGroundShine: THREE.IUniform<THREE.Vector4>;
   /** x: the cloud shadows on, y: their strength, z: their clock in seconds, wrapped to a period. */
   uGroundCloud: THREE.IUniform<THREE.Vector4>;
+  /**
+   * The pictures laid from the side axes on steep faces (the horizon pass's wave 3b, `GROUND_DETAIL_TUNE.tri`): x on, y the
+   * up component of the face where the sides begin, z where they have it whole, w how sharply the two sides share it.
+   */
+  uGroundTri: THREE.IUniform<THREE.Vector4>;
+  /** The pictures moved by their own height near the eye (wave 3b, `GROUND_DETAIL_TUNE.relief`): x the depth in metres (nought off), y the reach, z its fade's share, w on. */
+  uGroundRelief: THREE.IUniform<THREE.Vector4>;
 }
 
 /** A small array of one colour, so a uniform the program reads always holds a real texture (an empty one binds nothing). */
@@ -251,6 +258,8 @@ export function makeGroundTileUniforms(): GroundTileUniforms {
     uGroundLook: { value: new THREE.Vector4() },
     uGroundShine: { value: new THREE.Vector4() },
     uGroundCloud: { value: new THREE.Vector4() },
+    uGroundTri: { value: new THREE.Vector4() },
+    uGroundRelief: { value: new THREE.Vector4() },
   };
   writeGroundDraw(u);
   return u;
@@ -279,6 +288,78 @@ export function writeGroundDraw(u: GroundTileUniforms = groundTileUniforms()): v
   u.uGroundShine.value.set(t.shine === 'highlight' ? GROUND_NORMAL.gloss : 0, t.shine === 'flat' ? t.flat : 0, GROUND_NORMAL.scale, 0);
   u.uGroundCloud.value.x = t.clouds.on ? 1 : 0;
   u.uGroundCloud.value.y = t.clouds.strength;
+  writeGroundDetail(u);
+}
+
+/**
+ * The ground up close (the horizon pass's wave 3b, every number ours and the owner's to move: `__debug.ground({ tri,
+ * relief })` and the debug menu's `ground` sliders). `tri`: on faces steeper than `from` degrees the pictures are also laid
+ * from the two side axes, wholly so past `to`, the two sides shared by the face's lean to the power `sharp`; flatter ground
+ * takes only the plain tap and is drawn exactly as it was. `relief`: within `reach` metres of the eye the pictures are moved
+ * by the height their gloss picture carries, `depth` metres peak to peak, in a fixed four steps, fading over the reach's last
+ * `fade` share. Each is a uniform: a switch or a slider builds nothing.
+ */
+export const GROUND_DETAIL_TUNE = {
+  tri: { on: true, from: 40, to: 60, sharp: 4 },
+  relief: { on: true, depth: 0.05, reach: 6, fade: 0.5 },
+};
+
+/**
+ * `GROUND_DETAIL_TUNE` moved by name (the console's `ground({ tri, relief })` and the sliders): a switch as true or false or
+ * 'on'/'off', a number held finite and inside its sense; answers what it would not take. The caller writes the uniforms.
+ */
+export function tuneGroundDetail(o: { tri?: unknown; relief?: unknown }): string[] {
+  const said: string[] = [];
+  const num = (v: unknown, lo: number, hi: number): number | null => (typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : null);
+  const take = (part: 'tri' | 'relief', v: unknown, keys: Record<string, [number, number]>) => {
+    if (v === undefined) return;
+    const t = GROUND_DETAIL_TUNE[part] as Record<string, number | boolean>;
+    if (typeof v === 'boolean' || v === 'on' || v === 'off') {
+      t.on = v === true || v === 'on';
+      return;
+    }
+    if (!v || typeof v !== 'object') {
+      said.push(`${part} takes true, false or { on, ${Object.keys(keys).join(', ')} }`);
+      return;
+    }
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      if (k === 'on') {
+        if (typeof x === 'boolean' || x === 'on' || x === 'off') t.on = x === true || x === 'on';
+        else said.push(`${part}.on takes true or false`);
+        continue;
+      }
+      const range = keys[k];
+      if (!range) {
+        said.push(`${part} has no ${k}`);
+        continue;
+      }
+      const n = num(x, range[0], range[1]);
+      if (n === null) said.push(`${part}.${k} takes a number`);
+      else t[k] = n;
+    }
+  };
+  take('tri', o.tri, { from: [0, 89], to: [0, 89.9], sharp: [0.1, 32] });
+  take('relief', o.relief, { depth: [0, 1], reach: [0.1, 100], fade: [0, 1] });
+  return said;
+}
+
+/** `GROUND_DETAIL_TUNE` into a set of uniforms (a console's move or a slider's, never a frame's). */
+export function writeGroundDetail(u: GroundTileUniforms): void {
+  const d = GROUND_DETAIL_TUNE;
+  const up = (deg: number) => Math.cos((Math.min(89.9, Math.max(0, deg)) * Math.PI) / 180);
+  const flatUp = up(Math.min(d.tri.from, d.tri.to));
+  // The two edges held apart, or smoothstep's are undefined.
+  const steepUp = Math.min(up(Math.max(d.tri.from, d.tri.to)), flatUp - 1e-4);
+  const ut = u.uGroundTri.value;
+  ut.x = d.tri.on ? 1 : 0;
+  ut.y = flatUp;
+  ut.z = steepUp;
+  ut.w = Math.max(0.1, d.tri.sharp);
+  const ur = u.uGroundRelief.value;
+  ur.x = d.relief.on ? Math.max(0, d.relief.depth) : 0;
+  ur.y = Math.max(0.01, d.relief.reach);
+  ur.z = Math.min(1, Math.max(0, d.relief.fade));
+  ur.w = d.relief.on ? 1 : 0;
 }
 
 /** The cloud tile's clock, a period wrapped (`CLOUD_PERIOD`), written once a frame: nothing allocated. */
@@ -378,6 +459,93 @@ float groundMask( const in float code, const in vec2 dx, const in vec2 dy ) {
 	return uGroundLook.y > 0.5 ? m : step( 0.5, m );
 }`;
 
+/**
+ * The hatches at load (the horizon pass's wave 3b): `localStorage['swg.ground.tri'] = '0'` leaves the steep faces' side
+ * pictures out of the tile program's text, `swg.ground.relief = '0'` the relief near the eye; with both, the text is the
+ * one the ground was drawn with before the wave, to the byte (`groundDetail.test.ts` rebuilds it).
+ */
+export const GROUND_TRI_WANTED: boolean = stored('swg.ground.tri') !== '0';
+export const GROUND_RELIEF_WANTED: boolean = stored('swg.ground.relief') !== '0';
+
+/**
+ * The ground's pictures on a steep face (wave 3b), read by the tile program and by the rings' near composition through
+ * `TILE_MAP`: past the slope `uGroundTri` starts at, each picture is also laid from the two side axes (a face looking along
+ * x takes it along z and down, one along z along x and down) and the three blended by how far the face leans each way, so a
+ * cliff wears its pictures and not their stretch; under that slope only the plain tap is taken and the ground is what it
+ * was to the bit. The bump takes no side tap: on a side it leans to flat by the sides' share (its slope is laid along the
+ * ground's own x and z, which on a side would be the wrong way). Reads `uGroundTri` and `viewMatrix`, which whoever
+ * interpolates it declares; the face's normal, its height and the height's derivatives are handed in from `main()`.
+ */
+export const GROUND_TRI_GLSL = `vec3 gTriW = vec3( 1.0, 0.0, 0.0 );
+vec2 gTriX = vec2( 0.0 );
+vec2 gTriZ = vec2( 0.0 );
+vec4 gTriXd = vec4( 0.0 );
+vec4 gTriZd = vec4( 0.0 );
+// The sides' share of a face by its up component (groundMath.triSide is its mirror).
+float groundTriSide( float up, float flatUp, float steepUp ) {
+	return 1.0 - smoothstep( steepUp, flatUp, up );
+}
+void groundTriSetup( const in vec2 uv, const in vec2 dx, const in vec2 dy, const in float y, const in vec2 yd, const in vec3 viewNormal ) {
+	gTriW = vec3( 1.0, 0.0, 0.0 );
+	if ( uGroundTri.x < 0.5 ) return;
+	vec3 n = normalize( ( vec4( viewNormal, 0.0 ) * viewMatrix ).xyz );
+	float side = groundTriSide( abs( n.y ), uGroundTri.y, uGroundTri.z );
+	if ( side <= 0.0 ) return;
+	float ax = pow( abs( n.x ), uGroundTri.w );
+	float az = pow( abs( n.z ), uGroundTri.w );
+	float s = ax + az;
+	if ( s <= 1e-6 ) return;
+	gTriW = vec3( 1.0 - side, side * ax / s, side * az / s );
+	gTriX = vec2( uv.y, -y * 0.25 );
+	gTriZ = vec2( uv.x, -y * 0.25 );
+	gTriXd = vec4( dx.y, -yd.x * 0.25, dy.y, -yd.y * 0.25 );
+	gTriZd = vec4( dx.x, -yd.x * 0.25, dy.x, -yd.y * 0.25 );
+}
+vec4 groundTap( sampler2DArray s, const in vec2 uv, const in float layer, const in vec2 dx, const in vec2 dy ) {
+	vec4 c = textureGrad( s, vec3( uv, layer ), dx, dy );
+	if ( gTriW.x >= 1.0 ) return c;
+	c *= gTriW.x;
+	if ( gTriW.y > 0.0 ) c += gTriW.y * textureGrad( s, vec3( gTriX, layer ), gTriXd.xy, gTriXd.zw );
+	if ( gTriW.z > 0.0 ) c += gTriW.z * textureGrad( s, vec3( gTriZ, layer ), gTriZd.xy, gTriZd.zw );
+	return c;
+}
+vec4 groundBumpTap( sampler2DArray s, const in vec2 uv, const in float layer, const in vec2 dx, const in vec2 dy ) {
+	vec4 c = textureGrad( s, vec3( uv, layer ), dx, dy );
+	if ( gTriW.x >= 1.0 ) return c;
+	return vec4( mix( vec3( 0.5, 0.5, 1.0 ), c.rgb, gTriW.x ), c.a * gTriW.x );
+}`;
+
+/**
+ * The relief near the eye (wave 3b, the tile program alone): each picture carries its height in its colour's alpha (the
+ * gloss picture's green, which the terrain pass writes and `assembleTileArrays` lays there), the layers' heights blended by
+ * the tile's masks, and the picture moved toward the eye by how far a ray at that height runs over the ground, in a fixed
+ * four steps. Reads `vGroundUV`, the tile's layers and codes, `uGround`, `uGroundFrame`, `vViewPosition` and `viewMatrix`.
+ */
+export const GROUND_RELIEF_GLSL = `float groundHeightTap( const in vec2 uv, const in vec3 w, const in vec2 dx, const in vec2 dy ) {
+	float h = textureGrad( uGround, vec3( uv, vGroundLayers.x ), dx, dy ).a;
+	if ( w.x > 0.0 ) h = mix( h, textureGrad( uGround, vec3( uv, vGroundLayers.y ), dx, dy ).a, w.x );
+	if ( w.y > 0.0 ) h = mix( h, textureGrad( uGround, vec3( uv, vGroundLayers.z ), dx, dy ).a, w.y );
+	if ( w.z > 0.0 ) h = mix( h, textureGrad( uGround, vec3( uv, vGroundLayers.w ), dx, dy ).a, w.z );
+	return h;
+}
+// The picture's offset for a depth k (metres, faded): the eye's direction in the world, its run over the ground per metre
+// of height in picture units (one repeat a 4 m tile, its u along the terrain's x), at the blended height, four times.
+vec2 groundRelief( const in float k, const in vec2 tx, const in vec2 ty, const in vec2 dx, const in vec2 dy ) {
+	vec3 w = vec3( 0.0 );
+	if ( vGroundBlend.x > 0.5 ) {
+		w.x = groundMask( vGroundBlend.x, tx, ty );
+		if ( vGroundBlend.y > 0.5 ) {
+			w.y = groundMask( vGroundBlend.y, tx, ty );
+			if ( vGroundBlend.z > 0.5 ) w.z = groundMask( vGroundBlend.z, tx, ty );
+		}
+	}
+	vec3 e = normalize( ( vec4( vViewPosition, 0.0 ) * viewMatrix ).xyz );
+	vec2 r = vec2( -uGroundFrame.z * e.x, e.z ) * ( 0.25 * k / max( e.y, 0.25 ) );
+	vec2 off = vec2( 0.0 );
+	for ( int i = 0; i < 4; i++ ) off = r * ( groundHeightTap( vGroundUV + off, w, dx, dy ) - 0.5 );
+	return off;
+}`;
+
 /** Vertex: the tile attributes and what is worked out from them, after `#include <common>`. */
 const TILE_VERTEX_PARS = /* glsl */ `
 // The ground drawn the client's way (src/world/terrainTextures.ts, groundTiles.ts): each triangle's tile.
@@ -392,7 +560,7 @@ flat varying vec4 vGroundBlend;
 varying vec2 vGroundTile;
 varying vec2 vGroundUV;
 varying vec3 vGroundTint;
-// The colour map's tint in the client's gamma (groundMath.tintGamma): off, the client's, normalised, per channel.
+${GROUND_TRI_WANTED ? 'varying float vGroundY;\n' : ''}// The colour map's tint in the client's gamma (groundMath.tintGamma): off, the client's, normalised, per channel.
 ${GROUND_TINT_GLSL}
 `;
 
@@ -408,7 +576,7 @@ const TILE_VERTEX = /* glsl */ `
 	float gS = floor( ( gCode + 0.5 ) / 3.0 );
 	vGroundTile = vec2( gS, gCode - 3.0 * gS ) * 0.5;
 	vGroundTint = groundTintOf( aGroundTint );
-}
+${GROUND_TRI_WANTED ? '\tvGroundY = gWorld.y;\n' : ''}}
 `;
 
 /** Fragment: the samplers, the knobs, the tile's data and the functions, after `#include <common>`. */
@@ -427,7 +595,7 @@ flat varying vec4 vGroundBlend;
 varying vec2 vGroundTile;
 varying vec2 vGroundUV;
 varying vec3 vGroundTint;
-// Worked out in main() at the colour stage and read later: the overlays' weights, the blended bump and
+${GROUND_TRI_WANTED ? 'varying float vGroundY;\nuniform vec4 uGroundTri;\n' : ''}${GROUND_RELIEF_WANTED ? 'uniform vec4 uGroundRelief;\n' : ''}// Worked out in main() at the colour stage and read later: the overlays' weights, the blended bump and
 // gloss, the colour before the light, the flat shine the lights add (RE_Direct_Physical cannot see main()),
 // and the ground's lean in the world's frame before the rain's rings (for the self test's view of it).
 vec3 gGroundW = vec3( 0.0 );
@@ -435,8 +603,8 @@ vec4 gGroundBump = vec4( 0.5, 0.5, 1.0, 0.0 );
 vec3 gGroundAlbedo = vec3( 1.0 );
 float gGroundFlat = 0.0;
 vec3 gGroundNormalW = vec3( 0.0, 1.0, 0.0 );
-${GROUND_MASK_GLSL}
-// sRGB's own curve each way (groundMath.srgbDecode, srgbEncode); the decode runs on past one.
+${GROUND_RELIEF_WANTED ? 'vec2 gGroundOff = vec2( 0.0 );\n' : ''}${GROUND_MASK_GLSL}
+${GROUND_TRI_WANTED ? `${GROUND_TRI_GLSL}\n` : ''}${GROUND_RELIEF_WANTED ? `${GROUND_RELIEF_GLSL}\n` : ''}// sRGB's own curve each way (groundMath.srgbDecode, srgbEncode); the decode runs on past one.
 ${GROUND_DECODE_GLSL}
 ${GROUND_CLOUD_GLSL}
 `;
@@ -446,33 +614,60 @@ ${GROUND_CLOUD_GLSL}
  * by its mask in turn. Derivatives are taken once at the top, where every pixel of the quad runs, and handed to
  * every sample, so the branches on how many layers a tile holds (most hold one) never ask a texture for a
  * derivative inside them. Exported (from the volumetrics' wave 2b) so the air's variant can hold itself to finding this
- * text in its program unchanged.
+ * text in its program unchanged. The horizon pass's wave 3b adds the steep faces' side pictures (`groundTap`, the face's
+ * height and its derivatives taken with the others at the top) and the relief's moved picture (`gUV`); with both left out
+ * at load (`GROUND_TRI_WANTED`, `GROUND_RELIEF_WANTED`) it is the text of before to the byte.
  */
-export const TILE_MAP = /* glsl */ `
+export function tileMapText(tri: boolean, relief: boolean): string {
+  const uv = relief ? 'gUV' : 'vGroundUV';
+  const c = (l: string) => (tri ? `groundTap( uGround, ${uv}, vGroundLayers.${l}, gDx, gDy )` : `textureGrad( uGround, vec3( ${uv}, vGroundLayers.${l} ), gDx, gDy )`);
+  const b = (l: string) => (tri ? `groundBumpTap( uGroundBump, ${uv}, vGroundLayers.${l}, gDx, gDy )` : `textureGrad( uGroundBump, vec3( ${uv}, vGroundLayers.${l} ), gDx, gDy )`);
+  return `
 {
 	vec2 gDx = dFdx( vGroundUV );
 	vec2 gDy = dFdy( vGroundUV );
 	vec2 gTx = dFdx( vGroundTile );
 	vec2 gTy = dFdy( vGroundTile );
-	vec4 gColour = textureGrad( uGround, vec3( vGroundUV, vGroundLayers.x ), gDx, gDy );
-	gGroundBump = textureGrad( uGroundBump, vec3( vGroundUV, vGroundLayers.x ), gDx, gDy );
+${relief ? `\t${TILE_MAP_UV_LINE}\n` : ''}${tri ? `\t${TILE_MAP_Y_LINE}\n\tgroundTriSetup( ${uv}, gDx, gDy, vGroundY, gYd, vNormal );\n` : ''}	vec4 gColour = ${c('x')};
+	gGroundBump = ${b('x')};
 	if ( vGroundBlend.x > 0.5 ) {
 		gGroundW.x = groundMask( vGroundBlend.x, gTx, gTy );
-		gColour = mix( gColour, textureGrad( uGround, vec3( vGroundUV, vGroundLayers.y ), gDx, gDy ), gGroundW.x );
-		gGroundBump = mix( gGroundBump, textureGrad( uGroundBump, vec3( vGroundUV, vGroundLayers.y ), gDx, gDy ), gGroundW.x );
+		gColour = mix( gColour, ${c('y')}, gGroundW.x );
+		gGroundBump = mix( gGroundBump, ${b('y')}, gGroundW.x );
 		if ( vGroundBlend.y > 0.5 ) {
 			gGroundW.y = groundMask( vGroundBlend.y, gTx, gTy );
-			gColour = mix( gColour, textureGrad( uGround, vec3( vGroundUV, vGroundLayers.z ), gDx, gDy ), gGroundW.y );
-			gGroundBump = mix( gGroundBump, textureGrad( uGroundBump, vec3( vGroundUV, vGroundLayers.z ), gDx, gDy ), gGroundW.y );
+			gColour = mix( gColour, ${c('z')}, gGroundW.y );
+			gGroundBump = mix( gGroundBump, ${b('z')}, gGroundW.y );
 			if ( vGroundBlend.z > 0.5 ) {
 				gGroundW.z = groundMask( vGroundBlend.z, gTx, gTy );
-				gColour = mix( gColour, textureGrad( uGround, vec3( vGroundUV, vGroundLayers.w ), gDx, gDy ), gGroundW.z );
-				gGroundBump = mix( gGroundBump, textureGrad( uGroundBump, vec3( vGroundUV, vGroundLayers.w ), gDx, gDy ), gGroundW.z );
+				gColour = mix( gColour, ${c('w')}, gGroundW.z );
+				gGroundBump = mix( gGroundBump, ${b('w')}, gGroundW.z );
 			}
 		}
 	}
 	gGroundAlbedo = gColour.rgb * groundDecode( vGroundTint );
 	diffuseColor.rgb *= gGroundAlbedo;
+}
+`;
+}
+/** `TILE_MAP`'s line for the relief's moved picture, and the steep faces' height derivatives (the rings swap the latter for their own). */
+export const TILE_MAP_UV_LINE = 'vec2 gUV = vGroundUV + gGroundOff;';
+export const TILE_MAP_Y_LINE = 'vec2 gYd = vec2( dFdx( vGroundY ), dFdy( vGroundY ) );';
+export const TILE_MAP = /* glsl */ tileMapText(GROUND_TRI_WANTED, GROUND_RELIEF_WANTED);
+
+/**
+ * Fragment, after `#include <map_fragment>` and before `TILE_MAP` (wave 3b, the tile program alone): the relief's offset,
+ * its derivatives taken where every pixel of the quad runs and its taps only within the reach (a uniform, so the switch and
+ * the sliders build nothing).
+ */
+export const TILE_RELIEF = /* glsl */ `
+{
+	vec2 gRx = dFdx( vGroundTile );
+	vec2 gRy = dFdy( vGroundTile );
+	vec2 gRu = dFdx( vGroundUV );
+	vec2 gRv = dFdy( vGroundUV );
+	float gRk = uGroundRelief.w * uGroundRelief.x * ( 1.0 - smoothstep( uGroundRelief.y * ( 1.0 - uGroundRelief.z ), uGroundRelief.y, length( vViewPosition ) ) );
+	if ( gRk > 0.0 ) gGroundOff = groundRelief( gRk, gRx, gRy, gRu, gRv );
 }
 `;
 
@@ -545,7 +740,7 @@ export function injectGroundTiles(shader: { fragmentShader: string; vertexShader
   const pars = `${chunk.slice(0, ggx + GGX_ANCHOR.length)}\n\t${TILE_FLAT_LINE}${chunk.slice(ggx + GGX_ANCHOR.length)}`;
   shader.vertexShader = after(after(vs, '#include <common>', TILE_VERTEX_PARS), '#include <worldpos_vertex>', TILE_VERTEX);
   let f = after(fs, '#include <common>', `${TILE_FRAGMENT_PARS}${GROUND_DECLS_END}`);
-  f = after(f, '#include <map_fragment>', TILE_MAP);
+  f = after(f, '#include <map_fragment>', GROUND_RELIEF_WANTED ? `${TILE_RELIEF}${TILE_MAP}` : TILE_MAP);
   f = f.replace('#include <lights_physical_pars_fragment>', pars);
   f = before(f, '#include <opaque_fragment>', TILE_CLOUDS);
   f = after(f, '#include <dithering_fragment>', TILE_VIEW);
@@ -1116,7 +1311,7 @@ export interface TilePictures {
 
 /** What the arrays hold. */
 export interface TileArrays {
-  /** Every kept picture's colour, a layer each, and its bump (rgb) with its gloss (alpha) layer for layer. */
+  /** Every kept picture's colour (rgb, its relief's height in alpha), a layer each, and its bump (rgb) with its gloss (alpha) layer for layer. */
   colour: Uint8Array;
   bump: Uint8Array;
   depth: number;
@@ -1165,10 +1360,11 @@ export function assembleTileArrays(families: readonly ShaderFamilyDef[], entries
         bump[at + p + 2] = nm[p + 2];
       }
     }
-    if (glossTaken(e.def, e.family)) {
-      const sm = pictures.gloss(i);
-      if (sm) for (let p = 0; p < per; p += 4) bump[at + p + 3] = sm[p];
-    }
+    const sm = pictures.gloss(i);
+    if (sm && glossTaken(e.def, e.family)) for (let p = 0; p < per; p += 4) bump[at + p + 3] = sm[p];
+    // The relief's height (the horizon pass's wave 3b) in the colour's alpha, which nothing else reads: the gloss picture's
+    // green, where the terrain pass writes the bump map's height, whatever the shine; level (128) with no gloss picture.
+    for (let p = 0; p < per; p += 4) colour[at + p + 3] = sm ? sm[p + 1] : 128;
     const key = e.family.name.toLowerCase();
     let list = childLayersByName.get(key);
     if (!list) childLayersByName.set(key, (list = []));
@@ -1438,6 +1634,12 @@ export interface GroundSelfTest {
   capBinds: boolean;
   /** Programs built while the knobs moved between runs, after each scene's first draw: must be 0. */
   builtOnKnobs: number;
+  /**
+   * The ground up close (wave 3b): flat ground drawn by the program with the side pictures and the relief (past its reach)
+   * pixel for pixel as with both off; a face turned to look along x runs the plain stripe along z; the relief within its
+   * reach moves the picture. True for a part left out at load.
+   */
+  upClose: { flatSame: boolean; steepTurns: boolean; reliefNearMoves: boolean };
   note: string;
 }
 
@@ -1634,6 +1836,7 @@ export function groundSelfTest(renderer: THREE.WebGLRenderer): GroundSelfTest {
   const programs = () => renderer.info.programs?.length ?? 0;
   const runs: GroundSelfTest['runs'] = [];
   let builtOnKnobs = 0;
+  const detail = { flatSame: !GROUND_TRI_WANTED && !GROUND_RELIEF_WANTED, steepTurns: !GROUND_TRI_WANTED, reliefNearMoves: !GROUND_RELIEF_WANTED };
   // The mirror's view of the masks: bilinear over the two by two texels, clamped at the edges, as the sampler is set.
   const texel = (k: number, x: number, y: number) => maskTexels[k][Math.min(1, Math.max(0, y)) * 2 + Math.min(1, Math.max(0, x))] / 255;
   const sample: MaskSample = (kind, uu, vv) => {
@@ -1766,6 +1969,59 @@ export function groundSelfTest(renderer: THREE.WebGLRenderer): GroundSelfTest {
       }
       runs.push({ name: run.name, pixels: counted, maxError: Number(worst.toFixed(4)) });
     }
+    // The ground up close (the horizon pass's wave 3b), drawn by the program itself: on flat ground the steep faces' side
+    // pictures change no pixel at all, nor does the relief past its reach (the camera stands 10 m off); on a face turned to
+    // look along x the plain stripe (layer 0, striped along the picture's u) runs along z instead, and the relief within its
+    // reach moves the picture.
+    if (GROUND_TRI_WANTED || GROUND_RELIEF_WANTED) {
+      u.uGroundTint.value.set(0, cap, 0, 0);
+      u.uGroundFrame.value.z = 1;
+      u.uGroundLook.value.set(0, 1, 1, 0);
+      const a = new Uint16Array(W * H * 4);
+      const b = new Uint16Array(W * H * 4);
+      const same = (p: Uint16Array, q: Uint16Array) => p.every((x, k) => x === q[k]);
+      const triWas = u.uGroundTri.value.x;
+      const reliefWas = u.uGroundRelief.value.clone();
+      u.uGroundTri.value.x = 0;
+      u.uGroundRelief.value.w = 0;
+      draw(scene, a);
+      u.uGroundTri.value.x = 1;
+      u.uGroundRelief.value.set(0.05, 6, 0.5, 1);
+      draw(scene, b);
+      detail.flatSame = same(a, b);
+      // The last tile is layer 0 alone: across it the stripe's colour along a row and down a column.
+      const last = tiles - 1;
+      const spread = (p: Uint16Array, alongX: boolean) => {
+        let lo = Infinity;
+        let hi = -Infinity;
+        for (let k = 3; k < pxPerTile - 3; k++) {
+          const i = alongX ? last * pxPerTile + k : last * pxPerTile + pxPerTile / 2;
+          const j = alongX ? H / 2 : k;
+          const r = THREE.DataUtils.fromHalfFloat(p[(j * W + i) * 4]);
+          lo = Math.min(lo, r);
+          hi = Math.max(hi, r);
+        }
+        return hi - lo;
+      };
+      if (GROUND_TRI_WANTED) {
+        const nAttr = geometry.getAttribute('normal') as THREE.BufferAttribute;
+        for (let k = 0; k < vcount; k++) nAttr.setXYZ(k, 1, 0, 0);
+        nAttr.needsUpdate = true;
+        u.uGroundRelief.value.w = 0;
+        draw(scene, b);
+        detail.steepTurns = spread(a, true) > 0.05 && spread(a, false) < 0.01 && spread(b, true) < 0.01 && spread(b, false) > 0.05;
+        for (let k = 0; k < vcount; k++) nAttr.setXYZ(k, 0, 1, 0);
+        nAttr.needsUpdate = true;
+      }
+      if (GROUND_RELIEF_WANTED) {
+        u.uGroundTri.value.x = 0;
+        u.uGroundRelief.value.set(0.4, 100, 0.5, 1);
+        draw(scene, b);
+        detail.reliefNearMoves = !same(a, b);
+      }
+      u.uGroundTri.value.x = triWas;
+      u.uGroundRelief.value.copy(reliefWas);
+    }
   } finally {
     renderer.setRenderTarget(previous);
     renderer.setClearColor(clearColour, clearAlpha);
@@ -1780,10 +2036,11 @@ export function groundSelfTest(renderer: THREE.WebGLRenderer): GroundSelfTest {
   }
   const worst = runs.reduce((a, r) => Math.max(a, r.maxError), 0);
   return {
-    ok: worst < 0.01 && runs.every((r) => r.pixels > 0) && capBinds && builtOnKnobs === 0,
+    ok: worst < 0.01 && runs.every((r) => r.pixels > 0) && capBinds && builtOnKnobs === 0 && detail.flatSame && detail.steepTurns && detail.reliefNearMoves,
     runs,
     capBinds,
     builtOnKnobs,
+    upClose: detail,
     note: "every pixel a texel's breadth inside its tile, in linear colour: the tile program's own colour, clouds, lean and gloss against groundMath (composeTile, tintGamma, cloudUv and cloudShade, bumpNormal), and the flat shine against flatShine, worst under 0.01; the bright tiles' tint at the gain cap; and no program built as the knobs moved",
   };
 }

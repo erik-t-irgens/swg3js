@@ -24,7 +24,7 @@ import * as THREE from 'three';
 import type { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { DOME_COLOUR_GLSL } from '../domeColour.ts';
 import { GGX_ANCHOR } from '../specular.ts';
-import { GROUND_CLOUD_GLSL, GROUND_DECODE_GLSL, GROUND_MASK_GLSL, GROUND_TINT_GLSL, TILE_FLAT_LINE, TILE_MAP, TILE_NORMAL, TILE_ROUGHNESS, type GroundTileUniforms } from '../terrainTextures.ts';
+import { GROUND_CLOUD_GLSL, GROUND_DECODE_GLSL, GROUND_MASK_GLSL, GROUND_TINT_GLSL, GROUND_TRI_GLSL, GROUND_TRI_WANTED, TILE_FLAT_LINE, TILE_MAP, TILE_MAP_Y_LINE, TILE_NORMAL, TILE_ROUGHNESS, type GroundTileUniforms } from '../terrainTextures.ts';
 import { injectWetness } from '../wetness.ts';
 import { ALBEDO_SCALE } from './horizonDecode.ts';
 import { PATCH } from './horizonMath.ts';
@@ -74,6 +74,15 @@ export interface RingUniforms {
   uHorizonLook: THREE.IUniform<THREE.Vector4>;
   /** x the fade's share, y on, z its colour (0 the sky, 1 the fog, 2 none), w what is drawn (`HORIZON_VIEWS`' index). */
   uHorizonFade: THREE.IUniform<THREE.Vector4>;
+  /**
+   * The rings' shape up close (wave 3b): x the 2 m level's range, y the 4 m level's, z the finest level (nought, minus one or
+   * minus two), w the shape window's heights read (1) or not (0).
+   */
+  uHorizonShape: THREE.IUniform<THREE.Vector4>;
+  /** The shape window: x, y its first sample's global index (raw over the step), z, w its column and row in the heights atlas. */
+  uHorizonShapeWin: THREE.IUniform<THREE.Vector4>;
+  /** x the window's step (the near ground's poles, 2 m), y its side in samples, z the samples its share fades over at its edge, w the finer levels' morph share. */
+  uHorizonShapeAt: THREE.IUniform<THREE.Vector4>;
   /** The dome's own uniforms, their values copied from the sky each frame (the snippet reads these names). */
   uGradient: THREE.IUniform<THREE.Texture | null>;
   uGradient2: THREE.IUniform<THREE.Texture | null>;
@@ -124,6 +133,9 @@ export function makeRingUniforms(): RingUniforms {
     uHorizonWinC: { value: new THREE.Vector4() },
     uHorizonLook: { value: new THREE.Vector4(0.996, 2500, 1250, 1) },
     uHorizonFade: { value: new THREE.Vector4(0.15, 1, 0, 0) },
+    uHorizonShape: { value: new THREE.Vector4(1, 1, 0, 0) },
+    uHorizonShapeWin: { value: new THREE.Vector4() },
+    uHorizonShapeAt: { value: new THREE.Vector4(2, 1, 16, 0.15) },
     uGradient: { value: null },
     uGradient2: { value: null },
     uRingDome: { value: new THREE.Vector4(0, 0, 0, 0) },
@@ -148,6 +160,14 @@ float ringDistLevel( float d, float lod0, float morph ) {
 	float r = lod0 * pow( 2.0, k );
 	float f = clamp( ( d - r * ( 1.0 - morph ) ) / ( r * morph ), 0.0, 1.0 );
 	return k + f;
+}
+// The level a distance asks with the rings' finer levels (wave 3b): the 2 m level's range in shape.x, the 4 m level's in
+// shape.y and the finest level in shape.z (nought, minus one or minus two), each finer one morphing over its outer share mf
+// onto the next, the ranges set (shapeRanges) so that every one meets the next with its morph not yet begun.
+float ringLevelOf( float d, float lod0, float morph, vec4 shape, float mf ) {
+	if ( shape.z > -0.5 || d >= shape.y ) return ringDistLevel( d, lod0, morph );
+	if ( shape.z > -1.5 || d >= shape.x ) return -1.0 + clamp( ( d - shape.y * ( 1.0 - mf ) ) / ( shape.y * mf ), 0.0, 1.0 );
+	return -2.0 + clamp( ( d - shape.x * ( 1.0 - mf ) ) / ( shape.x * mf ), 0.0, 1.0 );
 }
 float ringEdgeLevel( float e, float band, float morph ) {
 	float x = max( e, 0.0 );
@@ -218,6 +238,45 @@ float ringCoarseDx( float rx, float rz, float s ) {
 float ringCoarseDz( float rx, float rz, float s ) {
 	return ( bakeCoarse( rx, rz + s ) - bakeCoarse( rx, rz - s ) ) / ( 2.0 * s );
 }
+// The shape window (wave 3b): the live generator's own 2 m heights round the eye, laid as the near ground lays them, in a
+// block of the heights atlas from column uHorizonShapeWin.z and row .w, toroidal by the global sample index (raw over the
+// step), its first sample (.x, .y) and its side (uHorizonShapeAt.y); a sample not made yet holds a sentinel. Its share at a
+// place (gShapeShare): one inside, fading to nought over its last uHorizonShapeAt.z samples, nought where one is not made.
+float gShapeShare = 0.0;
+float shapeTap( float gi, float gj ) {
+	float n = uHorizonShapeAt.y;
+	return texelFetch( uHorizonHeights, ivec2( int( uHorizonShapeWin.z + mod( gi, n ) ), int( uHorizonShapeWin.w + mod( gj, n ) ) ), 0 ).r;
+}
+float shapeHeight( float rx, float rz ) {
+	gShapeShare = 0.0;
+	float fx = rx / uHorizonShapeAt.x;
+	float fz = rz / uHorizonShapeAt.x;
+	float ix = floor( fx );
+	float iz = floor( fz );
+	float lx = ix - uHorizonShapeWin.x;
+	float lz = iz - uHorizonShapeWin.y;
+	float inner = min( min( lx, lz ), min( uHorizonShapeAt.y - 2.0 - lx, uHorizonShapeAt.y - 2.0 - lz ) );
+	float share = clamp( inner / uHorizonShapeAt.z, 0.0, 1.0 );
+	if ( share <= 0.0 ) return 0.0;
+	float h00 = shapeTap( ix, iz );
+	float h10 = shapeTap( ix + 1.0, iz );
+	float h01 = shapeTap( ix, iz + 1.0 );
+	float h11 = shapeTap( ix + 1.0, iz + 1.0 );
+	if ( min( min( h00, h10 ), min( h01, h11 ) ) < -1e29 ) return 0.0;
+	gShapeShare = share;
+	float ax = fx - ix;
+	float az = fz - iz;
+	return mix( mix( h00, h10, ax ), mix( h01, h11, ax ), az );
+}
+// The ring's height at a raw place: the bake's, and with the shape window read, the window's wherever it holds the place
+// (its share in gShapeShare), the bake's past it.
+float ringHeightAt( float rx, float rz ) {
+	float h = bakeHeight( rx, rz );
+	gShapeShare = 0.0;
+	if ( uHorizonShape.w < 0.5 ) return h;
+	float w = shapeHeight( rx, rz );
+	return gShapeShare > 0.0 ? mix( h, w, gShapeShare ) : h;
+}
 `;
 
 const SHARED_PARS = /* glsl */ `
@@ -233,8 +292,14 @@ uniform vec4 uHorizonSizes;
 uniform vec4 uHorizonColourN;
 uniform vec4 uHorizonLook;
 uniform vec4 uHorizonFade;
+uniform vec4 uHorizonShape;
+uniform vec4 uHorizonShapeWin;
+uniform vec4 uHorizonShapeAt;
 uniform vec4 uGroundFrame;
 uniform sampler2D uHorizonFineN;
+varying float vRingShape;
+varying vec3 vRingShapeN;
+varying float vGroundY;
 varying vec2 vRingRaw;
 varying vec3 vRingWorld;
 varying float vRingEdge;
@@ -261,6 +326,23 @@ vec3 ringNormalAt( vec2 raw, float lod ) {
 	float s = ringCoarseSpan( lod );
 	// The game's frame: raw x runs the other way, so the slope along it is the normal's x as it stands, z's turned (normalsOf).
 	return normalize( vec3( ringCoarseDx( raw.x, raw.y, s ), 1.0, -ringCoarseDz( raw.x, raw.y, s ) ) );
+}
+// The vertex's normal where the shape window holds it (wave 3b): the window's own central differences s either side
+// (normalsOf's arithmetic and frame, at the vertex's own spacing, as the near ground's vertices take theirs), mixed with the
+// bake's by the least share of the five places; the bake's alone where the window holds none.
+vec3 ringShapeNormal( vec2 raw, float s, vec3 base, float share ) {
+	if ( share <= 0.0 ) return base;
+	float hx1 = shapeHeight( raw.x + s, raw.y );
+	float k = min( share, gShapeShare );
+	float hx0 = shapeHeight( raw.x - s, raw.y );
+	k = min( k, gShapeShare );
+	float hz1 = shapeHeight( raw.x, raw.y + s );
+	k = min( k, gShapeShare );
+	float hz0 = shapeHeight( raw.x, raw.y - s );
+	k = min( k, gShapeShare );
+	if ( k <= 0.0 ) return base;
+	vec3 n = normalize( vec3( ( hx1 - hx0 ) / ( 2.0 * s ), 1.0, -( hz1 - hz0 ) / ( 2.0 * s ) ) );
+	return normalize( mix( base, n, k ) );
 }
 `;
 
@@ -298,7 +380,7 @@ export const HORIZON_RING_VERTEX = /* glsl */ `
 	float gDx = gVx - uHorizonEye.x;
 	float gDz = gVz - uHorizonEye.z;
 	float gDy = gH0 - uHorizonEye.y;
-	float gD = ringDistLevel( sqrt( gDx * gDx + gDy * gDy + gDz * gDz ), uHorizonMorph.x, uHorizonMorph.y );
+	float gD = ringLevelOf( sqrt( gDx * gDx + gDy * gDy + gDz * gDz ), uHorizonMorph.x, uHorizonMorph.y, uHorizonShape, uHorizonShapeAt.w );
 	float gE = ringEdgeLevel( ringEdgeDistance( gVx, gVz, uHorizonSquare.x, uHorizonSquare.y, uHorizonSquare.z, uHorizonSquare.w ), uHorizonMorph.z, uHorizonMorph.y );
 	float gW = min( min( gD, gE ), uHorizonMorph.w );
 	float gMx = ringMorph( gVx, uHorizonGrid.x, gW, gL );
@@ -308,19 +390,42 @@ export const HORIZON_RING_VERTEX = /* glsl */ `
 	gMz = uHorizonEye.z + ( gMz - uHorizonEye.z ) * gK;
 	float gEdge = ringEdgeDistance( gMx, gMz, uHorizonSquare.x, uHorizonSquare.y, uHorizonSquare.z, uHorizonSquare.w );
 	vec2 gRaw = vec2( uGroundFrame.x - gMx, gMz + uGroundFrame.y );
-	float gH = bakeHeight( gRaw.x, gRaw.y ) - ringDrop( gEdge, uHorizonDrop.x, uHorizonDrop.y, uHorizonDrop.z ) - gHang * uHorizonDrop.w;
+	float gH = ringHeightAt( gRaw.x, gRaw.y ) - ringDrop( gEdge, uHorizonDrop.x, uHorizonDrop.y, uHorizonDrop.z ) - gHang * uHorizonDrop.w;
+	float gShapeW = gShapeShare;
 	gRingPos = vec3( gMx, gH, gMz );
 	vRingRaw = gRaw;
 	vRingWorld = gRingPos;
 	vRingEdge = gEdge;
 	vRingDist = length( vec2( gMx - uHorizonEye.x, gMz - uHorizonEye.z ) );
 	vRingLevel = gL;
+	vRingShape = gShapeW;
+	vGroundY = gH;
 	vGroundUV = vec2( uGroundFrame.z * gRaw.x, gRaw.y ) * 0.25;
-	vec3 objectNormal = ringNormalAt( gRaw, gL );
+	vec3 objectNormal = ringShapeNormal( gRaw, max( uHorizonShapeAt.x, ${(64 / PATCH).toFixed(1)} * exp2( floor( max( gW, gL ) ) ) ), ringNormalAt( gRaw, gL ), gShapeW );
+	// The window's smooth lean to the fragment (wave 3b's review): the ring is flat shaded, so three hands it no vertex normal.
+	vRingShapeN = objectNormal;
 #ifdef USE_TANGENT
 	vec3 objectTangent = vec3( 1.0, 0.0, 0.0 );
 #endif
 `;
+
+/**
+ * The steep faces' normal in the ring (wave 3b): the ring's geometry carries no normal, so three draws it flat shaded and
+ * declares no `vNormal` (a program naming it does not compile, and the rings draw nothing); the side pictures take the
+ * ground's own lean instead, as the ring's lighting does (`FRAGMENT_NORMAL`'s first two lines): the baked normal, mixed
+ * toward the window's own smooth lean (`vRingShapeN`) by the shape window's share, in the view's frame as `groundTriSetup`
+ * takes it. The face, taken at the top of `main()` (`gRingFaceN`), is the base's past the fine extent alone.
+ */
+const RING_TRI_NORMAL_GLSL = /* glsl */ `
+vec3 gRingFaceN = vec3( 0.0, 0.0, 1.0 );
+vec3 ringTriViewNormal() {
+	vec3 w = ringBaseNormal( vRingRaw, gRingFaceN );
+	if ( vRingShape > 0.0 ) w = normalize( mix( w, normalize( vRingShapeN ), vRingShape ) );
+	return ( viewMatrix * vec4( w, 0.0 ) ).xyz;
+}
+`;
+/** The tile program's steep-face line as the ring runs it: its normal the ground's own lean, not three's `vNormal`. */
+export const RING_TRI_SWAP = ['gYd, vNormal );', 'gYd, ringTriViewNormal() );'] as const;
 
 const FRAGMENT_PARS = /* glsl */ `
 precision highp sampler2DArray;
@@ -356,10 +461,15 @@ vec4 gGroundBump = vec4( 0.5, 0.5, 1.0, 0.0 );
 vec3 gGroundAlbedo = vec3( 1.0 );
 float gGroundFlat = 0.0;
 vec3 gGroundNormalW = vec3( 0.0, 1.0, 0.0 );
+// The near ground's relief moves its picture; the rings' never does (wave 3b: the relief is the tile program's alone).
+vec2 gGroundOff = vec2( 0.0 );
+uniform vec4 uGroundTri;
 ${GROUND_TINT_GLSL}
 ${GROUND_MASK_GLSL}
+${GROUND_TRI_WANTED ? GROUND_TRI_GLSL : ''}
 ${GROUND_DECODE_GLSL}
 ${GROUND_CLOUD_GLSL}
+vec2 gRingYd = vec2( 0.0 );
 vec2 gRingDx = vec2( 0.0 );
 vec2 gRingDy = vec2( 0.0 );
 vec2 gUvDx = vec2( 0.0 );
@@ -441,7 +551,7 @@ vec3 ringAlbedoAt( vec2 raw ) {
 	vec2 kc = 1.0 / ( uHorizonCoarse.z * uHorizonSizes.zw );
 	return textureGrad( uHorizonCoarseAlbedo, ( c + 0.5 ) / uHorizonSizes.zw, gRingDx * kc, gRingDy * kc ).rgb * ${ALBEDO_SCALE.toFixed(1)};
 }
-`;
+${GROUND_TRI_WANTED ? RING_TRI_NORMAL_GLSL : ''}`;
 
 /**
  * The tile program's own composition (`TILE_MAP`) as the ring runs it, or null when its text has moved from what this
@@ -455,6 +565,8 @@ export const TILE_MAP_SWAPS: readonly (readonly [string, string])[] = [
   ['vec2 gDy = dFdy( vGroundUV );', 'vec2 gDy = gUvDy;'],
   ['vec2 gTx = dFdx( vGroundTile );', 'vec2 gTx = gTileDx;'],
   ['vec2 gTy = dFdy( vGroundTile );', 'vec2 gTy = gTileDy;'],
+  // The steep faces' height derivatives (wave 3b), the ring's own taken at the top of main() as its others are.
+  ...(TILE_MAP.includes(TILE_MAP_Y_LINE) ? [[TILE_MAP_Y_LINE, 'vec2 gYd = gRingYd;'] as const, RING_TRI_SWAP] : []),
   ['diffuseColor.rgb *= gGroundAlbedo;', '// (the ring multiplies the surface after the fade)'],
 ];
 export function ringTileMap(src: string): string | null {
@@ -475,7 +587,8 @@ const FRAGMENT_TOP = /* glsl */ `
 	gUvDy = dFdy( vGroundUV );
 	gTileDx = gRingDx * 0.25;
 	gTileDy = gRingDy * 0.25;
-#ifdef FOG_EXP2
+	gRingYd = vec2( dFdx( vGroundY ), dFdy( vGroundY ) );
+${GROUND_TRI_WANTED ? '\tgRingFaceN = normalize( cross( dFdx( vViewPosition ), dFdy( vViewPosition ) ) );\n' : ''}#ifdef FOG_EXP2
 	{
 		float gFog = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth );
 		if ( gFog > uHorizonLook.x && uHorizonFade.w < 0.5 ) {
@@ -517,6 +630,10 @@ ${RING_TILE_MAP ?? ''}
  */
 const FRAGMENT_NORMAL = /* glsl */ `
 gGroundNormalW = ringBaseNormal( vRingRaw, normal );
+// Where the shape window holds the ground (wave 3b) its own vertices' lean (the window's central differences at each vertex's
+// spacing, smooth across the triangle as the near ground's vertex normals are), by the window's share; never the flat
+// face's, which would facet every level-0 patch the window holds and part from the near ground at the hole's edge.
+if ( vRingShape > 0.0 ) gGroundNormalW = normalize( mix( gGroundNormalW, normalize( vRingShapeN ), vRingShape ) );
 normal = normalize( ( viewMatrix * vec4( gGroundNormalW, 0.0 ) ).xyz );
 if ( gRingNear > 0.0 ) ${TILE_NORMAL.trim()}
 `;
@@ -615,6 +732,7 @@ export function injectRing(shader: { vertexShader: string; fragmentShader: strin
   shader.uniforms.uGroundLook = ground.uGroundLook;
   shader.uniforms.uGroundTint = ground.uGroundTint;
   shader.uniforms.uGroundTintRef = ground.uGroundTintRef;
+  shader.uniforms.uGroundTri = ground.uGroundTri;
   return true;
 }
 

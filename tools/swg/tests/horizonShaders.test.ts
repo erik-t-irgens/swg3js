@@ -14,11 +14,12 @@ import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import { glslFunctions, GLSL_SCALARS } from './glslRun.ts';
 import { redeclared, reservedWords, unbalanced, undefinedCalls } from './glslScan.ts';
-import { HORIZON_RING_FUNCTIONS, HORIZON_RING_VERTEX, RING_NORMAL_GLSL, RING_SAMPLER_MOST, RING_SHELTER, RING_TEXT, TILE_MAP_SWAPS, injectRing, makeRingUniforms, ringTileMap } from '../../../src/world/horizon/horizonRings.ts';
+import { HORIZON_RING_FUNCTIONS, HORIZON_RING_VERTEX, RING_NORMAL_GLSL, RING_SAMPLER_MOST, RING_SHELTER, RING_TEXT, RING_TRI_SWAP, TILE_MAP_SWAPS, injectRing, makeRingUniforms, patchGeometry, ringTileMap } from '../../../src/world/horizon/horizonRings.ts';
 import { heightsAtlas } from '../../../src/world/horizon/horizonField.ts';
 import { normalsOf } from '../../../src/world/horizon/horizonDecode.ts';
 import { GROUND_CLOUD_GLSL, GROUND_DECODE_GLSL, GROUND_MASK_GLSL, GROUND_TINT_GLSL, TILE_MAP, TILE_NORMAL, TILE_ROUGHNESS, injectGroundTiles, makeGroundTileUniforms } from '../../../src/world/terrainTextures.ts';
-import { HORIZON_TUNE, HoleGrid, LEAF, RingSelector, bakeHeightAt, cameraFrustum, ringDistLevel, ringDrop, ringEdgeDistance, ringEdgeLevel, ringMorphAxis, ringReach, ringSnap, type BakeGrid } from '../../../src/world/horizon/horizonMath.ts';
+import { HORIZON_TUNE, HoleGrid, LEAF, RingSelector, bakeHeightAt, cameraFrustum, ringDistLevel, ringDrop, ringEdgeDistance, ringEdgeLevel, ringLevelOf, ringMorphAxis, ringReach, ringSnap, type BakeGrid } from '../../../src/world/horizon/horizonMath.ts';
+import { SHAPE_EMPTY } from '../../../src/world/horizon/shapeWindow.ts';
 import { newAsk, rolling, testAsk, testCamera, testHole, testPyramid } from './horizonFixtures.ts';
 
 let checks = 0;
@@ -67,7 +68,7 @@ const env: Record<string, unknown> = {
   uHorizonSizes: { x: fineG.nx, y: fineG.nz, z: coarseG.nx, w: coarseG.nz },
   uHorizonHeights: atlas(fineG, coarseG),
 };
-const G = glslFunctions(HORIZON_RING_FUNCTIONS, ['ringDistLevel', 'ringEdgeLevel', 'ringSnap', 'ringMorph', 'ringEdgeDistance', 'ringDrop', 'ringReach', 'bakeHeight', 'bakeCoarse', 'ringCoarseSpan', 'ringCoarseDx', 'ringCoarseDz'], env);
+const G = glslFunctions(HORIZON_RING_FUNCTIONS, ['ringDistLevel', 'ringLevelOf', 'ringEdgeLevel', 'ringSnap', 'ringMorph', 'ringEdgeDistance', 'ringDrop', 'ringReach', 'bakeHeight', 'bakeCoarse', 'ringCoarseSpan', 'ringCoarseDx', 'ringCoarseDz'], env);
 let seed = 99;
 const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
 let bad = 0;
@@ -81,6 +82,8 @@ for (let k = 0; k < 10000; k++) {
   const rz = (rnd() * 2 - 1) * 12000;
   const pairs: [number, number][] = [
     [G.ringDistLevel(d, 1400, 0.3), ringDistLevel(d, 1400, 0.3)],
+    // Wave 3b's finer levels: the 2 m level's range 400 and the 4 m level's 800, each finest in turn.
+    [G.ringLevelOf(d % 2000, 1400, 0.3, { x: 400, y: 800, z: -(k % 3), w: 0 }, 0.15), ringLevelOf(d % 2000, 1400, 0.3, 400, 800, -(k % 3), 0.15)],
     [G.ringEdgeLevel(e, 64, 0.3), ringEdgeLevel(e, 64, 0.3)],
     [G.ringSnap(v, 1, 32), ringSnap(v, 1, 32)],
     [G.ringMorph(v, 1, w, node), ringMorphAxis(v, 1, w, node)],
@@ -124,15 +127,21 @@ ok(nSeen > 1000 && nWorst <= 0.5 / 127.5 + 1e-9, `a coarse vertex's normal is no
 ok(G.ringCoarseSpan(2) === 64 && G.ringCoarseSpan(3) === 64 && G.ringCoarseSpan(5) === 256, "the coarse normal's step is the lattice's own up to its level, then the level's spacing");
 
 // ---- the vertex stage, run as script over real selections
+// Run twice: as the rings stood before wave 3b (no finer level, the bake's heights alone), and with the shape up close on
+// (levels down to 2 m from the hole outward, the shape window's 2 m heights read where it holds them, a finer ripple than
+// the bake carries, so a window misread shows).
 const shift = { x: 1, z: 0 };
 const square = { x: 0, y: 0, z: 0, w: 0 };
 const eye = { x: 0, y: 0, z: 0, w: 0 };
 const morph = { x: 1400, y: 0.3, z: 64, w: 3 };
 const drop = { x: 2.5, y: 256, z: 0, w: 16 };
 const frame = { x: 1270, y: -3600, z: 1, w: 0 };
+const shapeU = { x: 1, y: 1, z: 0, w: 0 };
+const shapeWin = { x: 0, y: 0, z: 0, w: 0 };
+const shapeAt = { x: 2, y: 1, z: 16, w: HORIZON_TUNE.shapeMorph };
 const vertexFn = `${HORIZON_RING_FUNCTIONS}
 vec3 gRingPos;
-vec2 vRingRaw; vec3 vRingWorld; float vRingEdge; float vRingDist; float vRingLevel; vec2 vGroundUV;
+vec2 vRingRaw; vec3 vRingWorld; float vRingEdge; float vRingDist; float vRingLevel; vec2 vGroundUV; float vRingShape; vec3 vRingShapeN; float vGroundY;
 void ringVertexMain( float px, float py, float pz, float ax, float ay, float az, float aw ) {
 ${HORIZON_RING_VERTEX.replace(/^#.*$/gm, '').replace(/position\.([xyz])/g, 'p$1').replace(/aRing\.([xyzw])/g, (_m, c: string) => `a${c === 'w' ? 'w' : c === 'x' ? 'x' : c === 'y' ? 'y' : 'z'}`)}
 }
@@ -140,27 +149,57 @@ float outX() { return gRingPos.x; }
 float outY() { return gRingPos.y; }
 float outZ() { return gRingPos.z; }
 float outEdge() { return vRingEdge; }
+float outShape() { return vRingShape; }
+float outShare() { return gShapeShare; }
 `;
 // The coarse grid stands in the raw frame about the frame's centre: the vertex reads raw = (centre.x - x, z + centre.z).
 const fineV = grid(1270 - 12000, -3600 - 12000, 8, 3001, raw);
 const coarseV = grid(1270 - 40000, -3600 - 40000, 64, 1251, raw);
-const V = glslFunctions(vertexFn, ['ringVertexMain', 'outX', 'outY', 'outZ', 'outEdge'], {
+// The shape window's block in the atlas (wave 3b), a side of 1,024 2 m samples as the game's, filled round each camera with the bake's
+// own ground and a 2 m ripple the 8 m bake does not carry.
+const SIDE = 1024;
+const fine2 = (rx: number, rz: number) => raw(rx, rz) + 0.7 * Math.sin(rx * 0.9) * Math.cos(rz * 1.1);
+const shapeAtlas = { w: Math.max(fineV.nx, coarseV.nx + SIDE), h: heightsAtlas(fineV.h, fineV.nx, fineV.nz, coarseV.h, coarseV.nx, coarseV.nz, SIDE) };
+const layShape = (rawEx: number, rawEz: number) => {
+  const gi0 = Math.floor(rawEx / 2) - SIDE / 2;
+  const gj0 = Math.floor(rawEz / 2) - SIDE / 2;
+  shapeWin.x = gi0;
+  shapeWin.y = gj0;
+  shapeWin.z = coarseV.nx;
+  shapeWin.w = fineV.nz;
+  shapeAt.y = SIDE;
+  for (let j = 0; j < SIDE; j++) {
+    for (let i = 0; i < SIDE; i++) {
+      const gi = gi0 + i;
+      const gj = gj0 + j;
+      const c = ((gi % SIDE) + SIDE) % SIDE;
+      const r = ((gj % SIDE) + SIDE) % SIDE;
+      shapeAtlas.h[(fineV.nz + r) * shapeAtlas.w + coarseV.nx + c] = fine2(gi * 2, gj * 2);
+    }
+  }
+};
+const V = glslFunctions(vertexFn, ['ringVertexMain', 'outX', 'outY', 'outZ', 'outEdge', 'outShape', 'outShare', 'shapeHeight'], {
   ...env,
+  mod: (x: number, y: number) => x - y * Math.floor(x / y),
   uHorizonFine: { x: fineV.x0, y: fineV.z0, z: 8, w: 0 },
   uHorizonCoarse: { x: coarseV.x0, y: coarseV.z0, z: 64, w: 3 },
   uHorizonSizes: { x: fineV.nx, y: fineV.nz, z: coarseV.nx, w: coarseV.nz },
-  uHorizonHeights: atlas(fineV, coarseV),
+  uHorizonHeights: shapeAtlas,
   uHorizonEye: eye,
   uHorizonSquare: square,
   uHorizonMorph: morph,
   uHorizonDrop: drop,
   uHorizonGrid: { x: shift.x, y: shift.z, z: 0, w: 0 },
+  uHorizonShape: shapeU,
+  uHorizonShapeWin: shapeWin,
+  uHorizonShapeAt: shapeAt,
   uGroundFrame: frame,
   ringNormalAt: () => ({ x: 0, y: 1, z: 0 }),
+  ringShapeNormal: (_r: unknown, _s: number, base: unknown) => base,
 });
 const vert = (px: number, py: number, pz: number, a: number[]) => {
   V.ringVertexMain(px, py, pz, a[0], a[1], a[2], a[3]);
-  return [V.outX(), V.outY(), V.outZ(), V.outEdge()];
+  return [V.outX(), V.outY(), V.outZ(), V.outEdge(), V.outShape()];
 };
 const groundH = (gx: number, gz: number) => rolling(gx - 1270 + 1270, gz);
 const pyr = testPyramid(20000, shift, (gx, gz) => raw(1270 - gx, gz - 3600));
@@ -170,119 +209,176 @@ const cam = testCamera();
 const fr = new THREE.Frustum();
 const mm = new THREE.Matrix4();
 const ask = newAsk();
-let shared = 0;
-let sharedBad = 0;
-let tWorst = 0;
-let tChecked = 0;
-let edgeOff = 0;
-let edgeSeen = 0;
-let skirtBad = 0;
-let pastReach = 0;
-for (let c = 0; c < 60; c++) {
-  const x = (rnd() * 2 - 1) * 5000;
-  const z = (rnd() * 2 - 1) * 5000;
-  const up = c % 4 === 0 ? 2000 : 2 + rnd() * 30;
-  cam.position.set(x, raw(1270 - x, z - 3600) + up, z);
-  // Every eighth looks nearly straight down from 2 km: only there do the edge's bands, not the range, decide the leaves by the
-  // square (from near the ground the range rule always splits them first).
-  cam.rotation.set(c % 8 === 0 ? -1.45 : up > 1000 ? -0.6 : -0.05, rnd() * 6.28, 0, 'YXZ');
-  cam.updateMatrixWorld();
-  HORIZON_TUNE.reach = [3300, 8000][c % 2];
-  testHole(hole, Math.floor(x / LEAF), Math.floor(z / LEAF), 6);
-  testAsk(ask, cam.position, 0, 6, shift);
-  cameraFrustum(cam, mm, fr);
-  sel.select(fr, ask, pyr, hole);
-  eye.x = x;
-  eye.y = cam.position.y;
-  eye.z = z;
-  eye.w = ask.reach;
-  square.x = ask.cx0 * LEAF + shift.x;
-  square.y = ask.cz0 * LEAF + shift.z;
-  square.z = (ask.cx1 + 1) * LEAF + shift.x;
-  square.w = (ask.cz1 + 1) * LEAF + shift.z;
-  morph.x = ask.lod0;
-  morph.w = ask.levels - 1;
-  // Every node's border vertices, by their place: shared ones the same from each node; a finer node's edge vertices on its coarser neighbour's edge.
-  const byPlace = new Map<string, number[]>();
-  const nodes: { x0: number; z0: number; L: number }[] = [];
-  for (let k = 0; k < sel.patchCount; k++) nodes.push({ x0: sel.patches[k * 4], z0: sel.patches[k * 4 + 1], L: sel.patches[k * 4 + 2] });
-  for (const n of nodes) {
-    const q = 8 * 2 ** n.L;
-    for (let t = 0; t <= 8; t++) {
-      for (const [i, j] of [[t, 0], [t, 8], [0, t], [8, t]]) {
-        const out = vert(i, 0, j, [n.x0, n.z0, n.L, 0]);
-        const key = `${n.x0 + i * q},${n.z0 + j * q}`;
-        const had = byPlace.get(key);
-        if (had) {
-          shared++;
-          if (Math.abs(had[0] - out[0]) > 1e-6 || Math.abs(had[1] - out[1]) > 1e-6 || Math.abs(had[2] - out[2]) > 1e-6) sharedBad++;
-        } else byPlace.set(key, out);
-        if (Math.hypot(out[0] - x, out[2] - z) > ask.reach + 1e-6) pastReach++;
-        // The hole's edge, seen from anywhere: a vertex on it stands on the chunks' lattice, unmorphed.
-        if (out[3] <= 0 && out[3] > -1e-6 && n.L === 0) {
-          edgeSeen++;
-          if (Math.abs(out[0] - (n.x0 + i * q)) > 1e-6 || Math.abs(out[2] - (n.z0 + j * q)) > 1e-6) edgeOff++;
-        }
-      }
-    }
-  }
-  // T-junctions: a finer node's border vertex that lies on a coarser neighbour's edge, against that edge's line.
-  for (const fine of nodes) {
-    const q = 8 * 2 ** fine.L;
-    for (const coarse of nodes) {
-      if (coarse.L !== fine.L + 1) continue;
-      const S = 64 * 2 ** coarse.L;
-      const cq = 8 * 2 ** coarse.L;
+function vertexChecks(shapeOn: boolean): void {
+  const tag = shapeOn ? ' (the shape up close on)' : '';
+  HORIZON_TUNE.shape = shapeOn;
+  // The game's frame puts the chunks' vertices on the near ground's poles (raw x even); the stand-in's centre does so with the shape on.
+  frame.x = shapeOn ? 1271 : 1270;
+  let shared = 0;
+  let sharedBad = 0;
+  let tWorst = 0;
+  let tChecked = 0;
+  let edgeOff = 0;
+  let edgeSeen = 0;
+  let edgeLine = 0;
+  let skirtBad = 0;
+  let pastReach = 0;
+  let finePatches = 0;
+  let onWindow = 0;
+  let onWindowBad = 0;
+  for (let c = 0; c < 60; c++) {
+    const x = (rnd() * 2 - 1) * 5000;
+    const z = (rnd() * 2 - 1) * 5000;
+    const up = c % 4 === 0 ? 2000 : 2 + rnd() * 30;
+    cam.position.set(x, raw(1270 - x, z - 3600) + up, z);
+    // Every eighth looks nearly straight down from 2 km: only there do the edge's bands, not the range, decide the leaves by the
+    // square (from near the ground the range rule always splits them first).
+    cam.rotation.set(c % 8 === 0 ? -1.45 : up > 1000 ? -0.6 : -0.05, rnd() * 6.28, 0, 'YXZ');
+    cam.updateMatrixWorld();
+    HORIZON_TUNE.reach = [3300, 8000][c % 2];
+    testHole(hole, Math.floor(x / LEAF), Math.floor(z / LEAF), 6);
+    testAsk(ask, cam.position, 0, 6, shift);
+    cameraFrustum(cam, mm, fr);
+    sel.select(fr, ask, pyr, hole);
+    eye.x = x;
+    eye.y = cam.position.y;
+    eye.z = z;
+    eye.w = ask.reach;
+    square.x = ask.cx0 * LEAF + shift.x;
+    square.y = ask.cz0 * LEAF + shift.z;
+    square.z = (ask.cx1 + 1) * LEAF + shift.x;
+    square.w = (ask.cz1 + 1) * LEAF + shift.z;
+    morph.x = ask.lod0;
+    morph.w = ask.levels - 1;
+    shapeU.x = ask.r2 > 0 ? ask.r2 : 1;
+    shapeU.y = ask.r1 > 0 ? ask.r1 : 1;
+    shapeU.z = ask.finest;
+    shapeU.w = shapeOn ? 1 : 0;
+    if (shapeOn) layShape(frame.x - x, z + frame.y);
+    // Every node's border vertices, by their place: shared ones the same from each node; a finer node's edge vertices on its coarser neighbour's edge.
+    const byPlace = new Map<string, number[]>();
+    const nodes: { x0: number; z0: number; L: number }[] = [];
+    for (let k = 0; k < sel.patchCount; k++) nodes.push({ x0: sel.patches[k * 4], z0: sel.patches[k * 4 + 1], L: sel.patches[k * 4 + 2] });
+    for (const n of nodes) {
+      if (n.L < 0) finePatches++;
+      const q = 8 * 2 ** n.L;
       for (let t = 0; t <= 8; t++) {
         for (const [i, j] of [[t, 0], [t, 8], [0, t], [8, t]]) {
-          const px = fine.x0 + i * q;
-          const pz = fine.z0 + j * q;
-          const onX = (px === coarse.x0 || px === coarse.x0 + S) && pz >= coarse.z0 && pz <= coarse.z0 + S;
-          const onZ = (pz === coarse.z0 || pz === coarse.z0 + S) && px >= coarse.x0 && px <= coarse.x0 + S;
-          if (!onX && !onZ) continue;
-          const v = vert(i, 0, j, [fine.x0, fine.z0, fine.L, 0]);
-          // The coarse edge's two vertices round it, and the line between them at the fine vertex's place.
-          const along = onX ? (pz - coarse.z0) / cq : (px - coarse.x0) / cq;
-          const a0 = Math.floor(along);
-          const a1 = Math.min(8, a0 + 1);
-          const ci = (a: number) => (onX ? [(px - coarse.x0) / cq, a] : [a, (pz - coarse.z0) / cq]);
-          const [i0, j0] = ci(a0);
-          const [i1, j1] = ci(a1);
-          const p0 = vert(i0, 0, j0, [coarse.x0, coarse.z0, coarse.L, 0]);
-          const p1 = vert(i1, 0, j1, [coarse.x0, coarse.z0, coarse.L, 0]);
-          const dx = p1[0] - p0[0];
-          const dz = p1[2] - p0[2];
-          const len2 = dx * dx + dz * dz;
-          const s = len2 > 0 ? Math.min(1, Math.max(0, ((v[0] - p0[0]) * dx + (v[2] - p0[2]) * dz) / len2)) : 0;
-          const ex = p0[0] + dx * s - v[0];
-          const ez = p0[2] + dz * s - v[2];
-          const ey = p0[1] + (p1[1] - p0[1]) * s - v[1];
-          tWorst = Math.max(tWorst, Math.hypot(ex, ey, ez));
-          tChecked++;
+          const out = vert(i, 0, j, [n.x0, n.z0, n.L, 0]);
+          const key = `${n.x0 + i * q},${n.z0 + j * q}`;
+          const had = byPlace.get(key);
+          if (had) {
+            shared++;
+            if (Math.abs(had[0] - out[0]) > 1e-6 || Math.abs(had[1] - out[1]) > 1e-6 || Math.abs(had[2] - out[2]) > 1e-6) sharedBad++;
+          } else byPlace.set(key, out);
+          if (Math.hypot(out[0] - x, out[2] - z) > ask.reach + 1e-6) pastReach++;
+          if (out[3] <= 0 && out[3] > -1e-6) {
+            // The hole's edge, seen from anywhere: a leaf's vertex on it stands on the chunks' lattice, unmorphed; a finer
+            // node's morphs only along it (wave 3b), never off its line.
+            if (n.L === 0) {
+              edgeSeen++;
+              if (Math.abs(out[0] - (n.x0 + i * q)) > 1e-6 || Math.abs(out[2] - (n.z0 + j * q)) > 1e-6) edgeOff++;
+            } else if (n.L < 0 && Math.abs(out[3]) > 1e-6) edgeLine++;
+          }
+          // A vertex standing unmorphed on the 2 m lattice where the window holds it whole stands at the window's own sample,
+          // less the drop (the near ground's very pole).
+          if (shapeOn && out[4] >= 1 && Math.abs(out[0] - (n.x0 + i * q)) < 1e-9 && Math.abs(out[2] - (n.z0 + j * q)) < 1e-9) {
+            const rx = frame.x - out[0];
+            const rz = out[2] + frame.y;
+            if (Math.abs(rx / 2 - Math.round(rx / 2)) < 1e-9 && Math.abs(rz / 2 - Math.round(rz / 2)) < 1e-9) {
+              onWindow++;
+              const want = Math.fround(fine2(rx, rz)) - ringDrop(out[3], drop.x, drop.y, drop.z);
+              if (Math.abs(out[1] - want) > 1e-6) onWindowBad++;
+            }
+          }
         }
       }
     }
-  }
-  // A skirt's top row is its leaf's edge (the same place, the same morph).
-  for (let k = 0; k < sel.skirtCount; k++) {
-    const sx = sel.skirts[k * 4];
-    const sz = sel.skirts[k * 4 + 1];
-    const side = sel.skirts[k * 4 + 3];
-    for (let t = 0; t <= 8; t++) {
-      const top = vert(t, 1, 0, [sx, sz, 0, side]);
-      const [i, j] = side === 1 ? [t, 0] : side === 2 ? [8, t] : side === 3 ? [t, 8] : [0, t];
-      const leaf = vert(i, 0, j, [sx, sz, 0, 0]);
-      const bottom = vert(t, 2, 0, [sx, sz, 0, side]);
-      if (Math.abs(top[0] - leaf[0]) > 1e-9 || Math.abs(top[1] - leaf[1]) > 1e-9 || Math.abs(top[2] - leaf[2]) > 1e-9 || Math.abs(top[1] - bottom[1] - drop.w) > 1e-9) skirtBad++;
+    // T-junctions: a finer node's border vertex that lies on a coarser neighbour's edge, against that edge's line.
+    for (const fine of nodes) {
+      const q = 8 * 2 ** fine.L;
+      for (const coarse of nodes) {
+        if (coarse.L !== fine.L + 1) continue;
+        const S = 64 * 2 ** coarse.L;
+        const cq = 8 * 2 ** coarse.L;
+        for (let t = 0; t <= 8; t++) {
+          for (const [i, j] of [[t, 0], [t, 8], [0, t], [8, t]]) {
+            const px = fine.x0 + i * q;
+            const pz = fine.z0 + j * q;
+            const onX = (px === coarse.x0 || px === coarse.x0 + S) && pz >= coarse.z0 && pz <= coarse.z0 + S;
+            const onZ = (pz === coarse.z0 || pz === coarse.z0 + S) && px >= coarse.x0 && px <= coarse.x0 + S;
+            if (!onX && !onZ) continue;
+            const v = vert(i, 0, j, [fine.x0, fine.z0, fine.L, 0]);
+            // The coarse edge's two vertices round it, and the line between them at the fine vertex's place.
+            const along = onX ? (pz - coarse.z0) / cq : (px - coarse.x0) / cq;
+            const a0 = Math.floor(along);
+            const a1 = Math.min(8, a0 + 1);
+            const ci = (a: number) => (onX ? [(px - coarse.x0) / cq, a] : [a, (pz - coarse.z0) / cq]);
+            const [i0, j0] = ci(a0);
+            const [i1, j1] = ci(a1);
+            const p0 = vert(i0, 0, j0, [coarse.x0, coarse.z0, coarse.L, 0]);
+            const p1 = vert(i1, 0, j1, [coarse.x0, coarse.z0, coarse.L, 0]);
+            const dx = p1[0] - p0[0];
+            const dz = p1[2] - p0[2];
+            const len2 = dx * dx + dz * dz;
+            const s = len2 > 0 ? Math.min(1, Math.max(0, ((v[0] - p0[0]) * dx + (v[2] - p0[2]) * dz) / len2)) : 0;
+            const ex = p0[0] + dx * s - v[0];
+            const ez = p0[2] + dz * s - v[2];
+            const ey = p0[1] + (p1[1] - p0[1]) * s - v[1];
+            tWorst = Math.max(tWorst, Math.hypot(ex, ey, ez));
+            tChecked++;
+          }
+        }
+      }
+    }
+    // A skirt's top row is its node's edge (the same place, the same morph), at the node's own level.
+    for (let k = 0; k < sel.skirtCount; k++) {
+      const sx = sel.skirts[k * 4];
+      const sz = sel.skirts[k * 4 + 1];
+      const sL = sel.skirts[k * 4 + 2];
+      const side = sel.skirts[k * 4 + 3];
+      for (let t = 0; t <= 8; t++) {
+        const top = vert(t, 1, 0, [sx, sz, sL, side]);
+        const [i, j] = side === 1 ? [t, 0] : side === 2 ? [8, t] : side === 3 ? [t, 8] : [0, t];
+        const leaf = vert(i, 0, j, [sx, sz, sL, 0]);
+        const bottom = vert(t, 2, 0, [sx, sz, sL, side]);
+        if (Math.abs(top[0] - leaf[0]) > 1e-9 || Math.abs(top[1] - leaf[1]) > 1e-9 || Math.abs(top[2] - leaf[2]) > 1e-9 || Math.abs(top[1] - bottom[1] - drop.w) > 1e-9) skirtBad++;
+      }
     }
   }
+  HORIZON_TUNE.reach = 8000;
+  ok(shared > 1000 && sharedBad === 0, `a vertex two nodes share comes out the same from each (${shared} shared)${tag}`);
+  ok(tChecked > 100 && tWorst < 0.01, `a finer node's edge lies on its coarser neighbour's edge (${tChecked} T-junctions, worst ${(tWorst * 100).toFixed(3)} cm off the coarse edge)${tag}`);
+  ok(edgeSeen > (shapeOn ? 10 : 100) && edgeOff === 0, `every leaf's vertex on the hole's edge stands on the chunks' lattice unmorphed, cameras from the ground to 2 km up (${edgeSeen} vertices)${tag}`);
+  ok(edgeLine === 0, `a finer node's vertex on the hole's edge stays on its line${tag}`);
+  ok(skirtBad === 0, `a skirt's top row is its node's edge and its bottom hangs the skirt's depth under it${tag}`);
+  ok(pastReach === 0, `no ring vertex stands past the reach in force${tag}`);
+  if (shapeOn) {
+    ok(finePatches > 500, `the finer levels are drawn from the hole outward (${finePatches} patches of 4 m and 2 m over 60 cameras)`);
+    ok(onWindow > 1000 && onWindowBad === 0, `a vertex on the 2 m lattice where the shape window holds it whole stands at the window's own sample less the drop, exactly (${onWindow} vertices)`);
+  } else ok(finePatches === 0, 'with the shape off no node is finer than a leaf: the rings of before');
 }
-HORIZON_TUNE.reach = 8000;
-ok(shared > 1000 && sharedBad === 0, `a vertex two nodes share comes out the same from each (${shared} shared)`);
-ok(tChecked > 100 && tWorst < 0.01, `a finer node's edge lies on its coarser neighbour's edge (${tChecked} T-junctions, worst ${(tWorst * 100).toFixed(3)} cm off the coarse edge)`);
-ok(edgeSeen > 100 && edgeOff === 0, `every vertex on the hole's edge stands on the chunks' lattice unmorphed, cameras from the ground to 2 km up (${edgeSeen} vertices)`);
-ok(skirtBad === 0, "a skirt's top row is its leaf's edge and its bottom hangs the skirt's depth under it");
-ok(pastReach === 0, 'no ring vertex stands past the reach in force');
+vertexChecks(false);
+vertexChecks(true);
+HORIZON_TUNE.shape = true;
+// The window's sentinel: a sample not made yet reads as none (its share nought), and the bake stands there.
+{
+  shapeWin.x = 0;
+  shapeWin.y = 0;
+  shapeWin.z = coarseV.nx;
+  shapeWin.w = fineV.nz;
+  const k = (fineV.nz + 5) * shapeAtlas.w + coarseV.nx + 7;
+  const was = shapeAtlas.h[k];
+  shapeAtlas.h[k] = SHAPE_EMPTY;
+  V.shapeHeight(15, 11);
+  ok(V.outShare() === 0, "a window sample not made yet (the sentinel) is read as none, its share nought: the bake stands there");
+  shapeAtlas.h[k] = was;
+  const h = V.shapeHeight(15, 11);
+  ok(V.outShare() > 0 && Math.abs(h - 0.25 * (shapeAtlas.h[k] + shapeAtlas.h[k + 1] + shapeAtlas.h[k + shapeAtlas.w] + shapeAtlas.h[k + shapeAtlas.w + 1])) < 1e-6, "and made, its bilinear between the four samples, in the window's toroidal block");
+  // Past the window's edge, and over its fade there, its share goes to nought: the bake's heights beyond.
+  V.shapeHeight(2 * (SIDE - 1), 11);
+  ok(V.outShare() === 0, "past the window's last sample its share is nought");
+}
 
 // ---- the third wave: the near ground's own composition, by the tile program's own text
 const ringTile = ringTileMap(TILE_MAP);
@@ -300,7 +396,8 @@ for (const [name, text] of [['GROUND_MASK_GLSL', GROUND_MASK_GLSL], ['GROUND_TIN
 ok(RING_TEXT.FRAGMENT_NORMAL.includes(TILE_NORMAL.trim()) && RING_TEXT.FRAGMENT_ROUGH === TILE_ROUGHNESS, "and runs the tile program's own TILE_NORMAL (where the near composition is drawn) and TILE_ROUGHNESS");
 ok(/gl_FragColor = vec4\( fogColor, 1\.0 \);/.test(RING_TEXT.FRAGMENT_TOP), "the fog's cheap path writes the fog's own colour, exactly");
 // The derivatives every taps reads are taken once at the top of main(), never inside a branch.
-ok(!/dFd[xy]/.test(RING_TEXT.FRAGMENT_MAP + RING_TEXT.FRAGMENT_NORMAL + RING_TEXT.FRAGMENT_ROUGH + RING_TEXT.FRAGMENT_PARS) && (RING_TEXT.FRAGMENT_TOP.match(/dFd[xy]/g) ?? []).length === 4, 'every derivative the taps read is taken once at the top of main(), none in a branch');
+// (Eight since wave 3b: the steep faces' height derivatives and the face's own lean beside the raw place's and the picture's.)
+ok(!/dFd[xy]/.test(RING_TEXT.FRAGMENT_MAP + RING_TEXT.FRAGMENT_NORMAL + RING_TEXT.FRAGMENT_ROUGH + RING_TEXT.FRAGMENT_PARS) && (RING_TEXT.FRAGMENT_TOP.match(/dFd[xy]/g) ?? []).length === 8, 'every derivative the taps read is taken once at the top of main(), none in a branch');
 
 // ---- the third wave: the program's samplers, counted over its text as three assembles it, under Direct3D 11's sixteen
 /** `#include <x>` resolved through three's chunks, as `WebGLProgram` does. */
@@ -422,6 +519,27 @@ for (const c of COMBOS) {
   ok(units <= RING_SAMPLER_MOST, `the ring program under ${c.name} reads ${units} samplers, at most Direct3D 11's ${RING_SAMPLER_MOST}`);
 }
 console.log(`note the most the ring program reads: ${mostUnits} (${mostNames})`);
+// Wave 3b's lesson: the ring's geometry carries no normal, so three defines FLAT_SHADED for it and declares no `vNormal`;
+// a program naming it does not compile on the card and the rings draw nothing (the first smoke's grey ground from 400 m).
+{
+  const flat = patchGeometry(1).geometry.attributes.normal === undefined;
+  ok(flat, "the ring's patch carries no normal: three draws it flat shaded, with no vNormal varying");
+  const f = preprocess(prog.fragment, { ...COMBOS[0].defs, FLAT_SHADED: 1 });
+  const v = preprocess(prog.vertex, { ...COMBOS[0].defs, FLAT_SHADED: 1 });
+  const named = (s: string) => /\bvNormal\b/.test(s.replace(/varying\s+vec3\s+vNormal\s*;/g, ''));
+  const declared = (s: string) => /varying\s+vec3\s+vNormal\s*;/.test(s);
+  ok(!named(f) || declared(f), 'the ring fragment under FLAT_SHADED names vNormal only where it is declared (the steep faces take the ground\'s own lean)');
+  ok(!named(v) || declared(v), 'and so does its vertex');
+  ok(TILE_MAP.includes(RING_TRI_SWAP[0]) === prog.fragment.includes('ringTriViewNormal()'), "the tile program's steep-face line runs in the ring on the ring's own normal");
+  // Its review: under FLAT_SHADED three's `normal` is the face's own, so a lean mixed toward it by the window's share faceted
+  // every level-0 patch the window holds (8 m facets out to its edge, a band where they meet the bake's, a seam at the hole's
+  // edge against the near ground's smooth normals). Every mix by the share takes the window's smooth lean, which the vertex
+  // stage hands on from `ringShapeNormal` (the vertex's own central differences), and none takes the face.
+  const mixes = (s: string) => [...s.matchAll(/mix\([^;]*\bvRingShape\s*\)/g)].map((m) => m[0]);
+  const fm = mixes(f);
+  ok(fm.length >= 2 && fm.every((m) => /\bvRingShapeN\b/.test(m) && !/\bnormal\b|gRingFaceN/.test(m)), `every lean mixed by the window's share in the ring fragment is the window's smooth one (${fm.length} mixes), never the flat face`);
+  ok(/varying\s+vec3\s+vRingShapeN\s*;/.test(f) && /vRingShapeN\s*=\s*objectNormal\s*;/.test(v) && v.indexOf('vec3 objectNormal = ringShapeNormal(') >= 0 && v.indexOf('vec3 objectNormal = ringShapeNormal(') < v.indexOf('vRingShapeN = objectNormal'), "and the vertex stage writes it from ringShapeNormal's answer");
+}
 // The counter itself, held to the program before this wave's packing: the same assembly over W1's samplers counts past 16.
 const before = prog.fragment.replace('uniform highp usampler2D uHorizonWindow;', 'uniform highp usampler2D uHorizonWindow;\nuniform sampler2D uHorizonCoarseN;\nuniform sampler2D uHorizonDetail;\nuniform sampler2D uHorizonMeans;\nuniform highp sampler2D uRoofMap2;').replace('void main() {', 'void main() {\n\tvec4 gOld = texture( uHorizonCoarseN, vec2( 0.0 ) ) + texture( uHorizonDetail, vec2( 0.0 ) ) + texture( uHorizonMeans, vec2( 0.0 ) ) + texture( uRoofMap2, vec2( 0.0 ) );');
 const beforeUnits = [...new Map([...activeSamplers(preprocess(prog.vertex, COMBOS[0].defs), COMBOS[0].defs), ...activeSamplers(preprocess(before, COMBOS[0].defs), COMBOS[0].defs)]).values()].reduce((a, b) => a + b, 0);
@@ -457,10 +575,11 @@ const tt = old('src/world/terrainTextures.ts');
 const sk = old('src/world/sky.ts');
 if (!tt || !sk) console.log(`note git cannot show ${PRE_PASS} here: the byte-for-byte checks are left out`);
 else {
-  const nowTt = fold(readFileSync(new URL('../../../src/world/terrainTextures.ts', import.meta.url), 'utf8'));
-  // The third wave exported the masks' functions (laid back the same way) and the bump's and gloss's stages (an `export` alone).
-  const backTt = laidBack(laidBack(nowTt, 'GROUND_CLOUD_GLSL'), 'GROUND_MASK_GLSL').replace('export const TILE_ROUGHNESS = ', 'const TILE_ROUGHNESS = ').replace('export const TILE_NORMAL = ', 'const TILE_NORMAL = ');
-  ok(backTt === tt, `the tile program's text is ${PRE_PASS}'s to the byte with GROUND_CLOUD_GLSL and GROUND_MASK_GLSL laid back and TILE_ROUGHNESS and TILE_NORMAL unexported (its key unchanged)`);
+  // The tile program's text moved in wave 3b on purpose (the owner's: the steep faces' side pictures and the relief near the
+  // eye), so it is no longer held to PRE_PASS's file here: `groundDetail.test.ts` holds the program assembled with both left
+  // out at load (the hatches) to 993f258's assembled program, to the byte.
+  void tt;
+  void laidBack;
   const nowSk = fold(readFileSync(new URL('../../../src/world/sky.ts', import.meta.url), 'utf8'));
   const dome = fold(readFileSync(new URL('../../../src/world/domeColour.ts', import.meta.url), 'utf8'));
   const body = dome.slice(dome.indexOf('= `') + 3, dome.lastIndexOf('`;'));

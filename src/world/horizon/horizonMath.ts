@@ -7,8 +7,13 @@
 //
 // Pure: three's maths alone (a frustum and a box), so node runs it.
 import * as THREE from 'three';
+import { SHAPE_BLOCK, SHAPE_SIDE } from './shapeWindow.ts';
 
 export type HorizonGround = 'tiles' | 'both' | 'rings';
+
+/** The shape window's half side in blocks and a block's width in metres at its 2 m step (`shapeWindowReach`'s, written out in `shapeRanges`). */
+const SHAPE_HALF = (SHAPE_SIDE / SHAPE_BLOCK) >> 1;
+const SHAPE_BW = SHAPE_BLOCK * 2;
 
 /**
  * Every number of the far ground [ours unless a line says so], live through `__debug.horizon({ tune })`; the look ones are
@@ -67,6 +72,24 @@ export const HORIZON_TUNE = {
   farGridRadius: 2,
   /** W2: how long an arrival waits behind its screen for the overlays the terrain worker makes again (paint, a dropped building, Life Day), ms; the rest lands in play. */
   regenWaitMs: 4000,
+  /**
+   * Wave 3b, the rings' shape up close: finer levels than the bake's 8 m from the hole outward, standing on the live
+   * generator's own 2 m heights round the eye (the shape window, `shapeWindow.ts`), so the shape does not change just past
+   * the near ground. `shapeReach` is how far the finest (`shapeFinest` metres, 2 or 4) holds before it gives way (the
+   * Graphics page's Terrain shape detail): it morphs over the range's last `morph` share onto 4 m, which the ranges hand on to
+   * the 8 m level, never coarser than the rings were without it. Nought, or the switch off, is the rings of before.
+   */
+  shape: true,
+  shapeFinest: 2,
+  shapeReach: 700,
+  /** The finer levels' own morph share (their ranges are short: a share of 0.3 would want more room before the next). */
+  shapeMorph: 0.15,
+  /** How many of the coarser level's node sizes past a finer range the coarser one's morph begins (keeps the T-junctions closed). */
+  shapeGap: 2.5,
+  /** How far the selection's frustum box is grown up and down for the 2 m heights, which stand off the bake's 8 m samples (metres). */
+  shapePad: 12,
+  /** The shape window's share fades to nought over its last this many samples, so its edge is never a step. */
+  shapeFade: 16,
 };
 export type HorizonTune = typeof HORIZON_TUNE;
 
@@ -102,9 +125,65 @@ export interface ReachRules {
   /** Level 0's range in force, and how many levels reach the reach in force. */
   lod0: number;
   levels: number;
+  /** Wave 3b: the finest level (nought, minus one or minus two), the 4 m level's range and the 2 m level's (nought where none). */
+  finest: number;
+  r1: number;
+  r2: number;
+  /** The finer levels' morph share in force (`shapeMorph` held to [0.01, 0.9]): the ranges are placed with it and the ring morphs by it. */
+  mf: number;
 }
 
-export function reachRules(t: HorizonTune, viewRadius: number, reversed: boolean, out: ReachRules): ReachRules {
+/**
+ * The finer levels' ranges (wave 3b) round level 0's of before (`lodT`): the finest level's range is the shape's reach;
+ * the 4 m level's is twice it where that fits under level 0's range of before (so no coarser level moves), else as short as
+ * the morph allows; level 0's is held at least far enough for the 4 m level to morph onto it. Every finer range is held
+ * inside the shape window's whole share (`shapeWindowReach`), past which its 2 m shape would be the bake's 8 m. Written into `out`.
+ */
+export function shapeRanges(t: HorizonTune, lodT: number, shapeOk: boolean, out: ReachRules): void {
+  let finest = shapeOk && t.shape && t.shapeReach > 0 ? (t.shapeFinest <= 2 ? -2 : t.shapeFinest <= 4 ? -1 : 0) : 0;
+  const mf = Math.min(Math.max(t.shapeMorph, 0.01), 0.9);
+  out.mf = mf;
+  out.lod0 = lodT;
+  out.r1 = 0;
+  out.r2 = 0;
+  if (finest === 0) {
+    out.finest = 0;
+    return;
+  }
+  // Each level's morph must not have begun where it meets the finer one's nodes, or a finer node's edge vertex and its
+  // coarser neighbour's would morph by two fractions and part (the T-junction a doubling range's 40% keeps closed): so a
+  // range's morph begins `shapeGap` of its coarser level's node sizes past the finer range, the finer levels morphing over
+  // their own outer `shapeMorph` share.
+  const S = Math.max(t.shapeReach, 1);
+  const gap = Math.max(t.shapeGap, 0);
+  // A finer vertex asks its level at d < r1 and its morph moves it at most a 4 m step, so r1 stands that step inside the
+  // window's whole share (`shapeWindowReach`, written out: a frame's, and a number handed back from a call is a number made).
+  const f = Math.max(t.shapeFade, 1);
+  const most = Math.min((SHAPE_SIDE - 1 - f) * 2 - (SHAPE_HALF + 1) * SHAPE_BW, SHAPE_HALF * SHAPE_BW - f * 2) - LEAF / PATCH / 2;
+  if (finest === -2) {
+    const s2 = Math.min(S, most * (1 - mf) - gap * (LEAF / 2));
+    if (s2 >= 1) {
+      out.r2 = s2;
+      out.r1 = (s2 + gap * (LEAF / 2)) / (1 - mf);
+    } else finest = -1;
+  }
+  if (finest === -1) out.r1 = Math.min(S, most);
+  out.finest = finest;
+  out.lod0 = Math.max(lodT, (out.r1 + gap * LEAF) / (1 - t.morph));
+}
+
+/**
+ * The furthest the 2 m shape may hold under the tune's fade, morph and gap (wave 3b's review): the reach `shapeRanges` keeps
+ * whole, which the Graphics page's Terrain shape detail and the dial stop at (`SHAPE_REACH_MOST`, at the shipped numbers).
+ */
+export function shapeReachMost(t: HorizonTune): number {
+  const f = Math.max(t.shapeFade, 1);
+  const most = Math.min((SHAPE_SIDE - 1 - f) * 2 - (SHAPE_HALF + 1) * SHAPE_BW, SHAPE_HALF * SHAPE_BW - f * 2) - LEAF / PATCH / 2;
+  const mf = Math.min(Math.max(t.shapeMorph, 0.01), 0.9);
+  return most * (1 - mf) - Math.max(t.shapeGap, 0) * (LEAF / 2);
+}
+
+export function reachRules(t: HorizonTune, viewRadius: number, reversed: boolean, out: ReachRules, shapeOk = true): ReachRules {
   const fogDensity = out.fogDensity;
   const reach = reversed ? t.reach : Math.min(t.reach, REACH_NO_REVZ);
   out.reach = reach;
@@ -115,7 +194,7 @@ export function reachRules(t: HorizonTune, viewRadius: number, reversed: boolean
   out.inForce = t.fogCap ? Math.min(reach, out.fogReach) : reach;
   out.skyRadius = Math.max(3500, reach * t.skyMargin);
   out.far = Math.max(9000, out.skyRadius * t.farMargin);
-  out.lod0 = Math.max(t.lod0, ((viewRadius + 2) * LEAF * Math.SQRT2) / (1 - t.morph));
+  shapeRanges(t, Math.max(t.lod0, ((viewRadius + 2) * LEAF * Math.SQRT2) / (1 - t.morph)), shapeOk, out);
   // A whole number kept a whole number (| 0): a float64 stored into a small-integer field is a number made.
   out.levels = (Math.min(LEVELS_MOST, Math.max(0, Math.ceil(Math.log2(Math.max(1, out.inForce) / out.lod0)))) | 0) + 1;
   return out;
@@ -123,7 +202,10 @@ export function reachRules(t: HorizonTune, viewRadius: number, reversed: boolean
 
 export function newReachRules(): ReachRules {
   // Every field that will hold a fraction starts as one: a field begun as a small integer boxes every fraction written after.
-  const r = { fogDensity: 0.5, reach: 0.5, fogReach: 0.5, inForce: 0.5, skyRadius: 0.5, far: 0.5, lod0: 0.5, levels: 1 };
+  const r = { fogDensity: 0.5, reach: 0.5, fogReach: 0.5, inForce: 0.5, skyRadius: 0.5, far: 0.5, lod0: 0.5, levels: 1, finest: 0, r1: 0.5, r2: 0.5, mf: 0.5 };
+  r.mf = 0.15;
+  r.r1 = 0;
+  r.r2 = 0;
   r.fogDensity = 0;
   r.reach = 0;
   r.fogReach = Infinity;
@@ -142,6 +224,16 @@ export function ringDistLevel(d: number, lod0: number, morph: number): number {
   const r = lod0 * Math.pow(2, k);
   const f = Math.min(Math.max((d - r * (1 - morph)) / (r * morph), 0), 1);
   return k + f;
+}
+
+/**
+ * The level a distance asks with the finer levels (wave 3b, `ringLevelOf`): r2 the 2 m level's range, r1 the 4 m level's,
+ * `finest` the finest level, `mf` the finer levels' own morph share.
+ */
+export function ringLevelOf(d: number, lod0: number, morph: number, r2: number, r1: number, finest: number, mf: number): number {
+  if (finest > -0.5 || d >= r1) return ringDistLevel(d, lod0, morph);
+  if (finest > -1.5 || d >= r2) return -1 + Math.min(Math.max((d - r1 * (1 - mf)) / (r1 * mf), 0), 1);
+  return -2 + Math.min(Math.max((d - r2 * (1 - mf)) / (r2 * mf), 0), 1);
 }
 
 /** The edge's level: bands doubling from `band`, each with a morph of its own over its outer share (`ringEdgeLevel`). */
@@ -237,27 +329,37 @@ export interface RingSurface {
   drop: number;
   fade: number;
   everywhere: number;
+  /**
+   * Wave 3b's review: the shape window the vertex stage reads where it holds the ground (null where it does not: the
+   * window off, not placed, or no finer level), and its edge fade in force; a vertex's height is then the window's mixed
+   * into the bake's by its share (`ringHeightAt`).
+   */
+  shape: { ringHeight(rx: number, rz: number, bake: number, fade: number): number } | null;
+  shapeFade: number;
 }
 
 export function newRingSurface(): RingSurface {
-  return { fine: null, coarse: null, cx: 0.5, cz: 0.5, sx: 0.5, sz: 0.5, sq0: 0.5, sq1: 0.5, sq2: 0.5, sq3: 0.5, drop: 0.5, fade: 0.5, everywhere: 0.5 };
+  return { fine: null, coarse: null, cx: 0.5, cz: 0.5, sx: 0.5, sz: 0.5, sq0: 0.5, sq1: 0.5, sq2: 0.5, sq3: 0.5, drop: 0.5, fade: 0.5, everywhere: 0.5, shape: null, shapeFade: 16.5 };
 }
 
-/** One level-0 vertex as the vertex stage stands it unmorphed: the bake there less the drop at its edge distance. */
+/** One vertex as the vertex stage stands it unmorphed: the bake there (with the shape window's share, `ringHeightAt`) less the drop at its edge distance. */
 function ringVertexHeight(s: RingSurface, vx: number, vz: number): number {
-  const h = bakeHeightAt(s.fine!, s.coarse!, s.cx - vx, vz + s.cz);
+  const rx = s.cx - vx;
+  const rz = vz + s.cz;
+  const b = bakeHeightAt(s.fine!, s.coarse!, rx, rz);
+  const h = s.shape !== null ? s.shape.ringHeight(rx, rz, b, s.shapeFade) : b;
   return h - ringDrop(ringEdgeDistance(vx, vz, s.sq0, s.sq1, s.sq2, s.sq3), s.drop, s.fade, s.everywhere);
 }
 
 /**
- * The drawn ring's surface at a game-frame point (§2.9, the far cards' height): level 0's triangle under it, its three
- * vertices each the vertex stage's own unmorphed height (`ringVertexHeight`), split as the patch is (the raw south-west to
- * north-east diagonal, which in the game's frame is the quad's (x + 8, z) to (x, z + 8)), never the bilinear. NaN with no
- * bake.
+ * The drawn ring's surface at a game-frame point (§2.9, the far cards' height): the triangle of a level's lattice under it
+ * (`q` metres, level 0's 8 by default; the finer levels' 4 and 2 where the far cards stand on them, wave 3b's review), its
+ * three vertices each the vertex stage's own unmorphed height (`ringVertexHeight`), split as the patch is (the raw
+ * south-west to north-east diagonal, which in the game's frame is the quad's (x + q, z) to (x, z + q)), never the
+ * bilinear. NaN with no bake.
  */
-export function ringSurfaceAt(s: RingSurface, gx: number, gz: number): number {
+export function ringSurfaceAt(s: RingSurface, gx: number, gz: number, q: number = LEAF / PATCH): number {
   if (!s.fine || !s.coarse) return Number.NaN;
-  const q = LEAF / PATCH;
   const i = Math.floor((gx - s.sx) / q);
   const j = Math.floor((gz - s.sz) / q);
   const x0 = s.sx + i * q;
@@ -414,6 +516,11 @@ export interface RingAsk {
   cz0: number;
   cx1: number;
   cz1: number;
+  /** Wave 3b: the finest level (nought, minus one or minus two), the 4 m and 2 m levels' ranges, and the frustum box's growth for the 2 m heights. */
+  finest: number;
+  r1: number;
+  r2: number;
+  pad: number;
 }
 
 /** Per level, how many patches the last selection drew. */
@@ -433,13 +540,15 @@ export class RingSelector {
   /** Patches the arrays had no room for (never expected: the arrays are sized past §2.4's counts). */
   overflow = 0;
   readonly perLevel = new Int32Array(LEVEL_COUNT);
+  /** Wave 3b: patches of the finer levels, the 4 m level's then the 2 m level's. */
+  readonly perFine = new Int32Array(2);
   /** Leaves left out because their chunk stands. */
   holeLeaves = 0;
   private stackI = new Int32Array(4096);
   private stackJ = new Int32Array(4096);
   private stackL = new Int8Array(4096);
   private readonly box = new THREE.Box3();
-  constructor(patchCap = 8192, skirtCap = 4096) {
+  constructor(patchCap = 16384, skirtCap = 8192) {
     this.patches = new Float32Array(patchCap * 4);
     this.skirts = new Float32Array(skirtCap * 4);
   }
@@ -456,6 +565,7 @@ export class RingSelector {
     this.holeLeaves = 0;
     this.overflow = 0;
     this.perLevel.fill(0);
+    this.perFine.fill(0);
     if (!pyr) return 0;
     const top = Math.min(a.levels - 1, pyr.levels - 1, LEVELS_MOST);
     const S = LEAF * (1 << top);
@@ -476,7 +586,8 @@ export class RingSelector {
           const ni = this.stackI[sp];
           const nj = this.stackJ[sp];
           const L = this.stackL[sp];
-          const size = LEAF * (1 << L);
+          // A node finer than a leaf (wave 3b) is a power-of-two share of one: its size by a division, never a shift of a negative.
+          const size = L >= 0 ? LEAF * (1 << L) : LEAF / (1 << -L);
           const x0 = a.shiftX + ni * size;
           const z0 = a.shiftZ + nj * size;
           const x1 = x0 + size;
@@ -485,31 +596,59 @@ export class RingSelector {
           const hx = Math.max(x0 - a.ex, 0, a.ex - x1);
           const hz = Math.max(z0 - a.ez, 0, a.ez - z1);
           if (hx * hx + hz * hz > R * R) continue;
-          // The heights its vertices take; none baked there, none drawn.
-          const pl = L;
+          // The heights its vertices take (a node finer than a leaf: its leaf's); none baked there, none drawn.
+          const pl = L > 0 ? L : 0;
           const n = pyr.n >> pl;
-          const pi = ((x0 - pyr.x0) / size) | 0;
-          const pj = ((z0 - pyr.z0) / size) | 0;
+          const psize = LEAF * (1 << pl);
+          const pi = Math.floor((x0 - pyr.x0) / psize);
+          const pj = Math.floor((z0 - pyr.z0) / psize);
           if (pi < 0 || pj < 0 || pi >= n || pj >= n) continue;
           const lo = pyr.lo[pl][pj * n + pi];
           const hi = pyr.hi[pl][pj * n + pi];
           if (!(lo <= hi)) continue;
           const yl = lo - a.drop;
-          this.box.min.set(x0, yl, z0);
-          this.box.max.set(x1, hi, z1);
+          // The 2 m heights stand off the bake's samples: the frustum's box grown for them (never the range's).
+          this.box.min.set(x0, yl - a.pad, z0);
+          this.box.max.set(x1, hi + a.pad, z1);
           if (!frustum.intersectsBox(this.box)) continue;
           const meets = a.cx0 * LEAF + a.shiftX <= x1 && (a.cx1 + 1) * LEAF + a.shiftX >= x0 && a.cz0 * LEAF + a.shiftZ <= z1 && (a.cz1 + 1) * LEAF + a.shiftZ >= z0;
-          if (L === 0) {
-            if (ni >= a.cx0 && ni <= a.cx1 && nj >= a.cz0 && nj <= a.cz1 && hole.standing(ni, nj)) {
+          if (L <= 0) {
+            // A leaf whose chunk stands is left out; one finer than a leaf is inside a leaf already found standing nowhere.
+            if (L === 0 && ni >= a.cx0 && ni <= a.cx1 && nj >= a.cz0 && nj <= a.cz1 && hole.standing(ni, nj)) {
               this.holeLeaves++;
               continue;
             }
-            this.emitPatch(x0, z0, 0);
+            if (L > a.finest) {
+              // The finer levels' split (wave 3b): by range alone, from level 0 at the 4 m level's range and from the 4 m
+              // level at the 2 m level's.
+              const dy = Math.max(yl - a.ey, 0, a.ey - hi);
+              const r = L === 0 ? a.r1 : a.r2;
+              if (hx * hx + hz * hz + dy * dy < r * r) {
+                if (sp + 4 > this.stackI.length) this.growStack();
+                const ci = ni * 2;
+                const cj = nj * 2;
+                for (let q = 0; q < 4; q++) {
+                  this.stackI[sp] = ci + (q & 1);
+                  this.stackJ[sp] = cj + (q >> 1);
+                  this.stackL[sp] = L - 1;
+                  sp++;
+                }
+                continue;
+              }
+            }
+            this.emitPatch(x0, z0, L);
             if (meets) {
-              if (hole.standing(ni, nj - 1)) this.emitSkirt(x0, z0, 1);
-              if (hole.standing(ni + 1, nj)) this.emitSkirt(x0, z0, 2);
-              if (hole.standing(ni, nj + 1)) this.emitSkirt(x0, z0, 3);
-              if (hole.standing(ni - 1, nj)) this.emitSkirt(x0, z0, 4);
+              // A side on its leaf's own edge, with a standing chunk across it, takes a skirt (a leaf's every side).
+              const k = L < 0 ? -L : 0;
+              const li = ni >> k;
+              const lj = nj >> k;
+              const top = (1 << k) - 1;
+              const mi = ni - (li << k);
+              const mj = nj - (lj << k);
+              if (mj === 0 && hole.standing(li, lj - 1)) this.emitSkirt(x0, z0, L, 1);
+              if (mi === top && hole.standing(li + 1, lj)) this.emitSkirt(x0, z0, L, 2);
+              if (mj === top && hole.standing(li, lj + 1)) this.emitSkirt(x0, z0, L, 3);
+              if (mi === 0 && hole.standing(li - 1, lj)) this.emitSkirt(x0, z0, L, 4);
             }
             continue;
           }
@@ -573,10 +712,11 @@ export class RingSelector {
     p[k * 4 + 2] = L;
     p[k * 4 + 3] = 0;
     this.patchCount++;
-    this.perLevel[L]++;
+    if (L >= 0) this.perLevel[L]++;
+    else this.perFine[-L - 1]++;
   }
 
-  private emitSkirt(x0: number, z0: number, side: number): void {
+  private emitSkirt(x0: number, z0: number, L: number, side: number): void {
     const k = this.skirtCount;
     if (k >= this.skirtCap) {
       this.overflow++;
@@ -585,7 +725,7 @@ export class RingSelector {
     const s = this.skirts;
     s[k * 4] = x0;
     s[k * 4 + 1] = z0;
-    s[k * 4 + 2] = 0;
+    s[k * 4 + 2] = L;
     s[k * 4 + 3] = side;
     this.skirtCount++;
   }

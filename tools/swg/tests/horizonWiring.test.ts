@@ -33,10 +33,22 @@ ok(HORIZON_TUNE.ground === 'tiles', "the switch starts at 'tiles': nothing of th
 const pre = old('src/world/terrain.ts');
 if (!pre) console.log(`note git cannot show ${PRE_PASS} here: the day-one file checks are left out`);
 else {
-  for (const p of ['src/world/terrain.ts', 'src/swg/terrain/trn.ts', 'src/world/groundTiles.ts', 'src/world/groundMath.ts']) ok(now(p) === old(p), `${p} is ${PRE_PASS}'s to the byte (the far tiles and the far grids as they were)`);
+  for (const p of ['src/world/terrain.ts', 'src/world/groundTiles.ts']) ok(now(p) === old(p), `${p} is ${PRE_PASS}'s to the byte (the far tiles and the far grids as they were)`);
+  // Wave 3b added two methods to trn.ts (a cached block's own poles read, a generated block laid as one entering the cache:
+  // the rings' shape window's) and the steep faces' and relief's mirrors to groundMath.ts: each taken back out by its own
+  // text, the rest PRE_PASS's to the byte.
+  const cut = (s: string, from: string, to: string) => {
+    const a = s.indexOf(from);
+    const b = s.indexOf(to, a);
+    return a < 0 || b < 0 ? s : s.slice(0, a) + s.slice(b + to.length);
+  };
+  // Its review added the cache by block number (the window's probe builds no key): the field and every line that keeps it, by their own text.
+  const trnNow = cut(cut(now('src/swg/terrain/trn.ts'), "\n  /**\n   * A cached block's own poles' heights as laid", '    this.layOne(heights.slice(), heights, x0, z0);\n  }\n'), '  /**\n   * The same cached blocks by block number', 'private readonly byNumber = new Map<number, PoleBlock>();\n');
+  ok(trnNow.split('\n').filter((l) => !l.includes('this.byNumber.')).join('\n') === old('src/swg/terrain/trn.ts'), `src/swg/terrain/trn.ts is ${PRE_PASS}'s to the byte but for wave 3b's two methods and its review's cache by number`);
+  ok(cut(now('src/world/groundMath.ts'), "\n\n/**\n * The steep faces' side pictures", '  out[1] = ov;\n  return out;\n}') === old('src/world/groundMath.ts'), `src/world/groundMath.ts is ${PRE_PASS}'s to the byte but for wave 3b's mirrors`);
   // The second wave's two additions to swgTerrain.ts (the bake's hook in heightIfCached, null with no field, and the live
-  // generator's grid for the overlays) taken back out by their own text: the rest PRE_PASS's to the byte.
-  const swgNow = now('src/world/swgTerrain.ts');
+  // generator's grid for the overlays) and wave 3b's worker getter taken back out by their own text: the rest PRE_PASS's to the byte.
+  const swgNow = cut(now('src/world/swgTerrain.ts'), '  /** Whether the terrain worker is there and ready', '    return !!this.worker && this.workerReady;\n  }\n\n');
   const hookAt = swgNow.indexOf("    // The far ground's bake, laid, while the rings stand");
   const hookEnd = swgNow.indexOf('      if (b === b) return b;\n    }\n', hookAt) + '      if (b === b) return b;\n    }\n'.length;
   const genAt = swgNow.indexOf("  /** The far ground's bake `heightIfCached` reads past the blocks");
@@ -64,7 +76,9 @@ pin(w, 'if (f) f.timing = true;', 'world.ts: the selection timed only once the c
 pin(w, "if (HORIZON_TUNE.ground === 'rings' && this.horizonDrawn) {\n      this.streamRingCards(center, budget);\n      return;\n    }", "world.ts: at 'rings' with the bake drawn, streamFar builds no far tile, only the far grids and cards within farGridRadius (W2)");
 // W2's hand-overs.
 // W2's review: the terrain itself handed over, its stores read at each lay, never a copy taken before the bake's fetch.
-pin(w, 'const stores = swg;\n    const ok = await field.load(', "world.ts: the near ground's own stores (the terrain itself, read at each lay) laid over the bake as it loads, before anything is uploaded");
+// Wave 3b put the shape window's side between the stores and the load: the atlas is made at the load with its block.
+pin(w, "const stores = swg;\n    // The rings' shape window (wave 3b): the live generator's own 2 m heights round the eye, on a world of 2 m poles, in a\n    // block of the heights atlas; made from the near ground's cache and the terrain worker in play.\n    if (SHAPE_WANTED && swg.sampler.poleStep === 2) field.shapeSide = SHAPE_SIDE;\n    const ok = await field.load(", "world.ts: the near ground's own stores (the terrain itself, read at each lay) laid over the bake as it loads, before anything is uploaded, the shape window's side set first");
+pin(w, '    field.useShape(shapeSourceOf(swg));\n    if (session.patch.parent !== this.chunkRoot)', "world.ts: the shape window's source is the near ground's own terrain (its cache, its worker, its lay), handed over once the bake stands");
 ok(!/\{ heights: swg\.heights, course: swg\.course \}/.test(w), "world.ts: no copy of the stores is taken anywhere (a file landing while the bake loads, or before a lay made again, is laid)");
 pin(w, 'if (!f.relayLate(swg)) return;', 'world.ts: a late file laid from the terrain itself');
 pin(w, 'void f.regenerate(paintRegenAsks(paint), (x, z, n, step) => swg.generatePoles(x, z, n, step), swg);', 'world.ts: a paint file landed late asks what an arrival asks (paintRegenAsks), its heights from the terrain itself');
@@ -78,7 +92,9 @@ pin(w, "if (this.flora) this.flora.onCourse = this.courseRule();\n    // And the
 pin(w, "this.applyPaintWeights(true);\n      // The far ground's bake: every painted tile made again from the live generator (W2), landing in play.\n      this.horizonPaintLate();", 'world.ts: a paint file landed late makes the painted tiles again');
 pin(w, 'if (this.terrain?.swg) this.terrain.swg.horizon = ready ? this.horizonField : null;', 'world.ts: heightIfCached reads the bake past the blocks only while it is drawn');
 pin(w, "if (f && HORIZON_TUNE.ground === 'rings' && this.horizonDrawn) samples.surfaceAt = ringCardSurface(f, this.ringHole, gx0, gz0, () => this.viewRadius);", "world.ts: a far card stands on the ring's own surface at 'rings', round the hole as it stands when placed (ringCardSurface)");
-pin(w, "if (ringHoleMoved(this.ringHole, pcx, pcz, this.viewRadius, HORIZON_TUNE) && this.ringCardTiles.size) this.farCards?.restand();\n    this.streamPcx = pcx;\n    this.streamPcz = pcz;\n    if (pcx === this.lastCx && pcz === this.lastCz && budget !== Infinity) return;", 'world.ts: the stream stands the ring cards again whenever the hole moves, before its early return (beside farProbe\'s pair, never between it)');
+pin(w, "const holeMoved = ringHoleMoved(this.ringHole, pcx, pcz, this.viewRadius, HORIZON_TUNE);\n    const shapeMoved = this.horizonField?.shapeMoved() === true;\n    if ((holeMoved || shapeMoved) && this.ringCardTiles.size) this.farCards?.restand();\n    this.streamPcx = pcx;\n    this.streamPcz = pcz;\n    if (pcx === this.lastCx && pcz === this.lastCz && budget !== Infinity) return;", "world.ts: the stream stands the ring cards again whenever the hole moves or the shape under them does (wave 3b's review: the window come whole, the Terrain shape detail), both asked every call, before its early return (beside farProbe's pair, never between it)");
+pin(w, 'const detailSaid = tuneGroundDetail({ tri: o.tri, relief: o.relief });', "world.ts: __debug.ground's up-close knobs keep what tuneGroundDetail would not take (wave 3b's review)");
+pin(w, '        said: detailSaid,\n      },\n    };', 'world.ts: and hand it back in the answer');
 pin(w, "if (this.ringCardTiles.has(`${tx},${tz}`)) {\n        this.paintLandWork.far++;\n        this.farCardsAgain(tx, tz);\n        return;\n      }\n      const t = this.farTiles.get(`${tx},${tz}`);", "world.ts: a paint landing's far grid kept for the rings' cards makes its cards again (no far tile at 'rings')");
 // The first unload runs before the first world has a terrain (a smoke found the plain `this.terrain.swg` there).
 pin(w, 'if (this.terrain?.swg) this.terrain.swg.horizon = null;\n    this.releaseRingCards();', 'world.ts: the bake let go takes its hook and its far grids with it, a terrain or none');
@@ -107,7 +123,9 @@ pin(m, "await this.groundCurtain(\"the world's bake\", async () => {\n      awai
 // The third wave packed the ring program to 15 samplers (`horizonShaders.test.ts` counts them): the switch says nothing of Direct3D 11.
 ok(!now('src/ui/menu.ts').includes('Direct3D 11 (Chrome'), "menu.ts: the rings' switch no longer says it is not ready on Direct3D 11");
 // W3's: the Graphics page's Ground detail distance, read before any world (the first bake's window is made at its size) and moved live.
-pin(m, "HORIZON_TUNE.detailReach = S.groundDetailDistance * 1000;\n    // The spawner's cap", "main.ts: the Ground detail distance read before any world");
+// Wave 3b put the Terrain shape detail between it and the spawner's cap, read before any world as it is.
+pin(m, "HORIZON_TUNE.detailReach = S.groundDetailDistance * 1000;\n    // How far the rings keep the near ground's 2 m shape (wave 3b): a range the selection reads a frame.\n    HORIZON_TUNE.shapeReach = S.terrainShapeDetail * 1000;\n    // The spawner's cap", "main.ts: the Ground detail distance and the Terrain shape detail read before any world");
+pin(m, "case 'terrainShapeDetail':\n        // A range the selection and the ring's morph read a frame (wave 3b): nothing is built, the shape window is the world's.\n        HORIZON_TUNE.shapeReach = S.terrainShapeDetail * 1000;", "main.ts: the Terrain shape detail moved in play is the rings' range at once");
 pin(m, "case 'groundDetailDistance':\n        // A number the rings read a frame: the composition window is made again at its new size in the decode worker and\n        // swapped in when it lands (a texture's size, never a program).\n        HORIZON_TUNE.detailReach = S.groundDetailDistance * 1000;", "main.ts: the Ground detail distance moved in play is the rings' distance at once");
 pin(w, "    const t = GROUND_DRAW_TUNE;\n    // The knobs the far ground's tables read, before this call moves any (a view, the shine or the clouds compose nothing again).\n    const tablesWere = tableKnobs();", "world.ts: groundDraw reads the tables' knobs before it moves any");
 pin(w, "    if (tableKnobs() !== tablesWere) this.horizonField?.retune();\n    if (!textures || !this.terrain.swg) return null;", "world.ts: a ground knob's move composes the far ground's albedo and window again, only when a knob the tables read moved (the review round)");

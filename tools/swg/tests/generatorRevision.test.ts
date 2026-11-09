@@ -20,7 +20,11 @@ import { chunk, encode, form, ihdr, mfrc, W } from './iffWriter.ts';
  * What was recorded for the revision in force: the text, the output over three converted worlds, and the output over a
  * terrain made here in memory, which is checked wherever the packs are not (a launcher's checkout, a machine with none).
  */
-const RECORDED = { revision: 1, text: '5c2e0da32518e1f3', output: 'fa29364a18a48ad2', made: 'f2a2a6ea73e28b08' };
+// The horizon pass's wave 3b moved the text (trn.ts's `copyInnerHeights` and `layBlockHeights`, which the rings' shape window
+// reads a cached block and lays a generated one by; neither is run by the generator) and not the output: the revision stays.
+// Its review moved it again (the sampler's cache kept by block number beside its string keys, for the window's probe) and
+// not the output.
+const RECORDED = { revision: 1, text: '7858343986c45eee', output: 'fa29364a18a48ad2', made: 'f2a2a6ea73e28b08' };
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {

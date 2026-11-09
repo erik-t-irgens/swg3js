@@ -12,6 +12,8 @@ import * as THREE from 'three';
 import { HORIZON_TUNE, HoleGrid, LEAF } from '../../../src/world/horizon/horizonMath.ts';
 import { HorizonField, RingSession, copyDome, type DomeUniforms } from '../../../src/world/horizon/horizonField.ts';
 import { windowPlace, windowTiles, type WindowPlace } from '../../../src/world/horizon/horizonDecode.ts';
+import { SHAPE_BLOCK, SHAPE_SIDE, ShapeWindow, shapeSourceOf } from '../../../src/world/horizon/shapeWindow.ts';
+import { TerrainSampler } from '../../../src/swg/terrain/trn.ts';
 import { rolling, testCamera, testHole, testPyramid } from './horizonFixtures.ts';
 
 const shift = { x: 1, z: 0 };
@@ -157,5 +159,90 @@ for (let attempt = 0; attempt < 3; attempt++) {
   if (scavenges < bestStill.scavenges || (scavenges === bestStill.scavenges && made < bestStill.made)) bestStill = { made, scavenges };
   if (bestStill.scavenges === 0 && bestStill.made <= 0) break;
 }
+const meanPatches = st[1] / (st[0] || 1);
+// Wave 3b: the rings' shape up close, its finer levels selected and its shape window kept round the eye. The field holds a
+// window whose blocks the near ground's cache answers through the game's own source (`shapeSourceOf`) and the sampler's own
+// `copyInnerHeights` (run on a stand-in of the sampler's own shape: its two maps, its block sizes), so as the camera walks
+// over block edges (the still cameras' 40 m about one place) the window moves, hands its slots on and takes the new ones from
+// the cache, and every 256 frames it jumps 3 km and back (a far move: the whole block at once, then the refill's whole
+// uploads and block uploads through a stand-in renderer that records them), all within the frame: none of it may make
+// anything either (wave 3b's review: a probe's string key and a whole upload's texture were made in the frame).
+const shapeField = field as unknown as { shape: ShapeWindow | null; renderer: unknown; heights: unknown; shapeSrc: unknown; shapeWork: { blocks: number; wholes: number } };
+shapeField.shape = new ShapeWindow(SHAPE_SIDE, 2);
+const NP = 36;
+const sampler = Object.create(TerrainSampler.prototype) as Record<string, unknown>;
+Object.assign(sampler, { blocks: new Map(), byNumber: new Map(), numberOfPoles: NP, blockWidth: 64, poleStep: 2, lastBx: Number.NaN, lastBz: Number.NaN, lastBlock: undefined });
+const blockHeights = new Float32Array(NP * NP).map((_, k) => (k % NP) * 0.25 + Math.floor(k / NP) * 0.125);
+const far: THREE.PerspectiveCamera[] = [];
+for (let p = 0; p < POSES; p++) {
+  const s = still[p];
+  if (p < POSES / 2) {
+    far.push(s);
+    continue;
+  }
+  const cam = testCamera();
+  const x = s.position.x + 3000;
+  const z = s.position.z;
+  cam.position.set(x, rolling(x, z) + (s.position.y - rolling(s.position.x, z)), z);
+  cam.rotation.copy(s.rotation);
+  cam.updateMatrixWorld();
+  far.push(cam);
+}
+// Every block either place's window can ask for, under both of the sampler's keys (the string one only the old lookup read).
+for (const c of [far[0], far[POSES - 1]]) {
+  const ebx = Math.floor(-c.position.x / 64);
+  const ebz = Math.floor(c.position.z / 64);
+  for (let bz = ebz - 20; bz <= ebz + 20; bz++) {
+    for (let bx = ebx - 20; bx <= ebx + 20; bx++) {
+      const b = { heights: blockHeights };
+      (sampler.blocks as Map<string, unknown>).set(`${bx},${bz}`, b);
+      (sampler.byNumber as Map<number, unknown>).set((bx + 4096) * 8192 + (bz + 4096), b);
+    }
+  }
+}
+shapeField.shape.source = shapeSourceOf({ sampler: sampler as never, workerUp: false, generatePoles: () => Promise.resolve(null) });
+let uploads = 0;
+shapeField.renderer = {
+  copyTextureToTexture() {
+    uploads++;
+  },
+};
+shapeField.heights = new THREE.DataTexture(new Float32Array(4) as never, 2, 2, THREE.RedFormat, THREE.FloatType);
+shapeField.shapeSrc = new THREE.DataTexture(new Float32Array(SHAPE_BLOCK * SHAPE_BLOCK) as never, SHAPE_BLOCK, SHAPE_BLOCK, THREE.RedFormat, THREE.FloatType);
+// The composition window's ask (a message posted when the eye is 128 m off its middle, which every 3 km jump is) is the
+// second measure's business and makes its message by design: no worker here, so the jumps measure the shape window alone.
+f.worker = null;
+st[3] = 0;
+function shapeFrame(): void {
+  st[3] += 1;
+  const cam = far[(st[3] | 0) & (POSES - 1)];
+  copyDome(session.uniforms, dome);
+  field.update(session, cam, cam.position, 6, 0, 0, hole, true);
+  st[1] += session.selector.perFine[1];
+}
+function shapeFrames(n: number): void {
+  for (let i = 0; i < n; i++) shapeFrame();
+}
+try {
+  new Function('f', '%NeverOptimizeFunction(f)')(shapeFrames);
+} catch {
+  // Without the flag the loop is left to the compiler.
+}
+st[1] = 0;
+shapeFrames(4000);
+const finePatches = st[1] / 4000;
+let bestShape = { made: Infinity, scavenges: Infinity };
+for (let attempt = 0; attempt < 3; attempt++) {
+  shapeFrames(1000);
+  (globalThis as unknown as { gc: (o?: { type: string }) => void }).gc({ type: 'minor' });
+  await settle();
+  scavenges = 0;
+  const before = young();
+  shapeFrames(N);
+  const made = young() - before;
+  await settle();
+  if (scavenges < bestShape.scavenges || (scavenges === bestShape.scavenges && made < bestShape.made)) bestShape = { made, scavenges };
+  if (bestShape.scavenges === 0 && bestShape.made <= 0) break;
+}
 watch.disconnect();
-console.log(JSON.stringify({ frames: N, made: best.made, scavenges: best.scavenges, patches: st[1] / (st[0] || 1), window: { made: bestStill.made, scavenges: bestStill.scavenges, asks } }));
+console.log(JSON.stringify({ frames: N, made: best.made, scavenges: best.scavenges, patches: meanPatches, window: { made: bestStill.made, scavenges: bestStill.scavenges, asks }, shape: { made: bestShape.made, scavenges: bestShape.scavenges, finePatches, moves: shapeField.shape.counts.moves, cached: shapeField.shape.counts.cached, uploads, blocks: shapeField.shapeWork.blocks, wholes: shapeField.shapeWork.wholes } }));

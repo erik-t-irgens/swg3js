@@ -61,7 +61,7 @@ import type { FloraGroup, RadialChild, RadialGroup } from '../swg/terrain/flora.
 import { floraColliders } from './floraCollision.ts';
 import { eyeSpeed, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, rideLodBias, steppedBias, sweepDue } from './lodLevels.ts';
 import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.ts';
-import { GROUND_FIRST_CHILD_ONLY, GROUND_NORMAL, GROUND_TILES_WANTED, groundSelfTest, groundTileUniforms, groundTilesMaterial, setGroundClock, TerrainTextures, writeGroundDraw, type GroundSelfTest, type ShadersFile } from './terrainTextures.ts';
+import { GROUND_DETAIL_TUNE, GROUND_FIRST_CHILD_ONLY, GROUND_NORMAL, GROUND_RELIEF_WANTED, GROUND_TILES_WANTED, GROUND_TRI_WANTED, groundSelfTest, groundTileUniforms, groundTilesMaterial, setGroundClock, TerrainTextures, tuneGroundDetail, writeGroundDraw, type GroundSelfTest, type ShadersFile } from './terrainTextures.ts';
 import { GROUND_DRAW_TUNE, groundChunkAt, groundChunkOrigin, tilesFit, worldRowSwitches, type CornerName, type DrawSwitchesKept, type GroundColour, type GroundShine } from './groundTiles.ts';
 import { PICTURES_NOT_LOADED, appendLending, arrivalAsks, baseFamilyId, familyOfKey, groundPacksOf, lendInto, lentAnswer, lentPackDir, lentPacksOf, lentPicturesOf, loadLentTable, notGroundPack, planLending, shadersTiled, undrawnLent, type LendPlan, type LentFetch, type LentTable } from './lentGround.ts';
 import { AssetPack, lowerLevels, normalYOf, type Layout, type LoadedModel, type PackModelDef } from './assetPack';
@@ -70,6 +70,7 @@ import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
 import { HORIZON_TUNE, HoleGrid, RingHole, ringCardSurface, ringHoleMoved } from './horizon/horizonMath.ts';
 import { HorizonField, RingSession, copyDome, tableKnobs, type RegenAsk } from './horizon/horizonField.ts';
+import { SHAPE_SIDE, SHAPE_WANTED, shapeSourceOf } from './horizon/shapeWindow.ts';
 import { layerExtent, paintRegenAsks, seasonalExtents } from './horizon/horizonOverlay.ts';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { TERRAIN_GROUND_TUNE, lentFamilyKey, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
@@ -10235,7 +10236,7 @@ export class World {
    * children and the child's corner decide what each chunk is built with, so changing one builds the ground
    * round the player again (the chunks and the far tiles, at once). Null with no converted ground.
    */
-  groundDraw(o: { colour?: GroundColour; gainCap?: number; shine?: GroundShine; flat?: number; mirror?: boolean; masks?: boolean; opposite?: 'max' | 'add'; order?: 'first' | 'last'; children?: boolean; childCorner?: CornerName[]; clouds?: boolean | { on?: boolean; strength?: number }; view?: 'lit' | 'colour' | 'clouds' | 'bump' } = {}): Record<string, unknown> | null {
+  groundDraw(o: { colour?: GroundColour; gainCap?: number; shine?: GroundShine; flat?: number; mirror?: boolean; masks?: boolean; opposite?: 'max' | 'add'; order?: 'first' | 'last'; children?: boolean; childCorner?: CornerName[]; clouds?: boolean | { on?: boolean; strength?: number }; view?: 'lit' | 'colour' | 'clouds' | 'bump'; tri?: boolean | { on?: boolean; from?: number; to?: number; sharp?: number }; relief?: boolean | { on?: boolean; depth?: number; reach?: number; fade?: number } } = {}): Record<string, unknown> | null {
     const t = GROUND_DRAW_TUNE;
     // The knobs the far ground's tables read, before this call moves any (a view, the shine or the clouds compose nothing again).
     const tablesWere = tableKnobs();
@@ -10252,6 +10253,8 @@ export class World {
       if (typeof o.clouds.on === 'boolean') t.clouds.on = o.clouds.on;
       if (num(o.clouds.strength)) t.clouds.strength = o.clouds.strength;
     }
+    // The ground up close (the horizon pass's wave 3b): uniforms, so nothing is built; what it would not take is said back.
+    const detailSaid = tuneGroundDetail({ tri: o.tri, relief: o.relief });
     let rebuild = false;
     if ((o.order === 'first' || o.order === 'last') && o.order !== t.order) {
       t.order = o.order;
@@ -10294,6 +10297,12 @@ export class World {
       memoryMB: textures.gpuMegabytes,
       shift: this.terrain.groundShift,
       rebuilt: rebuild && !!tiles,
+      // The ground up close (wave 3b): the two parts' knobs, and whether each is in the program this session (the hatches at load).
+      upClose: {
+        tri: { ...GROUND_DETAIL_TUNE.tri, inProgram: GROUND_TRI_WANTED, note: GROUND_TRI_WANTED ? 'the side pictures on faces steeper than from, wholly past to' : "left out at load: localStorage['swg.ground.tri'] is '0'" },
+        relief: { ...GROUND_DETAIL_TUNE.relief, inProgram: GROUND_RELIEF_WANTED, note: GROUND_RELIEF_WANTED ? 'the pictures moved by their own height within reach metres of the eye, depth metres peak to peak' : "left out at load: localStorage['swg.ground.relief'] is '0'" },
+        said: detailSaid,
+      },
     };
   }
 
@@ -11922,7 +11931,11 @@ export class World {
     const pcz = Math.floor(center.z / CHUNK_SIZE);
     // The far cards standing on the rings stood again when the hole they read moves (W2's review): a chunk's step, the view
     // radius, the drop's numbers. Nothing at 'tiles' (no ring card stands) and nothing while the hole stands still.
-    if (ringHoleMoved(this.ringHole, pcx, pcz, this.viewRadius, HORIZON_TUNE) && this.ringCardTiles.size) this.farCards?.restand();
+    // Wave 3b's review: and when the shape the ring draws under them moved (the window come whole, the Terrain shape detail).
+    // Both asked every call, so neither record lags the other.
+    const holeMoved = ringHoleMoved(this.ringHole, pcx, pcz, this.viewRadius, HORIZON_TUNE);
+    const shapeMoved = this.horizonField?.shapeMoved() === true;
+    if ((holeMoved || shapeMoved) && this.ringCardTiles.size) this.farCards?.restand();
     this.streamPcx = pcx;
     this.streamPcz = pcz;
     if (pcx === this.lastCx && pcz === this.lastCz && budget !== Infinity) return;
@@ -12191,6 +12204,9 @@ export class World {
     // the terrain itself, whose `heights` and `course` are read as each lay is made (W2's review: a copy taken here missed a
     // file landing while the bake loaded, and a lay made again later put that file's tiles back to raw).
     const stores = swg;
+    // The rings' shape window (wave 3b): the live generator's own 2 m heights round the eye, on a world of 2 m poles, in a
+    // block of the heights atlas; made from the near ground's cache and the terrain worker in play.
+    if (SHAPE_WANTED && swg.sampler.poleStep === 2) field.shapeSide = SHAPE_SIDE;
     const ok = await field.load({ json: (f) => packJson(packId, f, undefined, { probe: false }), bytes: (f) => packBytes(packId, f, undefined, { probe: false }) }, ground, session, this.renderer, eye, stores);
     if (this.horizonField !== field) {
       field.dispose(null);
@@ -12200,6 +12216,7 @@ export class World {
       console.info(`horizon: the far tiles drawn (${'why' in field.state ? field.state.why : field.state.state})`);
       return;
     }
+    field.useShape(shapeSourceOf(swg));
     if (session.patch.parent !== this.chunkRoot) this.chunkRoot.add(session.patch, session.skirt);
     this.applyHorizonGround();
     const mb = field.megabytes();
@@ -12455,7 +12472,17 @@ export class World {
       decodeMs: f?.decodeMs ?? null,
       loadMs: f ? { fetch: Math.round(f.fetchMs), decodeWall: Math.round(f.decodeWallMs), mainThread: Math.round(f.mainMs), arrivalJoinWait: Math.round(f.joinWaitMs) } : null,
       reach: r ? { slider: r.reach, inForce: Math.round(r.inForce), fogReach: Number.isFinite(r.fogReach) ? Math.round(r.fogReach) : null, fogDensity: (this.scene.fog as THREE.FogExp2 | null)?.density ?? null, lod0: Math.round(r.lod0), levels: r.levels, skyRadius: r.skyRadius, far: r.far } : null,
-      selection: sel ? { patches: sel.patchCount, perLevel: Array.from(sel.perLevel), skirts: sel.skirtCount, triangles: sel.patchCount * 128 + sel.skirtCount * 32, overflow: sel.overflow, us: f ? Math.round(f.selectMean() * 10) / 10 : null, benchUs: f && s && opts?.bench ? Math.round(f.benchSelect(s, this.horizonHole, opts.bench) * 10) / 10 : null } : null,
+      selection: sel ? { patches: sel.patchCount, perLevel: Array.from(sel.perLevel), fine: { level4m: sel.perFine[0], level2m: sel.perFine[1] }, skirts: sel.skirtCount, triangles: sel.patchCount * 128 + sel.skirtCount * 32, overflow: sel.overflow, us: f ? Math.round(f.selectMean() * 10) / 10 : null, benchUs: f && s && opts?.bench ? Math.round(f.benchSelect(s, this.horizonHole, opts.bench) * 10) / 10 : null } : null,
+      // Wave 3b: the rings' shape up close (the finer levels' ranges, the shape window round the eye and what it has made).
+      shape: f
+        ? {
+            on: HORIZON_TUNE.shape,
+            reach: HORIZON_TUNE.shapeReach,
+            finest: r ? r.finest : 0,
+            ranges: r && r.finest < 0 ? { level2m: Math.round(r.r2), level4m: Math.round(r.r1), level0: Math.round(r.lod0) } : null,
+            window: f.shape ? { side: f.shape.side, metres: f.shape.side * f.shape.step, made: f.shape.made, of: f.shape.blocks * f.shape.blocks, ...f.shape.counts, onCard: { ...f.shapeWork } } : SHAPE_WANTED ? 'none: this world\'s poles are not 2 m' : "none: localStorage['swg.horizon.shape'] is '0'",
+          }
+        : null,
       hole: { chunks: this.horizonHole.count, leavesLeftOut: sel?.holeLeaves ?? 0 },
       farTiles: this.farTiles.size,
       // W2: what is laid over the bake (tiles laid, the late files, the rectangles made again from the generator and those

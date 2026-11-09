@@ -428,6 +428,12 @@ export class TerrainSampler {
   readonly tilesPerBlock: number;
   readonly numberOfPoles: number;
   private readonly blocks = new Map<string, PoleBlock>();
+  /**
+   * The same cached blocks by block number (the horizon pass's wave 3b review): the rings' shape window probes the cache a
+   * frame (`copyInnerHeights`), and a string key a probe was a string made in a frame. Set and let go beside `blocks`
+   * wherever a block enters or leaves it; a block past `blockNumber`'s reach is in `blocks` alone.
+   */
+  private readonly byNumber = new Map<number, PoleBlock>();
   private readonly building: Layer[] = [];
   readonly template: TerrainTemplate;
   /**
@@ -604,12 +610,48 @@ export class TerrainSampler {
       // carved under them (the race drawer).
       if (this.heights || this.course) this.layEntering(blockX, blockZ, b);
       this.blocks.set(`${blockX},${blockZ}`, b);
+      if (TerrainSampler.blockNumber(blockX, blockZ) >= 0) this.byNumber.set(TerrainSampler.blockNumber(blockX, blockZ), b);
     }
     return b;
   }
 
   hasBlock(blockX: number, blockZ: number): boolean {
     return this.blockAt(blockX, blockZ) !== undefined;
+  }
+
+  /**
+   * A cached block's own poles' heights as laid (the horizon pass's wave 3b, the rings' shape window): its 32 by 32 from
+   * `ORIGIN_OFFSET` in, raw (bx·64, bz·64) first, into `out`; false when the block is not cached. Never generates. Looked up
+   * by its number (a frame's probe builds no key) and never through `lastBlock`, which the near ground's own runs of lookups keep.
+   */
+  copyInnerHeights(blockX: number, blockZ: number, out: Float32Array): boolean {
+    const k = TerrainSampler.blockNumber(blockX, blockZ);
+    const b = k >= 0 ? this.byNumber.get(k) : this.blocks.get(`${blockX},${blockZ}`);
+    if (!b) return false;
+    const np = this.numberOfPoles;
+    const n = Math.round(this.blockWidth / this.poleStep);
+    if (out.length < n * n) return false;
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) out[j * n + i] = b.heights[(j + ORIGIN_OFFSET) * np + i + ORIGIN_OFFSET];
+    return true;
+  }
+
+  /**
+   * A block-shaped grid the live generator made for block (bx, bz) laid as a block entering the cache is (`layEntering`): the
+   * drawn courses carved and the owner's edits over them from its raw heights, in place; left as it came where neither
+   * touches it. Its heights are then the very ones the near ground's block would hold (wave 3b, the shape window).
+   */
+  layBlockHeights(blockX: number, blockZ: number, heights: Float32Array): void {
+    const h = this.heights;
+    const c = this.course;
+    if (!h && !c) return;
+    const step = this.poleStep;
+    const np = this.numberOfPoles;
+    const x0 = blockX * this.blockWidth - ORIGIN_OFFSET * step;
+    const z0 = blockZ * this.blockWidth - ORIGIN_OFFSET * step;
+    const x1 = x0 + (np - 1) * step;
+    const z1 = z0 + (np - 1) * step;
+    if ((!h || !h.touches(x0, z0, x1, z1)) && (!c || !c.touches(x0, z0, x1, z1))) return;
+    this.layOne(heights.slice(), heights, x0, z0);
   }
 
   putBlock(blockX: number, blockZ: number, block: PoleBlock): void {
@@ -620,6 +662,7 @@ export class TerrainSampler {
     // A block made again (for a paint, Map-maker II) replaces the one cached, and a preview's ground for it goes with it.
     if (this.previewBase.size) this.previewBase.delete(TerrainSampler.blockNumber(blockX, blockZ));
     this.blocks.set(`${blockX},${blockZ}`, block);
+    if (TerrainSampler.blockNumber(blockX, blockZ) >= 0) this.byNumber.set(TerrainSampler.blockNumber(blockX, blockZ), block);
   }
 
   /**
@@ -632,6 +675,7 @@ export class TerrainSampler {
     if (n >= 0) {
       this.raws.delete(n);
       this.previewBase.delete(n);
+      this.byNumber.delete(n);
     }
     return this.blocks.delete(`${blockX},${blockZ}`);
   }
@@ -1108,6 +1152,7 @@ export class TerrainSampler {
       const [x, z] = key.split(',').map(Number);
       if (Math.max(Math.abs(x - blockX), Math.abs(z - blockZ)) > radius) {
         this.blocks.delete(key);
+        this.byNumber.delete(TerrainSampler.blockNumber(x, z));
         // Its raw copy goes with it: a block generated again is copied afresh as it enters.
         if (this.raws.size) this.raws.delete(TerrainSampler.blockNumber(x, z));
         if (this.previewBase.size) this.previewBase.delete(TerrainSampler.blockNumber(x, z));
@@ -1118,6 +1163,7 @@ export class TerrainSampler {
   invalidateAll(): void {
     this.lastBlock = undefined;
     this.blocks.clear();
+    this.byNumber.clear();
     this.raws.clear();
     this.previewBase.clear();
     this.relayWait.clear();
@@ -1160,6 +1206,7 @@ export class TerrainSampler {
     this.building.push(layer);
     this.lastBlock = undefined;
     this.blocks.clear();
+    this.byNumber.clear();
     this.raws.clear();
     this.previewBase.clear();
   }

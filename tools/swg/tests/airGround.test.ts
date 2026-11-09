@@ -40,7 +40,9 @@ ok(injectGroundAir(v, air), 'the variant goes in over it');
 const fs = v.fragmentShader;
 ok(v.vertexShader === plain.vertexShader, 'and touches no vertex text: no vertex moves and no varying is added');
 ok(count(fs, TILE_MAP) === 1, "TILE_MAP is in the variant byte for byte: the ground's own picture never moves (the second wave's eight rewritten calls are gone)");
-ok(!fs.includes('gAirShift') && !fs.includes('vGroundUV + '), 'and no layer is sampled anywhere but where it rests');
+// The horizon pass's wave 3b gave the plain program a relief of its own near the eye (`gUV = vGroundUV + gGroundOff`): the
+// variant adds no move of its own to where a picture is sampled.
+ok(!fs.includes('gAirShift') && count(fs, 'vGroundUV + ') === count(plainFs, 'vGroundUV + '), 'and no layer is sampled anywhere but where the plain program samples it');
 {
   const common = fs.indexOf('#include <common>');
   const pars = fs.indexOf('uniform sampler2D uAirOffsets;');

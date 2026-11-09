@@ -202,12 +202,12 @@ else {
   ok(!!reset && / roomLightSpots=0 roomLightShadows=0 /.test(reset.act), "and the page's reset puts both back at nought, the pool as the world always had it");
   // The horizon pass's second wave added two to Distance and detail (the far ground's switch and the Terrain distance),
   // after the far tiles' radius; they are held apart as the rooms' two are.
-  // The third wave added the Ground detail distance after them.
-  const HORIZON = ['input:farRings', 'input:terrainDistance', 'input:groundDetailDistance'];
+  // The third wave added the Ground detail distance after them, and its wave 3b the Terrain shape detail after that.
+  const HORIZON = ['input:farRings', 'input:terrainDistance', 'input:groundDetailDistance', 'input:terrainShapeDetail'];
   const hz = HORIZON.map((id) => all.findIndex((c) => c.id === id));
-  ok(hz[0] === all.findIndex((c) => c.id === 'input:farRadius') + 1 && hz[1] === hz[0] + 1 && hz[2] === hz[1] + 1, `the far ground's switch, the Terrain distance and the Ground detail distance stand after the far tiles' radius (${hz.join(', ')})`);
+  ok(hz[0] === all.findIndex((c) => c.id === 'input:farRadius') + 1 && hz[1] === hz[0] + 1 && hz[2] === hz[1] + 1 && hz[3] === hz[2] + 1, `the far ground's switch, the Terrain distance, the Ground detail distance and the Terrain shape detail stand after the far tiles' radius (${hz.join(', ')})`);
   // The reset's act, less the ones it now writes as well, is the reset of before.
-  const nc = all.filter((c) => !ADDED.includes(c.id) && !HORIZON.includes(c.id)).map((c) => (c.id === 'button:reset-gfx' ? { ...c, act: c.act.replace(' roomLightSpots=0 roomLightShadows=0', '').replace(' farRings=false terrainDistance=8 groundDetailDistance=2.5', '') } : c));
+  const nc = all.filter((c) => !ADDED.includes(c.id) && !HORIZON.includes(c.id)).map((c) => (c.id === 'button:reset-gfx' ? { ...c, act: c.act.replace(' roomLightSpots=0 roomLightShadows=0', '').replace(' farRings=false terrainDistance=8 groundDetailDistance=2.5 terrainShapeDetail=0.7', '') } : c));
   const added = all.filter((c) => ADDED.includes(c.id));
   ok(added.length === 2 && all.findIndex((c) => c.id === ADDED[0]) === all.findIndex((c) => c.id === 'input:shadowCasterRadius') + 1 && all.findIndex((c) => c.id === ADDED[1]) === all.findIndex((c) => c.id === ADDED[0]) + 1, `the rooms' two light settings stand in the shadows' section, after the smallest caster (${added.map((c) => c.id).join(', ')})`);
   ok(oldTitles.join('|') === newTitles.join('|'), `the page's sections are the ones it had, in the order it had them (${newTitles.length})`);
