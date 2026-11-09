@@ -307,7 +307,7 @@ import { CLOUD_TUNE, cloudLook, loadCloudNoise, loadCloudPack, loadCloudVolumes,
 import { UNDERWATER_TUNE, tuneUnderwater, unknownUnderwaterKeys, type UnderwaterTune } from './core/fx/underwaterMath.ts';
 import type { UnderwaterPass } from './core/fx/underwater';
 import { FIGURE_SPHERE, followDepth, measureLocalSphere, type FxMoverList, type LocalSphere, type VelocityProduct } from './core/fx/velocity';
-import { MOTION_TUNING, MOVER_LIMITS } from './core/fx/velocityMath.ts';
+import { MOTION_TUNING, MOVER_LIMITS, tuneMotion, type FollowView, type MotionChanges } from './core/fx/velocityMath.ts';
 import type { MotionBlurPass } from './core/fx/motionBlur';
 import { HeatSources, plumeNoiseFrequency } from './world/heatSources';
 import { MobileAssets } from './world/mobiles/assets';
@@ -1574,7 +1574,7 @@ class App {
   /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
   private readonly litSources: LitSources = { world: null!, effects: null!, torch: null };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, vignetteKick: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, cameraSubmerged: false, underwaterDepth: 0, underwaterColor: new THREE.Color(0x2e7fbb), underwaterOpacity: 0.75, underwaterReach: 0, exitWater: false, exitDepth: 0, exitColor: new THREE.Color(0x2e7fbb), exitOpacity: 0.75, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, weather: null };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, vignetteKick: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, cameraSubmerged: false, underwaterDepth: 0, underwaterColor: new THREE.Color(0x2e7fbb), underwaterOpacity: 0.75, underwaterReach: 0, exitWater: false, exitDepth: 0, exitColor: new THREE.Color(0x2e7fbb), exitOpacity: 0.75, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, followView: 'other', weather: null };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /**
    * The frame's word to the underwater pass's exits variant (`World.exitWaterOf`, Map-maker II's fifth wave), kept: `look`
@@ -5724,37 +5724,56 @@ class App {
       renderInfo: () => ({ memory: { ...this.renderer.info.memory }, programs: this.renderer.info.programs?.length ?? 0, effects: !!this.postfx }),
       /** What the motion blur tracks this frame: every mover listed, what it drew and why not, the variants and the static cut. Null with the effects off. */
       movers: (list = true) => this.postfx?.product<VelocityProduct>('velocity')?.stats(list) ?? null,
-      /** Draw a frame and read the blur's radius field at a pixel (from the top left; the crosshair by default): what a passing thing does, without a screenshot. */
-      motionProbe: (x?: number, y?: number) => {
+      /**
+       * Draw a frame and read the blur's radius field at a pixel (from the top left; the crosshair by default): what a passing
+       * thing does, without a screenshot. A frame drawn from here has not moved the camera since the last, so the camera's own
+       * smear reads nought in it: `motionProbe(x, y, false)` reads the field the last frame of play left instead (the race
+       * view's ground beside the pod).
+       */
+      motionProbe: (x?: number, y?: number, draw = true) => {
         const fx = this.postfx;
         if (!fx) return { off: 'the effects are off; turn Effects on in the menu' };
         const pass = fx.pass<MotionBlurPass>('motionBlur');
         if (!pass || typeof pass.readField !== 'function') return { off: 'this chain has no motion blur with a radius field' };
-        this.drawFrame();
+        if (draw) this.drawFrame();
         const row = fx.describe().passes.find((p) => p.id === 'motionBlur');
         if (!row?.drewLastFrame) return { off: row?.why ?? 'the motion blur did not draw' };
         const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
         const read = pass.readField(this.renderer, x ?? size.x / 2, y ?? size.y / 2);
         if (!read) return { off: 'the read failed' };
-        return { ...read, cut: [pass.lastCut.x, pass.lastCut.y] };
+        return { ...read, cut: [pass.lastCut.x, pass.lastCut.y], masked: pass.lastMasked, view: this.followView, tileSize: pass.tileSize };
       },
-      /** Retune the motion blur for this session: `{ nearCut: [8, 25], radiusOfHeight, samples, limits: { maxDraws } }`. Returns the values in force; nothing is saved. */
-      motionTune: (changes?: { nearCut?: [number, number]; radiusOfHeight?: number; samples?: number; limits?: Partial<typeof MOVER_LIMITS> }) => {
-        if (changes?.nearCut) {
-          const [a, b] = changes.nearCut;
-          if (!(Number.isFinite(a) && Number.isFinite(b) && a >= 0 && a < b)) return `nearCut must be two distances in metres, the first below the second (got ${JSON.stringify(changes.nearCut)})`;
-          MOTION_TUNING.nearCut = [a, b];
-        }
-        if (changes?.radiusOfHeight !== undefined && Number.isFinite(changes.radiusOfHeight) && changes.radiusOfHeight > 0) {
-          MOTION_TUNING.radiusOfHeight = changes.radiusOfHeight;
-          this.postfx?.pass<MotionBlurPass>('motionBlur')?.resizeTiles?.();
-        }
-        if (changes?.samples !== undefined && Number.isFinite(changes.samples)) MOTION_TUNING.samples = Math.min(32, Math.max(4, Math.round(changes.samples)));
+      /**
+       * Retune the motion blur for this session: `{ nearCut: [8, 25], radiusOfHeight, samples, limits: { maxDraws } }`, and what
+       * keeps what the camera follows sharp, `{ followRule: 'auto' | 'cut' | 'mask', maskCutNear, maskCutFull }`, and the race
+       * view's own `{ raceShutter, raceStrength, raceRadiusOfHeight, raceSamples }` (its dials in the debug menu, `motionTune`
+       * picked). Returns the values in force, with any refusal in `refused`; nothing is saved.
+       */
+      motionTune: (changes?: MotionChanges & { limits?: Partial<typeof MOVER_LIMITS> }) => {
+        const refused = changes ? tuneMotion(changes) : [];
         if (changes?.limits) {
           const L = MOVER_LIMITS as Record<string, number>;
           for (const [k, v] of Object.entries(changes.limits)) if (k in L && typeof v === 'number' && Number.isFinite(v)) L[k] = v;
         }
-        return { nearCut: [...MOTION_TUNING.nearCut], radiusOfHeight: MOTION_TUNING.radiusOfHeight, samples: MOTION_TUNING.samples, shutter: MOTION_TUNING.shutter, tileSize: this.postfx?.pass<MotionBlurPass>('motionBlur')?.tileSize ?? null, limits: { ...MOVER_LIMITS } };
+        const T = MOTION_TUNING;
+        const pass = this.postfx?.pass<MotionBlurPass>('motionBlur');
+        return {
+          ...(refused.length ? { refused } : {}),
+          nearCut: [...T.nearCut],
+          radiusOfHeight: T.radiusOfHeight,
+          samples: T.samples,
+          shutter: T.shutter,
+          followRule: T.followRule,
+          maskCut: [...T.maskCut],
+          raceShutter: T.raceShutter,
+          raceStrength: T.raceStrength,
+          raceRadiusOfHeight: T.raceRadiusOfHeight,
+          raceSamples: T.raceSamples,
+          view: this.followView,
+          masked: pass?.lastMasked ?? null,
+          tileSize: pass?.tileSize ?? null,
+          limits: { ...MOVER_LIMITS },
+        };
       },
       /**
        * Every pass of the last frame: what it was and what it drew, and beside it what the shadow
@@ -20221,6 +20240,7 @@ class App {
    * round from that same eye. A bridge pilot's first person is their own eyes. Allocates nothing.
    */
   private placeCamera(blocked: import('./core/camera').CameraBlocker | null, dt: number): void {
+    this.followView = 'other'; // the motion blur's view (`masksFollowed`): a branch below may say race, chase or third
     // The world editor's eye: the camera at the anchor with the eye's look, written into the orbit's own yaw and pitch.
     if (this.editor?.on) {
       this.editor.placeCamera();
@@ -20276,6 +20296,7 @@ class App {
       } else this.cam.chase(input, dt, mid, turn, heading, reach, null, this.rideBlock, f.rise);
       this.cam.zoomTarget = Math.max(this.cam.zoomTarget, RIDE_TUNE.minZoom);
       this.showHull(rh, true);
+      this.followView = 'third';
       return;
     }
     if (this.rideZoomKept !== null) {
@@ -20305,6 +20326,7 @@ class App {
       this.orbitUnder.copy(head).addScaledVector(tmp2.set(0, 1, 0).applyQuaternion(ship.group.quaternion), -1.5);
       this.cam.update(input, this.orbitUnder, null, dt, eye, Math.max(1, (6 + ship.radius * 2.2) / 6), 1.5, 0);
       this.showHull(ship, true);
+      this.followView = this.cam.firstPerson ? 'other' : 'third';
       return;
     }
     this.altLooking = false;
@@ -20313,6 +20335,8 @@ class App {
       // Seated in the cockpit the hull would fill the view unless a frame is drawn there; a bridge pilot keeps the rooms
       // (unless __debug.cockpit({ bridgeHull: false }) asks for the hull hidden around them).
       this.showHull(ship, !this.cam.firstPerson || !!ship.cockpitFrame || (player.piloting === ship && this.bridgeHullInFlight));
+      // A flown ship's chase takes the mask; the cockpit and a jump's tunnel (which follows the hull and is no mover) the cut.
+      this.followView = this.cam.firstPerson || jumpView || this.jumpTunnel.shown ? 'other' : 'chase';
       return;
     }
     if (inCockpit && seated) {
@@ -20380,6 +20404,9 @@ class App {
       this.cam.cockpit(input, dt, eyes, seated.group.quaternion, seated.heading, false);
       this.showHull(seated, !!seated.cockpitFrame);
     }
+    // The race view from outside takes the mask, any other view from outside is 'third'; first person and a conversation
+    // over the shoulder keep the cut.
+    if (!this.cam.firstPerson && !(this.talkNow || this.talkCam.blend > 0)) this.followView = raced ? 'race' : 'third';
   }
 
   /** How the passenger's view frames the hull of the trip it last framed, kept and written in place, and that trip. */
@@ -23812,8 +23839,10 @@ class App {
       f.exitOpacity = ew.opacity;
       // The room this frame is drawn from inside (RoomAir ran above, before the scene): the light shafts' input.
       f.room = this.roomAir.frame;
-      // The far side of what the camera follows: nothing nearer smears with the camera.
+      // The far side of what the camera follows: nothing nearer smears with the camera, unless the view keeps it sharp by
+      // its own pixels (`followView`: the race view and a flown ship's chase, `masksFollowed`).
       f.followFar = this.followFar(cam);
+      f.followView = this.followView;
       // The weather the effects fade by (the god rays and the flare in overcast), while it is on.
       f.weather = wfx;
       // The lit blades as drawn this frame (drawBlades and the fighters' step have run), and how
@@ -23913,6 +23942,12 @@ class App {
     this.world.moverGround(m);
   }
 
+  /**
+   * Where the camera is for the motion blur's rule about what it follows, decided by `placeCamera` each frame and handed
+   * to the effects (`masksFollowed`): the race view and a flown ship's chase keep the hull sharp by its own pixels, every
+   * other view by the depth cut unless `motionTune({ followRule: 'mask' })` says otherwise.
+   */
+  private followView: FollowView = 'other';
   /** The follow sphere of the vehicle followed now, and what it was measured from: dropped when nothing is followed. */
   private followRoot: THREE.Object3D | null = null;
   private readonly followSphere: LocalSphere = { centre: new THREE.Vector3(), radius: 0 };

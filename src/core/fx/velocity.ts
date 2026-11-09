@@ -8,7 +8,9 @@
 // velocity differs from what the blur would compute from depth are drawn:
 //   - what the camera follows (the player, what they ride, fly or stand aboard) draws only its rigid
 //     parts that moved relative to it (wings opening, a weapon in a hand); everything else of it is
-//     exactly the static result under the static cut, which is pushed past its far side;
+//     exactly the static result under the static cut, which is pushed past its far side; under the mask (the race
+//     view and a flown ship's chase, `masksFollowed`) it draws all of itself instead, its riding parts at nought, so
+//     its own pixels are what the blur takes out of the reprojection and nothing beside it is held by a depth cut;
 //   - other movers draw everything while their root moves, and only such parts while it stands.
 // Motion is the root's: a skinned body moves with its root, and last frame's bones are not kept.
 //
@@ -26,7 +28,7 @@ import type { OwnJob } from '../programQueue.ts';
 import { GeometryProduct, geometryMaterialDefaults, type FxGeometryDrawer } from './geometry.ts';
 import type { PostFX } from '../postfx';
 import { ACTOR_LAYER } from '../../world/portalRender.ts';
-import { MOVER_LIMITS, WARM_VARIANTS, classifyMover, drawableSince, moverPriority, movingWeight, reprojectionCarry, shownSince, staticCut, takeByBudget, variantKey, type BudgetTotals, type FxMoverKind, type MoverFacts, type MoverResult, type VariantKeyParts } from './velocityMath.ts';
+import { MOTION_TUNING, MOVER_LIMITS, WARM_VARIANTS, classifyMover, drawableSince, maskCut, masksFollowed, moverPriority, movingWeight, reprojectionCarry, shownSince, staticCut, takeByBudget, variantKey, type BudgetTotals, type FollowRule, type FollowView, type FxMoverKind, type MoverFacts, type MoverResult, type VariantKeyParts } from './velocityMath.ts';
 
 export type { FxMoverKind } from './velocityMath.ts';
 
@@ -84,9 +86,11 @@ export interface VelocityStats {
   empty: boolean;
   followFar: number;
   cut: [number, number];
+  /** The rule about what the camera follows this frame: the rule in force, the camera's view, whether the mask was wanted and whether it was whole (and so used). */
+  follow: { rule: FollowRule; view: FollowView; wanted: boolean; masked: boolean; overCap: boolean };
   broken: string | null;
   variants: { key: string; warm: boolean; ready: boolean; failed: boolean }[];
-  list: { kind: FxMoverKind; name: string; carried: boolean; meshes: number; drawable: number; animated: number; drawn: number; result: MoverResult; speed: number; depth: number; px: number }[];
+  list: { kind: FxMoverKind; name: string; carried: boolean; meshes: number; drawable: number; animated: number; drawn: number; unready: number; result: MoverResult; speed: number; depth: number; px: number }[];
 }
 
 // --- what may be drawn -------------------------------------------------------------------------
@@ -118,6 +122,57 @@ function eligibleMesh(o: THREE.Object3D): o is THREE.Mesh {
   const s = m as THREE.SkinnedMesh;
   if (s.isSkinnedMesh && !s.skeleton) return false;
   return true;
+}
+
+/**
+ * A glow sprite (an engine's: additive, a picture, writing no depth) that the mask holds sharp with what the camera follows:
+ * drawn only then, as a camera-facing quad on the sprite's own shared geometry, cut by its picture's alpha.
+ */
+function glowSprite(o: THREE.Object3D): o is THREE.Sprite {
+  const s = o as THREE.Sprite;
+  if (!s.isSprite || s.userData.noVelocity) return false;
+  const m = s.material;
+  return !!m && m.visible && !!m.map && !!s.geometry?.attributes.position;
+}
+
+/**
+ * A glow's stand-in quad (three's sprite quad, -0.5..0.5) written into `out`: at the sprite's place and size, facing the
+ * camera as three's sprite program stands it (centre and rotation at their defaults, as every engine glow has them).
+ */
+function placeGlow(sprite: THREE.Sprite, out: THREE.Matrix4, camera: THREE.Camera): void {
+  const s = sprite.matrixWorld.elements;
+  const c = camera.matrixWorld.elements;
+  const o = out.elements;
+  const sx = Math.sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+  const sy = Math.sqrt(s[4] * s[4] + s[5] * s[5] + s[6] * s[6]);
+  const rx = sx / Math.max(Math.sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]), 1e-9);
+  const ry = sy / Math.max(Math.sqrt(c[4] * c[4] + c[5] * c[5] + c[6] * c[6]), 1e-9);
+  const rz = 1 / Math.max(Math.sqrt(c[8] * c[8] + c[9] * c[9] + c[10] * c[10]), 1e-9);
+  o[0] = c[0] * rx;
+  o[1] = c[1] * rx;
+  o[2] = c[2] * rx;
+  o[3] = 0;
+  o[4] = c[4] * ry;
+  o[5] = c[5] * ry;
+  o[6] = c[6] * ry;
+  o[7] = 0;
+  o[8] = c[8] * rz;
+  o[9] = c[9] * rz;
+  o[10] = c[10] * rz;
+  o[11] = 0;
+  o[12] = s[12];
+  o[13] = s[13];
+  o[14] = s[14];
+  o[15] = 1;
+}
+
+/** The nodes a scan of `o` visits (`scanTree`), `skip`'s subtree left out: a part added under what the camera follows moves it. */
+function countTree(o: THREE.Object3D, skip: THREE.Object3D | null): number {
+  if (o === skip) return 0;
+  let n = 1;
+  const children = o.children;
+  for (let i = 0; i < children.length; i++) n += countTree(children[i], skip);
+  return n;
 }
 
 function anyEligibleMaterial(m: THREE.Mesh): boolean {
@@ -240,6 +295,12 @@ export function followFarOf(ctx: FxFrameContext): number {
   return typeof f === 'number' && Number.isFinite(f) ? Math.max(0, f) : 0;
 }
 
+/** Where the camera is for the rule about what it follows (`ctx.followView`): 'other', which keeps the depth cut, when the context does not say. */
+export function followViewOf(ctx: FxFrameContext): FollowView {
+  const v = (ctx as { followView?: FollowView }).followView;
+  return v === 'race' || v === 'chase' || v === 'third' ? v : 'other';
+}
+
 // --- the shaders --------------------------------------------------------------------------------
 
 const VELOCITY_VERT = /* glsl */ `
@@ -284,6 +345,7 @@ void main() {
 const VELOCITY_FRAG = /* glsl */ `
 uniform vec2 uCut;
 uniform float uMoving;
+uniform float uFollowed;     // 1 for what the camera follows while it is the mask: only its parts' own motion, never the camera's
 #ifdef VEL_ALPHA
 uniform sampler2D uAlphaMap;
 uniform float uAlphaTest;
@@ -300,7 +362,7 @@ void main() {
   vec2 now = vNow.xy / vNow.w;
   vec2 ref = vRef.w > 1e-4 ? vRef.xy / vRef.w : now;           // behind last frame's camera: no rigid motion
   vec2 prev = vPrev.w > 1e-4 ? vPrev.xy / vPrev.w : ref;
-  float w = max( smoothstep( uCut.x, uCut.y, vViewZ ), uMoving ); // uCut.x < uCut.y always (staticCut)
+  float w = max( smoothstep( uCut.x, uCut.y, vViewZ ), uMoving ) * ( 1.0 - uFollowed ); // uCut.x < uCut.y always (staticCut, maskCut)
   vec2 v = ( ( now - ref ) * w + ( ref - prev ) ) * 0.5;        // ndc to uv; now minus then, per frame
   if ( any( isnan( v ) ) || any( isinf( v ) ) ) v = vec2( 0.0 );
   gl_FragColor = vec4( clamp( v, -1.0, 1.0 ), 1.0, uMoving );  // b: covered; a: the moving weight, for the debug view
@@ -350,7 +412,10 @@ interface DrawRecord {
 /** One mesh of a mover. */
 interface MeshState {
   readonly mover: MoverRecord;
+  /** The mesh drawn; for a glow sprite a kept stand-in on the sprite's geometry, placed facing the camera per draw. */
   readonly mesh: THREE.Mesh;
+  /** The glow sprite this state stands for (`glowSprite`), whose chain, visibility and material are what is checked; null for a mesh. */
+  readonly sprite: THREE.Sprite | null;
   /** mesh.geometry at scan. */
   geometry: THREE.BufferGeometry;
   /** mesh.material at scan (identity). */
@@ -398,6 +463,8 @@ interface MoverRecord {
   stagger: number;
   /** A check found the scan out of date. */
   stale: boolean;
+  /** The nodes the last scan visited (`countTree`): under the mask a count that moved is a part added since, out of date. */
+  nodes: number;
   states: MeshState[];
   spare: MeshState[];
   /** Geometries this record listens to for disposal. */
@@ -411,6 +478,8 @@ interface MoverRecord {
   moved: number;
   speed: number;
   turn: number;
+  /** Meshes shown this frame that cannot be drawn yet (first seen, or their variant still building or failed): what the camera follows is no whole mask while any is. */
+  unready: number;
   hidden: boolean;
   inFrustum: boolean;
   depth: number;
@@ -486,10 +555,12 @@ export class VelocityProduct extends GeometryProduct {
   private readonly invRoot = new THREE.Matrix4();
   private readonly facts: MoverFacts = { kind: 'player', carried: false, hidden: false, inFrustum: false, historyValid: false, moved: 0, dt: 1 / 60, speed: 0, turn: 0, animated: 0, screenRadiusPx: 0 };
   private readonly scratchGeometries = new Set<THREE.BufferGeometry>();
-  private readonly oldStates = new Map<THREE.Mesh, MeshState>();
+  private readonly oldStates = new Map<THREE.Object3D, MeshState>();
   private readonly proxy: THREE.Scene;
   private scanRec: MoverRecord | null = null;
   private scanFrame = 0;
+  /** Nodes the scan in progress has visited. */
+  private scanNodes = 0;
   private staggerNext = 0;
   private failures = 0;
   private frame = 0;
@@ -500,6 +571,19 @@ export class VelocityProduct extends GeometryProduct {
   private scans = 0;
   private cpuMs = 0;
   private lastFollowFar = 0;
+  /** The camera's view this frame (`ctx.followView`). */
+  private view: FollowView = 'other';
+  /** The mask is wanted this frame (`masksFollowed`): what the camera follows draws all of itself. */
+  private masking = false;
+  /**
+   * The mask was wanted and is whole this frame: every follow in view drew all of itself, so its pixels are marked and
+   * the motion blur takes them out of the reprojection with no depth cut. Read by the pass through `maskedOn`.
+   */
+  masked = false;
+  /** The frame `masked` was last true on: the pass reads it only for the frame it is drawing. */
+  private maskedFrame = -1;
+  /** This frame the mask was wanted and what the camera follows did not fit `maxMaskDraws`: drawn by the old rule instead. */
+  private maskOver = false;
   /** The target holds a velocity picture a later empty frame has to clear. */
   private dirty = false;
   private disposed = false;
@@ -528,10 +612,14 @@ export class VelocityProduct extends GeometryProduct {
     this.waiting = 0;
     this.scans = 0;
     this.empty = true;
+    this.masked = false;
+    this.maskOver = false;
     if (this.broken || this.disposed) return;
     this.frame = ctx.frame;
     this.dt = Math.max(ctx.dt, 1e-4);
     this.lastFollowFar = followFarOf(ctx);
+    this.view = followViewOf(ctx);
+    this.masking = masksFollowed(MOTION_TUNING.followRule, this.view);
     this.list.clear();
     try {
       this.collect(this.list);
@@ -541,11 +629,16 @@ export class VelocityProduct extends GeometryProduct {
     }
     this.refresh();
     this.classify(ctx);
+    // Decided before anything is drawn: a mask with a hole in it (a part first seen, a variant still building, a follow
+    // over its draws) would leave that part to the reprojection with no cut, a smear of the hull, so the frame keeps the cut.
+    this.masked = this.masking && this.wholeMask();
+    if (this.masked) this.maskedFrame = ctx.frame;
     this.empty = this.draws + this.carriedDraws === 0;
     if (!this.empty) {
       this.bindAndClear(ctx);
       this.shared.uPrevProjView.value.copy(prevProjViewOf(ctx));
-      staticCut(this.lastFollowFar, this.shared.uCut.value);
+      if (this.masked) maskCut(this.shared.uCut.value);
+      else staticCut(this.lastFollowFar, this.shared.uCut.value);
       this.draw(ctx);
       this.dirty = true;
     } else if (this.dirty) {
@@ -555,6 +648,27 @@ export class VelocityProduct extends GeometryProduct {
     }
     this.record();
     this.cpuMs = performance.now() - t0;
+  }
+
+  /** Whether the frame being drawn has what the camera follows as a whole mask in the product (the motion blur's question). */
+  maskedOn(frame: number): boolean {
+    return this.maskedFrame === frame && this.masked;
+  }
+
+  /**
+   * Every follow in view drew all of itself, every part ready and its scan up to date (a part added since the last scan,
+   * whose count moved but whose rescan waits for the frame's scan budget, is in no list yet): nothing of it is left to
+   * the reprojection. False with none in view.
+   */
+  private wholeMask(): boolean {
+    let any = false;
+    for (let i = 0; i < this.active.length; i++) {
+      const rec = this.active[i];
+      if (!rec.carried || rec.hidden || !rec.inFrustum) continue;
+      if (rec.result !== 'all' || rec.unready > 0 || rec.stale) return false;
+      any = true;
+    }
+    return any;
   }
 
   /** Bind the target and clear its colour only: the frame's depth is what makes the draws worth doing. */
@@ -612,6 +726,9 @@ export class VelocityProduct extends GeometryProduct {
         rec.skip = skip;
         rec.stale = true;
       }
+      // Under the mask what the camera follows is counted every frame (one or two roots, a walk of their nodes): a part
+      // added since its scan (a weapon drawn, a refit's part) is known at once and rescanned, never left out of the mask.
+      if (this.masking && rec.carried && rec.scanned >= 0 && !rec.stale && countTree(rec.root, rec.skip) !== rec.nodes) rec.stale = true;
       const due = rec.scanned < 0 || rec.stale || (rec.scanned !== frame && (frame + rec.stagger) % MOVER_LIMITS.rescanFrames === 0);
       if (due && this.scans < MOVER_LIMITS.maxScansPerFrame) {
         this.scan(rec);
@@ -635,6 +752,7 @@ export class VelocityProduct extends GeometryProduct {
       scanned: -1,
       stagger: this.staggerNext++ % MOVER_LIMITS.rescanFrames,
       stale: false,
+      nodes: 0,
       states: [],
       spare: [],
       geometries: new Set(),
@@ -645,6 +763,7 @@ export class VelocityProduct extends GeometryProduct {
       moved: 0,
       speed: 0,
       turn: 0,
+      unready: 0,
       hidden: false,
       inFrustum: false,
       depth: 0,
@@ -717,13 +836,14 @@ export class VelocityProduct extends GeometryProduct {
   private scan(rec: MoverRecord): void {
     const old = this.oldStates;
     old.clear();
-    for (const s of rec.states) old.set(s.mesh, s);
+    for (const s of rec.states) old.set(s.sprite ?? s.mesh, s);
     const next = rec.spare;
     next.length = 0;
     rec.spare = rec.states;
     rec.states = next;
     this.scanRec = rec;
     this.scanFrame = this.frame;
+    this.scanNodes = 0;
     let skinned = false;
     try {
       rec.root.updateWorldMatrix(true, false);
@@ -731,6 +851,7 @@ export class VelocityProduct extends GeometryProduct {
     } finally {
       this.scanRec = null;
     }
+    rec.nodes = this.scanNodes;
     rec.spare.length = 0;
     old.clear();
     // Listen to the geometries now in use and let go of those that are not.
@@ -754,6 +875,7 @@ export class VelocityProduct extends GeometryProduct {
   /** Object3D.traverse that leaves out one subtree. */
   private scanTree(o: THREE.Object3D, skip: THREE.Object3D | null): void {
     if (o === skip) return;
+    this.scanNodes++;
     this.scanVisit(o);
     const children = o.children;
     for (let i = 0; i < children.length; i++) this.scanTree(children[i], skip);
@@ -762,6 +884,10 @@ export class VelocityProduct extends GeometryProduct {
   private readonly scanVisit = (o: THREE.Object3D): void => {
     const rec = this.scanRec!;
     if (!rec.name && o.name) rec.name = o.name;
+    if (glowSprite(o)) {
+      this.scanGlow(rec, o);
+      return;
+    }
     if (!eligibleMesh(o) || this.failedMeshes.has(o) || !anyEligibleMaterial(o)) return;
     const mesh = o;
     const skinned = !!(mesh as THREE.SkinnedMesh).isSkinnedMesh;
@@ -775,6 +901,7 @@ export class VelocityProduct extends GeometryProduct {
       s = {
         mover: rec,
         mesh,
+        sprite: null,
         geometry: mesh.geometry,
         material: mat,
         snapshot: Array.isArray(mat) ? mat.slice() : null,
@@ -833,6 +960,79 @@ export class VelocityProduct extends GeometryProduct {
     rec.states.push(s);
   };
 
+  /**
+   * A glow sprite's state: one draw on the rigid alpha variant (warmed behind the first screen), its picture as the alpha
+   * map, drawn only while the mask is wanted for what the camera follows (`glowDrawn`). The sprite's geometry is three's
+   * one shared sprite quad, uploaded by the first sprite the scene ever drew, so the stand-in needs no buffers of its own.
+   */
+  private scanGlow(rec: MoverRecord, sprite: THREE.Sprite): void {
+    const prevState = this.oldStates.get(sprite);
+    let s: MeshState;
+    if (prevState && prevState.geometry === sprite.geometry && prevState.material === sprite.material && !this.failedMeshes.has(prevState.mesh)) s = prevState;
+    else if (prevState && this.failedMeshes.has(prevState.mesh)) return;
+    else {
+      const standIn = new THREE.Mesh(sprite.geometry, sprite.material as unknown as THREE.Material);
+      standIn.name = sprite.name || 'glow';
+      standIn.matrixAutoUpdate = false;
+      s = {
+        mover: rec,
+        mesh: standIn,
+        sprite,
+        geometry: sprite.geometry,
+        material: sprite.material,
+        snapshot: null,
+        chain: [],
+        skinned: false,
+        prev: new THREE.Matrix4(),
+        historyFrame: -1,
+        rel: new THREE.Matrix4(),
+        relFrame: -1,
+        firstShown: -1,
+        animated: false,
+        drawable: false,
+        dead: false,
+        draws: [],
+        drawCount: 0,
+      };
+    }
+    if (s.dead) {
+      s.dead = false;
+      s.firstShown = -1;
+    }
+    const chain = s.chain;
+    chain.length = 0;
+    let node: THREE.Object3D | null = sprite;
+    while (node && node !== rec.root) {
+      chain.push(node);
+      node = node.parent;
+    }
+    if (node !== rec.root) return;
+    s.drawCount = 0;
+    const parts: VariantKeyParts = scanParts;
+    parts.skinned = false;
+    parts.morphs = 0;
+    parts.morphNormals = false;
+    parts.morphColors = false;
+    parts.alpha = true;
+    const i = s.drawCount++;
+    let d = s.draws[i];
+    if (!d) {
+      d = { state: s, group: null, source: sprite.material, parts: { ...parts }, variant: null, alphaMap: null, alphaTest: 0 };
+      s.draws[i] = d;
+    }
+    d.source = sprite.material;
+    d.variant = this.variantFor(d.parts, false);
+    d.alphaMap = sprite.material.map;
+    d.alphaTest = MOVER_LIMITS.glowAlphaTest;
+    s.draws.length = 1;
+    rec.states.push(s);
+  }
+
+  /** Whether a state is drawn this frame: a mesh always, a glow sprite only for what the camera follows while the mask is wanted. */
+  private glowDrawn(s: MeshState): boolean {
+    return !s.sprite || (s.mover.carried && this.masking);
+  }
+
   private addDraw(s: MeshState, group: THREE.GeometryGroup | null, source: THREE.Material, parts: VariantKeyParts): void {
     const map = (source as THREE.MeshBasicMaterial).map ?? null;
     const alpha = source.alphaTest > 0 && !!map;
@@ -869,7 +1069,6 @@ export class VelocityProduct extends GeometryProduct {
     const pxPerUnit = ctx.height / 2 / Math.max(ctx.tanHalfFov.y, 1e-6);
     const cands = this.candidates;
     cands.length = 0;
-    const f = this.facts;
     for (let i = 0; i < this.active.length; i++) {
       const rec = this.active[i];
       this.rootFacts(rec, ctx, frame, dt, pxPerUnit);
@@ -877,38 +1076,77 @@ export class VelocityProduct extends GeometryProduct {
       else {
         rec.animated = 0;
         rec.drawableCount = 0;
+        rec.unready = 0;
         for (const s of rec.states) {
           s.drawable = false;
           s.animated = false;
         }
       }
-      f.kind = rec.kind;
-      f.carried = rec.carried;
-      f.hidden = rec.hidden;
-      f.inFrustum = rec.inFrustum;
-      f.historyValid = rec.rootFrame === frame - 1 && rec.scanned >= 0;
-      f.moved = rec.moved;
-      f.dt = dt;
-      f.speed = rec.speed;
-      f.turn = rec.turn;
-      f.animated = rec.animated;
-      f.screenRadiusPx = rec.screenRadiusPx;
-      rec.result = classifyMover(f);
+      rec.result = classifyMover(this.factsOf(rec, frame, dt, this.masking));
       rec.drawn = 0;
       rec.pending = 0;
       if (rec.result !== 'all' && rec.result !== 'animated') continue;
-      rec.pending = this.countDraws(rec);
+      rec.pending = this.countDraws(rec, true);
       rec.priority = rec.carried ? 0 : moverPriority(rec.screenRadiusPx, rec.speed);
       cands.push(rec);
     }
-    // What the camera follows under its own cap; the rest larger and faster first, past any that does not fit.
-    const totals = takeByBudget(cands, this.taken, this.order, MOVER_LIMITS.maxDraws, MOVER_LIMITS.maxCarriedDraws, this.totals);
+    // What the camera follows under its own cap (the mask's, larger, while it draws all of itself); the rest larger and
+    // faster first, past any that does not fit.
+    const carriedCap = this.masking ? MOVER_LIMITS.maxMaskDraws : MOVER_LIMITS.maxCarriedDraws;
+    let totals = takeByBudget(cands, this.taken, this.order, MOVER_LIMITS.maxDraws, carriedCap, this.totals);
+    // A mask that does not fit its cap: what the camera follows is classified again by the old rule (its moving parts
+    // under the old cap), so the frame that keeps the cut is b4bfa5c's frame, wings and a held weapon blurred as before.
+    if (this.masking && this.maskRefused(cands)) {
+      this.maskOver = true;
+      this.unmask(cands, frame, dt);
+      totals = takeByBudget(cands, this.taken, this.order, MOVER_LIMITS.maxDraws, MOVER_LIMITS.maxCarriedDraws, this.totals);
+    }
     for (let i = 0; i < cands.length; i++) {
       if (this.taken[i]) this.take(cands[i]);
       else cands[i].result = 'budget';
     }
     this.draws = totals.draws;
     this.carriedDraws = totals.carriedDraws;
+  }
+
+  /** The kept facts for one record this frame, `mask` the rule's choice for it. */
+  private factsOf(rec: MoverRecord, frame: number, dt: number, mask: boolean): MoverFacts {
+    const f = this.facts;
+    f.kind = rec.kind;
+    f.carried = rec.carried;
+    f.hidden = rec.hidden;
+    f.inFrustum = rec.inFrustum;
+    f.historyValid = rec.rootFrame === frame - 1 && rec.scanned >= 0;
+    f.moved = rec.moved;
+    f.dt = dt;
+    f.speed = rec.speed;
+    f.turn = rec.turn;
+    f.animated = rec.animated;
+    f.screenRadiusPx = rec.screenRadiusPx;
+    f.mask = mask;
+    return f;
+  }
+
+  /** A follow among the candidates the budget refused. */
+  private maskRefused(cands: readonly MoverRecord[]): boolean {
+    for (let i = 0; i < cands.length; i++) if (cands[i].carried && !this.taken[i]) return true;
+    return false;
+  }
+
+  /** Every follow among the candidates classified again by the old rule, those left with nothing to draw taken out, in place. */
+  private unmask(cands: MoverRecord[], frame: number, dt: number): void {
+    let n = 0;
+    for (let i = 0; i < cands.length; i++) {
+      const rec = cands[i];
+      if (rec.carried) {
+        rec.result = classifyMover(this.factsOf(rec, frame, dt, false));
+        rec.pending = 0;
+        if (rec.result !== 'animated') continue;
+        rec.pending = this.countDraws(rec, false);
+      }
+      cands[n++] = rec;
+    }
+    cands.length = n;
   }
 
   /** Where the root is and was, how fast it goes and turns, and where it sits in the view. */
@@ -968,18 +1206,24 @@ export class VelocityProduct extends GeometryProduct {
   private checkMeshes(rec: MoverRecord, frame: number): void {
     rec.animated = 0;
     rec.drawableCount = 0;
+    rec.unready = 0;
     const frustum = this.frustum;
     const invRoot = this.invRoot;
     const tol = MOVER_LIMITS.relTolerance;
     for (let i = 0; i < rec.states.length; i++) {
       const s = rec.states[i];
-      const m = s.mesh;
+      const sprite = s.sprite;
+      const m: THREE.Mesh | THREE.Sprite = sprite ?? s.mesh;
+      // A glow sprite counts for the mask only while it would be drawn (`glowDrawn`); elsewhere it is only followed.
+      const counts = this.glowDrawn(s);
       s.drawable = false;
       s.animated = false;
-      // Out of date: removed, re-parented, swapped or disposed. Rescanned; nothing of it is drawn meanwhile.
+      // Out of date: removed, re-parented, swapped or disposed. Rescanned; nothing of it is drawn meanwhile, so it is a
+      // hole in a mask until then.
       if (s.dead || m.geometry !== s.geometry || m.material !== s.material || (s.snapshot && !sameEntries(m.material as THREE.Material[], s.snapshot))) {
         rec.stale = true;
         s.firstShown = -1;
+        if (counts) rec.unready++;
         continue;
       }
       let attached = true;
@@ -996,15 +1240,17 @@ export class VelocityProduct extends GeometryProduct {
       if (!attached) {
         rec.stale = true;
         s.firstShown = -1;
+        if (counts) rec.unready++;
         continue;
       }
-      const shown = visible && (rec.anyLayer || m.layers.isEnabled(ACTOR_LAYER)) && (!m.frustumCulled || frustum.intersectsObject(m));
+      const shown = visible && (rec.anyLayer || m.layers.isEnabled(ACTOR_LAYER)) && (!m.frustumCulled || (sprite ? frustum.intersectsSprite(sprite) : frustum.intersectsObject(m as THREE.Mesh)));
       s.firstShown = shownSince(s.firstShown, shown, frame);
-      if (!shown) continue;
+      if (!shown || !counts) continue;
       // Shown on an earlier frame too: three has projected it, so its buffers exist.
       s.drawable = drawableSince(s.firstShown, frame);
       if (s.drawable) rec.drawableCount++;
-      if (!s.skinned && !rec.velocity) {
+      else rec.unready++;
+      if (!s.skinned && !sprite && !rec.velocity) {
         tmpM.multiplyMatrices(invRoot, m.matrixWorld);
         s.animated = s.relFrame === frame - 1 && affineDiffers(tmpM, s.rel, tol);
         s.rel.copy(tmpM);
@@ -1014,8 +1260,11 @@ export class VelocityProduct extends GeometryProduct {
     }
   }
 
-  /** The draws a mover would make now, counting those whose program is still being built as waiting. */
-  private countDraws(rec: MoverRecord): number {
+  /**
+   * The draws a mover would make now, counting those whose program is still being built as waiting. `tally` false for a
+   * second count of the same frame (`unmask`: a subset of the first), which counts no hole or wait again.
+   */
+  private countDraws(rec: MoverRecord, tally = true): number {
     const onlyAnimated = rec.result === 'animated';
     let n = 0;
     for (let i = 0; i < rec.states.length; i++) {
@@ -1025,9 +1274,15 @@ export class VelocityProduct extends GeometryProduct {
         const d = s.draws[k];
         // First wanted now: made and compiling from here, waiting until it is linked.
         const v = d.variant ?? (d.variant = this.variantFor(d.parts, false));
-        if (v.failed) continue;
+        if (v.failed) {
+          if (tally) rec.unready++;
+          continue;
+        }
         if (!v.ready) {
-          this.waiting++;
+          if (tally) {
+            this.waiting++;
+            rec.unready++;
+          }
           // A variant whose job the queue let go unbuilt (a world went) is asked for again, as loose work.
           if (!v.compiling && this.queue) {
             v.compiling = true;
@@ -1106,11 +1361,14 @@ export class VelocityProduct extends GeometryProduct {
     const mesh = s.mesh;
     const u = material.uniforms;
     const prev = u.uPrev.value as THREE.Matrix4;
+    // A glow's stand-in stands where its sprite is drawn now, and rides the follow's own motion: nought of its own.
+    if (s.sprite) placeGlow(s.sprite, mesh.matrixWorld, camera);
     if (s.skinned) prev.copy(rec.R);
-    else if (!rec.velocity && s.historyFrame === this.frame - 1 && rec.rootFrame === this.frame - 1) prev.copy(s.prev);
+    else if (!s.sprite && !rec.velocity && s.historyFrame === this.frame - 1 && rec.rootFrame === this.frame - 1) prev.copy(s.prev);
     else prev.multiplyMatrices(rec.R, mesh.matrixWorld);
     (u.uCarry.value as THREE.Matrix4).copy(rec.carried ? rec.R : IDENTITY);
     u.uMoving.value = rec.carried ? 0 : movingWeight(rec.speed);
+    u.uFollowed.value = rec.carried && this.masked ? 1 : 0;
     if (d.alphaMap) {
       u.uAlphaMap.value = d.alphaMap;
       u.uAlphaTest.value = d.alphaTest;
@@ -1249,6 +1507,7 @@ export class VelocityProduct extends GeometryProduct {
         uPrev: { value: new THREE.Matrix4() },
         uCarry: { value: new THREE.Matrix4() },
         uMoving: { value: 0 },
+        uFollowed: { value: 0 },
         uAlphaMap: { value: null },
         uAlphaTest: { value: 0 },
       },
@@ -1433,7 +1692,7 @@ export class VelocityProduct extends GeometryProduct {
   stats(withList: boolean): VelocityStats {
     let drawnMovers = 0;
     for (const rec of this.active) if (rec.drawn > 0) drawnMovers++;
-    const cut = staticCut(this.lastFollowFar, { x: 0, y: 0 });
+    const cut = this.masked ? maskCut({ x: 0, y: 0 }) : staticCut(this.lastFollowFar, { x: 0, y: 0 });
     const round = (v: number, k = 100) => (Number.isFinite(v) ? Math.round(v * k) / k : v);
     return {
       frame: this.frame,
@@ -1447,6 +1706,7 @@ export class VelocityProduct extends GeometryProduct {
       empty: this.empty,
       followFar: round(this.lastFollowFar),
       cut: [round(cut.x), round(cut.y)],
+      follow: { rule: MOTION_TUNING.followRule, view: this.view, wanted: this.masking, masked: this.masked, overCap: this.maskOver },
       broken: this.broken,
       variants: this.variants.map((v) => ({ key: v.key, warm: v.warm, ready: v.ready, failed: v.failed })),
       list: withList
@@ -1458,6 +1718,7 @@ export class VelocityProduct extends GeometryProduct {
             drawable: rec.drawableCount,
             animated: rec.animated,
             drawn: rec.drawn,
+            unready: rec.unready,
             result: rec.result,
             speed: round(rec.speed),
             depth: round(rec.depth),

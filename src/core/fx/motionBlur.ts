@@ -8,22 +8,30 @@
 //      velocity product, its velocity (the camera's movement and its own, already merged). Everywhere
 //      else the camera's reprojection of the scene depth, weighted by a static cut: nothing nearer
 //      than the far side of what the camera follows smears with the camera, so the ship flown stays
-//      sharp however large it is and however far back the camera sits. Last frame's view is taken
+//      sharp however large it is and however far back the camera sits. In the race view and a flown
+//      ship's chase (`masksFollowed`) what the camera follows is kept sharp by its own pixels instead:
+//      the velocity product draws all of it, its riding parts at nought, and the cut shrinks to the
+//      lens (`maskCut`), so the ground and the walls right beside the hull smear as the fastest things
+//      on the screen; a frame whose mask has a hole in it keeps the cut. Last frame's view is taken
 //      with this frame's projection, so zooming in to aim is not movement.
-//   2-3. tile max: the longest radius in each K x K tile (K the largest radius), across then down.
+//   2-3. tile max: the longest radius in each K x K tile (K the largest radius), across then down. The
+//      race view's K is its own, longer (`raceBlurRadiusPx`): the tile targets are sized once for the
+//      smaller of the two and a frame draws into as much of them as its K needs.
 //   4. neighbour max: the longest over each tile's 3x3 neighbourhood, which holds every movement that
 //      can reach any pixel of the tile.
 //   5. gather: 12 taps along the neighbourhood's movement and the pixel's own, each weighted by which
 //      of the two is in front and how far each one's blur reaches.
-// Strength, the shutter and the longest radius apply to both sources alike, after the choice.
+// Strength, the shutter and the longest radius apply to both sources alike, after the choice; the race view
+// takes its own three (`MOTION_TUNING.raceStrength`, `raceShutter`, `raceRadiusOfHeight`) and its own taps.
 import { REVERSED_DEPTH } from '../depthMode.ts';
 import * as THREE from 'three';
 import type { FxProductId, FxSettings } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context';
-import { createFxQuad, FX_CAMERA, NO_PRODUCTS, type FxDebugTexture, type FxPass, type FxWarmItem } from './pass';
-import { FX_FULLSCREEN_VERTEX, FX_IGN, FX_LINEARIZE } from './glsl';
-import { MOTION_TUNING, clamp, maxBlurRadiusPx, staticCut } from './velocityMath.ts';
-import { followFarOf, prevProjViewOf } from './velocity';
+// The value imports carry their extensions so a node test can build the pass itself (`motionMask.test.ts`).
+import { createFxQuad, FX_CAMERA, NO_PRODUCTS, type FxDebugTexture, type FxPass, type FxWarmItem } from './pass.ts';
+import { FX_FULLSCREEN_VERTEX, FX_IGN, FX_LINEARIZE } from './glsl.ts';
+import { MAX_TILE_K, MOTION_TUNING, blurRadiusFor, blurScale, clamp, maskCut, maxBlurRadiusPx, raceBlurRadiusPx, staticCut } from './velocityMath.ts';
+import { followFarOf, followViewOf, prevProjViewOf, type VelocityProduct } from './velocity.ts';
 
 /** The products the pass reads when moving things smear too. */
 const VELOCITY_NEEDS: readonly FxProductId[] = ['velocity'];
@@ -80,7 +88,7 @@ void main() {
   ivec2 base = uAxis == 0 ? ivec2( o.x * uK, o.y ) : ivec2( o.x, o.y * uK );
   vec2 best = vec2( 0.0 );
   float bestLen = -1.0;
-  for ( int i = 0; i < 64; i++ ) {   // K <= 64 (maxBlurRadiusPx clamps)
+  for ( int i = 0; i < ${MAX_TILE_K}; i++ ) {   // K <= ${MAX_TILE_K} (maxBlurRadiusPx and raceBlurRadiusPx clamp)
     if ( i >= uK ) break;
     vec2 v = texelFetch( tIn, min( base + stepv * i, size - 1 ), 0 ).xy;
     float l = dot( v, v );
@@ -92,9 +100,10 @@ void main() {
 
 const NEIGHBOUR_FRAG = /* glsl */ `
 uniform sampler2D tTiles;
+uniform vec2 uTiles;            // the tiles this frame's K made: the target may be larger
 void main() {
   ivec2 o = ivec2( gl_FragCoord.xy );
-  ivec2 size = textureSize( tTiles, 0 );
+  ivec2 size = ivec2( uTiles );
   vec2 best = texelFetch( tTiles, o, 0 ).xy;
   float bestLen = dot( best, best );
   for ( int y = -1; y <= 1; y++ ) for ( int x = -1; x <= 1; x++ ) {
@@ -115,6 +124,7 @@ uniform sampler2D tColor;       // chain input (Linear)
 uniform sampler2D tField;       // Nearest
 uniform sampler2D tNeighbours;  // Nearest
 uniform float uK;
+uniform vec2 uTiles;            // the tiles this frame's K made: the target may be larger
 uniform vec2 uTexel;
 uniform int uSamples;
 varying vec2 vUv;
@@ -125,7 +135,7 @@ float cylinder( float d, float r ) { float q = max( r, 1e-3 ); return 1.0 - smoo
 float inFront( float za, float zb ) { return clamp( 1.0 - ( za - zb ) / max( 0.05, 0.02 * zb ), 0.0, 1.0 ); }
 void main() {
   float noise = fxIgn( gl_FragCoord.xy );
-  ivec2 tsize = textureSize( tNeighbours, 0 );
+  ivec2 tsize = ivec2( uTiles );
   vec2 tile = gl_FragCoord.xy / uK + ( noise - 0.5 ) * 0.5;   // a jittered lookup hides the tile edges
   vec2 vN = texelFetch( tNeighbours, clamp( ivec2( tile ), ivec2( 0 ), tsize - 1 ), 0 ).xy;
   vec4 cX = textureLod( tColor, vUv, 0.0 );
@@ -195,6 +205,10 @@ export class MotionBlurPass implements FxPass {
   readonly neighbours: THREE.WebGLRenderTarget;
   /** The static cut the last drawn frame used (view depth, m): what the camera follows and nearer stays sharp. */
   readonly lastCut = new THREE.Vector2(25, 60);
+  /** The last drawn frame kept what the camera follows sharp by its own pixels (the mask) rather than by the cut. */
+  lastMasked = false;
+  /** The velocity product, set by installEffects with it: asked whether what the camera follows is a whole mask this frame. */
+  velocity: VelocityProduct | null = null;
 
   private readonly resolveU: Record<string, THREE.IUniform>;
   private readonly tileXU: Record<string, THREE.IUniform>;
@@ -213,7 +227,11 @@ export class MotionBlurPass implements FxPass {
   private readonly probeBuf = new Uint16Array(4);
   private width = 1;
   private height = 1;
+  /** The K this frame draws with. */
   private k = 8;
+  /** Every other view's K and the race view's, as the tiles were last sized for them (the smaller sizes the targets). */
+  private kNormal = 8;
+  private kRace = 8;
 
   constructor() {
     this.field = makeTarget(THREE.RGBAFormat, 'fx.motionBlur.field');
@@ -237,12 +255,13 @@ export class MotionBlurPass implements FxPass {
     };
     this.tileXU = { tIn: { value: this.field.texture }, uK: { value: 8 }, uAxis: { value: 0 } };
     this.tileYU = { tIn: { value: this.tilesX.texture }, uK: { value: 8 }, uAxis: { value: 1 } };
-    this.neighbourU = { tTiles: { value: this.tiles.texture } };
+    this.neighbourU = { tTiles: { value: this.tiles.texture }, uTiles: { value: new THREE.Vector2(1, 1) } };
     this.gatherU = {
       tColor: { value: null },
       tField: { value: this.field.texture },
       tNeighbours: { value: this.neighbours.texture },
       uK: { value: 8 },
+      uTiles: { value: new THREE.Vector2(1, 1) },
       uTexel: { value: new THREE.Vector2(1, 1) },
       uSamples: { value: MOTION_TUNING.samples },
     };
@@ -289,13 +308,22 @@ export class MotionBlurPass implements FxPass {
     (u.uInvViewProj.value as THREE.Matrix4).copy(ctx.invViewProj);
     (u.uPrevProjView.value as THREE.Matrix4).copy(prevProjViewOf(ctx));
     (u.uNearFar.value as THREE.Vector2).set(ctx.near, ctx.far);
-    // Pushed past what the camera follows, with or without object blur.
-    staticCut(followFarOf(ctx), u.uCut.value as THREE.Vector2);
+    // What the camera follows: its own pixels where the velocity product drew all of it this frame (the mask), with the
+    // cut shrunk to the lens; else pushed past its far side, with or without object blur.
+    this.lastMasked = !!vel && !!this.velocity?.maskedOn(ctx.frame);
+    if (this.lastMasked) maskCut(u.uCut.value as THREE.Vector2);
+    else staticCut(followFarOf(ctx), u.uCut.value as THREE.Vector2);
     this.lastCut.copy(u.uCut.value as THREE.Vector2);
-    u.uScale.value = ctx.settings.motionBlurStrength * clamp(MOTION_TUNING.shutter / Math.max(ctx.dt, 1e-3), 0.25, 2);
+    // The race view's own shutter, strength (times the setting's), longest smear and taps; every other view the game's.
+    const view = followViewOf(ctx);
+    const race = view === 'race';
+    u.uScale.value = blurScale(view, ctx.settings.motionBlurStrength, ctx.dt);
     (u.uSize.value as THREE.Vector2).set(ctx.width, ctx.height);
+    // A radius moved by the console or a dial sizes the tiles again here, on the frame it moved, never otherwise.
+    if (maxBlurRadiusPx(this.height) !== this.kNormal || raceBlurRadiusPx(this.height) !== this.kRace) this.resizeTiles();
+    this.useK(blurRadiusFor(view, this.height));
     u.uMaxRadius.value = this.k;
-    this.gatherU.uSamples.value = clamp(Math.round(MOTION_TUNING.samples), 1, 32);
+    this.gatherU.uSamples.value = clamp(Math.round(race ? MOTION_TUNING.raceSamples : MOTION_TUNING.samples), 1, 32);
   }
 
   render(ctx: FxFrameContext, input: THREE.WebGLRenderTarget, output: THREE.WebGLRenderTarget | null): boolean {
@@ -322,19 +350,42 @@ export class MotionBlurPass implements FxPass {
     this.resizeTiles();
   }
 
-  /** K = maxBlurRadiusPx(height) from MOTION_TUNING; only the three tile targets change size. */
+  /**
+   * K = maxBlurRadiusPx(height), and the race view's raceBlurRadiusPx(height), from MOTION_TUNING: only the three tile
+   * targets change size, sized for the smaller K (the more tiles), so either view draws into them with no new storage.
+   */
   resizeTiles(): void {
-    const k = maxBlurRadiusPx(this.height);
-    this.k = k;
+    this.kNormal = maxBlurRadiusPx(this.height);
+    this.kRace = raceBlurRadiusPx(this.height);
+    const k = Math.min(this.kNormal, this.kRace);
     const tw = Math.ceil(this.width / k);
     const th = Math.ceil(this.height / k);
     this.tilesX.setSize(tw, this.height);
     this.tiles.setSize(tw, th);
     this.neighbours.setSize(tw, th);
+    // A resize puts each target's viewport back to the whole of it: the next useK writes them again.
+    this.k = 0;
+    this.useK(this.kNormal);
+    this.resolveU.uMaxRadius.value = this.k;
+  }
+
+  /**
+   * Draw with tiles of `k`: the tile targets' viewports cut to the tiles it makes and the passes told how many there are.
+   * Writes only when K changes (entering or leaving the race view), and allocates nothing.
+   */
+  private useK(k: number): void {
+    if (k === this.k) return;
+    this.k = k;
+    const tw = Math.ceil(this.width / k);
+    const th = Math.ceil(this.height / k);
+    this.tilesX.viewport.set(0, 0, tw, this.height);
+    this.tiles.viewport.set(0, 0, tw, th);
+    this.neighbours.viewport.set(0, 0, tw, th);
     this.tileXU.uK.value = k;
     this.tileYU.uK.value = k;
     this.gatherU.uK.value = k;
-    this.resolveU.uMaxRadius.value = k;
+    (this.neighbourU.uTiles.value as THREE.Vector2).set(tw, th);
+    (this.gatherU.uTiles.value as THREE.Vector2).set(tw, th);
   }
 
   /** The tile size, which is also the longest radius either side of a pixel. */

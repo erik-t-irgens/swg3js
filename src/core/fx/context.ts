@@ -9,6 +9,7 @@ import { createFxLights, type FxLights } from './lights.ts';
 import type { FxCloudLayer, FxSkyLight } from './lensFlare';
 import type { RoomAirFrame } from '../../world/roomAir';
 import type { GradeLook } from './gradeMath.ts';
+import type { FollowView } from './velocityMath.ts';
 
 /** The sun as the world knows it: which way it lies (towards it), its colour, and how much daylight there is (0 at night, and in space). */
 export interface SunInfo {
@@ -129,6 +130,8 @@ export interface FxFrameInput {
   room: RoomAirFrame | null;
   /** The view depth (m) of the far side of what the camera follows (App.followFar), 0 when nothing: nothing nearer smears with the camera. */
   followFar: number;
+  /** Where the camera is for the motion blur's rule about what it follows (App.placeCamera's `followView`); absent is 'other', which keeps the depth cut. */
+  followView?: FollowView;
   /** World.weather.fx while the weather is on, else null. */
   weather: FxWeather | null;
 }
@@ -171,6 +174,8 @@ export interface FxFrameContext {
   readonly prevProjView: THREE.Matrix4;
   /** The view depth (m) of the far side of what the camera follows; 0 when nothing. */
   followFar: number;
+  /** Where the camera is for the motion blur's rule about what it follows: the race view, a flown ship's chase, another view from outside, or one that keeps the depth cut. */
+  followView: FollowView;
   readonly cameraPos: THREE.Vector3;
   /** (tan(fov/2) x aspect, tan(fov/2)): a view position from a screen place and a distance. */
   readonly tanHalfFov: THREE.Vector2;
@@ -274,6 +279,7 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     prevView: new THREE.Matrix4(),
     prevProjView: new THREE.Matrix4(),
     followFar: 0,
+    followView: 'other',
     cameraPos: new THREE.Vector3(),
     tanHalfFov: new THREE.Vector2(1, 1),
     cameraCut: true,
@@ -349,6 +355,7 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   if (ctx.frame === 0 || ctx.cameraCut) ctx.prevView.copy(ctx.view);
   ctx.prevProjView.multiplyMatrices(ctx.proj, ctx.prevView);
   ctx.followFar = input.followFar;
+  ctx.followView = input.followView ?? 'other';
 
   const sun = input.sun;
   if (!sun) ctx.sun = null;

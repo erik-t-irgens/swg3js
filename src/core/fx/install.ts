@@ -95,8 +95,13 @@ export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
   postfx.registerPass(new DepthOfFieldPass(dofGlow));
   // Object motion blur, when the game lists what moves: the velocity product, and the blur told to ask for it.
   if (deps.collectMovers) {
-    postfx.registerProduct(new VelocityProduct(postfx, deps.collectMovers));
+    const velocity = new VelocityProduct(postfx, deps.collectMovers);
+    postfx.registerProduct(velocity);
     const blur = postfx.pass<MotionBlurPass>('motionBlur');
-    if (blur) blur.objects = true;
+    if (blur) {
+      blur.objects = true;
+      // Asked a frame whether what the camera follows drew all of itself (the mask), which the cut then stands aside for.
+      blur.velocity = velocity;
+    }
   }
 }

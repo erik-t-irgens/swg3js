@@ -58,9 +58,7 @@ import {
   newLooseStep,
   newYawStep,
   resolveRace,
-  newShareAsk,
   shareSpeed,
-  shareSpeedOf,
   slopePush,
   speedOf,
   stepLooseOf,
@@ -276,8 +274,8 @@ export class RaceDrive {
   kick = 0.5;
   hold = 0.5;
   private readonly holdNormal = new THREE.Vector3();
-  /** The last hit, for the console. */
-  readonly lastHit = { kind: '' as '' | 'scrape' | 'crash' | 'face' | 'climb' | 'strike' | 'wall', loss: 0, drop: 0, at: 0 };
+  /** The last hit, for the console (its numbers begun as fractions, so its first strike or scrape changes no shape). */
+  readonly lastHit = { kind: '' as '' | 'scrape' | 'crash' | 'face' | 'climb' | 'strike' | 'wall', loss: 0.5, drop: 0.5, at: 0 };
   /** Words for the message line, taken once by the game (`takeNote`). */
   private note = '';
   /** Every time the strike sweep met the ground and lifted the hull out of it, slight or hard, ever: the ground's own push, which a measure of the hold sets apart. */
@@ -531,22 +529,6 @@ export class RaceDrive {
     this.h = v;
   }
 
-  /** `share` with the speed in the kept ask (`shareQ.v`): a race wall's touch, asked every plan a hull grinds along one, makes nothing. */
-  private readonly shareQ = newShareAsk();
-  private shareKept(): void {
-    const q = this.shareQ;
-    q.p = this.p;
-    q.B = this.B;
-    q.thrustCap = RACE_TUNE.thrustCap;
-    q.boostHalf = RACE_TUNE.boostHalf;
-    shareSpeedOf(q, this.handling, this.parts);
-    this.T = this.parts.T;
-    this.B = this.parts.B;
-    this.p = this.parts.p;
-    this.over = this.parts.over;
-    this.h = q.v;
-  }
-
   /**
    * Take the hull from the springs: its horizontal speed shared out into the parts, its travel from its horizontal
    * velocity, its vertical speed and yaw rate from the body's; gravity and damping to nought (the drive moves it); the
@@ -590,6 +572,13 @@ export class RaceDrive {
     this.bank = 0;
     this.lean = 0;
     this.slideMul = 1;
+    // The hull's `justHit` takes fractions from the drive (a strike's closing, a scrape's loss) and nought before any: a
+    // field that has held only whole numbers changes the hull's shape the first time it takes a fraction, and every
+    // optimised function that takes the hull is thrown away there (on a hull that seldom strikes, late in a race: measured
+    // in the race walls' allocation round). So it is given a fraction first, here, and its own value put back.
+    const hit = v.justHit;
+    v.justHit = 0.5;
+    v.justHit = hit;
     body.setGravityScale(0, true);
     body.setLinearDamping(0);
     v.setRaceHull(true);
@@ -888,6 +877,16 @@ export class RaceDrive {
   private readonly pose = { ex: 0.5, ez: 0.5, low: 0.5 };
   private readonly hitC = { x: 0.5, y: 0.5, z: 0.5 };
   private readonly hitA = { x: 0.5, y: 0.5, z: 0.5 };
+  /**
+   * The wall's touch's numbers that can come out whole (a `Math.min`, a `Math.max` or a root at nought, a choice of a
+   * literal nought or one), each written into this record of fractions and read back before anything compares or works with
+   * it (`wallHit`). Read from a field of fractions, the unoptimised tiers hand a number on as a heap number and never a small
+   * integer, so what they learn of every comparison and sum there is "a number": learnt as "a small integer" (a hull touching
+   * with no boost charged, a slide met by nothing, a touch square on), the optimised code was thrown away ("lost precision")
+   * the first time a fraction came, which on a hull that seldom touches was thousands of touches later (the race walls'
+   * allocation round). The same numbers to the bit: a field of fractions keeps whatever number is written into it.
+   */
+  private readonly wk = { hitLoss: 0.5, len: 0.5, cut: 0.5, f: 0.5, ls: 0.5, rv: 0.5, w: 0.5, push: 0.5, b: 0.5, keep: 0.5, r: 0.5, thrustCap: 0.5, boostHalf: 0.5, inf: Infinity };
   private readonly yawStep = newYawStep();
   private readonly lagStepQ = newLagStep();
 
@@ -1212,9 +1211,9 @@ export class RaceDrive {
 
   /** The heading the turn of this step began at (`turnStep`), judged against the walls from there (`turnWalls`). */
   private headBefore = 0.5;
-  /** The slide along a wall's own crossing ask (`wallHit`), kept apart from the hit's, whose answer is read after it. */
+  /** The slide along a wall's own crossing ask (`wallStep`), kept apart from the hit's, whose answer is read after it. */
   private readonly wq2 = wallCross();
-  /** The travel a wall turned in this sub-step (`wallHit`), written into `u` after the sub-step's sweep (`subStep`). */
+  /** The travel a wall turned in this sub-step (`wallStep`), written into `u` after the sub-step's sweep (`subStep`). */
   private wallTurned = false;
   private wallUx = 0.5;
   private wallUz = 0.5;
@@ -1350,7 +1349,7 @@ export class RaceDrive {
     const body = v.body;
     let vx = this.h * this.u.x;
     let vz = this.h * this.u.z;
-    // A race wall met this plan: the body to the crossing and along the wall for the time left (`wallHit`), once.
+    // A race wall met this plan: the body to the crossing and along the wall for the time left (`wallStep`), once.
     if (this.wallSlide) {
       vx = this.slideX;
       vz = this.slideZ;
@@ -2227,14 +2226,16 @@ export class RaceDrive {
       if (met) {
         const wall = this.strike(v, st, Math.abs(this.h), this.pLip);
         if (wall === 2) return true;
-        if (wall === 1) this.pStopAt = s1;
+        // Written at every strike, the same stop kept where it does not stop (a store first made late, a strike's first
+        // stop on a hull walls hold to a course, threw the optimised code away there: the race walls' allocation round).
+        this.pStopAt = wall === 1 ? s1 : this.pStopAt;
       }
     }
     if (this.wallTurned) this.turnTravel();
     return false;
   }
 
-  /** The travel a race wall turned (`wallHit`) written into `u`, and its slide marked swept. */
+  /** The travel a race wall turned (`wallStep`) written into `u`, and its slide marked swept. */
   private turnTravel(): void {
     this.u.x = this.wallUx;
     this.u.z = this.wallUz;
@@ -2274,7 +2275,18 @@ export class RaceDrive {
     return this.wallHit(v);
   }
 
-  /** The face rule at the wall `crossBox` found (its answer in `wq`). True when the hull was wrecked. */
+  /**
+   * The face rule at the wall `crossBox` found (its answer in `wq`), the slide along the wall after it and the speed shared
+   * out again. True when the hull was wrecked.
+   *
+   * Asked only on a touch, so written out whole and branch-free (the race walls' allocation round): every number of it is
+   * worked out on every touch and only chosen between afterwards, and the verdict (`hitVerdictOf`), the slide and the share
+   * (`shareSpeedOf`) are written out here, each to the bit, never asked of a function of their own. A function asked this
+   * seldom is optimised only after some three thousand touches, and code that first meets an operation on a rarer path (a
+   * reverse, a boost charged, a second wall in the slide, a crash) is thrown away there and left in the unoptimised tiers
+   * for as many touches again, every number it works out a number made: measured under load, 40 to 300 bytes a touch, the
+   * verdict's and the share's functions (asked from here alone, so tiered on touches alone) the most of it.
+   */
   private wallHit(v: Vehicle): boolean {
     const q = this.wq;
     const sg = this.pSign;
@@ -2287,7 +2299,7 @@ export class RaceDrive {
     const lx = speed * mx - into * q.gx;
     const lz = speed * mz - into * q.gz;
     const left = Math.sqrt(lx * lx + lz * lz);
-    // The verdict through kept records (a hull held into a wall is asked every plan, and makes nothing).
+    // The verdict: `hitVerdictOf` on the kept records with `verdictNumbers`, then the off-course rule, to the bit.
     const hc = this.hitC;
     const ha = this.hitA;
     hc.x = speed * mx;
@@ -2296,116 +2308,213 @@ export class RaceDrive {
     ha.x = lx;
     ha.y = 0;
     ha.z = lz;
-    let verdict = hitVerdictOf(hc, ha, this.verdictNumbers());
-    if (verdict === HIT_CRASH && RACE_TUNE.offCourse === 'stop') verdict = HIT_SCRAPE;
+    const hd = this.handling;
+    const tune = RACE_TUNE;
+    const wk = this.wk;
+    wk.hitLoss = tune.hitLoss;
+    const hitLoss = wk.hitLoss;
+    const ix = hc.x - ha.x;
+    const iy = hc.y - ha.y;
+    const iz = hc.z - ha.z;
+    const impact = Math.sqrt(ix * ix + iy * iy + iz * iz);
+    const from = Math.sqrt(hc.x * hc.x + hc.y * hc.y + hc.z * hc.z);
+    const drop = from - Math.sqrt(ha.x * ha.x + ha.y * ha.y + ha.z * ha.z);
+    const scored = impact > hitLoss;
+    const crashes = impact >= hd.crashImpact && drop >= hd.crashDrop && from >= hd.crashFrom;
+    const stopRule = tune.offCourse === 'stop';
+    const verdict = !scored ? HIT_NONE : crashes && !stopRule ? HIT_CRASH : HIT_SCRAPE;
+    const isCrash = verdict === HIT_CRASH;
+    const isScrape = verdict === HIT_SCRAPE;
     // Where it stops: the crossing less the gap (never behind the sub-step's start), and the plan's time spent getting there.
-    const crossing = this.kS0 + (this.kS1 - this.kS0) * q.t;
-    const stop = crossing - WALL_GAP > this.kS0 ? crossing - WALL_GAP : this.kS0;
-    const used = this.pTravel > 0 ? ((stop - this.odo) / this.pTravel) * this.pT : 0;
-    const rest = this.pT - used > 0 ? this.pT - used : 0;
+    const kS0 = this.kS0;
+    const odo = this.odo;
+    const pT = this.pT;
+    const pTravel = this.pTravel;
+    const crossing = kS0 + (this.kS1 - kS0) * q.t;
+    const gapped = crossing - WALL_GAP;
+    const stop = gapped > kS0 ? gapped : kS0;
+    const spent = ((stop - odo) / pTravel) * pT;
+    const used = pTravel > 0 ? spent : 0;
+    const timeLeft = pT - used;
+    const rest = timeLeft > 0 ? timeLeft : 0;
+    const toStop = stop - odo;
     this.lossX = into * q.gx;
     this.lossZ = into * q.gz;
     this.lastWallIdx = q.wall;
-    this.lastWallKind = verdict === HIT_CRASH ? 'crash' : verdict === HIT_SCRAPE ? 'scrape' : 'touch';
+    this.lastWallKind = isCrash ? 'crash' : isScrape ? 'scrape' : 'touch';
     this.lastWallLoss = into;
     this.lastWallAt = this.steps;
-    this.lastWallX = v.pos.x + this.pUx * sg * (stop - this.odo);
-    this.lastWallZ = v.pos.z + this.pUz * sg * (stop - this.odo);
+    this.lastWallX = v.pos.x + this.pUx * sg * toStop;
+    this.lastWallZ = v.pos.z + this.pUz * sg * toStop;
     // The body's whole move this plan: along the plan's way to the stop, then along the wall at what is left, the slide
-    // judged against the walls in its turn (`wallSlideOn`), so a corner or an arc's next run stops it as the plan's own
-    // travel would at any frame rate.
-    this.slideDx = this.pUx * sg * (stop - this.odo);
-    this.slideDz = this.pUz * sg * (stop - this.odo);
+    // judged against the walls in its turn, so a corner or an arc's next run stops it as the plan's own travel would at any
+    // frame rate.
+    this.slideDx = this.pUx * sg * toStop;
+    this.slideDz = this.pUz * sg * toStop;
     this.slideVx = lx;
     this.slideVz = lz;
     this.slideT = rest;
-    this.wallSlideOn(v);
-    this.slideX = this.slideDx / this.pT;
-    this.slideZ = this.slideDz / this.pT;
-    this.wallSlide = true;
-    this.pStopAt = stop;
-    // The travel turned along the wall (and along any it touched sliding): written into `u` after this sub-step's sweep,
-    // which reads the ground along the way the hull really came (`subStep`). And the slide marked swept then, as far as the
-    // odometer will find the body went (the chord of its move): the next plan's sweep would otherwise lay the slide's
-    // metres behind it along its own travel, which the lag has already turned off the wall.
-    const ls = Math.sqrt(this.slideVx * this.slideVx + this.slideVz * this.slideVz);
-    if (ls > 1e-6) {
-      this.wallUx = (sg * this.slideVx) / ls;
-      this.wallUz = (sg * this.slideVz) / ls;
-    } else {
-      this.wallUx = this.u.x;
-      this.wallUz = this.u.z;
-    }
-    this.wallTurned = true;
-    this.slideMark = this.odo + Math.sqrt(this.slideDx * this.slideDx + this.slideDz * this.slideDz);
-    this.shareQ.v = sg * ls;
-    this.shareKept();
-    if (verdict === HIT_NONE) return false;
-    this.note = verdict === HIT_CRASH ? 'Crashed into the wall.' : 'Scraped the wall.';
-    this.sImpact = into;
-    this.sDrop = speed - left;
-    return this.scoreKept(v, verdict, 'wall');
-  }
-  /** The slide after a wall's hit (`wallHit`): the body's move from the plan's start so far, the slide's velocity, its time left. */
-  private slideDx = 0.5;
-  private slideDz = 0.5;
-  private slideVx = 0.5;
-  private slideVz = 0.5;
-  private slideT = 0.5;
-
-  /**
-   * The slide along a wall for the plan's time left, judged against the walls (the race walls' review): from the stop along
-   * the slide, a crossing cuts it `WALL_GAP` short; a touch there (the drive's own verdict says nothing) turns it along that
-   * wall too and it goes on, at most four walls; anything harder ends the slide there with its velocity kept, so the next
-   * plan meets that wall whole and scores it. The answer in `slideDx`, `slideDz` (the move from the plan's start) and
-   * `slideVx`, `slideVz` (the travel at its end).
-   */
-  private wallSlideOn(v: Vehicle): void {
+    // The slide along a wall for the plan's time left (the race walls' review): from the stop along the slide, a crossing
+    // cuts it `WALL_GAP` short; a touch there (the verdict's first test says nothing) turns it along that wall too and it
+    // goes on, at most four walls; anything harder ends the slide there with its velocity kept, so the next plan meets that
+    // wall whole and scores it. The answer in `slideDx`, `slideDz` (the move from the plan's start) and `slideVx`, `slideVz`
+    // (the travel at its end). Every number of a meeting is worked out whether the slide met a wall or not.
     const set = this.wallsNow!;
     const s = this.wq2;
-    this.boxInto(s, v);
+    const sb = v.spec.bounds;
+    const bx0 = sb.min[0];
+    const bx1 = sb.max[0];
+    const bz0 = sb.min[2];
+    const bz1 = sb.max[2];
+    s.hh = Math.abs(sb.max[1] - sb.min[1]);
+    s.x0 = bx0 < bx1 ? bx0 : bx1;
+    s.x1 = bx0 < bx1 ? bx1 : bx0;
+    s.z0 = bz0 < bz1 ? bz0 : bz1;
+    s.z1 = bz0 < bz1 ? bz1 : bz0;
     s.s = this.sinH;
     s.c = this.cosH;
     s.s2 = this.sinH;
     s.c2 = this.cosH;
     s.lowA = this.kLowB;
     s.lowB = this.kLowB;
-    const hc = this.hitC;
-    const ha = this.hitA;
     for (let k = 0; k < 4 && this.slideT > 0; k++) {
-      const mx = this.slideVx * this.slideT;
-      const mz = this.slideVz * this.slideT;
-      const len = Math.sqrt(mx * mx + mz * mz);
-      if (!(len > 1e-6)) return;
+      const tNow = this.slideT;
+      const svx0 = this.slideVx;
+      const svz0 = this.slideVz;
+      const smx = svx0 * tNow;
+      const smz = svz0 * tNow;
+      wk.len = Math.sqrt(smx * smx + smz * smz);
+      const len = wk.len;
+      if (!(len > 1e-6)) break;
       s.ax = v.pos.x + this.slideDx;
       s.az = v.pos.z + this.slideDz;
-      s.bx = s.ax + mx;
-      s.bz = s.az + mz;
-      if (!set.crossBox(s)) {
-        this.slideDx += mx;
-        this.slideDz += mz;
-        return;
-      }
-      const cut = s.t * len - WALL_GAP > 0 ? s.t * len - WALL_GAP : 0;
-      const f = cut / len;
-      this.slideDx += mx * f;
-      this.slideDz += mz * f;
-      this.slideT *= 1 - f;
-      const into = this.slideVx * s.gx + this.slideVz * s.gz;
-      if (!(into > 0)) return;
-      const ax = this.slideVx - into * s.gx;
-      const az = this.slideVz - into * s.gz;
-      hc.x = this.slideVx;
+      s.bx = s.ax + smx;
+      s.bz = s.az + smz;
+      const crossed = set.crossBox(s);
+      const reach = s.t * len - WALL_GAP;
+      wk.cut = reach > 0 ? reach : 0;
+      const share = wk.cut / len;
+      // Clear: the whole move (times one, the same to the bit). Met: cut at the crossing.
+      wk.f = crossed ? share : 1;
+      const f = wk.f;
+      this.slideDx += smx * f;
+      this.slideDz += smz * f;
+      const tCut = tNow * (1 - f);
+      this.slideT = crossed ? tCut : tNow;
+      const sInto = svx0 * s.gx + svz0 * s.gz;
+      const ax = svx0 - sInto * s.gx;
+      const az = svz0 - sInto * s.gz;
+      hc.x = svx0;
       hc.y = 0;
-      hc.z = this.slideVz;
+      hc.z = svz0;
       ha.x = ax;
       ha.y = 0;
       ha.z = az;
-      if (hitVerdictOf(hc, ha, this.verdictNumbers()) !== HIT_NONE) return;
+      const jx = hc.x - ha.x;
+      const jy = hc.y - ha.y;
+      const jz = hc.z - ha.z;
+      const goesOn = sInto > 0;
+      const harder = Math.sqrt(jx * jx + jy * jy + jz * jz) > hitLoss;
+      if (!crossed || !goesOn || harder) break;
       this.slideVx = ax;
       this.slideVz = az;
     }
+    this.slideX = this.slideDx / pT;
+    this.slideZ = this.slideDz / pT;
+    this.wallSlide = true;
+    this.pStopAt = stop;
+    // The travel turned along the wall (and along any it touched sliding): written into `u` after this sub-step's sweep,
+    // which reads the ground along the way the hull really came (`subStep`). And the slide marked swept then, as far as the
+    // odometer will find the body went (the chord of its move): the next plan's sweep would otherwise lay the slide's
+    // metres behind it along its own travel, which the lag has already turned off the wall.
+    const svx = this.slideVx;
+    const svz = this.slideVz;
+    wk.ls = Math.sqrt(svx * svx + svz * svz);
+    const ls = wk.ls;
+    const turnedX = (sg * svx) / ls;
+    const turnedZ = (sg * svz) / ls;
+    const keptX = this.u.x;
+    const keptZ = this.u.z;
+    const along = ls > 1e-6;
+    this.wallUx = along ? turnedX : keptX;
+    this.wallUz = along ? turnedZ : keptZ;
+    this.wallTurned = true;
+    this.slideMark = odo + Math.sqrt(this.slideDx * this.slideDx + this.slideDz * this.slideDz);
+    // The speed along the wall shared out again: `share` through `shareSpeedOf`, both ways of travel worked out and the
+    // one the speed goes chosen, to the bit.
+    const sv = sg * ls;
+    const V = hd.V;
+    const A = hd.t75 / 3;
+    // Infinity as a float read from the kept record: the global `Infinity` in a choice among floats made the optimised code
+    // keep that choice as a tagged value, and every float chosen there a number made (16 to 48 bytes a touch, measured).
+    const inf = wk.inf;
+    // Backward: the curve's alone.
+    wk.rv = -hd.reverseTop;
+    const rv = wk.rv;
+    const nrv = -rv;
+    const rvFin = (A * rv) / (V - rv);
+    const nrvFin = -(A * nrv) / (V - nrv);
+    const trv = rv >= 0 ? (rv >= V ? inf : rvFin) : nrv >= V ? -inf : nrvFin;
+    const reverseT = -trv;
+    wk.w = Math.max(sv, rv);
+    const w = wk.w;
+    const nw = -w;
+    const wFin = (A * w) / (V - w);
+    const nwFin = -(A * nw) / (V - nw);
+    const tw = w >= 0 ? (w >= V ? inf : wFin) : nw >= V ? -inf : nwFin;
+    const tBack = Math.max(-reverseT, tw);
+    // Forward: the push, then the boost's share, then the curve, the rest over.
+    wk.thrustCap = tune.thrustCap;
+    wk.boostHalf = tune.boostHalf;
+    const thrustCap = wk.thrustCap;
+    const boostHalf = wk.boostHalf;
+    const p0 = this.p;
+    const B0 = this.B;
+    const pushLess = Math.min(p0, sv);
+    wk.push = p0 > 0 ? pushLess : p0;
+    const push = wk.push;
+    let ahead = sv - push;
+    const BT = hd.BT;
+    const bOf = (BT * B0) / (B0 + boostHalf);
+    wk.b = B0 > 0 ? bOf : 0;
+    const b = wk.b;
+    wk.keep = Math.min(b, Math.max(0, ahead));
+    const keep = wk.keep;
+    const keepFor = (boostHalf * keep) / (BT - keep);
+    const kept = keep === b;
+    const keepsAny = keep > 0;
+    const keepsAll = keep >= BT;
+    const bNext = kept ? B0 : !keepsAny ? 0 : keepsAll ? inf : keepFor;
+    ahead -= keep;
+    wk.r = Math.min(Math.max(0, ahead), thrustCap * V);
+    const r = wk.r;
+    const nr = -r;
+    const rFin = (A * r) / (V - r);
+    const nrFin = -(A * nr) / (V - nr);
+    const tr = r >= 0 ? (r >= V ? inf : rFin) : nr >= V ? -inf : nrFin;
+    const tAhead = Math.min((thrustCap / (1 - thrustCap)) * A, tr);
+    const overAhead = Math.max(0, ahead - r);
+    const back = sv < 0;
+    this.T = back ? tBack : tAhead;
+    this.B = back ? 0 : bNext;
+    this.p = back ? 0 : push;
+    this.over = back ? 0 : overAhead;
+    this.h = sv;
+    // What a scored hit costs is read by `scoreKept` from these; written on every touch (nothing else reads them). The note
+    // is written on a scored hit alone and never read here: read, its never having changed is what the optimised code would
+    // count on, and the first note anywhere (an overheat, a scrape) would throw that code away.
+    this.sImpact = into;
+    this.sDrop = speed - left;
+    if (verdict === HIT_NONE) return false;
+    this.note = isCrash ? 'Crashed into the wall.' : 'Scraped the wall.';
+    return this.scoreKept(v, verdict, 'wall');
   }
+  /** The slide after a wall's hit (`wallStep`): the body's move from the plan's start so far, the slide's velocity, its time left. */
+  private slideDx = 0.5;
+  private slideDz = 0.5;
+  private slideVx = 0.5;
+  private slideVz = 0.5;
+  private slideT = 0.5;
 
   private readonly fallTune = { ride: 0.5, riseRate: 0.5, riseMax: 0.5, band: 0.5, bandRate: 0.5, fall: 0.5, fallMax: 0.5 };
   private readonly looseTune = { ride: 0.5, riseRate: 0.5, riseMax: 0.5, band: 0.5, bandRate: 0.5, fall: 0.5, fallMax: 0.5, gravity: 0.5, grip: 0.5 };
@@ -2499,9 +2608,14 @@ export class RaceDrive {
       path.back[path.n] = Number.isFinite(back) ? back : path.g[path.n];
       path.y[path.n] = y;
       if (path.g[path.n] > y) {
-        // The deepest point met, where a face's own slope is read if it turns out to be a wall.
-        if (!met || path.g[path.n] - y > this.metDepth) {
-          this.metDepth = path.g[path.n] - y;
+        // The deepest point met, where a face's own slope is read if it turns out to be a wall. Its depth and the comparison
+        // worked out at every point met, the first of a sweep's included (the race walls' allocation round): worked out only
+        // from a sweep's second point met on, they first came late on a hull walls hold to a course, and the optimised code
+        // was thrown away there, every number made until it was built again.
+        const depth = path.g[path.n] - y;
+        const deeper = depth > this.metDepth;
+        if (!met || deeper) {
+          this.metDepth = depth;
           this.metX = x;
           this.metZ = z;
         }

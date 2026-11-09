@@ -11,6 +11,7 @@ import { ENGINE_TUNE, tuneEngines, type EngineTune } from './drivetrain.ts';
 import type { RaceNumber } from './raceMath.ts';
 import { CEILING_LEAST, CEILING_MOST, RACE_BASE, RACE_TUNE, tuneBase, tuneRace, type RaceTune } from './raceTune.ts';
 import { TRACK_DIALS } from '../race/trackDials.ts';
+import { MOTION_DIALS } from '../core/fx/motionDials.ts';
 
 const kmh = (v: number) => `${Math.round(v * 3.6)} km/h`;
 
@@ -142,7 +143,10 @@ export const RACE_DIALS: DialSet = { helper: 'race', groups: RACE_GROUPS, shippe
 /** The engines' dials. */
 export const ENGINE_DIALS: DialSet = { helper: 'engines', groups: ENGINE_GROUPS, shipped: readDials(ENGINE_GROUPS) };
 
-/** The dials a helper of `__debug` has, or null: what the debug menu asks as a helper is picked (a run's and the track editor's are `src/race/trackDials.ts`). */
+/**
+ * The dials a helper of `__debug` has, or null: what the debug menu asks as a helper is picked (a run's and the track
+ * editor's are `src/race/trackDials.ts`, the motion blur's race view and follow rule `src/core/fx/motionDials.ts`).
+ */
 export function vehicleDialsFor(helper: string): DialSet | null {
-  return helper === 'race' ? RACE_DIALS : helper === 'engines' ? ENGINE_DIALS : helper === 'track' ? TRACK_DIALS : null;
+  return helper === 'race' ? RACE_DIALS : helper === 'engines' ? ENGINE_DIALS : helper === 'track' ? TRACK_DIALS : helper === 'motionTune' ? MOTION_DIALS : null;
 }

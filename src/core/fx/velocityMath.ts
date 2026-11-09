@@ -67,6 +67,8 @@ export interface MoverFacts {
   /** Rigid parts whose matrix relative to the root changed since last frame. */
   animated: number;
   screenRadiusPx: number;
+  /** What the camera follows is the mask this frame (`masksFollowed`): it draws all of itself. */
+  mask?: boolean;
 }
 
 export const MOVER_LIMITS = {
@@ -74,6 +76,14 @@ export const MOVER_LIMITS = {
   maxDraws: 64,
   /** Animated parts of what the camera follows (wings, a held weapon). */
   maxCarriedDraws: 16,
+  /** Draws of what the camera follows while its own pixels are the mask (`masksFollowed`): the whole of a raced pod and its rider, at most about 0.35 ms of CPU. A follow that would take more keeps the depth cut that frame. */
+  maxMaskDraws: 96,
+  /**
+   * Under the mask, a glow sprite riding what the camera follows (an engine's) is held sharp with it where its own picture's
+   * alpha is at least this: the glow writes no depth, so its pixels are the ground's and would otherwise smear with it. A
+   * tenth keeps the glow's disc and leaves its faint rim to the ground.
+   */
+  glowAlphaTest: 0.1,
   /** A mover smaller on screen than this (radius, pixels) is left to the camera's blur. */
   minScreenRadiusPx: 3,
   /** m/s: slower than this, and turning slower than `stillTurn`, a mover stands. */
@@ -95,6 +105,20 @@ export const MOVER_LIMITS = {
   forgetFrames: 120,
 };
 
+/**
+ * Where the camera is, for the motion blur's rule about what it follows (`App.placeCamera` decides it a frame):
+ * 'race' the race view of a raced pod or bike, 'chase' a flown ship's chase, 'third' any other view from outside
+ * the figure (on foot, a mount, a speeder, a passenger's view, Alt looking round a ship), 'other' a view that keeps
+ * the depth cut whatever the rule says (first person, the cockpit, the editor's eye, a jump's tunnel, a conversation).
+ */
+export type FollowView = 'race' | 'chase' | 'third' | 'other';
+/** What keeps what the camera follows sharp (`MOTION_TUNING.followRule`). */
+export type FollowRule = 'auto' | 'cut' | 'mask';
+export const FOLLOW_RULES: readonly FollowRule[] = ['auto', 'cut', 'mask'];
+
+/** The longest tile the tile max can take (its loop's bound): the race view's cap is held under it. */
+export const MAX_TILE_K = 128;
+
 export const MOTION_TUNING = {
   /** View depth (m) where the camera's own movement starts to smear, and where it smears fully, before the push past what the camera follows. */
   nearCut: [25, 60] as [number, number],
@@ -104,7 +128,129 @@ export const MOTION_TUNING = {
   samples: 12,
   /** The blur is scaled as if every frame lasted this long. */
   shutter: 1 / 60,
+  /**
+   * What keeps what the camera follows sharp. 'auto': its own pixels in the race view and a flown ship's chase (the
+   * velocity product draws the whole of what is followed and the reprojection leaves those pixels out, so the ground and
+   * the walls right beside the hull, the fastest things on the screen, smear), the depth cut in every other view, which
+   * is what the owner already plays on foot. 'cut': the depth cut everywhere, as before. 'mask': the mask in every view
+   * from outside the figure. First person and the cockpit keep the cut whatever this says.
+   */
+  followRule: 'auto' as FollowRule,
+  /**
+   * Under the mask, the view depth (m) where the camera's own movement starts to smear and where it smears fully: nothing
+   * is pushed past what the camera follows. A third of a metre keeps a leaf brushing the lens from smearing across the screen.
+   */
+  maskCut: [0.3, 1] as [number, number],
+  /**
+   * The race view's longest smear either side, as a share of the drawing buffer's height (the rest of the game's is
+   * `radiusOfHeight`): nearly three times it to start, so the near ground streaks at racing speed where it stopped at a
+   * stub. Held to 8..`MAX_TILE_K` px; the tile max costs the same whatever its tile.
+   */
+  raceRadiusOfHeight: 0.07,
+  /** Taps in the race view's gather: four more than the rest's, so a streak nearly three times as long stays a streak rather than a row of dots. */
+  raceSamples: 16,
+  /** The race view's shutter (s): the rest of the game's to start, so entering the race view changes only the mask and the cap until the owner moves it. */
+  raceShutter: 1 / 60,
+  /** The race view's strength, times the Graphics page's: 1 to start, the setting's own look. */
+  raceStrength: 1,
 };
+
+/** Whether what the camera follows is kept sharp by its own pixels this frame (the mask) rather than by the depth cut. */
+export function masksFollowed(rule: FollowRule, view: FollowView): boolean {
+  if (rule === 'cut' || view === 'other') return false;
+  if (rule === 'mask') return true;
+  return view === 'race' || view === 'chase';
+}
+
+/** The mask's cut (c0, c1) on view depth: nothing pushed past what the camera follows. */
+export function maskCut(out: { x: number; y: number }): { x: number; y: number } {
+  out.x = MOTION_TUNING.maskCut[0];
+  out.y = MOTION_TUNING.maskCut[1];
+  return out;
+}
+
+/** The race view's longest smear either side of a pixel, in pixels, and its tile size. */
+export function raceBlurRadiusPx(height: number): number {
+  return clamp(Math.round(MOTION_TUNING.raceRadiusOfHeight * height), 8, MAX_TILE_K);
+}
+
+/** The longest smear for a view: the race view's own, every other view's. */
+export function blurRadiusFor(view: FollowView, height: number): number {
+  return view === 'race' ? raceBlurRadiusPx(height) : maxBlurRadiusPx(height);
+}
+
+/**
+ * The radius scale the resolve takes (the pass's `uScale`; a radius is the field's uv per frame times this). Every view
+ * but the race view: the setting's strength over the game's shutter, a frame of `dt` held to a quarter and twice it, as
+ * b4bfa5c had it. The race view: the setting's strength times its own, over its own shutter, with no bound on the ratio
+ * but the frame's own floor, so a fixed speed smears as far at 30, 60 and 144 frames a second; held to twice the frame,
+ * 1/60 already read as 1/72 at 144 Hz and every Shutter past it moved nothing. The streak's length is held by the race
+ * K (`uMaxRadius`), never by the ratio.
+ */
+export function blurScale(view: FollowView, strength: number, dt: number): number {
+  const step = Math.max(dt, 1e-3);
+  if (view === 'race') return strength * MOTION_TUNING.raceStrength * (MOTION_TUNING.raceShutter / step);
+  return strength * clamp(MOTION_TUNING.shutter / step, 0.25, 2);
+}
+
+/** What `tuneMotion` takes: every key optional, the console's `motionTune` argument. */
+export interface MotionChanges {
+  nearCut?: [number, number];
+  radiusOfHeight?: number;
+  samples?: number;
+  followRule?: string;
+  maskCutNear?: number;
+  maskCutFull?: number;
+  raceRadiusOfHeight?: number;
+  raceSamples?: number;
+  raceShutter?: number;
+  raceStrength?: number;
+}
+
+/**
+ * Move the motion blur's numbers for this session, as `__debug.motionTune` and its dials do: each value checked, a
+ * refused one named in the words returned and left as it was. Nothing is saved. The pass sizes its tiles again by
+ * itself on the frame a radius moves.
+ */
+export function tuneMotion(c: MotionChanges): string[] {
+  const words: string[] = [];
+  const T = MOTION_TUNING;
+  const pos = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+  if (c.nearCut !== undefined) {
+    const [a, b] = c.nearCut;
+    if (Number.isFinite(a) && Number.isFinite(b) && a >= 0 && a < b) T.nearCut = [a, b];
+    else words.push(`nearCut must be two distances in metres, the first below the second (got ${JSON.stringify(c.nearCut)})`);
+  }
+  if (c.radiusOfHeight !== undefined) {
+    if (pos(c.radiusOfHeight)) T.radiusOfHeight = c.radiusOfHeight;
+    else words.push(`radiusOfHeight must be a share above nought (got ${c.radiusOfHeight})`);
+  }
+  if (c.samples !== undefined && Number.isFinite(c.samples)) T.samples = Math.min(32, Math.max(4, Math.round(c.samples)));
+  if (c.followRule !== undefined) {
+    if ((FOLLOW_RULES as readonly string[]).includes(c.followRule)) T.followRule = c.followRule as FollowRule;
+    else words.push(`followRule is one of ${FOLLOW_RULES.join(', ')} (got ${JSON.stringify(c.followRule)})`);
+  }
+  if (c.maskCutNear !== undefined || c.maskCutFull !== undefined) {
+    const a = c.maskCutNear ?? T.maskCut[0];
+    const b = c.maskCutFull ?? T.maskCut[1];
+    if (Number.isFinite(a) && Number.isFinite(b) && a >= 0 && a < b) T.maskCut = [a, b];
+    else words.push(`the mask's cut must be two distances in metres, the near below the full (got ${a} and ${b})`);
+  }
+  if (c.raceRadiusOfHeight !== undefined) {
+    if (pos(c.raceRadiusOfHeight)) T.raceRadiusOfHeight = c.raceRadiusOfHeight;
+    else words.push(`raceRadiusOfHeight must be a share above nought (got ${c.raceRadiusOfHeight})`);
+  }
+  if (c.raceSamples !== undefined && Number.isFinite(c.raceSamples)) T.raceSamples = Math.min(32, Math.max(4, Math.round(c.raceSamples)));
+  if (c.raceShutter !== undefined) {
+    if (pos(c.raceShutter)) T.raceShutter = c.raceShutter;
+    else words.push(`raceShutter must be seconds above nought (got ${c.raceShutter})`);
+  }
+  if (c.raceStrength !== undefined) {
+    if (typeof c.raceStrength === 'number' && Number.isFinite(c.raceStrength) && c.raceStrength >= 0) T.raceStrength = c.raceStrength;
+    else words.push(`raceStrength must be nought or more (got ${c.raceStrength})`);
+  }
+  return words;
+}
 
 /** A peer's velocity from its relay messages. */
 export const RELAY = {
@@ -143,8 +289,9 @@ export function classifyMover(f: MoverFacts): MoverResult {
   if (!f.historyValid) return 'fresh';
   if (isJump(f.kind, f.moved, f.dt)) return 'jump';
   // What the camera follows is exactly the static result wherever its parts ride with it: only a
-  // part that moves relative to it has anything to draw, and it is never too small to matter.
-  if (f.carried) return f.animated > 0 ? 'animated' : 'still';
+  // part that moves relative to it has anything to draw, and it is never too small to matter. Under the mask it draws all
+  // of itself, its parts riding with it at nought, so its pixels are marked and taken out of the reprojection.
+  if (f.carried) return f.mask ? 'all' : f.animated > 0 ? 'animated' : 'still';
   if (f.screenRadiusPx < MOVER_LIMITS.minScreenRadiusPx) return 'small';
   const standing = f.speed < MOVER_LIMITS.stillSpeed && f.turn < MOVER_LIMITS.stillTurn;
   if (standing) return f.animated > 0 ? 'animated' : 'still';
