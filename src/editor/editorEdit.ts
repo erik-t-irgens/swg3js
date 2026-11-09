@@ -1985,13 +1985,15 @@ export class EditorEdits {
    * A row's own fields set on **every** picked row alike (the Selected tab, the console's `set`): its name, note, state,
    * solidity, flora clearing and guard, one action however many rows.
    */
-  async setField(fields: Partial<Record<'name' | 'note' | 'state' | 'solid' | 'clear' | 'guard' | 'furnish' | 'furniture', unknown>>): Promise<string> {
+  async setField(fields: Partial<Record<'name' | 'note' | 'state' | 'solid' | 'clear' | 'guard' | 'furnish' | 'furniture' | 'landmark' | 'drawDistance', unknown>>): Promise<string> {
     this.sameWorld();
     if (!this.sel.size || this.live || this.writing) return 'pick one first';
     const changes: RowChange[] = [];
     let marksPassed = 0;
     let notBuildings = 0;
     let ownKept = 0;
+    let badReach = 0;
+    let insidePassed = 0;
     for (const id of this.sel.ids) {
       const r = this.ed.rowFor(id);
       if (!r) continue;
@@ -2002,7 +2004,7 @@ export class EditorEdits {
       const mark = r.row.kind === 'mark';
       let touched = false;
       for (const [k, v] of Object.entries(fields)) {
-        if (mark && (k === 'solid' || k === 'clear' || k === 'guard' || k === 'furniture')) {
+        if (mark && (k === 'solid' || k === 'clear' || k === 'guard' || k === 'furniture' || k === 'landmark' || k === 'drawDistance')) {
           marksPassed++;
           continue;
         }
@@ -2023,6 +2025,17 @@ export class EditorEdits {
           else if (v === true || v === null) delete after.furnish;
           continue;
         }
+        // A row in a building's rooms has no far copy (the landmark index leaves every contained thing out): a field that would
+        // make one is passed over, and said; taking one off is still written.
+        if (r.row.inside === true && ((k === 'landmark' && v === true) || (k === 'drawDistance' && typeof v === 'number'))) {
+          insidePassed++;
+          continue;
+        }
+        // A far copy's reach (the horizon pass's wave 5b) the reader would not take is passed over, and said.
+        if (k === 'drawDistance' && !(v === null || v === '' || (typeof v === 'number' && Number.isFinite(v) && v >= PLACEMENT_LIMITS.drawDistanceMin && v <= PLACEMENT_LIMITS.drawDistanceMax))) {
+          badReach++;
+          continue;
+        }
         touched = true;
         if (k === 'name' || k === 'note' || k === 'state') {
           if (v === '' || v === null) delete after[k];
@@ -2037,6 +2050,14 @@ export class EditorEdits {
           // What it counts as for the people (Map-maker II's twelfth wave): a seat, a table, neither, or its template's name.
           if (v === 'seat' || v === 'table' || v === 'none') after.furniture = v;
           else delete after.furniture;
+        } else if (k === 'landmark') {
+          // Seen from far off whatever its size (the horizon pass's wave 5b): only `true` is kept, anything else is absent.
+          if (v === true) after.landmark = true;
+          else delete after.landmark;
+        } else if (k === 'drawDistance') {
+          // How far its far copy is kept, metres (wave 5b), inside the reader's own limits; empty or null takes it off.
+          if (typeof v === 'number' && Number.isFinite(v) && v >= PLACEMENT_LIMITS.drawDistanceMin && v <= PLACEMENT_LIMITS.drawDistanceMax) after.drawDistance = v;
+          else if (v === null || v === '') delete after.drawDistance;
         }
       }
       if (!touched) continue;
@@ -2048,7 +2069,11 @@ export class EditorEdits {
         ? "its furniture is rows of its own in its rooms: the file's would stand beside them, every piece twice (undo the make-own, or take those rows out first)"
         : notBuildings
           ? 'only a building stands furniture of its own'
-          : '';
+          : badReach
+            ? `a draw distance is metres from ${PLACEMENT_LIMITS.drawDistanceMin} to ${PLACEMENT_LIMITS.drawDistanceMax} (empty takes it off)`
+            : insidePassed
+              ? "a row in a building's rooms has no far copy: only what stands out in the open is seen from far off"
+              : '';
     if (!changes.length) {
       if (passed) this.ed.say(passed, false);
       return passed || 'nothing picked stands in the files';

@@ -112,6 +112,9 @@ export interface DressingStand {
   radius?: number;
   /** What it counts as for the people (`PlacementRow.furniture`, the twelfth wave), absent for its template's own name. */
   furniture?: 'seat' | 'table' | 'none';
+  /** Its landmark fields (`PlacementRow.landmark`, `drawDistance`, the horizon pass's wave 5b), absent for none. */
+  landmark?: true;
+  drawDistance?: number;
 }
 
 /**
@@ -137,7 +140,7 @@ export function dressingStandOf(row: PlacementRow, g: GamePlace, key: string, th
   // A mark has no model to stand (the attachments' holder stands what it carries).
   if (row.kind === 'mark') return null;
   // A row's scale rides along only where it has one, so a row with none stands exactly as it always did; its looks the same.
-  const at = { key, x: g.x, y: g.y, z: g.z, q: g.q, inside: !!row.inside, ...(row.clear && row.clear > 0 ? { clear: row.clear } : {}), ...(row.scale !== undefined ? { scale: scaleOf(row) } : {}), ...(row.mats !== undefined ? { mats: row.mats } : {}) };
+  const at = { key, x: g.x, y: g.y, z: g.z, q: g.q, inside: !!row.inside, ...(row.clear && row.clear > 0 ? { clear: row.clear } : {}), ...(row.scale !== undefined ? { scale: scaleOf(row) } : {}), ...(row.mats !== undefined ? { mats: row.mats } : {}), ...(row.landmark ? { landmark: true as const } : {}), ...(row.drawDistance !== undefined ? { drawDistance: row.drawDistance } : {}) };
   if (row.pack === 'props') {
     const def = row.thing ? thingOf(row.thing) : null;
     if (!def) return null;

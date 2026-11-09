@@ -414,6 +414,8 @@ import { RACE_CLOCK, enginePartName, holdsLiving, raceFling, type RaceDrive, typ
 import { vehicleDialsFor } from './vehicles/raceDials.ts';
 import { FAR_BASE, HORIZON_TUNE, HORIZON_VIEWS, type HorizonGround } from './world/horizon/horizonMath.ts';
 import { horizonDialsFor, tuneHorizon } from './world/horizon/horizonDials.ts';
+import { LANDMARK_TUNE, tuneLandmarks } from './world/landmarkMath.ts';
+import { landmarkDialsFor } from './world/landmarkDials.ts';
 import { CARD_FIELD_TUNE, tuneCardField } from './world/horizon/cardField.ts';
 import { shipDialsFor } from './space/tierDials.ts';
 import { ENGINE_TUNE, damagePart, mendEngines, tuneEngines, type EngineTune } from './vehicles/drivetrain.ts';
@@ -542,6 +544,13 @@ import { censusOf, CNT, PASS, PERF, perf, PERF_SWITCHES, PERF_TUNE, PERF_WAIT_MS
 // The race drive's hatch, read before anything spawns or the garage sorts a vehicle: `localStorage['swg.race'] = '0'`
 // starts the session with the pass switched off, so nothing is built differently (src/vehicles/raceTune.ts).
 readRaceHatch(() => (typeof localStorage === 'undefined' ? null : localStorage.getItem('swg.race')));
+// The landmarks' size rule at load (the horizon pass's wave 5b): `localStorage['swg.landmarks'] = '1'` starts it on, read once,
+// before any world is collected; off is its start and the world of before.
+try {
+  if (typeof localStorage !== 'undefined' && localStorage.getItem('swg.landmarks') === '1') LANDMARK_TUNE.on = true;
+} catch {
+  // A page that refuses storage keeps the rule off.
+}
 
 /** A race-driven hull's engine part as the flight display's condition block reads one (`ShipPartState`), written in place. */
 interface RacePartView {
@@ -2286,6 +2295,8 @@ class App {
       values: ['tiles', 'rings'],
       note: "the far ground drawn as rings from the bake, or as far tiles (only with __debug.horizon({ ground: 'both' }))",
     });
+    // The horizon pass's wave 5b: the landmarks drawn or every copy hidden, nothing let go (the same view with and without them).
+    registerPerfSwitch('landmarks', { get: () => LANDMARK_TUNE.drawn, set: (v) => (LANDMARK_TUNE.drawn = !!v), values: [false, true], note: "the big placed things kept at their lowest level past their tiers' ranges, out to the far ground's reach in force (__debug.landmarks)" });
     // (The far plane follows the reach a frame after any slider moves it: `followHorizonFar` after every `updateHorizon`.)
     registerPerfSwitch('farProbeCached', { get: () => FAR_PROBE.cached, set: (v) => (FAR_PROBE.cached = !!v), values: [false, true], note: "a creature or person far from the player reads the ground the world holds, and never makes terrain on the spot" });
     registerPerfSwitch('floraWarm', { get: () => FLORA_WARM.on, set: (v) => (FLORA_WARM.on = !!v), values: [false, true], note: "every plant compiled behind the loading screen (from the next arrival) and a chunk's materials adopted as it is made" });
@@ -5441,6 +5452,24 @@ class App {
         if (o?.cardField !== undefined) said.push(await this.setCardField(o.cardField));
         this.followHorizonFar();
         return { ...this.world.horizonReport({ bench: o?.bench, at: o?.at }), far: { camera: Math.round(this.cam.camera.far), jumpKept: this.jumpFarKept, reversed: this.cam.camera.reversedDepth }, said: said.filter(Boolean) };
+      },
+      /**
+       * The landmarks (the horizon pass's wave 5b): every big placed thing kept at its lowest level of detail past its tier's
+       * own range, out to `k` of its half-spans and never past the far ground's reach in force, hidden wherever the streamer
+       * holds it finer. Reports what was collected and built and what the last sweep drew. `{ on }` is the size rule's switch
+       * (off by default; a row's own `landmark` or `drawDistance` works either way): on in a world, the index is built behind a
+       * short curtain; off, only the rows' own stay. `{ tune }` any `LANDMARK_TUNE` number (`k`, `minSize`, `hysteresis`,
+       * `sweepMetres`, `drawn`...); a moved `minSize` (which brings in models no tier has drawn) is taken behind the same
+       * curtain in a world, and so is one the dial moved with `{ apply: true }`, never by a frame. `localStorage['swg.landmarks']
+       * = '1'` turns the size rule on at load. Await it when it changes `on` or `minSize`.
+       */
+      landmarks: async (o?: { on?: boolean; apply?: boolean; tune?: Record<string, unknown> }) => {
+        const said: string[] = [];
+        if (o?.tune) said.push(...tuneLandmarks(o.tune));
+        if (typeof o?.on === 'boolean' && o.on !== LANDMARK_TUNE.on) said.push(await this.setLandmarks(o.on));
+        else if ((o?.apply === true || (o?.tune !== undefined && 'minSize' in o.tune)) && this.world.landmarks?.pending) said.push(await this.applyLandmarks());
+        this.world.landmarks?.refresh();
+        return { ...(this.world.landmarks?.report() ?? { index: 'none here: a ground world builds one at its arrival (not space, the gallery or the copies)', on: LANDMARK_TUNE.on, k: LANDMARK_TUNE.k }), said: said.filter(Boolean) };
       },
       farTiles: (o?: { local?: boolean; probe?: boolean; floraWarm?: boolean }) => {
         if (typeof o?.local === 'boolean') this.world.setFarTileLocal(o.local);
@@ -12223,7 +12252,7 @@ class App {
       // picked, the NPC ship ladder's tiers 6 to 10 when `npcShips` is, how a far body is drawn when `crowd` is, and
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -18735,6 +18764,9 @@ class App {
     const dressingUntil = performance.now() + Math.max(0, Math.min(DRESSING_TUNE.standWaitMs, timeoutMs - (performance.now() - t0)));
     await Promise.race([this.dressingStanding, new Promise((r) => setTimeout(r, Math.max(0, dressingUntil - performance.now())))]);
     await Promise.race([this.dressingBuilt, new Promise((r) => setTimeout(r, Math.max(0, dressingUntil - performance.now())))]);
+    // The landmarks (the horizon pass's wave 5b), collected now that what this world stands for good is filed, their models
+    // loaded by size while the rest of this screen goes on, waited for (bounded) just before the sweep below.
+    const landmarksBuilt = this.world.standLandmarks();
     while (performance.now() - t0 < timeoutMs) {
       if (this.world.settled(this.player.worldPos)) break;
       const { total, stage } = this.world.progress(this.player.worldPos);
@@ -18794,6 +18826,12 @@ class App {
     // The people's shapes (begun above) finished before the sweep, said under the title while they are waited for.
     this.loadingScreen.setWhat("the people's shaders");
     await personWarm;
+    // The landmarks' models and programs (wave 5b), bounded by `LANDMARK_TUNE.waitMs`: what is still loading after it is
+    // shown once built through the queue. Nothing to wait for with none collected.
+    if (this.world.landmarks?.busy) {
+      this.loadingScreen.setWhat('the landmarks');
+      await Promise.race([landmarksBuilt, new Promise((r) => setTimeout(r, Math.max(0, Math.min(LANDMARK_TUNE.waitMs, timeoutMs - (performance.now() - t0)))))]);
+    }
     if (PLACED_TUNE.warmWaitMs > 0) {
       this.loadingScreen.setWhat('the placed objects round you');
       await this.world.placedWarmSettled(PLACED_TUNE.warmWaitMs);
@@ -30704,6 +30742,35 @@ class App {
       said = await this.world.loadCardField();
     });
     return said;
+  }
+
+  /**
+   * The landmarks' size rule (wave 5b, `LANDMARK_TUNE.on`): on in a world, the index collected and built behind the far ground's
+   * short curtain (its models loaded and its programs built there, never on a frame); off, collected again at once with only
+   * the rows' own fields, what went taken down. Elsewhere it stands from the next arrival.
+   */
+  private async setLandmarks(on: boolean): Promise<string> {
+    LANDMARK_TUNE.on = on;
+    if (!on) {
+      await this.world.standLandmarks();
+      return 'landmarks by size off: only the rows carrying landmark or drawDistance are kept far';
+    }
+    if (!this.inWorld || this.traveling) return 'landmarks by size: from the next arrival';
+    await this.groundCurtain('the landmarks', () => this.world.standLandmarks());
+    const n = this.world.landmarks?.report();
+    return n ? `landmarks by size on: ${String(n.members)} collected in ${String(n.groups)} groups` : 'landmarks by size on: none on this world (space, the gallery or the copies)';
+  }
+
+  /**
+   * A least half-span moved (the review round of wave 5b): a lower one brings in models no tier has drawn, so it is taken as
+   * the switch is, behind the far ground's short curtain in a world (its models loaded and its programs built there), and
+   * from the next arrival elsewhere; the frame's own collections keep the rule last taken (`LandmarkIndex.pending`).
+   */
+  private async applyLandmarks(): Promise<string> {
+    if (!this.inWorld || this.traveling) return 'landmarks: the least half-span is taken at the next arrival';
+    await this.groundCurtain('the landmarks', () => this.world.standLandmarks());
+    const n = this.world.landmarks?.report();
+    return n ? `landmarks collected again at ${String(LANDMARK_TUNE.minSize)} m: ${String(n.members)} in ${String(n.groups)} groups` : 'landmarks: none on this world';
   }
 
   /** The camera's far plane written through the jump's tunnel: while a tunnel holds it, the kept value is what moves. */

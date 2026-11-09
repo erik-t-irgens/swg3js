@@ -28,6 +28,7 @@ import type { AssetPack } from '../world/assetPack.ts';
 import type { PlacedObject, RoomAnswer } from '../world/layoutStream.ts';
 import { ACTOR_LAYER, INTERIOR_LAYER } from '../world/portalRender.ts';
 import { packIdOfRoot } from '../world/layoutStream.ts';
+import { farCopyWords } from '../world/landmarkMath.ts';
 import { EditorGhost, type GhostDeps } from '../world/placeGhost.ts';
 import { patchOfBounds, clearRadius, type Patch } from '../world/housePlace.ts';
 import { destinationFile, rowFromEditor, type EditorSource } from '../world/permanentEdit.ts';
@@ -4790,6 +4791,8 @@ export class Editor {
       furniture: r.row.kind === 'building' ? (this.host.furnitureNote?.(r.row.id) ?? '') : '',
       // What it counts as for the people (Map-maker II's twelfth wave): its own word, '' for its template's name.
       ...(r.row.kind !== 'mark' ? { counts: r.row.furniture ?? '' } : {}),
+      // Seen from far off (the horizon pass's wave 5b): its row's two fields, and how far the landmark index keeps it in words.
+      ...(r.row.kind !== 'mark' ? { landmark: r.row.landmark === true, drawDistance: r.row.drawDistance === undefined ? '' : String(r.row.drawDistance), farCopy: farCopyWords(r.row, b ? Math.max(Math.abs(b.max[0] - b.min[0]) * sc[0], Math.abs(b.max[1] - b.min[1]) * sc[1], Math.abs(b.max[2] - b.min[2]) * sc[2]) / 2 : Number.NaN) } : {}),
       materials: this.materialsView(first as string),
       picking: this.looks.picking ? `click a surface (or choose a library entry) to take its ${this.looks.picking.take === 'texture' ? 'picture' : 'material'} for ${this.looks.picking.of === '*' ? 'every material' : this.looks.picking.of}; Escape lets go` : '',
       offered: this.looks.choice,

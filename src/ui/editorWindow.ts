@@ -214,6 +214,13 @@ export interface SelectedView {
   /** Map-maker II's twelfth wave: what it counts as for the people (`seat`, `table`, `none`; '' for its template's name). */
   counts?: string;
   /**
+   * The horizon pass's wave 5b: whether its row says it is seen from far off (`landmark`), its far copy's reach in metres ('' for
+   * the size rule's), and whether the landmark index keeps it now and how far, in words. Absent on a mark.
+   */
+  landmark?: boolean;
+  drawDistance?: string;
+  farCopy?: string;
+  /**
    * Its model's materials, each name once, with the look each wears in words, its tint (`#rrggbb` or ''), a little picture of
    * it and why a look would not go on it ('' for nothing); null where its model is not loaded or it is a mark.
    */
@@ -1061,6 +1068,15 @@ export class EditorWindow {
     if (s.furniture) this.field(what, 'Its furniture', s.furniture, null);
     // Map-maker II's twelfth wave: a seat (people of ours sit on it, a chair of ours stands nowhere on it), a table, or neither.
     if (s.counts !== undefined) this.field(what, 'Counts as (seat, table, none; empty: its name)', s.counts, (v) => this.host.setField({ furniture: v.trim() || null }));
+    // The horizon pass's wave 5b: seen from far off whatever its size, and how far its far copy is kept (the row alone).
+    if (s.landmark !== undefined) {
+      this.field(what, 'Seen from far off', s.landmark, (v) => this.host.setField({ landmark: v === 'true' }), 'check');
+      this.field(what, 'Far copy kept to m (empty: its size)', s.drawDistance ?? '', (v) => {
+        const n = Number(v);
+        this.host.setField({ drawDistance: v.trim() === '' ? null : Number.isFinite(n) ? n : v });
+      }, 'number');
+      if (s.farCopy) this.field(what, 'Its far copy', s.farCopy, null);
+    }
     this.field(what, 'State', s.state, (v) => this.host.setField({ state: v.trim() || null }));
     this.field(what, 'Its name', s.name, (v) => this.host.setField({ name: v.trim() || null }));
     this.field(what, 'Note', s.note, (v) => this.host.setField({ note: v.trim() || null }));

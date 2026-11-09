@@ -84,6 +84,7 @@ import { PaintFloraSource, appearancesNamed, recipeClassesMoved, recipesLead } f
 import { Wash } from './demWash.ts';
 import type { GroundRules } from './demShader';
 import { LayoutStreamer, arrivalSlope, nearTierRange, openGroundAt, type Building, type CellState, type FloorUnder, type PlacedObject, type RoomAnswer, type WaterSurfaceHandle } from './layoutStream';
+import { LandmarkIndex } from './landmarks.ts';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchMiddle, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { DRESSING_TUNE, type DressingKeep, type DressingStand, type StandAnswer } from './permanent.ts';
 import { PLACEMENT_KEY_PREFIX } from '../story/placements.ts';
@@ -2557,6 +2558,7 @@ export class World {
       }
     }
     if (layout && !this.sceneOnly) {
+      this.dropLandmarks();
       this.rowAttach.clear();
       this.layoutStream?.dispose();
       this.particles?.dispose();
@@ -2719,6 +2721,7 @@ export class World {
     const base = `${import.meta.env.BASE_URL}assets-private/${id}/`;
     const stand = AssetPack.from({ planet: id, categories: {} }, base);
     const layout: Layout = { planet: id, center: { x: 0, z: 0 }, radius: 0, objects: [] };
+    this.dropLandmarks();
     this.rowAttach.clear();
     this.layoutStream?.dispose();
     this.particles?.dispose();
@@ -2960,6 +2963,8 @@ export class World {
     this.sceneAdds.clear();
     for (const o of this.structures) this.scene.remove(o);
     this.structures.length = 0;
+    // The landmarks (wave 5b) before the streamer they ask: their meshes out of the scene, their looks let go.
+    this.dropLandmarks();
     // What hangs on the permanent rows goes first, while the particles it placed out of still stand (the seventh wave).
     this.rowAttach.clear();
     this.layoutStream?.dispose();
@@ -5625,6 +5630,55 @@ export class World {
    */
   placedWarmSettled(ms: number): Promise<void> {
     return Promise.race([this.placedWarmLoads, new Promise<void>((r) => setTimeout(r, Math.max(0, ms)))]);
+  }
+
+  // ---- The landmarks (the horizon pass's wave 5b, DESIGN.md §1b, `landmarks.ts`) ----------------------------------------------
+
+  /** This world's landmark index, made behind its loading screen (`standLandmarks`); null with none (space, the gallery, the copies). */
+  landmarks: LandmarkIndex<PlacedObject> | null = null;
+
+  /**
+   * The landmarks collected and built behind a loading screen (`App.settle` waits for them, bounded by `LANDMARK_TUNE.waitMs`,
+   * so their programs are built by the screen and not in play): every big placed thing (with the size rule on) and every row
+   * carrying a landmark field, their models loaded by size and never by region, each group's lowest level made hidden and
+   * prepared. A ground world only: in space, in the gallery (whose every exhibit loads from anywhere) and in the world of
+   * copies there is no far ground for a landmark to stand against. With the switch off and no row's field nothing is
+   * collected, loaded or drawn. Asked again (a travel's settle, a curtain), it collects again and builds only what moved.
+   */
+  standLandmarks(): Promise<void> {
+    const ls = this.layoutStream;
+    if (!ls || this.sceneOnly || this.planet?.space || this.planet?.id === 'gallery' || this.planet?.instances) {
+      this.dropLandmarks();
+      return Promise.resolve();
+    }
+    if (!this.landmarks || this.landmarks.host !== ls) {
+      this.landmarks?.dispose();
+      this.landmarks = new LandmarkIndex<PlacedObject>(ls);
+    }
+    return this.landmarks.build();
+  }
+
+  /** The landmarks let go (a world going, the streamer made again): their meshes out of the scene, nothing of the pack's touched. */
+  dropLandmarks(): void {
+    this.landmarks?.dispose();
+    this.landmarks = null;
+  }
+
+  /**
+   * A frame of the landmarks: the eye, the reach in force and the step into the index's kept record (fields, never arguments)
+   * and its step. The reach in force is the rings' (their rules, a frame old) while they drew, else the far tiles'
+   * (`farTilesReach`, written out: a number handed back from a call is a number made).
+   */
+  private stepLandmarks(lm: LandmarkIndex<PlacedObject>, eye: THREE.Vector3, dt: number): void {
+    const a = lm.ask;
+    a.eyeX = eye.x;
+    a.eyeY = eye.y;
+    a.eyeZ = eye.z;
+    a.dt = dt;
+    const f = this.horizonField;
+    if (this.horizonFollow.on && f) a.reach = f.rules.inForce;
+    else a.reach = (this.farRadius + 0.5) * FAR_TILE;
+    lm.step();
   }
 
   /**
@@ -10944,6 +10998,9 @@ export class World {
     perf.begin(SEC.levels);
     this.sweepDetail(camPos, dt);
     perf.end(SEC.levels);
+    // The landmarks (the horizon pass's wave 5b), after the streamer's update so a tier shown or let go hands its copies over
+    // this same frame; nothing with no index or nothing collected.
+    if (this.landmarks) this.stepLandmarks(this.landmarks, camPos, dt);
     this.gaugeDetail();
     perf.begin(SEC.particles);
     // What hangs on the permanent rows, looked at a few times a second (the seventh wave): nothing between looks.

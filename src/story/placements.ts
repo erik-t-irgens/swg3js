@@ -157,6 +157,19 @@ export interface PlacementRow {
    */
   furniture?: 'seat' | 'table' | 'none';
   /**
+   * Seen from far off (the horizon pass's wave 5b, `src/world/landmarks.ts`): kept at its lowest level of detail out to its
+   * size's reach whatever its size, and whether or not the size rule is on. Only `true` is a value a row keeps: `false` reads as
+   * absent, so one meaning has one spelling. Part of how it stands, so in `rowHash`, and only where present. Never on a mark.
+   */
+  landmark?: true;
+  /**
+   * How far its far copy is kept, metres (wave 5b): over the size rule both ways (a small beacon kept far, a big wall let go
+   * early), never past the far ground's reach in force; within its own tier's range the streamer draws it as always. From
+   * `PLACEMENT_LIMITS.drawDistanceMin` to `drawDistanceMax`; one of any other shape is kept out of the row as a field this build
+   * does not read, with its note. In `rowHash`, and only where present. Never on a mark.
+   */
+  drawDistance?: number;
+  /**
    * Its looks (the seventh wave, `RowLook`): absent, the model's own materials. Part of how it stands, so in `rowHash`. One of
    * the wrong shape is kept out of the row as a field this build does not read, with its note, and the row stands in its own.
    */
@@ -214,6 +227,9 @@ export const PLACEMENT_LIMITS = {
   /** The least and the most a scale may be along any axis (a thousandth to a thousand: the editor's notes stand at 0.05 and 20). */
   scaleMin: 0.001,
   scaleMax: 1000,
+  /** The least and the most a row's far copy may be kept to, metres (wave 5b): a metre, and past any reach the far ground has. */
+  drawDistanceMin: 1,
+  drawDistanceMax: 100000,
   /** The most looks and attachments a row may carry (the seventh wave). */
   looks: 64,
   attachments: 64,
@@ -235,7 +251,7 @@ const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const NAME_ID = /^[A-Za-z0-9_.-]{1,96}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 /** The fields a row may carry; the reserved ones are read and set aside. */
-const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'furnish', 'furniture', 'scale', 'mats', 'attach', 'name', 'note', 'at']);
+const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'furnish', 'furniture', 'landmark', 'drawDistance', 'scale', 'mats', 'attach', 'name', 'note', 'at']);
 /** A tint, as a look writes it. */
 const TINT = /^#[0-9a-fA-F]{6}$/;
 /** A material a look borrows from: `<pack>:<model>/<material>`, the material's own name after the first slash. */
@@ -463,7 +479,7 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
     if (!a) return 'a mark carries attachments (one effect or sound at least), and its own did not read';
     row.attach = a;
     // The fields of a thing with a model mean nothing on a mark: kept out as fields this build does not read, with their note.
-    for (const k of ['solid', 'clear', 'guard', 'template', 'from', 'scale', 'furnish', 'furniture', 'mats'] as const) if (o[k] !== undefined) unknown.push(`${id}.${k}`);
+    for (const k of ['solid', 'clear', 'guard', 'template', 'from', 'scale', 'furnish', 'furniture', 'landmark', 'drawDistance', 'mats'] as const) if (o[k] !== undefined) unknown.push(`${id}.${k}`);
   } else if (o.pack === 'props') {
     if (typeof o.thing !== 'string' || !NAME_ID.test(o.thing)) return 'a props row names its thing (the props catalogue\'s id)';
     row.thing = o.thing;
@@ -544,6 +560,17 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
   if (o.furniture !== undefined && !mark) {
     if (o.furniture === 'seat' || o.furniture === 'table' || o.furniture === 'none') row.furniture = o.furniture;
     else unknown.push(`${id}.furniture`);
+  }
+  // Its landmark fields (the horizon pass's wave 5b), read the way `state` is: `landmark: false` the meaning of absent and
+  // written so, and anything of no shape a row takes kept out of it with its note.
+  if (o.landmark !== undefined && !mark) {
+    if (o.landmark === true) row.landmark = true;
+    else if (o.landmark !== false) unknown.push(`${id}.landmark`);
+  }
+  if (o.drawDistance !== undefined && !mark) {
+    const d = num(o.drawDistance);
+    if (d !== undefined && d >= L.drawDistanceMin && d <= L.drawDistanceMax) row.drawDistance = d;
+    else unknown.push(`${id}.drawDistance`);
   }
   // Its looks and what hangs on it (the seventh wave), read the way `state` is: a list of no shape a row takes is kept out
   // of it with its note, and the row stands in its own materials, or with nothing hung on it; an empty list is none.
@@ -736,6 +763,10 @@ export function rowHash(row: PlacementRow): string {
     ...(row.furniture !== undefined ? ['furniture', row.furniture] : []),
     // Its looks (the seventh wave): what it is drawn in is how it stands. Its attachments are not, so they are not here.
     ...(row.mats !== undefined ? ['mats', row.mats] : []),
+    // Its landmark fields (the horizon pass's wave 5b): how far it is seen is how it stands. Only where present, so every row
+    // of before hashes as it did.
+    ...(row.landmark ? ['landmark', true] : []),
+    ...(row.drawDistance !== undefined ? ['drawDistance', row.drawDistance] : []),
   ]);
 }
 
@@ -812,7 +843,7 @@ export function mintPlacementId(base: string, taken: ReadonlySet<string>): strin
 }
 
 /** The field order a row is written in, so one row is always one line spelled the same way. */
-const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'furnish', 'furniture', 'scale', 'mats', 'attach', 'name', 'note', 'at'];
+const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'state', 'template', 'from', 'furnish', 'furniture', 'landmark', 'drawDistance', 'scale', 'mats', 'attach', 'name', 'note', 'at'];
 /** Every field a row of this build reads, in the order it is written. */
 export const PLACEMENT_FIELDS: readonly string[] = ORDER;
 const ORDERED = new Set<string>(ORDER);

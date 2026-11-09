@@ -79,7 +79,7 @@ export const DEBUG_GROUPS: readonly { title: string; helpers: readonly string[] 
   // (`airDials.ts`) when `air` is picked, and the unified wind and its hold (`windDials.ts`) when `wind` is.
   { title: 'Volumetrics', helpers: ['volumetrics', 'air', 'wind'] },
   { title: 'Water, sky and weather', helpers: ['water', 'waterFx', 'waterSurface', 'sea', 'afloat', 'lava', 'ripples', 'fountains', 'weather', 'sky'] },
-  { title: 'Frame cost', helpers: ['perf', 'bench', 'cull', 'skeletons', 'farTiles', 'horizon', 'placed', 'passes', 'passLog', 'drawCalls', 'shaders', 'loading', 'links', 'skinnedLoad', 'shadowPass', 'personKeys', 'files', 'physics', 'props'] },
+  { title: 'Frame cost', helpers: ['perf', 'bench', 'cull', 'skeletons', 'farTiles', 'horizon', 'landmarks', 'placed', 'passes', 'passLog', 'drawCalls', 'shaders', 'loading', 'links', 'skinnedLoad', 'shadowPass', 'personKeys', 'files', 'physics', 'props'] },
   { title: 'Sound', helpers: ['audio', 'sound', 'soundGain', 'ambience', 'audioSelfTest', 'footsteps', 'gunSounds', 'vehicleSounds', 'sabers', 'surface', 'band'] },
   { title: 'Display and keys', helpers: ['hud', 'hurt', 'hit', 'say', 'windows', 'bind', 'bindings', 'resetBindings', 'debugMenu'] },
   { title: 'Playing together', helpers: ['session', 'group', 'chat', 'combat', 'together', 'raceTogether', 'reckon', 'owned', 'npcs', '__sharedDay', '__aboard', '__board', '__peers', '__rooms', '__peerBlades', '__npcs'] },

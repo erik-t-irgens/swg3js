@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { packIdOfRoot, relativeRoot } from './packPath.ts';
 import { cleanTrimesh, Group, groups, RAPIER as R, TRIMESH_FLAGS, type Physics } from '../core/physics.ts';
 import { splitTrimesh } from './trimeshPieces.ts';
-import type { AssetPack, Layout, LoadedModel, PackEffect, PackModelDef } from './assetPack';
+import type { AssetPack, Layout, LoadedModel, PackEffect, PackModelDef, Primitive } from './assetPack';
 import { CHUNK_SIZE } from './terrain.ts';
 import type { Exclusion } from './props';
 import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender.ts';
@@ -17,7 +17,7 @@ import { castsShadow, drawsAfterWater, isBasinWater, isDecal } from './surfaces.
 import { placedCasts } from './shadowCasters.ts';
 import { marks } from './marks.ts';
 import { floraClearRadius, modelReach } from './floraClear.ts';
-import { boxDistance, floorAt, footprintOf, gameX, gameZ, hostRadiusOf, hostReach, modelTier, PLACED_TIERS, PLACED_TUNE, REGION, regionCentre, regionIndex, regionRange, snapshotTier, tiltSin, type FloorAnswer, type FloorAsk } from './placedTiers.ts';
+import { boxDistance, floorAt, footprintOf, gameX, gameZ, hostRadiusOf, hostReach, modelSize, modelTier, PLACED_TIERS, PLACED_TUNE, REGION, regionCentre, regionIndex, regionRange, snapshotTier, tiltSin, type FloorAnswer, type FloorAsk } from './placedTiers.ts';
 // Which room a name picks is a rule of its own, with a node test over it; this file calls it rather
 // than keeping a second copy.
 import { namedCellIndex } from './cloning.ts';
@@ -322,6 +322,13 @@ export interface PlacedObject {
   solidOverride?: boolean;
   /** A permanent row's own word on what it counts as for the people (`PlacementRow.furniture`); absent, its template's name. */
   furniture?: 'seat' | 'table' | 'none';
+  /**
+   * A permanent row's own word that it is seen from far off (the horizon pass's wave 5b, `PlacementRow.landmark`): kept by the
+   * landmark index whatever its size (`landmarks.ts`). Absent on everything else, which the index asks of its size alone.
+   */
+  landmark?: true;
+  /** A permanent row's own reach for its far copy, metres (`PlacementRow.drawDistance`), over the size rule both ways. Absent on everything else. */
+  drawDistance?: number;
 }
 
 /** A row's looks as the streamer carries them: the list, and its signature (`lookSignature`), which a tier's bulk groups by. */
@@ -400,6 +407,9 @@ export interface RuntimePlacement {
   fold?: true;
   /** A permanent row's looks (`PlacedObject.look`); absent for its model's own materials. */
   look?: RowLookSet;
+  /** A permanent row's landmark fields (`PlacedObject.landmark`, `drawDistance`, the horizon pass's wave 5b); absent for none. */
+  landmark?: true;
+  drawDistance?: number;
 }
 
 /** A box `min`..`max` (either corner may come first) at a scale along its own axes: the corners scaled, which way round kept. */
@@ -1682,9 +1692,12 @@ export class LayoutStreamer {
       ...(p.scale ? { scale: p.scale } : {}),
       ...(p.fold ? { folded: true as const } : {}),
       ...(p.look ? { look: p.look } : {}),
+      ...(p.landmark ? { landmark: true as const } : {}),
+      ...(p.drawDistance !== undefined ? { drawDistance: p.drawDistance } : {}),
     };
     this.objects.push(placed);
     this.placedByKey.set(p.template, placed);
+    this.noteLandmark(placed);
     // A house can host what is put down in it, and a thing put down in a room is drawn with that room.
     let hosts = false;
     if (!placed.contained) {
@@ -1778,6 +1791,7 @@ export class LayoutStreamer {
     }
     const i = this.objects.indexOf(placed);
     if (i >= 0) this.objects.splice(i, 1);
+    this.noteLandmark(placed);
     // A house taken up hosts nothing more, and what stood in it is drawn as it was before anything was
     // drawn with its rooms: its building is going, and only that building's pass ever showed it.
     const hostId = this.hostIds.get(placed);
@@ -1812,6 +1826,7 @@ export class LayoutStreamer {
       const placed = this.placedByKey.get(template);
       if (!placed || going.has(placed)) continue;
       going.add(placed);
+      this.noteLandmark(placed);
       this.placedByKey.delete(template);
       const circle = this.placedCircles.get(template);
       if (circle) {
@@ -2616,6 +2631,7 @@ export class LayoutStreamer {
     for (const p of [o, ...(o.contained ? [] : this.containedIn(o))]) {
       if (this.hiddenLive.has(p)) continue;
       this.hiddenLive.add(p);
+      this.noteLandmark(p);
       n++;
       const region = this.regions.get(`${regionIndex(p.x)},${regionIndex(p.z)}`);
       if (region) {
@@ -2648,6 +2664,7 @@ export class LayoutStreamer {
     const with_ = [o, ...[...this.hiddenLive].filter((p) => p !== o && p.contained && (p.host === o || (p.hostIndex !== undefined && this.objects[p.hostIndex] === o)))];
     for (const p of with_) {
       if (!this.hiddenLive.delete(p)) continue;
+      this.noteLandmark(p);
       n++;
       const region = this.regionFor(p.x, p.z);
       region.objects[p.tier].push(p);
@@ -2682,6 +2699,7 @@ export class LayoutStreamer {
       this.hiddenAtArrival.splice(k, 1);
       this.hiddenIn.delete(p);
       this.objects.push(p);
+      this.noteLandmark(p);
       // The snapshot's own word on its building, as an index into this list (the furniture hosting of the arrival is not
       // made again: it stands in its room's pass by the old rule until the next arrival).
       const host = p === o ? ownHost : o;
@@ -2940,6 +2958,9 @@ export class LayoutStreamer {
       fold: true,
       // Its looks (the seventh wave), where it has any: drawn in their copies, folded with the copies wearing the same.
       ...(mats && mats.length ? { look: { mats, sig: lookSignature(mats) } } : {}),
+      // Its landmark fields (the horizon pass's wave 5b), where it has any: the landmark index reads them.
+      ...(row.landmark ? { landmark: true as const } : {}),
+      ...(row.drawDistance !== undefined ? { drawDistance: row.drawDistance } : {}),
     });
     // What it counts as for the people (Map-maker II's twelfth wave), where its row says: `World.dataPlacedNear` reads it.
     if (row.furniture) {
@@ -3626,11 +3647,87 @@ export class LayoutStreamer {
     if (!this.disposed && region.tiers[tier] === loaded) {
       loaded.ready = true;
       this.batchTier(loaded);
+      // The landmark index hands its copies of this tier's objects back at its next sweep, which this asks for (`landmarks.ts`).
+      this.tierEpoch++;
     }
   }
 
   /** What the shadow batches are, for the streamer (`shadowBatches.ts`); null leaves every caster as it was. */
   shadowBatches: ShadowBatches | null = null;
+
+  // ---- The landmark index's half (the horizon pass's wave 5b, `landmarks.ts`) -------------------------------------------------
+  // Counters and questions, nothing that files, loads, builds or draws a tier: with no index built the streamer is as it was.
+
+  /** Moves whenever a tier is shown or let go: the index's sweep then runs at once, so a copy is handed over the same frame. */
+  tierEpoch = 0;
+  /** Moves whenever something that could be a landmark is put down, taken up, taken away or stood again (`noteLandmark`). */
+  memberEpoch = 0;
+
+  /** Something filed or let go: the index collects again only where it could be a landmark (its size tier the first, or a row's field). */
+  private noteLandmark(p: PlacedObject): void {
+    if (p.sizeTier === 0 || p.landmark || p.drawDistance !== undefined) this.memberEpoch++;
+  }
+
+  /**
+   * Every placed thing out in the open that could be a landmark, with its half-span at its scale (`modelSize` of its own box,
+   * never the snapshot's radius): what stands in the world's list, less what stands in a room, the world builder's markers, a
+   * particle effect, a model no pack carries and anything taken away live. The landmark index asks the rules of each.
+   */
+  landmarkCandidates(visit: (o: PlacedObject, size: number) => void): void {
+    for (const o of this.objects) {
+      if (o.contained || isToolOnly(o.template) || this.hiddenLive.has(o)) continue;
+      // The size rule's least half-span is never under the first tier's (`LANDMARK_MIN_SIZE_FLOOR`), and a row's size tier is
+      // its box at its scale (`place`'s `scaledDef`), so only that tier can meet it: the rest are skipped before a box is scaled.
+      if (!o.landmark && o.drawDistance === undefined && o.sizeTier !== 0) continue;
+      const def = this.defOf(o.model, o.pack);
+      if (!def || def.particle) continue;
+      const size = modelSize(this.scaledBoxOf(o));
+      visit(o, Number.isFinite(size) ? size : 0);
+    }
+  }
+
+  /**
+   * One piece of a landmark group's lowest level as an instanced mesh with room for `n` copies, made as a tier's are (in its
+   * look's copy where its group wears one, after the water for a translucent surface, receiving the sun's shadow) but casting
+   * none (Light and shadow's step 3), hidden until its programs exist, in the scene, offered to the exit narrowing. Null for a
+   * basin's water, which the water system draws.
+   */
+  landmarkMesh(owner: object, prim: Primitive, n: number, look: RowLookSet | undefined): THREE.InstancedMesh | null {
+    if (isBasinWater(prim.material)) return null;
+    const worn = look && this.looks ? this.looks.wear(owner, prim.material, look.mats, prim.geometry, this.donorOf) : prim.material;
+    const mesh = new THREE.InstancedMesh(prim.geometry, worn, n);
+    mesh.castShadow = false;
+    mesh.receiveShadow = true;
+    if (drawsAfterWater(worn)) mesh.renderOrder = 3;
+    mesh.name = 'landmark';
+    mesh.visible = false;
+    mesh.boundingSphere = new THREE.Sphere();
+    markNarrowRoot(mesh, mesh.boundingSphere);
+    this.scene.add(mesh);
+    return mesh;
+  }
+
+  /** A landmark group's meshes out of the scene and let go (their geometry and materials are the pack's), its looks' copies released. */
+  landmarkDrop(owner: object, meshes: readonly THREE.InstancedMesh[]): void {
+    for (const m of meshes) {
+      this.scene.remove(m);
+      m.dispose();
+    }
+    this.looks?.release(owner);
+  }
+
+  /** Whether this object's own tier is built and shown (the streamer holds it finer than a landmark copy): one lookup. */
+  holdsFiner(o: PlacedObject): boolean {
+    const region = this.regionsByNumber.get(regionNumber(regionIndex(o.x), regionIndex(o.z)));
+    if (!region) return false;
+    const t = region.tiers[o.tier];
+    return t !== null && t !== 'loading' && t.ready;
+  }
+
+  /** Whether a mesh failed to draw and is hidden for good (the portal renderer's quarantine). */
+  isBroken(mesh: THREE.Object3D): boolean {
+    return isQuarantined(mesh);
+  }
 
   /**
    * A shown tier's still casters handed to the shadow batches: its own instanced meshes of the bulk build that are not
@@ -4581,6 +4678,8 @@ export class LayoutStreamer {
   private unloadTier(region: Region, tier: number): void {
     const t = region.tiers[tier];
     if (!t || t === 'loading') return;
+    // The landmark index takes its copies of this tier's objects up again at its next sweep, this same frame.
+    this.tierEpoch++;
     // Its shadow batch goes with it (its geometry and textures; the material is the session's).
     if (t.batch) this.shadowBatches?.drop(t.batch);
     t.batch = null;
