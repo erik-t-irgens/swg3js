@@ -7,6 +7,7 @@ import type { DialGroup, DialSet, NumberDial, ChoiceDial } from '../../ui/dials.
 import { readDials } from '../../ui/dials.ts';
 import { HORIZON_TUNE, HORIZON_VIEWS, shapeReachMost } from './horizonMath.ts';
 import { GROUND_DETAIL_TUNE, groundTileUniforms, tuneGroundDetail, writeGroundDetail } from '../terrainTextures.ts';
+import { CARD_FIELD_TUNE, tuneCardField } from './cardField.ts';
 
 const CHOICES: Record<string, readonly string[]> = {
   ground: ['tiles', 'both', 'rings'],
@@ -27,15 +28,6 @@ export const REACH_RANGE = [500, 32000] as const;
  */
 export const SHAPE_REACH_MOST = Math.floor(shapeReachMost(HORIZON_TUNE) / 25) * 25;
 
-/** The numbers the measurement's far plane and sky radius are worked out from: a move of one is told to `HORIZON_WATCH`. */
-const MEASURED = new Set(['reach', 'skyMargin', 'farMargin', 'measure']);
-
-/**
- * Told whenever `tuneHorizon` moves a number the measurement's far plane and sky follow (`main.ts` hangs its
- * `applyHorizonMeasure` here), so a slider and a typed line move the far plane alike.
- */
-export const HORIZON_WATCH: { moved: (() => void) | null } = { moved: null };
-
 /**
  * Any `HORIZON_TUNE` value set by name (a number held finite and positive where it must be, the reach inside
  * `REACH_RANGE`, a switch, a choice among its own words); answers what it would not take. `ground` is the console's to
@@ -44,7 +36,6 @@ export const HORIZON_WATCH: { moved: (() => void) | null } = { moved: null };
 export function tuneHorizon(o: Record<string, unknown>): string[] {
   const t = HORIZON_TUNE as unknown as Record<string, unknown>;
   const said: string[] = [];
-  let measured = false;
   for (const [k, v] of Object.entries(o)) {
     if (!(k in t)) {
       said.push(`horizon has no ${k}`);
@@ -72,6 +63,12 @@ export function tuneHorizon(o: Record<string, unknown>): string[] {
       // The program divides by the fade: never under one sample.
       else if (k === 'shapeFade') t[k] = Math.max(1, v);
       else if (k === 'shapePad') t[k] = Math.max(0, v);
+      // W5: nought is the slider's reach at any height, or the far sea following every move; a step of under a metre none.
+      else if (k === 'heightReach' || k === 'seaStep') t[k] = Math.max(0, v);
+      else if (k === 'farStep') t[k] = Math.max(1, v);
+      // The far plane must stand past the sky's dome (1.6 of the sky's radius) and the sky past the reach.
+      else if (k === 'farMargin') t[k] = Math.max(1.65, v);
+      else if (k === 'skyMargin') t[k] = Math.max(1.01, v);
       else t[k] = k === 'renderOrder' ? Math.round(v) : Math.max(k === 'drop' ? 0 : 1e-4, v);
     } else if (typeof was === 'boolean') {
       if (v === 'on' || v === 'off') t[k] = v === 'on';
@@ -81,16 +78,17 @@ export function tuneHorizon(o: Record<string, unknown>): string[] {
       if (!CHOICES[k].includes(v as string)) said.push(`${k} takes ${CHOICES[k].join(', ')}`);
       else t[k] = v;
     }
-    if (MEASURED.has(k) && t[k] !== was) measured = true;
   }
   if (HORIZON_TUNE.morph >= 1) HORIZON_TUNE.morph = 0.99;
-  if (measured) HORIZON_WATCH.moved?.();
   return said;
 }
 
 function num(k: keyof typeof HORIZON_TUNE, label: string, min: number, max: number, step: number, unit: string, note: string): NumberDial {
   const t = HORIZON_TUNE as unknown as Record<string, number>;
   return { kind: 'number', key: `tune.${k}`, label, note, min, max, step, unit, get: () => t[k], set: (v) => tuneHorizon({ [k]: v }) };
+}
+function cardNum(k: 'cells' | 'grow' | 'levelsMost', label: string, min: number, max: number, step: number, unit: string, note: string): NumberDial {
+  return { kind: 'number', key: `cardField.${k}`, label, note, min, max, step, unit, get: () => CARD_FIELD_TUNE[k], set: (v) => [tuneCardField({ [k]: v })] };
 }
 function choice(k: keyof typeof HORIZON_TUNE, label: string, note: string): ChoiceDial {
   const t = HORIZON_TUNE as unknown as Record<string, string | boolean>;
@@ -111,7 +109,8 @@ const HORIZON_GROUPS: DialGroup[] = [
     title: 'How far',
     note: "The reach of the rings, and where the planet's fog takes it over (the reach in force). The ground switch is the console's.",
     dials: [
-      num('reach', 'Reach', 1000, 16000, 100, 'm', 'How far the rings go (the Graphics page\'s Terrain distance from a later wave).'),
+      num('reach', 'Reach', 1000, 16000, 100, 'm', 'How far the rings go (the Graphics page\'s Terrain distance, which a reload puts back).'),
+      num('heightReach', 'Reach a metre of height buys', 0, 20, 0.5, 'm', 'A ship high up sees further: the reach grows by this many metres for each metre the eye stands over the ground, held under the slider\'s top (16 km) and the bake. Nought is the reach at any height.'),
       choice('fogCap', 'Stop where the fog hides it', 'The rings stop where the fog leaves less than one level in 255 of the ground.'),
       num('lod0', 'Level 0 range', 400, 4000, 50, 'm', "The finest level's range, before the floor the standing chunks set."),
       num('morph', 'Morph share', 0.05, 0.6, 0.01, '', 'The outer share of each range, and of each edge band, a vertex morphs over.'),
@@ -136,6 +135,26 @@ const HORIZON_GROUPS: DialGroup[] = [
       num('fade', 'Horizon fade share', 0, 0.5, 0.01, '', 'The share of the reach in force the fade runs over.'),
       num('fogCheap', 'Fog cheap path', 0.9, 1, 0.001, '', 'Past this fog factor a fragment is the fog\'s colour with no taps.'),
       choice('view', 'View', 'What the program draws (the lit ground, or a part of it).'),
+    ],
+  },
+  {
+    title: 'Past the reach',
+    note: 'The fifth wave: what follows the reach while the rings are drawn (the sky, the far plane, the god rays and the flare, the far sea).',
+    dials: [
+      num('skyMargin', 'Sky past the reach', 1.01, 2, 0.01, '×', "The sky's sun, moons, stars and skybox hang this far past the reach, so a far ridge stands in front of a setting sun."),
+      num('farMargin', 'Far plane past the sky', 1.65, 3, 0.01, '×', "The camera's far plane past the sky's radius (the dome stands at 1.6 of it)."),
+      num('farStep', 'Far plane steps', 1, 4000, 50, 'm', 'The far plane and the sky move only in steps of this much reach, so a climbing ship moves the projection and the shadows\' fit only as it crosses a step.'),
+      choice('raysBlock', 'Far ridges stop the sun', 'On, the god rays and the lens flare count the far ground as solid out to the reach less half its fade; off, past 2.5 km is sky as it always was.'),
+      num('seaStep', 'Far sea follows by', 0, 2000, 50, 'm', "How far the reach moves before the far sea's edge follows it."),
+    ],
+  },
+  {
+    title: 'Far tree cards to the horizon',
+    note: "The Graphics page's Flora switch: past the far tiles' own cards, the same cards drawn as far as the rings reach, from the bake's far tree cards.",
+    dials: [
+      cardNum('cells', 'Cells a side', 32, 512, 4, '', "Each level's square round the eye: more cells, more cards drawn and more of the far ground's distance at the finest level."),
+      cardNum('grow', 'Growth a level', 0, 2, 0.05, '', 'A coarser level keeps one card in four, grown by two to this power so a forest keeps its cover (1) or not (0).'),
+      cardNum('levelsMost', 'Most levels', 1, 8, 1, '', 'Each level twice the last one\'s cell and reach.'),
     ],
   },
   {

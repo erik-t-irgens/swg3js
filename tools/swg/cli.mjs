@@ -276,7 +276,7 @@ import { autoCenter, frameCheck, mergePlaceLists, namePorts, noBuildOf, placeKey
 import { isZoneGate, writeZoneGates } from './gates.mjs';
 import { COLOR_RAMPS, downscaleRgba, groundStatus, writeColorRamps, writeGroundTextures, writeTerrainBitmaps } from './terrainShaders.mjs';
 import { radialStatusOf } from './radial.mjs';
-import { horizonStatusOf } from './horizon.mjs';
+import { HORIZON_STATUS_ASKS, horizonStatusOf } from './horizon.mjs';
 import { snapshotCategories, strayCategories } from './worldManifest.mjs';
 import { exportSky } from './sky.mjs';
 import { exportWater, readWaterHarm, waterHarmLines, waterPackNeedsHarm } from './water.mjs';
@@ -3084,6 +3084,7 @@ function packStatus(dir) {
   const cardShaders = new Set();
   /** The worlds whose radial flora (grass and the far tree cards) has no pictures, or pictures from another terrain, each with why. */
   const wantRadial = [];
+  const wantHorizon = [];
   // A folder with some worlds converted asks for a missing one alone (a world added to the list since, Hoth among
   // them), since `snapshot all` would convert every world again; a folder with none asks for them all in one run.
   const anyPacked = GAME_PLANETS.some((p) => existsSync(join(dir, p, 'manifest.json')));
@@ -3112,6 +3113,8 @@ function packStatus(dir) {
     // The far ground's bake (horizon.mjs): listed with the command that makes it, and never asked for until the rings
     // ship on (the horizon design's §2.0 item 6); the world of copies draws no ground.
     const horizon = planet === 'dungeon1' ? { line: null } : horizonStatusOf(planet, packDir);
+    // The ask itself, after `radial` (the fifth wave, §7), for the worlds a player is offered alone, behind its one word.
+    if (HORIZON_STATUS_ASKS && !EXTRA_WORLDS.includes(planet) && (horizon.stale || horizon.cards)) wantHorizon.push(planet);
     const layers = existsSync(join(packDir, 'terrain')) ? readdirSync(join(packDir, 'terrain')).filter((f) => f.endsWith('.lay')).length : 0;
     const sky = readJson(join(packDir, 'sky.json'));
     const water = readJson(join(packDir, 'water.json'));
@@ -3377,6 +3380,9 @@ function packStatus(dir) {
   }
   // One run writes every world's grass pictures, and converts no model (radial.mjs).
   if (wantRadial.length) need(`radial <swg-dir> ${dir} --retail-only`, wantRadial.length === 1 ? wantRadial[0] : `${wantRadial.length} worlds have no pictures for their grass and far tree cards, or pictures from another terrain (${wantRadial[0]}; ...)`);
+  // The far ground's bakes (horizon.mjs), asked only once `HORIZON_STATUS_ASKS` is on (the wave that turns the rings on by
+  // default): every offered world missing one, stale, or without the far tree cards' file, in one run.
+  if (wantHorizon.length) need(`horizon ${dir} --only=${wantHorizon.join(',')}`, `${wantHorizon.length} world${wantHorizon.length === 1 ? ' has' : 's have'} no far-ground bake, a stale one, or none of its far tree cards (${wantHorizon.slice(0, 3).join(', ')}${wantHorizon.length > 3 ? ', ...' : ''})`);
   // One run writes every world's file, and needs no model converted again.
   if (wantFloraCollision.length) need(`floracollision <swg-dir> ${dir} --retail-only`, `the trees and rocks on ${wantFloraCollision.length} world${wantFloraCollision.length === 1 ? '' : 's'} are guessed cylinders, a wide tree solid across most of its canopy, instead of the trunks and rocks the client collided with (${wantFloraCollision.slice(0, 3).join(', ')}${wantFloraCollision.length > 3 ? ', ...' : ''})`);
   if (wantFittings) need(`fittings <swg-dir> ${dir} --retail-only`, "no world has the fittings the server stood on its buildings, or a world was converted again after they were written: no elevator panel by a lift, no bank terminal outside a bank, no sign over a cantina's door");
@@ -7904,12 +7910,16 @@ switch (cmd) {
     // terrain/horizon.bin beside its terrain file: its raw heights, families and colour means from the near ground's own
     // 2 m poles. It reads only each pack's own files (no archive), lays nothing of the owner's, and writes those two
     // files and nothing else. By hand until the rings ship on: `status` lists every bake and asks for none.
+    // `--cards-only` (the fifth wave, §1b Q11) writes the far tree cards' own two files (terrain/horizon-cards.json and
+    // .bin, the game's far grids' own 16 m generation a 512 m tile at a time) beside a bake made before them and leaves the
+    // bake as it is, in seconds; every bake writes them too.
     if (!pos[1]) usage();
     const { bakeHorizon } = await import('./horizon.mjs');
     const only = options.only ? new Set(options.only.split(',')) : null;
     const num = (k) => (options[k] !== undefined ? Number(options[k]) : undefined);
     const o = { threads: num('threads'), margin: num('margin'), farMargin: num('far-margin'), fineMost: num('fine-most') };
     for (const k of Object.keys(o)) if (o[k] === undefined || !Number.isFinite(o[k])) delete o[k];
+    if (flags.has('--cards-only')) o.cardsOnly = true;
     let baked = 0;
     let mb = 0;
     const t0 = performance.now();
@@ -7928,8 +7938,10 @@ switch (cmd) {
         continue;
       }
       baked++;
-      mb += r.mb;
-      console.log(`\r${planet}: ${r.fine.nx} x ${r.fine.nz} at ${r.fine.step} m, coarse ${r.coarse.nx} x ${r.coarse.nz}, ${r.mb.toFixed(1)} MB in ${(r.wall / 1000).toFixed(1)} s on ${r.threads} threads (${(r.cpu / 1000).toFixed(0)} s of generator)${r.wideFamilies ? `, ${r.wideFamilies} samples of a family past a byte drawn as none` : ''}`);
+      mb += r.mb + r.cardsMb;
+      const cardsWords = `far tree cards ${r.cards.nx} x ${r.cards.nz} (${r.cardsWithFamily} with a far family), ${r.cardsMb.toFixed(2)} MB`;
+      if (r.cardsOnly) console.log(`\r${planet}: ${cardsWords} in ${(r.wall / 1000).toFixed(1)} s on ${r.threads} threads (the bake left as it was)`);
+      else console.log(`\r${planet}: ${r.fine.nx} x ${r.fine.nz} at ${r.fine.step} m, coarse ${r.coarse.nx} x ${r.coarse.nz}, ${r.mb.toFixed(1)} MB and ${cardsWords} in ${(r.wall / 1000).toFixed(1)} s on ${r.threads} threads (${(r.cpu / 1000).toFixed(0)} s of generator)${r.wideFamilies ? `, ${r.wideFamilies} samples of a family past a byte drawn as none` : ''}`);
     }
     console.log(`horizon: ${baked} worlds baked, ${mb.toFixed(1)} MB in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     break;

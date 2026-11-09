@@ -54,8 +54,8 @@ import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './
 import { FLORA_WARM, FloraPlanter, plantedShadow } from './flora.ts';
 import { clientPlantDistance, FLORA_TUNE, plantReachOf, PlantSweep } from './floraReach.ts';
 import { FLORA_BATCH, FloraField, type FloraChunkData } from './floraBatch.ts';
-import { CHUNK_TREES, FAR_CARDS_ON, FarCards, GRASS_CAST, GRASS_NO_SHADOW, GRASS_ON, GRASS_TUNE, GRASS_UNIFORMS, GrassField, grassDepthMaterial, grassMaterial, grassStandIn, loadRadialPack, setGrassPictures, writeGrassUniforms, type GrassHost, type GrassSetup } from './grass.ts';
-import { GRASS_SHADOW_TUNE, fillRoadMask, grassCastCascades, grassReach, type FarSamples, type RoadMask } from './grassMath.ts';
+import { CHUNK_TREES, FAR_CARDS_ON, FAR_CARD_HANDOVER, FAR_CARD_TUNE, FarCards, GRASS_CAST, GRASS_CHUNK, GRASS_NO_SHADOW, GRASS_ON, GRASS_TUNE, GRASS_UNIFORMS, GrassField, grassDepthMaterial, grassMaterial, grassStandIn, loadRadialPack, setGrassPictures, writeGrassUniforms, type GrassHost, type GrassSetup } from './grass.ts';
+import { GRASS_SHADOW_TUNE, farReach, fillRoadMask, grassCastCascades, grassReach, jitterOf, type FarSamples, type FloraCircle, type RoadMask } from './grassMath.ts';
 import { SHADOW_CASTER_TUNE, floraBig } from './shadowCasters.ts';
 import type { FloraGroup, RadialChild, RadialGroup } from '../swg/terrain/flora.ts';
 import { floraColliders } from './floraCollision.ts';
@@ -68,13 +68,16 @@ import { AssetPack, lowerLevels, normalYOf, type Layout, type LoadedModel, type 
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
-import { HORIZON_TUNE, HoleGrid, RingHole, ringCardSurface, ringHoleMoved } from './horizon/horizonMath.ts';
+import { HORIZON_TUNE, HoleGrid, RingHole, SKY_BASE, ringCardSurface, ringHoleMoved } from './horizon/horizonMath.ts';
+import { FarSea, HorizonFollow, applyFollow } from './horizon/horizonSea.ts';
+import { CARD_CIRCLE, CARD_FIELD_TUNE, CARD_KEPT, CARD_WET, CardField, CardFieldAsk, CardFieldSession, cardFieldKeep, cardFieldLevelsOf, inflateCards } from './horizon/cardField.ts';
+import { HORIZON_CARDS_BIN, HORIZON_CARDS_JSON, readCardsHeader } from './horizon/horizonFile.ts';
 import { RingCardDebt, horizonPaintKeys, type CardRect } from './horizon/ringCardDebt.ts';
 import { HorizonField, RingSession, copyDome, tableKnobs, type RegenAsk } from './horizon/horizonField.ts';
 import { SHAPE_SIDE, SHAPE_WANTED, shapeSourceOf } from './horizon/shapeWindow.ts';
 import { layerExtent, paintRegenAsks, seasonalExtents } from './horizon/horizonOverlay.ts';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
-import { TERRAIN_GROUND_TUNE, lentFamilyKey, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
+import { GENERATOR_REVISION, TERRAIN_GROUND_TUNE, lentFamilyKey, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
 import { GroundPaint, PAINT_CELL, PAINT_TILE, paintTileNumber, paintTileOf, weightedFamily, type FloraRecipe, type PaintPaletteEntry } from '../swg/terrain/groundPaint.ts';
 import { PaintRows, cellsOfTile, copyRecipes, paintTileOfId, tileCells, type PaintLoaded, type PaintPaletteRow, type PaintRecipesRow, type PaintRow, type PaintTileRow, type PaintWorldRow } from './editFiles/paintFile.ts';
 import { PaintFloraSource, appearancesNamed, recipeClassesMoved, recipesLead } from './paintFlora.ts';
@@ -1011,6 +1014,10 @@ export class World {
   private envTimer = 99;
   private readonly fill = new THREE.DirectionalLight(0xffffff, 0);
   private waterFar: THREE.Mesh | null = null;
+  /** The far sea's outer row, followed to the rings' reach in force (`horizonSea.ts`), else today's 9,000 m. */
+  private farSea: FarSea | null = null;
+  /** What every reader of the far ground's reach holds this frame (the horizon's fifth wave): today's numbers with no rings drawn. */
+  readonly horizonFollow = new HorizonFollow();
   private waterTime = 0;
   private readonly waterMaterials: WaterMaterial[] = [];
   /** Every water surface with the look its own terrain shader asks for, and what it reflects. */
@@ -2479,6 +2486,12 @@ export class World {
             await horizon;
             if (this.horizonField) this.horizonField.joinWaitMs = performance.now() - tj;
             if (token !== this.loadToken) return null;
+            // The far tree cards to the horizon (the fifth wave, §1b Q11), once both the bake and the radial flora stand,
+            // with the Graphics page's switch on: behind this screen, so its sweep builds the field's program.
+            if (CARD_FIELD_TUNE.on && this.horizonDrawn) {
+              await this.loadCardField();
+              if (token !== this.loadToken) return null;
+            }
           }
           this.packProgress = 0.92;
         } catch (err) {
@@ -3134,6 +3147,7 @@ export class World {
       this.scene.remove(this.waterFar);
       this.waterFar.geometry.dispose();
       this.waterFar = null;
+      this.farSea = null;
     }
     // One lit material per body now, so a planet leaves a couple of dozen behind rather than three:
     // both the portal renderer's set and the cascades' map are strong, and the first is walked on
@@ -3171,6 +3185,8 @@ export class World {
     this.waterFar.name = 'water:sea-far';
     this.waterFar.position.y = level - 0.05;
     this.waterFar.frustumCulled = false;
+    // Its outer row kept as made, moved to the rings' reach in force while they are drawn (the horizon's fifth wave, §2.7).
+    this.farSea = new FarSea(this.waterFar.geometry);
     this.waterFarBody = this.waterBodies.add(this.waterFar, false, look, 'seaFar');
     this.scene.add(this.waterFar);
     this.waterMaterials.push(this.waterNear.lit, this.waterFarBody.lit);
@@ -12300,6 +12316,8 @@ export class World {
   /** The rings and this world's bake let go (a travel, the switch back at `'tiles'`): the session's program and meshes are kept. */
   dropHorizon(): void {
     const s = this.horizonSession;
+    // The far tree cards' field goes with the bake it stands on (the fifth wave).
+    this.dropCardField();
     this.horizonField?.dispose(s);
     this.horizonField = null;
     if (s && s.patch.parent) s.patch.parent.remove(s.patch, s.skirt);
@@ -12445,7 +12463,11 @@ export class World {
   updateHorizon(camera: THREE.PerspectiveCamera): void {
     const field = this.horizonField;
     const s = this.horizonSession;
-    if (!field || !s || !this.horizonDrawn || this.planet.space || !s.patch.visible) return;
+    if (!field || !s || !this.horizonDrawn || this.planet.space || !s.patch.visible) {
+      // Every reader of the reach holds today's numbers, by `Object.is` (the fifth wave's day one).
+      this.horizonFollowBase();
+      return;
+    }
     perf.begin(SEC.horizonSelect);
     this.syncHorizonHole();
     if (this.swgSky) copyDome(s.uniforms, this.swgSky.domeUniforms);
@@ -12455,13 +12477,162 @@ export class World {
     // The fog's density into the field's kept record (a fraction handed across the call would be a number made).
     field.rules.fogDensity = fog && (fog as THREE.FogExp2).isFogExp2 ? fog.density : 0;
     field.update(s, camera, camera.position, this.viewRadius, pcx, pcz, this.horizonHole, camera.reversedDepth);
+    // W5: what follows the reach (the far plane the game writes, the sky's radius, the rays' and the flare's sky, the far
+    // sea), and the far tree cards out to it where they are drawn.
+    this.horizonFollow.follow(field.rules);
+    this.applyHorizonFollow();
+    if (this.cardField && this.cardSession) this.stepCardField(this.cardSession, field);
     perf.count(CNT.horizonPatches, s.selector.patchCount);
     perf.end(SEC.horizonSelect);
   }
 
-  /** The sky's bodies, stars and skybox scaled to a radius (the measurement's, under reversed depth only; 3,500 m is today's). */
+  /**
+   * What follows the far ground's reach, applied (the fifth wave, §2.6, §2.7): the sky's bodies, stars and skybox scaled to
+   * its radius, the flare's sky, and the far sea's outer row; each written only where it moved, so with the rings not drawn
+   * nothing is written at all and every one holds today's (the camera's far plane is the game's to write, through the jump's
+   * tunnel: `App.followHorizonFar`; the god rays read `horizonFollow.groundSky` from the effects' frame input).
+   */
+  /** Today's numbers into every reader of the reach at once (a frame with no rings, a travel, the select screen). */
+  horizonFollowBase(): void {
+    this.horizonFollow.base();
+    this.applyHorizonFollow();
+  }
+
+  private applyHorizonFollow(): void {
+    applyFollow(this.horizonFollow, this.swgSky, this.farSea);
+  }
+
+  /** The sky's bodies, stars and skybox scaled to a radius (3,500 m is today's: a scale of one, never written while it stands). */
   setSkyRadius(radius: number): void {
-    if (this.swgSky) this.swgSky.group.scale.setScalar(radius / 3500);
+    const g = this.swgSky?.group;
+    if (!g) return;
+    const k = radius / SKY_BASE;
+    if (g.scale.x !== k) g.scale.setScalar(k);
+  }
+
+  // ---- The far tree cards to the horizon (the fifth wave, §1b Q11) -----------------------------------------------------
+
+  /** The session's field (made at its first world with it on, kept as the ring's session is), this world's, and a frame's ask. */
+  private cardSession: CardFieldSession | null = null;
+  private cardField: CardField | null = null;
+  private readonly cardAsk = new CardFieldAsk();
+  /** Why the field is not drawn, for the console (empty while it is, or while it is off). */
+  cardFieldNote = '';
+  private readonly cardCircles: FloraCircle[] = [];
+
+  /**
+   * This world's far tree cards to the horizon made (`CARD_FIELD_TUNE.on`, the bake drawn, the world's radial flora read):
+   * its cards' file fetched and checked against the bake it stands beside, its samples under the drawn water or inside a
+   * placed object's no-flora circle taken out, its textures handed to the session's field, whose mesh hangs under the
+   * chunks' root (an arrival's or a curtain's sweep builds its program), and the far tiles' cards handed over to it at
+   * their reach. Answers what it came to. Asked behind a screen only: `loadHorizon` at an arrival, the App's curtain in play.
+   */
+  async loadCardField(): Promise<string> {
+    this.dropCardField();
+    if (!CARD_FIELD_TUNE.on) return '';
+    const field = this.horizonField;
+    const s = this.horizonSession;
+    const setup = this.grassWorld;
+    const swg = this.terrain?.swg;
+    const why = (w: string): string => {
+      this.cardFieldNote = w;
+      return w;
+    };
+    if (!field || !s || !this.horizonDrawn || !field.header || !swg) return why("the far ground's rings are not drawn here");
+    if (!setup) return why('this world has no far tree cards (its radial pictures are not converted, or its terrain plants none)');
+    const packId = this.packId;
+    const json = await packJson(packId, HORIZON_CARDS_JSON, undefined, { probe: false });
+    if (this.horizonField !== field) return '';
+    const read = readCardsHeader(json, field.header, GENERATOR_REVISION);
+    if ('refused' in read) return why(json ? read.refused : `this world's bake carries no far tree cards (npm run swg -- horizon assets-private --only=${packId} --cards-only)`);
+    const bytes = await packBytes(packId, HORIZON_CARDS_BIN, undefined, { probe: false });
+    if (this.horizonField !== field) return '';
+    const sec = read.header.section;
+    if (!bytes || bytes.length < sec.offset + sec.length) return why("the far tree cards' file is shorter than its header says");
+    let rgba: Uint8Array;
+    try {
+      rgba = await inflateCards(bytes.subarray(sec.offset, sec.offset + sec.length));
+    } catch (err) {
+      return why(`the far tree cards' file did not inflate (${(err as Error).message})`);
+    }
+    if (this.horizonField !== field) return '';
+    if (rgba.length !== sec.size) return why("the far tree cards' file inflated to another size than its header's");
+    const circles = this.cardCircles;
+    // What a far tile's cards leave out, at the sample (made once, behind the screen; `placeFarCards`' own tests): a placed
+    // object's no-flora circle, and, while the far cards drop what stands there, the drawn water over the bake's ground
+    // (where only the children meant for water stand: `markExcluded`).
+    const dropWater = FAR_CARD_TUNE.water === 'drop';
+    const excluded = (rx: number, rz: number): number => {
+      const gx = swg.toGameX(rx);
+      const gz = swg.toGameZ(rz);
+      circles.length = 0;
+      this.grassHost.circlesFor(Math.floor(gx / GRASS_CHUNK), Math.floor(gz / GRASS_CHUNK), circles);
+      for (const c of circles) if ((gx - c.x) * (gx - c.x) + (gz - c.z) * (gz - c.z) <= c.r * c.r) return CARD_CIRCLE;
+      if (!dropWater) return CARD_KEPT;
+      const g = field.heightRaw(rx, rz);
+      return g === g && swg.waterAt(gx, gz) > g ? CARD_WET : CARD_KEPT;
+    };
+    const t0 = performance.now();
+    const cf = new CardField(rgba, read.header.cards, setup.world, excluded);
+    const ms = performance.now() - t0;
+    const session = (this.cardSession ??= new CardFieldSession(s.uniforms, s.ground));
+    cf.bind(session.uniforms, setup.far.tileSize, jitterOf(setup.far, null, FAR_CARD_TUNE.jitterMin));
+    this.cardField = cf;
+    this.cardFieldNote = '';
+    if (session.mesh.parent !== this.chunkRoot) this.chunkRoot.add(session.mesh);
+    if (this.renderer) {
+      this.renderer.initTexture(cf.cards);
+      this.renderer.initTexture(cf.table);
+    }
+    // The far tiles' cards stand to the hand-over with no band, the field from there on (`from` worked out by the grass's
+    // writer from what it keeps and the far reach in force, at every write: `stepCardField` moves what it keeps).
+    FAR_CARD_HANDOVER.on = true;
+    FAR_CARD_HANDOVER.keep = cardFieldKeep(HORIZON_TUNE.farGridRadius, FAR_TILE, this.viewRadius, CHUNK_SIZE);
+    writeGrassUniforms(setup);
+    const said = `far tree cards to the horizon: ${cf.withFamily} samples with a far family (${cf.dropped} in a circle or under water with nothing meant for it, ${cf.wet} under water kept for what is), ${cf.megabytes().toFixed(1)} MB on the card, made in ${ms.toFixed(0)} ms`;
+    console.info(said);
+    return said;
+  }
+
+  /** The field let go (its switch off, the bake let go, a travel): its mesh taken down, this world's textures disposed, the far tiles' cards back at their own reach. */
+  dropCardField(): void {
+    const s = this.cardSession;
+    if (s && s.mesh.parent) s.mesh.parent.remove(s.mesh);
+    this.cardField?.dispose();
+    this.cardField = null;
+    if (FAR_CARD_HANDOVER.on) {
+      FAR_CARD_HANDOVER.on = false;
+      writeGrassUniforms(this.grassWorld);
+    }
+  }
+
+  /** A frame of the field: the eye's raw place, the hand-over, the reach in force and the fade's band, the levels drawn (`CardFieldSession.step`). */
+  private stepCardField(session: CardFieldSession, field: HorizonField): void {
+    const a = this.cardAsk;
+    const u = session.uniforms;
+    const t = CARD_FIELD_TUNE;
+    const r = field.rules;
+    // The cells a side held to a multiple of four (a coarser level's cells then meet the finer square's edge whole).
+    const cells = Math.max(8, Math.round(t.cells / 4) * 4);
+    a.eyeX = field.eyeRaw[0];
+    a.eyeZ = field.eyeRaw[1];
+    // What the hand-over keeps for the far tiles moved (the Ground detail radius, the far grids' radius): the grass's writer
+    // works the hand-over out again (a whole number compared, nothing made a frame it stands).
+    const keep = cardFieldKeep(HORIZON_TUNE.farGridRadius, FAR_TILE, this.viewRadius, CHUNK_SIZE);
+    if (FAR_CARD_HANDOVER.keep !== keep) {
+      FAR_CARD_HANDOVER.keep = keep;
+      writeGrassUniforms(this.grassWorld);
+    }
+    a.from = FAR_CARD_HANDOVER.from;
+    a.to = r.inForce;
+    // (A worked number met with a constant in one ternary is a number made: the switch multiplies instead.)
+    a.band = r.inForce * HORIZON_TUNE.fade * (HORIZON_TUNE.fadeOn && HORIZON_TUNE.fadeTo !== 'none' ? 1 : 0);
+    a.cells = cells;
+    a.tile = u.uFieldSize.value.z;
+    a.levelsMost = t.levelsMost;
+    a.levels = cardFieldLevelsOf(a);
+    a.grow = t.grow;
+    session.step(a);
   }
 
   /** The far ground's self test for the console (`__debug.horizon({ selfTest: true })`): the layer means and the ring program's samplers. */
@@ -12492,7 +12663,12 @@ export class World {
       detail: f ? { on: HORIZON_TUNE.detail, reach: HORIZON_TUNE.detailReach, fade: Math.round(HORIZON_TUNE.detailReach * HORIZON_TUNE.detailFadeShare), window: { ...f.place, metres: f.place.S * 4 }, work: { ...f.windowWork } } : null,
       decodeMs: f?.decodeMs ?? null,
       loadMs: f ? { fetch: Math.round(f.fetchMs), decodeWall: Math.round(f.decodeWallMs), mainThread: Math.round(f.mainMs), arrivalJoinWait: Math.round(f.joinWaitMs) } : null,
-      reach: r ? { slider: r.reach, inForce: Math.round(r.inForce), fogReach: Number.isFinite(r.fogReach) ? Math.round(r.fogReach) : null, fogDensity: (this.scene.fog as THREE.FogExp2 | null)?.density ?? null, lod0: Math.round(r.lod0), levels: r.levels, skyRadius: r.skyRadius, far: r.far } : null,
+      reach: r ? { slider: r.reach, eyeOver: Math.round(r.eyeOver), grown: Math.round(r.grown), inForce: Math.round(r.inForce), fogReach: Number.isFinite(r.fogReach) ? Math.round(r.fogReach) : null, fogDensity: (this.scene.fog as THREE.FogExp2 | null)?.density ?? null, lod0: Math.round(r.lod0), levels: r.levels, skyRadius: r.skyRadius, far: r.far } : null,
+      // W5: what every reader of the reach holds this frame (today's numbers while the rings are not drawn): the camera's far
+      // plane and the jump's kept one, the sky's radius, the god rays' and the flare's sky, and the far sea's outer edge.
+      follow: { rings: this.horizonFollow.on, far: Math.round(this.horizonFollow.far), cameraFar: this.camera ? Math.round(this.camera.far) : null, sky: Math.round(this.horizonFollow.sky), raysGroundSky: Math.round(this.horizonFollow.groundSky), flareSky: Math.round(this.horizonFollow.flareSky), farSeaEdge: this.farSea ? Math.round(this.farSea.edge) : null, heightReach: HORIZON_TUNE.heightReach, raysBlock: HORIZON_TUNE.raysBlock },
+      // W5 (§1b Q11): the far tree cards to the horizon.
+      cardField: { on: CARD_FIELD_TUNE.on, drawn: !!this.cardField, why: this.cardFieldNote || null, ...(this.cardField ? { withFamily: this.cardField.withFamily, dropped: this.cardField.dropped, families: this.cardField.families, childrenMost: this.cardField.children, cut: this.cardField.cut, megabytes: Math.round(this.cardField.megabytes() * 10) / 10, from: Math.round(FAR_CARD_HANDOVER.from), levels: this.cardAsk.levels, cells: this.cardAsk.cells, instances: this.cardAsk.levels * this.cardAsk.cells * this.cardAsk.cells } : {}) },
       selection: sel ? { patches: sel.patchCount, perLevel: Array.from(sel.perLevel), fine: { level4m: sel.perFine[0], level2m: sel.perFine[1] }, skirts: sel.skirtCount, triangles: sel.patchCount * 128 + sel.skirtCount * 32, overflow: sel.overflow, us: f ? Math.round(f.selectMean() * 10) / 10 : null, benchUs: f && s && opts?.bench ? Math.round(f.benchSelect(s, this.horizonHole, opts.bench) * 10) / 10 : null } : null,
       // Wave 3b: the rings' shape up close (the finer levels' ranges, the shape window round the eye and what it has made).
       shape: f

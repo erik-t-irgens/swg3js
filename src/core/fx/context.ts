@@ -51,6 +51,11 @@ export interface FxFrameInput {
    */
   placeGrade?: GradeLook | null;
   placeGradeTau?: number;
+  /**
+   * Over a planet, depth past this many metres counts as sky to the god rays (the horizon pass's fifth wave): 2,500 m as
+   * ever, and with the far ground's rings drawn past the far ridges (`HorizonFollow.groundSky`). Absent, 2,500 m.
+   */
+  groundSky?: number;
   aiming: boolean;
   /** How far the aimed camera has eased in, 0 to 1. */
   aimAmount: number;
@@ -203,6 +208,8 @@ export interface FxFrameContext {
   /** The place of ours's colour-grade look holding the eye, or null (the frame input's own record), and its ease's seconds. */
   placeGrade: GradeLook | null;
   placeGradeTau: number;
+  /** Over a planet, depth past this is sky to the god rays (the horizon pass's fifth wave; 2,500 m with no rings drawn). */
+  groundSky: number;
   aiming: boolean;
   aimAmount: number;
   /** Added to the vignette's strength this frame (the grapple's daze); nought by default. */
@@ -259,7 +266,7 @@ const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 export function createContext(renderer: THREE.WebGLRenderer, settings: FxSettings, sceneTarget: THREE.WebGLRenderTarget): FxFrameContext {
   const products = {} as Record<FxProductId, THREE.Texture | null>;
   for (const p of FX_PRODUCTS) products[p.id] = null;
-  return {
+  const ctx: FxFrameContext = {
     renderer,
     settings,
     camera: new THREE.PerspectiveCamera(),
@@ -301,6 +308,8 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     planetId: '',
     placeGrade: null,
     placeGradeTau: 0.5,
+    // Begun as a fraction (a field begun as a whole number boxes every fraction written after it), then today's 2,500 m.
+    groundSky: 0.5,
     aiming: false,
     aimAmount: 0,
     vignetteKick: 0,
@@ -331,7 +340,12 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     debugViewPass: null,
     sunStore: { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0, screen: new THREE.Vector2(0.5, 0.5), behind: false, fade: 0 },
   };
+  ctx.groundSky = GROUND_SKY;
+  return ctx;
 }
+
+/** Over a planet, depth past this is the sky to the god rays with no far ground's rings drawn (`passes.ts`'s since the effects began). */
+export const GROUND_SKY = 2500;
 
 /** Take the frame as the game has just drawn it. Called once, before anything decides whether it draws. */
 export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: THREE.Vector2): void {
@@ -398,6 +412,8 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   // A caller from before the places' grade (a node test's own input) hands none: no place's look.
   ctx.placeGrade = input.placeGrade ?? null;
   ctx.placeGradeTau = input.placeGradeTau !== undefined ? input.placeGradeTau : 0;
+  // A caller from before the horizon's fifth wave (a node test's own input) hands none: today's 2,500 m.
+  ctx.groundSky = input.groundSky !== undefined ? input.groundSky : GROUND_SKY;
   ctx.aiming = input.aiming;
   ctx.aimAmount = input.aimAmount;
   ctx.vignetteKick = input.vignetteKick;

@@ -1,5 +1,6 @@
 // One thread of the far ground's bake (`horizon.mjs`): the world's terrain loaded once as the game loads it (its bitmaps,
-// its colour ramps and every building layer the layout names, in the layout's order), then jobs of two kinds. A `fine`
+// its colour ramps and every building layer the layout names, in the layout's order), then jobs of three kinds (the third,
+// `cards`, is the far tree cards' row of far grids: `cardsJob`). A `fine`
 // job is a row of squares of 2 m poles with four of margin, each run through the generator as the sampler makes a block,
 // keeping the heights on the ground's lattice, the family at every 8 m pattern corner and each colour cell's mean of the
 // colour map's linear interpolation (weights 1, 2, ..., 2, 1 over the cell's poles). A `coarse` job is a band of 64 m
@@ -109,6 +110,53 @@ function fineJob(s, job) {
   return { kind: 'fine', hj0, gj0, cj0, H, F, C, wide };
 }
 
+/**
+ * A `cards` job (the fifth wave, §1b Q11; its review round): one row of far tiles, each generated exactly as the game's
+ * far grid is (`SwgTerrain.farGrid`: `res + 3` samples a side at `size / res` metres from the raw place of game column
+ * `res + 1` and row -1), keeping the colour map's bytes and the radial flora's far family of the tile's own samples (game
+ * columns and rows 1 to `res`, so each sample of the cards' lattice comes from the one tile that holds it): the far
+ * grid's own 16 m generation, whose families differ from the near ground's 2 m poles where its filters read the coarse
+ * grid, never the 2 m poles a far tile's cards never read.
+ */
+function cardsJob(s, job) {
+  const { cards, centre, shift, tz, tx0, tx1, size, res } = job;
+  const step = size / res;
+  const n = res + 3;
+  // The tile row's raw z band: game z from its origin to the next row's.
+  const gz0 = tz * size + shift.z;
+  const [kj0, kj1] = rowsIn(cards, gz0 + centre.z, gz0 + size + centre.z);
+  const K = new Uint8Array(Math.max(0, kj1 - kj0) * cards.nx * 4);
+  let off = 0;
+  for (let tx = tx0; tx <= tx1; tx++) {
+    const gx0 = tx * size + shift.x;
+    const startX = centre.x - (gx0 + (res + 1) * step);
+    const startZ = gz0 - step + centre.z;
+    const g = s.generate(startX, startZ, n, step);
+    // Raw column c is game column n - 1 - c (`finishFar`), raw row r game row r.
+    for (let r = 1; r <= res; r++) {
+      const rz = startZ + r * step;
+      const lk = (rz - cards.z0) / cards.step;
+      if (lk < kj0 || lk >= kj1) continue;
+      for (let c = 2; c <= res + 1; c++) {
+        const rx = startX + c * step;
+        const li = (rx - cards.x0) / cards.step;
+        if (li < 0 || li >= cards.nx) continue;
+        if (!Number.isInteger(li) || !Number.isInteger(lk)) {
+          off++;
+          continue;
+        }
+        const p = r * n + c;
+        const o = ((lk - kj0) * cards.nx + li) * 4;
+        K[o] = g.colors[p * 3];
+        K[o + 1] = g.colors[p * 3 + 1];
+        K[o + 2] = g.colors[p * 3 + 2];
+        K[o + 3] = g.radialFar ? g.radialFar[p * 2] : 0;
+      }
+    }
+  }
+  return { kind: 'cards', kj0, K, off };
+}
+
 function coarseJob(s, job) {
   const { coarse, j0, j1 } = job;
   const step = coarse.step;
@@ -145,12 +193,12 @@ if (parentPort && workerData?.packDir) {
   const sampler = loadBakeSampler(workerData.packDir);
   parentPort.on('message', ({ i, job }) => {
     const t0 = performance.now();
-    const r = job.kind === 'fine' ? fineJob(sampler, job) : coarseJob(sampler, job);
+    const r = job.kind === 'fine' ? fineJob(sampler, job) : job.kind === 'cards' ? cardsJob(sampler, job) : coarseJob(sampler, job);
     r.i = i;
     r.ms = performance.now() - t0;
-    parentPort.postMessage(r, [r.H.buffer, r.F.buffer, r.C.buffer]);
+    parentPort.postMessage(r, r.kind === 'cards' ? [r.K.buffer] : [r.H.buffer, r.F.buffer, r.C.buffer]);
   });
   parentPort.postMessage({ ready: true });
 }
 
-export { fineJob, coarseJob };
+export { fineJob, coarseJob, cardsJob };

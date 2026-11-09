@@ -44,6 +44,7 @@ const WORDS = {
   flora: 'Trees and plants',
   floracollision: 'What trees and rocks you walk into',
   radial: 'Grass, flowers and the far hills’ trees',
+  horizon: 'The far ground to the horizon',
   sounds: 'Sounds',
   music: 'The music players make',
   gallery: 'The gallery',

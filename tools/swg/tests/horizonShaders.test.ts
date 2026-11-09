@@ -18,7 +18,7 @@ import { HORIZON_RING_FUNCTIONS, HORIZON_RING_VERTEX, RING_NORMAL_GLSL, RING_SAM
 import { heightsAtlas } from '../../../src/world/horizon/horizonField.ts';
 import { normalsOf } from '../../../src/world/horizon/horizonDecode.ts';
 import { GROUND_CLOUD_GLSL, GROUND_DECODE_GLSL, GROUND_MASK_GLSL, GROUND_TINT_GLSL, TILE_MAP, TILE_NORMAL, TILE_ROUGHNESS, injectGroundTiles, makeGroundTileUniforms } from '../../../src/world/terrainTextures.ts';
-import { HORIZON_TUNE, HoleGrid, LEAF, RingSelector, bakeHeightAt, cameraFrustum, ringDistLevel, ringDrop, ringEdgeDistance, ringEdgeLevel, ringLevelOf, ringMorphAxis, ringReach, ringSnap, type BakeGrid } from '../../../src/world/horizon/horizonMath.ts';
+import { HORIZON_TUNE, HoleGrid, LEAF, RingSelector, bakeHeightAt, cameraFrustum, ringFadeOf, ringDistLevel, ringDrop, ringEdgeDistance, ringEdgeLevel, ringLevelOf, ringMorphAxis, ringReach, ringSnap, type BakeGrid } from '../../../src/world/horizon/horizonMath.ts';
 import { SHAPE_EMPTY } from '../../../src/world/horizon/shapeWindow.ts';
 import { newAsk, rolling, testAsk, testCamera, testHole, testPyramid } from './horizonFixtures.ts';
 
@@ -583,9 +583,33 @@ else {
   const nowSk = fold(readFileSync(new URL('../../../src/world/sky.ts', import.meta.url), 'utf8'));
   const dome = fold(readFileSync(new URL('../../../src/world/domeColour.ts', import.meta.url), 'utf8'));
   const body = dome.slice(dome.indexOf('= `') + 3, dome.lastIndexOf('`;'));
-  const back = nowSk.replace("import { DOME_COLOUR_GLSL } from './domeColour.ts';\n", '').replace('${DOME_COLOUR_GLSL}', body).replace("'uClear' | 'uHorizonFog', THREE.IUniform>> {", "'uClear', THREE.IUniform>> {").replace("'uClear' | 'uHorizonFog', THREE.IUniform>;", "'uClear', THREE.IUniform>;");
-  ok(back === sk, `the dome's text is ${PRE_PASS}'s to the byte with DOME_COLOUR_GLSL laid back (only domeUniforms' type gains uHorizonFog)`);
+  // The fifth wave's three lines (the flare's sky the world moves, `flareSkyDistance`) taken back out too: they touch no
+  // program text, and everything else of the file must still be PRE_PASS's.
+  const W5_FIELD = "  /**\n   * The flare's sky over a planet (`flareLights`' `skyDistance`): `SKY_RADIUS` as ever, and with the far ground's rings\n   * drawn the horizon pass's own (`HorizonFollow.flareSky`: past the far ridges with `raysBlock`, else the sky's radius),\n   * written by the world a frame. Begun as a fraction, so a fraction written later is written in place.\n   */\n  flareSkyDistance = 0.5;\n";
+  const w5Parts = [W5_FIELD, '    this.flareSkyDistance = SKY_RADIUS;\n', 'o.skyDistance = this.flareSkyDistance;'];
+  ok(w5Parts.every((p) => nowSk.split(p).length === 2), "the fifth wave's three lines in sky.ts are there exactly once each (the flare's sky, its start, its read)");
+  const back = nowSk.replace("import { DOME_COLOUR_GLSL } from './domeColour.ts';\n", '').replace('${DOME_COLOUR_GLSL}', body).replace("'uClear' | 'uHorizonFog', THREE.IUniform>> {", "'uClear', THREE.IUniform>> {").replace("'uClear' | 'uHorizonFog', THREE.IUniform>;", "'uClear', THREE.IUniform>;").replace(W5_FIELD, '').replace(w5Parts[1], '').replace(w5Parts[2], 'o.skyDistance = SKY_RADIUS;');
+  ok(back === sk, `the dome's text is ${PRE_PASS}'s to the byte with DOME_COLOUR_GLSL laid back (only domeUniforms' type gains uHorizonFog, and the fifth wave's flare sky, which is no program's text)`);
 }
 void groundH;
+
+// ---- the horizon fade (the fifth wave, §1b Q4): the program's own expression run as script against its mirror
+{
+  const line = /float gF = (smoothstep\( uHorizonEye\.w \* \( 1\.0 - uHorizonFade\.x \), uHorizonEye\.w, vRingDist \));/.exec(RING_TEXT.FRAGMENT_FADE);
+  ok(!!line && RING_TEXT.FRAGMENT_TOP.includes(line[1]), "the fade's expression is one, in the lit path and the fog's cheap path alike");
+  const fadeEnv: Record<string, unknown> = { uHorizonEye: { x: 0, y: 0, z: 0, w: 0 }, uHorizonFade: { x: 0, y: 1, z: 0, w: 0 } };
+  const F = glslFunctions(`float ringFadeRun( float vRingDist ) { return ${line![1]}; }`, ['ringFadeRun'], fadeEnv);
+  let worst = 0;
+  for (const reach of [3300, 8000, 16000])
+    for (const share of [0.05, 0.15, 0.5]) {
+      (fadeEnv.uHorizonEye as { w: number }).w = reach;
+      (fadeEnv.uHorizonFade as { x: number }).x = share;
+      const G2 = glslFunctions(`float ringFadeRun( float vRingDist ) { return ${line![1]}; }`, ['ringFadeRun'], fadeEnv);
+      for (let d = 0; d <= reach * 1.1; d += reach / 97) worst = Math.max(worst, Math.abs(G2.ringFadeRun(d) - ringFadeOf(d, reach, share)));
+    }
+  void F;
+  ok(worst < 1e-12, `the fade runs as its mirror, ringFadeOf, at every reach and share (worst ${worst.toExponential(1)})`);
+  ok(/uHorizonFade\.z < 0\.5 \) gTo = ringOut\( ringSky\(/.test(RING_TEXT.FRAGMENT_FADE) && /uHorizonFade\.y > 0\.5 && uHorizonFade\.z < 1\.5/.test(RING_TEXT.FRAGMENT_FADE), "Q4's switch of three is a uniform of the one program: the sky's colour (0), the fog's (1), none (2)");
+}
 
 console.log(`\nhorizonShaders: ${checks} checks passed`);

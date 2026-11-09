@@ -258,7 +258,7 @@ export function sizesInText(glsl: string, sizes: readonly number[]): string[] {
 
 /** GLSL ES 3.00's own functions, constructors and keywords that stand before a `(` (what a shader may call without defining). */
 const GLSL_CALLABLE = new Set(
-  'if for while return switch texture texture2D textureLod textureGrad texelFetch textureSize textureProj vec2 vec3 vec4 ivec2 ivec3 ivec4 uvec2 uvec3 uvec4 bvec2 bvec3 bvec4 mat2 mat3 mat4 float int uint bool max min clamp mix step smoothstep exp exp2 log log2 pow sqrt inversesqrt abs sign floor ceil fract mod round trunc dot cross length distance normalize reflect refract sin cos tan asin acos atan sinh cosh tanh degrees radians any all not isnan isinf lessThan lessThanEqual greaterThan greaterThanEqual equal notEqual fwidth dFdx dFdy transpose inverse determinant outerProduct floatBitsToInt intBitsToFloat packHalf2x16 unpackHalf2x16 layout'.split(' '),
+  'if for while return switch texture texture2D textureLod textureGrad texelFetch textureSize textureProj vec2 vec3 vec4 ivec2 ivec3 ivec4 uvec2 uvec3 uvec4 bvec2 bvec3 bvec4 mat2 mat3 mat4 float int uint bool max min clamp mix step smoothstep exp exp2 log log2 pow sqrt inversesqrt abs sign floor ceil fract mod round trunc dot cross length distance normalize reflect refract sin cos tan asin acos atan sinh cosh tanh degrees radians any all not isnan isinf lessThan lessThanEqual greaterThan greaterThanEqual equal notEqual fwidth dFdx dFdy transpose inverse determinant outerProduct floatBitsToInt intBitsToFloat floatBitsToUint uintBitsToFloat packHalf2x16 unpackHalf2x16 layout'.split(' '),
 );
 
 /**

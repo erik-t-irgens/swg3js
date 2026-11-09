@@ -341,6 +341,12 @@ interface FlareBody {
 
 export class SwgSky {
   readonly group = new THREE.Group();
+  /**
+   * The flare's sky over a planet (`flareLights`' `skyDistance`): `SKY_RADIUS` as ever, and with the far ground's rings
+   * drawn the horizon pass's own (`HorizonFollow.flareSky`: past the far ridges with `raysBlock`, else the sky's radius),
+   * written by the world a frame. Begun as a fraction, so a fraction written later is written in place.
+   */
+  flareSkyDistance = 0.5;
   /** A scene holding only the dome, for filtering it into an environment map. */
   readonly domeScene = new THREE.Scene();
   private readonly dome: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial>;
@@ -484,6 +490,7 @@ export class SwgSky {
     failed: Set<string>,
   ) {
     this.failedTextures = failed;
+    this.flareSkyDistance = SKY_RADIUS;
     this.defaultBlock = data.blocks.find((b) => b.weatherIndex === 0) ?? data.blocks[0] ?? EMPTY_BLOCK;
     for (let i = 0; i < MIX_MAX; i++) this.mix.push({ block: this.defaultBlock, weight: i === 0 ? 1 : 0 });
     this.mixWeights[0] = 1;
@@ -1514,7 +1521,7 @@ export class SwgSky {
       o.glowRadius = b.glowRadius;
       o.weight = b.weight;
       o.star = b.star;
-      o.skyDistance = SKY_RADIUS;
+      o.skyDistance = this.flareSkyDistance;
       if (b.color) o.color.copy(b.color);
       else o.color.copy(main).multiplyScalar(k);
     }

@@ -75,6 +75,8 @@ export interface Settings extends FxSettings {
   farRings: boolean;
   /** How far the rings reach, kilometres (the horizon pass's reach; the fog and reversed depth hold it shorter). */
   terrainDistance: number;
+  /** The far tree cards on past their own distance as far as the rings reach (the horizon's fifth wave, §1b Q11); off until its cost is known. */
+  farCardsHorizon: boolean;
   /**
    * How far the rings draw the near ground's own look (its pictures, alternates, masks, tint, bump and gloss), kilometres;
    * past it they fade into the bake's per-tile mean (the horizon pass's third wave).
@@ -396,6 +398,7 @@ export const DEFAULT_SETTINGS: Settings = {
   farRadius: 6,
   farRings: false,
   terrainDistance: 8,
+  farCardsHorizon: false,
   groundDetailDistance: 2.5,
   terrainShapeDetail: 0.7,
   mobileCap: 40,

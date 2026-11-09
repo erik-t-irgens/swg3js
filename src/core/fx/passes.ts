@@ -56,7 +56,7 @@ const GOD_RAYS = {
     uStrength: { value: 0.6 },
     uAspect: { value: 1.6 },
     uNearFar: { value: new THREE.Vector2(0.05, 9000) },
-    /** Depth past this distance counts as sky (GROUND_SKY_DISTANCE, or in space a share of the far plane). */
+    /** Depth past this distance counts as sky (`ctx.groundSky`, or in space a share of the far plane). */
     uSkyDistance: { value: 2500 },
   },
   vertexShader: FX_FULLSCREEN_VERTEX,
@@ -120,12 +120,12 @@ export class SanitizePass extends ShaderFxPass {
 }
 
 /**
- * Over a planet, depth past 2.5 km is the sky: the far terrain and the dome stand there. In space
- * nothing stands anywhere, so the test moves out to a share of the far plane (src/space/suns.ts),
- * where a station or an asteroid six kilometres off blocks the rays instead of shining through
- * them, and a planet's depth stand-in stops them too. It is a uniform, so nothing recompiles.
+ * Over a planet, depth past 2.5 km is the sky (`ctx.groundSky`, `context.ts`'s GROUND_SKY): the far terrain and the dome
+ * stand there; with the far ground's rings drawn, past the far ridges (the horizon pass's fifth wave, `raysBlock`), so a
+ * sun setting behind a ridge kilometres off sends no rays through it. In space nothing stands anywhere, so the test moves
+ * out to a share of the far plane (src/space/suns.ts), where a station or an asteroid six kilometres off blocks the rays
+ * instead of shining through them, and a planet's depth stand-in stops them too. It is a uniform, so nothing recompiles.
  */
-const GROUND_SKY_DISTANCE = 2500;
 
 export class GodRaysPass extends ShaderFxPass {
   readonly id: FxPassId = 'godRays';
@@ -156,7 +156,7 @@ export class GodRaysPass extends ShaderFxPass {
     u.uAspect.value = ctx.width / Math.max(1, ctx.height);
     u.tDepth.value = ctx.depth;
     (u.uNearFar.value as THREE.Vector2).set(ctx.near, ctx.far);
-    u.uSkyDistance.value = skyDistanceFor(ctx.space, ctx.far, GROUND_SKY_DISTANCE);
+    u.uSkyDistance.value = skyDistanceFor(ctx.space, ctx.far, ctx.groundSky);
   }
 }
 

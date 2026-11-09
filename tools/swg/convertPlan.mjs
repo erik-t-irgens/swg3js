@@ -119,6 +119,11 @@ export const STEP_FACTS = {
   // The grass and the far tree cards' pictures (radial.mjs). It reads each pack's own terrain.trn, which the
   // snapshot writes and `terrain` writes again, and writes two files of its own beside it in every pack.
   radial: { order: 16.6, lock: 'pack', needs: ['snapshot', 'terrain'], seconds: 10, bytes: 0.5 * GB, measured: 'sixteen worlds, 401 pictures: 1.9 s, 371 MB, 100 MB written' },
+  // The far ground's bake and its far tree cards (horizon.mjs, the horizon pass). It runs the terrain generator over the
+  // pack's own terrain.trn and the colour ramps `terrain` writes beside it, on worker threads, and writes
+  // terrain/horizon*.json and .bin. `status` asks for it only once the rings are on by default (HORIZON_STATUS_ASKS);
+  // Its time is the three bakes measured scaled to every world by their samples (Kashyyyk's 4 km zones about a second).
+  horizon: { order: 16.7, lock: 'pack', needs: ['snapshot', 'terrain'], seconds: 400, each: 22, bytes: 2 * GB, measured: 'mustafar: 7.9 s on 15 threads, 1392 MB (the same 2305 x 2304 lattice as tatooine 27.6 s and naboo 21.5 s)' },
   // The outdoor walkability grid. It is the one step here that opens no archive at all -- it reads
   // the pack's own terrain, placements and models -- so it mounts nothing, and almost all of its
   // time is the terrain generator running over sixty-seven million poles on one core. It is also

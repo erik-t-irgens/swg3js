@@ -12,8 +12,9 @@ import * as THREE from 'three';
 import { HorizonField, MEANS_CARD_MOST, MEANS_STRIDE, RingSession, copyDome, meansVerdict, type FieldFetch, type FieldGround, type DomeUniforms } from '../../../src/world/horizon/horizonField.ts';
 import { layerMeans } from '../../../src/world/horizon/horizonDecode.ts';
 import { HORIZON_FORMAT, HORIZON_SECTIONS, planBake } from '../../../src/world/horizon/horizonFile.ts';
-import { HORIZON_TUNE, cameraFrustum } from '../../../src/world/horizon/horizonMath.ts';
-import { HORIZON_DIALS, HORIZON_WATCH, REACH_RANGE } from '../../../src/world/horizon/horizonDials.ts';
+import { HORIZON_TUNE, HoleGrid, cameraFrustum } from '../../../src/world/horizon/horizonMath.ts';
+import { testCamera, testHole, testPyramid } from './horizonFixtures.ts';
+import { HORIZON_DIALS, REACH_RANGE } from '../../../src/world/horizon/horizonDials.ts';
 import { RING_TEXT, ringMipOffset } from '../../../src/world/horizon/horizonRings.ts';
 import { GENERATOR_REVISION } from '../../../src/swg/terrain/generator.ts';
 
@@ -68,9 +69,16 @@ const header = (step16 = false) => {
     sections: HORIZON_SECTIONS.map((name) => ({ name, offset: 0, length: 1, size: 1 })),
   };
 };
+/** Heights the next decode hands the field, by raw place (nought where none is set): fine, then coarse. */
+let fillHeights: { fine: (rx: number, rz: number) => number; coarse: (rx: number, rz: number) => number } | null = null;
+const lattice = (L: { x0: number; z0: number; step: number; nx: number; nz: number }, f: ((rx: number, rz: number) => number) | undefined) => {
+  const a = new Float32Array(L.nx * L.nz);
+  if (f) for (let j = 0; j < L.nz; j++) for (let i = 0; i < L.nx; i++) a[j * L.nx + i] = f(L.x0 + i * L.step, L.z0 + j * L.step);
+  return a;
+};
 const decoded = (h: ReturnType<typeof header>) => ({
-  fine: new Float32Array(h.fine.nx * h.fine.nz),
-  coarse: new Float32Array(h.coarse.nx * h.coarse.nz),
+  fine: lattice(h.fine, fillHeights?.fine),
+  coarse: lattice(h.coarse, fillHeights?.coarse),
   fineNormal: new Uint8Array(h.fine.nx * h.fine.nz * 2),
   albedo: new Uint8Array(h.colour.nx * h.colour.nz * 4),
   coarseAlbedo: new Uint8Array(h.coarse.nx * h.coarse.nz * 4),
@@ -172,6 +180,55 @@ const loadWith = async (m: Mode, h = header(), waitMs = 60000) => {
   ok(v.includes('max( lod - uHorizonFine.w, 0.0 )') && v.includes('max( lod - uHorizonCoarse.w, 0.0 )') && !/lod - 3\.0/.test(v), 'and the vertex normal reads each lattice at the level less its own mips');
 }
 
+// ---------------------------------------------------------------- the eye over the bake, through the field's own frame (W5)
+// h5's review round: what the frame's `eyeGround` writes (§1b Q10's height reach), read off the real `update`: the eye's
+// height over the fine lattice's bilinear inside its extent, the coarse past it, nought below the ground and past both;
+// the bake's farthest coarse corner from the eye; and the grown reach that follows both. The coarse stands 100 m over the
+// fine here, so a lattice read for the other shows.
+{
+  const p = planBake(4000, centre, { margin: 64, farMargin: 4000 });
+  const h = { ...header(), fine: { ...p.fine, lo: 0, q: 1 }, ground: p.ground, colour: p.colour, coarse: { ...p.coarse, lo: 0, q: 1 } };
+  const fineAt = (rx: number, rz: number) => 40 + 0.01 * rx - 0.02 * rz;
+  const coarseAt = (rx: number, rz: number) => 140 + 0.01 * rx - 0.02 * rz;
+  fillHeights = { fine: fineAt, coarse: coarseAt };
+  const r = await loadWith('decode', h);
+  fillHeights = null;
+  const f = r.f;
+  f.pyramid = testPyramid(24000, { x: 0, z: 0 });
+  const hole = new HoleGrid();
+  const held = { reach: HORIZON_TUNE.reach, heightReach: HORIZON_TUNE.heightReach };
+  HORIZON_TUNE.reach = 2000;
+  HORIZON_TUNE.heightReach = 4;
+  const C = h.coarse;
+  const corners = (rx: number, rz: number) => {
+    let m = 0;
+    for (const x of [C.x0, C.x0 + (C.nx - 1) * C.step]) for (const z of [C.z0, C.z0 + (C.nz - 1) * C.step]) m = Math.max(m, Math.hypot(rx - x, rz - z));
+    return m;
+  };
+  const at = (gx: number, y: number, gz: number) => {
+    const cam = testCamera();
+    cam.position.set(gx, y, gz);
+    cam.updateMatrixWorld();
+    const pcx = Math.floor(gx / 64);
+    const pcz = Math.floor(gz / 64);
+    testHole(hole, pcx, pcz, 6);
+    f.rules.fogDensity = 0;
+    f.update(session, cam, cam.position, 6, pcx, pcz, hole, true);
+    return { over: f.rules.eyeOver, most: f.rules.bakeMost, grown: f.rules.grown, cornerMost: corners(centre.x - gx, gz + centre.z) };
+  };
+  // The fine (raw -100, 200: ground 35 m), below it, the coarse alone (raw -3,000, -3,000: ground 170 m), past both.
+  const a = at(100, 335, 200);
+  const b = at(100, 25, 200);
+  const c = at(3000, 670, -3000);
+  const d = at(3000, 3170, -3000);
+  const e = at(9000, 100, 9000);
+  ok(Math.abs(a.over - 300) < 1e-3 && b.over === 0 && Math.abs(c.over - 500) < 1e-3 && Math.abs(d.over - 3000) < 1e-3 && e.over === 0, `the eye's height over the bake: the fine's ground inside its extent (${a.over.toFixed(2)} m), nought under the ground, the coarse's past it (${c.over.toFixed(2)} m), nought past both`);
+  ok([a, b, c, d, e].every((q) => Math.abs(q.most - q.cornerMost) < 1e-6), `the bake's farthest coarse corner from the eye (${a.most.toFixed(0)} m from the fine's place, ${e.most.toFixed(0)} m from past both)`);
+  ok(Math.abs(a.grown - 3200) < 1e-2 && b.grown === 2000 && Math.abs(c.grown - 4000) < 1e-2 && Math.abs(d.grown - d.most) < 1e-6 && d.most < 14000 && e.grown === 2000, `and the reach grows with them: 4 m a metre over the ground (${a.grown.toFixed(0)}, ${c.grown.toFixed(0)} m), none under it or past the bake, never past its farthest corner (${d.grown.toFixed(0)} m)`);
+  Object.assign(HORIZON_TUNE, held);
+  f.dispose(session);
+}
+
 // ---------------------------------------------------------------- the frustum, three's planes written out
 {
   const cam = new THREE.PerspectiveCamera(60, 16 / 9, 0.05, 30000);
@@ -233,18 +290,21 @@ const loadWith = async (m: Mode, h = header(), waitMs = 60000) => {
 
 // ---------------------------------------------------------------- the reach slider is the console's
 {
+  // (The fifth wave: the far plane and the sky follow the reach a frame, so no slider tells anything; each is held.)
   const dial = HORIZON_DIALS.groups.flatMap((g) => g.dials).find((d) => d.key === 'tune.reach') as { set(v: number): void } | undefined;
-  let told = 0;
-  HORIZON_WATCH.moved = () => told++;
   const was = HORIZON_TUNE.reach;
   dial!.set(99999);
-  ok(HORIZON_TUNE.reach === REACH_RANGE[1] && told === 1, `the Reach slider is held to the console's top (${HORIZON_TUNE.reach} m) and the measurement told`);
+  ok(HORIZON_TUNE.reach === REACH_RANGE[1], `the Reach slider is held to the console's top (${HORIZON_TUNE.reach} m)`);
   dial!.set(10);
-  ok(HORIZON_TUNE.reach === REACH_RANGE[0] && told === 2, 'and its bottom');
-  const look = HORIZON_DIALS.groups.flatMap((g) => g.dials).find((d) => d.key === 'tune.fogCheap') as { set(v: number): void };
-  look.set(0.99);
-  ok(told === 2, 'a slider the measurement does not follow tells it nothing');
-  HORIZON_WATCH.moved = null;
+  ok(HORIZON_TUNE.reach === REACH_RANGE[0], 'and its bottom');
+  const dials = HORIZON_DIALS.groups.flatMap((g) => g.dials) as { key: string; set(v: number): void }[];
+  const held = { farMargin: HORIZON_TUNE.farMargin, skyMargin: HORIZON_TUNE.skyMargin, farStep: HORIZON_TUNE.farStep, heightReach: HORIZON_TUNE.heightReach };
+  dials.find((d) => d.key === 'tune.farMargin')!.set(1);
+  dials.find((d) => d.key === 'tune.skyMargin')!.set(0.5);
+  dials.find((d) => d.key === 'tune.farStep')!.set(0);
+  dials.find((d) => d.key === 'tune.heightReach')!.set(-3);
+  ok(HORIZON_TUNE.farMargin >= 1.65 && HORIZON_TUNE.skyMargin > 1 && HORIZON_TUNE.farStep >= 1 && HORIZON_TUNE.heightReach === 0, 'the far plane held past the dome, the sky past the reach, a step of a metre at least, no growth under nought (W5)');
+  Object.assign(HORIZON_TUNE, held);
   HORIZON_TUNE.reach = was;
   HORIZON_TUNE.fogCheap = 0.996;
 }

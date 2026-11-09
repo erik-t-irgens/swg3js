@@ -424,7 +424,8 @@ export class HorizonField {
   /** Where the next window is asked to stand (kept: a frame that asks none makes nothing). */
   private readonly nextPlace: WindowPlace = { ox: 0, oz: 0, S: 0, ci0: 0, cj0: 0, T: 0 };
   /** The eye's raw place a frame, the distance last read and the window's side for it (fields: a frame hands no number across a call). */
-  private readonly eyeRaw = new Float64Array(2);
+  /** The eye's raw place this frame (written first thing in `update`): read by the far tree cards' field beside it. */
+  readonly eyeRaw = new Float64Array(2);
   private reachSeen = 0.5;
   private wantS = 0;
   /** What the ring's surface reads (the far cards', `ringSurfaceAt`): the lattices over the laid heights, the square and the drop. */
@@ -971,6 +972,63 @@ export class HorizonField {
   }
 
   /**
+   * W5 (§1b Q10): the eye's height over the bake's ground under it (`heightRaw`'s arithmetic written out, nought where the
+   * bake has none) and the distance from the eye to the bake's farthest coarse corner, written into the rules' record
+   * (`eyeOver`, `bakeMost`), a frame's: nothing handed back, nothing made. Reads `eyeRaw`, which the frame wrote first.
+   */
+  private eyeGround(eye: THREE.Vector3): void {
+    const r = this.rules;
+    const h = this.header;
+    const f = this.fineH;
+    const c = this.coarseH;
+    r.eyeOver = 0;
+    r.bakeMost = 0;
+    if (!h || !f || !c) return;
+    const rx = this.eyeRaw[0];
+    const rz = this.eyeRaw[1];
+    const L = h.fine;
+    const C = h.coarse;
+    const fx = (rx - L.x0) / L.step;
+    const fz = (rz - L.z0) / L.step;
+    const cx = (rx - C.x0) / C.step;
+    const cz = (rz - C.z0) / C.step;
+    // The lattice's bilinear written out (`lerpIn`'s, a number handed back from a call is a number made): the fine
+    // inside its extent, the coarse past it, nothing past both.
+    let a: Float32Array | null = null;
+    let n = 0;
+    let m = 0;
+    let ax = 0.5;
+    let az = 0.5;
+    if (fx >= 0 && fz >= 0 && fx <= L.nx - 1 && fz <= L.nz - 1) {
+      a = f;
+      n = L.nx;
+      m = L.nz;
+      ax = fx;
+      az = fz;
+    } else if (cx >= 0 && cz >= 0 && cx <= C.nx - 1 && cz <= C.nz - 1) {
+      a = c;
+      n = C.nx;
+      m = C.nz;
+      ax = cx;
+      az = cz;
+    }
+    if (a !== null) {
+      const i = Math.min(Math.floor(ax), n - 2);
+      const k = Math.min(Math.floor(az), m - 2);
+      const u = ax - i;
+      const v = az - k;
+      const o = k * n + i;
+      const g = (a[o] * (1 - u) + a[o + 1] * u) * (1 - v) + (a[o + n] * (1 - u) + a[o + n + 1] * u) * v;
+      if (eye.y > g) r.eyeOver = eye.y - g;
+    }
+    const x1 = C.x0 + (C.nx - 1) * C.step;
+    const z1 = C.z0 + (C.nz - 1) * C.step;
+    const dx = Math.max(Math.abs(rx - C.x0), Math.abs(rx - x1));
+    const dz = Math.max(Math.abs(rz - C.z0), Math.abs(rz - z1));
+    r.bakeMost = Math.sqrt(dx * dx + dz * dz);
+  }
+
+  /**
    * The drawn ring's surface at a game place (the far cards', §2.9): the hole's square as the selection stands it round
    * chunk (pcx, pcz) with `viewRadius` chunks, and the drop's numbers in force; NaN with no bake.
    */
@@ -1402,6 +1460,12 @@ export class HorizonField {
    */
   update(s: RingSession, camera: THREE.PerspectiveCamera, eye: THREE.Vector3, viewRadius: number, pcx: number, pcz: number, hole: HoleGrid, reversed: boolean): void {
     const t = HORIZON_TUNE;
+    // The eye's raw place into a kept array (a number handed across a call the compiler leaves out is a number made).
+    this.eyeRaw[0] = this.centre.x - eye.x;
+    this.eyeRaw[1] = eye.z + this.centre.z;
+    // W5 (§1b Q10): the eye's height over the bake's ground and the bake's reach from it, into the rules' kept record (the
+    // eye handed whole: its height handed across the call would be a number made).
+    this.eyeGround(eye);
     const r = reachRules(t, viewRadius, reversed, this.rules, this.shape !== null);
     const a = this.ask;
     a.finest = r.finest;
@@ -1475,9 +1539,6 @@ export class HorizonField {
       s.selector.select(this.frustum, a, this.pyramid, hole);
     }
     s.upload();
-    // The eye's raw place into a kept array (a number handed across a call the compiler leaves out is a number made).
-    this.eyeRaw[0] = this.centre.x - eye.x;
-    this.eyeRaw[1] = eye.z + this.centre.z;
     // The shape window kept round the eye (wave 3b) while the finer levels are drawn: its blocks made nearest first, put on
     // the card as they come, the uniforms its place in the same frame as a move empties what moved.
     if (sh !== null && r.finest < 0) this.stepShape(sh, u);

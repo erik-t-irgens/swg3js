@@ -412,8 +412,9 @@ import { wireVehicleId } from './vehicles/podHybrid.ts';
 import { BIKE_SCALE, CEILING_MOST, RACE_BASE, RACE_TUNE, RACE_UPGRADES, readRaceHatch, tuneBase, tuneRace, tuneUpgrades, type RaceTune } from './vehicles/raceTune.ts';
 import { RACE_CLOCK, enginePartName, holdsLiving, raceFling, type RaceDrive, type RaceMode } from './vehicles/raceDrive.ts';
 import { vehicleDialsFor } from './vehicles/raceDials.ts';
-import { HORIZON_TUNE, HORIZON_VIEWS, reachRules, newReachRules, type HorizonGround } from './world/horizon/horizonMath.ts';
-import { HORIZON_WATCH, horizonDialsFor, tuneHorizon } from './world/horizon/horizonDials.ts';
+import { FAR_BASE, HORIZON_TUNE, HORIZON_VIEWS, type HorizonGround } from './world/horizon/horizonMath.ts';
+import { horizonDialsFor, tuneHorizon } from './world/horizon/horizonDials.ts';
+import { CARD_FIELD_TUNE, tuneCardField } from './world/horizon/cardField.ts';
 import { shipDialsFor } from './space/tierDials.ts';
 import { ENGINE_TUNE, damagePart, mendEngines, tuneEngines, type EngineTune } from './vehicles/drivetrain.ts';
 import { hardpointName } from './vehicles/shipAssembly.ts';
@@ -1574,7 +1575,7 @@ class App {
   /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
   private readonly litSources: LitSources = { world: null!, effects: null!, torch: null };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, vignetteKick: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, cameraSubmerged: false, underwaterDepth: 0, underwaterColor: new THREE.Color(0x2e7fbb), underwaterOpacity: 0.75, underwaterReach: 0, exitWater: false, exitDepth: 0, exitColor: new THREE.Color(0x2e7fbb), exitOpacity: 0.75, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, followView: 'other', weather: null };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', groundSky: 0.5, aiming: false, aimAmount: 0, vignetteKick: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, cameraSubmerged: false, underwaterDepth: 0, underwaterColor: new THREE.Color(0x2e7fbb), underwaterOpacity: 0.75, underwaterReach: 0, exitWater: false, exitDepth: 0, exitColor: new THREE.Color(0x2e7fbb), exitOpacity: 0.75, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, followView: 'other', weather: null };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /**
    * The frame's word to the underwater pass's exits variant (`World.exitWaterOf`, Map-maker II's fifth wave), kept: `look`
@@ -2049,6 +2050,8 @@ class App {
     this.applyFlora();
     // The far ground's switch from the Graphics page before any world, so the first arrival loads the bake when it is on.
     HORIZON_TUNE.ground = S.farRings ? 'rings' : 'tiles';
+    // And the far tree cards to the horizon (the fifth wave, §1b Q11): made at an arrival where the rings stand.
+    CARD_FIELD_TUNE.on = S.farCardsHorizon;
     this.applyReach();
     // How far the rings draw the near ground's own look, before any world: the first bake's window is made at its size.
     HORIZON_TUNE.detailReach = S.groundDetailDistance * 1000;
@@ -2283,8 +2286,7 @@ class App {
       values: ['tiles', 'rings'],
       note: "the far ground drawn as rings from the bake, or as far tiles (only with __debug.horizon({ ground: 'both' }))",
     });
-    // A slider of the far ground's that the measurement follows (the reach, its margins) moves the far plane as the console does.
-    HORIZON_WATCH.moved = () => void this.applyHorizonMeasure();
+    // (The far plane follows the reach a frame after any slider moves it: `followHorizonFar` after every `updateHorizon`.)
     registerPerfSwitch('farProbeCached', { get: () => FAR_PROBE.cached, set: (v) => (FAR_PROBE.cached = !!v), values: [false, true], note: "a creature or person far from the player reads the ground the world holds, and never makes terrain on the spot" });
     registerPerfSwitch('floraWarm', { get: () => FLORA_WARM.on, set: (v) => (FLORA_WARM.on = !!v), values: [false, true], note: "every plant compiled behind the loading screen (from the next arrival) and a chunk's materials adopted as it is made" });
     // Step 5, the plants shown only as near as the client drew them.
@@ -5418,14 +5420,17 @@ class App {
        * 'rings' the rings and no far tile), the world's bake (made how, when, by which generator, its lattices, its MB on
        * the card and on the CPU, or why it is not used), the reach, the reach in force and the fog's density, `lod0` in
        * force, the last selection (patches by level, skirts, triangles, its microseconds) and the hole. `{ ground }` off
-       * 'tiles' loads the bake behind a short curtain (nothing built on a live frame); `{ reach }` metres; `{ measure }`
-       * moves the far plane and the sky's radius to the reach, under reversed depth only; `{ view }` 'shaded', 'lod',
+       * 'tiles' loads the bake behind a short curtain (nothing built on a live frame); `{ reach }` metres; `{ view }` 'shaded', 'lod',
        * 'albedo', 'normals', 'edge', 'detail' (the near ground's own look where it is drawn, the mean dimmed past it) or
        * 'window' (its share red, the window's tiles green, their layers blue); `{ tune }` any `HORIZON_TUNE` number;
        * `{ selfTest: true }` the layer means against the arrays' top mip and the ring program's samplers as the driver
-       * counts them. Await it when it changes `ground`.
+       * counts them. W5: `follow` says what every reader of the reach holds (the far plane, the sky's radius, the rays'
+       * and the flare's sky, the far sea's edge; today's with the rings not drawn), the reach the eye's height grew to
+       * (`reach.grown`, `tune.heightReach`); `{ cardField }` true or false is the Graphics page's Far tree cards to the
+       * horizon (behind a short curtain where the rings stand), or `{ cells, grow, levelsMost }` its numbers. Await it when
+       * it changes `ground` or `cardField`.
        */
-      horizon: async (o?: { ground?: HorizonGround; reach?: number; measure?: boolean; view?: (typeof HORIZON_VIEWS)[number]; tune?: Record<string, unknown>; bench?: number; at?: [number, number]; selfTest?: boolean }) => {
+      horizon: async (o?: { ground?: HorizonGround; reach?: number; view?: (typeof HORIZON_VIEWS)[number]; tune?: Record<string, unknown>; cardField?: boolean | { cells?: number; grow?: number; levelsMost?: number }; bench?: number; at?: [number, number]; selfTest?: boolean }) => {
         if (o?.selfTest) return this.world.horizonSelfTest();
         const said: string[] = [];
         if (o?.tune) said.push(...tuneHorizon(o.tune));
@@ -5433,9 +5438,9 @@ class App {
         if (o?.view && (HORIZON_VIEWS as readonly string[]).includes(o.view)) HORIZON_TUNE.view = o.view;
         if (o?.ground && o.ground !== HORIZON_TUNE.ground) said.push(await this.setHorizonGround(o.ground));
         else if (HORIZON_TUNE.ground !== 'tiles') this.world.applyHorizonGround();
-        if (typeof o?.measure === 'boolean') HORIZON_TUNE.measure = o.measure;
-        said.push(this.applyHorizonMeasure());
-        return { ...this.world.horizonReport({ bench: o?.bench, at: o?.at }), measure: { on: HORIZON_TUNE.measure, far: Math.round(this.cam.camera.far), reversed: this.cam.camera.reversedDepth }, said: said.filter(Boolean) };
+        if (o?.cardField !== undefined) said.push(await this.setCardField(o.cardField));
+        this.followHorizonFar();
+        return { ...this.world.horizonReport({ bench: o?.bench, at: o?.at }), far: { camera: Math.round(this.cam.camera.far), jumpKept: this.jumpFarKept, reversed: this.cam.camera.reversedDepth }, said: said.filter(Boolean) };
       },
       farTiles: (o?: { local?: boolean; probe?: boolean; floraWarm?: boolean }) => {
         if (typeof o?.local === 'boolean') this.world.setFarTileLocal(o.local);
@@ -13192,6 +13197,7 @@ class App {
     this.effects.update(dt);
     this.world.updateWeatherView(dt);
     this.world.updateHorizon(cam);
+    this.followHorizonFar();
     // A shoot's frame lists no fast mover: nothing it draws flies.
     this.world.shadowMovers.begin();
     this.world.updateShadows(performance.now());
@@ -13311,7 +13317,7 @@ class App {
     this.minimap.standDown();
     // A race run, its block and its gates, and the track the dev server's editor had in hand, are the world's.
     this.leaveTracks('the select screen');
-    this.horizonMeasureOff();
+    this.horizonFarBack();
     // A raced hull's smoke and fire stand in the session's ship effects, which outlive every world: taken away with it.
     this.engineFx.clear();
     this.world.leave();
@@ -13419,6 +13425,13 @@ class App {
       case 'farRings':
         // The far ground's switch (the horizon pass): the rings stood or the tiles made again behind a short curtain.
         void this.setHorizonGround(S.farRings ? 'rings' : 'tiles').then((said) => {
+          if (said) this.messages.note(said);
+        });
+        break;
+      case 'farCardsHorizon':
+        // The far tree cards to the horizon (the fifth wave, §1b Q11): made behind the far ground's short curtain where the
+        // rings stand (its program built there, never on a frame), let go at once when switched off.
+        void this.setCardField(S.farCardsHorizon).then((said) => {
           if (said) this.messages.note(said);
         });
         break;
@@ -14311,6 +14324,9 @@ class App {
   private volKnobState(key: string): { note?: string; off?: string } | null {
     // The far tiles' radius while the rings stand in their place (the horizon pass): their reach is the Terrain distance.
     if (key === 'farRadius' && this.settings.farRings) return { off: 'the rings stand in place of the far tiles: their reach is the Terrain distance' };
+    // Without reversed depth the rings stop at today's 4.9 km whatever the slider says (the fifth wave's guard), and the page says why.
+    if (key === 'terrainDistance' && this.settings.farRings && !this.cam.camera.reversedDepth) return { note: 'held to 4.9 km: this browser draws without reversed depth' };
+    if (key === 'farCardsHorizon' && this.settings.farCardsHorizon && this.inWorld && this.world.horizonDrawn && this.world.cardFieldNote) return { note: this.world.cardFieldNote };
     if (key === 'volumetrics') {
       if (VOL_HATCH_OFF) return { off: "off at load: localStorage['swg.vol'] is '0'" };
       if (this.volWarming) return { note: 'preparing shaders' };
@@ -19456,8 +19472,8 @@ class App {
     if (this.traveling) return null;
     // A conversation does not cross: whoever it was with stays with the world, as a follower does.
     this.endTalk(false);
-    // The far ground's measurement far plane and sky put back (the horizon pass): each world asks again.
-    this.horizonMeasureOff();
+    // The far ground's far plane and sky put back (the horizon pass): each world's rings follow again from their first frame.
+    this.horizonFarBack();
     this.hyperspace.abort('travel');
     this.ultraCruise.abort();
     // A shuttle trip stops before the world goes under it: its passenger put down and its hull away.
@@ -23790,6 +23806,8 @@ class App {
       // over the planet's own: null on every world whose places name no sky, which is the planet's own look by identity.
       f.placeGrade = this.placeGradeNow();
       f.placeGradeTau = PLACE_TUNE.gradeTau;
+      // Where the god rays count depth as sky (the horizon's fifth wave): 2,500 m, or past the far ridges with the rings drawn.
+      f.groundSky = this.world.horizonFollow.groundSky;
       f.aiming = this.player.aiming;
       f.aimAmount = this.cam.aimAmount;
       // The grapple's daze while a slam staggers the player: the vignette darkens a little more for that half second,
@@ -30585,7 +30603,8 @@ class App {
       const had = !!this.world.horizonField;
       this.world.dropHorizon();
       this.world.applyHorizonGround();
-      HORIZON_TUNE.measure = false;
+      // Today's far plane and sky at once (the fifth wave: they followed the rings' reach).
+      this.horizonFarBack();
       // The far tiles built again behind the same short curtain (W2: a curtain's work, never a frame's).
       if (had && this.inWorld && !this.traveling) await this.groundCurtain('the far tiles', () => this.world.standFarGround(this.player.worldPos));
       return "the far tiles again: the bake let go";
@@ -30600,6 +30619,8 @@ class App {
     await this.groundCurtain("the world's bake", async () => {
       await this.world.loadHorizon(this.world.packId, this.player.worldPos);
       this.world.standFarGround(this.player.worldPos);
+      // The far tree cards to the horizon with them, inside the same curtain (the fifth wave): its program built by its sweep.
+      if (CARD_FIELD_TUNE.on && this.world.horizonDrawn) await this.world.loadCardField();
     });
     const st = this.world.horizonField?.state;
     return st?.state === 'ready' ? `the rings at '${g}'` : `the far tiles still: ${st && 'why' in st ? st.why : 'no bake'}`;
@@ -30646,31 +30667,43 @@ class App {
     );
   }
 
-  private readonly horizonRules = newReachRules();
-
   /**
-   * The measurement's far plane and sky radius (`HORIZON_TUNE.measure`, the console's alone in W1): at the reach's own
-   * (`reachRules`: the sky past the reach, the far plane past the sky), under reversed depth only, through the one far
-   * plane writer that knows the jump's tunnel (`writeCameraFar`); off, or without reversed depth, today's 9,000 m and
-   * 3,500 m. Put back on every travel and at the select screen (`horizonMeasureOff`).
+   * The camera's far plane follows the far ground's reach (the horizon's fifth wave, §2.6): what the world's rules answer
+   * this frame (`World.horizonFollow.far`: the reach the eye's height grew to, in `farStep`'s steps, past the sky's radius,
+   * which is past the reach, and never the fog's), today's 9,000 m while the rings are not drawn, through the one far plane
+   * writer that knows the jump's tunnel and tells the cascades (`writeCameraFar`, which writes nothing while it stands).
+   * Called after every `updateHorizon`.
    */
-  private applyHorizonMeasure(): string {
-    const cam = this.cam.camera;
-    const on = HORIZON_TUNE.measure && this.world.horizonDrawn && cam.reversedDepth;
-    this.horizonRules.fogDensity = 0;
-    const r = reachRules(HORIZON_TUNE, this.world.viewRadius, cam.reversedDepth, this.horizonRules);
-    this.writeCameraFar(on ? r.far : 9000);
-    this.world.setSkyRadius(on ? r.skyRadius : 3500);
-    if (HORIZON_TUNE.measure && !cam.reversedDepth) return 'measure needs reversed depth: the far plane stays at 9,000 m';
-    if (HORIZON_TUNE.measure && !this.world.horizonDrawn) return 'measure moves nothing while the rings are not drawn';
-    return on ? `far plane ${Math.round(r.far)} m, sky ${Math.round(r.skyRadius)} m` : '';
+  private followHorizonFar(): void {
+    this.writeCameraFar(this.world.horizonFollow.far);
   }
 
-  /** The measurement put back (a travel, the select screen). */
-  private horizonMeasureOff(): void {
-    if (!HORIZON_TUNE.measure) return;
-    HORIZON_TUNE.measure = false;
-    this.applyHorizonMeasure();
+  /** Today's far plane and sky put back at once (a travel, the select screen): the next world's rings follow again from its first frame. */
+  private horizonFarBack(): void {
+    this.world.horizonFollowBase();
+    this.writeCameraFar(FAR_BASE);
+  }
+
+  /**
+   * The far tree cards to the horizon (the Graphics page's Flora switch, §1b Q11, `CARD_FIELD_TUNE.on`): on where the rings
+   * stand, the field made behind the far ground's short curtain (its sweep builds the field's program, never a frame);
+   * elsewhere it stands from the next arrival. Off, let go at once. Numbers (`cells`, `grow`, `levelsMost`) a frame reads.
+   */
+  private async setCardField(v: boolean | { cells?: number; grow?: number; levelsMost?: number }): Promise<string> {
+    if (typeof v === 'object' && v) return tuneCardField(v);
+    if (typeof v !== 'boolean') return '';
+    CARD_FIELD_TUNE.on = v;
+    if (!v) {
+      this.world.dropCardField();
+      return 'far tree cards to the horizon off: the far tiles\' own cards to their own reach';
+    }
+    if (!this.inWorld || this.traveling) return 'far tree cards to the horizon: from the next arrival';
+    if (!this.world.horizonDrawn) return "far tree cards to the horizon: drawn wherever the far ground's rings are";
+    let said = '';
+    await this.groundCurtain('the far tree cards', async () => {
+      said = await this.world.loadCardField();
+    });
+    return said;
   }
 
   /** The camera's far plane written through the jump's tunnel: while a tunnel holds it, the kept value is what moves. */
@@ -35179,6 +35212,9 @@ class App {
       perf.passEnd(PASS.air);
       // The clouds' holes step on play's clock alone (the feed reads it before the scene is drawn, `feedAirClouds`).
       this.airSimulate = simulate;
+      // The far plane follows the reach the rings answered above (W5), through the jump's tunnel's own writer, before the
+      // cascades are decided below (the air's step reads no far plane).
+      this.followHorizonFar();
       // What moves fast enough to draw a far cascade every frame it could cast into (the sixth wave): after `stepAudio`
       // above, which poses the shuttles, and before the cascades are decided.
       this.fillShadowMovers(dt);

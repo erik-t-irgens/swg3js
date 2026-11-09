@@ -34,6 +34,24 @@ export interface BakedWorld {
   swg: SwgTerrain;
 }
 
+/** A pack folder's terrain made as the game makes it at an arrival (its building layers placed as `world.ts` places them), no worker. */
+export async function terrainOf(dir: string): Promise<SwgTerrain> {
+  const layout = JSON.parse(readFileSync(join(dir, 'layout.json'), 'utf8'));
+  const layers: { bytes: ArrayBuffer; x: number; z: number; yaw: number }[] = [];
+  for (const o of layout.objects ?? []) {
+    if (!o.layer || o.contained || !existsSync(join(dir, o.layer))) continue;
+    const b = readFileSync(join(dir, o.layer));
+    layers.push({ bytes: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength), x: o.x, z: o.z, yaw: yawOf(o.q) });
+  }
+  const trn = readFileSync(join(dir, 'terrain.trn'));
+  return SwgTerrain.create(trn.buffer.slice(trn.byteOffset, trn.byteOffset + trn.byteLength), layers, layout.center.x, layout.center.z, async (file) => {
+    const p = join(dir, file);
+    if (!existsSync(p)) return null;
+    const b = readFileSync(p);
+    return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+  });
+}
+
 export async function loadBaked(name: string): Promise<BakedWorld | null> {
   const dir = join(packs, name);
   if (!existsSync(join(dir, HORIZON_JSON)) || !existsSync(join(dir, 'layout.json'))) return null;
@@ -42,19 +60,7 @@ export async function loadBaked(name: string): Promise<BakedWorld | null> {
   if (!('header' in read)) return null;
   const header = read.header;
   const sec = await inflateSections(header, new Uint8Array(readFileSync(join(dir, HORIZON_BIN))));
-  const layers: { bytes: ArrayBuffer; x: number; z: number; yaw: number }[] = [];
-  for (const o of layout.objects ?? []) {
-    if (!o.layer || o.contained || !existsSync(join(dir, o.layer))) continue;
-    const b = readFileSync(join(dir, o.layer));
-    layers.push({ bytes: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength), x: o.x, z: o.z, yaw: yawOf(o.q) });
-  }
-  const trn = readFileSync(join(dir, 'terrain.trn'));
-  const swg = await SwgTerrain.create(trn.buffer.slice(trn.byteOffset, trn.byteOffset + trn.byteLength), layers, layout.center.x, layout.center.z, async (file) => {
-    const p = join(dir, file);
-    if (!existsSync(p)) return null;
-    const b = readFileSync(p);
-    return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
-  });
+  const swg = await terrainOf(dir);
   return {
     name,
     dir,
@@ -79,4 +85,15 @@ export function poleHeight(swg: SwgTerrain, x: number, z: number): number {
   const i = Math.round((x - st.x) / s.poleStep);
   const j = Math.round((z - st.z) / s.poleStep);
   return b.heights[j * s.numberOfPoles + i];
+}
+
+/** A raw pole's radial far family out of the sampler's cached block (the near ground's own 2 m generation). */
+export function poleFar(swg: SwgTerrain, x: number, z: number): number {
+  const s = swg.sampler;
+  const bw = s.blockWidth;
+  const b = s.generateBlock(Math.floor(x / bw), Math.floor(z / bw));
+  const st = s.blockStart(Math.floor(x / bw), Math.floor(z / bw));
+  const i = Math.round((x - st.x) / s.poleStep);
+  const j = Math.round((z - st.z) / s.poleStep);
+  return b.radialFar ? b.radialFar[(j * s.numberOfPoles + i) * 2] : 0;
 }

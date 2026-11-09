@@ -16,7 +16,8 @@ import { Worker } from 'node:worker_threads';
 import { deflateSync } from 'node:zlib';
 import { bitmapFiles, parseTerrainTemplate } from '../../src/swg/terrain/trn.ts';
 import { GENERATOR_REVISION } from '../../src/swg/terrain/generator.ts';
-import { BAKE_DEFAULTS, HORIZON_BIN, HORIZON_FORMAT, HORIZON_JSON, encodeHeights, planBake, readHorizonHeader } from '../../src/world/horizon/horizonFile.ts';
+import { BAKE_DEFAULTS, HORIZON_BIN, HORIZON_CARDS_BIN, HORIZON_CARDS_FORMAT, HORIZON_CARDS_JSON, HORIZON_FORMAT, HORIZON_JSON, encodeHeights, planBake, planCards, readCardsHeader, readHorizonHeader } from '../../src/world/horizon/horizonFile.ts';
+import { groundShift } from '../../src/world/groundTiles.ts';
 
 /** The colour ramps' file beside a pack's terrain (`COLOR_RAMP_FILE`). */
 const RAMPS = 'terrain/colorramps.json';
@@ -26,6 +27,29 @@ export const SQUARE_MARGIN = 4;
 
 export function sha1Of(bytes) {
   return createHash('sha1').update(bytes).digest('hex');
+}
+
+/** The game's far tiles (`world.ts`'s `FAR_TILE` and `FAR_RES`): 512 m, 32 steps of 16 m a side. */
+export const CARDS_FAR_TILE = 512;
+export const CARDS_FAR_RES = 32;
+
+/**
+ * The far tree cards' jobs (§1b Q11, its review round): a job a row of the game's far tiles over the cards' lattice, each
+ * tile at `groundChunkOrigin`'s place with the world's ground shift, so its samples are the far grid's own.
+ */
+export function cardsJobs(cards, centre) {
+  const shift = groundShift(centre.x, centre.z);
+  const size = CARDS_FAR_TILE;
+  // The lattice's game extent (game x runs the other way from raw x; game z is raw z less the centre's).
+  const gxa = centre.x - (cards.x0 + (cards.nx - 1) * cards.step);
+  const gxb = centre.x - cards.x0;
+  const gza = cards.z0 - centre.z;
+  const gzb = cards.z0 + (cards.nz - 1) * cards.step - centre.z;
+  const tx0 = Math.floor((gxa - shift.x) / size);
+  const tx1 = Math.floor((gxb - shift.x) / size);
+  const jobs = [];
+  for (let tz = Math.floor((gza - shift.z) / size); tz <= Math.floor((gzb - shift.z) / size); tz++) jobs.push({ kind: 'cards', cards, centre, shift, tz, tx0, tx1, size, res: CARDS_FAR_RES });
+  return jobs;
 }
 
 /** The yaw the game reads a layout object's turn as (`world.ts`'s `yawOf`). */
@@ -146,6 +170,10 @@ export async function bakeHorizon(packDir, world, opts = {}) {
   const plan = planBake(inp.mapWidth, inp.centre, opts);
   const t0 = performance.now();
   const { fine, ground, colour, coarse } = plan;
+  // The far tree cards' samples (the fifth wave, §1b Q11), made with every bake, and alone with `cardsOnly` (a bake made
+  // before it stays as it is: only the cards' own two files are written).
+  const cards = planCards(fine, inp.centre);
+  const cardsOnly = !!opts.cardsOnly;
   // The fine jobs: rows of squares across the fine extent, each keeping the rows whose raw z falls in it.
   const lo = Math.min(fine.x0, ground.x0, colour.x0, fine.z0, ground.z0, colour.z0);
   const hi = Math.max(fine.x0 + (fine.nx - 1) * fine.step, ground.x0 + (ground.nx - 1) * 8, colour.x0 + (colour.nx - 1) * colour.step, fine.z0 + (fine.nz - 1) * fine.step, ground.z0 + (ground.nz - 1) * 8, colour.z0 + (colour.nz - 1) * colour.step);
@@ -153,14 +181,17 @@ export async function bakeHorizon(packDir, world, opts = {}) {
   const s0 = lo - (((lo % 2) + 2) % 2);
   const squares = Math.ceil((hi - s0 + 2) / span);
   const jobs = [];
-  for (let r = 0; r < squares; r++) jobs.push({ kind: 'fine', s0, squares, row: r, fine, ground, colour });
+  if (!cardsOnly) for (let r = 0; r < squares; r++) jobs.push({ kind: 'fine', s0, squares, row: r, fine, ground, colour });
   // The coarse jobs: rows of 64 m grids of 64 samples with two of margin.
   const crow = 64;
-  for (let j0 = 0; j0 < coarse.nz; j0 += crow) jobs.push({ kind: 'coarse', coarse, j0, j1: Math.min(coarse.nz, j0 + crow) });
+  if (!cardsOnly) for (let j0 = 0; j0 < coarse.nz; j0 += crow) jobs.push({ kind: 'coarse', coarse, j0, j1: Math.min(coarse.nz, j0 + crow) });
+  // The cards' jobs (§1b Q11, its review round): a row of far tiles a job, each the far grid the game makes for it.
+  for (const job of cardsJobs(cards, inp.centre)) jobs.push(job);
   const results = await runJobs(packDir, jobs, threads, opts.progress);
   const H = new Float32Array(fine.nx * fine.nz);
   const F = new Uint8Array(ground.nx * ground.nz);
   const C = new Uint8Array(colour.nx * colour.nz * 3);
+  const K = new Uint8Array(cards.nx * cards.nz * 4);
   const CH = new Float32Array(coarse.nx * coarse.nz);
   const CF = new Uint8Array(coarse.nx * coarse.nz);
   const CC = new Uint8Array(coarse.nx * coarse.nz * 3);
@@ -169,7 +200,10 @@ export async function bakeHorizon(packDir, world, opts = {}) {
   for (const m of results) {
     cpu += m.ms;
     wideFamilies += m.wide ?? 0;
-    if (m.kind === 'fine') {
+    if (m.kind === 'cards') {
+      if (m.off) throw new Error(`${world}: ${m.off} far grid samples fell between the cards' lattice's samples`);
+      K.set(m.K, m.kj0 * cards.nx * 4);
+    } else if (m.kind === 'fine') {
       H.set(m.H, m.hj0 * fine.nx);
       F.set(m.F, m.gj0 * ground.nx);
       C.set(m.C, m.cj0 * colour.nx * 3);
@@ -179,6 +213,23 @@ export async function bakeHorizon(packDir, world, opts = {}) {
       CC.set(m.C, m.j0 * coarse.nx * 3);
     }
   }
+  const dir = join(packDir, 'terrain');
+  mkdirSync(dir, { recursive: true });
+  const put = (file, data) => {
+    const tmp = join(packDir, `${file}.tmp`);
+    writeFileSync(tmp, data);
+    renameSync(tmp, join(packDir, file));
+  };
+  const trn = { length: inp.trn.length, sha1: sha1Of(inp.trn) };
+  const at = new Date().toISOString();
+  // The far tree cards' file, its own (§1b Q11): one deflated section of the cards' samples.
+  const kz = deflateSync(K, { level: 6 });
+  put(HORIZON_CARDS_BIN, kz);
+  put(HORIZON_CARDS_JSON, JSON.stringify({ format: HORIZON_CARDS_FORMAT, source: { generator: GENERATOR_REVISION, trn, centre: inp.centre, at }, cards, section: { offset: 0, length: kz.length, size: K.length } }, null, 1));
+  const cardsMb = kz.length / 1048576;
+  let families = 0;
+  for (let i = 3; i < K.length; i += 4) if (K[i]) families++;
+  if (cardsOnly) return { world, wall: performance.now() - t0, cpu, mb: 0, cardsMb, cards, cardsWithFamily: families, fine, coarse, wide: plan.wide, wideFamilies, threads, cardsOnly: true };
   const fh = encodeHeights(H, fine.nx, fine.nz);
   const chh = encodeHeights(CH, coarse.nx, coarse.nz);
   const raw = [
@@ -200,24 +251,17 @@ export async function bakeHorizon(packDir, world, opts = {}) {
   }
   const header = {
     format: HORIZON_FORMAT,
-    source: { generator: GENERATOR_REVISION, trn: { length: inp.trn.length, sha1: sha1Of(inp.trn) }, inputs: inp.inputs, centre: inp.centre, layers: inp.layers, lifeDay: false, made: 'poles', at: new Date().toISOString() },
+    source: { generator: GENERATOR_REVISION, trn, inputs: inp.inputs, centre: inp.centre, layers: inp.layers, lifeDay: false, made: 'poles', at },
     fine: { ...fine, lo: fh.lo, q: fh.q },
     ground,
     colour,
     coarse: { ...coarse, lo: chh.lo, q: chh.q },
     sections,
   };
-  const dir = join(packDir, 'terrain');
-  mkdirSync(dir, { recursive: true });
   const bin = Buffer.concat(parts);
-  const put = (file, data) => {
-    const tmp = join(packDir, `${file}.tmp`);
-    writeFileSync(tmp, data);
-    renameSync(tmp, join(packDir, file));
-  };
   put(HORIZON_BIN, bin);
   put(HORIZON_JSON, JSON.stringify(header, null, 1));
-  return { world, wall: performance.now() - t0, cpu, mb: bin.length / 1048576, fine, coarse, wide: plan.wide, wideFamilies, threads };
+  return { world, wall: performance.now() - t0, cpu, mb: bin.length / 1048576, cardsMb, cards, cardsWithFamily: families, fine, coarse, wide: plan.wide, wideFamilies, threads };
 }
 
 /**
@@ -244,12 +288,35 @@ export function horizonStatusOf(planet, packDir) {
   }
   if (stale) return { line: `far-ground bake STALE: ${stale} (by hand: ${cmd})`, why: null, stale };
   const f = read.header.fine;
-  return { line: `far-ground bake (${f.step} m, ${f.nx} x ${f.nz}${read.header.source.made === 'grid' ? ', quick' : ''})`, why: null, stale: null };
+  // The far tree cards' file beside it (the fifth wave, §1b Q11): named, and never asked for (the Graphics page's option
+  // that reads it starts off).
+  const cards = cardsStatusOf(packDir, read.header);
+  return { line: `far-ground bake (${f.step} m, ${f.nx} x ${f.nz}${read.header.source.made === 'grid' ? ', quick' : ''}; ${cards.words}${cards.stale ? ` (by hand: ${cmd} --cards-only)` : ''})`, why: null, stale: null, cards: cards.stale };
 }
 
-/** The bake's files taken away (the tests' and a by-hand clean). */
+/**
+ * The far tree cards' file beside a current bake (§1b Q11): what `status` says of it (`words`), and why it would be made
+ * again (`stale`: missing, refused), or null where it is current.
+ */
+export function cardsStatusOf(packDir, header) {
+  const jp = join(packDir, HORIZON_CARDS_JSON);
+  const bp = join(packDir, HORIZON_CARDS_BIN);
+  if (!existsSync(jp) || !existsSync(bp)) return { words: 'no far tree cards', stale: 'missing' };
+  const read = readCardsHeader(readJson(jp), header, GENERATOR_REVISION, statSync(bp).size);
+  if ('refused' in read) return { words: `far tree cards STALE: ${read.refused}`, stale: read.refused };
+  return { words: `far tree cards ${read.header.cards.nx} x ${read.header.cards.nz}`, stale: null };
+}
+
+/**
+ * Whether `status` asks a player for the offered worlds' bakes (§2.0 item 6, §7): false until the wave that turns the rings
+ * on by default; the plan of that ask (after `radial`, every world a player is offered, never a `PlanetDef.extra`
+ * developer world) stands in `status` behind it, so turning it on is this one word.
+ */
+export const HORIZON_STATUS_ASKS = false;
+
+/** The bake's files taken away (the tests' and a by-hand clean), the far tree cards' with them. */
 export function removeHorizon(packDir) {
-  for (const f of [HORIZON_JSON, HORIZON_BIN]) rmSync(join(packDir, f), { force: true });
+  for (const f of [HORIZON_JSON, HORIZON_BIN, HORIZON_CARDS_JSON, HORIZON_CARDS_BIN]) rmSync(join(packDir, f), { force: true });
 }
 
 export { BAKE_DEFAULTS };

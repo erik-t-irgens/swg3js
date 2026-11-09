@@ -8,6 +8,7 @@
 // Pure: three's maths alone (a frustum and a box), so node runs it.
 import * as THREE from 'three';
 import { SHAPE_BLOCK, SHAPE_SIDE } from './shapeWindow.ts';
+import { SKY_SHARE as FLARE_SKY_SHARE } from '../../core/fx/flareMath.ts';
 
 export type HorizonGround = 'tiles' | 'both' | 'rings';
 
@@ -45,8 +46,21 @@ export const HORIZON_TUNE = {
   dropAt: 'seam' as 'seam' | 'everywhere',
   /** Drawn after the chunks, so their depth rejects hidden ring pixels early. */
   renderOrder: 1,
-  /** The console's measurement far plane and sky radius at the reach, under reversed depth only (W5 makes it the setting's). */
-  measure: false,
+  /**
+   * W5 (§1b Q10): metres of reach a metre of the eye's height over the ground under it buys, so a ship high up sees further
+   * (4 [ours]: a ship 2 km up sees the slider's reach and 8 km more); held under the slider's top (`REACH_SLIDER_TOP`, or
+   * the console's reach where that is more) and the bake's own extent. Nought is the slider's reach at any height.
+   */
+  heightReach: 4,
+  /**
+   * W5: the far plane and the sky's radius follow the reach (grown by height) in steps of this many metres [ours], so a
+   * climbing ship moves the far plane, the projection and the cascades' fit only as it crosses a step, never a frame.
+   */
+  farStep: 500,
+  /** W5 (§12 Q3): the far ridges stop the god rays and the flare (depth past the reach in force less half the fade is sky). */
+  raysBlock: true,
+  /** W5 (§2.7): how far the reach in force moves before the far sea's outer row follows it, metres [ours]. */
+  seaStep: 250,
   /**
    * The third wave: inside `detailReach` (metres from the eye, the Graphics page's Ground detail distance) the rings draw
    * the near ground's own composition (the tile program's pictures, alternates, masks, tint, bump and gloss) from the
@@ -60,7 +74,7 @@ export const HORIZON_TUNE = {
   fade: 0.15,
   fadeOn: true,
   fadeTo: 'sky' as 'sky' | 'fog' | 'none',
-  /** The sky's radius over the slider's reach and the far plane over the sky's radius (`measure` in W1). */
+  /** The sky's radius over the reach (grown by height, never the fog's) and the far plane over the sky's radius (W5). */
   skyMargin: 1.1,
   farMargin: 1.7,
   /** What the program draws: the lit ground, or one of its parts for the console (a uniform). */
@@ -105,6 +119,19 @@ export const HORIZON_VIEWS = ['shaded', 'lod', 'albedo', 'normals', 'edge', 'det
 
 /** The reach without reversed depth: today's slider top (ordinary depth's 24 bits were already living there). */
 export const REACH_NO_REVZ = 4900;
+/** The Graphics page's Terrain distance top (`menu.ts`'s 16 km), which the height's growth is held under (§1b Q10). */
+export const REACH_SLIDER_TOP = 16000;
+/**
+ * Today's numbers, each what every reader holds with the rings not drawn (`'tiles'`, no bake, a space zone), by `Object.is`:
+ * the sky's bodies' radius (`sky.ts`'s SKY_RADIUS), the camera's far plane (`camera.ts`), the god rays' ground sky
+ * (`context.ts`'s GROUND_SKY, once `passes.ts`'s GROUND_SKY_DISTANCE) and the far sea's outer edge (`createGlobalWater`).
+ */
+export const SKY_BASE = 3500;
+export const FAR_BASE = 9000;
+export const RAYS_GROUND_SKY = 2500;
+export const SEA_BASE = 9000;
+/** Every sky element's radius as a multiple of `SKY_BASE` (`sky.ts`: the bodies 1, the stars 1.2, the skybox 1.5, the dome 1.6). */
+export const SKY_SHELLS = [1, 1.2, 1.5, 1.6] as const;
 /** The most levels the quadtree has (a root at level 7 is 8 km across). */
 export const LEVELS_MOST = 7;
 /** A leaf is one 64 m chunk; a patch is 8 by 8 quads. */
@@ -121,15 +148,26 @@ export function fogReachOf(density: number, at: number): number {
 export interface ReachRules {
   /** The fog's density in force, the caller's to write before asking (a kept record: a number handed across a call is a number made). */
   fogDensity: number;
+  /** W5: the eye's height over the bake's ground under it (never under nought) and how far the bake reaches from the eye, the caller's to write. */
+  eyeOver: number;
+  bakeMost: number;
   /** The slider's reach, held to 4.9 km without reversed depth. */
   reach: number;
+  /** W5 (§1b Q10): the slider's reach grown by the eye's height (`heightReach`), held under the slider's top and the bake's extent. */
+  grown: number;
   /** Where the fog leaves less than `fogCapAt` of the ground. */
   fogReach: number;
-  /** The reach the rings stop at: the lesser of the two with `fogCap`, else the slider's. */
+  /** The reach the rings stop at: the lesser of the grown reach and the fog's with `fogCap`, else the grown reach. */
   inForce: number;
-  /** The sky's radius and the far plane, on the slider's reach (the fog never moves the cascades). */
+  /** The sky's radius and the far plane, on the grown reach in steps of `farStep` (the fog never moves the cascades). */
   skyRadius: number;
   far: number;
+  /** The grown reach on `farStep`'s steps, held a step and a quarter below its step as it falls (no flip back and forth on a step's line). */
+  farReach: number;
+  /** W5 (§2.6): depth past this is sky to the god rays and the flare: the reach in force less half the fade with `raysBlock`, else 2,500 m. */
+  groundSky: number;
+  /** The flare's `skyDistance`: so that `skyDistance x SKY_SHARE` is `groundSky` with `raysBlock`, else the sky's radius. */
+  flareSky: number;
   /** Level 0's range in force, and how many levels reach the reach in force. */
   lod0: number;
   levels: number;
@@ -195,31 +233,69 @@ export function reachRules(t: HorizonTune, viewRadius: number, reversed: boolean
   const fogDensity = out.fogDensity;
   const reach = reversed ? t.reach : Math.min(t.reach, REACH_NO_REVZ);
   out.reach = reach;
+  // W5 (§1b Q10): the reach grown by the eye's height over the ground, held under the slider's top (or the console's own
+  // reach past it) and the bake's extent; without reversed depth today's 4.9 km holds it whatever the height.
+  // (The ternary picks between two whole constants: a worked number in one arm and a constant in the other is a number made.)
+  const top = Math.max(reversed ? REACH_SLIDER_TOP : REACH_NO_REVZ, reach);
+  const up = reach + Math.max(0, t.heightReach) * Math.max(0, out.eyeOver);
+  out.grown = Math.max(reach, Math.min(Math.min(up, top), out.bakeMost));
   // `fogReachOf`, written out (a frame's: a number handed back from a call is a number made).
   // No ternary with Infinity in it: a constant and a worked number met in one branch are a number made each call (no
   // density divides to Infinity by itself).
   out.fogReach = Math.sqrt(-Math.log(t.fogCapAt)) / Math.max(fogDensity, 0);
-  out.inForce = t.fogCap ? Math.min(reach, out.fogReach) : reach;
-  out.skyRadius = Math.max(3500, reach * t.skyMargin);
-  out.far = Math.max(9000, out.skyRadius * t.farMargin);
+  out.inForce = t.fogCap ? Math.min(out.grown, out.fogReach) : out.grown;
+  // The far plane and the sky on the grown reach in steps (`farStep`), never the fog's: the projection and the cascades'
+  // fit move only as a step is crossed, and a reach falling back keeps its step until a quarter step past it.
+  const step = Math.max(1, t.farStep);
+  const want = Math.ceil(out.grown / step) * step;
+  if (!(out.farReach >= want && out.farReach - out.grown < step * 1.25)) out.farReach = want;
+  out.skyRadius = Math.max(SKY_BASE, out.farReach * t.skyMargin);
+  out.far = Math.max(FAR_BASE, out.skyRadius * t.farMargin);
+  // The god rays' and the flare's sky (§2.6, §12 Q3): past the reach in force less half the fade (none with the fade off,
+  // when the ridge at the reach is drawn whole) a ridge is sky; with `raysBlock` off, today's 2,500 m and the sky's radius.
+  // Written by branch into the record's fields, never through a ternary of a worked number and a constant (a number made).
+  const fade = Math.min(Math.max(t.fade, 0), 1) * (t.fadeOn && t.fadeTo !== 'none' ? 1 : 0);
+  if (t.raysBlock) {
+    out.groundSky = out.inForce * (1 - fade / 2);
+    out.flareSky = out.groundSky / FLARE_SKY_SHARE;
+  } else {
+    out.groundSky = RAYS_GROUND_SKY;
+    out.flareSky = out.skyRadius;
+  }
   shapeRanges(t, Math.max(t.lod0, ((viewRadius + 2) * LEAF * Math.SQRT2) / (1 - t.morph)), shapeOk, out);
   // A whole number kept a whole number (| 0): a float64 stored into a small-integer field is a number made.
   out.levels = (Math.min(LEVELS_MOST, Math.max(0, Math.ceil(Math.log2(Math.max(1, out.inForce) / out.lod0)))) | 0) + 1;
   return out;
 }
 
+/**
+ * The horizon fade's share at a distance (§2.5, §1b Q4; the mirror of the ring program's `gF`): nought inside the last
+ * `share` of the reach in force, one at the reach, GLSL's smoothstep between.
+ */
+export function ringFadeOf(d: number, reach: number, share: number): number {
+  const e0 = reach * (1 - share);
+  const t = Math.min(Math.max((d - e0) / (reach - e0), 0), 1);
+  return t * t * (3 - 2 * t);
+}
+
 export function newReachRules(): ReachRules {
   // Every field that will hold a fraction starts as one: a field begun as a small integer boxes every fraction written after.
-  const r = { fogDensity: 0.5, reach: 0.5, fogReach: 0.5, inForce: 0.5, skyRadius: 0.5, far: 0.5, lod0: 0.5, levels: 1, finest: 0, r1: 0.5, r2: 0.5, mf: 0.5 };
+  const r = { fogDensity: 0.5, eyeOver: 0.5, bakeMost: 0.5, reach: 0.5, grown: 0.5, fogReach: 0.5, inForce: 0.5, skyRadius: 0.5, far: 0.5, farReach: 0.5, groundSky: 0.5, flareSky: 0.5, lod0: 0.5, levels: 1, finest: 0, r1: 0.5, r2: 0.5, mf: 0.5 };
   r.mf = 0.15;
   r.r1 = 0;
   r.r2 = 0;
   r.fogDensity = 0;
+  r.eyeOver = 0;
+  r.bakeMost = Infinity;
   r.reach = 0;
+  r.grown = 0;
   r.fogReach = Infinity;
   r.inForce = 0;
-  r.skyRadius = 3500;
-  r.far = 9000;
+  r.skyRadius = SKY_BASE;
+  r.far = FAR_BASE;
+  r.farReach = 0;
+  r.groundSky = RAYS_GROUND_SKY;
+  r.flareSky = SKY_BASE;
   r.lod0 = 1400;
   return r;
 }

@@ -125,6 +125,10 @@ export function packHolds(packId: string, file: string): boolean {
     // is the client's empty punch-out. Asked only with the far ground's switch off 'tiles' (`World.loadHorizon`).
     case 'terrain/horizon.json':
     case 'terrain/horizon.bin':
+    // Its far tree cards' file beside it (the fifth wave), asked only with the Graphics page's Far tree cards to the
+    // horizon on and the bake drawn (`World.loadCardField`).
+    case 'terrain/horizon-cards.json':
+    case 'terrain/horizon-cards.bin':
       return ground && !world.instances;
     default:
       return true;

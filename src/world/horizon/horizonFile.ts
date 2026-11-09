@@ -61,6 +61,58 @@ export const BAKE_DEFAULTS = { margin: 1024, farMargin: 16384, fineMost: 2305, c
 const mod = (v: number, m: number): number => ((v % m) + m) % m;
 
 /**
+ * The far tree cards' file (the fifth wave, §1b Q11): a file of its own beside the bake, so a bake made before it stays
+ * good (`horizon --cards-only` writes this alone). One section of four bytes a sample over the fine extent, every 16 m on
+ * the far grids' own lattice (game x = shift.x + 16i, as `farCardSamples` reads a far tile): the colour map's bytes and
+ * the radial flora's far family as the far grid's own 16 m generation says them there (format 2, the fifth wave's review
+ * round: format 1 took the near ground's 2 m pole there, whose family the coarse grid's filters can make another).
+ */
+export const HORIZON_CARDS_FORMAT = 2;
+export const HORIZON_CARDS_JSON = 'terrain/horizon-cards.json';
+export const HORIZON_CARDS_BIN = 'terrain/horizon-cards.bin';
+export const CARDS_STEP = 16;
+export interface HorizonCardsHeader {
+  format: number;
+  source: { generator: number; trn: { length: number; sha1: string }; centre: { x: number; z: number }; at?: string };
+  cards: Lattice;
+  section: { offset: number; length: number; size: number };
+}
+
+/**
+ * The cards' lattice (§1b Q11): every 16 m over the fine extent's span on the far grids' lattice, whose raw residue is the
+ * heights' own taken modulo 16 (`farCardSamples`: a far tile's samples stand at game x = 512 tx + shift.x + 16k).
+ */
+export function planCards(fine: Lattice, centre: { x: number; z: number }): Lattice {
+  const rx = mod(centre.x - mod(centre.x, 2), CARDS_STEP);
+  const rz = mod(centre.z + mod(-centre.z, 2), CARDS_STEP);
+  const x1 = fine.x0 + (fine.nx - 1) * fine.step;
+  const z1 = fine.z0 + (fine.nz - 1) * fine.step;
+  const x0 = fine.x0 + mod(rx - fine.x0, CARDS_STEP);
+  const z0 = fine.z0 + mod(rz - fine.z0, CARDS_STEP);
+  return { x0, z0, step: CARDS_STEP, nx: Math.floor((x1 - x0) / CARDS_STEP) + 1, nz: Math.floor((z1 - z0) / CARDS_STEP) + 1 };
+}
+
+/**
+ * A cards header read and checked against the bake it stands beside: its format, the generator's revision, and the very
+ * terrain and centre the bake was made from. Answers the header, or why it is refused (the rings draw on; no cards past
+ * the far grids).
+ */
+export function readCardsHeader(json: unknown, bake: Pick<HorizonHeader, 'source'>, generator: number, binLength?: number): { header: HorizonCardsHeader } | { refused: string } {
+  const again = 'npm run swg -- horizon assets-private --only=<world> --cards-only makes it again';
+  const h = json as HorizonCardsHeader | null;
+  if (!h || typeof h !== 'object' || typeof h.format !== 'number' || !h.source || !h.section) return { refused: `the far cards' file is not one (${again})` };
+  if (h.format !== HORIZON_CARDS_FORMAT) return { refused: `the far cards' file is format ${h.format}, this build reads ${HORIZON_CARDS_FORMAT} (${again})` };
+  if (h.source.generator !== generator) return { refused: `the far cards' file was made by generator revision ${h.source.generator}, this build's is ${generator} (${again})` };
+  if (!h.source.trn || h.source.trn.sha1 !== bake.source.trn.sha1 || h.source.trn.length !== bake.source.trn.length) return { refused: `the far cards' file was made from another terrain file than the bake (${again})` };
+  if (!h.source.centre || h.source.centre.x !== bake.source.centre.x || h.source.centre.z !== bake.source.centre.z) return { refused: `the far cards' file stands about another centre than the bake (${again})` };
+  if (!isLattice(h.cards, false) || h.cards.step !== CARDS_STEP) return { refused: `the far cards' lattice is not whole (${again})` };
+  const s = h.section;
+  if (!(s.offset >= 0) || !(s.length > 0) || s.size !== h.cards.nx * h.cards.nz * 4) return { refused: `the far cards' section is not the lattice's size (${again})` };
+  if (binLength !== undefined && s.offset + s.length > binLength) return { refused: `the far cards' section reaches past its file's end (${again})` };
+  return { header: h };
+}
+
+/**
  * Where a world's bake stands (§2.2), by its map's width and its layout's centre: the heights on the ground's lattice
  * (game x = shift.x + 8i, so raw x = centre.x - shift.x - 8i: a raw value congruent to centre.x - shift.x modulo 8), at
  * 8 m, or 16 m where 8 m would pass `fineMost` samples a side; the families at every 8 m pattern corner whatever the

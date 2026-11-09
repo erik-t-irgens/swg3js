@@ -20,6 +20,8 @@ export interface FloraSettings {
   grassDensity: number;
   farCards: boolean;
   farCardReach: number;
+  /** The far tree cards on past their own distance with the far ground's rings (the horizon pass's fifth wave, §1b Q11): the horizon's own, through `CARD_FIELD_TUNE`, never a tune of this file's. */
+  farCardsHorizon: boolean;
   floraPlantReach: number;
   floraTreeReach: number;
   floraTreeShadows: boolean;
@@ -31,7 +33,7 @@ export interface FloraSettings {
 }
 
 /** Every flora setting's key, in the page's order. */
-export const FLORA_KEYS: readonly (keyof FloraSettings)[] = ['grass', 'grassReach', 'grassDensity', 'farCards', 'farCardReach', 'floraPlantReach', 'floraTreeReach', 'floraTreeShadows', 'floraPlantShadows', 'grassShadows', 'grassTakesShadows', 'farCardShadows', 'leafShadows'];
+export const FLORA_KEYS: readonly (keyof FloraSettings)[] = ['grass', 'grassReach', 'grassDensity', 'farCards', 'farCardReach', 'farCardsHorizon', 'floraPlantReach', 'floraTreeReach', 'floraTreeShadows', 'floraPlantShadows', 'grassShadows', 'grassTakesShadows', 'farCardShadows', 'leafShadows'];
 
 /**
  * The ends the page's controls and the console both read, all ours. The far cards' scale starts at 1: their own end

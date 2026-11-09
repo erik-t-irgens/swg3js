@@ -579,7 +579,7 @@ export function writeGrassShadowUniforms(): void {
 }
 
 /** The quads a tuft is drawn with: two, the second crossed, each a metre wide about x nought and a metre tall from its foot. */
-function tuftQuads(g: THREE.InstancedBufferGeometry): void {
+export function tuftQuads(g: THREE.InstancedBufferGeometry): void {
   // position.z says which quad: nought the first, one the crossed second.
   g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([-0.5, 0, 0, 0.5, 0, 0, 0.5, 1, 0, -0.5, 1, 0, -0.5, 0, 1, 0.5, 0, 1, 0.5, 1, 1, -0.5, 1, 1]), 3));
   g.setIndex([0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
@@ -708,11 +708,24 @@ export interface GrassSetup {
   reference: { luminance: number; rgb: [number, number, number] } | null;
 }
 
+/**
+ * The far tree cards' hand-over to the horizon's card field (the horizon pass's fifth wave, §1b Q11): while the field is
+ * drawn, the cards a far tile builds stand out to `from` with no fade band, and the field's from there on (the very
+ * candidates at the very sizes, so nothing changes where the two meet); off, the far cards' reach and band as ever.
+ * `keep` is how far the hand-over keeps the far tiles' cards (`cardFieldKeep`: the far grids' reach, never inside the near
+ * square), written by the world when it moves; `from` is worked out here from it and the far reach in force at every
+ * write, so a Far tree card distance moved in play moves the hand-over with it (h5's review round).
+ */
+export const FAR_CARD_HANDOVER = { on: false, keep: 0.5, from: 0.5 };
+
 /** The tune and the world into the uniforms (and the dither's and the tint's modes). Uniforms only; nothing compiles. */
 export function writeGrassUniforms(setup: GrassSetup | null): void {
   const u = GRASS_UNIFORMS;
   const t = GRASS_TUNE;
-  u.uSwgGrassReach.value.set(setup ? grassReach(setup.near, t) : (t.reach ?? 30), t.fadeBand, setup ? farReach(setup.far, FAR_CARD_TUNE) : (FAR_CARD_TUNE.reach ?? 500), FAR_CARD_TUNE.fadeBand);
+  const fr = setup ? farReach(setup.far, FAR_CARD_TUNE) : (FAR_CARD_TUNE.reach ?? 500);
+  const h = FAR_CARD_HANDOVER;
+  if (h.on) h.from = Math.min(fr, h.keep);
+  u.uSwgGrassReach.value.set(setup ? grassReach(setup.near, t) : (t.reach ?? 30), t.fadeBand, h.on ? Math.min(fr, h.from) : fr, h.on ? 1e-4 : FAR_CARD_TUNE.fadeBand);
   u.uSwgGrassMode.value.set(t.facing === 'fixed' ? 1 : 0, t.fade === 'dither' ? 1 : t.fade === 'child' ? 2 : 0, GRASS_SWAY.amp, GRASS_SWAY.useChild ? 1 : 0);
   u.uSwgGrassShow.value.set(GRASS_ON && t.on ? 1 : 0, FAR_CARDS_ON && FAR_CARD_TUNE.on ? 1 : 0);
   u.uSwgGrassCut.value.set(t.cutoff, t.mipScale, t.fade === 'dither' ? 1 : 0);
