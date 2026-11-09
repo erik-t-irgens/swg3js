@@ -65,6 +65,8 @@ export function tuneHorizon(o: Record<string, unknown>): string[] {
         t[k] = Math.min(SHAPE_REACH_MOST, Math.max(0, v));
         if (v > SHAPE_REACH_MOST) said.push(`shapeReach held at ${SHAPE_REACH_MOST} m: the shape window round the eye holds its 2 m heights no further`);
       } else if (k === 'shapeFinest') t[k] = v <= 3 ? 2 : 4;
+      // W4: never under nought (a negative share would lay nothing; mips every frame at nought).
+      else if (k === 'mipsEvery' || k === 'liveMs') t[k] = Math.max(0, v);
       // The morph share the ranges are placed with and the ring morphs by, one number for both (`shapeRanges`' own hold).
       else if (k === 'shapeMorph') t[k] = Math.min(0.9, Math.max(0.01, v));
       // The program divides by the fade: never under one sample.

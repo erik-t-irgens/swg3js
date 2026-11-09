@@ -90,6 +90,14 @@ export const HORIZON_TUNE = {
   shapePad: 12,
   /** The shape window's share fades to nought over its last this many samples, so its edge is never a step. */
   shapeFade: 16,
+  /**
+   * W4, the edits followed live (DESIGN.md §6, §2.13): a region put on the card makes no mips; the fine normals' and the
+   * albedos' mips are made again by one flagged 1-texel copy at most every `mipsEvery` ms while an edit is held, and once at
+   * its end. `liveMs` is a frame's share for a course's change laid over the bake (the race drawer's own 2 ms), nearest the
+   * eye first; a stroke's stamp is laid whole at once (a 200 m brush is 25 by 25 samples).
+   */
+  mipsEvery: 250,
+  liveMs: 2,
 };
 export type HorizonTune = typeof HORIZON_TUNE;
 

@@ -162,6 +162,98 @@ export class HeightOverlay {
     return out;
   }
 
+  /**
+   * W4 (DESIGN.md §6): the samples of one rectangle laid again from raw with the stores as they stand now (a stroke's stamp,
+   * a course's piece, an undo, a file landed): every horizon tile it reaches keeps (or takes) its raw copy while a store
+   * touches it, by the very rule `layAll` asks, and only the rectangle's own samples are written, the carve then the edits
+   * over a lattice of just those samples (both are a sample's own: `layAll` laid tile by tile is the whole lattice laid at
+   * once). A tile no store touches any more has the rectangle's samples put back to raw, and lets its copy go once the whole
+   * tile is raw again (unless pinned); one that is not (a sample outside the rectangle that never came back) is put back whole
+   * and the whole tile answered. Answers the samples it wrote **a tile at a time** (into `out`, emptied first), so a
+   * rectangle that spans two edits far apart (a landed file's or an undo's union) is put on the card tile by tile, never as
+   * one box over every untouched tile between them (W4's review round). A stamp's work, never a frame's.
+   */
+  layRect(fine: Float32Array, heights: HeightEdits | null, course: CourseCarve | null, r: SampleRect, out: SampleRect[] = []): SampleRect[] {
+    out.length = 0;
+    const L = this.lat;
+    const s = L.step;
+    const carving = !!course && !course.empty;
+    const ri0 = Math.max(0, r.i0);
+    const rj0 = Math.max(0, r.j0);
+    const ri1 = Math.min(L.nx - 1, r.i1);
+    const rj1 = Math.min(L.nz - 1, r.j1);
+    if (ri0 > ri1 || rj0 > rj1) return out;
+    const nx = L.nx;
+    for (let tj = Math.floor(rj0 / HORIZON_TILE); tj <= Math.floor(rj1 / HORIZON_TILE); tj++) {
+      for (let ti = Math.floor(ri0 / HORIZON_TILE); ti <= Math.floor(ri1 / HORIZON_TILE); ti++) {
+        const key = tj * this.tx + ti;
+        const tr = this.rectOf(ti, tj);
+        const x0 = L.x0 + tr.i0 * s;
+        const z0 = L.z0 + tr.j0 * s;
+        const x1 = L.x0 + tr.i1 * s;
+        const z1 = L.z0 + tr.j1 * s;
+        // The tile's own question, as `layAll` asks it (a step round the tile: a road's widening reaches half a step).
+        const touched = (!!heights && heights.touches(x0 - s, z0 - s, x1 + s, z1 + s)) || (carving && course!.touches(x0 - s, z0 - s, x1 + s, z1 + s));
+        let raw = this.raw.get(key);
+        if (!touched && !raw) continue;
+        const tw = tr.i1 - tr.i0 + 1;
+        const th = tr.j1 - tr.j0 + 1;
+        if (!raw) {
+          raw = new Float32Array(tw * th);
+          this.copyOut(fine, tr, raw);
+          this.raw.set(key, raw);
+        }
+        const a0 = Math.max(tr.i0, ri0);
+        const b0 = Math.max(tr.j0, rj0);
+        const a1 = Math.min(tr.i1, ri1);
+        const b1 = Math.min(tr.j1, rj1);
+        const w = a1 - a0 + 1;
+        const h = b1 - b0 + 1;
+        if (!touched) {
+          // Put back to raw over the rectangle; the copy let go once the whole tile is raw (else the whole put back and answered).
+          for (let j = b0; j <= b1; j++) for (let i = a0; i <= a1; i++) fine[j * nx + i] = raw[(j - tr.j0) * tw + (i - tr.i0)];
+          let rest = true;
+          for (let j = tr.j0; j <= tr.j1 && rest; j++) for (let i = tr.i0; i <= tr.i1; i++) if (!Object.is(fine[j * nx + i], raw[(j - tr.j0) * tw + (i - tr.i0)])) { rest = false; break; }
+          if (!rest) {
+            this.copyIn(fine, tr, raw);
+            out.push(tr);
+          } else out.push({ i0: a0, j0: b0, i1: a1, j1: b1 });
+          if (!this.pinned.has(key)) this.raw.delete(key);
+          continue;
+        }
+        // The rectangle's raw samples, then the carve and the edits over a lattice of just them.
+        const sub = this.subRaw;
+        const o = this.scratch;
+        for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) sub[j * w + i] = raw[(b0 - tr.j0 + j) * tw + (a0 - tr.i0 + i)];
+        const sx0 = L.x0 + a0 * s;
+        const sz0 = L.z0 + b0 * s;
+        const subRaw = w * h === sub.length ? sub : sub.subarray(0, w * h);
+        const lay = w * h === o.length ? o : o.subarray(0, w * h);
+        if (carving) {
+          const k = this.carve;
+          k.raw = subRaw;
+          k.out = lay;
+          k.x0 = sx0;
+          k.dx = s;
+          k.z0 = sz0;
+          k.dz = s;
+          k.nx = w;
+          k.nz = h;
+          k.widen = s / 2;
+          course!.layIn(k);
+          k.raw = null;
+          k.out = null;
+          if (heights) this.layEdits(heights, lay, lay, sx0, sz0, w, h);
+        } else if (heights) this.layEdits(heights, subRaw, lay, sx0, sz0, w, h);
+        else lay.set(subRaw);
+        for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) fine[(b0 + j) * nx + a0 + i] = lay[j * w + i];
+        out.push({ i0: a0, j0: b0, i1: a1, j1: b1 });
+      }
+    }
+    return out;
+  }
+  private readonly subRaw = new Float32Array(HORIZON_TILE * HORIZON_TILE);
+
   private layEdits(heights: HeightEdits, raw: Float32Array, out: Float32Array, x0: number, z0: number, w: number, h: number): void {
     const a = this.lay;
     a.raw = raw;

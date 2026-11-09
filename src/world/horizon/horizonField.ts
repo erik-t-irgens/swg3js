@@ -16,7 +16,8 @@ import type { HeightEdits } from '../../swg/terrain/heightEdits.ts';
 import { DETAIL_TILE, STRIP_TILES, clipRect, freshRects, layerMeans, normalsRect, poleTiles, pyramidRelay, windowPlace, windowTiles, wrapPieces, type DecodedBake, type IndexRect, type RgbaRegion, type TileTables, type WindowPlace } from './horizonDecode.ts';
 import { HORIZON_BIN, HORIZON_JSON, readHorizonHeader, type HorizonHeader } from './horizonFile.ts';
 import { HORIZON_TUNE, HORIZON_VIEWS, HoleGrid, LEAF, PATCH, RingSelector, bakeHeightAt, cameraFrustum, newReachRules, newRingSurface, reachRules, ringLevelOf, ringSurfaceAt, type MinMaxPyramid, type ReachRules, type RingAsk, type RingSurface } from './horizonMath.ts';
-import { HeightOverlay, REGEN_STEP, overridesOf, regenPlan, samplesIn, type RawRect, type SampleRect } from './horizonOverlay.ts';
+import { HORIZON_TILE, HeightOverlay, REGEN_STEP, overridesOf, regenPlan, samplesIn, type RawRect, type SampleRect } from './horizonOverlay.ts';
+import { PAINT_TILE, paintTileOf } from '../../swg/terrain/groundPaint.ts';
 import { makeRingUniforms, patchGeometry, ringMaterial, ringMesh, ringMipOffset, skirtGeometry, type RingUniforms } from './horizonRings.ts';
 import { SHAPE_BLOCK, SHAPE_EMPTY, ShapeWindow, type ShapeSource } from './shapeWindow.ts';
 import { keepUploadRange, type UploadRange } from '../uploadRange.ts';
@@ -263,6 +264,11 @@ export interface OverlayStores {
 export type PoleGenerate = (startX: number, startZ: number, n: number, step: number) => Promise<{ heights: Float32Array; shaders: Int32Array; children: Uint8Array; colors: Uint8Array } | null>;
 
 /** A rectangle to make again and whether its heights moved too (a dropped building's ground does; the paint and Life Day do not). */
+/** A course's piece waiting to be laid: a rectangle of the raw frame inside one horizon tile, and that tile's key. */
+interface CoursePiece extends RawRect {
+  key: number;
+}
+
 export interface RegenAsk extends RawRect {
   heights: boolean;
 }
@@ -428,6 +434,39 @@ export class HorizonField {
   /** The worker's answers to the overlays by id. */
   private readonly overlayWait = new Map<number, (r: { fine: RgbaRegion; coarse: RgbaRegion } | null) => void>();
   private nextOverlay = 3;
+
+  // ---------------------------------------------------------------- W4: the edits followed live (DESIGN.md §6)
+  /** The clock the live steps read (the tests move it); read only while something waits, a clock read being a number made. */
+  now: () => number = () => performance.now();
+  /**
+   * What the live edits came to, for the console (`horizon()`): relays laid (`relays`, the samples they wrote), flagged
+   * copies that made mips (`mips`), a course's pieces laid and waiting, the paint's tiles made again, named again while on
+   * their way (`merged`, asked once) or after their grid came back (`again`, asked once more).
+   */
+  readonly live = { relays: 0, samples: 0, mips: 0, coursePieces: 0, courseWaiting: 0, courseMerged: 0, paintTiles: 0, merged: 0, again: 0, regenWaiting: 0 };
+  /** The textures whose mips a region upload leaves stale (the fine normals, the albedos), each with its 1-texel stand-in and whether its mips are stale. */
+  private readonly mipped: THREE.DataTexture[] = [];
+  private readonly mipStale: boolean[] = [];
+  private readonly mipTexel: ({ src: THREE.DataTexture; at: THREE.Vector2 } | null)[] = [];
+  private mipsStale = 0;
+  private mipsAt = Number.NEGATIVE_INFINITY;
+  /** The edit is over (a stroke's end, a course's pieces all laid, a paint's tiles all made): the mips made at the next step whatever the time. */
+  private mipsOwed = false;
+  /** The tiles a relay laid (`HeightOverlay.layRect`'s answer, kept). */
+  private readonly laidTiles: SampleRect[] = [];
+  /**
+   * A course's change, cut into pieces by horizon tile and laid nearest the eye first within `liveMs` a frame; the stores
+   * they read. One piece a tile at most (W4's review round): a held drag hands over its edges' old and new rectangles at
+   * every preview tick, and a rectangle meeting a tile that already waits grows that tile's piece (`courseByTile`).
+   */
+  private readonly coursePieces: CoursePiece[] = [];
+  private readonly courseByTile = new Map<number, CoursePiece>();
+  private liveStores: OverlayStores | null = null;
+  /** The paint's 512 m tiles to make again, in order; each one's state: 1 waiting, 2 its grid asked, 3 composed; named again while 3, made once more. */
+  private readonly paintQueue: number[] = [];
+  private readonly paintState = new Map<number, number>();
+  private readonly paintAgain = new Set<number>();
+  private paintRunning = false;
   constructor(world: string, centre: { x: number; z: number }, shift: GroundShift) {
     this.world = world;
     this.centre = centre;
@@ -507,6 +546,14 @@ export class HorizonField {
       // the worker's to make again; the heights' own arrays stay (Light and shadow's march reads them, §2.8), the atlas
       // put on the card from them is let go too.
       for (const t of this.textures) letGo(t);
+      // W4 (§2.13): no region upload makes mips after this first whole one (three's `copyTextureToTexture` makes the whole
+      // chain whenever the destination asks for it); a flagged 1-texel copy makes them, at most every `mipsEvery`.
+      for (const t of [fn, al, cal]) {
+        t.generateMipmaps = false;
+        this.mipped.push(t);
+        this.mipStale.push(false);
+        this.mipTexel.push(null);
+      }
     }
     this.renderer = renderer;
     this.bind(session);
@@ -547,7 +594,186 @@ export class HorizonField {
     this.overlays.late++;
     // The shape window's blocks taken again (wave 3b): the near ground's own are laid again under the late file.
     this.shape?.forget();
+    this.mipsOwed = true;
     return this.layHeights(stores, null);
+  }
+
+  /**
+   * W4 (DESIGN.md §6): the heights under a rectangle of the raw frame laid again as they are made (a sculpt stroke's stamp,
+   * an undo, a heights file landed): the fine samples it holds (grown by `grow` metres, a course's widening) laid from raw with
+   * the stores as they stand (`HeightOverlay.layRect`), their normals and a sample round them, the pyramid's leaves and the
+   * card's texels made again (no mips: `stepMips`), and the shape window's blocks there laid again (`ShapeWindow.relayRect`).
+   * `end` says the edit is over (its mips made at the next step). Answers the samples it wrote. A stamp's work.
+   */
+  relay(x0: number, z0: number, x1: number, z1: number, stores: OverlayStores, grow = 0, end = false): number {
+    if (this.state.state !== 'ready' || this.disposed) return 0;
+    const h = this.header;
+    const fine = this.fineH;
+    if (!h || !fine) return 0;
+    this.overlay ??= new HeightOverlay(h.fine);
+    const r = samplesIn(h.fine, { x0: Math.min(x0, x1) - grow, z0: Math.min(z0, z1) - grow, x1: Math.max(x0, x1) + grow, z1: Math.max(z0, z1) + grow });
+    let n = 0;
+    // A tile at a time (W4's review round): a union of two edits far apart (a landed file's, an undo's) is laid, normalled
+    // and put on the card tile by tile, never as one box over the untouched tiles between them.
+    if (r) {
+      for (const t of this.overlay.layRect(fine, stores.heights, stores.course, r, this.laidTiles)) {
+        this.heightsMoved(t, null);
+        n += (t.i1 - t.i0 + 1) * (t.j1 - t.j0 + 1);
+      }
+    }
+    this.shape?.relayRect(x0, z0, x1, z1);
+    this.live.relays++;
+    this.live.samples += n;
+    if (end) this.mipsOwed = true;
+    return n;
+  }
+
+  /**
+   * W4: a course's change (its edges' dirty rectangles in the raw frame, `CourseCarve.rects`) cut into pieces of at most a
+   * horizon tile each, grown by the far-grid widening (half the bake's step), and laid over the bake nearest the eye first
+   * within `liveMs` a frame (`stepCourse`). The stores read as each piece is laid.
+   */
+  courseLater(rects: readonly RawRect[], n: number, stores: OverlayStores): number {
+    if (this.state.state !== 'ready' || this.disposed || !this.header) return 0;
+    this.liveStores = stores;
+    const L = this.header.fine;
+    const span = HORIZON_TILE * L.step;
+    const grow = L.step / 2;
+    const before = this.coursePieces.length;
+    for (let k = 0; k < n; k++) {
+      const r = rects[k];
+      const lx = Math.min(r.x0, r.x1) - grow;
+      const hx = Math.max(r.x0, r.x1) + grow;
+      const lz = Math.min(r.z0, r.z1) - grow;
+      const hz = Math.max(r.z0, r.z1) + grow;
+      if (!(lx <= hx && lz <= hz)) continue;
+      // Pieces by the horizon tiles of the lattice's own origin (a kilometre-long edge is several frames' work, never one).
+      for (let tz = Math.floor((lz - L.z0) / span); tz <= Math.floor((hz - L.z0) / span); tz++) {
+        for (let tx = Math.floor((lx - L.x0) / span); tx <= Math.floor((hx - L.x0) / span); tx++) {
+          const px0 = Math.max(lx, L.x0 + tx * span);
+          const px1 = Math.min(hx, L.x0 + (tx + 1) * span);
+          const pz0 = Math.max(lz, L.z0 + tz * span);
+          const pz1 = Math.min(hz, L.z0 + (tz + 1) * span);
+          if (!(px0 <= px1 && pz0 <= pz1)) continue;
+          // One piece a tile: a tile already waiting grows its piece (each is laid from raw with the stores as they stand
+          // when it is laid, so the grown piece lays both rectangles as they now are).
+          const key = (tz + 32768) * 65536 + (tx + 32768);
+          const p = this.courseByTile.get(key);
+          if (p) {
+            p.x0 = Math.min(p.x0, px0);
+            p.z0 = Math.min(p.z0, pz0);
+            p.x1 = Math.max(p.x1, px1);
+            p.z1 = Math.max(p.z1, pz1);
+            this.live.courseMerged++;
+          } else {
+            const np: CoursePiece = { x0: px0, z0: pz0, x1: px1, z1: pz1, key };
+            this.coursePieces.push(np);
+            this.courseByTile.set(key, np);
+          }
+        }
+      }
+    }
+    this.live.courseWaiting = this.coursePieces.length;
+    return this.coursePieces.length - before;
+  }
+
+  /**
+   * W4: a frame's share of a course's change, nearest the eye first, within `liveMs` (one piece at the least); once nothing
+   * waits, its mips owed. Nothing read, nothing made, while none waits.
+   */
+  private stepCourse(): void {
+    const q = this.coursePieces;
+    if (q.length === 0) return;
+    const stores = this.liveStores;
+    if (!stores) {
+      q.length = 0;
+      this.courseByTile.clear();
+      return;
+    }
+    const t0 = this.now();
+    const ex = this.eyeRaw[0];
+    const ez = this.eyeRaw[1];
+    do {
+      let best = 0;
+      let bd = Number.POSITIVE_INFINITY;
+      for (let k = 0; k < q.length; k++) {
+        const r = q[k];
+        const dx = (r.x0 + r.x1) * 0.5 - ex;
+        const dz = (r.z0 + r.z1) * 0.5 - ez;
+        const d = dx * dx + dz * dz;
+        if (d < bd) {
+          bd = d;
+          best = k;
+        }
+      }
+      const r = q[best];
+      q[best] = q[q.length - 1];
+      q.length--;
+      this.courseByTile.delete(r.key);
+      this.relay(r.x0, r.z0, r.x1, r.z1, stores, 0, false);
+      this.live.coursePieces++;
+    } while (q.length > 0 && this.now() - t0 < HORIZON_TUNE.liveMs);
+    this.live.courseWaiting = q.length;
+    if (q.length === 0) this.mipsOwed = true;
+  }
+
+  /**
+   * W4: one block of the near ground's cache laid again (the race drawer's budgeted relay of a course's change, a block at a
+   * time): the shape window's block there taken again from it, which the field's own piece may have copied before it was laid.
+   */
+  shapeRelay(x0: number, z0: number, x1: number, z1: number): void {
+    if (this.state.state === 'ready') this.shape?.relayRect(x0, z0, x1, z1);
+  }
+
+  /**
+   * W4: the paint's 512 m tiles made again as they land (a stroke let go, an undo, a file landed): each asked of the live
+   * generator once however many landings name it before its grid comes back (the terrain asks a grid older than the paint
+   * over it again itself, `staleGrid`'s rule), and once more if one names it after (its grid may predate that paint); their
+   * albedo and the composition window's tiles made again (`regenerate`'s own path, a tile at a time). Answers how many were
+   * queued anew.
+   */
+  paintTiles(keys: Iterable<number>, gen: PoleGenerate, stores: OverlayStores | null): number {
+    if (this.state.state !== 'ready' || this.disposed) return 0;
+    let queued = 0;
+    for (const k of keys) {
+      const st = this.paintState.get(k);
+      if (st === undefined) {
+        this.paintState.set(k, 1);
+        this.paintQueue.push(k);
+        queued++;
+      } else if (st === 3) {
+        this.paintAgain.add(k);
+        this.live.again++;
+      } else this.live.merged++;
+    }
+    this.live.regenWaiting = this.paintState.size;
+    if (queued && !this.paintRunning) void this.runPaint(gen, stores);
+    return queued;
+  }
+
+  /** The paint's tiles made again one at a time, in the order they were named. */
+  private async runPaint(gen: PoleGenerate, stores: OverlayStores | null): Promise<void> {
+    this.paintRunning = true;
+    try {
+      while (this.paintQueue.length && !this.disposed) {
+        const key = this.paintQueue.shift()!;
+        this.paintState.set(key, 2);
+        const t = paintTileOf(key);
+        const ask: RegenAsk = { x0: t.tx * PAINT_TILE, z0: t.tz * PAINT_TILE, x1: (t.tx + 1) * PAINT_TILE, z1: (t.tz + 1) * PAINT_TILE, heights: false };
+        await this.regenOne(ask, gen, stores, () => this.paintState.set(key, 3));
+        this.paintState.delete(key);
+        this.live.paintTiles++;
+        if (this.paintAgain.delete(key)) {
+          this.paintState.set(key, 1);
+          this.paintQueue.push(key);
+        }
+        this.live.regenWaiting = this.paintState.size;
+      }
+    } finally {
+      this.paintRunning = false;
+      this.mipsOwed = true;
+      this.live.regenWaiting = this.paintState.size;
+    }
   }
 
   /** The samples of a rectangle moved: their normals (and a sample round them), the pyramid's leaves and, once on the card, the textures. */
@@ -576,7 +802,10 @@ export class HorizonField {
     }
   }
 
-  /** A rectangle of texels put on the card in place (`copyTextureToTexture` from a stand-in of the rectangle; mips made again). */
+  /**
+   * A rectangle of texels put on the card in place (`copyTextureToTexture` from a stand-in of the rectangle, never bound),
+   * making no mips (W4: `stepMips` makes them, at most every `mipsEvery`).
+   */
   private upload(dst: THREE.DataTexture, data: ArrayBufferView, i0: number, j0: number, w: number, h: number, format: THREE.PixelFormat, type: THREE.TextureDataType, srgb = false): void {
     const r = this.renderer;
     if (!r || !w || !h || this.disposed) return;
@@ -586,6 +815,57 @@ export class HorizonField {
     r.copyTextureToTexture(src, dst, null, new THREE.Vector2(i0, j0));
     src.dispose();
     this.overlays.uploads++;
+    // W4: its mips stale until the next flagged copy, which writes this rectangle's first texel back where it now stands.
+    const k = this.mipped.indexOf(dst);
+    if (k < 0) return;
+    const per = (data as unknown as { length: number }).length / (w * h);
+    let tx = this.mipTexel[k];
+    if (!tx) {
+      const one = dst.type === THREE.FloatType ? new Float32Array(per) : new Uint8Array(per);
+      const t1 = new THREE.DataTexture(one as never, 1, 1, format, type);
+      t1.unpackAlignment = 1;
+      if (srgb) t1.colorSpace = THREE.SRGBColorSpace;
+      tx = this.mipTexel[k] = { src: t1, at: new THREE.Vector2() };
+    }
+    const d1 = tx.src.image.data as unknown as { [i: number]: number };
+    const d0 = data as unknown as { [i: number]: number };
+    for (let c = 0; c < per; c++) d1[c] = d0[c];
+    tx.at.set(i0, j0);
+    if (!this.mipStale[k]) {
+      this.mipStale[k] = true;
+      this.mipsStale++;
+    }
+  }
+
+  /**
+   * W4: the stale mips made, at most every `mipsEvery` while an edit is held and at the next step once it is over: one
+   * flagged 1-texel copy a texture (its last uploaded rectangle's first texel written back where it stands, the destination
+   * asking for mips for that call alone). Nothing read, nothing made, while none is stale.
+   */
+  private stepMips(): void {
+    if (this.mipsStale === 0) return;
+    const t = this.now();
+    if (!this.mipsOwed && t - this.mipsAt < HORIZON_TUNE.mipsEvery) return;
+    this.mipsAt = t;
+    this.mipsOwed = false;
+    const r = this.renderer;
+    for (let k = 0; k < this.mipped.length; k++) {
+      if (!this.mipStale[k]) continue;
+      this.mipStale[k] = false;
+      const tx = this.mipTexel[k];
+      if (!r || !tx || this.disposed) continue;
+      const dst = this.mipped[k];
+      dst.generateMipmaps = true;
+      r.copyTextureToTexture(tx.src, dst, null, tx.at);
+      dst.generateMipmaps = false;
+      this.live.mips++;
+    }
+    this.mipsStale = 0;
+  }
+
+  /** W4: the edit is over: the stale mips made at the next step whatever the time (a stroke's end, a late file, a paint's tiles all made). */
+  editEnd(): void {
+    this.mipsOwed = true;
   }
 
   /**
@@ -599,14 +879,31 @@ export class HorizonField {
     const h = this.header;
     if (!h || this.state.state !== 'ready') return;
     for (const a of asks) {
+      await this.regenOne(a, gen, stores);
+      if (this.disposed) return;
+    }
+    // W4: the albedos' mips made at the next step (their rectangles went up with none).
+    this.mipsOwed = true;
+  }
+
+  /**
+   * One rectangle made again from the live generator (`regenerate`'s step, and the paint's live tiles, W4): its grid asked,
+   * `generated` told once it is back (the paint's queue names a tile named again after that), its overrides composed in the
+   * decode worker and put on the card.
+   */
+  private async regenOne(a: RegenAsk, gen: PoleGenerate, stores: OverlayStores | null, generated?: () => void): Promise<void> {
+    const h = this.header;
+    if (!h || this.state.state !== 'ready') return;
+    {
       const p = regenPlan(h.colour, a);
-      if (!p) continue;
+      if (!p) return;
       this.overlays.regenAsked++;
       const g = await gen(p.startX, p.startZ, p.n, REGEN_STEP);
       if (this.disposed) return;
+      generated?.();
       if (!g) {
         this.overlays.regenFailed++;
-        continue;
+        return;
       }
       if (a.heights && this.overlay && this.fineH) {
         const s = samplesIn(h.fine, a);
@@ -631,7 +928,7 @@ export class HorizonField {
       this.windowFails = 0;
       if (!answer) {
         this.overlays.regenFailed++;
-        continue;
+        return;
       }
       if (this.albedo) this.upload(this.albedo, answer.fine.rgba, answer.fine.i0, answer.fine.j0, answer.fine.w, answer.fine.h, THREE.RGBAFormat, THREE.UnsignedByteType, true);
       if (this.coarseAlbedo) this.upload(this.coarseAlbedo, answer.coarse.rgba, answer.coarse.i0, answer.coarse.j0, answer.coarse.w, answer.coarse.h, THREE.RGBAFormat, THREE.UnsignedByteType, true);
@@ -927,8 +1224,18 @@ export class HorizonField {
         t.image = { data, width: t.image.width, height: t.image.height } as never;
         t.needsUpdate = true;
         if (this.renderer) {
+          // A whole upload makes the chain (W4: the textures keep `generateMipmaps` false between, for the region uploads).
+          t.generateMipmaps = true;
           this.renderer.initTexture(t);
+          t.generateMipmaps = false;
           letGo(t);
+          // Its chain is whole and fresh: a flagged copy still owed would write a texel kept from before over it (W4's
+          // review round), so it owes none.
+          const k = this.mipped.indexOf(t);
+          if (k >= 0 && this.mipStale[k]) {
+            this.mipStale[k] = false;
+            this.mipsStale--;
+          }
         }
       }
       this.windowWork.retunes++;
@@ -1177,6 +1484,16 @@ export class HorizonField {
     // The composition window kept round the eye: its strips once the eye is `STRIP_TILES` tiles off its middle or an overlay
     // made poles again, whole when the distance's side moved, a retune when the ground's knobs moved (nothing asked, nothing made).
     if (this.worker && !this.windowAsked) this.askWindow();
+    this.stepLive();
+  }
+
+  /**
+   * W4: a frame's share of the edits followed live: a course's change laid a frame's share at a time, and the mips its
+   * uploads left stale made at most every `mipsEvery` (nothing read, nothing made, while nothing waits). The frame's own call.
+   */
+  stepLive(): void {
+    this.stepCourse();
+    this.stepMips();
   }
 
   /** The shape window a frame: stood round the eye, its due blocks put on the card (all at once after a far move), its uniforms written. */
@@ -1314,5 +1631,15 @@ export class HorizonField {
     this.tintTex?.dispose();
     this.winTex = this.tintTex = null;
     this.session = null;
+    // W4: the live edits' queues and the mips' 1-texel stand-ins let go.
+    for (const t of this.mipTexel) t?.src.dispose();
+    this.mipped.length = this.mipStale.length = this.mipTexel.length = 0;
+    this.mipsStale = 0;
+    this.coursePieces.length = 0;
+    this.courseByTile.clear();
+    this.paintQueue.length = 0;
+    this.paintState.clear();
+    this.paintAgain.clear();
+    this.liveStores = null;
   }
 }

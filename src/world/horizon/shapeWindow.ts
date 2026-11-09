@@ -51,8 +51,20 @@ export const SHAPE_CACHE_PER_FRAME = 48;
 export interface ShapeSource {
   /** The near ground's cached block (bx, bz)'s 32 by 32 own poles from raw (bx·64, bz·64), as laid, into `out`; false when not cached. */
   cached(bx: number, bz: number, out: Float32Array): boolean;
-  /** The block made by the live generator and laid as the near ground lays a block, its own 32 by 32 poles; null when it cannot now (no worker). */
-  make(bx: number, bz: number): Promise<Float32Array | null> | null;
+  /**
+   * The block made by the live generator and laid as the near ground lays a block, its own 32 by 32 poles; null when it
+   * cannot now (no worker). W4: with the raw grid it was laid from beside them (`ShapeMade`), so an edit made later lays it
+   * again from raw with no worker (`lay`).
+   */
+  make(bx: number, bz: number): Promise<Float32Array | ShapeMade | null> | null;
+  /** W4: a block `make` handed back laid again from its raw grid with the edits in force now, its own 32 by 32 poles into `out`. */
+  lay?(bx: number, bz: number, raw: Float32Array, out: Float32Array): void;
+}
+
+/** A block the live generator made (W4): its own poles as laid, and the raw grid they were laid from. */
+export interface ShapeMade {
+  inner: Float32Array;
+  raw: Float32Array;
 }
 
 /** Slot states. */
@@ -90,8 +102,14 @@ export class ShapeWindow {
   private eyeBx = 0;
   private eyeBz = 0;
   made = 0;
-  /** For the console: blocks copied from the near ground's cache, made by the worker, answers dropped (moved past), nulls. */
-  readonly counts = { cached: 0, generated: 0, dropped: 0, failed: 0, moves: 0 };
+  /**
+   * For the console: blocks copied from the near ground's cache, made by the worker, answers dropped (moved past), nulls;
+   * W4: blocks laid again under an edit (`relaid`: copied again from the cache, or laid from a kept raw grid) and blocks an
+   * edit could do neither for, asked again (`reasked`).
+   */
+  readonly counts = { cached: 0, generated: 0, dropped: 0, failed: 0, moves: 0, relaid: 0, reasked: 0 };
+  /** W4: the raw grid each slot the worker made was laid from (null where its block came from the cache), by slot. */
+  private readonly raws: (Float32Array | null)[];
   source: ShapeSource | null = null;
   disposed = false;
 
@@ -107,6 +125,7 @@ export class ShapeWindow {
     this.dirtyQ = new Int32Array(B * B);
     this.isDirty = new Uint8Array(B * B);
     this.scratch = new Float32Array(SHAPE_BLOCK * SHAPE_BLOCK);
+    this.raws = new Array<Float32Array | null>(B * B).fill(null);
     const offs: [number, number, number][] = [];
     const h = B >> 1;
     for (let dz = -h; dz < B - h; dz++) for (let dx = -h; dx < B - h; dx++) offs.push([dx, dz, dx * dx + dz * dz]);
@@ -182,6 +201,7 @@ export class ShapeWindow {
         this.slotX[s] = bx;
         this.slotZ[s] = bz;
         this.state[s] = WANTED;
+        this.raws[s] = null;
         this.clear(s);
         if (!far) this.markDirty(s);
       }
@@ -226,6 +246,7 @@ export class ShapeWindow {
         if (probes <= 0) continue;
         probes--;
         if (src.cached(bx, bz, this.scratch)) {
+          this.raws[s] = null;
           this.put(s, this.scratch);
           this.counts.cached++;
           continue;
@@ -256,7 +277,7 @@ export class ShapeWindow {
     );
   }
 
-  private landed(s: number, bx: number, bz: number, h: Float32Array | null): void {
+  private landed(s: number, bx: number, bz: number, h: Float32Array | ShapeMade | null): void {
     if (this.asked === s) this.asked = -1;
     if (this.disposed) return;
     const still = this.slotX[s] === bx && this.slotZ[s] === bz && this.state[s] === ASKED;
@@ -264,8 +285,14 @@ export class ShapeWindow {
     else if (!h) {
       this.counts.failed++;
       this.state[s] = PENDING;
-    } else {
+    } else if (h instanceof Float32Array) {
+      this.raws[s] = null;
       this.put(s, h);
+      this.counts.generated++;
+    } else {
+      // The raw grid kept beside it (W4): an edit made later lays the block again from it with no worker.
+      this.raws[s] = h.raw;
+      this.put(s, h.inner);
       this.counts.generated++;
     }
     // The next nearest block asked at once (a wanted one looked for in the cache first): the worker makes the window as fast
@@ -396,6 +423,55 @@ export class ShapeWindow {
     return u >= v ? h00 + u * (h10 - h00) + v * (h11 - h10) : h00 + v * (h01 - h00) + u * (h11 - h01);
   }
 
+  /**
+   * W4 (DESIGN.md §6): the blocks whose own poles a rectangle of the raw frame reaches laid again as they are made (a
+   * stroke's stamp, a course's piece, an undo, a file landed): a made block taken again from the near ground's cache (which
+   * its own relay laid first), else laid again from the raw grid the worker made it from (`ShapeSource.lay`), else asked of
+   * the worker again, its heights standing until the answer lands; a block on its way is laid as it lands, with the edits
+   * then in force; one not made yet waits to be made. Put on the card a few a frame as made blocks are (`takeDirty`).
+   * Answers how many it laid. A stamp's work: the cache's copy and the lay allocate only the lay's own copy of a raw grid.
+   */
+  relayRect(x0: number, z0: number, x1: number, z1: number): number {
+    const src = this.source;
+    if (!src || this.disposed || !this.placed) return 0;
+    const BW = SHAPE_BLOCK * this.step;
+    // A pole of reach each way (an edit's rectangle is a pole's; a block's own poles end a pole short of the next block).
+    const lx = Math.min(x0, x1) - this.step;
+    const hx = Math.max(x0, x1) + this.step;
+    const lz = Math.min(z0, z1) - this.step;
+    const hz = Math.max(z0, z1) + this.step;
+    const B = this.blocks;
+    const bx0 = Math.max(this.bx0, Math.floor(lx / BW));
+    const bx1 = Math.min(this.bx0 + B - 1, Math.floor(hx / BW));
+    const bz0 = Math.max(this.bz0, Math.floor(lz / BW));
+    const bz1 = Math.min(this.bz0 + B - 1, Math.floor(hz / BW));
+    let laid = 0;
+    for (let bz = bz0; bz <= bz1; bz++) {
+      for (let bx = bx0; bx <= bx1; bx++) {
+        const s = this.slotOf(bx, bz);
+        if (this.slotX[s] !== bx || this.slotZ[s] !== bz || this.state[s] !== MADE) continue;
+        const raw = this.raws[s];
+        if (src.cached(bx, bz, this.scratch)) {
+          this.raws[s] = null;
+          this.put(s, this.scratch);
+        } else if (raw && src.lay) {
+          src.lay(bx, bz, raw, this.scratch);
+          this.put(s, this.scratch);
+        } else {
+          // Neither: asked of the worker again, the heights it holds standing meanwhile.
+          this.state[s] = WANTED;
+          this.made--;
+          this.counts.reasked++;
+          continue;
+        }
+        laid++;
+      }
+    }
+    this.counts.relaid += laid;
+    if (this.made < B * B && this.asked < 0) this.pump(SHAPE_CACHE_PER_FRAME);
+    return laid;
+  }
+
   /** Every made block let go (a late heights or course file: the near ground's own blocks are laid again, so the window takes them again). */
   forget(): void {
     const B = this.blocks;
@@ -442,11 +518,20 @@ export function shapeSourceOf(t: ShapeTerrain): ShapeSource {
       const np = t.sampler.numberOfPoles;
       return t.generatePoles(s.x, s.z, np, t.sampler.poleStep).then((b) => {
         if (!b) return null;
+        // The raw grid kept beside the laid poles (W4): an edit made later lays the block again from it (`lay`).
+        const raw = b.heights.slice();
         t.sampler.layBlockHeights(bx, bz, b.heights);
         const out = new Float32Array(SHAPE_BLOCK * SHAPE_BLOCK);
         for (let j = 0; j < SHAPE_BLOCK; j++) for (let i = 0; i < SHAPE_BLOCK; i++) out[j * SHAPE_BLOCK + i] = b.heights[(j + BLOCK_OFFSET) * np + i + BLOCK_OFFSET];
-        return out;
+        return { inner: out, raw };
       });
+    },
+    lay: (bx, bz, raw, out) => {
+      // From raw every time, by the sampler's own rule for a block entering the cache (the carve, then the edits over it).
+      const g = raw.slice();
+      t.sampler.layBlockHeights(bx, bz, g);
+      const np = t.sampler.numberOfPoles;
+      for (let j = 0; j < SHAPE_BLOCK; j++) for (let i = 0; i < SHAPE_BLOCK; i++) out[j * SHAPE_BLOCK + i] = g[(j + BLOCK_OFFSET) * np + i + BLOCK_OFFSET];
     },
   };
 }

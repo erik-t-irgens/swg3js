@@ -172,8 +172,10 @@ else {
     let fromCache = 0;
     const out = new Float32Array(32 * 32);
     for (const [bx, bz] of [[2, 2], [3, 2], [-5, 7], [10, -3]]) {
-      const h = await source.make(bx, bz);
-      if (!h) continue;
+      const got = await source.make(bx, bz);
+      if (!got) continue;
+      // W4: the laid poles with the raw grid they were laid from beside them.
+      const h = got instanceof Float32Array ? got : got.inner;
       made++;
       // The near ground's own block (generated and laid as it enters the cache), its own poles.
       for (let j = 0; j < 32; j++) for (let i = 0; i < 32; i++) if (h[j * 32 + i] !== poleHeight(swg, bx * 64 + i * 2, bz * 64 + j * 2)) off++;

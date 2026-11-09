@@ -69,6 +69,7 @@ import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, familyKeepFor, FAR_TILE_DROP, Terrain } from './terrain';
 import { HORIZON_TUNE, HoleGrid, RingHole, ringCardSurface, ringHoleMoved } from './horizon/horizonMath.ts';
+import { RingCardDebt, horizonPaintKeys, type CardRect } from './horizon/ringCardDebt.ts';
 import { HorizonField, RingSession, copyDome, tableKnobs, type RegenAsk } from './horizon/horizonField.ts';
 import { SHAPE_SIDE, SHAPE_WANTED, shapeSourceOf } from './horizon/shapeWindow.ts';
 import { layerExtent, paintRegenAsks, seasonalExtents } from './horizon/horizonOverlay.ts';
@@ -12284,6 +12285,18 @@ export class World {
     void f.regenerate(paintRegenAsks(paint), (x, z, n, step) => swg.generatePoles(x, z, n, step), swg);
   }
 
+  /**
+   * The paint's 512 m tiles (`paintTileNumber`) made again in the far ground as they land (the horizon pass's W4): their 2 m
+   * grids asked of the live generator, each once however often named while on its way, and their albedo and composition
+   * window composed again in the decode worker. Nothing with no bake ready.
+   */
+  private horizonPaint(keys: Iterable<number>): void {
+    const f = this.horizonField;
+    const swg = this.terrain.swg;
+    if (!f || !swg || f.state.state !== 'ready') return;
+    f.paintTiles(keys, (x, z, n, step) => swg.generatePoles(x, z, n, step), swg);
+  }
+
   /** The rings and this world's bake let go (a travel, the switch back at `'tiles'`): the session's program and meshes are kept. */
   dropHorizon(): void {
     const s = this.horizonSession;
@@ -12297,6 +12310,13 @@ export class World {
 
   /** The far tiles whose far grid and tree cards stand while the rings do (W2: within `farGridRadius` tiles), by key. */
   private readonly ringCardTiles = new Set<string>();
+  /**
+   * The ring cards an edit's end owes, by tile, stood once the far ground's bake under them is laid (W4's review round: a
+   * course's pieces are laid a frame's share at a time and can still wait when the near ground's own queue is empty).
+   */
+  private readonly ringCardDebt = new RingCardDebt();
+  private readonly ringCardRect: CardRect[] = [{ x0: 0.5, z0: 0.5, x1: 0.5, z1: 0.5 }];
+  private readonly ringCardAgain = (tx: number, tz: number): void => this.farCardsAgain(tx, tz);
   /** The hole the ring cards stand round (`ringCardSurface` reads it, `stream` writes it and stands them again when it moves). */
   private readonly ringHole = new RingHole();
   private ringLastTx = Number.NaN;
@@ -12320,6 +12340,7 @@ export class World {
       this.farCards?.tileGone(tx, tz);
     }
     this.ringCardTiles.clear();
+    this.ringCardDebt.clear();
     this.ringLastTx = Number.NaN;
     this.ringLastTz = Number.NaN;
   }
@@ -12489,11 +12510,14 @@ export class World {
       // still on their way, the albedo's cells made again, the texture rectangles put on the card) and the far grids the
       // rings keep for the far cards and the race.
       overlays: f ? { ...f.overlays, layMs: Math.round(f.overlays.layMs * 10) / 10, waiting: f.overlays.regenAsked - f.overlays.regenDone - f.overlays.regenFailed, rawTilesKept: f.rawTilesKept } : null,
+      // W4: the edits followed live (relays laid under strokes, texture rectangles put up, mips made by a flagged copy, a
+      // course's pieces laid and waiting, the paint's tiles made again and waiting, and the shape window's blocks laid again).
+      live: f ? { ...f.live, uploads: f.overlays.uploads, shapeRelaid: f.shape?.counts.relaid ?? 0, shapeReasked: f.shape?.counts.reasked ?? 0, cardsOwed: this.ringCardDebt.owed.size, cardsStood: this.ringCardDebt.stood } : null,
       farGrids: { kept: this.ringCardTiles.size, radius: HORIZON_TUNE.farGridRadius },
       heightIfCached: this.terrain.swg?.horizon ? 'block, else the bake' : 'block, else a far grid',
       // `{ at: [x, z] }` (the game's frame): what heightIfCached answers there, the bake laid, and the ring's drawn surface.
       ...(opts?.at && f && this.terrain.swg
-        ? { at: { x: opts.at[0], z: opts.at[1], heightIfCached: this.terrain.heightIfCached(opts.at[0], opts.at[1], FAR_TILE, FAR_RES), bake: f.heightRaw(this.terrain.swg.toSwgX(opts.at[0]), this.terrain.swg.toSwgZ(opts.at[1])), ring: f.surfaceAt(opts.at[0], opts.at[1], Number.isFinite(this.streamPcx) ? this.streamPcx : 0, Number.isFinite(this.streamPcz) ? this.streamPcz : 0, this.viewRadius) } }
+        ? { at: { x: opts.at[0], z: opts.at[1], heightIfCached: this.terrain.heightIfCached(opts.at[0], opts.at[1], FAR_TILE, FAR_RES), bake: f.heightRaw(this.terrain.swg.toSwgX(opts.at[0]), this.terrain.swg.toSwgZ(opts.at[1])), shapeWindow: f.shape ? f.shape.heightAt(this.terrain.swg.toSwgX(opts.at[0]), this.terrain.swg.toSwgZ(opts.at[1])) : null, ring: f.surfaceAt(opts.at[0], opts.at[1], Number.isFinite(this.streamPcx) ? this.streamPcx : 0, Number.isFinite(this.streamPcz) ? this.streamPcz : 0, this.viewRadius) } }
         : {}),
     };
   }
@@ -12851,8 +12875,9 @@ export class World {
       return;
     } else this.terrain.heights = store;
     if (!late && !this.chunks.size) this.heightsLaidAtArrival = true;
-    if (rect.x0 <= rect.x1) this.heightsChanged(rect.x0, rect.z0, rect.x1, rect.z1, true);
-    // A file landed late reaches the far ground's bake as it reached the near ground (W2): its whole layer laid again.
+    // A file landed late reaches the far ground's bake as it reached the near ground (W2): its whole layer laid again, tile
+    // by tile (`horizonLate`), so the rectangle's own relay of the bake is left out (W4's review round: laid twice).
+    if (rect.x0 <= rect.x1) this.heightsChanged(rect.x0, rect.z0, rect.x1, rect.z1, true, Number.NaN, Number.NaN, !late);
     if (late) this.horizonLate();
   }
 
@@ -12896,7 +12921,7 @@ export class World {
    * (`stepGroundRewrite`) and replanted at `floraHz`. `end` says the stroke is over: its plantings all made again at once,
    * and its far tiles, far cards, the air raster's cells, the water's depth cells and the sun's held cascades redone.
    */
-  heightsChanged(gx0: number, gz0: number, gx1: number, gz1: number, end: boolean, fx = Number.NaN, fz = Number.NaN): void {
+  heightsChanged(gx0: number, gz0: number, gx1: number, gz1: number, end: boolean, fx = Number.NaN, fz = Number.NaN, horizon = true): void {
     const x0 = Math.min(gx0, gx1) - 2;
     const x1 = Math.max(gx0, gx1) + 2;
     const z0 = Math.min(gz0, gz1) - 2;
@@ -12906,6 +12931,11 @@ export class World {
       const r = swg.relayRect(x0, z0, x1, z1);
       this.groundWork.blocks += r.blocks;
       this.groundWork.farGrids += r.far;
+      // The far ground's bake under it laid again as it is made (the horizon pass's W4): its fine heights from raw with the
+      // stores as they stand, their normals, leaves and texels, and the shape window's blocks (taken again from the blocks
+      // just laid). Nothing with no bake ready, and nothing where the caller lays the whole bake itself (`horizon` false: a
+      // late file, `horizonLate`).
+      if (horizon) this.horizonField?.relay(swg.toSwgX(x1), swg.toSwgZ(z0), swg.toSwgX(x0), swg.toSwgZ(z1), swg, 0, end);
     }
     for (const c of this.chunks.values()) {
       if (!rectMeetsChunk(c.origin.x, c.origin.z, CHUNK_SIZE, x0, z0, x1, z1)) continue;
@@ -12942,12 +12972,40 @@ export class World {
       else this.groundWork.failed++;
       this.farCardsAgain(tx, tz);
     }
+    // With the rings in place of the far tiles (the horizon pass's W4): the far cards they stand stood again on the ground
+    // the stroke moved (they stand on the ring's own surface, which the stroke's stamps laid as they came), and the far
+    // ground's stale mips made at its next frame.
+    this.ringCardsAgainIn(s.x0, s.z0, s.x1, s.z1);
+    this.horizonField?.editEnd();
     // The one reader of the ground that does not heal by itself, and the two that heal slowly.
     this.air?.raster.forget(s.x0, s.z0, s.x1, s.z1);
     if (this.waterMaterials.length) refreshWaterDepth(s.x0, s.z0, s.x1, s.z1, this.depthHeightAt);
     this.grass?.circleChanged((s.x0 + s.x1) / 2, (s.z0 + s.z1) / 2, Math.hypot(s.x1 - s.x0, s.z1 - s.z0) / 2);
     this.shadowHold.dirtyAll();
     this.resetStrokeRect();
+  }
+
+  /**
+   * The far cards the rings stand (W2: within `farGridRadius`) whose tile's grid a game-frame rectangle meets, made again
+   * (the horizon pass's W4: a stroke's end, a course's end, a lake landed). Nothing with none standing.
+   */
+  private ringCardsAgainIn(x0: number, z0: number, x1: number, z1: number): void {
+    if (!this.ringCardTiles.size) return;
+    const r = this.ringCardRect[0];
+    r.x0 = x0;
+    r.z0 = z0;
+    r.x1 = x1;
+    r.z1 = z1;
+    this.ringCardDebt.oweIn(this.ringCardTiles, this.ringCardRect, 1, this.terrain.groundShift, FAR_TILE, FAR_TILE / FAR_RES);
+    this.standOwedRingCards();
+  }
+
+  /**
+   * The ring cards owed (`ringCardDebt`) stood again, each once, once nothing of the far ground's bake waits to be laid (a
+   * course's pieces, `HorizonField.live.courseWaiting`); asked again each frame while any is owed (`stepCourseRelay`).
+   */
+  private standOwedRingCards(): void {
+    this.ringCardDebt.release(this.horizonField?.live.courseWaiting ?? 0, this.ringCardTiles, this.ringCardAgain);
   }
 
   private resetStrokeRect(): void {
@@ -13141,6 +13199,7 @@ export class World {
     this.courseZoneList = [];
     this.courseRectN = 0;
     this.courseEndOwed = false;
+    this.ringCardDebt.clear();
     this.farDirty.clear();
     // The console's counts are this world's (`course()`'s `work`).
     const w = this.courseWork;
@@ -13257,6 +13316,8 @@ export class World {
     const swg = this.terrain.swg;
     if (swg) swg.courseLater(store.rects, n);
     else this.terrain.courseGrid?.later(store.rects, n);
+    // And the far ground's bake under them (the horizon pass's W4): laid nearest the eye within `liveMs` a frame, from raw.
+    if (swg) this.horizonField?.courseLater(store.rects, n, swg);
     this.courseWork.rects += n;
     const last: CarveRect[] = [];
     for (let k = 0; k < n; k++) {
@@ -13356,6 +13417,9 @@ export class World {
       this.courseGroundKeys.add(c.key);
       this.courseFloraKeys.add(c.key);
     }
+    // The rings' shape window takes the block just laid again (the horizon pass's W4; its own piece may have copied it first).
+    const swg = this.terrain.swg;
+    if (swg && this.horizonField) this.horizonField.shapeRelay(swg.toSwgX(x1), swg.toSwgZ(z0), swg.toSwgX(x0), swg.toSwgZ(z1));
   };
 
   /**
@@ -13379,6 +13443,8 @@ export class World {
    * Nothing at all on a frame with nothing waiting and no end owed.
    */
   private stepCourseRelay(eye: THREE.Vector3): void {
+    // The ring cards an edit's end owes, stood once the far ground's own pieces are laid (a Set's size while none is owed).
+    if (this.ringCardDebt.owed.size) this.standOwedRingCards();
     const swg = this.terrain.swg;
     const grid = this.terrain.courseGrid;
     // A plain number, read on every frame of every converted world course or none (`courseWaiting` makes a record).
@@ -13416,6 +13482,11 @@ export class World {
       if (this.waterMaterials.length) refreshWaterDepth(r.x0, r.z0, r.x1, r.z1, this.depthHeightAt);
       this.grass?.circleChanged((r.x0 + r.x1) / 2, (r.z0 + r.z1) / 2, Math.hypot(r.x1 - r.x0, r.z1 - r.z0) / 2);
     }
+    // The far cards the rings stand stood again on the carved ground (the horizon pass's W4): each tile once however many
+    // rectangles meet it, and only once the far ground's own pieces of the change are laid (`standOwedRingCards`, asked
+    // again each frame while any is owed): the near ground's queue can empty while the field's still waits.
+    if (this.ringCardTiles.size) this.ringCardDebt.oweIn(this.ringCardTiles, this.courseRects, this.courseRectN, this.terrain.groundShift, FAR_TILE, FAR_TILE / FAR_RES);
+    this.standOwedRingCards();
     this.courseRectN = 0;
     this.courseFocus.x = Number.NaN;
     this.courseFocus.z = Number.NaN;
@@ -14192,6 +14263,9 @@ export class World {
       const asked = swg.repaint(x0, z0, x1, z1);
       // A flora stroke (the fourth wave) replants the chunks under it as their grids land, whatever `follow` says.
       if (fl.length) this.floraReplantLeft += asked;
+      // The far ground's albedo and composition window over the tiles it painted made again (the horizon pass's W4), after
+      // the paint is posted, so the worker makes their grids with it (the editor hands lists, walked twice).
+      this.horizonPaint(horizonPaintKeys(false, famKeys, colKeys, null, null));
       return;
     }
     const a = this.rawToGame(x0, z0);
@@ -14373,6 +14447,10 @@ export class World {
       const asked = swg.landPaint(paletteMoved, fam, col, movedRaw, flo);
       // The flora's grids replanted as they land whatever `follow` says (a recipe paints the plants themselves).
       if (flo.size || recipesMoved) this.floraReplantLeft += asked;
+      // The far ground's albedo over the tiles that moved made again (the horizon pass's W4), and over every tile the paint
+      // holds where the palette moved (an entry's family moves every cell that names it). A flora tile moves no family.
+      const hk = horizonPaintKeys(familiesMoved, fam, col, this.groundPaint?.fam.keys() ?? null, this.groundPaint?.col.keys() ?? null);
+      if (hk.length) this.horizonPaint(hk);
     } else if ((moved || paletteMoved) && !swg && this.terrain.demShader) {
       // A real-elevation world's plants are its paint's alone: the chunks under the flora tiles that moved planted again,
       // their grass and (where a recipe did or does anything to them) their far cards; a recipe moved adds every tile the
@@ -15496,6 +15574,8 @@ export class World {
     this.air?.raster.forget(x0, z0, x1, z1);
     if (this.waterMaterials.length) refreshWaterDepth(x0, z0, x1, z1, this.depthHeightAt);
     this.forgetCameraWater();
+    // The far cards the rings stand made again under it (the horizon pass's W4): a card is dropped under the drawn water.
+    this.ringCardsAgainIn(x0, z0, x1, z1);
   }
 
   /** The roofs made again a few times a second (`LAKE_TUNE`'s clock is the roofs' own, 1 s, ours: a building stands in a tier's time). */
