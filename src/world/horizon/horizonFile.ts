@@ -56,7 +56,13 @@ export interface HorizonHeader {
 }
 
 /** The converter's own extents [ours, §2.14]: the map and this round it at the fine step, and this past it coarse. */
-export const BAKE_DEFAULTS = { margin: 1024, farMargin: 16384, fineMost: 2305, coarseStep: 64 };
+export const BAKE_DEFAULTS = { margin: 1024, farMargin: 16384, fineMost: 2305, coarseStep: 64, step: 8 };
+/**
+ * Wave h6a: the heights' steps a bake may ask for (`horizon --step=4`); the fine extent's samples a side may reach
+ * `fineMost` at 8 m and as many again for each halving (4,609 at 4 m: the same 18.4 km), past which the next step up is
+ * taken (an 8 m bake's 16 m rule, the same metres).
+ */
+export const BAKE_STEPS: readonly number[] = [4, 8, 16];
 
 const mod = (v: number, m: number): number => ((v % m) + m) % m;
 
@@ -115,8 +121,9 @@ export function readCardsHeader(json: unknown, bake: Pick<HorizonHeader, 'source
 /**
  * Where a world's bake stands (§2.2), by its map's width and its layout's centre: the heights on the ground's lattice
  * (game x = shift.x + 8i, so raw x = centre.x - shift.x - 8i: a raw value congruent to centre.x - shift.x modulo 8), at
- * 8 m, or 16 m where 8 m would pass `fineMost` samples a side; the families at every 8 m pattern corner whatever the
- * step; the colour at the heights' step on raw multiples of it (cells centred on pattern corners); the coarse heights on
+ * 8 m, or 16 m where 8 m would pass `fineMost` samples a side, or 4 m where `step: 4` asks for it (wave h6a); the families
+ * at every 8 m pattern corner whatever the step; the colour at the heights' step (never under 8 m) on raw multiples of it
+ * (cells centred on pattern corners); the coarse heights on
  * the heights' own lattice every 64 m, so every eighth fine sample is a coarse one.
  */
 export function planBake(mapWidth: number, centre: { x: number; z: number }, o: Partial<typeof BAKE_DEFAULTS> = {}): { fine: Lattice; ground: Lattice; colour: Lattice; coarse: Lattice; wide: boolean } {
@@ -139,13 +146,26 @@ export function planBake(mapWidth: number, centre: { x: number; z: number }, o: 
   const at8 = across(8, rx);
   const wide = at8.n > fineMost;
   if (wide) step = 16;
-  const fx = across(step, rx);
-  const fz = across(step, rz);
+  let fx = across(step, rx);
+  let fz = across(step, rz);
+  // Wave h6a (`--step=4`): the heights every 4 m over the very extent an 8 m bake has, from its first sample, so every
+  // other sample is the 8 m bake's own and the coarse lattice below stands where it stands for 8 m. `fineMost` raised as
+  // the step needs: 2 (fineMost - 1) + 1 samples a side at 4 m are the same metres as `fineMost` at 8 m, so a world the
+  // 8 m rule keeps at 8 m is baked at 4 m and a wider one keeps the 16 m rule.
+  if (o.step === 4 && !wide) {
+    step = 4;
+    const az = across(8, rz);
+    fx = { x0: at8.x0, n: 2 * (at8.n - 1) + 1 };
+    fz = { x0: az.x0, n: 2 * (az.n - 1) + 1 };
+  }
   const fine: Lattice = { x0: fx.x0, z0: fz.x0, step, nx: fx.n, nz: fz.n };
   const gx = across(8, 0);
   const ground: Lattice = { x0: gx.x0, z0: gx.x0, step: 8, nx: gx.n, nz: gx.n };
-  const cx = across(step, 0);
-  const colour: Lattice = { x0: cx.x0, z0: cx.x0, step, nx: cx.n, nz: cx.n };
+  // The colour at the heights' step, never finer than 8 m (a 4 m bake keeps the 8 m cells' means: the near look's tint
+  // is the composition window's within its reach, and the albedo past it is 8 m's).
+  const cs8 = Math.max(step, 8);
+  const cx = across(cs8, 0);
+  const colour: Lattice = { x0: cx.x0, z0: cx.x0, step: cs8, nx: cx.n, nz: cx.n };
   const k = Math.ceil((farMargin - margin) / cs);
   const c0x = fine.x0 - cs * k;
   const c0z = fine.z0 - cs * k;
@@ -228,8 +248,10 @@ const isLattice = (l: unknown, heights: boolean): l is HeightLattice => {
  * file's end. The words name the command that makes another.
  */
 export function readHorizonHeader(json: unknown, expect: HorizonExpect, world = '<world>'): { header: HorizonHeader } | { refused: string } {
-  const again = `npm run swg -- horizon assets-private --only=${world}`;
   const h = json as Partial<HorizonHeader> | null;
+  // Wave h6a's review: a bake made at 4 m is made again at 4 m (`status`'s own words, `horizonStatusOf`), read before any check.
+  const fine = h && typeof h === 'object' ? (h.fine as { step?: unknown } | undefined) : undefined;
+  const again = `npm run swg -- horizon assets-private --only=${world}${fine && typeof fine === 'object' && fine.step === 4 ? ' --step=4' : ''}`;
   if (!h || typeof h !== 'object') return { refused: `the bake's header is not one (${again})` };
   if (typeof h.format !== 'number') return { refused: `the bake's header has no format (${again})` };
   if (h.format > HORIZON_FORMAT) return { refused: `the bake is format ${h.format}, newer than this build's ${HORIZON_FORMAT}: a newer build made it` };

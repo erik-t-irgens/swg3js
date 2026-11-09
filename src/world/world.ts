@@ -74,7 +74,7 @@ import { CARD_CIRCLE, CARD_FIELD_TUNE, CARD_KEPT, CARD_WET, CardField, CardField
 import { HORIZON_CARDS_BIN, HORIZON_CARDS_JSON, readCardsHeader } from './horizon/horizonFile.ts';
 import { RingCardDebt, horizonPaintKeys, type CardRect } from './horizon/ringCardDebt.ts';
 import { HorizonField, RingSession, copyDome, tableKnobs, type RegenAsk } from './horizon/horizonField.ts';
-import { SHAPE_SIDE, SHAPE_WANTED, shapeSourceOf } from './horizon/shapeWindow.ts';
+import { SHAPE_CHOICE, SHAPE_WANTED, shapeSourceOf } from './horizon/shapeWindow.ts';
 import { layerExtent, paintRegenAsks, seasonalExtents } from './horizon/horizonOverlay.ts';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { GENERATOR_REVISION, TERRAIN_GROUND_TUNE, lentFamilyKey, type ShaderFamily, type ShaderGroup } from '../swg/terrain/generator.ts';
@@ -12280,7 +12280,8 @@ export class World {
     const stores = swg;
     // The rings' shape window (wave 3b): the live generator's own 2 m heights round the eye, on a world of 2 m poles, in a
     // block of the heights atlas; made from the near ground's cache and the terrain worker in play.
-    if (SHAPE_WANTED && swg.sampler.poleStep === 2) field.shapeSide = SHAPE_SIDE;
+    // Wave h6a: at the side the Graphics page's Terrain shape window chose (1,024 today, or 2,048).
+    if (SHAPE_WANTED && swg.sampler.poleStep === 2) field.shapeSide = SHAPE_CHOICE.side;
     const ok = await field.load({ json: (f) => packJson(packId, f, undefined, { probe: false }), bytes: (f) => packBytes(packId, f, undefined, { probe: false }) }, ground, session, this.renderer, eye, stores);
     if (this.horizonField !== field) {
       field.dispose(null);
@@ -12303,6 +12304,20 @@ export class World {
     // A dropped building's or Life Day's heights moved under far cards that may already stand: stood again once laid.
     if (asks.some((a) => a.heights)) void done.then(() => this.horizonField === field && this.farCards?.restand());
     await Promise.race([done, new Promise<void>((r) => setTimeout(r, HORIZON_TUNE.regenWaitMs))]);
+  }
+
+  /**
+   * Wave h6a: the rings' shape window made again at the side the Graphics page's Terrain shape window now says (the game
+   * calls it behind the far ground's short curtain): the heights atlas laid again and put on the card there, the window
+   * filled in play from the near ground's cache and the terrain worker as at an arrival. Answers what it came to.
+   */
+  reshapeHorizon(): string {
+    const f = this.horizonField;
+    const swg = this.terrain.swg;
+    if (!f || f.state.state !== 'ready' || !f.shape || !swg) return f?.shape ? '' : "the shape window: none here (no rings drawn, or this world's poles are not 2 m)";
+    if (!f.resizeShape(SHAPE_CHOICE.side)) return '';
+    f.useShape(shapeSourceOf(swg));
+    return `the shape window at ${SHAPE_CHOICE.side} samples a side (${((SHAPE_CHOICE.side * 2) / 1000).toFixed(1)} km), filled as you play`;
   }
 
   /**
@@ -12732,6 +12747,10 @@ export class World {
         ? {
             on: HORIZON_TUNE.shape,
             reach: HORIZON_TUNE.shapeReach,
+            // Wave h6a: the window side chosen and the bake's own step (4 carries the 4 m level past the window with `shapeBake`).
+            choice: SHAPE_CHOICE.side,
+            bakeStep: f.header?.fine.step ?? null,
+            fromBake: HORIZON_TUNE.shapeBake && (f.header?.fine.step ?? 8) <= 4,
             finest: r ? r.finest : 0,
             ranges: r && r.finest < 0 ? { level2m: Math.round(r.r2), level4m: Math.round(r.r1), level0: Math.round(r.lod0) } : null,
             window: f.shape ? { side: f.shape.side, metres: f.shape.side * f.shape.step, made: f.shape.made, of: f.shape.blocks * f.shape.blocks, ...f.shape.counts, onCard: { ...f.shapeWork } } : SHAPE_WANTED ? 'none: this world\'s poles are not 2 m' : "none: localStorage['swg.horizon.shape'] is '0'",

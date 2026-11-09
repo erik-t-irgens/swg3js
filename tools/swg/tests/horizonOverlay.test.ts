@@ -329,7 +329,10 @@ else {
   s.useHeights(null);
   // The live generator's grid made into overrides: the bake's own corners, choices and colour cells where nothing is painted.
   const C = w.header.colour;
-  const p = regenPlan(C, { x0: C.x0 + (mi - 30) * C.step, z0: C.z0 + (mj - 30) * C.step, x1: C.x0 + (mi + 10) * C.step, z1: C.z0 + (mj + 10) * C.step })!;
+  // (Wave h6a: about the colour lattice's own middle, which a 4 m bake's heights lattice is not: its colour stays 8 m.)
+  const ci = Math.floor(C.nx / 2);
+  const cj = Math.floor(C.nz / 2);
+  const p = regenPlan(C, { x0: C.x0 + (ci - 30) * C.step, z0: C.z0 + (cj - 30) * C.step, x1: C.x0 + (ci + 10) * C.step, z1: C.z0 + (cj + 10) * C.step })!;
   const grid = await s.generatePoles(p.startX, p.startZ, p.n, 2);
   const o = overridesOf(C, p, grid!);
   let fBad = 0;
@@ -346,7 +349,7 @@ else {
   }
   ok(fBad === 0, `${w.name}: the live generator's 4 m poles over ${o.poles.n} by ${o.poles.m} are the bake's own corners and the place's hash where nothing is painted`);
   ok(cBad2 === 0, `${w.name}: and its cells' colour means the bake's own colour section (${cellN / 3} cells)`);
-  ok(samplesIn(L, { x0: L.x0, z0: L.z0, x1: L.x0 + 16, z1: L.z0 + 8 })!.i1 === 2, 'samplesIn takes the fine samples a raw rectangle holds');
+  ok(samplesIn(L, { x0: L.x0, z0: L.z0, x1: L.x0 + 2 * L.step, z1: L.z0 + L.step })!.i1 === 2, 'samplesIn takes the fine samples a raw rectangle holds');
 
   // W2's review: a dropped building's extent (`layerExtent`, parsed against a stand-in) is the extent the near ground's own
   // `TerrainSampler.addBuildingLayer` gave the same layer, placed and turned the same, over the world's own building layers.

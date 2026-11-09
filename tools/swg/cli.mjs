@@ -7905,7 +7905,7 @@ switch (cmd) {
   }
 
   case 'horizon': {
-    // <out-dir> [--only=tatooine,naboo] [--threads=N] [--margin=1024] [--far-margin=16384] [--fine-most=2305]: the far
+    // <out-dir> [--only=tatooine,naboo] [--threads=N] [--margin=1024] [--far-margin=16384] [--fine-most=2305] [--step=4]: the far
     // ground's bake (horizon.mjs) of every converted world the rings can draw, into terrain/horizon.json and
     // terrain/horizon.bin beside its terrain file: its raw heights, families and colour means from the near ground's own
     // 2 m poles. It reads only each pack's own files (no archive), lays nothing of the owner's, and writes those two
@@ -7917,8 +7917,15 @@ switch (cmd) {
     const { bakeHorizon } = await import('./horizon.mjs');
     const only = options.only ? new Set(options.only.split(',')) : null;
     const num = (k) => (options[k] !== undefined ? Number(options[k]) : undefined);
-    const o = { threads: num('threads'), margin: num('margin'), farMargin: num('far-margin'), fineMost: num('fine-most') };
+    // `--step=4` (wave h6a, the owner's "finer shape far out"): the heights every 4 m over the same extent (every other
+    // sample the 8 m bake's own; the families and colours as at 8 m), which the rings' 4 m level reads past the shape
+    // window; about four times the heights' bytes on disk, on the CPU and on the card. 8 is the default.
+    const o = { threads: num('threads'), margin: num('margin'), farMargin: num('far-margin'), fineMost: num('fine-most'), step: num('step') };
     for (const k of Object.keys(o)) if (o[k] === undefined || !Number.isFinite(o[k])) delete o[k];
+    if (o.step !== undefined && o.step !== 4 && o.step !== 8) {
+      console.error(`horizon: --step takes 4 or 8 (a world too wide for 8 m is baked at 16 m by itself), not ${options.step}`);
+      process.exit(1);
+    }
     if (flags.has('--cards-only')) o.cardsOnly = true;
     let baked = 0;
     let mb = 0;

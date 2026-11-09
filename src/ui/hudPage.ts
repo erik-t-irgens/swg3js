@@ -33,6 +33,10 @@ export interface Knob {
   format?: (v: number) => string;
   /** Greyed while any of these is off; still usable, so a strength can be set before its toggle. */
   requires?: readonly (keyof Settings)[];
+  /** A range whose top follows the settings (the Terrain shape detail's, by the shape window's side): `max` where absent. */
+  maxOf?: (s: Settings) => number;
+  /** A select whose change draws the page again, because another knob's bounds read it (`maxOf`). */
+  redraws?: boolean;
 }
 
 /**

@@ -168,7 +168,13 @@ const meanPatches = st[1] / (st[0] || 1);
 // uploads and block uploads through a stand-in renderer that records them), all within the frame: none of it may make
 // anything either (wave 3b's review: a probe's string key and a whole upload's texture were made in the frame).
 const shapeField = field as unknown as { shape: ShapeWindow | null; renderer: unknown; heights: unknown; shapeSrc: unknown; shapeWork: { blocks: number; wholes: number } };
-shapeField.shape = new ShapeWindow(SHAPE_SIDE, 2);
+// Wave h6a: `H6A_SIDE=2048` the window of 2,048 (the Terrain shape detail at its top, 1,550 m), `H6A_BAKE4=1` a bake of 4 m
+// (the 4 m level to twice the 2 m one's range, level 0 to twice that): the widest selection the options make.
+const SIDE6 = Number(process.env.H6A_SIDE) === 2048 ? 2048 : SHAPE_SIDE;
+field.rules.side = SIDE6;
+field.rules.bakeStep = process.env.H6A_BAKE4 === '1' ? 4 : 8;
+if (SIDE6 === 2048) HORIZON_TUNE.shapeReach = 1550;
+shapeField.shape = new ShapeWindow(SIDE6, 2);
 const NP = 36;
 const sampler = Object.create(TerrainSampler.prototype) as Record<string, unknown>;
 Object.assign(sampler, { blocks: new Map(), byNumber: new Map(), numberOfPoles: NP, blockWidth: 64, poleStep: 2, lastBx: Number.NaN, lastBz: Number.NaN, lastBlock: undefined });
@@ -192,8 +198,9 @@ for (let p = 0; p < POSES; p++) {
 for (const c of [far[0], far[POSES - 1]]) {
   const ebx = Math.floor(-c.position.x / 64);
   const ebz = Math.floor(c.position.z / 64);
-  for (let bz = ebz - 20; bz <= ebz + 20; bz++) {
-    for (let bx = ebx - 20; bx <= ebx + 20; bx++) {
+  const R = (SIDE6 >> 6) + 4;
+  for (let bz = ebz - R; bz <= ebz + R; bz++) {
+    for (let bx = ebx - R; bx <= ebx + R; bx++) {
       const b = { heights: blockHeights };
       (sampler.blocks as Map<string, unknown>).set(`${bx},${bz}`, b);
       (sampler.byNumber as Map<number, unknown>).set((bx + 4096) * 8192 + (bz + 4096), b);
@@ -219,7 +226,9 @@ function shapeFrame(): void {
   copyDome(session.uniforms, dome);
   field.update(session, cam, cam.position, 6, 0, 0, hole, true);
   st[1] += session.selector.perFine[1];
+  st6[0] += session.selector.perFine[0];
 }
+const st6 = new Float64Array(1);
 function shapeFrames(n: number): void {
   for (let i = 0; i < n; i++) shapeFrame();
 }
@@ -229,8 +238,10 @@ try {
   // Without the flag the loop is left to the compiler.
 }
 st[1] = 0;
+st6[0] = 0;
 shapeFrames(4000);
 const finePatches = st[1] / 4000;
+const fourMean = st6[0] / 4000;
 let bestShape = { made: Infinity, scavenges: Infinity };
 for (let attempt = 0; attempt < 3; attempt++) {
   shapeFrames(1000);
@@ -245,4 +256,4 @@ for (let attempt = 0; attempt < 3; attempt++) {
   if (bestShape.scavenges === 0 && bestShape.made <= 0) break;
 }
 watch.disconnect();
-console.log(JSON.stringify({ frames: N, made: best.made, scavenges: best.scavenges, patches: meanPatches, window: { made: bestStill.made, scavenges: bestStill.scavenges, asks }, shape: { made: bestShape.made, scavenges: bestShape.scavenges, finePatches, moves: shapeField.shape.counts.moves, cached: shapeField.shape.counts.cached, uploads, blocks: shapeField.shapeWork.blocks, wholes: shapeField.shapeWork.wholes } }));
+console.log(JSON.stringify({ frames: N, made: best.made, scavenges: best.scavenges, patches: meanPatches, window: { made: bestStill.made, scavenges: bestStill.scavenges, asks }, shape: { made: bestShape.made, scavenges: bestShape.scavenges, finePatches, fourPatches: fourMean, overflow: session.selector.overflow, side: SIDE6, moves: shapeField.shape.counts.moves, cached: shapeField.shape.counts.cached, uploads, blocks: shapeField.shapeWork.blocks, wholes: shapeField.shapeWork.wholes } }));

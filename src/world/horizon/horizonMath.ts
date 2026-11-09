@@ -7,13 +7,12 @@
 //
 // Pure: three's maths alone (a frustum and a box), so node runs it.
 import * as THREE from 'three';
-import { SHAPE_BLOCK, SHAPE_SIDE } from './shapeWindow.ts';
+import { SHAPE_BLOCK, SHAPE_SIDE, shapeReachMostOf } from './shapeWindow.ts';
 import { SKY_SHARE as FLARE_SKY_SHARE } from '../../core/fx/flareMath.ts';
 
 export type HorizonGround = 'tiles' | 'both' | 'rings';
 
-/** The shape window's half side in blocks and a block's width in metres at its 2 m step (`shapeWindowReach`'s, written out in `shapeRanges`). */
-const SHAPE_HALF = (SHAPE_SIDE / SHAPE_BLOCK) >> 1;
+/** A shape window block's width in metres at its 2 m step (`shapeWindowReach`'s, written out in `shapeRanges`). */
 const SHAPE_BW = SHAPE_BLOCK * 2;
 
 /**
@@ -105,6 +104,12 @@ export const HORIZON_TUNE = {
   /** The shape window's share fades to nought over its last this many samples, so its edge is never a step. */
   shapeFade: 16,
   /**
+   * Wave h6a: where the bake's own heights are 4 m (`horizon --step=4`), the 4 m level reads them past the shape window and
+   * runs to twice the 2 m level's range, level 0 to twice its, so each level hands over where its triangles reach the size
+   * the finer one's had at its own handover. Off, the ranges of an 8 m bake (the shape window's alone). No 8 m bake moves.
+   */
+  shapeBake: true,
+  /**
    * W4, the edits followed live (DESIGN.md §6, §2.13): a region put on the card makes no mips; the fine normals' and the
    * albedos' mips are made again by one flagged 1-texel copy at most every `mipsEvery` ms while an edit is held, and once at
    * its end. `liveMs` is a frame's share for a course's change laid over the bake (the race drawer's own 2 ms), nearest the
@@ -177,6 +182,13 @@ export interface ReachRules {
   r2: number;
   /** The finer levels' morph share in force (`shapeMorph` held to [0.01, 0.9]): the ranges are placed with it and the ring morphs by it. */
   mf: number;
+  /**
+   * Wave h6a, the caller's to write once a field is made (a kept record): the shape window's side in samples (1,024 or
+   * 2,048), whose whole share holds the finer ranges, and the bake's own fine step in metres (4 where baked at 4 m, which
+   * carries the 4 m level past the window with `shapeBake`).
+   */
+  side: number;
+  bakeStep: number;
 }
 
 /**
@@ -205,28 +217,35 @@ export function shapeRanges(t: HorizonTune, lodT: number, shapeOk: boolean, out:
   // A finer vertex asks its level at d < r1 and its morph moves it at most a 4 m step, so r1 stands that step inside the
   // window's whole share (`shapeWindowReach`, written out: a frame's, and a number handed back from a call is a number made).
   const f = Math.max(t.shapeFade, 1);
-  const most = Math.min((SHAPE_SIDE - 1 - f) * 2 - (SHAPE_HALF + 1) * SHAPE_BW, SHAPE_HALF * SHAPE_BW - f * 2) - LEAF / PATCH / 2;
+  // The window's side in force (wave h6a: 1,024 or 2,048 samples), its half in blocks a whole number.
+  const side = out.side;
+  const half = (side / SHAPE_BLOCK) >> 1;
+  const most = Math.min((side - 1 - f) * 2 - (half + 1) * SHAPE_BW, half * SHAPE_BW - f * 2) - LEAF / PATCH / 2;
+  // Wave h6a: a bake of 4 m carries the 4 m level past the window, to twice the 2 m level's range, and level 0 to twice
+  // its (each level handing over where its triangles reach the size the finer one's had at its own); an 8 m bake's ranges
+  // are wave 3b's to the bit.
+  const bake4 = t.shapeBake && out.bakeStep <= 4;
   if (finest === -2) {
     const s2 = Math.min(S, most * (1 - mf) - gap * (LEAF / 2));
     if (s2 >= 1) {
       out.r2 = s2;
       out.r1 = (s2 + gap * (LEAF / 2)) / (1 - mf);
+      if (bake4) out.r1 = Math.max(out.r1, 2 * s2);
     } else finest = -1;
   }
-  if (finest === -1) out.r1 = Math.min(S, most);
+  if (finest === -1) out.r1 = bake4 ? S : Math.min(S, most);
   out.finest = finest;
   out.lod0 = Math.max(lodT, (out.r1 + gap * LEAF) / (1 - t.morph));
+  if (bake4) out.lod0 = Math.max(out.lod0, 2 * out.r1);
 }
 
 /**
  * The furthest the 2 m shape may hold under the tune's fade, morph and gap (wave 3b's review): the reach `shapeRanges` keeps
- * whole, which the Graphics page's Terrain shape detail and the dial stop at (`SHAPE_REACH_MOST`, at the shipped numbers).
+ * whole, which the Graphics page's Terrain shape detail and the dial stop at (`SHAPE_REACH_MOST`, at the shipped numbers),
+ * for a window of `side` samples (wave h6a; today's 1,024 by default).
  */
-export function shapeReachMost(t: HorizonTune): number {
-  const f = Math.max(t.shapeFade, 1);
-  const most = Math.min((SHAPE_SIDE - 1 - f) * 2 - (SHAPE_HALF + 1) * SHAPE_BW, SHAPE_HALF * SHAPE_BW - f * 2) - LEAF / PATCH / 2;
-  const mf = Math.min(Math.max(t.shapeMorph, 0.01), 0.9);
-  return most * (1 - mf) - Math.max(t.shapeGap, 0) * (LEAF / 2);
+export function shapeReachMost(t: HorizonTune, side = SHAPE_SIDE): number {
+  return shapeReachMostOf(side, t.shapeFade, t.shapeMorph, t.shapeGap);
 }
 
 export function reachRules(t: HorizonTune, viewRadius: number, reversed: boolean, out: ReachRules, shapeOk = true): ReachRules {
@@ -280,7 +299,7 @@ export function ringFadeOf(d: number, reach: number, share: number): number {
 
 export function newReachRules(): ReachRules {
   // Every field that will hold a fraction starts as one: a field begun as a small integer boxes every fraction written after.
-  const r = { fogDensity: 0.5, eyeOver: 0.5, bakeMost: 0.5, reach: 0.5, grown: 0.5, fogReach: 0.5, inForce: 0.5, skyRadius: 0.5, far: 0.5, farReach: 0.5, groundSky: 0.5, flareSky: 0.5, lod0: 0.5, levels: 1, finest: 0, r1: 0.5, r2: 0.5, mf: 0.5 };
+  const r = { fogDensity: 0.5, eyeOver: 0.5, bakeMost: 0.5, reach: 0.5, grown: 0.5, fogReach: 0.5, inForce: 0.5, skyRadius: 0.5, far: 0.5, farReach: 0.5, groundSky: 0.5, flareSky: 0.5, lod0: 0.5, levels: 1, finest: 0, r1: 0.5, r2: 0.5, mf: 0.5, side: SHAPE_SIDE, bakeStep: 8 };
   r.mf = 0.15;
   r.r1 = 0;
   r.r2 = 0;
@@ -632,7 +651,9 @@ export class RingSelector {
   private stackJ = new Int32Array(4096);
   private stackL = new Int8Array(4096);
   private readonly box = new THREE.Box3();
-  constructor(patchCap = 16384, skirtCap = 8192) {
+  // Wave h6a: room for the widest finer levels (a 2,048 window's 2 m level and a 4 m bake's 4 m level at their tops, about
+  // 20,000 patches in a ground view), the instance buffer 512 KB.
+  constructor(patchCap = 32768, skirtCap = 8192) {
     this.patches = new Float32Array(patchCap * 4);
     this.skirts = new Float32Array(skirtCap * 4);
   }

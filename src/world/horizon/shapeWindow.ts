@@ -29,6 +29,48 @@ export const SHAPE_WANTED: boolean = (() => {
 export const SHAPE_SIDE = 1024;
 /** Samples a side of a block: a 64 m chunk of the near ground's 2 m poles. */
 export const SHAPE_BLOCK = 32;
+/**
+ * Wave h6a (the owner's "finer shape far out"): the window's sides the Graphics page offers (its Terrain shape window), the
+ * first today's. 2,048 holds the 2 m shape about twice as far (`shapeReachMostOf`) for four times the samples: about 18 MB
+ * more on the card and about 28 MB more on the CPU (its heights, and the raw grids kept beside the worker's blocks), and
+ * four times the worker's fill.
+ */
+export const SHAPE_SIDES: readonly number[] = [1024, 2048];
+/**
+ * The window's side in force (the Graphics page's choice, written by the game before any world and when it moves): read by
+ * the world as it makes a field, by the Terrain shape detail's most and by `tuneHorizon`'s hold. A move in play makes the
+ * field's window again behind a short curtain (`World.reshapeHorizon`).
+ */
+export const SHAPE_CHOICE = { side: SHAPE_SIDE };
+/** A setting's number as a side the window takes: 2,048 where it says so, else today's 1,024. */
+export function shapeSideOf(v: unknown): number {
+  return v === 2048 ? 2048 : SHAPE_SIDE;
+}
+/**
+ * The furthest the 2 m shape may hold for a window of `side` samples under a fade, morph share and gap (wave 3b's review,
+ * `shapeReachMost`'s arithmetic by the side): the finest level's range a 4 m morph step inside `shapeWindowReach`, its
+ * coarser neighbour's morph its gap of 32 m nodes past it. 703 m at 1,024 samples, 1,574 m at 2,048, at the shipped tune.
+ */
+export function shapeReachMostOf(side: number, fade: number, morph: number, gap: number): number {
+  const f = Math.max(fade, 1);
+  const half = (side / SHAPE_BLOCK) >> 1;
+  const bw = SHAPE_BLOCK * 2;
+  const most = Math.min((side - 1 - f) * 2 - (half + 1) * bw, half * bw - f * 2) - 4;
+  const mf = Math.min(Math.max(morph, 0.01), 0.9);
+  return most * (1 - mf) - Math.max(gap, 0) * 32;
+}
+/** The Graphics page's Terrain shape detail top for a window side at the shipped fade, morph and gap, kilometres on its 25 m steps. */
+export function shapeDetailTopKm(side: number): number {
+  return (Math.floor(shapeReachMostOf(shapeSideOf(side), 16, 0.15, 2.5) / 25) * 25) / 1000;
+}
+/**
+ * The Terrain shape detail (kilometres) held where a window of `side` holds it (h6a's review): a setting saved under the
+ * window of 2,048 and read, or left standing, under 1,024 is the page's top there, so the page, the console and the rings
+ * say one number. Never under nought.
+ */
+export function heldShapeDetailKm(km: number, side: number): number {
+  return Math.min(shapeDetailTopKm(side), Math.max(0, Number.isFinite(km) ? km : 0));
+}
 /** What a sample not made holds; the ring program reads anything under -1e29 as none. */
 export const SHAPE_EMPTY = -1e30;
 /**
@@ -470,6 +512,13 @@ export class ShapeWindow {
     this.counts.relaid += laid;
     if (this.made < B * B && this.asked < 0) this.pump(SHAPE_CACHE_PER_FRAME);
     return laid;
+  }
+
+  /** The bytes of the raw grids kept beside the blocks the worker made (`raws`): the console's memory (h6a's review). */
+  rawBytes(): number {
+    let n = 0;
+    for (const r of this.raws) if (r) n += r.byteLength;
+    return n;
   }
 
   /** Every made block let go (a late heights or course file: the near ground's own blocks are laid again, so the window takes them again). */

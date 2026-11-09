@@ -27,7 +27,7 @@ import { paintTileNumber } from '../../../src/swg/terrain/groundPaint.ts';
 import { groundShift } from '../../../src/world/groundTiles.ts';
 import { HORIZON_FORMAT, HORIZON_SECTIONS, encodeHeights, planBake, sectionSize, type HeightLattice } from '../../../src/world/horizon/horizonFile.ts';
 import { HORIZON_TUNE, HoleGrid, LEAF } from '../../../src/world/horizon/horizonMath.ts';
-import { HorizonField, RingSession, atlasLayout, type FieldGround, type OverlayStores, type PoleGenerate } from '../../../src/world/horizon/horizonField.ts';
+import { HorizonField, RingSession, SHAPE_WHOLE_PAST, atlasLayout, shapeWholePast, type FieldGround, type OverlayStores, type PoleGenerate } from '../../../src/world/horizon/horizonField.ts';
 import { HORIZON_TILE, HeightOverlay, samplesIn, type SampleRect } from '../../../src/world/horizon/horizonOverlay.ts';
 import { RingCardDebt, horizonPaintKeys, type CardRect } from '../../../src/world/horizon/ringCardDebt.ts';
 import { SHAPE_BLOCK, ShapeWindow, shapeSourceOf, type ShapeSource, type ShapeTerrain } from '../../../src/world/horizon/shapeWindow.ts';
@@ -930,6 +930,126 @@ void sculpt;
   ok(/if \(this\.worker && !this\.windowAsked\) this\.askWindow\(\);\s*this\.stepLive\(\);\s*\}/.test(f), "horizonField.ts: the frame's own call steps the live edits after the window's ask");
   const atlas = atlasLayout(L.nx, L.nz, plan.coarse.nx, plan.coarse.nz, SIDE);
   void atlas;
+}
+
+// ---- wave h6a: the shape window made again at another side (the Graphics page's Terrain shape window moved in play), and a
+// bake of 4 m loaded and ranged, through the field's own load, frame and `resizeShape` over the recording card.
+{
+  const none: OverlayStores = { heights: null, course: null };
+  // The Terrain shape detail at the wider window's top: the window of 1,024 holds it to its own.
+  const reachWas = HORIZON_TUNE.shapeReach;
+  HORIZON_TUNE.shapeReach = 1550;
+  const { field, session, frameAt } = await loadField('h6a', none, 1024);
+  const blockH = (bx: number, bz: number) => 3 + bx * 0.25 - bz * 0.5;
+  const standIn: ShapeSource = { cached: (bx, bz, out) => (out.fill(blockH(bx, bz)), true), make: () => null };
+  field.useShape(standIn);
+  for (let k = 0; k < 40; k++) frameAt(ex, ez);
+  const before = field.heights!;
+  const r1024 = { r2: field.rules.r2, r1: field.rules.r1, lod0: field.rules.lod0, side: field.rules.side };
+  ok(field.shape!.side === 1024 && r1024.side === 1024 && field.shape!.made === field.shape!.blocks ** 2, `a field made with the window of 1,024 has it whole from the near ground's cache (${field.shape!.made} blocks), the rules' side its own`);
+  // h6a's review: the old atlas let go when (and only when) a new one stands in its place, the field's list holding the new one.
+  let beforeGone = 0;
+  before.addEventListener('dispose', () => beforeGone++);
+  ok(!field.resizeShape(1024), 'made again at the side in force, nothing is made');
+  ok(beforeGone === 0 && field.textures.includes(before), 'and the atlas in force is kept');
+  ok(field.resizeShape(2048), 'made again at 2,048 samples a side');
+  const after = field.heights!;
+  ok(beforeGone === 1 && !field.textures.includes(before) && field.textures.includes(after) && field.textures.filter((t) => t === after).length === 1, "the old heights atlas let go once, the field's own list holding the new one in its place (h6a's review)");
+  const lay = atlasLayout(L.nx, L.nz, plan.coarse.nx, plan.coarse.nz, 2048);
+  const held = card.get(after);
+  ok(after !== before && before.image.width !== undefined && held !== undefined && held.w === lay.w && held.h === lay.h && session.uniforms.uHorizonHeights.value === after, `the heights atlas laid again at the window's new size and put on the card whole (${held?.w} by ${held?.h}), the session's sampler handed it`);
+  ok(field.shape!.side === 2048 && field.shape!.source === standIn && field.shape!.made === 0 && field.rules.side === 2048, 'the new window empty, its source the old one\'s, the rules\' side moved');
+  // Every fine and coarse sample on the card where it stood (the laid heights the field keeps), the window's block empty.
+  const fine = (field as unknown as { fineH: Float32Array }).fineH;
+  let off = 0;
+  for (let j = 0; j < L.nz; j++) for (let i = 0; i < L.nx; i++) if (!Object.is(held!.data[j * held!.w + i], fine[j * L.nx + i])) off++;
+  ok(off === 0, 'every fine sample on the card where it stood, to the bit');
+  for (let k = 0; k < 120; k++) frameAt(ex, ez);
+  ok(field.shape!.made === field.shape!.blocks ** 2 && r1024.r2 < 704 && field.rules.r2 === 1550, `filled again in play, the 2 m level reaching further (${Math.round(r1024.r2)} m to ${Math.round(field.rules.r2)} m at the Terrain shape detail ${HORIZON_TUNE.shapeReach} m)`);
+  // h6a's review: past how many due blocks the window goes whole is a share of its own slots (96 of the window of 1,024's
+  // 1,024, the same share of 2,048's 4,096), so a step of one block, which empties 2B - 1 slots, never puts the whole
+  // window on the card in a frame: at 2,048 a diagonal step empties 127, past the 1,024 window's 96.
+  ok(shapeWholePast(32) === SHAPE_WHOLE_PAST && shapeWholePast(64) === 384, `the whole upload past ${shapeWholePast(32)} due blocks at 1,024 and ${shapeWholePast(64)} at 2,048`);
+  for (let k = 0; k < 40 && field.shape!.dirty; k++) frameAt(ex, ez);
+  ok(field.shape!.dirty === 0, 'the window filled and every block on the card before it is moved');
+  const w0 = field.shapeWork.wholes;
+  const b0 = field.shapeWork.blocks;
+  const regions0 = regions.length;
+  frameAt(ex + SHAPE_BLOCK * 2, ez + SHAPE_BLOCK * 2);
+  const stepped = field.shapeWork.blocks - b0;
+  const wholeRegions = regions.slice(regions0).filter((r) => r.dst === after && r.w === 2048).length;
+  ok(field.shapeWork.wholes === w0 && wholeRegions === 0 && stepped === 2 * field.shape!.blocks - 1 && field.shape!.dirty === 0, `a diagonal step of one block at 2,048 puts its ${stepped} emptied blocks on the card in its own frame, never the whole window (${field.shapeWork.wholes - w0} whole uploads)`);
+  frameAt(ex + SHAPE_BLOCK * 2 * 20, ez + SHAPE_BLOCK * 2);
+  ok(field.shapeWork.wholes === w0 + 1, 'a far move still puts the window on the card whole');
+  // h6a's review: the console's memory counts the raw grid kept beside every block the terrain worker made (W4's `raws`).
+  const rawN = 36 * 36;
+  const maker: ShapeSource = { cached: () => false, make: (bx, bz) => Promise.resolve({ inner: new Float32Array(SHAPE_BLOCK * SHAPE_BLOCK).fill(blockH(bx, bz)), raw: new Float32Array(rawN) }) };
+  field.useShape(maker);
+  field.shape!.forget();
+  for (let k = 0; k < 20 && field.shape!.made < field.shape!.blocks ** 2; k++) {
+    frameAt(ex + SHAPE_BLOCK * 2 * 20, ez + SHAPE_BLOCK * 2);
+    await new Promise((r) => setImmediate(r));
+  }
+  const nMade = field.shape!.blocks ** 2;
+  const mb = field.megabytes();
+  ok(field.shape!.made === nMade && field.shape!.counts.generated >= nMade && Math.abs(mb.shape * 1048576 - (2048 * 2048 * 4 + nMade * rawN * 4)) < 1, `the window's share of the CPU counts the raw grids the worker's blocks keep (${mb.shape.toFixed(1)} MB: 16 of heights and ${((nMade * rawN * 4) / 1048576).toFixed(1)} of raw grids)`);
+  HORIZON_TUNE.shapeReach = reachWas;
+  let afterGone = 0;
+  after.addEventListener('dispose', () => afterGone++);
+  field.dispose(session);
+  ok(afterGone === 1, "the field let go with the atlas made at the new window (h6a's review)");
+}
+{
+  // A bake of 4 m (the converter's `--step=4`): every other sample the 8 m bake's own lattice, the colour at 8 m.
+  const p4 = planBake(1024, centre, { margin: 256, farMargin: 1024, step: 4 });
+  ok(p4.fine.step === 4 && p4.fine.x0 === plan.fine.x0 && p4.fine.z0 === plan.fine.z0 && p4.fine.nx === 2 * (plan.fine.nx - 1) + 1 && JSON.stringify(p4.colour) === JSON.stringify(plan.colour) && JSON.stringify(p4.coarse) === JSON.stringify(plan.coarse) && JSON.stringify(p4.ground) === JSON.stringify(plan.ground), "a 4 m plan stands on the 8 m one's first sample over its very extent, its families, colours and coarse lattice the 8 m plan's");
+  const fe4 = encodeHeights(fill(p4.fine), p4.fine.nx, p4.fine.nz);
+  const raws4: Record<string, Uint8Array> = { ...raws, heights: fe4.bytes };
+  const h4 = { ...header0, fine: { ...p4.fine, lo: fe4.lo, q: fe4.q } };
+  const parts4: Uint8Array[] = [];
+  const secs4: typeof sections = [];
+  let at4 = 0;
+  for (const name of HORIZON_SECTIONS) {
+    const z = new Uint8Array(deflateSync(raws4[name]));
+    secs4.push({ name, offset: at4, length: z.length, size: sectionSize(h4 as never, name) });
+    parts4.push(z);
+    at4 += z.length;
+  }
+  const bin4 = new Uint8Array(at4);
+  for (let k = 0, o = 0; k < parts4.length; o += parts4[k].length, k++) bin4.set(parts4[k], o);
+  const json4 = { ...h4, sections: secs4 };
+  const session = new RingSession(null);
+  const field = new HorizonField('h6a-4m', centre, shift);
+  field.shapeSide = 1024;
+  const loaded = await settle(field.load({ json: async () => json4, bytes: async () => bin4.slice() }, ground, session, renderer, { x: centre.x - ex, z: ez - centre.z }, null));
+  ok(loaded && field.state.state === 'ready' && field.rules.bakeStep === 4 && field.header!.fine.step === 4, 'a 4 m bake loads, the rules told its step');
+  field.useShape({ cached: (_bx, _bz, out) => (out.fill(1), true), make: () => null });
+  const cam = testCamera();
+  const hole = new HoleGrid();
+  const gx = centre.x - ex;
+  const gz = ez - centre.z;
+  cam.position.set(gx, 40, gz);
+  cam.updateMatrixWorld();
+  testHole(hole, Math.floor(gx / LEAF), Math.floor(gz / LEAF), 6);
+  field.update(session, cam, cam.position, 6, Math.floor(gx / LEAF), Math.floor(gz / LEAF), hole, true);
+  const r = field.rules;
+  ok(r.finest === -2 && r.r1 === 2 * r.r2 && r.lod0 >= 2 * r.r1, `the 4 m level reads the bake to twice the 2 m level's range and level 0 to twice that (${Math.round(r.r2)} / ${Math.round(r.r1)} / ${Math.round(r.lod0)} m)`);
+  HORIZON_TUNE.shapeBake = false;
+  field.update(session, cam, cam.position, 6, Math.floor(gx / LEAF), Math.floor(gz / LEAF), hole, true);
+  ok(field.rules.r1 < 2 * field.rules.r2 && field.rules.r1 <= 926, `with shapeBake off the 8 m bake's ranges (${Math.round(field.rules.r1)} m, inside the window)`);
+  HORIZON_TUNE.shapeBake = true;
+  // The far ground's own reader at a 4 m sample: the sample as baked (its 16-bit store), exact.
+  let worst = 0;
+  for (let k = 0; k < 400; k++) {
+    const i = 1 + ((k * 37) % (p4.fine.nx - 2));
+    const j = 1 + ((k * 91) % (p4.fine.nz - 2));
+    const want = fe4.lo + fe4.q * Math.round((hRaw(p4.fine.x0 + i * 4, p4.fine.z0 + j * 4) - fe4.lo) / fe4.q);
+    worst = Math.max(worst, Math.abs(field.heightRaw(p4.fine.x0 + i * 4, p4.fine.z0 + j * 4) - want));
+  }
+  ok(worst < 1e-3, `its fine heights read back at every 4 m sample as stored (worst ${worst.toExponential(1)} m)`);
+  const mb4 = field.megabytes();
+  ok(mb4.card > 0 && mb4.cpu > 0, `its memory by the formats' arithmetic (${mb4.card.toFixed(1)} MB on the card, ${mb4.cpu.toFixed(1)} on the CPU)`);
+  field.dispose(session);
 }
 
 void note;

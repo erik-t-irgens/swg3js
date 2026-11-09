@@ -67,8 +67,11 @@ export function testHole(hole: HoleGrid, pcx: number, pcz: number, radius: numbe
 const rules = newReachRules();
 
 /** The ask the world fills for a camera (`HorizonField.update`'s first lines). */
-export function testAsk(a: RingAsk, eye: THREE.Vector3, fogDensity: number, radius: number, shift: { x: number; z: number }): RingAsk {
+export function testAsk(a: RingAsk, eye: THREE.Vector3, fogDensity: number, radius: number, shift: { x: number; z: number }, fit: { side?: number; bakeStep?: number } = {}): RingAsk {
   rules.fogDensity = fogDensity;
+  // Wave h6a: the shape window's side and the bake's own step, as the field writes them at its load (today's by default).
+  rules.side = fit.side ?? 1024;
+  rules.bakeStep = fit.bakeStep ?? 8;
   const r = reachRules(HORIZON_TUNE, radius, true, rules);
   const pcx = Math.floor(eye.x / LEAF);
   const pcz = Math.floor(eye.z / LEAF);

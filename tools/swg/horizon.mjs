@@ -272,11 +272,13 @@ export async function bakeHorizon(packDir, world, opts = {}) {
 export function horizonStatusOf(planet, packDir) {
   const inp = bakeInputs(packDir);
   if (inp.why) return { line: null, why: null, stale: null };
-  const cmd = `npm run swg -- horizon assets-private --only=${planet}`;
+  let cmd = `npm run swg -- horizon assets-private --only=${planet}`;
   const jsonPath = join(packDir, HORIZON_JSON);
   const binPath = join(packDir, HORIZON_BIN);
   if (!existsSync(jsonPath) || !existsSync(binPath)) return { line: `no far-ground bake (by hand: ${cmd})`, why: null, stale: 'missing' };
   const json = readJson(jsonPath);
+  // Wave h6a: a world baked at 4 m is made again at 4 m.
+  if (json?.fine?.step === 4) cmd += ' --step=4';
   const read = readHorizonHeader(json, { generator: GENERATOR_REVISION, centre: inp.centre, binLength: statSync(binPath).size }, planet);
   let stale = null;
   if ('refused' in read) stale = read.refused;

@@ -19,7 +19,7 @@ import { heightsAtlas } from '../../../src/world/horizon/horizonField.ts';
 import { normalsOf } from '../../../src/world/horizon/horizonDecode.ts';
 import { GROUND_CLOUD_GLSL, GROUND_DECODE_GLSL, GROUND_MASK_GLSL, GROUND_TINT_GLSL, TILE_MAP, TILE_NORMAL, TILE_ROUGHNESS, injectGroundTiles, makeGroundTileUniforms } from '../../../src/world/terrainTextures.ts';
 import { HORIZON_TUNE, HoleGrid, LEAF, RingSelector, bakeHeightAt, cameraFrustum, ringFadeOf, ringDistLevel, ringDrop, ringEdgeDistance, ringEdgeLevel, ringLevelOf, ringMorphAxis, ringReach, ringSnap, type BakeGrid } from '../../../src/world/horizon/horizonMath.ts';
-import { SHAPE_EMPTY } from '../../../src/world/horizon/shapeWindow.ts';
+import { SHAPE_EMPTY, shapeWindowReach } from '../../../src/world/horizon/shapeWindow.ts';
 import { newAsk, rolling, testAsk, testCamera, testHole, testPyramid } from './horizonFixtures.ts';
 
 let checks = 0;
@@ -153,13 +153,30 @@ float outShape() { return vRingShape; }
 float outShare() { return gShapeShare; }
 `;
 // The coarse grid stands in the raw frame about the frame's centre: the vertex reads raw = (centre.x - x, z + centre.z).
-const fineV = grid(1270 - 12000, -3600 - 12000, 8, 3001, raw);
+const fine8 = grid(1270 - 12000, -3600 - 12000, 8, 3001, raw);
 const coarseV = grid(1270 - 40000, -3600 - 40000, 64, 1251, raw);
+// Wave h6a: a bake of 4 m over the cameras' own ground (every other sample the 8 m one's lattice), made when its checks run.
+let fineV = fine8;
 // The shape window's block in the atlas (wave 3b), a side of 1,024 2 m samples as the game's, filled round each camera with the bake's
-// own ground and a 2 m ripple the 8 m bake does not carry.
-const SIDE = 1024;
+// own ground and a 2 m ripple the 8 m bake does not carry. Wave h6a: a side of 2,048 too, the atlas laid again for it.
+let SIDE = 1024;
 const fine2 = (rx: number, rz: number) => raw(rx, rz) + 0.7 * Math.sin(rx * 0.9) * Math.cos(rz * 1.1);
 const shapeAtlas = { w: Math.max(fineV.nx, coarseV.nx + SIDE), h: heightsAtlas(fineV.h, fineV.nx, fineV.nz, coarseV.h, coarseV.nx, coarseV.nz, SIDE) };
+const fineU = { x: fineV.x0, y: fineV.z0, z: 8, w: 0 };
+const sizesU = { x: fineV.nx, y: fineV.nz, z: coarseV.nx, w: coarseV.nz };
+/** Wave h6a: the bake and the window the vertex stage reads made another (the atlas laid as the field lays it). */
+const useBake = (f: BakeGrid, side: number) => {
+  fineV = f;
+  SIDE = side;
+  shapeAtlas.w = Math.max(f.nx, coarseV.nx + side);
+  shapeAtlas.h = heightsAtlas(f.h, f.nx, f.nz, coarseV.h, coarseV.nx, coarseV.nz, side);
+  fineU.x = f.x0;
+  fineU.y = f.z0;
+  fineU.z = f.step;
+  fineU.w = Math.log2(f.step / 8);
+  sizesU.x = f.nx;
+  sizesU.y = f.nz;
+};
 const layShape = (rawEx: number, rawEz: number) => {
   const gi0 = Math.floor(rawEx / 2) - SIDE / 2;
   const gj0 = Math.floor(rawEz / 2) - SIDE / 2;
@@ -181,9 +198,9 @@ const layShape = (rawEx: number, rawEz: number) => {
 const V = glslFunctions(vertexFn, ['ringVertexMain', 'outX', 'outY', 'outZ', 'outEdge', 'outShape', 'outShare', 'shapeHeight'], {
   ...env,
   mod: (x: number, y: number) => x - y * Math.floor(x / y),
-  uHorizonFine: { x: fineV.x0, y: fineV.z0, z: 8, w: 0 },
+  uHorizonFine: fineU,
   uHorizonCoarse: { x: coarseV.x0, y: coarseV.z0, z: 64, w: 3 },
-  uHorizonSizes: { x: fineV.nx, y: fineV.nz, z: coarseV.nx, w: coarseV.nz },
+  uHorizonSizes: sizesU,
   uHorizonHeights: shapeAtlas,
   uHorizonEye: eye,
   uHorizonSquare: square,
@@ -209,11 +226,18 @@ const cam = testCamera();
 const fr = new THREE.Frustum();
 const mm = new THREE.Matrix4();
 const ask = newAsk();
-function vertexChecks(shapeOn: boolean): void {
-  const tag = shapeOn ? ' (the shape up close on)' : '';
+function vertexChecks(shapeOn: boolean, o: { bake4?: boolean; side?: number; cams?: number; spread?: number } = {}): void {
+  const tag = shapeOn ? ` (the shape up close on${o.bake4 ? ', a bake of 4 m' : ''}${o.side ? `, a window of ${o.side}` : ''})` : '';
   HORIZON_TUNE.shape = shapeOn;
   // The game's frame puts the chunks' vertices on the near ground's poles (raw x even); the stand-in's centre does so with the shape on.
   frame.x = shapeOn ? 1271 : 1270;
+  // Wave h6a: the bake's step and the window's side the field would hand the rules, and the stage reads.
+  const fit = { side: o.side ?? 1024, bakeStep: o.bake4 ? 4 : 8 };
+  // A level-0 vertex reading a 4 m bake's own sample, and the 4 m level's patches past where the window holds its heights.
+  let onBake4 = 0;
+  let onBake4Bad = 0;
+  let fourPast = 0;
+  const windowWhole = shapeWindowReach(HORIZON_TUNE.shapeFade, fit.side);
   let shared = 0;
   let sharedBad = 0;
   let tWorst = 0;
@@ -226,9 +250,9 @@ function vertexChecks(shapeOn: boolean): void {
   let finePatches = 0;
   let onWindow = 0;
   let onWindowBad = 0;
-  for (let c = 0; c < 60; c++) {
-    const x = (rnd() * 2 - 1) * 5000;
-    const z = (rnd() * 2 - 1) * 5000;
+  for (let c = 0; c < (o.cams ?? 60); c++) {
+    const x = (rnd() * 2 - 1) * (o.spread ?? 5000);
+    const z = (rnd() * 2 - 1) * (o.spread ?? 5000);
     const up = c % 4 === 0 ? 2000 : 2 + rnd() * 30;
     cam.position.set(x, raw(1270 - x, z - 3600) + up, z);
     // Every eighth looks nearly straight down from 2 km: only there do the edge's bands, not the range, decide the leaves by the
@@ -237,7 +261,7 @@ function vertexChecks(shapeOn: boolean): void {
     cam.updateMatrixWorld();
     HORIZON_TUNE.reach = [3300, 8000][c % 2];
     testHole(hole, Math.floor(x / LEAF), Math.floor(z / LEAF), 6);
-    testAsk(ask, cam.position, 0, 6, shift);
+    testAsk(ask, cam.position, 0, 6, shift, fit);
     cameraFrustum(cam, mm, fr);
     sel.select(fr, ask, pyr, hole);
     eye.x = x;
@@ -289,6 +313,19 @@ function vertexChecks(shapeOn: boolean): void {
               onWindow++;
               const want = Math.fround(fine2(rx, rz)) - ringDrop(out[3], drop.x, drop.y, drop.z);
               if (Math.abs(out[1] - want) > 1e-6) onWindowBad++;
+            }
+          }
+          // Wave h6a: a 4 m node's vertex standing unmorphed where the window holds none stands at the 4 m bake's own sample
+          // less the drop (the near ground's very pole every 4 m: never the 8 m bilinear between).
+          // A 4 m vertex standing unmorphed off the 8 m lattice (a true 4 m vertex) past where the window holds its heights.
+          if (n.L === -1 && (i & 1 || j & 1) && Math.abs(out[0] - (n.x0 + i * q)) < 1e-9 && Math.abs(out[2] - (n.z0 + j * q)) < 1e-9 && Math.max(Math.abs(out[0] - x), Math.abs(out[2] - z)) > windowWhole) fourPast++;
+          if (o.bake4 && n.L === -1 && out[4] === 0 && Math.abs(out[0] - (n.x0 + i * q)) < 1e-9 && Math.abs(out[2] - (n.z0 + j * q)) < 1e-9) {
+            const fx = (frame.x - out[0] - fineV.x0) / 4;
+            const fz = (out[2] + frame.y - fineV.z0) / 4;
+            if (fx >= 0 && fz >= 0 && fx <= fineV.nx - 1 && fz <= fineV.nz - 1 && Number.isInteger(fx) && Number.isInteger(fz)) {
+              onBake4++;
+              const want = fineV.h[fz * fineV.nx + fx] - ringDrop(out[3], drop.x, drop.y, drop.z);
+              if (Math.abs(out[1] - want) > 1e-6) onBake4Bad++;
             }
           }
         }
@@ -349,17 +386,37 @@ function vertexChecks(shapeOn: boolean): void {
   HORIZON_TUNE.reach = 8000;
   ok(shared > 1000 && sharedBad === 0, `a vertex two nodes share comes out the same from each (${shared} shared)${tag}`);
   ok(tChecked > 100 && tWorst < 0.01, `a finer node's edge lies on its coarser neighbour's edge (${tChecked} T-junctions, worst ${(tWorst * 100).toFixed(3)} cm off the coarse edge)${tag}`);
-  ok(edgeSeen > (shapeOn ? 10 : 100) && edgeOff === 0, `every leaf's vertex on the hole's edge stands on the chunks' lattice unmorphed, cameras from the ground to 2 km up (${edgeSeen} vertices)${tag}`);
+  // (Wave h6a's few cameras: with a 4 m bake the 4 m level reaches the hole's edge from 2 km up, so no leaf need stand there.)
+  ok(edgeSeen >= (o.cams ? 0 : shapeOn ? 11 : 101) && edgeOff === 0, `every leaf's vertex on the hole's edge stands on the chunks' lattice unmorphed, cameras from the ground to 2 km up (${edgeSeen} vertices)${tag}`);
   ok(edgeLine === 0, `a finer node's vertex on the hole's edge stays on its line${tag}`);
   ok(skirtBad === 0, `a skirt's top row is its node's edge and its bottom hangs the skirt's depth under it${tag}`);
   ok(pastReach === 0, `no ring vertex stands past the reach in force${tag}`);
   if (shapeOn) {
-    ok(finePatches > 500, `the finer levels are drawn from the hole outward (${finePatches} patches of 4 m and 2 m over 60 cameras)`);
-    ok(onWindow > 1000 && onWindowBad === 0, `a vertex on the 2 m lattice where the shape window holds it whole stands at the window's own sample less the drop, exactly (${onWindow} vertices)`);
+    ok(finePatches > 500, `the finer levels are drawn from the hole outward (${finePatches} patches of 4 m and 2 m over ${o.cams ?? 60} cameras)${tag}`);
+    ok(onWindow > 1000 && onWindowBad === 0, `a vertex on the 2 m lattice where the shape window holds it whole stands at the window's own sample less the drop, exactly (${onWindow} vertices)${tag}`);
   } else ok(finePatches === 0, 'with the shape off no node is finer than a leaf: the rings of before');
+  // Wave h6a: with a 4 m bake the 4 m level runs past the window on the bake's own samples; an 8 m bake's never does.
+  if (o.bake4) {
+    ok(fourPast > 500, `with a bake of 4 m the 4 m level is drawn past where the window holds its heights (${fourPast} true 4 m vertices past ${windowWhole} m)${tag}`);
+    ok(onBake4 > 1000 && onBake4Bad === 0, `and a 4 m node's vertex there stands at the bake's own 4 m sample less the drop, exactly (${onBake4} vertices)${tag}`);
+  } else if (shapeOn) ok(fourPast === 0, `with a bake of 8 m no true 4 m vertex stands past the window's whole share${tag}`);
 }
 vertexChecks(false);
 vertexChecks(true);
+// Wave h6a: a window of 2,048 samples on the 8 m bake, then a 4 m bake with each window: crack-free with the new ranges.
+useBake(fine8, 2048);
+HORIZON_TUNE.shapeReach = 1550;
+vertexChecks(true, { side: 2048, cams: 2, spread: 3000 });
+useBake(grid(1270 - 7000, -3600 - 7000, 4, 3501, raw), 1024);
+HORIZON_TUNE.shapeReach = 700;
+vertexChecks(true, { bake4: true, cams: 3, spread: 3000 });
+useBake(fineV, 2048);
+HORIZON_TUNE.shapeReach = 1550;
+vertexChecks(true, { bake4: true, side: 2048, cams: 2, spread: 3000 });
+HORIZON_TUNE.shapeReach = 700;
+useBake(fine8, 1024);
+// The window's block filled again as the checks below read it (the last camera's lay, at today's side).
+layShape(frame.x, frame.y);
 HORIZON_TUNE.shape = true;
 // The window's sentinel: a sample not made yet reads as none (its share nought), and the bake stands there.
 {

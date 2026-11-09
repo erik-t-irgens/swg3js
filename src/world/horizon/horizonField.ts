@@ -19,7 +19,7 @@ import { HORIZON_TUNE, HORIZON_VIEWS, HoleGrid, LEAF, PATCH, RingSelector, bakeH
 import { HORIZON_TILE, HeightOverlay, REGEN_STEP, overridesOf, regenPlan, samplesIn, type RawRect, type SampleRect } from './horizonOverlay.ts';
 import { PAINT_TILE, paintTileOf } from '../../swg/terrain/groundPaint.ts';
 import { makeRingUniforms, patchGeometry, ringMaterial, ringMesh, ringMipOffset, skirtGeometry, type RingUniforms } from './horizonRings.ts';
-import { SHAPE_BLOCK, SHAPE_EMPTY, ShapeWindow, type ShapeSource } from './shapeWindow.ts';
+import { SHAPE_BLOCK, SHAPE_EMPTY, SHAPE_SIDE, ShapeWindow, type ShapeSource } from './shapeWindow.ts';
 import { keepUploadRange, type UploadRange } from '../uploadRange.ts';
 
 let standIns: RingUniforms | null = null;
@@ -286,6 +286,15 @@ export const DECODE_WAIT_MS = 60000;
 /** The shape window's blocks put on the card a frame at most (4 KB each), and past how many due the whole block goes at once [ours]. */
 export const SHAPE_UPLOADS_PER_FRAME = 24;
 export const SHAPE_WHOLE_PAST = 96;
+/**
+ * Past how many due blocks a window of `blocks` a side goes on the card whole: `SHAPE_WHOLE_PAST` of the window of 1,024's
+ * 1,024 blocks, the same share of any other's (h6a's review: the whole upload grows with the window's area, and at 2,048 a
+ * diagonal step of one block empties 127 slots, past 96, which put the 16 MB window on the card whole in a live frame for
+ * about half a megabyte of blocks). A whole number (a shift), so the frame's test makes nothing.
+ */
+export function shapeWholePast(blocks: number): number {
+  return (SHAPE_WHOLE_PAST * blocks * blocks) >> 10;
+}
 
 /** How many times a composition window ask that failed in the worker is asked again before the field gives it up [ours]. */
 export const WINDOW_RETRIES = 3;
@@ -527,6 +536,9 @@ export class HorizonField {
     // The owner's heights and the drawn courses laid over the bake before anything is uploaded (§2.3: before the first ring
     // is drawn), each tile's normals and leaves made again from the laid heights.
     if (stores) this.layHeights(stores, d.fineNormal);
+    // Wave h6a: the ranges' window side and the bake's own step, written once (the rules' kept record).
+    this.rules.side = this.shapeSide || SHAPE_SIDE;
+    this.rules.bakeStep = h.fine.step;
     // The shape window's block beside the coarse rows (wave 3b), empty until its blocks are made in play.
     const lay = atlasLayout(h.fine.nx, h.fine.nz, h.coarse.nx, h.coarse.nz, this.shapeSide);
     if (this.shapeSide) {
@@ -1580,7 +1592,7 @@ export class HorizonField {
       sh.dropDirty();
       return;
     }
-    if (sh.whole || sh.dirty > SHAPE_WHOLE_PAST) {
+    if (sh.whole || sh.dirty > shapeWholePast(sh.blocks)) {
       // The whole block at once (a far move, the arrival's first fill): the window's array is laid out as the card's block is.
       sh.whole = false;
       sh.moved = false;
@@ -1623,6 +1635,43 @@ export class HorizonField {
   }
 
   /**
+   * Wave h6a: the shape window made again at another side (the Graphics page's Terrain shape window moved in play, behind
+   * the far ground's short curtain): the heights atlas laid again from the laid fine and coarse heights the field keeps with
+   * the new window's empty block beside the coarse rows, put on the card whole (a texture's size, never a program), the
+   * session's sampler handed it, the old let go; the new window empty, its source the old one's, filled in play as at an
+   * arrival. Answers whether anything was made (nothing for the side in force, a field not ready, or no window before).
+   */
+  resizeShape(side: number): boolean {
+    const h = this.header;
+    const fine = this.fineH;
+    const coarse = this.coarseH;
+    if (this.state.state !== 'ready' || this.disposed || !h || !fine || !coarse || !this.shapeSide || side === this.shapeSide || !(side > 0)) return false;
+    const source = this.shape?.source ?? null;
+    this.shape?.dispose();
+    this.shapeWhole?.dispose();
+    this.shapeWhole = null;
+    this.shapeSide = side;
+    this.rules.side = side;
+    const lay = atlasLayout(h.fine.nx, h.fine.nz, h.coarse.nx, h.coarse.nz, side);
+    const sh = (this.shape = new ShapeWindow(side, this.shapeStep));
+    sh.source = source;
+    this.shapeCol = lay.col;
+    this.shapeRow = lay.row;
+    const old = this.heights;
+    const heights = (this.heights = dataTex(heightsAtlas(fine, h.fine.nx, h.fine.nz, coarse, h.coarse.nx, h.coarse.nz, side), lay.w, lay.h, THREE.RedFormat, THREE.FloatType, false));
+    if (this.renderer) {
+      this.renderer.initTexture(heights);
+      letGo(heights);
+    }
+    const i = old ? this.textures.indexOf(old) : -1;
+    if (i >= 0) this.textures[i] = heights;
+    else this.textures.push(heights);
+    if (this.session) this.session.uniforms.uHorizonHeights.value = heights;
+    old?.dispose();
+    return true;
+  }
+
+  /**
    * The selection's microseconds: the mean over the last 64 frames (a browser's clock is coarse, 0.1 ms or worse, so a
    * frame's own reading is mostly nought or one step; the mean of many is the measure), or, with `bench`, the last
    * frame's selection run again `bench` times on its own inputs and timed whole.
@@ -1640,11 +1689,12 @@ export class HorizonField {
 
   /**
    * MB on the card (the formats' arithmetic: the heights atlas 4 bytes, the fine normals 2 with mips, the albedos 4 with
-   * mips, the composition window 8 and its tint window 4) and on the CPU; `window` the two windows' share of the card.
+   * mips, the composition window 8 and its tint window 4) and on the CPU; `window` the two windows' share of the card;
+   * `shape` the shape window's share of the CPU (its heights, and the raw grids kept beside the terrain worker's blocks).
    */
-  megabytes(): { card: number; cpu: number; window: number } {
+  megabytes(): { card: number; cpu: number; window: number; shape: number } {
     const h = this.header;
-    if (!h) return { card: 0, cpu: 0, window: 0 };
+    if (!h) return { card: 0, cpu: 0, window: 0, shape: 0 };
     const mip = 4 / 3;
     const f = h.fine.nx * h.fine.nz;
     const c = h.coarse.nx * h.coarse.nz;
@@ -1654,7 +1704,11 @@ export class HorizonField {
     const win = this.place.S * this.place.S * 8 + this.place.T * this.place.T * 4;
     const card = atlas * 4 + f * 2 * mip + (col + c) * 4 * mip + win;
     const pyr = this.pyramid ? this.pyramid.lo.reduce((n, a) => n + a.byteLength * 2, 0) : 0;
-    return { card: card / 1048576, cpu: (f * 4 + c * 4 + pyr) / 1048576, window: win / 1048576 };
+    // Wave h6a: the shape window's own heights (its block of the atlas on the card, its array on the CPU), apart; on the CPU
+    // with the raw grid kept beside each block the terrain worker made (W4's `raws`, about 5 KB each: h6a's review, some 20 MB
+    // of a window of 2,048 against 4 of 1,024).
+    const shape = this.shapeSide * this.shapeSide * 4 + (this.shape ? this.shape.rawBytes() : 0);
+    return { card: card / 1048576, cpu: (f * 4 + c * 4 + pyr + shape) / 1048576, window: win / 1048576, shape: shape / 1048576 };
   }
 
   /** Every overlay still awaited answered with nothing (the worker gone, the field let go), so no caller waits for good. */

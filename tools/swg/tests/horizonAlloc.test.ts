@@ -21,11 +21,11 @@ interface Answer {
   scavenges: number;
   patches: number;
   window: { made: number; scavenges: number; asks: number };
-  shape: { made: number; scavenges: number; finePatches: number; moves: number; cached: number; uploads: number; blocks: number; wholes: number };
+  shape: { made: number; scavenges: number; finePatches: number; fourPatches: number; overflow: number; side: number; moves: number; cached: number; uploads: number; blocks: number; wholes: number };
 }
-const run = () =>
+const run = (env: Record<string, string> = {}) =>
   new Promise<Answer>((resolve, reject) => {
-    const child = spawn(process.execPath, ['--expose-gc', '--allow-natives-syntax', file], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['--expose-gc', '--allow-natives-syntax', file], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
     let out = '';
     let err = '';
     child.stdout.on('data', (d) => (out += d));
@@ -55,5 +55,12 @@ for (let i = 0; i < all.length; i++) {
   // Its review: the probes through the sampler's own copy (by block number), and the card's uploads (blocks and whole windows
   // after a 3 km jump) through a stand-in renderer, ran in the window too.
   ok(s.finePatches > 50 && s.moves > 100 && s.cached > 1000 && s.blocks > 100 && s.wholes > 10 && s.uploads === s.blocks + s.wholes && s.scavenges === 0 && s.made < 0.05 * a.frames, `process ${i + 1} of 12: with the shape up close (${s.finePatches.toFixed(0)} 2 m patches a frame, the window moved ${s.moves} times, ${s.cached} blocks taken from the sampler's cache, ${s.blocks} block uploads and ${s.wholes} whole ones), a frame makes ${Math.max(0, s.made)} bytes over ${a.frames} frames (${(Math.max(0, s.made) / a.frames).toFixed(3)} a frame)`);
+}
+// Wave h6a: the widest selection the two options make (the window of 2,048 at the Terrain shape detail's top, and a bake of
+// 4 m carrying the 4 m level to twice that), twelve processes at once again, every one asserted, and none past the cap.
+const wide = await Promise.all(Array.from({ length: 12 }, () => run({ H6A_SIDE: '2048', H6A_BAKE4: '1' })));
+for (let i = 0; i < wide.length; i++) {
+  const s = wide[i].shape;
+  ok(s.side === 2048 && s.finePatches > 50 && s.fourPatches > s.finePatches / 4 && s.overflow === 0 && s.moves > 100 && s.cached > 1000 && s.scavenges === 0 && s.made < 0.05 * wide[i].frames, `process ${i + 1} of 12 (h6a, the window of 2,048 and a bake of 4 m): ${s.finePatches.toFixed(0)} 2 m and ${s.fourPatches.toFixed(0)} 4 m patches a frame, none past the cap, a frame makes ${Math.max(0, s.made)} bytes over ${wide[i].frames} frames (${(Math.max(0, s.made) / wide[i].frames).toFixed(3)} a frame)`);
 }
 console.log(`\nhorizonAlloc: ${checks} checks passed`);

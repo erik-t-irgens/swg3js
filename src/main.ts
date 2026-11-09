@@ -413,7 +413,8 @@ import { BIKE_SCALE, CEILING_MOST, RACE_BASE, RACE_TUNE, RACE_UPGRADES, readRace
 import { RACE_CLOCK, enginePartName, holdsLiving, raceFling, type RaceDrive, type RaceMode } from './vehicles/raceDrive.ts';
 import { vehicleDialsFor } from './vehicles/raceDials.ts';
 import { FAR_BASE, HORIZON_TUNE, HORIZON_VIEWS, type HorizonGround } from './world/horizon/horizonMath.ts';
-import { horizonDialsFor, tuneHorizon } from './world/horizon/horizonDials.ts';
+import { SHAPE_CHOICE, heldShapeDetailKm, shapeSideOf } from './world/horizon/shapeWindow.ts';
+import { horizonDialsFor, shapeReachTop, tuneHorizon } from './world/horizon/horizonDials.ts';
 import { LANDMARK_TUNE, tuneLandmarks } from './world/landmarkMath.ts';
 import { landmarkDialsFor } from './world/landmarkDials.ts';
 import { CARD_FIELD_TUNE, tuneCardField } from './world/horizon/cardField.ts';
@@ -2062,9 +2063,13 @@ class App {
     // And the far tree cards to the horizon (the fifth wave, §1b Q11): made at an arrival where the rings stand.
     CARD_FIELD_TUNE.on = S.farCardsHorizon;
     this.applyReach();
+    // The rings' shape window's side (wave h6a), before any world: the first bake's window is made at it.
+    SHAPE_CHOICE.side = shapeSideOf(S.terrainShapeWindow);
     // How far the rings draw the near ground's own look, before any world: the first bake's window is made at its size.
     HORIZON_TUNE.detailReach = S.groundDetailDistance * 1000;
-    // How far the rings keep the near ground's 2 m shape (wave 3b): a range the selection reads a frame.
+    // How far the rings keep the near ground's 2 m shape (wave 3b): a range the selection reads a frame, held where the
+    // window in force holds it (h6a's review: a detail saved under 2,048 and read under 1,024), in memory.
+    S.terrainShapeDetail = heldShapeDetailKm(S.terrainShapeDetail, SHAPE_CHOICE.side);
     HORIZON_TUNE.shapeReach = S.terrainShapeDetail * 1000;
     // The spawner's cap and the creatures' animation range, kept by the world for every planet's manager.
     this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
@@ -5441,9 +5446,15 @@ class App {
        * horizon (behind a short curtain where the rings stand), or `{ cells, grow, levelsMost }` its numbers. Await it when
        * it changes `ground` or `cardField`.
        */
-      horizon: async (o?: { ground?: HorizonGround; reach?: number; view?: (typeof HORIZON_VIEWS)[number]; tune?: Record<string, unknown>; cardField?: boolean | { cells?: number; grow?: number; levelsMost?: number }; bench?: number; at?: [number, number]; selfTest?: boolean }) => {
+      horizon: async (o?: { ground?: HorizonGround; reach?: number; view?: (typeof HORIZON_VIEWS)[number]; tune?: Record<string, unknown>; cardField?: boolean | { cells?: number; grow?: number; levelsMost?: number }; shapeWindow?: number; bench?: number; at?: [number, number]; selfTest?: boolean }) => {
         if (o?.selfTest) return this.world.horizonSelfTest();
         const said: string[] = [];
+        // Wave h6a: the Graphics page's Terrain shape window (1024 or 2048), written in memory as the page shows it and never
+        // saved; first, so a `shapeReach` in the same call is held where the new window holds.
+        if (o?.shapeWindow !== undefined) {
+          this.settings.terrainShapeWindow = shapeSideOf(o.shapeWindow);
+          said.push(await this.setShapeWindow(this.settings.terrainShapeWindow));
+        }
         if (o?.tune) said.push(...tuneHorizon(o.tune));
         if (typeof o?.reach === 'number' && o.reach > 0) said.push(...tuneHorizon({ reach: o.reach }));
         if (o?.view && (HORIZON_VIEWS as readonly string[]).includes(o.view)) HORIZON_TUNE.view = o.view;
@@ -13471,7 +13482,14 @@ class App {
         break;
       case 'terrainShapeDetail':
         // A range the selection and the ring's morph read a frame (wave 3b): nothing is built, the shape window is the world's.
-        HORIZON_TUNE.shapeReach = S.terrainShapeDetail * 1000;
+        HORIZON_TUNE.shapeReach = heldShapeDetailKm(S.terrainShapeDetail, SHAPE_CHOICE.side) * 1000;
+        break;
+      case 'terrainShapeWindow':
+        // The shape window's side (wave h6a): made again behind the far ground's short curtain where the rings stand (the
+        // heights atlas grows or shrinks on the card there), from the next arrival elsewhere.
+        void this.setShapeWindow(shapeSideOf(S.terrainShapeWindow)).then((said) => {
+          if (said) this.messages.note(said);
+        });
         break;
       case 'objectReach':
       case 'terrainRadius':
@@ -30742,6 +30760,27 @@ class App {
       said = await this.world.loadCardField();
     });
     return said;
+  }
+
+  /**
+   * The rings' shape window's side (wave h6a, the Graphics page's Terrain shape window): where the rings stand with a
+   * window, made again behind the far ground's short curtain (the heights atlas laid again and put on the card there,
+   * nothing built: a texture's size), and filled in play as at an arrival; elsewhere it stands from the next arrival.
+   */
+  private async setShapeWindow(side: number): Promise<string> {
+    if (SHAPE_CHOICE.side === side) return '';
+    SHAPE_CHOICE.side = side;
+    // The Terrain shape detail held where the new window holds it (h6a's review), before the page draws itself again: the
+    // setting in memory (the next save keeps it) and the reach the rings read, which the console may have set apart.
+    this.settings.terrainShapeDetail = heldShapeDetailKm(this.settings.terrainShapeDetail, side);
+    HORIZON_TUNE.shapeReach = Math.min(HORIZON_TUNE.shapeReach, shapeReachTop());
+    const words = `the Terrain shape window at ${side} samples a side`;
+    if (!this.inWorld || this.traveling || !this.world.horizonField?.shape) return `${words}: from the next arrival where the rings stand`;
+    let said = '';
+    await this.groundCurtain('the shape window', () => {
+      said = this.world.reshapeHorizon();
+    });
+    return said || words;
   }
 
   /**

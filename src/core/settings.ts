@@ -87,6 +87,12 @@ export interface Settings extends FxSettings {
    * to 4 m and then 8 m, never coarser than they were without it. Nought is the rings' shape of before.
    */
   terrainShapeDetail: number;
+  /**
+   * The rings' shape window's samples a side (wave h6a): 1,024 (2 km of 2 m heights round you, the Terrain shape detail to
+   * 0.7 km) or 2,048 (4 km, to 1.55 km), at about 18 MB more on the card and 28 MB more on the CPU (the window's heights and
+   * the raw grids kept beside the worker's blocks) and four times the worker's fill.
+   */
+  terrainShapeWindow: number;
   /** How many creatures and NPCs the spawner may have out at once (nothing the world itself stands is counted). */
   mobileCap: number;
   /** Metres past which a creature or NPC holds its pose until it comes nearer. */
@@ -401,6 +407,7 @@ export const DEFAULT_SETTINGS: Settings = {
   farCardsHorizon: false,
   groundDetailDistance: 2.5,
   terrainShapeDetail: 0.7,
+  terrainShapeWindow: 1024,
   mobileCap: 40,
   mobileAnimRange: 160,
   waterRipples: true,

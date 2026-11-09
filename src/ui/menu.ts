@@ -12,6 +12,7 @@ import { GraphicsLayout, graphicsMarkup, wireGraphics } from './graphicsPage.ts'
 import { multiplayerMarkup, type CharacterCopy } from './multiplayerPage.ts';
 import { resetWindows } from './drag.ts';
 import { compilerVerdict, verdictNote } from '../core/shaderWatch.ts';
+import { shapeDetailTopKm } from '../world/horizon/shapeWindow.ts';
 
 // The Interface page's knobs and the rebind note live in `hudPage.ts` so that a node test can read
 // them without a browser; they are theirs to change and everything else's to import from here. The
@@ -274,7 +275,8 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
       { key: 'farRings', label: 'Far ground: rings to the horizon', hint: "On, the far ground is drawn from the world's bake as rings out to the Terrain distance (npm run swg -- horizon assets-private --only=<world> makes a world's bake); off, as tiles out to the Far ground radius. Changed in play behind a short loading screen.", kind: 'toggle' },
       { key: 'terrainDistance', label: 'Terrain distance', hint: "How far the rings reach. The planet's fog takes it over where it is thicker, and without reversed depth it stops at 4.9 km.", kind: 'range', min: 1, max: 16, step: 0.5, format: (v) => `${v.toFixed(1)} km`, requires: ['farRings'] },
       { key: 'groundDetailDistance', label: 'Ground detail distance', hint: "How far the rings draw the ground exactly as the near ground draws it (its pictures, their alternates, the masks between them, the colour map's tint, the bumps and the gloss); past it they fade, over the last half of it, into each 4 m tile's average colour. Further costs more of the card's memory (about 7 MB at 1.2 km, 21 MB at 2.5 km, 71 MB at 5 km) and of its time.", kind: 'range', min: 0.5, max: 6, step: 0.1, format: (v) => `${v.toFixed(1)} km`, requires: ['farRings'] },
-      { key: 'terrainShapeDetail', label: 'Terrain shape detail', hint: "How far the rings keep the near ground's own 2 m shape past the detailed ground, from the very heights the near ground stands on; past it they give way to 4 m and then 8 m, never coarser than they were without it. 0 is the rings' shape of before. Further costs more triangles; 0.7 km is as far as the heights kept round you reach.", kind: 'range', min: 0, max: 0.7, step: 0.05, format: (v) => (v > 0 ? `${v.toFixed(2)} km` : 'off'), requires: ['farRings'] },
+      { key: 'terrainShapeWindow', label: 'Terrain shape window', hint: "How much of the near ground's own 2 m heights the rings keep round you: 1,024 samples a side (2 km, the Terrain shape detail to 0.7 km) or 2,048 (4 km, to 1.55 km), at about 18 MB more on the card, about 28 MB more of the computer's memory and four times the terrain worker's time to fill it as you move; going back to 1,024 holds the Terrain shape detail at 0.7 km. Changed in play behind a short loading screen.", kind: 'select', options: [{ value: 1024, label: '1,024 (2 km)' }, { value: 2048, label: '2,048 (4 km)' }], redraws: true, requires: ['farRings'] },
+      { key: 'terrainShapeDetail', label: 'Terrain shape detail', hint: "How far the rings keep the near ground's own 2 m shape past the detailed ground, from the very heights the near ground stands on; past it they give way to 4 m and then 8 m, never coarser than they were without it. 0 is the rings' shape of before. Further costs more triangles; 0.7 km is as far as the heights kept round you reach with the Terrain shape window at 1,024, 1.55 km at 2,048. Where the world is baked at 4 m (npm run swg -- horizon assets-private --only=<world> --step=4) the rings take 4 m to twice this and 8 m to twice that.", kind: 'range', min: 0, max: 0.7, maxOf: (s) => shapeDetailTopKm(s.terrainShapeWindow), step: 0.05, format: (v) => (v > 0 ? `${v.toFixed(2)} km` : 'off'), requires: ['farRings'] },
       { key: 'mobileCap', label: 'Spawned creatures and NPCs', hint: 'How many the spawner may have out at once. Each one is a body, a skeleton and its animation.', kind: 'range', min: 5, max: 150, step: 5, format: (v) => `${v}` },
       { key: 'mobileAnimRange', label: 'Creature animation range', hint: 'Past this they hold their pose until they come nearer. Their shadows and their movement carry on.', kind: 'range', min: 60, max: 400, step: 20, format: (v) => `${v} m` },
     ],
@@ -647,7 +649,7 @@ export class Menu {
         } else if (k.kind === 'toggle') control = `<label class="switch"><input type="checkbox" data-key="${k.key}"${v ? ' checked' : ''} /><span></span></label>`;
         else if (k.kind === 'select') control = `<select data-key="${k.key}">${k.options!.map((o) => `<option value="${o.value}"${o.value === v ? ' selected' : ''}>${o.label}</option>`).join('')}</select>`;
         else if (k.kind === 'choice') control = `<select data-key="${k.key}">${k.choices!.map((o) => `<option value="${o.value}"${o.value === v ? ' selected' : ''}>${o.label}</option>`).join('')}</select>`;
-        else control = `<input type="range" data-key="${k.key}" min="${k.min}" max="${k.max}" step="${k.step}" value="${v}" /><span class="value">${k.format ? k.format(v as number) : String(v)}</span>`;
+        else control = `<input type="range" data-key="${k.key}" min="${k.min}" max="${k.maxOf ? k.maxOf(this.settings) : k.max}" step="${k.step}" value="${v}" /><span class="value">${k.format ? k.format(v as number) : String(v)}</span>`;
         // What this knob waits on: it is greyed, and says so, while any of them is off.
         const off = k.requires?.filter((key) => !this.settings[key]) ?? [];
         const labels = off.map((key) => this.labelOf(key));
@@ -679,7 +681,7 @@ export class Menu {
         if (out && typeof value === 'number') out.textContent = knob.format ? knob.format(value) : String(value);
         // A switch other knobs wait on: draw the page again so they grey or come back. Ranges
         // never do this, so a drag is never interrupted.
-        if (knob.kind === 'toggle' && all.some((k) => k.requires?.includes(knob.key))) {
+        if ((knob.kind === 'toggle' && all.some((k) => k.requires?.includes(knob.key))) || knob.redraws) {
           const scroll = body.scrollTop;
           this.showPage(this.page);
           const again = this.root.querySelector<HTMLElement>('.menu-body');

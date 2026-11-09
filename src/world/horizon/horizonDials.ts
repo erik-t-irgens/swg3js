@@ -6,6 +6,7 @@
 import type { DialGroup, DialSet, NumberDial, ChoiceDial } from '../../ui/dials.ts';
 import { readDials } from '../../ui/dials.ts';
 import { HORIZON_TUNE, HORIZON_VIEWS, shapeReachMost } from './horizonMath.ts';
+import { SHAPE_CHOICE, SHAPE_SIDES } from './shapeWindow.ts';
 import { GROUND_DETAIL_TUNE, groundTileUniforms, tuneGroundDetail, writeGroundDetail } from '../terrainTextures.ts';
 import { CARD_FIELD_TUNE, tuneCardField } from './cardField.ts';
 
@@ -27,6 +28,15 @@ export const REACH_RANGE = [500, 32000] as const;
  * tune says. The Graphics page's Terrain shape detail stops here too (`menu.ts`, held to it by `horizonShape.test.ts`).
  */
 export const SHAPE_REACH_MOST = Math.floor(shapeReachMost(HORIZON_TUNE) / 25) * 25;
+/** Wave h6a: the same for the widest window the Graphics page offers (2,048 samples: 1,550 m), the dial's top. */
+export const SHAPE_REACH_MOST_WIDE = Math.floor(shapeReachMost(HORIZON_TUNE, SHAPE_SIDES[SHAPE_SIDES.length - 1]) / 25) * 25;
+/**
+ * The Terrain shape detail's top for the window in force (`SHAPE_CHOICE`), at the shipped fade, morph and gap as
+ * `SHAPE_REACH_MOST` is (a tune moved past them is held by `shapeRanges` itself), on the dial's 25 m steps.
+ */
+export function shapeReachTop(): number {
+  return SHAPE_CHOICE.side === SHAPE_SIDES[SHAPE_SIDES.length - 1] ? SHAPE_REACH_MOST_WIDE : SHAPE_REACH_MOST;
+}
 
 /**
  * Any `HORIZON_TUNE` value set by name (a number held finite and positive where it must be, the reach inside
@@ -53,8 +63,10 @@ export function tuneHorizon(o: Record<string, unknown>): string[] {
       else if (k === 'farGridRadius') t[k] = Math.max(1, Math.round(v));
       // Wave 3b: nought is the rings' shape of before; the finest is the near ground's 2 m or 4 m.
       else if (k === 'shapeReach') {
-        t[k] = Math.min(SHAPE_REACH_MOST, Math.max(0, v));
-        if (v > SHAPE_REACH_MOST) said.push(`shapeReach held at ${SHAPE_REACH_MOST} m: the shape window round the eye holds its 2 m heights no further`);
+        // Wave h6a: held where the window in force holds its heights whole (700 m at 1,024 samples, 1,550 m at 2,048).
+        const top = shapeReachTop();
+        t[k] = Math.min(top, Math.max(0, v));
+        if (v > top) said.push(`shapeReach held at ${top} m: the shape window round the eye (${SHAPE_CHOICE.side} samples a side) holds its 2 m heights no further`);
       } else if (k === 'shapeFinest') t[k] = v <= 3 ? 2 : 4;
       // W4: never under nought (a negative share would lay nothing; mips every frame at nought).
       else if (k === 'mipsEvery' || k === 'liveMs') t[k] = Math.max(0, v);
@@ -162,7 +174,8 @@ const HORIZON_GROUPS: DialGroup[] = [
     note: "Wave 3b: finer levels than the bake's 8 m just past the detailed ground, standing on the near ground's own 2 m heights round the eye, so the shape does not change where the detailed ground ends.",
     dials: [
       choice('shape', 'Finer levels', "On, the rings take the near ground's 2 m (and 4 m) shape out to the Terrain shape detail; off, the rings' shape of before."),
-      num('shapeReach', 'Terrain shape detail', 0, SHAPE_REACH_MOST, 25, 'm', "How far the finest holds before it gives way to 4 m, then 8 m (the Graphics page's Terrain shape detail, which a reload puts back). Nought is off."),
+      num('shapeReach', 'Terrain shape detail', 0, SHAPE_REACH_MOST_WIDE, 25, 'm', "How far the finest holds before it gives way to 4 m, then 8 m (the Graphics page's Terrain shape detail, which a reload puts back), held where the Terrain shape window holds its heights (700 m at 1,024 samples, 1,550 m at 2,048). Nought is off."),
+      choice('shapeBake', '4 m from a 4 m bake', "Where the world is baked at 4 m (horizon --step=4), the 4 m level reads the bake past the shape window, out to twice the Terrain shape detail, and 8 m to twice that; off, the ranges of an 8 m bake. A world baked at 8 m is the same either way."),
       num('shapeFinest', 'Finest spacing', 2, 4, 2, 'm', "The finest ring level's spacing: the near ground's own 2 m, or 4 m (half the triangles)."),
       num('shapePad', 'Box growth', 0, 40, 1, 'm', "How far a node's box is grown up and down for the frustum, for 2 m crests that stand off the bake's samples."),
       num('shapeFade', 'Window edge fade', 1, 64, 1, 'samples', "Over how many 2 m samples the shape window's heights fade into the bake's at the window's edge."),
