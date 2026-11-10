@@ -132,7 +132,7 @@ import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi, type PoisFile } from './ui/galaxyMap';
 import { PLACE_TUNE, PlaceIndex, PlaceIndexKeeper, PlaceSky, loadingLine as placeLoadingLine, minimapPlacesOf, placesFileFor, tunePlaces, worldRowOf, zoneWordsOf } from './world/places.ts';
-import { readLocationsFile, type LocationGrade, type LocationRow } from './world/editFiles/locationsFile.ts';
+import { readLocationsFile, sheetMultipliers, type LocationGrade, type LocationRow } from './world/editFiles/locationsFile.ts';
 import { DemMapMaker, MAP_PICTURE_TUNE, demMapSourceOf, remakeDue, tuneMapPicture } from './world/demMap.ts';
 import { SERVICE_TUNE, tuneServices } from './ui/serviceMarks.ts';
 import { MapUi } from './ui/mapUi';
@@ -24267,6 +24267,8 @@ class App {
     this.world.setWorldFog(pack, row?.fog ?? null);
     setPlaceWind(pack, row?.wind ?? null);
     this.worldClouds.set(pack, row?.clouds);
+    const sheets = sheetMultipliers(row?.clouds);
+    this.world.setCloudSheets(pack, sheets.height, sheets.scale);
   }
   /** The world row's multipliers on the cloud decks and the pack they are for (NaN where it sets none): the clouds' feed reads them. */
   private readonly worldClouds = new WorldClouds();
@@ -24593,6 +24595,8 @@ class App {
           fog: { look: fog.look, own: fog.own },
           wind: windWorldNow(),
           clouds: Object.keys(ownClouds).length ? ownClouds : null,
+          // The sky's flat sheets as they stand now: their heights and their pictures' size multiplier.
+          sheets: this.world.swgSky?.sheetSizes ?? null,
         },
         families: this.world.weather.familyNames(),
       };

@@ -9,6 +9,7 @@ import { Ragdoll } from '../combat/ragdoll';
 import { nextLivingKey, type Aggression, type Living, type Side } from '../combat/kit';
 import { applyDifficultyTo, rescaleBody, scaledByDifficulty } from './difficulty.ts';
 import { skinnedPlugin } from '../core/skinnedLoad.ts';
+import { fellOut } from './fellOut.ts';
 
 export type CreatureDef = PlanetDef['creatures'];
 
@@ -596,7 +597,7 @@ export class CreatureManager {
       // Every one was stood by hand: it lies where it fell and is then taken away, which is what the
       // panel's own note has always claimed. It is never recycled by distance: walking away from one
       // you put there by hand must not quietly delete it.
-      if ((c.dead && c.deadTimer <= 0) || c.pos.y < this.terrain.floor - 20) {
+      if ((c.dead && c.deadTimer <= 0) || fellOut(this.terrain, c.pos.x, c.pos.z, c.pos.y, 20)) {
         this.group.remove(c.group);
         this.byCollider.delete(c.collider.handle);
         c.dispose();

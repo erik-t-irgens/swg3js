@@ -387,7 +387,33 @@ export class SwgSky {
    * heaviest cloud images of the blocks in the mix. `file` is the image a sheet shows this frame.
    * Every sheet is built at load with the same program, so a new image never makes a material.
    */
-  private readonly clouds: { mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>; altitude: number; file: string | null }[] = [];
+  private readonly clouds: { mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>; slot: number; altitude: number; repeatAt: number; file: string | null }[] = [];
+  /** A world's own multipliers on the sheets (`setSheets`): their heights, and their pictures' size (the decks' with them). */
+  private sheetHeight = 1;
+  private sheetScale = 1;
+
+  /**
+   * A world's sheets moved and sized (its locations file's world row, `sheetMultipliers`): each sheet stands at its own
+   * altitude times `height`, and its picture repeats over the metres it did at its own altitude times `scale`, so moving a
+   * sheet never resizes its picture. Both one is the sky as it always was, to the bit.
+   */
+  setSheets(height: number, scale: number): void {
+    const h = height > 0 ? height : 1;
+    const s = scale > 0 ? scale : 1;
+    if (h === this.sheetHeight && s === this.sheetScale) return;
+    this.sheetHeight = h;
+    this.sheetScale = s;
+    for (const c of this.clouds) {
+      c.altitude = CLOUD_ALTITUDES[c.slot] * h;
+      c.repeatAt = CLOUD_ALTITUDES[c.slot] * s;
+      c.mesh.position.y = c.altitude;
+    }
+  }
+
+  /** The sheets' multipliers in force (`setSheets`). */
+  get sheetSizes(): { height: number; scale: number; altitudes: number[] } {
+    return { height: this.sheetHeight, scale: this.sheetScale, altitudes: [CLOUD_ALTITUDES[0] * this.sheetHeight, CLOUD_ALTITUDES[1] * this.sheetHeight] };
+  }
   /** Scroll of each cloud image, in texture repeats, integrated frame by frame and wrapped to [0, 1); `at` is the frame it last moved. */
   private readonly cloudScroll = new Map<string, { s: THREE.Vector2; at: number }>();
   /** Where the clouds drift toward (radians, 0 = +Z, turning toward +X). */
@@ -786,7 +812,8 @@ export class SwgSky {
     // Cloud layers: wide sheets at fixed altitudes, fading out long before their edges. Four of
     // them, two at each altitude, whatever the table holds: which image each shows, and how
     // strongly, is the mix's business frame by frame (update), so none is ever made later.
-    const cloud = (altitude: number) => {
+    const cloud = (slot: number) => {
+      const altitude = CLOUD_ALTITUDES[slot];
       const mat = new THREE.ShaderMaterial({
         vertexShader: CLOUD_VERT,
         fragmentShader: CLOUD_FRAG,
@@ -811,12 +838,12 @@ export class SwgSky {
       mesh.frustumCulled = false;
       mesh.visible = false;
       this.cloudGroup.add(mesh);
-      this.clouds.push({ mesh, altitude, file: null });
+      this.clouds.push({ mesh, slot, altitude, repeatAt: altitude, file: null });
     };
-    cloud(CLOUD_ALTITUDES[0]);
-    cloud(CLOUD_ALTITUDES[0]);
-    cloud(CLOUD_ALTITUDES[1]);
-    cloud(CLOUD_ALTITUDES[1]);
+    cloud(0);
+    cloud(0);
+    cloud(1);
+    cloud(1);
   }
 
   /** How a texture wraps for its use: a gradient's columns wrap with the day and its rows must not; clouds tile. */
@@ -1373,13 +1400,13 @@ export class SwgSky {
         } else {
           // The wind aloft (`sheetWind`): its metres a second over the sheet's repeat in metres, with no floor, the upper
           // sheet turned from the heading by the veer.
-          driftAloft(scroll.s, this.sheetAloft, slot, this.windHeading, size, c.altitude, dt);
+          driftAloft(scroll.s, this.sheetAloft, slot, this.windHeading, size, c.repeatAt, dt);
         }
       }
       u.uMap.value = tex;
       u.uOpacity.value = w[k];
       this.sheetWeights[slot * 2 + m] = w[k];
-      u.uRepeat.value = size * (c.altitude / CLIENT_CLOUD_HEIGHT) * CLOUD_SIZE_TRIM;
+      u.uRepeat.value = size * (c.repeatAt / CLIENT_CLOUD_HEIGHT) * CLOUD_SIZE_TRIM;
       (u.uScroll.value as THREE.Vector2).copy(scroll.s);
       (u.uCamera.value as THREE.Vector3).copy(camPos);
       // White by day and grey by night in the client, lit by the main light's colour.
@@ -1456,7 +1483,7 @@ export class SwgSky {
       im.weight = w[k];
       im.size = size;
       im.speed = layer.speed;
-      im.repeat = size * (CLOUD_ALTITUDES[slot] / CLIENT_CLOUD_HEIGHT) * CLOUD_SIZE_TRIM;
+      im.repeat = size * ((CLOUD_ALTITUDES[slot] * this.sheetScale) / CLIENT_CLOUD_HEIGHT) * CLOUD_SIZE_TRIM;
       im.texture = this.textures.get(file) ?? null;
       const scroll = this.cloudScroll.get(file);
       im.scrollX = scroll ? scroll.s.x : 0;
@@ -1696,7 +1723,7 @@ export class SwgSky {
     };
     const mix: string[] = [];
     for (let i = 0; i < this.mixCount; i++) mix.push(`${this.mix[i].block.name} w${this.mix[i].block.weatherIndex} ${this.mix[i].weight.toFixed(2)}`);
-    const clouds = this.clouds.filter((c) => c.mesh.visible && c.file).map((c) => `${c.altitude === CLOUD_ALTITUDES[0] ? 'bottom' : 'top'} ${c.file!.replace(/^.*\//, '').replace(/\.\w+$/, '')} ${(c.mesh.material.uniforms.uOpacity.value as number).toFixed(2)}`);
+    const clouds = this.clouds.filter((c) => c.mesh.visible && c.file).map((c) => `${c.slot === 0 ? 'bottom' : 'top'} ${c.file!.replace(/^.*\//, '').replace(/\.\w+$/, '')} ${(c.mesh.material.uniforms.uOpacity.value as number).toFixed(2)}`);
     return {
       mix,
       gradients: [gradientName(du.uGradient.value, du.uHasGradient.value as number), gradientName(du.uGradient2.value, du.uHasGradient2.value as number), Number((du.uGradientMix.value as number).toFixed(2))],

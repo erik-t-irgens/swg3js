@@ -129,13 +129,25 @@ export interface LocationClouds {
   height?: number;
   depth?: number;
   density?: number;
+  /**
+   * The sky's flat cloud sheets (`SwgSky`, at 1,500 and 2,300 m): a multiplier on both their heights, the deck's own
+   * `height` where this is absent, else one; and on the size of their pictures (and the decks' pictures, which are the same).
+   */
+  sheetHeight?: number;
+  sheetScale?: number;
 }
 export const CLOUD_RANGES: Readonly<Record<keyof LocationClouds, readonly [number, number]>> = {
   cover: [0, 4],
   height: [0.05, 20],
   depth: [0.05, 20],
   density: [0, 20],
+  sheetHeight: [0.01, 20],
+  sheetScale: [0.05, 20],
 };
+/** The sheets' height and picture-size multipliers a world row's clouds ask for (both one with none). */
+export function sheetMultipliers(c: LocationClouds | null | undefined): { height: number; scale: number } {
+  return { height: c?.sheetHeight ?? c?.height ?? 1, scale: c?.sheetScale ?? 1 };
+}
 export const CLOUD_KEYS = Object.keys(CLOUD_RANGES) as (keyof LocationClouds)[];
 
 /** The most weather levels a climate names (a world's schedule pads a shorter one with its last weight and cuts a longer). */

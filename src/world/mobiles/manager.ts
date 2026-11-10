@@ -61,6 +61,7 @@ import type { GroundTactics } from './tactics.ts';
 import { NPC_SABER_CLIPS, styleOf } from '../npcSaber.ts';
 // Where the people standing in a building are put when it comes down.
 import { doorstepSpot } from '../myBuildings.ts';
+import { fellOut } from '../fellOut.ts';
 
 export interface SpawnOpts {
   /** How it came to stand: always by somebody's hand or the world's data now that nothing roams in on its own. */
@@ -1250,7 +1251,7 @@ export class MobileManager {
       // Spent: taken away. Whatever stood it -- a lair, a row, the console, the server's list -- stands
       // it again on its own clock if it comes back at all; nothing here recycles a body by distance.
       // The fallen-out-of-the-world floor never applies inside a building: dungeon rooms go far below it.
-      if ((m.dead && m.deadTimer <= 0) || (!m.inside && m.pos.y < this.deps.terrain.floor - 20)) {
+      if ((m.dead && m.deadTimer <= 0) || (!m.inside && fellOut(this.deps.terrain, m.pos.x, m.pos.z, m.pos.y, 20))) {
         this.remove(m);
         continue;
       }

@@ -645,7 +645,26 @@ else {
   const W5_FIELD = "  /**\n   * The flare's sky over a planet (`flareLights`' `skyDistance`): `SKY_RADIUS` as ever, and with the far ground's rings\n   * drawn the horizon pass's own (`HorizonFollow.flareSky`: past the far ridges with `raysBlock`, else the sky's radius),\n   * written by the world a frame. Begun as a fraction, so a fraction written later is written in place.\n   */\n  flareSkyDistance = 0.5;\n";
   const w5Parts = [W5_FIELD, '    this.flareSkyDistance = SKY_RADIUS;\n', 'o.skyDistance = this.flareSkyDistance;'];
   ok(w5Parts.every((p) => nowSk.split(p).length === 2), "the fifth wave's three lines in sky.ts are there exactly once each (the flare's sky, its start, its read)");
-  const back = nowSk.replace("import { DOME_COLOUR_GLSL } from './domeColour.ts';\n", '').replace('${DOME_COLOUR_GLSL}', body).replace("'uClear' | 'uHorizonFog', THREE.IUniform>> {", "'uClear', THREE.IUniform>> {").replace("'uClear' | 'uHorizonFog', THREE.IUniform>;", "'uClear', THREE.IUniform>;").replace(W5_FIELD, '').replace(w5Parts[1], '').replace(w5Parts[2], 'o.skyDistance = SKY_RADIUS;');
+  // A world's own multipliers on the flat cloud sheets (`setSheets`, after the horizon pass): no program's text either, so
+  // each of its lines is taken back out, every one found exactly once, and the rest must still be PRE_PASS's.
+  const sheetsFrom = nowSk.indexOf("  /** A world's own multipliers on the sheets (`setSheets`)");
+  const sheetsTo = nowSk.indexOf('  /** Scroll of each cloud image, in texture repeats');
+  const SHEETS: [string, string][] = [
+    [sheetsFrom > 0 && sheetsTo > sheetsFrom ? nowSk.slice(sheetsFrom, sheetsTo) : '\u0000none', ''],
+    ['slot: number; altitude: number; repeatAt: number; file: string | null }[] = [];', 'altitude: number; file: string | null }[] = [];'],
+    ['const cloud = (slot: number) => {\n      const altitude = CLOUD_ALTITUDES[slot];\n', 'const cloud = (altitude: number) => {\n'],
+    ['this.clouds.push({ mesh, slot, altitude, repeatAt: altitude, file: null });\n    };\n    cloud(0);\n    cloud(0);\n    cloud(1);\n    cloud(1);', 'this.clouds.push({ mesh, altitude, file: null });\n    };\n    cloud(CLOUD_ALTITUDES[0]);\n    cloud(CLOUD_ALTITUDES[0]);\n    cloud(CLOUD_ALTITUDES[1]);\n    cloud(CLOUD_ALTITUDES[1]);'],
+    ['size, c.repeatAt, dt);', 'size, c.altitude, dt);'],
+    ['(c.repeatAt / CLIENT_CLOUD_HEIGHT)', '(c.altitude / CLIENT_CLOUD_HEIGHT)'],
+    ['((CLOUD_ALTITUDES[slot] * this.sheetScale) / CLIENT_CLOUD_HEIGHT)', '(CLOUD_ALTITUDES[slot] / CLIENT_CLOUD_HEIGHT)'],
+    ["c.slot === 0 ? 'bottom'", "c.altitude === CLOUD_ALTITUDES[0] ? 'bottom'"],
+  ];
+  ok(SHEETS.every(([p]) => nowSk.split(p).length === 2), "the cloud sheets' lines in sky.ts are there exactly once each");
+  const unSheeted = SHEETS.reduce((s, [p, q]) => s.replace(p, q), nowSk);
+  const back = unSheeted.replace("import { DOME_COLOUR_GLSL } from './domeColour.ts';\n", '').replace('${DOME_COLOUR_GLSL}', body).replace("'uClear' | 'uHorizonFog', THREE.IUniform>> {", "'uClear', THREE.IUniform>> {").replace("'uClear' | 'uHorizonFog', THREE.IUniform>;", "'uClear', THREE.IUniform>;").replace(W5_FIELD, '').replace(w5Parts[1], '').replace(w5Parts[2], 'o.skyDistance = SKY_RADIUS;');
+  let at = 0;
+  while (at < back.length && back[at] === sk[at]) at++;
+  if (back !== sk) console.log(`note the first difference from ${PRE_PASS}'s sky.ts, at ${at}: now ${JSON.stringify(back.slice(at - 40, at + 80))}, then ${JSON.stringify(sk.slice(at - 40, at + 80))}`);
   ok(back === sk, `the dome's text is ${PRE_PASS}'s to the byte with DOME_COLOUR_GLSL laid back (only domeUniforms' type gains uHorizonFog, and the fifth wave's flare sky, which is no program's text)`);
 }
 void groundH;

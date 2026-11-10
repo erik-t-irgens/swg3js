@@ -921,6 +921,25 @@ export class World {
   }
   /** The planet's own sky when its pack carries one; the procedural dome is hidden while it is up. */
   swgSky: SwgSky | null = null;
+  /** A world row's multipliers on the sky's cloud sheets and the world they are for (`setCloudSheets`). */
+  private readonly cloudSheets = { pack: '', height: 1, scale: 1 };
+  /**
+   * The sheets' height and picture-size multipliers of a world's own row (its locations file, `sheetMultipliers`), kept for
+   * the world they are for and put on its sky now and whenever its sky is made; any other world's sky stands as it was.
+   */
+  setCloudSheets(pack: string, height: number, scale: number): void {
+    this.cloudSheets.pack = pack;
+    this.cloudSheets.height = height;
+    this.cloudSheets.scale = scale;
+    this.applyCloudSheets();
+  }
+  private applyCloudSheets(): void {
+    const s = this.swgSky;
+    if (!s) return;
+    const c = this.cloudSheets;
+    if (c.pack === this.packId) s.setSheets(c.height, c.scale);
+    else s.setSheets(1, 1);
+  }
   /** Rain, dust storms and snow, and which area's rows the sky draws (weather.ts). Made in the constructor. */
   readonly weather: Weather;
   /** Set by main before update: the player is aboard a ship's rooms. */
@@ -3600,6 +3619,7 @@ export class World {
     this.dropSky();
     this.swgSky = sky;
     this.skyPack = pack;
+    this.applyCloudSheets();
     this.scene.add(sky.group, sky.cloudGroup);
     markActor(sky.group);
     markActor(sky.cloudGroup);

@@ -28,6 +28,7 @@ import { RopeRibbon, dartMesh } from './grappleDraw.ts';
 import { makeHullController, type PeerHulls } from './grappleFrames.ts';
 import { armAimFor } from './grappleMath.ts';
 import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from './swimStep.ts';
+import { FELL_UNDER } from '../world/fellOut.ts';
 
 /**
  * The two lines a fire says, and the only two: one when you catch, one when it goes out, and
@@ -2691,8 +2692,9 @@ export class Player {
     // lean and the arm. It moves no body, and for a player who never fires it never runs.
     if (this.grapple.lively) this.grapple.look(this.gview, dt);
     // Fallen out of the world: back onto the ground. Not inside a building, whose rooms (a bunker's
-    // lowest landing, a dungeon under a mountain) go far below the terrain's floor.
-    if (!this.aboard && !this.inside && this.pos.y < terrain.floor) {
+    // lowest landing, a dungeon under a mountain) go far below the terrain's floor. And under the ground right below
+    // too (`fellOut`): a sinkhole sculpted deeper than the world's floor is ground, not out of the world.
+    if (!this.aboard && !this.inside && this.pos.y < terrain.floor && !(this.pos.y >= ground - FELL_UNDER)) {
       this.pos.y = ground + 1;
       this.vel.set(0, 0, 0);
     }
