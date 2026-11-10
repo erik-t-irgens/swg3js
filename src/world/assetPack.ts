@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { isReflective, registerReflective } from './envmap.ts';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { surfaces } from './surfaces.ts';
+import { SharedImages } from './sharedImages.ts';
 import { drawnLevels } from './lodLevels.ts';
 import { mergeFloraCollision, modelExtentOf, type FloraCollision } from './floraCollision.ts';
 import { DOORS_PACK_VERSION, type DoorsFile } from './doorMath.ts';
@@ -446,6 +447,8 @@ export class AssetPack {
   private readonly baseUrl: string;
   /** A folder of the owner's own imported models (`load`'s `dir`), not a converted pack: what the world lets go and reloads apart. */
   imported = false;
+  /** An imports folder's pictures, one decoded and uploaded per distinct image its models embed; null for a converted pack. */
+  images: SharedImages | null = null;
 
   // Written out, not as parameter properties: node's type stripping runs this file in the leaf cards' wiring test.
   private constructor(manifest: PackManifest, baseUrl: string) {
@@ -507,6 +510,10 @@ export class AssetPack {
         // An import's folder: its flora's own shapes, and the pack's one difference from a converted one (`imported`).
         pack.imported = true;
         pack.effectsLoad = Promise.resolve();
+        // Every copy of one picture its models embed decoded and uploaded once for the folder (`sharedImages.ts`).
+        const images = new SharedImages();
+        pack.images = images;
+        pack.loader.register((parser) => images.plugin(parser));
         if (manifest.categories.flora?.length) {
           try {
             const cr = await fetch(`${baseUrl}flora-collision.json`, { cache: 'no-store' });

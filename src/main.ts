@@ -30059,7 +30059,7 @@ class App {
       return { id: s.row.id, model: s.row.model, layer: s.layer, from: p ? (p === packs?.shipped ? 'shipped' : 'private') : null };
     });
     const skipped = this.permanent.report().rows.filter((r) => !r.stood && [...(this.permanent.fileOf('story')?.rows ?? []), ...(this.permanent.fileOf('world')?.rows ?? [])].some((x) => x.id === r.id && x.pack === 'imported')).map((r) => ({ id: r.id, why: r.why }));
-    return { folders: { shipped: { dir: IMPORTS_SHIPPED, ...shipped, loaded: !!packs?.shipped }, private: { dir: IMPORTS_PRIVATE, ...priv, loaded: !!packs?.private } }, rows, ...(skipped.length ? { notStood: skipped } : {}) };
+    return { folders: { shipped: { dir: IMPORTS_SHIPPED, ...shipped, loaded: !!packs?.shipped, pictures: packs?.shipped?.images?.pictures ?? null }, private: { dir: IMPORTS_PRIVATE, ...priv, loaded: !!packs?.private, pictures: packs?.private?.images?.pictures ?? null } }, rows, ...(skipped.length ? { notStood: skipped } : {}) };
   }
 
   /**
