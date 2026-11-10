@@ -278,6 +278,34 @@ ok(now({ bakeStep: 16 }) === todayText, 'and a 16 m bake (a wide world) as an 8 
   ok(/--only=w --step=4\)/.test(refused(stale(4))) && /--only=w\)/.test(refused(stale(8))) && !/--step/.test(refused(stale(8))) && /--only=w\)/.test(refused(null)) && /--only=w\)/.test(refused({ format: HORIZON_FORMAT, fine: null })), "a stale 4 m bake's refusal names `--step=4`, an 8 m or unreadable one's none");
 }
 
+// A band of the bake past the end of a 4 m lattice (the owner's whole-install `--step=4` stopped on Corellia): every band of
+// rows a worker can be handed, over every residue of the world's centre, lands inside the array.
+{
+  const { rowsIn } = await import('../horizonWorker.mjs');
+  const span = 256;
+  let bands = 0;
+  let bad = 0;
+  let past = 0;
+  for (let cz = 0; cz < 16; cz++) {
+    for (const step of [4, 8] as const) {
+      const { fine } = planBake(16384, { x: 0, z: cz }, { step });
+      const out = new Float32Array(fine.nz);
+      const last = fine.z0 + (fine.nz - 1) * fine.step;
+      for (let sz = fine.z0 - 2 * span; sz < last + 2 * span; sz += 8) {
+        const [j0, j1] = rowsIn(fine, sz, sz + span);
+        bands++;
+        if (Math.ceil((sz - fine.z0) / fine.step) > fine.nz) past++;
+        try {
+          out.set(new Float32Array(Math.max(0, j1 - j0)), j0);
+        } catch {
+          bad++;
+        }
+      }
+    }
+  }
+  ok(past > 0 && bad === 0, `every band of a bake's rows lands inside the lattice, ${past} of ${bands} beginning past its end`);
+}
+
 Object.assign(HORIZON_TUNE, saved);
 void (null as unknown as ReachRules);
 console.log(`\nhorizonFiner: ${checks} checks passed`);

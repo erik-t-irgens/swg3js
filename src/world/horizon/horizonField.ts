@@ -15,6 +15,7 @@ import type { CourseCarve } from '../../swg/terrain/courseCarve.ts';
 import type { HeightEdits } from '../../swg/terrain/heightEdits.ts';
 import { DETAIL_TILE, STRIP_TILES, clipRect, freshRects, layerMeans, normalsRect, poleTiles, pyramidRelay, windowPlace, windowTiles, wrapPieces, type DecodedBake, type IndexRect, type RgbaRegion, type TileTables, type WindowPlace } from './horizonDecode.ts';
 import { HORIZON_BIN, HORIZON_JSON, readHorizonHeader, type HorizonHeader } from './horizonFile.ts';
+import { PlainColours, plainAlbedoRect, type MadeGroundSpec, type PlainGround } from './horizonDem.ts';
 import { HORIZON_TUNE, HORIZON_VIEWS, HoleGrid, LEAF, PATCH, RingSelector, bakeHeightAt, cameraFrustum, newReachRules, newRingSurface, reachRules, ringLevelOf, ringSurfaceAt, type MinMaxPyramid, type ReachRules, type RingAsk, type RingSurface } from './horizonMath.ts';
 import { HORIZON_TILE, HeightOverlay, REGEN_STEP, overridesOf, regenPlan, samplesIn, type RawRect, type SampleRect } from './horizonOverlay.ts';
 import { PAINT_TILE, paintTileOf } from '../../swg/terrain/groundPaint.ts';
@@ -318,6 +319,7 @@ interface WorkerAnswer {
   cells?: Uint8Array[];
   albedo?: Uint8Array;
   coarseAlbedo?: Uint8Array;
+  heights?: Float32Array;
 }
 
 /** The dome's uniforms the ring's horizon fade reads (`SwgSky.domeUniforms`). */
@@ -444,6 +446,8 @@ export class HorizonField {
   /** The worker's answers to the overlays by id. */
   private readonly overlayWait = new Map<number, (r: { fine: RgbaRegion; coarse: RgbaRegion } | null) => void>();
   private nextOverlay = 3;
+  /** A made world's shape-window blocks awaited of the decode worker, by id (`madePoles`). */
+  private readonly polesWait = new Map<number, (r: { heights: Float32Array } | null) => void>();
 
   // ---------------------------------------------------------------- W4: the edits followed live (DESIGN.md §6)
   /** The clock the live steps read (the tests move it); read only while something waits, a clock read being a number made. */
@@ -518,13 +522,48 @@ export class HorizonField {
     this.mainMs = performance.now() - tm;
     const td = performance.now();
     this.ground = ground;
-    const d = await this.decode(read.header, bin, tables, eye);
+    const d = await this.decode((w) => w.postMessage({ type: 'decode', id: 1, header: read.header, bin: bin.buffer, tables, centre: this.centre, shift: { x: this.shift.x, z: this.shift.z }, eye: { rx: this.centre.x - eye.x, rz: eye.z + this.centre.z }, S: windowTiles(HORIZON_TUNE.detailReach) }, [bin.buffer as ArrayBuffer]));
     this.decodeWallMs = performance.now() - td;
     if (!d || this.disposed) return false;
+    return this.stand(read.header, d, session, renderer, stores);
+  }
+
+  /** Whether this field's ground names no family (`horizonDem.ts`' plain world): its albedo is the palette's and it has no composition window. */
+  plain: PlainGround | null = null;
+  private plainColours: PlainColours | null = null;
+  /** A plain world's fine albedo while its arrival lays its edits (before the textures exist), else null. */
+  private plainFirst: Uint8Array | null = null;
+
+  /**
+   * A world with no converted terrain's rings made in the decode worker behind the arrival's screen (the horizon pass's h6b,
+   * `horizonDem.ts`), from there on the field a bake's: `ground` (the lent ground's tile arrays) composes its albedo; null, a
+   * world that names no ground, takes its palette's and keeps its composition window empty. Answers whether the rings stand.
+   */
+  async loadMade(spec: MadeGroundSpec, ground: FieldGround | null, session: RingSession, renderer: THREE.WebGLRenderer | null, eye: { x: number; z: number }, stores: OverlayStores | null = null): Promise<boolean> {
+    const tm = performance.now();
+    const tables = ground ? tileTablesOf(ground) : null;
+    this.means = tables ? tables.means : null;
+    this.mainMs = performance.now() - tm;
+    this.ground = ground;
+    this.plain = tables ? null : spec.plain;
+    this.plainColours = this.plain ? new PlainColours(this.plain) : null;
+    // The rings stand on this world's raw frame about (0, 0): a world with a tiler has been bound so already, and a plain one
+    // has no `bindTiles` to say so over the last world's layout centre.
+    session.ground.uGroundFrame.value.x = 0;
+    session.ground.uGroundFrame.value.y = 0;
+    const td = performance.now();
+    const d = await this.decode((w) => w.postMessage({ type: 'make', id: 1, spec, tables, centre: this.centre, shift: { x: this.shift.x, z: this.shift.z }, eye: { rx: this.centre.x - eye.x, rz: eye.z + this.centre.z }, S: windowTiles(HORIZON_TUNE.detailReach) }, spec.source ? [spec.source.raw] : []));
+    this.decodeWallMs = performance.now() - td;
+    if (!d || !d.header || this.disposed) return false;
+    this.header = d.header;
+    return this.stand(d.header, d, session, renderer, stores);
+  }
+
+  /** The decoded (or made) bake stood: the surface's lattices, the overlays laid, the textures made and bound. */
+  private stand(h: HorizonHeader, d: DecodedBake, session: RingSession, renderer: THREE.WebGLRenderer | null, stores: OverlayStores | null): boolean {
     const tu = performance.now();
     this.decodeMs = d.ms;
     this.pyramid = d.pyramid;
-    const h = read.header;
     this.fineH = d.fine;
     this.coarseH = d.coarse;
     this.surface.fine = { x0: h.fine.x0, z0: h.fine.z0, step: h.fine.step, nx: h.fine.nx, nz: h.fine.nz, h: d.fine };
@@ -535,7 +574,9 @@ export class HorizonField {
     this.surface.sz = this.shift.z;
     // The owner's heights and the drawn courses laid over the bake before anything is uploaded (§2.3: before the first ring
     // is drawn), each tile's normals and leaves made again from the laid heights.
+    this.plainFirst = this.plain ? d.albedo : null;
     if (stores) this.layHeights(stores, d.fineNormal);
+    this.plainFirst = null;
     // Wave h6a: the ranges' window side and the bake's own step, written once (the rules' kept record).
     this.rules.side = this.shapeSide || SHAPE_SIDE;
     this.rules.bakeStep = h.fine.step;
@@ -808,6 +849,16 @@ export class HorizonField {
       for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) hr[(j - j0) * w + (i - i0)] = fine[j * L.nx + i];
       // The fine lattice's rows stand from the atlas's row nought, column nought: a rectangle lands at its own indices.
       if (this.heights) this.upload(this.heights, hr, i0, j0, w, hh, THREE.RedFormat, THREE.FloatType);
+    }
+    // A plain world's colours are its palette's by height and slope, so they move with the heights (the colour lattice is the
+    // fine one on a world about (0, 0): `horizonDem.ts`).
+    if (this.plainColours) {
+      if (this.plainFirst) plainAlbedoRect(this.plainColours, fine, L, i0, j0, i1, j1, this.plainFirst);
+      else if (this.albedo) {
+        const w = i1 - i0 + 1;
+        const hh = j1 - j0 + 1;
+        this.upload(this.albedo, plainAlbedoRect(this.plainColours, fine, L, i0, j0, i1, j1, new Uint8Array(w * hh * 4), i0, j0, w), i0, j0, w, hh, THREE.RGBAFormat, THREE.UnsignedByteType, true);
+      }
     }
     if (this.pyramid) {
       const c = this.centre;
@@ -1107,7 +1158,7 @@ export class HorizonField {
    * nothing within `decodeWaitMs`), so the far tiles are drawn and nothing waits for good. Once decoded the worker stays
    * for the detail window, and what goes wrong with it after is a note: the rings stand as they stood.
    */
-  private decode(header: HorizonHeader, bin: Uint8Array, tables: TileTables, eye: { x: number; z: number }): Promise<DecodedBake | null> {
+  private decode(post: (w: Worker) => void): Promise<DecodedBake | null> {
     return new Promise((resolve) => {
       if (this.disposed) {
         resolve(null);
@@ -1169,10 +1220,18 @@ export class HorizonField {
           const r = this.overlayWait.get(m.id);
           this.overlayWait.delete(m.id);
           r?.(m as unknown as { fine: RgbaRegion; coarse: RgbaRegion });
+        } else if (m.type === 'poles' && m.id !== undefined) {
+          const r = this.polesWait.get(m.id);
+          this.polesWait.delete(m.id);
+          r?.(m.heights ? { heights: m.heights } : null);
         } else if (m.type === 'error') {
           // An overlay that did not compose keeps the albedo that stands (a note); so does a detail window, which is asked again.
           if (m.id !== undefined && m.id !== 0 && m.id === this.windowAsked) this.windowFailed(m.message ?? 'no word');
-          else if (m.id !== undefined && this.overlayWait.has(m.id)) {
+          else if (m.id !== undefined && this.polesWait.has(m.id)) {
+            const r = this.polesWait.get(m.id);
+            this.polesWait.delete(m.id);
+            r?.(null);
+          } else if (m.id !== undefined && this.overlayWait.has(m.id)) {
             const r = this.overlayWait.get(m.id);
             this.overlayWait.delete(m.id);
             r?.(null);
@@ -1182,7 +1241,24 @@ export class HorizonField {
           } else fail(`the bake did not decode (${m.message})`);
         }
       };
-      w.postMessage({ type: 'decode', id: 1, header, bin: bin.buffer, tables, centre: this.centre, shift: { x: this.shift.x, z: this.shift.z }, eye: { rx: this.centre.x - eye.x, rz: eye.z + this.centre.z }, S: windowTiles(HORIZON_TUNE.detailReach) }, [bin.buffer as ArrayBuffer]);
+      post(w);
+    });
+  }
+
+  /** Whether the decode worker stands to answer (a made world's shape window, `horizonDem.ts`' `madeShapeTerrain`). */
+  get workerUp(): boolean {
+    return this.worker !== null;
+  }
+
+  /** The near ground's heights over a raw-frame grid, made by the decode worker from the raster it holds (h6b): null with no worker. */
+  madePoles(startX: number, startZ: number, n: number, step: number): Promise<{ heights: Float32Array } | null> {
+    const w = this.worker;
+    if (!w) return Promise.resolve(null);
+    const id = this.nextOverlay;
+    this.nextOverlay += 2;
+    return new Promise((resolve) => {
+      this.polesWait.set(id, resolve);
+      w.postMessage({ type: 'poles', id, startX, startZ, n, step });
     });
   }
 
@@ -1322,7 +1398,8 @@ export class HorizonField {
   private askWindow(): void {
     const w = this.worker;
     const h = this.header;
-    if (!w || !h || this.windowAsked || !this.place.S) return;
+    // A plain world's window holds nothing and stays so (no tables to make one from, no paint to lay).
+    if (!w || !h || this.windowAsked || !this.place.S || this.plainColours !== null) return;
     // The side the distance in force asks, worked out again only when the distance moved.
     const reach = HORIZON_TUNE.detailReach;
     if (reach !== this.reachSeen) {
@@ -1716,6 +1793,9 @@ export class HorizonField {
     const waits = [...this.overlayWait.values()];
     this.overlayWait.clear();
     for (const r of waits) r(null);
+    const poles = [...this.polesWait.values()];
+    this.polesWait.clear();
+    for (const r of poles) r(null);
   }
 
   dispose(s: RingSession | null): void {

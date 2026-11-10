@@ -1139,6 +1139,8 @@ export interface DecodedBake {
   tint: Uint8Array;
   place: WindowPlace;
   ms: { inflate: number; heights: number; normals: number; albedo: number; pyramid: number; detail: number; memo: number };
+  /** A bake made in the worker (`horizonDem.ts`), which has no file to read a header from: the one it made. */
+  header?: HorizonHeader;
 }
 
 /** The whole decode, in the worker's order; the window made round the eye at side `S` tiles. */
@@ -1151,22 +1153,41 @@ export async function decodeBake(header: HorizonHeader, bin: Uint8Array, t: Tile
   const fine = decodeHeights(s.heights, header.fine.nx, header.fine.nz, header.fine.lo, header.fine.q);
   const coarse = decodeHeights(s.coarseHeights, header.coarse.nx, header.coarse.nz, header.coarse.lo, header.coarse.q);
   ms.heights = clock() - t0;
-  t0 = clock();
+  return composeBake(header, fine, coarse, s, t, centre, shift, eye, S, ms);
+}
+
+/**
+ * From the heights on (the decode's, and a bake made in the worker for a world with no converted terrain, `horizonDem.ts`): the
+ * normals, the albedos composed from the tile tables, the pyramid and the composition window. With `plain` (a made world that
+ * names no ground and so has no tables) its two albedos as handed in and a window that holds nothing, whose every tile reads as
+ * empty and is never asked for again.
+ */
+export function composeBake(header: HorizonHeader, fine: Float32Array, coarse: Float32Array, s: Pick<Record<HorizonSectionName, Uint8Array>, 'families' | 'colour' | 'coarseFamilies' | 'coarseColour'>, t: TileTables | null, centre: { x: number; z: number }, shift: { x: number; z: number }, eye: { rx: number; rz: number }, S: number, ms: DecodedBake['ms'], plain: { albedo: Uint8Array; coarseAlbedo: Uint8Array } | null = null): DecodedBake {
+  const clock = () => performance.now();
+  let t0 = clock();
   // The coarse lattice's normals are worked out in the ring's vertex stage from its heights (the third wave's sampler budget).
   const fineNormal = normalsOf(fine, header.fine);
   ms.normals = clock() - t0;
-  const a = composeAlbedo(t, header, s.families, s.colour);
-  ms.albedo = a.ms;
-  ms.memo = a.memo;
-  t0 = clock();
-  const coarseAlbedo = composeCoarseAlbedo(t, header, a.rgba, s.coarseFamilies, s.coarseColour);
-  ms.albedo += clock() - t0;
+  let albedo: Uint8Array;
+  let coarseAlbedo: Uint8Array;
+  if (t) {
+    const a = composeAlbedo(t, header, s.families, s.colour);
+    ms.albedo = a.ms;
+    ms.memo = a.memo;
+    albedo = a.rgba;
+    t0 = clock();
+    coarseAlbedo = composeCoarseAlbedo(t, header, a.rgba, s.coarseFamilies, s.coarseColour);
+    ms.albedo += clock() - t0;
+  } else {
+    albedo = plain!.albedo;
+    coarseAlbedo = plain!.coarseAlbedo;
+  }
   t0 = clock();
   const pyramid = pyramidOf(header, fine, coarse, centre, shift);
   ms.pyramid = clock() - t0;
   t0 = clock();
   const place = windowPlace(eye.rx, eye.rz, S, header.colour);
-  const w = wholeWindow(t, header, s.families, s.colour, [], [], place);
+  const w = t ? wholeWindow(t, header, s.families, s.colour, [], [], place) : { window: new Uint16Array(place.S * place.S * 4), tint: new Uint8Array(place.T * place.T * 4) };
   ms.detail = clock() - t0;
-  return { fine, coarse, fineNormal, albedo: a.rgba, coarseAlbedo, pyramid, window: w.window, tint: w.tint, place, ms };
+  return { fine, coarse, fineNormal, albedo, coarseAlbedo, pyramid, window: w.window, tint: w.tint, place, ms };
 }

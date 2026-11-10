@@ -94,6 +94,14 @@ export class DemShader {
     }
   }
 
+  /** The rules and the lift as they were written (the far ground's rings evaluate the same rules in their worker, `horizonDem.ts`). */
+  get groundSpec(): GroundRules {
+    return this.spec;
+  }
+  get groundLift(): number {
+    return this.lift;
+  }
+
   /**
    * The ground's paint (Map-maker II, `groundPaint.ts`), asked before any rule: a painted cell keeps its paint whatever the
    * rules say of the ground under it. In the raw frame about (0, 0), a real-elevation world's (`x` mirrored). Null asks none.

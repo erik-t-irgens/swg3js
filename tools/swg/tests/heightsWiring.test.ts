@@ -65,8 +65,8 @@ const install = body(world, '  installHeights(store: HeightEdits | null, late = 
 ok(/if \(swg\) \{\s*swg\.useHeights\(store\);\s*this\.terrain\.heights = null;\s*\} else if \(this\.swgComingFor === this\.terrain\) \{[\s\S]{0,400}?return;\s*\} else this\.terrain\.heights = store;/.test(install), "and installHeights keeps a store for a converted ground still being made, never laying it on the terrain that ground replaces");
 const loadBody = body(world, '  load(planet: PlanetDef, packId = packIdOf(planet)): void {');
 // Moved on purpose by Map-maker II's fourth wave's fix round: the remake sits in a `try` that makes the far cards at once behind the screen.
-// (And moved on purpose by the race drawer's second wave: the drawn courses' pole grid is made between the two.)
-ok(/const store = await this\.heightsReady\(\);[\s\S]{0,200}terrain\.heights = store;[\s\S]{0,700}this\.remakeGround\(\);/.test(loadBody), "on a real-elevation world, before the raster's remakeGround");
+// (And moved on purpose by the race drawer's second wave: the drawn courses' pole grid is made between the two; and by the horizon's h6b: its far rings are made there too.)
+ok(/const store = await this\.heightsReady\(\);[\s\S]{0,200}terrain\.heights = store;[\s\S]{0,1000}this\.remakeGround\(\);/.test(loadBody), "on a real-elevation world, before the raster's remakeGround");
 // A raster that does not load: the file is still read and laid on the noise ground in its place (else its rows were never
 // kept and every stroke over a tile the file holds was refused).
 ok(/its elevation did not load[^\n]*\n[\s\S]{0,600}?this\.heightsByDem = false;\s*const store = await this\.heightsReady\(\);\s*if \(store && this\.terrain === terrainAtLoad\) this\.installHeights\(store\);/.test(loadBody), "a real-elevation world whose raster fails still reads its heights file and lays it on the noise ground");

@@ -38,6 +38,8 @@ export interface DemPatch {
    * height is wanted too, so this takes it and does the blend here.
    */
   heightAt(x: number, z: number, under: () => number): number | null;
+  /** What a raster's patch was made from, the far ground's rings made from the same in a worker (`horizonDem.ts`); none on a ground made in the browser. */
+  readonly source?: { readonly raw: ArrayBuffer; readonly meta: DemMeta; readonly where: { centreX?: number; centreZ?: number; size?: number; lift?: number; feather?: number } };
 }
 
 /** 16-bit little-endian rows, top-down, exactly as `base16.raw` holds them. */
@@ -59,6 +61,7 @@ export function makeDemPatch(raw: ArrayBuffer, meta: DemMeta, where: { centreX?:
     samples: n,
     minHeight: lo,
     maxHeight: meta.base.maxHeight,
+    source: { raw, meta, where },
 
     heightAt(x: number, z: number, under: () => number): number | null {
       const half = this.size / 2;

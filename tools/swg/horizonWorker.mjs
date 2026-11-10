@@ -39,7 +39,10 @@ export function loadBakeSampler(packDir) {
 }
 
 const mod = (v, m) => ((v % m) + m) % m;
-const rowsIn = (lat, z0, z1) => [Math.max(0, Math.ceil((z0 - lat.z0) / lat.step)), Math.min(lat.nz, Math.ceil((z1 - lat.z0) / lat.step))];
+// The first row is held to the lattice's end as well: a 4 m lattice stops at the 8 m bake's last sample, up to 7.99 m short
+// of the band's reach, so a last band can begin more than one step past it, and that row past the end was handed to
+// `Float32Array.set` as an offset past the array's (a world whose centre's residue did it: Corellia, not Tatooine or Naboo).
+export const rowsIn = (lat, z0, z1) => [Math.min(lat.nz, Math.max(0, Math.ceil((z0 - lat.z0) / lat.step))), Math.min(lat.nz, Math.ceil((z1 - lat.z0) / lat.step))];
 
 function fineJob(s, job) {
   const { s0, squares, row, fine, ground, colour } = job;

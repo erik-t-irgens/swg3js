@@ -3,7 +3,8 @@
 // or by the strips the eye's move brought into it), and for the overlays the field lays over the bake (W2: the poles and
 // colour cells the live generator made again), whose albedo is composed again here over their cells and the coarse
 // texels those reach. A ground knob's move hands it new tables (`retune`): the albedo composed again whole.
-import { coarseAlbedoRegion, coarseReach, composeAlbedo, composeAlbedoRegion, composeCoarseAlbedo, decodeBake, inflate, TileComposer, tintRect, wholeWindow, windowRect, type ColourOverride, type IndexRect, type PoleOverride, type TileTables, type WindowPlace } from './horizonDecode.ts';
+import { coarseAlbedoRegion, coarseReach, composeAlbedo, composeAlbedoRegion, composeBake, composeCoarseAlbedo, decodeBake, inflate, TileComposer, tintRect, wholeWindow, windowRect, type ColourOverride, type IndexRect, type PoleOverride, type TileTables, type WindowPlace } from './horizonDecode.ts';
+import { MadeGround, makeBake, plainAlbedos, type MadeGroundSpec } from './horizonDem.ts';
 import { sectionOf, type HorizonHeader } from './horizonFile.ts';
 
 interface Kept {
@@ -18,9 +19,13 @@ interface Kept {
   cells: ColourOverride[];
 }
 let kept: Kept | null = null;
+/** A world with no converted terrain's ground (h6b, `horizonDem.ts`), kept for the shape window's poles (`poles`). */
+let madeGround: MadeGround | null = null;
 
 type Message =
   | { type: 'decode'; id: number; header: HorizonHeader; bin: ArrayBuffer; tables: TileTables; centre: { x: number; z: number }; shift: { x: number; z: number }; eye: { rx: number; rz: number }; S: number }
+  | { type: 'make'; id: number; spec: MadeGroundSpec; tables: TileTables | null; centre: { x: number; z: number }; shift: { x: number; z: number }; eye: { rx: number; rz: number }; S: number }
+  | { type: 'poles'; id: number; startX: number; startZ: number; n: number; step: number }
   | { type: 'window'; id: number; place: WindowPlace }
   | { type: 'strip'; id: number; place: WindowPlace; tiles: IndexRect[]; cells: IndexRect[] }
   | { type: 'retune'; id: number; tables: TileTables; place: WindowPlace }
@@ -42,6 +47,26 @@ self.onmessage = async (e: MessageEvent) => {
       const buffers: ArrayBuffer[] = [d.fine.buffer, d.coarse.buffer, d.fineNormal.buffer, d.albedo.buffer, d.coarseAlbedo.buffer, d.window.buffer, d.tint.buffer] as ArrayBuffer[];
       for (const a of [...d.pyramid.lo, ...d.pyramid.hi]) buffers.push(a.buffer as ArrayBuffer);
       post({ type: 'decoded', id: m.id, d }, buffers);
+    } else if (m.type === 'make') {
+      // A world with no converted terrain (h6b): the bake's own lattices and sections made here, then the decode's own steps.
+      const t0 = performance.now();
+      const g = new MadeGround(m.spec);
+      const b = makeBake(g);
+      const ms = { inflate: 0, heights: performance.now() - t0, normals: 0, albedo: 0, pyramid: 0, detail: 0, memo: 0 };
+      const t1 = performance.now();
+      const plain = m.tables ? null : plainAlbedos(b, m.spec.plain!);
+      if (plain) ms.albedo = performance.now() - t1;
+      const d = composeBake(b.header, b.fine, b.coarse, b, m.tables, m.centre, m.shift, m.eye, m.S, ms, plain);
+      d.header = b.header;
+      madeGround = g;
+      if (m.tables) kept = { header: b.header, families: b.families, colour: b.colour, coarseFamilies: b.coarseFamilies, coarseColour: b.coarseColour, tables: m.tables, poles: [], cells: [] };
+      const buffers: ArrayBuffer[] = [d.fine.buffer, d.coarse.buffer, d.fineNormal.buffer, d.albedo.buffer, d.coarseAlbedo.buffer, d.window.buffer, d.tint.buffer] as ArrayBuffer[];
+      for (const a of [...d.pyramid.lo, ...d.pyramid.hi]) buffers.push(a.buffer as ArrayBuffer);
+      post({ type: 'decoded', id: m.id, d }, buffers);
+    } else if (m.type === 'poles') {
+      if (!madeGround) return;
+      const heights = madeGround.polesIn(m.startX, m.startZ, m.n, m.step);
+      post({ type: 'poles', id: m.id, heights }, [heights.buffer as ArrayBuffer]);
     } else if (m.type === 'window') {
       if (!kept) return;
       const w = wholeWindow(kept.tables, kept.header, kept.families, kept.colour, kept.poles, kept.cells, m.place);

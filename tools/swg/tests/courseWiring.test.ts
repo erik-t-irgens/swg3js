@@ -148,9 +148,10 @@ ok(/return \(x, z\) => \(\{ x: rawToGameX\(c\.x, x\), z: rawToGameZ\(c\.z, z\) \
       if (/from '[^']*race\/course(Path|Gates|Tune|Track)\.ts'/.test(text) || /courseSpines\(/.test(text) || /from '[^']*courseCarve\.ts'/.test(text)) readers.push(rel);
     }
   // And the far ground's (the horizon pass's second wave, its §2.11): the course laid over the bake by the carve's own
-  // `layIn`, from the store the near ground holds (`horizonOverlay.ts`), handed over by the field (`horizonField.ts`).
-  const want = ['src/swg/terrain/courseCarve.ts', 'src/swg/terrain/trn.ts', 'src/world/swgTerrain.ts', 'src/world/terrain.ts', 'src/world/world.ts', 'src/world/horizon/horizonField.ts', 'src/world/horizon/horizonOverlay.ts'];
-  ok(readers.sort().join(',') === want.sort().join(','), `the modules of the terrain and the world that read a course are the carve's own five and the far ground's two (${readers.join(', ')})`);
+  // `layIn`, from the store the near ground holds (`horizonOverlay.ts`), handed over by the field (`horizonField.ts`); and a
+  // world with no converted terrain's shape window lays its blocks the same way (`horizonDem.ts`, the horizon's h6b).
+  const want = ['src/swg/terrain/courseCarve.ts', 'src/swg/terrain/trn.ts', 'src/world/swgTerrain.ts', 'src/world/terrain.ts', 'src/world/world.ts', 'src/world/horizon/horizonField.ts', 'src/world/horizon/horizonOverlay.ts', 'src/world/horizon/horizonDem.ts'];
+  ok(readers.sort().join(',') === want.sort().join(','), `the modules of the terrain and the world that read a course are the carve's own five and the far ground's three (${readers.join(', ')})`);
 }
 
 // The second wave's hand-overs only the game makes (every behaviour test builds its own world): the courses asked as the load
@@ -162,7 +163,8 @@ ok(/return \(x, z\) => \(\{ x: rawToGameX\(c\.x, x\), z: rawToGameZ\(c\.z, z\) \
   ok(/\/\/ whatever the race switch says \(a course is ground\), and waited on \(bounded\) before the ground that carves them is made\.\s*this\.askCourse\(this\.editKey\);/.test(world), "a world's drawn courses are asked as its load begins, whatever the race switch says");
   const conv = after(world, '    await this.removalsReady();\n    await this.peopleReady();\n    // And its drawn race courses', 4800);
   ok(/await this\.courseReady\(\);/.test(conv) && /const course = this\.courseCarve;\s*const swg = await SwgTerrain\.create\([^\n]*\{ heights, paint, [^\n]*course \}\)/.test(world), 'a converted world awaits its courses before `SwgTerrain.create`, which is handed the store');
-  ok(/await this\.courseReady\(\);\s*if \(this\.terrain !== terrain\) return;\s*this\.attachCourseGrid\(terrain\);[\s\S]{0,300}this\.remakeGround\(\);/.test(world), "a real-elevation world's pole grid is made whole before its raster's ground is made again");
+  // (The horizon's h6b makes the far rings between the two, a few lines more.)
+  ok(/await this\.courseReady\(\);\s*if \(this\.terrain !== terrain\) return;\s*this\.attachCourseGrid\(terrain\);[\s\S]{0,600}this\.remakeGround\(\);/.test(world), "a real-elevation world's pole grid is made whole before its raster's ground is made again");
   ok(/await this\.courseReady\(\);\s*if \(token !== this\.loadToken\) return null;\s*if \(this\.courseCarve && !this\.terrain\.courseGrid\) this\.installCourseLate\(\);/.test(world), "the noise ground's path carves its courses through the pole grid too");
   ok(/this\.flora\.onCourse = this\.courseRule\(\);/.test(world) && (world.match(/this\.flora\.onCourse = this\.courseRule\(\);/g) ?? []).length >= 4, "the planter is handed the road's rule at every install and landing");
   ok(/const onRoad = this\.courseSkip;/.test(world) && /this\.props\.buildForChunk\(cx, cz, this\.terrain, exclude, this\.courseSkip \?\? undefined\)/.test(world), "the props keep off a road on both of a chunk's paths");

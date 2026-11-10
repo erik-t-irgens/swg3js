@@ -41,7 +41,8 @@ export interface HorizonSource {
   centre: { x: number; z: number };
   layers: { sha1: string; list: [number, string, number, number, number][] };
   lifeDay: boolean;
-  made: 'poles' | 'grid';
+  /** `'browser'`: made in the decode worker for a world with no converted terrain (`horizonDem.ts`), no file behind it. */
+  made: 'poles' | 'grid' | 'browser';
   /** When it was made (ISO), for the console. */
   at?: string;
 }
