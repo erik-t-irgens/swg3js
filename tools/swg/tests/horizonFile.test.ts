@@ -176,7 +176,7 @@ if (!existsSync(join(source, 'terrain.trn'))) {
     writeFileSync(join(to, HORIZON_CARDS_JSON), JSON.stringify({ ...cardsHead, source: { ...cardsHead.source, trn: { ...cardsHead.source.trn, sha1: '0' } } }));
     ok(/another terrain file/.test(String(hz.horizonStatusOf('kashyyyk_main', to).cards)), 'and cards of another terrain file');
     writeFileSync(join(to, HORIZON_CARDS_JSON), JSON.stringify(cardsHead));
-    ok(hz.HORIZON_STATUS_ASKS === false, 'status asks no player for a bake this wave (its one word, for the wave that turns the rings on)');
+    ok(hz.HORIZON_STATUS_ASKS === true, 'status asks every player for the offered worlds\' bakes since the rings went on for everyone (its one word)');
     const json = JSON.parse(readFileSync(join(to, HORIZON_JSON), 'utf8'));
     const write = (o: unknown) => writeFileSync(join(to, HORIZON_JSON), JSON.stringify(o));
     write({ ...json, source: { ...json.source, generator: GENERATOR_REVISION + 1 } });

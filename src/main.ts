@@ -416,7 +416,7 @@ import { FAR_BASE, HORIZON_TUNE, HORIZON_VIEWS, type HorizonGround } from './wor
 import { SHAPE_CHOICE, heldShapeDetailKm, shapeSideOf } from './world/horizon/shapeWindow.ts';
 import { horizonDialsFor, shapeReachTop, tuneHorizon } from './world/horizon/horizonDials.ts';
 import { LANDMARK_TUNE, tuneLandmarks } from './world/landmarkMath.ts';
-import { landmarkDialsFor } from './world/landmarkDials.ts';
+import { LANDMARK_SWITCH, landmarkDialsFor } from './world/landmarkDials.ts';
 import { CARD_FIELD_TUNE, tuneCardField } from './world/horizon/cardField.ts';
 import { shipDialsFor } from './space/tierDials.ts';
 import { ENGINE_TUNE, damagePart, mendEngines, tuneEngines, type EngineTune } from './vehicles/drivetrain.ts';
@@ -5474,10 +5474,12 @@ class App {
        * curtain in a world, and so is one the dial moved with `{ apply: true }`, never by a frame. `localStorage['swg.landmarks']
        * = '1'` turns the size rule on at load. Await it when it changes `on` or `minSize`.
        */
-      landmarks: async (o?: { on?: boolean; apply?: boolean; tune?: Record<string, unknown> }) => {
+      landmarks: async (o?: { on?: boolean | 'on' | 'off'; apply?: boolean; tune?: Record<string, unknown> }) => {
         const said: string[] = [];
         if (o?.tune) said.push(...tuneLandmarks(o.tune));
-        if (typeof o?.on === 'boolean' && o.on !== LANDMARK_TUNE.on) said.push(await this.setLandmarks(o.on));
+        // The dial's own line writes 'on' or 'off' (`LANDMARK_DIALS`' key `on`); a boolean as ever.
+        const on = o?.on === 'on' ? true : o?.on === 'off' ? false : o?.on;
+        if (typeof on === 'boolean' && on !== LANDMARK_TUNE.on) said.push(await this.setLandmarks(on));
         else if ((o?.apply === true || (o?.tune !== undefined && 'minSize' in o.tune)) && this.world.landmarks?.pending) said.push(await this.applyLandmarks());
         this.world.landmarks?.refresh();
         return { ...(this.world.landmarks?.report() ?? { index: 'none here: a ground world builds one at its arrival (not space, the gallery or the copies)', on: LANDMARK_TUNE.on, k: LANDMARK_TUNE.k }), said: said.filter(Boolean) };
@@ -12263,11 +12265,13 @@ class App {
       // picked, the NPC ship ladder's tiers 6 to 10 when `npcShips` is, how a far body is drawn when `crowd` is, and
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
+      // (The landmarks' switch dial is handed the app's own curtain just below, `LANDMARK_SWITCH`.)
       dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
     draggable(this.debugMenu.root, '.dbg-panel', '.dbg-head', 'debug');
+    LANDMARK_SWITCH.set = (on) => void this.setLandmarks(on).then((said) => console.info(`landmarks: ${said}`));
     if (debugRoot) {
       // `__debug.debugMenu()` says what the menu holds; `{ open, pick, args, run }` works it from a
       // tab with no keyboard, a run being waited on before the report comes back. `{ pin, atStart }`
@@ -30790,6 +30794,13 @@ class App {
    */
   private async setLandmarks(on: boolean): Promise<string> {
     LANDMARK_TUNE.on = on;
+    // Remembered in this browser (the owner: once, then travel round): read back at load as `swg.landmarks`.
+    try {
+      if (on) localStorage.setItem('swg.landmarks', '1');
+      else localStorage.removeItem('swg.landmarks');
+    } catch {
+      /* a page that refuses storage keeps the rule for this session alone */
+    }
     if (!on) {
       await this.world.standLandmarks();
       return 'landmarks by size off: only the rows carrying landmark or drawDistance are kept far';

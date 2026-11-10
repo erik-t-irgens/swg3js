@@ -312,9 +312,10 @@ export function cardsStatusOf(packDir, header) {
 /**
  * Whether `status` asks a player for the offered worlds' bakes (§2.0 item 6, §7): false until the wave that turns the rings
  * on by default; the plan of that ask (after `radial`, every world a player is offered, never a `PlanetDef.extra`
- * developer world) stands in `status` behind it, so turning it on is this one word.
+ * developer world) stands in `status` behind it, so turning it on is this one word. On since the rings went on for everyone
+ * (the owner, 2026-11-09).
  */
-export const HORIZON_STATUS_ASKS = false;
+export const HORIZON_STATUS_ASKS = true;
 
 /** The bake's files taken away (the tests' and a by-hand clean), the far tree cards' with them. */
 export function removeHorizon(packDir) {

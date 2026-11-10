@@ -994,8 +994,8 @@ npm run swg -- radial @SWG assets-private --retail-only                         
                                                                                   #    one layer each, out of the shaders its terrain's radial families name (about two seconds and
                                                                                   #    100 MB over every world; converts no model; run after the worlds and `terrain`;
                                                                                   #    Mustafar plants none)
-npm run swg -- horizon assets-private                                             #    OPTIONAL until the far ground's rings ship on (the Graphics page's "Far ground: rings to
-                                                                                  #    the horizon", off): each world's far ground baked to the horizon and its far tree cards
+npm run swg -- horizon assets-private                                             #    the far ground's rings (the Graphics page's "Far ground: rings to the horizon", on for
+                                                                                  #    everyone; a world with no bake draws the far tiles): each world's far ground baked and its far tree cards
                                                                                   #    beside it (about 30 s and 20 MB a large world on 16 threads; reads only the packs, so no
                                                                                   #    --retail-only; `--cards-only` adds the cards beside a bake made before them); run after
                                                                                   #    `radial`. `status` lists every bake and asks for none yet.

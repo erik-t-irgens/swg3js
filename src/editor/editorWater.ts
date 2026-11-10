@@ -39,7 +39,7 @@ import { mergeClosePoints } from '../swg/terrain/ribbons.ts';
 import { rowFromEditor, type EditorSource } from '../world/permanentEdit.ts';
 import { writtenScale, type PlacementLayer, type PlacementRow } from '../story/placements.ts';
 import { cursor, dragAt, gizmoDrag, gizmoLayout, grabAt, H, layoutGizmo, pickAt, ray3, rayAt, worldAxes, type ScreenView } from './gizmo.ts';
-import { liftDelta } from '../world/placeHold.ts';
+import { PLACE_HOLD_TUNE } from '../world/placeHold.ts';
 import { lakePools, projectPoint } from '../ui/editorMarks.ts';
 import type { EditorEdits } from './editorEdit.ts';
 import type { RowChange } from './undo.ts';
@@ -501,15 +501,7 @@ export class EditorWater {
       if (!this.dragging) pickAt(L, this.cur, WATER_TUNE.hitPx);
     }
     // F held on the picked lake: raised by the mouse at the placing hand's own rate; let go, written.
-    if (picked && f.lift && !this.writing) {
-      // Fly's movement down the screen (spent for the camera's sake), or Point's cursor's own.
-      let dy = f.dy;
-      if (!dy && Number.isFinite(this.lastSy)) dy = f.sy - this.lastSy;
-      if (dy) {
-        this.beginRaise();
-        this.raise += liftDelta(dy, f.dt, 1, 'house');
-      }
-    }
+    if (picked && f.lift && !this.writing) this.raiseHeld();
     this.lastSy = f.sy;
     if (liftUp && this.raising) {
       const by = this.raise;
@@ -534,6 +526,29 @@ export class EditorWater {
     else if (pressInverse) this.inversePressed();
     if (f.sampled && f.valid) this.sample(f.x, f.z);
     this.drawMarks(d, view, outlines, picked);
+  }
+
+  /**
+   * One frame of F held on the picked lake: raised by Fly's movement down the screen (spent for the camera's sake), or
+   * Point's cursor's own, at the placing hand's own rate. **`liftDelta(dy, dt, 1, 'house')` and `holdGain`'s lines are
+   * written out here, in their own order**, and the frame's numbers are read off the kept frame record: the raise branch is
+   * first taken long after `overlay` was optimised, and the re-optimised `overlay` sometimes left `liftDelta` out of line
+   * (its call site then too rare against the method's own count to inline), so its answer was boxed every raising frame
+   * (16 bytes; one measure process in about sixty under load). A call to this method hands no number either way.
+   */
+  private raiseHeld(): void {
+    const f = this.f;
+    let dy = f.dy;
+    if (!dy && Number.isFinite(this.lastSy)) dy = f.sy - this.lastSy;
+    if (!dy) return;
+    this.beginRaise();
+    const tune = PLACE_HOLD_TUNE;
+    const gv = Math.abs(dy) / Math.max(f.dt, tune.dtFloor);
+    const gspan = tune.fast - tune.knee;
+    const gt = gspan > 0 ? (gv - tune.knee) / gspan : gv > tune.knee ? 1 : 0;
+    const gain = 1 + (tune.most - 1) * Math.min(1, Math.max(0, gt));
+    const m = -dy * tune.liftPerPxHouse * gain * 1;
+    this.raise += tune.flipLift ? -m : m;
   }
 
   /** A press: the picked lake's square grabbed, a lake's ring picked, or the mode's own click. */

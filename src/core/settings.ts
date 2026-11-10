@@ -70,7 +70,8 @@ export interface Settings extends FxSettings {
   farRadius: number;
   /**
    * The far ground drawn as rings from the world's bake to the Terrain distance (the horizon pass), or, off, as today's
-   * far tiles to the Far ground radius. Off until the pass's last wave turns it on.
+   * far tiles to the Far ground radius. On for everyone since the pass's last step (the owner, 2026-11-09: "this should
+   * ship for everyone"); a world with no bake on disk draws the far tiles as before.
    */
   farRings: boolean;
   /** How far the rings reach, kilometres (the horizon pass's reach; the fog and reversed depth hold it shorter). */
@@ -402,7 +403,7 @@ export const DEFAULT_SETTINGS: Settings = {
   objectReach: 1,
   terrainRadius: 6,
   farRadius: 6,
-  farRings: false,
+  farRings: true,
   terrainDistance: 8,
   farCardsHorizon: false,
   groundDetailDistance: 2.5,

@@ -16,6 +16,7 @@ import { yawOfTurn, yawTurn } from '../../../src/world/permanentEdit.ts';
 import { scaleOf, toGame, type PlacementRow } from '../../../src/story/placements.ts';
 import { WATER_TUNE, WATER_TUNE_DEFAULTS, tuneWater } from '../../../src/editor/editorTune.ts';
 import { toolFrame } from '../../../src/editor/tools.ts';
+import { liftDelta } from '../../../src/world/placeHold.ts';
 import { screenView } from '../../../src/editor/gizmo.ts';
 import { marksView } from '../../../src/ui/editorMarks.ts';
 import { planLakeLanding, surfaceOf, lakeTable } from '../../../src/world/ourWater.ts';
@@ -194,6 +195,24 @@ tuneWater({ ...WATER_TUNE_DEFAULTS, mode: 'clicks', levelFrom: 'lowest' } as nev
   ok((s.writes[4][0].after as WaterLakeRow).h === -50 + WATER_TUNE.seaNudge, 'a level brought within a centimetre of the sea is raised clear of it');
   await w.remove(second.id);
   ok(s.writes[5][0].after === null && !s.bodies.has(second.id) && s.bodies.size === 1 && s.strokes === 6, 'a removal takes its body out: one write, one undo entry each');
+
+  // F held on the picked lake with the mouse moving: the raise is `liftDelta`'s, frame by frame, to the bit (the tool writes
+  // its lines out, so a frame hands no number across a call), a quick frame's gain between the knee and `fast` included; a
+  // frame with no movement raises nothing; let go, it is one write of that raise.
+  w.picked = row.id;
+  const held = s.rows.find((r) => r.id === row.id)!;
+  let want = 0;
+  for (const [dy, dt] of [[-3.37, 1 / 60], [-7.13, 1 / 144], [1.91, 1 / 30], [-19.7, 1 / 60], [0, 1 / 60], [-0.43, 1 / 144], [-9.9, 1 / 144]]) {
+    frame(w, { lift: true, dy, dt });
+    if (dy) want += liftDelta(dy, dt, 1, 'house');
+  }
+  const raised = (w.report() as { raising: number }).raising;
+  ok(raised === want && raised !== 0, `F held raises the lake by liftDelta's own sum to the bit (${raised} m)`);
+  const writesBefore = s.writes.length;
+  frame(w, { lift: false });
+  await settle();
+  const raisedRow = s.writes[writesBefore]?.[0]?.after as WaterLakeRow | undefined;
+  ok(s.writes.length === writesBefore + 1 && !!raisedRow && Math.abs(raisedRow.h - (held.h + want)) < 0.006, 'let go, it is one write of that raise');
 
   // The file keeps a centimetre and a millimetre as written figures: Helensar's smoke wrote 749.9300000000001 and
   // -11856.880000000001 while the step was multiplied back.
