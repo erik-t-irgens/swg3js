@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "world": "ours_race_map_2",
+  "frame": "raw",
+  "rows": [
+    { "id": "fish_tank_right_panel-1", "kind": "prop", "pack": "props", "thing": "fish_tank_right_panel", "x": -68.209, "y": 0, "z": -16.921, "q": [0.8428088972405315,0,0.538212934378392,0], "ground": 0, "at": 1794241327683 }
+  ]
+}

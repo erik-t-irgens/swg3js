@@ -951,6 +951,28 @@ export function importModel(src, record, tune = IMPORT_TUNE, opts = {}) {
       }
       if (!looks.some((l) => l.of === name)) looks.push({ of: name, ...b });
     }
+    // Animated surfaces a converter wrote into the source (extras.swg: a flip-book `anim`, a `scroll`),
+    // the same shape tools/swg/glb.mjs writes, carried with their textures re-indexed into this model.
+    const sw = s.extras?.swg;
+    if (sw && typeof sw === 'object') {
+      const swg = {};
+      const a = sw.anim;
+      if (a && Array.isArray(a.map) && a.map.length > 1 && a.map.length <= 64) {
+        const map = a.map.map((ti) => (Number.isInteger(ti) ? textureOf(ti) : -1));
+        const seconds = Array.isArray(a.seconds) && a.seconds.length === 2 && a.seconds.every((x) => Number.isFinite(x) && x > 0) ? a.seconds : null;
+        const modes = ['time', 'random', 'pingpong', 'frame', 'randomFrame'];
+        if (seconds && map.every((t) => t >= 0)) {
+          swg.anim = { mode: modes.includes(a.mode) ? a.mode : 'time', seconds, map };
+          if (Array.isArray(a.emissive) && a.emissive.length === a.map.length) {
+            const em = a.emissive.map((ti) => (Number.isInteger(ti) ? textureOf(ti) : -1));
+            if (em.every((t) => t >= 0)) swg.anim.emissive = em;
+          }
+        }
+      }
+      const ok2 = (v) => Array.isArray(v) && v.length === 2 && v.every(Number.isFinite);
+      if (sw.scroll && (ok2(sw.scroll.map) || ok2(sw.scroll.alpha))) swg.scroll = { map: ok2(sw.scroll.map) ? sw.scroll.map : [0, 0], alpha: ok2(sw.scroll.alpha) ? sw.scroll.alpha : null };
+      if (Object.keys(swg).length) extras.swg = swg;
+    }
     out.extras = extras;
     outMaterials.push(out);
     if (b?.map) mapBorrowers.add(outMaterials.length - 1);

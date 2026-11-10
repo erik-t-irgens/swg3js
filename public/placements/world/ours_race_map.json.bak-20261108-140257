@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "world": "ours_race_map",
+  "frame": "raw",
+  "rows": [
+    { "id": "gong-1", "kind": "prop", "pack": "props", "thing": "gong", "x": -4.133, "y": 0, "z": 18.045, "q": [0.2844259993344432,0,0.9586979977566468,0], "ground": 0, "at": 1794175325022 }
+  ]
+}

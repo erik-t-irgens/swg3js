@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "world": "ours_race_map_2",
+  "frame": "raw",
+  "cell": 4,
+  "tile": 512,
+  "rows": [
+    { "id": "world", "tint": "normalised", "opposite": "max", "clouds": true, "wash": {"base":[101,115,93],"bands":[{"colour":[123,180,178],"amount":0.36,"above":-500,"below":2595,"slopeBelow":10},{"colour":[176,171,146],"amount":0.75,"above":315,"slopeAbove":20,"slopeBelow":45},{"colour":[29,126,84],"amount":0.34,"above":785,"slopeAbove":21,"slopeBelow":60},{"colour":[129,80,70],"amount":0.8,"slopeAbove":60}],"noise":{"scale":135,"amount":0.35}}, "at": 1794322776237 }
+  ]
+}

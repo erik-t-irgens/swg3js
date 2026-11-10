@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "world": "ours_tatooine_copy",
+  "frame": "raw",
+  "rows": [
+    { "id": "beast_steroid_mantis_monkey-1", "kind": "prop", "pack": "props", "thing": "beast_steroid_mantis_monkey", "x": -3843.426, "y": 29.509, "z": -4728.158, "q": [-0.011249996813613229,0,0.9999367167834641,0], "ground": 29.333, "at": 1794174682815 }
+  ]
+}
