@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "world": "ours_race_map_2",
+  "frame": "raw",
+  "rows": [
+    { "id": "world", "kind": "world", "clouds": {"height":1.2}, "at": 1794318862477 }
+  ]
+}

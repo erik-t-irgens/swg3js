@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "rows": [
+    { "id": "ours_race_map", "kind": "new", "name": "Boonta Eve Classic", "listed": true, "size": 16000, "start": {"kind":"flat","height":0}, "ground": {"pack":"tatooine","base":"sand-blown"}, "sky": {"colours":"tatooine"}, "gravity": 20, "arrival": {"x":-3143.73,"z":2158.51,"y":0,"heading":1.29}, "at": 1794176508799 },
+    { "id": "ours_race_map_2", "kind": "new", "name": "Utapau", "listed": true, "size": 16000, "start": {"kind":"noise","base":2599.62,"amplitude":8,"frequency":0.006,"octaves":5,"ridged":0.2,"flatten":1,"detail":0.25}, "ground": {"pack":"lok","base":"dirt_redsandy"}, "sky": {"colours":"lok"}, "water": {"color":6913626,"opacity":0.8}, "gravity": 20, "at": 1794322810603 }
+  ]
+}
