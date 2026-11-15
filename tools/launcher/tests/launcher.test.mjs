@@ -382,6 +382,15 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   ok(dem.files.includes('dem/monument/base16.raw') && !dem.problems.some((p) => p.includes('dem/monument')) && dem.problems.some((p) => p.includes('misc/base16.raw') && p.includes('not a kind of file')), `an elevation raster under dem/ is packed, and a .raw anywhere else is refused (${dem.problems.join('; ')})`);
   rmSync(join(dist, 'dem'), { recursive: true });
   rmSync(join(dist, 'misc'), { recursive: true });
+  // An imported animation clip, tracked under public/anims/<pack>/, is a file a page reads; the same kind anywhere else is not.
+  put('anims/mixamo/index.json', '{}');
+  put('anims/mixamo/test_walk.mxa', 'clip');
+  put('misc/test_walk.mxa', 'clip');
+  const clips = new Map([...tracked, ['public/anims/mixamo/index.json', blobHash(Buffer.from('{}'))], ['public/anims/mixamo/test_walk.mxa', blobHash(Buffer.from('clip'))], ['public/misc/test_walk.mxa', blobHash(Buffer.from('clip'))]]);
+  const anims = distFiles(dist, clips);
+  ok(anims.files.includes('anims/mixamo/test_walk.mxa') && anims.files.includes('anims/mixamo/index.json') && !anims.problems.some((p) => p.includes('anims/mixamo')) && anims.problems.some((p) => p.includes('misc/test_walk.mxa') && p.includes('not a kind of file')), `an imported clip under anims/<pack>/ is packed with its index, and a .mxa anywhere else is refused (${anims.problems.join('; ')})`);
+  rmSync(join(dist, 'anims'), { recursive: true });
+  rmSync(join(dist, 'misc'), { recursive: true });
   // A world's race tracks (`public/tracks/<world>.json`, src/race/trackFile.ts) are plain JSON in public/, packed as the
   // placements' files are when git tracks them, and an untracked one stops the pack.
   put('tracks/tatooine.json', '{ "version": 1 }');

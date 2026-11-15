@@ -352,6 +352,28 @@ export class ClipEventIndex {
     this.counts.names = [...this.names.values()].reduce((n, m) => n + m.size, 0);
   }
 
+  /**
+   * Events handed over by something other than the sounds pack: the imported animations' foot marks (src/anim/), each
+   * list under its clip's own name, which is looked up outright as a mobile's source path is. The pack's format and
+   * everything read from it stay as they are, so this may come before the pack, after it, or with no pack at all. A
+   * name handed over again takes the newer list. Answers how many clips now carry events from here.
+   */
+  addClips(clips: Record<string, RawClipEvent[]>): number {
+    let added = 0;
+    for (const [name, raw] of Object.entries(clips)) {
+      if (!name || name.startsWith('jka:')) continue;
+      const list = normalizeList(raw);
+      if (!list.length) continue;
+      this.byPath.set(name, list);
+      added++;
+    }
+    if (added) {
+      this.loaded = true;
+      this.counts.paths = this.byPath.size;
+    }
+    return added;
+  }
+
   private addPath(path: string, entry: ClipEntry | RawClipEvent[] | undefined): void {
     if (!path || !entry) return;
     if (path.startsWith('jka:')) {

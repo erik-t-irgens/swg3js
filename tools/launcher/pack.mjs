@@ -45,6 +45,11 @@ export const DIST_KINDS = new Set(['.html', '.js', '.css', '.wasm', '.json', '.s
  * of file a page reads that is none of the kinds above, and allowed only where those rasters live.
  */
 export const DEM_RASTER = /^dem\/[^/]+\/[^/]+\.raw$/;
+/**
+ * An imported animation clip (`public/anims/<pack>/<clip>.mxa`: a clip's rotations and travel, served as bytes;
+ * `npm run anims -- import` writes them and src/anim/mxaFile.ts reads them), allowed only where the clip packs live.
+ */
+export const ANIM_CLIP = /^anims\/[^/]+\/[^/]+\.mxa$/;
 /** Game archives and the game's own file formats: never in a release, wherever they sit. */
 export const FORBIDDEN_KINDS = new Set(['.tre', '.toc', '.pk3', '.iff', '.msh', '.mgn', '.sht', '.dds', '.ans', '.skt', '.lmg', '.sat', '.apt', '.pob', '.trn', '.lay', '.snd', '.cdf', '.stf', '.ws', '.gla', '.glm', '.clips']);
 
@@ -163,7 +168,7 @@ export function distFiles(dist, tracked, root = null) {
   }
   for (const rel of all) if (!reached.has(rel)) problems.push(`dist/${rel} was not made by the build and is not a tracked public file`);
   const files = all.filter((rel) => reached.has(rel));
-  for (const rel of files) if (!DIST_KINDS.has(extname(rel).toLowerCase()) && !DEM_RASTER.test(rel)) problems.push(`dist/${rel} is not a kind of file a built page is made of`);
+  for (const rel of files) if (!DIST_KINDS.has(extname(rel).toLowerCase()) && !DEM_RASTER.test(rel) && !ANIM_CLIP.test(rel)) problems.push(`dist/${rel} is not a kind of file a built page is made of`);
   return { files, problems };
 }
 

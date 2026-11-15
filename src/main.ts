@@ -127,7 +127,12 @@ const SCENE_SHIP_REACH = 250;
  * and the object reach does nothing at all here, since a scene has no streamer to reach with.
  */
 const SCENE_REACH = { objects: 0, terrain: 3, far: 6, waitMs: 40000 };
-import { loadPlayerRig } from './player/rig';
+import { IMPORTED_CLIPS, loadPlayerRig } from './player/rig';
+import { browserIo, mixamoPack } from './anim/mixamoPack.ts';
+import { ANIM_TUNE, tuneAnim } from './anim/animTune.ts';
+import { IMPACT_MUTES } from './anim/animRules.ts';
+import { animDialsFor } from './anim/animDials.ts';
+import { clipName } from './anim/mxaFile.ts';
 import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi, type PoisFile } from './ui/galaxyMap';
@@ -534,11 +539,30 @@ import { SKINNED_LOAD, SKINNED_STATS } from './core/skinnedLoad.ts';
 import { PERSON_KEYS_LIVE, PERSON_KEYS_STATS, PERSON_KEYS_TUNE, PERSON_KEYS_WARM, PERSON_TEST_BOUND, forEachPersonMaterial, givenTo, outsideWhy, personShapes, pickTestLooks, pixelDiff, setGiven, setPersonKeysLive, shapeName, type PixelStats } from './world/personKeys.ts';
 import type { CharacterPreview } from './ui/characterPreview.ts';
 import { centreAgrees, LOADING_TUNE, LoadingLog, placeFromPois, programsForUp, raceCurtainNeed, tuneLoading } from './world/loadingTune.ts';
-import { IMPORTS_PRIVATE, IMPORTS_SHIPPED, fetchPublic, filesReport, forgetFiles, importsAsks, packJson, packless, setShippedPublic } from './world/packFiles.ts';
+import { IMPORTS_PRIVATE, IMPORTS_SHIPPED, fetchPublic, fetchPublicBytes, filesReport, forgetFiles, importsAsks, packJson, packless, setShippedPublic } from './world/packFiles.ts';
 // The public files this build ships, the tracked tracks, placements and real-elevation rasters (`vite.config.ts`):
 // null on the dev server, which asks for every such file and answers it from the disk as the editors need.
 import shippedPublic from 'virtual:shipped-public';
 setShippedPublic(shippedPublic);
+// The imported animations (`public/anims/mixamo/`, src/anim/): the game's one pack, asked for as every shipped public
+// file is (only where the build's own list carries it, and kept for `__debug.files()`), begun now so the first rig
+// seldom waits for it, and handed to the rigs' loader through its own record. `localStorage['swg.mixamo'] = '0'` at
+// load fetches nothing and no rig gains a clip.
+const MIXAMO = mixamoPack(browserIo({ text: (path, init) => fetchPublic(path, init, import.meta.env.BASE_URL), bytes: (path, query) => fetchPublicBytes(path, query, import.meta.env.BASE_URL) }))!;
+IMPORTED_CLIPS.provider = (skeleton, label) => MIXAMO.clipsFor(skeleton, label);
+void MIXAMO.load();
+
+/** What `__debug.anim` takes beside a clip's name. */
+interface AnimDebugOptions {
+  /** An imported clip's id (or a word one holds) to play on the player. */
+  play?: string;
+  loop?: boolean;
+  /** Where a played clip starts: seconds, or 'trim' for the clip's own trim. */
+  from?: number | 'trim';
+  stop?: boolean;
+  align?: { torso?: boolean; feet?: boolean; clavicles?: boolean };
+  tune?: unknown;
+}
 import { census as programFamilies, playKindOf } from './core/fx/programCensus.ts';
 import { censusOf, CNT, PASS, PERF, perf, PERF_SWITCHES, PERF_TUNE, PERF_WAIT_MS, readMarks, registerPerfSwitch, SEC, writeMark, type TraceReport } from './core/perf.ts';
 
@@ -1952,6 +1976,9 @@ class App {
     // land nothing has feet, which is what a game with no sound pack does anyway.
     this.feet = new BodySounds(this.audio, import.meta.env.BASE_URL);
     this.feet.load();
+    // The imported animations' foot marks, under each clip's own name, whether or not the sounds pack's own marks
+    // ever land: a step in one of those clips then sounds by the path every other step does.
+    void MIXAMO.load().then(() => this.feet.index.addClips(MIXAMO.footEvents()));
     // The guns. Every place a bolt is fired reaches this through the module it lives in, so a shot
     // deep in a creature's brain or a turret's aim needs no mixer of its own to be heard.
     combatSounds.attach(this.audio, import.meta.env.BASE_URL);
@@ -7429,6 +7456,8 @@ class App {
             // A building or a prop in hand takes its keys, the click and a held key's mouse first, and mutes
             // the fight for the rest of the step, as the frame loop has it: so a hold can be driven from here.
             this.stepPlacingKeys(dt);
+            // A thrown fall's impact holds the keys, as the frame loop has it.
+            this.stepImpactKeys();
             // And the grapple's, beside them as the frame loop has them: its mutes, the fire, the boost, the held reels.
             if (!this.placing && !this.propPlacing) this.stepGrappleKeys();
             this.stepEmoteKeys();
@@ -7919,24 +7948,18 @@ class App {
           admin: this.net.session.isAdmin,
         };
       },
-      /** Play any clip the player's rig has, looping (or once), to see it on the player: `__debug.anim('BOTH_A2_SPECIAL')`; no name stops it. */
-      anim: (name?: string, loop = true) => {
-        const rig = this.player.rig;
-        if (!rig) return 'no rig';
-        if (!name) {
-          rig.stopOverride();
-          return 'stopped';
-        }
-        const clips = rig.clipsMatching(new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
-        const exact = rig.has(name) ? name : clips[0];
-        if (!exact) return `no clip matches ${name}`;
-        if (/^add_/.test(exact)) {
-          rig.playUpper(exact);
-          return { playing: exact, note: 'an additive clip: played once as a delta over the current pose', matches: clips.slice(0, 20) };
-        }
-        rig.play(exact, { loop, hold: !loop });
-        return { playing: exact, matches: clips.slice(0, 20) };
-      },
+      /**
+       * The imported animations (src/anim/, `public/anims/mixamo/`), and any clip of the rig. `anim()`: the pack's state,
+       * what was fitted for which skeleton with each fit's report (joints mapped and missing, the facing, the scale, where
+       * the standing rest leaves the feet and the hips), the tune, and what the player's rig has and is playing.
+       * `anim({ play: 'walking', loop })` plays any imported clip on the player, fetching and fitting it if need be (`from:
+       * 'trim'` or seconds starts it there; a word that is no id plays the first id holding it); `anim({ stop: true })`
+       * stops it; `anim({ align: { torso, feet, clavicles } })` lines those rest poses up or not and fits every clip again
+       * in place (`torso: true` is the old rule that tipped the hips back); `anim({ tune: { land: { soft: 8 } } })` moves
+       * `ANIM_TUNE` (the debug menu has every number as a slider; nothing is saved). `anim('BOTH_A2_SPECIAL')` still plays
+       * any clip the rig has by name, looping unless the second argument is false.
+       */
+      anim: (arg?: string | AnimDebugOptions, loop = true) => this.animDebug(arg, loop),
       /** Mount the nearest vehicle, or dismount, as E does. */
       mount: () => {
         this.handleMount();
@@ -12266,7 +12289,7 @@ class App {
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
       // (The landmarks' switch dial is handed the app's own curtain just below, `LANDMARK_SWITCH`.)
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -28406,6 +28429,96 @@ class App {
    * go, and Space boosts off the line, a let-go made here muting at once; and the held reels and the haul are
    * handed to the hook for the frame's steps.
    */
+  /**
+   * The thrown fall's impact (src/anim/): while it plays the body can do nothing else, so moving, jumping, the
+   * postures and the fight are muted by action for the rest of the frame, before anything reads a key. The frame loop
+   * and `__debug.advance` both call it, in the same place.
+   */
+  private stepImpactKeys(): void {
+    if (this.player.impactLocked) this.input.mute(IMPACT_MUTES as readonly Action[]);
+  }
+
+  /** `__debug.anim`: see its row in the README. A clip's name plays any clip the rig has, as it always did. */
+  private animDebug(arg: string | AnimDebugOptions | undefined, loop: boolean): unknown {
+    const rig = this.player.rig;
+    if (typeof arg === 'string') {
+      if (!rig) return 'no rig';
+      const clips = rig.clipsMatching(new RegExp(arg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
+      const exact = rig.has(arg) ? arg : clips[0];
+      if (!exact) return `no clip matches ${arg}`;
+      if (/^add_/.test(exact)) {
+        rig.playUpper(exact);
+        return { playing: exact, note: 'an additive clip: played once as a delta over the current pose', matches: clips.slice(0, 20) };
+      }
+      rig.play(exact, { loop, hold: !loop });
+      return { playing: exact, matches: clips.slice(0, 20) };
+    }
+    const o = arg ?? {};
+    const words: string[] = [];
+    if (o.tune !== undefined) words.push(...tuneAnim(o.tune));
+    if (o.align) {
+      const n = MIXAMO.setAlign(o.align, words);
+      words.push(n ? `${n} fitted clips written again in place` : 'the alignment stands as it did (or nothing is fitted yet)');
+    }
+    if (o.stop) {
+      rig?.stopOverride();
+      words.push('stopped');
+    }
+    if (typeof o.play === 'string') return this.playImported(o.play, o.loop, o.from, words);
+    return this.animReport(words);
+  }
+
+  /** The imported animations' account, with what the player's own rig has of them and is doing. */
+  private animReport(words: string[]): Record<string, unknown> {
+    const rig = this.player.rig;
+    return {
+      ...(words.length ? { words } : {}),
+      ...MIXAMO.report(),
+      tune: JSON.parse(JSON.stringify(ANIM_TUNE)) as unknown,
+      player: rig ? { has: rig.clipNames.filter((n) => n.startsWith('mx_')), ...rig.describe(), impactLocked: this.player.impactLocked, pose: rig.poseAgainstRest() } : 'no rig',
+    };
+  }
+
+  /** Play an imported clip on the player, fetched and fitted first if this rig has not got it. */
+  private async playImported(word: string, loop: boolean | undefined, from: number | 'trim' | undefined, words: string[]): Promise<unknown> {
+    const rig = this.player.rig;
+    if (!rig) return 'no rig';
+    await MIXAMO.load();
+    // No pack at all (the switch, a build without it) is said as that, never as a clip that does not match.
+    const none = MIXAMO.unavailable();
+    if (none) return { ...(words.length ? { words } : {}), error: none, state: MIXAMO.state };
+    const ids = MIXAMO.matching(word);
+    const id = ids[0];
+    const row = id ? MIXAMO.row(id) : null;
+    if (!id || !row) return { ...(words.length ? { words } : {}), error: `no imported clip matches ${word} (anim() lists the ones the game uses; the pack's index lists all)`, state: MIXAMO.state };
+    const name = clipName(id);
+    if (!rig.has(name)) {
+      const clip = await MIXAMO.clipFor(id, rig.restSkeleton(), rig.character?.manifest.id ?? 'player');
+      if (typeof clip === 'string') return { ...(words.length ? { words } : {}), error: clip };
+      // The rig may have been swapped for another while the clip was fetched: the one playing now takes it.
+      this.player.rig?.addClips([clip]);
+      this.feet.index.addClips(MIXAMO.footEvents());
+    }
+    const now = this.player.rig;
+    if (!now?.has(name)) return { ...(words.length ? { words } : {}), error: 'the rig changed while the clip was fetched' };
+    const looping = loop ?? row.loop;
+    const tuned = (ANIM_TUNE.trim as Record<string, number | undefined>)[id];
+    const start = from === 'trim' ? (tuned ?? row.trimStart) : typeof from === 'number' && from > 0 ? from : 0;
+    const seconds = now.play(name, { loop: looping, hold: !looping, from: start });
+    const p = this.player;
+    const note = p.mounted || p.swimming || p.eva ? 'riding, swimming and adrift stop a played clip every frame: stand on the ground to see it' : undefined;
+    return {
+      ...(words.length ? { words } : {}),
+      playing: name,
+      loop: looping,
+      from: start,
+      seconds: seconds === null ? null : Number(seconds.toFixed(3)),
+      clip: { duration: row.duration, frames: row.frames, loops: row.loop, speed: row.speed, heading: row.heading, feet: row.feet, trimStart: row.trimStart, travelNet: row.travelNet, ...(row.mirrorOf ? { mirrorOf: row.mirrorOf } : {}) },
+      ...(ids.length > 1 ? { alsoMatches: ids.slice(1, 12) } : {}),
+      ...(note ? { note } : {}),
+    };
+  }
+
   private stepGrappleKeys(): void {
     const input = this.input;
     // Somebody else's choice took the grapple's only key: said once a session, and never to a player who cleared it on purpose.
@@ -35012,6 +35125,8 @@ class App {
       // boxes in the player's update, before that, so the pose it rides and the picture are worked out to one moment.
       const reckonAt = this.remotes.count > 0 && sharedClock.where === 'shared' ? sharedClock.now() - sharedClock.lagNow() : Number.NaN;
       this.remotes.reckonAt = reckonAt;
+      // Whether a floating peer is adrift (a space zone has no water to tread): their imported loop follows this player's own.
+      this.remotes.adrift = !!this.world.planet.space;
       peerBodies().stampReckon(reckonAt);
       const active = this.started && !this.traveling && !this.dying && !this.menu.open;
       if (active) this.savePlace();
@@ -35090,6 +35205,8 @@ class App {
         // behind it; and never at a ship's controls, where O is the ultra cruise's own key and every run
         // would also say there is nothing of yours near enough to pick up.
         if (takeKey && !hadInHand && !this.anyPanelOpen() && !this.map.open && !riding && !atControls) void this.takeNearestProp();
+        // A thrown fall's impact holds the keys while it plays, before the grapple, the kit or the body reads one.
+        this.stepImpactKeys();
         // The grapple's keys, under the same guard as the rest of the block (never with the map, a panel or the
         // placing hand up): its mutes first, so the torch, the walk and a swinging jump are already muted below.
         if (!this.map.open && !this.anyPanelOpen() && !this.placing && !this.propPlacing) this.stepGrappleKeys();

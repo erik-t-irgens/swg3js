@@ -19,6 +19,7 @@ import { weaponHolder, type WeaponCatalogue, type WeaponDef } from '../player/we
 import type { FxMoverList } from '../core/fx/velocity';
 import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
 import { measureBox, peerBodies, peerLow, type PeerBlow, type PeerBox } from './remoteBodies.ts';
+import { MX } from '../anim/animRules.ts';
 import { hangHeld } from './peerHands.ts';
 import { glidePeerTurn, yawOf } from './peerTurn.ts';
 import { newPeerRope, readPeerRope, type PeerRope } from './peerRope.ts';
@@ -329,6 +330,11 @@ export class RemotePlayers {
    * vehicle and the picture drawn here are worked out to one moment.
    */
   reckonAt = Number.NaN;
+  /**
+   * The world has no ground (a space zone): a peer on foot there who floats is adrift, as this player's own figure
+   * is, and takes the same imported loop where their rig has it. Their state says only `float`, on every build.
+   */
+  adrift = false;
 
   /** Called with a peer's rig once it is dressed, and again when their look changes: the motion blur prepares its shaders for it. */
   onDressed: ((root: THREE.Object3D) => void) | null = null;
@@ -1117,6 +1123,9 @@ export class RemotePlayers {
           const clip = pose ? rig.variant('loop_riding', pose) : null;
           rig.prefer('seated', clip && clip !== 'loop_riding' ? clip : null);
         }
+        // Floating: adrift in space or still in the water, which their state does not tell apart and the world does.
+        // A name their rig has not got is stepped over, and the state's own list answers as it always did.
+        else if (state === 'float') rig.prefer('float', this.adrift && !r.aboard ? MX.adrift : MX.tread);
         rig.setState(rig.hasState(state) ? state : 'idle', r.speed);
         rig.update(dt);
         // Whether their head may look at all. It goes still under anything the clip is posing the

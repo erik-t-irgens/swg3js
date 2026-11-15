@@ -18,9 +18,10 @@ import { join } from 'node:path';
 /**
  * The folders under `public/` whose files are asked for by name, and so need a list. `imports` (Map-maker II's tenth wave)
  * is the owner's own models he has shipped with `npm run swg -- import --ship`: a build asks for its manifest only where it
- * carries one.
+ * carries one. `anims` (Animations I) is the imported clip pack (`npm run anims -- import`): a build asks for its index
+ * and its clip files only where it carries them.
  */
-export const SHIPPED_DIRS = ['tracks', 'placements', 'dem', 'imports'];
+export const SHIPPED_DIRS = ['tracks', 'placements', 'dem', 'imports', 'anims'];
 
 /** Every file under a folder, as paths relative to `under` with forward slashes. */
 function walk(dir, prefix) {

@@ -28,6 +28,9 @@ import { RopeRibbon, dartMesh } from './grappleDraw.ts';
 import { makeHullController, type PeerHulls } from './grappleFrames.ts';
 import { armAimFor } from './grappleMath.ts';
 import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from './swimStep.ts';
+import { ANIM_TUNE } from '../anim/animTune.ts';
+import { MX } from '../anim/animRules.ts';
+import { BodyAnim } from '../anim/bodyAnim.ts';
 import { FELL_UNDER } from '../world/fellOut.ts';
 
 /**
@@ -405,6 +408,25 @@ export class Player {
   jkaMode = false;
   /** Which way the current jump was made, for its air and landing clips (PMF_BACKWARDS_JUMP and kin). */
   private jumpDir: Dir = 'F';
+  /**
+   * What the body remembers for the imported clips (src/anim/bodyAnim.ts): what the air has been since the feet left
+   * the ground, the thrown fall and its impact's hold on the keys, the landing playing and how long. Every moment of
+   * those is one call on it below, and nothing else here decides any of it.
+   */
+  private readonly anim = new BodyAnim(ANIM_TUNE, UNIT);
+
+  /** Whether the thrown fall's impact still holds the keys: the game mutes them before anything reads one. */
+  get impactLocked(): boolean {
+    return this.anim.impactLocked;
+  }
+
+  /** Thrown from a wreck and not yet down (`fling`). */
+  get flung(): boolean {
+    return this.anim.flung;
+  }
+
+  /** Jedi Academy's animations are in charge by what the player is doing (the block held, a fight's move), written each frame beside `jkaMode`. */
+  private jkaActing = false;
   /** The walk key is held: the walk clips rather than the runs, whatever the speed. */
   private walkKey = false;
   /** The blaster in hand: a pistol is carried at the side like a hilt, a rifle across the chest. */
@@ -1004,6 +1026,7 @@ export class Player {
     this.pos.copy(p);
     this.vel.set(0, 0, 0);
     this.grounded = true;
+    this.anim.drop();
     // Stood somewhere means stood on your feet: a body put down here is not in whatever flow it was
     // last drawn into, and `placeVisual` below would otherwise draw it a waist under the new ground.
     this.dropLavaSink();
@@ -1043,6 +1066,7 @@ export class Player {
     this.submerged = false;
     this.swing = -1;
     this.jka.reset();
+    this.anim.drop();
     this.saber.holster();
     this.rig?.stopOverride(0);
     this.mounted = null;
@@ -1060,6 +1084,8 @@ export class Player {
     this.vel.z += fwd.z * forwardBoost;
     this.grounded = false;
     this.pos.y += 0.05;
+    // A Force user's air, as a held jump's is.
+    this.anim.forceMove();
   }
 
   setClass(id: ClassId): void {
@@ -2167,7 +2193,8 @@ export class Player {
     // meaningful while `swimming` is, so the two go together wherever either is put down.
     this.swimming = false;
     this.submerged = false;
-    this.flung = false;
+    // And off whatever the imported clips were holding, a thrown fall with them.
+    this.anim.drop();
     // The rider starts straight: no twist toward the view or aim carried over from on foot (nor back onto the ground after).
     this.torsoTwist = 0;
     this.aimTwist = 0;
@@ -2177,16 +2204,14 @@ export class Player {
 
   /**
    * Thrown from a vehicle that has just blown up under the rider: off it with its speed and a
-   * kick upward, flailing through the air, and down on the ground prone.
+   * kick upward, flailing through the air, and down on the ground prone. (`flung` says so until then.)
    */
-  flung = false;
-
   fling(from: THREE.Vector3, velocity: THREE.Vector3): void {
     this.dismount(from);
     this.vel.copy(velocity);
     this.vel.y += FLING_UP;
     this.grounded = false;
-    this.flung = true;
+    this.anim.fling();
     this.prone = false;
     this.kneeling = false;
   }
@@ -2264,7 +2289,9 @@ export class Player {
     this.heading = Math.atan2(evaFwd.x, evaFwd.z);
     this.group.position.copy(this.pos);
     this.group.quaternion.copy(q);
-    // Weightless: the treading-water pose, until there is a pose of its own.
+    // Weightless: the imported adrift loop when the rig has it (a preference the rig steps over without it), else the
+    // still-water pose the state's own list gives.
+    this.rig?.prefer('float', MX.adrift);
     this.rig?.setState('float');
     this.rig?.update(dt);
     this.group.updateMatrixWorld(true);
@@ -2388,12 +2415,17 @@ export class Player {
       this.swing += dt / SWING_TIME;
       if (this.swing >= 1) this.swing = -1;
     }
+    // The thrown fall's impact holds the keys until it has played out (the game mutes them from `impactLocked`).
+    this.anim.tick(dt);
     this.blocking = this.classId === 'jedi' && this.saberOn && input.held('block') && !this.mounted && !this.noclip && !this.fists;
     this.aiming = this.classId === 'bounty_hunter' && input.held('altAttack') && !this.mounted && !this.noclip && !this.swimming && !this.fists;
     this.sinceShot += dt;
     cam.aim = this.aiming;
     const fighting = this.swing >= 0 || this.saber.busy || this.thrown.inFlight || this.jka.inSpecialJump || this.jka.rolling || this.fistsBusy;
     this.jkaMode = this.hasJkaClips && (this.blocking || fighting || !!this.rig?.overridingJka);
+    // Blocking or fighting, and not merely one of that game's one-offs still playing out: what keeps its jump, its
+    // in-air pose and its landing over the imported ones (the owner's rule: its legs stay only while blocking or attacking).
+    this.jkaActing = this.hasJkaClips && (this.blocking || fighting);
 
     if (this.mounted) {
       if (this.grapple.out) this.grapple.letGo('mount');
@@ -2520,6 +2552,9 @@ export class Player {
       // movement profile: the water keeps its own rules.) The arithmetic is `swimStep`'s, the block moved out
       // unchanged so the grapple's tests run the game's own swim; what is not arithmetic stays here.
       this.rig?.stopOverride();
+      // Water ends a thrown fall and a Force user's air, and what the movement reports on the first step out is the
+      // plunge's and no landing (`BodyAnim.swim`).
+      this.anim.swim();
       this.saber.holster();
       const sw = this.swimIn;
       sw.vel = this.vel;
@@ -2597,11 +2632,16 @@ export class Player {
       const stepGrounded = this.grapple.command(c, this.grounded);
       const force = this.force;
       const ev = this.jka.step(dt, this.vel, this.pos, stepGrounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
+      const rig = this.rig;
+      // The imported clips' memory of the air (src/anim/bodyAnim.ts): a step in the air is a fall begun here.
+      this.anim.stepped(stepGrounded);
       if (ev.jumped) {
         this.grounded = false;
         // The jump for the direction pushed (PM_JumpForDir); with the body turned the way it runs, that is always forward.
         this.jumpDir = this.jkaMode ? (mz > 0 ? 'F' : mz < 0 ? 'B' : mx > 0 ? 'R' : mx < 0 ? 'L' : 'F') : 'F';
-        this.playOnce(this.jumpClip('JUMP', false), 0.05);
+        // A plain jump is the imported one for every class; with Jedi Academy's animations in charge, or without the
+        // imported clips, that game's own.
+        if (!this.anim.jump(rig, this.jkaActing)) this.playOnce(this.jumpClip('JUMP', false), 0.05);
       }
       if (ev.special) {
         this.grounded = false;
@@ -2609,14 +2649,25 @@ export class Player {
       }
       if (ev.flip) this.playOnce(`BOTH_FLIP_${ev.flip}`, 0.08);
       else if (ev.forceJumpStarted) this.playOnce(this.jumpClip('JUMP', true), 0.08);
+      // A flip, a Force jump or a wall move: the air is a Force user's from here until the feet touch down.
+      if (ev.special || ev.flip || ev.forceJumpStarted) this.anim.forceMove();
       this.lockedHeading = ev.heading;
       if (ev.rolled) this.playOnce(`BOTH_ROLL_${ev.rolled}`, 0.05);
       if (this.jka.rolling) this.crouching = false;
-      if (ev.landed !== null && ev.landed >= 2 && !ev.rolled && !this.saber.busy) this.playOnce(this.jumpClip('LAND', ev.forceLanded), 0.06);
+      if (ev.landed !== null) {
+        // The landing: the imported one by how fast and how hard it was, none for a gentle one, and "before" for the
+        // game's own by its own rule. A thrown fall's landing, reported here a frame after its impact began, is the impact's.
+        const how = this.anim.land(rig, ev.landed, ev.damage, ev.forceLanded, ev.rolled !== null, this.saber.busy || this.jkaActing);
+        if (how === 'before' && ev.landed >= 2 && !ev.rolled && !this.saber.busy) this.playOnce(this.jumpClip('LAND', ev.forceLanded), 0.06);
+      }
+      // An imported landing gives way to the keys once it has shown its start.
+      this.anim.cut(rig, dt, moving);
       if (ev.damage > 0) this.takeDamage(ev.damage, false, 'fall');
       // A landing roll that kept some of a fall's harm off: what Acrobatics is paid for, outside a fight as well.
       if (ev.rollSaved > 0) this.onRolled?.(ev.fell, ev.rollSaved);
     } else if (this.grounded) {
+      // This profile reports no landing: on the ground, the air's memory is simply put down.
+      this.anim.onGround();
       this.vel.x = move.x * speed;
       this.vel.z = move.z * speed;
       if (input.held('jump') && !this.prone && !wasProne && !atControls) {
@@ -2677,10 +2728,12 @@ export class Player {
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
     // Down from a wreck: flat on the ground where the fall ends.
     if (this.flung && this.grounded) {
-      this.flung = false;
       this.prone = true;
       this.vel.x = 0;
       this.vel.z = 0;
+      // The imported impact, from its trim, and the keys held while it plays (`impactLocked`); the body is already
+      // lying as far as the game goes, so the prone idle is what the clip gives way to. Without the clip, as before.
+      this.anim.hitGround(this.rig);
     }
 
     const ground = this.aboard ? -1e9 : terrain.heightAt(this.pos.x, this.pos.z);
@@ -2939,13 +2992,22 @@ export class Player {
       rig.prefer('seated', this.seatedClip());
       rig.setState('seated');
     }
-    // Swimming with the block held: the stance on the torso and arms over the swimming legs.
-    else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
-    // Thrown from a wreck: flailing (the swimming stroke) all the way down.
-    else if (this.flung && !this.grounded) rig.setState('swim', 3);
+    // Swimming with the block held: the stance on the torso and arms over the swimming legs. Still in the water, the
+    // imported tread when the rig has it (said outright, since adrift in space prefers another loop for the same state).
+    else if (this.swimming) {
+      rig.prefer('float', MX.tread);
+      rig.setState(moving || this.submerged ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
+    }
     else if (!this.grounded) {
-      rig.prefer('air', this.jumpClip('INAIR', this.jka.isForceJumping));
-      rig.setState('air');
+      // In the air. Thrown from a wreck: the imported long fall, else flailing (the swimming stroke) all the way down.
+      // Otherwise the imported falling loop, or the float after a flip or a Force jump, and Jedi Academy's own in-air
+      // pose with its animations in charge or without the imported clips.
+      const loop = this.anim.air(rig, this.jkaActing);
+      if (this.flung && !loop) rig.setState('swim', 3);
+      else {
+        rig.prefer('air', loop ?? this.jumpClip('INAIR', this.jka.isForceJumping));
+        rig.setState('air');
+      }
     }
     else if (this.prone) {
       // Lying down: a blaster has its own prone carries, else the game's crawl.
@@ -2997,7 +3059,9 @@ export class Player {
     // Seated, the spine keeps the clip's own pose: no view-following twist or aim tilt carried over from on foot.
     const straight = wholeJka || !!this.mounted;
     rig.twistTorso(straight ? 0 : this.torsoTwist + this.aimTwist + spineFix, straight ? 0 : this.torsoPitch + this.aimFix.pitch);
-    this.correctAim(dt, gunUp);
+    // An imported clip posing the arms (the jump's start, a loop of the air, a landing) holds the gun wherever the clip
+    // has it, so the barrel says nothing of the aim while it plays.
+    this.correctAim(dt, gunUp, rig.armSource().startsWith('mx_'));
     // The hilt turns in the hand to whichever convention poses the arms: the game's own clips
     // hold it their way, Jedi Academy's the way its swings were made for.
     // The hilt's axis: the solved one through Jedi Academy's one-off clips (its swings, katas, throws),
@@ -3046,7 +3110,7 @@ export class Player {
    * camera looks, and fold the difference into the torso's turn and tilt for the next frame. Off, the
    * correction eases away. A shot's recoil is not chased.
    */
-  private correctAim(dt: number, gunUp: boolean): void {
+  private correctAim(dt: number, gunUp: boolean, importedArms = false): void {
     const fix = this.aimFix;
     if (!gunUp || this.mounted || !fix.on) {
       fix.yaw += (0 - fix.yaw) * Math.min(1, dt * 8);
@@ -3054,6 +3118,10 @@ export class Player {
       return;
     }
     if (this.sinceShot < 0.35) return;
+    // Held where it stands, as through a shot, while an imported clip has the arms: measured against a barrel the
+    // clip is swinging, the correction wound up and turned the whole body up to a right angle off the view through a
+    // hop's landing.
+    if (importedArms) return;
     const right = this.reach.right;
     if (right && this.held.right) {
       right.near.getWorldPosition(barrelA);

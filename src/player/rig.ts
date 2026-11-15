@@ -7,6 +7,7 @@ import { HeadLook } from './lookAt.ts';
 import { MOOD_TUNE } from './moods.ts';
 import { chainPoint, clipLinks, HEAD_TO_EYE, type Quat, type Vec3 } from '../vehicles/cockpitSeat';
 import type { ActiveClip, ClipHalf } from '../audio/clipEvents.ts';
+import { restWorld as restPlaces, type TargetSkeleton } from '../anim/fit.ts';
 
 export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun' | 'kneel' | 'prone' | 'proneMove' | 'gunProneIdle' | 'gunProneMove' | 'gunProneReadyIdle' | 'gunProneReadyMove' | 'gunProneAimIdle' | 'gunProneAimMove';
 
@@ -15,11 +16,14 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   idle: ['idle', 'Idle', 'stand', 'loop_stand', 'idle_combat'],
   walk: ['walk', 'Walk', 'loop_walk', 'walk_combat'],
   run: ['run', 'Run', 'loop_run', 'run_combat'],
-  air: ['BOTH_INAIR1', 'jump', 'fall', 'loop_jump', 'sneak_pose', 'idle', 'stand'],
+  // The imported falling loop first, when the rig has it (src/anim/): a rig without the imported clips, or with the
+  // switch off, steps over the name and plays what it always did.
+  air: ['mx_falling_idle', 'BOTH_INAIR1', 'jump', 'fall', 'loop_jump', 'sneak_pose', 'idle', 'stand'],
   // Riding: the vehicle's own pose is asked for through `prefer` (loop_riding:vehicle_speeder_bike, the saddle poses); the plain loop_riding is the game's default saddle.
   seated: ['loop_riding', /^loop_riding/, 'loop_ride', 'sit', 'loop_sit', /^loop_sitting_chair/, 'loop_sitting_ground', 'sneak_pose', 'idle', 'stand'],
   swim: ['swim', 'loop_swimming:speed1', 'loop_swimming:speed0', 'walk', 'idle'],
-  float: ['float', 'loop_swimming:speed0', 'swim', 'idle'],
+  // Still in the water: the imported tread when the rig has it. (Adrift in space sets its own preference over this.)
+  float: ['mx_treading_water', 'float', 'loop_swimming:speed0', 'swim', 'idle'],
   crouch: ['BOTH_CROUCH1IDLE', 'BOTH_CROUCH1', 'sneak_pose', 'idle', 'stand'],
   crouchWalk: ['BOTH_CROUCH1WALK', 'sneak', 'walk', 'loop_walk'],
   crouchWalkBack: ['BOTH_CROUCH1WALKBACK', 'BOTH_CROUCH1WALK', 'sneak', 'walk', 'loop_walk'],
@@ -171,6 +175,7 @@ const restWorld = new THREE.Vector3();
 const dirWorld = new THREE.Vector3();
 const tmpA = new THREE.Vector3();
 const tmpB = new THREE.Vector3();
+const tmpM = new THREE.Matrix4();
 
 /**
  * A half's clip is named `upper:<clip>` or `lower:<clip>`, and a clip's event markers are listed
@@ -447,6 +452,65 @@ export class CharacterRig {
 
   has(clip: string): boolean {
     return this.actions.has(clip);
+  }
+
+  /**
+   * Take clips after the rig was made: the imported animations fitted to this skeleton (src/anim/), which the
+   * loader hands over before the rig is shown, and any the console asks for later. A clip is an action more on the
+   * mixer and a name more in the table; nothing that is playing is touched, and a name the rig already has is left
+   * as it is. Never called on a frame. Answers how many were new.
+   */
+  addClips(clips: readonly THREE.AnimationClip[]): number {
+    let added = 0;
+    for (const clip of clips) {
+      if (this.actions.has(clip.name)) continue;
+      this.actions.set(clip.name, this.mixer.clipAction(clip));
+      added++;
+    }
+    return added;
+  }
+
+  /**
+   * The skeleton at its bind pose, as the imported animations' fitter takes it (`TargetSkeleton`, src/anim/fit.ts):
+   * every joint parent first with its rest under its parent, from the rest the rig kept when it was made, so the
+   * answer is the same whatever is playing; and where a joint that hangs from no joint has its parent, in the frame
+   * of the rig's own root.
+   */
+  restSkeleton(): TargetSkeleton {
+    const list = [...this.bones.values()];
+    const at = new Map(list.map((b, i) => [b, i]));
+    const joints = list.map((b) => {
+      const p = this.restPosition.get(b) ?? b.position;
+      const q = this.restLocal.get(b) ?? b.quaternion;
+      return { name: b.name, parent: b.parent instanceof THREE.Bone ? (at.get(b.parent) ?? -1) : -1, restP: [p.x, p.y, p.z] as [number, number, number], restQ: [q.x, q.y, q.z, q.w] as [number, number, number, number] };
+    });
+    // Whatever stands between the rig's root and the first parentless joint (nothing, in the converted packs): no
+    // clip moves it, so its place now is its place always.
+    const base = new THREE.Matrix4();
+    const first = list.find((b) => !(b.parent instanceof THREE.Bone));
+    for (let o = first?.parent ?? null; o && o !== this.root; o = o.parent) base.premultiply(tmpM.compose(o.position, o.quaternion, o.scale));
+    const bp = new THREE.Vector3(), bq = new THREE.Quaternion(), bs = new THREE.Vector3();
+    base.decompose(bp, bq, bs);
+    return { joints, base: { p: [bp.x, bp.y, bp.z], q: [bq.x, bq.y, bq.z, bq.w] } };
+  }
+
+  /**
+   * How the pose now stands against the bind pose, for the console (`__debug.anim()`): how far the hips are turned
+   * from their rest, degrees, and how far each ankle stands over (+) or under (-) where it rests, metres, in the rig's
+   * own frame, so a body standing on the ground reads its feet against the ground. Null on a skeleton without them.
+   */
+  poseAgainstRest(): { hipsFromRestDeg: number; leftAnkleM: number; rightAnkleM: number } | null {
+    const hips = this.bones.get('root'), left = this.bones.get('lAnkle'), right = this.bones.get('rAnkle');
+    const restQ = hips ? this.restLocal.get(hips) : undefined;
+    if (!hips || !left || !right || !restQ) return null;
+    const skeleton = this.restSkeleton();
+    const rest = restPlaces(skeleton);
+    const at = (name: string) => skeleton.joints.findIndex((j) => j.name === name);
+    this.root.updateWorldMatrix(true, true);
+    const scale = this.root.getWorldScale(new THREE.Vector3()).y;
+    const over = (bone: THREE.Bone, name: string) => (this.root.worldToLocal(bone.getWorldPosition(new THREE.Vector3())).y - rest.p[at(name) * 3 + 1]) * scale;
+    const n = (v: number, digits: number) => Number(v.toFixed(digits));
+    return { hipsFromRestDeg: n((hips.quaternion.angleTo(restQ) * 180) / Math.PI, 2), leftAnkleM: n(over(left, 'lAnkle'), 3), rightAnkleM: n(over(right, 'rAnkle'), 3) };
   }
 
   /** Length of a clip in seconds, or null when the rig lacks it. */
@@ -735,28 +799,33 @@ export class CharacterRig {
   /**
    * Play a clip over the state clips: once (then the state clip returns) or looping until
    * `stopOverride`. Returns its length in seconds at the given speed, or null when missing.
+   * `from` starts a one-off that many seconds into the clip (an imported landing's trim: the part of
+   * it before the feet come down is skipped), and what is returned is then what is left to play.
    */
-  play(clip: string, { loop = false, fadeIn = 0.1, timeScale = 1, hold = false, upperOnly = false }: { loop?: boolean; fadeIn?: number; timeScale?: number; hold?: boolean; upperOnly?: boolean } = {}): number | null {
+  play(clip: string, { loop = false, fadeIn = 0.1, timeScale = 1, hold = false, upperOnly = false, from = 0 }: { loop?: boolean; fadeIn?: number; timeScale?: number; hold?: boolean; upperOnly?: boolean; from?: number } = {}): number | null {
     if (!this.actions.has(clip)) return null;
+    // Never past the clip's own end, less a moment, so a trim set too long still shows its last pose and ends.
+    const startAt = from > 0 ? Math.min(from, Math.max(0, this.actions.get(clip)!.getClip().duration - 0.02)) : 0;
     // A one-off chained onto one already on the upper body alone (a swing's follow-through after
     // the swing) stays on the upper body: the legs go on with what they were doing.
     if (upperOnly && this.overrideUpper && this.override) {
       const next = this.half(clip, 'upper');
-      const from = this.override;
+      const was = this.override;
       next.reset().setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity).setEffectiveWeight(1);
       next.clampWhenFinished = true;
       next.timeScale = timeScale;
       next.play();
-      if (from !== next) from.crossFadeTo(next, fadeIn, false);
+      if (startAt > 0) next.time = startAt;
+      if (was !== next) was.crossFadeTo(next, fadeIn, false);
       else next.fadeIn(0);
       this.override = next;
-      const duration = next.getClip().duration / Math.max(1e-3, Math.abs(timeScale));
+      const duration = (next.getClip().duration - startAt) / Math.max(1e-3, Math.abs(timeScale));
       this.overrideEnds = loop || hold ? Infinity : duration;
       this.overrideTime = 0;
       return duration;
     }
     const next = this.actions.get(clip)!;
-    const from = this.override ?? this.current;
+    const was = this.override ?? this.current;
     if (this.upper) {
       // A one-off clip poses the whole body; the upper layer comes back with the state after it.
       this.upper.fadeOut(fadeIn);
@@ -767,16 +836,17 @@ export class CharacterRig {
     next.clampWhenFinished = true;
     next.timeScale = timeScale;
     next.play();
-    if (this.overrideUpper && from) {
+    if (startAt > 0) next.time = startAt;
+    if (this.overrideUpper && was) {
       // The last one-off had the upper body alone; this one takes the whole body, so the legs' clip goes too.
-      from.fadeOut(fadeIn);
-      if (this.current && this.current !== from) this.current.fadeOut(fadeIn);
+      was.fadeOut(fadeIn);
+      if (this.current && this.current !== was) this.current.fadeOut(fadeIn);
       next.fadeIn(fadeIn);
-    } else if (from && from !== next) from.crossFadeTo(next, fadeIn, false);
-    else if (from === next) next.fadeIn(0);
+    } else if (was && was !== next) was.crossFadeTo(next, fadeIn, false);
+    else if (was === next) next.fadeIn(0);
     this.overrideUpper = false;
     this.override = next;
-    const duration = next.getClip().duration / Math.max(1e-3, Math.abs(timeScale));
+    const duration = (next.getClip().duration - startAt) / Math.max(1e-3, Math.abs(timeScale));
     // A held clip keeps its last frame until the next one-off clip or `stopOverride` (a saber
     // move chains straight into the next without a dip back to the stance).
     this.overrideEnds = loop || hold ? Infinity : duration;
@@ -803,6 +873,33 @@ export class CharacterRig {
       this.override.crossFadeTo(back, fade, false);
     } else this.override.fadeOut(fade);
     this.override = null;
+  }
+
+  /**
+   * End a whole-body one-off early and fade straight into the clip of the state as it stands now, over `fade`
+   * seconds: what an imported landing does when the keys cut it short (src/anim/bodyAnim.ts). `stopOverride` fades
+   * back to the clip that was playing when the one-off began and leaves the state it remembered since as it is, which
+   * is right where the stop and the state's change come in one frame (a swimmer, a rider) and wrong after a one-off
+   * has played a while: a body that landed standing and was then told to run was left in the idle, sliding, since
+   * the state it was asked for was already the one remembered. A one-off on the upper body alone ends as it always did.
+   */
+  yieldOverride(fade = 0.15): void {
+    const ending = this.override;
+    if (!ending) return;
+    if (this.overrideUpper) {
+      this.stopOverride(fade);
+      return;
+    }
+    // As a one-off's own end does (`update`): the state's clip is resolved afresh with the one-off as what it fades from.
+    const state = this.state;
+    const upper = this.wantedUpper;
+    this.override = null;
+    this.current = ending;
+    this.state = null;
+    this.upperName = null;
+    if (state) this.setState(state, 0, upper);
+    if (this.current === ending) ending.fadeOut(fade);
+    else if (this.current) ending.crossFadeTo(this.current, fade, false);
   }
 
   /**
@@ -1281,6 +1378,47 @@ interface PlayerManifest {
 }
 
 /**
+ * Where a rig's loader gets the imported animations fitted to its skeleton (src/anim/mixamoPack.ts): set once by the
+ * game as it starts, through this record and never an import, so the rig knows nothing of the pack, its files or the
+ * page. With none set, or a provider that answers with nothing (no pack, the switch off), a rig is the rig it was.
+ */
+export const IMPORTED_CLIPS: { provider: ((skeleton: TargetSkeleton, label: string) => Promise<THREE.AnimationClip[]>) | null; waitMs: number } = {
+  provider: null,
+  /**
+   * How long a rig's load waits for them before it goes on without: the clips are a few hundred kilobytes beside a
+   * rig file of hundreds of megabytes, so this is only ever a server that has stopped answering. They are added
+   * when they do land.
+   */
+  waitMs: 4000,
+};
+
+/**
+ * Hand a freshly made rig the imported clips for its skeleton, before it is shown: fitted once a skeleton and shared,
+ * so every rig after the first takes the same clip objects at no cost. Never throws.
+ */
+export async function attachImportedClips(rig: CharacterRig, label: string): Promise<void> {
+  const provider = IMPORTED_CLIPS.provider;
+  if (!provider) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const fitting = provider(rig.restSkeleton(), label).catch((err) => {
+      console.warn('imported animations: the fit failed', err);
+      return [] as THREE.AnimationClip[];
+    });
+    const late = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), IMPORTED_CLIPS.waitMs);
+    });
+    const clips = await Promise.race([fitting, late]);
+    if (clips) rig.addClips(clips);
+    else void fitting.then((c) => rig.addClips(c));
+  } catch (err) {
+    console.warn('imported animations: not attached', err);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
  * The player's rig: a character converted from the game (assets-private/player/manifest.json, the
  * first entry) when one exists, otherwise the bundled placeholder.
  */
@@ -1295,6 +1433,8 @@ export async function loadPlayerRig(baseUrl: string, id = 'human_male'): Promise
     if (!['idle', 'walk', 'run'].every((n) => names.has(n))) throw new Error(`the parts rig has ${character.clips.length} clips but no idle, walk and run; run the converter's parts command again`);
     const hold = Object.entries(m.jkaClips ?? {}).filter(([, c]) => !c.loop).map(([name]) => name);
     const rig = CharacterRig.fromCharacter(character, { clipSpeeds: m.clipSpeeds, scale: m.scale ?? 1, hold, grip: m.jkaGrip, partialClips: m.partialClips, variants: m.variants });
+    // The imported animations for this skeleton, before anybody is shown the rig (the player's, a peer's, a fighter's).
+    await attachImportedClips(rig, m.id);
     console.info(`player ${m.id}: assembled from ${m.parts.length} parts, ${character.clips.length} clips, ${Object.keys(character.morphValues()).length} shape sliders`);
     return rig;
   } catch (err) {
@@ -1308,6 +1448,7 @@ export async function loadPlayerRig(baseUrl: string, id = 'human_male'): Promise
       if (entry) {
         const hold = Object.entries(entry.jkaClips ?? {}).filter(([, c]) => !c.loop).map(([name]) => name);
         const rig = await CharacterRig.load(`${baseUrl}assets-private/${entry.file}`, { clipSpeeds: entry.clipSpeeds, scale: entry.scale ?? 1, hold, grip: entry.jkaGrip, partialClips: entry.partialClips, variants: entry.variants });
+        await attachImportedClips(rig, entry.id);
         console.info(`player model ${entry.id}: clips ${rig.clipNames.join(', ')}; bones ${rig.boneNames.join(', ')}`);
         return rig;
       }
