@@ -214,7 +214,7 @@ function declaredBeforeUse(src: string, name: string): { declared: number; first
   const flat = frag.indexOf(TILE_FLAT_LINE, fn);
   ok(fn > 0 && ggx > fn && flat > ggx && flat < frag.indexOf('}', flat), "the flat shine is added in RE_Direct_Physical straight after three's own highlight, for every direct light");
   ok(frag.indexOf('float gGroundFlat = 0.0;') < fn, 'and the global it reads is declared above the light functions, which cannot see main()');
-  ok(THREE.ShaderChunk.lights_physical_pars_fragment.includes(GGX_ANCHOR), "three 0.185's lighting chunk still has the highlight line the flat shine follows");
+  ok(THREE.ShaderChunk.lights_physical_pars_fragment.includes(GGX_ANCHOR), "three 0.187's lighting chunk, held to 0.185's lines, still has the highlight line the flat shine follows");
 
   // The clouds over the lit colour, and the view at the very end.
   const clouds = fs.indexOf('if ( uGroundCloud.x > 0.5 ) outgoingLight *= groundCloudShade( outgoingLight );');

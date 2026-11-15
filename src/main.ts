@@ -3,7 +3,9 @@
 // keeps a shape V8 can read fast. A material made before it would carry a plain field of its own instead.
 import './world/stencilRef.ts';
 import * as THREE from 'three';
-import { reversedOpaqueSort, reversedTransparentSort } from './core/reversedSort.ts';
+// Next, before anything can build a program: three's lighting chunks are held to the lines three 0.185 drew with
+// (src/core/threeHolds.ts), so the library's upgrade changes nothing a surface looks like.
+import './core/threeHolds.ts';
 import { REVERSED_DEPTH, projectedBehind } from './core/depthMode.ts';
 // The display's own rules, apart from the panels'. The stylesheet in index.html carries the named
 // colours on `:root`; this one carries what is drawn from them.
@@ -1915,11 +1917,8 @@ class App {
     // its precision all the way out instead of losing it with the square of the distance. With the camera's 0.05 m
     // near plane a depth step was 2.7 m at 1.5 km, and a seabed that close under the water showed through it.
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true, reversedDepthBuffer: REVERSED_DEPTH });
-    if (this.renderer.capabilities.reversedDepthBuffer) {
-      // Three reverses its whole sorted lists under reversed depth, renderOrder and all (reversedSort.ts).
-      this.renderer.setOpaqueSort(reversedOpaqueSort as never);
-      this.renderer.setTransparentSort(reversedTransparentSort as never);
-    }
+    // The draw order is three's own under reversed depth too: 0.187 turns each item's projected depth round as it is
+    // listed, where 0.185 reversed its whole sorted lists, renderOrder and all, and was handed comparators to undo it.
     if (REVERSED_DEPTH !== this.renderer.capabilities.reversedDepthBuffer) {
       console.error('reversed depth: the page chose it, but the renderer could not use it (no EXT_clip_control here); shaders chosen for it will draw wrong. Add ?norevz to the address.');
     }
@@ -7563,7 +7562,7 @@ class App {
           for (const m of mats) {
             m.alphaTest = DECAL_TUNE.alphaFloor;
             m.polygonOffsetFactor = DECAL_TUNE.factor;
-            m.polygonOffsetUnits = REVERSED_DEPTH ? -DECAL_TUNE.units : DECAL_TUNE.units;
+            m.polygonOffsetUnits = DECAL_TUNE.units;
           }
         }
         return { tune: { ...DECAL_TUNE }, materials: mats.size };

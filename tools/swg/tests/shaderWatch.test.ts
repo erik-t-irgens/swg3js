@@ -65,9 +65,11 @@ const ok = (cond: boolean, what: string): void => {
 // ---------------------------------------------------------------------------------------------
 // 1. Three's own key order.
 //
-// The module anchors on the precision and counts forward, so what matters is the order of the 51
-// fields from there and that exactly two boolean masks and the renderer's colour space come after
-// them, with the material's own custom key last.
+// The module anchors on the precision and counts forward, so what matters is the order of the 56
+// fields from there: the 53 parameters three pushes (three 0.187's: 0.185 pushed 48, with the flat environment
+// layout's height where the three fields of a filtered cube now are, one map channel fewer, a morph attribute
+// count it never set, and no sun light or probe grid counts), then exactly two boolean masks and the renderer's
+// colour space, with the material's own custom key last. (`shaderWatch.ts` counts the same 56.)
 const here = dirname(fileURLToPath(import.meta.url));
 const programsJs = readFileSync(join(here, '../../../node_modules/three/src/renderers/webgl/WebGLPrograms.js'), 'utf8');
 
@@ -82,16 +84,16 @@ const pushed = (body: string): string[] => [...body.matchAll(/array\.push\(\s*pa
 
 // The fixed run, in three's own order, as the module counts it back from the end.
 const EXPECTED_TAIL = [
-  'precision', 'outputColorSpace', 'envMapMode', 'envMapCubeUVHeight',
+  'precision', 'outputColorSpace', 'envMapMode', 'envMapPMREM', 'envMapMaxLod', 'envMapSize',
   'mapUv', 'alphaMapUv', 'lightMapUv', 'aoMapUv', 'bumpMapUv', 'normalMapUv', 'displacementMapUv',
   'emissiveMapUv', 'metalnessMapUv', 'roughnessMapUv', 'anisotropyMapUv', 'clearcoatMapUv',
-  'clearcoatNormalMapUv', 'clearcoatRoughnessMapUv', 'iridescenceMapUv', 'iridescenceThicknessMapUv',
+  'clearcoatNormalMapUv', 'clearcoatRoughnessMapUv', 'diffuseRoughnessMapUv', 'iridescenceMapUv', 'iridescenceThicknessMapUv',
   'sheenColorMapUv', 'sheenRoughnessMapUv', 'specularMapUv', 'specularColorMapUv',
   'specularIntensityMapUv', 'transmissionMapUv', 'thicknessMapUv',
-  'combine', 'fogExp2', 'sizeAttenuation', 'morphTargetsCount', 'morphAttributeCount',
-  'numDirLights', 'numPointLights', 'numSpotLights', 'numSpotLightMaps', 'numHemiLights',
-  'numRectAreaLights', 'numDirLightShadows', 'numPointLightShadows', 'numSpotLightShadows',
-  'numSpotLightShadowsWithMaps', 'numLightProbes', 'shadowMapType', 'toneMapping',
+  'combine', 'fogExp2', 'sizeAttenuation', 'morphTargetsCount',
+  'numSunLights', 'numDirLights', 'numPointLights', 'numSpotLights', 'numSpotLightMaps', 'numHemiLights',
+  'numRectAreaLights', 'numSunLightShadows', 'numDirLightShadows', 'numPointLightShadows', 'numSpotLightShadows',
+  'numSpotLightShadowsWithMaps', 'numLightProbes', 'numLightProbeGrids', 'shadowMapType', 'toneMapping',
   'numClippingPlanes', 'numClipIntersection', 'depthPacking',
 ];
 
@@ -135,7 +137,8 @@ const EXPECTED_TAIL = [
   ok(/function getChannel\(\s*value\s*\)\s*\{[\s\S]{0,200}?return 'uv'[\s\S]{0,120}?return `uv\$\{ value \}`/.test(programsJs), 'and the channel names are uv, uv1, uv2 … as this reads them');
   ok(/envMapMode:\s*HAS_ENVMAP\s*&&\s*envMap\.mapping/.test(params), "the environment map's kind is false when there is none");
   ok(/fogExp2:\s*\(\s*!!\s*fog\s*&&\s*fog\.isFogExp2\s*\)/.test(params) && /sizeAttenuation:\s*material\.sizeAttenuation === true/.test(params), 'the fog kind and the point sizing are always one of the two words');
-  ok(!/\bmorphAttributeCount\s*:/.test(params), 'three pushes morphAttributeCount and never sets it, so that field is always empty — a reader that wants a number there reads nothing at all');
+  ok(!/\bmorphAttributeCount\b/.test(programsJs), 'three no longer pushes the morphAttributeCount it never set (0.185 did, and the field was always empty), so no reader counts a field for it');
+  ok(/envMapPMREM:\s*HAS_PMREM,/.test(params) && /envMapMaxLod:\s*HAS_PMREM \?[^,]+: null,/.test(params) && /envMapSize:\s*HAS_PMREM \?[^,]+: null,/.test(params), "whether the environment is a filtered cube of three's own is always one of the two words, and its last level and face size are empty when it is not");
   ok(/combine:\s*material\.combine/.test(params), 'and how an environment map is combined is unset on every material that has none');
 }
 
@@ -167,12 +170,13 @@ interface FakeKey {
 function makeKey(o: FakeKey = {}): string {
   const a: (string | number)[] = [...(o.head ?? ['physical'])];
   for (const [k, v] of Object.entries(o.defines ?? {})) a.push(k, v);
-  // precision, the material's colour space, the environment map's kind and its cube height.
-  a.push('highp', 'srgb-linear', 'false', o.envHeight ?? '');
-  for (let i = 0; i < 23; i++) a.push('false'); // the per-map UV sets: false where there is no such map
-  a.push('', 'false', 'false', 0, ''); // combine, fogExp2, sizeAttenuation, morphTargetsCount, morphAttributeCount
-  a.push(o.dir ?? 0, o.point ?? 0, o.spot ?? 0, 0, o.hemi ?? 0, 0);
-  a.push(o.dirShadow ?? 0, o.pointShadow ?? 0, o.spotShadow ?? 0, 0, 0);
+  // precision, the material's colour space, the environment map's kind, whether it is a filtered cube of three's
+  // own, and that cube's last level and face size.
+  a.push('highp', 'srgb-linear', 'false', o.envHeight === undefined ? 'false' : 'true', o.envHeight === undefined ? '' : 8, o.envHeight ?? '');
+  for (let i = 0; i < 24; i++) a.push('false'); // the per-map UV sets: false where there is no such map
+  a.push('', 'false', 'false', 0); // combine, fogExp2, sizeAttenuation, morphTargetsCount
+  a.push(0, o.dir ?? 0, o.point ?? 0, o.spot ?? 0, 0, o.hemi ?? 0, 0); // sun, dir, point, spot, spot maps, hemi, rect area
+  a.push(0, o.dirShadow ?? 0, o.pointShadow ?? 0, o.spotShadow ?? 0, 0, 0, 0); // the shadows of each, the light probes and their grids
   a.push(1, 4, o.clipping ?? 0, 0, 0); // shadowMapType, toneMapping, clipping, clipIntersection, depthPacking
   a.push(o.mask1 ?? 0, o.mask2 ?? 0);
   a.push('srgb', o.custom ?? DEFAULT_KEY);
@@ -203,7 +207,7 @@ const ROOM_PASS = { dir: 1, point: 12 };
   const flags = readKey(makeKey({ ...WORLD_PASS, mask1: (1 << 9) | (1 << 10), mask2: (1 << 0) | (1 << 5) | (1 << 11) }))!;
   ok(flags.alphaTest && flags.vertexColors && flags.fog && flags.skinning && flags.side === 'double', 'and the bits this reads are the ones three sets');
   ok(readKey(makeKey({ mask2: 1 << 12 }))!.side === 'back', 'a flipped face reads as the back');
-  ok(readKey(makeKey({ envHeight: '1024', mask1: 1 << 4 }))!.envHeight === '1024', "the environment cube's height is kept, since it is in the program key and a change of it recompiles");
+  ok(readKey(makeKey({ envHeight: '1024', mask1: 1 << 4 }))!.envHeight === '1024', "the face size of a filtered environment cube of three's own is kept, since it is in the program key and a change of it recompiles");
   ok(readKey(makeKey({ defines: { USE_CSM: '1', CSM_CASCADES: '3' } }))!.cascades, "the shadow cascades' define is found among the defines, wherever they sit");
   ok(readKey(makeKey({ custom: 'wet-object|swg-ground-wet-16' }))!.wet, 'and the wet wrap by the front of the key the material wrote itself');
   ok(readKey(makeKey({ custom: 'swg-ground-tiles-wet' }))!.wet, "and the ground drawn the client's way, which carries the wet look itself, by its own key");
@@ -250,21 +254,30 @@ const ROOM_PASS = { dir: 1, point: 12 };
 // believes, and what it believed at first was wrong in two ways at once — an unset field is empty
 // or the word `false`, never `undefined`, and the two masks are bit fields running past eight
 // million, which a reader that bounds them like a light count refuses. With both mistakes in place
-// every check above still passed while the game read 0 of its 222 keys. So four keys are copied
-// here as the renderer handed them over on a planet: the ground, a room's prop, a shadow pass and
-// the one material in a world whose key cannot be read at all.
+// every check above still passed while the game read 0 of its 222 keys. So five keys are copied
+// here as the renderer handed them over on a planet: the ground, two of a room's props (one with a colour
+// map alone, one with maps on five channels and an environment), a shadow pass and the one material in a
+// world whose key cannot be read at all. (Taken again on three 0.187, whose run is another length: the
+// ground is drawn the client's way now, every material carries the cascades and the highlight's wrap, the
+// rooms pass lights with the torch's spot, and the shadow pass with every light.)
 //
 // They are cache keys and nothing else: three builds them out of its own parameters, the defines
 // and the material's own key, so no name of anything converted appears in one.
 const CAPTURED = {
   /** The ground: the cascades' defines, the world's lights, and its own wet key at the end. */
-  ground: 'physical,STANDARD,,USE_CSM,1,CSM_CASCADES,3,CSM_FADE,,highp,srgb-linear,false,,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,,true,false,0,,4,4,1,0,1,0,3,0,0,0,0,1,0,0,0,0,8388608,8520707,srgb,swg-ground-wet-17',
-  /** A prop inside a building: the room pass's lights, instanced, with maps on three channels. */
-  prop: 'physical,STANDARD,,highp,srgb-linear,false,,uv,false,false,false,false,uv,false,uv,uv,uv,false,false,false,false,false,false,false,false,false,false,false,false,false,,true,false,0,,1,12,0,0,0,0,0,0,0,0,0,1,0,0,0,0,8388673,8519683,srgb,onBeforeCompile() {}',
+  ground: 'physical,STANDARD,,USE_CSM,1,CSM_CASCADES,3,CSM_FADE,,highp,srgb-linear,false,false,,,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,,true,false,0,0,4,4,1,0,1,0,0,3,0,0,0,0,0,1,0,0,0,0,8388608,8520723,srgb,swg-ground-tiles-wet',
+  /** A prop inside a building: the room pass's lights, instanced, with a colour map and the highlight's wrap round the cascades' hook. */
+  prop: 'physical,STANDARD,,USE_CSM,1,CSM_CASCADES,3,CSM_FADE,,highp,srgb-linear,false,false,,,uv,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,,true,false,0,0,1,12,1,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,8388609,8519699,srgb,spec|function swgInject(shader, renderer) {\n\t\tprevious.call(this, shader, renderer);\n\t\tinject(shader);\n\t}',
+  /**
+   * Another prop in the same room, with maps on five channels (colour, normal, glow, metalness, roughness) and an
+   * environment in three 0.185's flat layout: its kind is a number three has no name for (306), it is no filtered
+   * cube of three's own, and the wet look's wrap stands in front of the highlight's.
+   */
+  propMaps: 'physical,STANDARD,,USE_CSM,1,CSM_CASCADES,3,CSM_FADE,,highp,srgb-linear,306,false,,,uv,false,false,false,false,uv,false,uv,uv,uv,false,false,false,false,false,false,false,false,false,false,false,false,false,false,,true,false,0,0,1,12,1,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,8388689,8519699,srgb,wet-object|spec|function swgInject(shader, renderer) {\n\t\tprevious.call(this, shader, renderer);\n\t\tinject(shader);\n\t}',
   /** A shadow pass: depth packing is a real number there, and the alpha test is on. */
-  depth: 'depth,highp,srgb-linear,false,,uv,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,,false,false,0,,1,12,0,0,0,0,0,0,0,0,0,1,0,0,0,3200,8389121,8530944,srgb,onBeforeCompile() {}',
+  depth: 'depth,highp,srgb-linear,false,false,,,uv,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,,false,false,0,0,5,12,1,0,1,0,0,3,0,0,0,0,0,1,0,0,0,3200,8389121,8530960,srgb,onBeforeCompile() {}',
   /** The effects' output pass, a raw shader material: three writes no run of parameters at all. */
-  raw: '37,38,SRGB_TRANSFER,,ACES_FILMIC_TONE_MAPPING,,onBeforeCompile() {}',
+  raw: '33,34,SRGB_TRANSFER,,ACES_FILMIC_TONE_MAPPING,,onBeforeCompile() {}',
 };
 
 {
@@ -273,16 +286,27 @@ const CAPTURED = {
   ok(ground.lights === '4 dir, 4 point, 1 spot, 1 hemi, 3 dirShadows', `and its lights are the world pass's ("${ground.lights}")`);
   ok(ground.cascades && ground.wet && ground.fog, 'with the cascades, the wet wrap and the fog all found');
   ok(ground.defines.join(' ') === 'STANDARD USE_CSM CSM_CASCADES CSM_FADE', `and every define named ("${ground.defines.join(' ')}")`);
-  ok(ground.custom === 'swg-ground-wet-17', "and the material's own key kept whole, since that is what the ground is keyed by");
+  ok(ground.custom === 'swg-ground-tiles-wet', "and the material's own key kept whole, since that is what the ground is keyed by");
 
   const prop = readKey(CAPTURED.prop)!;
-  ok(prop.lights === '1 dir, 12 point', "a prop in a room reads as the room pass, which is the other signature the game warms");
-  ok(prop.instancing && prop.fog && !prop.cascades && !prop.wet, 'instanced, fogged, with no cascades and no wet wrap');
-  ok(prop.custom === '' && prop.customLength === 0, "and no key of its own, though three wrote its empty hook there");
+  ok(prop.lights === '1 dir, 12 point, 1 spot', `a prop in a room reads as the room pass, which is the other signature the game warms ("${prop.lights}")`);
+  ok(prop.instancing && prop.fog && prop.cascades && !prop.wet, 'instanced, fogged, with the cascades every material joins and no wet wrap');
+  ok(prop.custom.startsWith('spec|') && !prop.custom.includes('\n'), `and its own key is the highlight's wrap round the cascades' hook, shown as one line ("${prop.custom}")`);
+
+  // Several map channels at once: each `uv` stands where three's run has that map, by the run's own names.
+  const maps = readKey(CAPTURED.propMaps)!;
+  ok(!!maps && maps.lights === '1 dir, 12 point, 1 spot' && maps.instancing && maps.fog && maps.cascades && maps.wet, `a prop with maps on five channels is read as the same room pass, instanced, fogged, with the cascades and the wet wrap ("${maps?.lights}")`);
+  const run = CAPTURED.propMaps.split(',');
+  const start = run.indexOf('highp');
+  const channels = EXPECTED_TAIL.filter((_name, i) => run[start + i] === 'uv');
+  ok(channels.join(' ') === 'mapUv normalMapUv emissiveMapUv metalnessMapUv roughnessMapUv', `its five channels stand where three's run has them (${channels.join(', ')})`);
+  ok(maps.envMap && maps.envHeight === 'none' && run[start + EXPECTED_TAIL.indexOf('envMapMode')] === '306' && run[start + EXPECTED_TAIL.indexOf('envMapPMREM')] === 'false', "and its environment is read as one, of a kind three has no name for and no filtered cube of three's own, so no face size is in the key");
+  ok(maps.custom.startsWith('wet-object|spec|') && maps.defines.join(' ') === 'STANDARD USE_CSM CSM_CASCADES CSM_FADE', `with its own key and its defines whole ("${maps.custom}")`);
 
   const depth = readKey(CAPTURED.depth)!;
   ok(depth.alphaTest && depth.instancing && depth.side === 'double', 'a shadow pass reads its alpha test, its instancing and which face it draws');
   ok(!depth.fog, 'and carries no fog, as a depth material does not');
+  ok(depth.custom === '' && depth.customLength === 0, "and no key of its own, though three wrote its empty hook there");
 
   ok(readKey(CAPTURED.raw) === null, 'while a raw shader material, which three writes no parameters for at all, is reported unread rather than guessed at');
 }

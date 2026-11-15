@@ -221,7 +221,7 @@ function personMaterial(opts: { cube?: boolean; normal?: boolean; mr?: boolean }
   const spec = repo('src/world/specular.ts');
   ok(/float swgSpecMask = 1\.0;/.test(spec) && /#ifdef USE_ROUGHNESSMAP\s*swgSpecMask = texelRoughness\.r;/.test(spec), "the highlight's mask is one where there is no roughness map and the map's red where there is: the white texel's red is that one");
   const chunks = THREE.ShaderChunk;
-  ok(/roughnessFactor \*= texelRoughness\.g;/.test(chunks.roughnessmap_fragment) && /metalnessFactor \*= texelMetalness\.b;/.test(chunks.metalnessmap_fragment), "three 0.185's own chunks multiply the factors by the map's green and blue, as read here");
+  ok(/roughnessFactor \*= texelRoughness\.g;/.test(chunks.roughnessmap_fragment) && /metalnessFactor \*= texelMetalness\.b;/.test(chunks.metalnessmap_fragment), "three 0.187's own chunks multiply the factors by the map's green and blue, as read here");
   // The packed (two-channel) branch between is taken only for a red-green texture, which the flat normal is not.
   ok(/vec3 mapN = texture2D\( normalMap, vNormalMapUv \)\.xyz \* 2\.0 - 1\.0;\s*#if defined\( USE_PACKED_NORMALMAP \)[\s\S]*?#endif\s*mapN\.xy \*= normalScale;\s*normal = normalize\( tbn \* mapN \);/.test(chunks.normal_fragment_maps) && flatNormalMap().format === THREE.RGBAFormat, "and three's own normal-map chunk is the arithmetic test 2 holds (the flat normal is four channels, never the packed branch)");
   ok(/mat3 tbn = getTangentFrame\( - vViewPosition, normal,/.test(chunks.normal_fragment_begin) && /vec3 normal = normalize\( vNormal \);/.test(chunks.normal_fragment_begin), "whose frame's third column is the interpolated normal already normalised, so what is left is normalising a unit vector again: a last-place rounding at most");
@@ -434,7 +434,7 @@ function personMaterial(opts: { cube?: boolean; normal?: boolean; mr?: boolean }
   ok(!/this\.compileOne\([^)]*'rooms'\)/.test(ready), 'and no rooms pass is compiled outright in `compileReady`: unbudgeted on one frame, a hole built and waited for there');
   const defer = repo('src/world/roomDefer.ts');
   ok(/export function urgentRooms\([\s\S]*?pushRooms\(later, objects, label, counted, queue, true, /.test(defer), '`urgentRooms` pushes through the same queue as a deferral, at the urgent rank');
-  // The records the warm and the in-play count read: the renderer's own, and where three 0.185 keeps them.
+  // The records the warm and the in-play count read: the renderer's own, and where three 0.187 keeps them.
   ok(/readonly programsOf: ProgramsOf = \(m\) => \{\s*const props = this\.renderer\?\.properties as [^\n]*\| undefined;\s*if \(!props \|\| !props\.has\(m\)\) return null;\s*return props\.get\(m\)\.programs\?\.values\(\) \?\? null;\s*\};/.test(world),"the world reads a material's programs off its renderer's own records (`programsOf`), nothing copied");
   const three = repo('node_modules/three/src/renderers/WebGLRenderer.js');
   ok(/materialProperties\.programs = programs;/.test(three) && /programs\.set\( programCacheKey, program \);/.test(three), "which is where three keeps them: one map a material, by cache key (`WebGLRenderer.getProgram`)");

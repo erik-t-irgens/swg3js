@@ -9,7 +9,6 @@
 // swaps it live. The game's X is the client's mirrored, so the pattern is the client's seen in a mirror;
 // every retail flow has no X component, so nothing moves the other way.
 import * as THREE from 'three';
-import { REVERSED_DEPTH } from '../core/depthMode.ts';
 import type { AssetPack } from './assetPack';
 import type { SwgWaterTable } from './swgTerrain';
 import type { LavaHeatTable } from './heatSources';
@@ -288,11 +287,11 @@ export function createLavaMaterial(style: LavaStyle, shaderSize: number, texture
     side: THREE.DoubleSide,
     // The lava's depth is pushed back by about one pixel's depth slope, so where the ground meets it at
     // a shallow angle the ground wins ties instead of flickering. Render state, not the program key.
-    // Under reversed depth three flips the factor and not the units, so the units are flipped here
-    // (docs/REVERSED-DEPTH.md).
+    // Under reversed depth three flips the factor and the units itself (docs/REVERSED-DEPTH.md; three 0.185
+    // flipped the factor alone, and the units were flipped here).
     polygonOffset: true,
     polygonOffsetFactor: 1,
-    polygonOffsetUnits: REVERSED_DEPTH ? -1 : 1,
+    polygonOffsetUnits: 1,
   }) as LavaMaterial;
   material.userData = {
     loopTime: style.loopTime,

@@ -77,7 +77,7 @@ class CountingFilter implements DomeFilter {
   // cube's files out of the world's own pack, which such a world has not got.
   ok(/usable\.faces\.map\(\(f\) => skyPack\.url\(f\)\)/.test(refresh) && !/this\.pack!\.url/.test(refresh) && /this\.swgSky = sky;\s*this\.skyPack = pack;/.test(world) && /this\.skyPack = null;/.test(world), "an area's own cube is read out of the pack the sky came from, a borrowed sky's included");
   const make = world.slice(world.indexOf('  private makeDome('), world.indexOf('  private refreshEnvironment('));
-  ok(/new DomeCapture\(new THREE\.PMREMGenerator\(renderer\)\)/.test(make) && /dome\.domePmrem\.compileCubemapShader\(\);/.test(make) && /dome\.capture\(\(camera\) => camera\.update\(renderer, empty\)\);/.test(make), 'the dome has a generator of its own, warmed with one capture of an empty scene, which makes the kept target');
+  ok(/new DomeCapture\(new PMREMGenerator185\(renderer\)\)/.test(make) && /dome\.domePmrem\.compileCubemapShader\(\);/.test(make) && /dome\.capture\(\(camera\) => camera\.update\(renderer, empty\)\);/.test(make), 'the dome has a generator of its own, warmed with one capture of an empty scene, which makes the kept target');
   const use = world.slice(world.indexOf('  private useEnvironment('), world.indexOf('  async reflectionsReady('));
   ok(/if \(this\.envTexture !== texture\) \{\s*this\.envTexture = texture;\s*setEnvironment\(texture, 1\);\s*\}/.test(use) && /if \(old && old !== own\) old\.dispose\(\);/.test(use), 'the materials are handed an environment only when it is another texture, and only a target of its own is freed');
   const warm = world.slice(world.indexOf('  warmUp(center'), world.indexOf('this.readySound();', world.indexOf('  warmUp(center')));

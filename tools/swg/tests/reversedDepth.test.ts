@@ -2,9 +2,10 @@
 // work around fails here, by name, rather than on screen. With no document node draws with ordinary depth, so the
 // texts are checked as they always were; reversedDepthOn.test.ts checks them turned round.
 //
-//   1. the draw order: three reverses each whole sorted list under reversed depth (WebGLRenderLists.sort), renderOrder
-//      and all; reversedSort.ts's comparators, put through three's real list and its reversal, give renderOrder rising,
-//      opaque things nearest first and see-through things farthest first -- the sky's dome first, as it must be
+//   1. the draw order: three 0.187 turns each item's projected depth round as it is listed under reversed depth
+//      (WebGLRenderLists.push), so its own sort gives renderOrder rising, opaque things nearest first and see-through
+//      things farthest first -- the sky's dome first, as it must be -- and the game hands it no comparators (three
+//      0.185 reversed each whole sorted list instead, renderOrder and all, and src/core/reversedSort.ts undid that)
 //   2. the cascades: three's CSM, with a reversed camera, collapses its frustum; csmDepth.ts's followCameraDepth gives
 //      it the camera's whole depth, reversed or not
 //   3. the depth-test table: three maps Always to Never under reversed depth; the doorway reset's choice
@@ -16,7 +17,6 @@ import * as THREE from 'three';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { WebGLRenderLists } from 'three/src/renderers/webgl/WebGLRenderLists.js';
 import { ReversedDepthFuncs } from 'three/src/utils.js';
-import { reversedOpaqueSort, reversedTransparentSort } from '../../../src/core/reversedSort.ts';
 import { followCameraDepth } from '../../../src/world/csmDepth.ts';
 import { projectedBehind, REVERSED_DEPTH } from '../../../src/core/depthMode.ts';
 import { FX_LINEARIZE, pastFarTest, skyTest } from '../../../src/core/fx/glsl.ts';
@@ -35,8 +35,8 @@ const ok = (cond: boolean, what: string): void => {
 
 // --- 1. the draw order through three's real list ---
 {
-  // One scene, sorted twice by three's real list: with an ordinary camera and three's own comparators, and with a
-  // reversed camera, reversedSort.ts's comparators and three's reversal. The two orders must be the same.
+  // One scene, sorted twice by three's real list and three's own comparators: with an ordinary camera, and with a
+  // reversed one. The two orders must be the same.
   const cameraOf = (reversed: boolean): THREE.PerspectiveCamera => {
     const c = new THREE.PerspectiveCamera(60, 16 / 9, 0.05, 9000);
     (c as unknown as { _reversedDepth: boolean })._reversedDepth = reversed;
@@ -66,22 +66,21 @@ const ok = (cond: boolean, what: string): void => {
       mesh.name = name;
       mesh.renderOrder = renderOrder;
       // z as three works it out for the sort (WebGLRenderer.projectObject).
-      list.push(mesh, geo, material, 0, new THREE.Vector3(0, 0, -at).applyMatrix4(projScreen).z, null);
+      list.push(mesh, geo, material, 0, new THREE.Vector3(0, 0, -at).applyMatrix4(projScreen).z, null, camera);
     });
-    if (reversed) list.sort(reversedOpaqueSort, reversedTransparentSort, true);
-    else list.sort(null, null, false);
+    list.sort(null, null);
     const names = (items: { object: THREE.Object3D }[]): string => items.map((r) => r.object.name).join(' > ');
     return { opaque: names(list.opaque), seeThrough: names(list.transparent) };
   };
   const ordinary = order(false);
   const reversed = order(true);
-  const why = 'under reversed depth the draw order differs from ordinary depth; three may have stopped reversing its sorted lists (WebGLRenderLists.sort), and reversedSort.ts must follow, or the sky covers the world';
+  const why = 'under reversed depth the draw order differs from ordinary depth; three may have stopped turning the projected depth round as it lists an item (WebGLRenderLists.push), and the game must then order its own lists again, or the sky covers the world';
   ok(reversed.opaque === ordinary.opaque, `opaque: reversed ${reversed.opaque}, ordinary ${ordinary.opaque}: ${why}`);
   ok(reversed.seeThrough === ordinary.seeThrough, `see-through: reversed ${reversed.seeThrough}, ordinary ${ordinary.seeThrough}: ${why}`);
   ok(reversed.opaque.startsWith('dome > planet stand-in'), 'the dome is drawn first, the planets\' depth after it');
   ok(reversed.opaque.includes('player 4 m > rock 50 m > terrain 200 m'), 'among one material, nearest first');
   ok(reversed.seeThrough.startsWith('stars > planet') && reversed.seeThrough.includes('smoke 100 m > glass 10 m'), 'stars before planets, then farthest first');
-  // And three's own order, unaided, is what the comparators are there for: the dome last.
+  // And three's own order, unaided, puts the dome first (0.185's put it last, which is what the comparators were for).
   const unaided = new WebGLRenderLists().get(new THREE.Scene(), 0);
   unaided.init();
   const dome = new THREE.Mesh(geo, own[0]);
@@ -89,10 +88,13 @@ const ok = (cond: boolean, what: string): void => {
   dome.renderOrder = -10;
   const rock = new THREE.Mesh(geo, shared);
   rock.name = 'rock';
-  unaided.push(dome, geo, own[0], 0, 0.00001, null);
-  unaided.push(rock, geo, shared, 0, 0.001, null);
-  unaided.sort(null, null, true);
-  ok(unaided.opaque[unaided.opaque.length - 1].object.name === 'dome', 'three, unaided, still draws the dome last under reversed depth (if not, reversedSort.ts may be retired)');
+  const reversedCamera = cameraOf(true);
+  unaided.push(dome, geo, own[0], 0, 0.00001, null, reversedCamera);
+  unaided.push(rock, geo, shared, 0, 0.001, null, reversedCamera);
+  unaided.sort(null, null);
+  ok(unaided.opaque[0].object.name === 'dome', 'three, unaided, draws the dome first under reversed depth (0.185 drew it last, and reversedSort.ts, retired with 0.187, undid it)');
+  const mainText = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
+  ok(!/setOpaqueSort|setTransparentSort/.test(mainText), "so the game hands the renderer no comparators of its own: its lists are three's to sort");
 }
 
 // --- 2. the cascades' frustum ---

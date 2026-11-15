@@ -25,6 +25,8 @@
 // `localStorage['swg.spec'] = 'three'` skips the wrap at load: a program that fails to compile draws
 // nothing at all, which is the wet wrap's lesson, and this is the way back without a build.
 import * as THREE from 'three';
+// The line this replaces is three 0.185's, which the holds put back in three's chunk before it is read here.
+import '../core/threeHolds.ts';
 import { chainHas, wrapCompile, type Wrappable } from './compileHooks.ts';
 import { BAND_POWER, BAND_TIGHTEN, SPEC_TUNE, clientSpecular, filmShare, specValues, weatherShare, type SpecTune, type Vec3 } from './specMath.ts';
 

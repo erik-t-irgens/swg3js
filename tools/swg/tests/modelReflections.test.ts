@@ -44,6 +44,7 @@ import {
   takesEnvironment,
 } from '../../../src/world/envmap.ts';
 import { STUDIO_CUBE, StudioChoice, studioEnvironment } from '../../../src/ui/previewStudio.ts';
+import { PMREMGenerator185 } from '../../../src/core/pmrem185.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -312,13 +313,15 @@ setEnvironment(sky, 1);
   ok(/setEnvironmentStandIn\(this\.world\.waterBodies\.blackEnvironment\);/.test(main) && before(main, 'this.world.waterBodies.attach(this.renderer);', 'setEnvironmentStandIn('), 'the stand-in is handed over at boot, once the water has made it, before any world loads');
   // Since the performance pass's fifth wave the sky is captured into a kept cube of `DOME_CUBE` (`DomeCapture`), which
   // refuses any other size (`skyCapture.test.ts`).
-  ok(/new DomeCapture\(new THREE\.PMREMGenerator\(renderer\)\)/.test(world) && /export const DOME_CUBE = 128;/.test(text('src/world/envmap.ts')) && /const WATER_CUBE_SIZE = 128;/.test(text('src/world/waterBodies.ts')) && STUDIO_CUBE === 128, "the world's sky captures and its black stand-in say 128 in their own source (the words only: making either needs a WebGL context), the studio's size with them");
+  // (The generator is three 0.185's, carried: three 0.187 filters into a cube with mip levels, another blur at every roughness.)
+  ok(/new DomeCapture\(new PMREMGenerator185\(renderer\)\)/.test(world) && /export const DOME_CUBE = 128;/.test(text('src/world/envmap.ts')) && /const WATER_CUBE_SIZE = 128;/.test(text('src/world/waterBodies.ts')) && STUDIO_CUBE === 128, "the world's sky captures and its black stand-in say 128 in their own source (the words only: making either needs a WebGL context), the studio's size with them");
   {
-    // What the studio is really filtered at, through the real `studioEnvironment` with three's filter stood in for.
-    const real = THREE.PMREMGenerator.prototype.fromScene;
+    // What the studio is really filtered at, through the real `studioEnvironment` with the filter (three 0.185's, carried) stood in for.
+    const filter = (PMREMGenerator185 as unknown as { prototype: { fromScene: unknown } }).prototype;
+    const real = filter.fromScene;
     const asked: { size?: number }[] = [];
     const made = new THREE.WebGLRenderTarget(1, 1);
-    THREE.PMREMGenerator.prototype.fromScene = function (_scene: THREE.Scene, _sigma?: number, _near?: number, _far?: number, options?: { size?: number }) {
+    filter.fromScene = function (_scene: THREE.Scene, _sigma?: number, _near?: number, _far?: number, options?: { size?: number }) {
       asked.push(options ?? {});
       return made;
     };
@@ -326,7 +329,7 @@ setEnvironment(sky, 1);
     try {
       got = studioEnvironment({} as THREE.WebGLRenderer);
     } finally {
-      THREE.PMREMGenerator.prototype.fromScene = real;
+      filter.fromScene = real;
     }
     ok(asked.length === 1 && asked[0].size === STUDIO_CUBE && got === made, "the previews' studio is filtered from a cube of the world's one size, so a program keyed with either is keyed alike");
     made.dispose();

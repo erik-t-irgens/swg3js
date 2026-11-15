@@ -3,7 +3,8 @@
 // very hook chain `World.adoptMaterials` builds (the cascades' hook, the wet look, the detail map, then this):
 //
 //  - **the anchor is three's own**: three 0.185's `RE_Direct_Physical` adds every direct light's highlight with
-//    one GGX line, and that line, and only that one, is replaced;
+//    one GGX line, which the game holds in three 0.187's chunk (`src/core/threeHolds.ts`), and that line, and
+//    only that one, is replaced;
 //  - **every name is declared before it is used**, in the text with every include resolved, the uniforms, the
 //    two globals `main()` writes, the texel three's roughness chunk samples and the wet look's three amounts;
 //  - **every line the node mirror copies is the shader's own**, the mode's branch, the dot products, the term
@@ -66,7 +67,7 @@ const compiled = (m: THREE.Material): Shader => {
 {
   const chunk = THREE.ShaderChunk.lights_physical_pars_fragment;
   const fn = glslFunction(chunk, 'RE_Direct_Physical');
-  ok(THREE.REVISION === '185', `three is 0.185 (REVISION ${THREE.REVISION}), whose lighting this replaces a line of`);
+  ok(THREE.REVISION === '187', `three is 0.187 (REVISION ${THREE.REVISION}), whose lighting, held to 0.185's lines, this replaces a line of`);
   ok(fn.includes(GGX_ANCHOR), "three's RE_Direct_Physical adds each direct light's highlight with the GGX line the injection replaces");
   ok(count(chunk, GGX_ANCHOR) === 1, 'and that line is in the chunk once, so nothing else is replaced with it');
   ok(lib.fragmentShader.includes('#include <lights_physical_pars_fragment>') && lib.fragmentShader.includes('#include <lights_fragment_begin>') && lib.fragmentShader.includes('#include <roughnessmap_fragment>'), 'the physical program includes the chunk, the light loop and the roughness stage the injection writes around');

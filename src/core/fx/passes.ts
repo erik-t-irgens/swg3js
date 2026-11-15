@@ -9,9 +9,10 @@
 // into the very buffer whose depth it was sampling, the browser threw the draw away, and the rays
 // never showed while the blur and the bloom went missing whenever the sun was off screen.
 import * as THREE from 'three';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import type { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js';
+import { HeldBloomPass } from './bloomHold.ts';
 import type { FxPassId, FxProductId, FxSettings } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context';
 import { NO_PRODUCTS, ShaderFxPass, ThreePassAdapter, type FxDebugTexture, type FxWarmItem } from './pass';
@@ -167,7 +168,9 @@ export class BloomPass extends ThreePassAdapter {
   constructor(width: number, height: number, strength: number) {
     // The full size goes in: the pass halves whatever it is given, so passing half meant the
     // bright target started at a quarter and the glow grew wider after every resize.
-    const inner = new UnrealBloomPass(new THREE.Vector2(width, height), strength, 0.5, 0.85);
+    // Three's pass with three 0.185's blur held in it (`bloomHold.ts`): 0.187 reads the blur's taps in pairs, which
+    // moved the glow's shape on the four levels that read a level twice their size.
+    const inner = new HeldBloomPass(new THREE.Vector2(width, height), strength, 0.5, 0.85);
     super(inner);
     this.bloom = inner;
   }

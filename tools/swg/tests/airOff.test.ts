@@ -238,9 +238,25 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
   const a = texts(o, lo);
   const b = texts(n, ln);
   ok(a.length === 12 && b.length === 12, 'the water: lit and both mask twins, waves and flat, hooked and plain, twelve programs each tree');
+  // One call of the water's text is no longer the old tree's, and not by the volumetrics: three 0.187 changed what its
+  // `computeMultiscattering` takes (the highlight's table lookup handed in, where 0.185 took the normal, the view and the
+  // roughness and looked it up itself), and the mask twins' call moved with three, or they compile in no browser
+  // (`threeAnchors.test.ts` holds the call to three's own definition). So the old tree's text is given that one call,
+  // which stands in each of its twelve programs once, and then every one is the same key, defines and text.
+  const CALL_WAS = [
+    '    // metalness 0 the dielectric half is the whole of it.',
+    '    computeMultiscattering(geometryNormal, geometryViewDir, material.specularColor, material.specularF90, material.roughness, fxSingle, fxMulti);',
+  ].join('\n');
+  const CALL_IS = [
+    "    // metalness 0 the dielectric half is the whole of it. Three's light loop has already looked the",
+    "    // highlight's table up for this pixel (material.dfg, at the material's roughness and the normal",
+    '    // against the view), and hands it to its own calls of this function, so this one takes the same.',
+    '    computeMultiscattering(material.dfg, material.specularColor, material.specularF90, fxSingle, fxMulti);',
+  ].join('\n');
+  ok(a.every((t) => t.split(CALL_WAS).length === 2) && b.every((t) => t.split(CALL_IS).length === 2 && !t.includes(CALL_WAS)), "the old tree's water calls three's computeMultiscattering once, as three 0.185 declared it, and today's once, as 0.187 declares it");
   let same = true;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) same = false;
-  ok(same, 'and every one is the same key, defines and text');
+  for (let i = 0; i < a.length; i++) if (a[i].replace(CALL_WAS, CALL_IS) !== b[i]) same = false;
+  ok(same, 'and but for that one call every one is the same key, defines and text');
 }
 {
   // The ripples (the fifth wave hangs a carry on them, `setRippleCarry`, only with the master and the current on): with

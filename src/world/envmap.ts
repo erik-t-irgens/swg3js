@@ -284,7 +284,9 @@ export function onEnvironment(listener: (texture: THREE.Texture | null, scale: n
 
 /**
  * The cube every environment here is filtered from, in pixels a side: the dome's capture and every cube a water body may
- * see, since `envMapCubeUVHeight` (four times this) is in a reflective material's program key.
+ * see. Under three 0.185 the filtered picture's height (four times this, `envMapCubeUVHeight`) was in a reflective
+ * material's program key; from 0.187 it is not (the held environment chunk reads the picture's sizes off the picture,
+ * `src/core/threeHolds.ts`), and the one size stays so every environment is the picture it was.
  */
 export const DOME_CUBE = 128;
 

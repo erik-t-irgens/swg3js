@@ -28,6 +28,8 @@
 // `localStorage['swg.cardLight'] = '0'` leaves the light's define out at load; `localStorage['swg.leafShadow']
 // = 'all'` leaves the skip out. Both are escape hatches: a program that fails to compile draws nothing.
 import * as THREE from 'three';
+// Three's chunks are read as the holds leave them (three 0.185's lighting lines).
+import '../core/threeHolds.ts';
 import { ACES_IN_INV, ACES_OUT_INV, CARD_ROWS_DEFAULT, glslMat3, type CardLightTune, type CardRows } from './cardLightMath.ts';
 import { cardLightsBegin, padBox, type LeafBox } from './leafShadow.ts';
 

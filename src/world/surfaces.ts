@@ -13,7 +13,6 @@ import * as THREE from 'three';
 import type { GLTF, GLTFLoader, GLTFLoaderPlugin, GLTFParser } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { frac, makeClock, stepClock, type FlipClock, type FlipMode } from './surfaceClock.ts';
 import { skinnedPlugin } from '../core/skinnedLoad.ts';
-import { REVERSED_DEPTH } from '../core/depthMode.ts';
 
 /** The converter's `extras.swg` on a material (tools/swg/glb.mjs). */
 export interface SwgSurface {
@@ -562,8 +561,8 @@ export const DECAL_TUNE = { factor: -2, units: -2, alphaFloor: 1 / 255 };
  * A decal drawn the client's way: blended at its own alpha, writing no depth, cut only where it is wholly clear, held over
  * what it lies on by a polygon offset, and casting no shadow (`noShadow`, which `castsShadow` reads). Every field it sets
  * that is in three's program key (`transparent`, the alpha test) is set here, in the loader's `afterRoot`, before the
- * model is ever compiled, as the emissive and scrolling surfaces are. Three turns the offset's factor round under
- * reversed depth but not its units, so the units are turned here as the marks turn theirs.
+ * model is ever compiled, as the emissive and scrolling surfaces are. Three turns the offset's factor and its units
+ * round under reversed depth (three 0.185 turned the factor alone, and the units were turned here as the marks' were).
  */
 export function applyDecal(m: THREE.Material): void {
   m.transparent = true;
@@ -571,7 +570,7 @@ export function applyDecal(m: THREE.Material): void {
   m.alphaTest = DECAL_TUNE.alphaFloor;
   m.polygonOffset = true;
   m.polygonOffsetFactor = DECAL_TUNE.factor;
-  m.polygonOffsetUnits = REVERSED_DEPTH ? -DECAL_TUNE.units : DECAL_TUNE.units;
+  m.polygonOffsetUnits = DECAL_TUNE.units;
   m.userData.decal = true;
   m.userData.noShadow = true;
   m.needsUpdate = true;

@@ -22,6 +22,8 @@
 // twin from `HORIZON_RING_VERTEX`, which morphs by `uHorizonEye` and never `cameraPosition`.
 import * as THREE from 'three';
 import type { CSM } from 'three/examples/jsm/csm/CSM.js';
+// Three's chunks are read as the holds leave them (three 0.185's lighting lines).
+import '../../core/threeHolds.ts';
 import { DOME_COLOUR_GLSL } from '../domeColour.ts';
 import { GGX_ANCHOR } from '../specular.ts';
 import { GROUND_CLOUD_GLSL, GROUND_DECODE_GLSL, GROUND_MASK_GLSL, GROUND_TINT_GLSL, GROUND_TRI_GLSL, GROUND_TRI_WANTED, TILE_FLAT_LINE, TILE_MAP, TILE_MAP_Y_LINE, TILE_NORMAL, TILE_ROUGHNESS, type GroundTileUniforms } from '../terrainTextures.ts';

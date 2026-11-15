@@ -252,7 +252,8 @@ pass('after the build');
   cam.lookAt(40, 0, 30);
   cam.updateMatrixWorld();
   const depth = new THREE.MeshDepthMaterial();
-  mesh.onBeforeShadow(null as never, mesh, null as never, cam, mesh.geometry, depth, null as never);
+  // Three 0.187 asks the renderer it is handed which kind it is (its WebGPU one culls on the card): a WebGL one's stand-in.
+  mesh.onBeforeShadow({} as never, mesh, null as never, cam, mesh.geometry, depth, null as never);
   sb.restore();
   const listed = new Set<number>();
   const self = mesh as unknown as { _multiDrawCount: number; _indirectTexture: { image: { data: Uint32Array } }; _instanceInfo: { visible: boolean; active: boolean; geometryIndex: number }[] };

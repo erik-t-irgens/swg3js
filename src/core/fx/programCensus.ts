@@ -10,15 +10,18 @@
 // every define as a name and a value, then a fixed run of parameters, then two bitmasks of
 // booleans, the output colour space, and last the material's own `customProgramCacheKey`. Only
 // the head and the tail are variable, so the fixed run is found by looking for the one token that
-// can only be the precision ('highp', 'mediump' or 'lowp') with eleven light counts and two
+// can only be the precision ('highp', 'mediump' or 'lowp') with fourteen light counts and two
 // masks where they must be. Everything here reads that; nothing here changes it.
 //
-// The parameter order is three's and is pinned to the version in package.json (0.185). If three
+// The parameter order is three's and is pinned to the version in package.json (0.187, which put the three
+// fields of a filtered environment cube where 0.185 had the flat layout's height, a UV set for the diffuse
+// roughness map among the channels, and a sun light's two counts and the light probe grids' among the lights,
+// and dropped the morph attribute count it never set). If three
 // ever moves it, the anchor stops validating rather than lying: a program whose key cannot be
 // read is reported as unread, and the count of unread programs is part of the answer.
 
-/** The eleven light counts in the key, in three's order, and what they are called here. */
-export const LIGHT_FIELDS = ['dir', 'point', 'spot', 'spotMaps', 'hemi', 'rectArea', 'dirShadow', 'pointShadow', 'spotShadow', 'spotShadowMaps', 'lightProbes'] as const;
+/** The fourteen light counts in the key, in three's order, and what they are called here. */
+export const LIGHT_FIELDS = ['sun', 'dir', 'point', 'spot', 'spotMaps', 'hemi', 'rectArea', 'sunShadow', 'dirShadow', 'pointShadow', 'spotShadow', 'spotShadowMaps', 'lightProbes', 'lightProbeGrids'] as const;
 
 export type LightField = (typeof LIGHT_FIELDS)[number];
 
@@ -26,7 +29,7 @@ export type LightField = (typeof LIGHT_FIELDS)[number];
 export type LightCounts = Record<LightField, number>;
 
 /** The first bitmask three pushes, bit by bit (WebGLPrograms.getProgramCacheKeyBooleans). */
-export const MASK_A = ['instancing', 'instancingColor', 'instancingMorph', 'matcap', 'envMap', 'normalMapObjectSpace', 'normalMapTangentSpace', 'clearcoat', 'iridescence', 'alphaTest', 'vertexColors', 'vertexAlphas', 'vertexUv1s', 'vertexUv2s', 'vertexUv3s', 'vertexTangents', 'anisotropy', 'alphaHash', 'batching', 'dispersion', 'batchingColor', 'gradientMap', 'packedNormalMap', 'vertexNormals'] as const;
+export const MASK_A = ['instancing', 'instancingColor', 'instancingMorph', 'matcap', 'envMap', 'normalMapObjectSpace', 'normalMapTangentSpace', 'clearcoat', 'iridescence', 'alphaTest', 'vertexColors', 'vertexAlphas', 'vertexUv1s', 'vertexUv2s', 'vertexUv3s', 'vertexTangents', 'anisotropy', 'alphaHash', 'batching', 'dispersion', 'batchingColor', 'gradientMap', 'packedNormalMap', 'vertexNormals', 'retroreflection', 'diffuseRoughness'] as const;
 
 /** The second bitmask. `fog` is the scene's, `useFog` the material's: both are in the key. */
 export const MASK_B = ['fog', 'useFog', 'flatShading', 'logarithmicDepth', 'reversedDepth', 'skinning', 'morphTargets', 'morphNormals', 'morphColors', 'premultipliedAlpha', 'shadowMapEnabled', 'doubleSided', 'flipSided', 'useDepthPacking', 'dithering', 'transmission', 'sheen', 'opaque', 'pointsUvs', 'decodeVideoTexture', 'decodeVideoTextureEmissive', 'alphaToCoverage', 'lightProbeGrids', 'hasPositionAttribute'] as const;
@@ -36,22 +39,25 @@ const AT = {
   precision: 0,
   outputColorSpace: 1,
   envMapMode: 2,
-  envMapCubeUVHeight: 3,
-  combine: 27,
-  fogExp2: 28,
-  sizeAttenuation: 29,
-  morphTargetsCount: 30,
-  morphAttributeCount: 31,
-  lights: 32,
-  shadowMapType: 43,
-  toneMapping: 44,
-  numClippingPlanes: 45,
-  numClipIntersection: 46,
-  depthPacking: 47,
-  maskA: 48,
-  maskB: 49,
-  outputColorSpaceAgain: 50,
-  custom: 51,
+  envMapPMREM: 3,
+  envMapMaxLod: 4,
+  envMapSize: 5,
+  /** 24 per-map UV-set fields, 6 to 29. */
+  firstChannel: 6,
+  combine: 30,
+  fogExp2: 31,
+  sizeAttenuation: 32,
+  morphTargetsCount: 33,
+  lights: 34,
+  shadowMapType: 48,
+  toneMapping: 49,
+  numClippingPlanes: 50,
+  numClipIntersection: 51,
+  depthPacking: 52,
+  maskA: 53,
+  maskB: 54,
+  outputColorSpaceAgain: 55,
+  custom: 56,
 } as const;
 
 const PRECISIONS = new Set(['highp', 'mediump', 'lowp']);
@@ -65,7 +71,11 @@ export interface KeyRead {
   lights: LightCounts;
   /** True of each boolean three set; the ones that are false are left out. */
   flags: string[];
-  envMapCubeUVHeight: string;
+  /**
+   * The face size of a filtered environment cube of three's own, or nothing: the game's environments are filtered into
+   * three 0.185's flat layout (`pmrem185.ts`), whose size three no longer writes into a key.
+   */
+  envMapSize: string;
   shadowMapType: string;
   toneMapping: string;
   clippingPlanes: string;
@@ -100,8 +110,8 @@ const isBool = (s: string | undefined): boolean => s === 'true' || s === 'false'
  * and a value, and the tail is the material's own key, whose default in three is the whole source
  * text of its compile hook, commas and newlines and all. So the run is found rather than counted
  * to: each token that reads as a precision is tried, and every field of the run that can only be
- * one shape is checked -- the twenty-three map channels (each `false` or the name of a UV set),
- * the two booleans, the morph counts, the eleven light counts, the shadow and tone-mapping kinds,
+ * one shape is checked -- the twenty-four map channels (each `false` or the name of a UV set),
+ * the two booleans, the morph count, the fourteen light counts, the shadow and tone-mapping kinds,
  * the clipping counts and the two masks. A define whose value happened to be `highp`, and that
  * word inside a hook's source, each fail the check and the search goes on past them.
  *
@@ -123,7 +133,7 @@ export function anchorOf(tokens: string[]): number {
       }
     }
     if (!ok) continue;
-    for (let k = AT.envMapCubeUVHeight + 1; k < AT.combine; k++) {
+    for (let k = AT.firstChannel; k < AT.combine; k++) {
       if (!isChannel(tokens[i + k])) {
         ok = false;
         break;
@@ -131,8 +141,8 @@ export function anchorOf(tokens: string[]): number {
     }
     if (!ok) continue;
     if (!isBool(tokens[i + AT.fogExp2]) || !isBool(tokens[i + AT.sizeAttenuation])) continue;
-    if (!isCount(tokens[i + AT.morphTargetsCount]) || !isCountOrUnset(tokens[i + AT.morphAttributeCount])) continue;
-    if (!isCountOrUnset(tokens[i + AT.envMapCubeUVHeight]) || !isCountOrUnset(tokens[i + AT.combine])) continue;
+    if (!isCount(tokens[i + AT.morphTargetsCount])) continue;
+    if (!isBool(tokens[i + AT.envMapPMREM]) || !isCountOrUnset(tokens[i + AT.envMapMaxLod]) || !isCountOrUnset(tokens[i + AT.envMapSize]) || !isCountOrUnset(tokens[i + AT.combine])) continue;
     if (!isCount(tokens[i + AT.maskA]) || !isCount(tokens[i + AT.maskB])) continue;
     if (!isCount(tokens[i + AT.shadowMapType]) || !isCount(tokens[i + AT.toneMapping])) continue;
     if (!isCount(tokens[i + AT.numClippingPlanes]) || !isCount(tokens[i + AT.numClipIntersection])) continue;
@@ -169,7 +179,7 @@ export function readKey(cacheKey: string): KeyRead | null {
     defines,
     lights,
     flags: [...bits(tokens[at + AT.maskA], MASK_A), ...bits(tokens[at + AT.maskB], MASK_B)],
-    envMapCubeUVHeight: tokens[at + AT.envMapCubeUVHeight] ?? '',
+    envMapSize: tokens[at + AT.envMapSize] ?? '',
     shadowMapType: tokens[at + AT.shadowMapType] ?? '',
     toneMapping: tokens[at + AT.toneMapping] ?? '',
     clippingPlanes: tokens[at + AT.numClippingPlanes] ?? '',
@@ -327,7 +337,7 @@ export function marksOf(read: KeyRead): string {
   for (const f of ['alphaTest', 'vertexColors', 'skinning', 'instancing', 'doubleSided', 'flipSided', 'fog', 'useFog', 'shadowMapEnabled', 'envMap', 'opaque', 'premultipliedAlpha', 'morphTargets']) {
     if (read.flags.includes(f)) marks.push(f);
   }
-  if (read.envMapCubeUVHeight) marks.push(`cubeUV ${read.envMapCubeUVHeight}`);
+  if (read.envMapSize) marks.push(`filtered cube ${read.envMapSize}`);
   if (read.toneMapping && read.toneMapping !== '0') marks.push(`tone ${read.toneMapping}`);
   if (read.clippingPlanes && read.clippingPlanes !== '0') marks.push(`clip ${read.clippingPlanes}`);
   return marks.join(' ');
@@ -365,8 +375,8 @@ export function namesOfDifference(keys: string[]): string[] {
 }
 
 function nameOfIndex(i: number): string {
+  if (i >= AT.firstChannel && i < AT.combine) return 'a texture channel';
   for (const [name, index] of Object.entries(AT)) if (index === i) return name;
-  if (i >= 4 && i <= 26) return 'a texture channel';
   return `token ${i}`;
 }
 

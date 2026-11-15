@@ -4,18 +4,20 @@
 // it onto what it draws around its own draws (`EnvironmentSwap` in `envmap.ts`).
 //
 // Filtered from a 128 px cube, as every environment the world hands its materials is (the sky's captures
-// and the black stand-in): the environment's height is in three's program key, so a program a preview
-// compiles is keyed exactly as one compiled with the world's environment still on the material would be.
+// and the black stand-in), by three 0.185's own filter (`src/core/pmrem185.ts`): its flat layout is what the
+// held environment chunk reads, so a program a preview compiles is keyed exactly as one compiled with the
+// world's environment still on the material would be (under 0.185 the picture's height was in that key too).
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { MODEL_REFLECTIONS_AT_LOAD, takesEnvironment } from '../world/envmap.ts';
+import { PMREMGenerator185 } from '../core/pmrem185.ts';
 
 /** The cube the studio is filtered from: the world's own size (`World.refreshEnvironment`, `WaterBodies`). */
 export const STUDIO_CUBE = 128;
 
 /** A neutral lit room, filtered for reflections in this renderer's own context. The caller keeps and frees the target. */
 export function studioEnvironment(renderer: THREE.WebGLRenderer): THREE.WebGLRenderTarget {
-  const pmrem = new THREE.PMREMGenerator(renderer);
+  const pmrem = new PMREMGenerator185(renderer);
   const room = new RoomEnvironment();
   const target = pmrem.fromScene(room, 0.04, 0.1, 100, { size: STUDIO_CUBE });
   room.dispose();

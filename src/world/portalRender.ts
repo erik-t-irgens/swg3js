@@ -112,7 +112,7 @@ if (SHADOW_STRAYS.keep) console.warn('shaders: ?shadowStrays=1 is set, so the sh
  * test through its `ReversedDepthFuncs`, and in three 0.185 that table turns Always into Never (and Equal into NotEqual)
  * where only less and greater should swap: the doorway's depth reset, asked to write always, wrote never, and the rooms
  * seen through a door from outside lost to any terrain standing in them. Asked of the GPU rather than assumed, so the
- * day three mends its table this asks for Always again by itself. Ordinarily it is Always and nothing is probed.
+ * day three mended its table (0.187) this asked for Always again by itself. Ordinarily it is Always and nothing is probed.
  */
 function alwaysDepthFunc(renderer: THREE.WebGLRenderer): THREE.DepthModes {
   if (!renderer.capabilities?.reversedDepthBuffer) return THREE.AlwaysDepth;

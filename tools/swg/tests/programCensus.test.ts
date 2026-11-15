@@ -25,7 +25,8 @@ type KeyParts = {
   maskA?: number;
   maskB?: number;
   toneMapping?: number;
-  cubeUV?: string;
+  /** The face size of a filtered environment cube of three's own (three 0.187 keys on it and on the cube's last level). */
+  cube?: string;
   custom?: string;
   channels?: (string | undefined)[];
 };
@@ -33,10 +34,12 @@ type KeyParts = {
 /**
  * A cache key built exactly as three joins one, so the reader is tested against the real shape.
  *
- * Every field here is written the way three 0.185 writes it, which is not always the way it reads:
+ * Every field here is written the way three 0.187 writes it, which is not always the way it reads:
  * a map's UV set is the word `false` where the material has no such map (`HAS_MAP && getChannel(…)`)
  * and the name of a channel where it has one, `envMapMode` is `false` with no environment, and
- * `morphAttributeCount` is never set at all and so comes out as nothing. Guessing these was what
+ * a filtered cube's last level and face size are null, and so come out as nothing, where there is none
+ * (0.185 wrote the flat layout's height there, one map channel fewer, a morph attribute count it never
+ * set, and no sun light or probe grid counts). Guessing these was what
  * made an earlier reader find no anchor in any key a running world held. `REAL_KEY` below is one
  * the game itself built, kept as the check on all of it.
  */
@@ -48,11 +51,12 @@ function makeKey(p: KeyParts): string {
   a.push('highp'); // precision
   a.push('srgb-linear'); // outputColorSpace
   a.push(false); // envMapMode: false with no environment
-  a.push(p.cubeUV); // envMapCubeUVHeight: unset unless a filtered cube is bound
-  for (let i = 0; i < 23; i++) a.push(p.channels?.[i] ?? false); // every texture's uv set, or false
+  a.push(p.cube !== undefined); // envMapPMREM: whether a filtered cube of three's own is bound
+  a.push(p.cube !== undefined ? 8 : null, p.cube ?? null); // envMapMaxLod, envMapSize: null unless one is
+  for (let i = 0; i < 24; i++) a.push(p.channels?.[i] ?? false); // every texture's uv set, or false
   a.push(undefined); // combine
   a.push(false, false); // fogExp2, sizeAttenuation
-  a.push(0, undefined); // morphTargetsCount, morphAttributeCount (never set)
+  a.push(0); // morphTargetsCount
   for (const f of LIGHT_FIELDS) a.push(p.lights?.[f] ?? 0);
   a.push(1); // shadowMapType
   a.push(p.toneMapping ?? 0);
@@ -72,7 +76,7 @@ function makeKey(p: KeyParts): string {
  * texture. It is here so that a three that changes the shape of its keys fails this file rather
  * than quietly reporting a world of two hundred programs as unreadable.
  */
-const REAL_KEY = '5,6,highp,srgb,false,,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,,false,false,0,,0,0,0,0,0,0,0,0,0,0,0,1,4,0,0,0,0,0,srgb,onBeforeCompile() {}';
+const REAL_KEY = '5,6,highp,srgb,false,false,,,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,,false,false,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,4,0,0,0,0,16,srgb,onBeforeCompile() {}';
 
 const bit = (names: readonly string[], ...want: string[]): number => {
   let m = 0;
@@ -81,7 +85,7 @@ const bit = (names: readonly string[], ...want: string[]): number => {
   });
   return m;
 };
-const MASK_A_NAMES = ['instancing', 'instancingColor', 'instancingMorph', 'matcap', 'envMap', 'normalMapObjectSpace', 'normalMapTangentSpace', 'clearcoat', 'iridescence', 'alphaTest', 'vertexColors', 'vertexAlphas', 'vertexUv1s', 'vertexUv2s', 'vertexUv3s', 'vertexTangents', 'anisotropy', 'alphaHash', 'batching', 'dispersion', 'batchingColor', 'gradientMap', 'packedNormalMap', 'vertexNormals'];
+const MASK_A_NAMES = ['instancing', 'instancingColor', 'instancingMorph', 'matcap', 'envMap', 'normalMapObjectSpace', 'normalMapTangentSpace', 'clearcoat', 'iridescence', 'alphaTest', 'vertexColors', 'vertexAlphas', 'vertexUv1s', 'vertexUv2s', 'vertexUv3s', 'vertexTangents', 'anisotropy', 'alphaHash', 'batching', 'dispersion', 'batchingColor', 'gradientMap', 'packedNormalMap', 'vertexNormals', 'retroreflection', 'diffuseRoughness'];
 const MASK_B_NAMES = ['fog', 'useFog', 'flatShading', 'logarithmicDepth', 'reversedDepth', 'skinning', 'morphTargets', 'morphNormals', 'morphColors', 'premultipliedAlpha', 'shadowMapEnabled', 'doubleSided', 'flipSided', 'useDepthPacking', 'dithering', 'transmission', 'sheen', 'opaque', 'pointsUvs', 'decodeVideoTexture', 'decodeVideoTextureEmissive', 'alphaToCoverage', 'lightProbeGrids', 'hasPositionAttribute'];
 
 // The two light sets the game's own passes have: the world (the cascades, the fill, the flash
@@ -172,8 +176,10 @@ const HOOK_SOURCE = 'function wetObject(shader, renderer) { const a = "highp flo
   const owned = namesOfDifference([worldPass, makeKey({ shaderId: 'basic', lights: WORLD_LIGHTS, custom: `wet-object|${HOOK_SOURCE}` })]);
   ok(owned.length === 1 && owned[0] === 'own key', 'a material that only wears the wetness wrap differs by its own key');
 
-  const cube = namesOfDifference([makeKey({ shaderId: 'standard', lights: WORLD_LIGHTS, cubeUV: '256' }), makeKey({ shaderId: 'standard', lights: WORLD_LIGHTS, cubeUV: '512' })]);
-  ok(cube.length === 1 && cube[0] === 'envMapCubeUVHeight', 'and a reflection filtered at another height says that, which is a cut nobody may make');
+  const cube = namesOfDifference([makeKey({ shaderId: 'standard', lights: WORLD_LIGHTS, cube: '256' }), makeKey({ shaderId: 'standard', lights: WORLD_LIGHTS, cube: '512' })]);
+  ok(cube.length === 1 && cube[0] === 'envMapSize', 'and a reflection filtered by three at another size says that, which is a cut nobody may make');
+  const channel = namesOfDifference([makeKey({ shaderId: 'standard', lights: WORLD_LIGHTS }), makeKey({ shaderId: 'standard', lights: WORLD_LIGHTS, channels: ['uv'] })]);
+  ok(channel.length === 1 && channel[0] === 'a texture channel', 'and a map on the first channel of the run says a texture channel, as on any other');
 
   // The third light set is what a camera seeing every layer at once builds, and it is a whole
   // extra program for every material drawn under it.

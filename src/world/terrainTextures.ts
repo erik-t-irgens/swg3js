@@ -14,6 +14,8 @@
 
 import * as THREE from 'three';
 import type { CSM } from 'three/examples/jsm/csm/CSM.js';
+// Three's chunks are read as the holds leave them (three 0.185's lighting lines).
+import '../core/threeHolds.ts';
 import type { AssetPack } from './assetPack';
 import { injectWetness } from './wetness.ts';
 import { GGX_ANCHOR } from './specular.ts';

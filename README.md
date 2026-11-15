@@ -74,7 +74,7 @@ The rig is a thing you own now: **Grapple rig** in the backpack, under Worn and 
 ## Installation
 
 1. **Node 22.18 or newer** (24 is fine) and a Chromium browser. Chrome on Windows is what the game is tested in.
-2. Clone the repo and `npm install`.
+2. Clone the repo and `npm install`. The stack is Three.js 0.187 on its WebGL renderer, Rapier for physics, Vite and TypeScript, with no framework; where three 0.187 draws a lit surface, a shadow, a reflection or the bloom otherwise than 0.185 did, the game holds three's own text to the earlier look (`src/core/threeHolds.ts`).
 3. Copy `.env.example` to `.env` (git-ignored) and fill in where your own installs are:
    ```
    SWG=C:/SWG                                                                # the folder holding the client's .tre archives

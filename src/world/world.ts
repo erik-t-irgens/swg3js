@@ -1,5 +1,6 @@
 import { followCameraDepth } from './csmDepth.ts';
 import { REVERSED_DEPTH } from '../core/depthMode.ts';
+import { PMREMGenerator185, type Pmrem185 } from '../core/pmrem185.ts';
 import * as THREE from 'three';
 import { packIdOf, type PlanetDef } from '../data/planets';
 import { editKeyOfPack, standsLife, worldRowOfPlanet } from '../data/ourWorlds.ts';
@@ -1013,7 +1014,7 @@ export class World {
   private readonly waterAtFn = (x: number, z: number): number => this.terrain.waterHeightAt(x, z);
   /** Set by main: needed to filter the sky into an environment map for reflective surfaces. */
   renderer: THREE.WebGLRenderer | null = null;
-  private pmrem: THREE.PMREMGenerator | null = null;
+  private pmrem: Pmrem185 | null = null;
   /**
    * Our own sky's capture into a kept cube and a kept PMREM target, through a generator of its own (`DomeCapture`,
    * `domePmrem`): made and warmed with the shared generator, written in place every capture, never disposed.
@@ -3717,8 +3718,8 @@ export class World {
    * on a machine where a program costs hundreds of milliseconds that is a visible freeze, and the
    * warning it prints (`_applyPMREM` in the stack) is what put us on to this.
    */
-  private makePmrem(renderer: THREE.WebGLRenderer): THREE.PMREMGenerator {
-    const gen = new THREE.PMREMGenerator(renderer);
+  private makePmrem(renderer: THREE.WebGLRenderer): Pmrem185 {
+    const gen = new PMREMGenerator185(renderer);
     gen.compileCubemapShader();
     // `compileCubemapShader` covers the cube the pack brings and nothing else: the filter three
     // runs over a *scene* is another program again, and a planet with no cube map of its own
@@ -3744,7 +3745,7 @@ export class World {
    * generator's warm-up has not (the same sources at the same 128). Every capture after it writes the same two targets.
    */
   private makeDome(renderer: THREE.WebGLRenderer): DomeCapture {
-    const dome = new DomeCapture(new THREE.PMREMGenerator(renderer));
+    const dome = new DomeCapture(new PMREMGenerator185(renderer));
     try {
       dome.domePmrem.compileCubemapShader();
       const empty = new THREE.Scene();
@@ -3806,7 +3807,7 @@ export class World {
     if (this.envTimer < 4) return;
     this.envTimer = 0;
     // Filtered from a 128 px cube like every other environment water may see, so swapping to it
-    // never changes a water material's program key (envMapCubeUVHeight is in that key): rendered into the
+    // never changes a water material's program key (three 0.185 had the filtered height in that key): rendered into the
     // dome's kept cube and filtered into its kept target in place (`DomeCapture`), so a capture makes no
     // target and the texture every surface holds stays the same object.
     const renderer = this.renderer;
@@ -3909,7 +3910,7 @@ export class World {
    * The sky has been moved by hand (the creator's hour slider, settling after a drag): the reflections
    * are taken again on the next frame rather than when their four-second clock next comes round, so a
    * scrubbed hour does not wear the last hour's sky in every shiny surface. One capture, the very one
-   * the clock would have made; nothing compiles (`envMapCubeUVHeight` is the same 128 every time).
+   * the clock would have made; nothing compiles (the filtered picture is the same 128 px cube's every time).
    */
   recaptureSky(): void {
     this.envTimer = 99;

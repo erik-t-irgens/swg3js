@@ -342,7 +342,7 @@ function sheetsOfGeometry(g: THREE.BufferGeometry) {
 
 {
   const lib = THREE.ShaderLib.physical;
-  ok(lib.vertexShader.includes('#include <beginnormal_vertex>') && THREE.ShaderChunk.beginnormal_vertex.includes('vec3 objectNormal = vec3( normal );'), "the anchor is in three 0.185's physical program, and it is where objectNormal is first made from the normal attribute");
+  ok(lib.vertexShader.includes('#include <beginnormal_vertex>') && THREE.ShaderChunk.beginnormal_vertex.includes('vec3 objectNormal = vec3( normal );'), "the anchor is in three 0.187's physical program, and it is where objectNormal is first made from the normal attribute");
   const shader = { vertexShader: lib.vertexShader, fragmentShader: lib.fragmentShader, uniforms: THREE.UniformsUtils.clone(lib.uniforms) } as unknown as THREE.WebGLProgramParametersWithUniforms;
   const m = new THREE.MeshStandardMaterial({ alphaTest: 0.5 });
   m.userData.swgCardBlend = 'blend';

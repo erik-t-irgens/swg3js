@@ -23,7 +23,7 @@ the ordinary meaning. Use these:
 | a projected point behind the camera | `p.z > 1` | `p.z < 0` | `projectedBehind(p.z, camera)` |
 | a culling frustum from a camera | `setFromProjectionMatrix(m)` | needs the flag | `setFromProjectionMatrix(m, THREE.WebGLCoordinateSystem, camera.reversedDepth)` |
 | a shadow bias applied by hand | `z += bias` | `z -= bias` | see `grassForDepthMode` (`grass.ts`) |
-| polygon offset toward the camera | negative factor and units | three flips the factor only | flip the units yourself (`fx/geometry.ts`, `marks.ts`) |
+| polygon offset toward the camera | negative factor and units | three flips both itself | write them as for ordinary depth (`fx/geometry.ts`, `marks.ts`); three 0.185 flipped the factor alone and the units were flipped by hand |
 | a depth written by hand | `ndc * 0.5 + 0.5` | `ndc` as it is | see the planets' depth stand-in (`world.ts`) |
 | a far-plane value written by hand | 1.0 | 0.0 | see the doorway reset (`portalRender.ts`) |
 
@@ -32,26 +32,29 @@ changes a program's text even when it does nothing, and the clouds' and the gras
 text byte for byte (`airClouds.test.ts`, `grassAir.test.ts`). Where a pinned text must stay in the file verbatim, the
 reversed twin is made beside it and swapped in where the material is built (`grassForDepthMode`).
 
-## Three.js 0.185's reversed-depth bugs, and what works round them
+## Three.js's reversed-depth bugs, and what works round them
 
-Each was found in play, and each is held by `tools/swg/tests/reversedDepth.test.ts` against three's own code, so an
-upgrade that changes it fails there, by name.
+Each was found in play on three 0.185, and each is held by `tools/swg/tests/reversedDepth.test.ts` against three's own
+code, so an upgrade that changes it fails there, by name. Three 0.187 mended the first and the third, and the polygon
+offset's units with them; the second still stands.
 
-1. **Draw order.** `WebGLRenderLists.sort` reverses each whole sorted list under reversed depth, meaning to turn
-   nearest-first into farthest-first, but that also reverses `renderOrder`: the sky's dome, ordered first and drawn
-   without a depth test, was drawn last and covered the world. `src/core/reversedSort.ts` gives the renderer comparators
-   that sort into the exact reverse of the wanted order, so three's reversal brings it out right. **This is the one
-   workaround that depends on the bug staying**: the test compares the reversed order with the ordinary one and fails
-   if they differ.
+1. **Draw order (mended in three 0.187).** Three 0.185's `WebGLRenderLists.sort` reversed each whole sorted list under
+   reversed depth, meaning to turn nearest-first into farthest-first, but that also reversed `renderOrder`: the sky's
+   dome, ordered first and drawn without a depth test, was drawn last and covered the world, and the game gave the
+   renderer comparators of its own that sorted into the exact reverse of the wanted order (`src/core/reversedSort.ts`,
+   gone with the upgrade). Three 0.187 turns each item's projected depth round as it is listed
+   (`WebGLRenderLists.push`) and sorts as ever, so the game hands the renderer no comparators: the test sorts one scene
+   with an ordinary and a reversed camera through three's real list and fails if the two orders differ.
 2. **Shadow cascades.** Three's `CSM` never tells its `CSMFrustum` that the camera is reversed, so every
    `updateFrustums` after the camera was first drawn reversed (a new location, a shadow setting) fitted the cascades to a
    collapsed frustum, and the sun's shadows were gone. `src/world/csmDepth.ts` sets the frustum's depths from the
    camera before every split. Harmless if three mends it.
-3. **The depth-test table.** `ReversedDepthFuncs` turns Always into Never and Equal into NotEqual, where only less and
-   greater should swap: the doorway's depth reset, asked to write always, wrote never, and rooms seen from outside lost
-   to terrain standing in them. `alwaysDepthFunc` in `portalRender.ts` asks the GPU which test three really sets and
-   picks the one that comes out Always, so it follows three either way. The game has no other Always, Never, Equal or
-   NotEqual depth tests; **any new one must go through the same probe.**
+3. **The depth-test table (mended in three 0.187).** Three 0.185's `ReversedDepthFuncs` turned Always into Never and
+   Equal into NotEqual, where only less and greater should swap: the doorway's depth reset, asked to write always,
+   wrote never, and rooms seen from outside lost to terrain standing in them. Three 0.187's table swaps only less and
+   greater. `alwaysDepthFunc` in `portalRender.ts` asks the GPU which test three really sets and picks the one that
+   comes out Always, so it followed three across the mend and needs nothing changed. The game has no other Always,
+   Never, Equal or NotEqual depth tests; **any new one must go through the same probe.**
 
 ## Traps
 
@@ -62,6 +65,9 @@ upgrade that changes it fails there, by name.
   camera never is; ask the camera (`camera.reversedDepth`), not the flag, wherever a camera's own maths is concerned.
 - **`__debug.grassShadowSelfTest()`** models ordinary depth and does not run under reversed depth; load with
   `?norevz` to run it.
+- **The sun's shadow bias is added under reversed depth, where it should be taken off.** That was three 0.185's own
+  filtered lookup, which 0.187 mended; the game holds 0.185's line (`sun-shadow-bias` in `src/core/threeHolds.ts`)
+  because it is the look the game has had, and taking that one hold out is the mend.
 
 ## How it was found
 

@@ -197,7 +197,7 @@ export function readbackNote(backend: Backend): string | null {
 //    material carries a hook (the shadow cascades put one on and the wet wrap another), counting
 //    back from the end read 168 of 169 live programs wrongly.
 //
-// What is fixed is the run of 51 fields between them, beginning at `precision`, which is always one
+// What is fixed is the run of 56 fields between them, beginning at `precision`, which is always one
 // of three words. So the run is found by trying each of those words as a starting point and then
 // checking that every field in the run is one of the few things three can write there. A define
 // whose value happened to be the word `highp`, or a hook whose source contained it, fails that
@@ -209,10 +209,11 @@ export function readbackNote(backend: Backend): string | null {
 // so read **none** of a world's 222 keys. `array.join()` writes an empty string for undefined and
 // null, and three's own parameters are mostly not numbers at all — a map's UV set is
 // `HAS_MAP && getChannel(...)`, so it is the word `false` when there is no such map and `uv`, `uv1`
-// … when there is; `envMapMode` is `false` or a mapping number; `envMapCubeUVHeight` and `combine`
-// are empty when unset; `fogExp2` and `sizeAttenuation` are always `true` or `false`; and
-// `morphAttributeCount` is pushed but never set, so it is always empty. Only eighteen of the run's
-// fields are whole numbers. The node test beside this reads three's own source for the order and
+// … when there is; `envMapMode` is `false` or a mapping number; `envMapPMREM` is `true` or `false`,
+// and `envMapMaxLod`, `envMapSize` and `combine` are empty when unset; `fogExp2` and `sizeAttenuation`
+// are always `true` or `false`. Only twenty of the run's fields are whole numbers. (This is three
+// 0.187's run: 0.185's had the flat layout's height where the three environment fields are, one map
+// channel fewer, a morph attribute count it pushed and never set, and no sun light or probe grid counts.) The node test beside this reads three's own source for the order and
 // drives the reader on keys captured from the running game, so the same mistake cannot be made
 // twice in silence.
 
@@ -221,36 +222,40 @@ const AT = {
   precision: 0,
   outputColorSpace: 1,
   envMapMode: 2,
-  envMapCubeUVHeight: 3,
-  /** 23 per-map UV-set fields, 4 to 26. */
-  firstMapUv: 4,
-  lastMapUv: 26,
-  combine: 27,
-  fogExp2: 28,
-  sizeAttenuation: 29,
-  morphTargetsCount: 30,
-  morphAttributeCount: 31,
-  numDirLights: 32,
-  numPointLights: 33,
-  numSpotLights: 34,
-  numSpotLightMaps: 35,
-  numHemiLights: 36,
-  numRectAreaLights: 37,
-  numDirLightShadows: 38,
-  numPointLightShadows: 39,
-  numSpotLightShadows: 40,
-  numSpotLightShadowsWithMaps: 41,
-  numLightProbes: 42,
-  shadowMapType: 43,
-  toneMapping: 44,
-  numClippingPlanes: 45,
-  numClipIntersection: 46,
-  depthPacking: 47,
-  mask1: 48,
-  mask2: 49,
-  rendererColorSpace: 50,
+  envMapPMREM: 3,
+  envMapMaxLod: 4,
+  envMapSize: 5,
+  /** 24 per-map UV-set fields, 6 to 29. */
+  firstMapUv: 6,
+  lastMapUv: 29,
+  combine: 30,
+  fogExp2: 31,
+  sizeAttenuation: 32,
+  morphTargetsCount: 33,
+  numSunLights: 34,
+  numDirLights: 35,
+  numPointLights: 36,
+  numSpotLights: 37,
+  numSpotLightMaps: 38,
+  numHemiLights: 39,
+  numRectAreaLights: 40,
+  numSunLightShadows: 41,
+  numDirLightShadows: 42,
+  numPointLightShadows: 43,
+  numSpotLightShadows: 44,
+  numSpotLightShadowsWithMaps: 45,
+  numLightProbes: 46,
+  numLightProbeGrids: 47,
+  shadowMapType: 48,
+  toneMapping: 49,
+  numClippingPlanes: 50,
+  numClipIntersection: 51,
+  depthPacking: 52,
+  mask1: 53,
+  mask2: 54,
+  rendererColorSpace: 55,
   /** The material's own key, which is everything from here to the end however many commas it holds. */
-  custom: 51,
+  custom: 56,
 } as const;
 
 /** The bits of the first of three's two boolean masks, by the name of the parameter each stands for. */
@@ -278,7 +283,10 @@ export interface KeyFacts {
   envMap: boolean;
   /** Which face, in the word the design uses: a material that differs only by this is worth chasing. */
   side: 'front' | 'back' | 'double';
-  /** The cube-UV height that CLAUDE.md warns is in the key: a reflective material whose environment changes height recompiles. */
+  /**
+   * The face size of a filtered environment cube of three's own, which is in the key, or 'none': the game's own
+   * environments are filtered into three 0.185's flat layout (`pmrem185.ts`), whose height three 0.187 no longer keys on.
+   */
   envHeight: string;
   toneMapping: string;
   clipping: number;
@@ -344,7 +352,7 @@ function uvField(text: string | undefined): boolean {
  *
  * Each `highp`, `mediump` or `lowp` in the key is tried in turn, and every field of the run is
  * checked against the few things three can write in it: the UV sets against `false` and the channel
- * names, the two flags against `true` and `false`, and the eighteen counts against whole numbers.
+ * names, the two flags against `true` and `false`, and the twenty counts against whole numbers.
  * One of those words inside a define or inside a hook's source text fails the check and the search
  * goes on to the next; a raw shader material, whose key has no such run at all, fails every one of
  * them and is reported unread.
@@ -352,16 +360,16 @@ function uvField(text: string | undefined): boolean {
 function findRun(parts: readonly string[]): number {
   for (let i = 0; i + AT.custom < parts.length; i++) {
     if (!PRECISIONS.includes(parts[i])) continue;
-    // The environment map's kind and the height of its cube: a number when there is one, `false`
-    // and empty when there is not.
-    let good = (boolField(parts[i + AT.envMapMode]) || whole(parts[i + AT.envMapMode]) >= 0) && wholeOrUnset(parts[i + AT.envMapCubeUVHeight]);
+    // The environment map's kind, whether it is a filtered cube of three's own, and that cube's last level and
+    // face size: a number when there is one, `false` and empty when there is not.
+    let good = (boolField(parts[i + AT.envMapMode]) || whole(parts[i + AT.envMapMode]) >= 0) && boolField(parts[i + AT.envMapPMREM]) && wholeOrUnset(parts[i + AT.envMapMaxLod]) && wholeOrUnset(parts[i + AT.envMapSize]);
     for (let u = AT.firstMapUv; good && u <= AT.lastMapUv; u++) good = uvField(parts[i + u]);
     // How an environment map is combined (unset on all but the old materials), then the two flags.
     if (good) good = wholeOrUnset(parts[i + AT.combine]) && boolField(parts[i + AT.fogExp2]) && boolField(parts[i + AT.sizeAttenuation]);
     // The morph targets, every light count, the shadow and tone-mapping kinds and the clipping: all
-    // of them whole numbers. `morphAttributeCount` is pushed by three and never set, so it is empty.
-    if (good) good = whole(parts[i + AT.morphTargetsCount]) >= 0 && wholeOrUnset(parts[i + AT.morphAttributeCount]);
-    for (let w = AT.numDirLights; good && w <= AT.numClipIntersection; w++) good = whole(parts[i + w]) >= 0;
+    // of them whole numbers.
+    if (good) good = whole(parts[i + AT.morphTargetsCount]) >= 0;
+    for (let w = AT.numSunLights; good && w <= AT.numClipIntersection; w++) good = whole(parts[i + w]) >= 0;
     // The depth packing is a number today and was a boolean before; both are allowed, since neither
     // is anything else. Then the two masks, which are always numbers.
     if (good) good = (wholeOrUnset(parts[i + AT.depthPacking]) || boolField(parts[i + AT.depthPacking])) && maskField(parts[i + AT.mask1]) >= 0 && maskField(parts[i + AT.mask2]) >= 0;
@@ -476,9 +484,9 @@ export function readKey(cacheKey: string): KeyFacts | null {
     vertexColors: bit1(MASK1.vertexColors),
     envMap: bit1(MASK1.envMap),
     side: doubleSided ? 'double' : flipSided ? 'back' : 'front',
-    // Empty where the material's environment map is not a cube-UV one; three writes the height only
-    // for those, and CLAUDE.md records why a change of it costs every such material its program.
-    envHeight: at(AT.envMapCubeUVHeight) === '' ? 'none' : at(AT.envMapCubeUVHeight),
+    // Empty where the material's environment map is not a filtered cube of three's own; three writes the size
+    // only for those, and the game's own environments are in 0.185's flat layout, which is not in the key.
+    envHeight: at(AT.envMapSize) === '' ? 'none' : at(AT.envMapSize),
     toneMapping: at(AT.toneMapping),
     clipping: whole(at(AT.numClippingPlanes)),
     // The cascades write a define (`CSM.setupMaterial` sets `USE_CSM`), so they are looked for among

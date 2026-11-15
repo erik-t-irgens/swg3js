@@ -570,8 +570,10 @@ const MASK_OUTPUT_GLSL = /* glsl */ `
     vec3 fxSingle = vec3(0.0);
     vec3 fxMulti = vec3(0.0);
     // The split-sum term three's RE_IndirectSpecular_Physical weighs the environment by; with
-    // metalness 0 the dielectric half is the whole of it.
-    computeMultiscattering(geometryNormal, geometryViewDir, material.specularColor, material.specularF90, material.roughness, fxSingle, fxMulti);
+    // metalness 0 the dielectric half is the whole of it. Three's light loop has already looked the
+    // highlight's table up for this pixel (material.dfg, at the material's roughness and the normal
+    // against the view), and hands it to its own calls of this function, so this one takes the same.
+    computeMultiscattering(material.dfg, material.specularColor, material.specularF90, fxSingle, fxMulti);
     // The FogExp2 the lit pass applies over the view depth, so the added reflection fades as the water does.
     float fxFog = 1.0 - exp(-uFxFogDensity * uFxFogDensity * vViewPosition.z * vViewPosition.z);
     float fxA = clamp(diffuseColor.a, 0.0, 1.0);

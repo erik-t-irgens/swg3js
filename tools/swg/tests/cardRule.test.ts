@@ -8,7 +8,7 @@
 //      every placed model wearing any world's flora card shader is known as its own world loads (by the table
 //      beside the packs, `flora-cards.json` or SWG3JS_FLORA_CARDS, and the world's own), once the packs carry them;
 //   2. the injection's text, through the very hook chain `World.adoptMaterials` builds (the cascades' hook, the wet
-//      look, the highlight, then the rule): its anchors are three 0.185's and the wet look's own, every name it uses
+//      look, the highlight, then the rule): its anchors are three 0.187's and the wet look's own, every name it uses
 //      is declared before it, no name is declared twice in one scope, a wet card takes no gloss or sheen and its
 //      sheen's Fresnel reads whichever face is drawn, and wrapping twice adds nothing;
 //   3. the table: a pack's own class wins over a name's guess, and the knobs move only uniforms.
@@ -222,7 +222,7 @@ const compiled = (m: THREE.Material): Shader => {
 const count = (text: string, s: string) => text.split(s).length - 1;
 
 {
-  ok(lib.fragmentShader.includes('#include <alphatest_fragment>') && lib.vertexShader.includes('#include <beginnormal_vertex>'), "the rule's anchors are in three 0.185's physical program");
+  ok(lib.fragmentShader.includes('#include <alphatest_fragment>') && lib.vertexShader.includes('#include <beginnormal_vertex>'), "the rule's anchors are in three 0.187's physical program");
   const wet = compiled(chained(true));
   const dry = compiled(chained(false));
   const cutLine = 'float swgCardK = swgCardBlend > 0.5 ? uSwgCardMipScale : uSwgCardMipScalePunch;';

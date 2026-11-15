@@ -82,10 +82,12 @@ function methodOf(src: string, sig: string): string {
   const fresh = new THREE.MeshBasicMaterial();
   applyDecal(fresh);
   ok(fresh.userData.noShadow === true && fresh.userData.decal === true, 'applyDecal marks the material for the shadow and collider rules');
-  // Three turns a polygon offset's factor round under reversed depth and not its units: both the plugin and the console's
-  // knob turn the units themselves, or under reversed depth a decal is pushed into what it lies on.
-  ok(/\n  m\.polygonOffsetUnits = REVERSED_DEPTH \? -DECAL_TUNE\.units : DECAL_TUNE\.units;\n/.test(read('src/world/surfaces.ts')), 'a decal\'s offset units are turned round under reversed depth (text)');
-  ok(/m\.polygonOffsetUnits = REVERSED_DEPTH \? -DECAL_TUNE\.units : DECAL_TUNE\.units;/.test(read('src/main.ts')), 'and so are they when the console moves them (text)');
+  // Three turns a polygon offset's factor and its units round under reversed depth (0.187; 0.185 turned the factor alone,
+  // and the plugin and the console's knob turned the units themselves): both hand three the units as they stand, or under
+  // reversed depth a decal, turned twice, is pushed into what it lies on.
+  ok(/\n  m\.polygonOffsetUnits = DECAL_TUNE\.units;\n/.test(read('src/world/surfaces.ts')), 'a decal\'s offset units are handed to three as they stand, which turns them round under reversed depth (text)');
+  ok(/m\.polygonOffsetUnits = DECAL_TUNE\.units;/.test(read('src/main.ts')), 'and so are they when the console moves them (text)');
+  ok(/if \( depthBuffer\.getReversed\(\) \) \{\s*factor = - factor;\s*units = - units;\s*\}/.test(read('node_modules/three/src/renderers/webgl/WebGLState.js')), 'three itself turns both round under reversed depth (WebGLState.setPolygonOffset): if it stops, the units are turned here again');
 }
 
 // The collider sweep leaves a decal out: the real streamer, the real physics.

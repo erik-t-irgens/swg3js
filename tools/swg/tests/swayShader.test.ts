@@ -1,7 +1,7 @@
 // The flora sway's chunk in three's own programs (`src/world/floraSway.ts`, `src/world/swayMath.ts`):
 //
 //   1. through the very hook chain `World.adoptMaterials` builds (the cascades' hook, the wet look, the highlight,
-//      the leaf cards' rule, then the sway), the colour program of three 0.185's physical shader and the depth
+//      the leaf cards' rule, then the sway), the colour program of three 0.187's physical shader and the depth
 //      program of its depth shader each carry the chunk exactly once, after `begin_vertex` and before
 //      `project_vertex`; the wet look's insert comes after `project_vertex`, and the card's leaf capture after the
 //      sway, so it reads the swayed place;

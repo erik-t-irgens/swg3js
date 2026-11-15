@@ -289,6 +289,165 @@ const GLSL_WORDS = new Set(
 const GLSL_TYPE = /^(?:void|bool|int|uint|float|[biu]?vec[234]|mat[234](?:x[234])?|[iu]?sampler\w+|struct)$/;
 
 /**
+ * Every name a GLSL text declares after one of GLSL's own types (a variable, a parameter, a function, every name of a
+ * comma list), added to `into`: what `undeclaredNames` counts as declared, handed out so a test can ask of one text (a
+ * few lines the game writes into a shader of three's) whether another (the whole program round them) declares what
+ * they read.
+ */
+export function declaredNames(glsl: string, into: Set<string> = new Set<string>()): Set<string> {
+  const code = codeOf(glsl);
+  // A type, then a name: every declaration, parameter and function; and every further name of a comma list after one.
+  const decl = /\b([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*([,;=)[(])/g;
+  let m: RegExpExecArray | null;
+  while ((m = decl.exec(code))) {
+    if (!GLSL_TYPE.test(m[1])) continue;
+    into.add(m[2]);
+    if (m[3] === ',') {
+      // `float a, b, c;` (never a parameter list, whose next word is a type)
+      const rest = code.slice(decl.lastIndex).match(/^([^;(){}]*);/);
+      if (rest) for (const w of rest[1].split(',')) {
+        const n = w.trim().match(/^([A-Za-z_]\w*)/)?.[1];
+        if (n && !GLSL_TYPE.test(n)) into.add(n);
+      }
+    }
+  }
+  return into;
+}
+
+/** The text between a `(` at `open` and the `)` that closes it; null when it never closes. */
+function insideParens(text: string, open: number): string | null {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === '(') depth++;
+    else if (text[i] === ')' && --depth === 0) return text.slice(open + 1, i);
+  }
+  return null;
+}
+
+/** How many arguments (or parameters) stand between a call's parentheses: its commas at depth nought, and one. */
+function countArgs(inside: string): number {
+  const s = inside.trim();
+  if (s === '' || s === 'void') return 0;
+  let depth = 0;
+  let n = 1;
+  for (const ch of s) {
+    if (ch === '(' || ch === '[') depth++;
+    else if (ch === ')' || ch === ']') depth--;
+    else if (ch === ',' && depth === 0) n++;
+  }
+  return n;
+}
+
+/** One definition of a GLSL function: what it answers and what it takes, qualifiers that change no call left out. */
+function signatureOf(type: string, params: string): string {
+  const list = params.trim() === '' || params.trim() === 'void' ? [] : params.split(',');
+  const each = list.map((p) => {
+    const words = p.replace(/\b(?:const|in|highp|mediump|lowp)\b/g, ' ').trim().split(/\s+/);
+    // The last word is the parameter's name (with any array size on it); what is before it is its type, `out` or `inout` kept.
+    const size = /\[[^\]]*\]$/.exec(words[words.length - 1])?.[0] ?? '';
+    return `${words.slice(0, -1).join(' ')}${size}`;
+  });
+  return `${type}(${each.join(', ')})`;
+}
+
+/** What a GLSL text defines that a shader may call: each function's definitions by parameter count, and each macro that takes arguments. */
+export interface GlslCallables {
+  /** A name's parameter counts, one for each definition (overloads, and both arms of an `#ifdef`). */
+  counts: Map<string, Set<number>>;
+  /** A name's definitions as written, `float(vec3, inout vec3)` (a macro: `macro(2)`), sorted. */
+  signatures: Map<string, string[]>;
+}
+
+/**
+ * Every function a GLSL text defines and every macro with arguments it `#define`s, by name (comments aside; both
+ * branches of an `#ifdef` are read, so a function defined two ways is both). Added to `into` when one is handed in, so
+ * the chunks of a whole library can be gathered into one table.
+ */
+export function glslCallables(glsl: string, into: GlslCallables = { counts: new Map(), signatures: new Map() }): GlslCallables {
+  const text = glsl.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  const add = (name: string, n: number, sig: string): void => {
+    if (!into.counts.has(name)) into.counts.set(name, new Set());
+    into.counts.get(name)!.add(n);
+    const list = into.signatures.get(name) ?? [];
+    if (!list.includes(sig)) list.push(sig);
+    list.sort();
+    into.signatures.set(name, list);
+  };
+  const def = /(?:^|[\n;}])[ \t]*(?:(?:highp|mediump|lowp)[ \t]+)?([A-Za-z_]\w*)[ \t]+([A-Za-z_]\w*)[ \t]*\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = def.exec(text))) {
+    if (!GLSL_TYPE.test(m[1]) && !/^[A-Z]/.test(m[1])) continue;
+    const open = m.index + m[0].length - 1;
+    const inside = insideParens(text, open);
+    if (inside === null) continue;
+    // A definition opens its body next; anything else is a prototype, a constructor or a call.
+    if (!text.slice(open + inside.length + 2).trimStart().startsWith('{')) continue;
+    add(m[2], countArgs(inside), signatureOf(m[1], inside));
+  }
+  const macro = /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)\(([^)]*)\)/gm;
+  while ((m = macro.exec(text))) add(m[1], countArgs(m[2]), `macro(${countArgs(m[2])})`);
+  return into;
+}
+
+/** One call a GLSL text makes of a name in a table of callables. */
+export interface GlslCall {
+  name: string;
+  /** How many arguments it hands over. */
+  args: number;
+  /** The call as written, cut short. */
+  text: string;
+}
+
+/**
+ * Every call the code makes of a name `callables` defines (comments and directives aside; a definition is not a call):
+ * what a test holds to the definitions' own parameter counts. Node compiles no GLSL, and a call handing a function of
+ * three's the arguments its last version took compiles in no browser either (the water's mask twins, on three 0.187).
+ */
+// (`miscalls` below is the check; this is what it reads, handed out for a test that lists what is called.)
+export function glslCalls(glsl: string, callables: GlslCallables, tight = false): GlslCall[] {
+  const code = codeOf(glsl);
+  const out: GlslCall[] = [];
+  // `tight`: only a name with its parenthesis hard against it, for text that may be prose ("on average (and ...)").
+  const call = tight ? /(?<![\w.$])([A-Za-z_]\w*)\(/g : /(?<![\w.$])([A-Za-z_]\w*)\s*\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = call.exec(code))) {
+    if (!callables.counts.has(m[1])) continue;
+    const open = m.index + m[0].length - 1;
+    const inside = insideParens(code, open);
+    if (inside === null) continue;
+    if (code.slice(open + inside.length + 2).trimStart().startsWith('{')) continue;
+    out.push({ name: m[1], args: countArgs(inside), text: `${m[1]}(${inside.replace(/\s+/g, ' ').trim().slice(0, 120)})` });
+  }
+  return out;
+}
+
+/** The calls of `glslCalls` that hand a function a number of arguments none of its definitions takes, as `name(...): n against a/b`. */
+export function miscalls(glsl: string, callables: GlslCallables): string[] {
+  const out = new Set<string>();
+  for (const c of glslCalls(glsl, callables)) {
+    const counts = callables.counts.get(c.name)!;
+    if (!counts.has(c.args)) out.add(`${c.text}: ${c.args} argument(s) against ${[...counts].sort().join(' or ')}`);
+  }
+  return [...out];
+}
+
+/**
+ * A shader's text with every `#include <name>` given the chunk of that name out of `chunks`, chunks inside chunks too,
+ * as three resolves them when it builds a program. A chunk nobody has is left as a comment naming it and counted in
+ * `missing` when a list is handed in.
+ */
+export function resolveIncludes(text: string, chunks: Readonly<Record<string, string | undefined>>, missing?: string[], depth = 0): string {
+  return text.replace(/^[ \t]*#include +<([\w\d./]+)>/gm, (_whole, name: string) => {
+    const chunk = chunks[name];
+    if (typeof chunk !== 'string') {
+      missing?.push(name);
+      return `/* no chunk ${name} */`;
+    }
+    return depth > 8 ? chunk : resolveIncludes(chunk, chunks, missing, depth + 1);
+  });
+}
+
+/**
  * Every name the code reads that it never declares (comments and directives aside), less `known` (what the program round
  * it declares: three's uniforms and varyings, a host's globals): a name declared after a type (a variable, a parameter, a
  * function, every name of a comma list), a struct's member or a swizzle after a dot, and GLSL's own words are not reads.
@@ -297,22 +456,8 @@ const GLSL_TYPE = /^(?:void|bool|int|uint|float|[biu]?vec[234]|mat[234](?:x[234]
  */
 export function undeclaredNames(glsl: string, known: Iterable<string> = []): string[] {
   const code = codeOf(glsl);
-  const declared = new Set<string>(known);
-  // A type, then a name: every declaration, parameter and function; and every further name of a comma list after one.
-  const decl = /\b([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*([,;=)[(])/g;
+  const declared = declaredNames(glsl, new Set<string>(known));
   let m: RegExpExecArray | null;
-  while ((m = decl.exec(code))) {
-    if (!GLSL_TYPE.test(m[1])) continue;
-    declared.add(m[2]);
-    if (m[3] === ',') {
-      // `float a, b, c;` (never a parameter list, whose next word is a type)
-      const rest = code.slice(decl.lastIndex).match(/^([^;(){}]*);/);
-      if (rest) for (const w of rest[1].split(',')) {
-        const n = w.trim().match(/^([A-Za-z_]\w*)/)?.[1];
-        if (n && !GLSL_TYPE.test(n)) declared.add(n);
-      }
-    }
-  }
   const out = new Set<string>();
   const use = /(?<![\w.])([A-Za-z_]\w*)\b/g;
   while ((m = use.exec(code))) {

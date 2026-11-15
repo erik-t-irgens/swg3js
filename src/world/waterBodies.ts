@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { AssetPack } from './assetPack';
 import type { PlanetDef } from '../data/planets';
 import { ourWaterLook } from '../data/ourWorlds.ts';
+import { PMREMGenerator185 } from '../core/pmrem185.ts';
 import { currentEnvironment, onEnvironment } from './envmap';
 import { createWaterAirMaterial, createWaterMaskMaterial, createWaterMaterial, setWaterEnvSpecular, WATER_FX_FOG, WATER_FX_TRACED, waveReach, type WaterMaterial } from './water';
 import { readWaterPack, waterLookFor, type WaterLook, type WaterPackData } from './waterLook';
@@ -14,8 +15,9 @@ import { sortByDraw, WaterVisibility, type WaterDrawKey, type WaterVisibilitySta
  * it reflects, and the one decision each frame about whether the effects' reflections take the
  * water's environment term over.
  *
- * The environment is the awkward part: `envMapCubeUVHeight` is in three's program cache key, so a
- * body whose environment changes height recompiles its shader mid-play. Every environment a body
+ * The environment is the awkward part: `envMapCubeUVHeight` was in three 0.185's program cache key, so a
+ * body whose environment changed height recompiled its shader mid-play (from 0.187 the held chunk reads
+ * the sizes off the picture, `src/core/threeHolds.ts`, and the rule keeps every picture what it was). Every environment a body
  * can see is therefore filtered from a 128 px cube (a PMREM 512 high): the planet packs' sky maps,
  * this planet's own water cubes, the procedural dome, and a black stand-in every body carries from
  * the moment it exists, so the first real map to arrive swaps a texture and nothing more.
@@ -677,7 +679,7 @@ export class WaterBodies {
       wanted.set(info.cube.faces[0], info.cube.faces);
     }
     if (!wanted.size) return;
-    const gen = new THREE.PMREMGenerator(renderer);
+    const gen = new PMREMGenerator185(renderer);
     try {
       for (const [key, faces] of wanted) {
         try {
@@ -690,7 +692,7 @@ export class WaterBodies {
           const filtered = gen.fromCubemap(tex).texture;
           tex.dispose();
           // The converter never upscales a cube, so one authored under 128 px would filter shorter
-          // and change `envMapCubeUVHeight` — a recompile of every water material mid-play.
+          // and change the filtered picture's height (three 0.185's `envMapCubeUVHeight`) — a recompile of every water material mid-play.
           const height = envHeightOf(filtered);
           if (height !== WATER_ENV_HEIGHT) {
             this.notes.push(`water: the cube ${key} filters to ${height} high, not ${WATER_ENV_HEIGHT}; the bodies using it reflect the sky instead`);
@@ -768,7 +770,7 @@ function makeBlackEnvironment(renderer: THREE.WebGLRenderer): THREE.Texture {
   const cube = new THREE.CubeTexture(faces);
   cube.colorSpace = THREE.SRGBColorSpace;
   cube.needsUpdate = true;
-  const gen = new THREE.PMREMGenerator(renderer);
+  const gen = new PMREMGenerator185(renderer);
   const env = gen.fromCubemap(cube).texture;
   gen.dispose();
   cube.dispose();
@@ -776,8 +778,9 @@ function makeBlackEnvironment(renderer: THREE.WebGLRenderer): THREE.Texture {
 }
 
 /**
- * How tall a filtered environment is. It is what three keys a program on (`envMapCubeUVHeight`),
- * so anything other than WATER_ENV_HEIGHT on a water body is a recompile waiting to happen.
+ * How tall a filtered environment is. It is what three 0.185 keyed a program on (`envMapCubeUVHeight`),
+ * so anything other than WATER_ENV_HEIGHT on a water body was a recompile waiting to happen; from 0.187 it
+ * is another picture than every other body's and no recompile, and is refused all the same.
  */
 function envHeightOf(texture: THREE.Texture | null): number | null {
   const image = texture?.image as { height?: number } | undefined;

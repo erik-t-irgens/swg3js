@@ -395,7 +395,7 @@ const lumBytes = (p: number[]) => 0.2126 * lin(p[0]) + 0.7152 * lin(p[1]) + 0.07
 {
   const chunk = CSMShader.lights_fragment_begin;
   const edit = cardLightsBegin(chunk);
-  ok(edit.missing.length === 0, `every anchor is in three 0.185.1's cascades' chunk${edit.missing.length ? `: missing ${edit.missing.join(', ')}` : ''}`);
+  ok(edit.missing.length === 0, `every anchor is in three 0.187.0's cascades' chunk${edit.missing.length ? `: missing ${edit.missing.join(', ')}` : ''}`);
   const t = edit.text;
   const csm = t.indexOf('#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct ) && defined( USE_CSM ) && defined( CSM_CASCADES )');
   const plain = t.indexOf('#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct ) && !defined( USE_CSM ) && !defined( CSM_CASCADES )');
