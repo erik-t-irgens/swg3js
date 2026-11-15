@@ -22,6 +22,7 @@ const ok = (cond: boolean, what: string) => {
   checks++;
   console.log(`ok   ${what}`);
 };
+const note = (what: string) => console.log(`note ${what}`);
 const root = repoRoot(import.meta.url);
 const index = readPackIndex(JSON.parse(readFileSync(join(root, 'public', 'anims', 'mixamo', 'index.json'), 'utf8')));
 if (typeof index === 'string') throw new Error(index);
@@ -109,21 +110,36 @@ const T = (): LocoTune => JSON.parse(JSON.stringify(LOCO_TUNE_SHIPPED)) as LocoT
 }
 
 // ---- speeds ----------------------------------------------------------------------------------------------------------------
+/**
+ * The table's clips' speeds as the importer measured them when the paces were started (91e62d9's index, under the hips
+ * over every planted frame). Its measure was mended since and every clip now reads a few per cent faster, but the paces
+ * are the owner's dials and were left where they started (the clips' playback rates move instead): each start is held
+ * to the speed it was started from, and each is said beside its clip's own speed now, which the owner may set it to.
+ */
+const STARTED_FROM: Record<string, number> = {
+  standard_walk: 1.444, slow_run: 2.853, drunk_run_forward: 2.375, running: 5.47, fast_run: 5.539, left_strafe_walking: 1.697, right_strafe_walking: 1.642,
+  walk_strafe_left: 0.591, walk_strafe_right: 0.591, jog_strafe_left: 2.889, jog_strafe_left_mirrored: 2.889, left_strafe: 4.331, left_strafe_mirrored: 4.331,
+  jog_forward_diagonal: 2.656, jog_forward_diagonal_mirrored: 2.656, walking_backwards: 1.28, jog_backward: 2.252, running_backward: 2.931,
+  jog_backward_diagonal: 2.176, jog_backward_diagonal_mirrored: 2.176,
+};
 {
   const t = T();
   const own: string[] = [];
   const said: string[] = [];
+  const beside: string[] = [];
+  ok(tableClips().every((id) => STARTED_FROM[id] !== undefined) && Object.keys(STARTED_FROM).length === tableClips().length, 'every clip of the table has the speed its pace was started from');
   // A diagonal's jog clip used for its walk and run with a blaster up: at the class's own dial, the very speed the
   // way has at that class without a gun, so a gun never changes how fast anybody goes.
   const upCells = new Set<string>();
   let upWrong = 0;
   for (const p of allPicks()) {
-    const v = speedOf(t, p), m = row(p.id)!.speed;
+    const v = speedOf(t, p), m = STARTED_FROM[p.id];
     if (/diagonal/.test(p.id) && p.key !== 'jog') {
       upCells.add(`${DIRS[p.dir]} ${p.key}`);
       if (v !== speedOf(t, locoPick(p.dir, p.cls)!)) upWrong++;
       continue;
     }
+    beside.push(`${DIRS[p.dir]} ${p.key} ${v} (${p.id} ${row(p.id)!.speed})`);
     if (Math.abs(v - m) <= 0.045) own.push(p.id);
     else said.push(`${DIRS[p.dir]} ${p.key} ${v} (its clip ${m})`);
   }
@@ -131,9 +147,11 @@ const T = (): LocoTune => JSON.parse(JSON.stringify(LOCO_TUNE_SHIPPED)) as LocoT
   // The exceptions, each with its reason in the tune: the run and the sprint (their clips measure alike), and the
   // strafe walks' mean for the walked forward diagonals (one class of two clips).
   ok(t.speed.forward.run === 4.9 && t.speed.forward.sprint === 6.35 && t.speed.forward.sprint > t.speed.forward.run && t.speed.forward.run > t.speed.forward.jog && t.speed.forward.jog > t.speed.forward.walk, 'forward the four classes rise: 1.44, 2.85, 4.9 and 6.35, the last the one run the game had before');
-  ok(Math.abs(row('running')!.speed - row('fast_run')!.speed) < 0.1, `the run and the sprint do not start at their clips' speeds because the two clips measure almost alike (${row('running')!.speed} and ${row('fast_run')!.speed} m/s)`);
-  ok(said.every((s) => /^(F run|F sprint|FL walk|FR walk) /.test(s)) && Math.abs(t.speed.forwardDiag.walk - (row('left_strafe_walking')!.speed + row('right_strafe_walking')!.speed) / 2) < 0.01, `every other class starts at its clip's own measured speed (${own.length} cells), the walked forward diagonals at the two strafe walks' mean (${said.length} said otherwise: ${said.join('; ')})`);
-  ok(Math.abs(t.speed.forward.tired - row('drunk_run_forward')!.speed) < 0.006 && Math.abs(t.speed.side.walk - row('walk_strafe_left')!.speed) < 0.006 && Math.abs(t.speed.side.walk - row('walk_strafe_right')!.speed) < 0.006, 'the tired jog at its own, and the sideways walk at the slow strafes\' own 0.59');
+  ok(Math.abs(row('running')!.speed - row('fast_run')!.speed) < 0.1 && Math.abs(STARTED_FROM.running - STARTED_FROM.fast_run) < 0.1, `the run and the sprint do not start at their clips' speeds because the two clips measure almost alike (${row('running')!.speed} and ${row('fast_run')!.speed} m/s now, ${STARTED_FROM.running} and ${STARTED_FROM.fast_run} when the paces were started)`);
+  ok(said.every((s) => /^(F run|F sprint|FL walk|FR walk) /.test(s)) && Math.abs(t.speed.forwardDiag.walk - (STARTED_FROM.left_strafe_walking + STARTED_FROM.right_strafe_walking) / 2) < 0.01, `every other class starts at the speed its clip was measured at when the paces were started (${own.length} cells), the walked forward diagonals at the two strafe walks' mean (${said.length} said otherwise: ${said.join('; ')})`);
+  ok(Math.abs(t.speed.forward.tired - STARTED_FROM.drunk_run_forward) < 0.006 && Math.abs(t.speed.side.walk - STARTED_FROM.walk_strafe_left) < 0.006 && Math.abs(t.speed.side.walk - STARTED_FROM.walk_strafe_right) < 0.006, 'the tired jog at its own, and the sideways walk at the slow strafes\' own 0.59');
+  ok(tableClips().every((id) => row(id)!.speed >= STARTED_FROM[id] - 0.04), 'and no clip of the table measures slower now than when its pace was started (the mended measure reads the stride, which the old one read low)');
+  note(`each pace beside its clip's own speed now: ${beside.join('; ')}`);
   // What a frame reads: every dial at its own place in one array, which is each pick's own speed.
   const each = T();
   let n = 0;
@@ -367,7 +385,7 @@ const T = (): LocoTune => JSON.parse(JSON.stringify(LOCO_TUNE_SHIPPED)) as LocoT
   ok(!('walkKey' in LOCO_TUNE) && !('aimSlowStrafe' in LOCO_TUNE), 'the walk key is a hold and nothing else, and the slow strafe is the sideways walk whatever is in hand: neither is a switch (the owner\'s answers)');
   const dials = allDials(LOCO_DIALS);
   const keys = dials.map((d) => d.key);
-  ok(numbers.every((p) => keys.includes(`tune.${p}`)) && ['tune.on', 'tune.gunSquare'].every((k) => keys.includes(k)) && new Set(keys).size === keys.length && dials.length === numbers.length + 2, `every number of the tune is a slider, and its two switches are choices (${dials.length} dials)`);
+  ok(numbers.every((p) => keys.includes(`tune.${p}`)) && ['tune.on', 'tune.gunSquare', 'tune.sprintFight'].every((k) => keys.includes(k)) && new Set(keys).size === keys.length && dials.length === numbers.length + 3, `every number of the tune is a slider, and its two switches and its choice of what a fight's key does to a sprint are choices (${dials.length} dials)`);
   ok(locoDialsFor('loco') === LOCO_DIALS && locoDialsFor('anim') === null, 'the debug menu is handed them for `loco` and for nothing else');
   // Each number dial moves its own number through the helper's own setter, and is held to its range.
   let moved = 0;
@@ -393,6 +411,10 @@ const T = (): LocoTune => JSON.parse(JSON.stringify(LOCO_TUNE_SHIPPED)) as LocoT
   const square = dials.find((d) => d.key === 'tune.gunSquare')!;
   square.set('off');
   ok(LOCO_TUNE.gunSquare === false && tuneLoco({ gunSquare: true }).length === 0 && LOCO_TUNE.gunSquare === true && tuneLoco({ gunSquare: 'sometimes' }).length === 1, 'the square diagonals\' switch the same; a switch takes true or false and says so of anything else');
+  const fight = dials.find((d) => d.key === 'tune.sprintFight')!;
+  ok(fight.kind === 'choice' && (fight as { choices: readonly string[] }).choices.join() === 'ends,muted' && (fight as { get: () => string }).get() === 'ends', 'what a fight\'s key does to a sprint is a choice of its two words, standing at \'ends\'');
+  fight.set('muted');
+  ok(LOCO_TUNE.sprintFight === 'muted' && tuneLoco({ sprintFight: 'ends' }).length === 0 && LOCO_TUNE.sprintFight === 'ends' && tuneLoco({ sprintFight: true }).length === 1 && LOCO_TUNE.sprintFight === 'ends', 'its dial sets the rule, the word its line writes sets it back, and anything but its two words is said and sets nothing');
   ok(tuneLoco({ speed: { forward: { run: 5.2 } } }).length === 0 && LOCO_TUNE.speed.forward.run === 5.2 && tuneLoco({ speed: { forward: { run: 4.9 } } }).length === 0, 'a nested patch sets one number');
   const words = tuneLoco({ speed: { forward: { hop: 3 } }, nothing: 1, rate: 4, shift: { dropDelay: 'soon' }, walkKey: 'hold', __proto__: { on: false } });
   ok(words.length === 5 && JSON.stringify(LOCO_TUNE) === JSON.stringify(LOCO_TUNE_SHIPPED), `a name it has not got, a group given a number and a number given a word are each said and set nothing (${words.join('; ')})`);

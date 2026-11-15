@@ -66,6 +66,8 @@ export interface FitReport {
   toes: number;
   /** The target's hips-to-ankle rest height over the source's: what the hips' travel is scaled by. */
   scale: number;
+  /** The target's legs' own length over the source's, hip joint through the knee to the ankle: what a stride's speed is scaled by. */
+  stride: number;
   /** For the standing rest (the source in its own rest pose), how far each ankle ends over (+) or under (-) where it rests, metres. */
   feet: { left: number; right: number };
   /** For the standing rest, how far the hips are turned from their own rest, degrees: 0 unless the torso is lined up. */
@@ -90,6 +92,11 @@ export interface FitPlan {
   cos: number;
   sin: number;
   scale: number;
+  /**
+   * The legs' own length, target over source (`FitReport.stride`): what the speed a clip's feet were made for is scaled
+   * by on this skeleton (`factsOf`), where `scale` is the hips' height's, which is what the hips' travel is scaled by.
+   */
+  stride: number;
   /** The joint the hips drive (the one that takes the travel), or -1. */
   root: number;
   /** The driven joints, in the skeleton's order: one rotation track each. */
@@ -283,6 +290,26 @@ export function planFit(bones: readonly PackBone[], target: TargetSkeleton, flag
   const srcLeg = legHeight(bones[hips].rest[1], (i) => bones[i].rest[1], boneAt.get('LeftFoot'), boneAt.get('RightFoot'));
   const tgtLeg = root >= 0 ? legHeight(world.p[root * 3 + 1], (i) => world.p[i * 3 + 1], jointAt.get(SOURCE_TO_JOINT.LeftFoot), jointAt.get(SOURCE_TO_JOINT.RightFoot)) : 0;
   const scale = srcLeg > 1e-6 && tgtLeg > 1e-6 ? tgtLeg / srcLeg : 1;
+  // The stride: a planted foot sweeps back under its hip joint by the leg's own turns, thigh and shin, so how fast it
+  // goes on this skeleton is the source's speed times the legs' own lengths' ratio, not the hips' height's. The two
+  // differ wherever a skeleton's hips stand otherwise over its hip joints: the game's skeletons stand theirs 3.8 cm over
+  // them and the source 6.8 cm, so the hips' height reads 0.952 of the source's where the legs are 0.984 of it, and
+  // scaled by the hips' height every clip played 3% too fast for its ground and its planted feet slipped back by that.
+  // The thigh and the shin each by its own length, so a rest with a bent knee measures its leg whole. A skeleton
+  // without the leg's joints keeps the hips' scale.
+  const legOf = (len: (a: number, b: number) => number, up: number | undefined, knee: number | undefined, ankle: number | undefined) => (up !== undefined && knee !== undefined && ankle !== undefined ? len(up, knee) + len(knee, ankle) : 0);
+  const srcLen = (a: number, b: number) => Math.hypot(bones[a].rest[0] - bones[b].rest[0], bones[a].rest[1] - bones[b].rest[1], bones[a].rest[2] - bones[b].rest[2]);
+  const tgtLen = (a: number, b: number) => Math.hypot(world.p[a * 3] - world.p[b * 3], world.p[a * 3 + 1] - world.p[b * 3 + 1], world.p[a * 3 + 2] - world.p[b * 3 + 2]);
+  let srcLegs = 0, tgtLegs = 0;
+  for (const side of ['Left', 'Right']) {
+    const s = legOf(srcLen, boneAt.get(`${side}UpLeg`), boneAt.get(`${side}Leg`), boneAt.get(`${side}Foot`));
+    const t = legOf(tgtLen, jointAt.get(SOURCE_TO_JOINT[`${side}UpLeg`]), jointAt.get(SOURCE_TO_JOINT[`${side}Leg`]), jointAt.get(SOURCE_TO_JOINT[`${side}Foot`]));
+    if (s > 1e-6 && t > 1e-6) {
+      srcLegs += s;
+      tgtLegs += t;
+    }
+  }
+  const stride = srcLegs > 1e-6 ? tgtLegs / srcLegs : scale;
 
   // How well the facing holds: the toes' directions, source against target.
   let toes = 1;
@@ -333,6 +360,7 @@ export function planFit(bones: readonly PackBone[], target: TargetSkeleton, flag
     facing: (yaw * 180) / Math.PI,
     toes,
     scale,
+    stride,
     feet: { left: drop(SOURCE_TO_JOINT.LeftFoot), right: drop(SOURCE_TO_JOINT.RightFoot) },
     hipsTilt: root >= 0 ? tiltOf(root) : 0,
     spineTilt,
@@ -348,7 +376,7 @@ export function planFit(bones: readonly PackBone[], target: TargetSkeleton, flag
     rotateInto(level, 0, pq, 0, target.anchor[0], target.anchor[1], target.anchor[2]);
     rotateInto(anchor, 0, [-pq[0], -pq[1], -pq[2], pq[3]], 0, level[0], 0, level[2]);
   }
-  return { joints, boneOf, tail, restWorldQ: world.q, restWorldP: world.p, baseQ: [target.base.q[0], target.base.q[1], target.base.q[2], target.base.q[3]], cos, sin, scale, root, driven, anchor, report };
+  return { joints, boneOf, tail, restWorldQ: world.q, restWorldP: world.p, baseQ: [target.base.q[0], target.base.q[1], target.base.q[2], target.base.q[3]], cos, sin, scale, stride, root, driven, anchor, report };
 }
 
 /** What a clip's index row tells the fitter. */

@@ -21,8 +21,21 @@ export interface LocoTune {
    */
   gunSquare: boolean;
   /**
+   * What a fight's key does to a sprint (`SPRINT_ENDERS` in bodyLoco.ts: the attack, the other attack, a gun's other
+   * trigger, the saber's throw, the block; never the six ability keys or the jump). 'ends', the owner's word of
+   * 2026-11-15 ("maybe sprinting is interrupted if you attack like blocking does"): pressed or held while the class
+   * asked is the sprint, it ends the sprint on that very frame and goes through, the body drops to the run (fighting
+   * is capped at the run), and only a fresh double tap of Shift sprints again. 'muted' is the rule before it: the attack,
+   * the other trigger and the throw do nothing while the body sprints, and a block or an aim caps the pace only while
+   * held (let go with Shift still down, the sprint is back at once).
+   */
+  sprintFight: 'ends' | 'muted';
+  /**
    * What each class moves the body at, metres a second, by the way it goes. Every start is the speed its clip's own
-   * feet were measured at (the pack's index), so each clip plays near its own rate, with two exceptions said below.
+   * feet were measured at when the paces were made (the pack's index of 91e62d9), with two exceptions said below. The
+   * importer's measure was mended since (2026-11-15) and every clip now reads 1.5 to 10% faster (the README's
+   * "Walking, jogging, running and sprinting" puts each dial beside its clip's own speed now); the dials were left where
+   * they started, which are the owner's, and the clips' playback rates moved instead.
    */
   speed: {
     forward: {
@@ -67,11 +80,12 @@ export interface LocoTune {
     min: number;
     max: number;
     /**
-     * How fast every clip's feet really go over the ground, as a share of what the pack's index says they do. The
-     * index's speed is the mean of each planted foot's speed under the hips, its landing and lifting frames among
-     * them, which reads a few hundredths under the stride's own (1 to 4% on the four clips whose source travels, by
-     * their hips); raised past 1, every clip plays that much slower for the same ground speed. Started at 1, the
-     * index as it stands: the owner's eye says whether the feet slip.
+     * How fast every clip's feet really go over the ground, as a share of what the pack's index says they do; raised
+     * past 1, every clip plays that much slower for the same ground speed. The measure was mended (2026-11-15): the
+     * index's speed is now read off each stance's settled middle (the heel and the toe both down and still) against the
+     * ground the clip is carried on, never under the swaying hips or from a landing or lifting frame, and the fitted
+     * stride is scaled by the legs' own lengths rather than the hips' height, so at 1 a planted foot keeps within 2% of
+     * the ground on every clip of the table (the node test holds it). It stays for the eye.
      */
     feet: number;
   };
@@ -99,9 +113,9 @@ export interface LocoTune {
     /** Sideways and the forward diagonals from the jog up: the brief's "does not deplete stamina, but won't allow for stamina regen". */
     side: number;
     /**
-     * Sideways and the forward diagonals at the walk. Started at the standard rate, which is the design's reading
-     * (the brief's line stands under the whole side-to-side list, the slow strafe included): nought is the brief's
-     * line read to the letter.
+     * Sideways and the forward diagonals at the walk: the standard rate. The owner's answer of 2026-11-15, "walking
+     * sideways should give stamina back yes" (the brief's "won't allow for stamina regen" holds from the jog up,
+     * `side`). Nought is the brief's line read to the letter.
      */
     sideWalk: number;
     /**
@@ -166,6 +180,7 @@ export interface LocoTune {
 export const LOCO_TUNE: LocoTune = {
   on: true,
   gunSquare: true,
+  sprintFight: 'ends',
   speed: {
     forward: { walk: 1.44, jog: 2.85, tired: 2.38, run: 4.9, sprint: 6.35 },
     back: { walk: 1.28, jog: 2.25, run: 2.93 },
@@ -232,11 +247,13 @@ export const LOCO_RANGES: Record<string, { min: number; max: number }> = {
 };
 
 const SWITCHES: readonly string[] = ['on', 'gunSquare'];
+/** The switches that take one of their words, and the words. */
+export const LOCO_CHOICES: Readonly<Record<string, readonly string[]>> = { sprintFight: ['ends', 'muted'] };
 
 /**
  * Set numbers of the table from a nested object (`{ speed: { forward: { run: 5.2 } }, shift: { dropDelay: 0.8 } }`),
- * each held to its range; the two switches take true or false. Answers words for anything held, refused or not
- * known; nothing is saved.
+ * each held to its range; the two switches take true or false, and a choice one of its words. Answers words for
+ * anything held, refused or not known; nothing is saved.
  */
 export function tuneLoco(patch: unknown): string[] {
   const words: string[] = [];
@@ -259,6 +276,12 @@ export function tuneLoco(patch: unknown): string[] {
         const want = raw === 'on' ? true : raw === 'off' ? false : raw;
         if (typeof want !== 'boolean') words.push(`${here} takes true or false`);
         else at[key] = want;
+        continue;
+      }
+      const words2 = LOCO_CHOICES[here];
+      if (words2) {
+        if (typeof raw !== 'string' || !words2.includes(raw)) words.push(`${here} takes ${words2.map((w) => `'${w}'`).join(' or ')}`);
+        else at[key] = raw;
         continue;
       }
       const range = LOCO_RANGES[here];

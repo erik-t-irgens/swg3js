@@ -5,12 +5,14 @@
 // pinned as text, with the old expressions still standing under them.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BodyLoco, LocoIn, SPRINT_MUTES, newLocoIn, type LocoRig } from '../../../src/anim/bodyLoco.ts';
+import { BodyLoco, LocoIn, SPRINT_ENDERS, SPRINT_MUTES, fightKeysDown, newLocoIn, type LocoRig } from '../../../src/anim/bodyLoco.ts';
 import { rateFor } from '../../../src/anim/locoPhase.ts';
 import { tableClips } from '../../../src/anim/locoTable.ts';
-import { LOCO_TUNE_SHIPPED, type LocoTune } from '../../../src/anim/locoTune.ts';
+import { LOCO_TUNE, LOCO_TUNE_SHIPPED, tuneLoco, type LocoTune } from '../../../src/anim/locoTune.ts';
+import { loadOldMany } from './oldModules.ts';
 import { DEFAULT_BINDINGS, FIGHT_ACTIONS } from '../../../src/core/input.ts';
 import { JKA, UNIT } from '../../../src/player/jkaMove.ts';
 import { STATS } from '../../../src/progress/stats.ts';
@@ -27,6 +29,8 @@ const root = repoRoot(import.meta.url);
 const text = (rel: string) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n');
 const T = (): LocoTune => JSON.parse(JSON.stringify(LOCO_TUNE_SHIPPED)) as LocoTune;
 const DEG = 180 / Math.PI;
+/** The digest of the 'muted' frame trace, recorded from 91e62d9's own modules: what a checkout with no history is held to. */
+const MUTED_TRACE = '41249bd20fff03f8';
 
 /** A rig with every clip of the table (and what was asked of it), each clip's feet made for 3 m/s. */
 const asked: string[] = [];
@@ -52,7 +56,7 @@ class Body {
   step(dt: number, k: Keys, over: Partial<LocoIn> = {}): void {
     this.walking = this.loco.keys(dt, !!k.shift, !!k.shift && !this.was.shift, !!k.walk, this.rig);
     this.was = k;
-    Object.assign(this.f, { dt, mz: (k.w ? 1 : 0) - (k.s ? 1 : 0), mx: (k.d ? 1 : 0) - (k.a ? 1 : 0), standing: true, grounded: true, swimming: false, fighting: false, aiming: false, gunUp: false, boost: 1 }, over);
+    Object.assign(this.f, { dt, mz: (k.w ? 1 : 0) - (k.s ? 1 : 0), mx: (k.d ? 1 : 0) - (k.a ? 1 : 0), standing: true, grounded: true, swimming: false, fighting: false, aiming: false, gunUp: false, fightKeys: false, boost: 1 }, over);
     this.rules = this.loco.plan(this.f);
   }
   run(seconds: number, k: Keys, fps = 60, over: Partial<LocoIn> = {}): void {
@@ -380,6 +384,139 @@ class Body {
   ok(Math.abs(LOCO_TUNE_SHIPPED.speed.forward.sprint - JKA.speed * UNIT) < 1e-9, 'and the sprint starts at Jedi Academy\'s own run, the one speed the body had before: nothing is faster than it was');
 }
 
+// ---- a fight's key while sprinting: 'ends' (the owner's word of 2026-11-15), and 'muted' (the rule before) ------------------
+{
+  // Which keys: the fight's five, pressed or held; never an ability key or the jump.
+  const reader = (held: string[], pressed: string[] = []) => ({ held: (a: string) => held.includes(a), pressedAction: (a: string) => pressed.includes(a) });
+  ok(SPRINT_ENDERS.join() === 'attack,altAttack,altFire,saberThrow,block' && SPRINT_ENDERS.every((a) => Object.hasOwn(DEFAULT_BINDINGS, a) && (FIGHT_ACTIONS as readonly string[]).includes(a)), 'the keys that end a sprint are the attack, the other attack (a blaster\'s aim, bare hands\' kick), a gun\'s other trigger, the saber\'s throw and the block: each an action the game has, each one of the fight\'s');
+  ok(SPRINT_ENDERS.every((a) => fightKeysDown(reader([a])) && fightKeysDown(reader([], [a]))) && !fightKeysDown(reader([])), 'each of them pressed or held is one');
+  ok(!['slot1', 'slot2', 'slot3', 'slot4', 'slot5', 'slot6', 'jump', 'speedUp', 'walk', 'forward'].some((a) => fightKeysDown(reader([a], [a]))), 'and the six ability keys, the jump, the speed keys and the move keys never are');
+  ok(LOCO_TUNE_SHIPPED.sprintFight === 'ends', 'the rule is \'ends\' unless the owner moves it');
+
+  // 'ends', at 30, 60 and 144 frames a second.
+  for (const fps of [30, 60, 144]) {
+    const b = new Body();
+    b.sprint();
+    ok(b.loco.sprinting && b.loco.mutes() === null, `${fps} fps: sprinting under 'ends', nothing is muted (the press is never swallowed)`);
+    b.step(1 / fps, { w: true, shift: true }, { fightKeys: true });
+    ok(!b.loco.sprinting && b.loco.cls === 3 && b.loco.asked === 3 && b.loco.pick!.id === 'running' && b.loco.speed === b.tune.speed.forward.run && b.loco.refused.includes('fight key') && b.loco.mutes() === null, `${fps} fps: the frame a fight's key goes down the sprint is over and the body is at the run, on that very frame (so the kit, which reads the press after the body's plan, finds no sprint: the press goes through)`);
+    b.run(1, { w: true, shift: true }, fps);
+    ok(!b.loco.sprinting && b.loco.cls === 3 && b.loco.asked === 3, `${fps} fps: with Shift still held, a second on, the run: the sprint does not come back by itself`);
+    b.run(0.2, { w: true }, fps);
+    b.run(0.3, { w: true, shift: true }, fps);
+    ok(b.loco.sprinting && b.loco.cls === 4, `${fps} fps: a fresh double tap of Shift sprints again`);
+    // The block: held while sprinting, then let go with Shift still held.
+    b.run(0.3, { w: true, shift: true }, fps, { fighting: true, fightKeys: true });
+    ok(!b.loco.sprinting && b.loco.cls === 3, `${fps} fps: a block held caps it at the run`);
+    b.run(0.5, { w: true, shift: true }, fps);
+    ok(!b.loco.sprinting && b.loco.cls === 3 && b.loco.asked === 3, `${fps} fps: and let go with Shift still held it is the run, not the sprint: a block ends it the same way`);
+    // The jump and the ability keys: no fight key, so the sprint goes on through them.
+    b.run(0.2, { w: true }, fps);
+    b.run(0.3, { w: true, shift: true }, fps);
+    b.run(0.5, { w: true, shift: true }, fps, { grounded: false });
+    ok(b.loco.sprinting && b.loco.cls === 4, `${fps} fps: a jump out of a sprint is still the sprint`);
+    // Shift let go just before the fight's key and pressed once just after it: the two taps straddle the attack, and
+    // are no double tap. The let-go before the key is forgotten, so the one press held gives the run.
+    b.run(0.5, { w: true, shift: true }, fps);
+    b.run(0.1, { w: true }, fps);
+    ok(b.loco.sprinting, `${fps} fps: Shift let go a moment, still sprinting (the drop's delay)`);
+    b.step(1 / fps, { w: true }, { fightKeys: true });
+    b.run(0.05, { w: true }, fps);
+    b.run(1, { w: true, shift: true }, fps);
+    ok(!b.loco.sprinting && b.loco.cls === 3 && b.loco.asked === 3, `${fps} fps: Shift let go, a fight's key, then one press of Shift held: the run, not the sprint (a let-go from before the key opens no tap)`);
+    b.run(0.2, { w: true }, fps);
+    b.run(0.3, { w: true, shift: true }, fps);
+    ok(b.loco.sprinting && b.loco.cls === 4, `${fps} fps: and a double tap begun after the key sprints`);
+  }
+  // A fight's key held as the double tap comes: the sprint never starts.
+  const h = new Body();
+  h.run(0.5, { w: true, shift: true }, 60, { fightKeys: true });
+  h.run(0.2, { w: true }, 60, { fightKeys: true });
+  h.run(0.3, { w: true, shift: true }, 60, { fightKeys: true });
+  ok(!h.loco.sprinting && h.loco.cls === 3, 'with a fight\'s key held (a trigger kept down) the double tap gives the run and never a sprint');
+  // Walking, the walk key holds the walk whatever is pressed, and the sprint asked is left as it was.
+  const w = new Body();
+  w.sprint();
+  w.step(1 / 60, { w: true, shift: true, walk: true }, { fightKeys: true });
+  ok(w.loco.cls === 1 && w.loco.asked === 4, 'the walk key held, a fight\'s key ends nothing the body is not doing');
+  // Switched to 'muted' live: the rule before, its mutes back.
+  const m = new Body();
+  ok(tuneLoco({ sprintFight: 'muted' }).length === 0 && tuneLoco({ sprintFight: 'off' })[0].includes("'ends' or 'muted'") && LOCO_TUNE.sprintFight === 'muted', 'the switch takes its two words and refuses any other');
+  tuneLoco({ sprintFight: 'ends' });
+  m.tune.sprintFight = 'muted';
+  m.sprint();
+  ok(m.loco.mutes() === SPRINT_MUTES, 'under \'muted\', sprinting, the sprint\'s mutes are asked for as before');
+  m.step(1 / 60, { w: true, shift: true }, { fightKeys: true });
+  ok(m.loco.sprinting && m.loco.cls === 4, 'and a fight\'s key ends nothing');
+  m.run(0.3, { w: true, shift: true }, 60, { fighting: true, fightKeys: true });
+  m.run(0.3, { w: true, shift: true });
+  ok(m.loco.sprinting && m.loco.cls === 4, 'a block held caps it only while held: let go with Shift still held, the sprint is back by itself (what a block did before the owner\'s word)');
+  ok((m.loco.report(100) as { sprintFight: string }).sprintFight === 'muted', '__debug.loco() says the rule');
+
+  // 'muted' is 91e62d9's frame for frame: the same keys through that commit's own modules, out of git, and through
+  // today's, every number the record answers and the mutes the game asks for, compared by Object.is.
+  const FILES = ['src/anim/bodyLoco.ts', 'src/anim/locoClass.ts', 'src/anim/locoTable.ts', 'src/anim/locoTune.ts'];
+  const oldMods = await loadOldMany(FILES, ['src/anim/bodyLoco.ts', 'src/anim/locoTune.ts'], '91e62d9');
+  const trace = (Loco: new (t: never) => BodyLoco, tune: unknown, mutesOf: (b: BodyLoco) => readonly string[] | null): string[] => {
+    const rows: string[] = [];
+    for (const fps of [30, 60, 144]) {
+      const b = new Loco(tune as never);
+      const f = newLocoIn();
+      f.sprint = 6.35;
+      f.pool = 100;
+      let was = false;
+      const step = (seconds: number, k: Keys, over: Partial<LocoIn> = {}) => {
+        for (let i = 0; i < Math.round(seconds * fps); i++) {
+          const dt = 1 / fps;
+          const mutes = mutesOf(b);
+          b.keys(dt, !!k.shift, !!k.shift && !was, !!k.walk, full);
+          was = !!k.shift;
+          Object.assign(f, { dt, mz: (k.w ? 1 : 0) - (k.s ? 1 : 0), mx: (k.d ? 1 : 0) - (k.a ? 1 : 0), standing: true, grounded: true, swimming: false, fighting: false, aiming: false, gunUp: false, fightKeys: false, boost: 1, ground: 0 }, over);
+          const rules = b.plan(f);
+          f.ground = b.speed * (f.grounded ? 0.97 : 1);
+          const legs = b.legs(full, f, !!over.fighting);
+          b.face(b.faces(!!over.fighting));
+          b.fadeFor(legs !== null, !!over.fighting, f.mz !== 0 || f.mx !== 0);
+          rows.push([mutes ? mutes.join('+') : '-', rules, b.asked, b.cls, b.speed, b.sprinting, b.refused, b.pick?.id ?? '-', b.dir, b.walkOn, b.moves, b.legsOn, b.rate, b.turn, b.turnNow, b.turnStep, b.fadeNow, b.stamina.value, b.stamina.tired].map((v) => (typeof v === 'number' ? Object.is(v, -0) ? '-0' : String(v) : String(v))).join(' '));
+        }
+      };
+      step(0.5, { w: true });
+      step(0.5, { w: true, shift: true });
+      step(0.2, { w: true });
+      step(0.6, { w: true, shift: true });
+      step(1 / fps, { w: true, shift: true }, { fightKeys: true });
+      step(0.4, { w: true, shift: true }, { fightKeys: true, fighting: true });
+      step(0.5, { w: true, shift: true });
+      step(0.3, { w: true, shift: true }, { fightKeys: true, aiming: true, gunUp: true });
+      step(0.4, { w: true, shift: true });
+      step(0.3, { w: true, a: true, shift: true }, { fightKeys: true });
+      step(0.3, { s: true, d: true, shift: true });
+      step(0.3, { a: true, walk: true }, { fightKeys: true });
+      step(0.3, {});
+      step(0.2, { w: true });
+      step(0.6, { w: true, shift: true }, { grounded: false });
+      step(6, { w: true, shift: true });
+      step(1, { w: true }, { standing: false });
+      step(0.3, { w: true }, { swimming: true });
+      b.idle(1 / fps, 100);
+      step(0.5, { w: true, shift: true });
+    }
+    return rows;
+  };
+  const todayMuted = T();
+  todayMuted.sprintFight = 'muted';
+  const now = trace(BodyLoco as never, todayMuted, (b) => b.mutes());
+  const digest = createHash('sha1').update(now.join('\n')).digest('hex').slice(0, 16);
+  if (oldMods) {
+    const [oldBody, oldTune] = oldMods as [{ BodyLoco: new (t: never) => BodyLoco; SPRINT_MUTES: readonly string[] }, { LOCO_TUNE_SHIPPED: unknown }];
+    const then = trace(oldBody.BodyLoco, JSON.parse(JSON.stringify(oldTune.LOCO_TUNE_SHIPPED)), (b) => (b.sprinting ? oldBody.SPRINT_MUTES : null));
+    const first = now.findIndex((r, i) => r !== then[i]);
+    ok(now.length === then.length && first < 0, `under 'muted' the record is 91e62d9's, frame for frame at 30, 60 and 144 frames a second (${now.length} frames: the mutes the game asks for, the class asked and given, the speed, the pick, the rate, the turn, the fade and the pool)${first >= 0 ? `: frame ${first} is ${now[first]} against ${then[first]}` : ''}`);
+    note(`the 'muted' trace's digest is ${digest} (MUTED_TRACE, which a checkout with no history is held to)`);
+  } else note('git cannot hand over 91e62d9\'s modules here: the \'muted\' trace is held to the digest recorded from them');
+  ok(digest === MUTED_TRACE, `and its digest is the one recorded from 91e62d9's own modules (${digest})`);
+}
+
 // ---- the wiring, as text ---------------------------------------------------------------------------------------------------
 {
   const player = text('src/player/player.ts');
@@ -392,7 +529,7 @@ class Body {
 
   ok(has(player, 'readonly loco = new BodyLoco(LOCO_TUNE);') && count(player, 'new BodyLoco(') === 1, 'the player keeps one record for the speed classes, over the game\'s one tune');
   ok(has(player, "const walking = this.loco.keys(dt, !atControls && input.held('speedUp'), !atControls && input.pressedAction('speedUp'), !atControls && input.held('walk'), this.rig);\n    this.walkKey = walking;") && count(player, 'this.loco.keys(') === 1 && !has(player, "const walking = input.held('walk');") && !has(player, "pressedAction('walk')"), 'the speed keys are read once, first thing, through the record (the walk key as a hold, and neither key at a ship\'s controls, where Shift is the boost and Alt the free look): what comes back is the walk by the old rules');
-  ok(/lo\.dt = dt;\n\s+lo\.mz = mz;\n\s+lo\.mx = mx;\n\s+lo\.standing = !this\.crouching && !this\.prone && !this\.kneeling;\n\s+lo\.grounded = this\.grounded;\n\s+lo\.swimming = this\.swimming;\n(\s+\/\/[^\n]*\n)*\s+lo\.fighting = this\.blocking \|\| fighting;\n\s+lo\.aiming = this\.aiming;\n\s+lo\.gunUp = this\.classId === 'bounty_hunter' && !this\.fists && \(this\.aiming \|\| this\.gunReady\);\n\s+lo\.sprint = this\.stats\.apply\('move\.sprint', LOCO_TUNE\.speed\.forward\.sprint\);\n\s+lo\.pool = this\.staminaPool;\n\s+lo\.boost = this\.speedMultiplier;\n\s+const classes = this\.loco\.plan\(lo\);\n\s+if \(classes\) \{\n\s+speed = this\.loco\.speed \* this\.speedMultiplier \* this\.lavaPaceNow;\n(\s+\/\/[^\n]*\n)*\s+this\.walkKey = this\.loco\.cls <= 1;/.test(player) && count(player, 'this.loco.plan(') === 1, 'the frame is handed over whole and planned once, after the water has said whether the body swims; a class\'s speed is the body\'s, under Force Speed and the lava\'s pace as ever, and the walk class picks the walk clips whatever key gave it; only blocking or a fight caps the class, never one of Jedi Academy\'s one-offs playing out (a Force jump\'s flip)');
+  ok(/lo\.dt = dt;\n\s+lo\.mz = mz;\n\s+lo\.mx = mx;\n\s+lo\.standing = !this\.crouching && !this\.prone && !this\.kneeling;\n\s+lo\.grounded = this\.grounded;\n\s+lo\.swimming = this\.swimming;\n(\s+\/\/[^\n]*\n)*\s+lo\.fighting = this\.blocking \|\| fighting;\n\s+lo\.aiming = this\.aiming;\n(\s+\/\/[^\n]*\n)*\s+lo\.fightKeys = !atControls && fightKeysDown\(input\);\n\s+lo\.gunUp = this\.classId === 'bounty_hunter' && !this\.fists && \(this\.aiming \|\| this\.gunReady\);\n\s+lo\.sprint = this\.stats\.apply\('move\.sprint', LOCO_TUNE\.speed\.forward\.sprint\);\n\s+lo\.pool = this\.staminaPool;\n\s+lo\.boost = this\.speedMultiplier;\n\s+const classes = this\.loco\.plan\(lo\);\n\s+if \(classes\) \{\n\s+speed = this\.loco\.speed \* this\.speedMultiplier \* this\.lavaPaceNow;\n(\s+\/\/[^\n]*\n)*\s+this\.walkKey = this\.loco\.cls <= 1;/.test(player) && count(player, 'this.loco.plan(') === 1, 'the frame is handed over whole and planned once, after the water has said whether the body swims; a class\'s speed is the body\'s, under Force Speed and the lava\'s pace as ever, and the walk class picks the walk clips whatever key gave it; only blocking or a fight caps the class, never one of Jedi Academy\'s one-offs playing out (a Force jump\'s flip)');
   ok(player.indexOf('this.waterDepth = depth;') < player.indexOf('const classes = this.loco.plan(lo);') && player.indexOf('const classes = this.loco.plan(lo);') < player.indexOf('if (this.swimming) {\n      // Swimming: slow, no gravity'), 'between the swim\'s verdict and the swim itself');
   ok(has(player, "return this.stats.apply('move.stamina', LOCO_TUNE.stamina.pool);") && has(player, 'get sprinting(): boolean {\n    return this.loco.sprinting;\n  }'), 'the pool\'s size is the stats\' over the tune\'s, and the body sprints exactly while its record says so');
   ok(has(player, 'c.walk = classes && !script ? false : walking;') && has(player, 'c.speedScale = this.speedMultiplier * this.lavaPaceNow * (classes && this.loco.moves && !script ? this.loco.speed / (JKA.speed * UNIT) : this.paceScale(walking, mz, mx));'), 'Jedi Academy\'s movement is handed the class\'s speed as a share of its own run, with no halving, while a way is asked; with none (a body braking to a stop), in a leaping saber move, and everywhere without a class, the pace it always had');
@@ -419,7 +556,12 @@ class Body {
   ok(has(player, 'this.anim.drop();\n    // Whole means rested too: the stamina is full at a respawn and at an arrival.\n    this.loco.refill(this.staminaPool);'), 'a respawn and an arrival fill the pool');
   ok(has(player, "const speed = this.noclipSpeed * (input.held('speedUp') ? 3.5 : 1) * this.speedMultiplier;") && has(text('src/editor/editorEntry.ts'), "a.fast = input.held('speedUp');") && has(text('src/editor/editorEdit.ts'), "const shift = input.held('speedUp');"), 'noclip\'s fast, the world editor\'s fast flight and its Shift are Shift still, which is the speed-up now');
 
-  ok(has(main, 'private stepSprintKeys(): void {\n    if (this.player.sprinting) this.input.mute(SPRINT_MUTES as readonly Action[]);\n  }') && count(main, 'this.stepSprintKeys();\n') === 2 && /this\.stepSprintKeys\(\);\n\s+this\.stepImpactKeys\(\);/.test(main) && count(main, 'this.stepSprintKeys();') === count(main, 'this.stepImpactKeys();'), 'the game mutes the sprint\'s actions at two places, the frame loop and the console\'s advance, each straight before the impact\'s and so before anything reads a key');
+  ok(has(main, 'private stepSprintKeys(): void {\n    const mutes = this.player.loco.mutes();\n    if (mutes) this.input.mute(mutes as readonly Action[]);\n  }') && count(main, 'this.stepSprintKeys();\n') === 2 && /this\.stepSprintKeys\(\);\n\s+this\.stepImpactKeys\(\);/.test(main) && count(main, 'this.stepSprintKeys();') === count(main, 'this.stepImpactKeys();'), 'the game mutes what the record says to mute (under the tune\'s \'muted\' the sprint\'s actions, under \'ends\' nothing) at two places, the frame loop and the console\'s advance, each straight before the impact\'s and so before anything reads a key');
+  // Under 'ends' a fight's key ends the sprint in the body's own plan, which must come before the kit reads the press:
+  // in both loops the player's update stands before the combat's step (whose kit starts the swing, the shot, the kick).
+  const loops = [main.indexOf('this.stepSprintKeys();'), main.lastIndexOf('this.stepSprintKeys();')].map((at) => ({ sprint: at, update: main.indexOf('player.update(dt,', at), combat: main.indexOf('this.stepCombat(dt);', at) }));
+  ok(loops.every((l) => l.sprint >= 0 && l.sprint < l.update && l.update < l.combat) && has(main, 'this.kit.update(ctx);'), 'and in both the frame loop and the console\'s advance the player\'s update, which plans the class and ends a sprint, runs before the combat\'s step, whose kit reads the press: so the press that ends a sprint goes through on its own frame');
+  ok(has(player, 'lo.fightKeys = !atControls && fightKeysDown(input);') && count(player, 'fightKeysDown(') === 1, 'the player hands the plan whether one of the fight\'s keys is pressed or held, once a frame, never at a ship\'s controls');
   ok(has(main, 'IMPORTED_CLIPS.strides = (clip) => MIXAMO.strideOf(clip);') && has(main, "LOCO_TUNE.on = locoSwitchOn(() => localStorage.getItem(LOCO_SWITCH));") && has(main, 'animDialsFor(helper) ?? locoDialsFor(helper) ??') && has(main, 'loco: (o: LocoDebugOptions = {}) => this.locoDebug(o),'), 'the game hands the rigs\' loader each clip\'s stride, reads the classes\' switch at load, and has the console\'s helper and its dials');
   ok(has(main, 'this.hud.setStamina(player.loco.stamina, staminaPool, player.loco.stamina.shown(staminaPool, LOCO_TUNE), player.loco.on);\n      this.hud.update(dt,'), 'and tells the display the pool each frame it draws it, and whether the classes are in force for the body at all');
   ok(has(main, "boost: input.held('speedUp') && (pilot.combat ? pilot.combat.boostLeft > 0 : true),"), 'a ship\'s boost is Shift still, which is the speed-up now');

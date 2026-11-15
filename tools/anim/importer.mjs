@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { PACK_FORMAT, PACK_FPS, clipSlug, encodeMxa, mirrorClip, readPackIndex } from '../../src/anim/mxaFile.ts';
-import { analyzeClip } from './analyze.mjs';
+import { ANALYZE, analyzeClip } from './analyze.mjs';
 import { readFbx, restDifference } from './fbx.mjs';
 import { CLIPS, rowFor } from './mixamoClips.mjs';
 
@@ -193,6 +193,12 @@ export function importFolder(folder, out, { log = () => {} } = {}) {
   return { index, report, restDiffers, failed, tableUnused, stale, files: files.length, restFile: first.file, source: first.source, bytes: report.reduce((s, c) => s + c.bytes, 0) + Buffer.byteLength(text) };
 }
 
+/**
+ * How far a level travelling loop's feet may say it goes from what its hips did before the report calls it out, per
+ * cent. The measure meets every such clip of the owner's within 2% (it was 15% while the measure read 2 to 10% low).
+ */
+export const TRAVEL_APART = 5;
+
 /** The report as the lines the command prints. */
 export function reportLines(result, out) {
   const lines = [];
@@ -206,7 +212,7 @@ export function reportLines(result, out) {
       `${c.id.padEnd(36)} ${String(c.frames).padStart(6)}  ${c.duration.toFixed(3).padStart(7)}  ${(c.loop ? (c.loopSaid ? 'yes' : 'yes*') : c.loopSaid ? 'no*' : 'no').padEnd(4)}  ${c.travel.toFixed(2).padStart(6)}  ${c.speed.toFixed(2).padStart(5)}  ${c.speed >= 0.1 ? c.heading.toFixed(0).padStart(7) : '      -'}  ${String(c.marks).padStart(5)}  ${c.use ? 'yes' : ''}`,
     );
   }
-  lines.push('(loop with a star: the table said so over what the first and last poses say; travel is the hips\' level net displacement, metres; speed is by the planted feet, m/s; heading 0 forward, +90 left)');
+  lines.push('(loop with a star: the table said so over what the first and last poses say; travel is the hips\' level net displacement, metres; speed is by the planted feet over their stances\' settled middles, m/s; heading 0 forward, +90 left)');
   // Only a clip whose feet were measured: a hang that shuffles along a ledge travels too, on no ground.
   const travels = report.filter((c) => c.travelSpeed !== null && !c.mirrorOf && c.speed >= 0.1);
   if (travels.length) {
@@ -214,7 +220,11 @@ export function reportLines(result, out) {
     lines.push('The clips that travel and loop, their feet against their hips:');
     for (const c of travels) {
       const off = c.travelSpeed > 0 ? (c.speed / c.travelSpeed - 1) * 100 : 0;
-      lines.push(`  ${c.id}: ${c.travel.toFixed(2)} m in ${c.duration.toFixed(3)} s is ${c.travelSpeed.toFixed(2)} m/s; the feet say ${c.speed.toFixed(2)} (${off >= 0 ? '+' : ''}${off.toFixed(0)}%)${Math.abs(off) > 15 ? '  ** more than 15% apart' : ''}`);
+      // A loop the table keeps whose hips end higher or lower than they began climbs: its feet come down on steps, never
+      // on the one floor the measure reads ("near the lowest each foot gets"), so its feet are said and not held to its hips.
+      const climb = Math.abs(c.rise) > ANALYZE.loopHeight;
+      const verdict = climb ? `  (climbs ${Math.abs(c.rise).toFixed(2)} m a cycle: its feet stand on steps, not on one floor, and are not held to its hips)` : Math.abs(off) > TRAVEL_APART ? `  ** more than ${TRAVEL_APART}% apart` : '';
+      lines.push(`  ${c.id}: ${c.travel.toFixed(2)} m in ${c.duration.toFixed(3)} s is ${c.travelSpeed.toFixed(2)} m/s; the feet say ${c.speed.toFixed(2)} (${off >= 0 ? '+' : ''}${off.toFixed(0)}%)${verdict}`);
     }
   }
   const starts = report.filter((c) => c.use && !c.loop);

@@ -31,7 +31,7 @@ import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from './swimStep.ts';
 import { ANIM_TUNE } from '../anim/animTune.ts';
 import { MX } from '../anim/animRules.ts';
 import { BodyAnim } from '../anim/bodyAnim.ts';
-import { BodyLoco, FadeOpts, LegOpts, newLocoIn } from '../anim/bodyLoco.ts';
+import { BodyLoco, FadeOpts, LegOpts, fightKeysDown, newLocoIn } from '../anim/bodyLoco.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
 import { FELL_UNDER } from '../world/fellOut.ts';
 
@@ -2600,6 +2600,9 @@ export class Player {
     // out of a sprint is still the sprint.
     lo.fighting = this.blocking || fighting;
     lo.aiming = this.aiming;
+    // One of the fight's keys pressed or held (the attack, the other attack, a gun's other trigger, the throw, the
+    // block): under the tune's 'ends' it ends a sprint this frame, before the kit reads the press.
+    lo.fightKeys = !atControls && fightKeysDown(input);
     lo.gunUp = this.classId === 'bounty_hunter' && !this.fists && (this.aiming || this.gunReady);
     lo.sprint = this.stats.apply('move.sprint', LOCO_TUNE.speed.forward.sprint);
     lo.pool = this.staminaPool;

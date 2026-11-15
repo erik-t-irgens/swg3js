@@ -8,7 +8,7 @@
 // whether a number crossing one is boxed, turns on the load it compiles under.
 import v8 from 'node:v8';
 import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks';
-import { BodyLoco, FadeOpts, LegOpts, newLocoIn, type LocoRig } from '../../../src/anim/bodyLoco.ts';
+import { BodyLoco, FadeOpts, LegOpts, fightKeysDown, newLocoIn, type LocoRig } from '../../../src/anim/bodyLoco.ts';
 import { tableClips } from '../../../src/anim/locoTable.ts';
 import { PeerIn, PeerLoco } from '../../../src/anim/peerLoco.ts';
 import { LOCO_TUNE_SHIPPED, type LocoTune } from '../../../src/anim/locoTune.ts';
@@ -44,8 +44,19 @@ class StandInRig implements LocoRig {
   }
 }
 
-/** The keys of a frame, as bits: forward, back, left, right, Shift, Shift pressed this frame, the walk key. */
-const W = 1, S = 2, A = 4, D = 8, SHIFT = 16, PRESS = 32, WALK = 64, GUN = 128, AIR = 256, SEAT = 512, BLOCK = 1024;
+/** The keys of a frame, as bits: forward, back, left, right, Shift, Shift pressed this frame, the walk key; and the attack pressed (a fight's key that ends a sprint). */
+const W = 1, S = 2, A = 4, D = 8, SHIFT = 16, PRESS = 32, WALK = 64, GUN = 128, AIR = 256, SEAT = 512, BLOCK = 1024, FIGHT = 2048;
+
+/** The input as the player's update reads the fight's keys off it (`fightKeysDown`): the attack from the frame's bits, the block from the block's. */
+class StandInInput {
+  keys = 0;
+  held(action: string): boolean {
+    return action === 'block' ? (this.keys & BLOCK) !== 0 : false;
+  }
+  pressedAction(action: string): boolean {
+    return action === 'attack' ? (this.keys & FIGHT) !== 0 : false;
+  }
+}
 
 /** The body as the player's update drives the record: kept fields, and one method a frame. */
 class Body {
@@ -57,13 +68,19 @@ class Body {
   heading = 0.5;
   camYaw = 0.5;
   walking = false;
+  readonly input = new StandInInput();
   legsFrames = 0;
   sprintFrames = 0;
   seatFrames = 0;
   dropped = 0;
+  muted = 0;
+  ended = 0;
 
   update(dt: number, keys: number): void {
     const loco = this.loco;
+    // The game's key block first: what the record says to mute (under 'ends', nothing).
+    if (loco.mutes() !== null) this.muted++;
+    this.input.keys = keys;
     if ((keys & SEAT) !== 0) {
       // Riding: the record is put down, as every branch of the update that returns before the plan does.
       loco.idle(dt, tune.stamina.pool);
@@ -84,11 +101,14 @@ class Body {
     lo.swimming = false;
     lo.fighting = jka;
     lo.aiming = false;
+    lo.fightKeys = fightKeysDown(this.input);
     lo.gunUp = (keys & GUN) !== 0;
     lo.sprint = tune.speed.forward.sprint;
     lo.pool = tune.stamina.pool;
     lo.boost = 1;
+    const wasSprinting = loco.sprinting;
     const classes = loco.plan(lo);
+    if (wasSprinting && lo.fightKeys && !loco.sprinting) this.ended++;
     let speed = 6.35;
     if (classes) speed = loco.speed * 1.0125;
     const faces = moving && loco.faces(jka);
@@ -111,12 +131,15 @@ class Body {
   }
 }
 
-/** A script of keys: each entry held for a number of frames. A walk round every way and class, the taps that make a sprint, a jump out of it, a seat taken in the middle of one, a block, a blaster up. */
+/** A script of keys: each entry held for a number of frames. A walk round every way and class, the taps that make a sprint, a jump out of it, a seat taken in the middle of one, a block, a blaster up, and an attack and a block each ending a sprint. */
 const SCRIPT: [number, number][] = [
   [W, 40], [W | SHIFT | PRESS, 1], [W | SHIFT, 30], [W, 8], [W | SHIFT | PRESS, 1], [W | SHIFT, 50], [W | SHIFT | AIR, 30], [W | SHIFT, 20],
   [W | SHIFT | SEAT, 45], [W | SHIFT | PRESS, 1], [W | SHIFT, 25], [W | D | SHIFT, 30], [D | SHIFT, 30], [S | D | SHIFT, 25], [S, 30], [S | A, 30], [A, 30],
   [A | WALK, 30], [W | A | WALK, 30], [W | WALK, 30], [W | D | WALK | GUN, 30], [W | D | GUN, 30], [W | BLOCK, 30], [W, 20], [0, 40], [W | SHIFT | PRESS, 1], [W | SHIFT, 12],
   [W, 3], [W | SHIFT | PRESS, 1], [W | SHIFT, 700], [W | SHIFT, 60], [0, 200],
+  // A sprint ended by an attack on its own frame, Shift still held (the run), and a fresh double tap; then by a block.
+  [W | SHIFT | PRESS, 1], [W | SHIFT, 20], [W, 8], [W | SHIFT | PRESS, 1], [W | SHIFT, 30], [W | SHIFT | FIGHT, 1], [W | SHIFT, 40],
+  [W, 8], [W | SHIFT | PRESS, 1], [W | SHIFT, 30], [W | SHIFT | BLOCK, 20], [W | SHIFT, 30], [0, 30],
 ];
 let scriptFrames = 0;
 for (const [, n] of SCRIPT) scriptFrames += n;
@@ -223,7 +246,7 @@ const c = await measure(peerFrame);
 console.log(JSON.stringify({
   frames: N,
   steady: a.made, steadyScavenges: a.scavenges, steadyLegs: steady.legsFrames,
-  busy: b.made, busyScavenges: b.scavenges, busyLegs: busy.legsFrames, busySprints: busy.sprintFrames, busySeats: busy.seatFrames, busyDrops: busy.dropped,
+  busy: b.made, busyScavenges: b.scavenges, busyLegs: busy.legsFrames, busySprints: busy.sprintFrames, busySeats: busy.seatFrames, busyDrops: busy.dropped, busyEnded: busy.ended, busyMuted: busy.muted,
   peers: c.made, peerScavenges: c.scavenges, peerCount: peers.length, peerPicks,
 }));
 process.exit(0);

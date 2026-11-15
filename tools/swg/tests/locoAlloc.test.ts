@@ -28,6 +28,8 @@ interface Answer {
   busySprints: number;
   busySeats: number;
   busyDrops: number;
+  busyEnded: number;
+  busyMuted: number;
   peers: number;
   peerScavenges: number;
   peerCount: number;
@@ -59,7 +61,7 @@ const per = (made: number, frames: number) => (Math.max(0, made) / frames).toFix
 for (let i = 0; i < all.length; i++) {
   const a = all[i];
   ok(a.steadyLegs > a.frames && a.steadyScavenges === 0 && a.steady < 0.05 * a.frames, `process ${i + 1} of 12: a steady jog (the keys, the plan, the turn, the legs and their rate, the fade) makes ${Math.max(0, a.steady)} bytes over ${a.frames} frames (${per(a.steady, a.frames)} a frame)`);
-  ok(a.busyLegs > a.frames && a.busySprints > 10_000 && a.busySeats > 1000 && a.busyDrops > 100 && a.busyScavenges === 0 && a.busy < 0.05 * a.frames, `process ${i + 1} of 12: ways and classes changing every few frames (${a.busySprints} frames of sprint, ${a.busySeats} seated, ${a.busyDrops} states let go) make ${Math.max(0, a.busy)} bytes (${per(a.busy, a.frames)} a frame)`);
+  ok(a.busyLegs > a.frames && a.busySprints > 10_000 && a.busySeats > 1000 && a.busyDrops > 100 && a.busyEnded > 100 && a.busyMuted === 0 && a.busyScavenges === 0 && a.busy < 0.05 * a.frames, `process ${i + 1} of 12: ways and classes changing every few frames (${a.busySprints} frames of sprint, ${a.busySeats} seated, ${a.busyDrops} states let go, ${a.busyEnded} sprints ended by a fight's key with nothing muted) make ${Math.max(0, a.busy)} bytes (${per(a.busy, a.frames)} a frame)`);
   ok(a.peerCount === 12 && a.peerPicks > a.frames * 6 && a.peerScavenges === 0 && a.peers < 0.05 * a.frames, `process ${i + 1} of 12: the legs of ${a.peerCount} other players worked out each frame (${a.peerPicks} answers) make ${Math.max(0, a.peers)} bytes (${per(a.peers, a.frames)} a frame)`);
 }
 console.log(`\nlocoAlloc: ${checks} checks passed`);

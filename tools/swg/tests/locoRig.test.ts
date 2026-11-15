@@ -30,7 +30,8 @@ const { factsOf, phaseAt, phaseGap, sharedRate } = await import('../../../src/an
 const { dirOf, locoPick, tableClips } = await import('../../../src/anim/locoTable.ts');
 const { LOCO_TUNE_SHIPPED } = await import('../../../src/anim/locoTune.ts');
 const { readPackIndex } = await import('../../../src/anim/mxaFile.ts');
-const { skeletonKey } = await import('../../../src/anim/fit.ts');
+const { planFit, skeletonKey } = await import('../../../src/anim/fit.ts');
+const { ALIGN_SHIPPED } = await import('../../../src/anim/mixamoMap.ts');
 const { repoRoot, targetSkeleton } = await import('./animFixtures.ts');
 type Rig = InstanceType<typeof CharacterRig>;
 type Tune = typeof LOCO_TUNE_SHIPPED;
@@ -93,7 +94,13 @@ async function rigWith(ahead = 0, strides = true): Promise<Rig> {
   return rig;
 }
 const actionOf = (rig: Rig, name: string) => (rig as unknown as { actions: Map<string, THREE.AnimationAction> }).actions.get(name)!;
-const scaleOf = (rig: Rig) => (pack.report() as { fits: { key: string; scale: number }[] }).fits.find((f) => f.key === skeletonKey(rig.restSkeleton()))!.scale;
+// The legs' own scale (a stride's speed is the legs', not the hips' height's: `FitPlan.stride`), as the pack's own plan
+// for this skeleton has it, and as its report says to a thousandth.
+const scaleOf = (rig: Rig) => {
+  const stride = planFit(index.bones, rig.restSkeleton(), ALIGN_SHIPPED).stride;
+  assert.ok(Math.abs((pack.report() as { fits: { key: string; stride: number }[] }).fits.find((f) => f.key === skeletonKey(rig.restSkeleton()))!.stride - stride) < 6e-4, 'the pack reports the stride its plan has');
+  return stride;
+};
 
 const rig = await rigWith();
 const fitScale = scaleOf(rig);
@@ -103,7 +110,7 @@ const fitScale = scaleOf(rig);
   const names = tableClips().map((id) => `mx_${id}`);
   ok(names.every((n) => rig.has(n)), `a rig's load hands it every clip of the speed classes' table (${names.length}), fitted to its skeleton`);
   const speeds = tableClips().map((id) => [id, rig.clipSpeed(`mx_${id}`)!, row(id).speed * fitScale] as const);
-  ok(speeds.every(([, got, want]) => Math.abs(got - want) < 2e-3), `each with the speed its feet were made for, scaled to this skeleton's legs (x${fitScale.toFixed(3)}: the jog ${speeds.find((s) => s[0] === 'slow_run')![1].toFixed(2)} m/s)`);
+  ok(speeds.every(([, got, want]) => Math.abs(got - want) < 2e-3), `each with the speed its feet were made for, scaled by this skeleton's legs' own lengths (x${fitScale.toFixed(3)}: the jog ${speeds.find((s) => s[0] === 'slow_run')![1].toFixed(2)} m/s)`);
   ok(rig.clipSpeed('mx_falling_idle') === null && rig.clipSpeed('mx_jumping_down') === null && rig.clipSpeed('walk') === null && rig.clipSpeed('mx_nothing') === null, 'a fall, a landing and the game\'s own clips have no stride (the converter\'s manifest speaks for the game\'s, and this rig has none)');
   ok(tableClips().every((id) => rig.readSpeed(`mx_${id}`) && Object.is(rig.speedOut, rig.clipSpeed(`mx_${id}`))) && !rig.readSpeed('mx_falling_idle') && !rig.readSpeed('walk') && !rig.readSpeed('mx_nothing'), 'and the same asked the frame\'s way (the speed written into the rig\'s own field, the answer whether it is known) is the same speed to the bit');
   rig.root.scale.setScalar(1.25);

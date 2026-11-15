@@ -177,10 +177,98 @@ export function walkClip(bones: readonly PackBone[], { period = 1, swing = 0.4, 
   );
 }
 
-/** How fast that walk's planted foot passes under the hips at its fastest, m/s: the swing's rate times the leg from hip to ankle. */
+/**
+ * A walk whose stride is known, laid out foot by foot and posed by the leg's own two bones (the knee found by the two
+ * lengths, forward): over each stance's settled middle the foot lies flat and goes back over the ground the clip is
+ * carried on (the hips' mean travel, `travel` m/s forward) at exactly `speed` m/s, so `speed` is the truth. Round it,
+ * the frames a measure of the stance must not read: the heel coming down onto the ground with the toe still up (the
+ * landing, the foot going back at only `landShare` of the speed), and the heel rolling up off it about a toe still
+ * planted (the lifting, the ankle rising at `rise` m/s, inside the planting's own stillness but outside the middle's);
+ * and over it all, the hips swaying fore and aft twice a stride by `sway` metres, which the body's own speed is none of.
+ * `travel` 0 walks in place; `travel` equal to `speed` is a walk whose planted feet stand still on its own ground.
+ */
+export function strideWalk(bones: readonly PackBone[], { speed = 1, travel = 0, sway = 0.03, period = 1, frames = 61, stance = 0.4, lift = 0.085, land = 0.08, rise = 0.42, landShare = 0.8 }: { speed?: number; travel?: number; sway?: number; period?: number; frames?: number; stance?: number; lift?: number; land?: number; rise?: number; landShare?: number } = {}): ClipData {
+  const at = (n: string) => bones.find((b) => b.name === n)!.rest;
+  const hip = at('LeftUpLeg'), knee = at('LeftLeg'), ankle = at('LeftFoot'), toe = at('LeftToeBase');
+  const thigh = Math.hypot(knee[1] - hip[1], knee[2] - hip[2]), shin = Math.hypot(ankle[1] - knee[1], ankle[2] - knee[2]);
+  const thighRest = Math.atan2(knee[2] - hip[2], knee[1] - hip[1]), shinRest = Math.atan2(ankle[2] - knee[2], ankle[1] - knee[1]);
+  // The foot, ankle to toe, in (y, z): its pitch turns it about the ankle's own axis across the body.
+  const fy = toe[1] - ankle[1], fz = toe[2] - ankle[2];
+  const pitch = (p: number): [number, number] => [fy * Math.cos(p) - fz * Math.sin(p), fy * Math.sin(p) + fz * Math.cos(p)];
+  const drop = 0.1;
+  const P = period;
+  // A heel rising at `rise` turns the foot about its toe at this rate (the ankle's lever, across, is the foot's own fore and aft length).
+  const spin = rise / fz;
+  const liftPitch = spin * lift;
+  const landPitch = -liftPitch;
+  // Where the ankle stands over its own rest height as the heel starts down.
+  const landHigh = rise * land;
+  // One foot's ankle (z, y) on the carried ground and its pitch, at a phase of its stride.
+  const footAt = (u: number): { z: number; y: number; p: number } => {
+    const restY = ankle[1];
+    const start = speed * stance * P * 0.5;
+    if (u < stance) return { z: start - speed * u * P, y: restY, p: 0 };
+    const flatEnd = start - speed * stance * P;
+    const toeEnd0 = flatEnd + fz;
+    if (u < stance + lift / P) {
+      const tau = (u - stance) * P;
+      const tz = toeEnd0 - speed * tau;
+      const [py, pz] = pitch(spin * tau);
+      return { z: tz - pz, y: toe[1] - py, p: spin * tau };
+    }
+    const liftEnd = (() => {
+      const tz = toeEnd0 - speed * lift;
+      const [py, pz] = pitch(liftPitch);
+      return { z: tz - pz, y: toe[1] - py };
+    })();
+    const landStartU = 1 - land / P;
+    const landFrom = { z: start + landShare * speed * land, y: restY + landHigh };
+    if (u >= landStartU) {
+      const tau = (u - landStartU) * P;
+      return { z: landFrom.z - landShare * speed * tau, y: landFrom.y - rise * tau, p: landPitch * (1 - tau / land) };
+    }
+    // The swing: forward over a lifted arc, the pitch turning from the lifting's to the landing's.
+    const w = (u - (stance + lift / P)) / (landStartU - (stance + lift / P));
+    const e = w * w * (3 - 2 * w);
+    return { z: liftEnd.z + (landFrom.z - liftEnd.z) * e, y: liftEnd.y + (landFrom.y - liftEnd.y) * e + 0.12 * Math.sin(Math.PI * w), p: liftPitch + (landPitch - liftPitch) * e };
+  };
+  const hipsAt = (t: number) => travel * t + sway * Math.sin((4 * Math.PI * t) / P + 1.1);
+  // The leg's two bones to put the ankle at (z, y) from the hip joint, the knee forward: each bone's turn about +X.
+  const legTurns = (dz: number, dy: number): [number, number] => {
+    const d = Math.hypot(dz, dy);
+    const x = (thigh * thigh - shin * shin + d * d) / (2 * d);
+    const h = Math.sqrt(Math.max(0, thigh * thigh - x * x));
+    const ez = dz / d, ey = dy / d;
+    const kz = x * ez + h * -ey, ky = x * ey + h * ez;
+    return [Math.atan2(kz, ky) - thighRest, Math.atan2(dz - kz, dy - ky) - shinRest];
+  };
+  return makeClip(
+    bones,
+    frames,
+    P,
+    (bone, t) => {
+      const side = bone.startsWith('Left') ? 0 : bone.startsWith('Right') ? 0.5 : null;
+      if (side === null || !/(UpLeg|Leg|Foot)$/.test(bone)) return [0, 0, 0, 1];
+      const u = (((t / P + side) % 1) + 1) % 1;
+      const f = footAt(u);
+      const hz = hipsAt(t) - travel * t;
+      const [a1, a2] = legTurns(f.z - (hip[2] + hz), f.y - (hip[1] - drop));
+      return qaxis(1, 0, 0, /UpLeg$/.test(bone) ? a1 : /Leg$/.test(bone) ? a2 : f.p);
+    },
+    (t) => [0, -drop, hipsAt(t)],
+  );
+}
+
+/**
+ * How fast that walk's planted foot passes under the hips at its fastest, m/s: the swing's rate times the leg from hip
+ * to the foot's middle, halfway from the ankle to the toe (the point the importer reads a foot's speed off: the mean of
+ * its two). The walk swings the whole leg about the hip, so the toe, further out, goes faster than the ankle.
+ */
 export function walkTopSpeed(bones: readonly PackBone[], period = 1, swing = 0.4): number {
-  const hip = bones.find((b) => b.name === 'LeftUpLeg')!, ankle = bones.find((b) => b.name === 'LeftFoot')!;
-  return Math.hypot(hip.rest[0] - ankle.rest[0], hip.rest[1] - ankle.rest[1], hip.rest[2] - ankle.rest[2]) * swing * ((2 * Math.PI) / period);
+  const at = (n: string) => bones.find((b) => b.name === n)!.rest;
+  const hip = at('LeftUpLeg'), ankle = at('LeftFoot'), toe = at('LeftToeBase');
+  const mid = [0, 1, 2].map((i) => (ankle[i] + toe[i]) / 2);
+  return Math.hypot(hip[0] - mid[0], hip[1] - mid[1], hip[2] - mid[2]) * swing * ((2 * Math.PI) / period);
 }
 
 /** A converted body's skeleton, from its GLB's JSON chunk: the skin's joints parent first, each with its rest under its parent. */

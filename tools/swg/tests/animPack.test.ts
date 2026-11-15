@@ -190,14 +190,20 @@ const names = bones.map((b) => b.name);
   ok(['treading_water', 'flying', 'falling', 'falling_idle', 'floating'].every((id) => row(id).loop && far(id) < 6 && row(id).feet.length === 0 && row(id).speed === 0), 'the five loops of the air and the water loop, and have no foot marks and no speed: nothing is under their feet');
   ok(row('floating').level !== undefined && row('floating').level! > 0.2 && row('falling_idle').level === undefined, `the float is levelled (it rides ${row('floating').level?.toFixed(2)} m over its rest height as authored) and the falling loop is not`);
 
-  // The three clips that travel: what their feet say against what their hips did.
+  // The three clips that travel on the level: what their feet say against what their hips did. A loop that climbs (its
+  // hips end higher than they began: stairs) has its feet on steps, never on the one floor the measure reads, and is
+  // left out of it, as the importer's report leaves it.
   const travelling: [string, number][] = [];
+  const climbing: string[] = [];
   for (const c of index.clips) {
     const level = Math.hypot(c.travelNet[0], c.travelNet[2]);
-    if (c.loop && level > 0.3 && c.speed > 0 && !c.mirrorOf) travelling.push([c.id, c.speed / (level / c.duration) - 1]);
+    if (!(c.loop && level > 0.3 && c.speed > 0 && !c.mirrorOf)) continue;
+    if (Math.abs(c.travelNet[1]) > 0.03) climbing.push(c.id);
+    else travelling.push([c.id, c.speed / (level / c.duration) - 1]);
   }
   for (const id of ['left_strafe_walking', 'walk_strafe_right', 'sneak_walk']) ok(travelling.some(([t]) => t === id), `${id} travels, loops and has its feet measured`);
-  ok(travelling.every(([, off]) => Math.abs(off) < 0.15), `every travelling loop's foot speed is within 15% of its travel over its length (${travelling.map(([id, off]) => `${id} ${off >= 0 ? '+' : ''}${(off * 100).toFixed(0)}%`).join(', ')})`);
+  ok(travelling.every(([, off]) => Math.abs(off) < 0.05), `every level travelling loop's foot speed is within 5% of its travel over its length (${travelling.map(([id, off]) => `${id} ${off >= 0 ? '+' : ''}${(off * 100).toFixed(1)}%`).join(', ')})`);
+  ok(climbing.join() === 'running_up_stairs', `and the one that climbs, running_up_stairs, is not held to its hips (its feet say ${row('running_up_stairs').speed} m/s on steps, never one floor; the table never plays it)`);
 
   // Headings and marks by what the clips are.
   const near = (v: number, target: number, tol: number) => Math.abs(((v - target + 540) % 360) - 180) < tol;

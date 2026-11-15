@@ -19,8 +19,8 @@ export interface ClipFacts {
 }
 
 /**
- * A clip's stride from its index row and the scale it was fitted at; null for a clip that is no loop (a landing has
- * feet and no stride), has no left-foot mark, or has no speed.
+ * A clip's stride from its index row and its skeleton's legs (`FitPlan.stride`, the legs' own lengths over the source's);
+ * null for a clip that is no loop (a landing has feet and no stride), has no left-foot mark, or has no speed.
  */
 export function factsOf(row: { duration: number; speed: number; loop: boolean; feet: readonly { t: number; foot: string }[] }, scale: number): ClipFacts | null {
   if (!row.loop || !(row.duration > 0) || !(row.speed > 0.05)) return null;

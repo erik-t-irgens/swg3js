@@ -237,10 +237,11 @@ export class MixamoPack {
     const made = had ?? { clip: toThreeClip(clipName(id), fitted), fitted };
     if (!had) {
       fit.clips.set(id, made);
-      // A walking or running clip's stride, for the rig that plays it: its feet's speed at this skeleton's scale and
-      // when its left foot lands (src/anim/locoPhase.ts). A clip with no feet on the ground has none.
+      // A walking or running clip's stride, for the rig that plays it: its feet's speed scaled by this skeleton's legs
+      // (`stride`, the legs' own lengths; never `scale`, the hips' height, which is what the hips' travel is scaled by)
+      // and when its left foot lands (src/anim/locoPhase.ts). A clip with no feet on the ground has none.
       const row = this.rows.get(id);
-      const stride = row ? factsOf(row, fit.plan.scale) : null;
+      const stride = row ? factsOf(row, fit.plan.stride) : null;
       if (stride) this.strides.set(made.clip, stride);
     }
     const ms = this.io.now() - t;
@@ -385,6 +386,7 @@ export class MixamoPack {
         facingDeg: n2(r.facing),
         toesAgree: n2(r.toes),
         scale: Number(r.scale.toFixed(3)),
+        stride: Number(r.stride.toFixed(3)),
         standingRest: { leftFootM: Number(r.feet.left.toFixed(3)), rightFootM: Number(r.feet.right.toFixed(3)), hipsTiltDeg: n2(r.hipsTilt), spineTiltDeg: n2(r.spineTilt) },
         clips: [...f.clips.keys()].map(clipName),
         straysM: Object.fromEntries([...f.clips].filter(([, c]) => c.fitted.strays >= 0.02).map(([id, c]) => [clipName(id), Number(c.fitted.strays.toFixed(2))])),

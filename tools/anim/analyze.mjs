@@ -37,6 +37,59 @@ export function posePositions(clip, bones, frame, out = new Float64Array(bones.l
   return out;
 }
 
+/**
+ * Where a height taken straight from `h0` to `h1` across a span (0 to 1) is at or under `near`: the part of the span,
+ * as [from, to], empty (from at or past to) where it is over all the way.
+ */
+function belowAcross(h0, h1, near) {
+  if (h0 <= near && h1 <= near) return [0, 1];
+  if (h0 > near && h1 > near) return [1, 0];
+  const u = (near - h0) / (h1 - h0);
+  return h0 <= near ? [0, u] : [u, 1];
+}
+
+/**
+ * How much of each span (frame f to f + 1) of one foot is its stance's settled middle: of a span between two planted
+ * frames (`on`), the share near the ground (`near`, both points within `settledNear`) where neither point rises or
+ * falls faster than `still` across it (`rise`). A stance none of whose spans is that still keeps its stillest span
+ * near the ground all the same, so every stance a foot comes down for says how fast it went: a run's foot that lands
+ * and at once rolls its heel up off its toe is flat for an instant, and read at that instant alone it said nothing.
+ * `count` is how many frames `on` holds (a loop's last frame is its first); a loop's stance may run over its seam.
+ */
+export function settledShares(on, near, rise, count, loop, still) {
+  const spans = near.length;
+  const share = new Float64Array(spans);
+  const planted = (f) => on[f] && on[(f + 1) % count];
+  // Where to start walking: a span that is no stance's (in a loop, so a stance over the seam is read whole).
+  let start = 0;
+  if (loop) {
+    start = -1;
+    for (let f = 0; f < spans; f++) if (!planted(f)) { start = f; break; }
+    if (start < 0) start = 0;
+  }
+  let stance = [];
+  const close = () => {
+    if (!stance.length) return;
+    let kept = false, best = -1;
+    for (const f of stance) {
+      if (near[f] > 0 && rise[f] <= still) {
+        share[f] = near[f];
+        kept = true;
+      }
+      if (near[f] > 0 && (best < 0 || rise[f] < rise[best])) best = f;
+    }
+    if (!kept && best >= 0) share[best] = near[best];
+    stance = [];
+  };
+  for (let k = 0; k < spans; k++) {
+    const f = (start + k) % spans;
+    if (planted(f)) stance.push(f);
+    else close();
+  }
+  close();
+  return share;
+}
+
 /** The angle between two frames' deltas of one bone, degrees. */
 function angleBetween(q, a, b) {
   const dot = Math.abs(q[a] * q[b] + q[a + 1] * q[b + 1] + q[a + 2] * q[b + 2] + q[a + 3] * q[b + 3]);
@@ -66,6 +119,20 @@ export const ANALYZE = {
   goes: 0.35,
   /** ...keeping as planted only a foot that moves back under the hips at this share of that speed or more. */
   withBody: 0.4,
+  /**
+   * A planted foot is in its stance's settled middle while the ankle and the toe are both within this of the lowest
+   * each gets, metres... (where the foot is really planted: what a clip's speed is read from).
+   */
+  settledNear: 0.015,
+  /**
+   * ...and neither moves up or down faster than this, m/s: the foot flat on the ground, neither still coming down
+   * heel first nor rolling up onto its toe. Both are read between the frames, over each span from one frame to the
+   * next, as the game plays the clip (`settledShares`). Measured on the three walks whose source travels: over these
+   * spans the source's own feet move over its ground at 0.016, 0.015 and 0.050 m/s, against 0.080, 0.071 and 0.098
+   * over all the planted frames. From 1 to 2.5 cm and from 0.15 to 0.3 m/s no table clip's speed moves by more than
+   * 1.3%, and every stance of every table clip keeps a span (its stillest, where none is this still).
+   */
+  settledStill: 0.2,
 };
 
 const FEET = [
@@ -169,8 +236,18 @@ export function analyzeClip(clip, bones, { ground = true, tune = ANALYZE } = {})
   const feet = [];
   let sumX = 0, sumZ = 0, sumLen = 0, samples = 0;
   const planted = { L: 0, R: 0 };
+  // The stances' settled middles, each foot's spans between two frames with where in each the settled part begins and
+  // ends, in order, and the speed read off them.
+  const middle = { L: [], R: [] };
+  let speed = 0;
   if (ground && frames > 2) {
     const count = loop ? last : frames;
+    // The ground the game stands the clip on: the source's own, carried along at the clip's mean travel. The fitter
+    // takes a loop's net travel out as a straight ramp and keeps the rest of the hips' motion (their sway) as the clip's
+    // own pose, so what keeps a foot on the game's ground is how fast it moves back over this ground, and never how fast
+    // it moves back under the hips, whose sway over a stance is no motion of the body at all.
+    const carryX = clip.duration > 0 ? travelNet[0] / clip.duration : 0;
+    const carryZ = clip.duration > 0 ? travelNet[2] / clip.duration : 0;
     // Each foot's frames near its lowest and still up and down, and which of its two points says so.
     const rows = [];
     for (const tr of tracks) {
@@ -185,15 +262,40 @@ export function analyzeClip(clip, bones, { ground = true, tune = ANALYZE } = {})
       const flags = new Array(count);
       const vx = new Float64Array(count), vz = new Float64Array(count);
       for (let f = 0; f < count; f++) {
-        const aOn = tr.ankle[f * 3 + 1] - lowA <= tune.plantNear && Math.abs(vel(tr.ankle, f, 1)) <= tune.plantStill;
-        const tOn = tr.toe[f * 3 + 1] - lowT <= tune.plantNear && Math.abs(vel(tr.toe, f, 1)) <= tune.plantStill;
+        const aUp = tr.ankle[f * 3 + 1] - lowA, tUp = tr.toe[f * 3 + 1] - lowT;
+        const aVy = Math.abs(vel(tr.ankle, f, 1)), tVy = Math.abs(vel(tr.toe, f, 1));
+        const aOn = aUp <= tune.plantNear && aVy <= tune.plantStill;
+        const tOn = tUp <= tune.plantNear && tVy <= tune.plantStill;
         flags[f] = aOn || tOn;
         const p = !aOn && tOn ? tr.toe : tr.ankle;
-        // The body moves over the ground as fast as the planted foot moves back under the hips.
+        // The way the body goes: the planted foot moves back under the hips (what tells a planted foot from a swinging one).
         vx[f] = -(vel(p, f, 0) - vel(hips, f, 0));
         vz[f] = -(vel(p, f, 2) - vel(hips, f, 2));
       }
-      rows.push({ foot: tr.foot, flags, vx, vz });
+      // The settled middle, read between the frames as the game plays the clip (each joint turned smoothly from one
+      // frame to the next): over each span from a frame to the next, the share of it in which the heel and the toe are
+      // both within `settledNear` of their lowest, the height taken straight across the span, and neither rising or
+      // falling faster than `settledStill` across it. The speed there is the whole foot's (the mean of its two points)
+      // moving back over the carried ground across the span. Read at the frames alone, a stance of three frames could
+      // keep none: the run's and the sprint's right feet kept none, and their speeds were one frame of the left foot.
+      const spans = loop ? last : frames - 1;
+      // Each span's share near the ground (both points within `settledNear`), how fast its quicker point rises or
+      // falls across it, and its ground speed.
+      const near = new Float64Array(spans), from = new Float64Array(spans), rise = new Float64Array(spans);
+      const gx = new Float64Array(spans), gz = new Float64Array(spans);
+      for (let f = 0; f < spans; f++) {
+        const g = f + 1;
+        const a0 = tr.ankle[f * 3 + 1] - lowA, a1 = tr.ankle[g * 3 + 1] - lowA;
+        const t0 = tr.toe[f * 3 + 1] - lowT, t1 = tr.toe[g * 3 + 1] - lowT;
+        rise[f] = Math.max(Math.abs(a1 - a0), Math.abs(t1 - t0)) / dt;
+        const [aFrom, aTo] = belowAcross(a0, a1, tune.settledNear);
+        const [tFrom, tTo] = belowAcross(t0, t1, tune.settledNear);
+        from[f] = Math.max(aFrom, tFrom);
+        near[f] = Math.max(0, Math.min(aTo, tTo) - from[f]);
+        gx[f] = -((tr.ankle[g * 3] - tr.ankle[f * 3] + tr.toe[g * 3] - tr.toe[f * 3]) / (2 * dt) - carryX);
+        gz[f] = -((tr.ankle[g * 3 + 2] - tr.ankle[f * 3 + 2] + tr.toe[g * 3 + 2] - tr.toe[f * 3 + 2]) / (2 * dt) - carryZ);
+      }
+      rows.push({ foot: tr.foot, flags, vx, vz, near, from, rise, gx, gz, on: flags });
     }
     const measure = (keep) => {
       feet.length = 0;
@@ -201,6 +303,7 @@ export function analyzeClip(clip, bones, { ground = true, tune = ANALYZE } = {})
       planted.L = planted.R = 0;
       for (const row of rows) {
         const on = settle(row.flags.map((v, f) => v && keep(row, f)), tune.minLift, tune.minPlant, loop);
+        row.on = on;
         for (let f = 0; f < count; f++) {
           if (!on[f]) continue;
           planted[row.foot]++;
@@ -222,11 +325,40 @@ export function analyzeClip(clip, bones, { ground = true, tune = ANALYZE } = {})
       const ux = sumX / (first * samples), uz = sumZ / (first * samples);
       measure((row, f) => row.vx[f] * ux + row.vz[f] * uz >= tune.withBody * first);
     }
+    // The speed: over the stances' settled middles (spans between two planted frames, each weighed by its settled
+    // share: the time the foot is settled in it), the foot moving back over the carried ground, never from a span where
+    // it is still landing or already lifting. A clip with no settled span at all (none of the table's) is read off all
+    // its planted frames, from the point that is down, over the same ground.
+    let mx = 0, mz = 0, mn = 0;
+    for (const row of rows) {
+      const share = settledShares(row.on, row.near, row.rise, count, loop, tune.settledStill);
+      for (let f = 0; f < share.length; f++) {
+        const w = share[f];
+        if (!(w > 0)) continue;
+        middle[row.foot].push([f, row.from[f], row.from[f] + w]);
+        mx += w * row.gx[f];
+        mz += w * row.gz[f];
+        mn += w;
+      }
+    }
+    if (!mn) {
+      for (const row of rows) {
+        for (let f = 0; f < count; f++) {
+          if (!row.on[f]) continue;
+          // Back under the hips, less the hips' own motion over the carried ground: back over that ground.
+          mx += row.vx[f] - (vel(hips, f, 0) - carryX);
+          mz += row.vz[f] - (vel(hips, f, 2) - carryZ);
+          mn++;
+        }
+      }
+    }
+    speed = mn ? Math.hypot(mx, mz) / mn : 0;
   }
   feet.sort((a, b) => a.t - b.t || (a.foot < b.foot ? -1 : 1));
-  const speed = samples ? sumLen / samples : 0;
-  // 0 forward (+Z), +90 left (+X).
-  const heading = samples && speed >= 0.1 ? (Math.atan2(sumX, sumZ) * 180) / Math.PI : 0;
+  // The way, as it always was: the planted feet's mean way back under the hips, over all their frames (0 forward, +Z;
+  // +90 left, +X), for a clip whose feet say it goes somewhere at all.
+  const under = samples ? sumLen / samples : 0;
+  const heading = samples && under >= 0.1 ? (Math.atan2(sumX, sumZ) * 180) / Math.PI : 0;
   return {
     loop,
     endAngle,
@@ -236,6 +368,11 @@ export function analyzeClip(clip, bones, { ground = true, tune = ANALYZE } = {})
     heading,
     feet,
     planted,
+    /**
+     * Each foot's stances' settled middles, in order: each span as [the frame it starts at, and where in it (0 at that
+     * frame, 1 at the next) the settled part begins and ends]. What `speed` is read from, and what the slip test plays.
+     */
+    middle,
     /** How high the lower foot stands over the floor at a time, metres (blended between frames). */
     footHeightAt(t) {
       if (frames < 2 || dt <= 0) return footHeight[0] ?? 0;

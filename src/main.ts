@@ -132,7 +132,6 @@ import { browserIo, mixamoPack } from './anim/mixamoPack.ts';
 import { ANIM_TUNE, tuneAnim } from './anim/animTune.ts';
 import { IMPACT_MUTES } from './anim/animRules.ts';
 import { animDialsFor } from './anim/animDials.ts';
-import { SPRINT_MUTES } from './anim/bodyLoco.ts';
 import { locoDialsFor } from './anim/locoDials.ts';
 import { LOCO_SWITCH, LOCO_TUNE, locoSwitchOn, tuneLoco } from './anim/locoTune.ts';
 import { clipName } from './anim/mxaFile.ts';
@@ -28470,12 +28469,15 @@ class App {
   }
 
   /**
-   * The sprint (src/anim/bodyLoco.ts): while it lasts the attack, a gun's other trigger and the saber's throw do nothing
-   * (the block and a blaster's aim end it instead, by the classes' own caps), muted by action for the rest of the frame
-   * before anything reads a key. The frame loop and `__debug.advance` both call it, straight before the impact's.
+   * The sprint (src/anim/bodyLoco.ts): under the tune's 'muted' (the rule before) the attack, a gun's other trigger and
+   * the saber's throw do nothing while it lasts (`SPRINT_MUTES`), muted by action for the rest of the frame before
+   * anything reads a key; under 'ends' (the default) nothing is muted, and a fight's key ends the sprint in the body's
+   * own plan instead, before the kit reads the press. The frame loop and `__debug.advance` both call it, straight before
+   * the impact's.
    */
   private stepSprintKeys(): void {
-    if (this.player.sprinting) this.input.mute(SPRINT_MUTES as readonly Action[]);
+    const mutes = this.player.loco.mutes();
+    if (mutes) this.input.mute(mutes as readonly Action[]);
   }
 
   /** `__debug.loco`: see its row in the README. */

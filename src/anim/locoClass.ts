@@ -100,6 +100,15 @@ export class ShiftClass {
     if (this.releasedCls > most) this.releasedCls = most;
   }
 
+  /**
+   * A let-go before now opens no tap's window any more: the next press is a first press, and only a let-go after it
+   * makes a double tap. What a fight's key ending the sprint asks, so a Shift let go just before the attack and pressed
+   * once after it gives the run and not the sprint (the two taps would straddle the attack).
+   */
+  forgetLetGo(): void {
+    this.releasedAt = -1e9;
+  }
+
   reset(): void {
     this.cls = JOG;
     this.held = false;

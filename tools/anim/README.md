@@ -58,12 +58,23 @@ is held to it by `locoTable.test.ts`), and its left-foot marks (where a stride b
 kept in step by while one fades into the other). A clip put in the table must be a loop with a left-foot mark and a
 measured speed, and the test says so if it is not.
 
-The measured speed reads a little low: it is the mean of each planted foot's speed under the hips over every planted
-frame, the landing and lifting frames among them, where the foot is still slower than the body. On the four clips
-whose source travels (the report's travel check: the hips' own travel is the truth there) the feet read 1 to 4%
-under, and in the game a planted foot slips back about that and a little more. ate.feet in the game's tune
-(__debug.loco({ tune: { rate: { feet: 1.05 } } })) is every clip's foot speed as a share of what the index says,
-for the eye; a better measure here (the stance's middle, not its mean) means importing every clip again.
+The measured speed is read off each stance's settled middle, between the frames as the game plays the clip: over
+each span from one planted frame to the next, the part of it where the heel and the toe are both within 1.5 cm of
+the lowest each gets (the height taken straight across the span) and neither rises or falls faster than 0.2 m/s
+across it (`settledNear`, `settledStill` in `analyze.mjs`), so never where the foot is still coming down heel first or
+already rolling up onto its toe. A stance with no span that still keeps its stillest one near the ground
+(`settledShares`): a run's foot that lands and at once rolls its heel up off its toe is flat for an instant, and every
+stance of each foot says how fast it went. Over those parts it is the foot's speed back over the ground the clip is
+carried on (the hips' mean travel, the very ramp the game's fitter takes out of a loop), never its speed under the
+hips, whose sway fore and aft over a stance is no motion of the body at all. Where the plants are found and the foot
+marks are unchanged, and the heading is still the planted feet's way under the hips over every planted frame. On the
+level clips whose source travels (the report's travel check: the hips' own travel is the truth there) the measure
+meets the hips within 2%; a loop that climbs (stairs) has its feet on steps, never on the one floor the measure
+reads, and the report says so rather than holding it to its hips. Before it was mended (2026-11-15) the speed was the
+mean under the hips over every planted frame and read 2 to 10% low, which with the stride scaled by the hips' height
+rather than the legs' (`FitPlan.stride` now) left a planted foot slipping back 3 to 16% of the ground speed in the
+game. `rate.feet` in the game's tune (`__debug.loco({ tune: { rate: { feet: 1.05 } } })`) is every clip's foot speed
+as a share of what the index says, started at 1 and kept for the eye.
 
 How the game holds a clip in place follows from whether it loops: a loop is held about where its first frame has the
 hips, and a one-off over the hips' own rest place, so a take that happens to begin a step to one side does not play
@@ -96,4 +107,7 @@ and keys as text, which three's own loader reads as it reads Mixamo's), so the o
 sampling, the travel's signs and units, the foot marks' frames and the table's every setting are held on any
 machine, and the committed pack is held to the table row by row. `animImport.test.ts` also imports a real folder
 when `SWG3JS_MIXAMO_FBX` names one (the committed pack must then be that folder's import byte for byte), and says it
-skipped that part otherwise.
+skipped that part otherwise. The speed's measure is held on a walk the test lays out with a known stride, landing and
+lifting frames and a swaying hips included (`strideWalk` in `animFixtures.ts`), and `locoSlip.test.ts` plays every
+clip of the speed classes' table as the game fits it, between its keys, at the game's own rate, on three leg lengths
+and holds each planted foot within 2% of the ground across its stances' middles.

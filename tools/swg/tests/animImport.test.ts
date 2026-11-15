@@ -2,6 +2,7 @@
 // arithmetic; how it names a file; and its table. Where the folder of source files is on this machine (named by
 // SWG3JS_MIXAMO_FBX, never committed), the committed pack is held to a fresh import of it, file for file.
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,12 +10,13 @@ import { MX } from '../../../src/anim/animRules.ts';
 import { tableClips } from '../../../src/anim/locoTable.ts';
 import { ANIM_TUNE_SHIPPED } from '../../../src/anim/animTune.ts';
 import { clipName, clipSlug, decodeMxa, mirrorClip, readPackIndex } from '../../../src/anim/mxaFile.ts';
-import { ANALYZE, analyzeClip, posePositions, settle } from '../../anim/analyze.mjs';
+import { ANALYZE, analyzeClip, posePositions, settle, settledShares } from '../../anim/analyze.mjs';
 import { readFbx, restDifference } from '../../anim/fbx.mjs';
-import { idsFor, importFolder, reportLines, slug } from '../../anim/importer.mjs';
+import { TRAVEL_APART, idsFor, importFolder, reportLines, slug } from '../../anim/importer.mjs';
 import { CLIPS, CLIP_DEFAULTS, rowFor } from '../../anim/mixamoClips.mjs';
 import { fbxBonesOf, fbxText, type FbxBone, type FbxTake } from './animFbxFixture.ts';
-import { DEG, at4, makeClip, qangle, qaxis, qmul, repoRoot, sourceBones, walkClip, walkTopSpeed } from './animFixtures.ts';
+import { DEG, at4, makeClip, qangle, qaxis, qmul, repoRoot, sourceBones, strideWalk, walkClip, walkTopSpeed } from './animFixtures.ts';
+import { loadOld } from './oldModules.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -70,7 +72,7 @@ const at = (name: string) => bones.findIndex((b) => b.name === name);
   const c = analyzeClip(carried, bones);
   ok(c.loop && Math.abs(c.travelNet[2] - a.speed) < 1e-6, 'carried along by its hips it still loops: a loop may travel');
   ok(Math.abs(c.speed - a.speed) < 0.02 * a.speed && Math.abs(c.heading) < 2 && c.feet.length === 2, `and its feet say the same speed whether the hips travel or not (${c.speed.toFixed(2)} against ${a.speed.toFixed(2)})`);
-  ok(Math.abs(c.speed / (Math.hypot(c.travelNet[0], c.travelNet[2]) / carried.duration) - 1) < 0.15, 'which is its travel over its length, within the 15% the importer holds a travelling clip to');
+  ok(Math.abs(c.speed / (Math.hypot(c.travelNet[0], c.travelNet[2]) / carried.duration) - 1) < TRAVEL_APART / 100, `which is its travel over its length, within the ${TRAVEL_APART}% the importer holds a level travelling clip to`);
   // Sideways.
   const side = analyzeClip(walkClip(bones, { axis: 'z' }), bones);
   ok(Math.abs(side.heading - 90) < 3 && side.speed > 0.7 * top && side.feet.length === 2, `a walk whose legs swing sideways heads left (${side.heading.toFixed(1)} degrees) at the same speed`);
@@ -85,6 +87,51 @@ const at = (name: string) => bones.findIndex((b) => b.name === name);
   const h = analyzeClip(high, bones);
   ok(h.speed === 0 && h.feet.length === 0, `and a clip whose feet never come within ${ANALYZE.floorNear} m of where a standing foot is has none either, told or not (a hang, a fall)`);
   ok(Math.abs(h.footHeightAt(0.5) - 0.5) < 0.06 && Math.abs(a.footHeightAt(0)) < 0.02, 'how high the lower foot stands over the floor is its height less its standing height');
+}
+
+// ---- a walk whose stride is known: the speed is read off the stances' settled middles ---------------------------------------
+{
+  // Each foot lies flat for 0.4 of a stride going back over the clip's ground at exactly 1 m/s; round that, the heel comes
+  // down with the toe still up (going back at 0.8 m/s) and rolls up off a toe still planted; and the hips sway fore and aft
+  // by 3 cm twice a stride. In place, and carried along at its own speed (its planted feet standing still on its ground).
+  const old = await loadOld<{ analyzeClip: typeof analyzeClip }>(['tools/anim/analyze.mjs'], 'tools/anim/analyze.mjs', '91e62d9');
+  for (const [label, travel] of [['in place', 0], ['carried along at its own speed', 1]] as const) {
+    const clip = strideWalk(bones, { speed: 1, travel });
+    const a = analyzeClip(clip, bones);
+    const middle = a.middle.L.length + a.middle.R.length;
+    ok(a.loop && a.feet.length === 2 && a.feet[0].foot !== a.feet[1].foot && a.planted.L > a.middle.L.length && a.planted.R > a.middle.R.length && middle > 30, `a walk ${label} with a known stride: two steps a stride, each foot planted for more frames than its settled middle holds (${a.planted.L} and ${a.planted.R} planted, ${a.middle.L.length} and ${a.middle.R.length} settled: the landing and the lifting are planted and not settled)`);
+    ok(Math.abs(a.speed - 1) < 0.005, `and its speed, read off the settled middles against the ground the clip is carried on, is the stride's own within half a percent (${a.speed.toFixed(4)} m/s against 1)`);
+    if (old) {
+      const was = old.analyzeClip(clip, bones).speed;
+      ok(Math.abs(was - 1) > 0.02, `where the measure before (91e62d9's: under the hips, over every planted frame, the landing and the lifting among them) reads ${was.toFixed(3)} m/s, ${((was - 1) * 100).toFixed(1)}% off`);
+    } else note('git cannot hand over 91e62d9\'s measure here: it is not compared');
+  }
+  // Each of the three things round the middles alone: the lifting (no sway, a landing as fast as the stance), the
+  // lifting and the slower landing, the lifting and the sway. The measure reads the stride in every one; the one before
+  // reads each of them wrong on its own.
+  for (const [label, o] of [['the heel rolling up off the toe alone', { sway: 0, landShare: 1 }], ['that and a landing slower than the stance', { sway: 0 }], ['that and the hips\' sway', { landShare: 1 }]] as const) {
+    const clip = strideWalk(bones, { speed: 1, ...o });
+    const now = analyzeClip(clip, bones).speed;
+    const was = old ? old.analyzeClip(clip, bones).speed : null;
+    ok(Math.abs(now - 1) < 0.005 && (was === null || Math.abs(was - 1) > 0.02), `with ${label}: ${now.toFixed(4)} m/s${was !== null ? `, where the measure before read ${was.toFixed(3)}` : ''}`);
+  }
+  // Every stance says how fast it went. Spans of a foot (frame f to f + 1) laid out by hand: a stance whose spans are
+  // still keeps exactly those; one none of whose spans is still (a foot that lands and at once rolls its heel up) keeps
+  // its stillest span near the ground; a span not near the ground is never kept; and in a loop a stance over the seam is
+  // one stance. `on` is the planted frames (a loop's last frame is its first).
+  {
+    const F = false, T = true;
+    // Stances (spans between two planted frames): 4-5, 9-10, and 13-0 over the seam.
+    const on = [T, T, F, F, T, T, T, F, F, T, T, T, F, T];
+    const near = Float64Array.from([1, 0, 0, 0, 1, 0.5, 0, 0, 0, 1, 0, 0, 0, 1]);
+    const rise = Float64Array.from([0.4, 0, 0, 0, 0.1, 0.1, 0, 0, 0, 0.35, 0.25, 0, 0, 0.3]);
+    const kept = (s: Float64Array) => [...s].map((w, f) => (w > 0 ? `${f}:${w}` : '')).filter(Boolean).join(' ');
+    const loop = kept(settledShares(on, near, rise, on.length, true, 0.2));
+    ok(loop === '4:1 5:0.5 9:1 13:1', `a stance's still spans are its middle (4, and 5 for the half of it near the ground); a stance with none keeps its stillest near the ground (9, never 10, stiller but not near it); and in a loop a stance over the seam is one stance, keeping the stiller of its two (13 of 13 and 0): kept ${loop}`);
+    // A clip that does not loop has a span fewer than frames, and none over its end.
+    const plain = kept(settledShares(on, near.subarray(0, 13), rise.subarray(0, 13), on.length, false, 0.2));
+    ok(plain === '0:1 4:1 5:0.5 9:1', `in a clip that does not loop, a stance at its start is a stance of its own and keeps its span (0): kept ${plain}`);
+  }
 }
 
 // ---- loops and one-offs -----------------------------------------------------------------------------------------------
@@ -300,6 +347,19 @@ const yTurn = (deg: number) => qaxis(0, 1, 0, deg * DEG);
 }
 
 // ---- the committed pack against a fresh import, where the source is on this machine ------------------------------------
+/** The last commit whose clips (the `.mxa` files) were made anew: move it when they are. */
+const MXA_AT = '91e62d9';
+/** Each named clip file as MXA_AT committed it, or null where git cannot hand them over. */
+function mxaAt(files: readonly string[]): Map<string, Buffer> | null {
+  if (process.env.SWG3JS_NO_OLD === '1') return null;
+  const out = new Map<string, Buffer>();
+  try {
+    for (const n of files) out.set(n, execFileSync('git', ['show', `${MXA_AT}:public/anims/mixamo/${n}`], { cwd: repoRoot(import.meta.url), maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }));
+  } catch {
+    return null;
+  }
+  return out;
+}
 {
   const src = process.env.SWG3JS_MIXAMO_FBX;
   const root = repoRoot(import.meta.url);
@@ -319,8 +379,12 @@ const yTurn = (deg: number) => qaxis(0, 1, 0, deg * DEG);
       ok(fresh === kept, 'a fresh import writes the committed index, word for word');
       const files = readdirSync(out).filter((n) => n.endsWith('.mxa'));
       ok(files.length === result.index.clips.length && files.every((n) => readFileSync(join(out, n)).equals(readFileSync(join(packDir, n)))), `and its ${files.length} clip files byte for byte`);
+      // The clips themselves were last made anew at MXA_AT: a measure mended since moves the index and never a clip.
+      const was = mxaAt(files);
+      if (was) ok(files.every((n) => was.get(n)?.equals(readFileSync(join(out, n)))), `each of them byte for byte the clip ${MXA_AT} committed`);
+      else note(`git cannot hand over ${MXA_AT}'s clips here: they are not compared`);
       const lines = reportLines(result, out);
-      ok(lines.some((l) => /sneak_walk: 2\.10 m in 1\.050 s/.test(l)) && !lines.some((l) => /more than 15% apart/.test(l)), 'its report holds the travelling clips\' feet to their hips, none more than 15% apart');
+      ok(lines.some((l) => /sneak_walk: 2\.10 m in 1\.050 s/.test(l)) && !lines.some((l) => /more than \d+% apart/.test(l)) && lines.some((l) => /running_up_stairs: .*climbs 0\.48 m a cycle/.test(l)), `its report holds the level travelling clips' feet to their hips, none more than ${TRAVEL_APART}% apart, and says the one that climbs stairs stands on steps and is not held to its hips`);
       ok(lines.some((l) => /hard_landing: from 0\.533 s the foot stands/.test(l)) && lines.some((l) => /jumping_down: from 0\.000 s the foot stands 0\.43 m up; a foot comes down at 0\.24 s/.test(l)), 'and says where each one-off\'s feet are at its trim and when they come down');
     } finally {
       rmSync(out, { recursive: true, force: true });

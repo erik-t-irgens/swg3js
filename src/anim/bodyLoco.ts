@@ -46,6 +46,8 @@ export class LocoIn {
   fighting = false;
   /** A blaster aimed: capped at the jog. */
   aiming = false;
+  /** One of the fight's keys (`SPRINT_ENDERS`) pressed or held this frame: under the tune's 'ends' it ends a sprint. */
+  fightKeys = false;
   /** A blaster up, ready or aimed: with the tune's `gunSquare` the body stays square to the view (a diagonal plays its own jog clip at every class). */
   gunUp = false;
   /** The sprint's speed and the pool's size as the body's stats have them (the tune's own until something is earned). */
@@ -74,14 +76,35 @@ export class FadeOpts {
 }
 
 /**
- * The actions that do nothing while the body sprints: the attack, a gun's other trigger and the saber's throw (the
- * owner's rule: sprinting, "you can't shoot or attack, that way it always takes that animation"). Muted by action for
- * the rest of each frame the sprint lasts (`Input.mute`), before anything reads a key. Left alone on purpose: the
- * block, which ends the sprint (blocking is capped at the run); the other attack, which is a blaster's aim and ends
- * it too (aiming is capped at the jog), so bare hands' kick, on the same key, is refused by the brawl itself while
- * the body sprints (src/combat/unarmed.ts); the six ability keys; the jump.
+ * Under the tune's 'muted' (the rule before the owner's word of 2026-11-15), the actions that do nothing while the body
+ * sprints: the attack, a gun's other trigger and the saber's throw (his first rule: sprinting, "you can't shoot or
+ * attack, that way it always takes that animation"). Muted by action for the rest of each frame the sprint lasts
+ * (`Input.mute`), before anything reads a key (`BodyLoco.mutes`). Left alone on purpose: the block, which caps the
+ * sprint at the run while held; the other attack, which is a blaster's aim and caps it at the jog while held, so bare
+ * hands' kick, on the same key, is refused by the brawl itself while the body sprints (src/combat/unarmed.ts); the
+ * six ability keys; the jump. Under 'ends' nothing is muted.
  */
 export const SPRINT_MUTES: readonly string[] = ['attack', 'altFire', 'saberThrow'];
+
+/**
+ * Under the tune's 'ends' (the default), the fight's keys that end a sprint, pressed or held: the attack, the other
+ * attack (a blaster's aim, bare hands' kick), a gun's other trigger, the saber's throw and the block. The body drops
+ * to the run on that frame, the press goes through, and only a fresh double tap of Shift sprints again. Never the six
+ * ability keys or the jump.
+ */
+export const SPRINT_ENDERS: readonly string[] = ['attack', 'altAttack', 'altFire', 'saberThrow', 'block'];
+
+/** The little of the input this asks: whether an action is held, and whether it went down this frame. */
+export interface FightKeys {
+  held(action: string): boolean;
+  pressedAction(action: string): boolean;
+}
+
+/** Whether one of the fight's keys that end a sprint (`SPRINT_ENDERS`) is pressed or held this frame. */
+export function fightKeysDown(input: FightKeys): boolean {
+  for (let i = 0; i < SPRINT_ENDERS.length; i++) if (input.held(SPRINT_ENDERS[i]) || input.pressedAction(SPRINT_ENDERS[i])) return true;
+  return false;
+}
 
 /** The game's names for every clip the table can ask for: a rig has the classes only with all of them. */
 const TABLE_CLIPS: readonly string[] = tableClips().map((id) => `mx_${id}`);
@@ -126,7 +149,7 @@ export class BodyLoco {
   rate = 0.5;
   /** How long a change of the legs' clip fades this frame, seconds (`fadeFor`). */
   fadeNow = 0.5;
-  /** Sprinting, on the ground or through a jump: the fight's keys do nothing. */
+  /** Sprinting, on the ground or through a jump: under the tune's 'muted' the fight's keys do nothing meanwhile (`mutes`). */
   sprinting = false;
   private boost = 1.5;
   private dt = 0.5;
@@ -210,6 +233,16 @@ export class BodyLoco {
       cls = 1;
       this.refused = this.asked > JOG ? 'the walk key holds the walk' : '';
     } else {
+      if (f.fightKeys && cls > RUN && tune.sprintFight === 'ends') {
+        // A fight's key ends the sprint asked for, on this very frame (the press goes through: nothing is muted), and
+        // the sprint does not come back by itself: Shift, still held, gives the run, and a fresh double tap sprints. A
+        // let-go of Shift from before the key is forgotten, so one press just after it is no double tap.
+        cls = RUN;
+        this.asked = RUN;
+        this.shift.cap(RUN);
+        this.shift.forgetLetGo();
+        this.refused = 'a fight key ended the sprint: Shift held runs, a fresh double tap sprints again';
+      }
       if (this.stamina.tired && cls > JOG) {
         cls = JOG;
         this.refused = 'tired: no run until the stamina is back';
@@ -332,6 +365,15 @@ export class BodyLoco {
     return was !== null && was !== state ? was : null;
   }
 
+  /**
+   * The actions to mute for the rest of this frame, before anything reads a key (main.ts's `stepSprintKeys`, from the
+   * frame loop and `__debug.advance` alike): under the tune's 'muted' the sprint's own (`SPRINT_MUTES`) while the body
+   * sprints, as the rule before; under 'ends' none, ever (a fight's key ends the sprint in `plan` instead), so null.
+   */
+  mutes(): readonly string[] | null {
+    return this.tune.sprintFight === 'muted' && this.sprinting ? SPRINT_MUTES : null;
+  }
+
   /** The pool full again and the class asked forgotten: a respawn, an arrival. */
   refill(pool: number): void {
     this.stamina.fill(pool);
@@ -360,6 +402,7 @@ export class BodyLoco {
       bodyTurnNowDeg: n(this.turnNow / RAD, 1),
       fade: n(this.fadeNow, 3),
       sprinting: this.sprinting,
+      sprintFight: this.tune.sprintFight,
       stamina: { value: n(this.stamina.value, 1), pool: n(pool, 1), tired: this.stamina.tired, shown: this.stamina.shown(pool, this.tune) },
     };
   }

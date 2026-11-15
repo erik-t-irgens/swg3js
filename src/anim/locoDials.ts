@@ -8,7 +8,7 @@
 // through the real table.
 import type { ChoiceDial, DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
-import { LOCO_RANGES, LOCO_TUNE, tuneLoco } from './locoTune.ts';
+import { LOCO_CHOICES, LOCO_RANGES, LOCO_TUNE, tuneLoco } from './locoTune.ts';
 
 /** A nested patch for one path: `speed.forward.run`, 5 is `{ speed: { forward: { run: 5 } } }`. */
 function patchOf(path: string, v: unknown): Record<string, unknown> {
@@ -48,6 +48,7 @@ const LOCO_GROUPS: DialGroup[] = [
     dials: [
       choice('on', 'Speed classes', ['on', 'off'], 'The whole of it: off is the movement before the classes.', onOff, isOn),
       choice('gunSquare', 'Blaster up: diagonals stay square', ['on', 'off'], 'With a blaster ready or aimed a diagonal plays its own jog clip at every class and the body stays square to the view (ours). Off is the brief\'s rule with a blaster up too: the strafe or the backward clip with the body turned 45 degrees.', onOff, isOn),
+      choice('sprintFight', 'A fight key while sprinting', LOCO_CHOICES.sprintFight, 'ends: the attack, the other attack, a gun\'s other trigger, the saber\'s throw or the block ends the sprint on the press and goes through, whatever is in the hands (a key that does nothing with it too); the body drops to the run, and only a fresh double tap of Shift sprints again, a let-go from before the key not counting (the owner\'s word). muted: the rule before, the attack, the other trigger and the throw do nothing while sprinting, and a block or an aim holds the pace down only while held. The ability keys and the jump never end it.', (v) => String(v), (s) => s),
     ],
   },
   {
@@ -58,7 +59,7 @@ const LOCO_GROUPS: DialGroup[] = [
       speed('forward.jog', 'Jog', 'Forward with nothing held.'),
       speed('forward.tired', 'Tired jog', 'The jog while tired (the pool emptied and not yet back to its share).'),
       speed('forward.run', 'Run', 'Shift held.'),
-      speed('forward.sprint', 'Sprint', 'Shift let go and pressed again quickly. Burns stamina; no attack while it lasts.'),
+      speed('forward.sprint', 'Sprint', 'Shift let go and pressed again quickly. Burns stamina; a fight key ends it (or does nothing while it lasts: the switch under The classes).'),
     ],
   },
   {
@@ -105,7 +106,7 @@ const LOCO_GROUPS: DialGroup[] = [
       dial('stamina.walk', 'Walking and standing', 0.5, '/s', 'The standard rate: walking forward, and standing.'),
       dial('stamina.back', 'Backward', 0.5, '/s', 'Backing up, at any class.'),
       dial('stamina.side', 'Sideways', 0.5, '/s', 'Strafing and the forward diagonals, from the jog up.'),
-      dial('stamina.sideWalk', 'Sideways at a walk', 0.5, '/s', 'Strafing and the forward diagonals at the walk. Starts at the standard rate; nought is the brief\'s "won\'t allow for stamina regen" read to the letter.'),
+      dial('stamina.sideWalk', 'Sideways at a walk', 0.5, '/s', 'Strafing and the forward diagonals at the walk: the standard rate, by the owner\'s answer of 2026-11-15 (walking sideways gives stamina back). Nought is the brief\'s "won\'t allow for stamina regen" read to the letter.'),
       dial('stamina.air', 'Most regained in the air', 0.5, '/s', 'The most the pool regains a second off the ground and in the water. What a class spends it spends in the air too.'),
       dial('stamina.tiredUntil', 'Tired until', 0.01, '', 'Emptied, the body is tired until the pool is back to this share of itself.', (v) => `${Math.round(v * 100)}%`),
       dial('stamina.linger', 'Bar stays for', 0.1, 's', 'How long the bar stays up after the pool is full again.'),

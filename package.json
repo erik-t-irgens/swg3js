@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "swg": "node tools/swg/cli.mjs",
     "anims": "node tools/anim/cli.mjs",
-    "test:anim": "node tools/swg/tests/animPack.test.ts && node tools/swg/tests/animImport.test.ts && node tools/swg/tests/animFit.test.ts && node tools/swg/tests/animPackLoad.test.ts && node tools/swg/tests/animRig.test.ts && node tools/swg/tests/animBody.test.ts && node tools/swg/tests/animRules.test.ts && node tools/swg/tests/locoClass.test.ts && node tools/swg/tests/locoTable.test.ts && node tools/swg/tests/locoRig.test.ts && node tools/swg/tests/locoBody.test.ts && node tools/swg/tests/staminaRow.test.ts && node tools/swg/tests/eyeHold.test.ts && node tools/swg/tests/grappleClass.test.ts && node tools/swg/tests/locoAlloc.test.ts",
+    "test:anim": "node tools/swg/tests/animPack.test.ts && node tools/swg/tests/animImport.test.ts && node tools/swg/tests/animFit.test.ts && node tools/swg/tests/animPackLoad.test.ts && node tools/swg/tests/animRig.test.ts && node tools/swg/tests/animBody.test.ts && node tools/swg/tests/animRules.test.ts && node tools/swg/tests/locoClass.test.ts && node tools/swg/tests/locoTable.test.ts && node tools/swg/tests/locoRig.test.ts && node tools/swg/tests/locoSlip.test.ts && node tools/swg/tests/locoBody.test.ts && node tools/swg/tests/staminaRow.test.ts && node tools/swg/tests/eyeHold.test.ts && node tools/swg/tests/grappleClass.test.ts && node tools/swg/tests/locoAlloc.test.ts",
     "relay": "node server/relay.mjs",
     "story:check": "node tools/story/check.mjs",
     "launcher": "node tools/launcher/main.mjs",
