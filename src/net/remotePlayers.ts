@@ -20,10 +20,13 @@ import type { FxMoverList } from '../core/fx/velocity';
 import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
 import { measureBox, peerBodies, peerLow, type PeerBlow, type PeerBox } from './remoteBodies.ts';
 import { MX } from '../anim/animRules.ts';
-import { LegOpts } from '../anim/bodyLoco.ts';
-import { PeerIn, PeerLoco } from '../anim/peerLoco.ts';
+import { ANIM_TUNE } from '../anim/animTune.ts';
+import { CARRY_FULL, CARRY_ORIGINAL, LegOpts, carryOf, gunClassIndex } from '../anim/bodyLoco.ts';
+import { PeerIn, PeerLoco, PeerPistolCarry } from '../anim/peerLoco.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
 import { peerBackState, peerCarryState } from '../anim/locoTable.ts';
+import { SwimSink } from '../anim/swimSink.ts';
+import { SWIM_DEPTH } from '../player/swimStep.ts';
 import { hangHeld } from './peerHands.ts';
 import { glidePeerTurn, yawOf } from './peerTurn.ts';
 import { newPeerRope, readPeerRope, type PeerRope } from './peerRope.ts';
@@ -298,6 +301,15 @@ interface Remote {
   carryRig: CharacterRig | null;
   carryState: string | null;
   carryClip: string | null;
+  /**
+   * The kind of gun in their right hand (`GUN_CLASSES`' place, -1 for none or anything else), read off the weapon their
+   * hello names: with no gun up (their state the relaxed carry), what this player's own `gunCarry` has a pace play.
+   */
+  gunClass: number;
+  /** Whether their rig is asked for a pistol's own carry walk and run (`gunCarry.pistol` 'original'), taken off when the reason goes. */
+  pistolCarry: PeerPistolCarry;
+  /** How far their treading figure is drawn under where it floats (src/anim/swimSink.ts), as this player's own is. */
+  swimSink: SwimSink;
   /** The colour their blade is lit in; the game's own default until their own browser says. */
   saberColor: number;
   /** Their blade when it is out of their hand: where it is in the world and how far it has spun. */
@@ -353,6 +365,11 @@ export class RemotePlayers {
    * is, and takes the same imported loop where their rig has it. Their state says only `float`, on every build.
    */
   adrift = false;
+  /**
+   * The water's drawn surface at a place in this world (the game hands the world's own in once): how deep a treading
+   * peer floats, which says how much of the treading sink they take (`SwimSink`). Null takes every one at the surface.
+   */
+  surfaceAt: ((x: number, z: number) => number) | null = null;
 
   /** Called with a peer's rig once it is dressed, and again when their look changes: the motion blur prepares its shaders for it. */
   onDressed: ((root: THREE.Object3D) => void) | null = null;
@@ -470,7 +487,7 @@ export class RemotePlayers {
     markActor(group);
     const rope = newPeerRope();
     const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, shipTarget: new THREE.Vector3(), shipTargetQ: new THREE.Quaternion(), shipVel: new THREE.Vector3(), shipHeardAt: 0, shipReck: NO_RECKON, shipMount: false, shipDocked: false, hp: 100, maxHp: 100, down: false, low: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null, rope };
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, ride: { at: new THREE.Vector3(), q: new THREE.Quaternion(), yaw: 0, first: true }, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, loco: new PeerLoco(), locoState: null, carryRig: null, carryState: null, carryClip: null, saberColor: DEFAULT_PEER_SABER, thrown: null, rope, view };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, ride: { at: new THREE.Vector3(), q: new THREE.Quaternion(), yaw: 0, first: true }, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, loco: new PeerLoco(), locoState: null, carryRig: null, carryState: null, carryClip: null, gunClass: -1, pistolCarry: new PeerPistolCarry(), swimSink: new SwimSink(), saberColor: DEFAULT_PEER_SABER, thrown: null, rope, view };
     this.remotes.set(id, remote);
     // Told before the rig is fetched: what hangs on a peer decides for itself how much of them it
     // needs, and a body is made on the first frame they are drawn, not here at the origin.
@@ -702,6 +719,9 @@ export class RemotePlayers {
     r.heldApplied = key;
     for (const m of r.heldModels) m.node.removeFromParent();
     r.heldModels = [];
+    // The kind of gun in the right hand: what a pace plays with it out of combat (`LOCO_TUNE.gunCarry`).
+    const right = held?.r && cat ? cat.weapons.find((w) => w.id === held.r) : undefined;
+    r.gunClass = right ? gunClassIndex(right.class) : -1;
     if (!cat) return;
     await hangHeld(held, {
       find: (id) => cat.weapons.find((w) => w.id === id),
@@ -1159,6 +1179,24 @@ export class RemotePlayers {
         // Floating: adrift in space or still in the water, which their state does not tell apart and the world does.
         // A name their rig has not got is stepped over, and the state's own list answers as it always did.
         else if (state === 'float') rig.prefer('float', this.adrift && !r.aboard ? MX.adrift : MX.tread);
+        // In the air under the owner's rule (`ANIM_TUNE.airRule`): their state says only `air`, so the float while they
+        // rise or fall slower than `fall.floatUntil` (their own game's plain jump and rope; the step off a ledge too, for
+        // as long as it is slow) and the falling loop past it, read off how fast their figure is heard to fall. Under
+        // 'before' the state's own list, the falling loop, as it was.
+        else if (state === 'air') rig.prefer('air', ANIM_TUNE.airRule === 'owner' ? (r.vel.y > -ANIM_TUNE.fall.floatUntil ? MX.float : MX.fall) : null);
+        // Treading water: their figure drawn under where it floats as this player's own is (`SwimSink`), at its depth
+        // under the water this world draws there; nothing while they do anything else.
+        const ss = r.swimSink;
+        const treads = state === 'float' && !(this.adrift && !r.aboard);
+        if (treads || ss.share > 0) {
+          ss.dt = dt;
+          ss.scale = rig.root.scale.y;
+          ss.floatDepth = SWIM_DEPTH;
+          // With no world's water handed in (a test), the body is taken to float at the surface.
+          ss.depth = this.surfaceAt ? this.surfaceAt(r.group.position.x, r.group.position.z) - r.group.position.y : SWIM_DEPTH;
+          ss.step(treads, ANIM_TUNE);
+          rig.root.position.y = ss.now > 0 ? -ss.now : 0;
+        }
         // Walking or running on foot under the speed classes: the very clip their own game plays for the way they go
         // and their class, worked out here from what they already send (`PeerLoco`): how their travel lies against the
         // heading they sent, and their speed. With a gun in hand the legs take it and the upper body keeps the gun's
@@ -1168,12 +1206,20 @@ export class RemotePlayers {
         PEER_IN.heading = r.heading;
         PEER_IN.speed = r.speed;
         PEER_IN.dt = dt;
-        const legs = r.loco.resolve(LOCO_TUNE, rig, state, PEER_IN);
+        let legs = r.loco.resolve(LOCO_TUNE, rig, state, PEER_IN);
+        // A gun in hand and none up (their state the relaxed carry): what this player's own `gunCarry` has its kind play.
+        // 'original' is the state's own carry walk or run on the whole body (their figure is turned the way it runs, as
+        // their own game turns it), so the table's legs are let go; 'full' the table's clip with no upper body.
+        const relaxedGun = legs !== null && peerCarryState(state) === 'gunIdle' ? carryOf(LOCO_TUNE, r.gunClass) : -1;
+        if (relaxedGun === CARRY_ORIGINAL) legs = null;
         if (r.locoState && (!legs || r.locoState !== state)) {
           // Let go of, the state picks its own clip again there and then, even where the state itself stays as it was.
           rig.prefer(r.locoState, null, true);
           r.locoState = null;
         }
+        // A pistol's own carry walk and run for a pistol's 'original' (the state's own list has the rifle's first), taken
+        // off again once their gun is no pistol or the choice for a pistol is another (`PeerPistolCarry`).
+        r.pistolCarry.step(rig, LOCO_TUNE, state, r.gunClass, relaxedGun);
         if (legs && !rv) {
           let upper: string | null = null;
           const carry = peerCarryState(state);
@@ -1185,7 +1231,8 @@ export class RemotePlayers {
               r.carryState = carry;
               r.carryClip = rig.tableClip(carry);
             }
-            upper = r.carryClip;
+            // With the tune's 'full' for their kind of gun out of combat, the table's clip has the whole body.
+            upper = relaxedGun === CARRY_FULL ? null : r.carryClip;
           }
           rig.prefer(state, legs.clip);
           r.locoState = state;

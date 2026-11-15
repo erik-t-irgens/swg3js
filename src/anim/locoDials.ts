@@ -49,11 +49,22 @@ const LOCO_GROUPS: DialGroup[] = [
       choice('on', 'Speed classes', ['on', 'off'], 'The whole of it: off is the movement before the classes.', onOff, isOn),
       choice('gunSquare', 'Blaster up: diagonals stay square', ['on', 'off'], 'With a blaster ready or aimed a diagonal plays its own jog clip at every class and the body stays square to the view (ours). Off is the brief\'s rule with a blaster up too: the strafe or the backward clip with the body turned 45 degrees.', onOff, isOn),
       choice('sprintFight', 'A fight key while sprinting', LOCO_CHOICES.sprintFight, 'ends: the attack, the other attack, a gun\'s other trigger, the saber\'s throw or the block ends the sprint on the press and goes through, whatever is in the hands (a key that does nothing with it too); the body drops to the run, and only a fresh double tap of Shift sprints again, a let-go from before the key not counting (the owner\'s word). muted: the rule before, the attack, the other trigger and the throw do nothing while sprinting, and a block or an aim holds the pace down only while held. The ability keys and the jump never end it.', (v) => String(v), (s) => s),
+      choice('sideWalkClip', 'Walking sideways plays', LOCO_CHOICES.sideWalkClip, 'diagonal: the walked forward diagonal\'s own clip (the strafe walk), the body turned 45 degrees further toward the way it goes than in the diagonal, so it stands square to the view with its legs stepping straight across. forward: the forward walk with the body turned the whole 90 degrees toward the way it goes, the torso taking back its share toward the view. strafe: the slow strafe, as before.', (v) => String(v), (s) => s),
+    ],
+  },
+  {
+    title: 'A gun out, not fighting',
+    note: 'With a gun in hand and none up (no aim, no shot), what a pace plays, by the kind of gun. full: the walking or running clip has the whole body, the gun swinging in the hand. original: the game\'s own carry walk and run for that gun on the whole body, the body turned the way it runs (as before the paces), at the pace\'s speed. split: the walking or running legs under the gun\'s standing carry held still (as before this choice). Ready or aimed, nothing here applies.',
+    dials: [
+      choice('gunCarry.pistol', 'Pistol', LOCO_CHOICES['gunCarry.pistol'], 'The owner\'s: full.', (v) => String(v), (s) => s),
+      choice('gunCarry.carbine', 'Carbine', LOCO_CHOICES['gunCarry.carbine'], 'The owner\'s: original.', (v) => String(v), (s) => s),
+      choice('gunCarry.rifle', 'Rifle', LOCO_CHOICES['gunCarry.rifle'], 'Original, as the carbine.', (v) => String(v), (s) => s),
+      choice('gunCarry.heavy', 'Heavy weapon', LOCO_CHOICES['gunCarry.heavy'], 'Original, as the carbine.', (v) => String(v), (s) => s),
     ],
   },
   {
     title: 'Forward',
-    note: 'What each class moves the body at. Each starts at its clip\'s own measured speed, but the run (4.9) and the sprint (6.35, the one run the game had before): their two clips measure almost alike.',
+    note: 'What each class moves the body at: the owner\'s own speeds of 2026-11-15. The clip plays at the rate that keeps its feet on the ground (each pace\'s animation speed, below, at 1), inside the slowest and fastest playback.',
     dials: [
       speed('forward.walk', 'Walk', 'The walk class: what the walk key held gives.'),
       speed('forward.jog', 'Jog', 'Forward with nothing held.'),
@@ -68,7 +79,7 @@ const LOCO_GROUPS: DialGroup[] = [
       speed('back.walk', 'Back: walk', 'Backing up at a walk.'),
       speed('back.jog', 'Back: jog', 'Backing up with nothing held.'),
       speed('back.run', 'Back: run', 'Backing up with Shift (there is no sprint but forward).'),
-      speed('side.walk', 'Side: walk', 'Strafing at a walk: the slow strafe.'),
+      speed('side.walk', 'Side: walk', 'Strafing at a walk (whatever "Walking sideways plays" plays).'),
       speed('side.jog', 'Side: jog', 'Strafing with nothing held.'),
       speed('side.run', 'Side: run', 'Strafing with Shift.'),
     ],
@@ -93,6 +104,16 @@ const LOCO_GROUPS: DialGroup[] = [
       dial('rate.min', 'Slowest playback', 0.05, 'x', 'A clip never plays slower than this while it follows the ground speed.'),
       dial('rate.max', 'Fastest playback', 0.05, 'x', 'Nor faster than this (Force Speed raises it by its own factor).'),
       dial('rate.feet', 'Feet against the ground', 0.01, 'x', 'Every clip\'s own foot speed as a share of what the pack says: past 1 the legs play slower for the same ground speed (raise it if planted feet slip back, lower it if they slip forward).'),
+    ],
+  },
+  {
+    title: 'Each pace\'s animation speed',
+    note: 'How fast each pace\'s clip plays, as a share of the speed that keeps its planted feet on the ground. 1 locks the feet to the ground whatever the pace\'s speed is. Under 1 the clip plays slower than the body moves and the feet slide forward; over 1, faster, and they slide back. Always inside the slowest and fastest playback.',
+    dials: [
+      dial('rate.byClass.walk', 'Walk: animation speed, 1 = feet locked', 0.01, 'x', 'The walk\'s clip, as a share of the feet-locked speed.'),
+      dial('rate.byClass.jog', 'Jog: animation speed, 1 = feet locked', 0.01, 'x', 'The jog\'s clip (the tired jog\'s too), as a share of the feet-locked speed.'),
+      dial('rate.byClass.run', 'Run: animation speed, 1 = feet locked', 0.01, 'x', 'The run\'s clip, as a share of the feet-locked speed.'),
+      dial('rate.byClass.sprint', 'Sprint: animation speed, 1 = feet locked', 0.01, 'x', 'The sprint\'s clip, as a share of the feet-locked speed: under 1 a fast sprint with its feet sliding slightly, as the owner asked.'),
     ],
   },
   {

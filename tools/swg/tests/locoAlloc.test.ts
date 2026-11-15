@@ -34,6 +34,14 @@ interface Answer {
   peerScavenges: number;
   peerCount: number;
   peerPicks: number;
+  busyCarries: number;
+  polish: number;
+  polishScavenges: number;
+  polishLegs: number;
+  air: number;
+  airScavenges: number;
+  airFloats: number;
+  airSunk: number;
 }
 const run = () =>
   new Promise<Answer>((resolve, reject) => {
@@ -63,5 +71,7 @@ for (let i = 0; i < all.length; i++) {
   ok(a.steadyLegs > a.frames && a.steadyScavenges === 0 && a.steady < 0.05 * a.frames, `process ${i + 1} of 12: a steady jog (the keys, the plan, the turn, the legs and their rate, the fade) makes ${Math.max(0, a.steady)} bytes over ${a.frames} frames (${per(a.steady, a.frames)} a frame)`);
   ok(a.busyLegs > a.frames && a.busySprints > 10_000 && a.busySeats > 1000 && a.busyDrops > 100 && a.busyEnded > 100 && a.busyMuted === 0 && a.busyScavenges === 0 && a.busy < 0.05 * a.frames, `process ${i + 1} of 12: ways and classes changing every few frames (${a.busySprints} frames of sprint, ${a.busySeats} seated, ${a.busyDrops} states let go, ${a.busyEnded} sprints ended by a fight's key with nothing muted) make ${Math.max(0, a.busy)} bytes (${per(a.busy, a.frames)} a frame)`);
   ok(a.peerCount === 12 && a.peerPicks > a.frames * 6 && a.peerScavenges === 0 && a.peers < 0.05 * a.frames, `process ${i + 1} of 12: the legs of ${a.peerCount} other players worked out each frame (${a.peerPicks} answers) make ${Math.max(0, a.peers)} bytes (${per(a.peers, a.frames)} a frame)`);
+  ok(a.polishLegs > a.frames && a.busyCarries > a.frames && a.polishScavenges === 0 && a.polish < 0.05 * a.frames, `process ${i + 1} of 12: the polish's paces (walking sideways under each of its three choices, the dial moved every 512 frames; a gun in hand and none up at every pace, every kind's carry asked, ${a.busyCarries} frames; each pace's share of the locked rate a fraction) make ${Math.max(0, a.polish)} bytes (${per(a.polish, a.frames)} a frame)`);
+  ok(a.airFloats > a.frames / 4 && a.airSunk > a.frames / 4 && a.airScavenges === 0 && a.air < 0.05 * a.frames, `process ${i + 1} of 12: the owner's air (a plain jump floating until it falls past its speed, the rope's float) and the treading sink, surfaced and diving, make ${Math.max(0, a.air)} bytes (${per(a.air, a.frames)} a frame; ${a.airFloats} frames floating, ${a.airSunk} sunk)`);
 }
 console.log(`\nlocoAlloc: ${checks} checks passed`);

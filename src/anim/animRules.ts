@@ -53,6 +53,58 @@ export function airLoop(has: Has, thrown: boolean, force: boolean, jka: boolean)
   return has(clip) ? clip : null;
 }
 
+/** What the air is under the owner's rule (`airLoopOwner`): one kept record, written before each ask. */
+export class AirAsk {
+  /** Thrown from a wreck, and not yet down. */
+  thrown = false;
+  /** A flip, a Force jump or a wall move since the feet left the ground. */
+  force = false;
+  /** Jedi Academy's animations in charge (a swing under way, the block held). */
+  jka = false;
+  /** On the grappling rope, attached, with the feet off the ground. */
+  rope = false;
+  /** A plain jump began this air and has not yet fallen past `fall.floatUntil`. */
+  jumped = false;
+}
+
+/**
+ * The loop in the air under the owner's rule (`ANIM_TUNE.airRule` 'owner'): thrown, the long fall; with Jedi Academy's
+ * animations in charge, its own; after a flip, a Force jump or a wall move, the float, as before; on the grappling rope
+ * the float; a plain jump the float until it falls past `fall.floatUntil` (the caller says, in `jumped`); anything else
+ * (a step off a ledge, a let-go of the rope) the falling loop. Null where the answer is the game's own, or the rig has
+ * not got the one asked for.
+ */
+export function airLoopOwner(has: Has, a: AirAsk): string | null {
+  if (!a.thrown && a.jka) return null;
+  const clip = a.thrown ? MX.thrown : a.force || a.rope || a.jumped ? MX.float : MX.fall;
+  return has(clip) ? clip : null;
+}
+
+/**
+ * Under the owner's rule, a plain jump's start: none of its own (the air's float has the body from the first frame),
+ * where the rig has the float and Jedi Academy's animations are not in charge; else as before (`jumpStart`). Answers
+ * 'float' for "no start: the float takes it", the one-off for a start, or null for the caller's own.
+ */
+export function jumpStartOwner(has: Has, jkaMode: boolean, tune: AnimTune): OneOff | 'float' | null {
+  if (!jkaMode && has(MX.float)) return 'float';
+  return jumpStart(has, jkaMode, tune);
+}
+
+/** Whether a drop is deep enough for the ledge's hop: `drop` metres down to what is under the feet, or -1 for nothing found within `fall.hopDrop`. */
+export function deepDrop(drop: number, tune: AnimTune): boolean {
+  return drop < 0 || drop >= tune.fall.hopDrop;
+}
+
+/**
+ * Leaving the ground with no jump (a step off a ledge, a drop), under the owner's rule: the hop (the jump's start, from
+ * its trim) where what is under the feet lies at least `fall.hopDrop` down (`deep`, `deepDrop`); null for none (the
+ * falling loop alone, as before), with Jedi Academy's animations in charge, or on a rig without the clip.
+ */
+export function ledgeHop(has: Has, deep: boolean, jka: boolean, tune: AnimTune): OneOff | null {
+  if (!deep || jka || !has(MX.jump)) return null;
+  return { clip: MX.jump, from: tune.trim.jumping_up, fade: tune.jump.fade };
+}
+
 /**
  * Whether a landing clip that has played for `played` seconds gives way to the keys: a body the keys are moving does
  * not hold its landing to the end, since the feet would slide under it for as long as the clip had left to run.

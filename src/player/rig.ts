@@ -9,6 +9,12 @@ import { chainPoint, clipLinks, HEAD_TO_EYE, type Quat, type Vec3 } from '../veh
 import type { ActiveClip, ClipHalf } from '../audio/clipEvents.ts';
 import { restWorld as restPlaces, type TargetSkeleton } from '../anim/fit.ts';
 import { phaseAt, sharedRate, timeAtPhase, type ClipFacts } from '../anim/locoPhase.ts';
+import { ANIM_TUNE, watchJkaSpine } from '../anim/animTune.ts';
+import { applyJkaSpine, isJkaClip, rebaseJkaClips, spineRebaseFor } from '../anim/jkaSpine.ts';
+
+// The Jedi Academy spine's switch moved (`__debug.anim({ tune: { jkaSpine } })`, its dial): every clip rebased so far
+// takes the keys the switch names, written in place (an event, never a frame).
+watchJkaSpine(() => applyJkaSpine(ANIM_TUNE.jkaSpine === 'mended'));
 
 export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun' | 'kneel' | 'prone' | 'proneMove' | 'gunProneIdle' | 'gunProneMove' | 'gunProneReadyIdle' | 'gunProneReadyMove' | 'gunProneAimIdle' | 'gunProneAimMove';
 
@@ -341,6 +347,14 @@ export class CharacterRig {
         this.restScale.set(o, o.scale.clone());
       }
     });
+    // Jedi Academy's clips' spine rebased from the bind pose onto the game's own idle (src/anim/jkaSpine.ts): once a clip,
+    // before anything plays it, with the keys as converted kept for the switch (`ANIM_TUNE.jkaSpine`).
+    const idleClip = clips.find((c) => c.name === 'idle');
+    if (idleClip && clips.some((c) => isJkaClip(c.name))) {
+      const skel: { name: string; parent: string; rest: [number, number, number, number] }[] = [];
+      for (const [name, b] of this.bones) skel.push({ name, parent: b.parent instanceof THREE.Bone ? b.parent.name : '', rest: [b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w] });
+      rebaseJkaClips(clips as never, spineRebaseFor(skel, idleClip as never), ANIM_TUNE.jkaSpine === 'mended');
+    }
     for (const clip of clips) {
       // The game's add_ clips (a blaster's shots) are deltas on whatever plays: made additive against the rest pose.
       if (isAdditive(clip.name)) {

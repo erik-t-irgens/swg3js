@@ -6,15 +6,27 @@
 //
 // Pure: it imports the tune and the dials' own types and nothing of the page, so a node test moves every dial
 // through the real table.
-import type { DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
+import type { ChoiceDial, DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
-import { ANIM_RANGES, ANIM_TUNE, tuneAnim } from './animTune.ts';
+import { ANIM_CHOICES, ANIM_RANGES, ANIM_TUNE, tuneAnim } from './animTune.ts';
 
 /** A number of `ANIM_TUNE`, by its group and name, set through `tuneAnim`. */
-function dial(group: 'land' | 'jump' | 'impact' | 'trim', name: string, label: string, step: number, unit: string, note: string, text?: (v: number) => string): NumberDial {
+function dial(group: 'land' | 'jump' | 'impact' | 'trim' | 'fall' | 'swim', name: string, label: string, step: number, unit: string, note: string, text?: (v: number) => string): NumberDial {
   const table = ANIM_TUNE as unknown as Record<string, Record<string, number>>;
   const range = ANIM_RANGES[`${group}.${name}`];
   return { kind: 'number', key: `tune.${group}.${name}`, label, note, min: range.min, max: range.max, step, unit, get: () => table[group][name], set: (v) => tuneAnim({ [group]: { [name]: v } }), text };
+}
+
+/** A choice of `ANIM_TUNE`, by its path (`airRule`, `swim.rule`), set through `tuneAnim`. */
+function choice(path: string, label: string, note: string): ChoiceDial {
+  const parts = path.split('.');
+  const read = (): string => {
+    let at: unknown = ANIM_TUNE;
+    for (const p of parts) at = (at as Record<string, unknown>)[p];
+    return String(at);
+  };
+  const patch = (v: string): Record<string, unknown> => (parts.length === 1 ? { [parts[0]]: v } : { [parts[0]]: { [parts[1]]: v } });
+  return { kind: 'choice', key: `tune.${path}`, label, note, choices: ANIM_CHOICES[path], get: read, set: (s) => tuneAnim(patch(s)) };
 }
 
 /** A landing speed said as the height of a fall that gives it, under the game's own gravity (20.3 m/s²). */
@@ -40,6 +52,19 @@ const ANIM_GROUPS: DialGroup[] = [
       dial('jump', 'fade', 'Jump fades in over', 0.01, 's', 'How long the jump\'s start takes to fade in.'),
       dial('impact', 'lock', 'Keys held through the impact', 0.05, '', 'The share of the thrown fall\'s impact the keys are held for: 1 until it ends, 0 not at all.'),
       dial('impact', 'fade', 'Impact fades in over', 0.01, 's', 'How long the impact takes to fade in over the fall.'),
+    ],
+  },
+  {
+    title: 'The air and the water',
+    note: 'The owner\'s rules of 2026-11-15, each beside the rule before it.',
+    dials: [
+      choice('airRule', 'The air', 'owner: a plain jump floats (the Force jump\'s float) with no start of its own until it falls past the float\'s speed, then the falling loop; on the grappling rope off the ground the float; a step off a ledge over the drop plays the hop and then the falling loop, under it the falling loop. before: every plain jump the hop and the falling loop, the rope the falling loop.'),
+      dial('fall', 'hopDrop', 'Ledge hop from a drop of', 0.05, 'm', 'Stepping off something with no jump plays the hop where what is under the feet is at least this far down (one ray, as the feet leave).'),
+      dial('fall', 'floatUntil', 'A jump floats until falling at', 0.1, 'm/s', 'A plain jump hands over from the float to the falling loop once it falls faster than this. Every hop comes down slower than 9.6 m/s, so at 10 each floats to its landing and a jump off something hands over about 2.5 m into its fall.', asDrop),
+      choice('swim.rule', 'Treading water', 'owner: treading at the surface the drawn figure sits lower in the water, and held still under the water it treads too. before: at the float line, and the swimming stroke under the water.'),
+      dial('swim', 'sink', 'Treading figure drawn lower by', 0.01, 'm', 'How far the treading figure is drawn under where its body floats, on a figure of a human\'s size (scaled by the figure\'s own). At 0.3 the waterline is at a human\'s collarbones. Only at the surface; never in first person.'),
+      dial('swim', 'ease', 'Sinks and rises over', 0.01, 's', 'How fast the treading figure goes down as the body stops and comes back up as it swims off (a time constant).'),
+      choice('jkaSpine', 'Jedi Academy\'s lower back', 'mended: the saber moves\' spine laid on the game\'s own standing pose rather than the skeleton\'s bind pose, whose lower back is bent back against it. before: as converted.'),
     ],
   },
   {

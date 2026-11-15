@@ -84,8 +84,9 @@ const TODAY: Record<string, number> = {
   'grapple.swing': 1,
   'tether.strength': 40,
   // The speed classes' (Animations I, wave 2a): the numbers `LOCO_TUNE` shipped with, which their read site hands in.
-  // The sprint is the one run the body had before the classes (Jedi Academy's 250 units a second, 6.35 m/s).
-  'move.sprint': 6.35,
+  // The sprint is the owner's own speed of 2026-11-15 (the one run the body had before the classes was Jedi Academy's
+  // 250 units a second, 6.35 m/s, the start until then).
+  'move.sprint': 7,
   'move.stamina': 100,
 };
 const empty = resolveStats(emptyRecord('c1'), PROGRESS_RULES);

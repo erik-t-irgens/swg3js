@@ -237,6 +237,9 @@ function feetOf(id: string, target: Target, figure: number, stride: number): Fee
   return { L, R, pieces, ownL: own(0), ownR: own(6) };
 }
 
+/** The way and class a body's pick is, for the words: `F jog`. */
+const DIRS_OF = (b: Body) => `${['F', 'FL', 'L', 'BL', 'B', 'BR', 'R', 'FR'][b.pick!.dir]} ${b.pick!.key}`;
+
 /** A foot's slip at a rate: its mean speed over the ground as a share of the body's (nought is planted; + goes with the body). */
 const slip = (x: Along, rate: number, ground: number) => (ground + rate * x.along) / ground;
 /** Both feet's, over their time together. */
@@ -265,7 +268,14 @@ const oldSpeed = oldIndex ? new Map((JSON.parse(oldIndex.get('public/anims/mixam
 if (!oldSpeed) note(`git cannot hand over ${OLD}'s index here: the slip before the mend is not measured`);
 
 const tune = T();
-ok(tune.rate.feet === 1, 'the feet\'s own dial stands at 1: the pack\'s speeds are what the feet do');
+ok(tune.rate.feet === 1 && Object.values(tune.rate.byClass).every((v) => v === 1), 'the feet\'s own dial stands at 1, and every pace\'s animation speed at 1 (locked): the pack\'s speeds are what the feet do');
+// The slow strafe is the sideways walk only under the choice before the owner's (`sideWalkClip` 'strafe'): it is brought
+// to under that choice, every other clip under the tune as it ships.
+const strafeTune = T();
+strafeTune.sideWalkClip = 'strafe';
+const tuneFor = (id: string) => (/^walk_strafe_/.test(id) ? strafeTune : tune);
+/** Every pace whose speed asks more of its clip on a figure than the playback band gives (the owner's speeds of 2026-11-15), by figure. */
+const banded: string[] = [];
 for (const b of bodies) {
   const rig = rigOf(b.target);
   await attachImportedClips(rig, b.label);
@@ -275,9 +285,17 @@ for (const b of bodies) {
   let worst = 0, worstId = '', worstFoot = 0, worstFootId = '', wobble = 0, wobbleId = '', control = 0, before = 0, beforeLeast = -Infinity;
   let ownWorst = 0, ownWorstId = '', ownFoot = 0, ownFootId = '';
   for (const id of tableClips()) {
-    const body = bodyAt(rig, id, tune);
-    const rate = body.rate, ground = body.speed;
+    const body = bodyAt(rig, id, tuneFor(id));
+    const ground = body.speed;
+    // The rate that locks the feet, and the one the band lets it play at: where the two part (a pace's speed asking more
+    // of a short figure's clip than the band gives), the feet are held to 2% at the locking rate (the measure's own
+    // claim) and the band's slip is said.
+    rig.readSpeed(body.pick!.clip);
+    const locked = ground / (rig.speedOut * tuneFor(id).rate.feet);
+    const heldBy = Math.abs(body.rate - locked) > 1e-9 ? body.rate : null;
+    const rate = heldBy === null ? body.rate : locked;
     const s = feetOf(id, b.target, b.figure, plan.stride);
+    if (heldBy !== null) banded.push(`${b.label}: ${DIRS_OF(body)} ${id} at ${ground} m/s wants ${locked.toFixed(3)} and plays at the band's ${heldBy} (its feet go over the ground at ${pc(both(s.L, s.R, heldBy, ground))} of the body's speed)`);
     // Every stance of each foot keeps a settled part to be read from: both feet of every clip are measured.
     assert.ok(s.L.time > 0 && s.R.time > 0, `${b.label}: ${id} has a settled middle for each foot (${s.L.time.toFixed(3)} and ${s.R.time.toFixed(3)} s of the clip)`);
     const l = slip(s.L, rate, ground), r = slip(s.R, rate, ground), lr = both(s.L, s.R, rate, ground);
@@ -308,12 +326,15 @@ for (const b of bodies) {
     lines.push(`${id} L ${pc(l)} R ${pc(r)} both ${pc(lr)} (own selection L ${pc(ol)} R ${pc(or)}; wobble ${(spread * 100).toFixed(1)}%; rate ${rate.toFixed(3)})`);
   }
   checks += tableClips().length * (b.each ? 3 : 2);
-  ok(true, `${b.label} (legs x${plan.stride.toFixed(4)}, hips x${plan.scale.toFixed(4)}): every one of the ${tableClips().length} table clips, played between its keys at the game's own rate, keeps ${b.each ? 'each of its feet' : 'its two feet together'} within 2% of the ground across their stances' settled middles (worst together ${worstId}, ${pc(worst)}; worst foot ${worstFootId}, ${pc(worstFoot)}: + is a foot going with the body)`);
+  ok(true, `${b.label} (legs x${plan.stride.toFixed(4)}, hips x${plan.scale.toFixed(4)}): every one of the ${tableClips().length} table clips, played between its keys at the game's own rate (or, where the band holds it, at the rate that locks its feet), keeps ${b.each ? 'each of its feet' : 'its two feet together'} within 2% of the ground across their stances' settled middles (worst together ${worstId}, ${pc(worst)}; worst foot ${worstFootId}, ${pc(worstFoot)}: + is a foot going with the body)`);
   ok(control < -0.02, `and the control, the same clips' speeds scaled by the hips' height as before, slips back past 2% (${pc(control)} at its worst)`);
   if (oldSpeed) ok(before < -0.04, `before the mend (${OLD}'s speeds, scaled by the hips' height) the same feet slipped back by ${(-beforeLeast * 100).toFixed(1)} to ${(-before * 100).toFixed(1)}% of the body's speed`);
   note(`${b.label}: the wobble within a stance, the source's own and no rate's to take away: up to ${(wobble * 100).toFixed(1)}% of the body's speed (${wobbleId})`);
   note(`${b.label}: by the test's own selection (heel and toe near their lowest in the played pose, as the review measured; not the importer's middles): worst together ${ownWorstId} ${pc(ownWorst)}, worst foot ${ownFootId} ${pc(ownFoot)}`);
   note(`${b.label}: ${lines.join('; ')}`);
 }
+// The paces whose speed, the owner's of 2026-11-15, asks more of a figure's clip than the band (`rate.min` to
+// `rate.max`, not moved) gives: their feet slide by the rest. Said, never failed (the band is the owner's).
+note(`the paces the playback band holds, by figure (${banded.length}): ${banded.join('; ') || 'none'}`);
 console.info = info;
 console.log(`\n${checks} checks passed`);

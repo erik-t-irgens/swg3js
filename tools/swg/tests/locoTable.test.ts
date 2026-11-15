@@ -144,13 +144,14 @@ const STARTED_FROM: Record<string, number> = {
     else said.push(`${DIRS[p.dir]} ${p.key} ${v} (its clip ${m})`);
   }
   ok(upCells.size === 8 && upWrong === 0 && ['FL', 'FR', 'BL', 'BR'].every((d) => upCells.has(`${d} walk`) && upCells.has(`${d} run`)), `with a blaster up the four diagonals' walks and runs (${upCells.size} cells) move at the very speed they have without one`);
-  // The exceptions, each with its reason in the tune: the run and the sprint (their clips measure alike), and the
-  // strafe walks' mean for the walked forward diagonals (one class of two clips).
-  ok(t.speed.forward.run === 4.9 && t.speed.forward.sprint === 6.35 && t.speed.forward.sprint > t.speed.forward.run && t.speed.forward.run > t.speed.forward.jog && t.speed.forward.jog > t.speed.forward.walk, 'forward the four classes rise: 1.44, 2.85, 4.9 and 6.35, the last the one run the game had before');
-  ok(Math.abs(row('running')!.speed - row('fast_run')!.speed) < 0.1 && Math.abs(STARTED_FROM.running - STARTED_FROM.fast_run) < 0.1, `the run and the sprint do not start at their clips' speeds because the two clips measure almost alike (${row('running')!.speed} and ${row('fast_run')!.speed} m/s now, ${STARTED_FROM.running} and ${STARTED_FROM.fast_run} when the paces were started)`);
-  ok(said.every((s) => /^(F run|F sprint|FL walk|FR walk) /.test(s)) && Math.abs(t.speed.forwardDiag.walk - (STARTED_FROM.left_strafe_walking + STARTED_FROM.right_strafe_walking) / 2) < 0.01, `every other class starts at the speed its clip was measured at when the paces were started (${own.length} cells), the walked forward diagonals at the two strafe walks' mean (${said.length} said otherwise: ${said.join('; ')})`);
-  ok(Math.abs(t.speed.forward.tired - STARTED_FROM.drunk_run_forward) < 0.006 && Math.abs(t.speed.side.walk - STARTED_FROM.walk_strafe_left) < 0.006 && Math.abs(t.speed.side.walk - STARTED_FROM.walk_strafe_right) < 0.006, 'the tired jog at its own, and the sideways walk at the slow strafes\' own 0.59');
-  ok(tableClips().every((id) => row(id)!.speed >= STARTED_FROM[id] - 0.04), 'and no clip of the table measures slower now than when its pace was started (the mended measure reads the stride, which the old one read low)');
+  // The owner's own speeds, pinned on 2026-11-15 after he tried the paces, are the starts; the two he did not name (the
+  // backward walks) stay where the paces were started, at the backward walk's own 1.28.
+  const OWNER = { forward: { walk: 1.66, jog: 4, tired: 3.5, run: 6, sprint: 7 }, back: { walk: 1.28, jog: 3, run: 4 }, side: { walk: 1.44, jog: 4, run: 6 }, forwardDiag: { walk: 1.66, jog: 4, run: 6 }, backDiag: { walk: 1.28, jog: 3, run: 4 } };
+  ok(JSON.stringify(t.speed) === JSON.stringify(OWNER), `every pace starts at the owner's own speed of 2026-11-15 (${JSON.stringify(t.speed)})`);
+  ok(t.speed.back.walk === STARTED_FROM.walking_backwards && t.speed.backDiag.walk === STARTED_FROM.walking_backwards, 'and the two he did not name, the backward walks, where they were started: the backward walk\'s own 1.28');
+  ok(t.speed.forward.sprint > t.speed.forward.run && t.speed.forward.run > t.speed.forward.jog && t.speed.forward.jog > t.speed.forward.tired && t.speed.forward.tired > t.speed.forward.walk, 'forward the classes still rise: walk, tired jog, jog, run, sprint');
+  note(`the paces as started (91e62d9's index, kept for the record): ${said.length + own.length} cells, ${own.length} of them at their clip's speed then`);
+  ok(tableClips().every((id) => row(id)!.speed >= STARTED_FROM[id] - 0.04), 'no clip of the table measures slower now than when its pace was started (the mended measure reads the stride, which the old one read low)');
   note(`each pace beside its clip's own speed now: ${beside.join('; ')}`);
   // What a frame reads: every dial at its own place in one array, which is each pick's own speed.
   const each = T();
@@ -194,7 +195,11 @@ const STARTED_FROM: Record<string, number> = {
 
 // ---- another player's figure ---------------------------------------------------------------------------------------------
 {
+  // At the speeds the paces were started at and with the slow strafe sideways (62143fe's tune), which the numbers below
+  // are written for; the owner's speeds and the other sideways walks are held the same way by locoPolish.test.ts.
   const t = T();
+  t.speed = { forward: { walk: 1.44, jog: 2.85, tired: 2.38, run: 4.9, sprint: 6.35 }, back: { walk: 1.28, jog: 2.25, run: 2.93 }, side: { walk: 0.59, jog: 2.89, run: 4.33 }, forwardDiag: { walk: 1.67, jog: 2.66, run: 4.33 }, backDiag: { walk: 1.28, jog: 2.18, run: 2.93 } };
+  t.sideWalkClip = 'strafe';
   const RAD = Math.PI / 180;
   const speedOfClip = (c: string) => row(c.replace(/^mx_/, ''))!.speed;
   const rig = { has: () => true, speedOut: 0, readSpeed(c: string) { this.speedOut = speedOfClip(c); return true; } };
@@ -318,7 +323,7 @@ const STARTED_FROM: Record<string, number> = {
   ok(ways.join() === 'running,jog_forward_diagonal', 'and held the same way coming back');
   climb(t, hill, 0, 0.05, 70);
   ok(ways.join() === 'running,jog_forward_diagonal,running', 'until the travel is the other clip\'s again');
-  const loose = T();
+  const loose = JSON.parse(JSON.stringify(t)) as LocoTune;
   loose.peer.hold = 0;
   ways.length = 0;
   const flick = new PeerLoco();
@@ -385,7 +390,8 @@ const STARTED_FROM: Record<string, number> = {
   ok(!('walkKey' in LOCO_TUNE) && !('aimSlowStrafe' in LOCO_TUNE), 'the walk key is a hold and nothing else, and the slow strafe is the sideways walk whatever is in hand: neither is a switch (the owner\'s answers)');
   const dials = allDials(LOCO_DIALS);
   const keys = dials.map((d) => d.key);
-  ok(numbers.every((p) => keys.includes(`tune.${p}`)) && ['tune.on', 'tune.gunSquare', 'tune.sprintFight'].every((k) => keys.includes(k)) && new Set(keys).size === keys.length && dials.length === numbers.length + 3, `every number of the tune is a slider, and its two switches and its choice of what a fight's key does to a sprint are choices (${dials.length} dials)`);
+  const choiceKeys = ['tune.on', 'tune.gunSquare', 'tune.sprintFight', 'tune.sideWalkClip', 'tune.gunCarry.pistol', 'tune.gunCarry.carbine', 'tune.gunCarry.rifle', 'tune.gunCarry.heavy'];
+  ok(numbers.every((p) => keys.includes(`tune.${p}`)) && choiceKeys.every((k) => keys.includes(k)) && new Set(keys).size === keys.length && dials.length === numbers.length + choiceKeys.length, `every number of the tune is a slider, and its two switches, its choice of what a fight's key does to a sprint, of what walking sideways plays and of what each kind of gun's pace plays out of combat are choices (${dials.length} dials)`);
   ok(locoDialsFor('loco') === LOCO_DIALS && locoDialsFor('anim') === null, 'the debug menu is handed them for `loco` and for nothing else');
   // Each number dial moves its own number through the helper's own setter, and is held to its range.
   let moved = 0;
@@ -415,7 +421,7 @@ const STARTED_FROM: Record<string, number> = {
   ok(fight.kind === 'choice' && (fight as { choices: readonly string[] }).choices.join() === 'ends,muted' && (fight as { get: () => string }).get() === 'ends', 'what a fight\'s key does to a sprint is a choice of its two words, standing at \'ends\'');
   fight.set('muted');
   ok(LOCO_TUNE.sprintFight === 'muted' && tuneLoco({ sprintFight: 'ends' }).length === 0 && LOCO_TUNE.sprintFight === 'ends' && tuneLoco({ sprintFight: true }).length === 1 && LOCO_TUNE.sprintFight === 'ends', 'its dial sets the rule, the word its line writes sets it back, and anything but its two words is said and sets nothing');
-  ok(tuneLoco({ speed: { forward: { run: 5.2 } } }).length === 0 && LOCO_TUNE.speed.forward.run === 5.2 && tuneLoco({ speed: { forward: { run: 4.9 } } }).length === 0, 'a nested patch sets one number');
+  ok(tuneLoco({ speed: { forward: { run: 5.2 } } }).length === 0 && LOCO_TUNE.speed.forward.run === 5.2 && tuneLoco({ speed: { forward: { run: LOCO_TUNE_SHIPPED.speed.forward.run } } }).length === 0, 'a nested patch sets one number');
   const words = tuneLoco({ speed: { forward: { hop: 3 } }, nothing: 1, rate: 4, shift: { dropDelay: 'soon' }, walkKey: 'hold', __proto__: { on: false } });
   ok(words.length === 5 && JSON.stringify(LOCO_TUNE) === JSON.stringify(LOCO_TUNE_SHIPPED), `a name it has not got, a group given a number and a number given a word are each said and set nothing (${words.join('; ')})`);
   ok(tuneLoco(null).length === 1 && tuneLoco([1]).length === 1, 'and a patch that is no object is said');

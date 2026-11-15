@@ -130,6 +130,7 @@ const SCENE_REACH = { objects: 0, terrain: 3, far: 6, waitMs: 40000 };
 import { IMPORTED_CLIPS, loadPlayerRig } from './player/rig';
 import { browserIo, mixamoPack } from './anim/mixamoPack.ts';
 import { ANIM_TUNE, tuneAnim } from './anim/animTune.ts';
+import { rebasedCount } from './anim/jkaSpine.ts';
 import { IMPACT_MUTES } from './anim/animRules.ts';
 import { animDialsFor } from './anim/animDials.ts';
 import { locoDialsFor } from './anim/locoDials.ts';
@@ -11192,6 +11193,12 @@ class App {
     this.remotes.prepareVehicle = (roots) => this.world.vehiclePrepare(roots);
     // A peer's painted ship owns copies of its materials: out of the world's sets when they go (read at call time).
     this.remotes.forget = (m) => this.world.forgetMaterials(m);
+    // A treading peer's depth, under the water this world draws where they float (the very surface the player's own swim
+    // reads: the lava-filtered column and the sea's swell over it), for how much of the treading sink they take.
+    this.remotes.surfaceAt = (x, z) => {
+      const flat = this.world.waterColumnAt(x, z);
+      return flat + this.world.seaSwellOverFlat(x, z, flat);
+    };
     // The moving air's sixth wave: other players' rides stir it from where this screen draws them, and a stood shuttle's
     // engines while a flame its clip lights is in its window. Nothing of anybody's is sent for either.
     this.world.airPeerRides = (out) => {
@@ -28545,6 +28552,11 @@ class App {
       ...(words.length ? { words } : {}),
       ...MIXAMO.report(),
       tune: JSON.parse(JSON.stringify(ANIM_TUNE)) as unknown,
+      // The owner's rules of 2026-11-15 as they stand on the player now: the air's float, the treading sink and the Jedi
+      // Academy spine's rebase (how many clips carry it).
+      air: { rule: ANIM_TUNE.airRule, jumpFloat: this.player.jumpFloat, rope: this.player.grapple.attached },
+      swim: { rule: ANIM_TUNE.swim.rule, sinkNow: Number(this.player.swimSink.now.toFixed(3)), share: Number(this.player.swimSink.share.toFixed(3)), depth: Number(this.player.waterDepthNow.toFixed(3)), rootY: rig ? Number(rig.root.position.y.toFixed(3)) : null },
+      jkaSpine: { rule: ANIM_TUNE.jkaSpine, clipsRebased: rebasedCount() },
       player: rig ? { has: rig.clipNames.filter((n) => n.startsWith('mx_')), ...rig.describe(), impactLocked: this.player.impactLocked, pose: rig.poseAgainstRest() } : 'no rig',
     };
   }

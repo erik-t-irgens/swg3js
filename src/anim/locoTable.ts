@@ -54,6 +54,11 @@ export interface LocoPick {
   state: LocoState;
   /** How far the body is turned from the view for it, degrees (+ left): the travel's angle less the clip's heading. */
   turn: number;
+  /**
+   * The sideways walk's choice (`LocoTune.sideWalkClip`) this cell belongs to (`SIDE_STRAFE`, `SIDE_DIAGONAL`,
+   * `SIDE_FORWARD`), or -1 for a cell every choice shares: what the peers' side steps over when another is in force.
+   */
+  side: number;
 }
 
 /** A clip id, or one by gait. */
@@ -71,6 +76,11 @@ interface DirRows {
    * got the turn), so with a gun up it stays square to the view and its feet still go the way it does.
    */
   up?: Cell;
+  /**
+   * Sideways only: the walk class's clip under the two newer choices of `LocoTune.sideWalkClip` (the plain cell is
+   * the third, 'strafe'): 'diagonal' the walked forward diagonal's own clip, 'forward' the forward walk.
+   */
+  sideWalk?: { diagonal: Cell; forward: Cell };
 }
 
 /**
@@ -83,11 +93,11 @@ export const LOCO_TABLE: Record<LocoPosture, Record<LocoDir, DirRows>> = {
   stand: {
     F: { group: 'forward', cells: { 1: { standard: 'standard_walk' }, 2: 'slow_run', 3: 'running', 4: 'fast_run' }, tired: 'drunk_run_forward' },
     FL: { group: 'forwardDiag', cells: { 1: 'left_strafe_walking', 2: 'jog_forward_diagonal_mirrored', 3: 'left_strafe' }, up: 'jog_forward_diagonal_mirrored' },
-    L: { group: 'side', cells: { 1: 'walk_strafe_left', 2: 'jog_strafe_left', 3: 'left_strafe' } },
+    L: { group: 'side', cells: { 1: 'walk_strafe_left', 2: 'jog_strafe_left', 3: 'left_strafe' }, sideWalk: { diagonal: 'left_strafe_walking', forward: { standard: 'standard_walk' } } },
     BL: { group: 'backDiag', cells: { 1: 'walking_backwards', 2: 'jog_backward_diagonal_mirrored', 3: 'running_backward' }, up: 'jog_backward_diagonal_mirrored' },
     B: { group: 'back', cells: { 1: 'walking_backwards', 2: 'jog_backward', 3: 'running_backward' } },
     BR: { group: 'backDiag', cells: { 1: 'walking_backwards', 2: 'jog_backward_diagonal', 3: 'running_backward' }, up: 'jog_backward_diagonal' },
-    R: { group: 'side', cells: { 1: 'walk_strafe_right', 2: 'jog_strafe_left_mirrored', 3: 'left_strafe_mirrored' } },
+    R: { group: 'side', cells: { 1: 'walk_strafe_right', 2: 'jog_strafe_left_mirrored', 3: 'left_strafe_mirrored' }, sideWalk: { diagonal: 'right_strafe_walking', forward: { standard: 'standard_walk' } } },
     FR: { group: 'forwardDiag', cells: { 1: 'right_strafe_walking', 2: 'jog_forward_diagonal', 3: 'left_strafe_mirrored' }, up: 'jog_forward_diagonal' },
   },
 };
@@ -195,11 +205,19 @@ export function fillSpeeds(tune: LocoTune, out: Float64Array): void {
 /** The variants of a cell: plain, tired, a blaster up (ready or aimed) with the body kept square. */
 export const PLAIN = 0, TIRED = 1, GUN_UP = 2;
 const VARIANTS = 3;
-/** Every pick, made once: by posture, gait, way, class and variant. */
+/** The sideways walk's choices (`LocoTune.sideWalkClip`), by number: the slow strafe (as before), the walked diagonal's own clip, the forward walk. */
+export const SIDE_STRAFE = 0, SIDE_DIAGONAL = 1, SIDE_FORWARD = 2;
+const SIDES = 3;
+/** A tune's sideways walk as a number (`SIDE_*`). */
+export function sideMode(tune: LocoTune): number {
+  const s = tune.sideWalkClip;
+  return s === 'diagonal' ? SIDE_DIAGONAL : s === 'forward' ? SIDE_FORWARD : SIDE_STRAFE;
+}
+/** Every pick, made once: by posture, gait, way, class, variant and the sideways walk's choice. */
 const PICKS: (LocoPick | null)[] = [];
 /** And each of them once, in the order made: what the peers' side walks. */
 const UNIQUE: LocoPick[] = [];
-const at = (gait: number, dir: number, cls: number, variant: number) => ((gait * 8 + dir) * 5 + cls) * VARIANTS + variant;
+const at = (gait: number, dir: number, cls: number, variant: number, side: number) => (((gait * 8 + dir) * 5 + cls) * VARIANTS + variant) * SIDES + side;
 
 function build(): void {
   const rows = LOCO_TABLE.stand;
@@ -210,29 +228,40 @@ function build(): void {
         // A way with no sprint gives its run.
         const eff = Math.min(cls, topClass(dir)) as LocoClass;
         for (let variant = 0; variant < VARIANTS; variant++) {
-          let cell = row.cells[eff];
-          let key = CLASS_NAMES[eff];
-          if (variant === TIRED && eff === 2 && row.tired) {
-            cell = row.tired;
-            key = 'tired';
-          } else if (variant === GUN_UP && row.up) {
-            // The class's own speed (its dial), on the clip that keeps the body square.
-            cell = row.up;
-          }
-          if (!cell) {
-            PICKS[at(g, dir, cls, variant)] = null;
-            continue;
-          }
-          const id = typeof cell === 'string' ? cell : cell[gait];
-          const heading = CLIP_HEADING[id];
-          const state: LocoState = eff === 1 ? 'walk' : 'run';
-          const made: LocoPick = { id, clip: `mx_${id}`, heading, dir, cls: eff, group: row.group, key, slot: SLOTS[`${row.group}.${key}`], state, turn: wrapDeg(travelDeg(dir) - heading) };
-          // One object a cell, however many classes and variants name it.
-          const same = UNIQUE.find((p) => p.id === made.id && p.dir === made.dir && p.cls === made.cls && p.key === made.key);
-          if (same) PICKS[at(g, dir, cls, variant)] = same;
-          else {
-            UNIQUE.push(Object.freeze(made));
-            PICKS[at(g, dir, cls, variant)] = UNIQUE[UNIQUE.length - 1];
+          for (let side = 0; side < SIDES; side++) {
+            let cell = row.cells[eff];
+            let key = CLASS_NAMES[eff];
+            // A cell of one of the sideways walk's choices (the walk class sideways), or -1 for one every choice shares.
+            let tag = -1;
+            if (variant === TIRED && eff === 2 && row.tired) {
+              cell = row.tired;
+              key = 'tired';
+            } else if (variant === GUN_UP && row.up) {
+              // The class's own speed (its dial), on the clip that keeps the body square.
+              cell = row.up;
+            } else if (eff === 1 && row.sideWalk) {
+              // Walking sideways: the slow strafe as before, the walked diagonal's own clip, or the forward walk with the
+              // body turned. With a blaster up the forward walk's turn would take the barrel off the crosshair, so that
+              // choice plays the diagonal's clip square (the slow strafe stays the slow strafe).
+              tag = side;
+              if (side === SIDE_DIAGONAL || (side === SIDE_FORWARD && variant === GUN_UP)) cell = row.sideWalk.diagonal;
+              else if (side === SIDE_FORWARD) cell = row.sideWalk.forward;
+            }
+            if (!cell) {
+              PICKS[at(g, dir, cls, variant, side)] = null;
+              continue;
+            }
+            const id = typeof cell === 'string' ? cell : cell[gait];
+            const heading = CLIP_HEADING[id];
+            const state: LocoState = eff === 1 ? 'walk' : 'run';
+            const made: LocoPick = { id, clip: `mx_${id}`, heading, dir, cls: eff, group: row.group, key, slot: SLOTS[`${row.group}.${key}`], state, turn: wrapDeg(travelDeg(dir) - heading), side: tag };
+            // One object a cell, however many classes, variants and choices name it.
+            const same = UNIQUE.find((p) => p.id === made.id && p.dir === made.dir && p.cls === made.cls && p.key === made.key && p.side === made.side);
+            if (same) PICKS[at(g, dir, cls, variant, side)] = same;
+            else {
+              UNIQUE.push(Object.freeze(made));
+              PICKS[at(g, dir, cls, variant, side)] = UNIQUE[UNIQUE.length - 1];
+            }
           }
         }
       }
@@ -242,16 +271,18 @@ function build(): void {
 build();
 
 /**
- * The clip for a way (`dirOf`) and a class: the tired jog in place of the forward jog while tired; and with a blaster
- * up and kept square (`gun` `GUN_UP`) a diagonal's own jog clip at every class. Null for no way.
+ * The clip for a way (`dirOf`) and a class: the tired jog in place of the forward jog while tired; with a blaster
+ * up and kept square (`gun` `GUN_UP`) a diagonal's own jog clip at every class; and walking sideways, the clip of the
+ * sideways walk's choice (`side`, `SIDE_*`: the slow strafe unless said). Null for no way.
  */
-export function locoPick(dir: number, cls: number, tired = false, gun: number = PLAIN, gait: LocoGait = 'standard'): LocoPick | null {
+export function locoPick(dir: number, cls: number, tired = false, gun: number = PLAIN, gait: LocoGait = 'standard', side: number = SIDE_STRAFE): LocoPick | null {
   if (dir < 0 || dir > 7) return null;
   const g = Math.max(0, GAITS.indexOf(gait));
   const c = cls < 1 ? 1 : cls > 4 ? 4 : cls | 0;
+  const s = side === SIDE_DIAGONAL || side === SIDE_FORWARD ? side : SIDE_STRAFE;
   // Tired wins forward (only the forward jog has a tired clip, and forward has no gun-up one of its own).
   const variant = tired && dir === 0 ? TIRED : gun === GUN_UP ? GUN_UP : tired ? TIRED : PLAIN;
-  return PICKS[at(g, dir, c, variant)] ?? null;
+  return PICKS[at(g, dir, c, variant, s)] ?? null;
 }
 
 /** What a pick moves the body at, m/s, by the tune's dials. (The console's and the tests': a frame reads `fillSpeeds`' array at the pick's `slot`.) */
@@ -309,6 +340,8 @@ export class PeerAsk {
   rel = 0.5;
   /** How fast it goes, m/s. */
   speed = 0.5;
+  /** The sideways walk's choice in force here (`SIDE_*`, `sideMode`): a cell of another choice is stepped over. */
+  side = SIDE_STRAFE;
 }
 
 /**
@@ -328,9 +361,11 @@ export function peerPickIn(speeds: Float64Array, state: string, ask: PeerAsk): L
   let bestGap = Infinity;
   let any: LocoPick | null = null;
   let anyGap = Infinity;
+  const side = ask.side;
   for (let i = 0; i < UNIQUE.length; i++) {
     const p = UNIQUE[i];
     if (p.heading !== heading) continue;
+    if (p.side >= 0 && p.side !== side) continue;
     const d = speeds[p.slot] - speed;
     const gap = d < 0 ? -d : d;
     if (gap < anyGap) {
@@ -354,5 +389,6 @@ export function peerPick(tune: LocoTune, state: string, rel: number, speed: numb
   fillSpeeds(tune, PICK_SPEEDS);
   PICK_ASK.rel = rel;
   PICK_ASK.speed = speed;
+  PICK_ASK.side = sideMode(tune);
   return peerPickIn(PICK_SPEEDS, state, PICK_ASK);
 }

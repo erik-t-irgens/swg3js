@@ -52,7 +52,9 @@ class Recorder implements AnimRig {
   }
 }
 
-const tune = (): AnimTune => JSON.parse(JSON.stringify(ANIM_TUNE_SHIPPED));
+// The rules wave 1 made, under the air's rule before the owner's of 2026-11-15 (`airRule` 'before', which is 62143fe's):
+// the owner's rule has its own test (animPolish.test.ts).
+const tune = (): AnimTune => ({ ...JSON.parse(JSON.stringify(ANIM_TUNE_SHIPPED)), airRule: 'before' });
 const T = tune();
 /** The movement step's measure of a landing at a speed, m/s: the speed in its own units, squared, over ten thousand. */
 const delta = (speed: number) => (speed / UNIT) ** 2 / 10000;

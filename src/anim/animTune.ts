@@ -58,6 +58,57 @@ export interface AnimTune {
    * clip's feet are at its trim and when they come down.
    */
   trim: Record<TrimId, number>;
+  /**
+   * The air's rule. 'owner' (the default, his word of 2026-11-15): a plain jump plays no start of its own and floats in
+   * the Force jump's float (`mx_floating`) until it falls faster than `fall.floatUntil`, then the falling loop; on the
+   * grappling rope with the feet off the ground the air is the float too; leaving the ground with no jump over a drop
+   * of `fall.hopDrop` or more plays the jump's start (the hop) and then the falling loop, and over less the falling loop
+   * alone. A Force jump, a flip, a wall move and being thrown keep their own. 'before': 62143fe's (every plain jump the
+   * hop and the falling loop; the rope's air the falling loop).
+   */
+  airRule: 'owner' | 'before';
+  fall: {
+    /**
+     * Leaving the ground with no jump over a drop at least this deep plays the hop, metres: judged once, the frame the
+     * feet leave the ground, by one ray straight down from the feet. 1.5 (the lead's start): a kerb, a stair or a step
+     * off a low wall is no drop, and a ledge a body's height or so is.
+     */
+    hopDrop: number;
+    /**
+     * A plain jump floats until it falls faster than this, m/s, then hands over to the falling loop with the rig's own
+     * fade. 10: no hop of any class ever comes down that fast (a plain hop on level ground lands at 5.7 m/s, a Force
+     * user's tapped one at up to 9.6: `land.soft`'s own numbers), so every hop floats to its landing, and a jump off
+     * something hands over once it has fallen about 2.5 m from where it stopped rising (v squared over twice the game's
+     * 20.32 m/s squared).
+     */
+    floatUntil: number;
+  };
+  swim: {
+    /**
+     * The water's rule. 'owner' (the default, his word of 2026-11-15): treading at the surface the drawn figure is
+     * lowered by `sink` (the capsule, the swim and the camera are not), and held still under the water the figure treads
+     * there too, as it does at the surface. 'before': 62143fe's (the figure at the float line; still under water the
+     * swimming stroke).
+     */
+    rule: 'owner' | 'before';
+    /**
+     * How far the treading figure is drawn under where its body floats, metres on a figure of the human's size (scaled
+     * by the figure's own). 0.3: the treading clip fitted to a human holds the collarbones 1.39 m over the feet (the
+     * pelvis 0.995) and the body floats with its feet 1.1 m under the surface (`SWIM_DEPTH`), so the pelvis stood at the
+     * surface; lowered 0.29 m the waterline is at the collarbones. Applied only at the surface: a body deeper than the
+     * float line takes that much less of it, none once it is the sink's depth under (`swimSinkAt`).
+     */
+    sink: number;
+    /** How fast the sink comes on as the body stops to tread and goes as it swims off, seconds (a time constant): 0.3, so it is most of the way in under a second. */
+    ease: number;
+  };
+  /**
+   * Jedi Academy's clips' lower back. 'mended' (the default): every Jedi Academy clip's spine is rebased from the
+   * skeleton's bind pose, which the converter laid its standing frame on, onto the game's own idle's spine (a turn per
+   * spine joint worked out once per skeleton from the two: `src/anim/jkaSpine.ts`), the neck and the shoulders kept
+   * where the clip has them in the world. 'before': the clips as converted (62143fe).
+   */
+  jkaSpine: 'mended' | 'before';
 }
 
 export const ANIM_TUNE: AnimTune = {
@@ -65,6 +116,10 @@ export const ANIM_TUNE: AnimTune = {
   jump: { fade: 0.05 },
   impact: { lock: 1, fade: 0.05 },
   trim: { falling_flat_impact: 0.38, falling_to_landing: 0.233, hard_landing: 0.533, jumping_down: 0, jumping_up: 0 },
+  airRule: 'owner',
+  fall: { hopDrop: 1.5, floatUntil: 10 },
+  swim: { rule: 'owner', sink: 0.3, ease: 0.3 },
+  jkaSpine: 'mended',
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -85,6 +140,17 @@ export const ANIM_RANGES: Record<string, { min: number; max: number }> = {
   'trim.hard_landing': { min: 0, max: 2.2 },
   'trim.jumping_down': { min: 0, max: 0.3 },
   'trim.jumping_up': { min: 0, max: 0.18 },
+  'fall.hopDrop': { min: 0.3, max: 10 },
+  'fall.floatUntil': { min: 1, max: 40 },
+  'swim.sink': { min: 0, max: 1 },
+  'swim.ease': { min: 0, max: 2 },
+};
+
+/** The table's choices, by their path, and the words each takes. */
+export const ANIM_CHOICES: Readonly<Record<string, readonly string[]>> = {
+  airRule: ['owner', 'before'],
+  'swim.rule': ['owner', 'before'],
+  jkaSpine: ['mended', 'before'],
 };
 
 /** The trims that moved, for whoever holds fitted clips (a clip's travel is stripped from its trim on): told once a `tuneAnim` call. */
@@ -93,18 +159,38 @@ export function watchTrims(fn: ((ids: TrimId[]) => void) | null): void {
   onTrims = fn;
 }
 
+/** Told when `jkaSpine` moves, for whoever holds the clips it rebases (src/anim/jkaSpine.ts). */
+let onJkaSpine: (() => void) | null = null;
+export function watchJkaSpine(fn: (() => void) | null): void {
+  onJkaSpine = fn;
+}
+
 /**
  * Set numbers of the table from a nested object (`{ land: { soft: 8 }, trim: { hard_landing: 0.6 } }`), each held to
- * its range. Answers words for anything held, refused or not known; nothing is saved.
+ * its range, and its choices to their words (`{ airRule: 'before', swim: { rule: 'before' } }`). Answers words for
+ * anything held, refused or not known; nothing is saved.
  */
 export function tuneAnim(patch: unknown): string[] {
   const words: string[] = [];
   if (!patch || typeof patch !== 'object') return ['tune takes an object: { land: { soft: 8 } }'];
   const moved: TrimId[] = [];
-  const table = ANIM_TUNE as unknown as Record<string, Record<string, number>>;
+  const table = ANIM_TUNE as unknown as Record<string, Record<string, number | string>>;
+  const top = ANIM_TUNE as unknown as Record<string, unknown>;
+  const choose = (path: string, raw: unknown, set: (v: string) => void): void => {
+    const allowed = ANIM_CHOICES[path];
+    if (typeof raw !== 'string' || !allowed.includes(raw)) words.push(`${path} takes ${allowed.map((w) => `'${w}'`).join(' or ')}`);
+    else set(raw);
+  };
   for (const [group, values] of Object.entries(patch as Record<string, unknown>)) {
     if (!Object.prototype.hasOwnProperty.call(table, group)) {
-      words.push(`no group ${group} (land, jump, impact, trim)`);
+      words.push(`no group ${group} (land, jump, impact, trim, fall, swim, airRule, jkaSpine)`);
+      continue;
+    }
+    if (ANIM_CHOICES[group]) {
+      // A choice of the whole table (`airRule`, `jkaSpine`).
+      const was = top[group];
+      choose(group, values, (v) => (top[group] = v));
+      if (group === 'jkaSpine' && top[group] !== was) onJkaSpine?.();
       continue;
     }
     if (!values || typeof values !== 'object') {
@@ -112,6 +198,10 @@ export function tuneAnim(patch: unknown): string[] {
       continue;
     }
     for (const [key, raw] of Object.entries(values as Record<string, unknown>)) {
+      if (ANIM_CHOICES[`${group}.${key}`]) {
+        choose(`${group}.${key}`, raw, (v) => (table[group][key] = v));
+        continue;
+      }
       const range = ANIM_RANGES[`${group}.${key}`];
       if (!range || !Object.prototype.hasOwnProperty.call(table[group], key)) {
         words.push(`no ${group}.${key}`);

@@ -12,8 +12,8 @@
 // is made on a frame and no number crosses a call: what a frame hands in rides one kept record (`PeerIn`), and the
 // rate is read off this record (locoAlloc.test.ts measures it).
 
-import type { LocoRig } from './bodyLoco.ts';
-import { PeerAsk, SPEED_SLOTS, fillSpeeds, peerLocoState, peerPickIn, type LocoPick } from './locoTable.ts';
+import { CARRY_ORIGINAL, carryOf, type LocoRig } from './bodyLoco.ts';
+import { PeerAsk, SPEED_SLOTS, fillSpeeds, peerLocoState, peerPickIn, sideMode, type LocoPick } from './locoTable.ts';
 import type { LocoTune } from './locoTune.ts';
 
 const DEG = 180 / Math.PI;
@@ -83,6 +83,9 @@ export class PeerLoco {
     fillSpeeds(tune, SPEEDS);
     this.ask.rel = rel;
     this.ask.speed = f.speed;
+    // The sideways walk as this player's own tune has it: their game sends nothing of the choice (a figure walking
+    // sideways is drawn by the clip this side would play for the travel against the heading it sent).
+    this.ask.side = sideMode(tune);
     const found = peerPickIn(SPEEDS, state, this.ask);
     if (!found || !rig.has(found.clip)) return this.drop();
     if (!this.pick || found === this.pick) {
@@ -112,7 +115,11 @@ export class PeerLoco {
       if (natural > 0) {
         const band = tune.rate;
         const top = band.max * 2;
-        const r = f.speed / (natural * band.feet);
+        // The class's share of the feet-locked rate (`rate.byClass`), written out as the player's own is.
+        const by = band.byClass;
+        const c = this.pick.cls;
+        const share = c === 1 ? by.walk : c === 2 ? by.jog : c === 3 ? by.run : by.sprint;
+        const r = (f.speed / (natural * band.feet)) * share;
         rate = r < band.min ? band.min : r > top ? top : r;
       }
     }
@@ -124,5 +131,39 @@ export class PeerLoco {
     this.pick = null;
     this.next = null;
     return null;
+  }
+}
+
+/** The little of a rig a figure's pistol carry asks of: its states' preferences (`CharacterRig.prefer`). */
+export interface PreferRig {
+  prefer(state: string, clip: RegExp | null, repick?: boolean): void;
+}
+
+/** A pistol's own carry walk and run (the player's own `gunWalk` and `gunRun` preferences for a pistol). */
+export const PISTOL_WALK = /^loop_pistol_standing:speed1/;
+export const PISTOL_RUN = /^loop_pistol_standing:speed2/;
+
+/**
+ * Another player's relaxed pistol under this side's `gunCarry.pistol` 'original': the rig's own list for the relaxed
+ * carry's walk and run names the rifle's first, so their figure's `gunWalk` and `gunRun` are asked for the pistol's.
+ * Those preferences outlast the frame that set them, so they are taken off (and the state in force picks again) the
+ * moment their reason is gone: the gun in their right hand is no pistol any more, or the choice for a pistol is no
+ * longer 'original'. Never merely because a frame had no legs (a figure heard still a message), which would flick the
+ * clip back and forth. One a figure; nothing made a frame.
+ */
+export class PeerPistolCarry {
+  /** Whether the pistol's carry walk and run are the figure's `gunWalk` and `gunRun` preferences now. */
+  held = false;
+
+  /** The frame's step: `relaxedGun` the carry its kind of gun takes this frame (`CARRY_*`, -1 where none applies). */
+  step(rig: PreferRig, tune: LocoTune, state: string, gunClass: number, relaxedGun: number): void {
+    if (relaxedGun === CARRY_ORIGINAL && gunClass === 0) {
+      rig.prefer(state, state === 'gunWalk' ? PISTOL_WALK : PISTOL_RUN);
+      this.held = true;
+    } else if (this.held && !(gunClass === 0 && carryOf(tune, 0) === CARRY_ORIGINAL)) {
+      rig.prefer('gunWalk', null, true);
+      rig.prefer('gunRun', null, true);
+      this.held = false;
+    }
   }
 }

@@ -31,43 +31,56 @@ export interface LocoTune {
    */
   sprintFight: 'ends' | 'muted';
   /**
-   * What each class moves the body at, metres a second, by the way it goes. Every start is the speed its clip's own
-   * feet were measured at when the paces were made (the pack's index of 91e62d9), with two exceptions said below. The
-   * importer's measure was mended since (2026-11-15) and every clip now reads 1.5 to 10% faster (the README's
-   * "Walking, jogging, running and sprinting" puts each dial beside its clip's own speed now); the dials were left where
-   * they started, which are the owner's, and the clips' playback rates moved instead.
+   * What walking sideways (the walk class to a side: Alt held, strafing) plays. 'diagonal', the default (the owner's
+   * word of 2026-11-15: "use the walking forward + diagonal animation but rotate the body more"): the walked forward
+   * diagonal's own clip, the strafe walk (`left_strafe_walking`, `right_strafe_walking`), with the body turned 45 degrees
+   * further toward the travel than in the diagonal. That clip's own feet carry it straight sideways (its measured
+   * heading is 89.8 degrees), so in the diagonal the body stands turned 45 degrees away from the travel and here it
+   * stands square to the view, its legs stepping straight across. 'forward': the forward walk (`standard_walk`) with the
+   * body turned the whole 90 degrees toward the travel, the torso taking back its share toward the view. 'strafe': the
+   * slow strafe (`walk_strafe_left` / `_right`), as before (62143fe). With a blaster up and `gunSquare` on, 'forward'
+   * plays the strafe walk square (a body turned 90 degrees cannot also hold a barrel on the crosshair).
+   */
+  sideWalkClip: 'diagonal' | 'forward' | 'strafe';
+  /**
+   * With a gun in hand and out of combat (not ready, not aimed: no shot, no aim), what a pace plays, by the kind of
+   * gun. 'full': the imported clip drives the whole body, top and bottom, the gun swinging in the hand with it (the
+   * owner's word for pistols: "just let the full animation take over top and bottom"). 'original': the movement the game
+   * played with that gun out before the imported paces, the game's own carry walk and run (`loop_pistol_standing:speed1`
+   * and `:speed2` for a pistol, `loop_rifle:speed1` and `:speed2` for the rest) on the whole body, the body turned the way
+   * it runs as it was then, at the pace's own speed (the owner: "fall back to the original run cycle for carbines").
+   * 'split': the imported legs under the gun's standing carry held still on the upper body, as 62143fe had it. In
+   * combat nothing of this applies: the ready or aimed pose rides the imported legs as before.
+   */
+  gunCarry: { pistol: GunCarry; carbine: GunCarry; rifle: GunCarry; heavy: GunCarry };
+  /**
+   * What each class moves the body at, metres a second, by the way it goes. Every start is the owner's own, pinned on
+   * 2026-11-15 after he tried the paces ("the speed for sprint fast"), but the backward walks (1.28, the walking
+   * backwards clip's own as the paces were made), which he did not name. The clips' playback rates follow the speeds so
+   * the feet stay planted (`rate.byClass` at 1), inside `rate.min` to `rate.max`; where a pace's speed asks more of a
+   * figure's clip than the band allows (the jog at 4 on a short figure), the clip plays at the band's edge and its feet
+   * slide by the rest.
    */
   speed: {
     forward: {
-      /** `standard_walk`'s own 1.44. */
+      /** The owner's 1.66 (the forward walk, `standard_walk`). */
       walk: number;
-      /** `slow_run`'s own 2.85: what forward is with nothing held. */
+      /** The owner's 4 (`slow_run`): what forward is with nothing held. */
       jog: number;
-      /** `drunk_run_forward`'s own 2.38: the jog while tired. */
+      /** The owner's 3.5 (`drunk_run_forward`): the jog while tired. */
       tired: number;
-      /**
-       * `running` and `fast_run` measure almost alike (5.47 and 5.54), and two classes at one speed are one class. So
-       * the run starts under its clip's own, at 4.9, about midway between the jog and the sprint by ratio...
-       */
+      /** The owner's 6 (`running`). */
       run: number;
-      /** ...and the sprint at 6.35, the one run the game had before the classes, so nothing is faster than it was. */
+      /** The owner's 7 (`fast_run`). */
       sprint: number;
     };
-    /** `walking_backwards` 1.28, `jog_backward` 2.25, `running_backward` 2.93. */
+    /** Backing up: the walk 1.28 (the backward walk's own, not one he named), the owner's jog 3 and run 4. */
     back: { walk: number; jog: number; run: number };
-    /**
-     * The walk is the slow strafe, `walk_strafe_left` and `_right`, at their own 0.59 (the owner's answer: the
-     * brief's sideways "speed 0" is what walking sideways plays); `jog_strafe_left` 2.89; `left_strafe` 4.33.
-     */
+    /** Sideways: the owner's walk 1.44 (whatever `sideWalkClip` plays), jog 4 and run 6. */
     side: { walk: number; jog: number; run: number };
-    /**
-     * Forward and to a side. The walk and the run are the strafes' clips with the body turned (the brief has no
-     * clip of their own for them): the walk the strafe walks, which measure 1.70 to the left and 1.64 to the right
-     * and are one class, so it starts at the two's mean, 1.67; the run `left_strafe`'s 4.33. The jog is
-     * `jog_forward_diagonal`'s own 2.66.
-     */
+    /** Forward and to a side: the owner's walk 1.66, jog 4 and run 6. */
     forwardDiag: { walk: number; jog: number; run: number };
-    /** Back and to a side: the backward walk and run with the body turned, at their speeds; `jog_backward_diagonal`'s own 2.18. */
+    /** Back and to a side: the walk 1.28 (not one he named), the owner's jog 3 and run 4. */
     backDiag: { walk: number; jog: number; run: number };
   };
   /**
@@ -88,6 +101,14 @@ export interface LocoTune {
      * the ground on every clip of the table (the node test holds it). It stays for the eye.
      */
     feet: number;
+    /**
+     * Each class's clip played as a share of the rate that keeps its planted feet on the ground (the owner's word of
+     * 2026-11-15: "make the speed for sprint fast and the animation can slide slightly ... default lock animations to
+     * speed"). 1, the start of each, is locked, as before: a pace's speed moved keeps its feet planted. Under 1 the clip
+     * plays slower than the body moves and the planted feet slide forward with it; over 1 the other way. Multiplies with
+     * `feet` and stays inside `min` to `max`.
+     */
+    byClass: { walk: number; jog: number; run: number; sprint: number };
   };
   shift: {
     /** How long after Shift is let go the class drops by one, and again by one each such time until the jog, seconds. The brief's "after a moment": half a second. */
@@ -177,18 +198,23 @@ export interface LocoTune {
   };
 }
 
+/** What a pace plays with a gun in hand out of combat (`LocoTune.gunCarry`). */
+export type GunCarry = 'full' | 'original' | 'split';
+
 export const LOCO_TUNE: LocoTune = {
   on: true,
   gunSquare: true,
   sprintFight: 'ends',
+  sideWalkClip: 'diagonal',
+  gunCarry: { pistol: 'full', carbine: 'original', rifle: 'original', heavy: 'original' },
   speed: {
-    forward: { walk: 1.44, jog: 2.85, tired: 2.38, run: 4.9, sprint: 6.35 },
-    back: { walk: 1.28, jog: 2.25, run: 2.93 },
-    side: { walk: 0.59, jog: 2.89, run: 4.33 },
-    forwardDiag: { walk: 1.67, jog: 2.66, run: 4.33 },
-    backDiag: { walk: 1.28, jog: 2.18, run: 2.93 },
+    forward: { walk: 1.66, jog: 4, tired: 3.5, run: 6, sprint: 7 },
+    back: { walk: 1.28, jog: 3, run: 4 },
+    side: { walk: 1.44, jog: 4, run: 6 },
+    forwardDiag: { walk: 1.66, jog: 4, run: 6 },
+    backDiag: { walk: 1.28, jog: 3, run: 4 },
   },
-  rate: { min: 0.6, max: 1.6, feet: 1 },
+  rate: { min: 0.6, max: 1.6, feet: 1, byClass: { walk: 1, jog: 1, run: 1, sprint: 1 } },
   shift: { dropDelay: 0.5, tapWindow: 0.35 },
   stamina: { pool: 100, sprint: -12, run: 0, jog: 4, walk: 10, back: 10, side: 0, sideWalk: 10, air: 0, tiredUntil: 0.3, linger: 1.5 },
   fade: { loco: 0.2, idle: 0.2, jka: 0.2 },
@@ -222,6 +248,10 @@ export const LOCO_RANGES: Record<string, { min: number; max: number }> = {
   'rate.min': { min: 0.2, max: 1 },
   'rate.max': { min: 1, max: 3 },
   'rate.feet': { min: 0.8, max: 1.25 },
+  'rate.byClass.walk': { min: 0.4, max: 1.6 },
+  'rate.byClass.jog': { min: 0.4, max: 1.6 },
+  'rate.byClass.run': { min: 0.4, max: 1.6 },
+  'rate.byClass.sprint': { min: 0.4, max: 1.6 },
   'shift.dropDelay': { min: 0.05, max: 3 },
   'shift.tapWindow': { min: 0, max: 1.5 },
   'stamina.pool': { min: 10, max: 500 },
@@ -248,7 +278,15 @@ export const LOCO_RANGES: Record<string, { min: number; max: number }> = {
 
 const SWITCHES: readonly string[] = ['on', 'gunSquare'];
 /** The switches that take one of their words, and the words. */
-export const LOCO_CHOICES: Readonly<Record<string, readonly string[]>> = { sprintFight: ['ends', 'muted'] };
+const CARRIES: readonly GunCarry[] = ['full', 'original', 'split'];
+export const LOCO_CHOICES: Readonly<Record<string, readonly string[]>> = {
+  sprintFight: ['ends', 'muted'],
+  sideWalkClip: ['diagonal', 'forward', 'strafe'],
+  'gunCarry.pistol': CARRIES,
+  'gunCarry.carbine': CARRIES,
+  'gunCarry.rifle': CARRIES,
+  'gunCarry.heavy': CARRIES,
+};
 
 /**
  * Set numbers of the table from a nested object (`{ speed: { forward: { run: 5.2 } }, shift: { dropDelay: 0.8 } }`),

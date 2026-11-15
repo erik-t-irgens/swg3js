@@ -11,7 +11,7 @@
 // Pure: no three.js and nothing of the page. Nothing here makes an object on a frame: a landing, a jump and an impact
 // make one each, as events.
 
-import { NO_LANDING, airLoop, impact, impactHold, jumpStart, landing, landingSpeed, landingYields, type Landing } from './animRules.ts';
+import { AirAsk, NO_LANDING, airLoop, airLoopOwner, impact, impactHold, jumpStart, jumpStartOwner, landing, landingSpeed, landingYields, ledgeHop, type Landing } from './animRules.ts';
 import type { AnimTune } from './animTune.ts';
 
 /** The little of a rig this asks for: the game's `CharacterRig` is one. */
@@ -60,6 +60,19 @@ export class BodyAnim {
   private landFor = 0.5;
   /** The landing in the rules' terms; one kept record. */
   private readonly rec: Landing = { speed: 0.5, harm: 0, force: false, rolled: false, jka: false };
+  /** The air in the owner's rule's terms (`airLoopOwner`); one kept record. */
+  private readonly ask = new AirAsk();
+  /**
+   * Under the owner's rule, a plain jump began this air (its start is the float's, `jump`), until it falls faster
+   * than `fall.floatUntil` or the feet touch down: what keeps the air in the float.
+   */
+  private jumped = false;
+  /** On the grappling rope, attached, with the feet off the ground: written by the caller each frame before `air`. */
+  rope = false;
+  /** The body's upward speed, m/s (negative falling): written by the caller each frame before `air`. (Declared as a fraction.) */
+  vy = 0.5;
+  /** How far down what is under the feet lies as they leave the ground with no jump, metres, or -1 for nothing within the hop's drop: written before `leftGround`. */
+  dropBelow = 0.5;
 
   constructor(tune: AnimTune, unit: number) {
     this.tune = tune;
@@ -67,6 +80,18 @@ export class BodyAnim {
     this.impactLeft = 0;
     this.landFor = 0;
     this.rec.speed = 0;
+    this.vy = 0;
+    this.dropBelow = -1;
+  }
+
+  /** Under the owner's rule (`ANIM_TUNE.airRule`), a plain jump is in its float. */
+  get jumpFloat(): boolean {
+    return this.jumped;
+  }
+
+  /** Whether the caller is to judge a step off the ground (one ray down, `leftGround`): only under the owner's rule. */
+  get judgesLedges(): boolean {
+    return this.tune.airRule === 'owner';
   }
 
   /** Whether the thrown fall's impact still holds the keys: the game mutes them before anything reads one. */
@@ -101,6 +126,7 @@ export class BodyAnim {
    */
   drop(): void {
     this.force = false;
+    this.jumped = false;
     this.thrown = false;
     this.impactLeft = 0;
     this.impactOwed = false;
@@ -122,6 +148,7 @@ export class BodyAnim {
   swim(): void {
     this.thrown = false;
     this.force = false;
+    this.jumped = false;
     this.impactOwed = false;
     this.noFall = true;
   }
@@ -139,15 +166,27 @@ export class BodyAnim {
   /** On the ground under a movement that reports no landings: the air's memory is simply put down. */
   onGround(): void {
     this.force = false;
+    this.jumped = false;
     this.impactOwed = false;
   }
 
   /**
-   * A jump has begun. True when its start is the imported one, which is then playing; false leaves the caller the
-   * jump it always played (Jedi Academy's animations in charge, or a rig without the clip).
+   * A jump has begun. True when its start is the imported one, which is then playing, or under the owner's rule the
+   * float, which takes the air from the first frame with no start of its own; false leaves the caller the jump it
+   * always played (Jedi Academy's animations in charge, or a rig without the clip).
    */
   jump(rig: AnimRig | null, jka: boolean): boolean {
     this.rig = rig;
+    if (this.tune.airRule === 'owner') {
+      const up = rig ? jumpStartOwner(this.has, jka, this.tune) : null;
+      if (!up || !rig) return false;
+      if (up === 'float') {
+        this.jumped = true;
+        return true;
+      }
+      rig.play(up.clip, { fadeIn: up.fade, from: up.from });
+      return true;
+    }
     const up = rig ? jumpStart(this.has, jka, this.tune) : null;
     if (!up || !rig) return false;
     rig.play(up.clip, { fadeIn: up.fade, from: up.from });
@@ -155,13 +194,40 @@ export class BodyAnim {
   }
 
   /**
+   * The feet left the ground with no jump (a step off a ledge, a drop): under the owner's rule, the hop where what is
+   * under them lies at least `fall.hopDrop` down (`dropBelow`, written before: metres, or -1 for nothing found within it),
+   * which plays over the falling loop; under it, or with Jedi Academy's animations in charge, nothing but the falling
+   * loop. True when the hop plays. (The drop is a field and not an argument: a number handed across a call is a number made.)
+   */
+  leftGround(rig: AnimRig | null, jka: boolean): boolean {
+    this.rig = rig;
+    this.jumped = false;
+    if (this.tune.airRule !== 'owner' || !rig) return false;
+    const d = this.dropBelow;
+    const hop = ledgeHop(this.has, d < 0 || d >= this.tune.fall.hopDrop, jka, this.tune);
+    if (!hop) return false;
+    rig.play(hop.clip, { fadeIn: hop.fade, from: hop.from });
+    return true;
+  }
+
+  /**
    * The loop in the air, or null for the caller's own: thrown, the long fall (null without it: the caller's old flail);
    * after a flip, a Force jump or a wall move, the float; else the falling loop; and Jedi Academy's own in-air pose
-   * with its animations in charge (`jka`) or on a rig without the clip.
+   * with its animations in charge (`jka`) or on a rig without the clip. Under the owner's rule also the float on the
+   * grappling rope (`rope`) and through a plain jump until it falls faster than `fall.floatUntil` (`vy`), after which it
+   * is the falling loop for the rest of that air.
    */
   air(rig: AnimRig | null, jka: boolean): string | null {
     this.rig = rig;
-    return airLoop(this.has, this.thrown, this.force, jka);
+    if (this.tune.airRule !== 'owner') return airLoop(this.has, this.thrown, this.force, jka);
+    if (this.jumped && this.vy < -this.tune.fall.floatUntil) this.jumped = false;
+    const a = this.ask;
+    a.thrown = this.thrown;
+    a.force = this.force;
+    a.jka = jka;
+    a.rope = this.rope;
+    a.jumped = this.jumped;
+    return airLoopOwner(this.has, a);
   }
 
   /**
@@ -174,6 +240,7 @@ export class BodyAnim {
     this.rig = rig;
     const force = this.force;
     this.force = false;
+    this.jumped = false;
     if (this.impactOwed) {
       // The thrown fall's own landing, reported a frame after the impact began: the impact keeps the body, however
       // long it holds the keys.
@@ -229,6 +296,7 @@ export class BodyAnim {
     this.rig = rig;
     this.thrown = false;
     this.force = false;
+    this.jumped = false;
     this.landClip = null;
     const hit = rig ? impact(this.has, this.tune) : null;
     const plays = hit && rig ? rig.play(hit.clip, { fadeIn: hit.fade, from: hit.from }) : null;

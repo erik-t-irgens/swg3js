@@ -14,7 +14,7 @@
 // off this record's fields (locoAlloc.test.ts measures it).
 
 import { JOG, RUN, ShiftClass, SPRINT, Stamina } from './locoClass.ts';
-import { CLASS_NAMES, DIRS, GUN_UP, JOG_SLOT, PLAIN, SPEED_SLOTS, dirOf, fillSpeeds, locoPick, tableClips, topClass, type LocoPick } from './locoTable.ts';
+import { CLASS_NAMES, DIRS, GUN_UP, JOG_SLOT, PLAIN, SPEED_SLOTS, dirOf, fillSpeeds, locoPick, sideMode, tableClips, topClass, type LocoPick } from './locoTable.ts';
 import type { LocoTune } from './locoTune.ts';
 
 /** The little of a rig this asks for: the game's `CharacterRig` is one. */
@@ -50,6 +50,11 @@ export class LocoIn {
   fightKeys = false;
   /** A blaster up, ready or aimed: with the tune's `gunSquare` the body stays square to the view (a diagonal plays its own jog clip at every class). */
   gunUp = false;
+  /**
+   * The kind of gun in hand, where the body carries one it has clips for (`GUN_CLASSES`' place: 0 pistol, 1 carbine,
+   * 2 rifle, 3 heavy), or -1 for none: with no blaster up, what the tune's `gunCarry` says that kind plays.
+   */
+  gunClass = -1;
   /** The sprint's speed and the pool's size as the body's stats have them (the tune's own until something is earned). */
   sprint = 0.5;
   pool = 0.5;
@@ -106,6 +111,28 @@ export function fightKeysDown(input: FightKeys): boolean {
   return false;
 }
 
+/** The kinds of gun `LocoIn.gunClass` numbers, in order. */
+export const GUN_CLASSES = ['pistol', 'carbine', 'rifle', 'heavy'] as const;
+/** A gun's kind as `LocoIn.gunClass` numbers it, -1 for anything else. */
+export function gunClassIndex(cls: string): number {
+  return cls === 'pistol' ? 0 : cls === 'carbine' ? 1 : cls === 'rifle' ? 2 : cls === 'heavy' ? 3 : -1;
+}
+/**
+ * What a pace plays with a gun in hand out of combat (`BodyLoco.carry`): no gun, or one up (the ready or aimed pose
+ * rides the imported legs as ever), and the tune's three choices (`LocoTune.gunCarry`).
+ */
+export const CARRY_NONE = -1, CARRY_SPLIT = 0, CARRY_FULL = 1, CARRY_ORIGINAL = 2;
+/** A kind of gun's choice under a tune, as a number (`CARRY_*`). */
+export function carryOf(tune: LocoTune, gunClass: number): number {
+  const c = gunClass === 0 ? tune.gunCarry.pistol : gunClass === 1 ? tune.gunCarry.carbine : gunClass === 2 ? tune.gunCarry.rifle : gunClass === 3 ? tune.gunCarry.heavy : null;
+  return c === 'full' ? CARRY_FULL : c === 'original' ? CARRY_ORIGINAL : c === 'split' ? CARRY_SPLIT : CARRY_NONE;
+}
+/** The share of the feet-locked rate a class's clip plays at (`LocoTune.rate.byClass`): the jog's for the tired jog. */
+export function classShare(tune: LocoTune, cls: number): number {
+  const b = tune.rate.byClass;
+  return cls === 1 ? b.walk : cls === 2 ? b.jog : cls === 3 ? b.run : b.sprint;
+}
+
 /** The game's names for every clip the table can ask for: a rig has the classes only with all of them. */
 const TABLE_CLIPS: readonly string[] = tableClips().map((id) => `mx_${id}`);
 
@@ -151,6 +178,13 @@ export class BodyLoco {
   fadeNow = 0.5;
   /** Sprinting, on the ground or through a jump: under the tune's 'muted' the fight's keys do nothing meanwhile (`mutes`). */
   sprinting = false;
+  /**
+   * With a gun in hand and none up, what the tune's `gunCarry` has the pace play (`CARRY_*`); `CARRY_NONE` with no gun
+   * or one up. Under `CARRY_ORIGINAL` the table's clip leaves the legs and the facing to the caller's old rules (the
+   * game's own carry walk and run, the body turned the way it runs); under `CARRY_FULL` the caller hands the legs' clip
+   * no upper body of its own.
+   */
+  carry = CARRY_NONE;
   private boost = 1.5;
   private dt = 0.5;
   private legsWere = LEGS_OTHER;
@@ -208,6 +242,7 @@ export class BodyLoco {
     this.sprinting = false;
     this.pick = null;
     this.refused = '';
+    this.carry = CARRY_NONE;
     this.boost = f.boost;
     this.dt = f.dt;
     const tune = this.tune;
@@ -262,8 +297,10 @@ export class BodyLoco {
         this.refused = 'only forward sprints: the run';
       }
     }
-    const pick = locoPick(dir, cls, this.stamina.tired, (f.aiming || f.gunUp) && tune.gunSquare ? GUN_UP : PLAIN);
+    const pick = locoPick(dir, cls, this.stamina.tired, (f.aiming || f.gunUp) && tune.gunSquare ? GUN_UP : PLAIN, 'standard', sideMode(tune));
     this.pick = pick;
+    // A gun in hand with none up: what its kind's pace plays (none up means out of combat: no aim, no shot).
+    if (f.gunClass >= 0 && !f.gunUp && !f.aiming) this.carry = carryOf(tune, f.gunClass);
     this.cls = pick ? pick.cls : cls;
     // The class's speed by its dial; the sprint's is the stats' (the tune's own until something is earned); standing still, the jog's.
     fillSpeeds(tune, this.speeds);
@@ -290,6 +327,7 @@ export class BodyLoco {
     this.sprinting = false;
     this.pick = null;
     this.refused = '';
+    this.carry = CARRY_NONE;
     this.dir = -1;
     this.turn = 0;
     this.turnNow = 0;
@@ -310,14 +348,19 @@ export class BodyLoco {
   legs(rig: LocoRig | null, f: LocoIn, jka: boolean): LocoPick | null {
     const pick = this.pick;
     this.legsOn = false;
-    if (!this.rules || !pick || jka || !rig || !rig.has(pick.clip)) return null;
+    // A gun's 'original' carry: the game's own carry walk and run have the legs, by the caller's old rule.
+    if (!this.rules || !pick || jka || !rig || this.carry === CARRY_ORIGINAL || !rig.has(pick.clip)) return null;
     let rate = 1;
     if (rig.readSpeed(pick.clip)) {
       const natural = rig.speedOut;
       if (natural > 0) {
         const band = this.tune.rate;
         const top = band.max * (this.boost > 1 ? this.boost : 1);
-        const r = f.ground / (natural * band.feet);
+        // The class's share of the feet-locked rate (`rate.byClass`, 1 locked): written out, so no number crosses a call.
+        const by = band.byClass;
+        const c = pick.cls;
+        const share = c === 1 ? by.walk : c === 2 ? by.jog : c === 3 ? by.run : by.sprint;
+        const r = (f.ground / (natural * band.feet)) * share;
         rate = r < band.min ? band.min : r > top ? top : r;
       }
     }
@@ -328,7 +371,7 @@ export class BodyLoco {
 
   /** Whether the body faces by the table this frame (the view's way plus the clip's turn), rather than the way it runs. */
   faces(jka: boolean): boolean {
-    return this.rules && this.pick !== null && !jka;
+    return this.rules && this.pick !== null && !jka && this.carry !== CARRY_ORIGINAL;
   }
 
   /**
@@ -403,6 +446,9 @@ export class BodyLoco {
       fade: n(this.fadeNow, 3),
       sprinting: this.sprinting,
       sprintFight: this.tune.sprintFight,
+      sideWalkClip: this.tune.sideWalkClip,
+      gunCarry: this.carry === CARRY_FULL ? 'full' : this.carry === CARRY_ORIGINAL ? 'original' : this.carry === CARRY_SPLIT ? 'split' : null,
+      share: this.pick ? n(classShare(this.tune, this.pick.cls), 3) : null,
       stamina: { value: n(this.stamina.value, 1), pool: n(pool, 1), tired: this.stamina.tired, shown: this.stamina.shown(pool, this.tune) },
     };
   }

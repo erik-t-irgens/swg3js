@@ -31,7 +31,8 @@ import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from './swimStep.ts';
 import { ANIM_TUNE } from '../anim/animTune.ts';
 import { MX } from '../anim/animRules.ts';
 import { BodyAnim } from '../anim/bodyAnim.ts';
-import { BodyLoco, FadeOpts, LegOpts, fightKeysDown, newLocoIn } from '../anim/bodyLoco.ts';
+import { BodyLoco, CARRY_FULL, FadeOpts, LegOpts, fightKeysDown, gunClassIndex, newLocoIn } from '../anim/bodyLoco.ts';
+import { SwimSink } from '../anim/swimSink.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
 import { FELL_UNDER } from '../world/fellOut.ts';
 
@@ -416,10 +417,25 @@ export class Player {
    * those is one call on it below, and nothing else here decides any of it.
    */
   private readonly anim = new BodyAnim(ANIM_TUNE, UNIT);
+  /**
+   * How far the treading figure is drawn under where its body floats (src/anim/swimSink.ts): the rig's root lowered by
+   * it, so only what is drawn moves (the capsule, the swim, the wading and the camera's place are as ever).
+   */
+  readonly swimSink = new SwimSink();
 
   /** Whether the thrown fall's impact still holds the keys: the game mutes them before anything reads one. */
   get impactLocked(): boolean {
     return this.anim.impactLocked;
+  }
+
+  /** Under the owner's air rule, a plain jump is in its float (`BodyAnim.jumpFloat`): the console's. */
+  get jumpFloat(): boolean {
+    return this.anim.jumpFloat;
+  }
+
+  /** How deep the feet are under the water's surface, metres (-Infinity with none): the console's. */
+  get waterDepthNow(): number {
+    return this.waterDepth;
   }
 
   /** Thrown from a wreck and not yet down (`fling`). */
@@ -956,6 +972,10 @@ export class Player {
       this.group.rotation.set(0, this.heading, 0);
       if (this.grapple.leaning) this.group.quaternion.premultiply(this.leanTurn(grappleLeanQ));
     }
+    // Treading water, the drawn figure under where the body floats (`swimSink`, stepped by the update): the rig's root
+    // alone, so the capsule, the camera's place and everything hung on the group stay where the swim has them.
+    const rig = this.rig;
+    if (rig) rig.root.position.y = this.swimming && !room && !this.eva && this.swimSink.now > 0 ? -this.swimSink.now : 0;
   }
 
   /** The grapple's lean (§3.12) as a turn in the world's frame, into `out`. */
@@ -1063,6 +1083,7 @@ export class Player {
     // Stood somewhere means stood on your feet: a body put down here is not in whatever flow it was
     // last drawn into, and `placeVisual` below would otherwise draw it a waist under the new ground.
     this.dropLavaSink();
+    this.swimSink.drop();
     this.body.setEnabled(true);
     this.body.setTranslation({ x: p.x, y: p.y, z: p.z }, true);
     this.placeVisual();
@@ -1102,6 +1123,7 @@ export class Player {
     this.anim.drop();
     // Whole means rested too: the stamina is full at a respawn and at an arrival.
     this.loco.refill(this.staminaPool);
+    this.swimSink.drop();
     this.saber.holster();
     this.rig?.stopOverride(0);
     this.mounted = null;
@@ -2604,6 +2626,8 @@ export class Player {
     // block): under the tune's 'ends' it ends a sprint this frame, before the kit reads the press.
     lo.fightKeys = !atControls && fightKeysDown(input);
     lo.gunUp = this.classId === 'bounty_hunter' && !this.fists && (this.aiming || this.gunReady);
+    // The kind of gun in hand, where the body carries one it has the game's clips for: what a pace plays with none up.
+    lo.gunClass = this.classId === 'bounty_hunter' && this.hasGunClips && !this.fists ? gunClassIndex(this.gunClass) : -1;
     lo.sprint = this.stats.apply('move.sprint', LOCO_TUNE.speed.forward.sprint);
     lo.pool = this.staminaPool;
     lo.boost = this.speedMultiplier;
@@ -2805,6 +2829,15 @@ export class Player {
     this.grounded = this.controller.computedGrounded();
     if (this.grounded && this.vel.y < 0) this.vel.y = 0;
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
+    // Off the ground with no jump this frame (a jump puts the feet down as `grounded` false before the move): a step off
+    // a ledge or a drop. Under the owner's air rule, judged once now by one ray down from the feet (the game's own
+    // ground query, which passes over other players): the hop over a drop of `fall.hopDrop` or more (`BodyAnim.leftGround`).
+    if (wasGrounded && !this.grounded && !this.swimming && !this.flung && !this.grapple.attached && this.anim.judgesLedges) {
+      const reach = ANIM_TUNE.fall.hopDrop;
+      const d = this.physics.groundDistance(this.pos.x, this.pos.y + 0.1, this.pos.z, reach + 0.1, this.body, filter);
+      this.anim.dropBelow = d === null ? -1 : Math.max(0, d - 0.1);
+      this.anim.leftGround(this.rig, this.jkaActing);
+    }
     // Down from a wreck: flat on the ground where the fall ends.
     if (this.flung && this.grounded) {
       this.prone = true;
@@ -2993,6 +3026,15 @@ export class Player {
     this.animate(dt);
     cam.camera.getWorldDirection(this.lookDir);
     this.animateRig(dt, this.groundSpeed, moving, mz, mx);
+    // The treading figure's sink (`SwimSink`): on while the body treads in the water (still, which under the owner's
+    // rule is under the water too), never in first person, whose eye is the head itself (lowered with the figure it
+    // would sit 0.15 m over the water on a human and go under on the swell), and only at the surface.
+    const ss = this.swimSink;
+    ss.dt = dt;
+    ss.depth = this.waterDepth;
+    ss.scale = this.rig ? this.rig.root.scale.y : 1;
+    ss.floatDepth = SWIM_DEPTH;
+    ss.step(this.swimming && !moving && !cam.firstPerson, ANIM_TUNE);
 
     this.placeVisual();
     this.group.updateMatrixWorld(true);
@@ -3134,12 +3176,16 @@ export class Player {
     // imported tread when the rig has it (said outright, since adrift in space prefers another loop for the same state).
     else if (this.swimming) {
       rig.prefer('float', MX.tread);
-      rig.setState(moving || this.submerged ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
+      // Still under the water the tread too, under the owner's rule (`ANIM_TUNE.swim.rule`); the swimming stroke before.
+      rig.setState(moving || (this.submerged && ANIM_TUNE.swim.rule !== 'owner') ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
     }
     else if (!this.grounded) {
       // In the air. Thrown from a wreck: the imported long fall, else flailing (the swimming stroke) all the way down.
       // Otherwise the imported falling loop, or the float after a flip or a Force jump, and Jedi Academy's own in-air
       // pose with its animations in charge or without the imported clips.
+      // On the rope (attached, the feet off the ground) and how fast the body falls: what the owner's air rule reads.
+      this.anim.rope = this.grapple.attached;
+      this.anim.vy = this.vel.y;
       const loop = this.anim.air(rig, this.jkaActing);
       if (this.flung && !loop) rig.setState('swim', 3);
       else {
@@ -3173,9 +3219,11 @@ export class Player {
       const state = `${carry}${!moving ? 'Idle' : running ? 'Run' : 'Walk'}` as RigState;
       if (legs) {
         // Under the speed classes the legs are the classes' clip, and the upper body the gun's own: its ready or aimed
-        // pose as ever, else its relaxed carry (the standing one, held steady over the legs as those poses are).
+        // pose as ever, else its relaxed carry (the standing one, held steady over the legs as those poses are), or with
+        // the tune's 'full' for this kind of gun none, the clip having the whole body (`BodyLoco.carry`). Its 'original'
+        // hands no legs (`legs` null) and takes the line below, the state's own carry walk or run.
         rig.prefer(state, legs.clip);
-        rig.setState(state, speed, gunUpper ?? this.gunCarry(rig, gun), this.legOpts);
+        rig.setState(state, speed, gunUpper ?? (this.loco.carry === CARRY_FULL ? null : this.gunCarry(rig, gun)), this.legOpts);
       } else rig.setState(state, speed, gunUpper, fo);
     } else if (!moving) rig.setState('idle', 0, null, fo);
     // Moving with the block held: Jedi Academy's saber run and walk; otherwise the game's own, saber lit or not.
