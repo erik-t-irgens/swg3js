@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MX } from '../../../src/anim/animRules.ts';
+import { tableClips } from '../../../src/anim/locoTable.ts';
 import { ANIM_TUNE_SHIPPED } from '../../../src/anim/animTune.ts';
 import { clipName, clipSlug, decodeMxa, mirrorClip, readPackIndex } from '../../../src/anim/mxaFile.ts';
 import { ANALYZE, analyzeClip, posePositions, settle } from '../../anim/analyze.mjs';
@@ -129,7 +130,7 @@ const at = (name: string) => bones.findIndex((b) => b.name === name);
   const allowed = new Set(['use', 'loop', 'trimStart', 'mirror', 'ground', 'level']);
   ok(Object.values(CLIPS).every((r) => Object.keys(r as object).every((k) => allowed.has(k))), 'every row of the table says only what the importer reads');
   const used = Object.entries(CLIPS).filter(([, r]) => (r as { use?: boolean }).use).map(([id]) => clipName(id)).sort();
-  ok(JSON.stringify(used) === JSON.stringify(Object.values(MX).sort()), 'the clips the table marks for the game are the ones the game\'s rules name');
+  ok(JSON.stringify(used) === JSON.stringify([...Object.values(MX), ...tableClips().filter((id) => !id.endsWith('_mirrored')).map(clipName)].sort()), 'the clips the table marks for the game are the ones the game\'s rules name and the ones the speed classes\' table names (a mirrored twin is marked with the clip it mirrors)');
   ok(rowFor('falling_flat_impact').trimStart === 0.38 && rowFor('falling_to_landing').trimStart === 0.233 && rowFor('hard_landing').trimStart === 0.533, 'the brief\'s three trims, counted at thirty frames a second: 0.38, 0.233 and 0.533 s');
   ok(Object.entries(ANIM_TUNE_SHIPPED.trim).every(([id, t]) => rowFor(id).trimStart === t), 'and each is the tune\'s own start');
   ok(['jog_strafe_left', 'left_strafe', 'jog_forward_diagonal', 'jog_backward_diagonal'].every((id) => rowFor(id).mirror) && Object.entries(CLIPS).filter(([, r]) => (r as { mirror?: boolean }).mirror).length === 4, 'four clips are mirrored: the two strafes and the two diagonals the brief asks for');
@@ -256,7 +257,7 @@ const yTurn = (deg: number) => qaxis(0, 1, 0, deg * DEG);
     ok(Math.abs(row('floating').level! - 0.33) < 0.002 && row('floating').loop && row('walking').level === undefined, `a clip the table levels carries how high its hips ride on average (${row('floating').level} m)`);
     // The mirrored twin.
     const left = row('left_strafe'), twin = row('left_strafe_mirrored');
-    ok(Math.abs(left.heading - 90) < 3 && Math.abs(twin.heading + 90) < 3 && Math.abs(left.speed - twin.speed) < 1e-3 && twin.mirrorOf === 'left_strafe' && left.mirrorOf === undefined && !twin.use && twin.source === 'Left Strafe.fbx', `a clip the table mirrors has a twin beside it, measured afresh: it goes the other way (${left.heading} and ${twin.heading} degrees) at the same speed`);
+    ok(Math.abs(left.heading - 90) < 3 && Math.abs(twin.heading + 90) < 3 && Math.abs(left.speed - twin.speed) < 1e-3 && twin.mirrorOf === 'left_strafe' && left.mirrorOf === undefined && twin.use === left.use && twin.source === 'Left Strafe.fbx', `a clip the table mirrors has a twin beside it, measured afresh: it goes the other way (${left.heading} and ${twin.heading} degrees) at the same speed`);
     ok(left.feet.length === 2 && twin.feet.length === 2 && left.feet.every((m, i) => twin.feet[i].foot !== m.foot && Math.abs(twin.feet[i].t - m.t) < 1e-9), 'each of its feet coming down when the other one did');
     const names = index.bones.map((b) => b.name);
     const want = mirrorClip(clipOf('left_strafe'), names), got = clipOf('left_strafe_mirrored');

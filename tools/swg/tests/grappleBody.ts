@@ -382,7 +382,9 @@ export class TestBody implements GrappleBody {
     const move = this.move.set(0, 0, 0).addScaledVector(this.forward, mz).addScaledVector(this.right, mx);
     const moving = move.lengthSq() > 0;
     if (moving) move.normalize();
-    const walking = input.held('walk');
+    // The speed keys as the player's record answers them for a body without the speed classes (this one has no rig, so
+    // none): Shift walks, as it did before them, and so does the walk key held (`BodyLoco.keys`).
+    const walking = input.held('speedUp') || input.held('walk');
     const crouching = !this.swimming && (input.held('crouch') || this.crouchHeld);
     this.setCrouchCollider(crouching && this.grounded);
     let speed = (walking ? WALK_SPEED : RUN_SPEED) * (crouching && this.grounded ? 0.5 : 1);

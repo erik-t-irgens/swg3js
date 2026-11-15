@@ -3,7 +3,8 @@
 // (`Animation Brief.txt`, never committed) put into numbers, or a measurement's exception.
 //
 // A row may say:
-//   use        the game loads it at start (wave 1's swaps); every other clip waits for the console to ask
+//   use        the game loads it at start (wave 1's swaps, wave 2a's walks and runs), and its mirrored twin with it;
+//              every other clip waits for the console to ask
 //   loop       true or false, over what the first and last poses say
 //   trimStart  where the game starts a one-off, seconds. The brief counts frames at 30 a second
 //   mirror     also write `<id>_mirrored`, its mirror image through the body's middle
@@ -41,12 +42,31 @@ export const CLIPS = {
   // A landing that harms: "skip the first 16 frames".
   hard_landing: { use: true, loop: false, trimStart: frames(16) },
 
+  // ---- wave 2a: the brief's "Locomotion" list, standing (src/anim/locoTable.ts names every one of these) -----------
+  // Forward: the walk (the general one; the other gaits wait for the creator's switch), the jog, the jog while
+  // tired, the run and the sprint.
+  standard_walk: { use: true },
+  slow_run: { use: true },
+  drunk_run_forward: { use: true },
+  running: { use: true },
+  fast_run: { use: true },
+  // Backward.
+  walking_backwards: { use: true },
+  jog_backward: { use: true },
+  running_backward: { use: true },
+  // Sideways: the slow strafes, the strafe walks, and the jog and the run, whose right-hand sides are their mirror
+  // images ("the example online is too different"). A mirrored twin is loaded with the clip it mirrors.
+  walk_strafe_left: { use: true },
+  walk_strafe_right: { use: true },
+  left_strafe_walking: { use: true },
+  right_strafe_walking: { use: true },
+  jog_strafe_left: { use: true, mirror: true },
+  left_strafe: { use: true, mirror: true },
+  // The diagonals' jogs: forward and right, and back and right, as the files are; mirrored for the left.
+  jog_forward_diagonal: { use: true, mirror: true },
+  jog_backward_diagonal: { use: true, mirror: true },
+
   // ---- later waves: imported and measured now, played only from the console ---------------------------------------
-  // The strafes and diagonals the brief wants mirrored for the other side.
-  jog_strafe_left: { mirror: true },
-  left_strafe: { mirror: true },
-  jog_forward_diagonal: { mirror: true },
-  jog_backward_diagonal: { mirror: true },
   // The three that climb stairs rise half a metre a cycle, so their hips do not end where they began; pose for pose
   // they end as they began (within two degrees) and are cycles all the same. The two that descend are not: each ends
   // with its legs 46 and 55 degrees from where they began (and no mirror image of it either), so they are left as the

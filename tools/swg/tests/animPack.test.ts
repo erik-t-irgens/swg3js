@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { MX } from '../../../src/anim/animRules.ts';
+import { tableClips } from '../../../src/anim/locoTable.ts';
 import { ANIM_TUNE_SHIPPED } from '../../../src/anim/animTune.ts';
 import { MXA_HEADER_BYTES, PACK_FORMAT, PACK_FPS, clipName, clipSlug, continuousSign, decodeMxa, encodeMxa, frameTime, mirrorClip, mirrorMap, readPackIndex, type PackIndex } from '../../../src/anim/mxaFile.ts';
 import { SOURCE_TO_JOINT } from '../../../src/anim/mixamoMap.ts';
@@ -166,9 +167,9 @@ const names = bones.map((b) => b.name);
   checks += 4;
   ok(worstUnit < 1e-5, `every clip file decodes, of the index's frames, bones, length and hash (${(bytes / 1048576).toFixed(2)} MB in all), every rotation a unit one`);
 
-  // The clips the game plays at start are exactly the ones its rules name.
+  // The clips the game plays at start are exactly the ones its rules name, and the ones the speed classes' table names.
   const used = index.clips.filter((c) => c.use).map((c) => clipName(c.id)).sort();
-  ok(JSON.stringify(used) === JSON.stringify(Object.values(MX).sort()), `the clips marked for the game are the ten its rules name (${used.length})`);
+  ok(JSON.stringify(used) === JSON.stringify([...Object.values(MX), ...tableClips().map(clipName)].sort()), `the clips marked for the game are the ten its rules name and the twenty the speed classes' table names (${used.length})`);
   for (const [id, trim] of Object.entries(ANIM_TUNE_SHIPPED.trim)) {
     const row = index.clips.find((c) => c.id === id);
     assert.ok(row && Math.abs(row.trimStart - trim) < 1e-9, `${id}: the pack's trim (${row?.trimStart}) is the tune's start (${trim})`);
@@ -209,7 +210,7 @@ const names = bones.map((b) => b.name);
   ok(['ascending_stairs', 'ascending_stairs_1', 'running_up_stairs'].every((id) => row(id).loop && far(id) < 6) && ['descending_stairs', 'descending_stairs_1'].every((id) => !row(id).loop && far(id) > 40), `the stairs that climb end pose for pose as they began and are cycles; the two that descend end ${far('descending_stairs').toFixed(0)} and ${far('descending_stairs_1').toFixed(0)} degrees from where they began and are not`);
   for (const id of ['jog_strafe_left', 'left_strafe', 'jog_forward_diagonal', 'jog_backward_diagonal']) {
     const a = row(id), b = row(`${id}_mirrored`);
-    assert.ok(b && b.mirrorOf === id && near(b.heading, -a.heading, 1) && Math.abs(a.speed - b.speed) < 0.02 && !b.use, `${id}_mirrored is ${id}'s twin, heading the other way at its speed`);
+    assert.ok(b && b.mirrorOf === id && near(b.heading, -a.heading, 1) && Math.abs(a.speed - b.speed) < 0.02 && b.use === a.use, `${id}_mirrored is ${id}'s twin, heading the other way at its speed`);
     const twin = mirrorClip(data.get(id)!, packNames);
     const stored = data.get(`${id}_mirrored`)!;
     let worst = 0;

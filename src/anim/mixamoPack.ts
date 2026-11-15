@@ -15,6 +15,7 @@
 import * as THREE from 'three';
 import { ANIM_TUNE, watchTrims, type TrimId } from './animTune.ts';
 import { fitClip, planFit, skeletonKey, type FitPlan, type FitReport, type FitRow, type FittedClip, type TargetSkeleton } from './fit.ts';
+import { factsOf, type ClipFacts } from './locoPhase.ts';
 import { ALIGN_SHIPPED, type AlignFlags } from './mixamoMap.ts';
 import { clipName, clipSlug, decodeMxa, readPackIndex, type ClipData, type PackClipRow, type PackIndex } from './mxaFile.ts';
 
@@ -92,6 +93,13 @@ export class MixamoPack {
   private readonly align: AlignFlags = { ...ALIGN_SHIPPED };
   /** Clip files that could not be had, by id, with why. */
   private readonly lost = new Map<string, string>();
+  /** Each fitted walking or running clip's stride, by the clip object every rig of its skeleton shares. */
+  private readonly strides = new WeakMap<THREE.AnimationClip, ClipFacts>();
+
+  /** A fitted clip's stride (the speed its feet were made for on its skeleton, and its left foot's landing), or null: what a rig is handed with the clip. */
+  strideOf(clip: THREE.AnimationClip): ClipFacts | null {
+    return this.strides.get(clip) ?? null;
+  }
 
   constructor(io: PackIo) {
     this.io = io;
@@ -227,7 +235,14 @@ export class MixamoPack {
     const had = fit.clips.get(id);
     const fitted = fitClip(fit.plan, clip, this.rowFor(id), had?.fitted);
     const made = had ?? { clip: toThreeClip(clipName(id), fitted), fitted };
-    if (!had) fit.clips.set(id, made);
+    if (!had) {
+      fit.clips.set(id, made);
+      // A walking or running clip's stride, for the rig that plays it: its feet's speed at this skeleton's scale and
+      // when its left foot lands (src/anim/locoPhase.ts). A clip with no feet on the ground has none.
+      const row = this.rows.get(id);
+      const stride = row ? factsOf(row, fit.plan.scale) : null;
+      if (stride) this.strides.set(made.clip, stride);
+    }
     const ms = this.io.now() - t;
     fit.ms += ms;
     fit.longest = Math.max(fit.longest, ms);

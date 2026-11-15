@@ -43,6 +43,13 @@ export interface TargetJoint {
 export interface TargetSkeleton {
   joints: TargetJoint[];
   base: { p: Vec3; q: Quat };
+  /**
+   * Where the game's own clips hold the joint that takes the travel, as an offset from its rest place in its parent's
+   * frame (the standing idle's first frame less the bind pose; a species' own clips all stand in one place, which
+   * is not the bind pose's: 5.5 cm ahead of it on the human). The fitted clips are anchored there, level, so a
+   * hand-over between one of the game's clips and an imported one does not slide the hips. Absent: the bind pose's.
+   */
+  anchor?: Vec3;
 }
 
 /** What a fit says of a skeleton. */
@@ -87,6 +94,8 @@ export interface FitPlan {
   root: number;
   /** The driven joints, in the skeleton's order: one rotation track each. */
   driven: number[];
+  /** Where the clips are anchored, less the root's rest place, in the root's parent's frame, level (no height): nought without an anchor. */
+  anchor: Vec3;
   report: FitReport;
 }
 
@@ -329,7 +338,17 @@ export function planFit(bones: readonly PackBone[], target: TargetSkeleton, flag
     spineTilt,
     align: { torso: flags.torso, feet: flags.feet, clavicles: flags.clavicles },
   };
-  return { joints, boneOf, tail, restWorldQ: world.q, restWorldP: world.p, baseQ: [target.base.q[0], target.base.q[1], target.base.q[2], target.base.q[3]], cos, sin, scale, root, driven, report };
+  // The anchor: the offset the game's own clips hold the root at, turned into the figure's frame, its height taken out
+  // (a clip's height is its own, as authored), and turned back into the root's parent's frame, where the track is written.
+  const anchor: Vec3 = [0, 0, 0];
+  if (target.anchor && root >= 0) {
+    const rk = joints[root].parent;
+    const pq = rk < 0 ? [target.base.q[0], target.base.q[1], target.base.q[2], target.base.q[3]] : [world.q[rk * 4], world.q[rk * 4 + 1], world.q[rk * 4 + 2], world.q[rk * 4 + 3]];
+    const level = [0, 0, 0];
+    rotateInto(level, 0, pq, 0, target.anchor[0], target.anchor[1], target.anchor[2]);
+    rotateInto(anchor, 0, [-pq[0], -pq[1], -pq[2], pq[3]], 0, level[0], 0, level[2]);
+  }
+  return { joints, boneOf, tail, restWorldQ: world.q, restWorldP: world.p, baseQ: [target.base.q[0], target.base.q[1], target.base.q[2], target.base.q[3]], cos, sin, scale, root, driven, anchor, report };
 }
 
 /** What a clip's index row tells the fitter. */
@@ -451,9 +470,10 @@ export function fitClip(plan: FitPlan, clip: ClipData, row: FitRow, into?: Fitte
       const wz = scale * (-ox * sin + oz * cos);
       // ...and that in the frame of the root's parent, which nothing moves: its rest place plus the offset turned back.
       rotateInto(v, 0, rootParentInv, 0, wx, wy, wz);
-      out.rootPosition[f * 3] = joints[root].restP[0] + v[0];
-      out.rootPosition[f * 3 + 1] = joints[root].restP[1] + v[1];
-      out.rootPosition[f * 3 + 2] = joints[root].restP[2] + v[2];
+      // ...from where the clips are anchored: the rest place, or level with where the game's own clips stand (`anchor`).
+      out.rootPosition[f * 3] = joints[root].restP[0] + plan.anchor[0] + v[0];
+      out.rootPosition[f * 3 + 1] = joints[root].restP[1] + plan.anchor[1] + v[1];
+      out.rootPosition[f * 3 + 2] = joints[root].restP[2] + plan.anchor[2] + v[2];
     }
   }
   out.strays = strays;
@@ -508,5 +528,7 @@ export function skeletonKey(target: TargetSkeleton): string {
   const num = (v: number) => (Math.round(v * 1e5) + 0).toString(36);
   for (const j of target.joints) eat(`${j.name}|${j.parent}|${j.restP.map(num).join(',')}|${j.restQ.map(num).join(',')};`);
   eat(`${target.base.p.map(num).join(',')}|${target.base.q.map(num).join(',')}`);
+  // Only a skeleton that says where its own clips stand: one that does not keeps the key it always had.
+  if (target.anchor) eat(`|anchor:${target.anchor.map(num).join(',')}`);
   return `${target.joints.length}-${h1.toString(36)}${h2.toString(36)}`;
 }

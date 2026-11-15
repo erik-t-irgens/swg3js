@@ -8,6 +8,7 @@ import { MOOD_TUNE } from './moods.ts';
 import { chainPoint, clipLinks, HEAD_TO_EYE, type Quat, type Vec3 } from '../vehicles/cockpitSeat';
 import type { ActiveClip, ClipHalf } from '../audio/clipEvents.ts';
 import { restWorld as restPlaces, type TargetSkeleton } from '../anim/fit.ts';
+import { phaseAt, sharedRate, timeAtPhase, type ClipFacts } from '../anim/locoPhase.ts';
 
 export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun' | 'kneel' | 'prone' | 'proneMove' | 'gunProneIdle' | 'gunProneMove' | 'gunProneReadyIdle' | 'gunProneReadyMove' | 'gunProneAimIdle' | 'gunProneAimMove';
 
@@ -30,9 +31,10 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   /** Standing with the saber drawn: the style's stance (set through `stanceClip`), else the idle. */
   stance: ['BOTH_STAND2', 'idle_combat', 'idle', 'Idle', 'stand', 'loop_stand'],
   // Sideways and backwards locomotion, when the skeleton's tables carry them: the body then
-  // keeps facing the camera while it moves. Nothing else matches, so these states stay unused.
-  strafeLeft: [/strafe.*(left|_l)$/i, /^(run|walk)_?(strafe_?)?l(eft)?$/i, /side.*left/i],
-  strafeRight: [/strafe.*(right|_r)$/i, /^(run|walk)_?(strafe_?)?r(ight)?$/i, /side.*right/i],
+  // keeps facing the camera while it moves. The imported jog strafes first, when the rig has them (src/anim/): what a
+  // figure told only "strafing" plays. The speed classes name the exact clip themselves, through `prefer`.
+  strafeLeft: ['mx_jog_strafe_left', /strafe.*(left|_l)$/i, /^(run|walk)_?(strafe_?)?l(eft)?$/i, /side.*left/i],
+  strafeRight: ['mx_jog_strafe_left_mirrored', /strafe.*(right|_r)$/i, /^(run|walk)_?(strafe_?)?r(ight)?$/i, /side.*right/i],
   runBack: ['BOTH_RUNBACK2', 'BOTH_RUNBACK1', /^run.*back/i, /back.*run/i, /^run.*bwd/i],
   walkBack: ['BOTH_WALKBACK2', 'BOTH_WALKBACK1', /^walk.*back/i, /back.*walk/i, /^walk.*bwd/i],
   /** Moving with the block held: Jedi Academy's saber run and walk, else the game's own. */
@@ -146,6 +148,7 @@ const RIGHT_AXIS = new THREE.Vector3(1, 0, 0);
 const pitchQ = new THREE.Quaternion();
 const steadyQ = new THREE.Quaternion();
 const IDENTITY_Q = new THREE.Quaternion();
+const steadyFullQ = new THREE.Quaternion();
 /** States whose legs walk or run around the standing pelvis, where a pose on the upper body is held steady. */
 const LOCOMOTION_STATES = new Set<RigState>(['walk', 'run', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'strafeLeft', 'strafeRight', 'gunWalk', 'gunRun', 'gunReadyWalk', 'gunReadyRun', 'gunAimWalk', 'gunAimRun']);
 /**
@@ -251,6 +254,26 @@ export class CharacterRig {
   readonly grip: GripAxes | null;
   readonly partialClips: Record<string, string[]>;
   readonly variants: Record<string, { variable: string; values: string[] }>;
+  /**
+   * The stride of each walking or running clip that has one (the imported ones: src/anim/locoPhase.ts), by clip name:
+   * the speed its feet were made for, and when its left foot lands. A clip without one (every clip of the game's own)
+   * plays and fades exactly as it always did.
+   */
+  private readonly strides = new Map<string, ClipFacts>();
+  /**
+   * Two striding clips kept in step while one fades into the other: the outgoing and the incoming action with their
+   * strides, how far the fade has got, and the rates. Kept fields rather than a record made at each change of clip.
+   */
+  private syncOn = false;
+  private syncFrom: THREE.AnimationAction | null = null;
+  private syncNext: THREE.AnimationAction | null = null;
+  private syncA: ClipFacts | null = null;
+  private syncB: ClipFacts | null = null;
+  private syncT = 0.5;
+  private syncFade = 0.5;
+  /** The outgoing clip's own phase rate as the fade began, strides a second, and the rate the incoming clip is asked to play at. */
+  private syncFromRate = 0.5;
+  private syncWanted = 1.5;
   /** A clip to play for a state ahead of its table, when the rig has it: the style's stance, the jump's direction, the style's run. */
   private readonly preferred = new Map<RigState, string | RegExp>();
   /** A one-shot clip on the upper body over whatever the legs do (a shot fired), and when it ends. */
@@ -460,14 +483,75 @@ export class CharacterRig {
    * mixer and a name more in the table; nothing that is playing is touched, and a name the rig already has is left
    * as it is. Never called on a frame. Answers how many were new.
    */
-  addClips(clips: readonly THREE.AnimationClip[]): number {
+  addClips(clips: readonly THREE.AnimationClip[], strides?: ((clip: THREE.AnimationClip) => ClipFacts | null) | null): number {
     let added = 0;
     for (const clip of clips) {
       if (this.actions.has(clip.name)) continue;
       this.actions.set(clip.name, this.mixer.clipAction(clip));
+      // A walking or running clip comes with its stride: what keeps its feet on the ground and in step.
+      const stride = strides?.(clip);
+      if (stride) this.strides.set(clip.name, stride);
       added++;
     }
     return added;
+  }
+
+  /**
+   * The ground speed a clip's feet were made for on this figure, m/s: a striding clip's own at the figure's size, else
+   * the converter's manifest's, else null. What a caller divides the body's speed by for the rate the clip plays at.
+   */
+  clipSpeed(clip: string): number | null {
+    const stride = this.strides.get(clip);
+    if (stride) return stride.speed * this.root.scale.y;
+    return this.clipSpeeds[clip] ?? null;
+  }
+
+  /**
+   * `clipSpeed` for a frame: the speed is written into `speedOut` and the answer is whether it is known, so no
+   * number is handed back across the call (the speed classes ask this of the legs' clip every frame).
+   */
+  readSpeed(clip: string): boolean {
+    const stride = this.strides.get(clip);
+    if (stride) {
+      this.speedOut = stride.speed * this.root.scale.y;
+      return true;
+    }
+    const own = this.clipSpeeds[clip];
+    if (own === undefined) return false;
+    this.speedOut = own;
+    return true;
+  }
+  /** What `readSpeed` last read, m/s. (Declared as a fraction: it holds one.) */
+  speedOut = 0.5;
+
+  /** The clip a state plays as things stand: its preference when the rig has it, else its table's first match; null with neither. */
+  stateClip(state: RigState): string | null {
+    return this.preferredClip(state) ?? this.findClip(STATE_CLIPS[state]) ?? null;
+  }
+
+  /** The clip a state's own table gives, whatever is preferred. */
+  tableClip(state: RigState): string | null {
+    return this.findClip(STATE_CLIPS[state]) ?? null;
+  }
+
+  /** The stride of the clip an action plays (its lower half is the clip's own), or null. */
+  private strideOf(action: THREE.AnimationAction): ClipFacts | null {
+    if (!this.strides.size) return null;
+    const name = action.getClip().name;
+    return this.strides.get(name.startsWith('lower:') ? bareClipName(name) : name) ?? null;
+  }
+
+  /**
+   * What the legs' clip is doing, for the console and the tests: its name, the rate it plays at, how far it is through
+   * its stride (null for a clip with none), and while two striding clips are fading the two's phases.
+   */
+  strideNow(): { clip: string | null; rate: number; phase: number | null; fading: { from: string; phase: number; to: string; toPhase: number } | null } {
+    const cur = this.current;
+    const stride = cur ? this.strideOf(cur) : null;
+    const fading = this.syncOn && this.syncFrom && this.syncNext && this.syncA && this.syncB
+      ? { from: this.syncFrom.getClip().name, phase: phaseAt(this.syncFrom.time, this.syncA), to: this.syncNext.getClip().name, toPhase: phaseAt(this.syncNext.time, this.syncB) }
+      : null;
+    return { clip: cur?.getClip().name ?? null, rate: cur?.timeScale ?? 0, phase: cur && stride ? phaseAt(cur.time, stride) : null, fading };
   }
 
   /**
@@ -491,7 +575,16 @@ export class CharacterRig {
     for (let o = first?.parent ?? null; o && o !== this.root; o = o.parent) base.premultiply(tmpM.compose(o.position, o.quaternion, o.scale));
     const bp = new THREE.Vector3(), bq = new THREE.Quaternion(), bs = new THREE.Vector3();
     base.decompose(bp, bq, bs);
-    return { joints, base: { p: [bp.x, bp.y, bp.z], q: [bq.x, bq.y, bq.z, bq.w] } };
+    // Where this figure's own clips hold the root: the standing idle's first frame, less the bind pose. The fitted
+    // clips are anchored there, so a hand-over between the game's clips and the imported ones never slides the hips.
+    // A rig whose idle leaves the root where it rests (or has no such track) says nothing, and its fit is the one it was.
+    const hips = this.bones.get('root') ?? first;
+    const idle = this.findClip(STATE_CLIPS.idle);
+    const held = hips && idle ? this.actions.get(idle)!.getClip().tracks.find((t) => t.name === `${hips.name}.position`) : undefined;
+    const rest = hips ? this.restPosition.get(hips) : undefined;
+    const off: [number, number, number] | null = held && rest && held.values.length >= 3 ? [held.values[0] - rest.x, held.values[1] - rest.y, held.values[2] - rest.z] : null;
+    const anchor = off && Math.hypot(off[0], off[1], off[2]) > 1e-4 ? off : null;
+    return { joints, base: { p: [bp.x, bp.y, bp.z], q: [bq.x, bq.y, bq.z, bq.w] }, ...(anchor ? { anchor } : {}) };
   }
 
   /**
@@ -511,6 +604,21 @@ export class CharacterRig {
     const over = (bone: THREE.Bone, name: string) => (this.root.worldToLocal(bone.getWorldPosition(new THREE.Vector3())).y - rest.p[at(name) * 3 + 1]) * scale;
     const n = (v: number, digits: number) => Number(v.toFixed(digits));
     return { hipsFromRestDeg: n((hips.quaternion.angleTo(restQ) * 180) / Math.PI, 2), leftAnkleM: n(over(left, 'lAnkle'), 3), rightAnkleM: n(over(right, 'rAnkle'), 3) };
+  }
+
+  /**
+   * Where the two ankles are in the world just now, metres, for the console (`__debug.loco()`): a foot that is on the
+   * ground and moves over it is a foot sliding, and this is what that is measured from. Null on a skeleton without them.
+   */
+  anklesNow(): { left: [number, number, number]; right: [number, number, number] } | null {
+    const left = this.bones.get('lAnkle'), right = this.bones.get('rAnkle');
+    if (!left || !right) return null;
+    this.root.updateWorldMatrix(true, true);
+    const at = (b: THREE.Bone): [number, number, number] => {
+      const p = b.getWorldPosition(new THREE.Vector3());
+      return [p.x, p.y, p.z];
+    };
+    return { left: at(left), right: at(right) };
   }
 
   /** Length of a clip in seconds, or null when the rig lacks it. */
@@ -906,8 +1014,10 @@ export class CharacterRig {
    * Play the state's clip. With `upper`, that clip drives the legs only and `upper` (a stance)
    * drives the spine, arms and head: the saber held up while the legs swim.
    */
-  setState(state: RigState, speed = 0, upper: string | null = null): void {
+  setState(state: RigState, speed = 0, upper: string | null = null, opts?: { rate?: number; fade?: number }): void {
     this.wantedUpper = upper;
+    // How long a change of clip takes to fade (the speed classes say; the game's own 0.18 otherwise).
+    const fade = opts?.fade ?? 0.18;
     if (this.override && !this.overrideUpper) {
       // A one-off clip is playing; remember the state for when it ends.
       this.state = state;
@@ -919,17 +1029,38 @@ export class CharacterRig {
     // A one-shot on the upper body takes the layer while it plays; the caller's layer returns after it.
     const upperName = legsOnly ? null : (this.shotName ?? (upper && this.actions.has(upper) ? upper : null));
     const playing = this.current?.getClip().name.replace(/^lower:/, '');
-    if (state !== this.state || (wantedStance && playing !== wantedStance) || upperName !== this.upperName) {
+    if (state !== this.state || this.repick || (wantedStance && playing !== wantedStance) || upperName !== this.upperName) {
+      this.repick = false;
       const clipName = wantedStance ?? this.findClip(STATE_CLIPS[state]);
       const next = clipName ? (upperName || legsOnly ? this.half(clipName, 'lower') : this.actions.get(clipName)!) : null;
       // The same action already playing is left alone, unless it was faded out (a one-off clip
       // took the whole body from it meanwhile) and has gone dead: then it is started again.
       if (next && (next !== this.current || !next.enabled)) {
         const same = next === this.current;
+        // Two striding clips fade with their feet in step: the incoming one starts where the outgoing one is in its
+        // own stride, and the two then advance at one phase rate until the fade is done (`stepSync`). A clip with no
+        // stride (every one of the game's own) fades plain, from its start, as it always did.
+        const was = this.current;
+        const a = was && !same && was.enabled ? this.strideOf(was) : null;
+        const b = a ? this.strideOf(next) : null;
+        const startAt = a && b ? timeAtPhase(phaseAt(was!.time, a), b, next.getClip().duration) : 0;
         // A held clip (a stance) plays once and keeps its last frame.
         next.reset().setLoop(this.hold.has(clipName!) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity).setEffectiveWeight(1).play();
         next.clampWhenFinished = true;
-        if (this.current && !same) this.current.crossFadeTo(next, 0.18, false);
+        this.syncOn = false;
+        if (a && b && was) {
+          next.time = startAt;
+          this.syncOn = true;
+          this.syncFrom = was;
+          this.syncNext = next;
+          this.syncA = a;
+          this.syncB = b;
+          this.syncT = 0;
+          this.syncFade = fade;
+          this.syncFromRate = was.timeScale / a.cycle;
+          this.syncWanted = was.timeScale;
+        }
+        if (this.current && !same) this.current.crossFadeTo(next, fade, false);
         else if (same) next.fadeIn(0.12);
         this.current = next;
       }
@@ -946,13 +1077,48 @@ export class CharacterRig {
       this.upperName = upperName;
       this.state = state;
     }
-    const clip = this.current?.getClip().name.replace(/^lower:/, '');
-    const natural = (clip && this.clipSpeeds[clip]) || DEFAULT_CLIP_SPEED[state];
-    if (this.current && natural && speed > 0) this.current.timeScale = THREE.MathUtils.clamp(speed / natural, 0.5, 2.5);
-    else if (this.current) this.current.timeScale = 1;
+    if (!this.current) return;
+    // The rate the caller worked out (the speed classes, inside their own band), else the body's speed over the
+    // clip's own, inside the game's band, else the clip's own rate. (A striding clip's own speed is worked out here
+    // and never asked of `clipSpeed`: a number handed back across a call is a number made, and this is every frame.)
+    let wanted = 1;
+    if (opts?.rate !== undefined) wanted = opts.rate;
+    else if (speed > 0) {
+      const clip = this.current.getClip().name.replace(/^lower:/, '');
+      const stride = this.strides.size ? this.strides.get(clip) : undefined;
+      const natural = stride ? stride.speed * this.root.scale.y : this.clipSpeeds[clip] || DEFAULT_CLIP_SPEED[state];
+      if (natural) wanted = THREE.MathUtils.clamp(speed / natural, 0.5, 2.5);
+    }
+    // Part way through a fade in step, the rate is the two clips' shared one, written each frame by `stepSync`.
+    if (this.syncOn && this.syncNext === this.current) this.syncWanted = wanted;
+    else this.current.timeScale = wanted;
+  }
+
+  /**
+   * Two striding clips part way through a fade: both advance at one phase rate, the outgoing clip's own as the fade
+   * began eased to the incoming clip's own as it ends, so the left feet of the two land together all the way through.
+   * Over as soon as the fade is, or anything else takes the body.
+   */
+  private stepSync(dt: number): void {
+    const from = this.syncFrom, next = this.syncNext, a = this.syncA, b = this.syncB;
+    if (!from || !next || !a || !b || next !== this.current || (this.override !== null && !this.overrideUpper)) {
+      this.syncOn = false;
+      return;
+    }
+    this.syncT += dt;
+    const w = this.syncFade > 0 ? Math.min(1, this.syncT / this.syncFade) : 1;
+    const rate = sharedRate(this.syncFromRate, this.syncWanted / b.cycle, w);
+    from.timeScale = rate * a.cycle;
+    next.timeScale = rate * b.cycle;
+    if (w >= 1) {
+      this.syncOn = false;
+      next.timeScale = this.syncWanted;
+    }
   }
 
   update(dt: number): void {
+    this.stepDt = dt;
+    if (this.syncOn) this.stepSync(dt);
     this.mixer.update(dt);
     // The mixer writes a joint only when its clip's value moved since the last frame, so a neck or head the look
     // turned last frame still carries that turn on a frame the clip held it still. The first-person eye reads the
@@ -1049,15 +1215,21 @@ export class CharacterRig {
   }
 
   /** Ask a state to play `clip` when the rig has it: a name or a pattern (null goes back to the state's table). */
-  prefer(state: RigState, clip: string | RegExp | null): void {
+  prefer(state: RigState, clip: string | RegExp | null, repick = false): void {
     if (clip) this.preferred.set(state, clip);
-    else this.preferred.delete(state);
+    // Taken off with `repick`, the state in force picks its clip again at its next `setState`: a preference removed
+    // leaves the clip it had asked for playing for as long as the state stays the same (a stance's, a crouch's, as it
+    // always was), which is wrong for a clip the speed classes had put on a state they have just let go of.
+    else if (this.preferred.delete(state) && repick && state === this.state) this.repick = true;
   }
+
+  /** The state in force has had its preference taken off and picks its clip again at its next `setState` (`prefer`). */
+  private repick = false;
 
   /** The speed, in metres a second, the clip a state would play was made for, or null when unknown. */
   naturalSpeed(state: RigState): number | null {
     const clip = this.preferredClip(state) ?? this.findClip(STATE_CLIPS[state]);
-    return (clip && this.clipSpeeds[clip]) || DEFAULT_CLIP_SPEED[state] || null;
+    return (clip && (this.clipSpeed(clip) ?? 0)) || DEFAULT_CLIP_SPEED[state] || null;
   }
 
   /** What plays now, for the console. */
@@ -1116,6 +1288,17 @@ export class CharacterRig {
 
   /** Whether the torso is held steady over locomotion legs while a pose rides the upper body. */
   steady = true;
+  /**
+   * Seconds the steady hold takes to come on as the legs start to walk or run and to go as they stop: 0, at once,
+   * as it always was. The hold takes the pelvis's whole turn off the torso, and a strafe's hips stand turned a
+   * dozen degrees, so on at once it swung a pose on the upper body (an aimed blaster) that far in the one frame
+   * the legs started or stopped; whoever fades the legs' clip sets this to that fade (`Player`, the speed classes).
+   */
+  steadyEase = 0;
+  /** How much of the steady hold is on, 0 to 1: at once with no `steadyEase`, eased over it otherwise. */
+  private steadyShare = 1e-9;
+  /** The last update's step, for what is eased after the mixer (`steadyShare`). */
+  private stepDt = 1 / 60;
 
   /**
    * With a pose riding the upper body over locomotion legs, the pelvis's rock from the run would carry
@@ -1125,12 +1308,21 @@ export class CharacterRig {
   private steadyTurn(bone: THREE.Bone, out: THREE.Quaternion): THREE.Quaternion {
     out.identity();
     // Only over walking and running legs: a posture's pelvis (prone, kneeling, swimming) is meant to be turned.
-    if (!this.upper || !this.steady || !this.state || !LOCOMOTION_STATES.has(this.state)) return out;
+    const wanted = !!this.upper && this.steady && !!this.state && LOCOMOTION_STATES.has(this.state);
+    if (this.steadyEase > 0) {
+      const step = this.stepDt / this.steadyEase;
+      this.steadyShare = wanted ? Math.min(1, this.steadyShare + step) : Math.max(0, this.steadyShare - step);
+    } else this.steadyShare = wanted ? 1 : 0;
+    // Going, it eases out under whatever pose still rides the upper body; with none there is nothing to hold.
+    if (this.steadyShare <= 0 || !this.upper || !this.steady) return out;
     const parent = bone.parent;
     if (!(parent instanceof THREE.Bone) || this.upperBones().has(parent.name)) return out;
     const rest = this.restLocal.get(parent);
     if (!rest) return out;
-    return out.copy(parent.quaternion).invert().multiply(rest);
+    out.copy(parent.quaternion).invert().multiply(rest);
+    // Part way: that share of the turn from none (the whole of it is left exactly as it was worked out).
+    if (this.steadyShare < 1) out.slerpQuaternions(IDENTITY_Q, steadyFullQ.copy(out), this.steadyShare);
+    return out;
   }
 
   /** The bones from the lowest spine bone up: the torso, arms and head. */
@@ -1382,8 +1574,10 @@ interface PlayerManifest {
  * game as it starts, through this record and never an import, so the rig knows nothing of the pack, its files or the
  * page. With none set, or a provider that answers with nothing (no pack, the switch off), a rig is the rig it was.
  */
-export const IMPORTED_CLIPS: { provider: ((skeleton: TargetSkeleton, label: string) => Promise<THREE.AnimationClip[]>) | null; waitMs: number } = {
+export const IMPORTED_CLIPS: { provider: ((skeleton: TargetSkeleton, label: string) => Promise<THREE.AnimationClip[]>) | null; strides: ((clip: THREE.AnimationClip) => ClipFacts | null) | null; waitMs: number } = {
   provider: null,
+  /** A fitted walking or running clip's stride (its feet's speed, its left foot's landing), which the rig keeps with the clip; null for none. */
+  strides: null,
   /**
    * How long a rig's load waits for them before it goes on without: the clips are a few hundred kilobytes beside a
    * rig file of hundreds of megabytes, so this is only ever a server that has stopped answering. They are added
@@ -1409,8 +1603,8 @@ export async function attachImportedClips(rig: CharacterRig, label: string): Pro
       timer = setTimeout(() => resolve(null), IMPORTED_CLIPS.waitMs);
     });
     const clips = await Promise.race([fitting, late]);
-    if (clips) rig.addClips(clips);
-    else void fitting.then((c) => rig.addClips(c));
+    if (clips) rig.addClips(clips, IMPORTED_CLIPS.strides);
+    else void fitting.then((c) => rig.addClips(c, IMPORTED_CLIPS.strides));
   } catch (err) {
     console.warn('imported animations: not attached', err);
   } finally {

@@ -8,6 +8,7 @@ import { ANIM_DIALS, animDialsFor } from '../../../src/anim/animDials.ts';
 import { IMPACT_MUTES, MX, NO_LANDING, airLoop, impact, impactHold, jumpStart, landing, landingSpeed, landingYields, type Landing } from '../../../src/anim/animRules.ts';
 import { ANIM_RANGES, ANIM_TUNE, ANIM_TUNE_SHIPPED, tuneAnim, watchTrims, type AnimTune } from '../../../src/anim/animTune.ts';
 import { clipName, readPackIndex } from '../../../src/anim/mxaFile.ts';
+import { tableClips } from '../../../src/anim/locoTable.ts';
 import { ClipEventIndex } from '../../../src/audio/clipEvents.ts';
 import { SLOT_ACTIONS } from '../../../src/combat/forcePowers.ts';
 import { DEFAULT_BINDINGS } from '../../../src/core/input.ts';
@@ -36,7 +37,7 @@ const land = (over: Partial<Landing>): Landing => ({ speed: 5.7, harm: 0, force:
   const index = readPackIndex(JSON.parse(text('public/anims/mixamo/index.json')));
   if (typeof index === 'string') throw new Error(index);
   const used = index.clips.filter((c) => c.use).map((c) => clipName(c.id)).sort();
-  ok(Object.values(MX).sort().join() === used.join(), `the clips the rules name are exactly the clips the pack marks for the game's use (${used.length})`);
+  ok([...Object.values(MX), ...tableClips().map(clipName)].sort().join() === used.join(), `the clips the rules name, with the speed classes' table's, are exactly the clips the pack marks for the game's use (${used.length})`);
   ok(index.clips.find((c) => c.id === 'treading_water')!.loop && index.clips.find((c) => c.id === 'falling_idle')!.loop && index.clips.find((c) => c.id === 'flying')!.loop && index.clips.find((c) => c.id === 'floating')!.loop && index.clips.find((c) => c.id === 'falling')!.loop, 'the five the game loops are loops in the pack');
   ok(['falling_flat_impact', 'falling_to_landing', 'hard_landing', 'jumping_down', 'jumping_up'].every((id) => !index.clips.find((c) => c.id === id)!.loop && id in ANIM_TUNE.trim), 'and the five it plays once are one-offs, each with a trim on a dial');
 }
@@ -217,7 +218,7 @@ const land = (over: Partial<Landing>): Landing => ({ speed: 5.7, harm: 0, force:
   ok(has(main, '    const start = from === \'trim\' ? (tuned ?? row.trimStart) : typeof from === \'number\' && from > 0 ? from : 0;\n    const seconds = now.play(name, { loop: looping, hold: !looping, from: start });') && has(main, '    const looping = loop ?? row.loop;'), 'and it starts where it was asked to: at its trim (the dial\'s, else its row\'s), at a number of seconds, else at its start, looping as its row says unless told');
   ok(has(main, 'this.remotes.adrift = !!this.world.planet.space;'), 'the peers are told whether the world has ground');
 
-  ok(count(rig, 'await attachImportedClips(rig, ') === 2 && has(rig, 'const clips = await Promise.race([fitting, late]);\n    if (clips) rig.addClips(clips);\n    else void fitting.then((c) => rig.addClips(c));'), 'both of the rig loader\'s paths hand a rig its clips before it is returned, bounded, and late ones are added when they land');
+  ok(count(rig, 'await attachImportedClips(rig, ') === 2 && has(rig, 'const clips = await Promise.race([fitting, late]);\n    if (clips) rig.addClips(clips, IMPORTED_CLIPS.strides);\n    else void fitting.then((c) => rig.addClips(c, IMPORTED_CLIPS.strides));'), 'both of the rig loader\'s paths hand a rig its clips (each walking or running one with its stride) before it is returned, bounded, and late ones are added when they land');
   ok(has(rig, "  air: ['mx_falling_idle', 'BOTH_INAIR1', 'jump', 'fall', 'loop_jump', 'sneak_pose', 'idle', 'stand'],") && has(rig, "  float: ['mx_treading_water', 'float', 'loop_swimming:speed0', 'swim', 'idle'],"), 'the air and the still water name the imported loop first, and after it exactly what they named before');
   ok(has(peers, "else if (state === 'float') rig.prefer('float', this.adrift && !r.aboard ? MX.adrift : MX.tread);"), 'a peer who floats is adrift where the world has no ground and they are in no hull, and treading otherwise');
 

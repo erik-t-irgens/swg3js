@@ -253,6 +253,21 @@ const TAU = 2 * Math.PI;
   // origin, and that is its pose.
   const asLoop = fitClip(plan, land, still);
   ok(Math.abs(rootPos(asLoop, 0)[0] - restP[0] + plan.scale * 0.09) < 1e-6 && Math.abs(rootPos(asLoop, 0)[2] - restP[2] + plan.scale * 0.07) < 1e-6 && Math.hypot(rootPos(asLoop, 60)[0] - rootPos(asLoop, 0)[0], rootPos(asLoop, 60)[2] - rootPos(asLoop, 0)[2]) < 1e-6, 'a loop is anchored where its own first frame has its hips, and ends there');
+  // A figure whose own idle holds the root off its rest place (the target's `anchor`): every clip is counted from
+  // there, level, so a hand-over between the game's clips and these never slides the hips. Its height is no part of it.
+  const offIdle: [number, number, number] = [0.03, -0.021, 0.055];
+  const anchoredTarget = { ...targetSkeleton(), anchor: offIdle };
+  const ap = planFit(bones, anchoredTarget, ALIGN_SHIPPED);
+  ok(plan.anchor.join() === '0,0,0' && Math.abs(ap.anchor[0] - 0.03) < 1e-9 && ap.anchor[1] === 0 && Math.abs(ap.anchor[2] - 0.055) < 1e-9, 'a plan with no anchor counts from the rest place; with one, from the anchor\'s level part (its height left out)');
+  let anchorWorst = 0;
+  for (const [clip, row] of [[loop, still], [land, { trimStart: 0.5, loop: false }], [land, still]] as const) {
+    const plain = fitClip(plan, clip, row), moved = fitClip(ap, clip, row);
+    for (let f = 0; f < plain.rootPosition.length / 3; f++) {
+      anchorWorst = Math.max(anchorWorst, Math.abs(moved.rootPosition[f * 3] - plain.rootPosition[f * 3] - 0.03), Math.abs(moved.rootPosition[f * 3 + 1] - plain.rootPosition[f * 3 + 1]), Math.abs(moved.rootPosition[f * 3 + 2] - plain.rootPosition[f * 3 + 2] - 0.055));
+    }
+  }
+  ok(anchorWorst < 1e-6, `and every frame of a loop and of a one-off is moved by exactly that, level, its height as it was (worst ${anchorWorst.toExponential(1)} m off)`);
+  ok(skeletonKey(anchoredTarget) !== skeletonKey(targetSkeleton()) && skeletonKey({ ...targetSkeleton(), anchor: [0.03, -0.021, 0.056] }) !== skeletonKey(anchoredTarget), 'two figures alike but for where their idles stand are two fits');
   // Levelled.
   const high = makeClip(bones, 11, 1, () => [0, 0, 0, 1], (s) => [0, 0.33 + 0.02 * Math.sin(s * TAU), 0]);
   const lev = fitClip(plan, high, { trimStart: 0, loop: true, level: 0.33 });

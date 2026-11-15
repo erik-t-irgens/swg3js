@@ -132,6 +132,9 @@ import { browserIo, mixamoPack } from './anim/mixamoPack.ts';
 import { ANIM_TUNE, tuneAnim } from './anim/animTune.ts';
 import { IMPACT_MUTES } from './anim/animRules.ts';
 import { animDialsFor } from './anim/animDials.ts';
+import { SPRINT_MUTES } from './anim/bodyLoco.ts';
+import { locoDialsFor } from './anim/locoDials.ts';
+import { LOCO_SWITCH, LOCO_TUNE, locoSwitchOn, tuneLoco } from './anim/locoTune.ts';
 import { clipName } from './anim/mxaFile.ts';
 import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
@@ -549,8 +552,23 @@ setShippedPublic(shippedPublic);
 // seldom waits for it, and handed to the rigs' loader through its own record. `localStorage['swg.mixamo'] = '0'` at
 // load fetches nothing and no rig gains a clip.
 const MIXAMO = mixamoPack(browserIo({ text: (path, init) => fetchPublic(path, init, import.meta.env.BASE_URL), bytes: (path, query) => fetchPublicBytes(path, query, import.meta.env.BASE_URL) }))!;
+// With each walking or running clip, its stride: what the rig keeps its feet on the ground and in step by.
+IMPORTED_CLIPS.strides = (clip) => MIXAMO.strideOf(clip);
 IMPORTED_CLIPS.provider = (skeleton, label) => MIXAMO.clipsFor(skeleton, label);
 void MIXAMO.load();
+// The speed classes (walk, jog, run and sprint on foot: src/anim/bodyLoco.ts) are on unless `localStorage['swg.loco']`
+// is '0' at load, which is the movement before them; `__debug.loco({ on })` flips them live.
+LOCO_TUNE.on = locoSwitchOn(() => localStorage.getItem(LOCO_SWITCH));
+
+/** What `__debug.loco` takes. */
+interface LocoDebugOptions {
+  /** The speed classes on or off, live. */
+  on?: boolean;
+  /** Numbers of `LOCO_TUNE` to move, as a nested object. */
+  tune?: unknown;
+  /** Put the stamina at a number of points (the console's, for seeing the tired jog without a long sprint). */
+  stamina?: number;
+}
 
 /** What `__debug.anim` takes beside a clip's name. */
 interface AnimDebugOptions {
@@ -7457,6 +7475,7 @@ class App {
             // the fight for the rest of the step, as the frame loop has it: so a hold can be driven from here.
             this.stepPlacingKeys(dt);
             // A thrown fall's impact holds the keys, as the frame loop has it.
+            this.stepSprintKeys();
             this.stepImpactKeys();
             // And the grapple's, beside them as the frame loop has them: its mutes, the fire, the boost, the held reels.
             if (!this.placing && !this.propPlacing) this.stepGrappleKeys();
@@ -7960,6 +7979,17 @@ class App {
        * any clip the rig has by name, looping unless the second argument is false.
        */
       anim: (arg?: string | AnimDebugOptions, loop = true) => this.animDebug(arg, loop),
+      /**
+       * The speed classes on foot (src/anim/bodyLoco.ts): walk, jog, run and sprint, Shift and the walk key, stamina,
+       * and the imported clip for each way the keys go. `loco()`: whether they are in force, the class asked and the
+       * class given with why one was refused, the way moved, the clip and the rate it plays at, the ground speed, how
+       * far the clip turns the body from the view, the stamina, and what the legs' clip is doing (its stride's phase,
+       * and both clips' while two fade). `loco({ on: false })` is the movement before the classes, live (one run, Shift
+       * walks, the body turns the way it runs; `localStorage['swg.loco'] = '0'` does it at load); `loco({ tune: { speed:
+       * { forward: { run: 5.2 } } } })` moves `LOCO_TUNE` (the debug menu has every number as a slider; nothing is
+       * saved); `loco({ stamina: 5 })` sets the pool.
+       */
+      loco: (o: LocoDebugOptions = {}) => this.locoDebug(o),
       /** Mount the nearest vehicle, or dismount, as E does. */
       mount: () => {
         this.handleMount();
@@ -8415,7 +8445,8 @@ class App {
           // On foot: the glyphs the sheet holds, the keys the number slots are showing (which is how
           // a rebind is checked from a tab nobody can see), what is in each hand, and whether the
           // crosshair is drawn for the class in play.
-          onFoot: { icons: foot.icons, keys: foot.keys, hands: foot.hands, crosshair: foot.crosshair, attached: foot.attached, ops: foot.ops },
+          // (`stamina`: '' while the row is not in the block, the speed classes off; 'down' while it keeps its place unseen.)
+          onFoot: { icons: foot.icons, keys: foot.keys, hands: foot.hands, crosshair: foot.crosshair, attached: foot.attached, ops: foot.ops, stamina: foot.stamina },
           // The plate over a head, and the line in the corner it replaced.
           plates: { shown: plate.shown, label: plate.label, writes: plate.writes, enabled: plate.enabled, tune: { ...PLATE_TUNE } },
           nearby: { name: this.nearbyName, hz: HUD_WIRING.nearbyHz },
@@ -9473,7 +9504,7 @@ class App {
         const n3 = (v: number) => Number(v.toFixed(3));
         const roped = g.attached || g.holding;
         const piv = roped ? g.pivot(new THREE.Vector3()) : null;
-        const watched = ['walk', 'crouch', 'flashlight', 'prone', 'kneel', 'emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4', 'jump'] as const;
+        const watched = ['speedUp', 'crouch', 'flashlight', 'prone', 'kneel', 'emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4', 'jump'] as const;
         // A loose prop under the mark (when the rope holds none): what it weighs and who the mass rule would move.
         const markProp = !g.holding && mk.kind === 'prop' && mk.collider ? (g.propAt?.(mk.collider.handle) ?? null) : null;
         const held = g.thing;
@@ -12289,7 +12320,7 @@ class App {
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
       // (The landmarks' switch dial is handed the app's own curtain just below, `LANDMARK_SWITCH`.)
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -20937,7 +20968,7 @@ class App {
         strafe: hovering ? keys : 0,
         heading: free ? null : this.cockpitYaw ?? this.cam.yaw + Math.PI,
         // A ship with a fight boosts on its booster's energy.
-        boost: input.held('walk') && (pilot.combat ? pilot.combat.boostLeft > 0 : true),
+        boost: input.held('speedUp') && (pilot.combat ? pilot.combat.boostLeft > 0 : true),
         hop: input.pressedAction('jump'),
         up: input.held('jump'),
         down: input.held('crouch'),
@@ -28438,6 +28469,43 @@ class App {
     if (this.player.impactLocked) this.input.mute(IMPACT_MUTES as readonly Action[]);
   }
 
+  /**
+   * The sprint (src/anim/bodyLoco.ts): while it lasts the attack, a gun's other trigger and the saber's throw do nothing
+   * (the block and a blaster's aim end it instead, by the classes' own caps), muted by action for the rest of the frame
+   * before anything reads a key. The frame loop and `__debug.advance` both call it, straight before the impact's.
+   */
+  private stepSprintKeys(): void {
+    if (this.player.sprinting) this.input.mute(SPRINT_MUTES as readonly Action[]);
+  }
+
+  /** `__debug.loco`: see its row in the README. */
+  private locoDebug(o: LocoDebugOptions): unknown {
+    const words: string[] = [];
+    const p = this.player;
+    if (typeof o.on === 'boolean') words.push(...tuneLoco({ on: o.on }));
+    if (o.tune !== undefined) words.push(...tuneLoco(o.tune));
+    const pool = p.staminaPool;
+    if (typeof o.stamina === 'number' && Number.isFinite(o.stamina)) {
+      p.loco.stamina.value = Math.min(pool, Math.max(0, o.stamina));
+      if (p.loco.stamina.value <= 0) p.loco.stamina.tired = true;
+    }
+    const rig = p.rig;
+    const n2 = (v: number) => Number(v.toFixed(2));
+    return {
+      ...(words.length ? { words } : {}),
+      switch: LOCO_TUNE.on,
+      has: rig ? p.loco.enabled(rig) : false,
+      ...p.loco.report(pool),
+      groundSpeed: n2(Math.hypot(p.vel.x, p.vel.z)),
+      headingDeg: n2((p.heading * 180) / Math.PI),
+      viewDeg: n2((wrapAngle(this.cam.yaw + Math.PI) * 180) / Math.PI),
+      rig: rig ? { ...rig.describe(), stride: rig.strideNow(), ankles: rig.anklesNow() } : 'no rig',
+      // The other players here: what each one's game sent and the clip their legs play on this screen.
+      peers: this.remotes.legs(),
+      tune: JSON.parse(JSON.stringify(LOCO_TUNE)) as unknown,
+    };
+  }
+
   /** `__debug.anim`: see its row in the README. A clip's name plays any clip the rig has, as it always did. */
   private animDebug(arg: string | AnimDebugOptions | undefined, loop: boolean): unknown {
     const rig = this.player.rig;
@@ -28496,7 +28564,7 @@ class App {
       const clip = await MIXAMO.clipFor(id, rig.restSkeleton(), rig.character?.manifest.id ?? 'player');
       if (typeof clip === 'string') return { ...(words.length ? { words } : {}), error: clip };
       // The rig may have been swapped for another while the clip was fetched: the one playing now takes it.
-      this.player.rig?.addClips([clip]);
+      this.player.rig?.addClips([clip], IMPORTED_CLIPS.strides);
       this.feet.index.addClips(MIXAMO.footEvents());
     }
     const now = this.player.rig;
@@ -35206,6 +35274,7 @@ class App {
         // would also say there is nothing of yours near enough to pick up.
         if (takeKey && !hadInHand && !this.anyPanelOpen() && !this.map.open && !riding && !atControls) void this.takeNearestProp();
         // A thrown fall's impact holds the keys while it plays, before the grapple, the kit or the body reads one.
+        this.stepSprintKeys();
         this.stepImpactKeys();
         // The grapple's keys, under the same guard as the rest of the block (never with the map, a panel or the
         // placing hand up): its mutes first, so the torch, the walk and a swinging jump are already muted below.
@@ -35695,6 +35764,10 @@ class App {
       const locZ = locSpace ? locAt.z : gameToRawZ(locC ? locC.z : 0, locAt.z);
       // The breath goes last: it is null on dry land and with a full lungful, and the row is not on
       // the page at all while it is, so an ordinary frame writes nothing for it.
+      // The stamina's row (the speed classes), up while the pool is not full and for a moment after: nothing is written
+      // while it is down, and with the classes not in force for the body the row is not in the block at all.
+      const staminaPool = player.staminaPool;
+      this.hud.setStamina(player.loco.stamina, staminaPool, player.loco.stamina.shown(staminaPool, LOCO_TUNE), player.loco.on);
       this.hud.update(dt, locX, locAt.y, locZ, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn, player.breath);
       // The minimap: drawn only when you have moved or turned enough to show, which a still frame has not.
       this.stepMinimap();

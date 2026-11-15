@@ -502,7 +502,7 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
       // A bike in racing mode: the boost, the slide on Space, and the way back to traversal; with an engine part
       // damaged the repair comes before the way back, which is the one the bar has no room left for.
       if (v.mode === 'racing') {
-        if (v.boost) n = push(out, n, 'walk', W.boost);
+        if (v.boost) n = push(out, n, 'speedUp', W.boost);
         n = push(out, n, 'jump', W.slide);
         if (v.repair) n = push(out, n, 'repair', W.repair);
         n = push(out, n, 'raceMode', W.traversalMode);
@@ -511,7 +511,7 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
       // Today's: the hop, the boost; a pod raced slides on Space instead (and repairs while a part is damaged); a bike
       // in traversal offers racing mode.
       if (v.hop && !v.slide) n = push(out, n, 'jump', W.hop);
-      if (v.boost) n = push(out, n, 'walk', W.boost);
+      if (v.boost) n = push(out, n, 'speedUp', W.boost);
       if (v.slide) n = push(out, n, 'jump', W.slide);
       if (v.slide && v.repair) n = push(out, n, 'repair', W.repair);
       if (v.mode === 'traversal') n = push(out, n, 'raceMode', W.racingMode);

@@ -31,6 +31,8 @@ import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from './swimStep.ts';
 import { ANIM_TUNE } from '../anim/animTune.ts';
 import { MX } from '../anim/animRules.ts';
 import { BodyAnim } from '../anim/bodyAnim.ts';
+import { BodyLoco, FadeOpts, LegOpts, newLocoIn } from '../anim/bodyLoco.ts';
+import { LOCO_TUNE } from '../anim/locoTune.ts';
 import { FELL_UNDER } from '../world/fellOut.ts';
 
 /**
@@ -423,6 +425,37 @@ export class Player {
   /** Thrown from a wreck and not yet down (`fling`). */
   get flung(): boolean {
     return this.anim.flung;
+  }
+
+  /**
+   * The speed classes (src/anim/bodyLoco.ts): the class Shift and the walk key ask for, the stamina that pays, the
+   * imported clip for the way the keys go, what the class moves the body at and how far its clip turns the body from
+   * the view. Every moment of those is one call on it below, and nothing else here decides any of it; with the classes
+   * off, or on a rig without the imported clips, each call answers "as before".
+   */
+  readonly loco = new BodyLoco(LOCO_TUNE);
+  /** The frame as the classes need it: one kept record, written before `loco.plan`. */
+  private readonly locoIn = newLocoIn();
+  /** The rate and the fade the classes hand the rig with a state: one kept record; and the fade alone, for a state whose clip keeps its own rate. */
+  private readonly legOpts = new LegOpts();
+  private readonly fadeOpts = new FadeOpts();
+  /** The blaster's own relaxed carry (its standing loop), found once a rig and a kind of gun: what rides the upper body over the classes' legs. */
+  private readonly carryFor: { rig: CharacterRig | null; gun: string; clip: string | null } = { rig: null, gun: '', clip: null };
+  /**
+   * Under a block or a swing with the classes ruling: the speed from which Jedi Academy's run has the legs rather than
+   * its walk, forward and backing up, found once a rig and a saber style (the geometric mean of the two clips' own
+   * speeds: where each is equally far from its own rate). Times the tune's `fight.walkUnder` where it is read.
+   */
+  private readonly saberRunFrom: { rig: CharacterRig | null; style: string; forward: number; back: number } = { rig: null, style: '', forward: 0.5, back: 0.5 };
+
+  /** Sprinting: the game mutes the fight's keys before anything reads one. */
+  get sprinting(): boolean {
+    return this.loco.sprinting;
+  }
+
+  /** The stamina pool's size as the stats have it (the tune's own until something is earned). */
+  get staminaPool(): number {
+    return this.stats.apply('move.stamina', LOCO_TUNE.stamina.pool);
   }
 
   /** Jedi Academy's animations are in charge by what the player is doing (the block held, a fight's move), written each frame beside `jkaMode`. */
@@ -1067,6 +1100,8 @@ export class Player {
     this.swing = -1;
     this.jka.reset();
     this.anim.drop();
+    // Whole means rested too: the stamina is full at a respawn and at an arrival.
+    this.loco.refill(this.staminaPool);
     this.saber.holster();
     this.rig?.stopOverride(0);
     this.mounted = null;
@@ -2379,6 +2414,9 @@ export class Player {
     this.grappleVehicles = world.vehicles;
     // Dead: the body is the physics' now, and nothing else moves.
     if (this.ragdoll) {
+      // (The speed classes are put down, as on every branch below that returns before they are planned: a sprint
+      // must not outlive the feet it was run on. The pool waits for the respawn, which fills it.)
+      this.loco.idle(0, this.staminaPool);
       this.ragdollStep();
       return;
     }
@@ -2387,6 +2425,7 @@ export class Player {
     // of everything, noclip's branch included, which never reaches it.
     if (this.editorFlight) {
       if (this.grapple.out) this.grapple.letGo('editor');
+      this.loco.idle(dt, this.staminaPool);
       this.editorFlight.step(dt, input, this.pos);
       this.vel.set(0, 0, 0);
       this.grounded = false;
@@ -2429,6 +2468,9 @@ export class Player {
 
     if (this.mounted) {
       if (this.grapple.out) this.grapple.letGo('mount');
+      // Seated, the speed classes are put down (`BodyLoco.idle`): nothing sprints, so the fight's keys are not left
+      // muted for the ride by a sprint the body sat down out of, and the stamina regains as it does standing.
+      this.loco.idle(dt, this.staminaPool);
       this.rig?.stopOverride();
       this.thrown.cancel();
       this.updateBlades();
@@ -2439,6 +2481,7 @@ export class Player {
 
     if (this.noclip) {
       if (this.grapple.out) this.grapple.letGo('noclip');
+      this.loco.idle(dt, this.staminaPool);
       this.rig?.stopOverride();
       this.saber.holster();
       this.thrown.cancel();
@@ -2450,6 +2493,7 @@ export class Player {
     // On foot in space, outside any ship's rooms: adrift. The zero-g tether waits, so the rope lets go.
     if (world.planet.space && !this.aboard) {
       if (this.grapple.out) this.grapple.letGo('eva');
+      this.loco.idle(dt, this.staminaPool);
       this.evaUpdate(dt, input, cam);
       return;
     }
@@ -2477,7 +2521,10 @@ export class Player {
     const moving = move.lengthSq() > 0;
     if (moving) move.normalize();
 
-    const walking = input.held('walk');
+    // The speed keys (src/anim/bodyLoco.ts): Shift raises the class and the walk key, held, is the slowest. What comes
+    // back is the walk by the rules the body always had: with the classes off either key held, as Shift walked. At a
+    // ship's controls neither is the body's: Shift is the ship's boost there and Alt its free look.
+    const walking = this.loco.keys(dt, !atControls && input.held('speedUp'), !atControls && input.pressedAction('speedUp'), !atControls && input.held('walk'), this.rig);
     this.walkKey = walking;
     // Postures: Z toggles prone and V kneeling, on the ground; jumping, swimming or a saber swing brings the
     // body up, and a kneel also ends when you move or crouch. The game's own transitions play between them.
@@ -2539,6 +2586,30 @@ export class Player {
     this.swimming = !this.inside && depth > (this.swimming ? SWIM_DEPTH - 0.3 : SWIM_DEPTH);
     this.submerged = this.swimming && depth > DIVE_DEPTH;
     this.waterDepth = depth;
+    // The speed classes: the frame's class, its clip and its speed, and the stamina's step (`BodyLoco.plan`). Where
+    // the class rules the body (on its feet, out of the water) its speed is the body's, under whatever multiplies it;
+    // crouched, prone, kneeling and swimming keep the speeds they always had, and so does everything with the classes off.
+    const lo = this.locoIn;
+    lo.dt = dt;
+    lo.mz = mz;
+    lo.mx = mx;
+    lo.standing = !this.crouching && !this.prone && !this.kneeling;
+    lo.grounded = this.grounded;
+    lo.swimming = this.swimming;
+    // Blocking or fighting, and not merely one of Jedi Academy's one-offs playing out (a Force jump's flip): a jump
+    // out of a sprint is still the sprint.
+    lo.fighting = this.blocking || fighting;
+    lo.aiming = this.aiming;
+    lo.gunUp = this.classId === 'bounty_hunter' && !this.fists && (this.aiming || this.gunReady);
+    lo.sprint = this.stats.apply('move.sprint', LOCO_TUNE.speed.forward.sprint);
+    lo.pool = this.staminaPool;
+    lo.boost = this.speedMultiplier;
+    const classes = this.loco.plan(lo);
+    if (classes) {
+      speed = this.loco.speed * this.speedMultiplier * this.lavaPaceNow;
+      // The walk clips are the walk class's (Jedi Academy's saber walk too), whatever key gave it.
+      this.walkKey = this.loco.cls <= 1;
+    }
     // The rope's words for this frame, from the body as the swim has just left it (`ropeModes`, the one place
     // they are decided), and the move keys' direction as the sway: read below and by the grapple's steps.
     if (this.grapple.out) {
@@ -2611,14 +2682,19 @@ export class Player {
       c.right.copy(rgt);
       c.fmove = mz;
       c.smove = mx;
-      c.walk = walking;
+      // With a speed class ruling the body the class's speed is the whole of it (on `speedScale`, below): no halving.
+      // (A leaping saber move keeps the walk key's halving with the pace it is paired with there, as it always had.)
+      c.walk = classes && !script ? false : walking;
       c.crouch = this.crouching;
       // A crouch tap on the move rolls, as the game's does, unless a swing is in its cutting part (its wind-up and return may be rolled out of).
       c.roll = input.pressedAction('crouch') && moving && !this.saber.attacking;
       c.jump = jump;
       c.jumpPressed = jumpPressed && !this.saber.busy;
       c.attack = input.held('attack');
-      c.speedScale = this.speedMultiplier * this.lavaPaceNow * this.paceScale(walking, mz, mx);
+      // The class's speed as a share of Jedi Academy's own run, so its acceleration, friction and air are unchanged; a
+      // leaping saber move, and everything without a class, keeps the pace it always had, and so does a body with no
+      // way asked (`loco.moves`: the scale also sets how hard the friction stops it, which is as it always was).
+      c.speedScale = this.speedMultiplier * this.lavaPaceNow * (classes && this.loco.moves && !script ? this.loco.speed / (JKA.speed * UNIT) : this.paceScale(walking, mz, mx));
       // What progress makes of a fall and the air, each today's number until something is earned.
       const st = this.stats;
       c.fallSafeExtra = st.fallSafeExtra / UNIT;
@@ -2844,18 +2920,35 @@ export class Player {
     // Swinging on the rope the body faces the way the view looks, as it does in the air in a fight (§3.12).
     const faceCamera = (this.classId === 'bounty_hunter' && (this.gunReady || !this.hasGunClips)) || (fighting && !swingOnLegs) || (!this.grounded && this.jkaMode) || cam.firstPerson || (this.grapple.attached && this.grapple.modes.swinging);
     const camYaw = Math.atan2(fwd.x, fwd.z);
+    // The speed classes face the body by the clip that has the legs: the way the view looks, turned by how far the
+    // travel lies from the clip's own heading (`BodyLoco.faces`, `turn`). Backing up and strafing no longer turn it
+    // round; a strafe used for a diagonal turns it 45 degrees, which the torso and the head then take back.
+    const locoFaces = moving && !this.swimming && this.loco.faces(this.jkaMode);
+    const locoTurn = locoFaces ? this.loco.turn : 0;
+    // The turn eased (`BodyLoco.face`): where it has got to, which first person takes as it stands, and this frame's
+    // share of the way left, which the third-person body's heading is turned by.
+    this.loco.face(locoFaces);
+    this.aimBodyNow = 0;
     let legsOffset = 0;
     if (this.lockedHeading) {
       this.heading = Math.atan2(this.lockedHeading.x, this.lockedHeading.z);
     } else if (cam.firstPerson) {
       // Seen from the eyes, the body turns with the view at once: a lag would show the shoulders
-      // swinging round, and turning the view alone would look back down into the neck.
-      this.heading = camYaw;
+      // swinging round, and turning the view alone would look back down into the neck. (A clip's own turn is eased.)
+      this.heading = camYaw + this.loco.turnNow;
     } else if (faceCamera) {
       // With a blaster up, the body also turns by what the aim's correction left over from the spine.
-      let diff = camYaw + this.aimBodyTurn - this.heading;
+      let diff = camYaw + locoTurn + this.aimBodyTurn - this.heading;
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       this.heading += diff * Math.min(1, dt * 16);
+      // How far the body stands turned for the aim just now (it comes round to `aimBodyTurn` over a few frames): what
+      // the spine takes the rest of under the speed classes, so the barrel holds while the two change shares.
+      const stands = this.heading - camYaw - locoTurn;
+      this.aimBodyNow = Math.atan2(Math.sin(stands), Math.cos(stands));
+    } else if (locoFaces) {
+      let diff = camYaw + locoTurn - this.heading;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      this.heading += diff * this.loco.turnStep;
     } else if (moving && directional) {
       // Forward 0, diagonals 22.5, sideways 45 (the sign turns the legs towards the side moved);
       // backing up keeps the legs forward and the back diagonals turn them the other way.
@@ -2883,6 +2976,12 @@ export class Player {
     // the legs at the movement offset, the torso at a quarter of it), so a strafe leans the shoulders a little.
     const torsoWants = camYaw + legsOffset * 0.25;
     this.torsoTwist = directional && this.grounded && !faceCamera && !this.lockedHeading ? Math.atan2(Math.sin(torsoWants - this.heading), Math.cos(torsoWants - this.heading)) : 0;
+    // Under the speed classes the torso takes back a share of whatever the clip turned the body by (the head's look
+    // takes what it can of the rest), measured from where the body really stands just now.
+    if (locoFaces && !this.lockedHeading) {
+      const back = camYaw + this.aimBodyNow - this.heading;
+      this.torsoTwist = Math.atan2(Math.sin(back), Math.cos(back)) * LOCO_TUNE.turn.torso;
+    }
 
     this.moveAmount += ((moving ? Math.min(1, speed / RUN_SPEED) : 0) - this.moveAmount) * Math.min(1, dt * 10);
     this.phase += dt * speed * (moving ? 1.9 : 0);
@@ -2920,12 +3019,26 @@ export class Player {
     const rig = this.rig;
     if (!rig) return;
     // The walk key picks the walk clips; the speed only sets how fast a clip plays.
-    const running = !this.walkKey;
+    let running = !this.walkKey;
     const style = this.saber.style;
     const stance = STANCE_ANIM[style];
     // The saber run and walk are the staff's, the dual sabers' or the single saber's (the three single styles share them).
     rig.prefer('runSaber', style === 'staff' ? 'BOTH_RUN_STAFF' : style === 'dual' ? 'BOTH_RUN_DUAL' : 'BOTH_RUN2');
     rig.prefer('walkSaber', style === 'staff' ? 'BOTH_WALK_STAFF' : style === 'dual' ? 'BOTH_WALK_DUAL' : 'BOTH_WALK2');
+    // Under the speed classes with Jedi Academy's legs (a block, a swing under way) the body keeps the class's speed,
+    // and the legs are that game's saber walk where the speed is nearer the walk's own than the run's, its run from
+    // there up (`LOCO_TUNE.fight.walkUnder` of the point where the two are equally far from their own rates): the run
+    // at the jog's pace would play under the half rate a clip is held above, its feet sliding.
+    if (this.jkaMode && this.loco.rules && this.loco.moves) {
+      const from = this.saberRunFrom;
+      if (from.rig !== rig || from.style !== style) {
+        from.rig = rig;
+        from.style = style;
+        from.forward = Math.sqrt((rig.naturalSpeed('walkSaber') ?? 0) * (rig.naturalSpeed('runSaber') ?? 0));
+        from.back = Math.sqrt((rig.naturalSpeed('walkBack') ?? 0) * (rig.naturalSpeed('runBack') ?? 0));
+      }
+      running = this.loco.cls > 1 && this.loco.speed >= (this.directional && mz < 0 ? from.back : from.forward) * LOCO_TUNE.fight.walkUnder;
+    }
     // The kind of blaster picks its carries: the pistol's stand at the side, the rifle's across the chest.
     const gun = this.gunKind;
     const armed = this.classId === 'bounty_hunter' && this.hasGunClips && !this.fists;
@@ -2986,6 +3099,28 @@ export class Player {
     // that game plays its torso and legs apart; standing still, the swing has the whole body.
     // The specials (katas, kicks, lunges, the jump attacks) move the legs themselves and keep the whole body.
     if (rig.overridingJka && this.saber.busy && this.saber.current.kind !== 'special' && !this.jka.rolling && !this.jka.inSpecialJump && (moving || !this.grounded) && !this.mounted && !this.swimming) rig.overrideUpperOnly();
+    // The speed classes' legs (`BodyLoco.legs`): the imported clip for the way the keys go and the class, on a body
+    // moving on its feet with Jedi Academy's animations not in charge, and the rate that keeps its feet on the ground.
+    // Null leaves every state below the clip it always had. While the classes are in force a change of the legs' clip
+    // fades by the tune: between two of their clips (in step), to and from standing, and into and out of Jedi Academy's legs.
+    const onFeet = moving && this.grounded && !this.mounted && !this.swimming && !this.prone && !this.kneeling && !this.crouching;
+    this.locoIn.ground = speed;
+    const legs = this.loco.legs(onFeet ? rig : null, this.locoIn, this.jkaMode);
+    // How long this frame's change of the legs' clip fades (`BodyLoco.fadeFor`), handed on with the state.
+    this.loco.fadeFor(legs !== null, this.jkaMode, moving);
+    this.legOpts.rate = this.loco.rate;
+    this.legOpts.fade = this.loco.fadeNow;
+    this.fadeOpts.fade = this.loco.fadeNow;
+    const fo = this.loco.on ? this.fadeOpts : undefined;
+    // The state the classes' clip is asked for keeps it only while they have the legs (`BodyLoco.prefers`): let go
+    // of, the state picks its own clip again, there and then (the classes switched off on the move). A blaster's
+    // states are asked for their own carries afresh every frame, above, and need no letting go.
+    const dropped = this.loco.prefers(legs && !armed ? legs.state : null);
+    if (dropped) rig.prefer(dropped as RigState, null, true);
+    // The hold that keeps a pose on the upper body steady over moving legs comes on and goes over the legs' own
+    // fade to and from standing (a strafe's hips stand turned, and taken off the torso in one frame the turn swung an
+    // aimed barrel off the crosshair at every start and stop); at once, as it always was, without the classes.
+    rig.steadyEase = this.loco.on ? LOCO_TUNE.fade.idle : 0;
     if (this.mounted) {
       // Seated the way the game seats a rider on this vehicle: its rider pose's branch of the
       // riding loop (a speeder bike's crouch, a landspeeder's seat, the hover chair, the pilot's chair), else the default saddle.
@@ -3024,19 +3159,29 @@ export class Player {
     }
     else if (moving && this.directional && mz < 0) {
       // Backing up with the legs facing forward: the back-pedal clip.
-      rig.setState(running && rig.hasState('runBack') ? 'runBack' : rig.hasState('walkBack') ? 'walkBack' : 'runBack', speed);
+      rig.setState(running && rig.hasState('runBack') ? 'runBack' : rig.hasState('walkBack') ? 'walkBack' : 'runBack', speed, null, fo);
     } else if (!moving && this.hasJkaClips && (this.blocking || this.thrown.inFlight)) {
       // Standing with the block held: the style's stance; the arm out while the saber flies.
       rig.prefer('stance', this.thrown.inFlight ? 'BOTH_SABERPULL' : stance);
-      rig.setState('stance');
+      rig.setState('stance', 0, null, fo);
     } else if (armed) {
       // The blaster carries: relaxed, combat after a shot, or aimed (the combat legs under the held aimed pose); each with its idle, walk and run.
       const carry = this.aiming ? 'gunAim' : this.gunReady ? 'gunReady' : 'gun';
-      rig.setState(`${carry}${!moving ? 'Idle' : running ? 'Run' : 'Walk'}` as RigState, speed, gunUpper);
-    } else if (!moving) rig.setState('idle');
+      const state = `${carry}${!moving ? 'Idle' : running ? 'Run' : 'Walk'}` as RigState;
+      if (legs) {
+        // Under the speed classes the legs are the classes' clip, and the upper body the gun's own: its ready or aimed
+        // pose as ever, else its relaxed carry (the standing one, held steady over the legs as those poses are).
+        rig.prefer(state, legs.clip);
+        rig.setState(state, speed, gunUpper ?? this.gunCarry(rig, gun), this.legOpts);
+      } else rig.setState(state, speed, gunUpper, fo);
+    } else if (!moving) rig.setState('idle', 0, null, fo);
     // Moving with the block held: Jedi Academy's saber run and walk; otherwise the game's own, saber lit or not.
-    else if (this.jkaMode) rig.setState(running ? 'runSaber' : 'walkSaber', speed);
-    else rig.setState(running ? 'run' : 'walk', speed);
+    else if (this.jkaMode) rig.setState(running ? 'runSaber' : 'walkSaber', speed, null, fo);
+    else if (legs) {
+      // The speed classes: the imported clip for the way and the class, at the rate that matches the ground.
+      rig.prefer(legs.state, legs.clip);
+      rig.setState(legs.state, speed, null, this.legOpts);
+    } else rig.setState(running ? 'run' : 'walk', speed, null, fo);
     rig.update(dt);
     this.group.updateMatrixWorld(true);
     // Always called: with no twist it puts the spine's clip pose back.
@@ -3055,7 +3200,15 @@ export class Player {
     const wholeJka = rig.overridingJka && !rig.overridingUpperOnly;
     // The measured correction: the spine takes the first part of it, the body's heading the rest (a kneeling
     // shooter's pose is authored with the hips turned from the target, which a spine twist cannot give).
-    const spineFix = THREE.MathUtils.clamp(this.aimFix.yaw, -AIM_SPINE_MAX, AIM_SPINE_MAX);
+    // Under the speed classes' legs the spine takes more of it (`aimSpineMax`), so the body stays where its legs' clip
+    // needs it: the legs then carry it the way it really goes, and the heading other players are sent is the legs' own.
+    const wideSpine = Math.max(AIM_SPINE_MAX, (LOCO_TUNE.turn.aimSpine * Math.PI) / 180);
+    this.aimSpineMax = legs ? wideSpine : AIM_SPINE_MAX;
+    // The spine's share changes the moment the classes' legs come or go, and the body comes round to its new share
+    // over a few frames. With the classes in force the spine takes whatever of the correction the body does not
+    // stand turned by just now (`aimBodyNow`), up to its wider limit, so the two always add up to the correction and
+    // the barrel holds through every start and stop; without them the spine's share is the game's own, as before.
+    const spineFix = this.loco.on && gunUp ? THREE.MathUtils.clamp(this.aimFix.yaw - this.aimBodyNow, -wideSpine, wideSpine) : THREE.MathUtils.clamp(this.aimFix.yaw, -this.aimSpineMax, this.aimSpineMax);
     // Seated, the spine keeps the clip's own pose: no view-following twist or aim tilt carried over from on foot.
     const straight = wholeJka || !!this.mounted;
     rig.twistTorso(straight ? 0 : this.torsoTwist + this.aimTwist + spineFix, straight ? 0 : this.torsoPitch + this.aimFix.pitch);
@@ -3145,8 +3298,22 @@ export class Player {
 
   /** The part of the aim's correction the spine cannot take, turned into the whole body's facing. */
   private get aimBodyTurn(): number {
-    return this.aimFix.yaw - THREE.MathUtils.clamp(this.aimFix.yaw, -AIM_SPINE_MAX, AIM_SPINE_MAX);
+    return this.aimFix.yaw - THREE.MathUtils.clamp(this.aimFix.yaw, -this.aimSpineMax, this.aimSpineMax);
   }
+
+  /**
+   * How far the spine turns for the aim before the rest goes on the body's facing, radians, this frame: the game's own
+   * limit, and under the speed classes' legs the tune's wider one. An imported clip keeps the hips square to the way
+   * the body faces, where the game's own gun carries stand side-on; the aimed pose on the upper body was made for
+   * those, so over the imported legs it needs about twice the turn, and a body turned for it would cross its own legs.
+   */
+  private aimSpineMax = AIM_SPINE_MAX;
+  /**
+   * How far the body stands turned from the view for the aim just now, radians: its heading less the view's and the
+   * clip's own turn, written each frame the body faces the view with a blaster up and nought otherwise. (Declared as
+   * a fraction: it holds one.)
+   */
+  private aimBodyNow = 1e-9;
 
   /** The capsule shrinks to the crouch height while ducking (its feet stay where they are). */
   private setCrouchCollider(crouched: boolean): void {
@@ -3210,6 +3377,17 @@ export class Player {
     if (this.rig?.has(clip)) this.rig.play(clip, { fadeIn });
   }
 
+  /** A kind of blaster's relaxed standing carry on a rig, looked for once a rig and a kind (a search of every clip's name). */
+  private gunCarry(rig: CharacterRig, gun: 'pistol' | 'rifle'): string | null {
+    const c = this.carryFor;
+    if (c.rig !== rig || c.gun !== gun) {
+      c.rig = rig;
+      c.gun = gun;
+      c.clip = rig.clipMatching(gun === 'pistol' ? /^loop_pistol_standing:speed0/ : /^loop_rifle:speed0/) ?? null;
+    }
+    return c.clip;
+  }
+
   /** Fly the thrown saber, steer it where the camera looks, and take it back into the hand. */
   private updateThrown(dt: number, input: Input, cam: ThirdPersonCamera): void {
     if (!this.thrown.inFlight) return;
@@ -3251,7 +3429,7 @@ export class Player {
     if (input.held('noclipDown')) move.y -= 1;
     const moving = move.lengthSq() > 0;
     if (moving) move.normalize();
-    const speed = this.noclipSpeed * (input.held('walk') ? 3.5 : 1) * this.speedMultiplier;
+    const speed = this.noclipSpeed * (input.held('speedUp') ? 3.5 : 1) * this.speedMultiplier;
     this.pos.addScaledVector(move, speed * dt);
     this.vel.set(0, 0, 0);
     this.grounded = false;

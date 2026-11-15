@@ -244,15 +244,15 @@ const rand = () => {
   const swinging = grappleMutes(out, true, true);
   const swingList = out.join(',');
   ok(none === 0 && noneList === '', 'nothing is muted while the hook is not out');
-  ok(outOn === 10 && onList === 'walk,crouch,flashlight,prone,kneel,emoteWheel,emote1,emote2,emote3,emote4', `while it is out: ${onList}`);
+  ok(outOn === 10 && onList === 'speedUp,crouch,flashlight,prone,kneel,emoteWheel,emote1,emote2,emote3,emote4', `while it is out: ${onList}`);
   ok(swinging === 11 && swingList === `${onList},jump`, 'and the jump as well while swinging');
-  ok(GRAPPLE_RELEASE_MUTES.join(',') === 'jump,flashlight,walk', 'every let-go mutes the jump, the torch and the walk until their keys are up, never the crouch');
+  ok(GRAPPLE_RELEASE_MUTES.join(',') === 'jump,flashlight,speedUp', 'every let-go mutes the jump, the torch and the speed-up (Shift, which was the reel) until their keys are up, never the crouch');
   const again = grappleMutes(out, true, true);
   ok(again === 11 && out.join(',') === swingList, 'asked again for the same list it keeps it as it is');
   // A loose prop on the line (wave 3a): the reels do nothing to it, so only the torch (F, the yank) and the emotes.
   const held = grappleMutes(out, true, false, true);
   const heldList = out.join(',');
-  ok(held === 6 && heldList === 'flashlight,emoteWheel,emote1,emote2,emote3,emote4', `with a prop on the line only ${heldList}: the walk, the crouch and the postures are the player's`);
+  ok(held === 6 && heldList === 'flashlight,emoteWheel,emote1,emote2,emote3,emote4', `with a prop on the line only ${heldList}: the speed-up, the crouch and the postures are the player's`);
   const back = grappleMutes(out, true, false);
   ok(back === 10 && out.join(',') === onList && THING_RELEASE_MUTES.join(',') === 'flashlight', "and back on an anchor the whole list again; a prop's let-go owes the torch alone");
 }

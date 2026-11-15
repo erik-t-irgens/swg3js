@@ -20,6 +20,10 @@ import type { FxMoverList } from '../core/fx/velocity';
 import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
 import { measureBox, peerBodies, peerLow, type PeerBlow, type PeerBox } from './remoteBodies.ts';
 import { MX } from '../anim/animRules.ts';
+import { LegOpts } from '../anim/bodyLoco.ts';
+import { PeerIn, PeerLoco } from '../anim/peerLoco.ts';
+import { LOCO_TUNE } from '../anim/locoTune.ts';
+import { peerBackState, peerCarryState } from '../anim/locoTable.ts';
 import { hangHeld } from './peerHands.ts';
 import { glidePeerTurn, yawOf } from './peerTurn.ts';
 import { newPeerRope, readPeerRope, type PeerRope } from './peerRope.ts';
@@ -283,6 +287,17 @@ interface Remote {
    * axis.
    */
   lookAllowed: boolean;
+  /**
+   * Their legs under the speed classes (src/anim/peerLoco.ts): the clip their own game plays for the way they go and
+   * their class, worked out from the state, heading and speed they already send. The state its clip was last preferred
+   * for, so the preference is taken off when the classes let go; and with a gun the standing pose of the
+   * same carry (relaxed, ready or aimed) for the upper body, found once a rig and carry.
+   */
+  loco: PeerLoco;
+  locoState: RigState | null;
+  carryRig: CharacterRig | null;
+  carryState: string | null;
+  carryClip: string | null;
   /** The colour their blade is lit in; the game's own default until their own browser says. */
   saberColor: number;
   /** Their blade when it is out of their hand: where it is in the world and how far it has spun. */
@@ -312,6 +327,9 @@ const DEFAULT_PEER_SABER = 0x3aa0ff;
  * place -- the six prone blaster carries were added to the rig and never added here, so a player
  * lying prone with a blaster was drawn standing on every other screen.
  */
+/** The rate and the fade a figure's legs are handed with their state under the speed classes, and the frame as their legs need it: kept records, written before each use. */
+const PEER_LEGS = new LegOpts();
+const PEER_IN = new PeerIn();
 const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove', 'gunProneIdle', 'gunProneMove', 'gunProneReadyIdle', 'gunProneReadyMove', 'gunProneAimIdle', 'gunProneAimMove']);
 
 export class RemotePlayers {
@@ -411,6 +429,21 @@ export class RemotePlayers {
     return [...this.remotes.values()].filter((r) => this.sameWorld(r.hello)).map((r) => r.hello.name);
   }
 
+  /**
+   * What each figure on this world is doing on its feet, for the console (`__debug.loco()`): the state and the speed
+   * its game sent, how its travel lies against the heading it sent, the clip its legs play here and the rate, and the
+   * clip the speed classes worked out for it (null: the state's own clip, as before the classes).
+   */
+  legs(): { name: string; state: string; speed: number; travelDeg: number | null; clip: string | null; upper: string | null; rate: number; classes: string | null }[] {
+    const n2 = (v: number) => Number(v.toFixed(2));
+    return [...this.remotes.values()].filter((r) => this.sameWorld(r.hello)).map((r) => {
+      const d = r.rig?.describe();
+      const moving = r.vel.x * r.vel.x + r.vel.z * r.vel.z > 0.09;
+      const rel = moving ? (((((Math.atan2(r.vel.x, r.vel.z) - r.heading) * 180) / Math.PI + 180) % 360) + 360) % 360 - 180 : null;
+      return { name: r.hello.name, state: r.state, speed: n2(r.speed), travelDeg: rel === null ? null : n2(rel), clip: d?.clip ?? null, upper: d?.upper ?? null, rate: n2(r.rig?.strideNow().rate ?? 0), classes: r.loco.pick?.clip ?? null };
+    });
+  }
+
   setWorld(planet: string, zone: string | undefined): void {
     this.planet = planet;
     this.zone = zone;
@@ -437,7 +470,7 @@ export class RemotePlayers {
     markActor(group);
     const rope = newPeerRope();
     const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, shipTarget: new THREE.Vector3(), shipTargetQ: new THREE.Quaternion(), shipVel: new THREE.Vector3(), shipHeardAt: 0, shipReck: NO_RECKON, shipMount: false, shipDocked: false, hp: 100, maxHp: 100, down: false, low: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null, rope };
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, ride: { at: new THREE.Vector3(), q: new THREE.Quaternion(), yaw: 0, first: true }, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, saberColor: DEFAULT_PEER_SABER, thrown: null, rope, view };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, ride: { at: new THREE.Vector3(), q: new THREE.Quaternion(), yaw: 0, first: true }, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, loco: new PeerLoco(), locoState: null, carryRig: null, carryState: null, carryClip: null, saberColor: DEFAULT_PEER_SABER, thrown: null, rope, view };
     this.remotes.set(id, remote);
     // Told before the rig is fetched: what hangs on a peer decides for itself how much of them it
     // needs, and a body is made on the first frame they are drawn, not here at the origin.
@@ -1126,7 +1159,46 @@ export class RemotePlayers {
         // Floating: adrift in space or still in the water, which their state does not tell apart and the world does.
         // A name their rig has not got is stepped over, and the state's own list answers as it always did.
         else if (state === 'float') rig.prefer('float', this.adrift && !r.aboard ? MX.adrift : MX.tread);
-        rig.setState(rig.hasState(state) ? state : 'idle', r.speed);
+        // Walking or running on foot under the speed classes: the very clip their own game plays for the way they go
+        // and their class, worked out here from what they already send (`PeerLoco`): how their travel lies against the
+        // heading they sent, and their speed. With a gun in hand the legs take it and the upper body keeps the gun's
+        // standing pose of the same carry. Null (the classes off, a rig without the clips, any other state) is the state's own clip, as before.
+        PEER_IN.vx = r.vel.x;
+        PEER_IN.vz = r.vel.z;
+        PEER_IN.heading = r.heading;
+        PEER_IN.speed = r.speed;
+        PEER_IN.dt = dt;
+        const legs = r.loco.resolve(LOCO_TUNE, rig, state, PEER_IN);
+        if (r.locoState && (!legs || r.locoState !== state)) {
+          // Let go of, the state picks its own clip again there and then, even where the state itself stays as it was.
+          rig.prefer(r.locoState, null, true);
+          r.locoState = null;
+        }
+        if (legs && !rv) {
+          let upper: string | null = null;
+          const carry = peerCarryState(state);
+          if (carry) {
+            // The gun's standing pose of the same carry (relaxed, ready or aimed), as they stand when they stop:
+            // found once a rig and carry.
+            if (r.carryRig !== rig || r.carryState !== carry) {
+              r.carryRig = rig;
+              r.carryState = carry;
+              r.carryClip = rig.tableClip(carry);
+            }
+            upper = r.carryClip;
+          }
+          rig.prefer(state, legs.clip);
+          r.locoState = state;
+          PEER_LEGS.rate = r.loco.rate;
+          PEER_LEGS.fade = LOCO_TUNE.fade.loco;
+          rig.setState(state, r.speed, upper, PEER_LEGS);
+        } else {
+          // Without the classes' legs (a rig with no imported clips, the classes off here) a figure sent `walk` or
+          // `run` while it goes backward plays its own back-pedal, when it has one, rather than a run forward.
+          const back = legs ? null : peerBackState(state, r.loco.rel);
+          const shown = back && rig.hasState(back) ? back : state;
+          rig.setState(rig.hasState(shown) ? shown : 'idle', r.speed);
+        }
         rig.update(dt);
         // Whether their head may look at all. It goes still under anything the clip is posing the
         // head through -- an emote, a dance, a swing that rides the upper body, a death clip -- and,

@@ -48,6 +48,23 @@ Only a clip that ends pose for pose as it began is called a loop in the table: t
 (their hips rise, their poses come round), the two that descend are not (each ends with its legs some fifty degrees
 from where they began) and stay one-offs until a later wave decides how stairs are cycled.
 
+**The walks, jogs, runs and strafes** the speed classes play (wave 2a: `src/anim/locoTable.ts`, the brief's
+Locomotion list as one table) are sixteen rows marked `use` in `mixamoClips.mjs`, twenty clips with the four
+mirrored twins. A mirrored twin (`<id>_mirrored`) takes its original's `use`, so marking a one-sided strafe loads
+both sides. What the game reads of each off the
+index is what this importer measured: its speed (what the class's pace starts at, and what its playback rate is
+worked out against), its heading to the nearest 45 degrees (which way its feet carry it: `CLIP_HEADING` in the table
+is held to it by `locoTable.test.ts`), and its left-foot marks (where a stride begins, which is what two clips are
+kept in step by while one fades into the other). A clip put in the table must be a loop with a left-foot mark and a
+measured speed, and the test says so if it is not.
+
+The measured speed reads a little low: it is the mean of each planted foot's speed under the hips over every planted
+frame, the landing and lifting frames among them, where the foot is still slower than the body. On the four clips
+whose source travels (the report's travel check: the hips' own travel is the truth there) the feet read 1 to 4%
+under, and in the game a planted foot slips back about that and a little more. ate.feet in the game's tune
+(__debug.loco({ tune: { rate: { feet: 1.05 } } })) is every clip's foot speed as a share of what the index says,
+for the eye; a better measure here (the stance's middle, not its mean) means importing every clip again.
+
 How the game holds a clip in place follows from whether it loops: a loop is held about where its first frame has the
 hips, and a one-off over the hips' own rest place, so a take that happens to begin a step to one side does not play
 a step to one side.

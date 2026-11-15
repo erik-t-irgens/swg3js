@@ -57,7 +57,9 @@ export class Unarmed {
       }
       if (t >= 1) this.blow = null;
     }
-    if (!onFoot || this.blow) return;
+    // Sprinting, no blow starts (the speed classes: "you can't shoot or attack"). The punch's key is muted then; the
+    // kick's is not, since it is also a blaster's aim, which ends a sprint, so the kick is refused here.
+    if (!onFoot || this.blow || player.sprinting) return;
     const punch = input.pressedAction('attack') || input.held('attack');
     const kick = input.pressedAction('altAttack');
     if (!punch && !kick) return;

@@ -10,6 +10,7 @@
 // The class itself is built against a stand-in page and storage, so the save and the load are the class's
 // own and not a copy of them. Nothing here is read from the game's files.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -264,7 +265,7 @@ const KEY = 'swg3js.bindings';
   store.clear();
   const holders = (code: string) => (Object.keys(DEFAULT_BINDINGS) as Action[]).filter((a) => DEFAULT_BINDINGS[a].includes(code));
   ok(holders('Mouse3').join() === 'grappleFire', 'Mouse 4 (the back side button) is the grapple\'s fire alone');
-  ok(holders('ShiftLeft').join() === 'walk,reelIn' && holders('ShiftRight').join() === 'walk,reelIn', 'Shift is the walk\'s and the reel-in\'s');
+  ok(holders('ShiftLeft').join() === 'speedUp,reelIn' && holders('ShiftRight').join() === 'speedUp,reelIn' && holders('AltLeft').join() === 'walk,freeLook' && holders('AltRight').join() === 'walk,freeLook' && holders('CapsLock').length === 0, 'Shift is the speed-up\'s and the reel-in\'s; Alt is the walk\'s, held on foot, and the free look\'s on anything ridden; nothing is on Caps Lock');
   // Edited on purpose by the world editor's first wave: its down borrows X and its up Space, both muted by the editor
   // while it is on and read by nothing else (DESIGN.md §2.14), and no editor default holds Ctrl.
   ok(holders('ControlLeft').join() === 'crouch' && holders('KeyX').join() === 'crouch,noclipDown,reelOut,editorDown', 'Ctrl is the crouch\'s alone, and X the crouch\'s, noclip\'s down, the reel-out\'s and the world editor\'s down');
@@ -275,11 +276,27 @@ const KEY = 'swg3js.bindings';
   ok(keys.slice(at + 1, at + 6).join() === 'grappleFire,reelIn,reelOut,grappleBoost,grappleHaul', 'listed together after the torch, so the Controls page shows them together');
   // The rebind cases: a key a player chose for something else wins over these defaults.
   const emote = loadedBindings({ emote1: ['ShiftLeft'] });
-  ok(emote.emote1.join() === 'ShiftLeft' && emote.reelIn.join() === 'ShiftRight' && emote.walk.join() === 'ShiftRight', 'an emote put on Left Shift keeps it, and the reel-in (and the walk) keep Right Shift');
+  ok(emote.emote1.join() === 'ShiftLeft' && emote.reelIn.join() === 'ShiftRight' && emote.speedUp.join() === 'ShiftRight' && emote.walk.join() === 'AltLeft,AltRight', 'an emote put on Left Shift keeps it, and the reel-in (and the speed-up) keep Right Shift');
   const blocked = loadedBindings({ block: ['Mouse3'] });
   ok(blocked.block.join() === 'Mouse3' && blocked.grappleFire.length === 0, 'a block chosen on Mouse 4 keeps it, and the fire is left with no key');
-  const walked = loadedBindings({ walk: ['CapsLock'] });
-  ok(walked.walk.join() === 'CapsLock' && walked.reelIn.join() === 'ShiftLeft,ShiftRight', 'the walk moved to Caps Lock leaves the reel-in on Shift, which nobody chose');
+  const walked = loadedBindings({ speedUp: ['KeyQ'] });
+  ok(walked.speedUp.join() === 'KeyQ' && walked.reelIn.join() === 'ShiftLeft,ShiftRight' && walked.altFire.join() === 'Mouse1' && walked.brake.length === 0, 'the speed-up moved to Q leaves the reel-in on Shift, which nobody chose (and takes Q off the two defaults that had it)');
+  // The walk left Shift for the speed classes: what a player had chosen before stays theirs.
+  const kept = loadedBindings({ walk: ['KeyQ'] });
+  ok(kept.walk.join() === 'KeyQ' && kept.speedUp.join() === 'ShiftLeft,ShiftRight', 'a walk a player had put on a key of their own keeps it, and Shift is the speed-up\'s');
+  const half = loadedBindings({ walk: ['ShiftLeft'] });
+  ok(half.walk.join() === 'ShiftLeft' && half.speedUp.join() === 'ShiftRight' && half.reelIn.join() === 'ShiftRight', 'a walk a player had left on Left Shift alone keeps Left Shift, and the speed-up (and the reel-in) take Right Shift: one press never answers twice');
+  const alt = loadedBindings({ emote1: ['AltLeft'] });
+  ok(alt.emote1.join() === 'AltLeft' && alt.walk.join() === 'AltRight' && alt.freeLook.join() === 'AltRight' && loadedBindings({ emote1: ['KeyO'] }).walk.join() === 'AltLeft,AltRight', 'an emote a player had put on Left Alt keeps it, the walk and the free look keep Right Alt, and both have Left Alt back the moment the choice moves');
+  const look = loadedBindings({ freeLook: ['KeyY'] });
+  ok(look.freeLook.join() === 'KeyY' && look.walk.join() === 'AltLeft,AltRight', 'a free look a player had moved off Alt leaves the walk on it');
+  ok(DEFAULT_BINDINGS.walk.join() === 'AltLeft,AltRight' && DEFAULT_BINDINGS.walk.join() === DEFAULT_BINDINGS.freeLook.join() && DEFAULT_BINDINGS.speedUp.join() === 'ShiftLeft,ShiftRight' && Object.keys(DEFAULT_BINDINGS).indexOf('speedUp') === Object.keys(DEFAULT_BINDINGS).indexOf('walk') + 1, 'the walk is on Alt (the owner\'s choice, shared with the free look as the placing keys share theirs) and the speed-up on Shift, listed together');
+  // Put back on Alt after being moved, the walk shares it with the free look again.
+  store.clear();
+  const shared = new Input(canvas);
+  shared.assignKey('walk', ['KeyY'], 'KeyY');
+  shared.assignKey('walk', ['AltLeft', 'AltRight'], 'AltLeft');
+  ok(shared.bindings.walk.join() === 'AltLeft,AltRight' && shared.bindings.freeLook.join() === 'AltLeft,AltRight', 'and a walk moved and put back on Alt shares it with the free look again, as their defaults do');
   const xed = loadedBindings({ emote2: ['KeyX'] });
   ok(xed.emote2.join() === 'KeyX' && xed.reelOut.length === 0 && xed.noclipDown.length === 0 && xed.crouch.join() === 'ControlLeft,ControlRight', 'an emote put on X takes it off the reel-out, noclip\'s down and the crouch, which keeps Ctrl');
   // Whose choice emptied the fire: told only when it was somebody else's.
@@ -290,13 +307,13 @@ const KEY = 'swg3js.bindings';
   const mine = new Input(canvas);
   mine.assignKey('grappleFire', [], null);
   ok(mine.bindings.grappleFire.length === 0 && mine.chose('grappleFire'), 'taken off the fire on purpose (Backspace on the Controls page), it is chosen empty, and nothing is said');
-  // The reel-in moved and put back shares Shift with the walk again.
+  // The reel-in moved and put back shares Shift with the speed-up again.
   store.clear();
   const back = new Input(canvas);
   back.assignKey('reelIn', ['KeyV'], 'KeyV');
-  ok(back.bindings.reelIn.join() === 'KeyV' && back.bindings.walk.join() === 'ShiftLeft,ShiftRight', 'the reel-in moved to V leaves the walk on Shift');
+  ok(back.bindings.reelIn.join() === 'KeyV' && back.bindings.speedUp.join() === 'ShiftLeft,ShiftRight', 'the reel-in moved to V leaves the speed-up on Shift');
   back.assignKey('reelIn', ['ShiftLeft', 'ShiftRight'], 'ShiftLeft');
-  ok(back.bindings.reelIn.join() === 'ShiftLeft,ShiftRight' && back.bindings.walk.join() === 'ShiftLeft,ShiftRight', 'and put back on Shift it shares it with the walk again, as their defaults do');
+  ok(back.bindings.reelIn.join() === 'ShiftLeft,ShiftRight' && back.bindings.speedUp.join() === 'ShiftLeft,ShiftRight', 'and put back on Shift it shares it with the speed-up again, as their defaults do');
 }
 
 // --- Ctrl with a move key, kept from the browser while the pointer is locked ------------------------------------
@@ -307,6 +324,10 @@ const KEY = 'swg3js.bindings';
   ok(!cancelsKey('KeyI', true, true, b) && !cancelsKey('KeyS', true, false, b) && !cancelsKey('KeyS', false, true, b), 'Ctrl with I, Ctrl with the pointer free and S with no Ctrl are not');
   const moved = { ...DEFAULT_BINDINGS, forward: ['KeyE'] };
   ok(cancelsKey('KeyE', true, true, moved) && !cancelsKey('KeyW', true, true, moved), 'a move key rebound to another code is followed: Ctrl with it is cancelled, and Ctrl with the old one is not');
+  // Alt is the walk on foot and the free look riding, held with every other key: any key with Alt, locked.
+  ok(['KeyD', 'KeyE', 'KeyF', 'ArrowLeft', 'ArrowRight', 'Space', 'KeyI'].every((k) => cancelsKey(k, false, true, b, true)), 'anything with Alt is cancelled while the pointer is locked: a walk\'s strafe is not the address bar\'s (Alt+D), its use key not the browser\'s menu (Alt+E, Alt+F), an emote\'s arrow not a page back');
+  ok(!cancelsKey('KeyD', false, false, b, true) && !cancelsKey('ArrowLeft', false, false, b, true) && !cancelsKey('KeyD', false, true, b, false) && !cancelsKey('KeyD', false, true, b), 'with the pointer free Alt\'s shortcuts are the browser\'s, and a key with no Alt and no Ctrl is never cancelled');
+  ok(/if \(cancelsKey\(e\.code, e\.ctrlKey, this\.locked, this\.bindings, e\.altKey\)\) e\.preventDefault\(\);/.test(readFileSync(new URL('../../../src/core/input.ts', import.meta.url), 'utf8')), 'and the key handler hands it whether Alt is down');
 }
 
 // --- the placement editor's destination: the dev server's alone ----------------------------------------------

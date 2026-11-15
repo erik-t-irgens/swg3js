@@ -12,7 +12,7 @@ import { glyphFor, handGlyph, iconCount, installIcons } from './hudIcons.ts';
  * `%s` takes the next action's key in turn.
  */
 const HELP_LINES: readonly { text: string; actions: readonly string[]; move?: boolean }[] = [
-  { text: 'move · mouse look · wheel zoom · %s jump · %s walk', actions: ['jump', 'walk'], move: true },
+  { text: 'move · mouse look · wheel zoom · %s jump · %s run · %s walk', actions: ['jump', 'speedUp', 'walk'], move: true },
   // The class switch is the developer's now (a character learns rather than switches), so the block leaves it out;
   // the Controls page still lists it as such.
   { text: '%s mount and dismount · %s fast-forward time', actions: ['mount', 'fastForward'] },
@@ -293,6 +293,24 @@ export class Hud {
   private readonly breathFill: HTMLElement;
   private readonly breathRowEl: HTMLElement;
   private readonly breathText: HTMLElement;
+  /**
+   * The stamina row: the third bar, under health and the class pool, as the speed classes' design asks. While the
+   * classes are in force it is in the block and only ever made visible or not (the class `off`), never taken out of
+   * it: the block is anchored at the bottom and grows upward, so a row that came and went under the other two would
+   * move both every time a sprint began, which is the breath row's own lesson. With the classes off it is not in the
+   * block at all (`gone`), and the display stands as it did before them. It carries no ghost, for the breath row's
+   * reason: stamina drains and comes back, it is not taken in blows.
+   */
+  private readonly staminaRowEl: HTMLElement;
+  private readonly staminaBar: HTMLElement;
+  private readonly staminaFill: HTMLElement;
+  private readonly staminaText: HTMLElement;
+  /** The stamina row as last written: in the block or not, up or not, the bar in steps of its own pixels, the number, and whether it wears the tired band. */
+  private staminaOn = false;
+  private staminaShown = false;
+  private staminaCur = NaN;
+  private staminaTextDrawn = NaN;
+  private staminaTired = false;
   private readonly slotsEl: HTMLElement;
   private readonly hands: HandCell[] = [];
   private readonly help: HTMLElement;
@@ -379,7 +397,7 @@ export class Hud {
   /** The grapple's mark, written by the game each frame it is simulated and drawn on the overlay with the crosshair. */
   readonly grappleMark: HudGrappleMark = newHudGrappleMark();
   /** What `report` hands back: one object, filled in place. */
-  private readonly out = { ops: 0, icons: 0, keys: '', attached: false, crosshair: false, hands: '', breath: '' };
+  private readonly out = { ops: 0, icons: 0, keys: '', attached: false, crosshair: false, hands: '', breath: '', stamina: '' };
 
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
@@ -417,6 +435,10 @@ export class Hud {
             <div class="hud-bar pool"><div class="ghost snap"></div><div class="fill"></div></div>
             <div class="val res-val"></div>
           </div>
+          <div class="hud-brow stamina-row off gone">
+            <div class="hud-bar stamina good"><div class="fill"></div></div>
+            <div class="val stamina-val"></div>
+          </div>
         </div>
         <div class="hud-kit">
           <div class="slots"></div>
@@ -446,6 +468,10 @@ export class Hud {
     this.breathBar = q('.hud-bar.breath');
     this.breathFill = q('.hud-bar.breath > .fill');
     this.breathText = q('.breath-val');
+    this.staminaRowEl = q('.stamina-row');
+    this.staminaBar = q('.hud-bar.stamina');
+    this.staminaFill = q('.hud-bar.stamina > .fill');
+    this.staminaText = q('.stamina-val');
     this.slotsEl = q('.slots');
     this.help = q('.help');
     this.crosshair = q('.crosshair');
@@ -653,11 +679,13 @@ export class Hud {
    * `breath` is the breath row as it reads, and an empty string while the row is down, which is the
    * only way to see it at all from a tab nobody is looking at.
    */
-  report(): { ops: number; icons: number; keys: string; attached: boolean; crosshair: boolean; hands: string; breath: string } {
+  report(): { ops: number; icons: number; keys: string; attached: boolean; crosshair: boolean; hands: string; breath: string; stamina: string } {
     const o = this.out;
     o.icons = iconCount();
     o.crosshair = this.crosshairShown();
     o.breath = this.breathShown ? `${this.breathLabelDrawn} ${this.breathTextDrawn}` : '';
+    // The stamina row: '' while it is not in the block (the speed classes off), 'down' while it keeps its place unseen.
+    o.stamina = !this.staminaOn ? '' : this.staminaShown ? `Stamina ${this.staminaTextDrawn}${this.staminaTired ? ' tired' : ''}` : 'down';
     let keys = '';
     for (let i = 0; i < this.kitSlotCount; i++) keys += (keys ? ' ' : '') + keyLabel(this.slots[i].code);
     o.keys = keys;
@@ -985,6 +1013,63 @@ export class Hud {
       this.breathTextDrawn = shown;
       this.breathLabelDrawn = r.label;
       this.breathText.textContent = `${r.label} ${shown}`;
+      this.writes++;
+    }
+  }
+
+  /**
+   * The stamina row (the speed classes: src/anim/). `pool` is the body's own pool (what is left, and whether the
+   * body is tired), read here so that no number is handed across the call; `max` its size; `show` the pool's own word
+   * for whether its bar is up (while it is not full, and for a moment after); and `on` whether the speed classes are
+   * in force for the body at all. Called by the game each frame it draws the display, before `update`; a frame with
+   * the pool full and the row down reaches the third line and writes nothing.
+   *
+   * With the classes off the row is not in the block at all (`gone`), so the two bars above stand where they stood
+   * before the classes. With them on it keeps its place while it is down (`off` hides it and never takes it out of
+   * the block), so the bars above do not move each time a sprint begins.
+   *
+   * What it costs while it is up: one write as the row comes up and one as it goes, one per pixel of the bar's own
+   * length as the pool moves (`HUD_SIZES.staminaBarW`), one per change of the number, and one each time the body
+   * becomes tired or rested (the bar wears the warning colour while tired: no run until the pool is back).
+   */
+  setStamina(pool: { readonly value: number; readonly tired: boolean }, max: number, show: boolean, on: boolean): void {
+    if (on !== this.staminaOn) {
+      this.staminaOn = on;
+      this.staminaRowEl.classList.toggle('gone', !on);
+      this.writes++;
+    }
+    if (!on) show = false;
+    const value = pool.value;
+    const tired = pool.tired;
+    if (show !== this.staminaShown) {
+      this.staminaShown = show;
+      this.staminaRowEl.classList.toggle('off', !show);
+      this.writes++;
+      // Written again from scratch the next time it comes up, so it never shows the last sprint's number for a frame.
+      if (!show) {
+        this.staminaCur = NaN;
+        this.staminaTextDrawn = NaN;
+      }
+    }
+    if (!show) return;
+    // A step of the bar is a pixel of its own length at scale 1 (`staminaBarW`): the pool moves all the time while it
+    // shows, so it is compared no finer than can be seen.
+    const px = HUD_SIZES.staminaBarW;
+    const steps = Math.round(Math.max(0, Math.min(1, max > 0 ? value / max : 0)) * px);
+    if (steps !== this.staminaCur) {
+      this.staminaCur = steps;
+      this.staminaFill.style.transform = `scaleX(${steps / px})`;
+      this.writes++;
+    }
+    if (tired !== this.staminaTired) {
+      this.staminaTired = tired;
+      this.staminaBar.classList.toggle('warn', tired);
+      this.writes++;
+    }
+    const shown = Math.ceil(value);
+    if (shown !== this.staminaTextDrawn) {
+      this.staminaTextDrawn = shown;
+      this.staminaText.textContent = `Stamina ${shown}`;
       this.writes++;
     }
   }

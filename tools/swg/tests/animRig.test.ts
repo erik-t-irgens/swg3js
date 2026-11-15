@@ -152,11 +152,14 @@ console.info = () => {};
   const used = (pack.report() as { used: string[] }).used;
   ok(used.length >= 10 && used.every((n) => rig.has(n)) && rig.clipNames.length === names + used.length, `through the provider the game sets, the rig has every clip the game uses before its load returns (${used.length})`);
 
-  // Only the air and the still water change.
+  // Only the air, the still water and the two strafes change (the strafes had no clip at all before the imported jog strafes).
   const withClips = trace(CharacterRig, (r) => r.addClips(used.map((n) => (rig as unknown as { actions: Map<string, THREE.AnimationAction> }).actions.get(n)!.getClip())));
   const changed: string[] = [];
   for (const p of Object.keys(PACKS)) for (const s of STATES) if (withClips[p][s] !== plain[p][s]) changed.push(`${p}.${s}`);
-  ok(changed.sort().join() === ['bare.air', 'bare.float', 'placeholder.air', 'placeholder.float', 'species.air', 'species.float'].join(), `with the clips, of every state only the air and the still water play something else (${changed.length} of ${STATES.length * 3} answers)`);
+  // A state with no clip of its own leaves the clip before it playing: in these fixtures the back-pedals (and the bare pack's saber walk and run) come after the strafes.
+  const own = changed.filter((c) => /\.(air|float|strafeLeft|strafeRight)$/.test(c)).sort();
+  const after = changed.filter((c) => !own.includes(c));
+  ok(own.join() === ['bare.air', 'bare.float', 'bare.strafeLeft', 'bare.strafeRight', 'placeholder.air', 'placeholder.float', 'placeholder.strafeLeft', 'placeholder.strafeRight', 'species.air', 'species.float', 'species.strafeLeft', 'species.strafeRight'].join() && after.every((c) => /\.(runBack|walkBack|runSaber|walkSaber)$/.test(c) && plain[c.split('.')[0]][c.split('.')[1]].includes('|false|')), `with the clips, of every state only the air, the still water and the two strafes play something else (${own.length} of ${STATES.length * 3} answers, and ${after.length} states with no clip of their own that follow the strafes)`);
   ok(withClips.species.air.startsWith(`${MX.fall}|`) && withClips.species.float.startsWith(`${MX.tread}|`), 'the falling loop and the tread');
 
   // What the player asks for by name.

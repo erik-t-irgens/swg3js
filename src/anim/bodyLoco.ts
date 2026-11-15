@@ -1,0 +1,366 @@
+// What a body remembers from frame to frame for the speed classes, and the hand-over of each rule's answer to the
+// body's update: the class Shift asks for and whether the walk key is down (locoClass.ts), the stamina that pays, the
+// way the keys go and the table's clip for it (locoTable.ts), what the class moves the body at, how far the clip turns
+// the body from the view and how far it has come round, the rate the clip plays at so its feet match the ground
+// (locoPhase.ts), how long a change of the legs' clip fades, and which state the clip was last asked for.
+//
+// The player's update calls one method here at each of those moments and decides none of it itself, so the node test
+// drives this very class over stand-in frames (locoBody.test.ts) and over the game's own rig (locoRig.test.ts). With
+// the classes switched off, or on a rig without the imported clips, every method answers "as before" and the caller
+// moves and animates the body by the rules it always had.
+//
+// Pure: no three.js and nothing of the page. Nothing here makes an object on a frame, and no number crosses a call
+// on a frame's path: what a frame hands in rides its one kept record (`LocoIn`), and what it is handed back it reads
+// off this record's fields (locoAlloc.test.ts measures it).
+
+import { JOG, RUN, ShiftClass, SPRINT, Stamina } from './locoClass.ts';
+import { CLASS_NAMES, DIRS, GUN_UP, JOG_SLOT, PLAIN, SPEED_SLOTS, dirOf, fillSpeeds, locoPick, tableClips, topClass, type LocoPick } from './locoTable.ts';
+import type { LocoTune } from './locoTune.ts';
+
+/** The little of a rig this asks for: the game's `CharacterRig` is one. */
+export interface LocoRig {
+  has(clip: string): boolean;
+  /**
+   * The ground speed a clip's feet were made for on this figure: written into `speedOut`, m/s, with the answer
+   * whether it is known. (A field and not an answer: a number handed back across a call is a number made.)
+   */
+  readSpeed(clip: string): boolean;
+  speedOut: number;
+}
+
+/**
+ * A frame of the body as the classes need it: one kept record the body writes before `plan`, and `ground` before
+ * `legs`. A class, and every number that will hold a fraction declared as one: a record's numbers are then written
+ * in place, frame after frame.
+ */
+export class LocoIn {
+  dt = 0.5;
+  /** The move keys: forward (+1) or back, right (+1) or left. */
+  mz = 0;
+  mx = 0;
+  /** On its feet: not crouched, kneeling or prone (those keep their own rules until their own wave). */
+  standing = true;
+  grounded = true;
+  swimming = false;
+  /** Blocking, attacking or a swing under way: capped at the run. */
+  fighting = false;
+  /** A blaster aimed: capped at the jog. */
+  aiming = false;
+  /** A blaster up, ready or aimed: with the tune's `gunSquare` the body stays square to the view (a diagonal plays its own jog clip at every class). */
+  gunUp = false;
+  /** The sprint's speed and the pool's size as the body's stats have them (the tune's own until something is earned). */
+  sprint = 0.5;
+  pool = 0.5;
+  /** What Force Speed makes of the body's speed (1 without it): widens the top of the playback band. */
+  boost = 1.5;
+  /** How fast the body really moves over the ground, m/s: what the legs' clip is played against. */
+  ground = 0.5;
+}
+
+export function newLocoIn(): LocoIn {
+  const f = new LocoIn();
+  f.boost = 1;
+  f.ground = 0;
+  return f;
+}
+
+/** The rate and the fade a state is handed with the classes' clip, and the fade alone for a state whose clip keeps its own rate: kept records, written before each use. */
+export class LegOpts {
+  rate = 0.5;
+  fade = 0.5;
+}
+export class FadeOpts {
+  fade = 0.5;
+}
+
+/**
+ * The actions that do nothing while the body sprints: the attack, a gun's other trigger and the saber's throw (the
+ * owner's rule: sprinting, "you can't shoot or attack, that way it always takes that animation"). Muted by action for
+ * the rest of each frame the sprint lasts (`Input.mute`), before anything reads a key. Left alone on purpose: the
+ * block, which ends the sprint (blocking is capped at the run); the other attack, which is a blaster's aim and ends
+ * it too (aiming is capped at the jog), so bare hands' kick, on the same key, is refused by the brawl itself while
+ * the body sprints (src/combat/unarmed.ts); the six ability keys; the jump.
+ */
+export const SPRINT_MUTES: readonly string[] = ['attack', 'altFire', 'saberThrow'];
+
+/** The game's names for every clip the table can ask for: a rig has the classes only with all of them. */
+const TABLE_CLIPS: readonly string[] = tableClips().map((id) => `mx_${id}`);
+
+const RAD = Math.PI / 180;
+/** What had the legs last frame, for the fade between that and what has them now. */
+const LEGS_OTHER = 0, LEGS_LOCO = 1, LEGS_JKA = 2, LEGS_IDLE = 3;
+
+export class BodyLoco {
+  private readonly tune: LocoTune;
+  private readonly shift = new ShiftClass();
+  /** The tune's class speeds, read once a frame by name (`fillSpeeds`) and by a pick's own place from then on. */
+  private readonly speeds = new Float64Array(SPEED_SLOTS);
+  readonly stamina: Stamina;
+
+  /** The classes are in force for this body this frame: the switch is on and its rig has every clip of the table. */
+  on = false;
+  /** The walk key is down. */
+  walkOn = false;
+  /** The class Shift asks for (2 to 4), and the class the body really moves at (1 to 4). */
+  asked = JOG;
+  cls = JOG;
+  /** Why the class asked was not given, in words, or ''. */
+  refused = '';
+  /** The way the keys go (`DIRS`' index, -1 for none) and the table's clip for it at this class. */
+  dir = -1;
+  pick: LocoPick | null = null;
+  /** The class's speed this frame, m/s, before Force Speed and the like. (Declared as a fraction, as every number below that a frame counts.) */
+  speed = 0.5;
+  /** The class speeds move the body this frame (on its feet, not swimming). */
+  rules = false;
+  /** A way is asked and the class's speed is the body's this frame: without one (standing, braking to a stop) the movement keeps the pace it always had. */
+  moves = false;
+  /** The imported clip has the legs this frame, and the body faces by it. */
+  legsOn = false;
+  /** How far the clip turns the body from the view, radians (+ left). */
+  turn = 0.5;
+  /** How far the body has come round to that, eased (first person takes it as it stands), and this frame's share of the way left (`face`). */
+  turnNow = 0.5;
+  turnStep = 0.5;
+  /** The rate the clip plays at. */
+  rate = 0.5;
+  /** How long a change of the legs' clip fades this frame, seconds (`fadeFor`). */
+  fadeNow = 0.5;
+  /** Sprinting, on the ground or through a jump: the fight's keys do nothing. */
+  sprinting = false;
+  private boost = 1.5;
+  private dt = 0.5;
+  private legsWere = LEGS_OTHER;
+  /** The state the classes' clip was last asked for, so the rig is told when they let go of it (`prefers`). */
+  private preferred: string | null = null;
+
+  constructor(tune: LocoTune) {
+    this.tune = tune;
+    this.stamina = new Stamina(tune.stamina.pool);
+    fillSpeeds(tune, this.speeds);
+    this.speed = tune.speed.forward.jog;
+    this.turn = 0;
+    this.turnNow = 0;
+    this.turnStep = 1;
+    this.rate = 1;
+    this.fadeNow = tune.fade.idle;
+    this.boost = 1;
+    this.dt = 0;
+  }
+
+  /** Whether a rig has the classes: the switch on, and every clip the table can ask for on the rig. */
+  enabled(rig: LocoRig | null): boolean {
+    if (!this.tune.on || !rig) return false;
+    for (let i = 0; i < TABLE_CLIPS.length; i++) if (!rig.has(TABLE_CLIPS[i])) return false;
+    return true;
+  }
+
+  /**
+   * The speed keys, first thing in the body's frame: Shift (held, and whether it went down this frame) and the walk
+   * key (held). Answers whether the body walks by the rules it always had: with the classes off, either key held
+   * (Shift walked before them); with them on, the walk key alone, which is all a crouch or a crawl reads of it.
+   */
+  keys(dt: number, shiftHeld: boolean, shiftPressed: boolean, walkHeld: boolean, rig: LocoRig | null): boolean {
+    this.on = this.enabled(rig);
+    if (!this.on) {
+      this.shift.reset();
+      this.walkOn = false;
+      this.asked = JOG;
+      return shiftHeld || walkHeld;
+    }
+    this.asked = this.shift.advance(dt, shiftHeld, shiftPressed, this.tune);
+    this.walkOn = walkHeld;
+    return walkHeld;
+  }
+
+  /**
+   * The frame's class, clip and speed, and the stamina's step. True when the classes rule the body this frame
+   * (`speed`, to be multiplied by whatever multiplies the body's speed; `moves` says whether a way is asked); false
+   * leaves the caller its own rule (the classes off, a crouch, a crawl, a kneel, the water).
+   */
+  plan(f: LocoIn): boolean {
+    this.rules = false;
+    this.moves = false;
+    this.legsOn = false;
+    this.sprinting = false;
+    this.pick = null;
+    this.refused = '';
+    this.boost = f.boost;
+    this.dt = f.dt;
+    const tune = this.tune;
+    if (!this.on) {
+      // Off: the pool is simply full, and its bar down.
+      this.stamina.fill(f.pool);
+      this.dir = -1;
+      this.turn = 0;
+      return false;
+    }
+    const dir = dirOf(f.mz, f.mx);
+    this.dir = dir;
+    const afloat = !f.grounded || f.swimming;
+    if (!f.standing || f.swimming) {
+      // Crouched, kneeling, prone or swimming: the body moves by its own rules, and the pool regains as a walk does.
+      this.cls = 1;
+      this.turn = 0;
+      this.stamina.stepFor(f, tune, dir, 1, afloat);
+      return false;
+    }
+    let cls = this.asked;
+    if (this.walkOn) {
+      cls = 1;
+      this.refused = this.asked > JOG ? 'the walk key holds the walk' : '';
+    } else {
+      if (this.stamina.tired && cls > JOG) {
+        cls = JOG;
+        this.refused = 'tired: no run until the stamina is back';
+        // The sprint does not come back by itself once the body has rested: Shift, still held, gives the run.
+        this.shift.cap(RUN);
+      }
+      if (f.aiming && cls > JOG) {
+        cls = JOG;
+        this.refused = 'a blaster aimed: no faster than the jog';
+      }
+      if (f.fighting && cls > RUN) {
+        cls = RUN;
+        this.refused = 'blocking or attacking: no faster than the run';
+      }
+      if (dir >= 0 && cls > topClass(dir)) {
+        cls = topClass(dir);
+        this.refused = 'only forward sprints: the run';
+      }
+    }
+    const pick = locoPick(dir, cls, this.stamina.tired, (f.aiming || f.gunUp) && tune.gunSquare ? GUN_UP : PLAIN);
+    this.pick = pick;
+    this.cls = pick ? pick.cls : cls;
+    // The class's speed by its dial; the sprint's is the stats' (the tune's own until something is earned); standing still, the jog's.
+    fillSpeeds(tune, this.speeds);
+    this.speed = pick ? (pick.cls === SPRINT ? f.sprint : this.speeds[pick.slot]) : this.speeds[JOG_SLOT];
+    this.turn = pick ? pick.turn * RAD : 0;
+    // In the air too: a jump out of a sprint is still the sprint, and the fight's keys stay down through it.
+    this.sprinting = pick !== null && pick.cls === SPRINT;
+    this.stamina.stepFor(f, tune, dir, this.cls, afloat);
+    this.rules = true;
+    this.moves = pick !== null;
+    return true;
+  }
+
+  /**
+   * A frame in which the body is not on its feet under the classes at all: riding or piloting from a seat, flying in
+   * noclip or the world editor, adrift in space, dead. Nothing sprints (so the fight's keys are never left muted by a
+   * sprint the body was in as it sat down), no clip of the classes has the legs, the class Shift had asked for is
+   * forgotten, and the pool regains as it does standing. `dt` nought only puts the record down.
+   */
+  idle(dt: number, pool: number): void {
+    this.rules = false;
+    this.moves = false;
+    this.legsOn = false;
+    this.sprinting = false;
+    this.pick = null;
+    this.refused = '';
+    this.dir = -1;
+    this.turn = 0;
+    this.turnNow = 0;
+    this.walkOn = false;
+    this.asked = JOG;
+    this.cls = JOG;
+    this.shift.reset();
+    if (!this.tune.on) this.stamina.fill(pool);
+    else if (dt > 0) this.stamina.rest(dt, pool, this.tune);
+  }
+
+  /**
+   * The legs' clip for this frame, or null for the caller's own: asked where the body's update picks what the rig
+   * plays, with `f.ground` how fast the body really moves and `jka` Jedi Academy's animations in charge (its legs
+   * stay under a block or a swing). Sets the rate the clip plays at: the ground speed over the speed the clip's feet
+   * were made for, held inside the tune's band (`rateFor`'s own lines, written out).
+   */
+  legs(rig: LocoRig | null, f: LocoIn, jka: boolean): LocoPick | null {
+    const pick = this.pick;
+    this.legsOn = false;
+    if (!this.rules || !pick || jka || !rig || !rig.has(pick.clip)) return null;
+    let rate = 1;
+    if (rig.readSpeed(pick.clip)) {
+      const natural = rig.speedOut;
+      if (natural > 0) {
+        const band = this.tune.rate;
+        const top = band.max * (this.boost > 1 ? this.boost : 1);
+        const r = f.ground / (natural * band.feet);
+        rate = r < band.min ? band.min : r > top ? top : r;
+      }
+    }
+    this.rate = rate;
+    this.legsOn = true;
+    return pick;
+  }
+
+  /** Whether the body faces by the table this frame (the view's way plus the clip's turn), rather than the way it runs. */
+  faces(jka: boolean): boolean {
+    return this.rules && this.pick !== null && !jka;
+  }
+
+  /**
+   * The body's turn eased toward the clip's (`faces`: the body faces by the table this frame; else toward none):
+   * `turnNow` is where it has got to, and `turnStep` the share of whatever is left that this frame takes, which is
+   * what the caller turns the body's heading by. An exponential of the frame's own seconds, so the body comes round
+   * alike at any frame rate.
+   */
+  face(faces: boolean): void {
+    const k = 1 - Math.exp(-this.dt * this.tune.turn.rate);
+    this.turnStep = k;
+    this.turnNow += ((faces ? this.turn : 0) - this.turnNow) * k;
+  }
+
+  /**
+   * How long this frame's change of the legs' clip fades, into `fadeNow`: between two of the classes' clips the
+   * tune's `loco` (in step), into and out of Jedi Academy's legs its `jka`, and to and from standing (or anything
+   * else) its `idle`. `legs`: the classes' clip has them; `jka`: that game's animations are in charge; `moving`.
+   */
+  fadeFor(legs: boolean, jka: boolean, moving: boolean): void {
+    const are = legs ? LEGS_LOCO : jka ? LEGS_JKA : !moving ? LEGS_IDLE : LEGS_OTHER;
+    const fades = this.tune.fade;
+    this.fadeNow = are === LEGS_JKA || this.legsWere === LEGS_JKA ? fades.jka : are === LEGS_LOCO && this.legsWere === LEGS_LOCO ? fades.loco : fades.idle;
+    this.legsWere = are;
+  }
+
+  /**
+   * The state the classes' clip is asked for this frame (null: none). Answers the state it was last asked for when
+   * that is another, which the caller then takes the clip off (and has the rig pick that state's own clip again).
+   */
+  prefers(state: string | null): string | null {
+    const was = this.preferred;
+    this.preferred = state;
+    return was !== null && was !== state ? was : null;
+  }
+
+  /** The pool full again and the class asked forgotten: a respawn, an arrival. */
+  refill(pool: number): void {
+    this.stamina.fill(pool);
+    this.shift.reset();
+    this.asked = JOG;
+    this.sprinting = false;
+  }
+
+  /** `__debug.loco()`'s account of the body. Console only: it makes an object. */
+  report(pool: number): Record<string, unknown> {
+    const n = (v: number, d = 2) => Number(v.toFixed(d));
+    return {
+      on: this.on,
+      rules: this.rules,
+      legs: this.legsOn,
+      class: CLASS_NAMES[this.cls] ?? this.cls,
+      asked: CLASS_NAMES[this.asked] ?? this.asked,
+      walkKey: this.walkOn,
+      refused: this.refused || null,
+      direction: this.dir >= 0 ? DIRS[this.dir] : null,
+      clip: this.pick?.clip ?? null,
+      state: this.pick?.state ?? null,
+      speed: n(this.speed),
+      rate: n(this.rate, 3),
+      bodyTurnDeg: n(this.turn / RAD, 1),
+      bodyTurnNowDeg: n(this.turnNow / RAD, 1),
+      fade: n(this.fadeNow, 3),
+      sprinting: this.sprinting,
+      stamina: { value: n(this.stamina.value, 1), pool: n(pool, 1), tired: this.stamina.tired, shown: this.stamina.shown(pool, this.tune) },
+    };
+  }
+}

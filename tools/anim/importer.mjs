@@ -141,7 +141,8 @@ export function importFolder(folder, out, { log = () => {} } = {}) {
       trimStart,
       ...(level !== undefined ? { level } : {}),
       ...(mirrorOf ? { mirrorOf } : {}),
-      use: table.use && !mirrorOf,
+      // A mirrored twin is the other side of the clip it mirrors, so the game loads the two together.
+      use: table.use,
       source,
       hash: hashOf(bytes),
     };

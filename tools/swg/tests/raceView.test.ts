@@ -279,9 +279,13 @@ for (const fps of RATES) {
     const a = Old ? new Old(16 / 9) : null;
     const b = new ThirdPersonCamera(16 / 9);
     // A blocker that cuts the line on some frames and not others (the trace's own place decides), so its path is run.
+    // The first-person eye's own question (from the body's axis to its eyes, a fifth of a metre: the hold that keeps
+    // the view this side of a wall, which came after this pass and is eyeHold.test.ts's) is answered clear, so first
+    // person here is the camera at the pass's start, which asked nothing there; the orbit's line is never under 0.5 m.
     let cuts = 0;
     const blocker = blocked
       ? (from: THREE.Vector3, to: THREE.Vector3) => {
+          if (from.distanceTo(to) < 0.5) return null;
           if (Math.sin(to.z / 7) <= 0.3) return null;
           cuts++;
           return from.distanceTo(to) * 0.6;
