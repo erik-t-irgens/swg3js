@@ -14,7 +14,7 @@
 // off this record's fields (locoAlloc.test.ts measures it).
 
 import { JOG, RUN, ShiftClass, SPRINT, Stamina } from './locoClass.ts';
-import { CLASS_NAMES, DIRS, GUN_UP, JOG_SLOT, PLAIN, SPEED_SLOTS, dirOf, fillSpeeds, locoPick, sideMode, tableClips, topClass, type LocoPick } from './locoTable.ts';
+import { CLASS_NAMES, CROUCH, DIRS, GAITS, GUN_UP, JOG_SLOT, MADE_CROUCHED, MADE_CROUCH_BACK, MADE_INJURED, PLAIN, POSTURE_KEYS, PRONE, SPEED_SLOTS, STAND, dirOf, fillSpeeds, gaitIndex, injuredPick, locoPick, posturePick, posturePicks, sideMode, tableClips, topClass, type LocoGait, type LocoPick } from './locoTable.ts';
 import type { LocoTune } from './locoTune.ts';
 
 /** The little of a rig this asks for: the game's `CharacterRig` is one. */
@@ -62,12 +62,21 @@ export class LocoIn {
   boost = 1.5;
   /** How fast the body really moves over the ground, m/s: what the legs' clip is played against. */
   ground = 0.5;
+  /** Crouched (the crouch key held) and prone, of the postures that are not standing (wave 2b): what the tune's `crouchRule` and `proneRule` take under the classes. */
+  crouched = false;
+  prone = false;
+  /** The share of its health pool the body has (1 whole): under the tune's `injured.below` the walk is the injured walk. */
+  hpShare = 1.5;
+  /** The figure's own scale (its rig's root): what a game clip's `made` speed is scaled by. */
+  scale = 1.5;
 }
 
 export function newLocoIn(): LocoIn {
   const f = new LocoIn();
   f.boost = 1;
   f.ground = 0;
+  f.hpShare = 1;
+  f.scale = 1;
   return f;
 }
 
@@ -135,6 +144,20 @@ export function classShare(tune: LocoTune, cls: number): number {
 
 /** The game's names for every clip the table can ask for: a rig has the classes only with all of them. */
 const TABLE_CLIPS: readonly string[] = tableClips().map((id) => `mx_${id}`);
+/**
+ * Wave 2b's rows' clips, by what takes them: crouched, prone, each gait (by `GAITS`' place; the standard's none of its own),
+ * and the injured walk. A rig without every clip of one walks as before there (crouched or prone as 7424bad did, the
+ * standard gait, no injured walk), never a row with a clip missing.
+ */
+const unique = (list: string[]): readonly string[] => [...new Set(list)];
+const CROUCH_NAMES = unique(posturePicks().filter((p) => p.posture === CROUCH).map((p) => p.clip));
+const PRONE_NAMES = unique(posturePicks().filter((p) => p.posture === PRONE).map((p) => p.clip));
+const GAIT_NAMES: readonly (readonly string[])[] = GAITS.map((_, g) => unique(g === 0 ? [] : DIRS.flatMap((_d, dir) => [0, 1, 2].map((side) => locoPick(dir, 1, false, PLAIN, GAITS[g], side)?.clip ?? '')).filter((c) => c && !TABLE_CLIPS.includes(c))));
+const INJURED_NAME = injuredPick(0)!.clip;
+function hasAll(rig: LocoRig, names: readonly string[]): boolean {
+  for (let i = 0; i < names.length; i++) if (!rig.has(names[i])) return false;
+  return true;
+}
 
 const RAD = Math.PI / 180;
 /** What had the legs last frame, for the fade between that and what has them now. */
@@ -185,6 +208,17 @@ export class BodyLoco {
    * no upper body of its own.
    */
   carry = CARRY_NONE;
+  /** The posture the classes rule this frame (`STAND`, or under the tune's `crouchRule` and `proneRule` 'classes', `CROUCH` or `PRONE`). */
+  posture = STAND;
+  /** The character's gait, as `GAITS`' place (`setGait`): the walk class's clips in it. */
+  gait = 0;
+  /** The walk this frame is the injured walk (`LocoTune.injured`). */
+  injured = false;
+  /** The rig has every clip of the crouched set, the prone set, the character's gait and the injured walk (`keys`). */
+  crouchOn = false;
+  proneOn = false;
+  gaitOn = false;
+  injuredOn = false;
   private boost = 1.5;
   private dt = 0.5;
   private legsWere = LEGS_OTHER;
@@ -219,6 +253,11 @@ export class BodyLoco {
    */
   keys(dt: number, shiftHeld: boolean, shiftPressed: boolean, walkHeld: boolean, rig: LocoRig | null): boolean {
     this.on = this.enabled(rig);
+    // Which of wave 2b's rows this rig can play: each needs every clip of its own.
+    this.crouchOn = this.on && hasAll(rig!, CROUCH_NAMES);
+    this.proneOn = this.on && hasAll(rig!, PRONE_NAMES);
+    this.gaitOn = this.on && hasAll(rig!, GAIT_NAMES[this.gait] ?? GAIT_NAMES[0]);
+    this.injuredOn = this.on && rig!.has(INJURED_NAME);
     if (!this.on) {
       this.shift.reset();
       this.walkOn = false;
@@ -243,6 +282,8 @@ export class BodyLoco {
     this.pick = null;
     this.refused = '';
     this.carry = CARRY_NONE;
+    this.posture = STAND;
+    this.injured = false;
     this.boost = f.boost;
     this.dt = f.dt;
     const tune = this.tune;
@@ -257,6 +298,8 @@ export class BodyLoco {
     this.dir = dir;
     const afloat = !f.grounded || f.swimming;
     if (!f.standing || f.swimming) {
+      // Crouched or prone under the classes (wave 2b): three classes of their own (`posture`).
+      if (!f.swimming && (f.prone ? this.proneOn && tune.proneRule === 'classes' : f.crouched && this.crouchOn && tune.crouchRule === 'classes')) return this.posturePlan(f, dir, afloat);
       // Crouched, kneeling, prone or swimming: the body moves by its own rules, and the pool regains as a walk does.
       this.cls = 1;
       this.turn = 0;
@@ -297,14 +340,21 @@ export class BodyLoco {
         this.refused = 'only forward sprints: the run';
       }
     }
-    const pick = locoPick(dir, cls, this.stamina.tired, (f.aiming || f.gunUp) && tune.gunSquare ? GUN_UP : PLAIN, 'standard', sideMode(tune));
+    const gun = (f.aiming || f.gunUp) && tune.gunSquare ? GUN_UP : PLAIN;
+    let pick = locoPick(dir, cls, this.stamina.tired, gun, this.gaitOn ? GAITS[this.gait] : 'standard', sideMode(tune));
+    // Walking hurt (`LocoTune.injured`): the walk class forward and to the sides, with no blaster up, is the injured walk.
+    const hurt = pick !== null && pick.cls === 1 && this.injuredOn && tune.injured.rule === 'walk' && f.hpShare < tune.injured.below && !f.aiming && !f.gunUp ? injuredPick(dir) : null;
+    if (hurt) {
+      pick = hurt;
+      this.injured = true;
+    }
     this.pick = pick;
     // A gun in hand with none up: what its kind's pace plays (none up means out of combat: no aim, no shot).
     if (f.gunClass >= 0 && !f.gunUp && !f.aiming) this.carry = carryOf(tune, f.gunClass);
     this.cls = pick ? pick.cls : cls;
     // The class's speed by its dial; the sprint's is the stats' (the tune's own until something is earned); standing still, the jog's.
     fillSpeeds(tune, this.speeds);
-    this.speed = pick ? (pick.cls === SPRINT ? f.sprint : this.speeds[pick.slot]) : this.speeds[JOG_SLOT];
+    this.speed = pick ? (pick.cls === SPRINT ? f.sprint : hurt ? tune.injured.speed : this.speeds[pick.slot]) : this.speeds[JOG_SLOT];
     this.turn = pick ? pick.turn * RAD : 0;
     // In the air too: a jump out of a sprint is still the sprint, and the fight's keys stay down through it.
     this.sprinting = pick !== null && pick.cls === SPRINT;
@@ -312,6 +362,42 @@ export class BodyLoco {
     this.rules = true;
     this.moves = pick !== null;
     return true;
+  }
+
+  /**
+   * Crouched or prone under the classes (wave 2b): Alt held the slowest class, nothing held the middle, Shift held (or a
+   * double tap) the quickest, and no sprint. The class's clip for the way (`posturePick`), its speed by the tune's dials
+   * (crouched backing up its own), the turn the clip asks of the body, and the pool's step by the class.
+   */
+  private posturePlan(f: LocoIn, dir: number, afloat: boolean): boolean {
+    const tune = this.tune;
+    const prone = f.prone;
+    const posture = prone ? PRONE : CROUCH;
+    this.posture = posture;
+    let cls = this.walkOn ? 1 : this.asked >= RUN ? 3 : 2;
+    if (this.asked > RUN && !this.walkOn) this.refused = prone ? 'no sprint prone: the quickest crawl' : 'no sprint crouched: the quickest crouch';
+    if (this.walkOn && this.asked > JOG) this.refused = 'the walk key holds the slowest';
+    if (this.stamina.tired && cls > 2) {
+      cls = 2;
+      this.refused = 'tired: not the quickest until the stamina is back';
+      this.shift.cap(RUN);
+    }
+    // Backing up prone under 'reverse', the forward crawl backwards; with a gun in hand its own carries crawl, as ever.
+    const pick = posturePick(posture, dir, cls, prone && tune.proneBack === 'reverse' && f.gunClass < 0);
+    this.pick = pick;
+    this.cls = cls;
+    const g = prone ? tune.prone.forward : dir >= 3 && dir <= 5 ? tune.crouch.back : tune.crouch.forward;
+    this.speed = cls === 1 ? g.slow : cls === 2 ? g.normal : g.fast;
+    this.turn = pick ? pick.turn * RAD : 0;
+    this.stamina.stepPosture(f, tune, prone, cls, afloat);
+    this.rules = true;
+    this.moves = pick !== null;
+    return true;
+  }
+
+  /** The character's gait (`GAITS`' word; anything else is the standard): the walk class's clips from the next frame. */
+  setGait(gait: LocoGait | string | null | undefined): void {
+    this.gait = gaitIndex(gait);
   }
 
   /**
@@ -328,6 +414,8 @@ export class BodyLoco {
     this.pick = null;
     this.refused = '';
     this.carry = CARRY_NONE;
+    this.posture = STAND;
+    this.injured = false;
     this.dir = -1;
     this.turn = 0;
     this.turnNow = 0;
@@ -350,27 +438,37 @@ export class BodyLoco {
     this.legsOn = false;
     // A gun's 'original' carry: the game's own carry walk and run have the legs, by the caller's old rule.
     if (!this.rules || !pick || jka || !rig || this.carry === CARRY_ORIGINAL || !rig.has(pick.clip)) return null;
+    // Prone with a gun in hand: the gun's own prone carries keep the legs, at the class's speed (the imported crawls hold no gun).
+    if (pick.posture === PRONE && f.gunClass >= 0) return null;
     let rate = 1;
-    if (rig.readSpeed(pick.clip)) {
-      const natural = rig.speedOut;
-      if (natural > 0) {
-        const band = this.tune.rate;
-        const top = band.max * (this.boost > 1 ? this.boost : 1);
-        // The class's share of the feet-locked rate (`rate.byClass`, 1 locked): written out, so no number crosses a call.
-        const by = band.byClass;
-        const c = pick.cls;
-        const share = c === 1 ? by.walk : c === 2 ? by.jog : c === 3 ? by.run : by.sprint;
-        const r = (f.ground / (natural * band.feet)) * share;
-        rate = r < band.min ? band.min : r > top ? top : r;
-      }
+    // The speed the clip's feet were made for: a game clip the tune has measured (`made`) at the figure's own scale, else the rig's.
+    let natural = 0;
+    if (pick.made >= 0) {
+      const m = this.tune.made;
+      natural = (pick.made === MADE_CROUCHED ? m.crouched : pick.made === MADE_CROUCH_BACK ? m.crouchBack : pick.made === MADE_INJURED ? m.injuredWalk : m.gameWalk) * f.scale;
+    } else if (rig.readSpeed(pick.clip)) natural = rig.speedOut;
+    if (natural > 0) {
+      const band = this.tune.rate;
+      const top = band.max * (this.boost > 1 ? this.boost : 1);
+      // The class's share of the feet-locked rate (`rate.byClass`, 1 locked): written out, so no number crosses a call.
+      const by = band.byClass;
+      const c = pick.cls;
+      const share = c === 1 ? by.walk : c === 2 ? by.jog : c === 3 ? by.run : by.sprint;
+      const r = (f.ground / (natural * band.feet)) * share;
+      rate = r < band.min ? band.min : r > top ? top : r;
     }
-    this.rate = rate;
+    // The prone crawl backing up under 'reverse': the forward crawl played backwards.
+    this.rate = pick.reverse ? -rate : rate;
     this.legsOn = true;
     return pick;
   }
 
-  /** Whether the body faces by the table this frame (the view's way plus the clip's turn), rather than the way it runs. */
+  /**
+   * Whether the body faces by the table this frame (the view's way plus the clip's turn), rather than the way it runs.
+   * Prone it never does (no strafing crawl: the body turns the way it crawls), but backing up under 'reverse'.
+   */
   faces(jka: boolean): boolean {
+    if (this.posture === PRONE) return this.rules && this.pick !== null && this.pick.reverse && !jka;
     return this.rules && this.pick !== null && !jka && this.carry !== CARRY_ORIGINAL;
   }
 
@@ -432,7 +530,8 @@ export class BodyLoco {
       on: this.on,
       rules: this.rules,
       legs: this.legsOn,
-      class: CLASS_NAMES[this.cls] ?? this.cls,
+      // Crouched and prone the classes are named as the dials name them (slow, normal, fast).
+      class: this.posture !== STAND ? POSTURE_KEYS[this.cls] : (CLASS_NAMES[this.cls] ?? this.cls),
       asked: CLASS_NAMES[this.asked] ?? this.asked,
       walkKey: this.walkOn,
       refused: this.refused || null,
@@ -449,6 +548,14 @@ export class BodyLoco {
       sideWalkClip: this.tune.sideWalkClip,
       gunCarry: this.carry === CARRY_FULL ? 'full' : this.carry === CARRY_ORIGINAL ? 'original' : this.carry === CARRY_SPLIT ? 'split' : null,
       share: this.pick ? n(classShare(this.tune, this.pick.cls), 3) : null,
+      posture: this.posture === CROUCH ? 'crouched' : this.posture === PRONE ? 'prone' : 'standing',
+      crouchRule: this.tune.crouchRule,
+      proneRule: this.tune.proneRule,
+      proneBack: this.tune.proneBack,
+      reverse: this.pick?.reverse ?? false,
+      gait: GAITS[this.gait],
+      injured: this.injured,
+      injuredRule: this.tune.injured.rule,
       stamina: { value: n(this.stamina.value, 1), pool: n(pool, 1), tired: this.stamina.tired, shown: this.stamina.shown(pool, this.tune) },
     };
   }

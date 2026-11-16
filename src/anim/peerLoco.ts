@@ -13,7 +13,7 @@
 // rate is read off this record (locoAlloc.test.ts measures it).
 
 import { CARRY_ORIGINAL, carryOf, type LocoRig } from './bodyLoco.ts';
-import { PeerAsk, SPEED_SLOTS, fillSpeeds, peerLocoState, peerPickIn, sideMode, type LocoPick } from './locoTable.ts';
+import { CROUCH, MADE_CROUCHED, MADE_CROUCH_BACK, MADE_INJURED, PRONE, PeerAsk, SPEED_SLOTS, STAND, fillSpeeds, peerLocoState, peerPickIn, posturePick, sideMode, type LocoPick } from './locoTable.ts';
 import type { LocoTune } from './locoTune.ts';
 
 const DEG = 180 / Math.PI;
@@ -28,6 +28,12 @@ export class PeerIn {
   speed = 0.5;
   /** The frame's seconds. */
   dt = 0.5;
+  /** Their gait as their hello says it (`GAITS`' place; 0 the standard, and anything a hello from before says nothing of). */
+  gait = 0;
+  /** The share of their health pool they have, where this side hears it (1 whole, and wherever it does not). */
+  hpShare = 1.5;
+  /** The figure's own scale (its rig's root): what a game clip's `made` speed is scaled by. */
+  scale = 1.5;
 }
 
 /** The tune's class speeds, read by name once a call and by a pick's own place from there (one array for every figure: a call fills it before it reads it). */
@@ -57,7 +63,10 @@ export class PeerLoco {
    * on foot, with the classes off, or on a rig without the clip: the caller plays the state's own clip, as before.
    */
   resolve(tune: LocoTune, rig: LocoRig, state: string, f: PeerIn): LocoPick | null {
-    if (!peerLocoState(state) || !(f.speed > 0.05)) {
+    // Crouched or prone (wave 2b): the states every build sends there, worked out under this side's own rules.
+    const posture = state === 'crouchWalk' || state === 'crouchWalkBack' ? CROUCH : state === 'proneMove' ? PRONE : STAND;
+    const postureOn = posture === CROUCH ? tune.crouchRule === 'classes' : posture === PRONE && tune.proneRule === 'classes';
+    if ((!postureOn && !peerLocoState(state)) || !(f.speed > 0.05)) {
       this.rel = 0;
       return this.drop();
     }
@@ -72,6 +81,7 @@ export class PeerLoco {
     } else if (this.pick) rel = this.pick.heading;
     this.rel = rel;
     if (!tune.on) return this.drop();
+    if (posture !== STAND) return this.postureLegs(tune, rig, posture, state === 'crouchWalkBack', f);
     if (moving) {
       // The legs keep the way they go until the travel lies clearly nearer another clip's: ground that deflects a body
       // (a slope climbed across, a wall slid along) turns its travel a few degrees, and must not flick the legs.
@@ -86,7 +96,16 @@ export class PeerLoco {
     // The sideways walk as this player's own tune has it: their game sends nothing of the choice (a figure walking
     // sideways is drawn by the clip this side would play for the travel against the heading it sent).
     this.ask.side = sideMode(tune);
-    const found = peerPickIn(SPEEDS, state, this.ask);
+    // Their gait out of their hello, and walking hurt where this side hears their health (wave 2b); a rig without the
+    // clip for either shows the standard walk.
+    this.ask.gait = f.gait;
+    this.ask.injured = tune.injured.rule === 'walk' && f.hpShare < tune.injured.below;
+    let found = peerPickIn(SPEEDS, state, this.ask);
+    if (found && !rig.has(found.clip) && (this.ask.gait > 0 || this.ask.injured)) {
+      this.ask.gait = 0;
+      this.ask.injured = false;
+      found = peerPickIn(SPEEDS, state, this.ask);
+    }
     if (!found || !rig.has(found.clip)) return this.drop();
     if (!this.pick || found === this.pick) {
       this.pick = found;
@@ -107,23 +126,72 @@ export class PeerLoco {
         this.next = null;
       }
     }
-    // The rate: the speed sent over the speed the clip's feet were made for, inside the tune's band with its top
-    // doubled (`rateFor`'s own lines, written out): a peer under Force Speed says so only by how fast it goes.
+    this.setRate(tune, rig, this.pick, f);
+    return this.pick;
+  }
+
+  /**
+   * The rate: the speed sent over the speed the clip's feet were made for (a game clip the tune has measured, at the
+   * figure's own scale, else the rig's), inside the tune's band with its top doubled (`rateFor`'s own lines, written
+   * out): a peer under Force Speed says so only by how fast it goes. Backwards for a crawl backing up. Into `rate`, so no number crosses the call.
+   */
+  private setRate(tune: LocoTune, rig: LocoRig, pick: LocoPick, f: PeerIn): void {
     let rate = 1;
-    if (rig.readSpeed(this.pick.clip)) {
-      const natural = rig.speedOut;
-      if (natural > 0) {
-        const band = tune.rate;
-        const top = band.max * 2;
-        // The class's share of the feet-locked rate (`rate.byClass`), written out as the player's own is.
-        const by = band.byClass;
-        const c = this.pick.cls;
-        const share = c === 1 ? by.walk : c === 2 ? by.jog : c === 3 ? by.run : by.sprint;
-        const r = (f.speed / (natural * band.feet)) * share;
-        rate = r < band.min ? band.min : r > top ? top : r;
+    let natural = 0;
+    if (pick.made >= 0) {
+      const m = tune.made;
+      natural = (pick.made === MADE_CROUCHED ? m.crouched : pick.made === MADE_CROUCH_BACK ? m.crouchBack : pick.made === MADE_INJURED ? m.injuredWalk : m.gameWalk) * f.scale;
+    } else if (rig.readSpeed(pick.clip)) natural = rig.speedOut;
+    if (natural > 0) {
+      const band = tune.rate;
+      const top = band.max * 2;
+      // The class's share of the feet-locked rate (`rate.byClass`), written out as the player's own is.
+      const by = band.byClass;
+      const c = pick.cls;
+      const share = c === 1 ? by.walk : c === 2 ? by.jog : c === 3 ? by.run : by.sprint;
+      const r = (f.speed / (natural * band.feet)) * share;
+      rate = r < band.min ? band.min : r > top ? top : r;
+    }
+    this.rate = pick.reverse ? -rate : rate;
+  }
+
+  /**
+   * A figure crouched or prone under this side's classes (wave 2b): the class whose speed is nearest the one sent (each
+   * change of class standing a moment, as standing's do), its forward clip, or crouched backing up (`crouchWalkBack`)
+   * Jedi Academy's walk back. A crawl heard going backward against its heading (their own game kept the body to the view,
+   * under its 'reverse') is played backwards. Their figure faces the heading they sent, which is the way their own game
+   * turned it, so the clip's turn is theirs already.
+   */
+  private postureLegs(tune: LocoTune, rig: LocoRig, posture: number, back: boolean, f: PeerIn): LocoPick | null {
+    const g = posture === PRONE ? tune.prone.forward : back ? tune.crouch.back : tune.crouch.forward;
+    const s = f.speed;
+    let cls = 1;
+    let gap = g.slow > s ? g.slow - s : s - g.slow;
+    const d2 = g.normal > s ? g.normal - s : s - g.normal;
+    if (d2 < gap) {
+      cls = 2;
+      gap = d2;
+    }
+    const d3 = g.fast > s ? g.fast - s : s - g.fast;
+    if (d3 < gap) cls = 3;
+    const reverse = posture === PRONE && (this.rel > 112.5 || this.rel < -112.5);
+    const found = posturePick(posture, back || reverse ? 4 : 0, cls, reverse);
+    if (!found || !rig.has(found.clip)) return this.drop();
+    if (!this.pick || found === this.pick || found.state !== this.pick.state || found.reverse !== this.pick.reverse) {
+      this.pick = found;
+      this.next = null;
+    } else {
+      if (found !== this.next) {
+        this.next = found;
+        this.nextFor = 0;
+      }
+      this.nextFor += f.dt;
+      if (this.nextFor >= tune.peer.settle) {
+        this.pick = found;
+        this.next = null;
       }
     }
-    this.rate = rate;
+    this.setRate(tune, rig, this.pick, f);
     return this.pick;
   }
 

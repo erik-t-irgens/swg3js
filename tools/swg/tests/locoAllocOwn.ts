@@ -11,7 +11,7 @@
 import v8 from 'node:v8';
 import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks';
 import { BodyLoco, FadeOpts, LegOpts, fightKeysDown, newLocoIn, type LocoRig } from '../../../src/anim/bodyLoco.ts';
-import { tableClips } from '../../../src/anim/locoTable.ts';
+import { GAITS, moreClips, tableClips } from '../../../src/anim/locoTable.ts';
 import { PeerIn, PeerLoco } from '../../../src/anim/peerLoco.ts';
 import { LOCO_TUNE_SHIPPED, type LocoTune } from '../../../src/anim/locoTune.ts';
 import { BodyAnim, type AnimRig } from '../../../src/anim/bodyAnim.ts';
@@ -42,6 +42,9 @@ class StandInRig implements LocoRig {
   scale = 1.0625;
   constructor() {
     tableClips().forEach((id, i) => this.speeds.set(`mx_${id}`, 1.37 + i * 0.211));
+    // Wave 2b's rows' clips too: the gaits', the injured walk's, crouched and prone (the game's own among them).
+    moreClips().forEach((id, i) => this.speeds.set(`mx_${id}`, 0.61 + i * 0.137));
+    for (const name of ['walk', 'loop_crouched:speed1', 'BOTH_CROUCH1WALKBACK', 'loop_prone:speed1']) this.speeds.set(name, 1.4375);
   }
   has(clip: string): boolean {
     return this.speeds.has(clip);
@@ -55,7 +58,7 @@ class StandInRig implements LocoRig {
 }
 
 /** The keys of a frame, as bits: forward, back, left, right, Shift, Shift pressed this frame, the walk key; and the attack pressed (a fight's key that ends a sprint). */
-const W = 1, S = 2, A = 4, D = 8, SHIFT = 16, PRESS = 32, WALK = 64, GUN = 128, AIR = 256, SEAT = 512, BLOCK = 1024, FIGHT = 2048, HOLSTERED = 4096;
+const W = 1, S = 2, A = 4, D = 8, SHIFT = 16, PRESS = 32, WALK = 64, GUN = 128, AIR = 256, SEAT = 512, BLOCK = 1024, FIGHT = 2048, HOLSTERED = 4096, CROUCHED = 8192, PRONE = 16384, HURT = 32768;
 /** The sideways walk's three choices, cycled through as the script runs (a dial moved in play). */
 const SIDE_CHOICES = ['diagonal', 'forward', 'strafe'] as const;
 
@@ -111,7 +114,11 @@ class Body {
     lo.dt = dt;
     lo.mz = mz;
     lo.mx = mx;
-    lo.standing = true;
+    lo.crouched = (keys & CROUCHED) !== 0;
+    lo.prone = (keys & PRONE) !== 0;
+    lo.standing = !lo.crouched && !lo.prone;
+    lo.hpShare = (keys & HURT) !== 0 ? 0.125 : 0.875;
+    lo.scale = 1.0625;
     lo.grounded = (keys & AIR) === 0;
     lo.swimming = false;
     lo.fighting = jka;
@@ -197,7 +204,7 @@ let peerPicks = 0;
 
 const steady = new Body();
 const busy = new Body();
-const st = new Float64Array(4);
+const st = new Float64Array(5);
 const DT = 1 / 60;
 
 function steadyFrame(): void {
@@ -222,6 +229,59 @@ function polishFrame(): void {
   // The sideways walk's dial moved every so often, as the owner's slider moves it in play.
   if ((at & 511) === 0) tune.sideWalkClip = SIDE_CHOICES[(at >> 9) % 3];
   polish.update(DT, POLISH_KEYS[at % polishFrames]);
+}
+
+/**
+ * Wave 2b's own (a body of its own, measured on its own, as the polish's is): crouched and prone at each class and way,
+ * the prone crawl backing up under each of `proneBack`'s choices (the dial moved every 512 frames), the walk in each gait
+ * in turn (the gait moved every 256 frames), and walking hurt; and other players crouched, prone and walking in a gait
+ * and hurt.
+ */
+const POSTURE: [number, number][] = [
+  [W | CROUCHED | WALK, 40], [W | CROUCHED, 40], [W | CROUCHED | SHIFT, 40], [W | A | CROUCHED, 30], [D | CROUCHED | SHIFT, 30], [S | CROUCHED, 30], [S | D | CROUCHED | WALK, 30], [CROUCHED, 20],
+  [W | PRONE | WALK, 40], [W | PRONE, 40], [W | PRONE | SHIFT, 40], [S | PRONE, 40], [S | A | PRONE | SHIFT, 30], [A | PRONE, 30], [PRONE, 20], [W | PRONE | HOLSTERED, 30],
+  [W | WALK, 40], [W | A | WALK, 30], [D | WALK, 30], [W | WALK | HURT, 40], [W | A | WALK | HURT, 30], [A | WALK | HURT, 30], [S | WALK | HURT, 30], [W | HURT, 30], [0, 20],
+];
+let postureFrames = 0;
+for (const [, n] of POSTURE) postureFrames += n;
+const POSTURE_KEYS = new Int32Array(postureFrames);
+{
+  let at = 0;
+  for (const [k, n] of POSTURE) for (let i = 0; i < n; i++) POSTURE_KEYS[at++] = k;
+}
+const postureBody = new Body();
+const BACKS = ['today', 'reverse'] as const;
+const POSTURE_PEER_STATES = ['crouchWalk', 'crouchWalkBack', 'proneMove', 'walk', 'walk', 'run'];
+const posturePeers: Peer[] = POSTURE_PEER_STATES.map((state, i) => {
+  const p = new Peer();
+  p.state = state;
+  p.heading = i * 0.73 - 1.9;
+  return p;
+});
+let posturePeerPicks = 0;
+const postureIn = new PeerIn();
+function postureFrame(): void {
+  st[4] += 1;
+  const at = st[4] | 0;
+  if ((at & 255) === 0) postureBody.loco.setGait(GAITS[(at >> 8) % GAITS.length]);
+  if ((at & 511) === 0) tune.proneBack = BACKS[(at >> 9) & 1];
+  postureBody.update(DT, POSTURE_KEYS[at % postureFrames]);
+  for (let i = 0; i < posturePeers.length; i++) {
+    const p = posturePeers[i];
+    const turn = p.heading + ((at + i * 41) % 700) * 0.0091;
+    const speed = 0.3 + (((at >> 5) + i * 5) % 11) * 0.27;
+    p.vel.x = Math.sin(turn) * speed;
+    p.vel.z = Math.cos(turn) * speed;
+    postureIn.vx = p.vel.x;
+    postureIn.vz = p.vel.z;
+    postureIn.heading = p.heading;
+    postureIn.speed = speed;
+    postureIn.dt = DT;
+    postureIn.gait = (at >> 7) % GAITS.length;
+    postureIn.hpShare = ((at >> 8) & 1) === 0 ? 0.125 : 0.875;
+    postureIn.scale = 1.0625;
+    if (p.loco.resolve(tune, peerRig, p.state, peerIn)) posturePeerPicks++;
+  }
 }
 
 /** The air and the water as the player's update drives them: the owner's air rule over a stand-in rig, and the treading sink. */
@@ -335,7 +395,9 @@ const b = await measure(busyFrame);
 const c = await measure(peerFrame);
 const d = await measure(airFrame);
 const e = await measure(polishFrame);
+const g = await measure(postureFrame);
 console.log(JSON.stringify({
+  posture: g.made, postureScavenges: g.scavenges, postureLegs: postureBody.legsFrames, posturePeerPicks,
   frames: N,
   steady: a.made, steadyScavenges: a.scavenges, steadyLegs: steady.legsFrames,
   busy: b.made, busyScavenges: b.scavenges, busyLegs: busy.legsFrames, busySprints: busy.sprintFrames, busySeats: busy.seatFrames, busyDrops: busy.dropped, busyEnded: busy.ended, busyMuted: busy.muted,

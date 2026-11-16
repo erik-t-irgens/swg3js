@@ -155,6 +155,10 @@ const pitchQ = new THREE.Quaternion();
 const steadyQ = new THREE.Quaternion();
 const IDENTITY_Q = new THREE.Quaternion();
 const steadyFullQ = new THREE.Quaternion();
+/** A swing's own pelvis at its moment, and the turn onto it (wave 2b's `swingPelvis`). */
+const swingQ = new THREE.Quaternion();
+const swingTurnQ = new THREE.Quaternion();
+const swingWasQ = new THREE.Quaternion();
 /** States whose legs walk or run around the standing pelvis, where a pose on the upper body is held steady. */
 const LOCOMOTION_STATES = new Set<RigState>(['walk', 'run', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'strafeLeft', 'strafeRight', 'gunWalk', 'gunRun', 'gunReadyWalk', 'gunReadyRun', 'gunAimWalk', 'gunAimRun']);
 /**
@@ -491,6 +495,11 @@ export class CharacterRig {
     return this.actions.has(clip);
   }
 
+  /** A clip the rig has, by name, as its three.js clip (the appearance page's doll plays a gait's walk on its own skeleton). */
+  clipObject(clip: string): THREE.AnimationClip | null {
+    return this.actions.get(clip)?.getClip() ?? null;
+  }
+
   /**
    * Take clips after the rig was made: the imported animations fitted to this skeleton (src/anim/), which the
    * loader hands over before the rig is shown, and any the console asks for later. A clip is an action more on the
@@ -606,7 +615,7 @@ export class CharacterRig {
    * from their rest, degrees, and how far each ankle stands over (+) or under (-) where it rests, metres, in the rig's
    * own frame, so a body standing on the ground reads its feet against the ground. Null on a skeleton without them.
    */
-  poseAgainstRest(): { hipsFromRestDeg: number; leftAnkleM: number; rightAnkleM: number } | null {
+  poseAgainstRest(): { hipsFromRestDeg: number; leftAnkleM: number; rightAnkleM: number; chestLeanDeg: number | null; reachDeg: number | null } | null {
     const hips = this.bones.get('root'), left = this.bones.get('lAnkle'), right = this.bones.get('rAnkle');
     const restQ = hips ? this.restLocal.get(hips) : undefined;
     if (!hips || !left || !right || !restQ) return null;
@@ -617,7 +626,16 @@ export class CharacterRig {
     const scale = this.root.getWorldScale(new THREE.Vector3()).y;
     const over = (bone: THREE.Bone, name: string) => (this.root.worldToLocal(bone.getWorldPosition(new THREE.Vector3())).y - rest.p[at(name) * 3 + 1]) * scale;
     const n = (v: number, digits: number) => Number(v.toFixed(digits));
-    return { hipsFromRestDeg: n((hips.quaternion.angleTo(restQ) * 180) / Math.PI, 2), leftAnkleM: n(over(left, 'lAnkle'), 3), rightAnkleM: n(over(right, 'rAnkle'), 3) };
+    // Wave 2b's swing (`swingPelvis`): the chest's lean (the top of the spine to the neck, + forward) and the reach (the
+    // shoulder to the hand's hold point, + up), degrees, in the figure's own frame; null on a skeleton without them.
+    const local = (name: string) => {
+      const b = this.bones.get(name);
+      return b ? this.root.worldToLocal(b.getWorldPosition(new THREE.Vector3())) : null;
+    };
+    const s3 = local('spine3'), neck = local('neck'), arm = local('rArm'), hold = local('hold_r');
+    const chestLeanDeg = s3 && neck ? n((Math.atan2(neck.z - s3.z, neck.y - s3.y) * 180) / Math.PI, 1) : null;
+    const reachDeg = arm && hold ? n((Math.atan2(hold.y - arm.y, Math.hypot(hold.x - arm.x, hold.z - arm.z)) * 180) / Math.PI, 1) : null;
+    return { hipsFromRestDeg: n((hips.quaternion.angleTo(restQ) * 180) / Math.PI, 2), leftAnkleM: n(over(left, 'lAnkle'), 3), rightAnkleM: n(over(right, 'rAnkle'), 3), chestLeanDeg, reachDeg };
   }
 
   /**
@@ -940,6 +958,8 @@ export class CharacterRig {
       if (startAt > 0) next.time = startAt;
       if (was !== next) was.crossFadeTo(next, fadeIn, false);
       else next.fadeIn(0);
+      // The swing fading out under the one chained on (the swings' own pelvis, `swingTurn`, blends the two by their weights).
+      this.swingFading = was !== next ? was : null;
       this.override = next;
       const duration = (next.getClip().duration - startAt) / Math.max(1e-3, Math.abs(timeScale));
       this.overrideEnds = loop || hold ? Infinity : duration;
@@ -962,6 +982,7 @@ export class CharacterRig {
     if (this.overrideUpper && was) {
       // The last one-off had the upper body alone; this one takes the whole body, so the legs' clip goes too.
       was.fadeOut(fadeIn);
+      this.swingFading = was;
       if (this.current && this.current !== was) this.current.fadeOut(fadeIn);
       next.fadeIn(fadeIn);
     } else if (was && was !== next) was.crossFadeTo(next, fadeIn, false);
@@ -982,6 +1003,8 @@ export class CharacterRig {
     if (this.overrideUpper) {
       // The upper body's clip goes; the state's clip comes back whole over the legs it kept.
       this.override.fadeOut(fade);
+      // A swing fading out still stands on its own pelvis by its weight (`swingTurn`), or the chest drops onto the legs' hips.
+      this.swingFading = this.override;
       this.override = null;
       this.overrideUpper = false;
       const state = this.state;
@@ -1314,6 +1337,63 @@ export class CharacterRig {
   /** The last update's step, for what is eased after the mixer (`steadyShare`). */
   private stepDt = 1 / 60;
 
+  /** Each Jedi Academy clip's own pelvis, as an interpolant over its track (made once a clip; null where it has none). */
+  private readonly swingPelvisOf = new Map<THREE.AnimationClip, THREE.Interpolant | null>();
+  /** The swing fading out under one chained onto the upper body (`play`'s `upperOnly`), while it fades. */
+  private swingFading: THREE.AnimationAction | null = null;
+
+  /**
+   * A Jedi Academy swing's own pelvis at its moment, into `q`, and the swing's weight; nought (`q` untouched) for an
+   * action that is no swing on the upper body alone, or whose clip has no track for the pelvis.
+   */
+  private swingPelvisAt(action: THREE.AnimationAction, pelvis: string, q: THREE.Quaternion): number {
+    const name = action.getClip().name;
+    if (!name.startsWith('upper:BOTH_')) return 0;
+    const full = this.actions.get(name.slice('upper:'.length))?.getClip();
+    if (!full) return 0;
+    let at = this.swingPelvisOf.get(full);
+    if (at === undefined) {
+      const track = full.tracks.find((t) => t.name === `${pelvis}.quaternion`);
+      // The track's own (spherical) interpolation, made once with a buffer of its own.
+      at = track ? new THREE.QuaternionLinearInterpolant(track.times, track.values, 4, new Float32Array(4)) : null;
+      this.swingPelvisOf.set(full, at);
+    }
+    if (!at) return 0;
+    const w = action.getEffectiveWeight();
+    if (!(w > 0)) return 0;
+    const v = at.evaluate(action.time);
+    q.set(v[0], v[1], v[2], v[3]).normalize();
+    return w;
+  }
+
+  /**
+   * Wave 2b (`ANIM_TUNE.swingPelvis` 'mended'): a Jedi Academy swing riding the upper body alone stands on its own
+   * pelvis. Its spine's keys are turns against the pelvis, so over the legs' pelvis the whole upper body took the legs'
+   * hips: a medium or strong swing (its hips bent 16 to 30 degrees into the strike) over the back-pedal (8.5 degrees) or
+   * a walk stood up to 30 degrees further back and passed over people. The turn from the legs' pelvis to the swing's own
+   * at the swing's moment, for the lowest spine bone, so that bone and all above it stand in the figure as the
+   * whole-body swing has them; by the swing's weight (a swing fading out under one chained on blended in by its own), so
+   * it comes and goes with the swings' fades. False (and `out` untouched) when no such swing rides, and always under
+   * 'before'.
+   */
+  private swingTurn(bone: THREE.Bone, out: THREE.Quaternion): boolean {
+    if (ANIM_TUNE.swingPelvis !== 'mended') return false;
+    const ride = this.override && this.overrideUpper ? this.override : null;
+    if (!ride && !this.swingFading) return false;
+    const parent = bone.parent;
+    if (!(parent instanceof THREE.Bone) || this.upperBones().has(parent.name)) return false;
+    const now = ride ? this.swingPelvisAt(ride, parent.name, swingQ) : 0;
+    const fading = this.swingFading;
+    const was = fading && fading !== ride ? this.swingPelvisAt(fading, parent.name, swingWasQ) : 0;
+    const total = now + was;
+    if (!(total > 0)) return false;
+    if (now <= 0) swingQ.copy(swingWasQ);
+    else if (was > 0) swingQ.copy(swingWasQ.slerp(swingQ, now / total));
+    out.copy(parent.quaternion).invert().multiply(swingQ);
+    if (total < 1) out.slerpQuaternions(IDENTITY_Q, steadyFullQ.copy(out), total);
+    return true;
+  }
+
   /**
    * With a pose riding the upper body over locomotion legs, the pelvis's rock from the run would carry
    * the torso with it: the turn that takes the pelvis back to its rest, to go on the lowest spine bone
@@ -1435,7 +1515,9 @@ export class CharacterRig {
       // The lowest spine bone also takes the turn that holds the torso steady over running legs.
       if (!(bone.parent instanceof THREE.Bone && /spine|torso|chest/i.test(bone.parent.name))) {
         this.steadyTurn(bone, steadyQ);
-        if (!steadyQ.equals(IDENTITY_Q)) bone.quaternion.premultiply(steadyQ);
+        // A Jedi Academy swing on the upper body alone stands on its own pelvis (wave 2b), in place of the steady hold.
+        if (this.swingTurn(bone, swingTurnQ)) bone.quaternion.premultiply(swingTurnQ);
+        else if (!steadyQ.equals(IDENTITY_Q)) bone.quaternion.premultiply(steadyQ);
       }
       if (each !== 0 || eachPitch !== 0) {
         // A turn about the character's up axis, expressed in the bone's parent frame.

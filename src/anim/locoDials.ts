@@ -40,6 +40,8 @@ const onOff = (v: unknown) => (v ? 'on' : 'off');
 const isOn = (s: string) => s === 'on';
 const kmh = (v: number) => `${(v * 3.6).toFixed(1)} km/h`;
 const speed = (path: string, label: string, note: string) => dial(`speed.${path}`, label, 0.05, 'm/s', note, kmh);
+/** A speed by its whole path (wave 2b's groups are not under `speed`). */
+const speedDial = (path: string, label: string, note: string) => dial(path, label, 0.05, 'm/s', note, kmh);
 
 const LOCO_GROUPS: DialGroup[] = [
   {
@@ -145,6 +147,60 @@ const LOCO_GROUPS: DialGroup[] = [
       dial('fight.walkUnder', 'Block or swing: saber walk under', 0.05, 'x', 'Under a block or a swing the legs are the saber\'s own walk below this share of the speed at which its walk played fast and its run played slow are equally far from their own rates, and its run from there up. Nought: the run at every class above the walk.'),
       dial('peer.settle', 'Others change class after', 0.05, 's', 'How long another player\'s speed must have said a new class before their figure changes clip.'),
       dial('peer.hold', 'Others keep their way within', 1, 'deg', 'How far past halfway to another clip\'s way another player\'s travel must lie before their legs change way: a slope or a wall turns a body\'s travel a few degrees from its heading.'),
+    ],
+  },
+  {
+    title: 'Crouched',
+    note: 'Crouched (Ctrl held): Alt held the slowest (the sneak walk), nothing held the middle (the crouched walk), Shift held the quickest (the game\'s own crouched walk); no sprint. Every way but back plays the class\'s forward clip with the body turned toward the travel (45 degrees on a diagonal, 90 sideways); backing up is Jedi Academy\'s crouched walk back, the body facing the view. Each clip plays at the rate that keeps its feet down, inside the band under Shift and the feet.',
+    dials: [
+      choice('crouchRule', 'Crouched', LOCO_CHOICES.crouchRule, 'classes: the three crouched speeds and their clips. before: one clip, the game\'s own crouched walk at its own pace (halved with Alt), the body turned the way it goes, as before this choice.', (v) => String(v), (s) => s),
+      speedDial('crouch.forward.slow', 'Crouched, Alt held (sneak walk)', 'Started at what Alt crouched moved at before (half the game\'s crouched walk). The sneak walk\'s own feet are made for about 2.6 m/s, so here it plays at the band\'s bottom and its feet slide.'),
+      speedDial('crouch.forward.normal', 'Crouched, nothing held (crouched walk)', 'Started at what crouching moved at before (the game\'s crouched walk\'s written 1.63).'),
+      speedDial('crouch.forward.fast', 'Crouched, Shift held (the game\'s crouch)', 'Started at the quickest round speed the game\'s own crouched walk keeps its feet at inside the band (1.6 times its measured 1.49).'),
+      speedDial('crouch.back.slow', 'Crouched back, Alt held', 'Backing up crouched (Jedi Academy\'s walk back): three quarters of the forward speed, as the standing back jog is of the forward jog.'),
+      speedDial('crouch.back.normal', 'Crouched back, nothing held', 'Three quarters of the forward speed.'),
+      speedDial('crouch.back.fast', 'Crouched back, Shift held', 'Three quarters of the forward speed.'),
+      dial('crouch.stamina.slow', 'Stamina crouched, Alt held', 1, '/s', 'Points a second the pool regains: the walk\'s rate.'),
+      dial('crouch.stamina.normal', 'Stamina crouched, nothing held', 1, '/s', 'The walk\'s rate.'),
+      dial('crouch.stamina.fast', 'Stamina crouched, Shift held', 1, '/s', 'The jog\'s rate.'),
+      dial('made.crouched', 'The game\'s crouched walk: its feet go', 0.01, 'm/s', 'The speed the game\'s own crouched walk\'s feet were made for (on a figure of scale 1): what its rate is worked out against. Measured 1.486 by the importer\'s own rule on the human male; the converter wrote 1.628.'),
+      dial('made.crouchBack', 'Crouched walk back: its feet go', 0.01, 'm/s', 'The same for Jedi Academy\'s crouched walk back: 1.39, its planted frames\' median (its feet settle too briefly for the importer\'s rule).'),
+    ],
+  },
+  {
+    title: 'Prone',
+    note: 'Prone (Z): Alt held the game\'s own crawl, nothing held the low crawl, Shift held the running crawl; no sprint. No crawl has a strafe, so the body turns the way it crawls. With a gun in hand the gun\'s own prone crawl plays at every speed.',
+    dials: [
+      choice('proneRule', 'Prone', LOCO_CHOICES.proneRule, 'classes: the three prone speeds and their crawls. before: the game\'s crawl at its own pace, as before this choice.', (v) => String(v), (s) => s),
+      choice('proneBack', 'Backing up prone', LOCO_CHOICES.proneBack, 'today: the body turns round and crawls the way it goes. reverse: the body keeps facing the view and the class\'s crawl plays backwards (the brief\'s experiment).', (v) => String(v), (s) => s),
+      speedDial('prone.forward.slow', 'Prone, Alt held (the game\'s crawl)', 'Started at the game\'s crawl\'s own pace, as prone moved before.'),
+      speedDial('prone.forward.normal', 'Prone, nothing held (low crawl)', 'Started as fast as the low crawl\'s feet keep up inside the band\'s top (0.61 times 1.6).'),
+      speedDial('prone.forward.fast', 'Prone, Shift held (running crawl)', 'Started at the running crawl\'s own speed on the human male: its feet locked.'),
+      dial('prone.stamina.slow', 'Stamina prone, Alt held', 1, '/s', 'The walk\'s rate.'),
+      dial('prone.stamina.normal', 'Stamina prone, nothing held', 1, '/s', 'The walk\'s rate.'),
+      dial('prone.stamina.fast', 'Stamina prone, Shift held', 1, '/s', 'The jog\'s rate.'),
+    ],
+  },
+  {
+    title: 'The walk: gait and hurt',
+    note: 'A character\'s gait (the Walk row on the appearance page, or loco({ gait })) chooses the walk\'s clips; only the walk changes. Hurt under the share below, the walk forward and to the sides is the injured walk.',
+    dials: [
+      dial('made.gameWalk', 'The game\'s walk: its feet go', 0.01, 'm/s', 'The speed the game\'s own walk\'s feet were made for (the gait \'game\'), on a figure of scale 1: measured 1.436 by the importer\'s rule; the converter wrote 1.549.'),
+      choice('injured.rule', 'Walking hurt', LOCO_CHOICES['injured.rule'], 'walk: under the share below, the walk forward and to the sides is the injured walk (the jog and up as ever). off: as before.', (v) => String(v), (s) => s),
+      dial('injured.below', 'Hurt under', 0.01, '', 'The share of the health pool under which the walk is the injured walk.', (v) => `${Math.round(v * 100)}%`),
+      speedDial('injured.speed', 'The injured walk', 'Started at the injured walk\'s own measured speed: its feet locked.'),
+      dial('made.injuredWalk', 'The injured walk: its feet go', 0.01, 'm/s', 'The speed the injured walk\'s feet were made for on a figure of scale 1: its index speed (0.573) fitted to the human male\'s legs (0.564), since the importer marked no foot landing in it.'),
+    ],
+  },
+  {
+    title: 'The slope',
+    note: 'A face steeper than the climb limit is never ground, on the terrain and on every model alike: the body cannot stand, walk or rest on it, and slides down it. The grappling rope, the water, a ride, a flight and noclip are as ever.',
+    dials: [
+      choice('slopeRule', 'Faces too steep to stand on', LOCO_CHOICES.slopeRule, 'limit: past the climb limit the body slides off, landing on one slides, and the fall it slides into is paid for its speed into the ground. before: the controller called any face that points up at all ground, so the body stood on a face of any steepness.', (v) => String(v), (s) => s),
+      dial('slope.climb', 'Climb limit', 1, '°', 'Steeper than this is never ground, and is not walked up: 55, the controller\'s own climb angle since the game had one.'),
+      dial('slope.slide', 'Slides with this much gravity', 0.01, '', 'The share of the world\'s gravity along the face a body slides with: 1, Jedi Academy\'s own rule (a face too steep to walk on is air there, and gravity slides the body down it with no friction); less is a rougher face.', (v) => `${Math.round(v * 100)}%`),
+      choice('slopeJump', 'Jumping off a steep face', LOCO_CHOICES.slopeJump, 'refused: no plain jump off a face too steep to stand on (jumping up such a face was how a body climbed it, the fault being mended). allowed: the plain jump off it, as from the ground. A Jedi\'s own moves off a wall in the air are the air\'s.', (v) => String(v), (s) => s),
+      dial('slope.fade', 'Falling loop comes in over', 0.01, 's', 'How fast the falling loop takes the body as a slide begins: 0.18, the rig\'s own fade for any change of clip.'),
     ],
   },
 ];

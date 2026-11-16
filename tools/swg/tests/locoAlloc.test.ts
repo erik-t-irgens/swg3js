@@ -42,6 +42,10 @@ interface Answer {
   airScavenges: number;
   airFloats: number;
   airSunk: number;
+  posture: number;
+  postureScavenges: number;
+  postureLegs: number;
+  posturePeerPicks: number;
 }
 const run = () =>
   new Promise<Answer>((resolve, reject) => {
@@ -73,5 +77,6 @@ for (let i = 0; i < all.length; i++) {
   ok(a.peerCount === 12 && a.peerPicks > a.frames * 6 && a.peerScavenges === 0 && a.peers < 0.05 * a.frames, `process ${i + 1} of 12: the legs of ${a.peerCount} other players worked out each frame (${a.peerPicks} answers) make ${Math.max(0, a.peers)} bytes (${per(a.peers, a.frames)} a frame)`);
   ok(a.polishLegs > a.frames && a.busyCarries > a.frames && a.polishScavenges === 0 && a.polish < 0.05 * a.frames, `process ${i + 1} of 12: the polish's paces (walking sideways under each of its three choices, the dial moved every 512 frames; a gun in hand and none up at every pace, every kind's carry asked, ${a.busyCarries} frames; each pace's share of the locked rate a fraction) make ${Math.max(0, a.polish)} bytes (${per(a.polish, a.frames)} a frame)`);
   ok(a.airFloats > a.frames / 4 && a.airSunk > a.frames / 4 && a.airScavenges === 0 && a.air < 0.05 * a.frames, `process ${i + 1} of 12: the owner's air (a plain jump floating until it falls past its speed, the rope's float) and the treading sink, surfaced and diving, make ${Math.max(0, a.air)} bytes (${per(a.air, a.frames)} a frame; ${a.airFloats} frames floating, ${a.airSunk} sunk)`);
+  ok(a.postureLegs > a.frames && a.posturePeerPicks > a.frames * 3 && a.postureScavenges === 0 && a.posture < 0.05 * a.frames, `process ${i + 1} of 12: wave 2b's (crouched and prone at every class and way, the crawl backing up under each choice, every gait in turn, walking hurt; six others crouched, prone, in a gait and hurt: ${a.posturePeerPicks} answers) make ${Math.max(0, a.posture)} bytes (${per(a.posture, a.frames)} a frame)`);
 }
 console.log(`\nlocoAlloc: ${checks} checks passed`);

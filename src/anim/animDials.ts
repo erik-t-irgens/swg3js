@@ -65,6 +65,7 @@ const ANIM_GROUPS: DialGroup[] = [
       dial('swim', 'sink', 'Treading figure drawn lower by', 0.01, 'm', 'How far the treading figure is drawn under where its body floats, on a figure of a human\'s size (scaled by the figure\'s own). At 0.3 the waterline is at a human\'s collarbones. Only at the surface; never in first person.'),
       dial('swim', 'ease', 'Sinks and rises over', 0.01, 's', 'How fast the treading figure goes down as the body stops and comes back up as it swims off (a time constant).'),
       choice('jkaSpine', 'Jedi Academy\'s lower back', 'mended: the saber moves\' spine laid on the game\'s own standing pose rather than the skeleton\'s bind pose, whose lower back is bent back against it. before: as converted.'),
+      choice('swingPelvis', 'A swing on the move stands on', 'mended: a saber swing riding the upper body over moving legs keeps its own hips\' tilt, so it goes where it goes standing. before: on the legs\' hips, so over the back-pedal or a walk a medium or strong swing leaned back and passed over people.'),
     ],
   },
   {

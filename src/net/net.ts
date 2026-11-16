@@ -33,6 +33,12 @@ export interface Hello {
    * anybody in no mood, so a peer without one is simply a peer with none.
    */
   mood?: string;
+  /**
+   * How they walk (`GAITS` in src/anim/locoTable.ts): the walk class's clips in their gait. Left out for the standard, by
+   * a browser built before, and by a relay that does not pass it (one started before the animations' second wave), all
+   * of which every build reads as the standard walk.
+   */
+  gait?: string;
 }
 
 /** The vehicle a peer is on: which (a garage id), where it is and how it is turned, and how the peer is in it. */

@@ -54,6 +54,112 @@ export interface LocoTune {
    */
   gunCarry: { pistol: GunCarry; carbine: GunCarry; rifle: GunCarry; heavy: GunCarry };
   /**
+   * Crouched (Ctrl held), the speed classes too (wave 2b, the owner's brief's "Crouching"): Alt held the slowest
+   * (Sneak Walk (1)), nothing held the middle (Crouched Walking), Shift held the quickest (the game's own crouched walk,
+   * `loop_crouched:speed1`); no sprint. Every way but backward plays the class's forward clip with the body turned toward
+   * the travel (45 degrees on a diagonal, 90 sideways) and the head on the view; backward at every class is Jedi Academy's
+   * `BOTH_CROUCH1WALKBACK` with the body facing the view. 'before' is the crouch of 7424bad: one clip, the game's own
+   * crouched walk at its own pace (halved with Alt), the body turned the way it goes.
+   */
+  crouchRule: 'classes' | 'before';
+  /**
+   * Prone (Z), the speed classes too: Alt held the game's own crawl (today's), nothing held the low crawl (`low_crawl`),
+   * Shift held the running crawl (`running_crawl`); no sprint, and no strafing clips, so the body turns the way it crawls
+   * at every class (the owner's words). 'before' is 7424bad's prone: the game's crawl at its own pace.
+   */
+  proneRule: 'classes' | 'before';
+  /**
+   * Prone and backing up: 'today' turns the body round to crawl the way it goes, as 7424bad did; 'reverse' (the owner's
+   * brief's experiment) keeps the body facing the view and plays the class's forward crawl backwards.
+   */
+  proneBack: 'today' | 'reverse';
+  /**
+   * The slope limit (wave 2b, the owner's brief's line 11 and his note of 2026-11-15, `src/player/slopeRule.ts`):
+   * 'limit', a face steeper than `slope.climb` is never ground, on terrain and on every model's collider alike, and the
+   * body slides down it under gravity. 'before' is 7424bad's: the controller called any face whose normal points up at
+   * all ground, so the body stood on a face of any steepness and could jump on up it. Not while the grappling rope is
+   * attached or in its fast flight after a let-go (the rope holds the body against a cliff as it always did), nor in the
+   * water, riding, flying or in noclip, which never reach the feet's move.
+   */
+  slopeRule: 'limit' | 'before';
+  /**
+   * Jumping off a face too steep to stand on: 'refused', the start (the owner's "I can jump up it and land anywhere",
+   * which is the fault being mended: a jump from a steep face was how a body went up it); 'allowed' gives the plain
+   * jump off it as from the ground, straight up and kept along the face. Jedi Academy's own moves off a wall in the air
+   * (a Jedi's rebound, wall run and flip) are the air's and are not this switch's.
+   */
+  slopeJump: 'refused' | 'allowed';
+  slope: {
+    /**
+     * The climb limit, degrees: a face steeper than this is never ground, and the controller will not walk up it.
+     * 55, the controller's own climb angle since the game had one (`Player.makeBody`).
+     */
+    climb: number;
+    /**
+     * The share of the world's gravity along the face a body slides with: 1, Jedi Academy's own rule (a plane too steep
+     * to walk on is air there, and gravity clipped along it slides the body with no friction, PM_SlideMove); less is a
+     * rougher face.
+     */
+    slide: number;
+    /** Seconds the falling loop takes to come in as a slide begins: 0.18, the rig's own fade for any change of clip. */
+    fade: number;
+  };
+  /**
+   * Walking hurt (Walking (1), `walking_1`): on its feet, standing, with health under `below` of its pool, the walk class
+   * plays the injured walk at `injured.speed` (forward, the forward diagonals and sideways, the body turned toward the
+   * travel; backing up keeps its own walk). The jog, the run and the sprint are as ever: no speed cap, which would be a
+   * rule of play and not of animation. `rule` 'off' is 7424bad's.
+   */
+  injured: {
+    rule: 'walk' | 'off';
+    /** The share of the health pool under which the walk is the injured walk: a quarter, the brief's "below a certain health threshold" made a number. */
+    below: number;
+    /**
+     * What the injured walk moves the body at, m/s (the brief's `speed.injured`, kept in this group so the standing
+     * speed table stays the owner's pinned paces): 0.57, the clip's own measured speed (0.573 by the importer; 0.564
+     * fitted on the human male), so its feet are locked.
+     */
+    speed: number;
+  };
+  /**
+   * Crouched speeds, metres a second, by class (`slow` Alt held, `normal` nothing held, `fast` Shift held), forward and
+   * to the sides (the forward clip turned), and backing up. Started so ground speed rises with class: `normal` at 1.63,
+   * what the body moved crouched at 7424bad on every converted species (the game's crouched walk's written speed,
+   * 1.628); `slow` at 0.81, what Alt crouched moved at then (half of it, the game's own walk rule); `fast` at 2.2, the
+   * quickest round speed the game's own clip can keep its feet at inside the playback band (1.6 times its measured 1.49
+   * is 2.38). Backing up at three quarters of each, as the owner's standing back jog is of his forward jog (3 of 4).
+   */
+  crouch: {
+    forward: { slow: number; normal: number; fast: number };
+    back: { slow: number; normal: number; fast: number };
+    /** Points a second the pool regains crouched by class: the two slower at the walk's rate (10), the quickest at the jog's (4), the brief's own split. */
+    stamina: { slow: number; normal: number; fast: number };
+  };
+  /**
+   * Prone speeds, metres a second, by class (`slow` Alt held, `normal` nothing held, `fast` Shift held; backing up the
+   * same, whichever way `proneBack` turns the body): `slow` at 0.66, today's prone crawl (the game's crawl's own written
+   * speed, 0.662); `normal` at 0.95, as fast as the low crawl's own feet can keep up inside the playback band's top
+   * (0.61 times 1.6 is 0.98) and so quicker than today's; `fast` at 2.15, the running crawl's own speed on the human
+   * male (2.187 by the importer, its fitted stride 2.15): feet locked.
+   */
+  prone: {
+    forward: { slow: number; normal: number; fast: number };
+    /** As crouched: the two slower at the walk's rate, the quickest at the jog's. */
+    stamina: { slow: number; normal: number; fast: number };
+  };
+  /**
+   * The speed the game's own clips' feet were made for on a figure of scale 1, metres a second, where the converter's
+   * written number is not the stride: what each is played against for its rate (times the figure's own scale).
+   * `crouched` (`loop_crouched:speed1`): 1.49, the importer's own measure (its stances' settled middles) on the human
+   * male's converted rig, where the converter wrote 1.628. `crouchBack` (`BOTH_CROUCH1WALKBACK`): 1.39, the median of
+   * its planted frames' foot speed (1.386; the converter wrote 1.373), since its feet settle for one span a stride and the
+   * settled measure reads 3.71, which is no crouched walk's. `gameWalk` (the game's own walk, the `'game'` gait): 1.44,
+   * the importer's measure (1.436), where the converter wrote 1.549. `injuredWalk` (the imported injured walk,
+   * `walking_1`): 0.564, its index speed (0.573) fitted to the human male's legs (times 0.984), since the importer
+   * marked no foot landing in it and the pack gives it no stride of its own to be played against.
+   */
+  made: { crouched: number; crouchBack: number; gameWalk: number; injuredWalk: number };
+  /**
    * What each class moves the body at, metres a second, by the way it goes. Every start is the owner's own, pinned on
    * 2026-11-15 after he tried the paces ("the speed for sprint fast"), but the backward walks (1.28, the walking
    * backwards clip's own as the paces were made), which he did not name. The clips' playback rates follow the speeds so
@@ -207,6 +313,23 @@ export const LOCO_TUNE: LocoTune = {
   sprintFight: 'ends',
   sideWalkClip: 'diagonal',
   gunCarry: { pistol: 'full', carbine: 'original', rifle: 'original', heavy: 'original' },
+  crouchRule: 'classes',
+  proneRule: 'classes',
+  proneBack: 'today',
+  slopeRule: 'limit',
+  slopeJump: 'refused',
+  slope: { climb: 55, slide: 1, fade: 0.18 },
+  injured:{ rule: 'walk', below: 0.25, speed: 0.57 },
+  crouch: {
+    forward: { slow: 0.81, normal: 1.63, fast: 2.2 },
+    back: { slow: 0.61, normal: 1.22, fast: 1.65 },
+    stamina: { slow: 10, normal: 10, fast: 4 },
+  },
+  prone: {
+    forward: { slow: 0.66, normal: 0.95, fast: 2.15 },
+    stamina: { slow: 10, normal: 10, fast: 4 },
+  },
+  made: { crouched: 1.49, crouchBack: 1.39, gameWalk: 1.44, injuredWalk: 0.564 },
   speed: {
     forward: { walk: 1.66, jog: 4, tired: 3.5, run: 6, sprint: 7 },
     back: { walk: 1.28, jog: 3, run: 4 },
@@ -245,6 +368,30 @@ export const LOCO_RANGES: Record<string, { min: number; max: number }> = {
   'speed.backDiag.walk': { min: 0.3, max: 4 },
   'speed.backDiag.jog': { min: 0.5, max: 6 },
   'speed.backDiag.run': { min: 1, max: 10 },
+  'slope.climb': { min: 20, max: 85 },
+  'slope.slide': { min: 0.05, max: 1 },
+  'slope.fade': { min: 0, max: 1 },
+  'injured.speed': { min: 0.2, max: 3 },
+  'injured.below': { min: 0, max: 1 },
+  'crouch.forward.slow': { min: 0.2, max: 4 },
+  'crouch.forward.normal': { min: 0.2, max: 5 },
+  'crouch.forward.fast': { min: 0.3, max: 6 },
+  'crouch.back.slow': { min: 0.2, max: 4 },
+  'crouch.back.normal': { min: 0.2, max: 5 },
+  'crouch.back.fast': { min: 0.3, max: 6 },
+  'crouch.stamina.slow': { min: -30, max: 60 },
+  'crouch.stamina.normal': { min: -30, max: 60 },
+  'crouch.stamina.fast': { min: -30, max: 60 },
+  'prone.forward.slow': { min: 0.1, max: 3 },
+  'prone.forward.normal': { min: 0.1, max: 4 },
+  'prone.forward.fast': { min: 0.2, max: 5 },
+  'prone.stamina.slow': { min: -30, max: 60 },
+  'prone.stamina.normal': { min: -30, max: 60 },
+  'prone.stamina.fast': { min: -30, max: 60 },
+  'made.crouched': { min: 0.3, max: 4 },
+  'made.crouchBack': { min: 0.3, max: 4 },
+  'made.gameWalk': { min: 0.3, max: 4 },
+  'made.injuredWalk': { min: 0.2, max: 3 },
   'rate.min': { min: 0.2, max: 1 },
   'rate.max': { min: 1, max: 3 },
   'rate.feet': { min: 0.8, max: 1.25 },
@@ -282,6 +429,12 @@ const CARRIES: readonly GunCarry[] = ['full', 'original', 'split'];
 export const LOCO_CHOICES: Readonly<Record<string, readonly string[]>> = {
   sprintFight: ['ends', 'muted'],
   sideWalkClip: ['diagonal', 'forward', 'strafe'],
+  crouchRule: ['classes', 'before'],
+  proneRule: ['classes', 'before'],
+  proneBack: ['today', 'reverse'],
+  slopeRule: ['limit', 'before'],
+  slopeJump: ['refused', 'allowed'],
+  'injured.rule': ['walk', 'off'],
   'gunCarry.pistol': CARRIES,
   'gunCarry.carbine': CARRIES,
   'gunCarry.rifle': CARRIES,

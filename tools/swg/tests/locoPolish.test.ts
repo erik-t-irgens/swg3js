@@ -124,7 +124,7 @@ class Body {
   strafeOnly.sideWalkClip = 'forward';
   ok(peerPick(strafeOnly, 'walk', 90, 0.6)?.id !== 'walk_strafe_left' && peerPick({ ...strafeOnly, sideWalkClip: 'strafe' }, 'walk', 90, 0.6)?.id === 'walk_strafe_left', 'and a cell of another choice is stepped over: under \'forward\' a slow walk to the left is never drawn as the slow strafe');
   // A mutation: the plan handed no choice plays the slow strafe whatever the dial says.
-  const [mut] = await loadMutant(['src/anim/bodyLoco.ts'], ['src/anim/bodyLoco.ts'], [{ file: 'src/anim/bodyLoco.ts', from: "GUN_UP : PLAIN, 'standard', sideMode(tune));", to: 'GUN_UP : PLAIN);' }]);
+  const [mut] = await loadMutant(['src/anim/bodyLoco.ts'], ['src/anim/bodyLoco.ts'], [{ file: 'src/anim/bodyLoco.ts', from: "this.gaitOn ? GAITS[this.gait] : 'standard', sideMode(tune));", to: "this.gaitOn ? GAITS[this.gait] : 'standard');" }]);
   const mb = new Body(T(), (mut as { BodyLoco: new (t: never) => Loco }).BodyLoco, (mut as { newLocoIn: () => LocoIn }).newLocoIn);
   mb.run(0.5, { a: true, walk: true }, 60);
   ok(mb.loco.pick!.id === 'walk_strafe_left', 'a mutation that hands the plan no choice walks the slow strafe under \'diagonal\': the check above fails on it');

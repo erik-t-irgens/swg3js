@@ -135,6 +135,7 @@ import { IMPACT_MUTES } from './anim/animRules.ts';
 import { animDialsFor } from './anim/animDials.ts';
 import { locoDialsFor } from './anim/locoDials.ts';
 import { LOCO_SWITCH, LOCO_TUNE, locoSwitchOn, tuneLoco } from './anim/locoTune.ts';
+import { GAITS, PLAIN, gaitOf, locoPick, type LocoGait } from './anim/locoTable.ts';
 import { clipName } from './anim/mxaFile.ts';
 import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
@@ -568,6 +569,10 @@ interface LocoDebugOptions {
   tune?: unknown;
   /** Put the stamina at a number of points (the console's, for seeing the tired jog without a long sprint). */
   stamina?: number;
+  /** The character's gait (`GAITS`: 'standard', 'masculine', 'feminine', 'heavy', 'game'): worn now, saved on the record and sent in the hello. */
+  gait?: string;
+  /** Put the player's health at this share of its pool (0 to 1): the console's way to see the injured walk. */
+  health?: number;
 }
 
 /** What `__debug.anim` takes beside a clip's name. */
@@ -3225,6 +3230,18 @@ class App {
     this.appearanceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
     // A hairstyle goes on the way every worn piece does: loaded hidden, coloured, compiled, then shown.
     this.appearanceUi.onHair = (id) => this.wearHairPrepared(id);
+    // The Walk row (wave 2b): the gait in force, a pick worn and kept (`setGait`), and the gait's forward walk on the
+    // figure's own rig for the doll to play in place (the game's own walk for 'game', the standard's where the rig has
+    // not got a gait's clip).
+    this.appearanceUi.gait = {
+      now: () => this.gaitNow(),
+      set: (g) => this.setGait(gaitOf(g)),
+      walkClip: (g) => {
+        const rig = this.player.rig;
+        const pick = locoPick(0, 1, false, PLAIN, gaitOf(g));
+        return (rig && pick && rig.clipObject(pick.clip)) || (rig ? rig.clipObject(locoPick(0, 1)!.clip) : null);
+      },
+    };
     // A garment's colour is the worn copy's own, saved on the thing and told to the server: the part it
     // is worn under is read back as the item, and the copy worn is the one coloured. In the creator there
     // is no record yet, and the colour stays on the meshes until the character is made.
@@ -15798,7 +15815,7 @@ class App {
     const rig = this.player.rig?.character;
     const keep = rig ? lookKeep(rig.wornMeshes()) : undefined;
     const drawn = c && rig ? { ...c.appearance, values: rig.variableValues() } : c?.appearance;
-    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c && drawn ? packLook(drawn, c.outfit ?? [], keep) : undefined, held, ship, saber: this.player.bladeColor, mood: c?.mood || undefined };
+    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c && drawn ? packLook(drawn, c.outfit ?? [], keep) : undefined, held, ship, saber: this.player.bladeColor, mood: c?.mood || undefined, gait: c?.gait && c.gait !== 'standard' ? c.gait : undefined };
     // Who the session is about: every connection and every change of world goes through here, so this is
     // where the session learns which character is in play, where it is and what its record holds now.
     this.net.session.noteCharacter(this.marked(c), { species: hello.species, class: hello.class, planet: hello.planet, zone: hello.zone });
@@ -18054,6 +18071,9 @@ class App {
     this.select.hide();
     this.creating = true;
     this.current = null;
+    // A new character walks the standard gait until one is chosen on the appearance page (wave 2b).
+    this.creatorGait = 'standard';
+    this.player.loco.setGait('standard');
     // Nobody's progress is held while a character is made: the new one's is read when it is played.
     this.progress.use(null);
     // Nobody's hairstyle still loading lands on the new character, whose rig may be the same one.
@@ -18199,6 +18219,8 @@ class App {
       inv: 1,
       named: 1,
       tints: 1,
+      // The gait chosen on the appearance page (wave 2b); none for the standard.
+      ...(this.creatorGait !== 'standard' ? { gait: this.creatorGait } : {}),
     };
     if (!upsertCharacter(record)) {
       this.creatorBar.note('No room for another character: delete one first.');
@@ -18257,6 +18279,8 @@ class App {
     // has one, and the name goes out in the hello either way. A record from before the moods has none,
     // which takes nothing off nothing.
     this.player.rig?.setMood(c.mood ?? null);
+    // How the character walks (wave 2b): the walk class's clips in its gait; a record from before walks the standard.
+    this.player.loco.setGait(c.gait);
     // The weapons in hand at logout, back in the same hands, blade unlit; behind the loading screen,
     // where arriving compiles the whole scene, the held models included.
     await this.equipment.restoreHeld();
@@ -28487,6 +28511,33 @@ class App {
     if (mutes) this.input.mute(mutes as readonly Action[]);
   }
 
+  /** The gait chosen in the creator, for the record it makes (`finishCreation`); 'standard' at every new body. */
+  private creatorGait: LocoGait = 'standard';
+
+  /**
+   * The character's gait (wave 2b): the body walks in it from the next frame; in play it is written on the record (none
+   * for the standard, so a record from before is as it was) and goes out in the next hello; in the creator it waits for
+   * the record the creator makes.
+   */
+  private setGait(gait: LocoGait): void {
+    this.player.loco.setGait(gait);
+    if (this.creating) {
+      this.creatorGait = gait;
+      return;
+    }
+    const c = this.current;
+    if (!c) return;
+    if (gait === 'standard') delete c.gait;
+    else c.gait = gait;
+    upsertCharacter(c);
+    this.queueHello();
+  }
+
+  /** The gait in force: the creator's choice there, else the record's. */
+  private gaitNow(): LocoGait {
+    return this.creating ? this.creatorGait : gaitOf(this.current?.gait);
+  }
+
   /** `__debug.loco`: see its row in the README. */
   private locoDebug(o: LocoDebugOptions): unknown {
     const words: string[] = [];
@@ -28498,6 +28549,12 @@ class App {
       p.loco.stamina.value = Math.min(pool, Math.max(0, o.stamina));
       if (p.loco.stamina.value <= 0) p.loco.stamina.tired = true;
     }
+    // The gait (wave 2b): worn now, written on the record and sent, as a pick on the appearance page does.
+    if (o.gait !== undefined) {
+      if (typeof o.gait !== 'string' || !(GAITS as readonly string[]).includes(o.gait)) words.push(`gait takes ${GAITS.map((g) => `'${g}'`).join(', ')}`);
+      else this.setGait(o.gait as LocoGait);
+    }
+    if (typeof o.health === 'number' && Number.isFinite(o.health)) p.hp = Math.max(1, Math.min(p.maxHp, Math.round(o.health * p.maxHp)));
     const rig = p.rig;
     const n2 = (v: number) => Number(v.toFixed(2));
     return {
@@ -28509,6 +28566,9 @@ class App {
       headingDeg: n2((p.heading * 180) / Math.PI),
       viewDeg: n2((wrapAngle(this.cam.yaw + Math.PI) * 180) / Math.PI),
       rig: rig ? { ...rig.describe(), stride: rig.strideNow(), ankles: rig.anklesNow() } : 'no rig',
+      // The slope limit (wave 2b): the rule, and the feet's last verdict (sliding down a face too steep to stand on, the
+      // faces met, the floor ray's face's upward share, and how many of the controller's "grounded" the rule overturned).
+      slope: { rule: LOCO_TUNE.slopeRule, jump: LOCO_TUNE.slopeJump, ...LOCO_TUNE.slope, sliding: p.slope.sliding, faces: p.slope.count, floorUp: Number.isNaN(p.slope.rayNy) ? null : n2(p.slope.rayNy), overturned: p.slope.overturned, casts: p.slope.casts, kept: p.slope.kept, edges: p.slope.edges },
       // The other players here: what each one's game sent and the clip their legs play on this screen.
       peers: this.remotes.legs(),
       tune: JSON.parse(JSON.stringify(LOCO_TUNE)) as unknown,
@@ -28557,6 +28617,8 @@ class App {
       air: { rule: ANIM_TUNE.airRule, jumpFloat: this.player.jumpFloat, rope: this.player.grapple.attached },
       swim: { rule: ANIM_TUNE.swim.rule, sinkNow: Number(this.player.swimSink.now.toFixed(3)), share: Number(this.player.swimSink.share.toFixed(3)), depth: Number(this.player.waterDepthNow.toFixed(3)), rootY: rig ? Number(rig.root.position.y.toFixed(3)) : null },
       jkaSpine: { rule: ANIM_TUNE.jkaSpine, clipsRebased: rebasedCount() },
+      // Wave 2b: a Jedi Academy swing on the upper body alone (on the move) stands on its own pelvis ('mended') or the legs' ('before').
+      swingPelvis: ANIM_TUNE.swingPelvis,
       player: rig ? { has: rig.clipNames.filter((n) => n.startsWith('mx_')), ...rig.describe(), impactLocked: this.player.impactLocked, pose: rig.poseAgainstRest() } : 'no rig',
     };
   }

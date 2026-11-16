@@ -73,6 +73,12 @@ export class BodyAnim {
   vy = 0.5;
   /** How far down what is under the feet lies as they leave the ground with no jump, metres, or -1 for nothing within the hop's drop: written before `leftGround`. */
   dropBelow = 0.5;
+  /**
+   * Sliding down a face too steep to stand on (wave 2b's slope limit, `src/player/slopeRule.ts`): written by the caller
+   * each frame after the move. The feet left the ground for a slide and not off a ledge (no hop), and its air is the
+   * falling loop whatever the jump or the Force move before it. Never true under the slope's 'before'.
+   */
+  slide = false;
 
   constructor(tune: AnimTune, unit: number) {
     this.tune = tune;
@@ -202,7 +208,7 @@ export class BodyAnim {
   leftGround(rig: AnimRig | null, jka: boolean): boolean {
     this.rig = rig;
     this.jumped = false;
-    if (this.tune.airRule !== 'owner' || !rig) return false;
+    if (this.tune.airRule !== 'owner' || !rig || this.slide) return false;
     const d = this.dropBelow;
     const hop = ledgeHop(this.has, d < 0 || d >= this.tune.fall.hopDrop, jka, this.tune);
     if (!hop) return false;
@@ -219,6 +225,11 @@ export class BodyAnim {
    */
   air(rig: AnimRig | null, jka: boolean): string | null {
     this.rig = rig;
+    // A slide's air is the falling loop: the float of a jump and a Force move's are over once the body slides.
+    if (this.slide) {
+      this.jumped = false;
+      this.force = false;
+    }
     if (this.tune.airRule !== 'owner') return airLoop(this.has, this.thrown, this.force, jka);
     if (this.jumped && this.vy < -this.tune.fall.floatUntil) this.jumped = false;
     const a = this.ask;

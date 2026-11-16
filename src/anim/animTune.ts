@@ -109,6 +109,16 @@ export interface AnimTune {
    * where the clip has them in the world. 'before': the clips as converted (62143fe).
    */
   jkaSpine: 'mended' | 'before';
+  /**
+   * A Jedi Academy swing riding the upper body alone (on the move, or in the air: the legs keep what they were doing).
+   * 'mended' (wave 2b, the default): the swing's spine stands on the swing's own pelvis, as it does standing, the legs
+   * running under it (the turn from the legs' pelvis to the swing's own at that moment goes on the lowest spine bone, by
+   * the swing's weight). 'before' (7424bad): the spine stands on the legs' pelvis, so a strong or medium swing over the
+   * back-pedal or a walk stood 10 to 32 degrees further back than standing and passed up to 24 degrees higher (over
+   * people rather than through them), and a fast one over the run up to 38 degrees further forward; a change of legs
+   * in the middle of a swing (forward to back) swung the chest 20 degrees.
+   */
+  swingPelvis: 'mended' | 'before';
 }
 
 export const ANIM_TUNE: AnimTune = {
@@ -120,6 +130,7 @@ export const ANIM_TUNE: AnimTune = {
   fall: { hopDrop: 1.5, floatUntil: 10 },
   swim: { rule: 'owner', sink: 0.3, ease: 0.3 },
   jkaSpine: 'mended',
+  swingPelvis: 'mended',
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -151,6 +162,7 @@ export const ANIM_CHOICES: Readonly<Record<string, readonly string[]>> = {
   airRule: ['owner', 'before'],
   'swim.rule': ['owner', 'before'],
   jkaSpine: ['mended', 'before'],
+  swingPelvis: ['mended', 'before'],
 };
 
 /** The trims that moved, for whoever holds fitted clips (a clip's travel is stripped from its trim on): told once a `tuneAnim` call. */
@@ -183,7 +195,7 @@ export function tuneAnim(patch: unknown): string[] {
   };
   for (const [group, values] of Object.entries(patch as Record<string, unknown>)) {
     if (!Object.prototype.hasOwnProperty.call(table, group)) {
-      words.push(`no group ${group} (land, jump, impact, trim, fall, swim, airRule, jkaSpine)`);
+      words.push(`no group ${group} (land, jump, impact, trim, fall, swim, airRule, jkaSpine, swingPelvis)`);
       continue;
     }
     if (ANIM_CHOICES[group]) {

@@ -32,8 +32,10 @@ import { ANIM_TUNE } from '../anim/animTune.ts';
 import { MX } from '../anim/animRules.ts';
 import { BodyAnim } from '../anim/bodyAnim.ts';
 import { BodyLoco, CARRY_FULL, FadeOpts, LegOpts, fightKeysDown, gunClassIndex, newLocoIn } from '../anim/bodyLoco.ts';
+import { SlopeRule } from './slopeRule.ts';
 import { SwimSink } from '../anim/swimSink.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
+import { CROUCH, STAND } from '../anim/locoTable.ts';
 import { FELL_UNDER } from '../world/fellOut.ts';
 
 /**
@@ -454,7 +456,17 @@ export class Player {
   private readonly locoIn = newLocoIn();
   /** The rate and the fade the classes hand the rig with a state: one kept record; and the fade alone, for a state whose clip keeps its own rate. */
   private readonly legOpts = new LegOpts();
+  /** The crouched states were last asked for one of the classes' clips (wave 2b): what lets them go when a blaster takes the legs back. */
+  private crouchPreferred = false;
   private readonly fadeOpts = new FadeOpts();
+  /**
+   * The slope limit (wave 2b, `src/player/slopeRule.ts`): the controller's numbers before the move, its "grounded"
+   * judged after it (a face too steep to stand on is never ground), and the slide down such a face. The grapple's
+   * harness steps the very same calls in the same places.
+   */
+  readonly slope = new SlopeRule();
+  /** The fade the falling loop comes in with as a slide begins: one kept record (`LOCO_TUNE.slope.fade`). */
+  private readonly slideFade = { fade: 0.18 };
   /** The blaster's own relaxed carry (its standing loop), found once a rig and a kind of gun: what rides the upper body over the classes' legs. */
   private readonly carryFor: { rig: CharacterRig | null; gun: string; clip: string | null } = { rig: null, gun: '', clip: null };
   /**
@@ -1080,6 +1092,7 @@ export class Player {
     this.vel.set(0, 0, 0);
     this.grounded = true;
     this.anim.drop();
+    this.slope.reset();
     // Stood somewhere means stood on your feet: a body put down here is not in whatever flow it was
     // last drawn into, and `placeVisual` below would otherwise draw it a waist under the new ground.
     this.dropLavaSink();
@@ -1119,6 +1132,7 @@ export class Player {
     this.swimming = false;
     this.submerged = false;
     this.swing = -1;
+    this.slope.reset();
     this.jka.reset();
     this.anim.drop();
     // Whole means rested too: the stamina is full at a respawn and at an arrival.
@@ -2439,6 +2453,7 @@ export class Player {
       // (The speed classes are put down, as on every branch below that returns before they are planned: a sprint
       // must not outlive the feet it was run on. The pool waits for the respawn, which fills it.)
       this.loco.idle(0, this.staminaPool);
+      this.slope.reset();
       this.ragdollStep();
       return;
     }
@@ -2448,6 +2463,8 @@ export class Player {
     if (this.editorFlight) {
       if (this.grapple.out) this.grapple.letGo('editor');
       this.loco.idle(dt, this.staminaPool);
+      // And the slope's slide with them: what the feet were sliding on is not under them when they come back.
+      this.slope.reset();
       this.editorFlight.step(dt, input, this.pos);
       this.vel.set(0, 0, 0);
       this.grounded = false;
@@ -2493,6 +2510,8 @@ export class Player {
       // Seated, the speed classes are put down (`BodyLoco.idle`): nothing sprints, so the fight's keys are not left
       // muted for the ride by a sprint the body sat down out of, and the stamina regains as it does standing.
       this.loco.idle(dt, this.staminaPool);
+      // And the slope's slide with them: what the feet were sliding on is not under them when they come back.
+      this.slope.reset();
       this.rig?.stopOverride();
       this.thrown.cancel();
       this.updateBlades();
@@ -2504,6 +2523,8 @@ export class Player {
     if (this.noclip) {
       if (this.grapple.out) this.grapple.letGo('noclip');
       this.loco.idle(dt, this.staminaPool);
+      // And the slope's slide with them: what the feet were sliding on is not under them when they come back.
+      this.slope.reset();
       this.rig?.stopOverride();
       this.saber.holster();
       this.thrown.cancel();
@@ -2516,6 +2537,8 @@ export class Player {
     if (world.planet.space && !this.aboard) {
       if (this.grapple.out) this.grapple.letGo('eva');
       this.loco.idle(dt, this.staminaPool);
+      // And the slope's slide with them: what the feet were sliding on is not under them when they come back.
+      this.slope.reset();
       this.evaUpdate(dt, input, cam);
       return;
     }
@@ -2631,6 +2654,12 @@ export class Player {
     lo.sprint = this.stats.apply('move.sprint', LOCO_TUNE.speed.forward.sprint);
     lo.pool = this.staminaPool;
     lo.boost = this.speedMultiplier;
+    // Wave 2b: crouched and prone under the classes, the injured walk by the health's share, and the figure's scale a
+    // game clip's measured stride is scaled by.
+    lo.crouched = this.crouching;
+    lo.prone = this.prone;
+    lo.hpShare = this.hp / this.maxHp;
+    lo.scale = this.rig ? this.rig.root.scale.y : 1;
     const classes = this.loco.plan(lo);
     if (classes) {
       speed = this.loco.speed * this.speedMultiplier * this.lavaPaceNow;
@@ -2721,7 +2750,9 @@ export class Player {
       // The class's speed as a share of Jedi Academy's own run, so its acceleration, friction and air are unchanged; a
       // leaping saber move, and everything without a class, keeps the pace it always had, and so does a body with no
       // way asked (`loco.moves`: the scale also sets how hard the friction stops it, which is as it always was).
-      c.speedScale = this.speedMultiplier * this.lavaPaceNow * (classes && this.loco.moves && !script ? this.loco.speed / (JKA.speed * UNIT) : this.paceScale(walking, mz, mx));
+      // Crouched under the classes the movement halves the speed on the ground (Jedi Academy's duck), which the share
+      // takes back, so the class's speed is the body's.
+      c.speedScale = this.speedMultiplier * this.lavaPaceNow * (classes && this.loco.moves && !script ? this.loco.speed / (this.loco.posture === CROUCH && this.grounded ? JKA.speed * UNIT * JKA.duckScale : JKA.speed * UNIT) : this.paceScale(walking, mz, mx));
       // What progress makes of a fall and the air, each today's number until something is earned.
       const st = this.stats;
       c.fallSafeExtra = st.fallSafeExtra / UNIT;
@@ -2733,8 +2764,13 @@ export class Player {
       // are the rope's words, rewritten in the hook's own `command`, which the node harness calls too; while the
       // hook is not attached nothing here changes.
       const stepGrounded = this.grapple.command(c, this.grounded);
+      // A jump off a face too steep to stand on (wave 2b's slope limit): under `LOCO_TUNE.slopeJump` 'allowed' the plain
+      // jump, as from the ground; refused by default, when the movement (which jumps only off the ground) never sees one.
+      const slopeJumped = this.slope.jumpOff(this.vel, c.jumpPressed);
+      if (slopeJumped) this.jka.markJumpStart(this.pos.y);
       const force = this.force;
       const ev = this.jka.step(dt, this.vel, this.pos, stepGrounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
+      if (slopeJumped) ev.jumped = true;
       const rig = this.rig;
       // The imported clips' memory of the air (src/anim/bodyAnim.ts): a step in the air is a fall begun here.
       this.anim.stepped(stepGrounded);
@@ -2787,13 +2823,17 @@ export class Player {
     if (!this.swimming && this.moveProfile !== 'jka') this.vel.y -= g * dt;
     // Falling into deep water: the plunge slows quickly.
     if (depth > 0 && !this.swimming && this.vel.y < -4) this.vel.y += (-4 - this.vel.y) * (1 - Math.exp(-dt * 8));
+    // Sliding down a face too steep to stand on (wave 2b's slope limit): gravity's share along it, before the move.
+    if (this.slope.sliding) this.slope.share(this.vel, dt, this.moveProfile === 'jka' ? this.jka.gravity : g);
     // The grapple's step before the move: the dart's flight, and attached, the reel or the haul, the sway, the
     // drags, the constraint and its correction, and the fall's memory held while the rope is taut.
     if (this.grapple.out) this.grapple.beforeMove(this.gview, dt);
 
-    // The snap to the ground is off while swinging on the rope as well as rising and swimming.
-    if (this.vel.y > 0.5 || this.swimming || (this.grapple.attached && this.grapple.modes.swinging)) this.controller.disableSnapToGround();
+    // The snap to the ground is off while swinging on the rope as well as rising and swimming, and while the body slides
+    // down a face too steep to stand on (wave 2b), whose controller is told so before the move (`SlopeRule.controllerFor`).
+    if (this.vel.y > 0.5 || this.swimming || this.slope.sliding || (this.grapple.attached && this.grapple.modes.swinging)) this.controller.disableSnapToGround();
     else this.controller.enableSnapToGround(0.35);
+    this.slope.controllerFor(this.controller);
     const filter = this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
     let moveX = this.vel.x * dt;
     let moveY = this.vel.y * dt;
@@ -2827,6 +2867,21 @@ export class Player {
     this.pos.z += mv.z;
     const wasGrounded = this.grounded;
     this.grounded = this.controller.computedGrounded();
+    // The slope limit (wave 2b): the controller calls any face whose normal points up at all ground; one too steep to
+    // stand on is not, and the body slides down it (the velocity clipped onto it, gravity's share along it kept, the
+    // fall's memory held at what the speed down into the ground is worth). Not on the rope, nor in the water.
+    // (The place goes over in the rule's own record, never as numbers, which a call not built in would box every frame.)
+    const slopeAt = this.slope.at;
+    slopeAt.x = this.pos.x;
+    slopeAt.y = this.pos.y;
+    slopeAt.z = this.pos.z;
+    slopeAt.offsetY = this.colliderOffsetY;
+    slopeAt.r = CAPSULE_RADIUS;
+    slopeAt.filter = filter;
+    this.grounded = this.slope.judge(this.physics.world, this.grounded, !this.swimming && !this.grapple.attached && !this.grapple.released, this.body, this.walkPast);
+    if (this.slope.sliding) this.jka.holdApex(this.slope.slide(this.vel, this.pos.y, this.moveProfile === 'jka' ? this.jka.gravity : g));
+    // A slide is no step off a ledge (no hop) and its air is the falling loop (`BodyAnim.slide`).
+    this.anim.slide = this.slope.sliding;
     if (this.grounded && this.vel.y < 0) this.vel.y = 0;
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
     // Off the ground with no jump this frame (a jump puts the feet down as `grounded` false before the move): a step off
@@ -3148,7 +3203,8 @@ export class Player {
     // moving on its feet with Jedi Academy's animations not in charge, and the rate that keeps its feet on the ground.
     // Null leaves every state below the clip it always had. While the classes are in force a change of the legs' clip
     // fades by the tune: between two of their clips (in step), to and from standing, and into and out of Jedi Academy's legs.
-    const onFeet = moving && this.grounded && !this.mounted && !this.swimming && !this.prone && !this.kneeling && !this.crouching;
+    // Crouched or prone under the classes (wave 2b, `loco.posture`) the legs are the classes' too.
+    const onFeet = moving && this.grounded && !this.mounted && !this.swimming && !this.kneeling && (this.loco.posture !== STAND || (!this.prone && !this.crouching));
     this.locoIn.ground = speed;
     const legs = this.loco.legs(onFeet ? rig : null, this.locoIn, this.jkaMode);
     // How long this frame's change of the legs' clip fades (`BodyLoco.fadeFor`), handed on with the state.
@@ -3190,21 +3246,39 @@ export class Player {
       if (this.flung && !loop) rig.setState('swim', 3);
       else {
         rig.prefer('air', loop ?? this.jumpClip('INAIR', this.jka.isForceJumping));
-        rig.setState('air');
+        // Sliding down a face too steep to stand on, the falling loop comes in over the slope's own fade (wave 2b).
+        this.slideFade.fade = LOCO_TUNE.slope.fade;
+        rig.setState('air', 0, null, this.slope.sliding ? this.slideFade : undefined);
       }
     }
     else if (this.prone) {
-      // Lying down: a blaster has its own prone carries, else the game's crawl.
+      // Lying down: a blaster has its own prone carries, else the game's crawl; under the classes (wave 2b) the class's
+      // crawl at the rate that keeps it on the ground (`legs`, none with a blaster in hand).
       if (armed) rig.setState(`${this.aiming ? 'gunProneAim' : this.gunReady ? 'gunProneReady' : 'gunProne'}${moving ? 'Move' : 'Idle'}` as RigState, speed);
-      else rig.setState(moving ? 'proneMove' : 'prone', speed);
+      else if (legs) {
+        rig.prefer(legs.state, legs.clip);
+        rig.setState(legs.state, speed, null, this.legOpts);
+      } else rig.setState(moving ? 'proneMove' : 'prone', speed);
     } else if (this.kneeling) rig.setState('kneel', 0, gunUpper);
     else if (this.crouching) {
       // Crouched: the game's own loop_crouched clips unless Jedi Academy's animations are in charge.
       const swg = !this.jkaMode && !!rig.clipMatching(/^loop_crouched:speed1/);
+      // The classes' crouched clips were preferred last frame and are not now (a blaster in hand, whose states the
+      // classes' let-go does not reach): each state picks its own again there and then (only ever true under the classes).
+      if (this.crouchPreferred && !legs) {
+        rig.prefer('crouchWalk', null, true);
+        rig.prefer('crouchWalkBack', null, true);
+        this.crouchPreferred = false;
+      }
       rig.prefer('crouch', swg ? /^loop_crouched:speed0/ : null);
       rig.prefer('crouchWalk', swg ? /^loop_crouched:speed1/ : null);
       rig.prefer('crouchWalkBack', swg ? /^loop_crouched:speed1/ : null);
-      rig.setState(moving ? (this.directional && mz < 0 ? 'crouchWalkBack' : 'crouchWalk') : 'crouch', speed, gunUpper);
+      if (legs) {
+        // Under the classes (wave 2b): the class's crouched clip for the way, at the rate that keeps its feet down.
+        rig.prefer(legs.state, legs.clip);
+        rig.setState(legs.state, speed, gunUpper, this.legOpts);
+        this.crouchPreferred = true;
+      } else rig.setState(moving ? (this.directional && mz < 0 ? 'crouchWalkBack' : 'crouchWalk') : 'crouch', speed, gunUpper);
     }
     else if (moving && this.directional && mz < 0) {
       // Backing up with the legs facing forward: the back-pedal clip.

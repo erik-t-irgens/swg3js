@@ -22,19 +22,50 @@ export const CLASS_NAMES: readonly string[] = ['', 'walk', 'jog', 'run', 'sprint
 export const DIRS = ['F', 'FL', 'L', 'BL', 'B', 'BR', 'R', 'FR'] as const;
 export type LocoDir = (typeof DIRS)[number];
 
-/** The postures the table has rows for (standing, this wave) and the gaits it knows. */
+/** The postures the table has rows for (standing; crouched and prone are `POSTURE_PICKS`, below) and the gaits it knows. */
 export type LocoPosture = 'stand';
-export type LocoGait = 'standard';
-export const GAITS: readonly LocoGait[] = ['standard'];
+/**
+ * A character's gait (wave 2b, the owner's "a character creator switch for 'Gait'"): which of the walk class's clips at
+ * one speed it walks in. 'standard' (`standard_walk`, wave 2a's, and every record from before), 'masculine' (`walking`),
+ * 'feminine' (`walking_2`, and the strafe walk pair `left/right_strafe_walk` for the forward diagonals and sideways),
+ * 'heavy' (`dwarf_walk`), 'game' (the game's own walk, the walk before the imported paces). Only the walk class changes.
+ */
+export type LocoGait = 'standard' | 'masculine' | 'feminine' | 'heavy' | 'game';
+export const GAITS: readonly LocoGait[] = ['standard', 'masculine', 'feminine', 'heavy', 'game'];
+/** A gait named by a record or a hello, or 'standard' for anything else (a record from before, a word not known). */
+export function gaitOf(word: unknown): LocoGait {
+  return typeof word === 'string' && (GAITS as readonly string[]).includes(word) ? (word as LocoGait) : 'standard';
+}
+/** A gait's place in `GAITS` (0 for 'standard' and anything not known): what a frame carries in place of the word. */
+export function gaitIndex(word: unknown): number {
+  const i = (GAITS as readonly unknown[]).indexOf(word);
+  return i < 0 ? 0 : i;
+}
+
+/**
+ * The ids of the game's own clips a pick may name (every other id is an imported clip, `mx_<id>`): the game's walk (the
+ * 'game' gait), its crouched walk (the crouch's quickest class), Jedi Academy's crouched walk back, and the game's prone
+ * crawl (the prone's slowest class), each by the rig's own name for it.
+ */
+export const GAME_WALK = 'game_walk', GAME_CROUCHED = 'game_crouched', CROUCH_BACK = 'crouch_back', GAME_PRONE = 'game_prone';
+const GAME_CLIPS: Readonly<Record<string, string>> = { [GAME_WALK]: 'walk', [GAME_CROUCHED]: 'loop_crouched:speed1', [CROUCH_BACK]: 'BOTH_CROUCH1WALKBACK', [GAME_PRONE]: 'loop_prone:speed1' };
+/** Which of the tune's `made` speeds a game clip is played against for its rate (`MADE_*`), or `MADE_NONE` for the rig's own number. */
+export const MADE_NONE = -1, MADE_CROUCHED = 0, MADE_CROUCH_BACK = 1, MADE_GAME_WALK = 2, MADE_INJURED = 3;
+const MADE_OF: Readonly<Record<string, number>> = { [GAME_WALK]: MADE_GAME_WALK, [GAME_CROUCHED]: MADE_CROUCHED, [CROUCH_BACK]: MADE_CROUCH_BACK };
+/** A pick id's clip as the rig names it. */
+export function clipOfId(id: string): string {
+  return GAME_CLIPS[id] ?? `mx_${id}`;
+}
 
 /**
  * The states the sender's rig is put in and the wire carries: the walk class is `walk` and every other `run`,
  * whichever way the body goes. Both are names every build has a clip for (a build from before the classes, or a
  * figure without the imported clips, shows its own walk or run), and neither is one Jedi Academy's own legs use for
  * backing up (`walkBack`, `runBack`), so a figure that sends one of those is blocking or fighting and is shown that
- * game's back-pedal, never the table's.
+ * game's back-pedal, never the table's. Crouched, the forward clips are `crouchWalk` and the walk back `crouchWalkBack`;
+ * prone, `proneMove`: the states every build already sent there, so a build from before shows its own crouch or crawl.
  */
-export type LocoState = 'walk' | 'run';
+export type LocoState = 'walk' | 'run' | 'crouchWalk' | 'crouchWalkBack' | 'proneMove';
 
 /** One cell of the table, resolved. */
 export interface LocoPick {
@@ -59,7 +90,17 @@ export interface LocoPick {
    * `SIDE_FORWARD`), or -1 for a cell every choice shares: what the peers' side steps over when another is in force.
    */
   side: number;
+  /** Which of the tune's `made` speeds the clip is played against (`MADE_*`), or `MADE_NONE` for the rig's own number for it. */
+  made: number;
+  /** A standing pick's place among `allPicks()` (what its gait twins are kept by), or -1 for any other. */
+  uid: number;
+  /** The posture the pick is for: 0 standing, `CROUCH` or `PRONE`. */
+  posture: number;
+  /** Played backwards (the prone crawl backing up under `proneBack` 'reverse'). */
+  reverse: boolean;
 }
+/** The postures a pick is for, by number (`LocoPick.posture`). */
+export const STAND = 0, CROUCH = 1, PRONE = 2;
 
 /** A clip id, or one by gait. */
 type Cell = string | Record<LocoGait, string>;
@@ -83,22 +124,32 @@ interface DirRows {
   sideWalk?: { diagonal: Cell; forward: Cell };
 }
 
+/** A cell by gait: the standard's clip, and each other gait's where it walks in another. */
+function byGait(standard: string, others: Partial<Record<LocoGait, string>> = {}): Record<LocoGait, string> {
+  return { standard, masculine: others.masculine ?? standard, feminine: others.feminine ?? standard, heavy: others.heavy ?? standard, game: others.game ?? standard };
+}
+/** The forward walk by gait, and the walked forward diagonals' (and the sideways walk's) strafe walks: only the feminine has a pair of its own. */
+const WALK_F = byGait('standard_walk', { masculine: 'walking', feminine: 'walking_2', heavy: 'dwarf_walk', game: GAME_WALK });
+const WALK_FL = byGait('left_strafe_walking', { feminine: 'left_strafe_walk' });
+const WALK_FR = byGait('right_strafe_walking', { feminine: 'right_strafe_walk' });
+
 /**
  * The table: the owner's brief, row for row. Sideways at the walk is the slow strafe (the brief's sideways
  * "speed 0", by the owner's answer); a forward diagonal's walk and run are the strafe walks and the strafes with the
  * body turned, and a backward diagonal's the backward clips with the body turned; the jogs have clips of their own,
- * the right-hand ones as the files are and the left-hand ones their mirror images.
+ * the right-hand ones as the files are and the left-hand ones their mirror images. The walk class's forward clip, its
+ * forward diagonals' and the sideways walk's two newer choices are by gait.
  */
 export const LOCO_TABLE: Record<LocoPosture, Record<LocoDir, DirRows>> = {
   stand: {
-    F: { group: 'forward', cells: { 1: { standard: 'standard_walk' }, 2: 'slow_run', 3: 'running', 4: 'fast_run' }, tired: 'drunk_run_forward' },
-    FL: { group: 'forwardDiag', cells: { 1: 'left_strafe_walking', 2: 'jog_forward_diagonal_mirrored', 3: 'left_strafe' }, up: 'jog_forward_diagonal_mirrored' },
-    L: { group: 'side', cells: { 1: 'walk_strafe_left', 2: 'jog_strafe_left', 3: 'left_strafe' }, sideWalk: { diagonal: 'left_strafe_walking', forward: { standard: 'standard_walk' } } },
+    F: { group: 'forward', cells: { 1: WALK_F, 2: 'slow_run', 3: 'running', 4: 'fast_run' }, tired: 'drunk_run_forward' },
+    FL: { group: 'forwardDiag', cells: { 1: WALK_FL, 2: 'jog_forward_diagonal_mirrored', 3: 'left_strafe' }, up: 'jog_forward_diagonal_mirrored' },
+    L: { group: 'side', cells: { 1: 'walk_strafe_left', 2: 'jog_strafe_left', 3: 'left_strafe' }, sideWalk: { diagonal: WALK_FL, forward: WALK_F } },
     BL: { group: 'backDiag', cells: { 1: 'walking_backwards', 2: 'jog_backward_diagonal_mirrored', 3: 'running_backward' }, up: 'jog_backward_diagonal_mirrored' },
     B: { group: 'back', cells: { 1: 'walking_backwards', 2: 'jog_backward', 3: 'running_backward' } },
     BR: { group: 'backDiag', cells: { 1: 'walking_backwards', 2: 'jog_backward_diagonal', 3: 'running_backward' }, up: 'jog_backward_diagonal' },
-    R: { group: 'side', cells: { 1: 'walk_strafe_right', 2: 'jog_strafe_left_mirrored', 3: 'left_strafe_mirrored' }, sideWalk: { diagonal: 'right_strafe_walking', forward: { standard: 'standard_walk' } } },
-    FR: { group: 'forwardDiag', cells: { 1: 'right_strafe_walking', 2: 'jog_forward_diagonal', 3: 'left_strafe_mirrored' }, up: 'jog_forward_diagonal' },
+    R: { group: 'side', cells: { 1: 'walk_strafe_right', 2: 'jog_strafe_left_mirrored', 3: 'left_strafe_mirrored' }, sideWalk: { diagonal: WALK_FR, forward: WALK_F } },
+    FR: { group: 'forwardDiag', cells: { 1: WALK_FR, 2: 'jog_forward_diagonal', 3: 'left_strafe_mirrored' }, up: 'jog_forward_diagonal' },
   },
 };
 
@@ -129,6 +180,29 @@ export const CLIP_HEADING: Readonly<Record<string, number>> = {
   jog_backward_diagonal: -135,
   jog_backward_diagonal_mirrored: 135,
 };
+
+/**
+ * The same for the clips wave 2b's rows name beyond the standing table (the gaits, the injured walk, crouched and prone):
+ * the imported ones held by the node test to the committed index's own measurement, the game's own by their rig's
+ * measure (the game's walk 0.3, its crouched walk 0.6, Jedi Academy's crouched walk back -176).
+ */
+export const MORE_HEADING: Readonly<Record<string, number>> = {
+  walking: 0,
+  walking_2: 0,
+  dwarf_walk: 0,
+  left_strafe_walk: 90,
+  right_strafe_walk: -90,
+  walking_1: 0,
+  sneak_walk_1: 0,
+  crouched_walking: 0,
+  low_crawl: 0,
+  running_crawl: 0,
+  [GAME_WALK]: 0,
+  [GAME_CROUCHED]: 0,
+  [CROUCH_BACK]: 180,
+  [GAME_PRONE]: 0,
+};
+const headingOf = (id: string): number => CLIP_HEADING[id] ?? MORE_HEADING[id];
 
 /** An angle in degrees brought into -180 (not included) to 180. */
 export function wrapDeg(a: number): number {
@@ -215,8 +289,12 @@ export function sideMode(tune: LocoTune): number {
 }
 /** Every pick, made once: by posture, gait, way, class, variant and the sideways walk's choice. */
 const PICKS: (LocoPick | null)[] = [];
-/** And each of them once, in the order made: what the peers' side walks. */
+/** And each of them once, in the order made: what the peers' side walks. Only the standard gait's (the standing table's own twenty clips). */
 const UNIQUE: LocoPick[] = [];
+/** The other gaits' own picks, once each (a gait's cell that names the standard's clip is the standard's pick). */
+const GAIT_UNIQUE: LocoPick[] = [];
+/** Each standard pick's twin by gait (`uid * GAITS.length + gait`), null where the gait walks as the standard does. */
+const TWINS: (LocoPick | null)[] = [];
 const at = (gait: number, dir: number, cls: number, variant: number, side: number) => (((gait * 8 + dir) * 5 + cls) * VARIANTS + variant) * SIDES + side;
 
 function build(): void {
@@ -252,23 +330,106 @@ function build(): void {
               continue;
             }
             const id = typeof cell === 'string' ? cell : cell[gait];
-            const heading = CLIP_HEADING[id];
-            const state: LocoState = eff === 1 ? 'walk' : 'run';
-            const made: LocoPick = { id, clip: `mx_${id}`, heading, dir, cls: eff, group: row.group, key, slot: SLOTS[`${row.group}.${key}`], state, turn: wrapDeg(travelDeg(dir) - heading), side: tag };
-            // One object a cell, however many classes, variants and choices name it.
-            const same = UNIQUE.find((p) => p.id === made.id && p.dir === made.dir && p.cls === made.cls && p.key === made.key && p.side === made.side);
-            if (same) PICKS[at(g, dir, cls, variant, side)] = same;
-            else {
-              UNIQUE.push(Object.freeze(made));
-              PICKS[at(g, dir, cls, variant, side)] = UNIQUE[UNIQUE.length - 1];
+            const standard = g > 0 ? PICKS[at(0, dir, cls, variant, side)] : null;
+            // Another gait whose cell names the standard's clip walks as the standard does: the standard's own pick.
+            if (standard && standard.id === id) {
+              PICKS[at(g, dir, cls, variant, side)] = standard;
+              continue;
             }
+            const heading = headingOf(id);
+            const state: LocoState = eff === 1 ? 'walk' : 'run';
+            const made: LocoPick = { id, clip: clipOfId(id), heading, dir, cls: eff, group: row.group, key, slot: SLOTS[`${row.group}.${key}`], state, turn: wrapDeg(travelDeg(dir) - heading), side: tag, made: MADE_OF[id] ?? MADE_NONE, uid: g === 0 ? UNIQUE.length : -1, posture: STAND, reverse: false };
+            // One object a cell, however many classes, variants and choices name it.
+            const list = g === 0 ? UNIQUE : GAIT_UNIQUE;
+            const same = list.find((p) => p.id === made.id && p.dir === made.dir && p.cls === made.cls && p.key === made.key && p.side === made.side);
+            const pick = same ?? Object.freeze(made);
+            if (!same) list.push(pick);
+            PICKS[at(g, dir, cls, variant, side)] = pick;
+            if (standard && standard.uid >= 0) TWINS[standard.uid * GAITS.length + g] = pick;
           }
         }
       }
     });
   });
+  for (let i = 0; i < UNIQUE.length * GAITS.length; i++) TWINS[i] ??= null;
 }
 build();
+
+/**
+ * Walking hurt (`LocoTune.injured`): the injured walk for a way, or null for a way it does not take (backing up keeps its
+ * own walk). Forward, the forward diagonals and sideways, the body turned toward the travel by the clip's own heading.
+ */
+const INJURED: (LocoPick | null)[] = DIRS.map((_, dir) => {
+  if (dir >= 3 && dir <= 5) return null;
+  const id = 'walking_1';
+  return Object.freeze({ id, clip: clipOfId(id), heading: headingOf(id), dir, cls: 1 as LocoClass, group: 'forward' as const, key: 'injured', slot: -1, state: 'walk' as LocoState, turn: wrapDeg(travelDeg(dir) - headingOf(id)), side: -1, made: MADE_INJURED, uid: -1, posture: STAND, reverse: false });
+});
+export function injuredPick(dir: number): LocoPick | null {
+  return dir >= 0 && dir <= 7 ? INJURED[dir] : null;
+}
+
+/** Crouched and prone (wave 2b): the clips by class (1 Alt held, 2 nothing held, 3 Shift held), and backing up crouched. */
+export const CROUCH_CLIPS: readonly string[] = ['', 'sneak_walk_1', 'crouched_walking', GAME_CROUCHED];
+export const PRONE_CLIPS: readonly string[] = ['', GAME_PRONE, 'low_crawl', 'running_crawl'];
+export const POSTURE_KEYS: readonly ('slow' | 'normal' | 'fast')[] = ['slow', 'slow', 'normal', 'fast'];
+/** By posture (`CROUCH`, `PRONE`), way, class and whether played backwards: made once. */
+const POSTURE: (LocoPick | null)[] = [];
+const atPosture = (posture: number, dir: number, cls: number, reverse: number) => ((posture * 8 + dir) * 4 + cls) * 2 + reverse;
+function buildPostures(): void {
+  for (const posture of [CROUCH, PRONE]) {
+    for (let dir = 0; dir < 8; dir++) {
+      const back = dir >= 3 && dir <= 5;
+      for (let cls = 1; cls <= 3; cls++) {
+        for (let rev = 0; rev < 2; rev++) {
+          // Crouched, backing up is Jedi Academy's walk back at every class; every other way the class's forward clip,
+          // turned toward the travel by the one rule every pick is (the travel less the clip's own heading). Prone, the
+          // forward crawl every way (the body turns to it, `faces`), or backing up and played backwards.
+          if (rev && (posture !== PRONE || !back)) {
+            POSTURE[atPosture(posture, dir, cls, rev)] = null;
+            continue;
+          }
+          const id = posture === CROUCH ? (back ? CROUCH_BACK : CROUCH_CLIPS[cls]) : PRONE_CLIPS[cls];
+          const heading = headingOf(id);
+          const state: LocoState = posture === PRONE ? 'proneMove' : back ? 'crouchWalkBack' : 'crouchWalk';
+          const turn = rev ? wrapDeg(travelDeg(dir) - 180) : wrapDeg(travelDeg(dir) - heading);
+          POSTURE[atPosture(posture, dir, cls, rev)] = Object.freeze({ id, clip: clipOfId(id), heading: rev ? 180 : heading, dir, cls: cls as LocoClass, group: (back ? 'back' : 'forward') as keyof LocoTune['speed'], key: POSTURE_KEYS[cls], slot: -1, state, turn, side: -1, made: MADE_OF[id] ?? MADE_NONE, uid: -1, posture, reverse: !!rev });
+        }
+      }
+    }
+  }
+}
+buildPostures();
+
+/** A crouched or prone pick (`posture` `CROUCH` or `PRONE`): by way and class (1 to 3), the prone backing up played backwards when `reverse`. Null for no way. */
+export function posturePick(posture: number, dir: number, cls: number, reverse = false): LocoPick | null {
+  if (dir < 0 || dir > 7 || (posture !== CROUCH && posture !== PRONE)) return null;
+  const c = cls < 1 ? 1 : cls > 3 ? 3 : cls | 0;
+  return POSTURE[atPosture(posture, dir, c, reverse && posture === PRONE && dir >= 3 && dir <= 5 ? 1 : 0)] ?? null;
+}
+
+/** Every crouched and prone pick, once each. */
+export function posturePicks(): readonly LocoPick[] {
+  return POSTURE.filter((p): p is LocoPick => p !== null);
+}
+
+/** A standing pick's twin in a gait (`GAITS`' place): the gait's own pick where it walks in another clip, else the pick itself. */
+export function gaitTwin(pick: LocoPick, gait: number): LocoPick {
+  if (gait <= 0 || pick.uid < 0) return pick;
+  return TWINS[pick.uid * GAITS.length + gait] ?? pick;
+}
+
+/**
+ * Every clip id wave 2b's rows name beyond the standing table (the gaits', the injured walk's, crouched and prone), once
+ * each: what the game loads with the table's own whatever the pack's index marks (`MixamoPack`'s `also`), and what the
+ * console lists. Imported ones only (the game's own are the rig's already).
+ */
+export function moreClips(): string[] {
+  const out = new Set<string>();
+  for (const p of GAIT_UNIQUE) out.add(p.id);
+  out.add('walking_1');
+  for (const p of POSTURE) if (p) out.add(p.id);
+  return [...out].filter((id) => !GAME_CLIPS[id]);
+}
 
 /**
  * The clip for a way (`dirOf`) and a class: the tired jog in place of the forward jog while tired; with a blaster
@@ -287,6 +448,9 @@ export function locoPick(dir: number, cls: number, tired = false, gun: number = 
 
 /** What a pick moves the body at, m/s, by the tune's dials. (The console's and the tests': a frame reads `fillSpeeds`' array at the pick's `slot`.) */
 export function speedOf(tune: LocoTune, pick: LocoPick): number {
+  if (pick.posture === CROUCH) return (pick.group === 'back' ? tune.crouch.back : tune.crouch.forward)[pick.key as 'slow' | 'normal' | 'fast'];
+  if (pick.posture === PRONE) return tune.prone.forward[pick.key as 'slow' | 'normal' | 'fast'];
+  if (pick.key === 'injured') return tune.injured.speed;
   return (tune.speed[pick.group] as Record<string, number>)[pick.key];
 }
 
@@ -342,6 +506,10 @@ export class PeerAsk {
   speed = 0.5;
   /** The sideways walk's choice in force here (`SIDE_*`, `sideMode`): a cell of another choice is stepped over. */
   side = SIDE_STRAFE;
+  /** Their gait, as `GAITS`' place (0 the standard, and anything their hello did not say): the walk's cell is its twin in it. */
+  gait = 0;
+  /** Walking hurt, as their own game would have it (their health, where this side hears it, under the tune's share): the forward walk is the injured walk. */
+  injured = false;
 }
 
 /**
@@ -378,7 +546,14 @@ export function peerPickIn(speeds: Float64Array, state: string, ask: PeerAsk): L
       best = p;
     }
   }
-  return best ?? any;
+  const got = best ?? any;
+  // The walk class as their own game plays it: hurt, the forward walk is the injured walk (a body walking hurt turns to
+  // its travel, so its travel lies ahead of its heading); else the walk's cell in their gait.
+  if (got && got.cls === 1) {
+    if (ask.injured && got.heading === 0) return INJURED[0];
+    if (ask.gait > 0) return gaitTwin(got, ask.gait);
+  }
+  return got;
 }
 
 const PICK_SPEEDS = new Float64Array(SPEED_SLOTS);

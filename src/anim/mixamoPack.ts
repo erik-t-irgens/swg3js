@@ -16,6 +16,7 @@ import * as THREE from 'three';
 import { ANIM_TUNE, watchTrims, type TrimId } from './animTune.ts';
 import { fitClip, planFit, skeletonKey, type FitPlan, type FitReport, type FitRow, type FittedClip, type TargetSkeleton } from './fit.ts';
 import { factsOf, type ClipFacts } from './locoPhase.ts';
+import { moreClips } from './locoTable.ts';
 import { ALIGN_SHIPPED, type AlignFlags } from './mixamoMap.ts';
 import { clipName, clipSlug, decodeMxa, readPackIndex, type ClipData, type PackClipRow, type PackIndex } from './mxaFile.ts';
 
@@ -42,6 +43,11 @@ export interface PackIo {
   /** A pause between clips, so fitting never holds a frame. */
   breath(): Promise<void>;
   now(): number;
+  /**
+   * Clip ids the game loads at start whatever the index marks `use` (wave 2b's rows: the gaits', the injured walk's, the
+   * crouched and prone sets'), until a reimport marks them itself: the game's own, never anything the console asks for.
+   */
+  also?: readonly string[];
 }
 
 export type PackState = 'off' | 'idle' | 'loading' | 'ready' | 'absent' | 'failed';
@@ -101,8 +107,17 @@ export class MixamoPack {
     return this.strides.get(clip) ?? null;
   }
 
+  /** The ids loaded at start beside the index's `use` (`PackIo.also`). */
+  private readonly also: ReadonlySet<string>;
+
+  /** Whether a row is loaded and fitted at start: the index's `use`, or the game naming it (`also`). */
+  private wanted(row: PackClipRow): boolean {
+    return row.use || this.also.has(row.id);
+  }
+
   constructor(io: PackIo) {
     this.io = io;
+    this.also = new Set(io.also ?? []);
     watchTrims((ids) => this.restrip(ids));
   }
 
@@ -153,7 +168,7 @@ export class MixamoPack {
         }
         this.index = index;
         for (const row of index.clips) this.rows.set(row.id, row);
-        await Promise.all(index.clips.filter((c) => c.use).map((c) => this.clipData(c.id)));
+        await Promise.all(index.clips.filter((c) => this.wanted(c)).map((c) => this.clipData(c.id)));
         this.status = 'ready';
       } catch (err) {
         this.status = 'failed';
@@ -262,7 +277,7 @@ export class MixamoPack {
     fit.ready ??= (async () => {
       const out: THREE.AnimationClip[] = [];
       for (const row of this.index!.clips) {
-        if (!row.use) continue;
+        if (!this.wanted(row)) continue;
         const clip = this.data.get(row.id);
         if (!clip) continue;
         out.push(this.fitOne(fit, row.id, clip));
@@ -464,6 +479,8 @@ export function browserIo(deps: {
       return res.arrayBuffer();
     },
     breath: browserBreath,
+    // Wave 2b's rows' clips, which the committed index does not mark `use` (marking them is a reimport, which waits on the owner).
+    also: moreClips(),
     now: () => performance.now(),
   };
 }

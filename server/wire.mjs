@@ -59,6 +59,11 @@ const CLASSES = ['jedi', 'bounty_hunter'];
  * body is the browser's pack to answer -- and only makes sure what is passed on is a word, not a line.
  */
 const MOOD_NAME = /^[a-z0-9_]+$/;
+/**
+ * The gaits a hello may name, the browser's `GAITS` in src/anim/locoTable.ts word for word (a browser sends none for
+ * the standard): how a character walks, chosen on the creator's page. The server has no opinion about what one looks like.
+ */
+export const GAITS = ['standard', 'masculine', 'feminine', 'heavy', 'game'];
 const TAKES = ['browser', 'server'];
 /**
  * Names a character id may not have. A character id is used as a key in the table the server keeps,
@@ -141,6 +146,9 @@ export function cleanHello(x) {
   // no mood field, exactly as empty hands are no `held`.
   const mood = cleanWord(x.mood, '', WIRE.mood).trim().toLowerCase();
   if (mood && MOOD_NAME.test(mood)) hello.mood = mood;
+  // How they walk (the animations' second wave): one word of a closed list, or nothing, which every build reads as the
+  // standard walk. A hello with none (a browser built before, or the standard) is simply a hello with no gait.
+  if (typeof x.gait === 'string' && GAITS.includes(x.gait)) hello.gait = x.gait;
   const ship = cleanShip(x.ship);
   if (ship) hello.ship = ship;
   return hello;

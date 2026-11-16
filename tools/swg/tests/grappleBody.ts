@@ -16,6 +16,7 @@ import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from '../../../src/player
 import { newHarm, newHarmAsk, takeHarm, type HarmKind } from '../../../src/player/harmRule.ts';
 import { vehicleOfCollider, type Vehicle } from '../../../src/vehicles/vehicle.ts';
 import { makeHullController, type PeerHulls } from '../../../src/player/grappleFrames.ts';
+import { SlopeRule } from '../../../src/player/slopeRule.ts';
 
 /** `DIVE_DEPTH` in player.ts: the head is under and looking down dives (the wiring test reads the two equal). */
 export const DIVE_DEPTH_FOR_TESTS = 1.9;
@@ -187,6 +188,8 @@ export class TestBody implements GrappleBody {
   forceSlide = false;
   /** The swim holds the fall's apex every frame (the day-one change); off, the water's control case, the old game. */
   swimHoldsApex = true;
+  /** The slope limit (wave 2b): the very rule the player's update steps, in the same places (`LOCO_TUNE.slopeRule`). */
+  readonly slope = new SlopeRule();
   private colliderCrouched = false;
   private readonly swimIn = newSwimIn();
   private readonly swimOut = newSwimOut();
@@ -302,6 +305,7 @@ export class TestBody implements GrappleBody {
     this.swimming = false;
     this.submerged = false;
     this.jka.reset();
+    this.slope.reset();
     this.body.setTranslation({ x, y, z }, true);
     this.body.setNextKinematicTranslation({ x, y, z });
     this.collider.setTranslation({ x, y: y + this.colliderOffsetY, z });
@@ -439,7 +443,11 @@ export class TestBody implements GrappleBody {
       // The rope's rewrite of the command is the hook's own `command`, the very call the player's update makes.
       let stepGrounded = this.hooks ? g.command(c, this.grounded) : this.grounded;
       if (this.hooks && g.attached && this.forceSlide) stepGrounded = false;
+      // A jump off a face too steep to stand on, where the tune allows one (the player's own two lines).
+      const slopeJumped = this.slope.jumpOff(this.vel, c.jumpPressed);
+      if (slopeJumped) this.jka.markJumpStart(this.pos.y);
       const ev = this.jka.step(dt, this.vel, this.pos, stepGrounded, c, this.force);
+      if (slopeJumped) ev.jumped = true;
       if (ev.jumped) {
         this.grounded = false;
         this.jumped++;
@@ -454,9 +462,11 @@ export class TestBody implements GrappleBody {
     }
     // Falling into deep water: the plunge slows quickly.
     if (depth > 0 && !this.swimming && this.vel.y < -4) this.vel.y += (-4 - this.vel.y) * (1 - Math.exp(-dt * 8));
+    if (this.slope.sliding) this.slope.share(this.vel, dt, this.jka.gravity);
     if (this.hooks && g.out) g.beforeMove(this, dt);
-    if (this.vel.y > 0.5 || this.swimming || (this.hooks && g.attached && g.modes.swinging)) this.controller.disableSnapToGround();
+    if (this.vel.y > 0.5 || this.swimming || this.slope.sliding || (this.hooks && g.attached && g.modes.swinging)) this.controller.disableSnapToGround();
     else this.controller.enableSnapToGround(0.35);
+    this.slope.controllerFor(this.controller);
     let moveX = this.vel.x * dt;
     let moveY = this.vel.y * dt;
     let moveZ = this.vel.z * dt;
@@ -474,6 +484,17 @@ export class TestBody implements GrappleBody {
     this.pos.z += mv.z;
     const wasGrounded = this.grounded;
     this.grounded = this.controller.computedGrounded();
+    // The slope limit's verdict and slide, the player's own lines (its swim and its rope are the harness's `swimming`
+    // and `g`); the movement's gravity is Jedi Academy's here, the only profile the harness steps.
+    const slopeAt = this.slope.at;
+    slopeAt.x = this.pos.x;
+    slopeAt.y = this.pos.y;
+    slopeAt.z = this.pos.z;
+    slopeAt.offsetY = this.colliderOffsetY;
+    slopeAt.r = CAPSULE_RADIUS;
+    slopeAt.filter = this.filter;
+    this.grounded = this.slope.judge(this.physics.world, this.grounded, !this.swimming && !(this.hooks && (g.attached || g.released)), this.body, this.walkPast);
+    if (this.slope.sliding) this.jka.holdApex(this.slope.slide(this.vel, this.pos.y, this.jka.gravity));
     if (this.grounded && this.vel.y < 0) this.vel.y = 0;
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
     this.ground = this.groundAt ? this.groundAt(this.pos.x, this.pos.z) : Number.NEGATIVE_INFINITY;

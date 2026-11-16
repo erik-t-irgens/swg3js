@@ -24,7 +24,7 @@ import { ANIM_TUNE } from '../anim/animTune.ts';
 import { CARRY_FULL, CARRY_ORIGINAL, LegOpts, carryOf, gunClassIndex } from '../anim/bodyLoco.ts';
 import { PeerIn, PeerLoco, PeerPistolCarry } from '../anim/peerLoco.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
-import { peerBackState, peerCarryState } from '../anim/locoTable.ts';
+import { gaitIndex, peerBackState, peerCarryState } from '../anim/locoTable.ts';
 import { SwimSink } from '../anim/swimSink.ts';
 import { SWIM_DEPTH } from '../player/swimStep.ts';
 import { hangHeld } from './peerHands.ts';
@@ -1201,6 +1201,11 @@ export class RemotePlayers {
         // and their class, worked out here from what they already send (`PeerLoco`): how their travel lies against the
         // heading they sent, and their speed. With a gun in hand the legs take it and the upper body keeps the gun's
         // standing pose of the same carry. Null (the classes off, a rig without the clips, any other state) is the state's own clip, as before.
+        // Wave 2b: their gait out of their hello, their health where their game sends it (the walk hurt under the
+        // tune's share), and their figure's scale.
+        PEER_IN.gait = gaitIndex(r.hello.gait);
+        PEER_IN.hpShare = r.hp / r.maxHp;
+        PEER_IN.scale = rig.root.scale.y;
         PEER_IN.vx = r.vel.x;
         PEER_IN.vz = r.vel.z;
         PEER_IN.heading = r.heading;

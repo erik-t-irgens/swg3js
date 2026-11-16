@@ -93,7 +93,7 @@ for (const fps of [144, 60, 30]) {
   grappleMutes(out, true, false);
   ok(out.includes('speedUp'), "with the hook out the classes' key is muted (Shift reels), so on the line the pace comes down to the jog");
   const player = readFileSync(new URL('../../../src/player/player.ts', import.meta.url), 'utf8');
-  ok(player.includes('c.walk = classes && !script ? false : walking;') && player.includes('classes && this.loco.moves && !script ? this.loco.speed / (JKA.speed * UNIT) : this.paceScale(walking, mz, mx)'), 'the game hands the movement what this test hands the harness: no walk flag and the class\'s share of the run');
+  ok(player.includes('c.walk = classes && !script ? false : walking;') && player.includes('classes && this.loco.moves && !script ? this.loco.speed / (this.loco.posture === CROUCH && this.grounded ? JKA.speed * UNIT * JKA.duckScale : JKA.speed * UNIT) : this.paceScale(walking, mz, mx)'), 'the game hands the movement what this test hands the harness: no walk flag and the class\'s share of the run');
 }
 
 console.log(`\n${checks} checks passed`);

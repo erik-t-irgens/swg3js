@@ -173,6 +173,21 @@ export class Stamina {
     this.apply(tune);
   }
 
+  /**
+   * A frame of a body crouched or prone under the classes (wave 2b): the class's own rate (`crouch.stamina`,
+   * `prone.stamina`: the two slower at the walk's rate, the quickest at the jog's), in the air or the water no faster
+   * than the air's, as a standing step is. Read off the tune here, so no number crosses a call.
+   */
+  stepPosture(f: { dt: number; pool: number }, tune: LocoTune, prone: boolean, cls: number, afloat: boolean): void {
+    const s = prone ? tune.prone.stamina : tune.crouch.stamina;
+    const r = cls <= 1 ? s.slow : cls === 2 ? s.normal : s.fast;
+    const air = tune.stamina.air;
+    this.dt = f.dt;
+    this.rate = afloat && r > air ? air : r;
+    this.pool = f.pool;
+    this.apply(tune);
+  }
+
   /** A frame of a body that is not on its feet at all (riding, flying, adrift): the pool regains as standing does. */
   rest(dt: number, pool: number, tune: LocoTune): void {
     this.dt = dt;
