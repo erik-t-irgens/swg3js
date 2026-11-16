@@ -7218,7 +7218,7 @@ export class World {
    * Filed under `key`, which is a name of its own, so a removal is one lookup and can never reach
    * something the snapshot placed.
    */
-  async placeProp(model: string, o: { key: string; at: { x: number; y: number; z: number }; yaw: number; turn?: readonly number[]; pack?: AssetPack | null; inside?: boolean; solid?: boolean; template?: string; unlessStanding?: boolean }): Promise<boolean> {
+  async placeProp(model: string, o: { key: string; at: { x: number; y: number; z: number }; yaw: number; turn?: readonly number[]; pack?: AssetPack | null; inside?: boolean; solid?: boolean; template?: string; unlessStanding?: boolean; scale?: readonly [number, number, number] }): Promise<boolean> {
     const stream = this.layoutStream;
     const from = o.pack ?? this.pack;
     if (!stream || !from) return false;
@@ -7250,7 +7250,10 @@ export class World {
     const q = o.turn && o.turn.length === 4 ? new THREE.Quaternion(o.turn[0], o.turn[1], o.turn[2], o.turn[3]) : new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.yaw);
     // Filed under its own key so a removal finds exactly it; the object template, where there is one,
     // is what its client data hangs on it (a brazier's fire, a torch's flame) is looked up by.
-    await stream.place({ model, template: o.key, x: o.at.x, y: o.at.y, z: o.at.z, q, radius: loaded.radius, inside: o.inside, solid: o.solid, ...(o.template ? { effectsOf: o.template } : {}) });
+    // At a size of its own along its own axes where one is given (`__debug.stairsTest`'s flights): drawn as far as its largest axis takes it.
+    const s = o.scale;
+    const big = s ? Math.max(Math.abs(s[0]), Math.abs(s[1]), Math.abs(s[2])) : 1;
+    await stream.place({ model, template: o.key, x: o.at.x, y: o.at.y, z: o.at.z, q, radius: loaded.radius * big, inside: o.inside, solid: o.solid, ...(o.template ? { effectsOf: o.template } : {}), ...(s ? { scale: new THREE.Vector3(s[0], s[1], s[2]) } : {}) });
     return true;
   }
 

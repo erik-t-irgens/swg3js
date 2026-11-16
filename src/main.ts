@@ -6862,6 +6862,55 @@ class App {
         const p = this.player.pos;
         return c ? { x: Number((c.x - p.x).toFixed(1)), z: Number((c.z + p.z).toFixed(1)), y: Number(p.y.toFixed(2)), ground: Number(this.world.terrain.heightAt(p.x, p.z).toFixed(2)) } : null;
       },
+      /**
+       * A line of test flights in front of the player (the owner's 2026-11-16): the game's own `stair_tatooine_large_style_01`
+       * (out of the props pack: 76 steps of riser 0.211 m and tread 0.315 m, 4 m wide, 16 m up over 24 m) at sizes along its
+       * own axes ([x, y, z]: y scales the riser, z the tread), side by side to the right, each one's foot `ahead` metres along
+       * the way the body faces and climbing away from it. The start line: the base; the riser at 1.5x, 2x (the tallest step
+       * the owner's rule allows) and 2.2x (past it: a ledge); the tread at 1.75x, 2.5x (the longest stair tread) and 3x (past
+       * it: plain walking); and both at their most. Nothing saved: they stand until `{ clear: true }`, a travel or a reload.
+       */
+      stairsTest: async (o: { clear?: boolean; scales?: [number, number, number][]; ahead?: number; gap?: number; model?: string } = {}) => {
+        const old = this.stairTestKeys;
+        this.stairTestKeys = [];
+        const cleared = old.length ? this.world.unplaceMany(old) : 0;
+        if (o.clear) return { cleared };
+        const pack = this.props.pack;
+        const def = this.props.find(o.model ?? 'stair_tatooine_large_style_01');
+        if (!pack || !def) return { error: !pack ? `the props pack is not here (${this.props.note || 'not minted for this world'})` : `no prop ${o.model ?? 'stair_tatooine_large_style_01'} in the props pack` };
+        const B = def.bounds as { min: number[]; max: number[] } | undefined;
+        const width = B ? B.max[0] - B.min[0] : 4;
+        const foot = B ? B.max[2] : 12; // the flight's foot stands at its +z end (it climbs toward -z)
+        const RISER = 0.2108;
+        const TREAD = 0.315;
+        const scales: [number, number, number][] = o.scales ?? [[1, 1, 1], [1, 1.5, 1], [1, 2, 1], [1, 2.2, 1], [1, 1, 1.75], [1, 1, 2.5], [1, 1, 3], [1, 2, 2.5]];
+        const ahead = o.ahead ?? 3;
+        const gap = o.gap ?? 2;
+        const p = this.player.pos;
+        const h = this.player.heading;
+        const fx = Math.sin(h);
+        const fz = Math.cos(h);
+        const rx = Math.cos(h);
+        const rz = -Math.sin(h);
+        const out: { scale: number[]; riserM: number; treadM: number; stood: boolean; at: number[] }[] = [];
+        let side = 0;
+        for (let i = 0; i < scales.length; i++) {
+          const s = scales[i];
+          const w = width * s[0];
+          const lat = side + w / 2;
+          side += w + gap;
+          const bx = p.x + fx * ahead + rx * lat;
+          const bz = p.z + fz * ahead + rz * lat;
+          const y = this.world.terrain.heightAt(bx, bz);
+          const cx = bx + fx * foot * s[2];
+          const cz = bz + fz * foot * s[2];
+          const key = `stairtest:${i}`;
+          const stood = await this.world.placeProp(def.model, { key, at: { x: cx, y, z: cz }, yaw: h + Math.PI, pack, solid: true, template: def.template ?? undefined, scale: s });
+          if (stood) this.stairTestKeys.push(key);
+          out.push({ scale: s, riserM: Number((RISER * s[1]).toFixed(3)), treadM: Number((TREAD * s[2]).toFixed(3)), stood, at: [Number(bx.toFixed(1)), Number(y.toFixed(2)), Number(bz.toFixed(1))] });
+        }
+        return { cleared, flights: out, note: 'each flight\'s foot is `at` (the game\'s frame); walk up from there. `__debug.stairsTest({ clear: true })` takes them down.' };
+      },
       // Show a converted model (path under assets-private/) in front of the player, playing a clip.
       show: async (file: string, clip?: string) => {
         let gltf;
@@ -21566,6 +21615,8 @@ class App {
   /** The dev server's editor: the track in hand, whether it differs from the file, the files saved to this session, and an ask waiting for its second. */
   private trackHeld: TrackDef | null = null;
   private trackHeldUnsaved = false;
+  /** The test flights `__debug.stairsTest` stood (by the keys they are filed under), taken down by `{ clear: true }`. */
+  private stairTestKeys: string[] = [];
   private readonly trackFilesSaved = new Set<string>();
   private trackArm: { what: string; until: number } | null = null;
   /** The editor's list in the debug menu, made the first time the menu asks for it. */
