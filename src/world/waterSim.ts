@@ -12,6 +12,7 @@
 // are in the window. The water shader reads one texel for both the ripple height and its slope,
 // because the step writes the slope out of taps it already had.
 import * as THREE from 'three';
+import { GPU } from '../core/gpuSwitch.ts';
 import {
   courantOf, dampingFor, deepWaterWavelength, fastestRipple, maxWaveSpeed, realWavePeriod,
   realWaveSpeed, reliefFor, RIPPLE_HELP, rippleGroupSpeed, rippleHalfLife, ripplePeriod,
@@ -511,6 +512,8 @@ export function stepWaterSim(
   cameraY = 0,
 ): void {
   if (failed) return;
+  // No ripple field on WebGPU (the GPU port's step 3): its passes are programs of ours, and the water stands in plain.
+  if (GPU.webgpu) return;
 
   // Off: give the targets back and tell the water shader to ignore the field.
   if (!settings.waterRipples) {

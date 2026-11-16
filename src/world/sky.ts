@@ -7,6 +7,7 @@ import type { FxCloudLayer, FxSkyLight } from '../core/fx/lensFlare';
 import { blockShadow, driftScroll, heaviestTwo, type ForcedKind, type WeatherKind } from './weatherSchedule';
 import { CARD_ROWS, readCardRows, type CardSkyRows, type RampRead } from './cardLight.ts';
 import { DOME_COLOUR_GLSL } from './domeColour.ts';
+import { GPU } from '../core/gpuSwitch.ts';
 
 // The planet's sky as the original client draws it (see tools/swg/sky.mjs for the export):
 // a gradient sky texture whose columns are the time of day and rows run from the horizon up
@@ -559,6 +560,12 @@ export class SwgSky {
     );
     this.dome.frustumCulled = false;
     this.dome.renderOrder = -10;
+    // On WebGPU (the GPU port's step 3) the dome's program is a stand-in: its horizon colour up to its clear colour by the
+    // view's elevation, both read live from the very colours the hour writes (`src/core/gpu/standIns.ts`).
+    if (GPU.webgpu) {
+      const du = this.dome.material.uniforms;
+      this.dome.material.userData.gpuStandIn = () => GPU.rt!.standIns.sky(du.uHorizonFog.value as THREE.Color, du.uClear.value as THREE.Color);
+    }
     this.group.add(this.dome);
     this.domeScene.add(new THREE.Mesh(this.dome.geometry, this.dome.material));
 

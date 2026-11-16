@@ -33,6 +33,7 @@ import { furnitureOn, maskSeen } from './furnitureHost.ts';
 import { beginSkeletonFrame, endSkeletonFrame, installSkeletonOnce } from '../core/skeletonOnce.ts';
 import { setPortalRef, setSharedRef as shareEveryRef, shareRef, unshareRef } from './stencilRef.ts';
 import { PassScenes } from './passScenes.ts';
+import { GPU } from '../core/gpuSwitch.ts';
 
 /**
  * What the rooms' pool hands the portal renderer (Map-maker II's wave of the rooms' lights, `RoomLightPool`): its casting slots,
@@ -420,7 +421,9 @@ export class PortalRenderer {
 
   constructor(renderer: THREE.WebGLRenderer) {
     this.renderer = renderer;
-    this.hookDraws();
+    // On WebGPU there is no `renderBufferDirect` to hook (the GPU port's step 3): a pass that throws is still caught, and
+    // named by the pass rather than the object.
+    if (!GPU.webgpu) this.hookDraws();
     // A skeleton is worked out once a frame inside `render`, not once a pass (commit 3b, `skeletonOnce.ts`).
     installSkeletonOnce();
     this.portalMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, depthTest: true, side: THREE.DoubleSide });
@@ -448,6 +451,9 @@ export class PortalRenderer {
     this.resetMat.stencilFail = THREE.KeepStencilOp;
     this.resetMat.stencilZFail = THREE.KeepStencilOp;
     this.resetMat.stencilZPass = THREE.KeepStencilOp;
+    // On WebGPU its program is a stand-in of three's nodes (the far depth written where the stencil passes); the pipeline's
+    // state, the stencil test and the always-pass depth test are this material's own (`src/core/gpu/fallback.ts`).
+    if (GPU.webgpu) this.resetMat.userData.gpuStandIn = () => GPU.rt!.standIns.depthReset(REVERSED_DEPTH);
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
     this.resetQuad = new THREE.Mesh(g, this.resetMat);
@@ -486,6 +492,8 @@ export class PortalRenderer {
    */
   drawShadowsOnly(scene: THREE.Scene): void {
     const r = this.renderer;
+    // On WebGPU three draws a light's maps itself, in the first pass of a frame that lights with it: nothing to draw here.
+    if (GPU.webgpu) return;
     if (!r.shadowMap.enabled) return;
     r.shadowMap.needsUpdate = true;
     // Every map asked for here, outside any hook: the stand-ins are drawn into every cascade and key their programs
@@ -572,6 +580,8 @@ export class PortalRenderer {
    * pass while marking where rooms were drawn.
    */
   private drawPortals(meshes: THREE.Mesh[], n: number, camera: THREE.Camera, from: number, depthTest: boolean, restore = false): void {
+    // On WebGPU each of the two ways a doorway is drawn wears a material of its own (`drawPortalsGpu`).
+    if (GPU.webgpu) return this.drawPortalsGpu(meshes, n, camera, from, depthTest, restore);
     const m = this.portalMat;
     if (restore) {
       // Leave the doors' rooms region at 3 instead of writing 1 back: a later building's doors
@@ -592,6 +602,31 @@ export class PortalRenderer {
     for (let i = 0; i < n; i++) this.pass('portal', meshes[i], camera, PASS.doorways);
   }
 
+  /**
+   * The doorways drawn on WebGPU (the GPU port's step 3): as `drawPortals` draws them, but the opening draws (depth tested)
+   * and the restoring ones (not) each wear a material of their own, set on the doorway's mesh for its draw. Three's WebGPU
+   * renderer keeps one pipeline a render object and lets a pipeline go the moment nothing uses it, so one material whose
+   * depth test flipped between the two draws made both pipelines again, synchronously, on every frame a doorway was drawn
+   * (288 a second for the cantina's two doors, measured). Its stencil fields are written as `drawPortals` writes them.
+   */
+  private drawPortalsGpu(meshes: THREE.Mesh[], n: number, camera: THREE.Camera, from: number, depthTest: boolean, restore: boolean): void {
+    let m = this.portalMat;
+    if (restore || !depthTest) m = this.portalOpenNoDepth ??= this.portalMat.clone();
+    m.stencilFunc = THREE.EqualStencilFunc;
+    m.stencilRef = restore ? 2 : from;
+    m.stencilZPass = THREE.IncrementStencilOp;
+    m.stencilFuncMask = 0xff;
+    m.depthTest = depthTest;
+    for (let i = 0; i < n; i++) {
+      const mesh = meshes[i];
+      if (mesh.material !== m) mesh.material = m;
+      this.pass('portal', mesh, camera, PASS.doorways);
+    }
+  }
+
+  /** The doorways' material for the draws that test no depth (the restore), on WebGPU alone (`drawPortalsGpu`). */
+  private portalOpenNoDepth: THREE.MeshBasicMaterial | null = null;
+
   private resetDepth(ref: number, camera: THREE.Camera): void {
     this.resetMat.stencilRef = ref;
     this.pass('depth reset', this.resetQuad, camera, PASS.doorways);
@@ -600,6 +635,9 @@ export class PortalRenderer {
   private renderLayer(scene: THREE.Scene, camera: THREE.Camera, layer: number): void {
     camera.layers.set(layer);
     camera.layers.enable(ACTOR_LAYER);
+    // On WebGPU the region tiers' render bundles are drawn only in a pass that sees the world's layer (three replays a bundle
+    // whatever its layers say).
+    if (GPU.webgpu) GPU.rt!.bundles.pass(layer === 0);
     const interior = layer === INTERIOR_LAYER;
     this.pass(interior ? 'interior' : 'world', scene, camera, interior ? PASS.interior : PASS.world);
   }
@@ -740,6 +778,12 @@ export class PortalRenderer {
    * building the camera is in), so every pass shares the same lighting.
    */
   private renderShadows(scene: THREE.Scene, view: Building | null): void {
+    // On WebGPU (the GPU port's step 3) three draws the sun's cascades itself, once a frame, in the first pass of the frame
+    // that lights with the sun (the world pass's, whose layers its shadow camera takes); no probe pass, no hold, no batches.
+    if (GPU.webgpu) {
+      SHADOW_STRAYS.seen = 0;
+      return;
+    }
     const r = this.renderer;
     const hooks = this.shadowPassHooks;
     // Off, or faded to nothing by a storm (the cascades' intensity is 0, so the stale maps cannot show): a frame with no
@@ -799,6 +843,11 @@ export class PortalRenderer {
     const src = this.roomShadows;
     const r = this.renderer;
     if (!src || !r.shadowMap.enabled) return;
+    // On WebGPU three draws a casting lamp's map itself in the rooms pass that lights with it: each lit slot is told to.
+    if (GPU.webgpu) {
+      if (this.roomShadowBuilding) for (let i = 0; i < src.litN; i++) src.litCasters[i].shadow.needsUpdate = true;
+      return;
+    }
     const all = src.casterList;
     if (all.length === 0) return;
     let any = false;
@@ -915,6 +964,8 @@ export class PortalRenderer {
       this.passLog.length = 0;
       projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       frustum.setFromProjectionMatrix(projView, THREE.WebGLCoordinateSystem, camera.reversedDepth);
+      // On WebGPU each region tier's render bundle is shown this frame while the view or the sun's shadow reach meets it.
+      if (GPU.webgpu) GPU.rt!.bundles.frame(camera);
       // The frame an exit comes into view the shadows are drawn here, before the world pass, so nothing pops.
       if (skipWorld) {
         SHADOW_STRAYS.seen = 0;

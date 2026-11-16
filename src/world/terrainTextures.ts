@@ -23,6 +23,7 @@ import { childIndexOf, lentFamilyKey, type ShaderFamily, type ShaderGroup } from
 import { COLOUR_MODES, cornerOrder, GROUND_DRAW_TUNE, maskCode, tilesFit, type GroundTiler } from './groundTiles.ts';
 import { CLOUD_GREY, CLOUD_METRES, CLOUD_PERIOD, LUMA, bumpNormal, cloudShade, cloudUv, composeTile, flatShine, srgbDecode, tintGamma, type MaskSample, type TintReference } from './groundMath.ts';
 import { lighterTone } from './volumetrics/airMath.ts';
+import { GPU } from '../core/gpuSwitch.ts';
 
 /** `toneColour`'s scratch: the lighter tones' means and how many samples were taken. */
 const TONE_SCRATCH = { r: 0.5, g: 0.5, b: 0.5, n: 0 };
@@ -772,6 +773,8 @@ export function groundTilesMaterial(u: GroundTileUniforms, csm: CSM | null): THR
   // The ground carries its own wet injection; the material scan must not wrap it again.
   mat.userData.wetBuiltIn = true;
   mat.customProgramCacheKey = () => GROUND_TILES_KEY;
+  // On WebGPU (the GPU port's step 3) the tile program does not run: a stand-in draws each chunk in its colour map's colour.
+  if (GPU.webgpu) mat.userData.gpuStandIn = () => GPU.rt!.standIns.ground('tint');
   return mat;
 }
 

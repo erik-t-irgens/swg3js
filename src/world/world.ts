@@ -1,5 +1,6 @@
 import { followCameraDepth } from './csmDepth.ts';
 import { REVERSED_DEPTH } from '../core/depthMode.ts';
+import { GPU, type GpuSun } from '../core/gpuSwitch.ts';
 import { PMREMGenerator185, type Pmrem185 } from '../core/pmrem185.ts';
 import * as THREE from 'three';
 import { packIdOf, type PlanetDef } from '../data/planets';
@@ -1458,7 +1459,15 @@ export class World {
     this.sky.renderOrder = -1;
     scene.add(this.sky);
     markActor(this.sky);
+    // On WebGPU (the GPU port's step 3) this plain dome's own program is not drawn: it stands in as one colour, the fog's
+    // as the hour blends it (`applyLighting` writes it beside the fog's own), on a world with no converted sky.
+    if (GPU.webgpu) {
+      const c = (this.gpuSkyColour = new THREE.Color());
+      this.sky.material.userData.gpuStandIn = () => GPU.rt!.standIns.sky(c, c);
+    }
   }
+  /** The plain dome's colour on WebGPU (the fog's, written as the light is applied); null on WebGL. */
+  private gpuSkyColour: THREE.Color | null = null;
 
   // ---- The sound the world makes. ----
 
@@ -3763,6 +3772,8 @@ export class World {
    * only where it has none, which is what this did before.
    */
   private refreshEnvironment(dt: number): void {
+    // No reflections on WebGPU this step (the GPU port's step 3): the filter is WebGL's, and the sky's capture is a remake.
+    if (GPU.webgpu) return;
     const sky = this.swgSky;
     if (!sky || !this.renderer) return;
     this.pmrem ??= this.makePmrem(this.renderer);
@@ -3846,6 +3857,7 @@ export class World {
    * every reflective material in the world was rebuilt at once.
    */
   async reflectionsReady(ms: number): Promise<void> {
+    if (GPU.webgpu) return;
     if (!this.swgSky || !this.renderer) return;
     if (!this.envTexture) {
       this.envTimer = 99;
@@ -6635,6 +6647,8 @@ export class World {
     // The world pass drawn from inside a building may leave out what these hold when it misses the
     // exits: the placed objects' instanced meshes hang off the scene, the ground's chunks and far tiles off its root.
     if (!portals.narrowParents.includes(this.scene)) portals.narrowParents.push(this.scene, this.chunkRoot);
+    // On WebGPU (the GPU port's step 3) the region tiers' render bundles hang under a root of their own, one of those parents.
+    if (GPU.webgpu) GPU.rt!.bundles.attach(this.scene, portals.narrowParents);
     // Round every shadow pass (the sixth wave): the batches follow their sources and take over their casting for the
     // pass alone, and the cascades' holds are told what was drawn, the batches' sources put back first whatever happens.
     const batches = this.shadowBatches;
@@ -6670,7 +6684,17 @@ export class World {
     this.sun.castShadow = false;
     this.sun.visible = false;
     this.setupShadowMaterials();
+    // On WebGPU (the GPU port's step 3) the classic cascades are kept for every reader of them and hidden from the renderer;
+    // one sun with three's `CSMShadowNode` at the game's own splits, map and reach lights and shadows in their place,
+    // copying from them every frame (`updateShadows`).
+    if (GPU.webgpu) {
+      for (const l of this.csm.lights) l.visible = false;
+      this.gpuSun = GPU.rt!.makeSun(this.scene, camera, { maxFar: this.shadowDistance, mapSize: this.shadowMapSize, lightMargin: LIGHT_MARGIN, splits: (amount, near, far, target) => splitBreaks(amount, near, far, SHADOW_SPLIT_TUNE, target) });
+    }
   }
+
+  /** The sun of the cascades on WebGPU (`GpuRuntime.makeSun`), or null: on WebGL, and before the cascades exist. */
+  private gpuSun: GpuSun | null = null;
 
   /**
    * Retune the shadows and report what they cost. `distance` rebuilds the cascades at a new
@@ -6740,6 +6764,7 @@ export class World {
     if (!this.csm) return;
     this.csm.updateFrustums();
     this.applyShadowQuality();
+    this.gpuSun?.frustums();
   }
 
   /**
@@ -8097,6 +8122,25 @@ export class World {
   }
 
   /**
+   * On WebGPU alone (the GPU port's step 3): every pass of each object handed to the warm-up (`compileOne` turn after turn
+   * until it is done, each turn one pass listed by `renderer.compile`, which the WebGPU runtime answers), then those
+   * compiles waited for. The WebGL queue counts programs to pace itself, and WebGPU makes none: its pipelines are made off
+   * the frame and a frame that meets one not yet made skips that draw.
+   */
+  private async gpuReady(objects: THREE.Object3D[], own: OwnJob | null): Promise<void> {
+    const rt = GPU.rt!;
+    const mark = rt.compileMark();
+    for (const o of objects) {
+      for (let guard = 0; guard < 8; guard++) {
+        const step = own ? own.compile(o, Number.POSITIVE_INFINITY, false) : this.compileOne(o, Number.POSITIVE_INFINITY, false);
+        if (step.done) break;
+      }
+    }
+    // These objects' own compiles alone: what else is being built meanwhile (a tier streaming in elsewhere) is not waited for.
+    await rt.compiledSince(mark);
+  }
+
+  /**
    * Make some objects ready to be drawn and answer when they are, either through the paced queue
    * or outright.
    *
@@ -8110,6 +8154,9 @@ export class World {
    */
   private async queueOrBuild(objects: THREE.Object3D[], label: string, urgent: boolean, own: OwnJob | null = null): Promise<void> {
     if (!objects.length) return;
+    // On WebGPU (the GPU port's step 3) every pass of each object is listed for the warm-up at once, and the answer waits
+    // for its pipelines to land: no frame builds one, and the queue's program pacing is WebGL's.
+    if (GPU.webgpu) return this.gpuReady(objects, own);
     // On a page on screen the idle rule's bounds are the long ones (`PACE_TUNE.idleShownMs`): frames stand still there
     // only while the browser waits on the GPU process, never because the loop has gone.
     const shown = !document.hidden;
@@ -8449,6 +8496,9 @@ export class World {
       await this.nextFrame();
       land(!parallel());
     }
+    // On WebGPU (the GPU port's step 3) the batches were listed for the warm-up, built on its own clock: waited for here,
+    // every pipeline landed, as the links are above on WebGL.
+    if (GPU.webgpu) await GPU.rt!.compiled();
     const t = this.outrightLinks;
     t.issued += flight.issued;
     t.resolved += flight.resolved;
@@ -8795,6 +8845,7 @@ export class World {
         this.splitsApplied = shadowSplitsVersion();
         csm.updateFrustums();
         this.applyShadowQuality();
+        this.gpuSun?.frustums();
       }
       csm.lightDirection.copy(this.day.lightDir).negate().normalize();
       csm.update();
@@ -8811,6 +8862,9 @@ export class World {
     perf.gauge(CNT.batchedCasters, this.shadowBatches.casters);
     perf.gauge(CNT.shadowBatches, this.shadowBatches.standing);
     this.syncGrassShadows();
+    // On WebGPU (the GPU port's step 3) the cascades' own lights are hidden and none is held (their cadence is forced off):
+    // the sun of three's `CSMShadowNode` copies their fit, colour and shadow look, once they have moved this frame.
+    if (csm && this.gpuSun && this.camera) this.gpuSun.sync(csm, this.camera, this.renderer?.shadowMap.enabled === true);
     if (now - this.csmScanAt > SCAN_TUNE.everyMs) {
       this.csmScanAt = now;
       perf.begin(SEC.scan);
@@ -8920,7 +8974,8 @@ export class World {
     // The environment filter's own programs, built here with everything else's rather than in the
     // loader callback that brings the first cube in, which lands after the screen has lifted; and the
     // dome's own capture with its kept targets beside it.
-    if (this.renderer) {
+    // Neither on WebGPU (the GPU port's step 3): no environment is filtered there this step.
+    if (this.renderer && !GPU.webgpu) {
       this.pmrem ??= this.makePmrem(this.renderer);
       this.dome ??= this.makeDome(this.renderer);
     }
@@ -12034,6 +12089,7 @@ export class World {
     const fog = this.scene.fog as THREE.FogExp2;
     fog.color.copy(this.nightFog).lerp(this.dayFog, d);
     fog.color.lerp(new THREE.Color(0xd08a5a), this.day.sunset * 0.35 * d);
+    if (this.gpuSkyColour) this.gpuSkyColour.copy(fog.color);
   }
 
   private stream(center: THREE.Vector3, budget: number): void {

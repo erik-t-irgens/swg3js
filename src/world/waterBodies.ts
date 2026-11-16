@@ -9,6 +9,7 @@ import { readWaterPack, waterLookFor, type WaterLook, type WaterPackData } from 
 import { packNamesImmunity, setLavaImmunity } from './lavaImmunity';
 import { lavaImmuneTemplates } from './lavaHarmMath';
 import { sortByDraw, WaterVisibility, type WaterDrawKey, type WaterVisibilityState } from './waterVisibility';
+import { GPU } from '../core/gpuSwitch.ts';
 
 /**
  * Every water surface in the world, with the look its terrain shader asks for and the environment
@@ -192,6 +193,9 @@ export class WaterBodies {
   attach(renderer: THREE.WebGLRenderer): void {
     if (this.renderer === renderer) return;
     this.renderer = renderer;
+    // On WebGPU (the GPU port's step 3) no environment is filtered for the water and no visibility query is made: the
+    // bodies draw as three's node copy of their material, a flat surface in their look's colour and opacity.
+    if (GPU.webgpu) return;
     const gl = renderer.getContext();
     if (typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext) this.visibility.attach(gl);
     this.standIn?.dispose();

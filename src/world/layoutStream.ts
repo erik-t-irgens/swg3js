@@ -36,6 +36,7 @@ import { isFallingWaterShader, solidRuleOf } from './walkThrough.ts';
 import { POST_CLEAR_TUNE, clearSpotNear, insidePiece, type PieceBox } from './interiors.ts';
 import { isTableTemplate } from './rowSolid.ts';
 import { buildFloor, heightIn, locate, type FloorSource, type NavFloor } from './nav/navMesh.ts';
+import { GPU } from '../core/gpuSwitch.ts';
 
 /**
  * What stands the doors in a building's doorways when its rooms are built and takes them down with
@@ -2462,6 +2463,8 @@ export class LayoutStreamer {
   hideInPlace(o: PlacedObject, whole: boolean): boolean {
     const r = this.foldOf.get(o);
     if (!r) return false;
+    // On WebGPU its tier's render bundle is recorded again: a recorded bundle follows no matrix written in place.
+    if (GPU.webgpu) GPU.rt!.bundles.dirty(r.tier);
     if (r.hidden === 0) {
       // The slots' own matrices kept, then each written as the copy's place at no size.
       const saved = r.saved ?? (r.saved = new Float32Array(r.slots.length * 16));
@@ -2519,6 +2522,8 @@ export class LayoutStreamer {
   showInPlace(o: PlacedObject): boolean {
     const r = this.foldOf.get(o);
     if (!r || r.hidden === 0) return false;
+    // On WebGPU its tier's render bundle is recorded again: a recorded bundle follows no matrix written in place.
+    if (GPU.webgpu) GPU.rt!.bundles.dirty(r.tier);
     const saved = r.saved;
     for (let k = 0; k < r.slots.length; k++) {
       const { mesh, i } = r.slots[k];
@@ -3629,6 +3634,8 @@ export class LayoutStreamer {
   private async loadTier(region: Region, tier: number): Promise<void> {
     const loaded = await this.buildTier(region, tier);
     if (!loaded) return;
+    // On WebGPU (the GPU port's step 3) its bulk's still meshes are marked for a render bundle before their programs are built.
+    if (GPU.webgpu) GPU.rt!.bundles.mark(loaded, loaded.meshes, loaded.bulk, (m) => this.furnitureOfMesh.has(m));
     if (this.prepare && loaded.meshes.length) {
       // The meshes went in hidden: they are shown once their programs exist, so no frame is ever the
       // first to draw a material nothing had built. The tier is already recorded, so an unload while
@@ -3647,6 +3654,8 @@ export class LayoutStreamer {
     if (!this.disposed && region.tiers[tier] === loaded) {
       loaded.ready = true;
       this.batchTier(loaded);
+      // On WebGPU what was marked goes under the tier's render bundle now it is shown.
+      if (GPU.webgpu) GPU.rt!.bundles.take(loaded, this.scene);
       // The landmark index hands its copies of this tier's objects back at its next sweep, which this asks for (`landmarks.ts`).
       this.tierEpoch++;
     }
@@ -4097,6 +4106,8 @@ export class LayoutStreamer {
       }
     }
     for (const g of this.levelGroups) g.setBase((mesh) => stampedCasts(mesh));
+    // On WebGPU every render bundle is looked at again: what casts moved.
+    if (GPU.webgpu) GPU.rt!.bundles.poke();
     for (const region of this.regions.values()) {
       for (const tier of region.tiers) {
         if (!tier || tier === 'loading') continue;
@@ -4211,6 +4222,8 @@ export class LayoutStreamer {
     st.sweeps++;
     st.repacks += repacks;
     st.ms = performance.now() - t0;
+    // On WebGPU every render bundle is looked at again: a level moved or a level's shadow rule did (`bundles.ts`).
+    if (GPU.webgpu) GPU.rt!.bundles.poke();
   }
 
   /** The levels switch or a tune moved: the next sweep runs whatever the clock says. */
@@ -4683,6 +4696,8 @@ export class LayoutStreamer {
     // Its shadow batch goes with it (its geometry and textures; the material is the session's).
     if (t.batch) this.shadowBatches?.drop(t.batch);
     t.batch = null;
+    // On WebGPU its render bundle goes first: its meshes back in the scene, where the loop below takes them out.
+    if (GPU.webgpu) GPU.rt!.bundles.drop(t);
     for (const b of t.buildings) this.dropInterior(b);
     for (const mesh of t.meshes) {
       this.scene.remove(mesh);

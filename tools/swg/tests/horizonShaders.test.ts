@@ -660,7 +660,14 @@ else {
     ["c.slot === 0 ? 'bottom'", "c.altitude === CLOUD_ALTITUDES[0] ? 'bottom'"],
   ];
   ok(SHEETS.every(([p]) => nowSk.split(p).length === 2), "the cloud sheets' lines in sky.ts are there exactly once each");
-  const unSheeted = SHEETS.reduce((s, [p, q]) => s.replace(p, q), nowSk);
+  // The GPU port's step 3: the renderer switch's import and the dome's stand-in on WebGPU (a function WebGPU's fallback
+  // calls, no program's text), each taken back out and found exactly once.
+  const GPU_IMPORT = "import { GPU } from '../core/gpuSwitch.ts';\n";
+  const gpuFrom = nowSk.indexOf("    // On WebGPU (the GPU port's step 3) the dome's program is a stand-in");
+  const gpuTo = gpuFrom > 0 ? nowSk.indexOf('    this.group.add(this.dome);', gpuFrom) : -1;
+  const GPU_DOME = gpuFrom > 0 && gpuTo > gpuFrom ? nowSk.slice(gpuFrom, gpuTo) : '\u0000none';
+  ok(nowSk.split(GPU_IMPORT).length === 2 && nowSk.split(GPU_DOME).length === 2 && GPU_DOME.includes('if (GPU.webgpu) {') && GPU_DOME.trimEnd().endsWith('}'), "the GPU port's two parts in sky.ts are there exactly once each (the switch's import, the dome's stand-in)");
+  const unSheeted = SHEETS.reduce((s, [p, q]) => s.replace(p, q), nowSk).replace(GPU_IMPORT, '').replace(GPU_DOME, '');
   const back = unSheeted.replace("import { DOME_COLOUR_GLSL } from './domeColour.ts';\n", '').replace('${DOME_COLOUR_GLSL}', body).replace("'uClear' | 'uHorizonFog', THREE.IUniform>> {", "'uClear', THREE.IUniform>> {").replace("'uClear' | 'uHorizonFog', THREE.IUniform>;", "'uClear', THREE.IUniform>;").replace(W5_FIELD, '').replace(w5Parts[1], '').replace(w5Parts[2], 'o.skyDistance = SKY_RADIUS;');
   let at = 0;
   while (at < back.length && back[at] === sk[at]) at++;

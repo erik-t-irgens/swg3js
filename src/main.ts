@@ -7,6 +7,9 @@ import * as THREE from 'three';
 // (src/core/threeHolds.ts), so the library's upgrade changes nothing a surface looks like.
 import './core/threeHolds.ts';
 import { REVERSED_DEPTH, projectedBehind } from './core/depthMode.ts';
+// Which renderer the game draws with, read once at boot (the GPU port's step 3): WebGL unless asked otherwise. The WebGPU
+// side is one dynamic import (`./core/gpu/start.ts`) made by the boot only with the switch at WebGPU.
+import { GPU, readRendererSwitch } from './core/gpuSwitch.ts';
 // The display's own rules, apart from the panels'. The stylesheet in index.html carries the named
 // colours on `:root`; this one carries what is drawn from them.
 import './ui/hud.css';
@@ -64,6 +67,7 @@ import { LIVE_GROUND_OVERRIDES } from './world/volumetrics/groundResponse.ts';
 import { groundAirSelfTest } from './world/volumetrics/airGround.ts';
 import type { AirField } from './world/volumetrics/airField.ts';
 import { SHADOW_PASS_TUNE, tuneShadowPass } from './world/shadowCadence.ts';
+import { SHADOW_BATCH_HATCH } from './world/shadowBatches.ts';
 import { SHADOW_SPLIT_TUNE, splitEnds, tuneShadowSplits } from './world/shadowSplits.ts';
 import type { AbReport } from './core/perfMath.ts';
 import { FAR_TILE_TUNE } from './world/farTile.ts';
@@ -1916,7 +1920,13 @@ class App {
     // Reversed depth (core/depthMode.ts, docs/REVERSED-DEPTH.md): the near plane at 1 and the far at 0, so depth keeps
     // its precision all the way out instead of losing it with the square of the distance. With the camera's 0.05 m
     // near plane a depth step was 2.7 m at 1.5 km, and a seabed that close under the water showed through it.
-    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true, reversedDepthBuffer: REVERSED_DEPTH });
+    // On WebGPU (the GPU port's step 3) the renderer is three's `WebGPURenderer` the boot made and initialised on this canvas;
+    // none of the WebGL context's questions below is asked of it (its backend is said by `__debug.gpu()`).
+    if (GPU.webgpu) this.renderer = GPU.rt!.renderer;
+    else this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, powerPreference: 'high-performance', stencil: true, reversedDepthBuffer: REVERSED_DEPTH });
+    // The WebGL program machinery's backend is no question of WebGPU's: 'unknown' to it, and `__debug.gpu()` says WebGPU's.
+    if (GPU.webgpu) this.backend = 'unknown';
+    else {
     // The draw order is three's own under reversed depth too: 0.187 turns each item's projected depth round as it is
     // listed, where 0.185 reversed its whole sorted lists, renderOrder and all, and was handed comparators to undo it.
     if (REVERSED_DEPTH !== this.renderer.capabilities.reversedDepthBuffer) {
@@ -1938,6 +1948,9 @@ class App {
     // The link-wait watch (`linkMode.ts`): the GL calls that can make the main thread wait on a shader link, wrapped
     // once on this context and timed, whoever makes them, so a frame's real wait is known (T9). Nothing on a steady frame.
     watchLinkWaits(this.renderer.getContext(), () => performance.now());
+    }
+    // Asked for WebGPU and given WebGL (the boot could not start it): said once, on the message line.
+    if (GPU.refused) this.messages.say('system', `WebGPU could not start here (${GPU.refused}); the game draws on WebGL.`);
     // ?lowfx=1 is the cheap preset for this session; otherwise the settings kept in this browser.
     const lowfx = new URLSearchParams(location.search).get('lowfx') === '1';
     if (lowfx) Object.assign(this.settings, { renderScale: 0.5, shadows: false, effects: false });
@@ -1962,7 +1975,8 @@ class App {
     this.renderer.shadowMap.enabled = S.shadows;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    World.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+    if (GPU.webgpu) World.anisotropy = Math.min(8, (this.renderer as unknown as { getMaxAnisotropy(): number }).getMaxAnisotropy());
+    else World.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     this.renderer.toneMappingExposure = S.exposure;
 
     this.cam = new ThirdPersonCamera(window.innerWidth / window.innerHeight);
@@ -2037,8 +2051,10 @@ class App {
     // session and nothing of the pass is ever made.
     this.applyVolumetrics();
     // The effects chain is built only now: the water reflections pass is handed the world's water
-    // bodies, so a chain made before the world exists throws on boot.
-    if (S.effects) this.postfx = this.makePostFX();
+    // bodies, so a chain made before the world exists throws on boot. Never on WebGPU this step (the effects are step 6):
+    // the scene draws straight to the canvas with three's own tone mapping at the game's exposure.
+    if (GPU.webgpu) this.forceGpuOff();
+    else if (S.effects) this.postfx = this.makePostFX();
     // The wardrobe and creator dolls take their lens from the same settings (a static, so no panel need exist yet).
     this.syncPreviewEffects();
     // Shaders are warmed for the target the frames are actually drawn into: with the effects on,
@@ -2058,7 +2074,8 @@ class App {
     // The flora's settings into their tunes before any world or camera, so the first world is planted, cast and drawn by them.
     this.applyFlora();
     // The far ground's switch from the Graphics page before any world, so the first arrival loads the bake when it is on.
-    HORIZON_TUNE.ground = S.farRings ? 'rings' : 'tiles';
+    if (GPU.webgpu) HORIZON_TUNE.ground = 'tiles';
+    else HORIZON_TUNE.ground = S.farRings ? 'rings' : 'tiles';
     // And the far tree cards to the horizon (the fifth wave, §1b Q11): made at an arrival where the rings stand.
     CARD_FIELD_TUNE.on = S.farCardsHorizon;
     this.applyReach();
@@ -2105,7 +2122,9 @@ class App {
     // The frame report (`__debug.perf()`) times each pass on the GPU through this context when asked,
     // and can put the portal renderer's matrix walk side by side with its old behaviour. (The shadow
     // strays' knob is deliberately not a switch: keeping them builds programs on a live frame.)
-    perf.attach(this.renderer.getContext() as WebGL2RenderingContext);
+    // On WebGPU there is no GL context to time passes through: the report reads WebGPU's own counters (`__debug.gpu()`).
+    if (GPU.webgpu) perf.attach(null);
+    else perf.attach(this.renderer.getContext() as WebGL2RenderingContext);
     registerPerfSwitch('passMatrices', { get: () => this.portals.matrixOnce, set: (v) => (this.portals.matrixOnce = !!v), values: [false, true], note: 'false walks the scene matrices every pass (the old way), true once a frame' });
     // Step 1, drawing only what can be seen through the portals: the whole of it, and each cut apart.
     // The volumetrics' A/B switches: soft offs that never move the real master or a setting (the master off frees the
@@ -3385,6 +3404,24 @@ class App {
     for (const [id, ui] of [['wardrobe', this.wardrobe], ['weapons', this.weaponsUi], ['garage', this.vehiclesUi], ['npcs', this.npcUi], ['appearance', this.appearanceUi], ['backpack', this.backpack], ['shipedit', this.shipEdit], ['force', this.forceUi], ['housing', this.housingUi], ['props', this.propsUi]] as const) draggable(ui.root, '.wardrobe-panel', '.wardrobe-header', id);
     // Console hooks for driving the game from tests: window.__debug.teleport(x, z, yaw), .look(yaw, pitch), .cell().
     (window as unknown as { __debug: unknown }).__debug = {
+      /**
+       * The renderer (the GPU port's step 3): which one the game draws with and how the switch was read (`?renderer=webgpu`,
+       * else `localStorage['swg.renderer']`, else WebGL). On WebGPU: the adapter, the features asked and granted, the
+       * frame's draws and triangles, the pipelines held and made in play, the materials WebGPU cannot draw by name and
+       * count, the stand-ins drawn, each private patch of three's and whether it applied, the region tiers' render bundles,
+       * the warm-up, and everything forced off there. `{ look: { skyZenithAt, lavaGlow, groundGrey } }` moves the stand-ins'
+       * look live; `{ bundles: false }` draws the tiers' still meshes one by one again; `{ patches: { shadow, still, warm,
+       * stencil } }` switches a patch (each true by default); `{ warm: { sliceMs, sliceInPlayMs, inFlight } }` the warm-up's pace;
+       * `{ dynamicHint: true }` keeps the game's dynamic-draw hint on what the scene holds (dropped on WebGPU by default).
+       */
+      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean }) => {
+        const how = { asked: GPU.asked, read: GPU.how, switch: "?renderer=webgpu on the address, else localStorage['swg.renderer'] ('webgpu' or 'webgl'), else WebGL; read once at boot" };
+        if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };
+        const rt = GPU.rt!;
+        const look = o?.look ? rt.look(o.look) : undefined;
+        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined) ? rt.tune({ ...o, scene: this.scene }) : undefined;
+        return { renderer: 'WebGPU', ...how, ...rt.report({ shadowsOn: this.renderer.shadowMap.enabled }), ...(look ? { look } : {}), ...(tuned ? { tuned } : {}) };
+      },
       /**
        * Every window's box, its minimum, what storage holds for it, whether it is wholly on the screen and
        * whether anything in it would scroll sideways. `{ set: { id: 'map', x: 40, y: 30, w: 900, h: 600 } }`
@@ -14012,6 +14049,8 @@ class App {
     const was = VOL_TUNE.on;
     volQualityFrom(this.settings, VOL_TUNE, this.volOver);
     if (VOL_HATCH_OFF) VOL_TUNE.on = false;
+    // The volumetrics' master is held off on WebGPU this step (its remake is the owner's): nothing of the moving air is made.
+    if (GPU.webgpu) VOL_TUNE.on = false;
     // The unified wind's arm (the seventh wave): the master, its switch and its art above nought, written here when a
     // setting moves and never read from the settings on a frame.
     setWindArm({ master: VOL_TUNE.on, wind: VOL_TUNE.wind, devils: VOL_TUNE.windDevils, trees: VOL_TUNE.windTrees, art: VOL_TUNE.artWind });
@@ -14372,6 +14411,8 @@ class App {
    * decal); and the ground's switches say so where this world's ground is not drawn the way the air's variant needs.
    */
   private volKnobState(key: string): { note?: string; off?: string } | null {
+    // On WebGPU (the GPU port's step 3) the effects, the volumetrics and the far rings are not drawn yet: their rows say so.
+    if (GPU.webgpu && (isFxSettingKey(key) || key.startsWith('vol') || key === 'farRings' || key === 'farCardsHorizon')) return { off: 'not on WebGPU yet' };
     // The far tiles' radius while the rings stand in their place (the horizon pass): their reach is the Terrain distance.
     if (key === 'farRadius' && this.settings.farRings) return { off: 'the rings stand in place of the far tiles: their reach is the Terrain distance' };
     // Without reversed depth the rings stop at today's 4.9 km whatever the slider says (the fifth wave's guard), and the page says why.
@@ -18654,6 +18695,8 @@ class App {
    * rather than deciding on it). The stand-in is let go once it answers.
    */
   private startLinkCheck(): void {
+    // No program links on WebGPU (the GPU port's step 3): the link machinery is WebGL's and is skipped there.
+    if (GPU.webgpu) return;
     if (this.linkCheck) return;
     const check = new LinkCheck();
     this.linkCheck = check;
@@ -19217,6 +19260,8 @@ class App {
     if (!this.world.planet) return;
     const zone = this.zone ? `&zone=${this.zone}` : '';
     history.replaceState(null, '', `?planet=${this.world.planet.id}${zone}&class=${this.kit.id}`);
+    // The renderer asked for on the address stays on it (the GPU port's step 3), so a reload draws with the same one.
+    if (GPU.how === 'address') history.replaceState(null, '', `${location.search}&renderer=${GPU.asked}`);
   }
 
   /** The zone of a multi-terrain planet the player is in, when the planet has zones. */
@@ -23822,7 +23867,10 @@ class App {
     // Every renderer.render() resets these, so sum them as the passes go by.
     const auto = this.renderer.info.autoReset;
     this.renderer.info.autoReset = false;
-    info.calls = 0;
+    // On WebGPU `info.render.calls` is three's own count of render calls since the start, the id it skips an attribute's
+    // second upload in one render call by: put back to nought a frame, the ids came round again and no attribute written in
+    // play (a level group's copies, the flora batches) ever reached the GPU after its first frame.
+    if (!GPU.webgpu) info.calls = 0;
     info.triangles = 0;
     // Decided before the scene is drawn, so the lit water and the reflections pass never disagree
     // about who adds the water's environment term this frame. Before the clouds are fed, too: the
@@ -23942,7 +23990,8 @@ class App {
       postfx.end(f);
       perf.passEnd(PASS.post);
     }
-    this.frameCalls = info.calls;
+    if (GPU.webgpu) this.frameCalls = GPU.rt!.frameDraws();
+    else this.frameCalls = info.calls;
     this.frameTriangles = info.triangles;
     this.renderer.info.autoReset = auto;
   }
@@ -24064,6 +24113,28 @@ class App {
   }
 
   /** A new chain with every effect registered on it, ready to be warmed. */
+  /**
+   * What is held off on WebGPU this step (the GPU port's step 3), each named for `__debug.gpu()`: the effects chain (the
+   * scene draws straight to the canvas with three's tone mapping), the far rings (a program of ours: far tiles stand), the
+   * volumetrics' master (its remake is the owner's), the sun's shadow hold and shadow batches (every cascade drawn every
+   * frame, every caster drawing itself) and the leaf cards' shadow skip (a hook of ours WebGPU does not run).
+   */
+  private forceGpuOff(): void {
+    const rt = GPU.rt!;
+    rt.forced('effects', 'the effects chain is not made on WebGPU this step (step 6): straight to the canvas, three\'s tone mapping at the game\'s exposure');
+    rt.forced('far rings', 'a program of ours (step 5): the far ground is drawn as far tiles');
+    rt.forced('volumetrics', 'the master is held off: its remake is the owner\'s');
+    rt.forced('shadow hold', 'every cascade is drawn every frame');
+    rt.forced('shadow batches', 'every caster draws itself');
+    rt.forced('leaf skip', 'the leaf cards\' own shadow skip is a hook of ours: every card receives as any surface does');
+    HORIZON_TUNE.ground = 'tiles';
+    VOL_TUNE.on = false;
+    SHADOW_PASS_TUNE.cadence = false;
+    SHADOW_PASS_TUNE.batches = false;
+    SHADOW_BATCH_HATCH.on = false;
+    CARD_LIGHT_TUNE.shadow = 'all';
+  }
+
   private makePostFX(): PostFX {
     const fx = new PostFX(this.renderer, this.settings);
     fx.debugMaskObjects = () => {
@@ -24107,6 +24178,11 @@ class App {
    * when the programs are ready.
    */
   private async reconcileEffects(): Promise<void> {
+    // On WebGPU no effects chain is made this step: the Graphics page's rows say so; only the previews' lens is kept in step.
+    if (GPU.webgpu) {
+      this.syncPreviewEffects();
+      return;
+    }
     if (this.fxBusy) {
       this.fxAgain = true;
       return;
@@ -30660,6 +30736,8 @@ class App {
    * between `'both'` and `'rings'`, the far tiles shown, hidden or let go. Answers what it came to.
    */
   private async setHorizonGround(g: HorizonGround): Promise<string> {
+    // The far rings are a program of ours, not drawn on WebGPU this step (step 5): the far tiles stand there.
+    if (GPU.webgpu && g !== 'tiles') return 'not on WebGPU yet: the far ground is drawn as far tiles there (the rings are step 5)';
     const was = HORIZON_TUNE.ground;
     HORIZON_TUNE.ground = g;
     if (g === 'tiles') {
@@ -35709,6 +35787,8 @@ class App {
       // A frame the game did not simulate (the Escape menu, which is up whenever the console has the
       // mouse, a panel, the map, a loading screen, a death) is left out of the report and only counted.
       perf.frameEnd(performance.now(), this.frameCalls, simulate);
+      // WebGPU's own counters for the frame (draws, triangles, pipelines made while no loading screen was up).
+      if (GPU.webgpu) GPU.rt!.endFrame(this.traveling || !this.inWorld);
       input.endFrame();
     };
     frame();
@@ -35741,16 +35821,46 @@ async function readOurWorlds(): Promise<WorldRow[] | null> {
 /** The worlds of yours the boot read (none with no file), which the App starts from. */
 let BOOT_WORLDS: WorldRow[] = [];
 
+/**
+ * The WebGPU side made before the App, with the switch at WebGPU alone (the GPU port's step 3): one dynamic import, three's
+ * `WebGPURenderer` on the game's canvas, `init()` waited for. Where WebGPU cannot start (no `navigator.gpu`, no adapter,
+ * `init()` throws) the game boots on WebGL and the App says so once on the message line (`GPU.refused`); a canvas that took
+ * a WebGPU context can never take a WebGL one, so a fresh one stands in its place first.
+ */
+async function startGpu(): Promise<void> {
+  try {
+    const m = await import('./core/gpu/start.ts');
+    let timestamps = false;
+    try {
+      timestamps = localStorage.getItem('swg.gpu.timestamps') === '1';
+    } catch {
+      // Storage refused: no timestamps.
+    }
+    GPU.rt = await m.startWebGPU(document.getElementById('game') as HTMLCanvasElement, { reversedDepth: REVERSED_DEPTH, timestamps });
+    GPU.webgpu = true;
+  } catch (err) {
+    GPU.rt = null;
+    GPU.refused = String((err as Error)?.message ?? err);
+    console.warn(`renderer: WebGPU was asked for and could not start (${GPU.refused}); the game draws on WebGL`);
+    const old = document.getElementById('game');
+    if (old) old.replaceWith(old.cloneNode(false));
+  }
+}
+
 async function boot(): Promise<void> {
+  readRendererSwitch();
   // The worlds file waits a few seconds at most; a read that answers after that is landed when it comes (`readWithin`), never
   // thrown away, or the session would stand no world of yours and the editor mint ids against an empty list.
   const [physics, worlds] = await Promise.all([Physics.create(), readWithin(readOurWorlds(), 4000)]);
+  if (GPU.asked === 'webgpu') await startGpu();
   if (worlds.value?.length) {
     BOOT_WORLDS = worlds.value;
     mergeOurWorlds(worlds.value);
     if (OUR_WORLDS.refused.length) console.warn(`worlds: ${OUR_WORLDS.refused.map((s) => `${s.id}: ${s.why}`).join('; ')}`);
   }
   const app = new App(physics);
+  // On WebGPU the console's helpers that reach under WebGL's renderer answer in words (the GPU port's step 3).
+  if (GPU.webgpu) GPU.rt!.wrapConsole((window as unknown as { __debug: Record<string, unknown> }).__debug);
   if (worlds.late) {
     console.warn('worlds: the worlds file had not answered at boot; its worlds are landed when it does');
     void worlds.late.then((rows) => {

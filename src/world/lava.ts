@@ -15,6 +15,7 @@ import type { LavaHeatTable } from './heatSources';
 import { heatNoiseTexture, setupNoiseVolume } from './heatNoise';
 import { HEAT_NOISE_SIZE } from './heatNoiseData';
 import { decodeRamp, lavaFarValues, noiseFits, standInRamp, type LavaStyle } from './lavaStyle';
+import { GPU } from '../core/gpuSwitch.ts';
 
 /** The reconversion that writes each lava shader's look, for the warnings. */
 const RECONVERT = 'npm run swg -- water @SWG all assets-private --retail-only';
@@ -300,6 +301,13 @@ export function createLavaMaterial(style: LavaStyle, shaderSize: number, texture
     unlit: true,
     far: { noise: textures.noiseData, ramp: textures.rampData, rampWidth: textures.rampWidth, style },
   };
+  // On WebGPU (the GPU port's step 3) the lava's program is a stand-in: its ramp's middle colour, unlit.
+  if (GPU.webgpu) {
+    const k = Math.max(0, Math.floor(textures.rampWidth / 2)) * 4;
+    const d = textures.rampData;
+    const middle = new THREE.Color().setRGB((d[k] ?? 128) / 255, (d[k + 1] ?? 64) / 255, (d[k + 2] ?? 0) / 255, THREE.SRGBColorSpace);
+    material.userData.gpuStandIn = () => GPU.rt!.standIns.lava(middle);
+  }
   return material;
 }
 
