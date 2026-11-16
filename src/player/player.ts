@@ -37,7 +37,7 @@ import { SwimSink } from '../anim/swimSink.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
 import { CROUCH, STAND, isStairPick } from '../anim/locoTable.ts';
 import { FELL_UNDER } from '../world/fellOut.ts';
-import { FootIk } from './footIk.ts';
+import { FootIk, stairFeetOf } from './footIk.ts';
 import { StairSense } from './stairSense.ts';
 import { LedgeHang, LedgeIn, type LedgeWorld } from './ledge.ts';
 import { LimbPlace } from './limbPlace.ts';
@@ -490,6 +490,8 @@ export class Player {
   readonly feet = new FootIk(LOCO_TUNE.ik, () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }));
   readonly stairSense = new StairSense();
   readonly drawn = new DrawnHeight();
+  /** The stairs wave: how far the moves since the legs last read it took the body along the stairs' travel, metres (stairLoco's and BodyLoco.legs'). */
+  private stairMoved = 0.5;
   private readonly drawnIn = new DrawnIn();
   /**
    * Wave 4: the ledges (`src/player/ledge.ts`): a lip grabbed in the air after the move (`sense`), and while it holds the
@@ -838,6 +840,7 @@ export class Player {
     };
     this.ropeRibbon = new RopeRibbon(this.grapple.rope.capacity, GRAPPLE_TUNE.sagSegments);
     this.ropeDrawn = new Float64Array(3 * this.grapple.rope.capacity);
+    this.stairMoved = 0;
     scene.add(this.ropeRibbon.mesh);
     markActor(this.ropeRibbon.mesh);
     this.dartView = dartMesh();
@@ -2821,6 +2824,8 @@ export class Player {
     // crouched, prone, kneeling and swimming keep the speeds they always had, and so does everything with the classes off.
     // Wave 3: the stairs the rule held under the body last frame (read after the move, `stairSense`).
     this.locoIn.stairs = this.stairSense.way;
+    // The stairs wave: and their measure (the tread and riser one step a stair is planned by).
+    this.stairLoco();
     const lo = this.locoIn;
     lo.dt = dt;
     lo.mz = mz;
@@ -3114,7 +3119,10 @@ export class Player {
     sa.dt = dt;
     sa.filter = filter;
     sa.reads = this.grounded && !this.swimming && !rope && !this.crouching && !this.prone && !this.kneeling && moving;
+    sa.measure = LOCO_TUNE.ik.hips === 'steady' || LOCO_TUNE.stairs.stepRule === 'stairs';
     this.stairSense.step(this.physics.world, LOCO_TUNE.stairs);
+    // The stairs wave: how far the move took the body along the stairs' travel, for the legs' clip's phase.
+    this.stairMoved += mv.x * this.stairSense.ux + mv.z * this.stairSense.uz;
     // Off the ground with no jump this frame (a jump puts the feet down as `grounded` false before the move): a step off
     // a ledge or a drop. Under the owner's air rule, judged once now by one ray down from the feet (the game's own
     // ground query, which passes over other players): the hop over a drop of `fall.hopDrop` or more (`BodyAnim.leftGround`).
@@ -3353,12 +3361,33 @@ export class Player {
     fi.pz = this.pos.z;
     fi.heading = this.heading;
     fi.filter = this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+    // The stairs wave: the stairs measured under the body (the hips' line), and one step a stair's stride and clearance.
+    const stepping = this.loco.legsOn && this.loco.stepFacts !== null;
+    fi.stride = stepping ? this.loco.step.stride : 1;
+    fi.clear = stepping ? LOCO_TUNE.stairs.clear : 0;
+    fi.pin = stepping && LOCO_TUNE.stairs.pin === 'sole';
+    stairFeetOf(this.stairSense, fi);
+    fi.pivotL = stepping ? this.loco.step.pivotL : 0;
+    fi.pivotR = stepping ? this.loco.step.pivotR : 0;
     // Nothing to place and nothing eased in: under 'before' (and off the feet) the frame asks nothing more, the figure's
     // matrices left for the draw to work out as ever.
     if (!(fi.on && LOCO_TUNE.ik.rule === 'placed') && this.feet.weight === 0 && this.feet.drop === 0) return;
     this.group.updateMatrixWorld(true);
     const room = this.aboard;
     this.feet.step(rig, this.physics.world, room ? this.roomInverse.copy(roomFrame(room)).invert() : null);
+  }
+
+  /** The stairs wave: the speed classes' record of the stairs' measure (`StairSense`: the tread and riser, the next riser), field by field. */
+  private stairLoco(): void {
+    const s = this.stairSense;
+    const lo = this.locoIn;
+    lo.stairKnown = s.known;
+    lo.stairTread = s.tread;
+    lo.stairRiser = s.riser;
+    lo.stairNext = s.next;
+    lo.stairPrev = s.prev;
+    lo.stairLead = this.feet.leadSide;
+    lo.stairLeadAt = this.feet.leadAt;
   }
 
   // ---- wave 4: the ledges ------------------------------------------------------------------------------------------------
@@ -3873,6 +3902,13 @@ export class Player {
     // Null leaves every state below the clip it always had. While the classes are in force a change of the legs' clip
     // fades by the tune: between two of their clips (in step), to and from standing, and into and out of Jedi Academy's legs.
     // Crouched or prone under the classes (wave 2b, `loco.posture`) the legs are the classes' too.
+    // The stairs wave: the stairs as measured after this frame's move, how far it took the body along them, and the legs'
+    // clip's time, for one step a stair (`BodyLoco.legs`).
+    this.stairLoco();
+    this.locoIn.stairMoved = this.stairMoved;
+    this.stairMoved = 0;
+    const stepPick = this.loco.pick;
+    this.locoIn.legTime = stepPick !== null && rig.readTime(stepPick.clip) ? rig.timeOut : Number.NaN;
     const onFeet = moving && this.grounded && !this.mounted && !this.swimming && !this.kneeling && (this.loco.posture !== STAND || (!this.prone && !this.crouching));
     this.locoIn.ground = speed;
     const legs = this.loco.legs(onFeet ? rig : null, this.locoIn, this.jkaMode);
@@ -3976,6 +4012,8 @@ export class Player {
       rig.prefer(legs.state, legs.clip);
       rig.setState(legs.state, speed, null, this.legOpts);
     } else rig.setState(running ? 'run' : 'walk', speed, null, fo);
+    // The stairs wave: a stair cycle just taken on starts where its next footfall lands on a tread (`StairStep`'s snap).
+    if (legs && this.loco.snap === this.loco.snap) rig.setTime(legs.clip, this.loco.snap);
     rig.update(dt);
     this.group.updateMatrixWorld(true);
     // Always called: with no twist it puts the spine's clip pose back.

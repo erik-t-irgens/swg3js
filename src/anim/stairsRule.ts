@@ -26,7 +26,26 @@ export class StairsFound {
   /** Risers of any kind in the window, going up and going down (what the hold reads: a riser of its way keeps it). */
   ups = 0;
   downs = 0;
+  /**
+   * The stairs wave: the longest run's risers, along the window in samples (each riser's middle, the first sample 0), the
+   * ground's height on the side it is come to from (`from`) and the side it goes to (`to`), and the samples it spans
+   * (`lo`, `hi`: the last sample before it and the first after it). As many as `risers` (and no more than `RUN_MOST`).
+   */
+  readonly mids = new Float64Array(RUN_MOST);
+  readonly from = new Float64Array(RUN_MOST);
+  readonly to = new Float64Array(RUN_MOST);
+  readonly lo = new Int32Array(RUN_MOST);
+  readonly hi = new Int32Array(RUN_MOST);
 }
+
+/** The most risers of one run kept (a window of 4 m at 0.03 a sample holds no more than a 0.18 m tread's 22). */
+export const RUN_MOST = 64;
+/** The run being read, kept beside the longest: copied over it when it grows past it. */
+const curMid = new Float64Array(RUN_MOST);
+const curFrom = new Float64Array(RUN_MOST);
+const curTo = new Float64Array(RUN_MOST);
+const curLo = new Int32Array(RUN_MOST);
+const curHi = new Int32Array(RUN_MOST);
 
 /**
  * The rule over one window: `h[0..n-1]` the ground's heights `step` apart along the travel, the first the farthest
@@ -92,9 +111,26 @@ export function stairsIn(h: ArrayLike<number>, n: number, step: number, tune: Lo
       }
       lastMid = mid;
       levelSince = true;
+      // The stairs wave: where the riser stands and its two treads' heights, kept with its run.
+      if (runRisers <= RUN_MOST) {
+        const r = runRisers - 1;
+        curMid[r] = mid;
+        curFrom[r] = a;
+        curTo[r] = h[e];
+        curLo[r] = k;
+        curHi[r] = e;
+      }
       if (runRisers > best) {
         best = runRisers;
         bestSign = runSign;
+        const m = runRisers < RUN_MOST ? runRisers : RUN_MOST;
+        for (let r = 0; r < m; r++) {
+          out.mids[r] = curMid[r];
+          out.from[r] = curFrom[r];
+          out.to[r] = curTo[r];
+          out.lo[r] = curLo[r];
+          out.hi[r] = curHi[r];
+        }
       }
     } else {
       // Not a riser (a ramp's rise, a bump, a wall): the run ends here.

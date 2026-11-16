@@ -15,6 +15,9 @@
 import { CARRY_ORIGINAL, carryOf, type LocoRig } from './bodyLoco.ts';
 import { CROUCH, MADE_CROUCHED, MADE_CROUCH_BACK, MADE_INJURED, MADE_STAIRS_DOWN, MADE_STAIRS_RUN_DOWN, MADE_STAIRS_RUN_UP, MADE_STAIRS_UP, PRONE, PeerAsk, SPEED_SLOTS, STAND, fillSpeeds, peerLocoState, peerPickIn, posturePick, sideMode, stairPick, stairWay, type LocoPick } from './locoTable.ts';
 import type { LocoTune } from './locoTune.ts';
+import { cycleKindOf, isStairPick, stairCyclePick } from './locoTable.ts';
+import type { StairCycleFacts } from './stairCycle.ts';
+import { StairStep, StairStepIn } from './stairStep.ts';
 
 const DEG = 180 / Math.PI;
 
@@ -36,6 +39,24 @@ export class PeerIn {
   scale = 1.5;
   /** Wave 3: the stairs their figure stands on, as this side's own stairs rule holds them from where it stands (+1 up its travel, -1 down, 0 none). */
   stairs = 0;
+  /**
+   * The stairs wave: this side's measure of the stairs under them (src/player/stairSense.ts), how far their figure went
+   * along them since last frame, metres (their own distance, as drawn here), and their legs' clip's time now (NaN: not
+   * playing it yet): one step a stair driven by their own distance, as this side drives its own.
+   */
+  stairKnown = false;
+  stairTread = 0.5;
+  stairRiser = 0.5;
+  stairNext = 0.5;
+  stairMoved = 0.5;
+  legTime = 0.5;
+  /** The clip `legTime` is the time of ('' for none): a pick of another clip this frame starts its own (its time NaN). */
+  legClip = '';
+  /** How far behind their middle the last riser stands (NaN: none), metres. */
+  stairPrev = 0.5;
+  /** The foot their feet had planted furthest along the travel last frame (0 left, 1 right, -1 none) and its ankle's place along it from their middle, metres: what a stair clip taken on keeps where it stands. */
+  stairLead = -1;
+  stairLeadAt = 0.5;
 }
 
 /** The tune's class speeds, read by name once a call and by a pick's own place from there (one array for every figure: a call fills it before it reads it). */
@@ -52,11 +73,17 @@ export class PeerLoco {
   private next: LocoPick | null = null;
   private nextFor = 0.5;
   private readonly ask = new PeerAsk();
+  /** The stairs wave: their one step a stair (`stairs.stepRule` 'stairs'), the facts it is driven by (null: none), and a time to start their legs' clip at (NaN: none). */
+  readonly step = new StairStep();
+  stepFacts: StairCycleFacts | null = null;
+  snap = 0.5;
+  private readonly stepIn = new StairStepIn();
 
   constructor() {
     this.rate = 1;
     this.rel = 0;
     this.nextFor = 0;
+    this.snap = Number.NaN;
   }
 
   /**
@@ -114,6 +141,12 @@ export class PeerLoco {
     if (f.stairs !== 0 && tune.stairs.rule === 'stairs' && found.posture === STAND && stairWay(found.dir, tune.stairs.ways)) {
       const up = stairPick(found, f.stairs);
       if (rig.has(up.clip)) found = up;
+      // The stairs wave: the same cycle this side plays its own on (`stairs.cycle`, `stairs.mirror`).
+      const kind = cycleKindOf(up, tune.stairs.cycle, tune.stairs.mirror);
+      if (kind !== null && found === up) {
+        const twin = stairCyclePick(up, kind);
+        if (rig.has(twin.clip)) found = twin;
+      }
     }
     if (!this.pick || found === this.pick) {
       this.pick = found;
@@ -145,6 +178,35 @@ export class PeerLoco {
    */
   private setRate(tune: LocoTune, rig: LocoRig, pick: LocoPick, f: PeerIn): void {
     let rate = 1;
+    // The stairs wave: on stairs this side has measured under them, their stair clip driven by their own distance along
+    // them, one step every n treads chosen from those stairs and their speed (this side's own `StairStep`).
+    this.snap = Number.NaN;
+    this.stepFacts = null;
+    if (f.stairs !== 0 && tune.stairs.stepRule === 'stairs' && isStairPick(pick) && rig.stairFacts) {
+      const facts = rig.stairFacts(pick.clip);
+      if (facts !== null) {
+        const s = this.stepIn;
+        s.dt = f.dt;
+        s.known = f.stairKnown;
+        s.way = f.stairs;
+        s.tread = f.stairTread;
+        s.riser = f.stairRiser;
+        s.next = f.stairNext;
+        s.prev = f.stairPrev;
+        s.scale = f.scale;
+        s.moved = f.stairMoved;
+        s.time = f.legClip === pick.clip ? f.legTime : Number.NaN;
+        s.lead = f.stairLead;
+        s.leadAt = f.stairLeadAt;
+        s.asked = f.speed;
+        this.step.plan(s, facts, tune.stairs);
+        this.step.step(s, facts, tune.stairs);
+        this.stepFacts = facts;
+        this.snap = this.step.snap;
+        this.rate = this.step.rate;
+        return;
+      }
+    } else if (f.stairs === 0) this.step.reset();
     let natural = 0;
     if (pick.made >= 0) {
       const m = tune.made;

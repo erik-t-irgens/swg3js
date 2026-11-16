@@ -27,7 +27,7 @@ const { CharacterRig, IMPORTED_CLIPS, attachImportedClips } = await import('../.
 const { MixamoPack } = await import('../../../src/anim/mixamoPack.ts');
 const { BodyLoco, newLocoIn } = await import('../../../src/anim/bodyLoco.ts');
 const { factsOf, phaseAt, phaseGap, sharedRate } = await import('../../../src/anim/locoPhase.ts');
-const { dirOf, locoPick, tableClips } = await import('../../../src/anim/locoTable.ts');
+const { STAIR_IDS, dirOf, locoPick, tableClips } = await import('../../../src/anim/locoTable.ts');
 const { LOCO_TUNE_SHIPPED } = await import('../../../src/anim/locoTune.ts');
 const { readPackIndex } = await import('../../../src/anim/mxaFile.ts');
 const { planFit, skeletonKey } = await import('../../../src/anim/fit.ts');
@@ -291,6 +291,43 @@ function fadeGap(r: Rig, from: string, to: string, fps: number, fade: number, le
   rig.setState('run' as never, 0, null, { rate: 1, fade: 0.2 });
   ok(actionOf(rig, 'mx_slow_run').time === 0 && rig.strideNow().fading === null, 'from a clip with no stride (the idle) a walk fades in plain, from its start');
   rig.prefer('run' as never, null);
+  // The stairs wave: off a whole stair cycle (its two footfalls, the left foot's among them), a walk starts in step, its
+  // left foot's landing at the cycle's; onto a stair cycle nothing is put in step (the stairs' step starts it itself).
+  const cyc = 'mx_ascending_stairs~trimmed';
+  const stairPack = new MixamoPack({
+    enabled: () => true,
+    index: async () => readFileSync(join(packDir, 'index.json'), 'utf8'),
+    clip: async (file: string) => {
+      const b = readFileSync(join(packDir, file));
+      return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
+    },
+    breath: async () => {},
+    also: [...STAIR_IDS],
+    now: () => performance.now(),
+  });
+  const sr = CharacterRig.fromCharacter({ group: bonesOf(), clips: ownClips() } as never);
+  sr.addClips(await stairPack.clipsFor(sr.restSkeleton(), 'made'), (c: THREE.AnimationClip) => stairPack.strideOf(c));
+  const sf = sr.stairFacts(cyc);
+  if (sf && sr.has(cyc)) {
+    const k = sf.side[0] === 0 ? 0 : 1;
+    sr.prefer('walk' as never, 'mx_standard_walk');
+    sr.setState('walk' as never, 0, null, { rate: 1, fade: 0.2 });
+    sr.update(0.5);
+    sr.prefer('walk' as never, cyc);
+    sr.setState('walk' as never, 0, null, { rate: 1, fade: 0.2 });
+    ok(actionOf(sr, cyc).time === 0 && sr.strideNow().fading === null, 'onto a stair cycle the clip starts plain, from its start (the stairs\' step puts it where it lands)');
+    sr.update(0.2);
+    sr.update(0.31);
+    const t = actionOf(sr, cyc).time;
+    sr.prefer('walk' as never, 'mx_standard_walk');
+    sr.setState('walk' as never, 0, null, { rate: 1, fade: 0.2 });
+    const want = (((t - sf.at[k]) / sf.len) % 1 + 1) % 1;
+    const got = phaseAt(actionOf(sr, 'mx_standard_walk').time, factsOf(row('standard_walk'), fitScale)!);
+    ok(phaseGap(got, want) < 1e-6 && sr.strideNow().fading !== null, `off the stair cycle the walk starts in step: its phase ${got.toFixed(3)}, the cycle's ${want.toFixed(3)} (from its left foot's landing)`);
+    sr.prefer('walk' as never, null);
+    sr.setState('idle' as never);
+    sr.update(0.3);
+  } else ok(false, 'the test rig holds the stair cycle it is asked about');
 }
 
 // ---- the rate a clip plays at ---------------------------------------------------------------------------------------------

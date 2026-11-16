@@ -226,6 +226,38 @@ export interface LocoTune {
     edgePull: number;
     /** Other players' figures within this many metres of the camera are placed too: 40 (the brief's start). */
     peerReach: number;
+    /**
+     * The stairs wave, the hips (the owner's 2026-11-15: "the whole body bobs up and down to accomplish foot contact.
+     * Normal humans try to stabilize their general height ... the feet/legs stretch to match"). 'steady' (the start): the
+     * hips stand at the clip's own height over the ground where the body stands now (under its middle, or on stairs the
+     * line through the treads' middles), eased over `hipEase`; the legs bend and stretch to their grounds, and the hips drop
+     * only by what a leg stretched to `stretch` with its toe pointed still cannot reach, held over `hipHold` and eased in
+     * over `hipEase` and out over `hipRelease`. 'before': 9c18665's pelvis, lowered each frame for the lower foot.
+     */
+    hips: 'steady' | 'before';
+    /** How fast the ground the hips stand over is followed past what its own slope gives (a kerb, the stairs' start), and the drop eased in, seconds: 0.25, about a step. */
+    hipEase: number;
+    /** How fast the drop the legs asked for goes back out, seconds: 0.6, slower than it came in, so a steady slope's drop is held. */
+    hipRelease: number;
+    /**
+     * The drop asked is the most either foot asked over this long, seconds: 1.5, a whole cycle of both feet at the walk and the
+     * jog, so a footfall never pumps it. (At 0.7, one step, the jog's two feet, which ask differently, let it go between
+     * them: up a 30 degree hill at 30 fps the right foot's toe-off stood 1.8 cm off its ground every cycle.)
+     */
+    hipHold: number;
+    /** A downhill leg stretches to this share of its whole length before the hips drop: 0.98 (the clip's own leg at heel strike is near straight). */
+    stretch: number;
+    /** And points its toe to make up at most this share of its foot's length: 0.5 (the heel up, the ball and toe on the ground), only once the clip's foot is on its ball. */
+    toeReach: number;
+    /**
+     * Under 'steady', a flat clip's foot is planted by its lower sole point (heel or ball) over the clip's own ground: whole
+     * at or under `soleLow` (0.005 m), swinging as the clip has it at or over `soleHigh` (0.025 m). Measured on the human
+     * male's walk: its heel comes down from 8 cm to the ground over the last 0.15 s of a swing and its middle swing dips to
+     * 2.5 cm (its toe's tip to 1.1 cm), so the ankle's band (`plantLow`, `plantHigh`) planted it from 4 cm up and mid-swing,
+     * which a steady hip reaches only by dropping for good.
+     */
+    soleLow: number;
+    soleHigh: number;
   };
   /**
    * Wave 3, stairs (src/anim/stairsRule.ts, the owner's brief's line 52 and its "Stairs" list): found by a rule from the
@@ -257,12 +289,65 @@ export interface LocoTune {
     count: number;
     /** On stairs until this far is travelled with no riser in the window, metres: 0.5. */
     leave: number;
-    /** A class's speed on stairs, as a share of its speed: 1 (changes nothing; whether a class goes slower on stairs is a rule of play). */
+    /**
+     * The speed on stairs under `stepRule` 'stairs' (the owner's "combo of a and b"): a share between the stair clip's own
+     * pace for stairs of this size (0: one clip step every `n` treads at its own rate) and the class's speed (1), then held
+     * so the clip's rate stays within `rateLow` to `rateHigh`: 0.25, toward the clips' pace ("the animation speeds are
+     * good"). Under 'before' the class's speed, as 9c18665 played stairs.
+     */
     pace: number;
     /** How fast the drawn body's height catches the capsule's after a step pops it, seconds: 0.12. */
     ease: number;
     /** The drawn body is never more than this behind the capsule's height, metres: 0.5 (the autostep's height). */
     lagMost: number;
+    /**
+     * The stair clips played round (src/anim/stairCycle.ts): 'trimmed' (the start) each clip's measured window that loops
+     * cleanly, one footfall a step (a one-footfall clip made a cycle of two by mirroring it, `mirror`); 'before' the clips
+     * untrimmed, as 9c18665 played them (both downstairs clips' ankles jumping 0.3 to 0.5 m at each wrap).
+     */
+    cycle: 'trimmed' | 'before';
+    /**
+     * A one-footfall clip's other step (the two downstairs clips): 'legs' (the start) the legs and hips mirrored, the
+     * spine, arms and head keeping the clip's own turn (which the owner says is on purpose); 'whole' the whole body
+     * mirrored; 'off' the same foot every step, the clip as it stands, its wrap's jump kept.
+     */
+    mirror: 'legs' | 'whole' | 'off';
+    /**
+     * One step a stair (src/anim/stairStep.ts; the brief names it `stairs.step`, which the sampler's step already is):
+     * 'stairs' (the start) the clip's phase driven by the distance gone along the stairs, each planted foot locked onto a
+     * tread `land` of the way along it, `n` treads a step, the stride reached to the treads, the swing foot lifted over
+     * the nosing, and the speed matched (`pace`, the rate band); 'before' 9c18665's stairs: the class's speed, the rate held
+     * at the band's 1.6, the feet sliding.
+     */
+    stepRule: 'stairs' | 'before';
+    /** How many treads a step takes: 'auto' (the start) by the stairs' size against the clip's own step and by the speed, held on a flight; or '1', '2', '3' forced. */
+    perStep: 'auto' | '1' | '2' | '3';
+    /** Under 'auto', at most this many treads a step: 2 (3 allowed: a long-legged run up shallow stairs). */
+    nMost: number;
+    /** Under 'auto', a step takes one tread more where the clip's rate at the speed asked would pass this: 1.4 (the band's top, past which the speed would be cut). */
+    upAt: number;
+    /** Under 'auto', the treads a step takes are chosen again on the same flight only once its tread or riser has changed by this share: 0.15. */
+    resize: number;
+    /** Where on its tread each planted foot lands, as a share of the tread from its riser: 0.5, the tread's middle (never over a nosing). */
+    land: number;
+    /** The stair clip's rate is held within these, so the speed is what they allow: 0.7 and 1.4 (the clips' own pace give or take). */
+    rateLow: number;
+    rateHigh: number;
+    /**
+     * Each footfall is steered onto its tread's spot as the body goes toward it (the phase taking each move's share of what it
+     * would miss by, so it lands on the spot as it happens); one nearer than this share of a step is left to land where it
+     * lands and the one after it steered: 0.25 (a quarter of a step: under it the clip would have to race or stall).
+     */
+    steer: number;
+    /** A swinging foot passes over a nosing by at least this, metres: 0.04 (a toe's clearance). */
+    clear: number;
+    /**
+     * One step a stair: a planted foot held where its sole stands ('sole': its heel or its ball, whichever the clip has lower,
+     * kept where it was when the foot came onto it, eased out as it lifts) or left to the clip ('off'). Start 'sole': the stair
+     * clips' stance feet go back unevenly while the body goes on at an even speed, so left to the clip a planted foot slid
+     * 3 to 5 cm along its tread every step down and up to 26 cm a step running (measured on the human male, 60 fps).
+     */
+    pin: 'sole' | 'off';
   };
   /**
    * What each class moves the body at, metres a second, by the way it goes. Every start is the owner's own, pinned on
@@ -436,8 +521,8 @@ export const LOCO_TUNE: LocoTune = {
     stamina: { slow: 10, normal: 10, fast: 4 },
   },
   made: { crouched: 1.49, crouchBack: 1.39, gameWalk: 1.44, injuredWalk: 0.564, stairsUp: 0.365, stairsRunUp: 0.749, stairsDown: 0.485, stairsRunDown: 1.119 },
-  ik: { rule: 'placed', eye: 'steady', pitchMost: 35, rollMost: 20, pelvisMost: 0.4, ease: 0.08, plantLow: 0.04, plantHigh: 0.15, stairBack: 0.1, stairAhead: 0.3, toeMost: 30, edgePull: 0.25, peerReach: 40 },
-  stairs: { rule: 'stairs', ways: 'forward', camera: 'smooth', look: 1.6, step: 0.1, riserMin: 0.08, riserMax: 0.5, riserRun: 0.12, level: 0.03, treadMin: 0.18, count: 2, leave: 0.5, pace: 1, ease: 0.12, lagMost: 0.5 },
+  ik: { rule: 'placed', eye: 'steady', pitchMost: 35, rollMost: 20, pelvisMost: 0.4, ease: 0.08, plantLow: 0.04, plantHigh: 0.15, stairBack: 0.1, stairAhead: 0.3, toeMost: 30, edgePull: 0.25, peerReach: 40, hips: 'steady', hipEase: 0.25, hipRelease: 0.6, hipHold: 1.5, stretch: 0.98, toeReach: 0.5, soleLow: 0.005, soleHigh: 0.025 },
+  stairs: { rule: 'stairs', ways: 'forward', camera: 'smooth', look: 1.6, step: 0.1, riserMin: 0.08, riserMax: 0.5, riserRun: 0.12, level: 0.03, treadMin: 0.18, count: 2, leave: 0.5, pace: 0.25, ease: 0.12, lagMost: 0.5, cycle: 'trimmed', mirror: 'legs', stepRule: 'stairs', perStep: 'auto', nMost: 2, upAt: 1.4, resize: 0.15, land: 0.5, rateLow: 0.7, rateHigh: 1.4, steer: 0.25, clear: 0.04, pin: 'sole' },
   speed: {
     forward: { walk: 1.66, jog: 4, tired: 3.5, run: 6, sprint: 7 },
     back: { walk: 1.28, jog: 3, run: 4 },
@@ -515,6 +600,13 @@ export const LOCO_RANGES: Record<string, { min: number; max: number }> = {
   'ik.toeMost': { min: 0, max: 60 },
   'ik.edgePull': { min: 0, max: 0.5 },
   'ik.peerReach': { min: 0, max: 200 },
+  'ik.hipEase': { min: 0, max: 1.5 },
+  'ik.hipRelease': { min: 0, max: 3 },
+  'ik.hipHold': { min: 0, max: 2 },
+  'ik.stretch': { min: 0.8, max: 1 },
+  'ik.toeReach': { min: 0, max: 1 },
+  'ik.soleLow': { min: 0, max: 0.1 },
+  'ik.soleHigh': { min: 0.005, max: 0.2 },
   'stairs.look': { min: 0.4, max: 4 },
   'stairs.step': { min: 0.03, max: 0.3 },
   'stairs.riserMin': { min: 0.02, max: 0.4 },
@@ -524,9 +616,17 @@ export const LOCO_RANGES: Record<string, { min: number; max: number }> = {
   'stairs.treadMin': { min: 0.05, max: 1 },
   'stairs.count': { min: 1, max: 6 },
   'stairs.leave': { min: 0, max: 3 },
-  'stairs.pace': { min: 0.2, max: 1.5 },
+  'stairs.pace': { min: 0, max: 1 },
   'stairs.ease': { min: 0, max: 0.6 },
   'stairs.lagMost': { min: 0, max: 1 },
+  'stairs.nMost': { min: 1, max: 3 },
+  'stairs.upAt': { min: 1, max: 3 },
+  'stairs.resize': { min: 0, max: 1 },
+  'stairs.land': { min: 0.1, max: 0.9 },
+  'stairs.rateLow': { min: 0.2, max: 1 },
+  'stairs.rateHigh': { min: 1, max: 3 },
+  'stairs.steer': { min: 0, max: 0.9 },
+  'stairs.clear': { min: 0, max: 0.2 },
   'rate.min': { min: 0.2, max: 1 },
   'rate.max': { min: 1, max: 3 },
   'rate.feet': { min: 0.8, max: 1.25 },
@@ -576,6 +676,12 @@ export const LOCO_CHOICES: Readonly<Record<string, readonly string[]>> = {
   'stairs.rule': ['stairs', 'before'],
   'stairs.ways': ['forward', 'forwardDiag'],
   'stairs.camera': ['smooth', 'capsule'],
+  'ik.hips': ['steady', 'before'],
+  'stairs.cycle': ['trimmed', 'before'],
+  'stairs.mirror': ['legs', 'whole', 'off'],
+  'stairs.stepRule': ['stairs', 'before'],
+  'stairs.perStep': ['auto', '1', '2', '3'],
+  'stairs.pin': ['sole', 'off'],
   'gunCarry.pistol': CARRIES,
   'gunCarry.carbine': CARRIES,
   'gunCarry.rifle': CARRIES,

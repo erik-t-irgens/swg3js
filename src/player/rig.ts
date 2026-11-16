@@ -9,6 +9,7 @@ import { chainPoint, clipLinks, HEAD_TO_EYE, type Quat, type Vec3 } from '../veh
 import type { ActiveClip, ClipHalf } from '../audio/clipEvents.ts';
 import { restWorld as restPlaces, type TargetSkeleton } from '../anim/fit.ts';
 import { phaseAt, sharedRate, timeAtPhase, type ClipFacts } from '../anim/locoPhase.ts';
+import { STAIR_WINDOWS, stairCyclesFor, type StairCycleFacts, type StairCycles } from '../anim/stairCycle.ts';
 import { ANIM_TUNE, watchJkaSpine } from '../anim/animTune.ts';
 import { applyJkaSpine, isJkaClip, rebaseJkaClips, spineRebaseFor } from '../anim/jkaSpine.ts';
 
@@ -537,15 +538,71 @@ export class CharacterRig {
    */
   addClips(clips: readonly THREE.AnimationClip[], strides?: ((clip: THREE.AnimationClip) => ClipFacts | null) | null): number {
     let added = 0;
+    let stairs = false;
     for (const clip of clips) {
       if (this.actions.has(clip.name)) continue;
       this.actions.set(clip.name, this.mixer.clipAction(clip));
       // A walking or running clip comes with its stride: what keeps its feet on the ground and in step.
       const stride = strides?.(clip);
       if (stride) this.strides.set(clip.name, stride);
+      if (clip.name.startsWith('mx_') && clip.name.slice(3) in STAIR_WINDOWS) stairs = true;
       added++;
     }
+    // The stairs wave: a stair clip taken, the stair cycles made beside the clips (once a skeleton), with their facts.
+    if (stairs) this.addStairCycles(stairCyclesFor(clips, this.restSkeleton()));
     return added;
+  }
+
+  /**
+   * The stairs wave: the stair clips' facts on this rig's skeleton (src/anim/stairCycle.ts), by clip name: the cycles
+   * made beside the pack's clips and the clips as they stand. Set with the cycles (`attachImportedClips`).
+   */
+  private cycleFacts: Map<string, StairCycleFacts> | null = null;
+  /** A stair clip's facts, or null (no cycles made for this rig, or no such clip). */
+  stairFacts(clip: string): StairCycleFacts | null {
+    return this.cycleFacts?.get(clip) ?? null;
+  }
+  /** Take a skeleton's stair cycles: their clips as any clip is taken (none a stair clip of the pack's own), and every stair clip's facts. */
+  addStairCycles(cycles: StairCycles): void {
+    for (const clip of cycles.clips) if (!this.actions.has(clip.name)) this.actions.set(clip.name, this.mixer.clipAction(clip));
+    const facts = this.cycleFacts ?? (this.cycleFacts = new Map());
+    for (const [name, f] of cycles.facts) {
+      facts.set(name, f);
+      // A whole cycle (both feet's footfalls) has a stride its left foot's landing starts, which a change off it to a
+      // striding clip starts that clip in step with (`stairStrides`, read only as the clip faded out).
+      let k = -1;
+      for (let i = 0; i < f.steps; i++) if (f.side[i] === 0) k = i;
+      if (f.steps === 2 && k >= 0 && f.len > 0) this.stairStrides.set(name, { speed: (2 * f.fwd) / f.len, leftAt: f.at[k], cycle: f.len });
+    }
+  }
+  /**
+   * The stairs wave: a stair cycle's stride, for a change off it alone. Started from its start as every clip without a
+   * stride is, the walk at the top of a flight came in with the foot planted on the last tread swinging, skimming 38 cm
+   * along the floor through the fade (measured at 144 fps). A change onto a stair clip is not put in step: the stairs'
+   * step starts it at its footfall's own phase (`setTime`).
+   */
+  private readonly stairStrides = new Map<string, ClipFacts>();
+  private stairStrideOf(action: THREE.AnimationAction): ClipFacts | null {
+    const name = action.getClip().name;
+    return this.stairStrides.get(name.startsWith('lower:') ? bareClipName(name) : name) ?? null;
+  }
+  /** The legs' clip's time now, into `timeOut`, where the legs play `clip` (whole, or its lower half): false otherwise. */
+  timeOut = 0.5;
+  readTime(clip: string): boolean {
+    const cur = this.current;
+    if (!cur || !cur.enabled) return false;
+    const name = cur.getClip().name;
+    if (name !== clip && !(name.length === clip.length + 6 && name.startsWith('lower:') && name.endsWith(clip))) return false;
+    this.timeOut = cur.time;
+    return true;
+  }
+  /** Put the legs' clip at a time, where the legs play `clip` (the stairs' step starts a clip at its footfall's phase). */
+  setTime(clip: string, t: number): void {
+    const cur = this.current;
+    if (!cur) return;
+    const name = cur.getClip().name;
+    if (name !== clip && !(name.length === clip.length + 6 && name.startsWith('lower:') && name.endsWith(clip))) return;
+    cur.time = t;
   }
 
   /**
@@ -1107,7 +1164,7 @@ export class CharacterRig {
         // own stride, and the two then advance at one phase rate until the fade is done (`stepSync`). A clip with no
         // stride (every one of the game's own) fades plain, from its start, as it always did.
         const was = this.current;
-        const a = was && !same && was.enabled ? this.strideOf(was) : null;
+        const a = was && !same && was.enabled ? (this.strideOf(was) ?? this.stairStrideOf(was)) : null;
         const b = a ? this.strideOf(next) : null;
         const startAt = a && b ? timeAtPhase(phaseAt(was!.time, a), b, next.getClip().duration) : 0;
         // A held clip (a stance) plays once and keeps its last frame.

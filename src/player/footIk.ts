@@ -75,6 +75,73 @@ export class FootIn {
   heading = 0.5;
   /** The move's own collision groups. */
   filter = 0.5;
+  /**
+   * The stairs wave: the stairs measured under the body (src/player/stairSense.ts, `StairSense.known` and the rest):
+   * whether they stand, their way along the travel (+1 up), their tread and riser, how far ahead the next riser and how far
+   * behind the last one stand from the body's middle (NaN for none), the tread's height the body stands on, and the
+   * travel's way across the ground (a unit). What the hips' line on stairs and a swinging foot's clearance read.
+   */
+  stairKnown = false;
+  stairWay = 0;
+  stairTread = 0.5;
+  stairRiser = 0.5;
+  stairNext = 0.5;
+  stairPrev = 0.5;
+  stairFloor = 0.5;
+  ux = 0.5;
+  uz = 0.5;
+  /**
+   * One step a stair (src/anim/stairStep.ts): the stride's scale along the travel (each foot moved along it about the
+   * body's middle by this less one of its place there, so a planted foot stays where it landed: 1 none), and how far a
+   * swinging foot passes over a nosing at least (0 none).
+   */
+  stride = 1.5;
+  clear = 0.5;
+  /**
+   * The point along the travel from the body's middle each foot is moved about by the stride (its stance's middle: `StairStep`'s
+   * `pivotL` and `pivotR`), metres: 0 the body's middle.
+   */
+  pivotL = 0.5;
+  pivotR = 0.5;
+  /**
+   * One step a stair: a foot planted whole is held where it was planted across the ground (its place along and across
+   * kept from the frame its share reached whole, let go by its share as it lifts), so the clip's own uneven stance never
+   * slides it along its tread. False none.
+   */
+  pin = false;
+
+  constructor() {
+    this.stride = 1;
+    this.clear = 0;
+    this.pivotL = 0;
+    this.pivotR = 0;
+  }
+}
+
+/** The little of the stairs' sampler the feet read (src/player/stairSense.ts's `StairSense`). */
+export interface StairMeasure {
+  readonly known: boolean;
+  readonly way: number;
+  readonly tread: number;
+  readonly riser: number;
+  readonly next: number;
+  readonly prev: number;
+  readonly floor: number;
+  readonly ux: number;
+  readonly uz: number;
+}
+
+/** The stairs wave: a frame's stairs from the sampler's measure, field by field (the stride and the clearance are the caller's). */
+export function stairFeetOf(s: StairMeasure, fi: FootIn): void {
+  fi.stairKnown = s.known;
+  fi.stairWay = s.way;
+  fi.stairTread = s.tread;
+  fi.stairRiser = s.riser;
+  fi.stairNext = s.next;
+  fi.stairPrev = s.prev;
+  fi.stairFloor = s.floor;
+  fi.ux = s.ux;
+  fi.uz = s.uz;
 }
 
 /** One ray's kept answer: where it was cast from, and what it met. */
@@ -182,11 +249,49 @@ class Leg {
   readonly probes: Probe[] = [];
   readonly kept: Probe[] = [];
   readonly next: Int32Array;
+  /** The stairs wave: this frame's stride shift along the travel (x, z, metres), and the toe's point (radians: the heel up so the ball and toe meet a ground the stretched leg falls short of). */
+  sx = 0.5;
+  sz = 0.5;
+  point = 0.5;
+  /**
+   * How far the clip's foot (turned to its ground) already stands on its ball: 0 on its heel or level, 1 with its ball
+   * lower than its heel by `PIN_FLAT` or more. The share of `ik.toeReach` the hips' ask and the toe's point may take: a
+   * foot striking with its heel cannot point its toe to reach, so its whole shortfall is the hips'.
+   */
+  lean = 0.5;
+  /** The ankle to the ball as the clip turns the foot to its ground: its length, and its height (under nought: the ball under the ankle), metres. */
+  ballR = 0.5;
+  ballB = 0.5;
+  /** How far the foot is drawn back along the travel to keep its toe short of an up flight's first riser (held while planted), and how far this frame would draw it, metres. */
+  back = 0.5;
+  backWant = 0.5;
+  /** A stair clip's foot under the steady hips: the lowest its lower sole point has stood over the clip's ground this stance, metres (NaN: none yet). */
+  low = 0.5;
+  /** Where a planted foot is held across the ground (`FootIn.pin`), NaN for none; and the hold's offset from the clip's place, eased out once let go. */
+  pinX = 0.5;
+  pinZ = 0.5;
+  pinOX = 0.5;
+  pinOZ = 0.5;
+  /** Which sole point the hold is on: 0 the middle (level), 1 the heel, 2 the ball. */
+  pinOn = 0;
   constructor(thigh: THREE.Bone, shin: THREE.Bone, ankle: THREE.Bone, toe: THREE.Bone | null) {
     this.thigh = thigh;
     this.shin = shin;
     this.ankle = ankle;
     this.toe = toe;
+    this.sx = 0;
+    this.sz = 0;
+    this.point = 0;
+    this.lean = 0;
+    this.ballR = 0;
+    this.ballB = 0;
+    this.back = 0;
+    this.backWant = 0;
+    this.low = Number.NaN;
+    this.pinX = Number.NaN;
+    this.pinZ = Number.NaN;
+    this.pinOX = 0;
+    this.pinOZ = 0;
     for (let i = 0; i < 4 + PULL_MOST; i++) this.probes.push(new Probe());
     for (let i = 0; i < (4 + PULL_MOST) * KEPT; i++) this.kept.push(new Probe());
     this.next = new Int32Array(4 + PULL_MOST);
@@ -202,9 +307,47 @@ class Leg {
   }
 }
 
+/** Where the feet's rays are kept: a leg, or the body's middle (the stairs wave's hips). */
+interface Probed {
+  readonly probes: Probe[];
+  readonly kept: Probe[];
+  readonly next: Int32Array;
+}
+
+/** The body's middle's one ray (the ground the hips stand over), kept as a leg's are. */
+class MidProbe implements Probed {
+  readonly probes: Probe[] = [new Probe()];
+  readonly kept: Probe[] = [];
+  readonly next = new Int32Array(1);
+  constructor() {
+    for (let i = 0; i < KEPT; i++) this.kept.push(new Probe());
+  }
+}
+
+/** How long a ring of the legs' asks the hips' hold keeps, frames (two seconds at 240 a second: `ik.hipHold`'s most). */
+const HOLD_RING = 512;
+/** A riser's own width along the travel, over which a swinging foot's clearance comes in before it (up) or goes after it (down), metres. */
+const RISER_EASE = 0.06;
+/** How many treads either way a swinging foot's ground is read over. */
+const CLEAR_TREADS = 4;
+
+/** A planted foot is held where it was planted from this share (whole), and held no further than this from the clip's place, metres. */
+const PIN_FROM = 0.99;
+const PIN_MOST = 0.12;
+/** A foot stands on its middle while its heel and ball stand level in the clip within this, else on the lower, metres. */
+const PIN_FLAT = 0.02;
+/** A foot before an up flight is drawn back to stand this short of its first riser with its toe's tip, metres. */
+const TOE_GAP = 0.02;
+/** The hips held steady keep their line on measured stairs while the drawn root stands within a riser and this of it, metres. */
+const HOP_SLACK = 0.1;
+
 /** A leg's eased placement let go: unplanted, its ground forgotten (written in place: nothing is made). */
 function letGo(leg: Leg): void {
   leg.planted = 0;
+  leg.back = 0;
+  leg.pinX = Number.NaN;
+  leg.pinOX = 0;
+  leg.pinOZ = 0;
   leg.shareE = 0;
   leg.had = false;
   for (let i = 0; i < 5; i++) leg.sole[i] = Number.NaN;
@@ -316,6 +459,49 @@ export class FootIk {
   readonly ask = new TwoBoneAsk();
   readonly out = new TwoBoneOut();
   readonly in = new FootIn();
+  /**
+   * The stairs wave, the hips held steady (`ik.hips` 'steady'): the ground the hips stand over (`line`, this frame's: the
+   * ground under the body's middle, or on stairs the line through their treads' middles), followed as far as its own slope
+   * gives and eased past that (`lineE`, NaN: taken outright next frame), with where it was last frame and how steep; the
+   * drop the legs asked for this frame (`ask`), held (`held`, the most over `hipHold`) and eased (`legDrop`); and the
+   * root's drop to the line (`base`). The console's and the tests'. (Declared as fractions.)
+   */
+  line = 0.5;
+  lineE = 0.5;
+  /** How far the root is put on the line (0 to 1), weighed in and out over `hipEase` as the feet are. */
+  hipW = 0.5;
+  legAsk = 0.5;
+  held = 0.5;
+  legDrop = 0.5;
+  base = 0.5;
+  private lineWas = 0.5;
+  private lineSlope = 0.5;
+  private lineX = 0.5;
+  private lineZ = 0.5;
+  private clock = 0.5;
+  private readonly askT = new Float64Array(HOLD_RING);
+  private readonly askV = new Float64Array(HOLD_RING);
+  private askHead = 0;
+  private askLen = 0;
+  private readonly mid = new MidProbe();
+  /** A swinging foot's clearance's question and answer (`clearAt`): the place along the travel from the body's middle, and the stairs' height there. */
+  private envS = 0.5;
+  private envOut = 0.5;
+  /**
+   * The foot planted furthest along the travel (`in.ux`, `in.uz`) this frame (0 left, 1 right, -1 none) and its ankle's
+   * place along it from the body's middle, metres: what one step a stair keeps where it stands when it takes a stair clip on.
+   */
+  leadSide = -1;
+  leadAt = 0.5;
+  /** How far a swinging foot's ankle is lifted to clear the stairs this frame (`swingClear`'s and `planeLift`'s answer), metres. */
+  private clearOut = 0.5;
+  /** Whether last frame's legs were measured as a stair clip's (held through a hop of the capsule's under the steady hips). */
+  private stairClipWas = false;
+  /** Off measured stairs, the ground under the body's middle's plane (its normal), found this frame (`stepLine`). */
+  private planeOk = false;
+  private pnx = 0.5;
+  private pny = 0.5;
+  private pnz = 0.5;
 
   constructor(tune: LocoTune['ik'], makeRay: RayMaker) {
     this.tune = tune;
@@ -323,6 +509,20 @@ export class FootIk {
     this.weight = 0;
     this.drop = 0;
     this.applied = 0;
+    this.line = Number.NaN;
+    this.lineE = Number.NaN;
+    this.lineWas = Number.NaN;
+    this.lineSlope = 0;
+    this.lineX = Number.NaN;
+    this.lineZ = Number.NaN;
+    this.legAsk = 0;
+    this.held = 0;
+    this.legDrop = 0;
+    this.base = 0;
+    this.hipW = 0;
+    this.clock = 0;
+    this.clearOut = 0;
+    this.leadAt = 0;
   }
 
   /** The legs of a rig, found once a rig (the rig's `legPose` hook set to this). */
@@ -398,11 +598,27 @@ export class FootIk {
     this.applied = 0;
   }
 
+  /** The hips' line and their held drop let go (`ik.hips` 'steady'): taken afresh next frame. */
+  private letGoHips(): void {
+    this.lineE = Number.NaN;
+    this.lineWas = Number.NaN;
+    this.lineX = Number.NaN;
+    this.lineZ = Number.NaN;
+    this.legAsk = 0;
+    this.held = 0;
+    this.legDrop = 0;
+    this.base = 0;
+    this.hipW = 0;
+    this.askLen = 0;
+  }
+
   /** Let go of everything eased: the body stood somewhere new. */
   reset(): void {
     this.weight = 0;
     this.drop = 0;
     this.mostE = Number.NaN;
+    this.letGoHips();
+    this.stairClipWas = false;
     if (this.legs) for (const leg of this.legs) {
       leg.lastX = Number.NaN;
       leg.lastZ = Number.NaN;
@@ -410,8 +626,198 @@ export class FootIk {
     }
   }
 
+  /**
+   * The stairs wave (`ik.hips` 'steady'): the ground the hips stand over this frame (`line`): on stairs the sampler has
+   * measured, the line through their treads' middles (the tread under the body, raised or lowered by the riser's share
+   * of how near the next riser ahead or the last behind stands, within half a tread: so it meets each tread's own height at
+   * the tread's middle and the floor beyond the flight); elsewhere the ground under the body's middle (one ray, kept as a
+   * foot's are), else the capsule's feet. It is followed (`lineE`) as far as its own slope gives over how far the body went,
+   * and whatever it changes by past that (a kerb's edge crossed, the stairs come onto) is eased in over `hipEase`. Never
+   * the ground ahead. Reads `in` and the rays' reach in `qs` and `ql`.
+   */
+  private stepLine(world: FootWorld): void {
+    const f = this.in;
+    let g = Number.NaN;
+    let slope = 0;
+    const T = f.stairTread;
+    if (f.stairKnown && f.stairWay !== 0 && T > 0) {
+      const R = f.stairRiser;
+      const half = T * 0.5;
+      const a = f.stairNext === f.stairNext && f.stairNext < half ? half - f.stairNext : 0;
+      const b = f.stairPrev === f.stairPrev && f.stairPrev < half ? half - f.stairPrev : 0;
+      g = f.stairFloor + (f.stairWay * R * (a - b)) / T;
+      slope = R / T;
+      this.planeOk = false;
+    } else {
+      this.qx = f.px;
+      this.qz = f.pz;
+      this.planeOk = false;
+      if (this.probe(world, this.mid, 0)) {
+        const p = this.mid.probes[0];
+        g = p.y;
+        slope = p.ny > 0.05 ? Math.sqrt(p.nx * p.nx + p.nz * p.nz) / p.ny : 0;
+        if (p.ny > 0.05) {
+          this.planeOk = true;
+          this.pnx = p.nx;
+          this.pny = p.ny;
+          this.pnz = p.nz;
+        }
+      } else g = f.py;
+    }
+    this.line = g;
+    if (this.lineE !== this.lineE) this.lineE = g;
+    else {
+      const dx = f.px - this.lineX;
+      const dz = f.pz - this.lineZ;
+      let st = slope > this.lineSlope ? slope : this.lineSlope;
+      if (st > SLOPE_FOLLOW) st = SLOPE_FOLLOW;
+      const allow = Math.sqrt(dx * dx + dz * dz) * st + FOLLOW_SLACK;
+      const d = g - this.lineWas;
+      if (d <= allow && d >= -allow) this.lineE += d;
+      const e = this.tune.hipEase;
+      this.lineE += (g - this.lineE) * (e > 0 ? 1 - Math.exp(-f.dt / e) : 1);
+    }
+    this.lineWas = g;
+    this.lineSlope = slope;
+    this.lineX = f.px;
+    this.lineZ = f.pz;
+  }
+
+  /**
+   * The stairs wave (`ik.hips` 'steady'): the legs' ask held, the most of it over `hipHold` (a running most kept in a ring,
+   * each ask by its moment), eased in over `hipEase` and out over `hipRelease`, never past `pelvisMost`; and the drop
+   * (the root put on the line, and that).
+   */
+  private holdHips(): void {
+    const tune = this.tune;
+    const dt = this.in.dt;
+    this.clock += dt;
+    const now = this.clock;
+    // Out of the ring's front what is older than the hold, off its back what the new ask outdoes, then the new ask in.
+    while (this.askLen > 0 && this.askT[this.askHead] < now - tune.hipHold) {
+      this.askHead = this.askHead + 1 === HOLD_RING ? 0 : this.askHead + 1;
+      this.askLen--;
+    }
+    const v = this.legAsk > 0 ? this.legAsk : 0;
+    while (this.askLen > 0) {
+      let last = this.askHead + this.askLen - 1;
+      if (last >= HOLD_RING) last -= HOLD_RING;
+      if (this.askV[last] > v) break;
+      this.askLen--;
+    }
+    if (this.askLen === HOLD_RING) {
+      this.askHead = this.askHead + 1 === HOLD_RING ? 0 : this.askHead + 1;
+      this.askLen--;
+    }
+    let at = this.askHead + this.askLen;
+    if (at >= HOLD_RING) at -= HOLD_RING;
+    this.askT[at] = now;
+    this.askV[at] = v;
+    this.askLen++;
+    let held = this.askV[this.askHead];
+    if (held > tune.pelvisMost) held = tune.pelvisMost;
+    this.held = held;
+    const e = held > this.legDrop ? tune.hipEase : tune.hipRelease;
+    this.legDrop += (held - this.legDrop) * (e > 0 ? 1 - Math.exp(-dt / e) : 1);
+    if (this.legDrop < 1e-6 && held === 0) this.legDrop = 0;
+    this.drop = this.base + this.legDrop;
+  }
+
+  /**
+   * The stairs wave: how far a swinging foot's ankle must rise for its heel and its toe's tip to pass over the stairs by
+   * `clear` (`clearOut`), from the bend's ankle as the clip and the drop put it (`pC`, `qC`), moved by the stride.
+   */
+  private swingClear(leg: Leg, toPhys: THREE.Matrix4 | null): void {
+    const f = this.in;
+    const scale = this.scaleNow;
+    let need = 0;
+    vB.x = leg.heel.x * scale;
+    vB.y = leg.heel.y * scale;
+    vB.z = leg.heel.z * scale;
+    vB.applyQuaternion(qC).add(pC);
+    this.envS = (vB.x + leg.sx - f.px) * f.ux + (vB.z + leg.sz - f.pz) * f.uz;
+    this.clearAt();
+    let d = this.envOut + f.clear - vB.y;
+    if (d > need) need = d;
+    if (leg.toe) {
+      boneIn(leg.toe, toPhys, cT, cTq);
+      tipV.x = leg.tip.x * scale;
+      tipV.y = leg.tip.y * scale;
+      tipV.z = leg.tip.z * scale;
+      tipV.applyQuaternion(cTq).add(cT);
+      tipV.y -= this.drop;
+      this.envS = (tipV.x + leg.sx - f.px) * f.ux + (tipV.z + leg.sz - f.pz) * f.uz;
+      this.clearAt();
+      d = this.envOut + f.clear - tipV.y;
+      if (d > need) need = d;
+    }
+    this.clearOut = need;
+  }
+
+  /**
+   * The hips held steady, off measured stairs: how far the ground under a swinging foot's heel and its toe's tip stands
+   * over the ground under the body's middle, on that ground's plane (`clearOut`, never under nought; nought where no plane
+   * was found). From the bend's ankle as the clip and the drop put it (`pC`, `qC`).
+   */
+  private planeLift(leg: Leg, toPhys: THREE.Matrix4 | null): void {
+    let need = 0;
+    if (this.planeOk) {
+      const f = this.in;
+      const scale = this.scaleNow;
+      vB.x = leg.heel.x * scale;
+      vB.y = leg.heel.y * scale;
+      vB.z = leg.heel.z * scale;
+      vB.applyQuaternion(qC).add(pC);
+      let d = -(this.pnx * (vB.x - f.px) + this.pnz * (vB.z - f.pz)) / this.pny;
+      if (d > need) need = d;
+      if (leg.toe) {
+        boneIn(leg.toe, toPhys, cT, cTq);
+        tipV.x = leg.tip.x * scale;
+        tipV.y = leg.tip.y * scale;
+        tipV.z = leg.tip.z * scale;
+        tipV.applyQuaternion(cTq).add(cT);
+        d = -(this.pnx * (tipV.x - f.px) + this.pnz * (tipV.z - f.pz)) / this.pny;
+        if (d > need) need = d;
+      }
+    }
+    this.clearOut = need;
+  }
+
+  /**
+   * The stairs' height at `envS` along the travel from the body's middle (`envOut`): the tread under the body, and each
+   * riser within `CLEAR_TREADS` either way taking its rise in over `RISER_EASE` (before it going up, after it going down,
+   * so the nosing is cleared and no height steps). Reads `in`'s measure of the stairs.
+   */
+  private clearAt(): void {
+    const f = this.in;
+    const s = this.envS;
+    const T = f.stairTread;
+    const R = f.stairRiser * f.stairWay;
+    const up = f.stairWay > 0;
+    let h = f.stairFloor;
+    if (f.stairNext === f.stairNext) {
+      for (let j = 0; j < CLEAR_TREADS; j++) {
+        const r = f.stairNext + j * T;
+        let c = up ? (s - r + RISER_EASE) / RISER_EASE : (s - r) / RISER_EASE;
+        if (c <= 0) break;
+        if (c > 1) c = 1;
+        h += R * c;
+      }
+    }
+    if (f.stairPrev === f.stairPrev) {
+      for (let j = 0; j < CLEAR_TREADS; j++) {
+        const r = -f.stairPrev - j * T;
+        let c = up ? (r - s) / RISER_EASE : (r + RISER_EASE - s) / RISER_EASE;
+        if (c <= 0) break;
+        if (c > 1) c = 1;
+        h -= R * c;
+      }
+    }
+    this.envOut = h;
+  }
+
   /** One ray down at (x, z) from `start` for `len`, or a kept answer: into the leg's probe `slot`. True where it met ground. */
-  private probe(world: FootWorld, leg: Leg, slot: number): boolean {
+  private probe(world: FootWorld, leg: Probed, slot: number): boolean {
     const x = this.qx;
     const z = this.qz;
     const start = this.qs;
@@ -485,11 +891,15 @@ export class FootIk {
     const want = f.on && tune.rule === 'placed' && legs !== null && world !== null ? 1 : 0;
     const ease = tune.ease;
     const k = ease > 0 ? 1 - Math.exp(-f.dt / ease) : 1;
+    const wWas = this.weight;
     this.weight += (want - this.weight) * k;
     if (want === 0 && this.weight < 1e-3) this.weight = 0;
+    this.leadSide = -1;
     if (!legs || !world || (this.weight === 0 && this.drop === 0)) {
       this.drop = 0;
       this.mostE = Number.NaN;
+      if (this.lineE === this.lineE || this.legDrop !== 0) this.letGoHips();
+      this.stairClipWas = false;
       if (legs) for (const leg of legs) {
         leg.clip = 0;
         leg.lift = 0;
@@ -506,8 +916,9 @@ export class FootIk {
       this.world = world;
       this.count = n;
       for (const leg of legs) for (const p of leg.kept) p.x = Number.NaN;
+      for (const p of this.mid.kept) p.x = Number.NaN;
     }
-    const W = this.weight;
+    let W = this.weight;
     // The figure's front, and the line across it (`rx`, `rz`: its left hand's side), in the physics frame.
     const fx = Math.sin(f.heading);
     const fz = Math.cos(f.heading);
@@ -523,12 +934,49 @@ export class FootIk {
     // over the capsule (going down a flight) may come back down to it as well (src/anim/drawnHeight.ts).
     const over = groundClip - f.py;
     const most = tune.pelvisMost + (over > 0 ? over : 0);
-    const reach = top - (groundClip - most - PROBE_UNDER);
+    // The stairs wave: the hips held steady stand on the ground under the body's middle, or the stairs' line (`stepLine`),
+    // which may put the root under the drawn one: the rays reach that much further (none under 'before').
+    const steady = tune.hips === 'steady';
+    let low = groundClip;
+    // Whether the capsule is off the ground within a riser of the stairs' line this frame (a hop, held: below).
+    let hop = false;
+    if (steady) {
+      this.qs = top;
+      this.ql = top - (groundClip - most - PROBE_UNDER);
+      this.stepLine(world);
+      if (this.lineE < low) low = this.lineE;
+      // Weighed as the feet are, but held on measured stairs while the capsule stays within a riser of their line, grounded
+      // or not: climbing a tall riser at a high frame rate the capsule hops off the ground for a tenth of a second, and
+      // weighed by the feet the root took the hop's share and rose 16 cm and fell back in a frame. A jump leaves the line
+      // in a few frames and lets go as ever.
+      const onStairs = f.stairKnown && f.stairWay !== 0;
+      const hipWant = want === 1 || (tune.rule === 'placed' && onStairs && groundClip - this.lineE < f.stairRiser + HOP_SLACK) ? 1 : 0;
+      // And let go over `hipEase` on measured stairs (the capsule's hop at a high frame rate can carry the drawn root past a
+      // riser for a frame or two), the feet's own ease elsewhere (a jump off level ground lets go as ever).
+      const hk = onStairs && hipWant < this.hipW && tune.hipEase > 0 ? 1 - Math.exp(-f.dt / tune.hipEase) : k;
+      this.hipW += (hipWant - this.hipW) * hk;
+      if (hipWant === 0 && this.hipW < 1e-3) this.hipW = 0;
+      this.base = this.hipW * (groundClip - this.lineE);
+      // And the feet keep their weight through such a hop as well, or they let go of the treads and sink into them by the
+      // share let go while the hips stay on the line (8 cm, measured at 144 fps).
+      hop = hipWant === 1 && want === 0 && tune.rule === 'placed';
+      if (hop) {
+        this.weight = wWas;
+        W = wWas;
+      }
+      this.legAsk = 0;
+    }
+    const reach = top - (low - most - PROBE_UNDER);
     let need = 0;
     // Each foot's own ease (`ik.ease`): its share moves at most `rate` a frame (none to whole in `ease`), and the part of a
     // sudden change of its placement it has not yet let in decays by `decay` a frame.
     const rate = ease > 0 ? f.dt / ease : 2;
     const decay = 1 - k;
+    // The stairs wave, the hips held steady: a stair clip's legs keep their measure through a frame or two the capsule is
+    // off the ground (climbing a tall riser at a high frame rate it hops, and the caller's legs are not handed the clip
+    // then): measured as a level clip for that frame, a foot planted whole read as swinging and let go in one frame.
+    const stairClip = f.stairClip || (hop && this.stairClipWas);
+    this.stairClipWas = stairClip;
     for (let s = 0; s < legs.length; s++) {
       const leg = legs[s];
       boneIn(leg.ankle, toPhys, pC, qC);
@@ -536,11 +984,54 @@ export class FootIk {
       // the figure's front under the body (back in stance, ahead in the swing), in the figure's own frame.
       const along = (pC.x - pA.x) * fx + (pC.z - pA.z) * fz;
       let want = 0;
-      if (f.stairClip) {
+      if (stairClip) {
         const v = leg.lastX === leg.lastX && f.dt > 0 ? (along - leg.lastX) / f.dt : 0;
         const lo = -tune.stairBack;
         const hi = tune.stairAhead;
         const u = hi > lo ? (v - lo) / (hi - lo) : v >= hi ? 1 : 0;
+        want = u <= 0 ? 1 : u >= 1 ? 0 : 1 - u * u * (3 - 2 * u);
+        if (steady) {
+          // The hips held steady: and only while the clip keeps the foot down. A stair clip's foot still going back under
+          // the body as the clip lifts it at the end of its stance (walking up two treads a step) was held planted and
+          // drawn down to the tread it was leaving, 13 cm off it: its share goes as its lower sole point rises over the
+          // lowest it stood at this stance by `soleLow` to `soleHigh`.
+          sv.x = leg.heel.x * scale;
+          sv.y = leg.heel.y * scale;
+          sv.z = leg.heel.z * scale;
+          sv.applyQuaternion(qC);
+          const hy = sv.y;
+          sv.x = leg.ball.x * scale;
+          sv.y = leg.ball.y * scale;
+          sv.z = leg.ball.z * scale;
+          sv.applyQuaternion(qC);
+          const h = pC.y + (hy < sv.y ? hy : sv.y) - groundClip;
+          if (leg.planted < 0.01 || leg.low !== leg.low) leg.low = h;
+          else if (h < leg.low) leg.low = h;
+          const lo2 = tune.soleLow * scale;
+          const hi2 = tune.soleHigh * scale;
+          const u2 = hi2 > lo2 ? (h - leg.low - lo2) / (hi2 - lo2) : 0;
+          const w2 = u2 <= 0 ? 1 : u2 >= 1 ? 0 : 1 - u2 * u2 * (3 - 2 * u2);
+          if (w2 < want) want = w2;
+        }
+      } else if (steady) {
+        // The stairs wave, the hips held steady: by the clip's lower sole point (its heel or its ball) over the clip's own
+        // ground, within `soleLow` to `soleHigh`: a foot is planted as its clip puts it down. (The ankle's band below plants
+        // a walk's foot from 4 cm up, and its middle swing too, both of which the steady hips could reach only by dropping
+        // for good: a 9 cm crouch on flat ground, measured on the human male.)
+        sv.x = leg.heel.x * scale;
+        sv.y = leg.heel.y * scale;
+        sv.z = leg.heel.z * scale;
+        sv.applyQuaternion(qC);
+        const hy = sv.y;
+        sv.x = leg.ball.x * scale;
+        sv.y = leg.ball.y * scale;
+        sv.z = leg.ball.z * scale;
+        sv.applyQuaternion(qC);
+        const h = pC.y + (hy < sv.y ? hy : sv.y) - groundClip;
+        // At the figure's size: the clip's own heights scale with it.
+        const lo = tune.soleLow * scale;
+        const hi = tune.soleHigh * scale;
+        const u = hi > lo ? (h - lo) / (hi - lo) : h >= hi ? 1 : 0;
         want = u <= 0 ? 1 : u >= 1 ? 0 : 1 - u * u * (3 - 2 * u);
       } else {
         const h = pC.y - groundClip - leg.ankleH * scale;
@@ -551,6 +1042,111 @@ export class FootIk {
       }
       leg.clip = want;
       leg.lastX = along;
+      // The stairs wave, one step a stair (`stride`): the foot moved along the travel about its stance's middle (`pivotL`,
+      // `pivotR`) by the stride less one of its place there, so a planted foot stays where it landed while the body goes n
+      // treads a step. Every point of the foot below (and its target in the bend) is the moved one; its planted measure
+      // above is the clip's own.
+      if (f.stride !== 1) {
+        const at = (pC.x - pA.x) * f.ux + (pC.z - pA.z) * f.uz - (s === 0 ? f.pivotL : f.pivotR);
+        const sh = (f.stride - 1) * at;
+        leg.sx = sh * f.ux;
+        leg.sz = sh * f.uz;
+        pC.x += leg.sx;
+        pC.z += leg.sz;
+      } else {
+        leg.sx = 0;
+        leg.sz = 0;
+      }
+      // The stairs wave: before an up flight the sampler has measured, a foot whose toe's tip would stand over the first
+      // riser (its heel on the floor short of it) is drawn back along the travel to stand `TOE_GAP` short of it, its share
+      // of that kept while it stays planted and let go as it lifts: the walk puts its last foot down wherever its stride
+      // falls, and standing with its tip on the first nosing it was lifted whole off the floor (12 cm for most of a second).
+      // (Only a walk's foot: a stair clip's footfalls are put on the treads by the step, and its stance foot going back over
+      // the riser line must not be taken for one short of it.)
+      if (!stairClip && f.stairKnown && f.stairWay > 0 && f.stairNext === f.stairNext && f.stairPrev !== f.stairPrev && leg.toe) {
+        sv.x = leg.heel.x * scale;
+        sv.y = leg.heel.y * scale;
+        sv.z = leg.heel.z * scale;
+        sv.applyQuaternion(qC);
+        const heelA = (pC.x + sv.x - f.px) * f.ux + (pC.z + sv.z - f.pz) * f.uz;
+        boneIn(leg.toe, toPhys, cT, cTq);
+        sv.x = leg.tip.x * scale;
+        sv.y = leg.tip.y * scale;
+        sv.z = leg.tip.z * scale;
+        sv.applyQuaternion(cTq);
+        const tipA = (cT.x + leg.sx + sv.x - f.px) * f.ux + (cT.z + leg.sz + sv.z - f.pz) * f.uz;
+        const over = heelA < f.stairNext ? tipA + TOE_GAP - f.stairNext : 0;
+        leg.backWant = over > 0 ? over : 0;
+      } else leg.backWant = 0;
+      if (leg.back !== 0 || leg.backWant !== 0) {
+        if (leg.planted < PIN_FROM) {
+          leg.back = leg.backWant > leg.back ? leg.backWant : leg.back * decay;
+          if (leg.back < 1e-5) leg.back = 0;
+        }
+        const bx = leg.back * f.ux;
+        const bz = leg.back * f.uz;
+        leg.sx -= bx;
+        leg.sz -= bz;
+        pC.x -= bx;
+        pC.z -= bz;
+      }
+      // And a foot planted whole held where its sole stands on its ground (`pin`): the point it stands on (its heel or its
+      // ball, whichever the clip has lower, their middle while level) kept where it was when the foot came onto it, so the
+      // clip's own uneven stance never slides it; as it lifts, the hold is eased out over `ik.ease` (last frame's share). A
+      // hold already made goes on while the foot stays planted after the step lets go of the stairs (a flight's end, a
+      // landing: the clip handed over under it), and only a step on the stairs makes a new one.
+      if (f.pin || leg.pinX === leg.pinX || leg.pinOX !== 0 || leg.pinOZ !== 0) {
+        sv.x = leg.heel.x * scale;
+        sv.y = leg.heel.y * scale;
+        sv.z = leg.heel.z * scale;
+        sv.applyQuaternion(qC);
+        const hx = sv.x;
+        const hy = sv.y;
+        const hz = sv.z;
+        sv.x = leg.ball.x * scale;
+        sv.y = leg.ball.y * scale;
+        sv.z = leg.ball.z * scale;
+        sv.applyQuaternion(qC);
+        const on = hy - sv.y > PIN_FLAT ? 2 : sv.y - hy > PIN_FLAT ? 1 : 0;
+        const px = pC.x + (on === 2 ? sv.x : on === 1 ? hx : (hx + sv.x) * 0.5);
+        const pz = pC.z + (on === 2 ? sv.z : on === 1 ? hz : (hz + sv.z) * 0.5);
+        if (leg.planted >= PIN_FROM && (f.pin || leg.pinX === leg.pinX)) {
+          if (leg.pinX !== leg.pinX || on !== leg.pinOn) {
+            // Held from here on (a foot rolling onto another point keeps the hold it had, from the new point).
+            leg.pinX = px + leg.pinOX;
+            leg.pinZ = pz + leg.pinOZ;
+            leg.pinOn = on;
+          }
+          let ox = leg.pinX - px;
+          let oz = leg.pinZ - pz;
+          const ol = Math.sqrt(ox * ox + oz * oz);
+          if (ol > PIN_MOST) {
+            // Held no further than this from where the clip has it: past it the hold goes with the clip.
+            ox *= PIN_MOST / ol;
+            oz *= PIN_MOST / ol;
+            leg.pinX = px + ox;
+            leg.pinZ = pz + oz;
+          }
+          leg.pinOX = ox;
+          leg.pinOZ = oz;
+        } else {
+          leg.pinX = Number.NaN;
+          leg.pinOX *= decay;
+          leg.pinOZ *= decay;
+          if (leg.pinOX < 1e-5 && leg.pinOX > -1e-5 && leg.pinOZ < 1e-5 && leg.pinOZ > -1e-5) {
+            leg.pinOX = 0;
+            leg.pinOZ = 0;
+          }
+        }
+        leg.sx += leg.pinOX;
+        leg.sz += leg.pinOZ;
+        pC.x += leg.pinOX;
+        pC.z += leg.pinOZ;
+      } else {
+        leg.pinX = Number.NaN;
+        leg.pinOX = 0;
+        leg.pinOZ = 0;
+      }
       // The clip's own sole points (heel, ball, the toe's tip), as the clip and the drawn body put them this frame.
       cH.x = leg.heel.x * scale;
       cH.y = leg.heel.y * scale;
@@ -563,6 +1159,10 @@ export class FootIk {
       let tipY = cB.y;
       if (leg.toe) {
         boneIn(leg.toe, toPhys, cT, cTq);
+        if (leg.sx !== 0 || leg.sz !== 0) {
+          cT.x += leg.sx;
+          cT.z += leg.sz;
+        }
         sv.x = leg.tip.x * scale;
         sv.y = leg.tip.y * scale;
         sv.z = leg.tip.z * scale;
@@ -577,6 +1177,7 @@ export class FootIk {
       leg.roll = 0;
       leg.toeBend = 0;
       leg.grounded = false;
+      leg.lean = 0;
       let slopeTan = 0;
       probe: if (want > 0) {
       // The heel's ground (under the heel as the clip turns the foot: on a step's edge the ankle and the heel can stand
@@ -644,6 +1245,10 @@ export class FootIk {
       let gT = Number.NaN;
       if (leg.toe) {
         boneIn(leg.toe, toPhys, pT, qT);
+        if (leg.sx !== 0 || leg.sz !== 0) {
+          pT.x += leg.sx;
+          pT.z += leg.sz;
+        }
         vTip.x = leg.tip.x * scale;
         vTip.y = leg.tip.y * scale;
         vTip.z = leg.tip.z * scale;
@@ -696,6 +1301,15 @@ export class FootIk {
       vB.y = leg.ball.y * scale;
       vB.z = leg.ball.z * scale;
       vB.applyQuaternion(qW).add(pC);
+      // How far the foot so turned already stands on its ball (the toe's reach is only for a foot off its heel).
+      const lean = (vH.y - vB.y) / PIN_FLAT;
+      leg.lean = lean <= 0 ? 0 : lean >= 1 ? 1 : lean;
+      // And the ankle to the ball across the figure's front (how far it already hangs under the ankle, and its reach): how
+      // much lower pointing the toe can still put the ball (nothing past straight under the ankle).
+      const ba = (vB.x - pC.x) * fx + (vB.z - pC.z) * fz;
+      const bb = vB.y - pC.y;
+      leg.ballR = Math.sqrt(ba * ba + bb * bb);
+      leg.ballB = bb;
       let lift = gH - (nx * (vH.x + leg.pullX - gx) + nz * (vH.z + leg.pullZ - gz)) / ny - vH.y;
       let tipGround = Number.NaN;
       let tipY0 = 0;
@@ -794,7 +1408,7 @@ export class FootIk {
         leg.shareE -= rate;
         if (leg.shareE < wantAll) leg.shareE = wantAll;
       }
-      leg.planted = f.stairClip || leg.shareE < leg.clip ? leg.shareE : leg.clip;
+      leg.planted = stairClip || leg.shareE < leg.clip ? leg.shareE : leg.clip;
       // Its placement: this frame's own answers followed as they stand as far as they change by what the clip itself moved
       // the foot since last frame (`FOLLOW_*`); what changes beyond that (the ground jumping under the foot) is held back
       // and let in over the ease. A foot come fresh to the ground (no share yet) takes its answers whole, its share ramping
@@ -887,10 +1501,34 @@ export class FootIk {
       // The pelvis lowered for a foot on its ground this frame, by no more of it than the clip still has planted (a foot
       // leaving the ground asks less as it goes, and nothing once off: the pelvis is not held down to keep it there).
       if (wantAll > 0) {
-        const down = -app[0] * (leg.planted < wantAll ? leg.planted : wantAll) * W;
-        if (down > need) need = down;
+        if (steady) {
+          // The stairs wave (`ik.hips` 'steady'): how far the hips must drop for this leg, its hip put on the line, to reach
+          // its ground stretched to `stretch` of its length with its toe pointed (`toeReach` of its foot made up, by the share
+          // the clip's foot already stands on its ball: a heel striking asks its whole shortfall).
+          boneIn(leg.thigh, toPhys, pB, qB);
+          boneIn(leg.shin, toPhys, vH, qD1);
+          const ax = pC.x - leg.sx;
+          const az = pC.z - leg.sz;
+          const l1 = Math.sqrt((vH.x - pB.x) * (vH.x - pB.x) + (vH.y - pB.y) * (vH.y - pB.y) + (vH.z - pB.z) * (vH.z - pB.z));
+          const l2 = Math.sqrt((ax - vH.x) * (ax - vH.x) + (pC.y - vH.y) * (pC.y - vH.y) + (az - vH.z) * (az - vH.z));
+          const hx = pC.x + app[1] - pB.x;
+          const hz = pC.z + app[2] - pB.z;
+          const h = Math.sqrt(hx * hx + hz * hz);
+          let toeR = tune.toeReach * leg.footLen * scale;
+          const left = leg.ballR + leg.ballB;
+          if (left < toeR) toeR = left;
+          const v = pB.y - this.base - (pC.y + app[0] + toeR * leg.lean);
+          const sL = tune.stretch * (l1 + l2);
+          const ask = (h >= sL ? v : v - Math.sqrt(sL * sL - h * h)) * (leg.planted < wantAll ? leg.planted : wantAll) * W;
+          if (ask > this.legAsk) this.legAsk = ask;
+        } else {
+          const down = -app[0] * (leg.planted < wantAll ? leg.planted : wantAll) * W;
+          if (down > need) need = down;
+        }
       }
     }
+    if (steady) this.holdHips();
+    else {
     // The pelvis: down to what the lower foot needs (which eases, each foot's own ease), back up over `ik.ease`, never
     // above the clip, never past its most (itself eased: the capsule's step moves it a riser at once).
     this.mostE = this.mostE === this.mostE ? this.mostE + (most - this.mostE) * k : most;
@@ -903,6 +1541,7 @@ export class FootIk {
       if (this.drop < need) this.drop = need;
     }
     if (this.drop < 1e-5 && need === 0) this.drop = 0;
+    }
     const drop = this.drop;
     if (drop !== 0) {
       rig.root.position.y -= drop;
@@ -936,14 +1575,57 @@ export class FootIk {
       // The ankle's target: the clip's ankle lowered with the pelvis (so a swinging foot keeps the clip's own leg, riding
       // down with the body, and never folds up under a dropped hip), moved by its share onto its ground.
       const app = leg.app;
-      q.tx = pC.x + app[1] * w;
+      // The stairs wave: moved along the stairs by the stride (`stride`), whatever its share planted.
+      q.tx = leg.sx !== 0 || leg.sz !== 0 ? pC.x + leg.sx + app[1] * w : pC.x + app[1] * w;
       q.ty = pC.y + w * (drop + app[0]);
-      q.tz = pC.z + app[2] * w;
+      q.tz = leg.sx !== 0 || leg.sz !== 0 ? pC.z + leg.sz + app[2] * w : pC.z + app[2] * w;
+      // And a swinging foot lifted over the nosing it passes (`clear`), by its share not planted.
+      if (f.clear > 0 && f.stairKnown && f.stairTread > 0 && w < 1) {
+        this.swingClear(leg, toPhys);
+        // The hips held steady: their held drop is a planted leg's, so a swinging foot is lifted by it as well (the higher).
+        const rise = steady && this.legDrop > this.clearOut ? this.legDrop : this.clearOut;
+        if (rise > 0) q.ty += rise * (1 - w);
+      } else if (steady && w < 1) {
+        // The hips held steady, off measured stairs: a swinging foot keeps the clip's own height over its ground, never
+        // carried down by the drop a planted leg asked for, and lifted by as far as the ground under it stands over the
+        // ground under the body's middle (that ground's plane: up a hill ahead, up behind going down one; never lowered).
+        this.planeLift(leg, toPhys);
+        const rise = this.legDrop + this.clearOut;
+        if (rise > 0) q.ty += rise * (1 - w);
+      }
       q.px = fx;
       q.py = 0;
       q.pz = fz;
       const o = this.out;
       solveTwoBone(q, o);
+      // The foot planted furthest along the travel (the stairs' step keeps it where it stands when it takes a clip on).
+      if (leg.planted >= PIN_FROM && leg.grounded) {
+        const a = (o.ex - f.px) * f.ux + (o.ez - f.pz) * f.uz;
+        if (this.leadSide < 0 || a > this.leadAt) {
+          this.leadSide = s;
+          this.leadAt = a;
+        }
+      }
+      // The hips held steady: a planted foot the stretched leg falls short of points its toe (the heel up) so its ball meets
+      // the ground, by as much as `toeReach` of the foot makes up: only a foot the clip already has on its ball (`lean`), since
+      // pointing a heel-striking foot lifts its heel off the ground and leaves its ball over it.
+      leg.point = 0;
+      if (steady && w > 0 && o.short > 1e-4 && leg.lean > 0) {
+        let gap = o.ey - q.ty;
+        let allow = tune.toeReach * leg.footLen * scale;
+        const left = leg.ballR + leg.ballB;
+        if (left < allow) allow = left;
+        allow *= leg.lean;
+        if (gap > allow) gap = allow;
+        // The turn that puts the ball `gap` lower about the ankle, from where the clip already has it (a foot already up on
+        // its toes turns further for the same drop).
+        const R = leg.ballR;
+        if (gap > 0 && R > 1e-6) {
+          const was = -leg.ballB / R;
+          const now = was + gap / R;
+          leg.point = (Math.asin(now >= 1 ? 1 : now) - Math.asin(was <= -1 ? -1 : was >= 1 ? 1 : was)) * w;
+        }
+      }
       // The thigh onto the new knee.
       TA.fx = pB.x - pA.x;
       TA.fy = pB.y - pA.y;
@@ -970,8 +1652,8 @@ export class FootIk {
       // The ankle: the clip's own turn in the world, turned to the slope by the placement's share (its pitch and roll
       // taken by that share, so a placement easing in turns the foot in with it).
       qX.set(0, 0, 0, 1);
-      if (app[3] !== 0 || app[4] !== 0) {
-        const tp = Math.tan(app[3] * w);
+      if (app[3] !== 0 || app[4] !== 0 || leg.point !== 0) {
+        const tp = leg.point !== 0 ? Math.tan(app[3] * w + leg.point) : Math.tan(app[3] * w);
         const tr = Math.tan(app[4] * w);
         TA.fx = 0;
         TA.fy = 1;
@@ -985,14 +1667,22 @@ export class FootIk {
       qW.copy(qD2).multiply(qD1).multiply(qB);
       setBoneWorld(leg.ankle, qT, qW);
       // The toe, bent about the foot's own right by its share.
-      if (leg.toe && app[5] !== 0) {
+      if (leg.toe && (app[5] !== 0 || leg.point !== 0)) {
         vAxis.x = rx;
         vAxis.y = 0;
         vAxis.z = rz;
         vAxis.applyQuaternion(qX);
         // A bend up (+) turns the toe's tip up: about the figure's right, which is minus (rx, rz). Three's
         // `setFromAxisAngle`, written out so no number crosses a call.
-        const half = -app[5] * w * 0.5;
+        // A foot pointed for the steady hips (`point`, the heel up) bends its toe back up by as much, so the toes keep their
+      // place on the ground as the heel rises off it (held to `toeMost` in all).
+      let tb = app[5] * w;
+      if (leg.point !== 0) {
+        tb += leg.point;
+        const tm = tune.toeMost * DEG;
+        if (tb > tm) tb = tm;
+      }
+      const half = -tb * 0.5;
         const sh = Math.sin(half);
         QB[0] = vAxis.x * sh;
         QB[1] = vAxis.y * sh;
@@ -1031,7 +1721,11 @@ export class FootIk {
       eye: this.tune.eye,
       weight: n(this.weight),
       dropM: n(this.drop),
-      legs: this.none ? 'this skeleton has no legs to place' : (this.legs ?? []).map((l, i) => ({ side: i === 0 ? 'left' : 'right', planted: n(l.planted), clip: n(l.clip), grounded: l.grounded, liftM: n(l.app[0]), easingM: n(Math.abs(l.off[0]) + this.scaleNow * (l.footLen * (Math.abs(l.off[3]) + Math.abs(l.off[4])) + l.toeLen * Math.abs(l.off[5])), 4), pullM: n(Math.sqrt(l.app[1] * l.app[1] + l.app[2] * l.app[2])), pitchDeg: n(l.app[3] / DEG, 1), rollDeg: n(l.app[4] / DEG, 1), toeDeg: n(l.app[5] / DEG, 1) })),
+      // The stairs wave: the hips held steady (the ground they stand over, eased; the root's drop onto it; the legs' ask, held and eased).
+      hips: this.tune.hips,
+      hipsLine: this.tune.hips === 'steady' ? { groundM: n(this.line), easedM: n(this.lineE), rootToLineM: n(this.base), legsAskM: n(this.legAsk), heldM: n(this.held), legsDropM: n(this.legDrop) } : null,
+      stride: n(this.in.stride),
+      legs: this.none ? 'this skeleton has no legs to place' : (this.legs ?? []).map((l, i) => ({ side: i === 0 ? 'left' : 'right', planted: n(l.planted), clip: n(l.clip), grounded: l.grounded, liftM: n(l.app[0]), easingM: n(Math.abs(l.off[0]) + this.scaleNow * (l.footLen * (Math.abs(l.off[3]) + Math.abs(l.off[4])) + l.toeLen * Math.abs(l.off[5])), 4), pullM: n(Math.sqrt(l.app[1] * l.app[1] + l.app[2] * l.app[2])), pitchDeg: n(l.app[3] / DEG, 1), rollDeg: n(l.app[4] / DEG, 1), toeDeg: n(l.app[5] / DEG, 1), pointDeg: n(l.point / DEG, 1), strideM: n(Math.sqrt(l.sx * l.sx + l.sz * l.sz)) })),
       casts: this.casts,
       reused: this.reused,
     };

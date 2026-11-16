@@ -93,7 +93,9 @@ function figure(parent?: THREE.Object3D): Figure {
   const rig = { root, boneNamed: (n: string) => bones.get(n) ?? null, restSkeleton: () => target, legPose: null as { restore(): void } | null };
   return { root, bones, rig, mixer: new THREE.AnimationMixer(root) };
 }
-const tuneNow = () => JSON.parse(JSON.stringify(LOCO_TUNE_SHIPPED.ik)) as typeof LOCO_TUNE.ik;
+// Wave 3's own pelvis rule, which the stairs wave keeps as `ik.hips` 'before': the hips held steady (its start) are held
+// to these same checks, and their own, by `hipsSteady.test.ts`.
+const tuneNow = () => ({ ...(JSON.parse(JSON.stringify(LOCO_TUNE_SHIPPED.ik)) as typeof LOCO_TUNE.ik), hips: 'before' as const });
 
 // ---- the worlds ---------------------------------------------------------------------------------------------------------
 function trimesh(p: Phys, v: number[], idx: number[]): void {
@@ -1106,7 +1108,7 @@ async function easeApart(Cls: typeof FootIk): Promise<{ w: number; d: number; n:
     const s = await swayStand(await mutant('const KEPT = 4;', 'const KEPT = 1;'));
     ok(s.after > 0, `mutation: one answer kept a slot: an idle swaying the feet is cast for again and again (${s.after} rays after its first sway)`);
   }
-  const planted = await mutant('      if (f.stairClip) {\n        const v =', '      if (false) {\n        const v =');
+  const planted = await mutant('      if (stairClip) {\n        const v =', '      if (false) {\n        const v =');
   ok((await stairWalk(planted, tuneNow(), 0.25, WALK, 0.5, 60)).planted < (await stairWalk(FootIk, tuneNow(), 0.25, WALK, 0.5, 60)).planted / 2, 'mutation: a stair clip\'s planted foot read by its height (which climbs a tread a step in the clip): most planted frames are lost');
 }
 console.log(`footIk: ${checks} checks passed`);

@@ -36,7 +36,7 @@ import { specFor } from '../vehicles/vehicle.ts';
 import { sharedClock } from '../world/sharedClock.ts';
 import { listPeerMover, type ShadowMovers } from '../world/shadowCadence.ts';
 import { Group, RAPIER, groups } from '../core/physics.ts';
-import { FootIk, type FootWorld } from '../player/footIk.ts';
+import { FootIk, stairFeetOf, type FootWorld } from '../player/footIk.ts';
 import { StairSense, type StairWorld } from '../player/stairSense.ts';
 import { isStairPick } from '../anim/locoTable.ts';
 import { PeerHang, PeerHangIn, figureScaleOf, isHangState } from '../player/peerHang.ts';
@@ -350,6 +350,8 @@ interface Remote {
    */
   feet: FootIk;
   stairs: StairSense;
+  /** The stairs wave: where their figure stood along the ground last frame (x, z; NaN for none), for their own distance along the stairs. Made the first time they are on stairs. */
+  stairWas?: Float64Array;
   /** Wave 4: hanging from a ledge, their clip lined up and their hands on a lip found here (src/player/peerHang.ts); made the first time they are seen hanging. */
   hang?: PeerHang;
   /** Wave 4, item B: on a wall, their figure leant into a face found here and its hands and feet on it (src/player/peerWall.ts); and their hands bracing by this side's own rule (src/player/brace.ts); with the one limbs' solve a figure has (a rig has one hook), all made the first time they are asked. */
@@ -388,6 +390,41 @@ const DEFAULT_PEER_SABER = 0x3aa0ff;
 /** The rate and the fade a figure's legs are handed with their state under the speed classes, and the frame as their legs need it: kept records, written before each use. */
 const PEER_LEGS = new LegOpts();
 const PEER_IN = new PeerIn();
+
+/**
+ * The stairs wave: their stairs as this side measured them under their figure, their own distance along them since last
+ * frame (as their figure is drawn here), and their legs' clip and its time, into `f` (`PEER_IN`). Nothing made but a
+ * figure's two numbers the first time it is on stairs.
+ */
+function stairFrameOf(r: Remote, f: PeerIn): void {
+  const s = r.stairs;
+  f.stairKnown = s.known;
+  f.stairTread = s.tread;
+  f.stairRiser = s.riser;
+  f.stairNext = s.next;
+  f.stairPrev = s.prev;
+  const x = r.group.position.x;
+  const z = r.group.position.z;
+  let was = r.stairWas;
+  if (f.stairs !== 0) {
+    if (!was) {
+      was = r.stairWas = new Float64Array(2);
+      was[0] = Number.NaN;
+    }
+    f.stairMoved = was[0] === was[0] ? (x - was[0]) * s.ux + (z - was[1]) * s.uz : 0;
+    was[0] = x;
+    was[1] = z;
+  } else {
+    f.stairMoved = 0;
+    if (was) was[0] = Number.NaN;
+  }
+  const rig = r.rig;
+  const pick = r.loco.pick;
+  f.legClip = pick ? pick.clip : '';
+  f.legTime = rig && pick && rig.readTime(pick.clip) ? rig.timeOut : Number.NaN;
+  f.stairLead = r.feet.leadSide;
+  f.stairLeadAt = r.feet.leadAt;
+}
 const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove', 'gunProneIdle', 'gunProneMove', 'gunProneReadyIdle', 'gunProneReadyMove', 'gunProneAimIdle', 'gunProneAimMove', 'hangBraced', 'hangFree', 'shimmyBracedL', 'shimmyBracedR', 'shimmyFreeL', 'shimmyFreeR', 'climbUpBraced', 'climbUpFree', 'wallStill', 'wallUp', 'wallDown', 'wallLeft', 'wallRight']);
 
 export class RemotePlayers {
@@ -1276,8 +1313,12 @@ export class RemotePlayers {
         sa.dt = dt;
         sa.filter = PEER_FEET_FILTER;
         sa.reads = near && moving && !OFF_FEET.has(state) && state !== 'crouchWalk' && state !== 'crouchWalkBack' && state !== 'kneel';
+        // The stairs wave: the stairs measured too where the hips or the step read them.
+        sa.measure = LOCO_TUNE.ik.hips === 'steady' || LOCO_TUNE.stairs.stepRule === 'stairs';
         if (fw) r.stairs.step(fw, LOCO_TUNE.stairs);
         PEER_IN.stairs = near ? r.stairs.way : 0;
+        // And their own distance along them since last frame, as their figure is drawn here.
+        stairFrameOf(r, PEER_IN);
         // Wave 2b: their gait out of their hello, their health where their game sends it (the walk hurt under the
         // tune's share), and their figure's scale.
         PEER_IN.gait = gaitIndex(r.hello.gait);
@@ -1328,6 +1369,8 @@ export class RemotePlayers {
           PEER_LEGS.rate = r.loco.rate;
           PEER_LEGS.fade = LOCO_TUNE.fade.loco;
           rig.setState(state, r.speed, upper, PEER_LEGS);
+          // The stairs wave: a stair cycle just taken on starts where its next footfall lands on a tread.
+          if (r.loco.snap === r.loco.snap) rig.setTime(legs.clip, r.loco.snap);
         } else {
           // Without the classes' legs (a rig with no imported clips, the classes off here) a figure sent `walk` or
           // `run` while it goes backward plays its own back-pedal, when it has one, rather than a run forward.
@@ -1380,6 +1423,13 @@ export class RemotePlayers {
       fi.pz = r.group.position.z;
       fi.heading = yawOf(r.group.quaternion);
       fi.filter = PEER_FEET_FILTER;
+      // The stairs wave: the stairs this side measured under them, and their step's stride and clearance.
+      fi.stride = r.loco.stepFacts !== null ? r.loco.step.stride : 1;
+      fi.clear = r.loco.stepFacts !== null ? LOCO_TUNE.stairs.clear : 0;
+      fi.pin = r.loco.stepFacts !== null && LOCO_TUNE.stairs.pin === 'sole';
+      stairFeetOf(r.stairs, fi);
+      fi.pivotL = r.loco.stepFacts !== null ? r.loco.step.pivotL : 0;
+      fi.pivotR = r.loco.stepFacts !== null ? r.loco.step.pivotR : 0;
       r.feet.step(rig, fw, null);
     }
     // Wave 4: hanging from a ledge, their clip lined up against their body as their own game lines it up, and within

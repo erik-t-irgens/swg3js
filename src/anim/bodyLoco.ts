@@ -16,6 +16,9 @@
 import { JOG, RUN, ShiftClass, SPRINT, Stamina } from './locoClass.ts';
 import { CLASS_NAMES, CROUCH, DIRS, GAITS, GUN_UP, JOG_SLOT, MADE_CROUCHED, MADE_CROUCH_BACK, MADE_INJURED, MADE_STAIRS_DOWN, MADE_STAIRS_RUN_DOWN, MADE_STAIRS_RUN_UP, MADE_STAIRS_UP, PLAIN, POSTURE_KEYS, PRONE, SPEED_SLOTS, STAIR_IDS, STAND, dirOf, fillSpeeds, gaitIndex, injuredPick, locoPick, posturePick, posturePicks, sideMode, stairPick, stairWay, tableClips, topClass, type LocoGait, type LocoPick } from './locoTable.ts';
 import type { LocoTune } from './locoTune.ts';
+import { cycleKindOf, stairCyclePick } from './locoTable.ts';
+import { STAIR_WINDOWS, type StairCycleFacts } from './stairCycle.ts';
+import { StairStep, StairStepIn } from './stairStep.ts';
 
 /** The little of a rig this asks for: the game's `CharacterRig` is one. */
 export interface LocoRig {
@@ -26,6 +29,8 @@ export interface LocoRig {
    */
   readSpeed(clip: string): boolean;
   speedOut: number;
+  /** The stairs wave: a stair clip's facts measured on this rig's skeleton (src/anim/stairCycle.ts), null for none. */
+  stairFacts?(clip: string): StairCycleFacts | null;
 }
 
 /**
@@ -71,6 +76,22 @@ export class LocoIn {
   scale = 1.5;
   /** Wave 3: the stairs the body stands on, as the stairs rule holds them (+1 up the travel, -1 down, 0 none). */
   stairs = 0;
+  /**
+   * The stairs wave: the sampler's measure of the stairs (whether it stands, the tread, the riser, how far ahead the next
+   * riser stands: src/player/stairSense.ts), how far the body went along them since last frame (metres), and the legs'
+   * clip's time now (NaN: the legs do not play it yet). Written before `plan` and again before `legs`.
+   */
+  stairKnown = false;
+  stairTread = 0.5;
+  stairRiser = 0.5;
+  stairNext = 0.5;
+  /** The stairs wave: how far behind the body's middle the last riser stands (NaN: none), metres. */
+  stairPrev = 0.5;
+  stairMoved = 0.5;
+  legTime = 0.5;
+  /** The stairs wave: the foot the feet had planted furthest along the travel last frame (0 left, 1 right, -1 none) and its ankle's place along the travel from the body's middle, metres (the feet's `leadSide`, `leadAt`). */
+  stairLead = 0;
+  stairLeadAt = 0.5;
 }
 
 export function newLocoIn(): LocoIn {
@@ -79,6 +100,11 @@ export function newLocoIn(): LocoIn {
   f.ground = 0;
   f.hpShare = 1;
   f.scale = 1;
+  f.stairMoved = 0;
+  f.legTime = Number.NaN;
+  f.stairLead = -1;
+  f.stairLeadAt = 0;
+  f.stairPrev = Number.NaN;
   return f;
 }
 
@@ -146,6 +172,13 @@ export function classShare(tune: LocoTune, cls: number): number {
 
 /** The game's names for every clip the table can ask for: a rig has the classes only with all of them. */
 const TABLE_CLIPS: readonly string[] = tableClips().map((id) => `mx_${id}`);
+/**
+ * One step a stair: how far a planted foot may stand past where a stair clip lands it when the clip is taken on (metres:
+ * the hold of a planted foot makes up the rest, so nothing slides), and how long the clip may wait for it (seconds: past
+ * that it is taken on whatever, the hold keeping what it can). Not feel: the bounds of a mechanism.
+ */
+const WAIT_SLACK = 0.03;
+const WAIT_MOST = 0.4;
 /**
  * Wave 2b's rows' clips, by what takes them: crouched, prone, each gait (by `GAITS`' place; the standard's none of its own),
  * and the injured walk. A rig without every clip of one walks as before there (crouched or prone as 7424bad did, the
@@ -226,6 +259,20 @@ export class BodyLoco {
   /** Wave 3: the rig has the four stair clips, and the stairs the legs walk this frame (+1 up, -1 down, 0 none). */
   stairsOn = false;
   stairs = 0;
+  /**
+   * The stairs wave: one step a stair (`stairs.stepRule` 'stairs', src/anim/stairStep.ts): the step, the stair clip's
+   * facts it is driven by this frame (null: the step does not rule it), and a time to start the legs' clip at once it is
+   * playing (NaN: none), which the caller puts on the rig after handing it the clip.
+   */
+  readonly step = new StairStep();
+  stepFacts: StairCycleFacts | null = null;
+  snap = 0.5;
+  private readonly stepIn = new StairStepIn();
+  /** The rig `keys` was last handed (what a stair clip's facts are asked of). */
+  private rigNow: LocoRig | null = null;
+  /** Whether last frame's plan played a stair clip, and how long a stair clip has waited to be taken on (`waitStair`), seconds. */
+  private stairPlayed = false;
+  private waitT = 0.5;
   private boost = 1.5;
   private dt = 0.5;
   private legsWere = LEGS_OTHER;
@@ -244,6 +291,8 @@ export class BodyLoco {
     this.fadeNow = tune.fade.idle;
     this.boost = 1;
     this.dt = 0;
+    this.snap = Number.NaN;
+    this.waitT = 0;
   }
 
   /** Whether a rig has the classes: the switch on, and every clip the table can ask for on the rig. */
@@ -260,6 +309,7 @@ export class BodyLoco {
    */
   keys(dt: number, shiftHeld: boolean, shiftPressed: boolean, walkHeld: boolean, rig: LocoRig | null): boolean {
     this.on = this.enabled(rig);
+    this.rigNow = rig;
     // Which of wave 2b's rows this rig can play: each needs every clip of its own.
     this.crouchOn = this.on && hasAll(rig!, CROUCH_NAMES);
     this.proneOn = this.on && hasAll(rig!, PRONE_NAMES);
@@ -293,6 +343,7 @@ export class BodyLoco {
     this.posture = STAND;
     this.injured = false;
     this.stairs = 0;
+    this.stepFacts = null;
     this.boost = f.boost;
     this.dt = f.dt;
     const tune = this.tune;
@@ -360,9 +411,23 @@ export class BodyLoco {
     // Wave 3, stairs: standing and going forward (and the forward diagonals under 'forwardDiag', where no blaster keeps the
     // body square) on stairs the rule holds, the stair clip of the pace, at the class's speed by the stairs' own share.
     if (f.stairs !== 0 && pick !== null && this.stairsOn && tune.stairs.rule === 'stairs' && stairWay(pick.dir, tune.stairs.ways) && (pick.dir === 0 || gun !== GUN_UP)) {
+      const plain = pick;
       pick = stairPick(pick, f.stairs);
       this.stairs = f.stairs;
+      // The stairs wave: the clip's cycle (`stairs.cycle`, `stairs.mirror`), where the rig has made it.
+      const kind = cycleKindOf(pick, tune.stairs.cycle, tune.stairs.mirror);
+      if (kind !== null) {
+        const twin = stairCyclePick(pick, kind);
+        if (this.rigNow !== null && this.rigNow.has(twin.clip)) pick = twin;
+      }
+      // And one step a stair takes the clip on only once a foot the feet have planted stands no further along than the
+      // clip lands one (`waitStair`): the walk goes on over it until then.
+      if (this.waitStair(f, pick)) {
+        pick = plain;
+        this.stairs = 0;
+      }
     }
+    this.stairPlayed = this.stairs !== 0;
     this.pick = pick;
     // A gun in hand with none up: what its kind's pace plays (none up means out of combat: no aim, no shot).
     if (f.gunClass >= 0 && !f.gunUp && !f.aiming) this.carry = carryOf(tune, f.gunClass);
@@ -370,7 +435,19 @@ export class BodyLoco {
     // The class's speed by its dial; the sprint's is the stats' (the tune's own until something is earned); standing still, the jog's.
     fillSpeeds(tune, this.speeds);
     this.speed = pick ? (pick.cls === SPRINT ? f.sprint : hurt ? tune.injured.speed : this.speeds[pick.slot]) : this.speeds[JOG_SLOT];
-    if (this.stairs !== 0) this.speed *= tune.stairs.pace;
+    // On stairs under the stairs wave's step: the speed one step a stair gives (`StairStep.plan`); under 'before', the
+    // class's own (9c18665 multiplied it by a pace of 1).
+    this.stepFacts = null;
+    if (this.stairs !== 0 && pick !== null && tune.stairs.stepRule === 'stairs') {
+      const facts = this.rigNow !== null && this.rigNow.stairFacts ? this.rigNow.stairFacts(pick.clip) : null;
+      if (facts !== null) {
+        this.fillStep(f);
+        this.stepIn.asked = this.speed;
+        this.step.plan(this.stepIn, facts, tune.stairs);
+        this.speed = this.step.speed;
+        this.stepFacts = facts;
+      }
+    } else if (this.stairs === 0) this.step.reset();
     this.turn = pick ? pick.turn * RAD : 0;
     // In the air too: a jump out of a sprint is still the sprint, and the fight's keys stay down through it.
     this.sprinting = pick !== null && pick.cls === SPRINT;
@@ -378,6 +455,50 @@ export class BodyLoco {
     this.rules = true;
     this.moves = pick !== null;
     return true;
+  }
+
+  /**
+   * One step a stair (`stairs.stepRule` 'stairs'), taking a stair clip on from a walk (none played last frame): wait while
+   * the foot the feet have planted furthest along (`stairLead`) stands further along than the clip ever lands that foot
+   * (its footfall's place, by the stride the step gives these stairs) by more than `WAIT_SLACK`, for at most `WAIT_MOST`.
+   * Measured going down a 0.28/0.17 flight: the walk puts its last foot 0.27 m ahead of the body, the walk down 0.09, and
+   * taken on at once the clip slid that planted foot 18 cm back along the top (the hold reaching 12 cm of it).
+   */
+  private waitStair(f: LocoIn, pick: LocoPick): boolean {
+    const tune = this.tune;
+    if (tune.stairs.stepRule !== 'stairs' || this.stairPlayed || f.stairLead < 0 || !f.stairKnown || !(f.stairTread > 0)) {
+      this.waitT = 0;
+      return false;
+    }
+    const facts = this.rigNow !== null && this.rigNow.stairFacts ? this.rigNow.stairFacts(pick.clip) : null;
+    if (facts === null) return false;
+    const k = facts.side[0] === f.stairLead ? 0 : facts.steps > 1 && facts.side[1] === f.stairLead ? 1 : -1;
+    if (k < 0) return false;
+    this.fillStep(f);
+    this.stepIn.asked = this.speed;
+    this.step.plan(this.stepIn, facts, tune.stairs);
+    const lands = (facts.off[k] + (this.step.stride - 1) * facts.fwd * 0.5) * f.scale;
+    this.waitT += f.dt;
+    if (f.stairLeadAt - lands > WAIT_SLACK && this.waitT <= WAIT_MOST) return true;
+    this.waitT = 0;
+    return false;
+  }
+
+  /** The step's record from the frame's (field by field: nothing crosses a call). */
+  private fillStep(f: LocoIn): void {
+    const s = this.stepIn;
+    s.dt = f.dt;
+    s.known = f.stairKnown;
+    s.way = f.stairs;
+    s.tread = f.stairTread;
+    s.riser = f.stairRiser;
+    s.next = f.stairNext;
+    s.prev = f.stairPrev;
+    s.scale = f.scale;
+    s.moved = f.stairMoved;
+    s.time = f.legTime;
+    s.lead = f.stairLead;
+    s.leadAt = f.stairLeadAt;
   }
 
   /**
@@ -433,6 +554,8 @@ export class BodyLoco {
     this.posture = STAND;
     this.injured = false;
     this.stairs = 0;
+    this.stepFacts = null;
+    this.step.reset();
     this.dir = -1;
     this.turn = 0;
     this.turnNow = 0;
@@ -453,11 +576,22 @@ export class BodyLoco {
   legs(rig: LocoRig | null, f: LocoIn, jka: boolean): LocoPick | null {
     const pick = this.pick;
     this.legsOn = false;
+    this.snap = Number.NaN;
     // A gun's 'original' carry: the game's own carry walk and run have the legs, by the caller's old rule.
     if (!this.rules || !pick || jka || !rig || this.carry === CARRY_ORIGINAL || !rig.has(pick.clip)) return null;
     // Prone with a gun in hand: the gun's own prone carries keep the legs, at the class's speed (the imported crawls hold no gun).
     if (pick.posture === PRONE && f.gunClass >= 0) return null;
     let rate = 1;
+    // The stairs wave: a stair clip the step rules is played at the rate the distance along the stairs drives it at.
+    const facts = this.stepFacts;
+    if (facts !== null) {
+      this.fillStep(f);
+      this.step.step(this.stepIn, facts, this.tune.stairs);
+      this.rate = this.step.rate;
+      this.snap = this.step.snap;
+      this.legsOn = true;
+      return pick;
+    }
     // The speed the clip's feet were made for: a game clip the tune has measured (`made`) at the figure's own scale, else the rig's.
     let natural = 0;
     if (pick.made >= 0) {
@@ -575,6 +709,22 @@ export class BodyLoco {
       injured: this.injured,
       injuredRule: this.tune.injured.rule,
       stairs: this.stairs > 0 ? 'up' : this.stairs < 0 ? 'down' : null,
+      // The stairs wave: one step a stair, while it holds the legs (the cycle played, its window and whether it is
+      // mirrored, the treads a step, the speed the class asked and the step gave, the clip's own pace, the rate, the
+      // stride the feet are reached by, and what the steered footfall would miss its spot by).
+      step: this.stepFacts
+        ? {
+            cycle: this.stepFacts.name,
+            window: STAIR_WINDOWS[this.pick?.id ?? ''] ? { fromS: STAIR_WINDOWS[this.pick!.id].t0, toS: STAIR_WINDOWS[this.pick!.id].t1, mirrored: STAIR_WINDOWS[this.pick!.id].one ? this.tune.stairs.mirror : false } : null,
+            perStep: this.step.n,
+            askedMs: n(this.stepIn.asked),
+            givenMs: n(this.step.speed),
+            ownMs: n(this.step.own),
+            rate: n(this.step.rate, 3),
+            stride: n(this.step.stride, 3),
+            missMm: n(this.step.miss * 1000, 1),
+          }
+        : null,
       stamina: { value: n(this.stamina.value, 1), pool: n(pool, 1), tired: this.stamina.tired, shown: this.stamina.shown(pool, this.tune) },
     };
   }

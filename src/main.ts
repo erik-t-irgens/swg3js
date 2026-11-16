@@ -28676,7 +28676,7 @@ class App {
       // pelvis's drop, the rays cast), each planted sole's height over its ground, the stairs held, and the drawn body's
       // lag over a step (the crease's settling and how many creases were met beside it).
       feet: { ...p.feet.report(), soles, eyeLiftM: n3(p.eyeLift) },
-      stairs: { rule: LOCO_TUNE.stairs.rule, ways: LOCO_TUNE.stairs.ways, camera: LOCO_TUNE.stairs.camera, held: p.stairSense.way > 0 ? 'up' : p.stairSense.way < 0 ? 'down' : null, risers: p.stairSense.found.risers, casts: p.stairSense.casts, reused: p.stairSense.reused, drawnLagM: n3(p.drawn.offset), lastPopM: n3(p.drawn.popped) },
+      stairs: { rule: LOCO_TUNE.stairs.rule, ways: LOCO_TUNE.stairs.ways, camera: LOCO_TUNE.stairs.camera, held: p.stairSense.way > 0 ? 'up' : p.stairSense.way < 0 ? 'down' : null, risers: p.stairSense.found.risers, measured: p.stairSense.known ? { treadM: n3(p.stairSense.tread), riserM: n3(p.stairSense.riser), nextM: Number.isNaN(p.stairSense.next) ? null : n3(p.stairSense.next) } : null, casts: p.stairSense.casts, reused: p.stairSense.reused, drawnLagM: n3(p.drawn.offset), lastPopM: n3(p.drawn.popped) },
       crease: { rule: LOCO_TUNE.slopeCrease, settling: p.slope.settling, creases: p.slope.creases },
       sideViewDeg: this.sideView,
       // The other players here: what each one's game sent and the clip their legs play on this screen.

@@ -451,16 +451,48 @@ const STAIR_TWINS = new Map<LocoPick, [LocoPick, LocoPick]>();
 export function stairPick(pick: LocoPick, way: number): LocoPick {
   let twins = STAIR_TWINS.get(pick);
   if (!twins) {
-    const make = (up: boolean): LocoPick => {
-      const fast = pick.cls > 1;
-      const id = up ? STAIR_CLIPS.up[fast ? 1 : 0] : STAIR_CLIPS.down[fast ? 1 : 0];
-      const made = up ? (fast ? MADE_STAIRS_RUN_UP : MADE_STAIRS_UP) : fast ? MADE_STAIRS_RUN_DOWN : MADE_STAIRS_DOWN;
-      return Object.freeze({ ...pick, id, clip: clipOfId(id), heading: 0, turn: wrapDeg(travelDeg(pick.dir)), side: -1, made, uid: -1, reverse: false });
-    };
-    twins = [make(true), make(false)];
+    twins = [stairTwin(pick, true), stairTwin(pick, false)];
     STAIR_TWINS.set(pick, twins);
   }
   return way > 0 ? twins[0] : twins[1];
+}
+/** One of a pick's stair twins. (A function of its own: a closure over `pick` inside `stairPick` made that function's
+ *  context on every call, 40 bytes a frame on stairs, though the closure itself was made only once a pick.) */
+function stairTwin(pick: LocoPick, up: boolean): LocoPick {
+  const fast = pick.cls > 1;
+  const id = up ? STAIR_CLIPS.up[fast ? 1 : 0] : STAIR_CLIPS.down[fast ? 1 : 0];
+  const made = up ? (fast ? MADE_STAIRS_RUN_UP : MADE_STAIRS_UP) : fast ? MADE_STAIRS_RUN_DOWN : MADE_STAIRS_DOWN;
+  return Object.freeze({ ...pick, id, clip: clipOfId(id), heading: 0, turn: wrapDeg(travelDeg(pick.dir)), side: -1, made, uid: -1, reverse: false });
+}
+
+/**
+ * The stairs wave: a stair pick's cycle twin (src/anim/stairCycle.ts), the very pick with the cycle's clip: 'trimmed' for
+ * an upstairs clip, 'legs' or 'whole' (the mirror's kind) for a downstairs one. Made once a pick and kind, and kept.
+ */
+const CYCLE_TWINS = new Map<LocoPick, Map<string, LocoPick>>();
+export function stairCyclePick(pick: LocoPick, kind: 'trimmed' | 'legs' | 'whole'): LocoPick {
+  let twins = CYCLE_TWINS.get(pick);
+  if (!twins) {
+    twins = new Map();
+    CYCLE_TWINS.set(pick, twins);
+  }
+  let twin = twins.get(kind);
+  if (!twin) {
+    twin = Object.freeze({ ...pick, clip: `mx_${pick.id}~${kind}` });
+    twins.set(kind, twin);
+  }
+  return twin;
+}
+
+/**
+ * The stairs wave: which cycle a stair pick plays under the tune (`stairs.cycle`, `stairs.mirror`): an upstairs clip's
+ * trimmed loop, a downstairs clip's mirrored cycle of the kind asked, or null for the clip as it stands ('before', or a
+ * downstairs clip under the mirror's 'off').
+ */
+export function cycleKindOf(pick: LocoPick, cycle: string, mirror: string): 'trimmed' | 'legs' | 'whole' | null {
+  if (cycle !== 'trimmed') return null;
+  if (pick.made === MADE_STAIRS_UP || pick.made === MADE_STAIRS_RUN_UP) return 'trimmed';
+  return mirror === 'legs' ? 'legs' : mirror === 'whole' ? 'whole' : null;
 }
 
 /** Whether a pick is one of the stair clips. */
