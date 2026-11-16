@@ -17,6 +17,8 @@ import { ANIM_TUNE, watchTrims, type TrimId } from './animTune.ts';
 import { fitClip, planFit, skeletonKey, type FitPlan, type FitReport, type FitRow, type FittedClip, type TargetSkeleton } from './fit.ts';
 import { factsOf, type ClipFacts } from './locoPhase.ts';
 import { STAIR_IDS, moreClips } from './locoTable.ts';
+import { LEDGE_IDS } from './ledgeClips.ts';
+import { WALL_IDS } from './wallClips.ts';
 import { ALIGN_SHIPPED, type AlignFlags } from './mixamoMap.ts';
 import { clipName, clipSlug, decodeMxa, readPackIndex, type ClipData, type PackClipRow, type PackIndex } from './mxaFile.ts';
 
@@ -214,7 +216,8 @@ export class MixamoPack {
     const tuned = (ANIM_TUNE.trim as Record<string, number | undefined>)[id];
     // Wave 3's stair clips are played round with their net climb taken out (the body's height is the capsule's): fitted as
     // loops whatever the importer marked them, the climb stripped as the level travel is. Every other clip as before.
-    if (STAIR_IDS.includes(id)) return { trimStart: Math.min(tuned ?? row.trimStart, row.duration * 0.98), loop: true, level: row.level, climb: true };
+    // Wave 4's wall clips the same way (src/anim/wallClips.ts): the down clip falls 1.26 m a round in its file.
+    if (STAIR_IDS.includes(id) || WALL_IDS.includes(id)) return { trimStart: Math.min(tuned ?? row.trimStart, row.duration * 0.98), loop: true, level: row.level, climb: true };
     return { trimStart: Math.min(tuned ?? row.trimStart, row.duration * 0.98), loop: row.loop, level: row.level };
   }
 
@@ -483,8 +486,8 @@ export function browserIo(deps: {
     },
     breath: browserBreath,
     // Wave 2b's rows' clips, which the committed index does not mark `use` (marking them is a reimport, which waits on the owner),
-    // and wave 3's stair clips.
-    also: [...moreClips(), ...STAIR_IDS],
+    // wave 3's stair clips, and wave 4's ledge clips (src/anim/ledgeClips.ts) and wall clips (src/anim/wallClips.ts).
+    also: [...moreClips(), ...STAIR_IDS, ...LEDGE_IDS, ...WALL_IDS],
     now: () => performance.now(),
   };
 }

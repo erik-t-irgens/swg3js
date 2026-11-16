@@ -556,7 +556,9 @@ export type LetGoReason =
   | 'refit'
   | 'wing'
   // The world editor (the dev server's alone) took the body to carry as its camera.
-  | 'editor';
+  | 'editor'
+  // The haul ended under a lip it could not go over, and the body took hold of the lip (wave 4 of the animations).
+  | 'ledge';
 
 /**
  * The ways out that put the body somewhere new, give it to something else or take it out of the world (§3.10): they end
@@ -579,6 +581,7 @@ function endsFlight(reason: LetGoReason): boolean {
     case 'doorless':
     case 'world':
     case 'moved':
+    case 'ledge':
       return true;
     default:
       return false;
@@ -665,11 +668,19 @@ export interface GrappleFireState {
   stepped: boolean;
   /** The character owns a grapple rig (wave 4): asked only while `everyone` is off. */
   rig: boolean;
+  /** Hanging from a ledge or climbing a wall (wave 4 of the animations): refused in words. */
+  climbing?: boolean;
 }
 
 export function newFireState(): GrappleFireState {
-  return { mounted: false, piloting: false, noclip: false, eva: false, aboard: false, riding: false, jump: false, dead: false, placing: false, talking: false, prone: false, kneeling: false, rolling: false, special: false, swgProfile: false, stepped: true, rig: true };
+  return { mounted: false, piloting: false, noclip: false, eva: false, aboard: false, riding: false, jump: false, dead: false, placing: false, talking: false, prone: false, kneeling: false, rolling: false, special: false, swgProfile: false, stepped: true, rig: true, climbing: false };
 }
+
+/** How long the haul is held against something before the ledges may take the body (wave 4 of the animations; ours: a third of a second, a few frames past any bump). */
+export const HAUL_STALL = 0.3;
+
+/** What a shot refused while hanging from a ledge or climbing a wall says, once a press, on the message line. */
+export const CLIMBING_WORDS = 'Not while climbing: the hands are full.';
 
 /** What a shot refused for want of a rig says, once a press, on the message line: the one refusal said in words. */
 export const NO_RIG_WORDS = 'You carry no grapple rig.';
@@ -891,6 +902,8 @@ export class Grapple {
   private corrLen = 0;
   /** The hand's distance from its pivot this frame, handed to the haul in a field (an argument would be a fresh number). */
   private haulDist = 0.5;
+  /** Seconds the haul has been held against something with its distance not coming in (wave 4's hand-over to a ledge, haulStuck). */
+  private haulStall = 0.5;
   hauling = false;
   private haulEnded = false;
   /** What the haul's last step falls short of its speed by, taken off this frame's move (nought on every other frame). */
@@ -1040,6 +1053,15 @@ export class Grapple {
     return this.state === 'attached';
   }
 
+  /**
+   * The haul has come to its end under a lip it did not go over (wave 4 of the animations): hauled in to the shortest with
+   * F still held, its lip-over given up (no room), or held against the face under it (`HAUL_STALL`). What the ledges'
+   * hand-over reads (`LedgeHang.fromHaul`): a hang there, where there is a lip in reach.
+   */
+  get haulStuck(): boolean {
+    return this.state === 'attached' && (this.haulEnded || this.lipGaveUp || (this.hauling && this.haulStall > HAUL_STALL)) && !this.lipping;
+  }
+
   get flying(): boolean {
     return this.state === 'flying';
   }
@@ -1186,6 +1208,7 @@ export class Grapple {
     if (s.riding) return 'riding';
     if (s.jump) return 'jump';
     if (s.dead) return 'dead';
+    if (s.climbing) return 'climbing';
     if (s.placing) return 'placing';
     if (s.talking) return 'talking';
     if (s.prone) return 'prone';
@@ -2091,7 +2114,11 @@ export class Grapple {
       this.haulEnded = false;
       this.lipping = false;
       this.lipGaveUp = false;
+      this.haulStall = 0;
     } else if (dist > 1e-6) {
+      // Wave 4 of the animations: how long the haul has been held against something (a face under a lip it cannot go
+      // over), its distance to the first point coming in by less than a tenth of a metre a second.
+      this.haulStall = wasHauling && this.haulDist - dist < 0.1 * dt ? this.haulStall + dt : 0;
       this.haulDist = dist;
       this.haul(b, dt);
     }
@@ -2501,7 +2528,11 @@ export class Grapple {
       this.haulEnded = false;
       this.lipping = false;
       this.lipGaveUp = false;
+      this.haulStall = 0;
     } else if (dist > 1e-6) {
+      // Wave 4 of the animations: how long the haul has been held against something (a face under a lip it cannot go
+      // over), its distance to the first point coming in by less than a tenth of a metre a second.
+      this.haulStall = wasHauling && this.haulDist - dist < 0.1 * dt ? this.haulStall + dt : 0;
       this.haulDist = dist;
       this.haul(b, dt);
     }

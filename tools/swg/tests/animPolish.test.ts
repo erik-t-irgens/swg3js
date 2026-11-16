@@ -272,7 +272,25 @@ function jumpThrough(t: AnimTune, fps: number, level: number, held: number, floo
     'if (this.applied !== 0 && rig === this.rig) rig.root.position.y += this.applied;',
     'rig.root.position.y -= drop;',
   ];
+  // Wave 4 adds the ledges' line-up of a hanging figure against its body (each clip authored at a height of its own), on
+  // the player's root and, from their rig state, on a peer's, each by its own line and taken back off by its own (the
+  // player's put back to nought where nothing hangs, a peer's taken off before its frame writes it). Under 'before'
+  // (`climb.ledges`) nothing hangs and nothing makes one.
+  const WAVE4_ROOT = [
+    'rig.root.position.x = 0;',
+    'rig.root.position.z = 0;',
+    'rig.root.position.x = L.offX * c - L.offZ * s;',
+    'rig.root.position.y += L.offY;',
+    'rig.root.position.z = L.offX * s + L.offZ * c;',
+    'rig.root.position.y += oy;',
+    'rig.root.position.z = oz;',
+  ];
   const wave3Root: string[] = [];
+  const wave4Root: string[] = [];
+  // Wave 4, item B: the wall's own three (its figure's offset added to whatever the hang's put there), beside its two
+  // noughts above, which read as the ledges' own text.
+  const WAVE4B_ROOT = ['rig.root.position.x += W.offX * c - W.offZ * s;', 'rig.root.position.y += W.offY;', 'rig.root.position.z += W.offX * s + W.offZ * c;'];
+  const wave4bRoot: string[] = [];
   const writers: string[] = [];
   const walk = (dir: string) => {
     for (const e of readdirSync(join(root, dir), { withFileTypes: true })) {
@@ -283,13 +301,15 @@ function jumpThrough(t: AnimTune, fps: number, level: number, held: number, floo
         const own = rel === 'src/player/rig.ts' ? '|\\bthis\\.root' : '';
         const write = new RegExp(`(\\brig\\??\\.root${own})\\.position(\\.[xyz])?\\s*([-+*/]?=(?!=)|\\.(set|setX|setY|setZ|copy|add|sub|addScaledVector|multiplyScalar|lerp|applyMatrix4|applyQuaternion)\\()`);
         text(rel).split('\n').forEach((line, i) => {
-          if (write.test(line)) (WAVE3_ROOT.includes(line.trim()) ? wave3Root : writers).push(`${rel}:${i + 1}`);
+          if (write.test(line)) (WAVE3_ROOT.includes(line.trim()) ? wave3Root : WAVE4_ROOT.includes(line.trim()) ? wave4Root : WAVE4B_ROOT.includes(line.trim()) ? wave4bRoot : writers).push(`${rel}:${i + 1}`);
         });
       }
     }
   };
   walk('src');
   const rigTs = text('src/player/rig.ts');
+  ok(wave4Root.length === 10 && wave4Root.filter((w) => w.startsWith('src/player/player.ts:')).length === 7 && wave4Root.filter((w) => w.startsWith('src/player/peerHang.ts:')).length === 3, `wave 4's ten writers of a rig's root are the ledges' own lines and the wall's two noughts, and nothing else (${wave4Root.join(', ')})`);
+  ok(wave4bRoot.length === 3 && wave4bRoot.every((w) => w.startsWith('src/player/player.ts:')), `and the wall's own three, in the player alone (${wave4bRoot.join(', ')})`);
   ok(wave3Root.length === 4 && wave3Root.filter((w) => w.startsWith('src/player/player.ts:')).length === 2 && wave3Root.filter((w) => w.startsWith('src/player/footIk.ts:')).length === 2, `wave 3's four writers of a rig's root are its own lines and nothing else (${wave3Root.join(', ')})`);
   ok(writers.length === 2 && writers.some((w) => w.startsWith('src/player/player.ts:')) && writers.some((w) => w.startsWith('src/net/remotePlayers.ts:')) && rigTs.includes('return new CharacterRig(gltf.scene, gltf.animations, options);') && rigTs.includes('const rig = new CharacterRig(character.group, character.clips, options);') && text('src/player/character.ts').includes('readonly group = new THREE.Group();'), `nothing in the game writes a rig's root's place but the sink's two lines (${writers.join(', ')}), and a rig's root is a scene or a group made fresh at the origin: under 'before' the nought they write is the nought it already stood at, as 62143fe left it`);
 }

@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import v8 from 'node:v8';
 import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks';
 import { GRAPPLE_DEFAULTS, GRAPPLE_GRAVITY, GRAPPLE_TUNE, newFireState, tuneGrapple } from '../../../src/player/grapple.ts';
+import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
 import { GrappleRope, bendOffsetDir } from '../../../src/player/grappleRope.ts';
 import { grappleMutes, joltFor, leanRate, slamHarm } from '../../../src/player/grappleMath.ts';
 import { GRAPPLE_SOUND, GRAPPLE_SOUND_IDS, GrappleSounds } from '../../../src/audio/grappleSounds.ts';
@@ -145,6 +146,11 @@ await section(1, 'day one', async () => {
     }
     return { trace, b };
   };
+  // Wave 4's ledges are a switch of their own with tests of their own: 'before' here, since this day crouch-walks off the
+  // 8 m top to roll its landing, where the ledges lower a crouched body into a hang on the lip.
+  CLIMB_TUNE.ledges = 'before';
+  // (And the wall climb's, item B: the day holds W into faces the climb would take.)
+  CLIMB_TUNE.wall = 'before';
   for (const fps of FPS) {
     const a = await run(fps, true);
     const z = await run(fps, false);
@@ -153,6 +159,8 @@ await section(1, 'day one', async () => {
     ok(a.b.jumped > 0 && a.b.fallDamage > 0 && a.b.rolled && a.b.rollSaved > 0 && a.b.swimToggles > 0, `${fps} fps: the day walks, runs, jumps, falls ${a.b.fallDamage} harm from 8 m, rolls a landing (${a.b.rollSaved} saved) and swims`);
     ok(same, `${fps} fps: with the hook's steps called (never fired) and not called, every place, velocity and fall's harm is the same by Object.is over 20 s (${a.trace.length / 7} frames)`);
   }
+  CLIMB_TUNE.ledges = 'on';
+  CLIMB_TUNE.wall = 'on';
 });
 
 // =============================================================================================================

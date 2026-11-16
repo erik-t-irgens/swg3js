@@ -1,0 +1,2923 @@
+// Ledges (wave 4 of the animations, maker A; the owner's brief's "Free climbing" at lines 157 to 159: "various stances
+// such as braced (feet against wall while hanging from ledge) and hanging (no feet on wall in front of you, or no wall to
+// put feet on) and shimmying for each, as well as jumping, landing on a ledge from a jump or a run jump").
+//
+// A ledge is a lip whose top is walkable (by wave 2b's climb limit, `LOCO_TUNE.slope.climb`) with a face steeper than that
+// limit under it, of what stands still only (the engine's own query flags: terrain and fixed or bodiless colliders; never a
+// door, a vehicle, a loose prop, a creature or another player). One class, `LedgeHang`, holds the whole of it and is
+// stepped by the player's update and by the node harness alike (tools/swg/tests/grappleBody.ts), each at the very same
+// two places:
+//  - `sense`, after the move (beside wave 2b's slope verdict): in the air, moving toward a face whose lip stands within the
+//    hands' reach band over the feet (`climb.reachLow` to `reachHigh`, scaled by the figure), falling no faster than
+//    `climb.grabFall`, with no crouch held, no wall move or Force jump's rise under way and the stamina not tired, the body
+//    grabs (the grab's clip from the frame its hands reach the lip, the body carried onto the hang over its rest); crouched,
+//    walking off a lip whose drop is deeper than a hang, it turns and lowers into the hang;
+//  - `step`, in place of the movement while it holds the body (`holding`): the hang's keys (A and D shimmy along the lip,
+//    probed again as the body moves and stopped at its end or a corner; Space with A or D hops to another lip within
+//    `climb.hopSide`, with W up to one within `climb.hopUp`; Space or W climbs up where a crouched capsule fits on the top;
+//    crouch lets go; S with Space jumps off backward), the stamina (hanging and shimmying drain it, a hop takes a lump, and
+//    emptied the body lets go), and a one-off that moves the body (a grab, a hop, a climb, the turn between braced and free,
+//    the step down) carried from where it began to where it is aimed, so the hands land on the lip it was aimed at.
+// Braced or free is one probe at the feet's height under the lip: a face within reach of the feet is braced.
+//
+// What the figure plays is said in `rigState` (the hang's loop, which goes to other players as their rig state) and
+// `startClip` (a one-off to begin this frame, for the caller to hand its rig), and where the figure's own origin is drawn
+// against the body's in `offX/offY/offZ` (the world's frame: each clip was authored at a height of its own, so a clip is
+// lined up by its hands or its feet, src/anim/ledgeClips.ts). The hands' line on the lip is `handLine`.
+//
+// Nothing here makes an object on a frame: every ask and answer is a kept record, and the engine's own answers (a ray's,
+// a shape's) are the only things made, counted in `casts`.
+
+import * as THREE from 'three';
+import type { RAPIER } from '../core/physics.ts';
+import { STILL_FLAGS } from './stairSense.ts';
+import type { LimbPlace, LimbRig } from './limbPlace.ts';
+import { CLIMB_TUNE } from '../anim/climbTune.ts';
+import { LOCO_TUNE } from '../anim/locoTune.ts';
+import { LEDGE_FACTS, LEDGE_JUMP_OFF, LEDGE_REST, LEDGE_ROLES, LEDGE_STEP_DOWN, type LedgeClipFacts, type LedgeRoles } from '../anim/ledgeClips.ts';
+
+/** The little of a physics world the ledges ask (rapier's `World`). */
+export interface LedgeWorld {
+  castRayAndGetNormal(ray: RAPIER.Ray, maxToi: number, solid: boolean, filterFlags?: RAPIER.QueryFilterFlags, filterGroups?: number): RAPIER.RayColliderIntersection | null;
+  intersectionWithShape(shapePos: { x: number; y: number; z: number }, shapeRot: { x: number; y: number; z: number; w: number }, shape: RAPIER.Shape, filterFlags?: RAPIER.QueryFilterFlags, filterGroups?: number): RAPIER.Collider | null;
+}
+
+/** The engine's ray and the two capsules the room checks ask with, handed in once (so this file loads under node with no engine of its own). */
+export interface LedgeMakers {
+  ray(): RAPIER.Ray;
+  /** The standing capsule (half height, radius) and the crouched one. */
+  capsule(halfHeight: number, radius: number): RAPIER.Shape;
+}
+
+/** The little of a body the ledges move: its feet and its velocity (the player's `pos` and `vel`, the harness's). */
+export interface LedgeBody {
+  readonly pos: { x: number; y: number; z: number };
+  readonly vel: { x: number; y: number; z: number };
+}
+
+/** The stamina's pool (wave 2a's `Stamina`): its points, whether it is tired, and a step at a rate. */
+export interface LedgeStamina {
+  value: number;
+  tired: boolean;
+  step(dt: number, rate: number, pool: number, tune: typeof LOCO_TUNE): void;
+}
+
+/** A frame of the body as the ledges need it, written by the caller (fields, so no number crosses a call). */
+export class LedgeIn {
+  dt = 0.5;
+  /** The body's heading, radians (its front is (sin h, 0, cos h)). */
+  heading = 0.5;
+  grounded = false;
+  wasGrounded = false;
+  /** The movement jumped this frame (a step off a lip with a jump is no step down). */
+  jumped = false;
+  /** Something else has the body: swimming, the rope or its flight after, thrown from a wreck, dead, a wall move or a Force jump's rise. */
+  busy = false;
+  crouchHeld = false;
+  crouchPressed = false;
+  jumpPressed = false;
+  forwardHeld = false;
+  forwardPressed = false;
+  backHeld = false;
+  leftHeld = false;
+  rightHeld = false;
+  /** The move keys' direction in the world (horizontal), nought for none. */
+  moveX = 0.5;
+  moveZ = 0.5;
+  /** The figure's size against the human male (its hips' rest height over his, times its own scale). */
+  scale = 0.5;
+  /** The move's own collision groups. */
+  filter = 0.5;
+  /** The stamina's pool size (wave 2a: 100). */
+  pool = 0.5;
+  /**
+   * Maker B's wall climb: the frame's move was cut short across the ground by something in its way (the controller kept
+   * under 60% of the level move it was asked for): only a body pressed into a face feels for one to climb, so walking
+   * free in the open casts nothing.
+   */
+  blocked = false;
+  /**
+   * In the air, Jedi Academy's own wall move off a wall is open to the body now (`JkaMovement.airWallMoveOpen`): the wall
+   * climb never starts in the air then, so the Force's rebound keeps its own trigger (the fix round's).
+   */
+  airWallMove = false;
+  constructor() {
+    this.dt = 0;
+    this.heading = 0;
+    this.moveX = 0;
+    this.moveZ = 0;
+    this.scale = 1;
+    this.filter = 0;
+    this.pool = 100;
+  }
+}
+
+/** What becomes of the body when a one-off ends. */
+const AFTER_HANG = 0;
+const AFTER_STAND = 1;
+const AFTER_FALL = 2;
+
+/** The phase: holding nothing, hanging (still or shimmying), or carried through a one-off. */
+export const LEDGE_NONE = 0;
+export const LEDGE_HANG = 1;
+export const LEDGE_MOVE = 2;
+
+/** The capsule the player wears: its radius and its two half heights (player.ts's `CAPSULE_RADIUS`, standing and crouched). */
+export const LEDGE_CAPSULE = { r: 0.35, stand: 0.45, crouch: 0.15 } as const;
+
+/** One kept ray's answer. */
+class Hit {
+  hit = false;
+  x = 0.5;
+  y = 0.5;
+  z = 0.5;
+  nx = 0.5;
+  ny = 0.5;
+  nz = 0.5;
+  toi = 0.5;
+}
+
+/**
+ * A lip found: the face's top edge at the body's lateral place, its outward normal (level, unit), the top's own normal's
+ * rise, and how it slopes along its length (the rise a metre toward the figure's left, level: the hands grip it at its own
+ * height under each).
+ */
+export class Lip {
+  ex = 0.5;
+  ey = 0.5;
+  ez = 0.5;
+  nx = 0.5;
+  nz = 0.5;
+  topNy = 0.5;
+  slope = 0.5;
+  constructor() {
+    this.slope = 0;
+  }
+  copy(o: Lip): this {
+    this.ex = o.ex;
+    this.ey = o.ey;
+    this.ez = o.ez;
+    this.nx = o.nx;
+    this.nz = o.nz;
+    this.topNy = o.topNy;
+    this.slope = o.slope;
+    return this;
+  }
+}
+
+/** The rail's room: a lip held is sampled this many times at most (the far side let go as the near side grows). */
+const RAIL_CAP = 64;
+/** Metres of the lip's own edge between two of the rail's samples (ours: fine enough that a corner is found within a hand's width). */
+export const RAIL_STEP = 0.1;
+/** The steepest a lip may slope and still be followed at all, degrees (past `climb.lipSlope` it is followed, and stopped at). */
+const RAIL_STEEPEST = 60;
+/** A straight step along the lip takes a face turned at most this much from the last (its cosine): a lip that curves. */
+const CURVE_COS = Math.cos((50 * Math.PI) / 180);
+/** Rounding an outer corner, the turns tried for the face beyond it, radians: square first, then the gentler polygons'. */
+const CORNER_TURNS: readonly number[] = [Math.PI / 2, Math.PI / 3, Math.PI / 4, Math.PI / 6];
+/** A face found round an outer corner is taken within this of the turn tried (its cosine). */
+const CORNER_COS = Math.cos((25 * Math.PI) / 180);
+
+/**
+ * The lip held, sampled along its own edge (the fix round's: the owner's corners, curves and slopes, added while wave 4
+ * ran): points at increasing arc (metres along the edge, level, toward the figure's left), each its edge point, its face's
+ * outward normal (level, unit) and its top's rise; whether each end is the lip's own end, and the way each end's face looks
+ * (what the next step is felt for with: past a corner, the new face's). A sample in between is the two points' line, its
+ * normal their mean. Every ask and answer through fields (`q` in, `s*` out): no number crosses a call.
+ */
+export class Rail {
+  readonly a = new Float64Array(RAIL_CAP);
+  readonly x = new Float64Array(RAIL_CAP);
+  readonly y = new Float64Array(RAIL_CAP);
+  readonly z = new Float64Array(RAIL_CAP);
+  readonly nx = new Float64Array(RAIL_CAP);
+  readonly nz = new Float64Array(RAIL_CAP);
+  readonly top = new Float64Array(RAIL_CAP);
+  n = 0;
+  loEnd = false;
+  hiEnd = false;
+  loNx = 0.5;
+  loNz = 0.5;
+  hiNx = 0.5;
+  hiNz = 0.5;
+  /** A sample's arc (in) and its point, normal and top (out). */
+  q = 0.5;
+  sx = 0.5;
+  sy = 0.5;
+  sz = 0.5;
+  snx = 0.5;
+  snz = 0.5;
+  stop = 0.5;
+  /** A point to push (in): its arc, place, normal and top. */
+  pa = 0.5;
+  px = 0.5;
+  py = 0.5;
+  pz = 0.5;
+  pnx = 0.5;
+  pnz = 0.5;
+  ptop = 0.5;
+  constructor() {
+    this.sa = 0;
+    this.loNx = 0;
+    this.loNz = 0;
+    this.hiNx = 0;
+    this.hiNz = 0;
+    this.q = 0;
+    this.sx = 0;
+    this.sy = 0;
+    this.sz = 0;
+    this.snx = 0;
+    this.snz = 0;
+    this.stop = 0;
+    this.pa = 0;
+    this.px = 0;
+    this.py = 0;
+    this.pz = 0;
+    this.pnx = 0;
+    this.pnz = 0;
+    this.ptop = 0;
+  }
+
+  /** One point, the lip's middle, both ends open and going on along its own face. */
+  start(L: Lip): void {
+    this.n = 1;
+    this.a[0] = 0;
+    this.x[0] = L.ex;
+    this.y[0] = L.ey;
+    this.z[0] = L.ez;
+    this.nx[0] = L.nx;
+    this.nz[0] = L.nz;
+    this.top[0] = L.topNy;
+    this.loEnd = false;
+    this.hiEnd = false;
+    this.loNx = L.nx;
+    this.loNz = L.nz;
+    this.hiNx = L.nx;
+    this.hiNz = L.nz;
+  }
+
+  /** The point in `p*` onto the high end (toward the figure's left), the low end's far point let go where the room is full. */
+  pushHi(): void {
+    if (this.n === RAIL_CAP) {
+      this.shift(1, 0, this.n - 1);
+      this.n--;
+      this.loEnd = false;
+    }
+    this.put(this.n);
+    this.n++;
+  }
+
+  /** The point in `p*` onto the low end, the high end's far point let go where the room is full. */
+  pushLo(): void {
+    if (this.n === RAIL_CAP) {
+      this.n--;
+      this.hiEnd = false;
+    }
+    this.shift(0, 1, this.n);
+    this.put(0);
+    this.n++;
+  }
+
+  private put(i: number): void {
+    this.a[i] = this.pa;
+    this.x[i] = this.px;
+    this.y[i] = this.py;
+    this.z[i] = this.pz;
+    this.nx[i] = this.pnx;
+    this.nz[i] = this.pnz;
+    this.top[i] = this.ptop;
+  }
+
+  /** `count` points from `from` copied to `to` (overlapping either way). */
+  private shift(from: number, to: number, count: number): void {
+    this.a.copyWithin(to, from, from + count);
+    this.x.copyWithin(to, from, from + count);
+    this.y.copyWithin(to, from, from + count);
+    this.z.copyWithin(to, from, from + count);
+    this.nx.copyWithin(to, from, from + count);
+    this.nz.copyWithin(to, from, from + count);
+    this.top.copyWithin(to, from, from + count);
+  }
+
+  /** The lip at arc `q` into `s*` (held to the rail's two ends). */
+  sample(): void {
+    const n = this.n;
+    const a = this.a;
+    const q = this.q;
+    if (n === 0) return;
+    let i = 0;
+    if (q <= a[0] || n === 1) i = -1;
+    else if (q >= a[n - 1]) i = n - 1;
+    else while (i < n - 2 && a[i + 1] < q) i++;
+    if (i < 0 || i === n - 1) {
+      const k = i < 0 ? 0 : n - 1;
+      this.sx = this.x[k];
+      this.sy = this.y[k];
+      this.sz = this.z[k];
+      this.snx = this.nx[k];
+      this.snz = this.nz[k];
+      this.stop = this.top[k];
+      return;
+    }
+    const span = a[i + 1] - a[i];
+    const u = span > 1e-9 ? (q - a[i]) / span : 0;
+    this.sx = this.x[i] + (this.x[i + 1] - this.x[i]) * u;
+    this.sy = this.y[i] + (this.y[i + 1] - this.y[i]) * u;
+    this.sz = this.z[i] + (this.z[i + 1] - this.z[i]) * u;
+    let nx = this.nx[i] + (this.nx[i + 1] - this.nx[i]) * u;
+    let nz = this.nz[i] + (this.nz[i + 1] - this.nz[i]) * u;
+    const l = Math.sqrt(nx * nx + nz * nz);
+    if (l > 1e-9) {
+      nx /= l;
+      nz /= l;
+    } else {
+      nx = this.nx[i];
+      nz = this.nz[i];
+    }
+    this.snx = nx;
+    this.snz = nz;
+    this.stop = this.top[i] + (this.top[i + 1] - this.top[i]) * u;
+  }
+
+  /**
+   * How far along a shimmy may carry a point from arc `q` toward the high end (`hi`) or the low before the lip ends or
+   * grows steeper than `tanMax` (rise over level length): the arc of the last point before that, into `sa`.
+   */
+  sa = 0.5;
+  limit(hi: boolean, tanMax: number): void {
+    const n = this.n;
+    const a = this.a;
+    if (n === 0) {
+      this.sa = this.q;
+      return;
+    }
+    if (hi) {
+      let i = 0;
+      while (i < n - 1 && a[i + 1] <= this.q) i++;
+      // From the segment the point is on, out to the high end.
+      let k = i;
+      while (k < n - 1) {
+        const dx = this.x[k + 1] - this.x[k];
+        const dz = this.z[k + 1] - this.z[k];
+        const l = Math.sqrt(dx * dx + dz * dz);
+        const dy = this.y[k + 1] - this.y[k];
+        if (l > 1e-6 && (dy > tanMax * l || -dy > tanMax * l)) break;
+        k++;
+      }
+      this.sa = a[k];
+      return;
+    }
+    let i = n - 1;
+    while (i > 0 && a[i - 1] >= this.q) i--;
+    let k = i;
+    while (k > 0) {
+      const dx = this.x[k] - this.x[k - 1];
+      const dz = this.z[k] - this.z[k - 1];
+      const l = Math.sqrt(dx * dx + dz * dz);
+      const dy = this.y[k] - this.y[k - 1];
+      if (l > 1e-6 && (dy > tanMax * l || -dy > tanMax * l)) break;
+      k--;
+    }
+    this.sa = a[k];
+  }
+}
+
+/** The one-off under way: its clip, the body's path, the figure's offset at each end, its clock, and what follows it. */
+class Move {
+  id = '';
+  /** 'grab', 'hop', 'climb', 'turn', 'stepDown'. */
+  kind = '';
+  fx = 0.5;
+  fy = 0.5;
+  fz = 0.5;
+  tx = 0.5;
+  ty = 0.5;
+  tz = 0.5;
+  o0x = 0.5;
+  o0y = 0.5;
+  o0z = 0.5;
+  o1x = 0.5;
+  o1y = 0.5;
+  o1z = 0.5;
+  t0 = 0.5;
+  T = 0.5;
+  time = 0.5;
+  after = 0;
+  /** The hang's kind once it ends, and its heading (a step down turns the body round at its end). */
+  braced = false;
+  heading = 0.5;
+  /** The heading it began at (a hop turns from it to `heading` as it goes: a lip on another face). */
+  h0 = 0.5;
+  readonly lip = new Lip();
+  /**
+   * The body's own path (the capsule's), checked for room before the move begins (the fix round's): `PATH_LINE` straight,
+   * `PATH_CURVE` a curve through a middle point `c*` (a hop round what stands in its line), `PATH_LEGS` three legs through
+   * `p1*` and `p2*` (a climb up: out clear of the face, up over the lip, in onto the top, the last crouched). The figure
+   * drawn on a climb keeps the straight line it always had (the clip's own pose and line-up, so nothing it shows changes).
+   */
+  path = 0;
+  cx = 0.5;
+  cy = 0.5;
+  cz = 0.5;
+  p1x = 0.5;
+  p1y = 0.5;
+  p1z = 0.5;
+  p2x = 0.5;
+  p2y = 0.5;
+  p2z = 0.5;
+  /** The legs' lengths (a climb's), and how far along them the in-leg (crouched) begins. */
+  l1 = 0.5;
+  l2 = 0.5;
+  l3 = 0.5;
+}
+
+const PATH_LINE = 0;
+const PATH_CURVE = 1;
+const PATH_LEGS = 2;
+/** The capsule's room along a path is tested this often, metres (ours: under half its radius). */
+const PATH_EVERY = 0.15;
+/** A climb's capsule rises clear of the top by this before it goes in over it, metres (ours). */
+const CLIMB_LIFT = 0.05;
+/** And stands this far beyond its radius off the face as it rises (the wall climb's own skin), metres. */
+const CLIMB_SKIN = 0.02;
+/** A hop's curves tried where its line meets something: the middle pushed out from the faces and up by these, metres (ours). */
+const HOP_BENDS: readonly number[] = [0.6, 0, 0, 0.6, 0.6, 0.6, 1.2, 0, 1.2, 0.6];
+/** A hang's place pushed out where it meets something: along the lip's way out, then that way turned by these (cosine, sine pairs). */
+const ROOM_TURNS: readonly number[] = [1, 0, Math.cos(0.52), Math.sin(0.52), Math.cos(-0.52), Math.sin(-0.52), Math.cos(1.05), Math.sin(1.05), Math.cos(-1.05), Math.sin(-1.05)];
+
+const TAU = Math.PI * 2;
+/** A hand wholly put on the lip within this of it as the clip has it, let go of from this far off (metres). */
+const HAND_NEAR = 0.1;
+/** How far behind a face's line the ray down onto its top is cast, metres: near enough the edge that a sloped top reads the lip's own height. */
+const TOP_IN = 0.05;
+const HAND_FAR = 0.3;
+/**
+ * A hop's hands on a lip by its share done (ours, a share of the clip rather than a measurement of it: the first sixth on
+ * the lip it leaves, the last sixth on the one it takes): wholly placed only at the two ends, so the arms are never
+ * pulled to a lip they are flying past.
+ */
+function hopHands(u: number): number {
+  return u < 1 / 6 || u > 5 / 6 ? 1 : 0;
+}
+const gripV = new THREE.Vector3();
+/** A body's place handed to a line-up at a one-off's start (an event, never a frame's). */
+const gripAt = { x: 0, y: 0, z: 0 };
+const anchorV = new THREE.Vector3();
+const anchorD = new THREE.Vector3();
+/** What the hands' anchor moves the body past an arm's whole length, metres: a millimetre, so the solve meets its target. */
+const REACH_SPARE = 0.001;
+const anchorP = new THREE.Vector3();
+const anchorM = new THREE.Matrix4();
+
+/** A clip's grip over its own feet at its start (its hands' height less how high its ankles stand over its ground), human male metres. */
+function hangOver(f: LedgeClipFacts): number {
+  return f.g0[1] - (f.a0 - LEDGE_REST.ankle);
+}
+
+export class LedgeHang {
+  /** `LEDGE_NONE`, `LEDGE_HANG` or `LEDGE_MOVE`. */
+  phase = LEDGE_NONE;
+  braced = false;
+  /** The lip held (or aimed at, through a move). */
+  readonly lip = new Lip();
+  /** The heading the figure faces the wall at, radians. */
+  heading = 0.5;
+  /** -1 shimmying right, +1 left, 0 still. */
+  shimmy = 0;
+  /** The hang's loop for the rig (and the wire): '' while holding nothing. */
+  rigState = '';
+  /** The loop's clip id, for the rig's `prefer`. */
+  rigClip = '';
+  /** A one-off to begin this frame ('' for none), from this far in, faded in over `startFade`. Consumed by the caller. */
+  startClip = '';
+  startFrom = 0.5;
+  startFade = 0.5;
+  /** Where the figure's own origin is drawn against the body's, in the world's frame (metres). */
+  offX = 0.5;
+  offY = 0.5;
+  offZ = 0.5;
+  /** The hands' line on the lip: a point on it (the grip's height, out from the face) and its direction (level, unit, toward the figure's left). */
+  lineX = 0.5;
+  lineY = 0.5;
+  lineZ = 0.5;
+  lineTx = 0.5;
+  lineTz = 0.5;
+  /** How the line rises a metre along it (a sloping lip's: each hand grips the lip at its own height under it). */
+  lineSlope = 0.5;
+  /** How much the hands are placed on the line, and the feet on the wall (braced), each 0 to 1, eased. */
+  hands = 0.5;
+  feet = 0.5;
+  /** Words for the message line (a refusal), or '' (consumed by the caller). */
+  said = '';
+  /** A heading the caller turns the body to once `turnIn` runs out (the jump off's own turn round in its clip), NaN for none. */
+  turnTo = Number.NaN;
+  turnIn = 0.5;
+  /** A drop's let-go clip plays this long more before the falling loop takes the body (the caller cuts it). */
+  cutIn = 0.5;
+  /** After a climb up: kept crouched until a standing capsule fits (`standRoom`). */
+  keepCrouched = false;
+  /** A one-off ended this frame (the caller fades the rig's held last frame into the loop over `climb.ease`), and the body stands on a top (grounded). */
+  ended = false;
+  stood = false;
+  /** Rays and shape tests asked of the engine, and grabs, refusals and let-goes (the console's and the tests'). */
+  casts = 0;
+  grabs = 0;
+  lastLetGo = '';
+  readonly move = new Move();
+  private readonly hit = new Hit();
+  private readonly cand = new Lip();
+  private readonly found = new Lip();
+  private ray: RAPIER.Ray | null = null;
+  private shapeStand: RAPIER.Shape | null = null;
+  private shapeCrouch: RAPIER.Shape | null = null;
+  private readonly makers: LedgeMakers;
+  private readonly shapeAt = { x: 0, y: 0, z: 0 };
+  private readonly shapeRot = { x: 0, y: 0, z: 0, w: 1 };
+  /** The last lip let go of (its edge), and how long more it is not grabbed again. */
+  private regrabX = 0.5;
+  private regrabY = 0.5;
+  private regrabZ = 0.5;
+  private regrabT = 0.5;
+  /** The figure's offset eased between clips: where it was as the clip changed, and how far the fade has got. */
+  private ofX = 0.5;
+  private ofY = 0.5;
+  private ofZ = 0.5;
+  private fadeT = 0.5;
+  private fadeDur = 0.5;
+  /** The hang place's own scale (the figure's), kept from the grab. */
+  private s = 0.5;
+  /** Reach of the hands' tests this frame, the probes' place and direction (fields, so nothing crosses a call). */
+  private qx = 0.5;
+  private qy = 0.5;
+  private qz = 0.5;
+  private qdx = 0.5;
+  private qdy = 0.5;
+  private qdz = 0.5;
+  private qlen = 0.5;
+  private qflt = 0.5;
+  /** The hang place worked out last (`placeFor`). */
+  private bx = 0.5;
+  private by = 0.5;
+  private bz = 0.5;
+  /**
+   * The lip held, sampled along its own edge (the fix round's: corners, curves and slopes, `Rail`), and where on it the
+   * body hangs (its arc: the two hands' middle at their rest spacing, `bodyOn`). Another kept rail is a hop's look along the
+   * lip (`walk`), so a hop that finds nothing leaves the held one as it was.
+   */
+  readonly rail = new Rail();
+  private readonly walk = new Rail();
+  barc = 0.5;
+  /** The figure's turn about its own front with a sloping lip (radians, its left side up for a positive), eased: `lipTilt` of the slope. */
+  tilt = 0.5;
+  private tiltGoal = 0.5;
+  /** The lip probe's ask (a point on the face's line, a height to look from, the face's way, how far up and down, how near the way) and answer. */
+  private fpx = 0.5;
+  private fpz = 0.5;
+  private fref = 0.5;
+  private frise = 0.5;
+  private ffall = 0.5;
+  private fnx = 0.5;
+  private fnz = 0.5;
+  private facc = 0.5;
+  private fox = 0.5;
+  private foy = 0.5;
+  private foz = 0.5;
+  private fonx = 0.5;
+  private fonz = 0.5;
+  private fotop = 0.5;
+  /** A follower's step rounded a corner: its point (the gap a hop looks across starts there). */
+  private cornerX = 0.5;
+  private cornerY = 0.5;
+  private cornerZ = 0.5;
+  private cornered = false;
+  /** While a climb carries the body over the top on its last leg, its capsule is the crouched one (the caller wears it). */
+  crouchedNow = false;
+
+  constructor(makers: LedgeMakers) {
+    this.makers = makers;
+    this.barc = 0;
+    this.tilt = 0;
+    this.tiltGoal = 0;
+    this.tiltLift = 0;
+    this.fpx = 0;
+    this.fpz = 0;
+    this.fref = 0;
+    this.frise = 0;
+    this.ffall = 0;
+    this.fnx = 0;
+    this.fnz = 0;
+    this.facc = 0;
+    this.fox = 0;
+    this.foy = 0;
+    this.foz = 0;
+    this.fonx = 0;
+    this.fonz = 0;
+    this.fotop = 0;
+    this.cornerX = 0;
+    this.cornerY = 0;
+    this.cornerZ = 0;
+    this.lineSlope = 0;
+    // Fields that will hold fractions start as one (wave 2a's lesson) and are put to nought here.
+    this.dtNow = 0;
+    this.goalHands = 0;
+    this.goalFeet = 0;
+    this.lifted = 0;
+    this.heading = 0;
+    this.startFrom = 0;
+    this.startFade = 0;
+    this.offX = 0;
+    this.offY = 0;
+    this.offZ = 0;
+    this.lineX = 0;
+    this.lineY = 0;
+    this.lineZ = 0;
+    this.lineTx = 1;
+    this.lineTz = 0;
+    this.hands = 0;
+    this.feet = 0;
+    this.turnIn = 0;
+    this.cutIn = 0;
+    this.regrabT = 0;
+    this.ofX = 0;
+    this.ofY = 0;
+    this.ofZ = 0;
+    this.fadeT = 1;
+    this.fadeDur = 0;
+    this.s = 1;
+  }
+
+  /** Something holds the body (a hang, or a one-off carrying it). */
+  get holding(): boolean {
+    return this.phase !== LEDGE_NONE;
+  }
+
+  /** Let go of everything at once, with no fall of its own (a reset, a travel, a death): `why` for the console. */
+  reset(why = 'reset'): void {
+    this.release(why);
+    this.offX = 0;
+    this.offY = 0;
+    this.offZ = 0;
+    this.tilt = 0;
+    this.tiltGoal = 0;
+    this.outT = 0;
+    this.turnTo = Number.NaN;
+    this.cutIn = 0;
+    this.keepCrouched = false;
+  }
+
+  /** The hold given up, the drawn offset left where it is (a let-go eases it out, `tick`). */
+  private release(why: string): void {
+    if (this.phase !== LEDGE_NONE) this.lastLetGo = why;
+    this.phase = LEDGE_NONE;
+    this.crouchedNow = false;
+    this.fromClimb = false;
+    this.shimmy = 0;
+    this.rigState = '';
+    this.rigClip = '';
+    this.startClip = '';
+    this.hands = 0;
+    this.feet = 0;
+    this.fadeT = 1;
+    this.fadeDur = 0;
+  }
+
+  /** After a let-go the drawn offset eases out over this long more (seconds left, and the whole). */
+  private outT = 0.5;
+  private outDur = 0.5;
+
+  /** The drawn figure is still off the body's place (holding, or easing out after a let-go). */
+  get offset(): boolean {
+    return this.offX !== 0 || this.offY !== 0 || this.offZ !== 0;
+  }
+
+  // ---- the engine's two questions ------------------------------------------------------------------------------------------
+
+  /** One ray from (q) along (qd) for `qlen`, into `hit` (the still family only). */
+  private cast(world: LedgeWorld): boolean {
+    let ray = this.ray;
+    if (!ray) ray = this.ray = this.makers.ray();
+    ray.origin.x = this.qx;
+    ray.origin.y = this.qy;
+    ray.origin.z = this.qz;
+    ray.dir.x = this.qdx;
+    ray.dir.y = this.qdy;
+    ray.dir.z = this.qdz;
+    this.casts++;
+    const h = world.castRayAndGetNormal(ray, this.qlen, true, STILL_FLAGS, this.qflt);
+    const o = this.hit;
+    if (!h) {
+      o.hit = false;
+      return false;
+    }
+    o.hit = true;
+    o.toi = h.timeOfImpact;
+    o.x = this.qx + this.qdx * o.toi;
+    o.y = this.qy + this.qdy * o.toi;
+    o.z = this.qz + this.qdz * o.toi;
+    o.nx = h.normal.x;
+    o.ny = h.normal.y;
+    o.nz = h.normal.z;
+    return true;
+  }
+
+  /** Whether a capsule (crouched or standing) with its feet at (q) is clear of what stands still. */
+  private clear(world: LedgeWorld, crouched: boolean): boolean {
+    const half = crouched ? LEDGE_CAPSULE.crouch : LEDGE_CAPSULE.stand;
+    let shape = crouched ? this.shapeCrouch : this.shapeStand;
+    if (!shape) {
+      shape = this.makers.capsule(half, LEDGE_CAPSULE.r);
+      if (crouched) this.shapeCrouch = shape;
+      else this.shapeStand = shape;
+    }
+    const at = this.shapeAt;
+    at.x = this.qx;
+    at.y = this.qy + LEDGE_CAPSULE.r + half;
+    at.z = this.qz;
+    this.casts++;
+    return world.intersectionWithShape(at, this.shapeRot, shape, STILL_FLAGS, this.qflt) === null;
+  }
+
+  // ---- the lip along its own edge (the fix round's) --------------------------------------------------------------------------
+
+  /**
+   * A lip at a point on a face's line (`fpx`, `fpz`) with the face looking along (`fnx`, `fnz`): its top found from `frise`
+   * over `fref` down to `ffall` under it, a little behind the face's line, and the face just under that top from out in
+   * front, turned from the way asked by no more than `facc` (a cosine). Into `fo*`. Two rays. Refused where a ray starts
+   * inside what it meets (a taller block: no lip there), or the top is too steep to stand on, or the face is walkable.
+   */
+  private probeLip(world: LedgeWorld): boolean {
+    const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
+    const nx = this.fnx;
+    const nz = this.fnz;
+    this.qx = this.fpx - nx * TOP_IN;
+    this.qy = this.fref + this.frise;
+    this.qz = this.fpz - nz * TOP_IN;
+    this.qdx = 0;
+    this.qdy = -1;
+    this.qdz = 0;
+    this.qlen = this.frise + this.ffall;
+    if (!this.cast(world)) return false;
+    const h = this.hit;
+    if (h.toi < 1e-4 || h.ny < walk) return false;
+    const topY = h.y;
+    const topNy = h.ny;
+    this.qx = this.fpx + nx * 0.5;
+    this.qy = topY - 0.06;
+    this.qz = this.fpz + nz * 0.5;
+    this.qdx = -nx;
+    this.qdy = 0;
+    this.qdz = -nz;
+    this.qlen = 0.85;
+    if (!this.cast(world)) return false;
+    if (h.toi < 1e-4 || h.ny >= walk) return false;
+    let mx = h.nx;
+    let mz = h.nz;
+    const ml = Math.sqrt(mx * mx + mz * mz);
+    if (!(ml > 1e-6)) return false;
+    mx /= ml;
+    mz /= ml;
+    if (mx * nx + mz * nz < this.facc) return false;
+    // The face must stand where the top was found over it (the top a little behind its line): a face further out is another
+    // thing's (a block standing beyond a wall's end, rising past it), and no lip of this top.
+    const back = (h.x - this.fpx + nx * TOP_IN) * mx + (h.z - this.fpz + nz * TOP_IN) * mz;
+    if (back < -0.02 || back > TOP_IN + 0.1) return false;
+    this.fox = h.x;
+    this.foy = topY;
+    this.foz = h.z;
+    this.fonx = mx;
+    this.fonz = mz;
+    this.fotop = topNy;
+    return true;
+  }
+
+  /** The probe's answer pushed onto a rail's end (`hi`), its arc the level length on from that end's point. */
+  private pushFound(R: Rail, hi: boolean): void {
+    const k = hi ? R.n - 1 : 0;
+    const dx = this.fox - R.x[k];
+    const dz = this.foz - R.z[k];
+    const d = Math.sqrt(dx * dx + dz * dz);
+    R.pa = R.a[k] + (hi ? d : -d);
+    R.px = this.fox;
+    R.py = this.foy;
+    R.pz = this.foz;
+    R.pnx = this.fonx;
+    R.pnz = this.fonz;
+    R.ptop = this.fotop;
+    if (hi) R.pushHi();
+    else R.pushLo();
+  }
+
+  /**
+   * One step of a rail on along the lip's own edge from its end (`hi`: toward the figure's left, else its right), `RAIL_STEP`
+   * on: straight on where the lip goes on (its face turning a little a step where it curves), round an inner corner where a
+   * face stands across the way with a lip of its own, round an outer corner where the top ends (the corner itself put on the
+   * rail, the face beyond found at the turn that fits). False where none does: that end is the lip's own (`loEnd`/`hiEnd`).
+   * Two to a dozen rays; an inner corner three to five, an outer one up to fourteen.
+   */
+  private followStep(world: LedgeWorld, R: Rail, hi: boolean): boolean {
+    if (hi ? R.hiEnd : R.loEnd) return false;
+    this.cornered = false;
+    const k = hi ? R.n - 1 : 0;
+    const px = R.x[k];
+    const py = R.y[k];
+    const pz = R.z[k];
+    const nx = hi ? R.hiNx : R.loNx;
+    const nz = hi ? R.hiNz : R.loNz;
+    const tau = hi ? 1 : -1;
+    const tx = -nz * tau;
+    const tz = nx * tau;
+    const d = RAIL_STEP;
+    const reach = d * Math.tan((RAIL_STEEPEST * Math.PI) / 180) + 0.05;
+    const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
+    // An inner corner: a face standing across the way just under the top, within the step.
+    this.qx = px + nx * 0.05;
+    this.qy = py - 0.06;
+    this.qz = pz + nz * 0.05;
+    this.qdx = tx;
+    this.qdy = 0;
+    this.qdz = tz;
+    this.qlen = d + 0.05;
+    if (this.cast(world)) {
+      const h = this.hit;
+      let mx = h.nx;
+      let mz = h.nz;
+      const ml = Math.sqrt(mx * mx + mz * mz);
+      if (h.toi > 1e-4 && h.ny < walk && ml > 1e-6 && (mx * tx + mz * tz) / ml < -0.5) {
+        mx /= ml;
+        mz /= ml;
+        // The corner on the old face's line; the new lip from it along the new face, the old face's own way out.
+        const t = h.toi;
+        const cx = px + tx * t;
+        const cz = pz + tz * t;
+        const ntx = -mz * tau;
+        const ntz = mx * tau;
+        const on = Math.max(d - t, 0.03);
+        this.fpx = cx + ntx * on;
+        this.fpz = cz + ntz * on;
+        this.fref = py;
+        this.frise = reach;
+        this.ffall = reach;
+        this.fnx = mx;
+        this.fnz = mz;
+        this.facc = CORNER_COS;
+        if (!this.probeLip(world)) {
+          if (hi) R.hiEnd = true;
+          else R.loEnd = true;
+          return false;
+        }
+        this.ckx = cx;
+        this.cky = py;
+        this.ckz = cz;
+        this.cknx = nx + mx;
+        this.cknz = nz + mz;
+        this.cktop = R.top[k];
+        this.cornerPoint(R, hi);
+        this.pushFound(R, hi);
+        this.turnEnd(R, hi);
+        return true;
+      }
+    }
+    // Straight on along the lip (a curve's face a little turned).
+    this.fpx = px + tx * d;
+    this.fpz = pz + tz * d;
+    this.fref = py;
+    this.frise = reach;
+    this.ffall = reach;
+    this.fnx = nx;
+    this.fnz = nz;
+    this.facc = CURVE_COS;
+    if (this.probeLip(world)) {
+      this.pushFound(R, hi);
+      this.turnEnd(R, hi);
+      return true;
+    }
+    // An outer corner: where the top stops along the way (halved four times, to 6 mm), and the face beyond it.
+    let lo = 0;
+    let up = d;
+    let had = false;
+    for (let i = 0; i < 4; i++) {
+      const u = (lo + up) * 0.5;
+      this.qx = px + tx * u - nx * TOP_IN;
+      this.qy = py + reach;
+      this.qz = pz + tz * u - nz * TOP_IN;
+      this.qdx = 0;
+      this.qdy = -1;
+      this.qdz = 0;
+      this.qlen = reach * 2;
+      if (this.cast(world) && this.hit.toi > 1e-4 && this.hit.ny >= walk) {
+        lo = u;
+        had = true;
+      } else up = u;
+    }
+    void had;
+    const cx = px + tx * lo;
+    const cz = pz + tz * lo;
+    const on = Math.max(d - lo, 0.03);
+    const turns = CORNER_TURNS;
+    for (let j = 0; j < turns.length; j++) {
+      const c = Math.cos(turns[j]);
+      const s = Math.sin(turns[j]);
+      // The face beyond the corner looks between this one's way and the way along (turned toward it), and its lip goes on
+      // from the corner away from this face.
+      const qnx = nx * c + tx * s;
+      const qnz = nz * c + tz * s;
+      const qtx = tx * c - nx * s;
+      const qtz = tz * c - nz * s;
+      this.fpx = cx + qtx * on;
+      this.fpz = cz + qtz * on;
+      this.fref = py;
+      this.frise = reach;
+      this.ffall = reach;
+      this.fnx = qnx;
+      this.fnz = qnz;
+      this.facc = CORNER_COS;
+      if (!this.probeLip(world)) continue;
+      this.ckx = cx;
+      this.cky = py;
+      this.ckz = cz;
+      this.cknx = nx + this.fonx;
+      this.cknz = nz + this.fonz;
+      this.cktop = R.top[k];
+      this.cornerPoint(R, hi);
+      this.pushFound(R, hi);
+      this.turnEnd(R, hi);
+      return true;
+    }
+    if (hi) R.hiEnd = true;
+    else R.loEnd = true;
+    return false;
+  }
+
+  /** A corner's own point (`ck*`: its place, the two faces' normals summed, its top) onto a rail's end, kept for a hop's look (`corner*`). */
+  private ckx = 0.5;
+  private cky = 0.5;
+  private ckz = 0.5;
+  private cknx = 0.5;
+  private cknz = 0.5;
+  private cktop = 0.5;
+  private cornerPoint(R: Rail, hi: boolean): void {
+    const x = this.ckx;
+    const y = this.cky;
+    const z = this.ckz;
+    const nx = this.cknx;
+    const nz = this.cknz;
+    const top = this.cktop;
+    const l = Math.sqrt(nx * nx + nz * nz);
+    const k = hi ? R.n - 1 : 0;
+    const dx = x - R.x[k];
+    const dz = z - R.z[k];
+    const dd = Math.sqrt(dx * dx + dz * dz);
+    R.pa = R.a[k] + (hi ? dd : -dd);
+    R.px = x;
+    R.py = y;
+    R.pz = z;
+    R.pnx = l > 1e-6 ? nx / l : R.nx[k];
+    R.pnz = l > 1e-6 ? nz / l : R.nz[k];
+    R.ptop = top;
+    if (hi) R.pushHi();
+    else R.pushLo();
+    this.cornered = true;
+    this.cornerX = x;
+    this.cornerY = y;
+    this.cornerZ = z;
+  }
+
+  /** A rail's end goes on along the face it reached (the probe's answer's). */
+  private turnEnd(R: Rail, hi: boolean): void {
+    if (hi) {
+      R.hiNx = this.fonx;
+      R.hiNz = this.fonz;
+    } else {
+      R.loNx = this.fonx;
+      R.loNz = this.fonz;
+    }
+  }
+
+  /** The rail on that way (`hi`) until it reaches arc `need` (a field) or its end, a few steps a call at most. */
+  private need = 0.5;
+  private railReach(world: LedgeWorld, hi: boolean): void {
+    const R = this.rail;
+    for (let it = 0; it < 8; it++) {
+      if (R.n === 0) return;
+      if (hi ? R.a[R.n - 1] >= this.need : R.a[0] <= this.need) return;
+      if (!this.followStep(world, R, hi)) return;
+    }
+  }
+
+  /** The hands' rest half span of the hang's kind, metres (the idle's own, scaled), into `hh`. */
+  private hh = 0.5;
+  private handHalf(braced: boolean): void {
+    const f = braced ? LEDGE_FACTS[LEDGE_ROLES.braced.idle] : LEDGE_FACTS[LEDGE_ROLES.free.idle];
+    this.hh = Math.abs(f.span0) * 0.5 * this.s;
+  }
+
+  /**
+   * The lip a body hangs from at arc `bq` of the rail: the two hands' places at their rest spacing either side, their middle
+   * the edge, their normals' mean its way, the left's height less the right's over their level distance its slope. Into
+   * `out`.
+   */
+  private bq = 0.5;
+  private bodyOn(out: Lip): void {
+    const R = this.rail;
+    const q = this.bq;
+    this.handHalf(this.braced);
+    const half = this.hh;
+    R.q = q + half;
+    R.sample();
+    const lx = R.sx;
+    const ly = R.sy;
+    const lz = R.sz;
+    const lnx = R.snx;
+    const lnz = R.snz;
+    const ltop = R.stop;
+    R.q = q - half;
+    R.sample();
+    let nx = lnx + R.snx;
+    let nz = lnz + R.snz;
+    const nl = Math.sqrt(nx * nx + nz * nz);
+    if (nl > 1e-6) {
+      nx /= nl;
+      nz /= nl;
+    } else {
+      nx = lnx;
+      nz = lnz;
+    }
+    out.ex = (lx + R.sx) * 0.5;
+    out.ey = (ly + R.sy) * 0.5;
+    out.ez = (lz + R.sz) * 0.5;
+    out.nx = nx;
+    out.nz = nz;
+    out.topNy = (ltop + R.stop) * 0.5;
+    const dx = lx - R.sx;
+    const dz = lz - R.sz;
+    const dl = Math.sqrt(dx * dx + dz * dz);
+    out.slope = dl > 1e-6 ? (ly - R.sy) / dl : 0;
+  }
+
+  /** The rail begun again at the lip held (a hang begun), on far enough both ways that both hands and a hand's width more are on it. */
+  private railStart(world: LedgeWorld): void {
+    this.rail.start(this.lip);
+    this.barc = 0;
+    this.handHalf(this.braced);
+    const reach = this.hh + (CLIMB_TUNE.edgeAhead + RAIL_STEP) * this.s;
+    this.need = reach;
+    this.railReach(world, true);
+    this.need = -reach;
+    this.railReach(world, false);
+    this.bq = 0;
+    this.bodyOn(this.lip);
+    this.tiltGoal = Math.atan(this.lip.slope) * CLIMB_TUNE.lipTilt;
+  }
+
+  /** How the lip `L` slopes under the two hands (two probes along it, either side): into its `slope` (nought where either is not found). */
+  private measureSlope(world: LedgeWorld, L: Lip, flt: number): void {
+    this.handHalf(true);
+    const half = this.hh;
+    const reach = half * Math.tan((RAIL_STEEPEST * Math.PI) / 180) + 0.05;
+    this.qflt = flt;
+    this.fnx = L.nx;
+    this.fnz = L.nz;
+    this.fref = L.ey;
+    this.frise = reach;
+    this.ffall = reach;
+    this.facc = CORNER_COS;
+    this.fpx = L.ex - L.nz * half;
+    this.fpz = L.ez + L.nx * half;
+    L.slope = 0;
+    if (!this.probeLip(world)) return;
+    const ly = this.foy;
+    const lx = this.fox;
+    const lz = this.foz;
+    this.fpx = L.ex + L.nz * half;
+    this.fpz = L.ez - L.nx * half;
+    if (!this.probeLip(world)) return;
+    const dx = lx - this.fox;
+    const dz = lz - this.foz;
+    const dl = Math.sqrt(dx * dx + dz * dz);
+    L.slope = dl > 1e-6 ? (ly - this.foy) / dl : 0;
+  }
+
+  /**
+   * Whether the capsule (crouched or standing) is clear of what stands still all along the path from (`f`) through the
+   * move's path to (`t`): one shape test every `PATH_EVERY` of it (the start, where the body already stands, left out).
+   * The move's own path fields are read (`path`, its middle point, its legs); a climb's last leg asks the crouched one.
+   */
+  private pathClear(world: LedgeWorld): boolean {
+    const m = this.move;
+    const len = m.path === PATH_LEGS ? m.l1 + m.l2 + m.l3 : this.pathLength();
+    const n = Math.max(1, Math.ceil(len / PATH_EVERY));
+    for (let k = 1; k <= n; k++) {
+      this.pu = k / n;
+      this.pathAt();
+      this.qx = this.pqx;
+      // A skin over the feet (a climb ends standing on the top: touching it is no want of room).
+      this.qy = this.pqy + CLIMB_SKIN;
+      this.qz = this.pqz;
+      if (!this.clear(world, this.pathCrouched)) return false;
+    }
+    return true;
+  }
+
+  /** A path's length (a curve's, by eight chords). */
+  private pathLength(): number {
+    const m = this.move;
+    if (m.path === PATH_LINE) {
+      const dx = m.tx - m.fx;
+      const dy = m.ty - m.fy;
+      const dz = m.tz - m.fz;
+      return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    let len = 0;
+    let x = m.fx;
+    let y = m.fy;
+    let z = m.fz;
+    for (let k = 1; k <= 8; k++) {
+      this.pu = k / 8;
+      this.pathAt();
+      const dx = this.pqx - x;
+      const dy = this.pqy - y;
+      const dz = this.pqz - z;
+      len += Math.sqrt(dx * dx + dy * dy + dz * dz);
+      x = this.pqx;
+      y = this.pqy;
+      z = this.pqz;
+    }
+    return len;
+  }
+
+  /** The body's place a share `pu` along the move's path into `pq*`, and whether the capsule there is the crouched one. */
+  private pu = 0.5;
+  private pqx = 0.5;
+  private pqy = 0.5;
+  private pqz = 0.5;
+  private pathCrouched = false;
+  private pathAt(): void {
+    const m = this.move;
+    const u = this.pu;
+    this.pathCrouched = false;
+    if (m.path === PATH_CURVE) {
+      const a = (1 - u) * (1 - u);
+      const b = 2 * u * (1 - u);
+      const c = u * u;
+      this.pqx = m.fx * a + m.cx * b + m.tx * c;
+      this.pqy = m.fy * a + m.cy * b + m.ty * c;
+      this.pqz = m.fz * a + m.cz * b + m.tz * c;
+      return;
+    }
+    if (m.path === PATH_LEGS) {
+      const total = m.l1 + m.l2 + m.l3;
+      let d = u * total;
+      if (d <= m.l1 && m.l1 > 1e-9) {
+        const k = d / m.l1;
+        this.pqx = m.fx + (m.p1x - m.fx) * k;
+        this.pqy = m.fy + (m.p1y - m.fy) * k;
+        this.pqz = m.fz + (m.p1z - m.fz) * k;
+        return;
+      }
+      d -= m.l1;
+      if (d <= m.l2 && m.l2 > 1e-9) {
+        const k = d / m.l2;
+        this.pqx = m.p1x + (m.p2x - m.p1x) * k;
+        this.pqy = m.p1y + (m.p2y - m.p1y) * k;
+        this.pqz = m.p1z + (m.p2z - m.p1z) * k;
+        return;
+      }
+      d -= m.l2;
+      const k = m.l3 > 1e-9 ? Math.min(1, d / m.l3) : 1;
+      this.pqx = m.p2x + (m.tx - m.p2x) * k;
+      this.pqy = m.p2y + (m.ty - m.p2y) * k;
+      this.pqz = m.p2z + (m.tz - m.p2z) * k;
+      this.pathCrouched = d > 1e-9 || m.l2 <= 1e-9;
+      return;
+    }
+    this.pqx = m.fx + (m.tx - m.fx) * u;
+    this.pqy = m.fy + (m.ty - m.fy) * u;
+    this.pqz = m.fz + (m.tz - m.fz) * u;
+  }
+
+  // ---- finding a lip -------------------------------------------------------------------------------------------------------
+
+  /**
+   * A lip ahead of feet at (fx, fy, fz) along the level direction (dx, dz), whose top stands between `lo` and `hi` over the
+   * feet (metres), into `out`. With `steepTop` a top too steep to stand on counts too (the grapple's haul's hand-over).
+   * Three to four rays where there is one, one where there is no face at all.
+   */
+  private findLip(world: LedgeWorld, fx: number, fy: number, fz: number, dx: number, dz: number, lo: number, hi: number, ahead: number, flt: number, steepTop: boolean, out: Lip): boolean {
+    const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
+    this.qflt = flt;
+    // The face at the band's foot: no face there, no lip in the band (the wall ends under the hands, or there is none).
+    this.qx = fx;
+    this.qy = fy + lo;
+    this.qz = fz;
+    this.qdx = dx;
+    this.qdy = 0;
+    this.qdz = dz;
+    this.qlen = ahead;
+    if (!this.cast(world)) return false;
+    const h = this.hit;
+    if (h.ny >= walk || -(h.nx * dx + h.nz * dz) < 0.5) return false;
+    const faceX = h.x;
+    const faceZ = h.z;
+    // Open over the band's head: a face there means the wall goes on past the reach.
+    this.qy = fy + hi + 0.05;
+    this.qlen = ahead + 0.3;
+    if (this.cast(world)) return false;
+    // The top: down onto it a little behind the face's line.
+    this.qx = faceX + dx * TOP_IN;
+    this.qy = fy + hi + 0.05;
+    this.qz = faceZ + dz * TOP_IN;
+    this.qdx = 0;
+    this.qdy = -1;
+    this.qdz = 0;
+    this.qlen = hi - lo + 0.1;
+    if (!this.cast(world)) return false;
+    if (h.ny < (steepTop ? 0.2 : walk)) return false;
+    const topY = h.y;
+    const topNy = h.ny;
+    // The face just under the top: where the edge stands, and which way it faces.
+    this.qx = fx;
+    this.qy = topY - 0.06;
+    this.qz = fz;
+    this.qdx = dx;
+    this.qdy = 0;
+    this.qdz = dz;
+    this.qlen = ahead + 0.3;
+    if (!this.cast(world)) return false;
+    if (h.ny >= walk) return false;
+    let nx = h.nx;
+    let nz = h.nz;
+    const nl = Math.sqrt(nx * nx + nz * nz);
+    if (!(nl > 1e-6)) return false;
+    nx /= nl;
+    nz /= nl;
+    if (-(nx * dx + nz * dz) < 0.5) return false;
+    out.ex = h.x;
+    out.ey = topY;
+    out.ez = h.z;
+    out.nx = nx;
+    out.nz = nz;
+    out.topNy = topNy;
+    return true;
+  }
+
+  /**
+   * The hang place under a lip for the hang's kind into `bx/by/bz`: the body's feet where the idle's own feet hang (so the
+   * capsule is the hanging figure, and a let-go falls from where the figure is), out from the face by the idle's grip, and
+   * pushed further out until a standing capsule is clear there; false where none is (a drop no deeper than a hang).
+   */
+  private placeFor(world: LedgeWorld, lip: Lip, braced: boolean, s: number, flt: number): boolean {
+    const T = CLIMB_TUNE;
+    const f = braced ? LEDGE_FACTS[LEDGE_ROLES.braced.idle] : LEDGE_FACTS[LEDGE_ROLES.free.idle];
+    const out = (T.gripOut + f.g0[2]) * s;
+    this.qflt = flt;
+    for (let k = 0; k < 5; k++) {
+      const push = out + k * 0.12;
+      this.bx = lip.ex + lip.nx * push;
+      this.by = lip.ey - (T.gripDrop + hangOver(f)) * s;
+      this.bz = lip.ez + lip.nz * push;
+      this.qx = this.bx;
+      this.qy = this.by;
+      this.qz = this.bz;
+      if (this.clear(world, false)) return true;
+    }
+    return false;
+  }
+
+  /** A face within reach of the feet under the lip: the hang is braced. One ray. */
+  private bracedAt(world: LedgeWorld, lip: Lip, s: number, flt: number): boolean {
+    const T = CLIMB_TUNE;
+    const a = LEDGE_FACTS[LEDGE_ROLES.braced.idle];
+    // At the braced hang's feet (its ankles), from as far out of the face as the braced hang's body stands and a foot's
+    // length more, toward the face.
+    const out = (T.gripOut + a.g0[2]) * s;
+    this.qflt = flt;
+    this.qx = lip.ex + lip.nx * (out + 0.1);
+    this.qy = lip.ey - (T.gripDrop + hangOver(a)) * s + LEDGE_REST.ankle * s;
+    this.qz = lip.ez + lip.nz * (out + 0.1);
+    this.qdx = -lip.nx;
+    this.qdy = 0;
+    this.qdz = -lip.nz;
+    this.qlen = out + 0.1 + 0.3 * s;
+    if (!this.cast(world)) return false;
+    return this.hit.ny < Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
+  }
+
+  // ---- the grab and the step down --------------------------------------------------------------------------------------------
+
+  /**
+   * After the move: whether the body grabs a lip (or, crouched off a lip, lowers into a hang) this frame. On a grab the body
+   * is held from here (`holding`), its velocity is put down, and a one-off is asked for (`startClip`). False otherwise.
+   */
+  sense(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina): boolean {
+    const T = CLIMB_TUNE;
+    if (T.ledges !== 'on' || this.phase !== LEDGE_NONE) return false;
+    if (this.regrabT > 0) this.regrabT -= i.dt;
+    if (i.busy || i.grounded || stam.tired) return false;
+    const s = i.scale;
+    // Crouched off a lip, walking: lower into the hang.
+    if (i.crouchHeld) {
+      if (i.wasGrounded && !i.jumped) return this.stepDown(world, b, i);
+      return false;
+    }
+    if (-b.vel.y > T.grabFall) return false;
+    // Toward a face: the way the keys push, else the way the body travels.
+    let dx = i.moveX;
+    let dz = i.moveZ;
+    let dl = Math.sqrt(dx * dx + dz * dz);
+    if (!(dl > 1e-6)) {
+      dx = b.vel.x;
+      dz = b.vel.z;
+      dl = Math.sqrt(dx * dx + dz * dz);
+      if (!(dl > 0.5)) return false;
+    }
+    dx /= dl;
+    dz /= dl;
+    const lo = (T.reachLow + T.gripDrop) * s;
+    const hi = (T.reachHigh + T.gripDrop) * s;
+    const L = this.found;
+    if (!this.findLip(world, b.pos.x, b.pos.y, b.pos.z, dx, dz, lo, hi, T.reachAhead * s, i.filter, false, L)) return false;
+    if (this.regrabT > 0) {
+      const ex = L.ex - this.regrabX;
+      const ey = L.ey - this.regrabY;
+      const ez = L.ez - this.regrabZ;
+      if (ex * ex + ey * ey + ez * ez < 1) return false;
+    }
+    const braced = this.bracedAt(world, L, s, i.filter);
+    if (!this.placeFor(world, L, braced, s, i.filter)) return false;
+    // The grab's clip: falling onto the lip, rising slowly (a standing jump) or quickly (a running one).
+    const roles = braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
+    const vh = Math.sqrt(b.vel.x * b.vel.x + b.vel.z * b.vel.z);
+    const id = b.vel.y < 0 ? roles.grabFall : vh < 2 ? roles.grabStand : roles.grabRise;
+    this.s = s;
+    // How the lip slopes under the hands (each grips it at its own height: the owner's sloping lips).
+    this.measureSlope(world, L, i.filter);
+    this.lip.copy(L);
+    this.braced = braced;
+    this.heading = Math.atan2(-L.nx, -L.nz);
+    this.startMove(id, 'grab', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, braced, this.heading, 'hands', 'idle', L);
+    b.vel.x = 0;
+    b.vel.y = 0;
+    b.vel.z = 0;
+    this.grabs++;
+    return true;
+  }
+
+  /** Crouched off a lip: the lip behind the feet, a drop under it deeper than a hang, and the body lowered into it, turned round. */
+  private stepDown(world: LedgeWorld, b: LedgeBody, i: LedgeIn): boolean {
+    let dx = b.vel.x;
+    let dz = b.vel.z;
+    const dl = Math.sqrt(dx * dx + dz * dz);
+    if (!(dl > 0.2)) return false;
+    dx /= dl;
+    dz /= dl;
+    const s = i.scale;
+    const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
+    this.qflt = i.filter;
+    // The face under the lip just walked off, facing the way the body went.
+    this.qx = b.pos.x + dx * 0.5;
+    this.qy = b.pos.y - 0.25 * s;
+    this.qz = b.pos.z + dz * 0.5;
+    this.qdx = -dx;
+    this.qdy = 0;
+    this.qdz = -dz;
+    this.qlen = 1.5;
+    if (!this.cast(world)) return false;
+    const h = this.hit;
+    if (h.ny >= walk) return false;
+    let nx = h.nx;
+    let nz = h.nz;
+    const nl = Math.sqrt(nx * nx + nz * nz);
+    if (!(nl > 1e-6)) return false;
+    nx /= nl;
+    nz /= nl;
+    if (nx * dx + nz * dz < 0.5) return false;
+    const faceX = h.x;
+    const faceZ = h.z;
+    // Its top, just behind the face: where the feet stood.
+    this.qx = faceX - nx * TOP_IN;
+    this.qy = b.pos.y + 0.4;
+    this.qz = faceZ - nz * TOP_IN;
+    this.qdx = 0;
+    this.qdy = -1;
+    this.qdz = 0;
+    this.qlen = 1;
+    if (!this.cast(world)) return false;
+    if (h.ny < walk) return false;
+    const L = this.found;
+    L.ex = faceX;
+    L.ey = h.y;
+    L.ez = faceZ;
+    L.nx = nx;
+    L.nz = nz;
+    L.topNy = h.ny;
+    // A drop no deeper than a hang: the body would stand on it, not hang.
+    if (!this.placeFor(world, L, false, s, i.filter)) return false;
+    this.qx = this.bx;
+    this.qy = this.by + 0.3;
+    this.qz = this.bz;
+    this.qdx = 0;
+    this.qdy = -1;
+    this.qdz = 0;
+    this.qlen = 0.5;
+    if (this.cast(world)) return false;
+    this.s = s;
+    this.measureSlope(world, L, i.filter);
+    this.lip.copy(L);
+    this.braced = false;
+    // The clip walks off facing away from the wall and turns round to grab it: the body faces the wall once it is done.
+    this.heading = Math.atan2(dx, dz);
+    this.startMove(LEDGE_STEP_DOWN, 'stepDown', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, false, Math.atan2(-nx, -nz), 'feet', 'idle', L);
+    b.vel.x = 0;
+    b.vel.y = 0;
+    b.vel.z = 0;
+    this.grabs++;
+    return true;
+  }
+
+  /**
+   * The grapple's haul ended under a lip it could not go over (its top too steep to stand on, or no room): a braced hang
+   * there if the lip is in reach ahead of the body (a top steeper than walkable counts). True where it took the body.
+   */
+  fromHaul(world: LedgeWorld, b: LedgeBody, i: LedgeIn, dx: number, dz: number): boolean {
+    const T = CLIMB_TUNE;
+    if (T.ledges !== 'on' || this.phase !== LEDGE_NONE) return false;
+    const s = i.scale;
+    const dl = Math.sqrt(dx * dx + dz * dz);
+    if (!(dl > 1e-6)) return false;
+    // Asked once a place: a haul held where nothing was found asks again only once the body has moved.
+    const mx = b.pos.x - this.haulX;
+    const my = b.pos.y - this.haulY;
+    const mz = b.pos.z - this.haulZ;
+    if (mx * mx + my * my + mz * mz < 0.04) return false;
+    this.haulX = b.pos.x;
+    this.haulY = b.pos.y;
+    this.haulZ = b.pos.z;
+    const L = this.found;
+    if (!this.findLip(world, b.pos.x, b.pos.y, b.pos.z, dx / dl, dz / dl, (T.reachLow + T.gripDrop) * s, (T.reachHigh + T.gripDrop) * s, T.reachAhead * s + 0.3, i.filter, false, L) && !this.edgeUp(world, b.pos.x, b.pos.y, b.pos.z, dx / dl, dz / dl, s, i.filter, L)) return false;
+    if (!this.placeFor(world, L, true, s, i.filter)) return false;
+    this.s = s;
+    this.measureSlope(world, L, i.filter);
+    this.lip.copy(L);
+    this.braced = this.bracedAt(world, L, s, i.filter);
+    if (!this.braced) this.placeFor(world, L, false, s, i.filter);
+    this.heading = Math.atan2(-L.nx, -L.nz);
+    const roles = this.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
+    this.startMove(roles.grabRise, 'grab', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, this.braced, this.heading, 'hands', 'idle', L);
+    b.vel.x = 0;
+    b.vel.y = 0;
+    b.vel.z = 0;
+    this.grabs++;
+    return true;
+  }
+
+  /**
+   * Maker B's wall climb asks for a lip ahead of the climbing body with `findLip`'s own rule (a walkable top over a face
+   * steeper than the climb limit, its top between `lo` and `hi` over the feet), into `out`: the top-out's look-out.
+   */
+  lipAhead(world: LedgeWorld, fx: number, fy: number, fz: number, dx: number, dz: number, lo: number, hi: number, ahead: number, flt: number, out: Lip): boolean {
+    return this.findLip(world, fx, fy, fz, dx, dz, lo, hi, ahead, flt, false, out);
+  }
+
+  /** The braced hang's grip over its own feet for a figure of size `s` (its idle's, and `gripDrop`): where a wall climb hands over (maker B). */
+  hangGrip(s: number): number {
+    return (CLIMB_TUNE.gripDrop + hangOver(LEDGE_FACTS[LEDGE_ROLES.braced.idle])) * s;
+  }
+
+  /**
+   * Maker B's wall climb has reached a lip: a hang there (braced where the feet find the wall under it, as a grab's is),
+   * the body put at the hang place from where the climb has it, and the figure drawn on from where the climb drew it
+   * (`ox, oy, oz`, the climb's own offset in the world's frame) eased into the hang's line-up over `climb.ease`: no clip of
+   * its own (the climb's pose and the braced hang's are the same reach on the same wall). W still held climbs straight on
+   * up from it (the top-out). False where the ledges are switched off or the body has no room there.
+   */
+  fromWall(world: LedgeWorld, b: LedgeBody, i: LedgeIn, L: Lip, ox: number, oy: number, oz: number): boolean {
+    if (CLIMB_TUNE.ledges !== 'on' || this.phase !== LEDGE_NONE) return false;
+    const s = i.scale;
+    const braced = this.bracedAt(world, L, s, i.filter);
+    if (!this.placeFor(world, L, braced, s, i.filter)) return false;
+    this.s = s;
+    this.lip.copy(L);
+    this.braced = braced;
+    this.heading = Math.atan2(-L.nx, -L.nz);
+    // The body moves onto the hang place; the figure stays where it was drawn, its offset taking the move back.
+    this.offX = ox + (b.pos.x - this.bx);
+    this.offY = oy + (b.pos.y - this.by);
+    this.offZ = oz + (b.pos.z - this.bz);
+    b.pos.x = this.bx;
+    b.pos.y = this.by;
+    b.pos.z = this.bz;
+    b.vel.x = 0;
+    b.vel.y = 0;
+    b.vel.z = 0;
+    this.phase = LEDGE_HANG;
+    this.shimmy = 0;
+    this.rigState = this.loopState(braced, 0);
+    this.rigClip = (braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free).idle;
+    this.startClip = '';
+    this.outT = 0;
+    this.dtNow = 0;
+    this.qflt = i.filter;
+    this.railStart(world);
+    this.beginFade();
+    this.idleOffset(LEDGE_FACTS[this.rigClip], b);
+    this.lineFor(this.lip);
+    this.fromClimb = true;
+    this.grabs++;
+    return true;
+  }
+
+  /** A hang handed over by a wall climb with W held (maker B): the first hang frame climbs on up while W is still held (the top-out). */
+  private fromClimb = false;
+
+  /**
+   * The edge over a face the body is held against (the grapple's hand-over, where the top is too steep to stand on, so it
+   * is no lip by `findLip`'s own rule): rays into the face up the hands' band until the face ends or turns over toward the
+   * sky, the edge just under there. One ray a 0.1 m of the band.
+   */
+  private edgeUp(world: LedgeWorld, fx: number, fy: number, fz: number, dx: number, dz: number, s: number, flt: number, out: Lip): boolean {
+    const T = CLIMB_TUNE;
+    this.qflt = flt;
+    this.qdx = dx;
+    this.qdy = 0;
+    this.qdz = dz;
+    this.qlen = T.reachAhead * s + 0.3;
+    let had = false;
+    let lastY = 0;
+    let lastX = 0;
+    let lastZ = 0;
+    let nx = 0;
+    let nz = 0;
+    for (let y = 0.4 * s; y <= (T.reachHigh + T.gripDrop) * s * 1.2; y += 0.1) {
+      this.qx = fx;
+      this.qy = fy + y;
+      this.qz = fz;
+      const hit = this.cast(world);
+      const h = this.hit;
+      if (hit && h.ny < 0.2 && h.ny > -0.2) {
+        had = true;
+        lastY = fy + y;
+        lastX = h.x;
+        lastZ = h.z;
+        const l = Math.sqrt(h.nx * h.nx + h.nz * h.nz);
+        nx = h.nx / l;
+        nz = h.nz / l;
+        continue;
+      }
+      if (!had) continue;
+      // The face ended in this step: halved four times (to 6 mm), its top the slope over it (or nothing at all).
+      const topNy = hit ? h.ny : 1;
+      let lo = lastY;
+      let up = fy + y;
+      for (let k = 0; k < 4; k++) {
+        const mid = (lo + up) * 0.5;
+        this.qy = mid;
+        if (this.cast(world) && h.ny < 0.2 && h.ny > -0.2) {
+          lo = mid;
+          lastX = h.x;
+          lastZ = h.z;
+        } else up = mid;
+      }
+      out.ex = lastX;
+      out.ey = (lo + up) * 0.5;
+      out.ez = lastZ;
+      out.nx = nx;
+      out.nz = nz;
+      out.topNy = topNy;
+      return -(nx * dx + nz * dz) >= 0.5;
+    }
+    return false;
+  }
+
+  // ---- the one-offs ----------------------------------------------------------------------------------------------------
+
+  /**
+   * Begin a one-off: the body carried from (f) to (t) over the clip's [t0, end], the figure lined up at its start by its
+   * hands on the lip (`hands`), by its feet on the body's (`feet`), or by the idle's hands (`idle`, a hang's own place),
+   * and at its end by the idle's hands (`idle`) or its feet (`feet`).
+   */
+  private startMove(id: string, kind: string, fx: number, fy: number, fz: number, tx: number, ty: number, tz: number, after: number, braced: boolean, endHeading: number, start: 'hands' | 'feet' | 'idle', end: 'idle' | 'feet', lip: Lip): void {
+    const m = this.move;
+    const f = LEDGE_FACTS[id];
+    m.id = id;
+    m.kind = kind;
+    m.fx = fx;
+    m.fy = fy;
+    m.fz = fz;
+    m.tx = tx;
+    m.ty = ty;
+    m.tz = tz;
+    m.t0 = f.t0;
+    m.T = f.dur;
+    m.time = f.t0;
+    m.after = after;
+    m.braced = braced;
+    m.heading = endHeading;
+    m.h0 = this.heading;
+    m.path = PATH_LINE;
+    m.lip.copy(lip);
+    const s = this.s;
+    const h0 = this.heading;
+    // The start: where the figure's origin is drawn against the body's. By its feet (standing on the top it walks off),
+    // else by its hands at its start put on the grip's line (the lip held, `idle`, or the lip reached for, `hands`).
+    if (start === 'feet') {
+      m.o0x = 0;
+      m.o0y = (LEDGE_REST.ankle - f.a0) * s;
+      m.o0z = 0;
+    } else {
+      gripAt.x = fx;
+      gripAt.y = fy;
+      gripAt.z = fz;
+      this.gripOff(start === 'idle' ? this.lip : lip, gripAt, f.g0);
+      m.o0x = this.ax;
+      m.o0y = this.ay;
+      m.o0z = this.az;
+    }
+    // The end: by its feet on the body's (standing on the top), else by its hands at its end on the lip it is aimed at,
+    // from where the body is carried to (the clip's own frame still the start heading's: a step down turns round in it).
+    if (end === 'feet') {
+      m.o1x = 0;
+      m.o1y = (LEDGE_REST.ankle - f.a1) * s;
+      m.o1z = 0;
+    } else {
+      gripAt.x = tx;
+      gripAt.y = ty;
+      gripAt.z = tz;
+      // A hop ends facing the lip it is aimed at (another face's, round a corner), and turns to it as it goes.
+      if (kind === 'hop') this.heading = endHeading;
+      this.gripOff(lip, gripAt, f.g1);
+      this.heading = h0;
+      m.o1x = this.ax;
+      m.o1y = this.ay;
+      m.o1z = this.az;
+    }
+    this.phase = LEDGE_MOVE;
+    this.shimmy = 0;
+    this.startClip = id;
+    this.fresh = true;
+    this.startFrom = f.t0;
+    this.startFade = CLIMB_TUNE.ease;
+    this.beginFade();
+  }
+
+  /** A point of a clip's own frame (x left, y up, z forward, human male metres) turned into the world by a heading and scaled, into `wx/wy/wz`. */
+  private wx = 0.5;
+  private wy = 0.5;
+  private wz = 0.5;
+  private toWorld(p: readonly [number, number, number]): void {
+    const h = this.heading;
+    const s = this.s;
+    const sh = Math.sin(h);
+    const ch = Math.cos(h);
+    // left = (cos h, 0, -sin h), forward = (sin h, 0, cos h).
+    this.wx = (p[0] * ch + p[2] * sh) * s;
+    this.wy = p[1] * s;
+    this.wz = (-p[0] * sh + p[2] * ch) * s;
+  }
+
+  /** The figure's offset fades from where it stands now to its next target over the clip's own fade. */
+  private beginFade(): void {
+    this.ofX = this.offX;
+    this.ofY = this.offY;
+    this.ofZ = this.offZ;
+    this.fadeT = 0;
+    this.fadeDur = Math.max(1e-6, CLIMB_TUNE.ease);
+  }
+
+  // ---- a frame while holding ---------------------------------------------------------------------------------------------
+
+  /**
+   * In place of the movement while `holding`: the keys, the stamina, a one-off's carry, and the body's place written into
+   * `b.pos` (its velocity nought, or what a let-go throws it at). Answers false the frame the body is let go (the caller's
+   * movement takes it from the next).
+   */
+  step(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina): boolean {
+    const held = this.stepIn(world, b, i, stam);
+    this.fresh = false;
+    return held;
+  }
+
+  /**
+   * A one-off begun this frame before `step` (a grab: `sense`, `fromHaul`), whose clip the step after it must not forget;
+   * put down at every step's end.
+   */
+  private fresh = false;
+
+  private stepIn(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina): boolean {
+    const T = CLIMB_TUNE;
+    const dt = i.dt;
+    if (T.ledges !== 'on') {
+      this.letGo(b, 'switched off', 0, 0, 0);
+      return false;
+    }
+    this.dtNow = dt;
+    if (!this.fresh) this.startClip = '';
+    this.ended = false;
+    this.stood = false;
+    if (this.phase === LEDGE_MOVE) {
+      // A climb or a turn takes no stamina of its own; the hang under it drains as hanging does.
+      stam.step(dt, -T.stamina.hang, i.pool, LOCO_TUNE);
+      return this.moveStep(world, b, i, true);
+    }
+    // Hanging.
+    stam.step(dt, -(this.shimmy !== 0 ? T.stamina.shimmy : T.stamina.hang), i.pool, LOCO_TUNE);
+    b.vel.x = 0;
+    b.vel.y = 0;
+    b.vel.z = 0;
+    if (stam.tired) {
+      this.said = 'Too tired to hold on.';
+      this.drop(b, 'tired');
+      return false;
+    }
+    if (i.crouchPressed) {
+      this.drop(b, 'let go');
+      return false;
+    }
+    if (i.jumpPressed && i.backHeld) {
+      this.jumpOff(b);
+      return false;
+    }
+    if (i.jumpPressed && (i.leftHeld || i.rightHeld) && !(i.leftHeld && i.rightHeld)) {
+      this.hop(world, b, i, stam, i.leftHeld ? 1 : -1);
+      return this.begun(world, b, i);
+    }
+    if (i.jumpPressed && i.forwardHeld && this.hopUp(world, b, i, stam)) return this.begun(world, b, i);
+    // A wall climb handed over with W still held climbs straight on up (the top-out, maker B): asked once.
+    const topOut = this.fromClimb && i.forwardHeld;
+    this.fromClimb = false;
+    if (i.jumpPressed || i.forwardPressed || topOut) {
+      this.climbUp(world, b, i);
+      return this.begun(world, b, i);
+    }
+    // A and D shimmy along the lip.
+    const want = i.leftHeld && !i.rightHeld ? 1 : i.rightHeld && !i.leftHeld ? -1 : 0;
+    this.shimmyStep(world, b, i, want);
+    return this.begun(world, b, i);
+  }
+
+  /**
+   * A one-off begun in this frame's step is carried its first frame at once: the caller's rig plays it from its start and
+   * steps it by the frame in the same frame, so the body, the figure's offset and the hands' line keep to the pose's own
+   * time (a grab's first frame is carried the same way, by the step after `sense`).
+   */
+  private begun(world: LedgeWorld, b: LedgeBody, i: LedgeIn): boolean {
+    if (this.phase === LEDGE_MOVE && this.move.time === LEDGE_FACTS[this.move.id].t0) return this.moveStep(world, b, i, true);
+    return this.phase !== LEDGE_NONE;
+  }
+
+  /** A frame of a one-off: the body carried, the figure's offset and the hands' line along with it; its end at its end. */
+  private moveStep(world: LedgeWorld, b: LedgeBody, i: LedgeIn, chain: boolean): boolean {
+    const dt = i.dt;
+    const m = this.move;
+    m.time += dt;
+    const span = m.T - m.t0;
+    const lin = span > 1e-6 ? Math.min(1, Math.max(0, (m.time - m.t0) / span)) : 1;
+    // A hop is carried from rest at one hang to rest at the next (its clip leaves and takes a lip standing still); every
+    // other one-off evenly.
+    const u = m.kind === 'hop' ? lin * lin * (3 - 2 * lin) : lin;
+    // The body along its own path (the room for it checked before the move began).
+    this.pu = u;
+    this.pathAt();
+    b.pos.x = this.pqx;
+    b.pos.y = this.pqy;
+    b.pos.z = this.pqz;
+    this.crouchedNow = this.pathCrouched;
+    b.vel.x = 0;
+    b.vel.y = 0;
+    b.vel.z = 0;
+    this.ax = m.o0x + (m.o1x - m.o0x) * u;
+    this.ay = m.o0y + (m.o1y - m.o0y) * u;
+    this.az = m.o0z + (m.o1z - m.o0z) * u;
+    // A hop to another face turns with it as it goes.
+    if (m.kind === 'hop') {
+      let dh = m.heading - m.h0;
+      dh -= Math.round(dh / TAU) * TAU;
+      this.heading = m.h0 + dh * u;
+    }
+    this.tiltGoal = 0;
+    this.easeTilt();
+    this.setOffset();
+    // A climb's figure keeps the straight line it always had (its clip's own pose and line-up): its offset takes back,
+    // whole and outside the line-up's ease, whatever the capsule's own path stands off that line.
+    if (m.path === PATH_LEGS) {
+      this.offX += m.fx + (m.tx - m.fx) * u - this.pqx;
+      this.offY += m.fy + (m.ty - m.fy) * u - this.pqy;
+      this.offZ += m.fz + (m.tz - m.fz) * u - this.pqz;
+    }
+    // The hands' line: the lip the one-off leaves, then from its middle the lip it is aimed at.
+    this.lineFor(u < 0.5 && m.kind === 'hop' ? this.lip : m.lip);
+    // A climb's hands push off the top and leave the lip: let go over its first third. A hop's hands leave the lip it
+    // leaves and take the one it is aimed at (`hopHands`): wholly on a lip only at its two ends.
+    this.goalHands = m.kind === 'climb' ? Math.max(0, 1 - 3 * u) : m.kind === 'hop' ? hopHands(lin) : 1;
+    this.goalFeet = 0;
+    this.easeLimbs();
+    this.rigState = m.kind === 'climb' ? (m.braced ? 'climbUpBraced' : 'climbUpFree') : this.loopState(m.braced, 0);
+    this.rigClip = m.kind === 'climb' ? m.id : (m.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free).idle;
+    if (m.time >= m.T - 1e-9) {
+      this.endMove(world, b, i);
+      // A one-off chained on at the end (a free hang onto the wall) carried its first frame too.
+      if (chain && this.phase === LEDGE_MOVE && m.time === LEDGE_FACTS[m.id].t0) return this.moveStep(world, b, i, false);
+    }
+    return (this.phase as number) !== LEDGE_NONE;
+  }
+
+  /**
+   * The frame's shimmy: along the lip by the clip's own pace, the lip followed along its own edge (`rail`: round a corner,
+   * along a curve, up or down a slope), stopped where the leading hand and a hand's width more would leave it or reach a part
+   * steeper than `lipSlope`, and where the body's capsule would meet what stands still (a crate at the knees, a wall at an
+   * inner corner). The body hangs from its two hands' middle, turned to face their faces' mean.
+   */
+  private shimmyStep(world: LedgeWorld, b: LedgeBody, i: LedgeIn, want: number): void {
+    const T = CLIMB_TUNE;
+    const roles = this.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
+    const s = this.s;
+    const R = this.rail;
+    let moved = 0;
+    this.qflt = i.filter;
+    if (want !== 0 && R.n > 0) {
+      const f = LEDGE_FACTS[want > 0 ? roles.shimmyLeft : roles.shimmyRight];
+      const speed = (Math.abs(f.net[0]) / f.dur) * s * T.shimmy;
+      const step = speed * i.dt;
+      const lead = (Math.abs(f.span0) * 0.5 + T.edgeAhead) * s;
+      const hi = want > 0;
+      this.need = this.barc + want * (lead + step);
+      this.railReach(world, hi);
+      R.q = this.barc;
+      R.limit(hi, Math.tan((T.lipSlope * Math.PI) / 180));
+      const room = hi ? R.sa - (this.barc + lead) : this.barc - lead - R.sa;
+      const go = room < step ? room : step;
+      if (go > 1e-7) {
+        this.bq = this.barc + want * go;
+        const C = this.cand;
+        this.bodyOn(C);
+        if (this.hangRoom(world, C)) {
+          moved = want * go;
+          this.barc = this.bq;
+          this.lip.copy(C);
+          this.heading = Math.atan2(-C.nx, -C.nz);
+          b.pos.x = this.bx;
+          b.pos.y = this.by;
+          b.pos.z = this.bz;
+        }
+      }
+    }
+    const was = this.shimmy;
+    this.shimmy = moved > 0 ? 1 : moved < 0 ? -1 : 0;
+    this.tiltGoal = Math.atan(this.lip.slope) * T.lipTilt;
+    this.easeTilt();
+    if (moved !== 0) {
+      const L = this.lip;
+      // Braced or free where the body now is: onto or off the wall through the clip between the two.
+      const braced = this.bracedAt(world, L, s, i.filter);
+      if (braced !== this.braced && this.placeFor(world, L, braced, s, i.filter)) {
+        this.startMove(roles.toOther, 'turn', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, braced, this.heading, 'idle', 'idle', L);
+        return;
+      }
+    }
+    if (this.shimmy !== was) this.beginFade();
+    this.rigState = this.loopState(this.braced, this.shimmy);
+    this.rigClip = this.shimmy > 0 ? roles.shimmyLeft : this.shimmy < 0 ? roles.shimmyRight : roles.idle;
+    const f = LEDGE_FACTS[this.rigClip];
+    this.idleOffset(f, b);
+    this.lineFor(this.lip);
+    this.goalHands = 1;
+    this.goalFeet = this.braced ? 1 : 0;
+    this.easeLimbs();
+  }
+
+  /**
+   * The hang's place under a lip on the rail with room for the standing capsule: out from the face by the idle's grip, and
+   * pushed further out (0.12 m at a time, four times, as a grab's place is) where it meets something (an outer corner's
+   * edge, an overhang's underside), into `bx/by/bz`. False where none is clear (something at the knees or the side: the
+   * shimmy stops). One to five shape tests.
+   */
+  private hangRoom(world: LedgeWorld, L: Lip): boolean {
+    const T = CLIMB_TUNE;
+    const s = this.s;
+    const f = this.braced ? LEDGE_FACTS[LEDGE_ROLES.braced.idle] : LEDGE_FACTS[LEDGE_ROLES.free.idle];
+    const out = (T.gripOut + f.g0[2]) * s;
+    const y = L.ey - (T.gripDrop + hangOver(f)) * s;
+    const nx = L.nx;
+    const nz = L.nz;
+    // The place itself, then pushed further out along the lip's way out and, where that alone meets the other face of an
+    // inner corner, along that way turned either side by 30 and 60 degrees (`ROOM_TURNS`).
+    for (let j = 0; j < ROOM_TURNS.length; j += 2) {
+      const c = ROOM_TURNS[j];
+      const sn = ROOM_TURNS[j + 1];
+      const dx = nx * c - nz * sn;
+      const dz = nz * c + nx * sn;
+      for (let k = j === 0 ? 0 : 1; k < 5; k++) {
+        const push = k * 0.12;
+        this.qx = L.ex + nx * out + dx * push;
+        this.qy = y;
+        this.qz = L.ez + nz * out + dz * push;
+        if (this.clear(world, false)) {
+          this.bx = this.qx;
+          this.by = y;
+          this.bz = this.qz;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** The figure's offset for a hang loop: the clip's own hands put on the grip's line from where the body hangs. */
+  private idleOffset(f: LedgeClipFacts, b: LedgeBody): void {
+    this.gripOff(this.lip, b.pos, f.g0);
+    this.setOffset();
+  }
+
+  /**
+   * Where the figure's origin is drawn against a body standing at (bx, by, bz) so a clip's grip `g` (its own frame, turned
+   * by `h`) lands on a lip's grip line, into `ax/ay/az`: only up and out (along the lip the clip's hands are its own).
+   */
+  private ax = 0.5;
+  private ay = 0.5;
+  private az = 0.5;
+  private gripOff(L: Lip, at: { readonly x: number; readonly y: number; readonly z: number }, g: readonly [number, number, number]): void {
+    const bx = at.x;
+    const by = at.y;
+    const bz = at.z;
+    const T = CLIMB_TUNE;
+    const s = this.s;
+    this.toWorld(g);
+    let x = L.ex + L.nx * T.gripOut * s - (bx + this.wx);
+    const y = L.ey - T.gripDrop * s - (by + this.wy);
+    let z = L.ez + L.nz * T.gripOut * s - (bz + this.wz);
+    const tlx = -L.nz;
+    const tlz = L.nx;
+    const along = x * tlx + z * tlz;
+    x -= tlx * along;
+    z -= tlz * along;
+    this.ax = x;
+    this.ay = y;
+    this.az = z;
+  }
+
+  /** Ease the drawn offset to (x, y, z) over the fade begun last. */
+  private setOffset(): void {
+    const x = this.ax;
+    const y = this.ay;
+    const z = this.az;
+    this.fadeT += this.dtNow;
+    const k = this.fadeDur > 0 ? Math.min(1, this.fadeT / this.fadeDur) : 1;
+    this.offX = this.ofX + (x - this.ofX) * k;
+    this.offY = this.ofY + (y - this.ofY) * k;
+    this.offZ = this.ofZ + (z - this.ofZ) * k;
+  }
+
+  /** The hands' line on a lip: the grip's height, out from the face, along the lip. */
+  private lineFor(L: Lip): void {
+    const T = CLIMB_TUNE;
+    const s = this.s;
+    this.lineX = L.ex + L.nx * T.gripOut * s;
+    this.lineY = L.ey - T.gripDrop * s;
+    this.lineZ = L.ez + L.nz * T.gripOut * s;
+    this.lineTx = -L.nz;
+    this.lineTz = L.nx;
+    this.lineSlope = L.slope;
+  }
+
+  /** The figure's tilt eased toward its goal over `climb.ease`, by the frame's seconds. */
+  private easeTilt(): void {
+    const e = CLIMB_TUNE.ease;
+    const g = this.tiltGoal;
+    if (!(e > 0)) {
+      this.tilt = g;
+      return;
+    }
+    const k = Math.min(1, this.dtNow / e);
+    this.tilt += (g - this.tilt) * k;
+    if (this.tilt < 1e-6 && this.tilt > -1e-6 && g === 0) this.tilt = 0;
+  }
+
+  /** The hands' and the feet's shares eased toward their goals (`goalHands`, `goalFeet`) over `climb.ease`, by the frame's seconds. */
+  private easeLimbs(): void {
+    const e = CLIMB_TUNE.ease;
+    const gh = this.goalHands;
+    const gf = this.goalFeet;
+    if (!(e > 0)) {
+      this.hands = gh;
+      this.feet = gf;
+      return;
+    }
+    const step = this.dtNow / e;
+    const h = this.hands;
+    const f = this.feet;
+    this.hands = h < gh ? Math.min(gh, h + step) : Math.max(gh, h - step);
+    this.feet = f < gf ? Math.min(gf, f + step) : Math.max(gf, f - step);
+  }
+
+  /** The frame's seconds, written as a step or a peer's frame begins (fields, so no number crosses a call). */
+  private dtNow = 0.5;
+  /** The hands' and feet's goals this frame. */
+  private goalHands = 0.5;
+  private goalFeet = 0.5;
+
+  /** The loop's state word: a hang still or a shimmy, braced or free. */
+  loopState(braced: boolean, shimmy: number): string {
+    if (shimmy > 0) return braced ? 'shimmyBracedL' : 'shimmyFreeL';
+    if (shimmy < 0) return braced ? 'shimmyBracedR' : 'shimmyFreeR';
+    return braced ? 'hangBraced' : 'hangFree';
+  }
+
+  /** A one-off's end: the hang, standing on the top, or the fall. */
+  private endMove(world: LedgeWorld, b: LedgeBody, i: LedgeIn): void {
+    const m = this.move;
+    b.pos.x = m.tx;
+    b.pos.y = m.ty;
+    b.pos.z = m.tz;
+    if (m.after === AFTER_STAND) {
+      this.phase = LEDGE_NONE;
+      // It ends crouched on the top (the on-foot frame keeps it so until a standing capsule fits: `keepCrouched`).
+      this.crouchedNow = true;
+      this.keepCrouched = true;
+      this.ended = true;
+      this.stood = true;
+      this.rigState = '';
+      this.rigClip = '';
+      // The climb's held last frame (its feet on the top, lined up with the body's) fades into the crouch: so does the offset.
+      this.ofX = this.offX;
+      this.ofY = this.offY;
+      this.ofZ = this.offZ;
+      this.outDur = Math.max(CLIMB_TUNE.ease, 1e-3);
+      this.outT = this.outDur;
+      this.hands = 0;
+      this.feet = 0;
+      this.lastLetGo = 'climbed up';
+      return;
+    }
+    this.lip.copy(m.lip);
+    this.braced = m.braced;
+    this.heading = m.heading;
+    this.phase = LEDGE_HANG;
+    this.shimmy = 0;
+    this.crouchedNow = false;
+    // The lip held, followed along its own edge either way from here (its corners, its curve, its slope).
+    this.qflt = i.filter;
+    this.railStart(world);
+    // The one-off's held last frame fades into the hang's loop over the ease (the caller stops it so), and the offset with it.
+    this.beginFade();
+    this.ended = true;
+    this.rigState = this.loopState(this.braced, 0);
+    this.rigClip = (this.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free).idle;
+    // Its line-up begun with no time gone (the fade starts here).
+    const dtWas = this.dtNow;
+    this.dtNow = 0;
+    this.idleOffset(LEDGE_FACTS[this.rigClip], b);
+    this.dtNow = dtWas;
+    // Into a free hang where the feet find the wall: on to braced (a step down's way into a braced hang).
+    if (!this.braced && m.kind !== 'turn' && this.bracedAt(world, this.lip, this.s, i.filter) && this.placeFor(world, this.lip, true, this.s, i.filter)) {
+      this.startMove(LEDGE_ROLES.free.toOther, 'turn', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, true, this.heading, 'idle', 'idle', this.lip);
+    }
+  }
+
+  /** Let the body go: its velocity what it is thrown at, the regrab clock begun, why kept. */
+  letGo(b: LedgeBody, why: string, vx: number, vy: number, vz: number): void {
+    this.regrabX = this.lip.ex;
+    this.regrabY = this.lip.ey;
+    this.regrabZ = this.lip.ez;
+    this.regrabT = CLIMB_TUNE.regrab;
+    this.release(why);
+    // The drawn offset eases out from where it stands (the let-go's clip lined up by its hands as the body falls away).
+    this.ofX = this.offX;
+    this.ofY = this.offY;
+    this.ofZ = this.offZ;
+    this.outDur = Math.max(CLIMB_TUNE.dropCut, CLIMB_TUNE.ease, 1e-3);
+    this.outT = this.outDur;
+    b.vel.x = vx;
+    b.vel.y = vy;
+    b.vel.z = vz;
+  }
+
+  /** Crouch, or the stamina gone: the drop's let-go clip, then the fall. */
+  private drop(b: LedgeBody, why: string): void {
+    const roles = this.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
+    this.letGo(b, why, this.lip.nx * 0.3, 0, this.lip.nz * 0.3);
+    this.startClip = roles.drop;
+    this.startFrom = 0;
+    this.startFade = 0.08;
+    this.cutIn = CLIMB_TUNE.dropCut;
+  }
+
+  /** S with Space: braced, the jump off backward (its clip turns the figure round, which the caller takes up once it has played); free, a drop with a push back. */
+  private jumpOff(b: LedgeBody): void {
+    const T = CLIMB_TUNE;
+    const L = this.lip;
+    if (this.braced) {
+      const h = this.heading;
+      this.letGo(b, 'jumped off', L.nx * T.jumpBack, T.jumpUp, L.nz * T.jumpBack);
+      this.startClip = LEDGE_JUMP_OFF;
+      this.startFrom = 0;
+      this.startFade = 0.06;
+      this.turnTo = (h + Math.PI) % TAU;
+      this.turnIn = LEDGE_FACTS[LEDGE_JUMP_OFF].dur;
+      return;
+    }
+    this.letGo(b, 'pushed off', L.nx * T.freePush, 0, L.nz * T.freePush);
+    this.startClip = LEDGE_ROLES.free.drop;
+    this.startFrom = 0;
+    this.startFade = 0.08;
+    this.cutIn = T.dropCut;
+  }
+
+  /**
+   * Space with A or D: the nearest other lip that way within `hopSide` (the owner's addition: one on another face too).
+   * The held lip is looked along its own edge that way (`walk`; going round its corners is the shimmy's, so the look stops
+   * where the lip turns past 45 degrees from the held face's way, grows steeper than `lipSlope`, or ends); from there on,
+   * across the gap, a lip is felt for straight on (its face within 60 degrees of the last one's way: the next pillar's front,
+   * a wall at an angle, a step up or down) and facing back across the way (the near side of a block standing across it:
+   * round a corner), at heights from 0.8 m under the held lip to `hopUp` over it, every 0.15 m out to the reach. Where one is
+   * found, both hands' places on it, the body's place under it and the room all along the way there are checked before the
+   * hop begins (straight, else bent out from the faces and up over what stands in its line); refused in words where there is
+   * none. A hop along one lip going on the same way at the same height is refused too: that is the shimmy.
+   */
+  private hop(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina, dir: number): void {
+    const T = CLIMB_TUNE;
+    const s = this.s;
+    const hi = dir > 0;
+    const range = T.hopSide * s;
+    const tanMax = Math.tan((T.lipSlope * Math.PI) / 180);
+    const hnx = this.lip.nx;
+    const hnz = this.lip.nz;
+    this.qflt = i.filter;
+    // The look along the held lip, from the body's own place on it.
+    const R = this.rail;
+    const W = this.walk;
+    R.q = this.barc;
+    R.sample();
+    const C = this.cand;
+    C.ex = R.sx;
+    C.ey = R.sy;
+    C.ez = R.sz;
+    C.nx = R.snx;
+    C.nz = R.snz;
+    C.topNy = R.stop;
+    W.start(C);
+    let ex = R.sx;
+    let ey = R.sy;
+    let ez = R.sz;
+    let enx = R.snx;
+    let enz = R.snz;
+    let from = 0;
+    for (let it = 0; it < 200; it++) {
+      const k = hi ? W.n - 1 : 0;
+      const at = hi ? W.a[k] : -W.a[k];
+      if (at > range) {
+        this.said = 'No ledge to hop to.';
+        return;
+      }
+      ex = W.x[k];
+      ey = W.y[k];
+      ez = W.z[k];
+      enx = hi ? W.hiNx : W.loNx;
+      enz = hi ? W.hiNz : W.loNz;
+      from = at;
+      if (!this.followStep(world, W, hi)) break;
+      const nk = hi ? W.n - 1 : 0;
+      const nnx = hi ? W.hiNx : W.loNx;
+      const nnz = hi ? W.hiNz : W.loNz;
+      if (nnx * hnx + nnz * hnz < Math.SQRT1_2) {
+        // Round a corner: across the way from the corner itself.
+        if (this.cornered) {
+          const dx = this.cornerX - ex;
+          const dz = this.cornerZ - ez;
+          from += Math.sqrt(dx * dx + dz * dz);
+          ex = this.cornerX;
+          ey = this.cornerY;
+          ez = this.cornerZ;
+        }
+        break;
+      }
+      const dx = W.x[nk] - ex;
+      const dz = W.z[nk] - ez;
+      const dy = W.y[nk] - ey;
+      const dl = Math.sqrt(dx * dx + dz * dz);
+      if (dl > 1e-6 && (dy > tanMax * dl || -dy > tanMax * dl)) break;
+    }
+    const etx = -enz * dir;
+    const etz = enx * dir;
+    this.handHalf(this.braced);
+    const half = this.hh;
+    const out = half + T.edgeAhead * s;
+    // Facing back across the way: a block's near side, out from the held face's line by the hands' reach and a hand's width
+    // (its lip runs out from that line), felt for once low down (a block standing up from below, its top no more than 0.8 m
+    // under the held lip): how far along it stands.
+    let back = Number.POSITIVE_INFINITY;
+    let bx = 0;
+    let bz = 0;
+    let bnx = 0;
+    let bnz = 0;
+    if (from < range) {
+      this.qx = ex + enx * out;
+      this.qy = ey - 0.75;
+      this.qz = ez + enz * out;
+      this.qdx = etx;
+      this.qdy = 0;
+      this.qdz = etz;
+      this.qlen = range - from + 0.35;
+      if (this.cast(world)) {
+        const h = this.hit;
+        let mx = h.nx;
+        let mz = h.nz;
+        const ml = Math.sqrt(mx * mx + mz * mz);
+        const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
+        if (h.toi > 1e-4 && h.ny < walk && ml > 1e-6 && (mx * etx + mz * etz) / ml < -0.5) {
+          mx /= ml;
+          mz /= ml;
+          back = h.toi;
+          bx = h.x;
+          bz = h.z;
+          bnx = mx;
+          bnz = mz;
+        }
+      }
+    }
+    for (let d = 0.15; from + d <= range + 1e-9 && d < back; d += 0.15) {
+      // Straight on across the gap: the near end of a lip whose face looks roughly the held way.
+      this.fpx = ex + etx * d;
+      this.fpz = ez + etz * d;
+      this.fref = ey;
+      this.frise = T.hopUp * s + 0.1;
+      this.ffall = 0.8;
+      this.fnx = enx;
+      this.fnz = enz;
+      this.facc = 0.5;
+      if (this.probeLip(world) && this.hopTo(world, b, i, stam, dir, false)) return;
+      if (this.said) return;
+    }
+    if (back < Number.POSITIVE_INFINITY && from + back <= range + 1e-9) {
+      this.fpx = bx;
+      this.fpz = bz;
+      this.fref = ey;
+      this.frise = T.hopUp * s + 0.1;
+      this.ffall = 0.8;
+      this.fnx = bnx;
+      this.fnz = bnz;
+      this.facc = CORNER_COS;
+      if (this.probeLip(world) && this.hopTo(world, b, i, stam, dir, true)) return;
+      if (this.said) return;
+    }
+    this.said = 'No ledge to hop to.';
+  }
+
+  /**
+   * A lip found for a hop (the probe's answer: its near end straight on, or a point of a block's near side facing back):
+   * the body's middle on it where both hands are on it (half the hands' span on from a near end), each hand's place probed,
+   * the hang's kind there, its place clear, and the way there clear (straight, else bent: `HOP_BENDS`). Begins the hop and
+   * answers true; false where the lip is too short for both hands (the look goes on); a refusal in words where there is no
+   * room (`said`, and true: the look stops).
+   */
+  private hopTo(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina, dir: number, back: boolean): boolean {
+    const T = CLIMB_TUNE;
+    const s = this.s;
+    this.handHalf(this.braced);
+    const half = this.hh;
+    const mx = this.fonx;
+    const mz = this.fonz;
+    const ref = this.foy;
+    // The new lip's own way, on from where it was found (away from the gap; a facing-back side's out from the held face).
+    const tx = -mz * dir;
+    const tz = mx * dir;
+    const on = back ? 0 : half + 0.05;
+    const cx = this.fox + tx * on;
+    const cz = this.foz + tz * on;
+    const A = this.cand;
+    // The body's middle, and each hand's place either side of it.
+    this.fnx = mx;
+    this.fnz = mz;
+    this.fref = ref;
+    this.frise = 0.3;
+    this.ffall = 0.3;
+    this.facc = CORNER_COS;
+    for (let k = -1; k <= 1; k += 2) {
+      this.fpx = cx + tx * half * k;
+      this.fpz = cz + tz * half * k;
+      if (!this.probeLip(world)) return false;
+    }
+    this.fpx = cx;
+    this.fpz = cz;
+    if (!this.probeLip(world)) return false;
+    A.ex = this.fox;
+    A.ey = this.foy;
+    A.ez = this.foz;
+    A.nx = this.fonx;
+    A.nz = this.fonz;
+    A.topNy = this.fotop;
+    this.measureSlope(world, A, i.filter);
+    const braced = this.bracedAt(world, A, s, i.filter);
+    if (!this.placeFor(world, A, braced, s, i.filter)) {
+      this.said = 'No room to hop there.';
+      return true;
+    }
+    // The way there: straight, else bent out from the faces and up over what stands in its line.
+    const m = this.move;
+    m.fx = b.pos.x;
+    m.fy = b.pos.y;
+    m.fz = b.pos.z;
+    m.tx = this.bx;
+    m.ty = this.by;
+    m.tz = this.bz;
+    m.path = PATH_LINE;
+    let ok = this.pathClear(world);
+    if (!ok) {
+      let ox = this.lip.nx + A.nx;
+      let oz = this.lip.nz + A.nz;
+      const ol = Math.sqrt(ox * ox + oz * oz);
+      if (ol > 1e-6) {
+        ox /= ol;
+        oz /= ol;
+      } else {
+        ox = this.lip.nx;
+        oz = this.lip.nz;
+      }
+      const midX = (m.fx + m.tx) * 0.5;
+      const midY = (m.fy + m.ty) * 0.5;
+      const midZ = (m.fz + m.tz) * 0.5;
+      m.path = PATH_CURVE;
+      for (let k = 0; k < HOP_BENDS.length && !ok; k += 2) {
+        // The curve's control point twice the middle's bend out (a quadratic passes half way to it at its middle).
+        const bo = HOP_BENDS[k] * s * 2;
+        const bu = HOP_BENDS[k + 1] * s * 2;
+        m.cx = midX + ox * bo;
+        m.cy = midY + bu;
+        m.cz = midZ + oz * bo;
+        ok = this.pathClear(world);
+      }
+    }
+    if (!ok) {
+      this.said = 'No room to hop there.';
+      return true;
+    }
+    const path = m.path;
+    const cxx = m.cx;
+    const cyy = m.cy;
+    const czz = m.cz;
+    const roles = this.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
+    stam.step(1, -T.stamina.hop, i.pool, LOCO_TUNE);
+    this.startMove(dir > 0 ? roles.hopLeft : roles.hopRight, 'hop', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, braced, Math.atan2(-A.nx, -A.nz), 'idle', 'idle', A);
+    m.path = path;
+    m.cx = cxx;
+    m.cy = cyy;
+    m.cz = czz;
+    return true;
+  }
+
+  /** Space with W: a lip above within `hopUp` on the same face (braced only; a free hang has nothing to brace on to hop). */
+  private hopUp(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina): boolean {
+    const T = CLIMB_TUNE;
+    const s = this.s;
+    const L = this.lip;
+    const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
+    // A face over the lip, a little behind its edge: there is wall above to hop up.
+    this.qflt = i.filter;
+    this.qx = L.ex + L.nx * 0.6;
+    this.qy = L.ey + 0.3 * s;
+    this.qz = L.ez + L.nz * 0.6;
+    this.qdx = -L.nx;
+    this.qdy = 0;
+    this.qdz = -L.nz;
+    this.qlen = 1.2;
+    if (!this.cast(world) || this.hit.ny >= walk) return false;
+    if (!this.braced) {
+      this.said = 'A free hang cannot hop up: nothing to brace the feet on.';
+      return true;
+    }
+    // Up the face until it ends: the upper lip is under the first ray that meets nothing.
+    let lastFace = 0.3 * s;
+    let faceX = this.hit.x;
+    let faceZ = this.hit.z;
+    let top = Number.NaN;
+    for (let y = 0.45 * s; y <= T.hopUp * s + 0.1; y += 0.15 * s) {
+      this.qy = L.ey + y;
+      if (this.cast(world) && this.hit.ny < walk) {
+        lastFace = y;
+        faceX = this.hit.x;
+        faceZ = this.hit.z;
+        continue;
+      }
+      // Down onto it from here, behind the face.
+      this.qx = faceX - L.nx * TOP_IN;
+      this.qy = L.ey + y + 0.05;
+      this.qz = faceZ - L.nz * TOP_IN;
+      this.qdx = 0;
+      this.qdy = -1;
+      this.qdz = 0;
+      this.qlen = y - lastFace + 0.1;
+      if (this.cast(world) && this.hit.ny >= walk) top = this.hit.y;
+      break;
+    }
+    if (!(top === top)) {
+      this.said = 'No ledge above to hop to.';
+      return true;
+    }
+    const A = this.cand;
+    A.ex = faceX;
+    A.ey = top;
+    A.ez = faceZ;
+    A.nx = L.nx;
+    A.nz = L.nz;
+    A.topNy = this.hit.ny;
+    A.slope = 0;
+    if (!this.placeFor(world, A, true, s, i.filter)) {
+      this.said = 'No room to hop up there.';
+      return true;
+    }
+    // The way up clear of what stands still (the fix round's).
+    const m = this.move;
+    m.fx = b.pos.x;
+    m.fy = b.pos.y;
+    m.fz = b.pos.z;
+    m.tx = this.bx;
+    m.ty = this.by;
+    m.tz = this.bz;
+    m.path = PATH_LINE;
+    if (!this.pathClear(world)) {
+      this.said = 'No room to hop up there.';
+      return true;
+    }
+    this.measureSlope(world, A, i.filter);
+    stam.step(1, -T.stamina.hop, i.pool, LOCO_TUNE);
+    this.startMove(LEDGE_ROLES.braced.hopUp ?? LEDGE_ROLES.braced.idle, 'hop', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, true, this.heading, 'idle', 'idle', A);
+    return true;
+  }
+
+  /** Space or W: up onto the top where a crouched capsule fits there (and over the lip on the way), else refused in words. */
+  private climbUp(world: LedgeWorld, b: LedgeBody, i: LedgeIn): void {
+    const s = this.s;
+    const L = this.lip;
+    const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
+    if (L.topNy < walk) {
+      this.said = 'The top is too steep to stand on.';
+      return;
+    }
+    const roles = this.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
+    const f = LEDGE_FACTS[roles.climb];
+    // Where the clip's own travel puts the feet: that far along its forward from the hang place, on the top.
+    const fwd = f.net[2] * s;
+    let in0 = fwd - (CLIMB_TUNE.gripOut + (this.braced ? LEDGE_FACTS[LEDGE_ROLES.braced.idle] : LEDGE_FACTS[LEDGE_ROLES.free.idle]).g0[2]) * s;
+    if (in0 < LEDGE_CAPSULE.r * 0.5) in0 = LEDGE_CAPSULE.r * 0.5;
+    this.qflt = i.filter;
+    let ok = false;
+    let topY = L.ey;
+    for (let k = 0; k < 3 && !ok; k++) {
+      const d = in0 + k * 0.15;
+      // The top there (it may be a narrow wall's).
+      this.qx = L.ex - L.nx * d;
+      this.qy = L.ey + 0.3;
+      this.qz = L.ez - L.nz * d;
+      this.qdx = 0;
+      this.qdy = -1;
+      this.qdz = 0;
+      this.qlen = 0.6;
+      if (!this.cast(world) || this.hit.ny < walk) continue;
+      topY = this.hit.y;
+      this.qx = L.ex - L.nx * d;
+      this.qy = topY + 0.02;
+      this.qz = L.ez - L.nz * d;
+      if (this.clear(world, true)) {
+        ok = true;
+        this.bx = this.qx;
+        this.by = topY;
+        this.bz = this.qz;
+      }
+    }
+    if (!ok) {
+      this.said = 'No room to climb up here.';
+      return;
+    }
+    const tx = this.bx;
+    const ty = this.by;
+    const tz = this.bz;
+    // The capsule's own way up (the fix round's): out from the face until it stands clear of it, up until its feet are over
+    // the top, then in onto the top crouched; every step of it clear of what stands still, or refused in words.
+    const m = this.move;
+    const away = (b.pos.x - L.ex) * L.nx + (b.pos.z - L.ez) * L.nz;
+    const need = LEDGE_CAPSULE.r + CLIMB_SKIN;
+    const push = away < need ? need - away : 0;
+    m.fx = b.pos.x;
+    m.fy = b.pos.y;
+    m.fz = b.pos.z;
+    m.tx = tx;
+    m.ty = ty;
+    m.tz = tz;
+    m.p1x = b.pos.x + L.nx * push;
+    m.p1y = b.pos.y;
+    m.p1z = b.pos.z + L.nz * push;
+    m.p2x = m.p1x;
+    m.p2y = (L.ey > ty ? L.ey : ty) + CLIMB_LIFT;
+    m.p2z = m.p1z;
+    m.l1 = push;
+    m.l2 = m.p2y > m.p1y ? m.p2y - m.p1y : 0;
+    const dx = tx - m.p2x;
+    const dy = ty - m.p2y;
+    const dz = tz - m.p2z;
+    m.l3 = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    m.path = PATH_LEGS;
+    if (!this.pathClear(world)) {
+      this.said = 'No room to climb up here.';
+      return;
+    }
+    const p1x = m.p1x;
+    const p1y = m.p1y;
+    const p1z = m.p1z;
+    const p2y = m.p2y;
+    const l1 = m.l1;
+    const l2 = m.l2;
+    const l3 = m.l3;
+    this.startMove(roles.climb, 'climb', b.pos.x, b.pos.y, b.pos.z, tx, ty, tz, AFTER_STAND, this.braced, this.heading, 'idle', 'feet', L);
+    m.path = PATH_LEGS;
+    m.p1x = p1x;
+    m.p1y = p1y;
+    m.p1z = p1z;
+    m.p2x = p1x;
+    m.p2y = p2y;
+    m.p2z = p1z;
+    m.l1 = l1;
+    m.l2 = l2;
+    m.l3 = l3;
+  }
+
+  /** After a climb up: whether a standing capsule now fits at the feet (then it stands, as the crouch key lets it). One shape test while asked. */
+  standRoom(world: LedgeWorld, b: LedgeBody, flt: number): boolean {
+    this.qflt = flt;
+    this.qx = b.pos.x;
+    this.qy = b.pos.y + 0.02;
+    this.qz = b.pos.z;
+    const ok = this.clear(world, false);
+    if (ok) this.keepCrouched = false;
+    return ok;
+  }
+
+  /** The heading the caller turns the body to this frame (`tick` answered true), radians. */
+  turnNow = 0.5;
+  /** The drop's clip ran out its `dropCut` this frame (the caller hands the body to the falling loop). */
+  cutNow = false;
+
+  /**
+   * The caller's clocks after a let-go, every frame off the ledge: the drop clip's cut, the jump off's turn (true where the
+   * body turns to `turnNow` this frame), and the drawn offset eased out. Nothing at all while none of them runs.
+   */
+  tick(dt: number): boolean {
+    this.cutNow = false;
+    // A let-go's tilt eased back upright with the offset (nothing at all while there is none).
+    if (this.tilt !== 0) {
+      const e = CLIMB_TUNE.ease;
+      const k = e > 0 ? Math.min(1, dt / e) : 1;
+      this.tilt -= this.tilt * k;
+      if (this.tilt < 1e-6 && this.tilt > -1e-6) this.tilt = 0;
+    }
+    if (this.cutIn > 0) {
+      this.cutIn -= dt;
+      if (this.cutIn <= 0) {
+        this.cutIn = 0;
+        this.cutNow = true;
+      }
+    }
+    if (this.outT > 0) {
+      this.outT -= dt;
+      if (this.outT <= 0) {
+        this.outT = 0;
+        this.offX = 0;
+        this.offY = 0;
+        this.offZ = 0;
+      } else {
+        const k = this.outT / this.outDur;
+        this.offX = this.ofX * k;
+        this.offY = this.ofY * k;
+        this.offZ = this.ofZ * k;
+      }
+    }
+    if (this.turnTo === this.turnTo) {
+      this.turnIn -= dt;
+      if (this.turnIn <= 0) {
+        this.turnNow = this.turnTo;
+        this.turnTo = Number.NaN;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The hands and the feet handed to the limbs' solve (src/player/limbPlace.ts), the figure posed and placed: each hand put
+   * on the grip's line where the clip has it along the lip (so every figure grips at the clip's own spacing), by the
+   * placement's share and by how near the clip itself has the hand to the line (a hop's or a climb's hands leave it on
+   * their own); the feet on the wall's face while braced.
+   */
+  limbsFor(lp: LimbPlace, rig: LimbRig, toPhys: THREE.Matrix4 | null): void {
+    // Hanging, and through a one-off whose hands stay on a lip (a hop's ends, a grab once caught, a turn onto or off the wall).
+    const k = this.move.kind;
+    this.lifted = 0;
+    if (this.phase === LEDGE_HANG || (this.phase === LEDGE_MOVE && (k === 'hop' || k === 'grab' || k === 'turn'))) this.anchor(lp, rig, toPhys);
+    for (let s = 0; s < 2; s++) {
+      const g = lp.gripNow(rig, s, toPhys, gripV);
+      if (!g || !(this.hands > 0)) {
+        lp.handW[s] = 0;
+        continue;
+      }
+      // Where the clip has the hand along the lip, and the lip there: its own height and face under that hand.
+      this.tgAlong = (g.x - this.lineX) * this.lineTx + (g.z - this.lineZ) * this.lineTz;
+      this.targetAt();
+      const tx = this.tgx;
+      const ty = this.tgy;
+      const tz = this.tgz;
+      const dx = g.x - tx;
+      const dy = g.y - ty;
+      const dz = g.z - tz;
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      // Wholly placed within a hand's width of the line, let go of by a forearm's length off it.
+      const near = d <= HAND_NEAR ? 1 : d >= HAND_FAR ? 0 : 1 - (d - HAND_NEAR) / (HAND_FAR - HAND_NEAR);
+      // Written into the limbs' own arrays (`setHand`'s), so no number crosses a call.
+      lp.hand[s * 3] = tx;
+      lp.hand[s * 3 + 1] = ty;
+      lp.hand[s * 3 + 2] = tz;
+      const w = this.hands * near;
+      lp.handW[s] = w > 0 ? w : 0;
+    }
+    const L = this.lip;
+    // The clip's own palms and both feet wholly on the wall (maker B's bracing and wall climb set their own).
+    lp.palmW[0] = 0;
+    lp.palmW[1] = 0;
+    lp.footFade = false;
+    // Each braced foot comes on and off the wall over the hands' own ease where its own ray meets the face or stops meeting it.
+    lp.footStep = CLIMB_TUNE.ease > 0 ? this.dtNow / CLIMB_TUNE.ease : 1;
+    lp.wallW = this.feet;
+    lp.wall[0] = L.ex;
+    lp.wall[1] = L.ey;
+    lp.wall[2] = L.ez;
+    lp.wall[3] = L.nx;
+    lp.wall[4] = 0;
+    lp.wall[5] = L.nz;
+  }
+
+  /** How far `limbsFor`'s anchor moved the rig's root up in its parent's frame this frame (a caller that takes its own offset back off adds it). */
+  lifted = 0.5;
+
+  /**
+   * The figure turned with a sloping lip (`tilt`) about its own front, pivoting on its hands' grip as its clip has them, so
+   * the hands stay where the line-up put them: the root (already placed by the offset, in the figure's own frame: x left,
+   * y up, z forward) turned and moved. How far it went up is `tiltLift` (a caller that takes its offset back off takes it
+   * too). Nothing while there is no tilt (the caller puts the root's turn back).
+   */
+  tiltLift = 0.5;
+  applyTilt(root: THREE.Object3D): void {
+    const t = this.tilt;
+    this.tiltLift = 0;
+    if (t === 0) return;
+    const f = LEDGE_FACTS[this.rigClip] ?? LEDGE_FACTS[this.braced ? LEDGE_ROLES.braced.idle : LEDGE_ROLES.free.idle];
+    const gx = f.g0[0] * this.s;
+    const gy = f.g0[1] * this.s;
+    const c = Math.cos(t);
+    const sn = Math.sin(t);
+    root.position.x += gx - (gx * c - gy * sn);
+    const lift = gy - (gx * sn + gy * c);
+    root.position.y += lift;
+    this.tiltLift = lift;
+    root.quaternion.set(0, 0, Math.sin(t * 0.5), Math.cos(t * 0.5));
+  }
+
+  /**
+   * A hand's place on the lip for a grip `tgAlong` along the hands' line from its middle (in), into `tg*`: hanging, the lip
+   * under it on the rail (its own height, its own face: round a corner, along a curve, up a slope), else the line of the lip
+   * a one-off holds or is aimed at, risen by its slope. Out from the face by the grip's own `gripOut`, down by `gripDrop`.
+   */
+  tgAlong = 0.5;
+  tgx = 0.5;
+  tgy = 0.5;
+  tgz = 0.5;
+  targetAt(): void {
+    const along = this.tgAlong;
+    if (this.phase === LEDGE_HANG && this.rail.n > 0) {
+      const T = CLIMB_TUNE;
+      const s = this.s;
+      const R = this.rail;
+      R.q = this.barc + along;
+      R.sample();
+      this.tgx = R.sx + R.snx * T.gripOut * s;
+      this.tgy = R.sy - T.gripDrop * s;
+      this.tgz = R.sz + R.snz * T.gripOut * s;
+      return;
+    }
+    this.tgx = this.lineX + this.lineTx * along;
+    this.tgy = this.lineY + this.lineSlope * along;
+    this.tgz = this.lineZ + this.lineTz * along;
+  }
+
+  /**
+   * Hanging, the figure moved up so its lower posed hand is on the grip's line (and out from the face by the hands' middle),
+   * by the hands' share: the body hangs from its hands, so a clip's own sway, and a crossfade between two clips (whose poses
+   * blended are not the lined-up offsets blended), moves the body and never the hands. Lateral is the arms' own. Then
+   * whatever an arm would still have to stretch to reach its place on the line, the body is moved toward it by, up and out
+   * only. How far the root went up is `lifted`.
+   */
+  private anchor(lp: LimbPlace, rig: LimbRig, toPhys: THREE.Matrix4 | null): void {
+    const w = this.hands;
+    if (!(w > 0)) return;
+    const l = lp.gripNow(rig, 0, toPhys, gripV);
+    if (!l) return;
+    const lx = l.x;
+    const ly = l.y;
+    const lz = l.z;
+    const r = lp.gripNow(rig, 1, toPhys, gripV);
+    if (!r) return;
+    const rx = r.x;
+    const ry = r.y;
+    const rz = r.z;
+    const mx = (lx + rx) * 0.5;
+    const mz = (lz + rz) * 0.5;
+    const nx = this.lip.nx;
+    const nz = this.lip.nz;
+    // Each hand's place on the lip under it (a sloping lip's at its own height, a corner's on its own face).
+    this.tgAlong = (lx - this.lineX) * this.lineTx + (lz - this.lineZ) * this.lineTz;
+    this.targetAt();
+    const tlx = this.tgx;
+    const tly = this.tgy;
+    const tlz = this.tgz;
+    this.tgAlong = (rx - this.lineX) * this.lineTx + (rz - this.lineZ) * this.lineTz;
+    this.targetAt();
+    const trx = this.tgx;
+    const try_ = this.tgy;
+    const trz = this.tgz;
+    // Up by the hand furthest under its place: a hand over its place bends down onto it, one under it would have to stretch.
+    const upL = tly - ly;
+    const upR = try_ - ry;
+    const up = upL > upR ? upL : upR;
+    const out = ((tlx + trx) * 0.5 - mx) * nx + ((tlz + trz) * 0.5 - mz) * nz;
+    // Only a pose whose hands are on the lip already near enough (a forearm's length): never one flying past it.
+    if (up * up + out * out > HAND_FAR * HAND_FAR) return;
+    const root = rig.root;
+    const parent = root.parent;
+    if (!parent) return;
+    // The shift in the physics frame, written by its components (no number crosses a call).
+    const v = anchorV;
+    v.x = nx * out;
+    v.y = up;
+    v.z = nz * out;
+    const at = lp.reachAt;
+    const dir = anchorD;
+    for (let pass = 0; pass < 2; pass++) {
+      for (let s = 0; s < 2; s++) {
+        at[0] = (s === 0 ? tlx : trx) - v.x;
+        at[1] = (s === 0 ? tly : try_) - v.y;
+        at[2] = (s === 0 ? tlz : trz) - v.z;
+        lp.reachPastIn(rig, s, toPhys, dir);
+        const e = lp.past;
+        if (!(e > 0)) continue;
+        // Up and out only (along the lip the hand's place moves with the body): by enough of that to close the gap.
+        const tl = dir.x * this.lineTx + dir.z * this.lineTz;
+        const dx = dir.x - this.lineTx * tl;
+        const dy = dir.y;
+        const dz = dir.z - this.lineTz * tl;
+        const m2 = dx * dx + dy * dy + dz * dz;
+        if (!(m2 > 0.01)) continue;
+        const k = (e + REACH_SPARE) / m2;
+        v.x += dx * k;
+        v.y += dy * k;
+        v.z += dz * k;
+      }
+    }
+    v.x *= w;
+    v.y *= w;
+    v.z *= w;
+    // Into the world's frame, into the root's parent's.
+    if (toPhys) {
+      const len = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+      if (len > 0) {
+        v.transformDirection(anchorM.copy(toPhys).invert());
+        v.x *= len;
+        v.y *= len;
+        v.z *= len;
+      }
+    }
+    root.getWorldPosition(anchorP);
+    anchorP.x += v.x;
+    anchorP.y += v.y;
+    anchorP.z += v.z;
+    parent.worldToLocal(anchorP);
+    this.lifted = anchorP.y - root.position.y;
+    root.position.x = anchorP.x;
+    root.position.y = anchorP.y;
+    root.position.z = anchorP.z;
+    root.updateMatrixWorld(true);
+  }
+
+  /**
+   * Another player's figure hanging (their rig state says so; their game holds the lip): the lip in front of where their
+   * figure hangs, found here from it (a ray into the face just under where their hands are, one down onto the top) and
+   * kept while their figure stays within a centimetre, into this ledge's own lip and the hands' line. False where none is
+   * near enough to where the hang puts their hands (their hands are then drawn as the clip has them).
+   */
+  peerLip(world: LedgeWorld, q: { readonly x: number; readonly y: number; readonly z: number; readonly heading: number; readonly scale: number; readonly filter: number }, braced: boolean): boolean {
+    const T = CLIMB_TUNE;
+    const x = q.x;
+    const y = q.y;
+    const z = q.z;
+    const heading = q.heading;
+    const s = q.scale;
+    const flt = q.filter;
+    const ex = x - this.peerX;
+    const ey = y - this.peerY;
+    const ez = z - this.peerZ;
+    if (ex * ex + ey * ey + ez * ez < 1e-4 && this.peerH === heading && this.peerB === braced) return this.peerOk;
+    this.peerX = x;
+    this.peerY = y;
+    this.peerZ = z;
+    this.peerH = heading;
+    this.peerB = braced;
+    this.peerOk = false;
+    // Their figure hangs here, as far as this side's anchor goes (limbsFor), only while a lip is found under its hands.
+    this.phase = LEDGE_NONE;
+    const f = braced ? LEDGE_FACTS[LEDGE_ROLES.braced.idle] : LEDGE_FACTS[LEDGE_ROLES.free.idle];
+    const fx = Math.sin(heading);
+    const fz = Math.cos(heading);
+    const top = y + (hangOver(f) + T.gripDrop) * s;
+    const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
+    this.qflt = flt;
+    this.qx = x;
+    this.qy = top - 0.06;
+    this.qz = z;
+    this.qdx = fx;
+    this.qdy = 0;
+    this.qdz = fz;
+    this.qlen = (T.gripOut + Math.abs(f.g0[2])) * s + 0.6;
+    if (!this.cast(world) || this.hit.ny >= walk) return false;
+    const faceX = this.hit.x;
+    const faceZ = this.hit.z;
+    let nx = this.hit.nx;
+    let nz = this.hit.nz;
+    const nl = Math.sqrt(nx * nx + nz * nz);
+    if (!(nl > 1e-6)) return false;
+    nx /= nl;
+    nz /= nl;
+    this.qx = faceX - nx * TOP_IN;
+    this.qy = top + 0.3;
+    this.qz = faceZ - nz * TOP_IN;
+    this.qdx = 0;
+    this.qdy = -1;
+    this.qdz = 0;
+    this.qlen = 0.6;
+    if (!this.cast(world) || this.hit.ny < 0.2) return false;
+    const L = this.lip;
+    L.ex = faceX;
+    L.ey = this.hit.y;
+    L.ez = faceZ;
+    L.nx = nx;
+    L.nz = nz;
+    L.topNy = this.hit.ny;
+    L.slope = 0;
+    this.s = s;
+    this.braced = braced;
+    this.phase = LEDGE_HANG;
+    // The lip under each of their hands (round a corner, up a slope) as this side's own hang has it, and their figure's tilt.
+    this.railStart(world);
+    this.tilt = this.tiltGoal;
+    this.lineFor(this.lip);
+    this.peerOk = true;
+    return true;
+  }
+
+  /** Where the haul's hand-over last looked and found nothing. */
+  private haulX = Number.NaN;
+  private haulY = Number.NaN;
+  private haulZ = Number.NaN;
+
+  /** The last place `peerLip` was asked at, and its answer. */
+  private peerX = Number.NaN;
+  private peerY = Number.NaN;
+  private peerZ = Number.NaN;
+  private peerH = Number.NaN;
+  private peerB = false;
+  private peerOk = false;
+
+  /** Another player's figure: its hands and feet placed or not (`hands`, `feet`, each 0 or 1), eased toward over `climb.ease` by `i.dt`. */
+  easeShares(hands: number, feet: number, i: { readonly dt: number }): void {
+    this.dtNow = i.dt;
+    this.goalHands = hands;
+    this.goalFeet = feet;
+    this.easeLimbs();
+  }
+
+  /** What the console says of the ledges. */
+  report(): Record<string, unknown> {
+    const n = (v: number) => Math.round(v * 1000) / 1000;
+    return {
+      phase: this.phase === LEDGE_NONE ? 'none' : this.phase === LEDGE_HANG ? 'hang' : `move (${this.move.kind}: ${this.move.id}, ${n(this.move.time)} of ${n(this.move.T)} s)`,
+      braced: this.braced,
+      shimmy: this.shimmy,
+      rigState: this.rigState,
+      lip: this.phase === LEDGE_NONE ? null : { edge: [n(this.lip.ex), n(this.lip.ey), n(this.lip.ez)], out: [n(this.lip.nx), n(this.lip.nz)], topUp: n(this.lip.topNy) },
+      heading: n(this.heading),
+      offset: [n(this.offX), n(this.offY), n(this.offZ)],
+      slope: this.phase === LEDGE_NONE ? null : n((Math.atan(this.lip.slope) * 180) / Math.PI),
+      tilt: n((this.tilt * 180) / Math.PI),
+      rail: this.phase === LEDGE_NONE || this.rail.n === 0 ? null : { points: this.rail.n, from: n(this.rail.a[0] - this.barc), to: n(this.rail.a[this.rail.n - 1] - this.barc), ends: [this.rail.loEnd, this.rail.hiEnd] },
+      hands: n(this.hands),
+      feet: n(this.feet),
+      keepCrouched: this.keepCrouched,
+      grabs: this.grabs,
+      casts: this.casts,
+      lastLetGo: this.lastLetGo,
+    };
+  }
+}

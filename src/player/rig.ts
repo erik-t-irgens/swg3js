@@ -16,7 +16,7 @@ import { applyJkaSpine, isJkaClip, rebaseJkaClips, spineRebaseFor } from '../ani
 // takes the keys the switch names, written in place (an event, never a frame).
 watchJkaSpine(() => applyJkaSpine(ANIM_TUNE.jkaSpine === 'mended'));
 
-export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun' | 'kneel' | 'prone' | 'proneMove' | 'gunProneIdle' | 'gunProneMove' | 'gunProneReadyIdle' | 'gunProneReadyMove' | 'gunProneAimIdle' | 'gunProneAimMove';
+export type RigState = 'idle' | 'walk' | 'run' | 'air' | 'seated' | 'swim' | 'float' | 'crouch' | 'crouchWalk' | 'crouchWalkBack' | 'stance' | 'strafeLeft' | 'strafeRight' | 'runBack' | 'walkBack' | 'runSaber' | 'walkSaber' | 'gunIdle' | 'gunWalk' | 'gunRun' | 'gunReadyIdle' | 'gunReadyWalk' | 'gunReadyRun' | 'gunAimIdle' | 'gunAimWalk' | 'gunAimRun' | 'kneel' | 'prone' | 'proneMove' | 'gunProneIdle' | 'gunProneMove' | 'gunProneReadyIdle' | 'gunProneReadyMove' | 'gunProneAimIdle' | 'gunProneAimMove' | 'hangBraced' | 'hangFree' | 'shimmyBracedL' | 'shimmyBracedR' | 'shimmyFreeL' | 'shimmyFreeR' | 'climbUpBraced' | 'climbUpFree' | 'wallStill' | 'wallUp' | 'wallDown' | 'wallLeft' | 'wallRight';
 
 /** Clip names used for each state, in preference order (placeholder rig names, then the game's); a pattern matches any clip. */
 const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
@@ -76,6 +76,24 @@ const STATE_CLIPS: Record<RigState, (string | RegExp)[]> = {
   gunProneReadyMove: [/^loop_rifle_combat_prone:speed1/, /^loop_pistol_combat_prone:speed1/, /^loop_prone:speed1/, 'walk'],
   gunProneAimIdle: [/^loop_rifle_combat_prone_aimed:speed0/, /^loop_pistol_combat_prone_aimed:speed0/, /^loop_rifle_combat_prone_aimed:speed1/, /^loop_pistol_combat_prone_aimed:speed1/, /^loop_prone:speed0/, 'idle'],
   gunProneAimMove: [/^loop_rifle_combat_prone_aimed:speed1/, /^loop_pistol_combat_prone_aimed:speed1/, /^loop_prone:speed1/, 'walk'],
+  // Wave 4, the ledges (src/player/ledge.ts, src/anim/ledgeClips.ts): hanging braced (the feet on the wall) or free, still
+  // or shimmying left or right, and climbing up. Asked for by name through `prefer` too; a rig without the imported clips
+  // falls back on the air's own pose.
+  hangBraced: ['mx_braced_hanging_idle', 'mx_hanging_idle', 'BOTH_INAIR1', 'jump', 'idle'],
+  hangFree: ['mx_free_hang_hanging_idle', 'mx_hanging_idle_looking_up', 'mx_braced_hanging_idle', 'BOTH_INAIR1', 'jump', 'idle'],
+  shimmyBracedL: ['mx_braced_hang_shimmy_1', 'mx_braced_hanging_idle', 'BOTH_INAIR1', 'idle'],
+  shimmyBracedR: ['mx_braced_hang_shimmy', 'mx_braced_hanging_idle', 'BOTH_INAIR1', 'idle'],
+  shimmyFreeL: ['mx_free_hang_left_shimmy', 'mx_free_hang_hanging_idle', 'BOTH_INAIR1', 'idle'],
+  shimmyFreeR: ['mx_free_hang_right_shimmy', 'mx_free_hang_hanging_idle', 'BOTH_INAIR1', 'idle'],
+  climbUpBraced: ['mx_braced_hang_to_crouch', 'mx_braced_hanging_idle', 'BOTH_INAIR1', 'idle'],
+  climbUpFree: ['mx_freehang_climb', 'mx_free_hang_hanging_idle', 'BOTH_INAIR1', 'idle'],
+  // Wave 4, the wall climb (src/player/wallClimb.ts, src/anim/wallClips.ts): still, up, down and sideways (no clip of its own:
+  // the up clip, played at the sideways speed's rate). Without the imported clips, the air's own pose.
+  wallStill: ['mx_climbing_up_wall', 'BOTH_INAIR1', 'jump', 'idle'],
+  wallUp: ['mx_climbing_up_wall', 'BOTH_INAIR1', 'jump', 'idle'],
+  wallDown: ['mx_climbing_down_wall', 'mx_climbing_up_wall', 'BOTH_INAIR1', 'jump', 'idle'],
+  wallLeft: ['mx_climbing_up_wall', 'BOTH_INAIR1', 'jump', 'idle'],
+  wallRight: ['mx_climbing_up_wall', 'BOTH_INAIR1', 'jump', 'idle'],
 };
 
 /** The game's additive clips: add_pistol_fire_N and kin, deltas meant to play over whatever pose is up. */
@@ -428,6 +446,9 @@ export class CharacterRig {
 
   /** What placed the feet after the mixer last frame (src/player/footIk.ts), put back before it runs again; null for none. */
   legPose: { restore(): void } | null = null;
+
+  /** What placed the hands on a lip or a face, and the feet on a wall, after the mixer last frame (src/player/limbPlace.ts), put back before it runs again; null for none. */
+  limbPose: { restore(): void } | null = null;
 
   /** A bone by its own name, or null (the feet's placement asks for the legs' joints by the game's names). */
   boneNamed(name: string): THREE.Bone | null {
@@ -1167,6 +1188,9 @@ export class CharacterRig {
     // The feet's placement (wave 3, src/player/footIk.ts) turned the legs after the mixer last frame: their clean pose
     // goes back before the mixer runs, since it writes a joint only when its clip's value moved, and a leg the clip held
     // still would otherwise keep last frame's turn and the next placement would stack on it.
+    // Wave 4: the hands' and the wall feet's (src/player/limbPlace.ts) first, since they were placed after the feet's: each
+    // puts back what it found, so the last to turn a joint is the first to put it back.
+    this.limbPose?.restore();
     this.legPose?.restore();
     this.mixer.update(dt);
     // The mixer writes a joint only when its clip's value moved since the last frame, so a neck or head the look

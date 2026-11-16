@@ -30,6 +30,7 @@ import { pathToFileURL } from 'node:url';
 import * as harness from './grappleBody.ts';
 import { Group, RAPIER, TRIMESH_FLAGS, cleanTrimesh, groups, type Physics } from '../../../src/core/physics.ts';
 import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
+import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
 import { FIGHTER_BODY, applyBody, fallSpeed, settleFooting } from '../../../src/world/fighterStance.ts';
 import { edgeGround, PLANE_REACH, slopeGround, SlopeRule } from '../../../src/player/slopeRule.ts';
 import { BodyAnim } from '../../../src/anim/bodyAnim.ts';
@@ -416,6 +417,9 @@ const firstDiff = (a: number[], b: number[]): string => {
 
 // ---- the measurement: before held, now slid past the limit ---------------------------------------------------------------
 {
+  // Wave 4, item B: W held into a face past the limit now climbs it (its own suite's, wallClimb.test.ts); what is measured
+  // here is the walk, so the climb is held at 'before' through it.
+  CLIMB_TUNE.wall = 'before';
   const T = (s: number[], frame: number, f: number) => s[frame * 8 + f];
   for (const kind of ['terrain', 'trimesh'] as const) {
     const rows: string[] = [];
@@ -458,6 +462,7 @@ const firstDiff = (a: number[], b: number[]): string => {
     }
     for (const r of rows) note(`${kind} ${r}`);
   }
+  CLIMB_TUNE.wall = 'on';
 }
 
 // ---- the slide: the world's gravity times the share, the same at every frame rate -----------------------------------------
@@ -720,6 +725,11 @@ async function loadHarness(texts: Map<string, string>): Promise<Harness> {
   const oldH = old ? await loadHarness(old) : null;
   const now: number[][] = [];
   rule('before');
+  // Wave 4's ledges are a switch of their own, held to its own day one (wave4DayOne.test.ts): 'before' here, since the
+  // harness this compares with had none (the haul up the face ends under a lip a hang now takes).
+  CLIMB_TUNE.ledges = 'before';
+  // (And the wall climb's, item B: these scenes press into faces the climb would take.)
+  CLIMB_TUNE.wall = 'before';
   for (const s of scenes) {
     const a = await s.run(harness, 60);
     now.push(a);
@@ -729,6 +739,8 @@ async function loadHarness(texts: Map<string, string>): Promise<Harness> {
     }
   }
   restore();
+  CLIMB_TUNE.ledges = 'on';
+  CLIMB_TUNE.wall = 'on';
   const digest = createHash('sha1').update(now.map((t) => t.join(',')).join('\n')).digest('hex').slice(0, 16);
   if (oldH) note(`the 'before' traces' digest is ${digest} (BEFORE_TRACE, which a checkout with no history is held to)`);
   else note(`git cannot hand over ${BEFORE_2B}'s harness here: the 'before' traces are held to the digest recorded from it`);
@@ -774,7 +786,7 @@ async function loadHarness(texts: Map<string, string>): Promise<Harness> {
   ok(at(upd, ['const slopeJumped = this.slope.jumpOff(this.vel, c.jumpPressed);', 'if (slopeJumped) this.jka.markJumpStart(this.pos.y);', 'this.jka.step(', 'if (slopeJumped) ev.jumped = true;', 'if (this.slope.sliding) this.slope.share(this.vel, dt,', 'this.grapple.beforeMove(', 'this.slope.sliding ||', 'this.controller.disableSnapToGround();', 'this.slope.controllerFor(this.controller);', 'computeColliderMovement(', 'this.grounded = this.controller.computedGrounded();', 'const slopeAt = this.slope.at;', 'slopeAt.x = this.pos.x;', 'slopeAt.y = this.pos.y;', 'slopeAt.z = this.pos.z;', 'slopeAt.offsetY = this.colliderOffsetY;', 'slopeAt.r = CAPSULE_RADIUS;', 'slopeAt.filter = filter;', "this.grounded = this.slope.judge(this.physics.world, this.grounded, !this.swimming && !this.grapple.attached && !this.grapple.released, this.body, this.walkPast);", 'if (this.slope.sliding) this.jka.holdApex(this.slope.slide(this.vel, this.pos.y,', 'this.anim.slide = this.slope.sliding;', 'if (this.grounded && this.vel.y < 0) this.vel.y = 0;']), "the player's update: the jump off, the share before the move, the snap off and the controller's numbers, the verdict after the controller's word and before the fall is zeroed, the slide and the fall's memory, and the animation's word, in that order");
   ok(at(frame, ['const slopeJumped = this.slope.jumpOff(this.vel, c.jumpPressed);', 'if (slopeJumped) this.jka.markJumpStart(this.pos.y);', 'this.jka.step(', 'if (slopeJumped) ev.jumped = true;', 'if (this.slope.sliding) this.slope.share(this.vel, dt,', 'g.beforeMove(', 'this.slope.sliding ||', 'this.controller.disableSnapToGround();', 'this.slope.controllerFor(this.controller);', 'computeColliderMovement(', 'this.grounded = this.controller.computedGrounded();', 'const slopeAt = this.slope.at;', 'slopeAt.x = this.pos.x;', 'slopeAt.y = this.pos.y;', 'slopeAt.z = this.pos.z;', 'slopeAt.offsetY = this.colliderOffsetY;', 'slopeAt.r = CAPSULE_RADIUS;', 'slopeAt.filter = this.filter;', 'this.grounded = this.slope.judge(this.physics.world, this.grounded, !this.swimming && !(this.hooks && (g.attached || g.released)), this.body, this.walkPast);', 'if (this.slope.sliding) this.jka.holdApex(this.slope.slide(this.vel, this.pos.y,', 'if (this.grounded && this.vel.y < 0) this.vel.y = 0;']), 'and the harness steps the very same calls in the very same order');
   const count = (s: string, x: string) => s.split(x).length - 1;
-  ok(count(p, 'this.slope.reset();') === 7, "the slide is let go wherever the feet leave the move (the five branches off the feet, `stand`, `reset`)");
+  ok(count(p, 'this.slope.reset();') === 11 && /private takenByLedge\(\): void \{[^}]*this\.slope\.reset\(\);/.test(p) && /private hangFrame\([^)]*\): void \{[^}]*this\.slope\.reset\(\);/.test(p) && /private takenByWall\(\): void \{[^}]*this\.slope\.reset\(\);/.test(p) && /private wallFrame\([^)]*\): void \{[^}]*this\.slope\.reset\(\);/.test(p), "the slide is let go wherever the feet leave the move (the five branches off the feet, `stand`, `reset`, wave 4's grab and every frame of a hang, and the wall's take and every frame on it)");
   ok(!/SlopeRule|slopeRule/.test(text('src/world/npcs.ts')) && !/SlopeRule|slopeRule/.test(text('src/world/fighterStance.ts')), 'the fighters keep their own controller copy, untouched (measured below)');
 }
 

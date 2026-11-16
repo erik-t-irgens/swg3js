@@ -18,7 +18,7 @@ import { BountyHunterKit } from './combat/bountyHunter';
 import { TORCH_TUNE, newTorchPose, placeTorch, torchIntensity, type TorchTune } from './player/torch.ts';
 import { GodHold, godRefusal } from './player/godMode.ts';
 import { recordHarmKind } from './player/harmRule.ts';
-import { GRAPPLE_TUNE, NO_RIG_WORDS, grappleStatBase, resetGrappleTune, tuneGrapple } from './player/grapple.ts';
+import { CLIMBING_WORDS, GRAPPLE_TUNE, NO_RIG_WORDS, grappleStatBase, resetGrappleTune, tuneGrapple } from './player/grapple.ts';
 import { underWater } from './player/grappleMath.ts';
 import { HeldNotes } from './ui/heldNotes.ts';
 import { MENU_REACH_TOP, REACH_FLOOR, askReach, emptyHold, heldAxisNote, holding, reachInForce, reachWarnings, type ReachAsk } from './world/reachHold.ts';
@@ -132,6 +132,8 @@ import { browserIo, mixamoPack } from './anim/mixamoPack.ts';
 import { ANIM_TUNE, tuneAnim } from './anim/animTune.ts';
 import { rebasedCount } from './anim/jkaSpine.ts';
 import { IMPACT_MUTES } from './anim/animRules.ts';
+import { CLIMB_TUNE, LEDGE_MUTES, resetClimbTune, tuneClimb } from './anim/climbTune.ts';
+import { climbDialsFor } from './anim/climbDials.ts';
 import { animDialsFor } from './anim/animDials.ts';
 import { locoDialsFor } from './anim/locoDials.ts';
 import { LOCO_SWITCH, LOCO_TUNE, locoSwitchOn, tuneLoco } from './anim/locoTune.ts';
@@ -560,6 +562,19 @@ void MIXAMO.load();
 // The speed classes (walk, jog, run and sprint on foot: src/anim/bodyLoco.ts) are on unless `localStorage['swg.loco']`
 // is '0' at load, which is the movement before them; `__debug.loco({ on })` flips them live.
 LOCO_TUNE.on = locoSwitchOn(() => localStorage.getItem(LOCO_SWITCH));
+
+/**
+ * What `__debug.climb` takes (wave 4: the ledges, the wall climb and the hands' bracing): the ledges' switch (`on`), the
+ * wall climb's (`wall`), the bracing's (`brace`), the tune by group, back as shipped, and a let-go of a lip or a wall.
+ */
+interface ClimbDebugOptions {
+  on?: boolean;
+  wall?: boolean;
+  brace?: boolean;
+  tune?: unknown;
+  reset?: boolean;
+  letGo?: boolean;
+}
 
 /** What `__debug.loco` takes. */
 interface LocoDebugOptions {
@@ -2672,6 +2687,8 @@ class App {
     // blow a roll dodged, which is the fight's Acrobatics; and a landing roll that kept some of a fall off,
     // which pays Acrobatics whether or not anything was being fought.
     this.player.onHarm = (lost, kind) => this.encounters.hurt(lost, kind);
+    // Wave 4: what a ledge says (too tired to hold on, no room to climb up, a hop refused) goes to the message line.
+    this.player.onLedgeWords = (words) => this.messages.system(words);
     this.player.onDodge = (source) => this.encounters.dodged(source as Living | null);
     this.player.onRolled = (fell, saved) => {
       const at = sharedClock.now();
@@ -7499,6 +7516,7 @@ class App {
             // the fight for the rest of the step, as the frame loop has it: so a hold can be driven from here.
             this.stepPlacingKeys(dt);
             // A thrown fall's impact holds the keys, as the frame loop has it.
+            this.stepLedgeKeys();
             this.stepSprintKeys();
             this.stepImpactKeys();
             // And the grapple's, beside them as the frame loop has them: its mutes, the fire, the boost, the held reels.
@@ -8014,6 +8032,7 @@ class App {
        * saved); `loco({ stamina: 5 })` sets the pool.
        */
       loco: (o: LocoDebugOptions = {}) => this.locoDebug(o),
+      climb: (o: ClimbDebugOptions = {}) => this.climbDebug(o),
       /** Mount the nearest vehicle, or dismount, as E does. */
       mount: () => {
         this.handleMount();
@@ -12350,7 +12369,7 @@ class App {
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
       // (The landmarks' switch dial is handed the app's own curtain just below, `LANDMARK_SWITCH`.)
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -17774,6 +17793,9 @@ class App {
     // feet are placed within `ik.peerReach` of it).
     this.remotes.feetWorld = this.physics.world;
     this.remotes.cameraAt.copy(this.cam.camera.position);
+    // Wave 4, item B: and where this player stands on foot, for another figure's hands to brace on as it passes.
+    this.remotes.playerKnown = !this.player.mounted && !this.player.aboard && !this.player.eva;
+    if (this.remotes.playerKnown) this.remotes.playerAt.copy(this.player.pos);
     this.remotes.update(dt);
     if (!this.net.online) return;
     const now = performance.now();
@@ -17973,8 +17995,9 @@ class App {
    */
   private playEmote(clip: string | null): void {
     const rig = this.player.rig;
-    // No emote or dance while the grapple is out: the rope holds the arm and the body.
-    if (!clip || !rig || this.player.mounted || this.player.grapple.out) return;
+    // No emote or dance while the grapple is out: the rope holds the arm and the body. Nor hanging from a ledge or climbing
+    // a wall (the animations' wave 4): the hands are full and the hang's own pose is the body's.
+    if (!clip || !rig || this.player.mounted || this.player.grapple.out || this.player.climbHolds) return;
     if (rig.play(clip, { fadeIn: 0.15, loop: loopsEmote(clip) }) === null) {
       this.messages.system(`the rig has no clip ${clip}`);
       return;
@@ -28515,6 +28538,15 @@ class App {
   }
 
   /**
+   * Wave 4: hanging from a ledge (src/player/ledge.ts), the fight, the postures, the saber's switch and the use key are
+   * muted by action for the rest of the frame (`LEDGE_MUTES`), before anything reads a key: the hands are full. The frame
+   * loop and `__debug.advance` both call it, straight before the sprint's.
+   */
+  private stepLedgeKeys(): void {
+    if (this.player.climbHolds) this.input.mute(LEDGE_MUTES as readonly Action[]);
+  }
+
+  /**
    * The sprint (src/anim/bodyLoco.ts): under the tune's 'muted' (the rule before) the attack, a gun's other trigger and
    * the saber's throw do nothing while it lasts (`SPRINT_MUTES`), muted by action for the rest of the frame before
    * anything reads a key; under 'ends' (the default) nothing is muted, and a fight's key ends the sprint in the body's
@@ -28568,6 +28600,29 @@ class App {
     camera.position.z = mid.z - dx * Math.sin(a) + dz * Math.cos(a);
     camera.lookAt(mid);
     camera.updateMatrixWorld();
+  }
+
+  /** `__debug.climb`: see its row in the README. */
+  private climbDebug(o: ClimbDebugOptions): unknown {
+    const words: string[] = [];
+    const p = this.player;
+    if (o.reset) resetClimbTune();
+    if (typeof o.on === 'boolean') words.push(...tuneClimb({ ledges: o.on ? 'on' : 'before' }));
+    if (typeof o.wall === 'boolean') words.push(...tuneClimb({ wall: o.wall ? 'on' : 'before' }));
+    if (typeof o.brace === 'boolean') words.push(...tuneClimb({ brace: { rule: o.brace ? 'on' : 'before' } }));
+    if (o.tune !== undefined) words.push(...tuneClimb(o.tune));
+    if (o.letGo && p.ledge.holding) p.ledge.letGo(p as never, 'console', 0, 0, 0);
+    if (o.letGo && p.wall.holding) p.wall.letGo(p as never, 'console', 0, 0, 0);
+    return {
+      ...(words.length ? { words } : {}),
+      ledges: CLIMB_TUNE.ledges,
+      holding: p.climbHolds,
+      ...p.ledge.report(),
+      wall: p.wall.report(),
+      brace: p.brace.report(),
+      limbs: p.limbs.report(),
+      tune: JSON.parse(JSON.stringify(CLIMB_TUNE)) as unknown,
+    };
   }
 
   /** `__debug.loco`: see its row in the README. */
@@ -28757,6 +28812,11 @@ class App {
       if (why === 'no rig') {
         this.messages.system(NO_RIG_WORDS);
         return NO_RIG_WORDS;
+      }
+      // Wave 4: and hanging from a ledge, the hands are full (`CLIMBING_WORDS`).
+      if (why === 'climbing') {
+        this.messages.system(CLIMBING_WORDS);
+        return CLIMBING_WORDS;
       }
       return why || (mk.kind === 'none' ? 'nothing in reach' : `the mark is on ${mk.kind}`);
     }
@@ -35405,6 +35465,8 @@ class App {
         // would also say there is nothing of yours near enough to pick up.
         if (takeKey && !hadInHand && !this.anyPanelOpen() && !this.map.open && !riding && !atControls) void this.takeNearestProp();
         // A thrown fall's impact holds the keys while it plays, before the grapple, the kit or the body reads one.
+        // Hanging from a ledge, the hands are full: the fight and the postures muted as the impact's are.
+        this.stepLedgeKeys();
         this.stepSprintKeys();
         this.stepImpactKeys();
         // The grapple's keys, under the same guard as the rest of the block (never with the map, a panel or the

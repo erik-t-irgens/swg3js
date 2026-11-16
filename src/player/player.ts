@@ -39,6 +39,16 @@ import { CROUCH, STAND, isStairPick } from '../anim/locoTable.ts';
 import { FELL_UNDER } from '../world/fellOut.ts';
 import { FootIk } from './footIk.ts';
 import { StairSense } from './stairSense.ts';
+import { LedgeHang, LedgeIn, type LedgeWorld } from './ledge.ts';
+import { LimbPlace } from './limbPlace.ts';
+import { CLIMB_TUNE } from '../anim/climbTune.ts';
+import { ledgeClipName } from '../anim/ledgeClips.ts';
+import { figureScaleOf } from './peerHang.ts';
+import { WallClimb } from './wallClimb.ts';
+import { wallClipName } from '../anim/wallClips.ts';
+import { BraceIn, Crowd, HandBrace } from './brace.ts';
+import { hostileSides } from '../combat/targets.ts';
+import { PLAYER_KEY } from '../combat/kit.ts';
 import { DrawnHeight, DrawnIn } from '../anim/drawnHeight.ts';
 
 /**
@@ -115,6 +125,8 @@ const grappleDartDir = new THREE.Vector3();
 /** The grapple's look (wave 2): the lean as a turn, the rope point's lift it turns, and the arm's turn and way in the figure's own frame. */
 const grappleLeanQ = new THREE.Quaternion();
 const grappleLift = new THREE.Vector3();
+/** Wave 4: the grapple's pivot, read for the ledges' hand-over (`ledgeFromHaul`). */
+const ledgePivot = new THREE.Vector3();
 const grappleArmTurn = new THREE.Quaternion();
 const grappleArmDir = new THREE.Vector3();
 const grappleArmLocal = { x: 0, y: 0, z: 0 };
@@ -479,6 +491,32 @@ export class Player {
   readonly stairSense = new StairSense();
   readonly drawn = new DrawnHeight();
   private readonly drawnIn = new DrawnIn();
+  /**
+   * Wave 4: the ledges (`src/player/ledge.ts`): a lip grabbed in the air after the move (`sense`), and while it holds the
+   * body the hang's own frame in place of the movement (`hangFrame`); and the hands put on the lip and the feet on the
+   * wall after the figure is placed (`src/player/limbPlace.ts`, which maker B's bracing asks through `setHand`). The
+   * grapple's harness steps the very same calls in the same places.
+   */
+  readonly ledge = new LedgeHang({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  private readonly ledgeIn = new LedgeIn();
+  readonly limbs = new LimbPlace(() => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }));
+  /** The rig's root was put off the body's place by the hang (its x and z): what `placeVisual` puts back. */
+  private ledgeRooted = false;
+  /**
+   * Wave 4, item B: the wall climb (`src/player/wallClimb.ts`): onto a face after the move (`sense`, beside the ledges'),
+   * and while it holds the body its own frame in place of the movement (`wallFrame`); and the hands' bracing
+   * (`src/player/brace.ts`) after the feet are placed, through the very limbs' solve the ledges hand their lip to (a rig has
+   * one hook). The grapple's harness steps the climb's calls in the same places.
+   */
+  readonly wall = new WallClimb({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  readonly brace = new HandBrace(() => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }));
+  private readonly braceIn = new BraceIn();
+  /** The bodies near enough to brace on, refilled a frame while it is asked (kept). */
+  readonly crowd = new Crowd();
+  /** The rig's root was put off the body's place and leant by the climb: what `placeVisual` puts back. */
+  private wallRooted = false;
+  /** The frame's move was cut short across the ground by something in its way (the climb's start reads it). */
+  private wallBlocked = false;
   /** The world into a ship's rooms' frame (aboard), for the feet's rays; and the chase camera's point (`followAt`). */
   private readonly roomInverse = new THREE.Matrix4();
   private readonly followPoint = new THREE.Vector3();
@@ -836,6 +874,8 @@ export class Player {
     s.special = this.jka.inSpecialJump;
     s.swgProfile = this.moveProfile === 'swg';
     s.stepped = this.physics.steps > this.stepsAtReset;
+    // Wave 4: hanging from a ledge or climbing a wall, the hands are full.
+    s.climbing = this.climbHolds;
     return s;
   }
 
@@ -994,6 +1034,11 @@ export class Player {
     this.feet.reset();
     this.stairSense.reset();
     this.drawn.reset();
+    // Wave 4: stood somewhere new, nothing holds a lip any more, and nothing is placed on one.
+    this.ledge.reset('stood elsewhere');
+    this.wall.reset('stood elsewhere');
+    this.brace.reset();
+    this.limbs.reset();
   }
 
   /**
@@ -1045,6 +1090,44 @@ export class Player {
     if (rig) this.rootBase = rig.root.position.y;
     // Wave 3: the drawn body's lag over a step's pop, on the rig's root alone as the sink is (nought under 'before').
     if (rig && this.drawn.offset !== 0) rig.root.position.y += this.drawn.offset;
+    // Wave 4: hanging, the figure drawn where its clip's hands are on the lip (each clip authored at a height of its own),
+    // and after a let-go eased back onto the body; then the root's level offset put back (never under 'before').
+    if (rig && (this.ledgeRooted || this.ledge.offset)) {
+      if (this.ledge.offset) this.applyLedgeRoot();
+      else {
+        rig.root.position.x = 0;
+        rig.root.position.z = 0;
+        rig.root.quaternion.set(0, 0, 0, 1);
+        this.ledgeRooted = false;
+      }
+    }
+    // Wave 4, item B: on a wall, the figure drawn leant into the face with its clip's own wall on it, and after a let-go
+    // eased back upright onto the body (on top of the hang's offset in the frame the climb hands its body to a lip).
+    if (rig && (this.wallRooted || this.wall.drawn)) {
+      if (!this.ledge.offset) {
+        rig.root.position.x = 0;
+        rig.root.position.z = 0;
+      }
+      if (this.wall.drawn) this.applyWallRoot();
+      else {
+        rig.root.quaternion.set(0, 0, 0, 1);
+        this.wallRooted = false;
+      }
+    }
+  }
+
+  /** The rig's root put where the climb draws the figure against the body (its offset, the world's frame, into the group's) and leant into the face about its own left. */
+  private applyWallRoot(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const W = this.wall;
+    const c = Math.cos(this.heading);
+    const s = Math.sin(this.heading);
+    rig.root.position.x += W.offX * c - W.offZ * s;
+    rig.root.position.y += W.offY;
+    rig.root.position.z += W.offX * s + W.offZ * c;
+    rig.root.quaternion.setFromAxisAngle(AXIS_X, W.lean);
+    this.wallRooted = true;
   }
 
   /** What `placeVisual` last stood the rig's root at before wave 3's lag and drop: what a branch off the feet puts back (`feetOff`). */
@@ -1058,6 +1141,14 @@ export class Player {
   private feetOff(): void {
     this.feet.reset();
     this.drawn.reset();
+    // Wave 4: a frame off the feet for any other reason than the ledge's own (riding, flying, adrift, dead, the editor's
+    // flight) lets go of the ledge outright. (The hang's own frame lets go of the feet and the lag itself.)
+    if (this.ledge.holding) this.ledge.reset('off the feet');
+    if (this.wall.holding) this.wall.reset('off the feet');
+    if (this.brace.busy) {
+      this.brace.reset();
+      this.limbs.reset();
+    }
     const rig = this.rig;
     if (rig && rig.root.position.y !== this.rootBase) rig.root.position.y = this.rootBase;
   }
@@ -2440,6 +2531,8 @@ export class Player {
     this.rig?.setState('float');
     this.rig?.update(dt);
     this.group.updateMatrixWorld(true);
+    // Wave 4, item B: drifting near a surface, the hands reach to it and step along it (visual only: the drift is the drift).
+    this.placeBrace(dt, null, true);
   }
 
   dismount(to: THREE.Vector3): void {
@@ -2623,6 +2716,19 @@ export class Player {
     }
     this.eva = false;
 
+    // Wave 4: hanging from a ledge, or carried through one of its one-offs (`LedgeHang`): the ledge has the body in place
+    // of the movement. Never under `climb.ledges` 'before', where nothing ever holds.
+    if (this.ledge.holding) {
+      this.hangFrame(dt, input, cam, world);
+      return;
+    }
+    // Wave 4, item B: on a wall (`WallClimb`), the climb has the body in place of the movement. Never under `climb.wall`
+    // 'before', where nothing ever climbs.
+    if (this.wall.holding) {
+      this.wallFrame(dt, input, cam, world);
+      return;
+    }
+
     const g = world.planet.gravity;
     const terrain = world.terrain;
 
@@ -2667,7 +2773,7 @@ export class Player {
     const getsUp = this.swimming || input.pressedAction('jump') || (this.classId === 'jedi' && (input.pressedAction('attack') || input.pressedAction('block')));
     if (this.prone && getsUp) this.prone = false;
     if (this.kneeling && (getsUp || moving || input.held('crouch'))) this.kneeling = false;
-    this.crouching = !this.swimming && !this.prone && !this.kneeling && input.held('crouch');
+    this.crouching = !this.swimming && !this.prone && !this.kneeling && (input.held('crouch') || (this.ledge.keepCrouched && !this.ledge.standRoom(this.physics.world as unknown as LedgeWorld, this, this.moveFilter())));
     this.setCrouchCollider((this.crouching || this.prone || this.kneeling) && this.grounded);
     if (this.grounded && !this.swimming) this.postureTransition(was, moving);
     // `lavaPaceNow` is what a flow has left of the walk: 1 everywhere else, and it is a factor of its
@@ -2968,6 +3074,22 @@ export class Player {
     this.anim.slide = this.slope.sliding;
     if (this.grounded && this.vel.y < 0) this.vel.y = 0;
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
+    // Wave 4: a lip grabbed in the air, or lowered into off a lip crouched (`LedgeHang.sense`, after the move and the slope's
+    // verdict); and the clocks of a let-go (a drop's clip cut, the jump off's turn). From a grab the frame is the hang's.
+    this.ledgeClocks(dt);
+    // Wave 4, item B: whether the move was cut short across the ground by what is in its way (only a body pressed into a
+    // face feels for one to climb, so walking free casts nothing), worked out in place (no number crosses a call).
+    const askH = moveX * moveX + moveZ * moveZ;
+    this.wallBlocked = askH > 1e-8 && mv.x * mv.x + mv.z * mv.z < askH * 0.36;
+    if (this.senseLedge(dt, input, move, wasGrounded, atControls)) {
+      this.hangFrame(dt, input, cam, world);
+      return;
+    }
+    // Wave 4, item B: onto a wall after the move: W held into a climbable face it is pressed against (`WallClimb.sense`).
+    if (this.senseWall(dt, input, move, wasGrounded, atControls)) {
+      this.wallFrame(dt, input, cam, world);
+      return;
+    }
     // Wave 3: the drawn body's lag over a step (`DrawnHeight`): what the controller added to a move that began on the
     // ground beyond the plane under the body's own rise; and the stairs the ground along the travel makes, read here
     // after the move for the next frame's legs (`StairSense`). Neither touches the body.
@@ -3020,6 +3142,11 @@ export class Player {
     // And the rest of its frame while anything of it is still easing: the stagger, the jolt, the camera's pull, the
     // lean and the arm. It moves no body, and for a player who never fires it never runs.
     if (this.grapple.lively) this.grapple.look(this.gview, dt);
+    // Wave 4: the haul ended under a lip it could not go over (too steep a top, or no room): a braced hang there.
+    if (this.grapple.haulStuck && this.ledgeFromHaul()) {
+      this.hangFrame(dt, input, cam, world);
+      return;
+    }
     // Fallen out of the world: back onto the ground. Not inside a building, whose rooms (a bunker's
     // lowest landing, a dungeon under a mountain) go far below the terrain's floor. And under the ground right below
     // too (`fellOut`): a sinkhole sculpted deeper than the world's floor is ground, not out of the world.
@@ -3202,6 +3329,8 @@ export class Player {
 
     this.placeVisual();
     this.placeFeet(dt);
+    // Wave 4, item B: the hands bracing on a wall, in a passage or on a body near (after the feet: the last to turn a joint).
+    this.placeBrace(dt, world, false);
   }
 
   /**
@@ -3230,6 +3359,409 @@ export class Player {
     this.group.updateMatrixWorld(true);
     const room = this.aboard;
     this.feet.step(rig, this.physics.world, room ? this.roomInverse.copy(roomFrame(room)).invert() : null);
+  }
+
+  // ---- wave 4: the ledges ------------------------------------------------------------------------------------------------
+
+  /** Said on the message line by the ledges (a refusal in words): the game sets it. */
+  onLedgeWords: ((words: string) => void) | null = null;
+
+  /** Hanging from a ledge or carried through one of its one-offs, or on a wall: the fight's keys are muted by the game, the grapple refused. */
+  get climbHolds(): boolean {
+    return this.ledge.holding || this.wall.holding;
+  }
+
+  /** The move's own collision groups (as the frame's `filter`). */
+  private moveFilter(): number {
+    return this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+  }
+
+  /** The figure's size against the human male's (its hips' rest height over his 1.002 m, times its own scale), found once a rig. */
+  private ledgeScale(): number {
+    return this.rig ? figureScaleOf(this.rig) : 1;
+  }
+
+  /** The ledges' frame record: the keys and the body (fields, so nothing crosses a call). */
+  private fillLedgeIn(dt: number, input: Input | null, move: THREE.Vector3 | null, wasGrounded: boolean): LedgeIn {
+    const li = this.ledgeIn;
+    li.dt = dt;
+    li.heading = this.heading;
+    li.grounded = this.grounded;
+    li.wasGrounded = wasGrounded;
+    li.jumped = this.vel.y > 0.5;
+    li.crouchHeld = !!input && input.held('crouch');
+    li.crouchPressed = !!input && input.pressedAction('crouch');
+    li.jumpPressed = !!input && input.pressedAction('jump');
+    li.forwardHeld = !!input && input.held('forward');
+    li.forwardPressed = !!input && input.pressedAction('forward');
+    li.backHeld = !!input && input.held('back');
+    li.leftHeld = !!input && input.held('left');
+    li.rightHeld = !!input && input.held('right');
+    li.moveX = move ? move.x : 0;
+    li.moveZ = move ? move.z : 0;
+    li.scale = this.ledgeScale();
+    li.filter = this.moveFilter();
+    li.pool = this.staminaPool;
+    li.blocked = this.wallBlocked;
+    li.airWallMove = false;
+    return li;
+  }
+
+  /**
+   * After the move (`LedgeHang.sense`): a lip grabbed, or one lowered into off a lip crouched. Not swimming, on the rope or in
+   * its flight, thrown, dead, at a ship's controls, in a wall move or a Force jump's rise. True where the ledge took the body.
+   */
+  private senseLedge(dt: number, input: Input, move: THREE.Vector3, wasGrounded: boolean, atControls: boolean): boolean {
+    if (CLIMB_TUNE.ledges !== 'on') return false;
+    const li = this.fillLedgeIn(dt, input, move, wasGrounded);
+    li.busy = this.swimming || this.grapple.out || this.grapple.released || this.flung || this.hp <= 0 || atControls || this.prone || this.jka.inSpecialJump || (this.jka.isForceJumping && this.vel.y > 0) || (this.aboard !== null && isSurfaceRoom(this.aboard));
+    if (!this.ledge.sense(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina)) return false;
+    this.takenByLedge();
+    return true;
+  }
+
+  /** The grapple's haul ended under a lip it could not go over: a braced hang there (`LedgeHang.fromHaul`), the rope let go. */
+  private ledgeFromHaul(): boolean {
+    if (CLIMB_TUNE.ledges !== 'on') return false;
+    const piv = this.grapple.pivot(ledgePivot);
+    const li = this.fillLedgeIn(0, null, null, false);
+    if (!this.ledge.fromHaul(this.physics.world as unknown as LedgeWorld, this, li, piv.x - this.pos.x, piv.z - this.pos.z)) return false;
+    this.grapple.letGo('ledge');
+    this.takenByLedge();
+    return true;
+  }
+
+  /** A grab: the fall ends with no harm, the air's and the slope's memories are put down, the feet let go. */
+  private takenByLedge(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.anim.drop();
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    // (Wave 4, item B: the hands' bracing lets go; the hang has them.)
+    this.brace.reset();
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.heading = this.ledge.heading;
+  }
+
+  /** Off the ledge: a let-go's clocks (`LedgeHang.tick`): the drop's clip handed to the falling loop, the jump off's turn round. */
+  private ledgeClocks(dt: number): void {
+    if (this.ledge.tick(dt)) this.heading = this.ledge.turnNow;
+    if (this.ledge.cutNow) this.rig?.yieldOverride(CLIMB_TUNE.ease);
+    // Wave 4, item B: and the wall's (its drawn lean and offset eased out after a let-go, the jump off's turn round).
+    if (this.wall.tick(dt)) this.heading = this.wall.turnNow;
+  }
+
+  /**
+   * A frame of the hang (`LedgeHang.step`) in place of the movement: the speed classes put down with no regain (the hang
+   * drains the pool itself), what is in the hands kept as swimming keeps it (the blade put away, nothing aimed or blocked),
+   * the hang's clips, the figure placed, and its hands on the lip and its feet on the wall.
+   */
+  private hangFrame(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
+    void world;
+    this.loco.idle(0, this.staminaPool);
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.saber.holster();
+    this.blocking = false;
+    this.aiming = false;
+    cam.aim = false;
+    this.swimming = false;
+    this.submerged = false;
+    this.lockedHeading = null;
+    this.crouching = false;
+    const li = this.fillLedgeIn(dt, input, null, false);
+    this.ledge.step(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina);
+    // The capsule the ledge's step has the body in: standing, but crouched over the top on a climb's last leg.
+    this.setCrouchCollider(this.ledge.crouchedNow);
+    if (this.ledge.said) {
+      this.onLedgeWords?.(this.ledge.said);
+      this.ledge.said = '';
+    }
+    // The fall's memory held where the body is: a let-go falls from here, and nothing of the climb hurts.
+    this.jka.holdApex(this.pos.y);
+    if (this.ledge.holding) {
+      this.grounded = false;
+      this.heading = this.ledge.heading;
+    } else this.grounded = this.ledge.stood;
+    this.torsoTwist = 0;
+    this.groundSpeed = 0;
+    this.moveAmount += (0 - this.moveAmount) * Math.min(1, dt * 10);
+    // Wave 4, item B: a hang a wall climb handed over eases the climb's lean out (the hang never runs the clocks after it).
+    this.wall.tick(dt);
+    this.updateThrown(dt, input, cam);
+    this.updateOrbit(dt);
+    this.updateBlades();
+    this.animateHang(dt);
+    this.placeVisual();
+    this.placeHangLimbs();
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+  }
+
+  /** The kept fade a hang's loop comes in with (`climb.ease`). */
+  private readonly hangFade = { fade: 0.15 };
+
+  /** The hang's clips on the rig: a one-off begun, a held one let go into the loop, the loop itself. */
+  private animateHang(dt: number): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const L = this.ledge;
+    this.hangFade.fade = CLIMB_TUNE.ease;
+    if (L.startClip) rig.play(ledgeClipName(L.startClip), { from: L.startFrom, fadeIn: L.startFade, hold: L.holding });
+    else if (L.ended) rig.stopOverride(CLIMB_TUNE.ease);
+    if (L.rigState) {
+      rig.prefer(L.rigState as RigState, ledgeClipName(L.rigClip));
+      rig.setState(L.rigState as RigState, 0, null, this.hangFade);
+    } else rig.setState(L.stood ? 'crouch' : 'air', 0, null, this.hangFade);
+    rig.update(dt);
+    this.group.updateMatrixWorld(true);
+    rig.twistTorso(0, 0);
+  }
+
+  /** The rig's root put where the ledge draws the figure against the body (its offset, the world's frame, into the group's). */
+  private applyLedgeRoot(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const L = this.ledge;
+    const h = this.heading;
+    const c = Math.cos(h);
+    const s = Math.sin(h);
+    rig.root.position.x = L.offX * c - L.offZ * s;
+    rig.root.position.y += L.offY;
+    rig.root.position.z = L.offX * s + L.offZ * c;
+    // Turned with a sloping lip about its own front, on its hands (the fix round's: `climb.lipTilt`); upright otherwise.
+    if (L.tilt !== 0) L.applyTilt(rig.root);
+    else rig.root.quaternion.set(0, 0, 0, 1);
+    this.ledgeRooted = true;
+  }
+
+  /** The hands on the lip and the feet on the wall (`LimbPlace`, through the ledge's line): while the ledge places them. */
+  private placeHangLimbs(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const lp = this.limbs;
+    if (!this.ledge.holding && !lp.busy) return;
+    this.group.updateMatrixWorld(true);
+    const room = this.aboard;
+    const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
+    this.ledge.limbsFor(lp, rig, toPhys);
+    lp.filter = this.moveFilter();
+    lp.place(rig, this.physics.world, toPhys);
+  }
+
+  // ---- wave 4, item B: the wall climb and the hands' bracing -----------------------------------------------------------------
+
+  /**
+   * After the move (`WallClimb.sense`): onto a wall. Not swimming, on the rope or in its flight, thrown, dead, at a ship's
+   * controls, prone or kneeling, in a wall move or a Force jump's rise, nor on the gravity boots' surface. True where the
+   * climb took the body.
+   */
+  private senseWall(dt: number, input: Input, move: THREE.Vector3, wasGrounded: boolean, atControls: boolean): boolean {
+    if (CLIMB_TUNE.wall !== 'on') return false;
+    const li = this.fillLedgeIn(dt, input, move, wasGrounded);
+    li.busy = this.swimming || this.grapple.out || this.grapple.released || this.flung || this.hp <= 0 || atControls || this.prone || this.kneeling || this.jka.inSpecialJump || (this.jka.isForceJumping && this.vel.y > 0) || (this.aboard !== null && isSurfaceRoom(this.aboard));
+    li.airWallMove = !this.grounded && this.jka.airWallMoveOpen(this.pos, this.vel);
+    if (!this.wall.sense(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina)) return false;
+    this.takenByWall();
+    return true;
+  }
+
+  /** Onto a wall: a fall ends with no harm, the air's and the slope's memories put down, the feet and the hands let go. */
+  private takenByWall(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.anim.drop();
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.brace.reset();
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.heading = this.wall.heading;
+  }
+
+  /**
+   * A frame on the wall (`WallClimb.step`) in place of the movement: the speed classes put down with no regain (the climb
+   * drains the pool itself), what is in the hands kept as swimming keeps it, the climb's clips, the figure placed leant
+   * into the face, and its hands and feet on it. The frame the climb hands the body to a lip is the hang's.
+   */
+  private wallFrame(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
+    void world;
+    this.loco.idle(0, this.staminaPool);
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.saber.holster();
+    this.blocking = false;
+    this.aiming = false;
+    cam.aim = false;
+    this.swimming = false;
+    this.submerged = false;
+    this.lockedHeading = null;
+    this.crouching = false;
+    this.setCrouchCollider(false);
+    const li = this.fillLedgeIn(dt, input, null, false);
+    const W = this.wall;
+    W.step(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina, this.ledge);
+    if (W.said) {
+      this.onLedgeWords?.(W.said);
+      W.said = '';
+    }
+    // The fall's memory held where the body is: a let-go falls from here, and nothing of the climb hurts.
+    this.jka.holdApex(this.pos.y);
+    if (W.holding) {
+      this.grounded = false;
+      this.heading = W.heading;
+    } else if (this.ledge.holding) {
+      this.grounded = false;
+      this.heading = this.ledge.heading;
+    } else this.grounded = W.stood;
+    this.torsoTwist = 0;
+    this.groundSpeed = 0;
+    this.moveAmount += (0 - this.moveAmount) * Math.min(1, dt * 10);
+    this.updateThrown(dt, input, cam);
+    this.updateOrbit(dt);
+    this.updateBlades();
+    if (this.ledge.holding) {
+      this.animateHang(dt);
+      this.placeVisual();
+      this.placeHangLimbs();
+    } else {
+      this.animateWall(dt);
+      this.placeVisual();
+      this.placeWallLimbs();
+    }
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+  }
+
+  /** The climb's rate and fade handed to the rig (kept). */
+  private readonly wallRate = { rate: 0.5, fade: 0.15 };
+
+  /** The climb's clips on the rig: the jump off's one-off begun, the climb's loop at its rate (held still, the clip that played stops where it is). */
+  private animateWall(dt: number): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const W = this.wall;
+    if (W.startClip) rig.play(ledgeClipName(W.startClip), { from: W.startFrom, fadeIn: W.startFade, hold: false });
+    if (W.rigState) {
+      if (W.rigState === 'wallStill') rig.prefer('wallStill', wallClipName(W.rigClip));
+      this.wallRate.rate = W.rate;
+      this.wallRate.fade = CLIMB_TUNE.ease;
+      rig.setState(W.rigState as RigState, 0, null, this.wallRate);
+    } else rig.setState(W.stood ? 'idle' : 'air', 0, null, this.hangFade);
+    rig.update(dt);
+    this.group.updateMatrixWorld(true);
+    rig.twistTorso(0, 0);
+  }
+
+  /** The hands and the feet on the face (`LimbPlace`, through the climb's own face) while on the wall; let go of when off it. */
+  private placeWallLimbs(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const lp = this.limbs;
+    if (!this.wall.holding) {
+      if (lp.busy) lp.reset();
+      return;
+    }
+    this.group.updateMatrixWorld(true);
+    const room = this.aboard;
+    const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
+    lp.filter = this.moveFilter();
+    this.wall.limbsFor(lp, rig, this.physics.world as unknown as LedgeWorld, toPhys);
+    lp.place(rig, this.physics.world, toPhys);
+  }
+
+  /** The player's own key, kept (the crowd's `fights` asks with it: no closure a frame). */
+  private readonly isPlayerKey = (k: number): boolean => k === PLAYER_KEY;
+  private readonly crowdAt = new THREE.Vector3();
+
+  /**
+   * The bodies near enough to brace on (`Crowd`), refilled from the world's living a frame while asked: every other
+   * player, person and creature on this world but one fighting the player (one that would pick a fight on sight, or is
+   * fighting or holds a grudge against the player now). Nothing aboard a ship's rooms (their frame is the hull's).
+   */
+  private gatherCrowd(world: World | null): void {
+    const c = this.crowd;
+    c.count = 0;
+    if (!world || this.aboard || CLIMB_TUNE.brace.people !== 'on') return;
+    const list = world.targets();
+    const me = world.playerTarget;
+    const s = this.ledgeScale();
+    const reach = (CLIMB_TUNE.brace.reach + 0.6) * s + 1;
+    const at = this.crowdAt;
+    at.x = this.pos.x;
+    at.y = this.pos.y + CLIMB_TUNE.brace.height * s;
+    at.z = this.pos.z;
+    for (let k = 0; k < list.length; k++) {
+      const t = list[k];
+      if (t === me || t.dead || t.key === PLAYER_KEY) continue;
+      const dx = t.pos.x - at.x;
+      const dz = t.pos.z - at.z;
+      if (dx * dx + dz * dz > reach * reach) continue;
+      if (hostileSides(t, me) || (t as { fights?(ours: (key: number) => boolean): boolean }).fights?.(this.isPlayerKey)) continue;
+      c.add(at.x, at.z, t.pos.x, t.pos.z, t.pos.y, t.pos.y + 2 * t.halfHeight, t.radiusToward(at), reach);
+    }
+  }
+
+  /**
+   * Wave 4, item B: the hands bracing (`HandBrace`), after the figure is placed and its feet put down: on foot (a wall, a
+   * passage, the crowd), or drifting in space (`space`: a surface near, stepped along). Asks nothing at all under
+   * `brace.rule` 'before' (the wave 3 commit's arms) or while nothing is to be done.
+   */
+  private placeBrace(dt: number, world: World | null, space: boolean): void {
+    const B = this.brace;
+    if (CLIMB_TUNE.brace.rule !== 'on' && !B.busy) return;
+    const rig = this.rig;
+    if (!rig) return;
+    const bi = this.braceIn;
+    bi.dt = dt;
+    bi.x = this.pos.x;
+    bi.y = this.pos.y;
+    bi.z = this.pos.z;
+    bi.heading = this.heading;
+    bi.scale = this.ledgeScale();
+    bi.filter = this.moveFilter();
+    bi.vx = this.vel.x;
+    bi.vy = this.vel.y;
+    bi.vz = this.vel.z;
+    bi.moveX = space ? 0 : move.x;
+    bi.moveZ = space ? 0 : move.z;
+    // A hand holding something never braces; a gun held in both hands takes the left as well, and the rope the left.
+    const twoHanded = !!this.held.right && this.classId === 'bounty_hunter' && !this.fists && this.gunClass !== 'pistol';
+    bi.freeR = !this.held.right;
+    bi.freeL = !this.held.left && !twoHanded && !this.grapple.out;
+    bi.busy = this.climbHolds || this.saber.busy || this.blocking || this.aiming || this.fists || this.thrown.inFlight || rig.overriding || this.prone || this.kneeling || this.swimming || !!this.mounted || this.hp <= 0 || this.flung || this.drawnSink > 0 || this.grapple.attached || this.grapple.released;
+    bi.onFeet = !space && this.grounded;
+    bi.space = space;
+    bi.blocked = !space && this.wallBlocked;
+    if (space) {
+      evaUp.set(0, 1, 0).applyQuaternion(this.evaFrame);
+      evaFwd.set(0, 0, 1).applyQuaternion(this.evaFrame);
+      bi.ux = evaUp.x;
+      bi.uy = evaUp.y;
+      bi.uz = evaUp.z;
+      bi.fx = evaFwd.x;
+      bi.fy = evaFwd.y;
+      bi.fz = evaFwd.z;
+    }
+    const moving = bi.vx * bi.vx + bi.vz * bi.vz > CLIMB_TUNE.brace.moving * CLIMB_TUNE.brace.moving;
+    if (!space && moving && !bi.busy) this.gatherCrowd(world);
+    else this.crowd.count = 0;
+    B.step(this.physics.world, bi, this.crowd);
+    const lp = this.limbs;
+    if (!B.busy) {
+      if (lp.busy) lp.reset();
+      return;
+    }
+    this.group.updateMatrixWorld(true);
+    const room = this.aboard;
+    const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
+    B.apply(lp);
+    lp.filter = bi.filter;
+    lp.place(rig, this.physics.world, toPhys);
   }
 
   /**

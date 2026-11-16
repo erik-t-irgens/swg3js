@@ -29,6 +29,18 @@ export function oldTexts(files: readonly string[], commit = PRE_PASS): Map<strin
 }
 
 /**
+ * A dynamic import of a relative file (`await import('../../../src/core/input.ts')`, as the grapple harness takes its input)
+ * pointed where a static one is: at the old copy where the file is named, else at today's file.
+ */
+function dynamicToday(text: string, from: string, files: readonly string[], where: (f: string) => string): string {
+  return text.replace(/import\('(\.\.?\/[^']+)'\)/g, (_m, p: string) => {
+    const target = resolve(from, p).replace(/\\/g, '/');
+    const own = files.find((x) => resolve(REPO, x).replace(/\\/g, '/') === target || resolve(REPO, x).replace(/\\/g, '/') === `${target}.ts`);
+    return `import('${own ? pathToFileURL(where(own)).href : pathToFileURL(resolve(from, /\.[a-z]+$/.test(p) ? p : `${p}.ts`)).href}')`;
+  });
+}
+
+/**
  * The named files as they stood at `commit`, written side by side (under their own folders, so two files of one name
  * keep apart) and the entry's module imported. Every relative import of a named file to another named file goes to the old
  * copy; every other goes to today's file. The folder is taken away once the module is in.
@@ -47,7 +59,7 @@ export async function loadOld<T = Record<string, unknown>>(files: readonly strin
         const own = files.find((x) => resolve(REPO, x).replace(/\\/g, '/') === target || resolve(REPO, x).replace(/\\/g, '/') === `${target}.ts`);
         return `from '${own ? pathToFileURL(where(own)).href : pathToFileURL(resolve(from, /\.[a-z]+$/.test(p) ? p : `${p}.ts`)).href}'`;
       });
-      writeFileSync(where(f), text);
+      writeFileSync(where(f), dynamicToday(text, from, files, where));
     }
     return (await import(pathToFileURL(where(entry)).href)) as T;
   } finally {
@@ -70,7 +82,7 @@ export async function loadOldMany(files: readonly string[], entries: readonly st
         const own = files.find((x) => resolve(REPO, x).replace(/\\/g, '/') === target || resolve(REPO, x).replace(/\\/g, '/') === `${target}.ts`);
         return `from '${own ? pathToFileURL(where(own)).href : pathToFileURL(resolve(from, /\.[a-z]+$/.test(p) ? p : `${p}.ts`)).href}'`;
       });
-      writeFileSync(where(f), text);
+      writeFileSync(where(f), dynamicToday(text, from, files, where));
     }
     const out: Record<string, unknown>[] = [];
     for (const e of entries) out.push((await import(pathToFileURL(where(e)).href)) as Record<string, unknown>);

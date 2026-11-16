@@ -39,13 +39,35 @@ import { Group, RAPIER, groups } from '../core/physics.ts';
 import { FootIk, type FootWorld } from '../player/footIk.ts';
 import { StairSense, type StairWorld } from '../player/stairSense.ts';
 import { isStairPick } from '../anim/locoTable.ts';
+import { PeerHang, PeerHangIn, figureScaleOf, isHangState } from '../player/peerHang.ts';
+import { PeerWall } from '../player/peerWall.ts';
+import { isWallState, wallRateOf, wallClipOf } from '../player/wallClimb.ts';
+import { wallClipName } from '../anim/wallClips.ts';
+import { BraceIn, Crowd, HandBrace } from '../player/brace.ts';
+import { LimbPlace } from '../player/limbPlace.ts';
+import { CLIMB_TUNE } from '../anim/climbTune.ts';
 
 /** The groups the figures' feet and stairs cast in: every group (a figure's own room is not known here). */
 const PEER_FEET_FILTER = groups(Group.all, Group.all);
 /** The feet's ray, made once a figure (the engine's own `Ray`, cast straight down). */
 const makeFootRay = (): RAPIER.Ray => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
 /** The states another player's figure stands on its feet in (wave 3's feet and stairs): never the air, the water, a seat or lying. */
-const OFF_FEET: Set<string> = new Set(['air', 'seated', 'swim', 'float', 'prone', 'proneMove', 'gunProneIdle', 'gunProneMove', 'gunProneReadyIdle', 'gunProneReadyMove', 'gunProneAimIdle', 'gunProneAimMove']);
+const OFF_FEET: Set<string> = new Set(['air', 'seated', 'swim', 'float', 'prone', 'proneMove', 'gunProneIdle', 'gunProneMove', 'gunProneReadyIdle', 'gunProneReadyMove', 'gunProneAimIdle', 'gunProneAimMove', 'hangBraced', 'hangFree', 'shimmyBracedL', 'shimmyBracedR', 'shimmyFreeL', 'shimmyFreeR', 'climbUpBraced', 'climbUpFree', 'wallStill', 'wallUp', 'wallDown', 'wallLeft', 'wallRight']);
+/** Wave 4: a figure hanging from a ledge, made the first time one is seen hanging (its clip lined up, its hands on a lip found here). */
+const makeHangCapsule = (h: number, r: number): RAPIER.Shape => new RAPIER.Capsule(h, r);
+/** The hang's frame record, written for each figure in turn (kept, so the pass makes nothing). */
+const peerHangIn = new PeerHangIn();
+/** Wave 4, item B: the climb's rate and fade a figure's rig is handed on a wall, and the bracing's frame and crowd (kept). */
+const PEER_WALL = { rate: 0.5, fade: 0.15 };
+const peerBraceIn = new BraceIn();
+const peerCrowd = new Crowd();
+const makeBraceRay = (): RAPIER.Ray => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 });
+/** The one limbs' solve a figure has (its ledges', its wall's and its bracing's: a rig has one hook), made the first time it is asked. */
+function limbsOf(r: { limbs?: LimbPlace }): LimbPlace {
+  return r.limbs ?? (r.limbs = new LimbPlace(makeFootRay));
+}
+/** The fights that put a figure's hands to its weapon (its stances, a gun up or aimed): no bracing. */
+const PEER_FIGHTING: Set<string> = new Set(['stance', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun']);
 
 /**
  * One peer, as everything that hangs something on a peer sees them: their body in the physics, a
@@ -328,6 +350,12 @@ interface Remote {
    */
   feet: FootIk;
   stairs: StairSense;
+  /** Wave 4: hanging from a ledge, their clip lined up and their hands on a lip found here (src/player/peerHang.ts); made the first time they are seen hanging. */
+  hang?: PeerHang;
+  /** Wave 4, item B: on a wall, their figure leant into a face found here and its hands and feet on it (src/player/peerWall.ts); and their hands bracing by this side's own rule (src/player/brace.ts); with the one limbs' solve a figure has (a rig has one hook), all made the first time they are asked. */
+  wall?: PeerWall;
+  brace?: HandBrace;
+  limbs?: LimbPlace;
   /** The colour their blade is lit in; the game's own default until their own browser says. */
   saberColor: number;
   /** Their blade when it is out of their hand: where it is in the world and how far it has spun. */
@@ -360,7 +388,7 @@ const DEFAULT_PEER_SABER = 0x3aa0ff;
 /** The rate and the fade a figure's legs are handed with their state under the speed classes, and the frame as their legs need it: kept records, written before each use. */
 const PEER_LEGS = new LegOpts();
 const PEER_IN = new PeerIn();
-const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove', 'gunProneIdle', 'gunProneMove', 'gunProneReadyIdle', 'gunProneReadyMove', 'gunProneAimIdle', 'gunProneAimMove']);
+const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove', 'gunProneIdle', 'gunProneMove', 'gunProneReadyIdle', 'gunProneReadyMove', 'gunProneAimIdle', 'gunProneAimMove', 'hangBraced', 'hangFree', 'shimmyBracedL', 'shimmyBracedR', 'shimmyFreeL', 'shimmyFreeR', 'climbUpBraced', 'climbUpFree', 'wallStill', 'wallUp', 'wallDown', 'wallLeft', 'wallRight']);
 
 export class RemotePlayers {
   private readonly remotes = new Map<number, Remote>();
@@ -395,6 +423,9 @@ export class RemotePlayers {
    */
   feetWorld: (FootWorld & StairWorld) | null = null;
   readonly cameraAt = new THREE.Vector3();
+  /** Wave 4, item B: where this player's own feet stand in the world (the game writes it beside `cameraAt`), for another figure's hands to brace on; `playerKnown` false where there is none to (in the editor's flight, aboard, riding). */
+  readonly playerAt = new THREE.Vector3();
+  playerKnown = false;
 
   /** Called with a peer's rig once it is dressed, and again when their look changes: the motion blur prepares its shaders for it. */
   onDressed: ((root: THREE.Object3D) => void) | null = null;
@@ -1186,6 +1217,9 @@ export class RemotePlayers {
       const rig = r.rig;
       // Wave 3: the drop the feet put on the figure's root last frame comes off it before anything writes the root again.
       if (rig) r.feet.undrop(rig);
+      // Wave 4: and the hang's offset, the same way.
+      if (rig && r.hang) r.hang.undo(rig.root);
+      if (rig && r.wall) r.wall.undo(rig.root);
       if (rig && r.down) {
         // Down: the death clip holds on its last frame and nothing else is asked of the figure. The
         // head goes with it -- a body on the ground whose head goes on following its own camera is
@@ -1268,7 +1302,14 @@ export class RemotePlayers {
         // A pistol's own carry walk and run for a pistol's 'original' (the state's own list has the rifle's first), taken
         // off again once their gun is no pistol or the choice for a pistol is another (`PeerPistolCarry`).
         r.pistolCarry.step(rig, LOCO_TUNE, state, r.gunClass, relaxedGun);
-        if (legs && !rv) {
+        if (isWallState(state)) {
+          // Wave 4, item B: on a wall, the climb's clip at the rate its state's speed asks (so its planted hands stay put
+          // on the face), held still where it is; the clip they held still on is the one they last moved with.
+          if (state === 'wallStill' && r.wall) rig.prefer('wallStill', wallClipName(r.wall.wall.rigClip || wallClipOf(state)));
+          PEER_WALL.rate = wallRateOf(state, figureScaleOf(rig));
+          PEER_WALL.fade = CLIMB_TUNE.ease;
+          rig.setState(state, 0, null, PEER_WALL);
+        } else if (legs && !rv) {
           let upper: string | null = null;
           const carry = peerCarryState(state);
           if (carry) {
@@ -1340,6 +1381,109 @@ export class RemotePlayers {
       fi.heading = yawOf(r.group.quaternion);
       fi.filter = PEER_FEET_FILTER;
       r.feet.step(rig, fw, null);
+    }
+    // Wave 4: hanging from a ledge, their clip lined up against their body as their own game lines it up, and within
+    // `ik.peerReach` of the camera their hands on a lip found here in front of where they hang and their feet on the wall
+    // while braced (`PeerHang`). Nothing is made for a figure never seen hanging.
+    for (const r of this.remotes.values()) {
+      const rig = r.rig;
+      if (!rig || !r.group.visible) continue;
+      const hanging = !r.down && !r.vehicle && isHangState(r.state);
+      if (!hanging && !r.hang) continue;
+      if (!r.hang) r.hang = new PeerHang(makeFootRay, makeHangCapsule, limbsOf(r));
+      r.group.updateMatrixWorld(true);
+      const near = r.group.position.distanceToSquared(this.cameraAt) <= reach * reach;
+      const hq = peerHangIn;
+      hq.state = hanging ? r.state : '';
+      hq.x = r.group.position.x;
+      hq.y = r.group.position.y;
+      hq.z = r.group.position.z;
+      hq.heading = yawOf(r.group.quaternion);
+      hq.scale = figureScaleOf(rig);
+      hq.filter = PEER_FEET_FILTER;
+      hq.near = near;
+      hq.dt = dt;
+      r.hang.step(rig, fw as unknown as never, hq);
+    }
+    // Wave 4, item B: on a wall, their figure leant into a face found here in front of it and lined up on it as their own
+    // game lines it up, and within `ik.peerReach` its hands and feet on the face (`PeerWall`); off the wall and within
+    // reach, their hands bracing by this side's own rule over their figure (`HandBrace`). Nothing is made for a figure
+    // never seen on a wall, and nothing is felt for while they stand still or the rule is 'before'.
+    for (const r of this.remotes.values()) {
+      const rig = r.rig;
+      if (!rig || !r.group.visible) continue;
+      const climbing = !r.down && !r.vehicle && isWallState(r.state);
+      const near = r.group.position.distanceToSquared(this.cameraAt) <= reach * reach;
+      if (climbing || r.wall) {
+        if (!r.wall) r.wall = new PeerWall(makeFootRay, makeHangCapsule, limbsOf(r));
+        r.group.updateMatrixWorld(true);
+        const hq = peerHangIn;
+        hq.state = climbing ? r.state : '';
+        hq.x = r.group.position.x;
+        hq.y = r.group.position.y;
+        hq.z = r.group.position.z;
+        hq.heading = yawOf(r.group.quaternion);
+        hq.scale = figureScaleOf(rig);
+        hq.filter = PEER_FEET_FILTER;
+        hq.near = near;
+        hq.dt = dt;
+        r.wall.step(rig, fw as unknown as never, hq);
+      }
+      // The bracing: on its feet, within reach, its hands not on a lip or a face.
+      const busyHands = r.down || !!r.vehicle || climbing || isHangState(r.state) || OFF_FEET.has(r.state) || PEER_FIGHTING.has(r.state) || rig.overriding || r.state === 'kneel';
+      if (!r.brace && (busyHands || !near || CLIMB_TUNE.brace.rule !== 'on' || !fw)) continue;
+      if (!r.brace) r.brace = new HandBrace(makeBraceRay);
+      const B = r.brace;
+      const bi = peerBraceIn;
+      bi.dt = dt;
+      bi.x = r.group.position.x;
+      bi.y = r.group.position.y;
+      bi.z = r.group.position.z;
+      bi.heading = yawOf(r.group.quaternion);
+      bi.scale = figureScaleOf(rig);
+      bi.filter = PEER_FEET_FILTER;
+      bi.vx = r.vel.x;
+      bi.vy = r.vel.y;
+      bi.vz = r.vel.z;
+      bi.moveX = 0;
+      bi.moveZ = 0;
+      // What their hands hold (a gun of two hands takes both), and their rope the left.
+      let freeL = r.rope.kind < 0;
+      let freeR = true;
+      for (let k = 0; k < r.heldModels.length; k++) {
+        const m = r.heldModels[k];
+        if (m.hand === 'right') freeR = false;
+        else freeL = false;
+        const c = m.def.class;
+        if (c === 'carbine' || c === 'rifle' || c === 'heavy') freeL = false;
+      }
+      bi.freeL = freeL;
+      bi.freeR = freeR;
+      bi.busy = busyHands || !near;
+      bi.onFeet = true;
+      bi.space = false;
+      // The crowd round them: this player and the other figures (the world's own people are this player's to brace on).
+      const crowd = peerCrowd;
+      crowd.count = 0;
+      if (!bi.busy && CLIMB_TUNE.brace.people === 'on') {
+        const cr = (CLIMB_TUNE.brace.reach + 0.6) * bi.scale + 1;
+        for (const o of this.remotes.values()) {
+          if (o === r || !o.group.visible || o.down) continue;
+          crowd.add(bi.x, bi.z, o.group.position.x, o.group.position.z, o.group.position.y, o.group.position.y + 1.8, 0.35, cr);
+        }
+        const pp = this.playerAt;
+        if (this.playerKnown) crowd.add(bi.x, bi.z, pp.x, pp.z, pp.y, pp.y + 1.8, 0.35, cr);
+      }
+      B.step(fw as unknown as never, bi, crowd);
+      const lp = limbsOf(r);
+      if (!B.busy) {
+        if (lp.busy && !climbing && !isHangState(r.state)) lp.reset();
+        continue;
+      }
+      r.group.updateMatrixWorld(true);
+      B.apply(lp);
+      lp.filter = PEER_FEET_FILTER;
+      lp.place(rig, fw as unknown as never, null);
     }
     // Last of all: every figure and every picture is now where it is drawn this frame, which is
     // where a body of theirs belongs. A watcher told any sooner would follow a pose that the
