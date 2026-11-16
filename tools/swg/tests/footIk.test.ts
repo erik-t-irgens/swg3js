@@ -1111,4 +1111,50 @@ async function easeApart(Cls: typeof FootIk): Promise<{ w: number; d: number; n:
   const planted = await mutant('      if (stairClip) {\n        const v =', '      if (false) {\n        const v =');
   ok((await stairWalk(planted, tuneNow(), 0.25, WALK, 0.5, 60)).planted < (await stairWalk(FootIk, tuneNow(), 0.25, WALK, 0.5, 60)).planted / 2, 'mutation: a stair clip\'s planted foot read by its height (which climbs a tread a step in the clip): most planted frames are lost');
 }
+// ---- the steady hips in the air and through a landing (`ik.hipsLand`, the owner's 2026-11-16) ------------------------------
+// The legs made to ask a drop for a second (the drawn root a quarter metre over the capsule's feet), then the body in the air
+// or through a landing clip and standing again: under 'off' nothing of that drop is kept; under 'before' (14eab9f's) it is
+// held over `hipHold`, which was the dip on landing.
+{
+  type HipsLand = 'off' | 'before';
+  const run = async (rule: HipsLand, air: boolean): Promise<{ asked: number; during: number; after: number; away: boolean }> => {
+    const p = await Physics.create();
+    flat(p);
+    p.stepOnce();
+    const f = figure();
+    const feet = new FootIk({ ...tuneNow(), hips: 'steady', hipsLand: rule }, makeRay);
+    const dt = 1 / 60;
+    for (let i = 0; i < 60; i++) frame(f, feet, p.world, { x: 0, y: 0.25, z: 0, heading: 0, py: 0 }, dt, false, null);
+    const asked = feet.drop;
+    let away = false;
+    feet.in.landing = !air;
+    for (let i = 0; i < 30; i++) {
+      frame(f, feet, p.world, { x: 0, y: 0, z: 0, heading: 0 }, dt, false, null, !air);
+      away ||= feet.away;
+    }
+    const during = feet.drop;
+    feet.in.landing = false;
+    for (let i = 0; i < 30; i++) frame(f, feet, p.world, { x: 0, y: 0, z: 0, heading: 0 }, dt, false, null);
+    const after = feet.drop;
+    p.world.free();
+    return { asked, during, after, away };
+  };
+  // What the steady hips drop standing on flat ground with nothing asked before (the figure's own rest pose's ask).
+  const p = await Physics.create();
+  flat(p);
+  p.stepOnce();
+  const f = figure();
+  const still = new FootIk({ ...tuneNow(), hips: 'steady', hipsLand: 'off' }, makeRay);
+  for (let i = 0; i < 120; i++) frame(f, still, p.world, { x: 0, y: 0, z: 0, heading: 0 }, 1 / 60, false, null);
+  const rest = still.drop;
+  p.world.free();
+  for (const air of [false, true]) {
+    const what = air ? 'half a second in the air' : 'a landing clip of half a second';
+    const off = await run('off', air);
+    const before = await run('before', air);
+    ok(off.asked > rest + 0.05 && before.asked > rest + 0.05, `the legs ask the hips down first (${off.asked.toFixed(3)} and ${before.asked.toFixed(3)} m; standing with nothing asked ${rest.toFixed(4)} m)`);
+    ok(off.away && off.during < 0.005 && Math.abs(off.after - rest) < 0.005, `'off': through ${what} the hips let go of the drop they held (${off.during.toFixed(4)} m by its end) and come back to standing's own (${off.after.toFixed(4)} m half a second on, standing ${rest.toFixed(4)})`);
+    ok(!before.away && before.during > rest + 0.05 && before.after > rest + 0.02, `'before' (14eab9f's): through ${what} the drop asked before is held (${before.during.toFixed(3)} m by its end, ${before.after.toFixed(3)} m half a second on)`);
+  }
+}
 console.log(`footIk: ${checks} checks passed`);

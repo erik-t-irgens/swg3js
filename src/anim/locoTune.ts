@@ -245,6 +245,14 @@ export interface LocoTune {
      * them: up a 30 degree hill at 30 fps the right foot's toe-off stood 1.8 cm off its ground every cycle.)
      */
     hipHold: number;
+    /**
+     * The steady hips in the air and through a landing (the owner's 2026-11-16: "disable the hips while falling and while
+     * playing the landing animations"). 'off' (the start): off the ground (but for the stairs' own hop) and while an
+     * imported landing clip plays, the hips let go of every drop they held and of the ground they stood over, going out
+     * over `ease` as the feet do, and come back afresh once the feet are down and the landing has given way. 'before':
+     * 14eab9f's, where a drop held before the jump or asked by the landing's first frames was kept over `hipHold`.
+     */
+    hipsLand: 'off' | 'before';
     /** A downhill leg stretches to this share of its whole length before the hips drop: 0.98 (the clip's own leg at heel strike is near straight). */
     stretch: number;
     /** And points its toe to make up at most this share of its foot's length: 0.5 (the heel up, the ball and toe on the ground), only once the clip's foot is on its ball. */
@@ -521,7 +529,7 @@ export const LOCO_TUNE: LocoTune = {
     stamina: { slow: 10, normal: 10, fast: 4 },
   },
   made: { crouched: 1.49, crouchBack: 1.39, gameWalk: 1.44, injuredWalk: 0.564, stairsUp: 0.365, stairsRunUp: 0.749, stairsDown: 0.485, stairsRunDown: 1.119 },
-  ik: { rule: 'placed', eye: 'steady', pitchMost: 35, rollMost: 20, pelvisMost: 0.4, ease: 0.08, plantLow: 0.04, plantHigh: 0.15, stairBack: 0.1, stairAhead: 0.3, toeMost: 30, edgePull: 0.25, peerReach: 40, hips: 'steady', hipEase: 0.25, hipRelease: 0.6, hipHold: 1.5, stretch: 0.98, toeReach: 0.5, soleLow: 0.005, soleHigh: 0.025 },
+  ik: { rule: 'placed', eye: 'steady', pitchMost: 35, rollMost: 20, pelvisMost: 0.4, ease: 0.08, plantLow: 0.04, plantHigh: 0.15, stairBack: 0.1, stairAhead: 0.3, toeMost: 30, edgePull: 0.25, peerReach: 40, hips: 'steady', hipEase: 0.25, hipRelease: 0.6, hipHold: 1.5, hipsLand: 'off', stretch: 0.98, toeReach: 0.5, soleLow: 0.005, soleHigh: 0.025 },
   stairs: { rule: 'stairs', ways: 'forward', camera: 'smooth', look: 1.6, step: 0.1, riserMin: 0.08, riserMax: 0.5, riserRun: 0.12, level: 0.03, treadMin: 0.18, count: 2, leave: 0.5, pace: 0.25, ease: 0.12, lagMost: 0.5, cycle: 'trimmed', mirror: 'legs', stepRule: 'stairs', perStep: 'auto', nMost: 2, upAt: 1.4, resize: 0.15, land: 0.5, rateLow: 0.7, rateHigh: 1.4, steer: 0.25, clear: 0.04, pin: 'sole' },
   speed: {
     forward: { walk: 1.66, jog: 4, tired: 3.5, run: 6, sprint: 7 },
@@ -677,6 +685,7 @@ export const LOCO_CHOICES: Readonly<Record<string, readonly string[]>> = {
   'stairs.ways': ['forward', 'forwardDiag'],
   'stairs.camera': ['smooth', 'capsule'],
   'ik.hips': ['steady', 'before'],
+  'ik.hipsLand': ['off', 'before'],
   'stairs.cycle': ['trimmed', 'before'],
   'stairs.mirror': ['legs', 'whole', 'off'],
   'stairs.stepRule': ['stairs', 'before'],

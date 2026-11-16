@@ -65,6 +65,8 @@ export class FootIn {
   dt = 0.5;
   /** The feet are placed this frame: on its feet on the ground (the caller's rule). */
   on = false;
+  /** An imported landing clip is playing (`ik.hipsLand` 'off' lets the steady hips go while it does). */
+  landing = false;
   /** The legs play a stair clip (planted by speed). */
   stairClip = false;
   /** The capsule's feet, in the physics frame. */
@@ -474,6 +476,8 @@ export class FootIk {
   held = 0.5;
   legDrop = 0.5;
   base = 0.5;
+  /** The hips let go this frame (`ik.hipsLand` 'off': off the ground or through a landing clip). */
+  away = false;
   private lineWas = 0.5;
   private lineSlope = 0.5;
   private lineX = 0.5;
@@ -519,6 +523,7 @@ export class FootIk {
     this.held = 0;
     this.legDrop = 0;
     this.base = 0;
+    this.away = false;
     this.hipW = 0;
     this.clock = 0;
     this.clearOut = 0;
@@ -693,6 +698,16 @@ export class FootIk {
     const dt = this.in.dt;
     this.clock += dt;
     const now = this.clock;
+    // In the air or through a landing (`ik.hipsLand` 'off', `step`): nothing held, the drop going out over the feet's own ease.
+    if (this.away) {
+      this.askLen = 0;
+      this.held = 0;
+      const ea = tune.ease;
+      this.legDrop -= this.legDrop * (ea > 0 ? 1 - Math.exp(-dt / ea) : 1);
+      if (this.legDrop < 1e-6) this.legDrop = 0;
+      this.drop = this.base + this.legDrop;
+      return;
+    }
     // Out of the ring's front what is older than the hold, off its back what the new ask outdoes, then the new ask in.
     while (this.askLen > 0 && this.askT[this.askHead] < now - tune.hipHold) {
       this.askHead = this.askHead + 1 === HOLD_RING ? 0 : this.askHead + 1;
@@ -950,7 +965,15 @@ export class FootIk {
       // weighed by the feet the root took the hop's share and rose 16 cm and fell back in a frame. A jump leaves the line
       // in a few frames and lets go as ever.
       const onStairs = f.stairKnown && f.stairWay !== 0;
-      const hipWant = want === 1 || (tune.rule === 'placed' && onStairs && groundClip - this.lineE < f.stairRiser + HOP_SLACK) ? 1 : 0;
+      let hipWant = want === 1 || (tune.rule === 'placed' && onStairs && groundClip - this.lineE < f.stairRiser + HOP_SLACK) ? 1 : 0;
+      // `ik.hipsLand` 'off': off the ground (the stairs' own hop above aside) and through an imported landing clip the hips
+      // let go, their line kept on the ground under the body so they come back afresh (`holdHips` lets the held drop go too).
+      const away = tune.hipsLand === 'off' && (f.landing || hipWant === 0);
+      if (away) {
+        hipWant = 0;
+        if (this.line === this.line) this.lineE = this.line;
+      }
+      this.away = away;
       // And let go over `hipEase` on measured stairs (the capsule's hop at a high frame rate can carry the drawn root past a
       // riser for a frame or two), the feet's own ease elsewhere (a jump off level ground lets go as ever).
       const hk = onStairs && hipWant < this.hipW && tune.hipEase > 0 ? 1 - Math.exp(-f.dt / tune.hipEase) : k;
@@ -1723,7 +1746,7 @@ export class FootIk {
       dropM: n(this.drop),
       // The stairs wave: the hips held steady (the ground they stand over, eased; the root's drop onto it; the legs' ask, held and eased).
       hips: this.tune.hips,
-      hipsLine: this.tune.hips === 'steady' ? { groundM: n(this.line), easedM: n(this.lineE), rootToLineM: n(this.base), legsAskM: n(this.legAsk), heldM: n(this.held), legsDropM: n(this.legDrop) } : null,
+      hipsLine: this.tune.hips === 'steady' ? { groundM: n(this.line), easedM: n(this.lineE), rootToLineM: n(this.base), legsAskM: n(this.legAsk), heldM: n(this.held), legsDropM: n(this.legDrop), away: this.away } : null,
       stride: n(this.in.stride),
       legs: this.none ? 'this skeleton has no legs to place' : (this.legs ?? []).map((l, i) => ({ side: i === 0 ? 'left' : 'right', planted: n(l.planted), clip: n(l.clip), grounded: l.grounded, liftM: n(l.app[0]), easingM: n(Math.abs(l.off[0]) + this.scaleNow * (l.footLen * (Math.abs(l.off[3]) + Math.abs(l.off[4])) + l.toeLen * Math.abs(l.off[5])), 4), pullM: n(Math.sqrt(l.app[1] * l.app[1] + l.app[2] * l.app[2])), pitchDeg: n(l.app[3] / DEG, 1), rollDeg: n(l.app[4] / DEG, 1), toeDeg: n(l.app[5] / DEG, 1), pointDeg: n(l.point / DEG, 1), strideM: n(Math.sqrt(l.sx * l.sx + l.sz * l.sz)) })),
       casts: this.casts,

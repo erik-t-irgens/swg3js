@@ -3354,6 +3354,7 @@ export class Player {
     const fi = this.feet.in;
     const special = (this.saber.busy && this.saber.current.kind === 'special') || this.jka.rolling || this.jka.inSpecialJump || (rig.overridingJka && !rig.overridingUpperOnly && !this.saber.busy);
     fi.on = this.grounded && !this.swimming && !this.prone && !this.grapple.attached && !this.grapple.released && !this.flung && this.hp > 0 && this.drawnSink <= 0 && !(this.aboard && isSurfaceRoom(this.aboard)) && !this.slope.sliding && !special;
+    fi.landing = this.anim.landing !== null;
     fi.dt = dt;
     fi.stairClip = this.loco.legsOn && isStairPick(this.loco.pick);
     fi.px = this.pos.x;
