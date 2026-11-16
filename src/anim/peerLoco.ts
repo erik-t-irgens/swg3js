@@ -18,6 +18,7 @@ import type { LocoTune } from './locoTune.ts';
 import { cycleKindOf, isStairPick, stairCyclePick } from './locoTable.ts';
 import type { StairCycleFacts } from './stairCycle.ts';
 import { StairStep, StairStepIn } from './stairStep.ts';
+import { EndAsk, StairEnd } from './stairsRule.ts';
 
 const DEG = 180 / Math.PI;
 
@@ -57,6 +58,12 @@ export class PeerIn {
   /** The foot their feet had planted furthest along the travel last frame (0 left, 1 right, -1 none) and its ankle's place along it from their middle, metres: what a stair clip taken on keeps where it stands. */
   stairLead = -1;
   stairLeadAt = 0.5;
+  /** Stairs II: this side's hold of their stairs is ending (no riser of the way ahead within `treadMax`): their stair clip is walked off at its next footfall. */
+  stairEnding = false;
+  /** Stairs II: the risers of the way this side holds about their middle, metres along the travel: the nearest ahead, the tread from it to the next, the nearest behind; Infinity where none is known (`LocoIn.stairAhead`). */
+  stairAhead = Number.POSITIVE_INFINITY;
+  stairGap = Number.POSITIVE_INFINITY;
+  stairBehind = Number.POSITIVE_INFINITY;
 }
 
 /** The tune's class speeds, read by name once a call and by a pick's own place from there (one array for every figure: a call fills it before it reads it). */
@@ -77,6 +84,9 @@ export class PeerLoco {
   readonly step = new StairStep();
   stepFacts: StairCycleFacts | null = null;
   snap = 0.5;
+  /** Stairs II: their stair clip given way at its first footfall once this side's hold of their stairs is ending (as `BodyLoco`'s). */
+  readonly stairEnd = new StairEnd();
+  private readonly endAsk = new EndAsk();
   private readonly stepIn = new StairStepIn();
 
   constructor() {
@@ -137,8 +147,11 @@ export class PeerLoco {
     }
     if (!found || !rig.has(found.clip)) return this.drop();
     // Wave 3, stairs: their figure on stairs this side's rule finds under it, going forward, takes the stair clip of its
-    // pace (their state carries no stairs: derived here, as their class is).
-    if (f.stairs !== 0 && tune.stairs.rule === 'stairs' && found.posture === STAND && stairWay(found.dir, tune.stairs.ways)) {
+    // pace (their state carries no stairs: derived here, as their class is). Stairs II: once the hold is ending, only until
+    // its next footfall.
+    this.stairEnd.foot(f.stairLead);
+    const stairsNow = this.stairEnd.plays(f.stairs, f.stairEnding) ? f.stairs : 0;
+    if (stairsNow !== 0 && tune.stairs.rule === 'stairs' && found.posture === STAND && stairWay(found.dir, tune.stairs.ways)) {
       const up = stairPick(found, f.stairs);
       if (rig.has(up.clip)) found = up;
       // The stairs wave: the same cycle this side plays its own on (`stairs.cycle`, `stairs.mirror`).
@@ -204,9 +217,30 @@ export class PeerLoco {
         this.stepFacts = facts;
         this.snap = this.step.snap;
         this.rate = this.step.rate;
+        // Stairs II: a footfall inside this frame's advance that lands its foot past the last riser (or any, once this side's hold
+        // is ending) hands their legs to the regular clip next frame (as this side's own, `BodyLoco`).
+        const q = this.endAsk;
+        q.time = s.time;
+        q.adv = this.rate * f.dt;
+        q.rate = this.rate;
+        q.speed = f.speed;
+        q.stride = this.step.stride;
+        q.scale = s.scale;
+        q.ahead = f.stairAhead;
+        q.gap = f.stairGap;
+        q.behind = f.stairBehind;
+        q.ending = f.stairEnding;
+        q.treadMax = tune.stairs.treadMax;
+        q.takeOn = tune.stairs.takeOn;
+        q.lead = f.stairLead;
+        q.judge = tune.stairs.hold === 'ahead';
+        q.fwd = facts.fwd;
+        q.len = facts.len;
+        q.steps = facts.steps;
+        this.stairEnd.note(q, facts.at, facts.off);
         return;
       }
-    } else if (f.stairs === 0) this.step.reset();
+    } else if (f.stairs === 0 || this.stairEnd.landed) this.step.reset();
     let natural = 0;
     if (pick.made >= 0) {
       const m = tune.made;

@@ -47,7 +47,7 @@ const player = lines(read('src/player/player.ts'));
   ok(snap > legs && player[snap + 1] === 'rig.update(dt);', `the step's snap is put on the clip just before the rig's update (line ${snap + 1})`);
   const stride = at(player, 'fi.stride = stepping ? this.loco.step.stride : 1;');
   ok(
-    stride > 0 && player[stride + 1] === 'fi.clear = stepping ? LOCO_TUNE.stairs.clear : 0;' && player[stride + 2] === "fi.pin = stepping && LOCO_TUNE.stairs.pin === 'sole';" && player[stride + 3] === 'stairFeetOf(this.stairSense, fi);' && player[stride + 4] === 'fi.pivotL = stepping ? this.loco.step.pivotL : 0;' && player[stride + 5] === 'fi.pivotR = stepping ? this.loco.step.pivotR : 0;' && at(player, 'this.feet.step(rig, this.physics.world, room ? this.roomInverse.copy(roomFrame(room)).invert() : null);', stride) > stride,
+    stride > 0 && player[stride + 1] === 'fi.clear = stepping ? LOCO_TUNE.stairs.clear : 0;' && player[stride + 2] === "fi.pin = (stepping || this.loco.stairEnd.pins) && LOCO_TUNE.stairs.pin === 'sole';" && player[stride + 3] === 'stairFeetOf(this.stairSense, fi);' && player[stride + 4] === 'fi.pivotL = stepping ? this.loco.step.pivotL : 0;' && player[stride + 5] === 'fi.pivotR = stepping ? this.loco.step.pivotR : 0;' && at(player, 'this.feet.step(rig, this.physics.world, room ? this.roomInverse.copy(roomFrame(room)).invert() : null);', stride) > stride,
     `the stride, the clearance, the hold, the stairs and each foot's stride pivot are handed to the feet just before they step (line ${stride + 1})`,
   );
 }
@@ -59,7 +59,7 @@ const player = lines(read('src/player/player.ts'));
   const state = at(remote, 'rig.setState(state, r.speed, upper, PEER_LEGS);', frame);
   ok(state > frame && remote.slice(state + 1, state + 4).includes('if (r.loco.snap === r.loco.snap) rig.setTime(legs.clip, r.loco.snap);'), `their step's snap is put on the clip after the state (line ${state + 1})`);
   const stride = at(remote, 'fi.stride = r.loco.stepFacts !== null ? r.loco.step.stride : 1;');
-  ok(stride > 0 && remote[stride + 1] === 'fi.clear = r.loco.stepFacts !== null ? LOCO_TUNE.stairs.clear : 0;' && remote[stride + 2] === "fi.pin = r.loco.stepFacts !== null && LOCO_TUNE.stairs.pin === 'sole';" && remote[stride + 3] === 'stairFeetOf(r.stairs, fi);' && remote[stride + 4] === 'fi.pivotL = r.loco.stepFacts !== null ? r.loco.step.pivotL : 0;' && remote[stride + 5] === 'fi.pivotR = r.loco.stepFacts !== null ? r.loco.step.pivotR : 0;', `their feet are handed the stride, the clearance, the hold and the stairs (line ${stride + 1})`);
+  ok(stride > 0 && remote[stride + 1] === 'fi.clear = r.loco.stepFacts !== null ? LOCO_TUNE.stairs.clear : 0;' && remote[stride + 2] === "fi.pin = (r.loco.stepFacts !== null || r.loco.stairEnd.pins) && LOCO_TUNE.stairs.pin === 'sole';" && remote[stride + 3] === 'stairFeetOf(r.stairs, fi);' && remote[stride + 4] === 'fi.pivotL = r.loco.stepFacts !== null ? r.loco.step.pivotL : 0;' && remote[stride + 5] === 'fi.pivotR = r.loco.stepFacts !== null ? r.loco.step.pivotR : 0;', `their feet are handed the stride, the clearance, the hold and the stairs (line ${stride + 1})`);
 }
 {
   const rig = lines(read('src/player/rig.ts'));
@@ -71,7 +71,7 @@ const player = lines(read('src/player/player.ts'));
   const walker = lines(read('tools/swg/tests/stairsWaveBody.ts'));
   const stride = at(walker, 'fi.stride = stepping ? loco.step.stride : 1;');
   ok(
-    stride > 0 && walker[stride + 1] === 'fi.clear = stepping ? LOCO_TUNE.stairs.clear : 0;' && walker[stride + 2] === "fi.pin = stepping && LOCO_TUNE.stairs.pin === 'sole';" && walker[stride + 3] === 'stairFeetOf(sense, fi);' && walker[stride + 4] === 'fi.pivotL = stepping ? loco.step.pivotL : 0;' && walker[stride + 5] === 'fi.pivotR = stepping ? loco.step.pivotR : 0;' && at(walker, "sa.measure = LOCO_TUNE.ik.hips === 'steady' || LOCO_TUNE.stairs.stepRule === 'stairs';") > 0,
+    stride > 0 && walker[stride + 1] === 'fi.clear = stepping ? LOCO_TUNE.stairs.clear : 0;' && walker[stride + 2] === "fi.pin = (stepping || loco.stairEnd.pins) && LOCO_TUNE.stairs.pin === 'sole';" && walker[stride + 3] === 'stairFeetOf(sense, fi);' && walker[stride + 4] === 'fi.pivotL = stepping ? loco.step.pivotL : 0;' && walker[stride + 5] === 'fi.pivotR = stepping ? loco.step.pivotR : 0;' && at(walker, "sa.measure = LOCO_TUNE.ik.hips === 'steady' || LOCO_TUNE.stairs.stepRule === 'stairs';") > 0,
     `the tests' walker hands the feet and the sampler the player's own lines`,
   );
 }

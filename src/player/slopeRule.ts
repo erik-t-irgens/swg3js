@@ -244,6 +244,16 @@ export class SlopeRule {
   planeNx = 0.5;
   planeNy = 0.5;
   planeNz = 0.5;
+  /**
+   * Stairs II: whether this frame's verdict found anything under the body a face could stand it on (the floor ray's
+   * walkable face, a face of the fan's with a normal pointing up at all, or an edge's support with such a face beside it),
+   * or kept a stand that did. False where the controller's word was left with nothing under the lower sphere: a body
+   * pressed against a sheer wall in the air, which the controller calls grounded (its own test counts a face whose normal
+   * is level). Where the rule does not reach the body (not grounded, not ruled, or under 'before') it is the controller's
+   * word. Read by the step-up's mend (`StepUp.sync`), which puts the collider where the body is only on real ground.
+   */
+  supported = false;
+  private heldSupported = false;
   private controller: SlopeController | null = null;
   private climbSet = MADE_CLIMB;
   private ray: RAPIER.Ray | null = null;
@@ -367,6 +377,7 @@ export class SlopeRule {
       this.rayNy = Number.NaN;
       this.slid = 0;
       this.held = HELD_NONE;
+      this.supported = grounded;
       return grounded;
     }
     const at = this.at;
@@ -394,6 +405,7 @@ export class SlopeRule {
             this.planeNx = this.hnx;
             this.planeNy = this.hny;
             this.planeNz = this.hnz;
+            this.supported = true;
             return true;
           }
         }
@@ -404,6 +416,7 @@ export class SlopeRule {
         if (dx <= STILL_HOLD && dx >= -STILL_HOLD && dy <= STILL_HOLD && dy >= -STILL_HOLD && dz <= STILL_HOLD && dz >= -STILL_HOLD) {
           this.slid = 0;
           this.kept++;
+          this.supported = this.heldSupported;
           return true;
         }
       }
@@ -450,6 +463,7 @@ export class SlopeRule {
       this.hnx = n.x;
       this.hny = n.y;
       this.hnz = n.z;
+      this.supported = true;
       this.armCrease(world, body, pass, cosLimit);
       return true;
     }
@@ -477,8 +491,11 @@ export class SlopeRule {
     // and the faces that meet there decide (a lip stands, a peak does not). Otherwise the faces the fan met decide.
     this.lowNow = low;
     this.cosNow = cosLimit;
+    // Stairs II: a face of the fan's is a support (the edge probe says for itself where there is none).
+    this.supported = this.count > 0;
     if (this.count === 0 ? this.edgeProbe(world, body, pass) : slopeGround(floorNy, this.nx, this.ny, this.nz, this.count, cosLimit)) {
       this.slid = 0;
+      this.heldSupported = this.supported;
       // Kept while the body does not move.
       this.held = HELD_STILL;
       this.heldWorld = world;
@@ -627,6 +644,8 @@ export class SlopeRule {
     ray.dir.x = 0;
     ray.dir.y = -1;
     ray.dir.z = 0;
+    // Stairs II: a face either side of the edge that points up at all is a support (a sheer side is none).
+    this.supported = walkable || steep;
     if (edgeGround(walkable, steep)) {
       this.count = 0;
       return true;

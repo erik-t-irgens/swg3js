@@ -188,8 +188,10 @@ async function measure(xs: Float64Array, ys: Float64Array, zs: Float64Array, vx:
   let best = { bytes: Number.POSITIVE_INFINITY, casts: 0, frames: st.n * passes, clean: false, stepped: false };
   for (let tries = 0; tries < 4; tries++) {
     st.i = 0;
-    run(st.n);
+    // (Asked halfway along the path, on the stairs: Stairs II hands the walk back at the last step, short of the path's end.)
+    run(st.n >> 1);
     stepped = stepped || st.loco.stepFacts !== null;
+    run(st.n - (st.n >> 1));
     globalThis.gc!({ type: 'minor' } as never);
     await turn();
     await turn();

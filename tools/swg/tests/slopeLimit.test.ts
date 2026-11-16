@@ -730,6 +730,9 @@ async function loadHarness(texts: Map<string, string>): Promise<Harness> {
   CLIMB_TUNE.ledges = 'before';
   // (And the wall climb's, item B: these scenes press into faces the climb would take.)
   CLIMB_TUNE.wall = 'before';
+  // (And Stairs II's step-up mend, a switch of its own held to its own day one (playerStepUp.test.ts): the stairs scene's autostep
+  // is the very thing it mends.)
+  LOCO_TUNE.step.rule = 'before';
   for (const s of scenes) {
     const a = await s.run(harness, 60);
     now.push(a);
@@ -741,6 +744,7 @@ async function loadHarness(texts: Map<string, string>): Promise<Harness> {
   restore();
   CLIMB_TUNE.ledges = 'on';
   CLIMB_TUNE.wall = 'on';
+  LOCO_TUNE.step.rule = 'mended';
   const digest = createHash('sha1').update(now.map((t) => t.join(',')).join('\n')).digest('hex').slice(0, 16);
   if (oldH) note(`the 'before' traces' digest is ${digest} (BEFORE_TRACE, which a checkout with no history is held to)`);
   else note(`git cannot hand over ${BEFORE_2B}'s harness here: the 'before' traces are held to the digest recorded from it`);

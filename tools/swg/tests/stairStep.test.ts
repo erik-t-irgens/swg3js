@@ -158,13 +158,23 @@ const inOf = (o: Partial<StairStepIn>): StairStepIn => Object.assign(new StairSt
 // ---- the walker over real flights -------------------------------------------------------------------------------------------------
 const { clips, cycles } = await W.clipsAndCycles();
 interface Run { n: number; planted: number; off: number; worst: number; over: number; falls: number; crossed: number; stances: number; slides: number; slide: number; speed: number; asked: number; rate: number; bad: number; knownOff: boolean; strideAfter: number; gaps: number[] }
-async function walkFlight(tread: number, riser: number, way: number, gait: 'walk' | 'run', fps: number, opt: { half?: number; landing?: number; pin?: 'sole' | 'off'; before?: boolean; whole?: boolean } = {}): Promise<Run> {
+async function walkFlight(tread: number, riser: number, way: number, gait: 'walk' | 'run', fps: number, opt: { half?: number; landing?: number; pin?: 'sole' | 'off'; before?: boolean; whole?: boolean; twoBefore?: boolean; far?: boolean } = {}): Promise<Run> {
   const count = 12;
   const p = await H.makePhysics();
   const prof = W.flight(p, { tread, riser, count, x0: 2, way, half: opt.half, landing: opt.landing });
   p.stepOnce();
   const LT = (await import('../../../src/anim/locoTune.ts')).LOCO_TUNE;
   const was0 = [LT.stairs.pin, LT.ik.hips, LT.stairs.cycle, LT.stairs.stepRule] as const;
+  // Stairs II's switches and dials, at 33d3e67's with `twoBefore`.
+  const two0 = [LT.step.rule, LT.stairs.hold, LT.stairs.riserMax, LT.stairs.treadMax, LT.stairs.look, LT.stairs.mirror] as const;
+  if (opt.twoBefore) {
+    LT.step.rule = 'before';
+    LT.stairs.hold = 'before';
+    LT.stairs.riserMax = 0.5;
+    LT.stairs.treadMax = 4;
+    LT.stairs.look = 1.6;
+    LT.stairs.mirror = 'legs';
+  }
   LT.stairs.pin = opt.pin ?? 'sole';
   if (opt.before) {
     LT.stairs.pin = 'off';
@@ -181,7 +191,8 @@ async function walkFlight(tread: number, riser: number, way: number, gait: 'walk
   // The middle of the flight, past its first tread and short of its last; or (whole) the whole run, the floor before it and
   // the floor after it as well, its ends' first and last steps among them.
   const lo = opt.whole ? 0.8 : 2 + tread;
-  const hi = opt.whole ? end + 1.2 : end - tread;
+  // (`far`: on to 3 m past the flight's end, where 33d3e67's hold, 1.3 m past its last riser, hands the walk back.)
+  const hi = opt.whole ? end + (opt.far ? 3 : 1.2) : end - tread;
   const r: Run = { n: 0, planted: 0, off: 0, worst: 0, over: 0, falls: 0, crossed: 0, stances: 0, slides: 0, slide: 0, speed: 0, asked: 0, rate: 0, bad: 0, knownOff: false, strideAfter: 0, gaps: [] };
   const was = [0, 0];
   const st: (number[] | null)[] = [null, null];
@@ -210,7 +221,7 @@ async function walkFlight(tread: number, riser: number, way: number, gait: 'walk
   for (let i = 0; i < 25 * fps; i++) {
     const row = w.frame(dt);
     for (const l of row.legs) for (const v of [...l.heel, ...l.ball]) if (!Number.isFinite(v)) r.bad++;
-    if (row.x > end + 1.5) {
+    if (row.x > Math.max(end + 1.5, hi + 0.3)) {
       rows++;
       if (rows > 0.5 * fps) break;
       continue;
@@ -274,6 +285,7 @@ async function walkFlight(tread: number, riser: number, way: number, gait: 'walk
   r.knownOff = !w.sense.known;
   r.strideAfter = w.loco.step.stride;
   [LT.stairs.pin, LT.ik.hips, LT.stairs.cycle, LT.stairs.stepRule] = was0 as unknown as [typeof LT.stairs.pin, typeof LT.ik.hips, typeof LT.stairs.cycle, typeof LT.stairs.stepRule];
+  [LT.step.rule, LT.stairs.hold, LT.stairs.riserMax, LT.stairs.treadMax, LT.stairs.look, LT.stairs.mirror] = two0 as unknown as [typeof LT.step.rule, typeof LT.stairs.hold, number, number, number, typeof LT.stairs.mirror];
   return r;
 }
 const say = (r: Run) => `n ${r.n}, ${r.speed.toFixed(2)} m/s (the step asks ${r.asked.toFixed(2)}), rate ${r.rate.toFixed(2)}; ${r.planted} planted frames, ${r.off} off their tread by over 1 cm (worst ${(r.worst * 1000).toFixed(0)} mm), ${r.over} over a nosing; ${r.falls} footfalls over ${r.crossed.toFixed(1)} treads; ${r.stances} stances, ${r.slides} sliding over 2 cm (worst ${(r.slide * 1000).toFixed(0)} mm)`;
@@ -311,7 +323,12 @@ for (const fps of [30, 144]) {
 }
 {
   const r = await walkFlight(0.28, 0.17, 1, 'walk', 60, { half: 6, landing: 3 });
-  ok(r.bad === 0 && r.over === 0 && r.slides === 0 && Math.abs(r.falls - r.crossed / r.n) <= 2.5, `a flight with a landing three treads long halfway, walking up: no foot over a nosing or sliding, a footfall a tread (${say(r)})`);
+  // Stairs II: a landing three treads long (0.84 m) is longer than `treadMax` (0.79): the stair clip is handed to the walk at
+  // the footfall onto it and taken on again `takeOn` before the next riser, so one stance of the walk stands on the landing,
+  // the walk's first after a hand-over, which slides a few centimetres at every flight's end (see the whole flights below).
+  ok(r.bad === 0 && r.over === 0 && r.slides <= 1 && r.slide < 0.045 && Math.abs(r.falls - r.crossed / r.n) <= 2.5, `a flight with a landing three treads long halfway, walking up: no foot over a nosing, a footfall a tread, and no foot sliding but the walk's one stance on the landing, under 4.5 cm (${say(r)})`);
+  const whole = await walkFlight(0.28, 0.17, 1, 'walk', 60, { half: 6, landing: 3, twoBefore: true });
+  ok(whole.slides === 0 && whole.over === 0, `and with Stairs II's switches at 33d3e67's (the landing a tread of the flight) none slides at all (${say(whole)})`);
   note(`the first foot onto the flight after the landing stands over its tread for most of a second (${r.off} of ${r.planted} planted frames off by over 1 cm, worst ${(r.worst * 1000).toFixed(0)} mm): the stair clip's step reaches a riser up from the landing and the leg cannot press it down; the steering and the stride take the landing's tread for the flight's (a fault left)`);
   ok(r.knownOff && r.strideAfter === 1, `and past the flight's end the stairs are let go and the stride is whole again`);
 }
@@ -330,7 +347,14 @@ for (const fps of [60, 144]) {
   for (const way of [1, -1]) {
     const r = await walkFlight(0.28, 0.17, way, 'walk', fps, { whole: true });
     const tag = `0.28/0.17 walking onto the flight and off it ${way > 0 ? 'up' : 'down'} at ${fps} frames a second`;
-    ok(r.bad === 0 && r.over === 0 && r.off <= 0.01 * r.planted && Math.abs(r.worst) < 0.02 && r.slide <= 0.03, `${tag}: every planted foot on its tread or the floor, none over a nosing and none sliding more than 3 cm (${say(r)})`);
+    // Stairs II: the walk is handed back at the footfall past the last riser, inside this stretch, and its first stance
+    // slides a few centimetres; 33d3e67's hand-over, 1.3 m past the last riser (just beyond the stretch), slid more.
+    // (Its toe-off lifts the heel 3 cm a frame or two before the stance is let go.)
+    ok(r.bad === 0 && r.over === 0 && r.off <= 0.01 * r.planted && Math.abs(r.worst) < 0.035 && r.slide <= 0.045, `${tag}: every planted foot on its tread or the floor, none over a nosing and none sliding more than 4.5 cm (${say(r)})`);
+    const far = await walkFlight(0.28, 0.17, way, 'walk', fps, { whole: true, far: true });
+    const then = await walkFlight(0.28, 0.17, way, 'walk', fps, { whole: true, far: true, twoBefore: true });
+    ok(far.slide < then.slide, `${tag}, on to 3 m past the flight: the walk handed back at the last step slides ${(far.slide * 1000).toFixed(0)} mm at most, where with Stairs II's switches at 33d3e67's the walk handed back 1.3 m on slides ${(then.slide * 1000).toFixed(0)} mm`);
+    if (far.off > 0) note(`${tag}: the walk's first toe-off after the hand-over at the last step stands its heel up to ${(far.worst * 1000).toFixed(0)} mm over the floor for a frame or two before the stance is let go (${far.off} frames; with Stairs II's switches at 33d3e67's ${(then.worst * 1000).toFixed(0)} mm): a fault left`);
   }
 }
 // Running, the flight's middle: every footfall n treads on from the last (the review's: one in two landed three treads on

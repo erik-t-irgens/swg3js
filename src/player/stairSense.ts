@@ -13,7 +13,7 @@
 // an object on a frame but what the engine's own casts make (counted in `casts`).
 
 import { RAPIER } from '../core/physics.ts';
-import { StairsFound, StairsHold, stairsIn } from '../anim/stairsRule.ts';
+import { StairsAhead, StairsFound, StairsHold, stairsIn } from '../anim/stairsRule.ts';
 import type { LocoTune } from '../anim/locoTune.ts';
 
 /** The engine's query flags for what stands still: no sensor, nothing kinematic, nothing dynamic (as the grapple's rope). */
@@ -78,6 +78,14 @@ export class StairSense {
   floor = 0.5;
   /** The rays the risers' places cost (also in `casts`). */
   placeCasts = 0;
+  /**
+   * Stairs II (`stairs.hold` 'ahead'): the way is held but no riser of it stands ahead within `treadMax` (the stride under
+   * way is the last one on these stairs), and how far ahead the nearest riser of each way stood (Infinity none). Declared as
+   * fractions.
+   */
+  ending = false;
+  /** The risers about the body the hold read last (`StairsAhead`: metres to the nearest of each way ahead, its tread, and behind). */
+  readonly ahead = new StairsAhead();
   readonly at = new StairAt();
   readonly found = new StairsFound();
   private readonly hold = new StairsHold();
@@ -101,8 +109,21 @@ export class StairSense {
   private readonly placedJ = new Int32Array(PLACED);
   private readonly placedS = new Float64Array(PLACED);
   private placedNext = 0;
+  /**
+   * Stairs II (`stairs.hold` 'ahead'): each riser's face placed along the line where it stands within one gap of the
+   * lattice, by one level ray across that gap at the riser's middle height from its low side, kept by the lattice index of
+   * the sample before it while the line stands (`edgeIdx`, `edgePos`: its place along the line in samples, NaN where the ray
+   * met nothing), and the window's own (`edges`, by the window's gap, NaN for none), handed to `stairsIn`. The rays are
+   * `edgeCasts` (also in `casts`): one a riser a line, so its tread is measured to the millimetre and a flight of treads
+   * just over `treadMax` is never read a stair's on one tread and not on the next (the review of Stairs II).
+   */
+  private readonly edgeIdx = new Int32Array(CAP);
+  private readonly edgePos = new Float64Array(CAP);
+  private readonly edges = new Float64Array(CAP);
+  edgeCasts = 0;
 
   constructor() {
+    this.edgeIdx.fill(-0x7fffffff);
     this.ringIdx.fill(-0x7fffffff);
     this.placedJ.fill(-0x7fffffff);
     this.next = Number.NaN;
@@ -113,6 +134,7 @@ export class StairSense {
   reset(): void {
     this.hold.reset();
     this.way = 0;
+    this.ending = false;
     this.lined = false;
     this.world = null;
     this.known = false;
@@ -156,6 +178,7 @@ export class StairSense {
       this.ux = ux;
       this.uz = uz;
       this.ringIdx.fill(-0x7fffffff);
+      this.edgeIdx.fill(-0x7fffffff);
       if (at.measure) this.placedJ.fill(-0x7fffffff);
     }
     const half = Math.min(CAP / 2 - 1, Math.round(tune.look / 2 / step));
@@ -181,11 +204,75 @@ export class StairSense {
       this.ringY[slot] = y;
       w[m++] = y;
     }
-    // Read along the travel: the lattice's own way is the travel's (it is laid afresh past a tenth of a turn).
-    stairsIn(w, m, step, tune, this.found);
-    this.way = this.hold.step(this.found, moved, tune);
+    // Read along the travel: the lattice's own way is the travel's (it is laid afresh past a tenth of a turn). Stairs II:
+    // under the hold 'ahead', each riser placed exactly first (`placeEdges`).
+    if (tune.hold === 'ahead') {
+      this.placeEdges(world, ray, w, m, jb - half, step, tune);
+      stairsIn(w, m, step, tune, this.found, this.edges);
+    } else stairsIn(w, m, step, tune, this.found);
+    if (tune.hold === 'ahead') {
+      // Stairs II: the risers of each way about the body's middle (the window's middle sample, less the body's place off it
+      // along the line), and the hold that reads them.
+      const body = half + ((at.x - this.ox) * this.ux + (at.z - this.oz) * this.uz) / step - jb;
+      this.ahead.fill(this.found, body, step);
+      this.way = this.hold.stepAhead(this.found, moved, tune, this.ahead);
+    } else this.way = this.hold.step(this.found, moved, tune);
+    this.ending = this.hold.ending;
     if (at.measure) this.measureRun(world, ray, jb - half, step);
     return this.way;
+  }
+
+  /**
+   * Stairs II: each rise within one gap of the window (the gaps either side level, or no ground) and at least `riserMin`
+   * placed exactly into `edges` (its face along the line, in the window's samples), from the line's own kept places or by one
+   * level ray across its gap at its middle height from the low side; NaN where none is. `j0` the window's first lattice index.
+   */
+  private placeEdges(world: StairWorld, ray: RAPIER.Ray, w: Float64Array, m: number, j0: number, step: number, tune: LocoTune['stairs']): void {
+    const e = this.edges;
+    const level = tune.level;
+    const least = tune.riserMin;
+    const filter = this.at.filter;
+    for (let k = 0; k < m; k++) {
+      e[k] = Number.NaN;
+      if (k + 1 >= m) break;
+      const a = w[k];
+      const b = w[k + 1];
+      if (!(a === a) || !(b === b)) continue;
+      const d = b - a;
+      if (d < least && d > -least) continue;
+      if (k > 0) {
+        const p = w[k - 1];
+        if (p === p && (a - p > level || a - p < -level)) continue;
+      }
+      if (k + 2 < m) {
+        const q = w[k + 2];
+        if (q === q && (q - b > level || q - b < -level)) continue;
+      }
+      const j = j0 + k;
+      const slot = ((j % CAP) + CAP) % CAP;
+      let s = Number.NaN;
+      if (this.edgeIdx[slot] === j) s = this.edgePos[slot];
+      else {
+        const up = d > 0;
+        const from = up ? j : j + 1;
+        ray.origin.x = this.ox + this.ux * from * step;
+        ray.origin.y = (a + b) * 0.5;
+        ray.origin.z = this.oz + this.uz * from * step;
+        ray.dir.x = up ? this.ux : -this.ux;
+        ray.dir.y = 0;
+        ray.dir.z = up ? this.uz : -this.uz;
+        this.casts++;
+        this.edgeCasts++;
+        const hit = world.castRay(ray, step, true, STILL_FLAGS, filter);
+        if (hit) s = up ? j + hit.timeOfImpact / step : j + 1 - hit.timeOfImpact / step;
+        this.edgeIdx[slot] = j;
+        this.edgePos[slot] = s;
+      }
+      e[k] = s - j0;
+    }
+    ray.dir.x = 0;
+    ray.dir.y = -1;
+    ray.dir.z = 0;
   }
 
   /**

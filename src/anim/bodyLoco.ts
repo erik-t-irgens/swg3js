@@ -19,6 +19,7 @@ import type { LocoTune } from './locoTune.ts';
 import { cycleKindOf, stairCyclePick } from './locoTable.ts';
 import { STAIR_WINDOWS, type StairCycleFacts } from './stairCycle.ts';
 import { StairStep, StairStepIn } from './stairStep.ts';
+import { EndAsk, StairEnd } from './stairsRule.ts';
 
 /** The little of a rig this asks for: the game's `CharacterRig` is one. */
 export interface LocoRig {
@@ -92,6 +93,12 @@ export class LocoIn {
   /** The stairs wave: the foot the feet had planted furthest along the travel last frame (0 left, 1 right, -1 none) and its ankle's place along the travel from the body's middle, metres (the feet's `leadSide`, `leadAt`). */
   stairLead = 0;
   stairLeadAt = 0.5;
+  /** Stairs II: the hold is ending (`StairSense.ending`: no riser of the way ahead within `treadMax`): the stairs are walked off once a foot is planted beyond the last riser (`StairEnd`). */
+  stairEnding = false;
+  /** Stairs II: the risers of the way held about the body's middle, metres along the travel (`StairSense.ahead`): the nearest ahead, the tread from it to the next, the nearest behind; Infinity where none is known. */
+  stairAhead = 0.5;
+  stairGap = 0.5;
+  stairBehind = 0.5;
 }
 
 export function newLocoIn(): LocoIn {
@@ -105,6 +112,9 @@ export function newLocoIn(): LocoIn {
   f.stairLead = -1;
   f.stairLeadAt = 0;
   f.stairPrev = Number.NaN;
+  f.stairAhead = Number.POSITIVE_INFINITY;
+  f.stairGap = Number.POSITIVE_INFINITY;
+  f.stairBehind = Number.POSITIVE_INFINITY;
   return f;
 }
 
@@ -267,6 +277,9 @@ export class BodyLoco {
   readonly step = new StairStep();
   stepFacts: StairCycleFacts | null = null;
   snap = 0.5;
+  /** Stairs II (`stairs.hold` 'ahead'): the stair clip given way at its first footfall once the hold is ending. */
+  readonly stairEnd = new StairEnd();
+  private readonly endAsk = new EndAsk();
   private readonly stepIn = new StairStepIn();
   /** The rig `keys` was last handed (what a stair clip's facts are asked of). */
   private rigNow: LocoRig | null = null;
@@ -410,7 +423,11 @@ export class BodyLoco {
     }
     // Wave 3, stairs: standing and going forward (and the forward diagonals under 'forwardDiag', where no blaster keeps the
     // body square) on stairs the rule holds, the stair clip of the pace, at the class's speed by the stairs' own share.
-    if (f.stairs !== 0 && pick !== null && this.stairsOn && tune.stairs.rule === 'stairs' && stairWay(pick.dir, tune.stairs.ways) && (pick.dir === 0 || gun !== GUN_UP)) {
+    // Stairs II: once the hold is ending, only until the clip's first footfall past the last riser (`StairEnd`), and the hand-over's
+    // pin counted down by the feet.
+    this.stairEnd.foot(f.stairLead);
+    const stairsNow = this.stairEnd.plays(f.stairs, f.stairEnding) ? f.stairs : 0;
+    if (stairsNow !== 0 && pick !== null && this.stairsOn && tune.stairs.rule === 'stairs' && stairWay(pick.dir, tune.stairs.ways) && (pick.dir === 0 || gun !== GUN_UP)) {
       const plain = pick;
       pick = stairPick(pick, f.stairs);
       this.stairs = f.stairs;
@@ -556,6 +573,7 @@ export class BodyLoco {
     this.stairs = 0;
     this.stepFacts = null;
     this.step.reset();
+    this.stairEnd.reset();
     this.dir = -1;
     this.turn = 0;
     this.turnNow = 0;
@@ -590,6 +608,27 @@ export class BodyLoco {
       this.rate = this.step.rate;
       this.snap = this.step.snap;
       this.legsOn = true;
+      // Stairs II: a footfall inside this frame's advance of the clip that lands its foot past the last riser (or any, once the
+      // hold is ending) hands the legs to the regular clip next frame (`StairEnd`).
+      const q = this.endAsk;
+      q.time = f.legTime;
+      q.adv = this.rate * f.dt;
+      q.rate = this.rate;
+      q.speed = f.ground;
+      q.stride = this.step.stride;
+      q.scale = f.scale;
+      q.ahead = f.stairAhead;
+      q.gap = f.stairGap;
+      q.behind = f.stairBehind;
+      q.ending = f.stairEnding;
+      q.treadMax = this.tune.stairs.treadMax;
+      q.takeOn = this.tune.stairs.takeOn;
+      q.lead = f.stairLead;
+      q.judge = this.tune.stairs.hold === 'ahead';
+      q.fwd = facts.fwd;
+      q.len = facts.len;
+      q.steps = facts.steps;
+      this.stairEnd.note(q, facts.at, facts.off);
       return pick;
     }
     // The speed the clip's feet were made for: a game clip the tune has measured (`made`) at the figure's own scale, else the rig's.

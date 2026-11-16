@@ -424,6 +424,12 @@ function stairFrameOf(r: Remote, f: PeerIn): void {
   f.legTime = rig && pick && rig.readTime(pick.clip) ? rig.timeOut : Number.NaN;
   f.stairLead = r.feet.leadSide;
   f.stairLeadAt = r.feet.leadAt;
+  // Stairs II: this side's hold of their stairs ending (no riser of the way ahead within the longest tread): their stair clip
+  // walked off at its next footfall, as this side's own.
+  f.stairEnding = f.stairs !== 0 && s.ending;
+  f.stairAhead = f.stairs > 0 ? s.ahead.up : f.stairs < 0 ? s.ahead.down : Number.POSITIVE_INFINITY;
+  f.stairGap = f.stairs > 0 ? s.ahead.upGap : f.stairs < 0 ? s.ahead.downGap : Number.POSITIVE_INFINITY;
+  f.stairBehind = f.stairs > 0 ? s.ahead.upBehind : f.stairs < 0 ? s.ahead.downBehind : Number.POSITIVE_INFINITY;
 }
 const STATES: Set<string> = new Set(['idle', 'walk', 'run', 'air', 'seated', 'swim', 'float', 'crouch', 'crouchWalk', 'crouchWalkBack', 'stance', 'strafeLeft', 'strafeRight', 'runBack', 'walkBack', 'runSaber', 'walkSaber', 'gunIdle', 'gunWalk', 'gunRun', 'gunReadyIdle', 'gunReadyWalk', 'gunReadyRun', 'gunAimIdle', 'gunAimWalk', 'gunAimRun', 'kneel', 'prone', 'proneMove', 'gunProneIdle', 'gunProneMove', 'gunProneReadyIdle', 'gunProneReadyMove', 'gunProneAimIdle', 'gunProneAimMove', 'hangBraced', 'hangFree', 'shimmyBracedL', 'shimmyBracedR', 'shimmyFreeL', 'shimmyFreeR', 'climbUpBraced', 'climbUpFree', 'wallStill', 'wallUp', 'wallDown', 'wallLeft', 'wallRight']);
 
@@ -1426,7 +1432,7 @@ export class RemotePlayers {
       // The stairs wave: the stairs this side measured under them, and their step's stride and clearance.
       fi.stride = r.loco.stepFacts !== null ? r.loco.step.stride : 1;
       fi.clear = r.loco.stepFacts !== null ? LOCO_TUNE.stairs.clear : 0;
-      fi.pin = r.loco.stepFacts !== null && LOCO_TUNE.stairs.pin === 'sole';
+      fi.pin = (r.loco.stepFacts !== null || r.loco.stairEnd.pins) && LOCO_TUNE.stairs.pin === 'sole';
       stairFeetOf(r.stairs, fi);
       fi.pivotL = r.loco.stepFacts !== null ? r.loco.step.pivotL : 0;
       fi.pivotR = r.loco.stepFacts !== null ? r.loco.step.pivotR : 0;

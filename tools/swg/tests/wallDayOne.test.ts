@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import * as Today from './grappleBody.ts';
 import { CLIMB_TUNE, resetClimbTune } from '../../../src/anim/climbTune.ts';
+import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
 import { loadOldMany } from './oldModules.ts';
 import { wedge } from './wallScenes.ts';
 
@@ -111,11 +112,15 @@ async function trace(H: Harness): Promise<string[]> {
 {
   CLIMB_TUNE.ledges = 'before';
   CLIMB_TUNE.wall = 'before';
+  // Stairs II's step-up mend is a switch of its own (its day one in playerStepUp.test.ts): 'before' for both traces here, which hold
+  // the wall's switch alone (at 144 frames a second the mend puts the collider where the body is before every move).
+  LOCO_TUNE.step.rule = 'before';
   const before = await trace(Today);
   resetClimbTune();
   CLIMB_TUNE.ledges = 'before';
   const on = await trace(Today);
   resetClimbTune();
+  LOCO_TUNE.step.rule = 'mended';
   const digest = createHash('sha1').update(before.join('\n')).digest('hex').slice(0, 16);
   const first = on.findIndex((r, i) => r !== before[i]);
   ok(first >= 0 && on.length === before.length, `under climb.wall 'on' the same scenes change (from row ${first}: ${on[first]?.split(' ').slice(0, 2).join(' ')}), so the check is not blind`);

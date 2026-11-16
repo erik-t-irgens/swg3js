@@ -33,6 +33,7 @@ import { MX } from '../anim/animRules.ts';
 import { BodyAnim } from '../anim/bodyAnim.ts';
 import { BodyLoco, CARRY_FULL, FadeOpts, LegOpts, fightKeysDown, gunClassIndex, newLocoIn } from '../anim/bodyLoco.ts';
 import { SlopeRule } from './slopeRule.ts';
+import { StepUp } from './stepUp.ts';
 import { SwimSink } from '../anim/swimSink.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
 import { CROUCH, STAND, isStairPick } from '../anim/locoTable.ts';
@@ -480,6 +481,12 @@ export class Player {
    * harness steps the very same calls in the same places.
    */
   readonly slope = new SlopeRule();
+  /**
+   * Stairs II (A, `src/player/stepUp.ts`): the collider put where the body is before every move, and the step taken where the
+   * controller fell short at a riser up to the step-up's height, a riser taller a wall, at every frame rate. The grapple's
+   * harness steps the very same calls in the same places.
+   */
+  readonly stepUp = new StepUp((h, r) => new RAPIER.Capsule(h, r));
   /** The fade the falling loop comes in with as a slide begins: one kept record (`LOCO_TUNE.slope.fade`). */
   private readonly slideFade = { fade: 0.18 };
   /**
@@ -778,6 +785,9 @@ export class Player {
     this.collider = made.collider;
     this.controller = made.controller;
     this.hullController = makeHullController(physics.world);
+    // Stairs II (A): the capsule's radius and the controller's offset, for the step's casts.
+    this.stepUp.at.r = CAPSULE_RADIUS;
+    this.stepUp.at.off = 0.04;
     // The grappling hook, its rope and its dart: built now on their one material, hidden and marked as actors,
     // so every warm-up compiles them for the world's pass and the rooms' and the first fire builds nothing.
     this.grapple = new Grapple(RAPIER, physics);
@@ -3030,6 +3040,22 @@ export class Player {
     let moveX = this.vel.x * dt;
     let moveY = this.vel.y * dt;
     let moveZ = this.vel.z * dt;
+    // Stairs II (A): where the body stands before the move, for the collider's sync and the step (`StepUp`).
+    const su = this.stepUp.at;
+    su.x = this.pos.x;
+    su.y = this.pos.y;
+    su.z = this.pos.z;
+    su.localY = this.colliderOffsetY;
+    su.half = this.colliderOffsetY - CAPSULE_RADIUS;
+    // On real ground only: the slope rule's last verdict found something under the body (a body pressed against a sheer wall
+    // in the air is called grounded by the controller, and is no step's: its Jedi wall moves stay as they were).
+    su.ruled = this.grounded && !this.swimming && !this.grapple.attached && !this.grapple.released && !this.slope.sliding;
+    // Where the slope rule found nothing under the body to stand on, the step is the body's only with a floor within the
+    // step's height under it (`StepUp.reach`: a capsule wedged on a nosing over the tread below, yes; a body pressed against
+    // a sheer wall in the air, no).
+    su.supported = this.slope.supported;
+    su.filter = filter;
+    this.stepUp.reach(this.physics.world, this.body, this.collider, this.walkPast);
     if (this.grapple.attached || this.grapple.released) {
       // On the rope, or in the fast flight after letting go of it: the capsule's collider put where the body is (the
       // controller starts from the collider, which runs up to two frames behind at 144 fps), and the rope's correction
@@ -3040,6 +3066,10 @@ export class Player {
       moveY += gc.y;
       moveZ += gc.z;
     } else if (this.slope.settling) this.syncCrease();
+    // Stairs II (A): and on its feet on the ground, the collider put where the body is before every move (Rapier moves it only
+    // at its own 60 Hz step, and the controller works the move out from it: at 144 frames a second two moves in three began a
+    // frame or two back, and the body stalled at a riser), in the engine's own sums so a collider already there moves by no bit.
+    else this.stepUp.sync(this.collider);
     // Wave 3's crease: how fast a frame that began in the air falls into its move, and the frame's seconds.
     this.slope.at.fall = !this.grounded && this.vel.y < 0 ? -this.vel.y : 0;
     this.slope.at.dt = dt;
@@ -3049,6 +3079,14 @@ export class Player {
     // predicate is what keeps it true if that filter is ever widened.
     this.controller.computeColliderMovement(this.collider, { x: moveX, y: moveY, z: moveZ }, undefined, filter, this.walkPast);
     const mv = this.controller.computedMovement();
+    // Stairs II (A): where the controller met a riser in the way and fell short, the step (up to the step-up's 0.5 m, at
+    // every frame rate); a riser taller than that is a wall, its own lift onto one undone (`StepUp.after`).
+    su.ax = moveX;
+    su.ay = moveY;
+    su.az = moveZ;
+    su.filter = filter;
+    su.climb = LOCO_TUNE.slope.climb;
+    this.stepUp.after(this.physics.world, this.controller, mv, this.body, this.collider, this.walkPast);
     // On the rope and in the flight after it, what each surface refused is taken off the velocity, measured against
     // what was touched, and a wall struck hard enough is a slam (§3.11); a hull the rope rides and that moves is met in
     // its own frame there, its move written over the controller's (§3.18).
@@ -3062,6 +3100,7 @@ export class Player {
     this.pos.z += mv.z;
     const wasGrounded = this.grounded;
     this.grounded = this.controller.computedGrounded();
+    if (this.stepUp.stands) this.grounded = true;
     // The slope limit (wave 2b): the controller calls any face whose normal points up at all ground; one too steep to
     // stand on is not, and the body slides down it (the velocity clipped onto it, gravity's share along it kept, the
     // fall's memory held at what the speed down into the ground is worth). Not on the rope, nor in the water.
@@ -3364,9 +3403,10 @@ export class Player {
     fi.filter = this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
     // The stairs wave: the stairs measured under the body (the hips' line), and one step a stair's stride and clearance.
     const stepping = this.loco.legsOn && this.loco.stepFacts !== null;
+    // Stairs II: the pin held through each foot's first stance under the regular clip after the stairs gave way too (`StairEnd.pins`).
     fi.stride = stepping ? this.loco.step.stride : 1;
     fi.clear = stepping ? LOCO_TUNE.stairs.clear : 0;
-    fi.pin = stepping && LOCO_TUNE.stairs.pin === 'sole';
+    fi.pin = (stepping || this.loco.stairEnd.pins) && LOCO_TUNE.stairs.pin === 'sole';
     stairFeetOf(this.stairSense, fi);
     fi.pivotL = stepping ? this.loco.step.pivotL : 0;
     fi.pivotR = stepping ? this.loco.step.pivotR : 0;
@@ -3389,6 +3429,12 @@ export class Player {
     lo.stairPrev = s.prev;
     lo.stairLead = this.feet.leadSide;
     lo.stairLeadAt = this.feet.leadAt;
+    // Stairs II: the hold ending (no riser of the way ahead within the longest tread): walked off once a foot is planted on the
+    // floor beyond the last riser of the way, which stands this far behind the body's middle.
+    lo.stairEnding = s.ending;
+    lo.stairAhead = s.way > 0 ? s.ahead.up : s.way < 0 ? s.ahead.down : Number.POSITIVE_INFINITY;
+    lo.stairGap = s.way > 0 ? s.ahead.upGap : s.way < 0 ? s.ahead.downGap : Number.POSITIVE_INFINITY;
+    lo.stairBehind = s.way > 0 ? s.ahead.upBehind : s.way < 0 ? s.ahead.downBehind : Number.POSITIVE_INFINITY;
   }
 
   // ---- wave 4: the ledges ------------------------------------------------------------------------------------------------

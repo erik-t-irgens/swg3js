@@ -44,6 +44,14 @@ const before = (): LocoTune => {
   t.stairs.cycle = 'before';
   t.stairs.stepRule = 'before';
   t.stairs.pin = 'off';
+  // And Stairs II's switches and dials at 33d3e67's (which were 9c18665's): the hold, the longest riser and tread, the window,
+  // the mirror and the step-up. Their own day one is stairsTwo.test.ts.
+  t.stairs.hold = 'before';
+  t.stairs.riserMax = 0.5;
+  t.stairs.treadMax = 4;
+  t.stairs.look = 1.6;
+  t.stairs.mirror = 'legs';
+  t.step.rule = 'before';
   return t;
 };
 const n = (v: unknown) => (typeof v === 'number' ? (Object.is(v, -0) ? '-0' : String(v)) : String(v));

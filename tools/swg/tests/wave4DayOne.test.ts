@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as Today from './grappleBody.ts';
 import { CLIMB_TUNE, resetClimbTune } from '../../../src/anim/climbTune.ts';
+import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
 import { LEDGE_IDS } from '../../../src/anim/ledgeClips.ts';
 import { STAIR_IDS, moreClips } from '../../../src/anim/locoTable.ts';
 import { MixamoPack } from '../../../src/anim/mixamoPack.ts';
@@ -141,7 +142,11 @@ async function trace(H: Harness): Promise<string[]> {
   CLIMB_TUNE.ledges = 'before';
   // (And the wall climb's, item B: these scenes press into faces the climb would take.)
   CLIMB_TUNE.wall = 'before';
+  // (And Stairs II's step-up mend, held to its own day one in playerStepUp.test.ts: at 144 frames a second it puts the collider where
+  // the body is before every move, which these scenes would show.)
+  LOCO_TUNE.step.rule = 'before';
   const before = await trace(Today);
+  LOCO_TUNE.step.rule = 'mended';
   resetClimbTune();
   const on = await trace(Today);
   const digest = createHash('sha1').update(before.join('\n')).digest('hex').slice(0, 16);

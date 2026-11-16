@@ -140,10 +140,11 @@ for (const angle of [56, 58, 60, 62]) {
 // ---- the fix round: in the air a Jedi Academy wall move keeps its own trigger ---------------------------------------------
 {
   /** A body high beside a tall wall, falling with W held into it, Space pressed `press` seconds on: its special moves and climbs. */
-  const fall = async (force: number, mode: 'on' | 'before', press: number): Promise<{ specials: string[]; climbs: number; airClimb: boolean }> => {
+  const fall = async (force: number, mode: 'on' | 'before', press: number, step: 'mended' | 'before' = 'before', fps = 144): Promise<{ specials: string[]; climbs: number; airClimb: boolean }> => {
     restore();
     CLIMB_TUNE.wall = mode;
-    const fps = 144;
+    // Stairs II: the step-up's switch (its own day one is playerStepUp.test.ts). Under 'before' this scene is as it was written.
+    LOCO_TUNE.step.rule = step;
     const p = await scene((q) => box(q, [-10, 0, 2], [10, 40, 4]));
     const b = new TestBody(p);
     b.jka.forceLevel = force;
@@ -164,12 +165,24 @@ for (const angle of [56, 58, 60, 62]) {
     b.run(fps, 0.5);
     b.key('KeyW', false);
     restore();
+    LOCO_TUNE.step.rule = 'mended';
     return { specials: b.specials.slice(), climbs: b.wall.climbs, airClimb };
   };
   for (const press of [0.3, 0.4, 0.7]) {
     const was = await fall(3, 'before', press);
     const now = await fall(3, 'on', press);
     ok(was.specials.includes('BOTH_FORCEWALLREBOUND_FORWARD') && now.specials.join() === was.specials.join() && now.climbs === 0, `144 fps, Space ${press} s into a fall beside a wall with W held: a Force 3 body rebounds off it as it did before the climb (${now.specials.join() || 'none'}; climbs ${now.climbs})`);
+    // Stairs II: under the step-up's mend the same fall is what it was under the step-up as it was, at 144 and at 240 frames a
+    // second, the climb off and on (the review of Stairs II: the controller calls a body pressed against a sheer wall in the
+    // air grounded, and the mend synced its collider there, which at 144 and 240 took the rebound away; `StepUp.reach` leaves
+    // such a body to the controller as it was). At 30 and 60 the body clings and does not rebound, under either rule: the
+    // controller calls it grounded on every frame there, an older fault the mend does not touch.
+    const sameAs = (a: { specials: string[]; climbs: number }, b: { specials: string[]; climbs: number }) => a.specials.join() === b.specials.join() && a.climbs === b.climbs;
+    for (const fps of [144, 240]) {
+      const was2 = [await fall(3, 'before', press, 'before', fps), await fall(3, 'on', press, 'before', fps)];
+      const mended = [await fall(3, 'before', press, 'mended', fps), await fall(3, 'on', press, 'mended', fps)];
+      ok(sameAs(mended[0], was2[0]) && sameAs(mended[1], was2[1]) && mended[0].specials.includes('BOTH_FORCEWALLREBOUND_FORWARD'), `  and under the step-up's mend the same fall at ${fps} frames a second rebounds as it did under the step-up as it was, the climb off and on (${mended.map((m) => `${m.specials.join() || 'none'}, climbs ${m.climbs}`).join('; ')})`);
+    }
   }
   const plain = await fall(0, 'on', 0.4);
   ok(plain.airClimb, '  and a body with no Force for the wall moves takes the wall in the air as before (the climb is left only where the Force has its move)');

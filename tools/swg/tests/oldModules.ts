@@ -71,6 +71,15 @@ export async function loadOld<T = Record<string, unknown>>(files: readonly strin
 export async function loadOldMany(files: readonly string[], entries: readonly string[], commit = PRE_PASS): Promise<Record<string, unknown>[] | null> {
   const texts = oldTexts(files, commit);
   if (!texts) return null;
+  return loadTexts(texts, entries);
+}
+
+/**
+ * `loadOldMany` over texts handed in (a module of today's with a change made in it: a test's mutation): the named files
+ * written side by side, their imports among themselves pointed at the copies and every other at today's file.
+ */
+export async function loadTexts(texts: Map<string, string>, entries: readonly string[]): Promise<Record<string, unknown>[]> {
+  const files = [...texts.keys()];
   const dir = mkdtempSync(join(tmpdir(), 'mm2-old-'));
   const three = import.meta.resolve('three');
   const where = (f: string) => join(dir, f.replace(/\//g, '__'));

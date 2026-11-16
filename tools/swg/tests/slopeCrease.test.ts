@@ -316,6 +316,9 @@ for (const s of scenes) {
   const old = oldTexts(HARNESS_FILES, PRE_WAVE);
   const oldH = old ? await loadHarness(old) : null;
   const traces: number[][] = [];
+  // Stairs II's step-up mend is a switch of its own with its own day one (playerStepUp.test.ts): 'before' here, since the harness
+  // this compares with has none (it moves the 144 fps scenes, whose collider stood a frame or two behind the body).
+  LOCO_TUNE.step.rule = 'before';
   crease('before');
   for (const s of scenes) {
     const a = await s.run(now, 60);
@@ -343,6 +346,7 @@ for (const s of scenes) {
       ok(same(a, b2), `day one, ${s.name} at 144 fps under the mend: ${PRE_WAVE}'s own, frame for frame (${firstDiff(a, b2)})`);
     }
   }
+  LOCO_TUNE.step.rule = 'mended';
   const digest = createHash('sha1').update(traces.map((t) => t.join(',')).join('\n')).digest('hex').slice(0, 16);
   if (oldH) note(`the 'before' traces' digest is ${digest} (BEFORE_TRACE, which a checkout with no history is held to)`);
   else note(`git cannot hand over ${PRE_WAVE}'s harness here: the 'before' traces are held to the digest recorded from it`);
@@ -362,7 +366,12 @@ for (const s of scenes) {
   const noReach = await mutant('src/player/slopeRule.ts', "LOCO_TUNE.slopeCrease === 'floor' && hit!.timeOfImpact * floorNy - r > CREASE_TOUCH", 'false');
   ok((await hanging(noReach)).hung.length > 0, 'mutation: the floor counted wherever the ray meets it while a crease settles: drops hang again');
   const noSync = await mutant('tools/swg/tests/grappleBody.ts', '} else if (this.slope.settling) this.collider.setTranslation(', '} else if (false) this.collider.setTranslation(');
+  // Under the step-up as it was (Stairs II's 'before'): the crease's own sync is the only one (under its mend the collider is
+  // put where the body is before every move, the crease's frames included, so this mutant settles as the crease does).
+  LOCO_TUNE.step.rule = 'before';
   ok((await bouncing(noSync)).bad > 0, 'mutation: the capsule\'s collider not put where the body is while a crease settles: drops at 240 frames a second bounce over the floor');
+  LOCO_TUNE.step.rule = 'mended';
+  ok((await bouncing(noSync)).bad === 0, 'and under the step-up\'s mend (the collider put where the body is before every move) the same drops come to rest in the crease without it');
   const noArm = await mutant('src/player/slopeRule.ts', "if (LOCO_TUNE.slopeCrease !== 'floor' || !(this.at.fall > CREASE_FALL)) return;", 'return;');
   ok((await hanging(noArm)).hung.length > 0, 'mutation: no landing ever a crease: drops hang again');
 }

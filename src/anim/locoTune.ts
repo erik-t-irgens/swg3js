@@ -95,6 +95,15 @@ export interface LocoTune {
    * face 0.08 to 0.32 m up. Only under `slopeRule` 'limit'.
    */
   slopeCrease: 'floor' | 'before';
+  /**
+   * Stairs II (A): the step-up at every frame rate (src/player/stepUp.ts). 'mended' (the start): the capsule's collider put
+   * where the body is before every move (Rapier moves it only at its own 60 Hz step, and the controller works each move out
+   * from it, so at 144 frames a second two moves in three began where the body was a frame or two before), and where the
+   * controller's move falls short across the ground at a riser it cannot lift the capsule over (one taller than its lower
+   * sphere's middle, 0.39 m), the body stepped by the capsule's own casts up, across and down onto a walkable top within the
+   * step's 0.5 m. 'before' is 33d3e67's movement to the bit. A fault mended, not a number of feel.
+   */
+  step: { rule: 'mended' | 'before' };
   slope: {
     /**
      * The climb limit, degrees: a face steeper than this is never ground, and the controller will not walk up it.
@@ -279,13 +288,25 @@ export interface LocoTune {
     ways: 'forward' | 'forwardDiag';
     /** The chase camera: 'smooth' (the start) follows the drawn height, 'capsule' the capsule's (its pop at each step and all). */
     camera: 'smooth' | 'capsule';
-    /** The window the heights are sampled over along the travel, metres, half behind the body and half ahead: 1.6. */
+    /**
+     * The window the heights are sampled over along the travel, metres, half behind the body and half ahead: 2.4 (Stairs II;
+     * 1.6 before). A flight is taken on once its first riser and the one after it are both ahead in the window, so with
+     * treads of `treadMax` (0.79) the half ahead must hold two of them a step before the first riser: at 0.8 ahead the second
+     * riser of the owner's longest stair came into it only once the first was under the body, a tread late; at 1.2 ahead,
+     * 0.36 m before it, as the base flight's is. The casts a second are what they were (one new sample each `step` gone); the
+     * line laid afresh (a turn, a stray off it, the colliders changing) casts the whole window, 25 rays where it was 17.
+     */
     look: number;
     /** Every this many metres: 0.1. */
     step: number;
     /** A riser is a rise or a fall of at least this (0.08 m: under it is a bump)... */
     riserMin: number;
-    /** ...and at most this (0.5 m: the autostep's own height; more is a wall or a ledge)... */
+    /**
+     * ...and at most this (Stairs II: 0.422 m, twice the riser of the game's own base flight `stair_tatooine_large_style_01`,
+     * 0.2108, to the millimetre over so the owner's 2x flight reads as stairs; his "disable the stair animations above .42m").
+     * It is no longer the step-up's height: a riser over it and up to the step-up's 0.5 m breaks the run, and the body walks
+     * it with its plain classes, stepped up by the step-up as a kerb is (src/player/stepUp.ts)...
+     */
     riserMax: number;
     /** ...over less than this much ground (0.12 m: steeper than any ramp a body walks). */
     riserRun: number;
@@ -293,10 +314,34 @@ export interface LocoTune {
     level: number;
     /** ...for at least this long, metres (0.18: a narrow stair's tread). */
     treadMin: number;
+    /**
+     * Stairs II: ...and at most this, metres: 0.79, two and a half times the base flight's tread (0.315), the owner's longest
+     * stair ("anything longer ... should just use the regular locomotion animations"). A tread longer between two risers
+     * breaks the run, and a landing longer than it between two flights is walked with the plain classes. At its top (4,
+     * longer than the window) no tread is too long, which is 33d3e67's rule.
+     */
+    treadMax: number;
     /** Stairs are at least this many risers the same way in the window: 2 (a single kerb is no stairs). */
     count: number;
-    /** On stairs until this far is travelled with no riser in the window, metres: 0.5. */
+    /** Under `hold` 'before': on stairs until this far is travelled with no riser in the window, metres: 0.5. */
     leave: number;
+    /**
+     * Stairs II, how the stairs are held (the owner: "anticipate if there are more steps after the current one and end the
+     * last 'step' with a foot to be the bottom"): 'ahead' (the start) only while a riser of their way stands ahead of the body
+     * within `treadMax`; once none does, the stride under way finishes with its foot planted beyond the last riser and the
+     * regular clip takes over at that footfall, with its usual fade. 'before': 33d3e67's hold, while any riser of their way
+     * is in the window (which reaches 0.8 m behind the body) and `leave` after, the clip going on about 1.3 m past the last riser.
+     */
+    hold: 'ahead' | 'before';
+    /**
+     * Stairs II, under `hold` 'ahead': how far before a flight's first riser (metres, from the body's middle) the stair clip
+     * may be taken on, or one of the flight's own treads where that is further: 0.5. The capsule (0.35 m) meets a riser 0.35 m
+     * before it and slows as it climbs it; a regular walk's planted foot slides back while it does (126 mm, measured on a
+     * landing three treads long), so the stair clip must be on by then. Measured to a riser's middle known to half a sample
+     * either way, a flight of 0.28 m treads read 0.2 apart was taken on 0.24 m before it with one tread alone; 33d3e67 took a
+     * flight on 0.4 to 0.48 m before it.
+     */
+    takeOn: number;
     /**
      * The speed on stairs under `stepRule` 'stairs' (the owner's "combo of a and b"): a share between the stair clip's own
      * pace for stairs of this size (0: one clip step every `n` treads at its own rate) and the class's speed (1), then held
@@ -315,9 +360,11 @@ export interface LocoTune {
      */
     cycle: 'trimmed' | 'before';
     /**
-     * A one-footfall clip's other step (the two downstairs clips): 'legs' (the start) the legs and hips mirrored, the
-     * spine, arms and head keeping the clip's own turn (which the owner says is on purpose); 'whole' the whole body
-     * mirrored; 'off' the same foot every step, the clip as it stands, its wrap's jump kept.
+     * A one-footfall clip's other step (the two downstairs clips): 'whole' (the start since Stairs II, the owner's of
+     * 2026-11-16: "descending stairs mirroring the whole body looks best and should be default") the whole body mirrored,
+     * the spine, arms and head turning with the legs on the mirrored step; 'legs' the legs and hips mirrored, the spine, arms
+     * and head keeping the clip's own turn (the stairs wave's start); 'off' the same foot every step, the clip as it stands,
+     * its wrap's jump kept.
      */
     mirror: 'legs' | 'whole' | 'off';
     /**
@@ -517,6 +564,7 @@ export const LOCO_TUNE: LocoTune = {
   slopeRule: 'limit',
   slopeJump: 'refused',
   slopeCrease: 'floor',
+  step: { rule: 'mended' },
   slope: { climb: 55, slide: 1, fade: 0.18 },
   injured:{ rule: 'walk', below: 0.25, speed: 0.57 },
   crouch: {
@@ -530,7 +578,7 @@ export const LOCO_TUNE: LocoTune = {
   },
   made: { crouched: 1.49, crouchBack: 1.39, gameWalk: 1.44, injuredWalk: 0.564, stairsUp: 0.365, stairsRunUp: 0.749, stairsDown: 0.485, stairsRunDown: 1.119 },
   ik: { rule: 'placed', eye: 'steady', pitchMost: 35, rollMost: 20, pelvisMost: 0.4, ease: 0.08, plantLow: 0.04, plantHigh: 0.15, stairBack: 0.1, stairAhead: 0.3, toeMost: 30, edgePull: 0.25, peerReach: 40, hips: 'steady', hipEase: 0.25, hipRelease: 0.6, hipHold: 1.5, hipsLand: 'off', stretch: 0.98, toeReach: 0.5, soleLow: 0.005, soleHigh: 0.025 },
-  stairs: { rule: 'stairs', ways: 'forward', camera: 'smooth', look: 1.6, step: 0.1, riserMin: 0.08, riserMax: 0.5, riserRun: 0.12, level: 0.03, treadMin: 0.18, count: 2, leave: 0.5, pace: 0.25, ease: 0.12, lagMost: 0.5, cycle: 'trimmed', mirror: 'legs', stepRule: 'stairs', perStep: 'auto', nMost: 2, upAt: 1.4, resize: 0.15, land: 0.5, rateLow: 0.7, rateHigh: 1.4, steer: 0.25, clear: 0.04, pin: 'sole' },
+  stairs: { rule: 'stairs', ways: 'forward', camera: 'smooth', look: 2.4, step: 0.1, riserMin: 0.08, riserMax: 0.422, riserRun: 0.12, level: 0.03, treadMin: 0.18, treadMax: 0.79, count: 2, leave: 0.5, hold: 'ahead', takeOn: 0.5, pace: 0.25, ease: 0.12, lagMost: 0.5, cycle: 'trimmed', mirror: 'whole', stepRule: 'stairs', perStep: 'auto', nMost: 2, upAt: 1.4, resize: 0.15, land: 0.5, rateLow: 0.7, rateHigh: 1.4, steer: 0.25, clear: 0.04, pin: 'sole' },
   speed: {
     forward: { walk: 1.66, jog: 4, tired: 3.5, run: 6, sprint: 7 },
     back: { walk: 1.28, jog: 3, run: 4 },
@@ -622,6 +670,8 @@ export const LOCO_RANGES: Record<string, { min: number; max: number }> = {
   'stairs.riserRun': { min: 0.02, max: 0.5 },
   'stairs.level': { min: 0.005, max: 0.1 },
   'stairs.treadMin': { min: 0.05, max: 1 },
+  'stairs.treadMax': { min: 0.2, max: 4 },
+  'stairs.takeOn': { min: 0.1, max: 1.5 },
   'stairs.count': { min: 1, max: 6 },
   'stairs.leave': { min: 0, max: 3 },
   'stairs.pace': { min: 0, max: 1 },
@@ -678,6 +728,7 @@ export const LOCO_CHOICES: Readonly<Record<string, readonly string[]>> = {
   slopeRule: ['limit', 'before'],
   slopeJump: ['refused', 'allowed'],
   slopeCrease: ['floor', 'before'],
+  'step.rule': ['mended', 'before'],
   'injured.rule': ['walk', 'off'],
   'ik.rule': ['placed', 'before'],
   'ik.eye': ['steady', 'follow'],
@@ -688,6 +739,7 @@ export const LOCO_CHOICES: Readonly<Record<string, readonly string[]>> = {
   'ik.hipsLand': ['off', 'before'],
   'stairs.cycle': ['trimmed', 'before'],
   'stairs.mirror': ['legs', 'whole', 'off'],
+  'stairs.hold': ['ahead', 'before'],
   'stairs.stepRule': ['stairs', 'before'],
   'stairs.perStep': ['auto', '1', '2', '3'],
   'stairs.pin': ['sole', 'off'],

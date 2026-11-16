@@ -17,6 +17,8 @@ import { newHarm, newHarmAsk, takeHarm, type HarmKind } from '../../../src/playe
 import { vehicleOfCollider, type Vehicle } from '../../../src/vehicles/vehicle.ts';
 import { makeHullController, type PeerHulls } from '../../../src/player/grappleFrames.ts';
 import { SlopeRule } from '../../../src/player/slopeRule.ts';
+import { StepUp } from '../../../src/player/stepUp.ts';
+import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
 import { LedgeHang, LedgeIn, type LedgeWorld } from '../../../src/player/ledge.ts';
 import { Stamina } from '../../../src/anim/locoClass.ts';
 import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
@@ -194,6 +196,8 @@ export class TestBody implements GrappleBody {
   swimHoldsApex = true;
   /** The slope limit (wave 2b): the very rule the player's update steps, in the same places (`LOCO_TUNE.slopeRule`). */
   readonly slope = new SlopeRule();
+  /** Stairs II (A): the step-up's mend, the very one the player's update steps, in the same places (`LOCO_TUNE.step.rule`). */
+  readonly stepUp = new StepUp((h, r) => new RAPIER.Capsule(h, r));
   /** Wave 4: the ledges (`climb.ledges`), stepped in the player's own places: the hang in place of the movement, the grab after the move, the haul's hand-over after the rope's step. */
   readonly ledge = new LedgeHang({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }), capsule: (h, r) => new RAPIER.Capsule(h, r) });
   readonly ledgeIn = new LedgeIn();
@@ -283,6 +287,9 @@ export class TestBody implements GrappleBody {
     controller.setApplyImpulsesToDynamicBodies(false);
     controller.setCharacterMass(80);
     this.controller = controller;
+    // Stairs II (A): the capsule's radius and the controller's offset, for the step's casts (the player's own lines).
+    this.stepUp.at.r = CAPSULE_RADIUS;
+    this.stepUp.at.off = 0.04;
     // The hull test's controller, by the very maker the player calls.
     this.hullController = makeHullController(world);
     this.grapple = new Grapple(RAPIER, physics);
@@ -505,23 +512,44 @@ export class TestBody implements GrappleBody {
     let moveX = this.vel.x * dt;
     let moveY = this.vel.y * dt;
     let moveZ = this.vel.z * dt;
+    // Stairs II (A): where the body stands before the move, for the collider's sync and the step (the player's own lines).
+    const su = this.stepUp.at;
+    su.x = this.pos.x;
+    su.y = this.pos.y;
+    su.z = this.pos.z;
+    su.localY = this.colliderOffsetY;
+    su.half = this.colliderOffsetY - CAPSULE_RADIUS;
+    // On real ground only (the player's own line: the slope rule's last verdict found something under the body).
+    su.ruled = this.grounded && !this.swimming && !(this.hooks && (g.attached || g.released)) && !this.slope.sliding;
+    su.supported = this.slope.supported;
+    su.filter = this.filter;
+    this.stepUp.reach(this.physics.world, this.body, this.collider, this.walkPast);
     if (this.hooks && (g.attached || g.released)) {
       g.syncCollider(this);
       moveX += g.corr.x;
       moveY += g.corr.y;
       moveZ += g.corr.z;
     } else if (this.slope.settling) this.collider.setTranslation({ x: this.pos.x, y: this.pos.y + this.colliderOffsetY, z: this.pos.z });
+    else this.stepUp.sync(this.collider);
     // Wave 3's crease: how fast a frame that began in the air falls into its move, and the frame's seconds (the player's own lines).
     this.slope.at.fall = !this.grounded && this.vel.y < 0 ? -this.vel.y : 0;
     this.slope.at.dt = dt;
     this.controller.computeColliderMovement(this.collider, { x: moveX, y: moveY, z: moveZ }, undefined, this.filter, this.walkPast);
     const mv = this.controller.computedMovement();
+    // Stairs II (A): where the move fell short across the ground at a riser the controller could not lift the capsule over, the step (the player's own lines).
+    su.ax = moveX;
+    su.ay = moveY;
+    su.az = moveZ;
+    su.filter = this.filter;
+    su.climb = LOCO_TUNE.slope.climb;
+    this.stepUp.after(this.physics.world, this.controller, mv, this.body, this.collider, this.walkPast);
     if (this.hooks && (g.attached || g.released)) g.clip(this, mv);
     this.pos.x += mv.x;
     this.pos.y += mv.y;
     this.pos.z += mv.z;
     const wasGrounded = this.grounded;
     this.grounded = this.controller.computedGrounded();
+    if (this.stepUp.stands) this.grounded = true;
     // The slope limit's verdict and slide, the player's own lines (its swim and its rope are the harness's `swimming`
     // and `g`); the movement's gravity is Jedi Academy's here, the only profile the harness steps.
     const slopeAt = this.slope.at;

@@ -154,6 +154,9 @@ export class Walker {
   private moved = 0;
   /** The class walked: the walk (true) or the jog. */
   walk = true;
+  /** Stairs II: Shift held from the first frame (the run), unless walking. */
+  run = false;
+  private shiftWas = false;
   /** Measure the knees' clip legs each frame (costs a little). */
   knees = false;
   /** Played heading (the figure's front), radians, worked out from the travel. */
@@ -200,9 +203,15 @@ export class Walker {
     const sense = this.sense;
     this.t += dt;
     // 1. The speed keys (the walk class by the walk key, the jog with none: the classes take the walk flag off the movement).
-    loco.keys(dt, false, false, this.walk, this.rig);
+    const shift = this.run && !this.walk;
+    loco.keys(dt, shift, shift && !this.shiftWas, this.walk, this.rig);
+    this.shiftWas = shift;
     // 2. Last frame's stairs, and their measure.
     lo.stairs = sense.way;
+    lo.stairEnding = sense.ending;
+    lo.stairAhead = sense.way > 0 ? sense.ahead.up : sense.way < 0 ? sense.ahead.down : Number.POSITIVE_INFINITY;
+    lo.stairGap = sense.way > 0 ? sense.ahead.upGap : sense.way < 0 ? sense.ahead.downGap : Number.POSITIVE_INFINITY;
+    lo.stairBehind = sense.way > 0 ? sense.ahead.upBehind : sense.way < 0 ? sense.ahead.downBehind : Number.POSITIVE_INFINITY;
     lo.stairKnown = sense.known;
     lo.stairTread = sense.tread;
     lo.stairRiser = sense.riser;
@@ -251,6 +260,10 @@ export class Walker {
     sense.step(b.physics.world as never, LOCO_TUNE.stairs);
     this.moved += di.dx * sense.ux + di.dz * sense.uz;
     // 6. The stairs again, the move along them, the legs' clip's time; the legs.
+    lo.stairEnding = sense.ending;
+    lo.stairAhead = sense.way > 0 ? sense.ahead.up : sense.way < 0 ? sense.ahead.down : Number.POSITIVE_INFINITY;
+    lo.stairGap = sense.way > 0 ? sense.ahead.upGap : sense.way < 0 ? sense.ahead.downGap : Number.POSITIVE_INFINITY;
+    lo.stairBehind = sense.way > 0 ? sense.ahead.upBehind : sense.way < 0 ? sense.ahead.downBehind : Number.POSITIVE_INFINITY;
     lo.stairKnown = sense.known;
     lo.stairTread = sense.tread;
     lo.stairRiser = sense.riser;
@@ -311,7 +324,7 @@ export class Walker {
     const stepping = loco.legsOn && loco.stepFacts !== null;
     fi.stride = stepping ? loco.step.stride : 1;
     fi.clear = stepping ? LOCO_TUNE.stairs.clear : 0;
-    fi.pin = stepping && LOCO_TUNE.stairs.pin === 'sole';
+    fi.pin = (stepping || loco.stairEnd.pins) && LOCO_TUNE.stairs.pin === 'sole';
     stairFeetOf(sense, fi);
     fi.pivotL = stepping ? loco.step.pivotL : 0;
     fi.pivotR = stepping ? loco.step.pivotR : 0;

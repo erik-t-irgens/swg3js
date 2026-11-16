@@ -137,6 +137,7 @@ import { climbDialsFor } from './anim/climbDials.ts';
 import { animDialsFor } from './anim/animDials.ts';
 import { locoDialsFor } from './anim/locoDials.ts';
 import { LOCO_SWITCH, LOCO_TUNE, locoSwitchOn, tuneLoco } from './anim/locoTune.ts';
+import { REFUSED_WORDS, aheadReport } from './anim/stairsRule.ts';
 import { GAITS, PLAIN, gaitOf, locoPick, type LocoGait } from './anim/locoTable.ts';
 import { clipName } from './anim/mxaFile.ts';
 import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
@@ -28723,11 +28724,14 @@ class App {
       // The slope limit (wave 2b): the rule, and the feet's last verdict (sliding down a face too steep to stand on, the
       // faces met, the floor ray's face's upward share, and how many of the controller's "grounded" the rule overturned).
       slope: { rule: LOCO_TUNE.slopeRule, jump: LOCO_TUNE.slopeJump, ...LOCO_TUNE.slope, sliding: p.slope.sliding, faces: p.slope.count, floorUp: Number.isNaN(p.slope.rayNy) ? null : n2(p.slope.rayNy), overturned: p.slope.overturned, casts: p.slope.casts, kept: p.slope.kept, edges: p.slope.edges },
+      // Stairs II (A): the step-up's rule, and its counts (moves synced, risers measured, steps taken, lifts onto a wall
+      // undone, casts), the last riser it measured and why the last look took no step.
+      stepUp: { rule: LOCO_TUNE.step.rule, synced: p.stepUp.synced, looks: p.stepUp.looks, steps: p.stepUp.steps, walls: p.stepUp.walls, casts: p.stepUp.casts, lastRiserM: Number.isNaN(p.stepUp.riser) ? null : n3(p.stepUp.riser), lastWhy: p.stepUp.why || null },
       // Wave 3: the feet's placement (each leg's planted share, its lift and pull, the foot's turn and the toe's bend, the
       // pelvis's drop, the rays cast), each planted sole's height over its ground, the stairs held, and the drawn body's
       // lag over a step (the crease's settling and how many creases were met beside it).
       feet: { ...p.feet.report(), soles, eyeLiftM: n3(p.eyeLift) },
-      stairs: { rule: LOCO_TUNE.stairs.rule, ways: LOCO_TUNE.stairs.ways, camera: LOCO_TUNE.stairs.camera, held: p.stairSense.way > 0 ? 'up' : p.stairSense.way < 0 ? 'down' : null, risers: p.stairSense.found.risers, measured: p.stairSense.known ? { treadM: n3(p.stairSense.tread), riserM: n3(p.stairSense.riser), nextM: Number.isNaN(p.stairSense.next) ? null : n3(p.stairSense.next) } : null, casts: p.stairSense.casts, reused: p.stairSense.reused, drawnLagM: n3(p.drawn.offset), lastPopM: n3(p.drawn.popped) },
+      stairs: { rule: LOCO_TUNE.stairs.rule, ways: LOCO_TUNE.stairs.ways, camera: LOCO_TUNE.stairs.camera, hold: LOCO_TUNE.stairs.hold, held: p.stairSense.way > 0 ? 'up' : p.stairSense.way < 0 ? 'down' : null, ending: p.stairSense.ending, aheadM: aheadReport(p.stairSense.ahead), refused: p.stairSense.found.refused ? `${REFUSED_WORDS[p.stairSense.found.refused]} (${n3(p.stairSense.found.refusedBy)} m)` : null, risers: p.stairSense.found.risers, measured: p.stairSense.known ? { treadM: n3(p.stairSense.tread), riserM: n3(p.stairSense.riser), nextM: Number.isNaN(p.stairSense.next) ? null : n3(p.stairSense.next) } : null, casts: p.stairSense.casts, reused: p.stairSense.reused, drawnLagM: n3(p.drawn.offset), lastPopM: n3(p.drawn.popped) },
       crease: { rule: LOCO_TUNE.slopeCrease, settling: p.slope.settling, creases: p.slope.creases },
       sideViewDeg: this.sideView,
       // The other players here: what each one's game sent and the clip their legs play on this screen.

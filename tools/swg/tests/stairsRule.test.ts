@@ -103,6 +103,63 @@ ok(now.notKerb, 'a single kerb of 0.1 to 0.4 m, up or down, is no stairs (one ri
 ok(now.notLedge, 'nor a kerb with a 0.1 m lip on it read every 5 cm (a ledge shorter than `treadMin` is no tread)');
 ok(now.walls && now.holes, 'a wall between two risers breaks the stairs where it stands, and so does ground not found');
 ok(now.bumps, 'steps lower than the least riser (5 cm) are bumps, not stairs');
+// Stairs II: no tread over `treadMax` (0.79 m) and no riser over `riserMax` (0.422 m) joins a run, wherever the lattice falls.
+/** The risers of `stairs(…, tread, x0)` placed exactly, in samples of `line(…, from, n, step)` (at the gap each falls in), as the sampler's own `placeEdges` hands them over. */
+function exactOf(tread: number, x0: number, from = -0.8, n = 25, step = 0.1): Float64Array {
+  const ex = new Float64Array(n).fill(Number.NaN);
+  for (let j = 0; ; j++) {
+    const s = (x0 + j * tread - from) / step;
+    if (s > n - 1) break;
+    if (s > 0) ex[Math.ceil(s) - 1] = s;
+  }
+  return ex;
+}
+/** The review of Stairs II: treads just over `treadMax`, placed exactly, are never a stair's wherever the lattice falls, and treads just under it always are (read off the lattice alone, a tread of 0.80 m was a stair's at some offsets and not others, and the clip flickered). */
+function placedChecks(rule: Rule): { over: boolean; under: boolean; latticeFlickers: boolean } {
+  const f = new StairsFound();
+  let over = true;
+  let under = true;
+  let latticeFlickers = false;
+  for (const x0 of [-0.75, -0.73, -0.71, -0.69, -0.67, -0.65]) {
+    const tune = T();
+    const w = (tread: number) => line(stairs(0.2, tread, x0), -0.8, 25, 0.1);
+    if (rule(w(0.8), 25, 0.1, tune, f, exactOf(0.8, x0)) !== 0) over = false;
+    if (rule(w(0.785), 25, 0.1, tune, f, exactOf(0.785, x0)) !== 1 || !f.placed) under = false;
+    if (rule(w(0.8), 25, 0.1, tune, f) === 1) latticeFlickers = true;
+  }
+  return { over, under, latticeFlickers };
+}
+function stairsTwoChecks(rule: Rule): { longTread: boolean; tallRiser: boolean; atMost: boolean } {
+  const f = new StairsFound();
+  let longTread = true;
+  let tallRiser = true;
+  let atMost = true;
+  for (const x0 of [-0.75, -0.72, -0.68, -0.65]) {
+    const tune = T();
+    const window = (h: (x: number) => number) => line(h, -0.8, 25, 0.1);
+    // Treads of 0.78 m (just under treadMax): a stair's. Of 0.95 m: never, and the reading says why.
+    if (rule(window(stairs(0.2, 0.78, x0)), 25, 0.1, tune, f) !== 1) atMost = false;
+    if (rule(window(stairs(0.2, 0.95, x0)), 25, 0.1, tune, f) !== 0 || f.refused !== 2) longTread = false;
+    // Risers of 0.41 m: a stair's. Of 0.45 m: never, and the reading says why.
+    if (rule(window(stairs(0.41, 0.3, x0)), 25, 0.1, tune, f) !== 1) atMost = false;
+    if (rule(window(stairs(0.45, 0.3, x0)), 25, 0.1, tune, f) !== 0 || f.refused !== 1) tallRiser = false;
+  }
+  return { longTread, tallRiser, atMost };
+}
+{
+  const two = stairsTwoChecks(stairsIn);
+  ok(two.atMost, 'Stairs II: treads of 0.78 m and risers of 0.41 m are a stair\'s, wherever the lattice falls');
+  ok(two.longTread, 'Stairs II: treads of 0.95 m (over treadMax 0.79) are never a stair\'s, and the reading says it refused a tread');
+  ok(two.tallRiser, 'Stairs II: risers of 0.45 m (over riserMax 0.422) are never a stair\'s, and the reading says it refused a riser');
+  const placed = placedChecks(stairsIn);
+  ok(placed.over && placed.under, 'Stairs II, the review: treads of 0.80 m placed exactly are never a stair\'s and treads of 0.785 m always are, wherever the lattice falls');
+  ok(placed.latticeFlickers, '  (off the lattice alone a tread of 0.80 m is a stair\'s at some offsets: the check is not blind)');
+  const old = T();
+  old.treadMax = 4;
+  old.riserMax = 0.5;
+  const f = new StairsFound();
+  ok(stairsIn(line(stairs(0.2, 0.95, -0.72), -0.8, 25, 0.1), 25, 0.1, old, f) === 1 && stairsIn(line(stairs(0.45, 0.3, -0.72), -0.8, 25, 0.1), 25, 0.1, old, f) === 1, 'and with treadMax at 4 and riserMax at 0.5 (33d3e67\'s) both are stairs again, as they were');
+}
 {
   const hold = new StairsHold();
   const tune = T();
@@ -378,7 +435,12 @@ function walk(p: Physics, sense: StairSense, x0: number, x1: number, speed: numb
   ok(!ruleChecks(await mutant('rise <= tune.riserMax', 'rise <= 99')).walls, 'mutation: a riser\'s height not held under riserMax: a wall is taken for a riser');
   ok(!ruleChecks(await mutant('if (best >= count) {', 'if (best >= 1) {')).notKerb, 'mutation: one riser enough: a single kerb is stairs');
   ok(!ruleChecks(await mutant('rise >= tune.riserMin', 'rise >= 0')).bumps, 'mutation: the least riser not asked: bumps are stairs');
-  ok(!ruleChecks(await mutant('(mid - lastMid) * step >= tune.treadMin', 'true')).notLedge, 'mutation: the least tread not asked: a kerb\'s lip is a tread');
+  ok(!ruleChecks(await mutant('tread >= tune.treadMin && tread <= longest', 'tread <= longest')).notLedge, 'mutation: the least tread not asked: a kerb\'s lip is a tread');
+  ok(!stairsTwoChecks(await mutant('tread >= tune.treadMin && tread <= longest', 'tread >= tune.treadMin')).longTread, 'mutation: the longest tread not asked: treads of 0.95 m are a stair\'s');
+  ok(!stairsTwoChecks(await mutant('rise <= tune.riserMax', 'rise <= 0.5')).tallRiser, 'mutation: the old riserMax of 0.5 m: risers of 0.45 m are a stair\'s');
+  ok(!stairsTwoChecks(await mutant('const longest = treadMax + (isExact && lastExact ? PLACED_SLACK : step * 0.5);', 'const longest = treadMax - step * 0.5;')).atMost, 'mutation: a tread held under treadMax less half a sample: some treads of 0.78 m are lost where the lattice falls');
+  ok(!placedChecks(await mutant('const longest = treadMax + (isExact && lastExact ? PLACED_SLACK : step * 0.5);', 'const longest = treadMax + step * 0.5;')).over, 'mutation: treads placed exactly held to the lattice\'s half a sample: treads of 0.80 m are a stair\'s again at some offsets');
+  ok(!placedChecks(await mutant('    const mid = isExact ? ex : k + gaps * 0.5;', '    const mid = k + gaps * 0.5;')).under, 'mutation: a riser placed exactly read at its gap\'s middle: treads of 0.785 m are lost at some offsets');
   ok(!ruleChecks(await mutant('if (d <= level && d >= -level) {', 'if (d === 0) {')).slanted, 'mutation: a tread not let be level within `level`: stairs whose treads are not quite level are lost');
   ok(!ruleChecks(await mutant('      runSign = 0;\n      runRisers = 0;\n      levelSince = true;\n      k++;', '      k++;')).holes, 'mutation: ground not found does not end the run: stairs are read across a hole');
 }

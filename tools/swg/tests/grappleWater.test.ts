@@ -6,6 +6,7 @@
 // Run: node tools/swg/tests/grappleWater.test.ts
 import assert from 'node:assert/strict';
 import { GRAPPLE_DEFAULTS, GRAPPLE_TUNE } from '../../../src/player/grapple.ts';
+import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
 import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH, SWIM_RUN_SPEED, type SwimProbe } from '../../../src/player/swimStep.ts';
 import { underWater } from '../../../src/player/grappleMath.ts';
 import { afloatVelocity } from '../../../src/world/afloat.ts';
@@ -345,9 +346,25 @@ for (const fps of FPS) {
     return worst;
   };
   for (const fps of FPS) {
+    // Stairs II: the walk with no line as these checks were written, its capsule left where the last physics step put it
+    // (`step.rule` 'before'); under the step-up's mend the walk puts it where the body is too (checked after these).
+    LOCO_TUNE.step.rule = 'before';
     const plain = await walk(fps, false);
     const roped = await walk(fps, true);
     const unsynced = await walk(fps, true, false);
+    LOCO_TUNE.step.rule = 'mended';
+    {
+      const plainM = await walk(fps, false);
+      const ropedM = await walk(fps, true);
+      const worstM = apart(plainM, ropedM);
+      let wayM = 0;
+      for (let i = 0; i < plainM.length; i += 3) wayM = Math.max(wayM, Math.abs(plainM[i] - ropedM[i]), Math.abs(plainM[i + 2] - ropedM[i + 2]));
+      fresh();
+      // (Each puts it there by its own sums, the line's in doubles and the step-up's in the engine's single precision, a hair
+      // apart, and two controllers started a hair apart ride the 4 cm skin differently: the same few millimetres as above.)
+      ok(worstM <= 0.04 && wayM <= 0.02, `${fps} fps: under the step-up's mend, where the walk with no line puts its capsule where the body is as the line does, the two walks stand within ${r2(worstM * 1000)} mm of each other and at most ${r2(wayM * 1000)} mm behind or ahead (under 20)`);
+    }
+    LOCO_TUNE.step.rule = 'before';
     fresh();
     ok(apart(plain, unsynced) === 0, `${fps} fps: walking through 0.9 m of water on a slack line with the collider sync off is the walk with no line to the bit`);
     // With the sync on, the line puts the capsule where the body is before the controller moves it, where the walk
@@ -368,6 +385,7 @@ for (const fps of FPS) {
     for (let i = 0; i < plain.length; i += 3) way = Math.max(way, Math.abs(plain[i] - roped[i]), Math.abs(plain[i + 2] - roped[i + 2]));
     ok(worst <= skin && endHeight <= 0.001 && way <= 0.01, `${fps} fps: and with the sync on every place stands within ${r2(worst * 1000)} mm of it (inside the controller's ${skin * 1000} mm skin), the height ends ${r2(endHeight * 1000)} mm from it (within 1 mm) and the walk is at most ${r2(way * 1000)} mm behind or ahead (under 10)`);
   }
+  LOCO_TUNE.step.rule = 'mended';
 }
 // =============================================================================================================
 // 8. The fall into water: dropped from 30 m into deep water, swum to the beach and walked out.
