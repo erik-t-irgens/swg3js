@@ -51,6 +51,15 @@ export const GAME_WALK = 'game_walk', GAME_CROUCHED = 'game_crouched', CROUCH_BA
 const GAME_CLIPS: Readonly<Record<string, string>> = { [GAME_WALK]: 'walk', [GAME_CROUCHED]: 'loop_crouched:speed1', [CROUCH_BACK]: 'BOTH_CROUCH1WALKBACK', [GAME_PRONE]: 'loop_prone:speed1' };
 /** Which of the tune's `made` speeds a game clip is played against for its rate (`MADE_*`), or `MADE_NONE` for the rig's own number. */
 export const MADE_NONE = -1, MADE_CROUCHED = 0, MADE_CROUCH_BACK = 1, MADE_GAME_WALK = 2, MADE_INJURED = 3;
+/** Wave 3's stair clips, each played against its own measured stride (`LocoTune.made.stairs*`). */
+export const MADE_STAIRS_UP = 4, MADE_STAIRS_RUN_UP = 5, MADE_STAIRS_DOWN = 6, MADE_STAIRS_RUN_DOWN = 7;
+/**
+ * The stair clips by way and pace (the owner's brief's "Stairs" list): up, the walk class `ascending_stairs` and the jog
+ * and faster `running_up_stairs`; down, the walk class `descending_stairs_1` and the jog and faster `descending_stairs`.
+ */
+export const STAIR_CLIPS = { up: ['ascending_stairs', 'running_up_stairs'], down: ['descending_stairs_1', 'descending_stairs'] } as const;
+/** Every stair clip's id: what the pack fits with its net climb taken out (`FitRow.climb`) and played round. */
+export const STAIR_IDS: readonly string[] = [...STAIR_CLIPS.up, ...STAIR_CLIPS.down];
 const MADE_OF: Readonly<Record<string, number>> = { [GAME_WALK]: MADE_GAME_WALK, [GAME_CROUCHED]: MADE_CROUCHED, [CROUCH_BACK]: MADE_CROUCH_BACK };
 /** A pick id's clip as the rig names it. */
 export function clipOfId(id: string): string {
@@ -429,6 +438,39 @@ export function moreClips(): string[] {
   out.add('walking_1');
   for (const p of POSTURE) if (p) out.add(p.id);
   return [...out].filter((id) => !GAME_CLIPS[id]);
+}
+
+/**
+ * Wave 3: a standing pick's stair twin, going up (`way` +1) or down (-1): the stair clip of its pace (the walk class the
+ * walk's, the jog and faster the running one), at the very class, speed dial and state the pick has, forward (the clip's
+ * own heading, 0: the stair clips' feet carry them up the stairs, whatever the importer measured off them as flat
+ * ground), the body turned by the travel less that (45 degrees on a forward diagonal, as the walk diagonals turn it).
+ * Made once a pick and way, and kept.
+ */
+const STAIR_TWINS = new Map<LocoPick, [LocoPick, LocoPick]>();
+export function stairPick(pick: LocoPick, way: number): LocoPick {
+  let twins = STAIR_TWINS.get(pick);
+  if (!twins) {
+    const make = (up: boolean): LocoPick => {
+      const fast = pick.cls > 1;
+      const id = up ? STAIR_CLIPS.up[fast ? 1 : 0] : STAIR_CLIPS.down[fast ? 1 : 0];
+      const made = up ? (fast ? MADE_STAIRS_RUN_UP : MADE_STAIRS_UP) : fast ? MADE_STAIRS_RUN_DOWN : MADE_STAIRS_DOWN;
+      return Object.freeze({ ...pick, id, clip: clipOfId(id), heading: 0, turn: wrapDeg(travelDeg(pick.dir)), side: -1, made, uid: -1, reverse: false });
+    };
+    twins = [make(true), make(false)];
+    STAIR_TWINS.set(pick, twins);
+  }
+  return way > 0 ? twins[0] : twins[1];
+}
+
+/** Whether a pick is one of the stair clips. */
+export function isStairPick(pick: LocoPick | null): boolean {
+  return pick !== null && pick.made >= MADE_STAIRS_UP && pick.made <= MADE_STAIRS_RUN_DOWN;
+}
+
+/** Whether a way (`DIRS`' index) takes the stair clips under a tune's `stairs.ways`: forward, and the forward diagonals too under 'forwardDiag'. */
+export function stairWay(dir: number, ways: string): boolean {
+  return dir === 0 || (ways === 'forwardDiag' && (dir === 1 || dir === 7));
 }
 
 /**

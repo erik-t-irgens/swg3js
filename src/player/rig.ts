@@ -426,6 +426,14 @@ export class CharacterRig {
   /** The parts this rig was assembled from, when it came from a parts pack. */
   character: Character | null = null;
 
+  /** What placed the feet after the mixer last frame (src/player/footIk.ts), put back before it runs again; null for none. */
+  legPose: { restore(): void } | null = null;
+
+  /** A bone by its own name, or null (the feet's placement asks for the legs' joints by the game's names). */
+  boneNamed(name: string): THREE.Bone | null {
+    return this.bones.get(name) ?? null;
+  }
+
   /** First person on a model not assembled from parts; a parts character keeps its own. */
   private headHider: HeadHider | null = null;
 
@@ -1156,6 +1164,10 @@ export class CharacterRig {
   update(dt: number): void {
     this.stepDt = dt;
     if (this.syncOn) this.stepSync(dt);
+    // The feet's placement (wave 3, src/player/footIk.ts) turned the legs after the mixer last frame: their clean pose
+    // goes back before the mixer runs, since it writes a joint only when its clip's value moved, and a leg the clip held
+    // still would otherwise keep last frame's turn and the next placement would stack on it.
+    this.legPose?.restore();
     this.mixer.update(dt);
     // The mixer writes a joint only when its clip's value moved since the last frame, so a neck or head the look
     // turned last frame still carries that turn on a frame the clip held it still. The first-person eye reads the

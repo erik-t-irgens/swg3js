@@ -475,7 +475,10 @@ export class TestBody implements GrappleBody {
       moveX += g.corr.x;
       moveY += g.corr.y;
       moveZ += g.corr.z;
-    }
+    } else if (this.slope.settling) this.collider.setTranslation({ x: this.pos.x, y: this.pos.y + this.colliderOffsetY, z: this.pos.z });
+    // Wave 3's crease: how fast a frame that began in the air falls into its move, and the frame's seconds (the player's own lines).
+    this.slope.at.fall = !this.grounded && this.vel.y < 0 ? -this.vel.y : 0;
+    this.slope.at.dt = dt;
     this.controller.computeColliderMovement(this.collider, { x: moveX, y: moveY, z: moveZ }, undefined, this.filter, this.walkPast);
     const mv = this.controller.computedMovement();
     if (this.hooks && (g.attached || g.released)) g.clip(this, mv);

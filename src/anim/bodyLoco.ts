@@ -14,7 +14,7 @@
 // off this record's fields (locoAlloc.test.ts measures it).
 
 import { JOG, RUN, ShiftClass, SPRINT, Stamina } from './locoClass.ts';
-import { CLASS_NAMES, CROUCH, DIRS, GAITS, GUN_UP, JOG_SLOT, MADE_CROUCHED, MADE_CROUCH_BACK, MADE_INJURED, PLAIN, POSTURE_KEYS, PRONE, SPEED_SLOTS, STAND, dirOf, fillSpeeds, gaitIndex, injuredPick, locoPick, posturePick, posturePicks, sideMode, tableClips, topClass, type LocoGait, type LocoPick } from './locoTable.ts';
+import { CLASS_NAMES, CROUCH, DIRS, GAITS, GUN_UP, JOG_SLOT, MADE_CROUCHED, MADE_CROUCH_BACK, MADE_INJURED, MADE_STAIRS_DOWN, MADE_STAIRS_RUN_DOWN, MADE_STAIRS_RUN_UP, MADE_STAIRS_UP, PLAIN, POSTURE_KEYS, PRONE, SPEED_SLOTS, STAIR_IDS, STAND, dirOf, fillSpeeds, gaitIndex, injuredPick, locoPick, posturePick, posturePicks, sideMode, stairPick, stairWay, tableClips, topClass, type LocoGait, type LocoPick } from './locoTable.ts';
 import type { LocoTune } from './locoTune.ts';
 
 /** The little of a rig this asks for: the game's `CharacterRig` is one. */
@@ -69,6 +69,8 @@ export class LocoIn {
   hpShare = 1.5;
   /** The figure's own scale (its rig's root): what a game clip's `made` speed is scaled by. */
   scale = 1.5;
+  /** Wave 3: the stairs the body stands on, as the stairs rule holds them (+1 up the travel, -1 down, 0 none). */
+  stairs = 0;
 }
 
 export function newLocoIn(): LocoIn {
@@ -154,6 +156,8 @@ const CROUCH_NAMES = unique(posturePicks().filter((p) => p.posture === CROUCH).m
 const PRONE_NAMES = unique(posturePicks().filter((p) => p.posture === PRONE).map((p) => p.clip));
 const GAIT_NAMES: readonly (readonly string[])[] = GAITS.map((_, g) => unique(g === 0 ? [] : DIRS.flatMap((_d, dir) => [0, 1, 2].map((side) => locoPick(dir, 1, false, PLAIN, GAITS[g], side)?.clip ?? '')).filter((c) => c && !TABLE_CLIPS.includes(c))));
 const INJURED_NAME = injuredPick(0)!.clip;
+/** Wave 3's stair clips: a rig without every one of them walks stairs as before. */
+const STAIR_NAMES: readonly string[] = STAIR_IDS.map((id) => `mx_${id}`);
 function hasAll(rig: LocoRig, names: readonly string[]): boolean {
   for (let i = 0; i < names.length; i++) if (!rig.has(names[i])) return false;
   return true;
@@ -219,6 +223,9 @@ export class BodyLoco {
   proneOn = false;
   gaitOn = false;
   injuredOn = false;
+  /** Wave 3: the rig has the four stair clips, and the stairs the legs walk this frame (+1 up, -1 down, 0 none). */
+  stairsOn = false;
+  stairs = 0;
   private boost = 1.5;
   private dt = 0.5;
   private legsWere = LEGS_OTHER;
@@ -258,6 +265,7 @@ export class BodyLoco {
     this.proneOn = this.on && hasAll(rig!, PRONE_NAMES);
     this.gaitOn = this.on && hasAll(rig!, GAIT_NAMES[this.gait] ?? GAIT_NAMES[0]);
     this.injuredOn = this.on && rig!.has(INJURED_NAME);
+    this.stairsOn = this.on && hasAll(rig!, STAIR_NAMES);
     if (!this.on) {
       this.shift.reset();
       this.walkOn = false;
@@ -284,6 +292,7 @@ export class BodyLoco {
     this.carry = CARRY_NONE;
     this.posture = STAND;
     this.injured = false;
+    this.stairs = 0;
     this.boost = f.boost;
     this.dt = f.dt;
     const tune = this.tune;
@@ -348,6 +357,12 @@ export class BodyLoco {
       pick = hurt;
       this.injured = true;
     }
+    // Wave 3, stairs: standing and going forward (and the forward diagonals under 'forwardDiag', where no blaster keeps the
+    // body square) on stairs the rule holds, the stair clip of the pace, at the class's speed by the stairs' own share.
+    if (f.stairs !== 0 && pick !== null && this.stairsOn && tune.stairs.rule === 'stairs' && stairWay(pick.dir, tune.stairs.ways) && (pick.dir === 0 || gun !== GUN_UP)) {
+      pick = stairPick(pick, f.stairs);
+      this.stairs = f.stairs;
+    }
     this.pick = pick;
     // A gun in hand with none up: what its kind's pace plays (none up means out of combat: no aim, no shot).
     if (f.gunClass >= 0 && !f.gunUp && !f.aiming) this.carry = carryOf(tune, f.gunClass);
@@ -355,6 +370,7 @@ export class BodyLoco {
     // The class's speed by its dial; the sprint's is the stats' (the tune's own until something is earned); standing still, the jog's.
     fillSpeeds(tune, this.speeds);
     this.speed = pick ? (pick.cls === SPRINT ? f.sprint : hurt ? tune.injured.speed : this.speeds[pick.slot]) : this.speeds[JOG_SLOT];
+    if (this.stairs !== 0) this.speed *= tune.stairs.pace;
     this.turn = pick ? pick.turn * RAD : 0;
     // In the air too: a jump out of a sprint is still the sprint, and the fight's keys stay down through it.
     this.sprinting = pick !== null && pick.cls === SPRINT;
@@ -416,6 +432,7 @@ export class BodyLoco {
     this.carry = CARRY_NONE;
     this.posture = STAND;
     this.injured = false;
+    this.stairs = 0;
     this.dir = -1;
     this.turn = 0;
     this.turnNow = 0;
@@ -445,7 +462,8 @@ export class BodyLoco {
     let natural = 0;
     if (pick.made >= 0) {
       const m = this.tune.made;
-      natural = (pick.made === MADE_CROUCHED ? m.crouched : pick.made === MADE_CROUCH_BACK ? m.crouchBack : pick.made === MADE_INJURED ? m.injuredWalk : m.gameWalk) * f.scale;
+      const c = pick.made;
+      natural = (c === MADE_CROUCHED ? m.crouched : c === MADE_CROUCH_BACK ? m.crouchBack : c === MADE_INJURED ? m.injuredWalk : c === MADE_STAIRS_UP ? m.stairsUp : c === MADE_STAIRS_RUN_UP ? m.stairsRunUp : c === MADE_STAIRS_DOWN ? m.stairsDown : c === MADE_STAIRS_RUN_DOWN ? m.stairsRunDown : m.gameWalk) * f.scale;
     } else if (rig.readSpeed(pick.clip)) natural = rig.speedOut;
     if (natural > 0) {
       const band = this.tune.rate;
@@ -556,6 +574,7 @@ export class BodyLoco {
       gait: GAITS[this.gait],
       injured: this.injured,
       injuredRule: this.tune.injured.rule,
+      stairs: this.stairs > 0 ? 'up' : this.stairs < 0 ? 'down' : null,
       stamina: { value: n(this.stamina.value, 1), pool: n(pool, 1), tired: this.stamina.tired, shown: this.stamina.shown(pool, this.tune) },
     };
   }

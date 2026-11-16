@@ -390,10 +390,16 @@ export interface FitRow {
   loop: boolean;
   /** A height taken off the hips' travel, source metres (an airborne loop authored off the ground). */
   level?: number;
+  /**
+   * Wave 3's stairs: the clip's net climb is taken out as the level travel is, a straight ramp from its trim to its
+   * end, so a stair clip played round never carries the body up or down (the body's height is the capsule's). Absent
+   * (every other clip), the height is kept as authored, as before.
+   */
+  climb?: boolean;
 }
 
-/** The hips' level travel at a time, blended between frames. */
-function levelAt(clip: ClipData, t: number, k: 0 | 2): number {
+/** The hips' travel along one axis at a time, blended between frames. */
+function levelAt(clip: ClipData, t: number, k: 0 | 1 | 2): number {
   const last = clip.frames - 1;
   if (last < 1 || !(clip.duration > 0)) return clip.travel[k];
   const x = Math.min(last, Math.max(0, (t / clip.duration) * last));
@@ -438,6 +444,10 @@ export function fitClip(plan: FitPlan, clip: ClipData, row: FitRow, into?: Fitte
   const xa = levelAt(clip, t0, 0), za = levelAt(clip, t0, 2);
   const xT = clip.travel[(frames - 1) * 3], zT = clip.travel[(frames - 1) * 3 + 2];
   const lift = row.level ?? 0;
+  // A stair clip's net climb, from its trim to its end (nought for every other clip, whose height is kept as authored).
+  const climbs = row.climb === true;
+  const ya = climbs ? levelAt(clip, t0, 1) : 0;
+  const yT = climbs ? clip.travel[(frames - 1) * 3 + 1] : 0;
   let strays = 0;
   // The root's parent's rest turn, inverted (the figure's base for a root that hangs from no joint).
   const rk = root >= 0 ? joints[root].parent : -1;
@@ -491,7 +501,8 @@ export function fitClip(plan: FitPlan, clip: ClipData, row: FitRow, into?: Fitte
         oz = hz - (za - z0) - (zT - za) * u;
       }
       strays = Math.max(strays, Math.hypot(ox - x0, oz - z0) * scale);
-      const oy = clip.travel[f * 3 + 1] - lift;
+      let oy = clip.travel[f * 3 + 1] - lift;
+      if (climbs && t > t0 && T > t0) oy -= (yT - ya) * ((t - t0) / (T - t0));
       // How far the root stands from its rest in the figure's frame: the travel scaled and turned by the facing...
       const wx = scale * (ox * cos + oz * sin);
       const wy = scale * oy;

@@ -35,6 +35,17 @@ import { nearRidesIn, rideKindOf, RIDE_KIND, type NearRides } from './nearRides.
 import { specFor } from '../vehicles/vehicle.ts';
 import { sharedClock } from '../world/sharedClock.ts';
 import { listPeerMover, type ShadowMovers } from '../world/shadowCadence.ts';
+import { Group, RAPIER, groups } from '../core/physics.ts';
+import { FootIk, type FootWorld } from '../player/footIk.ts';
+import { StairSense, type StairWorld } from '../player/stairSense.ts';
+import { isStairPick } from '../anim/locoTable.ts';
+
+/** The groups the figures' feet and stairs cast in: every group (a figure's own room is not known here). */
+const PEER_FEET_FILTER = groups(Group.all, Group.all);
+/** The feet's ray, made once a figure (the engine's own `Ray`, cast straight down). */
+const makeFootRay = (): RAPIER.Ray => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
+/** The states another player's figure stands on its feet in (wave 3's feet and stairs): never the air, the water, a seat or lying. */
+const OFF_FEET: Set<string> = new Set(['air', 'seated', 'swim', 'float', 'prone', 'proneMove', 'gunProneIdle', 'gunProneMove', 'gunProneReadyIdle', 'gunProneReadyMove', 'gunProneAimIdle', 'gunProneAimMove']);
 
 /**
  * One peer, as everything that hangs something on a peer sees them: their body in the physics, a
@@ -310,6 +321,13 @@ interface Remote {
   pistolCarry: PeerPistolCarry;
   /** How far their treading figure is drawn under where it floats (src/anim/swimSink.ts), as this player's own is. */
   swimSink: SwimSink;
+  /**
+   * Wave 3: their feet placed on this world's ground as this player's own are (src/player/footIk.ts), within
+   * `ik.peerReach` of the camera; and the stairs this side's own rule finds under them along their travel
+   * (src/player/stairSense.ts), which their state does not carry.
+   */
+  feet: FootIk;
+  stairs: StairSense;
   /** The colour their blade is lit in; the game's own default until their own browser says. */
   saberColor: number;
   /** Their blade when it is out of their hand: where it is in the world and how far it has spun. */
@@ -370,6 +388,13 @@ export class RemotePlayers {
    * peer floats, which says how much of the treading sink they take (`SwimSink`). Null takes every one at the surface.
    */
   surfaceAt: ((x: number, z: number) => number) | null = null;
+  /**
+   * Wave 3: the world the figures stand on (the game hands its physics' own in), for their feet's rays and their stairs'
+   * samples; null places no feet (a test, a world not up yet). And where the camera stood last frame, which says whose
+   * feet are near enough to place (`ik.peerReach`).
+   */
+  feetWorld: (FootWorld & StairWorld) | null = null;
+  readonly cameraAt = new THREE.Vector3();
 
   /** Called with a peer's rig once it is dressed, and again when their look changes: the motion blur prepares its shaders for it. */
   onDressed: ((root: THREE.Object3D) => void) | null = null;
@@ -451,13 +476,13 @@ export class RemotePlayers {
    * its game sent, how its travel lies against the heading it sent, the clip its legs play here and the rate, and the
    * clip the speed classes worked out for it (null: the state's own clip, as before the classes).
    */
-  legs(): { name: string; state: string; speed: number; travelDeg: number | null; clip: string | null; upper: string | null; rate: number; classes: string | null }[] {
+  legs(): { name: string; state: string; speed: number; travelDeg: number | null; clip: string | null; upper: string | null; rate: number; classes: string | null; feetWeight: number; dropM: number; stairs: 'up' | 'down' | null }[] {
     const n2 = (v: number) => Number(v.toFixed(2));
     return [...this.remotes.values()].filter((r) => this.sameWorld(r.hello)).map((r) => {
       const d = r.rig?.describe();
       const moving = r.vel.x * r.vel.x + r.vel.z * r.vel.z > 0.09;
       const rel = moving ? (((((Math.atan2(r.vel.x, r.vel.z) - r.heading) * 180) / Math.PI + 180) % 360) + 360) % 360 - 180 : null;
-      return { name: r.hello.name, state: r.state, speed: n2(r.speed), travelDeg: rel === null ? null : n2(rel), clip: d?.clip ?? null, upper: d?.upper ?? null, rate: n2(r.rig?.strideNow().rate ?? 0), classes: r.loco.pick?.clip ?? null };
+      return { name: r.hello.name, state: r.state, speed: n2(r.speed), travelDeg: rel === null ? null : n2(rel), clip: d?.clip ?? null, upper: d?.upper ?? null, rate: n2(r.rig?.strideNow().rate ?? 0), classes: r.loco.pick?.clip ?? null, feetWeight: n2(r.feet.weight), dropM: Number(r.feet.drop.toFixed(3)), stairs: r.stairs.way > 0 ? 'up' : r.stairs.way < 0 ? 'down' : null };
     });
   }
 
@@ -487,7 +512,7 @@ export class RemotePlayers {
     markActor(group);
     const rope = newPeerRope();
     const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, shipTarget: new THREE.Vector3(), shipTargetQ: new THREE.Quaternion(), shipVel: new THREE.Vector3(), shipHeardAt: 0, shipReck: NO_RECKON, shipMount: false, shipDocked: false, hp: 100, maxHp: 100, down: false, low: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null, rope };
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, ride: { at: new THREE.Vector3(), q: new THREE.Quaternion(), yaw: 0, first: true }, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, loco: new PeerLoco(), locoState: null, carryRig: null, carryState: null, carryClip: null, gunClass: -1, pistolCarry: new PeerPistolCarry(), swimSink: new SwimSink(), saberColor: DEFAULT_PEER_SABER, thrown: null, rope, view };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, ride: { at: new THREE.Vector3(), q: new THREE.Quaternion(), yaw: 0, first: true }, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, loco: new PeerLoco(), locoState: null, carryRig: null, carryState: null, carryClip: null, gunClass: -1, pistolCarry: new PeerPistolCarry(), swimSink: new SwimSink(), feet: new FootIk(LOCO_TUNE.ik, makeFootRay), stairs: new StairSense(), saberColor: DEFAULT_PEER_SABER, thrown: null, rope, view };
     this.remotes.set(id, remote);
     // Told before the rig is fetched: what hangs on a peer decides for itself how much of them it
     // needs, and a body is made on the first frame they are drawn, not here at the origin.
@@ -1159,6 +1184,8 @@ export class RemotePlayers {
         else r.ride.first = true;
       } else r.ride.first = true;
       const rig = r.rig;
+      // Wave 3: the drop the feet put on the figure's root last frame comes off it before anything writes the root again.
+      if (rig) r.feet.undrop(rig);
       if (rig && r.down) {
         // Down: the death clip holds on its last frame and nothing else is asked of the figure. The
         // head goes with it -- a body on the ground whose head goes on following its own camera is
@@ -1201,6 +1228,22 @@ export class RemotePlayers {
         // and their class, worked out here from what they already send (`PeerLoco`): how their travel lies against the
         // heading they sent, and their speed. With a gun in hand the legs take it and the upper body keeps the gun's
         // standing pose of the same carry. Null (the classes off, a rig without the clips, any other state) is the state's own clip, as before.
+        // Wave 3: the stairs under them along their travel, by this side's own rule from where their figure stands (their
+        // state carries none), within the feet's reach of the camera; their legs take the stair clip there.
+        const fw = this.feetWorld;
+        const reach = LOCO_TUNE.ik.peerReach;
+        const near = fw !== null && !rv && !r.aboard && r.group.position.distanceToSquared(this.cameraAt) <= reach * reach;
+        const sa = r.stairs.at;
+        sa.x = r.group.position.x;
+        sa.y = r.group.position.y;
+        sa.z = r.group.position.z;
+        sa.vx = r.vel.x;
+        sa.vz = r.vel.z;
+        sa.dt = dt;
+        sa.filter = PEER_FEET_FILTER;
+        sa.reads = near && moving && !OFF_FEET.has(state) && state !== 'crouchWalk' && state !== 'crouchWalkBack' && state !== 'kneel';
+        if (fw) r.stairs.step(fw, LOCO_TUNE.stairs);
+        PEER_IN.stairs = near ? r.stairs.way : 0;
         // Wave 2b: their gait out of their hello, their health where their game sends it (the walk hurt under the
         // tune's share), and their figure's scale.
         PEER_IN.gait = gaitIndex(r.hello.gait);
@@ -1276,6 +1319,27 @@ export class RemotePlayers {
       // measured from the chest. A peer's rig is never given a torso twist, so there is nothing to
       // take off; down, their head is level and eases there like everything else.
       rig.lookToward(0, r.down ? 0 : r.headPitch, dt, r.lookAllowed);
+    }
+    // Wave 3: their feet on this world's ground, after every placement pass, within `ik.peerReach` of the camera and
+    // standing on their feet (never down, riding, in somebody's hull, in the air, swimming, seated, lying or in a
+    // whole-body special move of Jedi Academy's). Nothing is cast while none is placed or easing out.
+    const fw = this.feetWorld;
+    const reach = LOCO_TUNE.ik.peerReach;
+    for (const r of this.remotes.values()) {
+      const rig = r.rig;
+      if (!rig || !r.group.visible) continue;
+      const fi = r.feet.in;
+      fi.on = fw !== null && !r.down && !r.vehicle && !r.aboard && !OFF_FEET.has(r.state) && !(rig.overridingJka && !rig.overridingUpperOnly) && r.group.position.distanceToSquared(this.cameraAt) <= reach * reach;
+      if (!(fi.on && LOCO_TUNE.ik.rule === 'placed') && r.feet.weight === 0 && r.feet.drop === 0) continue;
+      r.group.updateMatrixWorld(true);
+      fi.dt = dt;
+      fi.stairClip = isStairPick(r.loco.pick);
+      fi.px = r.group.position.x;
+      fi.py = r.group.position.y;
+      fi.pz = r.group.position.z;
+      fi.heading = yawOf(r.group.quaternion);
+      fi.filter = PEER_FEET_FILTER;
+      r.feet.step(rig, fw, null);
     }
     // Last of all: every figure and every picture is now where it is drawn this frame, which is
     // where a body of theirs belongs. A watcher told any sooner would follow a pose that the

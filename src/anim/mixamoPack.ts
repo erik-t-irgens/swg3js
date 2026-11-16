@@ -16,7 +16,7 @@ import * as THREE from 'three';
 import { ANIM_TUNE, watchTrims, type TrimId } from './animTune.ts';
 import { fitClip, planFit, skeletonKey, type FitPlan, type FitReport, type FitRow, type FittedClip, type TargetSkeleton } from './fit.ts';
 import { factsOf, type ClipFacts } from './locoPhase.ts';
-import { moreClips } from './locoTable.ts';
+import { STAIR_IDS, moreClips } from './locoTable.ts';
 import { ALIGN_SHIPPED, type AlignFlags } from './mixamoMap.ts';
 import { clipName, clipSlug, decodeMxa, readPackIndex, type ClipData, type PackClipRow, type PackIndex } from './mxaFile.ts';
 
@@ -212,6 +212,9 @@ export class MixamoPack {
   private rowFor(id: string): FitRow {
     const row = this.rows.get(id)!;
     const tuned = (ANIM_TUNE.trim as Record<string, number | undefined>)[id];
+    // Wave 3's stair clips are played round with their net climb taken out (the body's height is the capsule's): fitted as
+    // loops whatever the importer marked them, the climb stripped as the level travel is. Every other clip as before.
+    if (STAIR_IDS.includes(id)) return { trimStart: Math.min(tuned ?? row.trimStart, row.duration * 0.98), loop: true, level: row.level, climb: true };
     return { trimStart: Math.min(tuned ?? row.trimStart, row.duration * 0.98), loop: row.loop, level: row.level };
   }
 
@@ -479,8 +482,9 @@ export function browserIo(deps: {
       return res.arrayBuffer();
     },
     breath: browserBreath,
-    // Wave 2b's rows' clips, which the committed index does not mark `use` (marking them is a reimport, which waits on the owner).
-    also: moreClips(),
+    // Wave 2b's rows' clips, which the committed index does not mark `use` (marking them is a reimport, which waits on the owner),
+    // and wave 3's stair clips.
+    also: [...moreClips(), ...STAIR_IDS],
     now: () => performance.now(),
   };
 }

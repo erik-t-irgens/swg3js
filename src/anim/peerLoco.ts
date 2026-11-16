@@ -13,7 +13,7 @@
 // rate is read off this record (locoAlloc.test.ts measures it).
 
 import { CARRY_ORIGINAL, carryOf, type LocoRig } from './bodyLoco.ts';
-import { CROUCH, MADE_CROUCHED, MADE_CROUCH_BACK, MADE_INJURED, PRONE, PeerAsk, SPEED_SLOTS, STAND, fillSpeeds, peerLocoState, peerPickIn, posturePick, sideMode, type LocoPick } from './locoTable.ts';
+import { CROUCH, MADE_CROUCHED, MADE_CROUCH_BACK, MADE_INJURED, MADE_STAIRS_DOWN, MADE_STAIRS_RUN_DOWN, MADE_STAIRS_RUN_UP, MADE_STAIRS_UP, PRONE, PeerAsk, SPEED_SLOTS, STAND, fillSpeeds, peerLocoState, peerPickIn, posturePick, sideMode, stairPick, stairWay, type LocoPick } from './locoTable.ts';
 import type { LocoTune } from './locoTune.ts';
 
 const DEG = 180 / Math.PI;
@@ -34,6 +34,8 @@ export class PeerIn {
   hpShare = 1.5;
   /** The figure's own scale (its rig's root): what a game clip's `made` speed is scaled by. */
   scale = 1.5;
+  /** Wave 3: the stairs their figure stands on, as this side's own stairs rule holds them from where it stands (+1 up its travel, -1 down, 0 none). */
+  stairs = 0;
 }
 
 /** The tune's class speeds, read by name once a call and by a pick's own place from there (one array for every figure: a call fills it before it reads it). */
@@ -107,6 +109,12 @@ export class PeerLoco {
       found = peerPickIn(SPEEDS, state, this.ask);
     }
     if (!found || !rig.has(found.clip)) return this.drop();
+    // Wave 3, stairs: their figure on stairs this side's rule finds under it, going forward, takes the stair clip of its
+    // pace (their state carries no stairs: derived here, as their class is).
+    if (f.stairs !== 0 && tune.stairs.rule === 'stairs' && found.posture === STAND && stairWay(found.dir, tune.stairs.ways)) {
+      const up = stairPick(found, f.stairs);
+      if (rig.has(up.clip)) found = up;
+    }
     if (!this.pick || found === this.pick) {
       this.pick = found;
       this.next = null;
@@ -140,7 +148,8 @@ export class PeerLoco {
     let natural = 0;
     if (pick.made >= 0) {
       const m = tune.made;
-      natural = (pick.made === MADE_CROUCHED ? m.crouched : pick.made === MADE_CROUCH_BACK ? m.crouchBack : pick.made === MADE_INJURED ? m.injuredWalk : m.gameWalk) * f.scale;
+      const c = pick.made;
+      natural = (c === MADE_CROUCHED ? m.crouched : c === MADE_CROUCH_BACK ? m.crouchBack : c === MADE_INJURED ? m.injuredWalk : c === MADE_STAIRS_UP ? m.stairsUp : c === MADE_STAIRS_RUN_UP ? m.stairsRunUp : c === MADE_STAIRS_DOWN ? m.stairsDown : c === MADE_STAIRS_RUN_DOWN ? m.stairsRunDown : m.gameWalk) * f.scale;
     } else if (rig.readSpeed(pick.clip)) natural = rig.speedOut;
     if (natural > 0) {
       const band = tune.rate;

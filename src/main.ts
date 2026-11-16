@@ -573,6 +573,13 @@ interface LocoDebugOptions {
   gait?: string;
   /** Put the player's health at this share of its pool (0 to 1): the console's way to see the injured walk. */
   health?: number;
+  /**
+   * Wave 3: the chase camera swung this many degrees round the figure (90 its right side, -90 its left, 0 back behind it),
+   * after everything else has placed it, looking at the figure's middle: the keys still move the body by the view's own
+   * forward, so a walk up stairs can be watched side-on. The console's, for screenshots; nought (the start) is the camera
+   * as ever.
+   */
+  side?: number;
 }
 
 /** What `__debug.anim` takes beside a clip's name. */
@@ -17763,6 +17770,10 @@ class App {
     peerBodies().stampHulls(frameAt);
     // The peers' ropes glide and their arms ease by this frame's step, read as the peers are moved (`peerMoved`).
     remoteRopes.tick(dt);
+    // Wave 3: the world the other players' feet stand on and their stairs are read in, and where the camera stood (their
+    // feet are placed within `ik.peerReach` of it).
+    this.remotes.feetWorld = this.physics.world;
+    this.remotes.cameraAt.copy(this.cam.camera.position);
     this.remotes.update(dt);
     if (!this.net.online) return;
     const now = performance.now();
@@ -20543,7 +20554,9 @@ class App {
       this.cam.speedFov = this.raceView.fov;
       // The orbit pulls back with the speed while the grapple swings the body (§3.12): its own eased scale, the literal 1
       // whenever the rope is not out and the tail has run out, so nobody who never fires meets it.
-      this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);
+      this.cam.update(input, player.followAt, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);
+      // Wave 3's console side view (`__debug.loco({ side })`): the chase camera swung round the figure after it is placed.
+      if (this.sideView !== 0 && !this.cam.firstPerson) this.swingSideView(player.followAt, player.eyeHeight);
       // Fitted to the frustum the update has just given the camera, never to last frame's.
       if (refit) this.world.onCameraResized();
     }
@@ -20672,7 +20685,7 @@ class App {
       if (this.raceView.on) releaseRaceView(this.raceView);
       const widened = widenRaceView(this.raceView, ri, RACE_TUNE);
       this.cam.speedFov = this.raceView.fov;
-      this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);
+      this.cam.update(input, player.followAt, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);
       return widened;
     }
     const out = frameRaceView(this.raceView, ri, RACE_TUNE, this.raceOut);
@@ -20834,8 +20847,10 @@ class App {
     const head = rig?.boneFor('head');
     if (!rig || !head) return null;
     head.getWorldPosition(this.eyePoint);
-    // The joint sits at the skull's base; the eyes are a hand up and ahead in the head's own frame.
-    this.eyePoint.add(tmp.set(0, 0.12, 0.09).applyQuaternion(this.player.group.quaternion));
+    // The joint sits at the skull's base; the eyes are a hand up and ahead in the head's own frame. Wave 3: under
+    // `ik.eye` 'steady' the feet's placement's drop of the pelvis is put back, so the view does not bob on a slope or
+    // stairs (the drawn body's lag over a step's pop stays: it is what keeps the view from popping with the capsule).
+    this.eyePoint.add(tmp.set(0, 0.12 + this.player.eyeLift, 0.09).applyQuaternion(this.player.group.quaternion));
     return this.eyePoint;
   }
 
@@ -28538,6 +28553,23 @@ class App {
     return this.creating ? this.creatorGait : gaitOf(this.current?.gait);
   }
 
+  /** Wave 3's console side view, degrees round the figure (nought: the camera as ever). */
+  private sideView = 0;
+  private readonly sideAt = new THREE.Vector3();
+
+  /** The chase camera swung `sideView` degrees round the figure's middle, still looking at it (`__debug.loco({ side })`). */
+  private swingSideView(at: THREE.Vector3, eyeHeight: number): void {
+    const camera = this.cam.camera;
+    const mid = this.sideAt.set(at.x, at.y + eyeHeight * 0.55, at.z);
+    const a = (this.sideView * Math.PI) / 180;
+    const dx = camera.position.x - mid.x;
+    const dz = camera.position.z - mid.z;
+    camera.position.x = mid.x + dx * Math.cos(a) + dz * Math.sin(a);
+    camera.position.z = mid.z - dx * Math.sin(a) + dz * Math.cos(a);
+    camera.lookAt(mid);
+    camera.updateMatrixWorld();
+  }
+
   /** `__debug.loco`: see its row in the README. */
   private locoDebug(o: LocoDebugOptions): unknown {
     const words: string[] = [];
@@ -28555,8 +28587,24 @@ class App {
       else this.setGait(o.gait as LocoGait);
     }
     if (typeof o.health === 'number' && Number.isFinite(o.health)) p.hp = Math.max(1, Math.min(p.maxHp, Math.round(o.health * p.maxHp)));
+    if (typeof o.side === 'number' && Number.isFinite(o.side)) this.sideView = o.side;
     const rig = p.rig;
     const n2 = (v: number) => Number(v.toFixed(2));
+    const n3 = (v: number) => Number(v.toFixed(3));
+    // Wave 3: each planted sole's height over its ground (the heel, the ball and the toe's tip, metres), measured off the bones as they stand.
+    // The figure's matrices worked out first: a console call between frames reads the bones as the feet left them, not as the last draw had them.
+    if (rig) p.group.updateMatrixWorld(true);
+    const soles = rig ? [0, 1].map((side) => {
+      const h = p.feet.solePoint(side, 0, null, new THREE.Vector3());
+      const b = p.feet.solePoint(side, 1, null, new THREE.Vector3());
+      const tp = p.feet.solePoint(side, 2, null, new THREE.Vector3());
+      if (!h || !b || p.aboard) return null;
+      const gh = this.physics.groundDistance(h.x, h.y + 0.5, h.z, 2, p.body);
+      const gb = this.physics.groundDistance(b.x, b.y + 0.5, b.z, 2, p.body);
+      const gt = tp ? this.physics.groundDistance(tp.x, tp.y + 0.5, tp.z, 2, p.body) : null;
+      // The ray starts half a metre over the point: what it travels past that is the point's height over the ground.
+      return { heelOverGround: gh === null ? null : n3(gh - 0.5), ballOverGround: gb === null ? null : n3(gb - 0.5), toeTipOverGround: gt === null ? null : n3(gt - 0.5) };
+    }) : null;
     return {
       ...(words.length ? { words } : {}),
       switch: LOCO_TUNE.on,
@@ -28569,6 +28617,13 @@ class App {
       // The slope limit (wave 2b): the rule, and the feet's last verdict (sliding down a face too steep to stand on, the
       // faces met, the floor ray's face's upward share, and how many of the controller's "grounded" the rule overturned).
       slope: { rule: LOCO_TUNE.slopeRule, jump: LOCO_TUNE.slopeJump, ...LOCO_TUNE.slope, sliding: p.slope.sliding, faces: p.slope.count, floorUp: Number.isNaN(p.slope.rayNy) ? null : n2(p.slope.rayNy), overturned: p.slope.overturned, casts: p.slope.casts, kept: p.slope.kept, edges: p.slope.edges },
+      // Wave 3: the feet's placement (each leg's planted share, its lift and pull, the foot's turn and the toe's bend, the
+      // pelvis's drop, the rays cast), each planted sole's height over its ground, the stairs held, and the drawn body's
+      // lag over a step (the crease's settling and how many creases were met beside it).
+      feet: { ...p.feet.report(), soles, eyeLiftM: n3(p.eyeLift) },
+      stairs: { rule: LOCO_TUNE.stairs.rule, ways: LOCO_TUNE.stairs.ways, camera: LOCO_TUNE.stairs.camera, held: p.stairSense.way > 0 ? 'up' : p.stairSense.way < 0 ? 'down' : null, risers: p.stairSense.found.risers, casts: p.stairSense.casts, reused: p.stairSense.reused, drawnLagM: n3(p.drawn.offset), lastPopM: n3(p.drawn.popped) },
+      crease: { rule: LOCO_TUNE.slopeCrease, settling: p.slope.settling, creases: p.slope.creases },
+      sideViewDeg: this.sideView,
       // The other players here: what each one's game sent and the clip their legs play on this screen.
       peers: this.remotes.legs(),
       tune: JSON.parse(JSON.stringify(LOCO_TUNE)) as unknown,

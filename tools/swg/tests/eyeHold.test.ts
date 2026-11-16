@@ -137,7 +137,8 @@ for (const lead of [0.25, 0.37, 0.45, 0.58]) {
 {
   const { readFileSync } = await import('node:fs');
   const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
-  const onFoot = main.split('this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);').length - 1;
+  // Wave 3: the chase follows the drawn body's height (`player.followAt`, the capsule's own place under `stairs.camera` 'capsule').
+  const onFoot = main.split('this.cam.update(input, player.followAt, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);').length - 1;
   ok(onFoot === 2, 'both on-foot views hand the camera the blocker and the eyes with the default reach ahead');
   const cam = readFileSync(new URL('../../../src/core/camera.ts', import.meta.url), 'utf8');
   ok(cam.includes('if (blocked && eyes && eyeAhead > 0) this.holdEye(target, eyes, blocked);'), "the hold is asked only of a figure's own eyes");

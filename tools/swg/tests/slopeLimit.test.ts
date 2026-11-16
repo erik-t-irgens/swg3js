@@ -813,7 +813,11 @@ async function loadHarness(texts: Map<string, string>): Promise<Harness> {
   const stillAlways = await mutant('src/player/slopeRule.ts', 'if (dx <= STILL_HOLD && dx >= -STILL_HOLD && dy <= STILL_HOLD && dy >= -STILL_HOLD && dz <= STILL_HOLD && dz >= -STILL_HOLD) {', 'if (true) {');
   ok(groundedBetween(await offLip(stillAlways, 'trimesh', 80, 60), 2, LIP_TOP - 0.5), "mutation: a lip's stand kept however the body moves: walked on over the edge, it is still ground on the steep face");
   const hangs = await mutant('src/player/slopeRule.ts', 'if (floorNy >= cosLimit && this.slid > 0 && ', 'if (floorNy >= cosLimit && false && ');
+  // Wave 3's crease covers a slide landing in a crease too, so this check of the slide's own floor rule is made with it
+  // off (the two cover for each other; wave 3's crease suite mutates its own half).
+  LOCO_TUNE.slopeCrease = 'before';
   const hung = Math.max(await slideToFloor(hangs, 'trimesh', 89, 6, 60), await slideToFloor(hangs, 'trimesh', 89, 7.3, 60), await slideToFloor(hangs, 'terrain', 89, 6, 60));
+  LOCO_TUNE.slopeCrease = 'floor';
   ok(hung > 0.2, `mutation: a sliding body's floor counted wherever the ray meets it: a slide down an 89 degree face hangs ${hung.toFixed(2)} m over the floor again`);
   // And keeping a verdict changes none: the rule kept against the rule asking afresh every frame, frame for frame.
   const fresh = await mutant('src/player/slopeRule.ts', 'if (this.held !== HELD_NONE && world === this.heldWorld && cosLimit === this.heldCos) {', 'if (false) {');

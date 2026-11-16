@@ -6,7 +6,7 @@ import { Group, groups, PLAYER_SOLVER, RAPIER, type Physics } from '../core/phys
 import { markActor } from '../world/portalRender';
 import type { Vehicle } from '../vehicles/vehicle';
 import { SEATED_EYE_FALLBACK, SEATED_PELVIS_FALLBACK, bodyLift } from '../vehicles/cockpitSeat';
-import { roomFrame, roomTurn, type WalkableRoom } from '../vehicles/surfaceRoom';
+import { isSurfaceRoom, roomFrame, roomTurn, type WalkableRoom } from '../vehicles/surfaceRoom';
 import type { World } from '../world/world';
 import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type Dir, type SaberInput } from '../combat/saber';
 import { SaberThrow, THROW } from '../combat/saberThrow';
@@ -35,8 +35,11 @@ import { BodyLoco, CARRY_FULL, FadeOpts, LegOpts, fightKeysDown, gunClassIndex, 
 import { SlopeRule } from './slopeRule.ts';
 import { SwimSink } from '../anim/swimSink.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
-import { CROUCH, STAND } from '../anim/locoTable.ts';
+import { CROUCH, STAND, isStairPick } from '../anim/locoTable.ts';
 import { FELL_UNDER } from '../world/fellOut.ts';
+import { FootIk } from './footIk.ts';
+import { StairSense } from './stairSense.ts';
+import { DrawnHeight, DrawnIn } from '../anim/drawnHeight.ts';
 
 /**
  * The two lines a fire says, and the only two: one when you catch, one when it goes out, and
@@ -467,6 +470,18 @@ export class Player {
   readonly slope = new SlopeRule();
   /** The fade the falling loop comes in with as a slide begins: one kept record (`LOCO_TUNE.slope.fade`). */
   private readonly slideFade = { fade: 0.18 };
+  /**
+   * Wave 3: the feet placed on what is under them (`src/player/footIk.ts`), once the figure is posed and placed at the end
+   * of the update; the stairs the ground ahead and behind makes (`src/player/stairSense.ts`), read after the move for the
+   * next frame's legs; and the drawn body's height eased over a step's pop (`src/anim/drawnHeight.ts`).
+   */
+  readonly feet = new FootIk(LOCO_TUNE.ik, () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }));
+  readonly stairSense = new StairSense();
+  readonly drawn = new DrawnHeight();
+  private readonly drawnIn = new DrawnIn();
+  /** The world into a ship's rooms' frame (aboard), for the feet's rays; and the chase camera's point (`followAt`). */
+  private readonly roomInverse = new THREE.Matrix4();
+  private readonly followPoint = new THREE.Vector3();
   /** The blaster's own relaxed carry (its standing loop), found once a rig and a kind of gun: what rides the upper body over the classes' legs. */
   private readonly carryFor: { rig: CharacterRig | null; gun: string; clip: string | null } = { rig: null, gun: '', clip: null };
   /**
@@ -964,6 +979,45 @@ export class Player {
     return this.aboard ? this.group.position : this.pos;
   }
 
+  /** Wave 3's crease (`SlopeRule.settling`): the capsule's collider put where the body is before the move, as the grappling rope does. */
+  private syncCrease(): void {
+    const s = this.creaseAt;
+    s.x = this.pos.x;
+    s.y = this.pos.y + this.colliderOffsetY;
+    s.z = this.pos.z;
+    this.collider.setTranslation(s);
+  }
+  private readonly creaseAt = { x: 0.5, y: 0.5, z: 0.5 };
+
+  /** Wave 3: the feet's placement, the stairs held and the drawn body's lag let go of (the body stood somewhere new). */
+  private resetFeet(): void {
+    this.feet.reset();
+    this.stairSense.reset();
+    this.drawn.reset();
+  }
+
+  /**
+   * Wave 3: where the chase camera follows. Under `stairs.camera` 'smooth' the drawn body's height (its place lifted by
+   * the step's lag, along the figure's own up), else `worldPos` itself (the capsule's, its pop at each step and all).
+   */
+  get followAt(): THREE.Vector3 {
+    const lag = this.drawn.offset;
+    if (LOCO_TUNE.stairs.camera !== 'smooth' || lag === 0) return this.worldPos;
+    const out = this.followPoint.copy(this.worldPos);
+    if (this.aboard) out.add(this.followLift.set(0, lag, 0).applyQuaternion(roomTurn(this.aboard)));
+    else out.y += lag;
+    return out;
+  }
+  private readonly followLift = new THREE.Vector3();
+
+  /**
+   * Wave 3: how far the first-person eye is put back up after the feet's placement lowered the pelvis (`ik.eye` 'steady',
+   * the start: the view does not bob on a slope or stairs), along the figure's up; nought under 'follow'.
+   */
+  get eyeLift(): number {
+    return LOCO_TUNE.ik.eye === 'steady' ? this.feet.drop : 0;
+  }
+
   /** Put the figure where it is: in the world at `pos`, or, aboard, where the hull's transform carries `pos`. */
   placeVisual(): void {
     const room = this.aboard;
@@ -988,6 +1042,24 @@ export class Player {
     // alone, so the capsule, the camera's place and everything hung on the group stay where the swim has them.
     const rig = this.rig;
     if (rig) rig.root.position.y = this.swimming && !room && !this.eva && this.swimSink.now > 0 ? -this.swimSink.now : 0;
+    if (rig) this.rootBase = rig.root.position.y;
+    // Wave 3: the drawn body's lag over a step's pop, on the rig's root alone as the sink is (nought under 'before').
+    if (rig && this.drawn.offset !== 0) rig.root.position.y += this.drawn.offset;
+  }
+
+  /** What `placeVisual` last stood the rig's root at before wave 3's lag and drop: what a branch off the feet puts back (`feetOff`). */
+  private rootBase = 0;
+
+  /**
+   * Wave 3: a frame off the feet (riding, flying, adrift, dead, the editor's flight): the placement and the drawn lag let
+   * go of, and the rig's root put back where `placeVisual` last stood it without them (those branches never place the
+   * figure through it). Under every switch at 'before' the root is already there and nothing is written.
+   */
+  private feetOff(): void {
+    this.feet.reset();
+    this.drawn.reset();
+    const rig = this.rig;
+    if (rig && rig.root.position.y !== this.rootBase) rig.root.position.y = this.rootBase;
   }
 
   /** The grapple's lean (§3.12) as a turn in the world's frame, into `out`. */
@@ -1093,6 +1165,7 @@ export class Player {
     this.grounded = true;
     this.anim.drop();
     this.slope.reset();
+    this.resetFeet();
     // Stood somewhere means stood on your feet: a body put down here is not in whatever flow it was
     // last drawn into, and `placeVisual` below would otherwise draw it a waist under the new ground.
     this.dropLavaSink();
@@ -1133,6 +1206,7 @@ export class Player {
     this.submerged = false;
     this.swing = -1;
     this.slope.reset();
+    this.resetFeet();
     this.jka.reset();
     this.anim.drop();
     // Whole means rested too: the stamina is full at a respawn and at an arrival.
@@ -2454,6 +2528,7 @@ export class Player {
       // must not outlive the feet it was run on. The pool waits for the respawn, which fills it.)
       this.loco.idle(0, this.staminaPool);
       this.slope.reset();
+      this.feetOff();
       this.ragdollStep();
       return;
     }
@@ -2465,6 +2540,7 @@ export class Player {
       this.loco.idle(dt, this.staminaPool);
       // And the slope's slide with them: what the feet were sliding on is not under them when they come back.
       this.slope.reset();
+      this.feetOff();
       this.editorFlight.step(dt, input, this.pos);
       this.vel.set(0, 0, 0);
       this.grounded = false;
@@ -2512,6 +2588,7 @@ export class Player {
       this.loco.idle(dt, this.staminaPool);
       // And the slope's slide with them: what the feet were sliding on is not under them when they come back.
       this.slope.reset();
+      this.feetOff();
       this.rig?.stopOverride();
       this.thrown.cancel();
       this.updateBlades();
@@ -2525,6 +2602,7 @@ export class Player {
       this.loco.idle(dt, this.staminaPool);
       // And the slope's slide with them: what the feet were sliding on is not under them when they come back.
       this.slope.reset();
+      this.feetOff();
       this.rig?.stopOverride();
       this.saber.holster();
       this.thrown.cancel();
@@ -2539,6 +2617,7 @@ export class Player {
       this.loco.idle(dt, this.staminaPool);
       // And the slope's slide with them: what the feet were sliding on is not under them when they come back.
       this.slope.reset();
+      this.feetOff();
       this.evaUpdate(dt, input, cam);
       return;
     }
@@ -2634,6 +2713,8 @@ export class Player {
     // The speed classes: the frame's class, its clip and its speed, and the stamina's step (`BodyLoco.plan`). Where
     // the class rules the body (on its feet, out of the water) its speed is the body's, under whatever multiplies it;
     // crouched, prone, kneeling and swimming keep the speeds they always had, and so does everything with the classes off.
+    // Wave 3: the stairs the rule held under the body last frame (read after the move, `stairSense`).
+    this.locoIn.stairs = this.stairSense.way;
     const lo = this.locoIn;
     lo.dt = dt;
     lo.mz = mz;
@@ -2847,7 +2928,10 @@ export class Player {
       moveX += gc.x;
       moveY += gc.y;
       moveZ += gc.z;
-    }
+    } else if (this.slope.settling) this.syncCrease();
+    // Wave 3's crease: how fast a frame that began in the air falls into its move, and the frame's seconds.
+    this.slope.at.fall = !this.grounded && this.vel.y < 0 ? -this.vel.y : 0;
+    this.slope.at.dt = dt;
     // The dead are walked through: a corpse is no wall. So is another player: their body comes off
     // the wire and teleports between messages, and one walked into must never climb, shove or trap
     // you. Their collision groups already keep them out of a filtered query like this one; the
@@ -2884,6 +2968,31 @@ export class Player {
     this.anim.slide = this.slope.sliding;
     if (this.grounded && this.vel.y < 0) this.vel.y = 0;
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
+    // Wave 3: the drawn body's lag over a step (`DrawnHeight`): what the controller added to a move that began on the
+    // ground beyond the plane under the body's own rise; and the stairs the ground along the travel makes, read here
+    // after the move for the next frame's legs (`StairSense`). Neither touches the body.
+    const rope = this.grapple.attached || this.grapple.released;
+    const di = this.drawnIn;
+    di.dt = dt;
+    di.dx = mv.x;
+    di.dy = mv.y;
+    di.dz = mv.z;
+    di.askedY = moveY;
+    di.nx = this.slope.planeNx;
+    di.ny = this.slope.planeNy;
+    di.nz = this.slope.planeNz;
+    di.grounded = wasGrounded && !this.swimming && !rope;
+    this.drawn.step(di, LOCO_TUNE.stairs);
+    const sa = this.stairSense.at;
+    sa.x = this.pos.x;
+    sa.y = this.pos.y;
+    sa.z = this.pos.z;
+    sa.vx = this.vel.x;
+    sa.vz = this.vel.z;
+    sa.dt = dt;
+    sa.filter = filter;
+    sa.reads = this.grounded && !this.swimming && !rope && !this.crouching && !this.prone && !this.kneeling && moving;
+    this.stairSense.step(this.physics.world, LOCO_TUNE.stairs);
     // Off the ground with no jump this frame (a jump puts the feet down as `grounded` false before the move): a step off
     // a ledge or a drop. Under the owner's air rule, judged once now by one ray down from the feet (the game's own
     // ground query, which passes over other players): the hop over a drop of `fall.hopDrop` or more (`BodyAnim.leftGround`).
@@ -3092,7 +3201,35 @@ export class Player {
     ss.step(this.swimming && !moving && !cam.firstPerson, ANIM_TUNE);
 
     this.placeVisual();
+    this.placeFeet(dt);
+  }
+
+  /**
+   * Wave 3: the feet placed on what is under them (`FootIk`), the figure posed and placed: standing on its feet on the
+   * ground (idle, every class, crouched, kneeling, Jedi Academy's legs, a gun's carry); never in the air, swimming, prone,
+   * on the rope or in its flight, dead, thrown, standing in a flow, on the gravity boots' surface (whose up is not the
+   * world's), sliding, or in a whole-body special move (a flip, a kata, a roll, the landing roll: Jedi Academy's own
+   * one-offs on the whole body that are no plain swing). Aboard a ship's rooms its rays are cast in the rooms' own physics.
+   */
+  private placeFeet(dt: number): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const fi = this.feet.in;
+    const special = (this.saber.busy && this.saber.current.kind === 'special') || this.jka.rolling || this.jka.inSpecialJump || (rig.overridingJka && !rig.overridingUpperOnly && !this.saber.busy);
+    fi.on = this.grounded && !this.swimming && !this.prone && !this.grapple.attached && !this.grapple.released && !this.flung && this.hp > 0 && this.drawnSink <= 0 && !(this.aboard && isSurfaceRoom(this.aboard)) && !this.slope.sliding && !special;
+    fi.dt = dt;
+    fi.stairClip = this.loco.legsOn && isStairPick(this.loco.pick);
+    fi.px = this.pos.x;
+    fi.py = this.pos.y;
+    fi.pz = this.pos.z;
+    fi.heading = this.heading;
+    fi.filter = this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+    // Nothing to place and nothing eased in: under 'before' (and off the feet) the frame asks nothing more, the figure's
+    // matrices left for the draw to work out as ever.
+    if (!(fi.on && LOCO_TUNE.ik.rule === 'placed') && this.feet.weight === 0 && this.feet.drop === 0) return;
     this.group.updateMatrixWorld(true);
+    const room = this.aboard;
+    this.feet.step(rig, this.physics.world, room ? this.roomInverse.copy(roomFrame(room)).invert() : null);
   }
 
   /**

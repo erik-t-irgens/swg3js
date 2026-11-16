@@ -181,7 +181,8 @@ ok(pitchStep() < 0.71, 'which is finer than three quarters of a degree');
 // still the neck kept last frame's turn, and the first-person eye, read before `lookToward`, shook back and forth.
 {
   const rig = readFileSync(new URL('../../../src/player/rig.ts', import.meta.url), 'utf8');
-  const update = rig.slice(rig.indexOf('  update(dt: number): void {'), rig.indexOf('  update(dt: number): void {') + 900);
+  // The window reaches past wave 3's own lines before the mixer (the feet's clean pose put back first, `legPose.restore`).
+  const update = rig.slice(rig.indexOf('  update(dt: number): void {'), rig.indexOf('  update(dt: number): void {') + 1400);
   const mixed = update.indexOf('this.mixer.update(dt);');
   const neck = update.indexOf('this.cleanLookBone(this.lookBones.neck);');
   const head = update.indexOf('this.cleanLookBone(this.lookBones.head);');

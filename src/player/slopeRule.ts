@@ -150,7 +150,36 @@ export class SlopeAt {
   offsetY = 0.5;
   r = 0.5;
   filter = 0.5;
+  /** Wave 3's crease: on a frame that began in the air, how fast the body was falling into the move, m/s (nought on any other). */
+  fall = 0.5;
+  /** The frame's seconds (the crease's settling counts down by them). */
+  dt = 0.5;
 }
+
+/**
+ * Wave 3, the crease (wave 2b's leftover): a body dropped straight into the crease where a face too steep to stand on
+ * meets the floor could come to rest leaning on the face over the floor, 0.08 to 0.32 m up (42 of 192 such drops). Two
+ * causes, measured: the floor ray found the floor under the body, within its reach, and called it ground while the body
+ * was held up by the face (the slide's own `FLOOR_TOUCH`, asked only after a slide); and at 144 frames a second, beside a
+ * face the controller pressed the body off, the capsule's collider, which the physics moves only at its own 60 Hz step,
+ * stood a frame or two behind the body, and the controller's every move was worked out from where it stood then, so the
+ * body bounced on the floor for good (as the grappling rope found, `Grapple.syncCollider`).
+ *
+ * The mend: a landing from a fall faster than `CREASE_FALL` asks the fan whether a steep face touches the body; one that
+ * does is a crease, and for `CREASE_SETTLE` seconds after it the floor counts as ground only once the body sits on it
+ * (`FLOOR_TOUCH`, as after a slide), and the caller puts the capsule's collider where the body is before each move
+ * (`settling`). A landing on open ground, a landing beside a wall, a kerb and the autostep (whose one frame in the air is
+ * never a fall that fast) meet none of it.
+ */
+export const CREASE_FALL = 2.5;
+/** How long a crease's settling lasts, seconds: a slide down to the floor and the bounce the stale collider makes there. */
+export const CREASE_SETTLE = 0.6;
+/**
+ * How far off the floor a body settling in a crease may sit for the floor alone to make it ground, metres: the
+ * controller's own offset (0.04) and a few centimetres. `FLOOR_TOUCH`'s 0.12 lets a body leaning on a sheer face rest
+ * 0.08 m up (measured: a slide down an 89 degree face at 60 frames a second ended so).
+ */
+export const CREASE_TOUCH = 0.07;
 
 /**
  * The edge probe's verdict from what the two rays each side of the support met (pure, for the tests): a walkable face
@@ -204,6 +233,17 @@ export class SlopeRule {
   edges = 0;
   /** Where the caller says the body stands, written before every `judge`. */
   readonly at = new SlopeAt();
+  /** Wave 3's crease: seconds of settling left after a landing into one (the caller syncs the collider meanwhile: `settling`), and how many creases were met. */
+  settle = 0.5;
+  creases = 0;
+  /**
+   * Wave 3: the walkable plane the body stands on this frame (its normal), NaN for none known: the floor ray's face where
+   * it was walkable, or the plane a kept verdict stands on. What the drawn body's height tells a step's pop from the
+   * ground's own slope by (src/anim/drawnHeight.ts).
+   */
+  planeNx = 0.5;
+  planeNy = 0.5;
+  planeNz = 0.5;
   private controller: SlopeController | null = null;
   private climbSet = MADE_CLIMB;
   private ray: RAPIER.Ray | null = null;
@@ -228,6 +268,15 @@ export class SlopeRule {
   constructor() {
     // Starts as a fraction so a frame writing fractions into it never boxes one (wave 2a's lesson).
     this.rayNy = Number.NaN;
+    this.settle = 0;
+    this.planeNx = Number.NaN;
+    this.planeNy = Number.NaN;
+    this.planeNz = Number.NaN;
+  }
+
+  /** Whether the crease's settling is on this frame: the caller puts the capsule's collider where the body is before the move. */
+  get settling(): boolean {
+    return this.settle > 0 && this.on && LOCO_TUNE.slopeCrease === 'floor';
   }
 
   /** A face met this frame, kept once (a face two rays meet is one face) while there is room. */
@@ -277,6 +326,10 @@ export class SlopeRule {
     this.slid = 0;
     this.held = HELD_NONE;
     this.heldWorld = null;
+    this.settle = 0;
+    this.planeNx = Number.NaN;
+    this.planeNy = Number.NaN;
+    this.planeNz = Number.NaN;
   }
 
   /**
@@ -301,6 +354,14 @@ export class SlopeRule {
    */
   judge(world: SlopeWorld, grounded: boolean, ruled: boolean, body: RAPIER.RigidBody, pass: (c: RAPIER.Collider) => boolean): boolean {
     this.sliding = false;
+    // Wave 3's crease: its settling counts down on every frame, and the plane under the body is this frame's to say.
+    if (this.settle > 0) {
+      this.settle -= this.at.dt;
+      if (this.settle < 0) this.settle = 0;
+    }
+    this.planeNx = Number.NaN;
+    this.planeNy = Number.NaN;
+    this.planeNz = Number.NaN;
     if (!grounded || !ruled || !this.on) {
       this.count = 0;
       this.rayNy = Number.NaN;
@@ -330,6 +391,9 @@ export class SlopeRule {
             this.rayNy = this.hny;
             this.slid = 0;
             this.kept++;
+            this.planeNx = this.hnx;
+            this.planeNy = this.hny;
+            this.planeNz = this.hnz;
             return true;
           }
         }
@@ -363,13 +427,19 @@ export class SlopeRule {
       this.fnz = hit.normal.z;
     }
     // A walkable face under the body is ground; but a body sliding down a steep face onto it is ground only once it sits on
-    // it (`FLOOR_TOUCH`): until then what it touches decides below, the floor's face no longer counting for the fan.
+    // it (`FLOOR_TOUCH`): until then what it touches decides below, the floor's face no longer counting for the fan. So is
+    // a body settling in a crease (wave 3), and it sits on it only nearer (`CREASE_TOUCH`).
+    this.lowNow = low;
     let floorNy = this.rayNy;
     if (floorNy >= cosLimit && this.slid > 0 && hit!.timeOfImpact * floorNy - r > FLOOR_TOUCH) floorNy = Number.NaN;
+    if (floorNy >= cosLimit && this.settle > 0 && LOCO_TUNE.slopeCrease === 'floor' && hit!.timeOfImpact * floorNy - r > CREASE_TOUCH) floorNy = Number.NaN;
     if (floorNy >= cosLimit) {
       this.slid = 0;
       // Kept on that plane until the body leaves it (`PLANE_HOLD`, `PLANE_REACH`).
       const n = hit!.normal;
+      this.planeNx = n.x;
+      this.planeNy = n.y;
+      this.planeNz = n.z;
       this.held = HELD_PLANE;
       this.heldWorld = world;
       this.heldCos = cosLimit;
@@ -380,6 +450,7 @@ export class SlopeRule {
       this.hnx = n.x;
       this.hny = n.y;
       this.hnz = n.z;
+      this.armCrease(world, body, pass, cosLimit);
       return true;
     }
     // The faces the controller could have called ground, at the capsule's place after the move: a fan of rays out of the
@@ -415,12 +486,52 @@ export class SlopeRule {
       this.hx = x;
       this.hy = low;
       this.hz = z;
+      this.armCrease(world, body, pass, cosLimit);
       return true;
     }
     this.sliding = true;
     this.slid++;
     this.overturned++;
     return false;
+  }
+
+  /**
+   * Wave 3's crease, on a verdict that the body stands: a landing (a frame that began in the air, falling faster than
+   * `CREASE_FALL`) beside a face too steep to stand on that touches the body is a crease. It settles for `CREASE_SETTLE`
+   * seconds, and the stand just found is not kept, so the next frame asks again (sitting on the floor within
+   * `CREASE_TOUCH`, else held up by the face, and so sliding).
+   */
+  private armCrease(world: SlopeWorld, body: RAPIER.RigidBody, pass: (c: RAPIER.Collider) => boolean, cosLimit: number): void {
+    if (LOCO_TUNE.slopeCrease !== 'floor' || !(this.at.fall > CREASE_FALL)) return;
+    if (!this.creaseFan(world, body, pass, cosLimit)) return;
+    this.settle = CREASE_SETTLE;
+    this.creases++;
+    this.held = HELD_NONE;
+  }
+
+  /**
+   * Wave 3's crease: whether a face too steep to stand on touches the body as it lands (the fan's rays, out of the lower
+   * sphere's middle, that the floor ray's own origin stands at). Its own loop: nothing it finds is kept for the slide.
+   */
+  private creaseFan(world: SlopeWorld, body: RAPIER.RigidBody, pass: (c: RAPIER.Collider) => boolean, cosLimit: number): boolean {
+    const ray = this.ray!;
+    const r = this.at.r;
+    ray.origin.x = this.at.x;
+    ray.origin.y = this.lowNow;
+    ray.origin.z = this.at.z;
+    let steep = false;
+    for (let i = 0; i < FAN.length && !steep; i += 3) {
+      ray.dir.x = FAN[i];
+      ray.dir.y = FAN[i + 1];
+      ray.dir.z = FAN[i + 2];
+      this.casts++;
+      const h = world.castRayAndGetNormal(ray, r + FAN_REACH, true, undefined, this.at.filter, undefined, body, pass);
+      if (h && h.normal.y > 1e-3 && h.normal.y < cosLimit) steep = true;
+    }
+    ray.dir.x = 0;
+    ray.dir.y = -1;
+    ray.dir.z = 0;
+    return steep;
   }
 
   /**

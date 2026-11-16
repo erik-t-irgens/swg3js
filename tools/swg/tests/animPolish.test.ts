@@ -262,6 +262,17 @@ function jumpThrough(t: AnimTune, fps: number, level: number, held: number, floo
   // because a rig's root stands at the origin (a GLB's scene or a parts character's own group, each made fresh, the
   // player's and a peer's added under their own group as they are) and nothing else in the game moves it: held here over
   // every source file, so a writer added later cannot have its work put back to nought by the water's 'before'.
+  // Wave 3 adds four writers, each by its own line: the drawn body's lag and the feet's drop laid on the root after the
+  // sink's write in the same frame (so the sink never puts their work back), the drop taken off a peer's root before its
+  // own frame writes it, and a frame off the feet putting the root back where the sink stood it. Each writes only what is
+  // not nought, and under 'before' (`ik.rule`, `stairs.rule`) nothing makes one.
+  const WAVE3_ROOT = [
+    'if (rig && this.drawn.offset !== 0) rig.root.position.y += this.drawn.offset;',
+    'if (rig && rig.root.position.y !== this.rootBase) rig.root.position.y = this.rootBase;',
+    'if (this.applied !== 0 && rig === this.rig) rig.root.position.y += this.applied;',
+    'rig.root.position.y -= drop;',
+  ];
+  const wave3Root: string[] = [];
   const writers: string[] = [];
   const walk = (dir: string) => {
     for (const e of readdirSync(join(root, dir), { withFileTypes: true })) {
@@ -272,13 +283,14 @@ function jumpThrough(t: AnimTune, fps: number, level: number, held: number, floo
         const own = rel === 'src/player/rig.ts' ? '|\\bthis\\.root' : '';
         const write = new RegExp(`(\\brig\\??\\.root${own})\\.position(\\.[xyz])?\\s*([-+*/]?=(?!=)|\\.(set|setX|setY|setZ|copy|add|sub|addScaledVector|multiplyScalar|lerp|applyMatrix4|applyQuaternion)\\()`);
         text(rel).split('\n').forEach((line, i) => {
-          if (write.test(line)) writers.push(`${rel}:${i + 1}`);
+          if (write.test(line)) (WAVE3_ROOT.includes(line.trim()) ? wave3Root : writers).push(`${rel}:${i + 1}`);
         });
       }
     }
   };
   walk('src');
   const rigTs = text('src/player/rig.ts');
+  ok(wave3Root.length === 4 && wave3Root.filter((w) => w.startsWith('src/player/player.ts:')).length === 2 && wave3Root.filter((w) => w.startsWith('src/player/footIk.ts:')).length === 2, `wave 3's four writers of a rig's root are its own lines and nothing else (${wave3Root.join(', ')})`);
   ok(writers.length === 2 && writers.some((w) => w.startsWith('src/player/player.ts:')) && writers.some((w) => w.startsWith('src/net/remotePlayers.ts:')) && rigTs.includes('return new CharacterRig(gltf.scene, gltf.animations, options);') && rigTs.includes('const rig = new CharacterRig(character.group, character.clips, options);') && text('src/player/character.ts').includes('readonly group = new THREE.Group();'), `nothing in the game writes a rig's root's place but the sink's two lines (${writers.join(', ')}), and a rig's root is a scene or a group made fresh at the origin: under 'before' the nought they write is the nought it already stood at, as 62143fe left it`);
 }
 

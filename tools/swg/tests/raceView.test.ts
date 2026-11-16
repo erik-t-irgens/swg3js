@@ -439,7 +439,9 @@ for (const fps of RATES) {
   ok(eased(1 / 144) < 1.03 && eased(0.5) > 1.25, `8: four frames at 144 fps pull the view out to ${r2(eased(1 / 144))} with the frame's step, and to ${r2(eased(0.5))} with the record's half second`);
   // The cascades are fitted after the camera has written this frame's field of view (they read it as they fit).
   const place = /private placeRaceView\(.*\): void \{\s*\n\s*if \(this\.placeRaceCamera\(v, blocked, dt, eyes\)\) this\.world\.onCameraResized\(\);/.test(main);
-  const orbit = /this\.cam\.update\(input, player\.worldPos, blocked, dt, eyes, player\.grapple\.camScaleNow, player\.eyeHeight\);\s*\n\s*\/\/ Fitted to the frustum the update has just given the camera, never to last frame's\.\s*\n\s*if \(refit\) this\.world\.onCameraResized\(\);/.test(main);
+  // Animation wave 3: the camera follows the drawn body (`player.followAt`), and the console's side view (`__debug.loco({ side })`) swings it
+  // round the figure before the refit, so the cascades are fitted to where it looks.
+  const orbit = /this\.cam\.update\(input, player\.followAt, blocked, dt, eyes, player\.grapple\.camScaleNow, player\.eyeHeight\);\s*\n\s*\/\/ Wave 3's console side view[^\n]*\n\s*if \(this\.sideView !== 0 && !this\.cam\.firstPerson\) this\.swingSideView\(player\.followAt, player\.eyeHeight\);\s*\n\s*\/\/ Fitted to the frustum the update has just given the camera, never to last frame's\.\s*\n\s*if \(refit\) this\.world\.onCameraResized\(\);/.test(main);
   ok(place && orbit, '8: (main.ts: the cascades are refitted after the camera writes the field of view, in the race view and as it eases out)');
 }
 

@@ -89,6 +89,12 @@ export interface LocoTune {
    * (a Jedi's rebound, wall run and flip) are the air's and are not this switch's.
    */
   slopeJump: 'refused' | 'allowed';
+  /**
+   * Wave 3, the crease (src/player/slopeRule.ts's `CREASE_*`): 'floor' (the start), a body that falls into the crease where
+   * a face too steep to stand on meets the floor ends on the floor; 'before', 23d7898's, where it could rest leaning on the
+   * face 0.08 to 0.32 m up. Only under `slopeRule` 'limit'.
+   */
+  slopeCrease: 'floor' | 'before';
   slope: {
     /**
      * The climb limit, degrees: a face steeper than this is never ground, and the controller will not walk up it.
@@ -158,7 +164,106 @@ export interface LocoTune {
    * `walking_1`): 0.564, its index speed (0.573) fitted to the human male's legs (times 0.984), since the importer
    * marked no foot landing in it and the pack gives it no stride of its own to be played against.
    */
-  made: { crouched: number; crouchBack: number; gameWalk: number; injuredWalk: number };
+  /**
+   * Wave 3's stair clips' strides along the stairs, m/s on a figure of scale 1: the pack's speeds for these four are no
+   * strides (the importer read each stair clip as flat ground), so each was measured off the human male's own rig in
+   * node (tools/swg/tests/stairsRule.test.ts measures it again on every run): the planted foot's speed back along the
+   * stairs, the median over its stance, with the clip's net climb taken out as the game plays it. `stairsUp`
+   * (`ascending_stairs`) 0.365, `stairsRunUp` (`running_up_stairs`) 0.749, `stairsDown` (`descending_stairs_1`) 0.485,
+   * `stairsRunDown` (`descending_stairs`) 1.119. (The pack said 0.387, 0.754, 0.218 and 0.493.)
+   */
+  made: { crouched: number; crouchBack: number; gameWalk: number; injuredWalk: number; stairsUp: number; stairsRunUp: number; stairsDown: number; stairsRunDown: number };
+  /**
+   * Wave 3, the feet placed on what is under them (src/player/footIk.ts, the owner's brief's line 19): each foot's ground
+   * found under where the clip puts it, the leg bent by the two-bone solve (src/anim/twoBone.ts) so the sole meets it,
+   * the foot turned to its slope, and the pelvis lowered by as much as the lower foot needs. On the player's figure and
+   * every other player's within `peerReach` of the camera; never the creatures, the fighters or the people (the AI
+   * pass's). Standing on feet on the ground only (idle, every class, crouched, kneeling, Jedi Academy's legs, a gun's
+   * carry); never in the air, swimming, prone, riding, on the rope, dead, flying, adrift, on the gravity boots' surface,
+   * standing in a flow or in a whole-body special move.
+   */
+  ik: {
+    /** 'placed' (the start): the feet on their ground. 'before': 23d7898's figure, the clip's feet wherever they fall. */
+    rule: 'placed' | 'before';
+    /**
+     * First person: 'steady' (the start) keeps the eye where the figure's head would be with no drop of the pelvis, so the
+     * view does not bob on a slope or stairs; 'follow' puts the eye on the drawn head, drop and all.
+     */
+    eye: 'steady' | 'follow';
+    /** How far a foot pitches to its slope at most, degrees: 35, a little over a walkable ramp's lean the ankle can take. */
+    pitchMost: number;
+    /** How far a foot rolls to its slope at most, degrees: 20, an ankle's own side-to-side reach is less than its pitch. */
+    rollMost: number;
+    /** How far the pelvis is lowered at most, metres: 0.4, a riser and a half (the drop never raises it above the clip). */
+    pelvisMost: number;
+    /**
+     * The ease, seconds: how fast the placement comes in and goes out as the feet take the ground and leave it, how fast
+     * each foot's own planting comes in (and a stair clip's goes out), how fast a sudden change of what a planted foot
+     * stands on (a riser's edge crossed under it, an edge pull, a turn to a new slope) slides in rather than teleporting,
+     * and how fast the pelvis comes back up after a drop (it goes down with the eased need of the lower foot, or that
+     * foot would stand short of its ground). 0.08: about five frames at 60, no pop.
+     */
+    ease: number;
+    /**
+     * The planted band, metres of the foot's height over its own resting height in the clip: at or under `plantLow` the
+     * foot is planted whole (0.04, a walk's heel and toe both down), at or over `plantHigh` it swings as the clip has it
+     * (0.15, a walk's lifted foot), smoothly between.
+     */
+    plantLow: number;
+    plantHigh: number;
+    /**
+     * The stair clips' planted band (a stair clip's planted foot climbs a tread a step in the clip, so its height says
+     * nothing), by how the ankle goes along the figure's front in the figure's own frame, m/s: planted whole while it goes
+     * back under the body at least `stairBack` (0.1: a stance foot goes back at the clip's stride, at any rate it is played
+     * at, so the band holds whether the feet keep the ground or slide), swinging while it goes ahead at least `stairAhead`
+     * (0.3), smoothly between.
+     */
+    stairBack: number;
+    stairAhead: number;
+    /** How far a toe bends to meet its own ground on a step's edge at most, degrees: 30 (the brief's start). */
+    toeMost: number;
+    /** How far a foot over nothing is drawn in toward the body's middle to stand on the edge at most, metres: 0.25. */
+    edgePull: number;
+    /** Other players' figures within this many metres of the camera are placed too: 40 (the brief's start). */
+    peerReach: number;
+  };
+  /**
+   * Wave 3, stairs (src/anim/stairsRule.ts, the owner's brief's line 52 and its "Stairs" list): found by a rule from the
+   * ground's heights along the travel, never a mesh's name, and walked up and down by the stair clips, standing and
+   * moving forward only; and the drawn body's height eased over the capsule's step at any kerb.
+   */
+  stairs: {
+    /** 'stairs' (the start): the rule, the clips and the drawn height's ease. 'before': 23d7898's (no stair clip, the drawn body on the capsule). */
+    rule: 'stairs' | 'before';
+    /** Which ways take the stair clips: 'forward' (the brief's "ALWAYS forward"), 'forwardDiag' the forward diagonals too, the body turned as the walk diagonals turn it. */
+    ways: 'forward' | 'forwardDiag';
+    /** The chase camera: 'smooth' (the start) follows the drawn height, 'capsule' the capsule's (its pop at each step and all). */
+    camera: 'smooth' | 'capsule';
+    /** The window the heights are sampled over along the travel, metres, half behind the body and half ahead: 1.6. */
+    look: number;
+    /** Every this many metres: 0.1. */
+    step: number;
+    /** A riser is a rise or a fall of at least this (0.08 m: under it is a bump)... */
+    riserMin: number;
+    /** ...and at most this (0.5 m: the autostep's own height; more is a wall or a ledge)... */
+    riserMax: number;
+    /** ...over less than this much ground (0.12 m: steeper than any ramp a body walks). */
+    riserRun: number;
+    /** A tread is ground level within this, metres (0.03: a walkable ramp's rise over a sample's step is more). */
+    level: number;
+    /** ...for at least this long, metres (0.18: a narrow stair's tread). */
+    treadMin: number;
+    /** Stairs are at least this many risers the same way in the window: 2 (a single kerb is no stairs). */
+    count: number;
+    /** On stairs until this far is travelled with no riser in the window, metres: 0.5. */
+    leave: number;
+    /** A class's speed on stairs, as a share of its speed: 1 (changes nothing; whether a class goes slower on stairs is a rule of play). */
+    pace: number;
+    /** How fast the drawn body's height catches the capsule's after a step pops it, seconds: 0.12. */
+    ease: number;
+    /** The drawn body is never more than this behind the capsule's height, metres: 0.5 (the autostep's height). */
+    lagMost: number;
+  };
   /**
    * What each class moves the body at, metres a second, by the way it goes. Every start is the owner's own, pinned on
    * 2026-11-15 after he tried the paces ("the speed for sprint fast"), but the backward walks (1.28, the walking
@@ -318,6 +423,7 @@ export const LOCO_TUNE: LocoTune = {
   proneBack: 'today',
   slopeRule: 'limit',
   slopeJump: 'refused',
+  slopeCrease: 'floor',
   slope: { climb: 55, slide: 1, fade: 0.18 },
   injured:{ rule: 'walk', below: 0.25, speed: 0.57 },
   crouch: {
@@ -329,7 +435,9 @@ export const LOCO_TUNE: LocoTune = {
     forward: { slow: 0.66, normal: 0.95, fast: 2.15 },
     stamina: { slow: 10, normal: 10, fast: 4 },
   },
-  made: { crouched: 1.49, crouchBack: 1.39, gameWalk: 1.44, injuredWalk: 0.564 },
+  made: { crouched: 1.49, crouchBack: 1.39, gameWalk: 1.44, injuredWalk: 0.564, stairsUp: 0.365, stairsRunUp: 0.749, stairsDown: 0.485, stairsRunDown: 1.119 },
+  ik: { rule: 'placed', eye: 'steady', pitchMost: 35, rollMost: 20, pelvisMost: 0.4, ease: 0.08, plantLow: 0.04, plantHigh: 0.15, stairBack: 0.1, stairAhead: 0.3, toeMost: 30, edgePull: 0.25, peerReach: 40 },
+  stairs: { rule: 'stairs', ways: 'forward', camera: 'smooth', look: 1.6, step: 0.1, riserMin: 0.08, riserMax: 0.5, riserRun: 0.12, level: 0.03, treadMin: 0.18, count: 2, leave: 0.5, pace: 1, ease: 0.12, lagMost: 0.5 },
   speed: {
     forward: { walk: 1.66, jog: 4, tired: 3.5, run: 6, sprint: 7 },
     back: { walk: 1.28, jog: 3, run: 4 },
@@ -392,6 +500,33 @@ export const LOCO_RANGES: Record<string, { min: number; max: number }> = {
   'made.crouchBack': { min: 0.3, max: 4 },
   'made.gameWalk': { min: 0.3, max: 4 },
   'made.injuredWalk': { min: 0.2, max: 3 },
+  'made.stairsUp': { min: 0.1, max: 3 },
+  'made.stairsRunUp': { min: 0.1, max: 4 },
+  'made.stairsDown': { min: 0.1, max: 3 },
+  'made.stairsRunDown': { min: 0.1, max: 4 },
+  'ik.pitchMost': { min: 0, max: 60 },
+  'ik.rollMost': { min: 0, max: 45 },
+  'ik.pelvisMost': { min: 0, max: 0.8 },
+  'ik.ease': { min: 0, max: 0.5 },
+  'ik.plantLow': { min: 0, max: 0.3 },
+  'ik.plantHigh': { min: 0.01, max: 0.5 },
+  'ik.stairBack': { min: 0, max: 2 },
+  'ik.stairAhead': { min: 0, max: 3 },
+  'ik.toeMost': { min: 0, max: 60 },
+  'ik.edgePull': { min: 0, max: 0.5 },
+  'ik.peerReach': { min: 0, max: 200 },
+  'stairs.look': { min: 0.4, max: 4 },
+  'stairs.step': { min: 0.03, max: 0.3 },
+  'stairs.riserMin': { min: 0.02, max: 0.4 },
+  'stairs.riserMax': { min: 0.1, max: 1 },
+  'stairs.riserRun': { min: 0.02, max: 0.5 },
+  'stairs.level': { min: 0.005, max: 0.1 },
+  'stairs.treadMin': { min: 0.05, max: 1 },
+  'stairs.count': { min: 1, max: 6 },
+  'stairs.leave': { min: 0, max: 3 },
+  'stairs.pace': { min: 0.2, max: 1.5 },
+  'stairs.ease': { min: 0, max: 0.6 },
+  'stairs.lagMost': { min: 0, max: 1 },
   'rate.min': { min: 0.2, max: 1 },
   'rate.max': { min: 1, max: 3 },
   'rate.feet': { min: 0.8, max: 1.25 },
@@ -434,7 +569,13 @@ export const LOCO_CHOICES: Readonly<Record<string, readonly string[]>> = {
   proneBack: ['today', 'reverse'],
   slopeRule: ['limit', 'before'],
   slopeJump: ['refused', 'allowed'],
+  slopeCrease: ['floor', 'before'],
   'injured.rule': ['walk', 'off'],
+  'ik.rule': ['placed', 'before'],
+  'ik.eye': ['steady', 'follow'],
+  'stairs.rule': ['stairs', 'before'],
+  'stairs.ways': ['forward', 'forwardDiag'],
+  'stairs.camera': ['smooth', 'capsule'],
   'gunCarry.pistol': CARRIES,
   'gunCarry.carbine': CARRIES,
   'gunCarry.rifle': CARRIES,

@@ -201,7 +201,8 @@ ok(net.includes('const q = p.aboard || p.eva || leans ? (p.group.quaternion.toAr
 const remotes = read('../../../src/net/remotePlayers.ts');
 ok(/import \{ glidePeerTurn(, \w+)* \} from '\.\/peerTurn\.ts';/.test(remotes) && remotes.includes('glidePeerTurn(r.group, r.targetQ, r.heading, k, r);') && !/r\.group\.rotation\.set\(0, r\.group\.rotation\.y/.test(remotes), "a peer's turn is glided by peerTurn.ts, never by the Euler yaw a whole turn leaves behind");
 // The camera's pull and the shake: the camera's own arguments and register, nothing new in it.
-ok(main.includes('this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);'), "the on-foot camera is handed the hook's own scale in place of its 1");
+// Animation wave 3: the place the camera follows is the drawn body's (`player.followAt`: the capsule's own under `stairs.camera` 'capsule').
+ok(main.includes('this.cam.update(input, player.followAt, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);'), "the on-foot camera is handed the hook's own scale in place of its 1");
 const feel = method(main, '  private stepGrappleFeel(): void {');
 ok(feel.includes('this.hurtFrom(this.grappleSlamAt.set(s.x, s.y, s.z));') && feel.includes('setViewShake(g.shakeNow);') && feel.includes('setViewShake(g.joltNow);'), "a slam raises the flash and the arc at its contact, and the shake and the jolt go through the camera's register");
 ok((main.match(/this\.stepGrappleFeel\(\);/g) ?? []).length === 2, 'the feel is handed over by the frame and by advance alike');
