@@ -158,6 +158,26 @@ export const CLIMB_GROUPS: DialGroup[] = [
     ],
   },
   {
+    title: 'Climbing II: shallow lips and the hang\'s keys',
+    note: 'Each switch\'s other word is the climbing as the feedback round left it. shelves grab: a lip is the top edge of any face whose top runs back far enough with room for the hands over it, so a ladder\'s rung, a shelf with its next tier behind it and a sill are grabbed, hung from and hopped to. hangKeys cue: hold a way to look for a move (W where you look: up at the wall, a side past the turn below, behind past the look-away\'s threshold; A and D their own side; S down); a hold at a ladder-like distance is climbed to by the key alone, a lip further is shown by the body (a pull-up, a lean, the reach back, the drop\'s hand lowered) only while the key is held, and Space takes it; with nothing shown Space jumps a little off; W with nothing up climbs onto the top; a tap of crouch drops to the lip beneath, held it lets go fully. Nothing of it is on the action bar.',
+    dials: [
+      choice('shelves', 'Shallow lips', 'grab: a rung, a shelf, a sill is a lip; before: a lip with anything over its reach is none.'),
+      dial('shelfMin', 'A lip\'s top runs back at least', 0.01, 'm', 'The round\'s 0.12 before anything rises behind it: the fingers and a knuckle.'),
+      dial('handRoom', 'With room over it for the hands of', 0.01, 'm', 'The round\'s 0.15: a hand curled over the top, and a little.'),
+      choice('hangKeys', 'The hang\'s keys', 'cue: hold a way, the body shows it, Space takes it; before: phase 2\'s keys.'),
+      dial('wayTurn', 'W means a side once the view turns past', 1, 'deg', 'Ours: 45 from the wall, half way to square.'),
+      dial('ladderMin', 'A hold is ladder-like from', 0.01, 'm', 'The round\'s 0.3: nearer is the same hold.'),
+      dial('ladderMax', 'Up to', 0.01, 'm', 'The round\'s 1.1: the course\'s 0.75 and 1 m ladders are climbed by the key, 1.25 m and over are hops.'),
+      dial('wayDepth', 'A lip up or down may stand in front or behind by', 0.05, 'm', 'Ours: 0.8, the owner\'s shelves step 0.6 back, and a hand more.'),
+      dial('cueShare', 'A hop\'s cue holds its coil at', 0.05, 'of the coil', 'Ours: half of it (the hands leave the lip about 0.35 s in): a slight pull-up.'),
+      dial('cueEase', 'A cue eases in and out over', 0.01, 's', 'Ours: 0.2, the hang\'s own ease and a little more.'),
+      dial('cueLean', 'A side\'s cue leans the body that way by', 0.5, 'deg', 'Ours: 8, a slight lean, a shimmy still playing under it.'),
+      dial('dropMost', 'Crouch drops to a lip beneath within', 0.05, 'm', 'The round\'s 2.5.'),
+      dial('dropHold', 'Crouch held longer than this lets go fully', 0.01, 's', 'The round\'s 0.25: a tap is quicker.'),
+      choice('diagonals', 'A diagonal (W or S with A or D)', 'below: W with a side takes a lip over the hands, S with a side one under them (a level lip is the side key\'s alone); before: phase 2\'s band, 0.3 m either way.'),
+    ],
+  },
+  {
     title: 'The hands bracing',
     note: 'before: the arms as they were (nothing is felt for). on: moving into a wall the hand on that side rests on it (head on, both), in a passage narrower than the tight share both touch its sides, among people the hand on their side rests on them, and drifting in space near a surface both hands reach to it and step along it.',
     dials: [

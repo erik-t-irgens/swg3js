@@ -59,13 +59,13 @@ export interface EmoteSource {
 }
 
 const ACTION_LABELS: Record<Action, string> = {
-  forward: 'Move forward (held into a steep face: climb it; on a wall: up)',
-  back: 'Move back (on a wall: down)',
+  forward: 'Move forward (held into a steep face: climb it; on a wall: up; hanging: the way you look, up a ladder-like hold or showing a hop for Space)',
+  back: 'Move back (on a wall: down; hanging: down a ladder-like hold, or showing a drop for Space)',
   left: 'Strafe left (on a wall or a ledge: that way)',
   right: 'Strafe right (on a wall or a ledge: that way)',
-  jump: 'Jump (hold: Force jump; on a wall or a ledge: climb up, hop, jump off)',
-  crouch: 'Crouch (tap moving: roll; on a wall or a ledge: let go; under a low roof: duck further)',
-  prone: 'Lie prone (along the ground, under anything over half a metre; again to get up where there is room)',
+  jump: 'Jump (hold: Force jump; on a wall or a ledge: climb up, hop, jump off; hanging: takes the hop shown, else a small jump off)',
+  crouch: 'Crouch (tap moving: roll; on a wall: let go; hanging: a tap drops to the lip beneath, held lets go; under a low roof: duck further)',
+  prone: 'Lie prone (along the ground, under anything over half a metre; again to get up where there is room; under a roof too low to duck the body lies down and gets up by itself)',
   kneel: 'Kneel',
   walk: 'Walk, held (on foot: the slowest pace)',
   speedUp: 'Run, tap again to sprint (vehicle: boost)',

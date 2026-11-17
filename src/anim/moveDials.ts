@@ -45,6 +45,19 @@ export const MOVE_GROUPS: DialGroup[] = [
       dial('duckNeck', 'Neck bends with it', 1, 'deg', '20: the head carried down with the back, the face still ahead.'),
     ],
   },
+  {
+    title: "Ducking's pace (Climbing II, smoothness)",
+    note: "height: a ducked body slows from its walk's speed toward the crouch's as it lowers, wears the crouch's clips at their height and walks at their pace, slows on toward the crawl's past it, and where the room is too low for the deepest duck but a lying body fits it lies down and crawls, getting up again into a crouch where the room comes back. before: the feedback round's duck at the walk's own speeds and clips.",
+    dials: [
+      choice('duckPace', 'Pace by height', "before is the feedback round's duck."),
+      dial('crouchAt', "Crouch's clips at", 0.01, 'm', "1.05: the crouch's own 1.0 and the 5 cm the duck keeps over it, so a roof the crouch just passes under is walked under crouched."),
+      dial('crouchBand', 'Back to the walk past it by', 0.01, 'm', "0.05: a hand's width, so a duck holding at the crouch's height never swaps clips back and forth."),
+      dial('paceCurve', 'Pace follows the height', 0.05, '', '1: straight; over 1 it keeps the faster pace longer, under 1 slows sooner.'),
+      dial('proneUnder', 'Lies down under', 0.01, 'm', "0.8: the deepest duck's 0.75 and its 0.05 clearance, so every room the duck passes under it walks under and only a lower one is crawled."),
+      dial('proneAhead', 'Lies down this far before it', 0.05, 'm', "1.2: the lying body's half length, 0.9, and a third of a stride, so it is down before its head reaches the roof."),
+      dial('riseAt', 'Gets up where the room is', 0.01, 'm', "1.0: the crouch's own height; the duck stands it the rest of the way as the room allows."),
+    ],
+  },
 ];
 
 export const MOVE_DIALS: DialSet = { helper: 'move', groups: MOVE_GROUPS, shipped: readDials(MOVE_GROUPS) };

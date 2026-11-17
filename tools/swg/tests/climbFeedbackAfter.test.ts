@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { climbCourse } from '../../../src/anim/climbCourse.ts';
-import { resetClimbTune } from '../../../src/anim/climbTune.ts';
+import { climbSmoothBefore, resetClimbTune } from '../../../src/anim/climbTune.ts';
 import { moveBefore, resetMoveTune } from '../../../src/anim/moveTune.ts';
 import { RATES, runCourse, summarize } from './climbCourseBody.ts';
 
@@ -44,6 +44,8 @@ const pieces = climbCourse().pieces;
 for (const [what, want, off] of [['at the round\'s shipped settings', SHIPPED, false], ['with prone and the duck at their other setting (maker A\'s climbing alone)', BODY_OFF, true]] as const) {
   resetClimbTune();
   resetMoveTune();
+  // The smoothness round's switches at their other setting: the round's shipped settings as it left them (`d2d5bc4`).
+  climbSmoothBefore();
   if (off) moveBefore();
   const t0 = performance.now();
   const { runs, digest } = await runCourse();

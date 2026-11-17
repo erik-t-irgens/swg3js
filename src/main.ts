@@ -28848,6 +28848,9 @@ class App {
       asks: S.asks,
       pathBox: { asked: S.boxAsked, kept: S.boxKept },
       last: S.last || null,
+      // Climbing II's smoothness round, item 4: the pace by height (wearing the crouch's clips, the shares toward the crouch's
+      // and the crawl's speeds), whether the duck laid the body down, the times it laid it down and got it up, the roof probe's words.
+      pace: { rule: MOVE_TUNE.duckPace, crouch: p.duck.crouch, toCrouch: n(p.duck.toCrouch), toCrawl: n(p.duck.toCrawl), lyingForRoof: p.duck.lying, laid: p.duck.laid, rose: p.duck.rose, roof: S.roofSaid || null },
       tune: { ...MOVE_TUNE },
     };
   }
@@ -35940,7 +35943,8 @@ class App {
         if (player.ragdoll) rig.clearLook();
         else {
           const still = rig.overriding || ((!!player.mounted || !!player.piloting) && LOOK.ride <= 0);
-          rig.lookToward(wrapAngle(Math.atan2(headLook.x, headLook.z) - player.heading), this.cam.pitch, dt, simulate && !this.dying && player.hp > 0 && !still);
+          // (Climbing II's smoothness round: hanging, the drop's cue turns the head down at the lip beneath: `headPitchFor`.)
+          rig.lookToward(wrapAngle(Math.atan2(headLook.x, headLook.z) - player.heading), player.headPitchFor(this.cam.pitch), dt, simulate && !this.dying && player.hp > 0 && !still);
         }
       } else player.group.visible = !this.cam.firstPerson && !this.editor?.on; // the primitive placeholder body, before any rig
       // Seated in a ship without a cockpit frame the game drew no pilot: the whole figure, shadow included, is hidden.

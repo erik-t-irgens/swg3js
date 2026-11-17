@@ -18,7 +18,7 @@ import { readFileSync } from 'node:fs';
 import * as THREE from 'three';
 import { TestBody, box, ground, heightChunk, makePhysics, type Physics } from './grappleBody.ts';
 import { RAPIER, TRIMESH_FLAGS, cleanTrimesh, Physics as GamePhysics } from '../../../src/core/physics.ts';
-import { MOVE_TUNE, MOVE_TUNE_SHIPPED, moveBefore, resetMoveTune, shapeRulesOn, tuneMove } from '../../../src/anim/moveTune.ts';
+import { MOVE_TUNE, MOVE_TUNE_SHIPPED, moveBefore, moveSmoothBefore, resetMoveTune as resetShippedMove, shapeRulesOn, tuneMove } from '../../../src/anim/moveTune.ts';
 import { MOVE_DIALS } from '../../../src/anim/moveDials.ts';
 import { BODY_CAPSULE, BodyShape, CROUCH_TALL, DUCK_CLEAR, LYING, LYING_LENGTH, STAND_TALL, ShapeIn, type ShapeWorld } from '../../../src/player/bodyShape.ts';
 import { RemoteBodies } from '../../../src/net/remoteBodies.ts';
@@ -31,6 +31,12 @@ const ok = (cond: boolean, what: string) => {
   console.log(`ok   ${what}`);
 };
 const note = (what: string) => console.log(`note ${what}`);
+// Climbing II's smoothness round (item 4, `duckPace`): this suite is the feedback round's duck, so the table is put back with
+// the smoothness round's body switch at its other setting ('before'); the pace by height is `duckPace.test.ts`'s.
+const resetMoveTune = (): void => {
+  resetShippedMove();
+  moveSmoothBefore();
+};
 const RATES = [30, 60, 144, 240] as const;
 const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8').replace(/\r/g, '');
 const r3 = (v: number) => v.toFixed(3);
@@ -670,7 +676,7 @@ for (const fps of RATES) {
   ok(/this\.torsoTwist = Math\.atan2\(Math\.sin\(back\), Math\.cos\(back\)\) \* LOCO_TUNE\.turn\.torso;\n    \}\n    \/\/ The feedback round, item 3:[^\n]*\n    if \(this\.shape\.kind === LYING\) this\.turnLying\(\);/.test(player), "the lying turn is asked right after the player's heading is decided");
   ok(/this\.prone = lyingRule \? this\.proneAsk\(!this\.prone, input\) : !this\.prone;/.test(player) && /this\.prone = lyingRule \? this\.proneAsk\(!this\.prone, input\) : !this\.prone;/.test(harness), "Z asks for room under 'lying' in the player and the harness alike");
   ok(/if \(this\.shape\.kind === LYING\) su\.ruled = false;/.test(player) && /if \(this\.shape\.kind === LYING\) slopeAt\.r = this\.shape\.radius;/.test(player), "the step's and the slope rule's capsule readers take the lying one");
-  ok(/const ducks = MOVE_TUNE\.duck === 'on' && this\.shape\.kind !== LYING;\n    if \(ducks && this\.shape\.share > 0\) \{\n      rig\.duckWant = this\.shape\.share;\n      rig\.duckMoving = moving;/.test(player), "the crouch's share is handed to the rig before its update");
+  ok(/const ducks = MOVE_TUNE\.duck === 'on' && this\.shape\.kind !== LYING;\n    if \(ducks && this\.shape\.share > 0 && !this\.duck\.crouch\) \{\n      rig\.duckWant = this\.shape\.share;\n      rig\.duckMoving = moving;/.test(player), "the crouch's share is handed to the rig before its update");
   ok(/if \(duckBend > 0\) pitch \+= \(duckBend \* MOVE_TUNE\.duckBend \* Math\.PI\) \/ 180;\n    rig\.twistTorso\([^\n]*, pitch\);\n    if \(duckBend > 0\) rig\.bendNeck\(\(duckBend \* MOVE_TUNE\.duckNeck \* Math\.PI\) \/ 180\);/.test(player), '... the spine bent through the twist and the neck after it, before the camera reads the head');
   ok(/this\.stepDuck\(dt\);[^\n]*\n[\s\S]{0,700}this\.limbPose\?\.restore\(\);\n    this\.legPose\?\.restore\(\);\n    this\.mixer\.update\(dt\);/.test(rig) && /private stepDuck\(dt: number\): void \{\n[^\n]*\n    if \(!\(this\.duckWant > 0 \|\| this\.duckIdleShare > 0 \|\| this\.duckWalkShare > 0\)\) return;/.test(rig), "the rig lays the duck's layer before its mixer (weights only), stepping nothing while nothing is asked or easing out");
   ok(/this\.cleanLookBone\(this\.lookBones\.head\);\n    \}\n[\s\S]{0,200}const dn = this\.duckNeckTurn;\n    if \(dn\.on && dn\.bone\) \{\n      if \(dn\.bone\.quaternion\.equals\(dn\.turned\)\) dn\.bone\.quaternion\.copy\(dn\.clean\);/.test(rig), "... and puts the neck's bend back after the look's own, the last laid first, so nothing is written over a clip");

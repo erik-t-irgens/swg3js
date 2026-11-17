@@ -6,7 +6,7 @@
 // could be said for it, with the reason beside it.
 //
 // Pure: no three.js and nothing of the page, so the node tests move it as the console does.
-import { moveBefore } from './moveTune.ts';
+import { moveBefore, moveSmoothBefore } from './moveTune.ts';
 
 export interface ClimbTune {
   /**
@@ -214,6 +214,56 @@ export interface ClimbTune {
   roomBrush: number;
   /** Item 2: the least lift over the lip a lower way in is tried down to, metres (ours: nought, the climb's own skin of 0.02 still under the feet; today's lift is 0.05). */
   liftLeast: number;
+  /**
+   * Climbing II, the smoothness round, item 1 (the owner: "I can't grab any of the ledges in the chimney section you made or
+   * any ledges that are that shallow but I should be able to"): 'grab' a lip is the top edge of a face whose top runs back at
+   * least `shelfMin` before anything rises behind it, with `handRoom` clear over it at the hands, whatever stands over or
+   * behind it beyond that (a ladder's rung, a shelf with its next tier behind it, a window sill): the grab looks up a column
+   * of the face for every such edge in its reach band and takes the one nearest the hands' own height, and a hop's probe
+   * looks down a column through every top it passes and takes the one nearest the height it asks about. 'before': phase 2's
+   * (a lip with anything over its band's head is no lip; a hop's probe takes the topmost top in its column).
+   */
+  shelves: 'grab' | 'before';
+  /** Item 1: how far a top must run back from its edge before anything rises behind it, metres (the round's start, 0.12: the fingers' and a knuckle's depth). */
+  shelfMin: number;
+  /** Item 1: how much room over a top at the hands it must have, metres (the round's start, 0.15: a hand's thickness curled over it, and a little). */
+  handRoom: number;
+  /**
+   * The smoothness round, items 2 and 3 (the owner's control design of 2026-11-17): 'cue' one grammar while hanging: a way
+   * is asked by holding a key (W where the view looks: up at the wall, a side past `wayTurn`, behind past `lookStart`; A or D
+   * their own side; S down), a hold in that way at a ladder-like distance (`ladderMin` to `ladderMax`) is climbed to by the
+   * key alone, a lip further within the hop band is shown by the body (a pull-up, a lean, the reach back, the drop's hand
+   * lowered) only while the key is held, and Space commits to what is shown; with nothing shown Space jumps a little off
+   * (S with it, phase 2's down else off backward); W with nothing up climbs onto the top; a tap of the crouch key drops to
+   * the lip beneath (within `dropMost`), held past `dropHold` it lets go fully. Nothing of it goes on the action bar.
+   * 'before': phase 2's keys as they shipped.
+   */
+  hangKeys: 'cue' | 'before';
+  /** Item 2: how far the view turns from the wall before W means that side, degrees (ours: 45, half way to square: looking along the wall is a side, looking at it is up). */
+  wayTurn: number;
+  /** Item 2: a hold in the asked way at least this far from the held one is ladder-like (climbed by the key alone), metres (the round's start, 0.3: nearer is the same hold). */
+  ladderMin: number;
+  /** Item 2: and no further than this, metres (the round's start, 1.1: the course's 0.75 and 1 m ladders are ladder-like, 1.25 m and over are hops). */
+  ladderMax: number;
+  /** Item 2: how far in front of or behind the held face a lip above or below may stand for W, S and the crouch's drop, metres (ours: 0.8, the owner's shelves step 0.6 back, and a hand more). */
+  wayDepth: number;
+  /** Item 2: how far into the hop clip's coil a cued hop's pose is held, a share of the coil (the hands leave the lip about 0.35 s in; ours: half of it, a slight pull-up readying the jump). */
+  cueShare: number;
+  /** Item 2: how long a cue eases in and out, seconds (ours: 0.2, the hang's own ease and a little more, so a cue never snaps). */
+  cueEase: number;
+  /** Item 2: how far a side's cue leans the hanging body that way, degrees (ours: 8, a slight lean: the weight shifted toward the hop, a shimmy still playing under it). */
+  cueLean: number;
+  /** Item 3: how far below the hang the crouch's drop reaches for a lip beneath, metres (the round's start, 2.5). */
+  dropMost: number;
+  /** Item 3: the crouch held past this lets go fully (and is no drop to the lip beneath), seconds (the round's start, 0.25: a tap is quicker). */
+  dropHold: number;
+  /**
+   * The smoothness round, item 6 (found driving the extra rows: at a zigzag's top rung S with D took the wall's own top edge
+   * level with the hands, 0.3 m back, over the rung 1 m down the owner asked for): 'below' a side's diagonal asked with W takes
+   * only a lip over the held one, and asked with S only one under it, by at least the quarter metre the band up or down keeps
+   * (a lip level with the hands is A's or D's alone); 'before' phase 2's band, 0.3 m either way of the hands' height.
+   */
+  diagonals: 'below' | 'before';
 }
 
 /**
@@ -266,6 +316,27 @@ export function climbFeedbackBefore(): void {
   const t = CLIMB_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(CLIMB_FEEDBACK_BEFORE)) t[k] = v;
   moveBefore();
+  // `12ae8ad` had none of the smoothness round's either.
+  climbSmoothBefore();
+}
+
+/**
+ * Climbing II, the smoothness round: every switch it adds to the climbing, at its other setting (the climbing as `d2d5bc4`
+ * shipped it, the feedback round's). A later maker of the round adds its own switches here (the body's beside them in
+ * `moveTune.ts`'s `MOVE_SMOOTH_BEFORE`), so one call puts the whole round back.
+ */
+export const CLIMB_SMOOTH_BEFORE: Readonly<Record<string, string>> = {
+  shelves: 'before',
+  hangKeys: 'before',
+  // Maker B's: item 6.
+  diagonals: 'before',
+};
+
+/** The smoothness round's switches at their other setting (the feedback round's climbing and body, `d2d5bc4`). */
+export function climbSmoothBefore(): void {
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_SMOOTH_BEFORE)) t[k] = v;
+  moveSmoothBefore();
 }
 
 /** The hands bracing against a wall, in a tight spot, in a crowd and in space (the brief's item B, its second half). */
@@ -352,6 +423,20 @@ export const CLIMB_TUNE: ClimbTune = {
   roomRule: 'fit',
   roomBrush: 0.04,
   liftLeast: 0,
+  shelves: 'grab',
+  shelfMin: 0.12,
+  handRoom: 0.15,
+  hangKeys: 'cue',
+  wayTurn: 45,
+  ladderMin: 0.3,
+  ladderMax: 1.1,
+  wayDepth: 0.8,
+  cueShare: 0.5,
+  cueEase: 0.2,
+  cueLean: 8,
+  dropMost: 2.5,
+  dropHold: 0.25,
+  diagonals: 'below',
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -411,6 +496,17 @@ export const CLIMB_RANGES: Record<string, { min: number; max: number }> = {
   grabFreeAt: { min: 0, max: 1 },
   roomBrush: { min: 0, max: 0.15 },
   liftLeast: { min: 0, max: 0.05 },
+  shelfMin: { min: 0.02, max: 1 },
+  handRoom: { min: 0.02, max: 0.6 },
+  wayTurn: { min: 0, max: 180 },
+  ladderMin: { min: 0, max: 3 },
+  ladderMax: { min: 0, max: 3 },
+  wayDepth: { min: 0, max: 2 },
+  cueShare: { min: 0, max: 1 },
+  cueEase: { min: 0, max: 1 },
+  cueLean: { min: 0, max: 30 },
+  dropMost: { min: 0, max: 8 },
+  dropHold: { min: 0.05, max: 2 },
 };
 
 /** The table's choices, by their path, and the words each takes. */
@@ -434,6 +530,9 @@ export const CLIMB_CHOICES: Readonly<Record<string, readonly string[]>> = {
   grabFree: ['share', 'whole'],
   roomSay: ['why', 'before'],
   roomRule: ['fit', 'strict'],
+  shelves: ['grab', 'before'],
+  hangKeys: ['cue', 'before'],
+  diagonals: ['below', 'before'],
 };
 
 /**

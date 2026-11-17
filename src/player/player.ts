@@ -45,6 +45,7 @@ import { LimbPlace } from './limbPlace.ts';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
 import { MOVE_TUNE, shapeRulesOn } from '../anim/moveTune.ts';
 import { BodyShape, CROUCH_TALL, LYING, STAND_TALL, ShapeIn, type ShapeWorld } from './bodyShape.ts';
+import { DuckPace, lieOn, paceOn } from './duckPace.ts';
 import { ledgeClipName } from '../anim/ledgeClips.ts';
 import { figureScaleOf } from './peerHang.ts';
 import { WallClimb } from './wallClimb.ts';
@@ -508,7 +509,7 @@ export class Player {
    * wall after the figure is placed (`src/player/limbPlace.ts`, which maker B's bracing asks through `setHand`). The
    * grapple's harness steps the very same calls in the same places.
    */
-  readonly ledge = new LedgeHang({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  readonly ledge = new LedgeHang({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }), capsule: (h, r) => new RAPIER.Capsule(h, r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
   private readonly ledgeIn = new LedgeIn();
   /**
    * Climbing II, phase 2, item 1: the use key handed to the climb by the game's one use-key dispatch (main.ts's E) and still
@@ -523,6 +524,8 @@ export class Player {
    */
   readonly shape = new BodyShape({ capsule: (h, r) => new RAPIER.Capsule(h, r), ball: (r) => new RAPIER.Ball(r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
   private readonly shapeIn = new ShapeIn();
+  /** Climbing II's smoothness round, item 4 (`MOVE_TUNE.duckPace`): what the ducked height means for the pace and the clips, and whether the duck laid the body down (src/player/duckPace.ts). */
+  readonly duck = new DuckPace();
   /** The placing hand holds something (a building or a prop being put down): the game sets it; the duck waits while it does. */
   handPlacing: (() => boolean) | null = null;
   readonly limbs = new LimbPlace(() => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }));
@@ -1350,6 +1353,8 @@ export class Player {
       this.colliderOffsetY = this.shape.offsetY;
       this.colliderCrouched = null;
     }
+    // Climbing II's smoothness round, item 4: nothing of the duck's pace carried to the new place.
+    this.duck.reset();
   }
 
   /** Launch the player into the air (used by Force Jump). */
@@ -1844,7 +1849,7 @@ export class Player {
     const rig = this.rig;
     if (!rig) return;
     const from = was.prone ? 'prone' : was.kneel ? 'kneeling' : was.crouch ? 'crouched' : 'standing';
-    const to = this.prone ? 'prone' : this.kneeling ? 'kneeling' : this.crouching ? 'crouched' : 'standing';
+    const to = this.prone ? 'prone' : this.kneeling ? 'kneeling' : this.crouching || this.duck.crouch ? 'crouched' : 'standing';
     if (from === to) return;
     if ((from === 'crouched' || to === 'crouched') && (moving || this.jkaMode)) return;
     const names: string[] = [];
@@ -2802,7 +2807,7 @@ export class Player {
     this.walkKey = walking;
     // Postures: Z toggles prone and V kneeling, on the ground; jumping, swimming or a saber swing brings the
     // body up, and a kneel also ends when you move or crouch. The game's own transitions play between them.
-    const was = { prone: this.prone, kneel: this.kneeling, crouch: this.crouching };
+    const was = { prone: this.prone, kneel: this.kneeling, crouch: this.crouching || this.duck.crouch };
     const onGround = !this.mounted && !this.noclip && !this.swimming;
     // The feedback round, item 3 (`proneShape` 'lying'): going prone asks for room for the lying capsule and getting up for
     // room to stand (`proneAsk`); with the switch at 'crouch' both are today's toggles.
@@ -2821,12 +2826,20 @@ export class Player {
     // Lying, the water over the feet deeper than the body lies is water to stand up in, as the swim already stands it.
     const lyingDrowns = lyingRule && this.prone && this.waterDepth > 2 * MOVE_TUNE.lyingRadius;
     if (this.prone && (getsUp || lyingDrowns)) this.prone = lyingRule && !this.swimming ? this.proneAsk(false, input) : false;
+    // Climbing II's smoothness round, item 4: a body the duck laid down for a low roof gets up again into a crouch on its own
+    // where the room over its feet comes back and no roof ahead along its way would lay it down again; a prone the key asked
+    // for never does (`duck.lying` is only ever the duck's).
+    if (!this.prone) this.duck.lying = false;
+    else if (this.duck.lying && this.grounded && lieOn()) this.riseFromDuck(moving, move);
     if (this.kneeling && (getsUp || moving || input.held('crouch'))) this.kneeling = false;
     this.crouching = !this.swimming && !this.prone && !this.kneeling && (input.held('crouch') || (this.ledge.keepCrouched && !this.ledge.standRoom(this.physics.world as unknown as LedgeWorld, this, this.moveFilter())));
     // The feedback round, items 3 and 4: either switch on, the body's shape decides the capsule (`stepShape`); both off,
     // today's crouch rule, to the line.
     if (shapeRulesOn()) this.stepShape(dt, moving, move);
     else this.setCrouchCollider((this.crouching || this.prone || this.kneeling) && this.grounded);
+    // Item 4: what the height the shape wrote means for the pace and the clips (a body it laid down crouches no more).
+    if (paceOn()) this.stepDuckPace();
+    else if (this.duck.active) this.duck.step(STAND_TALL, false, false);
     if (this.grounded && !this.swimming) this.postureTransition(was, moving);
     // `lavaPaceNow` is what a flow has left of the walk: 1 everywhere else, and it is a factor of its
     // own rather than a write to `speedMultiplier`, which Force Speed rewrites from scratch each
@@ -2834,6 +2847,8 @@ export class Player {
     // Jedi Academy's), so the body really moves slower and the clips, which are scaled to how fast it
     // moves, slow with it.
     let speed = (walking ? WALK_SPEED : RUN_SPEED) * this.speedMultiplier * this.lavaPaceNow * (this.crouching && this.grounded ? 0.5 : 1);
+    // Item 4, without the speed classes: the duck's pace as a share of the body's own (the classes take it in their plan).
+    if (this.duck.active) speed *= (this.duck.crouch && !this.crouching && this.grounded ? 0.5 : 1) * this.duck.share;
 
     // Water: the surface here, and how deep the body sits in it. Swimming starts when the
     // chest is under; the head stays above the surface unless the player dives.
@@ -2879,7 +2894,7 @@ export class Player {
     lo.dt = dt;
     lo.mz = mz;
     lo.mx = mx;
-    lo.standing = !this.crouching && !this.prone && !this.kneeling;
+    lo.standing = !this.crouching && !this.duck.crouch && !this.prone && !this.kneeling;
     lo.grounded = this.grounded;
     lo.swimming = this.swimming;
     // Blocking or fighting, and not merely one of Jedi Academy's one-offs playing out (a Force jump's flip): a jump
@@ -2895,9 +2910,12 @@ export class Player {
     lo.sprint = this.stats.apply('move.sprint', LOCO_TUNE.speed.forward.sprint);
     lo.pool = this.staminaPool;
     lo.boost = this.speedMultiplier;
+    // Climbing II's smoothness round, item 4: the duck's pace (nought under 'before': every speed as it was).
+    lo.duckToCrouch = this.duck.toCrouch;
+    lo.duckToCrawl = this.duck.toCrawl;
     // Wave 2b: crouched and prone under the classes, the injured walk by the health's share, and the figure's scale a
-    // game clip's measured stride is scaled by.
-    lo.crouched = this.crouching;
+    // game clip's measured stride is scaled by. Item 4: ducked to `crouchAt`, the crouch's.
+    lo.crouched = this.crouching || this.duck.crouch;
     lo.prone = this.prone;
     lo.hpShare = this.hp / this.maxHp;
     lo.scale = this.rig ? this.rig.root.scale.y : 1;
@@ -2982,7 +3000,8 @@ export class Player {
       // With a speed class ruling the body the class's speed is the whole of it (on `speedScale`, below): no halving.
       // (A leaping saber move keeps the walk key's halving with the pace it is paired with there, as it always had.)
       c.walk = classes && !script ? false : walking;
-      c.crouch = this.crouching;
+      // Item 4: ducked to `crouchAt` the body moves crouched (Jedi Academy's duck halves its own speed; the classes' share takes it back).
+      c.crouch = this.crouching || this.duck.crouch;
       // A crouch tap on the move rolls, as the game's does, unless a swing is in its cutting part (its wind-up and return may be rolled out of).
       c.roll = input.pressedAction('crouch') && moving && !this.saber.attacking;
       c.jump = jump;
@@ -2994,6 +3013,8 @@ export class Player {
       // Crouched under the classes the movement halves the speed on the ground (Jedi Academy's duck), which the share
       // takes back, so the class's speed is the body's.
       c.speedScale = this.speedMultiplier * this.lavaPaceNow * (classes && this.loco.moves && !script ? this.loco.speed / (this.loco.posture === CROUCH && this.grounded ? JKA.speed * UNIT * JKA.duckScale : JKA.speed * UNIT) : this.paceScale(walking, mz, mx));
+      // Item 4 without the speed classes: the duck's pace as a share of the posture's own (the classes' plan took it above).
+      if (!(classes && this.loco.moves && !script) && this.duck.active) c.speedScale *= this.duck.share;
       // What progress makes of a fall and the air, each today's number until something is earned.
       const st = this.stats;
       c.fallSafeExtra = st.fallSafeExtra / UNIT;
@@ -3656,6 +3677,17 @@ export class Player {
 
   /** The kept fade a hang's loop comes in with (`climb.ease`). */
   private readonly hangFade = { fade: 0.15 };
+  /** The smoothness round, item 2: a ladder's climb's rate and fade handed to the rig (kept). */
+  private readonly ladderRate = { rate: 0.5, fade: 0.15 };
+
+  /**
+   * The smoothness round, item 3: the head's pitch while hanging (the view's, `pitch`), turned down at the lip beneath by the
+   * drop's cue's share while it shows (`LedgeHang.headDown`); the view's otherwise, to the bit.
+   */
+  headPitchFor(pitch: number): number {
+    const L = this.ledge;
+    return L.headShare > 0 ? pitch + (L.headDown - pitch) * L.headShare : pitch;
+  }
 
   /** The hang's clips on the rig: a one-off begun, a held one let go into the loop, the loop itself. */
   private animateHang(dt: number): void {
@@ -3667,15 +3699,21 @@ export class Player {
     else if (L.ended) rig.stopOverride(CLIMB_TUNE.ease);
     // Climbing II, item 7: the reach-back pose held from the leading side's hop clip while looking away, and let go of.
     else if (L.poseClip !== this.posePlaying) {
-      if (L.poseClip) rig.play(ledgeClipName(L.poseClip), { from: L.poseAt, fadeIn: CLIMB_TUNE.ease, hold: true, timeScale: 0 });
-      else rig.stopOverride(CLIMB_TUNE.ease);
+      // (The smoothness round: a cue's pose eases over the cue's own fade, `climb.cueEase`; the hang's ease otherwise.)
+      if (L.poseClip) rig.play(ledgeClipName(L.poseClip), { from: L.poseAt, fadeIn: L.poseFadeNow(), hold: true, timeScale: 0 });
+      else rig.stopOverride(L.poseFadeNow());
       this.posePlaying = L.poseClip;
     }
     // A one-off begun or ended takes the held pose's place: it is held again from the next frame where still looking away.
     if (L.startClip || L.ended) this.posePlaying = '';
     if (L.rigState) {
       rig.prefer(L.rigState as RigState, ledgeClipName(L.rigClip));
-      rig.setState(L.rigState as RigState, 0, null, this.hangFade);
+      // The smoothness round, item 2: a ladder's climb plays the wall's clip at its rate, or its arms over a free hang's legs.
+      if (L.rigRate === L.rigRate) {
+        this.ladderRate.rate = L.rigRate;
+        this.ladderRate.fade = CLIMB_TUNE.ease;
+        rig.setState(L.rigState as RigState, 0, null, this.ladderRate);
+      } else rig.setState(L.rigState as RigState, 0, L.rigUpper ? (WALL_CLIP_NAMES[L.rigUpper] ?? null) : null, this.hangFade);
     } else rig.setState(L.stood ? 'crouch' : 'air', 0, null, this.hangFade);
     rig.update(dt);
     this.group.updateMatrixWorld(true);
@@ -3699,7 +3737,7 @@ export class Player {
     rig.root.position.y += L.offY;
     rig.root.position.z = L.offX * s + L.offZ * c;
     // Turned with a sloping lip about its own front, on its hands (the fix round's: `climb.lipTilt`); upright otherwise.
-    if (L.tilt !== 0) L.applyTilt(rig.root);
+    if (L.tilted) L.applyTilt(rig.root);
     else rig.root.quaternion.set(0, 0, 0, 1);
     this.ledgeRooted = true;
   }
@@ -4104,8 +4142,8 @@ export class Player {
         rig.setState(legs.state, speed, null, this.legOpts);
       } else rig.setState(moving ? 'proneMove' : 'prone', speed);
     } else if (this.kneeling) rig.setState('kneel', 0, gunUpper);
-    else if (this.crouching) {
-      // Crouched: the game's own loop_crouched clips unless Jedi Academy's animations are in charge.
+    else if (this.crouching || this.duck.crouch) {
+      // Crouched (item 4: or ducked to `crouchAt`): the game's own loop_crouched clips unless Jedi Academy's animations are in charge.
       const swg = !this.jkaMode && !!rig.clipMatching(/^loop_crouched:speed1/);
       // The classes' crouched clips were preferred last frame and are not now (a blaster in hand, whose states the
       // classes' let-go does not reach): each state picks its own again there and then (only ever true under the classes).
@@ -4153,7 +4191,7 @@ export class Player {
     } else rig.setState(running ? 'run' : 'walk', speed, null, fo);
     // The feedback round, item 4: ducked under something, the crouch's share of the pose, laid on by the mixer (`stepDuck`).
     const ducks = MOVE_TUNE.duck === 'on' && this.shape.kind !== LYING;
-    if (ducks && this.shape.share > 0) {
+    if (ducks && this.shape.share > 0 && !this.duck.crouch) {
       rig.duckWant = this.shape.share;
       rig.duckMoving = moving;
     }
@@ -4358,9 +4396,55 @@ export class Player {
       const pt = pny > 0.1 ? Math.sqrt(this.slope.planeNx * this.slope.planeNx + this.slope.planeNz * this.slope.planeNz) / pny : 0;
       f.rise = pt > 0 ? (pt < 1 ? pt : 1) * 0.35 : 0;
       S.stepUpright(w, f, this.collider);
+      // Climbing II's smoothness round, item 4: a roof ahead too low for the deepest duck, and a lying body fits here: the
+      // duck lays the body down along its heading, to crawl under it (`BodyShape.lieAhead`, asked only under 'height'). Never
+      // where Z would refuse it (`proneAsk`, said nothing: nobody asked): with the grappling rope out, or in water deeper than
+      // the body lies, where the stand-up rule would stand it again the frame after.
+      if (S.lieAhead && !this.prone && !this.grapple.out && !this.grapple.released && !(this.waterDepth > 2 * MOVE_TUNE.lyingRadius)) {
+        this.prone = true;
+        this.kneeling = false;
+        this.duck.lying = true;
+        this.duck.laid++;
+        S.holdLying(f, this.collider);
+      }
     }
     this.colliderOffsetY = S.offsetY;
     this.colliderCrouched = null;
+  }
+
+  /**
+   * Climbing II's smoothness round, item 4, after the shape: a body the duck laid down crouches no more, and the duck's pace
+   * and clips from the height the shape wrote (`DuckPace.step`: on its feet only, the crouch key's own crouch eased on toward
+   * the crawl's in a tunnel).
+   */
+  private stepDuckPace(): void {
+    if (this.prone) this.crouching = false;
+    this.duck.step(this.shape.tall, !this.prone && this.shape.kind !== LYING && this.shapeIn.feet, this.crouching);
+  }
+
+  /**
+   * Item 4: a body the duck laid down gets up into a crouch (`riseAt` tall) where `BodyShape.riseClear` finds the room over its
+   * feet and no roof ahead along its way; the duck stands it the rest of the way as the room allows.
+   */
+  private riseFromDuck(moving: boolean, move: THREE.Vector3): void {
+    const S = this.shape;
+    const f = this.shapeIn;
+    f.x = this.pos.x;
+    f.y = this.pos.y;
+    f.z = this.pos.z;
+    f.heading = this.heading;
+    f.scale = this.ledgeScale();
+    f.filter = this.moveFilter();
+    f.vx = this.vel.x;
+    f.vz = this.vel.z;
+    f.moveX = moving ? move.x : 0;
+    f.moveZ = moving ? move.z : 0;
+    if (!S.riseClear(this.physics.world as unknown as ShapeWorld, f)) return;
+    this.prone = false;
+    this.duck.lying = false;
+    this.duck.rose++;
+    S.writeUpright(this.collider, this.pos.x, this.pos.y, this.pos.z, MOVE_TUNE.riseAt);
+    this.colliderOffsetY = S.offsetY;
   }
 
   /**

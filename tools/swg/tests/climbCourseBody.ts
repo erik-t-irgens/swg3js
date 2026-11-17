@@ -35,10 +35,12 @@ export interface Stood {
   colliders: CourseCollider[];
 }
 
-export async function standPiece(piece: CoursePiece): Promise<Stood> {
+export async function standPiece(piece: CoursePiece, shiftX = 0, shiftZ = 0): Promise<Stood> {
   const physics = await makePhysics();
   ground(physics, -SLAB_LIFT);
-  const frame: CourseFrame = { ox: piece.at[0], oz: -piece.at[1], h: 0, ref: () => 0 };
+  // (Moved by `shiftX`, `shiftZ` metres in the world, the smoothness round's review: a search whose answer turns on where the
+  // piece stands is found only by standing it somewhere not round.)
+  const frame: CourseFrame = { ox: piece.at[0] + shiftX, oz: -piece.at[1] + shiftZ, h: 0, ref: () => 0 };
   const one: ClimbCourse = { pieces: [piece], floor: 1, reach: { standing: 0, running: 0 }, lipSlope: 0, unknown: [] };
   const colliders = buildCourseColliders(physics.world, one, frame);
   physics.stepOnce();
@@ -441,6 +443,12 @@ const offJumps = (): boolean => CLIMB_TUNE.spaceOff === 'jump';
 function climbUp(s: Stood, b: TestBody, fps: number): string {
   fill(b);
   const words0 = b.ledgeWords.length;
+  // The smoothness round (`climb.hangKeys` 'cue'): W goes where the view looks, so the view is turned to the wall first (a
+  // corner rounded leaves it along the old one, where W would mean a side). Under 'before' the view is left as it is.
+  if (CLIMB_TUNE.hangKeys === 'cue' && b.ledge.holding) {
+    b.forward.set(Math.sin(b.heading), 0, Math.cos(b.heading));
+    b.right.set(-Math.cos(b.heading), 0, Math.sin(b.heading));
+  }
   tap(b, 'KeyW', fps);
   runUntil(b, fps, 3, () => !b.ledge.holding);
   b.run(fps, 0.2);
@@ -661,8 +669,12 @@ export function lookHop(s: Stood, b: TestBody, fps: number, to: string, deg: num
   const v = b.heading + (deg * Math.PI) / 180;
   b.forward.set(Math.sin(v), 0, Math.cos(v));
   b.right.set(-Math.cos(v), 0, Math.sin(v));
+  // The smoothness round (`climb.hangKeys` 'cue'): the look-away is W's cue, held through the look and the Space.
+  const cue = CLIMB_TUNE.hangKeys === 'cue';
+  if (cue) b.key('KeyW', true);
   b.run(fps, 0.3);
   tap(b, 'Space', fps);
+  if (cue) b.key('KeyW', false);
   let left = false;
   const t = runUntil(b, fps, 3, () => {
     if (L.phase !== LEDGE_HANG) left = true;

@@ -24,6 +24,7 @@ const player = read('../../../src/player/player.ts');
 const harness = read('./grappleBody.ts');
 const main = read('../../../src/main.ts');
 const rig = read('../../../src/player/rig.ts');
+const ledgeSrc = read('../../../src/player/ledge.ts');
 const peers = read('../../../src/net/remotePlayers.ts');
 const grapple = read('../../../src/player/grapple.ts');
 
@@ -58,7 +59,8 @@ ok(/this\.limbPose\?\.restore\(\);\n    this\.legPose\?\.restore\(\);\n    this\
 // The fix round's hand-overs (every behaviour test makes them in the harness for itself).
 const crouchNow = 'this.ledge.step(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina);\n    // The capsule the ledge\'s step has the body in: standing, but crouched over the top on a climb\'s last leg.\n    this.setCrouchCollider(this.ledge.crouchedNow);';
 ok(has(hang, crouchNow) && !has(hang, 'this.setCrouchCollider(false);') && has(harness, 'this.ledge.step(this.physics.world as unknown as LedgeWorld, this, this.fillLedgeIn(dt, null, false), this.stamina);\n    // The capsule the ledge\'s step has the body in: standing, but crouched over the top on a climb\'s last leg.\n    this.setCrouchCollider(this.ledge.crouchedNow);'), 'the hang wears the capsule the ledge\'s step has the body in (crouched on a climb\'s last leg), in the player and the harness alike, after the step');
-ok(has(player, '    if (L.tilt !== 0) L.applyTilt(rig.root);\n    else rig.root.quaternion.set(0, 0, 0, 1);\n    this.ledgeRooted = true;') && has(player, '        rig.root.quaternion.set(0, 0, 0, 1);\n        this.ledgeRooted = false;'), 'the figure is turned with a sloping lip on the rig\'s root, and upright again when the line-up is done');
+// (The smoothness round: `tilted` is the lip's tilt or a side's cue leaning the figure, `leanNow`, which is nought under 'before'.)
+ok(has(player, '    if (L.tilted) L.applyTilt(rig.root);\n    else rig.root.quaternion.set(0, 0, 0, 1);\n    this.ledgeRooted = true;') && has(player, '        rig.root.quaternion.set(0, 0, 0, 1);\n        this.ledgeRooted = false;') && has(ledgeSrc, 'return this.tilt !== 0 || this.leanNow !== 0;') && has(ledgeSrc, 'const t = this.tilt + this.leanNow;'), 'the figure is turned with a sloping lip (and a side\'s cue\'s lean) on the rig\'s root, and upright again when the line-up is done');
 const peerHang = read('../../../src/player/peerHang.ts');
 ok(has(peerHang, 'L.applyTilt(rig.root);\n      this.onY += L.tiltLift;\n      this.tilted = true;') && has(peerHang, 'if (this.tilted) root.quaternion.set(0, 0, 0, 1);'), 'another player\'s figure is turned with the lip found under their hands, and put back upright by the undo');
 ok(has(main, '|| this.player.grapple.out || this.player.climbHolds) return;') && ['emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4', 'switchClass'].every((a) => LEDGE_MUTES.includes(a)), 'no emote plays while hanging or climbing (its keys muted, and `playEmote` refuses for the band and the console), and the class is not switched');

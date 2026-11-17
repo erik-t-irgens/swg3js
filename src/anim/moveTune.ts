@@ -34,6 +34,27 @@ export interface MoveTune {
   duckBend: number;
   /** How far the neck bends forward with it at the deepest duck, degrees (ours, 20: the head carried down with the back, the face still ahead). */
   duckNeck: number;
+  /**
+   * Climbing II's smoothness round, item 4 (the owner: "dynamically slow down movement speed depending on height of the
+   * crouch so it matches our various crouch and prone heights the closer we get to them, and dynamically switch to their
+   * animations if we get to their heights"): 'height' a ducked body's speed eases from the standing class's toward the
+   * crouch's as it lowers, wears the crouch's clips at `crouchAt`, eases on toward the crawl's past it, and where the room
+   * is under `proneUnder` but a lying body fits it lies down and crawls, getting up again where the room comes back;
+   * 'before' the feedback round's duck at the walk's own speeds and clips.
+   */
+  duckPace: 'height' | 'before';
+  /** The ducked height at or under which the body wears the crouch's clips and walks at the crouch's pace, metres (ours, 1.05: the crouch's own 1.0 and the 5 cm the duck keeps over it, so a roof the crouch just passes under is walked under crouched). */
+  crouchAt: number;
+  /** How much higher than `crouchAt` a ducked body must rise before it takes the walk's clips again, metres (ours, 0.05: a hand's width, so a duck holding at the crouch's height never swaps clips back and forth). */
+  crouchBand: number;
+  /** The pace's blend by how far down the body is between two heights (standing to `crouchAt`, then `crouchAt` to the lying height): that share raised to this (ours, 1: the pace follows the height straight; over 1 it keeps the faster pace longer, under 1 slows sooner). */
+  paceCurve: number;
+  /** The room (metres over the feet) under which a ducking body lies down and crawls where a lying body fits (ours, 0.8: the deepest duck's 0.75 and its 0.05 clearance, so every room the duck passes under it walks under and only a lower one is crawled). */
+  proneUnder: number;
+  /** How far along its travel a room under `proneUnder` lays the body down, metres (ours, 1.2: the lying body's half length, 0.9, and a third of a stride, so it is down before its head reaches the roof). */
+  proneAhead: number;
+  /** The room over its feet a body that lay down for a low roof needs before it gets up into a crouch, metres (ours, 1.0: the crouch's own height; the duck stands it the rest of the way as the room allows). */
+  riseAt: number;
 }
 
 export const MOVE_TUNE: MoveTune = {
@@ -45,6 +66,13 @@ export const MOVE_TUNE: MoveTune = {
   duckRate: 3,
   duckBend: 40,
   duckNeck: 20,
+  duckPace: 'height',
+  crouchAt: 1.05,
+  crouchBand: 0.05,
+  paceCurve: 1,
+  proneUnder: 0.8,
+  proneAhead: 1.2,
+  riseAt: 1.0,
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -59,12 +87,22 @@ export const MOVE_RANGES: Record<string, { min: number; max: number }> = {
   duckRate: { min: 0.5, max: 12 },
   duckBend: { min: 0, max: 80 },
   duckNeck: { min: 0, max: 45 },
+  // The crouch's clips anywhere from the deepest duck to standing.
+  crouchAt: { min: 0.75, max: 1.6 },
+  crouchBand: { min: 0, max: 0.3 },
+  paceCurve: { min: 0.25, max: 4 },
+  // A lying body stands 0.48 m with the controller's skins; a room under 0.45 never fits one.
+  proneUnder: { min: 0.45, max: 1.6 },
+  proneAhead: { min: 0.3, max: 3 },
+  // Never under the capsule's own two radii and a hair (0.75 m).
+  riseAt: { min: 0.75, max: 1.6 },
 };
 
 /** The table's choices and the words each takes. */
 export const MOVE_CHOICES: Readonly<Record<string, readonly string[]>> = {
   proneShape: ['lying', 'crouch'],
   duck: ['on', 'off'],
+  duckPace: ['height', 'before'],
 };
 
 /** Every switch of the round at its other setting: the body's shape as `12ae8ad` shipped it. */
@@ -77,6 +115,20 @@ export const MOVE_BEFORE: Readonly<Record<string, string>> = {
 export function moveBefore(): void {
   const t = MOVE_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(MOVE_BEFORE)) t[k] = v;
+}
+
+/**
+ * Climbing II, the smoothness round: the body's switches it adds, at their other setting (`d2d5bc4`'s body): item 4's
+ * `duckPace` ('before': the feedback round's duck at the walk's own speeds and clips). `climbSmoothBefore` (climbTune.ts)
+ * puts these back with the climbing's. (The feedback round's own `moveBefore` turns the duck off, and with the duck off the
+ * pace never runs, so it need not name this one.)
+ */
+export const MOVE_SMOOTH_BEFORE: Readonly<Record<string, string>> = { duckPace: 'before' };
+
+/** The smoothness round's body switches at their other setting. */
+export function moveSmoothBefore(): void {
+  const t = MOVE_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(MOVE_SMOOTH_BEFORE)) t[k] = v;
 }
 
 /** Whether anything of the round decides the capsule (either switch on): off, the capsule is today's to the line. */

@@ -25,6 +25,7 @@ import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
 import { WallClimb } from '../../../src/player/wallClimb.ts';
 import { MOVE_TUNE, shapeRulesOn } from '../../../src/anim/moveTune.ts';
 import { BodyShape, CROUCH_TALL, LYING, STAND_TALL, ShapeIn, type ShapeWorld } from '../../../src/player/bodyShape.ts';
+import { DuckPace, lieOn, paceOn } from '../../../src/player/duckPace.ts';
 import { JKA, UNIT } from '../../../src/player/jkaMove.ts';
 
 /** `DIVE_DEPTH` in player.ts: the head is under and looking down dives (the wiring test reads the two equal). */
@@ -202,7 +203,7 @@ export class TestBody implements GrappleBody {
   /** Stairs II (A): the step-up's mend, the very one the player's update steps, in the same places (`LOCO_TUNE.step.rule`). */
   readonly stepUp = new StepUp((h, r) => new RAPIER.Capsule(h, r));
   /** Wave 4: the ledges (`climb.ledges`), stepped in the player's own places: the hang in place of the movement, the grab after the move, the haul's hand-over after the rope's step. */
-  readonly ledge = new LedgeHang({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  readonly ledge = new LedgeHang({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }), capsule: (h, r) => new RAPIER.Capsule(h, r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
   readonly ledgeIn = new LedgeIn();
   /** Climbing II: the use key handed to the climb, as the game's one dispatch hands it (nothing else in the harness takes the key). */
   readonly climbAsk = new ClimbAsk();
@@ -230,6 +231,8 @@ export class TestBody implements GrappleBody {
    */
   readonly shape = new BodyShape({ capsule: (h, r) => new RAPIER.Capsule(h, r), ball: (r) => new RAPIER.Ball(r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
   private readonly shapeIn = new ShapeIn();
+  /** Climbing II's smoothness round, item 4 (`MOVE_TUNE.duckPace`): the player's own `duck`, stepped in its places (the pace without the speed classes, as this body has none). */
+  readonly duck = new DuckPace();
   /** The prone key's jump latch (the player's `jumpLatched`): getting up on the jump key does not also jump. */
   private jumpLatched = false;
   /**
@@ -369,6 +372,8 @@ export class TestBody implements GrappleBody {
       this.colliderOffsetY = this.shape.offsetY;
       this.colliderCrouched = null;
     }
+    // Climbing II's smoothness round, item 4 (the player's `reset`): nothing of the duck's pace carried to the new place.
+    this.duck.reset();
     this.collider.setTranslation({ x, y: y + this.colliderOffsetY, z });
   }
 
@@ -477,9 +482,40 @@ export class TestBody implements GrappleBody {
       const pt = pny > 0.1 ? Math.sqrt(this.slope.planeNx * this.slope.planeNx + this.slope.planeNz * this.slope.planeNz) / pny : 0;
       f.rise = pt > 0 ? (pt < 1 ? pt : 1) * 0.35 : 0;
       S.stepUpright(w, f, this.collider);
+      // Climbing II's smoothness round, item 4 (the player's own lines): a roof ahead too low for the deepest duck and a lying
+      // body fits here: the duck lays the body down, never where Z would refuse it (the rope out, water deeper than it lies).
+      if (S.lieAhead && !this.prone && !this.grapple.out && !this.grapple.released && !(this.depth > 2 * MOVE_TUNE.lyingRadius)) {
+        this.prone = true;
+        this.kneeling = false;
+        this.duck.lying = true;
+        this.duck.laid++;
+        S.holdLying(f, this.collider);
+      }
     }
     this.colliderOffsetY = S.offsetY;
     this.colliderCrouched = null;
+  }
+
+  /** The player's `riseFromDuck`: a body the duck laid down gets up into a crouch where `riseClear` finds the room. */
+  private riseFromDuck(moving: boolean, move: THREE.Vector3): void {
+    const S = this.shape;
+    const f = this.shapeIn;
+    f.x = this.pos.x;
+    f.y = this.pos.y;
+    f.z = this.pos.z;
+    f.heading = this.heading;
+    f.scale = this.ledgeScale;
+    f.filter = this.filter;
+    f.vx = this.vel.x;
+    f.vz = this.vel.z;
+    f.moveX = moving ? move.x : 0;
+    f.moveZ = moving ? move.z : 0;
+    if (!S.riseClear(this.physics.world as unknown as ShapeWorld, f)) return;
+    this.prone = false;
+    this.duck.lying = false;
+    this.duck.rose++;
+    S.writeUpright(this.collider, this.pos.x, this.pos.y, this.pos.z, MOVE_TUNE.riseAt);
+    this.colliderOffsetY = S.offsetY;
   }
 
   /** The player's `groundPlaneInto`: the slope rule's last plane into the shape's frame. */
@@ -562,11 +598,21 @@ export class TestBody implements GrappleBody {
       wasProne = this.jumpLatched;
       const lyingDrowns = lyingRule && this.prone && this.depth > 2 * MOVE_TUNE.lyingRadius;
       if (this.prone && (this.swimming || input.pressedAction('jump') || lyingDrowns)) this.prone = lyingRule && !this.swimming ? this.proneAsk(false, input) : false;
+      // Climbing II's smoothness round, item 4 (the player's own lines): a body the duck laid down gets up on its own where the room comes back.
+      if (!this.prone) this.duck.lying = false;
+      else if (this.duck.lying && this.grounded && lieOn()) this.riseFromDuck(moving, move);
     }
-    const crouching = !this.swimming && !(rules && this.prone) && (input.held('crouch') || this.crouchHeld || (this.ledge.keepCrouched && !this.ledge.standRoom(this.physics.world as unknown as LedgeWorld, this, this.filter)));
+    let crouching = !this.swimming && !(rules && this.prone) && (input.held('crouch') || this.crouchHeld || (this.ledge.keepCrouched && !this.ledge.standRoom(this.physics.world as unknown as LedgeWorld, this, this.filter)));
     if (rules) this.stepShape(dt, moving, move, crouching);
     else this.setCrouchCollider(crouching && this.grounded);
+    // Item 4 (the player's `stepDuckPace`): a body the duck laid down crouches no more; the pace and the clips from the height.
+    if (paceOn()) {
+      if (this.prone) crouching = false;
+      this.duck.step(this.shape.tall, !this.prone && this.shape.kind !== LYING && this.shapeIn.feet, crouching);
+    } else if (this.duck.active) this.duck.step(STAND_TALL, false, false);
     let speed = (walking ? WALK_SPEED : RUN_SPEED) * (crouching && this.grounded ? 0.5 : 1);
+    // Item 4, as the player's without the speed classes (this body has none).
+    if (this.duck.active) speed *= (this.duck.crouch && !crouching && this.grounded ? 0.5 : 1) * this.duck.share;
     // The water.
     const surface = this.surface(this.pos.x, this.pos.z, this.t);
     const depth = surface - this.pos.y;
@@ -609,7 +655,8 @@ export class TestBody implements GrappleBody {
       c.fmove = mz;
       c.smove = mx;
       c.walk = walking;
-      c.crouch = crouching;
+      // Item 4 (the player's line): ducked to `crouchAt` the body moves crouched.
+      c.crouch = crouching || this.duck.crouch;
       // Prone (the feedback round's postures): no roll and no jump, and the crawl's pace (the speed classes' own prone crawl,
       // `LOCO_TUNE.prone`, walked or not, on Jedi Academy's own run or walk, as the player's classes put it on the movement).
       const lies = rules && this.prone;
@@ -618,6 +665,8 @@ export class TestBody implements GrappleBody {
       c.jumpPressed = input.pressedAction('jump') && !lies && !wasProne;
       c.attack = false;
       c.speedScale = lies ? (this.speedScale * (walking ? LOCO_TUNE.prone.forward.slow : LOCO_TUNE.prone.forward.normal)) / (JKA.speed * UNIT * (walking ? JKA.walkScale : 1)) : this.speedScale;
+      // Item 4 (the player's line without the speed classes): the duck's pace as a share of the posture's own.
+      if (!lies && this.duck.active) c.speedScale *= this.duck.share;
       // The rope's rewrite of the command is the hook's own `command`, the very call the player's update makes.
       let stepGrounded = this.hooks ? g.command(c, this.grounded) : this.grounded;
       if (this.hooks && g.attached && this.forceSlide) stepGrounded = false;

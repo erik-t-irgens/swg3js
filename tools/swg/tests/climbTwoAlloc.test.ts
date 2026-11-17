@@ -66,6 +66,8 @@ const all = await Promise.all(Array.from({ length: 12 }, () => run()));
 const per = (made: number, frames: number) => (Math.max(0, made) / frames).toFixed(3);
 const quiet = (a: Part) => a.clean && a.casts === 0 && a.bytes < 0.05 * a.frames;
 const engine = (a: Part) => a.clean && a.bytes <= a.casts * CAST_MOST + 0.05 * a.frames;
+// (Under the smoothness round's climb.shelves 'grab' the lip's one ask in the open is the shelf column's gate, one shape
+// round the whole column, which meets nothing there: still one question a frame, its bytes the engine's.)
 for (let i = 0; i < all.length; i++) {
   const a = all[i];
   const tag = `process ${i + 1} of 12`;

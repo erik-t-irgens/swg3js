@@ -20,7 +20,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { CLIMB_TUNE, CLIMB_TUNE_SHIPPED, resetClimbTune, tuneClimb } from '../../../src/anim/climbTune.ts';
+import { CLIMB_TUNE, CLIMB_TUNE_SHIPPED, climbSmoothBefore, resetClimbTune as resetShipped, tuneClimb } from '../../../src/anim/climbTune.ts';
+/** The smoothness round's switches at their other setting throughout: this suite holds the climbing as it stood before that round (`climbSmoothBefore`). */
+const resetClimbTune = (): void => {
+  resetShipped();
+  climbSmoothBefore();
+};
 import { climbCourse, type CoursePiece } from '../../../src/anim/climbCourse.ts';
 import { LEDGE_HANG, LEDGE_MOVE } from '../../../src/player/ledge.ts';
 import { WALL_ON } from '../../../src/player/wallClimb.ts';
